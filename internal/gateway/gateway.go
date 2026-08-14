@@ -90,7 +90,7 @@ type Router struct {
 //
 // Runtime wiring (cmd/nightme/run.go):
 //
-//	gw := gateway.New(inbound.New(mgr, commander, shellDisp, action, primary), em)
+//	gw := gateway.New(inbound.New(mgr, commander, shellDisp, action, em, primary), em)
 func New(ir *inbound.Router, em outbound.Emitter) *Router {
 	if ir == nil {
 		panic("gateway.New: inbound.Router must not be nil")
@@ -164,7 +164,15 @@ func (r *Router) Start(ctx context.Context) error {
 		return errors.New("gateway: already started")
 	}
 	r.stopCh = make(chan struct{})
-	r.channelCh = make(chan messages.InboundMessage, 64)
+	// channelCh buffers messages between pumpInbound and the
+	// dispatchLoop monitor. Sized to absorb bursty inbound
+	// (chatty group / multi-channel storm) without back-pressuring
+	// the per-channel SDK pumps. Each slot is a single
+	// messages.InboundMessage struct — 4096 is comfortably above
+	// realistic per-daemon message rates (Feishu's per-bot QPS
+	// bound is far lower) and keeps the monitor unblocked even
+	// under load spikes.
+	r.channelCh = make(chan messages.InboundMessage, 4096)
 	chans := r.channels
 	r.mu.Unlock()
 
@@ -238,6 +246,20 @@ func (r *Router) pumpInbound(ctx context.Context, ch channel.Channel) {
 
 // dispatchLoop reads from the central messages.InboundMessage
 // channel and routes through the wired *inbound.Router.
+//
+// F-59: this loop is now a pure monitor — it only feeds the
+// priority chain and never blocks on the actual command /
+// action / message work. Each try*Dispatch inside
+// *inbound.Router runs its real work in a spawned goroutine
+// and writes the resulting reply through the wired Emitter
+// from inside the goroutine. The result.Reply emit that lived
+// here before F-59 is gone: the priority chain's
+// CommandResult carries Consumed/Dropped (for fall-through
+// arbitration) and an empty Reply field (always — replies are
+// async now). Slow commands (gtw commit / pr) cannot block
+// the loop, so cross-chat inbound latency is bounded by the
+// goroutine launch cost, not by any single command's
+// wall-clock time.
 func (r *Router) dispatchLoop(ctx context.Context) {
 	defer r.wg.Done()
 	for {
@@ -250,36 +272,17 @@ func (r *Router) dispatchLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			result, err := r.DispatchInbound(withRouter(ctx, r), &msg)
-			if err != nil {
+			// F-59: result.Reply is no longer populated — the
+			// reply path lives inside each try*Dispatch's run*
+			// goroutine (see inbound/command.go's runCommand,
+			// action.go's runAction, message.go's runMessage,
+			// shell.go's existing async shell.Dispatcher.Handle).
+			// The CommandResult's Consumed/Dropped flags are
+			// still meaningful for chain arbitration and
+			// observability, but Reply is always empty here.
+			if _, err := r.DispatchInbound(withRouter(ctx, r), &msg); err != nil {
 				slog.Default().Warn("gateway: dispatch failed",
 					"chat_id", msg.ChatID, "err", err)
-			}
-			if result == nil {
-				continue
-			}
-			// Slash commands return a CommandResult whose Reply
-			// field carries the bot's text. The previous loop
-			// dropped it on the floor — /new / /use / /close /
-			// /gtw subcommands all hung silently after the
-			// F-58 dispatcher rewrite. Forward Reply through
-			// the wired Emitter so the user sees the expected
-			// "Now using pi…", "Reset N session(s)…", etc.
-			//
-			// ReplyTo = msg.MessageID anchors the chat-side
-			// thread so Feishu renders the reply as a thread
-			// reply to the slash command, not as a free-floating
-			// bot message.
-			if result.Reply != "" && r.emitter != nil {
-				if sendErr := r.emitter.Send(ctx, messages.OutboundMessage{
-					ChatID:  msg.ChatID,
-					Kind:    messages.OutReply,
-					Text:    result.Reply,
-					ReplyTo: msg.MessageID,
-				}); sendErr != nil {
-					slog.Default().Warn("gateway: emit reply failed",
-						"chat_id", msg.ChatID, "err", sendErr)
-				}
 			}
 		}
 	}

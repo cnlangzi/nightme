@@ -205,6 +205,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 		noopCommander{},
 		shell.NewDispatcher(nil),
 		gtwRouter,
+		captured.Emitter(),
 		"primary")
 	gw := gateway.New(ir, captured.Emitter())
 	gw.AttachChannels(captured)
@@ -461,6 +462,13 @@ type noopCommander struct{}
 func (noopCommander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
 	return nil, false, nil
 }
+
+// Match implements command.Commander — always false so the
+// debug fixture's tryCommandDispatch branch never claims and
+// the chain falls through. (The debug subcommands only
+// exercise the reaction branch, so a never-claiming commander
+// is the right fixture.)
+func (noopCommander) Match(_ string) (string, bool) { return "", false }
 
 // Incoming is required by the channel.Channel interface. The
 // debug subcommands never publish to it; the channel is closed

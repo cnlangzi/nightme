@@ -39,6 +39,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
 )
@@ -92,9 +93,12 @@ type (
 	}
 
 	// CommandDispatcher is command.Commander: the inbound.Router's
-	// slash-command branch (tryCommandDispatch) translates the
-	// inbound message to a SlashInput and calls Dispatch.
+	// slash-command branch (tryCommandDispatch) calls Match for
+	// the synchronous routing decision (chain's handled signal)
+	// and Dispatch for the actual async command execution
+	// (running inside the runCommand goroutine). See F-59.
 	CommandDispatcher interface {
+		Match(text string) (cmdName string, matched bool)
 		Dispatch(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error)
 	}
 
@@ -133,13 +137,41 @@ type Router struct {
 	shell     ShellDispatcher
 	action    ReactionRouter
 	primary   string
+
+	// emitter is the F-59 reply sink. F-59 made the
+	// try*Dispatch methods asynchronous (they spawn a
+	// goroutine that runs the actual command / action /
+	// message work), so the reply-emit that previously lived
+	// in gateway.dispatchLoop moved down into the inbound
+	// package — specifically into the per-branch run*
+	// goroutines. The wired Emitter is held here so each run*
+	// goroutine can write its reply without having to
+	// recover the gateway.Router from context.
+	emitter outbound.Emitter
+
+	// execWg tracks the F-59 async-dispatch goroutines
+	// (runCommand / runAction / runMessage). Production
+	// shutdown does NOT wait on this WaitGroup — the goroutines
+	// observe ctx cancellation via the inbound ctx, and the
+	// shell dispatcher pattern ("goroutine intentionally NOT
+	// tracked by the gateway's wg, so dispatchLoop isn't
+	// blocked and the daemon can shut down cleanly without
+	// deadlocking on its own restart") is mirrored here.
+	// execWg exists for **tests only**: tests assert
+	// post-dispatch side effects (router hit counts, message
+	// handler invocations, reply strings) that only land
+	// after the run* goroutine completes. Tests call
+	// r.WaitExec() between Dispatch and assertion.
+	execWg sync.WaitGroup
 }
 
-// New constructs a Router. All four dispatch targets are
-// required — New panics if any is nil (the daemon is broken
-// without each of them; explicit fail-fast at construction
-// beats a nil-deref at first dispatch).
-func New(csMgr MessageHandler, commander CommandDispatcher, sh ShellDispatcher, action ReactionRouter, primaryAgent string) *Router {
+// New constructs a Router. All five dependencies are required —
+// New panics if any is nil (the daemon is broken without each
+// of them; explicit fail-fast at construction beats a nil-deref
+// at first dispatch). em may be nil in test contexts where the
+// reply-emit path is intentionally disabled; the run* helpers
+// no-op when emitter is nil.
+func New(csMgr MessageHandler, commander CommandDispatcher, sh ShellDispatcher, action ReactionRouter, em outbound.Emitter, primaryAgent string) *Router {
 	if csMgr == nil {
 		panic("inbound.New: chatsession.Manager must not be nil")
 	}
@@ -157,6 +189,7 @@ func New(csMgr MessageHandler, commander CommandDispatcher, sh ShellDispatcher, 
 		commander: commander,
 		shell:     sh,
 		action:    action,
+		emitter:   em,
 		primary:   primaryAgent,
 	}
 }
@@ -212,4 +245,19 @@ func (r *Router) requireShell() (ShellDispatcher, bool) {
 // if not wired.
 func (r *Router) requireAction() (ReactionRouter, bool) {
 	return r.action, r.action != nil
+}
+
+// WaitExec blocks until every async-dispatch goroutine
+// spawned by Dispatch (F-59: runCommand / runAction /
+// runMessage) has returned. Tests-only — production code MUST
+// NOT call this; daemon shutdown observes ctx cancellation
+// in the goroutines themselves (mirroring the shell.Dispatcher
+// pattern documented in internal/shell/dispatch.go).
+//
+// Safe to call multiple times — WaitGroup.Wait on a drained
+// group is a fast no-op. Safe to call concurrently with
+// Dispatch — the WaitGroup correctly tracks increments that
+// happen during the wait.
+func (r *Router) WaitExec() {
+	r.execWg.Wait()
 }

@@ -29,6 +29,27 @@ import (
 // whitespace-separated token of input.Text to the registered
 // factory.
 type Commander interface {
+	// Match performs the cheap routing decision without
+	// executing any command. Returns the resolved command
+	// name (lower-cased) and true when text is a slash command
+	// that names a registered factory; otherwise ("", false).
+	//
+	// Used by the inbound.Router's tryCommandDispatch to
+	// decide synchronously whether the slash branch should
+	// claim the inbound (handled=true) or fall through to the
+	// next tryDispatch (e.g. tryMessageDispatch for
+	// "/etc/passwd"). The dispatch itself happens async in a
+	// worker goroutine spawned by tryCommandDispatch; Match
+	// exists so the dispatch chain's handled decision is
+	// synchronous and the monitor never blocks.
+	//
+	// Match is pure: no command is run, no state is mutated,
+	// no MessageState reaction is emitted. Identical
+	// slash-prefix detection rules as parseCommand below; the
+	// command name lookup goes through the same Registry
+	// path as Dispatch.
+	Match(text string) (cmdName string, matched bool)
+
 	// Dispatch runs the slash command implied by input.Text.
 	//
 	// Returns (output, handled, err) where:
@@ -70,6 +91,40 @@ func NewCommander(reg *Registry) Commander {
 
 type commander struct {
 	reg *Registry
+}
+
+// Match implements Commander. Pure routing decision; no
+// command is run, no MessageState reaction is emitted, no
+// state is mutated. See Commander.Match doc for the rationale
+// (synchronous chain decision in tryCommandDispatch).
+//
+// Returns the lower-cased command name when text starts with
+// "/" (HW or FW) AND the first whitespace-delimited token
+// resolves to a registered factory. Returns ("", false) for
+// non-slash inputs, empty bodies after the prefix, or
+// slash-prefixed inputs whose command name has no factory
+// (the v1.x "/etc/passwd" passthrough case — those fall
+// through to the message branch).
+func (c *commander) Match(text string) (string, bool) {
+	body, matched := parseCommand(text)
+	if !matched {
+		return "", false
+	}
+	tokens := strings.Fields(body)
+	if len(tokens) == 0 {
+		return "", false
+	}
+	// strings.Fields already drops whitespace-only tokens, so
+	// tokens[0] is non-empty here; TrimSpace is a no-op kept for
+	// defence-in-depth.
+	cmdName := strings.ToLower(tokens[0])
+	if cmdName == "" {
+		return "", false
+	}
+	if c.reg.FindByName(cmdName) == nil {
+		return "", false
+	}
+	return cmdName, true
 }
 
 // Dispatch implements Commander.

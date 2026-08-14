@@ -430,7 +430,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// action) and walks them in priority order. Replaces the v0.x
 	// shim closures (WithCommander / WithShellDispatch /
 	// WithActionHandler) that used to live here.
-	ir := inbound.New(mgr, commander, shellDispatcher, router, cfg.Primary)
+	ir := inbound.New(mgr, commander, shellDispatcher, router, em, cfg.Primary)
 	gwImpl := gateway.New(ir, em)
 	// Attach AFTER construction (see the note at the declaration
 	// site above): the gateway needs its channel binding before

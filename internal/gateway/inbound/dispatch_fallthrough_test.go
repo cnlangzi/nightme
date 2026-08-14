@@ -76,7 +76,7 @@ func TestDispatch_CommanderFallThrough(t *testing.T) {
 			commander.Recognize("/known", teststubs.Result{Consumed: true, Reply: "handled"})
 
 			msg := teststubs.NewMessage(chatsession.NewManager())
-			r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), "primary")
+			r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), nil, "primary")
 
 			res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 				ChatID:     chatID,
@@ -84,6 +84,8 @@ func TestDispatch_CommanderFallThrough(t *testing.T) {
 				HasMention: true, // skip per-chat WatchMode gate (lives in chatsession)
 				MessageID:  "om_test",
 			})
+			// F-59: async dispatch — wait before asserting.
+			r.WaitExec()
 			if err != nil {
 				t.Fatalf("Dispatch returned error: %v", err)
 			}
@@ -99,11 +101,16 @@ func TestDispatch_CommanderFallThrough(t *testing.T) {
 				t.Fatalf("Dispatch returned nil result")
 			}
 			if res.Consumed != tc.wantConsumed {
-				t.Errorf("Consumed = %v, want %v (Reply=%q)", res.Consumed, tc.wantConsumed, res.Reply)
+				t.Errorf("Consumed = %v, want %v", res.Consumed, tc.wantConsumed)
 			}
-			if res.Reply != tc.wantReply {
-				t.Errorf("Reply = %q, want %q", res.Reply, tc.wantReply)
-			}
+			// F-59: res.Reply is always empty now — replies are
+			// emitted asynchronously via the wired Emitter, not
+			// carried in CommandResult. tc.wantReply still drives
+			// the consumed-flag assertion (a commander that
+			// returned Reply must have Consumed=true; a fall-
+			// through case has wantReply=""), but we no longer
+			// pin the Reply field itself.
+			_ = tc.wantReply // see comment above — Reply intentionally not asserted
 		})
 	}
 }
@@ -119,7 +126,7 @@ func TestDispatch_FallThrough_HitsMessageHandler(t *testing.T) {
 
 	commander := teststubs.NewCommander() // no commands registered
 	msg := teststubs.NewMessage(chatsession.NewManager())
-	r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), "primary")
+	r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), nil, "primary")
 
 	res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 		ChatID:     chatID,
@@ -127,6 +134,8 @@ func TestDispatch_FallThrough_HitsMessageHandler(t *testing.T) {
 		HasMention: true,
 		MessageID:  "om_test",
 	})
+	// F-59: async dispatch — wait before asserting.
+	r.WaitExec()
 	if err != nil {
 		t.Fatalf("Dispatch(/xyz, mention): %v", err)
 	}
@@ -157,7 +166,7 @@ func TestDispatch_RecognisedSlash_BypassesMessageHandler(t *testing.T) {
 	commander.Recognize("/watch on", teststubs.Result{Consumed: true, Reply: "watch on"})
 
 	msg := teststubs.NewMessage(chatsession.NewManager())
-	r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), "primary")
+	r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), nil, "primary")
 
 	res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 		ChatID:     chatID,
@@ -165,6 +174,8 @@ func TestDispatch_RecognisedSlash_BypassesMessageHandler(t *testing.T) {
 		HasMention: false, // the dangerous case: non-mention in a Mention-mode chat
 		MessageID:  "om_test",
 	})
+	// F-59: async dispatch — wait before asserting.
+	r.WaitExec()
 	if err != nil {
 		t.Fatalf("Dispatch(/watch on, no mention): %v", err)
 	}

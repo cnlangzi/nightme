@@ -192,17 +192,6 @@ func NewEventHandler(
 			out.Workspace = s.Cwd
 		}
 
-		// F-CLAUDE-PRINT-002: chatsession owns the GitStatus
-		// snapshot (workspace + git status + PR). The runtime
-		// event hook stamps it onto every outbound so Channel
-		// adapters can render Line 3 of the footer without a
-		// separate StatusBar wrapper. chatsession.RefreshGitStatus
-		// decides when the snapshot is fresh; the runtime never
-		// recomputes — it just attaches the cached pointer.
-		if out.GitStatus == nil {
-			out.GitStatus = cs.GitStatus()
-		}
-
 		// Apply OutboundPolicy chain. Each policy may mutate
 		// out (e.g. StatusBarStampPolicy fills out.StatusBar)
 		// or short-circuit with drop=true (e.g. ThinkMode /

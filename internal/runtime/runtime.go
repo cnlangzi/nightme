@@ -299,19 +299,29 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// for the rest of this PR; chatsession.GitStatus is the
 	// sole source of GitStatus, and chatsession's event hook
 	// (Batch 2) stamps it onto out.GitStatus directly.
-	em := outbound.New(ch, outbound.Options{})
+	em := outbound.New(ch, outbound.Options{
+		// GitStatusLookup reaches the chatsession via mgr.Get and
+		// delegates to cs.GitStatus(ctx). The lookup is invoked for
+		// every Send / SendCard whose msg.GitStatus is nil — the
+		// SINGLE chokepoint where every outbound message picks up
+		// its git snapshot. Pull-on-read: cache miss (chat just
+		// restored / created after startup) triggers a synchronous
+		// refresh with a 3s timeout, then subsequent reads hit
+		// cache for the rest of the turn.
+		GitStatusLookup: func(ctx context.Context, chatID string) *messages.GitStatus {
+			cs := mgr.Get(chatID)
+			if cs == nil {
+				return nil
+			}
+			return cs.GitStatus(ctx)
+		},
+	})
 
 	// Bind the same Emitter to chatsession.Manager so its
 	// HandleInbound error-reply paths inherit the StatusBar
 	// footer (no-workspace / spawn-failed / queue-full).
 	mgr.WithEmitter(em).WithPrimaryAgent(cfg.Primary).
 		WithGitStatusDeps(statusbarDeps)
-
-	// Initial GitStatus refresh for the primary agent's chatsession
-	// (and any pre-existing chats the manager has). After this, the
-	// first outbound from each chat has a populated GitStatus;
-	// later refreshes happen at /gtw commit pre/post + /gtw pr.
-	mgr.RefreshAllGitStatus(ctx, statusbarDeps)
 
 	// F-58: gateway is now a thin pump + binding table. The
 	// dispatch chain lives in *inbound.Router (constructed

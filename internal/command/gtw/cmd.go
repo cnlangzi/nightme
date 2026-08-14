@@ -162,7 +162,7 @@ func (f *Factory) withHooks(
 			if cs != nil {
 				em = cs.Emitter()
 			}
-			_ = reply(ctx, em, nil, chatID, messageID, block)
+			_ = reply(ctx, em, chatID, messageID, block)
 		}
 		return mainErr
 	}
@@ -209,13 +209,13 @@ func (f *Factory) withHooks(
 	// had warnings" sits next to "here's what ran before the
 	// action" — both are pre-action context.
 	if block := formatLoadNotes(loadNotes) + FormatResults("before", pre); block != "" {
-		_ = reply(ctx, em, nil, chatID, messageID, block)
+		_ = reply(ctx, em, chatID, messageID, block)
 	}
 	// Reply 2: after-hooks. Separate reply so it lands AFTER the
 	// before-hooks reply in chat order — the user reads "before"
 	// then "after", matching what actually happened.
 	if block := FormatResults("after", post); block != "" {
-		_ = reply(ctx, em, nil, chatID, messageID, block)
+		_ = reply(ctx, em, chatID, messageID, block)
 	}
 	return mainErr
 }

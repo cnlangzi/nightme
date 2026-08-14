@@ -57,26 +57,36 @@ import (
 // satisfies the constructor's channel.Channel parameter. No
 // alias needed — outbound takes channel.Channel directly.
 //
-// F-CLAUDE-PRINT-002: Options.Source is gone. The previous
-// "if msg.StatusBar is nil, attach from Source" defensive
-// fallback was an anti-pattern — it hid bugs by silently
-// patching missing data, and it coupled the gateway to
-// statusbar (creating an import cycle). The new model:
+// F-CLAUDE-PRINT-002 + fix-status-bar-git: GitStatus stamping is
+// now done by the Emitter at the single chokepoint, not at every
+// caller. The model:
 //
 //   - chatsession owns the GitStatus snapshot
-//     (cs.GitStatus() / cs.RefreshGitStatus()).
-//   - The runtime event hook (internal/runtime/handler.go)
-//     stamps chatsession.GitStatus onto out.GitStatus
-//     directly, at translate-time.
-//   - Slash-command replies (commander.Dispatch, etc.) and
-//     one-shot dispatchers stamp their own out.GitStatus
-//     before calling em.Send.
-//   - Outbound is now a pure transport. No Source, no fallback.
+//     (cs.GitStatus(ctx) — pull-on-read with cache-miss refresh).
+//   - SetSelectedCwd proactively refreshes; ClearSelectedCwd
+//     drops the cache; /gtw commit pre/post + /gtw pr refresh
+//     explicitly. RefreshGitStatus stays the single mutator.
+//   - The Emitter's GitStatusLookup (wired once by runtime) is
+//     invoked for every Send / SendCard whose msg.GitStatus is
+//     nil. Returns the chat's pull-on-read snapshot.
+//   - Business code (runtime pump, slash commands, gtw replies)
+//     sends through em.Send without touching GitStatus directly.
+//
+// The gitStatusLookup closure reaches the chatsession via
+// mgr.Get(chatID) and calls cs.GitStatus(ctx). The closure-based
+// wiring avoids the outbound → chatsession import cycle.
 //
 // Options is retained as a struct (instead of removed entirely)
 // so call sites that already pass `outbound.Options{}` keep
-// working — no churn at the construction site.
-type Options struct{}
+// working — no churn at the construction site. GitStatusLookup
+// is the only field for now; nil is safe (skips stamping).
+type Options struct {
+	// GitStatusLookup, if non-nil, is invoked for every Send /
+	// SendCard whose msg.GitStatus is nil. Returns the chat's
+	// pull-on-read snapshot; nil means "no chat / no workspace"
+	// and the renderer drops the git line.
+	GitStatusLookup func(ctx context.Context, chatID string) *messages.GitStatus
+}
 
 // Emitter is the public surface every outbound caller holds.
 // Constructed once per daemon (in cmd/nightme/run.go); passed to
@@ -89,19 +99,39 @@ type Emitter interface {
 }
 
 // New constructs the default Emitter implementation. ch must be
-// non-nil; opts may be its zero value.
+// non-nil; opts.GitStatusLookup may be nil.
 func New(ch channel.Channel, opts Options) Emitter {
-	return &emitImpl{ch: ch}
+	return &emitImpl{ch: ch, gitStatusLookup: opts.GitStatusLookup}
 }
 
 type emitImpl struct {
-	ch channel.Channel
+	ch              channel.Channel
+	gitStatusLookup func(context.Context, string) *messages.GitStatus
 }
 
 func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
+	e.stampGitStatus(ctx, &msg)
 	return e.ch.Send(ctx, msg)
 }
 
 func (e *emitImpl) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
+	e.stampGitStatus(ctx, &msg)
 	return e.ch.SendCard(ctx, msg)
+}
+
+// stampGitStatus attaches the chat's git snapshot to msg if not
+// already set. Single chokepoint — every outbound path (runtime
+// pump / slash command / MessageState / gtw) flows through here.
+//
+// Three guards:
+//   - gitStatusLookup nil: deps not wired (e.g. unit tests); skip.
+//   - msg.GitStatus non-nil: caller pre-stamped (e.g. one-shot
+//     dispatchers that want to override); respect it.
+//   - msg.ChatID empty: non-routed message (e.g. internal log);
+//     nothing to look up.
+func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMessage) {
+	if e.gitStatusLookup == nil || msg.GitStatus != nil || msg.ChatID == "" {
+		return
+	}
+	msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)
 }

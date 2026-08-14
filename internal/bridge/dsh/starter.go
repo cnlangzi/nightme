@@ -15,7 +15,6 @@ package dsh
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 
@@ -85,18 +84,23 @@ func (s *Starter) Detect() error {
 	return nil
 }
 
-// Start returns an error because dsh chat session is not yet
-// implemented. This is intentional surfacing rather than a silent
-// fallback to PTY noise: the user gets a clear message instead of
-// bogus output when they `/use dsh` in chat mode.
+// Start spawns dsh --profile web as a long-lived process, dials
+// the two WebSocket downlinks (mux + host), performs session.create,
+// and returns a live *agent.Agent that streams events on its
+// Events channel. The starter is unchanged (reusable across many
+// sessions).
 //
-// A future PR may add the chat-session path via either:
-//   - dsh-jsonrpc-agent-pkg pip install + JSON-RPC bridge (~1500 lines)
-//   - dsh web HTTP API reverse-engineered (fragile)
-//
-// whichever the user prefers once that PR is scoped.
+// cfg.Workspace is the dsh web process's cwd (dsh's bash / fs
+// plugins read process.cwd() set via cmd.Dir). cfg.SessionID is
+// ignored — dsh web's session.resume wire isn't wired; new sessions
+// are always created (server-side session-persistence-jsonl keeps
+// the JSONL log, but resume would need a separate RPC).
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
-	return nil, errors.New("dsh: chat session not implemented (RunOnce only — use /gtw commit or /gtw pr)")
+	d, err := newDriver(ctx, s, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return agent.NewAgent(s.Info(), d.cmd.Process.Pid, d.events, d), nil
 }
 
 // RunOnce is the one-shot counterpart to Start. Spawns a fresh

@@ -31,10 +31,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // errParseAgentReply is the sentinel returned by parsePRReply
@@ -167,11 +169,15 @@ func dispatchPR(
 	url, err := provider.CreatePR(ctx, owner, repo, baseBranch, c.Branch, title, body)
 	if err != nil {
 		if errors.Is(err, ErrPRExists) {
-			// F-CLAUDE-PRINT-002: PR is being created by another
-			// command; refresh chatsession.GitStatus so the
-			// friendly-reuse message footer shows the existing
-			// PR.
-			_ = cs.RefreshGitStatus(ctx, deps.GitStatusDeps)
+			// (No explicit chatsession refresh needed here:
+			// ChatSession.GitStatus rebuilds its snapshot on every
+			// call, and the prcache.Cache.PR() read picks up the
+			// existing PR on the next stamp via the per-stamp
+			// MaybeRefresh trigger. ErrPRExists is a side-branch
+			// that uses a no-stamp reply, so the lack of
+			// pre-write here is harmless — footer update flows
+			// through the next user-driven stamp.)
+			//
 			// Friendly reuse — the user already opened a PR
 			// for this branch. We don't have the URL from
 			// gh/glab stderr reliably across versions, so we
@@ -187,17 +193,26 @@ func dispatchPR(
 
 	card := renderPROpenedCard(c, baseBranch, url)
 
-	// Invalidate the footer's PR cache for every AgentSession
-	// in this chat. Without this, the workspace footer line's
-	// PR reference (rendered as `[#N](url)` at the end of the
-	// 📁: row; clickable blue link in lark_md) would still
-	// render the previous state — either absent (the OLD
-	// branch had no PR) or a stale URL from a previous branch
-	// we had a PR on — until the 60s prcache.Cache TTL
-	// expires. The helper covers the full chat pool so any AS
-	// that re-stamps before the TTL picks up the new PR id
-	// immediately.
-	invalidateChatASPRCache(deps, cs)
+	// Write the new PR directly into the cache for every
+	// AgentSession in this chat. We already know the number
+	// / URL from `gh pr create`, so no refresh round-trip is
+	// needed; the next stamp's lazy MaybeRefresh will
+	// correct any branch mismatch within 60 s. Covers the
+	// full chat pool so any AS that re-stamps before TTL
+	// picks up the new PR id immediately.
+	if deps.PRCache != nil {
+		newPR := &messages.PR{
+			Number: prNumberFromURL(url),
+			URL:    url,
+			State:  "open",
+		}
+		for _, as := range cs.Pool() {
+			if as == nil {
+				continue
+			}
+			deps.PRCache.WritePR(as.ID, newPR)
+		}
+	}
 
 	// Success path: forward runRes so the footer (agentbar +
 	// usagebar) renders. Failure paths above (parsePRReply,
@@ -394,6 +409,29 @@ var prTitleJSONValueRegex = regexp.MustCompile(
 var prLineNoiseRegex = regexp.MustCompile(
 	`^(?:#+\s+|-\s+|\*\s+|\d+\.\s+|PR\s+Title\s*:|Title\s*:)\s*`,
 )
+
+// prNumberFromURL extracts the PR/MR number from a gh/glab
+// URL like `https://github.com/o/r/pull/123` or
+// `https://gitlab.com/o/r/-/merge_requests/123`. Returns 0
+// when the URL doesn't match a known pattern — the caller
+// still has the URL for rendering, the number just won't be
+// available for the link label. We don't bother with
+// gh/glab enterprise URL variants; production has used
+// the default URL shape since v1 and the regex tolerates
+// any host prefix.
+var prNumberFromURLRegex = regexp.MustCompile(`/(?:pull|merge_requests)/(\d+)(?:[?#]|$)`)
+
+func prNumberFromURL(rawURL string) int {
+	m := prNumberFromURLRegex.FindStringSubmatch(rawURL)
+	if len(m) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 // parsePRReply extracts title and body from an LLM-generated PR
 // description.

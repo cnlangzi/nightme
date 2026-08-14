@@ -458,3 +458,30 @@ func formatStatusBarLines(msg *messages.OutboundMessage) []string {
 4. **测试策略**:先改 mock test 反映新数据流,真机测试在最后?
 
 如果 4 点都确认,直接动手。
+---
+
+## 后续:去掉 CS 层 GitStatus 缓存 (`fix-gitstatus` 分支)
+
+本设计第 1 批「chatsession 持有缓存」在落地后被进一步简化 —— 当前实现**没有** per-chat GitStatus 缓存层。具体差异:
+
+| 项 | 本文档原设计 | 当前 (`fix-gitstatus` 分支) |
+|---|---|---|
+| ChatSession 上的 gitStatus 字段 | `*messages.GitStatus` 缓存 | **删除** |
+| ChatSession 上的 gitStatusMu | `sync.RWMutex` 串行化 cache 读写 | **删除** |
+| ChatSession.RefreshGitStatus | 公共写入接口 (SetSelectedCwd / /gtw commit / /gtw pr 主动刷) | **删除** |
+| GitStatusDeps.RefreshPR | 触发后台 PR 刷新 | **删除**(无人调用,PR invalidation 走 prcache.Cache.Invalidate) |
+| `ChatSession.GitStatus(ctx)` 行为 | RLock 读 cache,miss 时同步 3s refresh | **每次现采**(CollectGit + LookupPR 都是同步读,无状态) |
+| 主动 refresh 入口 | SetSelectedCwd / ClearSelectedCwd / /gtw commit pre-post / /gtw pr | **全部移除**:不再需要 cache 失效 |
+
+### 为什么去掉缓存
+
+footer 反映的是用户工作区「刚改完的文件」,而 cs 层 cache 在两次 turn 之间给的是 stale 视图,与 footer 的语义错位。PR 仍然由 `prcache.Cache` 单独缓存(60s TTL + 后台 refresh),因为 `gh/glab` API round-trip 是贵的;本地 `git status` 不贵(~25-35ms),实时读即可。
+
+### 性能权衡
+
+每次 send 都跑一次 `git status --porcelain --branch --untracked-files=normal`。30-event turn 在 readpump 串行 goroutine 上触发 30 次 git 子进程,wall-time ≈ 30× 单次 git。对本仓库量级可忽略;大仓库若发现性能回退,后续可以:
+
+- 把 `gtw.CollectReadiness` 改用 `--untracked-files=no`(砍 untracked 扫描,大仓库可省 60-90% 时间)
+- 或在 cs 层加 inflight fan-in(只在「N 个 goroutine 同时 stamp 同 chat」时复用同一次 git 的 inflight 结果;串行 readpump 不受益)
+
+本变更没引入 inflight;commit 时记录这个 follow-up。

@@ -134,25 +134,13 @@ type ChatSession struct {
 
 	mu sync.RWMutex
 
-	// F-CLAUDE-PRINT-002: chatsession-cached GitStatus (workspace
-	// path + git status snapshot + open PR). Sole owner of the
-	// snapshot — populated by:
-	//   - SetSelectedCwd (proactive refresh when /cwd lands)
-	//   - ClearSelectedCwd (drops the cache when /cwd clears)
-	//   - /gtw commit pre/post + /gtw pr (refresh after action)
-	//   - GitStatus(ctx) on cache miss (pull-on-read fallback for
-	//     chats restored from registry or created after startup)
-	//
-	// Stamped onto every OutboundMessage by the outbound Emitter's
-	// GitStatusLookup (cmd/nightme wiring), the SINGLE chokepoint
-	// every outbound flows through. Business code never reads
-	// GitStatus directly.
-	//
-	// gitStatusDeps is the deps that RefreshGitStatus uses for
-	// CollectGit + LookupPR; wired at chatsession construction
-	// via WithGitStatusDeps (manager.go).
-	gitStatus     *messages.GitStatus
-	gitStatusMu   sync.RWMutex
+	// gitStatusDeps bundles the CollectGit + LookupPR closures the
+	// runtime injects at startup; ChatSession.GitStatus reads them
+	// on every call (no per-chat cache layer — the workspace
+	// snapshot is rebuilt fresh each time so a footer always
+	// reflects the latest file edits). Wired at chatsession
+	// construction via WithGitStatusDeps (manager.go). PR caching
+	// lives in prcache.Cache (60s TTL), not here.
 	gitStatusDeps GitStatusDeps
 
 	// Active routing state. selectedAgent is mutable via /use;
@@ -478,20 +466,9 @@ func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 
 	cs.persistChatEntry()
 
-	// The git snapshot of the new workspace must be re-collected
-	// before /cwd returns: the cache is keyed on the workspace,
-	// and a stale snapshot from the previous cwd would surface a
-	// confusing footer line ("branch foo on path /old/dir").
-	//
-	// Synchronous refresh with a 3s timeout — matches the pre-refactor
-	// 3s git deadline (chatsession owns the snapshot post-refactor).
-	// Errors are swallowed: git status is a best-effort side effect of
-	// /cwd; if git is hung or the workspace isn't a repo, the cache
-	// becomes {Workspace: cwd, Snapshot: nil}, and formatGitLine drops
-	// the line (consistent with today).
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	_ = cs.RefreshGitStatus(ctx, cs.gitStatusDeps)
-	cancel()
+	// No cache to invalidate anymore: GitStatus(ctx) now rebuilds
+	// a fresh snapshot on every call, so the next outbound stamp
+	// against this chat will naturally read the new cwd.
 	return nil
 }
 
@@ -604,168 +581,95 @@ func (cs *ChatSession) SelectedCwd() string {
 	return cs.selectedCwd
 }
 
-// GitStatus returns the chatsession's cached workspace snapshot
-// (workspace path + git status + open PR). RefreshGitStatus()
-// populates this; the runtime / dispatcher reads it and stamps
-// it onto outbound messages so Channel adapters can render
-// Line 3 of the footer (workspace / branch / ahead-behind / PR).
+// GitStatus returns the chat's current workspace + git status +
+// open PR snapshot, built fresh on every call: CollectGit runs
+// `git status --porcelain --branch --untracked-files=normal`
+// synchronously against SelectedCwd with a hard 3s cap so a hung
+// git cannot wedge an outbound stamp (see the body for the cap),
+// and LookupPR reads the PR from prcache.Cache.PR synchronously.
+// PR caching stays where it belongs — in the dedicated prcache.Cache
+// with its own 60s TTL, failure-backoff, and background refresh
+// — because the PR lookup costs a `gh/glab` API round-trip.
 //
-// Returns nil when the chat has no workspace OR no AgentSession
-// yet (i.e. before /cwd is set or before the first /use). Channel
-// adapters treat nil as "no workspace line" and skip the segment.
+// We intentionally do NOT cache the snapshot at this layer:
+// the footer must reflect the latest file edits, not whatever
+// snapshot was last taken (which could be minutes stale in a
+// session that has been paused). Local `git status` is cheap
+// (~25-35ms for normal repos, see git_status.go benchmarks),
+// so per-call rebuild is the right trade-off.
 //
-// Cached at the chatsession level (not per-event-bus-message,
-// not per-outbound) so a 30-event turn doesn't trigger 30 git
-// status calls. RefreshGitStatus decides when to re-collect
-// (startup, /gtw commit pre/post, /gtw pr, etc.).
-// GitStatus is the pull-on-read getter for the snapshot. Returns
-// the cached value when present; on cache miss (chat just
-// restored from registry, or created via GetOrCreate after
-// startup and never had SetSelectedCwd called), synchronously
-// refreshes with a 3s timeout. Subsequent reads in the same turn
-// hit cache — a 30-event turn triggers 1 git call, not 30.
+// Concurrency: GitStatus does not mutate chat state, so multiple
+// goroutines may call it freely. The per-chat serialisation the
+// previous cache layer brought in is gone with the cache; a
+// 30-event turn on the readpump goroutine will trigger N git
+// invocations. For typical repos the inter-event delay dominates
+// this overhead; for repos where it doesn't, add
+// `--untracked-files=no` to gtw.CollectReadiness as a follow-up.
 //
 // Called by the outbound Emitter's GitStatusLookup closure
-// (cmd/nightme wiring), which is the SINGLE chokepoint where
-// every outbound message picks up GitStatus. Business code
+// (cmd/nightme wiring), the SINGLE chokepoint where every
+// outbound message picks up its git snapshot. Business code
 // (handler.go / eventbus.go / gtw/fix.go) does not call this
-// directly — they send through em.Send and let the Emitter stamp
+// directly — they send through em.Send and the Emitter stamps
 // the snapshot.
 //
-// Returns nil when the cache is empty AND refresh produced
-// nothing (git failed, non-git workspace, empty cwd). The
-// renderer (formatGitLine) drops the git line on nil — consistent
-// with the pre-refactor "no footer line on nil" contract.
+// Returns nil when there is no workspace (cwd == ""), the
+// AgentSession is unset, the deps are not wired, or git
+// produces nothing usable. formatGitLine drops the footer line
+// on nil — same contract as before the refactor.
 func (cs *ChatSession) GitStatus(ctx context.Context) *messages.GitStatus {
-	// Fast path: cache hit — RLock allows concurrent reads (e.g.
-	// a 30-event turn reads the populated cache in parallel
-	// without contending on each other).
-	cs.gitStatusMu.RLock()
-	cached := cs.gitStatus
-	cs.gitStatusMu.RUnlock()
-	if cached != nil {
-		return cached
-	}
-
-	// Slow path: cache miss. Take the write Lock — this serialises
-	// against RefreshGitStatus / ClearSelectedCwd AND any peer
-	// goroutine that also observed the empty cache. Double-check
-	// after acquiring the write Lock catches the case where a
-	// peer goroutine already refreshed while we were queued
-	// (their write is now visible to us via the same lock).
-	cs.gitStatusMu.Lock()
-	defer cs.gitStatusMu.Unlock()
-
-	if cs.gitStatus != nil {
-		return cs.gitStatus
-	}
-
-	// Cache still empty under the write Lock — we're the first
-	// to commit. Errors are swallowed inside the body
-	// (best-effort); whatever lands in the cache after the 3s
-	// timeout is what the caller sees.
-	rCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	_ = cs.refreshGitStatusBody(rCtx, cs.gitStatusDeps)
-	cancel()
-	return cs.gitStatus
-}
-
-// RefreshGitStatus re-runs git status + PR lookup and stores the
-// snapshot on the chatsession. Callers:
-//
-//   - SetSelectedCwd: pro-actively refresh for the new workspace
-//     before /cwd returns.
-//   - /gtw commit pre-RunOnce: capture pre-commit workspace state
-//     (used by verifyAgentCommitted).
-//   - /gtw commit post-RunOnce: capture post-commit state for the
-//     success card footer (HEAD advanced, branch moved).
-//   - /gtw pr: capture pre-pr state for the success card.
-//
-// The 3s git deadline (F-45 §1.7) lives inside deps.CollectGit
-// so a hung git can't block the outbound pipeline. A failing
-// or non-git workspace stores nil Snapshot, never blocks.
-//
-// Takes a separate GitStatusDeps rather than the runtime's
-// shared instance because chatsession has no direct runtime
-// reference — the runtime wires deps at startup and stores
-// them on the chatsession via this method (or via the
-// constructor). See manager.go for the wiring.
-//
-// Serialised by the write side of cs.gitStatusMu (same lock
-// used by GitStatus's pull-on-read slow path). Two goroutines
-// observing an empty cache (e.g. Emitter's per-event
-// GitStatusLookup hitting a freshly-restored chat concurrently)
-// both try to acquire the write Lock; the loser waits, then
-// sees the populated cache in the body's own double-check
-// (inside GitStatus) and short-circuits without re-running
-// `git status`. RefreshGitStatus always refreshes — no
-// double-check; the cache-hit early-out lives in GitStatus.
-func (cs *ChatSession) RefreshGitStatus(ctx context.Context, deps GitStatusDeps) error {
-	// Note: depsConfigured check is in refreshGitStatusBody, not
-	// here — body is the single chokepoint that touches deps, so
-	// every caller (this public wrapper + GitStatus's pull-on-read)
-	// is protected by one check.
-	cs.gitStatusMu.Lock()
-	defer cs.gitStatusMu.Unlock()
-	return cs.refreshGitStatusBody(ctx, deps)
-}
-
-// refreshGitStatusBody is the lock-free body of RefreshGitStatus.
-// Callers MUST hold cs.gitStatusMu (write Lock) before calling.
-func (cs *ChatSession) refreshGitStatusBody(ctx context.Context, deps GitStatusDeps) error {
-	// depsConfigured guard lives in the body (not just on the
-	// public RefreshGitStatus entry point) because GitStatus's
-	// pull-on-read path calls the body directly — bypassing the
-	// public wrapper. Without this, an unwired chat (e.g. a unit
-	// test that constructs ChatSession without WithGitStatusDeps)
-	// would nil-pointer-dereference deps.CollectGit.
-	if !depsConfigured(deps) {
+	deps := cs.gitStatusDeps
+	if deps.CollectGit == nil && deps.LookupPR == nil {
 		return nil
 	}
-
 	cwd := cs.SelectedCwd()
 	if cwd == "" {
-		// No workspace. Clear the cache so the next emitter
-		// doesn't surface a stale Workspace path. Caller already
-		// holds cs.gitStatusMu (write Lock) — no inner lock here.
-		cs.gitStatus = nil
 		return nil
 	}
-
-	snap, _ := deps.CollectGit(ctx, cwd)
-
+	// F-45 §1.7 git-status safety net: keep a hard 3s cap on the
+	// `git status` subprocess so a hung git cannot wedge an
+	// outbound stamp. The runtime's pump path reaches us with
+	// `context.Background()` (no parent deadline); without this
+	// cap a stalled git would block the handler indefinitely.
+	// LookupPR is synchronous (prcache.Cache.PR) and bounded, so
+	// it does not need the same cap.
+	var snap *messages.GitStatusSnapshot
+	if deps.CollectGit != nil {
+		runCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		snap, _ = deps.CollectGit(runCtx, cwd)
+		cancel()
+	}
 	var pr *messages.PR
 	if deps.LookupPR != nil {
-		as := cs.SelectedAgentSession()
-		if as != nil {
-			pr = deps.LookupPR(as.ID)
+		if as := cs.SelectedAgentSession(); as != nil {
+			// Per-stamp TTL check: prcache.Cache.MaybeRefresh is
+			// sync (no I/O) and conditional (only spawns a goroutine
+			// when the 60s TTL has elapsed). The cost on every stamp
+			// is one mutex acquire + one time check; the actual
+			// `gh/glab` round-trip happens in the background, off
+			// the stamp's critical path. Pass cwd so the refresh
+			// resolves the same workspace we just snapshotted above.
+			pr = deps.LookupPR(as.ID, cwd)
 		}
 	}
-
-	// Caller holds cs.gitStatusMu (write Lock) — direct write.
-	cs.gitStatus = &messages.GitStatus{
+	return &messages.GitStatus{
 		Workspace:   cwd,
 		Snapshot:    snap,
 		PullRequest: pr,
 	}
-	return nil
 }
 
-// WithGitStatusDeps wires the deps used by RefreshGitStatus.
-// Called once at chatsession startup so the chat can refresh
-// its workspace snapshot on demand (without going through the
-// runtime). Returns self for chaining.
+// WithGitStatusDeps wires the CollectGit / LookupPR closures used
+// by ChatSession.GitStatus. Called once at chatsession startup
+// (directly from the constructor / restore path and via
+// Manager.WithGitStatusDeps for the per-chat OnCreate hook).
+// Returns self for chaining.
+//
+// WithGitStatusDeps is the only mutator of cs.gitStatusDeps;
+// callers should not bypass it via direct field access.
 func (cs *ChatSession) WithGitStatusDeps(deps GitStatusDeps) *ChatSession {
 	cs.gitStatusDeps = deps
 	return cs
-}
-
-// depsConfigured reports whether deps has at least one wired
-// function (CollectGit or LookupPR). Used by RefreshGitStatus
-// to skip the git call when neither is set — e.g. unit tests
-// that don't wire the runtime registry.
-func depsConfigured(deps GitStatusDeps) bool {
-	return deps.CollectGit != nil || deps.LookupPR != nil
 }
 
 // ClearSelectedCwd removes the active workspace. Used by /gtw
@@ -794,23 +698,10 @@ func (cs *ChatSession) ClearSelectedCwd() {
 	cs.mu.Unlock()
 	cs.persistChatEntry()
 
-	// Serialise against any in-progress refresh — otherwise the
-	// refresh can read selectedCwd before our mu mutation lands,
-	// run deps.CollectGit on the now-stale workspace, and write
-	// the snapshot AFTER our clear, leaving a stale
-	// "📁: <old path> · ⎇ branch" footer line behind an empty
-	// workspace. Single lock — write Lock on gitStatusMu
-	// serialises against RefreshGitStatus / GitStatus's slow path
-	// the same way ClearSelectedCwd did before with two locks.
-	cs.gitStatusMu.Lock()
-	defer cs.gitStatusMu.Unlock()
-
-	// No workspace → no git line. Drop the cache directly rather
-	// than going through RefreshGitStatus (which would call
-	// deps.CollectGit on an empty cwd, waste a git invocation, and
-	// end up clearing the cache anyway via its own cwd=="" branch).
-	cs.gitStatus = nil
+	// No cache to clear anymore — ChatSession.GitStatus checks
+	// cwd on every call and returns nil when cwd == "".
 }
+
 
 // SelectedAgent returns the current active agent name.
 func (cs *ChatSession) SelectedAgent() string {

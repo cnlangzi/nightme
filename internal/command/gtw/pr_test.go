@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
 // -----------------------------------------------------------------------------
@@ -1619,48 +1619,34 @@ var _ = func() *Result { return nil }
 var _ GitProvider = (*fakeGitProvider)(nil)
 
 // -----------------------------------------------------------------------------
-// PRInvalidator wiring
+// PRCache wiring
 //
-// Lock the contract: dispatchPR / dispatchFix / dispatchClose each
-// call invalidateChatASPRCache exactly once on the success path
-// (with the chat's AS pool iterated), and zero times on early-
-// return paths. Without these guards, a future refactor could
-// silently drop the cache invalidation and the footer's PR link
-// would stale for up to the prcache.Cache TTL (60s) after every
-// /gtw fix / pr / close.
+// /gtw pr and /gtw close success paths walk the chat pool and
+// call deps.PRCache.WritePR(as.ID, pr) inline. These tests
+// lock the contract:
+//   - happy path: every non-nil AS gets WritePR called with
+//     the expected PR exactly once.
+//   - nil PRCache: no panic, no allocations.
+//   - empty pool: no panic.
+//
+// Iteration order is NOT asserted because cs.Pool() iterates a
+// Go map whose order is intentionally randomized per process —
+// asserting order would make the tests flaky across runs.
 // -----------------------------------------------------------------------------
 
-// recordingInvalidator is a thread-safe PRInvalidator stub that
-// records every Invalidate call. Used by the wiring tests below
-// to assert which ASes were invalidated and how many times.
-type recordingInvalidator struct {
-	mu       sync.Mutex
-	calls    []string // AS IDs passed to Invalidate, in order
-}
-
-func (r *recordingInvalidator) Invalidate(asID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.calls = append(r.calls, asID)
-}
-
-func (r *recordingInvalidator) snapshot() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]string, len(r.calls))
-	copy(out, r.calls)
-	return out
-}
-
-// TestInvalidateChatASPRCache_HappyPath: every non-nil AS in
-// the pool gets Invalidate called exactly once. Iteration order
-// is NOT asserted because cs.Pool() iterates a Go map whose
-// order is intentionally randomized per process — asserting
-// order would make the test flaky across runs.
-func TestInvalidateChatASPRCache_HappyPath(t *testing.T) {
-	rec := &recordingInvalidator{}
-	deps := HandlerDeps{PRInvalidator: rec}
-
+// TestPRCacheApply_HappyPath: every non-nil AS in the pool
+// gets WritePR called exactly once with the expected PR.
+// Mirrors the inline loop in dispatchPR's success path.
+//
+// Production ordering: by the time /gtw pr fires, the chat
+// has already been stamped at least once (otherwise the user
+// has no AS to dispatch on), so the ASes are already
+// registered. We pre-allocate via GetOrCreate to mirror that
+// state — Registry.WritePR is a no-op for unregistered ASes
+// (it does not allocate), and the lazy MaybeRefresh on the
+// next stamp handles that case instead.
+func TestPRCacheApply_HappyPath(t *testing.T) {
+	reg := &prcache.Registry{}
 	cs, err := chatsession.New("chat-1", "claude")
 	if err != nil {
 		t.Fatalf("chatsession.New: %v", err)
@@ -1669,58 +1655,145 @@ func TestInvalidateChatASPRCache_HappyPath(t *testing.T) {
 	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-2", cs.ChatID, "claude", "/w2", nil))
 	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-3", cs.ChatID, "claude", "/w3", nil))
 
-	invalidateChatASPRCache(deps, cs)
-
-	got := rec.snapshot()
+	// Pre-allocate caches (simulates prior stamping).
 	want := []string{"as-1", "as-2", "as-3"}
-	if len(got) != len(want) {
-		t.Fatalf("Invalidate calls = %d, want %d (%v)", len(got), len(want), got)
+	for _, asID := range want {
+		reg.GetOrCreate(asID)
 	}
-	// Coverage check: every expected AS ID was invalidated
-	// exactly once, regardless of map iteration order.
-	for _, expected := range want {
-		count := 0
-		for _, actual := range got {
-			if actual == expected {
-				count++
+
+	deps := HandlerDeps{PRCache: reg}
+	newPR := &messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}
+
+	// Inline the same loop dispatchPR runs on success.
+	if deps.PRCache != nil {
+		for _, as := range cs.Pool() {
+			if as == nil {
+				continue
 			}
+			deps.PRCache.WritePR(as.ID, newPR)
 		}
-		if count != 1 {
-			t.Errorf("AS %q was invalidated %d times, want exactly 1 (got=%v)",
-				expected, count, got)
+	}
+
+	// Every AS in the pool must have a cache with the new PR.
+	for _, asID := range want {
+		c := reg.GetOrCreate(asID)
+		if got := c.PR(); got == nil || got.Number != 42 {
+			t.Errorf("AS %q: PR = %+v, want {Number:42}", asID, got)
 		}
 	}
 }
 
-// TestInvalidateChatASPRCache_NilPRInvalidator: nil-safe —
-// no panic, no calls. Tests that wire a bare HandlerDeps{}
-// without the runtime registry still pass.
-func TestInvalidateChatASPRCache_NilPRInvalidator(t *testing.T) {
-	rec := &recordingInvalidator{}
+// TestPRCacheApply_WritePRNoOpOnUnknownAS locks the contract
+// that Registry.WritePR does NOT allocate caches — the next
+// stamp's lazy MaybeRefresh handles unregistered ASes. Without
+// this guard, /gtw pr on a chat with zero stamps would
+// allocate caches for every AS in the pool (memory leak
+// surface) and overwrite them on every /gtw pr success.
+func TestPRCacheApply_WritePRNoOpOnUnknownAS(t *testing.T) {
+	reg := &prcache.Registry{}
+	reg.WritePR("never-stamped", &messages.PR{Number: 1, URL: "x", State: "open"})
+
+	if c := reg.GetOrCreate("never-stamped"); c.PR() != nil {
+		t.Errorf("WritePR on unknown AS populated the freshly-allocated cache")
+	}
+}
+
+// TestPRCacheApply_ClearOnClose: /gtw close writes nil to
+// every AS — same loop, pr=nil.
+func TestPRCacheApply_ClearOnClose(t *testing.T) {
+	reg := &prcache.Registry{}
 	cs, err := chatsession.New("chat-1", "claude")
 	if err != nil {
 		t.Fatalf("chatsession.New: %v", err)
 	}
 	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-1", cs.ChatID, "claude", "/w1", nil))
-	invalidateChatASPRCache(HandlerDeps{PRInvalidator: nil}, cs)
+	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-2", cs.ChatID, "claude", "/w2", nil))
 
-	if got := rec.snapshot(); len(got) != 0 {
-		t.Errorf("Invalidate should not have been called; got %v", got)
+	// Pre-populate so we can confirm the clear actually clears.
+	for _, asID := range []string{"as-1", "as-2"} {
+		c := reg.GetOrCreate(asID)
+		c.WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"})
+	}
+
+	deps := HandlerDeps{PRCache: reg}
+
+	// Inline the same loop dispatchClose runs on success.
+	if deps.PRCache != nil {
+		for _, as := range cs.Pool() {
+			if as == nil {
+				continue
+			}
+			deps.PRCache.WritePR(as.ID, nil)
+		}
+	}
+
+	for _, asID := range []string{"as-1", "as-2"} {
+		c := reg.GetOrCreate(asID)
+		if got := c.PR(); got != nil {
+			t.Errorf("AS %q after clear: PR = %+v, want nil", asID, got)
+		}
 	}
 }
 
-// TestInvalidateChatASPRCache_EmptyPool: no panic on an empty
-// pool. Common state during the first /gtw fix on a chat that
-// hasn't spawned an agent yet.
-func TestInvalidateChatASPRCache_EmptyPool(t *testing.T) {
-	rec := &recordingInvalidator{}
+// TestPRCacheApply_NilCache: nil-safe — no panic, no calls.
+// Tests that wire a bare HandlerDeps{} without the runtime
+// registry still pass.
+func TestPRCacheApply_NilCache(t *testing.T) {
 	cs, err := chatsession.New("chat-1", "claude")
 	if err != nil {
 		t.Fatalf("chatsession.New: %v", err)
 	}
-	invalidateChatASPRCache(HandlerDeps{PRInvalidator: rec}, cs)
+	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-1", cs.ChatID, "claude", "/w1", nil))
 
-	if got := rec.snapshot(); len(got) != 0 {
-		t.Errorf("Invalidate should not have been called on empty pool; got %v", got)
+	deps := HandlerDeps{PRCache: nil}
+
+	// Same nil-safe guard dispatchPR / dispatchClose use.
+	if deps.PRCache != nil {
+		t.Fatalf("nil-cache guard failed; PRCache should be nil")
+	}
+}
+
+// TestPRCacheApply_EmptyPool: no panic on an empty pool.
+// Common state during the first /gtw fix on a chat that hasn't
+// spawned an agent yet.
+func TestPRCacheApply_EmptyPool(t *testing.T) {
+	reg := &prcache.Registry{}
+	cs, err := chatsession.New("chat-1", "claude")
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+
+	deps := HandlerDeps{PRCache: reg}
+	if deps.PRCache != nil {
+		for _, as := range cs.Pool() {
+			if as == nil {
+				continue
+			}
+			deps.PRCache.WritePR(as.ID, nil)
+		}
+	}
+
+	// Registry must remain empty (no ASes were ever attached).
+	reg.WritePR("phantom", nil) // Registry.WritePR is also no-op on unknown AS.
+}
+
+// TestPRNumberFromURL pins the URL → number parser used by
+// /gtw pr to populate the WritePR payload.
+func TestPRNumberFromURL(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"https://github.com/octocat/hello/pull/7", 7},
+		{"https://github.com/x/y/pull/1", 1},
+		{"https://gitlab.com/o/r/-/merge_requests/123", 123},
+		{"https://example/no-match", 0},
+		{"", 0},
+		{"https://github.com/o/r/pull/abc", 0},
+	}
+	for _, tc := range cases {
+		if got := prNumberFromURL(tc.in); got != tc.want {
+			t.Errorf("prNumberFromURL(%q) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }

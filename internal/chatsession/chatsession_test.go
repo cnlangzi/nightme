@@ -1,6 +1,7 @@
 package chatsession
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,8 @@ import (
 	"fmt"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -619,4 +622,152 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	if capturedState != agent.MessageSubmitted {
 		t.Errorf("bus event state = %v, want MessageSubmitted", capturedState)
 	}
+}
+
+// TestChatSession_GitStatus_NoCacheBehavior pins down the new
+// "no per-chat cache" contract. For each scenario we assert
+// the function returns what its doc-comment promises and that
+// repeated calls hit the deps on every invocation (i.e. we did
+// NOT silently re-introduce a cache layer).
+func TestChatSession_GitStatus_NoCacheBehavior(t *testing.T) {
+	t.Run("unwired deps returns nil", func(t *testing.T) {
+		cs, _ := New("t_unwired", "claude")
+		cs.persistChatEntry() // no-op without stores; safe
+		if got := cs.GitStatus(context.Background()); got != nil {
+			t.Fatalf("GitStatus with zero deps = %+v, want nil", got)
+		}
+	})
+
+	t.Run("cwd empty returns nil", func(t *testing.T) {
+		cs, _ := New("t_empty_cwd", "claude")
+		cs.WithGitStatusDeps(GitStatusDeps{
+			CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
+				return &messages.GitStatusSnapshot{Branch: "should-not-be-called"}, nil
+			},
+		})
+		if got := cs.GitStatus(context.Background()); got != nil {
+			t.Fatalf("GitStatus with empty cwd = %+v, want nil", got)
+		}
+	})
+
+	t.Run("CollectGit hit on every call (no cache layer)", func(t *testing.T) {
+		cs, _ := New("t_rebuild", "claude")
+		// Apply workspace via in-process mutex; we do not want to
+		// route through SetSelectedCwd's registry persist path here
+		// (it needs a registry store). SelectedCwd reads cs.selectedCwd
+		// under cs.mu; assigning directly via a helper avoids persistence.
+		cs.mu.Lock()
+		cs.selectedCwd = "/tmp/fake-workspace"
+		cs.mu.Unlock()
+		var calls int
+		cs.WithGitStatusDeps(GitStatusDeps{
+			CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
+				calls++
+				return &messages.GitStatusSnapshot{Branch: "main"}, nil
+			},
+		})
+		for i := 0; i < 3; i++ {
+			gs := cs.GitStatus(context.Background())
+			if gs == nil {
+				t.Fatalf("call %d: got nil snapshot", i)
+			}
+			if gs.Workspace != "/tmp/fake-workspace" {
+				t.Fatalf("call %d: Workspace=%q", i, gs.Workspace)
+			}
+			if gs.Snapshot == nil || gs.Snapshot.Branch != "main" {
+				t.Fatalf("call %d: Snapshot=%+v", i, gs.Snapshot)
+			}
+		}
+		if calls != 3 {
+			t.Fatalf("CollectGit was called %d times across 3 GitStatus() invocations, want 3 (no cache layer)", calls)
+		}
+	})
+
+	t.Run("CollectGit nil does not panic (partial wiring)", func(t *testing.T) {
+		cs, _ := New("t_partial", "claude")
+		cs.mu.Lock()
+		cs.selectedCwd = "/tmp/fake-workspace"
+		cs.mu.Unlock()
+		// Only LookupPR wired. CollectGit is nil. GitStatus must
+		// not panic and must return a *messages.GitStatus with
+		// Snapshot=nil (no fake default). LookupPR is gated on
+		// SelectedAgentSession() returning non-nil — in this test
+		// fixture we have no AgentSession, so PR is nil too;
+		// the assertion that matters here is "no panic, snap=nil".
+		cs.WithGitStatusDeps(GitStatusDeps{
+			LookupPR: func(asID, cwd string) *messages.PR {
+				return &messages.PR{Number: 42, URL: "https://example/pr/42"}
+			},
+		})
+		gs := cs.GitStatus(context.Background())
+		if gs == nil {
+			t.Fatalf("GitStatus = nil")
+		}
+		if gs.Snapshot != nil {
+			t.Fatalf("Snapshot should be nil when CollectGit is nil; got %+v", gs.Snapshot)
+		}
+	})
+
+	t.Run("LookupPR hit on every call (per-read update attempt)", func(t *testing.T) {
+		// Per the F-CLAUDE-PRINT-002 / fix-gitstatus design: every
+		// read of gitstatus triggers an update attempt on the PR
+		// cache. The closure is invoked once per cs.GitStatus()
+		// call when an AgentSession is active. The runtime-side
+		// implementation pairs this with MaybeRefresh + PR(), but
+		// those live in the closure body (runtime.go's LookupPR),
+		// NOT here — the test fixtures wire a stub LookupPR that
+		// just counts calls. End-to-end coverage of the runtime
+		// closure wiring lives in internal/runtime's tests.
+		cs, _ := New("t_lookuppr", "claude")
+		cs.mu.Lock()
+		cs.selectedCwd = "/tmp/fake-workspace"
+		cs.selectedAS = agentsession.NewAgentSession("as-1", "t_lookuppr", "claude", "/tmp/fake-workspace", nil)
+		cs.mu.Unlock()
+		var calls int
+		cs.WithGitStatusDeps(GitStatusDeps{
+			LookupPR: func(asID, cwd string) *messages.PR {
+				calls++
+				return nil
+			},
+		})
+		for i := 0; i < 5; i++ {
+			_ = cs.GitStatus(context.Background())
+		}
+		if calls != 5 {
+			t.Fatalf("LookupPR was called %d times across 5 GitStatus() invocations, want 5 (per-read trigger required)", calls)
+		}
+	})
+
+	t.Run("3s timeout caps a hung CollectGit", func(t *testing.T) {
+		cs, _ := New("t_timeout", "claude")
+		cs.mu.Lock()
+		cs.selectedCwd = "/tmp/fake-workspace"
+		cs.mu.Unlock()
+		cs.WithGitStatusDeps(GitStatusDeps{
+			CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
+				// Block until ctx is cancelled, returning ctx.Err
+				// like gtw.CollectReadiness does on timeout. The
+				// outer GitStatus caller should observe the cancel
+				// well before our manual 5s sleep would fire.
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		})
+		start := time.Now()
+		gs := cs.GitStatus(context.Background())
+		elapsed := time.Since(start)
+		if gs == nil {
+			t.Fatalf("GitStatus returned nil; want non-nil with Snapshot=nil")
+		}
+		if gs.Snapshot != nil {
+			t.Fatalf("Snapshot expected nil on timeout; got %+v", gs.Snapshot)
+		}
+		// Allow 2.7s-4s range: the 3s cap kills the inner git
+		// closure promptly, but scheduler slop can push it to
+		// ~3.05s. We deliberately do NOT assert <1s because the
+		// timeout is the *cap*, not a target.
+		if elapsed < 2700*time.Millisecond || elapsed > 4*time.Second {
+			t.Fatalf("GitStatus took %v; expected ~3s timeout cap", elapsed)
+		}
+	})
 }

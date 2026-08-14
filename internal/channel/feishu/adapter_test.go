@@ -2094,13 +2094,26 @@ func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
 }
 
 // TestEnsureReceiptForTyping_OmitsFooterWhenEmpty (F-48): when
-// the caller's footerLines is nil/empty (no StatusBar stamped
-// — e.g. agent hasn't EventAgentReady'd yet and the Cwd is not in a git
-// repo), the placeholder card omits the footer entirely. The
-// hr divider is also absent. This is the back-compat path for
-// the pre-F-48 "no footer" placeholder — supported but not
-// preferred; the runtime now stamps StatusBar on
-// MessageForwarded so the populated path is the common case.
+// the caller's footerLines is nil/empty (e.g. a test stub that
+// invokes ensureReceiptForTyping directly without going through
+// the runtime eventbus subscriber — production at MessageQueued
+// always passes formatStatusBarLines(&msg) after fix-placehold-card),
+// the placeholder card omits the footer entirely. The hr divider
+// is also absent. This is now a niche path used only by unit tests
+// and any future caller that doesn't have a StatusBar to render.
+//
+// Note: this test only locks the placeholder card's footer
+// rendering for the nil-footerLines case. It does NOT exercise
+// the runtime subscriber that produces footerLines in production
+// (see internal/runtime/eventbus.go::MessageStateBus handler
+// reading cs.SelectedAgentSession()). The integration test for
+// the subscriber stamping path lives in internal/runtime.
+//
+// Production MessageQueued's populated-footerLines contract is
+// locked by TestEnsureReceiptForTyping_RendersFooterWhenProvided
+// above, which verifies that when the caller passes footerLines
+// the card renders the lines correctly — independent of who built
+// the slice.
 func TestEnsureReceiptForTyping_OmitsFooterWhenEmpty(t *testing.T) {
 	a := testAdapter(t)
 	body := "{\"elements\":[]}"

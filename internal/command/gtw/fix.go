@@ -831,10 +831,28 @@ func dispatchIssueToChatSession(
 	chatID, messageID string,
 	blocks []agent.ContentBlock,
 ) error {
-	// F-54 timing: the runtime dispatcher (cmd/nightme/run.go)
-	// emits MessageQueued BEFORE QueueUserMessage so channels
-	// can render the ⏳ indicator while the agent spawns. We
-	// honour the same contract here: emit first, then queue.
+	// fix-placehold-card: resolve the active AgentSession BEFORE
+	// emitting MessageQueued so the runtime eventbus subscriber
+	// can stamp AgentBar onto the placeholder card (it reads
+	// cs.SelectedAgentSession() at publish time — see
+	// internal/runtime/eventbus.go). Mirrors the swap applied
+	// to internal/runtime/dispatcher.go and
+	// internal/chatsession/manager.go::HandleInbound.
+	//
+	// On error (no workspace / spawn failed) we deliberately do
+	// NOT emit MessageQueued — the caller already surfaces the
+	// failure via a warning log + OutCommandReply warning
+	// (see completeFixAndDispatch below), and emitting ⏳ first
+	// would leave an orphan reaction on the user message with
+	// no follow-up MessageSubmitted / MessageDone to clear it.
+	if _, err := cs.LookupSelectedAgentSession(); err != nil {
+		return err
+	}
+
+	// F-54 timing: emit MessageQueued AFTER the AS is resolved
+	// so the subscriber sees a non-nil selectedAS. Channels can
+	// render ⏳ (and AgentBar) immediately; QueueUserMessage
+	// follows so the message is delivered.
 	cs.EmitMessageState(messageID, agent.MessageQueued)
 	return cs.QueueUserMessage(chatsession.Message{
 		ID:         messageID,

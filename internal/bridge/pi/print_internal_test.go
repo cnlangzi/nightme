@@ -73,10 +73,12 @@ func TestAppendAuditFields_SubtypeAndUsage(t *testing.T) {
 }
 
 // TestAppendAuditFields_SessionIDGated pins that the
-// session_id field is omitted when whenSessionID=false (the
-// default for pi print-mode which doesn't surface SessionID)
-// and included when whenSessionID=true (a future bridge that
-// does capture it, or for parity with claudecode).
+// session_id field is omitted when whenSessionID=false (a
+// caller that hasn't captured one, or a bridge that doesn't
+// surface it) and included when whenSessionID=true. pi
+// print-mode passes true here as of F-PI-PRINT-002 — peekPrintMeta
+// pulls the session id off the wire's {"type":"session","id":..}
+// frame and parsePrintMode threads it into the audit suffix.
 func TestAppendAuditFields_SessionIDGated(t *testing.T) {
 	res := agent.RunResult{SessionID: "sess-123", Subtype: "stop"}
 
@@ -101,5 +103,101 @@ func TestAppendAuditFields_NilUsageDoesNotPanic(t *testing.T) {
 	}
 	if strings.Contains(got, "usage") {
 		t.Errorf("nil usage should not emit usage token: %q", got)
+	}
+}
+
+// TestPeekPrintMeta pins the wire-frame extraction helper that
+// feeds the F-PI-PRINT-002 AgentBar fix. Cases:
+//
+//   - session event with id → SessionID set, Model untouched.
+//   - message_start assistant with model → Model set, SessionID
+//     untouched.
+//   - message_update assistant with model → Model set (real pi
+//     also surfaces model on the update delta; first-non-empty
+//     still wins).
+//   - user-role message_* → no Model set (only assistant counts).
+//   - missing id / missing model → no-op (zero values stay).
+//   - malformed JSON → silent no-op (translator.translate
+//     surfaces JSON errors via the wrapped "pi: translate:" path
+//     so peekPrintMeta does not double-report).
+//   - pre-populated result.SessionID / result.Model → not
+//     overwritten (first-non-empty-wins invariant).
+func TestPeekPrintMeta(t *testing.T) {
+	type tc struct {
+		name string
+		line string
+		// pre-populated fields on a fresh RunResult before
+		// the peek runs; "" means unset.
+		preSID   string
+		preModel string
+		wantSID  string
+		wantMod  string
+	}
+	cases := []tc{
+		{
+			name:    "session_with_id",
+			line:    `{"type":"session","id":"sess-abc","version":3}`,
+			wantSID: "sess-abc",
+		},
+		{
+			name: "session_no_id_noop",
+			line: `{"type":"session","version":3}`,
+		},
+		{
+			name:    "message_start_assistant",
+			line:    `{"type":"message_start","message":{"role":"assistant","model":"sonnet-5","content":[]}}`,
+			wantMod: "sonnet-5",
+		},
+		{
+			name:    "message_update_assistant",
+			line:    `{"type":"message_update","message":{"role":"assistant","model":"haiku-4"}}`,
+			wantMod: "haiku-4",
+		},
+		{
+			name:    "message_end_assistant",
+			line:    `{"type":"message_end","message":{"role":"assistant","model":"opus-4"}}`,
+			wantMod: "opus-4",
+		},
+		{
+			name: "user_message_no_model",
+			line: `{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}`,
+		},
+		{
+			name: "unknown_event_type",
+			line: `{"type":"agent_start"}`,
+		},
+		{
+			name: "malformed_json_silent",
+			line: `{"type":`,
+		},
+		{
+			name:    "first_non_empty_wins_session",
+			line:    `{"type":"session","id":"sess-second"}`,
+			preSID:  "sess-first",
+			wantSID: "sess-first",
+		},
+		{
+			name:     "first_non_empty_wins_model",
+			line:     `{"type":"message_start","message":{"role":"assistant","model":"second-model"}}`,
+			preModel: "first-model",
+			wantMod:  "first-model",
+		},
+		{
+			name:    "session_id_picked_up_when_pre_empty",
+			line:    `{"type":"session","id":"sess-recovered"}`,
+			wantSID: "sess-recovered",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := agent.RunResult{SessionID: c.preSID, Model: c.preModel}
+			peekPrintMeta([]byte(c.line), &res)
+			if res.SessionID != c.wantSID {
+				t.Errorf("SessionID = %q, want %q", res.SessionID, c.wantSID)
+			}
+			if res.Model != c.wantMod {
+				t.Errorf("Model = %q, want %q", res.Model, c.wantMod)
+			}
+		})
 	}
 }

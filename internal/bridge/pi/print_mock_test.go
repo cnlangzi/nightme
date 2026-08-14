@@ -66,6 +66,44 @@ func TestPrintMode_Mock_CleanRun_ReturnsText(t *testing.T) {
 	}
 }
 
+// TestPrintMode_Mock_CleanRun_PopulatesSessionIDAndModel is the
+// regression lock for F-PI-PRINT-002: parsePrintStream must
+// surface SessionID (from {"type":"session","id":..}) and Model
+// (from the assistant message_start/message_end wire frames)
+// onto RunResult so the AgentBar footer in channel/feishu
+// renders "🤖: pi · <model> · <sessionid>" instead of just
+// "🤖: pi".
+//
+// Mock script (internal/testdata/pi_print_mock.sh) emits:
+//
+//   - {"type":"session","id":"mock-print-session",...}
+//   - {"type":"message_start","message":{...,"model":"mock",...}}
+//   - {"type":"message_end","message":{...,"model":"mock",...}}
+//
+// so both fields are observable on the wire and RunResult must
+// carry them after RunOnce returns.
+func TestPrintMode_Mock_CleanRun_PopulatesSessionIDAndModel(t *testing.T) {
+	a := NewStarter("pi-mock", piPrintMockPath, []string{"--mode", "rpc"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	t.Setenv("PI_PRINT_TEXT", "anything")
+
+	got, err := a.RunOnce(ctx, agent.StartConfig{Workspace: t.TempDir()}, []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "do thing"},
+	})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got.SessionID != "mock-print-session" {
+		t.Errorf("RunResult.SessionID = %q, want %q", got.SessionID, "mock-print-session")
+	}
+	if got.Model != "mock" {
+		t.Errorf("RunResult.Model = %q, want %q", got.Model, "mock")
+	}
+}
+
 func TestPrintMode_Mock_NonZeroExit_SurfacesStderr(t *testing.T) {
 	a := NewStarter("pi-mock", piPrintMockPath, []string{"--mode", "rpc"})
 
@@ -285,11 +323,15 @@ func TestPrintMode_Mock_NoSettled_PreservesUsage(t *testing.T) {
 	if !strings.Contains(err.Error(), "agent_settled") {
 		t.Errorf("error missing 'agent_settled' phrase: %v", err)
 	}
-	// appendAuditFields must be wired in (no-op today because the
-	// translator hasn't surfaced usage on the no-settled path).
-	// Once the translator change lands this assertion will flip
-	// to checking for "1234" / "128" / "subtype=stop" as the
-	// claudecode TestPrintMode_Mock_IsError_PreservesUsage does.
+	// F-PI-PRINT-002: appendAuditFields now runs with
+	// whenSessionID=true (peekPrintMeta surfaced SessionID from
+	// the {"type":"session","id":..} wire frame), so the error
+	// message does carry "[session_id=mock-print-session]" today.
+	// Usage + Subtype remain absent until the translator emits an
+	// EventAgentResult from recordAssistantMessageLocked; once
+	// that lands this assertion will flip to checking for "1234"
+	// / "128" / "subtype=stop" like the claudecode
+	// TestPrintMode_Mock_IsError_PreservesUsage does.
 	if strings.Contains(err.Error(), "[usage") || strings.Contains(err.Error(), "[subtype") {
 		t.Errorf("unexpected audit-field markers; translator may now emit EventAgentResult before agent_settled: %v", err)
 	}

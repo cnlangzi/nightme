@@ -500,11 +500,11 @@ type AgentEvent struct {
 	// Bridges maintain a "current context" snapshot and stamp these
 	// fields on every event before delivery. Runtime reads them
 	// directly; AgentSession holds no mirror state for these.
-	SessionID  string
-	Model      string
-	AgentName  string
+	SessionID string
+	Model     string
+	AgentName string
 	Workspace string
-	Branch     string
+	Branch    string
 
 	// ───── Action payload (per Kind; usually exactly one is meaningful) ─────
 	// Text is the payload for EventAgentText. Other Kinds leave it empty.
@@ -922,6 +922,7 @@ type driver interface {
 //   - Starter.Detect() is the pre-flight check (binary on PATH,
 //     SDK available). Called by Spawner before Start; an error
 //     aborts session creation with a clear "X not found" message.
+//
 // RunResult is the per-call output of Starter.RunOnce.
 // Captures everything a one-shot caller might want after the
 // turn — final text plus the per-turn metadata the bridge
@@ -952,19 +953,25 @@ type RunResult struct {
 	// run on a cheaper model via cfg override) — callers
 	// rendering a StatusBar should prefer Result.Model over
 	// the chat session's selectedAgent model. Empty when
-	// the bridge didn't observe model metadata.
+	// the bridge didn't observe model metadata. Pi
+	// print-mode peeks the model name off the assistant
+	// message_start/message_update/message_end wire frames
+	// (see internal/bridge/pi/print.go:peekPrintMeta) so
+	// /gtw commit et al. surface it on the AgentBar footer
+	// (F-PI-PRINT-002).
 	Model string
 
 	// SessionID is the bridge-side session identifier for
 	// the call (Claude Code: system/init.session_id; Codex:
-	// thread.id; Pi print-mode: empty — no session event on
-	// that path). Bridges populate when their wire format
-	// carries the value; empty when it doesn't. Print-mode
-	// sessions are short-lived (one per `-p` invocation), so
-	// the value is mostly useful for audit (logging which
-	// session produced which output) and future resume
-	// flows (`--resume <sid>` on retry) rather than as a
-	// persistent identifier.
+	// thread.started.thread_id; Pi print-mode: peeked from the
+	// `{"type":"session","id":..}` frame — see
+	// internal/bridge/pi/print.go:peekPrintMeta). Bridges
+	// populate when their wire format carries the value;
+	// empty when it doesn't. Print-mode sessions are
+	// short-lived (one per `-p` invocation), so the value is
+	// mostly useful for audit (logging which session produced
+	// which output) and future resume flows (`--resume <sid>`
+	// on retry) rather than as a persistent identifier.
 	SessionID string
 
 	// DurationMs is the wall-clock duration of the call in

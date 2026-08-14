@@ -53,6 +53,7 @@ package pi
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -81,6 +82,63 @@ func buildPrintArgs(blocks []agent.ContentBlock) (args []string, prompt string) 
 	prompt = agent.BlocksToPrompt(blocks)
 	args = []string{"--mode", "json", "-p", prompt}
 	return args, prompt
+}
+
+// peekPrintMeta inspects a single wire line for the metadata that
+// pi's print-mode emits but the translator's typed AgentEvent
+// surface never carries: the session id ({"type":"session","id":..})
+// and the assistant model ({"type":"message_*","message":{"role":"assistant","model":..}}).
+//
+// Print-mode has no get_state handshake, so these fields live on
+// wire events the translator drops via its default case
+// (translate.go:533+) or doesn't promote out of the assistant
+// message struct. Peeking here lets RunResult carry both fields
+// so the AgentBar footer in channel/feishu renders
+// "🤖: pi · <model> · <sessionid>" instead of just "🤖: pi".
+//
+// First-non-empty wins for both — semantically "the session the
+// turn ran in" is the only session event on the wire (one per
+// process), and "the model that actually produced the turn" is
+// the first assistant message's model (later updates within the
+// same turn are rare but should not retroactively rewrite the
+// AgentBar).
+//
+// contextWindow is intentionally NOT extracted: pi's wire events
+// do not carry the API-reported context window in print-mode
+// (no get_state response, no per-message contextWindow field).
+// The UsageBar will therefore continue to omit the `X% (window)`
+// segment for pi RunOnce outputs — same as before this fix.
+// Filling it would require either a per-model catalog or a
+// pi-side wire change; both are out of scope for the
+// RunOnce footer stamp. Documented in
+// docs/feat/F-PI-PRINT-002.md.
+//
+// `line` is the raw JSONL frame (without trailing newline); the
+// helper is silent on malformed input — translator.translate()
+// surfaces JSON errors via the wrapped "pi: translate:" path.
+func peekPrintMeta(line []byte, result *agent.RunResult) {
+	// Short-circuit: once both fields are captured, every
+	// subsequent line (~99% of a typical pi session) is a
+	// no-op, so skip the json.Unmarshal entirely. Reused the
+	// shared eventEnvelope type from protocol.go so the wire
+	// shape lives in exactly one place — see the F-PI-PRINT-002
+	// note on eventEnvelope.ID / eventEnvelope.Message.
+	if result.SessionID != "" && result.Model != "" {
+		return
+	}
+	var env eventEnvelope
+	if err := json.Unmarshal(line, &env); err != nil {
+		return
+	}
+	if env.Type == "session" && env.ID != "" && result.SessionID == "" {
+		result.SessionID = env.ID
+	}
+	if env.Message.Role == "assistant" &&
+		env.Message.Model != "" &&
+		result.Model == "" &&
+		(env.Type == "message_start" || env.Type == "message_update" || env.Type == "message_end") {
+		result.Model = env.Message.Model
+	}
 }
 
 // runPrintMode spawns pi in `--mode json -p` mode for one-shot
@@ -269,6 +327,17 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, workspace string) (
 			continue
 		}
 
+		// F-PI-PRINT-002: surface the session id + assistant
+		// model onto RunResult so the AgentBar footer in
+		// channel/feishu renders "🤖: pi · <model> · <sid>".
+		// Translator.translate() drops these via its default
+		// case (session) or doesn't promote them out of the
+		// message struct (message_*). Peeking here is cheap
+		// (one JSON unmarshal per line) and only fires before
+		// SessionID/Model are set, so the steady-state cost is
+		// just one struct decode.
+		peekPrintMeta(line, &result)
+
 		events, err := translator.translate(line, nil)
 		if err != nil {
 			return agent.RunResult{}, fmt.Errorf("pi: translate: %w (line=%s)", err, truncateForErr(line))
@@ -316,10 +385,11 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, workspace string) (
 		// cost on the failure path. Mirrors the claudecode
 		// is_error fix in print.go.
 		//
-		// Pi's print-mode doesn't expose a session_id (the
-		// EventAgentResult translator doesn't surface it on
-		// this path) so we only append usage + subtype.
-		return agent.RunResult{}, fmt.Errorf("pi: exit without agent_settled%s", appendAuditFields(result, false))
+		// F-PI-PRINT-002: SessionID + Model are now surfaced
+		// onto RunResult via peekPrintMeta above; the audit
+		// suffix includes them when present so operators can
+		// grep daemon logs by session / model across bridges.
+		return agent.RunResult{}, fmt.Errorf("pi: exit without agent_settled%s", appendAuditFields(result, true))
 	}
 
 	result.Text = strings.TrimSpace(result.Text)
@@ -342,9 +412,14 @@ func truncateForErr(line []byte) string {
 // the pi print-mode failure paths. Symmetric with claudecode's
 // `[session_id=X] [usage in=N out=N cache_read=N]` formatting.
 //
-// Pi's print-mode doesn't surface SessionID, so that field is
-// skipped (whenSessionID is for parity with claudecode; pass
-// true to include it on bridges that capture it).
+// F-PI-PRINT-002: SessionID is surfaced onto RunResult via
+// peekPrintMeta (peeked from the {"type":"session","id":..}
+// wire frame), so whenSessionID is true everywhere now. Model
+// is also captured but FormatModel is reserved for bridges that
+// surface it on the failure path only (acp); pi's failure-path
+// audit mirrors the success-path shape (session_id + subtype +
+// usage), so Model is folded into the standard chain via
+// FormatSessionID instead of FormatModel.
 //
 // Subtype is included when non-empty — pi uses stopReason strings
 // (e.g. "stop", "tool_use", "max_tokens"); claudecode uses the

@@ -161,3 +161,49 @@ func truncateForDisplay(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// TestPrintMode_RealPi_PopulatesSessionIDAndModel is the
+// F-PI-PRINT-002 regression guard: pi's print-mode RunOnce
+// must surface SessionID (peeked from {"type":"session","id":..})
+// and Model (peeked from the assistant message_* wire frames)
+// onto RunResult so the AgentBar footer in channel/feishu
+// renders "🤖: pi · <model> · <sid>" instead of just "🤖: pi".
+//
+// Cheaper than TestPrintMode_RealPi_CommitPrompt (no git repo
+// setup, no /gtw commit prompt) so a wire-protocol drift on
+// either field is caught in seconds rather than minutes. Runs
+// under the same NIGHTME_REAL_PI=1 opt-in switch.
+func TestPrintMode_RealPi_PopulatesSessionIDAndModel(t *testing.T) {
+	requireRealPrintMode(t)
+	bin, _ := exec.LookPath("pi")
+	t.Logf("using pi binary at %s", bin)
+
+	a := NewStarter("pi-meta-smoke", bin, nil)
+	if err := a.Detect(); err != nil {
+		t.Fatalf("Detect: %v (binary at %q)", err, bin)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	res, err := a.RunOnce(ctx, agent.StartConfig{Workspace: t.TempDir()}, []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "say hi in one short sentence"},
+	})
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if res.SessionID == "" {
+		t.Errorf("RunResult.SessionID is empty; peekPrintMeta should surface the {\"type\":\"session\",\"id\":..} wire frame")
+	} else {
+		t.Logf("SessionID: %s", res.SessionID)
+	}
+	if res.Model == "" {
+		t.Errorf("RunResult.Model is empty; peekPrintMeta should surface the assistant message_*.message.model field")
+	} else {
+		t.Logf("Model:     %s", res.Model)
+	}
+	if res.Text == "" {
+		t.Error("RunResult.Text is empty; smoke is uninteresting if the agent produced nothing")
+	}
+}

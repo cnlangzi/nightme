@@ -649,6 +649,80 @@ func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
 	}
 }
 
+// TestRunPush_PushErrorSurfaced — regression for the silent
+// failure mode where `git push` itself errors (auth, network,
+// remote protection rule). Pre-fix, programmaticPushWithRetry
+// discarded the push error and relied solely on the post-push
+// `unpushedIsZero` verify. On a fresh branch (no @{u} yet),
+// countUnpushed returns 0 silently via its "no upstream
+// configured" branch, the verify "succeeds", and dispatchPush
+// renders a misleading "✅ pushed 0 commit(s)" card while
+// /gtw pr correctly reports "branch has no upstream". This test
+// pins the new contract: when `git push` itself errors, the
+// error must surface — not be masked by a phantom success
+// card.
+//
+// Two attempts of the push are scripted to also error —
+// programmaticPushWithRetry must NOT retry on a hard push
+// failure (auth/protection errors don't heal on retry); it
+// surfaces the first attempt's error immediately.
+func TestRunPush_PushErrorSurfaced(t *testing.T) {
+	git := newPushGit()
+	git.onArgs(statusCmd, "## wt-auth-fail\n", "", nil)
+	// origin/<branch> does not exist — first-push path.
+	git.onArgs([]string{"rev-parse", "--verify", "origin/wt-auth-fail"},
+		"", "fatal: unknown revision or path not in the working tree: 'origin/wt-auth-fail'", errors.New("exit status 128"))
+	// Pre-push verify: @{u} is unset → countUnpushed returns 0
+	// silently. The post-push verify would do the same if the
+	// push errored again.
+	git.onSeq("rev-list",
+		pushGitResp{"0", "", nil},
+	)
+	// `git push` itself fails — both attempts, with the same
+	// auth error.
+	authErr := errors.New("exit status 128")
+	git.onSeq("push",
+		// Attempt 1: errored with stderr hint of the real cause.
+		pushGitResp{"", "remote: Permission to org/repo.git denied to user.\nfatal: unable to access 'https://github.com/org/repo.git/': The requested URL returned error: 403", authErr},
+		// Attempt 2: still fails (we expect the new code to bail
+		// out at attempt 1, but the fixture is here defensively
+		// in case the implementation runs both).
+		pushGitResp{"", "remote: Permission to org/repo.git denied to user.\nfatal: unable to access 'https://github.com/org/repo.git/': The requested URL returned error: 403", authErr},
+	)
+
+	withAgent(t)
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-auth-fail",
+		RepoRoot: mustPwd(t),
+	})
+
+	cs := newPushChatSession(t)
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+
+	// Anti-regression: the misleading "✅ pushed" success card
+	// must NOT appear when the push itself failed.
+	if strings.Contains(r, "✅ pushed") {
+		t.Fatalf("push error must NOT be masked by a success card; got:\n%s", r)
+	}
+	// New contract: the actual git push error message surfaces.
+	if !strings.Contains(r, "git push failed") {
+		t.Errorf("expected 'git push failed' diagnostic, got:\n%s", r)
+	}
+	// The real upstream-protection message should bubble up so
+	// the user can diagnose.
+	if !strings.Contains(r, "Permission to org/repo.git denied") {
+		t.Errorf("expected stderr hint to surface, got:\n%s", r)
+	}
+}
+
 // TestRunPush_DirtyRefused — F-XX (commit/push split) new
 // behavior. A dirty worktree used to fall through to Branch 2
 // (agent+push); push no longer auto-commits. The user is told

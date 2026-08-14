@@ -586,44 +586,16 @@ func (m *Manager) RestoreFromRegistry() error {
 			cs.attachAgentSession(as)
 		}
 
-		// Replay any in-flight messages that the killed AS had been
-		// processing. Push directly into the queue (NOT via
-		// QueueUserMessage) — the AS isn't spawned yet, so an
-		// immediate TryFlush would race against the spawn. The
-		// next TryFlush call (triggered by /use or by the first
-		// user message after restore) will pick these up, the
-		// Spawn will resume the agent via SessionID, and the agent
-		// decides how to handle the duplicate.
-		//
-		// Blocks is defensively copied (and the queue stores
-		// Message by value) so the queue's Message.Blocks is
-		// independent of as.inFlightMessages and of any other
-		// slice owned by the registry / Entry() snapshot. The
-		// cost is one small slice per replayed message; the
-		// safety is that no future mutation of the source can
-		// reach the queue's snapshot.
-		for _, as := range agentsByCS[entry.ID] {
-			for _, ref := range as.Entry().InFlightMessages {
-				msg := Message{
-					ID:         ref.ID,
-					ChatID:     entry.ChatID,
-					Blocks:     append([]agent.ContentBlock(nil), ref.Blocks...),
-					ReceivedAt: ref.ReceivedAt,
-					// Kind zero value == MessageKindNormal (default
-					// user input). Replayed messages are not
-					// "must stand alone" queued turns.
-				}
-				if err := cs.queue.Push(msg); err != nil {
-					// Should not happen at startup (queue is empty
-					// pre-restore). If it ever does, the message is
-					// lost — log loudly so the user knows the AS
-					// is now silently dropping an in-flight reply.
-					slog.Warn("Manager.RestoreFromRegistry: replay dropped in-flight message",
-						"chat_id", entry.ChatID, "as_id", as.ID,
-						"msg_id", ref.ID, "err", err)
-				}
-			}
-		}
+		// F-62 §3.3.1: in-flight messages are NOT pushed back into
+		// cs.queue at restore. The queue is chat-level and would
+		// bleed the previous (agent, cwd)'s hung messages into the
+		// new TryFlush's batch — both cross-AS misdelivery and
+		// receipt-card anchor drift. Drop on the (agent, cwd)
+		// "new session" boundary instead (see SetSelectedCwd /
+		// LookupSelectedAgentSession hadPrior). The registry's
+		// InFlightMessages slice stays on disk for audit and is
+		// cleared by the next ClearInFlight; the runtime in-memory
+		// view is what we re-hydrate per AS.
 
 		m.sessions[entry.ChatID] = cs
 

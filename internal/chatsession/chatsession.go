@@ -447,9 +447,35 @@ func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 		return errors.New("chatsession: empty cwd")
 	}
 	cs.mu.Lock()
+
+	// F-62 §3.3.2: chat-session "new session" boundary. The previous
+	// (agent, cwd) focus is lost — its in-flight mirror is dropped
+	// (in-memory + on-disk) so the next TryFlush never carries the
+	// old AS's hung messages into the new cwd's batch. Capture the
+	// old AS pointer while holding cs.mu; the actual clear runs
+	// AFTER we release cs.mu, mirroring the persistChatEntry path
+	// below (release-then-persist). This avoids holding cs.mu
+	// across ClearInFlight's own disk write.
+	var oldAS *agentsession.AgentSession
+	if cs.selectedCwd != "" && cs.selectedCwd != cwd {
+		if a, ok := cs.pool[agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}]; ok {
+			oldAS = a
+		}
+	}
+
 	cs.selectedCwd = cwd
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
+
+	// Drop the old AS's in-flight mirror outside cs.mu.
+	// ClearInFlight is idempotent and self-locks on asMu; the
+	// resulting disk write runs concurrently with other chat
+	// operations, which is fine because it is a chat-scoped
+	// reorg with no observable race window from the caller's side.
+	if oldAS != nil {
+		oldAS.ClearInFlight()
+	}
+
 	cs.persistChatEntry()
 
 	// The git snapshot of the new workspace must be re-collected
@@ -511,13 +537,33 @@ func (cs *ChatSession) SetThinkMode(mode ThinkMode) error {
 	return nil
 }
 
-// SetSelectedAgent changes the active agent name. Does NOT spawn or
-// kill; caller must invoke LookupSelectedAgentSession to materialize.
+// SetSelectedAgent switches the active agent family. Does NOT
+// spawn or kill any AgentSession; the pool is preserved. Next
+// message triggers LookupSelectedAgentSession which may spawn or
+// reuse for the (newAgent, currentCwd) tuple.
 func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	if agent == "" {
 		return errors.New("chatsession: empty agent")
 	}
 	cs.mu.Lock()
+
+	// F-62 §3.3.2 (extended to /use): chat-session "new session"
+	// boundary on agent switch. The previous (oldAgent, cwd) focus
+	// is lost — its in-flight mirror is dropped (in-memory +
+	// on-disk) so no future LookupSelectedAgentSession can route
+	// the old agent's hung messages into the new agent's batch.
+	//
+	// Capture the old AS pointer while holding cs.mu; the actual
+	// clear runs AFTER we release cs.mu, mirroring the
+	// persistChatEntry path below (release-then-persist).
+	var oldAS *agentsession.AgentSession
+	if cs.selectedAgent != "" && cs.selectedAgent != agent {
+		oldKey := agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}
+		if a, ok := cs.pool[oldKey]; ok {
+			oldAS = a
+		}
+	}
+
 	cs.selectedAgent = agent
 	// F-53: no more `currentTurnUserMsgID` to clear — the anchor
 	// now lives on `AgentSession.currentPrompt.LastMessageID`,
@@ -540,6 +586,13 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	// AS exits.
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
+
+	// Drop the old AS's in-flight mirror outside cs.mu.
+	// ClearInFlight is idempotent and self-locks on asMu.
+	if oldAS != nil {
+		oldAS.ClearInFlight()
+	}
+
 	cs.persistChatEntry()
 	return nil
 }
@@ -1575,24 +1628,43 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	// the next Spawn replays `--resume <id>` to the bridge. Creating
 	// a fresh entry here would discard the resume id and force a
 	// brand-new agent session after every daemon restart.
-	newAS, hadPrior := cs.pool[agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}]
+	poolKey := agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}
+	existingAS, hadPrior := cs.pool[poolKey]
+	// F-62 §3.3.3b: capture the old AS that needs its in-flight
+	// mirror dropped. Renamed from `newAS` to `existingAS` because
+	// the variable actually holds the OLD/reused AS on the hadPrior
+	// path — the `new` name was misleading fresh readers into
+	// thinking it was the freshly-created AS (which is on the
+	// !hadPrior path and has no in-flight to clear).
+	//
+	// Capture the pointer while holding cs.mu; the actual clear
+	// runs AFTER we release cs.mu, mirroring the SetSelectedCwd /
+	// SetSelectedAgent release-then-persist pattern. This avoids
+	// holding cs.mu across ClearInFlight's own disk write.
+	var oldASForClear *agentsession.AgentSession
+	if hadPrior {
+		oldASForClear = existingAS
+	}
+	var as *agentsession.AgentSession
 	if !hadPrior {
-		newAS = NewAgentSession(
+		as = NewAgentSession(
 			newAgentSessionID(),
 			cs.ID,
 			cs.selectedAgent,
 			cs.selectedCwd,
 			nil,
 		)
-		cs.attachAgentSessionLocked(newAS)
+		cs.attachAgentSessionLocked(as)
+	} else {
+		as = existingAS
 	}
 	// If hadPrior, the entry's ID + SessionID + Args are preserved
 	// from the prior construction or RestoreFromRegistry. Spawn
 	// will fork a new process and SetRunning will clear the stale
 	// exit code and flip stat back to Running.
-	cs.selectAgentSessionLocked(newAS)
+	cs.selectAgentSessionLocked(as)
 	if cs.asFile != nil {
-		_ = cs.asFile.Upsert(newAS.Entry())
+		_ = cs.asFile.Upsert(as.Entry())
 	}
 
 	// commit 7: actually fork the child via the configured Spawner.
@@ -1600,26 +1672,40 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	// AgentSession stays in status=Detached with no process — the
 	// caller can still see it in the pool, but SendBlocks will
 	// return ErrNotRunning until a Spawner is wired in.
-	if cs.spawner != nil {
-		// Spawn outside of cs.mu to avoid holding the write lock
+	spawner := cs.spawner
+	cs.mu.Unlock()
+
+	// F-62 §3.3.3b: drop the existing AS's in-flight mirror
+	// outside cs.mu. The previous in-flight slice is stale (from a
+	// hung or detached prior process); the new spawn starts fresh
+	// and the next flush will pick up only the user's new
+	// messages. ClearInFlight is idempotent and self-locks on
+	// asMu.
+	if oldASForClear != nil {
+		oldASForClear.ClearInFlight()
+	}
+
+	var spawnErr error
+	if spawner != nil {
+		// Spawn outside of cs.mu: avoids holding the write lock
 		// across a fork+exec. We re-acquire mu for the subsequent
 		// persistence + selectedAS assignment.
-		spawner := cs.spawner
-		cs.mu.Unlock()
-		spawnErr := newAS.Spawn(context.Background(), spawner)
-		cs.mu.Lock()
+		spawnErr = as.Spawn(context.Background(), spawner)
+	}
 
+	cs.mu.Lock()
+	if spawner != nil {
 		if spawnErr != nil {
 			// Spawn failed; keep the entry in the pool but mark
 			// detached so the next lookup can re-attempt. Caller
 			// will see an error from LookupSelectedAgentSession.
 			cs.mu.Unlock()
-			cs.attachAgentSubscription(newAS)
-			return newAS, fmt.Errorf("chatsession: spawn failed (selectedAgent=%q, cwd=%q): %w", cs.selectedAgent, cs.selectedCwd, spawnErr)
+			cs.attachAgentSubscription(as)
+			return as, fmt.Errorf("chatsession: spawn failed (selectedAgent=%q, cwd=%q): %w", cs.selectedAgent, cs.selectedCwd, spawnErr)
 		}
 		// Refresh registry entry with updated PID/Status.
 		if cs.asFile != nil {
-			_ = cs.asFile.Upsert(newAS.Entry())
+			_ = cs.asFile.Upsert(as.Entry())
 		}
 	}
 
@@ -1628,7 +1714,7 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	// Install the bus subscription OUTSIDE cs.mu — see the lock
 	// ordering note in attachAgentSubscription. attachAgentSubscription
 	// is idempotent so a race with PumpEvents' periodic scan is safe.
-	cs.attachAgentSubscription(newAS)
+	cs.attachAgentSubscription(as)
 
 	// commit 8c: readPump is NOT auto-started here. The runtime
 	// (cmd/nightme) explicitly calls cs.StartReadPump() after
@@ -1636,7 +1722,7 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	// message dispatch. Tests that don't go through the runtime
 	// are unaffected (no leak).
 
-	return newAS, nil
+	return as, nil
 }
 
 // AgentSessionsInCwd returns a fresh slice of every AgentSession in

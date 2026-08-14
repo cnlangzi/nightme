@@ -28,8 +28,10 @@ import (
 // AgentEvent → OutboundMessage and dispatches via the channel.
 //
 // The optional policies slice lets callers customise the
-// post-translate behaviour (statusbar stamp, /think gate,
-// /tools gate are the defaults; see DefaultPolicies). When
+// post-translate behaviour (/think gate, /tools gate are the
+// defaults; see DefaultPolicies). GitStatus stamping is no longer
+// a policy — it happens at the outbound Emitter chokepoint
+// (outbound.Options.GitStatusLookup) and is invisible here. When
 // policies is empty, DefaultPolicies is used. To add a custom
 // policy, append it after DefaultPolicies(...) — order
 // matters; the first drop wins.

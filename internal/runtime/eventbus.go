@@ -13,7 +13,6 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -146,8 +145,6 @@ func WireRuntimeCallbacksAndRestore(
 					State:     e.State,
 					MessageID: e.UserMsgID,
 				},
-			}
-			if e.State == agent.MessageSubmitted {
 			}
 			if err := em.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",

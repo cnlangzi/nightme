@@ -146,9 +146,11 @@ type HandlerDeps struct {
 	// refresh this after RunOnce so the success-card footer
 	// reflects the post-mutation state. nil is OK — the
 	// chatsession falls back to a no-op when deps is unconfigured.
-	// F-CLAUDE-PRINT-002: this is the only statusbar-related dep
-	// the dispatcher needs; the runtime owns the per-chatsession
-	// GitStatus cache (chatsession.GitStatus / RefreshGitStatus).
+	// F-CLAUDE-PRINT-002 + fix-status-bar-git: this is the only
+	// per-message-state-related dep the dispatcher needs; the
+	// runtime owns the per-chatsession GitStatus cache (chatsession
+	// .GitStatus(ctx) / RefreshGitStatus), and the Emitter stamps it
+	// onto every outbound via Options.GitStatusLookup.
 	GitStatusDeps chatsession.GitStatusDeps
 }
 
@@ -1136,11 +1138,6 @@ func gtwCardChoicesToGateway(in []CardChoice) []messages.CardChoice {
 // missing outbound surface — see wip/commander.md §2.7 for the
 // nil-skip invariant.
 //
-// F-CLAUDE-PRINT-002: reply also takes the ChatSession so the
-// helper can stamp chatsession.GitStatus onto out.GitStatus
-// (F-CLAUDE-PRINT-002 principle: the layer that builds an
-// OutboundMessage is responsible for filling all per-chatsession
-// context, not the runtime egress).
 // reply sends a single OutReply through the shared Emitter. The
 // Emitter stamps GitStatus at the chokepoint (outbound.Options
 // .GitStatusLookup); callers don't need a ChatSession reference

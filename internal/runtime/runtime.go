@@ -11,8 +11,8 @@
 //     - prcache.Registry (per-AS PR cache)
 //     - gtw.HandlerDeps (git runner, HTTP prober)
 //     - outbound.Emitter (the single outbound chokepoint;
-//       holds ch and the statusbar.Source that reads prCacheReg +
-//       gtwDeps + mgr)
+//       holds ch and the GitStatusLookup closure that reads
+//       mgr.Get(chatID) → cs.GitStatus(ctx))
 //  5. Build gtw.Manager, ReactionRouter, command.Commander,
 //     shell.Dispatcher (the command-adapter layer)
 //  6. Build gateway.Router (messageDispatcher + em); wire
@@ -252,10 +252,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// inside WireRuntimeCallbacksAndRestore — see its doc.
 	//
 	// Per-AgentSession PR / MR cache. Built before Emitter
-	// construction (the statusbar.Source reads it) and before
-	// gateway.New (the Emitter flows into Gateway's outbound
-	// chokepoint). See prcache.Registry comment for why this
-	// is owned at runtime scope, not on AgentSession itself.
+	// construction (the GitStatusLookup closure reads it) and
+	// before gateway.New (the Emitter flows into Gateway's
+	// outbound chokepoint). See prcache.Registry comment for
+	// why this is owned at runtime scope, not on AgentSession
+	// itself.
 	prCacheReg := &prcache.Registry{}
 
 	gtwDeps := gtw.HandlerDeps{
@@ -264,12 +265,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		PRInvalidator: prCacheReg,
 	}
 
-	// StatusBar deps — shared by every stamp site (runtime
-	// pump, MessageStateBus, Emitter's Source). The closures
-	// capture gtwDeps + prCacheReg; chatsession itself stays
-	// decoupled from gtw (which would create an import cycle:
+	// GitStatus deps — shared by every refresh site (chatsession
+	// SetSelectedCwd / RefreshGitStatus / pull-on-read fallback).
+	// The closures capture gtwDeps + prCacheReg; chatsession itself
+	// stays decoupled from gtw (which would create an import cycle:
 	// gtw → chatsession → outbound).
-	statusbarDeps := chatsession.GitStatusDeps{
+	gitStatusDeps := chatsession.GitStatusDeps{
 		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
 			return gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
 		},
@@ -286,6 +287,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		},
 	}
 
+	// Wire the same deps into gtwDeps so /gtw commit and /gtw pr
+	// can refresh the chatsession cache after RunOnce.
+	// Without this, cs.RefreshGitStatus(ctx, deps.GitStatusDeps)
+	// passes the zero value, depsConfigured short-circuits, and
+	// the chatsession cache holds the pre-mutation snapshot
+	// until the next pull-on-read cache miss — every outbound
+	// stamped by the Emitter in between shows stale branch / HEAD
+	// info on the workspace footer line.
+	gtwDeps.GitStatusDeps = gitStatusDeps
+
 	// emitter is the single daemon-wide outbound chokepoint.
 	// Constructed here (before gateway.New) so the Gateway can
 	// hold the reference at construction time — every
@@ -294,11 +305,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// instance. Manager.WithEmitter (further down) binds the
 	// same Emitter to every ChatSession.
 	//
-	// F-CLAUDE-PRINT-002: statusbar.NewRuntimeSource + AttachIfMissing
-	// are deleted (Batch 3). The Emitter becomes pure transport
-	// for the rest of this PR; chatsession.GitStatus is the
-	// sole source of GitStatus, and chatsession's event hook
-	// (Batch 2) stamps it onto out.GitStatus directly.
+	// F-CLAUDE-PRINT-002 + fix-status-bar-git: GitStatus stamping
+	// is centralized at the Emitter chokepoint via the
+	// GitStatusLookup closure below. chatsession owns the
+	// snapshot; the Emitter stamps it on every Send / SendCard
+	// whose msg.GitStatus is nil. Business code never reads
+	// GitStatus directly.
 	em := outbound.New(ch, outbound.Options{
 		// GitStatusLookup reaches the chatsession via mgr.Get and
 		// delegates to cs.GitStatus(ctx). The lookup is invoked for
@@ -321,7 +333,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// HandleInbound error-reply paths inherit the StatusBar
 	// footer (no-workspace / spawn-failed / queue-full).
 	mgr.WithEmitter(em).WithPrimaryAgent(cfg.Primary).
-		WithGitStatusDeps(statusbarDeps)
+		WithGitStatusDeps(gitStatusDeps)
 
 	// F-58: gateway is now a thin pump + binding table. The
 	// dispatch chain lives in *inbound.Router (constructed
@@ -450,7 +462,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-	if err := WireRuntimeCallbacksAndRestore(mgr, em, logger, statusbarDeps, ch); err != nil {
+	if err := WireRuntimeCallbacksAndRestore(mgr, em, logger, gitStatusDeps, ch); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 

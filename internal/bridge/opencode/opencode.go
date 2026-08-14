@@ -122,6 +122,55 @@ const startupMaxAttempts = 2
 // user does not notice on the happy path.
 const startupRetryDelay = 2 * time.Second
 
+// livenessProbeInterval is how often the bridge pings /api/health
+// on a SEPARATE HTTP connection to verify the opencode process is
+// still reachable. Chosen so a handful of probes cover a typical
+// 10-second server crash window without spamming the server.
+// Probes are independent of the SSE stream — a long stretch of
+// silent SSE (model thinking, large tool call, etc.) is not a
+// liveness signal.
+const livenessProbeInterval = 5 * time.Second
+
+// livenessProbeTimeout bounds each individual /api/health call so
+// a wedged probe cannot accumulate indefinitely. Short (2s) is
+// plenty: if the server answers at all, it answers well under a
+// second.
+const livenessProbeTimeout = 2 * time.Second
+
+// livenessFailThreshold is the number of consecutive probe failures
+// that triggers a session teardown. At 5s interval and 2s timeout,
+// three failures mean roughly 15-21 seconds of total unreachability
+// before we kill — long enough to ride out a brief network blip,
+// short enough that a wedged server gets reaped before the runtime's
+// HungPrompt sweeper (multi-minute) kicks in.
+const livenessFailThreshold = 3
+
+// sseReconnectMin is the initial backoff after an SSE disconnect.
+// Kept short so a transient blip recovers within a few hundred
+// milliseconds. Doubles on each consecutive failure (capped at
+// sseReconnectMax) with full jitter to avoid thundering-herd on
+// a server restart. Override via NIGHTME_OPENCODE_SSE_RECONNECT_MIN.
+const sseReconnectMin = 100 * time.Millisecond
+
+// sseReconnectMax is the upper bound on the SSE reconnect backoff.
+// Local 127.0.0.1 connections should never drop, but if the
+// server process is restarting itself (e.g. config reload) the
+// bridge needs to wait it out without burning the CPU. Override
+// via NIGHTME_OPENCODE_SSE_RECONNECT_MAX.
+const sseReconnectMax = 5 * time.Second
+
+// sseStableGrace is the minimum wall time a connection must
+// survive (with or without events) before the reconnect loop
+// considers it "stable" and resets the backoff to the minimum.
+// Below this window we keep growing the backoff, so a server
+// that closes every connection within a few hundred milliseconds
+// is not hammered at sseReconnectMin.
+//
+// Set generously enough to cover the opencode CLI's typical
+// post-handshake quiet period (model load, plugin init). 2s is
+// conservative; in practice the first event arrives much sooner.
+const sseStableGrace = 2 * time.Second
+
 // turnWatchdogTimeout bounds the wall time between consecutive SSE
 // events during a turn. Resets on every event delivered by the
 // translator (model is alive, plugin loaded, etc.). On timeout the

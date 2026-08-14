@@ -93,7 +93,13 @@ func (c *Client) subscribeGlobal(ctx context.Context) (io.ReadCloser, error) {
 	}
 	// SSE; do not let the http client auto-decompress.
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := c.http.Do(req)
+	// Use the SSE-dedicated client (no overall Timeout). The
+	// response-header phase is bounded by the transport's
+	// ResponseHeaderTimeout (10s in newClient), so an unreachable
+	// server fails fast at the connect step. Once a 2xx lands the
+	// body is handed to decodeSSE which reads until EOF or the
+	// caller's ctx cancels — there is no idle-read cut-off.
+	resp, err := c.httpSSE.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("opencode: subscribe: %w", err)
 	}

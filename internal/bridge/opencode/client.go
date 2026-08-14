@@ -41,18 +41,50 @@ type Client struct {
 	baseURL   string
 	workspace string
 	password  string
-	http      *http.Client
+
+	// http is the short-lived request client used by Prompt,
+	// Interrupt, Health, GetSession, etc. Per-request timeouts are
+	// applied at the call sites via context.WithTimeout — the
+	// client itself has no overall Timeout because a global Timeout
+	// would also kill the long-lived SSE connection (the historical
+	// bug we fixed: a 30 s idle cut-off swallowed every event the
+	// opencode CLI was about to push).
+	http *http.Client
+
+	// httpSSE is the dedicated client for the /api/event SSE
+	// stream. It has NO Timeout: the connection's lifetime is
+	// governed entirely by the caller's context (sseCancel in the
+	// driver). Server liveness is verified separately by the
+	// liveness-probe goroutine hitting /api/health — keeping the
+	// "is the server alive?" check off the SSE wire so a silent
+	// stretch during model thinking never tears down a healthy
+	// connection.
+	//
+	// ResponseHeaderTimeout bounds ONLY the response-header phase
+	// (TCP connect + TLS + first byte). Once a 2xx lands the body
+	// is handed to decodeSSE which reads until EOF or ctx cancel;
+	// that path is unbounded by design.
+	httpSSE *http.Client
 }
 
-// newClient builds a Client targeting the given serverProc. The HTTP
-// client uses a sensible per-request timeout that the caller can
-// override via ctx if needed.
+// newClient builds a Client targeting the given serverProc.
+//
+// Neither client has an http.Client.Timeout: short requests are
+// bounded at the call sites (Prompt uses promptTimeout via
+// context.WithTimeout; handshake uses handshakeTimeout; etc.), and
+// the SSE stream is bounded by sseCancel. The two clients differ
+// only in transport-level tuning — httpSSE pins ResponseHeaderTimeout
+// so a dead server fails fast on connect instead of hanging forever
+// before the SSE body even starts streaming.
 func newClient(proc *serverProc, workspace string) *Client {
 	return &Client{
 		baseURL:   proc.baseURL,
 		workspace: workspace,
-		http: &http.Client{
-			Timeout: 30 * time.Second,
+		http:      &http.Client{},
+		httpSSE: &http.Client{
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 10 * time.Second,
+			},
 		},
 	}
 }
@@ -321,9 +353,16 @@ func flattenPrompt(parts []PartInput) (string, []PromptInputFile) {
 // PromptInputFile mirrors the OpenAPI PromptInputFileAttachment —
 // one file per attachment. opencode then uploads/reads it
 // server-side.
+//
+// Note: the on-wire field is `uri`, NOT `url`. `url` only appears
+// on the response-shaped FilePart / FilePartInput schemas used to
+// describe already-stored parts; the prompt INPUT attachment
+// schema requires `uri` (verified against GET /doc on opencode
+// 1.x). Sending `url` here returns 400 "Missing key at
+// prompt.files[N].uri" from opencode's payload validator.
 type PromptInputFile struct {
 	MIME string `json:"mime,omitempty"`
-	URL  string `json:"url"`
+	URL  string `json:"uri"`
 	Name string `json:"filename,omitempty"`
 }
 

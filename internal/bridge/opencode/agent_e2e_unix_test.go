@@ -277,15 +277,11 @@ func TestAgent_StartEndToEnd(t *testing.T) {
 	}
 
 	// Subscribe to the SSE stream. We derive a context so Close()
-	// can cancel the stream — without it, readSSE blocks on the
+	// can cancel the stream — without it, sseLoop blocks on the
 	// body forever.
 	sseCtx, sseCancel := context.WithCancel(context.Background())
 	a.sseCancel = sseCancel
-	body, err := a.client.Subscribe(sseCtx, "ses_test")
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	go a.readSSE(body)
+	go a.sseLoop(sseCtx)
 	go a.lifecycle()
 
 	// Wait for the SSE handler to register the subscriber so the

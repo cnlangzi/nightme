@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -99,41 +98,174 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 
 // ─── SSE reader + lifecycle ──────────────────────────────────────
 
-// readSSE owns the SSE body. It blocks on decodeSSE until the server
-// closes the stream (graceful EOF → nil) or the wire errors. We
-// delegate event handling to the translator; this function never
-// touches the events channel directly.
-func (d *driver) readSSE(body io.ReadCloser) {
+// sseLoop owns the long-lived connection to /api/event. It
+// subscribes, drains events, and on ANY disconnect (graceful EOF,
+// wire error, server restart, network blip) it backs off and
+// reconnects — local `opencode serve` on 127.0.0.1 SHOULD never
+// drop, but when it does (kernel resource limit, proxy idle, the
+// server process briefly restarting itself) we self-heal instead
+// of going silently blind.
+//
+// We delegate event handling to the translator; this function
+// never touches the events channel directly.
+//
+// Exit conditions:
+//   - sseCtx (parent ctx) cancelled — Close() / liveness-kill /
+//     caller shutdown.
+//   - d.closed signalled — Close().
+//   - Non-retryable subscribe error (HTTP 4xx: auth, not-found,
+//     bad-request). These will not fix themselves with retries.
+//
+// Backoff: starts at sseReconnectMin (100ms), doubles up to
+// sseReconnectMax (5s), with full jitter so concurrent bridge
+// sessions do not thundering-herd the server on a restart.
+func (d *driver) sseLoop(ctx context.Context) {
 	d.pumpWG.Add(1)
 	defer d.pumpWG.Done()
-	defer body.Close()
 	defer d.finishTurn()
 
-	// Stamp the watchdog's "last event" timer immediately so a
-	// quiet SSE stream from the start does not look like a hang.
-	d.lastEventAtUnixNano.Store(time.Now().UnixNano())
+	backoff := sseReconnectMin
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.closed:
+			return
+		default:
+		}
 
-	err := decodeSSE(body, func(ev SessionEvent) error {
+		body, err := d.client.Subscribe(ctx, d.sessionID)
+		if err != nil {
+			if !isRetryableSubscribeErr(err) {
+				oLog("sse subscribe error (non-retryable), giving up",
+					"err", err.Error())
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-d.closed:
+				return
+			case <-time.After(backoff):
+			}
+			backoff = nextBackoff(backoff)
+			oLog("sse subscribe failed, will retry",
+				"err", err.Error(),
+				"backoff", backoff,
+			)
+			continue
+		}
+
+		// Connected. Drop the busy guard if it was set by a
+		// previous turn whose session.idle / session.error event
+		// we may have missed during the disconnect window — local
+		// TCP drops should not strand the user on ErrTurnBusy.
+		// The server will either push continuing events (in which
+		// case the new turn waits naturally) or has already
+		// finished (in which case we free the next SendBlocks).
+		d.pendingMu.Lock()
+		d.pendingTurnActive = false
+		d.pendingMu.Unlock()
+		// Stamp the watchdog's "last event" timer immediately so a
+		// quiet SSE stream from the start does not look like a hang.
 		d.lastEventAtUnixNano.Store(time.Now().UnixNano())
-		if ev.Type == "permission.asked" {
-			var p PermissionAsked
-			if err := json.Unmarshal(ev.properties(), &p); err == nil {
+
+		// Note: backoff is NOT reset on a bare Subscribe success.
+		// A server that closes the connection immediately on every
+		// attempt (e.g. broken handshake, auth round-trips, kernel
+		// drops) would otherwise be hammered at sseReconnectMin.
+		// We only reset after a connection has been stable for
+		// at least sseStableGrace (we observed at least one event
+		// OR the connection lasted longer than the grace window).
+		stable := false
+		connectedAt := time.Now()
+		gotEvent := false
+
+		err = decodeSSE(body, func(ev SessionEvent) error {
+			gotEvent = true
+			stable = true
+			d.lastEventAtUnixNano.Store(time.Now().UnixNano())
+			if ev.Type == "permission.asked" {
+				var p PermissionAsked
+				if err := json.Unmarshal(ev.properties(), &p); err == nil {
+					d.pendingMu.Lock()
+					d.pendingApprovalID = p.ID
+					d.pendingMu.Unlock()
+				}
+			}
+			switch ev.Type {
+			case "session.idle", "session.error":
 				d.pendingMu.Lock()
-				d.pendingApprovalID = p.ID
+				d.pendingTurnActive = false
 				d.pendingMu.Unlock()
 			}
+			return d.trans.handleEvent(ev)
+		})
+		_ = body.Close()
+
+		// If the connection survived long enough without an event
+		// (e.g. opencode answered the GET but the model stayed
+		// silent for the grace window), treat that as stability
+		// too. We don't want the bridge to ramp up backoff just
+		// because the model is thinking.
+		if !gotEvent && time.Since(connectedAt) >= sseStableGrace {
+			stable = true
 		}
-		switch ev.Type {
-		case "session.idle", "session.error":
-			d.pendingMu.Lock()
-			d.pendingTurnActive = false
-			d.pendingMu.Unlock()
+		if stable {
+			backoff = sseReconnectMin
 		}
-		return d.trans.handleEvent(ev)
-	})
-	if err != nil {
-		oLog("sse read error", "err", err.Error())
+
+		if err != nil {
+			oLog("sse read error, will reconnect", "err", err.Error())
+		} else {
+			oLog("sse closed by server, will reconnect")
+		}
+
+		// Honour shutdown before backing off.
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.closed:
+			return
+		case <-time.After(backoff):
+		}
+		backoff = nextBackoff(backoff)
 	}
+}
+
+// isRetryableSubscribeErr returns true for subscribe errors that
+// may fix themselves with a short retry: network failures, server
+// 5xx, EOF. Returns false for 4xx (auth, not-found, bad-request)
+// which will only succeed again after a config change.
+func isRetryableSubscribeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// 4xx is non-retryable; 5xx is transient. The Subscribe wrapper
+	// formats errors as "opencode: subscribe: <code>: <body>".
+	for _, code := range []string{": 400", ": 401", ": 403", ": 404", ": 410"} {
+		if strings.Contains(msg, code) {
+			return false
+		}
+	}
+	return true
+}
+
+// nextBackoff doubles the wait, capped at sseReconnectMax, with
+// full jitter so concurrent reconnects do not synchronise.
+func nextBackoff(cur time.Duration) time.Duration {
+	next := cur * 2
+	if next > sseReconnectMax {
+		next = sseReconnectMax
+	}
+	// full jitter in [next/2, next]
+	half := next / 2
+	jitter := time.Duration(time.Now().UnixNano() % int64(half+1))
+	return half + jitter
 }
 
 // finishTurn is called when the SSE stream closes. It releases the
@@ -257,3 +389,41 @@ func detectBranch(workspace string) string {
 // a var so tests can stub the environment lookup without mutating
 // the process environment.
 var osGetenv = os.Getenv
+
+// livenessProbeConfig returns (interval, per-probe timeout,
+// failure threshold), with NIGHTME_OPENCODE_LIVENESS_INTERVAL /
+// _TIMEOUT / _THRESHOLD env-var overrides for tests and operators
+// who want tighter or looser behaviour. Matches the
+// watchdogTimeout() env-override pattern.
+//
+//   - interval:   how often the probe ticks. Must be > 0.
+//   - timeout:    per-probe HTTP timeout. Must be > 0.
+//   - threshold:  consecutive failures that trigger teardown.
+//                 Must be >= 1.
+//
+// On parse error or invalid value we fall back to the package
+// default. Test code should set the env vars and restart the
+// goroutine to pick them up.
+func livenessProbeConfig() (time.Duration, time.Duration, int) {
+	interval := livenessProbeInterval
+	timeout := livenessProbeTimeout
+	threshold := livenessFailThreshold
+
+	if v := strings.TrimSpace(osGetenv("NIGHTME_OPENCODE_LIVENESS_INTERVAL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			interval = d
+		}
+	}
+	if v := strings.TrimSpace(osGetenv("NIGHTME_OPENCODE_LIVENESS_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			timeout = d
+		}
+	}
+	if v := strings.TrimSpace(osGetenv("NIGHTME_OPENCODE_LIVENESS_THRESHOLD")); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n >= 1 {
+			threshold = n
+		}
+	}
+	return interval, timeout, threshold
+}

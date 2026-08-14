@@ -285,7 +285,14 @@ func TestSendBlocks_RequestShape(t *testing.T) {
 	if first["mime"] != "image/png" {
 		t.Errorf("file[0].mime = %v, want image/png", first["mime"])
 	}
-	if first["url"] != "file:///tmp/x.png" {
-		t.Errorf("file[0].url = %v, want file:///tmp/x.png", first["url"])
+	// On-wire field is `uri` (PromptInputFileAttachment in opencode
+	// OpenAPI spec), NOT `url`. The old assertion encoded the bug
+	// and let it survive; sending `url` returns 400 "Missing key at
+	// prompt.files[0].uri" from opencode's payload validator.
+	if first["uri"] != "file:///tmp/x.png" {
+		t.Errorf("file[0].uri = %v, want file:///tmp/x.png", first["uri"])
+	}
+	if _, hasURL := first["url"]; hasURL {
+		t.Errorf("file[0].url should NOT be sent (opencode rejects it); got %v", first["url"])
 	}
 }

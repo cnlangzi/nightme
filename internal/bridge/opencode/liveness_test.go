@@ -18,7 +18,6 @@ package opencode
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -363,9 +362,6 @@ func TestLivenessLoop_StopsOnClosed(t *testing.T) {
 	}
 }
 
-// helper: keep linter happy about unused imports if we shrink tests.
-var _ = errors.New
-
 // ─── SSE reconnect ───────────────────────────────────────────────
 
 // TestSSELoop_ReconnectsAfterDisconnect simulates the opencode
@@ -522,8 +518,11 @@ func TestSSELoop_NonRetryableStopsLoop(t *testing.T) {
 	}
 }
 
-// TestSSELoop_StopsOnClosed verifies that Close() (which sets
-// d.closed) terminates a sseLoop that is mid-reconnect.
+// TestSSELoop_StopsOnClosed verifies that d.Close() terminates
+// an sseLoop that is currently in the backoff-and-retry path
+// (Subscribe returning 5xx). Close() cancels sseCtx and signals
+// d.closed; the loop must observe at least one of them and exit
+// within the backoff window.
 func TestSSELoop_StopsOnClosed(t *testing.T) {
 	// Subscribe handler returns 503 forever so sseLoop is in the
 	// backoff-and-retry path.

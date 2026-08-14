@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -418,8 +419,7 @@ func livenessProbeConfig() (time.Duration, time.Duration, int) {
 		}
 	}
 	if v := strings.TrimSpace(osGetenv("NIGHTME_OPENCODE_LIVENESS_THRESHOLD")); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n >= 1 {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			threshold = n
 		}
 	}

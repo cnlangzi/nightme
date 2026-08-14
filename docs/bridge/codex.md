@@ -35,18 +35,95 @@ nightme ──stdio JSON-RPC 2.0──> codex app-server --listen stdio:// [-c m
 | 不做 | 理由 |
 |---|---|
 | **不走 ACP 中间层** | `@agentclientprotocol/codex-acp` 内部也是 spawn `codex app-server`,加一层 Node shim 只增加启动延迟 + 压平流式事件(`item/started` vs `item/completed` 边界、`turn/completed.usage` 被 ACP 抹掉)。 |
-| **不双后端(默认 `exec` + 可选 `app_server`)** | cc-connect 在 `codex.go::StartSession` L466–504 用了二选一,默认 `exec`。我们走单选 `app_server`,因为 `exec` 与 nightme 的多 turn + 流式事件 + 审批 IPC 三条核心契约全部不兼容。**用户临时降级 `codex` 命令 → 自动落 `ModePTY` 兜底**(`cmd/nightme/buildAgentRegistry`),不会失能。 |
+| **chat-session 单选 `app_server`(`exec` 不做 chat 后端)** | cc-connect 在 `codex.go::StartSession` L466–504 用了二选一,默认 `exec`。我们走单选 `app_server`,因为 `exec` 与 nightme 的多 turn + 流式事件 + 审批 IPC 三条核心契约全部不兼容。**`exec` 不是 chat 后端,但 `Starter.RunOnce` 的 one-shot 路径用它**(F-CODEX-PRINT-001,见 §1.4);chat 与 print 各自独立,不在运行时互斥。**用户临时降级 `codex` 命令 → 自动落 `ModePTY` 兜底**(`cmd/nightme/buildAgentRegistry`),不会失能。 |
 | **不做模型别名表** | `-c model=…` 直接透传,由用户在 `StartConfig.Args` / chat args 写明。 |
 
 ### 1.3 与 cc-connect 的差异速查
 
 | | cc-connect | nightme |
 |---|---|---|
-| 后端选择 | `exec` (默认) / `app_server` 二选一 | 单选 `app_server` |
+| 后端选择 | `exec` (默认) / `app_server` 二选一 | chat = 单选 `app_server`;print-mode = `exec`(见 §1.4)。两个用途独立,不运行时互斥 |
 | provider config | `codex config.toml [model_providers.*]` + `auth.json` | 不做(本期直接 `-c model_provider=… -c openai_base_url=…` 透传) |
 | `Mode` | `backend == "app_server" ? ModeJSONIO : ModePTY`(运行时分支) | `ModeJSONIO` 单一值,与 pi / claudecode 对齐 |
-| 多模态图片路径 | `codex/images/img_<ns>_<pid>.<ext>` | 同上(在 `<workspace>/.nightme/codex/images/` 下) |
+| 多模态图片路径 | `codex/images/img_<ns>_<pid>.<ext>` | 同上(在 `<workspace>/.nightme/codex/images/` 下,仅 app-server 路径用) |
 | optOut 列表 | 6 条 | 同 6 条,**必须全发** —— 缺一条 double-consume |
+| print-mode 入口 | 复用 `exec` 作为 chat 后端 | chat 用 app-server,print 用 `exec --json -o <tmpfile>`(F-CODEX-PRINT-001)|
+
+---
+
+### 1.4 Print Mode(一次性调用)
+
+`Starter.RunOnce`(`/gtw commit` / `/gtw pr` / `buildAgentPrompt` 走这里)走 **`codex exec` 子命令**,不走 §1.1 的 app-server。`app-server` 是 chat session 的多 turn 路径;`exec` 是 codex CLI 自带的 one-shot 入口。两者不互斥——同一份 codex binary 装好就都可用。
+
+#### 1.4.1 为什么不用 app-server 做一次性
+
+旧实现是 `Start + defer Close + agent.RunOnceDrain`,跟 acp / opencode 对齐。但对一次性调用有两个浪费:
+
+1. **5s `closeDrainTimeout` 上限**(`session.go:53`)。app-server 没有"做完一个 turn 就退出"的协议 flag,一次性场景等满 5s 是浪费。
+2. **握手 + pump goroutine 开销**。`newSession` 起 4 个 goroutine(`readPump` + `stderrLoop` + `lifecycle` + `rpc`,见 §2)就跑一个 turn,全部拆掉——性价比为零。
+
+claudecode/pi 已经先一步切到 `xxx -p` print-mode(F-CLAUDE-PRINT-001 / F-PI-PRINT-001),codex 这边走同一思路,详见 `docs/feat/F-CODEX-PRINT-001.md` / `internal/bridge/codex/print.go`。
+
+#### 1.4.2 argv 布局
+
+实测 `codex-cli 0.145.0` 后确定(`print_internal_test.go::TestBuildPrintArgs_*` 锁定):
+
+```text
+codex exec \
+  --dangerously-bypass-approvals-and-sandbox \      # = app-server 的 approval_policy="never" + sandbox_mode="danger-full-access"
+  -C <workspace> \                                    # = cmd.Dir / StartConfig.Workspace
+  --skip-git-repo-check \                             # /gtw commit 可能在非 git 工作树跑
+  [-i <img1>] [-i <img2>] ... \                       # ContentImage → -i flag(repeatable,实测有效)
+  --json \                                            # NDJSON 事件流到 stdout
+  -o <tmpfile> \                                      # final agent_message 写到文件(无 progress 噪声)
+  -- \                                                # ← 必须:分隔 flag 与 positional prompt
+  <prompt>                                            # ContentText + ContentFile 合成
+```
+
+**关键**:`--` 不可省。codex 0.145 在 `-i` 与 positional prompt 共存时若没有 `--` 会把 prompt 当 stdin 读(实测 bug,`print_internal_test.go::TestBuildPrintArgs_AllImagesFallsBackToSentinel` 间接验证)。
+
+#### 1.4.3 RunResult 字段映射
+
+| RunResult 字段 | 来源 | 备注 |
+|---|---|---|
+| `Text` | `-o <tmpfile>` 内容 | 干净;不含 user/codex 标记、不含 tool_call progress |
+| `SessionID` | `thread.started.thread_id`(NDJSON 第一条) | 与 app-server 的 `threadId` 同源语义 |
+| `Usage` | `turn.completed.usage{input_tokens, cached_input_tokens, output_tokens}` | 与 app-server 的 `appServerUsageToUsageInfo` 同源语义,wire 字段名不同 |
+| `Subtype` | exit code:0 = `"completed"`,非零 = `"failed"` | 与 app-server 的 turn status 语义一致 |
+| `DurationMs` | 我们 wall-clock 测 | cmd.Wait 立即返回,不像 app-server 要等 5s 上限 |
+| `Model` | 空 | 当前 `StartConfig` 没有 `Model` 字段(app-server 也一样);后续若加可由 `-m` flag 注入 |
+
+实测 `codex-cli 0.145.0` 上跑通:
+
+```
+INFO [codex] PrintMode Start command=codex workspace=/tmp/foo prompt_bytes=85 args_count=10 pid=52274
+INFO [codex] PrintMode Exit  pid=52274 elapsed_ms=9828 wait_err=<nil>
+                                  session_id=019fff55-11bc-7283-b757-b8be07822c6a
+result: Text="PONG"  Subtype=completed  DurationMs=9828
+        SessionID=019fff55-...     Usage=InputTokens:17869 OutputTokens:22 CacheReadInputTokens:128
+```
+
+#### 1.4.4 Block 编码
+
+| `ContentBlock` | 处理 |
+|---|---|
+| `ContentText{Text}` | `\n` 拼到 prompt 末尾(空 `Text` 跳过) |
+| `ContentImage{Path}` | 追加 `-i <Path>` flag(空 `Path` 跳过;多张图 repeatable) |
+| `ContentFile{Path}` | 追加 `@<Path>` 到 prompt(app-server 没 file type;exec 没有 file flag,降级为文本注解) |
+| **空 blocks / 全 image** | sentinel `"(see attached content)"` 注入到 prompt——避免 codex exec 走 stdin 回退(0.145 实测 bug) |
+
+注意:`ContentImage` 走 `-i` flag 比 claudecode print-mode 的 `[image: ...]` 文本注解更强——exec 原生支持多模态附件,image 真的进模型视觉。
+
+#### 1.4.5 文件位置
+
+| 文件 | 角色 |
+|---|---|
+| `internal/bridge/codex/print.go` | 实现:`runPrintMode` + `buildPrintArgs` + `runNDJSON` |
+| `internal/bridge/codex/print_internal_test.go` | 7 个 argv 构造单测(不需 codex binary,CI 必跑) |
+| `internal/bridge/codex/print_real_unix_test.go` | 4 个 e2e(`NIGHTME_REAL_CODEX=1` 才跑真 binary) |
+| `internal/bridge/codex/starter.go` | `Starter.RunOnce` 1 行委托到 `runPrintMode` |
+
+关联:`F-CODEX-PRINT-001`(2026-08-14)。
 
 ---
 
@@ -489,7 +566,7 @@ go test ./internal/bridge/codex/ -count=1
 
 | 项 | 理由 | 何时做 |
 |---|---|---|
-| `codex exec` 后端(双选) | 违反 F-32/F-52/F-34 多 turn 契约 | 永不 |
+| ~~`codex exec` 后端(双选)~~ | ~~违反 F-32/F-52/F-34 多 turn 契约~~ | ~~永不~~ — F-CODEX-PRINT-001(2026-08-14)落地:`exec` 已用作 print-mode 入口(见 §1.4);`app_server` 仍是 chat-session 唯一后端,未引入双后端运行时分歧 |
 | ACP 中间层 | 多一层 Node shim | 永不 |
 | 模型别名表 | `-c model=…` 直传 | 永不 |
 | 第三方 provider config.toml | 独立 PR | F-XX |

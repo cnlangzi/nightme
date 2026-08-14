@@ -69,15 +69,16 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	}
 	return agent.NewAgent(s.Info(), d.session.pid, d.session.events, d), nil
 }
-// RunOnce is the one-shot counterpart to Start. Spawns a fresh
-// JSON-RPC session, sends blocks, and drains Events() until the
-// agent produces its final text result. Closes the session
-// before returning.
+// RunOnce is the one-shot counterpart to Start. Delegates to
+// runPrintMode in print.go, which spawns `codex exec` directly
+// (bypassing the long-lived app-server pipeline) — see the file
+// doc on print.go for rationale (F-CODEX-PRINT-001, 2026-08-14).
+//
+// The previous implementation was `Start + defer Close +
+// agent.RunOnceDrain`, mirroring acp / opencode. That pattern
+// paid the full app-server handshake + 5s closeDrainTimeout cost
+// per call, which is wasted work for one-shot uses (/gtw commit,
+// /gtw pr, buildAgentPrompt).
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-	a, err := s.Start(ctx, cfg)
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
-	}
-	defer a.Close()
-	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+	return runPrintMode(ctx, s, cfg, blocks)
 }

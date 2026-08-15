@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -926,9 +925,7 @@ func cmdCfgIsZero(c CmdConfig) bool {
 		len(c.Hooks.After) == 0
 }
 
-// Ensure timeout is reasonable (sanity check the const).
-func TestHookTimeout_Reasonable(t *testing.T) {
-	if hookTimeout <= 0 || hookTimeout > 5*time.Minute {
-		t.Errorf("hookTimeout = %v, want > 0 and <= 5m", hookTimeout)
-	}
-}
+// Note: positive-bound + sanity checks for timeouts.Hook (and the
+// other four values) live in internal/timeouts/timeouts_test.go
+// as TestTimeouts_AllSane — single source of truth for the
+// centralised timeout policy.

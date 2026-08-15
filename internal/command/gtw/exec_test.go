@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRunCmd_DirBinding is the regression test for the original
@@ -315,5 +316,49 @@ func TestGitLabProvider_RunnerBindsWorktree(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil {
 		t.Fatalf("glab-equivalent sentinel not at %s: %v (Worktree → Dir binding broken)",
 			filepath.Join(real, sentinelName), err)
+	}
+}
+// TestRunCmd_RespectsCallerDeadline pins the runCmd safety net's
+// "caller always wins" contract: when the caller passes a ctx
+// with a deadline shorter than timeouts.CLI (5 min), runCmd must
+// NOT override it. The 100 ms deadline below is two thousand
+// times shorter than CLI; if runCmd applied its own wrap, the
+// call would block for the full 5 minutes.
+//
+// The original bug this guards against: someone flipping the
+// condition `if hasDeadline` → `if !hasDeadline` (or removing the
+// guard entirely) would silently cap every call at 5 min, which
+// is fine for fast commands but breaks legitimate longer-running
+// calls like /gtw commit's 30-min agent budget.
+func TestRunCmd_RespectsCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	// `sleep 5` would block for 5 seconds under timeouts.CLI's
+	// fallback wrap; with the caller's 100 ms deadline honored,
+	// it should return within ~200 ms with a context error.
+	sleepName := "sleep"
+	sleepArgs := []string{"5"}
+	if runtime.GOOS == "windows" {
+		// Use timeout.exe (Windows System32) directly — a single
+		// process, no children. We previously tried `cmd /c ping`
+		// here, but killing cmd.exe orphans ping.exe which inherits
+		// cmd.exe's stdout pipe handle; cmd.Run() then blocks
+		// waiting for pipe EOF (~5 s) instead of returning at the
+		// 100 ms deadline. timeout.exe has no such child-process
+		// issue, so TerminateProcess cleanly closes its pipe and
+		// cmd.Run() returns immediately.
+		sleepName = "timeout"
+		sleepArgs = []string{"/t", "5", "/nobreak"}
+	}
+	_, _, err := runCmd(ctx, "", sleepName, sleepArgs...)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Errorf("expected timeout error, got nil (runCmd did not honor ctx deadline)")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("runCmd ran for %v despite a 100ms ctx deadline; safety net overrode caller", elapsed)
 	}
 }

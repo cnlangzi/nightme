@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // dispatchCommit runs /gtw commit — single-purpose: take the
@@ -106,7 +107,7 @@ func dispatchCommit(
 	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
 	// usagebar must reach the channel even when GTW bypasses the
 	// runtime event pipeline).
-	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer cancel()
 	runRes, agentName, err := runAgentFor(ctx, cs, c.Worktree,
 		buildAgentPrompt(c), args.Agent, ymlAgent)

@@ -35,6 +35,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // MaxStdoutLines caps the number of stdout lines inlined into
@@ -43,14 +44,7 @@ import (
 // up the Feishu message size limit.
 const MaxStdoutLines = 50
 
-// shellTimeout caps how long a single shell command can run
-// (background goroutine lifetime). 5 minutes is generous for
-// normal use; longer commands should run inside a screen/tmux
-// the user sets up themselves.
-const shellTimeout = 5 * time.Minute
-
-// replyTimeout caps the final summary-card reply send.
-const replyTimeout = 5 * time.Second
+// replyTimeout has moved to internal/timeouts (timeouts.Reply).
 
 // Request is the input to Dispatch (and to Dispatcher.Handle
 // via InboundRequest).
@@ -220,7 +214,7 @@ func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
 		}
 	}()
 
-	shellCtx, cancel := context.WithTimeout(context.Background(), shellTimeout)
+	shellCtx, cancel := context.WithTimeout(context.Background(), timeouts.Shell)
 	defer cancel()
 
 	out := dispatch(shellCtx, ir.Request)
@@ -228,7 +222,7 @@ func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
 		return
 	}
 
-	replyCtx, cancel := context.WithTimeout(context.Background(), replyTimeout)
+	replyCtx, cancel := context.WithTimeout(context.Background(), timeouts.Reply)
 	defer cancel()
 	if err := d.emitter.Send(replyCtx, messages.OutboundMessage{
 		ChatID:  ir.ChatID,

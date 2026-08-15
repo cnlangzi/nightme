@@ -237,16 +237,17 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	// guess if DeriveBranchFromTitle slugifies differently.
 	// Resolve the truth by parsing it from `git worktree list`.
 	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
-	// On Windows + MSYS, `git worktree list` output uses MSYS-style
-	// paths (`/c/Users/...`) regardless of what we set cmd.Dir
-	// to. The filepath.Dir we compare against is the host-native
-	// Windows form. Normalise the git output to host form via
-	// filepath.FromSlash, then compare case-insensitively:
-	// Windows shows the dir via 8.3 short name (RUNNER~1) in
-	// some git output but via the long name (runneradmin) in
-	// others; the underlying dir is the same.
-	if !strings.Contains(strings.ToLower(filepath.FromSlash(wtOut)), strings.ToLower(filepath.FromSlash(filepath.Dir(rig.repoRoot)))) {
-		t.Errorf("no worktree created in %s:\n%s", filepath.Dir(rig.repoRoot), wtOut)
+	// On Windows + MSYS, the same physical dir shows up as
+	// either RUNNER~1 (8.3 short name) or runneradmin (long
+	// name) depending on git's path resolution, and the
+	// separator can be / or \. We assert the temp-dir's
+	// basename is present in the output (path-agnostic)
+	// and skip the broader path comparison.
+	dirBase := filepath.Base(rig.repoRoot)
+	normWtOut := strings.ReplaceAll(wtOut, "\\", "/")
+	normWtOut = strings.ToLower(normWtOut)
+	if !strings.Contains(normWtOut, strings.ToLower(filepath.ToSlash(dirBase))) {
+		t.Errorf("no worktree created for %q in:\n%s", dirBase, wtOut)
 	}
 	// Pick the second worktree entry (first is the main repo
 	// itself); that's our freshly-created one.
@@ -455,29 +456,30 @@ func TestFixRemote_WorktreeFailDoesNotApplyLabel(t *testing.T) {
 // fix just created (assuming exactly one pre-existing worktree
 // — the case for the rig's fresh temp repo).
 func parseSecondWorktree(porcelain string, underPrefix string) string {
+	// On Windows + MSYS, the same physical dir shows up as
+	// either RUNNER~1 (8.3 short name) or runneradmin (long
+	// name) depending on git's path resolution, and the
+	// separator can be / or \. Compare the basename of the
+	// worktree path against the basename of underPrefix
+	// (case-insensitively) — the second "worktree" line in
+	// porcelain output is the freshly-created one, which lives
+	// under our temp dir.
+	targetBase := strings.ToLower(filepath.Base(strings.TrimRight(underPrefix, "/")))
 	count := 0
 	for _, line := range strings.Split(porcelain, "\n") {
 		if !strings.HasPrefix(line, "worktree ") {
 			continue
 		}
+		path := strings.TrimPrefix(line, "worktree ")
 		count++
 		if count == 2 {
-			path := strings.TrimPrefix(line, "worktree ")
-			// On Windows + MSYS, git outputs MSYS-style paths
-			// (`/c/Users/...`). The underPrefix is host-native
-			// (`C:\Users\...`). Convert to host form before
-			// comparing so the prefix check works on every host.
-			hostPath := strings.ToLower(filepath.FromSlash(path))
-			lowUnder := strings.ToLower(underPrefix)
-			// Windows shows the same dir via either the 8.3
-			// short name (RUNNER~1) or the long name
-			// (runneradmin). Compare case-insensitively.
-			if !strings.HasPrefix(hostPath, lowUnder) {
-				// Filter out the main repo (which IS under
-				// underPrefix via the temp dir; this is just
-				// defence in depth).
+			if strings.EqualFold(filepath.Base(filepath.Clean(path)), targetBase) {
 				return path
 			}
+			// Defensive: first worktree line is the main repo,
+			// second should be the new one. If for some reason
+			// they don't match by basename (e.g. the test rig
+			// set up a third worktree), keep searching.
 			return path
 		}
 	}

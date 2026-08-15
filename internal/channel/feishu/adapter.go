@@ -808,7 +808,18 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, nil, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList from the bridge event pump could mutate
+	// r.footerLines (and r.tasks) under r.mu between here and
+	// buildReceiptCard. Same race the fix-reply-placehold-card
+	// overflow handler fixed via receipt.Tasks(); symmetric fix
+	// for the cold-start path.
+	transient.mu.Lock()
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(nil, nil, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -922,7 +933,20 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient.entries, transient.tasks, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList / AppendEntry from the bridge event pump could
+	// mutate r.entries / r.tasks / r.footerLines under r.mu
+	// between here and buildReceiptCard. Same race the
+	// fix-reply-placehold-card overflow handler fixed via
+	// receipt.Tasks(); symmetric fix for the cold-start path.
+	transient.mu.Lock()
+	entriesSnap := transient.entries
+	tasksSnap := transient.tasks
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1128,7 +1152,19 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, transient.tasks, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList from the bridge event pump could mutate
+	// r.tasks / r.footerLines under r.mu between here and
+	// buildReceiptCard. Same race the fix-reply-placehold-card
+	// overflow handler fixed via receipt.Tasks(); symmetric fix
+	// for the cold-start path.
+	transient.mu.Lock()
+	tasksSnap := transient.tasks
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1251,10 +1287,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				// for the new placeholder card using the same
 				// tasks snapshot the old card had (tasks are a
 				// global view across the turn — see
-				// MessageReceipt.RolloverTo).
+				// MessageReceipt.RolloverTo). receipt.Tasks() reads
+				// r.tasks under r.mu — a raw r.tasks field read here
+				// would race with a concurrent SetTaskList from the
+				// bridge event pump.
 				body, buildErr := buildReceiptCard(
 					[]LogEntry{{Icon: "💬", Text: text}},
-					receipt.tasks,
+					receipt.Tasks(),
 					footerLines,
 				)
 				if buildErr != nil {

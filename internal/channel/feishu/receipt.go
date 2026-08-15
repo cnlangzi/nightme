@@ -287,6 +287,30 @@ func (r *MessageReceipt) State() chatsession.PromptState {
 	return r.PromptState()
 }
 
+// Tasks returns a snapshot of the receipt's current task checklist.
+// Holds r.mu; safe to call from any goroutine. The returned slice
+// is the snapshot taken under the lock — SetTaskListWithFooter
+// always installs a freshly-allocated slice (or nil for an empty
+// checklist), so the snapshot is safe to iterate without further
+// synchronization (the underlying array is not mutated after the
+// lock is released; ranging over a nil slice is a no-op).
+//
+// Used by the adapter's OutReply overflow handler (fix-reply-placehold-card)
+// to build the body for the rollover placeholder card without
+// racing against a concurrent SetTaskList from the bridge event
+// pump.
+//
+// Nil-safe: returns nil when called on a nil receiver, matching
+// the guard pattern used by AppendEntryWithFooter / RolloverTo.
+func (r *MessageReceipt) Tasks() []agent.AgentTaskItem {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tasks
+}
+
 // SetPromptState (F-53 follow-up) transitions the receipt's
 // `promptState` to `state` and, when transitioning for the first
 // time to that state, adds the corresponding reaction on the

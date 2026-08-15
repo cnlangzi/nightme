@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -624,5 +625,93 @@ func TestSetPromptState_AfterRollover_ReactionGoesToLastCard(t *testing.T) {
 		if rxn.MessageID == "om_card_initial" {
 			t.Errorf("reaction[%d] targeted the ORIGINAL card %q after rollover", i, rxn.MessageID)
 		}
+	}
+}
+
+// TestTasks_ReturnsSnapshotUnderLock verifies the new Tasks()
+// getter that the adapter's overflow handler uses to build the
+// rollover placeholder body. Specifically:
+//
+//   - Tasks() returns the current r.tasks slice verbatim.
+//   - Tasks() on a fresh receipt returns nil (no list stamped yet).
+//   - Tasks() reads under r.mu, so a concurrent SetTaskList
+//     cannot produce a torn slice header. The race detector
+//     (go test -race) is the actual assertion here; the body of
+//     this test just exercises the contended path with enough
+//     iterations to make a data race observable if the lock were
+//     missing.
+func TestTasks_ReturnsSnapshotUnderLock(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+
+	// Empty case: fresh receipt, no SetTaskList call yet.
+	if got := r.Tasks(); got != nil {
+		t.Errorf("Tasks() on fresh receipt = %v, want nil", got)
+	}
+
+	// Seed: install a 2-item task list.
+	if err := r.SetTaskList(context.Background(), &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{
+			{ID: "t1", Subject: "task one", Status: agent.TaskPending},
+			{ID: "t2", Subject: "task two", Status: agent.TaskCompleted},
+		},
+	}); err != nil {
+		t.Fatalf("seed SetTaskList: %v", err)
+	}
+	got := r.Tasks()
+	if len(got) != 2 {
+		t.Fatalf("Tasks() len = %d, want 2", len(got))
+	}
+	if got[0].ID != "t1" || got[1].ID != "t2" {
+		t.Errorf("Tasks() = %v, want t1/t2", got)
+	}
+
+	// Race-detector exercise: hammer Tasks() / SetTaskList from two
+	// goroutines. Each SetTaskList installs a fresh slice via the
+	// copy in SetTaskListWithFooter; Tasks() must read the slice
+	// header under r.mu so it never observes a torn pointer.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = r.SetTaskList(context.Background(), &agent.AgentTaskListEvent{
+				Items: []agent.AgentTaskItem{
+					{ID: fmt.Sprintf("writer-%d", i), Subject: "x", Status: agent.TaskPending},
+				},
+			})
+			i++
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = r.Tasks()
+		}
+	}()
+	// Let the race detector observe both goroutines for a while.
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// TestTasks_NilReceiptReturnsNil mirrors AppendEntry's nil-receiver
+// guard: Tasks() on a nil *MessageReceipt must not panic.
+func TestTasks_NilReceiptReturnsNil(t *testing.T) {
+	var r *MessageReceipt
+	if got := r.Tasks(); got != nil {
+		t.Errorf("nil.Tasks() = %v, want nil", got)
 	}
 }

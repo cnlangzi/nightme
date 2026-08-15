@@ -134,6 +134,79 @@ func TestF61_SpawnClearsClosedByUser(t *testing.T) {
 	}
 }
 
+// TestF61_RestartFromDeathPreservesSessionID is the regression
+// guard for the dsh silent-death incident on 2026-08-15:
+//
+//   When the bridge dies unexpectedly, RestartFromDeath must
+//   pass the PREVIOUS sessionID to respawn so resume-capable
+//   bridges (dsh session.fork, claudecode --resume, codex
+//   thread resume) preserve conversation context across the
+//   death. A previous version of this code deliberately cleared
+//   sessionID here ("we want a fresh conversation") — that
+//   broke upper-layer UX: the user would lose all in-flight
+//   context and have to repeat the task after every bridge
+//   crash.
+//
+// What this test asserts:
+//   1. RestartFromDeath passes the existing sessionID to the
+//      spawner verbatim (no clearing).
+//   2. RestartFromDeath does NOT clear as.sessionID after a
+//      successful respawn — the runtime's EventHandler will
+//      overwrite it with the new bridge's EventAgentReady
+//      SessionID once the handshake completes.
+//   3. RestartFromDeath still skips respawn when closedByUser
+//      is set (unchanged behavior).
+func TestF61_RestartFromDeathPreservesSessionID(t *testing.T) {
+	const saved = "session-abc-123"
+
+	as := newAgentSessionRuntime("as_test", "cs_x", "dsh", "/tmp", nil)
+	as.SetSessionID(saved)
+
+	// Capture the sessionID the spawner actually sees.
+	var got string
+	launcher := testSpawner{spawn: func(_ context.Context, _, _ string, _ []string, sessionID string) (*agent.Agent, error) {
+		got = sessionID
+		return newFakeAgentSession(7777).buildLive(), nil
+	}}
+
+	if err := as.RestartFromDeath(context.Background(), launcher); err != nil {
+		t.Fatalf("RestartFromDeath returned err: %v", err)
+	}
+
+	if got != saved {
+		t.Errorf("spawner received sessionID = %q, want %q (resume must be preserved)", got, saved)
+	}
+	if as.SessionID() != saved {
+		t.Errorf("as.sessionID after respawn = %q, want %q (must not clear; EventAgentReady will overwrite)",
+			as.SessionID(), saved)
+	}
+	if got := as.Status(); got != StatusRunning {
+		t.Errorf("Status = %s, want StatusRunning after successful respawn", got)
+	}
+}
+
+// TestF61_RestartFromDeathPassesEmptyWhenNoSessionID is the
+// sanity counter-case: a fresh AS with no captured sessionID
+// must pass empty through to the spawner (no-op resume → fresh
+// conversation). Guards against accidental hardcoding.
+func TestF61_RestartFromDeathPassesEmptyWhenNoSessionID(t *testing.T) {
+	as := newAgentSessionRuntime("as_test", "cs_x", "dsh", "/tmp", nil)
+	// sessionID left as zero value "".
+
+	var got string
+	launcher := testSpawner{spawn: func(_ context.Context, _, _ string, _ []string, sessionID string) (*agent.Agent, error) {
+		got = sessionID
+		return newFakeAgentSession(7778).buildLive(), nil
+	}}
+
+	if err := as.RestartFromDeath(context.Background(), launcher); err != nil {
+		t.Fatalf("RestartFromDeath returned err: %v", err)
+	}
+	if got != "" {
+		t.Errorf("spawner received sessionID = %q, want \"\" (cold start should be empty)", got)
+	}
+}
+
 // testSpawner is a Spawner that delegates to a function.
 type testSpawner struct {
 	spawn func(ctx context.Context, agent, cwd string, args []string, sessionID string) (*agent.Agent, error)

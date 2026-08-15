@@ -265,7 +265,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		closed:        make(chan struct{}),
 		exitDone:      make(chan struct{}),
 	}
-	d.startPumps()
 
 	// Session handshake: resume via session.fork when cfg.SessionID
 	// is set, otherwise create a fresh session via session.create.
@@ -279,11 +278,23 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// forkCtx / createCtx from the parent ctx internally) so a
 	// slow fork can't starve the create fallback's budget. We pass
 	// the spawn ctx directly.
+	//
+	// F-62 (2026-08-15): handshakeSession runs BEFORE startPumps so
+	// the WS / stderr pumps read a fully-initialized d.sessionID
+	// (used in PanicEventHandler for crash reports). Previously the
+	// order was inverted — pumps started first and raced the
+	// handshake's write to d.sessionID, occasionally producing panic
+	// reports with an empty sessionID and tripping the race detector.
 	resumed, hsErr := d.handshakeSession(ctx, cfg)
 	if hsErr != nil {
 		_ = d.Close()
 		return nil, hsErr
 	}
+
+	// F-62 (2026-08-15): startPumps now runs AFTER handshakeSession
+	// returns — see newDriver init-order comment. d.sessionID is
+	// populated before any goroutine reads it.
+	d.startPumps()
 	// handshakeSession already logs the success line at INFO
 	// ("dsh: session forked" or "dsh: session created") with the
 	// full session_id / requested_id / new_id trio. We deliberately

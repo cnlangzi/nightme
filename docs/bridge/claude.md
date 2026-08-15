@@ -258,6 +258,139 @@ claude \
 }
 ```
 
+### 3.4 In-flight 取消：`/stop` 的真实协议
+
+**2026-08-15 fix-stop**：用户报"第二次 /stop 后发送消息卡死在 Working…"。审计发现 claudecode bridge 用 `SignalProcessGroup(SIGINT)` 走 PTY，这跟 codex 老的 SIGINT 路径同款——子进程死了，聊天层 `--resume` 重启，撞上"幽灵 turn"。本文档记录**反向工程**过程、实际 wire 格式、以及最终方案。
+
+#### 3.4.1 反向工程方法（不要信文档，要看 wire）
+
+**为什么文档不够**：Anthropic `anthropics/claude-code` 的 `CHANGELOG.md` 只写"external SIGINT ... not running graceful shutdown"，读起来像"外部 SIGINT 是文档化的中断机制"。但 stream-json pipe 模式下实际行为完全不同——CLI **退出进程**而不是 cancel turn。文档没说 wire 协议，没说有没有 stdin 消息可以"取消 turn 但保留进程"。
+
+**实验装置**（已落地到 `/tmp/claude-exp/test-interrupt.py`，可重跑）：
+
+```bash
+# 起一个真实 claude 子进程
+ANTHROPIC_BASE_URL=... ANTHROPIC_DEFAULT_SONNET_MODEL=... \
+  claude --print --output-format stream-json --input-format stream-json \
+         --verbose --dangerously-skip-permissions \
+         "Write a 200-line essay to /tmp/essay.txt. Take your time."
+```
+
+启动后：
+1. 子进程发 init event 到 stdout——**关键发现**：`capabilities: ["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"]`。`interrupt_receipt_v1` 这个 capability name 直接告诉我们"有一个 v1 版的结构化中断协议"，但 CHANGELOG 没提。
+2. 通过 stdin 喂各种候选消息（详见 §3.4.3 的对照矩阵）。
+3. 观察 stdout 的 `control_response` / `result` 事件判定哪种 payload 真正生效。
+
+**判定信号**：
+- CLI 发 `control_response{response.subtype: "success"}` → stdin payload 被接受
+- CLI 发 `result{is_error: true, subtype: "error_during_execution"}` → turn 被取消
+- `proc.poll() == nil` 12 秒后 → CLI **保持存活**（不是 SIGINT 那种退出）
+- 后续再喂 `user` 消息 → CLI 在同一个 `session_id` 上继续 → turn-end → next turn 干净落地
+
+#### 3.4.2 实际 wire 格式（反向工程结论）
+
+**生效路径**（in-flight turn interrupt）：
+
+```jsonc
+// stdin
+{"type":"control_request","request":{"subtype":"interrupt"}}
+
+// stdout（紧跟其后）
+{"type":"control_response","response":{
+   "subtype": "success",
+   "response": {"still_queued": []}
+}}
+
+// stdout（turn 终止事件）
+{"is_error": true,
+ "stop_reason": "tool_use",
+ "subtype": "error_during_execution",
+ "num_turns": 3, ...}
+```
+
+**关键语义**：
+
+| 维度 | 行为 |
+|---|---|
+| CLI 进程 | **保持存活**，可接收下一条 user 消息 |
+| session_id | **不变**——不需要 `--resume` |
+| pendingTurnActive | turn 结束事件 `result{error_during_execution}` 触发现有的 translator 路径（`ev.IsError` 分支），发 `EventAgentResult` + `EventAgentDone{Reason:"settled"}`，`IsReady` 翻 true |
+| 没有 in-flight turn 时 | `control_request{interrupt}` 是 clean no-op：发 `control_response{success, still_queued:[]}`，无 `result` 事件，CLI 不受影响 |
+| 下一次 user prompt | 走同一个 `session_id`；`--resume` 不需要，幽灵 turn 不可能出现 |
+
+#### 3.4.3 对照矩阵（哪些消息被接受）
+
+| stdin payload | CLI 响应 | 备注 |
+|---|---|---|
+| `{"type":"control_request","request":{"subtype":"interrupt"}}` | `control_response{success}` + `result{error_during_execution}` + CLI 存活 | ✅ **正解** |
+| `{"type":"interrupt"}` | 无响应，CLI 继续 turn | ❌ 被忽略 |
+| `{"type":"control_request","request":{"subtype":"cancel_queued"}}` | 无响应，CLI 继续 turn | ❌ cancel_queued 是给"已排队但未开始"的消息用的，不是 in-flight turn |
+| SIGINT (kill -INT) | 进程**退出**（exit code 0），chat 层走 `--resume` 路径 | ❌ pre-fix 实现；撞 codex 同款幽灵 turn |
+
+#### 3.4.4 修复方案（落地的 `Stop()`）
+
+**核心改动**（`internal/bridge/claudecode/claudecode.go::Stop`，line 498 起）：
+
+```go
+func (d *driver) Stop(ctx context.Context) error {
+    if d.cmd == nil || d.cmd.Process == nil {
+        return agent.ErrNotSupported
+    }
+    payload := []byte(`{"type":"control_request","request":{"subtype":"interrupt"}}`)
+    if err := d.writeLine(payload); err == nil {
+        return nil  // happy path: CLI stays alive, turn cancels in-band
+    }
+    // Fallback: stdin pipe broken (CLI exited). SIGINT triggers
+    // the legacy graceful-shutdown path — only fires when the
+    // happy path already failed, never on the happy path.
+    return agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
+}
+```
+
+**translator 不用改**——`internal/bridge/claudecode/stream.go::case "result"` 的 `ev.IsError` 分支已经覆盖 `subtype: "error_during_execution"`，发 `EventAgentResult` + `EventAgentDone`，`onTurnEnd` 释放 `pendingTurnActive`，`TryFlush` 取同 session 的下一条 prompt。整条链路天然走通。
+
+**`stop.go` per-bridge 表格**：
+
+```
+claudecode — control_request{interrupt} stdin; CLI stays alive; turn ends cleanly; SessionID kept
+```
+
+#### 3.4.5 为什么 SIGINT 兜底仍然保留
+
+`stdin pipe broken` 的边界情况：
+
+1. CLI 已经在外面挂了（用户 Ctrl-C 终端、OOM kill、watchdog 终止）
+2. CLI 版本老到不支持 control_request（虽然目前反向工程覆盖 2.1.220，但理论上更早版本可能没有）
+3. pipe writer goroutine 异常
+
+这三种情况下，`writeLine` 会返 `EPIPE` / `ErrClosed` 等错误，bridge 退到 SIGINT 走 legacy 路径。这跟 chat 层 `ErrResumeUnhealthy` 的双重防御结构是同源的——**重要路径永远不假设下层协议是最新的**。
+
+#### 3.4.6 跟其他 bridge 的对比
+
+| Bridge | stop 协议 | CLI 存活？ |
+|---|---|---|
+| **pi** | `abort` JSON-RPC | ✅ |
+| **opencode** | `POST /api/session/{id}/interrupt` HTTP | ✅ |
+| **codex** | `turn/interrupt` JSON-RPC | ✅ |
+| **acp** | `session/cancel` JSON-RPC | ✅ |
+| **claudecode**（fix-stop） | `control_request{interrupt}` stdin | ✅ |
+| **pty** | `ErrNotSupported`（一次性 bridge，无 in-flight turn 概念） | — |
+
+五个 bridge 现在统一在"结构化 in-band 取消 + 进程保持存活"这条契约上，跟 Anthropic / OpenAI / Zed 各自的官方协议语义对齐。SIGINT / SIGKILL 只在兜底路径用——保护老版本 CLI 和 edge cases。
+
+#### 3.4.7 回归测试（`internal/bridge/claudecode/agent_interrupt_test.go`）
+
+4 个测试，反向锁住"happy path 走 stdin 不走 SIGINT"这条契约：
+
+| Test | 断言 |
+|---|---|
+| `TestStop_NoCmdReturnsErrNotSupported` | cmd 为空返 `ErrNotSupported`，不 panic |
+| `TestStop_WritesControlRequestInterruptOnStdin` | 挂真 `sleep 30` + os.Pipe，调 Stop，**从 pipe 读回字节**，断言 == `{"type":"control_request","request":{"subtype":"interrupt"}}`（关键回归） |
+| `TestStop_DoesNotSendSIGINT` | 同上装置，Stop 后 sleep **仍然存活 ≥1s**——SIGINT 会在 50ms 内干掉 sleep。**反向锁**：以后退回 SIGINT，测试立即挂掉 |
+| `TestStop_FallsBackToSIGINTWhenStdinBroken` | 关闭 write 端造 EPIPE，Stop 应触发 SIGINT 兜底，sleep 在 5s 内退 |
+
+`go test ./internal/bridge/claudecode/ -run 'TestStop_'` 全部 PASS。
+
 ## 4. 自动接受权限
 
 ### 4.1 模式选择

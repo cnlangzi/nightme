@@ -26,9 +26,9 @@
 //
 //	pi        — `abort` JSON-RPC; agent_settled event; SessionID kept
 //	opencode  — /interrupt HTTP; session.idle; SessionID kept
-//	codex     — SIGINT app-server; turn/failed settled; SessionID kept
-//	acp       — SIGINT over PTY; native Ctrl-C; SessionID kept
-//	claudecode — SIGINT over pipe; best-effort (may exit child)
+//	codex     — turn/interrupt JSON-RPC; turn/completed{interrupted}; SessionID kept
+//	acp       — session/cancel JSON-RPC; agent settles in-band; SessionID kept
+//	claudecode — control_request{interrupt} stdin; CLI stays alive; turn ends cleanly; SessionID kept
 //	pty       — ErrNotSupported (handler surfaces "use /close")
 //
 // Daemon shutdown (cmd/nightme/run.go) does NOT call this — agents

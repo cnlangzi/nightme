@@ -170,7 +170,25 @@ func (t *translator) notify(method string, params json.RawMessage) {
 	case "item/completed":
 		t.handleItemCompleted(params)
 	case "turn/completed":
-		t.completeTurn(params, "completed")
+		// Read the actual Status from the payload. The protocol
+		// carries "completed" for normal end-of-turn and
+		// "interrupted" for turn/interrupt-driven stop. The
+		// pre-fix bridge hardcoded "completed" here, which
+		// meant a /stop path and a natural completion looked
+		// identical on the channel; that hid the failure mode
+		// where SIGINT killed the app-server instead of cleanly
+		// cancelling the turn (see fix-stop).
+		//
+		// Empty status (older codex builds) is treated as
+		// "completed" for backward compatibility.
+		var p struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(params, &p)
+		if p.Status == "" {
+			p.Status = "completed"
+		}
+		t.completeTurn(params, p.Status)
 	case "turn/failed":
 		t.completeTurn(params, "failed")
 	case "thread/status/changed":
@@ -468,7 +486,8 @@ func (t *translator) completeTurn(params json.RawMessage, status string) {
 			Usage: usage,
 		},
 	}
-	if status == "failed" {
+	switch status {
+	case "failed":
 		// Surface the failure on the same Result event so channels
 		// render the error icon. Parse `error` as a JSON object
 		// with a "message" field; fall back to the raw text when
@@ -480,14 +499,31 @@ func (t *translator) completeTurn(params json.RawMessage, status string) {
 			errMsg = "codex: turn failed"
 		}
 		result.Err = errors.New(errMsg)
+	case "interrupted":
+		// turn/interrupt-driven stop (the fix-stop path).
+		// Surface a soft Err on the Result so channels render
+		// the stopped indicator instead of treating the turn
+		// as a normal completion. The text body is preserved
+		// so any partial reply the user had started is still
+		// shown.
+		result.Err = errors.New("codex: turn interrupted")
 	}
 	t.deliver(result)
 
+	// Reason disambiguates a clean completion from an interrupt-
+	// driven stop so downstream consumers (chat layer / channel
+	// footer renderers) can react differently. "settled" is the
+	// legacy value emitted for both paths; downstream code that
+	// needs the distinction should consult Result.Err.
+	doneReason := "settled"
+	if status == "interrupted" {
+		doneReason = "interrupted"
+	}
 	t.deliver(agent.AgentEvent{
 		Kind: agent.EventAgentDone,
 		Done: &agent.AgentDoneEvent{
 			ExitCode: 0,
-			Reason:   "settled",
+			Reason:   doneReason,
 			Usage:    usage,
 		},
 	})

@@ -163,10 +163,11 @@ func TestBuildPostMdJSON_Shape(t *testing.T) {
 //     (named colors only — no hex).
 func TestBuildReceiptCard_FooterUsesMarkdownFontGrey(t *testing.T) {
 	footer := []string{"🤖 claude · opus-4-5", "💰 ↓ 1.0k · ↻ 0 · ↑ 0 · 1.0k · $0.001"}
-	body, err := buildReceiptCard(
+	body, _, err := buildReceiptCard(
 		[]LogEntry{{Icon: "💬", Text: "hello"}},
 		nil,
 		footer,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)

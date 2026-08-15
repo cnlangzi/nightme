@@ -2233,7 +2233,7 @@ func TestSend_OutResult_CoLocatesUsage(t *testing.T) {
 
 // TestEnsureReceiptForTyping_CreatesPlaceholder verifies that
 // ensureReceiptForTyping creates a Typing-placeholder card in main
-// chat (top-level Create, rootID="") with the "⌨️ Working..."
+// chat (top-level Create, rootID="") with the "🤖 Working"
 // header line that buildReceiptCard prepends when both entries and
 // tasks are empty.
 //
@@ -2295,7 +2295,7 @@ func TestEnsureReceiptForTyping_CreatesPlaceholder(t *testing.T) {
 		t.Errorf("reply_in_thread = true, want false (ReplyInBoth: reply_in_thread field omitted)")
 	}
 	// Body must contain the Typing header line.
-	if !strings.Contains(got.Body, "⌨️ Working...") {
+	if !strings.Contains(got.Body, "🤖 Working") {
 		t.Errorf("body missing Typing header line, got %q", got.Body)
 	}
 	// Receipt registered in receiptsByUserMsgID with the placeholder
@@ -2352,7 +2352,7 @@ func TestEnsureReceiptForTyping_NoOpWhenReceiptExists(t *testing.T) {
 // placeholder card must include the footer in the rendered body.
 // This is the cold-start commit that fixes the "placeholder card
 // has no footer" UX gap — the user sees "📁 code/nightme · ⎇ main"
-// immediately on the "⌨️ Working..." emit, before any reply chunk
+// immediately on the "🤖 Working" emit, before any reply chunk
 // arrives.
 func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
 	a := testAdapter(t)
@@ -2374,7 +2374,7 @@ func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
 	// Body must contain the Typing header AND the footer lines.
 	// Catches regressions where the placeholder forgets to include
 	// the footer (the bug the user noticed in the F-48 prod deploy).
-	if !strings.Contains(body, "⌨️ Working...") {
+	if !strings.Contains(body, "🤖 Working") {
 		t.Errorf("placeholder body missing Typing header, got %q", body)
 	}
 	for _, line := range footerLines {
@@ -2425,7 +2425,7 @@ func TestEnsureReceiptForTyping_OmitsFooterWhenEmpty(t *testing.T) {
 		t.Fatalf("ensureReceiptForTyping: %v", err)
 	}
 
-	if !strings.Contains(body, "⌨️ Working...") {
+	if !strings.Contains(body, "🤖 Working") {
 		t.Errorf("placeholder body missing Typing header, got %q", body)
 	}
 	if strings.Contains(body, `"hr"`) {
@@ -2692,7 +2692,7 @@ func TestSend_OutTask_NilStatusBar_NoFooter(t *testing.T) {
 // TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder locks the
 // empty-items edge case for orphan OutTask*. Per review finding
 // (cross-file tracer #1, line-by-line #1): buildReceiptCard's
-// Section 0 placeholder ("⌨️ Working...") fires when BOTH entries
+// Section 0 placeholder ("🤖 Working") fires when BOTH entries
 // and tasks are empty. The orphan path always has nil entries,
 // so an empty Items slice renders the placeholder + (footer if
 // StatusBar is non-nil). Pre-F-47 this case went through
@@ -2737,8 +2737,8 @@ func TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder(t *testing.T) {
 	// both entries and tasks are empty. This is the documented
 	// F-47 behavior (no separate "empty list" indicator; the
 	// placeholder doubles as one).
-	if !strings.Contains(gotBody, "⌨️ Working") {
-		t.Errorf("empty-items orphan card should emit ⌨️ Working... placeholder (buildReceiptCard Section 0)\nbody: %s", gotBody)
+	if !strings.Contains(gotBody, "🤖 Working") {
+		t.Errorf("empty-items orphan card should emit \"🤖 Working\" placeholder (buildReceiptCard Section 0)\nbody: %s", gotBody)
 	}
 	// Footer still renders (ctx is non-nil).
 	if !strings.Contains(gotBody, `<font color='grey'>`) {

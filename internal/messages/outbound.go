@@ -1,6 +1,8 @@
 package messages
 
 import (
+	"time"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
@@ -104,6 +106,31 @@ const (
 	// the 2026-08-15 dsh textBuf fix; this kind is the
 	// downstream half that finally surfaces it to the chat user.
 	OutError
+
+	// OutHeartbeat (F-63) carries a per-turn progress update
+	// (ThinkCount / ToolCount / LastBeatAt) for the channel to
+	// render at the top of the rolling-log receipt card. Emitted
+	// by the runtime handler immediately after the
+	// HeartbeatTracker observes a countable OutboundKind
+	// (OutThinking / OutToolStart). The runtime emits it via the
+	// same outbound.Emitter.Send pipeline as every other kind, so
+	// it inherits telemetry / git-status / rate-limit behaviour
+	// without a separate code path.
+	//
+	// Crucially, OutHeartbeat is sent AFTER the tracker observe
+	// but BEFORE the policy chain in the handler — so even when
+	// /think off (ThinkModeGatePolicy) or /tools off
+	// (ToolsModeGatePolicy) drops the original OutThinking /
+	// OutToolStart, the heartbeat update still flows to the
+	// channel and the receipt header counter reflects the agent's
+	// real activity. See docs/feat/F-63-heartbeat.md §3.2 for
+	// the core invariant.
+	//
+	// OutHeartbeat itself does NOT enter the runtime's observe
+	// path (the handler only observes OutboundKinds produced by
+	// gateway.Translate on raw AgentEvents) — so the kind is
+	// idempotent against its own emissions and never recurses.
+	OutHeartbeat
 )
 
 // String renders OutboundKind for log lines.
@@ -137,6 +164,8 @@ func (k OutboundKind) String() string {
 		return "card_patch"
 	case OutError:
 		return "error"
+	case OutHeartbeat:
+		return "heartbeat"
 	}
 	return "unknown"
 }
@@ -244,6 +273,23 @@ type OutboundMessage struct {
 	// NOT mutate them.
 	Diagnostic *agent.BridgeDiagnostic
 
+	// Heartbeat (F-63) is the per-turn progress signal attached to
+	// OutHeartbeat. Channel renderers use it to draw a heartbeat
+	// header (e.g. "🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS") at the
+	// top of the rolling-log receipt card so the user sees the
+	// agent is still making progress during long turns.
+	//
+	// ThinkCount and ToolCount are monotonic counters accumulated
+	// by the runtime's HeartbeatTracker (one entry per
+	// userMsgID, LRU-evicted at cap). LastBeatAt is the wall-clock
+	// time of the most recent activity (any OutboundKind, not just
+	// thinking/tool) — the "agent is alive" signal.
+	//
+	// Nil on all other Kinds. Channels that don't render a
+	// heartbeat header (echo / capture / debug) silently ignore
+	// this field via the default OutboundKind switch case.
+	Heartbeat *HeartbeatSnapshot
+
 	// GitStatus (F-CLAUDE-PRINT-002) is the workspace + git + PR
 	// context attached to every outbound message that flows to a
 	// Channel. Sourced from chatsession (chatsession caches its
@@ -262,4 +308,27 @@ type OutboundMessage struct {
 	// Channels omit the workspace footer line entirely in that
 	// case.
 	GitStatus *GitStatus
+}
+
+// HeartbeatSnapshot (F-63) is the per-turn progress signal carried
+// on OutHeartbeat messages. ThinkCount and ToolCount are monotonic
+// per-turn counters; LastBeatAt is the wall-clock time of the most
+// recent activity (refreshed by any OutboundKind, not just
+// thinking / tool calls — it's the "agent is alive" indicator).
+//
+// Field semantics are stable; channels and tests are free to
+// consume them directly without coordinating with the runtime.
+type HeartbeatSnapshot struct {
+	ThinkCount int       `json:"think_count"`
+	ToolCount  int       `json:"tool_count"`
+	LastBeatAt time.Time `json:"last_beat_at"`
+}
+
+// Empty reports whether the snapshot carries no observable state.
+// Used by channel adapters to drop zero-valued follow-up
+// messages (e.g. after a /think off turn where the original
+// OutThinking was dropped but tracker still fires one OutHeartbeat
+// with ThinkCount unchanged).
+func (s HeartbeatSnapshot) Empty() bool {
+	return s.ThinkCount == 0 && s.ToolCount == 0 && s.LastBeatAt.IsZero()
 }

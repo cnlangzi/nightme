@@ -181,6 +181,21 @@ type Adapter struct {
 	// rules as receipts (delete together when SetCompleted).
 	receiptsByUserMsgID map[string]*MessageReceipt
 
+	// pendingHeartbeats (F-63.1) buffers the latest heartbeat
+	// snapshot for userMsgIDs whose receipt hasn't been created
+	// yet. The OutHeartbeat branch in Adapter.Send looks up
+	// the receipt first; if missing, it stashes the snapshot
+	// here. When ensureReceipt* later creates the receipt, it
+	// pulls any pending snapshot and folds it in via
+	// ApplyHeartbeat — so the first heartbeat-driven PATCH
+	// already carries the right counters, and the receipt
+	// never "jumps" from no header to the LATEST count.
+	//
+	// Bounded by a small map; entries are deleted once the
+	// receipt is installed and consumed. Map is protected by
+	// a.mu (same lock as receiptsByUserMsgID).
+	pendingHeartbeats map[string]messages.HeartbeatSnapshot
+
 	// messageStates tracks the last successfully-rendered
 	// MessageState per user message id, so same-state emits
 	// (retries) skip a duplicate AddReaction. v1.3
@@ -261,7 +276,8 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
-		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		receiptsByUserMsgID:     make(map[string]*MessageReceipt),
+		pendingHeartbeats:      make(map[string]messages.HeartbeatSnapshot),
 		messageStates:       messageStates,
 		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
@@ -819,7 +835,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	footerLinesSnap := transient.footerLines
 	transient.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, nil, footerLinesSnap)
+	body, _, err := buildReceiptCard(nil, nil, footerLinesSnap, nil)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -859,6 +875,12 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	a.mu.Unlock()
+	// F-63.1: drain any heartbeat snapshot that was stashed
+	// BEFORE this receipt existed (first countable event
+	// landing before MessageQueued). ApplyHeartbeat folds the
+	// counters into the receipt so the first heartbeat-driven
+	// PATCH already shows the right totals.
+	a.applyPendingHeartbeat(ctx, transient)
 	return transient, true, nil
 }
 
@@ -946,7 +968,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	footerLinesSnap := transient.footerLines
 	transient.mu.Unlock()
 
-	body, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap)
+	body, _, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -997,6 +1019,12 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	a.mu.Unlock()
+	// F-63.1: drain any heartbeat snapshot that was stashed
+	// BEFORE this receipt existed (first countable event
+	// landing before MessageQueued). ApplyHeartbeat folds the
+	// counters into the receipt so the first heartbeat-driven
+	// PATCH already shows the right totals.
+	a.applyPendingHeartbeat(ctx, transient)
 	return transient, true, nil
 }
 
@@ -1023,7 +1051,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 // the same helper (or a receipt if a userMsgID shows up later).
 func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, footerLines []string) error {
 	entries := []LogEntry{{Icon: "💬", Text: text}}
-	body, err := buildReceiptCard(entries, nil, footerLines)
+	body, _, err := buildReceiptCard(entries, nil, footerLines, nil)
 	if err != nil {
 		return fmt.Errorf("feishu: build orphan reply card: %w", err)
 	}
@@ -1080,7 +1108,7 @@ func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *a
 	if list == nil {
 		return errors.New("feishu: postOrphanTaskCard requires non-nil AgentTaskListEvent")
 	}
-	body, err := buildReceiptCard(nil, list.Items, footerLines)
+	body, _, err := buildReceiptCard(nil, list.Items, footerLines, nil)
 	if err != nil {
 		return fmt.Errorf("feishu: build orphan task card: %w", err)
 	}
@@ -1164,7 +1192,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	footerLinesSnap := transient.footerLines
 	transient.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap)
+	body, _, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap, nil)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1202,6 +1230,12 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	transient.cardMsgID = msgID
 	transient.initializing = false
 	a.mu.Unlock()
+	// F-63.1: drain any heartbeat snapshot that was stashed
+	// BEFORE this receipt existed (first countable event
+	// landing before MessageQueued). ApplyHeartbeat folds the
+	// counters into the receipt so the first heartbeat-driven
+	// PATCH already shows the right totals.
+	a.applyPendingHeartbeat(ctx, transient)
 	return transient, true, nil
 }
 
@@ -1291,10 +1325,11 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				// r.tasks under r.mu — a raw r.tasks field read here
 				// would race with a concurrent SetTaskList from the
 				// bridge event pump.
-				body, buildErr := buildReceiptCard(
+				body, _, buildErr := buildReceiptCard(
 					[]LogEntry{{Icon: "💬", Text: text}},
 					receipt.Tasks(),
 					footerLines,
+					nil,
 				)
 				if buildErr != nil {
 					return fmt.Errorf("feishu: build overflow placeholder card: %w", buildErr)
@@ -1818,6 +1853,61 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		// created=true — tasks already installed by ensure;
 		// first card already shipped.
+		return nil
+
+	case messages.OutHeartbeat:
+		// F-63: per-turn heartbeat follow-up emitted by the runtime
+		// handler BEFORE the policy chain. Routes to the receipt
+		// bound to msg.ReplyTo (userMsgID) and updates its header
+		// in place via PATCH. Receipt.ApplyHeartbeat enforces a 2s
+		// minimum interval to keep Feishu's PATCH rate limiter
+		// happy under dense thinking streams.
+		//
+		// F-63.1: when the receipt doesn't exist yet (e.g. the
+		// first countable event lands BEFORE MessageQueued has
+		// created the cold-start receipt), we stash the snapshot
+		// in a.pendingHeartbeats. ensureReceiptForTyping /
+		// ensureReceiptForReply / ensureReceiptForTask pull any
+		// pending snapshot and apply it on creation, so the
+		// first heartbeat-driven PATCH already carries the right
+		// counters and the receipt never "jumps" from no-header
+		// to the LATEST count.
+		//
+		// No-ops:
+		//   - msg.Heartbeat == nil — defensive (handler always
+		//     sets it, but adapter never asserts on the field).
+		//   - msg.Heartbeat.Empty() — snapshot zero-valued (e.g.
+		//     tracker entry was LRU-evicted between Observe and
+		//     the adapter seeing this OutHeartbeat).
+		if msg.Heartbeat == nil || msg.Heartbeat.Empty() {
+			return nil
+		}
+		snap := *msg.Heartbeat
+		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
+		if receipt == nil {
+			// Stash for the ensure* helper to pick up. Use
+			// a.mu (same lock as receiptsByUserMsgID) so the
+			// read-then-create sequence in ensure* is atomic.
+			a.mu.Lock()
+			// Latest-write-wins on the snapshot — we only
+			// care about the maximum counters, since the
+			// tracker is monotonic anyway.
+			if prev, ok := a.pendingHeartbeats[msg.ReplyTo]; ok {
+				if snap.ThinkCount < prev.ThinkCount {
+					snap.ThinkCount = prev.ThinkCount
+				}
+				if snap.ToolCount < prev.ToolCount {
+					snap.ToolCount = prev.ToolCount
+				}
+				if prev.LastBeatAt.After(snap.LastBeatAt) {
+					snap.LastBeatAt = prev.LastBeatAt
+				}
+			}
+			a.pendingHeartbeats[msg.ReplyTo] = snap
+			a.mu.Unlock()
+			return nil
+		}
+		receipt.ApplyHeartbeat(ctx, snap)
 		return nil
 	}
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
@@ -2403,23 +2493,58 @@ func encodeCardJSON(v any) ([]byte, error) {
 // warning) — AppendEntry needs to build a hypothetical card body
 // to check the overflow budget, but doing so via a struct copy
 // would silently bypass the lock semantics.
-func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLines []string) (string, error) {
+//
+// hb (F-63) is the per-turn heartbeat snapshot. nil means "no
+// heartbeat observed yet" (first render of a fresh receipt); a
+// populated snapshot drives the "🤖 Working · 💭 N · � M · ⏱
+// HH:MM:SS" header rendered as Section 0.
+//
+// Returns (body, elementCount, err). elementCount is the exact
+// number of elements buildReceiptCard appends to the body —
+// callers use it for the pre-render overflow check. Returning
+// it from here (rather than recomputing in receiptBodyStats)
+// guarantees the two stay in lock-step: any future section
+// added to this function automatically participates in the
+// overflow guard without a parallel update.
+func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLines []string, hb *messages.HeartbeatSnapshot) (string, int, error) {
 
-	elements := make([]map[string]any, 0, len(entries)+5)
+	elements := make([]map[string]any, 0, len(entries)+6)
+	elementCount := 0
 
-	// Section 0 (placeholder header): when the receipt has no
-	// entries and no tasks yet, prepend a Typing indicator so the
-	// user sees "⌨️ Working..." immediately after MessageForwarded
-	// fires. The header is removed as soon as the first entry or
-	// task arrives (the next renderLocked call sees a non-empty
-	// list and omits the header). This gives the user immediate
-	// feedback that the bot received the message and is working,
-	// before any stream chunk or task event lands.
-	if len(entries) == 0 && len(tasks) == 0 {
+	// Section 0 (placeholder header): F-63 — heartbeat-driven
+	// header. Three states:
+	//   1. hb != nil and !hb.Empty() — render the dynamic
+	//      "🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS" line. This is
+	//      the post-F-63 hot path: the receipt always shows
+	//      progress as long as the agent has produced any
+	//      activity in the turn.
+	//   2. hb == nil OR hb.Empty() AND no entries/tasks — render
+	//      the bare "� Working" placeholder (no dots, no
+	//      counters, no time) so the receipt card still has
+	//      something visible at MessageForwarded time (before any
+	//      event has landed on the tracker). Uses the SAME
+	//      robot emoji as the populated state so the visual
+	//      transition at first activity is a content add, not
+	//      a style swap — the user previously complained about
+	//      the ⌨️→🤖 swap reading as two different affordances.
+	//      The moment any OutThinking / OutToolStart fires, the
+	//      tracker populates hb and state 1 takes over.
+	//   3. hb == nil OR hb.Empty() AND entries/tasks non-empty —
+	//      no header at all (rolling-log starts at the top; the
+	//      entries themselves communicate "the agent is back").
+	switch {
+	case hb != nil && !hb.Empty():
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
-			"content": "⌨️ Working...",
+			"content": renderHeartbeatHeader(hb),
 		})
+		elementCount++
+	case len(entries) == 0 && len(tasks) == 0:
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": "🤖 Working",
+		})
+		elementCount++
 	}
 
 	// Section 1: rolling-log entries. Each entry's text is
@@ -2443,6 +2568,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 				"tag":     "markdown",
 				"content": chunk,
 			})
+			elementCount++
 		}
 	}
 
@@ -2452,6 +2578,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 			"tag":     "markdown",
 			"content": chunk,
 		})
+		elementCount++
 	}
 
 	// Section 3 (F-45): StatusBar footer at the bottom of
@@ -2476,6 +2603,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// USD); no sanitisation needed.
 	if footer := cardFooterElements(footerLines); footer != nil {
 		elements = append(elements, footer...)
+		elementCount += len(footer)
 	}
 
 	card := map[string]any{
@@ -2485,9 +2613,36 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	}
 	b, err := encodeCardJSON(card)
 	if err != nil {
-		return "", fmt.Errorf("feishu: encode receipt card: %w", err)
+		return "", 0, fmt.Errorf("feishu: encode receipt card: %w", err)
 	}
-	return string(b), nil
+	return string(b), elementCount, nil
+}
+
+// renderHeartbeatHeader (F-63) formats the per-turn heartbeat
+// snapshot into the receipt card's Section 0 markdown element.
+// Emitted format:
+//
+//	🤖 Working · 💭 3 · 🔧 12 · ⏱ 14:35:22
+//
+// Counter chips are omitted when zero (think=0 produces no 💭
+// chip; the line stays useful for "agent is alive but doing
+// plain replies" turns). LastBeatAt is omitted when zero
+// (pre-event receipt).
+func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
+	if hb == nil {
+		return ""
+	}
+	parts := []string{"🤖 Working"}
+	if hb.ThinkCount > 0 {
+		parts = append(parts, fmt.Sprintf("💭 %d", hb.ThinkCount))
+	}
+	if hb.ToolCount > 0 {
+		parts = append(parts, fmt.Sprintf("🔧 %d", hb.ToolCount))
+	}
+	if !hb.LastBeatAt.IsZero() {
+		parts = append(parts, "⏱ "+hb.LastBeatAt.Format("15:04:05"))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // buildColdStartCard was the minimal "⏳ 等待中" receipt posted by
@@ -3190,6 +3345,52 @@ func (a *Adapter) SendCard(ctx context.Context, msg messages.OutboundMessage) (s
 // plumbed through so future callers (e.g. permission card as thread-only)
 // can opt in without a second signature change.
 //
+// drainPendingHeartbeat (F-63.1) returns any pending heartbeat
+// snapshot for userMsgID and removes it from the map. Called by
+// the ensureReceipt* helpers immediately after they install a
+// new receipt, so the first heartbeat-driven PATCH already
+// carries the right counters (instead of the receipt seeing
+// the LATEST count when the next OutHeartbeat fires).
+//
+// Returns (zero HeartbeatSnapshot, false) when there's no
+// pending snapshot — caller treats that as "no work".
+//
+// Takes a.mu internally; callers do NOT need to hold it. The
+// OutHeartbeat branch in Adapter.Send also takes a.mu before
+// reading/writing a.pendingHeartbeats — the two paths are
+// serialised by the same mutex.
+func (a *Adapter) drainPendingHeartbeat(userMsgID string) (messages.HeartbeatSnapshot, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	snap, ok := a.pendingHeartbeats[userMsgID]
+	if !ok {
+		return messages.HeartbeatSnapshot{}, false
+	}
+	delete(a.pendingHeartbeats, userMsgID)
+	return snap, true
+}
+
+// applyPendingHeartbeat (F-63.1) is the ensureReceipt helper's
+// companion to drainPendingHeartbeat: drains any pending
+// snapshot for the receipt's userMsgID and applies it via
+// ApplyHeartbeat. The receipt has already been installed in
+// a.receiptsByUserMsgID; ApplyHeartbeat updates the per-
+// instance r.heartbeat under the receipt's own mutex (separate
+// from a.mu).
+//
+// Idempotent: if no pending snapshot exists, returns without
+// touching the receipt.
+func (a *Adapter) applyPendingHeartbeat(ctx context.Context, r *MessageReceipt) {
+	if r == nil {
+		return
+	}
+	snap, ok := a.drainPendingHeartbeat(r.userMsgID)
+	if !ok || snap.Empty() {
+		return
+	}
+	r.ApplyHeartbeat(ctx, snap)
+}
+
 // Per PR #47, the receipt cold-start card routes through ReplyInBoth
 // (reply endpoint with reply_in_thread omitted) when rootID is non-empty
 // — the card body shows inline in main chat with a reply quote header

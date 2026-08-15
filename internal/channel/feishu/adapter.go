@@ -1598,6 +1598,56 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// the wire; only the channel-side render is skipped.
 		return nil
 
+	case messages.OutError:
+		// Bridge died ungracefully (EventAgentError with a
+		// populated Diagnostic). Render as an interactive card
+		// (not a plain text bubble) so the user sees the exit
+		// kind + stderr tail without having to scroll a long
+		// message. Distinct from OutCommandReply so the visual
+		// treatment can be "this is a problem, not a system
+		// reply" — header emoji ⚠️ + red header (CardKindError
+		// default). We deliberately do NOT use CardKindPermission
+		// here — that prepends 🔐 to the title (no permission is
+		// being asked) and renders with a blue header that
+		// visually says "click to approve", the opposite of what
+		// the user needs to see for a bridge death.
+		//
+		// Body budget: Feishu's markdown element caps at 4 KiB.
+		// gateway translate already took the FIRST line of Err
+		// (typically <500 B) and Diagnostic.StderrTail is itself
+		// capped at 4 KiB; concatenating both can land at ~4.5 KiB
+		// which Feishu would reject. We re-cap the final body to
+		// 3 KiB with a truncation marker so a verbose error never
+		// breaks the card.
+		body := msg.Text
+		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" && !strings.Contains(body, msg.Diagnostic.StderrTail) {
+			body = body + "\n\n--- stderr tail ---\n" + msg.Diagnostic.StderrTail
+		}
+		body = agent.TruncateForLog(body, 3*1024)
+		// Title: ⚠️ <agent> bridge died (<exit-kind>). Skip the
+		// "bridge died" segment when AgentName is empty rather
+		// than rendering a bare "⚠️ bridge died" with no agent
+		// attribution — the user can't tell which bridge died.
+		title := "⚠️ bridge died"
+		if msg.AgentName != "" {
+			title = "⚠️ " + msg.AgentName + " bridge died"
+		}
+		if msg.Diagnostic != nil && msg.Diagnostic.ExitKind != 0 {
+			title = title + " (" + msg.Diagnostic.ExitKind.String() + ")"
+		}
+		card := &messages.Card{
+			Title:    title,
+			Body:     body,
+			Kind:     messages.CardKindError,
+			RequestID: fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano()),
+		}
+		content, err := buildInteractiveCard(card)
+		if err != nil {
+			return err
+		}
+		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
+		return err
+
 	case messages.OutCommandReply:
 		// Slash command response (or runtime error reply). Plain
 		// text, no receipt, no in-place update — the user sees a
@@ -2022,17 +2072,26 @@ func buildInteractiveCard(c *messages.Card) (string, error) {
 	// F-46 §3.2: 🔐 prefix is permission-specific; other kinds
 	// render the raw title. Default Kind (zero value) is Permission
 	// to preserve the pre-F-46 behaviour for callers that haven't
-	// been migrated yet.
+	// been migrated yet. CardKindError is also raw — the emoji
+	// comes from the caller (already prefixed with ⚠️), no need
+	// for the permission lock.
 	title := c.Title
 	if c.Kind == messages.CardKindPermission {
 		title = "🔐 " + title
 	}
 
 	// Header template: explicit HeaderColor wins; otherwise pick
-	// from Kind.
+	// from Kind. CardKindError defaults to "red" so a death card
+	// is visually distinguishable from a routine permission
+	// request without callers having to remember to set the color.
 	template := c.HeaderColor
 	if template == "" {
-		template = "blue"
+		switch c.Kind {
+		case messages.CardKindError:
+			template = "red"
+		default:
+			template = "blue"
+		}
 	}
 
 	// Body element: use Card.Body when set; fall back to Title for

@@ -891,6 +891,106 @@ func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 		t.Errorf("card body missing 🔐 emoji prefix on title; got body: %s", captured.Body)
 	}
 }
+// TestSend_OutError_RendersAsCard_NoPermissionEmoji — F-61 bridge-
+// death follow-up: OutError must render as an interactive card so
+// the user sees the diagnostic, but it MUST NOT carry the 🔐
+// permission-emoji prefix (no permission is being asked) and the
+// header template MUST default to "red" so it stands out from a
+// routine permission request.
+func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
+	a := testAdapter(t)
+	var captured struct {
+		ChatID  string
+		MsgType string
+		Body    string
+	}
+	a.sendFunc = func(_ context.Context, chatID, msgType, body, _ string, _ bool) (string, error) {
+		captured.ChatID = chatID
+		captured.MsgType = msgType
+		captured.Body = body
+		return "om_err_test", nil
+	}
+	errIn := errors.New("dsh: lifecycle exit signal_killed: signal: killed")
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:      messages.OutError,
+		ChatID:    "oc_test",
+		Text:      errIn.Error(),
+		Err:       errIn,
+		AgentName: "dsh",
+		Workspace: "/code",
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:   agent.BridgeExitSignalKilled,
+			WaitErr:    errIn,
+			StderrTail: "node[1234]: JavaScript heap out of memory",
+			SessionID:  "session-x",
+			AgentName:  "dsh",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutError): %v", err)
+	}
+	if captured.MsgType != "interactive" {
+		t.Errorf("sendFunc.MsgType = %q, want interactive", captured.MsgType)
+	}
+	// Title: ⚠️ dsh bridge died (signal-killed). The 🔐 permission
+	// prefix MUST NOT be present.
+	if strings.Contains(captured.Body, "🔐") {
+		t.Errorf("OutError card must not carry 🔐 permission prefix; got body: %s", captured.Body)
+	}
+	if !strings.Contains(captured.Body, "⚠️ dsh bridge died") {
+		t.Errorf("card title missing ⚠️ dsh bridge died; got body: %s", captured.Body)
+	}
+	if !strings.Contains(captured.Body, "(signal-killed)") {
+		t.Errorf("card title missing exit-kind suffix (signal-killed); got body: %s", captured.Body)
+	}
+	// Body must include the stderr tail block (Feishu renders
+	// markdown; the multi-line tail renders below the fold).
+	if !strings.Contains(captured.Body, "JavaScript heap out of memory") {
+		t.Errorf("card body missing stderr tail content; got body: %s", captured.Body)
+	}
+	// Header template must default to "red" for error cards.
+	if !strings.Contains(captured.Body, `"template":"red"`) {
+		t.Errorf("card header template must default to red for CardKindError; got body: %s", captured.Body)
+	}
+}
+
+// TestSend_OutError_TruncatesLongBody — body budget guard: the
+// Feishu markdown element caps at 4 KiB, but Diagnostic.StderrTail
+// is itself 4 KiB; concatenated with the first line of Err + the
+// separator we can exceed 4 KiB and Feishu rejects the card. The
+// adapter must re-cap the final body to a safe size.
+func TestSend_OutError_TruncatesLongBody(t *testing.T) {
+	a := testAdapter(t)
+	var captured struct {
+		Body string
+	}
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		captured.Body = body
+		return "om_err_test", nil
+	}
+	bigTail := strings.Repeat("x", 4000)
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:      messages.OutError,
+		ChatID:    "oc_test",
+		Text:      "dsh: lifecycle exit signal_killed: signal: killed",
+		AgentName: "dsh",
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:   agent.BridgeExitSignalKilled,
+			StderrTail: bigTail,
+			AgentName:  "dsh",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutError): %v", err)
+	}
+	// Body should be truncated to ~3 KiB + the truncation marker.
+	if !strings.Contains(captured.Body, "[truncated]") {
+		t.Errorf("card body should be truncated to ~3 KiB with marker; got body length %d", len(captured.Body))
+	}
+	// And the full 4 KiB tail MUST NOT make it through verbatim.
+	if strings.Count(captured.Body, "x") >= 4000 {
+		t.Errorf("card body should not contain the full 4 KiB stderr tail; got body length %d", len(captured.Body))
+	}
+}
+
 
 // TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed — F-44
 // follow-up: OutCommandReply is a top-level Create (ReplyInChat,

@@ -13,7 +13,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // --- Load() ---
@@ -926,11 +925,7 @@ func cmdCfgIsZero(c CmdConfig) bool {
 		len(c.Hooks.After) == 0
 }
 
-// Ensure the centralised hook timeout is a positive duration;
-// a zero or negative value would silently disable the kill path
-// in runOneHook.
-func TestTimeoutsHook_Positive(t *testing.T) {
-	if timeouts.Hook <= 0 {
-		t.Errorf("timeouts.Hook must be positive, got %v", timeouts.Hook)
-	}
-}
+// Note: positive-bound + sanity checks for timeouts.Hook (and the
+// other four values) live in internal/timeouts/timeouts_test.go
+// as TestTimeouts_AllSane — single source of truth for the
+// centralised timeout policy.

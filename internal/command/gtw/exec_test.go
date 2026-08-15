@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRunCmd_DirBinding is the regression test for the original
@@ -315,5 +316,44 @@ func TestGitLabProvider_RunnerBindsWorktree(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil {
 		t.Fatalf("glab-equivalent sentinel not at %s: %v (Worktree → Dir binding broken)",
 			filepath.Join(real, sentinelName), err)
+	}
+}
+// TestRunCmd_RespectsCallerDeadline pins the runCmd safety net's
+// "caller always wins" contract: when the caller passes a ctx
+// with a deadline shorter than timeouts.CLI (5 min), runCmd must
+// NOT override it. The 100 ms deadline below is two thousand
+// times shorter than CLI; if runCmd applied its own wrap, the
+// call would block for the full 5 minutes.
+//
+// The original bug this guards against: someone flipping the
+// condition `if hasDeadline` → `if !hasDeadline` (or removing the
+// guard entirely) would silently cap every call at 5 min, which
+// is fine for fast commands but breaks legitimate longer-running
+// calls like /gtw commit's 30-min agent budget.
+func TestRunCmd_RespectsCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	// `sleep 5` would block for 5 seconds under timeouts.CLI's
+	// fallback wrap; with the caller's 100 ms deadline honored,
+	// it should return within ~200 ms with a context error.
+	sleepName := "sleep"
+	sleepArgs := []string{"5"}
+	if runtime.GOOS == "windows" {
+		// `timeout` is the Windows equivalent of sleep that
+		// responds to cancellation; without it, cmd /c "sleep 5"
+		// wouldn't terminate cleanly on a short ctx deadline.
+		sleepName = "cmd"
+		sleepArgs = []string{"/c", "ping -n 6 127.0.0.1 > nul"}
+	}
+	_, _, err := runCmd(ctx, "", sleepName, sleepArgs...)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Errorf("expected timeout error, got nil (runCmd did not honor ctx deadline)")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("runCmd ran for %v despite a 100ms ctx deadline; safety net overrode caller", elapsed)
 	}
 }

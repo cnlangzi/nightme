@@ -281,6 +281,18 @@ func (d *driver) finishTurn() {
 // semantics are enforced by the closeOnce in Close(); everything else
 // just nudges the process toward a clean exit.
 func (d *driver) lifecycle() {
+	// Both closes are in defer so a panic anywhere in the body
+	// (or in pumpWG.Wait / Process.Wait) still tears the bridge
+	// down cleanly. Mirrors codex/dsh/pi — opencode was the
+	// outlier before this change. With these defers, a recovered
+	// lifecycle panic still closes events/stopDeliver; without
+	// them, a panic would orphan consumers waiting on either
+	// channel. The order — stopDeliver first, events last —
+	// matches the producer-side back-pressure contract: a producer
+	// selecting on <-d.stopDeliver sees the close before events is
+	// closed, so any in-flight deliver() exits without sending.
+	defer close(d.events)
+	defer close(d.stopDeliver)
 	defer close(d.exitDone)
 	if d.server != nil && d.server.cmd != nil {
 		_, _ = d.server.cmd.Process.Wait()
@@ -288,8 +300,6 @@ func (d *driver) lifecycle() {
 		<-d.closed
 	}
 	d.pumpWG.Wait()
-	close(d.stopDeliver)
-	close(d.events)
 }
 
 // ─── turn watchdog ───────────────────────────────────────────────

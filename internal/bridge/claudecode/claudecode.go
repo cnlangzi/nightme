@@ -259,20 +259,55 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	logger := slog.Default()
 	// pumpStream owns the events-channel close so Close() can wait
 	// for it to drain (via pumpWG) before allowing close.
-	live.pumpWG.Add(1)
-	go func() {
+	live.pumpWG.Add(2)
+	// Both pumps are wrapped in agent.SafeGo (outer, daemon-level
+	// safety net) + agent.PanicEventHandler (inner, domain-level
+	// recovery that emits EventAgentError) so a claudecode
+	// translator bug or a wire-decode panic cannot take down the
+	// nightme daemon AND the runtime can surface a "bridge died"
+	// EventAgentError to the user. The 2026-08-15 dsh textBuf
+	// panic that motivated this pattern is the prototype — pre-
+	// fix, it killed the daemon; with this two-layer recovery,
+	// the user would get a bridge-error card and the daemon would
+	// stay alive. See internal/agent/safego.go for the contract.
+	//
+	// claudecode's pumpStream writes to live.events directly
+	// (no .deliver() method), so we synthesize a panicDeliver
+	// closure here that does a non-blocking send (drop-on-full,
+	// drop-on-closed) — matches dsh/pi's "non-blocking deliver"
+	// pattern documented in session.go deliver().
+	panicDeliver := func(ev agent.AgentEvent) {
+		select {
+		case live.events <- ev:
+		case <-live.closed:
+			// bridge closed; drop silently
+		default:
+			// buffer full + bridge alive. Drop — the
+			// stream-pump will close the channel soon
+			// anyway, and the next deliver() from there
+			// will see live.closed.
+		}
+	}
+	agent.SafeGo("claudecode:stream-pump", func() {
 		defer live.pumpWG.Done()
 		defer close(live.events)
+		defer agent.PanicEventHandler(
+			"claudecode:stream-pump", panicDeliver,
+			"", live.agentName, live.workspace, live.branch)
 		pumpStream(stdout, live.events, handler, live.agentName, live.workspace, live.branch, logger)
-	}()
+	})
 
 	// stderr drainer — Claude Code logs to stderr; we both log
 	// (debug) and forward each line to live.stderrLines so the
 	// --resume fallback probe can react to deterministic stderr
 	// signals.
-	go func() {
+	agent.SafeGo("claudecode:stderr-drain", func() {
+		defer live.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"claudecode:stderr-drain", panicDeliver,
+			"", live.agentName, live.workspace, live.branch)
 		_ = drainStderr(stderr, logger, live.stderrLines)
-	}()
+	})
 
 	return live, nil
 }

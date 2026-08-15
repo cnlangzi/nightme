@@ -43,11 +43,25 @@ type translator struct {
 	mu sync.Mutex
 
 	// F-52 buffer state — mirrors pi/translate.go. textBuf is a
-	// slice (not map[int]) because contentIndex is small in practice
-	// (0..N where N is the number of text streams in the message,
-	// typically 1); a slice avoids the map[int]*Builder allocation
-	// overhead and the value-vs-pointer dance.
-	textBuf     []strings.Builder
+	// map[int]*strings.Builder (NOT a slice of strings.Builder) for
+	// a critical reason: strings.Builder has a noCopy / copyCheck
+	// guard (Go 1.20+) that panics the moment you call Grow/Write/
+	// WriteString on a Builder that was value-copied. A slice of
+	// values would silently break the moment `append` grew the
+	// underlying array — every existing Builder would be
+	// value-copied, its internal `addr` would still point to the
+	// OLD array, and the next Grow/WriteString on any previously-
+	// touched index would panic. We hit this in production
+	// (2026-08-15) after a long dsh turn grew textBuf past its
+	// initial capacity — see translate.go assistant/chunk case.
+	//
+	// A map of pointers keeps each Builder at a stable address for
+	// its entire lifetime, so Grow/WriteString are always safe.
+	// contentIndex stays small in practice (0..N where N is the
+	// number of concurrent text streams, typically 1) so the
+	// map[int] overhead is negligible — pi/translate.go has used
+	// this exact shape since the F-52 state machine was ported.
+	textBuf     map[int]*strings.Builder
 	thinkBuf    strings.Builder
 	pendingText string
 	lastText    string
@@ -92,7 +106,7 @@ func newTranslator(agentName, workspace string) *translator {
 	return &translator{
 		agentName:    agentName,
 		workspace:    workspace,
-		textBuf:      []strings.Builder{}, // lazy-grown by contentIndex
+		textBuf:      map[int]*strings.Builder{}, // lazy-grown by contentIndex
 		pendingTools: map[string]pendingTool{},
 	}
 }
@@ -208,12 +222,12 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 		}
 		t.active = true
 		// textBuf is lazy-grown: most turns have only 1 stream
-		// (contentIndex 0) so we avoid allocating a backing array
-		// until we see the first chunk. NB: we MUST append a
-		// zero-value Builder and then Grow it in place — copying
-		// a non-zero Builder by value triggers the runtime
-		// "strings: illegal use of non-zero Builder copied by value"
-		// check (Go 1.20+).
+		// (contentIndex 0) so we avoid allocating a Builder
+		// until we see the first chunk. The map stores
+		// *strings.Builder (pointers, not values) so the
+		// Builder's address stays stable for its lifetime —
+		// see the textBuf field comment for why a slice of
+		// values would panic on the next slice-grow.
 		//
 		// contentIndex is capped at maxTextStreams to prevent a
 		// malicious / buggy dsh web from triggering OOM via a
@@ -226,11 +240,13 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 				"max", maxTextStreams)
 			return
 		}
-		for len(t.textBuf) <= idx {
-			t.textBuf = append(t.textBuf, strings.Builder{})
+		b, ok := t.textBuf[idx]
+		if !ok {
+			b = &strings.Builder{}
+			t.textBuf[idx] = b
 		}
-		t.textBuf[idx].Grow(256) // typical chunk size hint
-		t.textBuf[idx].WriteString(data.Chunk.Text)
+		b.Grow(256) // typical chunk size hint
+		b.WriteString(data.Chunk.Text)
 
 	case "assistant/message":
 		var data assistantMessageData
@@ -343,7 +359,7 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 		//      turns. Without clearing, a stale pendingTool from
 		//      turn N would corrupt the tool/result event of a
 		//      recycled id in turn N+1.
-		t.textBuf = t.textBuf[:0]
+		clear(t.textBuf)
 		t.thinkBuf.Reset()
 		t.pendingText = ""
 		t.lastText = ""

@@ -124,9 +124,26 @@ func TestWindowsPipePingStatusStop(t *testing.T) {
 
 	server.SetReady()
 
-	status, err := GetStatus(paths.Socket, 2*time.Second)
+	// Same retry pattern as the Ping call above: GetStatus
+	// races the same Listen-seed-close vs Serve-create-new
+	// cycle. A single retry on each transient dialNamedPipe
+	// error covers the window.
+	// status is local; err is the outer-scope err (reused
+	// here so the test loop covers transient connection
+	// errors at the dialNamedPipe layer). The for loop
+	// reassigns both; the outer err was last set to nil by
+	// the successful Ping above.
+	var status Status
+	for i := 0; i < 50; i++ {
+		var err error
+		status, err = GetStatus(paths.Socket, 2*time.Second)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if err != nil {
-		t.Fatalf("GetStatus: %v", err)
+		t.Fatalf("GetStatus after retries: %v", err)
 	}
 	if status.State != "ready" {
 		t.Fatalf("State = %q, want ready", status.State)

@@ -868,12 +868,6 @@ func (a *Agent) Stop(ctx context.Context) error {
 	return a.driver.Stop(ctx)
 }
 
-// SetModel switches the active model on the next turn. Bridges that
-// can't honor the call return agent.ErrNotSupported.
-func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
-	return a.driver.SetModel(ctx, providerID, modelID)
-}
-
 // NewAgent builds a *Agent from its constituent parts.
 // Exported so bridges and test fakes (outside the agent package)
 // can construct one. The driver is passed as interface{} because
@@ -905,11 +899,10 @@ type driver interface {
 	Reset(ctx context.Context) error
 	Close() error
 
-	// Stop / SetModel are bridge-specific runtime methods that
-	// the shared *Agent wrapper exposes. Each driver returns
+	// Stop is a bridge-specific runtime method that the shared
+	// *Agent wrapper exposes. Each driver returns
 	// agent.ErrNotSupported if the bridge cannot honor the call.
 	Stop(ctx context.Context) error
-	SetModel(ctx context.Context, providerID, modelID string) error
 }
 
 // ─── Starter: spawn recipe (interface, the only one) ──────────────
@@ -1046,11 +1039,11 @@ var (
 	// "successfully reset in-place" from "needs full restart".
 	ErrRestartRequired = errors.New("agent: bridge requires restart for reset")
 
-	// ErrNotSupported is returned by Stop / SetModel when the
-	// bridge does not implement the requested operation. The
-	// runtime can detect this with errors.Is and surface a
-	// user-friendly "not supported for this agent" message
-	// instead of treating it as a generic bridge error.
+	// ErrNotSupported is returned by Stop when the bridge does
+	// not implement the requested operation. The runtime can
+	// detect this with errors.Is and surface a user-friendly
+	// "not supported for this agent" message instead of treating
+	// it as a generic bridge error.
 	//
 	// Bridges that DO implement the operation return nil on
 	// success and a real error on failure. The sentinel is only

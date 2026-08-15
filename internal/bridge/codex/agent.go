@@ -581,17 +581,6 @@ func isRPCMethodNotFound(err error) bool {
 	return strings.Contains(err.Error(), "method not found")
 }
 
-// SetModel is not supported on the codex bridge. codex reads the
-// model at startup via `-c model=...` and the app-server API does
-// not expose a model swap mechanism. Operators who want a
-// different model must restart the bridge.
-func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	_ = ctx
-	_ = providerID
-	_ = modelID
-	return agent.ErrNotSupported
-}
-
 // ─── close ───
 
 // Close terminates the session: closes stdin (so the child sees EOF

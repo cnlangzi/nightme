@@ -493,16 +493,6 @@ func isMethodNotFound(err error) bool {
 	return strings.Contains(err.Error(), "method not found")
 }
 
-// SetModel is not supported on the ACP bridge. ACP has a
-// session/set_mode method but no public session/set_model; the
-// provider / model is fixed at session creation.
-func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	_ = ctx
-	_ = providerID
-	_ = modelID
-	return agent.ErrNotSupported
-}
-
 // Close terminates the session by cancelling the per-session ctx
 // and closing the underlying transport. Idempotent.
 func (d *driver) Close() error {

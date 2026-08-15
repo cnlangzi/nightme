@@ -22,7 +22,7 @@ import (
 
 // stubStoppable implements the agent.driver contract with the
 // minimum surface required by AgentSession: SendBlocks /
-// SendPermission / Reset / Close / Stop / SetModel. Tests inject
+// SendPermission / Reset / Close / Stop. Tests inject
 // their own return values for Stop to drive the success / failure
 // matrix.
 type stubStoppable struct {
@@ -40,7 +40,6 @@ func (s *stubStoppable) Stop(_ context.Context) error {
 	s.stopped++
 	return s.stopErr
 }
-func (s *stubStoppable) SetModel(_ context.Context, _, _ string) error { return nil }
 
 // nopCh satisfies outbound.Emitter for tests that need a
 // non-nil channel to construct a ChatSession but don't exercise

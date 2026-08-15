@@ -13,7 +13,6 @@
 //	GET  /api/session/{id}/event  (SSE)                Subscribe
 //	POST /api/session/{id}/interrupt                   Interrupt
 //	POST /api/session/{id}/permission/{reqID}/reply    ReplyPermission
-//	POST /api/session/{id}/model                       SetModel
 //	GET  /api/config                                   GetConfig
 //	GET  /api/health                                   Health
 //
@@ -389,22 +388,6 @@ func (c *Client) ReplyPermission(ctx context.Context, sessionID, requestID, resp
 	req, err := c.newRequest(ctx, "POST",
 		"/api/session/"+url.PathEscape(sessionID)+"/permission/"+url.PathEscape(requestID)+"/reply",
 		body)
-	if err != nil {
-		return err
-	}
-	return c.doJSON(req, nil)
-}
-
-// SetModel calls POST /api/session/{id}/model.
-func (c *Client) SetModel(ctx context.Context, sessionID, providerID, modelID string) error {
-	if sessionID == "" {
-		return fmt.Errorf("opencode: empty session id")
-	}
-	body := map[string]any{
-		"providerID": providerID,
-		"modelID":    modelID,
-	}
-	req, err := c.newRequest(ctx, "POST", "/api/session/"+url.PathEscape(sessionID)+"/model", body)
 	if err != nil {
 		return err
 	}

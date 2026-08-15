@@ -89,9 +89,6 @@ func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
 func (a *echoAgent) SendPermission(string) error { return nil }
 func (a *echoAgent) New(context.Context) error   { return nil }
 func (a *echoAgent) Stop(context.Context) error { return agent.ErrNotSupported }
-func (a *echoAgent) SetModel(context.Context, string, string) error {
-	return agent.ErrNotSupported
-}
 func (a *echoAgent) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	if err := a.SendBlocks(ctx, blocks); err != nil {
 		return agent.RunResult{}, err
@@ -149,9 +146,6 @@ func (d *echoDriver) SendPermission(resp string) error {
 }
 func (d *echoDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *echoDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *echoDriver) SetModel(ctx context.Context, providerID, modelID string) error {
-	return d.inner.SetModel(ctx, providerID, modelID)
-}
 func (d *echoDriver) Close() error                   { return d.inner.Close() }
 // echoSpawner is a Spawner that hands out fresh echoAgent instances.
 type echoSpawner struct {

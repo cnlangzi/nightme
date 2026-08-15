@@ -69,9 +69,6 @@ func (d *longLivedFakeASDriver) SendPermission(resp string) error {
 }
 func (d *longLivedFakeASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *longLivedFakeASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *longLivedFakeASDriver) SetModel(ctx context.Context, providerID, modelID string) error {
-	return d.inner.SetModel(ctx, providerID, modelID)
-}
 func (d *longLivedFakeASDriver) Close() error                   { return d.inner.Close() }
 func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
@@ -79,9 +76,6 @@ func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) erro
 func (a *longLivedFakeAS) SendPermission(string) error { return nil }
 func (a *longLivedFakeAS) New(context.Context) error   { return nil }
 func (a *longLivedFakeAS) Stop(context.Context) error { return agent.ErrNotSupported }
-func (a *longLivedFakeAS) SetModel(context.Context, string, string) error {
-	return agent.ErrNotSupported
-}
 func (a *longLivedFakeAS) Close() error {
 	a.closeMu.Lock()
 	defer a.closeMu.Unlock()

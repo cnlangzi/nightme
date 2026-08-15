@@ -67,11 +67,13 @@ type translator struct {
 	// user — distinguishing "model produced nothing" from a
 	// genuine settle. Mirrors cc-connect's relay.go:5161 fallback.
 	//
-	// Guarded by turnMu: written from the SSE reader goroutine
-	// (markContent) and the SendBlocks call path (ResetTurn),
-	// read from the terminal-event branch (handleEvent).
-	turnMu      sync.Mutex
-	turnHadContent bool
+	// Guarded by turnMu together with the per-turn buffering
+	// state (turn *turnState). Written from the SSE reader
+	// goroutine (markContent / handleEvent) and the SendBlocks
+	// call path (ResetTurn); read from the terminal-event
+	// branches and from handlePart / handleTextStreamLocked.
+	turnMu          sync.Mutex
+	turnHadContent  bool
 
 	// turnHadStep tracks whether a session.next.step.started event
 	// fired during the current turn. The 1.18 step event payload
@@ -83,6 +85,14 @@ type translator struct {
 	// Combined with turnHadContent to refine the Done.Reason
 	// choice on terminal events.
 	turnHadStep bool // guarded by turnMu; see turnHadContent
+
+	// turn is the per-turn buffering state for streamed
+	// `session.next.text.*` events. Added in the opencode-stream-buffer
+	// fix to (a) match pi's "token-level buffer + flush at boundary"
+	// behaviour and (b) strip inline <think>...</think> blocks the
+	// same way the pi bridge does. Guarded by turnMu; see think_tags.go
+	// for the splitter rationale.
+	turn *turnState
 
 	// availableCommands caches the latest list of slash commands
 	// opencode advertises via SSE (stage 8.2). The runtime shim
@@ -104,6 +114,92 @@ type toolEntry struct {
 	args string
 }
 
+// turnState is the per-turn buffering state for the streamed
+// `session.next.text.*` path (opencode 1.18's token-level text
+// bus). Mirrors pi's `turnState.textBuf` + `thinkHoldings`
+// pattern; the keying dimension is opencode's PartID instead of
+// pi's contentIndex because opencode identifies text parts by a
+// stable per-part UUID rather than a positional index.
+//
+// All fields are guarded by translator.turnMu — textBuf,
+// pendingText, thinkHoldings, and activeTextBlock are written
+// from the SSE reader goroutine (handleEvent), and ResetTurn
+// clears the lot wholesale on each new turn.
+//
+// Lifecycle:
+//
+//	ResetTurn()                       → all fields zeroed
+//	session.next.text.started         → activeTextBlock = partID,
+//	                                    make textBuf[partID]
+//	session.next.text.delta           → splitThinking over delta + held;
+//	                                    Kept → textBuf[partID], Thinking →
+//	                                    [思考] emit, Held → thinkHoldings[partID]
+//	session.next.text.ended           → closeTextBlockLocked drops the
+//	                                    part's accumulated text into
+//	                                    pendingText (still NO deliver)
+//	tool pending / step.ended / idle   → flushPendingTextLocked emits
+//	                                    one EventAgentText{Text: pendingText}
+//	                                    and resets pendingText
+type turnState struct {
+	// textBuf maps PartID → accumulated reply text for that text
+	// part. Created on session.next.text.started, written on each
+	// .delta, drained into pendingText on .ended. We buffer
+	// per-part because opencode can interleave multiple text parts
+	// in a single turn (rare but legal on the wire — e.g. a
+	// mid-message correction the model emits as a fresh text
+	// part). Keying by PartID keeps each part's tail from
+	// bleeding into the next.
+	textBuf map[string]*strings.Builder
+
+	// thinkHoldings buffers the trailing partial of a
+	// <think>...</think> block that straddled two
+	// session.next.text.delta events. Keyed by PartID because
+	// each opencode text part has its own delta stream — the
+	// Held value is meaningless across parts. Populated by
+	// splitThinking when it sees an opening tag with no matching
+	// close in the current delta; cleared when the matching
+	// </think> arrives (the next delta is prepended with it).
+	//
+	// Reset wholesale with the rest of the turn — a half-open
+	// think block that never closes (model aborted mid-reasoning,
+	// partial reply) must not bleed into the next turn's first
+	// text block.
+	thinkHoldings map[string]string
+
+	// pendingText is the joined reply text assembled from all
+	// text parts that have ended so far in the current turn.
+	// Drained by flushPendingTextLocked at the tool boundary or
+	// at the turn's terminal event into ONE
+	// EventAgentText{Text: pendingText}. Empty between flushes —
+	// the bridge emits nothing on the reply surface until a
+	// flush happens, which keeps the chat client from rendering
+	// each token as it streams (the opencode-stream-buffer fix:
+	// before this, every `session.next.text.delta` was delivered
+	// as its own EventAgentText, causing per-word refreshes).
+	pendingText strings.Builder
+
+	// activeTextBlock is the PartID of the most-recently-started
+	// text block whose `.ended` has not yet arrived. Drops to ""
+	// after flush — guards against a stray .delta that arrives
+	// after .ended (misordered; opencode 1.18 sometimes emits
+	// one out-of-order .delta on resubscribe) from poisoning
+	// the next block's buffer.
+	activeTextBlock string
+}
+
+// newTurnState allocates an empty turnState. Used by both
+// newTranslator (one-shot at handshake) and ResetTurn (per-turn
+// re-init on each new prompt). Allocating fresh maps at
+// ResetTurn rather than clearing in-place avoids carrying stale
+// Held/thinkHoldings across turns (the move-logic-atomically
+// rule: a reset means a fresh struct, not a partial wipe).
+func newTurnState() *turnState {
+	return &turnState{
+		textBuf:      make(map[string]*strings.Builder),
+		thinkHoldings: make(map[string]string),
+	}
+}
+
 // newTranslator builds a translator. deliver is the live Agent's
 // deliver helper; the bridge's session lifecycle calls deliver on
 // every produced event.
@@ -117,15 +213,19 @@ func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent, agentName, w
 		model:             model,
 		pendingTools:      make(map[string]toolEntry),
 		availableCommands: make(map[string]json.RawMessage),
+		turn:              newTurnState(),
 	}
 }
 
-// ResetTurn clears per-turn state. Call before each Prompt submission
-// so the next terminal event can detect a (genuinely) empty response.
+// ResetTurn clears per-turn state. Call before each Prompt
+// submission so the next terminal event can detect a (genuinely)
+// empty response. Per-turn buffering is also discarded wholesale
+// — see the comment on newTurnState for the rationale.
 func (t *translator) ResetTurn() {
 	t.turnMu.Lock()
 	t.turnHadContent = false
 	t.turnHadStep = false
+	t.turn = newTurnState()
 	t.turnMu.Unlock()
 }
 
@@ -222,37 +322,32 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 	// path still works for older releases. We accept both so the
 	// bridge renders text on whatever system the user is running.
 	//
+	// Buffering (opencode-stream-buffer): the previous
+	// implementation called t.deliver(EventAgentText{Text: delta})
+	// on every .delta event, which produced one chat-side render
+	// per token — the symptom "每个词一直刷新" reproduced on
+	// production. The fix mirrors pi's "token-level buffer + flush
+	// at boundary" pattern (commit 892bef3 + internal/bridge/pi/
+	// translate.go turnState.textBuf + closeTextBlockLocked):
+	//
+	//   .started → start a new per-PartID textBuf
+	//   .delta   → split-thinking strip + write into textBuf[partID]
+	//              (no deliver — see closeTextBlockLocked)
+	//   .ended   → move textBuf[partID] into pendingText
+	//              (still no deliver — see flushPendingTextLocked)
+	// flushPendingTextLocked is called at the tool boundary and at
+	// the turn's terminal events; it emits ONE EventAgentText with
+	// the joined reply text. The chat client therefore renders once
+	// per part-cluster, not once per token.
+	//
 	// session.next.text.started / text.ended mark the boundaries
 	// of a single text block; the actual delta is on
 	// session.next.text.delta. For models that return the entire
 	// text in one shot (no streaming), the text may arrive via
 	// text.ended rather than as a series of deltas — we treat
-	// that as a fallback path.
+	// that as a fallback path (closeTextBlockLocked handles both).
 	case "session.next.text.started", "session.next.text.delta", "session.next.text.ended":
-		var p struct {
-			Text  string `json:"text"`
-			Delta string `json:"delta"`
-		}
-		_ = json.Unmarshal(ev.properties(), &p)
-		text := p.Text
-		if text == "" {
-			text = p.Delta
-		}
-		if text == "" {
-			// text.started/ended may have an empty body when
-			// the actual content is delivered via delta. Skip.
-			return nil
-		}
-		t.markContent()
-		t.deliver(agent.AgentEvent{
-			Kind:      agent.EventAgentText,
-			SessionID: t.sessionID,
-			Model:     t.model,
-			AgentName: t.agentName,
-			Workspace: t.workspace,
-			Branch:    t.branch,
-			Text:      text,
-		})
+		t.handleTextStreamEvent(ev)
 	case "session.next.prompt.admitted", "session.next.prompted":
 		// opencode 1.18 emits these as the prompt lifecycle markers
 		// on the global bus:
@@ -296,6 +391,30 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// step events arrived — that path means the prompt was
 		// admitted but the model produced nothing (auth/quota/
 		// hang before first token).
+		// opencode-stream-buffer (P0): drain any text parts whose
+		// .ended never arrived (resubscribe mid-part, connection
+		// drop, single-shot models) into pendingText, then flush
+		// pendingText. Without the closeAll step, the reply text
+		// stuck in textBuf would never reach the chat client.
+		t.turnMu.Lock()
+		t.closeAllTextBlocksLocked()
+		flushEvents := t.flushPendingTextLocked()
+		t.turnMu.Unlock()
+		for _, ev := range flushEvents {
+			t.deliver(ev)
+		}
+
+		// Also surface any unclosed <think> that survived to the
+		// terminal (partial reply, model aborted mid-reasoning)
+		// as a single [思考] EventAgentText so it never leaks
+		// into the next turn's first text block.
+		t.turnMu.Lock()
+		leaked := t.flushLeftoverThinkLocked()
+		t.turnMu.Unlock()
+		for _, ev := range leaked {
+			t.deliver(ev)
+		}
+
 		usage := t.lastUsage
 		reason := "settled"
 		hadContent, hadStep := t.turnHadAny(); if !hadContent && !hadStep {
@@ -321,8 +440,22 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// keep the case as a forward-compat hook so a future
 		// release reintroducing session.next.idle works.
 		//
-		// Same Reason rule as session.next.step.ended — settled
-		// unless both content AND step events were absent.
+		// Same closeAll + flush + Done rules as
+		// session.next.step.ended above.
+		t.turnMu.Lock()
+		t.closeAllTextBlocksLocked()
+		flushEvents := t.flushPendingTextLocked()
+		t.turnMu.Unlock()
+		for _, ev := range flushEvents {
+			t.deliver(ev)
+		}
+		t.turnMu.Lock()
+		leaked := t.flushLeftoverThinkLocked()
+		t.turnMu.Unlock()
+		for _, ev := range leaked {
+			t.deliver(ev)
+		}
+
 		usage := t.lastUsage
 		reason := "settled"
 		hadContent, hadStep := t.turnHadAny(); if !hadContent && !hadStep {
@@ -532,6 +665,17 @@ func (t *translator) handlePart(p Part) {
 			Text:      "[思考] " + p.Text,
 		})
 	case "tool":
+		// opencode-stream-buffer: tool boundary flush. The
+		// previous comment in handlePart correctly noted that
+		// the message.part.updated path emits ONE EventAgentText
+		// per part — but the 1.18 streaming path (above) takes
+		// the buffered route and never reaches this branch.
+		// This is the fallback: if the wire serves a non-streamed
+		// turn via message.part.updated text/type, the buffer
+		// won't have any pendingText and the chat client renders
+		// a single block per part exactly as before. No change
+		// needed here — the prior implementation was already
+		// correct for this code path.
 		t.markContent()
 		t.handleToolPart(p)
 	case "agent", "subtask", "step-start", "step-finish", "snapshot",
@@ -563,6 +707,20 @@ func (t *translator) handleToolPart(p Part) {
 
 	switch state.Status {
 	case "pending":
+		// opencode-stream-buffer: tool boundary flush. The
+		// buffer may still hold a closed-but-not-yet-delivered
+		// reply segment (e.g. "Let me check the files…" before
+		// the model calls a tool). pi's closeTextBlockLocked
+		// flushes the same way at this point — without it, the
+		// pre-tool text never reaches OutReply until the turn's
+		// terminal event, which arrives after the tool runs and
+		// re-orders the chat visually.
+		t.turnMu.Lock()
+		flushEvents := t.flushPendingTextLocked()
+		t.turnMu.Unlock()
+		for _, ev := range flushEvents {
+			t.deliver(ev)
+		}
 		args := stringOrEmpty(state.Input)
 		t.pendingTools[p.CallID] = toolEntry{
 			name: name,
@@ -652,6 +810,340 @@ func (t *translator) handleToolPart(p Part) {
 	default:
 		oLog("sse: unknown tool state", "state", state.Status, "callID", p.CallID)
 	}
+}
+
+// ─── session.next.text.* stream handling ──────────────────────────
+//
+// handleTextStreamEvent is the single entry point for opencode 1.18's
+// per-session text bus. It dispatches on the event sub-type and
+// routes through:
+//
+//   handleTextStreamStarted → mark active block, allocate textBuf
+//   handleTextStreamDelta   → splitThinking strip + textBuf write
+//   handleTextStreamEnded   → closeTextBlockLocked → pendingText
+//
+// Flush is centralized in flushPendingTextLocked, called from the
+// tool-boundary hooks (handleToolPart at the pending transition)
+// and the terminal events (session.next.step.ended /
+// session.idle). See F-OPENCODE-opencode-bridge.md §4.6 for the
+// protocol-side rationale.
+//
+// The full lock is held across these methods — they're called
+// only from the SSE reader goroutine, so contention with
+// ResetTurn (called from the Prompt goroutine) is bounded to the
+// critical sections that the lock guards.
+
+// handleTextStreamEvent decodes the text event's wire payload and
+// dispatches on the .type suffix. Empty bodies on .started / .ended
+// are tolerated (the model may emit boundary markers with no
+// payload; the actual content arrives on .delta or the subsequent
+// .ended snapshot).
+func (t *translator) handleTextStreamEvent(ev SessionEvent) {
+	var p struct {
+		PartID string `json:"partID"`
+		Text   string `json:"text"`
+		Delta  string `json:"delta"`
+	}
+	_ = json.Unmarshal(ev.properties(), &p)
+
+	payload := p.Text
+	if payload == "" {
+		payload = p.Delta
+	}
+
+	switch ev.Type {
+	case "session.next.text.started":
+		t.handleTextStreamStarted(p.PartID)
+	case "session.next.text.delta":
+		t.handleTextStreamDelta(p.PartID, payload)
+	case "session.next.text.ended":
+		// Pass the snapshot text too — some models emit the
+		// entire body on .ended without any .delta. In that
+		// case payload == p.Text and we want it buffered.
+		t.handleTextStreamEnded(p.PartID, payload)
+	}
+}
+
+// handleTextStreamStarted opens a new per-part textBuf. Called from
+// handleTextStreamEvent under turnMu.
+func (t *translator) handleTextStreamStarted(partID string) {
+	if partID == "" {
+		// Without a PartID we can't key the buffer safely; fall
+		// back to a literal so the bridge still surfaces the
+		// content (one EventAgentText per cluster, not per token).
+		partID = "_"
+	}
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	if t.turn == nil {
+		t.turn = newTurnState()
+	}
+	t.turn.activeTextBlock = partID
+	if _, ok := t.turn.textBuf[partID]; !ok {
+		t.turn.textBuf[partID] = &strings.Builder{}
+	}
+}
+
+// handleTextStreamDelta buffers one delta (or the snapshot of a
+// single-shot model) into textBuf[partID] after stripping inline
+// <think>...</think> blocks. Extracted reasoning surfaces as its
+// own [思考] EventAgentText (same channel as the structured
+// `reasoning` Part type). The [思考] emit counts as content for
+// the empty-turn detector (markContent) but the buffered reply
+// text is what flushPendingTextLocked surfaces at the terminal
+// event, so the chat client sees one render per part-cluster.
+//
+// Called from handleTextStreamEvent under turnMu.
+func (t *translator) handleTextStreamDelta(partID, payload string) {
+	if payload == "" {
+		return
+	}
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	if t.turn == nil {
+		t.turn = newTurnState()
+	}
+
+	pid := partID
+	if pid == "" {
+		pid = t.turn.activeTextBlock
+		if pid == "" {
+			pid = "_"
+		}
+	}
+
+	// Prepend the trailing partial of an unclosed <think> that
+	// straddled the previous delta, so splitThinking sees the
+	// whole block (the Held protocol from think_tags.go).
+	combined := t.turn.thinkHoldings[pid] + payload
+	t.turn.thinkHoldings[pid] = ""
+
+	split := splitThinking(combined)
+	if split.Kept != "" {
+		buf, ok := t.turn.textBuf[pid]
+		if !ok {
+			buf = &strings.Builder{}
+			t.turn.textBuf[pid] = buf
+		}
+		buf.WriteString(split.Kept)
+		t.turnHadContent = true
+		t.turn.activeTextBlock = pid
+	}
+	if split.Held != "" {
+		t.turn.thinkHoldings[pid] = split.Held
+	}
+	if thinking := strings.TrimSpace(split.Thinking); thinking != "" {
+		t.turnHadContent = true
+		t.deliver(agent.AgentEvent{
+			Kind:      agent.EventAgentText,
+			SessionID: t.sessionID,
+			Model:     t.model,
+			AgentName: t.agentName,
+			Workspace: t.workspace,
+			Branch:    t.branch,
+			Text:      "[思考] " + thinking,
+		})
+	}
+}
+
+// handleTextStreamEnded moves a closed part's textBuf into
+// pendingText. Reply text is NOT yet delivered —
+// flushPendingTextLocked picks it up at the tool boundary or the
+// turn's terminal event, so the chat client sees a single render
+// per part-cluster rather than one per token. If `payload` is
+// non-empty (single-shot model: entire text arrived on .ended),
+// it is buffered through the same splitThinking path the .delta
+// branch uses.
+//
+// Called from handleTextStreamEvent under turnMu.
+func (t *translator) handleTextStreamEnded(partID, payload string) {
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	if t.turn == nil {
+		t.turn = newTurnState()
+	}
+	pid := partID
+	if pid == "" {
+		pid = t.turn.activeTextBlock
+	}
+	if pid == "" {
+		// No active block — drop on the floor rather than
+		// fabricating a key. This is the safety net for
+		// reordered `.ended` with no preceding `.started`,
+		// which opencode 1.18 sometimes emits on resubscribe.
+		return
+	}
+
+	// Single-shot model: delta carries the full text. Run it
+	// through splitThinking so inline think blocks don't leak.
+	combined := t.turn.thinkHoldings[pid] + payload
+	t.turn.thinkHoldings[pid] = ""
+	if combined != "" {
+		split := splitThinking(combined)
+		if split.Kept != "" {
+			buf, ok := t.turn.textBuf[pid]
+			if !ok {
+				buf = &strings.Builder{}
+				t.turn.textBuf[pid] = buf
+			}
+			buf.WriteString(split.Kept)
+			t.turnHadContent = true
+		}
+		// A closed block typically has no Held — emit any
+		// in-place Thinking the same way the .delta branch does.
+		if thinking := strings.TrimSpace(split.Thinking); thinking != "" {
+			t.turnHadContent = true
+			t.deliver(agent.AgentEvent{
+				Kind:      agent.EventAgentText,
+				SessionID: t.sessionID,
+				Model:     t.model,
+				AgentName: t.agentName,
+				Workspace: t.workspace,
+				Branch:    t.branch,
+				Text:      "[思考] " + thinking,
+			})
+		}
+	}
+
+	t.closeTextBlockLocked(pid)
+	if t.turn.activeTextBlock == pid {
+		t.turn.activeTextBlock = ""
+	}
+}
+
+// closeTextBlockLocked moves a single part's textBuf into
+// pendingText and frees the bucket. Caller MUST hold turnMu.
+//
+// Why a separate pass: the .started → many .delta → .ended span
+// typically lasts many SSE frames; we keep the per-part bucket
+// around until .ended so the next part starts on a clean slate.
+// Whether to surface the accumulated text as EventAgentText or
+// keep holding it for a tool-boundary flush is the
+// flushPendingTextLocked caller's call.
+func (t *translator) closeTextBlockLocked(partID string) {
+	buf, ok := t.turn.textBuf[partID]
+	if !ok {
+		return
+	}
+	text := buf.String()
+	delete(t.turn.textBuf, partID)
+	if text == "" {
+		return
+	}
+	if t.turn.pendingText.Len() > 0 {
+		t.turn.pendingText.WriteByte('\n')
+	}
+	t.turn.pendingText.WriteString(text)
+	t.turnHadContent = true
+}
+
+// closeAllTextBlocksLocked drains every remaining textBuf entry
+// into pendingText. Called at turn-terminal time so any text
+// part whose `.ended` was not observed (opencode 1.18 fires
+// .delta without a closing .ended when the connection drops
+// mid-stream, the bridge resubscribes mid-part, or the model
+// single-shots the reply on .started itself without ever
+// emitting a separate .ended) still reaches the chat surface.
+//
+// Caller MUST hold turnMu. Reset parts and activeTextBlock so
+// the next turn starts clean.
+func (t *translator) closeAllTextBlocksLocked() {
+	if t.turn == nil || len(t.turn.textBuf) == 0 {
+		return
+	}
+	// Drain in deterministic order by sorting the partIDs so
+	// tests don't flake on Go's randomized map iteration.
+	ids := make([]string, 0, len(t.turn.textBuf))
+	for id := range t.turn.textBuf {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		t.closeTextBlockLocked(id)
+	}
+	t.turn.activeTextBlock = ""
+}
+
+// flushPendingTextLocked emits ONE EventAgentText with the joined
+// reply text from all closed parts in the current turn. Caller
+// MUST hold turnMu; the returned slice is empty when there is
+// nothing to emit.
+//
+// Called from:
+//
+//   - handleToolPart on the first pending transition of a tool
+//     call (tool-boundary flush; pi does the same)
+//   - the terminal-event branches (session.next.step.ended /
+//     session.idle) when no tool was called but the buffer still
+//     holds reply text the chat client must see before Done
+//
+// Resetting the pendingText after a successful flush means the
+// next call returns an empty slice, so the terminal-event path
+// can be safely entered twice without duplicating the reply.
+func (t *translator) flushPendingTextLocked() []agent.AgentEvent {
+	if t.turn == nil || t.turn.pendingText.Len() == 0 {
+		return nil
+	}
+	text := t.turn.pendingText.String()
+	t.turn.pendingText.Reset()
+	if text == "" {
+		return nil
+	}
+	t.turnHadContent = true
+	return []agent.AgentEvent{{
+		Kind:      agent.EventAgentText,
+		SessionID: t.sessionID,
+		Model:     t.model,
+		AgentName: t.agentName,
+		Workspace: t.workspace,
+		Branch:    t.branch,
+		Text:      text,
+	}}
+}
+
+// flushLeftoverThinkLocked emits any partial <think> block whose
+// close tag never arrived (model aborted mid-reasoning, partial
+// reply, etc.) as a single [思考] EventAgentText. Belt-and-braces
+// against think-tag leakage at the turn boundary: the Held text
+// is the raw unclosed tag plus its inner text, and leaving it in
+// turnState across turns would silently smuggle the partial into
+// the next turn's first text block.
+//
+// Called from the terminal-event branches AFTER
+// flushPendingTextLocked. Caller MUST hold turnMu; the returned
+// slice is empty when there are no leftovers. Walks thinkHoldings
+// and clears each entry on read — there's at most one held
+// partial per PartID and at most one PartID's worth of leak per
+// turn in practice.
+func (t *translator) flushLeftoverThinkLocked() []agent.AgentEvent {
+	if t.turn == nil || len(t.turn.thinkHoldings) == 0 {
+		return nil
+	}
+	var out []agent.AgentEvent
+	for _, held := range t.turn.thinkHoldings {
+		if held == "" {
+			continue
+		}
+		// Strip the open tag we re-attached during Held, leaving
+		// the inner text as the reasoning payload. Future
+		// readers can still spot an unclosed block by the
+		// absence of the [思考] close marker, but that's the
+		// model half-truncated its own reasoning — better to
+		// surface it than to silently drop it.
+		inner := strings.TrimPrefix(held, thinkOpenTag)
+		out = append(out, agent.AgentEvent{
+			Kind:      agent.EventAgentText,
+			SessionID: t.sessionID,
+			Model:     t.model,
+			AgentName: t.agentName,
+			Workspace: t.workspace,
+			Branch:    t.branch,
+			Text:      "[思考] " + inner,
+		})
+		t.turnHadContent = true
+	}
+	t.turn.thinkHoldings = make(map[string]string)
+	return out
 }
 
 // normalizeToolName maps an opencode tool slug to the Claude-style

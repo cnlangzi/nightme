@@ -237,16 +237,20 @@ opencode server 用这个 header 路由事件到对应项目的 Instance。对�
 | `server.connected` (initial) | 仅日志 | — |
 | `message.part.updated` (text part) | 直接 emit | `EventAgentText` |
 | `message.part.updated` (reasoning part) | `[思考] ` 前缀 | `EventAgentText` |
-| `message.part.updated` (tool part, state=pending) | 记录 + emit | `EventAgentToolStart` |
-| `message.part.updated` (tool part, state=running) | 同上 | `EventAgentToolStart` |
+| `message.part.updated` (tool part, state=pending) | flush pendingText, 记录 + emit | `EventAgentText` *(若有缓冲)* + `EventAgentToolStart` |
+| `message.part.updated` (tool part, state=running) | emit | `EventAgentToolStart` |
 | `message.part.updated` (tool part, state=completed) | emit | `EventAgentToolEnd` |
 | `message.part.updated` (tool part, state=error) | emit + Err | `EventAgentToolEnd` |
-| `session.idle` | flush + Done | `EventAgentDone{Reason:"settled"}` + `Done.Usage` |
+| `session.next.text.started` | 建桶 + activeTextBlock 标记 | — |
+| `session.next.text.delta` | splitThinking 拆 + 写 textBuf[partID] **(不 emit)** | — |
+| `session.next.text.ended` | closeTextBlockLocked → pendingText **(不 emit)** | — |
+| `session.next.step.ended` / `session.idle` / `session.next.idle` | closeAllTextBlocks → flushPendingText → flushLeftoverThink → Done | `(0..1) EventAgentText` *(joined reply)* + `(0..1) EventAgentText[思考]` *(unclosed thinking)* + `EventAgentDone` |
+| `session.next.step.failed` | emit | `EventAgentDone{Reason:"failed"}` |
 | `session.error` | emit | `EventAgentError` |
 | `session.compacted` | emit | `EventAgentReady` (refresher) |
-| `usage_update` | stash → `lastUsage` | (下次 session.idle 带过去) |
+| `usage_update` | stash → `lastUsage` | (下次终态带过去) |
 | `current_mode_update` | emit | `EventAgentReady` |
-| `available_commands_update` | log only | (stage 2 暂不路由) |
+| `available_commands_update` | log only | (暂不路由) |
 | `permission.asked` | emit | `EventAgentPermission` |
 | 其余 / 未知 | log only | — |
 
@@ -310,6 +314,65 @@ a.SetModel(ctx, "anthropic", "claude-sonnet-4")  // 改下一 turn 模型
 ```
 
 `Agent` interface **没有 Abort** (codex / pi / claudecode / pty / acp 也都没有)。当前 bridge-only,**等跨桥统一提案再上 interface**。
+
+### 4.6 Streamed text buffering (opencode-stream-buffer)
+
+opencode 1.18 把 token-level text 走全局 `session.next.text.{started,delta,ended}` 事件总线;不是分 part,所以 comment 提到的 "一个 part 一个 EventAgentText" 在 1.18 streaming 路径上**不成立**。如果照搬 claudecode 的 "每条事件一条 EventAgentText" 实现,每个 token 都会让客户端刷新一次,生产上表现为 "每个单词一直刷新"。
+
+修复沿用 pi 的 "token-level buffer + flush at boundary" 模式(`commit 892bef3 + internal/bridge/pi/translate.go turnState.textBuf`):
+
+```
+state machine (in turnState):
+
+  start   session.next.text.started(partID=X)
+            → activeTextBlock = X
+            → make textBuf[X] if missing
+  delta   session.next.text.delta(partID=X, delta=…)
+            → combined = thinkHoldings[X] + delta
+            → splitThinking(combined)
+                Kept     → textBuf[X]            (no deliver yet)
+                Thinking → [思考] 立即 emit     (同 reasoning part 走 gateway)
+                Held     → thinkHoldings[X]      (跨 delta 续接)
+  ended   session.next.text.ended(partID=X, text=…)
+            → closeTextBlockLocked(X) → pendingText   (no deliver yet)
+
+  flush   tool pending | session.next.step.ended | session.idle
+            → flushPendingTextLocked → emit ONE EventAgentText(joined)
+
+  cleanup partial <think> 未闭合: flushLeftoverThinkLocked
+            → emit ONE [思考] EventAgentText
+            → 清 thinkHoldings(跨 turn 不漏)
+```
+
+落点 (`internal/bridge/opencode/translate.go`):
+
+| 关键函数 | 角色 |
+|----------|------|
+| `handleTextStreamEvent` | 分派 `.started / .delta / .ended` 三态 |
+| `handleTextStreamStarted` | 建桶 / 标记 activeTextBlock |
+| `handleTextStreamDelta` | 拆分 `<think>` 跨 delta held + 写 textBuf |
+| `handleTextStreamEnded` | 走 `closeTextBlockLocked` 把 textBuf 转移到 pendingText |
+| `closeAllTextBlocksLocked` | 终态时把所有未 `.ended` 的 part 一次性搬到 pendingText |
+| `flushPendingTextLocked` | 返一条 joined reply `EventAgentText` |
+| `flushLeftoverThinkLocked` | 终态清残留的 unclosed `<think>` |
+| `splitThinking` (`think_tags.go`) | 与 pi 同型 -- 跨 token 边界正确拼 |
+
+终态分支 (`session.next.step.ended` / `session.idle` / `session.next.idle`) 都先 `closeAllTextBlocksLocked` 再 `flushPendingTextLocked` 再 `flushLeftoverThinkLocked`,保证 reply text + 残留 think 都先一步到 `OutReply` / `OutThinking`,再 emit `EventAgentDone`。
+
+不入 `EventAgentDone` 的"幽灵抑制":本修复**不**做这一步(原提案 P2)。`reason=empty` 路径还是会 emit Done 让 runtime 清 busy guard;真正的用户可见症状 (每词刷新 + inline think 泄漏) 由缓冲层 + think 剥离层处理。`Reason:"empty"` 仍由 `turnHadAny()` 判断,留给 channel 层决定是否表面 "(empty response)" 提示。
+
+测试 (`internal/bridge/opencode/translate_test.go` + `think_tags_test.go`) 覆盖:
+
+| 用例 | 守住的不变量 |
+|------|--------------|
+| `TestSplitThinking_*` (8 个) | splitter 单元:Held 协议 / stray close / nesting |
+| `TestTranslate_TextStreamBuffersUntilTerminal` | N 个 delta + terminal → 1 条 EventAgentText (反 regression:per-word refresh 症状) |
+| `TestTranslate_TextDeltaInlineThinkStripped` | inline `<think>` 不漏到 OutReply |
+| `TestTranslate_ThinkingOnlyTurnNoReply` | reasoning-only turn 不混入 reply |
+| `TestTranslate_ToolBoundaryFlushesBufferedReply` | 工具边界 flush 先 reply render 后 tool receipt |
+| `TestTranslate_TerminalWithoutSignalEmitsEmptyDone` | 空 turn 也 emit Done (令 Reason=empty) |
+| `TestTranslate_TerminalWithSignalEmitsDone` | step signal 在场时 Reason=settled |
+| `TestTranslate_ResetTurnClearsBuffer` | `ResetTurn` 全新 turnState,旧 held/buffer/pending 不漏 |
 
 ---
 

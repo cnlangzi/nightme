@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -104,14 +105,24 @@ func TestLogin_Success(t *testing.T) {
 		t.Errorf("stdout missing success check: %s", stdout.String())
 	}
 
-	// File is 0600.
-	path := os.Getenv("NIGHTME_CONFIG")
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat config: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("config perms = %#o, want 0600", perm)
+	// File is 0600 (POSIX only).
+	//
+	// Windows doesn't track POSIX permission bits — `os.Stat`
+	// returns mode bits that reflect the Win32 ACL inheritance,
+	// not 0600/0644/etc. We only enforce the POSIX assertion on
+	// Unix. On Windows the chmod 0600 call in config.Save is a
+	// no-op (see internal/config/config_windows.go) so this
+	// test would be asserting against a platform that never
+	// promised to honor the constraint.
+	if runtime.GOOS != "windows" {
+		path := os.Getenv("NIGHTME_CONFIG")
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat config: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("config perms = %#o, want 0600", perm)
+		}
 	}
 }
 

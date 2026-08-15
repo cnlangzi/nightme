@@ -10,6 +10,7 @@
 package feishu
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -227,12 +228,22 @@ func TestFormatStatusBarLines_GitStatusLine(t *testing.T) {
 	// Line 3: workspace + branch + counts + PR. F-45 §1.7.
 	// A clean local-only branch (no upstream) shows the "· local"
 	// marker so users see "this is untracked" vs "missing data".
+	//
+	// Workspace strings in GitStatus come from the git CLI which
+	// always emits forward slashes; formatWorkspacePath feeds them
+	// through filepath.Clean + filepath.Separator so the rendered
+	// path uses the OS-native separator. We build the expected
+	// string with the same transformation so the assertion is
+	// stable across Linux/macOS (`/`) and Windows (`\`).
 	gs := &messages.GitStatus{
 		Workspace: "code/nightme",
 		Snapshot:  &messages.GitStatusSnapshot{Branch: "main"},
 	}
 	got := formatStatusBarLines(outWith("claude", "opus-4-5", "", nil, gs))
-	want := []string{"🤖: claude · opus-4-5", "📁: code/nightme · ⎇ main · local"}
+	want := []string{
+		"🤖: claude · opus-4-5",
+		"📁: " + filepath.FromSlash("code/nightme") + " · ⎇ main · local",
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatStatusBarLines() = %v, want %v", got, want)
 	}
@@ -281,7 +292,7 @@ func TestFormatStatusBarLines_FullFooter(t *testing.T) {
 	if !strings.HasPrefix(got[1], "💰:「 ") {
 		t.Errorf("Line 2 = %q", got[1])
 	}
-	if !strings.HasPrefix(got[2], "📁: code/nightme") {
+	if !strings.HasPrefix(got[2], "📁: "+filepath.FromSlash("code/nightme")) {
 		t.Errorf("Line 3 = %q", got[2])
 	}
 	if !strings.Contains(got[2], "[#42]") {

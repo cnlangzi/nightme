@@ -662,16 +662,6 @@ func (d *driver) Stop(ctx context.Context) error {
 	return nil
 }
 
-// SetModel is not supported on the pi bridge. pi does not expose
-// a model swap RPC; the model is fixed at startup via pi's own
-// config.
-func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	_ = ctx
-	_ = providerID
-	_ = modelID
-	return agent.ErrNotSupported
-}
-
 // Close terminates the session: signals the child, waits for the
 // lifecycle goroutine to drain, then returns. Idempotent. Waits up
 // to closeDrainTimeout for the underlying cmd.Wait goroutine so

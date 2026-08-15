@@ -436,9 +436,9 @@ type sessionPromptValue struct {
 // NEXT assembled step — what dsh's adapter will dispatch to if the
 // user prompts right now. Bridge surfaces Current.Model on
 // EventAgentReady so the runtime can render the receipt header
-// (e.g. "session <id> · model <name>"). The dsh bridge does not
-// route SetModel through /api/session.selectModel — model changes
-// require a fresh session — but Current's shape is the same one
+// (e.g. "session <id> · model <name>"). The dsh bridge intentionally
+// does not route a live model-change call — model changes require a
+// fresh session — but Current's shape is the same one a future
 // /api/session.selectModel would set, so the field names line up
 // with dsh's wire contract.
 //

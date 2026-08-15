@@ -164,7 +164,6 @@ func (*reuseTestDriver) SendPermission(_ string) error                          
 func (*reuseTestDriver) Reset(_ context.Context) error                              { return nil }
 func (*reuseTestDriver) Close() error                                               { return nil }
 func (*reuseTestDriver) Stop(_ context.Context) error                              { return nil }
-func (*reuseTestDriver) SetModel(_ context.Context, _, _ string) error              { return nil }
 
 // itoa is a local strconv-free integer → string helper.
 func itoa(i int) string {

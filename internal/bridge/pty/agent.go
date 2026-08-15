@@ -227,16 +227,6 @@ func (d *driver) Stop(ctx context.Context) error {
 	return agent.ErrNotSupported
 }
 
-// SetModel is not supported on the PTY bridge. PTY has no
-// provider/model concept — the binary decides its own model at
-// startup.
-func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	_ = ctx
-	_ = providerID
-	_ = modelID
-	return agent.ErrNotSupported
-}
-
 // Close terminates the session by closing the PTY. Idempotent.
 func (d *driver) Close() error {
 	if d.closed {

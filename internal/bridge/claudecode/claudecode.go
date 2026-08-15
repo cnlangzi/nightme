@@ -634,17 +634,6 @@ func (d *driver) Stop(ctx context.Context) error {
 	return agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 }
 
-// SetModel is not supported on the claudecode bridge. The
-// stream-json protocol does not expose a model swap mechanism.
-// Operators who want a different model must restart the bridge
-// with the desired `--model` flag.
-func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	_ = ctx
-	_ = providerID
-	_ = modelID
-	return agent.ErrNotSupported
-}
-
 // Close terminates the session: closes stdin (so the child sees EOF
 // and exits cleanly), waits briefly for graceful shutdown, then
 // SIGKILLs if necessary. Idempotent.

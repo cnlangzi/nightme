@@ -14,7 +14,7 @@
 // It implements the unexported agent.driver interface (SendBlocks,
 // SendBlocks, SendPermission, Reset, Close) and exposes bridge-
 // specific extensions (Compact, ListSessions, AvailableBuiltinCommands,
-// Stop, SetModel) for callers that type-assert *agent.Agent.
+// Stop) for callers that type-assert *agent.Agent.
 package opencode
 
 import (
@@ -489,17 +489,6 @@ func (d *driver) Stop(ctx context.Context) error {
 		return fmt.Errorf("opencode: no session")
 	}
 	return d.client.Interrupt(ctx, d.sessionID)
-}
-
-// SetModel switches the active model on the running session.
-func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	if d.server == nil {
-		return fmt.Errorf("opencode: not started")
-	}
-	if d.sessionID == "" {
-		return fmt.Errorf("opencode: no session")
-	}
-	return d.client.SetModel(ctx, d.sessionID, providerID, modelID)
 }
 
 // Compact asks the server to compact the conversation history.

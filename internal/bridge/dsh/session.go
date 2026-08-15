@@ -4,8 +4,7 @@
 // URL from stdout, dials the two WebSocket downlinks, performs
 // session.create, and emits EventAgentReady. It returns a *driver
 // that satisfies the agent.driver interface (SendBlocks /
-// SendPermission / Reset / Close / Stop / SetModel — SetModel
-// returns ErrNotSupported; see the method doc for rationale).
+// SendPermission / Reset / Close / Stop).
 //
 // Lifecycle invariant: `close(events)` happens ONLY in the lifecycle
 // goroutine. Close() closes WS + stdin + cancels, then waits for
@@ -93,11 +92,9 @@ type driver struct {
 	// model is the model's authoritative selection captured at
 	// session-create time via /api/session.models. Bridge stamps
 	// it onto EventAgentReady.Model so the runtime's receipt
-	// header renders "session <id> · model <name>". The field
-	// is read-only on this bridge (SetModel returns
-	// ErrNotSupported); a model change requires restarting the
-	// session so a fresh probe picks up the new default from
-	// ~/.dsh/settings.yaml.
+	// header renders "session <id> · model <name>". A model
+	// change requires restarting the session so a fresh probe
+	// picks up the new default from ~/.dsh/settings.yaml.
 	//
 	// Format: provider-owned model id (e.g. "MiniMax-M3"). The
 	// provider prefix is NOT included — runtime footer compares
@@ -727,22 +724,6 @@ func (d *driver) Stop(ctx context.Context) error {
 		})
 	}
 	return nil
-}
-
-// SetModel is not supported on the dsh bridge. dsh does expose
-// `/api/session.selectModel`, but the local-test deployment
-// (nightme's primary use case) only ever runs against the host's
-// own settings.yaml default — switching mid-session is not a
-// scenario we need to cover. The bridge reads the active model
-// at session-create time (see fetchSessionModels) and stamps it
-// onto EventAgentReady.Model so the runtime can render the
-// receipt header; any future /model-style pick should restart
-// the session instead of going through this bridge.
-func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	_ = ctx
-	_ = providerID
-	_ = modelID
-	return agent.ErrNotSupported
 }
 
 // ─── wire content blocks ──────────────────────────────────────────────

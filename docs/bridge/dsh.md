@@ -801,7 +801,7 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROX
 |----|------|--------|
 | `dsh-jsonrpc-agent-pkg` JSON-RPC bridge | 见 §1.4 — 真 binary 未发布 | PyPI 真 wheel 发布后另 PR |
 | dsh multi-modal 图片 | baseline-only,fallback `[file:...]` | dsh 加 image capability 后 |
-| session.resume 跨 daemon | dsh session 持久化机制是 JSONL,但无显式 `--resume` | dsh 加 resume CLI/API 后 |
+| session.resume 跨 daemon | ~~dsh session 持久化机制是 JSONL,但无显式 `--resume`~~ **已支持**:`POST /api/session.fork{sessionId}` + `POST /api/session.list`;见 §13 | — |
 | subagent UI 渲染 | host frame `subagent.started/finished` 本期不消费 | 后续单独 PR |
 | Windows 支持 | dsh 在 Windows 是 non-goal(`pkg --sea` 不打 Windows) | dsh Windows 支持后 |
 
@@ -844,4 +844,96 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROX
 | 14 | chat session 单测 25+(protocol/http/translate/permissions)| 1d | 🔜 |
 | 15 | chat session e2e 10+(NIGHTME_REAL_DSH=1)| 1d | 🔜 |
 | 16 | chat session review + 修 | 0.5d | 🔜 |
-| **总计** | | **~10.25d** | 5.25d done,5d remaining |
+| 17 | **chat session resume(fork + list)** | 0.5d | ✅ done |
+| **总计** | | **~10.75d** | 5.75d done,5d remaining |
+
+---
+
+## 13. 跨 daemon resume (session.fork + session.list)
+
+dsh web 没有显式的 `--resume <id>` 启动参数,但暴露 2 个 server-side RPC:
+
+| Method | Payload | 用途 |
+|--------|---------|------|
+| `session.fork` | `{sessionId}` | 从现有 session 开新(返回新 sessionId,带父 history) |
+| `session.list` | `{}` / `{limit}` | 列 daemon-wide 全部 session 元数据 |
+
+bridge 在 `Start(cfg)` 路径透传 `cfg.SessionID`(strict-resume 策略):
+
+```
+newDriver
+  └─ handshakeSession(ctx, cfg)         ← ctx 由调用方持有,每个 RPC 各自有 handshakeTimeout
+       ├─ cfg.SessionID != "" → POST /api/session.fork {sessionId}
+       │    ├─ ok            → 捕获新 sessionId,d.sessionID = 新 id,resumed=true,INFO 日志
+       │    └─ 任何失败      → WARN 日志 + resumeUnhealthyError(满足 errors.Is(err, agent.ErrResumeUnhealthy))
+       │                       runtime 收到后清掉 stale id,用户下一条消息自动 fresh start
+       └─ cfg.SessionID == "" → 直接 POST /api/session.create
+                                  (失败是 true bridge error,向上 surface)
+```
+
+**为什么 fork 而不是 create-in-place**:dsh web 设计上不允许"原地接管"一个 sessionId —— 所有 session 写操作都通过 mux WS 上的 server-frame 派发,server 用 rpcId + sessionId 双重 key 做请求关联。原地接管意味着新进程要继续消费旧 server 的 WS,但旧 server 早已 close;物理上不可能。`session.fork` 让 server 端在数据库里建一份新 session,内容复制父 history,旧 sessionId 仍可在 server 列表里查到(供 audit / 二次 fork)。
+
+**为什么 fork 失败直接拒,而不是 fallthrough create**(strict resume,镜像 claudecode §87-103):
+- 静默 fallback → stale sessionId 永远停在 `registry.AgentSessionEntry.SessionID`
+- daemon 每次重启都重 fork 同一个死 id → 用户每次都失忆 → 永久丢历史,operator 看不见(全 Debug 日志)
+- 改成 strict refusal + 满足 `agent.ErrResumeUnhealthy` → runtime 自动清理 stale id(参考 `chatsession.go §1624` 的 retry-without-resume-id 路径 + `agentsession.go §1095` 的 clear-and-persist 路径)
+- 用户代价:多一次冷启动;用户收获:不永久丢历史,operator 看得见 WARN 日志
+
+**实测 fork 失败 error code**(`dsh 0.1.0-rc.6`,2026-08-15 probe):
+
+| Error code | 含义 | bridge 行为 |
+|------------|------|--------------|
+| `fork-unavailable` | session 无 completed turn | ErrResumeUnhealthy |
+| `session-not-found` | sessionId 不存在 | ErrResumeUnhealthy |
+| `bad-request` | payload 缺 `sessionId` | ErrResumeUnhealthy |
+| transport EOF / connection refused | server 不可达 | ErrResumeUnhealthy |
+
+所有 fork 失败统一映射到 `ErrResumeUnhealthy`(经 `resumeUnhealthyError.Is` 双 sentinel match),让 runtime 用统一路径处理。
+
+**resume picker 流程**(`Starter.ListSessions`):
+1. runtime 调用 `Starter.ListSessions(ctx, cfg)`
+2. bridge `Start()` 起一个一次性 dsh web(~1.5s 冷启动)
+3. driver 调 `session.list`,decode `[]Session`(wire 字段 `items`)
+4. bridge `Close()` 关掉一次性 dsh web
+5. runtime 按 `Session.Blank==false && Session.Running==false` 过滤,按 `Session.UpdatedAt DESC` 排序,渲染 picker
+6. 用户选 id → runtime 调 `/use dsh <id>` → 进入下一轮 Start,cfg.SessionID = id
+
+**wire 契约**(`internal/bridge/dsh/protocol.go`,2026-08-15 实机 probe 锁定):
+
+```go
+// Session 一条 = session.list items[] 一项
+type Session struct {
+    ID          string          `json:"sessionId"`     // "session-<uuid>" 格式
+    UpdatedAt   int64           `json:"updatedAt"`     // unix millis(不是 createdAt!)
+    Running     bool            `json:"running"`       // 是否有 in-flight turn
+    Blank       bool            `json:"blank"`         // 是否有 completed turn(决定能否 fork)
+    CWD         string          `json:"cwd,omitempty"`
+    AgentPreset string          `json:"agentPreset,omitempty"` // e.g. "standard"
+    Projections json.RawMessage `json:"projections,omitempty"` // 含 title/todo 等,目前不解
+}
+
+type sessionListValue struct {
+    Items []Session `json:"items"`  // ⚠️ 是 items,不是 sessions(2026-08-15 probe 修正)
+}
+
+type sessionForkValue struct {
+    SessionID string `json:"sessionId"`  // 与 sessionCreateValue 同 shape
+}
+```
+
+**实测关键修正**(vs 初始猜测):
+
+| 项 | 初始猜测 | 实测 | 影响 |
+|----|---------|------|------|
+| `session.list` 字段名 | `sessions` | `items` | 旧实现 decode 出 0 条,UI 全空 |
+| `Session` `CreatedAt` | 有 | 没有,只有 `UpdatedAt` | 排序 key 错 |
+| `Session` `Slug/Title` | 有 | 没有(top-level) | 旧 UI 字段全空,title 在 `projections.values.title` |
+| `limit` 参数 | 透传 | dsh 完全忽略 | 浪费 wire 字节,功能无效 |
+| `session.fork` 在 blank session | 未知 | 拒(`fork-unavailable`) | 大部分首次 fork 都会失败 |
+
+**runtime 集成点**(已存在):
+- `cfg.SessionID` 经 `agentregistry.Spawner` → `bridge.Start` 链路透传
+- `EventAgentReady.SessionID` 经 `agentsession.SetSessionID` 持久化到 `registry.AgentSessionEntry.SessionID`
+- `nightme list` 的 RESUME 列已读该字段,dsh 现在会显示非空
+
+**已知未实装**:dsh picker UI 还没建(目前只 CLI 路径走 opencode);dsh picker UX 是后续单独 PR。本 PR 只补全 wire + bridge 端到端通路,IM 渲染是 follow-up。

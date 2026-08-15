@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // wsHandshakeTimeout bounds the WebSocket upgrade. dsh web cold-starts
@@ -128,10 +130,15 @@ const drainStreamCapBytes = 4 * 1024
 // `done` is the driver's closed chan — when it's closed (bridge
 // shutting down) we return even if the stream is still readable.
 //
+// `sink` is an OPTIONAL ring buffer that receives every chunk we
+// read. Used by drainStderr to mirror bytes into d.stderrTail for
+// diagnostic capture on bridge exit; nil for callers that just want
+// to drain (drainStdout — we don't keep a stdout ring).
+//
 // Implementation note: we use io.ReadAll-style accumulation per
 // chunk (not bufio.Scanner) because dsh streams are often
 // unbuffered newlines, and we're not parsing — just draining.
-func drainStream(r io.ReadCloser, label string, done <-chan struct{}) {
+func drainStream(r io.ReadCloser, label string, done <-chan struct{}, sink *agent.StderrRingBuffer) {
 	buf := make([]byte, drainStreamCapBytes)
 	for {
 		select {
@@ -141,6 +148,9 @@ func drainStream(r io.ReadCloser, label string, done <-chan struct{}) {
 		}
 		n, err := r.Read(buf)
 		if n > 0 {
+			if sink != nil {
+				_, _ = sink.Write(buf[:n])
+			}
 			dLog("dsh: %s: %s", label, strings.TrimRight(string(buf[:n]), "\n"))
 		}
 		if err != nil {

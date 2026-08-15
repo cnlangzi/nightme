@@ -90,6 +90,14 @@ type driver struct {
 	workspace   string
 	agentName   string
 
+	// stderrTail keeps the LAST stderrTailBytes of dsh web's stderr
+	// for diagnostic capture on non-graceful exit. Always populated
+	// by drainStderr (no Debug gating) so a `/diagnose` request can
+	// surface "what did dsh say right before it died" without us
+	// having to reproduce the failure. NOT thread-safe on its own;
+	// drainStderr writes, lifecycle reads at exit.
+	stderrTail *agent.StderrRingBuffer
+
 	// model is the model's authoritative selection captured at
 	// session-create time via /api/session.models. Bridge stamps
 	// it onto EventAgentReady.Model so the runtime's receipt
@@ -226,6 +234,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		cmd:           cmd,
 		stdout:        stdout,
 		stderr:        stderr,
+		stderrTail:    agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		muxWS:         muxWS,
 		hostWS:        hostWS,
 		http:          newHTTPClient(baseURL),
@@ -517,10 +526,39 @@ func (d *driver) lifecycle() {
 	// requested shutdown. SIGINT'd-but-clean waitErr is not a
 	// runtime error (the runtime asked for it).
 	graceful := isClosed(d.closed)
-	if !graceful && waitErr != nil {
-		d.deliver(agent.AgentEvent{Kind: agent.EventAgentError, Err: waitErr})
+	exitKind := agent.ClassifyExit(waitErr, graceful)
+	if !graceful {
+		// Bridge died without our permission — emit EventAgentError
+		// with a structured Diagnostic so the runtime / recovery
+		// policy / /diagnose can act on it. Even when waitErr is
+		// nil (clean-exit but unrequested), we still emit so the
+		// user-visible event stream reflects the unexpected exit.
+		tail := ""
+		if d.stderrTail != nil {
+			tail = d.stderrTail.String()
+		}
+		diag := &agent.BridgeDiagnostic{
+			ExitKind:   exitKind,
+			WaitErr:    waitErr,
+			StderrTail: tail,
+			SessionID:  d.sessionID,
+			AgentName:  d.agentName,
+			KilledAt:   time.Now(),
+		}
+		errMsg := fmt.Sprintf("dsh: lifecycle exit %s: %v", exitKind, errStr(waitErr))
+		if tail != "" {
+			errMsg += "\n--- stderr tail ---\n" + agent.TruncateForLog(tail, 1024)
+		}
+		d.deliver(agent.AgentEvent{
+			Kind:       agent.EventAgentError,
+			Err:        fmt.Errorf("%s", errMsg),
+			Diagnostic: diag,
+		})
 	}
-	dLog("dsh: lifecycle exit", "err", errStr(waitErr), "graceful", graceful)
+	dLog("dsh: lifecycle exit",
+		"exit_kind", exitKind,
+		"graceful", graceful,
+		"err", errStr(waitErr))
 }
 
 // isClosed reports whether the chan has been signaled.
@@ -534,11 +572,22 @@ func isClosed(ch chan struct{}) bool {
 	}
 }
 
-// drainStderr consumes dsh's stderr into the dLog. dsh web may
-// emit warnings (HMR, plugin init) which we want visible in debug
-// logs but don't need to surface to the user.
+// drainStderr consumes dsh's stderr into the dLog AND mirrors raw
+// bytes into d.stderrTail. Why both:
+//
+//   - dLog is Debug-gated (kept quiet in production) — operators
+//     don't want HMR / plugin-init noise.
+//   - d.stderrTail is captured unconditionally (no Debug gating)
+//     so when lifecycle() detects a non-graceful exit, it can
+//     attach the last few hundred bytes of stderr to the
+//     EventAgentError.Diagnostic. /diagnose and the recovery
+//     policy's stderr fingerprint both read from this ring.
+//
+// dsh web's stderr is mostly noise but the LAST lines before a
+// crash (e.g. "dsh: fatal load failure: TypeError: ...") are gold
+// for post-mortem. Capturing them costs ~4 KiB per bridge.
 func (d *driver) drainStderr() {
-	drainStream(d.stderr, "stderr", d.closed)
+	drainStream(d.stderr, "stderr", d.closed, d.stderrTail)
 }
 
 // drainStdout keeps dsh's stdout pipe flowing after parseWebURL
@@ -550,7 +599,7 @@ func (d *driver) drainStderr() {
 // We don't parse the lines (the URL was already captured); we just
 // discard bytes. dLog at debug level for the post-URL output.
 func (d *driver) drainStdout() {
-	drainStream(d.stdout, "stdout (post-url)", d.closed)
+	drainStream(d.stdout, "stdout (post-url)", d.closed, nil)
 }
 
 // deliver sends an event to the runtime's read pump. NEVER blocks:

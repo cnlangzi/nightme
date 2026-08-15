@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -233,5 +234,83 @@ func TestTranslate_EventDone_Dropped(t *testing.T) {
 	// separate outbound message.
 	if _, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: 0}}); ok {
 		t.Error("EventAgentDone should drop (no OutboundMessage)")
+	}
+}
+func TestTranslate_EventError_WithDiagnostic_EmitsOutError(t *testing.T) {
+	// Bridge death with a populated Diagnostic must surface as a
+	// dedicated OutError card so the user sees a clear "dsh
+	// died because X" signal — pre-fix this was silently dropped.
+	in := agent.AgentEvent{
+		Kind:      agent.EventAgentError,
+		AgentName: "dsh",
+		Workspace: "/code",
+		Err:       errors.New("dsh: lifecycle exit signal_killed: signal: killed\n--- stderr tail ---\nfoo bar"),
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:   agent.BridgeExitSignalKilled,
+			WaitErr:    errors.New("signal: killed"),
+			StderrTail: "foo bar",
+			SessionID:  "session-x",
+			AgentName:  "dsh",
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("EventAgentError with Diagnostic should emit, got dropped")
+	}
+	if msg.Kind != messages.OutError {
+		t.Errorf("kind = %v, want OutError", msg.Kind)
+	}
+	// Body should be the FIRST line of Err — long stderr tails
+	// go via Diagnostic, not Text, so the card stays scannable.
+	if msg.Text == "" {
+		t.Error("OutError Text must be non-empty")
+	}
+	if strings.Contains(msg.Text, "stderr tail") {
+		t.Errorf("OutError Text should be first-line only, got %q", msg.Text)
+	}
+	if msg.Diagnostic == nil || msg.Diagnostic.ExitKind != agent.BridgeExitSignalKilled {
+		t.Errorf("Diagnostic should be propagated, got %+v", msg.Diagnostic)
+	}
+	if msg.AgentName != "dsh" {
+		t.Errorf("AgentName = %q, want dsh (channel uses it for the card title)", msg.AgentName)
+	}
+}
+
+func TestTranslate_EventError_NoDiagnostic_Drops(t *testing.T) {
+	// Pre-Diagnostic-era bridges (and EventAgentError events
+	// where the lifecycle couldn't classify the exit) keep the
+	// legacy silent-drop behavior — we don't want to start
+	// surfacing blank "bridge died" cards without the exit
+	// kind.
+	in := agent.AgentEvent{
+		Kind: agent.EventAgentError,
+		Err:  errors.New("plain error"),
+	}
+	if _, ok := Translate("chat1", in); ok {
+		t.Error("EventAgentError without Diagnostic should drop (legacy behavior)")
+	}
+}
+
+func TestTranslate_EventError_FallbackBodyFromDiagnostic(t *testing.T) {
+	// Err is nil but Diagnostic is present — we synthesize a
+	// short body from AgentName + ExitKind so the card is
+	// never blank.
+	in := agent.AgentEvent{
+		Kind:      agent.EventAgentError,
+		AgentName: "dsh",
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:  agent.BridgeExitNonZeroExit,
+			AgentName: "dsh",
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("EventAgentError with Diagnostic should emit")
+	}
+	if msg.Text == "" {
+		t.Error("body must be synthesized from Diagnostic when Err is nil")
+	}
+	if !strings.Contains(msg.Text, "dsh") || !strings.Contains(msg.Text, "non-zero-exit") {
+		t.Errorf("synthesized body should mention agent + exit kind, got %q", msg.Text)
 	}
 }

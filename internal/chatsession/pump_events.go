@@ -149,8 +149,15 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			// as Suspect("hung_prompt") — wrong: the respawned
 			// bridge just started, the previous one died.
 			cs.Watchdog().disarmHungPrompt()
-			slog.Info("chatsession: AS marked Exited (claude process exited)",
-				"chat_id", ev.ChatID, "as_id", ev.AgentSessionID)
+			// Use the AS's actual agent name (e.g. "dsh", "codex")
+			// instead of a hardcoded "claude" — pre-fix the log
+			// line said "claude process exited" even when the
+			// dying bridge was dsh / codex / pi, which made
+			// triage from nightme.log misleading.
+			slog.Info("chatsession: AS marked Exited",
+				"agent", as.Agent,
+				"chat_id", ev.ChatID,
+				"as_id", ev.AgentSessionID)
 			// F-61: immediate respawn right after marking Exited.
 			// Synchronous spawn — the new bridge starts with
 			// --resume <sessionID> and re-processes the

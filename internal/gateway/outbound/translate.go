@@ -133,7 +133,57 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 			},
 		}, true
 
-	case agent.EventAgentDone, agent.EventAgentError:
+	case agent.EventAgentError:
+		// Non-graceful bridge death. We emit a dedicated
+		// OutError card carrying the structured Diagnostic so the
+		// user gets a clear "bridge died because X" signal —
+		// the receipt alone only flips to ✅, which is
+		// indistinguishable from a clean turn end.
+		//
+		// When Diagnostic is nil, return the legacy silent-drop
+		// behaviour: the receipt's terminal emoji flips the same
+		// way regardless, and pre-Diagnostic-era bridges (or
+		// EventAgentError events without a populated Diagnostic,
+		// e.g. Err-only) keep working as before this kind.
+		if ev.Diagnostic == nil {
+			return messages.OutboundMessage{}, false
+		}
+		// Short body = first line of Err; longer detail (stderr
+		// tail, waitErr) goes via Diagnostic for channels that
+		// render it.
+		body := ""
+		if ev.Err != nil {
+			body = ev.Err.Error()
+			// Trim to the first line so the card body stays
+			// scannable — the stderr tail is rendered below the
+			// fold by channels that respect Diagnostic.StderrTail.
+			if nl := strings.IndexByte(body, '\n'); nl >= 0 {
+				body = body[:nl]
+			}
+		}
+		if body == "" {
+			// Err was nil but Diagnostic was populated — synthesize
+			// a short body. Skip the agent name segment when it's
+			// empty rather than emitting a leading-space "bridge"
+			// label with no attribution.
+			if ev.Diagnostic.AgentName != "" {
+				body = fmt.Sprintf("%s process exited (%s)",
+					ev.Diagnostic.AgentName, ev.Diagnostic.ExitKind)
+			} else {
+				body = fmt.Sprintf("process exited (%s)", ev.Diagnostic.ExitKind)
+			}
+		}
+		return messages.OutboundMessage{
+			ChatID:     chatID,
+			Kind:       messages.OutError,
+			Text:       body,
+			Err:        ev.Err,
+			Diagnostic: ev.Diagnostic,
+			AgentName:  ev.AgentName,
+			Workspace:  ev.Workspace,
+		}, true
+
+	case agent.EventAgentDone:
 		// Terminal events are reflected in the receipt's terminal
 		// header; the Stage 3 Feishu renderer flips the reaction
 		// emoji and edits the header line. We don't emit a separate

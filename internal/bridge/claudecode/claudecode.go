@@ -129,10 +129,28 @@ type driver struct {
 	// drainStderr when EOF arrives.
 	stderrLines chan string
 
-	// pumpWG tracks the pumpStream goroutine lifecycle so Close
-	// can wait for it to finish before allowing the events channel
-	// to be closed.
+	// stderrTail keeps the LAST StderrTailBytes of claudecode's
+	// stderr for diagnostic capture on non-graceful exit. Mirrors
+	// dsh / pi / codex pattern. drainStderr writes to it; lifecycle
+	// reads at exit. NOT thread-safe on its own; drainStderr is the
+	// sole writer.
+	stderrTail *agent.StderrRingBuffer
+
+	// pumpWG tracks the pumpStream + stderr-drain + lifecycle
+	// goroutines so Close can wait for them all to finish before
+	// returning. pumpStream + drainStderr decrement pumpWG; lifecycle
+	// ALSO decrements pumpWG (so a stalled stream-pump can't block
+	// lifecycle's defer-close of events) AND closes exitDone so
+	// Close() can wake from its drain wait.
 	pumpWG sync.WaitGroup
+
+	// exitDone is closed by lifecycle after cmd.Wait() returns AND
+	// the events channel has been closed. Close() blocks on
+	// exitDone to guarantee no goroutine outlives the bridge.
+	// Mirrors dsh / pi / codex / opencode. Required because we
+	// moved cmd.Wait() out of Close() into lifecycle() — Close()
+	// now needs an explicit signal that "cmd is fully reaped".
+	exitDone chan struct{}
 
 	// agentName + workspace + branch are captured at session start
 	// so the translate goroutine can stamp them onto the EventAgentReady
@@ -199,12 +217,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		cmd:         cmd,
 		stdin:       bufio.NewWriter(stdin),
 		events:      make(chan agent.AgentEvent, eventsBufferSize),
-		stderrLines: make(chan string, 64),
+		stderrLines:      make(chan string, 64),
+		stderrTail:       agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		pid:         cmd.Process.Pid,
 		agentName:   s.name,
 		workspace:   cfg.Workspace,
 		branch:      branch,
 		closed:      make(chan struct{}),
+		exitDone:    make(chan struct{}),
 	}
 
 	// Register pendingAsk bridge for AskUserQuestion: the default
@@ -257,19 +277,29 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	}
 
 	logger := slog.Default()
-	// pumpStream owns the events-channel close so Close() can wait
-	// for it to drain (via pumpWG) before allowing close.
+	// pumpStream + stderr-drain take 2 slots in pumpWG. The
+	// events-channel close is owned by lifecycle() (was pumpStream
+	// before refactor) so lifecycle has the cmd.Wait result +
+	// stderr tail available when emitting the EventAgentError.
+	// Diagnostic on non-graceful exit. Mirrors dsh / pi / codex /
+	// opencode — claudecode was the outlier.
+	//
+	// lifecycle is NOT in pumpWG (would deadlock — it calls
+	// pumpWG.Wait() inside its body). SafeGo gives us daemon-level
+	// safety; no WaitGroup slot is needed because lifecycle is the
+	// orchestrator, not a peer of the pumps.
 	live.pumpWG.Add(2)
-	// Both pumps are wrapped in agent.SafeGo (outer, daemon-level
-	// safety net) + agent.PanicEventHandler (inner, domain-level
-	// recovery that emits EventAgentError) so a claudecode
-	// translator bug or a wire-decode panic cannot take down the
-	// nightme daemon AND the runtime can surface a "bridge died"
-	// EventAgentError to the user. The 2026-08-15 dsh textBuf
-	// panic that motivated this pattern is the prototype — pre-
-	// fix, it killed the daemon; with this two-layer recovery,
-	// the user would get a bridge-error card and the daemon would
-	// stay alive. See internal/agent/safego.go for the contract.
+	// All three pumps are wrapped in agent.SafeGo (outer,
+	// daemon-level safety net) + agent.PanicEventHandler (inner,
+	// domain-level recovery that emits EventAgentError) so a
+	// claudecode translator bug or a wire-decode panic cannot take
+	// down the nightme daemon AND the runtime can surface a
+	// "bridge died" EventAgentError to the user. The 2026-08-15
+	// dsh textBuf panic that motivated this pattern is the
+	// prototype — pre-fix, it killed the daemon; with this
+	// two-layer recovery, the user would get a bridge-error card
+	// and the daemon would stay alive. See internal/agent/safego.go
+	// for the contract.
 	//
 	// claudecode's pumpStream writes to live.events directly
 	// (no .deliver() method), so we synthesize a panicDeliver
@@ -290,7 +320,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	}
 	agent.SafeGo("claudecode:stream-pump", func() {
 		defer live.pumpWG.Done()
-		defer close(live.events)
 		defer agent.PanicEventHandler(
 			"claudecode:stream-pump", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
@@ -300,22 +329,108 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// stderr drainer — Claude Code logs to stderr; we both log
 	// (debug) and forward each line to live.stderrLines so the
 	// --resume fallback probe can react to deterministic stderr
-	// signals.
+	// signals. Each line is also mirrored into live.stderrTail
+	// (no Debug gating) so lifecycle() can attach the last
+	// StderrTailBytes to EventAgentError.Diagnostic on non-graceful
+	// exit.
 	agent.SafeGo("claudecode:stderr-drain", func() {
 		defer live.pumpWG.Done()
 		defer agent.PanicEventHandler(
 			"claudecode:stderr-drain", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
-		_ = drainStderr(stderr, logger, live.stderrLines)
+		_ = drainStderr(stderr, logger, live.stderrLines, live.stderrTail)
+	})
+
+	// lifecycle — single owner of cmd.Wait + close(events) +
+	// close(exitDone). On non-graceful exit it emits an
+	// EventAgentError with a structured Diagnostic so the runtime /
+	// recovery policy / /diagnose can act on it. Mirrors dsh/pi/
+	// codex/opencode — claudecode was the outlier before this
+	// refactor.
+	agent.SafeGo("claudecode:lifecycle", func() {
+		defer close(live.events)
+		defer close(live.exitDone)
+		defer agent.PanicEventHandler(
+			"claudecode:lifecycle", panicDeliver,
+			"", live.agentName, live.workspace, live.branch)
+		live.lifecycle()
 	})
 
 	return live, nil
 }
 
+// lifecycle is the single owner of cmd.Wait and the events-channel
+// close. Once-close semantics are enforced by the closeOnce in
+// Close(); everything else just nudges the process toward a clean
+// exit. Mirrors dsh/pi/codex/opencode.
+func (d *driver) lifecycle() {
+	waitErr := d.cmd.Wait()
+
+	graceful := isClosed(d.closed)
+	exitKind := agent.ClassifyExit(waitErr, graceful)
+	if !graceful {
+		// Bridge died without our permission — emit EventAgentError
+		// with structured Diagnostic. Even when waitErr is nil
+		// (clean-exit but unrequested) we still emit so the
+		// user-visible event stream reflects the unexpected exit.
+		tail := ""
+		if d.stderrTail != nil {
+			tail = d.stderrTail.String()
+		}
+		diag := &agent.BridgeDiagnostic{
+			ExitKind:   exitKind,
+			WaitErr:    waitErr,
+			StderrTail: tail,
+			SessionID:  "",
+			AgentName:  d.agentName,
+			KilledAt:   time.Now(),
+		}
+		errMsg := fmt.Sprintf("claudecode: lifecycle exit %s: %v", exitKind, errStr(waitErr))
+		if tail != "" {
+			errMsg += "\n--- stderr tail ---\n" + agent.TruncateForLog(tail, 1024)
+		}
+		select {
+		case d.events <- agent.AgentEvent{
+			Kind:       agent.EventAgentError,
+			Err:        fmt.Errorf("%s", errMsg),
+			Diagnostic: diag,
+		}:
+		case <-d.closed:
+			// bridge closed; drop silently
+		default:
+			// buffer full; drop. The events channel
+			// is about to be closed (defer above)
+			// so the reader will see EOF soon.
+		}
+	}
+
+	// Wait for stream-pump + stderr-drain to drain before we close
+	// events. Without this, a still-running pump could panic on
+	// send-to-closed-channel after our defer close(events) fires.
+	// lifecycle itself is NOT in pumpWG — it calls Wait() to wait
+	// for the 2 sibling pumps (stream-pump + stderr-drain).
+	d.pumpWG.Wait()
+}
+
+// isClosed reports whether ch has been closed. Used by lifecycle()
+// to distinguish a graceful Close()-induced exit from an
+// unexpected child crash. Mirrors dsh/session.go's helper.
+func isClosed(ch chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// errStr is defined in print.go and shared between this file and
+// the print-mode driver.
+
 // ─── live-half methods ───
 
-// Events returns the live event stream. Closed by Close() (via the
-// pumpStream goroutine's defer).
+// Events returns the live event stream. Closed by lifecycle()
+// (defer at the top of the claudecode:lifecycle SafeGo).
 func (d *driver) Events() <-chan agent.AgentEvent { return d.events }
 
 // StderrLines exposes the per-line stderr stream captured by
@@ -647,7 +762,10 @@ func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error
 
 // Close terminates the session: closes stdin (so the child sees EOF
 // and exits cleanly), waits briefly for graceful shutdown, then
-// SIGKILLs if necessary. Idempotent.
+// SIGKILLs if necessary. Idempotent. cmd.Wait() is owned by the
+// lifecycle goroutine — Close() only nudges the process and waits
+// on exitDone for the reap signal. Mirrors dsh / pi / codex /
+// opencode.
 func (d *driver) Close() error {
 	var firstErr error
 	d.closeOnce.Do(func() {
@@ -665,26 +783,19 @@ func (d *driver) Close() error {
 			_ = agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 		}
 
-		// Wait up to 2s for graceful exit; SIGKILL after.
-		done := make(chan struct{})
-		go func() {
-			if d.cmd != nil {
-				_ = d.cmd.Wait()
-			}
-			close(done)
-		}()
+		// Wait up to 2s for graceful exit; SIGKILL after. We wait
+		// on d.exitDone (closed by lifecycle after cmd.Wait returns)
+		// rather than calling cmd.Wait() here — cmd.Wait is owned
+		// by lifecycle to guarantee its result + stderr tail are
+		// available when emitting EventAgentError.Diagnostic.
 		select {
-		case <-done:
+		case <-d.exitDone:
 		case <-time.After(2 * time.Second):
 			if d.cmd != nil && d.cmd.Process != nil {
 				_ = d.cmd.Process.Kill()
 			}
-			<-done
+			<-d.exitDone
 		}
-
-		// Wait for pumpStream to drain + close the events channel
-		// itself (via defer in startOnce).
-		d.pumpWG.Wait()
 	})
 	return firstErr
 }
@@ -828,14 +939,15 @@ func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 
 // drainStderr reads stderr line-by-line until EOF. Each non-empty
 // line is forwarded to lines (best-effort: a slow consumer is
-// dropped, never blocked) AND logged. Lines matching the
-// --resume / MCP failure patterns get elevated to Warn so they
-// show up in default-level daemon logs; the rest stay at Debug
-// to keep the log readable. The lines channel is closed when EOF
-// arrives.
+// dropped, never blocked) AND logged AND mirrored into sink (an
+// optional ring buffer kept for diagnostic capture on non-graceful
+// exit). Lines matching the --resume / MCP failure patterns get
+// elevated to Warn so they show up in default-level daemon logs;
+// the rest stay at Debug to keep the log readable. The lines
+// channel is closed when EOF arrives.
 func drainStderr(r interface {
 	Read(p []byte) (int, error)
-}, logger *slog.Logger, lines chan<- string) error {
+}, logger *slog.Logger, lines chan<- string, sink *agent.StderrRingBuffer) error {
 	defer func() {
 		if lines != nil {
 			close(lines)
@@ -850,6 +962,12 @@ func drainStderr(r interface {
 		line := scanner.Text()
 		if line == "" {
 			continue
+		}
+		if sink != nil {
+			// scanner strips the trailing newline; add it back so
+			// the ring buffer holds well-formed lines for
+			// post-mortem rendering.
+			_, _ = sink.Write([]byte(line + "\n"))
 		}
 		if logger != nil {
 			level := slog.LevelDebug

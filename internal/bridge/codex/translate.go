@@ -124,12 +124,12 @@ type translator struct {
 	deliver    func(agent.AgentEvent) agent.AgentEvent
 	onTurnEnd  func()
 	agentName, workspace, branch string
-	stderrTail *ringBuffer
+	stderrTail *agent.StderrRingBuffer
 }
 
 func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent,
 	agentName, workspace, branch string,
-	stderrTail *ringBuffer,
+	stderrTail *agent.StderrRingBuffer,
 	onTurnEnd func(),
 ) *translator {
 	return &translator{
@@ -226,7 +226,7 @@ func (s *session) onServerRequest(method string, rawID, params json.RawMessage) 
 
 // handleError translates a wire "error" notification into
 // EventAgentError, attaching the captured stderr tail.
-func (t *translator) handleError(params json.RawMessage, stderrTail *ringBuffer) {
+func (t *translator) handleError(params json.RawMessage, stderrTail *agent.StderrRingBuffer) {
 	var ev struct {
 		Message string          `json:"message"`
 		Code    json.RawMessage `json:"code"`

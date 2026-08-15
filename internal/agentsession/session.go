@@ -1076,20 +1076,32 @@ func (as *AgentSession) respawn(
 		as.asMu.Unlock()
 
 		// fix-stop (2026-08-15): if the bridge rejected the saved
-		// sessionID with agent.ErrResumeUnhealthy (claudecode's
-		// probeResume detected a "No conversation found" stderr
-		// line, etc.), clear the saved sessionID and persist so
-		// the chat layer's LookupSelectedAgentSession retry path
-		// (which catches this same error and re-Spawns) lands on
-		// a clean fresh session. Without this clear the retry
-		// would re-pass the same stale sessionID and re-fail
-		// identically — the user would see "Failed to spawn
-		// agent" on every message until they edit
-		// agent_sessions.json manually. Keeping the SessionID
-		// clear here does NOT throw away the bridge's loud
-		// failure signal: we still return the wrapped error so
-		// callers that want to surface it (e.g. dispatcher in
-		// non-recovery mode) can.
+		// sessionID with agent.ErrResumeUnhealthy, clear the saved
+		// sessionID and persist so the chat layer's
+		// LookupSelectedAgentSession retry path (which catches
+		// this same error and re-Spawns) lands on a clean fresh
+		// session. Without this clear the retry would re-pass the
+		// same stale sessionID and re-fail identically — the user
+		// would see "Failed to spawn agent" on every message until
+		// they edit agent_sessions.json manually.
+		//
+		// Cases this catches:
+		//   - daemon restart with an AS restored from disk whose
+		//     sessionID the upstream CLI no longer recognizes
+		//     (e.g. nightly cleanup of stale threads, or a
+		//     different host).
+		//   - claudecode SIGINT-fallback path (the stdin pipe was
+		//     broken, so SIGINT terminated the CLI; the chat layer
+		//     respawns with --resume, hits the stale-id branch).
+		//     With the post-fix-stop control_request path this is
+		//     the exception rather than the rule — see
+		//     internal/bridge/claudecode/claudecode.go::Stop for
+		//     the primary happy path.
+		//
+		// Keeping the SessionID clear here does NOT throw away
+		// the bridge's loud failure signal: we still return the
+		// wrapped error so callers that want to surface it (e.g.
+		// dispatcher in non-recovery mode) can.
 		if errors.Is(err, agent.ErrResumeUnhealthy) {
 			as.asMu.Lock()
 			cleared := as.sessionID != ""

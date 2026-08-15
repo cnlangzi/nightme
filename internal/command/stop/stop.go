@@ -28,7 +28,7 @@
 //	opencode  — /interrupt HTTP; session.idle; SessionID kept
 //	codex     — turn/interrupt JSON-RPC; turn/completed{interrupted}; SessionID kept
 //	acp       — session/cancel JSON-RPC; agent settles in-band; SessionID kept
-//	claudecode — SIGINT; CLI graceful shutdown; --resume (recovery via chat-layer ErrResumeUnhealthy retry)
+//	claudecode — control_request{interrupt} stdin; CLI stays alive; turn ends cleanly; SessionID kept
 //	pty       — ErrNotSupported (handler surfaces "use /close")
 //
 // Daemon shutdown (cmd/nightme/run.go) does NOT call this — agents

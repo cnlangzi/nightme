@@ -1062,8 +1062,17 @@ var (
 	// spawn once without a resume id (silently landing the user
 	// on a fresh session). The bridge stays loud (T-alive's
 	// resume-preservation invariant); the chat layer auto-recovers
-	// so the user's next message does not die after /close with a
-	// saved-but-unresumable session id.
+	// so the user's next message does not die when the saved
+	// sessionID has gone stale (daemon restart against an
+	// upstream-cleaned thread, /close on a CLI whose --resume
+	// was rejected, or a claudecode SIGINT-fallback path before
+	// the fix-stop control_request path landed).
+	//
+	// Note: claudecode's primary /stop path (post-fix-stop)
+	// uses control_request{interrupt} on stdin and keeps the
+	// same session alive — it does NOT trigger this sentinel.
+	// ErrResumeUnhealthy is only relevant for /close,
+	// daemon-restart, and the SIGINT-fallback edge case.
 	ErrResumeUnhealthy = errors.New("agent: resume session unhealthy")
 )
 

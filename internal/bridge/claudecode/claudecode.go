@@ -495,61 +495,107 @@ func (d *driver) New(ctx context.Context) error {
 	return d.writeLine(payload)
 }
 
-// Stop sends SIGINT to the claude code child. SIGINT is the
-// documented interrupt mechanism for the Claude Code CLI across
-// all run modes:
+// Stop sends a structured interrupt to the claude code child
+// via the stream-json stdin wire. The CLI's init event
+// advertises the capability `interrupt_receipt_v1`; the
+// corresponding input is a control_request with subtype
+// "interrupt":
 //
-//   - interactive TUI: Esc and Ctrl-C map to SIGINT
-//   - --output-format stream-json pipe (nightme's mode): SIGINT
-//     triggers the CLI's "graceful shutdown" path — terminal
-//     modes are restored, a `--resume` hint is printed on stderr,
-//     the CLI exits cleanly
-//   - SDK / external callers: `kill -INT` triggers the same path
+//	stdin:  {"type":"control_request","request":{"subtype":"interrupt"}}
+//	stdout: {"type":"control_response","response":{"subtype":"success","response":{"still_queued":[]}}}
+//	stdout: {"type":"result","is_error":true,"subtype":"error_during_execution",...}
 //
-// (Reference: anthropics/claude-code CHANGELOG entries
-// "Fixed external SIGINT ... not running graceful shutdown" and
-// "Fixed an interrupt (Esc) sent at the very start of a turn
-// being silently dropped in stream-json/SDK sessions".)
+// The CLI STAYS ALIVE after the interrupt — it can accept a
+// follow-up user message on the same session_id. This is the
+// same pattern as codex's `turn/interrupt` and acp's
+// `session/cancel`: structured in-band interrupt that keeps
+// the process alive so the chat layer's TryFlush picks up
+// the next queued prompt on the same session — no
+// `--resume`, no respawn, no ghost turn.
 //
-// Unlike codex and acp, the stream-json wire does NOT expose a
-// structured cancel method (no `{"type":"interrupt"}` or
-// `control_request` subtype for it). SIGINT IS the canonical
-// mechanism. There is nothing to "improve" here — the bridge
-// sends SIGINT, the CLI handles it gracefully, the readpump
-// sees the events-channel close and emits EventAgentDone, and
-// the next Submit picks up via the chat-layer spawn path.
+// (Reverse-engineered empirically against
+// anthropics/claude-code 2.1.220 with --input-format
+// stream-json --output-format stream-json --verbose. The
+// advertised `interrupt_receipt_v1` capability name is the
+// official hint.)
 //
-// The "real stop" recovery for claudecode lives at the chat
-// layer, not the bridge:
+// Why we changed from SIGINT to control_request:
 //
-//   - chatLayer chokepoint (chatsession.chatsession.go): on
-//     LookupSelectedAgentSession's respawn path, if the
-//     --resume argument fails with the documented stderr
-//     marker ("No conversation found", etc.), the bridge
-//     surfaces agent.ErrResumeUnhealthy. The chat layer
-//     clears the saved sessionID, persists the cleared state,
-//     and respawns once with no resume id — landing the user
-//     on a fresh session instead of an unrecoverable
-//     "Failed to spawn agent" loop.
+//   - Pre-fix: bridge sent SIGINT via SignalProcessGroup.
+//     This terminated the CLI process; chat-layer
+//     RestartFromDeath then re-spawned with `--resume
+//     <sessionID>`. On a turn that was interrupted mid-
+//     flight, `--resume` could hit the "stale resumed turn"
+//     state where the CLI accepts the next user message
+//     but never produces a turn/completed — the user saw
+//     a permanent "Working..." until HungPrompt fired 5 min
+//     later. The `ErrResumeUnhealthy` + chat-layer retry
+//     path was the workaround.
+//   - Post-fix: bridge writes the control_request line on
+//     stdin. The CLI cancels the in-flight turn, emits
+//     control_response + result{error_during_execution},
+//     and remains alive for the next turn on the same
+//     session. The chat layer never sees a process death;
+//     no `--resume`, no respawn. The "stale resumed turn"
+//     failure mode is no longer reachable in normal flow.
 //
-// Without that chat-layer recovery, SIGINT-then-resume on a
-// turn that was interrupted mid-flight would wedge the user
-// on a fresh message (the resume-rejected child stays
-// StatusExited). With it, /stop-then-recover is now bounded:
-// the user gets either (a) a normal resumed conversation, or
-// (b) a clean fresh conversation within a single respawn.
+// SIGINT remains as a last-resort fallback, but only when
+// the stdin pipe is broken — i.e. writeLine returned an
+// error (EPIPE, ErrClosed, etc.). This covers two cases:
 //
-// Stop is fire-and-forget: it does NOT block waiting for a
-// clean EventAgentDone. The chat layer's TryFlush picks up the
-// next queued prompt once the readpump observes the CLI's
-// graceful exit.
+//   1. CLI died before /stop arrived (OOM, external
+//      signal, etc.) — the chat layer's prober will see
+//      StatusExited and respawn cleanly via --resume.
 //
-// Returns ErrNotSupported if the bridge is not started.
+//   2. A hypothetical older CLI that rejects control_request
+//      at the FD level (returns EPIPE) — extremely unlikely;
+//      today's claude binary either accepts the write and
+//      handles control_request, or stays silent.
+//
+// It does NOT cover "old CLI that accepts stdin writes but
+// doesn't recognize control_request" — that case would
+// appear as a successful writeLine followed by no terminal
+// event. HungPrompt catches it after 5 min and the chat
+// layer's prober marks the AS suspect. There is no bridge-
+// side SIGINT trigger for that path because we have no
+// reliable way to detect "CLI accepted the bytes but didn't
+// understand them" — anything we did would either be a
+// no-op (CLI already processed-and-discarded the bogus
+// bytes) or a wrong SIGINT on a healthy CLI.
+//
+// Stop is fire-and-forget: it does NOT block waiting for
+// the control_response or the result event. The chat
+// layer's TryFlush picks up the next queued prompt once
+// the translator observes KindPromptEnded (driven by the
+// result{error_during_execution} event).
+//
+// Returns ErrNotSupported if the bridge has not been
+// started.
 func (d *driver) Stop(ctx context.Context) error {
 	_ = ctx
 	if d.cmd == nil || d.cmd.Process == nil {
 		return agent.ErrNotSupported
 	}
+
+	// Fast-path: structured control_request interrupt on
+	// stdin. The CLI stays alive; the next user message is
+	// accepted on the same session_id. This is the same
+	// pattern as codex's turn/interrupt and acp's
+	// session/cancel — see the file-level comment at the
+	// top of this method for the full wire format.
+	payload := []byte(`{"type":"control_request","request":{"subtype":"interrupt"}}`)
+	if err := d.writeLine(payload); err == nil {
+		// translator will release IsReady when
+		// result{error_during_execution} lands; chat
+		// layer's TryFlush picks up the next queued
+		// prompt on the same session.
+		return nil
+	}
+
+	// Fallback: writeLine failed (broken pipe / EPIPE).
+	// See the function-level comment for the full set of
+	// cases this covers and the ones it deliberately
+	// doesn't.
 	return agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 }
 

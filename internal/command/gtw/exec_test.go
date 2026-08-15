@@ -341,11 +341,16 @@ func TestRunCmd_RespectsCallerDeadline(t *testing.T) {
 	sleepName := "sleep"
 	sleepArgs := []string{"5"}
 	if runtime.GOOS == "windows" {
-		// `timeout` is the Windows equivalent of sleep that
-		// responds to cancellation; without it, cmd /c "sleep 5"
-		// wouldn't terminate cleanly on a short ctx deadline.
-		sleepName = "cmd"
-		sleepArgs = []string{"/c", "ping -n 6 127.0.0.1 > nul"}
+		// Use timeout.exe (Windows System32) directly — a single
+		// process, no children. We previously tried `cmd /c ping`
+		// here, but killing cmd.exe orphans ping.exe which inherits
+		// cmd.exe's stdout pipe handle; cmd.Run() then blocks
+		// waiting for pipe EOF (~5 s) instead of returning at the
+		// 100 ms deadline. timeout.exe has no such child-process
+		// issue, so TerminateProcess cleanly closes its pipe and
+		// cmd.Run() returns immediately.
+		sleepName = "timeout"
+		sleepArgs = []string{"/t", "5", "/nobreak"}
 	}
 	_, _, err := runCmd(ctx, "", sleepName, sleepArgs...)
 	elapsed := time.Since(start)

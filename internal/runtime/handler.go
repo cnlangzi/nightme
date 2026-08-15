@@ -21,6 +21,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // NewEventHandler returns the per-event callback installed on
@@ -194,12 +195,70 @@ func NewEventHandler(
 			out.Workspace = s.Cwd
 		}
 
+		// ══════════════════════════════════════════════════════════════════
+		// ⭐ F-63 核心不变量:Heartbeat 观测必须在 Policy 链之前 ⭐
+		// ══════════════════════════════════════════════════════════════════
+		//
+		// /think off (ThinkModeGatePolicy) 和 /tools off
+		// (ToolsModeGatePolicy) 是显示策略,不是 agent 行为策略。它们
+		// 在下面的 Policy.Apply 时 drop 消息,但 agent 实际上仍在
+		// thinking / 调工具。计数器必须反映真实动作,放在 policy
+		// 之前才能保证 /think off / /tools off 期间数字也照常累计。
+		//
+		// 守护测试:handler_test.go::TestEventHandler_ThinkOff_StillCounts
+		// 和 TestEventHandler_ToolsOff_StillCounts。任一破坏即 test fail。
+		//
+		// OutHeartbeat 自身不发到这里——这是 OutboundKind 由
+		// gateway.Translate 从 AgentEvent 翻译出来的产物,
+		// OutHeartbeat 是观测结果经 em.Send 二次产出,不会进入
+		// Observe 路径,所以也不会自递归。
+		if userMsgID != "" && cs != nil && cs.Heartbeat() != nil {
+			if cs.Heartbeat().Observe(userMsgID, out.Kind) {
+				snap := cs.Heartbeat().Snapshot(userMsgID)
+				// F-63 §3.8 #6: if the tracker entry was LRU-evicted
+				// between Observe (which created/incremented the
+				// entry and returned true) and Snapshot (which
+				// returns zero for absent keys), drop the follow-up
+				// here rather than sending an empty OutHeartbeat
+				// that the adapter's Empty() guard would discard
+				// anyway. Saves a cross-channel round-trip and a
+				// log line for a no-op.
+				if snap.Empty() {
+					if logger != nil {
+						logger.Debug("heartbeat dropped (tracker entry empty post-observe)",
+							"chat_id", chatID,
+							"user_msg_id", userMsgID,
+							"kind", out.Kind.String())
+					}
+				} else {
+					hb := messages.OutboundMessage{
+						ChatID:    chatID,
+						Kind:      messages.OutHeartbeat,
+						ReplyTo:   userMsgID,
+						Heartbeat: &snap,
+					}
+					if err := em.Send(context.Background(), hb); err != nil && logger != nil {
+						logger.Warn("heartbeat follow-up send failed",
+							"chat_id", chatID,
+							"user_msg_id", userMsgID,
+							"err", err)
+					}
+				}
+			}
+		}
+
 		// Apply OutboundPolicy chain. Each policy may mutate
 		// out (e.g. StatusBarStampPolicy fills out.StatusBar)
 		// or short-circuit with drop=true (e.g. ThinkMode /
 		// ToolsMode gates when the corresponding mode is Hide).
 		// The runtime never inspects a policy's verdict — it
 		// just hands the message to the next policy / em.Send.
+		//
+		// F-63: the heartbeat observe above runs BEFORE this loop,
+		// so even when a policy drops the original Out* (e.g. /think
+		// off hides OutThinking), the heartbeat counter has already
+		// been incremented and the OutHeartbeat follow-up has
+		// already been sent. See F-63 §3.2 for the invariant.
 		for _, p := range policies {
 			if p.Apply(&out, env) {
 				return

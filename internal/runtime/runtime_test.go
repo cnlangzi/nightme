@@ -41,12 +41,21 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	}, UserMsgID: "om_user_1"})
 
 	got := ch.Record()
-	if len(got) != 1 {
-		t.Fatalf("Channel.Record len = %d, want 1 (Show mode passes OutThinking)", len(got))
+	// F-63: a single OutThinking yields 2 events now — the
+	// original OutThinking + an OutHeartbeat follow-up. Filter
+	// the heartbeat to count what this test cares about.
+	var thinking *messages.OutboundMessage
+	for i := range got {
+		if got[i].Kind == messages.OutThinking {
+			thinking = &got[i]
+		}
 	}
-	if got[0].Kind.String() != "thinking" {
+	if thinking == nil {
+		t.Fatalf("OutThinking not in record (got %d events: %+v)", len(got), got)
+	}
+	if thinking.Kind.String() != "thinking" {
 		t.Errorf("OutboundKind = %q, want %q (Translate maps the [思考] prefix to OutThinking)",
-			got[0].Kind.String(), "thinking")
+			thinking.Kind.String(), "thinking")
 	}
 }
 
@@ -70,8 +79,8 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 		Text: "[思考] internal reasoning here",
 	}, UserMsgID: "om_user_1"})
 
-	if got := ch.Record(); len(got) != 0 {
-		t.Errorf("Hide mode dropped %d events; want 0. Recorded: %+v", len(got), got)
+	if got := countNonHeartbeat(ch.Record()); got != 0 {
+		t.Errorf("Hide mode dropped %d events; want 0. Recorded: %+v", got, ch.Record())
 	}
 }
 
@@ -129,8 +138,8 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}, UserMsgID: "om_user_1"})
 
 	got := ch.Record()
-	if len(got) != 3 {
-		t.Fatalf("Hide mode forwarded %d non-thinking events; want 3 (OutReply + OutResult + OutToolStart)", len(got))
+	if c := countNonHeartbeat(got); c != 3 {
+		t.Fatalf("Hide mode forwarded %d non-thinking events; want 3 (OutReply + OutResult + OutToolStart)", c)
 	}
 }
 
@@ -170,8 +179,8 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 		Text: "[思考] reasoning",
 	}, UserMsgID: "om_user_1"})
 
-	if got := ch.Record(); len(got) != 0 {
-		t.Errorf("Hide mode with nil logger forwarded %d events; want 0", len(got))
+	if got := countNonHeartbeat(ch.Record()); got != 0 {
+		t.Errorf("Hide mode with nil logger forwarded %d events; want 0", got)
 	}
 }
 
@@ -195,7 +204,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 
 	// Phase 1: default Show → forwarded.
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_1"})
-	if got := len(ch.Record()); got != 1 {
+	if got := countNonHeartbeat(ch.Record()); got != 1 {
 		t.Fatalf("phase1 (Show) forwarded %d events; want 1", got)
 	}
 
@@ -206,7 +215,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 
 	// Phase 2: Hide → dropped.
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_2"})
-	if got := len(ch.Record()); got != 1 {
+	if got := countNonHeartbeat(ch.Record()); got != 1 {
 		t.Errorf("phase2 (Hide) total events = %d; want 1 (the phase-1 event only)", got)
 	}
 
@@ -217,7 +226,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 
 	// Phase 3: Show again → forwarded.
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_3"})
-	if got := len(ch.Record()); got != 2 {
+	if got := countNonHeartbeat(ch.Record()); got != 2 {
 		t.Errorf("phase3 (Show again) total events = %d; want 2 (phase1 + phase3)", got)
 	}
 }
@@ -528,14 +537,23 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	}, UserMsgID: "om_user_1"})
 
 	got := ch.Record()
-	if len(got) != 2 {
-		t.Fatalf("Channel.Record len = %d, want 2 (Show mode passes both tool events)", len(got))
+	// F-63: OutHeartbeat now arrives BEFORE the original event
+	// (observe-before-policy). Re-find tool events by Kind rather
+	// than relying on positional indexing.
+	var toolStart, toolEnd *messages.OutboundMessage
+	for i := range got {
+		switch got[i].Kind {
+		case messages.OutToolStart:
+			toolStart = &got[i]
+		case messages.OutToolEnd:
+			toolEnd = &got[i]
+		}
 	}
-	if got[0].Kind.String() != "tool_start" {
-		t.Errorf("first event Kind = %q, want %q", got[0].Kind.String(), "tool_start")
+	if toolStart == nil {
+		t.Fatalf("OutToolStart not in record (got %d events: %+v)", len(got), got)
 	}
-	if got[1].Kind.String() != "tool_end" {
-		t.Errorf("second event Kind = %q, want %q", got[1].Kind.String(), "tool_end")
+	if toolEnd == nil {
+		t.Fatalf("OutToolEnd not in record (got %d events: %+v)", len(got), got)
 	}
 }
 
@@ -568,8 +586,8 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 		ToolEnd: &agent.AgentToolEndEvent{Name: "Read", Output: "line1\nline2"},
 	}, UserMsgID: "om_user_1"})
 
-	if got := ch.Record(); len(got) != 0 {
-		t.Errorf("Hide mode dropped %d tool events; want 0. Recorded: %+v", len(got), got)
+	if got := countNonHeartbeat(ch.Record()); got != 0 {
+		t.Errorf("Hide mode dropped %d tool events; want 0. Recorded: %+v", got, ch.Record())
 	}
 }
 
@@ -616,8 +634,8 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}, UserMsgID: "om_1"})
 
 	got := ch.Record()
-	if len(got) != 3 {
-		t.Fatalf("Hide mode forwarded %d non-tool events; want 3 (OutReply + OutResult + OutThinking)", len(got))
+	if c := countNonHeartbeat(got); c != 3 {
+		t.Fatalf("Hide mode forwarded %d non-tool events; want 3 (OutReply + OutResult + OutThinking)", c)
 	}
 }
 
@@ -642,7 +660,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 
 	// Phase 1: default Hide → dropped.
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_1"})
-	if got := len(ch.Record()); got != 0 {
+	if got := countNonHeartbeat(ch.Record()); got != 0 {
 		t.Fatalf("phase1 (Hide) forwarded %d events; want 0", got)
 	}
 
@@ -653,7 +671,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 
 	// Phase 2: Show → forwarded.
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_2"})
-	if got := len(ch.Record()); got != 1 {
+	if got := countNonHeartbeat(ch.Record()); got != 1 {
 		t.Errorf("phase2 (Show) total events = %d; want 1", got)
 	}
 
@@ -664,7 +682,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 
 	// Phase 3: Hide → dropped again.
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_3"})
-	if got := len(ch.Record()); got != 1 {
+	if got := countNonHeartbeat(ch.Record()); got != 1 {
 		t.Errorf("phase3 (Hide again) total events = %d; want 1 (phase1 + phase3 dropped, phase2 kept)", got)
 	}
 }
@@ -721,11 +739,22 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	}, UserMsgID: "om_user_2"})
 
 	got := ch.Record()
-	if len(got) != 1 {
-		t.Fatalf("expected 1 forwarded event (OutToolStart after /tools on); got %d: %+v", len(got), got)
+	if c := countNonHeartbeat(got); c != 1 {
+		t.Fatalf("expected 1 forwarded event (OutToolStart after /tools on); got %d: %+v", c, got)
 	}
-	if got[0].Kind.String() != "tool_start" {
-		t.Errorf("forwarded event Kind = %q, want %q", got[0].Kind.String(), "tool_start")
+	// Find the non-heartbeat forwarded event and assert its Kind.
+	var found *messages.OutboundMessage
+	for i := range got {
+		if got[i].Kind != messages.OutHeartbeat {
+			found = &got[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("no non-heartbeat forwarded event found")
+	}
+	if found.Kind.String() != "tool_start" {
+		t.Errorf("forwarded event Kind = %q, want %q", found.Kind.String(), "tool_start")
 	}
 }
 
@@ -1139,4 +1168,19 @@ func TestShutdownRun_CloseAllCancelsCaches(t *testing.T) {
 	if fresh == pre {
 		t.Errorf("GetOrCreate after CloseAll returned the old pointer; want a fresh cache")
 	}
+}
+
+// countNonHeartbeat (F-63) returns the number of recorded events
+// excluding OutHeartbeat. Pre-F-63 tests that counted total
+// forwarded events need to subtract the heartbeat side-channel
+// emissions to keep their original assertions meaningful (those
+// tests are about gate behaviour, not heartbeat counting).
+func countNonHeartbeat(msgs []messages.OutboundMessage) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Kind != messages.OutHeartbeat {
+			n++
+		}
+	}
+	return n
 }

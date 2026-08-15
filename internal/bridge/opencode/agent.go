@@ -294,13 +294,82 @@ func (d *driver) lifecycle() {
 	defer close(d.events)
 	defer close(d.stopDeliver)
 	defer close(d.exitDone)
+
+	var waitErr error
 	if d.server != nil && d.server.cmd != nil {
-		_, _ = d.server.cmd.Process.Wait()
+		_, waitErr = d.server.cmd.Process.Wait()
 	} else {
 		<-d.closed
 	}
 	d.pumpWG.Wait()
+
+	// Emit a structured Diagnostic on non-graceful exit so the
+	// runtime / recovery policy / /diagnose can act on it. Even
+	// when waitErr is nil (clean-exit but unrequested) we still
+	// emit so the user-visible event stream reflects the
+	// unexpected exit. Mirrors dsh/pi/claudecode/codex.
+	//
+	// We bypass d.deliver here because d.deliver blocks on
+	// <-d.stopDeliver / <-d.closed / <-d.exitDone, none of which
+	// have fired yet — the defers above will fire them on function
+	// return, but the deliver needs to happen BEFORE those closes
+	// so the runtime can actually read the diagnostic. Use a
+	// non-blocking send with drop-on-full + drop-on-closed (matches
+	// the panicDeliver shape in newDriver).
+	graceful := isClosed(d.closed)
+	exitKind := agent.ClassifyExit(waitErr, graceful)
+	if !graceful {
+		tail := ""
+		if d.server != nil && d.server.stderrTail != nil {
+			tail = d.server.stderrTail.String()
+		}
+		diag := &agent.BridgeDiagnostic{
+			ExitKind:   exitKind,
+			WaitErr:    waitErr,
+			StderrTail: tail,
+			SessionID:  d.sessionID,
+			AgentName:  d.name,
+			KilledAt:   time.Now(),
+		}
+		errMsg := fmt.Sprintf("opencode: lifecycle exit %s: %v", exitKind, errStr(waitErr))
+		if tail != "" {
+			errMsg += "\n--- stderr tail ---\n" + agent.TruncateForLog(tail, 1024)
+		}
+		ev := agent.AgentEvent{
+			Kind:       agent.EventAgentError,
+			Err:        fmt.Errorf("%s", errMsg),
+			Diagnostic: diag,
+			SessionID:  d.sessionID,
+			Model:      d.model,
+			AgentName:  d.name,
+			Workspace:  d.workspace,
+			Branch:     d.branch,
+		}
+		select {
+		case d.events <- ev:
+		case <-d.closed:
+		default:
+			// Buffer full or bridge already closed. The events
+			// channel is about to be closed (defer above) so
+			// the reader will see EOF soon.
+		}
+	}
 }
+
+// isClosed reports whether ch has been closed. Used by lifecycle()
+// to distinguish a graceful Close()-induced exit from an
+// unexpected child crash. Mirrors dsh/session.go's helper.
+func isClosed(ch chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// errStr is defined in print.go and shared between this file and
+// the print-mode driver.
 
 // ─── turn watchdog ───────────────────────────────────────────────
 

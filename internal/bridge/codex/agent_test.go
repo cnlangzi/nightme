@@ -92,7 +92,7 @@ func TestStageImage_ExtensionFromPath(t *testing.T) {
 	// Build a session stub just for staging.
 	s := &session{
 		workspace:  workspaceDir,
-		stderrTail: newRingBuffer(stderrTailBytes),
+		stderrTail: agent.NewStderrRingBuffer(agent.StderrTailBytes),
 	}
 	a.session = s
 
@@ -131,7 +131,7 @@ func TestStageImage_ExtensionFromMimeType(t *testing.T) {
 	}
 	s := &session{
 		workspace:  workspaceDir,
-		stderrTail: newRingBuffer(stderrTailBytes),
+		stderrTail: agent.NewStderrRingBuffer(agent.StderrTailBytes),
 	}
 	a.session = s
 

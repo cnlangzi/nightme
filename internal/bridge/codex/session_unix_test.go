@@ -1,4 +1,10 @@
 //go:build !windows
+// NOTE: ringBuffer-specific tests previously here were migrated to
+// internal/agent/bridge_diagnostic_test.go::TestStderrRingBuffer
+// when codex's local ringBuffer was unified onto
+// agent.StderrRingBuffer (see bridge_diagnostic.go for the shared
+// type and StderrTailBytes const). Keep that file's coverage
+// authoritative — do NOT reintroduce a parallel test here.
 
 package codex
 
@@ -7,45 +13,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// ─── ringBuffer tests ───
-
-func TestRingBuffer_BelowCapacity(t *testing.T) {
-	rb := newRingBuffer(100)
-	_, _ = rb.Write([]byte("hello"))
-	_, _ = rb.Write([]byte(" world"))
-	if got := rb.String(); got != "hello world" {
-		t.Errorf("ringBuffer = %q, want %q", got, "hello world")
-	}
-}
-
-func TestRingBuffer_TrimsToCapacity(t *testing.T) {
-	rb := newRingBuffer(5)
-	_, _ = rb.Write([]byte("abc"))
-	_, _ = rb.Write([]byte("def"))
-	_, _ = rb.Write([]byte("ghi")) // total 9, last 5 = "defghi"
-	// After "abc" + "def" + "ghi" = 9 bytes; trim to last 5 = "efghi".
-	if got := rb.String(); got != "efghi" {
-		t.Errorf("ringBuffer after overflow = %q, want %q", got, "efghi")
-	}
-}
-
-func TestRingBuffer_LargeSingleWrite(t *testing.T) {
-	rb := newRingBuffer(10)
-	big := make([]byte, 100)
-	for i := range big {
-		big[i] = byte('a' + i%26)
-	}
-	_, _ = rb.Write(big)
-	if got := rb.String(); len(got) != 10 {
-		t.Errorf("ringBuffer = %d bytes, want 10", len(got))
-	}
-	// Last 10 bytes of big.
-	expected := string(big[len(big)-10:])
-	if got := rb.String(); got != expected {
-		t.Errorf("ringBuffer = %q, want %q", got, expected)
-	}
-}
 
 // ─── detectBranch tests ───
 

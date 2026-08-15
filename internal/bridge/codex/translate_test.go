@@ -21,7 +21,7 @@ func captureTranslator() (*translator, *capturedEvents) {
 		cap.ch <- ev
 		return ev
 	}
-	t := newTranslator(deliver, "codex", "/tmp/ws", "main", newRingBuffer(stderrTailBytes), nil)
+	t := newTranslator(deliver, "codex", "/tmp/ws", "main", agent.NewStderrRingBuffer(agent.StderrTailBytes), nil)
 	return t, cap
 }
 

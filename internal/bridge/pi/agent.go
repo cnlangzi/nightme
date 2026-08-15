@@ -196,9 +196,16 @@ type driver struct {
 	stdinW  io.WriteCloser
 	stdoutR io.ReadCloser
 	stderrR io.ReadCloser
-	rpc     *rpcClient
-	events  chan agent.AgentEvent
-	pid     int
+
+	// stderrTail mirrors the LAST StderrTailBytes of the child's
+	// stderr for diagnostic capture on non-graceful exit. Always
+	// populated (no Debug gating) — see dsh's mirror field for
+	// the rationale. NOT thread-safe on its own; drainStderr
+	// writes, lifecycle reads at exit.
+	stderrTail *agent.StderrRingBuffer
+	rpc        *rpcClient
+	events     chan agent.AgentEvent
+	pid        int
 
 	// agentName / workspace / branch captured at Start and
 	// stamped onto EventAgentReady events for the channel-layer
@@ -308,6 +315,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		stdinW:     stdin,
 		stdoutR:    stdout,
 		stderrR:    stderr,
+		stderrTail: agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		rpc:        newRPCClient(stdin),
 		events:     make(chan agent.AgentEvent, eventsBufferSize),
 		pid:        cmd.Process.Pid,
@@ -835,12 +843,19 @@ func (d *driver) readPump() {
 
 // drainStderr consumes the child process's stderr to keep the
 // pipe from blocking the child on stderr writes (a wedged stderr
-// drain deadlocks the cmd.Wait that lifecycle needs).
+// drain deadlocks the cmd.Wait that lifecycle needs). The same
+// read bytes are also written to d.stderrTail (always-on, no Debug
+// gating) so lifecycle() can attach the last StderrTailBytes to
+// the EventAgentError.Diagnostic on non-graceful exit. Mirrors the
+// dsh / codex pattern.
 func (d *driver) drainStderr() {
 	buf := make([]byte, 4096)
 	for {
 		n, err := d.stderrR.Read(buf)
 		if n > 0 {
+			if d.stderrTail != nil {
+				_, _ = d.stderrTail.Write(buf[:n])
+			}
 			d.logger.Debug("pi stderr",
 				slog.String("chunk", string(buf[:n])),
 			)
@@ -887,10 +902,33 @@ func (d *driver) lifecycle() {
 	// any pending callers.
 	d.rpc.failPending(ErrSessionClosed)
 
-	if err != nil && !d.isGracefulClose() {
+	graceful := d.isGracefulClose()
+	exitKind := agent.ClassifyExit(err, graceful)
+	if !graceful {
+		// Bridge died without our permission — emit EventAgentError
+		// with structured Diagnostic. Even when err is nil
+		// (clean-exit but unrequested) we still emit so the
+		// user-visible event stream reflects the unexpected exit.
+		tail := ""
+		if d.stderrTail != nil {
+			tail = d.stderrTail.String()
+		}
+		diag := &agent.BridgeDiagnostic{
+			ExitKind:   exitKind,
+			WaitErr:    err,
+			StderrTail: tail,
+			SessionID:  "",
+			AgentName:  d.agentName,
+			KilledAt:   time.Now(),
+		}
+		errMsg := fmt.Sprintf("pi: lifecycle exit %s: %v", exitKind, errStr(err))
+		if tail != "" {
+			errMsg += "\n--- stderr tail ---\n" + agent.TruncateForLog(tail, 1024)
+		}
 		d.deliver(agent.AgentEvent{
-			Kind: agent.EventAgentError,
-			Err:  fmt.Errorf("pi: process exit: %w", err),
+			Kind:       agent.EventAgentError,
+			Err:        fmt.Errorf("%s", errMsg),
+			Diagnostic: diag,
 		})
 	}
 	d.pumpWG.Wait()

@@ -78,18 +78,6 @@ type rpcError struct {
 	Details json.RawMessage `json:"details,omitempty"`
 }
 
-// respondRequest is the payload for POST /api/respond — the only
-// "API method" that doesn't go through the unary dispatch table but
-// is the answer channel for server-initiated frames (approval /
-// question). See fetch/handler.ts and the approval/requested mux
-// frame below.
-type respondRequest struct {
-	Type    string          `json:"type"`   // "client-request"
-	RPCID   string          `json:"rpcId"`  // we mint
-	Method  string          `json:"method"` // "respond"
-	Payload respondPayload  `json:"payload"`
-}
-
 // respondPayload is the inner body for the /api/respond call.
 // `RpcID` here is the **server-frame's rpcId** (the approval/requested
 // or question/requested we received), NOT our client's rpcId.
@@ -419,11 +407,79 @@ type sessionCreateValue struct {
 	SessionID string `json:"sessionId"`
 }
 
-// sessionPromptValue is the `value` payload of an OK session.prompt
-// response. MessageID is durable; we don't currently act on it
-// (events flow via WS, not by polling this id).
-type sessionPromptValue struct {
-	MessageID string `json:"messageId"`
+// sessionForkValue is the `value` payload of an OK session.fork
+// response. dsh web's session.fork creates a NEW session (with a
+// new server-assigned sessionId) that carries the parent's event
+// history; the caller treats the returned id as the new live
+// sessionId for all subsequent session.prompt / session.cancel
+// calls. Wire shape is identical to session.create by design —
+// both endpoints hand back a "your new session is X" envelope.
+// Documented at docs/bridge/dsh.md §1.3 ("从现有 session 开新
+// (daemon 重启续接用)").
+type sessionForkValue struct {
+	SessionID string `json:"sessionId"`
+}
+
+// ─── /api/session.list response ───────────────────────────────────
+
+// Session is one entry in the session.list result. Wire shape
+// captured from a real `dsh --profile web` 0.1.0-rc.6 instance on
+// 2026-08-15 (docs/probe/dsh-2026-08-15.sh in this commit's notes
+// — pre-PR-validation probe). Every field except ID is audit/UI
+// only, but we decode them so a future IM-rendered picker card
+// (blank/running for "is this resumable?", cwd for "is this mine?")
+// doesn't need a second decode pass.
+//
+// Field notes (verified against real wire):
+//
+//   - ID          — the session's wire id. Format is a UUID
+//                   prefixed with "session-" (e.g.
+//                   "session-e4fe0be6-c082-48a5-be70-77628e7486bc").
+//                   Same shape as sessionCreateValue.SessionID.
+//   - UpdatedAt   — unix millis of the last write. Use this as
+//                   the "most recent" sort key for picker UI.
+//   - Running     — bool; true while the session has an in-flight
+//                   turn. Forks of a running session may behave
+//                   differently (or be rejected) — see the
+//                   fork-unavailable error class.
+//   - Blank       — bool; true for sessions with zero completed
+//                   turns. dsh's session.fork refuses blank
+//                   sessions with error code "fork-unavailable"
+//                   ("no completed turn to fork from"). The
+//                   picker should pre-filter blanks for a
+//                   smoother UX.
+//   - CWD         — directory the session was created against.
+//                   Used by the picker to filter sessions for the
+//                   current /cwd (cross-workspace contamination is
+//                   annoying — docs/bridge/dsh.md §11).
+//   - AgentPreset — registered agent preset key (e.g.
+//                   "standard"). Audit only; the bridge doesn't
+//                   dispatch on this.
+//   - Projections — optional. Some sessions include a
+//                   "projections.values" object carrying derived
+//                   metadata (title, turnCount, tokenUsage). The
+//                   bridge does NOT decode it — kept as RawMessage
+//                   so a server-side projection schema bump
+//                   doesn't break us. Future "show me the title"
+//                   picker card would decode `projections.values.title`.
+type Session struct {
+	ID          string          `json:"sessionId"`
+	UpdatedAt   int64           `json:"updatedAt"`
+	Running     bool            `json:"running"`
+	Blank       bool            `json:"blank"`
+	CWD         string          `json:"cwd,omitempty"`
+	AgentPreset string          `json:"agentPreset,omitempty"`
+	Projections json.RawMessage `json:"projections,omitempty"`
+}
+
+// sessionListValue is the `value` payload of an OK session.list
+// response. IMPORTANT: the wire field is `items` (NOT `sessions`)
+// — confirmed via 实机 HTTP probe 2026-08-15 against dsh 0.1.0-rc.6.
+// The first version of this struct assumed `sessions` and silently
+// produced zero-value Sessions for every entry; the picker UI
+// would have shown "all blank entries". Fixed.
+type sessionListValue struct {
+	Items []Session `json:"items"`
 }
 
 // ─── /api/session.models response ────────────────────────────────────

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -50,6 +51,11 @@ func runCmd(ctx context.Context, dir, name string, args ...string) (stdout, stde
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	// MSYS env handling: applied only on Windows via the
+	// applyMSYSEnvNoPathConv helper in exec_windows.go. On
+	// Unix/macOS the helper is a no-op (we just inherit
+	// os.Environ()), so cmd.Env stays platform-agnostic.
+	cmd.Env = applyMSYSEnvNoPathConv(os.Environ())
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
 	cmd.Stderr = &se

@@ -21,6 +21,21 @@
 //     is rejected at the prompt boundary per 实机 HTTP probe
 //     2026-08-14).
 //
+//     Resume: cfg.SessionID triggers `POST /api/session.fork`,
+//     which dsh web translates into a NEW server-assigned session
+//     whose history mirrors the parent's. On fork failure (transport
+//     error, business error, server missing the requested id) the
+//     bridge deliberately refuses to spawn — Start returns an error
+//     wrapping agent.ErrResumeUnhealthy so the runtime clears the
+//     stale sessionId and respawns fresh on the user's next message.
+//     This is strict resume (NOT a silent fall-back to session.create),
+//     mirroring claudecode/claudecode.go's resume-preservation
+//     invariant. See session.go:handshakeSession for the full
+//     rationale. Resume-picker support: `Starter.ListSessions` runs
+//     `POST /api/session.list` against a throwaway dsh web and
+//     returns the full Session array (the runtime filters by
+//     cwd before display).
+//
 // The bridge deliberately does NOT modify dsh's local default
 // configuration. Per the user's locked-in principle
 // (agent-no-config-tampering), nightme only injects:

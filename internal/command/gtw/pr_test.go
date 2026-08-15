@@ -631,7 +631,11 @@ func TestDispatchPR_MalformedYml(t *testing.T) {
 	// from the temp dir) — write yml directly.
 	tmp := t.TempDir()
 	withCwd(t, tmp)
-	writeYml(t, tmp, Context{Branch: "wt", RepoRoot: "/r"})
+	// RepoRoot must pass filepath.IsAbs on the test's host OS.
+	// See TestGTWYml_RoundTrip_AllFields for the bare "/" + Go
+	// 1.26+ Windows non-absolute path quirk; t.TempDir() is
+	// always absolute on every platform.
+	writeYml(t, tmp, Context{Branch: "wt", RepoRoot: tmp})
 	_ = rig.cs.SetSelectedCwd(tmp)
 	rig.installDeps()
 	cs := rig.cs

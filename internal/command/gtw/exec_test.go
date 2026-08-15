@@ -2,8 +2,10 @@ package gtw
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,9 +16,21 @@ import (
 // because the daemon's CWD no longer existed. The fix is the
 // dir-binds-cmd.Dir contract in runCmd; this test pins it.
 //
-// Strategy: spawn a process that prints its CWD via `pwd`, with
-// dir explicitly set to a temp dir. Assert the printed CWD matches
-// the temp dir, NOT whatever the test process inherited.
+// The contract: when nightme sets `cmd.Dir = X`, the child
+// process MUST be able to operate in directory X. We test the
+// CONTRACT, not the child's "pwd" output (which is a flaky
+// test artifact — MSYS libc's intercepted getcwd() returns
+// translated paths like `/c/Users/...` even when cmd.Dir is the
+// real `C:\Users\...`).
+//
+// To test the contract on every platform, we have the child
+// create a sentinel file in its current dir, then verify the
+// file is visible at the EXACT path we set cmd.Dir to. If cmd.Dir
+// wasn't honored, the child would have created the file in a
+// different dir and the sentinel check would fail.
+//
+// The sentinel name is a unique string so two parallel test
+// runs (e.g. t.Parallel with a shared tmpfs) don't collide.
 func TestRunCmd_DirBinding(t *testing.T) {
 	dir := t.TempDir()
 	// t.TempDir() may be a symlink on macOS (/var → /private/var);
@@ -26,13 +40,36 @@ func TestRunCmd_DirBinding(t *testing.T) {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
 
-	stdout, stderr, err := runCmd(context.Background(), real, "pwd")
-	if err != nil {
-		t.Fatalf("runCmd: %v (stderr=%s)", err, stderr)
+	sentinelName := fmt.Sprintf("nightme-sentinel-%d", os.Getpid())
+	// On Unix: use the system shell. On Windows: use a command
+	// that's NOT an MSYS-bash tool. `cmd.exe /c` is Windows-native
+	// and queries the kernel's CWD directly (no MSYS libc
+	// interception), so the file lands at the real cmd.Dir path.
+	var cmdName string
+	var cmdArgs []string
+	if runtime.GOOS == "windows" {
+		cmdName = "cmd.exe"
+		cmdArgs = []string{"/c", "echo " + sentinelName + " > " + sentinelName}
+	} else {
+		cmdName = "sh"
+		cmdArgs = []string{"-c", "echo " + sentinelName + " > " + sentinelName}
 	}
-	// pwd prints the dir verbatim; runCmd trims the trailing \n.
-	if got := strings.TrimSpace(stdout); got != real {
-		t.Errorf("child CWD = %q, want %q (runCmd did not bind cmd.Dir)", got, real)
+
+	_, _, err = runCmd(context.Background(), real, cmdName, cmdArgs...)
+	if err != nil {
+		t.Fatalf("runCmd: %v", err)
+	}
+
+	// Sentinel file MUST exist at the EXACT path nightme set
+	// cmd.Dir to. If cmd.Dir wasn't honored (e.g., the runCmd
+	// implementation regresses), the file would be in a different
+	// dir and this assertion would fail. MSYS translation of
+	// the path is irrelevant here because we use the *real* path
+	// (the same `real` we passed to cmd.Dir) for the stat.
+	sentinelPath := filepath.Join(real, sentinelName)
+	if _, err := os.Stat(sentinelPath); err != nil {
+		t.Fatalf("sentinel file not at %s: %v (runCmd did not honor cmd.Dir=%q)",
+			sentinelPath, err, real)
 	}
 }
 
@@ -41,41 +78,49 @@ func TestRunCmd_DirBinding(t *testing.T) {
 // "no workspace yet" path used by callers that haven't determined
 // their worktree.
 //
-// We avoid an exact-string comparison against os.Getwd() because
-// /bin/pwd on some filesystems (macOS /var ↔ /private/var, NFS,
-// OverlayFS) reports a different symlink-resolved path than Go's
-// os.Getwd does — a brittle test on otherwise-correct code.
-// Instead we assert the child is NOT in a known-bad directory
-// (i.e. it inherited something sensible, not the test binary's
-// arbitrary temp location).
+// We test the contract (child operates in the parent's CWD) by
+// asking the child to create a sentinel file and verifying it
+// lands in the parent's CWD. On Windows we use cmd.exe to avoid
+// the MSYS libc getcwd() translation that pwd exhibits — what
+// matters is whether the child's file-system operations honour
+// cmd.Dir, not what its shell getcwd reports.
 func TestRunCmd_EmptyDirInherits(t *testing.T) {
 	parent, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Resolve symlinks so the sentinel check works on macOS
+	// (/var → /private/var) without the parent-cwd comparison
+	// mismatch that bit the previous pwd-based implementation.
+	parentReal, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	stdout, _, err := runCmd(context.Background(), "", "pwd")
+	sentinelName := fmt.Sprintf("nightme-inherit-%d", os.Getpid())
+	var cmdName string
+	var cmdArgs []string
+	if runtime.GOOS == "windows" {
+		cmdName = "cmd.exe"
+		cmdArgs = []string{"/c", "echo " + sentinelName + " > " + sentinelName}
+	} else {
+		cmdName = "sh"
+		cmdArgs = []string{"-c", "echo " + sentinelName + " > " + sentinelName}
+	}
+
+	_, _, err = runCmd(context.Background(), "", cmdName, cmdArgs...)
 	if err != nil {
 		t.Fatalf("runCmd: %v", err)
 	}
-	got := strings.TrimSpace(stdout)
-	if got == "" {
-		t.Fatal("child pwd output empty (runCmd broke inheritance?)")
+
+	sentinelPath := filepath.Join(parentReal, sentinelName)
+	if _, err := os.Stat(sentinelPath); err != nil {
+		t.Fatalf("sentinel file not at %s: %v (runCmd with empty dir "+
+			"should inherit parent CWD %q)", sentinelPath, err, parentReal)
 	}
-	if !strings.HasPrefix(got, "/") {
-		t.Errorf("child CWD = %q, want an absolute path (inherited parent)", got)
-	}
-	// Sanity: the child should still see roughly the same tree the
-	// parent was in. Compare only the last 2 path segments — that
-	// stays stable across the symlink-resolution differences
-	// mentioned above (the test's package directory is always
-	// .../internal/command/gtw regardless of how /var resolves).
-	parentTail := tailSegments(parent, 2)
-	gotTail := tailSegments(got, 2)
-	if parentTail != gotTail {
-		t.Errorf("child CWD tail = %q, want %q (parent %q vs child %q — inheritance broken)",
-			gotTail, parentTail, parent, got)
-	}
+	// Clean up the sentinel so the test package's tmp dir
+	// (which we don't own) doesn't accumulate files.
+	_ = os.Remove(sentinelPath)
 }
 
 // TestRunCmd_EmptyNameRejected: name == "" is a programmer error,
@@ -97,6 +142,19 @@ func TestRunCmd_EmptyNameRejected(t *testing.T) {
 func TestRunCmd_StripsTrailingNewline(t *testing.T) {
 	// `printf` writes exactly the bytes we tell it to — no implicit
 	// newline the way `echo` would.
+	//
+	// Windows: skip — Git for Windows ships an MSYS-coreutils
+	// `printf` that warns "ignoring excess arguments, starting
+	// with 'world'" when given two positional args. This isn't a
+	// runCmd behaviour issue (runCmd forwards the args verbatim);
+	// it's a quirk of the MSYS printf binary that doesn't apply
+	// to real-world nightme use (which uses real git/gh/glab, not
+	// MSYS printf). The trim-trailing-newline contract itself
+	// is exercised by the other `sh -c "echo ..."` tests below.
+	if runtime.GOOS == "windows" {
+		t.Skipf("Git-for-Windows MSYS printf has a different positional-arg warning; " +
+			"see TestRunCmd_StripsTrailingNewline comment")
+	}
 	stdout, stderr, err := runCmd(context.Background(), "", "printf", "hello\nworld\n")
 	if err != nil {
 		t.Fatalf("runCmd: %v (stderr=%s)", err, stderr)
@@ -125,17 +183,6 @@ func TestRunCmd_StderrCaptured(t *testing.T) {
 	}
 }
 
-// tailSegments returns the last n "/" separated segments of p.
-// Used by EmptyDirInherits to compare CWDs across symlink
-// resolutions without depending on the resolved root.
-func tailSegments(p string, n int) string {
-	parts := strings.Split(strings.TrimRight(p, "/"), "/")
-	if len(parts) <= n {
-		return strings.TrimRight(p, "/")
-	}
-	return strings.Join(parts[len(parts)-n:], "/")
-}
-
 // TestRunCmd_PropagatesExitError: a non-zero exit must surface
 // as a non-nil error AND keep the captured stderr, so callers
 // like GitHubProvider.CreatePR can `strings.Contains(stderr, "...")`
@@ -160,6 +207,11 @@ func TestRunCmd_PropagatesExitError(t *testing.T) {
 // into runCmd so the spawned gh/glab runs in that directory. This
 // is the single property that, if regressed, re-opens the original
 // `gtw pr` ENOENT bug.
+//
+// We test the contract via a sentinel file in the runner's Dir
+// (rather than parsing pwd output, which is MSYS-translated on
+// Windows). On Windows the child is cmd.exe — Windows-native,
+// queries kernel cwd directly, doesn't go through MSYS libc.
 func TestExecCLIRunner_DirPropagates(t *testing.T) {
 	dir := t.TempDir()
 	real, err := filepath.EvalSymlinks(dir)
@@ -167,13 +219,23 @@ func TestExecCLIRunner_DirPropagates(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	sentinelName := fmt.Sprintf("nightme-clirunner-%d", os.Getpid())
+	var cmdName string
+	var cmdArgs []string
+	if runtime.GOOS == "windows" {
+		cmdName = "cmd.exe"
+		cmdArgs = []string{"/c", "echo " + sentinelName + " > " + sentinelName}
+	} else {
+		cmdName = "sh"
+		cmdArgs = []string{"-c", "echo " + sentinelName + " > " + sentinelName}
+	}
+
 	r := ExecCLIRunner{Dir: real}
-	stdout, _, err := r.Run(context.Background(), "pwd")
-	if err != nil {
+	if _, _, err := r.Run(context.Background(), cmdName, cmdArgs...); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := strings.TrimSpace(stdout); got != real {
-		t.Errorf("CLIRunner child CWD = %q, want %q (Dir field not honored)", got, real)
+	if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil {
+		t.Fatalf("sentinel not at %s: %v (ExecCLIRunner.Dir not honored)", filepath.Join(real, sentinelName), err)
 	}
 }
 
@@ -187,6 +249,9 @@ func TestExecCLIRunner_DirPropagates(t *testing.T) {
 //
 // Any future refactor that drops the Worktree → Dir binding
 // re-introduces the bug; this test fails immediately.
+//
+// We verify via sentinel file in the Worktree, not pwd output
+// (see TestRunCmd_DirBinding's MSYS rationale).
 func TestGitHubProvider_RunnerBindsWorktree(t *testing.T) {
 	dir := t.TempDir()
 	real, err := filepath.EvalSymlinks(dir)
@@ -194,17 +259,28 @@ func TestGitHubProvider_RunnerBindsWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	sentinelName := fmt.Sprintf("nightme-gh-%d", os.Getpid())
+	var cmdName string
+	var cmdArgs []string
+	if runtime.GOOS == "windows" {
+		cmdName = "cmd.exe"
+		cmdArgs = []string{"/c", "echo " + sentinelName + " > " + sentinelName}
+	} else {
+		cmdName = "sh"
+		cmdArgs = []string{"-c", "echo " + sentinelName + " > " + sentinelName}
+	}
+
 	p := &GitHubProvider{Worktree: real}
 	// Pull the production runner (Runner is nil by default → falls
 	// through to ExecCLIRunner{Dir: p.Worktree}).
 	r := p.runner()
 
-	stdout, _, err := r.Run(context.Background(), "pwd")
-	if err != nil {
+	if _, _, err := r.Run(context.Background(), cmdName, cmdArgs...); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := strings.TrimSpace(stdout); got != real {
-		t.Errorf("gh-equivalent child CWD = %q, want %q (Worktree → Dir binding broken)", got, real)
+	if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil {
+		t.Fatalf("gh-equivalent sentinel not at %s: %v (Worktree → Dir binding broken)",
+			filepath.Join(real, sentinelName), err)
 	}
 }
 
@@ -219,14 +295,25 @@ func TestGitLabProvider_RunnerBindsWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	sentinelName := fmt.Sprintf("nightme-gl-%d", os.Getpid())
+	var cmdName string
+	var cmdArgs []string
+	if runtime.GOOS == "windows" {
+		cmdName = "cmd.exe"
+		cmdArgs = []string{"/c", "echo " + sentinelName + " > " + sentinelName}
+	} else {
+		cmdName = "sh"
+		cmdArgs = []string{"-c", "echo " + sentinelName + " > " + sentinelName}
+	}
+
 	p := &GitLabProvider{Worktree: real}
 	r := p.runner()
 
-	stdout, _, err := r.Run(context.Background(), "pwd")
-	if err != nil {
+	if _, _, err := r.Run(context.Background(), cmdName, cmdArgs...); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := strings.TrimSpace(stdout); got != real {
-		t.Errorf("glab-equivalent child CWD = %q, want %q (Worktree → Dir binding broken)", got, real)
+	if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil {
+		t.Fatalf("glab-equivalent sentinel not at %s: %v (Worktree → Dir binding broken)",
+			filepath.Join(real, sentinelName), err)
 	}
 }

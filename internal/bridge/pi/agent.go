@@ -327,23 +327,37 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// fail. pumpWG is incremented BEFORE the goroutines start
 	// and decremented inside them so the lifecycle Wait below
 	// cannot race a missed Add.
+	// pumpWG counts read-pump + stderr-drain. lifecycle is
+	// wrapped in SafeGo (so a panic there is recovered and the
+	// daemon stays alive) but is NOT in pumpWG — the lifecycle
+	// itself calls pumpWG.Wait() inside its body, so adding
+	// itself to the WaitGroup would deadlock (it would wait
+	// for its own Done). SafeGo gives us daemon-level safety;
+	// no WaitGroup slot is needed because lifecycle is the
+	// orchestrator, not a peer of the pumps. See
+	// internal/agent/safego.go for the contract.
 	live.pumpWG.Add(2)
-	// Both pumps are wrapped in agent.SafeGo so a pi translator
-	// bug or a wire-decode panic cannot take down the nightme
-	// daemon. The 2026-08-15 dsh textBuf panic that motivated
-	// this pattern would have hit pi the same way if its
-	// readPump ever hit a noCopy-triggering struct — we apply
-	// the isolation pre-emptively. See internal/agent/safego.go
-	// for the contract.
 	agent.SafeGo("pi:read-pump", func() {
 		defer live.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"pi:read-pump", live.deliver,
+			"", live.agentName, live.workspace, live.branch)
 		live.readPump()
 	})
 	agent.SafeGo("pi:stderr-drain", func() {
 		defer live.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"pi:stderr-drain", live.deliver,
+			"", live.agentName, live.workspace, live.branch)
 		live.drainStderr()
 	})
-	go live.lifecycle()
+	// lifecycle is the supervisor that closes events / exitDone
+	// / fails pending RPCs. pi's lifecycle uses `defer close(
+	// events)` and `defer close(exitDone)` (see below) so a
+	// panic in lifecycle itself still tears the bridge down
+	// cleanly; SafeGo is the outer safety net for any panic
+	// INSIDE those defers (e.g. a nil deref on pendingMu).
+	agent.SafeGo("pi:lifecycle", live.lifecycle)
 
 	piLog("Start pumps+lifecycle spawned",
 		"pid", live.pid,
@@ -832,6 +846,18 @@ func (d *driver) lifecycleHalt() {
 // closeOnce in Close(); everything else just nudges the
 // process toward a clean exit.
 func (d *driver) lifecycle() {
+	// Both closes are in defer so a panic anywhere in the body
+	// (or in failPending/deliver) still tears the bridge down
+	// cleanly. Without these defers, a panic would orphan
+	// callers waiting on events / exitDone (Close() blocks on
+	// exitDone; runtime's events-reader blocks on events).
+	// The order — events first, exitDone last — matches the
+	// pre-existing Close() contract: Close() returns once
+	// exitDone is signaled, and the events channel must already
+	// be drained by then.
+	defer close(d.exitDone)
+	defer close(d.events)
+
 	err := d.cmd.Wait()
 	// Whatever the cause, stop accepting new requests and wake
 	// any pending callers.
@@ -844,8 +870,6 @@ func (d *driver) lifecycle() {
 		})
 	}
 	d.pumpWG.Wait()
-	close(d.events)
-	close(d.exitDone)
 }
 
 // isGracefulClose returns true when Close() is the reason the

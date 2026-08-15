@@ -158,7 +158,34 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		workspace: cfg.Workspace,
 		events:    make(chan agent.AgentEvent, eventBufferSize),
 	}
-	go live.readPump()
+	// readPump is the per-session long-lived read loop. Wrap in
+	// agent.SafeGo (outer, daemon-level safety net) +
+	// agent.PanicEventHandler (inner, domain-level recovery
+	// that emits EventAgentError) so a single acp bug
+	// (translator panic, wire-decode panic) cannot take down
+	// the nightme daemon AND the runtime can surface a
+	// "bridge died" EventAgentError to the user. The 2026-
+	// 08-15 dsh textBuf panic that motivated this pattern is
+	// the prototype. See internal/agent/safego.go for the
+	// contract.
+	//
+	// acp has no .deliver() method; we synthesize a closure
+	// that does a non-blocking send (drop-on-full, drop-on-
+	// closed) — same pattern as claudecode's panicDeliver.
+	panicDeliver := func(ev agent.AgentEvent) {
+		select {
+		case live.events <- ev:
+		case <-live.ctx.Done():
+			// session cancelled; drop silently
+		default:
+		}
+	}
+	agent.SafeGo("acp:read-pump", func() {
+		defer agent.PanicEventHandler(
+			"acp:read-pump", panicDeliver,
+			"", live.agentName, live.workspace, "")
+		live.readPump()
+	})
 	go func() {
 		<-parentCtx.Done()
 		_ = live.Close()

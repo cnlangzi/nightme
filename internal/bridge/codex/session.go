@@ -321,26 +321,47 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 		s.onNotification,
 	)
 
-	// Pumps: readPump + stderrLoop. Both incremented BEFORE the
-	// goroutine starts so lifecycle's Wait cannot race a missed Add.
-	//
-	// Both pumps are wrapped in agent.SafeGo so a codex
-	// translator bug or a wire-decode panic cannot take down the
-	// nightme daemon. The 2026-08-15 dsh textBuf panic that
-	// motivated this pattern would have hit codex the same way if
-	// its readPump ever hit a noCopy-triggering struct — we apply
-	// the isolation pre-emptively. See internal/agent/safego.go
-	// for the contract.
+	// Pumps: readPump + stderrLoop + lifecycle. All three are
+	// long-lived goroutines wrapped in agent.SafeGo so a single
+	// Pumps: readPump + stderrLoop. lifecycle is wrapped in
+	// SafeGo (so a panic there is recovered and the daemon
+	// stays alive) but is NOT in pumpWG — the lifecycle itself
+	// calls pumpWG.Wait() inside its body, so adding itself
+	// to the WaitGroup would deadlock (it would wait for its
+	// own Done). SafeGo gives us daemon-level safety; no
+	// WaitGroup slot is needed because lifecycle is the
+	// orchestrator, not a peer of the pumps. See
+	// internal/agent/safego.go for the contract.
 	s.pumpWG.Add(2)
+	// codex's deliver returns the rewritten event (it stamps
+	// session context); PanicEventHandler expects a void
+	// deliver, so we wrap in a small closure that discards
+	// the return. The closure is created once here and shared
+	// across both pumps.
+	panicDeliver := func(ev agent.AgentEvent) { s.deliver(ev) }
 	agent.SafeGo("codex:read-pump", func() {
 		defer s.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"codex:read-pump", panicDeliver,
+			"", s.agentName, s.workspace, s.branch)
 		s.rpc.readPump(parentCtx, s.emitWireError)
 	})
 	agent.SafeGo("codex:stderr-loop", func() {
 		defer s.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"codex:stderr-loop", panicDeliver,
+			"", s.agentName, s.workspace, s.branch)
 		s.stderrLoop(parentCtx)
 	})
-	go s.lifecycle()
+	// lifecycle is the supervisor that closes events / exitDone
+	// / fails pending RPCs. codex's lifecycle already has
+	// `defer close(s.exitDone)` at the top, but `close(s.events)`
+	// is at the END of the body — a pre-existing latent bug.
+	// We move that to a defer too in the lifecycle body below
+	// so a panic in lifecycle still tears the bridge down
+	// cleanly. SafeGo is the outer safety net in case the
+	// deferred closes themselves panic.
+	agent.SafeGo("codex:lifecycle", s.lifecycle)
 
 	cLog("session started",
 		"pid", s.pid,
@@ -508,7 +529,21 @@ func (s *session) emitWireError(err error) {
 // close. Pump completion is gated via pumpWG so the close happens
 // AFTER readPump + stderrLoop have drained.
 func (s *session) lifecycle() {
+	// Both closes are in defer so a panic anywhere in the body
+	// (or in failPending/deliver) still tears the bridge down
+	// cleanly. Pre-fix, close(s.events) was at the end of the
+	// function — a panic in the cmd.Wait / failPending /
+	// deliver path would orphan callers waiting on events
+	// (close-of-exitDone unblocks Close(), but the events
+	// reader would still be waiting forever on a channel
+	// that the lifecycle never closed). The order — events
+	// first, exitDone last — matches the pre-existing
+	// Close() contract: Close() returns once exitDone is
+	// signaled, and the events channel must already be drained
+	// by then.
 	defer close(s.exitDone)
+	defer close(s.events)
+
 	s.exitErr = s.cmd.Wait()
 	// Stop accepting new requests and wake any pending callers.
 	s.rpc.failPending(ErrSessionClosed)
@@ -532,7 +567,8 @@ func (s *session) lifecycle() {
 	// Close()'s. Close() only initiates shutdown (closes stdin,
 	// cancels ctx). Mixing the two under one sync.Once deadlocks
 	// Close()'s <-s.exitDone wait against lifecycle's closeOnce.Do.
-	close(s.events)
+	// The close itself is now in the defer above so a panic
+	// anywhere below still tears the bridge down cleanly.
 }
 
 // isGracefulClose reports whether the cause of cmd.Wait returning

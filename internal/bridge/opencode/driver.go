@@ -164,22 +164,39 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// drop, but if it does we self-heal instead of going blind).
 	sseCtx, sseCancel := context.WithCancel(ctx)
 	d.sseCancel = sseCancel
-	// The long-lived loops are wrapped in agent.SafeGo so an
+	// The long-lived loops are wrapped in agent.SafeGo (outer
+	// daemon-level safety net) + agent.PanicEventHandler (inner
+	// domain-level recovery that emits EventAgentError) so an
 	// opencode wire-decode or translator panic cannot take down
-	// the nightme daemon. The 2026-08-15 dsh textBuf panic that
-	// motivated this pattern would have hit opencode the same way
-	// if its sseLoop ever hit a noCopy-triggering struct — we
-	// apply the isolation pre-emptively. lifecycle is also
-	// wrapped because it drains the events channel; a panic
-	// there would orphan the reader. See internal/agent/safego.go
-	// for the contract.
+	// the nightme daemon AND the runtime can surface a "bridge
+	// died" error to the user. The 2026-08-15 dsh textBuf panic
+	// that motivated this pattern is the prototype — pre-fix, it
+	// killed the daemon; with this two-layer recovery, the user
+	// would get a bridge-error card and the daemon would stay
+	// alive. See internal/agent/safego.go for the contract.
+	//
+	// opencode's deliver returns the rewritten event (it stamps
+	// session/model/agentName/workspace/branch context);
+	// PanicEventHandler expects a void deliver, so we wrap in
+	// a small closure that discards the return. The closure is
+	// created once here and shared across all three loops.
+	panicDeliver := func(ev agent.AgentEvent) { d.deliver(ev) }
 	agent.SafeGo("opencode:sse-loop", func() {
+		defer agent.PanicEventHandler(
+			"opencode:sse-loop", panicDeliver,
+			d.sessionID, d.name, d.workspace, d.branch)
 		d.sseLoop(sseCtx)
 	})
 	agent.SafeGo("opencode:liveness", func() {
+		defer agent.PanicEventHandler(
+			"opencode:liveness", panicDeliver,
+			d.sessionID, d.name, d.workspace, d.branch)
 		d.livenessLoop(ctx)
 	})
 	agent.SafeGo("opencode:lifecycle", func() {
+		defer agent.PanicEventHandler(
+			"opencode:lifecycle", panicDeliver,
+			d.sessionID, d.name, d.workspace, d.branch)
 		d.lifecycle()
 	})
 
@@ -352,7 +369,19 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	}
 	d.trans.ResetTurn()
 	d.lastEventAtUnixNano.Store(time.Now().UnixNano())
-	go d.watchdog()
+	// watchdog fires if no events arrive within timeout (e.g.
+	// opencode web hung mid-turn). Wrap in SafeGo so a panic
+	// inside the watchdog's own logic (unlikely but possible —
+	// e.g. a future atomic.Bool misuse) doesn't take down the
+	// daemon. PanicEventHandler delivers an EventAgentError so
+	// the user gets a "bridge died" card instead of a silent
+	// turn hang. See internal/agent/safego.go for the contract.
+	agent.SafeGo("opencode:watchdog", func() {
+		defer agent.PanicEventHandler(
+			"opencode:watchdog", func(ev agent.AgentEvent) { d.deliver(ev) },
+			d.sessionID, d.name, d.workspace, d.branch)
+		d.watchdog()
+	})
 	return nil
 }
 

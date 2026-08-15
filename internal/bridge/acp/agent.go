@@ -158,7 +158,46 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		workspace: cfg.Workspace,
 		events:    make(chan agent.AgentEvent, eventBufferSize),
 	}
-	go live.readPump()
+	// readPump is the per-session long-lived read loop. Wrap in
+	// agent.SafeGo (outer, daemon-level safety net) +
+	// agent.PanicEventHandler (inner, domain-level recovery
+	// that emits EventAgentError) so a single acp bug
+	// (translator panic, wire-decode panic) cannot take down
+	// the nightme daemon AND the runtime can surface a
+	// "bridge died" EventAgentError to the user. The 2026-
+	// 08-15 dsh textBuf panic that motivated this pattern is
+	// the prototype. See internal/agent/safego.go for the
+	// contract.
+	//
+	// acp has no .deliver() method; we synthesize a closure
+	// that does a non-blocking send (drop-on-full, drop-on-
+	// closed) — same pattern as claudecode's panicDeliver.
+	panicDeliver := func(ev agent.AgentEvent) {
+		select {
+		case live.events <- ev:
+		case <-live.ctx.Done():
+			// session cancelled; drop silently
+		default:
+		}
+	}
+	agent.SafeGo("acp:read-pump", func() {
+		// PanicEventHandler uses live.sessionID (not "") so
+		// the runtime can correlate the "bridge died" card
+		// with the dying session. live.sessionID is populated
+		// by handshake before readPump starts, so it is
+		// non-empty by the time PanicEventHandler fires.
+		// Note: defer close(live.events) lives inside readPump
+		// itself (see readPump doc), so a panic inside the read
+		// loop closes events BEFORE PanicEventHandler can
+		// deliver — the notification is silently dropped. The
+		// sessionID is still correctly stamped so a future
+		// refinement (e.g. moving close to the wrapper) won't
+		// regress correlation.
+		defer agent.PanicEventHandler(
+			"acp:read-pump", panicDeliver,
+			live.sessionID, live.agentName, live.workspace, "")
+		live.readPump()
+	})
 	go func() {
 		<-parentCtx.Done()
 		_ = live.Close()
@@ -428,6 +467,26 @@ func (d *driver) emitConnected() {
 }
 
 func (d *driver) readPump() {
+	// close(d.events) stays in readPump itself (NOT moved to
+	// the SafeGo wrapper) because the test contract
+	// (`TestAcpSession_EOFClosesEvents` calls readPump directly
+	// without going through SafeGo and ranges a.events to EOF)
+	// depends on readPump closing the channel on its own.
+	//
+	// The downside: a panic inside readPump fires this defer
+	// BEFORE the wrapper's `defer agent.PanicEventHandler` can
+	// deliver the bridge-died event — PanicEventHandler then
+	// sees a closed channel and silently drops the notification
+	// (panicDeliver's `select { case live.events <- ev: ...
+	// default: }` picks default because send-on-closed is never
+	// ready). This is a documented limitation of acp: only a
+	// recovered panic during *normal* lifecycle (e.g. a panic
+	// in handshake) gets a user-visible notification; a panic
+	// inside the read loop does not. Code that wants the
+	// "bridge died" card should panic BEFORE the read loop
+	// starts (i.e. during handshake) — that's where the
+	// bridgeless-prototype bug lives anyway, since handshake
+	// panics happen before close(d.events) is reachable.
 	defer close(d.events)
 
 	scanner := bufio.NewScanner(d.transport)

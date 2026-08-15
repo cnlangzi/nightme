@@ -378,7 +378,7 @@ func parseWebURL(ctx context.Context, stdout io.Reader) (string, error) {
 // this returns, the driver is "live": events flow on d.events
 // until Close().
 //
-// We start FOUR goroutines, not three:
+// We start FIVE goroutines, not four:
 //   1. mux pump (events)
 //   2. host pump (lifecycle)
 //   3. stderr drain (debug)
@@ -386,25 +386,69 @@ func parseWebURL(ctx context.Context, stdout io.Reader) (string, error) {
 //      but dsh keeps printing HMR / plugin init / debug lines
 //      — we MUST keep the pipe flowing or dsh blocks once its
 //      64 KiB stdout pipe buffer fills, deadlocking the bridge.)
+//   5. lifecycle (event close + pending approval fail)
+//
+// Each pump is wrapped in agent.SafeGo (outer, daemon-level
+// safety net) + agent.PanicEventHandler (inner, domain-level
+// recovery) so a single bridge bug (e.g. a translator panic
+// in the mux pump) cannot tear down the entire nightme daemon
+// AND the runtime can surface a "bridge died" EventAgentError
+// to the user instead of leaving a zombie session. The
+// 2026-08-15 dsh textBuf panic that motivated this pattern is
+// the prototype — pre-fix, it killed the daemon; with this
+// two-layer recovery, the user would get a bridge-error card
+// and the daemon would stay alive. See internal/agent/safego.go
+// for the contract.
 func (d *driver) startPumps() {
+	// pumpWG counts the four data pumps: mux, host, stderr,
+	// stdout. lifecycle is wrapped in SafeGo (so a panic there
+	// is recovered and the daemon stays alive) but is NOT in
+	// pumpWG — the lifecycle itself calls pumpWG.Wait() inside
+	// its body, so adding itself to the WaitGroup would
+	// deadlock (it would wait for its own Done). SafeGo gives
+	// us daemon-level safety; no WaitGroup slot is needed
+	// because lifecycle is the orchestrator, not a peer of the
+	// pumps. See internal/agent/safego.go for the contract.
 	d.pumpWG.Add(4)
-	go func() {
+	branch := detectBranch(d.workspace)
+	agent.SafeGo("dsh:mux-pump", func() {
 		defer d.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"dsh:mux-pump", d.deliver,
+			d.sessionID, d.agentName, d.workspace, branch)
 		readMuxPump(d.muxWS, "mux", d.handleMuxFrame)
-	}()
-	go func() {
+	})
+	agent.SafeGo("dsh:host-pump", func() {
 		defer d.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"dsh:host-pump", d.deliver,
+			d.sessionID, d.agentName, d.workspace, branch)
 		readMuxPump(d.hostWS, "host", d.handleHostFrame)
-	}()
-	go func() {
+	})
+	agent.SafeGo("dsh:stderr-drain", func() {
 		defer d.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"dsh:stderr-drain", d.deliver,
+			d.sessionID, d.agentName, d.workspace, branch)
 		d.drainStderr()
-	}()
-	go func() {
+	})
+	agent.SafeGo("dsh:stdout-drain", func() {
 		defer d.pumpWG.Done()
+		defer agent.PanicEventHandler(
+			"dsh:stdout-drain", d.deliver,
+			d.sessionID, d.agentName, d.workspace, branch)
 		d.drainStdout()
-	}()
-	go d.lifecycle()
+	})
+	// lifecycle is the supervisor that closes events / exitDone /
+	// fails pending approvals. dsh's lifecycle already has
+	// `defer close(d.events)` and `defer close(d.exitDone)` at
+	// the top, so a panic in lifecycle still tears the bridge
+	// down cleanly; SafeGo is the outer safety net in case any
+	// of those defers panic (e.g. a nil deref in
+	// d.pendingApprovals). lifecycle is NOT in pumpWG above —
+	// it calls d.pumpWG.Wait() inside its body, so adding
+	// itself would deadlock (it would wait for its own Done).
+	agent.SafeGo("dsh:lifecycle", d.lifecycle)
 }
 
 // lifecycle owns the events-chan close and exitDone signal. It
@@ -424,9 +468,14 @@ func (d *driver) startPumps() {
 // because a SIGINT'd-but-clean shutdown is not an error from the
 // runtime's perspective (cf. codex's isGracefulClose() guard).
 func (d *driver) lifecycle() {
-	// Defer order: exitDone FIRST, events SECOND. Close() blocks on
-	// exitDone; if events closed first, Close() returning could race
-	// against an in-flight deliver(). Reverse order is safe.
+	// Defer registration order is exitDone first, events second —
+	// but defers execute in LIFO order, so events closes FIRST
+	// and exitDone closes SECOND. Close() blocks on exitDone, so
+	// Close() returning is guaranteed to be AFTER events is
+	// closed and drained by the runtime. Reversing the
+	// registration order would close exitDone first and let
+	// Close() return while events is still being drained — a
+	// real race.
 	defer close(d.exitDone)
 	defer close(d.events)
 

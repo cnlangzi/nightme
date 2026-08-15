@@ -176,8 +176,8 @@ type HookResult struct {
 	Err      error  // non-nil on any execution failure
 }
 
-// hookTimeout was a 30s const; centralised in internal/timeouts
-// (timeouts.Hook) — see that package for the LLM-era rationale.
+// Centralised in internal/timeouts (timeouts.Hook) — see that
+// package for the LLM-era rationale.
 
 // HookContext carries the per-invocation state that flows from
 // /gtw command dispatch into every hook subprocess. It is the

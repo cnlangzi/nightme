@@ -1,11 +1,11 @@
 // Package timeouts centralises the task-timeout policy for nightme.
 //
-// All shell / agent / hook / CLI execution paths derive their
-// deadlines from here so the numbers stay consistent and any
-// future tuning touches one file. There are intentionally no
-// user-facing knobs: the values below are the policy.
+// Every shell / agent / hook / CLI / reply deadline in the codebase
+// derives from here so the numbers stay consistent and any future
+// tuning touches one file. There are intentionally no user-facing
+// knobs: the values below are the policy.
 //
-// Two rationales drive every value:
+// Two rationales drive the longer budgets (Shell / Agent / Hook):
 //
 //   - The LLM era. A single fix cycle is multi-turn
 //     (read → edit → test → iterate), and tools like
@@ -16,6 +16,9 @@
 //     only way to surface a hung child is a wall-clock cap on
 //     the parent context. Without one, the daemon can park on a
 //     silent process forever.
+//
+// Reply is a different category (outbound IM delivery, not
+// subprocess execution) and is intentionally short.
 package timeouts
 
 import "time"
@@ -40,7 +43,14 @@ const (
 	// CLI caps git / gh / glab subprocess calls. 5 min is generous
 	// for normal network RTT against GitHub / GitLab APIs; anything
 	// longer is almost always a network stall — kill and surface,
-	// don't hang the daemon. Applied as an additive safety net in
-	// runCmd only when the caller didn't already set a deadline.
+	// don't hang the daemon. runCmd applies CLI as a fallback only
+	// when the caller didn't already set a deadline — caller always
+	// wins.
 	CLI = 5 * time.Minute
+
+	// Reply caps the outbound IM summary-card send (e.g. shell
+	// dispatcher's post-run reply). Different category from the
+	// execution budgets above: it's network RTT to the channel,
+	// not a long-running subprocess, so 5 s is plenty.
+	Reply = 5 * time.Second
 )

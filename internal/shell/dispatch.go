@@ -44,8 +44,7 @@ import (
 // up the Feishu message size limit.
 const MaxStdoutLines = 50
 
-// replyTimeout caps the final summary-card reply send.
-const replyTimeout = 5 * time.Second
+// replyTimeout has moved to internal/timeouts (timeouts.Reply).
 
 // Request is the input to Dispatch (and to Dispatcher.Handle
 // via InboundRequest).
@@ -223,7 +222,7 @@ func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
 		return
 	}
 
-	replyCtx, cancel := context.WithTimeout(context.Background(), replyTimeout)
+	replyCtx, cancel := context.WithTimeout(context.Background(), timeouts.Reply)
 	defer cancel()
 	if err := d.emitter.Send(replyCtx, messages.OutboundMessage{
 		ChatID:  ir.ChatID,

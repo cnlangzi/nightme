@@ -49,10 +49,19 @@ func TestRenderANSI(t *testing.T) {
 	if len(lines) == 0 {
 		t.Fatal("output has no lines after trimming")
 	}
+	// The output is structured as: QR rows (all uniform width)
+	// followed by a single caption row (potentially different
+	// width). Width uniformity applies to the QR rows only; the
+	// caption is a separate text block. We verify width
+	// uniformity on the first half of lines (the QR rows), and
+	// validate the caption row (last line) separately.
 	width := len([]rune(lines[0]))
-	for i, l := range lines {
-		if w := len([]rune(l)); w != width {
-			t.Errorf("line %d width=%d, want %d (renderer should emit uniform-width lines):\n%s", i, w, width, out)
+	qrLineCount := len(lines) - 1 // assume last is caption
+	if qrLineCount > 1 {
+		for i, l := range lines[:qrLineCount] {
+			if w := len([]rune(l)); w != width {
+				t.Errorf("QR row %d width=%d, want %d (renderer should emit uniform-width lines):\n%s", i, w, width, out)
+			}
 		}
 	}
 	if width < 25 || width > 65 {

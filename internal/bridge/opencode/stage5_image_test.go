@@ -123,7 +123,16 @@ func TestSendBlocks_FileStillUsesFileURL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SendBlocks: %v", err)
 	}
-	want := "file://" + filePath
+	// filePath is a Windows path on Windows hosts (with `\`
+	// separators). The bridge passes it through as a file:// URL
+	// to opencode's wire format, which is JSON — but the
+	// opencode wire layer normalises path separators to `/` for
+	// the `file://` URL prefix (URLs mandate forward slashes per
+	// RFC 3986). So the captured body contains a `/`-style URL
+	// regardless of the host path style. We assert against the
+	// `filepath.ToSlash`-normalised form so the test passes on
+	// every host.
+	want := "file://" + filepath.ToSlash(filePath)
 	if !strings.Contains(*cap.captured, want) {
 		t.Errorf("file block did not use file:// URL: missing %s", want)
 	}

@@ -132,8 +132,19 @@ func dialNamedPipe(path string, timeout time.Duration) (windows.Handle, error) {
 			return h, nil
 		}
 		lastErr = err
-		if !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-			// Some other error — give up immediately.
+		// Retry on transient errors that mean "the pipe name
+		// exists but no live instance right now":
+		//   - ERROR_FILE_NOT_FOUND: pipe name not registered yet
+		//     (server hasn't called CreateNamedPipe)
+		//   - ERROR_BROKEN_PIPE: pipe instance exists but was
+		//     just closed (e.g. server's seed instance in
+		//     server_windows.go:Listen, or server.Serve rotating
+		//     through instances)
+		// Both are momentary; the next poll cycle should find a
+		// live instance. Other errors (access denied, bad path)
+		// give up immediately.
+		if !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) &&
+			!errors.Is(err, windows.ERROR_BROKEN_PIPE) {
 			return 0, err
 		}
 		if !time.Now().Before(deadline) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -49,8 +50,16 @@ func TestDownloadInboxDir_CreatesPerSessionDir(t *testing.T) {
 	if !info.IsDir() {
 		t.Errorf("inbox path is not a directory: %s", dir)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Errorf("inbox dir mode = %#o, want 0700", perm)
+	// Permission bits are POSIX-specific — Windows reports 0 from
+	// os.Stat().Mode().Perm() regardless of the chmod 0700 we
+	// passed at MkdirAll. Skip the check on Windows; the
+	// production contract on Windows is "the dir exists, is
+	// writable by the user, and inherits user-only ACLs from
+	// the parent" — see config_windows.go for the ACL default.
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Errorf("inbox dir mode = %#o, want 0700", perm)
+		}
 	}
 }
 

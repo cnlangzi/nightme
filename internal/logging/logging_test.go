@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -19,6 +20,14 @@ func TestLogger_WritesToFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Close the log file before the test ends. On Windows, an
+	// open file handle blocks the t.TempDir cleanup (test reports
+	// "The process cannot access the file because it is being
+	// used by another process"); on Linux, t.TempDir cleanup
+	// works even on open handles. Calling Close here makes the
+	// cleanup race-free on every host.
+	t.Cleanup(func() { _ = Close(lg) })
+
 	lg.Info("hello", "key", "value")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -30,13 +39,18 @@ func TestLogger_WritesToFile(t *testing.T) {
 }
 
 func TestLogger_FilePermissions(t *testing.T) {
-	if os.Getenv("GOOS_OVERRIDE_WIN") == "windows" {
-		t.Skip("skipping on windows")
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0600 is a no-op on Windows; " +
+			"the production contract is ACL-based on Windows, " +
+			"covered by separate tests on internal/config.")
 	}
 	path := filepath.Join(t.TempDir(), "nightme.log")
-	if _, err := New(&config.Config{Logging: config.LoggingConfig{File: path}}); err != nil {
+	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: path}})
+	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	t.Cleanup(func() { _ = Close(lg) })
+
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
@@ -52,6 +66,8 @@ func TestLogger_Format(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	t.Cleanup(func() { _ = Close(lg) })
+
 	lg.Info("formatted", "answer", 42)
 	line, err := os.ReadFile(path)
 	if err != nil {
@@ -73,9 +89,12 @@ func TestLogger_DefaultPath(t *testing.T) {
 	// picks up our temp dir regardless of platform.
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
-	if _, err := New(&config.Config{}); err != nil {
+	lg, err := New(&config.Config{})
+	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	t.Cleanup(func() { _ = Close(lg) })
+
 	path := filepath.Join(dir, ".nightme", "nightme.log")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("default log: %v", err)
@@ -113,6 +132,8 @@ func TestLogger_TeesToStdoutAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	t.Cleanup(func() { _ = Close(lg) })
+
 	lg.Info("tee-me", "kind", "triple-sink")
 
 	// Close the writers so the reads on the consumer side complete.
@@ -199,6 +220,8 @@ func TestNewQuiet_FileOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewQuiet: %v", err)
 	}
+	t.Cleanup(func() { _ = Close(lg) })
+
 	lg.Info("quiet-me", "kind", "file-only")
 
 	_ = wOut.Close()

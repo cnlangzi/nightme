@@ -452,6 +452,18 @@ func TestFormatResults_ShowsFailure(t *testing.T) {
 	// Format 3 rule (gtw/README.md §2.3) prepends `  ❌ exit N`
 	// to the raw block for non-zero exits so the user sees the
 	// cause-of-failure first.
+	//
+	// Windows sh: the test exercises Windows sh behavior
+	// differences (cmd `1>&2; exit 5` returns exit 5 only on
+	// sh, not on cmd.exe). The dispatcher code itself is
+	// platform-agnostic, but the hook invocation goes through
+	// sh on Unix and cmd.exe on Windows. Skip on Windows; the
+	// Format 3 formatting is exercised end-to-end by other
+	// dispatcher tests.
+	if runtime.GOOS == "windows" {
+		t.Skipf("Windows sh/cmd exit-code semantics differ; " +
+			"Format 3 formatting is covered by other dispatcher tests")
+	}
 	results := RunHooks(context.Background(),
 		[]Hook{{Run: "echo oops 1>&2; exit 5"}}, HookContext{Command: "test"}, t.TempDir())
 	out := FormatResults("after", results)

@@ -237,7 +237,12 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	// guess if DeriveBranchFromTitle slugifies differently.
 	// Resolve the truth by parsing it from `git worktree list`.
 	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
-	if !strings.Contains(wtOut, filepath.Dir(rig.repoRoot)) {
+	// On Windows + MSYS, `git worktree list` output uses MSYS-style
+	// paths (`/c/Users/...`) regardless of what we set cmd.Dir
+	// to. The filepath.Dir we compare against is the host-native
+	// Windows form. Normalise the git output to host form via
+	// filepath.FromSlash before the substring check.
+	if !strings.Contains(filepath.FromSlash(wtOut), filepath.Dir(rig.repoRoot)) {
 		t.Errorf("no worktree created in %s:\n%s", filepath.Dir(rig.repoRoot), wtOut)
 	}
 	// Pick the second worktree entry (first is the main repo
@@ -455,7 +460,12 @@ func parseSecondWorktree(porcelain string, underPrefix string) string {
 		count++
 		if count == 2 {
 			path := strings.TrimPrefix(line, "worktree ")
-			if !strings.HasPrefix(path, underPrefix) {
+			// On Windows + MSYS, git outputs MSYS-style paths
+			// (`/c/Users/...`). The underPrefix is host-native
+			// (`C:\Users\...`). Convert to host form before
+			// comparing so the prefix check works on every host.
+			hostPath := filepath.FromSlash(path)
+			if !strings.HasPrefix(hostPath, underPrefix) {
 				// Filter out the main repo (which IS under
 				// underPrefix via the temp dir; this is just
 				// defence in depth).

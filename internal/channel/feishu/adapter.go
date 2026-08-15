@@ -808,7 +808,18 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, nil, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList from the bridge event pump could mutate
+	// r.footerLines (and r.tasks) under r.mu between here and
+	// buildReceiptCard. Same race the fix-reply-placehold-card
+	// overflow handler fixed via receipt.Tasks(); symmetric fix
+	// for the cold-start path.
+	transient.mu.Lock()
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(nil, nil, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -922,7 +933,20 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient.entries, transient.tasks, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList / AppendEntry from the bridge event pump could
+	// mutate r.entries / r.tasks / r.footerLines under r.mu
+	// between here and buildReceiptCard. Same race the
+	// fix-reply-placehold-card overflow handler fixed via
+	// receipt.Tasks(); symmetric fix for the cold-start path.
+	transient.mu.Lock()
+	entriesSnap := transient.entries
+	tasksSnap := transient.tasks
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1128,7 +1152,19 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, transient.tasks, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList from the bridge event pump could mutate
+	// r.tasks / r.footerLines under r.mu between here and
+	// buildReceiptCard. Same race the fix-reply-placehold-card
+	// overflow handler fixed via receipt.Tasks(); symmetric fix
+	// for the cold-start path.
+	transient.mu.Lock()
+	tasksSnap := transient.tasks
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1239,13 +1275,70 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		if !created {
 			// Receipt exists. Try to append; if the would-be card
-			// would exceed 50 elements / 30 KB envelope, bail out
-			// to a fresh top-level card.
+			// would exceed 50 elements / 30 KB envelope, rollover
+			// the receipt to a fresh top-level placeholder card so
+			// subsequent chunks PATCH that new card instead of
+			// producing a stream of N standalone bubbles.
 			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footerLines); err != nil {
-				if errors.Is(err, ErrReceiptOverflow) {
-					return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
+				if !errors.Is(err, ErrReceiptOverflow) {
+					return err
 				}
-				return err
+				// fix-reply-placehold-card: build the first entry
+				// for the new placeholder card using the same
+				// tasks snapshot the old card had (tasks are a
+				// global view across the turn — see
+				// MessageReceipt.RolloverTo). receipt.Tasks() reads
+				// r.tasks under r.mu — a raw r.tasks field read here
+				// would race with a concurrent SetTaskList from the
+				// bridge event pump.
+				body, buildErr := buildReceiptCard(
+					[]LogEntry{{Icon: "💬", Text: text}},
+					receipt.Tasks(),
+					footerLines,
+				)
+				if buildErr != nil {
+					return fmt.Errorf("feishu: build overflow placeholder card: %w", buildErr)
+				}
+				// rootID="" → top-level Create (no thread anchor),
+				// replyInThread=false → main-chat visible, matching
+				// the pre-fix postOrphanReplyCard surface so the
+				// user sees the same single bubble.
+				msgID, sendErr := a.SendCardForReceipt(ctx, msg.ChatID, body, "", false)
+				// sendErr != nil OR msgID == "" is a failure:
+				//
+				//   - sendErr != nil: the SDK call itself failed
+				//     (network / rate-limit / auth / API rejection).
+				//
+				//   - msgID == "" with sendErr == nil: Feishu accepted
+				//     the send (resp.Success() == true) but
+				//     resp.Data is nil OR resp.Data.MessageId is nil
+				//     (reply.go:294-297's ReplyInChat fall-through).
+				//     The placeholder card IS already in chat but we
+				//     have no id to PATCH — accepting it would
+				//     silently leak the card and leave the receipt on
+				//     the OLD cardMsgID, so the next overflow chunk
+				//     creates yet another placeholder (N bubbles,
+				//     defeating the rollover). Treat as a failure so
+				//     the next chunk re-tries the overflow path on a
+				//     healthy Feishu response.
+				if sendErr != nil || msgID == "" {
+					if sendErr == nil {
+						a.logger.Warn("feishu: SendCardForReceipt returned empty msgID; treating as overflow failure",
+							"chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
+						sendErr = errors.New("feishu: SendCardForReceipt returned empty msgID (Feishu accepted send but no MessageId in response)")
+					}
+					// Send failed (or returned an untrackable msgID):
+					// keep the receipt pointing at the old card and
+					// DO NOT reset entries — the next chunk will
+					// retry the overflow path and the original
+					// placeholder stays usable. Logging for the
+					// error path happens inside SendCardForReceipt's
+					// adapter wrapper; the empty-msgID warning is
+					// emitted above.
+					return sendErr
+				}
+				receipt.RolloverTo(msgID, LogEntry{Icon: "💬", Text: text}, footerLines)
+				return nil
 			}
 		}
 		// created=true — first entry was installed by ensure; no

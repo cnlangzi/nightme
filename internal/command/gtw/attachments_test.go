@@ -212,7 +212,10 @@ func TestBuildIssueDispatchBlocks(t *testing.T) {
 // completeFixAndDispatch: <worktree>/.nightme/attachments/issue-<id>.
 func TestAttachmentsDir(t *testing.T) {
 	got := attachmentsDir("/worktree", 42)
-	want := "/worktree/.nightme/attachments/issue-42"
+	// attachmentsDir uses filepath.Join which produces native
+	// separators (\\ on Windows, / on Unix). Build the expected
+	// via filepath.FromSlash so the assertion holds on both.
+	want := filepath.FromSlash("/worktree/.nightme/attachments/issue-42")
 	if got != want {
 		t.Errorf("attachmentsDir = %q, want %q", got, want)
 	}

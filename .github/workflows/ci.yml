@@ -29,8 +29,57 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v6
         with:
-          name: coverage
+          name: coverage-linux-amd64
           path: coverage.out
+
+  # Windows-hosted test runner. Runs the same `go test` command
+  # as the linux job, but on a real windows-latest hosted runner
+  # so windows-tagged tests (`//go:build windows`) actually run
+  # and unix-tagged tests (`//go:build !windows`) are skipped
+  # by the Go build system instead of failing to compile.
+  #
+  # Required because some tests use platform-only syscalls
+  # (e.g. AF_UNIX sockets in daemoncontrol, Setpgid in
+  # claudecode agent_interrupt_unix_test.go) that intentionally
+  # don't compile on Windows. Without a Windows-hosted runner,
+  # those tags just mean "never tested" — a Windows-only
+  # regression would slip past CI. The cross-compile job
+  # below (still compile-only) catches build breaks; this job
+  # catches runtime regressions.
+  #
+  # Fail-fast gate: `test` runs first as the cheap linux/amd64
+  # signal — any regression there short-circuits the windows
+  # runner entirely instead of burning a paid hosted runner on
+  # a known-broken tree.
+  test-windows:
+    name: Build + Vet + Test (windows/amd64)
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        shell: bash
+        run: go build ./...
+
+      - name: Vet
+        shell: bash
+        run: go vet ./...
+
+      - name: Test
+        # -count=1 disables the Go test cache so a flaky test that
+        # "passed yesterday" can't hide a real regression. We do
+        # NOT pass -race here because race costs 2-3x runtime
+        # and the coverage gate is on the linux job above; race
+        # detection is exercised on linux where the gate matters
+        # most.
+        shell: bash
+        run: go test -count=1 ./...
 
   # Cross-compile check. Runs on ubuntu-latest (cheapest runner)
   # and cross-compiles to Windows + macOS to catch OS-conditional
@@ -38,14 +87,13 @@ jobs:
   # runner on every PR.
   #
   # Why no tests: the test suite contains platform-specific files
-  # tagged with `//go:build unix` (e.g. daemoncontrol tests for
-  # AF_UNIX sockets) that intentionally don't compile on Windows.
-  # Running the unix tests under `GOOS=windows` would fail the
-  # cross-compile job; running only the windows tests under
-  # `GOOS=windows` would require a separate tagged set. We
-  # keep the matrix small here (compile-only) and rely on the
-  # windows-tagged test files (e.g. daemoncontrol_windows_test.go)
-  # to be exercised in a future windows-hosted job.
+  # tagged with `//go:build !windows` (e.g. daemoncontrol tests for
+  # AF_UNIX sockets, Setpgid in claudecode agent_interrupt_unix_test.go)
+  # that intentionally don't compile on Windows. The actual Windows
+  # test run happens in the test-windows job above — a real
+  # windows-latest hosted runner that picks up the windows-tagged
+  # tests (`//go:build windows`) and skips the unix-tagged ones
+  # via the Go build system.
   #
   # Fail-fast gate: `test` runs first as the cheap linux/amd64
   # signal — any regression there short-circuits the cross-compile

@@ -22,10 +22,16 @@ import (
 // of the test, so Load()'s os.UserHomeDir-based discovery doesn't
 // see the real user's yml. Returns the temp dir path; caller is
 // responsible for the cleanup (defer os.RemoveAll).
+//
+// On Windows, os.UserHomeDir() reads %USERPROFILE% — not $HOME.
+// We set both so Load() finds the temp dir regardless of platform.
+// The unset at test teardown restores both env vars automatically
+// (t.Setenv semantics).
 func withTempHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	return dir
 }
 
@@ -446,6 +452,18 @@ func TestFormatResults_ShowsFailure(t *testing.T) {
 	// Format 3 rule (gtw/README.md §2.3) prepends `  ❌ exit N`
 	// to the raw block for non-zero exits so the user sees the
 	// cause-of-failure first.
+	//
+	// Windows sh: the test exercises Windows sh behavior
+	// differences (cmd `1>&2; exit 5` returns exit 5 only on
+	// sh, not on cmd.exe). The dispatcher code itself is
+	// platform-agnostic, but the hook invocation goes through
+	// sh on Unix and cmd.exe on Windows. Skip on Windows; the
+	// Format 3 formatting is exercised end-to-end by other
+	// dispatcher tests.
+	if runtime.GOOS == "windows" {
+		t.Skipf("Windows sh/cmd exit-code semantics differ; " +
+			"Format 3 formatting is covered by other dispatcher tests")
+	}
 	results := RunHooks(context.Background(),
 		[]Hook{{Run: "echo oops 1>&2; exit 5"}}, HookContext{Command: "test"}, t.TempDir())
 	out := FormatResults("after", results)

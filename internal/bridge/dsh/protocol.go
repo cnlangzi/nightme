@@ -425,3 +425,76 @@ type sessionCreateValue struct {
 type sessionPromptValue struct {
 	MessageID string `json:"messageId"`
 }
+
+// ─── /api/session.models response ────────────────────────────────────
+
+// sessionModelsValue is the `value` payload of an OK session.models
+// response. Mirrors dsh's `SessionModels` shape from
+// `packages/host/apiproxy/src/api/sessions.ts`.
+//
+// Current is the model's authoritative selection for the session's
+// NEXT assembled step — what dsh's adapter will dispatch to if the
+// user prompts right now. Bridge surfaces Current.Model on
+// EventAgentReady so the runtime can render the receipt header
+// (e.g. "session <id> · model <name>") and SetModel can route
+// through /api/session.selectModel against the same provider+model.
+//
+// Routable tells us whether an adapter currently serves
+// Current.Provider; without it, the session can't start a turn at
+// all. Bridge does not gate on this — dsh will return agent-busy
+// or model-unavailable if a prompt is sent without a routable
+// adapter — but the flag is preserved on the wire struct so a
+// future caller can surface it.
+//
+// Groups + Failures are kept as RawMessage because the runtime
+// does not currently surface a /model picker UI for dsh (deferred
+// per docs/bridge/dsh.md §11). Future PR can decode them against
+// ModelProviderGroup / ModelCatalogFailure when /model lands.
+type sessionModelsValue struct {
+	Current  modelSelectionWire `json:"current"`
+	Routable bool                `json:"routable"`
+	Groups   json.RawMessage     `json:"groups,omitempty"`
+	Failures json.RawMessage     `json:"failures,omitempty"`
+}
+
+// modelSelectionWire is one entry of ModelSelection
+// (`sessions.ts: ModelSelection`). `Provider` is the registered
+// route key (e.g. "minimax-cn"), `Model` is the provider-owned
+// model id (e.g. "MiniMax-M3"). ReasoningEffort is optional and
+// only populated when the adapter exposes it for this exact route.
+//
+// The bridge stamps Model onto EventAgentReady.Model verbatim
+// (provider:model would be too wide for the runtime's model
+// string — runtime compares against `agent.UsageInfo.ContextWindow`
+// table and the channel footer wants a single token).
+type modelSelectionWire struct {
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+}
+
+// ─── /api/session.selectModel request / response ─────────────────────
+
+// selectModelRequest is the payload we POST to /api/session.selectModel.
+// Mirrors `SessionsApi['selectModel']`: sessionId + new provider + model,
+// plus an optional reasoningEffort that the adapter will validate
+// against the exact route.
+//
+// We send reasoningEffort as `omitempty` so the runtime can leave
+// it unset (the adapter preserves the existing effort on a
+// missing/empty field per `selectModel` semantics).
+type selectModelRequest struct {
+	SessionID       string `json:"sessionId"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+}
+
+// selectModelValue is the `value` payload of an OK
+// session.selectModel response. We surface Selected on the wire
+// struct but don't act on it — the bridge stamps the new Model
+// onto the next EventAgentReady and the runtime re-renders the
+// receipt header.
+type selectModelValue struct {
+	Selected modelSelectionWire `json:"selected"`
+}

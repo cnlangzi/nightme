@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,20 @@ type driver struct {
 	workspace   string
 	agentName   string
 
+	// model is the model's authoritative selection captured at
+	// session-create time via /api/session.models. Bridge stamps
+	// it onto EventAgentReady.Model so the runtime's receipt
+	// header renders "session <id> · model <name>". Updated by
+	// SetModel after a successful /api/session.selectModel so
+	// the next EventAgentReady (or the next turn's header) shows
+	// the new model without a separate re-emit.
+	//
+	// Format: provider-owned model id (e.g. "MiniMax-M3"). The
+	// provider prefix is NOT included — runtime footer compares
+	// against per-model context-window tables, and the
+	// provider:model composite is too wide for that key.
+	model string
+
 	// pendingApprovals maps the server-frame rpcId (NOT the payload's
 	// approvalId) to the response channel we hand to runtime via
 	// EventPermission. The frame rpcId is the key /api/respond is
@@ -150,6 +165,20 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		return nil, fmt.Errorf("dsh: start: %w", err)
 	}
 
+	// Info-level lifecycle log: emits the spawned dsh process pid
+	// and the bound web URL — the two facts the runtime/operator
+	// most need when triaging a "session won't start" report (e.g.
+	// matching the pid against a stuck process, copying the URL
+	// into a browser to reproduce a UI bug). Per
+	// docs/bridge/dsh.md §8.4, real-machine cold start is ~1.5s;
+	// seeing this line in nightme.log confirms the spawn actually
+	// happened. dLog (Debug) would be invisible under the default
+	// Info level and so useless for the support flow.
+	slog.Default().Info("dsh: web spawned",
+		"pid", cmd.Process.Pid,
+		"argv", cmd.Args,
+		"workspace", cfg.Workspace)
+
 	urlCtx, urlCancel := context.WithTimeout(ctx, webURLParseTimeout)
 	baseURL, err := parseWebURL(urlCtx, stdout)
 	urlCancel()
@@ -160,7 +189,15 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		_ = stderr.Close()
 		return nil, fmt.Errorf("dsh: parse web url: %w", err)
 	}
-	dLog("dsh: web url parsed", "url", baseURL)
+	// Info-level lifecycle log: the bound web URL is the operator's
+	// primary entry point for live debugging (paste into browser,
+	// watch HMR reloads, inspect permissions UI). Surfacing it on
+	// every startup makes "which port did dsh pick this time?"
+	// greppable from nightme.log. dLog would be filtered out at the
+	// default Info level, defeating the purpose.
+	slog.Default().Info("dsh: web url parsed",
+		"url", baseURL,
+		"pid", cmd.Process.Pid)
 
 	// Dial the two WebSocket downlinks. The server pushes frames
 	// as soon as the upgrade completes; ordering between mux and
@@ -227,21 +264,81 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	d.sessionID = scVal.SessionID
 	dLog("dsh: session created", "session_id", d.sessionID)
 
+	// Pull the authoritative model selection via /api/session.models.
+	// session.create does NOT return the model — dsh requires the
+	// adapter to resolve the model route asynchronously (catalog
+	// lookup) and the selection is only readable through this RPC.
+	// Without this call, EventAgentReady.Model would always be empty
+	// AND a follow-up session.prompt would fail with `model-unavailable`
+	// (per the踩坑记录 in docs/bridge/dsh.md §8.7).
+	//
+	// Failure handling: we do NOT abort startup on a transport
+	// hiccup — dsh's defaults (`~/.dsh/settings.yaml`'s
+	// `agent-default-model`) mean a successful session.create was
+	// almost certainly followed by a routable selection, and the
+	// runtime renders EventAgentReady even when Model is empty.
+	// A debug log is the right level; the next turn's session.prompt
+	// will surface the real failure (server-side `model-unavailable`)
+	// if the model is genuinely broken. We intentionally avoid
+	// surfacing this as EventAgentError to keep the bridge tolerant
+	// of transient catalog race conditions on cold start.
+	modelCtx, modelCancel := context.WithTimeout(ctx, handshakeTimeout)
+	if sm, err := d.fetchSessionModels(modelCtx); err != nil {
+		dLog("dsh: session.models probe failed (continuing without model)",
+			"err", errStr(err))
+	} else {
+		d.model = sm.Current.Model
+		dLog("dsh: model resolved",
+			"model", d.model,
+			"provider", sm.Current.Provider,
+			"routable", sm.Routable)
+	}
+	modelCancel()
+
 	// Emit EventAgentReady so the runtime can capture SessionID +
-	// Workspace + Branch. Model is left blank — dsh's web protocol
-	// doesn't surface the model name in the session/create response
-	// (it lives in settings.yaml and the runtime doesn't need it for
-	// log messages — the user sees it on the receipt header via the
-	// /api/session.models call which we don't actively surface).
+	// Workspace + Branch + Model. Model is filled from the
+	// session.models probe above; stays empty when the probe
+	// failed (the runtime renders EventAgentReady either way).
 	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
 		SessionID: d.sessionID,
 		AgentName: d.agentName,
 		Workspace: d.workspace,
 		Branch:    detectBranch(d.workspace),
+		Model:     d.model,
 	})
 
 	return d, nil
+}
+
+// fetchSessionModels calls POST /api/session.models with the
+// driver's sessionId and decodes the SessionModels envelope.
+// Returns the decoded value on success; callers decide how to
+// degrade on error.
+//
+// We deliberately keep this a thin helper rather than baking it
+// into newDriver — future SetModel may want to refresh the
+// selection after a switch (server-side `current` may lag), at
+// which point the same helper takes a fresh modelCtx.
+func (d *driver) fetchSessionModels(ctx context.Context) (*sessionModelsValue, error) {
+	if d.sessionID == "" {
+		return nil, errors.New("dsh: session not initialized")
+	}
+	resp, err := d.http.Post(ctx, "session.models", map[string]any{
+		"sessionId": d.sessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("dsh: session.models: %w", err)
+	}
+	if !resp.Result.OK {
+		return nil, fmt.Errorf("dsh: session.models rejected: %s",
+			resp.Result.ErrorMessage())
+	}
+	var out sessionModelsValue
+	if err := json.Unmarshal(resp.Result.Value, &out); err != nil {
+		return nil, fmt.Errorf("dsh: decode session.models value: %w", err)
+	}
+	return &out, nil
 }
 
 // parseWebURL reads stdout until it sees the `dsh web: http://…` line
@@ -581,12 +678,59 @@ func (d *driver) Stop(ctx context.Context) error {
 	return nil
 }
 
-// SetModel switches models mid-session. dsh web's session-level
-// model selection isn't exposed in the public wire yet; we
-// return ErrNotSupported for now. Per docs/bridge/dsh.md §11 this
-// is deferred.
+// SetModel switches the active model on the running session via
+// /api/session.selectModel. Mirrors the dsh sessions.ts wire:
+// { sessionId, provider, model } — `reasoningEffort` is left
+// empty so the adapter preserves the route's existing effort
+// (omit = preserve default per the SessionsApi.selectModel JSDoc).
+//
+// On success we update d.model from the server's authoritative
+// selection (`result.selected.model`) so the next EventAgentReady
+// (or the next receipt header render) reflects the new model.
+// The runtime does not currently re-emit EventAgentReady from
+// SetModel — that path is the runtime's job, see agentsession.
+//
+// The session-id guard matches codex's acp pattern: SetModel on
+// an uninitialized driver returns a transport error rather than
+// silently no-op'ing, so callers can distinguish "bridge not
+// ready" from "model unchanged".
 func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	return agent.ErrNotSupported
+	if d.sessionID == "" {
+		return errors.New("dsh: session not initialized")
+	}
+	if providerID == "" || modelID == "" {
+		return fmt.Errorf("dsh: SetModel requires both providerID and modelID (got %q, %q)",
+			providerID, modelID)
+	}
+	req := selectModelRequest{
+		SessionID: d.sessionID,
+		Provider:  providerID,
+		Model:     modelID,
+	}
+	resp, err := d.http.Post(ctx, "session.selectModel", req)
+	if err != nil {
+		return fmt.Errorf("dsh: session.selectModel: %w", err)
+	}
+	if !resp.Result.OK {
+		return fmt.Errorf("dsh: session.selectModel rejected: %s",
+			resp.Result.ErrorMessage())
+	}
+	var out selectModelValue
+	if err := json.Unmarshal(resp.Result.Value, &out); err != nil {
+		// Don't fail the switch on decode — server already
+		// accepted the change. Log and continue; the next
+		// session.models probe (or the next turn's usage
+		// payload) will refresh d.model anyway.
+		dLog("dsh: selectModel decode warning (using requested model)",
+			"err", errStr(err))
+		d.model = modelID
+		return nil
+	}
+	d.model = out.Selected.Model
+	dLog("dsh: model switched",
+		"new_model", d.model,
+		"new_provider", out.Selected.Provider)
+	return nil
 }
 
 // ─── wire content blocks ──────────────────────────────────────────────

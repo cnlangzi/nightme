@@ -436,8 +436,11 @@ type sessionPromptValue struct {
 // NEXT assembled step — what dsh's adapter will dispatch to if the
 // user prompts right now. Bridge surfaces Current.Model on
 // EventAgentReady so the runtime can render the receipt header
-// (e.g. "session <id> · model <name>") and SetModel can route
-// through /api/session.selectModel against the same provider+model.
+// (e.g. "session <id> · model <name>"). The dsh bridge does not
+// route SetModel through /api/session.selectModel — model changes
+// require a fresh session — but Current's shape is the same one
+// /api/session.selectModel would set, so the field names line up
+// with dsh's wire contract.
 //
 // Routable tells us whether an adapter currently serves
 // Current.Provider; without it, the session can't start a turn at
@@ -471,30 +474,4 @@ type modelSelectionWire struct {
 	Provider        string `json:"provider"`
 	Model           string `json:"model"`
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
-}
-
-// ─── /api/session.selectModel request / response ─────────────────────
-
-// selectModelRequest is the payload we POST to /api/session.selectModel.
-// Mirrors `SessionsApi['selectModel']`: sessionId + new provider + model,
-// plus an optional reasoningEffort that the adapter will validate
-// against the exact route.
-//
-// We send reasoningEffort as `omitempty` so the runtime can leave
-// it unset (the adapter preserves the existing effort on a
-// missing/empty field per `selectModel` semantics).
-type selectModelRequest struct {
-	SessionID       string `json:"sessionId"`
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoningEffort,omitempty"`
-}
-
-// selectModelValue is the `value` payload of an OK
-// session.selectModel response. We surface Selected on the wire
-// struct but don't act on it — the bridge stamps the new Model
-// onto the next EventAgentReady and the runtime re-renders the
-// receipt header.
-type selectModelValue struct {
-	Selected modelSelectionWire `json:"selected"`
 }

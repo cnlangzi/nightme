@@ -4,7 +4,8 @@
 // URL from stdout, dials the two WebSocket downlinks, performs
 // session.create, and emits EventAgentReady. It returns a *driver
 // that satisfies the agent.driver interface (SendBlocks /
-// SendPermission / Reset / Close / Stop / SetModel).
+// SendPermission / Reset / Close / Stop / SetModel — SetModel
+// returns ErrNotSupported; see the method doc for rationale).
 //
 // Lifecycle invariant: `close(events)` happens ONLY in the lifecycle
 // goroutine. Close() closes WS + stdin + cancels, then waits for
@@ -92,10 +93,11 @@ type driver struct {
 	// model is the model's authoritative selection captured at
 	// session-create time via /api/session.models. Bridge stamps
 	// it onto EventAgentReady.Model so the runtime's receipt
-	// header renders "session <id> · model <name>". Updated by
-	// SetModel after a successful /api/session.selectModel so
-	// the next EventAgentReady (or the next turn's header) shows
-	// the new model without a separate re-emit.
+	// header renders "session <id> · model <name>". The field
+	// is read-only on this bridge (SetModel returns
+	// ErrNotSupported); a model change requires restarting the
+	// session so a fresh probe picks up the new default from
+	// ~/.dsh/settings.yaml.
 	//
 	// Format: provider-owned model id (e.g. "MiniMax-M3"). The
 	// provider prefix is NOT included — runtime footer compares
@@ -317,9 +319,9 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 // degrade on error.
 //
 // We deliberately keep this a thin helper rather than baking it
-// into newDriver — future SetModel may want to refresh the
-// selection after a switch (server-side `current` may lag), at
-// which point the same helper takes a fresh modelCtx.
+// into newDriver — both the session-create probe and any future
+// "refresh model after a runtime hint" path reuse it with a fresh
+// modelCtx.
 func (d *driver) fetchSessionModels(ctx context.Context) (*sessionModelsValue, error) {
 	if d.sessionID == "" {
 		return nil, errors.New("dsh: session not initialized")
@@ -727,59 +729,20 @@ func (d *driver) Stop(ctx context.Context) error {
 	return nil
 }
 
-// SetModel switches the active model on the running session via
-// /api/session.selectModel. Mirrors the dsh sessions.ts wire:
-// { sessionId, provider, model } — `reasoningEffort` is left
-// empty so the adapter preserves the route's existing effort
-// (omit = preserve default per the SessionsApi.selectModel JSDoc).
-//
-// On success we update d.model from the server's authoritative
-// selection (`result.selected.model`) so the next EventAgentReady
-// (or the next receipt header render) reflects the new model.
-// The runtime does not currently re-emit EventAgentReady from
-// SetModel — that path is the runtime's job, see agentsession.
-//
-// The session-id guard matches codex's acp pattern: SetModel on
-// an uninitialized driver returns a transport error rather than
-// silently no-op'ing, so callers can distinguish "bridge not
-// ready" from "model unchanged".
+// SetModel is not supported on the dsh bridge. dsh does expose
+// `/api/session.selectModel`, but the local-test deployment
+// (nightme's primary use case) only ever runs against the host's
+// own settings.yaml default — switching mid-session is not a
+// scenario we need to cover. The bridge reads the active model
+// at session-create time (see fetchSessionModels) and stamps it
+// onto EventAgentReady.Model so the runtime can render the
+// receipt header; any future /model-style pick should restart
+// the session instead of going through this bridge.
 func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
-	if d.sessionID == "" {
-		return errors.New("dsh: session not initialized")
-	}
-	if providerID == "" || modelID == "" {
-		return fmt.Errorf("dsh: SetModel requires both providerID and modelID (got %q, %q)",
-			providerID, modelID)
-	}
-	req := selectModelRequest{
-		SessionID: d.sessionID,
-		Provider:  providerID,
-		Model:     modelID,
-	}
-	resp, err := d.http.Post(ctx, "session.selectModel", req)
-	if err != nil {
-		return fmt.Errorf("dsh: session.selectModel: %w", err)
-	}
-	if !resp.Result.OK {
-		return fmt.Errorf("dsh: session.selectModel rejected: %s",
-			resp.Result.ErrorMessage())
-	}
-	var out selectModelValue
-	if err := json.Unmarshal(resp.Result.Value, &out); err != nil {
-		// Don't fail the switch on decode — server already
-		// accepted the change. Log and continue; the next
-		// session.models probe (or the next turn's usage
-		// payload) will refresh d.model anyway.
-		dLog("dsh: selectModel decode warning (using requested model)",
-			"err", errStr(err))
-		d.model = modelID
-		return nil
-	}
-	d.model = out.Selected.Model
-	dLog("dsh: model switched",
-		"new_model", d.model,
-		"new_provider", out.Selected.Provider)
-	return nil
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
 }
 
 // ─── wire content blocks ──────────────────────────────────────────────

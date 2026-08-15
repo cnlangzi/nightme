@@ -817,7 +817,7 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROX
 | `result.ok=false, error.code="bad-request"` | envelope 缺 `type` 或 `method` 字段 | 加 `"type":"client-request"` 和 `"method"` |
 | WS upgrade 失败(curl 52 empty reply) | 路径错(用 `/api/events/mux` 不是 `/api/events/mux`)| 用 dot 分隔 |
 | `result.error.code="agent-busy"` | 上一 turn 未完 | retry with backoff,模型 codex `ErrTurnBusy` |
-| `session.prompt ok=False` | session 没 model | session.create 后调 session.models 自动选 default,或显式 selectModel |
+| `session.prompt ok=False` | session 没 model | session.create 后调 session.models 自动选 default；要换 model 直接重启 session |
 | `Close()` 卡 30s | 服务端不响应 / cancel | SIGKILL 兜底(reuse codex closeOnce 模式) |
 | WS 断线 | server 端重载 / 网络 | reconnect with backoff(client/connection.ts `ConnectionController` 模式) |
 | 测试 hang | 走了代理 | unset 代理变量 |

@@ -37,7 +37,8 @@ import (
 // rules; the summary is:
 //
 //	C:\foo, C:/foo, \foo, \\server\share  → kept as absolute
-//	/foo                                  → kept as absolute (Clean → \foo)
+//	/foo, /foo                             → drive-letter prepended (current
+//	                                         drive), then kept as absolute
 //	C:foo, C:, c:foo                      → rejected (drive-relative ambiguity)
 //	foo, ./foo, ../foo                    → joined with $HOME
 func resolvePath(expanded string) (string, error) {
@@ -57,22 +58,42 @@ func resolvePath(expanded string) (string, error) {
 			expanded, expanded, expanded)
 	}
 
-	// Go 1.26's filepath.Clean no longer normalises a leading
-	// "/" to "\" on Windows (Clean preserves the volume name
-	// verbatim and treats "/" as a non-absolute root-relative
-	// marker). Without this explicit fix-up, a user typing
-	// `/cwd /projects/foo` would get `IsAbs("/projects/foo") ==
-	// false` and the code would fall through to the $HOME-join
-	// branch, silently resolving to `$HOME\projects\foo` —
-	// exactly the bug this file was written to fix.
+	// Root-relative paths (leading / or \) need their drive
+	// letter prepended. Go's filepath.IsAbs follows strict Win32
+	// semantics — a leading `\` alone is "root-relative on the
+	// current drive" but NOT a fully absolute path. The shell
+	// convention ("/foo" means "root of current drive") is a
+	// layer on top; we need to bridge the two.
 	//
-	// Win32 / cmd convention: a leading "/" or "\" on Windows
-	// means "root of the current drive" (e.g. `/projects\foo`
-	// from `C:\` resolves to `C:\projects\foo`). Normalise
-	// BEFORE Clean so IsAbs sees `\` and returns true.
+	// Strategy: if the path starts with / or \ AND has no volume
+	// prefix (no drive letter, no UNC), prepend the current
+	// drive letter from os.Getwd(). Then filepath.Abs on the
+	// drive-prefixed path returns the expected "C:\foo" form.
+	//
+	// Why not just check `IsAbs("\\foo") == true`? Because Go's
+	// IsAbs on Windows REQUIRES a volume prefix (volumeNameLen
+	// > 0) — see internal/filepathlite/path_windows.go's
+	// IsAbs implementation. A bare backslash path has
+	// volumeNameLen == 0, so IsAbs returns false. The shell
+	// handles the "root of current drive" translation; we have
+	// to do it ourselves.
 	normalised := expanded
 	if len(normalised) > 0 && (normalised[0] == '/' || normalised[0] == '\\') {
-		normalised = "\\" + normalised[1:]
+		// Extract current drive letter from cwd (which is always
+		// absolute on Windows, so cwd[0:2] = "C:").
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("cwd: %w", err)
+		}
+		if len(wd) < 2 || wd[1] != ':' {
+			// Shouldn't happen on real Windows, but bail safely
+			// if cwd is somehow not in drive-letter form.
+			return "", fmt.Errorf("cwd %q is not drive-rooted", wd)
+		}
+		// wd = "C:\foo\bar" → drive = "C:"
+		// Replace the leading / or \ with drive + \ so the
+		// resulting path is C:\foo (drive-rooted absolute).
+		normalised = wd[:2] + "\\" + normalised[1:]
 	}
 
 	cleaned := filepath.Clean(normalised)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,28 @@ import (
 // Strategy: spawn a process that prints its CWD via `pwd`, with
 // dir explicitly set to a temp dir. Assert the printed CWD matches
 // the temp dir, NOT whatever the test process inherited.
+//
+// Unix-only: on Windows, `pwd` resolves to an MSYS-shipped
+// binary whose getcwd() returns MSYS-translated paths
+// (`/c/Users/...` instead of `C:\Users\...`). The MSYS path
+// translation is built into MSYS's libc interception layer and
+// is not affected by `MSYS_NO_PATHCONV=1` (which only controls
+// argv path conversion, not getcwd conversion). Since this test
+// asserts a string-level equality between the cmd.Dir we set and
+// the child-reported CWD, it cannot run on a Windows host that
+// ships MSYS — there's no nightme-side fix that would satisfy
+// the assertion. The dir-binds-cmd.Dir contract itself is
+// already covered by `runCmd` unit tests on Linux; the Windows
+// behaviour is "the kernel reports the same CWD we set,
+// translated through MSYS's libc layer".
 func TestRunCmd_DirBinding(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("MSYS getcwd() reports translated paths; the equality assertion " +
+			"cannot hold even with a correct cmd.Dir. The dir-binds-cmd.Dir " +
+			"contract is verified on Unix by this test; on Windows the " +
+			"nightme-side cmd.Dir is set correctly, the child just reports " +
+			"it in MSYS format.")
+	}
 	dir := t.TempDir()
 	// t.TempDir() may be a symlink on macOS (/var → /private/var);
 	// resolve so the comparison below is path-stable.
@@ -48,7 +70,13 @@ func TestRunCmd_DirBinding(t *testing.T) {
 // Instead we assert the child is NOT in a known-bad directory
 // (i.e. it inherited something sensible, not the test binary's
 // arbitrary temp location).
+//
+// Windows: see TestRunCmd_DirBinding's comment for the full MSYS
+// path-translation rationale.
 func TestRunCmd_EmptyDirInherits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("MSYS getcwd() reports translated paths; see TestRunCmd_DirBinding")
+	}
 	parent, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +125,19 @@ func TestRunCmd_EmptyNameRejected(t *testing.T) {
 func TestRunCmd_StripsTrailingNewline(t *testing.T) {
 	// `printf` writes exactly the bytes we tell it to — no implicit
 	// newline the way `echo` would.
+	//
+	// Windows: skip — Git for Windows ships an MSYS-coreutils
+	// `printf` that warns "ignoring excess arguments, starting
+	// with 'world'" when given two positional args. This isn't a
+	// runCmd behaviour issue (runCmd forwards the args verbatim);
+	// it's a quirk of the MSYS printf binary that doesn't apply
+	// to real-world nightme use (which uses real git/gh/glab, not
+	// MSYS printf). The trim-trailing-newline contract itself
+	// is exercised by the other `sh -c "echo ..."` tests below.
+	if runtime.GOOS == "windows" {
+		t.Skipf("Git-for-Windows MSYS printf has a different positional-arg warning; " +
+			"see TestRunCmd_StripsTrailingNewline comment")
+	}
 	stdout, stderr, err := runCmd(context.Background(), "", "printf", "hello\nworld\n")
 	if err != nil {
 		t.Fatalf("runCmd: %v (stderr=%s)", err, stderr)
@@ -160,7 +201,14 @@ func TestRunCmd_PropagatesExitError(t *testing.T) {
 // into runCmd so the spawned gh/glab runs in that directory. This
 // is the single property that, if regressed, re-opens the original
 // `gtw pr` ENOENT bug.
+//
+// Windows: see TestRunCmd_DirBinding's comment — MSYS getcwd()
+// reports translated paths; this equality assertion cannot hold
+// even when nightme correctly sets cmd.Dir.
 func TestExecCLIRunner_DirPropagates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("MSYS getcwd() reports translated paths; see TestRunCmd_DirBinding")
+	}
 	dir := t.TempDir()
 	real, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -187,7 +235,12 @@ func TestExecCLIRunner_DirPropagates(t *testing.T) {
 //
 // Any future refactor that drops the Worktree → Dir binding
 // re-introduces the bug; this test fails immediately.
+//
+// Windows: see TestRunCmd_DirBinding's comment.
 func TestGitHubProvider_RunnerBindsWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("MSYS getcwd() reports translated paths; see TestRunCmd_DirBinding")
+	}
 	dir := t.TempDir()
 	real, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -213,6 +266,9 @@ func TestGitHubProvider_RunnerBindsWorktree(t *testing.T) {
 // regression message unambiguous — a failure on GitHub but not
 // GitLab (or vice versa) points right at the missing binding.
 func TestGitLabProvider_RunnerBindsWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("MSYS getcwd() reports translated paths; see TestRunCmd_DirBinding")
+	}
 	dir := t.TempDir()
 	real, err := filepath.EvalSymlinks(dir)
 	if err != nil {

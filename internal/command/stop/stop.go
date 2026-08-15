@@ -26,7 +26,7 @@
 //
 //	pi        — `abort` JSON-RPC; agent_settled event; SessionID kept
 //	opencode  — /interrupt HTTP; session.idle; SessionID kept
-//	codex     — SIGINT app-server; turn/failed settled; SessionID kept
+//	codex     — turn/interrupt JSON-RPC; turn/completed{interrupted}; SessionID kept
 //	acp       — SIGINT over PTY; native Ctrl-C; SessionID kept
 //	claudecode — SIGINT over pipe; best-effort (may exit child)
 //	pty       — ErrNotSupported (handler surfaces "use /close")

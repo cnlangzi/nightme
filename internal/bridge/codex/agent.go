@@ -65,9 +65,22 @@ type driver struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 
-	// pendingMu guards pendingTurnActive.
+	// pendingMu guards pendingTurnActive and currentTurnID.
+	//
+	// pendingTurnActive is set true on entry to SendBlocks and
+	// released by the translator's onTurnEnd at the per-turn
+	// terminal event (turn/completed / turn/failed /
+	// thread/status/changed.idle). Stop() reads pendingTurnActive
+	// to decide whether there is anything to interrupt.
+	//
+	// currentTurnID is the turnId returned by the most recent
+	// turn/start RPC. It is the half of (threadId, turnId) Stop()
+	// passes to turn/interrupt. Empty until turn/start's response
+	// arrives — Stop() waits briefly for that response when
+	// pendingTurnActive is true but currentTurnID is still empty.
 	pendingMu         sync.Mutex
 	pendingTurnActive bool
+	currentTurnID     string
 }
 
 // ─── lifecycle ───
@@ -261,10 +274,36 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 		return nil
 	}
 
-	return d.session.rpc.request(ctx, "turn/start", turnStartParams{
+	// turn/start's response carries the turnId we need for
+	// turn/interrupt (Stop()). Capture it BEFORE returning so a
+	// concurrent Stop() can find (threadId, turnId) on the driver
+	// instead of having to wait — and so a panic between rpc
+	// return and pendingTurnActive=true never leaves the turnId
+	// dangling.
+	//
+	// pendingTurnActive stays true until the translator's
+	// onTurnEnd callback fires (turn/completed /
+	// turn/status/changed.idle). Stop() relies on that flag to
+	// decide whether there is an in-flight turn to interrupt;
+	// see agent.go Stop for the full contract.
+	var resp turnStartResponse
+	if err := d.session.rpc.request(ctx, "turn/start", turnStartParams{
 		ThreadID: d.session.threadID,
 		Input:    input,
-	}, nil)
+	}, &resp); err != nil {
+		// turn/start RPC failed — release the busy guard so the
+		// next SendBlocks can proceed. The translator will not
+		// fire onTurnEnd for a turn that never started.
+		d.pendingMu.Lock()
+		d.pendingTurnActive = false
+		d.currentTurnID = ""
+		d.pendingMu.Unlock()
+		return err
+	}
+	d.pendingMu.Lock()
+	d.currentTurnID = resp.Turn.ID
+	d.pendingMu.Unlock()
+	return nil
 }
 
 // stageImage copies an image from b.Path into a workspace-local
@@ -389,28 +428,157 @@ func (d *driver) New(ctx context.Context) error {
 	return nil
 }
 
-// Stop sends SIGINT to the codex app-server. The codex app-server
-// JSON-RPC API does not expose a structured `turn/cancel` method,
-// so the closest portable action is the same Ctrl-C signal a user
-// would press in interactive mode. The app-server catches it,
-// emits `turn/failed` (or `turn/completed`) with subtype
-// "interrupted", and the bridge's translator converts that to
-// EventAgentDone with Reason="settled". The app-server process
-// stays alive — the bridge handle remains valid for the next
-// Submit on the same codex thread.
+// Stop requests the in-flight turn to settle by sending a structured
+// turn/interrupt JSON-RPC. The codex app-server STAYS ALIVE and
+// shortly after emits turn/completed with Status="interrupted";
+// the bridge's translator routes that to EventAgentDone and clears
+// pendingTurnActive, so the chat layer's TryFlush picks up the next
+// queued prompt on the SAME thread (no respawn, no --resume, no
+// ghost turn).
 //
-// Stop is fire-and-forget: it does NOT block waiting for the
+// This is the same wire signal the codex TUI uses for the ESC key —
+// not SIGINT. SIGINT would terminate the app-server, force the chat
+// layer to --resume a fresh process, and on a thread whose previous
+// turn was interrupted mid-flight the resumed app-server can wedge
+// in a state where turn/start is accepted but turn/completed never
+// arrives (see fix-stop for the failure-mode report).
+//
+// State machine:
+//
+//   - session not started                 → ErrNotSupported
+//   - no in-flight turn (busy=false)      → nil (noop; matches
+//                                           stop.go's "nothing
+//                                           to stop" reply)
+//   - in-flight turn, turnId known       → turn/interrupt
+//   - in-flight turn, turnId still empty  → brief wait for
+//                                           turn/start's response,
+//                                           then turn/interrupt
+//   - turn/interrupt fails with          → SIGINT (legacy
+//     method-not-found                     fallback for old codex)
+//   - turnId stays empty after wait,      → SIGINT (last-resort
+//     no other RPC to interrupt             fallback)
+//
+// Stop is fire-and-forget — it does not block waiting for the
 // app-server to confirm the turn has settled. The chat layer's
 // TryFlush watches IsReady() and reschedules the next queued
-// prompt automatically once the bridge sees KindPromptEnded.
+// prompt automatically once the bridge sees the translated
+// turn/completed notification.
 //
-// Returns ErrNotSupported if the bridge is not started yet.
+// Returns ErrNotSupported only when the bridge has not been
+// started at all (no session).
 func (d *driver) Stop(ctx context.Context) error {
-	_ = ctx
-	if d.session == nil || d.session.cmd == nil || d.session.cmd.Process == nil {
+	if d.session == nil || d.session.rpc == nil {
+		return agent.ErrNotSupported
+	}
+
+	d.pendingMu.Lock()
+	busy := d.pendingTurnActive
+	turnID := d.currentTurnID
+	threadID := d.session.threadID
+	d.pendingMu.Unlock()
+
+	if !busy {
+		// No in-flight turn — mirrors stop.go's "noop" branch so
+		// a second /stop in quick succession doesn't surface a
+		// spurious "stop failed" reply.
+		return nil
+	}
+
+	// Race window: turn/start is still in flight on the wire.
+	// pendingTurnActive was set true just before we issued the
+	// RPC, so any /stop arriving in that ~ms window sees busy=true
+	// but turnID="". Wait briefly for the response to land; the
+	// RPC is local-process so this resolves in well under 200ms.
+	if turnID == "" {
+		turnID = waitForTurnID(d, 200*time.Millisecond)
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, stopRPCTimeout)
+	defer cancel()
+
+	if turnID != "" {
+		err := d.session.rpc.request(stopCtx, "turn/interrupt",
+			turnInterruptParams{ThreadID: threadID, TurnID: turnID}, nil)
+		if err == nil {
+			// translator will release pendingTurnActive when
+			// turn/completed{status:"interrupted"} arrives.
+			return nil
+		}
+		// Method-not-found on older codex versions: fall back
+		// to SIGINT. Anything else bubbles up so the chat
+		// layer can render "stop failed: ...".
+		if !isRPCMethodNotFound(err) {
+			return fmt.Errorf("codex: stop: %w", err)
+		}
+	}
+
+	// Last-resort SIGINT fallback: turnId never materialised (so
+	// no turn/interrupt to send) or the method isn't supported
+	// on this codex build. SIGINT still terminates the
+	// app-server cleanly from the OS's perspective; the chat
+	// layer will see KindLifecycle{StatusExited} and run
+	// RestartFromDeath.
+	if d.session.cmd == nil || d.session.cmd.Process == nil {
 		return agent.ErrNotSupported
 	}
 	return agent.SignalProcessGroup(d.session.cmd.Process, os.Interrupt)
+}
+
+// stopRPCTimeout bounds how long Stop() waits for the app-server
+// to acknowledge turn/interrupt. The wire reply is `{}` and
+// typically lands in <50ms; 3s is generous and matches
+// handshakeTimeout used elsewhere in this package.
+const stopRPCTimeout = 3 * time.Second
+
+// waitForTurnID polls d.pendingMu briefly for the turnId that
+// turn/start's response writes into d.currentTurnID. Returns ""
+// if the deadline elapses first.
+//
+// Polled rather than channel-based because the writer is the
+// rpc.request call inside SendBlocks, which does not publish on a
+// channel — it locks pendingMu directly. 10ms granularity is
+// plenty for an in-process JSON-RPC reply.
+func waitForTurnID(d *driver, timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	for {
+		d.pendingMu.Lock()
+		tid := d.currentTurnID
+		d.pendingMu.Unlock()
+		if tid != "" {
+			return tid
+		}
+		if time.Now().After(deadline) {
+			return ""
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// isRPCMethodNotFound reports whether err corresponds to the
+// JSON-RPC 2.0 reserved error -32601 (Method not found). Older
+// codex builds that pre-date the turn/interrupt method return
+// this; we treat it as a soft signal to fall back to SIGINT
+// rather than surface a "stop failed" reply to the user.
+//
+// Match order:
+//  1. *rpcError with Code == -32601 (the rpcClient surfaces the
+//     wire code verbatim on JSON-RPC errors).
+//  2. Otherwise, a substring match for "method not found" —
+//     some error-wrapping layers redact the numeric code but
+//     preserve the message. We only fall back to substring
+//     matching when no *rpcError is in the chain, so a
+//     well-formed -32600 invalid-request error that happens to
+//     mention "method not found" in its body is NOT
+//     mis-classified.
+func isRPCMethodNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var re *rpcError
+	if errors.As(err, &re) {
+		return re.Code == codeMethodNotFound
+	}
+	return strings.Contains(err.Error(), "method not found")
 }
 
 // SetModel is not supported on the codex bridge. codex reads the

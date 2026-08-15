@@ -96,6 +96,28 @@ type turnCompletedNotification struct {
 	Error  json.RawMessage `json:"error,omitempty"`
 }
 
+// turn/interrupt — cancel an in-flight turn without killing the app-server.
+// Codex app-server STAYS ALIVE and emits turn/completed with
+// Status="interrupted" shortly after; the bridge's translator routes
+// that to EventAgentDone{Reason:"interrupted"} so the chat layer's
+// TryFlush picks up the next queued prompt on the same thread.
+//
+// This is the same wire signal the codex TUI uses for the ESC key.
+// Sending SIGINT instead (the pre-fix behaviour) terminates the
+// app-server, forces the chat layer to --resume a fresh process, and
+// on a thread whose previous turn was interrupted mid-flight the
+// resume can wedge in a "ghost turn" state where turn/start is
+// accepted but turn/completed never arrives (see fix-stop).
+type turnInterruptParams struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+}
+
+// turnInterruptResponse is the body of a successful turn/interrupt
+// reply. The protocol documents the body as an empty object, but we
+// keep the type for symmetry and future-proofing.
+type turnInterruptResponse struct{}
+
 type appServerUsage struct {
 	InputTokens           int `json:"inputTokens"`
 	CachedInputTokens     int `json:"cachedInputTokens"`

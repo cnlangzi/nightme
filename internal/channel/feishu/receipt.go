@@ -410,6 +410,63 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 	return r.renderLocked(ctx)
 }
 
+// RolloverTo (fix-reply-placehold-card) transitions the receipt to
+// a freshly-created overflow placeholder card when the original
+// receipt card exceeded its 50-element / 30 KB envelope. After
+// RolloverTo returns, every subsequent AppendEntry / SetTaskList
+// PATCHes the new card instead of the original — so a stream of N
+// overflow chunks collapses into a single new placeholder card
+// followed by N-1 PATCHes, instead of N standalone bubbles in main
+// chat.
+//
+// Why a method, not just field assignment: cardMsgID, replyMsgID,
+// entries, footerLines, lastBody, and lastBodyPatch all need to
+// move together. Doing it under r.mu keeps a concurrent
+// renderLocked / SetPromptState from observing a half-migrated
+// state. lastBody + lastBodyPatch also need to be reset so the
+// first PATCH onto the new card isn't suppressed by the
+// duplicate-body short-circuit or delayed by the 300ms rate
+// limiter measured against the OLD card's last PATCH.
+//
+// tasks are intentionally preserved across the rollover — the
+// checklist is a global view across the whole turn; freezing it on
+// the old card and restarting on the new one would visually orphan
+// in-flight tasks.
+//
+// Caller contract:
+//
+//  1. SendCardForReceipt(chatID, body, "", false) must already
+//     have succeeded and returned msgID. RolloverTo does NOT send
+//     any network traffic itself; the caller owns the send.
+//  2. firstEntry should match the entry whose overflow triggered
+//     the rollover, so the new card starts with the same visible
+//     content the old postOrphanReplyCard fallback would have
+//     rendered.
+//
+// The original card remains visible in chat but the receipt no
+// longer tracks it — future AppendEntry calls go to msgID instead.
+// OnPromptEnded's SetPromptState therefore lands on the LAST
+// overflow card, which is the surface the user is reading.
+func (r *MessageReceipt) RolloverTo(msgID string, firstEntry LogEntry, footerLines []string) {
+	if r == nil || msgID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cardMsgID = msgID
+	r.replyMsgID = msgID
+	r.entries = []LogEntry{firstEntry}
+	r.footerLines = footerLines
+	// Reset render-state cache so the first PATCH on the new card
+	// is not skipped by the duplicate-body short-circuit
+	// (`body == r.lastBody` in renderLocked) and is not delayed by
+	// the 300ms rate limiter measured against the old card's last
+	// PATCH time.
+	r.lastBody = ""
+	r.lastBodyPatch = time.Time{}
+	// tasks intentionally preserved — see method doc.
+}
+
 // renderLocked pushes the current rolling-log + task-checklist
 // snapshot to Feishu. Caller must hold r.mu.
 // Caller must hold r.mu.

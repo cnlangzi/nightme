@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -382,4 +383,246 @@ func TestAppendEntry_OverflowBailsOut(t *testing.T) {
 			len(r.entries), receiptMaxElements)
 	}
 	r.mu.Unlock()
+}
+
+// TestAppendEntry_OverflowRolloverPatchesNewCard (fix-reply-placehold-card)
+// verifies the new overflow → rollover → continue-PATCHing flow:
+//
+//  1. Pre-fill the receipt to its 50-element cap so the next append
+//     would overflow.
+//  2. Append one more entry → ErrReceiptOverflow, no PATCH, the
+//     overflow entry is NOT committed (matches TestAppendEntry_OverflowBailsOut).
+//  3. Simulate the adapter's overflow handler: build a new card
+//     body for a fresh placeholder, send it via SendCardForReceipt
+//     to get the new msgID, then call receipt.RolloverTo to switch
+//     the receipt's tracking to the new card.
+//  4. Append a follow-up entry on the rolled-over receipt →
+//     should PATCH the NEW msgID, NOT the original cardMsgID.
+//
+// Assertions:
+//
+//   - bot.cards has exactly 1 entry (the new placeholder), with a
+//     different MessageID from the original.
+//   - bot.patches has exactly 1 entry, addressed to the NEW
+//     MessageID. The original cardMsgID never receives another
+//     PATCH after the rollover.
+func TestAppendEntry_OverflowRolloverPatchesNewCard(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+
+	// (1) Pre-fill to the element cap.
+	entries := make([]LogEntry, receiptMaxElements)
+	for i := range entries {
+		entries[i] = LogEntry{Icon: "💬", Text: fmt.Sprintf("entry %d", i)}
+	}
+	r.mu.Lock()
+	r.entries = entries
+	r.mu.Unlock()
+
+	// (2) Next append overflows; receipt stays untouched.
+	overflowEntry := LogEntry{Icon: "💬", Text: "overflow"}
+	if err := r.AppendEntry(context.Background(), overflowEntry); !errors.Is(err, ErrReceiptOverflow) {
+		t.Fatalf("AppendEntry = %v, want ErrReceiptOverflow", err)
+	}
+	r.mu.Lock()
+	if got := len(r.entries); got != receiptMaxElements {
+		t.Fatalf("pre-rollover entries len = %d, want %d (overflow entry must NOT commit)", got, receiptMaxElements)
+	}
+	preRolloverCard := r.cardMsgID
+	r.mu.Unlock()
+
+	// (3) Simulate adapter's OutReply overflow branch: build body,
+	// send a new top-level card, call RolloverTo.
+	r.mu.Lock()
+	currentTasks := r.tasks
+	r.mu.Unlock()
+	body, err := buildReceiptCard([]LogEntry{overflowEntry}, currentTasks, nil)
+	if err != nil {
+		t.Fatalf("buildReceiptCard for overflow placeholder: %v", err)
+	}
+	newMsgID, err := bot.SendCardForReceipt(context.Background(), "oc_chat", body, "", false)
+	if err != nil {
+		t.Fatalf("SendCardForReceipt for overflow placeholder: %v", err)
+	}
+	if newMsgID == preRolloverCard {
+		t.Fatalf("new placeholder msgID == original cardMsgID (%q); rollover would not actually move", newMsgID)
+	}
+	r.RolloverTo(newMsgID, overflowEntry, nil)
+
+	// (4) Append a follow-up entry → PATCHes the new card.
+	if err := r.AppendEntry(context.Background(), LogEntry{Icon: "💬", Text: "after-rollover"}); err != nil {
+		t.Fatalf("AppendEntry after rollover: %v", err)
+	}
+
+	// Exactly one new placeholder was created.
+	if len(bot.cards) != 1 {
+		t.Fatalf("SendCard count = %d, want 1 (the overflow placeholder)", len(bot.cards))
+	}
+	if got := bot.cards[0].MessageID; got != newMsgID {
+		t.Errorf("placeholder MessageID = %q, want %q", got, newMsgID)
+	}
+
+	// Exactly one PATCH was issued, and it targets the new card —
+	// the original cardMsgID receives zero post-rollover PATCHes.
+	if len(bot.patches) != 1 {
+		t.Fatalf("PatchMessage count = %d, want 1", len(bot.patches))
+	}
+	if got := bot.patches[0].MessageID; got != newMsgID {
+		t.Errorf("PATCH MessageID = %q, want %q (must target the new placeholder)", got, newMsgID)
+	}
+	if got := bot.patches[0].MessageID; got == preRolloverCard {
+		t.Errorf("PATCH targeted the ORIGINAL card %q after rollover; receipt should have migrated", got)
+	}
+
+	// Receipt state reflects the rollover: 2 entries on the new
+	// card, cardMsgID switched.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if got := len(r.entries); got != 2 {
+		t.Errorf("post-rollover entries len = %d, want 2 (overflow + follow-up)", got)
+	}
+	if r.entries[0].Text != "overflow" || r.entries[1].Text != "after-rollover" {
+		t.Errorf("entries = [%q, %q], want [overflow, after-rollover]", r.entries[0].Text, r.entries[1].Text)
+	}
+	if r.cardMsgID != newMsgID {
+		t.Errorf("cardMsgID = %q, want %q", r.cardMsgID, newMsgID)
+	}
+}
+
+// TestRolloverTo_ResetsEntriesAndFooter verifies the receipt's
+// internal state after a RolloverTo call:
+//
+//   - cardMsgID / replyMsgID switch to the new card.
+//   - entries is reset to exactly [firstEntry] (NOT appended to the
+//     pre-rollover slice — otherwise the new card would re-overflow
+//     immediately).
+//   - footerLines is replaced (or cleared if nil was passed).
+//   - tasks is PRESERVED (the checklist is a global view across the
+//     turn; freezing it on the old card would orphan in-flight
+//     tasks).
+//   - lastBody + lastBodyPatch are reset so the first PATCH on the
+//     new card isn't suppressed by the duplicate-body short-circuit
+//     or delayed by the 300ms rate limiter measured against the old
+//     card's last PATCH time.
+func TestRolloverTo_ResetsEntriesAndFooter(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+
+	// Seed: 3 entries, a footer, and 2 tasks. Also set lastBody +
+	// lastBodyPatch to non-zero values so we can verify the reset.
+	r.mu.Lock()
+	r.entries = []LogEntry{
+		{Icon: "💬", Text: "old-1"},
+		{Icon: "💬", Text: "old-2"},
+		{Icon: "💬", Text: "old-3"},
+	}
+	r.footerLines = []string{"old-footer-1", "old-footer-2"}
+	r.tasks = []agent.AgentTaskItem{
+		{ID: "t1", Subject: "task one", Status: agent.TaskPending},
+		{ID: "t2", Subject: "task two", Status: agent.TaskCompleted},
+	}
+	r.lastBody = "previous render body"
+	r.lastBodyPatch = time.Now()
+	r.mu.Unlock()
+
+	// Rollover to a new card.
+	first := LogEntry{Icon: "💬", Text: "new-first"}
+	r.RolloverTo("om_card_new", first, []string{"new-footer"})
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.cardMsgID != "om_card_new" {
+		t.Errorf("cardMsgID = %q, want %q", r.cardMsgID, "om_card_new")
+	}
+	if r.replyMsgID != "om_card_new" {
+		t.Errorf("replyMsgID = %q, want %q", r.replyMsgID, "om_card_new")
+	}
+	if got := len(r.entries); got != 1 {
+		t.Fatalf("entries len = %d, want 1 (reset to firstEntry only)", got)
+	}
+	if r.entries[0].Text != "new-first" {
+		t.Errorf("entries[0].Text = %q, want %q", r.entries[0].Text, "new-first")
+	}
+	if got := len(r.footerLines); got != 1 || r.footerLines[0] != "new-footer" {
+		t.Errorf("footerLines = %v, want [new-footer]", r.footerLines)
+	}
+	// tasks preserved.
+	if got := len(r.tasks); got != 2 {
+		t.Errorf("tasks len = %d, want 2 (preserved across rollover)", got)
+	}
+	if r.tasks[0].ID != "t1" || r.tasks[1].ID != "t2" {
+		t.Errorf("tasks = %v, want t1/t2 preserved", r.tasks)
+	}
+	// Render-state cache reset.
+	if r.lastBody != "" {
+		t.Errorf("lastBody = %q, want empty (so first PATCH on new card is not skipped)", r.lastBody)
+	}
+	if !r.lastBodyPatch.IsZero() {
+		t.Errorf("lastBodyPatch = %v, want zero (so first PATCH on new card is not rate-limited)", r.lastBodyPatch)
+	}
+}
+
+// TestRolloverTo_NilReceiptIsNoop verifies the nil-receiver contract
+// parallel to AppendEntryWithFooter / SetPromptState.
+func TestRolloverTo_NilReceiptIsNoop(t *testing.T) {
+	var r *MessageReceipt
+	r.RolloverTo("om_card_x", LogEntry{Icon: "💬", Text: "x"}, nil)
+	// No panic = pass.
+}
+
+// TestRolloverTo_EmptyMsgIDIsNoop guards against an adapter bug
+// where SendCardForReceipt returns "" on failure — calling RolloverTo
+// with an empty msgID would silently migrate the receipt to an
+// untracked card, breaking the next PATCH.
+func TestRolloverTo_EmptyMsgIDIsNoop(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	r.mu.Lock()
+	r.entries = []LogEntry{{Icon: "💬", Text: "keep-me"}}
+	r.mu.Unlock()
+
+	r.RolloverTo("", LogEntry{Icon: "💬", Text: "drop-me"}, nil)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cardMsgID != "om_card_initial" {
+		t.Errorf("cardMsgID = %q, want unchanged (%q) on empty-msgID rollover", r.cardMsgID, "om_card_initial")
+	}
+	if got := len(r.entries); got != 1 || r.entries[0].Text != "keep-me" {
+		t.Errorf("entries = %v, want unchanged on empty-msgID rollover", r.entries)
+	}
+}
+
+// TestSetPromptState_AfterRollover_ReactionGoesToLastCard (fix-reply-placehold-card)
+// verifies that OnPromptEnded → SetPromptState(PromptDone) lands
+// the ✅ reaction on the LAST active placeholder card, not the
+// original receipt card. This is the user-visible payoff of the
+// rollover: the "done" badge sticks to the surface the user is
+// reading, even after the receipt has overflowed once or more.
+func TestSetPromptState_AfterRollover_ReactionGoesToLastCard(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+
+	// Rollover: receipt now tracks a new placeholder.
+	r.RolloverTo("om_card_overflow_1", LogEntry{Icon: "💬", Text: "x"}, nil)
+	// Rollover again: simulate a second overflow within the same turn.
+	r.RolloverTo("om_card_overflow_2", LogEntry{Icon: "💬", Text: "y"}, nil)
+
+	// Adapter fires OnPromptEnded → SetPromptState(PromptDone).
+	r.SetPromptState(context.Background(), chatsession.PromptDone)
+
+	// The reaction should be on the LAST overflow card.
+	if len(bot.reactions) != 1 {
+		t.Fatalf("reaction count = %d, want 1", len(bot.reactions))
+	}
+	if got := bot.reactions[0].MessageID; got != "om_card_overflow_2" {
+		t.Errorf("reaction MessageID = %q, want %q (the last active placeholder)", got, "om_card_overflow_2")
+	}
+	// The original cardMsgID must NOT have received any reaction.
+	for i, rxn := range bot.reactions {
+		if rxn.MessageID == "om_card_initial" {
+			t.Errorf("reaction[%d] targeted the ORIGINAL card %q after rollover", i, rxn.MessageID)
+		}
+	}
 }

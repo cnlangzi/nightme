@@ -1239,13 +1239,43 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		if !created {
 			// Receipt exists. Try to append; if the would-be card
-			// would exceed 50 elements / 30 KB envelope, bail out
-			// to a fresh top-level card.
+			// would exceed 50 elements / 30 KB envelope, rollover
+			// the receipt to a fresh top-level placeholder card so
+			// subsequent chunks PATCH that new card instead of
+			// producing a stream of N standalone bubbles.
 			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footerLines); err != nil {
-				if errors.Is(err, ErrReceiptOverflow) {
-					return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
+				if !errors.Is(err, ErrReceiptOverflow) {
+					return err
 				}
-				return err
+				// fix-reply-placehold-card: build the first entry
+				// for the new placeholder card using the same
+				// tasks snapshot the old card had (tasks are a
+				// global view across the turn — see
+				// MessageReceipt.RolloverTo).
+				body, buildErr := buildReceiptCard(
+					[]LogEntry{{Icon: "💬", Text: text}},
+					receipt.tasks,
+					footerLines,
+				)
+				if buildErr != nil {
+					return fmt.Errorf("feishu: build overflow placeholder card: %w", buildErr)
+				}
+				// rootID="" → top-level Create (no thread anchor),
+				// replyInThread=false → main-chat visible, matching
+				// the pre-fix postOrphanReplyCard surface so the
+				// user sees the same single bubble.
+				msgID, sendErr := a.SendCardForReceipt(ctx, msg.ChatID, body, "", false)
+				if sendErr != nil {
+					// Send failed: keep the receipt pointing at the
+					// old card and DO NOT reset entries — the next
+					// chunk will retry the overflow path and the
+					// original placeholder stays usable. Logging
+					// happens inside SendCardForReceipt's adapter
+					// wrapper.
+					return sendErr
+				}
+				receipt.RolloverTo(msgID, LogEntry{Icon: "💬", Text: text}, footerLines)
+				return nil
 			}
 		}
 		// created=true — first entry was installed by ensure; no

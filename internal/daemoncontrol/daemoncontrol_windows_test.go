@@ -115,8 +115,8 @@ func TestWindowsPipePingStatusStop(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !ready {
-		t.Fatal("server reported not-ready after retries")
+	if ready {
+		t.Fatal("server reported ready before SetReady")
 	}
 	if ready {
 		t.Fatal("server reported ready before SetReady")

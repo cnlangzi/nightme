@@ -245,7 +245,7 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	// Windows shows the dir via 8.3 short name (RUNNER~1) in
 	// some git output but via the long name (runneradmin) in
 	// others; the underlying dir is the same.
-	if !strings.Contains(strings.ToLower(filepath.FromSlash(wtOut)), strings.ToLower(filepath.Dir(rig.repoRoot))) {
+	if !strings.Contains(strings.ToLower(filepath.FromSlash(wtOut)), strings.ToLower(filepath.FromSlash(filepath.Dir(rig.repoRoot)))) {
 		t.Errorf("no worktree created in %s:\n%s", filepath.Dir(rig.repoRoot), wtOut)
 	}
 	// Pick the second worktree entry (first is the main repo

@@ -235,16 +235,16 @@ opencode server 用这个 header 路由事件到对应项目的 Instance。对�
 | SSE 事件 | 处理 | 产出 AgentEvent |
 |----------|------|-----------------|
 | `server.connected` (initial) | 仅日志 | — |
-| `message.part.updated` (text part) | 直接 emit | `EventAgentText` |
+| `message.part.updated` (text part) | splitThinking 剥 inline `<think>` 后 emit；reasoning 部分走 `[思考] ` | `EventAgentText` (×0..2) |
 | `message.part.updated` (reasoning part) | `[思考] ` 前缀 | `EventAgentText` |
 | `message.part.updated` (tool part, state=pending) | flush pendingText, 记录 + emit | `EventAgentText` *(若有缓冲)* + `EventAgentToolStart` |
 | `message.part.updated` (tool part, state=running) | emit | `EventAgentToolStart` |
 | `message.part.updated` (tool part, state=completed) | emit | `EventAgentToolEnd` |
 | `message.part.updated` (tool part, state=error) | emit + Err | `EventAgentToolEnd` |
 | `session.next.text.started` | 建桶 + activeTextBlock 标记 | — |
-| `session.next.text.delta` | splitThinking 拆 + 写 textBuf[partID] **(不 emit)** | — |
+| `session.next.text.delta` | splitThinking 拆 + 写 textBuf[textID] **(不 emit)** | — |
 | `session.next.text.ended` | closeTextBlockLocked → pendingText **(不 emit)** | — |
-| `session.next.step.ended` / `session.idle` / `session.next.idle` | closeAllTextBlocks → flushPendingText → flushLeftoverThink → Done | `(0..1) EventAgentText` *(joined reply)* + `(0..1) EventAgentText[思考]` *(unclosed thinking)* + `EventAgentDone` |
+| `session.next.step.ended` / `session.idle` / `session.next.idle` | flushPendingText (内部 closeAll) → flushLeftoverThink → Done | `(0..1) EventAgentText` *(joined reply)* + `(0..1) EventAgentText[思考]` *(unclosed thinking)* + `EventAgentDone` |
 | `session.next.step.failed` | emit | `EventAgentDone{Reason:"failed"}` |
 | `session.error` | emit | `EventAgentError` |
 | `session.compacted` | emit | `EventAgentReady` (refresher) |
@@ -324,20 +324,22 @@ opencode 1.18 把 token-level text 走全局 `session.next.text.{started,delta,e
 ```
 state machine (in turnState):
 
-  start   session.next.text.started(partID=X)
+  start   session.next.text.started(textID=X)
             → activeTextBlock = X
             → make textBuf[X] if missing
-  delta   session.next.text.delta(partID=X, delta=…)
+            (老 variant 用 partID; handleTextStreamEvent 优先 textID)
+  delta   session.next.text.delta(textID=X, delta=…)
             → combined = thinkHoldings[X] + delta
             → splitThinking(combined)
                 Kept     → textBuf[X]            (no deliver yet)
                 Thinking → [思考] 立即 emit     (同 reasoning part 走 gateway)
                 Held     → thinkHoldings[X]      (跨 delta 续接)
-  ended   session.next.text.ended(partID=X, text=…)
+  ended   session.next.text.ended(textID=X, text=…)
             → closeTextBlockLocked(X) → pendingText   (no deliver yet)
 
   flush   tool pending | session.next.step.ended | session.idle
-            → flushPendingTextLocked → emit ONE EventAgentText(joined)
+            → flushPendingTextLocked (内部 closeAllTextBlocksLocked)
+              → emit ONE EventAgentText(joined)
 
   cleanup partial <think> 未闭合: flushLeftoverThinkLocked
             → emit ONE [思考] EventAgentText

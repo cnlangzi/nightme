@@ -240,15 +240,6 @@ func (t *translator) markContent() {
 	t.turnMu.Unlock()
 }
 
-// turnHadAny reports whether ANY content was delivered during the
-// current turn (text/tool/reasoning) or a step.started event fired.
-// Used by the terminal-event branches to choose Done.Reason.
-func (t *translator) turnHadAny() (content, step bool) {
-	t.turnMu.Lock()
-	defer t.turnMu.Unlock()
-	return t.turnHadContent, t.turnHadStep
-}
-
 // tryEmitTurnDone is the single funnel for EventAgentDone so the
 // various terminal-event branches (session.next.step.ended,
 // session.idle, session.next.idle, session.next.step.failed, and
@@ -454,13 +445,13 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// step events arrived — that path means the prompt was
 		// admitted but the model produced nothing (auth/quota/
 		// hang before first token).
-		// opencode-stream-buffer (P0): drain any text parts whose
-		// .ended never arrived (resubscribe mid-part, connection
-		// drop, single-shot models) into pendingText, then flush
-		// pendingText. Without the closeAll step, the reply text
-		// stuck in textBuf would never reach the chat client.
+		// flushPendingTextLocked closes any text part whose .ended
+		// never arrived (resubscribe mid-part, connection drop,
+		// single-shot models) into pendingText and emits the
+		// joined reply. Without the closeAll inside it, reply
+		// text stuck in textBuf would never reach the chat
+		// client — the "model mid-sentence → Done" symptom.
 		t.turnMu.Lock()
-		t.closeAllTextBlocksLocked()
 		flushEvents := t.flushPendingTextLocked()
 		t.turnMu.Unlock()
 		for _, ev := range flushEvents {
@@ -489,10 +480,10 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// keep the case as a forward-compat hook so a future
 		// release reintroducing session.next.idle works.
 		//
-		// Same closeAll + flush + Done rules as
-		// session.next.step.ended above.
+		// Same flush + Done rules as session.next.step.ended
+		// above (flushPendingTextLocked handles the close-all
+		// internally).
 		t.turnMu.Lock()
-		t.closeAllTextBlocksLocked()
 		flushEvents := t.flushPendingTextLocked()
 		t.turnMu.Unlock()
 		for _, ev := range flushEvents {
@@ -703,6 +694,37 @@ func (t *translator) handlePart(p Part) {
 			return
 		}
 		t.markContent()
+		// Mirror the session.next.text.delta path's splitThinking
+		// pass so an inline <think>...</think> block in a
+		// non-streamed / replayed reply doesn't leak into
+		// OutReply. opencode 1.18 doesn't fire message.part.updated
+		// with type=text alongside session.next.text.delta (verified
+		// against a live server: zero message.part.updated/text
+		// events across a full turn), so this branch is the
+		// fallback for older / replaying servers and must hold the
+		// same inline-think hygiene the streaming branch does.
+		split := splitThinking(p.Text)
+		var reply string
+		if split.Kept != "" {
+			reply = split.Kept
+		} else if split.Thinking != "" {
+			// Pure reasoning block with no surrounding reply —
+			// fall back to the reasoning surface rather than
+			// dropping the content.
+			t.deliver(agent.AgentEvent{
+				Kind:      agent.EventAgentText,
+				SessionID: t.sessionID,
+				Model:     t.model,
+				AgentName: t.agentName,
+				Workspace: t.workspace,
+				Branch:    t.branch,
+				Text:      "[思考] " + strings.TrimSpace(split.Thinking),
+			})
+			return
+		} else {
+			// Empty after splitting — nothing to surface.
+			return
+		}
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentText,
 			SessionID: t.sessionID,
@@ -710,8 +732,19 @@ func (t *translator) handlePart(p Part) {
 			AgentName: t.agentName,
 			Workspace: t.workspace,
 			Branch:    t.branch,
-			Text:      p.Text,
+			Text:      reply,
 		})
+		if think := strings.TrimSpace(split.Thinking); think != "" {
+			t.deliver(agent.AgentEvent{
+				Kind:      agent.EventAgentText,
+				SessionID: t.sessionID,
+				Model:     t.model,
+				AgentName: t.agentName,
+				Workspace: t.workspace,
+				Branch:    t.branch,
+				Text:      "[思考] " + think,
+			})
+		}
 	case "reasoning":
 		if p.Text == "" {
 			return
@@ -1449,13 +1482,35 @@ func extractToolError(raw string) string {
 // are tolerated (the model may emit boundary markers with no
 // payload; the actual content arrives on .delta or the subsequent
 // .ended snapshot).
+// handleTextStreamEvent decodes the text event's wire payload and
+// dispatches on the .type suffix. Empty bodies on .started / .ended
+// are tolerated (the model may emit boundary markers with no
+// payload; the actual content arrives on .delta or the subsequent
+// .ended snapshot).
+//
+// opencode 1.18 sends the per-block key as `textID` on the data
+// payload (verified against a live server — the wire shape is:
+//
+//	{"type":"session.next.text.delta",
+//	 "data":{"textID":"text-0","delta":"我"}}
+//
+// Older / non-1.18 variants used `partID`. We accept both and prefer
+// `textID` so each text block keeps a distinct textBuf entry;
+// falling back to a single shared bucket ("_") when both are missing
+// is the safety net for reordered .ended with no preceding .started.
 func (t *translator) handleTextStreamEvent(ev SessionEvent) {
 	var p struct {
 		PartID string `json:"partID"`
+		TextID string `json:"textID"`
 		Text   string `json:"text"`
 		Delta  string `json:"delta"`
 	}
 	_ = json.Unmarshal(ev.properties(), &p)
+
+	id := p.TextID
+	if id == "" {
+		id = p.PartID
+	}
 
 	payload := p.Text
 	if payload == "" {
@@ -1464,14 +1519,14 @@ func (t *translator) handleTextStreamEvent(ev SessionEvent) {
 
 	switch ev.Type {
 	case "session.next.text.started":
-		t.handleTextStreamStarted(p.PartID)
+		t.handleTextStreamStarted(id)
 	case "session.next.text.delta":
-		t.handleTextStreamDelta(p.PartID, payload)
+		t.handleTextStreamDelta(id, payload)
 	case "session.next.text.ended":
 		// Pass the snapshot text too — some models emit the
 		// entire body on .ended without any .delta. In that
 		// case payload == p.Text and we want it buffered.
-		t.handleTextStreamEnded(p.PartID, payload)
+		t.handleTextStreamEnded(id, payload)
 	}
 }
 
@@ -1495,6 +1550,16 @@ func (t *translator) handleTextStreamStarted(partID string) {
 	}
 }
 
+// handleTextStreamDelta buffers one delta (or the snapshot of a
+// single-shot model) into textBuf[partID] after stripping inline
+// <think>...</think> blocks. Extracted reasoning surfaces as its
+// own [思考] EventAgentText (same channel as the structured
+// `reasoning` Part type). The [思考] emit counts as content for
+// the empty-turn detector (markContent) but the buffered reply
+// text is what flushPendingTextLocked surfaces at the terminal
+// event, so the chat client sees one render per part-cluster.
+//
+// Called from handleTextStreamEvent under turnMu.
 // handleTextStreamDelta buffers one delta (or the snapshot of a
 // single-shot model) into textBuf[partID] after stripping inline
 // <think>...</think> blocks. Extracted reasoning surfaces as its
@@ -1537,6 +1602,9 @@ func (t *translator) handleTextStreamDelta(partID, payload string) {
 			t.turn.textBuf[pid] = buf
 		}
 		buf.WriteString(split.Kept)
+		// Inline (no markContent call) because we already hold
+		// turnMu via defer above; markContent would deadlock on
+		// the non-re-entrant sync.Mutex.
 		t.turnHadContent = true
 		t.turn.activeTextBlock = pid
 	}
@@ -1691,8 +1759,38 @@ func (t *translator) closeAllTextBlocksLocked() {
 // Resetting the pendingText after a successful flush means the
 // next call returns an empty slice, so the terminal-event path
 // can be safely entered twice without duplicating the reply.
+// flushPendingTextLocked emits ONE EventAgentText with the joined
+// reply text from all closed parts in the current turn. Caller
+// MUST hold turnMu; the returned slice is empty when there is
+// nothing to emit.
+//
+// Called from:
+//
+//   - handleToolPart on the first pending transition of a tool
+//     call (tool-boundary flush; pi does the same)
+//   - the terminal-event branches (session.next.step.ended /
+//     session.idle) when no tool was called but the buffer still
+//     holds reply text the chat client must see before Done
+//
+// Resetting the pendingText after a successful flush means the
+// next call returns an empty slice, so the terminal-event path
+// can be safely entered twice without duplicating the reply.
+//
+// Mirrors pi's pattern: close every still-open text block FIRST,
+// then read pendingText. Without this, a turn where the model
+// streams text and immediately invokes a tool WITHOUT emitting
+// `.ended` (opencode 1.18 fires .delta without a closing .ended
+// on resubscribe / connection drop / single-shot models — see
+// closeAllTextBlocksLocked) would lose the pre-tool narration:
+// pendingText never saw those bytes because closeTextBlockLocked
+// hadn't run. The chat client would jump from "model mid-sentence"
+// straight to the tool receipt.
 func (t *translator) flushPendingTextLocked() []agent.AgentEvent {
-	if t.turn == nil || t.turn.pendingText.Len() == 0 {
+	if t.turn == nil {
+		return nil
+	}
+	t.closeAllTextBlocksLocked()
+	if t.turn.pendingText.Len() == 0 {
 		return nil
 	}
 	text := t.turn.pendingText.String()

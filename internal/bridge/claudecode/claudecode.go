@@ -363,8 +363,28 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 // close. Once-close semantics are enforced by the closeOnce in
 // Close(); everything else just nudges the process toward a clean
 // exit. Mirrors dsh/pi/codex/opencode.
+// lifecycle is the single owner of cmd.Wait and the events-channel
+// close. Once-close semantics are enforced by the closeOnce in
+// Close(); everything else just nudges the process toward a clean
+// exit. Mirrors dsh/pi/codex/opencode.
+//
+// IMPORTANT: we call d.cmd.Process.Wait() — NOT d.cmd.Wait() — so
+// that Go does NOT close the parent-side stdio pipes when the child
+// exits. cmd.Wait() closes c.parentFiles (the FDs that the
+// stream-pump + stderr-drain are reading from) and races the pumps
+// on the way out: pumpStream's bufio.Scanner hits a "file already
+// closed" error from os.File.Read and aborts with a spurious
+// EventAgentError before the buffered assistant / result frames
+// reach events. Process.Wait() only reaps the OS process; the FDs
+// stay open until the cmd is GC'd, so pumpStream sees a clean EOF
+// (the kernel closes the write end on process exit) and reads the
+// full transcript. This matches internal/bridge/opencode/agent.go
+// lifecycle's pattern.
 func (d *driver) lifecycle() {
-	waitErr := d.cmd.Wait()
+	var waitErr error
+	if d.cmd != nil && d.cmd.Process != nil {
+		_, waitErr = d.cmd.Process.Wait()
+	}
 
 	graceful := isClosed(d.closed)
 	exitKind := agent.ClassifyExit(waitErr, graceful)

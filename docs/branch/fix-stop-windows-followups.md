@@ -13,6 +13,88 @@ that work tested on every commit. The issues below are pre-existing
 platform-specific test design problems that previously hid behind a
 Linux-only CI.
 
+## Design template: platform-split code
+
+Working through the cmd.Dir / MSYS issues taught us a clean pattern
+for cross-platform Go code. Future similar work should follow the
+same approach:
+
+### Principle
+
+Each platform has its own native semantics. Don't try to make
+platform-agnostic code "work everywhere" by adding env vars, env
+detection, or behaviour switching at runtime. Instead:
+
+- **Cross-platform logic** (e.g. `expandTilde`, `errHomeUnset`,
+  `Factory`, generic `os.Stat + info.IsDir`) → file with **no
+  build tag**, runs on every platform.
+- **Platform-specific logic** → file with `//go:build windows` or
+  `//go:build !windows`, even if the cross-platform version is
+  identical today. This way the platform can grow quirks
+  independently without churning the other.
+- **Sub-100ms "I need a Windows thing" decision** → make the call
+  site a function whose implementation is platform-split
+  (`applyMSYSEnvNoPathConv` in `exec_windows.go` /
+  `exec_unix.go`). The cross-platform caller doesn't need
+  `runtime.GOOS` checks; the platform-specific implementation
+  decides what to do (or no-op).
+
+### Concrete example: cmd.Dir contract test
+
+The `TestRunCmd_DirBinding` family was originally written assuming
+`pwd` would print the cmd.Dir. On Windows + MSYS, `pwd` is an
+MSYS binary whose `getcwd()` reports MSYS-translated paths
+(`/c/Users/...`) regardless of what we set `cmd.Dir` to. The fix
+wasn't to translate paths or set magic env vars — it was to change
+the **assertion** to test the production contract via a sentinel
+file:
+
+```go
+sentinelName := fmt.Sprintf("nightme-sentinel-%d", os.Getpid())
+// child writes the sentinel file in its current dir
+runCmd(ctx, real, "sh", "-c", "echo "+sentinelName+" > "+sentinelName)
+// verify the file lands at the EXACT path we set cmd.Dir to
+if _, err := os.Stat(filepath.Join(real, sentinelName)); err != nil { ... }
+```
+
+`os.Stat` reads the real filesystem (no MSYS libc involved), so
+this test is platform-agnostic. The child command differs per
+platform (`sh` on Unix, `cmd.exe` on Windows) to avoid the MSYS
+shell layer entirely. The test now passes on every platform and
+verifies the actual production contract.
+
+### Concrete example: cwd path resolution
+
+`internal/command/cwd/path_unix.go` (//go:build !windows) handles
+POSIX semantics (leading `/` is absolute, no drive letters,
+home dir is `$HOME`).
+
+`internal/command/cwd/path_windows.go` (//go:build windows) handles
+Win32 semantics (drive letters required for absolute, root-
+relative needs drive letter prepended, drive-relative like `C:foo`
+is rejected as ambiguous).
+
+Both files have **identical signatures** (`resolvePath(expanded)
+(string, error)`, `verifyDirectory(abs, raw) error`) so the
+caller in `cmd.go` doesn't need `runtime.GOOS` checks. Each
+implementation is free to use its platform's idioms.
+
+### Anti-patterns to avoid
+
+- **Don't** add env vars to a shared file as a "fix" for cross-
+  platform issues. If the env var is a workaround for a platform-
+  specific behavior, the env-var setting itself is platform-
+  specific — put it in a `_windows.go` / `_unix.go` file.
+- **Don't** use `runtime.GOOS` checks at call sites. Make the
+  function a platform-split definition (same signature, different
+  file) — Go's build system picks the right one.
+- **Don't** test for child stdout/stderr behavior that depends
+  on the platform's libc (e.g. `pwd` output on MSYS). Test
+  the production contract via file-system observations
+  (sentinel files, `os.Stat`) which are platform-agnostic.
+
+
+
 ## Fixed in fix-stop (in scope)
 
 - `usage_footer_test.go::TestFormatStatusBarLines_GitStatusLine` and

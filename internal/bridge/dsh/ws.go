@@ -38,21 +38,100 @@ const wsHandshakeTimeout = 10 * time.Second
 // dsh breaks into multiple events anyway).
 const wsFrameReadLimit = 10 * 1024 * 1024
 
+// wsPingInterval is the cadence at which the dialed WS gets a
+// client-side ping. dsh web's `web` profile silently closes WS
+// connections that look idle from the *server's* view after
+// roughly 25-30 min of no client traffic; without a client-side
+// ping the bridge's gorilla/websocket conn never emits anything,
+// dsh detects "client gone", closes the WS, and ~5 s later the
+// lifecycle watchdog SIGKILLs the cmd — surfacing as "dsh bridge
+// died (signal-killed)". 25 s is comfortably below any plausible
+// server-side idle timeout while keeping write pressure
+// negligible (< 5 B per ping).
+const wsPingInterval = 25 * time.Second
+
+// wsPingWriteTimeout caps how long a single PingMessage control
+// frame can take. gorilla's WriteControl respects an absolute
+// deadline — without one a wedged peer would block the ping
+// goroutine forever. 5 s is the recommended default in the
+// gorilla/websocket docs.
+const wsPingWriteTimeout = 5 * time.Second
+
+// startWSPingWriter launches a watchdog goroutine that sends a
+// WebSocket ping frame every wsPingInterval. The goroutine exits
+// on the first of these three signals:
+//
+//  1. stop is closed       — bridge is shutting down
+//  2. WriteControl fails   — conn is gone (server closed, network
+//                             drop, etc.); no point retrying
+//  3. WriteControl blocks  — bounded by wsPingWriteTimeout so the
+//                             goroutine cannot wedge forever
+//
+// Wrapped in agent.SafeGo so a panic (e.g. nil conn deref) is
+// recovered at the daemon level and the bridge keeps serving.
+//
+// MUST be called from dialWS only — the goroutine captures the
+// bare conn pointer and assumes single-owner semantics.
+func startWSPingWriter(stop <-chan struct{}, conn *websocket.Conn) {
+	startWSPingWriterAt(stop, conn, wsPingInterval)
+}
+
+// startWSPingWriterAt is the testable form: takes the ping
+// interval explicitly so unit tests can drive the loop with
+// sub-second cadence. Production callers should use
+// startWSPingWriter (which fixes the interval to wsPingInterval).
+func startWSPingWriterAt(stop <-chan struct{}, conn *websocket.Conn, interval time.Duration) {
+	agent.SafeGo("dsh:ws-ping", func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if err := conn.WriteControl(
+					websocket.PingMessage, nil,
+					time.Now().Add(wsPingWriteTimeout),
+				); err != nil {
+					// Conn is dead (close / reset / EOF). Silent
+					// exit — the read pump on the same conn will
+					// already be observing the same error and the
+					// lifecycle watchdog owns the dsh shutdown.
+					return
+				}
+			}
+		}
+	})
+}
+
 // dialMux opens the /api/events.mux WebSocket. Returns the live
 // connection ready for readPump; caller is responsible for calling
 // Close on shutdown.
-func dialMux(ctx context.Context, baseURL string) (*websocket.Conn, error) {
-	return dialWS(ctx, baseURL, "/api/events.mux")
+//
+// stop is the bridge's close-signal chan; the per-WS ping keeper
+// goroutine launched by dialWS exits as soon as stop is closed.
+func dialMux(ctx context.Context, baseURL string, stop <-chan struct{}) (*websocket.Conn, error) {
+	return dialWS(ctx, baseURL, "/api/events.mux", stop)
 }
 
 // dialHost opens the /api/events.host WebSocket. See dialMux.
-func dialHost(ctx context.Context, baseURL string) (*websocket.Conn, error) {
-	return dialWS(ctx, baseURL, "/api/events.host")
+//
+// stop is the bridge's close-signal chan; the per-WS ping keeper
+// goroutine launched by dialWS exits as soon as stop is closed.
+func dialHost(ctx context.Context, baseURL string, stop <-chan struct{}) (*websocket.Conn, error) {
+	return dialWS(ctx, baseURL, "/api/events.host", stop)
 }
 
 // dialWS is the shared upgrade routine. `path` must start with "/"
 // and is joined to baseURL after swapping http(s)→ws(s).
-func dialWS(ctx context.Context, baseURL string, path string) (*websocket.Conn, error) {
+//
+// stop is the bridge's close-signal chan. dialWS launches a
+// dedicated ping-keeper goroutine on the returned conn (see
+// startWSPingWriter) so the wire stays alive across multi-minute
+// idle gaps — dsh web closes the WS after ~25 min of no client
+// traffic, which would otherwise surface as "dsh bridge died
+// (signal-killed)" via the lifecycle watchdog.
+func dialWS(ctx context.Context, baseURL string, path string, stop <-chan struct{}) (*websocket.Conn, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("dsh: parse base url %q: %w", baseURL, err)
@@ -75,6 +154,13 @@ func dialWS(ctx context.Context, baseURL string, path string) (*websocket.Conn, 
 		return nil, fmt.Errorf("dsh: ws dial %s: %w", u.String(), err)
 	}
 	conn.SetReadLimit(wsFrameReadLimit)
+	// Default ping handler auto-pongs inbound pings. Combined with
+	// the outbound ping writer below, the WS link stays "alive"
+	// from both peers' perspective. The writer is needed because
+	// gorilla's default ping handler is read-loop-driven — if dsh
+	// stays silent on the wire, we'd never emit anything and the
+	// server-side idle detector would close us.
+	startWSPingWriter(stop, conn)
 	return conn, nil
 }
 

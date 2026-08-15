@@ -238,34 +238,18 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		"url", baseURL,
 		"pid", cmd.Process.Pid)
 
-	// Dial the two WebSocket downlinks. The server pushes frames
-	// as soon as the upgrade completes; ordering between mux and
-	// host upgrades is irrelevant — both feed the same translator.
-	muxWS, err := dialMux(ctx, baseURL)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, fmt.Errorf("dsh: dial mux: %w", err)
-	}
-	hostWS, err := dialHost(ctx, baseURL)
-	if err != nil {
-		_ = muxWS.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, fmt.Errorf("dsh: dial host: %w", err)
-	}
-
+	// Allocate the driver skeleton BEFORE dialing the WSs so we
+	// can pass d.closed to dialMux/dialHost as the per-WS ping
+	// keeper's stop signal. Without this, d.closed doesn't exist
+	// at dial time and the keeper has nothing to watch — which
+	// used to be fine because there was no keeper. F-DSH-PING
+	// added the keeper; threading the chan through here is the
+	// matching half of the contract.
 	d := &driver{
 		cmd:           cmd,
 		stdout:        stdout,
 		stderr:        stderr,
 		stderrTail:    agent.NewStderrRingBuffer(agent.StderrTailBytes),
-		muxWS:         muxWS,
-		hostWS:        hostWS,
 		http:          newHTTPClient(baseURL),
 		workspace:     cfg.Workspace,
 		agentName:     s.name,
@@ -277,6 +261,31 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		closed:        make(chan struct{}),
 		exitDone:      make(chan struct{}),
 	}
+
+	// Dial the two WebSocket downlinks. The server pushes frames
+	// as soon as the upgrade completes; ordering between mux and
+	// host upgrades is irrelevant — both feed the same translator.
+	// Each dial spawns a ping-keeper goroutine that exits when
+	// d.closed is closed in d.Close().
+	muxWS, err := dialMux(ctx, baseURL, d.closed)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return nil, fmt.Errorf("dsh: dial mux: %w", err)
+	}
+	hostWS, err := dialHost(ctx, baseURL, d.closed)
+	if err != nil {
+		_ = muxWS.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return nil, fmt.Errorf("dsh: dial host: %w", err)
+	}
+	d.muxWS = muxWS
+	d.hostWS = hostWS
 	// Wire dispatcher AFTER wireState + translate are set. The
 	// dispatcher's deliver closure captures d.deliver (which
 	// closes-over d.events), so this must run before startPumps.

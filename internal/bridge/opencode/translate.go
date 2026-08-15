@@ -114,7 +114,6 @@ type toolEntry struct {
 	name   string
 	args   string
 	output string // opencode 1.18.18 may send the final output on tool.success
-	error  string // opencode 1.18.18 may send the final error on tool.failed
 }
 
 // turnState is the per-turn buffering state for the streamed
@@ -894,9 +893,6 @@ func (t *translator) handleToolPart(p Part) {
 // sessionNextToolEvent is the union shape for tool.called /
 // tool.success / tool.failed: callID + tool name + optional
 // finalized input/output/error fields.
-// sessionNextToolEvent is the union shape for tool.called /
-// tool.success / tool.failed: callID + tool name + optional
-// finalized input/output/error fields.
 //
 // Wire-format note (opencode 1.18.18 SSE observed in production):
 //
@@ -921,9 +917,6 @@ type sessionNextToolEvent struct {
 	Error     string          `json:"error,omitempty"`
 }
 
-// sessionNextToolInputEvent is the streaming-input shape. delta
-// is the partial JSON fragment (NOT the full input) when
-// opencode streams the args token-by-token.
 // sessionNextToolInputEvent is the streaming-input shape used by
 // input.started / input.delta. Two field-name quirks from the
 // opencode 1.18.18 wire (reverse-engineered from SSE probes):
@@ -955,10 +948,6 @@ type inputBuf struct {
 // callID. Cleaned up on tool.success / tool.failed / on close.
 var _ = "" // (compile-time shim — fields live on translator instead)
 
-// handleToolInputStarted arms the per-callID input buffer. The
-// translator's pendingTools entry is created here too (if not
-// already present) so subsequent input.delta / tool.called events
-// find a stable slot to write into.
 // handleToolInputStarted arms the per-callID input buffer. The
 // translator's pendingTools entry is created here too (if not
 // already present) so subsequent input.delta / tool.called events
@@ -1107,9 +1096,6 @@ func (t *translator) handleToolCalled(ev SessionEvent) {
 // handleToolSucceeded closes a tool call and emits the per-turn
 // Done if no other turn-end signal has fired yet. This is the
 // terminal signal for the opencode 1.18.18 protocol path.
-// handleToolSucceeded closes a tool call and emits the per-turn
-// Done if no other turn-end signal has fired yet. This is the
-// terminal signal for the opencode 1.18.18 protocol path.
 //
 // Wire note (opencode 1.18.18 — reverse-engineered from SSE
 // probes against the real binary):
@@ -1149,11 +1135,20 @@ func (t *translator) handleToolSucceeded(ev SessionEvent) {
 	if !ok {
 		entry = toolEntry{name: normalizeToolName(p.Name)}
 	}
+	// Wire note: tool.success carries the tool name under `tool`,
+	// not `name` (the streaming-input family uses `name`). Fall
+	// back so an event family that ships only `name` still
+	// surfaces a label.
 	if entry.name == "" && p.Tool != "" {
 		entry.name = normalizeToolName(p.Tool)
-	} else if entry.name == "" && p.Name != "" {
+	}
+	if entry.name == "" && p.Name != "" {
 		entry.name = normalizeToolName(p.Name)
 	}
+	// Promote any partial output that handleToolProgress stashed
+	// earlier; only fill from structured/content if no progress
+	// event pre-populated the field (success always wins over
+	// progress because it is the authoritative final payload).
 	if entry.output == "" {
 		entry.output = extractToolOutput(p.Structured, p.Content)
 	}
@@ -1245,9 +1240,6 @@ func extractToolOutput(structured, content json.RawMessage) string {
 // handleToolFailed closes a tool call with an error and emits a
 // turn-end Done with Reason:"failed" if no other terminal event
 // fired first. Mirrors session.next.step.failed's reason choice.
-// handleToolFailed closes a tool call with an error and emits a
-// turn-end Done with Reason:"failed" if no other terminal event
-// fired first. Mirrors session.next.step.failed's reason choice.
 //
 // Wire note: tool.failed.data.error is sometimes a bare string,
 // sometimes an object like {name, data, message}. We extract the
@@ -1269,10 +1261,9 @@ func (t *translator) handleToolFailed(ev SessionEvent) {
 	if !ok {
 		entry = toolEntry{name: normalizeToolName(p.Tool)}
 	}
-	if entry.name == "" {
-		entry.name = normalizeToolName(p.Tool)
+	if entry.name == "" && p.Name != "" {
+		entry.name = normalizeToolName(p.Name)
 	}
-	entry.error = errMsg
 	delete(t.pendingTools, p.CallID)
 	t.turnMu.Unlock()
 
@@ -1371,14 +1362,15 @@ func (t *translator) handleContextUpdated(ev SessionEvent) {
 //	"opencode: permission denied for /foo"
 //	{"name":"PermissionDeniedError","data":{"message":"..."}}
 //
-// Returns "" when the payload is empty so the caller can decide
-// whether to surface "(unknown error)" or skip.
+// Object-form priority: .data.message > .message > the name
+// (we never return bare JSON so the chat client doesn't have
+// to render `{}` for an empty error). Returns "" when the
+// payload is genuinely empty so the caller can decide whether
+// to surface "(unknown error)" or skip.
 func extractToolError(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	// Object form: pull .data.message first, then .message, then
-	// the JSON itself so the user at least sees *something*.
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(raw), &obj); err == nil {
 		if data, ok := obj["data"].(map[string]any); ok {
@@ -1389,10 +1381,6 @@ func extractToolError(raw string) string {
 		if m, _ := obj["message"].(string); m != "" {
 			return m
 		}
-		if name, _ := obj["name"].(string); name != "" {
-			return name
-		}
-		return raw
 	}
 	return raw
 }

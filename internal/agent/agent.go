@@ -1047,6 +1047,24 @@ var (
 	// success and a real error on failure. The sentinel is only
 	// for "operation is not implemented on this bridge".
 	ErrNotSupported = errors.New("agent: operation not supported on this bridge")
+
+	// ErrResumeUnhealthy is returned by bridges (notably
+	// claudecode) when Start was called with a SessionID that the
+	// bridge refuses to resume — e.g. claude's "No conversation
+	// found with session ID" stderr diagnostic. Sentinel lives in
+	// the agent package so chat-layer code (chatsession) can
+	// detect it via errors.Is without importing the bridge
+	// package directly. Bridges that surface a resume rejection
+	// wrap their bridge-specific error with %w of this sentinel.
+	//
+	// T-alive (2026-08-07): the chat layer's policy on
+	// ErrResumeUnhealthy is to clear as.sessionID and retry the
+	// spawn once without a resume id (silently landing the user
+	// on a fresh session). The bridge stays loud (T-alive's
+	// resume-preservation invariant); the chat layer auto-recovers
+	// so the user's next message does not die after /close with a
+	// saved-but-unresumable session id.
+	ErrResumeUnhealthy = errors.New("agent: resume session unhealthy")
 )
 
 // sentinelErr is a small helper so tests can match errors with

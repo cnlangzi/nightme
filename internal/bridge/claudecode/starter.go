@@ -92,12 +92,39 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 			slog.Warn("claudecode: --resume spawn unhealthy; refusing fallback to preserve resume context",
 				"resume_id", cfg.SessionID, "reason", reason)
 			_ = d.Close()
-			return nil, fmt.Errorf("%w: %s (session_id=%s); check workspace path and resume id",
-				ErrResumeUnhealthy, reason, cfg.SessionID)
+			// Wrap with both sentinels (bridge-level for legacy
+			// callers, agent-level for chatsession auto-recovery).
+			// fmt.Errorf's %w only retains the last wrap, so the
+			// error type below exposes Is() to match both.
+			return nil, resumeUnhealthyError{
+				reason:  reason,
+				session: cfg.SessionID,
+			}
 		}
 	}
 
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
+}
+
+// resumeUnhealthyError is returned by Start when probeResume
+// detects a stderr rejection of the requested --resume session
+// id. It satisfies errors.Is for BOTH claudecode.ErrResumeUnhealthy
+// (the legacy bridge-level sentinel callers may have imported)
+// AND agent.ErrResumeUnhealthy (the cross-package sentinel the
+// chat layer uses to drive auto-recovery). fmt.Errorf's %w only
+// retains the last wrap, so we expose Is() instead.
+type resumeUnhealthyError struct {
+	reason  string
+	session string
+}
+
+func (e resumeUnhealthyError) Error() string {
+	return fmt.Sprintf("%s: %s (session_id=%s); check workspace path and resume id",
+		ErrResumeUnhealthy.Error(), e.reason, e.session)
+}
+
+func (e resumeUnhealthyError) Is(target error) bool {
+	return target == ErrResumeUnhealthy || target == agent.ErrResumeUnhealthy
 }
 
 // RunOnce is the one-shot counterpart to Start. Spawns a fresh

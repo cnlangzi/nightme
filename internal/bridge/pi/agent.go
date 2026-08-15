@@ -337,17 +337,41 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// orchestrator, not a peer of the pumps. See
 	// internal/agent/safego.go for the contract.
 	live.pumpWG.Add(2)
+	// pi's live.deliver has NO default branch — it blocks on a
+	// full events buffer waiting for the consumer to drain.
+	// Calling live.deliver from inside the deferred
+	// PanicEventHandler would therefore risk blocking the
+	// pump goroutine forever on a wedged consumer, holding
+	// pumpWG.Done() and deadlocking lifecycle's pumpWG.Wait().
+	// We synthesize a non-blocking panicDeliver (drop-on-full,
+	// drop-on-closed) — matches the dsh/claudecode/acp
+	// panicDeliver shape, and is consistent with the new
+	// opencode/codex panicDeliver pattern (those bridges'
+	// deliver was also back-pressuring by design).
+	panicDeliver := func(ev agent.AgentEvent) {
+		select {
+		case live.events <- ev:
+		case <-live.closed:
+			// bridge closed; drop silently
+		case <-live.exitDone:
+			// lifecycle done; drop silently
+		default:
+			// Buffer full + bridge alive. Drop — a dead pump
+			// can't self-heal anyway, and blocking here would
+			// wedge the bridge's pumpWG.
+		}
+	}
 	agent.SafeGo("pi:read-pump", func() {
 		defer live.pumpWG.Done()
 		defer agent.PanicEventHandler(
-			"pi:read-pump", live.deliver,
+			"pi:read-pump", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
 		live.readPump()
 	})
 	agent.SafeGo("pi:stderr-drain", func() {
 		defer live.pumpWG.Done()
 		defer agent.PanicEventHandler(
-			"pi:stderr-drain", live.deliver,
+			"pi:stderr-drain", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
 		live.drainStderr()
 	})

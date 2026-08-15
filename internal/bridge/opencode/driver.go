@@ -178,9 +178,33 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// opencode's deliver returns the rewritten event (it stamps
 	// session/model/agentName/workspace/branch context);
 	// PanicEventHandler expects a void deliver, so we wrap in
-	// a small closure that discards the return. The closure is
-	// created once here and shared across all three loops.
-	panicDeliver := func(ev agent.AgentEvent) { d.deliver(ev) }
+	// a small closure that discards the return. We do NOT call
+	// d.deliver directly here because deliver's select has
+	// NO default branch — it blocks on a full events buffer
+	// waiting for the consumer to drain. If the buffer is
+	// wedged when a pump panics, deliver would block forever
+	// inside the deferred PanicEventHandler, holding the
+	// pump goroutine and preventing pumpWG.Done() — lifecycle's
+	// pumpWG.Wait() then deadlocks too. panicDeliver
+	// therefore does a non-blocking send with drop-on-full /
+	// drop-on-closed, matching the dsh/claudecode/acp
+	// panicDeliver shape. The closure is created once here
+	// and shared across all three loops + the watchdog.
+	panicDeliver := func(ev agent.AgentEvent) {
+		select {
+		case d.events <- ev:
+		case <-d.closed:
+			// bridge closed; drop silently
+		case <-d.stopDeliver:
+			// lifecycle done; drop silently
+		case <-d.exitDone:
+			// lifecycle done; drop silently
+		default:
+			// Buffer full + bridge alive. Drop — a dead pump
+			// can't self-heal anyway, and blocking here would
+			// wedge the bridge's pumpWG.
+		}
+	}
 	agent.SafeGo("opencode:sse-loop", func() {
 		defer agent.PanicEventHandler(
 			"opencode:sse-loop", panicDeliver,

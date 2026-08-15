@@ -336,21 +336,46 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 	// codex's deliver returns the rewritten event (it stamps
 	// session context); PanicEventHandler expects a void
 	// deliver, so we wrap in a small closure that discards
-	// the return. The closure is created once here and shared
-	// across both pumps.
-	panicDeliver := func(ev agent.AgentEvent) { s.deliver(ev) }
+	// the return. We do NOT call s.deliver directly here
+	// because deliver's select has NO default branch — it
+	// blocks on a full events buffer waiting for the consumer
+	// to drain. If the buffer is wedged when a pump panics,
+	// deliver would block forever inside the deferred
+	// PanicEventHandler, holding the pump goroutine and
+	// preventing pumpWG.Done() — lifecycle's pumpWG.Wait()
+	// then deadlocks too. panicDeliver therefore does a
+	// non-blocking send with drop-on-full / drop-on-closed,
+	// matching the dsh/claudecode/acp panicDeliver shape
+	// (those bridges never had this problem because their
+	// deliver was non-blocking; codex's was back-pressuring
+	// by design). The AgentEvent passed in already carries
+	// SessionID/AgentName/Workspace/Branch from
+	// PanicEventHandler's constructor.
+	panicDeliver := func(ev agent.AgentEvent) {
+		select {
+		case s.events <- ev:
+		case <-s.closed:
+			// bridge closed; drop silently
+		case <-s.exitDone:
+			// lifecycle done; drop silently
+		default:
+			// Buffer full + bridge alive. Drop — a dead pump
+			// can't self-heal anyway, and blocking here would
+			// wedge the bridge's pumpWG.
+		}
+	}
 	agent.SafeGo("codex:read-pump", func() {
 		defer s.pumpWG.Done()
 		defer agent.PanicEventHandler(
 			"codex:read-pump", panicDeliver,
-			"", s.agentName, s.workspace, s.branch)
+			s.threadID, s.agentName, s.workspace, s.branch)
 		s.rpc.readPump(parentCtx, s.emitWireError)
 	})
 	agent.SafeGo("codex:stderr-loop", func() {
 		defer s.pumpWG.Done()
 		defer agent.PanicEventHandler(
 			"codex:stderr-loop", panicDeliver,
-			"", s.agentName, s.workspace, s.branch)
+			s.threadID, s.agentName, s.workspace, s.branch)
 		s.stderrLoop(parentCtx)
 	})
 	// lifecycle is the supervisor that closes events / exitDone

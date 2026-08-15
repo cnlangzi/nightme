@@ -348,9 +348,9 @@ func (d *driver) startPumps() {
 	// the top, so a panic in lifecycle still tears the bridge
 	// down cleanly; SafeGo is the outer safety net in case any
 	// of those defers panic (e.g. a nil deref in
-	// d.pendingApprovals). The +1 on pumpWG above matches this
-	// extra goroutine — lifecycle is a pump too, just not a
-	// read-pump.
+	// d.pendingApprovals). lifecycle is NOT in pumpWG above —
+	// it calls d.pumpWG.Wait() inside its body, so adding
+	// itself would deadlock (it would wait for its own Done).
 	agent.SafeGo("dsh:lifecycle", d.lifecycle)
 }
 
@@ -371,9 +371,14 @@ func (d *driver) startPumps() {
 // because a SIGINT'd-but-clean shutdown is not an error from the
 // runtime's perspective (cf. codex's isGracefulClose() guard).
 func (d *driver) lifecycle() {
-	// Defer order: exitDone FIRST, events SECOND. Close() blocks on
-	// exitDone; if events closed first, Close() returning could race
-	// against an in-flight deliver(). Reverse order is safe.
+	// Defer registration order is exitDone first, events second —
+	// but defers execute in LIFO order, so events closes FIRST
+	// and exitDone closes SECOND. Close() blocks on exitDone, so
+	// Close() returning is guaranteed to be AFTER events is
+	// closed and drained by the runtime. Reversing the
+	// registration order would close exitDone first and let
+	// Close() return while events is still being drained — a
+	// real race.
 	defer close(d.exitDone)
 	defer close(d.events)
 

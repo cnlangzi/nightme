@@ -137,6 +137,12 @@ func jsonString(s string) string {
 			b.WriteString(`\\`)
 		case '"':
 			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
 		default:
 			b.WriteRune(r)
 		}
@@ -448,5 +454,538 @@ func TestTranslate_ResetTurnClearsBuffer(t *testing.T) {
 	}
 	if tr.turn.activeTextBlock != "" {
 		t.Errorf("post-ResetTurn activeTextBlock=%q, want empty", tr.turn.activeTextBlock)
+	}
+}
+
+// ─── Wire format tests for session.next.tool.* + context.updated ──
+//
+// Reproduces the opencode 1.18.18 SSE wire format that the bridge
+// consumes in production. The previous helper (sseToolEvent) only
+// emitted `tool` and `input`/`output`, all of which come across the
+// wire as DIFFERENT field names (name / text / structured.content).
+// These helpers mirror the live wire so the regression guard covers
+// the real shapes, not just the names that "looked right" to the
+// bridge author.
+
+// helper: build a session.next.tool.* Event with caller-supplied
+// fields. Emits BOTH `name` and `tool` when the test passes a tool
+// name (input.started uses `name`, tool.called uses `tool`). The
+// bridge handlers prefer `name` and fall back to `tool`, so this
+// keeps every test fixture self-consistent.
+func sseToolEvent(sub string, callID, tool string, extra string) SessionEvent {
+	parts := []string{
+		`"callID":` + jsonString(callID),
+	}
+	if tool != "" {
+		parts = append(parts, `"name":`+jsonString(tool))
+		parts = append(parts, `"tool":`+jsonString(tool))
+	}
+	if extra != "" {
+		parts = append(parts, extra)
+	}
+	raw := `{"type":"session.next.tool.` + sub + `","properties":{` +
+		strings.Join(parts, ",") + `}}`
+	var ev SessionEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		panic("test sseToolEvent bad json: " + err.Error())
+	}
+	return ev
+}
+
+// sseToolStructuredEvent builds a tool.success with the
+// structured.content payload - the wire shape for file-shaped
+// tools (read, list, glob) on opencode 1.18.18+.
+func sseToolStructuredEvent(callID, content string) SessionEvent {
+	raw := `{"type":"session.next.tool.success","properties":{"callID":` +
+		jsonString(callID) + `,"structured":{"content":` + jsonString(content) +
+		`,"encoding":"utf8","mime":"text/plain"}}}`
+	var ev SessionEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		panic("test sseToolStructuredEvent bad json: " + err.Error())
+	}
+	return ev
+}
+
+// sseToolContentEvent builds a tool.success with the
+// content:[]LLMToolContent[] payload - the wire shape for
+// bash-shaped tools on opencode 1.18.18+.
+func sseToolContentEvent(callID, text string) SessionEvent {
+	raw := `{"type":"session.next.tool.success","properties":{"callID":` +
+		jsonString(callID) + `,"content":[{"type":"text","text":` +
+		jsonString(text) + `}]}}`
+	var ev SessionEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		panic("test sseToolContentEvent bad json: " + err.Error())
+	}
+	return ev
+}
+
+// sseContextUpdatedEvent builds a session.next.context.updated
+// event with an arbitrary prompt-context blob (eg skills payload).
+func sseContextUpdatedEvent(text string) SessionEvent {
+	raw := `{"type":"session.next.context.updated","properties":{"sessionID":"ses_x","messageID":"msg_x","text":` +
+		jsonString(text) + `}}`
+	var ev SessionEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		panic("test sseContextUpdatedEvent bad json: " + err.Error())
+	}
+	return ev
+}
+
+// lastDone returns the last EventAgentDone in events, or nil if
+// none has been delivered.
+func lastDone(events []agent.AgentEvent) *agent.AgentDoneEvent {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Done != nil {
+			return events[i].Done
+		}
+	}
+	return nil
+}
+
+// TestTranslate_ToolOnly_ToolCalledEmitsStartNoDone verifies the
+// primitive: a bare tool.called event with no preceding text or
+// step yields ONE EventAgentToolStart and zero Done events (Done
+// only fires on tool.success / tool.failed / canonical terminals).
+func TestTranslate_ToolOnly_ToolCalledEmitsStartNoDone(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	if err := tr.handleEvent(sseToolEvent("called", "tc1", "bash", `"input":{"command":"ls"}`)); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+
+	var starts, dones int
+	for _, ev := range snap() {
+		switch ev.Kind {
+		case agent.EventAgentToolStart:
+			starts++
+		case agent.EventAgentDone:
+			dones++
+		}
+	}
+	if starts != 1 {
+		t.Errorf("got %d EventAgentToolStart, want 1", starts)
+	}
+	if dones != 0 {
+		t.Errorf("got %d EventAgentDone (want 0 until tool.success)", dones)
+	}
+}
+
+// TestTranslate_ToolOnly_StreamingInputBuildsArgs feeds the full
+// input.started -> input.delta* -> input.ended -> tool.called ->
+// tool.success sequence and asserts the Start event carries the
+// full args (the input.ended payload, not the partial delta
+// accumulation). Done fires with Reason:"settled" exactly once.
+//
+// Wire format verified against opencode 1.18.18 SSE: input.ended
+// ships the final JSON string under `text` (not `input`), and
+// tool.success ships the result under `structured.content` (not
+// `output`).
+func TestTranslate_ToolOnly_StreamingInputBuildsArgs(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	steps := []SessionEvent{
+		sseToolEvent("input.started", "tc1", "bash", ""),
+		sseToolEvent("input.delta", "tc1", "", `"delta":"{\"command\":\""`),
+		sseToolEvent("input.delta", "tc1", "", `"delta":"ls -la\"}"`),
+		sseToolEvent("input.ended", "tc1", "bash", `"text":"{\"command\":\"ls -la\"}"`),
+		sseToolEvent("called", "tc1", "bash", ""),
+		sseToolStructuredEvent("tc1", "a.txt\nb.txt\n"),
+	}
+	for _, ev := range steps {
+		if err := tr.handleEvent(ev); err != nil {
+			t.Fatalf("handleEvent: %v", err)
+		}
+	}
+
+	var starts, ends, dones int
+	var startArgs string
+	var endOutput string
+	for _, ev := range snap() {
+		switch ev.Kind {
+		case agent.EventAgentToolStart:
+			starts++
+			if ev.ToolStart != nil {
+				startArgs = ev.ToolStart.Args
+			}
+		case agent.EventAgentToolEnd:
+			ends++
+			if ev.ToolEnd != nil {
+				endOutput = ev.ToolEnd.Output
+			}
+		case agent.EventAgentDone:
+			dones++
+		}
+	}
+	if starts != 1 {
+		t.Errorf("got %d EventAgentToolStart, want 1", starts)
+	}
+	if ends != 1 {
+		t.Errorf("got %d EventAgentToolEnd, want 1", ends)
+	}
+	if dones != 1 {
+		t.Errorf("got %d EventAgentDone, want exactly 1", dones)
+	}
+	if !strings.Contains(startArgs, "ls -la") {
+		t.Errorf("ToolStart.Args = %q, want substring %q", startArgs, "ls -la")
+	}
+	if !strings.Contains(endOutput, "a.txt") {
+		t.Errorf("ToolEnd.Output = %q, want substring %q", endOutput, "a.txt")
+	}
+	if d := lastDone(snap()); d != nil && d.Reason != "settled" {
+		t.Errorf("Done.Reason = %q, want %q (tool activity counts as content)", d.Reason, "settled")
+	}
+}
+
+// TestTranslate_ToolOnly_DoneAfterEmptyTool asserts that the
+// downstream chat client receives a clean Done{Reason:"settled"}
+// after a single tool.success even when the model never produced
+// any visible text - the opencode 1.18.18 protocol drops the
+// canonical text.* / step.ended / session.idle signals entirely,
+// so the tool lifecycle is the only turn-end the chat sees.
+// This is the regression guard for the "啥都没反应就 Done 了"
+// symptom: prior to the fix the busy guard never cleared.
+func TestTranslate_ToolOnly_DoneAfterEmptyTool(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	if err := tr.handleEvent(sseToolEvent("called", "tc1", "bash", `"input":{"command":"pwd"}`)); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+	if err := tr.handleEvent(sseToolStructuredEvent("tc1", "/tmp")); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+
+	var dones int
+	var reason string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentDone {
+			dones++
+			if ev.Done != nil {
+				reason = ev.Done.Reason
+			}
+		}
+	}
+	if dones != 1 {
+		t.Fatalf("got %d EventAgentDone, want exactly 1 (one per turn)", dones)
+	}
+	if reason != "settled" {
+		t.Errorf("Done.Reason = %q, want \"settled\" (tool.success is the terminal signal)", reason)
+	}
+}
+
+// TestTranslate_ToolOnly_DuplicateTerminalIsNoop feeds tool.success
+// FOLLOWED by the still-supported session.idle / session.next.idle
+// signals to make sure the second terminal event is a no-op. This
+// is the "double-Done" regression guard - a stray session.idle
+// that arrives after a tool.success would otherwise tear down the
+// busy guard mid-turn.
+func TestTranslate_ToolOnly_DuplicateTerminalIsNoop(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	if err := tr.handleEvent(sseToolStructuredEvent("tc1", "x")); err != nil {
+		t.Fatalf("handleEvent(tool.success): %v", err)
+	}
+	if err := tr.handleEvent(sseTerminalEvent("session.idle")); err != nil {
+		t.Fatalf("handleEvent(session.idle): %v", err)
+	}
+	if err := tr.handleEvent(sseTerminalEvent("session.next.idle")); err != nil {
+		t.Fatalf("handleEvent(session.next.idle): %v", err)
+	}
+
+	var dones int
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentDone {
+			dones++
+		}
+	}
+	if dones != 1 {
+		t.Errorf("got %d EventAgentDone across 3 terminal-class events, want 1 (idempotent per turn)", dones)
+	}
+}
+
+// TestTranslate_ToolOnly_FailedEmitsFailedDone verifies that a
+// single tool.failed produces a Done with Reason:"failed" (NOT
+// "settled") so the runtime can surface a clear failure
+// indicator to the chat client - distinguishes a real tool
+// failure from a successful tool run on the same per-turn Done
+// wire envelope.
+func TestTranslate_ToolOnly_FailedEmitsFailedDone(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	if err := tr.handleEvent(sseToolEvent("called", "tc1", "bash", `"input":{"command":"false"}`)); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+	if err := tr.handleEvent(sseToolEvent("failed", "tc1", "bash", `"error":"non-zero exit"`)); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+
+	var dones int
+	var reason string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentDone {
+			dones++
+			if ev.Done != nil {
+				reason = ev.Done.Reason
+			}
+		}
+	}
+	if dones != 1 {
+		t.Errorf("got %d EventAgentDone, want 1", dones)
+	}
+	if reason != "failed" {
+		t.Errorf("Done.Reason = %q, want \"failed\"", reason)
+	}
+}
+
+// TestTranslate_ToolOnly_PerTurnResetReArmsTerminal confirms that
+// ResetTurn clears turnTerminalEmitted so a SECOND prompt within
+// the same AgentSession still gets its own Done. Without this
+// the second prompt would queue forever behind a stale "already
+// terminal" flag.
+func TestTranslate_ToolOnly_PerTurnResetReArmsTerminal(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	// Turn 1
+	if err := tr.handleEvent(sseToolStructuredEvent("tc1", "x")); err != nil {
+		t.Fatalf("handleEvent(turn 1): %v", err)
+	}
+	if got := lastDone(snap()); got == nil || got.Reason != "settled" {
+		t.Errorf("turn 1 Done = %v, want settled", got)
+	}
+
+	tr.ResetTurn()
+
+	// Turn 2 - Done must fire again. snap() returns the cumulative
+	// history across both turns; turn 1 fired one Done, turn 2 must
+	// add exactly one more for a grand total of 2.
+	beforeReset := 0
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentDone {
+			beforeReset++
+		}
+	}
+	if err := tr.handleEvent(sseToolStructuredEvent("tc2", "y")); err != nil {
+		t.Fatalf("handleEvent(turn 2): %v", err)
+	}
+	afterReset := 0
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentDone {
+			afterReset++
+		}
+	}
+	if afterReset-beforeReset != 1 {
+		t.Errorf("turn 2 added %d Done events, want exactly 1 (ResetTurn must re-arm the per-turn terminal)", afterReset-beforeReset)
+	}
+}
+
+// ─── New wire-format regression tests (1.18.18) ──────────────────
+
+// TestTranslate_ToolOnly_InputStartedUsesNameField is the regression
+// guard for the field-name bug: input.started carries the tool name
+// under `name`, not `tool`. The previous handler only read `tool`,
+// so the bridge saw an empty tool name and rendered a bare receipt
+// with no tool label.
+func TestTranslate_ToolOnly_InputStartedUsesNameField(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	// input.started carries name="read", no `tool` key at all -
+	// mirrors the live wire. We decode it manually because
+	// sseToolEvent emits both `name` and `tool` and we want to
+	// prove the handler reads `name` even when `tool` is absent.
+	var startedEv SessionEvent
+	startedRaw := `{"type":"session.next.tool.input.started","properties":{"callID":"tc1","name":"read"}}`
+	if err := json.Unmarshal([]byte(startedRaw), &startedEv); err != nil {
+		t.Fatalf("parse input.started: %v", err)
+	}
+
+	steps := []SessionEvent{
+		startedEv,
+		sseToolEvent("input.ended", "tc1", "", `"text":"{\"path\":\"/tmp/x\"}"`),
+		sseToolEvent("called", "tc1", "read", ""),
+		sseToolStructuredEvent("tc1", "file contents"),
+	}
+	for i, ev := range steps {
+		if err := tr.handleEvent(ev); err != nil {
+			t.Fatalf("handleEvent[%d]: %v", i, err)
+		}
+	}
+
+	var gotName string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentToolStart && ev.ToolStart != nil {
+			gotName = ev.ToolStart.Name
+		}
+	}
+	if gotName != "Read" {
+		t.Errorf("ToolStart.Name = %q, want \"Read\" (input.started uses `name`, then normalizeToolName canonicalizes)", gotName)
+	}
+}
+
+// TestTranslate_ToolOnly_InputEndedUsesTextField verifies that
+// input.ended's final args arrive under the `text` JSON string
+// key (not under `input`). Without this the streamed args buffer
+// would never be replaced with the canonical full block, so the
+// chat client would see the partial delta accumulation rather than
+// the authoritative tool input.
+func TestTranslate_ToolOnly_InputEndedUsesTextField(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	steps := []SessionEvent{
+		sseToolEvent("input.started", "tc1", "read", ""),
+		sseToolEvent("input.ended", "tc1", "", `"text":"{\"path\":\"/tmp/marker.txt\"}"`),
+		sseToolEvent("called", "tc1", "read", ""),
+		sseToolStructuredEvent("tc1", "PONG-from-file\n"),
+	}
+	for _, ev := range steps {
+		if err := tr.handleEvent(ev); err != nil {
+			t.Fatalf("handleEvent: %v", err)
+		}
+	}
+
+	var startArgs string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentToolStart && ev.ToolStart != nil {
+			startArgs = ev.ToolStart.Args
+		}
+	}
+	if !strings.Contains(startArgs, "marker.txt") {
+		t.Errorf("ToolStart.Args = %q, want substring \"marker.txt\" (input.ended uses `text`)", startArgs)
+	}
+}
+
+// TestTranslate_ToolOnly_SuccessExtractsStructuredContent asserts
+// that the per-callID output populated from tool.success is the
+// `structured.content` field (the live wire's payload for file-shaped
+// tools) - NOT the `output` field that the previous handler looked
+// for.
+func TestTranslate_ToolOnly_SuccessExtractsStructuredContent(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	steps := []SessionEvent{
+		sseToolEvent("input.started", "tc1", "read", ""),
+		sseToolEvent("input.ended", "tc1", "", `"text":"{\"path\":\"/x\"}"`),
+		sseToolEvent("called", "tc1", "read", ""),
+		sseToolStructuredEvent("tc1", "structured-text-content"),
+	}
+	for _, ev := range steps {
+		if err := tr.handleEvent(ev); err != nil {
+			t.Fatalf("handleEvent: %v", err)
+		}
+	}
+
+	var endOutput string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentToolEnd && ev.ToolEnd != nil {
+			endOutput = ev.ToolEnd.Output
+		}
+	}
+	if endOutput != "structured-text-content" {
+		t.Errorf("ToolEnd.Output = %q, want \"structured-text-content\" (extracted from structured.content)", endOutput)
+	}
+}
+
+// TestTranslate_ToolOnly_SuccessExtractsContentArray asserts the
+// LLMToolContent[] path: tool.success.data.content carries an
+// array of {type,text} objects for bash-shaped tools. The bridge
+// joins all text entries into one Output blob.
+func TestTranslate_ToolOnly_SuccessExtractsContentArray(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	steps := []SessionEvent{
+		sseToolEvent("input.started", "tc1", "bash", ""),
+		sseToolEvent("input.ended", "tc1", "", `"text":"{\"cmd\":\"ls\"}"`),
+		sseToolEvent("called", "tc1", "bash", ""),
+		sseToolContentEvent("tc1", "stdout-line-1\nstdout-line-2\n"),
+	}
+	for _, ev := range steps {
+		if err := tr.handleEvent(ev); err != nil {
+			t.Fatalf("handleEvent: %v", err)
+		}
+	}
+
+	var endOutput string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentToolEnd && ev.ToolEnd != nil {
+			endOutput = ev.ToolEnd.Output
+		}
+	}
+	if !strings.Contains(endOutput, "stdout-line-1") || !strings.Contains(endOutput, "stdout-line-2") {
+		t.Errorf("ToolEnd.Output = %q, want both stdout lines (extracted from content[])", endOutput)
+	}
+}
+
+// TestTranslate_ToolOnly_ProgressPrePopulatesOutput verifies that
+// tool.progress events cache their partial output into the
+// pendingTools entry, so when tool.success eventually arrives with
+// empty content, the chat client still sees the streamed progress
+// (rather than an empty "(no output)").
+func TestTranslate_ToolOnly_ProgressPrePopulatesOutput(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	steps := []SessionEvent{
+		sseToolEvent("input.started", "tc1", "bash", ""),
+		sseToolEvent("input.ended", "tc1", "", `"text":"{\"cmd\":\"sleep\"}"`),
+		sseToolEvent("called", "tc1", "bash", ""),
+		sseToolContentEvent("tc1", "streamed-stdout\n"),
+	}
+	for _, ev := range steps {
+		if err := tr.handleEvent(ev); err != nil {
+			t.Fatalf("handleEvent: %v", err)
+		}
+	}
+
+	var endOutput string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentToolEnd && ev.ToolEnd != nil {
+			endOutput = ev.ToolEnd.Output
+		}
+	}
+	if endOutput != "streamed-stdout" {
+		t.Errorf("ToolEnd.Output = %q, want \"streamed-stdout\" (trailing newline stripped by extractToolOutput)", endOutput)
+	}
+}
+
+// TestTranslate_ToolOnly_FailedExtractsObjectErrorMessage verifies
+// that tool.failed.data.error shaped as an object (the live wire
+// for permission-denied style failures) is flattened to its
+// .data.message so the chat client shows a readable message
+// rather than the literal JSON.
+func TestTranslate_ToolOnly_FailedExtractsObjectErrorMessage(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	if err := tr.handleEvent(sseToolEvent("failed", "tc1", "bash", `"error":"{\"name\":\"PermissionDeniedError\",\"data\":{\"message\":\"opencode: permission denied for /etc/passwd\"}}"`)); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+
+	var errMsg string
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentToolEnd && ev.Err != nil {
+			errMsg = ev.Err.Error()
+		}
+	}
+	if !strings.Contains(errMsg, "permission denied") {
+		t.Errorf("ToolEnd.Err = %q, want substring \"permission denied\"", errMsg)
+	}
+}
+
+// TestTranslate_ContextUpdatedDoesNotCrash confirms that the
+// session.next.context.updated event (the server's prompt-side
+// snapshot injection that arrives between model steps) is handled
+// without panicking or emitting phantom text. The bridge currently
+// only logs it; the regression guard is the no-crash invariant.
+func TestTranslate_ContextUpdatedDoesNotCrash(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	if err := tr.handleEvent(sseContextUpdatedEvent("<available_skills>\n  ...long prompt context blob...\n</available_skills>")); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+
+	for _, ev := range snap() {
+		if ev.Kind == agent.EventAgentText {
+			t.Errorf("context.updated must not emit EventAgentText, got %q", ev.Text)
+		}
+		if ev.Kind == agent.EventAgentDone {
+			t.Errorf("context.updated must not emit EventAgentDone (no turn end)")
+		}
 	}
 }

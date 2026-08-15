@@ -1304,13 +1304,37 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				// the pre-fix postOrphanReplyCard surface so the
 				// user sees the same single bubble.
 				msgID, sendErr := a.SendCardForReceipt(ctx, msg.ChatID, body, "", false)
-				if sendErr != nil {
-					// Send failed: keep the receipt pointing at the
-					// old card and DO NOT reset entries — the next
-					// chunk will retry the overflow path and the
-					// original placeholder stays usable. Logging
-					// happens inside SendCardForReceipt's adapter
-					// wrapper.
+				// sendErr != nil OR msgID == "" is a failure:
+				//
+				//   - sendErr != nil: the SDK call itself failed
+				//     (network / rate-limit / auth / API rejection).
+				//
+				//   - msgID == "" with sendErr == nil: Feishu accepted
+				//     the send (resp.Success() == true) but
+				//     resp.Data is nil OR resp.Data.MessageId is nil
+				//     (reply.go:294-297's ReplyInChat fall-through).
+				//     The placeholder card IS already in chat but we
+				//     have no id to PATCH — accepting it would
+				//     silently leak the card and leave the receipt on
+				//     the OLD cardMsgID, so the next overflow chunk
+				//     creates yet another placeholder (N bubbles,
+				//     defeating the rollover). Treat as a failure so
+				//     the next chunk re-tries the overflow path on a
+				//     healthy Feishu response.
+				if sendErr != nil || msgID == "" {
+					if sendErr == nil {
+						a.logger.Warn("feishu: SendCardForReceipt returned empty msgID; treating as overflow failure",
+							"chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
+						sendErr = errors.New("feishu: SendCardForReceipt returned empty msgID (Feishu accepted send but no MessageId in response)")
+					}
+					// Send failed (or returned an untrackable msgID):
+					// keep the receipt pointing at the old card and
+					// DO NOT reset entries — the next chunk will
+					// retry the overflow path and the original
+					// placeholder stays usable. Logging for the
+					// error path happens inside SendCardForReceipt's
+					// adapter wrapper; the empty-msgID warning is
+					// emitted above.
 					return sendErr
 				}
 				receipt.RolloverTo(msgID, LogEntry{Icon: "💬", Text: text}, footerLines)

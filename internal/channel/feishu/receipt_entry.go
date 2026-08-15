@@ -4,13 +4,21 @@
 // function maps each entry to one or more `div` elements (split via
 // splitMarkdownForDivs when the entry text exceeds divTextCharLimit).
 //
-// Overflow bail-out: if appending an entry would push the card past
-// 50 elements / 30 KB envelope, AppendEntry returns ErrReceiptOverflow
-// and the caller sends that entry as a fresh top-level Create
-// (ReplyInChat — always visible in main chat, escapes the
-// parent-thread drawer). The receipt itself stays anchored to the
-// user message (ReplyInBoth) so the visual thread to the user input
-// is preserved in the normal case.
+// Overflow bail-out (fix-reply-placehold-card): if appending an entry
+// would push the card past 50 elements / 30 KB envelope,
+// AppendEntry returns ErrReceiptOverflow and the caller
+//
+//  1. sends that entry as a fresh top-level placeholder card (no
+//     thread anchor — ReplyInChat, always visible in main chat,
+//     escapes the parent-thread drawer), and
+//  2. calls receipt.RolloverTo(msgID, overflowEntry, footerLines)
+//     so subsequent chunks PATCH the new card instead of producing
+//     a stream of N standalone bubbles.
+//
+// The receipt's old card stays anchored to the user message
+// (ReplyInBoth) so the visual thread to the user input is preserved
+// in the normal case; the new placeholder is a top-level Create
+// (rootID="") for the overflow chunks.
 
 package feishu
 
@@ -37,9 +45,21 @@ type LogEntry struct {
 
 // ErrReceiptOverflow is returned by AppendEntry when adding the
 // entry would push the card past the element-count or envelope-
-// size limit. The caller is expected to catch this sentinel and
-// fall back to a fresh top-level Create so the user still sees the
-// entry (in main chat, not the thread drawer).
+// size limit. The caller is expected to:
+//
+//  1. Catch this sentinel.
+//  2. Build a body for a fresh top-level placeholder card that
+//     seeds itself with the entry that overflowed (so the user
+//     sees the same content the old postOrphanReplyCard fallback
+//     would have surfaced).
+//  3. Send that body via SendCardForReceipt(chatID, body, "", false)
+//     to get the new placeholder's msgID.
+//  4. Call receipt.RolloverTo(msgID, overflowEntry, footerLines)
+//     to migrate the receipt's tracking to the new card. Future
+//     AppendEntry / SetTaskList calls PATCH the new card instead
+//     of the original, so a stream of N overflow chunks collapses
+//     into one placeholder card + N-1 PATCHes, not N standalone
+//     bubbles.
 //
 // Detection: buildReceiptCard returns the projected body for the
 // would-be post-append state; AppendEntry counts elements and
@@ -47,7 +67,7 @@ type LogEntry struct {
 // issuing the PATCH. No Feishu PATCH call is made in the overflow
 // path, so the existing card stays untouched (no orphan-element
 // half-render).
-var ErrReceiptOverflow = errors.New("feishu receipt: append would exceed card limit; caller should send as fresh top-level message")
+var ErrReceiptOverflow = errors.New("feishu receipt: append would exceed card limit; caller should send as fresh top-level message and call RolloverTo")
 
 // receiptMaxElements is the Feishu Card 2.0 hard cap on body element
 // count. Cards with more than this many elements are rejected by

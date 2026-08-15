@@ -114,6 +114,26 @@ type promptParams struct {
 	Prompt    []contentBlock `json:"prompt"`
 }
 
+// sessionCancelParams — fix-stop: structured in-flight cancel.
+//
+// ACP's protocol exposes session/cancel as the canonical way to
+// halt a prompt without killing the agent process. SIGINT was the
+// pre-fix fallback (via transport.Signal), but on a PTY-backed
+// ACP server it depends on every agent implementation actually
+// handling SIGINT the same way — some agents exit, some
+// translate it to a structured cancel, some ignore it. Routing
+// through session/cancel gives us the same in-band protocol
+// guarantee as codex's turn/interrupt: the agent stays alive,
+// settles the in-flight turn cleanly, and the chat layer's
+// TryFlush picks up the next queued prompt on the SAME sessionId.
+//
+// Method-not-found on older agents (-32601) falls back to SIGINT
+// to preserve the pre-fix behaviour on agents that haven't
+// shipped session/cancel yet.
+type sessionCancelParams struct {
+	SessionID string `json:"sessionId"`
+}
+
 type contentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
@@ -334,24 +354,104 @@ func (d *driver) New(ctx context.Context) error {
 	return nil
 }
 
-// Stop sends SIGINT to the child process via the PTY transport.
-// The child runs with a TTY, so SIGINT is natively interpreted
-// the same way a user pressing Ctrl-C in interactive mode would
-// be: cancel the in-flight turn, stay alive, await the next
-// prompt. The ACP protocol surfaces the settled state via the
-// bridge's normal event stream; the chat layer's TryFlush picks up
-// the next queued prompt once IsReady() flips.
+// Stop requests the in-flight prompt to settle by sending a
+// structured session/cancel JSON-RPC. The ACP server STAYS ALIVE
+// and finishes the current turn; the bridge's normal event stream
+// surfaces the settled state, the chat layer's TryFlush picks up
+// the next queued prompt on the SAME sessionId (no respawn, no
+// --resume, no ghost turn).
+//
+// Pre-fix Stop sent SIGINT via transport.Signal — relying on
+// every agent implementation to interpret SIGINT the same way
+// when running under a PTY. That works for some agents and breaks
+// for others (some exit, some ignore it, some translate it to
+// an unstructured stream event the bridge can't tell apart from
+// a crash). session/cancel is the documented ACP method, so the
+// behaviour is now uniform.
+//
+// State machine:
+//
+//   - transport not started              → ErrNotSupported
+//   - sessionID empty (handshake failed) → noop (matches
+//                                          stop.go's "nothing
+//                                          to stop" branch)
+//   - sessionID set                      → session/cancel
+//   - session/cancel fails -32601        → SIGINT (legacy
+//     (method not found)                  fallback for old
+//                                          agents)
+//   - session/cancel fails otherwise     → return the wire
+//                                          error so the chat
+//                                          layer can render
+//                                          "stop failed"
 //
 // Stop is fire-and-forget: it does NOT block waiting for the
-// settle event.
-//
-// Returns ErrNotSupported if the transport is not started.
+// agent to confirm the prompt has settled. The chat layer
+// coordinates the next-submit transition via the existing
+// KindPromptEnded / EventAgentDone handler.
 func (d *driver) Stop(ctx context.Context) error {
-	_ = ctx
 	if d.transport == nil {
 		return agent.ErrNotSupported
 	}
+	if d.sessionID == "" {
+		// No session — there's nothing to cancel. Mirror
+		// stop.go's noop semantics so a second /stop in quick
+		// succession doesn't surface a spurious failure.
+		return nil
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, stopRPCTimeout)
+	defer cancel()
+
+	_, err := d.rpc.request(stopCtx, "session/cancel", sessionCancelParams{
+		SessionID: d.sessionID,
+	})
+	if err == nil {
+		// The agent's normal event stream will deliver the
+		// settled state (tool_end / session_end / message_chunk
+		// end-of-stream depending on the agent's protocol
+		// flavour). The chat layer's TryFlush picks up the
+		// next queued prompt once the bridge's prompt-end
+		// handler flips IsReady.
+		return nil
+	}
+	if !isMethodNotFound(err) {
+		return fmt.Errorf("acp: stop: %w", err)
+	}
+
+	// Last-resort SIGINT fallback for agents that pre-date the
+	// session/cancel method. The pre-fix path was always
+	// SIGINT, so this preserves old behaviour for old agents
+	// rather than regressing them.
 	return d.transport.Signal(os.Interrupt)
+}
+
+// stopRPCTimeout bounds how long Stop() waits for the agent to
+// acknowledge session/cancel. The wire reply is `null` and
+// typically lands in <50ms; 3s is generous and matches
+// codex's stopRPCTimeout.
+const stopRPCTimeout = 3 * time.Second
+
+// isMethodNotFound reports whether err corresponds to the
+// JSON-RPC 2.0 reserved error -32601 (Method not found). Older
+// ACP agents that pre-date the session/cancel method return
+// this; we treat it as a soft signal to fall back to SIGINT
+// rather than surface a "stop failed" reply to the user.
+//
+// Match order:
+//  1. *rpcError with Code == -32601 (the wire code verbatim).
+//  2. Otherwise, a substring match for "method not found" —
+//     only when no *rpcError is in the chain, so a well-formed
+//     -32600 invalid-request error that happens to mention
+//     "method not found" in its body is NOT mis-classified.
+func isMethodNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var re *rpcError
+	if errors.As(err, &re) {
+		return re.Code == -32601
+	}
+	return strings.Contains(err.Error(), "method not found")
 }
 
 // SetModel is not supported on the ACP bridge. ACP has a

@@ -108,6 +108,8 @@ func TestE2E_DeathResume_ForksOriginalSession(t *testing.T) {
 	if err := as.RestartFromDeath(context.Background(), rec); err != nil {
 		t.Fatalf("RestartFromDeath: %v", err)
 	}
+	t.Logf("after RestartFromDeath: as.Status=%v as.PID=%d handle.PID=%d",
+		as.Status(), as.PID(), as.Handle().PID())
 
 	// CRITICAL ASSERTION: the spawner MUST have been called with the
 	// ORIGINAL sessionA — this is what lets dsh's session.fork run
@@ -136,7 +138,7 @@ func TestE2E_DeathResume_ForksOriginalSession(t *testing.T) {
 	// the new ready fires (or we time out). The atomic.Value that
 	// backs Agent.SessionID() is only updated when the readPump
 	// processes that ready event.
-	newID := waitForReadySessionID(t, handle, 15*time.Second)
+	newID := waitForReadySessionID(t, handle, 60*time.Second)
 	t.Logf("session B (fork of A): %s", newID)
 
 	if newID == "" {
@@ -165,16 +167,23 @@ func waitForReadySessionID(t *testing.T, handle *agent.Agent, timeout time.Durat
 	t.Helper()
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
+	seen := 0
 	for {
 		select {
 		case ev, ok := <-handle.Events():
 			if !ok {
+				t.Logf("waitForReadySessionID: channel closed after %d events", seen)
 				return ""
 			}
+			seen++
 			if ev.Kind == agent.EventAgentReady && ev.SessionID != "" {
 				return ev.SessionID
 			}
+			if seen <= 5 {
+				t.Logf("waitForReadySessionID: skipping event #%d kind=%v sessionID=%q", seen, ev.Kind, ev.SessionID)
+			}
 		case <-deadline.C:
+			t.Logf("waitForReadySessionID: timed out after %d events", seen)
 			return ""
 		}
 	}

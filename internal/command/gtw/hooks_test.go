@@ -22,10 +22,16 @@ import (
 // of the test, so Load()'s os.UserHomeDir-based discovery doesn't
 // see the real user's yml. Returns the temp dir path; caller is
 // responsible for the cleanup (defer os.RemoveAll).
+//
+// On Windows, os.UserHomeDir() reads %USERPROFILE% — not $HOME.
+// We set both so Load() finds the temp dir regardless of platform.
+// The unset at test teardown restores both env vars automatically
+// (t.Setenv semantics).
 func withTempHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	return dir
 }
 

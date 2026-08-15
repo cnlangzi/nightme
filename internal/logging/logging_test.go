@@ -68,7 +68,11 @@ func TestLogger_Format(t *testing.T) {
 
 func TestLogger_DefaultPath(t *testing.T) {
 	dir := t.TempDir()
+	// os.UserHomeDir() reads %USERPROFILE% on Windows, $HOME on
+	// Unix. Set both so the logger's default-path resolution
+	// picks up our temp dir regardless of platform.
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	if _, err := New(&config.Config{}); err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -316,7 +317,11 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 				d.pendingMu.Unlock()
 				return fmt.Errorf("%w: %s = %d bytes", ErrImageTooLarge, b.Path, info.Size())
 			}
-			parts = append(parts, FilePart(b.MediaType, "file://"+b.Path))
+			// RFC 3986 mandates forward slashes in file:// URLs.
+					// b.Path comes from the runtime (a native Windows path on
+					// Windows hosts); the opencode wire layer expects forward
+					// slashes regardless of host. filepath.ToSlash normalises.
+					parts = append(parts, FilePart(b.MediaType, "file://"+filepath.ToSlash(b.Path)))
 		default:
 			oLog("SendBlocks: unknown block type, skipping", "type", string(b.Type))
 		}

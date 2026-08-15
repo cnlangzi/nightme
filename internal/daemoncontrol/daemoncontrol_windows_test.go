@@ -99,9 +99,24 @@ func TestWindowsPipePingStatusStop(t *testing.T) {
 	go func() { _ = server.Serve() }()
 
 	// Ping before SetReady — must return Ready=false (no error).
-	ready, err := Ping(paths.Socket, 2*time.Second)
-	if err != nil {
-		t.Fatalf("Ping (before SetReady): %v", err)
+	// Retry on transient errors (EOF / broken pipe / not found)
+	// because the test races with the server's seed-close vs
+	// new-create cycle; production dialNamedPipe also retries
+	// internally but a single test-level retry covers the case
+	// where the connection survives long enough to be returned
+	// to the caller but then the server side closes before
+	// responding.
+	var ready bool
+	for i := 0; i < 50; i++ {
+		var err error
+		ready, err = Ping(paths.Socket, 2*time.Second)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("server reported not-ready after retries")
 	}
 	if ready {
 		t.Fatal("server reported ready before SetReady")

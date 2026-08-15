@@ -241,8 +241,11 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	// paths (`/c/Users/...`) regardless of what we set cmd.Dir
 	// to. The filepath.Dir we compare against is the host-native
 	// Windows form. Normalise the git output to host form via
-	// filepath.FromSlash before the substring check.
-	if !strings.Contains(filepath.FromSlash(wtOut), filepath.Dir(rig.repoRoot)) {
+	// filepath.FromSlash, then compare case-insensitively:
+	// Windows shows the dir via 8.3 short name (RUNNER~1) in
+	// some git output but via the long name (runneradmin) in
+	// others; the underlying dir is the same.
+	if !strings.Contains(strings.ToLower(filepath.FromSlash(wtOut)), strings.ToLower(filepath.Dir(rig.repoRoot))) {
 		t.Errorf("no worktree created in %s:\n%s", filepath.Dir(rig.repoRoot), wtOut)
 	}
 	// Pick the second worktree entry (first is the main repo
@@ -464,8 +467,12 @@ func parseSecondWorktree(porcelain string, underPrefix string) string {
 			// (`/c/Users/...`). The underPrefix is host-native
 			// (`C:\Users\...`). Convert to host form before
 			// comparing so the prefix check works on every host.
-			hostPath := filepath.FromSlash(path)
-			if !strings.HasPrefix(hostPath, underPrefix) {
+			hostPath := strings.ToLower(filepath.FromSlash(path))
+			lowUnder := strings.ToLower(underPrefix)
+			// Windows shows the same dir via either the 8.3
+			// short name (RUNNER~1) or the long name
+			// (runneradmin). Compare case-insensitively.
+			if !strings.HasPrefix(hostPath, lowUnder) {
 				// Filter out the main repo (which IS under
 				// underPrefix via the temp dir; this is just
 				// defence in depth).

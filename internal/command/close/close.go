@@ -166,6 +166,24 @@ func CloseAgent(c *Cmd, agentName string) (Result, error) {
 		result.Action = "close-failed"
 		result.Error = fmt.Errorf("graceful shutdown timed out after %s", closeGraceTotal)
 	}
+	// F-61 proactive-SetExited: the bridge process is gone (or
+	// about to be — SIGINT has fired inside driver.Close and the
+	// SIGKILL fallback will complete shortly after the timeout).
+	// Mark the AS as StatusExited now so a concurrent inbound
+	// message arriving during /close does NOT hit
+	// LookupSelectedAgentSession's "StatusRunning && Handle()!=nil"
+	// cache-hit branch and submit to a dying stdin. Without this,
+	// there's a 0-5s race window between /close-start and
+	// readpump's eventual KindLifecycle{StatusExited} (which only
+	// fires once the events channel closes).
+	//
+	// SetExited is idempotent: routeEvent's
+	// `if as.Status() == StatusExited { return }` guard short-
+	// circuits the readpump's late cascade, so we don't
+	// double-persist agent_sessions.json. Matches the comment at
+	// pump_events.go:128 describing the desired "/close path
+	// does `as.Close(); as.SetExited(0)`" semantics.
+	as.SetExited(0)
 	return result, nil
 }
 
@@ -270,6 +288,17 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 				"expected", len(snapshot))
 			return results, nil
 		}
+	}
+	// F-61 proactive-SetExited (cwd-wide path): all entries have
+	// either closed cleanly or hit the closeGraceTotal bound (in
+	// which case driver.Close's SIGKILL fallback will complete
+	// shortly). Mark each one Exited so concurrent inbound
+	// messages skip the "StatusRunning && Handle()!=nil" cache-hit
+	// branch in LookupSelectedAgentSession. See CloseAgent for
+	// the full rationale; SetExited is idempotent and safe to
+	// apply to entries that may already be in Exited state.
+	for _, as := range snapshot {
+		as.SetExited(0)
 	}
 
 	return results, nil

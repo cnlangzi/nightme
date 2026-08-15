@@ -1262,6 +1262,29 @@ func (as *AgentSession) IsReady() bool {
 // outside the lock (it can block on a hung prompt RPC). Two
 // concurrent Submits are serialized by the bridge's turnMu
 // (pi) or single-threaded access (claudecode / pty).
+// Concurrency: asMu briefly during commit, but SendBlocks runs
+// outside the lock (it can block on a hung prompt RPC). Two
+// concurrent Submits are serialized by the bridge's turnMu
+// (pi) or single-threaded access (claudecode / pty).
+//
+// Ordering — set currentPrompt BEFORE SendBlocks so that any
+// response events (assistant / result) observed by the readpump
+// after SendBlocks returns are anchored to the user message.
+// The previous ordering (SendBlocks → currentPrompt) created a
+// race: a sub-millisecond-responding child (the integration
+// test's bash mock, or a CLI that hot-caches its prior turn)
+// could emit the full assistant + result envelope before
+// currentPrompt was committed, in which case the readpump
+// stamps UserMsgID="" on those events. The persisted
+// InFlightMessages mirror is committed in the same atomic
+// step as currentPrompt so Entry() always observes a
+// consistent pair. If SendBlocks fails after the commit, the
+// commit is rolled back (currentPrompt + inFlightMessages
+// cleared, isReady flipped back to true) so the queue's
+// Retry/Rewind path on the next TryFlush sees a clean AS —
+// matching the pre-fix contract that a failed Submit leaves
+// the AS in the same state as before the call (verified by
+// TestSubmit_FailureLeavesInFlightEmpty).
 func (as *AgentSession) Submit(p *Prompt) error {
 	as.asMu.RLock()
 	h := as.handle
@@ -1287,24 +1310,9 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		"blocks", len(p.Blocks),
 		"prompt_id", p.ID)
 
-	// SendBlocks can block on a hung prompt RPC; do NOT hold asMu.
-	err := h.SendBlocks(as.OpContext(), p.Blocks)
-	if err != nil {
-		slog.Warn("chatsession: Submit SendBlocks FAILED",
-			"chat_id", as.ChatSessionID,
-			"as_id", as.ID,
-			"err", err)
-		return err
-	}
-	slog.Debug("chatsession: Submit SendBlocks ok",
-		"chat_id", as.ChatSessionID,
-		"as_id", as.ID,
-		"prompt_id", p.ID)
-
-	// Commit: install currentPrompt and flip isReady. The
-	// in-flight-message mirror is updated as part of the same
-	// atomic commit so Entry() always sees a consistent
-	// (currentPrompt, inFlightMessages) pair.
+	// Commit: install currentPrompt and flip isReady BEFORE the
+	// bridge call. See the function-level ordering comment for
+	// the rationale (anchor race fix).
 	//
 	// Blocks is defensively copied: Message.Blocks is a slice
 	// header that aliases the queue's storage, and the persisted
@@ -1326,6 +1334,33 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	as.asMu.Unlock()
 	as.isReady.Store(false)
 
+	// SendBlocks can block on a hung prompt RPC; do NOT hold asMu.
+	err := h.SendBlocks(as.OpContext(), p.Blocks)
+	if err != nil {
+		slog.Warn("chatsession: Submit SendBlocks FAILED",
+			"chat_id", as.ChatSessionID,
+			"as_id", as.ID,
+			"err", err)
+		// Roll back the commit. Without this, a failed Submit
+		// would leave currentPrompt + isReady=false set, and the
+		// next TryFlush would skip (as_not_ready) until something
+		// else (e.g. an endPrompt from a stale event) cleared
+		// them. Compare with the pre-fix contract verified by
+		// TestSubmit_FailureLeavesInFlightEmpty.
+		as.asMu.Lock()
+		if as.currentPrompt == p {
+			as.currentPrompt = nil
+			as.inFlightMessages = nil
+		}
+		as.asMu.Unlock()
+		as.isReady.Store(true)
+		return err
+	}
+	slog.Debug("chatsession: Submit SendBlocks ok",
+		"chat_id", as.ChatSessionID,
+		"as_id", as.ID,
+		"prompt_id", p.ID)
+
 	// Best-effort persistence — failures must NOT roll back the
 	// commit, since SendBlocks already accepted the prompt and the
 	// bridge is now expecting a reply. The next status change
@@ -1338,13 +1373,10 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// InFlightMessages and we persist that. The disk always
 	// converges to the in-memory state; we never observe a stale
 	// non-empty InFlightMessages after the prompt actually ended.
-	// (Restart-replay therefore re-submits in-flight messages
-	// only when the in-memory state still considered them
-	// in-flight at the moment of the last successful persist.)
 	if as.persist != nil {
 		if err := as.persist(as.Entry()); err != nil {
-			slog.Warn("agentsession: persist after Submit failed; entry may be stale on restart",
-				"as_id", as.ID, "prompt_id", p.ID, "err", err)
+			slog.Warn("chatsession: persist after Submit failed; entry may be stale on restart",
+				"as_id", as.ID, "err", err)
 		}
 	}
 	return nil

@@ -989,3 +989,156 @@ func TestTranslate_ContextUpdatedDoesNotCrash(t *testing.T) {
 		}
 	}
 }
+
+// ─── extractToolOutput / uriBasename / truncateToolOutput ─────────
+
+// TestExtractToolOutput_TruncatesLargeStructuredContent is the
+// regression guard for the runaway-output case: a single read of a
+// multi-MiB file would otherwise surface the entire payload in the
+// chat receipt and balloon the in-memory AgentEvent. truncateToolOutput
+// must clip at toolOutputMaxBytes and append a tail marker so the
+// user sees the output was truncated, not that the file just ends
+// mid-sentence.
+func TestExtractToolOutput_TruncatesLargeStructuredContent(t *testing.T) {
+	// Build a structured.content just over the cap so the test is
+	// stable across toolOutputMaxBytes tweaks.
+	oversize := strings.Repeat("x", toolOutputMaxBytes+128)
+	raw, err := json.Marshal(map[string]any{
+		"structured": map[string]any{"content": oversize},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var p sessionNextToolEvent
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out := extractToolOutput(p.Structured, p.Content)
+	if len(out) <= toolOutputMaxBytes {
+		t.Fatalf("expected output to be capped at >%d bytes, got %d (no truncation?)", toolOutputMaxBytes, len(out))
+	}
+	if !strings.Contains(out, "[truncated") {
+		t.Errorf("output should carry a truncation marker, got tail %q", out[len(out)-64:])
+	}
+	if !strings.HasPrefix(out, strings.Repeat("x", toolOutputMaxBytes)) {
+		t.Errorf("output should start with the kept prefix of toolOutputMaxBytes x's, got prefix %q", out[:32])
+	}
+}
+
+// TestExtractToolOutput_FileRefUsesBasenameForLongURIs is the
+// regression guard for the file-shape receipt spam: when a
+// structured.content is absent but content[] carries a file
+// reference, a long file:// URI should surface as the basename
+// (e.g. "marker.txt") rather than the full path
+// ("file:///Users/.../very/long/path/to/marker.txt").
+func TestExtractToolOutput_FileRefUsesBasenameForLongURIs(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"content": []map[string]any{
+			{"type": "file", "uri": "file:///Users/geax/code/geax/github.com/cnlangzi/nightme.nightme/fix-gtw-agent/internal/bridge/opencode/translate.go", "mime": "text/x-go"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var p sessionNextToolEvent
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out := extractToolOutput(p.Structured, p.Content)
+	if !strings.Contains(out, "translate.go") {
+		t.Errorf("output should contain basename, got %q", out)
+	}
+	if strings.Contains(out, "/Users/geax/") {
+		t.Errorf("output should not contain the full URI, got %q", out)
+	}
+	if !strings.Contains(out, "text/x-go") {
+		t.Errorf("output should carry mime suffix, got %q", out)
+	}
+}
+
+// TestExtractToolOutput_FileRefPrefersNameOverURI asserts that a
+// file ref that ships BOTH `name` and `uri` uses `name` - that is
+// what every observed wire event does today, and the bridge should
+// not regress to using the URI when a human label is available.
+func TestExtractToolOutput_FileRefPrefersNameOverURI(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{
+		"content": []map[string]any{
+			{"type": "file", "name": "MARKER.txt", "uri": "file:///tmp/x/MARKER.txt", "mime": "text/plain"},
+		},
+	})
+	var p sessionNextToolEvent
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out := extractToolOutput(p.Structured, p.Content)
+	if !strings.HasPrefix(out, "MARKER.txt") {
+		t.Errorf("output should start with the human name, got %q", out)
+	}
+}
+
+// TestURIBasename covers the boundary cases the chat renderer
+// relies on - scheme stripping, query / fragment trimming, and
+// schemeless paths.
+func TestURIBasename(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"file:///a/b/c.txt", "c.txt"},
+		{"https://example.com/foo/bar?x=1", "bar"},
+		{"https://example.com/foo/bar#frag", "bar"},
+		{"a/b/c.txt", "c.txt"},
+		{"just-a-file.txt", "just-a-file.txt"},
+		{"file:///path/?q=1", "path"},
+	}
+	for _, tc := range cases {
+		got := uriBasename(tc.in)
+		if got != tc.want {
+			t.Errorf("uriBasename(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestTruncateToolOutput confirms that small inputs pass through
+// unchanged and oversize inputs are clipped with a marker.
+func TestTruncateToolOutput(t *testing.T) {
+	small := strings.Repeat("a", 100)
+	if got := truncateToolOutput(small); got != small {
+		t.Errorf("truncateToolOutput(small) mutated input")
+	}
+	big := strings.Repeat("a", toolOutputMaxBytes+1)
+	got := truncateToolOutput(big)
+	if !strings.HasPrefix(got, strings.Repeat("a", toolOutputMaxBytes)) {
+		t.Errorf("truncated output should keep the prefix, got prefix %q", got[:32])
+	}
+	if !strings.Contains(got, "[truncated 1 bytes]") {
+		t.Errorf("truncated output should carry a 1-byte marker, got tail %q", got[len(got)-32:])
+	}
+}
+
+// TestExtractToolError_PrefersDataMessage confirms that the
+// object-form error picks .data.message over .message over the
+// raw JSON - never bare {}. The previous implementation had a
+// .name fallback that surfaced the type instead of the message,
+// producing chat receipts like "PermissionDeniedError" instead
+// of the actual denial reason.
+func TestExtractToolError_PrefersDataMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain string", "permission denied for /etc/passwd", "permission denied for /etc/passwd"},
+		{"object with data.message", `{"name":"PermissionDeniedError","data":{"message":"opencode: permission denied"}}`, "opencode: permission denied"},
+		{"object with top-level message", `{"message":"something bad"}`, "something bad"},
+		{"object with neither", `{"name":"X"}`, `{"name":"X"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractToolError(tc.in); got != tc.want {
+				t.Errorf("extractToolError(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

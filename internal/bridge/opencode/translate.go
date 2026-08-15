@@ -936,18 +936,6 @@ type sessionNextToolInputEvent struct {
 	sessionNextToolEvent // embed for tool/input context (rarely populated here)
 }
 
-// inputBuf mirrors toolEntry but holds the live, partially-built
-// args string for in-flight tool calls. Cleared on tool.ended /
-// tool.success / tool.failed.
-type inputBuf struct {
-	name string
-	buf  strings.Builder
-}
-
-// toolInputBufs accumulates streaming tool-input state. Keyed by
-// callID. Cleaned up on tool.success / tool.failed / on close.
-var _ = "" // (compile-time shim — fields live on translator instead)
-
 // handleToolInputStarted arms the per-callID input buffer. The
 // translator's pendingTools entry is created here too (if not
 // already present) so subsequent input.delta / tool.called events
@@ -1176,16 +1164,24 @@ func (t *translator) handleToolSucceeded(ev SessionEvent) {
 	t.tryEmitTurnDone("settled", 0, nil)
 }
 
+// toolOutputMaxBytes caps the text we surface for a single tool
+// invocation. A 100-MiB read of a giant log file shouldn't blow
+// up the chat transcript; the renderer applies its own truncation
+// on top of this, but pre-clipping here keeps the in-memory
+// AgentEvent sane for long-running agents.
+const toolOutputMaxBytes = 64 * 1024
+
 // extractToolOutput pulls a human-readable summary out of a
 // tool.success payload. It tries two shapes:
 //
 //	structured.content  (file-shaped tools: read, list, glob)
 //	content[].text      (LLMToolContent arrays: bash, generic)
 //
-// File refs in content[] are surfaced as "<name> (<mime>)" so
-// the chat client has at least a pointer. Returns "" when the
-// payload is genuinely empty - the caller decides whether to
-// render "(empty output)" or just skip.
+// extractToolOutput returns the user-visible tool output text
+// (with file refs formatted) and is hard-capped at
+// toolOutputMaxBytes so a runaway read doesn't blow up the chat
+// transcript. Returns the empty string when the payload is
+// genuinely empty.
 func extractToolOutput(structured, content json.RawMessage) string {
 	// structured.content (most common for file tools).
 	if len(structured) > 0 && string(structured) != "null" {
@@ -1195,7 +1191,7 @@ func extractToolOutput(structured, content json.RawMessage) string {
 			Mime    string `json:"mime"`
 		}
 		if err := json.Unmarshal(structured, &s); err == nil && s.Content != "" {
-			return s.Content
+			return truncateToolOutput(s.Content)
 		}
 	}
 	// content: LLMToolContent[].
@@ -1217,10 +1213,12 @@ func extractToolOutput(structured, content json.RawMessage) string {
 						b.WriteByte('\n')
 					}
 				case "file":
-					// File refs: surface "<name> (<mime>)".
+					// File refs: surface "<name> (<mime>)". Long
+					// file:// URIs are clipped to the basename so
+					// the chat receipt doesn't get spammed.
 					label := it.Name
 					if label == "" {
-						label = it.URI
+						label = uriBasename(it.URI)
 					}
 					if label != "" {
 						if it.Mime != "" {
@@ -1231,10 +1229,50 @@ func extractToolOutput(structured, content json.RawMessage) string {
 					}
 				}
 			}
-			return strings.TrimRight(b.String(), "\n")
+			return truncateToolOutput(strings.TrimRight(b.String(), "\n"))
 		}
 	}
 	return ""
+}
+
+// uriBasename pulls the last path segment off a file:// URI
+// (or any URI with a slash). Returns "" when the URI has no
+// usable path component after trimming scheme / query / fragment.
+func uriBasename(uri string) string {
+	if uri == "" {
+		return ""
+	}
+	// Trim scheme prefix so we don't split on `://`.
+	p := uri
+	if i := strings.Index(p, "://"); i >= 0 {
+		p = p[i+3:]
+	}
+	// Strip query / fragment so they don't get mistaken for path.
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	// Take the segment after the LAST slash. Trim a trailing
+	// slash so "file:///path/?q=1" -> "" -> "" -> "" -> "" (no
+	// segment) returns "" instead of "path/" trimmed to "path"
+	// for an input the user never meant as a file.
+	for len(p) > 0 && p[len(p)-1] == '/' {
+		p = p[:len(p)-1]
+	}
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		p = p[i+1:]
+	}
+	return p
+}
+
+// truncateToolOutput clips s at toolOutputMaxBytes and appends
+// a tail marker so the chat client knows the payload was
+// truncated (rather than the original ending at that byte).
+func truncateToolOutput(s string) string {
+	if len(s) <= toolOutputMaxBytes {
+		return s
+	}
+	return s[:toolOutputMaxBytes] + "\n…[truncated " +
+		fmt.Sprintf("%d", len(s)-toolOutputMaxBytes) + " bytes]"
 }
 
 // handleToolFailed closes a tool call with an error and emits a

@@ -1582,6 +1582,29 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 		// across a fork+exec. We re-acquire mu for the subsequent
 		// persistence + selectedAS assignment.
 		spawnErr = as.Spawn(context.Background(), spawner)
+
+		// fix-stop (2026-08-15): when the bridge rejected the
+		// saved sessionID with agent.ErrResumeUnhealthy, the
+		// AgentSession.respawn path has already cleared the
+		// sessionID inside its own error branch. The next
+		// Spawn (without a resume id) should land on a fresh
+		// session — retry once before surfacing the error to
+		// the dispatcher. Without this, the user would see
+		// "Failed to spawn agent" on every inbound message
+		// after /close+--resume-rejection until they ran
+		// `/new` or hand-edited agent_sessions.json.
+		//
+		// Limit to ONE retry: the second attempt is a fresh
+		// spawn (no resume) so it can only fail with a
+		// different class of error (binary missing, handshake
+		// refused, etc.) — not the resume-stale-id loop. If
+		// the retry fails, surface the most recent error so
+		// the dispatcher can render it.
+		if spawnErr != nil && errors.Is(spawnErr, agent.ErrResumeUnhealthy) {
+			slog.Warn("chatsession: spawn retry without resume id after ErrResumeUnhealthy",
+				"chat_id", cs.ChatID, "as_id", as.ID, "agent", cs.selectedAgent)
+			spawnErr = as.Spawn(context.Background(), spawner)
+		}
 	}
 
 	cs.mu.Lock()

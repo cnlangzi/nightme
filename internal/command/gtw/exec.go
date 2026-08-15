@@ -54,28 +54,32 @@ func runCmd(ctx context.Context, dir, name string, args ...string) (stdout, stde
 	// MSYS path translation off: when the child is spawned from
 	// a Git-for-Windows bash environment (e.g. GitHub Actions
 	// windows-latest runner, or a user running nightme from
-	// Git Bash), `cmd.Dir = "D:\a\foo"` would be translated to
-	// `/d/a/foo` by MSYS before the child sees it, making the
-	// child's `pwd` output disagree with what we passed in.
+	// Git Bash), MSYS translates path-like argv entries before
+	// they reach CreateProcess. We disable the translation so
+	// git/gh/glab see the exact paths nightme set on the
+	// command line (e.g. `--git-dir=C:\foo\repo` instead of the
+	// MSYS-translated `/c/foo/repo`).
 	//
-	// We set BOTH the v1 and v2 knobs to cover all MSYS variants
-	// in one shot:
+	// Two env vars cover both MSYS generations:
 	//
-	//   - MSYS_NO_PATHCONV=1     — the original MSYS / Git for
-	//     Windows v1 switch. Disables path conversion in the
-	//     argv the bash layer passes to CreateProcess.
-	//   - MSYS2_ARG_CONV_EXCL=*  — the MSYS2 / Git for Windows
-	//     v2 switch (added in 2024). Disables the newer
+	//   - MSYS_NO_PATHCONV=1     — the MSYS / Git for Windows v1
+	//     switch. Disables path conversion in argv passed to
+	//     CreateProcess via the bash layer.
+	//   - MSYS2_ARG_CONV_EXCL=*  — the MSYS2 / Git for Windows v2
+	//     switch (added in 2024). Disables the newer
 	//     pattern-based converter that v1's MSYS_NO_PATHCONV
 	//     didn't fully cover. `*` excludes every arg from
 	//     conversion.
 	//
 	// On non-MSYS hosts (Linux, macOS, native Windows, WSL bash)
-	// both env vars are harmless no-ops. Setting them
-	// unconditionally is the simplest policy: nightme sets
-	// cmd.Dir to an exact Windows path, and we want the child
-	// to see that exact path. Users who run nightme from a
-	// MSYS-aware shell expect this behavior.
+	// both env vars are harmless no-ops. Note: these env vars
+	// only affect argv path conversion, NOT MSYS libc's
+	// interception of getcwd() — child processes that report
+	// their CWD via getcwd() will still see MSYS-translated
+	// paths. The tests under runCmd work around this by writing
+	// a sentinel file to the cmd.Dir and verifying the file
+	// exists at the real (untranslated) path, rather than
+	// parsing pwd output.
 	cmd.Env = append(os.Environ(),
 		"MSYS_NO_PATHCONV=1",
 		"MSYS2_ARG_CONV_EXCL=*",

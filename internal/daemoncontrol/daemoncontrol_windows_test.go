@@ -161,10 +161,21 @@ func TestWindowsPipePingStatusStop(t *testing.T) {
 		t.Fatalf("UptimeSeconds = %d, want >= 1 (StartedAt was 2s ago)", status.UptimeSeconds)
 	}
 
-	// Stop: ctx should cancel, server.Status().State should flip
-	// to "stopping".
-	if err := Stop(paths.Socket, 2*time.Second); err != nil {
-		t.Fatalf("Stop: %v", err)
+	// Stop: ctx should cancel, server.Status().State should
+	// flip to "stopping". Retry on transient dialNamedPipe
+	// errors — same race as Ping/GetStatus above.
+	var stopErr error
+	for i := 0; i < 50; i++ {
+		var err error
+		err = Stop(paths.Socket, 2*time.Second)
+		if err == nil {
+			break
+		}
+		stopErr = err
+		time.Sleep(20 * time.Millisecond)
+	}
+	if stopErr != nil {
+		t.Fatalf("Stop after retries: %v", stopErr)
 	}
 	select {
 	case <-ctx.Done():

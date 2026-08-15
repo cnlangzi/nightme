@@ -301,6 +301,16 @@ const (
 	CardKindPermission CardKind = iota
 	CardKindDecision
 	CardKindPreview
+
+	// CardKindError marks a card that surfaces a non-graceful
+	// bridge exit (EventAgentError with a populated Diagnostic).
+	// The renderer should NOT prepend the 🔐 permission emoji
+	// (no permission is being asked) and should default the
+	// header template to a warning colour (red/orange) instead
+	// of the default blue. Channels that want to render the
+	// short error string + structured Diagnostic.StderrTail
+	// read from the enclosing OutboundMessage.{Text,Diagnostic}.
+	CardKindError
 )
 
 type CardChoice struct {

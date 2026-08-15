@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -253,6 +254,45 @@ func TestRefreshDefaultBranch_RebaseConflict(t *testing.T) {
 // --- helpers ---
 
 func writeFile(path, content string) error {
+	// Cross-platform: on Unix we use sh; on Windows we use
+	// cmd.exe to avoid MSYS path translation (git outputs
+	// MSYS-style paths that don't match Windows file paths
+	// when re-interpreted by MSYS sh). Both commands write
+	// `content` to `path` with no trailing newline.
+	if runtime.GOOS == "windows" {
+		// /c echo|set /p= would be wrong (strips newlines and
+		// needs stdin), and > redirect in cmd.exe is fine with
+		// /U. Just run: cmd /c type nul > path; but we need
+		// to write content. Simpler: use printf's "no MSYS"
+		// behaviour by writing via PowerShell — but to avoid
+		// pulling in pwsh we use the well-supported
+		// `cmd /c set /p =CONTENT < nul > path` trick. But
+		// `set /p` doesn't write to a file directly.
+		//
+		// Simplest portable approach: write to a temp file in
+		// the same directory and rename, all via cmd.exe. This
+		// avoids both MSYS path translation and any quoting
+		// nightmares.
+		dir := filepath.Dir(path)
+		base := filepath.Base(path)
+		tmp := filepath.Join(dir, "."+base+".tmp")
+		f, err := os.Create(tmp)
+		if err != nil {
+			return err
+		}
+		if _, err := f.WriteString(content); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return err
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		// os.Rename is the cross-platform atomic-rename primitive
+		// that doesn't depend on shell quoting.
+		return os.Rename(tmp, path)
+	}
 	return exec.Command("sh", "-c",
 		"printf '%s' \"$1\" > \"$2\"", "-", content, path).Run()
 }

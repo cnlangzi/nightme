@@ -50,11 +50,32 @@ import (
 // frequent drops.
 const eventBufferSize = 131072
 
-// handshakeTimeout bounds the session.create POST. dsh web is
-// already accepting HTTP by the time we dial WS, but the first
-// session.create round-trips through Cordis plugin init, so give
-// it generous slack.
-const handshakeTimeout = 15 * time.Second
+// ErrResumeUnhealthy is the bridge-local mirror of
+// agent.ErrResumeUnhealthy. handshakeSession returns this (via
+// resumeUnhealthyError.Is) when the caller asked for resume
+// (cfg.SessionID != "") and session.fork refused for any reason
+// — server doesn't know the id, transport error mid-handshake,
+// value decode failure, etc.
+//
+// Mirrors claudecode's bridge-local ErrResumeUnhealthy
+// (claudecode/claudecode.go). The runtime's auto-recovery at
+// chatsession.go §1624 matches against agent.ErrResumeUnhealthy
+// directly; this local mirror exists for symmetry with other
+// bridges and for any future in-bridge callers that want to
+// detect a fork failure without importing the agent package.
+var ErrResumeUnhealthy = errors.New("dsh: resume session unhealthy")
+
+// handshakeTimeout bounds each of session.fork and session.create
+// independently (handshakeSession derives a separate ctx for each).
+// dsh web is already accepting HTTP by the time we dial WS, but the
+// first session.create round-trips through Cordis plugin init, and
+// session.fork can be slow if the parent history is large, so give
+// each call generous slack.
+//
+// Exposed as a var (not const) so tests can override it via
+// `defer func(orig) { handshakeTimeout = orig }(handshakeTimeout)`
+// — see TestHandshakeSession_IndependentTimeouts for the pattern.
+var handshakeTimeout = 15 * time.Second
 
 // lifecycleWatchdogTimeout bounds cmd.Wait() inside the lifecycle
 // goroutine. If the child doesn't exit within this window, the
@@ -88,6 +109,14 @@ type driver struct {
 	sessionID   string
 	workspace   string
 	agentName   string
+
+	// stderrTail keeps the LAST stderrTailBytes of dsh web's stderr
+	// for diagnostic capture on non-graceful exit. Always populated
+	// by drainStderr (no Debug gating) so a `/diagnose` request can
+	// surface "what did dsh say right before it died" without us
+	// having to reproduce the failure. NOT thread-safe on its own;
+	// drainStderr writes, lifecycle reads at exit.
+	stderrTail *agent.StderrRingBuffer
 
 	// model is the model's authoritative selection captured at
 	// session-create time via /api/session.models. Bridge stamps
@@ -223,6 +252,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		cmd:           cmd,
 		stdout:        stdout,
 		stderr:        stderr,
+		stderrTail:    agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		muxWS:         muxWS,
 		hostWS:        hostWS,
 		http:          newHTTPClient(baseURL),
@@ -237,31 +267,30 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	}
 	d.startPumps()
 
-	// session.create — required before any session.prompt. We send
-	// cwd + title (just the basename for now). sessionId is captured
-	// into d.sessionID; without it nothing else works.
-	hsCtx, hsCancel := context.WithTimeout(ctx, handshakeTimeout)
-	defer hsCancel()
-	createResp, err := d.http.Post(hsCtx, "session.create", map[string]any{
-		"cwd":   cfg.Workspace,
-		"title": filepath.Base(cfg.Workspace),
-	})
-	if err != nil {
+	// Session handshake: resume via session.fork when cfg.SessionID
+	// is set, otherwise create a fresh session via session.create.
+	// session.fork returns a new server-assigned sessionId whose
+	// server-side history mirrors the parent's; session.create
+	// always returns a brand-new empty session. The `resumed` flag
+	// is consumed by the EventAgentReady emission below to surface
+	// the resume source in the runtime's receipt header.
+	//
+	// handshakeSession owns its own per-call timeouts (it derives
+	// forkCtx / createCtx from the parent ctx internally) so a
+	// slow fork can't starve the create fallback's budget. We pass
+	// the spawn ctx directly.
+	resumed, hsErr := d.handshakeSession(ctx, cfg)
+	if hsErr != nil {
 		_ = d.Close()
-		return nil, fmt.Errorf("dsh: session.create: %w", err)
+		return nil, hsErr
 	}
-	if !createResp.Result.OK {
-		_ = d.Close()
-		return nil, fmt.Errorf("dsh: session.create rejected: %s",
-			createResp.Result.ErrorMessage())
-	}
-	var scVal sessionCreateValue
-	if err := json.Unmarshal(createResp.Result.Value, &scVal); err != nil {
-		_ = d.Close()
-		return nil, fmt.Errorf("dsh: decode session.create value: %w", err)
-	}
-	d.sessionID = scVal.SessionID
-	dLog("dsh: session created", "session_id", d.sessionID)
+	// handshakeSession already logs the success line at INFO
+	// ("dsh: session forked" or "dsh: session created") with the
+	// full session_id / requested_id / new_id trio. We deliberately
+	// do NOT add a duplicate dLog here — the Info-level line is
+	// the canonical support-flow trail, and the resumed flag is
+	// only consumed by the EventAgentReady emission below.
+	_ = resumed // surface is EventAgentReady.SessionID, not a log line
 
 	// Pull the authoritative model selection via /api/session.models.
 	// session.create does NOT return the model — dsh requires the
@@ -338,6 +367,136 @@ func (d *driver) fetchSessionModels(ctx context.Context) (*sessionModelsValue, e
 		return nil, fmt.Errorf("dsh: decode session.models value: %w", err)
 	}
 	return &out, nil
+}
+
+// handshakeSession runs the resume-or-create handshake against
+// dsh web and writes d.sessionID on success.
+//
+// The supplied ctx is the PARENT context (typically the spawn
+// context from newDriver). We derive per-call deadlines INSIDE
+// this function rather than accepting a pre-budgeted context,
+// because the fork and create branches have independent timeout
+// needs — a slow fork (large parent history → slow history copy)
+// must NOT eat the budget for the create fallback that would
+// normally follow it.
+//
+// When cfg.SessionID is non-empty, we first try session.fork —
+// dsh web's documented resume primitive (docs/bridge/dsh.md §1.3,
+// "从现有 session 开新 (daemon 重启续接用)"). session.fork creates
+// a NEW server-assigned session that mirrors the parent's history;
+// we capture the new id into d.sessionID and surface resumed=true.
+//
+// On ANY fork failure (transport error, business error, decode
+// failure, empty id) we deliberately refuse to spawn rather than
+// silently fall back to session.create. Mirrors claudecode's
+// resume-preservation invariant (claudecode/starter.go §87-103):
+// a silent fallback would let a stale sessionId linger in
+// registry forever, and on every subsequent daemon restart the
+// bridge would re-attempt the same bad fork and re-fall-back,
+// costing the user their history without any operator-visible
+// signal. Instead, we wrap the failure with agent.ErrResumeUnhealthy
+// so the runtime's auto-retry path (chatsession.go §1624) clears
+// the persisted sessionId and respawns fresh on the user's NEXT
+// message. The user pays one extra cold-start; they do NOT pay
+// permanent history loss.
+//
+// When cfg.SessionID is empty, we go straight to session.create.
+// A failure there is a true bridge error (server down, bad config)
+// — surfaced verbatim so the dispatcher can render it.
+//
+// Returns (resumed, nil) on success, where `resumed` indicates the
+// cfg.SessionID was honored via session.fork. Returns (false, nil)
+// on the "no SessionID requested" path. Returns (false, err)
+// where err satisfies errors.Is(err, agent.ErrResumeUnhealthy) on
+// any fork failure, and a plain wrapped error on create failure.
+func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (bool, error) {
+	if cfg.SessionID != "" {
+		forkCtx, forkCancel := context.WithTimeout(ctx, handshakeTimeout)
+		forkResp, err := d.http.Post(forkCtx, "session.fork", map[string]any{
+			"sessionId": cfg.SessionID,
+		})
+		forkCancel()
+		if err != nil {
+			reason := "transport error: " + errStr(err)
+			slog.Default().Warn("dsh: session.fork transport error; refusing fallback",
+				"requested_id", cfg.SessionID,
+				"err", errStr(err))
+			return false, resumeUnhealthyError{reason: reason, session: cfg.SessionID}
+		}
+		if !forkResp.Result.OK {
+			reason := "rejected: " + forkResp.Result.ErrorMessage()
+			slog.Default().Warn("dsh: session.fork rejected; refusing fallback",
+				"requested_id", cfg.SessionID,
+				"err", forkResp.Result.ErrorMessage())
+			return false, resumeUnhealthyError{reason: reason, session: cfg.SessionID}
+		}
+		var fv sessionForkValue
+		if uerr := json.Unmarshal(forkResp.Result.Value, &fv); uerr != nil {
+			reason := "value decode failed: " + errStr(uerr)
+			slog.Default().Warn("dsh: session.fork value decode failed; refusing fallback",
+				"requested_id", cfg.SessionID,
+				"err", errStr(uerr))
+			return false, resumeUnhealthyError{reason: reason, session: cfg.SessionID}
+		}
+		if fv.SessionID == "" {
+			slog.Default().Warn("dsh: session.fork returned empty sessionId; refusing fallback",
+				"requested_id", cfg.SessionID)
+			return false, resumeUnhealthyError{
+				reason:  "empty sessionId in response",
+				session: cfg.SessionID,
+			}
+		}
+		d.sessionID = fv.SessionID
+		slog.Default().Info("dsh: session forked",
+			"requested_id", cfg.SessionID,
+			"new_id", d.sessionID)
+		return true, nil
+	}
+
+	createCtx, createCancel := context.WithTimeout(ctx, handshakeTimeout)
+	createResp, err := d.http.Post(createCtx, "session.create", map[string]any{
+		"cwd":   cfg.Workspace,
+		"title": filepath.Base(cfg.Workspace),
+	})
+	createCancel()
+	if err != nil {
+		return false, fmt.Errorf("dsh: session.create: %w", err)
+	}
+	if !createResp.Result.OK {
+		return false, fmt.Errorf("dsh: session.create rejected: %s",
+			createResp.Result.ErrorMessage())
+	}
+	var scVal sessionCreateValue
+	if err := json.Unmarshal(createResp.Result.Value, &scVal); err != nil {
+		return false, fmt.Errorf("dsh: decode session.create value: %w", err)
+	}
+	d.sessionID = scVal.SessionID
+	slog.Default().Info("dsh: session created", "session_id", d.sessionID)
+	return false, nil
+}
+
+// resumeUnhealthyError is returned by handshakeSession when the
+// caller asked for resume (cfg.SessionID != "") and session.fork
+// refused for any reason. It satisfies errors.Is for both
+// agent.ErrResumeUnhealthy (the cross-package sentinel the chat
+// layer uses to drive auto-recovery at chatsession.go §1624) AND
+// ErrResumeUnhealthy (the bridge-local mirror, for symmetry with
+// the claudecode bridge). fmt.Errorf's %w only retains the last
+// wrap, so we expose Is() to match both sentinels.
+//
+// Mirrors claudecode/claudecode.go's resumeUnhealthyError.
+type resumeUnhealthyError struct {
+	reason  string
+	session string
+}
+
+func (e resumeUnhealthyError) Error() string {
+	return fmt.Sprintf("%s: %s (session_id=%s); check workspace path and resume id",
+		ErrResumeUnhealthy.Error(), e.reason, e.session)
+}
+
+func (e resumeUnhealthyError) Is(target error) bool {
+	return target == ErrResumeUnhealthy || target == agent.ErrResumeUnhealthy
 }
 
 // parseWebURL reads stdout until it sees the `dsh web: http://…` line
@@ -514,10 +673,39 @@ func (d *driver) lifecycle() {
 	// requested shutdown. SIGINT'd-but-clean waitErr is not a
 	// runtime error (the runtime asked for it).
 	graceful := isClosed(d.closed)
-	if !graceful && waitErr != nil {
-		d.deliver(agent.AgentEvent{Kind: agent.EventAgentError, Err: waitErr})
+	exitKind := agent.ClassifyExit(waitErr, graceful)
+	if !graceful {
+		// Bridge died without our permission — emit EventAgentError
+		// with a structured Diagnostic so the runtime / recovery
+		// policy / /diagnose can act on it. Even when waitErr is
+		// nil (clean-exit but unrequested), we still emit so the
+		// user-visible event stream reflects the unexpected exit.
+		tail := ""
+		if d.stderrTail != nil {
+			tail = d.stderrTail.String()
+		}
+		diag := &agent.BridgeDiagnostic{
+			ExitKind:   exitKind,
+			WaitErr:    waitErr,
+			StderrTail: tail,
+			SessionID:  d.sessionID,
+			AgentName:  d.agentName,
+			KilledAt:   time.Now(),
+		}
+		errMsg := fmt.Sprintf("dsh: lifecycle exit %s: %v", exitKind, errStr(waitErr))
+		if tail != "" {
+			errMsg += "\n--- stderr tail ---\n" + agent.TruncateForLog(tail, 1024)
+		}
+		d.deliver(agent.AgentEvent{
+			Kind:       agent.EventAgentError,
+			Err:        fmt.Errorf("%s", errMsg),
+			Diagnostic: diag,
+		})
 	}
-	dLog("dsh: lifecycle exit", "err", errStr(waitErr), "graceful", graceful)
+	dLog("dsh: lifecycle exit",
+		"exit_kind", exitKind,
+		"graceful", graceful,
+		"err", errStr(waitErr))
 }
 
 // isClosed reports whether the chan has been signaled.
@@ -531,11 +719,22 @@ func isClosed(ch chan struct{}) bool {
 	}
 }
 
-// drainStderr consumes dsh's stderr into the dLog. dsh web may
-// emit warnings (HMR, plugin init) which we want visible in debug
-// logs but don't need to surface to the user.
+// drainStderr consumes dsh's stderr into the dLog AND mirrors raw
+// bytes into d.stderrTail. Why both:
+//
+//   - dLog is Debug-gated (kept quiet in production) — operators
+//     don't want HMR / plugin-init noise.
+//   - d.stderrTail is captured unconditionally (no Debug gating)
+//     so when lifecycle() detects a non-graceful exit, it can
+//     attach the last few hundred bytes of stderr to the
+//     EventAgentError.Diagnostic. /diagnose and the recovery
+//     policy's stderr fingerprint both read from this ring.
+//
+// dsh web's stderr is mostly noise but the LAST lines before a
+// crash (e.g. "dsh: fatal load failure: TypeError: ...") are gold
+// for post-mortem. Capturing them costs ~4 KiB per bridge.
 func (d *driver) drainStderr() {
-	drainStream(d.stderr, "stderr", d.closed)
+	drainStream(d.stderr, "stderr", d.closed, d.stderrTail)
 }
 
 // drainStdout keeps dsh's stdout pipe flowing after parseWebURL
@@ -547,7 +746,7 @@ func (d *driver) drainStderr() {
 // We don't parse the lines (the URL was already captured); we just
 // discard bytes. dLog at debug level for the post-URL output.
 func (d *driver) drainStdout() {
-	drainStream(d.stdout, "stdout (post-url)", d.closed)
+	drainStream(d.stdout, "stdout (post-url)", d.closed, nil)
 }
 
 // deliver sends an event to the runtime's read pump. NEVER blocks:
@@ -644,9 +843,9 @@ func (d *driver) SendPermission(resp string) error {
 	}
 	approvalID := d.pendingOrder[0]
 	d.pendingOrder = d.pendingOrder[1:]
-	if _, ok := d.pendingApprovals[approvalID]; ok {
-		delete(d.pendingApprovals, approvalID)
-	}
+	// delete is a no-op when the key is absent (per Go spec), so the
+	// guard would only save a hash lookup — not worth the line.
+	delete(d.pendingApprovals, approvalID)
 	d.pendingMu.Unlock()
 
 	// Outcome shape mirrors dsh's ApprovalOutcome. We only support
@@ -667,6 +866,50 @@ func (d *driver) SendPermission(resp string) error {
 // kills the current driver and re-spawns.
 func (d *driver) Reset(ctx context.Context) error {
 	return agent.ErrRestartRequired
+}
+
+// ListSessions calls POST /api/session.list and decodes the
+// returned Session array. Used by the runtime's resume picker
+// (the bridge exposes this through Starter.ListSessions, which
+// spins up a fresh dsh web just long enough to hit the endpoint).
+//
+// LIMIT / PAGINATION — IMPORTANT:
+// 实机 probe 2026-08-15 against dsh 0.1.0-rc.6 showed that the
+// `limit` payload field is IGNORED by the server (passing
+// limit=2 returned 243 items; limit=0, -5, and no-limit all
+// returned the same full set). Other names we tried (pageSize,
+// page_size, count, max) were likewise ignored. dsh has no
+// pagination for session.list — every call returns the daemon's
+// full session store. The bridge therefore drops the limit
+// parameter from this signature; if dsh ever adds pagination,
+// the runtime's picker UI should add a new method (e.g.
+// ListSessionsPage) rather than reusing this one.
+//
+// Cross-workspace contamination: dsh web is daemon-wide — every
+// session across every workspace lives in the same global store.
+// Callers that want to filter to "sessions for THIS /cwd" must
+// inspect Session.CWD themselves; the bridge does NOT pre-filter
+// because (a) dsh doesn't expose a cwd scope and (b) a future
+// daemon-wide picker UI might want to surface cross-workspace
+// sessions explicitly.
+//
+// The returned slice ordering is server-defined; we don't
+// re-sort. dsh appears to return most-recently-updated first
+// (Session.UpdatedAt DESC), which is what the picker UI wants.
+func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
+	resp, err := d.http.Post(ctx, "session.list", map[string]any{})
+	if err != nil {
+		return nil, fmt.Errorf("dsh: session.list: %w", err)
+	}
+	if !resp.Result.OK {
+		return nil, fmt.Errorf("dsh: session.list rejected: %s",
+			resp.Result.ErrorMessage())
+	}
+	var out sessionListValue
+	if err := json.Unmarshal(resp.Result.Value, &out); err != nil {
+		return nil, fmt.Errorf("dsh: decode session.list value: %w", err)
+	}
+	return out.Items, nil
 }
 
 // Close shuts the bridge down. Idempotent. Closes WS, sends

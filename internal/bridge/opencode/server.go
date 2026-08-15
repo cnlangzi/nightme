@@ -38,7 +38,6 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -57,10 +56,18 @@ var serverURLRegex = regexp.MustCompile(`opencode server listening on (https?://
 
 // serverProc is the spawned `opencode serve` child. It owns the
 // underlying *exec.Cmd and the baseURL the HTTP client should target.
+//
+// stderrTail is a ring buffer kept for the FULL lifetime of the
+// process (banner-parse drain continues reading until the OS
+// closes the stderr pipe on exit) so lifecycle() can attach the
+// last StderrTailBytes to EventAgentError.Diagnostic on non-graceful
+// exit. Always populated (no Debug gating). Mirrors dsh / pi /
+// claudecode / codex.
 type serverProc struct {
-	cmd     *exec.Cmd
-	baseURL string
-	pid     int
+	cmd        *exec.Cmd
+	baseURL    string
+	pid        int
+	stderrTail *agent.StderrRingBuffer
 }
 
 // serverConfig is what the caller passes to startServer.
@@ -138,17 +145,17 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 	}
 
 	proc := &serverProc{
-		cmd: cmd,
-		pid: cmd.Process.Pid,
+		cmd:        cmd,
+		pid:        cmd.Process.Pid,
+		stderrTail: agent.NewStderrRingBuffer(agent.StderrTailBytes),
 	}
 
 	// Banner parsing + stderr tail run concurrently. We don't want a
 	// noisy stderr to deadlock the child before the banner appears.
 	var (
-		baseURL    string
-		bannerErr  error
-		stderrTail strings.Builder
-		wg         sync.WaitGroup
+		baseURL   string
+		bannerErr error
+		wg        sync.WaitGroup
 	)
 	startTimeout := serverStartTimeout
 	// NIGHTME_OPENCODE_INITIAL_DELAY overrides the start timeout for
@@ -169,15 +176,21 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 	stderrDone := make(chan struct{})
 	go func() {
 		defer close(stderrDone)
-		// Drain stderr into stderrTail. We don't fail startup on
-		// stderr noise — opencode writes info-level diagnostics freely.
-		// Only the first 8 KiB is kept; the rest is dropped to bound
-		// memory in the failure path.
+		// Drain stderr into proc.stderrTail for the FULL lifetime
+		// of the child. We don't fail startup on stderr noise —
+		// opencode writes info-level diagnostics freely. The ring
+		// buffer keeps only the last StderrTailBytes (4 KiB), so
+		// memory is bounded even on a chatty session. Used by
+		// lifecycle() to attach the last stderr to
+		// EventAgentError.Diagnostic on non-graceful exit. Pre-
+		// refactor this used a strings.Builder with a hard 8 KiB
+		// cap and was only read at startup — long-running
+		// crashes captured nothing.
 		buf := make([]byte, 4096)
 		for {
 			n, err := stderr.Read(buf)
-			if n > 0 && stderrTail.Len() < 8192 {
-				stderrTail.Write(buf[:n])
+			if n > 0 {
+				_, _ = proc.stderrTail.Write(buf[:n])
 			}
 			if err != nil {
 				return
@@ -200,7 +213,7 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 		// gets a clear ErrServerStartTimeout to retry against.
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
-		stderr := stderrTail.String()
+		stderr := proc.stderrTail.String()
 		if stderr != "" {
 			return nil, fmt.Errorf("%w (after %s)\n--- stderr ---\n%s", ErrServerStartTimeout, startTimeout, stderr)
 		}
@@ -210,7 +223,7 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 		<-stderrDone
-		stderr := stderrTail.String()
+		stderr := proc.stderrTail.String()
 		if !errors.Is(bannerErr, io.EOF) {
 			if stderr != "" {
 				return nil, fmt.Errorf("opencode: banner parse: %w\n--- stderr ---\n%s", bannerErr, stderr)

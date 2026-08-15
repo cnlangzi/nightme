@@ -21,7 +21,7 @@
 
 ## What is NightMe
 
-**NightMe** 把你的本地 AI Coding Agent（Claude Code、Codex、Pi、OpenCode 等）放进聊天里跑。你在任何已接入的 IM 里发条消息，NightMe 就把消息路由到对应的 agent 进程，回复以结构化卡片形式返回。
+**NightMe** 把你的本地 AI Coding Agent（Claude Code、Codex、DeepSeek Harness (DSH)、Pi、OpenCode 等）放进聊天里跑。你在任何已接入的 IM 里发条消息，NightMe 就把消息路由到对应的 agent 进程，回复以结构化卡片形式返回。
 
 多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 Agent 并行工作——切换是即时的，无需冷启动。`git` worktree 操作被封装进 `Git Team Workflow`（`/gtw`）：fix / hooks / close——每一步一张 IM 回复卡，集成 GitHub、GitLab 之类平台。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
 
@@ -44,6 +44,7 @@
     │   Codex       │  │   Codex       │  │   Codex       │
     │   Pi          │  │   Pi          │  │   Pi          │
     │   OpenCode    │  │   OpenCode    │  │   OpenCode    │
+    │   DSH         │  │   DSH         │  │   DSH         │
     └───────────────┘  └───────────────┘  └───────────────┘
 
    ▲ CWD = 项目；agent 在该 CWD 里跑；全部从同一个 NightMe 实例并行 ▲
@@ -67,7 +68,7 @@
 
 - **macOS、Linux 或 Windows** — NightMe 是单文件静态 Go 二进制；无运行时依赖。
 - **一个 Feishu 账号** — 目前唯一支持的 IM。`nightme login feishu` 通过扫码完成 bot 注册。
-- **至少一个本地 AI Coding Agent** — Claude Code、Pi、OpenCode、Codex 任一。装好 CLI 放到 `$PATH` 上，NightMe 会作为子进程拉起。
+- **至少一个本地 AI Coding Agent** — Claude Code、Pi、OpenCode、Codex、DeepSeek Harness (DSH) 任一。装好 CLI 放到 `$PATH` 上，NightMe 会作为子进程拉起。
 
 ## Install
 
@@ -149,7 +150,7 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | 命令 | 干什么 |
 |---|---|
 | `/cwd <path>` | 绑定这个 Chat 到一个工作区。会校验路径，下次发消息时 lazy-spawn。 |
-| `/use <agent>` | 切换当前 agent（`claude` / `codex` / `opencode` / `pi`）。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
+| `/use <agent>` | 切换当前 agent（`claude` / `codex` / `dsh` / `opencode` / `pi`）。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
 | `/stop` | 停掉当前 agent 上的 in-flight turn。会话留着，队列里的消息继续流。 |
 | `/steer <msg>` | 停掉 in-flight turn 并把 `<msg>` 插到队首。下个 turn agent 第一眼看到的就是这条。 |
 | `/close [agent]` | 终止当前工作区里 AgentSession 的 bridge 进程。AgentSession 记录保留——下次发消息触发 respawn 时会用 `--resume <sessionID>` 接着聊。 |
@@ -214,7 +215,7 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 
 4. **No prompt padding。** 没有 preamble、没有 brand voice、没有 injected system message。CLI 只看到你写的话。
 
-We sit in front of Claude / Codex / Pi / OpenCode. You stay in control. Nothing in a black box.
+We sit in front of Claude / Codex / DSH (DeepSeek Harness) / Pi / OpenCode. You stay in control. Nothing in a black box.
 
 ---
 
@@ -324,7 +325,7 @@ fix:
 - **Gateway** 路由入站。`inbound` 子包负责斜杠命令派发链；其它都转发到 ChatSession 的 active AgentSession。
 - **ChatSession** 是每个 chat 的 context。拥有 AgentSession 池和 InputBuffer FSM。daemon 重启之间持久化。
 - **AgentSession** 是每个 CLI 进程的句柄。每个 `(agent, cwd)` 一份，`/use` 和 `/cwd` 切换之间保活。
-- **Bridge** 是每个 agent 的 transport——`acp`、`claudecode`、`codex`、`opencode`、`pi` 或 `pty`（在 `internal/bridge/` 下），按 CLI 支持情况选。
+- **Bridge** 是每个 agent 的 transport——`acp`、`claudecode`、`codex`、`dsh`、`opencode`、`pi` 或 `pty`（在 `internal/bridge/` 下），按 CLI 支持情况选。
 
 完整责任表见 [`docs/SPEC.md`](./docs/SPEC.md) §1，"Channel 是 dumb renderer" 的设计动机见 §0.1。
 
@@ -348,6 +349,9 @@ agents:                                  # 列表：每项 = name / bridge / com
   - name: pi
     bridge: pi
     command: "pi"
+  - name: dsh
+    bridge: dsh
+    command: dsh
 
 feishu:
   app_id: "cli_xxxxxxxxxxxxxxxx"
@@ -383,7 +387,7 @@ paths:
 | [`docs/SPEC.md`](./docs/SPEC.md) | 技术架构——组件、数据流、NFR。 |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | 功能索引——每个 F-XX 一行。 |
 | [`docs/feat/`](./docs/feat/) | 每个 feature 的设计文档。 |
-| [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、opencode、pi。 |
+| [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、dsh、opencode、pi。 |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | 飞书 adapter 参考（渲染规则、卡片语义、线程路由）。 |
 | [`docs/flow/`](./docs/flow/) | 横切流程文档（如 3-layer doc model）。 |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | 飞书端到端手动测试 + 排错。 |
@@ -416,7 +420,7 @@ internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
-    acp/  claudecode/  codex/  opencode/  pi/  pty/
+    acp/  claudecode/  codex/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
     echo/  feishu/                 # adapters (Feishu is the production one)
   chatsession/                     # ChatSession + pool manager + persistence
@@ -464,7 +468,7 @@ PRs 和 issues 都欢迎。大改动的话先开 issue 聊聊，再写代码。
 
 详细指南在 [`/docs`](./docs/) — 设计流程参考 [3-layer doc model](./docs/README.md)。
 
-感谢使用 NightMe——我们欢迎更多 **channels**（Feishu、Web TUI、其他）和更多 **AI Coding Agents**（Claude Code、Codex、Pi、OpenCode、任何新的）接入。Drop 一个 `Channel` / `Bridge`，架构处理剩下的事。
+感谢使用 NightMe——我们欢迎更多 **channels**（Feishu、Web TUI、其他）和更多 **AI Coding Agents**（Claude Code、Codex、DeepSeek Harness (DSH)、Pi、OpenCode、任何新的）接入。Drop 一个 `Channel` / `Bridge`，架构处理剩下的事。
 
 联系维护者：
 

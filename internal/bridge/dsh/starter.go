@@ -85,16 +85,25 @@ func (s *Starter) Detect() error {
 }
 
 // Start spawns dsh --profile web as a long-lived process, dials
-// the two WebSocket downlinks (mux + host), performs session.create,
-// and returns a live *agent.Agent that streams events on its
-// Events channel. The starter is unchanged (reusable across many
-// sessions).
+// the two WebSocket downlinks (mux + host), runs the handshake
+// (session.fork when cfg.SessionID is set, otherwise
+// session.create), and returns a live *agent.Agent that streams
+// events on its Events channel. The starter is unchanged
+// (reusable across many sessions).
 //
 // cfg.Workspace is the dsh web process's cwd (dsh's bash / fs
-// plugins read process.cwd() set via cmd.Dir). cfg.SessionID is
-// ignored — dsh web's session.resume wire isn't wired; new sessions
-// are always created (server-side session-persistence-jsonl keeps
-// the JSONL log, but resume would need a separate RPC).
+// plugins read process.cwd() set via cmd.Dir).
+//
+// cfg.SessionID, when non-empty, triggers resume: the handshake
+// calls POST /api/session.fork {sessionId} which dsh web
+// translates into a NEW server-assigned session whose history
+// mirrors the parent's. On fork failure (transport error,
+// business error, server missing the requested id) we deliberately
+// refuse to spawn rather than silently fall back to session.create —
+// see handshakeSession in session.go for the strict-resume rationale.
+// The new id (fork's, or create's on the fresh path) is captured into
+// EventAgentReady.SessionID so the runtime can persist it via
+// SetSessionID and replay it as cfg.SessionID on the next Spawn.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	d, err := newDriver(ctx, s, cfg)
 	if err != nil {
@@ -125,4 +134,37 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
 	}
 	return result, nil
+}
+
+// ListSessions runs a one-shot list-sessions query. Bridge-specific
+// extension used by the runtime's resume picker.
+//
+// Each call spawns and closes a fresh dsh web process — just
+// enough to hit POST /api/session.list. The dsh web cold start
+// is ~1.5s (per docs/bridge/dsh.md §8.4) so this adds noticeable
+// latency to picker interactions; we accept the cost because
+// dsh's session.list is daemon-global (not per-CWD) and a stale
+// cached list would mislead the user.
+//
+// The `limit` int parameter is accepted for signature parity with
+// the opencode bridge's Starter.ListSessions (opencode/starter.go
+// §147-157) so the runtime's picker path can dispatch uniformly
+// across bridges — but it is INTENTIONALLY ignored on the wire: the
+// 2026-08-15 实机 probe against dsh 0.1.0-rc.6 confirmed that dsh's
+// session.list ignores every paging field we tried (limit, pageSize,
+// count, max, etc.). The parameter is kept so the runtime can pass
+// its preferred default without branching per bridge.
+func (s *Starter) ListSessions(ctx context.Context, cfg agent.StartConfig, limit int) ([]Session, error) {
+	if cfg.Workspace == "" {
+		return nil, fmt.Errorf("dsh: workspace is required")
+	}
+	a, err := s.Start(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer a.Close()
+	d := a.Driver().(interface {
+		ListSessions(ctx context.Context) ([]Session, error)
+	})
+	return d.ListSessions(ctx)
 }

@@ -808,7 +808,18 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, nil, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList from the bridge event pump could mutate
+	// r.footerLines (and r.tasks) under r.mu between here and
+	// buildReceiptCard. Same race the fix-reply-placehold-card
+	// overflow handler fixed via receipt.Tasks(); symmetric fix
+	// for the cold-start path.
+	transient.mu.Lock()
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(nil, nil, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -922,7 +933,20 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient.entries, transient.tasks, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList / AppendEntry from the bridge event pump could
+	// mutate r.entries / r.tasks / r.footerLines under r.mu
+	// between here and buildReceiptCard. Same race the
+	// fix-reply-placehold-card overflow handler fixed via
+	// receipt.Tasks(); symmetric fix for the cold-start path.
+	transient.mu.Lock()
+	entriesSnap := transient.entries
+	tasksSnap := transient.tasks
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(entriesSnap, tasksSnap, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1128,7 +1152,19 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, transient.tasks, transient.footerLines)
+	// Snapshot transient state under r.mu: the receipt is now
+	// visible in a.receiptsByUserMsgID, so a concurrent
+	// SetTaskList from the bridge event pump could mutate
+	// r.tasks / r.footerLines under r.mu between here and
+	// buildReceiptCard. Same race the fix-reply-placehold-card
+	// overflow handler fixed via receipt.Tasks(); symmetric fix
+	// for the cold-start path.
+	transient.mu.Lock()
+	tasksSnap := transient.tasks
+	footerLinesSnap := transient.footerLines
+	transient.mu.Unlock()
+
+	body, err := buildReceiptCard(nil, tasksSnap, footerLinesSnap)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1239,13 +1275,70 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		if !created {
 			// Receipt exists. Try to append; if the would-be card
-			// would exceed 50 elements / 30 KB envelope, bail out
-			// to a fresh top-level card.
+			// would exceed 50 elements / 30 KB envelope, rollover
+			// the receipt to a fresh top-level placeholder card so
+			// subsequent chunks PATCH that new card instead of
+			// producing a stream of N standalone bubbles.
 			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footerLines); err != nil {
-				if errors.Is(err, ErrReceiptOverflow) {
-					return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
+				if !errors.Is(err, ErrReceiptOverflow) {
+					return err
 				}
-				return err
+				// fix-reply-placehold-card: build the first entry
+				// for the new placeholder card using the same
+				// tasks snapshot the old card had (tasks are a
+				// global view across the turn — see
+				// MessageReceipt.RolloverTo). receipt.Tasks() reads
+				// r.tasks under r.mu — a raw r.tasks field read here
+				// would race with a concurrent SetTaskList from the
+				// bridge event pump.
+				body, buildErr := buildReceiptCard(
+					[]LogEntry{{Icon: "💬", Text: text}},
+					receipt.Tasks(),
+					footerLines,
+				)
+				if buildErr != nil {
+					return fmt.Errorf("feishu: build overflow placeholder card: %w", buildErr)
+				}
+				// rootID="" → top-level Create (no thread anchor),
+				// replyInThread=false → main-chat visible, matching
+				// the pre-fix postOrphanReplyCard surface so the
+				// user sees the same single bubble.
+				msgID, sendErr := a.SendCardForReceipt(ctx, msg.ChatID, body, "", false)
+				// sendErr != nil OR msgID == "" is a failure:
+				//
+				//   - sendErr != nil: the SDK call itself failed
+				//     (network / rate-limit / auth / API rejection).
+				//
+				//   - msgID == "" with sendErr == nil: Feishu accepted
+				//     the send (resp.Success() == true) but
+				//     resp.Data is nil OR resp.Data.MessageId is nil
+				//     (reply.go:294-297's ReplyInChat fall-through).
+				//     The placeholder card IS already in chat but we
+				//     have no id to PATCH — accepting it would
+				//     silently leak the card and leave the receipt on
+				//     the OLD cardMsgID, so the next overflow chunk
+				//     creates yet another placeholder (N bubbles,
+				//     defeating the rollover). Treat as a failure so
+				//     the next chunk re-tries the overflow path on a
+				//     healthy Feishu response.
+				if sendErr != nil || msgID == "" {
+					if sendErr == nil {
+						a.logger.Warn("feishu: SendCardForReceipt returned empty msgID; treating as overflow failure",
+							"chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
+						sendErr = errors.New("feishu: SendCardForReceipt returned empty msgID (Feishu accepted send but no MessageId in response)")
+					}
+					// Send failed (or returned an untrackable msgID):
+					// keep the receipt pointing at the old card and
+					// DO NOT reset entries — the next chunk will
+					// retry the overflow path and the original
+					// placeholder stays usable. Logging for the
+					// error path happens inside SendCardForReceipt's
+					// adapter wrapper; the empty-msgID warning is
+					// emitted above.
+					return sendErr
+				}
+				receipt.RolloverTo(msgID, LogEntry{Icon: "💬", Text: text}, footerLines)
+				return nil
 			}
 		}
 		// created=true — first entry was installed by ensure; no
@@ -1597,6 +1690,56 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// design deferred. OutboundMessage{Init} is preserved on
 		// the wire; only the channel-side render is skipped.
 		return nil
+
+	case messages.OutError:
+		// Bridge died ungracefully (EventAgentError with a
+		// populated Diagnostic). Render as an interactive card
+		// (not a plain text bubble) so the user sees the exit
+		// kind + stderr tail without having to scroll a long
+		// message. Distinct from OutCommandReply so the visual
+		// treatment can be "this is a problem, not a system
+		// reply" — header emoji ⚠️ + red header (CardKindError
+		// default). We deliberately do NOT use CardKindPermission
+		// here — that prepends 🔐 to the title (no permission is
+		// being asked) and renders with a blue header that
+		// visually says "click to approve", the opposite of what
+		// the user needs to see for a bridge death.
+		//
+		// Body budget: Feishu's markdown element caps at 4 KiB.
+		// gateway translate already took the FIRST line of Err
+		// (typically <500 B) and Diagnostic.StderrTail is itself
+		// capped at 4 KiB; concatenating both can land at ~4.5 KiB
+		// which Feishu would reject. We re-cap the final body to
+		// 3 KiB with a truncation marker so a verbose error never
+		// breaks the card.
+		body := msg.Text
+		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" && !strings.Contains(body, msg.Diagnostic.StderrTail) {
+			body = body + "\n\n--- stderr tail ---\n" + msg.Diagnostic.StderrTail
+		}
+		body = agent.TruncateForLog(body, 3*1024)
+		// Title: ⚠️ <agent> bridge died (<exit-kind>). Skip the
+		// "bridge died" segment when AgentName is empty rather
+		// than rendering a bare "⚠️ bridge died" with no agent
+		// attribution — the user can't tell which bridge died.
+		title := "⚠️ bridge died"
+		if msg.AgentName != "" {
+			title = "⚠️ " + msg.AgentName + " bridge died"
+		}
+		if msg.Diagnostic != nil && msg.Diagnostic.ExitKind != 0 {
+			title = title + " (" + msg.Diagnostic.ExitKind.String() + ")"
+		}
+		card := &messages.Card{
+			Title:    title,
+			Body:     body,
+			Kind:     messages.CardKindError,
+			RequestID: fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano()),
+		}
+		content, err := buildInteractiveCard(card)
+		if err != nil {
+			return err
+		}
+		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
+		return err
 
 	case messages.OutCommandReply:
 		// Slash command response (or runtime error reply). Plain
@@ -2022,17 +2165,26 @@ func buildInteractiveCard(c *messages.Card) (string, error) {
 	// F-46 §3.2: 🔐 prefix is permission-specific; other kinds
 	// render the raw title. Default Kind (zero value) is Permission
 	// to preserve the pre-F-46 behaviour for callers that haven't
-	// been migrated yet.
+	// been migrated yet. CardKindError is also raw — the emoji
+	// comes from the caller (already prefixed with ⚠️), no need
+	// for the permission lock.
 	title := c.Title
 	if c.Kind == messages.CardKindPermission {
 		title = "🔐 " + title
 	}
 
 	// Header template: explicit HeaderColor wins; otherwise pick
-	// from Kind.
+	// from Kind. CardKindError defaults to "red" so a death card
+	// is visually distinguishable from a routine permission
+	// request without callers having to remember to set the color.
 	template := c.HeaderColor
 	if template == "" {
-		template = "blue"
+		switch c.Kind {
+		case messages.CardKindError:
+			template = "red"
+		default:
+			template = "blue"
+		}
 	}
 
 	// Body element: use Card.Body when set; fall back to Title for

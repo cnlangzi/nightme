@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -891,6 +892,106 @@ func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 		t.Errorf("card body missing 🔐 emoji prefix on title; got body: %s", captured.Body)
 	}
 }
+// TestSend_OutError_RendersAsCard_NoPermissionEmoji — F-61 bridge-
+// death follow-up: OutError must render as an interactive card so
+// the user sees the diagnostic, but it MUST NOT carry the 🔐
+// permission-emoji prefix (no permission is being asked) and the
+// header template MUST default to "red" so it stands out from a
+// routine permission request.
+func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
+	a := testAdapter(t)
+	var captured struct {
+		ChatID  string
+		MsgType string
+		Body    string
+	}
+	a.sendFunc = func(_ context.Context, chatID, msgType, body, _ string, _ bool) (string, error) {
+		captured.ChatID = chatID
+		captured.MsgType = msgType
+		captured.Body = body
+		return "om_err_test", nil
+	}
+	errIn := errors.New("dsh: lifecycle exit signal_killed: signal: killed")
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:      messages.OutError,
+		ChatID:    "oc_test",
+		Text:      errIn.Error(),
+		Err:       errIn,
+		AgentName: "dsh",
+		Workspace: "/code",
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:   agent.BridgeExitSignalKilled,
+			WaitErr:    errIn,
+			StderrTail: "node[1234]: JavaScript heap out of memory",
+			SessionID:  "session-x",
+			AgentName:  "dsh",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutError): %v", err)
+	}
+	if captured.MsgType != "interactive" {
+		t.Errorf("sendFunc.MsgType = %q, want interactive", captured.MsgType)
+	}
+	// Title: ⚠️ dsh bridge died (signal-killed). The 🔐 permission
+	// prefix MUST NOT be present.
+	if strings.Contains(captured.Body, "🔐") {
+		t.Errorf("OutError card must not carry 🔐 permission prefix; got body: %s", captured.Body)
+	}
+	if !strings.Contains(captured.Body, "⚠️ dsh bridge died") {
+		t.Errorf("card title missing ⚠️ dsh bridge died; got body: %s", captured.Body)
+	}
+	if !strings.Contains(captured.Body, "(signal-killed)") {
+		t.Errorf("card title missing exit-kind suffix (signal-killed); got body: %s", captured.Body)
+	}
+	// Body must include the stderr tail block (Feishu renders
+	// markdown; the multi-line tail renders below the fold).
+	if !strings.Contains(captured.Body, "JavaScript heap out of memory") {
+		t.Errorf("card body missing stderr tail content; got body: %s", captured.Body)
+	}
+	// Header template must default to "red" for error cards.
+	if !strings.Contains(captured.Body, `"template":"red"`) {
+		t.Errorf("card header template must default to red for CardKindError; got body: %s", captured.Body)
+	}
+}
+
+// TestSend_OutError_TruncatesLongBody — body budget guard: the
+// Feishu markdown element caps at 4 KiB, but Diagnostic.StderrTail
+// is itself 4 KiB; concatenated with the first line of Err + the
+// separator we can exceed 4 KiB and Feishu rejects the card. The
+// adapter must re-cap the final body to a safe size.
+func TestSend_OutError_TruncatesLongBody(t *testing.T) {
+	a := testAdapter(t)
+	var captured struct {
+		Body string
+	}
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		captured.Body = body
+		return "om_err_test", nil
+	}
+	bigTail := strings.Repeat("x", 4000)
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:      messages.OutError,
+		ChatID:    "oc_test",
+		Text:      "dsh: lifecycle exit signal_killed: signal: killed",
+		AgentName: "dsh",
+		Diagnostic: &agent.BridgeDiagnostic{
+			ExitKind:   agent.BridgeExitSignalKilled,
+			StderrTail: bigTail,
+			AgentName:  "dsh",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutError): %v", err)
+	}
+	// Body should be truncated to ~3 KiB + the truncation marker.
+	if !strings.Contains(captured.Body, "[truncated]") {
+		t.Errorf("card body should be truncated to ~3 KiB with marker; got body length %d", len(captured.Body))
+	}
+	// And the full 4 KiB tail MUST NOT make it through verbatim.
+	if strings.Count(captured.Body, "x") >= 4000 {
+		t.Errorf("card body should not contain the full 4 KiB stderr tail; got body length %d", len(captured.Body))
+	}
+}
+
 
 // TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed — F-44
 // follow-up: OutCommandReply is a top-level Create (ReplyInChat,
@@ -1817,6 +1918,203 @@ func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
 // renderLocked — exercising the Send() bail-out path directly.
 func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 	t.Skip("F-CLAUDE-PRINT-002: stub pending rewrite")
+}
+
+// TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure
+// (fix-reply-placehold-card) verifies the Angle C cross-file tracer
+// Finding 1 fix: when the Feishu ReplyInChat fall-through returns
+// (msgID="", err=nil) — i.e. resp.Success() was true but
+// resp.Data.MessageId was nil — the overflow handler must NOT
+// silently call RolloverTo("", ...) (which is a deliberate no-op
+// in the receipt layer). Doing so would leak the placeholder card
+// into chat but leave the receipt on the old cardMsgID, so the
+// next overflow chunk would create yet another placeholder (N
+// bubbles, defeating the rollover).
+//
+// The fix: the handler now treats empty msgID the same as a send
+// error — it returns without calling RolloverTo, so the receipt
+// stays on the old card and the next chunk re-runs the overflow
+// path.
+//
+// Test scaffolding:
+//
+//  1. Cold-start an OutReply to create the receipt (1 entry, card
+//     "om_card_initial" posted).
+//  2. Pre-fill rcpt.entries with receiptMaxElements-1 additional
+//     entries so the next AppendEntry would push elementCount past
+//     receiptMaxElements (cap = 50; current 50 entries, next would
+//     be 51).
+//  3. Wire sendFunc to return ("", nil) on the placeholder send —
+//     simulating the ReplyInChat empty-MessageId fall-through.
+//  4. Send a second OutReply → overflow handler kicks in.
+//  5. Assert:
+//
+//   - Send returns a non-nil error (the empty-msgID sentinel)
+//   - The receipt's cardMsgID is UNCHANGED (still "om_card_initial")
+//   - The receipt's entries are UNCHANGED (overflow entry was NOT
+//     committed)
+//   - sendFunc was called exactly once for the placeholder attempt
+//     (and returned "" + nil, which the handler correctly rejected)
+func TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure(t *testing.T) {
+	a := testAdapter(t)
+
+	var sends int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		// Cold-start (sends == 1) returns a real msgID so the
+		// receipt's first card is set up correctly. Every later
+		// call simulates the ReplyInChat empty-MessageId
+		// fall-through (resp.Success() == true but
+		// resp.Data.MessageId == nil, reply.go:294-297) — this is
+		// the case the overflow handler must reject.
+		if sends == 1 {
+			return "om_card_test", nil
+		}
+		return "", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	// (1) Cold-start: first OutReply creates the receipt.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "cold-start",
+	}); err != nil {
+		t.Fatalf("cold-start Send(OutReply): %v", err)
+	}
+	if sends != 1 {
+		t.Fatalf("cold-start send count = %d, want 1", sends)
+	}
+
+	// Locate the receipt.
+	a.mu.RLock()
+	rcpt, ok := a.receiptsByUserMsgID["om_user"]
+	a.mu.RUnlock()
+	if !ok || rcpt == nil {
+		t.Fatalf("receipt not created on cold-start; F-44 revert: OutReply folds into receipt")
+	}
+
+	// (2) Pre-fill entries. We need receiptMaxElements (50) entries
+	// total so the next AppendEntry (the overflow test) would push
+	// elementCount past receiptMaxElements (cap = 50; current 50
+	// entries, next would be 51).
+	rcpt.mu.Lock()
+	rcpt.entries = make([]LogEntry, 0, receiptMaxElements)
+	rcpt.entries = append(rcpt.entries, LogEntry{Icon: "💬", Text: "seed-0"})
+	for i := 1; i < receiptMaxElements; i++ {
+		rcpt.entries = append(rcpt.entries, LogEntry{Icon: "💬", Text: fmt.Sprintf("seed-%d", i)})
+	}
+	rcpt.mu.Unlock()
+
+	// (3) sendFunc is already configured: subsequent calls return
+	// ("", nil) — simulates the ReplyInChat empty-MessageId
+	// fall-through. The overflow handler must reject this.
+
+	// (4) Send the overflow-triggering OutReply.
+	sendsBeforeOverflow := sends
+	err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "overflow-trigger",
+	})
+	if err == nil {
+		t.Fatalf("Send(overflow) = nil, want error (empty-msgID placeholder send should be rejected)")
+	}
+	if !strings.Contains(err.Error(), "empty msgID") {
+		t.Errorf("Send(overflow) error = %q, want substring %q", err.Error(), "empty msgID")
+	}
+
+	// (5) Assertions: receipt state unchanged, one placeholder send
+	// was attempted.
+	placeholderAttempts := sends - sendsBeforeOverflow
+	if placeholderAttempts != 1 {
+		t.Errorf("placeholder send attempts = %d, want 1 (the overflow handler's SendCardForReceipt call)", placeholderAttempts)
+	}
+
+	rcpt.mu.Lock()
+	defer rcpt.mu.Unlock()
+	if rcpt.cardMsgID != "om_card_test" {
+		t.Errorf("receipt.cardMsgID = %q, want %q (RolloverTo(\"\") must NOT migrate)",
+			rcpt.cardMsgID, "om_card_test")
+	}
+	if got := len(rcpt.entries); got != receiptMaxElements {
+		t.Errorf("receipt.entries len = %d, want %d (overflow entry must NOT be committed; RolloverTo didn't run)",
+			got, receiptMaxElements)
+	}
+	if rcpt.entries[receiptMaxElements-1].Text != fmt.Sprintf("seed-%d", receiptMaxElements-1) {
+		t.Errorf("last entry text = %q, want seed-%d (entries not mutated)",
+			rcpt.entries[receiptMaxElements-1].Text, receiptMaxElements-1)
+	}
+}
+
+// TestSend_OutReply_OverflowPlaceholderSendError_ReceiptUntouched
+// (fix-reply-placehold-card) is the symmetric test for the SDK
+// error path: when SendCardForReceipt returns a non-nil err, the
+// overflow handler must still leave the receipt untouched (no
+// RolloverTo, entries not reset). This was the pre-fix behavior and
+// remains correct — the test guards against a regression where the
+// new empty-msgID branch accidentally catches error returns too.
+func TestSend_OutReply_OverflowPlaceholderSendError_ReceiptUntouched(t *testing.T) {
+	a := testAdapter(t)
+
+	var sends int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		if sends == 1 {
+			return "om_card_test", nil // cold-start succeeds
+		}
+		return "", errors.New("simulated SDK timeout")
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "cold-start",
+	}); err != nil {
+		t.Fatalf("cold-start Send: %v", err)
+	}
+
+	a.mu.RLock()
+	rcpt := a.receiptsByUserMsgID["om_user"]
+	a.mu.RUnlock()
+	if rcpt == nil {
+		t.Fatalf("receipt not created on cold-start")
+	}
+
+	rcpt.mu.Lock()
+	rcpt.entries = make([]LogEntry, 0, receiptMaxElements)
+	rcpt.entries = append(rcpt.entries, LogEntry{Icon: "💬", Text: "seed-0"})
+	for i := 1; i < receiptMaxElements; i++ {
+		rcpt.entries = append(rcpt.entries, LogEntry{Icon: "💬", Text: fmt.Sprintf("seed-%d", i)})
+	}
+	rcpt.mu.Unlock()
+
+	err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "overflow-trigger",
+	})
+	if err == nil {
+		t.Fatalf("Send(overflow with SDK failure) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "simulated SDK timeout") {
+		t.Errorf("Send(overflow) error = %q, want substring %q", err.Error(), "simulated SDK timeout")
+	}
+
+	rcpt.mu.Lock()
+	defer rcpt.mu.Unlock()
+	if rcpt.cardMsgID != "om_card_test" {
+		t.Errorf("receipt.cardMsgID = %q, want %q (SDK failure must NOT trigger RolloverTo)",
+			rcpt.cardMsgID, "om_card_test")
+	}
+	if got := len(rcpt.entries); got != receiptMaxElements {
+		t.Errorf("receipt.entries len = %d, want %d", got, receiptMaxElements)
+	}
 }
 
 func TestSend_OutReply_NilStatusBar_NoFooterSection(t *testing.T) {

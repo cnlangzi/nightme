@@ -66,10 +66,6 @@ const closeDrainTimeout = 5 * time.Second
 // reintroduces a default-drop is caught in `go test`.
 const eventBufferSize = 40960
 
-// stderrTailBytes is how much of the child's stderr we keep for
-// error-enrichment on EventAgentError. Match cc-connect's choice.
-const stderrTailBytes = 2048
-
 // permissionTimeout is how long a server-initiated approval request
 // waits for a user decision before defaulting to decline. Package
 // var (not const) so tests can compress it.
@@ -100,32 +96,6 @@ func cLog(msg string, args ...any) {
 	all = append(all, "component", "codex")
 	all = append(all, args...)
 	slog.Default().Info("[codex] "+msg, all...)
-}
-
-// ─── ringBuffer ───
-
-// ringBuffer keeps the last N bytes of a stream for diagnostic
-// inclusion on EventAgentError. Not thread-safe on its own; callers
-// must serialize (we call it from stderrLoop only).
-type ringBuffer struct {
-	buf []byte
-	max int
-}
-
-func newRingBuffer(max int) *ringBuffer {
-	return &ringBuffer{buf: make([]byte, 0, max), max: max}
-}
-
-func (r *ringBuffer) Write(p []byte) (int, error) {
-	r.buf = append(r.buf, p...)
-	if len(r.buf) > r.max {
-		r.buf = r.buf[len(r.buf)-r.max:]
-	}
-	return len(p), nil
-}
-
-func (r *ringBuffer) String() string {
-	return string(r.buf)
 }
 
 // ─── stdioPipe ───
@@ -171,7 +141,7 @@ type session struct {
 	branch      string
 	model       string
 	threadID    string
-	stderrTail  *ringBuffer
+	stderrTail  *agent.StderrRingBuffer
 	pendingMu   sync.Mutex
 	pendingApprovals map[string]chan string
 	// lastPendingID is the request id of the most-recently spawned
@@ -307,7 +277,7 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 		agentName:         cfg.name,
 		workspace:         cfg.workspace,
 		branch:            detectBranch(cfg.workspace),
-		stderrTail:        newRingBuffer(stderrTailBytes),
+		stderrTail:        agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		pendingApprovals:  make(map[string]chan string),
 		lastPendingID:     "",
 		closed:            make(chan struct{}),
@@ -575,16 +545,29 @@ func (s *session) lifecycle() {
 
 	// If the wire produced a parse / oversized-frame error, that has
 	// already been delivered as EventAgentError. Only emit a generic
-	// exit error when the cause is NOT a graceful Close().
-	if s.exitErr != nil && !s.isGracefulClose() {
+	// exit error when the cause is NOT a graceful Close(). Even when
+	// exitErr is nil (clean-exit but unrequested) we still emit so
+	// the user-visible event stream reflects the unexpected exit;
+	// matches dsh/pi/claudecode/opencode post-Diagnostic refactor.
+	if !s.isGracefulClose() {
 		tail := s.stderrTail.String()
-		msg := fmt.Sprintf("codex: process exit: %v", s.exitErr)
+		exitKind := agent.ClassifyExit(s.exitErr, false)
+		diag := &agent.BridgeDiagnostic{
+			ExitKind:   exitKind,
+			WaitErr:    s.exitErr,
+			StderrTail: tail,
+			SessionID:  s.threadID,
+			AgentName:  s.agentName,
+			KilledAt:   time.Now(),
+		}
+		msg := fmt.Sprintf("codex: process exit %s: %v", exitKind, s.exitErr)
 		if tail != "" {
 			msg += "\n--- stderr tail ---\n" + tail
 		}
 		s.deliver(agent.AgentEvent{
-			Kind: agent.EventAgentError,
-			Err:  fmt.Errorf("%s", msg),
+			Kind:       agent.EventAgentError,
+			Err:        fmt.Errorf("%s", msg),
+			Diagnostic: diag,
 		})
 	}
 	s.pumpWG.Wait()

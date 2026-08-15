@@ -14,7 +14,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -160,6 +159,4 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// errRPCTimeout is returned by Post when ctx is cancelled mid-flight.
-// Callers should retry (subject to their own backoff policy).
-var errRPCTimeout = errors.New("dsh: rpc timeout")
+

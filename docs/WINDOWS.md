@@ -5,6 +5,40 @@
 > - bridge 层协议细节 → [`bridge/`](./bridge/)
 > - 单 CLI 实测约定 → [`bridge/CLAUDE.md`](./bridge/CLAUDE.md) §7（真机 vs mock）、§9（代码锚点）
 
+## 0.0 跨平台经验规则（fix-stop 沉淀）
+
+> 写跨平台 Go 代码时，**优先用跨平台兼容方案；不行则按平台分别实现**。
+
+按经验重要度排：
+
+| # | 规则 | 反例 | 正例 |
+|---|------|------|------|
+| 1 | **测试生产契约，别测子进程 stdout/stderr** | `assert stdout == "C:\\foo"`（MSYS 翻译后是 `/c/foo`） | 让 child 写 sentinel file，用 `os.Stat(sentinelPath)` 验证 cmd.Dir 是否生效（filesystem 操作不经过 MSYS libc） |
+| 2 | **跨平台逻辑放 tagless 文件** | `cmd.Env = append(os.Environ(), "MSYS_NO_PATHCONV=1")` 放在 `exec.go`（所有平台编译） | `applyMSYSEnvNoPathConv` 在 `exec_windows.go`，no-op stub 在 `exec_unix.go` |
+| 3 | **平台特定逻辑放 //go:build 文件** | `path_windows.go` 的 `isWindowsDriveRel` 提到 `path.go` 里加 `runtime.GOOS` 分支 | `path_unix.go`（//go:build !windows）只管 POSIX；`path_windows.go`（//go:build windows）只管 Win32 盘符、UNC、root-relative |
+| 4 | **call site 不写 `runtime.GOOS`** | `if runtime.GOOS == "windows" { runMSYS() }` | 调用 `applyMSYSEnvNoPathConv(env)`（在 _windows.go / _unix.go 各有定义） |
+| 5 | **path 验证用 `filepath.Clean` + 平台 separator** | `assert want == "/foo/.bar"` | `assert want == filepath.FromSlash("/foo/.bar")`（测试期望跟随平台） |
+| 6 | **env vars 跨平台覆盖用 `os.Environ()` + append** | 自己造一份完整 env（漏 HOME / PATH） | `cmd.Env = append(os.Environ(), "KEY=VALUE")`（只追加需要的，不替换全部） |
+| 7 | **MSYS env var 仅控制 argv 翻译，不控制 getcwd** | 设 `MSYS_NO_PATHCONV=1` 后断言 child 报告 exact path | 测 child 实际行为（写文件、读文件）——filesystem 不经过 MSYS libc |
+
+## 0.1 当前 Windows 13 个测试失败的根因（不是 fix-stop 引入）
+
+PR 186 引入 Windows CI runner 后，暴露了 13 个 pre-existing 平台问题。这些**与 fix-stop 无关**，已记在 `docs/branch/fix-stop-windows-followups.md`。按根因分类：
+
+| # | 失败 | 根因 | 归类 |
+|---|------|------|------|
+| 1 | `TestSendBlocks_FileStillUsesFileURL` (opencode) | opencode 把 `C:\foo` 渲染成非 `file://` URL，跨平台差异 pre-existing | bridge 协议问题 |
+| 2 | `TestDownloadInboxDir_CreatesPerSessionDir` (feishu) | `inbox dir mode = 0777, want 0700` — Windows 不支持 POSIX mode 位 | 平台权限 API |
+| 3 | `TestFixRemote_HappyPath` (gtw) | `git worktree` 输出 MSYS 翻译路径（`/c/Users/...`） | 跨平台 git 行为 |
+| 4 | `TestFormatResults_ShowsFailure` (gtw) | `cmd /c "echo oops 1>&2; exit 5"` 在 Windows 上 ExitCode 不为 5（sh 与 cmd 重定向语义差异） | dispatcher Windows shell |
+| 5 | `TestRefreshDefaultBranch_RebaseConflict` (gtw) | `fatal: pathspec 'shared.txt' did not match any files` — git on Windows pathspec 行为 | 跨平台 git 行为 |
+| 6 | `TestPreflightWorktreeCreate_ParentUnwritable` (gtw) | `os.Getenv("GOOS") == "windows"` 在 CI runner 上没正确返回 | 测试 guard 用错 API |
+| 7 | `TestWindowsPipePingStatusStop` (daemoncontrol) | Windows named pipe 在 server 关闭前就报 "pipe has been ended" | Windows pipe 时序 |
+| 8-12 | `TestLogger_*` (logging) 5 个 | (a) `mode = 666, want 0600` — Windows chmod no-op (b) `TempDir RemoveAll cleanup: file in use by another process` — Windows 文件锁延迟释放 | 跨平台文件权限 + cleanup 竞争 |
+| 13 | `TestRenderANSI` (feishu/qrencode) | QR 渲染输出在 Windows console 宽度不同 | 跨平台终端宽度 |
+
+**所有 13 个** = pre-existing 平台问题，**不在 fix-stop scope**。cmd.Dir 契约相关的 5 个测试（`TestRunCmd_DirBinding` 系列）已通过 **sentinel file 验证**修复（PR 186 内 commit `c2e3c2d`）。
+
 ---
 
 ## 0. 一句话速查
@@ -15,6 +49,41 @@
 | `fork/exec <path>.cmd: The parameter is incorrect.` | 直接用 `.cmd` 路径作为 `lpApplicationName` | 用 `agent.NewCmd`，自动包 `cmd.exe /d /c`；详见 §3 |
 | `.exe` 装了但仍走 `cmd.exe /d /c` | LookPath 顺序把 `.cmd` 排在前面 | 当前行为可以接受；如要绕开，配置 `agent_cmd.exe` 显式路径；详见 §3.4 |
 | Agent 启动后立刻退出 | `Setsid` 不可用 + 进程组信号被误用 | Windows 下 `agent.SignalProcessGroup` 已经退化为单 pid 信号；详见 §5 |
+| child 的 `pwd` 报告 `/c/Users/...` 而不是 `C:\Users\...` | MSYS libc getcwd() 翻译（**`MSYS_NO_PATHCONV=1` 不影响 getcwd**） | 不要测 child stdout 验证 CWD；测 sentinel file（filesystem 操作不经过 MSYS libc） |
+
+### §0.1.1 详细案例：cmd.Dir 契约测试为什么用 sentinel file 而不是 pwd
+
+**问题**：`internal/command/gtw/exec_test.go` 之前用 `pwd` 验证 `runCmd` 设置的 `cmd.Dir`：
+
+```go
+stdout, _, _ := runCmd(ctx, real, "pwd")
+assert stdout == real  // "C:\foo" expected
+```
+
+**Windows CI 上失败**：
+```
+runCmd: child CWD = "/c/Users/runneradmin/AppData/Local/Temp/TestRunCmd_DirBinding4047655615/001"
+want = "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\TestRunCmd_DirBinding4047655615\\001"
+```
+
+**根因**：`pwd` 是 MSYS-bash 工具，glibc 的 getcwd() 被 MSYS libc 拦截，**总是返回 MSYS 翻译后的路径**（`/c/...`）。这是 MSYS libc 层的硬编码行为，**`MSYS_NO_PATHCONV=1` 不影响**（该 env var 只控制 argv 翻译，不控制 getcwd）。
+
+**真正修复**：测试**契约**而不是 child 的 cwd 报告。Child 在 cmd.Dir 写 sentinel file，test 在 EXACT path 用 `os.Stat` 验证文件存在：
+
+```go
+sentinelName := fmt.Sprintf("nightme-sentinel-%d", os.Getpid())
+runCmd(ctx, real, "sh", "-c", "echo X > "+sentinelName)  // or cmd.exe on Windows
+os.Stat(filepath.Join(real, sentinelName))  // verifies cmd.Dir was honored
+```
+
+`os.Stat` 直接走 kernel（不经过 MSYS libc）。如果 cmd.Dir 没被设到 `real`，sentinel 会写到别的目录，stat 会失败。
+
+**关键点**：
+- test **用 cmd.exe**（Windows-native）做写文件，不走 MSYS shell 层
+- stat 验证用**真实 path**（不是 `filepath.FromSlash` 转换的）
+- 契约：**"child 真的能在 cmd.Dir 操作"** — 这才是 nightme 的生产承诺
+
+适用规则：#1（测试生产契约）+ #7（MSYS env 不影响 getcwd）。
 
 ---
 
@@ -342,6 +411,13 @@ err := cmd.Start() // ✅ nil
 ---
 
 ## 9. 变更记录
+
+- 2026-08-15：fix-stop 沉淀跨平台经验规则
+  - 新增 §0.0 七条跨平台经验规则（按重要度排序）
+  - 新增 §0.1 当前 Windows 13 个测试失败的根因分类（pre-existing，不在 fix-stop scope）
+  - 新增 §0.1.1 cmd.Dir 契约测试详细案例（为什么用 sentinel file 而不是 pwd）
+  - §0 一句话速查新增第 5 行（MSYS getcwd 翻译）
+  - 包含 fix-stop 的 cmd.Dir / MSYS / platform-split 修复
 
 - 2026-08-13：建立本文档
   - §2 env 格式校验 bug（claudecode / pi 已修）

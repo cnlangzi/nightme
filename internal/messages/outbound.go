@@ -88,6 +88,22 @@ const (
 	// card after the user has picked. ReplyTo carries the bot-side
 	// message id to PATCH; Card holds the new payload.
 	OutCardPatch
+
+	// OutError surfaces a non-graceful bridge child process exit
+	// (EventAgentError with a populated Diagnostic). Carries the
+	// short error string on Text plus a structured Diagnostic for
+	// channels that want to render the exit kind + stderr tail
+	// faithfully. Distinct from OutCommandReply (slash-command
+	// replies) so a channel can route it to a dedicated error
+	// UI without confusing it with a system command response.
+	//
+	// Pre-this-kind, EventAgentError was dropped silently at the
+	// gateway boundary — the receipt just flipped to ✅, leaving
+	// the user with no signal that the bridge had died. The
+	// Diagnostic already travels on AgentEvent.Diagnostic since
+	// the 2026-08-15 dsh textBuf fix; this kind is the
+	// downstream half that finally surfaces it to the chat user.
+	OutError
 )
 
 // String renders OutboundKind for log lines.
@@ -119,6 +135,8 @@ func (k OutboundKind) String() string {
 		return "task_update"
 	case OutCardPatch:
 		return "card_patch"
+	case OutError:
+		return "error"
 	}
 	return "unknown"
 }
@@ -211,6 +229,20 @@ type OutboundMessage struct {
 	// nil otherwise. Channels check `msg.Err != nil` to render
 	// error UI (📛 icon, ⚠️ prefix, etc.).
 	Err error
+
+	// Diagnostic is the structured payload attached to OutError
+	// when a bridge child process exits non-gracefully. Populated
+	// by the gateway translator from AgentEvent.Diagnostic; nil on
+	// other Kinds (and on OutError when the bridge didn't supply
+	// one — graceful close, clean exit, or pre-Diagnostic-era
+	// bridges).
+	//
+	// Channel renderers that want to show "dsh: signal: killed"
+	// with the LAST 1KB of stderr and the agent name read from
+	// here; renderers that only want the short message can fall
+	// back to Err. The fields are read-only data; channels MUST
+	// NOT mutate them.
+	Diagnostic *agent.BridgeDiagnostic
 
 	// GitStatus (F-CLAUDE-PRINT-002) is the workspace + git + PR
 	// context attached to every outbound message that flows to a

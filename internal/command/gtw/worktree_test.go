@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -127,7 +128,7 @@ func TestPreflightWorktreeCreate_BranchAttachedSamePath(t *testing.T) {
 // where chmod 0500 doesn't grant the desired read-only
 // behaviour.
 func TestPreflightWorktreeCreate_ParentUnwritable(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
+	if runtime.GOOS == "windows" {
 		t.Skipf("chmod semantics on Windows don't match POSIX; skipping")
 	}
 	tmp := t.TempDir()

@@ -287,6 +287,30 @@ func (r *MessageReceipt) State() chatsession.PromptState {
 	return r.PromptState()
 }
 
+// Tasks returns a snapshot of the receipt's current task checklist.
+// Holds r.mu; safe to call from any goroutine. The returned slice
+// is the snapshot taken under the lock — SetTaskListWithFooter
+// always installs a freshly-allocated slice (or nil for an empty
+// checklist), so the snapshot is safe to iterate without further
+// synchronization (the underlying array is not mutated after the
+// lock is released; ranging over a nil slice is a no-op).
+//
+// Used by the adapter's OutReply overflow handler (fix-reply-placehold-card)
+// to build the body for the rollover placeholder card without
+// racing against a concurrent SetTaskList from the bridge event
+// pump.
+//
+// Nil-safe: returns nil when called on a nil receiver, matching
+// the guard pattern used by AppendEntryWithFooter / RolloverTo.
+func (r *MessageReceipt) Tasks() []agent.AgentTaskItem {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tasks
+}
+
 // SetPromptState (F-53 follow-up) transitions the receipt's
 // `promptState` to `state` and, when transitioning for the first
 // time to that state, adds the corresponding reaction on the
@@ -408,6 +432,63 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 	// Commit the entry + render.
 	r.entries = proposed
 	return r.renderLocked(ctx)
+}
+
+// RolloverTo (fix-reply-placehold-card) transitions the receipt to
+// a freshly-created overflow placeholder card when the original
+// receipt card exceeded its 50-element / 30 KB envelope. After
+// RolloverTo returns, every subsequent AppendEntry / SetTaskList
+// PATCHes the new card instead of the original — so a stream of N
+// overflow chunks collapses into a single new placeholder card
+// followed by N-1 PATCHes, instead of N standalone bubbles in main
+// chat.
+//
+// Why a method, not just field assignment: cardMsgID, replyMsgID,
+// entries, footerLines, lastBody, and lastBodyPatch all need to
+// move together. Doing it under r.mu keeps a concurrent
+// renderLocked / SetPromptState from observing a half-migrated
+// state. lastBody + lastBodyPatch also need to be reset so the
+// first PATCH onto the new card isn't suppressed by the
+// duplicate-body short-circuit or delayed by the 300ms rate
+// limiter measured against the OLD card's last PATCH.
+//
+// tasks are intentionally preserved across the rollover — the
+// checklist is a global view across the whole turn; freezing it on
+// the old card and restarting on the new one would visually orphan
+// in-flight tasks.
+//
+// Caller contract:
+//
+//  1. SendCardForReceipt(chatID, body, "", false) must already
+//     have succeeded and returned msgID. RolloverTo does NOT send
+//     any network traffic itself; the caller owns the send.
+//  2. firstEntry should match the entry whose overflow triggered
+//     the rollover, so the new card starts with the same visible
+//     content the old postOrphanReplyCard fallback would have
+//     rendered.
+//
+// The original card remains visible in chat but the receipt no
+// longer tracks it — future AppendEntry calls go to msgID instead.
+// OnPromptEnded's SetPromptState therefore lands on the LAST
+// overflow card, which is the surface the user is reading.
+func (r *MessageReceipt) RolloverTo(msgID string, firstEntry LogEntry, footerLines []string) {
+	if r == nil || msgID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cardMsgID = msgID
+	r.replyMsgID = msgID
+	r.entries = []LogEntry{firstEntry}
+	r.footerLines = footerLines
+	// Reset render-state cache so the first PATCH on the new card
+	// is not skipped by the duplicate-body short-circuit
+	// (`body == r.lastBody` in renderLocked) and is not delayed by
+	// the 300ms rate limiter measured against the old card's last
+	// PATCH time.
+	r.lastBody = ""
+	r.lastBodyPatch = time.Time{}
+	// tasks intentionally preserved — see method doc.
 }
 
 // renderLocked pushes the current rolling-log + task-checklist

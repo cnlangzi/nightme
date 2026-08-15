@@ -530,6 +530,15 @@ type AgentEvent struct {
 	// wholesale. An Items slice with length 0 is a valid "clear the
 	// checklist" signal.
 	TaskList *AgentTaskListEvent
+
+	// Diagnostic carries structured info about a bridge child
+	// process exit when Kind == EventAgentError. Populated by the
+	// bridge's lifecycle() on every non-graceful exit; nil on
+	// other Kinds and on EventAgentError when the bridge died
+	// without a deterministic cause (e.g. Err only). Downstream
+	// consumers (gateway translate, RecoveryPolicy, /diagnose) read
+	// this to render error UI and to detect systematic failures.
+	Diagnostic *BridgeDiagnostic
 }
 
 // StartConfig is the per-session configuration handed to Agent.Start.

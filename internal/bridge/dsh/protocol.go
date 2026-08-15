@@ -378,11 +378,80 @@ type todoWriteData struct {
 	Items []todoItem `json:"items"`
 }
 
+// ToolEventView is the host-computed rendering view that dsh web
+// attaches to every session/event frame. Per docs/bridge/dsh.md
+// §1.3, each `session/event` frame carries `view?: ToolEventView`
+// alongside the raw `event` payload — the host has already merged
+// the event into its UI state and shipped a snapshot back so the
+// bridge doesn't have to re-derive tool / task state from the
+// raw event stream.
+//
+// F-DSH-CHAT-001 P3: this struct is the authoritative source for
+// tool status (running / completed / failed) when present. P3
+// makes View the truth source instead of bridge-inferred tool
+// state from raw event pairing.
+//
+// WIRE-PROBE-REQUIRED: field names below are best-guess from
+// the upstream dsh "host-computed ToolEventView" comment. Real
+// wire may use different casing or extra fields. If probe
+// reveals a different shape, update these tags only — handler
+// logic stays the same.
+type ToolEventView struct {
+	// Kind discriminates what's in the view. "tool_call" for a
+	// tool invocation view; "task_list" for a todo snapshot view
+	// (host emits a task_list view attached to todo/write or
+	// session/projection frames). Empty / unknown = skip.
+	Kind string `json:"kind,omitempty"`
+
+	// Tool-call view fields (Kind == "tool_call").
+	CallID  string `json:"callId,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Status  string `json:"status,omitempty"` // "running" | "completed" | "failed"
+	Output  string `json:"output,omitempty"`
+	IsError bool   `json:"isError,omitempty"`
+
+	// Task-list view fields (Kind == "task_list"). Carries the
+	// host-computed snapshot — same shape as todo/write data.
+	Tasks []todoItem `json:"tasks,omitempty"`
+
+	UpdatedAt int64 `json:"updatedAt,omitempty"`
+}
+
+// projectionEnvelope is the mux `session/projection` frame payload
+// (F-DSH-CHAT-001 §4.5). dsh web emits these periodically (and on
+// state changes) carrying host-computed derived state — title /
+// tasks / session list metadata. Previously the bridge dropped
+// these on the floor; we now route them through wireState.
+//
+// WIRE-PROBE-REQUIRED: field names below are inferred from
+// docs/bridge/dsh.md §4.5 (which says
+// `{sessionId, seq, projection, value}`). If probe shows different
+// names (e.g. `name` instead of `projection`), update tags only.
+type projectionEnvelope struct {
+	SessionID  string          `json:"sessionId,omitempty"`
+	Seq        int64           `json:"seq,omitempty"`
+	Projection string          `json:"projection"` // "todo" | "tasks" | "title" | ...
+	Value      json.RawMessage `json:"value"`
+}
+
 // todoItem is one entry in todoWriteEvent.Items. Matches
 // `packages/core/session/src/types.ts: TodoItem`.
+//
+// F-DSH-CHAT-001: ID and ActiveForm added so wireState.tasks can
+// index by stable ID (otherwise AgentTaskItem.ID == "" breaks
+// runtime-side dedup / merge / delta). Both are best-effort: if
+// dsh's wire omits them, the bridge falls back to Content as ID
+// and ActiveForm to "".
+//
+// WIRE-PROBE-REQUIRED: the JSON tag names below are inferred from
+// the upstream dsh type comment. If probe reveals different field
+// names (e.g. `taskId` instead of `id`), update the tags only —
+// handler logic stays the same.
 type todoItem struct {
-	Content string `json:"content"`
-	Status  string `json:"status"` // "pending" | "in_progress" | "completed"
+	ID         string `json:"id,omitempty"`
+	Content    string `json:"content"`
+	ActiveForm string `json:"activeForm,omitempty"`
+	Status     string `json:"status"` // "pending" | "in_progress" | "completed"
 }
 
 // approvalAskedData is the `data` body of an approval/asked event

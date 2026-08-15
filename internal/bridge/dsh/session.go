@@ -155,6 +155,17 @@ type driver struct {
 	events    chan agent.AgentEvent
 	translate *translator
 
+	// F-DSH-CHAT-001: wireState + dispatcher pair.
+	// wireState holds the dsh-bridge-internal normalized truth
+	// (tasks by ID, tools by CallID, inflight, title). It is fed
+	// by both raw session/event (via dispatcher → handlers) and
+	// session/projection (via handle_mux.go → applyProjection).
+	// dispatcher routes session/event envelopes by Type through a
+	// registration-driven handler map (replaces the prior
+	// switch env.Type in translate.go).
+	wireState  *wireState
+	dispatcher *eventDispatcher
+
 	// Lifecycle guards
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -262,9 +273,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		lastApprovalID:  map[string]string{},
 		events:        make(chan agent.AgentEvent, eventBufferSize),
 		translate:     newTranslator(s.name, cfg.Workspace),
+		wireState:     newWireState(),
 		closed:        make(chan struct{}),
 		exitDone:      make(chan struct{}),
 	}
+	// Wire dispatcher AFTER wireState + translate are set. The
+	// dispatcher's deliver closure captures d.deliver (which
+	// closes-over d.events), so this must run before startPumps.
+	d.dispatcher = newDispatcher(d.translate, d.wireState, d, d.deliver)
 
 	// Session handshake: resume via session.fork when cfg.SessionID
 	// is set, otherwise create a fresh session via session.create.

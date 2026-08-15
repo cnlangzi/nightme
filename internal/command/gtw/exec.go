@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // runCmd is the canonical exec.CommandContext wrapper used by every
@@ -43,9 +45,20 @@ import (
 //     keeps callers from re-Trimming per call site.
 //
 //   - The provided ctx is honored for cancellation and timeout.
+//     As a safety net, when the caller did NOT set a deadline
+//     (e.g. passed context.Background from a code path that
+//     forgot to wrap), runCmd applies timeouts.CLI so a hung
+//     network call can't park the dispatcher forever. When the
+//     caller DID set a deadline, it is used directly — the
+//     caller's deadline always wins.
 func runCmd(ctx context.Context, dir, name string, args ...string) (stdout, stderr string, err error) {
 	if name == "" {
 		return "", "", errors.New("gtw: cli: empty command name")
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeouts.CLI)
+		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	if dir != "" {

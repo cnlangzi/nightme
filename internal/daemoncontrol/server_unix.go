@@ -149,6 +149,15 @@ func (s *Server) Close() error {
 				closeErr = err
 			}
 		}
+		// Fire cancel from the same Once as the "stop" RPC
+		// handler so the daemon ctx is always cancellable —
+		// regardless of which path initiated the shutdown.
+		s.stopOnce.Do(func() {
+			s.state.Store("stopping")
+			if s.cancel != nil {
+				s.cancel()
+			}
+		})
 	})
 	return closeErr
 }

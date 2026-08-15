@@ -215,6 +215,16 @@ type ChatSession struct {
 	// without holding cs.mu.
 	queue *MessageQueue
 
+	// heartbeat (F-63) is the per-chat progress counter store,
+	// keyed by userMsgID. See internal/chatsession/heartbeat.go
+	// for the LRU semantics and the Observe() choke point. The
+	// runtime handler calls cs.Heartbeat().Observe() on every
+	// outbound event BEFORE the policy chain (see F-63 §3.2);
+	// channels read the resulting snapshot via OutboundMessage
+	// (Kind=OutHeartbeat). nil only if construction was bypassed
+	// (test fakes); production always populates it in New().
+	heartbeat *HeartbeatTracker
+
 	// commit 8c: per-ChatSession readPump controller. Only one
 	// CS-AS 边界重构 Phase 1: readpump is now per-AS (started
 	// by Spawn inside AgentSession). The chat-layer no longer
@@ -332,6 +342,13 @@ func New(chatID, primaryAgent string) (*ChatSession, error) {
 		toolsMode:        ToolsModeHide, // F-38 default (quiet by default)
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
+		// F-63: per-chat heartbeat tracker (LRU). The runtime
+		// handler calls cs.Heartbeat().Observe() on every outbound
+		// event BEFORE the policy chain (see F-63 §3.2); the
+		// tracker decides whether to fire an OutHeartbeat to the
+		// channel so the receipt card can show the live "agent is
+		// working" header.
+		heartbeat: NewHeartbeatTracker(DefaultHeartbeatCap),
 	}
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 	// F-54: one Bus per event kind. Constructed eagerly so the
@@ -862,6 +879,19 @@ func (cs *ChatSession) Emitter() outbound.Emitter {
 		return nil
 	}
 	return cs.emitter
+}
+
+// Heartbeat (F-63) returns the per-chat heartbeat tracker. The
+// runtime handler calls .Observe() on every outbound event BEFORE
+// the policy chain; channels read the resulting snapshot via
+// OutboundMessage (Kind=OutHeartbeat). Returns nil only if the
+// ChatSession was constructed via a test fake that bypassed
+// New(); production callers can rely on a non-nil result.
+func (cs *ChatSession) Heartbeat() *HeartbeatTracker {
+	if cs == nil {
+		return nil
+	}
+	return cs.heartbeat
 }
 
 // WithEmitter binds the outbound chokepoint to this chat session.

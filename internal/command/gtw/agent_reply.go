@@ -79,8 +79,8 @@ import (
 //
 // Contract: caller is responsible for the per-invocation context
 // timeout if it wants one — runAgentFor does NOT wrap ctx with
-// RunOnceTimeout itself. dispatchCommit / dispatchPR both wrap
-// ctx with RunOnceTimeout at their call sites (the timeout is
+// timeouts.Agent itself. dispatchCommit / dispatchPR both wrap
+// ctx with timeouts.Agent at their call sites (the timeout is
 // per-command-policy, not per-agent-call).
 func runAgentFor(
 	ctx context.Context,

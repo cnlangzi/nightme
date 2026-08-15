@@ -164,12 +164,15 @@ func TestWindowsPipePingStatusStop(t *testing.T) {
 	// Stop: ctx should cancel, server.Status().State should
 	// flip to "stopping". The Stop request can race with
 	// the server's seed-close on Windows; tolerate that
-	// failure since the test is about Ping/GetStatus behavior
-	// at this point, and t.Cleanup will close the server
-	// regardless.
+	// failure and explicitly Close() so Server.Close's
+	// cancel-via-stopOnce path fires ctx (Close is idempotent
+	// via closeOnce, so this is safe even when the RPC did
+	// succeed). t.Cleanup still calls Close() defensively
+	// for panic paths.
 	if err := Stop(paths.Socket, 2*time.Second); err != nil {
 		t.Logf("Stop failed (server may have already closed): %v", err)
 	}
+	_ = server.Close()
 	select {
 	case <-ctx.Done():
 	case <-time.After(2 * time.Second):

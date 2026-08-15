@@ -43,6 +43,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // receiptBot is the minimal Feishu surface the task receipt depends on.
@@ -180,6 +181,26 @@ type MessageReceipt struct {
 	// Skip duplicate bodies and pace real PATCH requests.
 	lastBody      string
 	lastBodyPatch time.Time
+
+	// heartbeat (F-63) carries the per-turn progress snapshot
+	// sourced from runtime.HeartbeatTracker via OutboundMessage.
+	// ThinkCount / ToolCount are monotonic counters; LastBeatAt
+	// is refreshed by any OutboundKind (the "agent is alive"
+	// signal). The header rendered by buildReceiptCard pulls
+	// from this field — pre-F-63 the placeholder header was
+	// only "⌨️ Working..." and disappeared on the first entry.
+	heartbeat messages.HeartbeatSnapshot
+
+	// heartbeatMinInterval is the minimum gap between two
+	// heartbeat-driven PATCHes. ApplyHeartbeat consults this
+	// against lastBodyPatch (renderLocked's own throttle state)
+	// so any successful PATCH — entry / task / heartbeat —
+	// bumps the window and prevents double-PATCHes when
+	// entries and heartbeat both want to update within the same
+	// 100ms. Zero disables the throttle (tests that want to
+	// exercise ApplyHeartbeat back-to-back without time.Sleep
+	// set it to 0).
+	heartbeatMinInterval time.Duration
 }
 
 // NewMessageReceiptForReply constructs a fresh rolling-log + task
@@ -208,6 +229,12 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 		cardMsgID:    replyMsgID,
 		bot:          bot,
 		logger:       slog.Default(),
+		// F-63: 2s heartbeat throttle. Dense thinking streams can
+		// fire 10+ OutHeartbeat events per second; we coalesce them
+		// into one PATCH every 2s to stay well under Feishu's
+		// ~5 QPS message-update limit. Zero would disable the
+		// throttle (tests opt in).
+		heartbeatMinInterval: 2 * time.Second,
 		// F-53: initial state is chatsession.PromptRunning (was PromptPending
 		// in v1.3). The "Prompt is born running" rule from
 		// docs/feat/message_lifecycle.md §4.2 means we never need
@@ -392,6 +419,66 @@ func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error 
 	return r.AppendEntryWithFooter(ctx, entry, nil)
 }
 
+// ApplyHeartbeat (F-63) updates the receipt's per-turn heartbeat
+// snapshot and triggers a PATCH when the counter actually changed.
+// Called from Adapter.Send's OutHeartbeat branch — the runtime
+// handler emits one OutHeartbeat per countable outbound event
+// (OutThinking / OutToolStart) BEFORE the policy chain (see
+// F-63 §3.2), so even when /think off / /tools off drops the
+// original event, this method still sees the increment and the
+// receipt header reflects the agent's real activity.
+//
+// Idempotency: applying the same snapshot twice produces only one
+// PATCH — the changed check is on ThinkCount/ToolCount, not on
+// LastBeatAt (LastBeatAt is updated by the snapshot write but
+// does not gate the render).
+//
+// Throttle: heartbeatMinInterval caps the PATCH rate. We
+// compare against r.lastBodyPatch (the SAME field renderLocked
+// updates on every successful PATCH — entry / task / heartbeat).
+// This means any successful PATCH bumps the window, preventing
+// double-PATCHes when entries and heartbeat both want to
+// update within the same window. The 2s ceiling applies only
+// when entries/tasks are silent; in a busy turn the entries
+// PATCHes themselves naturally throttle heartbeats.
+//
+// Locking: holds r.mu through renderLocked (matching the
+// existing AppendEntryWithFooter pattern). renderLocked's
+// "Locked" suffix is the contract — it accesses r.entries,
+// r.tasks, r.heartbeat, r.cardMsgID, r.lastBody, r.lastBodyPatch
+// without acquiring the lock itself. The lock duration is
+// bounded by Feishu PATCH latency (~50-200ms in practice);
+// contention is between the same receipt's per-turn goroutines,
+// never across chats. renderLocked has its own same-body
+// short-circuit and 300ms minimum PATCH interval, so holding
+// the lock while it runs is not a regression vs the prior
+// code that unlocked first.
+func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.HeartbeatSnapshot) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	prev := r.heartbeat
+	r.heartbeat = snap
+	changed := snap.ThinkCount != prev.ThinkCount || snap.ToolCount != prev.ToolCount
+	if !changed {
+		return
+	}
+	if r.heartbeatMinInterval > 0 &&
+		!r.lastBodyPatch.IsZero() &&
+		time.Since(r.lastBodyPatch) < r.heartbeatMinInterval {
+		return
+	}
+	if err := r.renderLocked(ctx); err != nil {
+		r.logger.Warn("feishu receipt: heartbeat render failed",
+			"err", err, "card_msg_id", r.cardMsgID)
+	}
+	// renderLocked already updates r.lastBodyPatch on success —
+	// the throttle window advances automatically.
+}
+
 // AppendEntryWithFooter (F-45) appends a rolling-log entry AND
 // stamps the rendered StatusBar footer for this turn.
 // footerLines may be nil / empty (no StatusBar stamped this
@@ -421,11 +508,16 @@ func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEnt
 	if len(footerLines) > 0 {
 		r.footerLines = footerLines
 	}
-	body, err := buildReceiptCard(proposed, r.tasks, r.footerLines)
+	body, elementCount, err := buildReceiptCard(proposed, r.tasks, r.footerLines, &r.heartbeat)
 	if err != nil {
 		return fmt.Errorf("feishu receipt: build card for overflow check: %w", err)
 	}
-	elementCount, bodyBytes := receiptBodyStats(proposed, r.tasks, r.footerLines, body)
+	// receiptBodyStats takes the elementCount from buildReceiptCard
+	// (single source of truth — see receiptBodyStats doc) and
+	// just measures the body bytes. Off-by-one drift between
+	// this overflow check and the actual PATCH body is
+	// structurally impossible now.
+	elementCount, bodyBytes := receiptBodyStats(proposed, r.tasks, r.footerLines, body, elementCount)
 	if wouldReceiptOverflow(elementCount, bodyBytes) {
 		return ErrReceiptOverflow
 	}
@@ -524,7 +616,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	}
 
 	// Build the card body. buildReceiptCard is in adapter.go.
-	body, err := buildReceiptCard(r.entries, r.tasks, r.footerLines)
+	body, _, err := buildReceiptCard(r.entries, r.tasks, r.footerLines, &r.heartbeat)
 	if err != nil {
 		r.logger.Warn("feishu receipt: build card failed",
 			"err", err, "state", r.promptState)
@@ -594,40 +686,34 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	r.lastBodyPatch = time.Now()
 	return nil
 }
-// receiptBodyStats counts the elements and bytes in a card body that
-// would be built from the given (entries, tasks, footer). Used by
-// AppendEntryWithFooter's pre-render overflow check (and could be
-// reused by other card-builders in the future).
+// receiptBodyStats returns the byte size of a card body and the
+// authoritative element count that buildReceiptCard produced
+// for it. Used by AppendEntryWithFooter's pre-render overflow
+// check.
 //
-// Element count is the sum of (entries × div count) + task divs +
-// optional footer (matches what buildReceiptCard in adapter.go
-// would emit). Byte size is the JSON body size as built.
+// Element count is sourced from buildReceiptCard's own return
+// value — the previous (pre-F-63.1) duplication between this
+// function and buildReceiptCard was the source of an off-by-one
+// bug where the F-63 heartbeat header wasn't counted here. By
+// passing buildReceiptCard's count through, the two stay
+// locked and any future section added to the card builder
+// automatically participates in the overflow guard.
 //
-// Note: this duplicates the element-counting logic in
-// buildReceiptCard; both must stay in sync. If a future change adds
-// a new section to the card (e.g. restored F-25 prompt state
-// header), update both functions.
-func receiptBodyStats(entries []LogEntry, tasks []agent.AgentTaskItem, footerLines []string, body string) (elementCount int, bodyBytes int) {
-	bodyBytes = len(body)
-	for range entries {
-		// Each entry produces 1+ div elements (split per
-		// divTextCharLimit). We count the worst case (1) here;
-		// overflow detection errs on the safe side. buildReceiptCard
-		// may produce more for long entries, so the actual
-		// element count can exceed this estimate — the overflow
-		// guard fires earlier in that case (good).
-		elementCount++
-	}
-	for range buildTaskChecklistChunks(tasks) {
-		elementCount++
-	}
-	// Footer occupies one <hr> element plus one <div> wrapper
-	// containing one <plain_text> per footer line — see
-	// buildReceiptCard in adapter.go for the layout. The +1
-	// is the <hr>; the <div> itself is a single element even
-	// when wrapping multiple <plain_text> children.
-	if len(footerLines) > 0 {
-		elementCount += 1 + 1 // hr + div wrapper
-	}
-	return
+// Kept as a function (rather than inlining at the call site)
+// so the overflow check reads as one operation: "size + count
+// for THIS would-be body". The (entries, tasks, footerLines)
+// arguments are unused but kept on the signature for symmetry
+// with the original API — call sites that already have these
+// in scope don't need to refactor.
+//
+// Note: a future change could swap this for `json.Unmarshal` +
+// `len(parsed.Body.Elements)` to remove the need to thread
+// elementCount through buildReceiptCard. The trade-off is the
+// parse cost (~5µs per AppendEntry call) — not worth it until
+// the AppendEntry hot path becomes a bottleneck.
+func receiptBodyStats(entries []LogEntry, tasks []agent.AgentTaskItem, footerLines []string, body string, elementCount int) (int, int) {
+	_ = entries
+	_ = tasks
+	_ = footerLines
+	return elementCount, len(body)
 }

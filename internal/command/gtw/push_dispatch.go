@@ -3,21 +3,9 @@ package gtw
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
-
-// RunOnceTimeout is the hard deadline for a one-shot agent call
-// used by both /gtw commit (F-XX split: was Branch 2 of push) and
-// /gtw pr. 5 minutes covers realistic agent commits (lint fixes,
-// conflict resolution, multi-tool flows) and PR-body generation
-// without wedging the dispatcher if an agent hangs (e.g. PTY
-// fallback with no idle signal — see pty.RunOnce's ptyIdleTimeout
-// for the per-call short-window heuristic).
-//
-// Exported because both /gtw commit and /gtw pr use it.
-const RunOnceTimeout = 5 * time.Minute
 
 // dispatchPush is the dispatcher for /gtw push. After the F-XX
 // commit/push split, this dispatcher is push-only: it does NOT

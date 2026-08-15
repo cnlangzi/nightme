@@ -11,6 +11,45 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Centralise task timeouts in `internal/timeouts`
+
+Every shell / agent / hook / CLI / reply deadline in the codebase
+now derives from a single package: `internal/timeouts`. The four
+scattered constants (`shellTimeout` 5m, `hookTimeout` 30s,
+`RunOnceTimeout` 5m, plus the implicit zero for git/gh via
+`runCmd`) and `replyTimeout` (5s) are gone — replaced by named
+constants in one file, retuned for the LLM era.
+
+**New constants:**
+
+| Name | Value | Caps | Replaces |
+| --- | --- | --- | --- |
+| `timeouts.Shell` | 30 m | `!cmd` user shell | `shellTimeout` (5 m) |
+| `timeouts.Agent` | 30 m | `RunOnce` (commit / pr) | `RunOnceTimeout` (5 m) |
+| `timeouts.Hook` | 30 m | gtw before/after hooks | `hookTimeout` (30 s) |
+| `timeouts.CLI` | 5 m | git / gh / glab subprocess | (none — implicit zero, hung the daemon) |
+| `timeouts.Reply` | 5 s | outbound IM summary card | `replyTimeout` (5 s, was local to `shell/dispatch.go`) |
+
+**Why 30 min for execution budgets:** a single Sonnet/Opus-class
+fix cycle is multi-turn (read → edit → test → iterate) and tools
+like `npm install` / `cargo build` routinely exceed 5 minutes.
+The old 5 min budgets were silently truncating real work mid-edit.
+
+**`runCmd` safety net (new):** when a caller forgets to wrap
+ctx with a deadline (passes `context.Background()`), `runCmd`
+applies `timeouts.CLI` (5 min) so a hung `git push` can't park
+the dispatcher. Caller-supplied deadlines always win — the new
+`TestRunCmd_RespectsCallerDeadline` pins this contract.
+
+**User-facing config:** none. The constants are the policy; tune
+later by editing `internal/timeouts/timeouts.go`.
+
+**Test coverage:** new `internal/timeouts/timeouts_test.go`
+asserts every value is `(0, 24h]` so accidental regressions
+(zero disables the kill path, > 24h is almost certainly a typo)
+fail loudly. The hook-only check that previously lived in
+`hooks_test.go` is removed in favour of the unified one.
+
 ### `statusbar`: split `Uncommitted` into Added / Deleted / Modified / Conflicts
 
 The git status footer line now follows the iTerm2 / powerlevel10k

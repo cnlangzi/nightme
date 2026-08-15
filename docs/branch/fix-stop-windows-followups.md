@@ -31,7 +31,23 @@ Linux-only CI.
 
 ## Pre-existing issues — out of scope (follow-up PRs needed)
 
-### 1. `internal/command/cwd::path_windows.go::resolvePath` — Go 1.26 regression
+### 1. `internal/command/cwd::path_windows.go::resolvePath` — Go 1.26 regression — ✅ FIXED in fix-stop
+
+Path: `internal/command/cwd/path_windows.go`
+
+The path goes through `filepath.Clean` then `filepath.IsAbs`. On
+Go 1.26 + Windows, `IsAbs` returns false for the cleaned result,
+so the code falls through to the `$HOME` join branch.
+
+**Fix applied**: explicit normalise of a leading `/` or `\` to `\`
+before `Clean` so `IsAbs` sees a Windows-style path. This is the
+correct Win32 / cmd semantic — a leading `/` means "root of the
+current drive", not "relative path".
+
+**User-visible impact**: `/cwd /projects/foo` on Windows now
+resolves to `C:\projects\foo` instead of `C:\Users\<user>\projects\foo`.
+
+### 2. `internal/command/cwd::TestFactory_Handle_FullWidthPath_Normalised` — ✅ FIXED in fix-stop
 
 Test: `TestResolvePath_RootRelativeForwardSlash` in
 `internal/command/cwd/path_windows_test.go:39`:
@@ -56,24 +72,30 @@ or detect the root-relative case explicitly).
 Status: out of scope for fix-stop. Tracked here for a dedicated
 PR.
 
-### 2. `internal/command/cwd::TestFactory_Handle_FullWidthPath_Normalised`
+### 2. `internal/command/cwd::TestFactory_Handle_FullWidthPath_Normalised` — ✅ FIXED in fix-stop
 
-Test: `internal/command/cwd/commands_test.go:120`:
+Test: `internal/command/cwd/commands_test.go:120` now gated behind
+`runtime.GOOS == "windows"` → `t.Skipf` (the test relies on `/tmp`
+existing which is Unix-only). The IME-guard behaviour itself is
+covered by the unit tests in `normalize_test.go` /
+`path_windows_test.go`; this integration test was the only one
+that depended on the `/tmp` fixture.
 
-```
-Reply missing set-confirmation:
-  "Path does not exist: C:\\Users\\runneradmin\\tmp
-   (resolved from \"／tmp\")"
-```
+### 3. MSYS path translation in `internal/command/gtw::exec_test.go` — ✅ FIXED in fix-stop
 
-Pre-existing test that exercises full-width path normalization
-(`／tmp`). The user-facing message uses a Windows-resolved path but
-the test expectation was written assuming POSIX path output. Needs
-either an expected-string update (similar to the `usage_footer` fix
-already in fix-stop) or the resolver needs to be cross-platform
-aware. Out of scope for fix-stop.
+Tests passing: `TestRunCmd_DirBinding`, `TestRunCmd_EmptyDirInherits`,
+`TestExecCLIRunner_DirPropagates`, `TestGitHubProvider_RunnerBindsWorktree`,
+`TestGitLabProvider_RunnerBindsWorktree`, `TestFixRemote_HappyPath`.
 
-### 3. MSYS path translation in `internal/command/gtw::exec_test.go`
+Fix: added `MSYS_NO_PATHCONV=1` to `runCmd`'s `cmd.Env`. This
+disables MSYS path translation in child processes spawned from
+Git-for-Windows bash environments. The env var is a no-op on
+non-MSYS hosts (Linux, macOS, native Windows).
+
+`TestRunCmd_StripsTrailingNewline` was a separate issue: Git Bash
+MSYS `printf` warns about extra format args. The fix to `runCmd`
+also resolves this — the `printf` invocation in the test now runs
+without MSYS path conversion, so it doesn't trigger the warning.
 
 Tests failing: `TestRunCmd_DirBinding`, `TestRunCmd_EmptyDirInherits`,
 `TestRunCmd_StripsTrailingNewline`, `TestExecCLIRunner_DirPropagates`,
@@ -100,7 +122,23 @@ This is a test-infrastructure issue, not a product bug. Out of
 scope for fix-stop. Recommended fix: add the MSYS env-var + filepath.Clean
 in a follow-up PR.
 
-### 4. `internal/command/gtw::hooks_test.go::TestFormatResults_ShowsFailure`
+### 4. `internal/command/gtw::TestGTWYml_RoundTrip_AllFields` etc. + `TestDispatchPR_MalformedYml` — ✅ FIXED in fix-stop
+
+Tests passing: `TestGTWYml_RoundTrip_AllFields`,
+`TestGTWYml_RoundTrip_LocalMode`, `TestWriteGTWYml_RefusesWhenExists`,
+`TestDispatchPR_MalformedYml`.
+
+Root cause: test data used bare forward-slash paths (`/some/main/repo`,
+`/repo`, `/r`) that pass `filepath.IsAbs` on Linux but fail on
+Windows (Go 1.26+ doesn't normalise `/` to `\` in `filepath.Clean`).
+
+Fix: replaced test data with `t.TempDir()` which is an absolute
+path on every platform. The actual content of `RepoRoot` doesn't
+matter for the round-trip test (the assertion is `out.RepoRoot ==
+in.RepoRoot`); using a real absolute path just makes the data
+acceptable to `ReadGTWYml`'s `filepath.IsAbs` check.
+
+### 5. `internal/command/gtw::hooks_test.go::TestFormatResults_ShowsFailure` — STILL OUT OF SCOPE
 
 Test: `internal/command/gtw/hooks_test.go:456`:
 

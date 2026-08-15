@@ -57,14 +57,26 @@ func resolvePath(expanded string) (string, error) {
 			expanded, expanded, expanded)
 	}
 
-	cleaned := filepath.Clean(expanded)
+	// Go 1.26's filepath.Clean no longer normalises a leading
+	// "/" to "\" on Windows (Clean preserves the volume name
+	// verbatim and treats "/" as a non-absolute root-relative
+	// marker). Without this explicit fix-up, a user typing
+	// `/cwd /projects/foo` would get `IsAbs("/projects/foo") ==
+	// false` and the code would fall through to the $HOME-join
+	// branch, silently resolving to `$HOME\projects\foo` —
+	// exactly the bug this file was written to fix.
+	//
+	// Win32 / cmd convention: a leading "/" or "\" on Windows
+	// means "root of the current drive" (e.g. `/projects\foo`
+	// from `C:\` resolves to `C:\projects\foo`). Normalise
+	// BEFORE Clean so IsAbs sees `\` and returns true.
+	normalised := expanded
+	if len(normalised) > 0 && (normalised[0] == '/' || normalised[0] == '\\') {
+		normalised = "\\" + normalised[1:]
+	}
 
-	// After Clean, filepath.IsAbs on Windows covers every
-	// absolute form we want: drive-rooted (C:\), the
-	// forward-slash variant (Clean normalises / to \),
-	// backslash-rooted, and UNC. This is the key fix for
-	// the original "/foo joined with $HOME" bug — Clean
-	// turns "/" into "\" before IsAbs sees it.
+	cleaned := filepath.Clean(normalised)
+
 	if filepath.IsAbs(cleaned) {
 		return filepath.Abs(cleaned)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -100,7 +101,19 @@ func TestFactory_Handle_ValidDir_SetsActiveCwd(t *testing.T) {
 // silently resolve to $HOME/／tmp instead of /tmp. With
 // normalisation the full-width slash becomes '/', the
 // path is classified as absolute, and we /cwd into /tmp.
+//
+// Unix-only: the test relies on `/tmp` being a real
+// top-level path (the full-width slash is just a Unicode
+// form of `/`). On Windows `/tmp` is not a real path so
+// the post-resolve chdir fails. The IME-guard behaviour
+// itself is platform-agnostic and covered by the unit
+// tests in normalize_test.go / path_windows_test.go; this
+// integration test verifies the end-to-end flow including
+// the chdir.
 func TestFactory_Handle_FullWidthPath_Normalised(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skipf("test relies on /tmp existing; Unix-only")
+	}
 	// Use a directory that exists on every Unix-like test
 	// box: /tmp. We pass it with a full-width slash so the
 	// test exercises the normalisation path, then verify

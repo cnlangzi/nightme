@@ -156,7 +156,16 @@ func TestGTWYml_RoundTrip_AllFields(t *testing.T) {
 		Issue:     42,
 		Branch:    "fix/42-foo",
 		Worktree:  wt,
-		RepoRoot:  "/some/main/repo",
+		// RepoRoot must be a path that passes filepath.IsAbs on the
+		// test's host OS. Linux/macOS: any leading-slash path is
+		// absolute. Windows: filepath.Clean("/foo") does NOT
+		// normalise "/" to "\" in Go 1.26+, so filepath.IsAbs
+		// rejects bare forward-slash paths. We use t.TempDir()
+		// which is always absolute on every platform. The exact
+		// content of RepoRoot doesn't matter for the round-trip
+		// test — we just need the data to be accepted and come
+		// back unchanged.
+		RepoRoot:  wt,
 		Repo:      "cnlangzi/nightme",
 		Provider:  "github",
 		State:     StateFixing,
@@ -207,7 +216,11 @@ func TestGTWYml_RoundTrip_LocalMode(t *testing.T) {
 		Issue:    -1,
 		Branch:   "login-bug",
 		Worktree: wt,
-		RepoRoot: "/some/main/repo",
+		// See TestGTWYml_RoundTrip_AllFields for the t.TempDir()
+		// choice rationale — this is a Unix-vs-Windows portable
+		// absolute path so the ReadGTWYml absolute-path check
+		// passes on every host.
+		RepoRoot: wt,
 		// Repo / Provider deliberately empty for local mode.
 		State:     StateFixing,
 		UpdatedAt: fixedNow(),
@@ -246,7 +259,10 @@ func TestWriteGTWYml_RefusesWhenExists(t *testing.T) {
 
 	first := Context{
 		Mode: ModeRemote, Issue: 1, Branch: "fix/1",
-		Worktree: wt, RepoRoot: "/repo", Repo: "o/r", Provider: "github",
+		// See TestGTWYml_RoundTrip_AllFields for the t.TempDir()
+		// choice — see also the comment in the previous test for
+		// why bare forward-slash paths fail on Go 1.26+ Windows.
+		Worktree: wt, RepoRoot: wt, Repo: "o/r", Provider: "github",
 		State: StateFixing, UpdatedAt: fixedNow(),
 	}
 	if err := WriteGTWYml(wt, first, fixedNow); err != nil {
@@ -255,7 +271,7 @@ func TestWriteGTWYml_RefusesWhenExists(t *testing.T) {
 
 	second := Context{
 		Mode: ModeRemote, Issue: 2, Branch: "fix/2",
-		Worktree: wt, RepoRoot: "/repo", Repo: "o/r", Provider: "github",
+		Worktree: wt, RepoRoot: wt, Repo: "o/r", Provider: "github",
 		State: StateFixing, UpdatedAt: fixedNow(),
 	}
 	err := WriteGTWYml(wt, second, fixedNow)

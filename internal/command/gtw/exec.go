@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -50,6 +51,15 @@ func runCmd(ctx context.Context, dir, name string, args ...string) (stdout, stde
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	// MSYS path translation off: when the child is spawned from
+	// a Git-for-Windows bash environment (e.g. GitHub Actions
+	// windows-latest runner), `cmd.Dir = "D:\a\foo"` would be
+	// translated to `/d/a/foo` by MSYS before the child sees it,
+	// making the child's `pwd` output disagree with what we
+	// passed in. Setting `MSYS_NO_PATHCONV=1` disables the
+	// translation. On non-MSYS hosts the env var is a harmless
+	// no-op.
+	cmd.Env = append(os.Environ(), "MSYS_NO_PATHCONV=1")
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
 	cmd.Stderr = &se

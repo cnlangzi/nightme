@@ -53,13 +53,33 @@ func runCmd(ctx context.Context, dir, name string, args ...string) (stdout, stde
 	}
 	// MSYS path translation off: when the child is spawned from
 	// a Git-for-Windows bash environment (e.g. GitHub Actions
-	// windows-latest runner), `cmd.Dir = "D:\a\foo"` would be
-	// translated to `/d/a/foo` by MSYS before the child sees it,
-	// making the child's `pwd` output disagree with what we
-	// passed in. Setting `MSYS_NO_PATHCONV=1` disables the
-	// translation. On non-MSYS hosts the env var is a harmless
-	// no-op.
-	cmd.Env = append(os.Environ(), "MSYS_NO_PATHCONV=1")
+	// windows-latest runner, or a user running nightme from
+	// Git Bash), `cmd.Dir = "D:\a\foo"` would be translated to
+	// `/d/a/foo` by MSYS before the child sees it, making the
+	// child's `pwd` output disagree with what we passed in.
+	//
+	// We set BOTH the v1 and v2 knobs to cover all MSYS variants
+	// in one shot:
+	//
+	//   - MSYS_NO_PATHCONV=1     — the original MSYS / Git for
+	//     Windows v1 switch. Disables path conversion in the
+	//     argv the bash layer passes to CreateProcess.
+	//   - MSYS2_ARG_CONV_EXCL=*  — the MSYS2 / Git for Windows
+	//     v2 switch (added in 2024). Disables the newer
+	//     pattern-based converter that v1's MSYS_NO_PATHCONV
+	//     didn't fully cover. `*` excludes every arg from
+	//     conversion.
+	//
+	// On non-MSYS hosts (Linux, macOS, native Windows, WSL bash)
+	// both env vars are harmless no-ops. Setting them
+	// unconditionally is the simplest policy: nightme sets
+	// cmd.Dir to an exact Windows path, and we want the child
+	// to see that exact path. Users who run nightme from a
+	// MSYS-aware shell expect this behavior.
+	cmd.Env = append(os.Environ(),
+		"MSYS_NO_PATHCONV=1",
+		"MSYS2_ARG_CONV_EXCL=*",
+	)
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
 	cmd.Stderr = &se

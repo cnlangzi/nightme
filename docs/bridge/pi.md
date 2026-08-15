@@ -71,7 +71,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 |---|---|---|---|
 | `agent_start` | — | (log debug) | 不入 events |
 | `agent_end` | `willRetry` | (log debug) | **不**作为 turn 终态 |
-| `agent_settled` | — | ⟪F-52⟫ **`EventResult{...}` → `EventDone{Reason:"settled"}`** | turn 终态；**不关 channel**。result 必须排在 done **之前**——runtime readpump 在 EventDone 切 Idle 并 flush 队列。若本 turn 未观察到任何事件（out-of-band settle，如 fire-and-forget 压缩），**只发 EventDone**，不发 result——否则用户会收到一张莫名的「Done.」卡片。见 [F-52 §2.4.3](./../bridge/pi.md) |
+| `agent_settled` | — | ⟪F-52⟫ **`EventResult{...}` → `EventDone{Reason:"settled"}`** | turn 终态；**不关 channel**。result 必须排在 done **之前**——runtime readpump 在 EventDone 切 Idle 并 flush 队列。若本 turn 未观察到任何事件（out-of-band settle，如 fire-and-forget 压缩），**只发 EventDone**，不发 result——否则用户会收到一张莫名的「Done.」卡片。见 [F-52 §2.4.3](./../bridge/pi.md)<br><br>**用户视觉行为**：在 text+tool 的 turn 里，model 有时会在最后一次 tool call 之后**不再发一句收尾的话**。此时 pi 的最终 `message_end.content[]` 只有 thinking / toolCall，没有 text block——bridge 的 `finishTurnLocked` 三级 fallback 全空，落 `emptyReplyFallback = "Done."`。Channel 把它渲染成 📝 卡片文字。Rolling log 里 user 已经通过 `EventAgentText` 看到了之前的 narration（tool 边界 flush），所以这不是 agent 的真实回复，是占位符。**这是 by-design**——保证 `OutboundMessage.Usage` 不丢(StatusBar token 行)。不同 model 触发频率不同:sensenova-flash-lite 几乎不出现,Anthropic Claude / GPT 短确认回复更容易出现。 |
 | `turn_start` / `turn_end` | — | (log debug) | 暂不消费 |
 | `message_start` | `message` | (log debug) | — |
 | `message_update` `{assistantMessageEvent:{type:"text_start"}}` | `contentIndex` | ⟪F-52⟫ no-op（重置该 index 的缓冲） | 防御:漏掉的 text_end 不会把上一块尾巴串进来 |
@@ -609,6 +609,13 @@ openclaw ──ACP(stdio JSON-RPC 2.0)──> npx pi-acp@^0.0.31 ──> pi --mo
 3. `emptyReplyFallback = "Done."` — 兜底常量。
 
 第 3 条**不是装饰**。`gateway.Translate` 会丢弃 `Text==""` 且 `IsError==false` 的 EventResult，而 runtime 是从**翻译后**的 OutboundMessage 上读 Usage 的——空文本会把这一轮的 token 数一起带走（抽象/具体 边界规范（空文本被丢弃））。本次不动共享层，所以由 bridge 侧保证 Text 非空，让 usage 100% 通过。
+
+**用户视觉行为（"Done." 什么时候会出现在 IM 里）**：
+
+- **不出现**：纯文本回复 / final message 有 text / `active=false`(out-of-band settle)
+- **出现**：turn 内有 streaming text(`textDelivered=true`) + final `message_end.content[]` 没有 text block(只有 thinking / toolCall / 空)
+
+channel 把 Text 渲染成 📝 卡片文字。Rolling log 里 user 已经通过 💬(EventAgentText)看到了之前的 narration；📝 只是为了让 OutResult 不被 gateway drop,从而保住 StatusBar token footer。这跟 cc-connect / openclaw 的 `EMPTY_REPLY_FALLBACK_TEXT` 同源——是协议适配层的最小占位策略。**不是 bug,是 by-design**。不同 model 触发频率不同:sensenova-flash-lite 几乎不出现,Anthropic Claude / GPT 短确认回复更容易出现。
 
 #### 2.4.1 `textDelivered` 守卫（review 阶段发现的缺陷）
 

@@ -10,10 +10,10 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // --- Load() ---
@@ -926,9 +926,11 @@ func cmdCfgIsZero(c CmdConfig) bool {
 		len(c.Hooks.After) == 0
 }
 
-// Ensure timeout is reasonable (sanity check the const).
-func TestHookTimeout_Reasonable(t *testing.T) {
-	if hookTimeout <= 0 || hookTimeout > 5*time.Minute {
-		t.Errorf("hookTimeout = %v, want > 0 and <= 5m", hookTimeout)
+// Ensure the centralised hook timeout is a positive duration;
+// a zero or negative value would silently disable the kill path
+// in runOneHook.
+func TestTimeoutsHook_Positive(t *testing.T) {
+	if timeouts.Hook <= 0 {
+		t.Errorf("timeouts.Hook must be positive, got %v", timeouts.Hook)
 	}
 }

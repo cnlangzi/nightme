@@ -77,8 +77,14 @@ func TestRunPrintMode_HappyPath(t *testing.T) {
 	if result.SessionID == "" {
 		t.Logf("SessionID empty (--json event not parsed); may be expected on older codex versions")
 	}
-	t.Logf("result: Text=%q Subtype=%s DurationMs=%d SessionID=%s Usage=%+v",
-		result.Text, result.Subtype, result.DurationMs, result.SessionID, result.Usage)
+	// Model is parsed from the item.completed error event (best-effort:
+	// depends on codex emitting the "Model metadata for `...` not found"
+	// wire shape. Older versions or non-error paths may not surface it).
+	if result.Model == "" {
+		t.Logf("Model empty (item.completed error event not parsed); may be expected on older codex versions or non-error paths")
+	}
+	t.Logf("result: Text=%q Subtype=%s DurationMs=%d SessionID=%s Model=%s Usage=%+v",
+		result.Text, result.Subtype, result.DurationMs, result.SessionID, result.Model, result.Usage)
 }
 
 // TestRunPrintMode_EmptyWorkspaceFails — guards the workspace

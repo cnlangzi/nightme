@@ -3,8 +3,6 @@
 // Why this exists (F-CODEX-PRINT-001, 2026-08-14):
 //
 // The codex bridge historically had ONE spawn recipe for RunOnce:
-//
-// The codex bridge historically had ONE spawn recipe for RunOnce:
 // the long-lived `codex app-server` path used by Starter.Start.
 // RunOnce would Start + defer Close + drain Events() until
 // EventAgentResult, then Close (which on codex paid a 5s
@@ -221,12 +219,25 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// complete when the child closes its pipes (typically right
 	// before exit).
 	var sessionID string
+	var model string
 	var usage *agent.UsageInfo
 	jsonReadErr := runNDJSON(ctx, stdout, func(ev codexExecEvent) {
 		switch ev.Type {
 		case "thread.started":
 			if sessionID == "" && ev.ThreadID != "" {
 				sessionID = ev.ThreadID
+			}
+		case "item.completed":
+			// The first item.completed error event carries the
+			// model name in its message (codex-cli 0.145+):
+			//   "Model metadata for `MiniMax-M3` not found. ..."
+			// We parse it as a best-effort signal so the AgentBar
+			// footer can render "🤖: codex · <model>" instead of
+			// just "🤖: codex".
+			if model == "" && ev.Item != nil && ev.Item.Type == "error" {
+				if m := extractModelFromError(ev.Item.Message); m != "" {
+					model = m
+				}
 			}
 		case "turn.completed":
 			if ev.Usage != nil {
@@ -267,6 +278,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	result := agent.RunResult{
 		Text:       finalText,
 		Usage:      usage,
+		Model:      model,
 		SessionID:  sessionID,
 		DurationMs: elapsedMs,
 		Subtype:    subtype,
@@ -437,7 +449,16 @@ func countImageFlags(args []string) int {
 type codexExecEvent struct {
 	Type     string          `json:"type"`
 	ThreadID string          `json:"thread_id,omitempty"` // thread.started
+	Item     *codexExecItem  `json:"item,omitempty"`     // item.completed
 	Usage    *codexExecUsage `json:"usage,omitempty"`    // turn.completed
+}
+
+// codexExecItem is the `item` payload inside item.completed events.
+// We only care about the error variant that carries the model name.
+type codexExecItem struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Message string `json:"message,omitempty"` // error message
 }
 
 type codexExecUsage struct {
@@ -490,6 +511,28 @@ func runNDJSON(ctx context.Context, r io.Reader, cb func(codexExecEvent)) error 
 		return err
 	}
 	return nil
+}
+
+// extractModelFromError parses the model name from the
+// `item.completed` error message that codex exec emits on every
+// run. The canonical format (codex-cli 0.145+) is:
+//
+//	Model metadata for `MiniMax-M3` not found. Defaulting to...
+//
+// We extract the text between the first pair of backticks.
+// Returns "" when the message doesn't match the expected shape.
+func extractModelFromError(msg string) string {
+	const prefix = "Model metadata for `"
+	i := strings.Index(msg, prefix)
+	if i < 0 {
+		return ""
+	}
+	rest := msg[i+len(prefix):]
+	j := strings.Index(rest, "`")
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // truncateForLog shortens a line for inclusion in error / log

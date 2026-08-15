@@ -48,4 +48,40 @@
 // sandbox policy / compaction / etc.) flows from dsh's local
 // defaults at `~/.dsh/settings.yaml` + `~/.dsh/.credentials.yaml`.
 // See docs/bridge/dsh.md for the full rationale.
+//
+// # Internal architecture (F-DSH-CHAT-001)
+//
+// The chat-session event translation layer is split into three
+// cooperating components (all dsh-private — none of these are
+// exposed to the agent / channel packages):
+//
+//   - translator (translate.go): F-52 streaming state machine.
+//     Holds textBuf, pendingTools, and per-turn F-52 buffers
+//     (pendingText / lastText / textDelivered / active). Mutated
+//     by handler functions in dispatch.go.
+//
+//   - wireState (state.go): multi-source normalized truth mirror.
+//     Holds tasks (by TodoItem ID), tools (by CallID), inflight
+//     (tool_callIDs awaiting result), and title. Fed by three
+//     wire sources (raw session/event via dispatcher, session/
+//     projection via handle_mux, and ToolEventView via dispatcher).
+//     Exposes DumpWireStats for ops triage.
+//
+//   - dispatcher (dispatch.go): registration-driven envelope
+//     router. Replaces the prior `switch env.Type` in translate.go
+//     with a registry of eventHandler functions; adding new event
+//     types = new registration line + new handler, no switch
+//     default to maintain.
+//
+// Lock discipline: dispatcher.dispatch acquires translator.mu +
+// wireState.mu at entry (fixed order: translator first, wireState
+// second). Handlers run with both locks held and MUST NOT
+// re-acquire either (would deadlock). deliver() is invoked AFTER
+// the locks are released. handle_mux.go's session/projection
+// path runs OUTSIDE the dispatcher lock window and acquires
+// only wireState.mu.
+//
+// Observability (P4): wireState maintains a 64-frame ring buffer
+// of recent mux frames and an unknownCount counter; DumpWireStats
+// surfaces both for ops triage.
 package dsh

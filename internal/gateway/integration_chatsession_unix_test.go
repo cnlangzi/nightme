@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -353,9 +354,6 @@ func (d *integrationFakeDriver) SendPermission(resp string) error {
 }
 func (d *integrationFakeDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *integrationFakeDriver) Stop(ctx context.Context) error  { return d.inner.Stop(ctx) }
-func (d *integrationFakeDriver) SetModel(ctx context.Context, providerID, modelID string) error {
-	return d.inner.SetModel(ctx, providerID, modelID)
-}
 func (d *integrationFakeDriver) Close() error                   { return d.inner.Close() }
 func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
@@ -363,9 +361,6 @@ func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) erro
 func (f *integrationFake) SendPermission(string) error { return nil }
 func (f *integrationFake) New(context.Context) error   { return nil }
 func (f *integrationFake) Stop(context.Context) error { return agent.ErrNotSupported }
-func (f *integrationFake) SetModel(context.Context, string, string) error {
-	return agent.ErrNotSupported
-}
 func (f *integrationFake) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	if err := f.SendBlocks(ctx, blocks); err != nil {
 		return agent.RunResult{}, err
@@ -499,15 +494,31 @@ func TestIntegration_RealBridge_FakeShell(t *testing.T) {
 	// prompt body followed by a single \n, so one read is enough.
 	body := `#!/bin/bash
 echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"claude-test","cwd":"/tmp"}'
-# Anchor barrier: wait for the bridge to write the prompt on
-# stdin before emitting the assistant turn. Without this, the
-# readpump races the test's QueueUserMessage and the assistant
-# event often lands with currentPrompt still nil → empty
-# UserMsgID → messages.OutReply.ReplyTo = "" assertion failure.
-read -t 30 _PROMPT || true
-echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
-echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
-exit 0
+# Anchor barrier + stay-alive loop. The while-read serves two
+# purposes:
+#
+#  (a) Anchor barrier: wait for the bridge to write the prompt on
+#      stdin before emitting the assistant turn. Without this,
+#      the readpump races the test's QueueUserMessage and the
+#      assistant event lands with currentPrompt still nil, which
+#      yields empty UserMsgID and breaks the OutReply.ReplyTo
+#      assertion below.
+#
+#  (b) Stay alive: the script MUST NOT exit between prompts. A
+#      real Claude Code CLI stays alive on stdin; if the script
+#      exits 0, the bridge lifecycle sees isClosed(closed)==false
+#      (no bridge.Close call yet) and emits EventAgentError,
+#      which the readpump terminal-handler forwards to endPrompt,
+#      clearing currentPrompt BEFORE the assistant/result events
+#      are stamped with UserMsgID. The script exits naturally on
+#      stdin EOF when the test's deferred as.Shutdown drives
+#      bridge.Close, which sends SIGINT to the process group;
+#      bash dies in non-interactive mode, the lifecycle sees
+#      graceful==true, and no EventAgentError is emitted.
+while read -t 30 _PROMPT; do
+  echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
+  echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
+done
 `
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -522,10 +533,32 @@ exit 0
 		t.Skipf("bash not on PATH (%v) — fake script requires bash; skipping", err)
 	}
 
+	// Sanity check: `stdbuf` must be on PATH. Without it the bash
+	// script uses 4 KiB block-buffered stdout when connected to a
+	// pipe (Go's cmd.StdoutPipe), so the bridge's readpump can see
+	// EOF before assistant/result are flushed — a race exposed by
+	// `go test -race` (commit 7ad4432's `lifecycle()` goroutine
+	// closes the events channel promptly, making the timing window
+	// wider than the pre-refactor architecture).
+	if _, err := exec.LookPath("stdbuf"); err != nil {
+		t.Skipf("stdbuf not on PATH (%v) — fake script requires stdbuf -oL for line-buffered stdout; skipping", err)
+	}
+
 	// Spawner that drives the real claudecode bridge against our
-	// fake shell. registrySpawner calls Agent.Start which calls
-	// newSession which exec's our script.
-	realAgent := claudecode.NewStarter("claude", script, nil)
+	// fake shell. We can't pass `stdbuf -oL` directly as the bridge's
+	// command — the bridge prepends its DefaultArgs (--input-format,
+	// --output-format, --permission-mode, --verbose) to every spawn,
+	// and stdbuf would try (and fail) to parse those flags as its
+	// own options. Instead we write a tiny wrapper script that
+	// ignores $@ and `exec stdbuf -oL bash <fake>` itself; this puts
+	// the fake behind line-buffered stdout regardless of how the
+	// bridge decides to invoke it.
+	wrapper := filepath.Join(dir, "fake-claude-wrapper.sh")
+	wrapperBody := fmt.Sprintf("#!/bin/bash\nexec stdbuf -oL bash %q\n", script)
+	if err := os.WriteFile(wrapper, []byte(wrapperBody), 0o755); err != nil {
+		t.Fatalf("WriteFile wrapper: %v", err)
+	}
+	realAgent := claudecode.NewStarter("claude", wrapper, nil)
 	spawner := &realBridgeSpawner{agent: realAgent}
 
 	cs := newIntegrationChatSession("oc_real_bridge", spawner)

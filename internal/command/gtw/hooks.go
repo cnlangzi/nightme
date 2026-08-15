@@ -7,13 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/shell"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // Config is the user-level gtw configuration loaded from
@@ -176,11 +176,8 @@ type HookResult struct {
 	Err      error  // non-nil on any execution failure
 }
 
-// hookTimeout caps a single hook's runtime. After this it is
-// killed (SIGKILL via context) and reported as a failure. The
-// 30s default is generous for shell hooks while still preventing
-// a hung binary from stalling the chat.
-const hookTimeout = 30 * time.Second
+// Centralised in internal/timeouts (timeouts.Hook) — see that
+// package for the LLM-era rationale.
 
 // HookContext carries the per-invocation state that flows from
 // /gtw command dispatch into every hook subprocess. It is the
@@ -270,7 +267,7 @@ func runOneHook(ctx context.Context, h Hook, hc HookContext, cwd string) HookRes
 		}
 	}
 
-	hctx, cancel := context.WithTimeout(ctx, hookTimeout)
+	hctx, cancel := context.WithTimeout(ctx, timeouts.Hook)
 	defer cancel()
 
 	// Shell execution goes through internal/shell so the platform

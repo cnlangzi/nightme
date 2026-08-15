@@ -13,6 +13,7 @@ package codex
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -140,6 +141,100 @@ func TestRunNDJSON_HandlesEOFAfterPartialEvents(t *testing.T) {
 	}
 	if got.ThreadID != "only-one" {
 		t.Errorf("ThreadID = %q, want only-one", got.ThreadID)
+	}
+}
+
+// TestExtractModelFromError_HappyPath — verifies the model name
+// is correctly extracted from the item.completed error message
+// that codex exec emits on every run.
+func TestExtractModelFromError_HappyPath(t *testing.T) {
+	msg := "Model metadata for `MiniMax-M3` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+	got := extractModelFromError(msg)
+	if got != "MiniMax-M3" {
+		t.Errorf("extractModelFromError = %q, want %q", got, "MiniMax-M3")
+	}
+}
+
+// TestExtractModelFromError_WithModelFlag — model name passed via
+// -m flag should also be parseable.
+func TestExtractModelFromError_WithModelFlag(t *testing.T) {
+	msg := "Model metadata for `gpt-4o` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+	got := extractModelFromError(msg)
+	if got != "gpt-4o" {
+		t.Errorf("extractModelFromError = %q, want %q", got, "gpt-4o")
+	}
+}
+
+// TestExtractModelFromError_EmptyMessage — empty message should
+// return empty string.
+func TestExtractModelFromError_EmptyMessage(t *testing.T) {
+	if got := extractModelFromError(""); got != "" {
+		t.Errorf("extractModelFromError('') = %q, want ''", got)
+	}
+}
+
+// TestExtractModelFromError_NoMatch — unrelated error message
+// should return empty string.
+func TestExtractModelFromError_NoMatch(t *testing.T) {
+	msg := "Some other error that doesn't contain the model name"
+	if got := extractModelFromError(msg); got != "" {
+		t.Errorf("extractModelFromError = %q, want ''", got)
+	}
+}
+
+// TestExtractModelFromError_UnclosedBacktick — malformed message
+// with unclosed backtick should return empty string.
+func TestExtractModelFromError_UnclosedBacktick(t *testing.T) {
+	msg := "Model metadata for `MiniMax-M3 not found."
+	if got := extractModelFromError(msg); got != "" {
+		t.Errorf("extractModelFromError = %q, want ''", got)
+	}
+}
+
+// TestExtractModelFromError_NameWithSpaces — model names with spaces
+// must parse correctly (real-world models like "gpt-4 turbo" or
+// "claude 3.5 sonnet" include spaces).
+func TestExtractModelFromError_NameWithSpaces(t *testing.T) {
+	msg := "Model metadata for `gpt-4 turbo` not found. Defaulting to fallback metadata."
+	if got := extractModelFromError(msg); got != "gpt-4 turbo" {
+		t.Errorf("extractModelFromError = %q, want %q", got, "gpt-4 turbo")
+	}
+}
+
+// TestRunNDJSON_ParsesItemCompletedError — verifies that the Item
+// field is correctly parsed from item.completed error events.
+func TestRunNDJSON_ParsesItemCompletedError(t *testing.T) {
+	const itemMsg = "Model metadata for `MiniMax-M3` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+	in := strings.NewReader(fmt.Sprintf(
+		`{"type":"item.completed","item":{"id":"item_0","type":"error","message":%q}}`+"\n",
+		itemMsg,
+	))
+
+	var ev codexExecEvent
+	err := runNDJSON(context.Background(), in, func(e codexExecEvent) {
+		ev = e
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if ev.Type != "item.completed" {
+		t.Errorf("type = %q, want item.completed", ev.Type)
+	}
+	if ev.Item == nil {
+		t.Fatal("Item is nil")
+	}
+	if ev.Item.Type != "error" {
+		t.Errorf("Item.Type = %q, want error", ev.Item.Type)
+	}
+	if ev.Item.ID != "item_0" {
+		t.Errorf("Item.ID = %q, want item_0", ev.Item.ID)
+	}
+	if ev.Item.Message == "" {
+		t.Errorf("Item.Message is empty")
+	}
+	// round-trip through extractModelFromError
+	if m := extractModelFromError(ev.Item.Message); m != "MiniMax-M3" {
+		t.Errorf("extractModelFromError = %q, want MiniMax-M3", m)
 	}
 }
 

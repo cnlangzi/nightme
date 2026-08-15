@@ -72,8 +72,9 @@ type translator struct {
 	// goroutine (markContent / handleEvent) and the SendBlocks
 	// call path (ResetTurn); read from the terminal-event
 	// branches and from handlePart / handleTextStreamLocked.
-	turnMu          sync.Mutex
-	turnHadContent  bool
+	turnMu                sync.Mutex
+	turnHadContent        bool
+	turnTerminalEmitted   bool
 
 	// turnHadStep tracks whether a session.next.step.started event
 	// fired during the current turn. The 1.18 step event payload
@@ -110,8 +111,9 @@ type translator struct {
 }
 
 type toolEntry struct {
-	name string
-	args string
+	name   string
+	args   string
+	output string // opencode 1.18.18 may send the final output on tool.success
 }
 
 // turnState is the per-turn buffering state for the streamed
@@ -225,6 +227,7 @@ func (t *translator) ResetTurn() {
 	t.turnMu.Lock()
 	t.turnHadContent = false
 	t.turnHadStep = false
+	t.turnTerminalEmitted = false
 	t.turn = newTurnState()
 	t.turnMu.Unlock()
 }
@@ -244,6 +247,66 @@ func (t *translator) turnHadAny() (content, step bool) {
 	t.turnMu.Lock()
 	defer t.turnMu.Unlock()
 	return t.turnHadContent, t.turnHadStep
+}
+
+// tryEmitTurnDone is the single funnel for EventAgentDone so the
+// various terminal-event branches (session.next.step.ended,
+// session.idle, session.next.idle, session.next.step.failed, and
+// the opencode 1.18.18 fallback via session.next.tool.success /
+// tool.failed) all converge on a consistent wire shape.
+//
+// Idempotent per turn: only the FIRST caller emits EventAgentDone
+// for this prompt. Subsequent callers (a stray session.idle that
+// follows a tool.success, for example) are no-ops. This is the
+// regression guard for the "double-Done" symptom on the 1.18.18
+// protocol path, which only emits tool lifecycle events and never
+// the canonical session.idle / session.next.step.ended signal —
+// without the per-turn guard, every tool completion would feed a
+// fresh Done to the runtime readpump and tear down / re-arm the
+// busy guard mid-turn.
+//
+// The reason argument is the canonical reason ("settled" / "failed"
+// / "empty"); if reason == "settled" AND neither content nor step
+// fired this turn, we downgrade to "empty" so the runtime can
+// surface an empty-response hint — same rule as the historical
+// terminal branches.
+//
+// err is optional; when non-nil it is forwarded on AgentEvent.Err so
+// the chat client can show the failure reason.
+func (t *translator) tryEmitTurnDone(reason string, exitCode int, err error) {
+	t.turnMu.Lock()
+	if t.turnTerminalEmitted {
+		t.turnMu.Unlock()
+		return
+	}
+	t.turnTerminalEmitted = true
+	hadContent := t.turnHadContent
+	hadStep := t.turnHadStep
+	usage := t.lastUsage
+	t.turnMu.Unlock()
+
+	effective := reason
+	if reason == "settled" && !hadContent && !hadStep {
+		effective = "empty"
+	}
+
+	ev := agent.AgentEvent{
+		Kind:      agent.EventAgentDone,
+		SessionID: t.sessionID,
+		Model:     t.model,
+		AgentName: t.agentName,
+		Workspace: t.workspace,
+		Branch:    t.branch,
+		Done: &agent.AgentDoneEvent{
+			Reason:   effective,
+			ExitCode: exitCode,
+			Usage:    usage,
+		},
+	}
+	if err != nil {
+		ev.Err = err
+	}
+	t.deliver(ev)
 }
 
 // AvailableBuiltinCommands returns the slash command names opencode
@@ -415,24 +478,10 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			t.deliver(ev)
 		}
 
-		usage := t.lastUsage
-		reason := "settled"
-		hadContent, hadStep := t.turnHadAny(); if !hadContent && !hadStep {
-			reason = "empty"
-		}
-		t.deliver(agent.AgentEvent{
-			Kind:      agent.EventAgentDone,
-			SessionID: t.sessionID,
-			Model:     t.model,
-			AgentName: t.agentName,
-			Workspace: t.workspace,
-			Branch:    t.branch,
-			Done: &agent.AgentDoneEvent{
-				Reason:   reason,
-				ExitCode: 0,
-				Usage:    usage,
-			},
-		})
+		// Idempotent per turn: tryEmitTurnDone swallows a second
+		// Done if a fallback terminal (tool.success, see below) already
+		// fired. Same regression guard as session.idle.
+		t.tryEmitTurnDone("settled", 0, nil)
 	case "session.idle", "session.next.idle":
 		// Older opencode releases (≤ 1.17) emit the per-turn
 		// terminal signal as session.idle. opencode 1.18+ switched
@@ -456,24 +505,7 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			t.deliver(ev)
 		}
 
-		usage := t.lastUsage
-		reason := "settled"
-		hadContent, hadStep := t.turnHadAny(); if !hadContent && !hadStep {
-			reason = "empty"
-		}
-		t.deliver(agent.AgentEvent{
-			Kind:      agent.EventAgentDone,
-			SessionID: t.sessionID,
-			Model:     t.model,
-			AgentName: t.agentName,
-			Workspace: t.workspace,
-			Branch:    t.branch,
-			Done: &agent.AgentDoneEvent{
-				Reason:   reason,
-				ExitCode: 0,
-				Usage:    usage,
-			},
-		})
+		t.tryEmitTurnDone("settled", 0, nil)
 	case "session.next.step.failed":
 		// opencode 1.18 emits this when the model step (LLM call)
 		// failed — auth/network/quota. We treat it as a terminal
@@ -484,19 +516,49 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(ev.properties(), &p)
-		t.deliver(agent.AgentEvent{
-			Kind:      agent.EventAgentDone,
-			SessionID: t.sessionID,
-			Model:     t.model,
-			AgentName: t.agentName,
-			Workspace: t.workspace,
-			Branch:    t.branch,
-			Done: &agent.AgentDoneEvent{
-				Reason:  "failed",
-				ExitCode: 1,
-			},
-			Err: errorOrNil(p.Error),
-		})
+		t.tryEmitTurnDone("failed", 1, errorOrNil(p.Error))
+
+	// ─── session.next.tool.* (opencode 1.18.18 fallback path) ───
+	//
+	// On the opencode 1.18.18 protocol observed in production
+	// (cleanly running gpt-5 / claude providers), the bus never
+	// carries session.next.text.* or message.part.updated at all —
+	// only the tool lifecycle event family is published. Without
+	// these handlers the chat client sees Working... → DONE with no
+	// content (the "啥都没反应就 Done 了" symptom), because the
+	// translator's only turn-end sources were step.ended /
+	// session.idle / next.idle / session.next.step.failed, all of
+	// which 1.18.18 omits.
+	//
+	// Lifecycle on the bus:
+	//
+	//	input.started → input.delta* → input.ended   (build args string)
+	//	tool.called                              (emit EventAgentToolStart)
+	//	tool.success | tool.failed               (emit EventAgentToolEnd + tryEmitTurnDone)
+	//
+	// The input.* family and tool.called both carry callID/tool but
+	// may arrive in any order across releases — we tolerate either
+	// ordering. tool.success and tool.failed are the only two
+	// turn-terminal events on this protocol path; they funnel through
+	// tryEmitTurnDone so we don't double-fire Done if a stray
+	// session.idle still arrives later.
+	case "session.next.tool.input.started":
+		t.handleToolInputStarted(ev)
+	case "session.next.tool.input.delta":
+		t.handleToolInputDelta(ev)
+	case "session.next.tool.input.ended":
+		t.handleToolInputEnded(ev)
+	case "session.next.tool.called":
+		t.handleToolCalled(ev)
+	case "session.next.tool.progress":
+		t.handleToolProgress(ev)
+	case "session.next.tool.success":
+		t.handleToolSucceeded(ev)
+	case "session.next.tool.failed":
+		t.handleToolFailed(ev)
+	case "session.next.context.updated":
+		t.handleContextUpdated(ev)
+
 	case "session.error":
 		var p struct {
 			Error json.RawMessage `json:"error"`
@@ -810,6 +872,555 @@ func (t *translator) handleToolPart(p Part) {
 	default:
 		oLog("sse: unknown tool state", "state", state.Status, "callID", p.CallID)
 	}
+}
+
+// ─── session.next.tool.* handlers (opencode 1.18.18 fallback) ────
+//
+// The global event bus on opencode 1.18.18 only publishes the
+// session.next.tool.* family on each tool turn. Without these
+// handlers the chat client sees the busy spinner until the
+// watchdog kills the session — the visible symptom was DONE | LzBook
+// immediately with no rendered content. See the case-branch
+// comments in handleEvent for the lifecycle and rationale.
+//
+// All handlers are defensive: any single event arriving without a
+// matching callID (or with empty fields) is logged and skipped
+// rather than fabricated. The pendingTools map mirrors the one
+// used by the message.part.updated path; both paths write to the
+// same map so a session that mixes the two protocols (1.17's
+// part.updated + 1.18's tool.*) still correlates correctly.
+
+// sessionNextToolEvent is the union shape for tool.called /
+// tool.success / tool.failed: callID + tool name + optional
+// finalized input/output/error fields.
+//
+// Wire-format note (opencode 1.18.18 SSE observed in production):
+//
+//	input.ended       -> {callID, text:JSONString}
+//	tool.called       -> {callID, tool, input:object, provider.executed}
+//	tool.success      -> {callID, structured:object, content:LLMToolContent[], ...}
+//	tool.failed       -> {callID, error, ...}
+//
+// The previous version only knew about `input` / `output` / `tool`
+// - all three come across as different field names per event
+// family. The fields below mirror the live wire so each handler
+// can pick whichever name its event actually carries.
+type sessionNextToolEvent struct {
+	CallID    string          `json:"callID"`
+	Tool      string          `json:"tool,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	Structured json.RawMessage `json:"structured,omitempty"`
+	Error     string          `json:"error,omitempty"`
+}
+
+// sessionNextToolInputEvent is the streaming-input shape used by
+// input.started / input.delta. Two field-name quirks from the
+// opencode 1.18.18 wire (reverse-engineered from SSE probes):
+//
+//	input.started -> {callID, name:"bash"|"read"|...}
+//	input.delta   -> {callID, delta:"partial JSON"}
+//
+// The previous shape only knew `tool` - which is the wrong key
+// for input.started. That bug silently dropped the tool name on
+// every streaming-input cycle, leaving the bridge with empty
+// tool receipts whenever the model streamed args token-by-token.
+type sessionNextToolInputEvent struct {
+	CallID string `json:"callID"`
+	Name   string `json:"name,omitempty"`
+	Tool   string `json:"tool,omitempty"`
+	Delta  string `json:"delta,omitempty"`
+	sessionNextToolEvent // embed for tool/input context (rarely populated here)
+}
+
+// handleToolInputStarted arms the per-callID input buffer. The
+// translator's pendingTools entry is created here too (if not
+// already present) so subsequent input.delta / tool.called events
+// find a stable slot to write into.
+//
+// Wire note: opencode 1.18.18 ships the tool name as `name`, NOT
+// `tool` (which is only populated on tool.called / tool.success).
+// Falling back to embed.Tool keeps legacy/future events working.
+func (t *translator) handleToolInputStarted(ev SessionEvent) {
+	var p sessionNextToolInputEvent
+	_ = json.Unmarshal(ev.properties(), &p)
+	if p.CallID == "" {
+		oLog("sse: tool.input.started missing callID")
+		return
+	}
+	name := p.Name
+	if name == "" {
+		name = p.Tool
+	}
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	entry, ok := t.pendingTools[p.CallID]
+	if !ok {
+		entry = toolEntry{}
+	}
+	if entry.name == "" && name != "" {
+		entry.name = normalizeToolName(name)
+	}
+	t.pendingTools[p.CallID] = entry
+}
+
+func (t *translator) handleToolInputDelta(ev SessionEvent) {
+	var p sessionNextToolInputEvent
+	_ = json.Unmarshal(ev.properties(), &p)
+	if p.CallID == "" {
+		return
+	}
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	entry, ok := t.pendingTools[p.CallID]
+	if !ok {
+		entry = toolEntry{}
+	}
+	entry.args = entry.args + p.Delta
+	t.pendingTools[p.CallID] = entry
+}
+
+// handleToolInputEnded snaps the per-callID input buffer to the
+// authoritative final JSON the server emits on input.ended.
+//
+// Wire note (opencode 1.18.18): input.ended ships the finalized
+// args under the `text` key as a JSON STRING, NOT under `input`
+// as an object. The previous implementation looked for `input`,
+// so p.Input was always nil and the streamed delta buffer was
+// never replaced with the canonical block. We also pick up the
+// tool name from the embedded event when the streaming-input
+// path never sent input.started first (input.ended carries no
+// `name`, so the field is best-effort here).
+func (t *translator) handleToolInputEnded(ev SessionEvent) {
+	var p sessionNextToolEvent
+	_ = json.Unmarshal(ev.properties(), &p)
+	if p.CallID == "" {
+		// Without a callID we can't correlate — drop. Should not
+		// happen in practice on 1.18.18 but the bridge never
+		// trusts the wire.
+		return
+	}
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	entry, ok := t.pendingTools[p.CallID]
+	if !ok {
+		entry = toolEntry{}
+	}
+	// input.ended carries the FINAL input as a JSON string under
+	// `text` (opencode 1.18+); fall back to `input` (raw) and
+	// the streamed delta buffer if neither is present.
+	switch {
+	case p.Text != "":
+		entry.args = p.Text
+	case len(p.Input) > 0 && string(p.Input) != "null":
+		entry.args = string(p.Input)
+	}
+	if entry.name == "" && p.Name != "" {
+		entry.name = normalizeToolName(p.Name)
+	} else if entry.name == "" && p.Tool != "" {
+		entry.name = normalizeToolName(p.Tool)
+	}
+	t.pendingTools[p.CallID] = entry
+}
+
+// handleToolCalled emits EventAgentToolStart. We flush any
+// pre-tool buffered reply text FIRST so the chat client renders
+// the model's "Let me check…" before the tool receipt (the
+// same flushing discipline as handleToolPart "pending").
+func (t *translator) handleToolCalled(ev SessionEvent) {
+	var p sessionNextToolEvent
+	_ = json.Unmarshal(ev.properties(), &p)
+	if p.CallID == "" {
+		// Orphan .called (no matching .input.started + .input.ended).
+		// Not an error; some opencode paths emit .called directly with
+		// input finalized inline. Synthesize a callID so the chat
+		// client still sees a named tool receipt.
+		p.CallID = fmt.Sprintf("orphan_%d", time.Now().UnixNano())
+	}
+	t.markContent()
+
+	// Tool-boundary flush: deliver any pre-tool reply text before
+	// emitting Start (mirrors handleToolPart 'pending' ordering).
+	t.turnMu.Lock()
+	flushEvents := t.flushPendingTextLocked()
+	t.turnMu.Unlock()
+	for _, fev := range flushEvents {
+		t.deliver(fev)
+	}
+
+	t.turnMu.Lock()
+	entry, ok := t.pendingTools[p.CallID]
+	if !ok {
+		entry = toolEntry{name: normalizeToolName(p.Tool)}
+	}
+	if entry.name == "" {
+		entry.name = normalizeToolName(p.Tool)
+	}
+	// Final inline input beats the streamed args buffer.
+	if len(p.Input) > 0 && string(p.Input) != "null" {
+		entry.args = string(p.Input)
+	}
+	t.pendingTools[p.CallID] = entry
+	t.turnMu.Unlock()
+
+	t.deliver(agent.AgentEvent{
+		Kind:      agent.EventAgentToolStart,
+		SessionID: t.sessionID,
+		Model:     t.model,
+		AgentName: t.agentName,
+		Workspace: t.workspace,
+		Branch:    t.branch,
+		ToolStart: &agent.AgentToolStartEvent{
+			ID:   p.CallID,
+			Name: entry.name,
+			Args: entry.args,
+		},
+	})
+}
+
+// handleToolSucceeded closes a tool call and emits the per-turn
+// Done if no other turn-end signal has fired yet. This is the
+// terminal signal for the opencode 1.18.18 protocol path.
+//
+// Wire note (opencode 1.18.18 — reverse-engineered from SSE
+// probes against the real binary):
+//
+//	tool.success.data = {
+//	  callID, structured:{uri,name,content,encoding,mime},
+//	  content:[ {type:"text",text:"..."}|{type:"file",uri,mime,name} ],
+//	  outputPaths:[...], provider:{executed, metadata},
+//	}
+//
+// The previous shape only read `output` - which the wire doesn't
+// carry. The actual text payload lives at:
+//
+//  1. structured.content  (a plain string the read tool returns,
+//     eg "PONG-from-file\n" for file reads)
+//  2. content[].text      (for tools that return LLMToolContent
+//     arrays with `text` entries - e.g. bash stdout chunks)
+//
+// We probe both and concatenate, preferring structured.content
+// because it's always present on the file/read-shaped tools we
+// see most often. Empty structured.content and empty content[] -
+// i.e. tool.success with no rendered output - still emit
+// EventAgentToolEnd so the receipt line lands, but with an empty
+// Output so the chat client shows "no output" rather than the
+// previous "running…" stuck state.
+func (t *translator) handleToolSucceeded(ev SessionEvent) {
+	var p sessionNextToolEvent
+	_ = json.Unmarshal(ev.properties(), &p)
+	if p.CallID == "" {
+		oLog("sse: tool.success missing callID")
+		return
+	}
+	t.markContent()
+
+	t.turnMu.Lock()
+	entry, ok := t.pendingTools[p.CallID]
+	if !ok {
+		entry = toolEntry{name: normalizeToolName(p.Name)}
+	}
+	// Wire note: tool.success carries the tool name under `tool`,
+	// not `name` (the streaming-input family uses `name`). Fall
+	// back so an event family that ships only `name` still
+	// surfaces a label.
+	if entry.name == "" && p.Tool != "" {
+		entry.name = normalizeToolName(p.Tool)
+	}
+	if entry.name == "" && p.Name != "" {
+		entry.name = normalizeToolName(p.Name)
+	}
+	// Promote any partial output that handleToolProgress stashed
+	// earlier; only fill from structured/content if no progress
+	// event pre-populated the field (success always wins over
+	// progress because it is the authoritative final payload).
+	if entry.output == "" {
+		entry.output = extractToolOutput(p.Structured, p.Content)
+	}
+	delete(t.pendingTools, p.CallID)
+	t.turnMu.Unlock()
+
+	t.deliver(agent.AgentEvent{
+		Kind:      agent.EventAgentToolEnd,
+		SessionID: t.sessionID,
+		Model:     t.model,
+		AgentName: t.agentName,
+		Workspace: t.workspace,
+		Branch:    t.branch,
+		ToolEnd: &agent.AgentToolEndEvent{
+			ID:     p.CallID,
+			Name:   entry.name,
+			Args:   entry.args,
+			Output: entry.output,
+		},
+	})
+
+	// Terminal signal for the 1.18.18 protocol path. tryEmitTurnDone
+	// is idempotent so a late session.idle / session.next.idle that
+	// follows a tool.success is a no-op.
+	t.tryEmitTurnDone("settled", 0, nil)
+}
+
+// toolOutputMaxBytes caps the text we surface for a single tool
+// invocation. A 100-MiB read of a giant log file shouldn't blow
+// up the chat transcript; the renderer applies its own truncation
+// on top of this, but pre-clipping here keeps the in-memory
+// AgentEvent sane for long-running agents.
+const toolOutputMaxBytes = 64 * 1024
+
+// extractToolOutput pulls a human-readable summary out of a
+// tool.success payload. It tries two shapes:
+//
+//	structured.content  (file-shaped tools: read, list, glob)
+//	content[].text      (LLMToolContent arrays: bash, generic)
+//
+// extractToolOutput returns the user-visible tool output text
+// (with file refs formatted) and is hard-capped at
+// toolOutputMaxBytes so a runaway read doesn't blow up the chat
+// transcript. Returns the empty string when the payload is
+// genuinely empty.
+func extractToolOutput(structured, content json.RawMessage) string {
+	// structured.content (most common for file tools).
+	if len(structured) > 0 && string(structured) != "null" {
+		var s struct {
+			Content string `json:"content"`
+			Name    string `json:"name"`
+			Mime    string `json:"mime"`
+		}
+		if err := json.Unmarshal(structured, &s); err == nil && s.Content != "" {
+			return truncateToolOutput(s.Content)
+		}
+	}
+	// content: LLMToolContent[].
+	if len(content) > 0 && string(content) != "null" {
+		var items []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+			Name string `json:"name"`
+			Mime string `json:"mime"`
+			URI  string `json:"uri"`
+		}
+		if err := json.Unmarshal(content, &items); err == nil {
+			var b strings.Builder
+			for _, it := range items {
+				switch it.Type {
+				case "text":
+					if it.Text != "" {
+						b.WriteString(it.Text)
+						b.WriteByte('\n')
+					}
+				case "file":
+					// File refs: surface "<name> (<mime>)". Long
+					// file:// URIs are clipped to the basename so
+					// the chat receipt doesn't get spammed.
+					label := it.Name
+					if label == "" {
+						label = uriBasename(it.URI)
+					}
+					if label != "" {
+						if it.Mime != "" {
+							fmt.Fprintf(&b, "%s (%s)\n", label, it.Mime)
+						} else {
+							fmt.Fprintf(&b, "%s\n", label)
+						}
+					}
+				}
+			}
+			return truncateToolOutput(strings.TrimRight(b.String(), "\n"))
+		}
+	}
+	return ""
+}
+
+// uriBasename pulls the last path segment off a file:// URI
+// (or any URI with a slash). Returns "" when the URI has no
+// usable path component after trimming scheme / query / fragment.
+func uriBasename(uri string) string {
+	if uri == "" {
+		return ""
+	}
+	// Trim scheme prefix so we don't split on `://`.
+	p := uri
+	if i := strings.Index(p, "://"); i >= 0 {
+		p = p[i+3:]
+	}
+	// Strip query / fragment so they don't get mistaken for path.
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	// Take the segment after the LAST slash. Trim a trailing
+	// slash so "file:///path/?q=1" -> "" -> "" -> "" -> "" (no
+	// segment) returns "" instead of "path/" trimmed to "path"
+	// for an input the user never meant as a file.
+	for len(p) > 0 && p[len(p)-1] == '/' {
+		p = p[:len(p)-1]
+	}
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		p = p[i+1:]
+	}
+	return p
+}
+
+// truncateToolOutput clips s at toolOutputMaxBytes and appends
+// a tail marker so the chat client knows the payload was
+// truncated (rather than the original ending at that byte).
+func truncateToolOutput(s string) string {
+	if len(s) <= toolOutputMaxBytes {
+		return s
+	}
+	return s[:toolOutputMaxBytes] + "\n…[truncated " +
+		fmt.Sprintf("%d", len(s)-toolOutputMaxBytes) + " bytes]"
+}
+
+// handleToolFailed closes a tool call with an error and emits a
+// turn-end Done with Reason:"failed" if no other terminal event
+// fired first. Mirrors session.next.step.failed's reason choice.
+//
+// Wire note: tool.failed.data.error is sometimes a bare string,
+// sometimes an object like {name, data, message}. We extract the
+// user-visible message in both shapes so the chat client always
+// sees a readable error rather than "{}".
+func (t *translator) handleToolFailed(ev SessionEvent) {
+	var p sessionNextToolEvent
+	_ = json.Unmarshal(ev.properties(), &p)
+	if p.CallID == "" {
+		oLog("sse: tool.failed missing callID")
+		return
+	}
+	t.markContent()
+
+	errMsg := extractToolError(p.Error)
+
+	t.turnMu.Lock()
+	entry, ok := t.pendingTools[p.CallID]
+	if !ok {
+		entry = toolEntry{name: normalizeToolName(p.Tool)}
+	}
+	if entry.name == "" && p.Name != "" {
+		entry.name = normalizeToolName(p.Name)
+	}
+	delete(t.pendingTools, p.CallID)
+	t.turnMu.Unlock()
+
+	t.deliver(agent.AgentEvent{
+		Kind:      agent.EventAgentToolEnd,
+		SessionID: t.sessionID,
+		Model:     t.model,
+		AgentName: t.agentName,
+		Workspace: t.workspace,
+		Branch:    t.branch,
+		ToolEnd: &agent.AgentToolEndEvent{
+			ID:     p.CallID,
+			Name:   entry.name,
+			Args:   entry.args,
+			Output: entry.output,
+		},
+		Err: errorOrNil(errMsg),
+	})
+
+	t.tryEmitTurnDone("failed", 1, errorOrNil(errMsg))
+}
+
+// handleToolProgress handles session.next.tool.progress events
+// that opencode 1.18+ emits for long-running tools (eg bash
+// commands that stream stdout before completion). The payload
+// mirrors tool.success but arrives BEFORE the success so the chat
+// client can show partial output.
+//
+// Wire format:
+//
+//	{callID, structured:object, content:LLMToolContent[]}
+//
+// We don't have a partial-output event in the AgentEvent schema,
+// so we coalesce: stash the partial text in the pendingTools
+// entry, then promote it into entry.output when tool.success
+// arrives. If the tool fails before producing a success event,
+// the partial still surfaces via the fail path.
+func (t *translator) handleToolProgress(ev SessionEvent) {
+	var p sessionNextToolEvent
+	_ = json.Unmarshal(ev.properties(), &p)
+	if p.CallID == "" {
+		return
+	}
+	out := extractToolOutput(p.Structured, p.Content)
+	if out == "" {
+		return
+	}
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	entry, ok := t.pendingTools[p.CallID]
+	if !ok {
+		entry = toolEntry{}
+	}
+	if entry.name == "" {
+		if p.Name != "" {
+			entry.name = normalizeToolName(p.Name)
+		} else if p.Tool != "" {
+			entry.name = normalizeToolName(p.Tool)
+		}
+	}
+	entry.output = out
+	t.pendingTools[p.CallID] = entry
+}
+
+// handleContextUpdated logs session.next.context.updated events.
+// opencode 1.18 fires these between model steps whenever the
+// prompt-side context changes - typically after a tool call
+// returns and the server injects a fresh skills/providers/
+// permissions snapshot. The payload's `text` blob is the new
+// serialized prompt prefix; we don't surface it (the chat client
+// doesn't need to see the system prompt churn), but we log the
+// delta so future debug captures can correlate turn boundaries
+// with prompt-side transitions.
+//
+// Wire format:
+//
+//	{timestamp, sessionID, messageID, text}
+func (t *translator) handleContextUpdated(ev SessionEvent) {
+	var p struct {
+		SessionID string `json:"sessionID"`
+		MessageID string `json:"messageID"`
+		Text      string `json:"text"`
+	}
+	_ = json.Unmarshal(ev.properties(), &p)
+	oLog("sse: session.next.context.updated",
+		"sessionID", p.SessionID,
+		"messageID", p.MessageID,
+		"text_len", len(p.Text),
+	)
+}
+
+// extractToolError flattens tool.failed.data.error into a
+// human-readable string. It handles both shapes observed on the
+// wire:
+//
+//	"opencode: permission denied for /foo"
+//	{"name":"PermissionDeniedError","data":{"message":"..."}}
+//
+// Object-form priority: .data.message > .message > the name
+// (we never return bare JSON so the chat client doesn't have
+// to render `{}` for an empty error). Returns "" when the
+// payload is genuinely empty so the caller can decide whether
+// to surface "(unknown error)" or skip.
+func extractToolError(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err == nil {
+		if data, ok := obj["data"].(map[string]any); ok {
+			if m, _ := data["message"].(string); m != "" {
+				return m
+			}
+		}
+		if m, _ := obj["message"].(string); m != "" {
+			return m
+		}
+	}
+	return raw
 }
 
 // ─── session.next.text.* stream handling ──────────────────────────

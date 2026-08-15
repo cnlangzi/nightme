@@ -50,9 +50,6 @@ func (d *callRecordingASDriver) SendPermission(resp string) error {
 }
 func (d *callRecordingASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *callRecordingASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *callRecordingASDriver) SetModel(ctx context.Context, providerID, modelID string) error {
-	return d.inner.SetModel(ctx, providerID, modelID)
-}
 func (d *callRecordingASDriver) Close() error                   { return d.inner.Close() }
 
 // failingNewAS is a fake whose New always returns errInjected. Used to
@@ -82,9 +79,6 @@ func (d *failingNewASDriver) SendPermission(resp string) error {
 }
 func (d *failingNewASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *failingNewASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *failingNewASDriver) SetModel(ctx context.Context, providerID, modelID string) error {
-	return d.inner.SetModel(ctx, providerID, modelID)
-}
 func (d *failingNewASDriver) Close() error                   { return d.inner.Close() }
 
 func (f *failingNewAS) New(_ context.Context) error { return errInjected }
@@ -506,9 +500,6 @@ func (d *restartErrASDriver) SendPermission(resp string) error {
 }
 func (d *restartErrASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *restartErrASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *restartErrASDriver) SetModel(ctx context.Context, providerID, modelID string) error {
-	return d.inner.SetModel(ctx, providerID, modelID)
-}
 func (d *restartErrASDriver) Close() error                   { return d.inner.Close() }
 
 // fakeRestartSpawner is a minimal chatsession.Spawner that returns a

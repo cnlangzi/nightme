@@ -80,11 +80,10 @@ func (d *errDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) erro
 	return d.inner.SendBlocks(ctx, b)
 }
 
-func (d *errDriver) SendPermission(resp string) error                              { return nil }
-func (d *errDriver) Reset(ctx context.Context) error                              { return nil }
-func (d *errDriver) Close() error                                                  { return nil }
-func (d *errDriver) Stop(ctx context.Context) error                                { return nil }
-func (d *errDriver) SetModel(ctx context.Context, providerID, modelID string) error { return nil }
+func (d *errDriver) SendPermission(resp string) error { return nil }
+func (d *errDriver) Reset(ctx context.Context) error { return nil }
+func (d *errDriver) Close() error                    { return nil }
+func (d *errDriver) Stop(ctx context.Context) error  { return nil }
 
 func TestSubmit_PersistsInFlightMessages(t *testing.T) {
 	as, fp := makeReadyAS(t, nil)

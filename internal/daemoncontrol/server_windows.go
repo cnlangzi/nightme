@@ -266,6 +266,15 @@ func (s *Server) handle(conn *pipeInstance) {
 // ConnectNamedPipe calls via CancelIoEx. The kernel reaps the
 // pipe name when the last handle closes.
 //
+// Close also fires s.cancel() via s.stopOnce, the same Once that
+// the "stop" RPC handler uses. This is the contract that keeps
+// the daemon context cancellable from BOTH shutdown paths:
+// external Stop RPC AND direct Close. Without it, a Windows
+// pipe race (Stop RPC arrives during the seed-close vs new-
+// create window) would leave s.cancel() unfired and the daemon
+// ctx stuck — exactly the failure mode TestWindowsPipePingStatusStop
+// guards against.
+//
 // Ordering: s.closed is closed BEFORE the pending snapshot is
 // taken. The Serve loop rechecks s.closed immediately after each
 // trackPipe (see Serve), so any new pipe created in the same
@@ -286,6 +295,15 @@ func (s *Server) Close() error {
 		for _, h := range pending {
 			_ = windows.CancelIoEx(h, nil)
 		}
+		// Fire cancel from the same Once as the "stop" RPC
+		// handler so the daemon ctx is always cancellable —
+		// regardless of which path initiated the shutdown.
+		s.stopOnce.Do(func() {
+			s.state.Store("stopping")
+			if s.cancel != nil {
+				s.cancel()
+			}
+		})
 	})
 	return closeErr
 }

@@ -37,6 +37,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
 // errParseAgentReply is the sentinel returned by parsePRReply
@@ -139,7 +140,7 @@ func dispatchPR(
 	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
 	// usagebar must reach the channel even when GTW bypasses the
 	// runtime event pipeline).
-	prCtx, prCancel := context.WithTimeout(ctx, RunOnceTimeout)
+	prCtx, prCancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer prCancel()
 	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
 		buildPRPrompt(c, baseBranch), args.Agent, "")

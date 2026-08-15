@@ -1,6 +1,6 @@
 //go:build !windows
 
-// Stage 2 tests: Stop, SetModel, usage tracking, tool name mapping,
+// Stage 2 tests: Stop, usage tracking, tool name mapping,
 // current_mode_update, available_commands_update.
 //
 // These tests build on the helpers in transport_test.go and
@@ -20,7 +20,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// ─── Stop / SetModel ────────────────────────────────────────────
+// ─── Stop ──────────────────────────────────────────────────────────
 
 // TestAgent_StopCallsInterrupt verifies Stop hits the
 // /api/session/{id}/interrupt endpoint.
@@ -50,56 +50,12 @@ func TestAgent_StopCallsInterrupt(t *testing.T) {
 	}
 }
 
-// TestAgent_SetModelCallsSwitch verifies SetModel posts to
-// /api/session/{id}/model with providerID + modelID.
-func TestAgent_SetModelCallsSwitch(t *testing.T) {
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-
-	a := &driver{
-		name:      "opencode",
-		server:    &serverProc{baseURL: srv.URL},
-		client:    newClient(&serverProc{baseURL: srv.URL}, "/tmp"),
-		sessionID: "ses_1",
-	}
-	if err := a.SetModel(context.Background(), "anthropic", "claude-sonnet-4"); err != nil {
-		t.Fatalf("SetModel: %v", err)
-	}
-	if gotBody["providerID"] != "anthropic" {
-		t.Errorf("providerID = %v, want anthropic", gotBody["providerID"])
-	}
-	if gotBody["modelID"] != "claude-sonnet-4" {
-		t.Errorf("modelID = %v", gotBody["modelID"])
-	}
-}
-
 // TestAgent_StopNoServerReturnsError verifies Stop on an unstarted
 // Agent returns an error rather than crashing.
 func TestAgent_StopNoServerReturnsError(t *testing.T) {
 	a := &driver{name: "opencode"}
 	if err := a.Stop(context.Background()); err == nil {
 		t.Errorf("Stop on unstarted agent = nil, want error")
-	}
-}
-
-// TestAgent_SetModelNoSessionReturnsError verifies SetModel on a
-// bridge without a session returns an error.
-func TestAgent_SetModelNoSessionReturnsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-	a := &driver{
-		name:   "opencode",
-		server: &serverProc{baseURL: srv.URL},
-		client: newClient(&serverProc{baseURL: srv.URL}, "/tmp"),
-	}
-	if err := a.SetModel(context.Background(), "anthropic", "claude-sonnet-4"); err == nil {
-		t.Errorf("SetModel with no session = nil, want error")
 	}
 }
 

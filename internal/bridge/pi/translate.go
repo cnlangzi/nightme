@@ -47,17 +47,28 @@ import (
 // channel renderers need no per-bridge branching.
 const thinkingPrefix = "[思考] "
 
-// emptyReplyFallback is the EventAgentResult text used when a turn settles
-// without any un-flushed assistant text — e.g. the agent ended on a
-// tool call and said nothing afterwards.
+// emptyReplyFallback is the EventAgentResult text used when a turn
+// settles with no useful assistant reply to surface — typically a
+// text+tool turn whose final assistant message_end has content[]
+// without a text block (only thinking/toolCall/empty).
 //
-// It is NOT cosmetic. gateway.Translate drops an EventAgentResult whose
-// Text is empty and IsError is false (internal/gateway/translate.go),
+// User-visible behavior: the channel renders this as the 📝 result
+// card's body. In the rolling-log 💬 the user already saw whatever
+// narration was streamed via EventAgentText (flushed at tool
+// boundaries); this fallback only shows up when the FINAL assistant
+// message had nothing new to say. The exact string "Done." is
+// therefore a deliberate, minimal placeholder — never the agent's
+// actual reply. Different models trigger it with different
+// frequencies: sensenova-flash-lite almost never, Anthropic Claude /
+// GPT for short confirmations more often.
+//
+// It is NOT cosmetic. gateway.Translate drops an EventAgentResult
+// whose Text is empty and IsError is false (internal/gateway/translate.go),
 // and the runtime reads Usage off the *translated* OutboundMessage
 // (cmd/nightme/run.go), so an empty-text result silently takes the
-// turn's token counts down with it. Guaranteeing a non-empty Text in
-// the bridge keeps usage flowing without touching the shared gateway
-// layer. cc-connect (MsgEmptyResponse) and openclaw-lark
+// turn's token counts down with it. Guaranteeing a non-empty Text
+// in the bridge keeps usage flowing without touching the shared
+// gateway layer. cc-connect (MsgEmptyResponse) and openclaw-lark
 // (EMPTY_REPLY_FALLBACK_TEXT = 'Done.') both do the same thing.
 const emptyReplyFallback = "Done."
 
@@ -877,14 +888,21 @@ func (t *translator) flushPendingTextLocked() []agent.AgentEvent {
 // finishTurnLocked builds the turn's single EventAgentResult, or returns
 // nil when the turn observed nothing worth reporting.
 //
-// Text resolution order:
+// Text resolution order (each rung is a separate fallback; the first
+// non-empty value wins):
+//
 //  1. pendingText — what we accumulated since the last flush. This is
 //     the normal path and is exactly the segment the user has NOT
-//     seen yet.
-//  2. lastMessageText — Pi's own composition, but ONLY when no reply
-//     text has been delivered yet this turn. See turnState.textDelivered
-//     for why the guard is load-bearing.
-//  3. emptyReplyFallback — never emit an empty Text; see the const.
+//     seen yet. Channels render it as the 📝 result card body.
+//  2. lastMessageText — Pi's own composition from message_end.content[],
+//     but ONLY when no reply text has been delivered yet this turn.
+//     See turnState.textDelivered for why the guard is load-bearing.
+//  3. emptyReplyFallback ("Done.") — fires when both (1) and (2) are
+//     empty: streaming had flushed narration (textDelivered=true) AND
+//     the final assistant message had no text block. In the rolling
+//     log the user already saw the streamed narration; this rung only
+//     ensures the OutResult stays alive so the StatusBar token footer
+//     gets its Usage.
 //
 // Caller must hold turnMu.
 func (t *translator) finishTurnLocked() []agent.AgentEvent {

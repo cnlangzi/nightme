@@ -495,23 +495,54 @@ func (d *driver) New(ctx context.Context) error {
 	return d.writeLine(payload)
 }
 
-// Stop sends SIGINT to the claude code child. The stream-json
-// protocol does not expose a structured cancel, so the closest
-// portable action is the same Ctrl-C signal a user would press.
-// In --output-format stream-json pipe mode the child's SIGINT
-// behavior is best-effort: it may either emit a final `result`
-// event with is_error=true (which the bridge translates to
-// EventAgentDone, IsReady flips) or it may simply exit on the
-// signal (the events channel closes, the bridge sets the AS to
-// StatusExited, the next Submit triggers a respawn via
-// LookupSelectedAgentSession). Either way the chat layer's
-// TryFlush loop picks up the next queued prompt — Stop itself
-// does not need to coordinate the turn-end → next-submit
-// transition.
+// Stop sends SIGINT to the claude code child. SIGINT is the
+// documented interrupt mechanism for the Claude Code CLI across
+// all run modes:
 //
-// Stop is fire-and-forget: it does NOT block waiting for a clean
-// EventAgentDone. The caller does not need to know which of the
-// two post-states the child landed in.
+//   - interactive TUI: Esc and Ctrl-C map to SIGINT
+//   - --output-format stream-json pipe (nightme's mode): SIGINT
+//     triggers the CLI's "graceful shutdown" path — terminal
+//     modes are restored, a `--resume` hint is printed on stderr,
+//     the CLI exits cleanly
+//   - SDK / external callers: `kill -INT` triggers the same path
+//
+// (Reference: anthropics/claude-code CHANGELOG entries
+// "Fixed external SIGINT ... not running graceful shutdown" and
+// "Fixed an interrupt (Esc) sent at the very start of a turn
+// being silently dropped in stream-json/SDK sessions".)
+//
+// Unlike codex and acp, the stream-json wire does NOT expose a
+// structured cancel method (no `{"type":"interrupt"}` or
+// `control_request` subtype for it). SIGINT IS the canonical
+// mechanism. There is nothing to "improve" here — the bridge
+// sends SIGINT, the CLI handles it gracefully, the readpump
+// sees the events-channel close and emits EventAgentDone, and
+// the next Submit picks up via the chat-layer spawn path.
+//
+// The "real stop" recovery for claudecode lives at the chat
+// layer, not the bridge:
+//
+//   - chatLayer chokepoint (chatsession.chatsession.go): on
+//     LookupSelectedAgentSession's respawn path, if the
+//     --resume argument fails with the documented stderr
+//     marker ("No conversation found", etc.), the bridge
+//     surfaces agent.ErrResumeUnhealthy. The chat layer
+//     clears the saved sessionID, persists the cleared state,
+//     and respawns once with no resume id — landing the user
+//     on a fresh session instead of an unrecoverable
+//     "Failed to spawn agent" loop.
+//
+// Without that chat-layer recovery, SIGINT-then-resume on a
+// turn that was interrupted mid-flight would wedge the user
+// on a fresh message (the resume-rejected child stays
+// StatusExited). With it, /stop-then-recover is now bounded:
+// the user gets either (a) a normal resumed conversation, or
+// (b) a clean fresh conversation within a single respawn.
+//
+// Stop is fire-and-forget: it does NOT block waiting for a
+// clean EventAgentDone. The chat layer's TryFlush picks up the
+// next queued prompt once the readpump observes the CLI's
+// graceful exit.
 //
 // Returns ErrNotSupported if the bridge is not started.
 func (d *driver) Stop(ctx context.Context) error {

@@ -187,6 +187,74 @@ func TestRestartFromDeath_NoInFlightNoResubmit(t *testing.T) {
 	}
 }
 
+// TestRestartFromDeath_ResubmitByteForByteEquality is the
+// strictest contract check: the blocks the new bridge receives
+// via SendBlocks must be the EXACT same blocks (text, image
+// fields, order, count) that were in in-flight when the old
+// bridge died. Catches regressions where the resubmit might
+// drop fields, reorder blocks, or wrap content incorrectly.
+func TestRestartFromDeath_ResubmitByteForByteEquality(t *testing.T) {
+	as := NewAgentSession(newAgentSessionID(), "cs_test", "dsh", "/code", nil)
+	as.SetSessionID("old-session-byte")
+	as.SetPersist(func(_ *registry.AgentSessionEntry) error { return nil })
+
+	original := []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "请继续 #1"},
+		{Type: agent.ContentImage, Path: "/tmp/foo.png", MediaType: "image/png"},
+		{Type: agent.ContentText, Text: "请继续 #3 — multi line\ndashed"},
+		{Type: agent.ContentFile, Path: "/tmp/data.json", MediaType: "application/json"},
+	}
+	as.asMu.Lock()
+	as.inFlightMessages = []registry.InFlightMessageRef{
+		{ID: "msg-byte-1", Blocks: original, ReceivedAt: time.Now()},
+	}
+	as.stat = StatusExited
+	as.pid = 11111
+	as.asMu.Unlock()
+
+	newBridge := &recordingSendBlocksAS{fakeAgentSession: newFakeAgentSession(7777)}
+	spawner := &fakeRestartSpawner{handle: newBridge.buildLive()}
+
+	if err := as.RestartFromDeath(context.Background(), spawner); err != nil {
+		t.Fatalf("RestartFromDeath: %v", err)
+	}
+
+	sent := newBridge.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("SendBlocks called %d times, want 1", len(sent))
+	}
+	got := sent[0]
+	if len(got) != len(original) {
+		t.Fatalf("resubmit block count = %d, want %d", len(got), len(original))
+	}
+	for i := range got {
+		if got[i].Type != original[i].Type {
+			t.Errorf("block %d: Type = %q, want %q", i, got[i].Type, original[i].Type)
+		}
+		if got[i].Text != original[i].Text {
+			t.Errorf("block %d: Text = %q, want %q", i, got[i].Text, original[i].Text)
+		}
+		if got[i].Path != original[i].Path {
+			t.Errorf("block %d: Path = %q, want %q", i, got[i].Path, original[i].Path)
+		}
+		if got[i].MediaType != original[i].MediaType {
+			t.Errorf("block %d: MediaType = %q, want %q", i, got[i].MediaType, original[i].MediaType)
+		}
+	}
+
+	// Concatenate text/path for a smoke summary.
+	summary := func(bs []agent.ContentBlock) string {
+		s := ""
+		for _, b := range bs {
+			s += "[" + string(b.Type) + ":" + b.Text + b.Path + "]"
+		}
+		return s
+	}
+	t.Logf("original: %s", summary(original))
+	t.Logf("resubmit: %s", summary(got))
+	t.Logf("BYTE-FOR-BYTE EQUAL across %d blocks (text+image+file mixed)", len(got))
+}
+
 // TestRestartFromDeath_ResubmitFailureDoesNotStall verifies that a
 // failed SendBlocks on the new bridge restores isReady=true so the
 // queue can drain the next message, instead of wedging the bridge

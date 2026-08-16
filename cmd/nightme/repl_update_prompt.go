@@ -2,23 +2,24 @@
 //
 // runREPLInteractive and runREPLWith call
 // promptForUpdateIfOutdated once, right after the banner prints.
-// The function does the full "check + prompt + maybe-print-
-// instructions" cycle in one shot so the caller doesn't have to
-// thread a 4-return-value result through its loop.
+// The function does the full "check + prompt + maybe-act"
+// cycle in one shot so the caller doesn't have to thread a
+// 4-return-value result through its loop.
 //
 // Design choices, in priority order:
 //
-//  1. NEVER block the REPL on a slow or unreachable GitHub.
-//     The Checker swallows network errors and falls back to the
-//     on-disk cache (see internal/version/check.go). If that
-//     also fails we return early — no prompt, no log spam.
+//  1. NEVER block the REPL on a slow or unreachable
+//     nightme.dev. The Checker swallows network errors and
+//     falls back to the on-disk cache (see
+//     internal/version/check.go). If that also fails we return
+//     early — no prompt, no log spam.
 //  2. NEVER prompt when the build is up to date.
 //  3. NEVER prompt more than once per startup, even if the user
-//     mistypes. One y/N read, then back to the main loop. We
-//     considered looping until the user typed y/n explicitly,
-//     but a stray space or "?" shouldn't trap them at the
-//     startup prompt.
-//  4. Read prompt uses the same writer as the banner so the
+//     mistypes. One y/N read, then back to the main loop.
+//  4. The "y" branch delegates to deps.OnYes. Production wires
+//     this to "execute \`nightme update check\` against the
+//     cobra tree"; tests wire it to a counter closure.
+//  5. Read prompt uses the same writer as the banner so the
 //     "nightme> " prompt and the prompt text stay aligned in
 //     the same terminal session.
 package main
@@ -37,26 +38,40 @@ import (
 )
 
 // PromptDeps bundles the knobs tests need without dragging in a
-// real config file. Production callers pass nil and get
-// promptForUpdateIfOutdated's default (which loads the
-// DataDir and constructs a version.DefaultChecker).
+// real config file.
+//
+// Production callers pass nil for the optional fields and get
+// defaults (Checker from version.DefaultChecker, OnYes runs
+// `nightme update check`, Reader=nil so the prompt is silent
+// for the scanner-based REPL path, etc.).
 //
 // tests pass:
 //   - Checker: a Checker wired to an httptest server so we
-//     can pin "latest = 9.9.9" without hitting GitHub.
+//     can pin "latest = 9.9.9" without hitting nightme.dev.
 //   - Reader: a function that returns the next y/N line.
-//     Production code passes rl.Readline; tests pass a
-//     closure over a bytes.Buffer so we don't need a TTY.
+//     Production code passes rl.Readline; tests pass a closure
+//     over a bytes.Buffer so we don't need a TTY.
+//   - OnYes: a closure that runs whatever the "user accepted"
+//     should trigger. Production wires it to execute the
+//     cobra `update` subcommand; tests wire it to a counter
+//     so they can assert "y was accepted" without spinning up
+//     a full cobra tree.
 //   - Out: a bytes.Buffer so we can assert on the prompt text.
 //   - Logger: nil is fine — we fall back to slog.Default().
 type PromptDeps struct {
 	Checker *version.Checker
 	// Reader is the line-source used for the y/N reply. When
 	// nil, promptForUpdateIfOutdated skips the prompt entirely
-	// (the "no stdin" branch). Production callers must wire
-	// this to readline.Instance.Readline; tests wire it to
-	// bufio.Reader.ReadString('\n') over an in-memory buffer.
+	// (the "no stdin" branch). Production callers wire this
+	// to readline.Instance.Readline.
 	Reader func() (string, error)
+	// OnYes runs when the user accepts the prompt with y/yes.
+	// Production wires it to dispatch the cobra `update`
+	// subcommand; tests pass a counter closure. When nil and
+	// the user says y, we fall back to printing the manual
+	// install hint (the legacy pre-cobra behaviour) so the
+	// prompt is never a no-op.
+	OnYes func() error
 	Out    io.Writer
 	Logger *slog.Logger
 }
@@ -68,9 +83,9 @@ type PromptDeps struct {
 // interactive loop.
 //
 // On success it has printed (a) the prompt, (b) the user's
-// echoed answer (so the REPL transcript shows what they
-// typed), and (c) either a "Run `nightme update`…" hint or
-// the manual-install instructions.
+// echoed answer, and (c) either (i) the result of deps.OnYes
+// when the user accepts, or (ii) a "Run \`nightme update\`…"
+// hint when they decline / EOF / error.
 func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	if deps == nil {
 		deps = &PromptDeps{}
@@ -113,11 +128,6 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	// to leak into its transcript and break the existing
 	// TestREPL_* banner-substring assertions).
 	if deps.Reader == nil {
-		// Production callers (runREPLInteractive) always
-		// wire a Reader via rl.Readline, so this branch is
-		// only hit by runREPLWith's scanner path. Honour
-		// "never block, never surprise the transcript":
-		// return silently.
 		return nil
 	}
 
@@ -154,10 +164,16 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		return nil
 	}
 
-	// 6. Yes — print the manual install hint. The actual
-	// download / replace flow lands in a follow-up commit; for
-	// now we point the user at the same instructions
-	// `nightme update` would print.
+	// 6. Yes — invoke OnYes. Production wires this to the
+	// cobra `update` subcommand so the user gets the same
+	// "current vs latest + install instructions" output they
+	// would get from `nightme update` in a fresh terminal.
+	// When OnYes is nil (legacy / safety net) we fall back
+	// to printing the manual install hint inline.
+	fmt.Fprintln(out, "→ running `nightme update check`…")
+	if deps.OnYes != nil {
+		return deps.OnYes()
+	}
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Automatic self-update is not implemented yet. To upgrade:")
 	fmt.Fprintln(out, "  go install github.com/cnlangzi/nightme/cmd/nightme@latest")
@@ -169,7 +185,8 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 // resolveDataDir returns cfg.Paths.DataDir or "" if config
 // can't be loaded. We don't surface the error because the
 // prompt path is best-effort: a missing data dir means no
-// cache, which is fine (every startup just hits GitHub once).
+// cache, which is fine (every startup just hits nightme.dev
+// once).
 func resolveDataDir() string {
 	cfg, err := config.LoadDefault()
 	if err != nil || cfg == nil {

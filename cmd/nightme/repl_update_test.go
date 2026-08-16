@@ -63,7 +63,12 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { r
 //   1. Checker says "newer than me"
 //   2. prompt prints the question
 //   3. Reader returns "y\n"
-//   4. prompt echoes "y", then prints install instructions
+//   4. prompt echoes "y", then invokes deps.OnYes (which is
+//      wired to the `nightme update check` subcommand in
+//      production). With OnYes nil the prompt falls back to
+//      printing the manual install hint — same as the
+//      pre-subcommand-split behaviour — so the legacy contract
+//      holds.
 func TestPrompt_OutdatedYes(t *testing.T) {
 	checker := newTestChecker(t, "v9.9.9")
 	var out bytes.Buffer
@@ -72,6 +77,8 @@ func TestPrompt_OutdatedYes(t *testing.T) {
 		Checker: checker,
 		Out:     &out,
 		Reader:  func() (string, error) { return "y\n", nil },
+		// OnYes intentionally nil → fallback to inline
+		// install hint.
 	})
 	if err != nil {
 		t.Fatalf("promptForUpdateIfOutdated: %v", err)
@@ -89,6 +96,96 @@ func TestPrompt_OutdatedYes(t *testing.T) {
 	}
 	if !strings.Contains(got, "y\n") {
 		t.Errorf("expected echoed answer 'y' in output, got:\n%s", got)
+	}
+}
+
+// TestPrompt_OnYesIsInvoked is the post-split contract:
+// when the user says y AND deps.OnYes is wired, the prompt
+// delegates to OnYes instead of printing the fallback hint.
+// Production wires OnYes to dispatch the cobra `update check`
+// subcommand; the test wires it to a counter so we can assert
+// the call happened without spinning up a full cobra tree.
+func TestPrompt_OnYesIsInvoked(t *testing.T) {
+	checker := newTestChecker(t, "v9.9.9")
+	var out bytes.Buffer
+	var onYesCalls int
+	var capturedOut string
+
+	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Checker: checker,
+		Out:     &out,
+		Reader:  func() (string, error) { return "y\n", nil },
+		OnYes: func() error {
+			onYesCalls++
+			capturedOut = out.String()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("promptForUpdateIfOutdated: %v", err)
+	}
+	if onYesCalls != 1 {
+		t.Errorf("OnYes called %d times, want exactly 1", onYesCalls)
+	}
+	// The prompt header must be in the buffer by the time
+	// OnYes runs (so production can route update output to
+	// the same writer).
+	for _, want := range []string{
+		"nightme 9.9.9 is available",
+		"Update now?",
+	} {
+		if !strings.Contains(capturedOut, want) {
+			t.Errorf("OnYes ran but prompt text %q was not in writer:\n%s", want, capturedOut)
+		}
+	}
+	// Fallback hint must NOT print when OnYes is wired —
+	// OnYes is the source of truth, so duplicating the
+	// manual-install text would be noise.
+	if strings.Contains(out.String(), "go install github.com/cnlangzi/nightme") {
+		t.Errorf("OnYes is set: fallback install hint should NOT print:\n%s", out.String())
+	}
+}
+
+// TestPrompt_OnYesErrorPropagates pins that the prompt
+// returns OnYes's error to the caller instead of swallowing
+// it. The REPL caller (runREPLInteractive) ignores the
+// returned error today, but future callers may want to log
+// it; the contract is "OnYes error flows out unchanged".
+func TestPrompt_OnYesErrorPropagates(t *testing.T) {
+	checker := newTestChecker(t, "v9.9.9")
+	sentinel := errors.New("synthetic update failure")
+
+	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Checker: checker,
+		Out:     io.Discard,
+		Reader:  func() (string, error) { return "y\n", nil },
+		OnYes:   func() error { return sentinel },
+	})
+	if err == nil || !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+}
+
+// TestPrompt_NoOnYesFallsBackToInlineHint documents the
+// legacy / safety-net path: when OnYes is nil the prompt
+// prints the manual install hint inline. This is what
+// tests relying on the "go install" string in the buffer
+// pin against.
+func TestPrompt_NoOnYesFallsBackToInlineHint(t *testing.T) {
+	checker := newTestChecker(t, "v9.9.9")
+	var out bytes.Buffer
+
+	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Checker: checker,
+		Out:     &out,
+		Reader:  func() (string, error) { return "yes\n", nil },
+		// OnYes nil
+	})
+	if err != nil {
+		t.Fatalf("promptForUpdateIfOutdated: %v", err)
+	}
+	if !strings.Contains(out.String(), "go install") {
+		t.Errorf("expected inline install hint when OnYes is nil:\n%s", out.String())
 	}
 }
 
@@ -303,5 +400,67 @@ func TestRunREPLWith_NoVersionChatter(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "Update now?") {
 		t.Errorf("runREPLWith must not prompt for update (no reader wired):\n%s", buf.String())
+	}
+}
+
+// TestUpdate_BareIsCheck exercises the "bare `nightme update`
+// delegates to `update check`" wiring. We run against an
+// httptest server that returns a known newer version and
+// assert the output looks exactly like `update check` would
+// produce (Current version / Latest release / Status lines).
+func TestUpdate_BareIsCheck(t *testing.T) {
+	srv := httptest.NewServer(stubVersionHandler("9.9.9"))
+	t.Cleanup(srv.Close)
+
+	// We can't override the default endpoint URL inside the
+	// production code without plumbing it through; redirect
+	// the default URL via the package-level DefaultVersionURL
+	// var instead (it's a var, not const, for exactly this
+	// reason).
+	saved := version.DefaultVersionURL
+	version.DefaultVersionURL = srv.URL
+	t.Cleanup(func() { version.DefaultVersionURL = saved })
+
+	root := newTestRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"update"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("nightme update: %v", err)
+	}
+
+	got := buf.String()
+	for _, want := range []string{
+		"Current version:",
+		"Latest release:",
+		"9.9.9",
+		"newer release is available",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q\n--- full output ---\n%s", want, got)
+		}
+	}
+}
+
+// TestUpdate_HasCheckDownloadInstallSubcommands is a smoke
+// test against the cobra tree: the three subcommands we
+// promised in the commit message must all be registered, and
+// the parent must NOT have a RunE that fires when subcommands
+// are listed under `help update`.
+func TestUpdate_HasCheckDownloadInstallSubcommands(t *testing.T) {
+	root := newTestRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"help", "update"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("help update: %v", err)
+	}
+	got := buf.String()
+	for _, sub := range []string{"check", "download", "install"} {
+		if !strings.Contains(got, sub) {
+			t.Errorf("help update missing subcommand %q\n%s", sub, got)
+		}
 	}
 }

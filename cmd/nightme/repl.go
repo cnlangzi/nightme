@@ -105,11 +105,28 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 	// Version-check prompt: once per REPL startup. Best-effort;
 	// any failure (network, missing cache, malformed input)
 	// falls through silently so the user always ends up at the
-	// interactive prompt.
+	// interactive prompt. On "y" we dispatch the `update check`
+	// subcommand against the same cobra tree the REPL uses for
+	// every other line, so the output looks identical to what
+	// the user would get from `nightme update check` in a
+	// separate shell.
 	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
 		Out:    out,
 		Reader: rl.Readline,
 		Logger: logger,
+		OnYes: func() error {
+			// Save the root command's state so we can
+			// restore it after dispatching — the main
+			// loop also pokes SetArgs / SetContext / etc.
+			// and we don't want to stomp on those.
+			savedArgs := root.Flags().Args()
+			root.SetArgs([]string{"update", "check"})
+			root.SetContext(withLogger(context.Background(), logger))
+			root.SetOut(out)
+			root.SetErr(out)
+			defer root.SetArgs(savedArgs)
+			return root.Execute()
+		},
 	})
 
 	for {

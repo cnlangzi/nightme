@@ -510,6 +510,28 @@ func (d *driver) Close() error {
 	return err
 }
 
+// Keepalive is the driver.Keepalive implementation for the
+// acp bridge. acp speaks JSON-RPC over an arbitrary Transport
+// (PTY / stdio / WebSocket) — there's no canonical OS PID
+// for the upstream SDK host. liveness is inferred from the
+// transport state: nil transport means we've been Closed
+// (or never Started). When acp's transport gets an IsAlive
+// method (planned for the next ACP SDK bump), tighten this
+// check with a real reachability probe.
+//
+// On dead state we invoke onRecover so the chat layer can
+// dial the upstream ACP host fresh and replay the saved
+// session id. See agent.driver.Keepalive for the full contract.
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if d.transport == nil {
+		if onRecover == nil {
+			return fmt.Errorf("acp: transport nil and no recovery callback")
+		}
+		return onRecover(ctx)
+	}
+	return nil
+}
+
 // ─── internals ───
 
 // setSessionID parses the session/new response and synthesizes the

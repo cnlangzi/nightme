@@ -783,6 +783,20 @@ type Agent struct {
 // for /run reconnect logic and the registry.
 func (a *Agent) PID() int { return a.pid }
 
+// Keepalive is the chat layer's canonical "is this bridge
+// usable right now?" entry point. Thin shim around
+// driver.Keepalive(ctx, onRecover) — see the driver interface
+// for the cohesive detect-and-recover contract. Called by
+// AgentSession.Submit before every SendBlocks.
+//
+// Bridges with a per-AS subprocess use procutil.AlivePID +
+// invoke onRecover to respawn; shared-host bridges (dsh)
+// inspect the host connection and reconnect on severance;
+// SDK-style bridges (future ACP) query the upstream service.
+func (a *Agent) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	return a.driver.Keepalive(ctx, onRecover)
+}
+
 // Events streams AgentEvent values until the session ends. The
 // channel is closed by the bridge implementation only when the
 // underlying process (or transport) terminates — NOT after every
@@ -890,7 +904,7 @@ func NewAgent(info Info, pid int, events chan AgentEvent, d interface{}) *Agent 
 // client / Transport / pump goroutines). It is package-private —
 // external code interacts only with *Agent.
 //
-// The 4 methods capture exactly what bridges expose at runtime;
+// The 6 methods capture exactly what bridges expose at runtime;
 // the static metadata is on Starter.Info, the spawning logic
 // is on Starter.Start, the close machinery is on Agent.Close.
 type driver interface {
@@ -903,6 +917,42 @@ type driver interface {
 	// *Agent wrapper exposes. Each driver returns
 	// agent.ErrNotSupported if the bridge cannot honor the call.
 	Stop(ctx context.Context) error
+
+	// Keepalive is the chat layer's canonical "is this bridge
+	// usable right now?" entry point. It encapsulates the
+	// detection-and-recover decision cohesively in the bridge:
+	// subprocess bridges probe the OS PID via
+	// procutil.AlivePID, shared-host bridges (dsh) inspect the
+	// WS host connection state, SDK-style bridges query the
+	// upstream service. On detection of dead / unhealthy
+	// state, Keepalive invokes onRecover so the bridge's
+	// underlying transport is rebuilt; the callback comes
+	// from the chat layer because the Spawner reference
+	// lives there (and is the only thing outside the bridge
+	// that knows how to re-spawn via the bridge's Starter).
+	//
+	// Contract:
+	//   - Returns nil when the bridge is alive (caller proceeds
+	//     with SendBlocks without further action).
+	//   - On dead state, invokes onRecover(ctx) once. If it
+	//     returns nil, Keepalive returns nil — the bridge is
+	//     back and the caller's next SendBlocks lands on the
+	//     fresh transport.
+	//   - Returns a non-nil error ONLY when recovery itself
+	//     fails (binary missing, auth refused, host unreachable
+	//     after retries, etc.). The caller surfaces the error
+	//     to the user; no retry loop.
+	//
+	// Concurrent calls MUST be serialized inside Keepalive
+	// (sync.Once-style guard or mutex) so a burst of Submits
+	// doesn't kick off parallel recoveries. The caller does not
+	// coordinate.
+	//
+	// Cost: alive check is microseconds (syscall.Kill(pid, 0)
+	// for subprocess bridges; a connection-state field read for
+	// dsh). Recovery only fires when dead and is bounded to one
+	// attempt — persistent failure is surfaced, not retried.
+	Keepalive(ctx context.Context, onRecover func(context.Context) error) error
 }
 
 // ─── Starter: spawn recipe (interface, the only one) ──────────────

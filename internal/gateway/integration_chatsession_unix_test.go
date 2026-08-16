@@ -308,7 +308,7 @@ func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	fake := newIntegrationFake(99000 + s.calls)
+	fake := newIntegrationFake(os.Getpid())
 	s.lastFake = fake
 	return fake.Start(context.Background(), agent.StartConfig{})
 }
@@ -355,6 +355,9 @@ func (d *integrationFakeDriver) SendPermission(resp string) error {
 func (d *integrationFakeDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *integrationFakeDriver) Stop(ctx context.Context) error  { return d.inner.Stop(ctx) }
 func (d *integrationFakeDriver) Close() error                   { return d.inner.Close() }
+func (d *integrationFakeDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
+	return nil
+}
 func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
 }

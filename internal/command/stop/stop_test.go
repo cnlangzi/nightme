@@ -36,6 +36,9 @@ func (s *stubStoppable) SendBlocks(_ context.Context, _ []agent.ContentBlock) er
 func (s *stubStoppable) SendPermission(_ string) error { return nil }
 func (s *stubStoppable) Reset(_ context.Context) error  { return nil }
 func (s *stubStoppable) Close() error                   { return nil }
+func (s *stubStoppable) Keepalive(_ context.Context, _ func(context.Context) error) error {
+	return nil
+}
 func (s *stubStoppable) Stop(_ context.Context) error {
 	s.stopped++
 	return s.stopErr

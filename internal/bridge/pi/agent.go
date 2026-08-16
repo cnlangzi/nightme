@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 )
 
 // ─── constants & exported errors ───
@@ -702,6 +703,23 @@ func (d *driver) Close() error {
 		}
 	})
 	return firstErr
+}
+
+// Keepalive is the driver.Keepalive implementation for the
+// pi bridge. pi spawns the `pi` CLI subprocess per AS — when
+// it dies, the next SendBlocks silently fails. Probe the OS
+// PID via procutil.AlivePID and invoke onRecover so the chat
+// layer can spawn a fresh pi with the saved --resume session.
+// See agent.driver.Keepalive for the full contract.
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if err := procutil.AlivePID(d.PID()); err == nil {
+		return nil
+	}
+	piLog("bridge process dead, invoking recovery", "pid", d.PID(), "agent", d.agentName, "workspace", d.workspace)
+	if onRecover == nil {
+		return fmt.Errorf("pi: bridge process dead (pid=%d) and no recovery callback", d.PID())
+	}
+	return onRecover(ctx)
 }
 
 // ─── internals ───

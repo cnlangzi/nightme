@@ -70,6 +70,9 @@ func (d *longLivedFakeASDriver) SendPermission(resp string) error {
 func (d *longLivedFakeASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *longLivedFakeASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *longLivedFakeASDriver) Close() error                   { return d.inner.Close() }
+func (d *longLivedFakeASDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
+	return nil
+}
 func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
 }

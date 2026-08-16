@@ -3,6 +3,7 @@ package chatsession
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,7 +43,7 @@ func TestAS_ReuseAcrossMessages_SuccessPath(t *testing.T) {
 	cs.SetSelectedCwd("/tmp")
 	cs.SetWatchMode(WatchModeAll)
 
-	spy := &countSpawner{inner: &fakeSuccessfulSpawner{pid: 4242}}
+	spy := &countSpawner{inner: &fakeSuccessfulSpawner{pid: os.Getpid()}}
 	mgr.WithSpawner(spy)
 	cs.WithSpawner(spy)
 
@@ -77,8 +78,8 @@ func TestAS_ReuseAcrossMessages_SuccessPath(t *testing.T) {
 	if as == nil {
 		t.Fatalf("expected a selected AS, got nil")
 	}
-	if as.PID() != 4242 {
-		t.Errorf("AS pid=%d, want 4242 (single CLI process reused)", as.PID())
+	if as.PID() != os.Getpid() {
+		t.Errorf("AS pid=%d, want %d (single CLI process reused)", as.PID(), os.Getpid())
 	}
 	if as.Status() != StatusRunning {
 		t.Errorf("AS status=%s, want %s (process must stay Running across messages)",
@@ -164,6 +165,9 @@ func (*reuseTestDriver) SendPermission(_ string) error                          
 func (*reuseTestDriver) Reset(_ context.Context) error                              { return nil }
 func (*reuseTestDriver) Close() error                                               { return nil }
 func (*reuseTestDriver) Stop(_ context.Context) error                              { return nil }
+func (*reuseTestDriver) Keepalive(_ context.Context, _ func(context.Context) error) error {
+	return nil
+}
 
 // itoa is a local strconv-free integer → string helper.
 func itoa(i int) string {

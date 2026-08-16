@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 )
 
 // ─── constants & exported errors ───
@@ -769,7 +770,30 @@ func (d *driver) Stop(ctx context.Context) error {
 	return agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 }
 
-// Close terminates the session: closes stdin (so the child sees EOF
+// Keepalive is the driver.Keepalive implementation for the
+// claudecode bridge. Detects a dead OS PID via procutil.AlivePID
+// and invokes onRecover so the chat layer's respawn (which has
+// access to the Spawner) can re-spawn the subprocess with the
+// saved --resume session_id. See agent.driver.Keepalive for the
+// full contract.
+//
+// The bridge deliberately does NOT hold the Spawner reference —
+// respawn is orchestrating it via the chat layer so we don't have
+// to plumb Spawner into every bridge constructor. The bridge
+// owns the "how do I know I'm dead" question (subprocess PID
+// liveness); the chat layer owns the "how do I rebuild myself"
+// question (Spawner).
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if err := procutil.AlivePID(d.pid); err == nil {
+		return nil
+	}
+	slog.Warn("claudecode: bridge process dead, invoking recovery",
+		"pid", d.pid, "agent", d.agentName, "workspace", d.workspace)
+	if onRecover == nil {
+		return fmt.Errorf("claudecode: bridge process dead (pid=%d) and no recovery callback", d.pid)
+	}
+	return onRecover(ctx)
+}
 // and exits cleanly), waits briefly for graceful shutdown, then
 // SIGKILLs if necessary. Idempotent. cmd.Wait() is owned by the
 // lifecycle goroutine — Close() only nudges the process and waits

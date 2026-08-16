@@ -55,6 +55,9 @@ func (d *fakeDriver) SendPermission(resp string) error { return d.inner.SendPerm
 func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ctx) }
 func (d *fakeDriver) Close() error                      { return d.inner.Close() }
 func (d *fakeDriver) Stop(_ context.Context) error       { return nil }
+func (d *fakeDriver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	return nil
+}
 
 func (f *fakeAgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	f.mu.Lock()
@@ -140,6 +143,9 @@ func (d *callRecordingASDriver) SendPermission(resp string) error {
 func (d *callRecordingASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *callRecordingASDriver) Close() error                   { return d.inner.Close() }
 func (d *callRecordingASDriver) Stop(_ context.Context) error   { return nil }
+func (d *callRecordingASDriver) Keepalive(_ context.Context, _ func(context.Context) error) error {
+	return nil
+}
 
 // --- restartErrAS -----------------------------------------------------
 

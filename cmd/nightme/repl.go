@@ -55,6 +55,7 @@ Common:
   stop            gracefully stop daemon
   help            full command list
   version         version info
+  update          check for a newer release
 
 Shell:
   exit / quit     leave shell

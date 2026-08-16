@@ -147,6 +147,9 @@ func (d *echoDriver) SendPermission(resp string) error {
 func (d *echoDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *echoDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *echoDriver) Close() error                   { return d.inner.Close() }
+func (d *echoDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
+	return nil
+}
 // echoSpawner is a Spawner that hands out fresh echoAgent instances.
 type echoSpawner struct {
 	mu       sync.Mutex

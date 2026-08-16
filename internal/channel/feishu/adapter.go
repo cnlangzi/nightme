@@ -2295,13 +2295,16 @@ func buildInteractiveCard(c *messages.Card) (string, error) {
 
 	buttons := buildCardButtons(c)
 	if len(buttons) > 0 {
-		if c.Kind == messages.CardKindDecision {
-			elements = append(elements, buildColumnSet(buttons))
-		} else {
-			elements = append(elements, map[string]any{
-				"tag": "action", "actions": buttons,
-			})
-		}
+		// F-46 / cc-connect: buttons render inside a column_set so
+		// widths are even. The Decision-kind branch used to wrap in
+		// `column_set` while the regular branch emitted the legacy
+		// `tag: action` envelope — but Feishu's V2 card schema (the
+		// one live on the tenant since 2026-Q2) dropped support for
+		// `tag: action` in body elements, so the regular branch
+		// failed with Code 230099 / ErrCode 200861. Both branches
+		// now go through buildColumnSet and produce the same V2
+		// shape. (Decision's previous code is the canonical V2 form.)
+		elements = append(elements, buildColumnSet(buttons))
 	}
 
 	card := map[string]any{

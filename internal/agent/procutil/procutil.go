@@ -3,24 +3,27 @@
 // (claudecode, opencode, codex, pi, pty).
 //
 // Why a separate package: each of those bridges used to keep
-// its own copy of the syscall.Kill(pid, 0) wrapper, which meant
-// five implementations of the same "is this PID alive?" check
+// its own copy of the kill(pid, 0) probe, which meant five
+// implementations of the same "is this PID alive?" check
 // drifted independently. The bridges that DON'T spawn a
 // subprocess (dsh's shared-host model, future ACP-style SDK
 // backends) implement their own liveness logic against the
 // driver.Keepalive(ctx) interface — procutil is for the
 // subprocess tier only.
 //
-// Cheap: every call is a single syscall + a couple of field
-// reads. Keepalive backstops in the bridge layer invoke this
-// on every Submit, so cost matters — syscall.Kill(pid, 0)
-// takes <10µs in practice.
+// Platform split: the underlying probe uses syscall.Kill(pid, 0)
+// on Unix and kernel32!OpenProcess on Windows. The shared API
+// (AlivePID, ErrNoPID) is platform-independent; the
+// implementation lives in procutil_unix.go / procutil_windows.go.
+// Same pattern as internal/chatsession/prober_kill_{unix,windows}.go.
+//
+// Cheap: every call is a single syscall (or one userland call +
+// CloseHandle on Windows) + a couple of field reads. Keepalive
+// backstops in the bridge layer invoke this on every Submit, so
+// cost matters — both implementations take <10µs in practice.
 package procutil
 
-import (
-	"errors"
-	"syscall"
-)
+import "errors"
 
 // ErrNoPID is returned when the caller hands procutil.AlivePID
 // a pid of 0 or negative — i.e., the bridge never reached
@@ -34,10 +37,10 @@ var ErrNoPID = errors.New("procutil: no PID (detached / never spawned / already 
 //
 // Returns nil when the PID is alive. Returns ErrNoPID for
 // non-positive pids so callers can distinguish "not tracked"
-// from "definitively dead". Returns the underlying syscall
-// error (typically ESRCH) for real "process is gone" cases —
-// the bridge's Keepalive interprets this as the trigger for
-// self-recovery.
+// from "definitively dead". Returns the underlying syscall error
+// (ESRCH on Unix; ERROR_INVALID_PARAMETER on Windows) for real
+// "process is gone" cases — the bridge's Keepalive interprets
+// this as the trigger for self-recovery.
 //
 // TOCTOU: this is a snapshot check; the PID can die between
 // this call and the bridge's next operation. Keepalive
@@ -49,8 +52,5 @@ func AlivePID(pid int) error {
 	if pid <= 0 {
 		return ErrNoPID
 	}
-	if err := syscall.Kill(pid, syscall.Signal(0)); err != nil {
-		return err
-	}
-	return nil
+	return platformAlivePID(pid)
 }

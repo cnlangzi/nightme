@@ -516,16 +516,23 @@ func (d *driver) fetchHistory(ctx context.Context) {
 	if d.sessionID == "" {
 		return
 	}
-	// dsh's session.history accepts a `beforeSeq` (exclusive upper
-	// bound). We pass lastSeq so the response is [0, lastSeq), then
-	// filter by seq > lastSeq ourselves — dsh's wire only has
-	// beforeSeq, not sinceSeq, so we round-trip the full range
-	// below the cursor and slice. For long sessions this is wasteful
-	// — a wire-side sinceSeq would help. Until then, the dsh's own
-	// session log keeps this manageable.
+	// dsh's session.history wire only carries `beforeSeq` (exclusive
+	// upper bound) — there is no `sinceSeq`. We want events with
+	// seq > lastSeq, which is the OPPOSITE direction. We can't ask
+	// for "the tail" without passing some upper bound, and we don't
+	// know max_seq ahead of time.
+	//
+	// Pragmatic choice: don't send `beforeSeq` at all. dsh returns
+	// the most recent up-to-maxMessages events (the full history
+	// for any session under the cap). The dispatcher dedupes by
+	// lastSeq so re-fetching the whole range each tick is wasteful
+	// but correct. For long sessions, dsh's session log is bounded
+	// in practice and we lose nothing.
+	//
+	// (A wire-side sinceSeq would cut the over-fetch by 1/N —
+	// open an upstream issue if this becomes hot.)
 	payload := map[string]any{
 		"sessionId": d.sessionID,
-		"beforeSeq": d.lastSeq,
 	}
 	resp, err := d.cli.RPC.Post(ctx, "session.history", payload)
 	if err != nil {

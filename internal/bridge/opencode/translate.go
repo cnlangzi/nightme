@@ -740,7 +740,66 @@ func (t *translator) handlePart(p Part) {
 		// correct for this code path.
 		t.markContent()
 		t.handleToolPart(p)
-	case "agent", "subtask", "step-start", "step-finish", "snapshot",
+	case "step-start":
+		// Same role as session.next.step.started on the global
+		// bus (translate.go:425-435): mark that the model took
+		// a turn so the terminal event doesn't classify the
+		// reply as "empty" when no payload-bearing events fire.
+		// opencode 1.18.18 emits step-start / step-finish as
+		// message.part.updated Parts (NOT on the global bus —
+		// only the tool.* family publishes there), so the
+		// bookkeeping has to live here too.
+		t.turnMu.Lock()
+		t.turnHadStep = true
+		t.turnMu.Unlock()
+		oLog("sse: step-start part")
+	case "step-finish":
+		// TERMINAL signal for opencode 1.18.18's text-only
+		// path. print.go (CLI mode) already treats step_finish
+		// as the terminal — print.go:178 sets st.done=true,
+		// covered by print_test.go:68
+		// TestHandleRunEvent_StepFinish_Terminal — and the CLI
+		// process exits 0 right after the event. The SSE
+		// bridge (1.18.18) instead publishes step-finish as a
+		// message.part.updated Part; before this handler it
+		// was lumped into the "internal flow markers" ignore
+		// list, stranding text-only turns in "Working"
+		// forever — no tool.success to trip tryEmitTurnDone,
+		// no step.ended / idle / next.idle (1.18.18 omits
+		// all three per the 913e7a2 fix note), so the chat
+		// session never received EventAgentDone. Visible
+		// symptom (2026-08-16 production): OpenCode session
+		// sent "Let me explore more about the review-related
+		// code in this project." then stopped — no tool
+		// call, no Done, no further logs. Mirrors
+		// translate.go:437-484's session.next.step.ended
+		// flush+leak dance (closeAllTextBlocksLocked +
+		// flushPendingTextLocked + flushLeftoverThinkLocked +
+		// tryEmitTurnDone).
+		t.turnMu.Lock()
+		t.closeAllTextBlocksLocked()
+		flushEvents := t.flushPendingTextLocked()
+		t.turnMu.Unlock()
+		for _, ev := range flushEvents {
+			t.deliver(ev)
+		}
+
+		t.turnMu.Lock()
+		leaked := t.flushLeftoverThinkLocked()
+		t.turnMu.Unlock()
+		for _, ev := range leaked {
+			t.deliver(ev)
+		}
+
+		// Idempotent: tryEmitTurnDone swallows a second Done
+		// via the turnTerminalEmitted guard. A tool.success
+		// that arrived earlier in the same turn (mixed
+		// protocol, or a future opencode that emits both on
+		// every turn) already emitted Done — this is a no-op.
+		// Same regression contract as session.next.step.ended
+		// and session.idle.
+		t.tryEmitTurnDone("settled", 0, nil)
+	case "agent", "subtask", "snapshot",
 		"patch", "retry", "compaction":
 		// Internal flow markers — log only when in debug mode.
 		oLog("sse: ignored part type", "type", p.Type)

@@ -1142,3 +1142,158 @@ func TestExtractToolError_PrefersDataMessage(t *testing.T) {
 		})
 	}
 }
+
+// ─── (f) step-finish Part is the turn terminal on 1.18.18 ────────
+//
+// Background. opencode 1.18.18's SSE bus omits the global
+// session.next.step.ended / session.idle events that 1.17/1.18
+// used for turn-end. The new fix (913e7a2) wires tool.success
+// and tool.failed as terminals, but text-only turns (assistant
+// replies with prose, no tool call) still have no terminal
+// signal — the only end-of-turn marker on the wire is a
+// `message.part.updated` Part with Type="step-finish". Before
+// this set of tests it was lumped into the "internal flow
+// markers" ignore list at translate.go:743, stranding the chat
+// session in "Working" forever (the symptom captured in the
+// production incident: OpenCode session sent "Let me explore
+// more about the review-related code in this project." then
+// stopped — no tool call, no Done, no further logs).
+//
+// These tests pin the contract: a step-finish Part MUST trigger
+// tryEmitTurnDone. step-start Part MUST set turnHadStep so a
+// content-less step-finish classifies as "settled" (the model
+// took a turn) rather than "empty". tool.success followed by
+// step-finish MUST NOT double-emit Done.
+
+// sseMessagePart builds a `message.part.updated` SessionEvent
+// whose Part payload has the given type and (optional) extra
+// JSON fields. Mirrors the inline literal at
+// translate_test.go:319 (tool-boundary test) — extracted here
+// so the step-finish tests stay readable.
+func sseMessagePart(partType, extra string) SessionEvent {
+	parts := []string{`"type":` + jsonString(partType)}
+	if extra != "" {
+		parts = append(parts, extra)
+	}
+	raw := `{"type":"message.part.updated","properties":{"part":{` +
+		strings.Join(parts, ",") + `}}}`
+	var ev SessionEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		panic("test sseMessagePart bad json: " + err.Error())
+	}
+	return ev
+}
+
+// TestTranslate_StepFinishPart_EmitsDoneForTextOnlyTurn is the
+// regression test for the 1.18.18 text-only path: a text reply
+// with no tool call must still terminate the turn. Failure mode
+// without the fix: step-finish is ignored, no EventAgentDone
+// ever surfaces, the chat session stays in "Working" until the
+// watchdog kills the bridge (~minutes later, after the user has
+// already given up).
+func TestTranslate_StepFinishPart_EmitsDoneForTextOnlyTurn(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	// Assistant replies with text but does NOT call a tool —
+	// this is the production-incident shape verbatim.
+	if err := tr.handleEvent(sseMessagePart("text", `"text":"Let me explore more about the review-related code in this project."`)); err != nil {
+		t.Fatalf("handleEvent(text): %v", err)
+	}
+	if err := tr.handleEvent(sseMessagePart("step-start", "")); err != nil {
+		t.Fatalf("handleEvent(step-start): %v", err)
+	}
+	if err := tr.handleEvent(sseMessagePart("step-finish", "")); err != nil {
+		t.Fatalf("handleEvent(step-finish): %v", err)
+	}
+
+	events := snap()
+
+	// The reply text must reach the chat client (it does today
+	// — message.part.updated text path is already wired).
+	var gotText string
+	for _, ev := range events {
+		if ev.Kind == agent.EventAgentText {
+			gotText = ev.Text
+			break
+		}
+	}
+	if gotText != "Let me explore more about the review-related code in this project." {
+		t.Errorf("text part not delivered; got %q", gotText)
+	}
+
+	// The terminal — this is what the bug breaks.
+	done := lastDone(events)
+	if done == nil {
+		t.Fatalf("step-finish Part did not emit EventAgentDone; events=%v", textTexts(events))
+	}
+	if done.Reason != "settled" {
+		t.Errorf("Done.Reason = %q, want %q (text content counts)", done.Reason, "settled")
+	}
+	if dones := countKind(events, agent.EventAgentDone); dones != 1 {
+		t.Errorf("got %d EventAgentDone, want exactly 1", dones)
+	}
+}
+
+// TestTranslate_StepFinishPart_NoContentButStepStart_IsSettled
+// covers the corner where step-start fires (proving the model
+// took a turn) but no payload-bearing events fire before
+// step-finish (e.g. the model output was a tool call that was
+// filtered, or a reasoning-only turn on a build that hides
+// reasoning parts). Without the step-start handler, this would
+// land on the "empty" branch — a chat session that did real
+// work would surface as "(empty response)" to the user.
+func TestTranslate_StepFinishPart_NoContentButStepStart_IsSettled(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	if err := tr.handleEvent(sseMessagePart("step-start", "")); err != nil {
+		t.Fatalf("handleEvent(step-start): %v", err)
+	}
+	if err := tr.handleEvent(sseMessagePart("step-finish", "")); err != nil {
+		t.Fatalf("handleEvent(step-finish): %v", err)
+	}
+
+	done := lastDone(snap())
+	if done == nil {
+		t.Fatalf("step-finish did not emit EventAgentDone")
+	}
+	if done.Reason != "settled" {
+		t.Errorf("Done.Reason = %q, want %q (step-start counted as work)", done.Reason, "settled")
+	}
+}
+
+// TestTranslate_StepFinishPart_AfterToolSuccess_IsIdempotent
+// guards against the regression where step-finish + tool.success
+// both fire on the same turn (mixed-protocol session, or a
+// future opencode that emits BOTH on every tool turn) — Done
+// must fire exactly once. Mirrors
+// TestTranslate_ToolOnly_DuplicateTerminalIsNoop for the Part
+// path.
+func TestTranslate_StepFinishPart_AfterToolSuccess_IsIdempotent(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	// Tool that succeeds.
+	if err := tr.handleEvent(sseToolEvent("success", "tc1", "bash", `"input":{"command":"ls"}`)); err != nil {
+		t.Fatalf("handleEvent(tool.success): %v", err)
+	}
+	// step-finish that arrives after.
+	if err := tr.handleEvent(sseMessagePart("step-finish", "")); err != nil {
+		t.Fatalf("handleEvent(step-finish): %v", err)
+	}
+
+	if dones := countKind(snap(), agent.EventAgentDone); dones != 1 {
+		t.Errorf("got %d EventAgentDone, want exactly 1 (step-finish after tool.success must be no-op)", dones)
+	}
+}
+
+// countKind returns the number of events in events whose Kind
+// matches k. Local helper, mirrors the inline switch loops used
+// in the surrounding tests.
+func countKind(events []agent.AgentEvent, k agent.EventKind) int {
+	n := 0
+	for _, ev := range events {
+		if ev.Kind == k {
+			n++
+		}
+	}
+	return n
+}

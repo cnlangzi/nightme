@@ -378,3 +378,101 @@ func TestE2E_Interrupt(t *testing.T) {
 // _ = errors.New keeps the imports when the test file is built
 // without the stopped / resume references in some configurations.
 var _ = errors.New
+
+// TestE2E_ResumeStuckSession_TextOnlyTurn is the production
+// incident reproducer: it resumes a real session ID from the
+// user's opencode DB and sends a text-only prompt (no tool
+// call expected) to verify the bridge now emits EventAgentDone.
+//
+// Before the step-finish Part handler was added, this turn
+// would never produce a Done event (no tool.success to fire
+// it, no session.idle / step.ended / next.idle on 1.18.18)
+// and the test would hang until the watchdog killed the
+// bridge. With the handler wired, the turn settles cleanly.
+//
+// Run with:
+//
+//	NIGHTME_OPENCODE_E2E=1 \
+//	NIGHTME_OPENCODE_E2E_WORKSPACE=/Users/geax/code/geax/github.com/cnlangzi/nightme.nightme/feat-review \
+//	go test ./internal/bridge/opencode/ -run TestE2E_ResumeStuckSession_TextOnlyTurn -v -count=1
+func TestE2E_ResumeStuckSession_TextOnlyTurn(t *testing.T) {
+	shouldRunE2E(t)
+
+	// Tighten the watchdog so a true failure (model never
+	// responds) still surfaces within the test deadline rather
+	// than hanging on the production default.
+	t.Setenv("NIGHTME_OPENCODE_TURN_WATCHDOG", "30s")
+
+	const stuckSessionID = "ses_ff8b562f5ffegdReUabycc20XE"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	template := NewStarter("opencode", "opencode", nil)
+	workspace := e2eWorkspace(t)
+	t.Logf("[e2e-stuck] workspace=%s session=%s", workspace, stuckSessionID)
+
+	sess, err := template.Start(ctx, agent.StartConfig{
+		Workspace: workspace,
+		SessionID: stuckSessionID,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "subscribe") {
+			t.Skipf("opencode server SSE endpoint unavailable (known 1.18.x bug): %v", err)
+		}
+		t.Fatalf("Start (resume stuck session): %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	ready := awaitReady(t, sess.Events(), 15*time.Second)
+	if ready.SessionID != stuckSessionID {
+		t.Errorf("resumed SessionID = %q, want %q", ready.SessionID, stuckSessionID)
+	}
+	t.Logf("[e2e-stuck] resumed ok — session=%s model=%s pid=%d",
+		ready.SessionID, ready.Model, sess.PID())
+
+	// Text-only prompt — instruct the model to reply with a
+	// single word so it doesn't reach for any tool. This is the
+	// exact shape that triggered the production incident
+	// ("Let me explore more about the review-related code in
+	// this project."): text out, no tool call.
+	if err := sess.SendBlocks(ctx, []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "Reply with exactly one word: ok. Do not call any tool."},
+	}); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
+	}
+
+	events := drainUntilTurnDone(t, sess.Events(), 90*time.Second)
+
+	// Report what we observed — every event kind in order so
+	// the failure surface is self-explanatory.
+	kinds := kindsOnly(events)
+	t.Logf("[e2e-stuck] events: %v", kinds)
+
+	hasDone := false
+	var doneReason string
+	for _, ev := range events {
+		if ev.Kind == agent.EventAgentDone {
+			hasDone = true
+			if ev.Done != nil {
+				doneReason = ev.Done.Reason
+			}
+			break
+		}
+	}
+	if !hasDone {
+		t.Fatalf("EventAgentDone not delivered; events=%v — turn is stuck (the original bug)", kinds)
+	}
+	t.Logf("[e2e-stuck] DONE fired; reason=%q", doneReason)
+
+	hasText := false
+	for _, ev := range events {
+		if ev.Kind == agent.EventAgentText && ev.Text != "" {
+			hasText = true
+			t.Logf("[e2e-stuck] text: %q", ev.Text)
+		}
+	}
+	if !hasText {
+		t.Errorf("no EventAgentText observed; kinds=%v", kinds)
+	}
+}

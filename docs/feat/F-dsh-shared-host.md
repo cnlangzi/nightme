@@ -273,8 +273,8 @@ standardRegistry = map[string]frameHandler{
     "user/message":          debugOnly,    // ⚠ 不能 emit,避免重复气泡
     "request/header":        debugOnly,
     "request/context":       debugOnly,
-    "step/start":            emitStepBoundary,  // 心跳用
-    "step/end":              emitStepBoundary,
+    "step/start":            handleStepBoundary, // no-op; sessionStats, not TodoPanel
+    "step/end":              handleStepBoundary,
     "session/title":         emitTitle,
     "session/title-llm-request": debugOnly,
 }
@@ -541,3 +541,4 @@ func requireRealDsh(t *testing.T) {
 
 - 2026-08-16: 初稿,基于 [dsh-shared-host.md](../bridge/dsh-shared-host.md) 实机 probe + 用户提案
 - 2026-08-16 修订: 用户决定不保留旧版兼容性,删除 Phase 1(dual-run)+ Phase 3(删旧路径),合并为 Phase 1(Build & Replace);移除 DSH_GLOBAL_HOST env flag;移除 dual-run sanity 期;移除"不可逆"标记改为 Phase 1 整体不可逆;移除 R1/R2 旧风险项
+- 2026-08-16 修订: dashboard To-dos 条对齐 `todo/write` + `todos` 投影;`step/start|end` 改为 registry no-op(不是 `emitStepBoundary` / OutTask*)

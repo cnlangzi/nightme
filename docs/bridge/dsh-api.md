@@ -992,7 +992,7 @@ First frame after stream open for **every attached session**. Replay replays eac
 | `assistant/message` | (flush `pendingText` → `EventAgentText`) |
 | `tool/call` | `EventToolStart{ID, Name, Args}` + record `pendingTools[id]` |
 | `tool/result` | `EventToolEnd{ID, Name, Args, Output, Err}` (back-fills Name/Args from pendingTools) |
-| `turn/start` | (clear turnState; align with pi F-32) |
+| `turn/start` | (clear turnState; align with pi F-32). Does **not** emit OutTask*. Host also pushes `session/projection{key:"todos", value:null}` — see §3.4.3. |
 | `turn/end` | `EventResult{Usage} + EventDone{Reason: "settled"}` |
 | `compaction/end` | `EventCompaction` |
 | `todo/write` | `EventAgentTaskCreate` (snapshot). Dashboard **To-dos / 任务** strip. Payload `{todos:[{content,status}]}`. |
@@ -1021,19 +1021,29 @@ When present, `view` is the **authoritative** source for tool status (P3 contrac
   "payload": {
     "sessionId": "session-...",
     "key":       "todos" | "title" | "sessionStats" | "goal" | ...,   // ⚠ NOT "projection"
-    "value":     { /* unit-specific */ },
+    "value":     /* unit-specific — see table */,
     "seq":       42
   }
 }
 ```
 
-| Wire field | Doc field | Notes |
+| Wire field | Notes |
+|---|---|
+| `key` | projection unit name. Canonical wire is `key` (not `projection`). Bridge `protocol.go:projectionEnvelope` uses `json:"key"` (fixed). |
+| `value` for `key:"todos"` | `TodoItem[] \| null` — **the array itself**, not `{todos:[...]}`. Declared by `@deepseek-ai/dsh-tool-todo` `SessionProjectionMap.todos`. Captured: `internal/bridge/dsh/testdata/projections/todo_snapshot.json`. |
+| `value` for other keys | unit-specific objects (`title` string, `sessionStats` counters, …). |
+
+Live push state, never logged — replay recomputes on the host. Dashboard seeds from the history tail page's `projections` block (`{asOfSeq, values}`), then applies higher-seq `session/projection` frames.
+
+**Dashboard To-dos / 任务** (`TodoDock` in `conversation.input.dock`; locale `todo.title` = "To-dos" / "任务"):
+
+| Surface | Maps to | Does not map to |
 |---|---|---|
-| `key` | (was `projection`) | projection unit name. The bridge `protocol.go:projectionEnvelope` uses `projection` — ❌ BRIDGE BUG (the Go tag is wrong; should be `key`). Will mismatch until fixed. |
+| Input-dock plan strip (`TodoDock` → `useProjection("todos")`) | live `todo/write` `{todos:[{content,status}]}` (tool `todo_write`); host fold `backscanTodos` = latest write until a later `turn/start` (that emit is `value: null`, which hides the strip) | `step/start` / `step/end` |
+| Chat tool row `todo_write(...)` | `tool/call` / `tool/result` | the dock list |
+| TTFT / tok/s (`StatsLine`) | `step/start` / `step/end` `{turn,step}` folded into `sessionStats` | TodoPanel |
 
-Live push state, never logged — replay recomputes on the host. Clients keep one generic per-session value store under higher-seq-wins, seeded by the history tail page's projections block.
-
-Dashboard **To-dos / 任务** (`TodoDock` in `conversation.input.dock`) reads `useProjection("todos")`. The host folds the latest `todo/write` `{todos:[{content,status}]}` until a later `turn/start` retires the plan (`backscanTodos`). The bridge maps live `todo/write` and `session/projection{key:"todos"}` to `EventAgentTaskCreate`. `step/start` / `step/end` feed `sessionStats`, not this strip.
+Bridge today: live `todo/write` → `EventAgentTaskCreate` (works). `step/*` is registered and emits nothing. `session/projection{key:"todos"}` is routed to `applyTodoProjectionLocked`, which still unmarshals an **object** `{todos\|items}`; a real array fails decode and is dropped. JSON `null` unmarshals as a zero struct and still emits `EventAgentTaskCreate{Items:[]}` (Feishu treats empty Items as “clear checklist”), which undoes `handleTurnStart`’s keep-last-snapshot comment. Attach/`session.history` does not apply the tail `projections` block (`observeHistory` only walks `events`).
 
 #### 3.4.4 `session/queue` — input queue snapshot
 
@@ -1560,7 +1570,8 @@ The Go bridge was implemented before the TS source was accessible for verificati
 
 | # | Bridge code | Authoritative wire | Status |
 |---|---|---|---|
-| 1 | `protocol.go:projectionEnvelope` uses `Projection string \`json:"projection"\`` | `session/projection` uses `key` field | ❌ BUG — Go tag is wrong; dsh 0.1.0-rc.6 may accept both forms, but canonical wire is `key` |
+| 1 | `protocol.go:projectionEnvelope` uses `Key string \`json:"key"\`` | `session/projection` uses `key` | ✅ fixed |
+| 1b | `applyTodoProjectionLocked` unmarshals `value` as `{todos\|items: TodoItem[]}` | `key:"todos"` value is `TodoItem[] \| null` (array or JSON null) | ❌ BUG — array frames drop; `null` still emits empty `EventAgentTaskCreate` (Feishu clears checklist). Live `todo/write` object shape is unaffected. History tail `projections.values.todos` is not applied on attach. |
 | 2 | `session.go:SendPermission` sends `client-request{method:"respond", payload:{rpcId, payload:{outcome}}}` | `respond` is `client-response{envelope.rpcId echoes server-frame's rpcId, result.value:{sessionId, approvalId, outcome}}` | ❌ BUG — legacy form accidentally accepted by 0.1.0-rc.6; fix to canonical form |
 | 3 | `session.go:SendPermission` outcome vocabulary: `"approved"` \| `"declined"` | `ApprovalOutcome`: `"allowed-once"` \| `"rejected"` (client-giveable subset) | ❌ BUG — wrong enum values |
 | 4 | `protocol.go:questionPayload.Options` uses `[]string` | `AskUserQuestionItem.options` is `[]AskUserQuestionOption` (objects) | ❌ BUG — option shapes |
@@ -1569,7 +1580,7 @@ The Go bridge was implemented before the TS source was accessible for verificati
 | 7 | `sessions.d.ts` lists 50+ methods across 11 domains; bridge only calls ~8 | All 50+ available | ⚠ Bridge doesn't yet wire host/workspace/skills/agentPresets/goals/settings/credentials/llm; runtime doesn't ask for them yet |
 | 8 | Bridge opens mux+host as 2 separate WS dials | `events.mux` aggregates ALL sessions on one stream (subscription baseline per attached session); host is single stream | ✅ OK semantically |
 
-Items 1-5 are the active bridge bugs against the canonical wire. Fix candidates tracked for next bridge revision.
+Items 1b and 2–5 are the active bridge bugs against the canonical wire. Item 1 (`key` vs `projection`) is fixed.
 
 ---
 
@@ -1596,6 +1607,7 @@ For future maintainers picking up this protocol or extending it:
    - `session.list.items` not `sessions`
    - `updatedAt` not `createdAt`
    - `session/projection.key` not `projection`
+   - `session/projection` `key:"todos"` **value is `TodoItem[] \| null`** (array), while `todo/write` **data is `{todos: TodoItem[]}`** (object). Do not decode one shape as the other.
    - `ApprovalOutcome` enum: `allowed-once`/`rejected` (client-giveable) + `cancelled`/`unavailable` (host-side)
    - `question/requested.options[]` is objects (`{label, description?}`) not strings
 

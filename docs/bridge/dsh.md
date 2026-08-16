@@ -121,7 +121,7 @@ ws://127.0.0.1:3080/api/events.host  # host lifecycle(创建/销毁/失败)
 |----------|------------------|------------------------------|
 | `session/subscribed` | `{sessionId, lastSeq}` | 初始化基线;不发 event,仅记录 seq 起点 |
 | `session/event` | `{sessionId, event: SessionEvent, view?: ToolEventView}` | translate 42 种 SessionEvent → AgentEvent |
-| `session/projection` | `{sessionId, seq, projection, value}` | 投影帧(标题/任务列表),不直接发 event;runtime 更新内部状态 |
+| `session/projection` | `{sessionId, seq, key, value}` | 投影帧。`key:"todos"` 的 `value` 是 `TodoItem[] \| null`(数组,不是 `{todos:[...]}` 包装)。Dashboard To-dos 条读这个 key;详见 §6 |
 | `session/queue` | `{sessionId, items}` | 输入队列快照;F-38 后续若做 QueueDock UI 时用 |
 | `session/jobs` | `{sessionId, jobs}` | 后台任务;本期不发 event |
 | `approval/requested` | `{sessionId, approvalId, toolName, callId?, reason?}` | **`EventAgentPermission{ResponseCh}`** + 记 `approvalId` |
@@ -506,7 +506,9 @@ func (t *translator) handleSessionEvent(ev SessionEvent, deliver func(agent.Agen
     case "compaction/end":
         // EventCompaction
     case "todo/write":
-        // EventAgentTaskCreate/Update(snapshot)
+        // EventAgentTaskCreate(snapshot) — dashboard To-dos / 任务 strip
+    case "step/start", "step/end":
+        // 不 emit; sessionStats(TTFT / tok/s),不是 TodoPanel
     case "approval/asked":
         // EventAgentPermission(单独走 permissions.go)
     default:
@@ -674,9 +676,9 @@ t12  AgentSession.SetExited(0)
 | `session/event` `turn/start` | `{event:{turnId, messageIds?}}` | (清 turnState;对齐 pi F-32) | |
 | `session/event` `turn/end` | `{event:{turnId, stopReason, usage?}}` | **`EventResult{Usage} → EventDone{Reason:"settled"}`** | F-52 终态 |
 | `session/event` `compaction/end` | `{event:{reason, aborted}}` | `EventCompaction` | 一个周期 = 一次 emit |
-| `session/event` `todo/write` | `{event:{todos:[{content, status}]}}` | `EventAgentTaskCreate` / `EventAgentTaskUpdate`(snapshot)| dashboard **To-dos / 任务** strip; last-write-wins whole list |
-| `session/event` `step/start` / `step/end` | `{event:{turn, step}}` | (不 emit)| inference cycle / `sessionStats`; **不是** TodoPanel |
-| `session/projection` `key:"todos"` | `{value:[{content,status},...]}` | `EventAgentTaskCreate`(snapshot)| 冷启动 / 重放; host fold of latest `todo/write` until next `turn/start` |
+| `session/event` `todo/write` | `{event:{todos:[{content, status}]}}` | `EventAgentTaskCreate`(snapshot)| dashboard **To-dos / 任务** strip; last-write-wins 整表。字段是 `todos` 不是 `items` |
+| `session/event` `step/start` / `step/end` | `{event:{turn, step}}` | (不 emit)| 一次模型推理 + 其工具;折叠进 `sessionStats`(TTFT / tok/s)。**不是** TodoPanel |
+| `session/projection` `key:"todos"` | `value: TodoItem[] \| null`(数组直出) | 应对齐 `EventAgentTaskCreate`| host fold:最新 `todo/write` 直到下一次 `turn/start`(`value:null` 退休 plan)。**与** `todo/write` 的 object `{todos:[...]}` **形状不同**。当前 `applyTodoProjectionLocked` 按 object 解,数组帧会丢;见 [dsh-api.md §3.4.3](./dsh-api.md) |
 | `session/event` `approval/asked` | `{event:{toolCallId, toolName, action, options}}` | (单独走 permissions.go) | **不**直接发 EventPermission 给 runtime,经 permissions 层 normalize |
 | `approval/requested` | `{sessionId, approvalId, toolName, callId?, reason?}` | `EventAgentPermission{ResponseCh}` | 见 §4.5 |
 | `question/requested` | `{sessionId, questions}` | `EventAgentPermission` (复用,多 question)| inline encode labels,见 codex §6.3 |

@@ -137,17 +137,18 @@ probe `session/event` 实际遇到的 type 集合(全部出现在 0.1.0-rc.6):
 | `turn/start` | `user/message` |
 | `turn/end` | `request/header` |
 | `compaction/end` | `request/context` |
-| `todo/write/update/delete` | `step/start` |
-| `approval/asked` | `step/end` |
-| | `session/title` |
-| | `session/title-llm-request` |
+| `todo/write/update/delete` | `session/title` |
+| `approval/asked` | `session/title-llm-request` |
+| `step/start` / `step/end` (registered, **不** emit AgentEvent) | |
 
-`session/projection` 新发现 key: `permissions`, `subagentTiming`, `sessionListMetadata`, `sessionStats`, `contextPressure`, `contextBreakdown`, `tokenUsage`, `title`
+`session/projection` keys (0.1.0-rc.6): `todos` (To-dos strip; `value` 是 `TodoItem[] | null`), `title`, `permissions`, `plan`, `goal`, `sessionStats` (由 `step/*` 折叠), `subagentTiming`, `sessionListMetadata`, `contextPressure`, `contextBreakdown`, `tokenUsage`, `imageLimits`.
+
+`step/start` / `step/end` 是推理周期边界 `{turn, step}`,给 `sessionStats`(TTFT / tok/s)用,**不是** TodoPanel。清单只对齐 `todo/write` + `todos` 投影。详见 [dsh-api.md §3.4.3](./dsh-api.md)。
 
 ### 2.8 ⚠️ Bridge Bug 仍存在(dsh-api.md §11)
 
-实机验证 §11 列的 5 个 ❌ BUG 全部未修:
-1. `protocol.go:projectionEnvelope` 用 `projection` 而非 `key`
+实机验证 §11 列的若干 ❌ BUG 部分已修:
+1. ~~`protocol.go:projectionEnvelope` 用 `projection` 而非 `key`~~ ✅ 已改为 `json:"key"`。**仍开**:`todos` 投影 `value` 是数组/`null`,decoder 仍按 `{todos|items}` object 解 — 见 [dsh-api.md §11 item 1b](./dsh-api.md)。
 2. `SendPermission` 发 `client-request{method:"respond"}` 而非 `client-response`
 3. `ApprovalOutcome` 用 `"approved"/"declined"` 而非 `"allowed-once"/"rejected"`
 4. `questionPayload.Options` 用 `[]string` 而非 `[]AskUserQuestionOption`
@@ -405,7 +406,7 @@ cs.Close() / DropAgentSession(as-a)
 | `agent/inbox/spliced` | ❌ | debug log(queue 已被 server spliced) |
 | `user/message` | ❌ | debug log(回显用户消息 — **不要** emit 到 chat,避免双气泡) |
 | `request/header` / `request/context` | ❌ | debug log(LLM 请求元数据) |
-| `step/start` / `step/end` | ❌ | `EventStepBoundary`(per-step progress) |
+| `step/start` / `step/end` | ✅ 已注册,不 emit | (no-op) inference cycle / `sessionStats`。**不是** TodoPanel(`todo/write` + `todos` 投影才是) |
 | `session/title` | ❌ | `EventSessionTitle{Title}` |
 | `session/title-llm-request` | ❌ | debug log(模型请求生成标题) |
 | `assistant/chunk` 等已有 | ✅ | 保留 |
@@ -416,11 +417,12 @@ cs.Close() / DropAgentSession(as-a)
 
 ## 6. 顺手修 Bridge BUG
 
-`internal/bridge/dsh/` 现有 5 个 BUG(dsh-api.md §11),新架构落地一并修:
+`internal/bridge/dsh/` 现有若干 BUG(dsh-api.md §11),新架构落地一并修:
 
 | # | 文件:行 | 当前 | 改为 |
 |---|---|---|---|
-| 1 | `protocol.go:projectionEnvelope` | `"projection"` | `"key"` |
+| 1 | `protocol.go:projectionEnvelope` | ~~`"projection"`~~ | `"key"` ✅ |
+| 1b | `state.go:applyTodoProjectionLocked` | `value` 当 `{todos\|items}` object 解 | `TodoItem[] \| null`(数组直出);`null` 不要发空 OutTask* |
 | 2 | `session.go:SendPermission` envelope | `client-request{method:"respond",payload:{...}}` | `client-response{rpcId:echoed,result:{ok,value}}` |
 | 3 | `SendPermission` outcome | `"approved"/"declined"` | `"allowed-once"/"rejected"` |
 | 4 | `protocol.go:questionPayload.Options` | `[]string` | `[]AskUserQuestionOption{label,description?}` |
@@ -469,7 +471,7 @@ cs.Close() / DropAgentSession(as-a)
 ### 8.2 仍需实测
 
 - **approval/requested 真实路径**: 实机 prompt 没触发 approval(默认 sandbox 接受了 Bash),需要构造 permission-policy 拒绝的 prompt 验证 dsh-api.md §3.4.6 路径
-- **session/event 新类型**: §5 列的 9 个新 event 实机都见过了,但 `step/start/end` / `request/header` 在 dsh 内部语义尚未与现有 `turn/start/end` 对齐测试
+- **session/event 新类型**: `step/start` / `step/end` 已对齐 dashboard — 推理周期 / `sessionStats`,不映射 OutTask*。`request/header` 仍是 debug-only
 - **host/session-removed 语义**: host stream 上见到 `session-removed` 时,本地订阅如何 cancel(避免 send on closed chan) — 需在 Router 订阅上加 ctx cancel 联动
 
 ### 8.3 设计层面

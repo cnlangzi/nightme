@@ -164,6 +164,15 @@ type AgentSession struct {
 	// pre-attachment or test contexts).
 	persist func(*registry.AgentSessionEntry) error
 
+	// spawner is the bridge-spawning primitive the chat layer
+	// owns. Wired once by SetSpawner after construction; nil
+	// means the chat layer hasn't attached this AS yet (or
+	// it's a test fake). Required by Submit's Keepalive
+	// backstop when the bridge self-reports dead — the chat
+	// layer passes respawnFromDeadHandle as the onRecover
+	// callback, which uses spawner to fork a fresh bridge.
+	spawner Spawner
+
 	// F-53: the in-flight Prompt for this AgentSession, or nil if
 	// no Prompt is currently active. Stored on AS (not on
 	// ChatSession) because a Prompt is bound to one specific AS
@@ -698,6 +707,18 @@ func (as *AgentSession) SetPersist(persist func(*registry.AgentSessionEntry) err
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.persist = persist
+}
+
+// SetSpawner wires the bridge-spawning primitive the chat
+// layer owns. Required for Submit's Keepalive backstop to
+// rebuild the bridge after the bridge self-reports dead.
+// nil means the chat layer hasn't attached this AS yet (or
+// it's a test fake); in that case Submit's recovery path
+// returns an error and the caller surfaces it.
+func (as *AgentSession) SetSpawner(s Spawner) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.spawner = s
 }
 
 func (as *AgentSession) SessionID() string {
@@ -1293,6 +1314,27 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		return ErrNotRunning
 	}
 
+	// Bridge liveness + self-recovery backstop. The bridge's
+	// Keepalive encapsulates detection ("is the subprocess /
+	// WS host / SDK transport still usable?") and recovery
+	// ("if not, invoke onRecover to rebuild"). The recovery
+	// callback is wired by the caller (chat layer) because it
+	// owns the Spawner. After successful recovery, Keepalive
+	// returns nil and Submit proceeds with SendBlocks on the
+	// fresh transport.
+	//
+	// Bounded retry: the chat layer's onRecover is a single
+	// spawn attempt (bounded by agentsession.respawn's existing
+	// ErrResumeUnhealthy retry). If Keepalive returns a non-nil
+	// error here, the bridge couldn't recover — surface it
+	// so the user can intervene (/new, /use, manual restart)
+	// instead of looping forever.
+	if err := h.Keepalive(as.OpContext(), func(ctx context.Context) error {
+		return as.respawnFromDeadHandle(ctx)
+	}); err != nil {
+		return fmt.Errorf("agentsession: Submit keepalive failed: %w", err)
+	}
+
 	// Assign IDs / timestamps BEFORE the bridge call. These belong
 	// to AS (per the design — see wip-cs-as-boundary.md §2.2).
 	p.ID = as.NewPromptID()
@@ -1382,7 +1424,58 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	return nil
 }
 
-// SendBlocks delivers structured content blocks. Returns ErrNotRunning
+// respawnFromDeadHandle is the recovery primitive passed to the
+// bridge's Keepalive as onRecover. The bridge has just decided
+// it's dead (subprocess PID gone, WS host severed, transport
+// nil); we tear down the stale in-memory handle, demote to
+// Detached, then respawn via the Spawner so a fresh bridge
+// lands on this AS. After this returns nil, Submit's next
+// SendBlocks goes to the new handle.
+
+// respawnFromDeadHandle is the recovery primitive passed to the
+// bridge's Keepalive as onRecover. The bridge has just decided
+// it's dead (subprocess PID gone, WS host severed, transport
+// nil); we tear down the stale in-memory handle, demote to
+// Detached, then respawn via the Spawner so a fresh bridge
+// lands on this AS. After this returns nil, Submit's next
+// SendBlocks goes to the new handle.
+//
+// Differs from the public Spawn method: that one no-ops when
+// the AS is already Running (assumes the existing handle is
+// fine). Here the bridge has explicitly told us it's NOT fine,
+// so we force a demote-then-respawn cycle. Errors propagate up
+// to Submit's caller — the chat layer surfaces them rather
+// than retrying.
+func (as *AgentSession) respawnFromDeadHandle(ctx context.Context) error {
+	as.asMu.Lock()
+	oldPID := as.pid
+	prevStat := as.stat
+	as.handle = nil
+	as.pid = 0
+	if prevStat == StatusRunning {
+		as.stat = StatusDetached
+	}
+	as.lastRunAt = time.Now()
+	as.asMu.Unlock()
+
+	// If we held a real subprocess PID, give the kernel a
+	// chance to reap it before respawn. For non-subprocess
+	// bridges (pty / acp / dsh's WS path) reapOrphan is a
+	// no-op because oldPID is 0.
+	if err := reapOrphan(oldPID); err != nil {
+		return fmt.Errorf("agentsession: reap orphan after dead-handle: %w", err)
+	}
+
+	as.asMu.Lock()
+	args := append([]string(nil), as.args...)
+	resume := as.sessionID
+	as.asMu.Unlock()
+
+	// Delegate to respawn for the actual fork+exec+handshake.
+	// respawn's own retry handles ErrResumeUnhealthy by
+	// clearing sessionID and retrying without --resume.
+	return as.respawn(ctx, as.spawner, args, resume)
+}
 // if Spawn has not been called.
 //
 // The ctx passed to SendBlocks flows to the bridge's SendBlocks, which

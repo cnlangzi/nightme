@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 )
 
 // ─── errors ───
@@ -595,6 +596,22 @@ func (d *driver) Close() error {
 		}
 	})
 	return firstErr
+}
+
+// Keepalive is the driver.Keepalive implementation for the
+// codex bridge. codex spawns the `codex app-server` subprocess
+// per AS — when it dies, the next SendBlocks silently fails.
+// Probe the OS PID via procutil.AlivePID and invoke onRecover
+// so the chat layer can spawn a fresh codex with the saved
+// thread_id. See agent.driver.Keepalive for the full contract.
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if err := procutil.AlivePID(d.PID()); err == nil {
+		return nil
+	}
+	if onRecover == nil {
+		return fmt.Errorf("codex: bridge process dead (pid=%d) and no recovery callback", d.PID())
+	}
+	return onRecover(ctx)
 }
 
 // ─── deliver ───

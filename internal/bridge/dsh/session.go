@@ -805,6 +805,39 @@ func (d *driver) Stop(ctx context.Context) error {
 	return nil
 }
 
+// Keepalive is the driver.Keepalive implementation for the
+// dsh bridge. Shared-host model: the dsh subprocess is owned
+// by the daemon-wide SharedHost (not by this driver), so the
+// right thing to probe is the SHARED host.Client's done-channel
+// — it's the single source of truth for "is the dsh backend
+// reachable?". The watchdog in SharedHost handles the
+// respawn side when Client.Close() has fired; we just report
+// the dead state and let onRecover (supplied by the chat
+// layer) re-install a fresh Client via host.EnsureSharedHost.
+// See agent.driver.Keepalive for the full contract.
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if onRecover == nil {
+		return errors.New("dsh: keepalive and no recovery callback")
+	}
+	cli := host.GetGlobal()
+	if cli == nil {
+		// Shared host never started — e.g. lazy-start never fired because
+		// nobody sent a dsh prompt yet. Treat as dead so onRecover
+		// re-runs EnsureSharedHost and we get a host to query.
+		return onRecover(ctx)
+	}
+	select {
+	case <-cli.Done():
+		// Host Client closed (server shutdown, network blip, or
+		// the upstream dsh process exited). The shared-host watchdog
+		// re-spawns as needed; the chat layer's onRecover knows how
+		// to re-populate host.GetGlobal() for us.
+		return onRecover(ctx)
+	default:
+		return nil
+	}
+}
+
 // ─── wire content blocks ──────────────────────────────────────────────
 
 // contentBlocksToDTO converts nightme's ContentBlock slice to

@@ -335,6 +335,9 @@ func (d *fakeBuilderDriver) SendPermission(resp string) error {
 func (d *fakeBuilderDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *fakeBuilderDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *fakeBuilderDriver) Close() error                   { return d.inner.Close() }
+func (d *fakeBuilderDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
+	return nil
+}
 func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                      { return b.events }
 func (b *fakeAgentBuilder) PID() int                                              { return 99999 }
 func (b *fakeAgentBuilder) SendBlocks(_ context.Context, _ []agent.ContentBlock) error { return nil }

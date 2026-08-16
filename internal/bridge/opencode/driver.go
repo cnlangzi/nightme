@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 )
 
 // ─── driver struct ─────────────────────────────────────────────────
@@ -494,6 +495,31 @@ func (d *driver) Stop(ctx context.Context) error {
 		return fmt.Errorf("opencode: no session")
 	}
 	return d.client.Interrupt(ctx, d.sessionID)
+}
+
+// Keepalive is the driver.Keepalive implementation for the
+// opencode bridge. opencode uses a single subprocess (the
+// `opencode serve` host) per AgentSession — when it dies, the
+// SSE stream severs and the next SendBlocks would write to a
+// dead stdin pipe. We probe the OS PID via procutil.AlivePID
+// and invoke onRecover so the chat layer can spawn a fresh
+// `opencode serve` and replay the saved session_id through
+// probeResume. See agent.driver.Keepalive for the full contract.
+//
+// Note: opencode also has an internal livenessLoop that probes
+// the upstream server health and emits EventAgentError on
+// prolonged failure. That goroutine and this Keepalive are
+// complementary — the goroutine handles "host up but unresponsive",
+// Keepalive handles "host process is gone".
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if err := procutil.AlivePID(d.PID()); err == nil {
+		return nil
+	}
+	oLog("bridge process dead, invoking recovery", "pid", d.PID(), "agent", d.name, "workspace", d.workspace)
+	if onRecover == nil {
+		return fmt.Errorf("opencode: bridge process dead (pid=%d) and no recovery callback", d.PID())
+	}
+	return onRecover(ctx)
 }
 
 // Compact asks the server to compact the conversation history.

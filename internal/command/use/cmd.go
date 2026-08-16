@@ -19,6 +19,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Factory is the command.SlashCommandFactory for /use.
@@ -91,6 +92,35 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		source = "resumed"
 	}
 
-	return command.Reply(ctx, rt, fmt.Sprintf("Now using %s (pid=%d, cwd=%s, source=%s)",
-		as.Agent, as.PID(), as.Cwd, source)), nil
+	// Stamp the new agent's identity onto the success reply so
+	// the channel's StatusBar AgentBar (Line 1: 🤖: Agent ·
+	// Model · SessionID) updates synchronously with the /use
+	// confirmation. The plain `command.Reply` path goes through
+	// Router.emitReply, which constructs the OutboundMessage with
+	// ONLY ChatID/Kind/Text/ReplyTo — AgentName/Model/SessionID
+	// stay empty, so formatStatusBarLines drops the entire AgentBar
+	// line and the placeholder card keeps showing the previous
+	// agent's identity until the next bridge EventAgentReady arrives
+	// (never, on the pool-reuse path where no new spawn happens).
+	//
+	// Routing through SlashOutput.Outbound lets routeOutbound
+	// forward a fully-populated OutboundMessage verbatim. On the
+	// cold-spawn path, as.Model()/SessionID() may be empty until
+	// the new bridge's EventAgentReady lands; that's fine — the
+	// AgentBar will update again when that event flows through the
+	// runtime's normal event translation (gateway.Translate stamps
+	// AgentName/Model/SessionID onto the resulting OutboundMessage
+	// from AgentEvent's top-level fields).
+	return &command.SlashOutput{
+		Consumed: true,
+		Outbound: []messages.OutboundMessage{{
+			ChatID:    input.ChatID,
+			Kind:      messages.OutReply,
+			Text:      fmt.Sprintf("Now using %s (pid=%d, cwd=%s, source=%s)", as.Agent, as.PID(), as.Cwd, source),
+			ReplyTo:   input.MessageID,
+			AgentName: as.Agent,
+			Model:     as.Model(),
+			SessionID: as.SessionID(),
+		}},
+	}, nil
 }

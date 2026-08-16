@@ -239,6 +239,30 @@ func (d *driver) Close() error {
 	return d.transport.Close()
 }
 
+// Keepalive is the driver.Keepalive implementation for the
+// pty bridge. pty wraps a child CLI via a PTY fd (no separate
+// OS PID — the parent owns the child). liveness is therefore
+// inferred from the transport state: nil transport means we've
+// been Closed (or never Started), so we ask the chat layer to
+// re-establish via onRecover. See agent.driver.Keepalive for
+// the full contract.
+//
+// Note: this is intentionally weaker than the subprocess
+// bridges — pty cannot probe a process that doesn't exist.
+// If the PTY fd is silently dead but the Transport wrapper
+// still has a handle, the next SendBlocks will surface the
+// failure. Tighten this with a Transport.IsAlive() method
+// if a future PTY issue surfaces.
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if d.transport == nil {
+		if onRecover == nil {
+			return fmt.Errorf("pty: transport nil and no recovery callback")
+		}
+		return onRecover(ctx)
+	}
+	return nil
+}
+
 // ─── internals ───
 
 // readLoop drains the transport until EOF or a read error, then emits a

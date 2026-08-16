@@ -355,6 +355,19 @@ func TestManager_HintNoPersistence_BestEffort(t *testing.T) {
 // misrepresent when the user actually last interacted, and
 // (future) idle-expiry decisions would mask the fact that the
 // chat has only ever received dropped non-mention traffic.
+//
+// Robustness: this test deliberately does NOT depend on
+// clock-resolution guarantees. Two consecutive time.Now() calls
+// can return the SAME nanosecond value on Windows (default
+// 15.6ms tick + QPC throttling on the GitHub Actions runner),
+// which broke an earlier version that asserted
+// `afterBaseline.After(beforeBaseline)`. Instead we capture
+// the baseline from the persisted ChatSessionEntry (the actual
+// value SetWatchMode wrote) and sleep long enough — 20ms, well
+// past any platform's tick — that any (incorrect) bump in
+// MarkWatcherHintEmitted would be measurable as a strict-greater
+// timestamp. The final assertion is `Equal`, not `After`, so
+// it holds whether the in-memory clock has moved or not.
 func TestManager_HintDoesNotBumpLastInteractionAt(t *testing.T) {
 	dir := t.TempDir()
 	mgr, _, csFile := makeHintTestManager(t, filepath.Join(dir, "chat_sessions.json"))
@@ -365,27 +378,37 @@ func TestManager_HintDoesNotBumpLastInteractionAt(t *testing.T) {
 
 	// Establish a known baseline lastInteractionAt by setting
 	// WatchMode (which DOES bump it — user-initiated command).
-	beforeBaseline := cs.LastInteractionAt()
 	if err := cs.SetWatchMode(WatchModeAll); err != nil {
 		t.Fatalf("SetWatchMode baseline: %v", err)
 	}
-	afterBaseline := cs.LastInteractionAt()
-	if !afterBaseline.After(beforeBaseline) {
-		t.Fatalf("baseline SetWatchMode should bump lastInteractionAt: before=%v after=%v",
-			beforeBaseline, afterBaseline)
-	}
 
-	// Sleep a hair so any (incorrect) bump would be visible.
-	time.Sleep(2 * time.Millisecond)
+	// Capture the baseline from the PERSISTED entry — this is
+	// the actual value SetWatchMode wrote, regardless of the
+	// caller's in-memory clock resolution. Reading the entry
+	// bypasses any race between the SetWatchMode write and
+	// subsequent in-memory reads.
+	baselineEntry, ok := csFile.GetByChat("oc_idle")
+	if !ok {
+		t.Fatalf("baseline entry missing from registry")
+	}
+	baselineTime := baselineEntry.LastInteractionAt
+
+	// Sleep long enough that ANY clock (including coarse
+	// Windows ticks) will measurably advance. 20ms is well
+	// past the Windows 15.6ms default tick — if
+	// MarkWatcherHintEmitted were to bump lastInteractionAt,
+	// the new value would be at least 20ms later than
+	// baselineTime, which any subsequent read would surface.
+	time.Sleep(20 * time.Millisecond)
 
 	// MarkWatcherHintEmitted must NOT bump lastInteractionAt.
 	if err := cs.MarkWatcherHintEmitted(); err != nil {
 		t.Fatalf("MarkWatcherHintEmitted: %v", err)
 	}
 	afterHint := cs.LastInteractionAt()
-	if !afterHint.Equal(afterBaseline) {
+	if !afterHint.Equal(baselineTime) {
 		t.Errorf("MarkWatcherHintEmitted bumped lastInteractionAt: %v → %v (must not — hint is a system event, not a user interaction)",
-			afterBaseline, afterHint)
+			baselineTime, afterHint)
 	}
 
 	// And the on-disk entry must agree — the persisted
@@ -394,9 +417,9 @@ func TestManager_HintDoesNotBumpLastInteractionAt(t *testing.T) {
 	if !ok {
 		t.Fatalf("registry has no entry for chat after hint")
 	}
-	if !entry.LastInteractionAt.Equal(afterBaseline) {
+	if !entry.LastInteractionAt.Equal(baselineTime) {
 		t.Errorf("on-disk LastInteractionAt = %v, want %v (hint must not bump)",
-			entry.LastInteractionAt, afterBaseline)
+			entry.LastInteractionAt, baselineTime)
 	}
 }
 

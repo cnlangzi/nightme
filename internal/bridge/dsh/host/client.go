@@ -349,9 +349,17 @@ type WorkspaceSummary struct {
 	Path        string   `json:"path"`
 	Title       string   `json:"title"`
 	SessionIDs  []string `json:"sessionIds,omitempty"`
-	CreatedAt   *int64   `json:"createdAt,omitempty"`
-	UpdatedAt   *int64   `json:"updatedAt,omitempty"`
-	ArchivedAt  *int64   `json:"archivedAt,omitempty"`
+	// dsh returns ISO 8601 strings for createdAt / updatedAt /
+	// archivedAt (e.g. "2026-08-16T08:24:45.015Z") even though the
+	// dsh-host-apiproxy zod schema declares them as z.number().
+	// The wire is the source of truth — match what the server
+	// sends, not what the schema thinks. Using *int64 here makes
+	// Unmarshal fail with "cannot unmarshal string into...field
+	// WorkspaceSummary.workspace.createdAt of type int64" and the
+	// whole workspace.create round-trips fails.
+	CreatedAt  string `json:"createdAt,omitempty"`
+	UpdatedAt  string `json:"updatedAt,omitempty"`
+	ArchivedAt string `json:"archivedAt,omitempty"`
 }
 
 // WorkspaceCreate resolves or creates one workspace for `path`. The

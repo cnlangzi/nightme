@@ -36,11 +36,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -53,15 +54,6 @@ const webURLParseTimeout = 10 * time.Second
 // dshURLPattern matches the first line of `dsh --profile web` stdout:
 // "dsh web: http://127.0.0.1:3080". Captures host + port.
 var dshURLPattern = regexp.MustCompile(`dsh web:\s+http://([^:\s]+):(\d+)`)
-
-// sigintGrace is how long we wait after SIGINT for dsh to exit
-// gracefully before escalating to SIGKILL. dsh's own SIGINT handler
-// closes WS, persists final sessions, and exits 0 — usually <1s.
-const sigintGrace = 5 * time.Second
-
-// sigkillGrace is the final wait budget after SIGKILL. If dsh is
-// still alive after this we error out (caller decides what to do).
-const sigkillGrace = 5 * time.Second
 
 // SharedHostOptions configures StartSharedHost.
 type SharedHostOptions struct {
@@ -93,21 +85,25 @@ type SharedHostOptions struct {
 }
 
 // SharedHost wraps the running dsh subprocess + the host.Client
-// pointing at it. Use StartSharedHost to construct; call Close to
-// tear down.
+// pointing at it. Use StartSharedHost to construct; the daemon
+// never tears it down (dsh is a persistent service — see
+// internal/bridge/dsh/host/ensure.go for the lazy-start model).
 //
 // Two ownership modes:
 //
 //   - ownsProcess=true:  SharedHost spawned the dsh subprocess;
-//                        watchdog respawns on crash; Close SIGINTs it.
+//                        watchdog respawns on crash.
 //   - ownsProcess=false: SharedHost reused a pre-existing dsh the user
 //                        already had running (e.g. browser dashboard);
-//                        watchdog is a no-op; Close only disconnects.
+//                        watchdog is a no-op.
 //
 // Watchdog (ownsProcess only): a background goroutine watches cmd.Wait
 // and respawns the dsh subprocess if it exits unexpectedly. After a
 // successful respawn, the watchdog re-attaches every Router
-// subscription on the new dsh via Client.RecoverSubscriptions.
+// subscription on the new dsh via Client.RecoverSubscriptions. The
+// watchdog is killed by the Go runtime when the daemon process exits
+// — there is no graceful-shutdown handshake since the daemon never
+// signals dsh on shutdown.
 type SharedHost struct {
 	cmd    *exec.Cmd
 	cli    *Client
@@ -115,25 +111,22 @@ type SharedHost struct {
 	opts   SharedHostOptions // captured at Start for respawn parity
 
 	// ownsProcess distinguishes "we spawned this dsh" from "this is
-	// the user's dsh we attached to". Close() and the watchdog
-	// consult this to decide whether to signal / respawn.
+	// the user's dsh we attached to". The watchdog consults this to
+	// decide whether to respawn.
 	ownsProcess bool
 
-	mu     sync.RWMutex // guards cmd + cli swap during respawn
-	once   sync.Once    // guards Close idempotency + closed chan
-	closed chan struct{}
+	mu sync.RWMutex // guards cmd + cli swap during respawn
 
 	// watchdogDone is closed when the watchdog goroutine has fully
-	// exited (or immediately if no watchdog was started). Close()
-	// blocks on it so a respawn in progress at shutdown time can't
-	// outlive the daemon.
+	// exited (or immediately if no watchdog was started).
 	watchdogDone chan struct{}
 }
 
 // closedChan is a pre-closed channel used as the watchdogDone value
-// when SharedHost doesn't run a watchdog (ownsProcess=false). This
-// way Close()'s <-h.watchdogDone returns immediately without
-// special-casing.
+// when SharedHost doesn't run a watchdog (ownsProcess=false). It's
+// a stand-in for the "watchdog already done" sentinel so callers
+// that (defensively) range on h.watchdogDone don't need to
+// special-case the no-watchdog path.
 var closedChan = func() chan struct{} {
 	c := make(chan struct{})
 	close(c)
@@ -171,10 +164,6 @@ func (h *SharedHost) PID() int {
 	}
 	return h.cmd.Process.Pid
 }
-
-// Done returns a channel that's closed when Close() completes (or
-// has already completed). Tests wait on this for clean shutdown.
-func (h *SharedHost) Done() <-chan struct{} { return h.closed }
 
 // StartSharedHost attaches to (or spawns) the shared dsh web daemon
 // and installs the resulting *Client as the process-wide singleton
@@ -238,7 +227,6 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 			logger:       logger,
 			opts:         opts,
 			ownsProcess:  false,
-			closed:       make(chan struct{}),
 			watchdogDone: closedChan,
 		}
 		SetGlobal(cli)
@@ -264,11 +252,37 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	if err != nil {
 		return nil, err
 	}
+
+	// Sanity: the spawned dsh must bind the canonical port. dsh
+	// defaults to 3080 for `--profile web`, but a misconfigured
+	// setup (DSH_PORT env, a CLI flag, a dsh config file) can
+	// silently steer it to a different port — and we couldn't
+	// re-discover it on next start because DiscoverExisting is
+	// hard-coded to 3080. Catch the mismatch early and fail loud:
+	// kill the spawn, return a clear error pointing at the fix.
+	port, portErr := portFromBaseURL(cli.BaseURL())
+	if portErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("dsh.host: parse spawned baseURL %q: %w",
+			cli.BaseURL(), portErr)
+	}
+	if port != defaultDSHPort {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf(
+			"dsh.host: spawned dsh bound to port %d, expected %d — "+
+				"unset any dsh port override (DSH_PORT env, --port flag, "+
+				"config) and free up 3080, then retry",
+			port, defaultDSHPort)
+	}
+
 	logger.Info("dsh.host: web spawned",
 		"pid", cmd.Process.Pid,
 		"argv", cmd.Args,
 		"workspace", opts.Workspace,
 		"permission_mode", opts.PermissionMode,
+		"port", port,
 	)
 
 	host := &SharedHost{
@@ -276,7 +290,6 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		cli:    cli,
 		logger: logger,
 		opts:   opts,
-		closed: make(chan struct{}),
 	}
 
 	// Install as the process-wide singleton. dsh.newDriver will look
@@ -329,6 +342,27 @@ func parseWebURL(ctx context.Context, stdout io.Reader) (string, error) {
 	}
 }
 
+// portFromBaseURL extracts the explicit port from a fully-qualified
+// dsh base URL (e.g. "http://127.0.0.1:3080" → 3080). Returns an
+// error if the URL is malformed or has no port (we refuse to
+// accept implicit-default ports — the canonical port must be in
+// the URL string so the operator can see what dsh actually bound).
+func portFromBaseURL(rawURL string) (int, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0, fmt.Errorf("dsh.host: parse %q: %w", rawURL, err)
+	}
+	portStr := u.Port()
+	if portStr == "" {
+		return 0, fmt.Errorf("dsh.host: %q has no explicit port", rawURL)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0, fmt.Errorf("dsh.host: %q port %q: %w", rawURL, portStr, err)
+	}
+	return port, nil
+}
+
 // drainStderr keeps dsh's stderr pipe flowing. Without this, dsh
 // blocks once its 64 KiB stderr pipe buffer fills. We log lines at
 // debug level for post-mortem.
@@ -338,73 +372,6 @@ func (h *SharedHost) drainStderr(stderr io.ReadCloser) {
 	for scanner.Scan() {
 		h.logger.Debug("dsh.host: stderr", "line", scanner.Text())
 	}
-}
-
-// Close shuts the shared host down. Idempotent.
-//
-// Order:
-//
-//  1. Close h.closed FIRST. The watchdog observes this and exits
-//     on its next inner-loop tick — important because the watchdog
-//     can otherwise race us: bash dies from SIGINT (cmdDone fires),
-//     watchdog enters tryRespawn before we manage to defer-close
-//     h.closed, then keeps respawning new cmds indefinitely.
-//  2. Close Client (stops mux/host pumps; in-flight RPC returns errors).
-//  3. SIGINT dsh (graceful shutdown; dsh closes WS, persists sessions).
-//  4. Wait up to sigintGrace; if still alive, SIGKILL.
-//  5. Wait up to sigkillGrace; if still alive, return error.
-//  6. Wait for watchdog to fully exit (so a respawn-in-progress can't outlive us).
-//
-// We do NOT cancel individual sessions — the runtime's own shutdown
-// sequence (ShutdownRun) calls session.Close() for every ChatSession
-// before this Close runs.
-func (h *SharedHost) Close() error {
-	var err error
-	h.once.Do(func() {
-		close(h.closed)
-
-		if h.cli != nil {
-			h.cli.Close()
-		}
-
-		h.mu.RLock()
-		cmd := h.cmd
-		h.mu.RUnlock()
-
-		if cmd == nil || cmd.Process == nil {
-			<-h.watchdogDone
-			return
-		}
-
-		// SIGINT — dsh web handles SIGINT gracefully.
-		_ = cmd.Process.Signal(syscall.SIGINT)
-
-		select {
-		case <-waitCmd(cmd):
-			h.logger.Info("dsh.host: exited after SIGINT", "pid", cmd.Process.Pid)
-			<-h.watchdogDone
-			return
-		case <-time.After(sigintGrace):
-		}
-
-		// SIGKILL fallback.
-		h.logger.Warn("dsh.host: SIGINT did not free; escalating to SIGKILL",
-			"pid", cmd.Process.Pid)
-		_ = cmd.Process.Kill()
-
-		select {
-		case <-waitCmd(cmd):
-			<-h.watchdogDone
-			return
-		case <-time.After(sigkillGrace):
-			err = errors.New("dsh.host: child did not exit within SIGKILL grace")
-		}
-
-		// Wait for the watchdog to fully exit even on error path so
-		// we don't leave an orphaned goroutine past the daemon.
-		<-h.watchdogDone
-	})
-	return err
 }
 
 // waitCmd returns a channel that closes when cmd.Wait() returns.
@@ -466,19 +433,24 @@ func UnsetSharedHost() {
 
 // ─── Watchdog: auto-restart dsh on unexpected death ─────────────
 
-// runWatchdog loops until the SharedHost is closed. Each iteration:
+// runWatchdog loops forever (until the daemon process exits) and
+// respawns dsh whenever it dies unexpectedly. Each iteration:
 //
-//  1. Wait for the current cmd to exit (graceful or otherwise).
-//  2. If Close was called (h.closed is closed), exit cleanly.
-//  3. Otherwise the dsh died unexpectedly — respawn with backoff.
-//  4. After respawn, re-attach every Router subscription on the
+//  1. Wait for the current cmd to exit.
+//  2. dsh died — respawn with backoff.
+//  3. After respawn, re-attach every Router subscription on the
 //     new dsh via Client.RecoverSubscriptions so ChatSessions keep
 //     receiving mux frames.
 //
 // The respawn cycle has bounded total attempts (maxRespawnAttempts);
 // if every attempt fails the watchdog gives up and exits. The
-// daemon stays alive (SharedHost.Close still works), but dsh will
-// not be re-spawned until the next manual restart.
+// daemon stays alive but dsh will not be re-spawned until the next
+// daemon restart (which triggers a fresh lazy start).
+//
+// The daemon never calls any shutdown hook on this goroutine —
+// when the daemon exits, Go's runtime takes the goroutine down.
+// That is the only reason the loop doesn't otherwise need a break
+// condition.
 func (h *SharedHost) runWatchdog() {
 	defer close(h.watchdogDone)
 
@@ -508,20 +480,10 @@ func (h *SharedHost) runWatchdog() {
 			return
 		}
 
-		cmdDone := waitCmd(cmd)
-
-		select {
-		case <-h.closed:
-			return
-		case <-cmdDone:
-			// dsh exited. Determine whether this was graceful.
-			h.mu.RLock()
-			graceful := h.isCloseFlagSetLocked()
-			h.mu.RUnlock()
-			if graceful {
-				return
-			}
-		}
+		// Block until cmd exits. The Go runtime tears this
+		// goroutine down when the daemon process exits, so there
+		// is no graceful-shutdown branch.
+		<-waitCmd(cmd)
 
 		h.logger.Error("dsh.host: subprocess exited unexpectedly; respawning")
 
@@ -548,17 +510,6 @@ func (h *SharedHost) runWatchdog() {
 				"reattached", result.Reattached,
 				"orphaned", len(result.Orphaned))
 		}
-	}
-}
-
-// isCloseFlagSetLocked reports whether Close() has been initiated.
-// Caller MUST hold h.mu.
-func (h *SharedHost) isCloseFlagSetLocked() bool {
-	select {
-	case <-h.closed:
-		return true
-	default:
-		return false
 	}
 }
 
@@ -593,11 +544,11 @@ func (h *SharedHost) forceKillCmd() {
 // gets a clean error rather than a hung transport.
 func (h *SharedHost) tryRespawn() error {
 	for attempt := 0; attempt < maxRespawnAttempts; attempt++ {
-		select {
-		case <-h.closed:
-			return errors.New("dsh.host: closed during respawn")
-		case <-time.After(respawnDelay(attempt)):
-		}
+		// No close-watch here: the daemon process is the only
+		// thing that can interrupt this loop, and when it does
+		// the watchdog goroutine is killed before tryRespawn
+		// returns. Letting the backoff tick fully is fine.
+		time.Sleep(respawnDelay(attempt))
 
 		cmd, cli, err := h.spawnOnce()
 		if err != nil {

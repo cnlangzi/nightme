@@ -211,14 +211,15 @@ func TestTodoWriteBothFieldsPrefersTodos(t *testing.T) {
 }
 
 // TestTodoProjectionRealWireShape — same wire shape check for
-// the projection path (session/projection with key="todo" carries
-// the host-computed snapshot). The projection value shape
-// matches the raw event shape per dsh-tool-todo's `todos`
-// projection unit.
+// the projection path. The discriminator on the real dsh wire
+// is "todos" (plural), per the captured testdata
+// testdata/projections/todo_snapshot.json. The projection
+// value shape matches the raw event shape per
+// dsh-tool-todo's `todos` projection unit.
 func TestTodoProjectionRealWireShape(t *testing.T) {
 	st := newWireState()
 	proj := projectionEnvelope{
-		Key: "todo",
+		Key: "todos",
 		Value: []byte(`{
 			"todos": [
 				{"content": "From projection (real wire)", "status": "completed"}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -178,7 +179,11 @@ func TestStartSharedHost_SpawnsWhenNoDsh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSharedHost: %v", err)
 	}
-	defer sh.Close()
+	// SharedHost no longer exposes Close: the daemon never tears
+	// dsh down. Tests still need to terminate the spawned
+	// subprocess so the test binary doesn't leak it. Send SIGKILL
+	// directly; the kernel reaps on test exit.
+	defer killFakeDSH(t, sh)
 
 	pid := waitPIDFile(t, pidFile, 2*time.Second)
 	if pid == 0 {
@@ -197,6 +202,55 @@ func TestStartSharedHost_SpawnsWhenNoDsh(t *testing.T) {
 // otherwise (CI shared-host environments may have a competing
 // dsh). For deterministic verification, see the DiscoverExisting
 // tests above which exercise the same discovery code path.
+// TestStartSharedHost_NonCanonicalPort — dsh spawned but bound a
+// non-3080 port (e.g. via DSH_PORT env override, a config file, or
+// the upcoming dsh --port 0 fallback). StartSharedHost must detect
+// the mismatch, kill the spawn, and return a clear error — silent
+// acceptance would let the daemon think it owns a host that the
+// next StartSharedHost call can't re-discover on 3080.
+func TestStartSharedHost_NonCanonicalPort(t *testing.T) {
+	host.UnsetGlobal()
+	host.UnsetSharedHost()
+	host.ResetEnsureForTest()
+	t.Cleanup(func() {
+		host.UnsetGlobal()
+		host.UnsetSharedHost()
+		host.ResetEnsureForTest()
+	})
+
+	// Build a fake-dsh that always reports a non-3080 port,
+	// regardless of argv. The daemon parses this URL and the
+	// port check (in StartSharedHost) must reject it.
+	dir := t.TempDir()
+	fakePath := filepath.Join(dir, "fake-dsh-wrong-port.sh")
+	script := `#!/bin/bash
+echo "dsh web: http://127.0.0.1:13080"
+sleep 30
+`
+	if err := os.WriteFile(fakePath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dsh: %v", err)
+	}
+
+	sh, err := host.StartSharedHost(context.Background(), host.SharedHostOptions{
+		Workspace:  dir,
+		HostCmd:    fakePath,
+		ForceSpawn: true,
+	})
+	if err == nil {
+		killFakeDSH(t, sh)
+		t.Fatal("StartSharedHost should reject non-3080 port, got nil error")
+	}
+	// Subprocess must be killed — verify the pid is gone.
+	if !strings.Contains(err.Error(), "13080") || !strings.Contains(err.Error(), "3080") {
+		t.Errorf("error should mention both ports, got: %v", err)
+	}
+
+	// Pid we just spawned: the error path's cmd.Wait() in
+	// StartSharedHost reclaims the spawn, so the test binary
+	// doesn't leak it. Nothing to verify beyond the error
+	// message; procAlive(0) is meaningless.
+}
+
 func TestStartSharedHost_AttachesToExistingDsh(t *testing.T) {
 	mock := newMockDSHServer(t)
 	port := portFromURL(t, mock.server.URL)
@@ -225,7 +279,9 @@ func TestStartSharedHost_AttachesToExistingDsh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSharedHost: %v", err)
 	}
-	defer sh.Close()
+	// Discovery path: we don't own the subprocess, so nothing to
+	// kill on cleanup. But Close() is gone — no defer needed.
+	_ = sh
 
 	// Attached-to-existing path: PID() returns 0 (we don't own
 	// the subprocess), but Client() is non-nil and pointing at

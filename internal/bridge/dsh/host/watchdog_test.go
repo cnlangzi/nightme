@@ -85,6 +85,44 @@ func procAlive(pid int) bool {
 	return cmd.Run() == nil
 }
 
+// killFakeDSH sends SIGKILL to the subprocess owned by sh (if any)
+// and waits for it to be reaped. Replaces the legacy sh.Close() in
+// tests after the daemon stopped tearing dsh down on shutdown —
+// tests still need to terminate the spawned process so the test
+// binary doesn't leak it. No-op when sh owns no subprocess
+// (PID == 0).
+func killFakeDSH(t *testing.T, sh *host.SharedHost) {
+	t.Helper()
+	pid := sh.PID()
+	if pid == 0 {
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		// Already gone (ESRCH); nothing to do.
+		return
+	}
+	_ = proc.Signal(os.Kill)
+	// Wait for the kernel to reap so the next test's port /
+	// state isn't racing with a zombie. 2s is generous for a
+	// SIGKILL'd process.
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 200; i++ {
+			if !procAlive(pid) {
+				close(done)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Logf("killFakeDSH: pid %d did not exit within 2s", pid)
+	}
+}
+
 // TestSharedHost_WatchdogRespawns verifies the watchdog observes a
 // fake-dsh crash and spawns a replacement. The bash script writes
 // its PID to FAKE_DSH_PIDFILE on startup; we observe the file
@@ -145,66 +183,18 @@ func TestSharedHost_WatchdogRespawns(t *testing.T) {
 		t.Errorf("first fake-dsh pid %d still alive", firstPID)
 	}
 
-	// Shut down. Let the second instance die on SIGINT cleanly.
+	// Shut down. The second instance is short-lived now, so the
+	// fake-dsh will exit on its own. Then we SIGKILL the live
+	// subprocess (if any) to clean up. SharedHost no longer
+	// exposes Close/Done — the daemon doesn't tear dsh down.
 	t.Setenv("FAKE_DSH_LIFETIME", "0.05")
-	if err := sh.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-	select {
-	case <-sh.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("SharedHost.Done not closed within 2s of Close")
-	}
+	killFakeDSH(t, sh)
 }
 
 // TestSharedHost_GracefulCloseStopsWatchdog verifies that Close()
 // prevents the watchdog from respawning even when the dsh subprocess
 // is still alive at close-time. Without this guarantee a Close
 // could race with a respawn and leave an orphaned subprocess.
-func TestSharedHost_GracefulCloseStopsWatchdog(t *testing.T) {
-	fake := writeFakeDSH(t)
-	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "pid")
-	t.Setenv("FAKE_DSH_PIDFILE", pidFile)
-	t.Setenv("FAKE_DSH_LIFETIME", "60") // long-lived; only SIGINT kills it
-
-	host.UnsetGlobal()
-	host.UnsetSharedHost()
-	t.Cleanup(func() {
-		host.UnsetGlobal()
-		host.UnsetSharedHost()
-	})
-
-	sh, err := host.StartSharedHost(context.Background(), host.SharedHostOptions{
-		Workspace:  dir,
-		HostCmd:    fake,
-		ForceSpawn: true, // bypass discover — drive our own fake-dsh
-	})
-	if err != nil {
-		t.Fatalf("StartSharedHost: %v", err)
-	}
-	pid := waitPIDFile(t, pidFile, 2*time.Second)
-	if pid == 0 {
-		t.Fatal("fake-dsh never started")
-	}
-
-	if err := sh.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-
-	// Watchdog should exit promptly.
-	select {
-	case <-sh.Done():
-	case <-time.After(1 * time.Second):
-		t.Fatal("SharedHost.Done not closed within 1s of Close")
-	}
-
-	// Subprocess should be gone.
-	if procAlive(pid) {
-		t.Errorf("fake-dsh pid %d still alive after Close", pid)
-	}
-}
-
 // ─── pure-unit backoff check ──────────────────────────────────────
 
 // TestRespawnDelay_Bounded verifies respawnDelay returns a value

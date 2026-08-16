@@ -435,7 +435,12 @@ type projectionEnvelope struct {
 	// used `json:"projection"` so dsh's mux frames never matched
 	// the decoder (dsh 0.1.0-rc.6 happened to also accept the
 	// legacy form, masking the bug). The canonical wire is "key".
-	Key   string          `json:"key"` // "todo" | "tasks" | "title" | ...
+	Key string `json:"key"` // "todos" | "todo" | "tasks" | "title" | ...
+	// Canonical wire (verified 2026-08-16 against captured
+	// testdata/projections/todo_snapshot.json) is "todos"
+	// (plural). Singular "todo" and "tasks" are accepted as
+	// fallbacks for older / fork builds — dispatched in
+	// applyProjectionLocked.
 	Value json.RawMessage `json:"value"`
 }
 

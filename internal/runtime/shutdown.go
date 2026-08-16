@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/prcache"
@@ -79,18 +78,14 @@ func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 		}
 	}
 
-	// F-dsh-shared-host: tear down the shared dsh web daemon
-	// LAST (after channel stop + registry flush) so any late
-	// chat-side cleanup that touches the dsh RPC client doesn't
-	// fail with "connection refused". SharedHost.Close() runs
-	// the SIGINT → SIGKILL ladder from host/lifecycle.go.
-	if sh := host.GetSharedHost(); sh != nil {
-		if err := sh.Close(); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("run: stop shared dsh host: %w", err)
-			}
-		}
-	}
+	// dsh is intentionally NOT torn down here. The shared dsh
+	// host is a persistent service — left running across daemon
+	// restarts so the next lazy start (via host.EnsureSharedHost)
+	// can reuse it via DiscoverExisting on port 3080. The daemon
+	// process exiting does not signal dsh; SIGKILL/SIGKILL-grace
+	// failures on shutdown used to be the dominant source of
+	// "child did not exit within SIGKILL grace" errors in
+	// daemon-stderr.log.
 
 	return firstErr
 }

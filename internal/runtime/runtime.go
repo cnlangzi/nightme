@@ -65,14 +65,13 @@ import (
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/shell"
 
-	// F-dsh-shared-host: the shared dsh web daemon. The dsh
-	// bridge's Starter.Start path (dsh.newDriver) looks up the
-	// shared host via host.GetGlobal(); we install one at boot
-	// via host.StartSharedHost below. Without this import, the
-	// package compiles but every dsh.Start call returns
-	// "shared host client not initialized" — a clear startup-
-	// ordering bug surface.
-	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
+	// dsh is intentionally NOT imported here: the runtime no
+	// longer touches the shared dsh host. The dsh bridge handles
+	// lazy-start on first use via host.EnsureSharedHost in
+	// internal/bridge/dsh/host/ensure.go. Bringing the host
+	// package in here would just re-couple the runtime to dsh
+	// lifecycle, which is exactly what the lazy-start refactor
+	// removes.
 )
 
 // RunOptions bundles the per-run parameters that aren't part of
@@ -205,77 +204,15 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		return errors.New("run: agent registry is nil")
 	}
 
-	// F-dsh-shared-host: start the shared dsh web daemon BEFORE
-	// opening the chat channel. dsh's bridge Starter.Start path
-	// (dsh.newDriver) looks up the shared host via
-	// host.GetGlobal(); if we don't install one first, every
-	// dsh session start returns "shared host client not
-	// initialized" and the user sees a bridge-error card.
+	// dsh is no longer started at boot. The dsh bridge lazy-starts
+	// it on first use via host.EnsureSharedHost (see
+	// internal/bridge/dsh/host/ensure.go). A user who never picks
+	// the dsh agent — or doesn't have dsh installed — pays nothing
+	// at startup; the daemon reaches ready without dsh in scope.
 	//
-	// Workspace is the host's cwd. Per-chat cwds are passed via
-	// session.create at session-start time, so the host's
-	// cmd.Dir is just the default starting point for sessions
-	// that don't specify one (and the source of truth for dsh's
-	// own internal plugins like bash/fs that read process.cwd()).
-	// We use os.Getwd() — nightme's own cwd at boot — so the host
-	// shares the daemon's view of the filesystem root.
-	//
-	// Permission mode is fixed at danger-full-access per
-	// [[agent-no-config-tampering]] (we only inject transport +
-	// permissions — never model / provider / credentials).
-	//
-	// Phase 1: graceful start + fail-fast on error. Watchdog
-	// (auto-restart on crash) lands in Phase 2.
-	hostWorkspace, _ := os.Getwd()
-	sharedHost, err := host.StartSharedHost(ctx, host.SharedHostOptions{
-		Workspace:      hostWorkspace,
-		HostCmd:        "dsh",
-		PermissionMode: "danger-full-access",
-		Logger:         logger,
-	})
-	if err != nil {
-		return fmt.Errorf("run: start shared dsh host: %w", err)
-	}
-	host.SetSharedHost(sharedHost)
-	logger.Info("dsh shared host ready",
-		"pid", sharedHost.PID(),
-		"url", sharedHost.Client().BaseURL())
-
-	// F-dsh-shared-host (Phase 2): restart recovery. The registry
-	// already exists (csFile + asFile opened above); walk every
-	// persisted AgentSessionEntry and re-attach the dsh session
-	// (if any) via session.create({sessionId, cwd}). Failures
-	// (session-conflict, server missing the id) are logged + skip;
-	// the user pays one fresh session next time they message,
-	// no permanent history loss.
-	//
-	// Phase 2 keeps recovery synchronous so a dsh restart during
-	// nightme startup lands in logs before the chat channel opens.
-	// Phase 3 (live-watchdog) re-attaches asynchronously when dsh
-	// crashes mid-daemon-lifetime.
-	knownSessions := func() []host.PersistedSession {
-		var out []host.PersistedSession
-		for _, e := range asFile.List() {
-			if e.SessionID == "" {
-				continue
-			}
-			out = append(out, host.PersistedSession{
-				SessionID:  e.SessionID,
-				CWD:        e.Cwd,
-				BridgeName: e.Agent,
-				Label:      e.ID,
-			})
-		}
-		return out
-	}
-	if res, err := sharedHost.Client().RPC.RecoverAll(ctx, knownSessions, logger); err != nil {
-		logger.Warn("dsh recovery aborted", "err", err.Error())
-	} else {
-		logger.Info("dsh restart recovery complete",
-			"reattached", res.Reattached,
-			"orphaned", len(res.Orphaned),
-			"skipped", res.Skipped)
-	}
+	// Per-session re-attachment after a daemon restart is handled
+	// by dsh's own session.fork at first use, not by a boot-time
+	// RecoverAll pass. See dsh.newDriver → handshakeSession.
 
 	ch, err := deps.NewChannel(cfg)
 	if err != nil {

@@ -305,7 +305,12 @@ func (s *wireState) applyProjection(proj projectionEnvelope) []agent.AgentEvent 
 // applyProjectionLocked assumes the caller holds s.mu.
 func (s *wireState) applyProjectionLocked(proj projectionEnvelope) []agent.AgentEvent {
 	switch proj.Key {
-	case "todo", "tasks":
+	case "todo", "todos", "tasks":
+		// Real dsh wire uses "todos" (plural) per
+		// @deepseek-ai/dsh-tool-todo `todos` projection unit
+		// (verified 2026-08-16 against captured
+		// testdata/projections/todo_snapshot.json). "todo" /
+		// "tasks" kept as fallbacks for older / fork builds.
 		return s.applyTodoProjectionLocked(proj.Value)
 	case "title":
 		// Host-pre-computed session title. Stash in s.title for

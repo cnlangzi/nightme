@@ -176,29 +176,53 @@ func (c *Client) Done() <-chan struct{} {
 }
 
 // RecoverSubscriptions walks every active Router subscription and
-// re-attaches it on the current dsh via RPCClient.RecoverSession.
-// Called by SharedHost.watchdog after a successful respawn so every
-// ChatSession / AgentSession continues receiving mux frames on the
-// new dsh instance.
+// re-attaches it on the current dsh via RPCClient.SessionCreate
+// (the sessionId+cwd is the documented re-attach key in
+// dsh-api.md §2.1.3; the legacy RecoverSession helper has been
+// retired in favour of plain SessionCreate). Used by the
+// watchdog after a dsh respawn so surviving ChatSessions keep
+// receiving mux frames from the new dsh instance.
 //
 // Per-session failures are logged at Warn level so operators see
 // "5 sessions were dropped on respawn" without having to inspect
-// the code. The orphan list is still returned in the result struct
-// for programmatic consumers (and `/diagnose` display).
+// the code. The orphan list is still returned in the result
+// struct for programmatic consumers (and `/diagnose` display).
 //
 // Safe for concurrent use: the subscription enumeration is a
-// snapshot, and RPCClient.RecoverSession is its own RPC round-trip.
+// snapshot, and SessionCreate is its own RPC round-trip.
+//
+// Returns RecoverResult summarizing how many subscriptions were
+// re-attached vs. orphaned (server-side session-conflict or
+// transport error). One bad sessionId does not abort the loop —
+// the watcher logs and continues.
 func (c *Client) RecoverSubscriptions(ctx context.Context, logger *slog.Logger) RecoverResult {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	var result RecoverResult
 	for _, sub := range c.Router.EnumerateSubscriptions() {
-		if err := c.RPC.RecoverSession(ctx, sub.SessionID, sub.CWD); err != nil {
+		if sub.SessionID == "" {
+			result.Orphaned = append(result.Orphaned, sub.SessionID)
+			continue
+		}
+		opts := SessionCreateOpts{
+			CWD:       sub.CWD,
+			SessionID: sub.SessionID,
+		}
+		got, err := c.RPC.SessionCreate(ctx, opts)
+		if err != nil {
 			logger.Warn("dsh.host: reattach orphaned after respawn",
 				"session_id", sub.SessionID,
 				"cwd", sub.CWD,
 				"err", err.Error())
+			result.Orphaned = append(result.Orphaned, sub.SessionID)
+			continue
+		}
+		if got != sub.SessionID {
+			logger.Warn("dsh.host: reattach returned new id (cwd mismatch?)",
+				"session_id", sub.SessionID,
+				"got", got,
+				"cwd", sub.CWD)
 			result.Orphaned = append(result.Orphaned, sub.SessionID)
 			continue
 		}
@@ -207,6 +231,13 @@ func (c *Client) RecoverSubscriptions(ctx context.Context, logger *slog.Logger) 
 		result.Reattached++
 	}
 	return result
+}
+
+// RecoverResult summarizes the outcome of Client.RecoverSubscriptions.
+// The runtime uses this to surface metrics after a watchdog respawn.
+type RecoverResult struct {
+	Reattached int      // successfully re-attached sessions
+	Orphaned   []string // server rejected (session-conflict, transport) — sessionIds
 }
 
 // ─── convenience methods (thin wrappers around Router) ────────────

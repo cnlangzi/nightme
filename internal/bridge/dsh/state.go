@@ -228,10 +228,14 @@ func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.Agent
 		return nil
 	}
 
-	items := make([]agent.AgentTaskItem, 0, len(data.Items))
+	// F-DSH-TODO-WIRE-FIX (2026-08-16): wire field is `todos`
+	// (verified against @deepseek-ai/dsh-tool-todo source),
+	// pre-fix the bridge used `items` and silently dropped every
+	// item. todoWriteData.UnmarshalJSON now recovers both shapes.
+	items := make([]agent.AgentTaskItem, 0, len(data.Todos))
 	skipped := 0
 
-	for _, it := range data.Items {
+	for _, it := range data.Todos {
 		key := it.ID
 		if key == "" {
 			key = it.Content
@@ -341,18 +345,29 @@ func (s *wireState) applyProjectionLocked(proj projectionEnvelope) []agent.Agent
 // and the next todo/write from raw event will reconcile). P3 can
 // add active pruning once we know real-world deletion frequency.
 func (s *wireState) applyTodoProjectionLocked(value json.RawMessage) []agent.AgentEvent {
+	// F-DSH-TODO-WIRE-FIX (2026-08-16): same fallback as
+	// applyTodoWriteLocked — wire uses `todos`, legacy / fork
+	// builds may use `items`. Decoding into both keys and
+	// preferring `todos` matches the projection-source schema
+	// in @deepseek-ai/dsh-tool-todo (the `todos` projection
+	// unit: `array({content, status}) | null`).
 	var data struct {
+		Todos []todoItem `json:"todos"`
 		Items []todoItem `json:"items"`
 	}
 	if err := json.Unmarshal(value, &data); err != nil {
 		dLog("dsh: wireState.applyTodoProjection decode: %v", err)
 		return nil
 	}
+	todos := data.Todos
+	if len(todos) == 0 {
+		todos = data.Items
+	}
 
-	items := make([]agent.AgentTaskItem, 0, len(data.Items))
+	items := make([]agent.AgentTaskItem, 0, len(todos))
 	skipped := 0
 
-	for _, it := range data.Items {
+	for _, it := range todos {
 		key := it.ID
 		if key == "" {
 			key = it.Content

@@ -154,12 +154,30 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	cli := host.GetGlobal()
 	if cli == nil {
-		// This is a startup-ordering bug, not a runtime error. The
-		// daemon should have called host.NewClient + host.SetGlobal
-		// before any ChatSession / AgentSession can be created.
-		// Surface a clear message instead of letting the next RPC
-		// fail with a confusing nil-pointer panic.
-		return nil, errors.New("dsh: shared host client not initialized; main.go must call host.NewClient + host.SetGlobal before any dsh session starts")
+		// Lazy start. The daemon does not pre-start dsh — a user
+		// who never uses dsh (or doesn't have it installed) pays
+		// nothing at startup. The first dsh agent-session spin-up
+		// pays the spawn cost (typically 1-3s); every subsequent
+		// one reuses the cached client.
+		//
+		// Per-session re-attachment: when this user later messages
+		// a chat whose persisted sessionId points at a dsh
+		// session, dsh's own session.fork in handshakeSession
+		// below re-attaches to the existing in-memory session —
+		// no boot-time RecoverAll is needed.
+		//
+		// Permission mode is fixed at danger-full-access per
+		// [[agent-no-config-tampering]] (we only inject transport
+		// + permissions — never model / provider / credentials).
+		var err error
+		cli, err = host.EnsureSharedHost(ctx, host.SharedHostOptions{
+			Workspace:      cfg.Workspace,
+			HostCmd:        "dsh",
+			PermissionMode: "danger-full-access",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("dsh: shared host not available: %w", err)
+		}
 	}
 
 	d := &driver{
@@ -225,6 +243,35 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		Branch:    detectBranch(d.workspace),
 		Model:     d.model,
 	})
+
+	// F-DSH-TODO-WIRE-FIX (2026-08-16): emit a single Info-level
+	// audit line stating the assumed wire field names. Verified
+	// against @deepseek-ai/dsh-tool-todo source.
+	//
+	// When the "todo list not converted" symptom recurs, the
+	// paper trail is:
+	//   1. Grep nightme.log for "dsh: wire assumptions" — see
+	//      which field names the bridge assumed.
+	//   2. Grep for "todo/write items dropped" — see which
+	//      frames mismatched, with raw bytes attached for diffing.
+	//
+	// F-DSH-TODO-WIRE-FIX (2026-08-16): real dsh wire verified:
+	//   - top-level container is `todos` (NOT `items`)
+	//   - each entry is {content, status} — dsh forbids
+	//     additionalProperties (so `id`, `activeForm` won't
+	//     appear on the wire)
+	//   - status values: pending | in_progress | completed
+	// The bridge uses Content as a stable ID since each list
+	// invariant-enforces unique content.
+	slog.Default().Info("dsh: wire assumptions",
+		"todo_data_top_level", "todos",
+		"todo_data_legacy_alias", "items",
+		"todo_item_id_field", "(none — wire omits id; bridge uses content as key)",
+		"todo_item_content_field", "content",
+		"todo_item_active_form_field", "(none — wire omits; bridge leaves empty)",
+		"todo_item_status_field", "status",
+		"todo_status_values", []string{"pending", "in_progress", "completed"},
+		"hint", "if these field names drift from dsh wire, see 'todo/write items dropped' warnings")
 
 	return d, nil
 }

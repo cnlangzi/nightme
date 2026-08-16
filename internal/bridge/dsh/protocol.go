@@ -327,11 +327,55 @@ type compactionEndData struct {
 	Aborted bool   `json:"aborted,omitempty"`
 }
 
-// todoWriteData is the `data` body of a todo/write event. Items
+// todoWriteData is the `data` body of a todo/write event. Todos
 // is a full snapshot (last-write-wins), translated to F-38
 // TaskList.
+//
+// F-DSH-TODO-WIRE-FIX (2026-08-16): the JSON tag is `todos` to
+// match the real dsh wire (verified via the @deepseek-ai/dsh-tool-todo
+// source: `agent.session.append('todo/write', { todos })`). Pre-fix
+// this struct used `items`, which silently failed every
+// json.Unmarshal — wire data was present but the bridge decoded
+// it as zero items, then emitted EventAgentTaskCreate{Items:[]}
+// (the "clear checklist" signal) — exactly the "todo list not
+// showing up" symptom.
+//
+// We accept `items` as a fallback for older dsh versions or
+// future drift; the first decode wins, the second is a no-op
+// (json.Unmarshal into a second struct with the alternative tag
+// then merging). Production today reads `todos`.
 type todoWriteData struct {
-	Items []todoItem `json:"items"`
+	Todos []todoItem `json:"todos"`
+	// Items is the legacy field name (pre-fix this struct used
+	// it as the primary tag). When the wire uses `items` instead
+	// of `todos` (older dsh, or a future rename), decoding into
+	// this field recovers the snapshot. Custom UnmarshalJSON
+	// below picks the populated one. JSON tag is `items,omitempty`
+	// so the canonical wire (`todos` only) doesn't carry a noisy
+	// empty `items:null` after a round-trip.
+	Items []todoItem `json:"items,omitempty"`
+}
+
+// UnmarshalJSON implements the wire-shape fallback: real dsh
+// emits `{todos: [...]}`, older / fork builds may use
+// `{items: [...]}`. We decode into both via a oneOf selector
+// and pick the populated slice. If both are populated, `todos`
+// wins (canonical).
+func (d *todoWriteData) UnmarshalJSON(data []byte) error {
+	var both struct {
+		Todos []todoItem `json:"todos"`
+		Items []todoItem `json:"items"`
+	}
+	if err := json.Unmarshal(data, &both); err != nil {
+		return err
+	}
+	if len(both.Todos) > 0 {
+		d.Todos = both.Todos
+	} else {
+		d.Todos = both.Items
+	}
+	d.Items = both.Items
+	return nil
 }
 
 // ToolEventView is the host-computed rendering view that dsh web

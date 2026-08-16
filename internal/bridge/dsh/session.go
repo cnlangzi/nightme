@@ -186,26 +186,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	cmd.Dir = cfg.Workspace
 	// Per agent-no-config-tampering: only inject permissions.
 	// Model / provider / credentials flow from ~/.dsh/settings.yaml.
-	//
-	// R-streamIdle: dsh-internal 5-min idle watch on the LLM stream
-	// (DEFAULT_STREAM_IDLE_TIMEOUT_MS in dsh-llm-pi-ai / dsh-llm-deepseek).
-	// Long DSH thinking + tools routinely idle 5+ min, after which dsh
-	// aborts the LLM stream and the session dies (we observe dsh 26931
-	// went from active to gone in 891 ms at 08:18:10). The streamIdle
-	// timeout is overridable per-provider via plugin config, but we can't
-	// touch the user's ~/.dsh/settings.yaml — by R4 we fold the env
-	// forward here. 24h is the upper bound Node's setTimeout accepts
-	// (MAX_TIMER_DELAY_MS); user can override at their end by leaving
-	// this env unset and editing their config.
-	streamIdleTimeoutMs := "86400000"
-	if v := os.Getenv("NIGHTME_DSH_STREAM_IDLE_TIMEOUT_MS"); v != "" {
-		streamIdleTimeoutMs = v
-	}
-	cmd.Env = append(os.Environ(),
-		"DSH_PERMISSION_MODE=danger-full-access",
-		"DSH_LLM_PI_AI_PROVIDERS_MINIMAX_CN_STREAMIDLETIMEOUTMS="+streamIdleTimeoutMs,
-		"DSH_LLM_DEEPSEEK_PROVIDERS_DEEPSEEK_OFFICIAL_STREAMIDLETIMEOUTMS="+streamIdleTimeoutMs,
-	)
+	cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -389,33 +370,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		Branch:    detectBranch(d.workspace),
 		Model:     d.model,
 	})
-
-	// F-DSH-TODO-FIX-LOG: emit a single Info-level audit line
-	// stating the assumed wire field names. Combined with the
-	// per-skipped-item Warn log in applyTodoWriteLocked /
-	// applyTodoProjectionLocked, this gives ops a complete
-	// paper trail when a "todo list not converted" report
-	// comes in:
-	//
-	//   1. Grep nightme.log for "dsh: wire assumptions" — see
-	//      which field names the bridge assumed.
-	//   2. Grep for "wire field-name drift" — see which frames
-	//      mismatched, with raw bytes attached for diffing.
-	//
-	// If the assumption list drifts from the dsh wire, the diff
-	// is visible in the audit line and the per-mismatch warn
-	// logs pinpoint the exact frame that broke.
-	slog.Default().Info("dsh: wire assumptions",
-		"todo_item_id_field", "id",
-		"todo_item_content_field", "content",
-		"todo_item_active_form_field", "activeForm",
-		"todo_item_status_field", "status",
-		"todo_status_values", []string{"pending", "in_progress", "completed"},
-		"projection_field", "projection",
-		"projection_value_field", "value",
-		"tool_view_kind_field", "kind",
-		"tool_view_kind_task_list_value", "task_list",
-		"hint", "if these field names drift from dsh wire, see 'todo/write items dropped' warnings above")
 
 	return d, nil
 }

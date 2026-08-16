@@ -199,6 +199,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		}
 	}
 
+	// Lazy-create a dsh workspace for this daemon and attach every
+	// Workspace creation lives in handshakeSession (per-session,
+	// keyed by cfg.Workspace). This mirrors the dsh dashboard's
+	// browser behavior: every session lives in a workspace at the
+	// session's cwd, and workspace.delete rips out the session row
+	// from the dsh host's in-memory store on close. See
+	// handshakeSession + deleteWorkspace for the wire flow.
+
 	d := &driver{
 		cli:              cli,
 		workspace:        cfg.Workspace,
@@ -380,10 +388,26 @@ func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (b
 		return true, nil
 	}
 
+	// Per-session workspace: create a workspace keyed by the agent
+	// session's cwd so this session lives in its own bucket. The
+	// dashboard groups sessions by workspace, so /ui shows the
+	// worktree-name as the friendly label. workspace.delete on
+	// driver.Close rips out every session attached to this
+	// workspace — including this one — so cross-session cleanup
+	// can't leak. The dsh server dedupes by path, so a second
+	// session with the same cwd reuses the same workspace; only
+	// the LAST session to close triggers the delete.
+	wsCtx, wsCancel := context.WithTimeout(ctx, handshakeTimeout)
+	ws, err := d.cli.RPC.WorkspaceCreate(wsCtx, cfg.Workspace)
+	wsCancel()
+	if err != nil {
+		return false, fmt.Errorf("dsh: workspace.create: %w", err)
+	}
+
 	createCtx, createCancel := context.WithTimeout(ctx, handshakeTimeout)
 	createResp, err := d.cli.RPC.Post(createCtx, "session.create", map[string]any{
-		"cwd":   cfg.Workspace,
-		"title": filepath.Base(cfg.Workspace),
+		"workspaceId": ws.ID,
+		"title":      filepath.Base(cfg.Workspace),
 	})
 	createCancel()
 	if err != nil {
@@ -398,9 +422,17 @@ func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (b
 		return false, fmt.Errorf("dsh: decode session.create value: %w", err)
 	}
 	d.sessionID = scVal.SessionID
-	slogDefault().Info("dsh: session created", "session_id", d.sessionID)
+	slogDefault().Info("dsh: session created",
+		"session_id", d.sessionID,
+		"workspace_id", ws.ID,
+		"cwd", cfg.Workspace)
 	return false, nil
 }
+
+// (workspace.create lives in handshakeSession; the driver never
+// deletes the workspace — the dsh host's archive policy owns
+// cleanup, matching the dashboard's behavior. If we ever need
+// explicit teardown, call cli.RPC.WorkspaceDelete directly.)
 
 // resumeUnhealthyError is returned by handshakeSession when the
 // caller asked for resume (cfg.SessionID != "") and session.fork
@@ -736,6 +768,12 @@ func (d *driver) Close() error {
 		// Drop pending-approval channels for this session too — the
 		// runtime's permission handlers would otherwise wait forever
 		// on a sessionId nobody can answer anymore.
+		//
+		// Workspace lifecycle is the dsh host's problem (it
+		// archives + reaps workspaces on its own schedule); we
+		// create one per session but don't delete on close. The
+		// dashboard matches this — closing a tab doesn't auto-delete
+		// the workspace either.
 		d.cli.Router.Unsubscribe(d.sessionID)
 		// Best-effort cancel of in-flight turn. 3s budget so a hung
 		// server doesn't stall daemon shutdown.

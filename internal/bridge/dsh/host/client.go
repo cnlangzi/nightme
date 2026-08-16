@@ -317,6 +317,73 @@ type SessionCreateOpts struct {
 	AgentPreset string `json:"agentPreset,omitempty"`
 }
 
+// WorkspaceList queries /api/workspace.list. Used by EnsureWorkspace
+// to dedupe: rather than blindly create a new workspace, we look
+// up an existing one with the same path and reuse it.
+func (c *RPCClient) WorkspaceList(ctx context.Context) ([]WorkspaceSummary, error) {
+	resp, err := c.Post(ctx, "workspace.list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Result.OK {
+		return nil, fmt.Errorf("dsh.host: workspace.list: %s", resp.Result.ErrorMessage())
+	}
+	var value struct {
+		Items []WorkspaceSummary `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
+		return nil, fmt.Errorf("dsh.host: workspace.list decode: %w", err)
+	}
+	return value.Items, nil
+}
+
+// WorkspaceSummary is the on-wire shape of one workspace.list row.
+type WorkspaceSummary struct {
+	ID         string `json:"id"`
+	Path       string `json:"path"`
+	Title      string `json:"title"`
+	ArchivedAt *int64 `json:"archivedAt,omitempty"`
+}
+
+// WorkspaceCreate resolves or creates one workspace for `path`. The
+// dsh server itself dedupes by path (workspaceRegistry.resolveByPath +
+// create) so a single call from the bridge is enough; we just call
+// workspace.create and trust the server's response.
+func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, error) {
+	resp, err := c.Post(ctx, "workspace.create", map[string]any{"path": path})
+	if err != nil {
+		return WorkspaceSummary{}, err
+	}
+	if !resp.Result.OK {
+		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create: %s", resp.Result.ErrorMessage())
+	}
+	var value struct {
+		Workspace WorkspaceSummary `json:"workspace"`
+	}
+	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
+		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create decode: %w", err)
+	}
+	if value.Workspace.ID == "" {
+		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create: empty workspaceId in response")
+	}
+	return value.Workspace, nil
+}
+
+// WorkspaceDelete removes one workspace and every session attached to
+// it (the dsh server tears down sessions in workspaceRegistry.delete).
+// Best-effort: callers log the error but don't propagate, since
+// shutdown still proceeds even if dsh is unreachable.
+func (c *RPCClient) WorkspaceDelete(ctx context.Context, workspaceID string) error {
+	resp, err := c.Post(ctx, "workspace.delete", map[string]any{"workspaceId": workspaceID})
+	if err != nil {
+		return err
+	}
+	if !resp.Result.OK {
+		return fmt.Errorf("dsh.host: workspace.delete: %s", resp.Result.ErrorMessage())
+	}
+	return nil
+}
+
 // SessionCreate invokes /api/session.create. Returns the new
 // sessionId. Phase 2 will call this from ChatSession.Spawner; Phase 0
 // is just plumbing.

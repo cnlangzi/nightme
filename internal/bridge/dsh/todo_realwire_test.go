@@ -54,6 +54,10 @@ func makeMuxCollector(t *testing.T) *muxCollector {
 		translate:    tr,
 		events:       make(chan agent.AgentEvent, 64),
 		closed:       make(chan struct{}),
+		// lastSeq = -1 so wire seq=0 dispatches (the field starts at
+		// 0 in Go zero value, which would skip dsh's first event —
+		// turn/start / step/start — that always have seq=0).
+		lastSeq: -1,
 	}
 	c := &muxCollector{d: d}
 	d.dispatcher = newDispatcher(tr, st, nil, func(ev agent.AgentEvent) {

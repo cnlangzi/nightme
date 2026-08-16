@@ -127,13 +127,23 @@ type questionPayload struct {
 //
 //	{
 //	  "type": "assistant/message",
+//	  "seq":  27,
+//	  "time": 1786862336663,
 //	  "data": {
 //	    "turn": 1, "step": 1,
 //	    "message": { "role": "assistant", "content": [ … ] }
 //	  }
 //	}
+//
+// Seq and Time are populated by dsh for every event but the dispatcher
+// itself only reads Type. The bridge uses Seq for dedup across the
+// mux stream (session/event) and the session.history backfill path
+// (both feeds dispatchEvent) so a frame arriving on both delivers
+// exactly once. Seq is monotonically increasing per session.
 type sessionEventEnvelope struct {
 	Type string          `json:"type"`
+	Seq  int64           `json:"seq,omitempty"`
+	Time int64           `json:"time,omitempty"`
 	Data json.RawMessage `json:"data"`
 }
 

@@ -133,6 +133,25 @@ type driver struct {
 	wireState  *wireState
 	dispatcher *eventDispatcher
 
+	// lastSeq is the highest SessionEvent.seq we've already pushed
+	// to the events channel. Both the mux stream (when it works) and
+	// the session.history backfill poll feed dispatchEvent; we dedupe
+	// by seq so a frame arriving on both paths is only delivered once.
+	// The dsh mux stream's events.mux listener is wired to a
+	// session-scope event bus the bridge can't see, so for now only
+	// the backfill path actually delivers events. The mux stream
+	// subscribe is kept as a future-proofing seam.
+	//
+	// Initialized to -1 so the wire's seq=0 (turn/start, step/start
+	// etc.) dispatches on first sight; seq == 0 is real on the wire
+	// for the very first event of a session.
+	lastSeq int64 // -1 = nothing seen yet (zero value is 0, but we need < 0)
+
+	// backfillCancel stops the runBackfillLoop goroutine. Set in
+	// newDriver after handshakeSession; cancelled in Close() so the
+	// goroutine doesn't outlive the events channel drain.
+	backfillCancel context.CancelFunc
+
 	// Lifecycle guards. The events chan is closed by Close() itself
 	// (no separate lifecycle goroutine — the host owns the dsh
 	// subprocess now, so there's nothing for lifecycle to wait on).
@@ -190,6 +209,9 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		translate:        newTranslator(s.name, cfg.Workspace),
 		wireState:        newWireState(),
 		closed:           make(chan struct{}),
+		// lastSeq = -1 so the wire's seq=0 (turn/start, etc.)
+		// passes the dispatch dedup gate. See the field doc.
+		lastSeq: -1,
 	}
 	d.dispatcher = newDispatcher(d.translate, d.wireState, d, d.deliver)
 
@@ -272,6 +294,16 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		"todo_item_status_field", "status",
 		"todo_status_values", []string{"pending", "in_progress", "completed"},
 		"hint", "if these field names drift from dsh wire, see 'todo/write items dropped' warnings")
+
+	// Start the session.history backfill loop. dsh's events.mux
+	// listener is wired to the wrong bus (session-scope vs global),
+	// so session/event frames are silently dropped at the mux
+	// stream today. backfill is the only path that actually delivers
+	// content; we keep the mux Subscribe above as a future-proofing
+	// seam when dsh fixes the wire. Cancel is owned by Close().
+	bfCtx, bfCancel := context.WithCancel(context.Background())
+	d.backfillCancel = bfCancel
+	go d.runBackfillLoop(bfCtx)
 
 	return d, nil
 }
@@ -406,6 +438,123 @@ func (d *driver) deliver(ev agent.AgentEvent) {
 		// Session already closed; drop quietly.
 	default:
 		dLog("dsh: events buffer full; dropping event kind=%s", ev.Kind)
+	}
+}
+
+// dispatchEvent is the single entry point from both the mux stream and
+// the session.history backfill. It dedupes by SessionEvent.seq so
+// a frame arriving on both paths is delivered exactly once, and
+// forwards to the dispatcher only when the seq advances.
+//
+// The mux stream's events.mux listener is wired to the wrong bus
+// (session-scope vs global) so today it never fires for session/event
+// frames — backfill is the only path that actually delivers today.
+// We keep the mux stream subscribe anyway so future dsh fixes are
+// free, and so session/projection / session/queue / approval/asked
+// keep flowing through the partially-working mux path.
+//
+// lastSeq starts at -1 so the first event with seq=0 dispatches
+// (events with `seq==0` are real on the wire — turn/start and
+// step/start both have seq=0 on the very first event of a session).
+// `max` defends against out-of-order delivery (a late residue from
+// before seq tracking, rare but possible if dsh's wire renumbers).
+func (d *driver) dispatchEvent(env sessionEventEnvelope, view json.RawMessage) {
+	if env.Seq <= d.lastSeq {
+		return
+	}
+	if env.Seq > d.lastSeq {
+		d.lastSeq = env.Seq
+	}
+	d.dispatcher.dispatch(env, view)
+}
+
+// runBackfillLoop polls session.history on a fixed interval and
+// dispatches any new events through dispatchEvent. Stops when
+// the driver closes or the backfill context is cancelled.
+//
+// The dsh's events.mux listener is wired to a session-scope event
+// bus so the global mux stream never receives session/event frames
+// for active sessions (verified against dsh 0.1.0-rc.6 on
+// 2026-08-16). session.history is the only reliable source for
+// the per-session event stream today.
+// dsh has historically polled this at 30 seconds in the dashboard's
+// reload path; we poll at 2s here so the runtime/Feishu user sees
+// the response within a couple of seconds of dsh generating it.
+func (d *driver) runBackfillLoop(ctx context.Context) {
+	defer func() {
+		// Make sure we don't leak the loop if fetchHistory trips
+		// on a fault we don't recover from. The context Done path
+		// is the normal exit; this panic guard is belt-and-suspenders.
+	}()
+	// Seed lastSeq with the current value before the first poll so
+	// we don't drop events that arrive via the mux stream between
+	// newDriver wiring the Subscribe and the backfill loop's first
+	// read. lastSeq starts at 0 (zero value), so the first poll
+	// fetches everything; subsequent polls only fetch deltas.
+	d.fetchHistory(ctx)
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.closed:
+			return
+		case <-ticker.C:
+			d.fetchHistory(ctx)
+		}
+	}
+}
+
+// fetchHistory pulls session.history for the current session. Each
+// event with seq > lastSeq is dispatched via dispatchEvent, which
+// dedupes + updates lastSeq. The dsh doesn't emit a "stream cursor"
+// cursor per session, so this is the canonical way to see what's
+// happened since the last poll.
+func (d *driver) fetchHistory(ctx context.Context) {
+	if d.sessionID == "" {
+		return
+	}
+	// dsh's session.history accepts a `beforeSeq` (exclusive upper
+	// bound). We pass lastSeq so the response is [0, lastSeq), then
+	// filter by seq > lastSeq ourselves — dsh's wire only has
+	// beforeSeq, not sinceSeq, so we round-trip the full range
+	// below the cursor and slice. For long sessions this is wasteful
+	// — a wire-side sinceSeq would help. Until then, the dsh's own
+	// session log keeps this manageable.
+	payload := map[string]any{
+		"sessionId": d.sessionID,
+		"beforeSeq": d.lastSeq,
+	}
+	resp, err := d.cli.RPC.Post(ctx, "session.history", payload)
+	if err != nil {
+		dLog("dsh: backfill history: %v", err)
+		return
+	}
+	if !resp.Result.OK {
+		dLog("dsh: backfill history rejected: %s", resp.Result.ErrorMessage())
+		return
+	}
+	type histEntry struct {
+		Event json.RawMessage `json:"event"`
+		View  json.RawMessage `json:"view,omitempty"`
+	}
+	type histResp struct {
+		Events []histEntry `json:"events"`
+	}
+	var history histResp
+	if err := json.Unmarshal(resp.Result.Value, &history); err != nil {
+		dLog("dsh: backfill history unmarshal: %v", err)
+		return
+	}
+	for _, entry := range history.Events {
+		var env sessionEventEnvelope
+		if err := json.Unmarshal(entry.Event, &env); err != nil {
+			dLog("dsh: backfill event decode: %v", err)
+			continue
+		}
+		d.dispatchEvent(env, entry.View)
 	}
 }
 
@@ -569,6 +718,13 @@ func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
 func (d *driver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.closed)
+		// Stop the backfill poller first so it doesn't try to push
+		// events into the events channel after we close it (next
+		// deliver would hit the closed branch and drop, but the
+		// goroutine would still be running).
+		if d.backfillCancel != nil {
+			d.backfillCancel()
+		}
 		// Stop the host from routing future frames for this session.
 		// Drop pending-approval channels for this session too — the
 		// runtime's permission handlers would otherwise wait forever

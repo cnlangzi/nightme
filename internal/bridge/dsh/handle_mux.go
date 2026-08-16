@@ -69,7 +69,13 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		// Ring buffer record happens INSIDE dispatcher.dispatch
 		// (per-frame, with the env.Type for triage). Mux-level
 		// doesn't double-record here.
-		d.dispatcher.dispatch(env, ev.View)
+		//
+		// dispatchEvent dedupes by SessionEvent.seq against the
+		// lastSeq the backfill poll is also writing to. The mux
+		// path is the future-proofing seam; today the dsh's
+		// events.mux listener is wired to the wrong bus so only
+		// backfill actually delivers session/event frames.
+		d.dispatchEvent(env, ev.View)
 
 	case "session/projection":
 		// D3 fix: previously dropped on the floor (default dLog).

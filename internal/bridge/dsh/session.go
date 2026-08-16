@@ -835,21 +835,21 @@ func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
 
 // Close shuts the bridge session down. Idempotent.
 //
-// In the shared-host architecture, Close is *much* simpler than the
-// pre-fix version:
-//   1. Unsubscribe from the shared host's Router — the global mux
-//      pump stops routing frames for this sessionId. Any frames
-//      that arrive between Unsubscribe and the runtime's readpump
-//      draining the events chan are simply lost (correct: the
-//      session is gone).
-//   2. Send session.cancel on the shared RPC client (best-effort)
-//      so any in-flight turn settles gracefully.
-//   3. Close events chan — the runtime's readpump drains any queued
-//      events, then exits the range loop.
+// This is the dashboard session-row context menu "Archive Session":
+//  1. Unsubscribe from the shared host's Router — the global mux
+//     pump stops routing frames for this sessionId.
+//  2. session.cancel so any in-flight turn settles (same RPC as
+//     the InputBar stop button; benign if already idle).
+//  3. workspace.archiveSession — drops the row from every grouping
+//     surface (left list) while keeping the session log. There is
+//     no session.delete on the wire (dsh-api.md §2: sessions.* has
+//     no delete; archive lives under workspace.*).
+//  4. Close events chan — the runtime's readpump drains then exits.
 //
 // We DO NOT kill the dsh subprocess — that's the daemon's
 // responsibility (host.Client.Close), and it lives for the full
-// daemon lifetime now.
+// daemon lifetime now. We also do not workspace.delete: archive
+// keeps the cwd workspace so other sessions in it stay grouped.
 func (d *driver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.closed)
@@ -864,19 +864,23 @@ func (d *driver) Close() error {
 		// Drop pending-approval channels for this session too — the
 		// runtime's permission handlers would otherwise wait forever
 		// on a sessionId nobody can answer anymore.
-		//
-		// Workspace lifecycle is the dsh host's problem (it
-		// archives + reaps workspaces on its own schedule); we
-		// create one per session but don't delete on close. The
-		// dashboard matches this — closing a tab doesn't auto-delete
-		// the workspace either.
 		d.cli.Router.Unsubscribe(d.sessionID)
-		// Best-effort cancel of in-flight turn. 3s budget so a hung
-		// server doesn't stall daemon shutdown.
 		if d.sessionID != "" {
-			cancelCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = d.cli.RPC.SessionCancel(cancelCtx, d.sessionID)
-			cancel()
+			rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := d.cli.RPC.SessionCancel(rpcCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
+				dLog("dsh: session.cancel on close: %v", err)
+			}
+			if err := d.cli.RPC.WorkspaceArchiveSession(rpcCtx, d.sessionID); err != nil {
+				if isBenignCancelErr(err) {
+					dLog("dsh: workspace.archiveSession already archived",
+						"session_id", d.sessionID, "err", errStr(err))
+				} else {
+					dLog("dsh: workspace.archiveSession on close: %v", err)
+				}
+			} else {
+				slogDefault().Info("dsh: session archived", "session_id", d.sessionID)
+			}
+			rpcCancel()
 		}
 		// Close events AFTER unsubscribe so the runtime drains any
 		// frames already routed to handleMuxFrame (and thus into

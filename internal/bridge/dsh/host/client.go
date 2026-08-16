@@ -386,6 +386,25 @@ func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (Workspace
 	return value.Workspace, nil
 }
 
+// WorkspaceArchiveSession is the dashboard session-row context menu
+// "Archive Session": POST /api/workspace.archiveSession {sessionId}
+// (dsh-api.md §2.4.7). The session drops off every grouping surface
+// (left list, workspace sessionIds) but keeps its log and workspace
+// accounting slot. Idempotent for an already-archived id.
+// session-not-found when the id is neither live nor persisted.
+func (c *RPCClient) WorkspaceArchiveSession(ctx context.Context, sessionID string) error {
+	resp, err := c.Post(ctx, "workspace.archiveSession", map[string]any{
+		"sessionId": sessionID,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Result.OK {
+		return fmt.Errorf("dsh.host: workspace.archiveSession: %s", resp.Result.ErrorMessage())
+	}
+	return nil
+}
+
 // WorkspaceDelete removes one workspace and every session attached to
 // it (the dsh server tears down sessions in workspaceRegistry.delete).
 // Best-effort: callers log the error but don't propagate, since

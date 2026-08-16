@@ -27,6 +27,7 @@ type handshakeMock struct {
 	workspaceCount atomic.Int64
 	historyCount   atomic.Int64
 	cancelCount    atomic.Int64
+	archiveCount   atomic.Int64
 
 	mu               sync.Mutex
 	lastCreate       map[string]any
@@ -46,6 +47,7 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/session.models", m.handleSessionModels)
 	mux.HandleFunc("/api/session.history", m.handleSessionHistory)
 	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
+	mux.HandleFunc("/api/workspace.archiveSession", m.handleWorkspaceArchiveSession)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
 	return m
@@ -175,6 +177,18 @@ func (m *handshakeMock) handleSessionCancel(w http.ResponseWriter, r *http.Reque
 	m.cancelCount.Add(1)
 	env := decodeEnvelope(r)
 	writeOK(w, env.RPCID, map[string]any{"accepted": true})
+}
+
+func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *http.Request) {
+	m.archiveCount.Add(1)
+	env := decodeEnvelope(r)
+	var payload struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(env.Payload, &payload)
+	writeOK(w, env.RPCID, map[string]any{
+		"archivedSessionIds": []string{payload.SessionID},
+	})
 }
 
 func (m *handshakeMock) lastCreateCopy() map[string]any {
@@ -385,6 +399,9 @@ func TestReset_InPlaceSingleCreate(t *testing.T) {
 	if mock.cancelCount.Load() < 1 {
 		t.Fatalf("session.cancel calls = %d, want >= 1 for the old session", mock.cancelCount.Load())
 	}
+	if mock.archiveCount.Load() != 0 {
+		t.Fatalf("workspace.archiveSession calls = %d, want 0 (/new is not Archive Session)", mock.archiveCount.Load())
+	}
 
 	select {
 	case ev := <-d.events:
@@ -428,6 +445,33 @@ func TestClose_StopsBackfill(t *testing.T) {
 	later := mock.historyCount.Load()
 	if later > afterClose+1 {
 		t.Fatalf("history polls kept running after Close: before=%d after=%d", afterClose, later)
+	}
+}
+
+func TestClose_ArchivesSession(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver: %v", err)
+	}
+	sid := d.sessionID
+	if sid == "" {
+		t.Fatal("empty sessionID after create")
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if mock.archiveCount.Load() < 1 {
+		t.Fatal("Close did not POST /api/workspace.archiveSession (dashboard Archive Session)")
+	}
+	if mock.cancelCount.Load() < 1 {
+		t.Fatal("Close did not POST /api/session.cancel before archive")
 	}
 }
 

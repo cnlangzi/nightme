@@ -187,9 +187,10 @@ func TestEndToEnd_Heartbeat_HeaderInPatchedCard(t *testing.T) {
 
 	// The PATCH was triggered by the first heartbeat event with
 	// ThinkCount=1, ToolCount=0 — so the header reflects that
-	// state at PATCH time.
-	if !strings.Contains(first, "🤖 Working") {
-		t.Fatalf("missing 🤖 Working: %q", first)
+	// state at PATCH time. F-63 mutual exclusion: back-part
+	// shape only, no "🤖 Working" prefix when activity > 0.
+	if strings.Contains(first, "🤖 Working") {
+		t.Fatalf("back-part header must omit 🤖 Working prefix: %q", first)
 	}
 	if !strings.Contains(first, "💭 1") {
 		t.Fatalf("missing 💭 1: %q", first)
@@ -298,10 +299,13 @@ func TestEndToEnd_Heartbeat_ConcurrentApply_NoRace(t *testing.T) {
 // ─── helpers ───
 
 // findBodyWithHeader returns the most-recent PATCH body
-// containing the heartbeat header; empty string if none.
+// containing the heartbeat header (back part — the 💭/🔧/⏱ line
+// that renderHeartbeatHeader produces). Empty string if none.
+// F-63: back-part header never contains "🤖 Working", so we match
+// on the 💭 counter chip instead.
 func findBodyWithHeader(cards []cardCall) string {
 	for i := len(cards) - 1; i >= 0; i-- {
-		if strings.Contains(cards[i].Body, "🤖 Working") {
+		if strings.Contains(cards[i].Body, "💭 ") {
 			return cards[i].Body
 		}
 	}

@@ -78,7 +78,8 @@ func TestBuildReceiptCard_HeartbeatHeader_EmptySnapshot(t *testing.T) {
 }
 
 // TestBuildReceiptCard_HeartbeatHeader_ThinkOnly covers the
-// "🤖 Working · 💭 3 · ⏱ HH:MM:SS" line shape with only the
+// "💭 3 · ⏱ HH:MM:SS" back-part shape (F-63 mutual exclusion:
+// no "🤖 Working" prefix when activity > 0) with only the
 // thinking counter (no tools).
 func TestBuildReceiptCard_HeartbeatHeader_ThinkOnly(t *testing.T) {
 	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
@@ -88,8 +89,10 @@ func TestBuildReceiptCard_HeartbeatHeader_ThinkOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
-	if !strings.Contains(body, "🤖 Working") {
-		t.Fatalf("missing 🤖 Working; body=%s", body)
+	// F-63 mutual exclusion: ThinkCount>0 → back part only,
+	// "🤖 Working" front part must NOT appear alongside it.
+	if strings.Contains(body, "🤖 Working") {
+		t.Fatalf("header must omit 🤖 Working when activity > 0; body=%s", body)
 	}
 	if !strings.Contains(body, "💭 3") {
 		t.Fatalf("missing 💭 3; body=%s", body)
@@ -130,15 +133,23 @@ func TestBuildReceiptCard_HeartbeatHeader_AllPopulated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
-	want := "🤖 Working · 💭 3 · 🔧 12 · ⏱ 14:35:22"
+	// F-63 mutual exclusion: full back-part line, no "🤖 Working" prefix.
+	want := "💭 3 · 🔧 12 · ⏱ 14:35:22"
 	if !strings.Contains(body, want) {
 		t.Fatalf("missing full header line; want %q in body:\n%s", want, body)
 	}
+	if strings.Contains(body, "🤖 Working") {
+		t.Fatalf("header must omit 🤖 Working prefix when activity > 0; body=%s", body)
+	}
 }
 
-// TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly covers a
-// "agent is alive but no think / no tool yet" turn — just the
-// time stamp.
+// TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly pins the
+// F-63 mutual-exclusion edge: a snapshot with LastBeatAt set
+// but BOTH counters zero is treated as "no activity" (front
+// part), so the time chip must NOT bleed through to the body.
+// The old !hb.Empty() gate would have rendered
+// "🤖 Working · ⏱ 14:35:22" here; the strict ThinkCount/ToolCount
+// gate instead routes to the bare "🤖 Working" placeholder.
 func TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly(t *testing.T) {
 	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
 	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
@@ -148,10 +159,17 @@ func TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly(t *testing.T) {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
 	if !strings.Contains(body, "🤖 Working") {
-		t.Fatalf("missing 🤖 Working (LastBeatAt-only); body=%s", body)
+		t.Fatalf("missing 🤖 Working (LastBeatAt-only counts as no activity → front part); body=%s", body)
 	}
 	if strings.Contains(body, "💭") || strings.Contains(body, "🔧") {
 		t.Fatalf("unexpected counter chips for LastBeatAt-only; body=%s", body)
+	}
+	// F-63: counts == 0 means the time chip must stay suppressed
+	// (the "front" half owns this state). A regression that
+	// re-introduces the !hb.Empty() gate would render
+	// "🤖 Working · ⏱ 14:35:22" and fail this assertion.
+	if strings.Contains(body, "⏱") {
+		t.Fatalf("LastBeatAt-only snapshot must not emit ⏱ (no activity → front part, no back part); body=%s", body)
 	}
 }
 
@@ -171,8 +189,10 @@ func TestBuildReceiptCard_HeartbeatHeader_WithEntries(t *testing.T) {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
 
-	// Find the index of the heartbeat header vs the entry.
-	hbIdx := strings.Index(body, "🤖 Working")
+	// F-63: back-part line shape is "💭 1 · 🔧 1 · ⏱ HH:MM:SS" (no
+	// "🤖 Working" prefix when activity > 0). Find the heartbeat
+	// line by its first non-zero counter chip.
+	hbIdx := strings.Index(body, "💭 1")
 	entryIdx := strings.Index(body, "first reply")
 	if hbIdx < 0 {
 		t.Fatal("heartbeat header missing")
@@ -183,6 +203,9 @@ func TestBuildReceiptCard_HeartbeatHeader_WithEntries(t *testing.T) {
 	if hbIdx >= entryIdx {
 		t.Fatalf("heartbeat header (idx %d) must precede entry (idx %d); body:\n%s",
 			hbIdx, entryIdx, body)
+	}
+	if strings.Contains(body, "🤖 Working") {
+		t.Fatalf("back-part header must omit 🤖 Working prefix; body=%s", body)
 	}
 }
 
@@ -195,17 +218,205 @@ func TestRenderHeartbeatHeader_Direct(t *testing.T) {
 		ThinkCount: 2, ToolCount: 5, LastBeatAt: now,
 	}
 	got := renderHeartbeatHeader(hb)
-	want := "🤖 Working · 💭 2 · 🔧 5 · ⏱ 14:35:22"
+	// F-63 mutual exclusion: renderHeartbeatHeader emits ONLY the
+	// back part; the "🤖 Working" front part is added by the
+	// buildReceiptCard switch when no activity is present. Verify
+	// the back-part shape directly.
+	want := "💭 2 · 🔧 5 · ⏱ 14:35:22"
 	if got != want {
 		t.Fatalf("renderHeartbeatHeader = %q, want %q", got, want)
 	}
+	if strings.HasPrefix(got, "🤖 Working") {
+		t.Fatalf("renderHeartbeatHeader must not start with 🤖 Working prefix; got %q", got)
+	}
 
-	// Empty / nil paths.
+	// Empty / nil paths. With mutual exclusion in force, an empty
+	// snapshot (counts all zero, no LastBeatAt) yields NO parts to
+	// join → "". The "🤖 Working" front part is the caller's
+	// (buildReceiptCard's) job, NOT renderHeartbeatHeader's.
 	if got := renderHeartbeatHeader(nil); got != "" {
 		t.Fatalf("renderHeartbeatHeader(nil) = %q, want \"\"", got)
 	}
-	if got := renderHeartbeatHeader(&messages.HeartbeatSnapshot{}); got != "🤖 Working" {
-		t.Fatalf("renderHeartbeatHeader(empty) = %q, want %q", got, "🤖 Working")
+	if got := renderHeartbeatHeader(&messages.HeartbeatSnapshot{}); got != "" {
+		t.Fatalf("renderHeartbeatHeader(empty) = %q, want \"\" (no parts to join)", got)
+	}
+}
+
+// TestBuildReceiptCard_HeartbeatHeader_MutualExclusion pins
+// the F-63 §3.6 four-way contract end-to-end through buildReceiptCard:
+//   (a) hb counts all zero + entries/tasks empty → "🤖 Working" (front)
+//   (b) hb ThinkCount>0 + ToolCount==0 → "💭 N · ⏱ HH:MM:SS" (back, no front)
+//   (c) hb ThinkCount==0 + ToolCount>0 → "🔧 M · ⏱ HH:MM:SS" (back, no front)
+//   (d) hb ThinkCount>0 + ToolCount>0 + LastBeatAt → full back line, no front
+//   (e) hb counts all zero but entries non-empty → no header at all
+// At no point do (a) and (b/c/d) ever produce a body that contains
+// BOTH "🤖 Working" AND a "💭 "/"🔧 " counter chip.
+func TestBuildReceiptCard_HeartbeatHeader_MutualExclusion(t *testing.T) {
+	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
+
+	type tc struct {
+		name    string
+		entries []LogEntry
+		tasks   []agent.AgentTaskItem
+		hb      *messages.HeartbeatSnapshot
+		wantHas []string // substrings the body MUST contain
+		wantNot []string // substrings the body MUST NOT contain
+	}
+	cases := []tc{
+		{
+			name:    "front: empty snapshot, no entries/tasks",
+			entries: nil, tasks: nil,
+			hb: &messages.HeartbeatSnapshot{},
+			wantHas: []string{"🤖 Working"},
+			wantNot: []string{"💭 ", "🔧 ", "⏱ "},
+		},
+		{
+			name:    "back: think only",
+			entries: nil, tasks: nil,
+			hb: &messages.HeartbeatSnapshot{ThinkCount: 1, LastBeatAt: now},
+			wantHas: []string{"💭 1", "⏱ 14:35:22"},
+			wantNot: []string{"🤖 Working", "🔧 "},
+		},
+		{
+			name:    "back: tool only",
+			entries: nil, tasks: nil,
+			hb: &messages.HeartbeatSnapshot{ToolCount: 1, LastBeatAt: now},
+			wantHas: []string{"🔧 1", "⏱ 14:35:22"},
+			wantNot: []string{"🤖 Working", "💭 "},
+		},
+		{
+			name:    "back: think + tool + time",
+			entries: nil, tasks: nil,
+			hb:      &messages.HeartbeatSnapshot{ThinkCount: 2, ToolCount: 3, LastBeatAt: now},
+			wantHas: []string{"💭 2", "🔧 3", "⏱ 14:35:22"},
+			wantNot: []string{"🤖 Working"},
+		},
+		{
+			// F-63 strict-gate edge: LastBeatAt set but counts == 0.
+			// Old !hb.Empty() gate would render "🤖 Working · ⏱ ..."
+			// (front + time). New gate routes to the bare front part —
+			// the time chip is suppressed. This is the case that
+			// TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly
+			// covers in single-test form; the table entry pins it
+			// alongside the rest of the contract.
+			name:    "front: LastBeatAt-only (counts == 0, no entries/tasks)",
+			entries: nil, tasks: nil,
+			hb:      &messages.HeartbeatSnapshot{LastBeatAt: now},
+			wantHas: []string{"🤖 Working"},
+			wantNot: []string{"💭 ", "🔧 ", "⏱ "},
+		},
+		{
+			name:    "no header: empty snapshot but entries present",
+			entries: []LogEntry{{Icon: "💬", Text: "first reply"}}, tasks: nil,
+			hb: &messages.HeartbeatSnapshot{},
+			wantHas: []string{"first reply"},
+			wantNot: []string{"🤖 Working", "💭 ", "🔧 ", "⏱ "},
+		},
+		{
+			// nil hb + no entries/tasks → front part (same as the
+			// "empty snapshot" case but exercising the hb == nil
+			// branch of the switch).
+			name:    "front: nil hb, no entries/tasks",
+			entries: nil, tasks: nil,
+			hb:      nil,
+			wantHas: []string{"🤖 Working"},
+			wantNot: []string{"💭 ", "🔧 ", "⏱ "},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body, _, err := buildReceiptCard(c.entries, c.tasks, nil, c.hb)
+			if err != nil {
+				t.Fatalf("buildReceiptCard: %v", err)
+			}
+			for _, want := range c.wantHas {
+				if !strings.Contains(body, want) {
+					t.Errorf("body missing %q\nbody: %s", want, body)
+				}
+			}
+			for _, ban := range c.wantNot {
+				if strings.Contains(body, ban) {
+					t.Errorf("body unexpectedly contains %q\nbody: %s", ban, body)
+				}
+			}
+		})
+	}
+}
+
+// TestRenderHeartbeatHeader_OmitsWorkingPrefix is the direct
+// guarantee on the contract boundary: renderHeartbeatHeader is
+// NEVER allowed to start its output with "🤖 Working". The
+// "🤖 Working" placeholder is the buildReceiptCard front-part
+// case's job; renderHeartbeatHeader only owns the back-part
+// shape. A regression that re-introduces the prefix would
+// surface as both halves rendered side-by-side (breaking §3.6
+// mutual exclusion).
+func TestRenderHeartbeatHeader_OmitsWorkingPrefix(t *testing.T) {
+	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
+	cases := []messages.HeartbeatSnapshot{
+		{},
+		{ThinkCount: 1, LastBeatAt: now},
+		{ToolCount: 1, LastBeatAt: now},
+		{ThinkCount: 1, ToolCount: 1, LastBeatAt: now},
+		{LastBeatAt: now},
+	}
+	for _, snap := range cases {
+		got := renderHeartbeatHeader(&snap)
+		if strings.HasPrefix(got, "🤖 Working") {
+			t.Errorf("renderHeartbeatHeader must not start with 🤖 Working; got %q for snap=%+v", got, snap)
+		}
+		if strings.Contains(got, "🤖 Working") {
+			t.Errorf("renderHeartbeatHeader must not contain 🤖 Working at all; got %q for snap=%+v", got, snap)
+		}
+	}
+}
+
+// TestRenderHeartbeatHeader_NoLastBeat pins the
+// zero-LastBeatAt case for the back part: when ThinkCount/ToolCount
+// are non-zero but LastBeatAt is the zero time, the time chip
+// must be omitted (the function only appends a "⏱ ..." part
+// when !hb.LastBeatAt.IsZero()). This case is unreachable in
+// production — runtime's HeartbeatTracker.Observe stamps
+// LastBeatAt on every event — but renderHeartbeatHeader is a
+// public function, so the contract gets a sanity test.
+func TestRenderHeartbeatHeader_NoLastBeat(t *testing.T) {
+	cases := []struct {
+		name string
+		snap messages.HeartbeatSnapshot
+		want string
+	}{
+		{
+			name: "think only, no beat",
+			snap: messages.HeartbeatSnapshot{ThinkCount: 2},
+			want: "💭 2",
+		},
+		{
+			name: "tool only, no beat",
+			snap: messages.HeartbeatSnapshot{ToolCount: 7},
+			want: "🔧 7",
+		},
+		{
+			name: "both, no beat",
+			snap: messages.HeartbeatSnapshot{ThinkCount: 1, ToolCount: 3},
+			want: "💭 1 · 🔧 3",
+		},
+		{
+			name: "zero everything → empty",
+			snap: messages.HeartbeatSnapshot{},
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := renderHeartbeatHeader(&c.snap)
+			if got != c.want {
+				t.Errorf("renderHeartbeatHeader = %q, want %q", got, c.want)
+			}
+			if strings.Contains(got, "⏱") {
+				t.Errorf("renderHeartbeatHeader must omit ⏱ when LastBeatAt is zero; got %q", got)
+			}
+		})
 	}
 }
 
@@ -247,10 +458,11 @@ func TestApplyHeartbeat_TriggersPatchOnCountChange(t *testing.T) {
 		t.Fatalf("expected 2 PATCHes (one per count change); got %d", got)
 	}
 
-	// PATCH body must contain the heartbeat header.
+	// PATCH body must contain the heartbeat header (back part
+	// only — no "🤖 Working" prefix when activity > 0).
 	last := bot.patches[len(bot.patches)-1]
-	if !strings.Contains(last.Body, "🤖 Working") {
-		t.Fatalf("PATCH body missing heartbeat header: %s", last.Body)
+	if strings.Contains(last.Body, "🤖 Working") {
+		t.Fatalf("PATCH body must omit 🤖 Working prefix when activity > 0: %s", last.Body)
 	}
 	if !strings.Contains(last.Body, "💭 2") {
 		t.Fatalf("PATCH body missing latest count: %s", last.Body)
@@ -374,8 +586,11 @@ func TestApplyHeartbeat_PATCHCardHasHeader(t *testing.T) {
 	if !ok {
 		t.Fatalf("first element is not a markdown string: %+v", parsed.Body.Elements[0])
 	}
-	if !strings.Contains(first, "🤖 Working") {
-		t.Fatalf("first element missing heartbeat header: %q", first)
+	// F-63 mutual exclusion: back-part header is counters + time,
+	// no "🤖 Working" prefix. Verify the prefix is NOT there, and
+	// the back-part chips are.
+	if strings.Contains(first, "🤖 Working") {
+		t.Fatalf("first element must omit 🤖 Working prefix when activity > 0: %q", first)
 	}
 	if !strings.Contains(first, "💭 7") {
 		t.Fatalf("first element missing 💭 7: %q", first)

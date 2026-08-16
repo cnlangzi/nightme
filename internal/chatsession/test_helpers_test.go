@@ -43,15 +43,28 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 // an outbound.Emitter, so the test stub is an Emitter.
 type testEmitter struct {
 	Sent []messages.OutboundMessage
+
+	// SendErr, when non-nil, is returned from Send and SendCard.
+	// Lets tests simulate channel-adapter failures (Feishu 5xx,
+	// network timeout) without standing up a real Channel. The
+	// message IS still recorded in Sent even when SendErr is
+	// non-nil — the contract under test is "Send returns the
+	// error AND the runtime must not stamp the tombstone", not
+	// "the message disappears". nil-default keeps the existing
+	// happy-path tests untouched.
+	SendErr error
 }
 
 func (t *testEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
 	t.Sent = append(t.Sent, msg)
-	return nil
+	return t.SendErr
 }
 
 func (t *testEmitter) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	t.Sent = append(t.Sent, msg)
+	if t.SendErr != nil {
+		return "", t.SendErr
+	}
 	return "bot-msg-test", nil
 }
 

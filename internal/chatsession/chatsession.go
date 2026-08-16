@@ -188,6 +188,21 @@ type ChatSession struct {
 	// ToolsMode's zero value is Hide (quiet by default; opt in).
 	toolsMode ToolsMode
 
+	// F-watch hint tombstone: true once the one-time `/watch on`
+	// hint has been emitted for this chat. Lived on the registry
+	// entry first (Manager.maybeEmitWatcherHint v1 wrote a stub
+	// entry directly to ChatSessionFile), but that path races
+	// against any other persist that builds the entry from this
+	// struct (SetWatchMode / SetThinkMode / SetToolsMode etc. all
+	// go through entryLocked(), which silently dropped the flag
+	// and clobbered the tombstone back to false on the next
+	// write). Tracking it as a first-class field here mirrors
+	// the WatchMode / ThinkMode / ToolsMode pattern: included in
+	// entryLocked() so every persist path preserves it, hydrated
+	// from entry in RestoreFromRegistry so daemon restart doesn't
+	// re-emit. Zero value (false) is the safe "no hint yet" state.
+	watcherHintEmitted bool
+
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
 
@@ -745,6 +760,45 @@ func (cs *ChatSession) ThinkMode() ThinkMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.thinkMode
+}
+
+// WatcherHintEmitted reports whether the one-time `/watch on`
+// hint has already been sent for this chat. Default false (hint
+// not yet sent). Once true, Manager.HandleInbound's drop branch
+// skips the hint entirely. Hydrated from the registry entry on
+// RestoreFromRegistry so daemon restart preserves the
+// tombstone. See Manager.maybeEmitWatcherHint for the trigger
+// contract.
+func (cs *ChatSession) WatcherHintEmitted() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.watcherHintEmitted
+}
+
+// MarkWatcherHintEmitted stamps the hint tombstone on the
+// ChatSession and persists the change. Called by
+// Manager.maybeEmitWatcherHint immediately after the Emitter
+// dispatch (so a transient Emitter.Send failure doesn't leave
+// the in-memory state ahead of the persisted state on retry).
+//
+// Deliberately does NOT touch lastInteractionAt: the hint
+// emission is a system event triggered by a dropped user
+// message, not a user interaction. Bumping the "last user
+// message" timestamp to the hint-emission time would
+// misrepresent when the user actually last interacted, and
+// (when the future idle-expiry feature lands) could mask the
+// fact that a chat has only ever received dropped non-mention
+// traffic.
+//
+// Concurrency: same pattern as SetWatchMode / SetThinkMode /
+// SetToolsMode — take ChatSession mutex, write field, release,
+// persist. The lock is NOT held across any channel.Send call.
+func (cs *ChatSession) MarkWatcherHintEmitted() error {
+	cs.mu.Lock()
+	cs.watcherHintEmitted = true
+	cs.mu.Unlock()
+	cs.persistChatEntry()
+	return nil
 }
 
 // SetToolsMode changes the per-chat tool-event visibility.
@@ -2218,6 +2272,11 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		WatchMode:            int(cs.watchMode),
 		ThinkMode:            int(cs.thinkMode),
 		ToolsMode:            int(cs.toolsMode),
+		// F-watch: propagate the hint tombstone so any persist
+		// path (SetWatchMode / SetThinkMode / SetToolsMode / SetSelectedCwd
+		// / ClearSelectedCwd / QueueUserMessage's lastInteractionAt
+		// bump) preserves it instead of clobbering back to false.
+		WatcherHintEmitted:   cs.watcherHintEmitted,
 	}
 }
 

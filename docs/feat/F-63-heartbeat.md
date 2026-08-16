@@ -1,10 +1,30 @@
 # F-63: Heartbeat — Receipt 顶部活动计数器与最后心跳时间
 
-> **Status**: Draft
-> **Date**: 2026-08-15
+> **Status**: Revised
+> **Date**: 2026-08-16
 > **Author**: 夜me
-> **Branch**: `feat-hearbeat`(本仓在 worktree `feat-hearbeat` 中开发)
+> **Branch**: `fix-working`(原 `feat-hearbeat` 合并后,继续在主仓迭代)
 > **触发**: 用户长 turn(30s+)时,飞书占位卡静态显示 "⌨️ Working..." 让人误以为 agent 卡死。需要在 receipt 顶部动态显示 agent 真实进度(thinking / tool 调用次数 + 最近活动时间)。
+
+## 0. 修订记录
+
+### 2026-08-16 — 视觉收敛:Working 前缀与活动计数互斥
+
+原方案在有活动时把 `🤖 Working` 和 `💭 N · 🔧 M · ⏱ HH:MM:SS` 拼在同一行。实际使用中 `🤖 Working` 与 `💭/🔧` 同屏重复表述"agent 在干活"——`💭/🔧` 已经在计数了,前缀显得冗余。
+
+新规则:**两段互斥**。Receipt 顶部只有以下两种形态之一:
+
+1. **前半部分**(无活动) — `🤖 Working`
+   - 触发:`ThinkCount == 0 && ToolCount == 0` 且 entries/tasks 都空
+   - 视觉语义:"agent 已经在排队,但还没开始动手 / 纯快速回答转瞬即逝"
+2. **后半部分**(有活动) — `💭 N · 🔧 M · ⏱ HH:MM:SS`
+   - 触发:`ThinkCount > 0 || ToolCount > 0`
+   - 视觉语义:"agent 真的在做事"+ "最近活动时刻"
+   - ⏱ 时间戳作为"还在活动"的副信号,跟计数同段同生
+
+`🤖 Working` 不再作为后半部分的前缀。两段不会同时出现,二选一。
+
+实现侧的代码改动在 `internal/channel/feishu/adapter.go:buildReceiptCard` 的 switch 与 `renderHeartbeatHeader`,见 §3.6。
 
 ---
 
@@ -45,7 +65,10 @@ UX 上必须满足:
 - **观测在最高拦截点**:runtime handler 唯一入口 `HeartbeatTracker.Observe(userMsgID, out.Kind)`,所有 channel 共享同一计数器
 - **观测在 policy 之前**:`/think off` / `/tools off` 不影响计数(核心不变量,§3.2 详述)
 - **新增 `OutHeartbeat` OutboundKind**:走同一条 `em.Send`,adapter 在 `Send` 里识别并 PATCH receipt 顶部
-- **Feishu receipt 顶部 heartbeat header**:第一行新增 `🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS`
+- **Feishu receipt 顶部 heartbeat header(两段互斥)**:
+  - 有活动时(`ThinkCount > 0 || ToolCount > 0`):第一行渲染 `💭 N · 🔧 M · ⏱ HH:MM:SS`
+  - 无活动时(`ThinkCount == 0 && ToolCount == 0`):第一行渲染 `🤖 Working` 占位
+  - 两段不共存,二选一(详见 §3.6)
 - **LRU 自动淘汰**:tracker 不做显式 Drop,满 cap 时最久未用的 userMsgID 自然出队,内存上界可控(~32KB)
 
 ### 非目标
@@ -308,29 +331,40 @@ func buildReceiptCard(
 ) (string, error) {
     elements := make([]map[string]any, 0, len(entries)+6)
 
-    // 头:心跳优先于原 placeholder
+    // 头:两段互斥 ——
+    //   前半部分 = "🤖 Working"   (无活动)
+    //   后半部分 = "💭 N · 🔧 M · ⏱ HH:MM:SS"   (有活动)
+    // 二选一,不会同时渲染。
     switch {
-    case hb != nil && !hb.Empty():
+    case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0):
+        // 后半部分:有任意一个计数器 > 0 → 走活动态
         elements = append(elements, map[string]any{
             "tag":     "markdown",
             "content": renderHeartbeatHeader(hb),
         })
     case len(entries) == 0 && len(tasks) == 0:
-        // 兼容路径:原 "⌨️ Working..."
+        // 前半部分:无活动 + 无 rolling-log → 走静默占位
         elements = append(elements, map[string]any{
             "tag":     "markdown",
-            "content": "⌨️ Working...",
+            "content": "🤖 Working",
         })
     }
+    // 其他情况(无活动但 entries/tasks 已有内容):不渲染头部,
+    // rolling-log 自身已经表达"agent 在工作"。
 
     // entries / tasks / footer 完全不变
     // ...
 }
 
-// renderHeartbeatHeader 形如:
-//   🤖 Working · 💭 3 · 🔧 12 · ⏱ 14:35:22
+// renderHeartbeatHeader 只产出后半部分(三块拼接),不再带 "🤖 Working" 前缀。
+//   示例:💭 3 · 🔧 12 · ⏱ 14:35:22
+//   - ThinkCount == 0 时省略 💭 块
+//   - ToolCount  == 0 时省略 🔧 块
+//   - LastBeatAt 为零时省略 ⏱ 块
+// 互斥由 buildReceiptCard 的 switch 保证;此处不需判断 ThinkCount/ToolCount 是否全 0。
 func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
-    parts := []string{"🤖 Working"}
+    if hb == nil { return "" }
+    var parts []string
     if hb.ThinkCount > 0 {
         parts = append(parts, fmt.Sprintf("💭 %d", hb.ThinkCount))
     }
@@ -344,19 +378,27 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 }
 ```
 
+**互斥规则**:
+- `ThinkCount > 0 || ToolCount > 0` → 后半部分 `💭 N · 🔧 M · ⏱ HH:MM:SS`
+- 其他 → 前半部分 `🤖 Working` 占位(仅当 entries/tasks 都空时;否则不渲染头部)
+
+两段不会同时出现。`🤖 Working` 仅在 receipt 还未收到任何 think/tool 事件时出现;一旦首个 think/tool 事件落定(ApplyHeartbeat 触发 PATCH),立刻切到后半部分,后续只要还有活动就一直保持后半部分。
+
+**为什么把"无活动但有时间"的情况归到前半部分**:`LastBeatAt` 是在所有 13 种 OutboundKind 上都刷新的(§3.3 `Observe`),但 `ApplyHeartbeat` 只在 ThinkCount/ToolCount 变化时才真正 PATCH(`receipt.go:ApplyHeartbeat` 的 `changed` 短路)。换言之,receipt 持有的快照一旦 ThinkCount/ToolCount 全 0,意味着从未有过 think/tool 事件,此时即便 LastBeatAt 已被 `OutReply` 推进过、也不曾让 PATCH 触发,所以渲染面读不到"有时间"的状态。理论上"hb 已下发但 think/tool 仍 0"在 receipt 路径上不会持久存在,落到 switch 的"前半"分支是安全的兜底。
+
 所有 `buildReceiptCard(...)` 调用点同步改为传 `&r.heartbeat`(`ensureReceiptForTyping` / `AppendEntryWithFooter` / `SetTaskListWithFooter` / `RolloverTo` 等)。
 
 ### 3.7 行为矩阵
 
-| 用户配置 | agent 真实动作 | receipt 卡片内容 | 心跳顶部 |
+| 用户配置 | agent 真实动作 | receipt 卡片内容 | 心跳头部(互斥) |
 |---|---|---|---|
-| `/think on` `/tools on` (默认) | think × 3 + tool × 5 | 💭 卡片 ×3 + 🔧 行 ×5 + 💬 最终回复 | `🤖 Working · 💭 3 · 🔧 5 · ⏱ HH:MM:SS` |
-| `/think off` `/tools on` | think × 3 + tool × 5 | (无 thinking 卡片) + 🔧 行 ×5 + 💬 最终回复 | `🤖 Working · 💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
-| `/think on` `/tools off` | think × 3 + tool × 5 | 💭 卡片 ×3 + (无 tool 行) + 💬 最终回复 | `🤖 Working · 💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
-| `/think off` `/tools off` | think × 3 + tool × 5 | (无 thinking) + (无 tool) + 💬 最终回复 | `🤖 Working · 💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
-| 全开,单纯快速回答 (0 think + 0 tool) | 0 think + 0 tool + reply chunks | 💬 最终回复 | `🤖 Working · ⏱ HH:MM:SS`(无 💭🔧) |
+| `/think on` `/tools on` (默认) | think × 3 + tool × 5 | 💭 卡片 ×3 + 🔧 行 ×5 + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS`(后半) |
+| `/think off` `/tools on` | think × 3 + tool × 5 | (无 thinking 卡片) + 🔧 行 ×5 + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
+| `/think on` `/tools off` | think × 3 + tool × 5 | 💭 卡片 ×3 + (无 tool 行) + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
+| `/think off` `/tools off` | think × 3 + tool × 5 | (无 thinking) + (无 tool) + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
+| 全开,单纯快速回答 (0 think + 0 tool) | 0 think + 0 tool + reply chunks | 💬 最终回复 | `🤖 Working`(前半,无 ⏱) |
 
-第 5 行特别重要:用户明确要的就是这种"agent 快速回答也无 noise"的体验。
+第 5 行:无 think/tool 活动时,头部回到前半部分静默占位。⏱ 时间戳只在后半部分出现 —— 既然"无活动"也意味头部不会持续变,⏱ 自然也无需"agent 还活着"的副信号。视觉更干净。
 
 ### 3.8 边界 case 显式处理
 
@@ -413,12 +455,13 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 
 | 场景 | 修复前 | 修复后 |
 |---|---|---|
-| 长 turn(30s+)无 reply | 卡片静态显示 `⌨️ Working...` | 顶部 `🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS` 实时更新 |
-| 长 thinking 间隙(15s+) | 完全无信号 | ⏱ 时间戳持续推进,证明 agent 还在推理 |
-| `/think off` + 长 turn | (无 thinking 卡片) + `⌨️ Working...` 一直挂着 | (无 thinking 卡片) + 顶部 `🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS`,💭 数字照常累计 |
-| `/tools off` + 长 turn | (无 tool 行) + `⌨️ Working...` 一直挂着 | (无 tool 行) + 顶部 `🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS`,🔧 数字照常累计 |
-| 快速回答 turn(0 think + 0 tool) | `⌨️ Working...` 短暂后变 reply | 顶部 `🤖 Working · ⏱ HH:MM:SS`,无 💭🔧,简洁 |
-| prompt 结束 | receipt 改 ✅ reaction | receipt 改 ✅ reaction + 顶部保留本轮汇总(💭/🔧 终态) |
+| 长 turn(30s+)有 think/tool 活动 | 卡片静态显示 `⌨️ Working...` | 顶部 `💭 N · 🔧 M · ⏱ HH:MM:SS` 实时更新(后半) |
+| 长 thinking 间隙(15s+,有 think 事件) | 完全无信号 | ⏱ 时间戳持续推进 + 💭 计数递增,证明 agent 还在推理 |
+| `/think off` + 长 turn(有 think) | (无 thinking 卡片) + `⌨️ Working...` 一直挂着 | (无 thinking 卡片) + 顶部 `💭 N · 🔧 M · ⏱ HH:MM:SS`,💭 数字照常累计 |
+| `/tools off` + 长 turn(有 tool) | (无 tool 行) + `⌨️ Working...` 一直挂着 | (无 tool 行) + 顶部 `💭 N · 🔧 M · ⏱ HH:MM:SS`,🔧 数字照常累计 |
+| 快速回答 turn(0 think + 0 tool) | `⌨️ Working...` 短暂后变 reply | 顶部 `🤖 Working` 占位(前半),无 ⏱ 噪声 |
+| prompt 结束 | receipt 改 ✅ reaction | receipt 改 ✅ reaction + 顶部保留本轮汇总(`💭/🔧` 终态,后半部分) |
+| turn 切换(新一轮 think 事件落定) | (整个 turn 重新计数) | 后半部分保持,`💭` `🔧` `⏱` 自然反映当前 turn;不再有 `🤖 Working` 前缀闪烁 |
 
 ---
 
@@ -449,10 +492,20 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 | `heartbeat_test.go` | `TestObserve_LRUEvicts` | 写入超过 cap 的 uid 后,最久未访问的 uid 被淘汰,`Snapshot` 返回 zero |
 | `heartbeat_test.go` | `TestObserve_LRUTouchUpdates` | 重复 Observe 同一 uid 不会让其被淘汰 |
 | `heartbeat_test.go` | `TestObserve_ConcurrentSafe` | 并发 Observe + Snapshot,`-race` 不报 |
-| `receipt_test.go` | `TestApplyHeartbeat_Idempotent` | 同 snapshot 二次调用不触发 renderLocked |
-| `receipt_test.go` | `TestApplyHeartbeat_Throttled` | 2s 内连续 ApplyHeartbeat 多次只渲染 ≤1 次 |
-| `receipt_test.go` | `TestApplyHeartbeat_RendersHeader` | ApplyHeartbeat 后 buildReceiptCard 输出含 header |
-| `adapter_test.go` | `TestBuildReceiptCard_HeartbeatHeader` | 5 种 hb 输入(nil / 空 / 仅 think / 仅 tool / 全有)下 header 文本 |
+| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Idempotent` | 同 snapshot 二次调用不触发 renderLocked |
+| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Throttled` | 2s 内连续 ApplyHeartbeat 多次只渲染 ≤1 次 |
+| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_PATCHCardHasHeader` | ApplyHeartbeat 后 buildReceiptCard 输出含 header(back part),且不出现 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_NilSnapshot` | hb=nil + 无 entries/tasks → 渲染 front part `"🤖 Working"`,不带任何计数/时间 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_EmptySnapshot` | hb=zero snapshot + 无 entries/tasks → 渲染 front part `"🤖 Working"`(精确字符串,无后缀点) |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_ThinkOnly` | hb={Think:3, Beat:t} → 后半 `💭 3 · ⏱ HH:MM:SS`;**不**带 "🤖 Working" 前缀;无 🔧 chip |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_ToolOnly` | hb={Tool:12, Beat:t} → 后半 `🔧 12 · ⏱ HH:MM:SS`,无 💭 chip,无 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_AllPopulated` | hb={Think:3, Tool:12, Beat:t} → 后半 `💭 3 · 🔧 12 · ⏱ HH:MM:SS`,无 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly` | hb={Beat:t} + 无 entries/tasks → 渲染 front part `"🤖 Working"`,**不**带 ⏱ chip(新行为;旧的 !hb.Empty() gate 会渲染 `🤖 Working · ⏱ HH:MM:SS`) |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_WithEntries` | hb populated + entries 非空 → header 排在 entries 之前,且不出现 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_MutualExclusion` | 7 个子用例的表驱动矩阵(front/empty / back/think-only / back/tool-only / back/think+tool+time / front/LastBeatAt-only / no-header/entries-only / front/nil-hb),逐 case 断言 `wantHas` 与 `wantNot` 不重叠 — 钉死 §3.6 互斥契约的 4-way 行为 |
+| `heartbeat_receipt_test.go` | `TestRenderHeartbeatHeader_Direct` | 直接调 `renderHeartbeatHeader` 验证 `{Think:2, Tool:5, Beat:t}` → `"💭 2 · 🔧 5 · ⏱ HH:MM:SS"`(无 Working 前缀);空快照 → `""` |
+| `heartbeat_receipt_test.go` | `TestRenderHeartbeatHeader_OmitsWorkingPrefix` | 5 种 hb 输入下,返回值从**任何位置**都不含 "🤖 Working"(守住契约边界) |
+| `heartbeat_receipt_test.go` | `TestRenderHeartbeatHeader_NoLastBeat` | 4 个子用例(think-only / tool-only / both / 全零)在 `LastBeatAt=zero` 下输出 back part 不带 ⏱ chip |
 
 ### 7.2 集成测试
 

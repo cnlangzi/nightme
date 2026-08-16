@@ -91,24 +91,28 @@ func newTestTranslator() (*translator, func() []agent.AgentEvent) {
 // switch on the full string — see translate.go's case statement),
 // properties carries partID + the appropriate payload field for
 // the sub-type.
-func sseTextEvent(sub, partID, payload string) SessionEvent {
-	var raw string
+// sseTextEvent builds a `session.next.text.*` SessionEvent. The
+// real opencode 1.18 wire shape (verified against a live server)
+// keys each text block under `textID`; older variants used
+// `partID`. We emit BOTH in the helper so the test fixture
+// matches the current protocol AND stays forward-compatible with
+// the partID fallback in handleTextStreamEvent — the bridge will
+// prefer textID, which is what production traffic looks like.
+func sseTextEvent(sub, id, payload string) SessionEvent {
+	props := []string{
+		`"textID":` + jsonString(id),
+		`"partID":` + jsonString(id),
+	}
 	switch sub {
 	case "started":
-		raw = `{"type":"session.next.text.` + sub + `","properties":{` +
-			`"partID":` + jsonString(partID) +
-			`}}`
+		// No payload on started.
 	case "delta":
-		raw = `{"type":"session.next.text.` + sub + `","properties":{` +
-			`"partID":` + jsonString(partID) +
-			`,"delta":` + jsonString(payload) +
-			`}}`
+		props = append(props, `"delta":`+jsonString(payload))
 	case "ended":
-		raw = `{"type":"session.next.text.` + sub + `","properties":{` +
-			`"partID":` + jsonString(partID) +
-			`,"text":` + jsonString(payload) +
-			`}}`
+		props = append(props, `"text":`+jsonString(payload))
 	}
+	raw := `{"type":"session.next.text.` + sub + `","properties":{` +
+		strings.Join(props, ",") + `}}`
 	var ev SessionEvent
 	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
 		panic("test sseTextEvent bad json: " + err.Error())
@@ -454,6 +458,195 @@ func TestTranslate_ResetTurnClearsBuffer(t *testing.T) {
 	}
 	if tr.turn.activeTextBlock != "" {
 		t.Errorf("post-ResetTurn activeTextBlock=%q, want empty", tr.turn.activeTextBlock)
+	}
+}
+
+// TestTranslate_TextStreamTwoBlocksBufferedSeparately is the
+// regression guard for the wire-field mismatch bug:
+//
+// opencode 1.18 keys text blocks under `textID` on the data
+// payload, not `partID`. The pre-fix bridge unmarshalled only
+// `partID` (always empty in production wire traffic), so all
+// blocks of a turn collapsed onto the single shared "_" bucket.
+// For single-block replies the symptom was invisible (the bucket
+// held one block's worth of text), but a turn with pre-tool text
+// + tool + post-tool text would interleave the two blocks' deltas
+// into one buffer and surface them as a single concatenated blob.
+//
+// The test fires two distinct text blocks (text-0, text-1) with
+// disjoint content, then asserts each block closes into its own
+// independent EventAgentText at the terminal event.
+func TestTranslate_TextStreamTwoBlocksBufferedSeparately(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	// Block 1 (pre-tool narration).
+	if err := tr.handleEvent(sseTextEvent("started", "text-0", "")); err != nil {
+		t.Fatalf("handleEvent(started text-0): %v", err)
+	}
+	for _, d := range []string{"Let me ", "check the ", "files."} {
+		if err := tr.handleEvent(sseTextEvent("delta", "text-0", d)); err != nil {
+			t.Fatalf("handleEvent(delta text-0): %v", err)
+		}
+	}
+	if err := tr.handleEvent(sseTextEvent("ended", "text-0", "")); err != nil {
+		t.Fatalf("handleEvent(ended text-0): %v", err)
+	}
+
+	// A tool call arrives between the two text blocks. The bridge
+	// must flush block 1 (and emit the tool start) before block 2
+	// ever opens. If the buffer keying collapses both blocks onto
+	// "_", the flush below would surface the wrong text.
+	toolPart := `{"type":"tool","callID":"c1","tool":"bash","state":{"status":"pending","input":{"command":"ls"}}}`
+	raw := `{"type":"message.part.updated","properties":{"part":` + toolPart + `}}`
+	var toolEv SessionEvent
+	if err := json.Unmarshal([]byte(raw), &toolEv); err != nil {
+		t.Fatalf("bad tool part json: %v", err)
+	}
+	if err := tr.handleEvent(toolEv); err != nil {
+		t.Fatalf("handleEvent(tool pending): %v", err)
+	}
+
+	// Block 2 (post-tool conclusion).
+	if err := tr.handleEvent(sseTextEvent("started", "text-1", "")); err != nil {
+		t.Fatalf("handleEvent(started text-1): %v", err)
+	}
+	for _, d := range []string{"Found ", "three files."} {
+		if err := tr.handleEvent(sseTextEvent("delta", "text-1", d)); err != nil {
+			t.Fatalf("handleEvent(delta text-1): %v", err)
+		}
+	}
+	if err := tr.handleEvent(sseTextEvent("ended", "text-1", "")); err != nil {
+		t.Fatalf("handleEvent(ended text-1): %v", err)
+	}
+
+	// Terminal flushes block 2.
+	if err := tr.handleEvent(sseTerminalEvent("session.next.step.ended")); err != nil {
+		t.Fatalf("handleEvent(terminal): %v", err)
+	}
+
+	// Walk the delivered events; we expect two EventAgentText
+	// payloads (block 1 closed at tool boundary, block 2 closed
+	// at terminal) and one EventAgentToolStart between them.
+	got := textTexts(snap())
+	wantText := []string{"Let me check the files.", "Found three files."}
+	if len(got) != len(wantText) {
+		t.Fatalf("reply events = %d (%v), want %d (%v)", len(got), got, len(wantText), wantText)
+	}
+	for i, want := range wantText {
+		if got[i] != want {
+			t.Errorf("reply[%d] = %q, want %q", i, got[i], want)
+		}
+	}
+}
+
+// TestTranslate_ToolBoundaryFlushClosesUnendedBlock is the
+// regression guard for the second half of the buffering fix:
+//
+// Before the fix, flushPendingTextLocked only read from
+// pendingText (the closed-blocks sink). A text block whose .ended
+// never arrived — opencode 1.18 fires .delta without a closing
+// .ended on connection drop, resubscribe mid-part, or single-shot
+// models — would stay parked in textBuf and silently disappear
+// at the tool boundary. The chat client saw the model go silent
+// mid-sentence and jump straight to the tool receipt.
+//
+// After the fix, flushPendingTextLocked calls
+// closeAllTextBlocksLocked FIRST (mirrors pi's pattern), so
+// un-ended blocks surface at the tool boundary just like
+// properly-closed ones.
+func TestTranslate_ToolBoundaryFlushClosesUnendedBlock(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	// Stream a text block, but NEVER send .ended — simulates
+	// the opencode resubscribe / connection-drop path.
+	if err := tr.handleEvent(sseTextEvent("started", "text-orphan", "")); err != nil {
+		t.Fatalf("handleEvent(started): %v", err)
+	}
+	for _, d := range []string{"Half a ", "sentence, then ", "the tool cuts in."} {
+		if err := tr.handleEvent(sseTextEvent("delta", "text-orphan", d)); err != nil {
+			t.Fatalf("handleEvent(delta): %v", err)
+		}
+	}
+
+	// Tool call fires before the text block's .ended would have
+	// arrived. flushPendingTextLocked must drain the orphan block
+	// into pendingText BEFORE the tool start lands on the chat
+	// surface, so the user sees the pre-tool narration.
+	toolPart := `{"type":"tool","callID":"c1","tool":"bash","state":{"status":"pending","input":{"command":"ls"}}}`
+	raw := `{"type":"message.part.updated","properties":{"part":` + toolPart + `}}`
+	var toolEv SessionEvent
+	if err := json.Unmarshal([]byte(raw), &toolEv); err != nil {
+		t.Fatalf("bad tool part json: %v", err)
+	}
+	if err := tr.handleEvent(toolEv); err != nil {
+		t.Fatalf("handleEvent(tool pending): %v", err)
+	}
+
+	events := snap()
+	texts := textTexts(events)
+	want := "Half a sentence, then the tool cuts in."
+	if len(texts) != 1 || texts[0] != want {
+		t.Fatalf("reply events after tool = %v, want exactly [%q]", texts, want)
+	}
+	// The text must precede the tool start so the chat client
+	// renders narration before the receipt.
+	var sawText, sawTool bool
+	for _, ev := range events {
+		if ev.Kind == agent.EventAgentText {
+			sawText = true
+			if sawTool {
+				t.Errorf("reply render appeared AFTER tool start; ordering wrong")
+			}
+		}
+		if ev.Kind == agent.EventAgentToolStart {
+			sawTool = true
+		}
+	}
+	if !sawText || !sawTool {
+		t.Errorf("missing events: text=%v tool=%v", sawText, sawTool)
+	}
+}
+
+// TestTranslate_MessagePartUpdatedTextStripsInlineThink is the
+// regression guard for the handlePart text branch's inline-think
+// hygiene. opencode 1.18 doesn't fire message.part.updated with
+// type=text alongside session.next.text.delta (verified against a
+// live server), but the fallback path must still strip
+// <think>...</think> so a non-streaming / replaying server
+// doesn't leak the model's scratchpad into the reply bubble.
+func TestTranslate_MessagePartUpdatedTextStripsInlineThink(t *testing.T) {
+	tr, snap := newTestTranslator()
+
+	// Mirror the real message.part.updated wire shape: the part
+	// payload lives under properties.part.{type,text}.
+	raw := `{"type":"message.part.updated","properties":{"part":{"type":"text","id":"prt_1","text":"Before <think>secret</think> after"}}}`
+	var ev SessionEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if err := tr.handleEvent(ev); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+
+	var reply, think []string
+	for _, e := range textEvents(snap()) {
+		if stripped, ok := strings.CutPrefix(e.Text, "[思考] "); ok {
+			think = append(think, stripped)
+		} else {
+			reply = append(reply, e.Text)
+		}
+	}
+
+	if len(reply) != 1 || reply[0] != "Before  after" {
+		t.Fatalf("reply = %v, want exactly [\"Before  after\"]", reply)
+	}
+	if len(think) != 1 || think[0] != "secret" {
+		t.Fatalf("think = %v, want exactly [\"secret\"]", think)
+	}
+	for _, r := range reply {
+		if strings.Contains(r, "<think>") || strings.Contains(r, "</think>") {
+			t.Errorf("reply %q still contains think tags", r)
+		}
 	}
 }
 

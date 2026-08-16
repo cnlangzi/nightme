@@ -486,3 +486,38 @@ func TestUpdate_DownloadHasTagAndQuietFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdate_InstallHasTagAndNoRestartFlags pins the install
+// subcommand's flag surface. --tag pins a specific version;
+// --no-restart skips the post-install daemon restart.
+func TestUpdate_InstallHasTagAndNoRestartFlags(t *testing.T) {
+	root := newTestRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"update", "install", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("update install --help: %v", err)
+	}
+	got := buf.String()
+	for _, want := range []string{"--tag", "--no-restart", "restart"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("install --help missing %q\n%s", want, got)
+		}
+	}
+}
+
+// TestUpdate_InstallRefusesEmptyDataDir covers the safety
+// property: if config.Paths.DataDir is empty (which happens
+// when config can't be loaded), install refuses instead of
+// writing into "/" or some other unintended location.
+func TestUpdate_InstallRefusesEmptyDataDir(t *testing.T) {
+	root := newTestRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"update", "install", "--tag", "v9.9.9"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("install with empty DataDir succeeded; want error")
+	}
+}

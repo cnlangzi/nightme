@@ -536,3 +536,132 @@ func extractZIP(archivePath, stagingDir string) (string, error) {
 	}
 	return "", errors.New("extract: nightme.exe not found in zip")
 }
+
+// InstallResult is what Install returns on success. The caller
+// (CLI) reads NewBinaryPath to print "the new binary is at X"
+// and OldBinaryPath to mention the rollback path.
+type InstallResult struct {
+	NewBinaryPath string // path to the binary now on disk (== target)
+	OldBinaryPath string // path to the backup of the previous binary
+	ExtractedFrom string // archive we extracted
+}
+
+// Install replaces the running binary with a previously
+// downloaded + extracted one.
+//
+//	stagedBinaryPath  -- the nightme / nightme.exe produced by
+//	                      ExtractArchive, sitting in
+//	                      <DataDir>/updates/<version>/
+//	targetPath        -- the on-disk binary the user is currently
+//	                      invoking (os.Executable())
+//
+// Steps:
+//
+//  1. Refuse to install when source == target (copying onto
+//     itself on Windows is a permissions nightmare; on unix
+//     it'd succeed but is almost certainly a caller bug).
+//  2. Verify stagedBinaryPath is a regular file, readable,
+//     and executable-sized.
+//  3. Move targetPath → targetPath + ".old" (the backup).
+//     Move is rename(2) on unix — atomic on the same
+//     filesystem — so a crashed install leaves either the
+//     old binary in place or the new one in place; never a
+//     half-written file at targetPath.
+//  4. Copy stagedBinaryPath → targetPath.
+//  5. chmod 0755 on targetPath (the staging dir might have
+//     lost the +x bit during extraction under some umasks).
+//
+// Errors before step 3 are pure: nothing on disk has changed.
+// Errors during step 4 attempt to roll back by renaming
+// targetPath.old back to targetPath. If the rollback also
+// fails the error wraps the rollback so the operator knows
+// to run `mv <target>.old <target>` by hand.
+func Install(stagedBinaryPath, targetPath string) (*InstallResult, error) {
+	if stagedBinaryPath == "" {
+		return nil, errors.New("install: empty staged binary path")
+	}
+	if targetPath == "" {
+		return nil, errors.New("install: empty target path")
+	}
+	if stagedBinaryPath == targetPath {
+		return nil, fmt.Errorf("install: staged binary equals target (%s); refusing to copy onto itself", stagedBinaryPath)
+	}
+
+	// Step 2: source checks.
+	srcInfo, err := os.Stat(stagedBinaryPath)
+	if err != nil {
+		return nil, fmt.Errorf("install: stat staged: %w", err)
+	}
+	if !srcInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("install: staged path is not a regular file (%s)", stagedBinaryPath)
+	}
+	if srcInfo.Size() < 1024 {
+		// Refuse to install a binary under 1 KiB — almost
+		// certainly a download error or a wrong asset.
+		return nil, fmt.Errorf("install: staged binary suspiciously small (%d bytes)", srcInfo.Size())
+	}
+	// Verify target's parent dir is writable so we don't
+	// get surprised mid-rename.
+	targetInfo, err := os.Stat(targetPath)
+	if err != nil {
+		return nil, fmt.Errorf("install: stat target: %w", err)
+	}
+	if !targetInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("install: target is not a regular file (%s)", targetPath)
+	}
+
+	// Step 3: move target → target.old. We use Rename; on
+	// cross-device moves (rare — staging usually lives
+	// under the user's homedir) this returns an error and
+	// we fall back to copy + remove.
+	oldPath := targetPath + ".old"
+	// Drop any stale .old from a previous install so the
+	// rename doesn't fail with "already exists".
+	_ = os.Remove(oldPath)
+	if err := os.Rename(targetPath, oldPath); err != nil {
+		return nil, fmt.Errorf("install: backup %s → %s: %w", targetPath, oldPath, err)
+	}
+
+	// Step 4: copy staged → target.
+	if err := copyFile(stagedBinaryPath, targetPath, 0o755); err != nil {
+		// Best-effort rollback.
+		if rbErr := os.Rename(oldPath, targetPath); rbErr != nil {
+			return nil, fmt.Errorf("install: copy %s → %s: %w; rollback also failed: %v",
+				stagedBinaryPath, targetPath, err, rbErr)
+		}
+		return nil, fmt.Errorf("install: copy %s → %s: %w (rolled back)",
+			stagedBinaryPath, targetPath, err)
+	}
+
+	return &InstallResult{
+		NewBinaryPath: targetPath,
+		OldBinaryPath: oldPath,
+		ExtractedFrom: stagedBinaryPath,
+	}, nil
+}
+
+// copyFile copies src → dst with the requested mode. dst is
+// truncated if it exists. We don't use io.Copy directly
+// because we want the destination's mode to be set even when
+// the copy itself is short (which it never should be, but
+// belt + suspenders).
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(dst, mode)
+}

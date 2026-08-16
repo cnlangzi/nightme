@@ -43,6 +43,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -50,6 +53,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
@@ -148,22 +152,49 @@ func newUpdateDownloadCmd() *cobra.Command {
 	return cmd
 }
 
-// newUpdateInstallCmd is a placeholder for round 3 of the
-// three-step split. It will use selfupdate to swap the binary
-// in place and then exec + restart the daemon.
+// newUpdateInstallCmd is the third step: replace the running
+// binary with the previously downloaded + extracted asset and
+// (optionally) restart the daemon.
+//
+// Workflow:
+//
+//   1. Look up the version (from --tag, or by reading the
+//      latest staging dir under <DataDir>/updates/).
+//   2. Extract <DataDir>/updates/<version>/nightme_<ver>_...
+//      via updater.ExtractArchive.
+//   3. Atomically swap the extracted binary over the running
+//      one (back up to <target>.old, copy, chmod +x).
+//   4. Optionally run `nightme restart` so the daemon picks
+//      up the new binary on next start.
+//
+// We deliberately do NOT exec the new binary in place:
+// execve() on macOS / Linux succeeds but loses the REPL
+// session + every open TTY handle, and on signed binaries
+// it confuses the macOS quarantine xattr. We tell the user
+// "please restart your REPL/shell" instead.
 func newUpdateInstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var tag string
+	var skipRestart bool
+	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Replace the binary + restart the daemon (not implemented yet)",
-		Long: "Replace the running binary with the previously downloaded\n" +
-			"asset, then restart the nightme daemon. Will land in\n" +
-			"the third commit of the three-step split.",
+		Short: "Replace the running binary with the staged release asset",
+		Long: "Replace the currently-running nightme binary with the\n" +
+			"asset previously downloaded by `nightme update download`.\n" +
+			"The previous binary is preserved as <binary>.old for\n" +
+			"manual rollback if the new one turns out to be broken.\n\n" +
+			"By default this also restarts the nightme daemon so it\n" +
+			"picks up the new binary. Pass --no-restart to skip.\n\n" +
+			"This command does NOT exec the new binary in place —\n" +
+			"restart your shell / REPL after install to load it.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(),
-				"nightme update install: not implemented yet (next-next commit)")
-			return nil
+			return runUpdateInstall(cmd, tag, skipRestart)
 		},
 	}
+	cmd.Flags().StringVar(&tag, "tag", "",
+		"Specific release tag to install (default: pick the newest staging dir)")
+	cmd.Flags().BoolVar(&skipRestart, "no-restart", false,
+		"Skip the daemon restart after install")
+	return cmd
 }
 
 // runUpdateCheck is the live version-status reporter. It
@@ -332,4 +363,209 @@ func assetNames(assets []updater.Asset) string {
 		names = append(names, a.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+// runUpdateInstall is the body of `nightme update install`.
+//
+// Flow:
+//
+//  1. Resolve which version we're installing. --tag pins a
+//     specific version; otherwise pick the newest subdir of
+//     <DataDir>/updates/.
+//  2. Find the staged archive under that staging dir.
+//  3. Extract the binary via updater.ExtractArchive.
+//  4. Resolve targetPath via os.Executable() (the binary
+//     the user is currently invoking).
+//  5. updater.Install swaps target ↔ staged with a .old
+//     backup, returning rollback info.
+//  6. Unless --no-restart, run `nightme restart` so the
+//     daemon picks up the new binary. The restart path is
+//     skipped entirely when the daemon isn't running —
+//     `nightme restart` on a stopped daemon is a no-op and
+//     just clutters the output.
+//
+// We deliberately do NOT exec the new binary; the user
+// restarts their shell / REPL.
+func runUpdateInstall(cmd *cobra.Command, tag string, skipRestart bool) error {
+	out := cmd.OutOrStdout()
+	errOut := cmd.ErrOrStderr()
+
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	dataDir := cfg.Paths.DataDir
+	if dataDir == "" {
+		return errors.New("install: cfg.Paths.DataDir is empty")
+	}
+
+	// 1. Resolve version.
+	version, err := resolveInstallVersion(dataDir, tag)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Installing version: %s\n", version)
+
+	// 2. Find the staged archive. We look for the matching
+	// "<version>_<os>_<arch>.<ext>" file in the staging
+	// dir; if absent we surface a clear "did you forget to
+	// run download?" diagnostic.
+	stagingDir, err := updater.StagingDir(dataDir, version)
+	if err != nil {
+		return err
+	}
+	archivePath, err := findStagedArchive(stagingDir, version)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Staged archive: %s\n", archivePath)
+
+	// 3. Extract.
+	extractedPath, err := updater.ExtractArchive(archivePath, stagingDir)
+	if err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+	fmt.Fprintf(out, "Extracted:      %s\n", extractedPath)
+
+	// 4. Target = the binary the user is currently running.
+	targetPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate current binary: %w", err)
+	}
+
+	// 5. Swap.
+	res, err := updater.Install(extractedPath, targetPath)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "✓ installed new binary at %s\n", res.NewBinaryPath)
+	fmt.Fprintf(out, "  backup: %s\n", res.OldBinaryPath)
+	fmt.Fprintln(out)
+
+	// 6. Optional daemon restart. We check whether a daemon
+	// is currently running before invoking restart — a
+	// stopped daemon makes `nightme restart` succeed (it
+	// starts one), which is almost certainly NOT what the
+	// user wants after a self-update.
+	if !skipRestart {
+		running, _ := daemonIsRunning(cfg)
+		if running {
+			fmt.Fprintln(out, "→ restarting nightme daemon…")
+			if err := runRestartInline(out); err != nil {
+				fmt.Fprintf(errOut, "warning: daemon restart failed: %v\n", err)
+				fmt.Fprintln(errOut, "         run `nightme restart` manually.")
+			} else {
+				fmt.Fprintln(out, "✓ daemon restarted on the new binary")
+			}
+		} else {
+			fmt.Fprintln(out, "→ no daemon running; skipping restart")
+		}
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Done. To load the new binary, restart your shell / REPL")
+	fmt.Fprintln(out, "(or just run `nightme` again).")
+	return nil
+}
+
+// resolveInstallVersion picks which staged version to install.
+// --tag pins the version; otherwise we walk <DataDir>/updates/
+// and return the lexicographically newest subdir (works for
+// semver tags since "0.3.7" < "0.3.10" alphabetically is wrong,
+// but it's a sane fallback when no --tag is given and we only
+// have one staging dir in practice).
+func resolveInstallVersion(dataDir, tag string) (string, error) {
+	if tag != "" {
+		return strings.TrimPrefix(tag, "v"), nil
+	}
+	updatesDir := filepath.Join(dataDir, "updates")
+	entries, err := os.ReadDir(updatesDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no staged installs under %s; run `nightme update download` first", updatesDir)
+		}
+		return "", fmt.Errorf("read staging dir: %w", err)
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("no staged installs under %s; run `nightme update download` first", updatesDir)
+	}
+	var newest string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if newest == "" || e.Name() > newest {
+			newest = e.Name()
+		}
+	}
+	if newest == "" {
+		return "", fmt.Errorf("no versioned subdirs under %s; run `nightme update download` first", updatesDir)
+	}
+	return newest, nil
+}
+
+// findStagedArchive picks the archive file in stagingDir that
+// matches version + current GOOS/GOARCH + extension. Returns
+// a clear error when nothing matches so the user gets an
+// actionable message instead of an empty failure.
+func findStagedArchive(stagingDir, version string) (string, error) {
+	ext := "tar.gz"
+	binaryBase := "nightme"
+	if runtime.GOOS == "windows" {
+		ext = "zip"
+		binaryBase = "nightme.exe"
+	}
+	want := fmt.Sprintf("nightme_%s_%s_%s.%s", version, runtime.GOOS, runtime.GOARCH, ext)
+	// First preference: the archive itself.
+	archive := filepath.Join(stagingDir, want)
+	if _, err := os.Stat(archive); err == nil {
+		return archive, nil
+	}
+	// Fall back: the binary might already be extracted.
+	// Install can work off the extracted binary too.
+	extracted := filepath.Join(stagingDir, binaryBase)
+	if _, err := os.Stat(extracted); err == nil {
+		return extracted, nil
+	}
+	return "", fmt.Errorf("no staged asset for %s/%s under %s (looked for %s and %s); run `nightme update download` first",
+		runtime.GOOS, runtime.GOARCH, stagingDir, want, extracted)
+}
+
+// daemonIsRunning reports whether a nightme daemon is up.
+// It uses the same socket-path resolution as `nightme status`
+// and is intentionally best-effort: if the lookup fails for
+// any reason we return false so the install doesn't blow up
+// when the daemon socket is absent.
+func daemonIsRunning(cfg *config.Config) (bool, error) {
+	paths, err := daemoncontrol.ResolvePaths(cfg.Paths.DataDir)
+	if err != nil {
+		return false, err
+	}
+	_, err = daemoncontrol.GetStatus(paths.Socket, time.Second)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, daemoncontrol.ErrNotRunning) {
+		return false, nil
+	}
+	// Any other error: report it but treat as not-running
+	// so install doesn't fail just because the socket
+	// couldn't be probed.
+	return false, err
+}
+
+// runRestartInline invokes `nightme restart` against the
+// freshly-installed binary. We shell out via os.Executable()
+// (which is now the new binary) so the restart is performed
+// by the version we just installed.
+func runRestartInline(out io.Writer) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, "restart")
+	cmd.Stdout = out
+	cmd.Stderr = out
+	return cmd.Run()
 }

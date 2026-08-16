@@ -157,8 +157,19 @@ func TestTodoWriteEndToEnd_ContentFallback(t *testing.T) {
 // different shape has a clear next step: change the JSON tags
 // on todoItem, then this test reconfigures to match the real
 // wire shape.
+//
+// F-DSH-TODO-FIX-LOG: this test also verifies that
+// wireState.unknownCount is bumped on the drift path — that's
+// the counter `nightme debug dsh dump-wire` reads to surface
+// "bridge isn't picking up dsh's todos" to ops. If the bump
+// regresses, the warn log + counter-based ops triage stops
+// working.
 func TestTodoWriteEndToEnd_FieldMismatch(t *testing.T) {
 	c := makeMuxCollector(t)
+
+	// Snapshot unknownCount before dispatch so we can verify
+	// the bump is exactly the right size (1 for the mismatch).
+	beforeUnknown, _ := c.d.wireState.DumpWireStats()
 
 	// Hypothetical wire that uses {task_id, subject, task_status}
 	// instead of the inferred {id, content, status}. Items ShouldBeSkipped.
@@ -194,10 +205,15 @@ func TestTodoWriteEndToEnd_FieldMismatch(t *testing.T) {
 			"non-zero, protocol.go's todoItem JSON tags need updating", len(ev.TaskList.Items))
 	}
 
-	// The empty-Items snapshot is exactly the "clear checklist" signal
-	// outbound.go documents. If a future bridge wants to suppress
-	// this for "wire I don't understand", add a guard here.
-	// Today: emit-and-clear is the documented behavior.
+	// F-DSH-TODO-FIX-LOG: verify wireState.unknownCount was bumped.
+	// This is the counter `nightme debug dsh dump-wire` reads to
+	// tell ops "the bridge is silently dropping your todos".
+	afterUnknown, _ := c.d.wireState.DumpWireStats()
+	if afterUnknown != beforeUnknown+1 {
+		t.Errorf("unknownCount = %d, want %d (ops-triage counter regression: "+
+			"drift detection will be invisible to nightme debug dsh dump-wire)",
+			afterUnknown, beforeUnknown+1)
+	}
 }
 
 // TestTodoWriteEndToEnd_TaskListView — pin the View path

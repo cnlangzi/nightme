@@ -262,9 +262,29 @@ func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.Agent
 		// wire shape" counters. Caller MUST hold s.mu (we are
 		// inside applyEventLocked).
 		s.unknownCount++
+		// F-DSH-TODO-FIX-LOG: include the raw wire bytes (truncated)
+		// so ops can immediately see what dsh actually sent and
+		// match it against protocol.go's inferred json tags.
+		// Without this, the symptom is "todo list not showing"
+		// but the cause is invisible — operators have to spin up
+		// a tcpdump or attach a debugger to dsh to figure out
+		// which field name drifted. With the raw bytes in the
+		// log, the diff against the struct tags is one diff
+		// command away.
+		//
+		// Cap the dump at 1 KiB to bound log volume (a single
+		// todo/write event with hundreds of items is rare; if it
+		// happens the diff'd field names are still visible in
+		// the first 1 KiB).
+		rawDump := string(env.Data)
+		if len(rawDump) > 1024 {
+			rawDump = rawDump[:1024] + "...[truncated]"
+		}
 		warnLogger.Warn("dsh: todo/write items dropped (wire field-name drift?)",
 			"skipped", skipped,
 			"kept", len(items),
+			"wire_data_bytes", len(env.Data),
+			"wire_data_preview", rawDump,
 			"hint", "check internal/bridge/dsh/protocol.go todoItem json tags vs dsh wire",
 			"unknown_total", s.unknownCount)
 	}
@@ -378,9 +398,19 @@ func (s *wireState) applyTodoProjectionLocked(value json.RawMessage) []agent.Age
 		// prevents. Caller MUST hold s.mu (we are inside
 		// applyProjectionLocked).
 		s.unknownCount++
+		// F-DSH-TODO-FIX-LOG: include the raw projection value
+		// bytes (truncated) so ops can diff against protocol.go's
+		// inferred json tags. Mirrors applyTodoWriteLocked's
+		// enhancement.
+		rawDump := string(value)
+		if len(rawDump) > 1024 {
+			rawDump = rawDump[:1024] + "...[truncated]"
+		}
 		warnLogger.Warn("dsh: session/projection todo items dropped (wire field-name drift?)",
 			"skipped", skipped,
 			"kept", len(items),
+			"wire_data_bytes", len(value),
+			"wire_data_preview", rawDump,
 			"hint", "check internal/bridge/dsh/protocol.go todoItem json tags vs dsh wire",
 			"unknown_total", s.unknownCount)
 	}

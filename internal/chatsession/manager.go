@@ -74,6 +74,27 @@ type Manager struct {
 	// at message time and calls cs.GitStatus(ctx), which
 	// rebuilds the snapshot on every call — no per-chat cache
 	// layer.)
+
+	// hintLocks holds a *sync.Mutex per chat, lazily created on
+	// first hint attempt for that chat. maybeEmitWatcherHint
+	// takes the per-chat lock to serialise the "check → send →
+	// mark" sequence so two concurrent non-mention drops in the
+	// SAME chat can't race past the tombstone check and produce
+	// duplicate hints. Per-chat (not Manager-wide) so a slow
+	// Emitter.Send or csFile.Upsert for one chat doesn't block
+	// hint attempts for every other chat — under load (Feishu
+	// outage, slow disk) this matters because the drop branch is
+	// on the hot inbound dispatch path.
+	//
+	// Memory: each entry is one *sync.Mutex + sync.Map overhead
+	// (~80 bytes). Even with 10k chats this is <1MB, and the
+	// lock is acquired at most once per chat per process lifetime
+	// (subsequent attempts short-circuit on the tombstone
+	// without locking). We do NOT clean up entries on tombstone
+	// set — freeing the *sync.Mutex while another goroutine is
+	// blocked on it would race. The unbounded growth is the
+	// lesser evil.
+	hintLocks sync.Map // map[chatID]*sync.Mutex
 }
 
 // NewManager creates an empty Manager. Both spawner and persistence
@@ -370,6 +391,20 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 	// work, so filtered messages don't allocate state or wake
 	// pumps. Slash commands never reach this branch.
 	if !m.AcceptInbound(msg.ChatID, msg.HasMention) {
+		// F-watch first-drop hint: on the very first non-mention
+		// group message we silently drop in this chat, tell the
+		// user `/watch on` exists. AcceptInbound's drop arm only
+		// returns false when cs already exists (its
+		// cs==nil short-circuit returns true), so the Get here
+		// always returns a non-nil ChatSession in production.
+		// The hint tombstone now lives on the ChatSession (see
+		// the field comment on chatsession.watcherHintEmitted)
+		// — every persist path that goes through entryLocked()
+		// preserves it, so SetWatchMode / SetSelectedCwd /
+		// ClearSelectedCwd cannot clobber it back to false.
+		// See maybeEmitWatcherHint for the full contract.
+		cs := m.Get(msg.ChatID)
+		m.maybeEmitWatcherHint(ctx, msg, cs)
 		slog.Default().Info("chatsession: drop non-mention group message (WatchMode != All)",
 			"chat_id", msg.ChatID, "message_id", msg.MessageID)
 		return nil
@@ -496,6 +531,139 @@ func (m *Manager) sendError(ctx context.Context, chatID, text string) error {
 	})
 }
 
+// hintLockFor returns the per-chat *sync.Mutex for hint
+// serialization, creating it on first use. See hintLocks field
+// comment for the rationale (per-chat, not Manager-wide, so a
+// slow Send in chat A doesn't block chat B's hint attempts).
+func (m *Manager) hintLockFor(chatID string) *sync.Mutex {
+	if v, ok := m.hintLocks.Load(chatID); ok {
+		return v.(*sync.Mutex)
+	}
+	fresh := &sync.Mutex{}
+	actual, _ := m.hintLocks.LoadOrStore(chatID, fresh)
+	return actual.(*sync.Mutex)
+}
+
+// maybeEmitWatcherHint is the F-watch first-drop UX. Fires from
+// the drop branch of HandleInbound — i.e. exactly when WatchMode
+// is WatchModeMention AND msg.HasMention is false (the channel
+// adapter stamps HasMention=true on every DM, so DM chats never
+// reach this path; slash commands never reach HandleInbound at
+// all). On the first qualifying drop for a given chat, sends a
+// one-line `/watch on` hint to the user via the wired Emitter
+// and stamps the chat's WatcherHintEmitted tombstone so the
+// hint never re-fires.
+//
+// AcceptInbound's drop arm only returns false when cs already
+// exists (its cs==nil short-circuit returns true), so the
+// caller-supplied cs is non-nil in production. cs may still be
+// nil if AcceptInbound's logic changes in the future, OR under
+// defensive direct invocation from tests — in that case we
+// GetOrCreate so the hint and its tombstone can be tracked on
+// a stable ChatSession (writing to ChatSessionFile directly
+// races with every other persist path that goes through
+// entryLocked()). This costs one ChatSession allocation per
+// brand-new group chat — the only "drop early" exception — and
+// subsequent drops in the same chat use the Get fast path.
+//
+// Concurrency: per-chat *sync.Mutex (hintLockFor) serialises
+// the "check → send → mark" sequence so two concurrent
+// non-mention drops in the SAME chat can't race past the
+// tombstone check and produce duplicate hints. The lock is
+// per-chat (not Manager-wide) so a slow Emitter.Send or
+// csFile.Upsert for one chat does NOT block hint attempts in
+// any other chat — see hintLocks field comment.
+//
+// Retry semantics: the tombstone is stamped ONLY if Emitter.Send
+// returned nil. A transient Send failure (Feishu 5xx, network
+// timeout) logs a warning and leaves the tombstone false, so
+// the very next non-mention drop will retry. This is the
+// critical F-watch correctness guarantee: under no circumstance
+// does a Send failure permanently deny the user the hint. The
+// trade-off is that a persistently broken channel can retry
+// forever — acceptable because every retry also logs at Warn
+// level so the operator sees the broken channel.
+//
+// Concurrency: hintMu serialises the check-and-set so two
+// concurrent drop-branch messages in the same chat can't both
+// pass the in-memory tombstone check and produce duplicate
+// hints. hintMu is released before returning; it does NOT
+// contend with the hot dispatch path.
+//
+// Best-effort: any failure (nil Emitter, persist error) is
+// logged at Warn and swallowed. The drop decision is unaffected
+// — the user simply doesn't get a hint this once.
+func (m *Manager) maybeEmitWatcherHint(ctx context.Context, msg *messages.InboundMessage, cs *ChatSession) {
+	if cs == nil {
+		// Defensive: should not happen in production (see
+		// doc comment), but GetOrCreate so we have a stable
+		// home for the tombstone.
+		newCS, err := m.GetOrCreate(msg.ChatID, m.primaryAgent)
+		if err != nil || newCS == nil {
+			slog.Default().Warn("chatsession: watcher hint: GetOrCreate failed",
+				"chat_id", msg.ChatID, "err", err)
+			return
+		}
+		cs = newCS
+	}
+
+	// Per-chat lock (NOT Manager-wide) so a slow Send for chat A
+	// doesn't block hint attempts for chat B. See hintLocks
+	// field comment.
+	mu := m.hintLockFor(msg.ChatID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-check under the lock (a concurrent caller could have
+	// just stamped the flag while we were waiting on the
+	// per-chat mutex).
+	if cs.WatcherHintEmitted() {
+		return
+	}
+
+	// Send the hint via the wired Emitter (same pattern as
+	// sendError). OutReply renders as a main-chat message in
+	// the Feishu adapter; we deliberately do NOT ReplyTo the
+	// dropped message — the dropped body is irrelevant to the
+	// hint, and a thread reply would hide the hint from the
+	// main chat where users look first.
+	//
+	// Send-failure contract: a transient Emitter.Send error
+	// (Feishu 5xx, network timeout) leaves the tombstone FALSE
+	// so the next non-mention drop retries. Stamping the
+	// tombstone on Send failure would permanently deny the user
+	// the hint — the entire point of F-watch is to surface it,
+	// not to record an attempt that nobody saw.
+	em := m.Emitter()
+	if em == nil {
+		slog.Default().Warn("chatsession: watcher hint with no Emitter wired; will retry on next drop",
+			"chat_id", msg.ChatID)
+		return
+	}
+	hint := "💡 I'm in /watch mention mode and only respond when @-mentioned. " +
+		"Run /watch on if you'd like me to respond to every message in this chat."
+	if err := em.Send(ctx, messages.OutboundMessage{
+		ChatID: msg.ChatID,
+		Kind:   messages.OutReply,
+		Text:   hint,
+	}); err != nil {
+		slog.Default().Warn("chatsession: watcher hint Send failed; will retry on next drop",
+			"chat_id", msg.ChatID, "err", err)
+		return
+	}
+
+	// Send succeeded — stamp + persist so future drops
+	// short-circuit. MarkWatcherHintEmitted goes through
+	// entryLocked() so the flag is durable alongside every
+	// other ChatSession field; subsequent SetWatchMode /
+	// SetThinkMode / SetToolsMode / SetSelectedCwd etc. preserve
+	// it instead of clobbering back to false.
+	if err := cs.MarkWatcherHintEmitted(); err != nil {
+		slog.Default().Warn("chatsession: mark watcher hint emitted failed",
+			"chat_id", msg.ChatID, "err", err)
+	}
+}
+
 // primaryAgent is the agent name GetOrCreate uses for new
 // ChatSessions. Set by the runtime via WithPrimaryAgent at
 // construction; defaults to "" (caller's responsibility).
@@ -588,6 +756,7 @@ func (m *Manager) RestoreFromRegistry() error {
 		cs.watchMode = WatchMode(entry.WatchMode) // 0 == WatchModeMention (default, safe)
 		cs.thinkMode = ThinkMode(entry.ThinkMode) // 0 == ThinkModeShow (default; preserve F-thread-route behavior)
 		cs.toolsMode = ToolsMode(entry.ToolsMode) // 0 == ToolsModeHide (default; quiet by default)
+		cs.watcherHintEmitted = entry.WatcherHintEmitted
 		cs.lastInteractionAt = entry.LastInteractionAt
 		// commit fix-6: clear selectedAS on restore. The persisted
 		// selectedAgentSessionId points at an AgentSession whose

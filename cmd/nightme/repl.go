@@ -101,6 +101,16 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 	out := rl.Stdout()
 	fmt.Fprintf(out, replBanner, bannerWithVersion())
 
+	// Version-check prompt: once per REPL startup. Best-effort;
+	// any failure (network, missing cache, malformed input)
+	// falls through silently so the user always ends up at the
+	// interactive prompt.
+	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Out:    out,
+		Reader: rl.Readline,
+		Logger: logger,
+	})
+
 	for {
 		line, err := rl.Readline()
 		switch {
@@ -172,6 +182,17 @@ func runREPLWith(root *cobra.Command, logger *slog.Logger, in io.Reader, out io.
 	}
 
 	fmt.Fprintf(out, replBanner, bannerWithVersion())
+
+	// runREPLWith is the test-driven path; passing nil Reader
+	// makes the prompt fall through to the "stdin unavailable"
+	// branch, which is what the existing TestREPL_* suite
+	// expects (no version-check chatter in the transcript).
+	// The dedicated TestREPL_*VersionPrompt exercises the
+	// real prompt path through the dedicated helper.
+	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Out:    out,
+		Logger: logger,
+	})
 
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)

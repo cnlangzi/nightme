@@ -60,6 +60,11 @@ import (
 //	ToolsMode            — F-38 per-chat tool-event visibility
 //	                       toggle. Stored as int. See the field-
 //	                       level comment + chatsession.ToolsMode.
+//	WatcherHintEmitted   — F-watch hint-emitted tombstone. True
+//	                       once the one-time `/watch on` hint has
+//	                       been sent for this chat. See the field-
+//	                       level comment + chatsession.Manager.
+//	                       maybeEmitWatcherHint.
 type ChatSessionEntry struct {
 	ID                     string    `json:"id"`
 	ChatID                 string    `json:"chatId"`
@@ -89,6 +94,19 @@ type ChatSessionEntry struct {
 	WatchMode int `json:"watchMode,omitempty"`
 	ThinkMode int `json:"thinkMode,omitempty"`
 	ToolsMode int `json:"toolsMode,omitempty"`
+
+	// WatcherHintEmitted records whether the one-time `/watch on`
+	// hint has already been sent to this chat. Defaults to false
+	// (hint not yet sent). Set to true the first time the drop
+	// branch in chatsession.Manager.HandleInbound fires a hint, so
+	// the user is never spammed across subsequent drops or daemon
+	// restarts. Persisted on the ChatSessionEntry so the flag
+	// survives in-memory evictions and is independent of whether a
+	// full ChatSession has been allocated for this chat yet (the
+	// hint can fire on the very first non-mention group message,
+	// before any @-mention has caused GetOrCreate to allocate
+	// state).
+	WatcherHintEmitted bool `json:"watcherHintEmitted,omitempty"`
 }
 
 // UnmarshalJSON reads a ChatSessionEntry, transparently migrating

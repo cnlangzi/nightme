@@ -275,9 +275,13 @@ type OutboundMessage struct {
 
 	// Heartbeat (F-63) is the per-turn progress signal attached to
 	// OutHeartbeat. Channel renderers use it to draw a heartbeat
-	// header (e.g. "🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS") at the
-	// top of the rolling-log receipt card so the user sees the
-	// agent is still making progress during long turns.
+	// header at the top of the rolling-log receipt card so the
+	// user sees the agent is still making progress during long
+	// turns. The header is two-part and mutually exclusive: with
+	// activity (ThinkCount>0 || ToolCount>0) the renderer emits
+	// "💭 N · 🔧 M · ⏱ HH:MM:SS"; without activity the bare
+	// "🤖 Working" placeholder is rendered instead. See
+	// docs/feat/F-63-heartbeat.md §3.6 for the contract.
 	//
 	// ThinkCount and ToolCount are monotonic counters accumulated
 	// by the runtime's HeartbeatTracker (one entry per

@@ -406,7 +406,7 @@ func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (b
 
 	createCtx, createCancel := context.WithTimeout(ctx, handshakeTimeout)
 	createResp, err := d.cli.RPC.Post(createCtx, "session.create", map[string]any{
-		"workspaceId": ws.ID,
+		"workspaceId": ws.WorkspaceID,
 		"title":      filepath.Base(cfg.Workspace),
 	})
 	createCancel()
@@ -424,7 +424,7 @@ func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (b
 	d.sessionID = scVal.SessionID
 	slogDefault().Info("dsh: session created",
 		"session_id", d.sessionID,
-		"workspace_id", ws.ID,
+		"workspace_id", ws.WorkspaceID,
 		"cwd", cfg.Workspace)
 	return false, nil
 }

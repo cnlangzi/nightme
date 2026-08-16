@@ -337,12 +337,21 @@ func (c *RPCClient) WorkspaceList(ctx context.Context) ([]WorkspaceSummary, erro
 	return value.Items, nil
 }
 
-// WorkspaceSummary is the on-wire shape of one workspace.list row.
+// WorkspaceSummary is the on-wire shape of one workspace.list row
+// (and the per-workspace sub-object of workspace.create responses).
+// The dsh host-apiproxy dsh-host-apiproxy/lib/types/api/workspace.schema
+// emits `workspaceId` (not `id`) — see workspaceView() in that file.
+// The earlier "id" tag here made handshakeSession blow up on
+// /reset because the empty ID propagated up as "empty workspaceId
+// in response" and the bridge refused start.
 type WorkspaceSummary struct {
-	ID         string `json:"id"`
-	Path       string `json:"path"`
-	Title      string `json:"title"`
-	ArchivedAt *int64 `json:"archivedAt,omitempty"`
+	WorkspaceID string   `json:"workspaceId"`
+	Path        string   `json:"path"`
+	Title       string   `json:"title"`
+	SessionIDs  []string `json:"sessionIds,omitempty"`
+	CreatedAt   *int64   `json:"createdAt,omitempty"`
+	UpdatedAt   *int64   `json:"updatedAt,omitempty"`
+	ArchivedAt  *int64   `json:"archivedAt,omitempty"`
 }
 
 // WorkspaceCreate resolves or creates one workspace for `path`. The
@@ -363,7 +372,7 @@ func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (Workspace
 	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
 		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create decode: %w", err)
 	}
-	if value.Workspace.ID == "" {
+	if value.Workspace.WorkspaceID == "" {
 		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create: empty workspaceId in response")
 	}
 	return value.Workspace, nil

@@ -44,10 +44,13 @@ func (d *recordingSendBlocksDriver) SendBlocks(_ context.Context, b []agent.Cont
 	d.inner.mu.Unlock()
 	return d.inner.fakeAgentSession.SendBlocks(context.Background(), b)
 }
-func (d *recordingSendBlocksDriver) SendPermission(string) error { return nil }
-func (d *recordingSendBlocksDriver) Reset(context.Context) error  { return d.inner.New(context.Background()) }
-func (d *recordingSendBlocksDriver) Close() error                 { return d.inner.Close() }
-func (d *recordingSendBlocksDriver) Stop(context.Context) error  { return nil }
+func (d *recordingSendBlocksDriver) SendPermission(string) error  { return nil }
+func (d *recordingSendBlocksDriver) Reset(context.Context) error   { return d.inner.New(context.Background()) }
+func (d *recordingSendBlocksDriver) Close() error                  { return d.inner.Close() }
+func (d *recordingSendBlocksDriver) Stop(context.Context) error   { return nil }
+func (d *recordingSendBlocksDriver) Keepalive(context.Context, func(context.Context) error) error {
+	return nil
+}
 
 func (r *recordingSendBlocksAS) buildLive() *agent.Agent {
 	r.inner = &recordingSendBlocksDriver{inner: r}
@@ -86,10 +89,13 @@ type failingSendBlocksDriver struct{ inner *failingSendBlocksAS }
 func (d *failingSendBlocksDriver) SendBlocks(_ context.Context, _ []agent.ContentBlock) error {
 	return errResubmit
 }
-func (d *failingSendBlocksDriver) SendPermission(string) error { return nil }
-func (d *failingSendBlocksDriver) Reset(context.Context) error  { return nil }
-func (d *failingSendBlocksDriver) Close() error                 { return nil }
-func (d *failingSendBlocksDriver) Stop(context.Context) error  { return nil }
+func (d *failingSendBlocksDriver) SendPermission(string) error  { return nil }
+func (d *failingSendBlocksDriver) Reset(context.Context) error   { return nil }
+func (d *failingSendBlocksDriver) Close() error                  { return nil }
+func (d *failingSendBlocksDriver) Stop(context.Context) error   { return nil }
+func (d *failingSendBlocksDriver) Keepalive(context.Context, func(context.Context) error) error {
+	return nil
+}
 
 var errResubmit = &resubmitError{}
 

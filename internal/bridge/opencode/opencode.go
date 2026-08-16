@@ -1,5 +1,5 @@
 
-// Package opencode_acp is the nightme bridge for the opencode CLI.
+// Package opencode is the nightme bridge for the opencode CLI.
 //
 // Unlike the other per-CLI bridges (claudecode / codex / pi), this
 // one intentionally ships TWO spawn paths and lets the caller pick:
@@ -10,7 +10,7 @@
 //     The actual JSON-RPC 2.0 / PTY / session lifecycle work lives in
 //     internal/bridge/acp; this package only supplies the
 //     bridge-specific sessionUpdate translator
-//     (internal/bridge/opencode_acp/update.go).
+//     (internal/bridge/opencode/update.go).
 //
 //   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
 //     `opencode run --format json <prompt>`. Mirrors
@@ -39,10 +39,10 @@
 //
 // The retired `internal/bridge/opencode/` package was deleted in
 // Phase 2 of the migration (commit 45e7b21). References to
-// `opencode.NewStarter` must use `opencode_acp.NewStarter`
+// `opencode.NewStarter` must use `opencode.NewStarter`
 // instead. See docs/feat/F-OPENCODE-ACP-MIGRATION.md §6 for the
 // phased removal plan (all three phases are now complete).
-package opencode_acp
+package opencode
 
 import (
 	"log/slog"

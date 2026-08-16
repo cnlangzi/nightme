@@ -42,7 +42,7 @@
 // itself if absent) and is parameterized by env vars rather
 // than argv so the same binary covers all scenarios.
 
-package opencode_acp
+package opencode
 
 import (
 	"context"

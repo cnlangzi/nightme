@@ -1,4 +1,4 @@
-// Package opencode_acp — sessionUpdate → AgentEvent translator.
+// Package opencode — sessionUpdate → AgentEvent translator.
 //
 // ACP spec sessionUpdate variants the opencode acp server emits
 // (verified against opencode 1.18.x source —
@@ -39,7 +39,7 @@
 // starter.go::Start, AFTER the generic acp handshake completes
 // but BEFORE the readPump observes the first session/update.
 // Late registration is racy — see SetUpdateHandler doc.
-package opencode_acp
+package opencode
 
 import (
 	"encoding/json"

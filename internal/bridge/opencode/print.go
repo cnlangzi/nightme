@@ -77,7 +77,7 @@
 // If a future migration brings a second bridge into the same
 // shape (e.g. another print-mode emitter), this file is the
 // place to extract a shared parser.
-package opencode_acp
+package opencode
 
 import (
 	"bufio"

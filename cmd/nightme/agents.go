@@ -26,7 +26,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh"
-	"github.com/cnlangzi/nightme/internal/bridge/opencode_acp"
+	"github.com/cnlangzi/nightme/internal/bridge/opencode"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
@@ -77,8 +77,8 @@ func init() {
 	// was retired in F-OPENCODE-ACP-MIGRATION — the same wire
 	// surface is now available via the standard ACP protocol
 	// with a thin per-bridge sessionUpdate translator (see
-	// internal/bridge/opencode_acp/update.go).
-	agent.Builtins.Register(opencode_acp.NewStarter("opencode", "opencode", []string{"acp"}))
+	// internal/bridge/opencode/update.go).
+	agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", []string{"acp"}))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see

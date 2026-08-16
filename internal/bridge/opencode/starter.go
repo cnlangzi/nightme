@@ -1,5 +1,5 @@
 
-// Package opencode_acp — Starter (spawn recipe) for the opencode
+// Package opencode — Starter (spawn recipe) for the opencode
 // ACP bridge.
 //
 // Model choice (F-OPENCODE-ACP-MIGRATION §2):
@@ -19,7 +19,7 @@
 // The two paths share the same Starter; only `RunOnce` and the
 // print-mode spawn in print.go differ from `Start` and the
 // ACP-backed driver.
-package opencode_acp
+package opencode
 
 import (
 	"context"

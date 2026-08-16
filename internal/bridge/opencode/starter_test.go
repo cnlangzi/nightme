@@ -1,8 +1,8 @@
-// Package opencode_acp — Starter tests.
+// Package opencode — Starter tests.
 //
 // Unit-level tests for the Starter. Real-binary e2e lives in
 // real_e2e_test.go (build-tagged).
-package opencode_acp
+package opencode
 
 import (
 	"os/exec"

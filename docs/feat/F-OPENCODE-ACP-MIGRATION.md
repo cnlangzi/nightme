@@ -1,7 +1,7 @@
 # F-OPENCODE-ACP-MIGRATION — opencode bridge 迁移到 ACP 模式
 
 > **Status**: ✅ 完成 (Phase 0 / Phase 1 / Phase 2 / 收尾清理 全部落地)
-> **Scope**: 实际落地范围与原设计有偏差 — 见 §2.1 "实际文件 layout"(原计划全部落在 `internal/bridge/opencode/`,实际新建 `internal/bridge/opencode_acp/` 子包,旧包完整删除)
+> **Scope**: `internal/bridge/opencode/`(Phase 0 期间临时叫 `opencode_acp` 以与旧 HTTP serve 包并存;Phase 2 旧包删除后改回 `opencode`)
 > **Supersedes**: `docs/bridge/opencode.md` §1.2 "三不做"(已随 Phase 2 一并删除 — 见本 doc §6)
 > **Related**: [`docs/bridge/acp.md`](./acp.md), [`docs/bridge/codex.md`](./codex.md), [`docs/bridge/pi.md`](./pi.md) — 同期 long-lived bridge 设计基线
 > [`docs/bridge/codex.md`](../bridge/codex.md), [`docs/bridge/pi.md`](../bridge/pi.md) — 同期 long-lived bridge 设计基线
@@ -644,8 +644,8 @@ func TestE2E_OpencodeACP_ToolUse(t *testing.T) {
 
 执行顺序:**先双注册共存 → 验证 → 切换默认 → 删除 serve**。三个阶段已全部落地(`fix-opencode` 分支):
 
-- **Phase 0**: ✅ 准备完成 — `opencode_acp` 子包 + `UpdateHandler` hook + 本 doc 全部提交
-- **Phase 1**: ✅ 默认切换完成 — `cmd/nightme/agents.go` 已注册 `opencode_acp.NewStarter`,`agents_test.go` 期望 `Args: [acp]` 一致
+- **Phase 0**: ✅ 准备完成 — 新建 `opencode` 包(当时路径 `opencode_acp`)+ `UpdateHandler` hook + 本 doc 全部提交
+- **Phase 1**: ✅ 默认切换完成 — `cmd/nightme/agents.go` 已注册 `opencode.NewStarter`,`agents_test.go` 期望 `Args: [acp]` 一致
 - **Phase 2**: ✅ 删除完成 — `internal/bridge/opencode/` 26 文件 ~12000 行已 git rm
 - **收尾**: ✅ `update.go` 从 449 行收敛到 302 行;`SessionView.StashUsage` 与 per-bridge `lastUsage` 跟踪删除
 
@@ -741,7 +741,7 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
 
 | 文档 | 改动 |
 |---|---|
-| ~~`docs/bridge/opencode.md`~~ | 已删除(Phase 2 一并下线,内容迁移到本文档 + `internal/bridge/opencode_acp/` 源码注释) |
+| ~~`docs/bridge/opencode.md`~~ | 已删除(Phase 2 一并下线,内容迁移到本文档 + `internal/bridge/opencode/` 源码注释) |
 | `docs/SPEC.md` §1(组件表) | 不动(opencode bridge 还在,只是实现路径换了) |
 | `docs/FEATURES.md` | 在 ACP 集成表添加 opencode 行 |
 | `README.md` 章节 "Bridge" | 不动 |
@@ -756,22 +756,22 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
   - [x] driver struct 加 `updateHandler UpdateHandler` 字段
   - [x] `SetUpdateHandler(h UpdateHandler)` 导出方法
   - [x] `handleSessionUpdate` 改为 dispatch to handler if set,else existing switch
-- [x] ~~`internal/bridge/opencode/opencode.go`~~ → 已删除(Phase 2);常量转移到 `internal/bridge/opencode_acp/opencode.go`
-- [x] `internal/bridge/opencode_acp/starter.go`(实际落地,非 §2.1 原计划的 `opencode/acp.go`):
+- [x] ~~`internal/bridge/opencode/opencode.go`~~ → 已删除(Phase 2);常量转移到 `internal/bridge/opencode/opencode.go`
+- [x] `internal/bridge/opencode/starter.go`(Phase 0 临时路径 `opencode_acp/starter.go`,Phase 2 旧包删除后改回 `opencode/starter.go`):
   - [x] `Starter` + `NewStarter(name, command, args)`
   - [x] `Info()` 返回 `ModeACP`
   - [x] `Detect()` LookPath
   - [x] `Start()` 委派 `acp.NewStarter(...).Start()` + `drv.SetUpdateHandler(newUpdateHandler(...))`
   - [x] `RunOnce()` 委派 `print.go::runPrintMode`
-- [x] `internal/bridge/opencode_acp/update.go`:
+- [x] `internal/bridge/opencode/update.go`:
   - [x] `newUpdateHandler(a, workspace) acp.UpdateHandler` 路由 5 个 opencode 真实发出的 sessionUpdate + 1 个 default log-only 分支
   - [x] `decodeTextChunk(raw) string` helper
   - [x] ~~`percent(used, size) float64`~~ → 已删除(usage_update 分支整体裁掉,见 §收尾)
-- [x] `internal/bridge/opencode_acp/update_test.go`:
+- [x] `internal/bridge/opencode/update_test.go`:
   - [x] 11 个单测覆盖 text/thought/tool/permission/stop/unknown/malformed/decode 各分支(原计划 8 个,实际多了 TypeAssertionIsStable 等)
-- [x] ~~`internal/bridge/opencode/acp_integration_test.go`~~ → 不再需要,acp 桥本身的 `acp_test.go` 已覆盖;opencode 端的 e2e 走 `internal/bridge/opencode_acp/starter_test.go` 的 Detect 路径
+- [x] ~~`internal/bridge/opencode/acp_integration_test.go`~~ → 不再需要,acp 桥本身的 `acp_test.go` 已覆盖;opencode 端的 e2e 走 `internal/bridge/opencode/starter_test.go` 的 Detect 路径
 - [x] `cmd/nightme/agents.go`:
-  - [x] 改默认 `opencode` 为 `opencode_acp.NewStarter("opencode", "opencode", []string{"acp"})`
+  - [x] 改默认 `opencode` 为 `opencode.NewStarter("opencode", "opencode", []string{"acp"})`
   - [x] 注释更新:指 `https://opencode.ai/docs/acp/` "All features are supported"
 - [x] `cmd/nightme/agents_test.go`:
   - [x] 验证 `Args: []string{"acp"}` 期望 PASS

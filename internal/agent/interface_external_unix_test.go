@@ -20,7 +20,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/acp"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
-	"github.com/cnlangzi/nightme/internal/bridge/opencode_acp"
+	"github.com/cnlangzi/nightme/internal/bridge/opencode"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
@@ -37,7 +37,7 @@ func TestBuiltinBridges_SatisfyAgentInterface(t *testing.T) {
 	}{
 		{"claudecode", claudecode.NewStarter("claudecode", "claude", nil)},
 		{"codex", codex.NewStarter("codex", "codex", nil)},
-		{"opencode_acp", opencode_acp.NewStarter("opencode", "opencode", []string{"acp"})},
+		{"opencode", opencode.NewStarter("opencode", "opencode", []string{"acp"})},
 		{"pi", pi.NewStarter("pi", "pi", nil)},
 		{"pty", pty.NewStarter("bash", "bash", nil, nil, 0, 0)},
 		{"acp", acp.NewStarter("acp", "opencode", []string{"acp"}, nil, 0, 0)},

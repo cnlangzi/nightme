@@ -44,8 +44,8 @@ retired `internal/bridge/opencode/` package directly:
 ```diff
 - import "github.com/cnlangzi/nightme/internal/bridge/opencode"
 - s := opencode.NewStarter("opencode", "opencode", nil)
-+ import "github.com/cnlangzi/nightme/internal/bridge/opencode_acp"
-+ s := opencode_acp.NewStarter("opencode", "opencode", []string{"acp"})
++ import "github.com/cnlangzi/nightme/internal/bridge/opencode"
++ s := opencode.NewStarter("opencode", "opencode", []string{"acp"})
 ```
 
 Production code under `cmd/`, `internal/`, and `docs/` only
@@ -58,7 +58,7 @@ extensions to the new package:
 
 - HTTP serve custom SSE event handling → translate to ACP
   sessionUpdate translator (see
-  `internal/bridge/opencode_acp/update.go`).
+  `internal/bridge/opencode/update.go`).
 - HTTP serve client.go endpoint overrides → no longer needed;
   the generic acp bridge handles all standard ACP methods.
 - opencodehomeDir / InstanceContext cwd tricks → no longer

@@ -1,4 +1,4 @@
-// Package opencode_acp — unit tests for the sessionUpdate →
+// Package opencode — unit tests for the sessionUpdate →
 // AgentEvent translator (update.go).
 //
 // All tests are pure-function tests: no live opencode binary,
@@ -8,7 +8,7 @@
 //
 // Integration tests against a real `opencode acp` binary live in
 // real_e2e_test.go (build-tagged opencode_real_e2e).
-package opencode_acp
+package opencode
 
 import (
 	"encoding/json"

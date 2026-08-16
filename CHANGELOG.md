@@ -32,7 +32,7 @@ for the full design.
 
 **What changes under the hood**
 
-- New package: `internal/bridge/opencode_acp/` — thin wrapper
+- New package: `internal/bridge/opencode/` — thin wrapper
   over the generic `internal/bridge/acp/` plus a
   sessionUpdate translator (`update.go`) covering the 5
   sessionUpdate variants opencode actually emits on the wire
@@ -54,7 +54,7 @@ for the full design.
   transport.go, translate.go, think_tags.go, agent.go, driver.go,
   testdata/, plus 14 test files). The bridge_env_safety
   whitelist in `internal/agent/bridge_env_safety_windows_test.go`
-  is updated to point at `internal/bridge/opencode_acp`. See
+  is updated to point at `internal/bridge/opencode`. See
   the migration doc §6 for the deletion checklist.
 - **Phase 2 follow-up cleanup**: after verifying the opencode
   wire against `sst/opencode@dev/packages/opencode/src/acp/event.ts`,
@@ -75,7 +75,7 @@ for the full design.
   unchanged).
 - Custom `opencode` extensions that imported
   `opencode.NewStarter` need to switch to
-  `opencode_acp.NewStarter`. No code in `cmd/`, `internal/`,
+  `opencode.NewStarter`. No code in `cmd/`, `internal/`,
   or `docs/` outside the bridge package imported
   `opencode.NewStarter` directly — verify your local fork.
 

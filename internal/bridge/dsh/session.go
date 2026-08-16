@@ -523,6 +523,8 @@ func (d *driver) runBackfillLoop(ctx context.Context) {
 	// newDriver wiring the Subscribe and the backfill loop's first
 	// read. lastSeq starts at 0 (zero value), so the first poll
 	// fetches everything; subsequent polls only fetch deltas.
+	slogDefault().Info("dsh: backfill loop start",
+		"session_id", d.sessionID)
 	d.fetchHistory(ctx)
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -587,6 +589,10 @@ func (d *driver) fetchHistory(ctx context.Context) {
 		dLog("dsh: backfill history unmarshal: %v", err)
 		return
 	}
+	slogDefault().Info("dsh: backfill fetched",
+		"session_id", d.sessionID,
+		"events", len(history.Events),
+		"last_seq", d.lastSeq)
 	for _, entry := range history.Events {
 		var env sessionEventEnvelope
 		if err := json.Unmarshal(entry.Event, &env); err != nil {

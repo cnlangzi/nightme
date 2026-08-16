@@ -2542,12 +2542,23 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// communicate "the agent is back".
 	//
 	// Why the strict ThinkCount/ToolCount gate (vs. !hb.Empty()):
-	// ApplyHeartbeat only PATCHes on count change (see
-	// receipt.go:ApplyHeartbeat's `changed` short-circuit), so
-	// the receipt's snapshot cannot be in the "LastBeatAt set,
-	// counts all zero" state at render time. Routing that case
-	// to the front part is therefore a safe fallback — receipt
-	// users will never see a "💭 0 · ⏱ ..." line.
+	// ApplyHeartbeat's `changed` short-circuit (receipt.go) only
+	// gates on the *PATCH*, not on the *assignment* — `r.heartbeat
+	// = snap` runs unconditionally before the short-circuit. So a
+	// direct caller (test, debug tool, future admin/renderer) CAN
+	// leave the receipt's snapshot in a "LastBeatAt set, counts
+	// all zero" state, and the next render would then read it via
+	// &r.heartbeat.
+	//
+	// The reason production never produces such a snapshot is
+	// upstream: Adapter.Send's OutHeartbeat branch (adapter.go)
+	// and applyPendingHeartbeat both gate on `!m.Heartbeat.Empty()`
+	// before calling ApplyHeartbeat, so an Empty() snapshot never
+	// reaches the receipt in the production call path. Routing
+	// the "no counts" case to the front part here is therefore a
+	// safe fallback for both production (upstream-filtered) and
+	// direct-test paths (where the snapshot is what the test set
+	// it to) — render output never shows a "💭 0 · ⏱ ..." line.
 	switch {
 	case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0):
 		elements = append(elements, map[string]any{

@@ -492,12 +492,20 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 | `heartbeat_test.go` | `TestObserve_LRUEvicts` | 写入超过 cap 的 uid 后,最久未访问的 uid 被淘汰,`Snapshot` 返回 zero |
 | `heartbeat_test.go` | `TestObserve_LRUTouchUpdates` | 重复 Observe 同一 uid 不会让其被淘汰 |
 | `heartbeat_test.go` | `TestObserve_ConcurrentSafe` | 并发 Observe + Snapshot,`-race` 不报 |
-| `receipt_test.go` | `TestApplyHeartbeat_Idempotent` | 同 snapshot 二次调用不触发 renderLocked |
-| `receipt_test.go` | `TestApplyHeartbeat_Throttled` | 2s 内连续 ApplyHeartbeat 多次只渲染 ≤1 次 |
-| `receipt_test.go` | `TestApplyHeartbeat_RendersHeader` | ApplyHeartbeat 后 buildReceiptCard 输出含 header |
-| `adapter_test.go` | `TestBuildReceiptCard_HeartbeatHeader` | 5 种 hb 输入(nil / 空 / 仅 think / 仅 tool / 全有)下 header 文本;`ThinkCount>0 \|\| ToolCount>0` 时 header **不带** "🤖 Working" 前缀,仅 think/tool 全 0 + entries/tasks 空时回退到 `🤖 Working` 占位 |
-| `adapter_test.go` | `TestBuildReceiptCard_HeartbeatHeader_MutualExclusion` | (a) hb={Think:0, Tool:0} + entries/tasks 空 → header == `🤖 Working`; (b) hb={Think:1, Tool:0} → header == `💭 1`; (c) hb={Think:0, Tool:1} → header == `🔧 1`; (d) hb={Think:2, Tool:3, Beat:t} → header == `💭 2 · 🔧 3 · ⏱ HH:MM:SS`; 任意两 case 不会同时出现 `🤖 Working` 与 `💭` / `🔧` |
-| `adapter_test.go` | `TestRenderHeartbeatHeader_OmitsWorkingPrefix` | 直接调 `renderHeartbeatHeader` 验证返回值从不以 `🤖 Working` 开头 |
+| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Idempotent` | 同 snapshot 二次调用不触发 renderLocked |
+| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Throttled` | 2s 内连续 ApplyHeartbeat 多次只渲染 ≤1 次 |
+| `heartbeat_receipt_test.go` | `TestApplyHeartbeat_PATCHCardHasHeader` | ApplyHeartbeat 后 buildReceiptCard 输出含 header(back part),且不出现 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_NilSnapshot` | hb=nil + 无 entries/tasks → 渲染 front part `"🤖 Working"`,不带任何计数/时间 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_EmptySnapshot` | hb=zero snapshot + 无 entries/tasks → 渲染 front part `"🤖 Working"`(精确字符串,无后缀点) |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_ThinkOnly` | hb={Think:3, Beat:t} → 后半 `💭 3 · ⏱ HH:MM:SS`;**不**带 "🤖 Working" 前缀;无 🔧 chip |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_ToolOnly` | hb={Tool:12, Beat:t} → 后半 `🔧 12 · ⏱ HH:MM:SS`,无 💭 chip,无 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_AllPopulated` | hb={Think:3, Tool:12, Beat:t} → 后半 `💭 3 · 🔧 12 · ⏱ HH:MM:SS`,无 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly` | hb={Beat:t} + 无 entries/tasks → 渲染 front part `"🤖 Working"`,**不**带 ⏱ chip(新行为;旧的 !hb.Empty() gate 会渲染 `🤖 Working · ⏱ HH:MM:SS`) |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_WithEntries` | hb populated + entries 非空 → header 排在 entries 之前,且不出现 "🤖 Working" 前缀 |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_MutualExclusion` | 7 个子用例的表驱动矩阵(front/empty / back/think-only / back/tool-only / back/think+tool+time / front/LastBeatAt-only / no-header/entries-only / front/nil-hb),逐 case 断言 `wantHas` 与 `wantNot` 不重叠 — 钉死 §3.6 互斥契约的 4-way 行为 |
+| `heartbeat_receipt_test.go` | `TestRenderHeartbeatHeader_Direct` | 直接调 `renderHeartbeatHeader` 验证 `{Think:2, Tool:5, Beat:t}` → `"💭 2 · 🔧 5 · ⏱ HH:MM:SS"`(无 Working 前缀);空快照 → `""` |
+| `heartbeat_receipt_test.go` | `TestRenderHeartbeatHeader_OmitsWorkingPrefix` | 5 种 hb 输入下,返回值从**任何位置**都不含 "🤖 Working"(守住契约边界) |
+| `heartbeat_receipt_test.go` | `TestRenderHeartbeatHeader_NoLastBeat` | 4 个子用例(think-only / tool-only / both / 全零)在 `LastBeatAt=zero` 下输出 back part 不带 ⏱ chip |
 
 ### 7.2 集成测试
 

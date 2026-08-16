@@ -143,9 +143,6 @@ func TestBuildReceiptCard_HeartbeatHeader_AllPopulated(t *testing.T) {
 	}
 }
 
-// TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly covers a
-// "agent is alive but no think / no tool yet" turn — just the
-// time stamp.
 // TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly pins the
 // F-63 mutual-exclusion edge: a snapshot with LastBeatAt set
 // but BOTH counters zero is treated as "no activity" (front

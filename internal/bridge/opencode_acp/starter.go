@@ -86,16 +86,25 @@ func (s *Starter) Detect() error {
 // The runtime state (transport / rpc / events / driver) lives
 // inside the generic acp bridge — this package only contributes:
 //
-//   - The sessionUpdate → AgentEvent translator (update.go).
+//   - The sessionUpdate → AgentEvent translator (update.go),
+//     installed via SetUpdateHandler after Start returns.
 //   - Per-bridge session context fields (AgentName=opencode,
 //     Workspace=cfg.Workspace) stamped on every event.
-//   - Late-carry usage stashing so usage_update lands on the
-//     same Done.Usage as EventAgentDone at session.status:idle.
 //
 // cfg.SessionID, when non-empty, is reserved for v2 ACP
 // session/load wiring. Today the bridge always opens a fresh
 // session; resume via cfg.SessionID is implemented in codex /
 // pi bridges already and will follow the same shape here in v2.
+//
+// Race note: SetUpdateHandler must be called BEFORE the readPump
+// observes the first session/update. The race-free storage is
+// the acp bridge's atomic.Pointer on d.updateHandler, but the
+// acp readPump goroutine is started inside acpStarter.Start —
+// so by the time SetUpdateHandler returns, early sessionUpdate
+// notifications could already be in flight. For opencode's
+// fresh-session path this is a no-op (no notifications arrive
+// before the client's first session/prompt). It will matter
+// once v2 wires session/load replay.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, errors.New("opencode: workspace is required")
@@ -126,7 +135,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 			"driver_type", fmt.Sprintf("%T", a.Driver()))
 		return a, nil
 	}
-	drv.SetUpdateHandler(newUpdateHandler(a, cfg.Workspace))
+	drv.SetUpdateHandler(newUpdateHandler(cfg.Workspace))
 	return a, nil
 }
 
@@ -146,8 +155,5 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // is `opencode run --format json` and is not affected by the
 // ACP migration).
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-	if cfg.Workspace == "" {
-		return agent.RunResult{}, errors.New("opencode: workspace is required")
-	}
 	return runPrintMode(ctx, s, cfg, blocks)
 }

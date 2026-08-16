@@ -60,7 +60,7 @@ type updateHandler struct {
 // the returned closure is supplied by the generic acp bridge and
 // exposes only the channels / fields the translator needs
 // (events emit, session id lookup).
-func newUpdateHandler(a *agent.Agent, workspace string) acp.UpdateHandler {
+func newUpdateHandler(workspace string) acp.UpdateHandler {
 	h := &updateHandler{
 		agentName: bridgeName,
 		workspace: workspace,
@@ -77,15 +77,11 @@ func newUpdateHandler(a *agent.Agent, workspace string) acp.UpdateHandler {
 func (h *updateHandler) handle(view *acp.SessionView, raw json.RawMessage) error {
 	var head struct {
 		SessionUpdate string `json:"sessionUpdate"`
-		Type          string `json:"type"` // legacy fallback
 	}
 	if err := json.Unmarshal(raw, &head); err != nil {
 		return fmt.Errorf("opencode/acp: decode sessionUpdate head: %w", err)
 	}
 	kind := head.SessionUpdate
-	if kind == "" {
-		kind = head.Type
-	}
 
 	switch kind {
 	// ── text ────────────────────────────────────────────────

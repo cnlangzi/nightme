@@ -40,7 +40,7 @@ func captureView(t *testing.T, sessionID string) (*acp.SessionView, chan agent.A
 // verbatim (no "[思考] " prefix).
 func TestHandleUpdate_AgentMessageChunk(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "agent_message_chunk",
@@ -75,7 +75,7 @@ func TestHandleUpdate_AgentMessageChunk(t *testing.T) {
 // noise).
 func TestHandleUpdate_AgentMessageChunk_EmptyTextDrops(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "agent_message_chunk",
@@ -99,7 +99,7 @@ func TestHandleUpdate_AgentMessageChunk_EmptyTextDrops(t *testing.T) {
 // reasoning.
 func TestHandleUpdate_AgentThoughtChunk_PrependsThinkPrefix(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "agent_thought_chunk",
@@ -127,7 +127,7 @@ func TestHandleUpdate_AgentThoughtChunk_PrependsThinkPrefix(t *testing.T) {
 // event — the channel already rendered the inbound.
 func TestHandleUpdate_UserMessageChunk_Drops(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "user_message_chunk",
@@ -149,7 +149,7 @@ func TestHandleUpdate_UserMessageChunk_Drops(t *testing.T) {
 // emits EventAgentToolStart with the title and rawInput.
 func TestHandleUpdate_ToolCall_EmitsStart(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "tool_call",
@@ -190,7 +190,7 @@ func TestHandleUpdate_ToolCall_EmitsStart(t *testing.T) {
 // EventAgentToolEnd with the rawOutput.
 func TestHandleUpdate_ToolCallUpdate_Completed_EmitsEnd(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "tool_call_update",
@@ -231,7 +231,7 @@ func TestHandleUpdate_ToolCallUpdate_Completed_EmitsEnd(t *testing.T) {
 // rawOutput on ToolEnd.Output for diagnostic visibility.
 func TestHandleUpdate_ToolCallUpdate_Failed_EmitsEndWithErr(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "tool_call_update",
@@ -269,7 +269,7 @@ func TestHandleUpdate_ToolCallUpdate_IntermediateStatus_LogsOnly(t *testing.T) {
 	for _, status := range []string{"running", "pending", "unknown_future_status"} {
 		t.Run(status, func(t *testing.T) {
 			view, events := captureView(t, "ses_test")
-			h := newUpdateHandler(nil, "/tmp/test")
+			h := newUpdateHandler("/tmp/test")
 			raw := json.RawMessage(`{
 				"sessionUpdate": "tool_call_update",
 				"toolCallId": "tc_3",
@@ -308,7 +308,7 @@ func TestHandleUpdate_UnknownKind_Tolerated(t *testing.T) {
 	} {
 		t.Run(kind, func(t *testing.T) {
 			view, events := captureView(t, "ses_test")
-			h := newUpdateHandler(nil, "/tmp/test")
+			h := newUpdateHandler("/tmp/test")
 			raw := json.RawMessage(`{"sessionUpdate":"` + kind + `","someField":"..."}`)
 			if err := h(view, raw); err != nil {
 				t.Fatalf("handle() error = %v, want nil", err)
@@ -329,7 +329,7 @@ func TestHandleUpdate_UnknownKind_Tolerated(t *testing.T) {
 // F-OPENCODE-ACP-MIGRATION §4.4 — wire decoding stays tolerant).
 func TestHandleUpdate_MalformedJSON_ReturnsError(t *testing.T) {
 	view, _ := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
+	h := newUpdateHandler("/tmp/test")
 
 	// Missing the sessionUpdate field AND missing the content
 	// field. We need to trip a json.Unmarshal error. Since the
@@ -367,32 +367,3 @@ func TestDecodeTextChunk_NonTextTypeDrops(t *testing.T) {
 	}
 }
 
-// TestUpdateHandler_TypeAssertionIsStable exercises the
-// sessionUpdate discriminator resolution across the legacy
-// `type` field and the v1 `sessionUpdate` field. The
-// translator prefers sessionUpdate and falls back to type for
-// pre-v1 servers (opencode 1.18+ ships v1; this is forward-
-// compat for hypothetical future spec drift).
-func TestUpdateHandler_TypeAssertionIsStable(t *testing.T) {
-	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler(nil, "/tmp/test")
-
-	// Fallback to legacy "type" field when "sessionUpdate" is
-	// absent. Useful for diagnosing wire-shape drift across
-	// opencode versions.
-	raw := json.RawMessage(`{
-		"type": "agent_message_chunk",
-		"content": {"type":"text","text":"legacy"}
-	}`)
-	if err := h(view, raw); err != nil {
-		t.Fatalf("handle() error = %v", err)
-	}
-	select {
-	case ev := <-events:
-		if ev.Text != "legacy" {
-			t.Errorf("Text = %q, want legacy", ev.Text)
-		}
-	default:
-		t.Fatal("no event emitted")
-	}
-}

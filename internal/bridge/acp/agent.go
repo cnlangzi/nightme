@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -87,7 +88,15 @@ type driver struct {
 	// generic ACP bridge does not recognize. nil keeps the
 	// existing behaviour. See SessionView + SetUpdateHandler
 	// below.
-	updateHandler UpdateHandler
+	//
+	// Stored as atomic.Pointer so SetUpdateHandler and the
+	// readPump can access the handler without a mutex. The
+	// SetUpdateHandler contract ("must be called BEFORE the
+	// readPump observes the first session/update") is the
+	// primary correctness guarantee; atomic.Pointer only
+	// eliminates the data race between the writer and the
+	// reader goroutines.
+	updateHandler atomic.Pointer[UpdateHandler]
 
 	// pendingTurnMu guards the in-flight session/prompt guard.
 	// Opencode ACP's prompt response IS the turn-end signal (the
@@ -784,7 +793,11 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 // acp backends). The opencode bridge is the first user
 // (F-OPENCODE-ACP-MIGRATION).
 func (d *driver) SetUpdateHandler(h UpdateHandler) {
-	d.updateHandler = h
+	if h == nil {
+		d.updateHandler.Store(nil)
+		return
+	}
+	d.updateHandler.Store(&h)
 }
 
 // View returns a SessionView for use by bridge-supplied
@@ -979,9 +992,9 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 	// (usage_update, available_commands_update, plan, etc.) plus
 	// the agent_thought_chunk variant the default treats as
 	// plain text.
-	if d.updateHandler != nil {
+	if h := d.updateHandler.Load(); h != nil {
 		view := d.View()
-		if err := d.updateHandler(view, params.Update); err != nil {
+		if err := (*h)(view, params.Update); err != nil {
 			// log only — keep the stream alive. Use the
 			// standard slog package directly so we don't
 			// pull in a per-package oLog helper (acp is

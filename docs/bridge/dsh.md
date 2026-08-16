@@ -674,13 +674,15 @@ t12  AgentSession.SetExited(0)
 | `session/event` `turn/start` | `{event:{turnId, messageIds?}}` | (清 turnState;对齐 pi F-32) | |
 | `session/event` `turn/end` | `{event:{turnId, stopReason, usage?}}` | **`EventResult{Usage} → EventDone{Reason:"settled"}`** | F-52 终态 |
 | `session/event` `compaction/end` | `{event:{reason, aborted}}` | `EventCompaction` | 一个周期 = 一次 emit |
-| `session/event` `todo/write` | `{event:{items:[{content, status}]}}` | `EventAgentTaskCreate` / `EventAgentTaskUpdate`(snapshot)| 字段名对齐 F-38 |
+| `session/event` `todo/write` | `{event:{todos:[{content, status}]}}` | `EventAgentTaskCreate` / `EventAgentTaskUpdate`(snapshot)| dashboard **To-dos / 任务** strip; last-write-wins whole list |
+| `session/event` `step/start` / `step/end` | `{event:{turn, step}}` | (不 emit)| inference cycle / `sessionStats`; **不是** TodoPanel |
+| `session/projection` `key:"todos"` | `{value:[{content,status},...]}` | `EventAgentTaskCreate`(snapshot)| 冷启动 / 重放; host fold of latest `todo/write` until next `turn/start` |
 | `session/event` `approval/asked` | `{event:{toolCallId, toolName, action, options}}` | (单独走 permissions.go) | **不**直接发 EventPermission 给 runtime,经 permissions 层 normalize |
 | `approval/requested` | `{sessionId, approvalId, toolName, callId?, reason?}` | `EventAgentPermission{ResponseCh}` | 见 §4.5 |
 | `question/requested` | `{sessionId, questions}` | `EventAgentPermission` (复用,多 question)| inline encode labels,见 codex §6.3 |
 | `session/queue` | `{sessionId, items}` | (debug;F-38 后续) | |
 | `session/jobs` | `{sessionId, jobs}` | (debug;本期不发) | |
-| `session/projection` | `{sessionId, seq, projection, value}` | (runtime 更新内部 state;不发 event) | 投影帧,title/tasks 等 |
+| `session/projection` | `{sessionId, seq, key, value}` | (见上 `key:"todos"`;其余 title / sessionStats 等不发 chat event) | 字段名是 `key` 不是 `projection` |
 | `approval/resolved` | `{sessionId, approvalId, outcome}` | (audit log) | user 已答,记 trace |
 | `question/resolved` | `{sessionId, questionRpcId, outcome}` | (audit log) | user 已答 |
 | host `session/created` / `session/destroyed` / `agent/status` | — | (debug log) | host 生命周期,本期不渲染 |

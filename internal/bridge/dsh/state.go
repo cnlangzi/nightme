@@ -22,7 +22,6 @@ package dsh
 
 import (
 	"encoding/json"
-	"fmt"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -60,13 +59,6 @@ type wireState struct {
 	tasks    map[string]todoItem // by ID, Content fallback if ID empty
 	tools    map[string]toolItem // by CallID (P3 populates from View)
 	inflight map[string]bool     // tool_callIDs seen without matching result
-
-	// steps is the current-turn inference-step checklist, sourced
-	// from session/event step/start + step/end. Distinct from
-	// tasks (todo/write). When tasks is non-empty, applyStepLocked
-	// does not emit — todos own the Feishu OutTask* card.
-	steps       []stepRec
-	stepCreated bool // first emit this turn is EventAgentTaskCreate
 
 	// wireRing is a fixed-capacity ring of recent raw mux frames
 	// (envelope type + raw bytes). Used by DumpWire for ops triage
@@ -148,14 +140,6 @@ type toolItem struct {
 	Status    string // "running" | "completed" | "failed"
 	Output    string
 	UpdatedAt int64
-}
-
-// stepRec is one dsh inference step in the current turn. Keyed by
-// (Turn, Step) from the wire; Status tracks start → end.
-type stepRec struct {
-	Turn   int
-	Step   int
-	Status agent.AgentTaskStatus
 }
 
 // newWireState returns an initialized wireState. Safe to call from
@@ -297,71 +281,6 @@ func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.Agent
 	// "intentional clear" apart from "wire drift ate everything".
 	return []agent.AgentEvent{{
 		Kind:     agent.EventAgentTaskCreate,
-		TaskList: &agent.AgentTaskListEvent{Items: items},
-	}}
-}
-
-// applyStepLocked folds one step/start or step/end into the
-// current-turn step checklist and returns the OutTask* snapshot.
-// Caller MUST hold s.mu (dispatcher.dispatch does).
-//
-// Mapping:
-//   - first emit this turn → EventAgentTaskCreate → OutTaskCreate
-//   - later start/end     → EventAgentTaskUpdate → OutTaskUpdate
-//
-// Todos take the Feishu checklist card: if s.tasks is non-empty
-// we return nil so a TodoWrite snapshot is not overwritten by
-// synthetic "Step N" rows.
-func (s *wireState) applyStepLocked(envType string, data stepBoundaryData) []agent.AgentEvent {
-	if data.Step < 1 {
-		return nil
-	}
-	if len(s.tasks) > 0 {
-		return nil
-	}
-	if len(s.steps) > 0 && s.steps[0].Turn != data.Turn {
-		s.steps = nil
-		s.stepCreated = false
-	}
-
-	idx := -1
-	for i, rec := range s.steps {
-		if rec.Turn == data.Turn && rec.Step == data.Step {
-			idx = i
-			break
-		}
-	}
-	status := agent.TaskInProgress
-	if envType == "step/end" {
-		status = agent.TaskCompleted
-	}
-	if idx >= 0 {
-		s.steps[idx].Status = status
-	} else {
-		s.steps = append(s.steps, stepRec{
-			Turn:   data.Turn,
-			Step:   data.Step,
-			Status: status,
-		})
-	}
-
-	items := make([]agent.AgentTaskItem, 0, len(s.steps))
-	for _, rec := range s.steps {
-		items = append(items, agent.AgentTaskItem{
-			ID:         fmt.Sprintf("step-%d-%d", rec.Turn, rec.Step),
-			Subject:    fmt.Sprintf("Step %d", rec.Step),
-			ActiveForm: fmt.Sprintf("Working on step %d", rec.Step),
-			Status:     rec.Status,
-		})
-	}
-
-	kind := agent.EventAgentTaskUpdate
-	if !s.stepCreated {
-		kind = agent.EventAgentTaskCreate
-		s.stepCreated = true
-	}
-	return []agent.AgentEvent{{
-		Kind:     kind,
 		TaskList: &agent.AgentTaskListEvent{Items: items},
 	}}
 }

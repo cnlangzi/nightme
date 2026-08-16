@@ -645,11 +645,13 @@ func handleTurnStart(env sessionEventEnvelope, view json.RawMessage, tr *transla
 	// CallID would otherwise stay in inflight forever, growing
 	// across many turns. A fresh turn starts with an empty
 	// inflight set; tools carried over are reconciled on the
-	// next View. tasks are session-scoped, not turn-scoped —
-	// they survive via the next todo/write or projection.
+	// next View. tasks (todo/write / todos projection) are the
+	// dashboard TodoPanel snapshot; a later todo/write or
+	// session/projection{key:"todos"} reconciles them. Dashboard
+	// also clears the panel on turn/start when no later write
+	// stands — we leave the last snapshot until that write so
+	// Feishu does not flicker an empty checklist mid-turn.
 	st.inflight = nil
-	st.steps = nil
-	st.stepCreated = false
 	return nil
 }
 
@@ -840,22 +842,17 @@ func handleUserMessageEcho(env sessionEventEnvelope, view json.RawMessage, tr *t
 	return nil
 }
 
-// handleStepBoundary maps dsh step/start and step/end onto the
-// existing Task pipeline (EventAgentTaskCreate / Update →
-// OutTaskCreate / OutTaskUpdate). There is no EventStepBoundary
-// kind; the Feishu checklist is the user-visible progress surface.
+// handleStepBoundary is a no-op for AgentEvent emission.
 //
-// Wire data is only {turn, step} — Subject is synthesised as
-// "Step N". Dispatcher already holds both mutexes; applyStepLocked
-// must not re-lock.
+// Dashboard alignment (packages/client/ui-conversation TodoDock):
+// the TODO LIST strip reads the host `todos` projection, which is
+// folded from `todo/write` {todos:[{content,status}]} and cleared
+// on a later `turn/start`. step/start and step/end are inference
+// cycle bounds ({turn, step} only — one model call plus its tools)
+// used for sessionStats (TTFT / tok/s), not the plan panel.
+// Mapping them onto OutTask* synthesised "Step N" rows was wrong.
 func handleStepBoundary(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
-	tr.active = true
-	var data stepBoundaryData
-	if err := json.Unmarshal(env.Data, &data); err != nil {
-		dLog("dsh: step boundary decode: %v", err)
-		return nil
-	}
-	return st.applyStepLocked(env.Type, data)
+	return nil
 }
 
 // handleSessionTitle emits an EventAgentTitle (or equivalent) so

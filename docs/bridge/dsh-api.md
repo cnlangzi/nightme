@@ -995,9 +995,10 @@ First frame after stream open for **every attached session**. Replay replays eac
 | `turn/start` | (clear turnState; align with pi F-32) |
 | `turn/end` | `EventResult{Usage} + EventDone{Reason: "settled"}` |
 | `compaction/end` | `EventCompaction` |
-| `todo/write` | `EventAgentTaskCreate` (snapshot) |
+| `todo/write` | `EventAgentTaskCreate` (snapshot). Dashboard **To-dos / 任务** strip. Payload `{todos:[{content,status}]}`. |
 | `todo/update` | `EventAgentTaskUpdate` (P3+; currently no-op) |
 | `todo/delete` | (P3+; currently no-op) |
+| `step/start` / `step/end` | (no AgentEvent). Inference-cycle bounds `{turn,step}` for `sessionStats` (TTFT / tok/s). **Not** the To-dos strip. |
 | `approval/asked` | `EventAgentPermission` via `handleInlineApproval` (synthesised id `"evt-" + toolCallId`) |
 
 `view` (optional) is the host-computed render intent:
@@ -1019,7 +1020,7 @@ When present, `view` is the **authoritative** source for tool status (P3 contrac
   "method": "session/projection",
   "payload": {
     "sessionId": "session-...",
-    "key":       "todo" | "tasks" | "title" | ...,   // ⚠ NOT "projection"
+    "key":       "todos" | "title" | "sessionStats" | "goal" | ...,   // ⚠ NOT "projection"
     "value":     { /* unit-specific */ },
     "seq":       42
   }
@@ -1031,6 +1032,8 @@ When present, `view` is the **authoritative** source for tool status (P3 contrac
 | `key` | (was `projection`) | projection unit name. The bridge `protocol.go:projectionEnvelope` uses `projection` — ❌ BRIDGE BUG (the Go tag is wrong; should be `key`). Will mismatch until fixed. |
 
 Live push state, never logged — replay recomputes on the host. Clients keep one generic per-session value store under higher-seq-wins, seeded by the history tail page's projections block.
+
+Dashboard **To-dos / 任务** (`TodoDock` in `conversation.input.dock`) reads `useProjection("todos")`. The host folds the latest `todo/write` `{todos:[{content,status}]}` until a later `turn/start` retires the plan (`backscanTodos`). The bridge maps live `todo/write` and `session/projection{key:"todos"}` to `EventAgentTaskCreate`. `step/start` / `step/end` feed `sessionStats`, not this strip.
 
 #### 3.4.4 `session/queue` — input queue snapshot
 

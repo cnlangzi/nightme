@@ -323,9 +323,11 @@ type turnEndData struct {
 //	{"type":"step/start","seq":6,"data":{"turn":1,"step":1}}
 //	{"type":"step/end","seq":40,"data":{"turn":1,"step":1}}
 //
-// A step is one model-inference cycle (optionally with a tool call).
-// There is no title on the wire — the bridge synthesises "Step N"
-// for the OutTask* checklist.
+// A step is one model-inference cycle (one LLM call plus the tool
+// executions it requested). Dashboard uses these for sessionStats
+// (TTFT / tok/s), not the TodoPanel — that panel is todo/write +
+// the `todos` projection. The bridge registers the types so they
+// are not counted unknown, and does not emit AgentEvents.
 type stepBoundaryData struct {
 	Turn int `json:"turn"`
 	Step int `json:"step"`

@@ -13,8 +13,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // collectDeliver 把 dispatch 产出的 events 收集成切片,方便断言。
@@ -83,14 +81,12 @@ func TestDispatcher_AllKnownTypesRoute_NoPanic(t *testing.T) {
 		{
 			envType: "step/start",
 			data:    `{"turn":1,"step":1}`,
-			minEv:   1,
-			want:    agent.EventAgentTaskCreate,
+			minEv:   0, // inference bound, not TodoPanel (todo/write owns OutTask*)
 		},
 		{
 			envType: "step/end",
 			data:    `{"turn":1,"step":1}`,
-			minEv:   1,
-			want:    agent.EventAgentTaskCreate, // fresh dispatcher → first emit is Create
+			minEv:   0,
 		},
 		{
 			envType: "approval/asked",
@@ -705,120 +701,36 @@ func TestDispatcher_ApprovalAsked_DoesNotDeliverUnderLock(t *testing.T) {
 	}
 }
 
-// TestDispatcher_StepBoundary_TranslatesToOutTask locks the live
-// mapping: dsh step/start → EventAgentTaskCreate → OutTaskCreate;
-// step/end and later starts → EventAgentTaskUpdate → OutTaskUpdate.
-// Wire payload is only {turn, step}; Subject is synthesised.
-func TestDispatcher_StepBoundary_TranslatesToOutTask(t *testing.T) {
+// TestDispatcher_StepBoundary_DoesNotEmitTask: dashboard TodoPanel
+// is todo/write + todos projection, not step/*. step/start|end are
+// inference-cycle bounds ({turn,step}) for sessionStats. Emitting
+// synthetic "Step N" OutTask* rows was a mis-alignment.
+func TestDispatcher_StepBoundary_DoesNotEmitTask(t *testing.T) {
 	tr := newTranslator("dsh", "/tmp")
 	st := newWireState()
 	c := &collectDeliver{}
 	dispatcher := newDispatcher(tr, st, nil, c.deliver)
 
-	dispatch := func(envType, data string) {
-		t.Helper()
-		env, _ := decodeMuxEvent(t, makeMuxEvent(t, envType, data))
+	for _, typ := range []string{"step/start", "step/end"} {
+		env, _ := decodeMuxEvent(t, makeMuxEvent(t, typ, `{"turn":1,"step":1}`))
 		dispatcher.dispatch(env, nil)
 	}
-
-	dispatch("step/start", `{"turn":1,"step":1}`)
-	dispatch("step/end", `{"turn":1,"step":1}`)
-	dispatch("step/start", `{"turn":1,"step":2}`)
-
-	if len(c.events) != 3 {
-		t.Fatalf("got %d events, want 3 (create + 2 updates)", len(c.events))
+	if len(c.events) != 0 {
+		t.Fatalf("step/* emitted %d events %v, want none (TodoPanel is todo/write)", len(c.events), c.events)
 	}
-	if c.events[0].Kind != agent.EventAgentTaskCreate {
-		t.Fatalf("events[0] = %v, want TaskCreate", c.events[0].Kind)
-	}
-	if c.events[1].Kind != agent.EventAgentTaskUpdate {
-		t.Fatalf("events[1] = %v, want TaskUpdate", c.events[1].Kind)
-	}
-	if c.events[2].Kind != agent.EventAgentTaskUpdate {
-		t.Fatalf("events[2] = %v, want TaskUpdate", c.events[2].Kind)
-	}
-
-	create, ok := outbound.Translate("chat", c.events[0])
-	if !ok || create.Kind != messages.OutTaskCreate {
-		t.Fatalf("step/start Translate = ok=%v kind=%v, want OutTaskCreate", ok, create.Kind)
-	}
-	update, ok := outbound.Translate("chat", c.events[1])
-	if !ok || update.Kind != messages.OutTaskUpdate {
-		t.Fatalf("step/end Translate = ok=%v kind=%v, want OutTaskUpdate", ok, update.Kind)
-	}
-
-	if len(c.events[0].TaskList.Items) != 1 {
-		t.Fatalf("start items = %d, want 1", len(c.events[0].TaskList.Items))
-	}
-	item := c.events[0].TaskList.Items[0]
-	if item.ID != "step-1-1" || item.Subject != "Step 1" || item.Status != agent.TaskInProgress {
-		t.Errorf("start item = %+v, want id=step-1-1 subject=Step 1 in_progress", item)
-	}
-	if c.events[1].TaskList.Items[0].Status != agent.TaskCompleted {
-		t.Errorf("end status = %v, want completed", c.events[1].TaskList.Items[0].Status)
-	}
-	if len(c.events[2].TaskList.Items) != 2 {
-		t.Fatalf("second start items = %d, want 2", len(c.events[2].TaskList.Items))
-	}
-	if c.events[2].TaskList.Items[1].Status != agent.TaskInProgress {
-		t.Errorf("step 2 status = %v, want in_progress", c.events[2].TaskList.Items[1].Status)
-	}
-}
-
-// TestDispatcher_StepBoundary_YieldsToTodos: todo/write owns the
-// OutTask* card. Subsequent step/* must not replace the todo snapshot
-// with synthetic "Step N" rows.
-func TestDispatcher_StepBoundary_YieldsToTodos(t *testing.T) {
-	tr := newTranslator("dsh", "/tmp")
-	st := newWireState()
-	c := &collectDeliver{}
-	dispatcher := newDispatcher(tr, st, nil, c.deliver)
 
 	env, _ := decodeMuxEvent(t, makeMuxEvent(t, "todo/write",
 		`{"todos":[{"content":"Read docs","status":"pending"}]}`))
 	dispatcher.dispatch(env, nil)
 	env, _ = decodeMuxEvent(t, makeMuxEvent(t, "step/start", `{"turn":1,"step":1}`))
 	dispatcher.dispatch(env, nil)
-
 	if len(c.events) != 1 {
-		t.Fatalf("got %d events, want 1 todo create (step suppressed)", len(c.events))
+		t.Fatalf("got %d events, want 1 todo create", len(c.events))
 	}
 	if c.events[0].Kind != agent.EventAgentTaskCreate {
 		t.Fatalf("kind = %v, want TaskCreate", c.events[0].Kind)
 	}
 	if len(c.events[0].TaskList.Items) != 1 || c.events[0].TaskList.Items[0].Subject != "Read docs" {
 		t.Fatalf("todo snapshot = %+v, want subject Read docs", c.events[0].TaskList)
-	}
-}
-
-// TestDispatcher_TurnStart_ResetsStepCreate so the next turn's first
-// step/start is OutTaskCreate again, not a dangling Update.
-func TestDispatcher_TurnStart_ResetsStepCreate(t *testing.T) {
-	tr := newTranslator("dsh", "/tmp")
-	st := newWireState()
-	c := &collectDeliver{}
-	dispatcher := newDispatcher(tr, st, nil, c.deliver)
-
-	env, _ := decodeMuxEvent(t, makeMuxEvent(t, "step/start", `{"turn":1,"step":1}`))
-	dispatcher.dispatch(env, nil)
-	env, _ = decodeMuxEvent(t, makeMuxEvent(t, "turn/start", `{"turn":2}`))
-	dispatcher.dispatch(env, nil)
-	env, _ = decodeMuxEvent(t, makeMuxEvent(t, "step/start", `{"turn":2,"step":1}`))
-	dispatcher.dispatch(env, nil)
-
-	var tasks []agent.AgentEvent
-	for _, ev := range c.events {
-		if ev.Kind == agent.EventAgentTaskCreate || ev.Kind == agent.EventAgentTaskUpdate {
-			tasks = append(tasks, ev)
-		}
-	}
-	if len(tasks) != 2 {
-		t.Fatalf("task events = %d, want 2 creates", len(tasks))
-	}
-	if tasks[0].Kind != agent.EventAgentTaskCreate || tasks[1].Kind != agent.EventAgentTaskCreate {
-		t.Fatalf("kinds = %v %v, want Create Create", tasks[0].Kind, tasks[1].Kind)
-	}
-	if len(tasks[1].TaskList.Items) != 1 || tasks[1].TaskList.Items[0].ID != "step-2-1" {
-		t.Fatalf("turn 2 snapshot = %+v, want step-2-1 only", tasks[1].TaskList)
 	}
 }

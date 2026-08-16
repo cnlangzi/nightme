@@ -32,7 +32,17 @@ import (
 // every thinking block before emitting EventAgentText. Renderer.render
 // (and Channel-specific renderers) use it to tell thinking from a
 // final reply and surface them with different icons (💭 vs 💬).
-const thinkingPrefix = "[思考] "
+// ThinkingPrefix is the sentinel the claudecode bridge (and the dsh
+// bridge's reasoning-block path) prepends to every thinking block
+// before emitting EventAgentText. Renderer.render (and Channel-
+// specific renderers) use it to tell thinking from a final reply
+// and surface them with different icons (💭 vs 💬).
+//
+// Exported so the dsh bridge (and any future bridge that wants
+// thinking to flow on OutThinking rather than OutReply) can write
+// the same prefix without copy-pasting the literal across the
+// bridge / gateway boundary.
+const ThinkingPrefix = "[思考] "
 
 // Translate converts one agent.AgentEvent into the abstract
 // messages.OutboundMessage stream. Returns the message to send and a
@@ -55,11 +65,11 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		if text == "" {
 			return messages.OutboundMessage{}, false
 		}
-		if strings.HasPrefix(text, thinkingPrefix) {
+		if strings.HasPrefix(text, ThinkingPrefix) {
 			return messages.OutboundMessage{
 				ChatID: chatID,
 				Kind:   messages.OutThinking,
-				Text:   strings.TrimPrefix(text, thinkingPrefix),
+				Text:   strings.TrimPrefix(text, ThinkingPrefix),
 			}, true
 		}
 		return messages.OutboundMessage{

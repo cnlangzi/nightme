@@ -424,30 +424,6 @@ func (c *RPCClient) SessionCreate(ctx context.Context, opts SessionCreateOpts) (
 	return value.SessionID, nil
 }
 
-// SessionFork invokes /api/session.fork. Returns the NEW (child)
-// sessionId — dsh's fork returns a fresh server-assigned id whose
-// history mirrors the parent (dsh-api.md §2.1.8).
-func (c *RPCClient) SessionFork(ctx context.Context, sessionID string, atSeq int64) (string, error) {
-	payload := map[string]any{"sessionId": sessionID}
-	if atSeq > 0 {
-		payload["atSeq"] = atSeq
-	}
-	resp, err := c.Post(ctx, "session.fork", payload)
-	if err != nil {
-		return "", err
-	}
-	if !resp.Result.OK {
-		return "", fmt.Errorf("dsh.host: session.fork: %s", resp.Result.ErrorMessage())
-	}
-	var value struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
-		return "", fmt.Errorf("dsh.host: session.fork decode: %w", err)
-	}
-	return value.SessionID, nil
-}
-
 // PromptPart mirrors dsh-api.md §2.1.9.1 PromptContentPart.
 // Phase 2 will provide typed mappers from agent.ContentBlock;
 // Phase 0 uses []map[string]any in tests for simplicity.

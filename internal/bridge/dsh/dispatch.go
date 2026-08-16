@@ -228,27 +228,140 @@ var standardRegistry = newRegistry(map[string]eventHandler{
 // handleAssistantChunk buffers streaming text into translator.textBuf.
 // Per F-52: chunks don't emit AgentEvents directly — flush happens
 // at tool-boundary (tool/call) or turn-end (assistant/message).
+// handleAssistantChunk ingests one assistant/chunk envelope and folds
+// its delta into the right per-block accumulator. Behavior mirrors
+// the dashboard's PartialAccumulator (dsh-client-runtime/.../partial.d.ts):
+// each StreamChunk's Type discriminator routes the delta to textBuf
+// (text-delta), reasoningBuf (reasoning-delta), or is dropped
+// (block-start / block-end / tool-call-delta / usage / finish).
+//
+// F-DSH-DASHBOARD-PARITY (2026-08-16): reasoning-delta MUST NOT land
+// in textBuf — pre-fix it did, and the model's thinking leaked into
+// the reply stream. block-end{type:"reasoning"} is the only emit
+// point for thinking text (whole-block, not per-delta, to match the
+// dashboard's collapsed-thinking view).
+// handleAssistantChunk ingests one assistant/chunk envelope and folds
+// its delta into the right per-block accumulator. Behavior mirrors
+// the dashboard's PartialAccumulator (dsh-client-runtime/.../partial.d.ts):
+// each StreamChunk's Type discriminator routes the delta to textBuf
+// (text-delta), reasoningBuf (reasoning-delta), or is dropped
+// (block-start / block-end / tool-call-delta / usage / finish).
+//
+// F-DSH-DASHBOARD-PARITY (2026-08-16): reasoning-delta MUST NOT land
+// in textBuf — pre-fix it did, and the model's thinking leaked into
+// the reply stream. block-end{type:"reasoning"} is the only emit
+// point for thinking text (whole-block, not per-delta, to match the
+// dashboard's collapsed-thinking view).
+//
+// F-52 invariant: tr.active is set PER-TYPE (not at function top),
+// so unknown / future chunk types (which fall through to the
+// post-switch dLog) don't flip active=true and synthesize a phantom
+// Done card. See translate.go's "Set PER-TYPE" comment for context.
 func handleAssistantChunk(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
 	var data assistantChunkData
 	if err := json.Unmarshal(env.Data, &data); err != nil {
 		dLog("dsh: handler data envelope decode: %v", err)
 		return nil
 	}
-	tr.active = true
-	idx := data.Chunk.Index
-	if idx < 0 || idx >= maxTextStreams {
-		dLog("dsh: assistant/chunk contentIndex out of range",
-			"content_index", idx,
-			"max", maxTextStreams)
+
+	switch data.Chunk.Type {
+	case "text-delta":
+		// Same accumulation path as pre-fix; flushed at the next
+		// assistant/message, tool/call, or turn/end boundary per
+		// F-52 granularity contract. Max-contentIndex guard
+		// preserved verbatim — mirrors the pre-fix behaviour and
+		// prevents a malicious dsh from OOM-ing the bridge via a
+		// huge Index field.
+		tr.active = true
+		idx := data.Chunk.Index
+		if idx < 0 || idx >= maxTextStreams {
+			dLog("dsh: assistant/chunk contentIndex out of range",
+				"content_index", idx,
+				"max", maxTextStreams)
+			return nil
+		}
+		b, ok := tr.textBuf[idx]
+		if !ok {
+			b = &strings.Builder{}
+			tr.textBuf[idx] = b
+		}
+		b.Grow(256)
+		b.WriteString(data.Chunk.Text)
+		return nil
+
+	case "reasoning-delta":
+		// Dashboard parity: reasoning goes to its OWN buffer, never
+		// to textBuf. We do not emit per-delta (would split the
+		// folded view into one OutThinking per token); instead we
+		// wait for block-end{type:"reasoning"} which carries the
+		// whole assembled reasoning block.
+		// active=true: a reasoning-only step should still produce
+		// EventAgentDone at turn/end (so receipt finalises).
+		tr.active = true
+		idx := data.Chunk.Index
+		if idx < 0 || idx >= maxTextStreams {
+			dLog("dsh: assistant/chunk reasoning contentIndex out of range",
+				"content_index", idx,
+				"max", maxTextStreams)
+			return nil
+		}
+		b, ok := tr.reasoningBuf[idx]
+		if !ok {
+			b = &strings.Builder{}
+			tr.reasoningBuf[idx] = b
+		}
+		b.WriteString(data.Chunk.Text)
+		return nil
+
+	case "block-end":
+		// Block-end is the authoritative carrier of a reasoning
+		// block's full text. Pre-fix this branch didn't exist; the
+		// whole reasoning-delta → block-end sequence was lost.
+		// We emit "[思考] ..." with the local thinkingPrefix
+		// constant (mirrors pi / codex) so the downstream
+		// gateway/outbound/translate.go routes the resulting
+		// OutboundMessage to OutThinking rather than OutReply.
+		tr.active = true
+		if data.Chunk.Block == nil {
+			return nil
+		}
+		if data.Chunk.Block.Type == "reasoning" && data.Chunk.Block.Text != "" {
+			idx := data.Chunk.Index
+			if tr.reasoningEmitted[idx] {
+				// Already emitted via assistant/message path —
+				// suppress duplicate.
+				return nil
+			}
+			tr.reasoningEmitted[idx] = true
+			// Clear the per-block accumulator once consumed so
+			// memory doesn't grow over a long turn.
+			delete(tr.reasoningBuf, idx)
+			return []agent.AgentEvent{{
+				Kind: agent.EventAgentText,
+				Text: thinkingPrefix + data.Chunk.Block.Text,
+			}}
+		}
+		// block-end for text: text-delta already accumulated into
+		// textBuf; boundary flush at assistant/message / tool/call /
+		// turn/end handles it. block-end for tool-call: the
+		// independent tool/call path handles it. No-op here.
+		return nil
+
+	case "block-start", "tool-call-delta", "usage", "finish":
+		// Dashboard feeds these to PartialAccumulator for projection
+		// state only — they don't render. Same posture here.
+		// usage arrives on assistant/message as data.Usage, which
+		// we already handle. finish / stopReason flows via turn/end.
+		// tr.active NOT set: none of these types are observed
+		// content from the model — a turn composed solely of
+		// usage chunks should not synthesize EventAgentResult.
 		return nil
 	}
-	b, ok := tr.textBuf[idx]
-	if !ok {
-		b = &strings.Builder{}
-		tr.textBuf[idx] = b
-	}
-	b.Grow(256)
-	b.WriteString(data.Chunk.Text)
+
+	// Unknown / future chunk types — debug-log only, no event, and
+	// critically NO tr.active flip (preserves the F-52 phantom-Done
+	// guard invariant).
+	dLog("dsh: assistant/chunk unknown type: %q", data.Chunk.Type)
 	return nil
 }
 
@@ -256,6 +369,67 @@ func handleAssistantChunk(env sessionEventEnvelope, view json.RawMessage, tr *tr
 // assistant message into pendingText for tool-boundary flush.
 // F-52 invariant: never emit EventAgentText here — flush is the
 // tool/call path's job.
+// handleAssistantMessage ingests one assistant/message envelope and
+// folds its content blocks into AgentEvents. Per-block-type routing
+// mirrors the dashboard's toAssistantBlocks (dsh-client-runtime/
+// .../conversation.d.ts): text blocks → reply, reasoning blocks
+// → thinking (via local thinkingPrefix → gateway OutThinking),
+// tool-call blocks → suppressed (handled by the independent
+// tool/call path to avoid double-emit).
+//
+// F-DSH-DASHBOARD-PARITY (2026-08-16): pre-fix this used
+// pickText(content) which filtered content to type=="text" only,
+// dropping reasoning entirely. Splitting the switch on b.Type is
+// the fix.
+// handleAssistantMessage ingests one assistant/message envelope and
+// folds its content blocks into AgentEvents. Per-block-type routing
+// mirrors the dashboard's toAssistantBlocks (dsh-client-runtime/
+// .../conversation.d.ts): text blocks → reply; reasoning blocks →
+// suppressed (already emitted via block-end{type:"reasoning"} in
+// handleAssistantChunk); tool-call blocks → suppressed (handled by
+// the independent tool/call path to avoid double-emit).
+//
+// F-DSH-DASHBOARD-PARITY (2026-08-16): pre-fix this used
+// pickText(content) which filtered content to type=="text" only,
+// dropping reasoning entirely. Splitting the switch on b.Type is
+// the fix.
+//
+// Reasoning-emission invariant: reasoning content blocks are NOT
+// emitted here. block-end{type:"reasoning"} in handleAssistantChunk
+// is the single source of truth for thinking text. The content
+// block in assistant/message is the same data shipped again for
+// durable-log purposes — emitting from both paths would double
+// the user's thinking card. This is why reasoningEmitted in the
+// translator is keyed by blockIndex (only block-end knows it).
+// handleAssistantMessage ingests one assistant/message envelope and
+// folds its content blocks into AgentEvents. Per-block-type routing
+// mirrors the dashboard's toAssistantBlocks (dsh-client-runtime/
+// .../conversation.d.ts): text blocks → reply; reasoning blocks →
+// suppressed (already emitted via block-end{type:"reasoning"} in
+// handleAssistantChunk); tool-call blocks → suppressed (handled by
+// the independent tool/call path to avoid double-emit).
+//
+// F-DSH-DASHBOARD-PARITY (2026-08-16): pre-fix this used
+// pickText(content) which filtered content to type=="text" only,
+// dropping reasoning entirely. Splitting the switch on b.Type is
+// the fix.
+//
+// Reasoning-emission invariant: reasoning content blocks are NOT
+// emitted here. block-end{type:"reasoning"} in handleAssistantChunk
+// is the single source of truth for thinking text. The content
+// block in assistant/message is the same data shipped again for
+// durable-log purposes — emitting from both paths would double
+// the user's thinking card. This is why reasoningEmitted in the
+// translator is keyed by blockIndex (only block-end knows it).
+//
+// F-52 state-machine contract (preserved from pre-fix): after
+// emitting text blocks, stash the joined text on tr.pendingText
+// AND tr.lastText so handleTurnEnd's Result.Text fallback carries
+// the reply (not "Done."), and mark textDelivered=true so
+// handleToolCall won't re-flush the same text. Pre-fix this was
+// the only emit path; my refactor moved to per-block emit but
+// must keep the state-machine side effects or the result card
+// degenerates.
 func handleAssistantMessage(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
 	var data assistantMessageData
 	if err := json.Unmarshal(env.Data, &data); err != nil {
@@ -263,9 +437,80 @@ func handleAssistantMessage(env sessionEventEnvelope, view json.RawMessage, tr *
 		return nil
 	}
 	tr.active = true
-	tr.pendingText = pickText(data.Message.Content)
-	tr.lastText = tr.pendingText
-	return nil
+
+	// Per-turn usage block → flows into EventAgentResult.Usage at
+	// turn/end (which the runtime's receipt-footer Line 2 already
+	// renders via gateway/outbound/translate.go → feishu
+	// usage_footer.go). Pre-fix this was dropped on the floor.
+	if u := usageToAgent(data.Usage); u != nil {
+		tr.lastUsage = u
+	}
+
+	var evs []agent.AgentEvent
+	var joined strings.Builder
+	for _, b := range data.Message.Content {
+		switch b.Type {
+		case "text":
+			// Dashboard parity: finalized text becomes one reply
+			// block. We emit per-block (not via pendingText) so
+			// the text lands on OutReply even when no tool call
+			// follows in the turn. Pre-fix relied on tool/call or
+			// turn/end boundary to flush, which delayed the reply
+			// (and dropped it entirely on tool-less turns).
+			if b.Text != "" {
+				evs = append(evs, agent.AgentEvent{
+					Kind: agent.EventAgentText,
+					Text: b.Text,
+				})
+				// Mirror into the F-52 state machine so
+				// handleTurnEnd's Result.Text fallback carries
+				// the reply (not "Done."). Joined text from all
+				// text blocks in this message.
+				if joined.Len() > 0 {
+					joined.WriteByte('\n')
+				}
+				joined.WriteString(b.Text)
+			}
+		case "reasoning":
+			// Suppressed — see reasoning-emission invariant above.
+			// block-end already covered this block; we drop the
+			// durable-log duplicate. If dsh ever omits the
+			// block-end frame (regression), reasoning leaks will
+			// be visible via the unknownCount in DumpWireStats.
+		case "tool-call":
+			// Suppressed: handled by the independent tool/call
+			// path (handleToolCall) which is the canonical
+			// source of EventAgentToolStart. Avoid double-emit.
+		case "image":
+			// dsh assistant-side image output is baseline-only;
+			// not produced in practice today. No-op.
+		case "tool-result":
+			// tool-result shouldn't appear in an assistant
+			// message's content[] — it has its own event
+			// (tool/result) handled by handleToolResult.
+			// Defensive no-op.
+		default:
+			// Unknown block type — dashboard treats it as
+			// AssistantBlock{kind:"other"} and renders generically.
+			// We no-op rather than guess a render. dLog the type
+			// so ops can see if dsh adds new block types we
+			// haven't taught the bridge.
+			dLog("dsh: assistant/message unknown content block type: %q", b.Type)
+		}
+	}
+
+	// F-52 sync: stash joined text + mark delivered so handleToolCall
+	// won't re-flush and handleTurnEnd's fallback can read it.
+	// textDelivered=true matters: handleToolCall flushes
+	// tr.pendingText as EventAgentText unconditionally (it can't
+	// tell whether the flush is a duplicate).
+	if joined.Len() > 0 {
+		joinedText := joined.String()
+		tr.pendingText = joinedText
+		tr.lastText = joinedText
+		tr.textDelivered = true
+	}
+	return evs
 }
 
 // handleToolCall flushes pendingText at the tool boundary (F-52) and
@@ -280,7 +525,13 @@ func handleToolCall(env sessionEventEnvelope, view json.RawMessage, tr *translat
 	tr.active = true
 
 	events := make([]agent.AgentEvent, 0, 2)
-	if tr.pendingText != "" {
+	// Flush pendingText only if it hasn't been delivered yet. Pre-fix
+	// the only emit path was this flush, so textDelivered was always
+	// false here; after F-DSH-DASHBOARD-PARITY (2026-08-16),
+	// handleAssistantMessage emits per-block and sets
+	// textDelivered=true — without this guard, every tool boundary
+	// after a finalized message would duplicate the text.
+	if tr.pendingText != "" && !tr.textDelivered {
 		text := tr.pendingText
 		events = append(events, agent.AgentEvent{
 			Kind: agent.EventAgentText,
@@ -379,6 +630,8 @@ func handleTurnStart(env sessionEventEnvelope, view json.RawMessage, tr *transla
 	tr.active = true
 
 	clear(tr.textBuf)
+	clear(tr.reasoningBuf)
+	clear(tr.reasoningEmitted)
 	tr.thinkBuf.Reset()
 	tr.pendingText = ""
 	tr.lastText = ""
@@ -395,6 +648,8 @@ func handleTurnStart(env sessionEventEnvelope, view json.RawMessage, tr *transla
 	// next View. tasks are session-scoped, not turn-scoped —
 	// they survive via the next todo/write or projection.
 	st.inflight = nil
+	st.steps = nil
+	st.stepCreated = false
 	return nil
 }
 
@@ -416,7 +671,11 @@ func handleTurnEnd(env sessionEventEnvelope, view json.RawMessage, tr *translato
 			text = tr.lastText
 		}
 		if text == "" {
-			text = "Done."
+			if data.StopReason == "abort" {
+				text = "Stopped."
+			} else {
+				text = "Done."
+			}
 		}
 		usage := tr.lastUsage
 		events = append(events, agent.AgentEvent{
@@ -429,11 +688,15 @@ func handleTurnEnd(env sessionEventEnvelope, view json.RawMessage, tr *translato
 			},
 		})
 	}
+	doneReason := "settled"
+	if data.StopReason == "abort" {
+		doneReason = "interrupted"
+	}
 	events = append(events, agent.AgentEvent{
 		Kind: agent.EventAgentDone,
 		Done: &agent.AgentDoneEvent{
 			ExitCode: 0,
-			Reason:   "settled",
+			Reason:   doneReason,
 			Usage:    tr.lastUsage,
 		},
 	})
@@ -476,7 +739,9 @@ func handleTodoWrite(env sessionEventEnvelope, view json.RawMessage, tr *transla
 func handleTodoUpdate(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
 	// Set tr.active defensively even though handleTurnStart has
 	// typically already set it for this turn: a future dsh version
-	// may ship todo/update before turn/start (session.fork
+	// may ship todo/update before turn/start (session.fork is
+		// no longer used; this comment kept for context on why
+		// we defensively set active=true here)
 	// resume edge case), and the F-52 phantom-Done guard depends
 	// on tr.active being true at turn/end. Setting it here is
 	// safe — the only way it gets cleared is at turn/start or
@@ -496,18 +761,15 @@ func handleTodoDelete(env sessionEventEnvelope, view json.RawMessage, tr *transl
 }
 
 // handleApprovalAsked is the session/event approval/asked entry.
-// Previously a no-op (returned nil) because the mux-frame `case
-// "approval/asked"` in handle_mux.go drove the actual approval
-// flow via driver.handleInlineApproval. But dsh ships approval/
-// asked as a session/event envelope in some versions (per
-// permissions.go's own comment on handleInlineApproval: "the
-// session/event approval/asked entry"). The old "registry hit +
-// return nil" silently dropped those approvals.
+// Mux also has a top-level `approval/asked` method (handle_mux.go)
+// that calls handleInlineApproval directly — that path is outside
+// the dispatcher lock. This handler covers the session/event
+// envelope form. If dispatcher.d is nil (test-only), return nil
+// rather than panicking.
 //
-// This handler now mirrors the mux-frame path: decodes the same
-// approval/asked payload (approvalAskedData) and routes through
-// driver.handleInlineApproval. If dispatcher.d is nil (test-only),
-// the handler returns nil silently rather than panicking.
+// MUST NOT call driver.deliver / handleInlineApproval here: both
+// would run while translator.mu + wireState.mu are held. Return
+// the EventAgentPermission so dispatch delivers after unlock.
 func handleApprovalAsked(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
 	if d == nil {
 		return nil
@@ -517,8 +779,23 @@ func handleApprovalAsked(env sessionEventEnvelope, view json.RawMessage, tr *tra
 		dLog("dsh: handleApprovalAsked decode: %v", err)
 		return nil
 	}
-	d.handleInlineApproval(aa.ToolCallID, aa.ToolName, aa.Action, optionLabels(aa.Options))
-	return nil
+	if aa.ToolCallID == "" {
+		return nil
+	}
+	options := optionLabels(aa.Options)
+	if len(options) == 0 {
+		options = []string{"approve", "decline"}
+	}
+	respCh := d.registerApproval("evt-" + aa.ToolCallID)
+	return []agent.AgentEvent{{
+		Kind: agent.EventAgentPermission,
+		Permission: &agent.AgentPermissionRequest{
+			Tool:       aa.ToolName,
+			Action:     aa.Action,
+			Options:    options,
+			ResponseCh: respCh,
+		},
+	}}
 }
 
 // ─── F-dsh-shared-host §5 new event handlers ────────────────────────
@@ -546,6 +823,14 @@ func handleDebugOnly(env sessionEventEnvelope, view json.RawMessage, tr *transla
 	return nil
 }
 
+// thinkingPrefix is the sentinel that gets prepended to every
+// thinking block before emit. The downstream gateway translate
+// (internal/gateway/outbound/translate.go) recognises this prefix
+// and routes the resulting OutboundMessage to OutThinking rather
+// than OutReply. Must stay in sync with the gateway constant.
+// Mirrors the same pattern in pi/translate.go and codex/translate.go.
+const thinkingPrefix = "[思考] "
+
 // handleUserMessageEcho is the same as handleDebugOnly but with a
 // stronger comment to flag the "do not emit" invariant. If a
 // future change needs to expose this event (e.g. for an IM channel
@@ -555,23 +840,22 @@ func handleUserMessageEcho(env sessionEventEnvelope, view json.RawMessage, tr *t
 	return nil
 }
 
-// handleStepBoundary emits an EventStepBoundary on step start/end.
-// Used by the runtime's heartbeat (F-63) to refresh "agent is
-// working" indicators mid-turn (between turn/start and turn/end
-// dsh may emit zero or more step boundaries). Phase 2 follow-up:
-// wire EventStepBoundary to the heartbeat's per-step tick if
-// needed; for now we emit a minimal AgentEvent with Kind set
-// to a debug-only path. Stub returns nil today — left here so
-// the registration is in place and we have a clear extension
-// point.
+// handleStepBoundary maps dsh step/start and step/end onto the
+// existing Task pipeline (EventAgentTaskCreate / Update →
+// OutTaskCreate / OutTaskUpdate). There is no EventStepBoundary
+// kind; the Feishu checklist is the user-visible progress surface.
+//
+// Wire data is only {turn, step} — Subject is synthesised as
+// "Step N". Dispatcher already holds both mutexes; applyStepLocked
+// must not re-lock.
 func handleStepBoundary(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
-	dLog("dsh: step boundary %s", env.Type)
-	// TODO(F-dsh-shared-host Phase 3+): emit EventStepBoundary once
-	// the agent package gains the corresponding Kind. The mux
-	// stream emits step/start + step/end around each model
-	// inference + tool call; the runtime's heartbeat could use
-	// these to drive "agent is mid-step" status indicators.
-	return nil
+	tr.active = true
+	var data stepBoundaryData
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		dLog("dsh: step boundary decode: %v", err)
+		return nil
+	}
+	return st.applyStepLocked(env.Type, data)
 }
 
 // handleSessionTitle emits an EventAgentTitle (or equivalent) so
@@ -590,15 +874,14 @@ func handleSessionTitle(env sessionEventEnvelope, view json.RawMessage, tr *tran
 	if p.Title == "" {
 		return nil
 	}
-	// Stash on wireState so the runtime can read it during
-	// prompt-end / receipt render. We deliberately don't emit
-	// an AgentEvent here — the title is a derived display field,
-	// not an action.
-	st.mu.Lock()
+	// Dispatcher already holds st.mu (see eventDispatcher.dispatch).
+	// Re-locking here deadlocks the mux pump and the history
+	// backfill — both call dispatch — which is the
+	// "events=14 then silence / Feishu card never patches"
+	// failure from 2026-08-16 (test-resume-01 / test-new-01).
 	if st.title == "" {
 		st.title = p.Title
 	}
-	st.mu.Unlock()
 	dLog("dsh: title=%q", p.Title)
 	return nil
 }

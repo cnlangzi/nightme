@@ -276,8 +276,8 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
-		receiptsByUserMsgID:     make(map[string]*MessageReceipt),
-		pendingHeartbeats:      make(map[string]messages.HeartbeatSnapshot),
+		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		pendingHeartbeats:   make(map[string]messages.HeartbeatSnapshot),
 		messageStates:       messageStates,
 		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
@@ -1764,9 +1764,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			title = title + " (" + msg.Diagnostic.ExitKind.String() + ")"
 		}
 		card := &messages.Card{
-			Title:    title,
-			Body:     body,
-			Kind:     messages.CardKindError,
+			Title:     title,
+			Body:      body,
+			Kind:      messages.CardKindError,
 			RequestID: fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano()),
 		}
 		content, err := buildInteractiveCard(card)
@@ -1859,9 +1859,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// F-63: per-turn heartbeat follow-up emitted by the runtime
 		// handler BEFORE the policy chain. Routes to the receipt
 		// bound to msg.ReplyTo (userMsgID) and updates its header
-		// in place via PATCH. Receipt.ApplyHeartbeat enforces a 2s
-		// minimum interval to keep Feishu's PATCH rate limiter
-		// happy under dense thinking streams.
+		// in place via PATCH. Receipt.ApplyHeartbeat coalesces
+		// thinking-only updates (2s) so dense streams stay under
+		// Feishu's PATCH limiter; ToolCount bumps PATCH immediately.
 		//
 		// F-63.1: when the receipt doesn't exist yet (e.g. the
 		// first countable event lands BEFORE MessageQueued has

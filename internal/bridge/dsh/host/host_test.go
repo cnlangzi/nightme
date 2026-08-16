@@ -82,7 +82,6 @@ func newMockDSH(t *testing.T) *mockDSH {
 	mux.HandleFunc("/api/session.create", m.handleSessionCreate)
 	mux.HandleFunc("/api/session.prompt", m.handleSessionPrompt)
 	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
-	mux.HandleFunc("/api/session.fork", m.handleSessionFork)
 	mux.HandleFunc("/api/respond", m.handleRespond)
 	mux.HandleFunc("/api/events.mux", m.handleMuxWS)
 	mux.HandleFunc("/api/events.host", m.handleHostWS)
@@ -119,9 +118,6 @@ func (m *mockDSH) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 	writeRPC(w, rpcIDFromRequest(r), true, map[string]any{"accepted": true})
 }
 
-func (m *mockDSH) handleSessionFork(w http.ResponseWriter, r *http.Request) {
-	writeRPC(w, rpcIDFromRequest(r), true, map[string]any{"sessionId": "session-mock-fork-001"})
-}
 
 // handleRespond validates that the inbound body is a client-response
 // envelope (NOT client-request), records the body for assertions,

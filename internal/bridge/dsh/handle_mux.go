@@ -21,7 +21,9 @@ package dsh
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 )
 
 // warnLogger is the package-level slog handle. Cached once at
@@ -42,6 +44,21 @@ var warnLogger = slog.Default()
 //   - approval/asked    → driver.handleInlineApproval (permissions layer)
 //   - other mux methods → debug log only
 func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
+	// Panic recover: the mux pump goroutine in host.StreamHub
+	// dispatches every server-pushed frame through here. A panic
+	// in any case would propagate up into the stream.go
+	// readUntilClose loop and kill the mux connection — every
+	// subsequent reconnect would re-process the same bad frame
+	// and panic again. Recover + log so the mux pump survives.
+	defer func() {
+		if r := recover(); r != nil {
+			warnLogger.Error("dsh: mux frame handler panic recovered",
+				"method", method,
+				"rpc_id", rpcID,
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()))
+		}
+	}()
 	switch method {
 	case "session/subscribed":
 		// Baseline frame on stream open. Just log it; the
@@ -53,6 +70,7 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			return
 		}
 		dLog("dsh: subscribed", "session_id", sub.SessionID, "last_seq", sub.LastSeq)
+		d.bumpLastSeq(sub.LastSeq)
 
 	case "session/event":
 		var ev muxSessionEvent
@@ -71,10 +89,9 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		// doesn't double-record here.
 		//
 		// dispatchEvent dedupes by SessionEvent.seq against the
-		// lastSeq the backfill poll is also writing to. The mux
-		// path is the future-proofing seam; today the dsh's
-		// events.mux listener is wired to the wrong bus so only
-		// backfill actually delivers session/event frames.
+		// lastSeq the backfill poll is also writing to. Mux
+		// session/event is the live path after session.create
+		// attach; backfill only fills gaps.
 		d.dispatchEvent(env, ev.View)
 
 	case "session/projection":

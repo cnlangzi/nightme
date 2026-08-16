@@ -317,17 +317,39 @@ type turnEndData struct {
 	StopReason string `json:"stopReason,omitempty"`
 }
 
+// stepBoundaryData is the `data` body of step/start and step/end.
+// Captured wire (dsh 0.1.0-rc.6 session.history):
+//
+//	{"type":"step/start","seq":6,"data":{"turn":1,"step":1}}
+//	{"type":"step/end","seq":40,"data":{"turn":1,"step":1}}
+//
+// A step is one model-inference cycle (optionally with a tool call).
+// There is no title on the wire — the bridge synthesises "Step N"
+// for the OutTask* checklist.
+type stepBoundaryData struct {
+	Turn int `json:"turn"`
+	Step int `json:"step"`
+}
+
 // usageInfo mirrors dsh's LLM usage payload. We decode the minimum
 // fields nightme cares about for footer rendering.
+//
+// Field naming gap vs agent.UsageInfo: dsh calls them
+// CacheCreationTokens / CacheReadTokens (input-side cache accounting);
+// agent.UsageInfo names them CacheCreationInputTokens /
+// CacheReadInputTokens. Conversion happens in usageToAgent() so the
+// bridge boundary stays a single point of truth.
 type usageInfo struct {
-	InputTokens          int     `json:"inputTokens"`
-	OutputTokens         int     `json:"outputTokens"`
-	CacheCreationTokens  int     `json:"cacheCreationTokens,omitempty"`
-	CacheReadTokens      int     `json:"cacheReadTokens,omitempty"`
-	CostUSD              float64 `json:"costUsd,omitempty"`
-	ContextWindow        int     `json:"contextWindow,omitempty"`
-	ContextWindowPct     float64 `json:"contextWindowPct,omitempty"`
+	InputTokens         int     `json:"inputTokens"`
+	OutputTokens        int     `json:"outputTokens"`
+	CacheCreationTokens int     `json:"cacheCreationTokens,omitempty"`
+	CacheReadTokens     int     `json:"cacheReadTokens,omitempty"`
+	CostUSD             float64 `json:"costUsd,omitempty"`
+	ContextWindow       int     `json:"contextWindow,omitempty"`
+	ContextWindowPct    float64 `json:"contextWindowPct,omitempty"`
 }
+
+
 
 // compactionEndData is the `data` body of a compaction/end event.
 // One cycle = one EventCompaction. The envelope strip happens in
@@ -525,19 +547,6 @@ type sessionCreateValue struct {
 	SessionID string `json:"sessionId"`
 }
 
-// sessionForkValue is the `value` payload of an OK session.fork
-// response. dsh web's session.fork creates a NEW session (with a
-// new server-assigned sessionId) that carries the parent's event
-// history; the caller treats the returned id as the new live
-// sessionId for all subsequent session.prompt / session.cancel
-// calls. Wire shape is identical to session.create by design —
-// both endpoints hand back a "your new session is X" envelope.
-// Documented at docs/bridge/dsh.md §1.3 ("从现有 session 开新
-// (daemon 重启续接用)").
-type sessionForkValue struct {
-	SessionID string `json:"sessionId"`
-}
-
 // ─── /api/session.list response ───────────────────────────────────
 
 // Session is one entry in the session.list result. Wire shape
@@ -557,14 +566,12 @@ type sessionForkValue struct {
 //   - UpdatedAt   — unix millis of the last write. Use this as
 //                   the "most recent" sort key for picker UI.
 //   - Running     — bool; true while the session has an in-flight
-//                   turn. Forks of a running session may behave
-//                   differently (or be rejected) — see the
-//                   fork-unavailable error class.
+//                   turn. Resuming a session that has no completed
+//                   turn is fine — the bridge just attaches and
+//                   waits for new events. (session.fork is no
+//                   longer used by this bridge.)
 //   - Blank       — bool; true for sessions with zero completed
-//                   turns. dsh's session.fork refuses blank
-//                   sessions with error code "fork-unavailable"
-//                   ("no completed turn to fork from"). The
-//                   picker should pre-filter blanks for a
+//                   turns. Picker should pre-filter blanks for a
 //                   smoother UX.
 //   - CWD         — directory the session was created against.
 //                   Used by the picker to filter sessions for the

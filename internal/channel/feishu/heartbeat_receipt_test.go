@@ -244,11 +244,13 @@ func TestRenderHeartbeatHeader_Direct(t *testing.T) {
 
 // TestBuildReceiptCard_HeartbeatHeader_MutualExclusion pins
 // the F-63 §3.6 four-way contract end-to-end through buildReceiptCard:
-//   (a) hb counts all zero + entries/tasks empty → "🤖 Working" (front)
-//   (b) hb ThinkCount>0 + ToolCount==0 → "💭 N · ⏱ HH:MM:SS" (back, no front)
-//   (c) hb ThinkCount==0 + ToolCount>0 → "🔧 M · ⏱ HH:MM:SS" (back, no front)
-//   (d) hb ThinkCount>0 + ToolCount>0 + LastBeatAt → full back line, no front
-//   (e) hb counts all zero but entries non-empty → no header at all
+//
+//	(a) hb counts all zero + entries/tasks empty → "🤖 Working" (front)
+//	(b) hb ThinkCount>0 + ToolCount==0 → "💭 N · ⏱ HH:MM:SS" (back, no front)
+//	(c) hb ThinkCount==0 + ToolCount>0 → "🔧 M · ⏱ HH:MM:SS" (back, no front)
+//	(d) hb ThinkCount>0 + ToolCount>0 + LastBeatAt → full back line, no front
+//	(e) hb counts all zero but entries non-empty → no header at all
+//
 // At no point do (a) and (b/c/d) ever produce a body that contains
 // BOTH "🤖 Working" AND a "💭 "/"🔧 " counter chip.
 func TestBuildReceiptCard_HeartbeatHeader_MutualExclusion(t *testing.T) {
@@ -266,21 +268,21 @@ func TestBuildReceiptCard_HeartbeatHeader_MutualExclusion(t *testing.T) {
 		{
 			name:    "front: empty snapshot, no entries/tasks",
 			entries: nil, tasks: nil,
-			hb: &messages.HeartbeatSnapshot{},
+			hb:      &messages.HeartbeatSnapshot{},
 			wantHas: []string{"🤖 Working"},
 			wantNot: []string{"💭 ", "🔧 ", "⏱ "},
 		},
 		{
 			name:    "back: think only",
 			entries: nil, tasks: nil,
-			hb: &messages.HeartbeatSnapshot{ThinkCount: 1, LastBeatAt: now},
+			hb:      &messages.HeartbeatSnapshot{ThinkCount: 1, LastBeatAt: now},
 			wantHas: []string{"💭 1", "⏱ 14:35:22"},
 			wantNot: []string{"🤖 Working", "🔧 "},
 		},
 		{
 			name:    "back: tool only",
 			entries: nil, tasks: nil,
-			hb: &messages.HeartbeatSnapshot{ToolCount: 1, LastBeatAt: now},
+			hb:      &messages.HeartbeatSnapshot{ToolCount: 1, LastBeatAt: now},
 			wantHas: []string{"🔧 1", "⏱ 14:35:22"},
 			wantNot: []string{"🤖 Working", "💭 "},
 		},
@@ -308,7 +310,7 @@ func TestBuildReceiptCard_HeartbeatHeader_MutualExclusion(t *testing.T) {
 		{
 			name:    "no header: empty snapshot but entries present",
 			entries: []LogEntry{{Icon: "💬", Text: "first reply"}}, tasks: nil,
-			hb: &messages.HeartbeatSnapshot{},
+			hb:      &messages.HeartbeatSnapshot{},
 			wantHas: []string{"first reply"},
 			wantNot: []string{"🤖 Working", "💭 ", "🔧 ", "⏱ "},
 		},
@@ -493,6 +495,29 @@ func TestApplyHeartbeat_Throttled(t *testing.T) {
 	if r.heartbeat.ThinkCount != 5 {
 		t.Fatalf("receipt heartbeat ThinkCount = %d, want 5 (tracker must advance even when PATCH is throttled)",
 			r.heartbeat.ThinkCount)
+	}
+}
+
+// TestApplyHeartbeat_ToolCountBypassesThrottle — a ToolCount bump
+// inside the thinking throttle window still PATCHes. The SPEC.md
+// turn fired two Reads 1.94s apart; throttling the second left
+// the receipt at 🔧 1 while the thread had two call lines.
+func TestApplyHeartbeat_ToolCountBypassesThrottle(t *testing.T) {
+	r, bot := newTestReceipt(t)
+	r.heartbeatMinInterval = 2 * time.Second
+
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		ThinkCount: 1, LastBeatAt: time.Now(),
+	})
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		ThinkCount: 1, ToolCount: 1, LastBeatAt: time.Now(),
+	})
+	if got := len(bot.patches); got != 2 {
+		t.Fatalf("ToolCount bump PATCHes = %d, want 2 (must bypass thinking throttle)", got)
+	}
+	last := bot.patches[len(bot.patches)-1]
+	if !strings.Contains(last.Body, "🔧 1") {
+		t.Fatalf("PATCH body missing tool count: %s", last.Body)
 	}
 }
 

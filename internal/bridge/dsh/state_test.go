@@ -470,3 +470,4 @@ func TestWireState_TasksMap_UpdateOverwritesByID(t *testing.T) {
 		t.Errorf("x-1 status = %q", st.tasks["x-1"].Status)
 	}
 }
+

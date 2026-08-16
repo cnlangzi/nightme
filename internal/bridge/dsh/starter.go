@@ -97,12 +97,10 @@ func (s *Starter) Detect() error {
 // cfg.Workspace is the dsh session's cwd (passed to session.create).
 //
 // cfg.SessionID, when non-empty, triggers resume: the handshake
-// calls POST /api/session.fork {sessionId} which dsh web
-// translates into a NEW server-assigned session whose history
-// mirrors the parent's. On fork failure (transport error,
-// business error, server missing the requested id) we deliberately
-// refuse to spawn rather than silently fall back to session.create —
-// see handshakeSession in session.go for the strict-resume rationale.
+// calls POST /api/session.create {sessionId, cwd} which re-attaches
+// the existing session (dashboard select). On attach failure
+// (session-conflict, transport, mismatched id) we refuse to spawn
+// rather than silently mint a new session — see handshakeSession.
 //
 // PID is 0 in the shared-host architecture — the dsh subprocess
 // belongs to the daemon, not to this session. Phase 1.5 (lifecycle

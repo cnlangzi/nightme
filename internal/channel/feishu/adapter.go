@@ -2496,8 +2496,10 @@ func encodeCardJSON(v any) ([]byte, error) {
 //
 // hb (F-63) is the per-turn heartbeat snapshot. nil means "no
 // heartbeat observed yet" (first render of a fresh receipt); a
-// populated snapshot drives the "🤖 Working · 💭 N · � M · ⏱
-// HH:MM:SS" header rendered as Section 0.
+// populated snapshot (ThinkCount > 0 || ToolCount > 0) drives
+// the "💭 N · 🔧 M · ⏱ HH:MM:SS" back part rendered as Section 0.
+// The "🤖 Working" front part is a separate case — see the
+// switch below for the mutual-exclusion rule.
 //
 // Returns (body, elementCount, err). elementCount is the exact
 // number of elements buildReceiptCard appends to the body —
@@ -2512,28 +2514,42 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	elementCount := 0
 
 	// Section 0 (placeholder header): F-63 — heartbeat-driven
-	// header. Three states:
-	//   1. hb != nil and !hb.Empty() — render the dynamic
-	//      "🤖 Working · 💭 N · 🔧 M · ⏱ HH:MM:SS" line. This is
-	//      the post-F-63 hot path: the receipt always shows
-	//      progress as long as the agent has produced any
-	//      activity in the turn.
-	//   2. hb == nil OR hb.Empty() AND no entries/tasks — render
-	//      the bare "� Working" placeholder (no dots, no
-	//      counters, no time) so the receipt card still has
-	//      something visible at MessageForwarded time (before any
-	//      event has landed on the tracker). Uses the SAME
-	//      robot emoji as the populated state so the visual
-	//      transition at first activity is a content add, not
-	//      a style swap — the user previously complained about
-	//      the ⌨️→🤖 swap reading as two different affordances.
-	//      The moment any OutThinking / OutToolStart fires, the
-	//      tracker populates hb and state 1 takes over.
-	//   3. hb == nil OR hb.Empty() AND entries/tasks non-empty —
-	//      no header at all (rolling-log starts at the top; the
-	//      entries themselves communicate "the agent is back").
+	// header. Two states, mutually exclusive (二选一):
+	//
+	//   Back part: hb != nil && (ThinkCount > 0 || ToolCount > 0)
+	//     → render "💭 N · 🔧 M · ⏱ HH:MM:SS" (no "🤖 Working"
+	//     prefix). This is the post-F-63 hot path: the receipt
+	//     shows progress as long as the agent has produced any
+	//     think/tool activity in the turn. renderHeartbeatHeader
+	//     is the single source of truth for this line shape and
+	//     NEVER emits the "🤖 Working" prefix — see its doc.
+	//
+	//   Front part: hb == nil OR no counters, AND no entries/tasks
+	//     → render the bare "🤖 Working" placeholder (no dots, no
+	//     counters, no time) so the receipt card still has
+	//     something visible at MessageForwarded time (before any
+	//     think/tool event has landed on the tracker). Uses the
+	//     SAME robot emoji as the back part so the visual
+	//     transition at first activity is a content add, not a
+	//     style swap — the user previously complained about the
+	//     ⌨️→🤖 swap reading as two different affordances. The
+	//     moment any OutThinking / OutToolStart fires, the
+	//     tracker populates hb and the back part takes over.
+	//
+	// When neither state fires (e.g. entries/tasks already
+	// non-empty but no heartbeat yet), no header at all —
+	// rolling-log starts at the top; the entries themselves
+	// communicate "the agent is back".
+	//
+	// Why the strict ThinkCount/ToolCount gate (vs. !hb.Empty()):
+	// ApplyHeartbeat only PATCHes on count change (see
+	// receipt.go:ApplyHeartbeat's `changed` short-circuit), so
+	// the receipt's snapshot cannot be in the "LastBeatAt set,
+	// counts all zero" state at render time. Routing that case
+	// to the front part is therefore a safe fallback — receipt
+	// users will never see a "💭 0 · ⏱ ..." line.
 	switch {
-	case hb != nil && !hb.Empty():
+	case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0):
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": renderHeartbeatHeader(hb),
@@ -2620,19 +2636,35 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 
 // renderHeartbeatHeader (F-63) formats the per-turn heartbeat
 // snapshot into the receipt card's Section 0 markdown element.
-// Emitted format:
+// Emits ONLY the back part of the header (counters + last beat);
 //
-//	🤖 Working · 💭 3 · 🔧 12 · ⏱ 14:35:22
+//	💭 3 · 🔧 12 · ⏱ 14:35:22
+//
+// The "🤖 Working" prefix is intentionally NOT included here —
+// the front/back halves are mutually exclusive (see buildReceiptCard
+// switch): a populated snapshot drives the back part, the bare
+// "🤖 Working" placeholder is rendered as a separate case when no
+// activity has been observed yet.
 //
 // Counter chips are omitted when zero (think=0 produces no 💭
-// chip; the line stays useful for "agent is alive but doing
-// plain replies" turns). LastBeatAt is omitted when zero
-// (pre-event receipt).
+// chip). LastBeatAt is omitted when zero.
+//
+// Mutual exclusion is the caller's responsibility. buildReceiptCard
+// is the single in-tree caller and only invokes this when
+// ThinkCount > 0 || ToolCount > 0. Any future direct caller (a new
+// renderer, an admin/debug tool, a test) MUST gate on the same
+// condition before calling — otherwise the front-part "🤖 Working"
+// placeholder that buildReceiptCard renders in the "no activity"
+// branch would co-exist with this function's back-part output,
+// breaking the §3.6 mutual-exclusion contract. The
+// TestRenderHeartbeatHeader_OmitsWorkingPrefix test pins this
+// boundary: renderHeartbeatHeader's output must never contain
+// "🤖 Working" in any substring position.
 func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 	if hb == nil {
 		return ""
 	}
-	parts := []string{"🤖 Working"}
+	var parts []string
 	if hb.ThinkCount > 0 {
 		parts = append(parts, fmt.Sprintf("💭 %d", hb.ThinkCount))
 	}

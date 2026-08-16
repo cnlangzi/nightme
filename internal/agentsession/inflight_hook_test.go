@@ -84,6 +84,9 @@ func (d *errDriver) SendPermission(resp string) error { return nil }
 func (d *errDriver) Reset(ctx context.Context) error { return nil }
 func (d *errDriver) Close() error                    { return nil }
 func (d *errDriver) Stop(ctx context.Context) error  { return nil }
+func (d *errDriver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	return nil
+}
 
 func TestSubmit_PersistsInFlightMessages(t *testing.T) {
 	as, fp := makeReadyAS(t, nil)

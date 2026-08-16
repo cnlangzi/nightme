@@ -32,6 +32,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/procutil"
 )
 
 // eventBufferSize caps the events channel fed to the runtime's
@@ -994,6 +995,80 @@ func (d *driver) Stop(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+// Keepalive is the driver.Keepalive implementation for the
+// dsh bridge. dsh is a "shared-host" model — even when this
+// AS's subprocess is alive, the WS host connection can be
+// severed (server-side restart, network blip), leaving the
+// bridge with a closed hostWS that makes the next SendBlocks
+// silently fail. We probe BOTH:
+//
+//   1. The subprocess OS PID (procutil.AlivePID).
+//   2. The WS host connection (hostWS not closed).
+//
+// If either is dead, the chat layer's onRecover is invoked
+// so it can spawn a fresh dsh process AND redial the host
+// WS, then replay the saved session_id through
+// session.list / session.fork.
+//
+// See agent.driver.Keepalive for the full contract.
+func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	if err := procutil.AlivePID(d.cmdPID()); err != nil {
+		dLog("dsh: subprocess dead, invoking recovery", "pid", d.cmdPID())
+		return d.invokeRecover(ctx, onRecover, "subprocess dead")
+	}
+	if d.hostWS == nil {
+		dLog("dsh: host WS nil, invoking recovery")
+		return d.invokeRecover(ctx, onRecover, "host WS nil")
+	}
+	// IsHealthy-style check: gorilla/websocket doesn't expose
+	// a public IsAlive, but the underlying conn has a close
+	// code field that gets set when the peer sends a close
+	// frame. We treat "hostWS has been closed" as dead.
+	// Tighten if needed by adding a heartbeat ping in dialHost.
+	if d.hostCloseSeen() {
+		dLog("dsh: host WS closed, invoking recovery")
+		return d.invokeRecover(ctx, onRecover, "host WS closed")
+	}
+	return nil
+}
+
+// invokeRecover centralizes the "onRecover is nil → error" check
+// so the three Keepalive branches above stay symmetric.
+func (d *driver) invokeRecover(ctx context.Context, onRecover func(context.Context) error, reason string) error {
+	if onRecover == nil {
+		return fmt.Errorf("dsh: %s and no recovery callback", reason)
+	}
+	return onRecover(ctx)
+}
+
+// cmdPID returns the subprocess OS PID, or 0 if no subprocess
+// is currently tracked (e.g. after Close). Lock-free read —
+// Close() is the only writer of d.cmd (under closeOnce) and
+// serializes against any in-flight Keepalive by virtue of
+// closing exitDone before returning. A torn read here is OK
+// for a best-effort liveness check; if it reports alive when
+// the cmd is mid-Close, the next Keepalive or SendBlocks call
+// surfaces the truth.
+func (d *driver) cmdPID() int {
+	if d.cmd == nil || d.cmd.Process == nil {
+		return 0
+	}
+	return d.cmd.Process.Pid
+}
+
+// hostCloseSeen returns true when the host WS connection has
+// been closed (peer sent a close frame, or d.hostWS.Close was
+// called). dsh doesn't expose a public IsAlive on gorilla/ws;
+// we use the nil check on d.hostWS as the canonical signal.
+// The close path nulls d.hostWS before closing it, so a nil
+// read here reliably means "host WS is no longer usable".
+//
+// Lock-free for the same reason as cmdPID — Close() serializes
+// the writer side via closeOnce.
+func (d *driver) hostCloseSeen() bool {
+	return d.hostWS == nil
 }
 
 // ─── wire content blocks ──────────────────────────────────────────────

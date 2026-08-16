@@ -2,6 +2,7 @@ package chatsession
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -24,7 +25,7 @@ type spawnerRecording struct {
 }
 
 func (s *spawnerRecording) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.Agent, error) {
-	rec := newRecordingAgentSession(42000 + s.idx)
+	rec := newRecordingAgentSession(os.Getpid())
 	s.sessions = append(s.sessions, rec)
 	s.idx++
 	return rec.buildLive(), nil

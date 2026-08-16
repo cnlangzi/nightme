@@ -22,6 +22,7 @@ package chatsession
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -492,7 +493,7 @@ func makeSpawnedAS(t *testing.T, cs *ChatSession, agentName string, parent conte
 
 	as.Activate(parent)
 
-	fake := newFakeAgentSession(99000)
+	fake := newFakeAgentSession(os.Getpid())
 	as.SetHandleForTest(fake.buildLive())
 	as.SetPIDForTest(fake.PID())
 	as.SetStatusForTest(StatusRunning)

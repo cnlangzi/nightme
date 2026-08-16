@@ -51,6 +51,9 @@ func (d *callRecordingASDriver) SendPermission(resp string) error {
 func (d *callRecordingASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *callRecordingASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *callRecordingASDriver) Close() error                   { return d.inner.Close() }
+func (d *callRecordingASDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
+	return nil
+}
 
 // failingNewAS is a fake whose New always returns errInjected. Used to
 // exercise the partial-failure path.
@@ -80,6 +83,9 @@ func (d *failingNewASDriver) SendPermission(resp string) error {
 func (d *failingNewASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *failingNewASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *failingNewASDriver) Close() error                   { return d.inner.Close() }
+func (d *failingNewASDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
+	return nil
+}
 
 func (f *failingNewAS) New(_ context.Context) error { return errInjected }
 
@@ -501,6 +507,9 @@ func (d *restartErrASDriver) SendPermission(resp string) error {
 func (d *restartErrASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *restartErrASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *restartErrASDriver) Close() error                   { return d.inner.Close() }
+func (d *restartErrASDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
+	return nil
+}
 
 // fakeRestartSpawner is a minimal chatsession.Spawner that returns a
 // pre-built handle. The wrapper only needs Spawn(ctx, name, cwd, args,

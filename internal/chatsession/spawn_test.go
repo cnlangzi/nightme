@@ -3,14 +3,14 @@ package chatsession
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/registry"
-
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // fakeAgentSession is a minimal agent.Agent implementation
@@ -24,6 +24,16 @@ type fakeAgentSession struct {
 }
 
 func newFakeAgentSession(pid int) *fakeAgentSession {
+	// Default to the test process's real PID when the caller passes
+	// a fake sentinel. The PID liveness backstop in Submit rejects
+	// any PID whose syscall.Kill(pid, 0) fails, which would loop
+	// tryAutoRecover forever when the test has no real spawner
+	// wired to recover from a "dead" PID. Tests that need a stable
+	// PID for assertion can still pass any int (the PID() method
+	// returns it verbatim) — but those tests must not call Submit.
+	if pid <= 0 {
+		pid = os.Getpid()
+	}
 	return &fakeAgentSession{
 		pid:    pid,
 		events: make(chan agent.AgentEvent, 32),
@@ -59,6 +69,9 @@ func (d *fakeDriver) SendPermission(resp string) error { return d.inner.SendPerm
 func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ctx) }
 func (d *fakeDriver) Stop(ctx context.Context) error    { return d.inner.Stop(ctx) }
 func (d *fakeDriver) Close() error                      { return d.inner.Close() }
+func (d *fakeDriver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
+	return nil
+}
 
 func (f *fakeAgentSession) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	f.mu.Lock()

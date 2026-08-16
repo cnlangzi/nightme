@@ -1255,6 +1255,14 @@ func (cs *ChatSession) TryFlush() error {
 	// Submit runs OUTSIDE cs.mu and outside the queue's mutex —
 	// SendBlocks can block on a hung prompt RPC. Errors mean
 	// "queue stays put" — we Rewind so the items are retryable.
+	//
+	// Submit's Keepalive backstop internally handles the
+	// "bridge reported dead" case (PID gone for subprocess
+	// bridges, WS host severed for dsh, transport nil for
+	// pty/acp) — it demotes + respawns in one cohesive step
+	// before SendBlocks lands. We don't need a separate
+	// auto-recover here; the chat layer just surfaces any
+	// persistent error from Submit.
 	err := as.Submit(p)
 	if err != nil {
 		cs.queue.Rewind()
@@ -1279,6 +1287,8 @@ func (cs *ChatSession) TryFlush() error {
 	}
 	return nil
 }
+
+// writebackMessageState (CS-AS 边界重构 Phase 1) fires the
 
 // writebackMessageState (CS-AS 边界重构 Phase 1) fires the
 // PromptEndBus event for a just-ended Prompt. Post-refactor the
@@ -1514,6 +1524,11 @@ func (cs *ChatSession) attachAgentSessionLocked(as *AgentSession) {
 			return asFile.Upsert(e)
 		})
 	}
+	// Wire the spawner so Submit's liveness backstop can
+	// rebuild the bridge via spawner.Spawn when the bridge's
+	// Keepalive detects a dead state. Without this, the
+	// recovery callback in Submit has nothing to call.
+	as.SetSpawner(cs.spawner)
 	cs.pool[key] = as
 }
 

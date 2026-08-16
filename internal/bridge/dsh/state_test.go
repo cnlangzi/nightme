@@ -158,7 +158,7 @@ func TestWireState_ApplyEvent_TodoWriteWithoutID_FallsBackGracefully(t *testing.
 func TestWireState_ApplyProjection_UpdatesTasks(t *testing.T) {
 	st := newWireState()
 	proj := projectionEnvelope{
-		Projection: "todo",
+		Key: "todo",
 		Value: []byte(`{
 			"items":[
 				{"id":"p-1","content":"From projection","status":"completed"}
@@ -198,7 +198,7 @@ func TestWireState_ApplyProjection_UpdatesTasks(t *testing.T) {
 func TestWireState_ApplyProjection_UnknownProjection_NoOp(t *testing.T) {
 	st := newWireState()
 	proj := projectionEnvelope{
-		Projection: "title",
+		Key: "title",
 		Value:      []byte(`{"title":"My Session"}`),
 	}
 	events := st.applyProjection(proj)
@@ -335,7 +335,7 @@ func TestWireState_ApplyTodoWrite_DoesNotSilentlyEmitEmptyItems(t *testing.T) {
 func TestWireState_ApplyTodoProjection_FieldNameDrift_SurfacesFailure(t *testing.T) {
 	st := newWireState()
 	proj := projectionEnvelope{
-		Projection: "todo",
+		Key: "todo",
 		Value: []byte(`{
 			"items":[
 				{"uuid":"u-1","subject":"Read README","taskStatus":"pending"},

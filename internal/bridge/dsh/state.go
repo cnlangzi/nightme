@@ -300,7 +300,7 @@ func (s *wireState) applyProjection(proj projectionEnvelope) []agent.AgentEvent 
 
 // applyProjectionLocked assumes the caller holds s.mu.
 func (s *wireState) applyProjectionLocked(proj projectionEnvelope) []agent.AgentEvent {
-	switch proj.Projection {
+	switch proj.Key {
 	case "todo", "tasks":
 		return s.applyTodoProjectionLocked(proj.Value)
 	case "title":

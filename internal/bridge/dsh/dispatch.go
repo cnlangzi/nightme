@@ -183,17 +183,36 @@ func (d *eventDispatcher) dispatch(env sessionEventEnvelope, view json.RawMessag
 // handlers that return nil today. When dsh starts emitting them, the
 // handler bodies get filled in — no switch default change needed.
 var standardRegistry = newRegistry(map[string]eventHandler{
-	"assistant/chunk":   handleAssistantChunk,
-	"assistant/message": handleAssistantMessage,
-	"tool/call":         handleToolCall,
-	"tool/result":       handleToolResult,
-	"turn/start":        handleTurnStart,
-	"turn/end":          handleTurnEnd,
-	"compaction/end":    handleCompactionEnd,
-	"todo/write":        handleTodoWrite,
-	"todo/update":       handleTodoUpdate, // P3+: dsh will emit; handler is no-op now
-	"todo/delete":       handleTodoDelete, // same
-	"approval/asked":    handleApprovalAsked,
+	"assistant/chunk":            handleAssistantChunk,
+	"assistant/message":          handleAssistantMessage,
+	"tool/call":                  handleToolCall,
+	"tool/result":                handleToolResult,
+	"turn/start":                 handleTurnStart,
+	"turn/end":                   handleTurnEnd,
+	"compaction/end":             handleCompactionEnd,
+	"todo/write":                 handleTodoWrite,
+	"todo/update":                handleTodoUpdate, // P3+: dsh will emit; handler is no-op now
+	"todo/delete":                handleTodoDelete, // same
+	"approval/asked":             handleApprovalAsked,
+
+	// F-dsh-shared-host §5: 9 new event types discovered during
+	// the 2026-08-16 mux-demux probe against dsh 0.1.0-rc.6.
+	// Most are debug-only — they describe internal dsh state that
+	// the runtime doesn't surface but operators want to see in
+	// /diagnose output. Adding them here (rather than relying on
+	// the "unknown method" warn branch) means a future dsh upgrade
+	// that adds new types no longer flips the count.
+	"permission/preset":          handleDebugOnly,
+	"sandbox/mode":               handleDebugOnly,
+	"approval/policy":            handleDebugOnly,
+	"agent/inbox/spliced":        handleDebugOnly, // queue spliced by server
+	"user/message":               handleUserMessageEcho, // ⚠ do NOT emit; see handler doc
+	"request/header":             handleDebugOnly,
+	"request/context":            handleDebugOnly,
+	"step/start":                 handleStepBoundary,
+	"step/end":                   handleStepBoundary,
+	"session/title":              handleSessionTitle,
+	"session/title-llm-request":  handleDebugOnly,
 })
 
 // ─── handlers ────────────────────────────────────────────────────
@@ -498,6 +517,88 @@ func handleApprovalAsked(env sessionEventEnvelope, view json.RawMessage, tr *tra
 		dLog("dsh: handleApprovalAsked decode: %v", err)
 		return nil
 	}
-	d.handleInlineApproval(aa.ToolCallID, aa.ToolName, aa.Action, aa.Options)
+	d.handleInlineApproval(aa.ToolCallID, aa.ToolName, aa.Action, optionLabels(aa.Options))
+	return nil
+}
+
+// ─── F-dsh-shared-host §5 new event handlers ────────────────────────
+//
+// Most of these types dsh emits as part of its own bookkeeping and
+// are interesting to /diagnose but should NOT bubble up to the
+// runtime's AgentEvent stream. The default handler
+// `handleDebugOnly` records the wire frame + decodes the envelope
+// for log inspection, then returns nil (no AgentEvent to deliver).
+//
+// `user/message` is special: it's the server's echo of the user's
+// message (dsh-api.md §3.4.2), distinct from request/header which
+// marks the actual LLM turn boundary. We must NOT emit this to the
+// runtime — the runtime's readpump already has the user's message
+// from the inbound path; re-emitting would double the bubble in
+// the feishu chat. See claudecode bridge §1 `--replay-user-messages`
+// don't for the same reason.
+
+// handleDebugOnly records the envelope for /diagnose + ops triage
+// but emits no AgentEvent. The wire frame is counted in
+// wireState's recordWireFrame (called by dispatcher.dispatch
+// before the handler runs), so observability is covered.
+func handleDebugOnly(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
+	dLog("dsh: %s", env.Type)
+	return nil
+}
+
+// handleUserMessageEcho is the same as handleDebugOnly but with a
+// stronger comment to flag the "do not emit" invariant. If a
+// future change needs to expose this event (e.g. for an IM channel
+// that does want the echo), the suppression lives here.
+func handleUserMessageEcho(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
+	dLog("dsh: user/message echo (suppressed; runtime has it via inbound)")
+	return nil
+}
+
+// handleStepBoundary emits an EventStepBoundary on step start/end.
+// Used by the runtime's heartbeat (F-63) to refresh "agent is
+// working" indicators mid-turn (between turn/start and turn/end
+// dsh may emit zero or more step boundaries). Phase 2 follow-up:
+// wire EventStepBoundary to the heartbeat's per-step tick if
+// needed; for now we emit a minimal AgentEvent with Kind set
+// to a debug-only path. Stub returns nil today — left here so
+// the registration is in place and we have a clear extension
+// point.
+func handleStepBoundary(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
+	dLog("dsh: step boundary %s", env.Type)
+	// TODO(F-dsh-shared-host Phase 3+): emit EventStepBoundary once
+	// the agent package gains the corresponding Kind. The mux
+	// stream emits step/start + step/end around each model
+	// inference + tool call; the runtime's heartbeat could use
+	// these to drive "agent is mid-step" status indicators.
+	return nil
+}
+
+// handleSessionTitle emits an EventAgentTitle (or equivalent) so
+// the runtime can surface the auto-generated session title in the
+// chat header / receipt card. dsh 0.1.0-rc.6 generates titles
+// during the first turn via session/title-llm-request, then commits
+// them via session/title once the model finishes.
+func handleSessionTitle(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
+	var p struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(env.Data, &p); err != nil {
+		dLog("dsh: session/title decode: %v", err)
+		return nil
+	}
+	if p.Title == "" {
+		return nil
+	}
+	// Stash on wireState so the runtime can read it during
+	// prompt-end / receipt render. We deliberately don't emit
+	// an AgentEvent here — the title is a derived display field,
+	// not an action.
+	st.mu.Lock()
+	if st.title == "" {
+		st.title = p.Title
+	}
+	st.mu.Unlock()
+	dLog("dsh: title=%q", p.Title)
 	return nil
 }

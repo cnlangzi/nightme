@@ -171,7 +171,7 @@ func (d *driver) handleQuestionRequested(frameRpcID string, qr muxQuestionReques
 		action.WriteString(q.Question)
 		if len(q.Options) > 0 {
 			action.WriteString(" [")
-			action.WriteString(strings.Join(q.Options, " | "))
+			action.WriteString(strings.Join(optionLabels(q.Options), " | "))
 			action.WriteString("]")
 		}
 	}
@@ -181,7 +181,7 @@ func (d *driver) handleQuestionRequested(frameRpcID string, qr muxQuestionReques
 		Permission: &agent.AgentPermissionRequest{
 			Tool:    "question",
 			Action:  action.String(),
-			Options: qr.Questions[0].Options, // best-effort; multi-question paths need channel work
+			Options: optionLabels(qr.Questions[0].Options), // best-effort; multi-question paths need channel work
 			ResponseCh: respCh,
 		},
 	})

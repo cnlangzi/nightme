@@ -25,78 +25,26 @@ import (
 	"encoding/json"
 )
 
-// ─── HTTP RPC envelope ─────────────────────────────────────────────────
-
-// clientRequest is the envelope we send on every POST /api/{method}.
-// The wire format is documented in `packages/host/apiproxy/src/api/rpc.ts`;
-// `type` MUST be the literal "client-request" (server validates against
-// clientRequestSchema in fetch/handler.ts).
-type clientRequest struct {
-	Type    string          `json:"type"`              // always "client-request"
-	RPCID   string          `json:"rpcId"`             // UUID we mint; echoed in response
-	Method  string          `json:"method"`            // e.g. "session.prompt"
-	Payload json.RawMessage `json:"payload,omitempty"` // method-specific body
-}
-
-// rpcResponse is the envelope we receive from every POST /api/{method}.
-// `type` is always "server-response"; rpcId echoes our request id;
-// `result` is one of OK(value) or Err(error).
-type rpcResponse struct {
-	Type   string     `json:"type"`
-	RPCID  string     `json:"rpcId"`
-	Result rpcResult  `json:"result"`
-}
-
-// rpcResult is the inner envelope of rpcResponse.result. Schema:
-//   { "ok": true,  "value": <method-specific> }
-//   { "ok": false, "error": { "code": "...", "message": "...", "details": {...} } }
-type rpcResult struct {
-	OK    bool            `json:"ok"`
-	Value json.RawMessage `json:"value,omitempty"`
-	Error *rpcError       `json:"error,omitempty"`
-}
-
-// ErrorMessage returns a one-line human-readable error string for
-// surfacing on EventAgentError or wrapping into a Go error.
-// Returns "" when the result is OK or has no Error payload (the
-// latter shouldn't happen in practice but defensive).
-func (r *rpcResult) ErrorMessage() string {
-	if r == nil || r.Error == nil {
-		return ""
-	}
-	return r.Error.Code + ": " + r.Error.Message
-}
-
-// rpcError is the bridge's view of a server-side business error.
-// `code` strings are enumerated in
-// `packages/host/apiproxy/src/api/rpc.ts: RpcErrorDetailsMap` — we
-// keep the string opaque and forward it to the user on
-// EventAgentError.
-type rpcError struct {
-	Code    string          `json:"code"`
-	Message string          `json:"message"`
-	Details json.RawMessage `json:"details,omitempty"`
-}
-
-// respondPayload is the inner body for the /api/respond call.
-// `RpcID` here is the **server-frame's rpcId** (the approval/requested
-// or question/requested we received), NOT our client's rpcId.
-type respondPayload struct {
-	RPCID   string          `json:"rpcId"`
-	Outcome json.RawMessage `json:"outcome"`
-}
-
 // ─── WS server-request envelope ─────────────────────────────────────────
-
-// serverFrame is the envelope server pushes on both /api/events.mux
-// and /api/events.host. `type` is always "server-request";
-// `method` is the event name (e.g. "session/event", "approval/requested").
-type serverFrame struct {
-	Type    string          `json:"type"`
-	RPCID   string          `json:"rpcId"`
-	Method  string          `json:"method"`
-	Payload json.RawMessage `json:"payload"`
-}
+//
+// RPC envelope types (clientRequest / rpcResponse / rpcResult /
+// rpcError) live in internal/bridge/dsh/host/client.go alongside
+// the RPCClient that produces them. The dsh bridge here no longer
+// constructs those envelopes directly — every RPC call goes through
+// host.Client, and the typed wrappers return host.RPCClient's
+// shapes directly. Keeping duplicates here would create two types
+// for one wire concept, both with zero callers outside this file.
+//
+// The mux / host wire frames still live here because the
+// dispatch / permissions layer decodes them directly (handle_mux.go,
+// permissions.go, translate.go). Decoding the mux payload needs the
+// per-method typed shapes; we keep those.
+//
+// The serverFrame envelope itself is decoded by host.StreamHub (see
+// internal/bridge/dsh/host/stream.go) which exposes typed callbacks
+// with (method, rpcID, payload json.RawMessage) — the dsh bridge
+// receives the inner payload directly and never needs to unmarshal
+// the envelope itself, so serverFrame lives there.
 
 // ─── Mux payload shapes (the ones we decode) ──────────────────────────
 
@@ -149,11 +97,19 @@ type muxQuestionRequested struct {
 
 // questionPayload is one entry in muxQuestionRequested.Questions.
 // `Header` is the short label; `Question` is the full text;
-// `Options` are the multiple-choice labels the model expects back.
+// `Options` are the multiple-choice options the user can pick.
+//
+// BUG FIX (F-dsh-shared-host §6 #4): pre-fix this used
+// `[]string` (just labels). Canonical wire shape is
+// `[]AskUserQuestionOption{label,description?}` per dsh-api.md
+// §3.4.9 — objects, not bare strings. dsh 0.1.0-rc.6 happened to
+// accept either form (so the bug didn't surface), but future
+// versions and the runtime's display logic both need the object
+// shape (label + description renders a richer feishu card).
 type questionPayload struct {
-	Header   string   `json:"header"`
-	Question string   `json:"question"`
-	Options  []string `json:"options"`
+	Header   string                  `json:"header"`
+	Question string                  `json:"question"`
+	Options  []AskUserQuestionOption `json:"options"`
 	Multi    bool     `json:"multiSelect,omitempty"`
 }
 
@@ -428,10 +384,15 @@ type ToolEventView struct {
 // `{sessionId, seq, projection, value}`). If probe shows different
 // names (e.g. `name` instead of `projection`), update tags only.
 type projectionEnvelope struct {
-	SessionID  string          `json:"sessionId,omitempty"`
-	Seq        int64           `json:"seq,omitempty"`
-	Projection string          `json:"projection"` // "todo" | "tasks" | "title" | ...
-	Value      json.RawMessage `json:"value"`
+	SessionID string          `json:"sessionId,omitempty"`
+	Seq       int64           `json:"seq,omitempty"`
+	// BUG FIX (F-dsh-shared-host §6 #1): the wire field is "key"
+	// (dsh-api.md §3.4.3), not "projection". Pre-fix this struct
+	// used `json:"projection"` so dsh's mux frames never matched
+	// the decoder (dsh 0.1.0-rc.6 happened to also accept the
+	// legacy form, masking the bug). The canonical wire is "key".
+	Key   string          `json:"key"` // "todo" | "tasks" | "title" | ...
+	Value json.RawMessage `json:"value"`
 }
 
 // todoItem is one entry in todoWriteEvent.Items. Matches
@@ -461,10 +422,39 @@ type todoItem struct {
 // falls through to a debug log when the payload is empty, which
 // is the expected behaviour when dsh skips this event entirely.
 type approvalAskedData struct {
-	ToolCallID string   `json:"toolCallId"`
-	ToolName   string   `json:"toolName"`
-	Action     string   `json:"action"`
-	Options    []string `json:"options"`
+	ToolCallID string                  `json:"toolCallId"`
+	ToolName   string                  `json:"toolName"`
+	Action     string                  `json:"action"`
+	// BUG FIX: pre-fix this was []string; canonical wire is
+	// []AskUserQuestionOption (objects). Same reasoning as
+	// questionPayload.Options above.
+	Options []AskUserQuestionOption `json:"options"`
+}
+
+// AskUserQuestionOption is the option shape used by both
+// muxQuestionRequested and approval/asked payloads (dsh-api.md
+// §3.4.6 / §3.4.9). One selectable choice; Label is the visible
+// answer and Description is auxiliary context shown alongside.
+type AskUserQuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// optionLabels extracts the visible Label from each option. The
+// runtime's EventAgentPermission.Options field is a []string
+// (label-only) for parity with other bridges (claudecode etc.); the
+// canonical wire shape carries label + description, but the
+// feishu card renders label only. Centralising the projection here
+// keeps every callsite consistent.
+func optionLabels(opts []AskUserQuestionOption) []string {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]string, len(opts))
+	for i, o := range opts {
+		out[i] = o.Label
+	}
+	return out
 }
 
 // ─── /api/session.create response ──────────────────────────────────────

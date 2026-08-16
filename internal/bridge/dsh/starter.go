@@ -84,15 +84,17 @@ func (s *Starter) Detect() error {
 	return nil
 }
 
-// Start spawns dsh --profile web as a long-lived process, dials
-// the two WebSocket downlinks (mux + host), runs the handshake
-// (session.fork when cfg.SessionID is set, otherwise
-// session.create), and returns a live *agent.Agent that streams
-// events on its Events channel. The starter is unchanged
-// (reusable across many sessions).
+// Start acquires a session on the shared dsh host. It does NOT spawn
+// a new dsh subprocess — that's cmd/nightme/main.go's responsibility,
+// which runs once at daemon boot. Start does:
+//   1. Run the resume-or-create handshake via the shared host.RPCClient.
+//   2. Subscribe to this sessionId's mux frames via host.Router.
+//   3. Emit EventAgentReady with the resolved sessionId + model.
 //
-// cfg.Workspace is the dsh web process's cwd (dsh's bash / fs
-// plugins read process.cwd() set via cmd.Dir).
+// The returned *agent.Agent streams events on its Events channel for
+// as long as the host keeps the session attached.
+//
+// cfg.Workspace is the dsh session's cwd (passed to session.create).
 //
 // cfg.SessionID, when non-empty, triggers resume: the handshake
 // calls POST /api/session.fork {sessionId} which dsh web
@@ -101,15 +103,18 @@ func (s *Starter) Detect() error {
 // business error, server missing the requested id) we deliberately
 // refuse to spawn rather than silently fall back to session.create —
 // see handshakeSession in session.go for the strict-resume rationale.
-// The new id (fork's, or create's on the fresh path) is captured into
-// EventAgentReady.SessionID so the runtime can persist it via
-// SetSessionID and replay it as cfg.SessionID on the next Spawn.
+//
+// PID is 0 in the shared-host architecture — the dsh subprocess
+// belongs to the daemon, not to this session. Phase 1.5 (lifecycle
+// wrapper) will surface the host PID via host.Client for `/diagnose`
+// output; for now agent.Agent displays "shared host" in lieu of
+// a per-session pid.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	d, err := newDriver(ctx, s, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return agent.NewAgent(s.Info(), d.cmd.Process.Pid, d.events, d), nil
+	return agent.NewAgent(s.Info(), 0 /* shared-host pid; see comment above */, d.events, d), nil
 }
 
 // RunOnce is the one-shot counterpart to Start. Spawns a fresh

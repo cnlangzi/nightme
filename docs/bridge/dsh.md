@@ -1,17 +1,23 @@
-# dsh — DeepSeek Harness Bridge
+# dsh — DeepSeek Harness Bridge (DEPRECATED — see dsh-shared-host.md)
 
-> **Status**: print-mode 已落地;chat session(web HTTP+WS)已设计,待实施
+> **Status**: ⚠️ **DEPRECATED 2026-08-16** — chat session 部分已重写为**单一全局 dsh web 实例**架构
+> **新设计 + 实现**: [./dsh-shared-host.md](./dsh-shared-host.md) — 1:N multiplexing,全局 watchdog + restart recovery
+> **Wire 协议参考**: [./dsh-api.md](./dsh-api.md) — 权威 wire contract(TS source + 实机)
+> **保留范围**: print-mode 仍然使用;chat session 部分仅作历史参考
 > **Scope**: `internal/bridge/dsh/` — nightme 侧的 DeepSeek Harness (`@deepseek-ai/dsh`) bridge
 > **形态**: 一桥两端
 >   - **Print-mode**(`Starter.RunOnce`):`dsh --profile headless -- "<prompt>"` CLI 调用,plain stdout
->   - **Chat session**(`Starter.Start`,待实施):`dsh --profile web --port 0` 长驻 + HTTP RPC + 双 WebSocket 下行
+>   - **Chat session**(`Starter.Start`,已重写):走 [共享 host](./dsh-shared-host.md)
 > **核心原则(用户 2026-08-14 锁定)**: 接入底层 AI agent,**不修改 agent 本地默认配置**;nightme 只管 transport + permissions(权限默认全开)。详见 [agent-no-config-tampering memory](../../.claude/projects/-Users-geax-code-geax-github-com-cnlangzi-nightme/memory/agent-no-config-tampering.md)
 > **姊妹文档**:
+> - [docs/bridge/dsh-shared-host.md](./dsh-shared-host.md) — **新架构:全局单实例 dsh,1:N 多路复用**
+> - [docs/bridge/dsh-api.md](./dsh-api.md) — wire 协议权威参考
 > - [docs/bridge/claude.md](./claude.md) — stream-json transport,长生命周期
-> - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio + print-mode(本 bridge 设计模板)
+> - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio + print-mode
 > - [docs/bridge/pi.md](./pi.md) — JSONL RPC over stdio + print-mode
-> - [docs/bridge/opencode.md](./opencode.md) — HTTP+SSE transport(本 chat session bridge 形态同构)
+> - [docs/bridge/opencode.md](./opencode.md) — HTTP+SSE transport
 > - [docs/feat/F-dsh-bridge.md](../feat/F-dsh-bridge.md) — print-mode 阶段的设计稿(已 closed)
+> - [docs/feat/F-dsh-shared-host.md](../feat/F-dsh-shared-host.md) — 共享 host 完整设计 + 实现记录
 > - [docs/bridge/cli-transport.md](./cli-transport.md) — pipe / lifecycle 通用约束
 
 ---

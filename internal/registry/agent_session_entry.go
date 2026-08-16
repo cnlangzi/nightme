@@ -80,6 +80,19 @@ type AgentSessionEntry struct {
 	// F-61: when SuspectReason was last set; used to compute the
 	// respawn cooldown window (5 min per AS).
 	SuspectSince *time.Time `json:"suspectSince,omitempty"`
+
+	// SessionID (already declared above) doubles as the dsh web
+	// sessionId for the dsh bridge. F-dsh-shared-host: at daemon
+	// restart, host.RecoverAll walks every entry, takes entries
+	// whose Agent == "dsh" with non-empty SessionID, and re-attaches
+	// each via session.create({sessionId: SessionID, cwd: Cwd}).
+	// dsh returns the same sessionId when given the original id +
+	// matching cwd (dsh-shared-host.md §2.6). Mismatch (different
+	// cwd or stale id) returns session-conflict → recovery logs +
+	// marks the session as fresh, the user's history is not lost.
+	//
+	// For non-dsh bridges (claudecode / opencode / pi), SessionID
+	// remains opaque; recover skips non-dsh entries.
 }
 
 // InFlightMessageRef is the persisted form of an in-flight user message.

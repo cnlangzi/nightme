@@ -31,6 +31,7 @@ import (
 var warnLogger = slog.Default()
 
 // handleMuxFrame is the mux-pump entry. It unmarshals the payload
+// and dispatches by method.
 // and dispatches by method. Extracted from translate.go in
 // F-DSH-CHAT-001 so the dispatcher owns the event Type switch
 // (registration-driven) instead of an inline switch statement.
@@ -140,7 +141,7 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			dLog("dsh: approval/asked decode: %v", err)
 			return
 		}
-		d.handleInlineApproval(aa.ToolCallID, aa.ToolName, aa.Action, aa.Options)
+		d.handleInlineApproval(aa.ToolCallID, aa.ToolName, aa.Action, optionLabels(aa.Options))
 
 	default:
 		// Unknown mux method. P4: single lock acquire for ring
@@ -154,15 +155,4 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			"len", len(payload),
 			"unknown_total", unknownTotal)
 	}
-}
-
-// handleHostFrame is the host-pump entry. Host events are
-// lifecycle-shaped (session/created, session/destroyed,
-// agent/status). We currently log all of them; future PR may
-// surface create/destroy to the runtime.
-func (d *driver) handleHostFrame(method, rpcID string, payload json.RawMessage) {
-	dLog("dsh: host method=%q len=%d", method, len(payload))
-	// No-op for now. Host events don't drive AgentEvent semantics;
-	// they describe container-level state we'd surface as
-	// diagnostic info only.
 }

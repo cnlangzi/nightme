@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/prcache"
@@ -75,6 +76,19 @@ func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 		// Upsert each ChatSession so the file reflects current state.
 		for _, cs := range mgr.List() {
 			_ = csFile.Upsert(cs.Entry())
+		}
+	}
+
+	// F-dsh-shared-host: tear down the shared dsh web daemon
+	// LAST (after channel stop + registry flush) so any late
+	// chat-side cleanup that touches the dsh RPC client doesn't
+	// fail with "connection refused". SharedHost.Close() runs
+	// the SIGINT → SIGKILL ladder from host/lifecycle.go.
+	if sh := host.GetSharedHost(); sh != nil {
+		if err := sh.Close(); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("run: stop shared dsh host: %w", err)
+			}
 		}
 	}
 

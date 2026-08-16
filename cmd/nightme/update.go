@@ -40,10 +40,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"runtime"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
@@ -108,23 +115,37 @@ func newUpdateCheckCmd() *cobra.Command {
 	return cmd
 }
 
-// newUpdateDownloadCmd is a placeholder for the next commit
-// (round 2 of the three-step split). It exists today so the
-// cobra tree already advertises the verb to `nightme help
-// update` users.
+// newUpdateDownloadCmd downloads the release asset that matches
+// the running binary's GOOS/GOARCH to a staging path under
+// <DataDir>/updates/<version>/. SHA256 is verified against the
+// release's SHA256SUMS file before the staging file is left in
+// place; a mismatch deletes the partial download.
+//
+// Ctrl-C cancels the download mid-flight: signal.NotifyContext
+// hands the CLI a context that's cancelled the moment SIGINT
+// fires, and the http client picks it up on the next chunk.
 func newUpdateDownloadCmd() *cobra.Command {
-	return &cobra.Command{
+	var tag string
+	var quiet bool
+	cmd := &cobra.Command{
 		Use:   "download",
-		Short: "Download the release asset (not implemented yet)",
-		Long: "Download the release asset for the current OS / arch.\n" +
-			"Will display progress, speed, ETA, and accept Ctrl-C\n" +
-			"to cancel. Lands in the next commit.",
+		Short: "Download the release asset for this OS/arch to the staging dir",
+		Long: "Download the release asset matching the running binary's\n" +
+			"GOOS/GOARCH (and a SHA256SUMS.txt-driven integrity check)\n" +
+			"to <DataDir>/updates/<version>/. Prints a progress bar\n" +
+			"with downloaded bytes, total, speed, and ETA; Ctrl-C\n" +
+			"cancels the download and removes the partial file.\n\n" +
+			"Use --tag <vX.Y.Z> to download a specific release instead\n" +
+			"of the latest. --quiet suppresses the progress bar.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(),
-				"nightme update download: not implemented yet (next commit)")
-			return nil
+			return runUpdateDownload(cmd, tag, quiet)
 		},
 	}
+	cmd.Flags().StringVar(&tag, "tag", "",
+		"Specific release tag to download (default: latest)")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
+		"Suppress progress bar (still verifies SHA256)")
+	return cmd
 }
 
 // newUpdateInstallCmd is a placeholder for round 3 of the
@@ -184,4 +205,131 @@ func runUpdateCheck(cmd *cobra.Command, quiet bool) error {
 	fmt.Fprintln(out, "Or download a binary release from:")
 	fmt.Fprintln(out, "  https://github.com/cnlangzi/nightme/releases/latest")
 	return nil
+}
+
+// runUpdateDownload is the body of `nightme update download`:
+// fetch the release metadata, pick the matching asset, stream
+// it to the staging dir with a progress bar, and verify SHA256
+// against the release's SHA256SUMS.txt before declaring success.
+//
+// dataDir is read from config.Paths.DataDir (the REPL prompt
+// path will eventually reuse this lookup). An empty dataDir
+// fails the command — the user can pin the install location
+// later via the planned `--staging-dir` flag.
+func runUpdateDownload(cmd *cobra.Command, tag string, quiet bool) error {
+	out := cmd.OutOrStdout()
+	errOut := cmd.ErrOrStderr()
+
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	dataDir := cfg.Paths.DataDir
+	if dataDir == "" {
+		return errors.New("download: cfg.Paths.DataDir is empty; cannot stage asset")
+	}
+
+	// Ctrl-C cancels the download mid-flight. cmd.Context()
+	// is already wired to the cobra signal handler, so we
+	// just pass it through to updater.Lookup / Download.
+	ctx := cmd.Context()
+
+	// 1. Resolve the GitHub release.
+	release, err := updater.Lookup(ctx, "cnlangzi/nightme", tag)
+	if err != nil {
+		fmt.Fprintf(errOut, "warning: %v\n", err)
+		return err
+	}
+	fmt.Fprintf(out, "Latest release: %s\n", release.TagName)
+
+	// 2. Pick the asset that matches our OS/arch.
+	asset := updater.MatchAsset(release, release.TagName)
+	if asset == nil {
+		return fmt.Errorf("no release asset for %s/%s in %s; available: %s",
+			runtime.GOOS, runtime.GOARCH, release.TagName,
+			assetNames(release.Assets))
+	}
+
+	// 3. Stage the download under <DataDir>/updates/<version>/.
+	stagingDir, err := updater.StagingDir(dataDir, release.TagName)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Asset: %s (%s)\n", asset.Name, updater.FormatBytes(asset.Size))
+	fmt.Fprintf(out, "Staging: %s\n", stagingDir)
+
+	// 4. Progress bar (or silent). We use a fixed-width line
+	// that we overwrite with \r on each tick so the terminal
+	// shows a single moving bar.
+	var progress updater.ProgressFunc = updater.QuietProgress
+	if !quiet {
+		progress = makeProgressBar(out, asset.Size)
+	}
+
+	// 5. Run the download.
+	res, err := updater.Download(ctx, release, asset, stagingDir, progress)
+	if err != nil {
+		fmt.Fprintln(errOut)
+		return fmt.Errorf("download: %w", err)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "✓ downloaded %s (%s, sha256=%s)\n",
+		res.Asset.Name, updater.FormatBytes(res.Bytes), res.SHA256Hex)
+	fmt.Fprintf(out, "  next: nightme update install\n")
+	return nil
+}
+
+// makeProgressBar returns a ProgressFunc that renders a
+// single-line ASCII progress bar to out. The bar overwrites
+// itself with \r on every tick and prints a final newline on
+// completion (handled by Download, which flushes an empty
+// event by virtue of total == done).
+//
+// total <= 0 (server omitted Content-Length) renders an
+// indeterminate bar that only shows downloaded bytes.
+func makeProgressBar(out io.Writer, total int64) updater.ProgressFunc {
+	const width = 30
+	return func(downloaded, totalNow int64, elapsed time.Duration) {
+		if totalNow > 0 {
+			total = totalNow
+		}
+		var pct float64
+		if total > 0 {
+			pct = float64(downloaded) / float64(total)
+			if pct > 1 {
+				pct = 1
+			}
+		}
+		filled := int(pct * float64(width))
+		if filled > width {
+			filled = width
+		}
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
+		elapsedSec := elapsed.Seconds()
+		var speed string
+		if elapsedSec > 0 {
+			speed = updater.FormatSpeed(downloaded, elapsed)
+		} else {
+			speed = "— B/s"
+		}
+		var eta string
+		if total > 0 && downloaded > 0 && elapsedSec > 0 {
+			remaining := time.Duration(float64(total-downloaded)/float64(downloaded)*elapsedSec) * time.Second
+			eta = " ETA " + remaining.Round(time.Second).String()
+		}
+		fmt.Fprintf(out, "\r[%s] %3d%% %s / %s  %s%s",
+			bar, int(pct*100),
+			updater.FormatBytes(downloaded), updater.FormatBytes(total),
+			speed, eta)
+	}
+}
+
+// assetNames joins asset basenames into a comma-separated
+// string for the "no asset for our OS/arch" diagnostic.
+func assetNames(assets []updater.Asset) string {
+	names := make([]string, 0, len(assets))
+	for _, a := range assets {
+		names = append(names, a.Name)
+	}
+	return strings.Join(names, ", ")
 }

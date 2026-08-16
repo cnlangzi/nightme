@@ -464,3 +464,25 @@ func TestUpdate_HasCheckDownloadInstallSubcommands(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdate_DownloadHasTagAndQuietFlags pins the download
+// subcommand's flag surface. --tag picks a specific release
+// (default: latest); --quiet suppresses the progress bar but
+// still runs the SHA256 verify. Both must be wired before
+// install (next commit) can rely on them.
+func TestUpdate_DownloadHasTagAndQuietFlags(t *testing.T) {
+	root := newTestRoot()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"update", "download", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("update download --help: %v", err)
+	}
+	got := buf.String()
+	for _, want := range []string{"--tag", "--quiet", "-q", "SHA256"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("download --help missing %q\n%s", want, got)
+		}
+	}
+}

@@ -181,19 +181,29 @@ func (c *Client) Done() <-chan struct{} {
 // ChatSession / AgentSession continues receiving mux frames on the
 // new dsh instance.
 //
-// Returns the same RecoverResult shape as RPCClient.RecoverAll —
-// used by `/diagnose` + boot logs to surface how many sessions
-// were re-attached vs orphaned (cwd mismatch / server-side reap).
+// Per-session failures are logged at Warn level so operators see
+// "5 sessions were dropped on respawn" without having to inspect
+// the code. The orphan list is still returned in the result struct
+// for programmatic consumers (and `/diagnose` display).
 //
 // Safe for concurrent use: the subscription enumeration is a
 // snapshot, and RPCClient.RecoverSession is its own RPC round-trip.
-func (c *Client) RecoverSubscriptions(ctx context.Context) RecoverResult {
+func (c *Client) RecoverSubscriptions(ctx context.Context, logger *slog.Logger) RecoverResult {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	var result RecoverResult
 	for _, sub := range c.Router.EnumerateSubscriptions() {
 		if err := c.RPC.RecoverSession(ctx, sub.SessionID, sub.CWD); err != nil {
+			logger.Warn("dsh.host: reattach orphaned after respawn",
+				"session_id", sub.SessionID,
+				"cwd", sub.CWD,
+				"err", err.Error())
 			result.Orphaned = append(result.Orphaned, sub.SessionID)
 			continue
 		}
+		logger.Info("dsh.host: reattached subscription",
+			"session_id", sub.SessionID)
 		result.Reattached++
 	}
 	return result

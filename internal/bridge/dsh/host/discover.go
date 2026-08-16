@@ -136,7 +136,7 @@ func probeDescribe(ctx context.Context, baseURL string) error {
 
 	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/host.describe", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("%w: build req: %v", ErrNotDSH, err)
+		return errors.Join(ErrNotDSH, fmt.Errorf("build req: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -146,17 +146,17 @@ func probeDescribe(ctx context.Context, baseURL string) error {
 	if err != nil {
 		// Transport error here means TCP got past probeLive but
 		// the connection broke before Do — treat as NotDSH (rare).
-		return fmt.Errorf("%w: do: %v", ErrNotDSH, err)
+		return errors.Join(ErrNotDSH, fmt.Errorf("do: %w", err))
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != 200 {
-		return fmt.Errorf("%w: HTTP %d", ErrNotDSH, httpResp.StatusCode)
+		return errors.Join(ErrNotDSH, fmt.Errorf("HTTP %d", httpResp.StatusCode))
 	}
 
 	respBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 64*1024))
 	if err != nil {
-		return fmt.Errorf("%w: read body: %v", ErrNotDSH, err)
+		return errors.Join(ErrNotDSH, fmt.Errorf("read body: %w", err))
 	}
 
 	var resp struct {
@@ -164,14 +164,14 @@ func probeDescribe(ctx context.Context, baseURL string) error {
 		RPCID string `json:"rpcId"`
 	}
 	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return fmt.Errorf("%w: decode: %v", ErrNotDSH, err)
+		return errors.Join(ErrNotDSH, fmt.Errorf("decode: %w", err))
 	}
 	if resp.Type != "server-response" {
-		return fmt.Errorf("%w: type=%q", ErrNotDSH, resp.Type)
+		return errors.Join(ErrNotDSH, fmt.Errorf("type=%q", resp.Type))
 	}
 	if resp.RPCID != probeID {
-		return fmt.Errorf("%w: rpcId mismatch (sent %s, got %s)",
-			ErrNotDSH, probeID, resp.RPCID)
+		return errors.Join(ErrNotDSH,
+			fmt.Errorf("rpcId mismatch (sent %s, got %s)", probeID, resp.RPCID))
 	}
 	return nil
 }

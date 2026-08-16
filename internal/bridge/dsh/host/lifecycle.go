@@ -223,6 +223,16 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		// watchdogDone is the pre-closed closedChan so Close's
 		// <-h.watchdogDone returns immediately without a
 		// special-case branch.
+		//
+		// CRITICAL: DiscoverExisting returns the Client fully
+		// wired but its Hub hasn't started pumping yet — call
+		// cli.Start(ctx) to bring up the mux+host WS pumps.
+		// Without this, ChatSessions subscribing via Router
+		// would never receive frames (the mux stream is open
+		// lazily inside Hub.Start).
+		if err := cli.Start(ctx); err != nil {
+			return nil, fmt.Errorf("dsh.host: client start (reuse): %w", err)
+		}
 		h := &SharedHost{
 			cli:          cli,
 			logger:       logger,
@@ -250,27 +260,10 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	// spawn will fail and we'll surface the error loudly (we no
 	// longer fall back to --port 0 — that hid the user's existing
 	// dsh from us and split sessions across instances).
-	cmd := agent.NewCmd(ctx, opts.HostCmd, "--profile", "web")
-	cmd.Dir = opts.Workspace
-	cmd.Env = append(os.Environ(),
-		"DSH_PERMISSION_MODE="+opts.PermissionMode,
-	)
-
-	stdout, err := cmd.StdoutPipe()
+	cmd, cli, err := spawnAndWire(ctx, opts, logger)
 	if err != nil {
-		return nil, fmt.Errorf("dsh.host: stdout pipe: %w", err)
+		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdout.Close()
-		return nil, fmt.Errorf("dsh.host: stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, fmt.Errorf("dsh.host: spawn: %w", err)
-	}
-
 	logger.Info("dsh.host: web spawned",
 		"pid", cmd.Process.Pid,
 		"argv", cmd.Args,
@@ -278,50 +271,17 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		"permission_mode", opts.PermissionMode,
 	)
 
-	// Drain stderr in the background. We don't parse it (URL was
-	// captured from stdout) but we MUST keep the pipe flowing or
-	// dsh blocks once its 64 KiB stderr pipe buffer fills. We do
-	// log stderr lines at debug level for `/diagnose` triage.
 	host := &SharedHost{
 		cmd:    cmd,
+		cli:    cli,
 		logger: logger,
+		opts:   opts,
 		closed: make(chan struct{}),
-	}
-	go host.drainStderr(stderr)
-
-	// Read stdout until we see the URL or ctx fires.
-	urlCtx, urlCancel := context.WithTimeout(ctx, webURLParseTimeout)
-	baseURL, err := parseWebURL(urlCtx, stdout)
-	urlCancel()
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, fmt.Errorf("dsh.host: parse web url: %w", err)
-	}
-	logger.Info("dsh.host: web url parsed", "url", baseURL, "pid", cmd.Process.Pid)
-
-	// Construct the Client (RPC + Hub + Router) and wire it.
-	// Note: cli is already declared above the discover-or-spawn
-	// switch — we just reassign in the spawn branch.
-	cli = New(baseURL, logger)
-	host.cli = cli
-	if err := cli.Start(ctx); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, fmt.Errorf("dsh.host: client start: %w", err)
 	}
 
 	// Install as the process-wide singleton. dsh.newDriver will look
 	// this up via GetGlobal() at every ChatSession Start.
 	SetGlobal(cli)
-
-	// Capture opts so a watchdog respawn can rebuild the subprocess
-	// with the same workspace / hostCmd / permission mode.
-	host.opts = opts
 
 	// Start the watchdog. It watches cmd.Wait and respawns the dsh
 	// subprocess if it exits unexpectedly (ungraceful death during
@@ -522,6 +482,23 @@ func UnsetSharedHost() {
 func (h *SharedHost) runWatchdog() {
 	defer close(h.watchdogDone)
 
+	// Start the health probe in parallel with the main watchdog
+	// loop. The probe fires onFailure → h.forceKillCmd() when
+	// strikes accumulate, which causes the cmd.Wait channel to
+	// fire and the main loop's respawn path takes over. We only
+	// run the probe when we own the process — for a reused
+	// user-owned dsh, killing it would be hostile.
+	var probe *HealthProbe
+	if h.ownsProcess {
+		probe = NewHealthProbe(
+			func() *Client { return h.Client() },
+			h.forceKillCmd,
+			h.logger,
+		)
+		probe.Start()
+		defer probe.Stop()
+	}
+
 	for {
 		h.mu.RLock()
 		cmd := h.cmd
@@ -556,14 +533,21 @@ func (h *SharedHost) runWatchdog() {
 
 		// Re-attach subscriptions on the new dsh. Best-effort —
 		// orphaned sessions (cwd mismatch / server-side reap)
-		// are logged but don't block the watchdog from
-		// continuing to watch the new cmd.
+		// are logged per-session at Warn level (see
+		// Client.RecoverSubscriptions) but don't block the
+		// watchdog from continuing to watch the new cmd.
 		ctx, cancel := context.WithTimeout(context.Background(), respawnRecoverTO)
-		result := h.cli.RecoverSubscriptions(ctx)
+		result := h.cli.RecoverSubscriptions(ctx, h.logger)
 		cancel()
-		h.logger.Info("dsh.host: post-respawn recovery complete",
-			"reattached", result.Reattached,
-			"orphaned", len(result.Orphaned))
+		switch {
+		case result.Reattached == 0 && len(result.Orphaned) > 0:
+			h.logger.Error("dsh.host: post-respawn recovery: NO sessions reattached; all orphaned",
+				"orphaned_count", len(result.Orphaned))
+		default:
+			h.logger.Info("dsh.host: post-respawn recovery complete",
+				"reattached", result.Reattached,
+				"orphaned", len(result.Orphaned))
+		}
 	}
 }
 
@@ -575,6 +559,27 @@ func (h *SharedHost) isCloseFlagSetLocked() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// forceKillCmd sends SIGKILL to the current dsh subprocess. Called
+// by HealthProbe when strikesMax consecutive /health probes fail
+// (signals "dsh is alive but wedged" — recoverable only by hard
+// restart). SIGKILL triggers cmd.Wait() to return, which the
+// main watchdog loop sees as an unexpected exit and respawns.
+//
+// Safe to call from any goroutine; takes h.mu briefly to read the
+// current cmd. No-op if cmd is nil or already exited.
+func (h *SharedHost) forceKillCmd() {
+	h.mu.RLock()
+	cmd := h.cmd
+	h.mu.RUnlock()
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		h.logger.Warn("dsh.host: forceKillCmd: kill failed",
+			"pid", cmd.Process.Pid, "err", err.Error())
 	}
 }
 
@@ -622,21 +627,25 @@ func (h *SharedHost) tryRespawn() error {
 	return errors.New("dsh.host: max respawn attempts exceeded")
 }
 
-// spawnOnce runs one dsh spawn cycle. Returns the live cmd + Client
-// pair (URL parsed from stdout), or an error. Mirrors the spawn
-// block inside StartSharedHost but doesn't touch any SharedHost
-// fields — caller is responsible for swapping.
+// spawnAndWire spawns a fresh dsh subprocess, parses its bound URL
+// from stdout, and constructs + starts a *Client rooted at that URL.
+// Returns the live cmd (caller takes ownership of lifecycle) and the
+// started Client (RPC + Hub + Router). On any error after Start() the
+// cmd is killed + wait'd before returning so callers don't have to
+// clean up a half-built subprocess.
+//
+// Shared by StartSharedHost's initial spawn and the watchdog's
+// spawnOnce path — same mechanics, different ownership semantics.
 //
 // No --port flag: dsh's own default for --profile web is 3080, and
-// the reuse-or-spawn contract in StartSharedHost assumes "3080 or
-// fail loud". Falling back to --port 0 here would split sessions
-// across instances if the user's dsh is on a different port.
-func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
-	cmd := agent.NewCmd(context.Background(), h.opts.HostCmd,
-		"--profile", "web")
-	cmd.Dir = h.opts.Workspace
+// the reuse-or-spawn contract assumes "3080 or fail loud". Falling
+// back to --port 0 would split sessions across instances if the
+// user's dsh is on a different port.
+func spawnAndWire(ctx context.Context, opts SharedHostOptions, logger *slog.Logger) (*exec.Cmd, *Client, error) {
+	cmd := agent.NewCmd(ctx, opts.HostCmd, "--profile", "web")
+	cmd.Dir = opts.Workspace
 	cmd.Env = append(os.Environ(),
-		"DSH_PERMISSION_MODE="+h.opts.PermissionMode,
+		"DSH_PERMISSION_MODE="+opts.PermissionMode,
 	)
 
 	stdout, err := cmd.StdoutPipe()
@@ -654,17 +663,19 @@ func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
 		return nil, nil, fmt.Errorf("dsh.host: spawn: %w", err)
 	}
 
+	// Drain stderr so the pipe buffer doesn't fill and deadlock the
+	// subprocess. Logs at debug level for /diagnose triage.
 	go func(r io.ReadCloser) {
 		scnr := bufio.NewScanner(r)
 		scnr.Buffer(make([]byte, 0, 4096), 16*1024)
 		for scnr.Scan() {
-			h.logger.Debug("dsh.host: stderr", "line", scnr.Text())
+			logger.Debug("dsh.host: stderr", "line", scnr.Text())
 		}
 	}(stderr)
 
-	urlCtx, urlCancel := context.WithTimeout(context.Background(), webURLParseTimeout)
+	urlCtx, urlCancel := context.WithTimeout(ctx, webURLParseTimeout)
+	defer urlCancel()
 	baseURL, err := parseWebURL(urlCtx, stdout)
-	urlCancel()
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -672,13 +683,19 @@ func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
 		return nil, nil, fmt.Errorf("dsh.host: parse web url: %w", err)
 	}
 
-	cli := New(baseURL, h.logger)
-	if err := cli.Start(context.Background()); err != nil {
+	cli := New(baseURL, logger)
+	if err := cli.Start(ctx); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return nil, nil, fmt.Errorf("dsh.host: client start: %w", err)
 	}
 	return cmd, cli, nil
+}
+
+// spawnOnce is the watchdog's per-attempt spawn wrapper around
+// spawnAndWire. Passes through the host's captured opts.
+func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
+	return spawnAndWire(context.Background(), h.opts, h.logger)
 }
 
 // respawnDelay returns the backoff for the given attempt index.

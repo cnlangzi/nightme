@@ -11,6 +11,7 @@
 package dsh
 
 import (
+	"os"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -28,6 +29,9 @@ import (
 // to dsh (we confirm via the user/message event echoing the
 // content back to the runtime).
 func TestE2E_ChatSession_ImageAndTextMixed(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}
@@ -123,6 +127,9 @@ func waitForReady(t *testing.T, a *agent.Agent, timeout time.Duration) string {
 // image with an unsupported MIME type degrades to a text
 // annotation (rather than crashing SendBlocks).
 func TestE2E_ChatSession_UnsupportedImageDegrades(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}

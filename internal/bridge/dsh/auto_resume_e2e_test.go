@@ -24,6 +24,7 @@ package dsh
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"sync/atomic"
 	"testing"
@@ -65,6 +66,18 @@ func (s *spawnerRecorder) LastSessionID() string {
 // history mirrors the parent's, so the user's in-flight message
 // and conversation context survive the crash.
 func TestE2E_DeathResume_ForksOriginalSession(t *testing.T) {
+	// Gated by NIGHTME_REAL_DSH=1 — these tests spawn a real
+	// `dsh --profile web` and wait on its events. Without the gate
+	// they fire on every dev `go test ./...` even when dsh is
+	// installed but the user isn't actually validating the
+	// resume path, slowing CI runs to no purpose. With the gate
+	// they skip cleanly when dsh isn't reachable OR the user
+	// doesn't opt in. (The lifecycle watchdog used to bound the
+	// wall-clock cost; with the watchdog removed in R3, this
+	// gate is the only way to keep CI snappy.)
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}
@@ -221,6 +234,11 @@ func startsWithSession(id string) bool {
 // stale ID — the spawner gets empty and dsh runs session.create as
 // expected.
 func TestE2E_DeathResume_NoSessionIDMeansFresh(t *testing.T) {
+	// Same gate as the ForksOriginalSession test above — these are
+	// the only two tests in this file and both need a real dsh.
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}

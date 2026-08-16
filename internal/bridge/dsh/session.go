@@ -77,20 +77,19 @@ var ErrResumeUnhealthy = errors.New("dsh: resume session unhealthy")
 // — see TestHandshakeSession_IndependentTimeouts for the pattern.
 var handshakeTimeout = 15 * time.Second
 
-// lifecycleWatchdogTimeout bounds cmd.Wait() inside the lifecycle
-// goroutine. If the child doesn't exit within this window, the
-// watchdog fires SIGKILL. This prevents a wedged dsh web (e.g.
-// plugin init hang that doesn't honor SIGINT) from holding the
-// bridge forever — the bridge would otherwise pin ~26 MiB of
-// events buffer + 1 goroutine indefinitely. Sized generously
-// (5 min) because normal dsh shutdown should complete within
-// seconds; the watchdog is the "nothing else worked" fallback,
-// not the common path.
-const lifecycleWatchdogTimeout = 5 * time.Minute
-
 // webURLParseTimeout bounds waiting for dsh web to print its bound
 // URL on stdout. Real-machine cold start is ~1.5s; 10s is generous.
 const webURLParseTimeout = 10 * time.Second
+
+// Note: there is no lifecycle watchdog. dsh can run long tasks
+// (15-30 min multi-step tool chains) and a wall-clock-from-spawn
+// SIGKILL at any fixed threshold (5 min, 30 min, etc) will
+// always kill some legitimate in-flight work. cmd.Wait() blocks
+// until dsh actually exits — if dsh is genuinely deadlocked we
+// rely on the OS / external monitor to detect and kill it. The
+// runtime's "should this bridge still be alive" judgement lives
+// at the chat-session layer (HungPrompt watchdog, /use switch,
+// daemon restart), not at the bridge layer.
 
 // dshURLPattern matches the first line of `dsh --profile web` stdout:
 // "dsh web: http://127.0.0.1:3080". Captures host + port.
@@ -672,21 +671,6 @@ func (d *driver) lifecycle() {
 	// real race.
 	defer close(d.exitDone)
 	defer close(d.events)
-
-	// Watchdog: if cmd.Wait() never returns (e.g. dsh web hung on a
-	// plugin init that didn't honor SIGINT/SIGTERM), force-kill
-	// after a generous timeout. This is the "Stop() didn't work
-	// AND Close() never fired" worst case — without this the
-	// bridge would hold 26 MiB of events buffer + 1 goroutine
-	// forever.
-	watchdog := time.AfterFunc(lifecycleWatchdogTimeout, func() {
-		if d.cmd.Process != nil {
-			dLog("dsh: lifecycle watchdog firing SIGKILL",
-				"timeout", lifecycleWatchdogTimeout)
-			_ = d.cmd.Process.Kill()
-		}
-	})
-	defer watchdog.Stop()
 
 	waitErr := d.cmd.Wait()
 	d.pumpWG.Wait() // wait for mux/host/stderr pumps to return

@@ -9,6 +9,7 @@
 package dsh
 
 import (
+	"os"
 	"context"
 	"os/exec"
 	"strings"
@@ -101,6 +102,9 @@ func TestDetect_MissingBinary(t *testing.T) {
 // runPrintMode). Full Start smoke lives in session_real_unix_test.go
 // behind NIGHTME_REAL_DSH.
 func TestStart_RequiresWorkspace(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	s := NewStarter("dsh")
 	_, err := s.Start(context.Background(), agent.StartConfig{})
 	if err == nil {

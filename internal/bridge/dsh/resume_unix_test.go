@@ -53,6 +53,7 @@
 package dsh
 
 import (
+	"os"
 	"context"
 	"encoding/json"
 	"errors"
@@ -757,6 +758,9 @@ func TestResumeUnhealthyError_IsChecks(t *testing.T) {
 // the same package, so unexported helpers are accessible).
 
 func TestE2E_RealDsh_ForkBlankSessionReturnsUnhealthy(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}

@@ -43,9 +43,9 @@ const wsFrameReadLimit = 10 * 1024 * 1024
 // connections that look idle from the *server's* view after
 // roughly 25-30 min of no client traffic; without a client-side
 // ping the bridge's gorilla/websocket conn never emits anything,
-// dsh detects "client gone", closes the WS, and ~5 s later the
-// lifecycle watchdog SIGKILLs the cmd — surfacing as "dsh bridge
-// died (signal-killed)". 25 s is comfortably below any plausible
+// dsh detects "client gone", closes the WS, and dsh shuts down
+// (the runtime's /use / HungPrompt watchdog will then mark the
+// bridge Exited). 25 s is comfortably below any plausible
 // server-side idle timeout while keeping write pressure
 // negligible (< 5 B per ping).
 const wsPingInterval = 25 * time.Second
@@ -57,7 +57,7 @@ const wsPingInterval = 25 * time.Second
 // gorilla/websocket docs.
 const wsPingWriteTimeout = 5 * time.Second
 
-// startWSPingWriter launches a watchdog goroutine that sends a
+// startWSPingWriter launches a ping goroutine that sends a
 // WebSocket ping frame every wsPingInterval. The goroutine exits
 // on the first of these three signals:
 //
@@ -95,8 +95,9 @@ func startWSPingWriterAt(stop <-chan struct{}, conn *websocket.Conn, interval ti
 				); err != nil {
 					// Conn is dead (close / reset / EOF). Silent
 					// exit — the read pump on the same conn will
-					// already be observing the same error and the
-					// lifecycle watchdog owns the dsh shutdown.
+					// already be observing the same error. dsh will
+					// then shut down on its own (or stay wedged
+					// until the OS / chat-session layer notices).
 					return
 				}
 			}
@@ -130,7 +131,7 @@ func dialHost(ctx context.Context, baseURL string, stop <-chan struct{}) (*webso
 // startWSPingWriter) so the wire stays alive across multi-minute
 // idle gaps — dsh web closes the WS after ~25 min of no client
 // traffic, which would otherwise surface as "dsh bridge died
-// (signal-killed)" via the lifecycle watchdog.
+// (signal-killed)".
 func dialWS(ctx context.Context, baseURL string, path string, stop <-chan struct{}) (*websocket.Conn, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {

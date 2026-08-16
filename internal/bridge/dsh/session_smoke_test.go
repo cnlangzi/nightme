@@ -5,6 +5,7 @@
 package dsh
 
 import (
+	"os"
 	"context"
 	"os/exec"
 	"testing"
@@ -21,6 +22,9 @@ import (
 // Gated by NIGHTME_REAL_DSH (same gate as the existing print-mode
 // e2e tests). Requires `dsh` on PATH (npm install -g @deepseek-ai/dsh).
 func TestE2E_ChatSession_SpawnAndReady(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}

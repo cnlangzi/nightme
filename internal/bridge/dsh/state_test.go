@@ -208,6 +208,234 @@ func TestWireState_ApplyProjection_UnknownProjection_NoOp(t *testing.T) {
 	// P3 之前 title 不更新;若 P3 已落,这里改为 st.title == "My Session"
 }
 
+// TestWireState_ApplyTodoWrite_DoesNotSilentlyEmitEmptyItems
+//
+// REGRESSION LOCK for the "todo list isn't converted to OutTaskCreate"
+// report: when dsh wire's todoItem field names DON'T match what
+// todoItem struct expects (per protocol.go's WIRE-PROBE-REQUIRED
+// comments — fields are inferred, not validated), every item gets
+// silently skipped (ID="" and Content="" both empty), and
+// applyTodoWriteLocked still returns EventAgentTaskCreate with
+// Items=[] — which the Feishu adapter then interprets as
+// "clear the checklist" and wipes the user's existing tasks.
+//
+// This test pins the wire format the bridge was DESIGNED for
+// (id/content/activeForm/status). If dsh's real wire uses different
+// field names (e.g. uuid/subject/taskStatus per the dsh probe
+// notes), applyTodoWriteLocked MUST be fixed to match — silent
+// skip + phantom clear is the failure mode.
+//
+// Each table entry below is a candidate real-world dsh wire
+// shape; the "expected" entry is what the code was built against.
+// If a probe updates the wire shape, update the struct tags AND
+// the table entry together, or this test will (correctly) fail
+// and force the issue into the open instead of letting the user
+// discover "my todo list vanished" in production.
+func TestWireState_ApplyTodoWrite_DoesNotSilentlyEmitEmptyItems(t *testing.T) {
+	cases := []struct {
+		name      string
+		wireItems string // raw JSON for the items[] array
+		wantIDs   []string
+		wantSubj  []string
+	}{
+		{
+			name: "designed_schema",
+			wireItems: `[
+				{"id":"t-1","content":"Read README","activeForm":"Reading README","status":"completed"},
+				{"id":"t-2","content":"Write code","activeForm":"Writing code","status":"in_progress"},
+				{"id":"t-3","content":"Run tests","status":"pending"}
+			]`,
+			wantIDs:  []string{"t-1", "t-2", "t-3"},
+			wantSubj: []string{"Read README", "Write code", "Run tests"},
+		},
+		{
+			// dsh.md §6.3 lists wire shape as
+			// {event:{items:[{content, status}]}} — no id field.
+			// Graceful fallback should use content as key.
+			name: "doc_quoted_schema_no_id",
+			wireItems: `[
+				{"content":"Read README","status":"pending"},
+				{"content":"Write code","status":"in_progress"}
+			]`,
+			wantIDs:  []string{"Read README", "Write code"},
+			wantSubj: []string{"Read README", "Write code"},
+		},
+		{
+			// Defensive: status field might be absent or use a
+			// different name. todoStatusToTaskStatus already maps
+			// unknown status -> TaskPending, so this is graceful.
+			name: "unknown_status_falls_to_pending",
+			wireItems: `[
+				{"id":"x-1","content":"Task X","status":"weird_status_value"}
+			]`,
+			wantIDs:  []string{"x-1"},
+			wantSubj: []string{"Task X"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newWireState()
+			data := `{"items":` + tc.wireItems + `}`
+			muxBytes := makeMuxEvent(t, "todo/write", data)
+			env, view := decodeMuxEvent(t, muxBytes)
+
+			events := st.applyEvent(env, view)
+
+			// Every entry must produce at least one event.
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			if events[0].Kind != agent.EventAgentTaskCreate {
+				t.Fatalf("event kind = %v, want EventAgentTaskCreate",
+					events[0].Kind)
+			}
+			if events[0].TaskList == nil {
+				t.Fatal("TaskList payload is nil")
+			}
+
+			// CRITICAL: every item in the wire must end up in the
+			// emitted TaskList. An empty Items slice here means the
+			// Feishu adapter will interpret this as "clear the
+			// checklist" and wipe whatever was previously shown.
+			if len(events[0].TaskList.Items) != len(tc.wantIDs) {
+				t.Fatalf("emitted items = %d, want %d — this is the\n"+
+					"silent-skip failure mode: every item in the wire\n"+
+					"was zero-valued (e.g. field names don't match the\n"+
+					"struct tags), so applyTodoWriteLocked skipped them\n"+
+					"all and still emitted an empty EventAgentTaskCreate,\n"+
+					"which the Feishu adapter will treat as 'clear the\n"+
+					"checklist'. Check that dsh wire's todoItem fields\n"+
+					"match the json tags on internal/bridge/dsh/protocol.go\n"+
+					"todoItem (WIRE-PROBE-REQUIRED).",
+					len(events[0].TaskList.Items), len(tc.wantIDs))
+			}
+			for i, want := range tc.wantIDs {
+				if events[0].TaskList.Items[i].ID != want {
+					t.Errorf("items[%d].ID = %q, want %q",
+						i, events[0].TaskList.Items[i].ID, want)
+				}
+				if events[0].TaskList.Items[i].Subject != tc.wantSubj[i] {
+					t.Errorf("items[%d].Subject = %q, want %q",
+						i, events[0].TaskList.Items[i].Subject,
+						tc.wantSubj[i])
+				}
+			}
+		})
+	}
+}
+
+// TestWireState_ApplyTodoProjection_FieldNameDrift_SurfacesFailure
+//
+// Same failure mode as TestWireState_ApplyTodoWrite_FieldNameDrift_SurfacesFailure
+// but for the session/projection frame's todo snapshot path. The
+// projection handler used to silently continue on drifted fields
+// (no dLog at all) — even worse than the todo/write path. Pin
+// the fix so a future wire probe validates both paths together.
+func TestWireState_ApplyTodoProjection_FieldNameDrift_SurfacesFailure(t *testing.T) {
+	st := newWireState()
+	proj := projectionEnvelope{
+		Projection: "todo",
+		Value: []byte(`{
+			"items":[
+				{"uuid":"u-1","subject":"Read README","taskStatus":"pending"},
+				{"uuid":"u-2","subject":"Write code","taskStatus":"in_progress"}
+			]
+		}`),
+	}
+	events := st.applyProjection(proj)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if got := len(events[0].TaskList.Items); got != 0 {
+		t.Fatalf("with drifted wire fields, projection items should be 0; got %d", got)
+	}
+	// UnknownCount MUST bump so ops sees the failure via DumpWireStats.
+	unknownTotal, _ := st.DumpWireStats()
+	if unknownTotal == 0 {
+		t.Fatal("expected unknownCount > 0 after drifted-projection skip")
+	}
+}
+
+// TestWireState_ApplyTodoWrite_FieldNameDrift_SurfacesFailure
+//
+// The hard scenario: the dsh wire uses field names that DON'T match
+// what todoItem struct expects. Per protocol.go's WIRE-PROBE-REQUIRED
+// comments, the json tags below are inferred from the dsh source
+// comment, not validated against a real wire. If the real wire uses
+// `uuid` instead of `id`, or `subject` instead of `content`, every
+// item silently zero-fills and gets skipped — and the function still
+// emits EventAgentTaskCreate with Items=[].
+//
+// This test simulates that failure mode and verifies:
+//   1. The items DO get skipped (so the production failure mode
+//      is detectable in tests, not hidden behind a passing test).
+//   2. wireState.unknownCount is bumped, so DumpWireStats surfaces
+//      the failure to ops via `nightme debug dsh dump-wire`.
+//
+// If dsh's real wire is later probed and the field names are confirmed
+// wrong, the struct tags MUST be updated — keeping this test
+// passing-by-accident would re-introduce the silent-skip production
+// failure.
+func TestWireState_ApplyTodoWrite_FieldNameDrift_SurfacesFailure(t *testing.T) {
+	st := newWireState()
+	// Hypothetical real dsh wire with different field names.
+	driftedItems := `[
+		{"uuid":"u-1","subject":"Read README","taskStatus":"pending"},
+		{"uuid":"u-2","subject":"Write code","taskStatus":"in_progress"}
+	]`
+	data := `{"items":` + driftedItems + `}`
+	muxBytes := makeMuxEvent(t, "todo/write", data)
+	env, view := decodeMuxEvent(t, muxBytes)
+
+	events := st.applyEvent(env, view)
+
+	// With drifted field names, all items zero-fill and get
+	// skipped (ID="" AND Content=""), so the emitted
+	// EventAgentTaskCreate has Items=[] — the EXACT failure mode
+	// that wipes the user's checklist. Pin this so anyone who
+	// tries to "fix" the test to ignore the failure will see the
+	// failure mode spelled out loud.
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if got := len(events[0].TaskList.Items); got != 0 {
+		t.Fatalf("with drifted wire fields, items should be 0 (silent\n"+
+			"skip + phantom clear is the failure mode); got %d.\n"+
+			"This means someone updated the test fixtures to match a\n"+
+			"probed real wire — which is good — but please verify\n"+
+			"the production code path also got the struct tag\n"+
+			"update, otherwise users will see their todo list\n"+
+			"vanish on every todo/write.", got)
+	}
+
+	// The fix: when items get skipped due to wire drift, the
+	// silent failure must be visible in DumpWireStats so ops can
+	// see "bridge isn't picking up dsh's todos" via
+	// `nightme debug dsh dump-wire` (unknownCount column).
+	unknownTotal, _ := st.DumpWireStats()
+	if unknownTotal == 0 {
+		t.Fatal("expected unknownCount > 0 after drifted-wire skip —\n"+
+			"the skip path must surface the failure mode, otherwise\n"+
+			"the only signal is 'user reports empty todo list' with\n"+
+			"zero ops-side telemetry.")
+	}
+
+	// Sanity: a real-shape todo/write on the same state should
+	// NOT bump unknownCount (only drift triggers it).
+	realData := `{"items":[{"id":"r-1","content":"Real","status":"pending"}]}`
+	realMuxBytes := makeMuxEvent(t, "todo/write", realData)
+	realEnv, realView := decodeMuxEvent(t, realMuxBytes)
+	st.applyEvent(realEnv, realView)
+	unknownAfterReal, _ := st.DumpWireStats()
+	if unknownAfterReal != unknownTotal {
+		t.Errorf("unknownCount bumped on a real-shape todo/write\n"+
+			"(before=%d, after=%d) — the counter should only fire\n"+
+			"on wire drift, not on every applyTodoWrite call.",
+			unknownTotal, unknownAfterReal)
+	}
+}
+
 // TestWireState_TasksMap_UpdateOverwritesByID
 // 验证 todo/write 多次下发,wireState.tasks 按 ID 更新而不是堆叠。
 func TestWireState_TasksMap_UpdateOverwritesByID(t *testing.T) {

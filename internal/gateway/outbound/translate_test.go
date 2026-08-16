@@ -236,6 +236,121 @@ func TestTranslate_EventDone_Dropped(t *testing.T) {
 		t.Error("EventAgentDone should drop (no OutboundMessage)")
 	}
 }
+
+// TestTranslate_EventAgentTaskCreate_ToOutTaskCreate pins the
+// EventAgentTaskCreate → OutTaskCreate translation. This is the
+// bridge-side contract that the dsh bridge (and claudecode) rely on:
+// if this translation breaks, every todo list sent by the agent
+// silently disappears from the channel. REGRESSION GUARD against
+// someone deleting the case (or changing the OutboundKind value)
+// and only noticing when users report "my todo list vanished".
+func TestTranslate_EventAgentTaskCreate_ToOutTaskCreate(t *testing.T) {
+	items := []agent.AgentTaskItem{
+		{ID: "t-1", Subject: "Read README", ActiveForm: "Reading README", Status: agent.TaskCompleted},
+		{ID: "t-2", Subject: "Write code", ActiveForm: "Writing code", Status: agent.TaskInProgress},
+		{ID: "t-3", Subject: "Run tests", Status: agent.TaskPending},
+	}
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind:     agent.EventAgentTaskCreate,
+		TaskList: &agent.AgentTaskListEvent{Items: items},
+	})
+	if !ok {
+		t.Fatal("EventAgentTaskCreate should translate to a message")
+	}
+	if msg.Kind != messages.OutTaskCreate {
+		t.Errorf("Kind = %v, want %v", msg.Kind, messages.OutTaskCreate)
+	}
+	if msg.TaskList == nil {
+		t.Fatal("TaskList payload is nil (channel will treat this as no-op)")
+	}
+	if len(msg.TaskList.Items) != 3 {
+		t.Errorf("items = %d, want 3 (channel-side checklist won't match bridge snapshot)", len(msg.TaskList.Items))
+	}
+	// Field-level fidelity: every AgentTaskItem field must survive
+	// the translate hop. Subject / ActiveForm / Status are what the
+	// Feishu adapter renders — if any of them are zeroed out by a
+	// future refactor, the checklist UI shows blank rows.
+	want := []agent.AgentTaskItem{
+		{ID: "t-1", Subject: "Read README", ActiveForm: "Reading README", Status: agent.TaskCompleted},
+		{ID: "t-2", Subject: "Write code", ActiveForm: "Writing code", Status: agent.TaskInProgress},
+		{ID: "t-3", Subject: "Run tests", Status: agent.TaskPending},
+	}
+	for i, w := range want {
+		got := msg.TaskList.Items[i]
+		if got.ID != w.ID || got.Subject != w.Subject ||
+			got.ActiveForm != w.ActiveForm || got.Status != w.Status {
+			t.Errorf("items[%d] = %+v, want %+v", i, got, w)
+		}
+	}
+	// ChatID must be preserved so the channel routes to the right chat.
+	if msg.ChatID != "chat1" {
+		t.Errorf("ChatID = %q, want chat1", msg.ChatID)
+	}
+}
+
+// TestTranslate_EventAgentTaskUpdate_ToOutTaskUpdate mirrors
+// TestTranslate_EventAgentTaskCreate_ToOutTaskCreate for the
+// update path. Empty Items is a valid "clear the checklist"
+// signal — pin that the empty slice is preserved (not nil-ed
+// out by an over-zealous "drop empty" branch).
+func TestTranslate_EventAgentTaskUpdate_ToOutTaskUpdate(t *testing.T) {
+	items := []agent.AgentTaskItem{
+		{ID: "t-2", Subject: "Write code", Status: agent.TaskCompleted},
+	}
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind:     agent.EventAgentTaskUpdate,
+		TaskList: &agent.AgentTaskListEvent{Items: items},
+	})
+	if !ok {
+		t.Fatal("EventAgentTaskUpdate should translate to a message")
+	}
+	if msg.Kind != messages.OutTaskUpdate {
+		t.Errorf("Kind = %v, want %v", msg.Kind, messages.OutTaskUpdate)
+	}
+	if len(msg.TaskList.Items) != 1 || msg.TaskList.Items[0].ID != "t-2" {
+		t.Errorf("TaskList items = %+v, want one row t-2", msg.TaskList.Items)
+	}
+}
+
+// TestTranslate_EventAgentTaskCreate_NilTaskList_Dropped pins
+// that a malformed EventAgentTaskCreate with no TaskList payload
+// is silently dropped (rather than rendered as an empty checklist
+// — which would be indistinguishable from "user explicitly cleared
+// the checklist"). The bridge contract is "emit TaskList or
+// nothing".
+func TestTranslate_EventAgentTaskCreate_NilTaskList_Dropped(t *testing.T) {
+	if _, ok := Translate("chat1", agent.AgentEvent{
+		Kind: agent.EventAgentTaskCreate,
+		// TaskList deliberately nil
+	}); ok {
+		t.Error("EventAgentTaskCreate with nil TaskList should drop (not emit empty checklist)")
+	}
+}
+
+// TestTranslate_EventAgentTaskUpdate_EmptyItems_EmptiesChecklist
+// pins the "clear the checklist" signal: an EventAgentTaskUpdate
+// with an empty (but non-nil) Items slice must translate to
+// OutTaskUpdate with the same empty Items — NOT be dropped. The
+// Feishu adapter treats this as "user's tasks all done / cleared
+// the list".
+func TestTranslate_EventAgentTaskUpdate_EmptyItems_EmptiesChecklist(t *testing.T) {
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind:     agent.EventAgentTaskUpdate,
+		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{}},
+	})
+	if !ok {
+		t.Fatal("EventAgentTaskUpdate with empty Items should emit (clear signal)")
+	}
+	if msg.Kind != messages.OutTaskUpdate {
+		t.Errorf("Kind = %v, want OutTaskUpdate", msg.Kind)
+	}
+	if msg.TaskList == nil {
+		t.Fatal("TaskList nil — empty Items must be preserved on the wire")
+	}
+	if len(msg.TaskList.Items) != 0 {
+		t.Errorf("Items = %d, want 0", len(msg.TaskList.Items))
+	}
+}
 func TestTranslate_EventError_WithDiagnostic_EmitsOutError(t *testing.T) {
 	// Bridge death with a populated Diagnostic must surface as a
 	// dedicated OutError card so the user sees a clear "dsh
@@ -312,5 +427,141 @@ func TestTranslate_EventError_FallbackBodyFromDiagnostic(t *testing.T) {
 	}
 	if !strings.Contains(msg.Text, "dsh") || !strings.Contains(msg.Text, "non-zero-exit") {
 		t.Errorf("synthesized body should mention agent + exit kind, got %q", msg.Text)
+	}
+}
+
+// TestTranslate_EventTaskCreate pins the F-38 happy path: a
+// non-empty TaskList from a bridge (dsh todo/write, claudecode
+// TaskCreate, etc.) must translate to OutTaskCreate with the
+// full snapshot preserved on the typed payload. The Feishu
+// adapter reads out.TaskList directly to render the checklist;
+// losing the typed payload here would silently render an empty
+// receipt card.
+//
+// This is the regression test that protects the
+// "todo list → OutTaskCreate" pipeline. If a future refactor
+// breaks the translation, this test catches it before the
+// channel sees a corrupt outbound message.
+func TestTranslate_EventTaskCreate(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind: agent.EventAgentTaskCreate,
+		TaskList: &agent.AgentTaskListEvent{
+			Items: []agent.AgentTaskItem{
+				{
+					ID:         "t-1",
+					Subject:    "Read docs",
+					ActiveForm: "Reading docs",
+					Status:     agent.TaskCompleted,
+				},
+				{
+					ID:         "t-2",
+					Subject:    "Write code",
+					ActiveForm: "Writing code",
+					Status:     agent.TaskInProgress,
+				},
+				{
+					ID:      "t-3",
+					Subject: "Run tests",
+					Status:  agent.TaskPending,
+				},
+			},
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("EventAgentTaskCreate with non-nil TaskList should emit")
+	}
+	if msg.Kind != messages.OutTaskCreate {
+		t.Errorf("Kind = %v, want OutTaskCreate", msg.Kind)
+	}
+	if msg.TaskList == nil {
+		t.Fatal("TaskList payload is nil; outbound must preserve the typed snapshot")
+	}
+	if len(msg.TaskList.Items) != 3 {
+		t.Fatalf("len(msg.TaskList.Items) = %d, want 3", len(msg.TaskList.Items))
+	}
+	// Field-level assertions protect against accidental field
+	// renames in agent.AgentTaskItem.
+	if msg.TaskList.Items[0].ID != "t-1" || msg.TaskList.Items[0].Subject != "Read docs" {
+		t.Errorf("items[0] = %+v, want ID=t-1 Subject=Read docs", msg.TaskList.Items[0])
+	}
+	if msg.TaskList.Items[0].ActiveForm != "Reading docs" {
+		t.Errorf("items[0].ActiveForm = %q, want Reading docs", msg.TaskList.Items[0].ActiveForm)
+	}
+	if msg.TaskList.Items[0].Status != agent.TaskCompleted {
+		t.Errorf("items[0].Status = %v, want TaskCompleted", msg.TaskList.Items[0].Status)
+	}
+	if msg.TaskList.Items[1].Status != agent.TaskInProgress {
+		t.Errorf("items[1].Status = %v, want TaskInProgress", msg.TaskList.Items[1].Status)
+	}
+	if msg.TaskList.Items[2].Status != agent.TaskPending {
+		t.Errorf("items[2].Status = %v, want TaskPending", msg.TaskList.Items[2].Status)
+	}
+}
+
+// TestTranslate_EventTaskUpdate — same payload semantics as
+// EventAgentTaskCreate; the only difference is the OutboundKind
+// (OutTaskUpdate for subsequent mutations, including delete
+// emitting an empty Items snapshot).
+func TestTranslate_EventTaskUpdate(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind: agent.EventAgentTaskUpdate,
+		TaskList: &agent.AgentTaskListEvent{
+			Items: []agent.AgentTaskItem{
+				{ID: "t-1", Subject: "Marked done", Status: agent.TaskCompleted},
+			},
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("EventAgentTaskUpdate with non-nil TaskList should emit")
+	}
+	if msg.Kind != messages.OutTaskUpdate {
+		t.Errorf("Kind = %v, want OutTaskUpdate", msg.Kind)
+	}
+	if msg.TaskList == nil || len(msg.TaskList.Items) != 1 {
+		t.Fatalf("TaskList payload lost: %+v", msg.TaskList)
+	}
+}
+
+// TestTranslate_EventTaskCreate_EmptySnapshot pins the
+// "clear the checklist" signal — an empty Items slice is a
+// valid payload. The Feishu adapter reads this as a clear
+// instruction (drop the checklist section). If a future
+// refactor accidentally drops empty snapshots, the channel
+// would re-render the previous checklist forever.
+func TestTranslate_EventTaskCreate_EmptySnapshot(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind:     agent.EventAgentTaskCreate,
+		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{}},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("empty TaskList is the valid 'clear checklist' signal; must emit")
+	}
+	if msg.Kind != messages.OutTaskCreate {
+		t.Errorf("Kind = %v, want OutTaskCreate", msg.Kind)
+	}
+	if msg.TaskList == nil {
+		t.Fatal("TaskList must be non-nil even when empty")
+	}
+	if len(msg.TaskList.Items) != 0 {
+		t.Errorf("len = %d, want 0", len(msg.TaskList.Items))
+	}
+}
+
+// TestTranslate_EventTaskCreate_NilTaskList pins the
+// defensive guard: a TaskList==nil payload (a bridge bug or
+// a malformed event) must drop, not emit an empty-message
+// Whisper to the channel. Feishu also rejects nil TaskList
+// payloads in postOrphanTaskCard / ensureReceiptForTask; this
+// is the upstream guard.
+func TestTranslate_EventTaskCreate_NilTaskList(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind:     agent.EventAgentTaskCreate,
+		TaskList: nil,
+	}
+	if _, ok := Translate("chat1", in); ok {
+		t.Error("nil TaskList should drop, not emit (defensive against bridge bugs)")
 	}
 }

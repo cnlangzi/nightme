@@ -19,6 +19,7 @@
 package dsh
 
 import (
+	"os"
 	"context"
 	"errors"
 	"os/exec"
@@ -100,6 +101,9 @@ func driveOneTurn(t *testing.T, a *agent.Agent, timeout time.Duration) string {
 //   5. Bridge B's EventAgentReady should carry the fork's new
 //      sessionId (NOT A's sessionId — that's the whole point of fork).
 func TestE2E_Resume_ForkHappyPath(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}
@@ -173,6 +177,9 @@ func TestE2E_Resume_ForkHappyPath(t *testing.T) {
 //   4. Verify wire field is "items", NOT "sessions".
 //   5. Verify Session struct fields match real dsh wire shape.
 func TestE2E_Resume_ListSessionsReturns(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}
@@ -242,6 +249,9 @@ func TestE2E_Resume_ListSessionsReturns(t *testing.T) {
 // how a user who restarts the daemon daily accumulates a chain
 // ses_v1 → ses_v2 → ses_v3 over time.
 func TestE2E_Resume_ForkChain(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}
@@ -317,6 +327,9 @@ func TestE2E_Resume_ForkChain(t *testing.T) {
 // the full newDriver path (not just handshakeSession in
 // isolation).
 func TestE2E_Resume_StaleIdReturnsUnhealthyOnRealDsh(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}
@@ -346,6 +359,9 @@ func TestE2E_Resume_StaleIdReturnsUnhealthyOnRealDsh(t *testing.T) {
 // "user reopens a chat but the previous session had no completed
 // turn" scenario — must trigger auto-retry in production.
 func TestE2E_Resume_BlankSessionRejected(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real-dsh e2e")
+	}
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skipf("dsh not in PATH; skipping: %v", err)
 	}

@@ -10,8 +10,7 @@
 > - [docs/bridge/claude.md](./claude.md) — stream-json transport,长生命周期
 > - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio + print-mode(本 bridge 设计模板)
 > - [docs/bridge/pi.md](./pi.md) — JSONL RPC over stdio + print-mode
-> - [docs/bridge/opencode.md](./opencode.md) — HTTP+SSE transport(本 chat session bridge 形态同构)
-> - [docs/feat/F-dsh-bridge.md](../feat/F-dsh-bridge.md) — print-mode 阶段的设计稿(已 closed)
+> > - [docs/feat/F-dsh-bridge.md](../feat/F-dsh-bridge.md) — print-mode 阶段的设计稿(已 closed)
 > - [docs/bridge/cli-transport.md](./cli-transport.md) — pipe / lifecycle 通用约束
 
 ---

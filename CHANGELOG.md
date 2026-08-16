@@ -11,6 +11,78 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### opencode bridge: migrate from HTTP serve to ACP
+
+The `opencode` integration is migrated from the proprietary
+`opencode serve` HTTP+SSE wire to the standard Agent Client
+Protocol (`opencode acp`). See
+[`docs/feat/F-OPENCODE-ACP-MIGRATION.md`](./docs/feat/F-OPENCODE-ACP-MIGRATION.md)
+for the full design.
+
+**What changes for users**
+
+- Default `opencode` agent now spawns `opencode acp` over a PTY
+  instead of `opencode serve` over HTTP. From the user's
+  perspective: same `/use opencode` flow, same tools, same
+  permissions UX, same `usage_update` footer. No config change
+  required.
+
+- One-shot invocations (`/gtw commit`, `buildAgentPrompt`)
+  continue to use `opencode run --format json`. No change.
+
+**What changes under the hood**
+
+- New package: `internal/bridge/opencode_acp/` — thin wrapper
+  over the generic `internal/bridge/acp/` plus a
+  sessionUpdate translator (`update.go`) covering the 5
+  sessionUpdate variants opencode actually emits on the wire
+  (user_message_chunk, agent_message_chunk, agent_thought_chunk,
+  tool_call, tool_call_update — verified against
+  sst/opencode `packages/opencode/src/acp/event.ts`). Unknown
+  variants are logged and dropped so a future opencode release
+  that adds new kinds does not break the bridge.
+- The generic `internal/bridge/acp/` package gained a per-bridge
+  extension hook: `acp.UpdateHandler` + `acp.SessionView` +
+  `(*driver).SetUpdateHandler`. SendBlocks now awaits the
+  session/prompt response (opencode acp's response is server-
+  side synchronous) so EventAgentDone.Usage carries the per-turn
+  token counts verbatim. `ErrTurnBusy` is now exported from the
+  acp package.
+- **Phase 2 (this snapshot)**: the retired
+  `internal/bridge/opencode/` (HTTP serve) package is deleted —
+  26 files, ~12000 lines removed (server.go, client.go,
+  transport.go, translate.go, think_tags.go, agent.go, driver.go,
+  testdata/, plus 14 test files). The bridge_env_safety
+  whitelist in `internal/agent/bridge_env_safety_windows_test.go`
+  is updated to point at `internal/bridge/opencode_acp`. See
+  the migration doc §6 for the deletion checklist.
+- **Phase 2 follow-up cleanup**: after verifying the opencode
+  wire against `sst/opencode@dev/packages/opencode/src/acp/event.ts`,
+  `update.go` is slimmed from 449 → 302 lines. The 6 speculative
+  sessionUpdate branches (usage_update,
+  available_commands_update, current_mode_update,
+  config_option_update, session_info_update, plan) collapse into
+  a single `default` log-only branch — opencode does not emit
+  any of these as ACP sessionUpdate notifications today (they
+  stay inside the opencode process as internal SSE events).
+  `SessionView.StashUsage` and the per-bridge `lastUsage`
+  tracking are removed for the same reason.
+
+**Compatibility**
+
+- `opencode` configuration entries in `~/.nightme/config.yaml`
+  continue to work without changes (the binary + Args are
+  unchanged).
+- Custom `opencode` extensions that imported
+  `opencode.NewStarter` need to switch to
+  `opencode_acp.NewStarter`. No code in `cmd/`, `internal/`,
+  or `docs/` outside the bridge package imported
+  `opencode.NewStarter` directly — verify your local fork.
+
+  See [`MIGRATION.md`](./MIGRATION.md) §"opencode bridge
+  migration: HTTP serve → ACP (Phase 2)" for the import diff
+  and extension-porting guidance.
+
 ### Centralise task timeouts in `internal/timeouts`
 
 Every shell / agent / hook / CLI / reply deadline in the codebase

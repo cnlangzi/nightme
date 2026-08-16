@@ -43,7 +43,7 @@ import (
 var bridgeDirs = []string{
 	"internal/bridge/claudecode",
 	"internal/bridge/codex",
-	"internal/bridge/opencode",
+	"internal/bridge/opencode_acp",
 	"internal/bridge/pi",
 	"internal/bridge/pty",
 	"internal/bridge/acp",

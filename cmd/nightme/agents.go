@@ -26,7 +26,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh"
-	"github.com/cnlangzi/nightme/internal/bridge/opencode"
+	"github.com/cnlangzi/nightme/internal/bridge/opencode_acp"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
@@ -60,12 +60,25 @@ func init() {
 		agent.Builtins.Register(dsh.NewStarter("dsh"))
 	}
 
-	// opencode — the `opencode serve` HTTP bridge. The bridge
-	// spawns `opencode serve --hostname=127.0.0.1 --port=0`, parses
-	// the bound URL from stdout, and drives the server via the 9
-	// endpoint OpenAPI surface. SSE is the event source. See
-	// docs/feat/F-OPENCODE-opencode-bridge.md for design notes.
-	agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", nil))
+	// opencode — the `opencode acp` Agent Client Protocol bridge.
+	// Long-lived chat sessions spawn `opencode acp` under a PTY
+	// and drive the standard ACP JSON-RPC 2.0 wire
+	// (initialize / session/new / session/prompt /
+	// session/cancel / session/request_permission). Per
+	// https://opencode.ai/docs/acp/ — opencode's vendor-
+	// recommended integration mode ("All features are supported").
+	//
+	// One-shot invocations (/gtw commit, buildAgentPrompt) use
+	// the opencode run --format json print-mode spawn in print.go.
+	//
+	// Migration history: prior versions of this package shipped
+	// an HTTP `opencode serve` SSE bridge (~3500 lines of
+	// opencode-private event translation). That implementation
+	// was retired in F-OPENCODE-ACP-MIGRATION — the same wire
+	// surface is now available via the standard ACP protocol
+	// with a thin per-bridge sessionUpdate translator (see
+	// internal/bridge/opencode_acp/update.go).
+	agent.Builtins.Register(opencode_acp.NewStarter("opencode", "opencode", []string{"acp"}))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see
@@ -86,3 +99,4 @@ func init() {
 		agent.Builtins.Register(pty.NewStarter("bash", "bash", nil, nil, 0, 0))
 	}
 }
+

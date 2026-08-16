@@ -27,17 +27,45 @@ func (b *mockTransport) PID() int { return b.pid }
 // child and never reads Signal.
 func (b *mockTransport) Signal(_ os.Signal) error { return nil }
 
+// TestAcpSession_SendBlocks_EncodesCorrectly verifies the JSON-RPC
+// envelope for session/prompt.
+//
+// Note (F-OPENCODE-ACP-MIGRATION): SendBlocks now awaits the
+// session/prompt response (opencode acp's response is server-side
+// synchronous, carrying stopReason + per-turn usage we want on
+// EventAgentDone). The test therefore writes both the prompt
+// request AND the response so SendBlocks can return cleanly, then
+// asserts the terminal EventAgentDone{Reason:"settled"} lands on
+// the events channel with the expected Usage.
+//
+// Wiring detail: only ONE goroutine (the server-side goroutine)
+// reads from serverReader — bufio.Reader is not concurrent-safe.
+// The server-side goroutine forwards the prompt request it
+// observed to the test body via promptSeen, where the assertions
+// on the request envelope shape live.
 func TestAcpSession_SendBlocks_EncodesCorrectly(t *testing.T) {
 	client, server := net.Pipe()
 	transport := &mockTransport{Conn: client, pid: 42}
 	defer server.Close()
 
+	promptSeen := make(chan rpcMessage, 1)
 	serverReader := bufio.NewReader(server)
 	go func() {
 		initialize := readRPCForTest(t, serverReader)
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: initialize.ID, Result: json.RawMessage(`{"protocolVersion":1}`)})
 		newSession := readRPCForTest(t, serverReader)
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{"sessionId":"session-1"}`)})
+		// Read the prompt request and forward it for assertion.
+		// Wire shape verified against opencode 1.18.18 + the
+		// @agentclientprotocol/sdk types:
+		//   { "stopReason": "end_turn", "usage": {...} }
+		prompt := readRPCForTest(t, serverReader)
+		promptSeen <- prompt
+		writeRPCForTest(t, server, rpcMessage{
+			JSONRPC: jsonRPCVersion,
+			ID:      prompt.ID,
+			Result:  json.RawMessage(`{"stopReason":"end_turn","usage":{"inputTokens":1,"outputTokens":2}}`),
+		})
 	}()
 
 	a := newAgentForTest(transport, "mock", "/tmp/workspace")
@@ -46,15 +74,26 @@ func TestAcpSession_SendBlocks_EncodesCorrectly(t *testing.T) {
 	}
 	defer a.Close()
 
-	promptDone := make(chan rpcMessage, 1)
-	go func() { promptDone <- readRPCForTest(t, serverReader) }()
+	// Drain the EventAgentReady that handshake synthesized.
+	select {
+	case ev := <-a.Events():
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("first event after handshake = %v, want EventAgentReady", ev.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentReady")
+	}
+
 	if err := a.SendBlocks(context.Background(), []agent.ContentBlock{
 		{Type: agent.ContentText, Text: "hello"},
 	}); err != nil {
 		t.Fatalf("SendBlocks() error = %v", err)
 	}
+
+	// Assert the wire envelope shape for the prompt request
+	// the server-side goroutine observed.
 	select {
-	case request := <-promptDone:
+	case request := <-promptSeen:
 		if request.Method != "session/prompt" {
 			t.Fatalf("method = %q, want session/prompt", request.Method)
 		}
@@ -67,6 +106,23 @@ func TestAcpSession_SendBlocks_EncodesCorrectly(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for prompt")
+	}
+
+	// SendBlocks awaited the response; assert the terminal
+	// event landed on the events channel.
+	select {
+	case ev := <-a.Events():
+		if ev.Kind != agent.EventAgentDone {
+			t.Fatalf("first event after SendBlocks = %v, want EventAgentDone", ev.Kind)
+		}
+		if ev.Done == nil || ev.Done.Reason != "settled" {
+			t.Errorf("Done = %+v, want Reason=settled", ev.Done)
+		}
+		if ev.Done.Usage == nil || ev.Done.Usage.InputTokens != 1 || ev.Done.Usage.OutputTokens != 2 {
+			t.Errorf("Usage = %+v, want input=1 output=2", ev.Done.Usage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventAgentDone")
 	}
 }
 

@@ -28,6 +28,49 @@ A v1.x install on the current dev binary will fail to start.
 - Otherwise → spawn a new AgentSession and add to the pool.
 
 There is no explicit "spawn" command. The first message after
+
+---
+
+## opencode bridge migration: HTTP serve → ACP (Phase 2)
+
+The `opencode` bridge shipped with HTTP serve for several snapshots
+and migrated to the standard Agent Client Protocol
+(`opencode acp`) in **F-OPENCODE-ACP-MIGRATION**. Most users see
+no change — the binary is the same, the args are `["acp"]`, the
+event semantics on the wire are identical or richer. The only
+breaking change is for code (rare) that imported the
+retired `internal/bridge/opencode/` package directly:
+
+```diff
+- import "github.com/cnlangzi/nightme/internal/bridge/opencode"
+- s := opencode.NewStarter("opencode", "opencode", nil)
++ import "github.com/cnlangzi/nightme/internal/bridge/opencode_acp"
++ s := opencode_acp.NewStarter("opencode", "opencode", []string{"acp"})
+```
+
+Production code under `cmd/`, `internal/`, and `docs/` only
+references the package in one place — `cmd/nightme/agents.go` —
+which is updated as part of the migration.
+
+If your local fork extends the opencode bridge (e.g. custom
+permission rules, custom tool normalization), port the
+extensions to the new package:
+
+- HTTP serve custom SSE event handling → translate to ACP
+  sessionUpdate translator (see
+  `internal/bridge/opencode_acp/update.go`).
+- HTTP serve client.go endpoint overrides → no longer needed;
+  the generic acp bridge handles all standard ACP methods.
+- opencodehomeDir / InstanceContext cwd tricks → no longer
+  needed; ACP `session/new` takes `cwd` directly.
+- 14 SSE event types → 11 ACP sessionUpdate variants
+  (some merged: e.g. opencode's
+  `session.next.text.{started,delta,ended}` becomes ACP's
+  `agent_message_chunk` token-by-token).
+
+See [`docs/feat/F-OPENCODE-ACP-MIGRATION.md`](./docs/feat/F-OPENCODE-ACP-MIGRATION.md)
+§6 for the Phase 2 deletion checklist.
+
 `/cwd` triggers lazy spawn automatically (via
 `ChatSession.LookupActiveAgentSession`).
 

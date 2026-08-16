@@ -12,7 +12,7 @@
 // Event types we act on: text, reasoning, tool_use, step_start,
 // step_finish, error. Unknown types are tolerated (ignored).
 
-package opencode
+package opencode_acp
 
 import (
 	"context"

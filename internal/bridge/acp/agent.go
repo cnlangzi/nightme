@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -78,7 +79,90 @@ type driver struct {
 	permissionMu sync.Mutex
 	permissions  []permissionCall
 	closeOnce    sync.Once
+
+	// updateHandler, when non-nil, receives raw session/update
+	// params.update payloads BEFORE the built-in 4-case fallback
+	// runs. Used by per-agent bridges (opencode) to inject a
+	// bridge-specific translator for sessionUpdate variants the
+	// generic ACP bridge does not recognize. nil keeps the
+	// existing behaviour. See SessionView + SetUpdateHandler
+	// below.
+	updateHandler UpdateHandler
+
+	// pendingTurnMu guards the in-flight session/prompt guard.
+	// Opencode ACP's prompt response IS the turn-end signal (the
+	// server resolves only after the turn settles), so the generic
+	// acp bridge now blocks on session/prompt until the response
+	// arrives. pendingTurnActive tracks that single in-flight
+	// turn so a second SendBlocks call gets ErrTurnBusy instead
+	// of stacking prompts on the same session.
+	//
+	// Released by SendBlocks on response receipt (success or
+	// error) and by Close as a safety net.
+	pendingTurnMu     sync.Mutex
+	pendingTurnActive bool
 }
+
+
+// SessionView is the read-only handle the bridge-specific
+// UpdateHandler receives. It exposes only the surface a translator
+// needs (events channel for emission, session id for stamping)
+// without leaking the unexported *driver or any of its locks /
+// rpc plumbing.
+//
+// Lifetime: the SessionView is valid for the lifetime of the
+// driver / *agent.Agent that produced it. Once Close() is called
+// the underlying transport is gone and Emit becomes a closed-
+// channel no-op (send completes silently via the close-aware
+// select in deliver()).
+type SessionView struct {
+	// Emit blocks on the underlying events channel with the same
+	// producer-side contract as the bridge's deliver() helper
+	// (no instant drop, no timeout drop; close-aware).
+	Emit func(ev agent.AgentEvent)
+
+	// SessionID returns the negotiated ACP session id. Stable
+	// across multi-turn conversations on the same driver; flips
+	// to "" before handshake completes.
+	SessionID func() string
+
+	// AgentName / Workspace are captured at Start time. Immutable
+	// for the driver's lifetime — exposed as strings (not funcs)
+	// so callers can use them without a lock.
+	AgentName string
+	Workspace string
+
+}
+
+
+// UpdateHandler is the bridge-supplied callback that receives raw
+// session/update params.update payloads. Returning a non-nil error
+// is logged at debug level but does NOT kill the read pump — wire
+// decoding stays tolerant so a malformed update from one agent
+// version does not strand the user on a broken bridge.
+//
+// Bridges that want to translate sessionUpdate variants beyond
+// the built-in 4-case fallback (agent_message_chunk, tool_call,
+// tool_call_update, message_chunk) register a handler via
+// SetUpdateHandler. The handler runs BEFORE the fallback, so it
+// can fully replace the default behaviour for any kind it cares
+// about (just return nil and don't re-emit if you want the
+// fallback to also run).
+type UpdateHandler func(view *SessionView, raw json.RawMessage) error
+
+
+// DriverHandle is the exported alias for the package-private
+// driver. Bridges that need to install an UpdateHandler (opencode,
+// future per-bridge translators) reach the driver through this
+// type via:
+//
+//	d, ok := a.Driver().(*acp.DriverHandle)
+//
+// and then call d.SetUpdateHandler(...) or d.View(). The type is
+// opaque to consumers; it exists purely so bridge-specific code
+// outside the acp package can perform the type assertion without
+// re-exporting the unexported driver struct.
+type DriverHandle = driver
 
 
 // permissionCall tracks an outstanding session/request_permission
@@ -286,14 +370,52 @@ func (d *driver) PID() int {
 // only Text is exercised by production agents (Codex / OpenCode
 // have not yet landed), so the type-safe Path-based blocks are
 // preserved here for Phase 2.
+//
+// Synchronous semantics
+//
+// Unlike a stream-json bridge (claudecode), this bridge awaits
+// the session/prompt RESPONSE before returning. Rationale:
+//
+//   - Opencode ACP's session/prompt is server-side synchronous:
+//     the server resolves the response only after the turn
+//     settles (it internally awaits sdk.global.event for
+//     session.status:idle).
+//   - The response carries stopReason + per-turn usage that the
+//     runtime reads from EventAgentDone.Usage. Awaiting lets us
+//     deliver Done with accurate usage on the same event.
+//   - The runtime's pump already drains sessionUpdate events
+//     while SendBlocks is blocked, so no events are buffered or
+//     dropped — the user sees the same text/tool stream either
+//     way; the only difference is SendBlocks returns at turn-end
+//     instead of immediately after writing the prompt.
+//
+// ErrTurnBusy is returned when a previous turn is still in
+// flight. Mirrors codex / pi / claudecode / opencode-serve's
+// pending-turn guard.
 func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
-	_ = ctx
 	if d.sessionID == "" {
 		return errors.New("bridge/acp: session is not initialized")
 	}
 	if len(blocks) == 0 {
 		return nil
 	}
+
+	// pendingTurnActive guard — refuse a second prompt while
+	// the first is still in flight. Released in the deferred
+	// block below on every return path.
+	d.pendingTurnMu.Lock()
+	if d.pendingTurnActive {
+		d.pendingTurnMu.Unlock()
+		return ErrTurnBusy
+	}
+	d.pendingTurnActive = true
+	d.pendingTurnMu.Unlock()
+	defer func() {
+		d.pendingTurnMu.Lock()
+		d.pendingTurnActive = false
+		d.pendingTurnMu.Unlock()
+	}()
+
 	out := make([]contentBlock, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Type {
@@ -320,10 +442,115 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	if len(out) == 0 {
 		return nil
 	}
-	return d.rpc.requestAsync("session/prompt", promptParams{
+
+	result, err := d.rpc.request(ctx, "session/prompt", promptParams{
 		SessionID: d.sessionID,
 		Prompt:    out,
 	})
+	if err != nil {
+		// Surface the wire error as EventAgentError so the
+		// runtime can render a "bridge rejected prompt" card
+		// instead of just hanging on the busy guard.
+		d.emit(agent.AgentEvent{
+			Kind: agent.EventAgentError,
+			Err:  fmt.Errorf("bridge/acp: session/prompt: %w", err),
+		})
+		return err
+	}
+
+	// Translate the prompt response into EventAgentDone +
+	// EventAgentError (depending on stopReason). The acp spec
+	// response shape (per @agentclientprotocol/sdk types):
+	//
+	//   {
+	//     "stopReason": "end_turn" | "cancelled" | "max_tokens" |
+	//                  "refusal" | string,
+	//     "usage": { "inputTokens": int, "outputTokens": int,
+	//                "cacheReadInputTokens": int,
+	//                "cacheCreationInputTokens": int }?,
+	//     "_meta": {...}
+	//   }
+	//
+	// Bridges without a stopReason (older acp spec) silently
+	// emit Done{Reason:"settled"} — safe default for the
+	// common-case end_turn path.
+	d.translatePromptResponse(result)
+	return nil
+}
+
+// translatePromptResponse parses the session/prompt response and
+// emits the terminal AgentEvent for the turn. Stops on
+// EventAgentDone for normal completion, EventAgentError for
+// cancelled / refused / max_tokens. Per-turn usage rides on
+// Done.Usage (matches codex / pi / claudecode convention).
+//
+// Exposed as a method so future bridges can override (e.g. a
+// bridge whose prompt response carries additional fields we
+// want to surface).
+func (d *driver) translatePromptResponse(raw json.RawMessage) {
+	var resp struct {
+		StopReason string `json:"stopReason"`
+		Usage      *struct {
+			InputTokens              int `json:"inputTokens"`
+			OutputTokens             int `json:"outputTokens"`
+			CacheReadInputTokens     int `json:"cacheReadInputTokens"`
+			CacheCreationInputTokens int `json:"cacheCreationInputTokens"`
+		} `json:"usage,omitempty"`
+		UserMessageID string `json:"userMessageId,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		// Unparseable response — emit Done with reason
+		// "settled" so the runtime clears the busy guard.
+		// Without this the user is stuck on the spinner.
+		d.emit(agent.AgentEvent{
+			Kind: agent.EventAgentDone,
+			Done: &agent.AgentDoneEvent{Reason: "settled"},
+		})
+		return
+	}
+
+	// usage is optional — a successful turn with empty usage
+	// emits Done without a Usage field (acceptable: channels
+	// render zero-usage turns without a footer line).
+	var usage *agent.UsageInfo
+	if resp.Usage != nil {
+		usage = &agent.UsageInfo{
+			InputTokens:              resp.Usage.InputTokens,
+			OutputTokens:             resp.Usage.OutputTokens,
+			CacheCreationInputTokens: resp.Usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     resp.Usage.CacheReadInputTokens,
+		}
+	}
+
+	switch resp.StopReason {
+	case "cancelled":
+		// /stop path. CLI is alive; next SendBlocks will
+		// succeed. Emit Error so the runtime can render a
+		// "turn cancelled" footer instead of a normal
+		// completed card.
+		d.emit(agent.AgentEvent{
+			Kind: agent.EventAgentError,
+			Err:  errors.New("bridge/acp: turn cancelled"),
+		})
+	case "max_tokens":
+		d.emit(agent.AgentEvent{
+			Kind: agent.EventAgentError,
+			Err:  errors.New("bridge/acp: turn exceeded max_tokens"),
+		})
+	case "refusal":
+		d.emit(agent.AgentEvent{
+			Kind: agent.EventAgentError,
+			Err:  errors.New("bridge/acp: turn refused by content filter"),
+		})
+	default:
+		// end_turn OR unknown stopReason → success path.
+		// Emitting Done{Reason:"settled"} lets the runtime
+		// clear the busy guard via pump_events, identical to
+		// how the opencode-serve bridge's session.status:idle
+		// translation worked.
+		done := &agent.AgentDoneEvent{Reason: "settled", Usage: usage}
+		d.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: done})
+	}
 }
 
 // SendPermission replies to the oldest outstanding
@@ -532,6 +759,52 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 	return nil
 }
 
+// ─── per-bridge extension hooks ──────────────────────────────────
+
+// SetUpdateHandler installs a bridge-specific translator for
+// session/update notifications. Subsequent updates route through
+// the handler BEFORE the built-in 4-case fallback runs; the
+// handler is responsible for emitting AgentEvents and may either
+// fully replace the default behaviour (most common) or layer on
+// top (rare; needed if a future acp spec adds a sessionUpdate
+// variant that the fallback should still handle).
+//
+// Must be called BEFORE the readPump observes the first
+// session/update. The runtime sets the handler from
+// `Starter.Start`'s post-handshake window — see opencode bridge
+// for the canonical pattern. Calling after the read pump has
+// started racing updates is racy (some updates may go to the old
+// handler or the fallback).
+//
+// Pass nil to revert to the built-in 4-case behaviour.
+//
+// Designed for bridge-specific translators that need to handle
+// sessionUpdate variants the generic acp bridge does not
+// recognize (opencode's agent_thought_chunk, future per-agent
+// acp backends). The opencode bridge is the first user
+// (F-OPENCODE-ACP-MIGRATION).
+func (d *driver) SetUpdateHandler(h UpdateHandler) {
+	d.updateHandler = h
+}
+
+// View returns a SessionView for use by bridge-supplied
+// UpdateHandlers. The view's closures are bound to this driver
+// and remain valid until Close. Emit / SessionID remain safe to
+// call after Close (Emit's send becomes a closed-channel no-op;
+// SessionID returns the last-set value).
+//
+// Mostly useful for tests; production code in the opencode bridge
+// constructs the SessionView inline so the closures can capture
+// per-bridge state (agentName, workspace).
+func (d *driver) View() *SessionView {
+	return &SessionView{
+		Emit:       d.emit,
+		SessionID:  func() string { return d.sessionID },
+		AgentName:  d.agentName,
+		Workspace:  d.workspace,
+	}
+}
+
 // ─── internals ───
 
 // setSessionID parses the session/new response and synthesizes the
@@ -688,6 +961,37 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 	if kind == "" {
 		kind = update.Type
 	}
+
+	// Per-bridge extension hook. If a bridge (e.g. opencode) has
+	// installed an UpdateHandler, dispatch the raw update payload
+	// to it BEFORE the built-in 4-case fallback runs. The handler
+	// is responsible for emitting AgentEvents and stashing any
+	//
+	// Returning a non-nil error logs at debug level but does NOT
+	// abort the read pump — wire decoding stays tolerant. The
+	// handler is run on every sessionUpdate regardless of kind,
+	// so a bridge that wants to fully replace the default must
+	// either (a) re-emit the same AgentEvents the fallback would
+	// have emitted, or (b) handle just the kinds it cares about
+	// and let the fallback handle the rest by returning nil
+	// without emitting. The opencode bridge picks option (b):
+	// only the kinds the existing default does not handle
+	// (usage_update, available_commands_update, plan, etc.) plus
+	// the agent_thought_chunk variant the default treats as
+	// plain text.
+	if d.updateHandler != nil {
+		view := d.View()
+		if err := d.updateHandler(view, params.Update); err != nil {
+			// log only — keep the stream alive. Use the
+			// standard slog package directly so we don't
+			// pull in a per-package oLog helper (acp is
+			// generic across backends; per-agent logging
+			// belongs in the bridge-specific layer).
+			slog.Debug("acp: updateHandler error (non-fatal)",
+				"kind", kind, "err", err.Error())
+		}
+	}
+
 	switch kind {
 	case "agent_message_chunk":
 		var content struct {

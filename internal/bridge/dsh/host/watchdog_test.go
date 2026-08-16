@@ -25,7 +25,7 @@ import (
 )
 
 const fakeDSHScript = `#!/bin/bash
-PORT=""
+PORT="3080"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port) PORT="$2"; shift 2;;
@@ -112,8 +112,9 @@ func TestSharedHost_WatchdogRespawns(t *testing.T) {
 	})
 
 	sh, err := host.StartSharedHost(context.Background(), host.SharedHostOptions{
-		Workspace: dir,
-		HostCmd:   fake,
+		Workspace:  dir,
+		HostCmd:    fake,
+		ForceSpawn: true, // bypass discover — drive our own fake-dsh
 	})
 	if err != nil {
 		t.Fatalf("StartSharedHost: %v", err)
@@ -175,8 +176,9 @@ func TestSharedHost_GracefulCloseStopsWatchdog(t *testing.T) {
 	})
 
 	sh, err := host.StartSharedHost(context.Background(), host.SharedHostOptions{
-		Workspace: dir,
-		HostCmd:   fake,
+		Workspace:  dir,
+		HostCmd:    fake,
+		ForceSpawn: true, // bypass discover — drive our own fake-dsh
 	})
 	if err != nil {
 		t.Fatalf("StartSharedHost: %v", err)

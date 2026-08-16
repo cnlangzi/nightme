@@ -36,7 +36,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -46,17 +45,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
-
-// defaultPort is the dsh web default (matches the browser `dsh web`).
-// We try this first; if it's already bound (e.g. user has a browser
-// dsh running), fall back to OS-assigned (--port 0) and let stdout
-// parsing pick up the assigned port.
-const defaultPort = 3080
-
-// portProbeTimeout bounds how long we wait to probe defaultPort's
-// availability. A listen on 127.0.0.1:3080 succeeds-or-fails in
-// microseconds; the timeout is here to fail fast on hung kernels.
-const portProbeTimeout = 500 * time.Millisecond
 
 // webURLParseTimeout bounds waiting for dsh web to print its bound
 // URL on stdout. Real-machine cold start is ~1.5s; 10s is generous.
@@ -93,35 +81,64 @@ type SharedHostOptions struct {
 	// pre-shared-host behaviour).
 	PermissionMode string
 
+	// ForceSpawn bypasses the reuse-or-spawn discovery: always
+	// spawn a fresh dsh subprocess, even if 3080 has one running.
+	// Used by tests (which need to drive their own fake dsh
+	// subprocess) and by users who explicitly want isolation
+	// (e.g. CI, multiple daemons on the same host). Default: false.
+	ForceSpawn bool
+
 	// Logger is the slog handle for lifecycle messages. nil → slog.Default().
 	Logger *slog.Logger
 }
 
 // SharedHost wraps the running dsh subprocess + the host.Client
 // pointing at it. Use StartSharedHost to construct; call Close to
-// tear down (graceful SIGINT then SIGKILL).
+// tear down.
 //
-// Watchdog: a background goroutine watches cmd.Wait and respawns
-// the dsh subprocess if it exits unexpectedly. After a successful
-// respawn, the watchdog re-attaches every Router subscription on
-// the new dsh via Client.RecoverSubscriptions (which calls
-// RPCClient.RecoverSession — session.create with preallocated id +
-// cwd, idempotent on the server).
+// Two ownership modes:
+//
+//   - ownsProcess=true:  SharedHost spawned the dsh subprocess;
+//                        watchdog respawns on crash; Close SIGINTs it.
+//   - ownsProcess=false: SharedHost reused a pre-existing dsh the user
+//                        already had running (e.g. browser dashboard);
+//                        watchdog is a no-op; Close only disconnects.
+//
+// Watchdog (ownsProcess only): a background goroutine watches cmd.Wait
+// and respawns the dsh subprocess if it exits unexpectedly. After a
+// successful respawn, the watchdog re-attaches every Router
+// subscription on the new dsh via Client.RecoverSubscriptions.
 type SharedHost struct {
 	cmd    *exec.Cmd
 	cli    *Client
 	logger *slog.Logger
 	opts   SharedHostOptions // captured at Start for respawn parity
 
+	// ownsProcess distinguishes "we spawned this dsh" from "this is
+	// the user's dsh we attached to". Close() and the watchdog
+	// consult this to decide whether to signal / respawn.
+	ownsProcess bool
+
 	mu     sync.RWMutex // guards cmd + cli swap during respawn
 	once   sync.Once    // guards Close idempotency + closed chan
 	closed chan struct{}
 
 	// watchdogDone is closed when the watchdog goroutine has fully
-	// exited. Close() blocks on it so a respawn in progress at
-	// shutdown time can't outlive the daemon.
+	// exited (or immediately if no watchdog was started). Close()
+	// blocks on it so a respawn in progress at shutdown time can't
+	// outlive the daemon.
 	watchdogDone chan struct{}
 }
+
+// closedChan is a pre-closed channel used as the watchdogDone value
+// when SharedHost doesn't run a watchdog (ownsProcess=false). This
+// way Close()'s <-h.watchdogDone returns immediately without
+// special-casing.
+var closedChan = func() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
 
 // respawnBackoffBase / respawnBackoffMax bound the exponential
 // backoff between respawn attempts. After a successful respawn the
@@ -159,17 +176,24 @@ func (h *SharedHost) PID() int {
 // has already completed). Tests wait on this for clean shutdown.
 func (h *SharedHost) Done() <-chan struct{} { return h.closed }
 
-// StartSharedHost spawns the shared dsh web daemon, blocks until the
-// HTTP server is ready (URL printed on stdout), and installs the
-// resulting *Client as the process-wide singleton via SetGlobal.
+// StartSharedHost attaches to (or spawns) the shared dsh web daemon
+// and installs the resulting *Client as the process-wide singleton
+// via SetGlobal.
 //
-// Returns a *SharedHost that owns the subprocess. The caller is
-// responsible for calling Close on shutdown.
+// Reuse-or-spawn:
 //
-// Errors are fatal-startup semantics: if dsh fails to start or
-// never prints the URL, the function returns an error and the
-// caller should treat it as a hard-fail boot condition (no
-// per-session fallback).
+//  1. Probe 127.0.0.1:3080 for an existing dsh. If found, attach to
+//     it (the user might have `dsh web` open in their browser) —
+//     the SharedHost ownsProcess=false; no subprocess lifecycle,
+//     no watchdog; Close just disconnects.
+//  2. If nothing's on 3080, spawn `dsh --profile web` (no --port
+//     flag → dsh defaults to 3080) and own it. Watchdog respawns
+//     on crash; Close SIGINTs.
+//  3. If something IS on 3080 but it's NOT dsh, surface the error
+//     (spawning on top of a foreign web service is a footgun).
+//
+// Errors are fatal-startup semantics: callers should treat them as
+// hard-fail boot conditions (no per-session fallback).
 func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, error) {
 	if opts.Workspace == "" {
 		return nil, errors.New("dsh.host: workspace is required")
@@ -185,17 +209,48 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		logger = slog.Default()
 	}
 
-	// Pick a port. Try defaultPort first; if it's bound, fall back
-	// to --port 0 and let dsh pick its own (parseWebURL will pick
-	// the URL out of stdout).
-	port, portArg, err := pickPort(ctx, defaultPort)
-	if err != nil {
-		return nil, fmt.Errorf("dsh.host: pick port: %w", err)
+	// Step 1: try to reuse an existing dsh on the default port,
+	// unless the caller opted out via ForceSpawn.
+	cli, err := func() (*Client, error) {
+		if opts.ForceSpawn {
+			return nil, ErrNotRunning
+		}
+		return DiscoverExisting(ctx, defaultDSHPort)
+	}()
+	switch {
+	case err == nil:
+		// Reused — build a SharedHost that owns no subprocess.
+		// watchdogDone is the pre-closed closedChan so Close's
+		// <-h.watchdogDone returns immediately without a
+		// special-case branch.
+		h := &SharedHost{
+			cli:          cli,
+			logger:       logger,
+			opts:         opts,
+			ownsProcess:  false,
+			closed:       make(chan struct{}),
+			watchdogDone: closedChan,
+		}
+		SetGlobal(cli)
+		logger.Info("dsh.host: attached to existing dsh web",
+			"base_url", cli.BaseURL(),
+			"workspace", opts.Workspace)
+		return h, nil
+	case errors.Is(err, ErrNotRunning):
+		// Fall through to spawn path below.
+	case errors.Is(err, ErrNotDSH):
+		return nil, fmt.Errorf("dsh.host: port %d responds but doesn't look like dsh: %w",
+			defaultDSHPort, err)
+	default:
+		return nil, fmt.Errorf("dsh.host: discover: %w", err)
 	}
-	_ = port // port discovery happens via stdout parse below; portArg is the argv flag
 
-	// Spawn `dsh --profile web --port <portArg>`.
-	cmd := agent.NewCmd(ctx, opts.HostCmd, "--profile", "web", "--port", portArg)
+	// Step 2: spawn a fresh dsh. No --port flag → dsh uses its
+	// default (3080). If 3080 is now bound by something else the
+	// spawn will fail and we'll surface the error loudly (we no
+	// longer fall back to --port 0 — that hid the user's existing
+	// dsh from us and split sessions across instances).
+	cmd := agent.NewCmd(ctx, opts.HostCmd, "--profile", "web")
 	cmd.Dir = opts.Workspace
 	cmd.Env = append(os.Environ(),
 		"DSH_PERMISSION_MODE="+opts.PermissionMode,
@@ -248,7 +303,9 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	logger.Info("dsh.host: web url parsed", "url", baseURL, "pid", cmd.Process.Pid)
 
 	// Construct the Client (RPC + Hub + Router) and wire it.
-	cli := New(baseURL, logger)
+	// Note: cli is already declared above the discover-or-spawn
+	// switch — we just reassign in the spawn branch.
+	cli = New(baseURL, logger)
 	host.cli = cli
 	if err := cli.Start(ctx); err != nil {
 		_ = cmd.Process.Kill()
@@ -273,29 +330,6 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	go host.runWatchdog()
 
 	return host, nil
-}
-
-// pickPort decides between defaultPort and "OS-assigned" (portArg=0).
-// We probe defaultPort via TCP listen; if the listen succeeds the
-// port is free, otherwise we fall back to 0.
-//
-// Returns the resolved port number (or 0 for OS-assigned) and the
-// argv flag value to pass to `dsh --port`.
-func pickPort(ctx context.Context, preferred int) (int, string, error) {
-	probeCtx, cancel := context.WithTimeout(ctx, portProbeTimeout)
-	defer cancel()
-
-	addr := fmt.Sprintf("127.0.0.1:%d", preferred)
-	d := net.Dialer{}
-	conn, err := d.DialContext(probeCtx, "tcp", addr)
-	if err == nil {
-		// Connected — port is in use (something else is listening).
-		// Close and fall back to OS-assigned.
-		_ = conn.Close()
-		return 0, "0", nil
-	}
-	// Dial failed — port is free.
-	return preferred, fmt.Sprintf("%d", preferred), nil
 }
 
 // parseWebURL reads stdout until it sees the `dsh web: http://…` line
@@ -592,15 +626,14 @@ func (h *SharedHost) tryRespawn() error {
 // pair (URL parsed from stdout), or an error. Mirrors the spawn
 // block inside StartSharedHost but doesn't touch any SharedHost
 // fields — caller is responsible for swapping.
+//
+// No --port flag: dsh's own default for --profile web is 3080, and
+// the reuse-or-spawn contract in StartSharedHost assumes "3080 or
+// fail loud". Falling back to --port 0 here would split sessions
+// across instances if the user's dsh is on a different port.
 func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
-	port, portArg, err := pickPort(context.Background(), defaultPort)
-	if err != nil {
-		return nil, nil, fmt.Errorf("dsh.host: pick port: %w", err)
-	}
-	_ = port
-
 	cmd := agent.NewCmd(context.Background(), h.opts.HostCmd,
-		"--profile", "web", "--port", portArg)
+		"--profile", "web")
 	cmd.Dir = h.opts.Workspace
 	cmd.Env = append(os.Environ(),
 		"DSH_PERMISSION_MODE="+h.opts.PermissionMode,

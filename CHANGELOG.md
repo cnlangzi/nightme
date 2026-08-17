@@ -11,15 +11,17 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
-### OutChoice rename
+### OutChoice model
 
-Interactive prompts on the abstract outbound surface are now
+Interactive prompts on the abstract outbound surface are
 `OutChoice` / `OutChoicePatch` with payload `messages.Choice`
-(subkinds Permission / Question / Decision / Error / Preview).
-Channel still renders them as native UI (Feishu Card 2.0, etc.).
-`String()` is `"choice"` / `"choice_patch"`. Feishu helpers
-(`buildInteractiveCard`, `SendCardForReceipt`, `optCards`) keep
-their Card names.
+(Kind: Permission / Question / Decision). The model carries
+RequestID, Options, Questions, Settled, and SelectedID — not
+Feishu chrome. Wizard paging (Step/Picks), 👉, header colour,
+and button green/grey live in the Feishu adapter. Errors stay
+`OutError` (not a Choice). `String()` is `"choice"` /
+`"choice_patch"`. Feishu helpers (`buildInteractiveCard`,
+`SendCardForReceipt`, `optCards`) keep their Card names.
 
 ### opencode bridge: migrate from HTTP serve to ACP
 

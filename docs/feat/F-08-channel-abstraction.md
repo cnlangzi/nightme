@@ -18,7 +18,7 @@
 
 **Channel 不知道**：sessions、workspaces、agents、bindings、slash commands、receipt 状态机的任何细节。Gateway 完全不持有 receipt —— Channel 在内部按 `OutboundMessage.ReplyTo = userMsgID` 路由到自己的 receipt 对象，自己决定怎么 cold-create / PATCH / 终态。
 
-**接口精简**：Channel 的唯一出站方法是 `Send(OutboundMessage)`。交互卡（OutChoice / OutChoicePatch）也走这条出口；相关键是 `Choice.RequestID`，Channel 私有映射到平台 message id。调用方不拿 bot-side id，也不另开 `SendCard` / `SendAction`。Receipt FSM 整体从 Gateway 撤回，详见 SPEC 与 [`channel/feishu-rendering.md`](../channel/feishu-rendering.md)。
+**接口精简**：Channel 的唯一出站方法是 `Send(OutboundMessage)`。交互选择（OutChoice / OutChoicePatch）也走这条出口；相关键是 `Choice.RequestID`，Channel 私有映射到平台 message id。`messages.Choice` 只带语义（Kind / Options / Questions / Settled / SelectedID）；标题 emoji、header 颜色、按钮绿灰、卡内翻页游标都在 Channel。调用方不拿 bot-side id，也不另开 `SendCard` / `SendAction`。Receipt FSM 整体从 Gateway 撤回，详见 SPEC 与 [`channel/feishu-rendering.md`](../channel/feishu-rendering.md)。
 
 **扩展**：Channel 按 `OutboundKind` 自决 routing（Feishu 选 thread + 类型感知摘要，详见 [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) + [`channel/feishu-rendering.md`](../channel/feishu-rendering.md)）。这是 "concrete stays concrete" 原则的具体落地：Gateway 只发 `OutboundMessage{Kind, ReplyTo, ...}`；Channel 看到 Kind 后自决 thread reply / receipt card / reaction。
 

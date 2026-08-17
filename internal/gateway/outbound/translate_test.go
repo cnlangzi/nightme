@@ -262,6 +262,12 @@ func TestTranslate_EventPermission_ActionNeeded(t *testing.T) {
 	if len(msg.Choice.Options) != 2 {
 		t.Errorf("Options = %v, want 2", msg.Choice.Options)
 	}
+	if msg.Choice.Kind != messages.ChoiceKindQuestion {
+		t.Errorf("Kind = %v, want Question", msg.Choice.Kind)
+	}
+	if msg.Choice.RequestID == "" {
+		t.Error("RequestID should be stamped")
+	}
 }
 
 func TestTranslate_EventPermission_QuestionBatch(t *testing.T) {
@@ -296,11 +302,14 @@ func TestTranslate_EventPermission_QuestionBatch(t *testing.T) {
 	if msg.Choice.Questions[0].ID != "q-trigger" || msg.Choice.Questions[1].ID != "q-source" {
 		t.Errorf("question ids = %+v", msg.Choice.Questions)
 	}
-	if len(msg.Choice.Options) != 2 || msg.Choice.Options[0] != "仅 REPL 启动(裸 nightme)" {
+	if len(msg.Choice.Options) != 2 || msg.Choice.Options[0].ID != "仅 REPL 启动(裸 nightme)" {
 		t.Errorf("Options = %v, want first question only", msg.Choice.Options)
 	}
-	if len(msg.Choice.Picks) != 2 {
-		t.Errorf("Picks = %d, want 2 slots", len(msg.Choice.Picks))
+	if msg.Choice.Kind != messages.ChoiceKindQuestion {
+		t.Errorf("Kind = %v, want Question", msg.Choice.Kind)
+	}
+	if msg.Choice.RequestID == "" {
+		t.Error("RequestID should be stamped on permission create")
 	}
 }
 
@@ -341,6 +350,9 @@ func TestTranslate_EventPermissionSettled_PatchesCard(t *testing.T) {
 	}
 	if msg.Choice == nil || !strings.Contains(msg.Choice.Body, "allowed-once") {
 		t.Errorf("Body = %+v, want dashboard outcome", msg.Choice)
+	}
+	if !msg.Choice.Settled {
+		t.Error("PermissionSettled should mark Choice.Settled")
 	}
 }
 

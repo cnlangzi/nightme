@@ -1010,7 +1010,7 @@ func sendDraft(
 		ChoicePosted:    cardPosted,
 		ChoiceTitle:     card.Title,
 		ChoiceBody:      card.Body,
-		ChoiceOptions:   card.Choices,
+		ChoiceOptions:   card.Options,
 		ChoiceRequestID: requestID,
 	})
 	return &Result{Consumed: true}, nil
@@ -1018,7 +1018,7 @@ func sendDraft(
 
 // toChatsessionChoiceOptions was removed in F-51: the gtw package
 // now owns ChoiceOption directly (no chatsession alias needed).
-// The renderer stores card.Choices verbatim on the draft.
+// The renderer stores card.Options verbatim on the draft.
 
 // renderChoiceMarkdown flattens a Choice back to plain markdown for
 // legacy channels that don't support interactive choice prompts (Feishu
@@ -1034,9 +1034,9 @@ func renderChoiceMarkdown(c Choice) string {
 		b.WriteString(c.Body)
 		b.WriteString("\n")
 	}
-	if len(c.Choices) > 0 {
+	if len(c.Options) > 0 {
 		b.WriteString("\n选择操作(反应对应 emoji):\n")
-		for _, ch := range c.Choices {
+		for _, ch := range c.Options {
 			label := ch.Label
 			if ch.Emoji != "" {
 				label = ch.Emoji + " " + label
@@ -1050,36 +1050,19 @@ func renderChoiceMarkdown(c Choice) string {
 }
 
 // gtwChoiceToGateway translates gtw.Choice (business view) to the
-// wire-level messages.Choice. gtw.Choice has fewer fields (no
-// Kind/Disabled/ChosenEmoji); Kind defaults to ChoiceKindDecision
-// (the only /gtw choice kind) — pre-refactor this default lived
-// in the deleted cardKindFromString. Disabled and ChosenEmoji
-// stay zero; the runtime path that needs them (gtw.emitFollowUp
-// post-reaction) sets them inline on the messages.OutboundMessage
-// after the fact.
+// wire-level messages.Choice. Kind is always ChoiceKindDecision.
 func gtwChoiceToGateway(in Choice) *messages.Choice {
+	opts := in.Options
+	if opts != nil {
+		opts = append([]messages.ChoiceOption(nil), opts...)
+	}
 	return &messages.Choice{
 		Kind:      messages.ChoiceKindDecision,
 		Title:     in.Title,
 		Body:      in.Body,
-		Choices:   gtwChoiceOptionsToGateway(in.Choices),
+		Options:   opts,
 		RequestID: in.RequestID,
 	}
-}
-
-func gtwChoiceOptionsToGateway(in []ChoiceOption) []messages.ChoiceOption {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]messages.ChoiceOption, len(in))
-	for i, c := range in {
-		out[i] = messages.ChoiceOption{
-			Emoji:  c.Emoji,
-			Label:  c.Label,
-			Action: c.Action,
-		}
-	}
-	return out
 }
 
 // reply posts a plain-text OutReply via the chat session's

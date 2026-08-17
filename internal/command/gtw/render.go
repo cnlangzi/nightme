@@ -164,10 +164,10 @@ func BranchExistsChoice(p FixDraftPayload, existingPath string) Choice {
 	return Choice{
 		Title: fmt.Sprintf("⚠️ 分支 `%s` 已存在", p.Branch),
 		Body:  body,
-		Choices: []ChoiceOption{
-			{Emoji: "🆕", Label: "用 -v2 新分支", Action: "act:/gtw/branch-newv2"},
-			{Emoji: "🔗", Label: "加入现有协作", Action: "act:/gtw/branch-join"},
-			{Emoji: "❌", Label: "取消", Action: "act:/gtw/cancel"},
+		Options: []ChoiceOption{
+			{ID: "act:/gtw/branch-newv2", Emoji: "🆕", Label: "用 -v2 新分支"},
+			{ID: "act:/gtw/branch-join", Emoji: "🔗", Label: "加入现有协作"},
+			{ID: "act:/gtw/cancel", Emoji: "❌", Label: "取消"},
 		},
 	}
 }
@@ -200,9 +200,9 @@ func WorktreeFailChoice(p FixDraftPayload) Choice {
 	return Choice{
 		Title: title,
 		Body:  body,
-		Choices: []ChoiceOption{
-			{Emoji: "🔄", Label: "重试", Action: "act:/gtw/worktree-retry"},
-			{Emoji: "❌", Label: cancelLabel, Action: "act:/gtw/cancel"},
+		Options: []ChoiceOption{
+			{ID: "act:/gtw/worktree-retry", Emoji: "🔄", Label: "重试"},
+			{ID: "act:/gtw/cancel", Emoji: "❌", Label: cancelLabel},
 		},
 	}
 }

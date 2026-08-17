@@ -275,66 +275,63 @@ type ToolInfo struct {
 type UsageInfo = agent.UsageInfo
 
 // Choice is an interactive prompt that requires the user's pick
-// (permission, question, gtw decision, error). Channel may render
-// it as a native card; this type is not a platform card schema.
+// (permission, clarifying question, or gtw decision). Channel may
+// render it as a native card; this type is not a platform schema.
 //
-// F-46: kind + options + action encoding. Interactive-choice
-// design and Feishu form/callback pitfalls:
-// docs/channel/feishu-cards.md. The legacy Options field still
-// works for callers that just want a flat list of button labels
-// — buildInteractiveCard renders Options as primary buttons when
-// Choices is empty.
+// Kind is semantic only. Visual chrome (title emoji, header
+// colour, button layout, in-card paging) belongs in the Channel.
 type Choice struct {
-	Title             string
-	Body              string
-	Options           []string
-	RequestID         string
-	Kind              ChoiceKind
-	Choices           []ChoiceOption
-	Action            string
-	Disabled          bool
-	ChosenChoiceEmoji string
-	HeaderColor       string
-	// Questions + Step + Picks drive the Action Needed wizard.
-	// len(Questions)<=1 is a one-shot card (click / custom / skip → respond).
-	// len(Questions)>1 is in-card paging: each click advances
-	// Step; /api/respond fires only after the last pick.
-	// Every question also has Type your answer + Skip this question.
+	RequestID string
+	Kind      ChoiceKind
+	Title     string
+	Body      string
+	Options   []ChoiceOption
+	// Questions is AskUserQuestion content. Empty for approvals
+	// and gtw decisions. Channel owns any in-progress paging.
 	Questions []ChoiceQuestion
-	Step      int
-	Picks     []string
+	// Settled means the prompt no longer accepts a pick.
+	// SelectedID is the chosen option ID; empty on dashboard settle.
+	Settled    bool
+	SelectedID string
 }
 
-// ChoiceQuestion is one step on an Action Needed card.
+// ChoiceQuestion is one AskUserQuestion item. Options are the
+// selectable answers for that item.
 type ChoiceQuestion struct {
 	ID       string
 	Header   string
 	Question string
-	Options  []string
+	Options  []ChoiceOption
 }
 
 type ChoiceKind int
 
 const (
 	ChoiceKindPermission ChoiceKind = iota
+	ChoiceKindQuestion
 	ChoiceKindDecision
-	ChoiceKindPreview
-
-	// ChoiceKindError marks a card that surfaces a non-graceful
-	// bridge exit (EventAgentError with a populated Diagnostic).
-	// The renderer should NOT prepend the 👉 Action Needed emoji
-	// (no permission is being asked) and should default the
-	// header template to a warning colour (red/orange) instead
-	// of the default blue. Channels that want to render the
-	// short error string + structured Diagnostic.StderrTail
-	// read from the enclosing OutboundMessage.{Text,Diagnostic}.
-	ChoiceKindError
 )
 
+// ChoiceOption is one selectable answer. ID is what comes back on
+// pick (permission: the option label; gtw: act:/gtw/...). Emoji is
+// an optional identity (gtw reaction key), not button chrome.
 type ChoiceOption struct {
-	Emoji  string
-	Label  string
-	Action string
+	ID    string
+	Label string
+	Emoji string
+}
+
+// ChoiceOptionsFromLabels maps a flat label list onto Options
+// whose ID equals Label (permission / question answers).
+func ChoiceOptionsFromLabels(labels []string) []ChoiceOption {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make([]ChoiceOption, len(labels))
+	for i, l := range labels {
+		out[i] = ChoiceOption{ID: l, Label: l}
+	}
+	return out
 }
 
 type MessageStatePayload struct {

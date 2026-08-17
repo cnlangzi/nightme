@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Label* constants are the platform-side state-machine labels that
@@ -185,16 +186,12 @@ type FixDraftPayload struct {
 }
 
 // ChoiceOption is one button on a decision prompt. F-46 → action
-// handler includes the original Choices on the PATCH so the
-// rebuilt card keeps the same layout (every button disabled).
+// handler includes the original Options on the PATCH so the
+// rebuilt prompt keeps the same layout (settled, selected id).
 //
 // F-51: defined natively in this package (was chatsession.ChoiceOption
-// pre-F-51). Identical field shape.
-type ChoiceOption struct {
-	Emoji  string
-	Label  string
-	Action string
-}
+// pre-F-51). Wire shape is messages.ChoiceOption.
+type ChoiceOption = messages.ChoiceOption
 
 // Draft is one pending user-confirmation choice indexed by
 // Choice.RequestID. Channel inbound copies that RequestID onto
@@ -216,7 +213,7 @@ type Draft struct {
 	// choice path unavailable).
 	ChoicePosted bool
 	// Original choice render data so the action handler can
-	// rebuild the prompt with `Disabled: true` and a result note
+	// rebuild the prompt as Settled with a SelectedID
 	// without going back to the dispatcher.
 	ChoiceTitle     string
 	ChoiceBody      string
@@ -234,12 +231,12 @@ type ReactionEvent = services.ReactionEvent
 
 // Choice represents the original decision prompt stored on a draft.
 // Carries enough information for the action handler to rebuild
-// it with Disabled=true and a result note (see executeXxxAction
-// → deps.Send → Kind=OutChoicePatch path).
+// it as Settled with a SelectedID (see executeXxxAction →
+// deps.Send → Kind=OutChoicePatch path).
 type Choice struct {
 	Title     string
 	Body      string
-	Choices   []ChoiceOption
+	Options   []ChoiceOption
 	RequestID string
 }
 

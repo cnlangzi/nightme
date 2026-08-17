@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestModeFromDraftPayload pins the Mode inference from a
@@ -128,7 +129,7 @@ func TestWorktreeFailChoice_LocalMode(t *testing.T) {
 		t.Errorf("local-mode title should not mention wip label, got %q", card.Title)
 	}
 	// Cancel label must NOT have the rollback suffix.
-	for _, c := range card.Choices {
+	for _, c := range card.Options {
 		if c.Emoji == "❌" && strings.Contains(c.Label, "nightme/wip") {
 			t.Errorf("local-mode cancel label should not mention nightme/wip, got %q", c.Label)
 		}
@@ -145,13 +146,13 @@ func TestWorktreeFailChoice_RemoteModeWithLabel(t *testing.T) {
 		t.Errorf("remote-mode title should include '(#42)', got %q", card.Title)
 	}
 	found := false
-	for _, c := range card.Choices {
+	for _, c := range card.Options {
 		if c.Emoji == "❌" && strings.Contains(c.Label, "nightme/wip") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("remote-mode cancel label should mention nightme/wip rollback, got choices %+v", card.Choices)
+		t.Errorf("remote-mode cancel label should mention nightme/wip rollback, got choices %+v", card.Options)
 	}
 }
 
@@ -161,10 +162,45 @@ func TestWorktreeFailChoice_RemoteModeWithLabel(t *testing.T) {
 func TestWorktreeFailChoice_RemoteModeNoLabel(t *testing.T) {
 	p := FixDraftPayload{IssueID: 42, Branch: "b", Repo: "o/r", LabelAdded: false}
 	card := WorktreeFailChoice(p)
-	for _, c := range card.Choices {
+	for _, c := range card.Options {
 		if c.Emoji == "❌" && strings.Contains(c.Label, "nightme/wip") {
 			t.Errorf("when LabelAdded=false, cancel label should not mention rollback, got %q", c.Label)
 		}
+	}
+}
+
+func TestEmitFollowUp_SelectedIDIsOptionIDNotEmoji(t *testing.T) {
+	rec := &recordingCh{}
+	cs := (&chatsession.ChatSession{}).WithEmitter(rec)
+	opts := []ChoiceOption{
+		{ID: "act:/gtw/branch-newv2", Emoji: "🆕", Label: "用 -v2 新分支"},
+		{ID: "act:/gtw/cancel", Emoji: "❌", Label: "取消"},
+	}
+	emitFollowUp(context.Background(), cs, &Draft{
+		ChoicePosted:    true,
+		ChoiceTitle:     "⚠️ 分支已存在",
+		ChoiceBody:      "branch: fix/42",
+		ChoiceOptions:   opts,
+		ChoiceRequestID: "gtw-fix-om1",
+	}, ReactionEvent{ChatID: "oc_1"}, "🆕", "✅ ready")
+	if len(rec.sends) != 1 {
+		t.Fatalf("sends = %d, want 1", len(rec.sends))
+	}
+	got := rec.sends[0]
+	if got.Kind != messages.OutChoicePatch {
+		t.Errorf("Kind = %v, want OutChoicePatch", got.Kind)
+	}
+	if got.Choice == nil {
+		t.Fatal("Choice is nil")
+	}
+	if got.Choice.SelectedID != "act:/gtw/branch-newv2" {
+		t.Errorf("SelectedID = %q, want act:/gtw/branch-newv2 (option ID, not emoji)", got.Choice.SelectedID)
+	}
+	if !got.Choice.Settled {
+		t.Error("follow-up PATCH should set Settled")
+	}
+	if got.Choice.Kind != messages.ChoiceKindDecision {
+		t.Errorf("Kind = %v, want Decision", got.Choice.Kind)
 	}
 }
 

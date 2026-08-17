@@ -49,19 +49,19 @@ func TestRenderActionLookupContract(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if len(tc.card.Choices) == 0 {
-				t.Fatalf("%s has no Choices — card rendered nothing to route", tc.name)
+			if len(tc.card.Options) == 0 {
+				t.Fatalf("%s has no Options — choice rendered nothing to route", tc.name)
 			}
-			for _, choice := range tc.card.Choices {
-				kind, ok := messages.ActionLookup(choice.Action)
+			for _, choice := range tc.card.Options {
+				kind, ok := messages.ActionLookup(choice.ID)
 				if !ok {
-					t.Errorf("%s emitted Action %q (Emoji %q) — ActionLookup has no mapping; user would see '未知操作' toast",
-						tc.name, choice.Action, choice.Emoji)
+					t.Errorf("%s emitted ID %q (Emoji %q) — ActionLookup has no mapping; user would see '未知操作' toast",
+						tc.name, choice.ID, choice.Emoji)
 					continue
 				}
 				if string(kind) != choice.Emoji {
-					t.Errorf("%s emitted Action %q → kind %q, but the rendered Emoji is %q (must match so the reaction handler sees the same emoji path)",
-						tc.name, choice.Action, kind, choice.Emoji)
+					t.Errorf("%s emitted ID %q → kind %q, but the rendered Emoji is %q (must match so the reaction handler sees the same emoji path)",
+						tc.name, choice.ID, kind, choice.Emoji)
 				}
 			}
 		})

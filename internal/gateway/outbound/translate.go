@@ -23,6 +23,7 @@ package outbound
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -131,27 +132,33 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		req := ev.Permission
 		isQuestion := req.Kind == agent.PermissionKindQuestion || len(req.Questions) > 0
 		title := "Waiting for approval"
+		kind := messages.ChoiceKindPermission
 		if isQuestion {
 			title = "Action Needed"
+			kind = messages.ChoiceKindQuestion
 		}
 		card := &messages.Choice{
-			Title:   title,
-			Body:    req.Tool + ": " + req.Action,
-			Options: req.Options,
+			RequestID: fmt.Sprintf("perm:%s:%d", chatID, time.Now().UnixNano()),
+			Kind:      kind,
+			Title:     title,
+			Body:      req.Tool + ": " + req.Action,
+			Options:   messages.ChoiceOptionsFromLabels(req.Options),
 		}
 		if n := len(req.Questions); n > 0 {
 			card.Title = "Action Needed"
+			card.Kind = messages.ChoiceKindQuestion
 			card.Questions = make([]messages.ChoiceQuestion, n)
-			card.Picks = make([]string, n)
 			for i, q := range req.Questions {
 				card.Questions[i] = messages.ChoiceQuestion{
 					ID:       q.ID,
 					Header:   q.Header,
 					Question: q.Question,
-					Options:  append([]string(nil), q.Options...),
+					Options:  messages.ChoiceOptionsFromLabels(q.Options),
 				}
 			}
-			card.Options = req.Questions[0].Options
+			if n > 0 {
+				card.Options = append([]messages.ChoiceOption(nil), card.Questions[0].Options...)
+			}
 		}
 		return messages.OutboundMessage{
 			ChatID: chatID,
@@ -171,9 +178,10 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 			ChatID: chatID,
 			Kind:   messages.OutChoicePatch,
 			Choice: &messages.Choice{
-				Title: "Waiting for approval",
-				Body:  "✓ **" + outcome + "**（dashboard）",
-				Kind:  messages.ChoiceKindPermission,
+				Title:   "Waiting for approval",
+				Body:    "✓ **" + outcome + "**（dashboard）",
+				Kind:    messages.ChoiceKindPermission,
+				Settled: true,
 			},
 		}, true
 

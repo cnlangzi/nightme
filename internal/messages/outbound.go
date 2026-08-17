@@ -43,9 +43,9 @@ const (
 	// support mutable state markers (e.g. Web UI).
 	OutMessageStateRemoved
 	// OutChoice sends an interactive choice prompt (permission,
-	// question, gtw decision, error). Channel may render it as a
-	// native card; the abstract payload is Choice, not a platform
-	// card schema.
+	// question, gtw decision). Channel may render it as a native
+	// card; the abstract payload is Choice, not a platform
+	// card schema. Errors use OutError.
 	OutChoice
 	// OutResult is the assistant's final reply for the turn. Sourced
 	// from agent.EventAgentResult (Claude Code: result.Result). Channels
@@ -87,12 +87,10 @@ const (
 	// valid "clear the checklist" signal.
 	OutTaskUpdate
 
-	// OutChoicePatch replaces the body of an existing choice
-	// prompt in place. Channel correlates the target via
-	// Choice.RequestID (Channel-private map from RequestID to the
-	// platform message id). Callers must not put a platform
-	// message id in ReplyTo — ReplyTo is the user-message
-	// thread anchor, not a choice handle.
+	// OutChoicePatch updates an existing choice prompt in place.
+	// Channel correlates via Choice.RequestID. Settled + SelectedID
+	// describe the outcome; Channel paints chrome. Callers must not
+	// put a platform message id in ReplyTo.
 	OutChoicePatch
 
 	// OutError surfaces a non-graceful bridge child process exit
@@ -192,7 +190,7 @@ type OutboundMessage struct {
 	// tool concept; channel decides how to render it).
 	Text string
 	// Choice carries the interactive choice payload for OutChoice
-	// / OutChoicePatch (permission, question, gtw decision, error).
+	// / OutChoicePatch (permission, question, gtw decision).
 	Choice *Choice
 	// Tool carries the typed payload for OutToolStart / OutToolEnd.
 	// nil for other Kinds. Gateway populates this from

@@ -39,7 +39,7 @@ Receipt / footer / thread 的坑在 [feishu.md](./feishu.md) §6 / §13.23，本
 
 Dashboard 的 1/N 是 **host UI**：只有整批 `POST /api/respond` 之后才会翻页（host `matchesQuestions` 要求 `answers.length == questions.length` 且 `answer.id` 按序对齐）。
 
-飞书自己做 **卡内向导**：`Card.Step` / `Card.Picks` 存在 adapter 内存里。中间一步 **不** 打 `/api/respond`。所以：
+飞书自己做 **卡内向导**：`Step` / `Picks` 存在 adapter 的 `optWizards` 里（不在 `messages.Choice` 上）。中间一步 **不** 打 `/api/respond`。所以：
 
 - 飞书从 1/3 翻到 2/3，dashboard 仍停在 1/3 —— 这是对的。
 - 飞书停在 1/2 但 toast「已提交」—— 多半是客户端没拿到下一张卡（见 §3），不是 host 没收到。
@@ -68,7 +68,7 @@ Host 非 multi 题 **拒绝** `custom` 与 `selected` 同时有值。
 
 长中文 label 用 **一行一个** `width: fill`（`buildStackedButtons`）。等宽 `column_set` 会把 Q1+Q2 混排的长句截断。gtw 决策卡仍用等宽 `column_set`（短 emoji+label）。
 
-标题 emoji 是 **👉**，不是 🔐。`ChoiceKindPermission` 才加；Decision / Error 不加。
+标题 emoji 是 **👉**，不是 🔐。`ChoiceKindPermission` 和 `ChoiceKindQuestion` 才加；`ChoiceKindDecision` 不加。错误走 `OutError`（红 header），不是 Choice。
 
 ---
 
@@ -176,7 +176,8 @@ form submit **经常省略** `value.action`，只带 `Action.Name`。
 OutboundMessage{Kind: OutChoice, Choice}
         │
         ▼
-buildInteractiveCard          schema 2.0 + header 👉
+buildInteractiveCard          schema 2.0 + header 👉（Permission/Question）
+  ├ optWizards                Channel 私有 Step/Picks（不在 messages.Choice 上）
   ├ questionStepOpen          → body 根 form question_form_<Step>
   │    ├ buildStackedButtons  opt_N + form_action_type=submit
   │    └ questionCustomFields input name=custom / skip_question / submit_custom
@@ -200,7 +201,7 @@ resolveCardAction     value.action | Name(opt_N/skip/submit)
 
 | 符号 | 文件 |
 |------|------|
-| `messages.Choice` / `ChoiceQuestion` | `internal/messages/session.go` |
+| `messages.Choice` / `ChoiceQuestion` / `ChoiceOption` | `internal/messages/session.go` |
 | `nm-q:` / `QuestionPick` | `internal/messages/question_picks.go` |
 | 卡 JSON / form / 回调 | `internal/channel/feishu/adapter.go` |
 | host 批答 / custom | `internal/bridge/dsh/permissions.go` |

@@ -863,9 +863,10 @@ func TestSend_OutChoice_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 	}
 
 	card := &messages.Choice{
-		Title:   "Action Needed",
-		Body:    "Allow Bash?",
-		Options: []string{"allow", "deny"},
+		Title:     "Action Needed",
+		Body:      "Allow Bash?",
+		Options:   messages.ChoiceOptionsFromLabels([]string{"allow", "deny"}),
+		RequestID: "req-choice-test",
 	}
 	if err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutChoice,
@@ -951,7 +952,7 @@ func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
 	}
 	// Header template must default to "red" for error cards.
 	if !strings.Contains(captured.Body, `"template":"red"`) {
-		t.Errorf("card header template must default to red for ChoiceKindError; got body: %s", captured.Body)
+		t.Errorf("card header template must default to red for OutError; got body: %s", captured.Body)
 	}
 }
 
@@ -1424,8 +1425,9 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_3", // F-44 follow-up: ReplyTo is ignored (top-level Create)
 				Choice: &messages.Choice{
-					Title:   "Allow Bash?",
-					Options: []string{"Allow", "Deny"},
+					Title:     "Allow Bash?",
+					Options:   messages.ChoiceOptionsFromLabels([]string{"Allow", "Deny"}),
+					RequestID: "req-perm",
 				},
 			},
 			wantRootID:        "", // top-level Create, no anchor

@@ -1,21 +1,20 @@
 // Package command hosts the F-51 slash command abstraction layer.
 // It provides the Commander / SlashCommandFactory / RuntimeServices
 // interfaces, the canonical inbound/outbound types
-// (SlashInput / SlashOutput / Outbound / ChoiceOption /
-// ReactionEvent), and the ReactionRouter service interface that
-// command implementations depend on.
+// (SlashInput / SlashOutput / Outbound / ReactionEvent), and the
+// ReactionRouter service interface that command implementations depend on.
 //
 // This package is the bottom of the command stack — it does NOT
 // import internal/gateway, internal/chatsession, internal/gtw, or
 // internal/channel. The runtime (cmd/nightme/) owns the boundary
 // translation between gateway messages and command inputs/outputs.
 //
-// The Commander refactor proposed deleting command.Outbound /
-// ChoiceOption in favour of using messages.OutboundMessage
-// directly. That would require command to import gateway, which
-// creates an import cycle (gateway → command/gtw → command). So
-// we keep the command-side mirror types; the runtime shim
-// translates at the boundary as before.
+// The Commander refactor proposed deleting command.Outbound in
+// favour of using messages.OutboundMessage directly. That would
+// require command to import gateway, which creates an import
+// cycle (gateway → command/gtw → command). So we keep the
+// command-side mirror types; the runtime shim translates at the
+// boundary as before.
 package command
 
 import (
@@ -91,18 +90,4 @@ type SlashOutput struct {
 	// the same type the Emitter accepts (no mirror types in
 	// this package).
 	Outbound []messages.OutboundMessage
-}
-
-// ChoiceOption is the command-package's view of one button on a
-// decision prompt.
-type ChoiceOption struct {
-	// Emoji is the button's leading emoji ("✅" / "🆕" / ...).
-	// Also the action's key — when the user clicks, the channel
-	// emits a reaction with this emoji on the card's bot msg.
-	Emoji string
-	// Label is the button's text label.
-	Label string
-	// Action is the action tag ("act:/xxx" form). Channel
-	// adapters route it to the action dispatcher.
-	Action string
 }

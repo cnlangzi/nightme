@@ -276,17 +276,25 @@ func emitFollowUp(
 		return
 	}
 	if draft.ChoicePosted {
+		selectedID := ""
+		for _, opt := range draft.ChoiceOptions {
+			if opt.Emoji == chosenEmoji {
+				selectedID = opt.ID
+				break
+			}
+		}
 		_ = em.Send(ctx, messages.OutboundMessage{
 			ChatID: ev.ChatID,
 			Kind:   messages.OutChoicePatch,
 			Text:   resultText,
 			Choice: &messages.Choice{
-				Title:             draft.ChoiceTitle,
-				Body:              draft.ChoiceBody,
-				Choices:           toChoiceOptions(draft.ChoiceOptions),
-				RequestID:         draft.ChoiceRequestID,
-				Disabled:          true,
-				ChosenChoiceEmoji: chosenEmoji,
+				Kind:       messages.ChoiceKindDecision,
+				Title:      draft.ChoiceTitle,
+				Body:       draft.ChoiceBody,
+				Options:    draft.ChoiceOptions,
+				RequestID:  draft.ChoiceRequestID,
+				Settled:    true,
+				SelectedID: selectedID,
 			},
 		})
 		return
@@ -362,26 +370,4 @@ func variantReadyResultText(p FixDraftPayload, branch string) string {
 		return fmt.Sprintf("✅ Local worktree ready (using `%s`).", branch)
 	}
 	return fmt.Sprintf("✅ Fix #%d ready (using `%s`).", p.IssueID, branch)
-}
-
-// toChatChoiceOptions translates gtw.ChoiceOption to
-// chatsession.ChoiceOption (same fields, different packages).
-// Defined here so the gtw package doesn't depend on the
-// chatsession.ChoiceOption internal layout for translation.
-// toChoiceOptions translates internal/command/gtw.ChoiceOption (the
-// gtw command's button type) to the wire-level
-// messages.ChoiceOption that the channel adapter renders.
-func toChoiceOptions(in []ChoiceOption) []messages.ChoiceOption {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]messages.ChoiceOption, len(in))
-	for i, c := range in {
-		out[i] = messages.ChoiceOption{
-			Emoji:  c.Emoji,
-			Label:  c.Label,
-			Action: c.Action,
-		}
-	}
-	return out
 }

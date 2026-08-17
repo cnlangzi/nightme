@@ -655,9 +655,9 @@ Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现�
 
 | 概念 | 含义 |
 |---|---|
-| `OutChoice` | 发出一张新的交互选择（permission / question / gtw decision / error） |
-| `OutChoicePatch` | 原地更新已发出的选择 |
-| typed `Choice` | kind / options / chosen / disabled —— 描述选择面，不含平台 schema |
+| `OutChoice` | 发出一次新的交互选择（permission / question / gtw decision） |
+| `OutChoicePatch` | 原地结算或更新已发出的选择（`Settled` + 可选 `SelectedID`） |
+| typed `Choice` | RequestID / Kind / Title / Body / Options / Questions —— 描述要选什么，不含平台 chrome |
 | 边界归一化 | 平台按钮点击在 Channel 边界折成既有 reaction/action 通路，与 emoji 汇合 |
 
 **不变式**：

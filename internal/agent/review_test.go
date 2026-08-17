@@ -83,8 +83,10 @@ func TestStandardPrompt_Structure(t *testing.T) {
 	}
 
 	// Required "What to look for" categories — must include
-	// Simplification (added so reviewers surface dead code,
-	// over-abstraction, naming issues in "## Suggestions").
+	// Efficiency (added to align with claude /code-review's
+	// "efficiency cleanups" pillar) and Simplification (which
+	// also covers claude's "reuse" pillar — prefer existing
+	// helpers over new code).
 	wantCategories := []string{
 		"Correctness",
 		"Resource lifetime",
@@ -93,6 +95,7 @@ func TestStandardPrompt_Structure(t *testing.T) {
 		"API surface",
 		"Security",
 		"Migration risk",
+		"Efficiency",
 		"Test gaps",
 		"Simplification",
 	}

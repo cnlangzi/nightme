@@ -68,6 +68,7 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 - **CLI 命令的使用方法 / 安装步骤**：放仓库根 `README.md`，不放 docs/
 - **某个 feature 的命名 / 编号变更**：改 `FEATURES.md` 即可，不动 SPEC/PRD
 - **已合并到 feat/ 的代码示例被 SPEC 引用**：SPEC 里只描述概念 + 链接到 feat/，不重复代码
+- **某个 Channel 的实机踩坑 / API 约束**（飞书卡片 JSON、form 回调、限速）：放 `docs/channel/`，索引写在 FEATURES.md §4
 
 ---
 
@@ -191,11 +192,10 @@ docs/
 ├── PRD.md                 ← Layer 1: 产品
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
-└── feat/                  ← Layer 4: 每个 feature 的实现
-    ├── F-runtime.md
-    ├── F-message-flow.md
-    ├── ...
-    └── ../bridge/cli-transport.md
+├── feat/                  ← Layer 4: 每个 feature 的实现
+├── bridge/                ← 各 agent bridge 协议（claude / dsh / …）
+└── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑**）
+    └── feishu-cards.md    ← 改按钮 / form / AskUserQuestion 先读这份
 ```
 
 ---
@@ -217,3 +217,4 @@ docs/
 ## 10. 变更记录
 
 - 初始：建立 4 层文档结构 + 命名约定 + 决策树
+- 2026-08-17：补 `docs/channel/` / `docs/bridge/` 在目录示意里的位置；飞书交互卡踩坑进 `channel/feishu-cards.md`

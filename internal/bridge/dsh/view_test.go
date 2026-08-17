@@ -119,7 +119,7 @@ func TestWireState_ApplyView_TaskListMergesIntoTasks(t *testing.T) {
 func TestWireState_ApplyProjection_TitleUpdatesState(t *testing.T) {
 	st := newWireState()
 	proj := projectionEnvelope{
-		Projection: "title",
+		Key: "title",
 		Value:      []byte(`{"title":"My Session"}`),
 	}
 	events := st.applyProjection(proj)

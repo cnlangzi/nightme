@@ -29,6 +29,7 @@
 //	codex     — turn/interrupt JSON-RPC; turn/completed{interrupted}; SessionID kept
 //	acp       — session/cancel JSON-RPC; agent settles in-band; SessionID kept
 //	claudecode — control_request{interrupt} stdin; CLI stays alive; turn ends cleanly; SessionID kept
+//	dsh       — POST /api/session.cancel (dashboard stop button); turn/end{abort}; SessionID kept
 //	pty       — ErrNotSupported (handler surfaces "use /close")
 //
 // Daemon shutdown (cmd/nightme/run.go) does NOT call this — agents

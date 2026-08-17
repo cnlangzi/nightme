@@ -153,6 +153,13 @@ const (
 	// the current full task snapshot so receipts can replace the
 	// checklist wholesale.
 	EventAgentTaskUpdate
+
+	// EventAgentPermissionSettled means the host already resolved
+	// the outstanding approval / AskUserQuestion (dashboard click,
+	// timeout, or cancel). The mux event stream is NOT blocked on
+	// Feishu answering; this event only PATCHes the outstanding
+	// Action Needed card so it does not linger.
+	EventAgentPermissionSettled
 )
 
 // String renders an EventKind for logs.
@@ -178,6 +185,8 @@ func (k EventKind) String() string {
 		return "task_create"
 	case EventAgentTaskUpdate:
 		return "task_update"
+	case EventAgentPermissionSettled:
+		return "permission_settled"
 	default:
 		return fmt.Sprintf("event(%d)", int(k))
 	}
@@ -198,12 +207,52 @@ type AgentPermissionRequest struct {
 	Action string
 
 	// Options enumerates the user-selectable choices. The first option
-	// is treated as the default / safe choice.
+	// is treated as the default / safe choice. For a multi-question
+	// AskUserQuestion batch, this is the first question's labels;
+	// the full batch lives in Questions.
 	Options []string
+
+	// Questions is the AskUserQuestion batch when the permission
+	// is a multi-choice prompt rather than a tool approval.
+	// Empty for allow/deny-style approvals. A single-question
+	// ask still populates this (len==1) so the channel can
+	// render header + question text without a concatenated dump.
+	Questions []AgentPermissionQuestion
+
+	// Kind is PermissionKindApproval or PermissionKindQuestion.
+	// Approvals map to dashboard Allow once / Reject and POST
+	// ApprovalResponse; questions use the in-card wizard and
+	// POST QuestionResponse. Mixing the two wire shapes leaves
+	// the dashboard card pending (host respond() returns
+	// bad-response).
+	Kind string
 
 	// ResponseCh receives the user's selected option string. Buffer 1,
 	// non-blocking — the Bridge reads it once and proceeds.
 	ResponseCh chan string
+}
+
+const (
+	PermissionKindApproval = "approval"
+	PermissionKindQuestion = "question"
+)
+
+// AgentPermissionSettled is the payload for EventAgentPermissionSettled.
+// Outcome uses the host vocabulary (allowed-once / rejected / answered /
+// cancelled). Source is "dashboard" when the mux resolved frame arrived
+// without a local SendPermission.
+type AgentPermissionSettled struct {
+	Outcome string
+	Source  string
+}
+
+// AgentPermissionQuestion is one AskUserQuestion item on
+// EventAgentPermission. ID is echoed in the /api/respond batch.
+type AgentPermissionQuestion struct {
+	ID       string
+	Header   string
+	Question string
+	Options  []string
 }
 
 // AgentToolStartEvent carries metadata when a tool invocation begins.
@@ -488,6 +537,7 @@ type AgentTaskListEvent struct {
 //	EventAgentReady      -> (no action payload; context fields only)
 //	EventAgentTaskCreate -> TaskList
 //	EventAgentTaskUpdate -> TaskList
+//	EventAgentPermissionSettled -> PermissionSettled
 //
 // Bridge-side session context fields (SessionID / Model / AgentName /
 // Workspace / Branch) are stamped on every event by the bridge's
@@ -530,6 +580,9 @@ type AgentEvent struct {
 	// wholesale. An Items slice with length 0 is a valid "clear the
 	// checklist" signal.
 	TaskList *AgentTaskListEvent
+
+	// PermissionSettled is the payload for EventAgentPermissionSettled.
+	PermissionSettled *AgentPermissionSettled
 
 	// Diagnostic carries structured info about a bridge child
 	// process exit when Kind == EventAgentError. Populated by the

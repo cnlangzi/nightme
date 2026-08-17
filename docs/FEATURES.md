@@ -58,6 +58,7 @@
 | OutReply 拆出 Receipt + Task Receipt 瘦身 | [channel/feishu-rendering.md](./channel/feishu-rendering.md) |
 | Main-Chat 卡片 Footer (per-turn snapshot) | [channel/feishu-rendering.md](./channel/feishu-rendering.md) |
 | Interactive Decision Cards | [channel/feishu-rendering.md](./channel/feishu-rendering.md) |
+| Feishu 交互卡设计与踩坑（form / callback / AskUserQuestion）| [channel/feishu-cards.md](./channel/feishu-cards.md) |
 | Compaction Counter | [channel/feishu-rendering.md](./channel/feishu-rendering.md) |
 | Footer Context Window 显示 | [channel/feishu-rendering.md](./channel/feishu-rendering.md) |
 | OutResult 独立 Reply（不再 fold receipt）| [channel/feishu-rendering.md](./channel/feishu-rendering.md) |

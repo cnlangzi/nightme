@@ -131,6 +131,51 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 			t.Errorf("msg.hits = %d, want 1 (plain text must hit agent)", msg.Hits())
 		}
 	})
+
+	t.Run("msg.Action routes to SendPermission, not agent loop", func(t *testing.T) {
+		perm := &permMessage{Message: teststubs.NewMessage(chatsession.NewManager())}
+		action := teststubs.NewReaction(true)
+		r := New(perm, teststubs.AlwaysFallThrough{}, teststubs.AlwaysFallThroughShell{}, action, nil, "primary")
+
+		res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
+			ChatID: chatID,
+			Text:   "",
+			Action: &messages.ActionPayload{Option: "仅 REPL 启动(裸 nightme)"},
+		})
+		r.WaitExec()
+		if err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		if res == nil || !res.Consumed {
+			t.Fatalf("result = %+v, want Consumed=true", res)
+		}
+		if perm.option != "仅 REPL 启动(裸 nightme)" {
+			t.Errorf("SendPermission option = %q", perm.option)
+		}
+		if perm.hits != 1 {
+			t.Errorf("SendPermission hits = %d, want 1", perm.hits)
+		}
+		if perm.Hits() != 0 {
+			t.Errorf("HandleInbound hits = %d, want 0", perm.Hits())
+		}
+		if len(action.Events) != 0 {
+			t.Errorf("ReactionRouter events = %d, want 0", len(action.Events))
+		}
+	})
+}
+
+// permMessage wraps teststubs.Message with SendPermission so the
+// optional permissionSender type-assert in dispatchAction succeeds.
+type permMessage struct {
+	*teststubs.Message
+	option string
+	hits   int
+}
+
+func (p *permMessage) SendPermission(_ string, option string) error {
+	p.option = option
+	p.hits++
+	return nil
 }
 
 // Compile-time guard that the teststubs satisfy the inbound
@@ -141,6 +186,8 @@ var (
 	_ CommandDispatcher = teststubs.AlwaysFallThrough{}
 	_ ShellDispatcher   = teststubs.AlwaysFallThroughShell{}
 	_ ReactionRouter    = (*teststubs.Reaction)(nil)
+	_ permissionSender  = (*chatsession.Manager)(nil)
+	_ permissionSender  = (*permMessage)(nil)
 )
 
 // Reference command packages so the import isn't flagged as

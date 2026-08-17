@@ -1,0 +1,26 @@
+{
+  "_comment": "Real dsh wire payload captured from dsh web 0.1.0-rc.6 mux stream on 2026-08-16. session: session-2361c446-8a6f-421c-b46b-a2f49e659bd3. CRITICAL: projection discriminator is 'key' (not 'projection'), and value is the array directly (not wrapped in items).",
+  "type": "server-request",
+  "rpcId": "7dbfc095-8e43-417b-b898-0e096f72be9c",
+  "method": "session/projection",
+  "payload": {
+    "type": "session/projection",
+    "sessionId": "session-2361c446-8a6f-421c-b46b-a2f49e659bd3",
+    "key": "todos",
+    "value": [
+      {
+        "content": "调研 dsh wire 真实格式",
+        "status": "in_progress"
+      },
+      {
+        "content": "修改 protocol.go JSON tags",
+        "status": "pending"
+      },
+      {
+        "content": "真机测试验证",
+        "status": "pending"
+      }
+    ],
+    "seq": 5786
+  }
+}

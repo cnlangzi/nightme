@@ -78,5 +78,14 @@ func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 		}
 	}
 
+	// dsh is intentionally NOT torn down here. The shared dsh
+	// host is a persistent service — left running across daemon
+	// restarts so the next lazy start (via host.EnsureSharedHost)
+	// can reuse it via DiscoverExisting on port 3080. The daemon
+	// process exiting does not signal dsh; SIGKILL/SIGKILL-grace
+	// failures on shutdown used to be the dominant source of
+	// "child did not exit within SIGKILL grace" errors in
+	// daemon-stderr.log.
+
 	return firstErr
 }

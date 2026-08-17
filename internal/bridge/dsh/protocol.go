@@ -25,78 +25,26 @@ import (
 	"encoding/json"
 )
 
-// ─── HTTP RPC envelope ─────────────────────────────────────────────────
-
-// clientRequest is the envelope we send on every POST /api/{method}.
-// The wire format is documented in `packages/host/apiproxy/src/api/rpc.ts`;
-// `type` MUST be the literal "client-request" (server validates against
-// clientRequestSchema in fetch/handler.ts).
-type clientRequest struct {
-	Type    string          `json:"type"`              // always "client-request"
-	RPCID   string          `json:"rpcId"`             // UUID we mint; echoed in response
-	Method  string          `json:"method"`            // e.g. "session.prompt"
-	Payload json.RawMessage `json:"payload,omitempty"` // method-specific body
-}
-
-// rpcResponse is the envelope we receive from every POST /api/{method}.
-// `type` is always "server-response"; rpcId echoes our request id;
-// `result` is one of OK(value) or Err(error).
-type rpcResponse struct {
-	Type   string     `json:"type"`
-	RPCID  string     `json:"rpcId"`
-	Result rpcResult  `json:"result"`
-}
-
-// rpcResult is the inner envelope of rpcResponse.result. Schema:
-//   { "ok": true,  "value": <method-specific> }
-//   { "ok": false, "error": { "code": "...", "message": "...", "details": {...} } }
-type rpcResult struct {
-	OK    bool            `json:"ok"`
-	Value json.RawMessage `json:"value,omitempty"`
-	Error *rpcError       `json:"error,omitempty"`
-}
-
-// ErrorMessage returns a one-line human-readable error string for
-// surfacing on EventAgentError or wrapping into a Go error.
-// Returns "" when the result is OK or has no Error payload (the
-// latter shouldn't happen in practice but defensive).
-func (r *rpcResult) ErrorMessage() string {
-	if r == nil || r.Error == nil {
-		return ""
-	}
-	return r.Error.Code + ": " + r.Error.Message
-}
-
-// rpcError is the bridge's view of a server-side business error.
-// `code` strings are enumerated in
-// `packages/host/apiproxy/src/api/rpc.ts: RpcErrorDetailsMap` — we
-// keep the string opaque and forward it to the user on
-// EventAgentError.
-type rpcError struct {
-	Code    string          `json:"code"`
-	Message string          `json:"message"`
-	Details json.RawMessage `json:"details,omitempty"`
-}
-
-// respondPayload is the inner body for the /api/respond call.
-// `RpcID` here is the **server-frame's rpcId** (the approval/requested
-// or question/requested we received), NOT our client's rpcId.
-type respondPayload struct {
-	RPCID   string          `json:"rpcId"`
-	Outcome json.RawMessage `json:"outcome"`
-}
-
 // ─── WS server-request envelope ─────────────────────────────────────────
-
-// serverFrame is the envelope server pushes on both /api/events.mux
-// and /api/events.host. `type` is always "server-request";
-// `method` is the event name (e.g. "session/event", "approval/requested").
-type serverFrame struct {
-	Type    string          `json:"type"`
-	RPCID   string          `json:"rpcId"`
-	Method  string          `json:"method"`
-	Payload json.RawMessage `json:"payload"`
-}
+//
+// RPC envelope types (clientRequest / rpcResponse / rpcResult /
+// rpcError) live in internal/bridge/dsh/host/client.go alongside
+// the RPCClient that produces them. The dsh bridge here no longer
+// constructs those envelopes directly — every RPC call goes through
+// host.Client, and the typed wrappers return host.RPCClient's
+// shapes directly. Keeping duplicates here would create two types
+// for one wire concept, both with zero callers outside this file.
+//
+// The mux / host wire frames still live here because the
+// dispatch / permissions layer decodes them directly (handle_mux.go,
+// permissions.go, translate.go). Decoding the mux payload needs the
+// per-method typed shapes; we keep those.
+//
+// The serverFrame envelope itself is decoded by host.StreamHub (see
+// internal/bridge/dsh/host/stream.go) which exposes typed callbacks
+// with (method, rpcID, payload json.RawMessage) — the dsh bridge
+// receives the inner payload directly and never needs to unmarshal
+// the envelope itself, so serverFrame lives there.
 
 // ─── Mux payload shapes (the ones we decode) ──────────────────────────
 
@@ -119,9 +67,8 @@ type muxSessionSubscribed struct {
 }
 
 // muxApprovalRequested is the payload of
-// serverFrame{method:"approval/requested"}. `ApprovalID` is the
-// **stable** id for routing SendPermission answers — we use it
-// (not rpcId) so concurrent approvals stay unambiguous.
+// serverFrame{method:"approval/requested"}. `ApprovalID` is
+// audit-only. /api/respond is keyed on the envelope rpcId.
 type muxApprovalRequested struct {
 	SessionID  string `json:"sessionId"`
 	ApprovalID string `json:"approvalId"`
@@ -130,12 +77,21 @@ type muxApprovalRequested struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-// muxApprovalResolved is the audit frame for an already-resolved
-// approval. We log it (debug) and never act.
+// muxApprovalResolved is the audit frame after the host settled
+// an approval (dashboard or /api/respond). Bridge drops local
+// pending and PATCHes the Feishu card.
 type muxApprovalResolved struct {
 	SessionID  string `json:"sessionId"`
 	ApprovalID string `json:"approvalId"`
-	Outcome    string `json:"outcome"` // "approved" | "declined" | ...
+	Outcome    string `json:"outcome"` // allowed-once | rejected | cancelled | unavailable
+}
+
+// muxQuestionResolved is the audit frame after a question batch is
+// answered or cancelled (dashboard or /api/respond).
+type muxQuestionResolved struct {
+	SessionID     string `json:"sessionId"`
+	QuestionRPCID string `json:"questionRpcId"`
+	Outcome       string `json:"outcome"` // answered | cancelled
 }
 
 // muxQuestionRequested is the payload of
@@ -148,13 +104,25 @@ type muxQuestionRequested struct {
 }
 
 // questionPayload is one entry in muxQuestionRequested.Questions.
-// `Header` is the short label; `Question` is the full text;
-// `Options` are the multiple-choice labels the model expects back.
+// `ID` is the stable caller-provided question id, echoed in the
+// /api/respond answer (AskUserQuestionAnswerItem.id). Host
+// matchesQuestions rejects a batch whose ids / length don't match
+// the pending request. `Header` is the short label; `Question` is
+// the full text; `Options` are the multiple-choice options.
+//
+// BUG FIX (F-dsh-shared-host §6 #4): pre-fix this used
+// `[]string` (just labels). Canonical wire shape is
+// `[]AskUserQuestionOption{label,description?}` per dsh-api.md
+// §3.4.9 — objects, not bare strings. dsh 0.1.0-rc.6 happened to
+// accept either form (so the bug didn't surface), but future
+// versions and the runtime's display logic both need the object
+// shape (label + description renders a richer feishu card).
 type questionPayload struct {
-	Header   string   `json:"header"`
-	Question string   `json:"question"`
-	Options  []string `json:"options"`
-	Multi    bool     `json:"multiSelect,omitempty"`
+	ID       string                  `json:"id"`
+	Header   string                  `json:"header"`
+	Question string                  `json:"question"`
+	Options  []AskUserQuestionOption `json:"options"`
+	Multi    bool                    `json:"multiSelect,omitempty"`
 }
 
 // ─── Mux session/event SessionEvent shapes (the 11 we decode) ────────
@@ -171,13 +139,23 @@ type questionPayload struct {
 //
 //	{
 //	  "type": "assistant/message",
+//	  "seq":  27,
+//	  "time": 1786862336663,
 //	  "data": {
 //	    "turn": 1, "step": 1,
 //	    "message": { "role": "assistant", "content": [ … ] }
 //	  }
 //	}
+//
+// Seq and Time are populated by dsh for every event but the dispatcher
+// itself only reads Type. The bridge uses Seq for dedup across the
+// mux stream (session/event) and the session.history backfill path
+// (both feeds dispatchEvent) so a frame arriving on both delivers
+// exactly once. Seq is monotonically increasing per session.
 type sessionEventEnvelope struct {
 	Type string          `json:"type"`
+	Seq  int64           `json:"seq,omitempty"`
+	Time int64           `json:"time,omitempty"`
 	Data json.RawMessage `json:"data"`
 }
 
@@ -197,25 +175,25 @@ type assistantChunkData struct {
 //
 //   - "block-start":     BlockType carries "text" | "tool-call" | …
 //   - "block-delta":     reserved for future streaming block updates
-//                        (current dsh builds only emit text-delta /
-//                        tool-call-delta)
+//     (current dsh builds only emit text-delta /
+//     tool-call-delta)
 //   - "block-end":       Block carries the complete finalized block
 //   - "text-delta":      Text carries the streaming fragment,
-//                        Index is the content-block slot
+//     Index is the content-block slot
 //   - "tool-call-delta": ID + Name + ArgumentsDelta carry a partial
-//                        tool-call accumulator
+//     tool-call accumulator
 //   - "usage":           Usage carries the model's usage row
 //   - "finish":          Reason carries the step-finish discriminator
 type assistantChunk struct {
-	Type           string            `json:"type"`
-	Index          int               `json:"index,omitempty"`
-	BlockType      string            `json:"blockType,omitempty"`
-	Text           string            `json:"text,omitempty"`
-	ArgumentsDelta string            `json:"argumentsDelta,omitempty"`
-	ID             string            `json:"id,omitempty"`
-	Name           string            `json:"name,omitempty"`
-	Block          *assistantBlock   `json:"block,omitempty"`
-	Usage          *usageInfo        `json:"usage,omitempty"`
+	Type           string             `json:"type"`
+	Index          int                `json:"index,omitempty"`
+	BlockType      string             `json:"blockType,omitempty"`
+	Text           string             `json:"text,omitempty"`
+	ArgumentsDelta string             `json:"argumentsDelta,omitempty"`
+	ID             string             `json:"id,omitempty"`
+	Name           string             `json:"name,omitempty"`
+	Block          *assistantBlock    `json:"block,omitempty"`
+	Usage          *usageInfo         `json:"usage,omitempty"`
 	Reason         *chunkFinishReason `json:"reason,omitempty"`
 }
 
@@ -351,16 +329,38 @@ type turnEndData struct {
 	StopReason string `json:"stopReason,omitempty"`
 }
 
+// stepBoundaryData is the `data` body of step/start and step/end.
+// Captured wire (dsh 0.1.0-rc.6 session.history):
+//
+//	{"type":"step/start","seq":6,"data":{"turn":1,"step":1}}
+//	{"type":"step/end","seq":40,"data":{"turn":1,"step":1}}
+//
+// A step is one model-inference cycle (one LLM call plus the tool
+// executions it requested). Dashboard uses these for sessionStats
+// (TTFT / tok/s), not the TodoPanel — that panel is todo/write +
+// the `todos` projection. The bridge registers the types so they
+// are not counted unknown, and does not emit AgentEvents.
+type stepBoundaryData struct {
+	Turn int `json:"turn"`
+	Step int `json:"step"`
+}
+
 // usageInfo mirrors dsh's LLM usage payload. We decode the minimum
 // fields nightme cares about for footer rendering.
+//
+// Field naming gap vs agent.UsageInfo: dsh calls them
+// CacheCreationTokens / CacheReadTokens (input-side cache accounting);
+// agent.UsageInfo names them CacheCreationInputTokens /
+// CacheReadInputTokens. Conversion happens in usageToAgent() so the
+// bridge boundary stays a single point of truth.
 type usageInfo struct {
-	InputTokens          int     `json:"inputTokens"`
-	OutputTokens         int     `json:"outputTokens"`
-	CacheCreationTokens  int     `json:"cacheCreationTokens,omitempty"`
-	CacheReadTokens      int     `json:"cacheReadTokens,omitempty"`
-	CostUSD              float64 `json:"costUsd,omitempty"`
-	ContextWindow        int     `json:"contextWindow,omitempty"`
-	ContextWindowPct     float64 `json:"contextWindowPct,omitempty"`
+	InputTokens         int     `json:"inputTokens"`
+	OutputTokens        int     `json:"outputTokens"`
+	CacheCreationTokens int     `json:"cacheCreationTokens,omitempty"`
+	CacheReadTokens     int     `json:"cacheReadTokens,omitempty"`
+	CostUSD             float64 `json:"costUsd,omitempty"`
+	ContextWindow       int     `json:"contextWindow,omitempty"`
+	ContextWindowPct    float64 `json:"contextWindowPct,omitempty"`
 }
 
 // compactionEndData is the `data` body of a compaction/end event.
@@ -371,11 +371,55 @@ type compactionEndData struct {
 	Aborted bool   `json:"aborted,omitempty"`
 }
 
-// todoWriteData is the `data` body of a todo/write event. Items
+// todoWriteData is the `data` body of a todo/write event. Todos
 // is a full snapshot (last-write-wins), translated to F-38
 // TaskList.
+//
+// F-DSH-TODO-WIRE-FIX (2026-08-16): the JSON tag is `todos` to
+// match the real dsh wire (verified via the @deepseek-ai/dsh-tool-todo
+// source: `agent.session.append('todo/write', { todos })`). Pre-fix
+// this struct used `items`, which silently failed every
+// json.Unmarshal — wire data was present but the bridge decoded
+// it as zero items, then emitted EventAgentTaskCreate{Items:[]}
+// (the "clear checklist" signal) — exactly the "todo list not
+// showing up" symptom.
+//
+// We accept `items` as a fallback for older dsh versions or
+// future drift; the first decode wins, the second is a no-op
+// (json.Unmarshal into a second struct with the alternative tag
+// then merging). Production today reads `todos`.
 type todoWriteData struct {
-	Items []todoItem `json:"items"`
+	Todos []todoItem `json:"todos"`
+	// Items is the legacy field name (pre-fix this struct used
+	// it as the primary tag). When the wire uses `items` instead
+	// of `todos` (older dsh, or a future rename), decoding into
+	// this field recovers the snapshot. Custom UnmarshalJSON
+	// below picks the populated one. JSON tag is `items,omitempty`
+	// so the canonical wire (`todos` only) doesn't carry a noisy
+	// empty `items:null` after a round-trip.
+	Items []todoItem `json:"items,omitempty"`
+}
+
+// UnmarshalJSON implements the wire-shape fallback: real dsh
+// emits `{todos: [...]}`, older / fork builds may use
+// `{items: [...]}`. We decode into both via a oneOf selector
+// and pick the populated slice. If both are populated, `todos`
+// wins (canonical).
+func (d *todoWriteData) UnmarshalJSON(data []byte) error {
+	var both struct {
+		Todos []todoItem `json:"todos"`
+		Items []todoItem `json:"items"`
+	}
+	if err := json.Unmarshal(data, &both); err != nil {
+		return err
+	}
+	if len(both.Todos) > 0 {
+		d.Todos = both.Todos
+	} else {
+		d.Todos = both.Items
+	}
+	d.Items = both.Items
+	return nil
 }
 
 // ToolEventView is the host-computed rendering view that dsh web
@@ -428,10 +472,20 @@ type ToolEventView struct {
 // `{sessionId, seq, projection, value}`). If probe shows different
 // names (e.g. `name` instead of `projection`), update tags only.
 type projectionEnvelope struct {
-	SessionID  string          `json:"sessionId,omitempty"`
-	Seq        int64           `json:"seq,omitempty"`
-	Projection string          `json:"projection"` // "todo" | "tasks" | "title" | ...
-	Value      json.RawMessage `json:"value"`
+	SessionID string `json:"sessionId,omitempty"`
+	Seq       int64  `json:"seq,omitempty"`
+	// BUG FIX (F-dsh-shared-host §6 #1): the wire field is "key"
+	// (dsh-api.md §3.4.3), not "projection". Pre-fix this struct
+	// used `json:"projection"` so dsh's mux frames never matched
+	// the decoder (dsh 0.1.0-rc.6 happened to also accept the
+	// legacy form, masking the bug). The canonical wire is "key".
+	Key string `json:"key"` // "todos" | "todo" | "tasks" | "title" | ...
+	// Canonical wire (verified 2026-08-16 against captured
+	// testdata/projections/todo_snapshot.json) is "todos"
+	// (plural). Singular "todo" and "tasks" are accepted as
+	// fallbacks for older / fork builds — dispatched in
+	// applyProjectionLocked.
+	Value json.RawMessage `json:"value"`
 }
 
 // todoItem is one entry in todoWriteEvent.Items. Matches
@@ -454,17 +508,30 @@ type todoItem struct {
 	Status     string `json:"status"` // "pending" | "in_progress" | "completed"
 }
 
-// approvalAskedData is the `data` body of an approval/asked event
-// (the session/event channel for approval flows; distinct from
-// mux approval/requested which is the server-pushed version).
-// Wire field names may not all match — translate.go's catch-all
-// falls through to a debug log when the payload is empty, which
-// is the expected behaviour when dsh skips this event entirely.
-type approvalAskedData struct {
-	ToolCallID string   `json:"toolCallId"`
-	ToolName   string   `json:"toolName"`
-	Action     string   `json:"action"`
-	Options    []string `json:"options"`
+// AskUserQuestionOption is the option shape used by
+// muxQuestionRequested (dsh-api.md §3.4.9). One selectable
+// choice; Label is the visible answer and Description is
+// auxiliary context shown alongside.
+type AskUserQuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// optionLabels extracts the visible Label from each option. The
+// runtime's EventAgentPermission.Options field is a []string
+// (label-only) for parity with other bridges (claudecode etc.); the
+// canonical wire shape carries label + description, but the
+// feishu card renders label only. Centralising the projection here
+// keeps every callsite consistent.
+func optionLabels(opts []AskUserQuestionOption) []string {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]string, len(opts))
+	for i, o := range opts {
+		out[i] = o.Label
+	}
+	return out
 }
 
 // ─── /api/session.create response ──────────────────────────────────────
@@ -473,19 +540,6 @@ type approvalAskedData struct {
 // response. We only consume SessionID; the rest are kept as
 // RawMessage for audit logs / future fields.
 type sessionCreateValue struct {
-	SessionID string `json:"sessionId"`
-}
-
-// sessionForkValue is the `value` payload of an OK session.fork
-// response. dsh web's session.fork creates a NEW session (with a
-// new server-assigned sessionId) that carries the parent's event
-// history; the caller treats the returned id as the new live
-// sessionId for all subsequent session.prompt / session.cancel
-// calls. Wire shape is identical to session.create by design —
-// both endpoints hand back a "your new session is X" envelope.
-// Documented at docs/bridge/dsh.md §1.3 ("从现有 session 开新
-// (daemon 重启续接用)").
-type sessionForkValue struct {
 	SessionID string `json:"sessionId"`
 }
 
@@ -502,35 +556,33 @@ type sessionForkValue struct {
 // Field notes (verified against real wire):
 //
 //   - ID          — the session's wire id. Format is a UUID
-//                   prefixed with "session-" (e.g.
-//                   "session-e4fe0be6-c082-48a5-be70-77628e7486bc").
-//                   Same shape as sessionCreateValue.SessionID.
+//     prefixed with "session-" (e.g.
+//     "session-e4fe0be6-c082-48a5-be70-77628e7486bc").
+//     Same shape as sessionCreateValue.SessionID.
 //   - UpdatedAt   — unix millis of the last write. Use this as
-//                   the "most recent" sort key for picker UI.
+//     the "most recent" sort key for picker UI.
 //   - Running     — bool; true while the session has an in-flight
-//                   turn. Forks of a running session may behave
-//                   differently (or be rejected) — see the
-//                   fork-unavailable error class.
+//     turn. Resuming a session that has no completed
+//     turn is fine — the bridge just attaches and
+//     waits for new events. (session.fork is no
+//     longer used by this bridge.)
 //   - Blank       — bool; true for sessions with zero completed
-//                   turns. dsh's session.fork refuses blank
-//                   sessions with error code "fork-unavailable"
-//                   ("no completed turn to fork from"). The
-//                   picker should pre-filter blanks for a
-//                   smoother UX.
+//     turns. Picker should pre-filter blanks for a
+//     smoother UX.
 //   - CWD         — directory the session was created against.
-//                   Used by the picker to filter sessions for the
-//                   current /cwd (cross-workspace contamination is
-//                   annoying — docs/bridge/dsh.md §11).
+//     Used by the picker to filter sessions for the
+//     current /cwd (cross-workspace contamination is
+//     annoying — docs/bridge/dsh.md §11).
 //   - AgentPreset — registered agent preset key (e.g.
-//                   "standard"). Audit only; the bridge doesn't
-//                   dispatch on this.
+//     "standard"). Audit only; the bridge doesn't
+//     dispatch on this.
 //   - Projections — optional. Some sessions include a
-//                   "projections.values" object carrying derived
-//                   metadata (title, turnCount, tokenUsage). The
-//                   bridge does NOT decode it — kept as RawMessage
-//                   so a server-side projection schema bump
-//                   doesn't break us. Future "show me the title"
-//                   picker card would decode `projections.values.title`.
+//     "projections.values" object carrying derived
+//     metadata (title, turnCount, tokenUsage). The
+//     bridge does NOT decode it — kept as RawMessage
+//     so a server-side projection schema bump
+//     doesn't break us. Future "show me the title"
+//     picker card would decode `projections.values.title`.
 type Session struct {
 	ID          string          `json:"sessionId"`
 	UpdatedAt   int64           `json:"updatedAt"`
@@ -580,9 +632,9 @@ type sessionListValue struct {
 // ModelProviderGroup / ModelCatalogFailure when /model lands.
 type sessionModelsValue struct {
 	Current  modelSelectionWire `json:"current"`
-	Routable bool                `json:"routable"`
-	Groups   json.RawMessage     `json:"groups,omitempty"`
-	Failures json.RawMessage     `json:"failures,omitempty"`
+	Routable bool               `json:"routable"`
+	Groups   json.RawMessage    `json:"groups,omitempty"`
+	Failures json.RawMessage    `json:"failures,omitempty"`
 }
 
 // modelSelectionWire is one entry of ModelSelection

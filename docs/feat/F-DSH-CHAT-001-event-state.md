@@ -7,6 +7,8 @@
 > - [F-dsh-bridge.md](./F-dsh-bridge.md) — dsh print-mode RunOnce 设计(已落地)
 > - [bridge/dsh.md](../bridge/dsh.md) — dsh wire / lifecycle 详细规范
 > - [F-CLAUDE-PRINT-002-statusbar-refactor.md](./F-CLAUDE-PRINT-002-statusbar-refactor.md) — 跨包重构的失败案例,作为本方案的"避免踩坑"参考
+>
+> **2026-08-16 修订 (dashboard 对齐)**: dsh web 的 **To-dos / 任务** 条(`TodoDock`)对齐 `todo/write` `{todos:[{content,status}]}` + `session/projection` `key:"todos"`(`value` 是 `TodoItem[] | null` 数组,不是 `{todos:[...]}` 包装)。`step/start` / `step/end` 是 `sessionStats`(TTFT / tok/s),**不要**映射成 OutTask*。聊天里的 `todo_write(...)` 行是 `tool/call`,不是 dock 清单。权威表:[dsh-api.md §3.4.2–3.4.3](../bridge/dsh-api.md)。
 
 ---
 
@@ -67,7 +69,7 @@ dsh web 同时下发三种并行数据源,共同描述 session 的"真值":
 | 数据源 | 何时下发 | 内容 |
 |---|---|---|
 | `session/event` | 每条 SessionEvent 伴随下发 | 原始事件流(text delta / tool_call / tool_result / turn 边界 / `todo/write` 等 42 种 SessionEvent) |
-| `session/projection` | host 周期性 / 事件性下发 | 派生状态快照(`todo` / `tasks` / `title` 等) |
+| `session/projection` | host 在 `todo/write` / `turn/start` 等变化时下发 | 派生状态快照。To-dos 的 key 是 **`todos`**(复数);`value` 是 `TodoItem[] \| null` |
 | `muxSessionEvent.View` | 每条 `session/event` 伴随下发 | host 已计算好的渲染视图(`ToolEventView`),含 tool 状态 + task 列表 + uuid |
 
 详见 [bridge/dsh.md §1](../bridge/dsh.md) 的 wire 规范。
@@ -449,7 +451,7 @@ grep -l "projection\|view:\|host.*computed" internal/bridge/*/protocol.go
 
 | 症状 | 根因 | 修法 |
 |---|---|---|
-| To-dos 面板仍为空 | wireState.tasks 没数据,或 `AgentTaskItem.ID == ""` | 检查 `TestTodoWrite_PopulatesIDAndActiveForm` 是否通过;检查 wire-probe fixture 是否覆盖了 `todo/write` 帧 |
+| To-dos 面板仍为空 | 直播缺 `todo/write`;或只靠投影但 `value` 是数组而 decoder 当 object 解;或 resume 没读 history `projections` | 先确认 `todo/write` 字段是 `todos` 不是 `items`;投影形状见 [dsh-api.md §3.4.3](../bridge/dsh-api.md);`step/*` **不是**清单 |
 | Tool 状态更新滞后 | View 没接进 wireState.tools | 确认 P3 已落地 |
 | `unknown event type` 大量出现 | dsh 加了新 SessionEvent,注册表没追上 | `nightme debug dsh dump-wire` 看最近的 wire 帧,在 eventRegistry 加 handler |
 | 锁死锁 | dispatcher handler 内部加锁 + 调用方已持锁 | 改用单源真值;或 dispatcher 入口统一 acquire |

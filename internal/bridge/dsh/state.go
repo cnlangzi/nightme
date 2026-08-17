@@ -41,8 +41,9 @@ import (
 //   - title: session header title (populated via projection/title
 //     handle in wireState.applyProjectionLocked).
 //   - wireRing: last 64 raw frames, for debug dump (P4).
-//   - unknownCount: cumulative count of unrecognized envelope types
-//     or mux methods (P4 observability).
+//   - unknownCount: cumulative count of unrecognized envelope types,
+//     unknown mux methods, AND todo-drift frames (F-DSH-TODO-FIX)
+//     — see field comment for details. P4 observability.
 //
 // Concurrency:
 //   - mu guards all fields. Read/write should be brief.
@@ -66,10 +67,22 @@ type wireState struct {
 	// translated. P4 observability.
 	wireRing *wireRingBuffer
 
-	// unknownCount counts unrecognized events (registry lookup miss
-	// in dispatcher OR unknown mux method in handleMuxFrame).
-	// Operators can read it via DumpWireStats for "is dsh emitting
-	// something we don't handle" detection. P4.
+	// unknownCount counts unrecognized events. Three sources bump it:
+	//   1. dispatcher registry lookup miss (handler not registered
+	//      for env.Type)
+	//   2. handleMuxFrame unknown mux method
+	//   3. todo drift: a todo/write or session/projection(todo) frame
+	//      whose items[] zero-fill (ID="" AND Content=""), which
+	//      usually means dsh's real wire field names don't match
+	//      the json tags on protocol.go's todoItem. Each affected
+	//      frame bumps the counter once, NOT once per item (so the
+	//      number is comparable to "how many frames had drift",
+	//      not "how many items were lost").
+	//
+	// Operators read it via DumpWireStats to triage "bridge isn't
+	// picking up dsh's todos" — distinct from the prior behaviour
+	// where the failure was completely silent (dLog at Debug).
+	// P4 + F-DSH-TODO-FIX.
 	unknownCount uint64
 }
 
@@ -122,10 +135,10 @@ func (r *wireRingBuffer) snapshot() []wireFrame {
 // running state. Populated by View (P3); Phase 1+2 keeps this as a
 // stub so the data path exists and P3 only needs to fill it.
 type toolItem struct {
-	CallID  string
-	Name    string
-	Status  string // "running" | "completed" | "failed"
-	Output  string
+	CallID    string
+	Name      string
+	Status    string // "running" | "completed" | "failed"
+	Output    string
 	UpdatedAt int64
 }
 
@@ -197,6 +210,17 @@ func (s *wireState) applyEventLocked(env sessionEventEnvelope) []agent.AgentEven
 // handling when dsh's TodoItem lacks ID. Either way the tasks
 // map key is stable, so runtime-side dedup / merge works correctly
 // across multiple todo/write events.
+//
+// F-DSH-TODO-FIX (2026-08-16): wire data arrived but every item
+// was zero-valued and got skipped — root cause was dsh wire
+// using field names that didn't match the struct tags (the
+// WIRE-PROBE-REQUIRED warning on todoItem in protocol.go was
+// never validated against a real wire). The skip path used to
+// dLog at Debug (invisible in production) and still emit
+// EventAgentTaskCreate{Items:[]}, which Feishu renders as
+// "clear the checklist". Now the path logs at Warn AND bumps
+// wireState.unknownCount so `nightme debug dsh dump-wire` shows
+// the failure mode to ops.
 func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.AgentEvent {
 	var data todoWriteData
 	if err := json.Unmarshal(env.Data, &data); err != nil {
@@ -204,18 +228,27 @@ func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.Agent
 		return nil
 	}
 
-	items := make([]agent.AgentTaskItem, 0, len(data.Items))
+	// F-DSH-TODO-WIRE-FIX (2026-08-16): wire field is `todos`
+	// (verified against @deepseek-ai/dsh-tool-todo source),
+	// pre-fix the bridge used `items` and silently dropped every
+	// item. todoWriteData.UnmarshalJSON now recovers both shapes.
+	items := make([]agent.AgentTaskItem, 0, len(data.Todos))
+	skipped := 0
 
-	for _, it := range data.Items {
+	for _, it := range data.Todos {
 		key := it.ID
 		if key == "" {
 			key = it.Content
 		}
 		if key == "" {
-			// Both ID and Content empty — skip rather than poison
-			// the map with an empty-string key (which would
-			// collapse all such items into one).
-			dLog("dsh: todo/write item has empty ID and Content, skipping")
+			// Both ID and Content empty — most likely a wire
+			// schema drift (todoItem struct json tags don't match
+			// dsh's real wire field names). Don't poison the map
+			// with an empty-string key (would collapse all such
+			// items into one), but DO surface the failure so ops
+			// can see "bridge isn't picking up dsh's todos" via
+			// nightme debug dsh dump-wire (unknownCount column).
+			skipped++
 			continue
 		}
 		s.tasks[key] = it
@@ -227,10 +260,25 @@ func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.Agent
 		})
 	}
 
+	if skipped > 0 {
+		// Bump unknownCount so the failure mode is visible in
+		// DumpWireStats alongside other "we don't recognize this
+		// wire shape" counters. Caller MUST hold s.mu (we are
+		// inside applyEventLocked).
+		s.unknownCount++
+		warnLogger.Warn("dsh: todo/write items dropped (wire field-name drift?)",
+			"skipped", skipped,
+			"kept", len(items),
+			"hint", "check internal/bridge/dsh/protocol.go todoItem json tags vs dsh wire",
+			"unknown_total", s.unknownCount)
+	}
+
 	// Even with len(items)==0, emit EventAgentTaskCreate with empty
 	// Items. gateway/outbound documents empty Items as the valid
 	// "clear the checklist" signal — dropping it freezes the prior
-	// checklist for the rest of the session.
+	// checklist for the rest of the session. The Warn log +
+	// unknownCount bump above is the only way for ops to tell
+	// "intentional clear" apart from "wire drift ate everything".
 	return []agent.AgentEvent{{
 		Kind:     agent.EventAgentTaskCreate,
 		TaskList: &agent.AgentTaskListEvent{Items: items},
@@ -256,8 +304,13 @@ func (s *wireState) applyProjection(proj projectionEnvelope) []agent.AgentEvent 
 
 // applyProjectionLocked assumes the caller holds s.mu.
 func (s *wireState) applyProjectionLocked(proj projectionEnvelope) []agent.AgentEvent {
-	switch proj.Projection {
-	case "todo", "tasks":
+	switch proj.Key {
+	case "todo", "todos", "tasks":
+		// Real dsh wire uses "todos" (plural) per
+		// @deepseek-ai/dsh-tool-todo `todos` projection unit
+		// (verified 2026-08-16 against captured
+		// testdata/projections/todo_snapshot.json). "todo" /
+		// "tasks" kept as fallbacks for older / fork builds.
 		return s.applyTodoProjectionLocked(proj.Value)
 	case "title":
 		// Host-pre-computed session title. Stash in s.title for
@@ -285,6 +338,8 @@ func (s *wireState) applyProjectionLocked(proj projectionEnvelope) []agent.Agent
 	}
 }
 
+
+
 // applyTodoProjectionLocked assumes the caller holds s.mu.
 //
 // Decodes a projection value carrying a todo snapshot (same shape
@@ -297,22 +352,37 @@ func (s *wireState) applyProjectionLocked(proj projectionEnvelope) []agent.Agent
 // and the next todo/write from raw event will reconcile). P3 can
 // add active pruning once we know real-world deletion frequency.
 func (s *wireState) applyTodoProjectionLocked(value json.RawMessage) []agent.AgentEvent {
+	// F-DSH-TODO-WIRE-FIX (2026-08-16): same fallback as
+	// applyTodoWriteLocked — wire uses `todos`, legacy / fork
+	// builds may use `items`. Decoding into both keys and
+	// preferring `todos` matches the projection-source schema
+	// in @deepseek-ai/dsh-tool-todo (the `todos` projection
+	// unit: `array({content, status}) | null`).
 	var data struct {
+		Todos []todoItem `json:"todos"`
 		Items []todoItem `json:"items"`
 	}
 	if err := json.Unmarshal(value, &data); err != nil {
 		dLog("dsh: wireState.applyTodoProjection decode: %v", err)
 		return nil
 	}
+	todos := data.Todos
+	if len(todos) == 0 {
+		todos = data.Items
+	}
 
-	items := make([]agent.AgentTaskItem, 0, len(data.Items))
+	items := make([]agent.AgentTaskItem, 0, len(todos))
+	skipped := 0
 
-	for _, it := range data.Items {
+	for _, it := range todos {
 		key := it.ID
 		if key == "" {
 			key = it.Content
 		}
 		if key == "" {
+			// See applyTodoWriteLocked for the rationale on
+			// surface-vs-silent: same wire-drift failure mode.
+			skipped++
 			continue
 		}
 		s.tasks[key] = it
@@ -324,10 +394,25 @@ func (s *wireState) applyTodoProjectionLocked(value json.RawMessage) []agent.Age
 		})
 	}
 
+	if skipped > 0 {
+		// Same field-drift detection as applyTodoWriteLocked —
+		// see that comment for the production failure mode this
+		// prevents. Caller MUST hold s.mu (we are inside
+		// applyProjectionLocked).
+		s.unknownCount++
+		warnLogger.Warn("dsh: session/projection todo items dropped (wire field-name drift?)",
+			"skipped", skipped,
+			"kept", len(items),
+			"hint", "check internal/bridge/dsh/protocol.go todoItem json tags vs dsh wire",
+			"unknown_total", s.unknownCount)
+	}
+
 	// Even with len(items)==0, emit EventAgentTaskCreate with empty
 	// Items. gateway/outbound documents empty Items as the valid
 	// "clear the checklist" signal — dropping it freezes the prior
-	// checklist for the rest of the session.
+	// checklist for the rest of the session. The Warn log +
+	// unknownCount bump above is the only way for ops to tell
+	// "intentional clear" apart from "wire drift ate everything".
 	return []agent.AgentEvent{{
 		Kind:     agent.EventAgentTaskCreate,
 		TaskList: &agent.AgentTaskListEvent{Items: items},

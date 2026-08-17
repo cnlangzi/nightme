@@ -277,22 +277,38 @@ type UsageInfo = agent.UsageInfo
 // Card is an interactive permission card or any other card that
 // requires the user's choice.
 //
-// F-46: kind + choices + action encoding (see docs/feat/F-46-
-// interactive-cards.md). The legacy Options field still works for
-// callers that just want a flat list of button labels — build-
-// InteractiveCard renders Options as primary buttons when Choices
-// is empty.
+// F-46: kind + choices + action encoding. Interactive-card design
+// and Feishu form/callback pitfalls: docs/channel/feishu-cards.md.
+// The legacy Options field still works for callers that just want
+// a flat list of button labels — buildInteractiveCard renders
+// Options as primary buttons when Choices is empty.
 type Card struct {
-	Title    string
-	Body     string
-	Options  []string
-	RequestID string
-	Kind     CardKind
-	Choices  []CardChoice
-	Action   string
-	Disabled bool
+	Title             string
+	Body              string
+	Options           []string
+	RequestID         string
+	Kind              CardKind
+	Choices           []CardChoice
+	Action            string
+	Disabled          bool
 	ChosenChoiceEmoji string
-	HeaderColor string
+	HeaderColor       string
+	// Questions + Step + Picks drive the Action Needed wizard.
+	// len(Questions)<=1 is a one-shot card (click / custom / skip → respond).
+	// len(Questions)>1 is in-card paging: each click advances
+	// Step; /api/respond fires only after the last pick.
+	// Every question also has Type your answer + Skip this question.
+	Questions []CardQuestion
+	Step      int
+	Picks     []string
+}
+
+// CardQuestion is one step on an Action Needed card.
+type CardQuestion struct {
+	ID       string
+	Header   string
+	Question string
+	Options  []string
 }
 
 type CardKind int
@@ -304,7 +320,7 @@ const (
 
 	// CardKindError marks a card that surfaces a non-graceful
 	// bridge exit (EventAgentError with a populated Diagnostic).
-	// The renderer should NOT prepend the 🔐 permission emoji
+	// The renderer should NOT prepend the 👉 Action Needed emoji
 	// (no permission is being asked) and should default the
 	// header template to a warning colour (red/orange) instead
 	// of the default blue. Channels that want to render the

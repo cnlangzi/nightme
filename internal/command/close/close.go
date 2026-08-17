@@ -22,7 +22,9 @@
 //   - /close — forcibly terminates the bridge process (close stdin
 //     → SIGINT → 2 s grace → SIGKILL fallback). AgentSession goes
 //     to StatusExited but stays in the pool; sessionID is preserved
-//     so respawn resumes the conversation.
+//     so respawn resumes the conversation. dsh: dashboard
+//     "Archive Session" — POST /api/workspace.archiveSession
+//     {sessionId} (no session.delete on the wire).
 //   - /new — invokes the bridge's in-place context reset (claude's
 //     `/clear`, pi's `new_session` RPC, etc.). The conversation
 //     history is cleared but the bridge process stays alive.
@@ -64,11 +66,11 @@ var ErrNoContext = errors.New("close: nil ChatSession")
 // to a single pool entry during CloseAgent / CloseAllAgents so the
 // handler can render a per-agent status instead of a bare count.
 type Result struct {
-	Agent       string // e.g. "claude", "codex"
-	Cwd         string // e.g. "/code/A"
+	Agent       string             // e.g. "claude", "codex"
+	Cwd         string             // e.g. "/code/A"
 	BeforeState chatsession.Status // StatusRunning / StatusDetached / StatusExited
-	Action      string // "closed" | "stale-cleared" | "close-failed"
-	Error       error  // nil on success
+	Action      string             // "closed" | "stale-cleared" | "close-failed"
+	Error       error              // nil on success
 }
 
 // closeGraceTotal is the outer-bound graceful shutdown timeout.

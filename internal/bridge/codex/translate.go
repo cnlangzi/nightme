@@ -149,6 +149,11 @@ func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent,
 // tests. Single switch + per-method handler so the bridge stays
 // testable per notification type.
 func (t *translator) notify(method string, params json.RawMessage) {
+	// DEBUG(F-codex-stopped-stuck): second sentinel. Logs every
+	// notification method that reaches the translator. Combined with
+	// the rpc notification log + deliver pushed log, this gives a
+	// three-point trace for any "agent appears to stop" repro.
+	cLog("translator notify", "method", method)
 	switch method {
 	case "thread/started":
 		// thread/started is fired on thread/start or thread/resume and
@@ -441,8 +446,16 @@ func (t *translator) completeTurn(params json.RawMessage, status string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.turn.doneEmitted {
+		cLog("completeTurn (already emitted, skipped)", "status", status)
 		return
 	}
+	// DEBUG(F-codex-stopped-stuck): third sentinel. We must see
+	// this fire whenever turn/completed (status=completed) or
+	// thread/status/changed.idle reaches the translator. If
+	// completeTurn fires but no matching deliver pushed
+	// kind=EventAgentDone appears, the bug is between this point
+	// and the deliver push.
+	cLog("completeTurn enter", "status", status, "active", t.turn.active)
 	if !t.turn.active {
 		// No meaningful activity this turn; skip Result + Done.
 		t.turn.doneEmitted = true

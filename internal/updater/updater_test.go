@@ -282,10 +282,17 @@ func TestInstall_HappyPath(t *testing.T) {
 		t.Errorf("backup body wrong after Install (got %q, want %q)", string(gotOld)[:20], originalBody[:20])
 	}
 
-	// Mode must be 0755 (or at least include +x).
-	st, _ := os.Stat(target)
-	if st.Mode()&0o111 == 0 {
-		t.Errorf("target mode = %v, want executable", st.Mode())
+	// Mode must be 0755 (or at least include +x) on POSIX
+	// systems. Windows ignores the executable bit (the
+	// filesystem has no +x), so we skip the assertion there
+	// — production behaviour is unchanged because the
+	// install step always issues os.Chmod, which is a
+	// no-op on Windows.
+	if runtime.GOOS != "windows" {
+		st, _ := os.Stat(target)
+		if st.Mode()&0o111 == 0 {
+			t.Errorf("target mode = %v, want executable", st.Mode())
+		}
 	}
 }
 

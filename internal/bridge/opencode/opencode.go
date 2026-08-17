@@ -1,227 +1,69 @@
 
-// Package opencode implements the bridge to the opencode CLI via its
-// first-party HTTP server (`opencode serve`).
+// Package opencode is the nightme bridge for the opencode CLI.
 //
-// Compared to the other nightme bridges (claudecode / codex / pi / acp)
-// this one is structurally simpler:
+// Unlike the other per-CLI bridges (claudecode / codex / pi), this
+// one intentionally ships TWO spawn paths and lets the caller pick:
 //
-//   - Transport: plain HTTP + Server-Sent Events. No JSON-RPC envelope,
-//     no NDJSON framing, no PTY carrier. The TS SDK is a thin wrapper
-//     around the same HTTP API; we hand-write the equivalent Go client.
-//   - Process lifecycle: 1 bridge session = 1 `opencode serve` child
-//     process. The server listens on 127.0.0.1:<random-port> (we pass
-//     --port 0 and parse the URL from stdout). Sessions are server-side
-//     resources scoped to a workspace via the `x-opencode-directory`
-//     header (mirrors the v2 SDK behaviour).
-//   - Events: the single SSE stream is the only event source. The
-//     discriminator on each event is `type`, and the heavy lifting
-//     happens in message.part.updated with a `part` union. We dispatch
-//     part types to AgentEvent (text → EventAgentText, reasoning →
-//     EventAgentText with the [思考] prefix, tool → tool lifecycle
-//     events).
+//   - Start (long-lived chat session) → opencode acp over PTY.
+//     Vendor-recommended integration mode
+//     (https://opencode.ai/docs/acp/ — "All features are supported").
+//     The actual JSON-RPC 2.0 / PTY / session lifecycle work lives in
+//     internal/bridge/acp; this package only supplies the
+//     bridge-specific sessionUpdate translator
+//     (internal/bridge/opencode/update.go).
 //
-// Design reference: docs/feat/F-OPENCODE-opencode-bridge.md.
+//   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
+//     `opencode run --format json <prompt>`. Mirrors
+//     codex/claudecode/pi print-mode; one process per call.
 //
-// Agent is BOTH the template (registered with agent.Builtins) and the
-// live handle (returned by Start). The template half is set once by
-// New and is immutable thereafter; Start clones the receiver and
-// populates runtime fields on the clone. The two states share one type
-// so the registry, the Spawner, and AgentSession.handle all deal with a
-// single agent.Agent — no separate session struct.
+// Why ACP, not HTTP serve
 //
-// Session lifetime is two-tier:
+// An earlier version of this package implemented the long-lived
+// path against `opencode serve` (HTTP + SSE + ~3500 lines of
+// hand-written event translation). That implementation was
+// retired for F-OPENCODE-ACP-MIGRATION. The reasons, in one
+// paragraph: opencode's own `acp` subcommand runs the SAME HTTP
+// server underneath and adds a JSON-RPC 2.0 stdio adapter on top,
+// so switching to ACP does not lose any capability — but it
+// removes the need to maintain ~1300 lines of opencode-private
+// SSE event translation, ~400 lines of stream-buffer bookkeeping,
+// ~300 lines of HTTP serve plumbing, and 9 endpoint-specific
+// tests. The same generic acp bridge used by codex / pi / future
+// ACP backends now serves opencode, with a thin per-bridge
+// UpdateHandler that translates the 5 sessionUpdate variants
+// opencode actually emits on the wire (user_message_chunk,
+// agent_message_chunk, agent_thought_chunk, tool_call,
+// tool_call_update — see update.go for the full routing table).
 //
-//   - process: serveCmd.Start() → "opencode server listening on http://..."
-//     captured from stdout → ... → Close() → cmd KILL
-//   - turn:    POST /api/session/{id}/prompt → SSE events … →
-//     session.idle (translated to EventAgentDone{Reason:"settled"})
+// Historical `opencode serve` artifacts
 //
-// The process carries many turns. EventAgentDone marks the end of one
-// turn but does NOT close the events channel; only process exit or
-// Close() does. This mirrors the contract documented in
-// docs/bridge/codex.md §2.3 and lets ChatSession.runReadPump continue
-// reading across many turns on the same AgentSession.
+// The retired `internal/bridge/opencode/` package was deleted in
+// Phase 2 of the migration (commit 45e7b21). References to
+// `opencode.NewStarter` must use `opencode.NewStarter`
+// instead. See docs/feat/F-OPENCODE-ACP-MIGRATION.md §6 for the
+// phased removal plan (all three phases are now complete).
 package opencode
 
 import (
-	"errors"
 	"log/slog"
 	"os"
 	"strings"
-	"time"
 )
 
-// ─── errors ───
+// ─── env / debug ───
 
-// ErrSessionClosed is returned by Client calls after the server process
-// has exited. Mirrors the codex/pi convention so the runtime can
-// distinguish send-on-dead-session from a real wire error.
-var ErrSessionClosed = errors.New("opencode: session closed")
-
-// ErrServerStartTimeout is returned by startServer when the
-// "opencode server listening on http://..." banner does not appear
-// within serverStartTimeout. The caller should treat this as a fatal
-// Start error.
-var ErrServerStartTimeout = errors.New("opencode: server start timeout")
-
-// ErrNoPendingPermission is returned by SendPermission when there is no
-// outstanding permission/asked event to answer. Matches the
-// codex/pi convention.
-var ErrNoPendingPermission = errors.New("opencode: no pending permission answer")
-
-// ErrImageTooLarge is returned by SendBlocks when a single image
-// exceeds maxImageBytes. Mirrors the limit used by codex / pi.
-var ErrImageTooLarge = errors.New("opencode: image too large")
-
-// ErrTurnBusy is returned by SendBlocks when a previous turn is still
-// streaming. The caller may retry after session.idle arrives.
-var ErrTurnBusy = errors.New("opencode: previous turn still active")
-
-// ─── timing ───
-
-// serverStartTimeout bounds how long we wait for the
-// "opencode server listening on http://..." banner after spawning
-// `opencode serve`. Cold start with model preload can take a few
-// seconds; 10s matches the other bridges' handshakeTimeout.
-const serverStartTimeout = 10 * time.Second
-
-// handshakeTimeout bounds the first HTTP round-trip (POST /api/session
-// or GET /api/session/{id}). opencode answers within a couple of
-// seconds even on cold start; 10s matches the other bridges.
-const handshakeTimeout = 10 * time.Second
-
-// shutdownGrace is the SIGINT-to-SIGKILL window for Close(), kept
-// short so /close on a stuck server does not hang the runtime.
-const shutdownGrace = 2 * time.Second
-
-// closeDrainTimeout bounds the time Close() will wait for the
-// lifecycle goroutine to reap the child and close the events channel.
-// Beyond this window Close returns even if the underlying cmd.Wait is
-// wedged (zombie / SIGKILL reap not landing).
-const closeDrainTimeout = 5 * time.Second
-
-// promptTimeout bounds a single POST /api/session/{id}/prompt and its
-// matching session.idle. Even with slow APIs, 90s usually suffices; we
-// leave 30s more headroom than codex's `promptTimeout` to account for
-// SSE delivery lag.
-const promptTimeout = 90 * time.Second
-
-// permissionTimeout is how long an EventAgentPermission waits for a
-// user decision before defaulting to reject. Mirrors codex's
-// 5-minute default.
-const permissionTimeout = 5 * time.Minute
-
-// startupMaxAttempts bounds the Start retry loop. Two attempts
-// covers the common "stale HOME/.opencode state" case without
-// hiding genuine misconfiguration (auth / binary missing). Tested
-// as the upper bound for the retry budget in agent_test.go.
-const startupMaxAttempts = 2
-
-// startupRetryDelay is the wait between Start attempts. Long
-// enough that any transient I/O settle, short enough that the
-// user does not notice on the happy path.
-const startupRetryDelay = 2 * time.Second
-
-// livenessProbeInterval is how often the bridge pings /api/health
-// on a SEPARATE HTTP connection to verify the opencode process is
-// still reachable. Chosen so a handful of probes cover a typical
-// 10-second server crash window without spamming the server.
-// Probes are independent of the SSE stream — a long stretch of
-// silent SSE (model thinking, large tool call, etc.) is not a
-// liveness signal.
-const livenessProbeInterval = 5 * time.Second
-
-// livenessProbeTimeout bounds each individual /api/health call so
-// a wedged probe cannot accumulate indefinitely. Short (2s) is
-// plenty: if the server answers at all, it answers well under a
-// second.
-const livenessProbeTimeout = 2 * time.Second
-
-// livenessFailThreshold is the number of consecutive probe failures
-// that triggers a session teardown. At 5s interval and 2s timeout,
-// three failures mean roughly 15-21 seconds of total unreachability
-// before we kill — long enough to ride out a brief network blip,
-// short enough that a wedged server gets reaped before the runtime's
-// HungPrompt sweeper (multi-minute) kicks in.
-const livenessFailThreshold = 3
-
-// sseReconnectMin is the initial backoff after an SSE disconnect.
-// Kept short so a transient blip recovers within a few hundred
-// milliseconds. Doubles on each consecutive failure (capped at
-// sseReconnectMax) with full jitter to avoid thundering-herd on
-// a server restart. Override via NIGHTME_OPENCODE_SSE_RECONNECT_MIN.
-const sseReconnectMin = 100 * time.Millisecond
-
-// sseReconnectMax is the upper bound on the SSE reconnect backoff.
-// Local 127.0.0.1 connections should never drop, but if the
-// server process is restarting itself (e.g. config reload) the
-// bridge needs to wait it out without burning the CPU. Override
-// via NIGHTME_OPENCODE_SSE_RECONNECT_MAX.
-const sseReconnectMax = 5 * time.Second
-
-// sseStableGrace is the minimum wall time a connection must
-// survive (with or without events) before the reconnect loop
-// considers it "stable" and resets the backoff to the minimum.
-// Below this window we keep growing the backoff, so a server
-// that closes every connection within a few hundred milliseconds
-// is not hammered at sseReconnectMin.
-//
-// Set generously enough to cover the opencode CLI's typical
-// post-handshake quiet period (model load, plugin init). 2s is
-// conservative; in practice the first event arrives much sooner.
-const sseStableGrace = 2 * time.Second
-
-// turnWatchdogTimeout bounds the wall time between consecutive SSE
-// events during a turn. Resets on every event delivered by the
-// translator (model is alive, plugin loaded, etc.). On timeout the
-// bridge kills the server and emits EventAgentError so the
-// runtime readpump clears the busy guard and the chat surfaces a
-// clear "agent session timed out (no response)" message instead
-// of hanging on the busy spinner.
-//
-// Default 10 minutes — matches the model of "humans typing into
-// chat apps are patient but not infinitely so". cc-connect's
-// equivalent uses 2 hours (defaultEventIdleTimeout in their
-// engine.go) but our session-scoped bridge plus the per-turn
-// busy-guard semantics argue for a tighter bound; runtime
-// operators can extend via NIGHTME_OPENCODE_TURN_WATCHDOG.
-const turnWatchdogTimeout = 10 * time.Minute
-
-// turnWatchdogEmptyFlag is the Done.Reason string we use when the
-// turn settled normally but produced zero EventAgentText /
-// EventAgentToolStart events. Runtime uses this to surface
-// "(empty response)" hints in the channel footer.
-const turnWatchdogEmptyFlag = "empty"
-
-// ─── buffer sizes ───
-
-// eventBufferSize is the events channel capacity.
-//
-// Sized to match the producer-side contract promoted in commit
-// 67b295ec ("unify producer-side buffer contract across all bridges"):
-// 40960 across pi / claudecode / pty / acp. The codex bridge adopted
-// the same value (see internal/bridge/codex/session.go eventBufferSize).
-//
-// Allocated in newSession; tests pin the value at the package level so
-// a regression that lowers the cap or reintroduces a default-drop is
-// caught in `go test`.
-const eventBufferSize = 40960
-
-// maxImageBytes is the upper bound for a single image attachment read
-// into memory before base64-encoding into the prompt parts. 10 MiB
-// matches the codex / pi limit.
-const maxImageBytes = 10 * 1024 * 1024
-
-// sseBufferSize is the maximum size of one SSE data line. opencode can
-// emit fairly large message-part.updated payloads (full tool argument
-// dumps); 10 MiB is generous and matches the codex MaxFrameSize.
-const sseBufferSize = 10 * 1024 * 1024
+// bridgeName is the AgentName stamped on every AgentEvent. Stable
+// across sessions; consumed by the runtime's translator to
+// attribute events to the opencode bridge (multi-bridge chat
+// sessions use this to route the correct renderer / slash command
+// set).
+const bridgeName = "opencode"
 
 // ─── debug ───
 
-// opencodeDebug toggles the bridge's detailed debug logging. Default
-// ON so a "why is opencode stuck" incident produces a usable
-// breadcrumb trail. Silence it with NIGHTME_OPENCODE_DEBUG=0
+// opencodeDebug toggles the bridge's detailed debug logging.
+// Default ON so a "why is opencode stuck" incident produces a
+// usable breadcrumb trail. Silence with NIGHTME_OPENCODE_DEBUG=0
 // (also accepts "false", "no", "off", case-folded).
 var opencodeDebug = opencodeDebugEnabled()
 
@@ -234,18 +76,14 @@ func opencodeDebugEnabled() bool {
 	return false
 }
 
-// version is the bridge version reported to opencode via the
-// Client-Name header. Kept in sync with the module's semantic intent;
-// bump manually when the HTTP contract changes materially.
-const version = "0.1.0"
-
 // ─── logging ───
 
 // oLog emits an info-level message tagged [opencode] (component=
-// "opencode") when debug is enabled. Mirrors the codex cLog / pi piLog
-// pattern so log scrapers see a consistent component label across all
-// bridges. Tests in this package may swap slog.Default via
-// slog.SetDefault() to keep test output clean.
+// "opencode") when debug is enabled. Mirrors the codex / pi /
+// claudecode cLog pattern so log scrapers see a consistent
+// component label across all bridges. Tests in this package may
+// swap slog.Default via slog.SetDefault() to keep test output
+// clean.
 func oLog(msg string, args ...any) {
 	if !opencodeDebug {
 		return

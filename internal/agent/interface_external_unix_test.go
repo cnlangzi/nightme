@@ -37,7 +37,7 @@ func TestBuiltinBridges_SatisfyAgentInterface(t *testing.T) {
 	}{
 		{"claudecode", claudecode.NewStarter("claudecode", "claude", nil)},
 		{"codex", codex.NewStarter("codex", "codex", nil)},
-		{"opencode", opencode.NewStarter("opencode", "opencode", nil)},
+		{"opencode", opencode.NewStarter("opencode", "opencode", []string{"acp"})},
 		{"pi", pi.NewStarter("pi", "pi", nil)},
 		{"pty", pty.NewStarter("bash", "bash", nil, nil, 0, 0)},
 		{"acp", acp.NewStarter("acp", "opencode", []string{"acp"}, nil, 0, 0)},

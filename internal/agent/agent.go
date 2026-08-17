@@ -1133,14 +1133,18 @@ type Starter interface {
 	// the bridge is responsible for injecting a review prompt via
 	// that callback.
 	//
-	// Most bridges should just delegate to agent.DefaultReview(ctx, rc),
-	// which injects the canonical StandardPrompt(). Bridges that
-	// want different review behavior (e.g. claude using its built-in
-	// `/code-review` slash command trigger) override this method.
+	// Most bridges should just delegate to agent.Review(ctx, s, rc),
+	// which injects the canonical StandardPrompt() via a fresh
+	// RunOnce subprocess and captures the output back into the
+	// main chat via rc.Inject. Bridges that want different review
+	// behavior (e.g. claude using its built-in `/code-review` slash
+	// command trigger) override this method.
 	//
 	// Return ErrReviewNotSupported when this agent type cannot do
 	// review (e.g. pty/bash fallback). The dispatcher surfaces a
-	// friendly "agent X 暂不支持 /review" reply.
+	// friendly "agent X 暂不支持 /review" reply (via cs.Emitter().Send
+	// from the async goroutine, since the inline reply is already
+	// gone by the time the bridge returns).
 	Review(ctx context.Context, rc ReviewContext) error
 }
 

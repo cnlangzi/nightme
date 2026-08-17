@@ -23,7 +23,9 @@
 //     rejected inline (matches /cwd / /think / /use).
 //   - The bridge's Starter.Review method calls agent.Review
 //     (uses s.RunOnce internally). Most coding bridges
-//     delegate; pty/bash returns agent.ErrReviewNotSupported.
+//     delegate; pty/bash returns agent.ErrReviewNotSupported —
+//     which the goroutine surfaces via cs.Emitter().Send() as
+//     a friendly inline reply, not silent failure.
 //   - Fix is conversational: after the review appears in chat,
 //     the user types "fix the blockers" and the main agent
 //     uses its native Edit tools. /review does NOT auto-apply.
@@ -31,12 +33,14 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
@@ -85,7 +89,7 @@ func (f *Factory) Spec() command.Spec {
 //  4. Build an agent.ReviewContext with the chat session's
 //     selected cwd and the AgentSession's SendBlocks callback.
 //  5. Delegate to starter.Review — the bridge's Starter owns the
-//     actual prompt injection (most call agent.DefaultReview).
+//     actual prompt injection (most call agent.Review).
 //
 // Returns Consumed=true and NO reply — the review appears
 // asynchronously through the chat session's normal event pipeline
@@ -127,6 +131,15 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		Inject:    as.SendBlocks,
 	}
 
+	// Capture the inputs the goroutine needs for an async reply
+	// (ErrReviewNotSupported is the one case we surface back to
+	// the user; everything else stays in logs). We grab them by
+	// value so the closure doesn't pin SlashInput for the full
+	// 30-min review budget.
+	agentName := as.Agent
+	chatID := input.ChatID
+	replyTo := input.MessageID
+
 	// v7: /review is fully async. Handle returns immediately
 	// after launching a goroutine that does the actual review
 	// work (RunOnce subprocess + inject findings). The dispatch
@@ -144,21 +157,36 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	//     only kills the review subprocess; the main chat is
 	//     untouched.
 	//
-	// Error handling: errors that happen AFTER Handle returns
+	// Error handling: most errors that happen AFTER Handle returns
 	// can't be surfaced as inline replies (the chat reply is
-	// gone). v1 just logs them — operators see the failure in
-	// logs; users re-run /review if needed. v2 can add
-	// cs.Emitter().Send("review failed: ...") for a user-visible
-	// failure notification.
-	agentName := as.Agent
+	// gone), so they stay in logs. The one exception is
+	// ErrReviewNotSupported — that error is fully predictable
+	// (we know upfront pty/bash can't review) and the user
+	// deserves a friendly inline reply, not silent failure.
+	// We surface it via cs.Emitter().Send() on the chat's
+	// emitter so the message lands in the right chat.
 	go func() {
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
-		if err := starter.Review(revCtx, rc); err != nil {
-			slog.Default().Warn("/review failed",
-				"agent", agentName,
-				"err", err,
-			)
+		err := starter.Review(revCtx, rc)
+		if err == nil {
+			return
+		}
+		slog.Default().Warn("/review failed",
+			"agent", agentName,
+			"err", err,
+		)
+		if errors.Is(err, agent.ErrReviewNotSupported) {
+			em := cs.Emitter()
+			if em == nil {
+				return
+			}
+			_ = em.Send(revCtx, messages.OutboundMessage{
+				ChatID:  chatID,
+				Kind:    messages.OutReply,
+				ReplyTo: replyTo,
+				Text:    fmt.Sprintf("❌ agent %q 暂不支持 /review", agentName),
+			})
 		}
 	}()
 

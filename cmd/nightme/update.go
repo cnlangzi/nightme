@@ -216,6 +216,12 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 	if err != nil {
 		return err
 	}
+	// Print "what / where from / where to" BEFORE the progress
+	// bar so the user knows what's about to download. These lines
+	// stay put; the bar overwrites itself with \r on every tick.
+	fmt.Fprintf(out, "  asset:    %s\n", asset.Name)
+	fmt.Fprintf(out, "  from:     %s\n", asset.BrowserDownloadURL)
+	fmt.Fprintf(out, "  to:       %s\n", stagingDir)
 	wantExt := "tar.gz"
 	if runtime.GOOS == "windows" {
 		wantExt = "zip"
@@ -224,7 +230,6 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		strings.TrimPrefix(res.Latest, "v"), runtime.GOOS, runtime.GOARCH, wantExt))
 	var dlRes *updater.DownloadResult
 	if info, err := os.Stat(wantArchive); err == nil && info.Size() == asset.Size {
-		// Cache hit. Compute SHA256 for the trailer so the
 		// Cache hit. Compute SHA256 for the trailer so the
 		// output is identical to a fresh download's; install
 		// doesn't use the value (extract just opens the
@@ -252,11 +257,10 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 			fmt.Fprintf(errOut, "download failed: %v\n", err)
 			return err
 		}
+		fmt.Fprintln(out) // newline after the bar
 	}
-	fmt.Fprintf(out, "  asset:    %s\n", dlRes.Asset.Name)
 	fmt.Fprintf(out, "  size:     %s\n", updater.FormatBytes(dlRes.Bytes))
 	fmt.Fprintf(out, "  sha256:   %s\n", dlRes.SHA256Hex)
-	fmt.Fprintf(out, "  staging:  %s\n", dlRes.StagingPath)
 
 	// Optional: --no-install stops here. We print the stage
 	// header even on the skip path so the user sees the

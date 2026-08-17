@@ -240,8 +240,14 @@ func runDownloadStage(
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(out, "\n[→] downloading %s (%s)…\n",
+	// "what / where from / where to" before the progress bar
+	// so the user knows what's about to download. The bar
+	// overwrites itself with \r; these lines stay put.
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "[→] downloading %s (%s)\n",
 		asset.Name, updater.FormatBytes(asset.Size))
+	fmt.Fprintf(out, "    from: %s\n", asset.BrowserDownloadURL)
+	fmt.Fprintf(out, "    to:   %s\n", stagingDir)
 	progress := updater.NewASCIIProgressBar(out, asset.Size)
 	res, err := updater.Download(ctx, checkRes.Release, asset, stagingDir, progress)
 	if err != nil {

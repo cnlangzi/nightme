@@ -484,6 +484,9 @@ const (
 	// AgentTaskItem with Status == TaskDeleted — by contract the
 	// snapshot's Items only contains the live tasks.
 	TaskDeleted
+	// TaskCancelled marks a task that was cancelled before completion.
+	// Cursor uses this status; mapped from Cursor's "cancelled" state.
+	TaskCancelled
 )
 
 // String renders a AgentTaskStatus for log lines.
@@ -497,6 +500,8 @@ func (s AgentTaskStatus) String() string {
 		return "completed"
 	case TaskDeleted:
 		return "deleted"
+	case TaskCancelled:
+		return "cancelled"
 	}
 	return "task(unknown)"
 }

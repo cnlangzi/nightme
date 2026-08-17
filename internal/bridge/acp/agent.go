@@ -112,6 +112,14 @@ type driver struct {
 	// of a mutex.
 	flushHandler atomic.Pointer[FlushHandler]
 
+	// methodHandler, when non-nil, receives unrecognized JSON-RPC
+	// methods from the ACP server. Used by per-agent bridges
+	// (cursor) to handle agent-specific extension methods like
+	// cursor/update_todos, cursor/create_plan, etc. The handler
+	// is called BEFORE the default "method not found" response.
+	// nil keeps the existing behaviour.
+	methodHandler atomic.Pointer[MethodHandler]
+
 	// pendingTurnMu guards the in-flight session/prompt guard.
 	// Opencode ACP's prompt response IS the turn-end signal (the
 	// server resolves only after the turn settles), so the generic
@@ -188,6 +196,23 @@ type UpdateHandler func(view *SessionView, raw json.RawMessage) error
 // — the bridge guarantees the same handler runs against the
 // same view it installed.
 type FlushHandler func(view *SessionView)
+
+// MethodHandler is the bridge-supplied callback that receives
+// unrecognized JSON-RPC methods from the ACP server. The generic
+// ACP bridge handles standard methods (session/update,
+// tool_start, tool_end, etc.); any method not in that set is
+// forwarded to this handler if installed. The handler receives
+// the method name, raw params, and an optional respond function
+// (non-nil when the method has an id, i.e. it expects a
+// response). Return true if the method was handled (the bridge
+// will not send a "method not found" error). Return false to
+// let the bridge fall through to the default error response.
+//
+// The respond callback accepts either a result value or an error.
+// If err is non-nil, the bridge sends a JSON-RPC error response;
+// otherwise it sends the result value. For notifications (no id),
+// respond is a no-op that returns true.
+type MethodHandler func(method string, params json.RawMessage, respond func(id json.RawMessage, result any, err error) bool) bool
 
 
 // DriverHandle is the exported alias for the package-private
@@ -872,6 +897,19 @@ func (d *driver) SetFlushHandler(h FlushHandler) {
 	d.flushHandler.Store(&h)
 }
 
+// SetMethodHandler installs a callback that receives unrecognized
+// JSON-RPC methods from the ACP server. Used by per-agent bridges
+// to handle agent-specific extension methods (cursor/update_todos,
+// cursor/create_plan, etc.). Safe to call once after Start returns.
+// Pass nil to revert to the default "method not found" behaviour.
+func (d *driver) SetMethodHandler(h MethodHandler) {
+	if h == nil {
+		d.methodHandler.Store(nil)
+		return
+	}
+	d.methodHandler.Store(&h)
+}
+
 // View returns a SessionView for use by bridge-supplied
 // UpdateHandlers. The view's closures are bound to this driver
 // and remain valid until Close. Emit / SessionID remain safe to
@@ -1022,6 +1060,26 @@ func (d *driver) handleMethod(message rpcMessage) {
 		// server calls.
 		return
 	default:
+		// Bridge-specific extension handler. If a bridge (cursor)
+		// has installed a MethodHandler, give it first crack at
+		// unrecognized methods before falling through to the
+		// default "method not found" error.
+		if h := d.methodHandler.Load(); h != nil {
+			respond := func(id json.RawMessage, result any, rpcErr error) bool {
+				if len(id) == 0 {
+					return true // notification — no response needed
+				}
+				if rpcErr != nil {
+					_ = d.rpc.respond(id, nil, &rpcError{Code: -32000, Message: rpcErr.Error()})
+				} else {
+					_ = d.rpc.respond(id, result, nil)
+				}
+				return true
+			}
+			if (*h)(message.Method, message.Params, respond) {
+				return
+			}
+		}
 		if len(message.ID) > 0 {
 			_ = d.rpc.respond(message.ID, nil, &rpcError{Code: -32601, Message: "method not found"})
 		}
@@ -1095,7 +1153,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 	}
 
 	switch kind {
-	case "agent_message_chunk":
+	case "agent_message_chunk", "agent_thought_chunk":
 		var content struct {
 			Type string `json:"type"`
 			Text string `json:"text"`

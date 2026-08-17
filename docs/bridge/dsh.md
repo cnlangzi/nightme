@@ -1,17 +1,23 @@
-# dsh — DeepSeek Harness Bridge
+# dsh — DeepSeek Harness Bridge (DEPRECATED — see dsh-shared-host.md)
 
-> **Status**: print-mode 已落地;chat session(web HTTP+WS)已设计,待实施
+> **Status**: ⚠️ **DEPRECATED 2026-08-16** — chat session 部分已重写为**单一全局 dsh web 实例**架构
+> **新设计 + 实现**: [./dsh-shared-host.md](./dsh-shared-host.md) — 1:N multiplexing,全局 watchdog + restart recovery
+> **Wire 协议参考**: [./dsh-api.md](./dsh-api.md) — 权威 wire contract(TS source + 实机)
+> **保留范围**: print-mode 仍然使用;chat session 部分仅作历史参考
 > **Scope**: `internal/bridge/dsh/` — nightme 侧的 DeepSeek Harness (`@deepseek-ai/dsh`) bridge
 > **形态**: 一桥两端
 >   - **Print-mode**(`Starter.RunOnce`):`dsh --profile headless -- "<prompt>"` CLI 调用,plain stdout
->   - **Chat session**(`Starter.Start`,待实施):`dsh --profile web --port 0` 长驻 + HTTP RPC + 双 WebSocket 下行
+>   - **Chat session**(`Starter.Start`,已重写):走 [共享 host](./dsh-shared-host.md)
 > **核心原则(用户 2026-08-14 锁定)**: 接入底层 AI agent,**不修改 agent 本地默认配置**;nightme 只管 transport + permissions(权限默认全开)。详见 [agent-no-config-tampering memory](../../.claude/projects/-Users-geax-code-geax-github-com-cnlangzi-nightme/memory/agent-no-config-tampering.md)
 > **姊妹文档**:
+> - [docs/bridge/dsh-shared-host.md](./dsh-shared-host.md) — **新架构:全局单实例 dsh,1:N 多路复用**
+> - [docs/bridge/dsh-api.md](./dsh-api.md) — wire 协议权威参考
 > - [docs/bridge/claude.md](./claude.md) — stream-json transport,长生命周期
-> - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio + print-mode(本 bridge 设计模板)
+> - [docs/bridge/codex.md](./codex.md) — JSON-RPC over stdio + print-mode
 > - [docs/bridge/pi.md](./pi.md) — JSONL RPC over stdio + print-mode
-> - [docs/bridge/opencode.md](./opencode.md) — HTTP+SSE transport(本 chat session bridge 形态同构)
+> - [docs/bridge/opencode.md](./opencode.md) — HTTP+SSE transport
 > - [docs/feat/F-dsh-bridge.md](../feat/F-dsh-bridge.md) — print-mode 阶段的设计稿(已 closed)
+> - [docs/feat/F-dsh-shared-host.md](../feat/F-dsh-shared-host.md) — 共享 host 完整设计 + 实现记录
 > - [docs/bridge/cli-transport.md](./cli-transport.md) — pipe / lifecycle 通用约束
 
 ---
@@ -115,12 +121,12 @@ ws://127.0.0.1:3080/api/events.host  # host lifecycle(创建/销毁/失败)
 |----------|------------------|------------------------------|
 | `session/subscribed` | `{sessionId, lastSeq}` | 初始化基线;不发 event,仅记录 seq 起点 |
 | `session/event` | `{sessionId, event: SessionEvent, view?: ToolEventView}` | translate 42 种 SessionEvent → AgentEvent |
-| `session/projection` | `{sessionId, seq, projection, value}` | 投影帧(标题/任务列表),不直接发 event;runtime 更新内部状态 |
+| `session/projection` | `{sessionId, seq, key, value}` | 投影帧。`key:"todos"` 的 `value` 是 `TodoItem[] \| null`(数组,不是 `{todos:[...]}` 包装)。Dashboard To-dos 条读这个 key;详见 §6 |
 | `session/queue` | `{sessionId, items}` | 输入队列快照;F-38 后续若做 QueueDock UI 时用 |
 | `session/jobs` | `{sessionId, jobs}` | 后台任务;本期不发 event |
 | `approval/requested` | `{sessionId, approvalId, toolName, callId?, reason?}` | **`EventAgentPermission{ResponseCh}`** + 记 `approvalId` |
 | `approval/resolved` | `{sessionId, approvalId, outcome}` | audit trail,debug log |
-| `question/requested` | `{sessionId, questions: AskUserQuestionItem[]}` | **`EventAgentPermission`**(复用)|
+| `question/requested` | `{sessionId, questions: AskUserQuestionItem[]}` | **`EventAgentPermission`**(复用;`Questions` 整批 + `Options` 仅第一题)|
 | `question/resolved` | `{sessionId, questionRpcId, outcome}` | audit trail |
 | 未知 / 其它 | — | debug log,不杀 session(宽松策略) |
 
@@ -500,7 +506,9 @@ func (t *translator) handleSessionEvent(ev SessionEvent, deliver func(agent.Agen
     case "compaction/end":
         // EventCompaction
     case "todo/write":
-        // EventAgentTaskCreate/Update(snapshot)
+        // EventAgentTaskCreate(snapshot) — dashboard To-dos / 任务 strip
+    case "step/start", "step/end":
+        // 不 emit; sessionStats(TTFT / tok/s),不是 TodoPanel
     case "approval/asked":
         // EventAgentPermission(单独走 permissions.go)
     default:
@@ -563,9 +571,12 @@ func (d *driver) SendPermission(resp string) error {
 ```
 
 **关键修正**(对 codex 已知踩坑的预防):
-- `SendPermission` 用 **approvalID**(服务端稳定字段)路由,**不**用 rpcId(可能变)
+- `SendPermission` 对 **approval** 用 `approvalId` 路由;对 **question** 用 **server-frame `rpcId`**(host pending 表的 key),不要用 `sessionId+":q"`
 - 只有 1 个 pending approval 时,rpcId == approvalID;多 approval 并发时按 approvalID 路由,避免 codex §6.4 那样的乱答
 - 5 min timeout(`permissionTimeout` 包级 var),过期 → decline,test 压 200ms
+- **AskUserQuestion 批答**:host `matchesQuestions` 要求 `answers.length == questions.length` 且 `answer.id === question.id` 按序。飞书单题卡点选项即 `SendPermission(label)`;**Type your answer** Submit / **Skip this question** 走 `nm-q:`(`custom` 或空 `selected`)。多题卡在卡内翻页(`Step`/`Picks`),中间 click PATCH 并且在 `card.action.trigger` 回调里带回下一张卡(`card.type=raw`),最后一步才 inbound `nm-q:` JSON 批答。飞书交互卡设计与踩坑见 [feishu-cards.md](../channel/feishu-cards.md)。
+- **Approval ≠ Question**:mux `approval/requested` 用 `ApprovalResponse{outcome:allowed-once|rejected}`(飞书 **Waiting for approval** / Allow once / Reject);`question/requested` 用 `QuestionResponse`。两种卡分类型。dashboard 点 Allow once 后 host 发 `approval/resolved`,bridge **继续收 mux 事件**(不卡在 Feishu Action Needed),并 PATCH 掉飞书按钮。
+- 新 session / attach / `/new` 后发 `/permission danger-full-access`(host 拦截 slash,不开模型 turn),避免 workspace-write 下 git worktree lock 反复授权。
 
 ### 4.6 lifecycle (`session.go`)
 
@@ -668,13 +679,15 @@ t12  AgentSession.SetExited(0)
 | `session/event` `turn/start` | `{event:{turnId, messageIds?}}` | (清 turnState;对齐 pi F-32) | |
 | `session/event` `turn/end` | `{event:{turnId, stopReason, usage?}}` | **`EventResult{Usage} → EventDone{Reason:"settled"}`** | F-52 终态 |
 | `session/event` `compaction/end` | `{event:{reason, aborted}}` | `EventCompaction` | 一个周期 = 一次 emit |
-| `session/event` `todo/write` | `{event:{items:[{content, status}]}}` | `EventAgentTaskCreate` / `EventAgentTaskUpdate`(snapshot)| 字段名对齐 F-38 |
+| `session/event` `todo/write` | `{event:{todos:[{content, status}]}}` | `EventAgentTaskCreate`(snapshot)| dashboard **To-dos / 任务** strip; last-write-wins 整表。字段是 `todos` 不是 `items` |
+| `session/event` `step/start` / `step/end` | `{event:{turn, step}}` | (不 emit)| 一次模型推理 + 其工具;折叠进 `sessionStats`(TTFT / tok/s)。**不是** TodoPanel |
+| `session/projection` `key:"todos"` | `value: TodoItem[] \| null`(数组直出) | 应对齐 `EventAgentTaskCreate`| host fold:最新 `todo/write` 直到下一次 `turn/start`(`value:null` 退休 plan)。**与** `todo/write` 的 object `{todos:[...]}` **形状不同**。当前 `applyTodoProjectionLocked` 按 object 解,数组帧会丢;见 [dsh-api.md §3.4.3](./dsh-api.md) |
 | `session/event` `approval/asked` | `{event:{toolCallId, toolName, action, options}}` | (单独走 permissions.go) | **不**直接发 EventPermission 给 runtime,经 permissions 层 normalize |
 | `approval/requested` | `{sessionId, approvalId, toolName, callId?, reason?}` | `EventAgentPermission{ResponseCh}` | 见 §4.5 |
-| `question/requested` | `{sessionId, questions}` | `EventAgentPermission` (复用,多 question)| inline encode labels,见 codex §6.3 |
+| `question/requested` | `{sessionId, questions}` | `EventAgentPermission` (复用,多 question)| `Questions` 整批保留;`Options` 仅第一题标签。飞书 `len>1` 走卡内向导,最后一步才 `POST /api/respond`(host `matchesQuestions` 要求 answers 与 questions 等长且 id 对齐)。单题 / 点选标签仍走 `questionAnswerFor` |
 | `session/queue` | `{sessionId, items}` | (debug;F-38 后续) | |
 | `session/jobs` | `{sessionId, jobs}` | (debug;本期不发) | |
-| `session/projection` | `{sessionId, seq, projection, value}` | (runtime 更新内部 state;不发 event) | 投影帧,title/tasks 等 |
+| `session/projection` | `{sessionId, seq, key, value}` | (见上 `key:"todos"`;其余 title / sessionStats 等不发 chat event) | 字段名是 `key` 不是 `projection` |
 | `approval/resolved` | `{sessionId, approvalId, outcome}` | (audit log) | user 已答,记 trace |
 | `question/resolved` | `{sessionId, questionRpcId, outcome}` | (audit log) | user 已答 |
 | host `session/created` / `session/destroyed` / `agent/status` | — | (debug log) | host 生命周期,本期不渲染 |
@@ -937,3 +950,276 @@ type sessionForkValue struct {
 - `nightme list` 的 RESUME 列已读该字段,dsh 现在会显示非空
 
 **已知未实装**:dsh picker UI 还没建(目前只 CLI 路径走 opencode);dsh picker UX 是后续单独 PR。本 PR 只补全 wire + bridge 端到端通路,IM 渲染是 follow-up。
+
+---
+
+## 14. dashboard parity 差距定位与最小 headless 复刻(2026-08-16)
+
+> 触发问题:在 dashboard 上选中某个 session,能实时看到选中的 session 的 `tool / think / reply`,但 nightme 这边收到 `tool ✅ / think ❌ / reply ⚠️` 不全。本节定位并给出最小 headless 复刻方案。
+
+### 14.1 现状对照表
+
+| dsh wire frame | dashboard 行为 | nightme `dispatch.go` 现状 | 结果 |
+|---|---|---|---|
+| `assistant/chunk{type:"text-delta"}` | 实时拼接并显示 | `handleAssistantChunk` 把 `data.Chunk.Text` 写进 `tr.textBuf[idx]` 缓冲,**不发任何 AgentEvent** | **reply 不实时**,等 `assistant/message` 或 tool/call 边界才 flush;无 tool 的纯文本回答要等到 `turn/end` 的 `EventAgentResult.Text` 才一次性出现 |
+| `assistant/chunk{type:"reasoning-delta"}` | "Show thinking" 折叠区 | `handleAssistantChunk` 无视 `data.Chunk.Type`,把 reasoning 的 text 也当 text 写入 `textBuf` | **think 串进 reply 内容**,且没有独立路径 |
+| `assistant/chunk{type:"block-end", block:{type:"reasoning", text:"..."}}` | 一次性补齐整段 thinking | **完全丢弃**(`handleAssistantChunk` 的 switch 还没拆 `Chunk.Type`,该分支不存在) | think 进一步丢失 |
+| `assistant/message.content[type:"reasoning"]` | 拆成 thinking 块独立展示 | `pickText(content)` 只挑 `Type=="text"`,**reasoning 整段被过滤掉** | think 丢光 |
+| `assistant/message.content[type:"text"]` | 显示 | 累积进 `tr.pendingText`,等 tool/call / turn/end 边界 flush | reply 不实时 |
+| `tool/call` | 工具卡片 | `handleToolCall` 发 `EventAgentToolStart` + 记 `pendingTools[CallID]` | ✅ 正常 |
+| `tool/result` | 结果卡片 | `handleToolResult` 发 `EventAgentToolEnd` + 回填 Name/Args | ✅ 正常 |
+| `user/message` | 用户消息回显 | `handleUserMessageEcho` **主动丢弃**(`return nil`) | OK,runtime 已经从 inbound 路径知道这条用户消息 |
+
+### 14.2 与 dashboard demux 的对比(demux 的真相)
+
+`@deepseek-ai/dsh-session/lib/types/types.d.ts:264-280`(`SessionEventMap`)和 `@deepseek-ai/dsh-llm/lib/types/types.d.ts:267-297`(`StreamChunk`)已经把 chunk 分类锁死:
+
+```ts
+type StreamChunk =
+  | { type: 'block-start'; index; blockType: ContentBlockType }       // text | reasoning | tool-call | image | tool-result
+  | { type: 'text-delta';      index; text }
+  | { type: 'reasoning-delta'; index; text }                          // ← dashboard 的 "Show thinking"
+  | { type: 'tool-call-delta'; index; id; name?; argumentsDelta }
+  | { type: 'block-end';       index; block: ContentBlock }           // ← reasoning 整段落地在这里
+  | { type: 'usage';           usage: TokenUsage }
+  | { type: 'finish';          reason: FinishReason; replayState? }
+```
+
+dashboard 用 `@deepseek-ai/dsh-client-runtime/lib/types/client/sessions/partial.d.ts::PartialAccumulator.push(chunk)` 对每个 `StreamChunk` 按 `blockType` 分桶(`textBuf` / `reasoningBuf` / `tool-call-args`),`assistant/message.content[]` 再用 `toAssistantBlocks(content)` 把 `ContentBlockMap`(`text` / `reasoning` / `image` / `tool-call` / `tool-result`)转成 UI 关心的 `AssistantBlock`(text / reasoning / image / tool-call / other)。
+
+dashboard 看到 think 的两条路径:
+1. `assistant/chunk{type:"reasoning-delta"}` 实时拼到 reasoningBuf
+2. `assistant/chunk{type:"block-end", block:{type:"reasoning", text:"…"}}` 整段定型
+
+dashboard 看到 reply 的路径:`assistant/chunk{type:"text-delta"}` 实时拼到 textBuf,按 token 上屏。
+
+### 14.3 nightme 这边对应的代码现状
+
+`internal/bridge/dsh/dispatch.go:231-252`(`handleAssistantChunk`)目前只有一种处理方式,与 `data.Chunk.Type` 无关:
+
+```go
+// 现状:无视 Chunk.Type / BlockType,一律当 text 累积到 textBuf
+b, ok := tr.textBuf[idx]
+if !ok { b = &strings.Builder{}; tr.textBuf[idx] = b }
+b.Grow(256)
+b.WriteString(data.Chunk.Text)   // ❌ reasoning-delta 也走这里
+return nil                       // ❌ 永远不发出 AgentEvent
+```
+
+`internal/bridge/dsh/translate.go:139-150`(`pickText`)的 content[] 分类也只看 `type=="text"`:
+
+```go
+for _, b := range content {
+    if b.Type == "text" && b.Text != "" {   // ❌ reasoning 被过滤
+        ...
+    }
+}
+```
+
+reply 的 flush 路径(目前只在三个边界触发):
+- `handleToolCall` 到达时(`dispatch.go:281-292`)把 `tr.pendingText` 整体 emit `EventAgentText`
+- `handleTurnEnd` 到达时(`dispatch.go:419-433`)把 `tr.lastText` 兜底成 `EventAgentResult.Text`
+- `handleAssistantMessage` 不直接发文字,只把 `pickText(...)` 塞进 `tr.pendingText`
+
+**结论**:一段无 tool 的纯文本回答,nightme 只在 `turn/end` 时通过 `EventAgentResult.Text` 一次性出现;含 reasoning 的回答,reasoning 文本会被串进 `textBuf` → 误显示为 reply 的一部分,thinking 内容等于丢光。
+
+### 14.4 完美复刻方案(headless,严格走 `agent.AgentEvent` 路径)
+
+按 dashboard 的 demux 行为对齐,**只动 `internal/bridge/dsh/` 包内的 handler 与 translator 状态**。nightme 的 `messages.OutThinking` 和 `internal/gateway/outbound/translate.go:31-63` 的 `[思考] ` 前缀约定已经存在(`gateway translate` 检测到该前缀就把事件转 `OutThinking`),直接复用这条已有管道,**不需要新 EventKind、不需要新 OutboundKind、不动上层**。
+
+#### 14.4.1 `protocol.go` — `assistantChunk` 加 `Block` 解析字段,`contentBlockDTO` 已经够用
+
+```go
+type assistantChunk struct {
+    Type           string            `json:"type"`               // text-delta | reasoning-delta | block-start | block-end | tool-call-delta | usage | finish
+    Index          int               `json:"index,omitempty"`
+    BlockType      string            `json:"blockType,omitempty"` // text | reasoning | tool-call | image | tool-result
+    Text           string            `json:"text,omitempty"`
+    ArgumentsDelta string            `json:"argumentsDelta,omitempty"`
+    ID             string            `json:"id,omitempty"`
+    Name           string            `json:"name,omitempty"`
+    Block          json.RawMessage   `json:"block,omitempty"`    // ← block-end 的整块,需要解 type/text
+    Usage          *usageInfo        `json:"usage,omitempty"`
+    Reason         *chunkFinishReason `json:"reason,omitempty"`
+}
+```
+
+`contentBlockDTO`(`protocol.go:244-254`)现有的字段已经覆盖 `text` / `reasoning` / `tool-call` / `tool-result` 的判别(`Type string` + `Text string`),不需要再扩。
+
+#### 14.4.2 `translate.go` — 引入独立的 `reasoningBuf`,与 dashboard 的 PartialAccumulator 对齐
+
+```go
+type translator struct {
+    // ... 既有字段 ...
+
+    // F-DSH-DASHBOARD-PARITY: reasoning blocks get their OWN accumulator,
+    // not the text one. Mixing them is the root bug — reasoning text
+    // ends up in textBuf and surfaces as reply instead of thinking.
+    reasoningBuf map[int]*strings.Builder  // blockIndex → builder
+
+    // Track which blockIndexes we've emitted via reasoningBuf, so we
+    // don't double-emit at block-end (reasoning-delta already queued
+    // the text, block-end re-emits the assembled block — pick one).
+    reasoningEmitted map[int]bool
+}
+```
+
+`reasoningBuf` 与 `textBuf` 一样的指针-map 设计(避免 `strings.Builder` 的 noCopy 陷阱,见 `translate.go:43-61` 的同款注释)。
+
+#### 14.4.3 `dispatch.go` — 改 `handleAssistantChunk` / `handleAssistantMessage` 两个 handler
+
+`handleAssistantChunk` 按 `Chunk.Type` 分流,与 dashboard 的 `PartialAccumulator.push` 一一对应:
+
+```go
+func handleAssistantChunk(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
+    var data assistantChunkData
+    if err := json.Unmarshal(env.Data, &data); err != nil {
+        dLog("dsh: handler data envelope decode: %v", err)
+        return nil
+    }
+    tr.active = true
+
+    switch data.Chunk.Type {
+    case "text-delta":
+        // 实时流式 reply —— 与 dashboard 行为一致
+        // 但要走 F-52 颗粒度合约:不每 delta 发 EventAgentText(怕双发),
+        // 而是把 text 累积进 pendingText,在 assistant/message / tool/call /
+        // turn/end 三个边界 flush(沿用既有路径)。
+        idx := data.Chunk.Index
+        if idx < 0 || idx >= maxTextStreams { return nil }
+        b, ok := tr.textBuf[idx]
+        if !ok { b = &strings.Builder{}; tr.textBuf[idx] = b }
+        b.Grow(256)
+        b.WriteString(data.Chunk.Text)
+        return nil
+
+    case "reasoning-delta":
+        // dashboard 的 thinking 路径:拼到 reasoningBuf,不进 textBuf
+        idx := data.Chunk.Index
+        if idx < 0 || idx >= maxTextStreams { return nil }
+        b, ok := tr.reasoningBuf[idx]
+        if !ok { b = &strings.Builder{}; tr.reasoningBuf[idx] = b }
+        b.WriteString(data.Chunk.Text)
+        return nil  // reasoning 实时逐 delta 发 OutThinking 会切碎视觉,
+                    // 跟 dashboard 的 "折叠" 行为对齐,等 block-end 整段发
+
+    case "block-end":
+        var blk struct {
+            Type string `json:"type"`
+            Text string `json:"text,omitempty"`
+        }
+        _ = json.Unmarshal(data.Chunk.Block, &blk)
+        if blk.Type == "reasoning" && blk.Text != "" {
+            idx := data.Chunk.Index
+            // 整段 thinking 上屏 —— 走已存在的 [思考] 前缀约定,
+            // gateway/outbound/translate.go:58-63 自动转 OutThinking。
+            return []agent.AgentEvent{{
+                Kind: agent.EventAgentText,
+                Text: "[思考] " + blk.Text,
+            }}
+        }
+        // block-end for text: 已在 text-delta 累积,这里不动;
+        // block-end for tool-call: 已在 tool/call 独立路径处理;
+        // block-end for other: 忽略
+        return nil
+
+    case "block-start", "tool-call-delta", "usage", "finish":
+        // dashboard 也只把它们喂给 PartialAccumulator,不直接渲染;
+        // 我们同等丢弃(usage 已在 assistant/message 的 Usage 字段透传)
+        return nil
+    }
+    return nil
+}
+```
+
+`handleAssistantMessage` 把 `content[]` 按块类型拆开,与 dashboard 的 `toAssistantBlocks` 对齐:
+
+```go
+func handleAssistantMessage(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
+    var data assistantMessageData
+    if err := json.Unmarshal(env.Data, &data); err != nil {
+        dLog("dsh: handler data envelope decode: %v", err)
+        return nil
+    }
+    tr.active = true
+    tr.lastUsage = data.Usage
+
+    var evs []agent.AgentEvent
+    for _, b := range data.Message.Content {
+        switch b.Type {
+        case "text":
+            // dashboard: 把 finalized text 当作一次块 flush,走 reply
+            if b.Text != "" {
+                evs = append(evs, agent.AgentEvent{Kind: agent.EventAgentText, Text: b.Text})
+            }
+        case "reasoning":
+            // dashboard: 整段折叠的 thinking,走 [思考] 约定
+            if b.Text != "" {
+                evs = append(evs, agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] " + b.Text})
+            }
+        case "tool-call":
+            // dashboard 在消息层就显示 tool-call,但我们已经有独立的 tool/call
+            // 事件路径(handleToolCall),这里不再发,避免双发
+        case "image", "tool-result":
+            // 暂不渲染(image 由 dsh assistant 端 baseline-only 不产出;
+            // tool-result 不应在 assistant message content[] 里出现,
+            // 它走独立的 tool/result 路径)
+        }
+    }
+    return evs
+}
+```
+
+**取舍说明 — 关于 `text-delta` 不实时逐 delta 发 `EventAgentText`**:
+- 选项 A(完全 dashboard parity):每个 text-delta 立刻发 `EventAgentText`,接受更多卡片更新。
+- 选项 B(沿用 F-52 颗粒度):text-delta 仍走 `textBuf` 累积,在 `assistant/message` / `tool/call` / `turn/end` 三个边界 flush,只新增 thinking 路径。
+
+**建议先做 B**,原因:
+1. 用户的核心痛点是 **think 完全没分类**(被串进 reply),reply 文本会通过 `EventAgentResult.Text` 在 `turn/end` 时一次性出现,**不是丢了,是延迟了**;
+2. 选项 B 改动最小,F-52 的 `textDelivered` / `active` / `pendingText` 守卫全部复用,不需要重新测 feishu 接收侧防双发;
+3. 选项 A 要重测飞书接收侧(可能触发 reply 卡片更新风暴),单独 PR 更安全;
+4. 若实测发现 reply 延迟感严重影响 UX,再开 A 方案的 PR。
+
+**关键防双发不变量**:
+- `reasoning-delta` 只写 `reasoningBuf`,不 emit
+- `block-end{type:"reasoning"}` 整段 emit 一条 `[思考] ...`
+- `assistant/message.content[type:"reasoning"]` 也 emit 一条 `[思考] ...`
+- 这两条路径可能在同一个 block 上都触发(reasoning-delta 累积了 N 条,然后 block-end 再来一次,然后 assistant/message 的 content[] 又来一次)→ 可能看到三段 thinking
+
+**对策**:用 `reasoningEmitted map[int]bool` 记录每个 blockIndex 是否已经发过;发过的就跳过下一次。或者更简单:`block-end{type:"reasoning"}` 触发时,把该 idx 在 `reasoningBuf` 里的内容 emit 完后清掉 `reasoningBuf[idx]` 并打标;`assistant/message.content[type:"reasoning"]` 路径只 emit 该 blockIndex 上 `reasoningEmitted[idx] == false` 的块。
+
+#### 14.4.4 `state.go` / `handle_mux.go` — 不动
+
+`applyProjection` / `applyTodoProjectionLocked` 与 mux stream 入口都不需要改——问题完全在 `session/event` 的 dispatcher 一层(`handleAssistantChunk` / `handleAssistantMessage`)。
+
+#### 14.4.5 回归测试
+
+`internal/bridge/dsh/dispatch_test.go` 已覆盖 11 种事件类型,新增三个 fixture 反向锁住 dashboard parity 合约:
+
+| Fixture 文件 | 断言 |
+|---|---|
+| `testdata/envelopes/assistant_chunk_text_delta.json` | `Chunk.Type=="text-delta"`,`BlockType=="text"`,`Text=="hello"` → handler 写入 `textBuf[0]`,**不**写 `reasoningBuf`,**不** emit 任何 `AgentEvent` |
+| `testdata/envelopes/assistant_chunk_reasoning_delta_then_block_end.json` | 先发 `reasoning-delta{Text:"让我想想"}`,再发 `block-end{Block:{type:"reasoning", text:"让我想想"}}` → 第一帧写入 `reasoningBuf[0]` 不 emit;第二帧 emit 一条 `EventAgentText{Text:"[思考] 让我想想"}`,**不**写 `textBuf` |
+| `testdata/envelopes/assistant_message_mixed_content.json` | `content=[{type:"reasoning",text:"A"},{type:"text",text:"B"},{type:"tool-call",id:"x"}]` → emit 一条 `[思考] A` + 一条 `B`;tool-call 不发(走独立 tool/call 路径) |
+
+### 14.5 验证清单(改完跑一遍)
+
+```bash
+# 1) 协议反向锁死
+go test ./internal/bridge/dsh/ -run 'TestHandleAssistant' -count=1
+
+# 2) 全库回归(确保没有破坏既有 11 种事件的处理)
+go test ./internal/bridge/dsh/... -race -count=1
+
+# 3) 实机对比验证:启动 dsh web,跑 dashboard,跑 nightme 同一个 sessionId,
+#    在 dashboard 看得到 think/reply 的 turn,grep nightme logs:
+bin/nightme logs --once -n 200 | grep -E "dsh: assistant/chunk|EventAgentText|OutThinking|OutReply"
+# 期望:
+#   - 文本 turn 多条 EventAgentText(对应 reply,经 OutReply 出)
+#   - 任一含 reasoning 的 turn 至少一条 [思考] ... → OutThinking 出
+#   - 任一含 tool 的 turn 多对 EventAgentToolStart/EventAgentToolEnd(对应 tool)
+```
+
+### 14.6 一句话总结
+
+nightme 漏 think + reply 实时流的根因,完全集中在 `internal/bridge/dsh/dispatch.go::handleAssistantChunk` 与 `handleAssistantMessage` 两个 handler:`handleAssistantChunk` 把所有 `Chunk.Type` 一律当 text 写进 `textBuf` 而忽略 `BlockType="reasoning"`,`handleAssistantMessage` 用的 `pickText` 又只挑 `Type=="text"` 的 content block —— dashboard 看到的 thinking 与 streaming reply,在 nightme 这一层就被无声地吞掉或串进 reply。按 dashboard 的 `PartialAccumulator(blockType)` 拆成 `textBuf` + `reasoningBuf` 双缓冲,在 `block-end{type:"reasoning"}` 与 `assistant/message.content[type="reasoning"]` 两个边界把整段 thinking 用 nightme 已有的 `[思考] ` 前缀转 `EventAgentText` 就能开箱即用 —— `messages.OutThinking` 与 gateway translate 的转换管道都已经在那等着,无需改 EventKind 或上层。

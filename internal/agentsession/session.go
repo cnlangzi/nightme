@@ -1606,6 +1606,17 @@ func (as *AgentSession) RestartFromDeath(ctx context.Context, launcher Spawner) 
 	}
 	resume := as.sessionID
 	args := append([]string(nil), as.args...)
+	// Snapshot the in-flight blocks under lock so we can resubmit
+	// them to the freshly-spawned bridge. The session.fork the
+	// bridge just performed (via respawn's sessionID param) only
+	// copies server-side history — it does NOT replay the turn
+	// that was in flight when the old bridge died. Without this
+	// resubmit, the new bridge sits idle and the user's prompt
+	// effectively vanishes.
+	var inFlightBlocks []agent.ContentBlock
+	for _, ref := range as.inFlightMessages {
+		inFlightBlocks = append(inFlightBlocks, ref.Blocks...)
+	}
 	as.asMu.Unlock()
 
 	if err := as.respawn(ctx, launcher, args, resume); err != nil {
@@ -1622,8 +1633,32 @@ func (as *AgentSession) RestartFromDeath(ctx context.Context, launcher Spawner) 
 		as.asMu.Unlock()
 		return nil
 	}
+	h := as.handle
 	persist := as.persist
 	as.asMu.Unlock()
+
+	// R1.5: after a successful respawn, re-send any blocks that
+	// were in flight when the old bridge died. The new bridge
+	// has the forked session's history but no in-flight prompt —
+	// without this call the new process would just sit idle
+	// until the 5-min watchdog kills it. Mark isReady=false so
+	// TryFlush doesn't race ahead of the resubmit.
+	if len(inFlightBlocks) > 0 && h != nil {
+		as.isReady.Store(false)
+		if err := h.SendBlocks(ctx, inFlightBlocks); err != nil {
+			slog.Warn("agentsession: resubmit in-flight after restart failed; user prompt lost",
+				"as_id", as.ID,
+				"blocks", len(inFlightBlocks),
+				"err", err)
+			// Restore ready so the next TryFlush / user message
+			// can land on this bridge.
+			as.isReady.Store(true)
+		} else {
+			slog.Info("agentsession: resubmitted in-flight blocks after restart; bridge continues previous turn",
+				"as_id", as.ID,
+				"blocks", len(inFlightBlocks))
+		}
+	}
 
 	if persist != nil {
 		if err := persist(as.Entry()); err != nil {

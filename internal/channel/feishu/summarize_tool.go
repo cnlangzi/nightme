@@ -1,7 +1,9 @@
 package feishu
 
 import (
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -42,7 +44,43 @@ func formatToolStartCall(name, args string) string {
 	if args == "" {
 		return "● " + name
 	}
-	return "● " + name + "(" + truncate(args, toolCallArgsMaxBytes) + ")"
+	return "● " + name + "(" + displayToolArgs(args) + ")"
+}
+
+// displayToolArgs is the call-line args body. JSON objects with a
+// file_path (Read/Edit/Write) compact to basename + offset/limit so
+// a long absolute path cannot eat the 100-byte budget and hide the
+// only field that distinguishes two calls of the same tool.
+func displayToolArgs(args string) string {
+	if compact := compactJSONToolArgs(args); compact != "" {
+		return compact
+	}
+	return truncate(args, toolCallArgsMaxBytes)
+}
+
+func compactJSONToolArgs(args string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(args), &m); err != nil || len(m) == 0 {
+		return ""
+	}
+	path, _ := m["file_path"].(string)
+	if path == "" {
+		path, _ = m["path"].(string)
+	}
+	if path == "" {
+		return ""
+	}
+	shown := filepath.Base(path)
+	var extra []string
+	for _, k := range []string{"offset", "limit"} {
+		if v, ok := m[k]; ok {
+			extra = append(extra, fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+	if len(extra) > 0 {
+		shown = shown + " " + strings.Join(extra, " ")
+	}
+	return truncate(shown, toolCallArgsMaxBytes)
 }
 
 // summarizeToolResult produces the "result" line for the thread

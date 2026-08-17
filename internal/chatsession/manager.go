@@ -277,7 +277,6 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 	return cs, nil // existing cs → emitter already bound
 }
 
-
 // WithEmitter binds the single daemon-wide outbound chokepoint
 // to the Manager. Every ChatSession created (or restored) after
 // this call is bound to the same Emitter via
@@ -332,6 +331,29 @@ func (m *Manager) Get(chatID string) *ChatSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sessions[chatID]
+}
+
+// SendPermission feeds a card-button label (or typed answer) to
+// the selected AgentSession's pending approval / AskUserQuestion.
+// Used by inbound.dispatchPermissionClick. Does not spawn or
+// GetOrCreate — a click with no live session is a no-op error.
+func (m *Manager) SendPermission(chatID, option string) error {
+	if m == nil {
+		return errors.New("chatsession: manager is nil")
+	}
+	cs := m.Get(chatID)
+	if cs == nil {
+		return fmt.Errorf("chatsession: no chat %s", chatID)
+	}
+	as := cs.SelectedAgentSession()
+	if as == nil {
+		return errors.New("chatsession: no selected agent")
+	}
+	h := as.Handle()
+	if h == nil {
+		return errors.New("chatsession: agent not spawned")
+	}
+	return h.SendPermission(option)
 }
 
 // AcceptInbound is the F-watch §3.1.1 per-chat gate, owned by
@@ -667,7 +689,6 @@ func (m *Manager) maybeEmitWatcherHint(ctx context.Context, msg *messages.Inboun
 // primaryAgent is the agent name GetOrCreate uses for new
 // ChatSessions. Set by the runtime via WithPrimaryAgent at
 // construction; defaults to "" (caller's responsibility).
-
 
 // PersistAgentSession writes the entry for as to the manager's
 // agent_sessions.json store. Idempotent; safe to call from event

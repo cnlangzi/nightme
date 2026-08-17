@@ -223,12 +223,12 @@ type MessageReceipt struct {
 // SendCard in renderLocked populates cardMsgID.
 func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
 	return &MessageReceipt{
-		chatID:       chatID,
-		userMsgID:    userMsgID,
-		replyMsgID:   replyMsgID,
-		cardMsgID:    replyMsgID,
-		bot:          bot,
-		logger:       slog.Default(),
+		chatID:     chatID,
+		userMsgID:  userMsgID,
+		replyMsgID: replyMsgID,
+		cardMsgID:  replyMsgID,
+		bot:        bot,
+		logger:     slog.Default(),
 		// F-63: 2s heartbeat throttle. Dense thinking streams can
 		// fire 10+ OutHeartbeat events per second; we coalesce them
 		// into one PATCH every 2s to stay well under Feishu's
@@ -433,14 +433,11 @@ func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error 
 // LastBeatAt (LastBeatAt is updated by the snapshot write but
 // does not gate the render).
 //
-// Throttle: heartbeatMinInterval caps the PATCH rate. We
-// compare against r.lastBodyPatch (the SAME field renderLocked
-// updates on every successful PATCH — entry / task / heartbeat).
-// This means any successful PATCH bumps the window, preventing
-// double-PATCHes when entries and heartbeat both want to
-// update within the same window. The 2s ceiling applies only
-// when entries/tasks are silent; in a busy turn the entries
-// PATCHes themselves naturally throttle heartbeats.
+// Throttle: heartbeatMinInterval caps thinking-only PATCH rate.
+// ToolCount increases always PATCH immediately — a second Read
+// 1.94s after the first must show 🔧 2, not stay stuck at 🔧 1.
+// Thinking deltas still coalesce against r.lastBodyPatch (the
+// SAME field renderLocked updates on every successful PATCH).
 //
 // Locking: holds r.mu through renderLocked (matching the
 // existing AppendEntryWithFooter pattern). renderLocked's
@@ -462,11 +459,17 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
 
 	prev := r.heartbeat
 	r.heartbeat = snap
-	changed := snap.ThinkCount != prev.ThinkCount || snap.ToolCount != prev.ToolCount
-	if !changed {
+	thinkChanged := snap.ThinkCount != prev.ThinkCount
+	toolChanged := snap.ToolCount != prev.ToolCount
+	if !thinkChanged && !toolChanged {
 		return
 	}
-	if r.heartbeatMinInterval > 0 &&
+	// Thinking streams are dense (10+ deltas/s) — coalesce those
+	// PATCHes. Tool starts are sparse and user-visible as thread
+	// replies; throttling a ToolCount bump is what made a two-Read
+	// turn show 🔧 1 while the thread had two ● read(...) lines
+	// (SPEC.md then SPEC.md offset=626, 1.94s apart).
+	if !toolChanged && r.heartbeatMinInterval > 0 &&
 		!r.lastBodyPatch.IsZero() &&
 		time.Since(r.lastBodyPatch) < r.heartbeatMinInterval {
 		return
@@ -686,6 +689,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	r.lastBodyPatch = time.Now()
 	return nil
 }
+
 // receiptBodyStats returns the byte size of a card body and the
 // authoritative element count that buildReceiptCard produced
 // for it. Used by AppendEntryWithFooter's pre-render overflow

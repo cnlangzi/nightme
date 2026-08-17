@@ -135,8 +135,15 @@ func TestTranslator_TextBufGrowAndReuse(t *testing.T) {
 func makeChunkEvent(t *testing.T, contentIndex int, text string) sessionEventEnvelope {
 	t.Helper()
 	// Outer event envelope: {"type":"assistant/chunk",
-	//                         "data":{"chunk":{"index":N,"text":"X"}}}
-	outerJSON := `{"type":"assistant/chunk","data":{"chunk":{"index":` +
+	//                         "data":{"chunk":{"type":"text-delta","index":N,"text":"X"}}}
+	// F-DSH-DASHBOARD-PARITY (2026-08-16): Chunk.Type is a
+	// discriminator on the wire (dsh's StreamChunk union —
+	// text-delta / reasoning-delta / block-end / tool-call-delta /
+	// usage / finish). Pre-fix the bridge ignored it and always
+	// accumulated into textBuf; the test fixture reflected that
+	// missing field. Now that handleAssistantChunk switches on
+	// Chunk.Type, fixtures must include it.
+	outerJSON := `{"type":"assistant/chunk","data":{"chunk":{"type":"text-delta","index":` +
 		itoa(contentIndex) + `,"text":"` + text + `"}}}`
 	var env sessionEventEnvelope
 	if err := json.Unmarshal([]byte(outerJSON), &env); err != nil {

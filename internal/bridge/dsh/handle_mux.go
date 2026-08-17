@@ -14,14 +14,16 @@
 //   - session/projection:经 wireState.applyProjection
 //   - session/queue / session/jobs:本期不消费,debug log
 //   - approval/requested / approval/resolved:permissions 层处理
-//   - approval/asked:经 handleInlineApproval
+//   - approval/asked:debug log only (respondable gate is approval/requested)
 //   - question/requested / question/resolved:handleQuestionRequested
 
 package dsh
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 )
 
 // warnLogger is the package-level slog handle. Cached once at
@@ -31,6 +33,7 @@ import (
 var warnLogger = slog.Default()
 
 // handleMuxFrame is the mux-pump entry. It unmarshals the payload
+// and dispatches by method.
 // and dispatches by method. Extracted from translate.go in
 // F-DSH-CHAT-001 so the dispatcher owns the event Type switch
 // (registration-driven) instead of an inline switch statement.
@@ -38,9 +41,24 @@ var warnLogger = slog.Default()
 // Routing:
 //   - session/event     → driver.dispatcher.dispatch (registered handlers)
 //   - session/projection → driver.wireState.applyProjection (state-only)
-//   - approval/asked    → driver.handleInlineApproval (permissions layer)
+//   - approval/asked    → debug log (mux has no top-level approval/asked)
 //   - other mux methods → debug log only
 func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
+	// Panic recover: the mux pump goroutine in host.StreamHub
+	// dispatches every server-pushed frame through here. A panic
+	// in any case would propagate up into the stream.go
+	// readUntilClose loop and kill the mux connection — every
+	// subsequent reconnect would re-process the same bad frame
+	// and panic again. Recover + log so the mux pump survives.
+	defer func() {
+		if r := recover(); r != nil {
+			warnLogger.Error("dsh: mux frame handler panic recovered",
+				"method", method,
+				"rpc_id", rpcID,
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()))
+		}
+	}()
 	switch method {
 	case "session/subscribed":
 		// Baseline frame on stream open. Just log it; the
@@ -52,6 +70,7 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			return
 		}
 		dLog("dsh: subscribed", "session_id", sub.SessionID, "last_seq", sub.LastSeq)
+		d.bumpLastSeq(sub.LastSeq)
 
 	case "session/event":
 		var ev muxSessionEvent
@@ -68,7 +87,12 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		// Ring buffer record happens INSIDE dispatcher.dispatch
 		// (per-frame, with the env.Type for triage). Mux-level
 		// doesn't double-record here.
-		d.dispatcher.dispatch(env, ev.View)
+		//
+		// dispatchEvent dedupes by SessionEvent.seq against the
+		// lastSeq the backfill poll is also writing to. Mux
+		// session/event is the live path after session.create
+		// attach; backfill only fills gaps.
+		d.dispatchEvent(env, ev.View)
 
 	case "session/projection":
 		// D3 fix: previously dropped on the floor (default dLog).
@@ -93,13 +117,16 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			dLog("dsh: approval/requested decode: %v", err)
 			return
 		}
-		d.handleApprovalRequested(ar)
+		d.handleApprovalRequested(rpcID, ar)
 
 	case "approval/resolved":
 		d.wireState.recordWireFrame(method, "", len(payload))
 		var ar muxApprovalResolved
-		_ = json.Unmarshal(payload, &ar)
-		dLog("dsh: approval/resolved audit", "approval_id", ar.ApprovalID, "outcome", ar.Outcome)
+		if err := json.Unmarshal(payload, &ar); err != nil {
+			dLog("dsh: approval/resolved decode: %v", err)
+			return
+		}
+		d.handleApprovalResolved(ar)
 
 	case "question/requested":
 		d.wireState.recordWireFrame(method, "", len(payload))
@@ -116,7 +143,12 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 
 	case "question/resolved":
 		d.wireState.recordWireFrame(method, "", len(payload))
-		dLog("dsh: question/resolved audit")
+		var qr muxQuestionResolved
+		if err := json.Unmarshal(payload, &qr); err != nil {
+			dLog("dsh: question/resolved decode: %v", err)
+			return
+		}
+		d.handleQuestionResolved(qr.QuestionRPCID, qr.Outcome)
 
 	case "session/queue":
 		d.wireState.recordWireFrame(method, "", len(payload))
@@ -129,18 +161,12 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		dLog("dsh: session/jobs: %d bytes", len(payload))
 
 	case "approval/asked":
-		// Note: `approval/asked` ALSO appears as a session/event
-		// envelope (env.Type == "approval/asked") in some dsh
-		// versions. We dispatch it via handleInlineApproval at the
-		// mux-frame level (here) so the approval/asked event in
-		// the registry is a graceful no-op (D4 symmetry).
+		// Mux schema has no top-level approval/asked (only
+		// session/event type approval/asked). If a frame still
+		// arrives here, skip — the respondable gate is
+		// approval/requested keyed on this envelope's rpcId.
 		d.wireState.recordWireFrame(method, "", len(payload))
-		var aa approvalAskedData
-		if err := json.Unmarshal(payload, &aa); err != nil {
-			dLog("dsh: approval/asked decode: %v", err)
-			return
-		}
-		d.handleInlineApproval(aa.ToolCallID, aa.ToolName, aa.Action, aa.Options)
+		dLog("dsh: mux approval/asked ignored (use approval/requested)")
 
 	default:
 		// Unknown mux method. P4: single lock acquire for ring
@@ -154,15 +180,4 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			"len", len(payload),
 			"unknown_total", unknownTotal)
 	}
-}
-
-// handleHostFrame is the host-pump entry. Host events are
-// lifecycle-shaped (session/created, session/destroyed,
-// agent/status). We currently log all of them; future PR may
-// surface create/destroy to the runtime.
-func (d *driver) handleHostFrame(method, rpcID string, payload json.RawMessage) {
-	dLog("dsh: host method=%q len=%d", method, len(payload))
-	// No-op for now. Host events don't drive AgentEvent semantics;
-	// they describe container-level state we'd surface as
-	// diagnostic info only.
 }

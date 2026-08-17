@@ -21,20 +21,17 @@
 //     is rejected at the prompt boundary per 实机 HTTP probe
 //     2026-08-14).
 //
-//     Resume: cfg.SessionID triggers `POST /api/session.fork`,
-//     which dsh web translates into a NEW server-assigned session
-//     whose history mirrors the parent's. On fork failure (transport
-//     error, business error, server missing the requested id) the
-//     bridge deliberately refuses to spawn — Start returns an error
-//     wrapping agent.ErrResumeUnhealthy so the runtime clears the
-//     stale sessionId and respawns fresh on the user's next message.
-//     This is strict resume (NOT a silent fall-back to session.create),
-//     mirroring claudecode/claudecode.go's resume-preservation
-//     invariant. See session.go:handshakeSession for the full
-//     rationale. Resume-picker support: `Starter.ListSessions` runs
-//     `POST /api/session.list` against a throwaway dsh web and
-//     returns the full Session array (the runtime filters by
-//     cwd before display).
+//     Resume: cfg.SessionID triggers POST /api/session.create
+//     {sessionId, cwd} — the dashboard "select a session" attach
+//     (dsh-api.md §2.1.3). Same id+cwd returns the same session and
+//     joins the mux live set. session-conflict / transport / a
+//     different returned id surface agent.ErrResumeUnhealthy so the
+//     runtime clears the stale sessionId and respawns fresh.
+//     F-DSH-NO-FORK (2026-08-16): session.fork mints a child and
+//     abandons the parent; we never call it. Mux session/event is
+//     the live path after attach; session.history backfill only
+//     fills gaps. Resume-picker support: `Starter.ListSessions`
+//     runs `POST /api/session.list` against the shared host.
 //
 // The bridge deliberately does NOT modify dsh's local default
 // configuration. Per the user's locked-in principle

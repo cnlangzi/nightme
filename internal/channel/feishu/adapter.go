@@ -40,6 +40,12 @@ const maxMessageBytes = 3800
 // parsing in handleCardAction.
 const interactiveMessageType = "interactive"
 
+// actionNeededTitleEmoji prefixes CardKindPermission titles
+// ("Action Needed"). 🔐 was the old permission-lock decoration;
+// 👉 is "your turn" — the user must pick an option, not grant a
+// capability.
+const actionNeededTitleEmoji = "👉"
+
 // messageStatesLRUSize bounds the in-memory MessageState cache.
 // Feishu adapters track the last-rendered MessageState per user
 // message id for idempotency (skip duplicate AddReaction calls) and
@@ -196,6 +202,24 @@ type Adapter struct {
 	// a.mu (same lock as receiptsByUserMsgID).
 	pendingHeartbeats map[string]messages.HeartbeatSnapshot
 
+	// optCards remembers the last OutCard payload per bot message
+	// id so a later opt: click can PATCH the card: drop all
+	// buttons and keep only the chosen option. Entries are
+	// removed on click (or overwritten by a later card). Guarded
+	// by a.mu.
+	optCards map[string]*messages.Card
+
+	// lastOptByChat maps chatID → last permission/question bot
+	// message id so OutCardPatch with empty ReplyTo (dashboard
+	// settled the gate) can hide the Feishu buttons.
+	lastOptByChat map[string]string
+
+	// optPatch serializes IM PATCHes per bot message id so a slow
+	// retry of step N cannot overwrite step N+1 or a dashboard
+	// settle. Guarded by a.mu; the worker does not hold a.mu
+	// during PatchMessage.
+	optPatch map[string]*optPatchJob
+
 	// messageStates tracks the last successfully-rendered
 	// MessageState per user message id, so same-state emits
 	// (retries) skip a duplicate AddReaction. v1.3
@@ -276,8 +300,10 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
-		receiptsByUserMsgID:     make(map[string]*MessageReceipt),
-		pendingHeartbeats:      make(map[string]messages.HeartbeatSnapshot),
+		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		pendingHeartbeats:   make(map[string]messages.HeartbeatSnapshot),
+		optCards:            make(map[string]*messages.Card),
+		optPatch:            make(map[string]*optPatchJob),
 		messageStates:       messageStates,
 		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
@@ -676,13 +702,14 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	OutMessageStateRemoved → DeleteReaction on MessageState.ReactionID
 //	                       (reserved; v1.3 uses append-only)
 //	OutCard              → top-level Create via sendContent (PR #47's
-//	                       ReplyInChat — rootID="") with the 🔐 emoji
+//	                       ReplyInChat — rootID="") with the 👉 emoji
 //	                       prepended to the card title (channel
-//	                       decoration). F-44 revert #2: a permission
-//	                       card is a blocking UI element (user must
-//	                       click Allow/Deny) — it MUST stay visible
-//	                       in main chat regardless of whether the
-//	                       parent user message has a tool thread.
+//	                       decoration). F-44 revert #2: an Action
+//	                       Needed card is a blocking UI element
+//	                       (user must pick an option) — it MUST
+//	                       stay visible in main chat regardless of
+//	                       whether the parent user message has a
+//	                       tool thread.
 //	OutTaskCreate/Update → Receipt card via SendCard (top-level
 //	                       Create on first send, PATCH in place after)
 //	                       — rolling-log task checklist, no anchor
@@ -1566,15 +1593,18 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// no anchor). Same parent-thread rationale as OutReply /
 		// OutResult / OutTask*: any tool-using turn creates a
 		// thread on the user message, and ReplyInBoth would be
-		// pulled into the thread drawer. The permission card is
-		// a blocking UI element (user must click Allow/Deny) —
-		// it MUST stay visible in main chat. The "🔐" emoji is
+		// pulled into the thread drawer. The Action Needed card
+		// is a blocking UI element (user must click an option) —
+		// it MUST stay visible in main chat. The "👉" emoji is
 		// prepended to the card title by buildInteractiveCard so
 		// the user can scan the main chat and immediately see
-		// "this is a permission request" (same pattern as 💭 for
-		// OutThinking).
-		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
-		return err
+		// the prompt (same pattern as 💭 for OutThinking).
+		msgID, err := a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
+		if err != nil {
+			return err
+		}
+		a.rememberOptCard(msg.ChatID, msgID, msg.Card)
+		return nil
 
 	case messages.OutCardPatch:
 		// F-46: in-place PATCH of a previously sent decision card.
@@ -1582,17 +1612,22 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// disable the original choices and surface the outcome
 		// (e.g. "✅ 已选择 🔄 重试 — Retry failed: …"). ReplyTo
 		// is the bot-side message id assigned at OutCard time.
+		// Empty ReplyTo: dashboard settled the approval/question;
+		// patch the last Action Needed card in this chat.
 		if msg.Card == nil {
 			return errors.New("feishu: OutCardPatch missing card payload")
 		}
-		if msg.ReplyTo == "" {
-			return errors.New("feishu: OutCardPatch missing ReplyTo (target bot message id)")
+		target := msg.ReplyTo
+		if target == "" {
+			target = a.lastOptMsgID(msg.ChatID)
 		}
-		content, err := buildInteractiveCard(msg.Card)
-		if err != nil {
+		if target == "" {
+			return nil
+		}
+		if err := a.patchOptCardSettled(ctx, target, msg.Card); err != nil {
 			return err
 		}
-		return a.PatchMessage(ctx, msg.ReplyTo, content)
+		return nil
 
 	case messages.OutToolStart:
 		// F-34: tool_start is posted to the user message
@@ -1735,9 +1770,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// treatment can be "this is a problem, not a system
 		// reply" — header emoji ⚠️ + red header (CardKindError
 		// default). We deliberately do NOT use CardKindPermission
-		// here — that prepends 🔐 to the title (no permission is
+		// here — that prepends 👉 to the title (no action is
 		// being asked) and renders with a blue header that
-		// visually says "click to approve", the opposite of what
+		// visually says "click to choose", the opposite of what
 		// the user needs to see for a bridge death.
 		//
 		// Body budget: Feishu's markdown element caps at 4 KiB.
@@ -1764,9 +1799,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			title = title + " (" + msg.Diagnostic.ExitKind.String() + ")"
 		}
 		card := &messages.Card{
-			Title:    title,
-			Body:     body,
-			Kind:     messages.CardKindError,
+			Title:     title,
+			Body:      body,
+			Kind:      messages.CardKindError,
 			RequestID: fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano()),
 		}
 		content, err := buildInteractiveCard(card)
@@ -1859,9 +1894,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// F-63: per-turn heartbeat follow-up emitted by the runtime
 		// handler BEFORE the policy chain. Routes to the receipt
 		// bound to msg.ReplyTo (userMsgID) and updates its header
-		// in place via PATCH. Receipt.ApplyHeartbeat enforces a 2s
-		// minimum interval to keep Feishu's PATCH rate limiter
-		// happy under dense thinking streams.
+		// in place via PATCH. Receipt.ApplyHeartbeat coalesces
+		// thinking-only updates (2s) so dense streams stay under
+		// Feishu's PATCH limiter; ToolCount bumps PATCH immediately.
 		//
 		// F-63.1: when the receipt doesn't exist yet (e.g. the
 		// first countable event lands BEFORE MessageQueued has
@@ -2220,9 +2255,9 @@ func toolOutput(m messages.OutboundMessage) string {
 //	  "body":   { "elements": [ ... ] }
 //	}
 //
-// F-44 follow-up: the title is prefixed with a 🔐 emoji so the
+// F-44 follow-up: the title is prefixed with a 👉 emoji so the
 // user can scan main chat and immediately recognize the surface as
-// a permission request (same visual pattern as the 💭 prefix
+// Action Needed (same visual pattern as the 💭 prefix
 // OutThinking uses for reasoning, the ❯ prefix OutCommandReply
 // uses for slash-command responses). The emoji is the channel's
 // visual decoration — messages.Card.Title is the original plain
@@ -2245,22 +2280,47 @@ func toolOutput(m messages.OutboundMessage) string {
 // Choices path with column_set equal-width layout for decision
 // cards. See docs/feat/F-46-interactive-cards.md §3.
 func buildInteractiveCard(c *messages.Card) (string, error) {
+	patch, err := encodeInteractiveCard(c)
+	return patch.JSON, err
+}
+
+type cardPatch struct {
+	JSON string
+	Data map[string]any
+}
+
+func encodeInteractiveCard(c *messages.Card) (cardPatch, error) {
+	data, err := interactiveCardMap(c)
+	if err != nil {
+		return cardPatch{}, err
+	}
+	b, err := encodeCardJSON(data)
+	if err != nil {
+		return cardPatch{}, fmt.Errorf("feishu: encode card: %w", err)
+	}
+	return cardPatch{JSON: string(b), Data: data}, nil
+}
+
+func interactiveCardMap(c *messages.Card) (map[string]any, error) {
 	if c == nil {
-		return "", errors.New("feishu: card is nil")
+		return nil, errors.New("feishu: card is nil")
 	}
 	if c.RequestID == "" {
-		return "", errors.New("feishu: card missing request_id")
+		return nil, errors.New("feishu: card missing request_id")
 	}
 
-	// F-46 §3.2: 🔐 prefix is permission-specific; other kinds
-	// render the raw title. Default Kind (zero value) is Permission
-	// to preserve the pre-F-46 behaviour for callers that haven't
-	// been migrated yet. CardKindError is also raw — the emoji
-	// comes from the caller (already prefixed with ⚠️), no need
-	// for the permission lock.
+	// F-46 §3.2: 👉 prefix is for Action Needed cards
+	// (CardKindPermission). Other kinds render the raw title.
+	// Default Kind (zero value) is Permission to preserve the
+	// pre-F-46 behaviour for callers that haven't been migrated
+	// yet. CardKindError is also raw — the emoji comes from the
+	// caller (already prefixed with ⚠️).
 	title := c.Title
 	if c.Kind == messages.CardKindPermission {
-		title = "🔐 " + title
+		if n := len(c.Questions); n > 1 && c.Step >= 0 && c.Step < n {
+			title = fmt.Sprintf("%s · %d/%d", title, c.Step+1, n)
+		}
+		title = actionNeededTitleEmoji + " " + title
 	}
 
 	// Header template: explicit HeaderColor wins; otherwise pick
@@ -2280,28 +2340,54 @@ func buildInteractiveCard(c *messages.Card) (string, error) {
 	// Body element: use Card.Body when set; fall back to Title for
 	// legacy permission cards that only populate Title.
 	body := c.Body
-	if body == "" {
+	if len(c.Questions) > 0 {
+		body = renderActionNeededBody(c)
+	} else if body == "" {
 		body = c.Title
 	}
 	body = SanitizeCardMarkdown(body)
 
 	var elements []map[string]any
+	md := map[string]any(nil)
 	if body != "" {
-		elements = append(elements, map[string]any{
+		md = map[string]any{
 			"tag":     "markdown",
 			"content": body,
-		})
+		}
 	}
 
 	buttons := buildCardButtons(c)
+	var buttonEls []map[string]any
 	if len(buttons) > 0 {
-		if c.Kind == messages.CardKindDecision {
-			elements = append(elements, buildColumnSet(buttons))
+		if c.Kind == messages.CardKindPermission {
+			// Action Needed: one option per row so long Chinese
+			// labels stay readable (equal-width column_set truncates).
+			buttonEls = buildStackedButtons(buttons)
 		} else {
-			elements = append(elements, map[string]any{
-				"tag": "action", "actions": buttons,
-			})
+			buttonEls = []map[string]any{buildColumnSet(buttons)}
 		}
+	}
+
+	// AskUserQuestion: one form at body root. Feishu does not
+	// callback option buttons that sit *outside* a form on the
+	// same card — latest_cli clicks never reached nightme.
+	if questionStepOpen(c) {
+		formEls := make([]map[string]any, 0, 2+len(buttonEls)+2)
+		if md != nil {
+			formEls = append(formEls, md)
+		}
+		formEls = append(formEls, buttonEls...)
+		formEls = append(formEls, questionCustomFields(c)...)
+		elements = append(elements, map[string]any{
+			"tag":      "form",
+			"name":     fmt.Sprintf("question_form_%d", c.Step),
+			"elements": formEls,
+		})
+	} else {
+		if md != nil {
+			elements = append(elements, md)
+		}
+		elements = append(elements, buttonEls...)
 	}
 
 	card := map[string]any{
@@ -2313,11 +2399,7 @@ func buildInteractiveCard(c *messages.Card) (string, error) {
 		},
 		"body": map[string]any{"elements": elements},
 	}
-	b, err := encodeCardJSON(card)
-	if err != nil {
-		return "", fmt.Errorf("feishu: encode card: %w", err)
-	}
-	return string(b), nil
+	return card, nil
 }
 
 // buildCardButtons turns the Card's Choices / Options / Action into
@@ -2355,6 +2437,17 @@ func buildCardButtons(c *messages.Card) []map[string]any {
 			"type":  btnType,
 			"value": valMap,
 		}
+		if c.Kind == messages.CardKindPermission {
+			btn["width"] = "fill"
+		}
+		if questionStepOpen(c) {
+			// Interactive components inside a form must have a
+			// unique name. form_action_type=submit is what makes
+			// the click actually callback (plain value buttons
+			// outside/inside the form are swallowed).
+			btn["name"] = "opt_" + strconv.Itoa(len(buttons))
+			btn["form_action_type"] = "submit"
+		}
 		if c.Disabled {
 			// F-46 §3.7: PATCH-rendered cards disable every button
 			// after the user has picked.
@@ -2377,10 +2470,7 @@ func buildCardButtons(c *messages.Card) []map[string]any {
 		}
 		addButton(label, ch.Action, isChosen)
 	}
-	for _, opt := range c.Options {
-		// Legacy Options path: emit one button per option with
-		// action="opt:<option>" so a future F-47 select_static
-		// bridge can recognise it.
+	for _, opt := range cardOptionLabels(c) {
 		addButton(opt, "opt:"+opt, false)
 	}
 	if c.Action != "" && len(buttons) == 0 {
@@ -2416,6 +2506,140 @@ func buildColumnSet(buttons []map[string]any) map[string]any {
 		set["flex_mode"] = "bisect"
 	}
 	return set
+}
+
+func questionStepOpen(c *messages.Card) bool {
+	return c != nil && len(c.Questions) > 0 && !c.Disabled && c.Step >= 0 && c.Step < len(c.Questions)
+}
+
+func questionCustomFields(c *messages.Card) []map[string]any {
+	reqID := ""
+	if c != nil {
+		reqID = c.RequestID
+	}
+	return []map[string]any{
+		{
+			"tag":   "input",
+			"name":  "custom",
+			"width": "fill",
+			"placeholder": map[string]any{
+				"tag":     "plain_text",
+				"content": "Type your answer",
+			},
+		},
+		{
+			"tag":              "column_set",
+			"flex_mode":        "bisect",
+			"horizontal_align": "right",
+			"columns": []map[string]any{
+				{
+					"tag":    "column",
+					"width":  "weighted",
+					"weight": 1,
+					"elements": []map[string]any{{
+						"tag":              "button",
+						"name":             "skip_question",
+						"type":             "default",
+						"width":            "fill",
+						"form_action_type": "submit",
+						"text":             map[string]any{"tag": "plain_text", "content": "Skip this question"},
+						"value": map[string]string{
+							"action":     "skip:",
+							"request_id": reqID,
+						},
+					}},
+				},
+				{
+					"tag":    "column",
+					"width":  "weighted",
+					"weight": 1,
+					"elements": []map[string]any{{
+						"tag":              "button",
+						"name":             "submit_custom",
+						"type":             "primary",
+						"width":            "fill",
+						"form_action_type": "submit",
+						"text":             map[string]any{"tag": "plain_text", "content": "Submit"},
+						"value": map[string]string{
+							"action":     "custom:",
+							"request_id": reqID,
+						},
+					}},
+				},
+			},
+		},
+	}
+}
+
+func cardOptionLabels(c *messages.Card) []string {
+	if c == nil {
+		return nil
+	}
+	if n := len(c.Questions); n > 0 {
+		if c.Step < 0 || c.Step >= n {
+			return nil
+		}
+		return c.Questions[c.Step].Options
+	}
+	return c.Options
+}
+
+func renderActionNeededBody(c *messages.Card) string {
+	if c == nil || len(c.Questions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	done := c.Step >= len(c.Questions)
+	for i, q := range c.Questions {
+		heading := q.Header
+		if heading == "" {
+			heading = q.Question
+		}
+		if i < c.Step || done {
+			pick := ""
+			if i < len(c.Picks) {
+				pick = c.Picks[i]
+			}
+			if strings.HasPrefix(pick, messages.QuestionCustomPrefix) {
+				pick = strings.TrimPrefix(pick, messages.QuestionCustomPrefix)
+			}
+			if pick == "" {
+				pick = "跳过"
+			}
+			fmt.Fprintf(&b, "✓ **%s**：%s\n", heading, pick)
+			continue
+		}
+		if i == c.Step {
+			if q.Header != "" {
+				fmt.Fprintf(&b, "**%s** — %s\n", q.Header, q.Question)
+			} else {
+				fmt.Fprintf(&b, "%s\n", q.Question)
+			}
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// buildStackedButtons puts each option on its own full-width row so
+// long labels are not squeezed into one equal-width column_set.
+func buildStackedButtons(buttons []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(buttons))
+	for _, btn := range buttons {
+		out = append(out, map[string]any{
+			"tag":       "column_set",
+			"flex_mode": "none",
+			"columns": []map[string]any{{
+				"tag":              "column",
+				"width":            "weighted",
+				"weight":           1,
+				"vertical_align":   "center",
+				"horizontal_align": "left",
+				"elements":         []map[string]any{btn},
+			}},
+		})
+	}
+	return out
 }
 
 // encodeCardJSON serialises a card map to JSON with HTMLEscape
@@ -3366,7 +3590,12 @@ func (a *Adapter) SendCard(ctx context.Context, msg messages.OutboundMessage) (s
 	if err != nil {
 		return "", err
 	}
-	return a.sendCardContent(ctx, msg.ChatID, content, "", false)
+	msgID, err := a.sendCardContent(ctx, msg.ChatID, content, "", false)
+	if err != nil {
+		return "", err
+	}
+	a.rememberOptCard(msg.ChatID, msgID, msg.Card)
+	return msgID, nil
 }
 
 // SendCard posts an interactive card and returns the created message
@@ -3489,6 +3718,74 @@ func (a *Adapter) PatchMessage(ctx context.Context, messageID, content string) e
 	err := update(ctx, messageID, content)
 	a.logOutgoing("patch_message", "", messageID, err)
 	return err
+}
+
+type optPatchJob struct {
+	content string
+	seq     uint64
+	running bool
+}
+
+// patchCardForOtherClients PATCHes the IM copy of a card after a
+// click or dashboard settle. The clicker's redraw is the callback
+// body; this must not block card.action.trigger (Feishu's ~3s
+// budget, plus retries). One worker per message_id always sends
+// the latest queued body so a slow step-N retry cannot rewind
+// step N+1.
+func (a *Adapter) patchCardForOtherClients(messageID, content string) {
+	if a == nil || strings.TrimSpace(messageID) == "" || strings.TrimSpace(content) == "" {
+		return
+	}
+	a.mu.Lock()
+	if a.optPatch == nil {
+		a.optPatch = make(map[string]*optPatchJob)
+	}
+	job := a.optPatch[messageID]
+	if job == nil {
+		job = &optPatchJob{}
+		a.optPatch[messageID] = job
+	}
+	job.content = content
+	job.seq++
+	start := !job.running
+	job.running = true
+	a.mu.Unlock()
+	if start {
+		go a.runOptPatch(messageID)
+	}
+}
+
+func (a *Adapter) runOptPatch(messageID string) {
+	for {
+		a.mu.Lock()
+		job := a.optPatch[messageID]
+		if job == nil {
+			a.mu.Unlock()
+			return
+		}
+		content := job.content
+		seq := job.seq
+		a.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err := a.PatchMessage(ctx, messageID, content)
+		cancel()
+		if err != nil {
+			a.logger.Warn("feishu: patch card for other clients",
+				"message_id", messageID, "err", err)
+		}
+
+		a.mu.Lock()
+		job = a.optPatch[messageID]
+		if job == nil || job.seq == seq {
+			if job != nil {
+				job.running = false
+			}
+			a.mu.Unlock()
+			return
+		}
+		a.mu.Unlock()
+	}
 }
 
 // updateViaLark is the production implementation of the PATCH dispatch
@@ -3866,38 +4163,30 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 // and paired with the matching callback registration in
 // DefaultAddons.
 //
-// v0.2 scope: the handler returns a Toast acknowledging the click.
-// The actual click-value → permission-decision routing (e.g. updating
-// the SessionManager's pending permission state for Allow/Deny) is
-// wired in a follow-up; for now we surface a user-visible ack so the
-// button doesn't look broken. The full click-value decoding is
-// documented inline so the next commit has a clear seam.
+// Routing:
+//   - act:  gtw decision cards → handleActCardAction (Reaction)
+//   - opt: / skip: / custom:  permission / AskUserQuestion cards
+//     → handleOptCardAction (Action.Option is the clicked label,
+//     skip, or nm-q: batch; inbound routes it to Agent.SendPermission)
+//   - else: toast ack so an unknown button doesn't look broken
 func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
 	if event == nil || event.Event == nil {
 		return &larkcallback.CardActionTriggerResponse{}, nil
 	}
 	req := event.Event
-
-	// F-46 §3.1: the action string lives in event.Event.Action.Value
-	// under key "action". Fall back to event.Event.Action.Option for
-	// select_static components (the chosen option string), then to
-	// Name for legacy forms.
-	actionStr := ""
-	if req.Action != nil && req.Action.Value != nil {
-		if v, ok := req.Action.Value["action"].(string); ok {
-			actionStr = v
-		}
+	var remembered *messages.Card
+	if req.Context != nil {
+		remembered = a.getOptCard(req.Context.OpenMessageID)
 	}
-	if actionStr == "" && req.Action != nil && req.Action.Option != "" {
-		actionStr = "opt:" + req.Action.Option
-	}
-	if actionStr == "" && req.Action != nil {
-		actionStr = req.Action.Name
-	}
+	actionStr := resolveCardAction(req, remembered)
 
 	switch {
 	case strings.HasPrefix(actionStr, "act:"):
 		return a.handleActCardAction(ctx, event, actionStr)
+	case strings.HasPrefix(actionStr, "opt:"),
+		strings.HasPrefix(actionStr, "skip:"),
+		strings.HasPrefix(actionStr, "custom:"):
+		return a.handleOptCardAction(ctx, event, actionStr)
 	}
 
 	// Unknown / no prefix — fall back to the F-46 prototype log so
@@ -3910,6 +4199,52 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 			Content: "Recorded: " + actionStr,
 		},
 	}, nil
+}
+
+// resolveCardAction maps a Feishu card.action.trigger onto nightme's
+// act:/opt:/skip:/custom: vocabulary.
+//
+// Form-submit buttons (AskUserQuestion) often omit value.action and
+// only send Action.Name (opt_0, skip_question, submit_custom). opt_N
+// is the Nth label on the current question — Chinese labels cannot
+// live in Feishu's name field (letters/digits/underscore only).
+func resolveCardAction(req *larkcallback.CardActionTriggerRequest, card *messages.Card) string {
+	if req == nil || req.Action == nil {
+		return ""
+	}
+	action := req.Action
+	if action.Value != nil {
+		if v, ok := action.Value["action"].(string); ok && v != "" {
+			return v
+		}
+	}
+	if action.Option != "" {
+		return "opt:" + action.Option
+	}
+	switch action.Name {
+	case "submit_custom":
+		return "custom:"
+	case "skip_question":
+		return "skip:"
+	}
+	if n, ok := parseOptIndex(action.Name); ok {
+		opts := cardOptionLabels(card)
+		if n >= 0 && n < len(opts) {
+			return "opt:" + opts[n]
+		}
+	}
+	return action.Name
+}
+
+func parseOptIndex(name string) (int, bool) {
+	if !strings.HasPrefix(name, "opt_") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(name, "opt_"))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // handleActCardAction is F-46 §3.6: when the user clicks an
@@ -3979,6 +4314,432 @@ func (a *Adapter) handleActCardAction(
 			Content: "✅ 已选择 " + string(emoji),
 		},
 	}, nil
+}
+
+// handleOptCardAction is the permission / AskUserQuestion button
+// path. buildCardButtons emits action="opt:<label>" for the current
+// question's options. The form under every question emits
+// "custom:" (Type your answer + Submit) and "skip:" (Skip this
+// question). One-shot cards inbound immediately. Wizard cards
+// PATCH until the last step, then inbound EncodeQuestionPicks so
+// inbound.dispatchAction can call Manager.SendPermission without
+// treating the click as a new user prompt.
+//
+// Feishu form cards stay on the clicker's "Submitted" toast unless
+// the callback HTTP body includes the next card (`card.type=raw`).
+// IM PATCH updates the message store / other clients, not the
+// form that is waiting on this response.
+func (a *Adapter) handleOptCardAction(
+	ctx context.Context,
+	event *larkcallback.CardActionTriggerEvent,
+	actionStr string,
+) (*larkcallback.CardActionTriggerResponse, error) {
+	if event == nil || event.Event == nil || event.Event.Context == nil {
+		return nil, nil
+	}
+	skip := strings.HasPrefix(actionStr, "skip:")
+	customSubmit := strings.HasPrefix(actionStr, "custom:")
+	option := strings.TrimPrefix(actionStr, "opt:")
+	if skip || customSubmit {
+		option = ""
+	}
+	custom := ""
+	if customSubmit {
+		custom = customTextFromAction(event.Event.Action)
+		if custom == "" {
+			return &larkcallback.CardActionTriggerResponse{
+				Toast: &larkcallback.Toast{Type: "warning", Content: "请输入回答"},
+			}, nil
+		}
+	}
+	if option == "" && !skip && !customSubmit {
+		return &larkcallback.CardActionTriggerResponse{
+			Toast: &larkcallback.Toast{Type: "warning", Content: "空选项"},
+		}, nil
+	}
+
+	chatID := event.Event.Context.OpenChatID
+	botMsgID := event.Event.Context.OpenMessageID
+	userID := ""
+	if event.Event.Operator != nil {
+		userID = event.Event.Operator.OpenID
+	}
+	if chatID == "" {
+		return nil, nil
+	}
+
+	requestID := ""
+	if event.Event.Action != nil && event.Event.Action.Value != nil {
+		if v, ok := event.Event.Action.Value["request_id"].(string); ok {
+			requestID = v
+		}
+	}
+	if requestID == "" {
+		if card := a.getOptCard(botMsgID); card != nil {
+			requestID = card.RequestID
+		}
+	}
+
+	a.logger.Debug("feishu: opt card action",
+		"chat_id", chatID, "message_id", botMsgID, "action", actionStr,
+		"skip", skip, "custom", custom != "")
+
+	inboundOption, toast, patch, err := a.applyOptClick(botMsgID, requestID, option, skip, custom)
+	if err != nil {
+		a.logger.Warn("feishu: apply option click",
+			"chat_id", chatID, "message_id", botMsgID, "err", err)
+	}
+	if inboundOption != "" {
+		synthetic := channel.Message{
+			ChatID:     chatID,
+			UserID:     userID,
+			Text:       "",
+			HasMention: true,
+			MessageID:  botMsgID,
+			Action: &messages.ActionPayload{
+				RequestID: requestID,
+				Option:    inboundOption,
+			},
+		}
+		select {
+		case a.incoming <- synthetic:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			a.logger.Warn("feishu: card option inbound full, dropping",
+				"chat_id", chatID, "option", inboundOption)
+		}
+	}
+	return &larkcallback.CardActionTriggerResponse{
+		Toast: &larkcallback.Toast{Type: "info", Content: toast},
+		Card:  callbackRawCard(patch),
+	}, nil
+}
+
+func callbackRawCard(patch cardPatch) *larkcallback.Card {
+	if patch.Data != nil {
+		return &larkcallback.Card{Type: "raw", Data: patch.Data}
+	}
+	content := strings.TrimSpace(patch.JSON)
+	if content == "" {
+		return nil
+	}
+	var data any
+	if err := json.Unmarshal([]byte(content), &data); err != nil {
+		return nil
+	}
+	return &larkcallback.Card{Type: "raw", Data: data}
+}
+
+func customTextFromAction(action *larkcallback.CallBackAction) string {
+	if action == nil {
+		return ""
+	}
+	if action.FormValue != nil {
+		if v, ok := action.FormValue["custom"]; ok {
+			if s := formValueString(v); s != "" {
+				return s
+			}
+		}
+	}
+	return strings.TrimSpace(action.InputValue)
+}
+
+func formValueString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case map[string]any:
+		if s, ok := t["value"].(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+// applyOptClick advances an Action Needed card. Wizard cards
+// (len(Questions)>1) build the next step for the callback body
+// and PATCH the IM copy in the background until the last pick;
+// then they return an EncodeQuestionPicks payload.
+// cardJSON is the next Card 2.0 body so the callback can redraw the
+// clicker's form. One-shot option clicks POST the plain label
+// immediately. Skip and Type your answer on a one-shot question POST
+// nm-q: so the host sees empty selected / custom rather than a fake
+// option label.
+func (a *Adapter) applyOptClick(botMsgID, requestID, option string, skip bool, custom string) (inboundOption, toast string, patch cardPatch, err error) {
+	card := a.getOptCard(botMsgID)
+	if card != nil && len(card.Questions) > 1 {
+		return a.applyWizardClick(botMsgID, requestID, card, option, skip, custom)
+	}
+	switch {
+	case skip:
+		if card == nil || len(card.Questions) == 0 {
+			return "", "空选项", cardPatch{}, nil
+		}
+		inboundOption = encodeQuestionPicksFromCard(withCurrentPick(card, "", true, ""))
+		option, toast = "跳过", "已跳过"
+	case custom != "":
+		inboundOption = custom
+		if card != nil && len(card.Questions) > 0 {
+			inboundOption = encodeQuestionPicksFromCard(withCurrentPick(card, "", false, custom))
+		}
+		option, toast = custom, "✅ 已提交"
+	default:
+		inboundOption, toast = option, "✅ 已选择 "+option
+	}
+	patch, err = a.patchOptCardSelected(botMsgID, requestID, option)
+	return inboundOption, toast, patch, err
+}
+
+func (a *Adapter) applyWizardClick(botMsgID, requestID string, card *messages.Card, option string, skip bool, custom string) (inboundOption, toast string, patch cardPatch, err error) {
+	card = cloneCard(card)
+	if card == nil {
+		return "", "", cardPatch{}, errors.New("feishu: missing wizard card")
+	}
+	if card.Picks == nil || len(card.Picks) != len(card.Questions) {
+		card.Picks = make([]string, len(card.Questions))
+	}
+	if card.Step < 0 {
+		card.Step = 0
+	}
+	if card.Step < len(card.Picks) {
+		switch {
+		case skip:
+			card.Picks[card.Step] = ""
+		case custom != "":
+			card.Picks[card.Step] = messages.StoreQuestionCustom(custom)
+		default:
+			card.Picks[card.Step] = option
+		}
+		card.Step++
+	}
+	ensureCardRequestID(card, requestID, botMsgID)
+	a.storeOptCard("", botMsgID, card)
+	patch, err = encodeInteractiveCard(card)
+	if err != nil {
+		return "", "", cardPatch{}, err
+	}
+	a.patchCardForOtherClients(botMsgID, patch.JSON)
+	if card.Step < len(card.Questions) {
+		switch {
+		case skip:
+			return "", "已跳过，下一题", patch, nil
+		case custom != "":
+			return "", "✅ 已提交", patch, nil
+		default:
+			return "", "✅ 已选择 " + option, patch, nil
+		}
+	}
+	a.takeOptCard(botMsgID)
+	return encodeQuestionPicksFromCard(card), "✅ 已选完", patch, nil
+}
+
+func withCurrentPick(card *messages.Card, option string, skip bool, custom string) *messages.Card {
+	out := cloneCard(card)
+	if out == nil || len(out.Questions) == 0 {
+		return out
+	}
+	if out.Picks == nil || len(out.Picks) != len(out.Questions) {
+		out.Picks = make([]string, len(out.Questions))
+	}
+	step := out.Step
+	if step < 0 || step >= len(out.Picks) {
+		step = 0
+	}
+	switch {
+	case skip:
+		out.Picks[step] = ""
+	case custom != "":
+		out.Picks[step] = messages.StoreQuestionCustom(custom)
+	default:
+		out.Picks[step] = option
+	}
+	return out
+}
+
+func encodeQuestionPicksFromCard(card *messages.Card) string {
+	if card == nil || len(card.Questions) == 0 {
+		return ""
+	}
+	picks := make([]messages.QuestionPick, len(card.Questions))
+	for i, q := range card.Questions {
+		stored := ""
+		if i < len(card.Picks) {
+			stored = card.Picks[i]
+		}
+		picks[i] = messages.ParseStoredQuestionPick(q.ID, stored)
+	}
+	return messages.EncodeQuestionPicks(picks)
+}
+
+func (a *Adapter) rememberOptCard(chatID, msgID string, card *messages.Card) {
+	a.storeOptCard(chatID, msgID, cloneCard(card))
+}
+
+func (a *Adapter) storeOptCard(chatID, msgID string, card *messages.Card) {
+	if a == nil || msgID == "" || card == nil {
+		return
+	}
+	a.mu.Lock()
+	if a.optCards == nil {
+		a.optCards = make(map[string]*messages.Card)
+	}
+	a.optCards[msgID] = card
+	if chatID != "" {
+		if a.lastOptByChat == nil {
+			a.lastOptByChat = make(map[string]string)
+		}
+		a.lastOptByChat[chatID] = msgID
+	}
+	a.mu.Unlock()
+}
+
+func (a *Adapter) lastOptMsgID(chatID string) string {
+	if a == nil || chatID == "" {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastOptByChat[chatID]
+}
+
+func (a *Adapter) getOptCard(msgID string) *messages.Card {
+	if a == nil || msgID == "" {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.optCards[msgID]
+}
+
+func (a *Adapter) takeOptCard(msgID string) *messages.Card {
+	if a == nil || msgID == "" {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	card := a.optCards[msgID]
+	delete(a.optCards, msgID)
+	for chatID, id := range a.lastOptByChat {
+		if id == msgID {
+			delete(a.lastOptByChat, chatID)
+			break
+		}
+	}
+	return card
+}
+
+func ensureCardRequestID(card *messages.Card, requestID, botMsgID string) {
+	if card == nil || card.RequestID != "" {
+		return
+	}
+	if requestID != "" {
+		card.RequestID = requestID
+		return
+	}
+	card.RequestID = botMsgID
+}
+
+func cloneCard(c *messages.Card) *messages.Card {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.Options != nil {
+		out.Options = append([]string(nil), c.Options...)
+	}
+	if c.Choices != nil {
+		out.Choices = append([]messages.CardChoice(nil), c.Choices...)
+	}
+	if c.Picks != nil {
+		out.Picks = append([]string(nil), c.Picks...)
+	}
+	if c.Questions != nil {
+		out.Questions = make([]messages.CardQuestion, len(c.Questions))
+		for i, q := range c.Questions {
+			out.Questions[i] = q
+			if q.Options != nil {
+				out.Questions[i].Options = append([]string(nil), q.Options...)
+			}
+		}
+	}
+	return &out
+}
+
+// patchOptCardSelected rebuilds the clicked card with no buttons
+// and a single selected-option line, then PATCHes in place.
+// The rebuilt JSON is also returned so the card.action.trigger
+// callback can redraw the clicker's form.
+func (a *Adapter) patchOptCardSelected(botMsgID, requestID, option string) (cardPatch, error) {
+	if botMsgID == "" {
+		return cardPatch{}, errors.New("feishu: missing card message id")
+	}
+	card := a.takeOptCard(botMsgID)
+	if card == nil {
+		card = &messages.Card{
+			Title: "Action Needed",
+			Kind:  messages.CardKindPermission,
+		}
+	}
+	ensureCardRequestID(card, requestID, botMsgID)
+	if n := len(card.Questions); n > 0 {
+		if card.Picks == nil || len(card.Picks) != n {
+			card.Picks = make([]string, n)
+		}
+		if card.Step >= 0 && card.Step < n {
+			card.Picks[card.Step] = option
+		}
+		card.Step = n
+	} else {
+		body := strings.TrimSpace(card.Body)
+		selected := "✓ **" + option + "**"
+		if body == "" {
+			card.Body = selected
+		} else {
+			card.Body = body + "\n\n" + selected
+		}
+	}
+	card.Options = nil
+	card.Choices = nil
+	card.Action = ""
+	patch, err := encodeInteractiveCard(card)
+	if err != nil {
+		return cardPatch{}, err
+	}
+	a.patchCardForOtherClients(botMsgID, patch.JSON)
+	return patch, nil
+}
+
+// patchOptCardSettled hides buttons on the outstanding Action Needed
+// card after the host resolved the gate without a Feishu click
+// (dashboard Allow once / Skip).
+func (a *Adapter) patchOptCardSettled(ctx context.Context, botMsgID string, incoming *messages.Card) error {
+	if botMsgID == "" {
+		return errors.New("feishu: missing card message id")
+	}
+	card := a.takeOptCard(botMsgID)
+	if card == nil {
+		card = cloneCard(incoming)
+	}
+	if card == nil {
+		card = &messages.Card{Title: "Waiting for approval", Kind: messages.CardKindPermission}
+	}
+	if incoming != nil && incoming.Body != "" {
+		card.Body = incoming.Body
+	}
+	if n := len(card.Questions); n > 0 {
+		card.Step = n
+	}
+	card.Options = nil
+	card.Choices = nil
+	card.Action = ""
+	ensureCardRequestID(card, "", botMsgID)
+	content, err := buildInteractiveCard(card)
+	if err != nil {
+		return err
+	}
+	a.patchCardForOtherClients(botMsgID, content)
+	return nil
 }
 
 func senderID(event *larkim.P2MessageReceiveV1) string {

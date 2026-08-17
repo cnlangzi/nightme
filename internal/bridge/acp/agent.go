@@ -96,19 +96,12 @@ type driver struct {
 	// primary correctness guarantee; atomic.Pointer only
 	// eliminates the data race between the writer and the
 	// reader goroutines.
+	//
+	// All-or-nothing ownership: a non-nil handler means the bridge
+	// takes over the entire sessionUpdate stream and the built-in
+	// 4-case fallback in handleSessionUpdate is bypassed. Installing
+	// a handler does NOT extend the fallback — it replaces it.
 	updateHandler atomic.Pointer[UpdateHandler]
-
-	// defaultFallbackDisabled, when true, makes handleSessionUpdate
-	// skip the built-in 4-case fallback (agent_message_chunk,
-	// tool_call, tool_call_update, message_chunk) so a bridge that
-	// installed an UpdateHandler isn't double-emitted (the handler
-	// runs first; without this flag the fallback would re-emit the
-	// same AgentEvent kinds a second time, doubling every text chunk
-	// / tool call). Set by SetUpdateHandler when a non-nil handler is
-	// installed; cleared by SetUpdateHandler(nil). Stored as atomic.Bool
-	// because SetUpdateHandler and the readPump race on it the same way
-	// they race on the handler pointer.
-	defaultFallbackDisabled atomic.Bool
 
 	// flushHandler, when non-nil, lets the bridge-specific UpdateHandler
 	// register a "flush any buffered text now" hook. Triggered on
@@ -854,14 +847,15 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 func (d *driver) SetUpdateHandler(h UpdateHandler) {
 	if h == nil {
 		d.updateHandler.Store(nil)
-		d.defaultFallbackDisabled.Store(false)
 		return
 	}
 	d.updateHandler.Store(&h)
-	// The bridge taking over sessionUpdate translation is opting OUT
-	// of the built-in 4-case fallback so the same chunks aren't
-	// emitted twice. Revert with SetUpdateHandler(nil) above.
-	d.defaultFallbackDisabled.Store(true)
+	// All-or-nothing ownership of sessionUpdate translation: a
+	// non-nil handler means the bridge takes over the full sessionUpdate
+	// stream and the built-in 4-case fallback in handleSessionUpdate
+	// stays out of the way. Otherwise the same chunks would be
+	// emitted twice (once by the handler, once by the fallback).
+	// Pass nil to revert.
 }
 
 // SetFlushHandler installs the "flush buffered text" callback used at
@@ -1086,18 +1080,18 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			slog.Debug("acp: updateHandler error (non-fatal)",
 				"kind", kind, "err", err.Error())
 		}
-		// When a bridge has registered an UpdateHandler it is
-		// responsible for emitting AgentEvents for every kind it
-		// cares about. Skipping the built-in fallback here avoids
-		// the double-emit (every chunk would otherwise be delivered
-		// to the channel twice — once by the handler, once by the
-		// fallback). The handler can return without emitting to
-		// opt INTO the fallback for kinds it doesn't handle, but
-		// in practice opencode / future per-bridge translators own
-		// all ACP sessionUpdate variants they receive today.
-		if d.defaultFallbackDisabled.Load() {
-			return
-		}
+		// The handler now owns the full sessionUpdate stream — the
+		// built-in 4-case fallback below stays out of the way so
+		// every chunk is delivered exactly once. The all-or-nothing
+		// ownership is intentional: a bridge installing an
+		// UpdateHandler has full domain knowledge of its own server's
+		// sessionUpdate variants and cannot leave any kind to the
+		// generic fallback without risking a double-emit on the
+		// kinds it does handle. (If a future bridge wants to extend
+		// rather than replace the fallback, the right answer is to
+		// wrap the fallback explicitly inside the bridge handler,
+		// not to half-install here.)
+		return
 	}
 
 	switch kind {

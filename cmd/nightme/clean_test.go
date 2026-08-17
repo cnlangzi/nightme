@@ -156,7 +156,19 @@ func TestRemoveInbox_Missing(t *testing.T) {
 func TestRunClean_InboxLivesInHOME(t *testing.T) {
 	home := t.TempDir()
 	dataDir := t.TempDir()
+	// os.UserHomeDir() reads HOME on Unix but USERPROFILE on
+	// Windows — setting only HOME is silently ignored on the
+	// Windows CI runner, and the test then exercises the real
+	// runner's home directory instead of the temp one. HOMEDRIVE
+	// + HOMEPATH are the legacy fallback that Go consults when
+	// USERPROFILE is empty; setting them keeps `os.UserHomeDir`
+	// deterministic on every Windows variant the runner image
+	// ships. The three together are belt-and-braces; USERPROFILE
+	// alone is enough on modern Windows.
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
 
 	// Write a config that points data_dir at a different location.
 	// This is the exact configuration that used to silent-fail:

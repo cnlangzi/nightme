@@ -1,5 +1,7 @@
-// Package inbound — tryActionDispatch: routes msg.Reaction /
-// msg.Action events through the wired services.ReactionRouter.
+// Package inbound — tryActionDispatch: routes msg.Reaction to
+// the wired services.ReactionRouter, and msg.Action (card button
+// clicks) to Manager.SendPermission for pending approvals /
+// AskUserQuestion.
 //
 // Priority 1 because action events carry empty Text — letting
 // them fall through to tryCommandDispatch would either
@@ -21,6 +23,7 @@ package inbound
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -96,18 +99,49 @@ func (r *Router) runAction(ctx context.Context, msg *messages.InboundMessage) {
 // and so any future sync caller (tests, debug fixture) can
 // still invoke it directly.
 func (r *Router) dispatchAction(ctx context.Context, msg *messages.InboundMessage) *CommandResult {
+	if msg.Action != nil {
+		r.dispatchPermissionClick(msg)
+		return &CommandResult{Consumed: true}
+	}
 	router, ok := r.requireAction()
 	if !ok {
-		return &CommandResult{Consumed: true, Dropped: true}
-	}
-	if msg.Reaction == nil {
-		// msg.Action (card button click) is not currently routed
-		// through ReactionRouter. Drop silently — the F-46 PATCH
-		// path owns that branch.
 		return &CommandResult{Consumed: true, Dropped: true}
 	}
 	if router.Handle(ctx, msg.ChatID, *msg.Reaction) {
 		return &CommandResult{Consumed: true}
 	}
 	return &CommandResult{Consumed: true, Dropped: true}
+}
+
+// permissionSender is the optional chatsession.Manager surface used
+// to feed a card-button label back to the selected agent's
+// SendPermission. Declared here so inbound.MessageHandler does not
+// grow a method that PTY/test stubs never need; production Manager
+// implements it.
+type permissionSender interface {
+	SendPermission(chatID, option string) error
+}
+
+// dispatchPermissionClick routes a Feishu opt:<label> (or other
+// channel Action.Option) to the selected agent's pending
+// approval / AskUserQuestion. Does not fall through to
+// HandleInbound — that would enqueue a new prompt while dsh is
+// still blocked on question/requested.
+func (r *Router) dispatchPermissionClick(msg *messages.InboundMessage) {
+	option := strings.TrimSpace(msg.Action.Option)
+	if option == "" {
+		slog.Default().Warn("inbound: card action missing option",
+			"chat_id", msg.ChatID)
+		return
+	}
+	sender, ok := r.csMgr.(permissionSender)
+	if !ok {
+		slog.Default().Warn("inbound: MessageHandler does not support SendPermission",
+			"chat_id", msg.ChatID)
+		return
+	}
+	if err := sender.SendPermission(msg.ChatID, option); err != nil {
+		slog.Default().Warn("inbound: SendPermission failed",
+			"chat_id", msg.ChatID, "err", err)
+	}
 }

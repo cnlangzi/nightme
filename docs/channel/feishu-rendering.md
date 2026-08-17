@@ -3352,7 +3352,7 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
 | `OutReply` | **Rolling-log receipt**（N 事件 = 1 张 card，每 chunk = 1+ div；超限转 top-level） | `ReplyInChat` (cold-start card 是 top-level Create，rootID=""，no anchor)；overflow → `ReplyInChat` | ✅ F-44 revert: 重新 fold，card 走 top-level 永远主 chat 可见 |
 | `OutResult` | 独立 top-level Create（每条 = 1 条消息） | `ReplyInChat` (top-level Create, no anchor) | ✅ 不变（F-39） |
 | `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt**（N 事件 = 1 张 card） | `ReplyInChat` (cold-start card 是 top-level Create; 后续 PATCH 保持) | ✅ 简化为只装 Tasks |
-| `OutCard` (permission) | Top-level Create + 🔐 emoji 前缀 | `ReplyInChat` (no anchor) | ✅ 切到 top-level (用户可一眼识别 permission 请求) |
+| `OutCard` (permission) | Top-level Create + 👉 emoji 前缀（`Action Needed`；多题向导带 `· i/n`） | `ReplyInChat` (no anchor) | ✅ 切到 top-level (用户可一眼识别需要点选的卡) |
 | `OutCommandReply` (slash command) | Top-level Create + ❯ emoji 前缀 | `ReplyInChat` (no anchor) | ✅ 切到 top-level (短状态消息, 不需要 thread anchor) |
 | `OutCompaction` | ReplyInBoth (brief 进度 marker) | `ReplyInBoth` (low frequency) | ✅ 不变 |
 | `OutInit` / `OutUsage` | Silent drop | — | ⏸ 推迟到 footer PR |
@@ -3368,7 +3368,7 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
   - 📋 = Tasks (rolling-log card 内的 checklist)
   - ✶ = Compacting
   - 💭 = Thinking (ReplyInThread, thread 抽屉内)
-  - 🔐 = Permission request (OutCard)
+  - 👉 = Action Needed (OutCard; AskUserQuestion / 权限点选)
   - ❯ = Slash command response (OutCommandReply)
   - ❌ = Error result (OutResult.IsError)
 
@@ -3419,7 +3419,7 @@ main chat (top-level Create, no anchor — F-44 + F-44 revert #2):
   │   💬 chunk 5
   │   **📋 Tasks** checklist (2 items)
   ├ Reply 2  ❯ command response    ⬅ top-level Create, no anchor
-  ├ Reply 3  🔐 Permission request  ⬅ top-level Create, no anchor
+  ├ Reply 3  👉 Action Needed  ⬅ top-level Create, no anchor
   ├ Reply 4  📝 complete OutResult text
   └ Thread (side panel only):
       💭 thinking
@@ -3433,7 +3433,7 @@ main chat (top-level Create, no anchor — F-44 + F-44 revert #2):
 - ✅ Rolling-log receipt card 永远在主 chat 可见（top-level Create，无 parent-thread 风险）
 - ✅ Task Receipt 单卡（不混 reply 流，PATCH 维护）
 - ✅ Tool stream（💭/🔧/⎿）跟 reply 流完全分离 — tool 在 thread 抽屉，reply 在主 chat 流
-- ✅ 各种消息有不同 emoji 前缀，扫一眼就识别类型（💬 reply, ❯ command, 🔐 permission, 📝 result）
+- ✅ 各种消息有不同 emoji 前缀，扫一眼就识别类型（💬 reply, ❯ command, 👉 Action Needed, 📝 result）
 - ⚠️ 失去 "Reply to <sender>" 头部（top-level Create 没有 reply anchor） — 跟 行为一致
 
 ### 1.2 Routing 分流表（最终）
@@ -5101,7 +5101,8 @@ if footer != "" {
 ## A11. F-46: 交互卡按钮回灌 + 原地 PATCH（Interactive Decision Cards）
 
 > **Source**: `../channel/feishu-rendering.md`
-
+>
+> **AskUserQuestion / form / 回调踩坑**（比 F-46 决策卡更晚、也更容易翻车）：见 [`feishu-cards.md`](./feishu-cards.md)。本节只记 gtw `act:` 决策卡落地。
 
 > **Scope**:
 
@@ -5170,11 +5171,12 @@ type Card struct {
     Options   []string             // button 文本 / select_static 选项
     RequestID string
     // F-46 新增
-    Kind      CardKind             // Permission / Decision / Preview；决定 header 配色 + 是否加 🔐
+    Kind      CardKind             // Permission / Decision / Preview；决定 header 配色 + 是否加 👉
     Action    string               // 当只有单一 action 时（替代 options）
     Choices   []CardChoice         // 比 Options 更结构化：每个选项可以指定 emoji + label + action
     Form      []CardFormField      // 预留 form input（F-48）
     HeaderColor string             // blue / red / green / grey；默认按 Kind 推
+    // AskUserQuestion：Questions + Step + Picks。len<=1 一击即答；len>1 卡内向导
 }
 ```
 
@@ -5183,9 +5185,9 @@ type Card struct {
 ```go
 type CardKind int
 const (
-    CardKindPermission CardKind = iota  // 权限请求（保留 🔐 + Allow/Deny）
-    CardKindDecision                     // 决策卡（无 🔐，自带 Choices）
-    CardKindPreview                      // /gtw test card 预览（无 🔐，无 action）
+    CardKindPermission CardKind = iota  // Action Needed（👉 前缀；AskUserQuestion / 权限点选）
+    CardKindDecision                     // 决策卡（无 👉，自带 Choices，等宽 column_set）
+    CardKindPreview                      // /gtw test card 预览（无 👉，无 action）
 )
 ```
 
@@ -5222,10 +5224,11 @@ const (
 
 `buildInteractiveCard` 改造点：
 
-1. 拆 header 配色：根据 `CardKind` 选 `template`，默认 blue（permission 仍 blue + 🔐）
-2. `🔐 ` 前缀改成只在 `CardKindPermission` 时加
-3. Choices 渲染为 `column_set` 等宽布局（cc-connect `CardActionLayoutEqualColumns`），3 个按钮横排
+1. 拆 header 配色：根据 `CardKind` 选 `template`，默认 blue（permission 仍 blue + 👉）
+2. `👉 ` 前缀只在 `CardKindPermission` 时加（历史上曾用 🔐）
+3. gtw `Choices` 渲染为 `column_set` 等宽布局（cc-connect `CardActionLayoutEqualColumns`），3 个按钮横排
 4. 单按钮场景（worktree-fail 两选项）也用 `column_set` 一致布局
+5. **Action Needed 选项一行一个**（`buildStackedButtons`）：长中文 label 不被等宽列截断。每题底部有 dashboard 同款 **Type your answer** 输入 + **Skip this question** + **Submit**（`form` / `custom:` / `skip:`）。`len(Questions)>1` 时卡内向导 `👉 Action Needed · i/n`，中间 click 除 PATCH 外还要在 `card.action.trigger` 回调里带回下一张卡（`card.type=raw`），否则飞书 form 停在「已提交」、客户端不翻到 2/N。最后一步 inbound `nm-q:` 批答（host `matchesQuestions` 要求整批 id 对齐）
 
 ```go
 // cc-connect 的等宽布局
@@ -5475,7 +5478,8 @@ func emitBranchExistsDraft(...) (*Result, error) {
 
 - `internal/gtw/action_routing_test.go`：`gtwActionMap` 全 prefix 命中
 - `internal/channel/feishu/adapter_test.go::TestHandleCardAction_ActRouting`：合成 `CardActionTriggerEvent`，验证 inbound 流收到正确 `ReactionEvent`
-- `internal/channel/feishu/card_test.go::TestBuildInteractiveCard_DecisionKind`：验证 `CardKindDecision` 不加 🔐、3 个 button 用 `column_set`
+- `internal/channel/feishu/card_test.go::TestBuildInteractiveCard_DecisionKind`：验证 `CardKindDecision` 不加 👉、3 个 button 用 `column_set`
+- `internal/channel/feishu/adapter_opt_test.go`：单题 `opt:` 立即 inbound；**Type your answer** Submit / **Skip this question** 走 `nm-q:`；多题向导中间 click PATCH **且**回调带回 `card.type=raw` 的 2/N，最后一步 `nm-q:` 批答；选项一行一个；approval 卡无 custom/skip。完整规则见 [`feishu-cards.md`](./feishu-cards.md)
 - `internal/channel/feishu/card_test.go::TestBuildInteractiveCard_DisabledButtons`：PATCH 后的卡 button 全 disabled
 
 ### 5.2 集成测试
@@ -5498,7 +5502,7 @@ func emitBranchExistsDraft(...) (*Result, error) {
    - 监控：加 metric `nightme_card_action_inbound_full_total`
 3. **PATCH 失败**：PATCH 失败时用户看到旧卡 + action 没生效提示
    - 现状：PATCH 失败由 `WithTransientRetry` 兜底（retry.go）
-4. **CardKind 误用**：decision 卡错填 `CardKindPermission` 会被加 🔐 + 颜色不对
+4. **CardKind 误用**：decision 卡错填 `CardKindPermission` 会被加 👉 + 颜色不对
    - 默认零值 `CardKind(0)` 保留为 Permission 行为；新增 `CardKindDecision` 起 iota=1
 
 ## 7. 实施状态
@@ -6724,7 +6728,7 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 - `Update` (PUT `/open-apis/im/v1/messages/:id`) - 仅文本/富文本。SDK 注释: "当前仅支持编辑文本和富文本消息"
 - `Patch` (PATCH `/open-apis/im/v1/messages/:id`) - 卡片/富文本都支持,5 QPS 频控,30 KB body 上限
 
-`update_multi` 不是独立接口,是 card `config` 里的一个 flag(`"update_multi": true`),让卡变成"共享卡"在所有接收方同步更新。nightme 单聊场景不启用。
+`update_multi` 不是独立接口,是 card `config` 里的一个 flag(`"update_multi": true`),让卡变成"共享卡"在所有接收方同步更新。nightme 单聊场景不启用。**点按者**看到下一张卡靠的是 `card.action.trigger` 回调里的 `card.type=raw`，不是这个 flag。交互卡完整规则见 [feishu-cards.md](./feishu-cards.md)。
 
 ## 4. nightme 当前现状(text 模式)
 

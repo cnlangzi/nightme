@@ -96,15 +96,8 @@ const (
 	// BridgeExitSignalKilled: cmd.Wait() returned an *exec.ExitError
 	// with negative exit code (signals use -SIGNAL). The child was
 	// terminated by a signal — usually SIGKILL from the OS (OOM
-	// killer, watchdog) or from us via Process.Kill().
+	// killer) or from us via Process.Kill() in Close().
 	BridgeExitSignalKilled
-
-	// BridgeExitWatchdogTimeout: bridge's own watchdog
-	// (lifecycleWatchdogTimeout) fired and SIGKILL'd the child.
-	// Distinguished from BridgeExitSignalKilled because the cause
-	// is "child wedged past its own grace window", which is a
-	// different recovery signal than "OS killed us".
-	BridgeExitWatchdogTimeout
 
 	// BridgeExitPanic: a panic propagated up to lifecycle() — either
 	// the bridge panicked in a goroutine that wasn't wrapped by
@@ -125,8 +118,6 @@ func (k BridgeExitKind) String() string {
 		return "non-zero-exit"
 	case BridgeExitSignalKilled:
 		return "signal-killed"
-	case BridgeExitWatchdogTimeout:
-		return "watchdog-timeout"
 	case BridgeExitPanic:
 		return "panic"
 	}

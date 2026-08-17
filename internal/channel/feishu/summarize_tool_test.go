@@ -191,6 +191,12 @@ func TestFormatToolStartCall_ClaudeStyle(t *testing.T) {
 		// CJK 60 chars (180 bytes) + budget=97 → 32 runes (96 bytes) + "..." = 99 bytes.
 		{"long CJK args rune-safe truncate", "Read",
 			strings.Repeat("文", 60), "● Read(" + strings.Repeat("文", 32) + "...)"},
+		{"json read keeps basename", "read",
+			`{"file_path":"/Users/geax/code/geax/github.com/cnlangzi/nightme.nightme/fix-dsh-tasks/docs/SPEC.md"}`,
+			"● read(SPEC.md)"},
+		{"json read keeps offset after long path", "read",
+			`{"file_path":"/Users/geax/code/geax/github.com/cnlangzi/nightme.nightme/fix-dsh-tasks/docs/SPEC.md","offset":626}`,
+			"● read(SPEC.md offset=626)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

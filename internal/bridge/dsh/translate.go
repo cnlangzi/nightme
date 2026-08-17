@@ -12,9 +12,9 @@
 // Required guards (F-52 / F-32 / F-49):
 //   - textDelivered : 防止 tool-结尾 turn 把已 flush 段当 result 重放
 //   - active        : 空 turn 不出 "Done." 卡片(避免乱入 result)
-//   - resetWindow   : /new 中断时丢弃半截 event(目前 dsh 用 Reset→
-//                     ErrRestartRequired,所以本 guard 暂时只用于
-//                     turn 边界清空,跨 session 持久化由 server 管)
+//   - resetWindow   : /new 中断时丢弃半截 event(dsh Reset 在同一
+//                     driver 上 session.create 新会话,本 guard 用于
+//                     turn 边界清空;跨 session 状态在 Reset 里重建)
 //
 // ContentImage / ContentFile on tool inputs degrade to bracketed
 // annotations on text args (same fallback as print-mode / pi /
@@ -63,7 +63,32 @@ type translator struct {
 	thinkBuf    strings.Builder
 	pendingText string
 	lastText    string
-	lastUsage   *agent.UsageInfo
+
+	// lastUsage is the per-turn usage block from the most recent
+	// assistant/message. Emitted onto EventAgentResult.Usage at
+	// turn/end so the receipt footer can render per-turn token
+	// counts. Set by handleAssistantMessage via usageToAgent
+	// (dsh.usageInfo → agent.UsageInfo field-name gap is bridged
+	// there). Cleared at every turn/start.
+	lastUsage *agent.UsageInfo
+
+	// F-DSH-DASHBOARD-PARITY (2026-08-16): reasoning blocks get
+	// their OWN accumulator, not the text one. Mixing them was the
+	// root bug — reasoning text leaked into textBuf and surfaced as
+	// reply text instead of going through the OutThinking path.
+	//
+	// Same noCopy / pointer-map design as textBuf for the same
+	// Grow / WriteString safety reason.
+	reasoningBuf map[int]*strings.Builder
+
+	// reasoningEmitted[idx] marks a reasoning block index whose
+	// full thinking text has already been emitted (as a
+	// [思考] ... EventAgentText). Prevents double-emission when
+	// both block-end{type:"reasoning"} and the matching
+	// assistant/message.content[type:"reasoning"] arrive in the
+	// same turn — they describe the same block; the first emit
+	// wins.
+	reasoningEmitted map[int]bool
 
 	// pendingTools backfills Name + Args onto tool/result events
 	// (the result event only carries result + isError, not the
@@ -100,12 +125,17 @@ type pendingTool struct {
 // newTranslator constructs a translator for the given agent +
 // workspace. agentName / workspace are stamped onto every event
 // (the runtime uses these for header rendering).
+// newTranslator constructs a translator for the given agent +
+// workspace. agentName / workspace are stamped onto every event
+// (the runtime uses these for header rendering).
 func newTranslator(agentName, workspace string) *translator {
 	return &translator{
-		agentName:    agentName,
-		workspace:    workspace,
-		textBuf:      map[int]*strings.Builder{}, // lazy-grown by contentIndex
-		pendingTools: map[string]pendingTool{},
+		agentName:        agentName,
+		workspace:        workspace,
+		textBuf:          map[int]*strings.Builder{}, // lazy-grown by contentIndex
+		reasoningBuf:     map[int]*strings.Builder{}, // lazy-grown by blockIndex
+		reasoningEmitted: map[int]bool{},
+		pendingTools:     map[string]pendingTool{},
 	}
 }
 
@@ -135,31 +165,31 @@ const maxTextStreams = 16
 // If you need the old switch back for debugging, `git log` the
 // removed block — it's preserved in commit history.
 
-// contentBlocksToDTO time.
-func pickText(content []contentBlockDTO) string {
-	var sb strings.Builder
-	for _, b := range content {
-		if b.Type == "text" && b.Text != "" {
-			if sb.Len() > 0 {
-				sb.WriteByte('\n')
-			}
-			sb.WriteString(b.Text)
-		}
-	}
-	return sb.String()
-}
+// pickText removed in F-DSH-DASHBOARD-PARITY (2026-08-16):
+// the old "pick text blocks only" filter dropped reasoning entirely
+// and lived in handleAssistantMessage. handleAssistantMessage now
+// switches on b.Type directly so reasoning flows to OutThinking.
+// If you need it back for debugging, `git log` the removed block —
+// it's preserved in commit history.
 
 // stopReasonToSubtype maps dsh's stopReason vocabulary onto the
 // bridge's Subtype string (used for error categorization in /gtw
 // commit-style calls). Mirrors the codex "completed" / "failed"
 // convention — finer-grained subtyping can land later.
 func stopReasonToSubtype(sr string) string {
-	if sr == "" || sr == "stop" || sr == "end_turn" {
+	switch sr {
+	case "", "stop", "end_turn":
 		return "completed"
+	case "abort", "cancelled", "interrupted":
+		// Dashboard stop button → session.cancel → turn/end{stopReason:"abort"}.
+		return "interrupted"
+	default:
+		return "failed"
 	}
-	return "failed"
 }
 
+// todoStatusToTaskStatus maps dsh's todo status vocabulary onto
+// nightme's AgentTaskStatus enum.
 // todoStatusToTaskStatus maps dsh's todo status vocabulary onto
 // nightme's AgentTaskStatus enum.
 func todoStatusToTaskStatus(s string) agent.AgentTaskStatus {
@@ -172,3 +202,31 @@ func todoStatusToTaskStatus(s string) agent.AgentTaskStatus {
 		return agent.TaskPending
 	}
 }
+
+// usageToAgent converts one dsh `usageInfo` payload (per-message
+// usage block carried on assistant/message and assistant/chunk
+// type:"usage") into nightme's agent.UsageInfo. Field-name gap:
+// dsh calls cache fields CacheCreationTokens / CacheReadTokens;
+// agent.UsageInfo uses the more specific
+// CacheCreationInputTokens / CacheReadInputTokens. Returns nil when
+// in is nil so callers can blindly pass `data.Usage`.
+//
+// Field-name gap intentionally NOT silently aliased (see
+// [[no-type-aliases]]): the bridge boundary is the single place
+// where dsh's vocabulary meets agent's vocabulary.
+func usageToAgent(in *usageInfo) *agent.UsageInfo {
+	if in == nil {
+		return nil
+	}
+	return &agent.UsageInfo{
+		InputTokens:               in.InputTokens,
+		OutputTokens:              in.OutputTokens,
+		CacheCreationInputTokens:  in.CacheCreationTokens,
+		CacheReadInputTokens:      in.CacheReadTokens,
+		CostUSD:                   in.CostUSD,
+		ContextWindow:             in.ContextWindow,
+		ContextWindowPct:          in.ContextWindowPct,
+	}
+}
+
+

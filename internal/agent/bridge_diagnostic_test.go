@@ -265,13 +265,12 @@ func TestBridgeExitKindString(t *testing.T) {
 	// in /diagnose output and in feishu error cards, so a rename
 	// would break user-visible UI.
 	stable := map[BridgeExitKind]string{
-		BridgeExitUnknown:         "unknown",
-		BridgeExitGracefulClose:   "graceful-close",
-		BridgeExitCleanExit:       "clean-exit",
-		BridgeExitNonZeroExit:     "non-zero-exit",
-		BridgeExitSignalKilled:    "signal-killed",
-		BridgeExitWatchdogTimeout: "watchdog-timeout",
-		BridgeExitPanic:           "panic",
+		BridgeExitUnknown:       "unknown",
+		BridgeExitGracefulClose: "graceful-close",
+		BridgeExitCleanExit:     "clean-exit",
+		BridgeExitNonZeroExit:   "non-zero-exit",
+		BridgeExitSignalKilled:  "signal-killed",
+		BridgeExitPanic:         "panic",
 	}
 	for k, want := range stable {
 		if got := k.String(); got != want {

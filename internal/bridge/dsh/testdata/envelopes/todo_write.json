@@ -1,0 +1,39 @@
+{
+  "_comment": "Real dsh wire payload captured from dsh-tool-todo/lib/types/index.js: agent.session.append('todo/write', { todos }). Verified 2026-08-16 against the installed @deepseek-ai/dsh-tool-todo package.",
+  "sessionId": "session-capture-001",
+  "event": {
+    "type": "todo/write",
+    "data": {
+      "todos": [
+        {
+          "content": "Read docs/SPEC.md",
+          "status": "completed"
+        },
+        {
+          "content": "Read docs/bridge/dsh.md",
+          "status": "completed"
+        },
+        {
+          "content": "Read docs/feat/F-dsh-bridge.md",
+          "status": "in_progress"
+        },
+        {
+          "content": "Read all bridge/dsh/*.go",
+          "status": "pending"
+        },
+        {
+          "content": "Cross-check spec vs implementation",
+          "status": "pending"
+        },
+        {
+          "content": "Cross-check SPEC.md invariants",
+          "status": "pending"
+        },
+        {
+          "content": "Summarize which features are implemented",
+          "status": "pending"
+        }
+      ]
+    }
+  }
+}

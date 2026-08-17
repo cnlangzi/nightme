@@ -4,6 +4,7 @@
 > **Scope**: nightme 内部 Feishu/Lark IM 适配器 (`internal/channel/feishu/*`)
 > **目的**: 描述 Feishu 侧 rolling-log card 实现策略 -- 收到 `OutboundMessage{ReplyTo: userMsgID}` 时如何 cold-create / PATCH / 终态 card。
 > **Related docs**:
+> - [feishu-cards.md](./feishu-cards.md) - **交互卡设计与踩坑**（AskUserQuestion form / `card.action.trigger` / 回调必须回卡）
 > - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) - 5-method Channel interface(v1.3 缩水)
 > - [F-25-rolling-log.md](../feat/F-25-rolling-log.md) - rolling-log UX 整体协议
 > - [F-26-gateway-hub.md](../feat/F-26-gateway-hub.md) - v1.1 Gateway ↔ Channel 边界(历史,v1.3 改)
@@ -129,7 +130,7 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 - `Update` (PUT `/open-apis/im/v1/messages/:id`) - 仅文本/富文本。SDK 注释: "当前仅支持编辑文本和富文本消息"
 - `Patch` (PATCH `/open-apis/im/v1/messages/:id`) - 卡片/富文本都支持,5 QPS 频控,30 KB body 上限
 
-`update_multi` 不是独立接口,是 card `config` 里的一个 flag(`"update_multi": true`),让卡变成"共享卡"在所有接收方同步更新。nightme 单聊场景不启用。
+`update_multi` 不是独立接口,是 card `config` 里的一个 flag(`"update_multi": true`),让卡变成"共享卡"在所有接收方同步更新。nightme 单聊场景不启用。**点按者**看到下一张卡靠的是 `card.action.trigger` 回调里的 `card.type=raw`，不是这个 flag。交互卡完整规则见 [feishu-cards.md](./feishu-cards.md)。
 
 ## 4. nightme 当前现状(text 模式)
 
@@ -1050,7 +1051,7 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 - `OutThinking` thread 抽屉内每条 body 前缀 💭（`postThreadMarkdownReply` 在 caller 附加）
 - `OutCompaction` 主 chat 内 "✶ Compacting…"（adapter.go 硬编码）
 - `OutTask*` receipt card 内 "📋 Tasks" markdown header（`buildTaskChecklistChunks` 附加）
-- `OutCard` 主 chat 内的 interactive card title 前缀 🔐（`buildInteractiveCard` 附加）
+- `OutCard` 主 chat 内的 interactive card title 前缀 👉（`buildInteractiveCard` 对 `CardKindPermission` 附加；多题向导进行中为 `👉 Action Needed · i/n`）
 - `OutCommandReply` 主 chat 内的文本前缀 ❯（adapter.go 硬编码）
 
 emoji 都是 channel 装饰（不在抽象 gateway 类型上），让用户在主 chat 扫一眼就知道是哪种消息，跟 `💭` for OutThinking 的视觉模式一致。
@@ -1495,6 +1496,7 @@ WebSearch  -> 10 results
 
 ## 14. 变更日志
 
+- **2026-08-17** - 交互卡（AskUserQuestion form / `card.action.trigger` / 回调必须回卡）抽到 [`feishu-cards.md`](./feishu-cards.md)，避免下次从零对照官方文档。本节 footer / receipt 坑仍在 §6 / §13.23。
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
 - **2026-08-03(同日增量)** - 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
 - **2026-08-03(同日再增量)** - 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
@@ -2036,7 +2038,7 @@ case gateway.OutReply, gateway.OutResult,
 
 ### 13.23 F-46 决策(2026-08-06):决策卡交互 button + 原地 PATCH
 
-**背景**:SPEC §2.5 之前只定义了 reaction-based lifecycle。gtw 决策卡（branch-exists / worktree-fail 场景，见 [`F-46-interactive-cards.md`](../feat/F-46-interactive-cards.md) §3.3）一直是纯文本 markdown——用户必须打 emoji 才能继续。F-46 把决策卡升级成可点 button + 原地 PATCH。
+**背景**:SPEC §2.5 之前只定义了 reaction-based lifecycle。gtw 决策卡（branch-exists / worktree-fail 场景，见 [feishu-rendering.md](./feishu-rendering.md) A11 §3.3）一直是纯文本 markdown——用户必须打 emoji 才能继续。F-46 把决策卡升级成可点 button + 原地 PATCH。
 
 **Feishu 端**做了 3 件事:
 
@@ -2086,7 +2088,7 @@ case gateway.OutReply, gateway.OutResult,
 - bridges 协议零变化（Feishu card API 是公共 SDK）
 - Receipt 自治不变（决策卡 ≠ receipt card，是独立 card message）
 
-**详细设计 + 调试心得**:见 [`docs/feat/F-46-interactive-cards.md`](../feat/F-46-interactive-cards.md)。SPEC §0.13 + §2.6。
+**交互卡设计 + 踩坑总表**:见 [feishu-cards.md](./feishu-cards.md)。F-46 决策卡落地过程见 [feishu-rendering.md](./feishu-rendering.md) A11。SPEC §0.13 + §2.6。
 
 ### 13.24 🎯 F-48 决策 (2026-08-06):Footer Line 3 ── Git Branch Tracking
 

@@ -64,6 +64,14 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/shell"
+
+	// dsh is intentionally NOT imported here: the runtime no
+	// longer touches the shared dsh host. The dsh bridge handles
+	// lazy-start on first use via host.EnsureSharedHost in
+	// internal/bridge/dsh/host/ensure.go. Bringing the host
+	// package in here would just re-couple the runtime to dsh
+	// lifecycle, which is exactly what the lazy-start refactor
+	// removes.
 )
 
 // RunOptions bundles the per-run parameters that aren't part of
@@ -195,6 +203,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	if agents == nil {
 		return errors.New("run: agent registry is nil")
 	}
+
+	// dsh is no longer started at boot. The dsh bridge lazy-starts
+	// it on first use via host.EnsureSharedHost (see
+	// internal/bridge/dsh/host/ensure.go). A user who never picks
+	// the dsh agent — or doesn't have dsh installed — pays nothing
+	// at startup; the daemon reaches ready without dsh in scope.
+	//
+	// Per-session re-attachment after a daemon restart is handled
+	// by dsh's own session.fork at first use, not by a boot-time
+	// RecoverAll pass. See dsh.newDriver → handshakeSession.
 
 	ch, err := deps.NewChannel(cfg)
 	if err != nil {

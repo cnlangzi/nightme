@@ -181,6 +181,15 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 
 	ctx := cmd.Context()
 
+	// Banner so the user can read what kind of operation
+	// is about to run BEFORE the first stage header
+	// appears. The "[1/3] check" line by itself doesn't say
+	// what we're checking, and a user pasting this into a
+	// bug report needs the verb visible at the top.
+	fmt.Fprintln(out, "nightme update — installing the latest release")
+	fmt.Fprintln(out, "  stages: 1/3 check → 2/3 download → 3/3 install")
+	fmt.Fprintln(out)
+
 	// Stage 1: check.
 	fmt.Fprintln(out, "[1/3] check")
 	res, err := updater.Check(ctx, opts.tag)

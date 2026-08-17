@@ -214,6 +214,12 @@ type Adapter struct {
 	// settled the gate) can hide the Feishu buttons.
 	lastOptByChat map[string]string
 
+	// optPatch serializes IM PATCHes per bot message id so a slow
+	// retry of step N cannot overwrite step N+1 or a dashboard
+	// settle. Guarded by a.mu; the worker does not hold a.mu
+	// during PatchMessage.
+	optPatch map[string]*optPatchJob
+
 	// messageStates tracks the last successfully-rendered
 	// MessageState per user message id, so same-state emits
 	// (retries) skip a duplicate AddReaction. v1.3
@@ -297,6 +303,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
 		pendingHeartbeats:   make(map[string]messages.HeartbeatSnapshot),
 		optCards:            make(map[string]*messages.Card),
+		optPatch:            make(map[string]*optPatchJob),
 		messageStates:       messageStates,
 		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
@@ -3713,21 +3720,72 @@ func (a *Adapter) PatchMessage(ctx context.Context, messageID, content string) e
 	return err
 }
 
+type optPatchJob struct {
+	content string
+	seq     uint64
+	running bool
+}
+
 // patchCardForOtherClients PATCHes the IM copy of a card after a
-// click. The clicker's redraw is the callback body; this must not
-// block card.action.trigger (Feishu's ~3s budget, plus retries).
+// click or dashboard settle. The clicker's redraw is the callback
+// body; this must not block card.action.trigger (Feishu's ~3s
+// budget, plus retries). One worker per message_id always sends
+// the latest queued body so a slow step-N retry cannot rewind
+// step N+1.
 func (a *Adapter) patchCardForOtherClients(messageID, content string) {
 	if a == nil || strings.TrimSpace(messageID) == "" || strings.TrimSpace(content) == "" {
 		return
 	}
-	go func() {
+	a.mu.Lock()
+	if a.optPatch == nil {
+		a.optPatch = make(map[string]*optPatchJob)
+	}
+	job := a.optPatch[messageID]
+	if job == nil {
+		job = &optPatchJob{}
+		a.optPatch[messageID] = job
+	}
+	job.content = content
+	job.seq++
+	start := !job.running
+	job.running = true
+	a.mu.Unlock()
+	if start {
+		go a.runOptPatch(messageID)
+	}
+}
+
+func (a *Adapter) runOptPatch(messageID string) {
+	for {
+		a.mu.Lock()
+		job := a.optPatch[messageID]
+		if job == nil {
+			a.mu.Unlock()
+			return
+		}
+		content := job.content
+		seq := job.seq
+		a.mu.Unlock()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := a.PatchMessage(ctx, messageID, content); err != nil {
+		err := a.PatchMessage(ctx, messageID, content)
+		cancel()
+		if err != nil {
 			a.logger.Warn("feishu: patch card for other clients",
 				"message_id", messageID, "err", err)
 		}
-	}()
+
+		a.mu.Lock()
+		job = a.optPatch[messageID]
+		if job == nil || job.seq == seq {
+			if job != nil {
+				job.running = false
+			}
+			a.mu.Unlock()
+			return
+		}
+		a.mu.Unlock()
+	}
 }
 
 // updateViaLark is the production implementation of the PATCH dispatch
@@ -4531,9 +4589,6 @@ func (a *Adapter) storeOptCard(chatID, msgID string, card *messages.Card) {
 		if a.lastOptByChat == nil {
 			a.lastOptByChat = make(map[string]string)
 		}
-		if old := a.lastOptByChat[chatID]; old != "" && old != msgID {
-			delete(a.optCards, old)
-		}
 		a.lastOptByChat[chatID] = msgID
 	}
 	a.mu.Unlock()
@@ -4683,7 +4738,8 @@ func (a *Adapter) patchOptCardSettled(ctx context.Context, botMsgID string, inco
 	if err != nil {
 		return err
 	}
-	return a.PatchMessage(ctx, botMsgID, content)
+	a.patchCardForOtherClients(botMsgID, content)
+	return nil
 }
 
 func senderID(event *larkim.P2MessageReceiveV1) string {

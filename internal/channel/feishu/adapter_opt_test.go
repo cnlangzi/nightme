@@ -474,11 +474,8 @@ func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
 		return msgID, nil
 	}
-	var patched string
-	a.updateFunc = func(_ context.Context, _, content string) error {
-		patched = content
-		return nil
-	}
+	var patches patchLog
+	a.updateFunc = patches.hook()
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutCard,
 		ChatID: chatID,
@@ -502,9 +499,8 @@ func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send OutCardPatch: %v", err)
 	}
-	if patched == "" {
-		t.Fatal("expected PATCH of last opt card")
-	}
+	_, patchedBodies := patches.wait(t, 1)
+	patched := patchedBodies[0]
 	if strings.Contains(patched, `"tag":"button"`) {
 		t.Errorf("settled PATCH should hide buttons; got %s", patched)
 	}
@@ -881,19 +877,53 @@ func callbackCardJSON(t *testing.T, resp *larkcallback.CardActionTriggerResponse
 	return string(b)
 }
 
-func TestRememberOptCard_EvictsPreviousForChat(t *testing.T) {
+func TestRememberOptCard_KeepsPreviousForStaleClick(t *testing.T) {
 	a := testAdapter(t)
 	oldCard := &messages.Card{Title: "old", RequestID: "r1", Questions: []messages.CardQuestion{{ID: "q1", Question: "a"}}}
 	newCard := &messages.Card{Title: "new", RequestID: "r2", Questions: []messages.CardQuestion{{ID: "q2", Question: "b"}}}
 	a.rememberOptCard("oc_1", "om_old", oldCard)
 	a.rememberOptCard("oc_1", "om_new", newCard)
-	if a.getOptCard("om_old") != nil {
-		t.Fatal("previous Action Needed card for the chat should be evicted")
+	if got := a.getOptCard("om_old"); got == nil || got.Title != "old" {
+		t.Fatal("previous Action Needed card must stay so a late click still pages")
 	}
 	if got := a.getOptCard("om_new"); got == nil || got.Title != "new" {
 		t.Fatalf("new card = %+v", got)
 	}
 	if a.lastOptMsgID("oc_1") != "om_new" {
 		t.Fatalf("lastOptMsgID = %q, want om_new", a.lastOptMsgID("oc_1"))
+	}
+}
+
+func TestPatchCardForOtherClients_LatestWins(t *testing.T) {
+	a := testAdapter(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var patches patchLog
+	var first bool
+	a.updateFunc = func(_ context.Context, messageID, content string) error {
+		patches.mu.Lock()
+		isFirst := !first
+		if isFirst {
+			first = true
+		}
+		patches.mu.Unlock()
+		if isFirst {
+			close(started)
+			<-release
+		}
+		return patches.hook()(context.Background(), messageID, content)
+	}
+
+	a.patchCardForOtherClients("om_seq", `{"step":"1"}`)
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first PATCH did not start")
+	}
+	a.patchCardForOtherClients("om_seq", `{"step":"2"}`)
+	close(release)
+	_, bodies := patches.wait(t, 2)
+	if bodies[len(bodies)-1] != `{"step":"2"}` {
+		t.Fatalf("last PATCH = %q, want step 2", bodies[len(bodies)-1])
 	}
 }

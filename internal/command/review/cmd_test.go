@@ -75,6 +75,41 @@ func TestSpec_RejectsArgs(t *testing.T) {
 	}
 }
 
+// TestParseReviewArgs covers the --agent / -a flag parser in
+// isolation. v8 introduced the single-flag command surface; the
+// dispatcher delegates to parseReviewArgs after the inline
+// `len(input.Args) > 1` early-return path is gone (because
+// the spec explicitly allows --agent).
+func TestParseReviewArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		argv     []string
+		wantSpec Spec
+		wantErr  bool
+	}{
+		{"empty", []string{}, Spec{}, false},
+		{"--agent codex", []string{"--agent", "codex"}, Spec{Agent: "codex"}, false},
+		{"-a codex (short form)", []string{"-a", "codex"}, Spec{Agent: "codex"}, false},
+		{"--agent at end", []string{"--agent", "dsh"}, Spec{Agent: "dsh"}, false},
+		{"--agent without value", []string{"--agent"}, Spec{}, true},
+		{"-a without value", []string{"-a"}, Spec{}, true},
+		{"positional arg rejected", []string{"foo"}, Spec{}, true},
+		{"unknown flag rejected", []string{"--base", "main"}, Spec{}, true},
+		{"empty agent name", []string{"--agent", ""}, Spec{Agent: ""}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := parseReviewArgs(tc.argv)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseReviewArgs(%v) err = %v, wantErr %v", tc.argv, err, tc.wantErr)
+			}
+			if !tc.wantErr && spec != tc.wantSpec {
+				t.Errorf("parseReviewArgs(%v) = %+v, want %+v", tc.argv, spec, tc.wantSpec)
+			}
+		})
+	}
+}
+
 // TestSpec_AcceptsNoArgs verifies the happy-path early check:
 // `/review` (input.Args == ["review"], len == 1) is accepted at
 // the Spec check stage. The downstream AS lookup is what

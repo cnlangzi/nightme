@@ -71,11 +71,54 @@ func NewFactory(mgr *chatsession.Manager) *Factory {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:    "review",
-		Summary: "Review current branch vs default branch (PR mode, zero qualifiers)",
-		Usage: `/review    # reviews current branch vs default branch (committed + uncommitted)
-              # fix is conversational: type "fix the blockers" in chat afterwards`,
+		Summary: "Review current branch vs default branch (PR mode)",
+		Usage: `/review                  # run review with the current selected agent,
+                                 #   inject findings back to the same chat
+/review --agent codex      # run review with codex (or any registered agent),
+                                 #   findings still go to the current selected agent
+/review -a codex            # short form of --agent`,
 		Category: "workspace",
 	}
+}
+
+// Spec is the parsed result of /review's argv. v8 introduced a
+// single optional flag (--agent) that lets the user run the
+// review on a different agent than the current selected one;
+// findings always land in the current AS. All other args are
+// rejected inline at the dispatch layer.
+type Spec struct {
+	// Agent overrides the review runner. Empty means "use the
+	// current selected AS's agent" (the default). When set, the
+	// dispatcher looks up agent.Builtins.Get(Agent) and uses that
+	// Starter's RunOnce to run the review; findings are still
+	// injected to the current AS (as.SendBlocks) — only the
+	// runner differs.
+	Agent string
+}
+
+// parseReviewArgs extracts the optional --agent / -a flag from
+// argv. Returns an error for any unrecognised token, matching
+// the dispatcher-level rejection pattern (don't be lenient
+// with user input — better to error and have the user retry).
+//
+// Side-effect-free; takes only argv (slice of strings after
+// the command name itself).
+func parseReviewArgs(argv []string) (Spec, error) {
+	var spec Spec
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		switch a {
+		case "-a", "--agent":
+			if i+1 >= len(argv) {
+				return Spec{}, fmt.Errorf("--agent requires a value")
+			}
+			i++
+			spec.Agent = argv[i]
+		default:
+			return Spec{}, fmt.Errorf("unknown arg %q (only --agent / -a supported)", a)
+		}
+	}
+	return spec, nil
 }
 
 // Handle implements command.SlashCommandFactory.
@@ -108,6 +151,21 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		)), nil
 	}
 
+	// Parse args. /review supports ONE optional flag: --agent/-a
+	// to specify which coding agent runs the review (overriding
+	// the default of the current selected AS). Findings always
+	// land in the current selected AS — see ReviewContext.Inject
+	// below. Multiple /review commands in parallel run on
+	// different agents and feed back into the same AS, matching
+	// the user's "different reviewers, single chat" workflow.
+	//
+	// All other args (positional names, other flags) are
+	// rejected — matches /cwd / /think / /use inline check.
+	spec, err := parseReviewArgs(input.Args[1:])
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+
 	as := cs.SelectedAgentSession()
 	if as == nil {
 		return command.Reply(ctx, rt,
@@ -115,20 +173,24 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		), nil
 	}
 
-	starter, err := agent.Builtins.Get(as.Agent)
+	// Resolve the review runner. --agent overrides the default
+	// (current AS's agent); empty / missing means "use the
+	// current AS's agent". Either way the findings are injected
+	// to the *current* AS via rc.Inject = as.SendBlocks.
+	runnerName := as.Agent
+	if spec.Agent != "" {
+		runnerName = spec.Agent
+	}
+	starter, err := agent.Builtins.Get(runnerName)
 	if err != nil {
-		// Shouldn't happen — cs.SelectedAgentSession() returned a
-		// live AS whose Agent name came from this same registry —
-		// but guard against a race (AS activated with a
-		// since-removed agent) with a friendly message.
 		return command.Reply(ctx, rt, fmt.Sprintf(
-			"❌ unknown agent %q", as.Agent,
+			"❌ unknown agent %q (--agent)", runnerName,
 		)), nil
 	}
 
 	rc := agent.ReviewContext{
 		Workspace: cs.SelectedCwd(),
-		Inject:    as.SendBlocks,
+		Inject:    as.SendBlocks, // ALWAYS current AS, not the runner
 	}
 
 	// Capture the inputs the goroutine needs for an async reply
@@ -136,7 +198,6 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// the user; everything else stays in logs). We grab them by
 	// value so the closure doesn't pin SlashInput for the full
 	// 30-min review budget.
-	agentName := as.Agent
 	chatID := input.ChatID
 	replyTo := input.MessageID
 
@@ -173,7 +234,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			return
 		}
 		slog.Default().Warn("/review failed",
-			"agent", agentName,
+			"agent", runnerName,
 			"err", err,
 		)
 		if errors.Is(err, agent.ErrReviewNotSupported) {
@@ -185,7 +246,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 				ChatID:  chatID,
 				Kind:    messages.OutReply,
 				ReplyTo: replyTo,
-				Text:    fmt.Sprintf("❌ agent %q 暂不支持 /review", agentName),
+				Text:    fmt.Sprintf("❌ agent %q 暂不支持 /review", runnerName),
 			})
 		}
 	}()

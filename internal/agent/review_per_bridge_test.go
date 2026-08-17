@@ -94,7 +94,7 @@ func TestReview_UsesSharedPrompt(t *testing.T) {
 	if gotInjected[0].Type != agent.ContentText {
 		t.Errorf("injected block type %q, want %q", gotInjected[0].Type, agent.ContentText)
 	}
-	want := "## Code review of " + workspace + "\n\n(current branch vs default branch; run via /review)\n\n## Summary\nThe diff is fine."
+	want := "## Code review of " + workspace + " (run by \"fake\")\n\n(current branch vs default branch; run via /review)\n\n## Summary\nThe diff is fine."
 	if gotInjected[0].Text != want {
 		t.Errorf("injected text mismatch:\n got  %q\n want %q", gotInjected[0].Text, want)
 	}

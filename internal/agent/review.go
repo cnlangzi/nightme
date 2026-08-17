@@ -121,21 +121,28 @@ func Review(ctx context.Context, s Starter, rc ReviewContext) error {
 
 	return rc.Inject(ctx, []ContentBlock{{
 		Type: ContentText,
-		Text: formatReviewMessage(rc.Workspace, result.Text),
+		Text: formatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
 	}})
 }
 
 // formatReviewMessage wraps the raw review output in a small
 // preamble so the main agent (which receives this as a user
 // message) understands the context. The preamble tells the main
-// agent where the review came from and what scope it covered —
-// important because the main agent then answers follow-up
-// questions like "fix the second blocker" using this review
-// as its source of truth.
-func formatReviewMessage(workspace, review string) string {
-	return fmt.Sprintf("## Code review of %s\n\n"+
+// agent where the review came from, who ran it, and what scope
+// it covered — important because the main agent then answers
+// follow-up questions like "fix the second blocker" using this
+// review as its source of truth.
+//
+// "Run by" annotates the agent that produced the review — the
+// review goroutine may have run on a different agent (via
+// `/review --agent <name>`) than the current selectedAS where
+// the findings land. Tracking the runner is essential for
+// reproducibility ("which agent's review is this?") and for the
+// user when they re-`/use` between review and fix.
+func formatReviewMessage(workspace, agentName, review string) string {
+	return fmt.Sprintf("## Code review of %s (run by %q)\n\n"+
 		"(current branch vs default branch; run via /review)\n\n%s",
-		workspace, review)
+		workspace, agentName, review)
 }
 
 // StandardPrompt is the canonical review prompt used by all

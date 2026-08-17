@@ -191,7 +191,7 @@ func TestReview_InjectsFormattedReview(t *testing.T) {
 	if gotInjected[0].Type != ContentText {
 		t.Errorf("injected block type %q, want %q", gotInjected[0].Type, ContentText)
 	}
-	want := "## Code review of /ws\n\n(current branch vs default branch; run via /review)\n\n" + reviewText
+	want := "## Code review of /ws (run by \"fake\")\n\n(current branch vs default branch; run via /review)\n\n" + reviewText
 	if gotInjected[0].Text != want {
 		t.Errorf("injected text mismatch:\n got  %q\n want %q", gotInjected[0].Text, want)
 	}

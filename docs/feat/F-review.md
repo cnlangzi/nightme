@@ -1018,3 +1018,100 @@ v2 评估:加 `cs.Emitter().Send("review failed: ...")` 给用户可见的失败
 - `internal/command/review/cmd_test.go` — 只测 inline 错误路径(arg check / accept no args);async 行为由上面两个测试 + 实机 smoke 覆盖
 
 完整 chat session 构造太重,async dispatcher pattern 由代码审查 + smoke test 验证,不写重复测试。
+
+---
+
+## 12. v8 改造:`--agent` flag(2026-08-18)
+
+v6 严格说"零限定符",但实际工作流里用户希望用**不同的 agent 跑 review**,把 findings 注入**当前 chat session**。v8 加上唯一的可选 flag `--agent <name>`(短形式 `-a`),但 findings 仍然落到当前选中的 AS(不切 AS)。
+
+### 12.1 设计选择
+
+| 问题 | 选择 | 理由 |
+|---|---|---|
+| `--agent` 接受哪些值? | `agent.Builtins` 已注册的任何 agent | 一致 — 跟 `/use` 用同一个 registry |
+| `--agent` 是否切 AS? | **不切** | 用户要的是"不同的 reviewer,同一个 chat";切 AS 副作用太大 |
+| findings 注入哪个 AS? | **始终是当前选中的 AS**(`as.SendBlocks`) | review 是 chat 内的对话,inject 到 active chat |
+| `formatReviewMessage` 是否标注 reviewer? | 是 — `## Code review of <workspace> (run by "<agent>")` | 让 main agent 知道"这是 codex 跑出来的 review,不是 claude 自己跑的" |
+| 不知道 `--agent <name>` 时? | inline 错误 "❌ unknown agent" | 跟 `/use <name>` 的语义一致 |
+
+### 12.2 文件改动
+
+- `internal/command/review/cmd.go`:`parseReviewArgs` 接受 `--agent/-a <name>`,rejects 其他 arg。`Spec` struct 加 `Agent` 字段。`Spec.Usage` 文档化 3 种调用。
+- `internal/agent/review.go`:`formatReviewMessage` 加 `s.Info().Name` 入参,preamble 变 `## Code review of <ws> (run by "<agent>")`。
+
+### 12.3 实装行为
+
+```bash
+# 当前 AS 是 claude
+/review                  # claude 跑 review,findings 注入回 claude chat
+/review --agent codex    # codex 跑 review,findings 还是注入回 claude chat
+/review -a codex         # 短形式
+
+# 多个 agent 并行 review(同时多次发)
+/review --agent claude &  # claude 跑
+/review --agent codex &   # codex 同时跑
+/review --agent gemini &  # gemini 同时跑
+# 三份 findings 都注入回当前 AS,用户一次看到 3 个 reviewer 的意见
+```
+
+### 12.4 dispatcher 关键代码
+
+```go
+// 解析 argv
+spec, err := parseReviewArgs(input.Args[1:])
+if err != nil {
+    return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+}
+
+as := cs.SelectedAgentSession()
+if as == nil { return ... "no active agent" ... }
+
+// --agent override,空时 fallback 到当前 AS 的 agent
+runnerName := as.Agent
+if spec.Agent != "" {
+    runnerName = spec.Agent
+}
+starter, err := agent.Builtins.Get(runnerName)
+if err != nil { return ... "unknown agent" ... }
+
+// findings 总是注入当前 AS,不切 AS
+rc := agent.ReviewContext{
+    Workspace: cs.SelectedCwd(),
+    Inject:    as.SendBlocks,
+}
+go func() {
+    revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
+    defer cancel()
+    err := starter.Review(revCtx, rc)  // 用 --agent 指定的 starter 跑
+    if err == nil { return }
+    slog.Default().Warn(...)
+    if errors.Is(err, agent.ErrReviewNotSupported) { /* surface to user */ }
+}()
+return &command.SlashOutput{Consumed: true}, nil
+```
+
+### 12.5 实机对比
+
+**v7(没有 --agent)**:
+- claude session 跑 claude /review,findings 注入回 claude chat — 单 reviewer 循环
+
+**v8(有 --agent)**:
+- claude session 跑 `codex /review` 或 `claude /review` 或 `dsh /review` — 多 reviewer 并行,findings 全部回到 claude chat
+- 适合代码 review 流水线(主 agent 选 A,review 调 B/C/D,fix 由 A 决定)— 利用不同模型的盲区互补
+
+### 12.6 多 reviewer 并行风险评估
+
+- 多个 goroutine 同时调 `as.SendBlocks` 写主 chat。claudecode / codex / pi / acp 都有 driver-level mutex(claudecode `d.stdinMu`,codex/pi `d.turnMu` 等),保证 frame 写入原子;dsh/pty 没显式锁但有 host-side RPC 队列保护。详见 v8 风险评估 doc。
+- main agent 同时收到多份 review 时,会先 emit 简短响应(每条),然后处理 fix 请求 — 用户体验是 "看到 3 条 review 接连出现,然后说 fix 一次"。OK。
+
+### 12.7 测试
+
+- `TestParseReviewArgs`:9 个 case,覆盖空 / `--agent codex` / `-a codex` / `--agent 无值` / 位置 arg / 未知 flag / 空 agent 名
+- `TestReview_InjectsFormattedReview` / `TestReview_UsesSharedPrompt`:验证 `(run by "fake")` preamble 出现在 injected 文本里
+
+### 12.8 不做的事
+
+- v1 不切 AS(`/review --agent codex` 不会让 chat session 切到 codex)
+- v1 不并发 submit 同一 chat — 多个 goroutine 调 `as.SendBlocks` 串行(由 driver 的 mutex / RPC 队列保证 frame 完整)
+- v1 不支持 `--agent pty` 之类的"(review 失败但 inline 报错)— pty 会返 `ErrReviewNotSupported`,已经通过 `cs.Emitter().Send` surface 给用户

@@ -140,12 +140,25 @@ func TestMatchAsset_PicksOurOSArch(t *testing.T) {
 // release has no asset for our OS/arch, MatchAsset returns
 // nil (no error). The CLI translates that into "no binary
 // for darwin/arm64 in this release".
+//
+// We list only assets for a DIFFERENT GOOS than the test
+// runner's, so the test is platform-independent (CI runners
+// on linux/amd64, macos/arm64, etc. all see "no match" for
+// the synthetic release).
 func TestMatchAsset_NoMatch(t *testing.T) {
+	otherOS := "windows"
+	if runtime.GOOS == "windows" {
+		otherOS = "linux"
+	}
+	wantExt := "tar.gz"
+	if otherOS == "windows" {
+		wantExt = "zip"
+	}
 	r := &Release{
 		TagName: "v9.9.9",
 		Assets: []Asset{
-			{Name: "nightme_9.9.9_linux_amd64.tar.gz"},
-			{Name: "nightme_9.9.9_linux_arm64.tar.gz"},
+			{Name: fmt.Sprintf("nightme_9.9.9_%s_amd64.%s", otherOS, wantExt)},
+			{Name: fmt.Sprintf("nightme_9.9.9_%s_arm64.%s", otherOS, wantExt)},
 		},
 	}
 	if got := MatchAsset(r, "9.9.9"); got != nil {

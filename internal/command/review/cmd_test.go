@@ -35,21 +35,29 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 )
 
-// TestSpec_RejectsArgs covers the inline `len(input.Args) > 1`
-// check. /review is zero-qualifier; any extra arg gets a
-// "❌ /review 不接受参数" reply with the offending arg echoed.
+// TestSpec_RejectsArgs covers the arg-rejection path. /review is
+// zero-qualifier except for the --agent / -a flag, so any
+// unrecognized arg (positional name, unknown flag) gets a
+// "❌ unknown arg" reply with the offending token echoed.
 //
 // (command.Reply always sets Consumed=true — the runtime shim
 // consumes the slash output and routes Reply to the channel. We
 // only check Reply text here, not Consumed.)
+//
+// Note: this test was previously written under the v6 design
+// (inline len > 1 check + "不接受参数" message). v8 added the
+// --agent flag and removed the inline check; parseReviewArgs is
+// now the single source of truth for arg validation. The test
+// names are kept for parity.
 func TestSpec_RejectsArgs(t *testing.T) {
 	cases := []struct {
-		name string
-		args []string
+		name           string
+		args           []string
+		wantArgInReply string
 	}{
-		{"single extra arg", []string{"review", "foo"}},
-		{"multiple extra args", []string{"review", "foo", "bar"}},
-		{"flag-looking arg", []string{"review", "--base", "main"}},
+		{"single extra arg", []string{"review", "foo"}, "foo"},
+		{"multiple extra args", []string{"review", "foo", "bar"}, "foo"},
+		{"flag-looking arg", []string{"review", "--base", "main"}, "--base"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,13 +71,13 @@ func TestSpec_RejectsArgs(t *testing.T) {
 			if out.Reply == "" {
 				t.Fatal("Handle returned empty Reply; expected error message")
 			}
-			if !strings.Contains(out.Reply, "/review 不接受参数") {
+			if !strings.Contains(out.Reply, "unknown arg") {
 				t.Errorf("Reply %q does not contain expected error", out.Reply)
 			}
 			// The first extra arg should be echoed back so the
 			// user knows which one was the offender.
-			if !strings.Contains(out.Reply, tc.args[1]) {
-				t.Errorf("Reply %q does not echo offending arg %q", out.Reply, tc.args[1])
+			if !strings.Contains(out.Reply, tc.wantArgInReply) {
+				t.Errorf("Reply %q does not echo offending arg %q", out.Reply, tc.wantArgInReply)
 			}
 		})
 	}

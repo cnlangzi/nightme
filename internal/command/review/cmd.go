@@ -141,16 +141,6 @@ func parseReviewArgs(argv []string) (Spec, error) {
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	// /review 零限定符 — input.Args[0] is the "review" command
-	// itself, anything beyond that is an unexpected arg.
-	// Inline check matches the /cwd / /think / /use pattern —
-	// no separate parse function (F-review.md §2.4).
-	if len(input.Args) > 1 {
-		return command.Reply(ctx, rt, fmt.Sprintf(
-			"❌ /review 不接受参数;去掉 %q", input.Args[1],
-		)), nil
-	}
-
 	// Parse args. /review supports ONE optional flag: --agent/-a
 	// to specify which coding agent runs the review (overriding
 	// the default of the current selected AS). Findings always
@@ -159,8 +149,14 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// different agents and feed back into the same AS, matching
 	// the user's "different reviewers, single chat" workflow.
 	//
-	// All other args (positional names, other flags) are
-	// rejected — matches /cwd / /think / /use inline check.
+	// parseReviewArgs is the single source of truth for arg
+	// validation (rejects unknown flags + positional names with
+	// a specific error message). There is intentionally no inline
+	// `len(input.Args) > 1` check — such a check would mistakenly
+	// reject `/review --agent codex` (3 args) before the flag
+	// parser can recognize `--agent`. v6 used an inline check +
+	// zero qualifiers; v8 added `--agent` and the inline check
+	// must NOT fire before parseReviewArgs.
 	spec, err := parseReviewArgs(input.Args[1:])
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil

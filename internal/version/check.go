@@ -383,3 +383,9 @@ func isOutdated(current, latest string) bool {
 	}
 	return semver.Compare(cur, lat) < 0
 }
+
+// IsOutdated is the exported alias used by other packages
+// (e.g. internal/updater.Check) that need to compare a
+// current build version against a latest tag without taking
+// a dependency on the Checker's on-disk cache.
+func IsOutdated(current, latest string) bool { return isOutdated(current, latest) }

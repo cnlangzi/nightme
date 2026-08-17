@@ -49,6 +49,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/version"
 )
 
 // DefaultTimeout caps the entire download path (lookup +
@@ -90,19 +92,74 @@ type Asset struct {
 	Size               int64  `json:"size"`
 }
 
+// CheckResult is the unified stage-1 output. It bundles the
+// raw *Release (so downstream stages can pick the asset +
+// SHA256SUMS without a second API call) with the user-
+// facing Latest string and the Outdated bool.
+//
+//   Latest  — tag of the release we're targeting (e.g. "v0.3.7")
+//   Outdated — true when current < latest under semver rules
+//   Release — full *Release for stages 2 + 3
+type CheckResult struct {
+	Latest   string
+	Outdated bool
+	Release  *Release
+}
+
+// Check is stage 1: resolve the latest (or pinned) GitHub
+// release and decide whether the running build is out of
+// date. It does NOT touch the filesystem or any binaries.
+//
+// Tag is the optional `--tag vX.Y.Z` override; empty means
+// "latest". The current version is read from the package-
+// level version.Version via version.Compare.
+//
+// Errors are surfaced verbatim — the CLI translates them
+// into the "[1/3] check failed" line.
+func Check(ctx context.Context, tag string) (*CheckResult, error) {
+	release, err := Lookup(ctx, "cnlangzi/nightme", tag)
+	if err != nil {
+		return nil, err
+	}
+	latest := release.TagName
+	outdated := isOutdatedLatest(latest)
+	return &CheckResult{
+		Latest:   latest,
+		Outdated: outdated,
+		Release:  release,
+	}, nil
+}
+
+// isOutdatedLatest compares version.Version (build-time
+// identity) with the latest tag from the release feed.
+// It defers to the internal/version.IsOutdated helper so the
+// comparison rules stay in lock-step with the REPL startup
+// prompt (which uses the same helper).
+func isOutdatedLatest(latest string) bool {
+	return version.IsOutdated(version.Version, latest)
+}
+
+// LookupURL is the base URL GitHub's releases API lives at.
+// Held as a var so tests can swap it for an httptest server
+// without having to plumb a base URL through every caller.
+//
+// Production callers should leave this untouched; the default
+// (api.github.com) is what we ship.
+var LookupURL = "https://api.github.com"
+
 // Lookup queries GitHub for the release that matches the
 // given tag (e.g. "v0.3.7" or "0.3.7"). When tag is empty the
 // API serves the latest non-prerelease release.
 //
 // repo is "owner/name" on GitHub. Tests override this to point
-// at an httptest server.
+// at an httptest server via LookupURL.
 func Lookup(ctx context.Context, repo, tag string) (*Release, error) {
-	url := "https://api.github.com/repos/" + repo + "/releases/latest"
+	url := LookupURL + "/repos/" + repo + "/releases/latest"
 	if tag != "" {
 		// GitHub's /releases/tags/<tag> route returns the
 		// same JSON shape and works for any tag, including
 		// those that point at a draft / pre-release.
-		url = "https://api.github.com/repos/" + repo + "/releases/tags/" + tag
+		url = LookupURL + "/repos/" + repo + "/releases/tags/" + tag
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -440,6 +497,55 @@ func formatBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGT"[exp])
+}
+
+// NewASCIIProgressBar returns a ProgressFunc that renders a
+// single-line ASCII bar to out. The bar overwrites itself
+// with \r on every tick and the caller prints a final
+// newline (Download flushes an empty event by virtue of
+// total == done).
+//
+// Layout (width = 30 cells):
+//
+//   [==============              ]  47% 1.2 MB / 2.6 MB  4.3 MB/s  ETA 5s
+//
+// total <= 0 (server omitted Content-Length) renders an
+// indeterminate bar that only shows downloaded bytes —
+// the bar cell count grows as bytes arrive.
+func NewASCIIProgressBar(out io.Writer, total int64) ProgressFunc {
+	const width = 30
+	return func(downloaded, totalNow int64, elapsed time.Duration) {
+		if totalNow > 0 {
+			total = totalNow
+		}
+		var pct float64
+		if total > 0 {
+			pct = float64(downloaded) / float64(total)
+			if pct > 1 {
+				pct = 1
+			}
+		}
+		filled := int(pct * float64(width))
+		if filled > width {
+			filled = width
+		}
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
+		var speed, eta string
+		elapsedSec := elapsed.Seconds()
+		if elapsedSec > 0 {
+			speed = FormatSpeed(downloaded, elapsed)
+		} else {
+			speed = "— B/s"
+		}
+		if total > 0 && downloaded > 0 && elapsedSec > 0 {
+			remaining := time.Duration(float64(total-downloaded)/float64(downloaded)*elapsedSec) * time.Second
+			eta = " ETA " + remaining.Round(time.Second).String()
+		}
+		fmt.Fprintf(out, "\r[%s] %3d%% %s / %s  %s%s",
+			bar, int(pct*100),
+			FormatBytes(downloaded), FormatBytes(total),
+			speed, eta)
+	}
 }
 
 // ExtractArchive pulls the nightme binary out of the .tar.gz /

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // makeTestMessage constructs a `Message` value with the minimal
@@ -32,8 +32,8 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 }
 
 // testEmitter is a minimal outbound.Emitter impl for in-package
-// tests. Records every Send/SendCard so tests can assert what
-// was emitted. PATCH semantics are encoded as Kind=OutCardPatch
+// tests. Records every Send so tests can assert what
+// was emitted. PATCH semantics are encoded as Kind=OutChoicePatch
 // in the message itself; the Send path applies the disabled-flag
 // conventions that the runtime would have set.
 //
@@ -44,7 +44,7 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 type testEmitter struct {
 	Sent []messages.OutboundMessage
 
-	// SendErr, when non-nil, is returned from Send and SendCard.
+	// SendErr, when non-nil, is returned from Send.
 	// Lets tests simulate channel-adapter failures (Feishu 5xx,
 	// network timeout) without standing up a real Channel. The
 	// message IS still recorded in Sent even when SendErr is
@@ -58,14 +58,6 @@ type testEmitter struct {
 func (t *testEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
 	t.Sent = append(t.Sent, msg)
 	return t.SendErr
-}
-
-func (t *testEmitter) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
-	t.Sent = append(t.Sent, msg)
-	if t.SendErr != nil {
-		return "", t.SendErr
-	}
-	return "bot-msg-test", nil
 }
 
 // pushEvent pushes an EnrichedEvent into the AS's dispatch queue

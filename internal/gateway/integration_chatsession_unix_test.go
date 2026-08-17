@@ -17,10 +17,10 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
-	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // fakeCh is a minimal outbound.Emitter for tests in this package.
@@ -51,12 +51,12 @@ import (
 // --- mock channel.Channel ----------------------------------------------------
 
 type recordingChannel struct {
-	mu      sync.Mutex
-	chatID  string
+	mu       sync.Mutex
+	chatID   string
 	captured []messages.OutboundMessage
 }
 
-func (c *recordingChannel) Name() string  { return "mock" }
+func (c *recordingChannel) Name() string                  { return "mock" }
 func (c *recordingChannel) Start(_ context.Context) error { return nil }
 func (c *recordingChannel) Stop(_ context.Context) error  { return nil }
 func (c *recordingChannel) Incoming() <-chan messages.InboundMessage {
@@ -70,10 +70,6 @@ func (c *recordingChannel) Send(_ context.Context, msg messages.OutboundMessage)
 	c.captured = append(c.captured, msg)
 	return nil
 }
-func (c *recordingChannel) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
-	_ = c.Send(context.Background(), msg)
-	return "mock-card-0", nil
-}
 func (c *recordingChannel) Record() []messages.OutboundMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -84,7 +80,7 @@ func (c *recordingChannel) Record() []messages.OutboundMessage {
 
 // Channel-interface extensions (Phase 2.1 + 2.2). recordingChannel
 // has no live state — all four are trivial fallbacks.
-func (c *recordingChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (c *recordingChannel) OnPromptEnded(_ context.Context, _, _ string) {}
 func (c *recordingChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "mock", json.RawMessage("{}"), nil
 }
@@ -327,7 +323,7 @@ func newIntegrationFake(pid int) *integrationFake {
 }
 
 func (f *integrationFake) Events() <-chan agent.AgentEvent { return f.events }
-func (f *integrationFake) PID() int                       { return f.pid }
+func (f *integrationFake) PID() int                        { return f.pid }
 func (f *integrationFake) Info() agent.Info {
 	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
@@ -354,7 +350,7 @@ func (d *integrationFakeDriver) SendPermission(resp string) error {
 }
 func (d *integrationFakeDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *integrationFakeDriver) Stop(ctx context.Context) error  { return d.inner.Stop(ctx) }
-func (d *integrationFakeDriver) Close() error                   { return d.inner.Close() }
+func (d *integrationFakeDriver) Close() error                    { return d.inner.Close() }
 func (d *integrationFakeDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
@@ -363,7 +359,7 @@ func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) erro
 }
 func (f *integrationFake) SendPermission(string) error { return nil }
 func (f *integrationFake) New(context.Context) error   { return nil }
-func (f *integrationFake) Stop(context.Context) error { return agent.ErrNotSupported }
+func (f *integrationFake) Stop(context.Context) error  { return agent.ErrNotSupported }
 func (f *integrationFake) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	if err := f.SendBlocks(ctx, blocks); err != nil {
 		return agent.RunResult{}, err
@@ -449,26 +445,26 @@ func summarizeKinds(msgs []messages.OutboundMessage) []messages.OutboundKind {
 // first read, wrong channel buffering, parse failure), this test
 // fails with a clear signal.
 func TestIntegration_RealBridge_FakeShell(t *testing.T) {
-//
-// The shell script writes:
-//   1. system/init             → EventAgentReady (immediate, no anchor)
-//   2. (wait for stdin prompt)  → barrier: bridge.SendBlocks has
-//                                 set currentPrompt by the time we
-//                                 return from read
-//   3. assistant message       → EventAgentText "hello back"
-//   4. result                  → EventAgentResult "final answer"
-//   5. EOF (exit 0)            → pumpStream closes events
-//
-// Why the stdin-wait barrier matters: the bridge spawns the script
-// via exec.CommandContext and pumpStream starts reading stdout
-// immediately. If the script eagerly emits init/assistant/result
-// before the test calls QueueUserMessage, the readpump sees those
-// events while currentPrompt is still nil, so they all carry
-// UserMsgID="" and the OutReply.ReplyTo assertion below fails.
-// Real claudecode behaves correctly because the real CLI waits for
-// the prompt on stdin before producing the assistant turn — the
-// fake must mirror that. See issue: anchor race in
-// real-bridge + fake-shell integration test (env-sensitive).
+	//
+	// The shell script writes:
+	//   1. system/init             → EventAgentReady (immediate, no anchor)
+	//   2. (wait for stdin prompt)  → barrier: bridge.SendBlocks has
+	//                                 set currentPrompt by the time we
+	//                                 return from read
+	//   3. assistant message       → EventAgentText "hello back"
+	//   4. result                  → EventAgentResult "final answer"
+	//   5. EOF (exit 0)            → pumpStream closes events
+	//
+	// Why the stdin-wait barrier matters: the bridge spawns the script
+	// via exec.CommandContext and pumpStream starts reading stdout
+	// immediately. If the script eagerly emits init/assistant/result
+	// before the test calls QueueUserMessage, the readpump sees those
+	// events while currentPrompt is still nil, so they all carry
+	// UserMsgID="" and the OutReply.ReplyTo assertion below fails.
+	// Real claudecode behaves correctly because the real CLI waits for
+	// the prompt on stdin before producing the assistant turn — the
+	// fake must mirror that. See issue: anchor race in
+	// real-bridge + fake-shell integration test (env-sensitive).
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-claude.sh")
 	//
@@ -670,7 +666,4 @@ type noopEmitter struct{}
 
 func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {
 	return nil
-}
-func (noopEmitter) SendCard(context.Context, messages.OutboundMessage) (string, error) {
-	return "", nil
 }

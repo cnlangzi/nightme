@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
@@ -35,9 +35,9 @@ type ContextSlot interface {
 // gtwDrafts map. Production: gtwDraftsMap from
 // internal/gateway. Tests: a map[string]*Draft with closures.
 type DraftsMap interface {
-	Store(userMsgID string, d *Draft)
-	Take(userMsgID string) *Draft
-	Lookup(userMsgID string) *Draft
+	Store(requestID string, d *Draft)
+	Take(requestID string) *Draft
+	Lookup(requestID string) *Draft
 }
 
 // /gtw {pr, close} success paths apply a known PR result to
@@ -58,12 +58,9 @@ type DraftsMap interface {
 // All fields are required; pass an instance constructed in the
 // runtime's startup code (cmd/nightme/run.go).
 //
-// Send / SendCard / Patch are gone — replies are sent via
-// cs.Emitter().Send / SendCard / Patch directly. The chat
-// session's Channel is wired at construction (Manager.WithEmitter)
-// and immutable thereafter; production runtime captures via a
-// `capturingChannel` shim in cmd/nightme/debug.go for the gtw-test
-// debug subcommand.
+// Replies go through cs.Emitter().Send. Interactive choices are
+// Kind=OutChoice; follow-up disable is Kind=OutChoicePatch keyed by
+// Choice.RequestID.
 type HandlerDeps struct {
 	// Git wraps the local git binary. Tests inject a fake.
 	Git GitRunner
@@ -103,7 +100,6 @@ type HandlerDeps struct {
 	// that want to focus on the /gtw fix business logic without
 	// needing a usable origin remote.
 	SkipRefreshDefaultBranch bool
-
 }
 
 // Result is the gtw-package view of a command's outcome. Mirrors
@@ -576,12 +572,12 @@ func runFixLocal(
 				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
 		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
-			IssueID: -1,
-			Title:   "(local branch)",
-			Branch:  branch,
-			Slug:    branch,
-			Repo:    "",
-			ChatID:  chatID,
+			IssueID:  -1,
+			Title:    "(local branch)",
+			Branch:   branch,
+			Slug:     branch,
+			Repo:     "",
+			ChatID:   chatID,
 			Worktree: repoRoot,
 		}, existingPath)
 	}
@@ -957,8 +953,8 @@ func emitBranchExistsDraft(
 	payload FixDraftPayload,
 	existingPath string,
 ) (*Result, error) {
-		card := BranchExistsCard(payload, existingPath)
-		return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
+	card := BranchExistsChoice(payload, existingPath)
+	return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
 }
 
 func emitWorktreeFailDraft(
@@ -969,8 +965,8 @@ func emitWorktreeFailDraft(
 	drafts DraftsMap,
 	payload FixDraftPayload,
 ) (*Result, error) {
-		card := WorktreeFailCard(payload)
-		return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
+	card := WorktreeFailChoice(payload)
+	return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
 }
 
 func sendDraft(
@@ -978,71 +974,57 @@ func sendDraft(
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID, userMsgID string,
-	card Card,
+	card Choice,
 	drafts DraftsMap,
 	kind DraftKind,
 	payload FixDraftPayload,
 ) (*Result, error) {
 	requestID := "gtw-fix-" + userMsgID
-	if requestID == "" {
+	if userMsgID == "" {
 		requestID = "gtw-fix-" + payload.Branch
 	}
 	card.RequestID = requestID
 
 	em := cs.Emitter()
-	var botMsgID string
+	cardPosted := false
 	if em != nil {
-		id, err := em.SendCard(ctx, messages.OutboundMessage{
+		if err := em.Send(ctx, messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   messages.OutCard,
-			Card:   gtwCardToGateway(card),
-		})
-		if err == nil {
-			botMsgID = id
-		}
-		// On error: fall through to text Send as a best-effort so
-		// the user still sees the decision content even if the
-		// channel's card path is unavailable.
-	}
-	if em == nil || botMsgID == "" {
-		// Legacy / fallback: render the card as plain markdown and
-		// send via the unified sink. The dispatcher still stores the
-		// draft so the reaction pipeline works; the action handler
-		// just emits plain text follow-ups (no PATCH) when the
-		// bot message id is empty.
-		if em != nil {
-			// Card-render-failure fallback is NOT the agent-result
-			// surface — replyAgent with empty agent stamp keeps
-			// this path uniform with the rest of GTW's outbound
-			// writes (git footer is still stamped by the Emitter's
-			// stampGitStatus chokepoint).
+			Kind:   messages.OutChoice,
+			Choice: gtwChoiceToGateway(card),
+		}); err == nil {
+			cardPosted = true
+		} else {
+			// Card path failed: fall through to markdown so the
+			// user still sees the decision content. Follow-up
+			// after click will be plain text (ChoicePosted=false).
 			_ = replyAgent(ctx, em, chatID, messageID,
-				renderCardMarkdown(card), "", agent.RunResult{})
+				renderChoiceMarkdown(card), "", agent.RunResult{})
 		}
 	}
 
-	drafts.Store(userMsgID, &Draft{
-		Kind:          kind,
-		Payload:       payload,
-		CreatedAt:     deps.Now(),
-		BotMessageID:  botMsgID,
-		CardTitle:     card.Title,
-		CardBody:      card.Body,
-		CardChoices:   card.Choices,
-		CardRequestID: requestID,
+	drafts.Store(requestID, &Draft{
+		Kind:            kind,
+		Payload:         payload,
+		CreatedAt:       deps.Now(),
+		ChoicePosted:    cardPosted,
+		ChoiceTitle:     card.Title,
+		ChoiceBody:      card.Body,
+		ChoiceOptions:   card.Options,
+		ChoiceRequestID: requestID,
 	})
 	return &Result{Consumed: true}, nil
 }
 
-// toChatsessionCardChoices was removed in F-51: the gtw package
-// now owns CardChoice directly (no chatsession alias needed).
-// The renderer stores card.Choices verbatim on the draft.
+// toChatsessionChoiceOptions was removed in F-51: the gtw package
+// now owns ChoiceOption directly (no chatsession alias needed).
+// The renderer stores card.Options verbatim on the draft.
 
-// renderCardMarkdown flattens a Card back to plain markdown for
-// legacy channels that don't support interactive cards (Feishu
+// renderChoiceMarkdown flattens a Choice back to plain markdown for
+// legacy channels that don't support interactive choice prompts (Feishu
 // Web in some configs, Slack, etc.). The shape mirrors the F-45
 // plain-text decision cards so the user's view is unchanged.
-func renderCardMarkdown(c Card) string {
+func renderChoiceMarkdown(c Choice) string {
 	var b strings.Builder
 	if c.Title != "" {
 		b.WriteString(c.Title)
@@ -1052,9 +1034,9 @@ func renderCardMarkdown(c Card) string {
 		b.WriteString(c.Body)
 		b.WriteString("\n")
 	}
-	if len(c.Choices) > 0 {
+	if len(c.Options) > 0 {
 		b.WriteString("\n选择操作(反应对应 emoji):\n")
-		for _, ch := range c.Choices {
+		for _, ch := range c.Options {
 			label := ch.Label
 			if ch.Emoji != "" {
 				label = ch.Emoji + " " + label
@@ -1067,37 +1049,20 @@ func renderCardMarkdown(c Card) string {
 	return b.String()
 }
 
-// gtwCardToGateway translates gtw.Card (business view) to the
-// wire-level messages.Card. gtw.Card has fewer fields (no
-// Kind/Disabled/ChosenEmoji); Kind defaults to CardKindDecision
-// (the only /gtw card kind) — pre-refactor this default lived
-// in the deleted cardKindFromString. Disabled and ChosenEmoji
-// stay zero; the runtime path that needs them (gtw.emitFollowUp
-// post-reaction) sets them inline on the messages.OutboundMessage
-// after the fact.
-func gtwCardToGateway(in Card) *messages.Card {
-	return &messages.Card{
-		Kind:      messages.CardKindDecision,
+// gtwChoiceToGateway translates gtw.Choice (business view) to the
+// wire-level messages.Choice. Kind is always ChoiceKindDecision.
+func gtwChoiceToGateway(in Choice) *messages.Choice {
+	opts := in.Options
+	if opts != nil {
+		opts = append([]messages.ChoiceOption(nil), opts...)
+	}
+	return &messages.Choice{
+		Kind:      messages.ChoiceKindDecision,
 		Title:     in.Title,
 		Body:      in.Body,
-		Choices:   gtwCardChoicesToGateway(in.Choices),
+		Options:   opts,
 		RequestID: in.RequestID,
 	}
-}
-
-func gtwCardChoicesToGateway(in []CardChoice) []messages.CardChoice {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]messages.CardChoice, len(in))
-	for i, c := range in {
-		out[i] = messages.CardChoice{
-			Emoji:  c.Emoji,
-			Label:  c.Label,
-			Action: c.Action,
-		}
-	}
-	return out
 }
 
 // reply posts a plain-text OutReply via the chat session's

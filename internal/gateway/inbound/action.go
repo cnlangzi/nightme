@@ -14,7 +14,7 @@
 //
 // F-59: the actual dispatchAction call now runs in a spawned
 // goroutine so reaction handling (which may invoke a card
-// PATCH through Emitter.SendCard or call into a downstream
+// PATCH through Emitter.Send (Kind=OutChoicePatch) or call into a downstream
 // gtw / permission handler) never blocks the dispatchLoop
 // monitor. The sync pattern check (Reaction / Action != nil)
 // stays inline so the chain's handled decision is synchronous.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strconv"
 	"sync"
 	"testing"
 
@@ -18,16 +17,16 @@ import (
 // fakeChannel is a minimal Channel implementation used by
 // gateway-level tests (kept local because the legacy shared
 // definition lived in the deleted handlers_chatsession_test.go).
-// Records every Send / SendCard so tests can assert on the
+// Records every Send so tests can assert on the
 // resulting OutboundMessages.
 type fakeChannel struct {
 	mu    sync.Mutex
 	sends []messages.OutboundMessage
 }
 
-func (c *fakeChannel) Name() string { return "fake" }
+func (c *fakeChannel) Name() string                  { return "fake" }
 func (c *fakeChannel) Start(_ context.Context) error { return nil }
-func (c *fakeChannel) Stop(_ context.Context) error { return nil }
+func (c *fakeChannel) Stop(_ context.Context) error  { return nil }
 func (c *fakeChannel) Incoming() <-chan messages.InboundMessage {
 	return make(<-chan messages.InboundMessage)
 }
@@ -37,16 +36,10 @@ func (c *fakeChannel) Send(_ context.Context, m messages.OutboundMessage) error 
 	c.sends = append(c.sends, m)
 	return nil
 }
-func (c *fakeChannel) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
-	_ = c.Send(context.Background(), m)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return "fake-card-" + strconv.Itoa(len(c.sends)), nil
-}
 
 // Channel-interface extensions (Phase 2.1 + 2.2). fakeChannel
 // has no live state — all four are trivial fallbacks.
-func (c *fakeChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (c *fakeChannel) OnPromptEnded(_ context.Context, _, _ string) {}
 func (c *fakeChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "fake", json.RawMessage("{}"), nil
 }
@@ -169,11 +162,11 @@ func newWiredRouter(t *testing.T) (*Router, *fakeChannel) {
 	t.Helper()
 	ch := &fakeChannel{}
 	ir := inbound.New(
-		teststubs.NewMessage(nil),                 // mgr=nil — chain never reaches GetOrCreate
-		teststubs.AlwaysFallThrough{},              // commander: never claims
-		teststubs.AlwaysFallThroughShell{},         // shell: never claims
-		teststubs.NewReaction(false),               // reaction router: never claims
-		&gatewaytest.NoopEmitter{},                 // F-59: emitter moved into inbound.Router
+		teststubs.NewMessage(nil),          // mgr=nil — chain never reaches GetOrCreate
+		teststubs.AlwaysFallThrough{},      // commander: never claims
+		teststubs.AlwaysFallThroughShell{}, // shell: never claims
+		teststubs.NewReaction(false),       // reaction router: never claims
+		&gatewaytest.NoopEmitter{},         // F-59: emitter moved into inbound.Router
 		"primary",
 	)
 	gw := New(ir, &gatewaytest.NoopEmitter{})

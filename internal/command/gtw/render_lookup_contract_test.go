@@ -8,7 +8,7 @@ import (
 )
 
 // TestRenderActionLookupContract locks the contract between
-// BranchExistsCard / WorktreeFailCard (the gtw card renderer) and
+// BranchExistsChoice / WorktreeFailChoice (the gtw card renderer) and
 // messages.ActionLookup (the channel-side translator that turns
 // Feishu card.action.trigger events into ReactionKind values).
 //
@@ -27,19 +27,19 @@ import (
 func TestRenderActionLookupContract(t *testing.T) {
 	cases := []struct {
 		name string
-		card gtw.Card
+		card gtw.Choice
 	}{
 		{
-			name: "BranchExistsCard",
-			card: gtw.BranchExistsCard(gtw.FixDraftPayload{
-				Branch: "feat/foo",
+			name: "BranchExistsChoice",
+			card: gtw.BranchExistsChoice(gtw.FixDraftPayload{
+				Branch:  "feat/foo",
 				IssueID: 42,
 				Title:   "example issue",
 			}, ""),
 		},
 		{
-			name: "WorktreeFailCard",
-			card: gtw.WorktreeFailCard(gtw.FixDraftPayload{
+			name: "WorktreeFailChoice",
+			card: gtw.WorktreeFailChoice(gtw.FixDraftPayload{
 				Branch:   "feat/foo",
 				IssueID:  -1, // local-mode
 				GitError: "fatal: not a git repository",
@@ -49,19 +49,19 @@ func TestRenderActionLookupContract(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if len(tc.card.Choices) == 0 {
-				t.Fatalf("%s has no Choices — card rendered nothing to route", tc.name)
+			if len(tc.card.Options) == 0 {
+				t.Fatalf("%s has no Options — choice rendered nothing to route", tc.name)
 			}
-			for _, choice := range tc.card.Choices {
-				kind, ok := messages.ActionLookup(choice.Action)
+			for _, choice := range tc.card.Options {
+				kind, ok := messages.ActionLookup(choice.ID)
 				if !ok {
-					t.Errorf("%s emitted Action %q (Emoji %q) — ActionLookup has no mapping; user would see '未知操作' toast",
-						tc.name, choice.Action, choice.Emoji)
+					t.Errorf("%s emitted ID %q (Emoji %q) — ActionLookup has no mapping; user would see '未知操作' toast",
+						tc.name, choice.ID, choice.Emoji)
 					continue
 				}
 				if string(kind) != choice.Emoji {
-					t.Errorf("%s emitted Action %q → kind %q, but the rendered Emoji is %q (must match so the reaction handler sees the same emoji path)",
-						tc.name, choice.Action, kind, choice.Emoji)
+					t.Errorf("%s emitted ID %q → kind %q, but the rendered Emoji is %q (must match so the reaction handler sees the same emoji path)",
+						tc.name, choice.ID, kind, choice.Emoji)
 				}
 			}
 		})
@@ -79,7 +79,7 @@ func TestActionLookupUnknown(t *testing.T) {
 		"act:/gtw/",
 		"act:/unknown",
 		"random string",
-		"ACT:/GTW/CANCEL", // case-sensitive
+		"ACT:/GTW/CANCEL",  // case-sensitive
 		"act:/gtw/cancel ", // trailing space
 	} {
 		if _, ok := messages.ActionLookup(tag); ok {

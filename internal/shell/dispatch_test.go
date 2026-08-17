@@ -317,9 +317,7 @@ func evalLinks(p string) string {
 // ---------------------------------------------------------------------------
 
 // fakeEmitter records each Send call. Implements outbound.Emitter
-// via the Send method; SendCard is unimplemented (returns ""
-// + nil) because shell.Dispatcher only uses Send. Tests that
-// need both methods can extend this struct.
+// via the Send method.
 //
 // sendErr, when non-nil, is returned from Send — used to verify
 // the "reply Send failed → goroutine still completes and emits
@@ -337,10 +335,6 @@ func (f *fakeEmitter) Send(_ context.Context, msg messages.OutboundMessage) erro
 	f.mu.Unlock()
 	f.gotReply.Store(true)
 	return f.sendErr
-}
-
-func (f *fakeEmitter) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
-	return "", nil
 }
 
 func (f *fakeEmitter) callsCopy() []messages.OutboundMessage {
@@ -729,10 +723,6 @@ type panickingEmitter struct{}
 
 func (panickingEmitter) Send(_ context.Context, _ messages.OutboundMessage) error {
 	panic("panickingEmitter: simulating dispatcher-side panic")
-}
-
-func (panickingEmitter) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
-	return "", nil
 }
 
 // TestDispatcherHandle_PanicStillEmitsDone verifies that even

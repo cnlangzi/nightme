@@ -8,14 +8,14 @@
 //
 // Dispatch (after SanitizeCardMarkdown):
 //
-//   ┌─ no markdown indicators ───────────── MsgTypeText (plain text bubble)
-//   │
-//   ├─ tables > resultCardTableLimit ───── MsgTypePost + tag:"md"
-//   │                                      (GFM rendering, no Card 2.0 table cap)
-//   │
-//   └─ default ──────────────────────────── MsgTypeInteractive (Card 2.0)
-//                                           elements split via
-//                                           splitMarkdownForDivs @ ≤ divTextCharLimit
+//	┌─ no markdown indicators ───────────── MsgTypeText (plain text bubble)
+//	│
+//	├─ tables > resultCardTableLimit ───── MsgTypePost + tag:"md"
+//	│                                      (GFM rendering, no Card 2.0 table cap)
+//	│
+//	└─ default ──────────────────────────── MsgTypeInteractive (Card 2.0)
+//	                                        elements split via
+//	                                        splitMarkdownForDivs @ ≤ divTextCharLimit
 //
 // MsgTypeText is rare in practice (Claude Code almost always emits markdown).
 // MsgTypePost catches the "many tables" edge case where Card 2.0's 5-table
@@ -196,13 +196,13 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 // receipt cards and result cards render the footer identically.
 //
 // Approach (matches openclaw-lark src/card/builder.ts::buildFooter):
-//   1. <hr> tag for the divider (Feishu renders ≈ #E5E5E5 thin-grey line)
-//   2. <markdown> element with multiline content + <font color='grey'>
-//      around each line. Feishu CardKit's lark_md supports inline
-//      <font color='...' color tags with named colors (red, green,
-//      grey, blue, etc.) — NOT hex (Feishu rejects with 230099
-//      "invalid color: #999999"). <text_tag color='grey'> is the
-//      newer equivalent of <font>; both work.
+//  1. <hr> tag for the divider (Feishu renders ≈ #E5E5E5 thin-grey line)
+//  2. <markdown> element with multiline content + <font color='grey'>
+//     around each line. Feishu CardKit's lark_md supports inline
+//     <font color='...' color tags with named colors (red, green,
+//     grey, blue, etc.) — NOT hex (Feishu rejects with 230099
+//     "invalid color: #999999"). <text_tag color='grey'> is the
+//     newer equivalent of <font>; both work.
 //
 // Why NOT <plain_text> with text_color: a separate card element per
 // line works (each <div> wrapping a <plain_text>), but is more
@@ -288,7 +288,7 @@ func buildResultPayload(sanitized string, footerLines []string) (msgType string,
 // entering a Feishu Card 2.0 `tag:"markdown"` element. Apply at every code
 // path that ships such content (OutResult via sendResultAsReply; OutReply
 // via buildReceiptCard inside ensureReceiptForReplyWithFooter /
-// postOrphanReplyCard; OutCard via buildInteractiveCard).
+// postOrphanReplyCard; OutChoice via buildInteractiveCard).
 //
 // Source: cc-connect `platform/feishu/feishu.go` (functions
 // sanitizeMarkdownURLs, preprocessFeishuMarkdown, stripInvalidFeishuCardImages,
@@ -491,16 +491,16 @@ func restoreFencedCodeBlocks(text string, blocks []string) string {
 }
 
 var (
-	h2to6Re         = regexp.MustCompile(`(?m)^#{2,6} (.+)$`)
-	h1Re            = regexp.MustCompile(`(?m)^# (.+)$`)
-	h1to3TriggerRe  = regexp.MustCompile(`(?m)^#{1,3} `)
-	multiNewlineRe  = regexp.MustCompile(`\n{3,}`)
+	h2to6Re        = regexp.MustCompile(`(?m)^#{2,6} (.+)$`)
+	h1Re           = regexp.MustCompile(`(?m)^# (.+)$`)
+	h1to3TriggerRe = regexp.MustCompile(`(?m)^#{1,3} `)
+	multiNewlineRe = regexp.MustCompile(`\n{3,}`)
 )
 
 // optimizeFeishuCardMarkdown runs:
 //   - Heading demotion (only if H1-H3 headings exist):
-//       H2-H6 → H5 (##### ...)
-//       H1    → H4 (####  ...)
+//     H2-H6 → H5 (##### ...)
+//     H1    → H4 (####  ...)
 //   - 3+ consecutive newlines → 2 (paragraph spacing preservation)
 //
 // Code blocks are protected via placeholders before transforms and restored
@@ -524,7 +524,7 @@ func optimizeFeishuCardMarkdown(text string) string {
 //
 // F-44 migration: this helper used to live in receipt_event.go. With
 // receipt_event.go deleted, it lives here alongside buildResultPayload so
-// every outbound markdown surface (OutReply / OutResult / OutCard) shares
+// every outbound markdown surface (OutReply / OutResult / OutChoice) shares
 // the same clamp semantics. The original signature is preserved byte-for-byte
 // so callers don't need to change.
 //

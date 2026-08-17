@@ -809,7 +809,7 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 // message must stay visible in the main chat):
 //
 //   - receipt cold-start card (the pinned answer card)
-//   - OutCard (permission card — discoverability > chat cleanliness)
+//   - OutChoice (permission card — discoverability > chat cleanliness)
 //   - OutCommandReply (slash command — user is waiting at the cursor)
 //
 // Without this guarantee, a future refactor that decides
@@ -817,14 +817,14 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 // receipt card behind a thread indicator, breaking the core UX.
 func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 	// F-44: ReceiptLazyCreate subtest removed — ensureReceiptForReply
-	// F-44 follow-up: OutCard / OutCommandReply moved off
+	// F-44 follow-up: OutChoice / OutCommandReply moved off
 	// ReplyInBoth to ReplyInChat (top-level Create). They no
 	// longer have a thread / anchor concept, so this test
 	// (which asserts reply_in_thread=false + anchored to
 	// userMsgID) doesn't apply. The dispatch is locked in by
 	// TestSendViaLark_TopLevelCreate_Dispatch and the dedicated
 	// per-kind emoji-prefix tests
-	// (TestSend_OutCard_TopLevelCreate_EmojiPrefixed /
+	// (TestSend_OutChoice_TopLevelCreate_EmojiPrefixed /
 	// TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed).
 
 	// F-49: "OutCompaction" subtest deleted — the OutCompaction kind
@@ -836,16 +836,16 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 // TestSend_OutText_FoldsIntoReceipt — F-34 regression guard.
 // OutReply / OutResult / OutInit / OutUsage must still fold into
 // the receipt card (unchanged behavior).
-// TestSend_OutCard_TopLevelCreate_EmojiPrefixed — F-44 follow-up:
-// OutCard is a top-level Create (ReplyInChat, rootID="") with the
+// TestSend_OutChoice_TopLevelCreate_EmojiPrefixed — F-44 follow-up:
+// OutChoice is a top-level Create (ReplyInChat, rootID="") with the
 // 👉 emoji prepended to the card title. The card is a blocking UI
 // element (user must pick an option) and must stay visible in
 // main chat regardless of whether the parent user message has a
 // tool thread. The emoji is the channel's visual decoration (so
 // users can scan main chat and immediately see "this needs a
-// choice"); the abstract messages.Card.Title is the
+// choice"); the abstract messages.Choice.Title is the
 // undecorated plain title.
-func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
+func TestSend_OutChoice_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 	a := testAdapter(t)
 
 	var captured struct {
@@ -862,23 +862,24 @@ func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 		return "om_card_test", nil
 	}
 
-	card := &messages.Card{
-		Title:   "Action Needed",
-		Body:    "Allow Bash?",
-		Options: []string{"allow", "deny"},
+	card := &messages.Choice{
+		Title:     "Action Needed",
+		Body:      "Allow Bash?",
+		Options:   messages.ChoiceOptionsFromLabels([]string{"allow", "deny"}),
+		RequestID: "req-choice-test",
 	}
 	if err := a.Send(t.Context(), messages.OutboundMessage{
-		Kind:    messages.OutCard,
+		Kind:    messages.OutChoice,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1", // F-44 follow-up: ReplyTo is ignored
-		Card:    card,
+		Choice:  card,
 	}); err != nil {
-		t.Fatalf("Send(OutCard): %v", err)
+		t.Fatalf("Send(OutChoice): %v", err)
 	}
 
 	// F-44 follow-up: top-level Create, no parent/thread anchor.
 	if captured.RootID != "" {
-		t.Errorf("sendFunc.RootID = %q, want %q (F-44 follow-up: OutCard is top-level Create, no anchor)",
+		t.Errorf("sendFunc.RootID = %q, want %q (F-44 follow-up: OutChoice is top-level Create, no anchor)",
 			captured.RootID, "")
 	}
 	if captured.MsgType != "interactive" {
@@ -951,7 +952,7 @@ func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
 	}
 	// Header template must default to "red" for error cards.
 	if !strings.Contains(captured.Body, `"template":"red"`) {
-		t.Errorf("card header template must default to red for CardKindError; got body: %s", captured.Body)
+		t.Errorf("card header template must default to red for OutError; got body: %s", captured.Body)
 	}
 }
 
@@ -996,7 +997,7 @@ func TestSend_OutError_TruncatesLongBody(t *testing.T) {
 // TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed — F-44
 // follow-up: OutCommandReply is a top-level Create (ReplyInChat,
 // rootID="") with the ❯ emoji prepended to the text body. Same
-// rationale as OutCard — slash-command replies are short status
+// rationale as OutChoice — slash-command replies are short status
 // messages, anchoring them to the user message is unnecessary, and
 // a thread-on-parent would pull them into the drawer. The ❯ emoji
 // mirrors the 💭 prefix OutThinking uses (visual channel
@@ -1245,7 +1246,7 @@ func TestIsFeishuTerminalMessageCode(t *testing.T) {
 // shared sendContent → sendFunc hook so the test exercises the
 // production dispatch path end-to-end.
 //
-// F-44 follow-up: OutReply / OutResult / OutCard / OutCommandReply
+// F-44 follow-up: OutReply / OutResult / OutChoice / OutCommandReply
 // moved OFF ReplyInBoth because of the parent-thread gotcha —
 // once OutToolStart/End creates a thread on the user message,
 // Feishu pulls all subsequent ReplyInBoth calls into the thread
@@ -1364,13 +1365,13 @@ func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 // proof. sendViaLark routes user-visible kinds to one of the three
 // PR #47 surfaces based on call semantics:
 //
-//	OutReply / OutResult / OutCard / OutCommandReply / OutTask*:
+//	OutReply / OutResult / OutChoice / OutCommandReply / OutTask*:
 //	  - The receipt card (OutReply / OutTask*) cold-start uses
 //	    ReplyInBoth (anchored to userMsgID, reply_in_thread omitted)
 //	    so the card reserves the inline-rendering slot in main chat
 //	    before any thread is created. Subsequent updates PATCH on
 //	    the same message_id — immune to later thread promotion.
-//	  - OutCard / OutCommandReply / OutResult stay on ReplyInChat
+//	  - OutChoice / OutCommandReply / OutResult stay on ReplyInChat
 //	    (top-level Create, no anchor) per F-44 follow-up; these are
 //	    one-shot messages that don't need to survive a thread
 //	    promotion.
@@ -1418,14 +1419,15 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 			wantReplyInThread: false,
 		},
 		{
-			name: "OutCard (permission)",
+			name: "OutChoice (permission)",
 			msg: messages.OutboundMessage{
-				Kind:    messages.OutCard,
+				Kind:    messages.OutChoice,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_3", // F-44 follow-up: ReplyTo is ignored (top-level Create)
-				Card: &messages.Card{
-					Title:   "Allow Bash?",
-					Options: []string{"Allow", "Deny"},
+				Choice: &messages.Choice{
+					Title:     "Allow Bash?",
+					Options:   messages.ChoiceOptionsFromLabels([]string{"Allow", "Deny"}),
+					RequestID: "req-perm",
 				},
 			},
 			wantRootID:        "", // top-level Create, no anchor

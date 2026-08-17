@@ -288,7 +288,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // tolerated by GetOrCreate: tests that don't exercise the
 // outbound path can construct ChatSessions without one
 // (cs.Emitter() returns nil; senders must nil-check before
-// Send / SendCard).
+// Send).
 //
 // Concurrency: the write is published through m.mu so
 // concurrent GetOrCreate calls see a consistent value (RLock

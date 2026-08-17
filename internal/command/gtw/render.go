@@ -140,7 +140,7 @@ func renderFixLocalSuccessCard(branch, worktree string) string {
 	return b.String()
 }
 
-// BranchExistsCard builds the §5.3.1 interactive decision card.
+// BranchExistsChoice builds the §5.3.1 interactive decision card.
 // This is the single source of truth for production `/gtw fix`
 // (emitBranchExistsDraft) and for debug `/gtw test` scenarios that
 // exercise the same card shape — debug must not re-hardcode Choices.
@@ -149,7 +149,7 @@ func renderFixLocalSuccessCard(branch, worktree string) string {
 // (IssueID == -1) drafts. Local-mode drafts have no issue
 // title / repo to display; the body shows the branch slug
 // directly.
-func BranchExistsCard(p FixDraftPayload, existingPath string) Card {
+func BranchExistsChoice(p FixDraftPayload, existingPath string) Choice {
 	var body string
 	if p.IssueID == -1 {
 		// Local-mode draft (no remote issue).
@@ -161,26 +161,26 @@ func BranchExistsCard(p FixDraftPayload, existingPath string) Card {
 		body += fmt.Sprintf("已有 worktree: %s\n", existingPath)
 	}
 	body += "\n选择操作(反应对应 emoji):"
-	return Card{
+	return Choice{
 		Title: fmt.Sprintf("⚠️ 分支 `%s` 已存在", p.Branch),
 		Body:  body,
-		Choices: []CardChoice{
-			{Emoji: "🆕", Label: "用 -v2 新分支", Action: "act:/gtw/branch-newv2"},
-			{Emoji: "🔗", Label: "加入现有协作", Action: "act:/gtw/branch-join"},
-			{Emoji: "❌", Label: "取消", Action: "act:/gtw/cancel"},
+		Options: []ChoiceOption{
+			{ID: "act:/gtw/branch-newv2", Emoji: "🆕", Label: "用 -v2 新分支"},
+			{ID: "act:/gtw/branch-join", Emoji: "🔗", Label: "加入现有协作"},
+			{ID: "act:/gtw/cancel", Emoji: "❌", Label: "取消"},
 		},
 	}
 }
 
-// WorktreeFailCard builds the §5.3.3 interactive decision card.
-// Same ownership rule as BranchExistsCard: business layer owns the
+// WorktreeFailChoice builds the §5.3.3 interactive decision card.
+// Same ownership rule as BranchExistsChoice: business layer owns the
 // shape; debug UAT reuses it.
 //
 // F-XX: local-mode drafts (IssueID == -1) have no remote issue
 // to label; the title omits the issue-id and the cancel
 // option does NOT mention the nightme/wip label rollback
 // (local-mode never added a label).
-func WorktreeFailCard(p FixDraftPayload) Card {
+func WorktreeFailChoice(p FixDraftPayload) Choice {
 	body := fmt.Sprintf("branch: %s\n", p.Branch)
 	if p.GitError != "" {
 		body += "[git stderr tail]\n" + p.GitError + "\n"
@@ -197,12 +197,12 @@ func WorktreeFailCard(p FixDraftPayload) Card {
 	if p.IssueID != -1 {
 		title = fmt.Sprintf("❌ 创建 worktree 失败(#%d)", p.IssueID)
 	}
-	return Card{
+	return Choice{
 		Title: title,
 		Body:  body,
-		Choices: []CardChoice{
-			{Emoji: "🔄", Label: "重试", Action: "act:/gtw/worktree-retry"},
-			{Emoji: "❌", Label: cancelLabel, Action: "act:/gtw/cancel"},
+		Options: []ChoiceOption{
+			{ID: "act:/gtw/worktree-retry", Emoji: "🔄", Label: "重试"},
+			{ID: "act:/gtw/cancel", Emoji: "❌", Label: cancelLabel},
 		},
 	}
 }

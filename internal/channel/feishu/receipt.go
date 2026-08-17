@@ -64,9 +64,8 @@ type receiptBot interface {
 	// SendCardForReceipt posts a new interactive card and returns its
 	// message ID. Used on the FIRST render of a receipt (no cardMsgID
 	// yet). v1.3.x (§13.10): rootID is the user message id to thread
-	// the cold-start card to. Renamed from SendCard in F-46 to
-	// disambiguate from the channel.Channel.SendCard interface
-	// method that takes a messages.OutboundMessage.
+	// the cold-start card to. Named distinctly from Channel.Send
+	// (which takes OutboundMessage) because receipts ship raw card JSON.
 	SendCardForReceipt(ctx context.Context, chatID, cardJSON, rootID string, replyInThread bool) (string, error)
 	// PatchMessage replaces the body of an existing message in place
 	// (Feishu PATCH /im/v1/messages/{id}). Used on every render after

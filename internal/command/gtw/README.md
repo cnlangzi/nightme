@@ -323,8 +323,8 @@ abc1234 fix(gtw): hooks output uses standard ✅ title
 
 以下场景**不**走本规约:
 
-- reaction handler 的交互卡(`Card.Title` / `Card.Choices`)—— 见
-  `WorktreeFailCard` / `BranchExistsCard`,那是 IM 原生 card 协议
+- reaction handler 的交互选择(`Choice.Title` / `Choice.Choices`)—— 见
+  `WorktreeFailChoice` / `BranchExistsChoice`，Channel 再渲染成 IM 原生 card
 - push / pr 命令从 channel 返回的 raw error(超出 gtw 边界的 stderr)
 - daemon 启动横幅
 

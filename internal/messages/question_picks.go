@@ -13,7 +13,7 @@ import (
 // path.
 const QuestionBatchPrefix = "nm-q:"
 
-// QuestionCustomPrefix marks a Card.Picks slot that came from
+// QuestionCustomPrefix marks a stored pick slot that came from
 // "Type your answer" rather than an option button. Stripped when
 // encoding a QuestionBatchPrefix payload.
 const QuestionCustomPrefix = "nm-c:"
@@ -58,12 +58,12 @@ func DecodeQuestionPicks(s string) ([]QuestionPick, error) {
 	return picks, nil
 }
 
-// StoreQuestionCustom encodes a typed answer into a Card.Picks slot.
+// StoreQuestionCustom encodes a typed answer into a pick slot.
 func StoreQuestionCustom(custom string) string {
 	return QuestionCustomPrefix + custom
 }
 
-// ParseStoredQuestionPick maps one Card.Picks slot onto a QuestionPick.
+// ParseStoredQuestionPick maps one stored pick slot onto a QuestionPick.
 // Empty stored is skip; QuestionCustomPrefix is custom text; anything
 // else is a selected option label.
 func ParseStoredQuestionPick(id, stored string) QuestionPick {

@@ -139,19 +139,19 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 | 文件 | 作用 |
 |---|---|
 | `internal/channel/feishu/adapter.go:890 SendMessageText` | 发 `msg_type: "text"` 消息,返回 messageID |
-| `internal/channel/feishu/adapter.go:765 buildInteractiveCard` | 已有的 OutCard 卡片构建(permission card),仅用于 OutCard 路径 |
+| `internal/channel/feishu/adapter.go:765 buildInteractiveCard` | 已有的 OutChoice 卡片构建(permission card),仅用于 OutChoice 路径 |
 | `internal/channel/feishu/adapter.go:1066 sendContent` | 透传到 lark client,支持任意 msgType |
 | `internal/channel/feishu/receipt.go:515 renderLocked` | 每个事件 `SendMessageText` 发新消息 |
 | `internal/channel/feishu/receipt.go:455 formatLocked` | 构造 plain text body(header + entries) |
 | `internal/channel/feishu/receipt.go:188 headerLine` | 单行 header(⏳ / 🔄 / ✅) |
-| `internal/gateway/messages.go:162 OutCard` / `:254 Card` | 已存在 interactive card 的抽象类型 |
+| `internal/gateway/messages.go:162 OutChoice` / `:254 Card` | 已存在 interactive card 的抽象类型 |
 | `internal/gateway/messages.go:182 OutInit` | 携带 `session_id` + `model`(无 `agent_name` / `provider`) |
 
 ### 4.2 现状(切到 card 之前)
 
 - 用户看到的 receipt 是一连串**短文本消息**(`⏳ 等待中` / `🔄 工具: Bash` / `✅ 已完成`)
 - 切到 card 后,这些短消息将合并为**一张可原地 PATCH 的卡片**
-- 已有的 `OutCard` 路径独立(permission card 走 `buildInteractiveCard` → `sendContent`),不影响 receipt 切换
+- 已有的 `OutChoice` 路径独立(permission card 走 `buildInteractiveCard` → `sendContent`),不影响 receipt 切换
 
 ## 5. 迁移方案:receipt → interactive card
 
@@ -176,7 +176,7 @@ Adapter.Send(OutboundMessage)
    ├── OutInit
    │     → receipt.Append(AgentConnectedEvent) → renderLocked → Patch(刷新 footer)
    │
-   └── OutCard (permission)
+   └── OutChoice (permission)
          → sendContent(interactive, buildInteractiveCard(...))   ← 不变
 ```
 
@@ -471,7 +471,7 @@ text, hasMention := stripAndDetectMention(
 - 单元: 字节数 = 收到超大 entries → 驱逐最老直到 < 24 KiB
 - 单元: 回归 `mockReceiptBot.AddReaction` 不变(v1.3 后,reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层)
 - 集成: 端到端: user message → 一张 receipt card(后续 agent event 不再发新消息,而是 PATCH);最终状态 `✅` 出现在 header;foot note 随状态变化
-- 回归: permission card (`OutCard`) 不受影响,继续走原 `buildInteractiveCard`
+- 回归: permission card (`OutChoice`) 不受影响,继续走原 `buildInteractiveCard`
 
 ## 8. 参考资料
 
@@ -651,7 +651,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutUsage` | `EventUsage` | token 用量 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventUsage` → `OutboundMessage{Usage}` Translate 路径保留 | — | ❌ (不渲染) |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
 | `OutInit` | `EventAgentConnected` | 会话初始化 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventAgentConnected` → `OutboundMessage{Init}` Translate 路径保留 | — | ❌ (不渲染) |
-| `OutCard` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
+| `OutChoice` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
 | `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` -- 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
 | `OutMessageStateRemoved` | (reserved) | 撤销进度标记 | `DeleteReaction`(v1.3 未用,append-only) | reaction API | ❌ |
 | `OutTyping` | (orphan) | typing 指示 | **silent drop**(飞书 bot 无原生 typing API) | - | ❌ |
@@ -661,7 +661,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 - **receipt card 路径覆盖 8 种** -- 选 `interactive` 是为了 PATCH-in-place(对抗 chat spam);选 markdown element 是为了渲染表格/代码块/超链接(后续会用)
 - **MessageState 单独走 reaction** -- append-only emoji 是飞书最轻量、最稳定的进度表达;走 reaction API 不挤占 card body 预算
-- **OutCard 走独立 card(非 receipt)** -- 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
+- **OutChoice 走独立 card(非 receipt)** -- 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
 - **OutCommandReply 走纯文本 `text`** -- 命令反馈是"短而独立"语义,绕过 receipt 让用户看到干净气泡(参见 F-08 §4 "Channel is dumb" contract: command reply 不属于滚动日志)
 
 ### 12.2 未来扩展槽位(不实现,但留位)
@@ -778,7 +778,7 @@ Meta: {
 
 MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称。建议下一份抽象文档(Gateway hub)补 `OutboundAttachment` 类型,把 §12.2 表里的"未来扩展"沉淀进代码契约。
 
-### 13.5 i️ 已知接受: `OutCard` RequestID 临时生成
+### 13.5 i️ 已知接受: `OutChoice` RequestID 临时生成
 
 `adapter.go:530-533` 用 `fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())` 拼 RequestID:
 
@@ -1015,12 +1015,12 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 
 1. **修复范围**:A / B / C?
 2. **OutCommandReply 同步 thread**?(B/C 方案下,slash command 的回复会变 threaded;`adapter.go:608-619` 注释需要更新)
-3. **OutCard(权限卡)同步 thread**?(B/C 方案下,权限请求与用户原消息连接)
+3. **OutChoice(权限卡)同步 thread**?(B/C 方案下,权限请求与用户原消息连接)
 4. **`reply_in_thread` 模式是否需要**?(C 方案专属;默认 false 走 main chat,保持 discoverable;用户可选 true 移入 thread)
 
 **附议**: 落地后 `adapter.go:608-619` 的 "no ReplyTo threading" 注释需要更新;`docs/feat/F-26-gateway-hub.md:223` 已经描述了这条约束,可以作为权威参考,无需修改 F-26(它是 v1.1 文档,已 superseded,但语义对 v1.3 仍生效)。
 
-**✅ 决议(2026-08-03,Devin "按你的建议修改")**: 采用 **方案 B**,同步 thread OutCard 与 OutCommandReply。**不**实现 `reply_in_thread` 模式(属未来 P2)。
+**✅ 决议(2026-08-03,Devin "按你的建议修改")**: 采用 **方案 B**,同步 thread OutChoice 与 OutCommandReply。**不**实现 `reply_in_thread` 模式(属未来 P2)。
 
 **✅ 子决议(2026-08-04,F-37 落地)**: `reply_in_thread` 不再"P2 一刀切",而**按 OutboundKind 拆分**到飞书 3 种 reply 形态：
 
@@ -1038,7 +1038,7 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 
 - **ReplyInThread (`reply_in_thread=true`)** — `OutThinking` / `OutToolStart` / `OutToolEnd`：agent 进度流，绝不污染 main chat
 - **ReplyInThreadAndChat (字段省略)** — `OutReply` 的 rolling-log receipt card（cold-start）/ `OutCompaction`：`OutReply` 是 N 段 reply 折进 1 张 card 的视觉模型（锚定 userMsgID），`OutCompaction` 是低频 brief 进度 marker。两者都走 ReplyInBoth，但触发 parent-thread gotcha 概率低（OutReply 走 bail-out 应急，OutCompaction 是低频一SHOT marker）
-- **ReplyInChat (顶级 Create)** — `OutResult` / `OutTaskCreate` / `OutTaskUpdate` / `OutCard` / `OutCommandReply` (F-44 follow-up #1/#2 + F-44 revert #2)：每条 result / 任务 receipt card / 权限请求 / slash 命令回应 独立成 top-level bubble，**不**锚定到 user 消息。理由：一旦同 turn 的 `OutToolStart` / `OutToolEnd`（用 `ReplyInThread`）在 user message 上建了 thread，**Feishu server 会把后续所有 `ReplyInBoth` 拉进 thread 抽屉，主 chat 看不到**（reply.go docstring 第 17-19 行明文）。`OutCard` 是用户必须点 Allow/Deny 的 blocking UI，`OutCommandReply` 是短状态消息，都需要主 chat 立即可见。`OutTask*` 的 cold-start card 通过 `SendCard` 走 `rootID=""` 强制 top-level Create；后续 `SetTaskList` 走的 `PatchMessage` 在 PATCH 时保留原 message 的 root_id 状态（顶级 Create 保持顶级）。`OutReply` 在 overflow bail-out 时也走 `ReplyInChat`（详见 `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3）。
+- **ReplyInChat (顶级 Create)** — `OutResult` / `OutTaskCreate` / `OutTaskUpdate` / `OutChoice` / `OutCommandReply` (F-44 follow-up #1/#2 + F-44 revert #2)：每条 result / 任务 receipt card / 权限请求 / slash 命令回应 独立成 top-level bubble，**不**锚定到 user 消息。理由：一旦同 turn 的 `OutToolStart` / `OutToolEnd`（用 `ReplyInThread`）在 user message 上建了 thread，**Feishu server 会把后续所有 `ReplyInBoth` 拉进 thread 抽屉，主 chat 看不到**（reply.go docstring 第 17-19 行明文）。`OutChoice` 是用户必须点 Allow/Deny 的 blocking UI，`OutCommandReply` 是短状态消息，都需要主 chat 立即可见。`OutTask*` 的 cold-start card 通过 `SendCard` 走 `rootID=""` 强制 top-level Create；后续 `SetTaskList` 走的 `PatchMessage` 在 PATCH 时保留原 message 的 root_id 状态（顶级 Create 保持顶级）。`OutReply` 在 overflow bail-out 时也走 `ReplyInChat`（详见 `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3）。
 
 实现（PR #47 收口后）：`sendMessageFunc` / `sendContent` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加一个尾部 `replyInThread bool` 参数；F-44 起 `sendViaLark` 内部直接路由到 PR #47 新加的三个 helper，不再有内联的 `sendViaLarkReply`：
 
@@ -1051,14 +1051,14 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 - `OutThinking` thread 抽屉内每条 body 前缀 💭（`postThreadMarkdownReply` 在 caller 附加）
 - `OutCompaction` 主 chat 内 "✶ Compacting…"（adapter.go 硬编码）
 - `OutTask*` receipt card 内 "📋 Tasks" markdown header（`buildTaskChecklistChunks` 附加）
-- `OutCard` 主 chat 内的 interactive card title 前缀 👉（`buildInteractiveCard` 对 `CardKindPermission` 附加；多题向导进行中为 `👉 Action Needed · i/n`）
+- `OutChoice` 主 chat 内的 interactive card title 前缀 👉（`buildInteractiveCard` 对 `ChoiceKindPermission` 附加；多题向导进行中为 `👉 Action Needed · i/n`）
 - `OutCommandReply` 主 chat 内的文本前缀 ❯（adapter.go 硬编码）
 
 emoji 都是 channel 装饰（不在抽象 gateway 类型上），让用户在主 chat 扫一眼就知道是哪种消息，跟 `💭` for OutThinking 的视觉模式一致。
 
-`OutReply` 的 cold-start 走 `ReplyInBoth`（F-44 revert：rolling-log receipt 锚定 userMsgID；多 chunk PATCH 同一张 card）；`OutResult` / `OutTask*` / `OutCard` / `OutCommandReply` 走 `ReplyInChat`（top-level Create，F-44 follow-up — 见 `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3 + §1.5）；`OutCompaction` 走 `ReplyInBoth`（low frequency，brief 进度 marker 锚定 userMsgID）；`OutThinking` / `OutToolStart` / `OutToolEnd` 走 `ReplyInThread`。`OutReply` 走 `ReplyInBoth` 触发的 overflow 阈值（50 elements / 30 KB envelope）在 `receipt.AppendEntry` 内部检测，命中时返回 `ErrReceiptOverflow`，caller 把该 chunk 改走 `ReplyInChat` 应急 surface。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3 / §1.5 + adapter.go::sendViaLark + reply.go（PR #47）。
+`OutReply` 的 cold-start 走 `ReplyInBoth`（F-44 revert：rolling-log receipt 锚定 userMsgID；多 chunk PATCH 同一张 card）；`OutResult` / `OutTask*` / `OutChoice` / `OutCommandReply` 走 `ReplyInChat`（top-level Create，F-44 follow-up — 见 `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3 + §1.5）；`OutCompaction` 走 `ReplyInBoth`（low frequency，brief 进度 marker 锚定 userMsgID）；`OutThinking` / `OutToolStart` / `OutToolEnd` 走 `ReplyInThread`。`OutReply` 走 `ReplyInBoth` 触发的 overflow 阈值（50 elements / 30 KB envelope）在 `receipt.AppendEntry` 内部检测，命中时返回 `ErrReceiptOverflow`，caller 把该 chunk 改走 `ReplyInChat` 应急 surface。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3 / §1.5 + adapter.go::sendViaLark + reply.go（PR #47）。
 
-**相关测试**：`adapter_test.go::TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (3 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (1 path × ReplyInThread+Also send it to chat — OutCompaction only, OutCard/OutCommandReply moved to TopLevelCreate) + PR #47 `TestSendViaLark_ReplyInBoth_Dispatch` (1 kind × ReplyInBoth — OutCompaction) / `TestSendViaLark_ReplyInThread_Dispatch` (3 kinds × ReplyInThread) / `TestSendViaLark_TopLevelCreate_Dispatch` (4 kinds × ReplyInChat — OutTaskCreate / OutTaskUpdate / OutCard / OutCommandReply) 锁定 dispatch 表。`OutReply` 的 receipt 折叠路由由 `TestSend_OutReply_FoldsIntoReceipt`（cold-start 一个 interactive card 锚 userMsgID）/ `TestSend_OutReply_MultipleChunks_PATCHesSameCard`（后续 chunks PATCH 同一张 card）锁住。`OutReply` overflow bail-out 由 `receipt_test.go::TestAppendEntry_OverflowBailsOut` 锁住（51st entry 返回 `ErrReceiptOverflow`，不发 PATCH）。`OutCard` / `OutCommandReply` emoji 前缀由 `TestSend_OutCard_TopLevelCreate_EmojiPrefixed` / `TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed` 锁住。
+**相关测试**：`adapter_test.go::TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (3 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (1 path × ReplyInThread+Also send it to chat — OutCompaction only, OutChoice/OutCommandReply moved to TopLevelCreate) + PR #47 `TestSendViaLark_ReplyInBoth_Dispatch` (1 kind × ReplyInBoth — OutCompaction) / `TestSendViaLark_ReplyInThread_Dispatch` (3 kinds × ReplyInThread) / `TestSendViaLark_TopLevelCreate_Dispatch` (4 kinds × ReplyInChat — OutTaskCreate / OutTaskUpdate / OutChoice / OutCommandReply) 锁定 dispatch 表。`OutReply` 的 receipt 折叠路由由 `TestSend_OutReply_FoldsIntoReceipt`（cold-start 一个 interactive card 锚 userMsgID）/ `TestSend_OutReply_MultipleChunks_PATCHesSameCard`（后续 chunks PATCH 同一张 card）锁住。`OutReply` overflow bail-out 由 `receipt_test.go::TestAppendEntry_OverflowBailsOut` 锁住（51st entry 返回 `ErrReceiptOverflow`，不发 PATCH）。`OutChoice` / `OutCommandReply` emoji 前缀由 `TestSend_OutChoice_TopLevelCreate_EmojiPrefixed` / `TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed` 锁住。
 
 #### 2026-08-05 实机验证(chat-mode 影响)
 
@@ -1171,7 +1171,7 @@ ChatSession.onAgentEvent
   ├─ out.ReplyTo = cs.currentTurnUserMsgID     // 不变
   └─ channel.Send → sendViaLark (PR #47 收口) → ReplyInBoth / ReplyInThread / ReplyInChat
      · rootID = msg.ReplyTo = user 当前 message_id
-     · replyInThread = false → ReplyInBoth (OutReply / OutResult / OutTask* / OutCard / OutCommandReply / OutCompaction)
+     · replyInThread = false → ReplyInBoth (OutReply / OutResult / OutTask* / OutChoice / OutCommandReply / OutCompaction)
      · replyInThread = true  → ReplyInThread (OutThinking / OutToolStart / OutToolEnd)
      · rootID = ""          → ReplyInChat (orphan path / terminal-code fallback)
      ↓
@@ -1262,7 +1262,7 @@ WebSearch  -> 10 results
 | `OutToolEnd` | ReplyInThread | 隐藏 | Claude Code-style `⎿  …` result 行 |
 | `OutThinking` | ReplyInThread | 隐藏 | `💭 <text>` |
 | `OutCompaction` | ReplyInThreadAndChat | **可见** | `✶ Compacting conversation…`(ops 决策 2026-08-04:brief marker 是 informative 不是 noise)|
-| `OutCard`(permission)| ReplyInThreadAndChat | 可见 | 必须 main chat 可视(discoverability > cleanliness)|
+| `OutChoice`(permission)| ReplyInThreadAndChat | 可见 | 必须 main chat 可视(discoverability > cleanliness)|
 | `OutCommandReply`(slash)| ReplyInThreadAndChat | 可见 | 用户在等回复 |
 | Receipt 冷启动卡 | ReplyInThreadAndChat | 可见 | receipt card 承载 OutText + 元数据(OutInit/OutUsage/TaskList)。**OutResult 不再 fold 进 receipt**(F-39 §13.16),独立 reply 走默认 replyOnly=false |
 
@@ -1863,7 +1863,7 @@ user_msg om_A
 | `OutResult` | 独立 `ReplyInThreadAndChat`(F-39) | 独立 `ReplyInThreadAndChat`(F-39 不变)|
 | `OutTaskCreate` / `OutTaskUpdate` | rolling-log receipt(4 sections)| rolling-log receipt(**仅 Tasks section**)|
 | `OutInit` / `OutUsage` | receipt header / footer | **silent drop** |
-| `OutThinking` / `OutTool*` / `OutCompaction` / `OutCard` / `OutMessageState` / `OutCommandReply` | 不变 | **不变** |
+| `OutThinking` / `OutTool*` / `OutCompaction` / `OutChoice` / `OutMessageState` / `OutCommandReply` | 不变 | **不变** |
 
 **架构不变式保留**:
 
@@ -1998,7 +1998,7 @@ case gateway.OutReply, gateway.OutResult,
 | `OutResult` | 独立 `ReplyInThreadAndChat`(F-39) | 独立 `ReplyInThreadAndChat` **+ text 末尾 footer** |
 | `OutTaskCreate` / `OutTaskUpdate` | rolling-log receipt(仅 Tasks) | rolling-log receipt(Tasks **+ footer** as 2 元素) |
 | `OutInit` / `OutUsage` | silent drop | **silent drop(不变)**;footer 数据走 `SessionContext` 单独路径 |
-| `OutThinking` / `OutTool*` / `OutCompaction` / `OutCard` / `OutMessageState` / `OutCommandReply` | 不变 | **不变**(不 stamp SessionContext) |
+| `OutThinking` / `OutTool*` / `OutCompaction` / `OutChoice` / `OutMessageState` / `OutCommandReply` | 不变 | **不变**(不 stamp SessionContext) |
 
 **架构不变式保留**:
 
@@ -2055,12 +2055,12 @@ case gateway.OutReply, gateway.OutResult,
    ```
    dispatcher 把 InboundMessage 推给 `g.actionHandler` → `cs.HandleAction` → 我的 `wireGTWActionOnSession` closure → `gtw.HandleAction` → `executeXxxAction` → `emitFollowUp` PATCH 原卡。
 
-2. **`OutCardPatch` case（`Send` dispatcher 路由）**:
+2. **`OutChoicePatch` case（`Send` dispatcher 路由）**:
    ```go
-   case gateway.OutCardPatch:
-       if msg.Card == nil  →  return error "card missing payload"
+   case gateway.OutChoicePatch:
+       if msg.Choice == nil  →  return error "card missing payload"
        if msg.ReplyTo == ""  →  return error "missing ReplyTo"
-       content, err := buildInteractiveCard(msg.Card)
+       content, err := buildInteractiveCard(msg.Choice)
        if err != nil  →  return err
        return a.PatchMessage(ctx, msg.ReplyTo, content)
    ```
@@ -2078,9 +2078,9 @@ case gateway.OutReply, gateway.OutResult,
 - PATCH `/im/v1/messages/{id}` 端点不变，Feishu 自家 SDK
 
 **已知设计决定**：
-- `gtwTestSeedDraft` 必须设 `CardRequestID: "gtw-test-" + userMsgID`——和 `sendScenarioCard` 的 RequestID 公式一致。PATCH 路径的 `buildInteractiveCard` 拿这个值，**没值就 fail "card missing request_id"**。
+- `gtwTestSeedDraft` 必须设 `ChoiceRequestID: "gtw-test-" + userMsgID`——和 `sendScenarioCard` 的 RequestID 公式一致。PATCH 路径的 `buildInteractiveCard` 拿这个值，**没值就 fail "card missing request_id"**。
 - `/gtw test` 不 auto-dispatch——demo 模式让用户自己点。auto-mode 留给 `/gtw test auto <emoji>`。
-- `OutCard`（出新卡）的 `ReplyTo` 缺省 empty（顶层卡）。`OutCardPatch`（PATCH 已有卡）的 `ReplyTo` 必填 = bot card msg id。
+- `OutChoice`（出新卡）的 `ReplyTo` 缺省 empty（顶层卡）。`OutChoicePatch`（PATCH 已有卡）的 `ReplyTo` 必填 = bot card msg id。
 
 **不变式**：
 - §1.4 抽象 / 具体 边界保留：OutboundKind 仍 typed enum；Channel 自决 render
@@ -2332,7 +2332,7 @@ const (
 - **F-42 lazy receipt + MessageState 简化 + TaskList 标题 (设计阶段)** ── 删 cold-start 空 Receipt card,改 lazy create(首个 OutReply / OutTask 触发);MessageState reactions 删 ⏳/🔄 留 ✅/❌;TaskList 永远加 `**📋 Tasks**` 标题。详见 §13.20 + F-42 design doc。
 - **F-41 active reconnect (commit 后续)** ── 30s ticker 周期性 `Stop()+Start()`,把 WS 断开到重连的最大等待从 SDK 默认 2min 压到 30s。prober goroutine 在 `OnDisconnected` 启动,`OnReconnected` 退出,无 HTTP probe / 无 tier / 无 circuit breaker。详见 §13.18 + F-41 design doc。
 - **F-40 observability (commit 85f5323, PR #41)** ── SDK `OnReady` / `OnError` / `OnDisconnected` / `OnReconnecting` / `OnReconnected` 五个 callback 接入 `WSHealth` struct,`nightme health` 命令通过 daemoncontrol unix-socket 调 `health` RPC 打印 STATUS / LIVENESS / LAST ERROR / RECENT EVENTS / RECENT INBOUND / RECENT OUTBOUND 六段。
-- **F-39 + F-39-follow-up (commit 5ab730b / ddb2cca, PR #39)** ── OutResult → 独立 reply(ReplyInThreadAndChat),`SetCompleted` 移到 EventDone 触发,`splitMarkdownForDivs` 复用,F-39 follow-up 修了 11 个 review 找出的 bug(dedup 参数、💬 entry 清空、SanitizeCardMarkdown 覆盖 OutThinking/OutCard、preprocessFeishuMarkdown 只在 opening fence 补 newline 等)。
+- **F-39 + F-39-follow-up (commit 5ab730b / ddb2cca, PR #39)** ── OutResult → 独立 reply(ReplyInThreadAndChat),`SetCompleted` 移到 EventDone 触发,`splitMarkdownForDivs` 复用,F-39 follow-up 修了 11 个 review 找出的 bug(dedup 参数、💬 entry 清空、SanitizeCardMarkdown 覆盖 OutThinking/OutChoice、preprocessFeishuMarkdown 只在 opening fence 补 newline 等)。
 - **F-38 (commit b6c59c7)** ── OutToolStart + OutToolEnd 合并为同一条 thread reply,新增 `ChatSession.ToolsMode` + `/tools on|off` slash command + runtime EventHandler gate。
 - **F-thread-route (commit 098fdb7)** ── OutThinking / OutToolStart / OutToolEnd / OutCompaction 投飞书 thread reply(独立于 receipt card);receipt card 收窄到只承载最终答复 + 元数据。
 
@@ -2350,7 +2350,7 @@ const (
 
 | 文件 | 变更 | 说明 |
 |------|------|------|
-| `internal/channel/feishu/adapter.go` | 1. `OutThinking` case 补回 `[思考] ` 前缀<br>2. `SendContent` / `SendCard` / `sendMessageText` 加 `rootID` 参数<br>3. `sendViaLark` 设 `body.RootId`<br>4. adapter.Send 在 `msg.ReplyTo != ""` 时透传 rootID<br>5. 删除 `OutCommandReply` 注释里的 "no ReplyTo threading"<br>6. `OutCard` case 也透传 rootID | §15.2 详情 |
+| `internal/channel/feishu/adapter.go` | 1. `OutThinking` case 补回 `[思考] ` 前缀<br>2. `SendContent` / `SendCard` / `sendMessageText` 加 `rootID` 参数<br>3. `sendViaLark` 设 `body.RootId`<br>4. adapter.Send 在 `msg.ReplyTo != ""` 时透传 rootID<br>5. 删除 `OutCommandReply` 注释里的 "no ReplyTo threading"<br>6. `OutChoice` case 也透传 rootID | §15.2 详情 |
 | `internal/channel/feishu/receipt_event.go` | 1. `EventToolStart` / `EventToolEnd` 新增 `Kind="tool"` 输出<br>2. 加注释:`thinkingPrefix` MUST be present | §15.3 详情 |
 | `internal/channel/feishu/adapter.go` (`buildReceiptCard`) | 新增 `Kind="tool"` 折叠分支(header + body 同 thinking 结构) | §15.3 详情 |
 | `internal/channel/feishu/receipt_test.go` | 加测试用例 | §15.4 详情 |
@@ -2430,9 +2430,9 @@ type updateMessageFunc func(ctx context.Context, messageID, content string) erro
 **Adapter.Send dispatcher 透传**:
 
 ```go
-case gateway.OutCard:
+case gateway.OutChoice:
     // ...
-    content, err := buildInteractiveCard(msg.Card)
+    content, err := buildInteractiveCard(msg.Choice)
     if err != nil { return err }
     _, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo)  // ← 加 ReplyTo
     return err
@@ -2587,7 +2587,7 @@ if e.Kind == "tool" {
 | 用例 | 验证 |
 |------|------|
 | `TestAdapter_Send_OutThinking_AppendsWithPrefix` | `Send(OutboundMessage{Kind: OutThinking, Text: "reasoning"})` 走到 receipt.Append 时,`event.Text == "[思考] reasoning"` |
-| `TestAdapter_Send_OutCard_PassesReplyTo` | `Send(OutboundMessage{Kind: OutCard, ReplyTo: "user_123", Card: ...})` → `sendContent` 收到的 `rootID == "user_123"` |
+| `TestAdapter_Send_OutChoice_PassesReplyTo` | `Send(OutboundMessage{Kind: OutChoice, ReplyTo: "user_123", Card: ...})` → `sendContent` 收到的 `rootID == "user_123"` |
 | `TestAdapter_Send_OutCommandReply_PassesReplyTo` | `Send(OutboundMessage{Kind: OutCommandReply, ReplyTo: "user_123", Text: "..."})` → `SendMessageText` 收到的 `rootID == "user_123"` |
 | `TestAdapter_ReceiptFor_ColdStartPassesUserMsgID` | 冷启动 receipt 时,`SendCard` 收到的 `rootID == msg.ReplyTo` |
 
@@ -2623,7 +2623,7 @@ if e.Kind == "tool" {
 
 ### 15.7 §13.10 Fallback:Reply target unavailable(2026-08-03 增量)
 
-**问题**: Reply API 在 user message 被撤回(230011)或删除(231003)时**永久失败**。Pre-fix 行为:Create API 不读 root_id,OutCard / OutCommandReply 在 msg.ReplyTo 是 dead message id 时仍然能发出(只是没视觉连接)。Post-fix v1.3.x 把所有 reply 路径都迁到 Message.Reply,**会硬失败**。
+**问题**: Reply API 在 user message 被撤回(230011)或删除(231003)时**永久失败**。Pre-fix 行为:Create API 不读 root_id,OutChoice / OutCommandReply 在 msg.ReplyTo 是 dead message id 时仍然能发出(只是没视觉连接)。Post-fix v1.3.x 把所有 reply 路径都迁到 Message.Reply,**会硬失败**。
 
 **openclaw-lark 模式**(src/core/message-unavailable.ts):用 `runWithMessageUnavailableGuard` 包装每次 API 调用,识别 230011/231003 后:
 1. 把 message_id 加入 30 分钟 TTL 的 unavailability cache

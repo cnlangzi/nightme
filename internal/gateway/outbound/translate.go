@@ -23,6 +23,7 @@ package outbound
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -48,15 +49,15 @@ const ThinkingPrefix = "[思考] "
 // messages.OutboundMessage stream. Returns the message to send and a
 // boolean indicating whether anything should be sent at all:
 //
-//   - (msg, true)  → Emitter.Send / Emitter.SendCard should send msg
+//   - (msg, true)  → Emitter.Send should send msg
 //   - (zero, false) → drop (e.g. terminal events that have no
 //     user-facing content; the receipt already reflects the
 //     final state)
 //
 // Terminal events (Done, Error) are NOT emitted as separate
 // OutboundMessages; the receipt's terminal header carries that
-// signal. Permission events are mapped to OutCard; the Channel
-// renders the card natively (Feishu interactive, Slack block kit,
+// signal. Permission events are mapped to OutChoice; the Channel
+// renders the choice natively (Feishu interactive card, Slack block kit,
 // Web HTML).
 func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bool) {
 	switch ev.Kind {
@@ -131,32 +132,38 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		req := ev.Permission
 		isQuestion := req.Kind == agent.PermissionKindQuestion || len(req.Questions) > 0
 		title := "Waiting for approval"
+		kind := messages.ChoiceKindPermission
 		if isQuestion {
 			title = "Action Needed"
+			kind = messages.ChoiceKindQuestion
 		}
-		card := &messages.Card{
-			Title:   title,
-			Body:    req.Tool + ": " + req.Action,
-			Options: req.Options,
+		card := &messages.Choice{
+			RequestID: fmt.Sprintf("perm:%s:%d", chatID, time.Now().UnixNano()),
+			Kind:      kind,
+			Title:     title,
+			Body:      req.Tool + ": " + req.Action,
+			Options:   messages.ChoiceOptionsFromLabels(req.Options),
 		}
 		if n := len(req.Questions); n > 0 {
 			card.Title = "Action Needed"
-			card.Questions = make([]messages.CardQuestion, n)
-			card.Picks = make([]string, n)
+			card.Kind = messages.ChoiceKindQuestion
+			card.Questions = make([]messages.ChoiceQuestion, n)
 			for i, q := range req.Questions {
-				card.Questions[i] = messages.CardQuestion{
+				card.Questions[i] = messages.ChoiceQuestion{
 					ID:       q.ID,
 					Header:   q.Header,
 					Question: q.Question,
-					Options:  append([]string(nil), q.Options...),
+					Options:  messages.ChoiceOptionsFromLabels(q.Options),
 				}
 			}
-			card.Options = req.Questions[0].Options
+			if n > 0 {
+				card.Options = append([]messages.ChoiceOption(nil), card.Questions[0].Options...)
+			}
 		}
 		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   messages.OutCard,
-			Card:   card,
+			Kind:   messages.OutChoice,
+			Choice: card,
 		}, true
 
 	case agent.EventAgentPermissionSettled:
@@ -169,11 +176,12 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		}
 		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   messages.OutCardPatch,
-			Card: &messages.Card{
-				Title: "Waiting for approval",
-				Body:  "✓ **" + outcome + "**（dashboard）",
-				Kind:  messages.CardKindPermission,
+			Kind:   messages.OutChoicePatch,
+			Choice: &messages.Choice{
+				Title:   "Waiting for approval",
+				Body:    "✓ **" + outcome + "**（dashboard）",
+				Kind:    messages.ChoiceKindPermission,
+				Settled: true,
 			},
 		}, true
 

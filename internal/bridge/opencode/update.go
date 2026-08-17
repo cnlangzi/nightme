@@ -9,13 +9,21 @@
 //                                chat layer already rendered the
 //                                user's input)
 //   - agent_message_chunk       → EventAgentText (assistant
-//                                text stream)
+//                                reply text stream — accumulated
+//                                into a per-handler buffer so the
+//                                chat channel sees one card per
+//                                sentence rather than one per
+//                                token; see §5.2 below)
 //   - agent_thought_chunk       → EventAgentText prefixed with
 //                                "[思考] " (reasoning / thinking
 //                                stream; matches the legacy
 //                                opencode-serve bridge's [思考]
 //                                convention so the channel
-//                                renderer needs no change)
+//                                renderer needs no change — also
+//                                buffered, separately, so the
+//                                reasoning card lands before the
+//                                reply card and the user never
+//                                sees per-token bubbles)
 //   - tool_call                 → EventAgentToolStart
 //   - tool_call_update          (status=running → log only,
 //                                status=completed → EventAgentToolEnd,
@@ -45,6 +53,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -79,6 +88,12 @@ const thinkingPrefix = "[思考] "
 // State is per-handler (per-driver, per-session); the generic acp bridge
 // guarantees FlushPending reaches the same handler instance it
 // delivered the chunks to.
+//
+// Concurrency: handle() runs on the readPump goroutine while Flush(view)
+// runs on the SendBlocks caller goroutine (via the FlushPending hook
+// in translatePromptResponse). textBuf / thoughtBuf are protected by
+// `mu` so the read+reset+emit sequence in flushBufferTo is atomic
+// against concurrent writes from handle().
 type updateHandler struct {
 	agentName string
 	workspace string
@@ -99,12 +114,25 @@ type updateHandler struct {
 	// mixing them would let partial thoughts leak into the reply body
 	// on a tool-boundary flush.
 	thoughtBuf *strings.Builder
+
+	// mu guards textBuf and thoughtBuf across the two goroutines
+	// that touch them:
+	//
+	//   - readPump goroutine: dispatches session/update notifications
+	//     into handle(), which writes into textBuf / thoughtBuf.
+	//   - SendBlocks caller goroutine: when session/prompt resolves,
+	//     translatePromptResponse invokes the FlushPending hook which
+	//     calls Flush(view), which reads + resets textBuf / thoughtBuf.
+	//
+	// These two goroutines can run concurrently: the readPump keeps
+	// draining session/update notifications while SendBlocks blocks on
+	// the rpc.request channel for the session/prompt response, and both
+	// are alive at the moment of turn-end. mu keeps the String/Reset/
+	// Emit sequences atomic across them. Tests cover the
+	// interleaving under `go test -race` (TestRace_HandleVsFlush).
+	mu sync.Mutex
 }
 
-// newUpdateHandler constructs the translator. The view passed to
-// the returned closure is supplied by the generic acp bridge and
-// exposes only the channels / fields the translator needs
-// (events emit, session id lookup).
 // newUpdateHandler constructs the translator. Returns the concrete
 // *updateHandler so callers (starter.go) can install both the UpdateHandler
 // closure AND the Flush method via SetUpdateHandler / SetFlushHandler. The
@@ -124,9 +152,11 @@ func newUpdateHandler(workspace string) *updateHandler {
 // translator so the bridge receives the function signature it
 // expects while the starter retains access to Flush.
 //
-// Returns a fresh closure on each call — no aliasing concerns
-// since updateHandler.handle is read-only on its state except
-// for h.textBuf, which the bridge serializes via the readPump.
+// Returns a fresh closure on each call — the bridge stores
+// the closure once via SetUpdateHandler and dispatches every
+// session/update through it. h.textBuf / h.thoughtBuf writes are
+// serialized by h.mu so concurrent handle() invocations (rare,
+// can happen if the bridge ever re-enters) stay safe.
 func (h *updateHandler) asUpdateHandler() acp.UpdateHandler {
 	return func(view *acp.SessionView, raw json.RawMessage) error {
 		return h.handle(view, raw)
@@ -148,6 +178,13 @@ func (h *updateHandler) asUpdateHandler() acp.UpdateHandler {
 // OutThinking arrives before OutReply), so flushing thought first
 // lets the runtime route them in source-order without an
 // additional reorder step.
+//
+// Cross-goroutine: Flush(view) is invoked from the
+// translatePromptResponse site on the SendBlocks caller
+// goroutine, NOT the readPump goroutine that runs handle(). The
+// two can race; flushBufferTo acquires h.mu before reading /
+// resetting textBuf / thoughtBuf, so this call is safe to fire
+// concurrently with handle().
 //
 // Wired via acp.DriverHandle.SetFlushHandler in starter.go::Start —
 // see F-OPENCODE-ACP-MIGRATION §5.2 (drain-on-turn-end).
@@ -239,16 +276,17 @@ func (h *updateHandler) handleAgentText(view *acp.SessionView, raw json.RawMessa
 	if text == "" {
 		return nil
 	}
+	h.mu.Lock()
 	h.textBuf.WriteString(text)
-	// Sentence-boundary flush: surface the buffered reply to the
-	// chat channel as soon as the agent has produced a coherent
-	// sentence, instead of waiting for the turn-end firehose that
-	// would otherwise deliver the full reply in a single send_card
-	// at Done-time. Mirrors how pi's flushPendingTextLocked drains
-	// at tool boundaries — same idea, different trigger.
 	if endsWithSentencePunctuation(h.textBuf.String()) {
+		// flushText → flushBufferTo releases mu before the Emit and
+		// takes it again for the actual String/Reset — wrong to call
+		// it while holding the lock here. Inline the flush path:
+		h.mu.Unlock()
 		h.flushText(view)
+		return nil
 	}
+	h.mu.Unlock()
 	return nil
 }
 
@@ -270,10 +308,14 @@ func (h *updateHandler) handleAgentThought(view *acp.SessionView, raw json.RawMe
 	if text == "" {
 		return nil
 	}
+	h.mu.Lock()
 	h.thoughtBuf.WriteString(text)
 	if endsWithSentencePunctuation(h.thoughtBuf.String()) {
+		h.mu.Unlock()
 		h.flushBufferTo(view, h.thoughtBuf, thinkingPrefix)
+		return nil
 	}
+	h.mu.Unlock()
 	return nil
 }
 
@@ -437,6 +479,15 @@ func (h *updateHandler) flushBufferTo(view *acp.SessionView, buf *strings.Builde
 	if buf == nil {
 		return
 	}
+	// Hold mu across String + Reset + Emit. Without it a concurrent
+	// handle() writer can land a WriteString between our String() and
+	// Reset(), erasing that chunk from the emitted text (lost-write).
+	// The lock is per-handler, contention is bounded by the bridge
+	// (only the readPump handle() vs. one Flush(view) call per turn),
+	// and the critical section is just the in-memory string ops plus
+	// the channel send — sub-microsecond in practice.
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	text := strings.TrimSpace(buf.String())
 	buf.Reset()
 	if text == "" {

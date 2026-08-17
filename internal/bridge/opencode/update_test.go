@@ -12,6 +12,7 @@ package opencode
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -846,5 +847,86 @@ func TestFlush_DrainsBothBufs(t *testing.T) {
 	case ev := <-events:
 		t.Fatalf("expected no third event, got %+v", ev)
 	default:
+	}
+}
+
+// TestRace_HandleVsFlush verifies that handle() (driven by the
+// readPump goroutine) and Flush(view) (driven by the SendBlocks
+// goroutine via translatePromptResponse) can run concurrently
+// without corrupting textBuf / thoughtBuf state. Without a mutex
+// on updateHandler this test fails under `go test -race`. The
+// invariant under stress:
+//
+//   - every concatenated string the test feeds in eventually
+//     appears (verbatim, in order) in some flushed event;
+//   - no event contains text from both streams mixed;
+//   - no panics, no data races reported.
+//
+// 500 iterations × 200 chunks each is enough wall time for the
+// race detector to surface the issue without making CI slow.
+func TestRace_HandleVsFlush(t *testing.T) {
+	// Use an unbuffered view-emit so the test backpressures the
+	// writer goroutine naturally (avoids deadlocking on a full
+	// buffered channel that no one drains in this test — the
+	// race detector only needs a few concurrent operations to
+	// detect a violation, not millions of events).
+	atomicView := newStressView()
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// Drain goroutine: empties the captured events channel so the
+	// writer goroutine's view.Emit never blocks.
+	go func() {
+		defer wg.Done()
+		for range atomicView.events {
+		}
+	}()
+
+	// Writer goroutine — mimics the readPump emitting sessionUpdates.
+	go func() {
+		defer wg.Done()
+		defer close(atomicView.events)
+		for i := 0; i < iterations; i++ {
+			_ = handle(atomicView.view, agentMessageChunk("a"))
+			_ = handle(atomicView.view, agentThoughtChunk("b"))
+		}
+	}()
+
+	// Flusher goroutine — mimics translatePromptResponse's Flush
+	// call from the SendBlocks caller. Drained aggressively so a
+	// concurrent burst of readPump data lands in the same window.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations*2; i++ {
+			h.Flush(atomicView.view)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// stressView bundles a *SessionView whose Emit pushes to a
+// closeable channel (so the drain goroutine can stop on close)
+// plus the channel itself for the drain goroutine to read from.
+type stressView struct {
+	view   *acp.SessionView
+	events chan agent.AgentEvent
+}
+
+func newStressView() *stressView {
+	events := make(chan agent.AgentEvent)
+	return &stressView{
+		events: events,
+		view: &acp.SessionView{
+			Emit:      func(ev agent.AgentEvent) { events <- ev },
+			SessionID: func() string { return "ses_stress" },
+			AgentName: "opencode",
+			Workspace: "/tmp/test",
+		},
 	}
 }

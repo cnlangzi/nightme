@@ -55,6 +55,7 @@ Common:
   stop            gracefully stop daemon
   help            full command list
   version         version info
+  update          check for a newer release
 
 Shell:
   exit / quit     leave shell
@@ -100,6 +101,19 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 
 	out := rl.Stdout()
 	fmt.Fprintf(out, replBanner, bannerWithVersion())
+
+	// Version-check prompt: once per REPL startup. The prompt
+// drives the three internal stages (check / download / install)
+// interactively, gating each on its own y/N. Ctrl-C mid-download
+// aborts cleanly; declining install keeps the staged archive
+// for a later `nightme update`. The REPL prompt never exec's
+// the new binary — we restart the daemon and tell the user
+// to exit + re-enter `nightme`.
+	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Out:    out,
+		Reader: rl.Readline,
+		Logger: logger,
+	})
 
 	for {
 		line, err := rl.Readline()
@@ -172,6 +186,17 @@ func runREPLWith(root *cobra.Command, logger *slog.Logger, in io.Reader, out io.
 	}
 
 	fmt.Fprintf(out, replBanner, bannerWithVersion())
+
+	// runREPLWith is the test-driven path; passing nil Reader
+	// makes the prompt fall through to the "stdin unavailable"
+	// branch, which is what the existing TestREPL_* suite
+	// expects (no version-check chatter in the transcript).
+	// The dedicated TestREPL_*VersionPrompt exercises the
+	// real prompt path through the dedicated helper.
+	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Out:    out,
+		Logger: logger,
+	})
 
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)

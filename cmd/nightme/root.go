@@ -52,6 +52,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newLogsCmd())
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newVersionCmd())
+	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newDebugCmd())
 	addLifecycleCommands(root)
 	addUnixOnlyCommands(root)

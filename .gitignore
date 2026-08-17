@@ -23,6 +23,9 @@ vendor/
 go.work
 go.work.sum
 
+# Local Go build cache (sandbox workaround; never committed)
+.cache/
+
 
 .claude/worktrees/
 

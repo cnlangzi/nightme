@@ -50,6 +50,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newNameCmd())
 	root.AddCommand(newLogsCmd())
+	root.AddCommand(newCleanCmd())
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newUpdateCmd())

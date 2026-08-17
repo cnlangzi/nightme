@@ -64,7 +64,9 @@ func TestStandardPrompt_Structure(t *testing.T) {
 		}
 	}
 
-	// Required guardrails (the 6 "How to review" rules).
+	// Required guardrails (the 7 "How to review" rules — last one
+	// added in the simplification pass to keep "## Suggestions"
+	// from being empty).
 	wantRules := []string{
 		"Read the diff first",
 		"Distinguish BLOCKERS from nits",
@@ -72,10 +74,31 @@ func TestStandardPrompt_Structure(t *testing.T) {
 		"Skip linter / typechecker",
 		"Skip pre-existing issues",
 		"False-positive filter",
+		"Look for simplification opportunities",
 	}
 	for _, r := range wantRules {
 		if !strings.Contains(p, r) {
 			t.Errorf("StandardPrompt() missing rule %q", r)
+		}
+	}
+
+	// Required "What to look for" categories — must include
+	// Simplification (added so reviewers surface dead code,
+	// over-abstraction, naming issues in "## Suggestions").
+	wantCategories := []string{
+		"Correctness",
+		"Resource lifetime",
+		"Concurrency",
+		"Error handling",
+		"API surface",
+		"Security",
+		"Migration risk",
+		"Test gaps",
+		"Simplification",
+	}
+	for _, c := range wantCategories {
+		if !strings.Contains(p, "**"+c+"**") {
+			t.Errorf("StandardPrompt() missing category %q", c)
 		}
 	}
 }

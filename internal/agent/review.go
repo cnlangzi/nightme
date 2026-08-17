@@ -210,6 +210,7 @@ Run all three and treat their union as the full diff to review. If you're on the
 4. **Skip linter / typechecker territory.** Don't flag what CI / gofmt / eslint / tsc / rustfmt would catch. Assume those run separately.
 5. **Skip pre-existing issues.** Only flag things this diff introduced or makes worse. If a pre-existing bug is relevant to the diff, mention it once with a note, do not enumerate.
 6. **False-positive filter.** If you're not sure something is a real issue, downgrade it to a nit or omit it. A noisy review is worse than a short one.
+7. **Look for simplification opportunities, not just problems.** Code that "works" can still be 2x shorter. The Suggestions section is where you flag dead code, redundant logic, over-abstraction, and clearer names. Don't just complain about what the code does wrong — propose what could be removed or simplified.
 
 # What to look for (priority order)
 
@@ -221,6 +222,7 @@ Run all three and treat their union as the full diff to review. If you're on the
 - **Security**: unsanitised input → shell / SQL / file path, auth checks skipped, secrets in logs
 - **Migration risk**: schema changes with no rollback path, config changes that break old clients, deploy ordering hazards
 - **Test gaps**: new code path with no test, behavioural change to existing function with no test update
+- **Simplification**: redundant code (DRY violations, dead code, unused parameters/imports), over-abstraction (interfaces/types with one impl, factories that always return the same concrete), functions doing too much (SRP — flag if a function has multiple unrelated responsibilities), naming clarity (ambiguous names, names that lie about what they do), unnecessary indirection. **This is the Suggestions section's main fuel** — without it, "## Suggestions" tends to be empty. Code that "works" can still be 2x shorter.
 
 # Output format
 

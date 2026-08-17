@@ -2,14 +2,30 @@ package review
 
 // Dispatcher tests for /review.
 //
-// We test against the real `agent.Builtins` registry (which is a
-// global var) — but ONLY for "agent not in registry" / "agent is
-// in registry" cases. We don't drive the chat session plumbing
-// (no real AgentSession, no real SendBlocks) because the
-// dispatcher's job ends at "decide what to do with the slash
-// command" — the actual prompt injection lives in the bridge's
-// Starter.Review method, which is covered by
-// internal/agent/review_per_bridge_test.go.
+// v7: Handle is fully async — it returns Consumed=true with no
+// inline reply and launches a goroutine to do the actual review
+// work. The synchronous error paths (arg check, no active AS,
+// unknown agent) still return inline replies; only the
+// starter.Review call is async.
+//
+// We test only the synchronous error paths here. The async
+// behavior is covered by:
+//   - internal/agent/review_test.go (tests agent.Review itself
+//     using a fakeStarter that records RunOnce calls + injects
+//     into a fake)
+//   - internal/agent/review_per_bridge_test.go (tests the
+//     per-bridge delegation contract)
+//   - F-review.md §3.5 smoke test (real /tmp/review-smoke run
+//     against the live daemon, where the chat session's
+//     readpump continues processing events while the review
+//     goroutine runs RunOnce in a subprocess)
+//
+// The reason we don't add a full async-handle test here: building
+// a real *chatsession.ChatSession for the dispatcher requires
+// NewManager + persistence + spawner setup, which is heavy for
+// what's a structural check (Handle launches a goroutine and
+// returns immediately). The async contract is well-isolated
+// in the agent package, where it's tested directly.
 
 import (
 	"context"

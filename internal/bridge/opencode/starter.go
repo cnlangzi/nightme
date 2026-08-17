@@ -1,41 +1,60 @@
 
-// Package opencode — Starter (spawn recipe) for the opencode HTTP
-// bridge. Adapted to the agent.Info/Starter/Agent/driver three-piece
-// model: Starter holds immutable recipe fields; newDriver holds
-// runtime state and is wrapped into *agent.Agent at Start time.
+// Package opencode — Starter (spawn recipe) for the opencode
+// ACP bridge.
 //
-// Model choice (F-OPENCODE-opencode-bridge §3): opencode is run
-// in long-lived mode — one `opencode serve` process per chat session,
-// many turns over its lifetime. We expose the bridge surface via
-// Starter (template) + *agent.Agent (live handle) just like every
-// other bridge in the codebase, even though our internal Start
-// path is "one HTTP server, many turns" rather than the typical
-// "one CLI process per turn" pattern.
+// Model choice (F-OPENCODE-ACP-MIGRATION §2):
+//
+//   - Long-lived chat sessions spawn `opencode acp` under a PTY
+//     and drive the standard ACP JSON-RPC 2.0 wire (initialize →
+//     session/new → session/prompt → ... → session/cancel).
+//     One opencode process per chat session; many turns over
+//     its lifetime.
+//
+//   - One-shot invocations (/gtw commit, buildAgentPrompt,
+//     nightly CI smoke tests) spawn `opencode run --format json
+//     <prompt>` directly. The print-mode path reuses the
+//     codex / claudecode / pi print-mode shape — single
+//     NDJSON stream, single result event, process exits.
+//
+// The two paths share the same Starter; only `RunOnce` and the
+// print-mode spawn in print.go differ from `Start` and the
+// ACP-backed driver.
 package opencode
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/bridge/acp"
 )
 
 // Starter is the opencode spawn recipe. Held in agent.Builtins as
 // a singleton per agent name.
+//
+// Mode is ModeACP: the chat-session runtime needs to know the
+// bridge speaks Agent Client Protocol so it can apply the
+// right per-mode behavior (timeout settings, event queue
+// routing, /stop propagation).
 type Starter struct {
 	name    string
 	command string
 	args    []string
 }
 
-// NewStarter constructs the opencode spawn recipe. Entry point used
-// at registration time (cmd/nightme/agents.go calls it from init()).
+// NewStarter constructs the opencode spawn recipe. Entry point
+// used at registration time (cmd/nightme/agents.go calls it
+// from init()).
 //
-// args are the command's protocol flags. They are appended after
-// `serve` automatically by newDriver — callers pass bridge-level
-// flags only (e.g. the opencode server hostname override). The
-// defensive copy means later mutation of the caller's slice does
-// not affect us.
+// args are the protocol flags. The bridge passes them as-is to
+// the opencode binary; the canonical value is `[]string{"acp"}`
+// (matches every supported editor's documented integration:
+// https://opencode.ai/docs/acp/).
+//
+// The defensive copy means later mutation of the caller's slice
+// does not affect us.
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
 		name:    name,
@@ -48,136 +67,101 @@ func NewStarter(name, command string, args []string) *Starter {
 // any time; used by `nightme agents` and any other spec-only
 // consumer.
 func (s *Starter) Info() agent.Info {
-	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
+	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, nil)
 }
 
-// Detect verifies the binary resolves on PATH. Called by Spawner
-// before Start; an error aborts session creation with a clear
-// "<binary> not found" message to the user.
+// Detect verifies the opencode binary resolves on PATH. Called
+// by Spawner before Start; an error aborts session creation with
+// a clear "opencode not installed" message.
 func (s *Starter) Detect() error {
 	_, err := exec.LookPath(s.command)
 	return err
 }
 
-// Start spawns the CLI under a PTY-style transport rooted at the
-// caller's workspace, opens an SSE subscription against the opencode
-// HTTP server, and returns a live *agent.Agent. The caller (typically
-// chatsession.AgentSession via the Spawner) must Close() the returned
-// handle when done. The Starter is unchanged (reusable across many
-// sessions).
+// Start spawns `opencode acp` under a PTY (via the generic acp
+// bridge), runs the initialize + session/new handshake, installs
+// the opencode-specific sessionUpdate translator, and returns a
+// live *agent.Agent.
 //
-// cfg.Workspace is the child's cwd. cfg.Args are appended after
-// the starter's defaults (user wins). cfg.Env is merged with the
-// starter's defaults (cfg wins). cfg.SessionID, when non-empty,
-// triggers resume via GET /api/session/{id} before create.
+// The runtime state (transport / rpc / events / driver) lives
+// inside the generic acp bridge — this package only contributes:
+//
+//   - The sessionUpdate → AgentEvent translator (update.go),
+//     installed via SetUpdateHandler after Start returns.
+//   - Per-bridge session context fields (AgentName=opencode,
+//     Workspace=cfg.Workspace) stamped on every event.
+//
+// cfg.SessionID, when non-empty, is reserved for v2 ACP
+// session/load wiring. Today the bridge always opens a fresh
+// session; resume via cfg.SessionID is implemented in codex /
+// pi bridges already and will follow the same shape here in v2.
+//
+// Race note: SetUpdateHandler must be called BEFORE the readPump
+// observes the first session/update. The race-free storage is
+// the acp bridge's atomic.Pointer on d.updateHandler, but the
+// acp readPump goroutine is started inside acpStarter.Start —
+// so by the time SetUpdateHandler returns, early sessionUpdate
+// notifications could already be in flight. For opencode's
+// fresh-session path this is a no-op (no notifications arrive
+// before the client's first session/prompt). It will matter
+// once v2 wires session/load replay.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
-	d, err := newDriver(ctx, s, cfg)
-	if err != nil {
-		return nil, err
+	if cfg.Workspace == "" {
+		return nil, errors.New("opencode: workspace is required")
 	}
-	return agent.NewAgent(s.Info(), d.PID(), d.events, d), nil
+	// The generic acp bridge handles spawn + JSON-RPC + PTY +
+	// Stop / Reset / Permission. We inject the opencode-specific
+	// sessionUpdate translator via SetUpdateHandler after Start
+	// returns the live *agent.Agent.
+	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
+	a, err := acpStarter.Start(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+	}
+
+	// Walk back to the *acp.driver through the public Driver()
+	// accessor. This is a type assertion, but Driver() is the
+	// documented bridge-extension point — see internal/agent
+	// agent.go §Driver. The Driver() interface{} return type is
+	// package-private by design; bridge-specific extensions
+	// like this one consume it via SetUpdateHandler / View which
+	// we expose just for this purpose.
+	drv, ok := a.Driver().(*acp.DriverHandle)
+	if !ok || drv == nil {
+		// Defensive: should never happen because acp.NewStarter
+		// always constructs *driver. If a future refactor
+		// changes this, fall back to a no-op update handler.
+		oLog("Start: could not access acp driver; sessionUpdate translator disabled",
+			"driver_type", fmt.Sprintf("%T", a.Driver()))
+		return a, nil
+	}
+	updater := newUpdateHandler(cfg.Workspace)
+	drv.SetUpdateHandler(updater.asUpdateHandler())
+	// Wire the per-turn flush hook the generic acp bridge invokes
+	// right before EventAgentDone. Without this the trailing text
+	// the agent produced after the last sentence-end stays in
+	// textBuf until the turn-end drop — the user would see only
+	// the partial reply with no Done / no result card. See
+	// F-OPENCODE-ACP-MIGRATION §5.2 (drain-on-turn-end).
+	drv.SetFlushHandler(updater.Flush)
+	return a, nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Delegates to
-// runPrintMode in print.go, which spawns `opencode run --format
-// json` directly (bypassing the long-lived `opencode serve` HTTP
-// pipeline).
+// RunOnce is the one-shot counterpart to Start. Spawns
+// `opencode run --format json <prompt>` directly and returns the
+// agent's final text. No chat session, no events channel, no
+// busy guard — the process exits after the turn.
 //
-// As of F-OPENCODE-PRINT-001, RunOnce routes through the
-// print-mode spawn rather than the long-lived Start path.
-// Rationale (mirrors F-CODEX-PRINT-001 / F-CLAUDE-PRINT-001 /
-// F-PI-PRINT-001):
+// Mirrors the F-CODEX-PRINT-001 / F-CLAUDE-PRINT-001 /
+// F-PI-PRINT-001 rationale: one-shot callers (/gtw commit,
+// buildAgentPrompt) do not need the long-lived ACP handshake
+// (~1s server boot + initialize + session/new round-trip) when
+// `opencode run` already gives them a turn and exits cleanly.
 //
-//   - One-shot invocations (/gtw commit, /gtw pr,
-//     buildAgentPrompt) don't need a multi-turn session; they
-//     spawn, do the work, and exit.
-//   - The Start path was observed to carry unnecessary surface
-//     for one-shot: opencode serve subprocess boot (~1s),
-//     session handshake (POST /api/session), SSE subscription,
-//     and closeDrainTimeout (~5s) on Close. Mirrors the
-//     F-CODEX-PRINT-001 finding that the long-lived path is
-//     wasted work for single-turn use.
-//   - `opencode run --format json <prompt>` is the documented
-//     CLI counterpart of `claude -p` / `codex exec` /
-//     `pi --mode json -p`: spawns, runs the turn, emits the
-//     step_finish event, and exits. Wire schema is JSON-Lines
-//     (one event per line) with envelope {type, timestamp,
-//     sessionID, ...data}; see print.go for the parser.
-//
-// Start (above) is unchanged: it still opens the long-lived
-// opencode serve HTTP session for the chat-session use case
-// where many turns ride one bridge. RunOnce and Start share
-// the same Starter; only the spawn path differs.
+// The print-mode spawn lives in print.go (verbatim copy of the
+// retired opencode print.go, with cosmetic cleanups — the wire
+// is `opencode run --format json` and is not affected by the
+// ACP migration).
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return runPrintMode(ctx, s, cfg, blocks)
-}
-
-// Compact asks the server to compact the conversation history.
-// Bridge-specific extension (not on agent.Agent). Callers type-assert
-// the *agent.Agent returned by Start back to *Starter (via
-// bridge-specific getter) or call directly via the runtime handle's
-// unexported path.
-//
-// To call this from runtime: use the bridge-specific accessor.
-//
-// We expose it through the Starter's RunOnce-like helpers below.
-func (s *Starter) Compact(ctx context.Context, cfg agent.StartConfig) error {
-	a, err := s.Start(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer a.Close()
-	// Compact is bridge-specific — drive it through a short
-	// session, send a sentinel prompt, observe compact event, exit.
-	// For now we just trigger the HTTP endpoint directly via the
-	// driver; the agent.NewAgent wrapper exposes a way to get
-	// the driver back via Driver() (see agent.go).
-	d := a.Driver().(interface {
-		Compact(ctx context.Context) error
-	})
-	return d.Compact(ctx)
-}
-
-// ListSessions runs a one-shot list-sessions query. Bridge-specific
-// extension used by the runtime's resume picker.
-//
-// Each call spawns and closes a fresh opencode server (just enough
-// to hit GET /api/session) — the HTTP server is cheap to spin up
-// (~1s) and we don't need the session state to persist.
-func (s *Starter) ListSessions(ctx context.Context, cfg agent.StartConfig, limit int) ([]Session, error) {
-	a, err := s.Start(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer a.Close()
-	d := a.Driver().(interface {
-		ListSessions(ctx context.Context, limit int) ([]Session, error)
-	})
-	return d.ListSessions(ctx, limit)
-}
-
-// ListProviders is the bridge-specific one-shot for the /model picker.
-func (s *Starter) ListProviders(ctx context.Context, cfg agent.StartConfig) ([]Provider, error) {
-	a, err := s.Start(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer a.Close()
-	d := a.Driver().(interface {
-		ListProviders(ctx context.Context) ([]Provider, error)
-	})
-	return d.ListProviders(ctx)
-}
-
-// ListModels is the bridge-specific one-shot for the /model picker.
-func (s *Starter) ListModels(ctx context.Context, cfg agent.StartConfig) (map[string]any, error) {
-	a, err := s.Start(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer a.Close()
-	d := a.Driver().(interface {
-		ListModels(ctx context.Context) (map[string]any, error)
-	})
-	return d.ListModels(ctx)
 }

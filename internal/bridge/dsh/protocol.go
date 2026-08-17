@@ -67,9 +67,8 @@ type muxSessionSubscribed struct {
 }
 
 // muxApprovalRequested is the payload of
-// serverFrame{method:"approval/requested"}. `ApprovalID` is the
-// **stable** id for routing SendPermission answers — we use it
-// (not rpcId) so concurrent approvals stay unambiguous.
+// serverFrame{method:"approval/requested"}. `ApprovalID` is
+// audit-only. /api/respond is keyed on the envelope rpcId.
 type muxApprovalRequested struct {
 	SessionID  string `json:"sessionId"`
 	ApprovalID string `json:"approvalId"`
@@ -78,12 +77,21 @@ type muxApprovalRequested struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-// muxApprovalResolved is the audit frame for an already-resolved
-// approval. We log it (debug) and never act.
+// muxApprovalResolved is the audit frame after the host settled
+// an approval (dashboard or /api/respond). Bridge drops local
+// pending and PATCHes the Feishu card.
 type muxApprovalResolved struct {
 	SessionID  string `json:"sessionId"`
 	ApprovalID string `json:"approvalId"`
-	Outcome    string `json:"outcome"` // "approved" | "declined" | ...
+	Outcome    string `json:"outcome"` // allowed-once | rejected | cancelled | unavailable
+}
+
+// muxQuestionResolved is the audit frame after a question batch is
+// answered or cancelled (dashboard or /api/respond).
+type muxQuestionResolved struct {
+	SessionID     string `json:"sessionId"`
+	QuestionRPCID string `json:"questionRpcId"`
+	Outcome       string `json:"outcome"` // answered | cancelled
 }
 
 // muxQuestionRequested is the payload of
@@ -96,8 +104,11 @@ type muxQuestionRequested struct {
 }
 
 // questionPayload is one entry in muxQuestionRequested.Questions.
-// `Header` is the short label; `Question` is the full text;
-// `Options` are the multiple-choice options the user can pick.
+// `ID` is the stable caller-provided question id, echoed in the
+// /api/respond answer (AskUserQuestionAnswerItem.id). Host
+// matchesQuestions rejects a batch whose ids / length don't match
+// the pending request. `Header` is the short label; `Question` is
+// the full text; `Options` are the multiple-choice options.
 //
 // BUG FIX (F-dsh-shared-host §6 #4): pre-fix this used
 // `[]string` (just labels). Canonical wire shape is
@@ -107,10 +118,11 @@ type muxQuestionRequested struct {
 // versions and the runtime's display logic both need the object
 // shape (label + description renders a richer feishu card).
 type questionPayload struct {
+	ID       string                  `json:"id"`
 	Header   string                  `json:"header"`
 	Question string                  `json:"question"`
 	Options  []AskUserQuestionOption `json:"options"`
-	Multi    bool     `json:"multiSelect,omitempty"`
+	Multi    bool                    `json:"multiSelect,omitempty"`
 }
 
 // ─── Mux session/event SessionEvent shapes (the 11 we decode) ────────
@@ -163,25 +175,25 @@ type assistantChunkData struct {
 //
 //   - "block-start":     BlockType carries "text" | "tool-call" | …
 //   - "block-delta":     reserved for future streaming block updates
-//                        (current dsh builds only emit text-delta /
-//                        tool-call-delta)
+//     (current dsh builds only emit text-delta /
+//     tool-call-delta)
 //   - "block-end":       Block carries the complete finalized block
 //   - "text-delta":      Text carries the streaming fragment,
-//                        Index is the content-block slot
+//     Index is the content-block slot
 //   - "tool-call-delta": ID + Name + ArgumentsDelta carry a partial
-//                        tool-call accumulator
+//     tool-call accumulator
 //   - "usage":           Usage carries the model's usage row
 //   - "finish":          Reason carries the step-finish discriminator
 type assistantChunk struct {
-	Type           string            `json:"type"`
-	Index          int               `json:"index,omitempty"`
-	BlockType      string            `json:"blockType,omitempty"`
-	Text           string            `json:"text,omitempty"`
-	ArgumentsDelta string            `json:"argumentsDelta,omitempty"`
-	ID             string            `json:"id,omitempty"`
-	Name           string            `json:"name,omitempty"`
-	Block          *assistantBlock   `json:"block,omitempty"`
-	Usage          *usageInfo        `json:"usage,omitempty"`
+	Type           string             `json:"type"`
+	Index          int                `json:"index,omitempty"`
+	BlockType      string             `json:"blockType,omitempty"`
+	Text           string             `json:"text,omitempty"`
+	ArgumentsDelta string             `json:"argumentsDelta,omitempty"`
+	ID             string             `json:"id,omitempty"`
+	Name           string             `json:"name,omitempty"`
+	Block          *assistantBlock    `json:"block,omitempty"`
+	Usage          *usageInfo         `json:"usage,omitempty"`
 	Reason         *chunkFinishReason `json:"reason,omitempty"`
 }
 
@@ -351,8 +363,6 @@ type usageInfo struct {
 	ContextWindowPct    float64 `json:"contextWindowPct,omitempty"`
 }
 
-
-
 // compactionEndData is the `data` body of a compaction/end event.
 // One cycle = one EventCompaction. The envelope strip happens in
 // translate.go before unmarshalling this struct.
@@ -462,8 +472,8 @@ type ToolEventView struct {
 // `{sessionId, seq, projection, value}`). If probe shows different
 // names (e.g. `name` instead of `projection`), update tags only.
 type projectionEnvelope struct {
-	SessionID string          `json:"sessionId,omitempty"`
-	Seq       int64           `json:"seq,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	Seq       int64  `json:"seq,omitempty"`
 	// BUG FIX (F-dsh-shared-host §6 #1): the wire field is "key"
 	// (dsh-api.md §3.4.3), not "projection". Pre-fix this struct
 	// used `json:"projection"` so dsh's mux frames never matched
@@ -505,9 +515,9 @@ type todoItem struct {
 // falls through to a debug log when the payload is empty, which
 // is the expected behaviour when dsh skips this event entirely.
 type approvalAskedData struct {
-	ToolCallID string                  `json:"toolCallId"`
-	ToolName   string                  `json:"toolName"`
-	Action     string                  `json:"action"`
+	ToolCallID string `json:"toolCallId"`
+	ToolName   string `json:"toolName"`
+	Action     string `json:"action"`
 	// BUG FIX: pre-fix this was []string; canonical wire is
 	// []AskUserQuestionOption (objects). Same reasoning as
 	// questionPayload.Options above.
@@ -562,33 +572,33 @@ type sessionCreateValue struct {
 // Field notes (verified against real wire):
 //
 //   - ID          — the session's wire id. Format is a UUID
-//                   prefixed with "session-" (e.g.
-//                   "session-e4fe0be6-c082-48a5-be70-77628e7486bc").
-//                   Same shape as sessionCreateValue.SessionID.
+//     prefixed with "session-" (e.g.
+//     "session-e4fe0be6-c082-48a5-be70-77628e7486bc").
+//     Same shape as sessionCreateValue.SessionID.
 //   - UpdatedAt   — unix millis of the last write. Use this as
-//                   the "most recent" sort key for picker UI.
+//     the "most recent" sort key for picker UI.
 //   - Running     — bool; true while the session has an in-flight
-//                   turn. Resuming a session that has no completed
-//                   turn is fine — the bridge just attaches and
-//                   waits for new events. (session.fork is no
-//                   longer used by this bridge.)
+//     turn. Resuming a session that has no completed
+//     turn is fine — the bridge just attaches and
+//     waits for new events. (session.fork is no
+//     longer used by this bridge.)
 //   - Blank       — bool; true for sessions with zero completed
-//                   turns. Picker should pre-filter blanks for a
-//                   smoother UX.
+//     turns. Picker should pre-filter blanks for a
+//     smoother UX.
 //   - CWD         — directory the session was created against.
-//                   Used by the picker to filter sessions for the
-//                   current /cwd (cross-workspace contamination is
-//                   annoying — docs/bridge/dsh.md §11).
+//     Used by the picker to filter sessions for the
+//     current /cwd (cross-workspace contamination is
+//     annoying — docs/bridge/dsh.md §11).
 //   - AgentPreset — registered agent preset key (e.g.
-//                   "standard"). Audit only; the bridge doesn't
-//                   dispatch on this.
+//     "standard"). Audit only; the bridge doesn't
+//     dispatch on this.
 //   - Projections — optional. Some sessions include a
-//                   "projections.values" object carrying derived
-//                   metadata (title, turnCount, tokenUsage). The
-//                   bridge does NOT decode it — kept as RawMessage
-//                   so a server-side projection schema bump
-//                   doesn't break us. Future "show me the title"
-//                   picker card would decode `projections.values.title`.
+//     "projections.values" object carrying derived
+//     metadata (title, turnCount, tokenUsage). The
+//     bridge does NOT decode it — kept as RawMessage
+//     so a server-side projection schema bump
+//     doesn't break us. Future "show me the title"
+//     picker card would decode `projections.values.title`.
 type Session struct {
 	ID          string          `json:"sessionId"`
 	UpdatedAt   int64           `json:"updatedAt"`
@@ -638,9 +648,9 @@ type sessionListValue struct {
 // ModelProviderGroup / ModelCatalogFailure when /model lands.
 type sessionModelsValue struct {
 	Current  modelSelectionWire `json:"current"`
-	Routable bool                `json:"routable"`
-	Groups   json.RawMessage     `json:"groups,omitempty"`
-	Failures json.RawMessage     `json:"failures,omitempty"`
+	Routable bool               `json:"routable"`
+	Groups   json.RawMessage    `json:"groups,omitempty"`
+	Failures json.RawMessage    `json:"failures,omitempty"`
 }
 
 // modelSelectionWire is one entry of ModelSelection

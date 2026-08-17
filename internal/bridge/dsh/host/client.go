@@ -499,15 +499,38 @@ type ApprovalResponse struct {
 	Outcome    string `json:"outcome"`              // "allowed-once" | "rejected"
 }
 
+// QuestionResponse is the inner body for POST /api/respond when
+// answering question/requested (dsh-api.md §2.12.2). Host
+// matchesQuestions requires answers.length == questions.length,
+// each answer.id echoing AskUserQuestionItem.id, in order.
+type QuestionResponse struct {
+	SessionID string         `json:"sessionId"`
+	Answer    QuestionAnswer `json:"answer"`
+}
+
+// QuestionAnswer is AskUserQuestionAnswer: one batch covering every
+// question in the originating ask().
+type QuestionAnswer struct {
+	Answers []QuestionAnswerItem `json:"answers"`
+}
+
+// QuestionAnswerItem is one AskUserQuestionAnswerItem. Selected is
+// always serialized (empty array, never JSON null). Custom is
+// omitted when empty — host rejects custom:"".
+type QuestionAnswerItem struct {
+	ID       string   `json:"id"`
+	Selected []string `json:"selected"`
+	Custom   string   `json:"custom,omitempty"`
+}
+
 // Respond sends the answer to a server-pushed approval/requested
 // or question/requested. Per dsh-api.md §2.12, /api/respond uses
 // the client-response envelope; the `rpcId` field is the
 // envelope-level echo of the server-frame's rpcId (NOT a fresh
 // client-minted id — that is what makes it correlate).
 //
-// Phase 2 will wrap this in a typed QuestionResponse. Phase 0
-// only covers the approval path because that's the one tested in
-// host_test.go.
+// `value` is ApprovalResponse or QuestionResponse depending on the
+// originating frame method.
 func (c *RPCClient) Respond(ctx context.Context, frameRpcID string, value any) error {
 	// envelope: {type:"client-response", rpcId:<echoed>, result:{ok, value}}
 	// Built inline as json.RawMessage so we ship the literal envelope

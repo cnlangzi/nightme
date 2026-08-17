@@ -838,12 +838,12 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 // the receipt card (unchanged behavior).
 // TestSend_OutCard_TopLevelCreate_EmojiPrefixed — F-44 follow-up:
 // OutCard is a top-level Create (ReplyInChat, rootID="") with the
-// 🔐 emoji prepended to the card title. The card is a blocking UI
-// element (user must click Allow/Deny) and must stay visible in
+// 👉 emoji prepended to the card title. The card is a blocking UI
+// element (user must pick an option) and must stay visible in
 // main chat regardless of whether the parent user message has a
 // tool thread. The emoji is the channel's visual decoration (so
-// users can scan main chat and immediately see "this is a
-// permission request"); the abstract messages.Card.Title is the
+// users can scan main chat and immediately see "this needs a
+// choice"); the abstract messages.Card.Title is the
 // undecorated plain title.
 func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 	a := testAdapter(t)
@@ -863,7 +863,7 @@ func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 	}
 
 	card := &messages.Card{
-		Title:   "Permission needed",
+		Title:   "Action Needed",
 		Body:    "Allow Bash?",
 		Options: []string{"allow", "deny"},
 	}
@@ -887,17 +887,18 @@ func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 	if captured.ChatID != "oc_test" {
 		t.Errorf("sendFunc.ChatID = %q, want %q", captured.ChatID, "oc_test")
 	}
-	// Body must contain the 🔐-prefixed title (channel decoration).
-	if !strings.Contains(captured.Body, "🔐 Permission needed") {
-		t.Errorf("card body missing 🔐 emoji prefix on title; got body: %s", captured.Body)
+	// Body must contain the 👉-prefixed title (channel decoration).
+	if !strings.Contains(captured.Body, "👉 Action Needed") {
+		t.Errorf("card body missing 👉 emoji prefix on title; got body: %s", captured.Body)
 	}
 }
+
 // TestSend_OutError_RendersAsCard_NoPermissionEmoji — F-61 bridge-
 // death follow-up: OutError must render as an interactive card so
-// the user sees the diagnostic, but it MUST NOT carry the 🔐
-// permission-emoji prefix (no permission is being asked) and the
+// the user sees the diagnostic, but it MUST NOT carry the 👉
+// Action Needed prefix (no choice is being asked) and the
 // header template MUST default to "red" so it stands out from a
-// routine permission request.
+// routine Action Needed card.
 func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
 	a := testAdapter(t)
 	var captured struct {
@@ -932,10 +933,10 @@ func TestSend_OutError_RendersAsCard_NoPermissionEmoji(t *testing.T) {
 	if captured.MsgType != "interactive" {
 		t.Errorf("sendFunc.MsgType = %q, want interactive", captured.MsgType)
 	}
-	// Title: ⚠️ dsh bridge died (signal-killed). The 🔐 permission
-	// prefix MUST NOT be present.
-	if strings.Contains(captured.Body, "🔐") {
-		t.Errorf("OutError card must not carry 🔐 permission prefix; got body: %s", captured.Body)
+	// Title: ⚠️ dsh bridge died (signal-killed). The 👉 Action
+	// Needed prefix MUST NOT be present.
+	if strings.Contains(captured.Body, "🔐") || strings.Contains(captured.Body, "👉") {
+		t.Errorf("OutError card must not carry Action Needed prefix; got body: %s", captured.Body)
 	}
 	if !strings.Contains(captured.Body, "⚠️ dsh bridge died") {
 		t.Errorf("card title missing ⚠️ dsh bridge died; got body: %s", captured.Body)
@@ -991,7 +992,6 @@ func TestSend_OutError_TruncatesLongBody(t *testing.T) {
 		t.Errorf("card body should not contain the full 4 KiB stderr tail; got body length %d", len(captured.Body))
 	}
 }
-
 
 // TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed — F-44
 // follow-up: OutCommandReply is a top-level Create (ReplyInChat,
@@ -1386,9 +1386,9 @@ func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 // preserves the slot thereafter.
 func TestSendViaLark_Dispatch(t *testing.T) {
 	cases := []struct {
-		name             string
-		msg              messages.OutboundMessage
-		wantRootID       string // "" = top-level Create; else = ReplyInBoth anchor
+		name              string
+		msg               messages.OutboundMessage
+		wantRootID        string // "" = top-level Create; else = ReplyInBoth anchor
 		wantReplyInThread bool
 	}{
 		{
@@ -1401,7 +1401,7 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 					{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
 				}},
 			},
-			wantRootID:       "om_user_1", // receipt cold-start: ReplyInBoth anchored
+			wantRootID:        "om_user_1", // receipt cold-start: ReplyInBoth anchored
 			wantReplyInThread: false,
 		},
 		{
@@ -1414,7 +1414,7 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 					{Subject: "step 1", Status: agent.TaskCompleted, ActiveForm: "doing 1"},
 				}},
 			},
-			wantRootID:       "om_user_2", // receipt cold-start: ReplyInBoth anchored
+			wantRootID:        "om_user_2", // receipt cold-start: ReplyInBoth anchored
 			wantReplyInThread: false,
 		},
 		{
@@ -1428,7 +1428,7 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 					Options: []string{"Allow", "Deny"},
 				},
 			},
-			wantRootID:       "", // top-level Create, no anchor
+			wantRootID:        "", // top-level Create, no anchor
 			wantReplyInThread: false,
 		},
 		{
@@ -1439,7 +1439,7 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 				ReplyTo: "om_user_4", // F-44 follow-up: ReplyTo is ignored (top-level Create)
 				Text:    "/help result",
 			},
-			wantRootID:       "", // top-level Create, no anchor
+			wantRootID:        "", // top-level Create, no anchor
 			wantReplyInThread: false,
 		},
 	}
@@ -1716,7 +1716,6 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // F-44 revert: OutReply folds into the rolling-log receipt card.
 // ---------------------------------------------------------------------------
@@ -1940,20 +1939,24 @@ func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 //
 //  1. Cold-start an OutReply to create the receipt (1 entry, card
 //     "om_card_initial" posted).
+//
 //  2. Pre-fill rcpt.entries with receiptMaxElements-1 additional
 //     entries so the next AppendEntry would push elementCount past
 //     receiptMaxElements (cap = 50; current 50 entries, next would
 //     be 51).
+//
 //  3. Wire sendFunc to return ("", nil) on the placeholder send —
 //     simulating the ReplyInChat empty-MessageId fall-through.
+//
 //  4. Send a second OutReply → overflow handler kicks in.
+//
 //  5. Assert:
 //
-//   - Send returns a non-nil error (the empty-msgID sentinel)
-//   - The receipt's cardMsgID is UNCHANGED (still "om_card_initial")
-//   - The receipt's entries are UNCHANGED (overflow entry was NOT
+//     - Send returns a non-nil error (the empty-msgID sentinel)
+//     - The receipt's cardMsgID is UNCHANGED (still "om_card_initial")
+//     - The receipt's entries are UNCHANGED (overflow entry was NOT
 //     committed)
-//   - sendFunc was called exactly once for the placeholder attempt
+//     - sendFunc was called exactly once for the placeholder attempt
 //     (and returned "" + nil, which the handler correctly rejected)
 func TestSend_OutReply_OverflowPlaceholderEmptyMsgID_TreatedAsFailure(t *testing.T) {
 	a := testAdapter(t)
@@ -2220,7 +2223,6 @@ func TestSend_OutResult_CoLocatesUsage(t *testing.T) {
 		t.Errorf("send count = %d, want 1 (OutResult with co-located Usage still ships one message)", count)
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // F-44 lifecycle shift: MessageForwarded → Typing placeholder receipt

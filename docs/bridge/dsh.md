@@ -126,7 +126,7 @@ ws://127.0.0.1:3080/api/events.host  # host lifecycle(创建/销毁/失败)
 | `session/jobs` | `{sessionId, jobs}` | 后台任务;本期不发 event |
 | `approval/requested` | `{sessionId, approvalId, toolName, callId?, reason?}` | **`EventAgentPermission{ResponseCh}`** + 记 `approvalId` |
 | `approval/resolved` | `{sessionId, approvalId, outcome}` | audit trail,debug log |
-| `question/requested` | `{sessionId, questions: AskUserQuestionItem[]}` | **`EventAgentPermission`**(复用)|
+| `question/requested` | `{sessionId, questions: AskUserQuestionItem[]}` | **`EventAgentPermission`**(复用;`Questions` 整批 + `Options` 仅第一题)|
 | `question/resolved` | `{sessionId, questionRpcId, outcome}` | audit trail |
 | 未知 / 其它 | — | debug log,不杀 session(宽松策略) |
 
@@ -571,9 +571,12 @@ func (d *driver) SendPermission(resp string) error {
 ```
 
 **关键修正**(对 codex 已知踩坑的预防):
-- `SendPermission` 用 **approvalID**(服务端稳定字段)路由,**不**用 rpcId(可能变)
+- `SendPermission` 对 **approval** 用 `approvalId` 路由;对 **question** 用 **server-frame `rpcId`**(host pending 表的 key),不要用 `sessionId+":q"`
 - 只有 1 个 pending approval 时,rpcId == approvalID;多 approval 并发时按 approvalID 路由,避免 codex §6.4 那样的乱答
 - 5 min timeout(`permissionTimeout` 包级 var),过期 → decline,test 压 200ms
+- **AskUserQuestion 批答**:host `matchesQuestions` 要求 `answers.length == questions.length` 且 `answer.id === question.id` 按序。飞书单题卡点选项即 `SendPermission(label)`;**Type your answer** Submit / **Skip this question** 走 `nm-q:`(`custom` 或空 `selected`)。多题卡在卡内翻页(`Step`/`Picks`),中间 click PATCH 并且在 `card.action.trigger` 回调里带回下一张卡(`card.type=raw`),最后一步才 inbound `nm-q:` JSON 批答。飞书交互卡设计与踩坑见 [feishu-cards.md](../channel/feishu-cards.md)。
+- **Approval ≠ Question**:mux `approval/requested` 用 `ApprovalResponse{outcome:allowed-once|rejected}`(飞书 **Waiting for approval** / Allow once / Reject);`question/requested` 用 `QuestionResponse`。两种卡分类型。dashboard 点 Allow once 后 host 发 `approval/resolved`,bridge **继续收 mux 事件**(不卡在 Feishu Action Needed),并 PATCH 掉飞书按钮。
+- 新 session / attach / `/new` 后发 `/permission danger-full-access`(host 拦截 slash,不开模型 turn),避免 workspace-write 下 git worktree lock 反复授权。
 
 ### 4.6 lifecycle (`session.go`)
 
@@ -681,7 +684,7 @@ t12  AgentSession.SetExited(0)
 | `session/projection` `key:"todos"` | `value: TodoItem[] \| null`(数组直出) | 应对齐 `EventAgentTaskCreate`| host fold:最新 `todo/write` 直到下一次 `turn/start`(`value:null` 退休 plan)。**与** `todo/write` 的 object `{todos:[...]}` **形状不同**。当前 `applyTodoProjectionLocked` 按 object 解,数组帧会丢;见 [dsh-api.md §3.4.3](./dsh-api.md) |
 | `session/event` `approval/asked` | `{event:{toolCallId, toolName, action, options}}` | (单独走 permissions.go) | **不**直接发 EventPermission 给 runtime,经 permissions 层 normalize |
 | `approval/requested` | `{sessionId, approvalId, toolName, callId?, reason?}` | `EventAgentPermission{ResponseCh}` | 见 §4.5 |
-| `question/requested` | `{sessionId, questions}` | `EventAgentPermission` (复用,多 question)| inline encode labels,见 codex §6.3 |
+| `question/requested` | `{sessionId, questions}` | `EventAgentPermission` (复用,多 question)| `Questions` 整批保留;`Options` 仅第一题标签。飞书 `len>1` 走卡内向导,最后一步才 `POST /api/respond`(host `matchesQuestions` 要求 answers 与 questions 等长且 id 对齐)。单题 / 点选标签仍走 `questionAnswerFor` |
 | `session/queue` | `{sessionId, items}` | (debug;F-38 后续) | |
 | `session/jobs` | `{sessionId, jobs}` | (debug;本期不发) | |
 | `session/projection` | `{sessionId, seq, key, value}` | (见上 `key:"todos"`;其余 title / sessionStats 等不发 chat event) | 字段名是 `key` 不是 `projection` |

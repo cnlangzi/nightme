@@ -149,12 +149,12 @@ probe `session/event` 实际遇到的 type 集合(全部出现在 0.1.0-rc.6):
 
 实机验证 §11 列的若干 ❌ BUG 部分已修:
 1. ~~`protocol.go:projectionEnvelope` 用 `projection` 而非 `key`~~ ✅ 已改为 `json:"key"`。**仍开**:`todos` 投影 `value` 是数组/`null`,decoder 仍按 `{todos|items}` object 解 — 见 [dsh-api.md §11 item 1b](./dsh-api.md)。
-2. `SendPermission` 发 `client-request{method:"respond"}` 而非 `client-response`
-3. `ApprovalOutcome` 用 `"approved"/"declined"` 而非 `"allowed-once"/"rejected"`
-4. `questionPayload.Options` 用 `[]string` 而非 `[]AskUserQuestionOption`
-5. `handleQuestionRequested` response 形状错误
+2. ~~`SendPermission` 发 `client-request{method:"respond"}`~~ ✅ `client-response` + approval `QuestionResponse` / `ApprovalResponse`
+3. ~~`ApprovalOutcome` 用 `"approved"/"declined"`~~ ✅ `"allowed-once"/"rejected"`
+4. ~~`questionPayload.Options` 用 `[]string`~~ ✅ `[]AskUserQuestionOption`
+5. ~~`handleQuestionRequested` response 形状错误~~ ✅ frame `rpcId` + `{sessionId, answer:{answers:[{id,selected,custom?}]}}`。飞书单题点选项即答;Type your answer / Skip 走 `nm-q:`;多题卡内向导,最后一步 `nm-q:` 整批 POST(host `matchesQuestions`)
 
-dsh 0.1.0-rc.6 出于兼容**两种都接受**,但新架构落地时一并修。
+剩余 active bug 是 item 1b。AskUserQuestion 的飞书 UX 见 [dsh-api.md §3.4.9](./dsh-api.md)；交互卡踩坑见 [feishu-cards.md](../channel/feishu-cards.md)。
 
 ---
 
@@ -423,10 +423,10 @@ cs.Close() / DropAgentSession(as-a)
 |---|---|---|---|
 | 1 | `protocol.go:projectionEnvelope` | ~~`"projection"`~~ | `"key"` ✅ |
 | 1b | `state.go:applyTodoProjectionLocked` | `value` 当 `{todos\|items}` object 解 | `TodoItem[] \| null`(数组直出);`null` 不要发空 OutTask* |
-| 2 | `session.go:SendPermission` envelope | `client-request{method:"respond",payload:{...}}` | `client-response{rpcId:echoed,result:{ok,value}}` |
-| 3 | `SendPermission` outcome | `"approved"/"declined"` | `"allowed-once"/"rejected"` |
-| 4 | `protocol.go:questionPayload.Options` | `[]string` | `[]AskUserQuestionOption{label,description?}` |
-| 5 | `permissions.go:handleQuestionRequested` | key by approvalID | key by frame.rpcId;payload 用 `QuestionResponsePayload` shape |
+| 2 | `session.go:SendPermission` envelope | ~~`client-request{method:"respond",payload:{...}}`~~ | `client-response{rpcId:echoed,result:{ok,value}}` ✅ |
+| 3 | `SendPermission` outcome | ~~`"approved"/"declined"`~~ | `"allowed-once"/"rejected"` ✅ |
+| 4 | `protocol.go:questionPayload.Options` | ~~`[]string`~~ | `[]AskUserQuestionOption{label,description?}` ✅ |
+| 5 | `permissions.go:handleQuestionRequested` | ~~key by approvalID; approval outcome payload~~ | key by frame.rpcId; payload 用 `QuestionResponsePayload` shape ✅ |
 
 加上: 新发现的 session/event 类型(§5)的 standardRegistry 注册。
 

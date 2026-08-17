@@ -895,7 +895,7 @@ interface AskUserQuestionAnswerItem {
 - **`approvalId` is audit-only** — it's the core correlation id used by the impl to reconcile `approval/asked`/`decided` events; the wire correlation is governed entirely by the echoed `rpcId`.
 - **`sessionId` IS required in the response value** (despite not being on the wire for the request frame) — the server uses it as the second correlation key.
 
-❌ **BRIDGE BUG** (`session.go:864-886`, `SendPermission`): the current Go bridge sends `type:"client-request", method:"respond", payload:{rpcId, payload:{outcome}}` instead of `type:"client-response", rpcId, result:{ok, value:{sessionId, approvalId, outcome}}`. The server accepts the legacy shape because dsh 0.1.0-rc.6 happens to recognize both forms, but the canonical wire (per `rpc.d.ts`) is `client-response`. Tracked for fix in next bridge revision.
+✅ **FIXED**: `SendPermission` now emits `type:"client-response"` with `result.value` as `ApprovalResponse` or `QuestionResponse` (envelope `rpcId` echoes the server-frame). See §11 items 2–5. Multi-question Feishu cards POST the full `answers[]` batch only after the last in-card step (`nm-q:` payload).
 
 ---
 
@@ -1100,7 +1100,11 @@ Sent as subscription baseline only for sessions with tasks. Empty `[]` still sen
 }
 ```
 
-Bridge emits `EventAgentPermission{Tool: toolName, Action: reason, Options: ["approve","decline"], ResponseCh: respCh}`. Response channel is registered in `pendingApprovals[frame.RPCID]`. Reply via `POST /api/respond` with `client-response` envelope (§2.12).
+Bridge emits `EventAgentPermission{Tool: toolName, Action: reason, Options: ["Allow once","Reject"], Kind: approval, ResponseCh: respCh}`. Response channel is registered in `pendingApprovals[frame.RPCID]` (NOT `approvalId`). Reply via `POST /api/respond` with `ApprovalResponse` `{sessionId, approvalId, outcome}` (§2.12.1). Feishu card title is **Waiting for approval** (not AskUserQuestion's Action Needed wizard).
+
+If the user answers on the **dashboard**, host broadcasts `approval/resolved` and the turn continues on mux `session/event`. nightme must **keep draining events** — it does not wait on Feishu `SendPermission`. On `approval/resolved` the bridge drops the local pending entry and emits `EventAgentPermissionSettled` so Feishu PATCHes the leftover card. A later Feishu click is a no-op (`no pending approval`).
+
+Posting a `QuestionResponse` for this rpcId returns `{accepted:false, reason:"bad-response"}` and the dashboard card stays.
 
 #### 3.4.7 `approval/resolved` — audit frame
 
@@ -1115,7 +1119,7 @@ Bridge emits `EventAgentPermission{Tool: toolName, Action: reason, Options: ["ap
 }
 ```
 
-Pure push; debug log only. Confirms our `respond` POST was received and acted on by the server.
+Pure push. Bridge drops the matching local pending (by `approvalId`) and emits `EventAgentPermissionSettled` so the Feishu card hides buttons. Mux `session/event` is independent of whether Feishu answered.
 
 #### 3.4.8 `approval/asked` — model-side approval (alt path)
 
@@ -1163,6 +1167,17 @@ interface AskUserQuestionItem {
 **Routing key** for `respond`: the frame's **rpcId** (NOT any session id concat). The question's logical id IS the rpcId minted when the host accepts `ask()`. `permissions.go:142-187` documents the trap.
 
 Empty `questions` array is a known dsh quirk (placeholder frames); bridge logs and skips.
+
+**Feishu Action Needed card** (channel-side, not host). Full design + pitfalls: [feishu-cards.md](../channel/feishu-cards.md).
+
+| batch | card | click | `/api/respond` |
+|-------|------|-------|----------------|
+| `len(questions)==1` | one-shot; options stacked one-per-row; **Type your answer** + **Skip this question** + **Submit** | option → inbound of the clicked **label**; Submit → `nm-q:` `{id,selected:[],custom}`; Skip → `nm-q:` `{id,selected:[]}` | `questionAnswerFor` maps a label onto that question; custom rides `AskUserQuestionAnswerItem.custom` with empty `selected` (host rejects custom+selected on non-multi) |
+| `len(questions)>1` | in-card wizard (`👉 Action Needed · i/n`), matching dashboard 1/N; same custom/skip chrome on every step | intermediate clicks PATCH **and** return the next card in the `card.action.trigger` response (`card.type=raw`); last click inbound `nm-q:` + JSON `[{id,selected,custom?}]` | host `matchesQuestions` requires `answers.length == questions.length` and `answer.id === question.id` in order — **must not** POST until the batch is complete |
+| skip | **Skip this question** (`skip:`) on every question, including one-shot | empty `selected` for that id (no `custom`), then advance or POST | same as dashboard Skip |
+| custom | **Type your answer** input + **Submit** (`custom:`) | typed text as `custom`, empty `selected` | same as dashboard free-text; chat-typed Feishu text still does **not** answer a pending question |
+
+Long option labels render as **one button per row** (`width: fill`), not equal-width `column_set` (that truncates mixed Q1+Q2 labels). Title emoji is **👉** (not 🔐). Approval cards (**Waiting for approval** / Allow once / Reject) have no Type your answer / Skip. Feishu `input` must not set `icon` (API 200621 unknown property; password inputs use `show_icon` only). Question options, Type your answer, Skip, and Submit live in **one** `form` at the card root — buttons outside a form on the same card do not fire `card.action.trigger`. Form submit often omits `value.action` and only sends button `name` (`opt_0`, `skip_question`, `submit_custom`); nightme maps `opt_N` back to the Nth option label. Intermediate wizard clicks must return the next card in the callback (`card.type=raw`); IM PATCH alone does not redraw a submitted form. Dashboard 1/N only advances after the **full** `nm-q:` batch hits `/api/respond` (host `matchesQuestions`); Feishu pages locally until the last step.
 
 #### 3.4.10 `question/resolved` — audit frame
 
@@ -1301,7 +1316,8 @@ cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
 | `--profile web` | launch the web harness (vs `--profile headless` for one-shot print mode) | selects the HTTP+SSE/WS surface |
 | `--port 0` | OS picks a free port | avoids collisions on shared hosts |
 | `cmd.Dir` = workspace | dsh's session cwd | runtime context (no other model/provider injection) |
-| `DSH_PERMISSION_MODE=danger-full-access` | bypass interactive permission prompts | per `[[agent-no-config-tampering]]` — only inject transport + permissions |
+| `DSH_PERMISSION_MODE=danger-full-access` | process env for sandbox-policy plugin default | per `[[agent-no-config-tampering]]` — only inject transport + permissions |
+| `/permission danger-full-access` after `session.create` / attach / `/new` | per-session preset: sandbox `danger-full-access` + approval `never` (dashboard "Full access") | web profile `pinInitialPermission` otherwise starts sessions at `workspace-write`+`ask`, which is why git writes to `.git/worktrees` keep prompting. Slash command is intercepted by host; no model turn. Does **not** persist `settings.defaultPreset`. |
 
 ### 7.2 URL parse
 
@@ -1572,15 +1588,15 @@ The Go bridge was implemented before the TS source was accessible for verificati
 |---|---|---|---|
 | 1 | `protocol.go:projectionEnvelope` uses `Key string \`json:"key"\`` | `session/projection` uses `key` | ✅ fixed |
 | 1b | `applyTodoProjectionLocked` unmarshals `value` as `{todos\|items: TodoItem[]}` | `key:"todos"` value is `TodoItem[] \| null` (array or JSON null) | ❌ BUG — array frames drop; `null` still emits empty `EventAgentTaskCreate` (Feishu clears checklist). Live `todo/write` object shape is unaffected. History tail `projections.values.todos` is not applied on attach. |
-| 2 | `session.go:SendPermission` sends `client-request{method:"respond", payload:{rpcId, payload:{outcome}}}` | `respond` is `client-response{envelope.rpcId echoes server-frame's rpcId, result.value:{sessionId, approvalId, outcome}}` | ❌ BUG — legacy form accidentally accepted by 0.1.0-rc.6; fix to canonical form |
-| 3 | `session.go:SendPermission` outcome vocabulary: `"approved"` \| `"declined"` | `ApprovalOutcome`: `"allowed-once"` \| `"rejected"` (client-giveable subset) | ❌ BUG — wrong enum values |
-| 4 | `protocol.go:questionPayload.Options` uses `[]string` | `AskUserQuestionItem.options` is `[]AskUserQuestionOption` (objects) | ❌ BUG — option shapes |
-| 5 | `permissions.go:handleQuestionRequested` registers `pendingApprovals[frameRpcID]` and the `respond` payload uses `{rpcId: approvalID, outcome}` | Question response is `{sessionId, answer: {answers: [{id, selected, custom}]}}`; `rpcId` is the envelope-level echo of server-frame | ❌ BUG — wrong response payload shape |
+| 2 | `session.go:SendPermission` sends `client-request{method:"respond", payload:{rpcId, payload:{outcome}}}` | `respond` is `client-response{envelope.rpcId echoes server-frame's rpcId, result.value:{sessionId, approvalId, outcome}}` | ✅ fixed |
+| 3 | `session.go:SendPermission` outcome vocabulary: `"approved"` \| `"declined"` | `ApprovalOutcome`: `"allowed-once"` \| `"rejected"` (client-giveable subset) | ✅ fixed |
+| 4 | `protocol.go:questionPayload.Options` uses `[]string` | `AskUserQuestionItem.options` is `[]AskUserQuestionOption` (objects) | ✅ fixed |
+| 5 | `permissions.go:handleQuestionRequested` registers `pendingApprovals[frameRpcID]` and the `respond` payload uses `{rpcId: approvalID, outcome}` | Question response is `{sessionId, answer: {answers: [{id, selected, custom}]}}`; `rpcId` is the envelope-level echo of server-frame | ✅ fixed — `questionPayload.ID` decoded; `SendPermission` emits `QuestionResponse`; Feishu one-shot `opt:` click → inbound `Action` → `Manager.SendPermission`. Multi-question cards page in-card (`· i/n`); last click POSTs `nm-q:` batch so `matchesQuestions` sees every id. Text replies still enqueue a new prompt (do not answer a pending question). |
 | 6 | Bridge dials WebSocket (`ws.go:dialWS`) | Server supports BOTH SSE GET and WebSocket upgrade | ✅ OK (both valid); could simplify by switching to SSE and dropping gorilla/websocket |
 | 7 | `sessions.d.ts` lists 50+ methods across 11 domains; bridge only calls ~8 | All 50+ available | ⚠ Bridge doesn't yet wire host/workspace/skills/agentPresets/goals/settings/credentials/llm; runtime doesn't ask for them yet |
 | 8 | Bridge opens mux+host as 2 separate WS dials | `events.mux` aggregates ALL sessions on one stream (subscription baseline per attached session); host is single stream | ✅ OK semantically |
 
-Items 1b and 2–5 are the active bridge bugs against the canonical wire. Item 1 (`key` vs `projection`) is fixed.
+Item 1b is the remaining active bridge bug against the canonical wire. Items 1–5 (except 1b) are fixed.
 
 ---
 

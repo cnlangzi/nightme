@@ -237,6 +237,113 @@ func TestTranslate_EventDone_Dropped(t *testing.T) {
 	}
 }
 
+func TestTranslate_EventPermission_ActionNeeded(t *testing.T) {
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind: agent.EventAgentPermission,
+		Permission: &agent.AgentPermissionRequest{
+			Tool:    "question",
+			Action:  "Which trigger?",
+			Options: []string{"仅 REPL 启动(裸 nightme)", "REPL + 所有 CLI 子命令"},
+			Kind:    agent.PermissionKindQuestion,
+		},
+	})
+	if !ok || msg.Kind != messages.OutCard {
+		t.Fatalf("got (%v, %v), want (OutCard, true)", msg.Kind, ok)
+	}
+	if msg.Card == nil {
+		t.Fatal("Card is nil")
+	}
+	if msg.Card.Title != "Action Needed" {
+		t.Errorf("Title = %q, want Action Needed", msg.Card.Title)
+	}
+	if !strings.Contains(msg.Card.Body, "Which trigger?") {
+		t.Errorf("Body = %q, want question text", msg.Card.Body)
+	}
+	if len(msg.Card.Options) != 2 {
+		t.Errorf("Options = %v, want 2", msg.Card.Options)
+	}
+}
+
+func TestTranslate_EventPermission_QuestionBatch(t *testing.T) {
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind: agent.EventAgentPermission,
+		Permission: &agent.AgentPermissionRequest{
+			Tool:    "question",
+			Action:  "Trigger — 何时检查?\nSource — 怎么查?",
+			Options: []string{"仅 REPL 启动(裸 nightme)", "REPL + 所有 CLI 子命令"},
+			Questions: []agent.AgentPermissionQuestion{
+				{
+					ID:       "q-trigger",
+					Header:   "Trigger",
+					Question: "何时检查?",
+					Options:  []string{"仅 REPL 启动(裸 nightme)", "REPL + 所有 CLI 子命令"},
+				},
+				{
+					ID:       "q-source",
+					Header:   "Source",
+					Question: "怎么查?",
+					Options:  []string{"GitHub Releases API", "go-github-selfupdate"},
+				},
+			},
+		},
+	})
+	if !ok || msg.Card == nil {
+		t.Fatalf("got (%v, %v), want OutCard", msg.Kind, ok)
+	}
+	if len(msg.Card.Questions) != 2 {
+		t.Fatalf("Questions = %d, want 2", len(msg.Card.Questions))
+	}
+	if msg.Card.Questions[0].ID != "q-trigger" || msg.Card.Questions[1].ID != "q-source" {
+		t.Errorf("question ids = %+v", msg.Card.Questions)
+	}
+	if len(msg.Card.Options) != 2 || msg.Card.Options[0] != "仅 REPL 启动(裸 nightme)" {
+		t.Errorf("Options = %v, want first question only", msg.Card.Options)
+	}
+	if len(msg.Card.Picks) != 2 {
+		t.Errorf("Picks = %d, want 2 slots", len(msg.Card.Picks))
+	}
+}
+
+func TestTranslate_EventPermission_ApprovalCard(t *testing.T) {
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind: agent.EventAgentPermission,
+		Permission: &agent.AgentPermissionRequest{
+			Tool:    "Bash",
+			Action:  "escalate sandbox to danger-full-access",
+			Options: []string{"Allow once", "Reject"},
+			Kind:    agent.PermissionKindApproval,
+		},
+	})
+	if !ok || msg.Card == nil {
+		t.Fatal("want OutCard")
+	}
+	if msg.Card.Title != "Waiting for approval" {
+		t.Errorf("Title = %q, want Waiting for approval", msg.Card.Title)
+	}
+	if len(msg.Card.Questions) != 0 {
+		t.Errorf("Questions = %d, want 0 (approval is not AskUserQuestion)", len(msg.Card.Questions))
+	}
+}
+
+func TestTranslate_EventPermissionSettled_PatchesCard(t *testing.T) {
+	msg, ok := Translate("chat1", agent.AgentEvent{
+		Kind: agent.EventAgentPermissionSettled,
+		PermissionSettled: &agent.AgentPermissionSettled{
+			Outcome: "allowed-once",
+			Source:  "dashboard",
+		},
+	})
+	if !ok || msg.Kind != messages.OutCardPatch {
+		t.Fatalf("got (%v, %v), want OutCardPatch", msg.Kind, ok)
+	}
+	if msg.ReplyTo != "" {
+		t.Errorf("ReplyTo = %q, want empty (channel looks up last opt card)", msg.ReplyTo)
+	}
+	if msg.Card == nil || !strings.Contains(msg.Card.Body, "allowed-once") {
+		t.Errorf("Body = %+v, want dashboard outcome", msg.Card)
+	}
+}
+
 // TestTranslate_EventAgentTaskCreate_ToOutTaskCreate pins the
 // EventAgentTaskCreate → OutTaskCreate translation. This is the
 // bridge-side contract that the dsh bridge (and claudecode) rely on:

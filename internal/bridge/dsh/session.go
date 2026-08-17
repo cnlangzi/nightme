@@ -116,12 +116,16 @@ type driver struct {
 	pendingMu        sync.Mutex
 	pendingApprovals map[string]chan string
 	pendingOrder     []string
-	// lastApprovalID maps frame rpcId → human-readable approvalId
-	// (muxApprovalID for mux path, SessionID+":q" for questions).
-	// Audit-only; not used for routing. Keeps the original dsh ID
-	// available in dLog messages even though we never pass it to
-	// /api/respond.
-	lastApprovalID map[string]string
+	// pendingQuestions maps frame rpcId → the AskUserQuestionItem
+	// batch from question/requested. Present only for question
+	// frames; SendPermission uses it to emit QuestionResponse
+	// instead of ApprovalResponse. lastApprovalID maps frame rpcId
+	// → human-readable approvalId (muxApprovalID for mux path,
+	// SessionID+":q" for questions). Audit-only; not used for
+	// routing. Keeps the original dsh ID available in dLog
+	// messages even though we never pass it to /api/respond.
+	pendingQuestions map[string][]questionPayload
+	lastApprovalID   map[string]string
 
 	events chan agent.AgentEvent
 	// translate + wireState + dispatcher are the per-session
@@ -217,6 +221,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		workspace:        cfg.Workspace,
 		agentName:        s.name,
 		pendingApprovals: map[string]chan string{},
+		pendingQuestions: map[string][]questionPayload{},
 		lastApprovalID:   map[string]string{},
 		events:           make(chan agent.AgentEvent, eventBufferSize),
 		translate:        newTranslator(s.name, cfg.Workspace),
@@ -270,6 +275,8 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			"routable", sm.Routable)
 	}
 	modelCancel()
+
+	d.ensureFullAccess(ctx)
 
 	// Emit EventAgentReady so the runtime can capture SessionID +
 	// Workspace + Branch + Model.
@@ -664,7 +671,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 }
 
 // SendPermission routes a user decision back to the OLDEST pending
-// approval (FIFO). The pending-approval FIFO is per-driver (each
+// approval or question (FIFO). The pending FIFO is per-driver (each
 // session has its own queue); see the doc comment on pendingApprovals.
 //
 // The shared host's RPC client emits a proper client-response envelope
@@ -673,10 +680,10 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 // dsh-api.md §11 item #2). The wire correlation is governed entirely
 // by the echoed rpcId, not by any payload.approvalId.
 //
-// The outcome vocabulary follows dsh-api.md §2.12.1: "allowed-once"
-// or "rejected" only — these are the client-giveable subset of
-// ApprovalOutcome. Pre-fix bridge used "approved"/"declined"
-// (dsh-api.md §11 item #3); now canonical.
+// Two value shapes share this method:
+//   - question/requested → QuestionResponse (dsh-api.md §2.12.2)
+//   - approval/requested → ApprovalResponse with outcome
+//     "allowed-once" | "rejected" (dsh-api.md §2.12.1)
 func (d *driver) SendPermission(resp string) error {
 	d.pendingMu.Lock()
 	if len(d.pendingOrder) == 0 {
@@ -684,32 +691,51 @@ func (d *driver) SendPermission(resp string) error {
 		return errors.New("dsh: no pending approval to answer")
 	}
 	frameRpcID := d.pendingOrder[0]
-	d.pendingOrder = d.pendingOrder[1:]
-	delete(d.pendingApprovals, frameRpcID)
-	d.pendingMu.Unlock()
+	questions, isQuestion := d.pendingQuestions[frameRpcID]
+	approvalID := d.lastApprovalID[frameRpcID]
 
-	// Map the runtime's user-facing answer vocabulary to dsh's wire
-	// vocabulary. The runtime's vocabulary is bridge-agnostic
-	// ("approved"/"declined"/"allowed-once"/"rejected"); we accept
-	// either spelling for forward/back compat.
-	outcome := canonicalApprovalOutcome(resp)
-	if outcome == "" {
-		return fmt.Errorf("dsh: unknown approval outcome %q (expected approved|declined|allowed-once|rejected)", resp)
+	var value any
+	outcome := resp
+	if isQuestion {
+		answer, err := questionAnswerFor(questions, resp)
+		if err != nil {
+			d.pendingMu.Unlock()
+			return err
+		}
+		value = host.QuestionResponse{
+			SessionID: d.sessionID,
+			Answer:    answer,
+		}
+	} else {
+		outcome = canonicalApprovalOutcome(resp)
+		if outcome == "" {
+			d.pendingMu.Unlock()
+			return fmt.Errorf("dsh: unknown approval outcome %q (expected approved|declined|allowed-once|rejected)", resp)
+		}
+		value = host.ApprovalResponse{
+			SessionID:  d.sessionID,
+			ApprovalID: approvalID,
+			Outcome:    outcome,
+		}
 	}
 
-	approvalID := ""
-	d.pendingMu.Lock()
-	approvalID = d.lastApprovalID[frameRpcID]
+	d.pendingOrder = d.pendingOrder[1:]
+	ch := d.pendingApprovals[frameRpcID]
+	delete(d.pendingApprovals, frameRpcID)
+	delete(d.pendingQuestions, frameRpcID)
 	d.pendingMu.Unlock()
+
+	if ch != nil {
+		select {
+		case ch <- resp:
+		default:
+		}
+	}
 
 	// /api/respond uses the client-response envelope; the response
 	// shape is {accepted: true} on success, {accepted: false,
 	// reason: ...} on duplicate / stale rpcId (dsh-api.md §2.12).
-	if err := d.cli.RPC.Respond(context.Background(), frameRpcID, host.ApprovalResponse{
-		SessionID:  d.sessionID,
-		ApprovalID: approvalID,
-		Outcome:    outcome,
-	}); err != nil {
+	if err := d.cli.RPC.Respond(context.Background(), frameRpcID, value); err != nil {
 		return fmt.Errorf("dsh: /api/respond: %w", err)
 	}
 
@@ -725,14 +751,48 @@ func (d *driver) SendPermission(resp string) error {
 // canonicalApprovalOutcome maps the runtime's loose vocabulary onto
 // dsh's wire vocabulary. Returns "" if resp is unknown.
 func canonicalApprovalOutcome(resp string) string {
-	switch resp {
-	case "approved", "allowed-once":
+	switch strings.ToLower(strings.TrimSpace(resp)) {
+	case "approved", "allowed-once", "approve", "allow once", "allowed":
 		return "allowed-once"
-	case "declined", "rejected":
+	case "declined", "rejected", "decline", "reject":
 		return "rejected"
 	default:
 		return ""
 	}
+}
+
+// fullAccessPreset is the dsh permission-presets table key that
+// bundles sandbox danger-full-access + approval never. Dashboard
+// shows it as "Full access". New sessions otherwise pin
+// workspace-write (ask) via pinInitialPermission, which is why
+// git writes outside the workspace root keep prompting.
+const fullAccessPreset = "danger-full-access"
+
+// ensureFullAccess switches the attached session to Full access
+// the same way the dashboard chip does: slash command
+// `/permission danger-full-access` via session.prompt. Host
+// intercepts leading `/` without starting a model turn. apply()
+// is a no-op when the session is already on that preset.
+//
+// We do not persist settings.defaultPreset (that would rewrite
+// ~/.dsh); per-session switch is the allowed permissions injection.
+func (d *driver) ensureFullAccess(ctx context.Context) {
+	if d == nil || d.cli == nil || d.sessionID == "" {
+		return
+	}
+	promptCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	err := d.cli.RPC.SessionPrompt(promptCtx, d.sessionID, "queue", []host.PromptPart{{
+		Type: "text",
+		Text: "/permission " + fullAccessPreset,
+	}})
+	if err != nil {
+		dLog("dsh: /permission danger-full-access failed", "err", errStr(err))
+		return
+	}
+	slogDefault().Info("dsh: session permission preset",
+		"session_id", d.sessionID,
+		"preset", fullAccessPreset)
 }
 
 // Reset starts a fresh dsh conversation on this same driver (dashboard
@@ -775,6 +835,7 @@ func (d *driver) Reset(ctx context.Context) error {
 	d.pendingMu.Lock()
 	d.pendingApprovals = map[string]chan string{}
 	d.pendingOrder = nil
+	d.pendingQuestions = map[string][]questionPayload{}
 	d.lastApprovalID = map[string]string{}
 	d.pendingMu.Unlock()
 
@@ -788,6 +849,8 @@ func (d *driver) Reset(ctx context.Context) error {
 		d.model = sm.Current.Model
 	}
 	modelCancel()
+
+	d.ensureFullAccess(ctx)
 
 	d.seedLastSeq(ctx)
 

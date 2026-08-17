@@ -213,6 +213,7 @@ func newTestDriver(cli *host.Client, workspace string) *driver {
 		workspace:        workspace,
 		agentName:        "dsh",
 		pendingApprovals: map[string]chan string{},
+		pendingQuestions: map[string][]questionPayload{},
 		lastApprovalID:   map[string]string{},
 		events:           make(chan agent.AgentEvent, 64),
 		translate:        newTranslator("dsh", workspace),

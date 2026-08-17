@@ -183,17 +183,17 @@ func (d *eventDispatcher) dispatch(env sessionEventEnvelope, view json.RawMessag
 // handlers that return nil today. When dsh starts emitting them, the
 // handler bodies get filled in — no switch default change needed.
 var standardRegistry = newRegistry(map[string]eventHandler{
-	"assistant/chunk":            handleAssistantChunk,
-	"assistant/message":          handleAssistantMessage,
-	"tool/call":                  handleToolCall,
-	"tool/result":                handleToolResult,
-	"turn/start":                 handleTurnStart,
-	"turn/end":                   handleTurnEnd,
-	"compaction/end":             handleCompactionEnd,
-	"todo/write":                 handleTodoWrite,
-	"todo/update":                handleTodoUpdate, // P3+: dsh will emit; handler is no-op now
-	"todo/delete":                handleTodoDelete, // same
-	"approval/asked":             handleApprovalAsked,
+	"assistant/chunk":   handleAssistantChunk,
+	"assistant/message": handleAssistantMessage,
+	"tool/call":         handleToolCall,
+	"tool/result":       handleToolResult,
+	"turn/start":        handleTurnStart,
+	"turn/end":          handleTurnEnd,
+	"compaction/end":    handleCompactionEnd,
+	"todo/write":        handleTodoWrite,
+	"todo/update":       handleTodoUpdate,    // P3+: dsh will emit; handler is no-op now
+	"todo/delete":       handleTodoDelete,    // same
+	"approval/asked":    handleApprovalAsked, // session/event echo; mux approval/requested is the respondable gate
 
 	// F-dsh-shared-host §5: 9 new event types discovered during
 	// the 2026-08-16 mux-demux probe against dsh 0.1.0-rc.6.
@@ -202,17 +202,17 @@ var standardRegistry = newRegistry(map[string]eventHandler{
 	// /diagnose output. Adding them here (rather than relying on
 	// the "unknown method" warn branch) means a future dsh upgrade
 	// that adds new types no longer flips the count.
-	"permission/preset":          handleDebugOnly,
-	"sandbox/mode":               handleDebugOnly,
-	"approval/policy":            handleDebugOnly,
-	"agent/inbox/spliced":        handleDebugOnly, // queue spliced by server
-	"user/message":               handleUserMessageEcho, // ⚠ do NOT emit; see handler doc
-	"request/header":             handleDebugOnly,
-	"request/context":            handleDebugOnly,
-	"step/start":                 handleStepBoundary,
-	"step/end":                   handleStepBoundary,
-	"session/title":              handleSessionTitle,
-	"session/title-llm-request":  handleDebugOnly,
+	"permission/preset":         handleDebugOnly,
+	"sandbox/mode":              handleDebugOnly,
+	"approval/policy":           handleDebugOnly,
+	"agent/inbox/spliced":       handleDebugOnly,       // queue spliced by server
+	"user/message":              handleUserMessageEcho, // ⚠ do NOT emit; see handler doc
+	"request/header":            handleDebugOnly,
+	"request/context":           handleDebugOnly,
+	"step/start":                handleStepBoundary,
+	"step/end":                  handleStepBoundary,
+	"session/title":             handleSessionTitle,
+	"session/title-llm-request": handleDebugOnly,
 })
 
 // ─── handlers ────────────────────────────────────────────────────
@@ -742,8 +742,8 @@ func handleTodoUpdate(env sessionEventEnvelope, view json.RawMessage, tr *transl
 	// Set tr.active defensively even though handleTurnStart has
 	// typically already set it for this turn: a future dsh version
 	// may ship todo/update before turn/start (session.fork is
-		// no longer used; this comment kept for context on why
-		// we defensively set active=true here)
+	// no longer used; this comment kept for context on why
+	// we defensively set active=true here)
 	// resume edge case), and the F-52 phantom-Done guard depends
 	// on tr.active being true at turn/end. Setting it here is
 	// safe — the only way it gets cleared is at turn/start or
@@ -773,31 +773,13 @@ func handleTodoDelete(env sessionEventEnvelope, view json.RawMessage, tr *transl
 // would run while translator.mu + wireState.mu are held. Return
 // the EventAgentPermission so dispatch delivers after unlock.
 func handleApprovalAsked(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
-	if d == nil {
-		return nil
-	}
-	var aa approvalAskedData
-	if err := json.Unmarshal(env.Data, &aa); err != nil {
-		dLog("dsh: handleApprovalAsked decode: %v", err)
-		return nil
-	}
-	if aa.ToolCallID == "" {
-		return nil
-	}
-	options := optionLabels(aa.Options)
-	if len(options) == 0 {
-		options = []string{"approve", "decline"}
-	}
-	respCh := d.registerApproval("evt-" + aa.ToolCallID)
-	return []agent.AgentEvent{{
-		Kind: agent.EventAgentPermission,
-		Permission: &agent.AgentPermissionRequest{
-			Tool:       aa.ToolName,
-			Action:     aa.Action,
-			Options:    options,
-			ResponseCh: respCh,
-		},
-	}}
+	// session/event approval/asked is an audit/echo of the tool
+	// call. The dashboard ApprovalPanel and /api/respond are keyed
+	// on mux approval/requested (frame rpcId). Emitting a second
+	// EventAgentPermission here duplicated the Feishu card and
+	// registered a fake "evt-" key that cannot POST /api/respond.
+	dLog("dsh: session/event approval/asked (echo; mux approval/requested is the gate)")
+	return nil
 }
 
 // ─── F-dsh-shared-host §5 new event handlers ────────────────────────

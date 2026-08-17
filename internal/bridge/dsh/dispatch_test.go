@@ -191,8 +191,8 @@ func TestDispatcher_RegistryHasAllExpectedTypes(t *testing.T) {
 		"turn/end",
 		"compaction/end",
 		"todo/write",
-		"todo/update",   // 未来 type,handler 现在返回 nil
-		"todo/delete",   // 同上
+		"todo/update", // 未来 type,handler 现在返回 nil
+		"todo/delete", // 同上
 		"approval/asked",
 		"step/start",
 		"step/end",
@@ -690,14 +690,8 @@ func TestDispatcher_ApprovalAsked_DoesNotDeliverUnderLock(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatch(approval/asked) deadlocked; handler must deliver after unlock")
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d events, want 1 permission via dispatcher deliver", len(got))
-	}
-	if got[0].Kind != agent.EventAgentPermission {
-		t.Fatalf("kind = %v, want permission", got[0].Kind)
-	}
-	if got[0].Permission == nil || got[0].Permission.Tool != "Bash" {
-		t.Fatalf("permission = %+v, want tool Bash", got[0].Permission)
+	if len(got) != 0 {
+		t.Fatalf("got %d events, want 0 (approval/asked is mux-echo; approval/requested is the gate)", len(got))
 	}
 }
 

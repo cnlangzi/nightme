@@ -117,13 +117,16 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			dLog("dsh: approval/requested decode: %v", err)
 			return
 		}
-		d.handleApprovalRequested(ar)
+		d.handleApprovalRequested(rpcID, ar)
 
 	case "approval/resolved":
 		d.wireState.recordWireFrame(method, "", len(payload))
 		var ar muxApprovalResolved
-		_ = json.Unmarshal(payload, &ar)
-		dLog("dsh: approval/resolved audit", "approval_id", ar.ApprovalID, "outcome", ar.Outcome)
+		if err := json.Unmarshal(payload, &ar); err != nil {
+			dLog("dsh: approval/resolved decode: %v", err)
+			return
+		}
+		d.handleApprovalResolved(ar)
 
 	case "question/requested":
 		d.wireState.recordWireFrame(method, "", len(payload))
@@ -140,7 +143,12 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 
 	case "question/resolved":
 		d.wireState.recordWireFrame(method, "", len(payload))
-		dLog("dsh: question/resolved audit")
+		var qr muxQuestionResolved
+		if err := json.Unmarshal(payload, &qr); err != nil {
+			dLog("dsh: question/resolved decode: %v", err)
+			return
+		}
+		d.handleQuestionResolved(qr.QuestionRPCID, qr.Outcome)
 
 	case "session/queue":
 		d.wireState.recordWireFrame(method, "", len(payload))
@@ -153,18 +161,12 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		dLog("dsh: session/jobs: %d bytes", len(payload))
 
 	case "approval/asked":
-		// Note: `approval/asked` ALSO appears as a session/event
-		// envelope (env.Type == "approval/asked") in some dsh
-		// versions. We dispatch it via handleInlineApproval at the
-		// mux-frame level (here) so the approval/asked event in
-		// the registry is a graceful no-op (D4 symmetry).
+		// Mux schema has no top-level approval/asked (only
+		// session/event type approval/asked). If a frame still
+		// arrives here, skip — the respondable gate is
+		// approval/requested keyed on this envelope's rpcId.
 		d.wireState.recordWireFrame(method, "", len(payload))
-		var aa approvalAskedData
-		if err := json.Unmarshal(payload, &aa); err != nil {
-			dLog("dsh: approval/asked decode: %v", err)
-			return
-		}
-		d.handleInlineApproval(aa.ToolCallID, aa.ToolName, aa.Action, optionLabels(aa.Options))
+		dLog("dsh: mux approval/asked ignored (use approval/requested)")
 
 	default:
 		// Unknown mux method. P4: single lock acquire for ring

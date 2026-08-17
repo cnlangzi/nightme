@@ -1,19 +1,17 @@
 package gtw
 
 import (
-	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
-	"sync"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
-
-
 
 // closeTestRig bundles the dependencies RunClose needs. Lives
 // here rather than in a shared test helper because no other test
@@ -32,8 +30,8 @@ type closeTestRig struct {
 // need Load/Store round-trips.
 type memSlot struct{ c Context }
 
-func (m *memSlot) Load() Context    { return m.c }
-func (m *memSlot) Store(c Context)  { m.c = c }
+func (m *memSlot) Load() Context   { return m.c }
+func (m *memSlot) Store(c Context) { m.c = c }
 
 // programmableGit is a fakeGit whose response per (subcommand)
 // the test pre-records. Lets us simulate "worktree remove" /
@@ -54,13 +52,13 @@ type programmableGit struct {
 
 	// worktreeRemoveErr is the error (and stderr) returned for
 	// any `worktree remove` call. nil = success.
-	worktreeRemoveErr error
+	worktreeRemoveErr    error
 	worktreeRemoveStderr string
 
 	// branchDeleteErr is the error (and stderr) returned for
 	// any `branch -D` call. nil = success. Defaults to nil —
 	// happy-path close tests rely on this.
-	branchDeleteErr error
+	branchDeleteErr    error
 	branchDeleteStderr string
 
 	// syncOriginRef is the value returned for any
@@ -126,7 +124,7 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	// recording channel captures every Send so tests can assert
 	// the reply text via cs.Emitter().
 	rec := &closeTestRecCh{}
-	cs, _ := chatsession.New("chat-close-" + t.Name(), "test-agent")
+	cs, _ := chatsession.New("chat-close-"+t.Name(), "test-agent")
 	cs.WithEmitter(rec)
 	_ = cs.SetSelectedCwd("/tmp/start") // neutral starting cwd; tests overwrite
 	rig.cs = cs
@@ -142,15 +140,15 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	// sync (TestRunClose_Sync* cases) flip this flag and
 	// configure the fake accordingly.
 	rig.deps = HandlerDeps{
-		Git:                    rig.git,
-		Now:                    func() time.Time { return time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC) },
+		Git:                      rig.git,
+		Now:                      func() time.Time { return time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC) },
 		SkipRefreshDefaultBranch: true,
 	}
 	return rig
 }
 
 // closeTestRecCh is a per-test recording channel that captures
-// every Send / SendCard / Patch call. Mirrors the pattern in
+// every Send call. Mirrors the pattern in
 // close_integration_test.go but lives here because the unit
 // tests want a no-network rig.
 type closeTestRecCh struct {
@@ -163,10 +161,6 @@ func (r *closeTestRecCh) Send(_ context.Context, m messages.OutboundMessage) err
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
 	return nil
-}
-func (r *closeTestRecCh) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
-	r.Send(context.Background(), m)
-	return "rec-card-id", nil
 }
 func (r *closeTestRecCh) Patch(_ context.Context, m messages.OutboundMessage) error {
 	r.Send(context.Background(), m)

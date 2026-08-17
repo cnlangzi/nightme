@@ -107,8 +107,8 @@ While each Channel can pick its own storage form, the
 | Subsequent `OutboundMessage{ReplyTo: userMsgID, Kind: OutText\|OutResult\|OutInit\|OutUsage}` | PATCH / update the existing receipt — append the event's content |
 | `OutboundMessage{Kind: OutMessageState, Meta: {state}}` | AddReaction / DOM state / status emoji on the user's message |
 | `OutboundMessage{Kind: OutText, ReplyTo: ""}` | Orphan: render as plain text (no anchor) |
-| `OutboundMessage{Kind: OutCard}` | Send as an interactive card (permission prompts etc.) — thread reply if ReplyTo set |
-| `OutboundMessage{Kind: OutCardPatch}` | **F-46 增量**: 原地 PATCH 已有交互卡（Feishu `PATCH /im/v1/messages/{id}`），用 `ReplyTo`=bot card msg id。`buildCardButtons` 在 `Disabled+ChosenChoiceEmoji` 时把选中按钮染绿 (`type: "success"` + `✓` 前缀)，没选按钮灰描边 disabled。详见 [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) §10.2.3 |
+| `OutboundMessage{Kind: OutChoice}` | Send as an interactive card (permission prompts etc.) — thread reply if ReplyTo set |
+| `OutboundMessage{Kind: OutChoicePatch}` | **F-46 增量**: 原地 PATCH 已有交互卡（Feishu `PATCH /im/v1/messages/{id}`），用 `ReplyTo`=bot card msg id。`buildCardButtons` 在 `Disabled+ChosenChoiceEmoji` 时把选中按钮染绿 (`type: "success"` + `✓` 前缀)，没选按钮灰描边 disabled。详见 [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) §10.2.3 |
 | `OutboundMessage{Kind: OutThinking\|OutToolStart\|OutToolEnd}` | **F-thread-route**: Channel-specific routing. Feishu: post as plain text thread reply (rootID = msg.ReplyTo). Other Channels: pick their own routing (fold into receipt / separate message / drop). See [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) §2.1. |
 | ~~`OutboundMessage{Kind: OutCompaction}`~~ | ~~**F-thread-route**: Feishu: `postThreadReply(... "✶ Compacting conversation…")`~~ | **F-49 删除**：`OutCompaction` kind 整条 path 删除(runtime 不再产生此 Outbound)。详见 [`F-49 §1.9`](./../channel/feishu-rendering.md)。|
 
@@ -785,7 +785,7 @@ Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing。
 | ~~`OutCompaction`~~ | ~~**ReplyInThreadAndChat**~~ | ~~`✶ Compacting conversation…`~~ | **F-49 删除**：`OutCompaction` kind 整条 path 删除（无瞬时"压缩进行中"提示需求）。runtime 在 `EventCompaction` 上只调 `s.RecordCompaction()` 累加计数，不产生 Outbound。Channel 不再发任何 marker。详见 [`F-49 §1.9`](./../channel/feishu-rendering.md)。 |
 | `OutText` / `OutResult` / `OutInit` / `OutUsage` | n/a（PATCH in place 不走 reply API） | 进 receipt card body |
 | `OutMessageState` | n/a | AddReaction ⏳/🔄/✅/❌ 在 user msg 上 |
-| `OutCard`（permission card） | **ReplyInThreadAndChat** | 进 main chat 内联回复 |
+| `OutChoice`（permission card） | **ReplyInThreadAndChat** | 进 main chat 内联回复 |
 | `OutCommandReply`（slash 回应） | **ReplyInThreadAndChat** | 进 main chat 内联回复 |
 | Receipt 冷启动卡 | **ReplyInThreadAndChat** | 进 main chat 内联回复（PATCH in-place） |
 | 顶级 Create 形态 | **ReplyInChat** | nightme **不**用（fallback 路径 230011/231003 退化时才走顶级 Create，详见 §15.2） |
@@ -1008,8 +1008,8 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
         }
         return receipt.Append(ctx, /* translated event */)
 
-    // OutMessageState / OutMessageStateRemoved / OutCard: 不变
-    //   - OutCard (permission card): reply_in_thread=false，权限卡必须 main chat 可见
+    // OutMessageState / OutMessageStateRemoved / OutChoice: 不变
+    //   - OutChoice (permission card): reply_in_thread=false，权限卡必须 main chat 可见
     //   - OutCommandReply: reply_in_thread=false，slash 回应必须 main chat 可见
     }
 }
@@ -3352,7 +3352,7 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
 | `OutReply` | **Rolling-log receipt**（N 事件 = 1 张 card，每 chunk = 1+ div；超限转 top-level） | `ReplyInChat` (cold-start card 是 top-level Create，rootID=""，no anchor)；overflow → `ReplyInChat` | ✅ F-44 revert: 重新 fold，card 走 top-level 永远主 chat 可见 |
 | `OutResult` | 独立 top-level Create（每条 = 1 条消息） | `ReplyInChat` (top-level Create, no anchor) | ✅ 不变（F-39） |
 | `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt**（N 事件 = 1 张 card） | `ReplyInChat` (cold-start card 是 top-level Create; 后续 PATCH 保持) | ✅ 简化为只装 Tasks |
-| `OutCard` (permission) | Top-level Create + 👉 emoji 前缀（`Action Needed`；多题向导带 `· i/n`） | `ReplyInChat` (no anchor) | ✅ 切到 top-level (用户可一眼识别需要点选的卡) |
+| `OutChoice` (permission) | Top-level Create + 👉 emoji 前缀（`Action Needed`；多题向导带 `· i/n`） | `ReplyInChat` (no anchor) | ✅ 切到 top-level (用户可一眼识别需要点选的卡) |
 | `OutCommandReply` (slash command) | Top-level Create + ❯ emoji 前缀 | `ReplyInChat` (no anchor) | ✅ 切到 top-level (短状态消息, 不需要 thread anchor) |
 | `OutCompaction` | ReplyInBoth (brief 进度 marker) | `ReplyInBoth` (low frequency) | ✅ 不变 |
 | `OutInit` / `OutUsage` | Silent drop | — | ⏸ 推迟到 footer PR |
@@ -3362,13 +3362,13 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
 - 主 chat 永远可见，所有 user-visible 消息都是 top-level Create（独立 bubble / card）
 - `OutReply` 多 chunk 折进 1 张 rolling-log card（PATCH 维护，Card 2.0 视觉，top-level Create）
 - `OutReply` overflow（50 elements / 30 KB envelope）→ 独立 top-level bubble（plain text / markdown，区分于 card 视觉）
-- `OutResult` / `OutTask*` / `OutCard` / `OutCommandReply` 都是 top-level Create，每条独立 surface
+- `OutResult` / `OutTask*` / `OutChoice` / `OutCommandReply` 都是 top-level Create，每条独立 surface
 - emoji 前缀让用户在主 chat 里能扫一眼就知道是哪种消息：
   - 💬 = OutReply (rolling-log card 内的 entry)
   - 📋 = Tasks (rolling-log card 内的 checklist)
   - ✶ = Compacting
   - 💭 = Thinking (ReplyInThread, thread 抽屉内)
-  - 👉 = Action Needed (OutCard; AskUserQuestion / 权限点选)
+  - 👉 = Action Needed (OutChoice; AskUserQuestion / 权限点选)
   - ❯ = Slash command response (OutCommandReply)
   - ❌ = Error result (OutResult.IsError)
 
@@ -3471,7 +3471,7 @@ case gateway.OutToolEnd: ...
 case gateway.OutMessageState: ...
 case gateway.OutMessageStateRemoved: ...
 case gateway.OutCompaction: ...
-case gateway.OutCard: ...
+case gateway.OutChoice: ...
 case gateway.OutTyping: ...
 case gateway.OutCommandReply: ...
 }
@@ -3602,7 +3602,7 @@ func (a *Adapter) sendReplyInThreadAndChat(
 - **P3**:`p2p` / `topic` 群检测在 `Adapter` startup 时 warm-up,避免首条消息延迟
 - **接受现状** 也行:当前实现跟 F-37 / F-40 在 group chat 下行为完全一致;p2p / topic 群用户在 DM 里看到 "X replies" 灰条不影响 main chat 可达性(只是不直观)
 
-其他 OutboundKind 不变(F-37 已处理 thinking/tool/compaction 走 `ReplyInThread`,`OutCard` / `OutCommandReply` 走 `ReplyInThreadAndChat`)。
+其他 OutboundKind 不变(F-37 已处理 thinking/tool/compaction 走 `ReplyInThread`,`OutChoice` / `OutCommandReply` 走 `ReplyInThreadAndChat`)。
 
 **`ReplyInThreadAndChat` 锚定语义**：所有 reply 都设 `root_id = userMsgID`，`reply_in_thread = false`（字段省略）。飞书端：消息在 main chat 可见正文，同时在 thread 入口处有视觉 reply 链。多个 reply 共享同一 `root_id` → 飞书把它们组织成"同一 user msg 的 reply 串"。
 
@@ -3787,7 +3787,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 - **`OutThinking` 路径** (F-think `postThreadMarkdownReply`) — 不变
 - **`OutToolStart` / `OutToolEnd` 路径** (F-38 `tool_thread_merge.go`) — 不变
 - **`OutCompaction` 路径** (`postThreadReply`) — 不变
-- **`OutCard` 路径** (`buildInteractiveCard`) — 不变 — 注意此路径也调用 `SanitizeCardMarkdown`，所以 `SanitizeCardMarkdown` 必须保留为 exported
+- **`OutChoice` 路径** (`buildInteractiveCard`) — 不变 — 注意此路径也调用 `SanitizeCardMarkdown`，所以 `SanitizeCardMarkdown` 必须保留为 exported
 - **`OutMessageState` 路径** (F-31 reactions) — 不变
 - **`OutCommandReply` 路径** (`SendMessageText`) — 不变
 - **Task receipt 路径** (`ensureReceiptForTask` / `SetTaskList`) — 不变
@@ -4142,7 +4142,7 @@ main chat:
 | `OutReply` | **ReplyInThreadAndChat**（每 chunk） | ✅ footer 在文末 |
 | `OutResult` | ReplyInThreadAndChat | ✅ footer 在文末 |
 | `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt card**（Tasks） | ✅ footer 在 checklist 末尾 |
-| `OutCard` (permission) | Top-level Create | ❌ 不带 footer（短状态消息） |
+| `OutChoice` (permission) | Top-level Create | ❌ 不带 footer（短状态消息） |
 | `OutCommandReply` | Top-level Create | ❌ 不带 footer |
 | `OutThinking` / `OutToolStart` / `OutToolEnd` | `ReplyInThread` | ❌ 不带 footer（thread 视觉独立） |
 | `OutMessageState` | AddReaction | ❌ 不带 footer |
@@ -4500,7 +4500,7 @@ F-45 §1.2 的 OutboundKind → Footer 路由表中 `OutCompaction` 一行删除
   | `OutReply` | **ReplyInThreadAndChat**（每 chunk） | ✅ footer 在文末 |
   | `OutResult` | ReplyInThreadAndChat | ✅ footer 在文末 |
   | `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt card**（Tasks） | ✅ footer 在 checklist 末尾 |
-  | `OutCard` (permission) | Top-level Create | ❌ 不带 footer（短状态消息） |
+  | `OutChoice` (permission) | Top-level Create | ❌ 不带 footer（短状态消息） |
   | `OutCommandReply` | Top-level Create | ❌ 不带 footer |
 - | `OutThinking` / `OutToolStart` / `OutToolEnd` | `ReplyInThread` | ❌ 不带 footer（thread 视觉独立） |
 - | `OutCompaction` | `ReplyInBoth` | ❌ 不带 footer（短暂 marker） |
@@ -5029,7 +5029,7 @@ if footer != "" {
 | `TestFooter_OmitsZeroSegments` | Model="" / Cost=0 / CacheRead=0 时对应 segment 不显示 |
 | `TestFooter_AllZero_ReturnsEmpty` | 全零时返回 ""，caller 不拼到 text |
 | `TestStatusBar_NeverStampedOnThreadKinds` | OutThinking / OutToolStart / OutToolEnd / OutCompaction 不带 StatusBar |
-| `TestStatusBar_NeverStampedOnLifecycleKinds` | OutInit / OutUsage / OutMessageState / OutCard / OutCommandReply 不带 StatusBar |
+| `TestStatusBar_NeverStampedOnLifecycleKinds` | OutInit / OutUsage / OutMessageState / OutChoice / OutCommandReply 不带 StatusBar |
 
 ---
 
@@ -5171,23 +5171,23 @@ type Card struct {
     Options   []string             // button 文本 / select_static 选项
     RequestID string
     // F-46 新增
-    Kind      CardKind             // Permission / Decision / Preview；决定 header 配色 + 是否加 👉
+    Kind      ChoiceKind             // Permission / Decision / Preview；决定 header 配色 + 是否加 👉
     Action    string               // 当只有单一 action 时（替代 options）
-    Choices   []CardChoice         // 比 Options 更结构化：每个选项可以指定 emoji + label + action
+    Choices   []ChoiceOption         // 比 Options 更结构化：每个选项可以指定 emoji + label + action
     Form      []CardFormField      // 预留 form input（F-48）
     HeaderColor string             // blue / red / green / grey；默认按 Kind 推
     // AskUserQuestion：Questions + Step + Picks。len<=1 一击即答；len>1 卡内向导
 }
 ```
 
-`CardKind`：
+`ChoiceKind`：
 
 ```go
-type CardKind int
+type ChoiceKind int
 const (
-    CardKindPermission CardKind = iota  // Action Needed（👉 前缀；AskUserQuestion / 权限点选）
-    CardKindDecision                     // 决策卡（无 👉，自带 Choices，等宽 column_set）
-    CardKindPreview                      // /gtw test card 预览（无 👉，无 action）
+    ChoiceKindPermission ChoiceKind = iota  // Action Needed（👉 前缀；AskUserQuestion / 权限点选）
+    ChoiceKindDecision                     // 决策卡（无 👉，自带 Choices，等宽 column_set）
+    ChoiceKindPreview                      // /gtw test card 预览（无 👉，无 action）
 )
 ```
 
@@ -5196,10 +5196,10 @@ const (
 ```go
 // branch-exists scenario (gtw fix flow decision)
 &Card{
-    Kind:    CardKindDecision,
+    Kind:    ChoiceKindDecision,
     Title:   fmt.Sprintf("⚠️ 分支 `%s` 已存在", payload.Branch),
     Body:    fmt.Sprintf("issue: #%d  %s\n\n选择操作:", payload.IssueID, payload.Title),
-    Choices: []CardChoice{
+    Choices: []ChoiceOption{
         {Emoji: "🆕", Label: "用 -v2 新分支", Action: "act:/gtw/branch-newv2"},
         {Emoji: "🔗", Label: "加入现有协作",  Action: "act:/gtw/branch-join"},
         {Emoji: "❌", Label: "取消",          Action: "act:/gtw/cancel"},
@@ -5209,10 +5209,10 @@ const (
 
 // worktree-fail scenario (gtw fix flow decision)
 &Card{
-    Kind:    CardKindDecision,
+    Kind:    ChoiceKindDecision,
     Title:   fmt.Sprintf("❌ 创建 worktree 失败(#%d)", payload.IssueID),
     Body:    fmt.Sprintf("branch: %s\n\n选择操作:", payload.Branch),
-    Choices: []CardChoice{
+    Choices: []ChoiceOption{
         {Emoji: "🔄", Label: "重试", Action: "act:/gtw/worktree-retry"},
         {Emoji: "❌", Label: "取消", Action: "act:/gtw/cancel"},
     },
@@ -5224,8 +5224,8 @@ const (
 
 `buildInteractiveCard` 改造点：
 
-1. 拆 header 配色：根据 `CardKind` 选 `template`，默认 blue（permission 仍 blue + 👉）
-2. `👉 ` 前缀只在 `CardKindPermission` 时加（历史上曾用 🔐）
+1. 拆 header 配色：根据 `ChoiceKind` 选 `template`，默认 blue（permission 仍 blue + 👉）
+2. `👉 ` 前缀只在 `ChoiceKindPermission` 时加（历史上曾用 🔐）
 3. gtw `Choices` 渲染为 `column_set` 等宽布局（cc-connect `CardActionLayoutEqualColumns`），3 个按钮横排
 4. 单按钮场景（worktree-fail 两选项）也用 `column_set` 一致布局
 5. **Action Needed 选项一行一个**（`buildStackedButtons`）：长中文 label 不被等宽列截断。每题底部有 dashboard 同款 **Type your answer** 输入 + **Skip this question** + **Submit**（`form` / `custom:` / `skip:`）。`len(Questions)>1` 时卡内向导 `👉 Action Needed · i/n`，中间 click 除 PATCH 外还要在 `card.action.trigger` 回调里带回下一张卡（`card.type=raw`），否则飞书 form 停在「已提交」、客户端不翻到 2/N。最后一步 inbound `nm-q:` 批答（host `matchesQuestions` 要求整批 id 对齐）
@@ -5347,12 +5347,12 @@ func ActionLookup(action string) (ReactionKind, bool) {
 
 ### 3.7 原地 PATCH（action 完成后）
 
-gtw 派发完成后 (`gtw.HandleAction` 返回 true)，`HandleAction` 在 CardType 卡上 follow-up 发一条 `OutboundMessage{Kind: OutCardPatch, Card: <updatedCard>, ReplyTo: userMsgID}`。Feishu adapter 的 `Send` 把 `OutCardPatch` 路由到 `PatchMessage`：
+gtw 派发完成后 (`gtw.HandleAction` 返回 true)，`HandleAction` 在 CardType 卡上 follow-up 发一条 `OutboundMessage{Kind: OutChoicePatch, Card: <updatedCard>, ReplyTo: userMsgID}`。Feishu adapter 的 `Send` 把 `OutChoicePatch` 路由到 `PatchMessage`：
 
 ```go
-case gateway.OutCardPatch:
-    if msg.Card == nil || msg.ReplyTo == "" { return errors.New(...) }
-    body, err := buildInteractiveCard(msg.Card)
+case gateway.OutChoicePatch:
+    if msg.Choice == nil || msg.ReplyTo == "" { return errors.New(...) }
+    body, err := buildInteractiveCard(msg.Choice)
     if err != nil { return err }
     _, err = a.updateContent(ctx, msg.ReplyTo, interactiveMessageType, body, false)
     return err
@@ -5362,10 +5362,10 @@ case gateway.OutCardPatch:
 
 ```go
 &Card{
-    Kind:    CardKindDecision,
+    Kind:    ChoiceKindDecision,
     Title:   ...,
     Body:    ... + "\n\n✅ 已选择 " + chosenEmoji,
-    Choices: []CardChoice{chosen},
+    Choices: []ChoiceOption{chosen},
     RequestID: ...,
 }
 ```
@@ -5381,17 +5381,17 @@ action := map[string]any{
 
 ### 3.8 派发后 follow-up
 
-`gtw.HandleAction` 在 `executeBranchExistsAction` / `executeWorktreeFailAction` 完成后调 `deps.Send` 发 follow-up text（"❌ Cancelled fix #N." 等）。F-46 把这些 text 改成 `OutCardPatch`：
+`gtw.HandleAction` 在 `executeBranchExistsAction` / `executeWorktreeFailAction` 完成后调 `deps.Send` 发 follow-up text（"❌ Cancelled fix #N." 等）。F-46 把这些 text 改成 `OutChoicePatch`：
 
 ```go
 // 之前
 deps.Send(ctx, OutMsg{ChatID: ev.ChatID, Text: fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)})
 
 // F-46
-deps.SendCard(ctx, OutCardMsg{
+deps.SendCard(ctx, OutChoiceMsg{
     ChatID:   ev.ChatID,
     ReplyTo:  ev.TargetMsgID,
-    Card:     &Card{Kind: CardKindResult, Title: fmt.Sprintf("❌ Cancelled fix #%d", p.IssueID)},
+    Card:     &Card{Kind: ChoiceKindResult, Title: fmt.Sprintf("❌ Cancelled fix #%d", p.IssueID)},
 })
 ```
 
@@ -5404,7 +5404,7 @@ type OutMsg struct {
     ReplyTo   string
     // F-46 新增
     Card      *Card       // 当需要发/ PATCH 交互卡时填
-    CardKind  string      // "create" | "patch"，create 走 sendContent，patch 走 PatchMessage
+    ChoiceKind  string      // "create" | "patch"，create 走 sendContent，patch 走 PatchMessage
 }
 ```
 
@@ -5437,14 +5437,14 @@ type Card struct {
     Body       string
     Options    []string
     RequestID  string
-    Kind       CardKind       // F-46
+    Kind       ChoiceKind       // F-46
     Action     string         // F-46
-    Choices    []CardChoice   // F-46
+    Choices    []ChoiceOption   // F-46
     Form       []CardFormField // F-48
     HeaderColor string        // F-46
 }
-type CardKind int
-type CardChoice struct {
+type ChoiceKind int
+type ChoiceOption struct {
     Emoji  string
     Label  string
     Action string  // act:/gtw/...
@@ -5456,8 +5456,8 @@ type CardChoice struct {
 ```go
 const (
     // ...existing...
-    OutCard        OutboundKind = iota  // 已有
-    OutCardPatch  OutboundKind          // F-46 新增：PATCH 现有卡（不是发新卡）
+    OutChoice        OutboundKind = iota  // 已有
+    OutChoicePatch  OutboundKind          // F-46 新增：PATCH 现有卡（不是发新卡）
 )
 ```
 
@@ -5478,7 +5478,7 @@ func emitBranchExistsDraft(...) (*Result, error) {
 
 - `internal/gtw/action_routing_test.go`：`gtwActionMap` 全 prefix 命中
 - `internal/channel/feishu/adapter_test.go::TestHandleCardAction_ActRouting`：合成 `CardActionTriggerEvent`，验证 inbound 流收到正确 `ReactionEvent`
-- `internal/channel/feishu/card_test.go::TestBuildInteractiveCard_DecisionKind`：验证 `CardKindDecision` 不加 👉、3 个 button 用 `column_set`
+- `internal/channel/feishu/card_test.go::TestBuildInteractiveCard_DecisionKind`：验证 `ChoiceKindDecision` 不加 👉、3 个 button 用 `column_set`
 - `internal/channel/feishu/adapter_opt_test.go`：单题 `opt:` 立即 inbound；**Type your answer** Submit / **Skip this question** 走 `nm-q:`；多题向导中间 click PATCH **且**回调带回 `card.type=raw` 的 2/N，最后一步 `nm-q:` 批答；选项一行一个；approval 卡无 custom/skip。完整规则见 [`feishu-cards.md`](./feishu-cards.md)
 - `internal/channel/feishu/card_test.go::TestBuildInteractiveCard_DisabledButtons`：PATCH 后的卡 button 全 disabled
 
@@ -5502,18 +5502,18 @@ func emitBranchExistsDraft(...) (*Result, error) {
    - 监控：加 metric `nightme_card_action_inbound_full_total`
 3. **PATCH 失败**：PATCH 失败时用户看到旧卡 + action 没生效提示
    - 现状：PATCH 失败由 `WithTransientRetry` 兜底（retry.go）
-4. **CardKind 误用**：decision 卡错填 `CardKindPermission` 会被加 👉 + 颜色不对
-   - 默认零值 `CardKind(0)` 保留为 Permission 行为；新增 `CardKindDecision` 起 iota=1
+4. **ChoiceKind 误用**：decision 卡错填 `ChoiceKindPermission` 会被加 👉 + 颜色不对
+   - 默认零值 `ChoiceKind(0)` 保留为 Permission 行为；新增 `ChoiceKindDecision` 起 iota=1
 
 ## 7. 实施状态
 
 | 步 | 计划 | 实际 |
 | --- | --- | --- |
-| 1. `Card` / `OutboundKind.OutCardPatch` 字段 | 1d | ✅ done |
+| 1. `Card` / `OutboundKind.OutChoicePatch` 字段 | 1d | ✅ done |
 | 2. `buildInteractiveCard` 改造（column_set 等宽 + Disabled + ChosenChoiceEmoji） | 1d | ✅ done |
 | 3. `gtwActionMap` + `handleActCardAction` | 1d | ✅ done |
-| 4. Feishu adapter `OutCardPatch` case | 0.5d | ✅ done |
-| 5. `executeXxxAction` follow-up 改发 OutCardPatch | 1d | ✅ done（emitFollowUp + gtwSendAdapter） |
+| 4. Feishu adapter `OutChoicePatch` case | 0.5d | ✅ done |
+| 5. `executeXxxAction` follow-up 改发 OutChoicePatch | 1d | ✅ done（emitFollowUp + gtwSendAdapter） |
 | 6. `/gtw fix` 决策卡改用 `buildDecisionCard` | 1d | ❌ 推迟（`/gtw fix` 路径仍走纯文本 markdown，未来再迁）|
 | 7. 单元 + 集成测试 | 1d | 🟡 部分（`handlers_gtw_test.go` 6 个 case，但 `/gtw fix` 路径未覆盖）|
 | 8. 飞书三端验证 | 1d | 🟡 用户 UAT（无真飞书账号）|
@@ -5575,12 +5575,12 @@ gtw.HandleAction → executeXxxAction → emitFollowUp
 emitFollowUp：if draft.BotMessageID != "" → PATCH 原卡；else 落 plain text
         │
         ▼
-gtwSendAdapter → channel.Send(OutboundMessage{Kind: OutCardPatch)
+gtwSendAdapter → channel.Send(OutboundMessage{Kind: OutChoicePatch)
         │
         ▼
-Feishu adapter Send → OutCardPatch case
-        ├─ msg.Card == nil  ── 岔路 C：return error (被 _ = 吞掉)
-        ├─ buildInteractiveCard(msg.Card)  ── 岔路 D：return error (被 _ = 吞掉)
+Feishu adapter Send → OutChoicePatch case
+        ├─ msg.Choice == nil  ── 岔路 C：return error (被 _ = 吞掉)
+        ├─ buildInteractiveCard(msg.Choice)  ── 岔路 D：return error (被 _ = 吞掉)
         └─ a.PatchMessage(ctx, msg.ReplyTo, content)
                 └─ a.logOutgoing("patch_message", ..., err)  ── logOutgoing 总 fire
 ```
@@ -5626,15 +5626,15 @@ PATCH 后的卡布局（`buildCardButtons` 中处理）：
 - **body 不再有"✅ 已选择 X"独立行**——那个是冗余的视觉噪声，PATCH 后的按钮绿色已经传达"已选"语义。
 - body 只剩原始 body + 底部一行 `Retry failed: ...`（来自 `m.PatchResult`）。
 
-#### 10.2.4 `CardRequestID` stamping：测试栈的 PATCH 死代码
+#### 10.2.4 `ChoiceRequestID` stamping：测试栈的 PATCH 死代码
 
 **Bug 现象**：`/gtw test ok` synthetic reaction 跑通（`consumed=true dropped=false (handler acted)`），但 `emitFollowUp` 之后日志里**没有 `patch_message`**。
 
-**根因**：`gtwTestSeedDraft` 设的 `chatsession.GTWDraft` **没有 `CardRequestID` 字段**。`sendScenarioCard` 算的是 `"gtw-test-" + userMsgID`，但 `gtwTestSeedDraft` 不知道。`gtwTestRekeyDraft` 把 draft 从 `om_test_ok` 移到 `cardMsgID`，但 `CardRequestID` 还是空。
+**根因**：`gtwTestSeedDraft` 设的 `chatsession.GTWDraft` **没有 `ChoiceRequestID` 字段**。`sendScenarioCard` 算的是 `"gtw-test-" + userMsgID`，但 `gtwTestSeedDraft` 不知道。`gtwTestRekeyDraft` 把 draft 从 `om_test_ok` 移到 `cardMsgID`，但 `ChoiceRequestID` 还是空。
 
-`gtwSendAdapter` PATCH 路径把这个空 RequestID 传给 Feishu adapter 的 `OutCardPatch` case → `buildInteractiveCard` 看到空 RequestID → return error `"feishu: card missing request_id"`。这个 error 被 `_ = deps.Send(...)` 静默吞掉。
+`gtwSendAdapter` PATCH 路径把这个空 RequestID 传给 Feishu adapter 的 `OutChoicePatch` case → `buildInteractiveCard` 看到空 RequestID → return error `"feishu: card missing request_id"`。这个 error 被 `_ = deps.Send(...)` 静默吞掉。
 
-**修法**：`gtwTestSeedDraft` 直接硬编码 `CardRequestID: "gtw-test-" + userMsgID`，和 `sendScenarioCard` 的 `RequestID` 计算公式保持一致。PATCH 路径就通了。
+**修法**：`gtwTestSeedDraft` 直接硬编码 `ChoiceRequestID: "gtw-test-" + userMsgID`，和 `sendScenarioCard` 的 `RequestID` 计算公式保持一致。PATCH 路径就通了。
 
 #### 10.2.5 `/gtw test ok` 是 UAT demo，**不** auto-dispatch
 
@@ -5678,7 +5678,7 @@ Execute(logger)
 | --- | --- | --- |
 | A | `g.actionHandler` 没装 | `gateway.dispatchAction` 入口 |
 | B | `cs.onReaction` 没装 | `chatsession.HandleAction` 入口 |
-| C | `OutCardPatch` case 入口 `msg.Card == nil` | adapter Send OutCardPatch case |
+| C | `OutChoicePatch` case 入口 `msg.Choice == nil` | adapter Send OutChoicePatch case |
 | D | `buildInteractiveCard` 失败（RequestID 空 / JSON 失败）| adapter buildInteractiveCard 入口 |
 | E | `gtwDrafts.Lookup(ev.TargetMsgID) == nil`（draft 被 Take 走）| gtw 包装 closure 入口 |
 | F | switch emoji 不匹配（`if rk == ReactionRetry` 打印 `matches`）| executeXxxAction 入口 |
@@ -6737,19 +6737,19 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 | 文件 | 作用 |
 |---|---|
 | `internal/channel/feishu/adapter.go:890 SendMessageText` | 发 `msg_type: "text"` 消息,返回 messageID |
-| `internal/channel/feishu/adapter.go:765 buildInteractiveCard` | 已有的 OutCard 卡片构建(permission card),仅用于 OutCard 路径 |
+| `internal/channel/feishu/adapter.go:765 buildInteractiveCard` | 已有的 OutChoice 卡片构建(permission card),仅用于 OutChoice 路径 |
 | `internal/channel/feishu/adapter.go:1066 sendContent` | 透传到 lark client,支持任意 msgType |
 | `internal/channel/feishu/receipt.go:515 renderLocked` | 每个事件 `SendMessageText` 发新消息 |
 | `internal/channel/feishu/receipt.go:455 formatLocked` | 构造 plain text body(header + entries) |
 | `internal/channel/feishu/receipt.go:188 headerLine` | 单行 header(⏳ / 🔄 / ✅) |
-| `internal/gateway/messages.go:162 OutCard` / `:254 Card` | 已存在 interactive card 的抽象类型 |
+| `internal/gateway/messages.go:162 OutChoice` / `:254 Card` | 已存在 interactive card 的抽象类型 |
 | `internal/gateway/messages.go:182 OutInit` | 携带 `session_id` + `model`(无 `agent_name` / `provider`) |
 
 ### 4.2 现状(切到 card 之前)
 
 - 用户看到的 receipt 是一连串**短文本消息**(`⏳ 等待中` / `🔄 工具: Bash` / `✅ 已完成`)
 - 切到 card 后,这些短消息将合并为**一张可原地 PATCH 的卡片**
-- 已有的 `OutCard` 路径独立(permission card 走 `buildInteractiveCard` → `sendContent`),不影响 receipt 切换
+- 已有的 `OutChoice` 路径独立(permission card 走 `buildInteractiveCard` → `sendContent`),不影响 receipt 切换
 
 ## 5. 迁移方案:receipt → interactive card
 
@@ -6774,7 +6774,7 @@ Adapter.Send(OutboundMessage)
    ├── OutInit
    │     → receipt.Append(AgentConnectedEvent) → renderLocked → Patch(刷新 footer)
    │
-   └── OutCard (permission)
+   └── OutChoice (permission)
          → sendContent(interactive, buildInteractiveCard(...))   ← 不变
 ```
 
@@ -7069,7 +7069,7 @@ text, hasMention := stripAndDetectMention(
 - 单元: 字节数 = 收到超大 entries → 驱逐最老直到 < 24 KiB
 - 单元：回归 `mockReceiptBot.AddReaction` 不变（reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层）
 - 集成: 端到端: user message → 一张 receipt card(后续 agent event 不再发新消息,而是 PATCH);最终状态 `✅` 出现在 header;foot note 随状态变化
-- 回归: permission card (`OutCard`) 不受影响,继续走原 `buildInteractiveCard`
+- 回归: permission card (`OutChoice`) 不受影响,继续走原 `buildInteractiveCard`
 
 ## 8. 参考资料
 
@@ -7249,7 +7249,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutUsage` | `EventUsage` | token 用量 | **F-44: silent drop**(footer 设计推迟到 footer PR)。`agent.EventUsage` → `OutboundMessage{Usage}` Translate 路径保留 | — | ❌ (不渲染) |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
 | `OutInit` | `EventAgentConnected` | 会话初始化 | **F-44: silent drop**(footer 设计推迟到 footer PR)。`agent.EventAgentConnected` → `OutboundMessage{Init}` Translate 路径保留 | — | ❌ (不渲染) |
-| `OutCard` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
+| `OutChoice` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
 | `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` -- 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
 | `OutMessageStateRemoved` | (reserved) | 撤销进度标记 | `DeleteReaction`(未使用,append-only) | reaction API | ❌ |
 | `OutTyping` | (orphan) | typing 指示 | **silent drop**(飞书 bot 无原生 typing API) | - | ❌ |
@@ -7259,7 +7259,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 - **receipt card 路径覆盖 8 种** -- 选 `interactive` 是为了 PATCH-in-place(对抗 chat spam);选 markdown element 是为了渲染表格/代码块/超链接(后续会用)
 - **MessageState 单独走 reaction** -- append-only emoji 是飞书最轻量、最稳定的进度表达;走 reaction API 不挤占 card body 预算
-- **OutCard 走独立 card(非 receipt)** -- 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
+- **OutChoice 走独立 card(非 receipt)** -- 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
 - **OutCommandReply 走纯文本 `text`** -- 命令反馈是"短而独立"语义,绕过 receipt 让用户看到干净气泡(参见 F-08 §4 "Channel is dumb" contract: command reply 不属于滚动日志)
 
 ### 12.2 未来扩展槽位(不实现,但留位)

@@ -8,7 +8,7 @@ import (
 )
 
 // TestRenderActionLookupContract locks the contract between
-// BranchExistsCard / WorktreeFailCard (the gtw card renderer) and
+// BranchExistsChoice / WorktreeFailChoice (the gtw card renderer) and
 // messages.ActionLookup (the channel-side translator that turns
 // Feishu card.action.trigger events into ReactionKind values).
 //
@@ -27,19 +27,19 @@ import (
 func TestRenderActionLookupContract(t *testing.T) {
 	cases := []struct {
 		name string
-		card gtw.Card
+		card gtw.Choice
 	}{
 		{
-			name: "BranchExistsCard",
-			card: gtw.BranchExistsCard(gtw.FixDraftPayload{
-				Branch: "feat/foo",
+			name: "BranchExistsChoice",
+			card: gtw.BranchExistsChoice(gtw.FixDraftPayload{
+				Branch:  "feat/foo",
 				IssueID: 42,
 				Title:   "example issue",
 			}, ""),
 		},
 		{
-			name: "WorktreeFailCard",
-			card: gtw.WorktreeFailCard(gtw.FixDraftPayload{
+			name: "WorktreeFailChoice",
+			card: gtw.WorktreeFailChoice(gtw.FixDraftPayload{
 				Branch:   "feat/foo",
 				IssueID:  -1, // local-mode
 				GitError: "fatal: not a git repository",
@@ -79,7 +79,7 @@ func TestActionLookupUnknown(t *testing.T) {
 		"act:/gtw/",
 		"act:/unknown",
 		"random string",
-		"ACT:/GTW/CANCEL", // case-sensitive
+		"ACT:/GTW/CANCEL",  // case-sensitive
 		"act:/gtw/cancel ", // trailing space
 	} {
 		if _, ok := messages.ActionLookup(tag); ok {

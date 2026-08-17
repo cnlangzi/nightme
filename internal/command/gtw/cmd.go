@@ -13,7 +13,7 @@ import (
 // Factory implements command.SlashCommandFactory for /gtw.
 //
 // It holds the per-process *Manager (gtw state) and the
-// runtime's HandlerDeps (Send / SendCard / Git / Prober /
+// runtime's HandlerDeps (Git / Prober /
 // Detect / Now). The runtime constructs one Factory at startup
 // and registers it with command.Registry.
 //
@@ -847,22 +847,22 @@ func (s *managerContextSlot) Store(c Context) {
 	s.mgr.SetContext(s.chatID, c)
 }
 
-// managerDraftsMap adapts Manager to the legacy DraftsMap
+// managerDraftsMap adapts Manager to the DraftsMap
 // interface (Store / Take / Lookup / Count) used by RunFix /
-// HandleAction. Drafts are keyed by (chatID, userMsgID) on the
+// HandleAction. Drafts are keyed by (chatID, requestID) on the
 // Manager; the shim pins chatID.
 type managerDraftsMap struct {
 	mgr    *Manager
 	chatID string
 }
 
-func (d *managerDraftsMap) Store(userMsgID string, draft *Draft) {
-	d.mgr.StoreDraft(d.chatID, userMsgID, draft)
+func (d *managerDraftsMap) Store(requestID string, draft *Draft) {
+	d.mgr.StoreDraft(d.chatID, requestID, draft)
 }
-func (d *managerDraftsMap) Take(userMsgID string) *Draft {
-	return d.mgr.TakeDraft(d.chatID, userMsgID)
+func (d *managerDraftsMap) Take(requestID string) *Draft {
+	return d.mgr.TakeDraft(d.chatID, requestID)
 }
-func (d *managerDraftsMap) Lookup(userMsgID string) *Draft {
-	return d.mgr.GetDraft(d.chatID, userMsgID)
+func (d *managerDraftsMap) Lookup(requestID string) *Draft {
+	return d.mgr.GetDraft(d.chatID, requestID)
 }
 func (d *managerDraftsMap) Count() int { return d.mgr.DraftCount(d.chatID) }

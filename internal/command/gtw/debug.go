@@ -43,7 +43,7 @@ func (d *debugFactory) Spec() command.Spec {
 		Name:    "gtw-test",
 		Aliases: []string{"gtwtest"},
 		Summary: "Debug / UAT only: seed a synthetic gtw draft and wait for a Feishu click.",
-		Usage: "/gtw test <scenario>   card | ok | yes-no | three | unknown | orphan",
+		Usage:   "/gtw test <scenario>   card | ok | yes-no | three | unknown | orphan",
 	}
 }
 
@@ -138,7 +138,7 @@ func (d *debugFactory) runScenario(ctx context.Context, rt command.RuntimeServic
 	// The seed is enough for the test to be useful in CI
 	// even without an actual card send.
 	return &command.SlashOutput{
-		Reply: fmt.Sprintf("🧪 /gtw test %s [seed only]\n  setup: %s\n  expected: production HandleReaction + PATCH on click.\n\n  (no card-send stub — runtime must wire rt.Channel.SendCard)",
+		Reply: fmt.Sprintf("🧪 /gtw test %s [seed only]\n  setup: %s\n  expected: production HandleReaction + PATCH on click (Choice.RequestID).\n",
 			name, sc.Description),
 		Consumed: true,
 	}, nil
@@ -152,7 +152,7 @@ func (d *debugFactory) runPreview(_ context.Context, _ command.RuntimeServices, 
 		}, nil
 	}
 	// Build the preview card via the production renderer.
-	card := BranchExistsCard(testPayload(input.ChatID, "branch-exists"), "(none — test env)")
+	card := BranchExistsChoice(testPayload(input.ChatID, "branch-exists"), "(none — test env)")
 	card.RequestID = "gtw-test-preview-" + sc.SetupUserMsgID
 	return &command.SlashOutput{
 		Reply: fmt.Sprintf("🧪 /gtw test card — preview\n  Card chrome: %s\n  Body: %s\n  (no auto-dispatch — seed only)",
@@ -174,7 +174,8 @@ func (d *debugFactory) seedDraft(chatID, userMsgID, kind string) error {
 		return fmt.Errorf("unknown kind %q", kind)
 	}
 	p := testPayload(chatID, kind)
-	d.mgr.StoreDraft(chatID, userMsgID, &Draft{
+	requestID := "gtw-test-" + userMsgID
+	d.mgr.StoreDraft(chatID, requestID, &Draft{
 		Kind: draftKind,
 		Payload: FixDraftPayload{
 			IssueID:    p.IssueID,
@@ -186,8 +187,8 @@ func (d *debugFactory) seedDraft(chatID, userMsgID, kind string) error {
 			LabelAdded: p.LabelAdded,
 			ChatID:     p.ChatID,
 		},
-		CardRequestID: "gtw-test-" + userMsgID,
-		CreatedAt:     time.Now(),
+		ChoiceRequestID: requestID,
+		CreatedAt:       time.Now(),
 	})
 	return nil
 }

@@ -78,16 +78,16 @@ func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 	a.updateFunc = patches.hook()
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			Body:      "question: 何时检查版本? [仅 REPL 启动(裸 nightme) | REPL + 所有 CLI 子命令]",
 			Options:   []string{wantOption, "REPL + 所有 CLI 子命令"},
 			RequestID: "req-1",
 		},
 	}); err != nil {
-		t.Fatalf("Send(OutCard): %v", err)
+		t.Fatalf("Send(OutChoice): %v", err)
 	}
 
 	resp, err := a.handleCardAction(context.Background(), &larkcallback.CardActionTriggerEvent{
@@ -157,11 +157,11 @@ func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 }
 
 func TestBuildInteractiveCard_PermissionButtonsStacked(t *testing.T) {
-	raw, err := buildInteractiveCard(&messages.Card{
+	raw, err := buildInteractiveCard(&messages.Choice{
 		Title:     "Action Needed",
 		RequestID: "r1",
-		Kind:      messages.CardKindPermission,
-		Questions: []messages.CardQuestion{{
+		Kind:      messages.ChoiceKindPermission,
+		Questions: []messages.ChoiceQuestion{{
 			ID:       "q1",
 			Header:   "Trigger",
 			Question: "何时检查版本?",
@@ -212,11 +212,11 @@ func TestBuildInteractiveCard_PermissionButtonsStacked(t *testing.T) {
 }
 
 func TestBuildInteractiveCard_QuestionWizardTitle(t *testing.T) {
-	raw, err := buildInteractiveCard(&messages.Card{
+	raw, err := buildInteractiveCard(&messages.Choice{
 		Title:     "Action Needed",
 		RequestID: "r1",
-		Kind:      messages.CardKindPermission,
-		Questions: []messages.CardQuestion{
+		Kind:      messages.ChoiceKindPermission,
+		Questions: []messages.ChoiceQuestion{
 			{ID: "q1", Header: "Trigger", Question: "何时检查?", Options: []string{"A", "B"}},
 			{ID: "q2", Header: "Source", Question: "怎么查?", Options: []string{"C"}},
 		},
@@ -260,12 +260,12 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 	a.updateFunc = patches.hook()
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			RequestID: "req-wiz",
-			Questions: []messages.CardQuestion{
+			Questions: []messages.ChoiceQuestion{
 				{
 					ID:       "q-trigger",
 					Header:   "Trigger",
@@ -282,7 +282,7 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 			Picks: make([]string, 2),
 		},
 	}); err != nil {
-		t.Fatalf("Send(OutCard): %v", err)
+		t.Fatalf("Send(OutChoice): %v", err)
 	}
 
 	click := func(option string) *larkcallback.CardActionTriggerResponse {
@@ -380,12 +380,12 @@ func TestHandleCardAction_QuestionWizardSkipThenAnswer(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_skip",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			RequestID: "req-skip",
-			Questions: []messages.CardQuestion{
+			Questions: []messages.ChoiceQuestion{
 				{ID: "q1", Header: "Q1", Question: "one", Options: []string{"A"}},
 				{ID: "q2", Header: "Q2", Question: "two", Options: []string{"B"}},
 			},
@@ -465,7 +465,7 @@ func stackedColumnSets(t *testing.T, raw string) []map[string]any {
 	return sets
 }
 
-func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
+func TestSend_OutChoicePatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	a := testAdapter(t)
 	const (
 		chatID = "oc_settle"
@@ -477,27 +477,27 @@ func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	var patches patchLog
 	a.updateFunc = patches.hook()
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: chatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Waiting for approval",
 			Body:      "Bash: escalate sandbox",
 			Options:   []string{"Allow once", "Reject"},
 			RequestID: "req-settle",
 		},
 	}); err != nil {
-		t.Fatalf("Send OutCard: %v", err)
+		t.Fatalf("Send OutChoice: %v", err)
 	}
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCardPatch,
+		Kind:   messages.OutChoicePatch,
 		ChatID: chatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title: "Waiting for approval",
 			Body:  "✓ **allowed-once**（dashboard）",
-			Kind:  messages.CardKindPermission,
+			Kind:  messages.ChoiceKindPermission,
 		},
 	}); err != nil {
-		t.Fatalf("Send OutCardPatch: %v", err)
+		t.Fatalf("Send OutChoicePatch: %v", err)
 	}
 	_, patchedBodies := patches.wait(t, 1)
 	patched := patchedBodies[0]
@@ -509,13 +509,70 @@ func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	}
 }
 
+func TestSend_OutChoicePatch_ByRequestID_NotLastCard(t *testing.T) {
+	a := testAdapter(t)
+	const chatID = "oc_two"
+	ids := []string{"om_first", "om_second"}
+	n := 0
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		id := ids[n]
+		n++
+		return id, nil
+	}
+	var patches patchLog
+	a.updateFunc = patches.hook()
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoice,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:     "first",
+			Body:      "card one",
+			Options:   []string{"A"},
+			RequestID: "req-first",
+		},
+	}); err != nil {
+		t.Fatalf("Send first OutChoice: %v", err)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoice,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:     "second",
+			Body:      "card two",
+			Options:   []string{"B"},
+			RequestID: "req-second",
+		},
+	}); err != nil {
+		t.Fatalf("Send second OutChoice: %v", err)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoicePatch,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:     "first",
+			Body:      "patched first",
+			RequestID: "req-first",
+			Disabled:  true,
+		},
+	}); err != nil {
+		t.Fatalf("Send OutChoicePatch: %v", err)
+	}
+	patchedID, patchedBodies := patches.wait(t, 1)
+	if patchedID != "om_first" {
+		t.Errorf("PATCH target = %q, want om_first (RequestID, not last card)", patchedID)
+	}
+	if !strings.Contains(patchedBodies[0], "patched first") {
+		t.Errorf("PATCH body missing outcome; got %s", patchedBodies[0])
+	}
+}
+
 func TestBuildInteractiveCard_ApprovalHasNoCustomInput(t *testing.T) {
-	raw, err := buildInteractiveCard(&messages.Card{
+	raw, err := buildInteractiveCard(&messages.Choice{
 		Title:     "Waiting for approval",
 		Body:      "Bash: escalate sandbox",
 		Options:   []string{"Allow once", "Reject"},
 		RequestID: "r-appr",
-		Kind:      messages.CardKindPermission,
+		Kind:      messages.ChoiceKindPermission,
 	})
 	if err != nil {
 		t.Fatalf("buildInteractiveCard: %v", err)
@@ -540,12 +597,12 @@ func TestHandleCardAction_OneShotSkip(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_oneshot_skip",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			RequestID: "req-oneshot-skip",
-			Questions: []messages.CardQuestion{
+			Questions: []messages.ChoiceQuestion{
 				{ID: "q1", Header: "Q1", Question: "which?", Options: []string{"A", "B"}},
 			},
 			Picks: make([]string, 1),
@@ -588,12 +645,12 @@ func TestHandleCardAction_OneShotCustomSubmit(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_oneshot_custom",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			RequestID: "req-oneshot-custom",
-			Questions: []messages.CardQuestion{
+			Questions: []messages.ChoiceQuestion{
 				{ID: "q1", Question: "which?", Options: []string{"A", "B"}},
 			},
 			Picks: make([]string, 1),
@@ -648,12 +705,12 @@ func TestHandleCardAction_CustomSubmitEmptyToasts(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_empty_custom",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			RequestID: "req-empty-custom",
-			Questions: []messages.CardQuestion{
+			Questions: []messages.ChoiceQuestion{
 				{ID: "q1", Question: "which?", Options: []string{"A"}},
 			},
 			Picks: make([]string, 1),
@@ -695,12 +752,12 @@ func TestHandleCardAction_QuestionWizardCustomThenSkip(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_custom_skip",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			RequestID: "req-custom-skip",
-			Questions: []messages.CardQuestion{
+			Questions: []messages.ChoiceQuestion{
 				{ID: "q1", Header: "Q1", Question: "one", Options: []string{"A"}},
 				{ID: "q2", Header: "Q2", Question: "two", Options: []string{"B"}},
 			},
@@ -777,12 +834,12 @@ func TestHandleCardAction_FormSubmitOptIndexName(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			RequestID: "req-form-opt",
-			Questions: []messages.CardQuestion{{
+			Questions: []messages.ChoiceQuestion{{
 				ID:       "q-commit",
 				Question: "怎么办?",
 				Options: []string{
@@ -834,8 +891,8 @@ func TestHandleCardAction_FormSubmitOptIndexName(t *testing.T) {
 }
 
 func TestResolveCardAction_FormNames(t *testing.T) {
-	card := &messages.Card{
-		Questions: []messages.CardQuestion{{
+	card := &messages.Choice{
+		Questions: []messages.ChoiceQuestion{{
 			Options: []string{"A", "B"},
 		}},
 	}
@@ -879,8 +936,8 @@ func callbackCardJSON(t *testing.T, resp *larkcallback.CardActionTriggerResponse
 
 func TestRememberOptCard_KeepsPreviousForStaleClick(t *testing.T) {
 	a := testAdapter(t)
-	oldCard := &messages.Card{Title: "old", RequestID: "r1", Questions: []messages.CardQuestion{{ID: "q1", Question: "a"}}}
-	newCard := &messages.Card{Title: "new", RequestID: "r2", Questions: []messages.CardQuestion{{ID: "q2", Question: "b"}}}
+	oldCard := &messages.Choice{Title: "old", RequestID: "r1", Questions: []messages.ChoiceQuestion{{ID: "q1", Question: "a"}}}
+	newCard := &messages.Choice{Title: "new", RequestID: "r2", Questions: []messages.ChoiceQuestion{{ID: "q2", Question: "b"}}}
 	a.rememberOptCard("oc_1", "om_old", oldCard)
 	a.rememberOptCard("oc_1", "om_new", newCard)
 	if got := a.getOptCard("om_old"); got == nil || got.Title != "old" {

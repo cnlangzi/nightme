@@ -79,12 +79,6 @@ func (r *recordingEmitter) Send(ctx context.Context, msg messages.OutboundMessag
 	r.out = append(r.out, msg)
 	return nil
 }
-func (r *recordingEmitter) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.out = append(r.out, msg)
-	return "card-id", nil
-}
 func (r *recordingEmitter) Record() []messages.OutboundMessage {
 	r.mu.Lock()
 	defer r.mu.Unlock()

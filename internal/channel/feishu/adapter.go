@@ -36,11 +36,11 @@ const maxMessageBytes = 3800
 
 // interactiveMessageType is the Feishu msg_type for v1 interactive
 // cards (permission requests, multi-choice polls, etc.). Used by
-// Channel.Send (OutCard kind) and CardActionTrigger callback
+// Channel.Send (OutChoice kind) and CardActionTrigger callback
 // parsing in handleCardAction.
 const interactiveMessageType = "interactive"
 
-// actionNeededTitleEmoji prefixes CardKindPermission titles
+// actionNeededTitleEmoji prefixes ChoiceKindPermission titles
 // ("Action Needed"). 🔐 was the old permission-lock decoration;
 // 👉 is "your turn" — the user must pick an option, not grant a
 // capability.
@@ -202,15 +202,20 @@ type Adapter struct {
 	// a.mu (same lock as receiptsByUserMsgID).
 	pendingHeartbeats map[string]messages.HeartbeatSnapshot
 
-	// optCards remembers the last OutCard payload per bot message
+	// optCards remembers the last OutChoice payload per bot message
 	// id so a later opt: click can PATCH the card: drop all
 	// buttons and keep only the chosen option. Entries are
 	// removed on click (or overwritten by a later card). Guarded
 	// by a.mu.
-	optCards map[string]*messages.Card
+	optCards map[string]*messages.Choice
+
+	// optByRequestID maps Choice.RequestID → bot message id so
+	// OutChoicePatch can target a card without the caller holding a
+	// Feishu message id. Channel-private correlation.
+	optByRequestID map[string]string
 
 	// lastOptByChat maps chatID → last permission/question bot
-	// message id so OutCardPatch with empty ReplyTo (dashboard
+	// message id so OutChoicePatch without RequestID (dashboard
 	// settled the gate) can hide the Feishu buttons.
 	lastOptByChat map[string]string
 
@@ -302,7 +307,9 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		incoming:            make(chan channel.Message, 128),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
 		pendingHeartbeats:   make(map[string]messages.HeartbeatSnapshot),
-		optCards:            make(map[string]*messages.Card),
+		optCards:            make(map[string]*messages.Choice),
+		optByRequestID:      make(map[string]string),
+		lastOptByChat:       make(map[string]string),
 		optPatch:            make(map[string]*optPatchJob),
 		messageStates:       messageStates,
 		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
@@ -701,7 +708,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       Idempotency via a.messageStates map.
 //	OutMessageStateRemoved → DeleteReaction on MessageState.ReactionID
 //	                       (reserved; v1.3 uses append-only)
-//	OutCard              → top-level Create via sendContent (PR #47's
+//	OutChoice              → top-level Create via sendContent (PR #47's
 //	                       ReplyInChat — rootID="") with the 👉 emoji
 //	                       prepended to the card title (channel
 //	                       decoration). F-44 revert #2: an Action
@@ -809,7 +816,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 // Wire: top-level Create (rootID="") so the placeholder stays in
 // main chat regardless of the parent user message's thread
 // state. Same parent-thread gotcha rationale as
-// ensureReceiptForReply / ensureReceiptForTask / OutCard /
+// ensureReceiptForReply / ensureReceiptForTask / OutChoice /
 // OutCommandReply.
 //
 // Returns the receipt plus a `created` flag: created=true means
@@ -922,7 +929,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 // receipt" pattern for the visual scan benefit (1 card, N chunks,
 // PATCH in place). The card is posted via top-level Create (no
 // anchor) — same parent-thread gotcha rationale as OutResult /
-// OutTask* / OutCard / OutCommandReply: any tool-using turn creates
+// OutTask* / OutChoice / OutCommandReply: any tool-using turn creates
 // a thread on the user message, and a ReplyInBoth-anchored card
 // would be pulled into the thread drawer. Top-level Create
 // guarantees the rolling-log card stays visible in main chat.
@@ -1087,7 +1094,7 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 	// orphan bubble is indistinguishable from the first receipt card
 	// at the wire level (only the receipt registration differs).
 	//
-	// Use sendCardContent (raw card JSON), NOT SendCard(OutboundMessage):
+	// Use sendCardContent (raw card JSON), NOT Send with Kind=OutChoice:
 	// body is already a buildReceiptCard envelope; routing it through
 	// buildInteractiveCard would wrap the JSON as markdown inside a
 	// second card.
@@ -1143,7 +1150,7 @@ func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *a
 	// → main chat visible. Same wire shape as the cold-start
 	// task card; only the receipt registration differs.
 	//
-	// Use sendCardContent (raw card JSON), NOT SendCard(OutboundMessage):
+	// Use sendCardContent (raw card JSON), NOT Send with Kind=OutChoice:
 	// body is already a buildReceiptCard envelope; routing it through
 	// buildInteractiveCard would wrap the JSON as markdown inside a
 	// second card.
@@ -1275,7 +1282,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		//
 		// The cold-start card is posted via top-level Create
 		// (rootID="") — NOT ReplyInBoth. Same parent-thread
-		// rationale as OutResult / OutTask* / OutCard /
+		// rationale as OutResult / OutTask* / OutChoice /
 		// OutCommandReply: any tool-using turn creates a thread on
 		// the user message, and a ReplyInBoth-anchored card would
 		// be pulled into the thread drawer. Top-level Create keeps
@@ -1578,18 +1585,18 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		return a.DeleteReaction(ctx, msg.MessageState.MessageID, msg.MessageState.ReactionID)
 
-	case messages.OutCard:
-		if msg.Card == nil {
-			return errors.New("feishu: OutCard missing card payload")
+	case messages.OutChoice:
+		if msg.Choice == nil {
+			return errors.New("feishu: OutChoice missing choice payload")
 		}
-		if msg.Card.RequestID == "" {
-			msg.Card.RequestID = fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())
+		if msg.Choice.RequestID == "" {
+			msg.Choice.RequestID = fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())
 		}
-		content, err := buildInteractiveCard(msg.Card)
+		content, err := buildInteractiveCard(msg.Choice)
 		if err != nil {
 			return err
 		}
-		// F-44 follow-up: OutCard → ReplyInChat (top-level Create,
+		// F-44 follow-up: OutChoice → ReplyInChat (top-level Create,
 		// no anchor). Same parent-thread rationale as OutReply /
 		// OutResult / OutTask*: any tool-using turn creates a
 		// thread on the user message, and ReplyInBoth would be
@@ -1603,28 +1610,29 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		if err != nil {
 			return err
 		}
-		a.rememberOptCard(msg.ChatID, msgID, msg.Card)
+		if msgID == "" {
+			return errors.New("feishu: OutChoice send returned empty message id")
+		}
+		a.rememberOptCard(msg.ChatID, msgID, msg.Choice)
 		return nil
 
-	case messages.OutCardPatch:
-		// F-46: in-place PATCH of a previously sent decision card.
-		// gtw.HandleDraftReaction emits this when a follow-up wants to
-		// disable the original choices and surface the outcome
-		// (e.g. "✅ 已选择 🔄 重试 — Retry failed: …"). ReplyTo
-		// is the bot-side message id assigned at OutCard time.
-		// Empty ReplyTo: dashboard settled the approval/question;
-		// patch the last Action Needed card in this chat.
-		if msg.Card == nil {
-			return errors.New("feishu: OutCardPatch missing card payload")
+	case messages.OutChoicePatch:
+		// In-place PATCH of a previously sent choice prompt.
+		// Correlation is Channel-private: Choice.RequestID looks up
+		// the Feishu message id. Dashboard-settled permission
+		// events may omit RequestID; those fall back to the last
+		// opt card in the chat. ReplyTo is NOT a choice handle.
+		if msg.Choice == nil {
+			return errors.New("feishu: OutChoicePatch missing choice payload")
 		}
-		target := msg.ReplyTo
+		target := a.msgIDForRequestID(msg.Choice.RequestID)
 		if target == "" {
 			target = a.lastOptMsgID(msg.ChatID)
 		}
 		if target == "" {
 			return nil
 		}
-		if err := a.patchOptCardSettled(ctx, target, msg.Card); err != nil {
+		if err := a.patchOptCardSettled(ctx, target, msg.Choice); err != nil {
 			return err
 		}
 		return nil
@@ -1768,8 +1776,8 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// kind + stderr tail without having to scroll a long
 		// message. Distinct from OutCommandReply so the visual
 		// treatment can be "this is a problem, not a system
-		// reply" — header emoji ⚠️ + red header (CardKindError
-		// default). We deliberately do NOT use CardKindPermission
+		// reply" — header emoji ⚠️ + red header (ChoiceKindError
+		// default). We deliberately do NOT use ChoiceKindPermission
 		// here — that prepends 👉 to the title (no action is
 		// being asked) and renders with a blue header that
 		// visually says "click to choose", the opposite of what
@@ -1798,10 +1806,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		if msg.Diagnostic != nil && msg.Diagnostic.ExitKind != 0 {
 			title = title + " (" + msg.Diagnostic.ExitKind.String() + ")"
 		}
-		card := &messages.Card{
+		card := &messages.Choice{
 			Title:     title,
 			Body:      body,
-			Kind:      messages.CardKindError,
+			Kind:      messages.ChoiceKindError,
 			RequestID: fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano()),
 		}
 		content, err := buildInteractiveCard(card)
@@ -1993,7 +2001,7 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // main-chat visibility at the cost of the "Reply to <sender>" header.
 // OutReply (F-46) routes through ensureReceiptForReplyWithFooter when
 // anchored, postOrphanReplyCard when orphan — both end up as cards.
-// OutCard / OutCommandReply / OutTask* stay on ReplyInBoth because
+// OutChoice / OutCommandReply / OutTask* stay on ReplyInBoth because
 // they don't have the chunk-stream problem. (F-49: OutCompaction
 // kind deleted — see the routing table comment above.)
 //
@@ -2242,7 +2250,7 @@ func toolOutput(m messages.OutboundMessage) string {
 }
 
 // buildInteractiveCard renders a Feishu Card 2.0 permission card
-// from an abstract messages.Card. Each option becomes a primary
+// from an abstract messages.Choice. Each option becomes a primary
 // button whose value carries the request_id so the inbound Action
 // carries it back.
 //
@@ -2260,7 +2268,7 @@ func toolOutput(m messages.OutboundMessage) string {
 // Action Needed (same visual pattern as the 💭 prefix
 // OutThinking uses for reasoning, the ❯ prefix OutCommandReply
 // uses for slash-command responses). The emoji is the channel's
-// visual decoration — messages.Card.Title is the original plain
+// visual decoration — messages.Choice.Title is the original plain
 // title; we prepend here so the abstract gateway type stays
 // decoration-agnostic and other channels (e.g. CLI) can render
 // the same payload without the prefix.
@@ -2274,12 +2282,12 @@ func toolOutput(m messages.OutboundMessage) string {
 // but rendered as blank/garbage for the receipt card (the user
 // reported "feishu上没看到起效果" until we aligned with the Card
 // 2.0 envelope).
-// buildInteractiveCard converts one nightme Card into a Feishu
+// buildInteractiveCard converts one messages.Choice into a Feishu
 // Card 2.0 JSON envelope. The legacy Options path renders a flat
 // primary-button list (kept for permission cards); F-46 adds the
 // Choices path with column_set equal-width layout for decision
 // cards. See docs/feat/F-46-interactive-cards.md §3.
-func buildInteractiveCard(c *messages.Card) (string, error) {
+func buildInteractiveCard(c *messages.Choice) (string, error) {
 	patch, err := encodeInteractiveCard(c)
 	return patch.JSON, err
 }
@@ -2289,7 +2297,7 @@ type cardPatch struct {
 	Data map[string]any
 }
 
-func encodeInteractiveCard(c *messages.Card) (cardPatch, error) {
+func encodeInteractiveCard(c *messages.Choice) (cardPatch, error) {
 	data, err := interactiveCardMap(c)
 	if err != nil {
 		return cardPatch{}, err
@@ -2301,7 +2309,7 @@ func encodeInteractiveCard(c *messages.Card) (cardPatch, error) {
 	return cardPatch{JSON: string(b), Data: data}, nil
 }
 
-func interactiveCardMap(c *messages.Card) (map[string]any, error) {
+func interactiveCardMap(c *messages.Choice) (map[string]any, error) {
 	if c == nil {
 		return nil, errors.New("feishu: card is nil")
 	}
@@ -2310,13 +2318,13 @@ func interactiveCardMap(c *messages.Card) (map[string]any, error) {
 	}
 
 	// F-46 §3.2: 👉 prefix is for Action Needed cards
-	// (CardKindPermission). Other kinds render the raw title.
+	// (ChoiceKindPermission). Other kinds render the raw title.
 	// Default Kind (zero value) is Permission to preserve the
 	// pre-F-46 behaviour for callers that haven't been migrated
-	// yet. CardKindError is also raw — the emoji comes from the
+	// yet. ChoiceKindError is also raw — the emoji comes from the
 	// caller (already prefixed with ⚠️).
 	title := c.Title
-	if c.Kind == messages.CardKindPermission {
+	if c.Kind == messages.ChoiceKindPermission {
 		if n := len(c.Questions); n > 1 && c.Step >= 0 && c.Step < n {
 			title = fmt.Sprintf("%s · %d/%d", title, c.Step+1, n)
 		}
@@ -2324,20 +2332,20 @@ func interactiveCardMap(c *messages.Card) (map[string]any, error) {
 	}
 
 	// Header template: explicit HeaderColor wins; otherwise pick
-	// from Kind. CardKindError defaults to "red" so a death card
+	// from Kind. ChoiceKindError defaults to "red" so a death card
 	// is visually distinguishable from a routine permission
 	// request without callers having to remember to set the color.
 	template := c.HeaderColor
 	if template == "" {
 		switch c.Kind {
-		case messages.CardKindError:
+		case messages.ChoiceKindError:
 			template = "red"
 		default:
 			template = "blue"
 		}
 	}
 
-	// Body element: use Card.Body when set; fall back to Title for
+	// Body element: use Choice.Body when set; fall back to Title for
 	// legacy permission cards that only populate Title.
 	body := c.Body
 	if len(c.Questions) > 0 {
@@ -2359,7 +2367,7 @@ func interactiveCardMap(c *messages.Card) (map[string]any, error) {
 	buttons := buildCardButtons(c)
 	var buttonEls []map[string]any
 	if len(buttons) > 0 {
-		if c.Kind == messages.CardKindPermission {
+		if c.Kind == messages.ChoiceKindPermission {
 			// Action Needed: one option per row so long Chinese
 			// labels stay readable (equal-width column_set truncates).
 			buttonEls = buildStackedButtons(buttons)
@@ -2402,7 +2410,7 @@ func interactiveCardMap(c *messages.Card) (map[string]any, error) {
 	return card, nil
 }
 
-// buildCardButtons turns the Card's Choices / Options / Action into
+// buildCardButtons turns the Choice's Choices / Options / Action into
 // a slice of button action maps. F-46 §3.1: each button's `value` is
 // the {"action": btn.Action, "request_id": RequestID} envelope so
 // handleCardAction can route via the act:/gtw/<scenario> prefix.
@@ -2416,7 +2424,7 @@ func interactiveCardMap(c *messages.Card) (map[string]any, error) {
 //     (greyed-out look). Both styles include the full label so the
 //     user can read what each option does even when only an icon
 //     is visible.
-func buildCardButtons(c *messages.Card) []map[string]any {
+func buildCardButtons(c *messages.Choice) []map[string]any {
 	var buttons []map[string]any
 	addButton := func(label, action string, isChosen bool) {
 		valMap := map[string]string{
@@ -2437,7 +2445,7 @@ func buildCardButtons(c *messages.Card) []map[string]any {
 			"type":  btnType,
 			"value": valMap,
 		}
-		if c.Kind == messages.CardKindPermission {
+		if c.Kind == messages.ChoiceKindPermission {
 			btn["width"] = "fill"
 		}
 		if questionStepOpen(c) {
@@ -2508,11 +2516,11 @@ func buildColumnSet(buttons []map[string]any) map[string]any {
 	return set
 }
 
-func questionStepOpen(c *messages.Card) bool {
+func questionStepOpen(c *messages.Choice) bool {
 	return c != nil && len(c.Questions) > 0 && !c.Disabled && c.Step >= 0 && c.Step < len(c.Questions)
 }
 
-func questionCustomFields(c *messages.Card) []map[string]any {
+func questionCustomFields(c *messages.Choice) []map[string]any {
 	reqID := ""
 	if c != nil {
 		reqID = c.RequestID
@@ -2571,7 +2579,7 @@ func questionCustomFields(c *messages.Card) []map[string]any {
 	}
 }
 
-func cardOptionLabels(c *messages.Card) []string {
+func cardOptionLabels(c *messages.Choice) []string {
 	if c == nil {
 		return nil
 	}
@@ -2584,7 +2592,7 @@ func cardOptionLabels(c *messages.Card) []string {
 	return c.Options
 }
 
-func renderActionNeededBody(c *messages.Card) string {
+func renderActionNeededBody(c *messages.Choice) string {
 	if c == nil || len(c.Questions) == 0 {
 		return ""
 	}
@@ -3465,7 +3473,7 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 // subsequent in-place updates, so once Reply-creates the card the
 // thread is locked in.
 //
-// Per F-44 + PR #47, the OutCard / OutCommandReply paths pass
+// Per F-44 + PR #47, the OutChoice / OutCommandReply paths pass
 // replyInThread=false and therefore route through ReplyInBoth.
 // OutReply / OutResult / OutTask* (F-44 follow-up) always pass
 // rootID="" regardless of the user message, so they route through
@@ -3487,7 +3495,7 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 	case rootID == "":
 		// ReplyInChat: top-level Create, no reply relationship.
 		// Used by the orphan / fallback paths (empty userMsgID on
-		// OutReply / OutResult / OutCard / OutCommandReply) and by
+		// OutReply / OutResult / OutChoice / OutCommandReply) and by
 		// the F-44 follow-up OutReply / OutResult path (always
 		// rootID="" to dodge the parent-thread gotcha — see
 		// sendResultAsReply docstring). Construct a fresh
@@ -3508,7 +3516,7 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 			Content(content)
 		return a.ReplyInThread(ctx, rootID, replyBuilder)
 	default:
-		// ReplyInBoth: reply_in_thread omitted. Used by OutCard /
+		// ReplyInBoth: reply_in_thread omitted. Used by OutChoice /
 		// OutCommandReply / OutTaskCreate / OutTaskUpdate.
 		// (F-49: OutCompaction kind deleted — not in this list.)
 		replyBuilder := larkim.NewReplyMessageReqBodyBuilder().
@@ -3573,50 +3581,6 @@ func isFeishuTerminalMessageCode(err error) bool {
 	return false
 }
 
-// SendCard implements channel.Channel (F-46). Builds an interactive-
-// card payload from msg.Card via buildInteractiveCard and forwards
-// to the legacy (chatID, content, rootID, replyInThread) SendCard
-// helper. Returns the bot-side message id assigned by Feishu; empty
-// string + nil on transient errors that the SDK returns without an
-// id.
-func (a *Adapter) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	if msg.Card == nil {
-		return "", errors.New("feishu: SendCard requires msg.Card")
-	}
-	if msg.Card.RequestID == "" {
-		msg.Card.RequestID = fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())
-	}
-	content, err := buildInteractiveCard(msg.Card)
-	if err != nil {
-		return "", err
-	}
-	msgID, err := a.sendCardContent(ctx, msg.ChatID, content, "", false)
-	if err != nil {
-		return "", err
-	}
-	a.rememberOptCard(msg.ChatID, msgID, msg.Card)
-	return msgID, nil
-}
-
-// SendCard posts an interactive card and returns the created message
-// ID. The content must be a JSON-serialized card envelope
-// ({"card": {...}}) — see buildInteractiveCard / buildReceiptCard
-// for the producers. Used by the receipt FSM for the first-send step
-// (receipt.renderLocked → SendCard → later PatchMessage cycles).
-//
-// rootID is forwarded as the Feishu root_id (reply-in-thread anchor).
-// v1.3.x: receipt cold-start passes the user message id here so the
-// card is rendered as a reply to the user's message; subsequent
-// PatchMessage calls preserve the thread automatically. See §15.2 of
-// docs/channel/feishu.md.
-//
-// replyInThread (F-37) is accepted for symmetry with sendContent /
-// SendMessageText but is effectively a no-op for the receipt cold-start
-// path (the cold-start card MUST stay visible in the main chat —
-// chat-pinned visual answer is the whole point of the rolling log). It is
-// plumbed through so future callers (e.g. permission card as thread-only)
-// can opt in without a second signature change.
-//
 // drainPendingHeartbeat (F-63.1) returns any pending heartbeat
 // snapshot for userMsgID and removes it from the map. Called by
 // the ensureReceipt* helpers immediately after they install a
@@ -3681,9 +3645,10 @@ func (a *Adapter) sendCardContent(ctx context.Context, chatID, content, rootID s
 }
 
 // SendCardForReceipt satisfies the receiptBot interface used by
-// rolling-log receipts (see receipt.go). It exposes the legacy
-// (chatID, content, rootID, replyInThread) signature the receipts
-// rely on, separate from the F-46 channel.Channel.SendCard method.
+// rolling-log receipts (see receipt.go). It exposes the
+// (chatID, content, rootID, replyInThread) signature receipts
+// rely on — Channel.Send is the public egress; this stays
+// adapter-private.
 func (a *Adapter) SendCardForReceipt(ctx context.Context, chatID, content, rootID string, replyInThread bool) (string, error) {
 	return a.sendCardContent(ctx, chatID, content, rootID, replyInThread)
 }
@@ -4123,6 +4088,7 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 		HasMention: true,
 		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: messageID,
+			RequestID:   a.requestIDForMsgID(messageID),
 			Emoji:       emoji,
 			UserID:      userID,
 			ChatID:      chatID,
@@ -4174,7 +4140,7 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 		return &larkcallback.CardActionTriggerResponse{}, nil
 	}
 	req := event.Event
-	var remembered *messages.Card
+	var remembered *messages.Choice
 	if req.Context != nil {
 		remembered = a.getOptCard(req.Context.OpenMessageID)
 	}
@@ -4208,7 +4174,7 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 // only send Action.Name (opt_0, skip_question, submit_custom). opt_N
 // is the Nth label on the current question — Chinese labels cannot
 // live in Feishu's name field (letters/digits/underscore only).
-func resolveCardAction(req *larkcallback.CardActionTriggerRequest, card *messages.Card) string {
+func resolveCardAction(req *larkcallback.CardActionTriggerRequest, card *messages.Choice) string {
 	if req == nil || req.Action == nil {
 		return ""
 	}
@@ -4292,6 +4258,7 @@ func (a *Adapter) handleActCardAction(
 		MessageID:  botMsgID,
 		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: botMsgID,
+			RequestID:   a.requestIDForMsgID(botMsgID),
 			Emoji:       string(emoji),
 			UserID:      userID,
 			ChatID:      chatID,
@@ -4476,12 +4443,12 @@ func (a *Adapter) applyOptClick(botMsgID, requestID, option string, skip bool, c
 		if card == nil || len(card.Questions) == 0 {
 			return "", "空选项", cardPatch{}, nil
 		}
-		inboundOption = encodeQuestionPicksFromCard(withCurrentPick(card, "", true, ""))
+		inboundOption = encodeQuestionPicksFromChoice(withCurrentPick(card, "", true, ""))
 		option, toast = "跳过", "已跳过"
 	case custom != "":
 		inboundOption = custom
 		if card != nil && len(card.Questions) > 0 {
-			inboundOption = encodeQuestionPicksFromCard(withCurrentPick(card, "", false, custom))
+			inboundOption = encodeQuestionPicksFromChoice(withCurrentPick(card, "", false, custom))
 		}
 		option, toast = custom, "✅ 已提交"
 	default:
@@ -4491,8 +4458,8 @@ func (a *Adapter) applyOptClick(botMsgID, requestID, option string, skip bool, c
 	return inboundOption, toast, patch, err
 }
 
-func (a *Adapter) applyWizardClick(botMsgID, requestID string, card *messages.Card, option string, skip bool, custom string) (inboundOption, toast string, patch cardPatch, err error) {
-	card = cloneCard(card)
+func (a *Adapter) applyWizardClick(botMsgID, requestID string, card *messages.Choice, option string, skip bool, custom string) (inboundOption, toast string, patch cardPatch, err error) {
+	card = cloneChoice(card)
 	if card == nil {
 		return "", "", cardPatch{}, errors.New("feishu: missing wizard card")
 	}
@@ -4513,7 +4480,7 @@ func (a *Adapter) applyWizardClick(botMsgID, requestID string, card *messages.Ca
 		}
 		card.Step++
 	}
-	ensureCardRequestID(card, requestID, botMsgID)
+	ensureChoiceRequestID(card, requestID, botMsgID)
 	a.storeOptCard("", botMsgID, card)
 	patch, err = encodeInteractiveCard(card)
 	if err != nil {
@@ -4531,11 +4498,11 @@ func (a *Adapter) applyWizardClick(botMsgID, requestID string, card *messages.Ca
 		}
 	}
 	a.takeOptCard(botMsgID)
-	return encodeQuestionPicksFromCard(card), "✅ 已选完", patch, nil
+	return encodeQuestionPicksFromChoice(card), "✅ 已选完", patch, nil
 }
 
-func withCurrentPick(card *messages.Card, option string, skip bool, custom string) *messages.Card {
-	out := cloneCard(card)
+func withCurrentPick(card *messages.Choice, option string, skip bool, custom string) *messages.Choice {
+	out := cloneChoice(card)
 	if out == nil || len(out.Questions) == 0 {
 		return out
 	}
@@ -4557,7 +4524,7 @@ func withCurrentPick(card *messages.Card, option string, skip bool, custom strin
 	return out
 }
 
-func encodeQuestionPicksFromCard(card *messages.Card) string {
+func encodeQuestionPicksFromChoice(card *messages.Choice) string {
 	if card == nil || len(card.Questions) == 0 {
 		return ""
 	}
@@ -4572,19 +4539,25 @@ func encodeQuestionPicksFromCard(card *messages.Card) string {
 	return messages.EncodeQuestionPicks(picks)
 }
 
-func (a *Adapter) rememberOptCard(chatID, msgID string, card *messages.Card) {
-	a.storeOptCard(chatID, msgID, cloneCard(card))
+func (a *Adapter) rememberOptCard(chatID, msgID string, card *messages.Choice) {
+	a.storeOptCard(chatID, msgID, cloneChoice(card))
 }
 
-func (a *Adapter) storeOptCard(chatID, msgID string, card *messages.Card) {
+func (a *Adapter) storeOptCard(chatID, msgID string, card *messages.Choice) {
 	if a == nil || msgID == "" || card == nil {
 		return
 	}
 	a.mu.Lock()
 	if a.optCards == nil {
-		a.optCards = make(map[string]*messages.Card)
+		a.optCards = make(map[string]*messages.Choice)
 	}
 	a.optCards[msgID] = card
+	if card.RequestID != "" {
+		if a.optByRequestID == nil {
+			a.optByRequestID = make(map[string]string)
+		}
+		a.optByRequestID[card.RequestID] = msgID
+	}
 	if chatID != "" {
 		if a.lastOptByChat == nil {
 			a.lastOptByChat = make(map[string]string)
@@ -4603,7 +4576,28 @@ func (a *Adapter) lastOptMsgID(chatID string) string {
 	return a.lastOptByChat[chatID]
 }
 
-func (a *Adapter) getOptCard(msgID string) *messages.Card {
+func (a *Adapter) msgIDForRequestID(requestID string) string {
+	if a == nil || requestID == "" {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.optByRequestID[requestID]
+}
+
+func (a *Adapter) requestIDForMsgID(msgID string) string {
+	if a == nil || msgID == "" {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if card := a.optCards[msgID]; card != nil {
+		return card.RequestID
+	}
+	return ""
+}
+
+func (a *Adapter) getOptCard(msgID string) *messages.Choice {
 	if a == nil || msgID == "" {
 		return nil
 	}
@@ -4612,7 +4606,7 @@ func (a *Adapter) getOptCard(msgID string) *messages.Card {
 	return a.optCards[msgID]
 }
 
-func (a *Adapter) takeOptCard(msgID string) *messages.Card {
+func (a *Adapter) takeOptCard(msgID string) *messages.Choice {
 	if a == nil || msgID == "" {
 		return nil
 	}
@@ -4620,6 +4614,9 @@ func (a *Adapter) takeOptCard(msgID string) *messages.Card {
 	defer a.mu.Unlock()
 	card := a.optCards[msgID]
 	delete(a.optCards, msgID)
+	if card != nil && card.RequestID != "" {
+		delete(a.optByRequestID, card.RequestID)
+	}
 	for chatID, id := range a.lastOptByChat {
 		if id == msgID {
 			delete(a.lastOptByChat, chatID)
@@ -4629,7 +4626,7 @@ func (a *Adapter) takeOptCard(msgID string) *messages.Card {
 	return card
 }
 
-func ensureCardRequestID(card *messages.Card, requestID, botMsgID string) {
+func ensureChoiceRequestID(card *messages.Choice, requestID, botMsgID string) {
 	if card == nil || card.RequestID != "" {
 		return
 	}
@@ -4640,7 +4637,7 @@ func ensureCardRequestID(card *messages.Card, requestID, botMsgID string) {
 	card.RequestID = botMsgID
 }
 
-func cloneCard(c *messages.Card) *messages.Card {
+func cloneChoice(c *messages.Choice) *messages.Choice {
 	if c == nil {
 		return nil
 	}
@@ -4649,13 +4646,13 @@ func cloneCard(c *messages.Card) *messages.Card {
 		out.Options = append([]string(nil), c.Options...)
 	}
 	if c.Choices != nil {
-		out.Choices = append([]messages.CardChoice(nil), c.Choices...)
+		out.Choices = append([]messages.ChoiceOption(nil), c.Choices...)
 	}
 	if c.Picks != nil {
 		out.Picks = append([]string(nil), c.Picks...)
 	}
 	if c.Questions != nil {
-		out.Questions = make([]messages.CardQuestion, len(c.Questions))
+		out.Questions = make([]messages.ChoiceQuestion, len(c.Questions))
 		for i, q := range c.Questions {
 			out.Questions[i] = q
 			if q.Options != nil {
@@ -4676,12 +4673,12 @@ func (a *Adapter) patchOptCardSelected(botMsgID, requestID, option string) (card
 	}
 	card := a.takeOptCard(botMsgID)
 	if card == nil {
-		card = &messages.Card{
+		card = &messages.Choice{
 			Title: "Action Needed",
-			Kind:  messages.CardKindPermission,
+			Kind:  messages.ChoiceKindPermission,
 		}
 	}
-	ensureCardRequestID(card, requestID, botMsgID)
+	ensureChoiceRequestID(card, requestID, botMsgID)
 	if n := len(card.Questions); n > 0 {
 		if card.Picks == nil || len(card.Picks) != n {
 			card.Picks = make([]string, n)
@@ -4713,16 +4710,16 @@ func (a *Adapter) patchOptCardSelected(botMsgID, requestID, option string) (card
 // patchOptCardSettled hides buttons on the outstanding Action Needed
 // card after the host resolved the gate without a Feishu click
 // (dashboard Allow once / Skip).
-func (a *Adapter) patchOptCardSettled(ctx context.Context, botMsgID string, incoming *messages.Card) error {
+func (a *Adapter) patchOptCardSettled(ctx context.Context, botMsgID string, incoming *messages.Choice) error {
 	if botMsgID == "" {
 		return errors.New("feishu: missing card message id")
 	}
 	card := a.takeOptCard(botMsgID)
 	if card == nil {
-		card = cloneCard(incoming)
+		card = cloneChoice(incoming)
 	}
 	if card == nil {
-		card = &messages.Card{Title: "Waiting for approval", Kind: messages.CardKindPermission}
+		card = &messages.Choice{Title: "Waiting for approval", Kind: messages.ChoiceKindPermission}
 	}
 	if incoming != nil && incoming.Body != "" {
 		card.Body = incoming.Body
@@ -4733,7 +4730,7 @@ func (a *Adapter) patchOptCardSettled(ctx context.Context, botMsgID string, inco
 	card.Options = nil
 	card.Choices = nil
 	card.Action = ""
-	ensureCardRequestID(card, "", botMsgID)
+	ensureChoiceRequestID(card, "", botMsgID)
 	content, err := buildInteractiveCard(card)
 	if err != nil {
 		return err

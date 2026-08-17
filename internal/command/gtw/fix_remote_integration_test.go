@@ -11,9 +11,9 @@ package gtw
 // focus on the ID-mode business logic.
 
 import (
-	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,8 +23,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
-
-
 
 // fixRemoteRig bundles everything an ID-mode /gtw fix test
 // needs: a real git repo, a ChatSession pre-pointed at it, the
@@ -107,7 +105,7 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 	return rig
 }
 
-// fixRemoteRecCh captures every Send / SendCard / Patch for the
+// fixRemoteRecCh captures every Send for the
 // fixRemote integration tests after the cs.Emitter() migration.
 // The legacy captureSend stub is kept for
 // backward compat with tests that read sentTexts, but the
@@ -123,10 +121,6 @@ func (r *fixRemoteRecCh) Send(_ context.Context, m messages.OutboundMessage) err
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
 	return nil
-}
-func (r *fixRemoteRecCh) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
-	r.Send(context.Background(), m)
-	return "rec-card-id", nil
 }
 func (r *fixRemoteRecCh) Patch(_ context.Context, m messages.OutboundMessage) error {
 	r.Send(context.Background(), m)

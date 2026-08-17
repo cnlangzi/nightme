@@ -274,21 +274,23 @@ type ToolInfo struct {
 // sum with cache reads. Cache hits live in CacheReadInputTokens.
 type UsageInfo = agent.UsageInfo
 
-// Card is an interactive permission card or any other card that
-// requires the user's choice.
+// Choice is an interactive prompt that requires the user's pick
+// (permission, question, gtw decision, error). Channel may render
+// it as a native card; this type is not a platform card schema.
 //
-// F-46: kind + choices + action encoding. Interactive-card design
-// and Feishu form/callback pitfalls: docs/channel/feishu-cards.md.
-// The legacy Options field still works for callers that just want
-// a flat list of button labels — buildInteractiveCard renders
-// Options as primary buttons when Choices is empty.
-type Card struct {
+// F-46: kind + options + action encoding. Interactive-choice
+// design and Feishu form/callback pitfalls:
+// docs/channel/feishu-cards.md. The legacy Options field still
+// works for callers that just want a flat list of button labels
+// — buildInteractiveCard renders Options as primary buttons when
+// Choices is empty.
+type Choice struct {
 	Title             string
 	Body              string
 	Options           []string
 	RequestID         string
-	Kind              CardKind
-	Choices           []CardChoice
+	Kind              ChoiceKind
+	Choices           []ChoiceOption
 	Action            string
 	Disabled          bool
 	ChosenChoiceEmoji string
@@ -298,27 +300,27 @@ type Card struct {
 	// len(Questions)>1 is in-card paging: each click advances
 	// Step; /api/respond fires only after the last pick.
 	// Every question also has Type your answer + Skip this question.
-	Questions []CardQuestion
+	Questions []ChoiceQuestion
 	Step      int
 	Picks     []string
 }
 
-// CardQuestion is one step on an Action Needed card.
-type CardQuestion struct {
+// ChoiceQuestion is one step on an Action Needed card.
+type ChoiceQuestion struct {
 	ID       string
 	Header   string
 	Question string
 	Options  []string
 }
 
-type CardKind int
+type ChoiceKind int
 
 const (
-	CardKindPermission CardKind = iota
-	CardKindDecision
-	CardKindPreview
+	ChoiceKindPermission ChoiceKind = iota
+	ChoiceKindDecision
+	ChoiceKindPreview
 
-	// CardKindError marks a card that surfaces a non-graceful
+	// ChoiceKindError marks a card that surfaces a non-graceful
 	// bridge exit (EventAgentError with a populated Diagnostic).
 	// The renderer should NOT prepend the 👉 Action Needed emoji
 	// (no permission is being asked) and should default the
@@ -326,10 +328,10 @@ const (
 	// of the default blue. Channels that want to render the
 	// short error string + structured Diagnostic.StderrTail
 	// read from the enclosing OutboundMessage.{Text,Diagnostic}.
-	CardKindError
+	ChoiceKindError
 )
 
-type CardChoice struct {
+type ChoiceOption struct {
 	Emoji  string
 	Label  string
 	Action string

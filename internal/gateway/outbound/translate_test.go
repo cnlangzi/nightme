@@ -247,20 +247,20 @@ func TestTranslate_EventPermission_ActionNeeded(t *testing.T) {
 			Kind:    agent.PermissionKindQuestion,
 		},
 	})
-	if !ok || msg.Kind != messages.OutCard {
-		t.Fatalf("got (%v, %v), want (OutCard, true)", msg.Kind, ok)
+	if !ok || msg.Kind != messages.OutChoice {
+		t.Fatalf("got (%v, %v), want (OutChoice, true)", msg.Kind, ok)
 	}
-	if msg.Card == nil {
-		t.Fatal("Card is nil")
+	if msg.Choice == nil {
+		t.Fatal("Choice is nil")
 	}
-	if msg.Card.Title != "Action Needed" {
-		t.Errorf("Title = %q, want Action Needed", msg.Card.Title)
+	if msg.Choice.Title != "Action Needed" {
+		t.Errorf("Title = %q, want Action Needed", msg.Choice.Title)
 	}
-	if !strings.Contains(msg.Card.Body, "Which trigger?") {
-		t.Errorf("Body = %q, want question text", msg.Card.Body)
+	if !strings.Contains(msg.Choice.Body, "Which trigger?") {
+		t.Errorf("Body = %q, want question text", msg.Choice.Body)
 	}
-	if len(msg.Card.Options) != 2 {
-		t.Errorf("Options = %v, want 2", msg.Card.Options)
+	if len(msg.Choice.Options) != 2 {
+		t.Errorf("Options = %v, want 2", msg.Choice.Options)
 	}
 }
 
@@ -287,20 +287,20 @@ func TestTranslate_EventPermission_QuestionBatch(t *testing.T) {
 			},
 		},
 	})
-	if !ok || msg.Card == nil {
-		t.Fatalf("got (%v, %v), want OutCard", msg.Kind, ok)
+	if !ok || msg.Choice == nil {
+		t.Fatalf("got (%v, %v), want OutChoice", msg.Kind, ok)
 	}
-	if len(msg.Card.Questions) != 2 {
-		t.Fatalf("Questions = %d, want 2", len(msg.Card.Questions))
+	if len(msg.Choice.Questions) != 2 {
+		t.Fatalf("Questions = %d, want 2", len(msg.Choice.Questions))
 	}
-	if msg.Card.Questions[0].ID != "q-trigger" || msg.Card.Questions[1].ID != "q-source" {
-		t.Errorf("question ids = %+v", msg.Card.Questions)
+	if msg.Choice.Questions[0].ID != "q-trigger" || msg.Choice.Questions[1].ID != "q-source" {
+		t.Errorf("question ids = %+v", msg.Choice.Questions)
 	}
-	if len(msg.Card.Options) != 2 || msg.Card.Options[0] != "仅 REPL 启动(裸 nightme)" {
-		t.Errorf("Options = %v, want first question only", msg.Card.Options)
+	if len(msg.Choice.Options) != 2 || msg.Choice.Options[0] != "仅 REPL 启动(裸 nightme)" {
+		t.Errorf("Options = %v, want first question only", msg.Choice.Options)
 	}
-	if len(msg.Card.Picks) != 2 {
-		t.Errorf("Picks = %d, want 2 slots", len(msg.Card.Picks))
+	if len(msg.Choice.Picks) != 2 {
+		t.Errorf("Picks = %d, want 2 slots", len(msg.Choice.Picks))
 	}
 }
 
@@ -314,14 +314,14 @@ func TestTranslate_EventPermission_ApprovalCard(t *testing.T) {
 			Kind:    agent.PermissionKindApproval,
 		},
 	})
-	if !ok || msg.Card == nil {
-		t.Fatal("want OutCard")
+	if !ok || msg.Choice == nil {
+		t.Fatal("want OutChoice")
 	}
-	if msg.Card.Title != "Waiting for approval" {
-		t.Errorf("Title = %q, want Waiting for approval", msg.Card.Title)
+	if msg.Choice.Title != "Waiting for approval" {
+		t.Errorf("Title = %q, want Waiting for approval", msg.Choice.Title)
 	}
-	if len(msg.Card.Questions) != 0 {
-		t.Errorf("Questions = %d, want 0 (approval is not AskUserQuestion)", len(msg.Card.Questions))
+	if len(msg.Choice.Questions) != 0 {
+		t.Errorf("Questions = %d, want 0 (approval is not AskUserQuestion)", len(msg.Choice.Questions))
 	}
 }
 
@@ -333,14 +333,14 @@ func TestTranslate_EventPermissionSettled_PatchesCard(t *testing.T) {
 			Source:  "dashboard",
 		},
 	})
-	if !ok || msg.Kind != messages.OutCardPatch {
-		t.Fatalf("got (%v, %v), want OutCardPatch", msg.Kind, ok)
+	if !ok || msg.Kind != messages.OutChoicePatch {
+		t.Fatalf("got (%v, %v), want OutChoicePatch", msg.Kind, ok)
 	}
 	if msg.ReplyTo != "" {
 		t.Errorf("ReplyTo = %q, want empty (channel looks up last opt card)", msg.ReplyTo)
 	}
-	if msg.Card == nil || !strings.Contains(msg.Card.Body, "allowed-once") {
-		t.Errorf("Body = %+v, want dashboard outcome", msg.Card)
+	if msg.Choice == nil || !strings.Contains(msg.Choice.Body, "allowed-once") {
+		t.Errorf("Body = %+v, want dashboard outcome", msg.Choice)
 	}
 }
 

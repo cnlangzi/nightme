@@ -258,6 +258,7 @@ func runDebugAction(cmd *cobra.Command, f debugFlags, msgID, emoji string) error
 		HasMention: true,
 		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: msgID,
+			RequestID:   "gtw-test-" + msgID,
 			Emoji:       emoji,
 			UserID:      f.userID,
 			ChatID:      f.chatID,
@@ -354,7 +355,8 @@ func seedDraft(fix *debugFixture, f debugFlags, userMsgID, kind string) error {
 	default:
 		return fmt.Errorf("unknown --seed=%q (want branch-exists | worktree-fail | label-taken)", kind)
 	}
-	fix.gtwMgr.StoreDraft(f.chatID, userMsgID, &gtw.Draft{
+	requestID := "gtw-test-" + userMsgID
+	fix.gtwMgr.StoreDraft(f.chatID, requestID, &gtw.Draft{
 		Kind: draftKind,
 		Payload: gtw.FixDraftPayload{
 			IssueID:    f.issueID,
@@ -363,10 +365,11 @@ func seedDraft(fix *debugFixture, f debugFlags, userMsgID, kind string) error {
 			Slug:       fmt.Sprintf("%d-test-slug", f.issueID),
 			Repo:       f.repo,
 			Provider:   "github",
-			LabelAdded: kind != "worktree-fail", // branch-exists & label-taken added it; worktree-fail did not
+			LabelAdded: kind != "worktree-fail",
 			ChatID:     f.chatID,
 		},
-		CreatedAt: timeNow(),
+		ChoiceRequestID: requestID,
+		CreatedAt:       timeNow(),
 	})
 	return nil
 }
@@ -411,13 +414,6 @@ func (c *capturingChannel) Name() string                  { return "capture" }
 func (c *capturingChannel) Start(_ context.Context) error { return nil }
 func (c *capturingChannel) Stop(_ context.Context) error  { return nil }
 
-func (c *capturingChannel) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
-	_ = c.Send(context.Background(), m)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return fmt.Sprintf("capture-card-%d", len(c.msgs)), nil
-}
-
 func (c *capturingChannel) Send(_ context.Context, m messages.OutboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -436,10 +432,6 @@ type capturingEmitter struct {
 
 func (e capturingEmitter) Send(ctx context.Context, m messages.OutboundMessage) error {
 	return e.ch.Send(ctx, m)
-}
-
-func (e capturingEmitter) SendCard(ctx context.Context, m messages.OutboundMessage) (string, error) {
-	return e.ch.SendCard(ctx, m)
 }
 
 // Emitter returns an outbound.Emitter that records every Send
@@ -483,7 +475,7 @@ func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
 // channel.Channel extensions (Phase 2.1 + 2.2). The debug
 // fixture has no live connection state, so all four are
 // no-ops or trivial fallbacks.
-func (c *capturingChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (c *capturingChannel) OnPromptEnded(_ context.Context, _, _ string) {}
 func (c *capturingChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "capture", json.RawMessage("{}"), nil
 }

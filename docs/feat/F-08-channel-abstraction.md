@@ -14,11 +14,11 @@
 **职责再定义**：Channel 是**纯渲染器**（dumb renderer）。它做两件事：
 
 1. **IM 协议编解码** — 把 native event 解码成 `InboundMessage`；把 `OutboundMessage` 编码成 native API 调用
-2. **`Send(OutboundMessage)` 通用渲染** — 文本 / tool_start / tool_end / thinking / card / reaction 等所有 `OutboundKind` 的视觉表达 + 自管 receipt 生命周期（card / thread / DOM 节点）
+2. **`Send(OutboundMessage)` 通用渲染** — 文本 / tool_start / tool_end / thinking / choice / reaction 等所有 `OutboundKind` 的视觉表达 + 自管 receipt 生命周期（card / thread / DOM 节点）
 
 **Channel 不知道**：sessions、workspaces、agents、bindings、slash commands、receipt 状态机的任何细节。Gateway 完全不持有 receipt —— Channel 在内部按 `OutboundMessage.ReplyTo = userMsgID` 路由到自己的 receipt 对象，自己决定怎么 cold-create / PATCH / 终态。
 
-**接口精简**：Channel interface 当前为 **6 个方法**（`Name / Start / Stop / Send / SendCard / Incoming`）。其中 `SendCard` 是飞书等 IM 的 card PATCH 专用通道，独立于通用 `Send`。Receipt FSM 整体从 Gateway 撤回，详见 SPEC 与 [`channel/feishu-rendering.md`](../channel/feishu-rendering.md)。
+**接口精简**：Channel 的唯一出站方法是 `Send(OutboundMessage)`。交互卡（OutChoice / OutChoicePatch）也走这条出口；相关键是 `Choice.RequestID`，Channel 私有映射到平台 message id。调用方不拿 bot-side id，也不另开 `SendCard` / `SendAction`。Receipt FSM 整体从 Gateway 撤回，详见 SPEC 与 [`channel/feishu-rendering.md`](../channel/feishu-rendering.md)。
 
 **扩展**：Channel 按 `OutboundKind` 自决 routing（Feishu 选 thread + 类型感知摘要，详见 [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) + [`channel/feishu-rendering.md`](../channel/feishu-rendering.md)）。这是 "concrete stays concrete" 原则的具体落地：Gateway 只发 `OutboundMessage{Kind, ReplyTo, ...}`；Channel 看到 Kind 后自决 thread reply / receipt card / reaction。
 
@@ -154,7 +154,7 @@ Channel **MUST**:
 
 | ✅ Do |
 |------|
-| Render `OutboundMessage` kinds (text/tool_start/tool_end/thinking/card/...) in native UI |
+| Render `OutboundMessage` kinds (text/tool_start/tool_end/thinking/choice/...) in native UI |
 | Route `OutboundMessage{ReplyTo: userMsgID}` to its own per-userMsgID receipt (cold-create if missing; PATCH if exists) |
 | Manage its own internal receipt state (Feishu: message IDs, cardMsgID, entries; Slack: thread map; Web: DOM nodes) — fully Channel-private |
 | Render `OutMessageState` events as platform-native progress indicators (Feishu: AddReaction; Slack: emoji shortcode; Web: DOM class) |

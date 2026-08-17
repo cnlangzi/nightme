@@ -760,7 +760,7 @@ const (
 // internal/channel/feishu/adapter.go — Send dispatcher
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
     switch msg.Kind {
-    case gateway.OutMessageState, gateway.OutMessageStateRemoved, OutCard, OutTyping:
+    case gateway.OutMessageState, gateway.OutMessageStateRemoved, OutChoice, OutTyping:
         // 全局 kinds — ReplyTo 无意义（message state / card / typing 是 chat-全局）
         return a.sendGlobal(ctx, msg)
     default:

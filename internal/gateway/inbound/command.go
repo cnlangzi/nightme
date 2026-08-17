@@ -170,32 +170,16 @@ func (r *Router) emitReply(ctx context.Context, msg *messages.InboundMessage, te
 }
 
 // routeOutbound forwards the explicit Outbound list from a
-// SlashOutput through the wired Emitter, preserving the
-// runtime-shim contract documented on SlashOutput.Outbound
-// (internal/command/event.go). Each entry is routed based on
-// its Kind / Card: OutCardPatch → Send (PATCH semantics fold
-// into Send with Kind=OutCardPatch), Card != nil → SendCard,
-// everything else → Send. Mirrors the test shim's contract in
-// internal/command/e2e_slash_test.go's replyingCommander so
-// production behaviour matches the documented intent.
+// SlashOutput through the wired Emitter. Every kind — including
+// OutChoice / OutChoicePatch — goes through Send; Channel routes
+// by Kind and correlates choice prompts via Choice.RequestID.
 func (r *Router) routeOutbound(ctx context.Context, outbound []messages.OutboundMessage) {
 	if len(outbound) == 0 || r.emitter == nil {
 		return
 	}
 	for _, ob := range outbound {
-		switch {
-		case ob.Kind == messages.OutCardPatch:
-			if err := r.emitter.Send(ctx, ob); err != nil {
-				slog.Default().Warn("inbound: outbound PATCH send failed", "err", err)
-			}
-		case ob.Card != nil:
-			if _, err := r.emitter.SendCard(ctx, ob); err != nil {
-				slog.Default().Warn("inbound: outbound SendCard failed", "err", err)
-			}
-		default:
-			if err := r.emitter.Send(ctx, ob); err != nil {
-				slog.Default().Warn("inbound: outbound Send failed", "err", err)
-			}
+		if err := r.emitter.Send(ctx, ob); err != nil {
+			slog.Default().Warn("inbound: outbound Send failed", "kind", ob.Kind, "err", err)
 		}
 	}
 }

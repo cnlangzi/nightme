@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // HandleDraftReaction is the per-draft action router. It is called
@@ -38,23 +38,24 @@ func HandleDraftReaction(
 	ev services.ReactionEvent,
 ) (bool, error) {
 	slog.Default().Warn("F-46 debug: HandleDraftReaction entry",
+		"request_id", ev.RequestID,
 		"target_msg_id", ev.TargetMsgID,
 		"emoji", ev.Emoji,
 		"chat_id", ev.ChatID)
-	if ev.TargetMsgID == "" || ev.Emoji == "" {
+	if ev.RequestID == "" || ev.Emoji == "" {
 		return false, nil
 	}
-	draft := m.GetDraft(ev.ChatID, ev.TargetMsgID)
+	draft := m.GetDraft(ev.ChatID, ev.RequestID)
 	if draft == nil {
 		slog.Default().Warn("F-46 debug: HandleDraftReaction draft not found",
-			"target_msg_id", ev.TargetMsgID,
+			"request_id", ev.RequestID,
 			"chat_id", ev.ChatID)
 		return false, nil
 	}
 	slog.Default().Warn("F-46 debug: HandleDraftReaction draft found",
-		"target_msg_id", ev.TargetMsgID,
+		"request_id", ev.RequestID,
 		"draft_kind", string(draft.Kind),
-		"bot_msg_id", draft.BotMessageID)
+		"choice_posted", draft.ChoicePosted)
 	cs := m.GetChatSession(ev.ChatID)
 	switch draft.Kind {
 	case DraftFixBranchExists:
@@ -88,14 +89,14 @@ func executeBranchExistsAction(
 	// legitimately have empty Repo. If an ID-mode draft shows
 	// up with no Repo, it's broken; surface that explicitly.
 	if p.IssueID != -1 && p.Repo == "" {
-		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.RequestID)
 		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), "❌ Internal error: draft missing repo.")
 		return true
 	}
 
 	switch messages.ReactionKind(ev.Emoji) {
 	case messages.ReactionCancel:
-		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.RequestID)
 		resultText := cancelResultText(p)
 		// Label rollback only applies to ID-mode drafts (local
 		// mode never added a label). resultText is set to a
@@ -117,7 +118,7 @@ func executeBranchExistsAction(
 		return true
 
 	case messages.ReactionNewV2:
-		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.RequestID)
 		repoRoot := repoRootFromChatSession(cs)
 		resultText := ""
 		for n := range 9 {
@@ -158,7 +159,7 @@ func executeBranchExistsAction(
 		return true
 
 	case messages.ReactionJoin:
-		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.RequestID)
 		repoRoot := repoRootFromChatSession(cs)
 		existingPath, err := WorktreeListPath(ctx, repoRoot, p.Branch, deps.Git)
 		resultText := ""
@@ -205,7 +206,7 @@ func executeWorktreeFailAction(
 	switch rk {
 	case messages.ReactionCancel:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionCancel")
-		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.RequestID)
 		resultText := cancelResultText(p)
 		// Label rollback only applies to ID-mode drafts (local
 		// mode never added a label). resultText is set to a
@@ -228,7 +229,7 @@ func executeWorktreeFailAction(
 
 	case messages.ReactionRetry:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionRetry")
-		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.RequestID)
 		repoRoot := repoRootFromChatSession(cs)
 		worktree := WorktreePath(repoRoot, p.Slug)
 		err := WorktreeAdd(ctx, repoRoot, p.Branch, worktree, "HEAD", deps.Git)
@@ -254,12 +255,11 @@ func executeWorktreeFailAction(
 	return false
 }
 
-// emitFollowUp is the F-46 single-sink for action-handler
-// outcomes. When the dispatched draft has a bot-side message id
-// (i.e. the dispatcher sent an interactive card), it emits a
-// PATCH that disables the original card and appends a result
-// line. When the dispatcher never sent a card (legacy text or
-// fallback), it emits a plain text reply preserved from F-45.
+// emitFollowUp is the single-sink for action-handler outcomes.
+// When the dispatcher posted a choice prompt, it emits
+// OutChoicePatch keyed by Choice.RequestID so Channel can PATCH in
+// place. When the choice path failed (plain-text fallback), it
+// emits a plain text reply.
 func emitFollowUp(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -275,21 +275,17 @@ func emitFollowUp(
 	if em == nil {
 		return
 	}
-	if draft.BotMessageID != "" {
-		// PATCH semantics: the channel renders an OutboundMessage
-		// with Kind=OutCardPatch. ReplyTo carries the bot-side
-		// message id to PATCH; Card holds the new payload.
+	if draft.ChoicePosted {
 		_ = em.Send(ctx, messages.OutboundMessage{
-			ChatID:    ev.ChatID,
-			Kind:      messages.OutCardPatch,
-			ReplyTo:   draft.BotMessageID,
-			Text:      resultText,
-			Card: &messages.Card{
-				Title:             draft.CardTitle,
-				Body:              draft.CardBody,
-				Choices:           toCardChoices(draft.CardChoices),
-				RequestID:         draft.CardRequestID,
-				Disabled:          true, // chosen → grey out the rest
+			ChatID: ev.ChatID,
+			Kind:   messages.OutChoicePatch,
+			Text:   resultText,
+			Choice: &messages.Choice{
+				Title:             draft.ChoiceTitle,
+				Body:              draft.ChoiceBody,
+				Choices:           toChoiceOptions(draft.ChoiceOptions),
+				RequestID:         draft.ChoiceRequestID,
+				Disabled:          true,
 				ChosenChoiceEmoji: chosenEmoji,
 			},
 		})
@@ -368,20 +364,20 @@ func variantReadyResultText(p FixDraftPayload, branch string) string {
 	return fmt.Sprintf("✅ Fix #%d ready (using `%s`).", p.IssueID, branch)
 }
 
-// toChatCardChoices translates gtw.CardChoice to
-// chatsession.CardChoice (same fields, different packages).
+// toChatChoiceOptions translates gtw.ChoiceOption to
+// chatsession.ChoiceOption (same fields, different packages).
 // Defined here so the gtw package doesn't depend on the
-// chatsession.CardChoice internal layout for translation.
-// toCardChoices translates internal/command/gtw.CardChoice (the
+// chatsession.ChoiceOption internal layout for translation.
+// toChoiceOptions translates internal/command/gtw.ChoiceOption (the
 // gtw command's button type) to the wire-level
-// messages.CardChoice that the channel adapter renders.
-func toCardChoices(in []CardChoice) []messages.CardChoice {
+// messages.ChoiceOption that the channel adapter renders.
+func toChoiceOptions(in []ChoiceOption) []messages.ChoiceOption {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]messages.CardChoice, len(in))
+	out := make([]messages.ChoiceOption, len(in))
 	for i, c := range in {
-		out[i] = messages.CardChoice{
+		out[i] = messages.ChoiceOption{
 			Emoji:  c.Emoji,
 			Label:  c.Label,
 			Action: c.Action,

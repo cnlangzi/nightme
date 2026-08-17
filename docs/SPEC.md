@@ -127,7 +127,7 @@ CS 通过 type aliases 暴露 AS 类型保持调用面简洁（`chatsession.Agen
 - **Gateway 不 import `channel/feishu`**（只 import `channel.Channel` interface）
 - **`ChatSession` 不知道 Channel**（只持有 Gateway 注入的 callback）
 - **`AgentSession` 知道自己的 `(agent, cwd)` immutable 标识**
-- **Channel 接口不暴露 ChatSession、AgentSession、binding、任何 receipt 概念**——Channel 自管渲染状态（receipt card / thread / DOM 节点），Gateway 一概不知。`Channel` interface 6 个方法：`Name / Start / Stop / Incoming / Send / SendCard`（`SendCard` 为 F-46 决策卡新增，返回 bot-side message_id 用于 PATCH correlation）
+- **Channel 接口不暴露 ChatSession、AgentSession、binding、任何 receipt 概念**——Channel 自管渲染状态（receipt card / thread / DOM 节点），Gateway 一概不知。`Channel` 的唯一出站方法是 `Send(OutboundMessage)`；交互卡相关是 Channel 私有的（`Choice.RequestID` → 平台 message id），调用方不拿 bot-side message id，也不另开 `SendCard` / `SendAction`
 - **`agentSession.Events()` chan 的唯一消费者是 session 自己的 readPump**；ChatSession 通过 `ChatSession.EventCallback` 接收事件，**不直接读 chan**（沿用 修复）
 - **ChatSession 内 `(agent, cwd)` 唯一索引**（不是全局唯一；不同 ChatSession 可有独立 `(claude, /path/A)` AgentSession）
 - **`/use` 不重启进程**：永远复用 pool 中的现有 AgentSession，找不到才 spawn 新进程
@@ -414,7 +414,7 @@ channel.Send(ctx, OutboundMessage)
   │   ├ 命中 → PATCH / 更新（receipt card 追加内容、thread 发新回复、DOM 节点 in-place 编辑）
   │   └ miss → cold-create 一个新 receipt（userMsgID 作为 key），然后追加
   ├ (OutMessageState case) → AddReaction on Meta["message_id"] → 用户消息挂 ⏳/🔄/✅/❌
-  └ (OutCard case) → 发交互卡片（permission prompt 等）
+  └ (OutChoice case) → 发交互卡片（permission prompt 等）
 ```
 
 **关键不变量**：
@@ -627,11 +627,11 @@ OutboundMessage{
 
 详见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md)（历史参考）+ [`feat/F-53-message-prompt-lifecycle.md`](./feat/F-53-message-prompt-lifecycle.md)（ 权威定义）。
 
-### 2.6 Interactive Decision Cards
+### 2.6 Interactive Choices
 
 **核心问题**：gtw 决策卡的 branch-exists / worktree-fail 场景（[`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3.3）此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
 
-**F-46**：决策面改为**交互卡**；用户选择后**原地更新**同一张卡（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。
+**F-46**：决策面改为**交互选择**（`OutChoice`）；用户选择后**原地更新**同一张 UI（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。Channel 可把它渲染成原生 card。
 
 **概念数据流**：
 
@@ -645,7 +645,7 @@ Channel：平台点击 → 归一化为 InboundMessage{Reaction|Action}
 Gateway：dispatchAction → ChatSession.HandleAction
         │
         ▼
-gtw：消费 draft → 执行决策 → 发出 OutCardPatch（或无 bot 卡 id 时退化为文本）
+gtw：消费 draft → 执行决策 → 发出 OutChoicePatch（或无 bot 卡 id 时退化为文本）
         │
         ▼
 Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现）
@@ -655,9 +655,9 @@ Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现�
 
 | 概念 | 含义 |
 |---|---|
-| `OutCard` | 发出一张新的交互决策卡 |
-| `OutCardPatch` | 原地更新已发出的决策卡 |
-| typed `Card` | kind / choices / chosen / disabled —— 描述决策面，不含平台 schema |
+| `OutChoice` | 发出一张新的交互选择（permission / question / gtw decision / error） |
+| `OutChoicePatch` | 原地更新已发出的选择 |
+| typed `Choice` | kind / options / chosen / disabled —— 描述选择面，不含平台 schema |
 | 边界归一化 | 平台按钮点击在 Channel 边界折成既有 reaction/action 通路，与 emoji 汇合 |
 
 **不变式**：
@@ -713,7 +713,7 @@ command.ReactionRouter 内部：
 gtw.Manager.HandleReaction(ev)
   ├ 查自己的 states / drafts map(不再走 chatsession.gtwContext)
   ├ dispatch 到 executeBranchExistsAction / executeWorktreeFailAction
-  ├ 执行动作 + 发 OutCardPatch / OutReply
+  ├ 执行动作 + 发 OutChoicePatch / OutReply
   └ 返 true / false 给 router
 ```
 
@@ -744,13 +744,13 @@ type ReactionRouter interface {
 **§2.6 ↔ §2.7 配合**：
 - §2.6 解决"decision card 按钮如何变成 reaction"（Channel 边界归一化）
 - §2.7 解决"reaction 由谁分发"（runtime ReationRouter，与 ChatSession 解耦）
-- 两件事独立但组合工作：decision-card 点击 → Channel 归一化为 reaction → router.Handle → gtw.Manager → OutCardPatch
+- 两件事独立但组合工作：decision-card 点击 → Channel 归一化为 reaction → router.Handle → gtw.Manager → OutChoicePatch
 
 **不变式**：
 - §1.3 现有不变式"ChatSession 不 import channel/feishu"保持
 - §1.3 **新增**"ChatSession 不 import command/、不 import gtw"（反应分发器不在 ChatSession）
 - §1.3 **新增**"reaction 不走 ChatSession.HandleAction"（handle action 必须走 ReactionRouter）
-- §2.6 决策卡 §2.6 不变式全部保留（按钮归一化、typed Card、不引入第二条生命周期）
+- §2.6 决策卡 §2.6 不变式全部保留（按钮归一化、typed Choice、不引入第二条生命周期）
 - gateway 持有了 `ReactionRouter`，但只通过接口持有，不直接实现
 
 **实现细节**（ReactionRouter 的具体实现策略、gtw.Manager 注册时机、`/gtw test` UAT）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3 / §5。

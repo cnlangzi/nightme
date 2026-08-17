@@ -27,7 +27,7 @@
 | **Receipt** | 无 👉；header 心跳 / 终态 | **无按钮** | PATCH 同一张 rolling-log |
 | **AskUserQuestion** | `👉 Action Needed`；多题 `· i/n` | 选项 + Type your answer + Skip + Submit | 单题立即 inbound；多题卡内翻页，最后一步 `nm-q:` |
 | **Approval** | **Waiting for approval** | Allow once / Reject **only** | `ApprovalResponse`；**不要**加 Type your answer |
-| **Decision (gtw)** | 无 👉；`CardKindDecision` | `act:/gtw/...` 等宽 `column_set` | 合成 reaction → `gtw.HandleAction` → `OutCardPatch` |
+| **Decision (gtw)** | 无 👉；`ChoiceKindDecision` | `act:/gtw/...` 等宽 `column_set` | 合成 reaction → `gtw.HandleAction` → `OutChoicePatch` |
 
 AskUserQuestion 与 Approval 走同一条 `opt:` inbound，但 **卡面和 host 协议不同**。dashboard Allow once 解决 approval 后，bridge 继续收 mux，并 PATCH 掉飞书按钮；不要把它做成 Action Needed 向导。
 
@@ -68,7 +68,7 @@ Host 非 multi 题 **拒绝** `custom` 与 `selected` 同时有值。
 
 长中文 label 用 **一行一个** `width: fill`（`buildStackedButtons`）。等宽 `column_set` 会把 Q1+Q2 混排的长句截断。gtw 决策卡仍用等宽 `column_set`（短 emoji+label）。
 
-标题 emoji 是 **👉**，不是 🔐。`CardKindPermission` 才加；Decision / Error 不加。
+标题 emoji 是 **👉**，不是 🔐。`ChoiceKindPermission` 才加；Decision / Error 不加。
 
 ---
 
@@ -173,7 +173,7 @@ form submit **经常省略** `value.action`，只带 `Action.Name`。
 ## 6. 代码地图
 
 ```
-OutboundMessage{Kind: OutCard, Card}
+OutboundMessage{Kind: OutChoice, Choice}
         │
         ▼
 buildInteractiveCard          schema 2.0 + header 👉
@@ -200,7 +200,7 @@ resolveCardAction     value.action | Name(opt_N/skip/submit)
 
 | 符号 | 文件 |
 |------|------|
-| `messages.Card` / `CardQuestion` | `internal/messages/session.go` |
+| `messages.Choice` / `ChoiceQuestion` | `internal/messages/session.go` |
 | `nm-q:` / `QuestionPick` | `internal/messages/question_picks.go` |
 | 卡 JSON / form / 回调 | `internal/channel/feishu/adapter.go` |
 | host 批答 / custom | `internal/bridge/dsh/permissions.go` |

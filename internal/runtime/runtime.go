@@ -64,7 +64,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/shell"
-
 	// dsh is intentionally NOT imported here: the runtime no
 	// longer touches the shared dsh host. The dsh bridge handles
 	// lazy-start on first use via host.EnsureSharedHost in
@@ -330,7 +329,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		},
 	}
 
-
 	// emitter is the single daemon-wide outbound chokepoint.
 	// Constructed here (before gateway.New) so the Gateway can
 	// hold the reference at construction time — every
@@ -342,13 +340,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// F-CLAUDE-PRINT-002 + fix-status-bar-git: GitStatus stamping
 	// is centralized at the Emitter chokepoint via the
 	// GitStatusLookup closure below. chatsession owns the
-	// snapshot; the Emitter stamps it on every Send / SendCard
+	// snapshot; the Emitter stamps it on every Send
 	// whose msg.GitStatus is nil. Business code never reads
 	// GitStatus directly.
 	em := outbound.New(ch, outbound.Options{
 		// GitStatusLookup reaches the chatsession via mgr.Get and
 		// delegates to cs.GitStatus(ctx). The lookup is invoked for
-		// every Send / SendCard whose msg.GitStatus is nil — the
+		// every Send whose msg.GitStatus is nil — the
 		// SINGLE chokepoint where every outbound message picks up
 		// its git snapshot. ChatSession.GitStatus rebuilds the
 		// snapshot from scratch on every call (no per-chat cache

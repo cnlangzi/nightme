@@ -105,9 +105,9 @@ var _ channel.Channel = (*Channel)(nil)
 func (c *Channel) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	if c.out != nil {
 		switch {
-		case msg.Kind == messages.OutCard && msg.Card != nil:
+		case msg.Kind == messages.OutChoice && msg.Choice != nil:
 			fmt.Fprintf(c.out, "echo: %s chat=%s title=%q options=%v\n",
-				msg.Kind, msg.ChatID, msg.Card.Title, msg.Card.Options)
+				msg.Kind, msg.ChatID, msg.Choice.Title, msg.Choice.Options)
 		default:
 			fmt.Fprintf(c.out, "echo: %s chat=%s text=%q\n", msg.Kind, msg.ChatID, msg.Text)
 		}
@@ -116,18 +116,6 @@ func (c *Channel) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	c.recorded = append(c.recorded, msg)
 	c.mu.Unlock()
 	return nil
-}
-
-// SendCard implements channel.Channel. F-46: returns a synthetic
-// message id so the /gtw test command path can correlate the
-// rendered card with later reaction routing. The echo channel
-// always returns "" (no real id); callers fall back to a synthetic
-// "echo-card-<n>" id when needed.
-func (c *Channel) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	if err := c.Send(ctx, msg); err != nil {
-		return "", err
-	}
-	return "", nil
 }
 
 // Record returns a snapshot of every message sent to this Channel

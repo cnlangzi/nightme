@@ -355,15 +355,14 @@ var _ = func(t *testing.T, fn any) uintptr {
 // records every OnPromptEnded call so TestPromptEndBus_*
 // tests can assert the subscriber routed the event through
 // ch.OnPromptEnded (Phase 2.5 contract). Every other method
-// is a trivial fallback — the tests don't exercise Send /
-// SendCard / etc.
+// is a trivial fallback — the tests don't exercise Send.
 type capturingChannel struct {
 	name   string
 	mu     sync.Mutex
 	record []string
 }
 
-func (c *capturingChannel) Name() string { return c.name }
+func (c *capturingChannel) Name() string                  { return c.name }
 func (c *capturingChannel) Start(_ context.Context) error { return nil }
 func (c *capturingChannel) Stop(_ context.Context) error  { return nil }
 func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
@@ -371,9 +370,6 @@ func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
 }
 func (c *capturingChannel) Send(_ context.Context, _ messages.OutboundMessage) error {
 	return nil
-}
-func (c *capturingChannel) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
-	return "", nil
 }
 func (c *capturingChannel) OnPromptEnded(_ context.Context, chatID, msgID string) {
 	c.mu.Lock()

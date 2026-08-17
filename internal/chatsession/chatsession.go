@@ -41,14 +41,14 @@ type (
 	AgentEventEnvelope = agentsession.AgentEventEnvelope
 	MessageStateEvent  = agentsession.MessageStateEvent
 	PromptEndedEvent   = agentsession.PromptEndedEvent
-	Prompt              = agentsession.Prompt
+	Prompt             = agentsession.Prompt
 )
 
 // Constructor + restorer re-exports.
 var (
-	NewAgentSession       = agentsession.NewAgentSession
-	FromAgentSessionEntry = agentsession.FromAgentSessionEntry
-	NewRegistrySpawner    = agentsession.NewRegistrySpawner
+	NewAgentSession        = agentsession.NewAgentSession
+	FromAgentSessionEntry  = agentsession.FromAgentSessionEntry
+	NewRegistrySpawner     = agentsession.NewRegistrySpawner
 	WithEventQueueCapacity = agentsession.WithEventQueueCapacity
 )
 
@@ -150,9 +150,9 @@ type ChatSession struct {
 	//
 	// At New() time selectedAgent is seeded from primaryAgent so the
 	// runtime never sees an empty selectedAgent on a fresh chat.
-	selectedCwd    string
-	selectedAgent  string
-	primaryAgent string
+	selectedCwd   string
+	selectedAgent string
+	primaryAgent  string
 
 	// F-watch §3.1.1: per-chat message-watch mode. Default
 	// WatchModeMention (only @ bot or @_all messages are
@@ -211,7 +211,7 @@ type ChatSession struct {
 	selectedAS *AgentSession
 
 	// Timestamps.
-	createdAt        time.Time
+	createdAt         time.Time
 	lastInteractionAt time.Time
 
 	// Persistence handles (optional — nil means no persistence).
@@ -306,7 +306,7 @@ type ChatSession struct {
 	// from Manager, which holds the single daemon-wide Emitter);
 	// test paths may pass a fake. Immutable post-binding; no
 	// lock needed. nil means "no emitter bound yet" — commands
-	// must nil-check via Emitter() before calling Send/SendCard.
+	// must nil-check via Emitter() before calling Send.
 	emitter outbound.Emitter
 
 	// watchdog (F-61) is the per-chat diagnostic timer. nil
@@ -347,15 +347,15 @@ type ChatSession struct {
 // of ch — construction never fails on the channel binding.
 func New(chatID, primaryAgent string) (*ChatSession, error) {
 	cs := &ChatSession{
-		ID:               deriveIDFromChatID(chatID),
-		ChatID:           chatID,
-		selectedAgent:      primaryAgent, // init seed
-		primaryAgent:     primaryAgent, // historical snapshot, read-only
-		pool:             make(map[agentCwdKey]*AgentSession),
-		watchMode:        WatchModeMention, // F-watch default
-		thinkMode:        ThinkModeShow,    // F-think default
-		toolsMode:        ToolsModeHide, // F-38 default (quiet by default)
-		createdAt:        time.Now(),
+		ID:                deriveIDFromChatID(chatID),
+		ChatID:            chatID,
+		selectedAgent:     primaryAgent, // init seed
+		primaryAgent:      primaryAgent, // historical snapshot, read-only
+		pool:              make(map[agentCwdKey]*AgentSession),
+		watchMode:         WatchModeMention, // F-watch default
+		thinkMode:         ThinkModeShow,    // F-think default
+		toolsMode:         ToolsModeHide,    // F-38 default (quiet by default)
+		createdAt:         time.Now(),
 		lastInteractionAt: time.Now(),
 		// F-63: per-chat heartbeat tracker (LRU). The runtime
 		// handler calls cs.Heartbeat().Observe() on every outbound
@@ -734,7 +734,6 @@ func (cs *ChatSession) ClearSelectedCwd() {
 	// cwd on every call and returns nil when cwd == "".
 }
 
-
 // SelectedAgent returns the current active agent name.
 func (cs *ChatSession) SelectedAgent() string {
 	cs.mu.RLock()
@@ -925,7 +924,7 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // session. nil when no Emitter has been wired yet (e.g. before
 // Manager.WithEmitter has been called or before GetOrCreate has
 // applied the Manager's emitter). Callers must nil-check before
-// Send / SendCard.
+// Send.
 //
 // Lock-free: emitter is set once and never mutated.
 func (cs *ChatSession) Emitter() outbound.Emitter {
@@ -1597,7 +1596,7 @@ func (cs *ChatSession) selectAgentSessionLocked(as *AgentSession) {
 //   - Resolve pool[(selectedAgent, selectedCwd)]:
 //     · hit (StatusRunning) → reuse
 //     · miss (or non-Running, e.g. Detached after daemon restart,
-//       or Exited after CLI died) → spawn (selectedAgent, selectedCwd)
+//     or Exited after CLI died) → spawn (selectedAgent, selectedCwd)
 //
 // Returns ErrNoSelectedCwd if selectedCwd is empty. Returns
 // ErrNoSelectedAgent if selectedAgent is empty (misconfigured daemon —
@@ -2275,23 +2274,23 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		}
 	}
 	return &registry.ChatSessionEntry{
-		ID:                   cs.ID,
-		ChatID:               cs.ChatID,
+		ID:                     cs.ID,
+		ChatID:                 cs.ChatID,
 		SelectedCwd:            cs.selectedCwd,
 		SelectedAgent:          cs.selectedAgent,
-		PrimaryAgent:         cs.primaryAgent,
-		AgentSessionIDs:      agentIDs,
+		PrimaryAgent:           cs.primaryAgent,
+		AgentSessionIDs:        agentIDs,
 		SelectedAgentSessionID: activeASID,
-		CreatedAt:            cs.createdAt,
-		LastInteractionAt:    cs.lastInteractionAt,
-		WatchMode:            int(cs.watchMode),
-		ThinkMode:            int(cs.thinkMode),
-		ToolsMode:            int(cs.toolsMode),
+		CreatedAt:              cs.createdAt,
+		LastInteractionAt:      cs.lastInteractionAt,
+		WatchMode:              int(cs.watchMode),
+		ThinkMode:              int(cs.thinkMode),
+		ToolsMode:              int(cs.toolsMode),
 		// F-watch: propagate the hint tombstone so any persist
 		// path (SetWatchMode / SetThinkMode / SetToolsMode / SetSelectedCwd
 		// / ClearSelectedCwd / QueueUserMessage's lastInteractionAt
 		// bump) preserves it instead of clobbering back to false.
-		WatcherHintEmitted:   cs.watcherHintEmitted,
+		WatcherHintEmitted: cs.watcherHintEmitted,
 	}
 }
 

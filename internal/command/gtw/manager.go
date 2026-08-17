@@ -21,9 +21,9 @@ import (
 // chatSessions cache) is keyed by chatID and protected by a
 // single sync.RWMutex.
 type Manager struct {
-	mu      sync.RWMutex
-	states  map[string]Context                       // chatID -> active /gtw fix snapshot
-	drafts  map[string]map[string]*Draft             // chatID -> userMsgID -> pending draft
+	mu           sync.RWMutex
+	states       map[string]Context                  // chatID -> active /gtw fix snapshot
+	drafts       map[string]map[string]*Draft        // chatID -> requestID -> pending draft
 	chatSessions map[string]*chatsession.ChatSession // chatID -> live ChatSession (cached per factory invocation)
 
 	// chatSessionLookup is the runtime-supplied closure that
@@ -38,7 +38,7 @@ type Manager struct {
 	// now is overridable for tests; defaults to time.Now.
 	now func() time.Time
 	// deps is the HandlerDeps shared by all reaction handlers
-	// (Send / SendCard / Git / Prober / Detect / Now). Set via
+	// (Git / Prober / Detect / Now). Set via
 	// SetHandlerDeps at runtime startup; may be nil before
 	// the runtime wires the action pipeline.
 	deps HandlerDeps
@@ -162,26 +162,25 @@ func (m *Manager) ClearContext(chatID string) {
 	m.SetContext(chatID, Context{})
 }
 
-// --- drafts (per-chat, per-userMsgID) ---
+// --- drafts (per-chat, per-RequestID) ---
 
-// GetDraft returns the pending draft keyed by userMsgID for the
-// given chatID, or nil if no draft is registered. Used by
-// HandleReaction to look up the context of the user's reaction
-// target.
-func (m *Manager) GetDraft(chatID, userMsgID string) *Draft {
-	if chatID == "" || userMsgID == "" {
+// GetDraft returns the pending draft keyed by Choice.RequestID for
+// the given chatID, or nil if no draft is registered. Used by
+// HandleReaction to look up the context of the user's click.
+func (m *Manager) GetDraft(chatID, requestID string) *Draft {
+	if chatID == "" || requestID == "" {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.drafts[chatID][userMsgID]
+	return m.drafts[chatID][requestID]
 }
 
-// StoreDraft registers a draft under (chatID, userMsgID).
+// StoreDraft registers a draft under (chatID, requestID).
 // Overwrites any previous draft under the same key (rare;
 // reactions are usually one-shot per card).
-func (m *Manager) StoreDraft(chatID, userMsgID string, d *Draft) {
-	if chatID == "" || userMsgID == "" || d == nil {
+func (m *Manager) StoreDraft(chatID, requestID string, d *Draft) {
+	if chatID == "" || requestID == "" || d == nil {
 		return
 	}
 	if d.CreatedAt.IsZero() {
@@ -191,15 +190,15 @@ func (m *Manager) StoreDraft(chatID, userMsgID string, d *Draft) {
 	if _, ok := m.drafts[chatID]; !ok {
 		m.drafts[chatID] = make(map[string]*Draft)
 	}
-	m.drafts[chatID][userMsgID] = d
+	m.drafts[chatID][requestID] = d
 	m.mu.Unlock()
 }
 
 // TakeDraft atomically reads and deletes the draft. Returns nil
 // if no draft was registered. Used by HandleReaction to ensure
 // a single ✅ / 🆕 / 🔗 / ❌ / 🔄 is acted on exactly once.
-func (m *Manager) TakeDraft(chatID, userMsgID string) *Draft {
-	if chatID == "" || userMsgID == "" {
+func (m *Manager) TakeDraft(chatID, requestID string) *Draft {
+	if chatID == "" || requestID == "" {
 		return nil
 	}
 	m.mu.Lock()
@@ -207,8 +206,8 @@ func (m *Manager) TakeDraft(chatID, userMsgID string) *Draft {
 	if m.drafts[chatID] == nil {
 		return nil
 	}
-	d := m.drafts[chatID][userMsgID]
-	delete(m.drafts[chatID], userMsgID)
+	d := m.drafts[chatID][requestID]
+	delete(m.drafts[chatID], requestID)
 	if len(m.drafts[chatID]) == 0 {
 		delete(m.drafts, chatID)
 	}
@@ -283,7 +282,7 @@ func (m *Manager) SetHandlerDeps(deps HandlerDeps) {
 //	gtwMgr.SetHandlerDeps(deps)
 //	router.Register("*", gtwMgr.HandleReaction)
 func (m *Manager) HandleReaction(ctx context.Context, ev services.ReactionEvent) bool {
-	if ev.TargetMsgID == "" || ev.ChatID == "" {
+	if ev.RequestID == "" || ev.ChatID == "" {
 		return false
 	}
 	m.mu.RLock()
@@ -293,7 +292,7 @@ func (m *Manager) HandleReaction(ctx context.Context, ev services.ReactionEvent)
 		// Deps not yet wired — log and fall through.
 		slog.Default().Warn("gtw: HandleReaction called before SetHandlerDeps",
 			"chat_id", ev.ChatID,
-			"target_msg_id", ev.TargetMsgID)
+			"request_id", ev.RequestID)
 		return false
 	}
 	consumed, err := HandleDraftReaction(ctx, m, deps, ev)
@@ -301,7 +300,7 @@ func (m *Manager) HandleReaction(ctx context.Context, ev services.ReactionEvent)
 		slog.Default().Error("gtw: HandleReaction error",
 			"err", err,
 			"chat_id", ev.ChatID,
-			"target_msg_id", ev.TargetMsgID,
+			"request_id", ev.RequestID,
 			"emoji", ev.Emoji)
 	}
 	return consumed

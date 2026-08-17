@@ -71,8 +71,8 @@ func TestRepoEmptyGuardAllowsLocalMode(t *testing.T) {
 	// `p.IssueID != -1 && p.Repo == ""`. Validate the truth
 	// table:
 	cases := []struct {
-		name      string
-		p         FixDraftPayload
+		name       string
+		p          FixDraftPayload
 		shouldTrip bool
 	}{
 		{"local w/ empty repo (allowed)", FixDraftPayload{IssueID: -1, Repo: ""}, false},
@@ -90,13 +90,13 @@ func TestRepoEmptyGuardAllowsLocalMode(t *testing.T) {
 	}
 }
 
-// TestBranchExistsCard_LocalMode pins the local-mode render
+// TestBranchExistsChoice_LocalMode pins the local-mode render
 // of the §5.3.1 decision card: the body must NOT show
 // "issue: #-1" (which would look broken); instead it shows
 // "branch: `<name>` (local)".
-func TestBranchExistsCard_LocalMode(t *testing.T) {
+func TestBranchExistsChoice_LocalMode(t *testing.T) {
 	p := FixDraftPayload{IssueID: -1, Title: "(local branch)", Branch: "login-fix", Slug: "login-fix", Repo: ""}
-	card := BranchExistsCard(p, "/worktrees/login-fix")
+	card := BranchExistsChoice(p, "/worktrees/login-fix")
 	if strings.Contains(card.Body, "issue: #") {
 		t.Errorf("local-mode card should not show 'issue: #', got body:\n%s", card.Body)
 	}
@@ -105,22 +105,22 @@ func TestBranchExistsCard_LocalMode(t *testing.T) {
 	}
 }
 
-// TestBranchExistsCard_RemoteMode pins the ID-mode render.
-func TestBranchExistsCard_RemoteMode(t *testing.T) {
+// TestBranchExistsChoice_RemoteMode pins the ID-mode render.
+func TestBranchExistsChoice_RemoteMode(t *testing.T) {
 	p := FixDraftPayload{IssueID: 42, Title: "Login state expires", Branch: "login-state", Repo: "owner/repo", Provider: "github"}
-	card := BranchExistsCard(p, "")
+	card := BranchExistsChoice(p, "")
 	if !strings.Contains(card.Body, "issue: #42") {
 		t.Errorf("remote-mode card should show 'issue: #42', got body:\n%s", card.Body)
 	}
 }
 
-// TestWorktreeFailCard_LocalMode pins the local-mode render
+// TestWorktreeFailChoice_LocalMode pins the local-mode render
 // of the §5.3.3 decision card: title must NOT include
 // "(-1)"; cancel label must NOT mention the nightme/wip
 // rollback (local mode never adds a label).
-func TestWorktreeFailCard_LocalMode(t *testing.T) {
+func TestWorktreeFailChoice_LocalMode(t *testing.T) {
 	p := FixDraftPayload{IssueID: -1, Branch: "b", Repo: ""}
-	card := WorktreeFailCard(p)
+	card := WorktreeFailChoice(p)
 	if strings.Contains(card.Title, "(#-1)") {
 		t.Errorf("local-mode title should not include '(-1)', got %q", card.Title)
 	}
@@ -135,12 +135,12 @@ func TestWorktreeFailCard_LocalMode(t *testing.T) {
 	}
 }
 
-// TestWorktreeFailCard_RemoteModeWithLabel pins the ID-mode
+// TestWorktreeFailChoice_RemoteModeWithLabel pins the ID-mode
 // render WITH LabelAdded: title includes "(#42)" and the
 // cancel label mentions the rollback.
-func TestWorktreeFailCard_RemoteModeWithLabel(t *testing.T) {
+func TestWorktreeFailChoice_RemoteModeWithLabel(t *testing.T) {
 	p := FixDraftPayload{IssueID: 42, Branch: "b", Repo: "o/r", LabelAdded: true}
-	card := WorktreeFailCard(p)
+	card := WorktreeFailChoice(p)
 	if !strings.Contains(card.Title, "(#42)") {
 		t.Errorf("remote-mode title should include '(#42)', got %q", card.Title)
 	}
@@ -155,12 +155,12 @@ func TestWorktreeFailCard_RemoteModeWithLabel(t *testing.T) {
 	}
 }
 
-// TestWorktreeFailCard_RemoteModeNoLabel covers the case
+// TestWorktreeFailChoice_RemoteModeNoLabel covers the case
 // where the worktree failed BEFORE the label was added
 // (LabelAdded=false). Cancel label must NOT mention rollback.
-func TestWorktreeFailCard_RemoteModeNoLabel(t *testing.T) {
+func TestWorktreeFailChoice_RemoteModeNoLabel(t *testing.T) {
 	p := FixDraftPayload{IssueID: 42, Branch: "b", Repo: "o/r", LabelAdded: false}
-	card := WorktreeFailCard(p)
+	card := WorktreeFailChoice(p)
 	for _, c := range card.Choices {
 		if c.Emoji == "❌" && strings.Contains(c.Label, "nightme/wip") {
 			t.Errorf("when LabelAdded=false, cancel label should not mention rollback, got %q", c.Label)

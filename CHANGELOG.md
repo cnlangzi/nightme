@@ -11,6 +11,16 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### OutChoice rename
+
+Interactive prompts on the abstract outbound surface are now
+`OutChoice` / `OutChoicePatch` with payload `messages.Choice`
+(subkinds Permission / Question / Decision / Error / Preview).
+Channel still renders them as native UI (Feishu Card 2.0, etc.).
+`String()` is `"choice"` / `"choice_patch"`. Feishu helpers
+(`buildInteractiveCard`, `SendCardForReceipt`, `optCards`) keep
+their Card names.
+
 ### opencode bridge: migrate from HTTP serve to ACP
 
 The `opencode` integration is migrated from the proprietary
@@ -1026,12 +1036,12 @@ spawn will fail at runtime. See
 按 OutboundKind 路径拆分（2026-08-04 ops 实机确认）：
 
 - `OutThinking` / `OutToolStart` / `OutToolEnd` → **ReplyInThread** (agent 进度只进 thread panel,main chat 仅显示 "X replies" 指示器)
-- `OutCompaction` / receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` → **ReplyInThreadAndChat** (必须 main chat 可见)
+- `OutCompaction` / receipt 冷启动卡 / `OutChoice` (permission) / `OutCommandReply` → **ReplyInThreadAndChat** (必须 main chat 可见)
 - 顶级 Create (ReplyInChat) 形态 → nightme **不**走 (fallback 230011/231003 才退化)
 
 > Kinds 命名 ops 用 past tense (`OutToolStarted/Ended/Think`)，但 nightme enum 实际是 present tense (`OutToolStart/OutToolEnd/OutThinking`)。**不**改 enum 名（会牵动 Gateway 抽象层多个包），只按 enum 行为归属。
 
-测试：`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (3 kinds × ReplyInThread: OutThinking/OutToolStart/OutToolEnd) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (4 paths × ReplyInThreadAndChat: ReceiptColdStart/OutCard/OutCommandReply/OutCompaction) + `cmd/_probe/send_one` 实机飞书群验证。详见 `docs/feat/F-37-tool-thread-routing.md` §7.5。
+测试：`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (3 kinds × ReplyInThread: OutThinking/OutToolStart/OutToolEnd) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (4 paths × ReplyInThreadAndChat: ReceiptColdStart/OutChoice/OutCommandReply/OutCompaction) + `cmd/_probe/send_one` 实机飞书群验证。详见 `docs/feat/F-37-tool-thread-routing.md` §7.5。
 
 ---
 

@@ -57,7 +57,7 @@ type SlashCommandFactory interface {
 	// The command receives a *chatsession.ChatSession that has
 	// already been GetOrCreate'd by the runtime; commands can
 	// read/write per-chat state via cs.SetXxx / cs.GetXxx and
-	// send replies via cs.Channel().Send / SendCard.
+	// send replies via cs.Emitter().Send.
 	//
 	// Handle is responsible for parsing args out of input.Text
 	// and returning a SlashOutput. nil error means success

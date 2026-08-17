@@ -1,7 +1,7 @@
 // Package command hosts the F-51 slash command abstraction layer.
 // It provides the Commander / SlashCommandFactory / RuntimeServices
 // interfaces, the canonical inbound/outbound types
-// (SlashInput / SlashOutput / Outbound / Card / CardChoice /
+// (SlashInput / SlashOutput / Outbound / ChoiceOption /
 // ReactionEvent), and the ReactionRouter service interface that
 // command implementations depend on.
 //
@@ -11,7 +11,7 @@
 // translation between gateway messages and command inputs/outputs.
 //
 // The Commander refactor proposed deleting command.Outbound /
-// Card / CardChoice in favour of using messages.OutboundMessage
+// ChoiceOption in favour of using messages.OutboundMessage
 // directly. That would require command to import gateway, which
 // creates an import cycle (gateway → command/gtw → command). So
 // we keep the command-side mirror types; the runtime shim
@@ -70,8 +70,8 @@ type SlashInput struct {
 
 // SlashOutput is the command-package's view of one command's
 // result. The runtime shim consumes Reply / Outbound and routes
-// them through cs.Emitter().Send / SendCard (PATCH semantics
-// fold into Send with Kind=OutCardPatch). Consumed + Dropped
+// them through cs.Emitter().Send (PATCH semantics
+// fold into Send with Kind=OutChoicePatch). Consumed + Dropped
 // flow back to the gateway for legacy fall-through handling.
 type SlashOutput struct {
 	// Reply is the human-readable reply text. When Outbound is
@@ -93,9 +93,9 @@ type SlashOutput struct {
 	Outbound []messages.OutboundMessage
 }
 
-// CardChoice is the command-package's view of one button on a
-// decision card.
-type CardChoice struct {
+// ChoiceOption is the command-package's view of one button on a
+// decision prompt.
+type ChoiceOption struct {
 	// Emoji is the button's leading emoji ("✅" / "🆕" / ...).
 	// Also the action's key — when the user clicks, the channel
 	// emits a reaction with this emoji on the card's bot msg.

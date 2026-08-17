@@ -109,7 +109,7 @@ const (
 // remote info at hand without re-fetching on each dispatch.
 type Context struct {
 	Mode     Mode
-	Issue    int    // -1 for ModeLocal (no remote issue); > 0 for ModeRemote
+	Issue    int // -1 for ModeLocal (no remote issue); > 0 for ModeRemote
 	Branch   string
 	Worktree string // absolute path; empty when the fix flow hasn't reached §5.2.④
 
@@ -136,7 +136,7 @@ type Context struct {
 	UpdatedAt time.Time
 }
 
-// DraftKind tags a pending user-confirmation card. The set is
+// DraftKind tags a pending user-confirmation choice. The set is
 // closed; future flows (commit / pr) extend it.
 type DraftKind string
 
@@ -150,11 +150,11 @@ const (
 // F-45 §3.4 / §5.3 + F-50 rename. The fields are the rollback-
 // relevant subset of the original /gtw fix context.
 type FixDraftPayload struct {
-	IssueID  int
-	Title    string
-	Branch   string
-	Slug     string
-	Repo     string // "owner/repo" (single-slash form)
+	IssueID int
+	Title   string
+	Branch  string
+	Slug    string
+	Repo    string // "owner/repo" (single-slash form)
 	// Provider is the provider identity (ProviderGitHub /
 	// ProviderGitLab). Used by the rollback path in action.go
 	// to construct a fresh GitProvider for label removal.
@@ -184,24 +184,24 @@ type FixDraftPayload struct {
 	ChatID string
 }
 
-// CardChoice is one button on a decision card. F-46 → action
+// ChoiceOption is one button on a decision prompt. F-46 → action
 // handler includes the original Choices on the PATCH so the
 // rebuilt card keeps the same layout (every button disabled).
 //
-// F-51: defined natively in this package (was chatsession.CardChoice
+// F-51: defined natively in this package (was chatsession.ChoiceOption
 // pre-F-51). Identical field shape.
-type CardChoice struct {
+type ChoiceOption struct {
 	Emoji  string
 	Label  string
 	Action string
 }
 
-// Draft is one pending user-confirmation card indexed by the
-// bot reply's userMsgID. Reactions on that message id route to
-// the matching draft via Manager.HandleReaction.
+// Draft is one pending user-confirmation choice indexed by
+// Choice.RequestID. Channel inbound copies that RequestID onto
+// ReactionEvent; Manager.HandleReaction looks up by it.
 //
 // F-51: defined natively in this package (was chatsession.GTWDraft
-// pre-F-51). Stored in gtw.Manager.drafts[chatID][userMsgID].
+// pre-F-51). Stored in gtw.Manager.drafts[chatID][requestID].
 type Draft struct {
 	Kind    DraftKind
 	Payload FixDraftPayload
@@ -210,19 +210,18 @@ type Draft struct {
 	// reaction → expunge").
 	CreatedAt time.Time
 
-	// F-46: bot-side message id of the rendered decision card.
-	// Populated by the dispatcher after SendCard returns; consumed
-	// by the action handler's follow-up PATCH. Empty when the
-	// dispatcher never sent a card (e.g. legacy text-only
-	// fallbacks).
-	BotMessageID string
-	// F-46: original card render data so the action handler can
-	// rebuild the card with `Disabled: true` and a result note
+	// ChoicePosted is true when Send(OutChoice) succeeded. The
+	// action handler PATCHes via Choice.RequestID when true, and
+	// falls back to a plain-text follow-up when false (channel
+	// choice path unavailable).
+	ChoicePosted bool
+	// Original choice render data so the action handler can
+	// rebuild the prompt with `Disabled: true` and a result note
 	// without going back to the dispatcher.
-	CardTitle     string
-	CardBody      string
-	CardChoices   []CardChoice
-	CardRequestID string
+	ChoiceTitle     string
+	ChoiceBody      string
+	ChoiceOptions   []ChoiceOption
+	ChoiceRequestID string
 }
 
 // ReactionEvent is the inbound reaction payload. Type alias to
@@ -233,14 +232,14 @@ type Draft struct {
 // can be migrated to this alias.
 type ReactionEvent = services.ReactionEvent
 
-// Card represents the original decision card stored on a draft.
+// Choice represents the original decision prompt stored on a draft.
 // Carries enough information for the action handler to rebuild
-// the card with Disabled=true and a result note (see
-// executeXxxAction → deps.Send → Kind=OutCardPatch path).
-type Card struct {
+// it with Disabled=true and a result note (see executeXxxAction
+// → deps.Send → Kind=OutChoicePatch path).
+type Choice struct {
 	Title     string
 	Body      string
-	Choices   []CardChoice
+	Choices   []ChoiceOption
 	RequestID string
 }
 

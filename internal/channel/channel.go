@@ -2,9 +2,9 @@
 // (Feishu, echo test stub). Channel is the runtime contract every
 // transport (Feishu, future Slack, future Web UI, …) must satisfy:
 // it owns BOTH the inbound pump (Incoming) and the outbound send
-// surface (Send / SendCard). The runtime wires it into the
-// outbound chokepoint (which holds the only outbound reference to
-// the Channel) and into the Gateway's inbound pump (which reads
+// surface (Send). The runtime wires it into the outbound
+// chokepoint (which holds the only outbound reference to the
+// Channel) and into the Gateway's inbound pump (which reads
 // from Incoming and never calls Send).
 //
 // Adapter packages in this directory (channel/feishu,
@@ -28,24 +28,24 @@ import (
 //
 //   - Name:        diagnostic / logging identifier
 //   - Start:       opens the adapter's long-lived receive loop and
-//                  begins publishing on Incoming. Adapter-specific
-//                  (Feishu: WS connect; echo: no-op).
+//     begins publishing on Incoming. Adapter-specific
+//     (Feishu: WS connect; echo: no-op).
 //   - Stop:        closes the receive loop and releases adapter
-//                  resources.
+//     resources.
 //   - Incoming:    the channel publishes inbound user messages on
-//                  this channel; the Gateway reads it in pumpInbound.
-//                  Closed when the channel shuts down.
-//   - Send:        plain-text outbound (one shot, no thread binding).
-//                  Used for OutReply / OutResult / OutCommandReply /
-//                  OutInit / OutTask* messages.
-//   - SendCard:    interactive card outbound; returns the bot-side
-//                  message id assigned by the channel so callers can
-//                  correlate the rendered card with later
-//                  card.action.trigger callbacks.
+//     this channel; the Gateway reads it in pumpInbound.
+//     Closed when the channel shuts down.
+//   - Send:        the sole outbound egress. Every OutboundKind
+//     (text, thinking, tool, OutChoice, OutChoicePatch,
+//     receipt, reaction, …) goes through here.
+//     Channel routes by Kind; interactive-choice
+//     correlation is Channel-private via
+//     Choice.RequestID. Callers never see a platform
+//     message id and never pick a second send method.
 //
 // "Abstract stays abstract, concrete stays concrete": the Gateway
-// knows only this surface. Receipt shape is each Channel's private
-// affair.
+// knows only this surface. Receipt shape and card handles are
+// each Channel's private affair.
 //
 // Channel-specific extensions:
 //
@@ -76,7 +76,6 @@ type Channel interface {
 	Stop(ctx context.Context) error
 	Incoming() <-chan messages.InboundMessage
 	Send(ctx context.Context, msg messages.OutboundMessage) error
-	SendCard(ctx context.Context, msg messages.OutboundMessage) (msgID string, err error)
 
 	OnPromptEnded(ctx context.Context, chatID, userMsgID string)
 	HealthSnapshot() (name string, payload json.RawMessage, err error)

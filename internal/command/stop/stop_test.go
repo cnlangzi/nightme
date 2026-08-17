@@ -7,9 +7,9 @@
 package stop_test
 
 import (
-	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"strings"
 	"testing"
 
@@ -34,8 +34,8 @@ func (s *stubStoppable) SendBlocks(_ context.Context, _ []agent.ContentBlock) er
 	return nil
 }
 func (s *stubStoppable) SendPermission(_ string) error { return nil }
-func (s *stubStoppable) Reset(_ context.Context) error  { return nil }
-func (s *stubStoppable) Close() error                   { return nil }
+func (s *stubStoppable) Reset(_ context.Context) error { return nil }
+func (s *stubStoppable) Close() error                  { return nil }
 func (s *stubStoppable) Keepalive(_ context.Context, _ func(context.Context) error) error {
 	return nil
 }
@@ -49,10 +49,7 @@ func (s *stubStoppable) Stop(_ context.Context) error {
 // the channel surface.
 type nopCh struct{}
 
-func (nopCh) Send(_ context.Context, _ messages.OutboundMessage) error { return nil }
-func (nopCh) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
-	return "", nil
-}
+func (nopCh) Send(_ context.Context, _ messages.OutboundMessage) error  { return nil }
 func (nopCh) Patch(_ context.Context, _ messages.OutboundMessage) error { return nil }
 
 // setupSelectedAS wires up a ChatSession + selected AgentSession +

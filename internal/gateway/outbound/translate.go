@@ -48,15 +48,15 @@ const ThinkingPrefix = "[思考] "
 // messages.OutboundMessage stream. Returns the message to send and a
 // boolean indicating whether anything should be sent at all:
 //
-//   - (msg, true)  → Emitter.Send / Emitter.SendCard should send msg
+//   - (msg, true)  → Emitter.Send should send msg
 //   - (zero, false) → drop (e.g. terminal events that have no
 //     user-facing content; the receipt already reflects the
 //     final state)
 //
 // Terminal events (Done, Error) are NOT emitted as separate
 // OutboundMessages; the receipt's terminal header carries that
-// signal. Permission events are mapped to OutCard; the Channel
-// renders the card natively (Feishu interactive, Slack block kit,
+// signal. Permission events are mapped to OutChoice; the Channel
+// renders the choice natively (Feishu interactive card, Slack block kit,
 // Web HTML).
 func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bool) {
 	switch ev.Kind {
@@ -134,17 +134,17 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		if isQuestion {
 			title = "Action Needed"
 		}
-		card := &messages.Card{
+		card := &messages.Choice{
 			Title:   title,
 			Body:    req.Tool + ": " + req.Action,
 			Options: req.Options,
 		}
 		if n := len(req.Questions); n > 0 {
 			card.Title = "Action Needed"
-			card.Questions = make([]messages.CardQuestion, n)
+			card.Questions = make([]messages.ChoiceQuestion, n)
 			card.Picks = make([]string, n)
 			for i, q := range req.Questions {
-				card.Questions[i] = messages.CardQuestion{
+				card.Questions[i] = messages.ChoiceQuestion{
 					ID:       q.ID,
 					Header:   q.Header,
 					Question: q.Question,
@@ -155,8 +155,8 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		}
 		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   messages.OutCard,
-			Card:   card,
+			Kind:   messages.OutChoice,
+			Choice: card,
 		}, true
 
 	case agent.EventAgentPermissionSettled:
@@ -169,11 +169,11 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		}
 		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   messages.OutCardPatch,
-			Card: &messages.Card{
+			Kind:   messages.OutChoicePatch,
+			Choice: &messages.Choice{
 				Title: "Waiting for approval",
 				Body:  "✓ **" + outcome + "**（dashboard）",
-				Kind:  messages.CardKindPermission,
+				Kind:  messages.ChoiceKindPermission,
 			},
 		}, true
 

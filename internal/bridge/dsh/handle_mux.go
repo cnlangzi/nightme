@@ -14,7 +14,7 @@
 //   - session/projection:经 wireState.applyProjection
 //   - session/queue / session/jobs:本期不消费,debug log
 //   - approval/requested / approval/resolved:permissions 层处理
-//   - approval/asked:经 handleInlineApproval
+//   - approval/asked:debug log only (respondable gate is approval/requested)
 //   - question/requested / question/resolved:handleQuestionRequested
 
 package dsh
@@ -41,7 +41,7 @@ var warnLogger = slog.Default()
 // Routing:
 //   - session/event     → driver.dispatcher.dispatch (registered handlers)
 //   - session/projection → driver.wireState.applyProjection (state-only)
-//   - approval/asked    → driver.handleInlineApproval (permissions layer)
+//   - approval/asked    → debug log (mux has no top-level approval/asked)
 //   - other mux methods → debug log only
 func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 	// Panic recover: the mux pump goroutine in host.StreamHub

@@ -39,7 +39,7 @@ import (
 // Receives the decoded envelope, optional View bytes, and access to
 // the translator (for F-52 textBuf/pendingTools), wireState (for
 // tasks/tools), and driver (for handlers that need driver methods
-// like handleApprovalAsked → handleInlineApproval). Returns the
+// like handleApprovalAsked). Returns the
 // AgentEvent sequence to deliver; nil for graceful no-op handlers
 // (e.g. todo/update before wire emits it).
 //
@@ -70,7 +70,7 @@ func (r *registry) lookup(envType string) (eventHandler, bool) {
 
 // eventDispatcher ties together the translator (F-52 streaming state),
 // wireState (multi-source truth), the driver (for handlers that need
-// to call driver methods like handleInlineApproval), and the
+// to call driver methods), and the
 // deliver callback. One instance per driver.
 type eventDispatcher struct {
 	registry *registry
@@ -86,7 +86,7 @@ type eventDispatcher struct {
 //
 // The driver argument is optional: pass nil for tests that don't
 // exercise handler paths that need driver methods (e.g.
-// handleApprovalAsked → handleInlineApproval).
+// handleApprovalAsked).
 func newDispatcher(tr *translator, st *wireState, d *driver, deliver func(agent.AgentEvent)) *eventDispatcher {
 	return &eventDispatcher{
 		registry: standardRegistry,
@@ -762,16 +762,10 @@ func handleTodoDelete(env sessionEventEnvelope, view json.RawMessage, tr *transl
 	return nil
 }
 
-// handleApprovalAsked is the session/event approval/asked entry.
-// Mux also has a top-level `approval/asked` method (handle_mux.go)
-// that calls handleInlineApproval directly — that path is outside
-// the dispatcher lock. This handler covers the session/event
-// envelope form. If dispatcher.d is nil (test-only), return nil
-// rather than panicking.
-//
-// MUST NOT call driver.deliver / handleInlineApproval here: both
-// would run while translator.mu + wireState.mu are held. Return
-// the EventAgentPermission so dispatch delivers after unlock.
+// handleApprovalAsked is the session/event approval/asked echo.
+// The dashboard ApprovalPanel and /api/respond are keyed on mux
+// approval/requested (frame rpcId). Emitting a second
+// EventAgentPermission here would duplicate the Feishu card.
 func handleApprovalAsked(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
 	// session/event approval/asked is an audit/echo of the tool
 	// call. The dashboard ApprovalPanel and /api/respond are keyed

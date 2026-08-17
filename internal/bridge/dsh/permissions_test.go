@@ -69,6 +69,14 @@ func TestQuestionAnswerFor_CustomFallback(t *testing.T) {
 	}
 }
 
+func TestQuestionAnswerFor_CorruptBatch(t *testing.T) {
+	qs := []questionPayload{{ID: "q1", Options: []AskUserQuestionOption{{Label: "A"}}}}
+	_, err := questionAnswerFor(qs, messages.QuestionBatchPrefix+"{")
+	if err == nil {
+		t.Fatal("want error for prefix plus invalid JSON")
+	}
+}
+
 func TestQuestionAnswerFor_MissingID(t *testing.T) {
 	_, err := questionAnswerFor([]questionPayload{{Question: "no id"}}, "x")
 	if err == nil {

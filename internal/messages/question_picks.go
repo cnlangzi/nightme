@@ -2,6 +2,7 @@ package messages
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -11,6 +12,11 @@ import (
 // option label (no prefix) remains the one-shot / single-question
 // path.
 const QuestionBatchPrefix = "nm-q:"
+
+// QuestionCustomPrefix marks a Card.Picks slot that came from
+// "Type your answer" rather than an option button. Stripped when
+// encoding a QuestionBatchPrefix payload.
+const QuestionCustomPrefix = "nm-c:"
 
 // QuestionPick is one answered item in a QuestionBatchPrefix payload.
 // Skip: empty Selected, empty Custom.
@@ -34,16 +40,39 @@ func EncodeQuestionPicks(picks []QuestionPick) string {
 }
 
 // DecodeQuestionPicks returns the batch when s is a QuestionBatchPrefix
-// payload. ok is false for plain option labels.
-func DecodeQuestionPicks(s string) ([]QuestionPick, bool) {
+// payload. A plain option label returns (nil, nil). Prefix plus
+// invalid JSON is an error — it must not be treated as custom text.
+func DecodeQuestionPicks(s string) ([]QuestionPick, error) {
 	s = strings.TrimSpace(s)
 	if !strings.HasPrefix(s, QuestionBatchPrefix) {
-		return nil, false
+		return nil, nil
 	}
 	raw := strings.TrimPrefix(s, QuestionBatchPrefix)
 	var picks []QuestionPick
 	if err := json.Unmarshal([]byte(raw), &picks); err != nil {
-		return nil, false
+		return nil, fmt.Errorf("messages: decode %s payload: %w", QuestionBatchPrefix, err)
 	}
-	return picks, true
+	if picks == nil {
+		picks = []QuestionPick{}
+	}
+	return picks, nil
+}
+
+// StoreQuestionCustom encodes a typed answer into a Card.Picks slot.
+func StoreQuestionCustom(custom string) string {
+	return QuestionCustomPrefix + custom
+}
+
+// ParseStoredQuestionPick maps one Card.Picks slot onto a QuestionPick.
+// Empty stored is skip; QuestionCustomPrefix is custom text; anything
+// else is a selected option label.
+func ParseStoredQuestionPick(id, stored string) QuestionPick {
+	p := QuestionPick{ID: id, Selected: []string{}}
+	switch {
+	case strings.HasPrefix(stored, QuestionCustomPrefix):
+		p.Custom = strings.TrimPrefix(stored, QuestionCustomPrefix)
+	case stored != "":
+		p.Selected = []string{stored}
+	}
+	return p
 }

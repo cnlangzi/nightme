@@ -129,9 +129,6 @@ type permissionSender interface {
 // still blocked on question/requested.
 func (r *Router) dispatchPermissionClick(msg *messages.InboundMessage) {
 	option := strings.TrimSpace(msg.Action.Option)
-	if option == "" && msg.Action.Form != nil {
-		option = strings.TrimSpace(msg.Action.Form["option"])
-	}
 	if option == "" {
 		slog.Default().Warn("inbound: card action missing option",
 			"chat_id", msg.ChatID)

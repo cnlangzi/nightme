@@ -508,26 +508,10 @@ type todoItem struct {
 	Status     string `json:"status"` // "pending" | "in_progress" | "completed"
 }
 
-// approvalAskedData is the `data` body of an approval/asked event
-// (the session/event channel for approval flows; distinct from
-// mux approval/requested which is the server-pushed version).
-// Wire field names may not all match — translate.go's catch-all
-// falls through to a debug log when the payload is empty, which
-// is the expected behaviour when dsh skips this event entirely.
-type approvalAskedData struct {
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Action     string `json:"action"`
-	// BUG FIX: pre-fix this was []string; canonical wire is
-	// []AskUserQuestionOption (objects). Same reasoning as
-	// questionPayload.Options above.
-	Options []AskUserQuestionOption `json:"options"`
-}
-
-// AskUserQuestionOption is the option shape used by both
-// muxQuestionRequested and approval/asked payloads (dsh-api.md
-// §3.4.6 / §3.4.9). One selectable choice; Label is the visible
-// answer and Description is auxiliary context shown alongside.
+// AskUserQuestionOption is the option shape used by
+// muxQuestionRequested (dsh-api.md §3.4.9). One selectable
+// choice; Label is the visible answer and Description is
+// auxiliary context shown alongside.
 type AskUserQuestionOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`

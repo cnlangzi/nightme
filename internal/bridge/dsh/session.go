@@ -120,10 +120,9 @@ type driver struct {
 	// batch from question/requested. Present only for question
 	// frames; SendPermission uses it to emit QuestionResponse
 	// instead of ApprovalResponse. lastApprovalID maps frame rpcId
-	// → human-readable approvalId (muxApprovalID for mux path,
-	// SessionID+":q" for questions). Audit-only; not used for
-	// routing. Keeps the original dsh ID available in dLog
-	// messages even though we never pass it to /api/respond.
+	// → mux approvalId for approval/requested (used by
+	// /api/respond and dropPendingByApprovalID). Questions are
+	// keyed only in pendingQuestions.
 	pendingQuestions map[string][]questionPayload
 	lastApprovalID   map[string]string
 
@@ -723,6 +722,7 @@ func (d *driver) SendPermission(resp string) error {
 	ch := d.pendingApprovals[frameRpcID]
 	delete(d.pendingApprovals, frameRpcID)
 	delete(d.pendingQuestions, frameRpcID)
+	delete(d.lastApprovalID, frameRpcID)
 	d.pendingMu.Unlock()
 
 	if ch != nil {

@@ -9,9 +9,12 @@ func TestEncodeDecodeQuestionPicks(t *testing.T) {
 		{ID: "q3", Selected: []string{}, Custom: "typed outside options"},
 	}
 	s := EncodeQuestionPicks(in)
-	got, ok := DecodeQuestionPicks(s)
-	if !ok {
-		t.Fatalf("decode ok = false; encode = %q", s)
+	got, err := DecodeQuestionPicks(s)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("decode nil; encode = %q", s)
 	}
 	if len(got) != 3 || got[0].ID != "q1" || len(got[0].Selected) != 1 || got[0].Selected[0] != "A" {
 		t.Errorf("got = %+v", got)
@@ -25,7 +28,30 @@ func TestEncodeDecodeQuestionPicks(t *testing.T) {
 }
 
 func TestDecodeQuestionPicks_PlainLabel(t *testing.T) {
-	if _, ok := DecodeQuestionPicks("仅 REPL 启动(裸 nightme)"); ok {
+	got, err := DecodeQuestionPicks("仅 REPL 启动(裸 nightme)")
+	if err != nil {
+		t.Fatalf("plain label error = %v", err)
+	}
+	if got != nil {
 		t.Fatal("plain label must not decode as batch")
+	}
+}
+
+func TestDecodeQuestionPicks_Corrupt(t *testing.T) {
+	_, err := DecodeQuestionPicks(QuestionBatchPrefix + "{")
+	if err == nil {
+		t.Fatal("want error for prefix plus invalid JSON")
+	}
+}
+
+func TestParseStoredQuestionPick(t *testing.T) {
+	if p := ParseStoredQuestionPick("q1", ""); len(p.Selected) != 0 || p.Custom != "" {
+		t.Errorf("skip = %+v", p)
+	}
+	if p := ParseStoredQuestionPick("q1", "A"); len(p.Selected) != 1 || p.Selected[0] != "A" {
+		t.Errorf("option = %+v", p)
+	}
+	if p := ParseStoredQuestionPick("q1", StoreQuestionCustom("typed")); p.Custom != "typed" || len(p.Selected) != 0 {
+		t.Errorf("custom = %+v", p)
 	}
 }

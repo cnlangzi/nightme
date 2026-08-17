@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,54 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+type patchLog struct {
+	mu     sync.Mutex
+	id     string
+	bodies []string
+}
+
+func (p *patchLog) hook() func(context.Context, string, string) error {
+	return func(_ context.Context, messageID, content string) error {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.id = messageID
+		p.bodies = append(p.bodies, content)
+		return nil
+	}
+}
+
+func (p *patchLog) wait(t *testing.T, n int) (id string, bodies []string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		if len(p.bodies) >= n {
+			id = p.id
+			bodies = append([]string(nil), p.bodies...)
+			p.mu.Unlock()
+			return id, bodies
+		}
+		p.mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t.Fatalf("PATCH count = %d, want %d", len(p.bodies), n)
+	return p.id, append([]string(nil), p.bodies...)
+}
+
+func decodePicks(t *testing.T, s string) []messages.QuestionPick {
+	t.Helper()
+	picks, err := messages.DecodeQuestionPicks(s)
+	if err != nil {
+		t.Fatalf("DecodeQuestionPicks: %v", err)
+	}
+	if picks == nil {
+		t.Fatalf("Option = %q, want nm-q: batch", s)
+	}
+	return picks
+}
 
 func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 	a := testAdapter(t)
@@ -25,12 +74,8 @@ func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
 		return wantMessageID, nil
 	}
-	var patchedID, patchedBody string
-	a.updateFunc = func(_ context.Context, messageID, content string) error {
-		patchedID = messageID
-		patchedBody = content
-		return nil
-	}
+	var patches patchLog
+	a.updateFunc = patches.hook()
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutCard,
@@ -92,6 +137,8 @@ func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 		t.Errorf("Text = %q, want empty", got.Text)
 	}
 
+	patchedID, patchedBodies := patches.wait(t, 1)
+	patchedBody := patchedBodies[0]
 	if patchedID != wantMessageID {
 		t.Errorf("PATCH message id = %q, want %q", patchedID, wantMessageID)
 	}
@@ -209,11 +256,8 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
 		return wantMessageID, nil
 	}
-	var patched []string
-	a.updateFunc = func(_ context.Context, _, content string) error {
-		patched = append(patched, content)
-		return nil
-	}
+	var patches patchLog
+	a.updateFunc = patches.hook()
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:   messages.OutCard,
@@ -280,9 +324,7 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 		t.Fatal("first wizard click must not inbound /api/respond")
 	case <-time.After(50 * time.Millisecond):
 	}
-	if len(patched) != 1 {
-		t.Fatalf("PATCH count after first click = %d, want 1", len(patched))
-	}
+	_, patched := patches.wait(t, 1)
 	if !strings.Contains(patched[0], "👉 Action Needed · 2/2") {
 		t.Errorf("step-2 title missing; got %s", patched[0])
 	}
@@ -307,10 +349,7 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 	if got.Action == nil {
 		t.Fatal("Action is nil on last click")
 	}
-	picks, ok := messages.DecodeQuestionPicks(got.Action.Option)
-	if !ok {
-		t.Fatalf("Option = %q, want nm-q: batch", got.Action.Option)
-	}
+	picks := decodePicks(t, got.Action.Option)
 	if len(picks) != 2 || picks[0].ID != "q-trigger" || picks[1].ID != "q-source" {
 		t.Errorf("picks = %+v", picks)
 	}
@@ -320,9 +359,7 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 	if len(picks[1].Selected) != 1 || picks[1].Selected[0] != opt2 {
 		t.Errorf("pick[1] = %+v", picks[1])
 	}
-	if len(patched) != 2 {
-		t.Fatalf("PATCH count after last click = %d, want 2", len(patched))
-	}
+	_, patched = patches.wait(t, 2)
 	if strings.Contains(patched[1], `"tag":"button"`) || strings.Contains(patched[1], "opt:") {
 		t.Errorf("final PATCH should hide buttons; got %s", patched[1])
 	}
@@ -387,10 +424,7 @@ func TestHandleCardAction_QuestionWizardSkipThenAnswer(t *testing.T) {
 	if got.Action == nil {
 		t.Fatal("Action is nil after last pick")
 	}
-	picks, ok := messages.DecodeQuestionPicks(got.Action.Option)
-	if !ok {
-		t.Fatalf("Option = %q, want nm-q: batch", got.Action.Option)
-	}
+	picks := decodePicks(t, got.Action.Option)
 	if len(picks[0].Selected) != 0 {
 		t.Errorf("skipped q1 selected = %v, want empty", picks[0].Selected)
 	}
@@ -543,10 +577,7 @@ func TestHandleCardAction_OneShotSkip(t *testing.T) {
 	if got.Action == nil {
 		t.Fatal("Action is nil")
 	}
-	picks, ok := messages.DecodeQuestionPicks(got.Action.Option)
-	if !ok {
-		t.Fatalf("Option = %q, want nm-q: skip batch", got.Action.Option)
-	}
+	picks := decodePicks(t, got.Action.Option)
 	if len(picks) != 1 || picks[0].ID != "q1" || len(picks[0].Selected) != 0 || picks[0].Custom != "" {
 		t.Errorf("skip pick = %+v, want empty selected and custom", picks)
 	}
@@ -606,10 +637,7 @@ func TestHandleCardAction_OneShotCustomSubmit(t *testing.T) {
 	if got.Action == nil {
 		t.Fatal("Action is nil")
 	}
-	picks, ok := messages.DecodeQuestionPicks(got.Action.Option)
-	if !ok {
-		t.Fatalf("Option = %q, want nm-q: custom batch", got.Action.Option)
-	}
+	picks := decodePicks(t, got.Action.Option)
 	if len(picks) != 1 || picks[0].Custom != typed || len(picks[0].Selected) != 0 {
 		t.Errorf("custom pick = %+v, want custom=%q empty selected", picks, typed)
 	}
@@ -731,10 +759,7 @@ func TestHandleCardAction_QuestionWizardCustomThenSkip(t *testing.T) {
 	if got.Action == nil {
 		t.Fatal("Action is nil after last skip")
 	}
-	picks, ok := messages.DecodeQuestionPicks(got.Action.Option)
-	if !ok {
-		t.Fatalf("Option = %q, want nm-q: batch", got.Action.Option)
-	}
+	picks := decodePicks(t, got.Action.Option)
 	if picks[0].Custom != "free text" || len(picks[0].Selected) != 0 {
 		t.Errorf("q1 = %+v, want custom", picks[0])
 	}
@@ -854,4 +879,21 @@ func callbackCardJSON(t *testing.T, resp *larkcallback.CardActionTriggerResponse
 		t.Fatalf("marshal callback card: %v", err)
 	}
 	return string(b)
+}
+
+func TestRememberOptCard_EvictsPreviousForChat(t *testing.T) {
+	a := testAdapter(t)
+	oldCard := &messages.Card{Title: "old", RequestID: "r1", Questions: []messages.CardQuestion{{ID: "q1", Question: "a"}}}
+	newCard := &messages.Card{Title: "new", RequestID: "r2", Questions: []messages.CardQuestion{{ID: "q2", Question: "b"}}}
+	a.rememberOptCard("oc_1", "om_old", oldCard)
+	a.rememberOptCard("oc_1", "om_new", newCard)
+	if a.getOptCard("om_old") != nil {
+		t.Fatal("previous Action Needed card for the chat should be evicted")
+	}
+	if got := a.getOptCard("om_new"); got == nil || got.Title != "new" {
+		t.Fatalf("new card = %+v", got)
+	}
+	if a.lastOptMsgID("oc_1") != "om_new" {
+		t.Fatalf("lastOptMsgID = %q, want om_new", a.lastOptMsgID("oc_1"))
+	}
 }

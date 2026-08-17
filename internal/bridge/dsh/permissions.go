@@ -1,18 +1,15 @@
 // permissions.go — approval / question request handling.
 //
-// dsh surfaces permission requests via two channels:
-//  1. mux serverFrame{method:"approval/requested"}   (server-side)
-//  2. mux session/event type:"approval/asked"          (model-side)
+// The respondable gate is mux approval/requested (and
+// question/requested), keyed on the server-frame rpcId.
+// session/event approval/asked is an audit echo and must not
+// register a second pending entry.
 //
-// Both funnel through pendingApprovals (keyed by approvalID — the
-// server-stable identifier). SendPermission picks the most-recent
-// pending approval (mirror of codex §6.4 lastPendingID pattern)
-// and POSTs to /api/respond. Single approval in flight keeps
-// semantics unchanged; concurrent approvals stay unambiguous
-// because each carries a distinct approvalID.
+// SendPermission pops pendingOrder[0] and POSTs /api/respond.
+// Single approval in flight keeps semantics unchanged; concurrent
+// approvals stay unambiguous because each carries a distinct rpcId.
 //
-// Question requests reuse the same plumbing (they're morally a
-// kind of approval with a list of choices). The runtime sees them
+// Question requests reuse the same plumbing. The runtime sees them
 // as EventAgentPermission with Questions populated; Feishu renders
 // a one-shot card (len<=1) or an in-card wizard (len>1). The
 // answer is POSTed as QuestionResponse (dsh-api.md §2.12.2).
@@ -39,14 +36,13 @@ import (
 // runtime isn't stuck. 5 minutes matches codex / pi / claudecode.
 const permissionTimeout = 5 * time.Minute
 
-// registerApproval is the shared entry for both mux and session/event
-// approval paths. It mints a respCh, registers it under id (with
+// registerApproval mints a respCh, registers it under id (with
 // insertion order tracked in pendingOrder for stable SendPermission
 // routing — Go map iteration is randomized), spawns the timeout
 // watchdog, and returns the channel. The caller wraps it in an
 // EventAgentPermission and delivers to the runtime.
 //
-// Two call sites (handleApprovalRequested / handleInlineApproval)
+// Call sites (handleApprovalRequested / handleQuestionRequested)
 // share this so the timeout semantics are identical: if neither
 // SendPermission nor the bridge-shutdown path consumes the channel
 // within permissionTimeout, we silently write "declined" so the
@@ -68,12 +64,7 @@ func (d *driver) registerApproval(id string) chan string {
 		}
 		d.pendingMu.Lock()
 		if pending, ok := d.pendingApprovals[approvalID]; ok && pending == ch {
-			delete(d.pendingApprovals, approvalID)
-			d.removeFromPendingOrderLocked(approvalID)
-			select {
-			case pending <- "declined":
-			default:
-			}
+			d.dropPendingLocked(approvalID, "declined")
 		}
 		d.pendingMu.Unlock()
 	}(id, respCh)
@@ -115,34 +106,6 @@ func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalReques
 	})
 }
 
-// handleInlineApproval is the session/event approval/asked entry.
-// Same plumbing as handleApprovalRequested; we synthesize an
-// approvalID from ToolCallID (session/event doesn't carry a
-// server-issued id). The "evt-" prefix marks this as coming from
-// the session/event channel (distinct from mux approval/requested
-// IDs), avoiding any chance of collision with server-issued IDs
-// in the same map.
-func (d *driver) handleInlineApproval(toolCallID, toolName, action string, options []string) {
-	if toolCallID == "" {
-		return
-	}
-	respCh := d.registerApproval("evt-" + toolCallID)
-
-	if len(options) == 0 {
-		options = []string{approvalAllowOnce, approvalReject}
-	}
-	d.deliver(agent.AgentEvent{
-		Kind: agent.EventAgentPermission,
-		Permission: &agent.AgentPermissionRequest{
-			Tool:       toolName,
-			Action:     action,
-			Options:    options,
-			Kind:       agent.PermissionKindApproval,
-			ResponseCh: respCh,
-		},
-	})
-}
-
 // handleQuestionRequested is the mux question/requested entry.
 // dsh web's AskUserQuestion UX is a batch: host matchesQuestions
 // requires answers.length == questions.length, each answer.id
@@ -169,7 +132,6 @@ func (d *driver) handleQuestionRequested(frameRpcID string, qr muxQuestionReques
 	respCh := d.registerApproval(frameRpcID)
 	d.pendingMu.Lock()
 	d.pendingQuestions[frameRpcID] = qr.Questions
-	d.lastApprovalID[frameRpcID] = qr.SessionID + ":q"
 	d.pendingMu.Unlock()
 
 	// Render Action as "<header> — <question> [<opt1> | <opt2> | ...]"
@@ -230,32 +192,25 @@ func questionAnswerFor(qs []questionPayload, resp string) (host.QuestionAnswer, 
 	if len(qs) == 0 {
 		return host.QuestionAnswer{}, fmt.Errorf("dsh: empty question batch")
 	}
-	if picks, ok := messages.DecodeQuestionPicks(resp); ok {
-		return questionAnswerFromPicks(qs, picks)
+	picks, err := messages.DecodeQuestionPicks(resp)
+	if err != nil {
+		return host.QuestionAnswer{}, err
 	}
-	answers := make([]host.QuestionAnswerItem, len(qs))
-	matched := -1
-	for i, q := range qs {
-		if q.ID == "" {
-			return host.QuestionAnswer{}, fmt.Errorf("dsh: question %d missing id", i)
-		}
-		item := host.QuestionAnswerItem{ID: q.ID, Selected: []string{}}
-		if matched < 0 {
-			for _, opt := range q.Options {
-				if opt.Label == resp {
-					item.Selected = []string{resp}
-					matched = i
-					break
-				}
+	if picks == nil {
+		picks = plainQuestionPicks(qs, resp)
+	}
+	return questionAnswerFromPicks(qs, picks)
+}
+
+func plainQuestionPicks(qs []questionPayload, resp string) []messages.QuestionPick {
+	for _, q := range qs {
+		for _, opt := range q.Options {
+			if opt.Label == resp {
+				return []messages.QuestionPick{{ID: q.ID, Selected: []string{resp}}}
 			}
 		}
-		answers[i] = item
 	}
-	if matched < 0 {
-		answers[0].Custom = resp
-		answers[0].Selected = []string{}
-	}
-	return host.QuestionAnswer{Answers: answers}, nil
+	return []messages.QuestionPick{{ID: qs[0].ID, Custom: resp}}
 }
 
 func questionAnswerFromPicks(qs []questionPayload, picks []messages.QuestionPick) (host.QuestionAnswer, error) {
@@ -327,7 +282,7 @@ func (d *driver) dropPendingByApprovalID(approvalID string) bool {
 	defer d.pendingMu.Unlock()
 	for rpcID, aid := range d.lastApprovalID {
 		if aid == approvalID {
-			return d.dropPendingLocked(rpcID)
+			return d.dropPendingLocked(rpcID, "settled")
 		}
 	}
 	return false
@@ -336,10 +291,10 @@ func (d *driver) dropPendingByApprovalID(approvalID string) bool {
 func (d *driver) dropPendingByRPCID(rpcID string) bool {
 	d.pendingMu.Lock()
 	defer d.pendingMu.Unlock()
-	return d.dropPendingLocked(rpcID)
+	return d.dropPendingLocked(rpcID, "settled")
 }
 
-func (d *driver) dropPendingLocked(rpcID string) bool {
+func (d *driver) dropPendingLocked(rpcID, notify string) bool {
 	ch, ok := d.pendingApprovals[rpcID]
 	if !ok {
 		return false
@@ -348,9 +303,9 @@ func (d *driver) dropPendingLocked(rpcID string) bool {
 	delete(d.pendingQuestions, rpcID)
 	delete(d.lastApprovalID, rpcID)
 	d.removeFromPendingOrderLocked(rpcID)
-	if ch != nil {
+	if ch != nil && notify != "" {
 		select {
-		case ch <- "settled":
+		case ch <- notify:
 		default:
 		}
 	}

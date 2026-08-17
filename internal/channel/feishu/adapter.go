@@ -2273,11 +2273,33 @@ func toolOutput(m messages.OutboundMessage) string {
 // Choices path with column_set equal-width layout for decision
 // cards. See docs/feat/F-46-interactive-cards.md §3.
 func buildInteractiveCard(c *messages.Card) (string, error) {
+	patch, err := encodeInteractiveCard(c)
+	return patch.JSON, err
+}
+
+type cardPatch struct {
+	JSON string
+	Data map[string]any
+}
+
+func encodeInteractiveCard(c *messages.Card) (cardPatch, error) {
+	data, err := interactiveCardMap(c)
+	if err != nil {
+		return cardPatch{}, err
+	}
+	b, err := encodeCardJSON(data)
+	if err != nil {
+		return cardPatch{}, fmt.Errorf("feishu: encode card: %w", err)
+	}
+	return cardPatch{JSON: string(b), Data: data}, nil
+}
+
+func interactiveCardMap(c *messages.Card) (map[string]any, error) {
 	if c == nil {
-		return "", errors.New("feishu: card is nil")
+		return nil, errors.New("feishu: card is nil")
 	}
 	if c.RequestID == "" {
-		return "", errors.New("feishu: card missing request_id")
+		return nil, errors.New("feishu: card missing request_id")
 	}
 
 	// F-46 §3.2: 👉 prefix is for Action Needed cards
@@ -2370,11 +2392,7 @@ func buildInteractiveCard(c *messages.Card) (string, error) {
 		},
 		"body": map[string]any{"elements": elements},
 	}
-	b, err := encodeCardJSON(card)
-	if err != nil {
-		return "", fmt.Errorf("feishu: encode card: %w", err)
-	}
-	return string(b), nil
+	return card, nil
 }
 
 // buildCardButtons turns the Card's Choices / Options / Action into
@@ -2483,22 +2501,9 @@ func buildColumnSet(buttons []map[string]any) map[string]any {
 	return set
 }
 
-func isQuestionWizard(c *messages.Card) bool {
-	return c != nil && len(c.Questions) > 1
-}
-
-func isQuestionCard(c *messages.Card) bool {
-	return c != nil && len(c.Questions) > 0
-}
-
 func questionStepOpen(c *messages.Card) bool {
-	return isQuestionCard(c) && !c.Disabled && c.Step >= 0 && c.Step < len(c.Questions)
+	return c != nil && len(c.Questions) > 0 && !c.Disabled && c.Step >= 0 && c.Step < len(c.Questions)
 }
-
-// wizardCustomPrefix marks a Picks slot that came from the
-// "Type your answer" form rather than an option button. The
-// prefix is stripped before EncodeQuestionPicks.
-const wizardCustomPrefix = "nm-c:"
 
 func questionCustomFields(c *messages.Card) []map[string]any {
 	reqID := ""
@@ -2588,8 +2593,8 @@ func renderActionNeededBody(c *messages.Card) string {
 			if i < len(c.Picks) {
 				pick = c.Picks[i]
 			}
-			if strings.HasPrefix(pick, wizardCustomPrefix) {
-				pick = strings.TrimPrefix(pick, wizardCustomPrefix)
+			if strings.HasPrefix(pick, messages.QuestionCustomPrefix) {
+				pick = strings.TrimPrefix(pick, messages.QuestionCustomPrefix)
 			}
 			if pick == "" {
 				pick = "跳过"
@@ -3708,6 +3713,23 @@ func (a *Adapter) PatchMessage(ctx context.Context, messageID, content string) e
 	return err
 }
 
+// patchCardForOtherClients PATCHes the IM copy of a card after a
+// click. The clicker's redraw is the callback body; this must not
+// block card.action.trigger (Feishu's ~3s budget, plus retries).
+func (a *Adapter) patchCardForOtherClients(messageID, content string) {
+	if a == nil || strings.TrimSpace(messageID) == "" || strings.TrimSpace(content) == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := a.PatchMessage(ctx, messageID, content); err != nil {
+			a.logger.Warn("feishu: patch card for other clients",
+				"message_id", messageID, "err", err)
+		}
+	}()
+}
+
 // updateViaLark is the production implementation of the PATCH dispatch
 // (wired in by NewAdapter as a.updateFunc). Builds a PatchMessageReq
 // and calls larkClient.Im.V1.Message.Patch (the PATCH endpoint). The
@@ -4094,7 +4116,11 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 		return &larkcallback.CardActionTriggerResponse{}, nil
 	}
 	req := event.Event
-	actionStr := resolveCardAction(req, a.optCardForEvent(event))
+	var remembered *messages.Card
+	if req.Context != nil {
+		remembered = a.getOptCard(req.Context.OpenMessageID)
+	}
+	actionStr := resolveCardAction(req, remembered)
 
 	switch {
 	case strings.HasPrefix(actionStr, "act:"):
@@ -4161,13 +4187,6 @@ func parseOptIndex(name string) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-func (a *Adapter) optCardForEvent(event *larkcallback.CardActionTriggerEvent) *messages.Card {
-	if a == nil || event == nil || event.Event == nil || event.Event.Context == nil {
-		return nil
-	}
-	return a.getOptCard(event.Event.Context.OpenMessageID)
 }
 
 // handleActCardAction is F-46 §3.6: when the user clicks an
@@ -4303,53 +4322,47 @@ func (a *Adapter) handleOptCardAction(
 		}
 	}
 
-	a.logger.Info("feishu: opt card action",
+	a.logger.Debug("feishu: opt card action",
 		"chat_id", chatID, "message_id", botMsgID, "action", actionStr,
 		"skip", skip, "custom", custom != "")
 
-	inboundOption, toast, cardJSON, err := a.applyOptClick(ctx, botMsgID, requestID, option, skip, custom)
+	inboundOption, toast, patch, err := a.applyOptClick(botMsgID, requestID, option, skip, custom)
 	if err != nil {
 		a.logger.Warn("feishu: apply option click",
 			"chat_id", chatID, "message_id", botMsgID, "err", err)
 	}
-	if inboundOption == "" {
-		return &larkcallback.CardActionTriggerResponse{
-			Toast: &larkcallback.Toast{Type: "info", Content: toast},
-			Card:  callbackRawCard(cardJSON),
-		}, nil
+	if inboundOption != "" {
+		synthetic := channel.Message{
+			ChatID:     chatID,
+			UserID:     userID,
+			Text:       "",
+			HasMention: true,
+			MessageID:  botMsgID,
+			Action: &messages.ActionPayload{
+				RequestID: requestID,
+				Option:    inboundOption,
+			},
+		}
+		select {
+		case a.incoming <- synthetic:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			a.logger.Warn("feishu: card option inbound full, dropping",
+				"chat_id", chatID, "option", inboundOption)
+		}
 	}
-
-	synthetic := channel.Message{
-		ChatID:     chatID,
-		UserID:     userID,
-		Text:       "",
-		HasMention: true,
-		MessageID:  botMsgID,
-		Action: &messages.ActionPayload{
-			RequestID: requestID,
-			Option:    inboundOption,
-		},
-	}
-	select {
-	case a.incoming <- synthetic:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-		a.logger.Warn("feishu: card option inbound full, dropping",
-			"chat_id", chatID, "option", inboundOption)
-	}
-
 	return &larkcallback.CardActionTriggerResponse{
-		Toast: &larkcallback.Toast{
-			Type:    "info",
-			Content: toast,
-		},
-		Card: callbackRawCard(cardJSON),
+		Toast: &larkcallback.Toast{Type: "info", Content: toast},
+		Card:  callbackRawCard(patch),
 	}, nil
 }
 
-func callbackRawCard(content string) *larkcallback.Card {
-	content = strings.TrimSpace(content)
+func callbackRawCard(patch cardPatch) *larkcallback.Card {
+	if patch.Data != nil {
+		return &larkcallback.Card{Type: "raw", Data: patch.Data}
+	}
+	content := strings.TrimSpace(patch.JSON)
 	if content == "" {
 		return nil
 	}
@@ -4387,51 +4400,43 @@ func formValueString(v any) string {
 }
 
 // applyOptClick advances an Action Needed card. Wizard cards
-// (len(Questions)>1) PATCH to the next step and return inboundOption=""
-// until the last pick; then they return an EncodeQuestionPicks payload.
+// (len(Questions)>1) build the next step for the callback body
+// and PATCH the IM copy in the background until the last pick;
+// then they return an EncodeQuestionPicks payload.
 // cardJSON is the next Card 2.0 body so the callback can redraw the
 // clicker's form. One-shot option clicks POST the plain label
 // immediately. Skip and Type your answer on a one-shot question POST
 // nm-q: so the host sees empty selected / custom rather than a fake
 // option label.
-func (a *Adapter) applyOptClick(ctx context.Context, botMsgID, requestID, option string, skip bool, custom string) (inboundOption, toast, cardJSON string, err error) {
+func (a *Adapter) applyOptClick(botMsgID, requestID, option string, skip bool, custom string) (inboundOption, toast string, patch cardPatch, err error) {
 	card := a.getOptCard(botMsgID)
-	if card != nil && isQuestionWizard(card) {
-		return a.applyWizardClick(ctx, botMsgID, requestID, card, option, skip, custom)
+	if card != nil && len(card.Questions) > 1 {
+		return a.applyWizardClick(botMsgID, requestID, card, option, skip, custom)
 	}
-	if skip {
+	switch {
+	case skip:
 		if card == nil || len(card.Questions) == 0 {
-			return "", "空选项", "", nil
+			return "", "空选项", cardPatch{}, nil
 		}
-		inbound := encodeQuestionPicksFromCard(card, "", true, "")
-		content, err := a.patchOptCardSelected(ctx, botMsgID, requestID, "跳过")
-		if err != nil {
-			return inbound, "已跳过", content, err
-		}
-		return inbound, "已跳过", content, nil
-	}
-	if custom != "" {
-		inbound := custom
+		inboundOption = encodeQuestionPicksFromCard(withCurrentPick(card, "", true, ""))
+		option, toast = "跳过", "已跳过"
+	case custom != "":
+		inboundOption = custom
 		if card != nil && len(card.Questions) > 0 {
-			inbound = encodeQuestionPicksFromCard(card, "", false, custom)
+			inboundOption = encodeQuestionPicksFromCard(withCurrentPick(card, "", false, custom))
 		}
-		content, err := a.patchOptCardSelected(ctx, botMsgID, requestID, custom)
-		if err != nil {
-			return inbound, "✅ 已提交", content, err
-		}
-		return inbound, "✅ 已提交", content, nil
+		option, toast = custom, "✅ 已提交"
+	default:
+		inboundOption, toast = option, "✅ 已选择 "+option
 	}
-	content, err := a.patchOptCardSelected(ctx, botMsgID, requestID, option)
-	if err != nil {
-		return option, "✅ 已选择 " + option, content, err
-	}
-	return option, "✅ 已选择 " + option, content, nil
+	patch, err = a.patchOptCardSelected(botMsgID, requestID, option)
+	return inboundOption, toast, patch, err
 }
 
-func (a *Adapter) applyWizardClick(ctx context.Context, botMsgID, requestID string, card *messages.Card, option string, skip bool, custom string) (inboundOption, toast, cardJSON string, err error) {
+func (a *Adapter) applyWizardClick(botMsgID, requestID string, card *messages.Card, option string, skip bool, custom string) (inboundOption, toast string, patch cardPatch, err error) {
 	card = cloneCard(card)
 	if card == nil {
-		return "", "", "", errors.New("feishu: missing wizard card")
+		return "", "", cardPatch{}, errors.New("feishu: missing wizard card")
 	}
 	if card.Picks == nil || len(card.Picks) != len(card.Questions) {
 		card.Picks = make([]string, len(card.Questions))
@@ -4444,91 +4449,90 @@ func (a *Adapter) applyWizardClick(ctx context.Context, botMsgID, requestID stri
 		case skip:
 			card.Picks[card.Step] = ""
 		case custom != "":
-			card.Picks[card.Step] = wizardCustomPrefix + custom
+			card.Picks[card.Step] = messages.StoreQuestionCustom(custom)
 		default:
 			card.Picks[card.Step] = option
 		}
 		card.Step++
 	}
-	if card.RequestID == "" {
-		card.RequestID = requestID
-	}
-	if card.RequestID == "" {
-		card.RequestID = botMsgID
-	}
-	a.rememberOptCard("", botMsgID, card)
-	content, err := buildInteractiveCard(card)
+	ensureCardRequestID(card, requestID, botMsgID)
+	a.storeOptCard("", botMsgID, card)
+	patch, err = encodeInteractiveCard(card)
 	if err != nil {
-		return "", "", "", err
+		return "", "", cardPatch{}, err
 	}
-	if err := a.PatchMessage(ctx, botMsgID, content); err != nil {
-		return "", "", content, err
-	}
+	a.patchCardForOtherClients(botMsgID, patch.JSON)
 	if card.Step < len(card.Questions) {
 		switch {
 		case skip:
-			return "", "已跳过，下一题", content, nil
+			return "", "已跳过，下一题", patch, nil
 		case custom != "":
-			return "", "✅ 已提交", content, nil
+			return "", "✅ 已提交", patch, nil
 		default:
-			return "", "✅ 已选择 " + option, content, nil
+			return "", "✅ 已选择 " + option, patch, nil
 		}
 	}
 	a.takeOptCard(botMsgID)
-	return encodeQuestionPicksFromCard(card, "", false, ""), "✅ 已选完", content, nil
+	return encodeQuestionPicksFromCard(card), "✅ 已选完", patch, nil
 }
 
-func encodeQuestionPicksFromCard(card *messages.Card, option string, skip bool, custom string) string {
+func withCurrentPick(card *messages.Card, option string, skip bool, custom string) *messages.Card {
+	out := cloneCard(card)
+	if out == nil || len(out.Questions) == 0 {
+		return out
+	}
+	if out.Picks == nil || len(out.Picks) != len(out.Questions) {
+		out.Picks = make([]string, len(out.Questions))
+	}
+	step := out.Step
+	if step < 0 || step >= len(out.Picks) {
+		step = 0
+	}
+	switch {
+	case skip:
+		out.Picks[step] = ""
+	case custom != "":
+		out.Picks[step] = messages.StoreQuestionCustom(custom)
+	default:
+		out.Picks[step] = option
+	}
+	return out
+}
+
+func encodeQuestionPicksFromCard(card *messages.Card) string {
 	if card == nil || len(card.Questions) == 0 {
 		return ""
 	}
 	picks := make([]messages.QuestionPick, len(card.Questions))
-	step := card.Step
-	completed := step >= len(card.Questions)
-	if step < 0 || step >= len(card.Questions) {
-		step = 0
-	}
 	for i, q := range card.Questions {
-		p := messages.QuestionPick{ID: q.ID, Selected: []string{}}
-		if completed && i < len(card.Picks) {
-			p = questionPickFromStored(q.ID, card.Picks[i])
-		} else if i == step {
-			switch {
-			case custom != "":
-				p.Custom = custom
-			case !skip && option != "":
-				p.Selected = []string{option}
-			}
+		stored := ""
+		if i < len(card.Picks) {
+			stored = card.Picks[i]
 		}
-		picks[i] = p
+		picks[i] = messages.ParseStoredQuestionPick(q.ID, stored)
 	}
 	return messages.EncodeQuestionPicks(picks)
 }
 
-func questionPickFromStored(id, stored string) messages.QuestionPick {
-	p := messages.QuestionPick{ID: id, Selected: []string{}}
-	switch {
-	case strings.HasPrefix(stored, wizardCustomPrefix):
-		p.Custom = strings.TrimPrefix(stored, wizardCustomPrefix)
-	case stored != "":
-		p.Selected = []string{stored}
-	}
-	return p
+func (a *Adapter) rememberOptCard(chatID, msgID string, card *messages.Card) {
+	a.storeOptCard(chatID, msgID, cloneCard(card))
 }
 
-func (a *Adapter) rememberOptCard(chatID, msgID string, card *messages.Card) {
+func (a *Adapter) storeOptCard(chatID, msgID string, card *messages.Card) {
 	if a == nil || msgID == "" || card == nil {
 		return
 	}
-	cloned := cloneCard(card)
 	a.mu.Lock()
 	if a.optCards == nil {
 		a.optCards = make(map[string]*messages.Card)
 	}
-	a.optCards[msgID] = cloned
+	a.optCards[msgID] = card
 	if chatID != "" {
 		if a.lastOptByChat == nil {
 			a.lastOptByChat = make(map[string]string)
+		}
+		if old := a.lastOptByChat[chatID]; old != "" && old != msgID {
+			delete(a.optCards, old)
 		}
 		a.lastOptByChat[chatID] = msgID
 	}
@@ -4541,9 +4545,6 @@ func (a *Adapter) lastOptMsgID(chatID string) string {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.lastOptByChat == nil {
-		return ""
-	}
 	return a.lastOptByChat[chatID]
 }
 
@@ -4553,9 +4554,6 @@ func (a *Adapter) getOptCard(msgID string) *messages.Card {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.optCards == nil {
-		return nil
-	}
 	return a.optCards[msgID]
 }
 
@@ -4565,9 +4563,6 @@ func (a *Adapter) takeOptCard(msgID string) *messages.Card {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.optCards == nil {
-		return nil
-	}
 	card := a.optCards[msgID]
 	delete(a.optCards, msgID)
 	for chatID, id := range a.lastOptByChat {
@@ -4577,6 +4572,17 @@ func (a *Adapter) takeOptCard(msgID string) *messages.Card {
 		}
 	}
 	return card
+}
+
+func ensureCardRequestID(card *messages.Card, requestID, botMsgID string) {
+	if card == nil || card.RequestID != "" {
+		return
+	}
+	if requestID != "" {
+		card.RequestID = requestID
+		return
+	}
+	card.RequestID = botMsgID
 }
 
 func cloneCard(c *messages.Card) *messages.Card {
@@ -4609,9 +4615,9 @@ func cloneCard(c *messages.Card) *messages.Card {
 // and a single selected-option line, then PATCHes in place.
 // The rebuilt JSON is also returned so the card.action.trigger
 // callback can redraw the clicker's form.
-func (a *Adapter) patchOptCardSelected(ctx context.Context, botMsgID, requestID, option string) (string, error) {
+func (a *Adapter) patchOptCardSelected(botMsgID, requestID, option string) (cardPatch, error) {
 	if botMsgID == "" {
-		return "", errors.New("feishu: missing card message id")
+		return cardPatch{}, errors.New("feishu: missing card message id")
 	}
 	card := a.takeOptCard(botMsgID)
 	if card == nil {
@@ -4620,12 +4626,7 @@ func (a *Adapter) patchOptCardSelected(ctx context.Context, botMsgID, requestID,
 			Kind:  messages.CardKindPermission,
 		}
 	}
-	if card.RequestID == "" {
-		card.RequestID = requestID
-	}
-	if card.RequestID == "" {
-		card.RequestID = botMsgID
-	}
+	ensureCardRequestID(card, requestID, botMsgID)
 	if n := len(card.Questions); n > 0 {
 		if card.Picks == nil || len(card.Picks) != n {
 			card.Picks = make([]string, n)
@@ -4646,14 +4647,12 @@ func (a *Adapter) patchOptCardSelected(ctx context.Context, botMsgID, requestID,
 	card.Options = nil
 	card.Choices = nil
 	card.Action = ""
-	content, err := buildInteractiveCard(card)
+	patch, err := encodeInteractiveCard(card)
 	if err != nil {
-		return "", err
+		return cardPatch{}, err
 	}
-	if err := a.PatchMessage(ctx, botMsgID, content); err != nil {
-		return content, err
-	}
-	return content, nil
+	a.patchCardForOtherClients(botMsgID, patch.JSON)
+	return patch, nil
 }
 
 // patchOptCardSettled hides buttons on the outstanding Action Needed
@@ -4679,9 +4678,7 @@ func (a *Adapter) patchOptCardSettled(ctx context.Context, botMsgID string, inco
 	card.Options = nil
 	card.Choices = nil
 	card.Action = ""
-	if card.RequestID == "" {
-		card.RequestID = botMsgID
-	}
+	ensureCardRequestID(card, "", botMsgID)
 	content, err := buildInteractiveCard(card)
 	if err != nil {
 		return err

@@ -656,8 +656,8 @@ func TestDispatcher_SessionTitle_DoesNotDeadlock(t *testing.T) {
 
 // TestDispatcher_ApprovalAsked_DoesNotDeliverUnderLock locks the
 // same contract as session/title: the handler must return events
-// for post-unlock deliver. Calling handleInlineApproval (or
-// driver.deliver) while dispatch holds wireState.mu deadlocks any
+// for post-unlock deliver. Calling driver.deliver while dispatch
+// holds wireState.mu deadlocks any
 // deliver that re-enters that mutex — and would stall the mux
 // pump the same way the 2026-08-16 title bug did.
 func TestDispatcher_ApprovalAsked_DoesNotDeliverUnderLock(t *testing.T) {

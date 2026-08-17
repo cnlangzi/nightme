@@ -957,3 +957,64 @@ bot: [独立 RunOnce 进程跑 30-60s,main context 干净]
 - v2 加 `--base <branch>` flag 覆盖默认 base
 - v2 加 `--path <files>` 限定文件
 - v2 加 finding 卡片渲染(把 JSON 转卡片)
+
+---
+
+## 11. v7 改造:Handle 完全异步(2026-08-18)
+
+v6 的 dispatcher 还在等 `starter.Review` 返回才 `Consumed=true` — 占着 dispatcher worker 30-60 秒。**slash command 本身是在 goroutine 跑的**(`internal/gateway/inbound/command.go:65` 派发),所以主 chat session 一直不阻塞 — 但 dispatcher worker 被占着。
+
+v7 直接让 Handle 立刻返回 Consumed=true,把工作丢到独立 goroutine。
+
+### 11.1 关键变化 vs v6
+
+| 项 | v6 (commit 2afe822 → 6f02696) | v7 |
+|---|---|---|
+| `cmd.go` Handle 占用 dispatcher worker | 30-60 秒(等 RunOnce 完成) | 立即释放(返回 Consumed=true 后) |
+| Handle 阻塞主 chat session? | ❌ 不阻塞(本来就不阻塞) | ❌ 不阻塞(同样) |
+| 用户发完 /review 能继续发消息? | 能(readpump 没卡) | 能(一样) |
+| 多用户并发 /review? | worker pool 排队 | 全并行(每个立即 launch 独立 goroutine) |
+| /close 取消 review? | ❌(Handle 还在等 RunOnce,跟 chat 关闭无关) | ✅ goroutine 用 `cs.Context()`,关闭自动 cancel |
+| Handle 失败时用户可见? | reply 立刻显示 | log only(operators 看 logs;v2 加 cs.Emitter().Send) |
+
+### 11.2 Handle 主体改动
+
+```go
+// 之前(v6):同步等 RunOnce
+revCtx, cancel := context.WithTimeout(ctx, timeouts.Review)
+defer cancel()
+if err := starter.Review(revCtx, rc); err != nil { ... }
+return &command.SlashOutput{Consumed: true}, nil
+
+// 现在(v7):立即返回,work 跑独立 goroutine
+agentName := as.Agent
+go func() {
+    revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
+    defer cancel()
+    if err := starter.Review(revCtx, rc); err != nil {
+        slog.Default().Warn("/review failed", "agent", agentName, "err", err)
+    }
+}()
+return &command.SlashOutput{Consumed: true}, nil
+```
+
+### 11.3 ctx 选择
+
+- `cs.Context()`:chat session 自带 context,关闭时 cancel。`/close` → review 自动取消(子进程被 kill,不会有 orphan work)。
+- `timeouts.Review` (30 min):跟 v6 一致,防 review 真的 hang 住。
+
+### 11.4 错误处理
+
+v7 把"成功 / 失败"和"用户可见"解耦:
+- **成功**:review findings 通过 `rc.Inject` 出现在 chat 消息流(chat session 正常 emit 链路)
+- **失败**:goroutine 里 log(`slog.Default().Warn`),不 emit 到 chat(因为 Handle 已经返回,inline reply 路径没了)
+
+v2 评估:加 `cs.Emitter().Send("review failed: ...")` 给用户可见的失败通知。
+
+### 11.5 测试覆盖
+
+- `internal/agent/review_test.go` — `agent.Review` 函数本身(用 fakeStarter 验证 RunOnce 路径)
+- `internal/agent/review_per_bridge_test.go` — 5 bridge 共享 `agent.Review` 的契约
+- `internal/command/review/cmd_test.go` — 只测 inline 错误路径(arg check / accept no args);async 行为由上面两个测试 + 实机 smoke 覆盖
+
+完整 chat session 构造太重,async dispatcher pattern 由代码审查 + smoke test 验证,不写重复测试。

@@ -347,6 +347,9 @@ func (b *fakeAgentBuilder) Stop(_ context.Context) error                        
 func (b *fakeAgentBuilder) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("fakeAgentBuilder: RunOnce not implemented")
 }
+func (b *fakeAgentBuilder) Review(_ context.Context, _ agent.ReviewContext) error {
+	return agent.ErrReviewNotSupported
+}
 func (b *fakeAgentBuilder) Close() error {
 	select {
 	case <-b.events:

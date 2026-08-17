@@ -426,6 +426,13 @@ func (f *integrationFake) FinishEvent() {
 	close(f.events)
 }
 
+// Review is unimplemented for the gateway integration fake —
+// integration tests don't drive /review. Return
+// ErrReviewNotSupported to satisfy the agent.Starter interface.
+func (f *integrationFake) Review(_ context.Context, _ agent.ReviewContext) error {
+	return agent.ErrReviewNotSupported
+}
+
 var _ agent.Starter = (*integrationFake)(nil)
 
 // --- helpers ----------------------------------------------------------

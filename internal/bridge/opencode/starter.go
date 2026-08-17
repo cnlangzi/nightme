@@ -165,3 +165,10 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return runPrintMode(ctx, s, cfg, blocks)
 }
+
+// Review implements /review for opencode: delegate to shared
+// StandardPrompt. opencode's chat agent (driven by the ACP bridge)
+// reads git diff and outputs the structured review.
+func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
+	return agent.Review(ctx, s, rc)
+}

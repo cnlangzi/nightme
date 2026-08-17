@@ -908,6 +908,13 @@ func (s *testStarter) RunOnce(context.Context, agent.StartConfig, []agent.Conten
 	return agent.RunResult{}, errors.New("testStarter: RunOnce not implemented")
 }
 
+// Review is unimplemented for the priority-resolver test fake.
+// ResolveAgent doesn't drive /review, so returning
+// ErrReviewNotSupported is fine.
+func (s *testStarter) Review(context.Context, agent.ReviewContext) error {
+	return agent.ErrReviewNotSupported
+}
+
 // cfgIsZero reports whether cfg has every field at its zero value.
 // Config contains slices (which aren't ==-comparable), so we check
 // field-by-field.

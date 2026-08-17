@@ -1125,6 +1125,23 @@ type Starter interface {
 	// callers (e.g. /gtw commit, /gtw pr) that want a single
 	// synchronous turn and don't need the session handle.
 	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error)
+
+	// Review runs the /review slash command against this agent's
+	// current chat session. The /review dispatcher (see
+	// internal/command/review) provides a ReviewContext that wraps
+	// the chat session's AgentSession.Handle().SendBlocks callback;
+	// the bridge is responsible for injecting a review prompt via
+	// that callback.
+	//
+	// Most bridges should just delegate to agent.DefaultReview(ctx, rc),
+	// which injects the canonical StandardPrompt(). Bridges that
+	// want different review behavior (e.g. claude using its built-in
+	// `/code-review` slash command trigger) override this method.
+	//
+	// Return ErrReviewNotSupported when this agent type cannot do
+	// review (e.g. pty/bash fallback). The dispatcher surfaces a
+	// friendly "agent X 暂不支持 /review" reply.
+	Review(ctx context.Context, rc ReviewContext) error
 }
 
 // Errors surfaced by the registry.

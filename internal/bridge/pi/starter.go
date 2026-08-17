@@ -103,3 +103,10 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	}
 	return result, nil
 }
+
+// Review implements /review for pi: delegate to shared
+// StandardPrompt. pi's chat agent reads git diff and outputs
+// the structured review.
+func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
+	return agent.Review(ctx, s, rc)
+}

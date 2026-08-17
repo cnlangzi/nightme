@@ -161,3 +161,17 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	}
 	return result, nil
 }
+
+// Review implements the /review slash command for the claudecode
+// bridge. Delegates to the canonical agent.DefaultReview, which
+// injects the shared StandardPrompt into the current chat session
+// via rc.Inject. The chat agent then reads the prompt, runs git
+// itself, and produces a structured review.
+//
+// (Future v2: claude could override Review to inject the
+// "/code-review" built-in slash trigger instead of StandardPrompt,
+// if its multi-agent review pipeline produces higher-quality
+// findings than our shared prompt.)
+func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
+	return agent.Review(ctx, s, rc)
+}

@@ -12,8 +12,6 @@
 // second dsh on a different port would split their sessions across
 // two instances; reusing the existing one keeps everything unified.
 
-//go:build !windows
-
 package host
 
 import (

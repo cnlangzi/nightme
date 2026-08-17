@@ -1,3 +1,5 @@
+//go:build !windows
+
 // ensure_test.go — tests for the lazy-start helper.
 //
 // Covers the three behaviors the runtime depends on:

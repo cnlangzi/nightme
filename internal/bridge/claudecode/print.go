@@ -148,7 +148,23 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// chat session's environment (CLAUDE.md / hooks / MCP /
 	// OAuth). See the package doc above.
 	args, prompt := buildPrintArgs(blocks)
+	return runPrintModeWithPrompt(ctx, s, cfg, args, prompt, startTime)
+}
 
+// runPrintModeWithPrompt is the shared implementation: buildPrintArgs
+// (or override) has already produced the argv + prompt; this
+// function handles the subprocess plumbing (start, drain stderr,
+// translate stdout events, capture result). The `startTime`
+// parameter is passed in so both callers get a consistent timer
+// baseline.
+func runPrintModeWithPrompt(
+	ctx context.Context,
+	s *Starter,
+	cfg agent.StartConfig,
+	args []string,
+	prompt string,
+	startTime time.Time,
+) (agent.RunResult, error) {
 	cmd := agent.NewCmd(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 	// Forward cfg.Env the same way Start does (append to os.Environ,
@@ -427,4 +443,37 @@ func errStr(err error) string {
 // grepping daemon logs can correlate.
 func appendAuditFields(result agent.RunResult) string {
 	return agent.FormatSessionID(result.SessionID) + agent.FormatUsage(result.Usage)
+}
+
+// runCodeReviewPrintMode runs `claude -p "/code-review"` against
+// the workspace. This is the bridge's native review path
+// (F-review.md §13 "codex/claude use native review" rule): we
+// invoke Claude Code's built-in slash command instead of running
+// our generic StandardPrompt via `claude -p "<prompt>"`. The chat
+// agent already has a multi-agent review pipeline tuned for this
+// task; reusing it is strictly better than reverse-engineering
+// the same prompt into a generic prompt-mode call.
+//
+// Output: the standard claude stream-json transcript. The shared
+// print-stream parser extracts the final text into RunResult.Text
+// (same path as runPrintMode, so output handling is identical).
+func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
+	if cfg.Workspace == "" {
+		return agent.RunResult{}, fmt.Errorf("claudecode: workspace is required")
+	}
+
+	// /code-review takes an optional positional [target] argument
+	// (file path / PR # / branch / ref range). v1 has no user-facing
+	// target flag; future v2 can pass rc.Comment or a parsed target.
+	// Default is the canonical "review current branch vs default"
+	// behaviour, which matches our /review dispatch.
+	args := []string{
+		"-p", "/code-review",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--permission-mode", "bypassPermissions",
+	}
+
+	startTime := time.Now()
+	return runPrintModeWithPrompt(ctx, s, cfg, args, "/code-review", startTime)
 }

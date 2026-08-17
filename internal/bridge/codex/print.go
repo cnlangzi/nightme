@@ -348,8 +348,11 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 // SendBlocks). If a future flag requires validation, add the
 // error return then.
 func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) (args []string, prompt string) {
-	args = []string{
-		"exec",
+	subcmd := "exec"
+	if cfg.Subcommand != "" {
+		subcmd = cfg.Subcommand
+	}
+	args = []string{subcmd,
 		// Mirror the app-server's two permission defaults
 		// (session.go:262-265): never ask + full FS access.
 		// Verified on codex 0.145.0 — equivalent combination
@@ -364,6 +367,13 @@ func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) (args []
 		// codex's perspective (e.g. sub-dir of main checkout).
 		// App-server mode doesn't have this guard; exec does.
 		"--skip-git-repo-check",
+	}
+
+	// Subcommand-specific flags (e.g. codex review's
+	// `--base <defaultBranch>`). Placed after the common flags
+	// but before any -i / positional args.
+	if len(cfg.ExtraFlags) > 0 {
+		args = append(args, cfg.ExtraFlags...)
 	}
 
 	// Encode blocks preserving order. Each block contributes
@@ -553,4 +563,69 @@ func errStr(err error) string {
 		return "<nil>"
 	}
 	return err.Error()
+}
+// runCodexReview runs `codex review --base <default>` against the
+// workspace. F-review.md §13 "codex/claude use native review" rule:
+// we invoke codex's built-in `review` subcommand instead of running
+// our generic StandardPrompt via `codex exec`.
+//
+// --base <default> gives PR-mode review (current branch vs default
+// branch). If the default branch can't be detected (no origin remote),
+// we fall back to --uncommitted (working-tree scan only) and log a
+// warning so the user knows the coverage is reduced.
+//
+// Output: stdout is the codex review text (stdio, not JSON — codex
+// review is designed for human reading). The bridge's Review method
+// passes it through FormatReviewMessage for the canonical preamble.
+func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
+	// Build the review subcommand args. --base <default> is the
+	// important one; we detect <default> via git commands.
+	extra := []string{}
+	if defaultBase := detectDefaultBranch(ctx, cfg.Workspace); defaultBase != "" {
+		extra = []string{"--base", defaultBase}
+	} else {
+		cLog("codex review: no default branch detected, falling back to --uncommitted",
+			"workspace", cfg.Workspace)
+		extra = []string{"--uncommitted"}
+	}
+
+	revCfg := cfg
+	revCfg.Subcommand = "review"
+	revCfg.ExtraFlags = extra
+
+	// Reuse runPrintMode's full subprocess plumbing (NDJSON parse,
+	// tempfile -o, stderr drain, exit handling). Pass empty blocks
+	// because the `review` subcommand doesn't take a prompt in
+	// the same way `exec` does — the [PROMPT] is appended to
+	// review instructions only, and we have none.
+	return runPrintMode(ctx, s, revCfg, nil)
+}
+
+// detectDefaultBranch finds the repo's default branch name
+// (main / master / trunk). Returns "" if it can't be detected —
+// the caller should fall back to --uncommitted.
+func detectDefaultBranch(ctx context.Context, workspace string) string {
+	// git symbolic-ref refs/remotes/origin/HEAD — most reliable on
+	// cloned repos.
+	cmd := agent.NewCmd(ctx, "git",
+		"-C", workspace, "symbolic-ref", "refs/remotes/origin/HEAD")
+	out, err := cmd.Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(out))
+		if strings.HasPrefix(ref, "refs/remotes/origin/") {
+			return strings.TrimPrefix(ref, "refs/remotes/origin/")
+		}
+	}
+	// git remote show origin — fallback for shallow clones.
+	cmd = agent.NewCmd(ctx, "git", "-C", workspace, "remote", "show", "origin")
+	out, err = cmd.Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "HEAD branch: ") {
+				return strings.TrimPrefix(line, "HEAD branch: ")
+			}
+		}
+	}
+	// Final fallback: guess "main".
+	return "main"
 }

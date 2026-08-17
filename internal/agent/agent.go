@@ -626,6 +626,21 @@ type StartConfig struct {
 	// <id>`); bridges that don't (ACP / Pi / PTY) silently ignore it.
 	// Empty means "no --resume; start a fresh session".
 	SessionID string
+
+	// Subcommand overrides the print-mode subcommand (default
+	// "exec"). Bridges that have a native review subcommand (codex
+	// → "review") set this to dispatch through the native path
+	// instead of going through the generic prompt-mode subcommand.
+	// Empty means "use the bridge's default" (almost always "exec").
+	// F-review.md §13 "codex/claude use native review" rule.
+	Subcommand string
+
+	// ExtraFlags are extra argv flags appended after the subcommand
+	// and before any -i / positional args. Used by bridges that
+	// need flags specific to a subcommand (e.g. codex review
+	// passes `--base <defaultBranch>`). Most callers leave this
+	// empty.
+	ExtraFlags []string
 }
 
 // AgentSpec is the static, read-only description of an agent.
@@ -1133,12 +1148,30 @@ type Starter interface {
 	// the bridge is responsible for injecting a review prompt via
 	// that callback.
 	//
-	// Most bridges should just delegate to agent.Review(ctx, s, rc),
-	// which injects the canonical StandardPrompt() via a fresh
-	// RunOnce subprocess and captures the output back into the
-	// main chat via rc.Inject. Bridges that want different review
-	// behavior (e.g. claude using its built-in `/code-review` slash
-	// command trigger) override this method.
+	// ===== F-review.md §13 "codex/claude use native review" rule =====
+	//
+	// Bridges that have a native review subcommand MUST invoke it
+	// directly instead of running our generic StandardPrompt:
+	//   - claudecode: `claude -p "/code-review"` (built-in slash command)
+	//   - codex:      `codex review --base <default-branch>` (subcommand)
+	//
+	// Bridges that have NO native review subcommand delegate to
+	// agent.Review(ctx, s, rc) which runs the canonical StandardPrompt
+	// via a fresh RunOnce subprocess:
+	//   - dsh, opencode, pi, acp
+	//
+	// The Review method's responsibilities:
+	//   1. run the appropriate command (native or StandardPrompt)
+	//   2. capture the resulting review text
+	//   3. wrap with agent.FormatReviewMessage for the canonical preamble
+	//   4. inject via rc.Inject so the main chat sees the review
+	//
+	// For native review paths, the agent's native output may already
+	// be in a canonical markdown structure (claudecode) or similar
+	// (codex review). FormatReviewMessage handles the preamble; the
+	// body is the agent's raw output wrapped verbatim. If body parsing
+	// fails (anomalous format), the preamble still injects and the
+	// raw body is preserved — the user can still read the findings.
 	//
 	// Return ErrReviewNotSupported when this agent type cannot do
 	// review (e.g. pty/bash fallback). The dispatcher surfaces a

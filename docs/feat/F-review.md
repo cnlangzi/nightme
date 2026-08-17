@@ -1115,3 +1115,135 @@ return &command.SlashOutput{Consumed: true}, nil
 - v1 不切 AS(`/review --agent codex` 不会让 chat session 切到 codex)
 - v1 不并发 submit 同一 chat — 多个 goroutine 调 `as.SendBlocks` 串行(由 driver 的 mutex / RPC 队列保证 frame 完整)
 - v1 不支持 `--agent pty` 之类的"(review 失败但 inline 报错)— pty 会返 `ErrReviewNotSupported`,已经通过 `cs.Emitter().Send` surface 给用户
+
+---
+
+## 13. v9 改造:codex/claude 走 native review,format 统一与 fallback(2026-08-18)
+
+### 13.1 设计规则(根)
+
+**核心原则:有 native review subcommand 的 bridge,必须调用 native;否则 fallback 到 StandardPrompt。**
+
+| Bridge | Native review command | 路径 |
+|---|---|---|
+| **claudecode** | `claude -p "/code-review"` | native(走 `runCodeReviewPrintMode`) |
+| **codex** | `codex review --base <default-branch>` | native(走 `runCodexReview`) |
+| **dsh** | (无) | StandardPrompt via `agent.Review` |
+| **opencode** | (无) | StandardPrompt via `agent.Review` |
+| **pi** | (无) | StandardPrompt via `agent.Review` |
+| **acp** | (无) | StandardPrompt via `agent.Review` |
+| **pty** | (无) | `ErrReviewNotSupported` |
+
+**这条规则贯穿 v9 全部 3 点决策**:
+1. **bridge.Selection**:每个 bridge 的 `Review` 方法由各 bridge 自己决定路径(native vs StandardPrompt)。
+2. **canonical format**:所有 review 经过 `agent.FormatReviewMessage` 包上 canonical preamble(workspace + agent 名),body 是各自 native 输出。
+3. **format detection failure → raw output**:如果各 bridge 的 native 输出 parse 失败(异常格式),保留 raw,不要替换成错误的结构化格式。
+
+### 13.2 canonical format
+
+每个 bridge 的 `Review` 方法最终都会调 `agent.FormatReviewMessage(workspace, agentName, review)`:
+
+```
+## Code review of <workspace> (run by "<agent>")
+
+(current branch vs default branch; run via /review)
+
+[body — 各 bridge native 输出]
+```
+
+- **title `## Code review of <workspace>`**:统一 indicator
+- **`(run by "<agent>")`**:明确标注是哪个 agent 跑的,用户切换 `/use` 时能区分
+- **`(current branch vs default branch; run via /review)`**:提示 review scope
+- **body**:各 bridge 的 native 输出。claude 是 JSON / claude /code-review 风格,codex 是 markdown sections,其他是 StandardPrompt 的 markdown sections
+
+### 13.3 各 bridge Review 实现
+
+**claudecode**:
+```go
+func (s *Starter) Review(ctx, rc) error {
+    result, err := runCodeReviewPrintMode(ctx, s, StartConfig{Workspace: rc.Workspace})
+    if err != nil { ... }
+    return rc.Inject(ctx, []ContentBlock{{
+        Type: ContentText,
+        Text: agent.FormatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
+    }})
+}
+```
+
+**codex**:
+```go
+func (s *Starter) Review(ctx, rc) error {
+    result, err := runCodexReview(ctx, s, StartConfig{Workspace: rc.Workspace})
+    if err != nil { ... }
+    return rc.Inject(ctx, []ContentBlock{{
+        Type: ContentText,
+        Text: agent.FormatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
+    }})
+}
+```
+
+**dsh/opencode/pi/acp** (fallback):
+```go
+func (s *Starter) Review(ctx, rc) error {
+    return agent.Review(ctx, s, rc)  // → StandardPrompt + FormatReviewMessage
+}
+```
+
+**pty**:
+```go
+func (s *Starter) Review(ctx, rc) error {
+    return agent.ErrReviewNotSupported
+}
+```
+
+### 13.4 codex review 命令的细节
+
+```bash
+codex review --base <default-branch>
+```
+
+为什么不直接用 `--uncommitted`:
+- `--uncommitted` 只 review working tree(staged + unstaged + untracked),**不包含** committed-by-not-in-base 的提交
+- 我们要 PR-mode review:current branch vs main,**要包含**所有 commits
+- `--base <default-branch>` 才是正确选择
+
+如果 default branch 检测失败(无 origin remote),fallback 到 `--uncommitted` + log warning。`detectDefaultBranch` 三层 fallback:
+1. `git symbolic-ref refs/remotes/origin/HEAD` (最可靠)
+2. `git remote show origin` (浅克隆 fallback)
+3. 字符串 `"main"` (最后 fallback)
+
+### 13.5 format detection failure → raw output
+
+canonical format 不是"必须 parse agent 输出成结构化" — 它是**两层 fallback**:
+
+1. **Aggressive parse**:尽量把 native output 转成 canonical markdown sections (## Summary, ## Findings, ## Suggestions)
+2. **Raw fallback**:parse 失败就保留 agent 的 raw output,只包一层 preamble
+
+实现上,因为 `FormatReviewMessage` 是 wrapper 而不是 parser,parse 失败 = 保持 raw。在 v9.0 我们采用更简单的方案:
+- claude /code-review 和 codex review 输出都已经接近 canonical(代码报告实验)
+- 如果解析失败,main agent 仍然能读 raw output(它足够聪明)
+- 不需要复杂的 format parser
+
+**v10 评估**:如果用户反馈"格式不一致",加 `NormalizeFindings(rawText, agentName)` helper 做 active parse + re-format。
+
+### 13.6 测试覆盖
+
+- `TestReview_UsesSharedPrompt` — 验证 `agent.Review` 路径(dsh/opencode/pi/acp 走 StandardPrompt)
+- `TestReview_PropagatesRunOnceError` — RunOnce 失败时不应 inject
+- `TestReview_RejectsNilInject` — RCS 的 nil-Inject 防御
+- `TestReview_InjectsFormattedReview` — FormatReviewMessage 包含 "(run by agent)" preamble
+- `TestPtyStarter_ReviewReturnsNotSupported` — pty 的 sentinel
+- `TestStandardPrompt_Structure` — StandardPrompt 包含 7 sections + 10 categories
+- `TestParseReviewArgs` — `--agent`/`-a` 解析
+
+`claudecode`/`codex` 的 native review 路径在它们各自的 `runCodeReviewPrintMode`/`runCodexReview` 里(e2e 测试需要 binary on PATH,CI 跳过)。
+
+### 13.7 改动文件
+
+- `internal/agent/agent.go` — `StartConfig` 新增 `Subcommand` + `ExtraFlags` 字段;`Starter` interface Review doc 全面更新为 §13 规则
+- `internal/agent/review.go` — `FormatReviewMessage` 由 unexported 改为 exported (bridges override 时调用)
+- `internal/bridge/codex/print.go` — `runCodexReview` + `detectDefaultBranch`,`buildPrintArgs` 支持 `Subcommand` + `ExtraFlags`
+- `internal/bridge/codex/starter.go` — `Review` 改用 `runCodexReview`
+- `internal/bridge/claudecode/print.go` — `runCodeReviewPrintMode` (v8 已加)
+- `internal/bridge/claudecode/starter.go` — `Review` 改用 `runCodeReviewPrintMode` (v8 已加)
+- `internal/agent/review_per_bridge_test.go` — doc 注释更新为 §13 规则

@@ -86,11 +86,28 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return runPrintMode(ctx, s, cfg, blocks)
 }
 
-// Review implements /review for codex: delegate to the canonical
-// shared StandardPrompt. Codex has a native `codex review`
-// subcommand, but architecture B runs /review in the current chat
-// session — not via the independent print-mode subcommand — so
-// the chat agent gets StandardPrompt and reads git itself.
+// Review implements /review for codex. F-review.md §13
+// "codex/claude use native review" rule: codex has a native
+// `codex review` subcommand, so we invoke it directly instead of
+// running our generic StandardPrompt via `codex exec <prompt>`.
+// The native subcommand is structured for the review task —
+// reusing it is strictly better than reverse-engineering the same
+// review into a generic prompt-mode call.
+//
+// Output is wrapped in agent.FormatReviewMessage (the canonical
+// preamble) by the caller. If body parsing fails (anomalous
+// format), FormatReviewMessage falls back to raw output with a
+// warning log.
 func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
-	return agent.Review(ctx, s, rc)
+	result, err := runCodexReview(ctx, s, agent.StartConfig{
+		Workspace: rc.Workspace,
+	})
+	if err != nil {
+		return fmt.Errorf("agent %s: review one-shot failed: %w",
+			s.Info().Name, err)
+	}
+	return rc.Inject(ctx, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: agent.FormatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
+	}})
 }

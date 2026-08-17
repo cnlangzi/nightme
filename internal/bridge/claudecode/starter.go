@@ -162,16 +162,31 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return result, nil
 }
 
-// Review implements the /review slash command for the claudecode
-// bridge. Delegates to the canonical agent.DefaultReview, which
-// injects the shared StandardPrompt into the current chat session
-// via rc.Inject. The chat agent then reads the prompt, runs git
-// itself, and produces a structured review.
+// Review implements /review for the claudecode bridge.
 //
-// (Future v2: claude could override Review to inject the
-// "/code-review" built-in slash trigger instead of StandardPrompt,
-// if its multi-agent review pipeline produces higher-quality
-// findings than our shared prompt.)
+// F-review.md §13 "codex/claude use native review" rule: when the
+// underlying CLI has a built-in review pathway, we invoke it
+// directly instead of running our generic StandardPrompt. Claude
+// Code has `/code-review` built in (a multi-agent review pipeline
+// tuned for the task); invoking it via `claude -p "/code-review"`
+// is strictly better than reverse-engineering the same review
+// into a generic prompt-mode call. Runs `runCodeReviewPrintMode`
+// which produces the same wire-format output as runPrintMode
+// (stream-json), so the result handling is unchanged.
+//
+// Other bridges (dsh / opencode / pi / acp) don't have native
+// review; they delegate to agent.Review which uses StandardPrompt.
+// pty returns ErrReviewNotSupported.
 func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
-	return agent.Review(ctx, s, rc)
+	result, err := runCodeReviewPrintMode(ctx, s, agent.StartConfig{
+		Workspace: rc.Workspace,
+	})
+	if err != nil {
+		return fmt.Errorf("agent %s: review one-shot failed: %w",
+			s.Info().Name, err)
+	}
+	return rc.Inject(ctx, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: agent.FormatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
+	}})
 }

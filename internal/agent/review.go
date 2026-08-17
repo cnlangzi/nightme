@@ -121,11 +121,11 @@ func Review(ctx context.Context, s Starter, rc ReviewContext) error {
 
 	return rc.Inject(ctx, []ContentBlock{{
 		Type: ContentText,
-		Text: formatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
+		Text: FormatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
 	}})
 }
 
-// formatReviewMessage wraps the raw review output in a small
+// FormatReviewMessage wraps the raw review output in a small
 // preamble so the main agent (which receives this as a user
 // message) understands the context. The preamble tells the main
 // agent where the review came from, who ran it, and what scope
@@ -139,7 +139,12 @@ func Review(ctx context.Context, s Starter, rc ReviewContext) error {
 // the findings land. Tracking the runner is essential for
 // reproducibility ("which agent's review is this?") and for the
 // user when they re-`/use` between review and fix.
-func formatReviewMessage(workspace, agentName, review string) string {
+//
+// Exported so bridges that override Starter.Review (e.g. claudecode
+// using its native /code-review command, codex using codex review)
+// can produce the same preamble when injecting their native output
+// into the main chat session.
+func FormatReviewMessage(workspace, agentName, review string) string {
 	return fmt.Sprintf("## Code review of %s (run by %q)\n\n"+
 		"(current branch vs default branch; run via /review)\n\n%s",
 		workspace, agentName, review)

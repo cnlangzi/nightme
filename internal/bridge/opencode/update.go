@@ -52,6 +52,14 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/acp"
 )
 
+// thinkingPrefix marks EventAgentText payloads that originated in
+// agent_thought_chunk so the gateway can route them to the thinking
+// surface (OutThinking) rather than the reply surface (OutReply).
+// Mirrors pi's thinkingPrefix / dsh's thinkingPrefix exactly —
+// flipping the literal in any of the three should be a coordinated
+// change so the channel layer's regex / prefix-match keeps matching.
+const thinkingPrefix = "[思考] "
+
 // updateHandler is the opencode-specific ACP sessionUpdate
 // translator. One per live *agent.Agent.
 //
@@ -80,6 +88,17 @@ type updateHandler struct {
 	// (no aliasing concerns) and supports Grow() if a chunk is unusually
 	// large.
 	textBuf *strings.Builder
+
+	// thoughtBuf holds accumulated reasoning text from
+	// agent_thought_chunk since the last flush. Same lifecycle as
+	// textBuf but the emitted EventAgentText is prefixed thinkingPrefix
+	// so the channel renders it on the thinking surface instead of the
+	// reply surface. Kept distinct from textBuf because the two streams
+	// can interleave (model thinks, then replies, then thinks again)
+	// and we want each flush to carry only its own stream's content —
+	// mixing them would let partial thoughts leak into the reply body
+	// on a tool-boundary flush.
+	thoughtBuf *strings.Builder
 }
 
 // newUpdateHandler constructs the translator. The view passed to
@@ -93,9 +112,10 @@ type updateHandler struct {
 // closure — never the concrete — so widening the return type here is safe.
 func newUpdateHandler(workspace string) *updateHandler {
 	return &updateHandler{
-		agentName: bridgeName,
-		workspace: workspace,
-		textBuf:   &strings.Builder{},
+		agentName:  bridgeName,
+		workspace:  workspace,
+		textBuf:    &strings.Builder{},
+		thoughtBuf: &strings.Builder{},
 	}
 }
 
@@ -114,14 +134,26 @@ func (h *updateHandler) asUpdateHandler() acp.UpdateHandler {
 }
 
 // Flush is the FlushHandler the generic acp bridge invokes at turn
-// boundaries (right before EventAgentDone). Drains whatever is in
-// textBuf to the channel as a single EventAgentText then resets the
-// buffer. No-op if the buffer is empty.
+// boundaries (right before EventAgentDone). Drains BOTH the reply
+// buffer (textBuf) AND the reasoning buffer (thoughtBuf) so a turn
+// never silently drops the trailing fragment of either stream —
+// the reply card carries the final reply sentence, the thinking
+// card carries the final reasoning block. Each buffer flush is
+// independent (an empty buf is a no-op) so a turn that produced
+// only reply text still emits one card, and a thinking-only turn
+// still emits one.
+//
+// Order: thoughtBuf before textBuf. The channel renders the
+// reasoning card above the reply card (mirrors pi / dsh where
+// OutThinking arrives before OutReply), so flushing thought first
+// lets the runtime route them in source-order without an
+// additional reorder step.
 //
 // Wired via acp.DriverHandle.SetFlushHandler in starter.go::Start —
-// see F-OPENCODE-ACP-MIGRATION §5.2 (drain trailing text on turn-end).
+// see F-OPENCODE-ACP-MIGRATION §5.2 (drain-on-turn-end).
 func (h *updateHandler) Flush(view *acp.SessionView) {
-	h.flushText(view)
+	h.flushBufferTo(view, h.thoughtBuf, thinkingPrefix)
+	h.flushBufferTo(view, h.textBuf, "")
 }
 
 // handle is the dispatch entry point. Reads the sessionUpdate
@@ -137,13 +169,32 @@ func (h *updateHandler) handle(view *acp.SessionView, raw json.RawMessage) error
 	}
 	kind := head.SessionUpdate
 
-	// Tool-boundary flush (F-52 invariant, mirrors pi / dsh). Any
-	// non-text agent_message_chunk arriving after a tool-call is a
-	// break in the assistant's reply stream; drain whatever the
-	// buffer still holds so the user sees the in-progress reply
-	// before the tool receipt appears.
+	// Boundary flush before each dispatch. Any kind other than a
+	// pure text/thought continuation is a break in the agent's
+	// streaming surface:
+	//
+	//   - tool_call / tool_call_update: F-52 invariant from pi / dsh;
+	//     the agent stops emitting reply text while a tool runs, so
+	//     drain both bufs so the user sees the in-progress content
+	//     before the tool receipt appears.
+	//   - agent_message_chunk: the agent just switched from thinking
+	//     to replying — flush whatever's in thoughtBuf so the
+	//     reasoning summary lands before the reply begins.
+	//   - agent_thought_chunk: the agent just switched from replying
+	//     back to thinking — flush whatever's in textBuf first.
+	//   - user_message_chunk / unknown: handled — drop / log only,
+	//     but a stray trailing fragment would be lost without the
+	//     pre-flush.
+	//
+	// Two bufs stay separate so the flushes carry only their own
+	// stream's content (no mixing of reply-text and reasoning).
 	if kind != "agent_message_chunk" && kind != "agent_thought_chunk" && kind != "user_message_chunk" {
-		h.flushText(view)
+		h.flushBufferTo(view, h.thoughtBuf, thinkingPrefix)
+		h.flushBufferTo(view, h.textBuf, "")
+	} else if kind == "agent_message_chunk" {
+		h.flushBufferTo(view, h.thoughtBuf, thinkingPrefix)
+	} else if kind == "agent_thought_chunk" {
+		h.flushBufferTo(view, h.textBuf, "")
 	}
 
 	switch kind {
@@ -201,22 +252,28 @@ func (h *updateHandler) handleAgentText(view *acp.SessionView, raw json.RawMessa
 	return nil
 }
 
-// handleAgentThought emits EventAgentText prefixed with
-// "[思考] " for an agent_thought_chunk. Matches the
-// opencode-serve bridge's convention so the channel renderer
-// needs no change.
+// handleAgentThought appends an agent_thought_chunk payload to the
+// reasoning buffer and flushes on sentence boundary (same trigger
+// as the reply stream in handleAgentText — keeps both streams
+// consistent and matches the user's "no per-token bubble"
+// expectation). On flush the EventAgentText is prefixed with
+// thinkingPrefix so the gateway routes it to the thinking surface
+// rather than the reply card.
+//
+// Pre-fix this emitted one EventAgentText per token — every delta
+// became its own card in the chat channel. The buffering mirrors
+// pi's thinking_* accumulation and dsh's reasoning-delta →
+// block-end pattern, but adapted for opencode which has NO
+// explicit agent_thought_end / block-end event on the wire.
 func (h *updateHandler) handleAgentThought(view *acp.SessionView, raw json.RawMessage) error {
 	text := decodeTextChunk(raw)
 	if text == "" {
 		return nil
 	}
-	view.Emit(agent.AgentEvent{
-		Kind:      agent.EventAgentText,
-		Text:      "[思考] " + text,
-		SessionID: view.SessionID(),
-		AgentName: h.agentName,
-		Workspace: h.workspace,
-	})
+	h.thoughtBuf.WriteString(text)
+	if endsWithSentencePunctuation(h.thoughtBuf.String()) {
+		h.flushBufferTo(view, h.thoughtBuf, thinkingPrefix)
+	}
 	return nil
 }
 
@@ -363,24 +420,30 @@ func decodeTextChunk(raw json.RawMessage) string {
 	return c.Content.Text
 }
 
-// flushText drains textBuf to the channel as a single EventAgentText
-// and clears the buffer. No-op (no event emitted) when the buffer
-// is empty or all-whitespace so callers can fire it unconditionally
-// at every tool / unknown / turn-end boundary.
+// flushBufferTo drains `buf` into a single EventAgentText and clears
+// it. No-op (no event emitted) when the buffer is empty or
+// all-whitespace, so callers can fire it unconditionally at every
+// boundary. When `prefix` is non-empty (e.g. thinkingPrefix) it is
+// prepended to the trimmed content BEFORE the channel sees it, so
+// the gateway can route thinking payloads to the reasoning surface
+// without a per-emit string-concat at the call site.
 //
 // Receives *SessionView (not via a field) so the EventAgentText
 // carries the same SessionID / AgentName / Workspace stamps as a
-// direct emit would. Held under no lock — textBuf is per-handler
-// and the generic acp bridge serializes session/update dispatches
-// through the readPump goroutine.
-func (h *updateHandler) flushText(view *acp.SessionView) {
-	if h.textBuf == nil {
+// direct emit would. Held under no lock — textBuf / thoughtBuf are
+// per-handler and the generic acp bridge serializes session/update
+// dispatches through the readPump goroutine.
+func (h *updateHandler) flushBufferTo(view *acp.SessionView, buf *strings.Builder, prefix string) {
+	if buf == nil {
 		return
 	}
-	text := strings.TrimSpace(h.textBuf.String())
-	h.textBuf.Reset()
+	text := strings.TrimSpace(buf.String())
+	buf.Reset()
 	if text == "" {
 		return
+	}
+	if prefix != "" {
+		text = prefix + text
 	}
 	view.Emit(agent.AgentEvent{
 		Kind:      agent.EventAgentText,
@@ -389,6 +452,14 @@ func (h *updateHandler) flushText(view *acp.SessionView) {
 		AgentName: h.agentName,
 		Workspace: h.workspace,
 	})
+}
+
+// flushText is a thin alias for the reply stream (textBuf, no
+// prefix) kept so legacy handleAgentText and the start-of-handle
+// pre-flush stay readable. New code should prefer flushBufferTo
+// directly so the buffer+prefix pair is explicit at the call site.
+func (h *updateHandler) flushText(view *acp.SessionView) {
+	h.flushBufferTo(view, h.textBuf, "")
 }
 
 // endsWithSentencePunctuation reports whether s ends with a sentence-

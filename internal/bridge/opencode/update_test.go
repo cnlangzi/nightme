@@ -13,6 +13,7 @@ package opencode
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/acp"
@@ -585,5 +586,265 @@ func TestEndsWithSentencePunctuation(t *testing.T) {
 				t.Errorf("endsWithSentencePunctuation(%q) = %v, want %v", tc.s, got, tc.want)
 			}
 		})
+	}
+}
+
+
+// ─── thought-buffering tests (F-OPENCODE-ACP-MIGRATION §5.3) ────
+//
+// agent_thought_chunk must mirror the reply-stream buffering
+// strategy: a per-token direct emit used to surface as a
+// `send_card` per token in the chat channel. With the new
+// thoughtBuf the reasoning stream accumulates into a buffer
+// flushed on sentence-end, stream-boundary, tool-boundary, or
+// external Flush(view) — same triggers as the reply stream,
+// matching pi / dsh. Each flush emits ONE EventAgentText
+// prefixed with thinkingPrefix so the gateway routes it to
+// OutThinking rather than OutReply.
+
+func agentThoughtChunk(text string) json.RawMessage {
+	return json.RawMessage(`{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":` + jsonQuote(text) + `}}`)
+}
+
+// TestHandleUpdate_ThoughtChunksWithoutPunctuation_Accumulate
+// pins that thought_stream deltas without a sentence terminator
+// only emit ONE EventAgentText once the flush trigger fires.
+func TestHandleUpdate_ThoughtChunksWithoutPunctuation_Accumulate(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	for _, chunk := range []string{"I am", " ", "thinking"} {
+		if err := handle(view, agentThoughtChunk(chunk)); err != nil {
+			t.Fatalf("handle() error = %v", err)
+		}
+	}
+
+	select {
+	case ev := <-events:
+		t.Fatalf("expected no event before flush trigger, got %+v", ev)
+	default:
+	}
+
+	h.Flush(view)
+
+	select {
+	case ev := <-events:
+		if ev.Kind != agent.EventAgentText {
+			t.Fatalf("event kind = %v, want EventAgentText", ev.Kind)
+		}
+		if ev.Text != "[思考] I am thinking" {
+			t.Errorf("Text = %q, want %q", ev.Text, "[思考] I am thinking")
+		}
+	default:
+		t.Fatal("no event emitted after Flush")
+	}
+}
+
+// TestHandleUpdate_ThoughtChunksWithPunctuation_FlushOnSentence
+// verifies the reasoning stream flushes on its own sentence
+// terminator (independent of whether the reply stream had content).
+func TestHandleUpdate_ThoughtChunksWithPunctuation_FlushOnSentence(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	for _, chunk := range []string{"step one", ".", " ", "step two"} {
+		if err := handle(view, agentThoughtChunk(chunk)); err != nil {
+			t.Fatalf("handle() error = %v", err)
+		}
+	}
+	// First sentence already flushed.
+	select {
+	case ev := <-events:
+		if ev.Text != "[思考] step one." {
+			t.Errorf("first flush = %q, want %q", ev.Text, "[思考] step one.")
+		}
+	default:
+		t.Fatal("expected first flush after sentence end")
+	}
+	// "step two" still buffered.
+	select {
+	case ev := <-events:
+		t.Fatalf("expected no further event until second sentence ends, got %+v", ev)
+	default:
+	}
+
+	if err := handle(view, agentThoughtChunk(".")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	select {
+	case ev := <-events:
+		if ev.Text != "[思考] step two." {
+			t.Errorf("second flush = %q, want %q", ev.Text, "[思考] step two.")
+		}
+	default:
+		t.Fatal("expected second flush")
+	}
+}
+
+// TestHandleUpdate_ThoughtToReplyTransition_DrainsThoughtBuf
+// pins the cross-flush behaviour: when the agent switches from
+// agent_thought_chunk to agent_message_chunk, whatever sits in
+// thoughtBuf is flushed FIRST so the user sees the reasoning
+// block before the reply card.
+func TestHandleUpdate_ThoughtToReplyTransition_DrainsThoughtBuf(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	// Stream some thinking without punctuation — buffer must hold it.
+	if err := handle(view, agentThoughtChunk("reasoning continues")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	// Now switch to reply — must drain the thoughtBuf first.
+	if err := handle(view, agentMessageChunk("the answer is 42")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Text != "[思考] reasoning continues" {
+			t.Fatalf("first event = %+v, want [思考] reasoning continues", ev)
+		}
+	default:
+		t.Fatal("expected thoughtBuf to drain on thought→reply transition")
+	}
+	// Reply is still buffered (no terminator).
+	select {
+	case ev := <-events:
+		t.Fatalf("reply should still be buffered, got %+v", ev)
+	default:
+	}
+}
+
+// TestHandleUpdate_ReplyToThoughtTransition_DrainsTextBuf
+// pins the reverse cross-flush: when the agent switches from
+// reply back to thinking, the partial reply textBuf is flushed
+// first so the user sees the in-progress reply before the next
+// reasoning block.
+func TestHandleUpdate_ReplyToThoughtTransition_DrainsTextBuf(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	if err := handle(view, agentMessageChunk("partial reply")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	// Now switch back to thought — drains textBuf first.
+	if err := handle(view, agentThoughtChunk("more thinking")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Text != "partial reply" {
+			t.Fatalf("first event = %+v, want plain \"partial reply\"", ev)
+		}
+	default:
+		t.Fatal("expected textBuf to drain on reply→thought transition")
+	}
+}
+
+// TestHandleUpdate_ToolCallAfterThought_DrainsBothBufs verifies
+// the tool-boundary flush drains both streams (pi / dsh F-52
+// invariant applies to whichever stream had in-flight content).
+func TestHandleUpdate_ToolCallAfterThought_DrainsBothBufs(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	if err := handle(view, agentThoughtChunk("partial thinking")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	if err := handle(view, agentMessageChunk("partial reply")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	// Switch back to thought — drains textBuf first.
+	if err := handle(view, agentThoughtChunk("more")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	// Now a tool_call — must drain thoughtBuf (which still holds
+	// the partial "thinking" + "more" content from the cross-flush).
+	toolRaw := json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"tc_1","title":"Bash","kind":"execute","status":"pending","rawInput":{"command":"ls"}}`)
+	if err := handle(view, toolRaw); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+
+	// 1) thought → reply transitioned, drains thoughtBuf ("partial thinking").
+	select {
+	case ev := <-events:
+		if ev.Text != "[思考] partial thinking" {
+			t.Fatalf("event 1 = %+v, want [思考] partial thinking", ev)
+		}
+	default:
+		t.Fatal("expected thoughtBuf drain on thought→reply transition")
+	}
+	// 2) reply → thought transitioned, drains textBuf ("partial reply").
+	select {
+	case ev := <-events:
+		if ev.Text != "partial reply" {
+			t.Fatalf("event 2 = %+v, want \"partial reply\"", ev)
+		}
+	default:
+		t.Fatal("expected textBuf drain on reply→thought transition")
+	}
+	// 3) tool_call boundary, drains thoughtBuf ("more").
+	select {
+	case ev := <-events:
+		if ev.Text != "[思考] more" {
+			t.Fatalf("event 3 = %+v, want [思考] more", ev)
+		}
+	default:
+		t.Fatal("expected thoughtBuf drain on tool boundary")
+	}
+	// 4) tool_call event itself.
+	select {
+	case ev := <-events:
+		if ev.Kind != agent.EventAgentToolStart {
+			t.Fatalf("event 4 kind = %v, want EventAgentToolStart", ev.Kind)
+		}
+	default:
+		t.Fatal("expected tool_call event after both flushes")
+	}
+}
+
+// TestFlush_DrainsBothBufs verifies Flush at turn-end drains both
+// streams and emits them in source-order (thought first, then
+// reply) regardless of which stream actually had content.
+func TestFlush_DrainsBothBufs(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	if err := handle(view, agentThoughtChunk("last thought")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	if err := handle(view, agentMessageChunk("final answer")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+
+	h.Flush(view)
+
+	select {
+	case ev := <-events:
+		if ev.Text != "[思考] last thought" {
+			t.Fatalf("first event = %+v, want [思考] last thought (thoughtBuf first)", ev)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("expected thoughtBuf flush first")
+	}
+	select {
+	case ev := <-events:
+		if ev.Text != "final answer" {
+			t.Fatalf("second event = %+v, want \"final answer\"", ev)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("expected textBuf flush second")
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("expected no third event, got %+v", ev)
+	default:
 	}
 }

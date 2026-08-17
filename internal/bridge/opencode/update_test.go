@@ -40,7 +40,7 @@ func captureView(t *testing.T, sessionID string) (*acp.SessionView, chan agent.A
 // verbatim (no "[思考] " prefix).
 func TestHandleUpdate_AgentMessageChunk(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "agent_message_chunk",
@@ -75,7 +75,7 @@ func TestHandleUpdate_AgentMessageChunk(t *testing.T) {
 // noise).
 func TestHandleUpdate_AgentMessageChunk_EmptyTextDrops(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "agent_message_chunk",
@@ -99,7 +99,7 @@ func TestHandleUpdate_AgentMessageChunk_EmptyTextDrops(t *testing.T) {
 // reasoning.
 func TestHandleUpdate_AgentThoughtChunk_PrependsThinkPrefix(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "agent_thought_chunk",
@@ -127,7 +127,7 @@ func TestHandleUpdate_AgentThoughtChunk_PrependsThinkPrefix(t *testing.T) {
 // event — the channel already rendered the inbound.
 func TestHandleUpdate_UserMessageChunk_Drops(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "user_message_chunk",
@@ -149,7 +149,7 @@ func TestHandleUpdate_UserMessageChunk_Drops(t *testing.T) {
 // emits EventAgentToolStart with the title and rawInput.
 func TestHandleUpdate_ToolCall_EmitsStart(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "tool_call",
@@ -190,7 +190,7 @@ func TestHandleUpdate_ToolCall_EmitsStart(t *testing.T) {
 // EventAgentToolEnd with the rawOutput.
 func TestHandleUpdate_ToolCallUpdate_Completed_EmitsEnd(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "tool_call_update",
@@ -231,7 +231,7 @@ func TestHandleUpdate_ToolCallUpdate_Completed_EmitsEnd(t *testing.T) {
 // rawOutput on ToolEnd.Output for diagnostic visibility.
 func TestHandleUpdate_ToolCallUpdate_Failed_EmitsEndWithErr(t *testing.T) {
 	view, events := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	raw := json.RawMessage(`{
 		"sessionUpdate": "tool_call_update",
@@ -269,7 +269,7 @@ func TestHandleUpdate_ToolCallUpdate_IntermediateStatus_LogsOnly(t *testing.T) {
 	for _, status := range []string{"running", "pending", "unknown_future_status"} {
 		t.Run(status, func(t *testing.T) {
 			view, events := captureView(t, "ses_test")
-			h := newUpdateHandler("/tmp/test")
+			h := newUpdateHandler("/tmp/test").asUpdateHandler()
 			raw := json.RawMessage(`{
 				"sessionUpdate": "tool_call_update",
 				"toolCallId": "tc_3",
@@ -308,7 +308,7 @@ func TestHandleUpdate_UnknownKind_Tolerated(t *testing.T) {
 	} {
 		t.Run(kind, func(t *testing.T) {
 			view, events := captureView(t, "ses_test")
-			h := newUpdateHandler("/tmp/test")
+			h := newUpdateHandler("/tmp/test").asUpdateHandler()
 			raw := json.RawMessage(`{"sessionUpdate":"` + kind + `","someField":"..."}`)
 			if err := h(view, raw); err != nil {
 				t.Fatalf("handle() error = %v, want nil", err)
@@ -329,7 +329,7 @@ func TestHandleUpdate_UnknownKind_Tolerated(t *testing.T) {
 // F-OPENCODE-ACP-MIGRATION §4.4 — wire decoding stays tolerant).
 func TestHandleUpdate_MalformedJSON_ReturnsError(t *testing.T) {
 	view, _ := captureView(t, "ses_test")
-	h := newUpdateHandler("/tmp/test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
 
 	// Missing the sessionUpdate field AND missing the content
 	// field. We need to trip a json.Unmarshal error. Since the
@@ -367,3 +367,223 @@ func TestDecodeTextChunk_NonTextTypeDrops(t *testing.T) {
 	}
 }
 
+
+// ─── text-buffering tests (F-OPENCODE-ACP-MIGRATION §5.2) ──────
+//
+// The bridge accumulates agent_message_chunk payloads into a
+// single per-turn buffer and only emits one EventAgentText per
+// sentence / tool-boundary / explicit Flush — instead of one
+// EventAgentText per token, which used to surface as a send_card
+// per token in the chat channel (and, with the opencode bridge's
+// pre-fix double-emit, doubled to two cards per token).
+//
+// These tests pin the buffering behaviour so future refactors do
+// not regress it. The existing per-chunk-emit tests above still
+// pass because their payloads happen to end with a terminator.
+
+func agentMessageChunk(text string) json.RawMessage {
+	return json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":` + jsonQuote(text) + `}}`)
+}
+
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestHandleUpdate_ChunksWithoutPunctuation_Accumulate verifies
+// a run of agent_message_chunk updates that does NOT end with a
+// sentence terminator only emits ONE EventAgentText once the
+// flush trigger fires (sentence end / tool boundary / explicit
+// Flush). Pre-fix the same sequence emitted N cards for N chunks.
+func TestHandleUpdate_ChunksWithoutPunctuation_Accumulate(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	for _, chunk := range []string{"hello", " ", "world"} {
+		if err := handle(view, agentMessageChunk(chunk)); err != nil {
+			t.Fatalf("handle() error = %v", err)
+		}
+	}
+
+	select {
+	case ev := <-events:
+		t.Fatalf("expected no event before flush trigger, got %+v", ev)
+	default:
+	}
+
+	// Explicit drain — turn-end flush path. Mirrors what the
+	// generic acp bridge invokes via SessionView.FlushPending
+	// right before EventAgentDone.
+	h.Flush(view)
+
+	select {
+	case ev := <-events:
+		if ev.Kind != agent.EventAgentText {
+			t.Fatalf("event kind = %v, want EventAgentText", ev.Kind)
+		}
+		if ev.Text != "hello world" {
+			t.Errorf("Text = %q, want %q", ev.Text, "hello world")
+		}
+	default:
+		t.Fatal("no event emitted after Flush")
+	}
+}
+
+// TestHandleUpdate_ChunksEndingWithPunctuation_FlushOnSentence
+// verifies the sentence-boundary trigger fires as soon as the
+// accumulated text ends in ". ? ! 。 ！ ？". Mirrors the
+// pi / dsh bridges' flush granularity contract.
+func TestHandleUpdate_ChunksEndingWithPunctuation_FlushOnSentence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		chunks []string
+		wantFlush1 string // emitted after the punctuation chunk
+	}{
+		{"ascii period", []string{"foo", " ", "bar", "."}, "foo bar."},
+		{"ascii question", []string{"why", "?"}, "why?"},
+		{"ascii bang", []string{"wow", "!"}, "wow!"},
+		{"full-width period", []string{"你好", "世界", "。"}, "你好世界。"},
+		{"full-width question", []string{"怎么了", "？"}, "怎么了？"},
+		{"full-width bang", []string{"太棒了", "！"}, "太棒了！"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view, events := captureView(t, "ses_test")
+			h := newUpdateHandler("/tmp/test")
+			handle := h.asUpdateHandler()
+			for _, chunk := range tc.chunks {
+				if err := handle(view, agentMessageChunk(chunk)); err != nil {
+					t.Fatalf("handle() error = %v", err)
+				}
+			}
+			select {
+			case ev := <-events:
+				if ev.Text != tc.wantFlush1 {
+					t.Errorf("flushed text = %q, want %q", ev.Text, tc.wantFlush1)
+				}
+			default:
+				t.Fatalf("expected flush on punctuation, got no event (buffer = %q)", h.textBuf.String())
+			}
+		})
+	}
+}
+
+// TestHandleUpdate_ChunkSequenceAcrossTwoSentences pins that
+// each sentence flushes independently (no double-flush, no
+// missing flush).
+func TestHandleUpdate_ChunkSequenceAcrossTwoSentences(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test").asUpdateHandler()
+
+	for _, chunk := range []string{"first sentence.", " ", "second sentence"} {
+		if err := h(view, agentMessageChunk(chunk)); err != nil {
+			t.Fatalf("handle() error = %v", err)
+		}
+	}
+	// First sentence should have already flushed; the third
+	// chunk (no terminator yet) keeps "second sentence" in the
+	// buffer.
+	select {
+	case ev := <-events:
+		if ev.Text != "first sentence." {
+			t.Errorf("first flush = %q, want %q", ev.Text, "first sentence. ")
+		}
+	default:
+		t.Fatal("expected first flush after first sentence")
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("expected no further event until second sentence ends, got %+v", ev)
+	default:
+	}
+
+	// Complete the second sentence.
+	if err := h(view, agentMessageChunk(".")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	select {
+	case ev := <-events:
+		if ev.Text != "second sentence." {
+			t.Errorf("second flush = %q, want %q", ev.Text, "second sentence.")
+		}
+	default:
+		t.Fatal("expected second flush after sentence end")
+	}
+}
+
+// TestHandleUpdate_ToolCallAfterText_FlushesBuffer verifies the
+// tool-boundary pre-flush in handle() drains the buffered
+// reply text BEFORE the tool event is emitted (F-52 invariant).
+func TestHandleUpdate_ToolCallAfterText_FlushesBuffer(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	handle := h.asUpdateHandler()
+
+	if err := handle(view, agentMessageChunk("partial answer")); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+	// Drain pending: tool-boundary
+	toolRaw := json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"tc_1","title":"Bash","kind":"execute","status":"pending","rawInput":{"command":"ls"}}`)
+	if err := handle(view, toolRaw); err != nil {
+		t.Fatalf("handle() error = %v", err)
+	}
+
+	// First event from channel must be the buffered text.
+	select {
+	case ev := <-events:
+		if ev.Kind != agent.EventAgentText || ev.Text != "partial answer" {
+			t.Fatalf("first event = %+v, want EventAgentText/partial answer", ev)
+		}
+	default:
+		t.Fatalf("expected buffered text flush on tool boundary; buf = %q", h.textBuf.String())
+	}
+	select {
+	case ev := <-events:
+		if ev.Kind != agent.EventAgentToolStart {
+			t.Fatalf("second event kind = %v, want EventAgentToolStart", ev.Kind)
+		}
+	default:
+		t.Fatal("expected EventAgentToolStart after buffered text flush")
+	}
+}
+
+// TestFlush_EmptyBufferIsNoop verifies Flush on an empty buffer
+// does NOT emit an EventAgentText (so the chat channel never
+// receives a stray "" / whitespace card at turn-end).
+func TestFlush_EmptyBufferIsNoop(t *testing.T) {
+	view, events := captureView(t, "ses_test")
+	h := newUpdateHandler("/tmp/test")
+	h.Flush(view)
+	select {
+	case ev := <-events:
+		t.Fatalf("expected no event on empty flush, got %+v", ev)
+	default:
+	}
+}
+
+// TestEndsWithSentencePunctuation exhaustively checks the
+// terminator set (ASCII + full-width + whitespace tolerance).
+func TestEndsWithSentencePunctuation(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		want bool
+	}{
+		{"", false},
+		{"hello", false},
+		{"hello.", true},
+		{"hello?", true},
+		{"hello!", true},
+		{"hello。", true},
+		{"hello？", true},
+		{"hello！", true},
+		{"hello. ", true},   // trailing whitespace tolerated
+		{"hello", false},    // no terminator
+		{"hello...", true},  // ellipsis still ends with "."
+	} {
+		t.Run(tc.s, func(t *testing.T) {
+			if got := endsWithSentencePunctuation(tc.s); got != tc.want {
+				t.Errorf("endsWithSentencePunctuation(%q) = %v, want %v", tc.s, got, tc.want)
+			}
+		})
+	}
+}

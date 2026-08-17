@@ -135,7 +135,15 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 			"driver_type", fmt.Sprintf("%T", a.Driver()))
 		return a, nil
 	}
-	drv.SetUpdateHandler(newUpdateHandler(cfg.Workspace))
+	updater := newUpdateHandler(cfg.Workspace)
+	drv.SetUpdateHandler(updater.asUpdateHandler())
+	// Wire the per-turn flush hook the generic acp bridge invokes
+	// right before EventAgentDone. Without this the trailing text
+	// the agent produced after the last sentence-end stays in
+	// textBuf until the turn-end drop — the user would see only
+	// the partial reply with no Done / no result card. See
+	// F-OPENCODE-ACP-MIGRATION §5.2 (drain-on-turn-end).
+	drv.SetFlushHandler(updater.Flush)
 	return a, nil
 }
 

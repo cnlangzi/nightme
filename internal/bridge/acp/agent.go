@@ -98,6 +98,27 @@ type driver struct {
 	// reader goroutines.
 	updateHandler atomic.Pointer[UpdateHandler]
 
+	// defaultFallbackDisabled, when true, makes handleSessionUpdate
+	// skip the built-in 4-case fallback (agent_message_chunk,
+	// tool_call, tool_call_update, message_chunk) so a bridge that
+	// installed an UpdateHandler isn't double-emitted (the handler
+	// runs first; without this flag the fallback would re-emit the
+	// same AgentEvent kinds a second time, doubling every text chunk
+	// / tool call). Set by SetUpdateHandler when a non-nil handler is
+	// installed; cleared by SetUpdateHandler(nil). Stored as atomic.Bool
+	// because SetUpdateHandler and the readPump race on it the same way
+	// they race on the handler pointer.
+	defaultFallbackDisabled atomic.Bool
+
+	// flushHandler, when non-nil, lets the bridge-specific UpdateHandler
+	// register a "flush any buffered text now" hook. Triggered on
+	// SessionView.FlushPending and (via the generic acp bridge) right
+	// before EventAgentDone is emitted in translatePromptResponse so a
+	// turn-end never silently drops the trailing text. atomic.Pointer
+	// mirrors updateHandler so the readPump / writePump race stays free
+	// of a mutex.
+	flushHandler atomic.Pointer[FlushHandler]
+
 	// pendingTurnMu guards the in-flight session/prompt guard.
 	// Opencode ACP's prompt response IS the turn-end signal (the
 	// server resolves only after the turn settles), so the generic
@@ -141,6 +162,13 @@ type SessionView struct {
 	AgentName string
 	Workspace string
 
+	// FlushPending requests the bridge-specific translator to flush
+	// any buffered text it is holding onto before the next event is
+	// emitted (typically EventAgentDone). A no-op when the translator
+	// has nothing buffered or no flush handler is registered. Bound
+	// to *driver.flushHandler by View() — kept on the view so callers
+	// never have to type-assert on the driver.
+	FlushPending func()
 }
 
 
@@ -158,6 +186,15 @@ type SessionView struct {
 // about (just return nil and don't re-emit if you want the
 // fallback to also run).
 type UpdateHandler func(view *SessionView, raw json.RawMessage) error
+
+// FlushHandler is the bridge-supplied callback that drains any
+// buffered text the translator is holding. Triggered on turn-end
+// (before EventAgentDone) so a turn never silently drops the
+// trailing fragment of text the agent already produced. The
+// translator should keep state per *driver (or per agent.Agent)
+// — the bridge guarantees the same handler runs against the
+// same view it installed.
+type FlushHandler func(view *SessionView)
 
 
 // DriverHandle is the exported alias for the package-private
@@ -537,16 +574,28 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		// succeed. Emit Error so the runtime can render a
 		// "turn cancelled" footer instead of a normal
 		// completed card.
+		// Flush any buffered text the bridge-specific translator is
+		// holding onto so a cancelled turn does not silently drop
+		// the trailing fragment.
+		if h := d.flushHandler.Load(); h != nil {
+			(*h)(d.View())
+		}
 		d.emit(agent.AgentEvent{
 			Kind: agent.EventAgentError,
 			Err:  errors.New("bridge/acp: turn cancelled"),
 		})
 	case "max_tokens":
+		if h := d.flushHandler.Load(); h != nil {
+			(*h)(d.View())
+		}
 		d.emit(agent.AgentEvent{
 			Kind: agent.EventAgentError,
 			Err:  errors.New("bridge/acp: turn exceeded max_tokens"),
 		})
 	case "refusal":
+		if h := d.flushHandler.Load(); h != nil {
+			(*h)(d.View())
+		}
 		d.emit(agent.AgentEvent{
 			Kind: agent.EventAgentError,
 			Err:  errors.New("bridge/acp: turn refused by content filter"),
@@ -557,6 +606,16 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		// clear the busy guard via pump_events, identical to
 		// how the opencode-serve bridge's session.status:idle
 		// translation worked.
+		//
+		// Flush any buffered text BEFORE EventAgentDone so the
+		// final send_card carries the whole accumulated reply
+		// rather than just the chunked preview. Without this the
+		// turn-end silently swallows whatever text the buffer is
+		// still holding (the trailing fragment after the last
+		// agent_message_chunk).
+		if h := d.flushHandler.Load(); h != nil {
+			(*h)(d.View())
+		}
 		done := &agent.AgentDoneEvent{Reason: "settled", Usage: usage}
 		d.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: done})
 	}
@@ -795,9 +854,28 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 func (d *driver) SetUpdateHandler(h UpdateHandler) {
 	if h == nil {
 		d.updateHandler.Store(nil)
+		d.defaultFallbackDisabled.Store(false)
 		return
 	}
 	d.updateHandler.Store(&h)
+	// The bridge taking over sessionUpdate translation is opting OUT
+	// of the built-in 4-case fallback so the same chunks aren't
+	// emitted twice. Revert with SetUpdateHandler(nil) above.
+	d.defaultFallbackDisabled.Store(true)
+}
+
+// SetFlushHandler installs the "flush buffered text" callback used at
+// turn boundaries. Mirrors SetUpdateHandler's lifetime contract —
+// safe to call once after Start returns. A nil handler clears the
+// hook (the generic acp bridge still tolerates it; FlushPending
+// becomes a no-op and the final flush before EventAgentDone is
+// skipped when no handler is installed).
+func (d *driver) SetFlushHandler(h FlushHandler) {
+	if h == nil {
+		d.flushHandler.Store(nil)
+		return
+	}
+	d.flushHandler.Store(&h)
 }
 
 // View returns a SessionView for use by bridge-supplied
@@ -811,10 +889,15 @@ func (d *driver) SetUpdateHandler(h UpdateHandler) {
 // per-bridge state (agentName, workspace).
 func (d *driver) View() *SessionView {
 	return &SessionView{
-		Emit:       d.emit,
-		SessionID:  func() string { return d.sessionID },
-		AgentName:  d.agentName,
-		Workspace:  d.workspace,
+		Emit:      d.emit,
+		SessionID: func() string { return d.sessionID },
+		AgentName: d.agentName,
+		Workspace: d.workspace,
+		FlushPending: func() {
+			if h := d.flushHandler.Load(); h != nil {
+				(*h)(d.View())
+			}
+		},
 	}
 }
 
@@ -1002,6 +1085,18 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			// belongs in the bridge-specific layer).
 			slog.Debug("acp: updateHandler error (non-fatal)",
 				"kind", kind, "err", err.Error())
+		}
+		// When a bridge has registered an UpdateHandler it is
+		// responsible for emitting AgentEvents for every kind it
+		// cares about. Skipping the built-in fallback here avoids
+		// the double-emit (every chunk would otherwise be delivered
+		// to the channel twice — once by the handler, once by the
+		// fallback). The handler can return without emitting to
+		// opt INTO the fallback for kinds it doesn't handle, but
+		// in practice opencode / future per-bridge translators own
+		// all ACP sessionUpdate variants they receive today.
+		if d.defaultFallbackDisabled.Load() {
+			return
 		}
 	}
 

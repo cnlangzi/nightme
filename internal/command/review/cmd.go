@@ -1,35 +1,38 @@
 // Package review implements the `/review` slash command.
 //
-// /review injects a code-review prompt into the current chat
-// session's AgentSession. The chat agent (claude / codex / dsh /
-// opencode / pi) reads the prompt, runs `git diff` itself, and
-// outputs a structured `## Summary / ## Findings / ## Suggestions`
-// review of the diff between the current branch and the default
-// branch (= the diff a PR would have).
+// /review runs a code review in a fresh RunOnce subprocess
+// (independent context window, isolated from the main chat).
+// The captured findings are injected back into the main chat
+// session as a user message.
 //
-// Architecture (F-review.md v9):
-//   - Architecture B: review runs in the current chat session
-//     (no new process spawn), so the chat agent's context
-//     (user's recent messages, prior tool calls) is preserved
-//     and the review appears in the same thread as the user's
-//     command.
+// Architecture (F-review.md v7):
+//   - **Fully async** dispatcher: Handle launches a goroutine
+//     to do the review work and returns Consumed=true
+//     immediately. The dispatch worker is freed within
+//     microseconds; the chat session's readpump is never
+//     blocked. Multiple /review commands can run in parallel.
+//   - The goroutine uses cs.Context() as its parent — when
+//     the chat session closes (e.g. /close), the context is
+//     cancelled, RunOnce's subprocess is killed, the goroutine
+//     exits cleanly. No orphan work.
+//   - RunOnce itself is the isolation: review runs in a
+//     fresh subprocess with its own context window. Main
+//     chat's token budget is NOT polluted by review
+//     reasoning (which can burn tens of thousands of tokens).
 //   - Zero qualifiers: /review takes no args. Extra args are
-//     rejected inline (matches the /cwd / /think / /use pattern
-//     — all check len(input.Args) directly, no separate parse
-//     function).
-//   - The bridge's Starter.Review method owns the actual
-//     prompt injection. Most coding bridges delegate to
-//     agent.DefaultReview which injects agent.StandardPrompt.
-//     pty/bash returns agent.ErrReviewNotSupported because
-//     bash can't do code review.
-//   - Fix is conversational: after the review, the user types
-//     "fix the blockers" and the same chat agent uses its
-//     native Edit tools. /review does NOT auto-apply anything.
+//     rejected inline (matches /cwd / /think / /use).
+//   - The bridge's Starter.Review method calls agent.Review
+//     (uses s.RunOnce internally). Most coding bridges
+//     delegate; pty/bash returns agent.ErrReviewNotSupported.
+//   - Fix is conversational: after the review appears in chat,
+//     the user types "fix the blockers" and the main agent
+//     uses its native Edit tools. /review does NOT auto-apply.
 package review
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -124,37 +127,46 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		Inject:    as.SendBlocks,
 	}
 
-	// /review is a one-shot review via RunOnce — wraps in
-	// timeouts.Review (30 min, same as Agent / Shell / Hook).
-	// RunOnce's subprocess boundary makes this safe: the
-	// deadline only kills the review subprocess; the main
-	// chat session is untouched. If we hit the timeout, the
-	// user gets a friendly "review timed out" reply, not a
-	// hung dispatcher.
-	revCtx, cancel := context.WithTimeout(ctx, timeouts.Review)
-	defer cancel()
-
-	// starter.Review is the bridge's opportunity to customize
-	// (e.g. claude could use its built-in /code-review trigger
-	// instead of StandardPrompt in v2). v1 ships with all
-	// 5 coding bridges delegating to agent.Review.
-	if err := starter.Review(revCtx, rc); err != nil {
-		// pty/bash returns ErrReviewNotSupported — surface a
-		// specific "this agent can't do /review" message rather
-		// than a generic bridge error.
-		if err == agent.ErrReviewNotSupported {
-			return command.Reply(ctx, rt, fmt.Sprintf(
-				"❌ agent %q 暂不支持 /review(bash / pty 不是 coding agent,不能 review)\n   当前支持 /review 的 agent: claude, codex, dsh, opencode, pi\n   (用 /use <name> 切换)",
-				as.Agent,
-			)), nil
+	// v7: /review is fully async. Handle returns immediately
+	// after launching a goroutine that does the actual review
+	// work (RunOnce subprocess + inject findings). The dispatch
+	// worker is freed within microseconds; the chat session's
+	// readpump continues processing events unblocked.
+	//
+	// Lifecycle:
+	//   - The goroutine uses cs.Context() as its parent — when
+	//     the chat session closes (e.g. /close), the context is
+	//     cancelled, RunOnce's subprocess is killed, and the
+	//     goroutine exits cleanly. No orphan work.
+	//   - revCtx wraps cs.Context() with timeouts.Review (30 min),
+	//     same as /gtw commit's Agent timeout. RunOnce's
+	//     subprocess boundary makes this safe: the deadline
+	//     only kills the review subprocess; the main chat is
+	//     untouched.
+	//
+	// Error handling: errors that happen AFTER Handle returns
+	// can't be surfaced as inline replies (the chat reply is
+	// gone). v1 just logs them — operators see the failure in
+	// logs; users re-run /review if needed. v2 can add
+	// cs.Emitter().Send("review failed: ...") for a user-visible
+	// failure notification.
+	agentName := as.Agent
+	go func() {
+		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
+		defer cancel()
+		if err := starter.Review(revCtx, rc); err != nil {
+			slog.Default().Warn("/review failed",
+				"agent", agentName,
+				"err", err,
+			)
 		}
-		return command.Reply(ctx, rt, "❌ /review 失败: "+err.Error()), nil
-	}
+	}()
 
-	// Successfully delegated to the bridge. The actual review
-	// reply comes back asynchronously through the chat session's
-	// normal event pipeline — we return Consumed=true and emit
-	// no inline reply, so the user sees a single coherent review
-	// in the chat thread (not two: a slash ack + the review).
+	// Return Consumed=true with no inline reply. The chat session
+	// is now free: readpump continues processing events, the
+	// dispatch worker is free, the user can send more messages.
+	// The review findings arrive in chat asynchronously when the
+	// goroutine completes and rc.Inject pushes them into the
+	// main AS as a user message.
 	return &command.SlashOutput{Consumed: true}, nil
 }

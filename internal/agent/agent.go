@@ -1141,44 +1141,51 @@ type Starter interface {
 	// synchronous turn and don't need the session handle.
 	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error)
 
-	// Review runs the /review slash command against this agent's
-	// current chat session. The /review dispatcher (see
-	// internal/command/review) provides a ReviewContext that wraps
-	// the chat session's AgentSession.Handle().SendBlocks callback;
-	// the bridge is responsible for injecting a review prompt via
-	// that callback.
+	// Review runs the /review slash command against this agent and
+	// returns the raw review output text. The bridge owns ONE thing:
+	// producing the review. The caller (the /review dispatcher in
+	// internal/command/review) is responsible for wrapping the text
+	// in agent.FormatReviewMessage and routing it to BOTH the
+	// AgentSession (via as.SendBlocks, so the main agent can act on
+	// "fix the blockers"-style follow-ups) and the channel (via the
+	// chat session's emitter, so the user sees the findings directly
+	// in chat without waiting for the AS's downstream reply).
 	//
 	// ===== F-review.md §13 "codex/claude use native review" rule =====
 	//
 	// Bridges that have a native review subcommand MUST invoke it
 	// directly instead of running our generic StandardPrompt:
-	//   - claudecode: `claude -p "/code-review"` (built-in slash command)
-	//   - codex:      `codex review --base <default-branch>` (subcommand)
+	//   - claudecode: `claude -p code-review` (built-in slash command;
+	//     note: NO leading slash in `[command]` slot — verified
+	//     2.1.220 that `claude -p /code-review` runs 0 turns and
+	//     returns empty result, while `claude -p code-review`
+	//     dispatches the slash command and fires the multi-agent
+	//     pipeline)
+	//   - codex:      `codex review --base <default-branch>` (subcommand;
+	//     review rejects exec-only flags like --json / -o /
+	//     --dangerously-bypass-approvals-and-sandbox / -C /
+	//     --skip-git-repo-check — use `runCodexReviewPlain`, NOT
+	//     `runPrintMode`)
 	//
 	// Bridges that have NO native review subcommand delegate to
 	// agent.Review(ctx, s, rc) which runs the canonical StandardPrompt
 	// via a fresh RunOnce subprocess:
 	//   - dsh, opencode, pi, acp
 	//
-	// The Review method's responsibilities:
-	//   1. run the appropriate command (native or StandardPrompt)
-	//   2. capture the resulting review text
-	//   3. wrap with agent.FormatReviewMessage for the canonical preamble
-	//   4. inject via rc.Inject so the main chat sees the review
-	//
-	// For native review paths, the agent's native output may already
-	// be in a canonical markdown structure (claudecode) or similar
-	// (codex review). FormatReviewMessage handles the preamble; the
-	// body is the agent's raw output wrapped verbatim. If body parsing
-	// fails (anomalous format), the preamble still injects and the
-	// raw body is preserved — the user can still read the findings.
-	//
 	// Return ErrReviewNotSupported when this agent type cannot do
 	// review (e.g. pty/bash fallback). The dispatcher surfaces a
-	// friendly "agent X 暂不支持 /review" reply (via cs.Emitter().Send
-	// from the async goroutine, since the inline reply is already
-	// gone by the time the bridge returns).
-	Review(ctx context.Context, rc ReviewContext) error
+	// friendly "agent X does not support /review" reply (via
+	// cs.Emitter().Send from the async goroutine, since the inline
+	// reply is already gone by the time the bridge returns).
+	//
+	// Why the bridge doesn't Inject: prior versions of this contract
+	// passed rc.Inject as a callback the bridge was responsible for
+	// invoking. That conflated "produce data" with "distribute data",
+	// and forced callers that wanted the channel-side fan-out to add
+	// an OnResult callback to recover the text the bridge had
+	// swallowed. The current contract returns the RunResult and lets
+	// the caller choose all distribution paths in one place.
+	Review(ctx context.Context, rc ReviewContext) (RunResult, error)
 }
 
 // Errors surfaced by the registry.

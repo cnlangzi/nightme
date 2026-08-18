@@ -162,46 +162,81 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
-	as := cs.SelectedAgentSession()
-	if as == nil {
-		return command.Reply(ctx, rt,
-			"❌ 当前没有 active agent。先发条消息 / /use <name> 激活。",
-		), nil
+	// Resolve the inject target. /review always injects findings
+	// back into the chat session's active AS (the
+	// "different reviewers, single chat" workflow). The runner
+	// (--agent) is a separate one-shot spawn — see below.
+	//
+	// Use LookupSelectedAgentSession (NOT SelectedAgentSession)
+	// so the AS is auto-spawned when the chat session has a
+	// selectedAgent + SelectedCwd but no live AS in the pool.
+	// This happens after a daemon restart (the chat session
+	// metadata is persisted, but the process exits) and after
+	// /close — the user shouldn't have to send a plain message
+	// or /use to revive the session before /review can run.
+	as, err := cs.LookupSelectedAgentSession()
+	if err != nil {
+		switch {
+		case errors.Is(err, chatsession.ErrNoSelectedCwd):
+			return command.Reply(ctx, rt,
+				"❌ no workspace set. Send /cwd <path> first.",
+			), nil
+		case errors.Is(err, chatsession.ErrNoSelectedAgent):
+			return command.Reply(ctx, rt,
+				"❌ no active agent configured. Run /use <agent> first.",
+			), nil
+		default:
+			return command.Reply(ctx, rt, fmt.Sprintf(
+				"❌ failed to activate agent: %v", err,
+			)), nil
+		}
 	}
 
 	// Resolve the review runner. --agent overrides the default
 	// (current AS's agent); empty / missing means "use the
-	// current AS's agent". Either way the findings are injected
-	// to the *current* AS via rc.Inject = as.SendBlocks.
+	// current AS's agent". The runner is a separate one-shot
+	// spawn — its findings get routed to BOTH the AS (via
+	// as.SendBlocks) and the channel (via em.Send) by the
+	// goroutine below.
 	runnerName := as.Agent
 	if spec.Agent != "" {
 		runnerName = spec.Agent
 	}
 	starter, err := agent.Builtins.Get(runnerName)
 	if err != nil {
+		// Only blame `--agent` when the user actually passed it —
+		// otherwise runnerName came from the current selected AS
+		// and the failure is about the chat's primary agent, not
+		// the --agent override.
+		suffix := ""
+		if spec.Agent != "" {
+			suffix = " (--agent)"
+		}
 		return command.Reply(ctx, rt, fmt.Sprintf(
-			"❌ unknown agent %q (--agent)", runnerName,
+			"❌ unknown agent %q%s", runnerName, suffix,
 		)), nil
 	}
 
 	rc := agent.ReviewContext{
 		Workspace: cs.SelectedCwd(),
-		Inject:    as.SendBlocks, // ALWAYS current AS, not the runner
 	}
 
 	// Capture the inputs the goroutine needs for an async reply
 	// (ErrReviewNotSupported is the one case we surface back to
 	// the user; everything else stays in logs). We grab them by
-	// value so the closure doesn't pin SlashInput for the full
-	// 30-min review budget.
+	// value so the closure doesn't pin SlashInput / agent
+	// references for the full 30-min review budget.
 	chatID := input.ChatID
 	replyTo := input.MessageID
+	workspace := cs.SelectedCwd()
+	sendBlocks := as.SendBlocks // close over SendBlocks for Inject
+	emitter := cs.Emitter()
 
 	// v7: /review is fully async. Handle returns immediately
 	// after launching a goroutine that does the actual review
-	// work (RunOnce subprocess + inject findings). The dispatch
-	// worker is freed within microseconds; the chat session's
-	// readpump continues processing events unblocked.
+	// work (RunOnce subprocess + distribute findings). The
+	// dispatch worker is freed within microseconds; the chat
+	// session's readpump continues processing events unblocked.
 	//
 	// Lifecycle:
 	//   - The goroutine uses cs.Context() as its parent — when
@@ -214,44 +249,87 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	//     only kills the review subprocess; the main chat is
 	//     untouched.
 	//
-	// Error handling: most errors that happen AFTER Handle returns
-	// can't be surfaced as inline replies (the chat reply is
-	// gone), so they stay in logs. The one exception is
-	// ErrReviewNotSupported — that error is fully predictable
-	// (we know upfront pty/bash can't review) and the user
-	// deserves a friendly inline reply, not silent failure.
-	// We surface it via cs.Emitter().Send() on the chat's
-	// emitter so the message lands in the right chat.
+	// v9 distribution: on success, the bridge returns the raw
+	// review text. The goroutine wraps it in FormatReviewMessage
+	// and emits to TWO destinations:
+	//
+	//   1. as.SendBlocks → AS as a user turn → main agent sees
+	//      findings, can act on "fix the blockers" follow-ups.
+	//   2. em.Send → channel directly → user sees findings in
+	//      chat immediately, without waiting for the AS's
+	//      downstream reply (which may not echo them verbatim).
+	//
+	// On failure (incl. ErrReviewNotSupported), only the channel
+	// gets a reply — no Inject, since there's no findings to act
+	// on.
 	go func() {
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
-		err := starter.Review(revCtx, rc)
-		if err == nil {
-			return
-		}
-		slog.Default().Warn("/review failed",
-			"agent", runnerName,
-			"err", err,
-		)
-		if errors.Is(err, agent.ErrReviewNotSupported) {
-			em := cs.Emitter()
-			if em == nil {
+
+		result, err := starter.Review(revCtx, rc)
+		if err != nil {
+			slog.Default().Warn("/review failed",
+				"agent", runnerName,
+				"err", err,
+			)
+			if emitter == nil {
 				return
 			}
-			_ = em.Send(revCtx, messages.OutboundMessage{
+			var text string
+			switch {
+			case errors.Is(err, agent.ErrReviewNotSupported):
+				text = fmt.Sprintf("❌ agent %q does not support /review", runnerName)
+			default:
+				msg := err.Error()
+				if len(msg) > 800 {
+					msg = msg[:800] + "…(truncated)"
+				}
+				text = fmt.Sprintf("❌ /review failed (agent=%s):\n%s", runnerName, msg)
+			}
+			_ = emitter.Send(revCtx, messages.OutboundMessage{
 				ChatID:  chatID,
 				Kind:    messages.OutReply,
 				ReplyTo: replyTo,
-				Text:    fmt.Sprintf("❌ agent %q 暂不支持 /review", runnerName),
+				Text:    text,
 			})
+			return
 		}
+
+		// Success: wrap once, route twice (AS + channel).
+		formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
+		blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: formatted}}
+
+		// 1) Inject into AS as a user turn — main agent sees
+		//    the review and can act on follow-ups.
+		if err := sendBlocks(revCtx, blocks); err != nil {
+			slog.Default().Warn("/review: AS inject failed",
+				"agent", runnerName,
+				"err", err,
+			)
+		}
+
+		// 2) Send to the channel directly — user sees the
+		//    findings without waiting for the AS's downstream
+		//    reply. Skip silently if the chat session is
+		//    closing (revCtx cancelled) or the emitter is gone.
+		if emitter == nil {
+			return
+		}
+		if revCtx.Err() != nil {
+			return
+		}
+		_ = emitter.Send(revCtx, messages.OutboundMessage{
+			ChatID:  chatID,
+			Kind:    messages.OutReply,
+			ReplyTo: replyTo,
+			Text:    formatted,
+		})
 	}()
 
 	// Return Consumed=true with no inline reply. The chat session
 	// is now free: readpump continues processing events, the
 	// dispatch worker is free, the user can send more messages.
 	// The review findings arrive in chat asynchronously when the
-	// goroutine completes and rc.Inject pushes them into the
-	// main AS as a user message.
+	// goroutine completes (both AS-injected and channel-emitted).
 	return &command.SlashOutput{Consumed: true}, nil
 }

@@ -175,44 +175,17 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 
 	cLog("PrintMode Start",
 		"command", s.command,
+		"mode", "exec",
 		"workspace", cfg.Workspace,
 		"prompt_bytes", len(prompt),
 		"args_count", len(args),
 		"image_count", countImageFlags(prefixArgs),
 		"pid", pid)
 
-	// Drain stderr in the background (mirrors claudecode/pi).
-	// Honors ctx cancellation between reads so a cancelled call
-	// doesn't wait for the child to be SIGKILL'd by
-	// exec.CommandContext before this goroutine returns —
-	// matches runNDJSON's ctx-aware loop below.
-	stderrBuf := &strings.Builder{}
-	stderrTruncated := false
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		buf := make([]byte, 4096)
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-			n, err := stderr.Read(buf)
-			if n > 0 {
-				if stderrBuf.Len() < stderrCapBytes {
-					room := stderrCapBytes - stderrBuf.Len()
-					if n > room {
-						stderrBuf.Write(buf[:room])
-						stderrTruncated = true
-					} else {
-						stderrBuf.Write(buf[:n])
-					}
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	// Drain stderr concurrently via the shared helper (matches
+	// runCodexReviewPlain's stderr semantics so a future tweak to
+	// the cap / cancellation applies to both surfaces at once).
+	stderrDrain := startStderrDrain(ctx, stderr)
 
 	// Read stdout NDJSON events + extract metadata. runNDJSON
 	// runs concurrently with the stderr drain above; both
@@ -247,16 +220,17 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	})
 
 	waitErr := cmd.Wait()
-	<-stderrDone
+	stderrDrain.wait()
 
 	elapsedMs := time.Since(startTime).Milliseconds()
 
 	cLog("PrintMode Exit",
 		"pid", pid,
+		"mode", "exec",
 		"elapsed_ms", elapsedMs,
 		"wait_err", errStr(waitErr),
-		"stderr_bytes", stderrBuf.Len(),
-		"stderr_truncated", stderrTruncated,
+		"stderr_bytes", len(stderrDrain.bytes()),
+		"stderr_truncated", stderrDrain.truncatedFlag(),
 		"session_id", sessionID)
 
 	// Build the result. Subtype comes from exit code; Usage /
@@ -284,42 +258,20 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		Subtype:    subtype,
 	}
 
-	// Failure paths: surface stderr (model / auth / sandbox errors
-	// land there) plus the underlying wait / json-read error.
-	// Order matters — prefer waitErr first because jsonReadErr is
-	// usually just "broken pipe on closed child" noise.
-	if waitErr != nil {
-		stderr := strings.TrimSpace(stderrBuf.String())
-		if finalText != "" {
-			// Process died after writing the final answer
-			// (rare but possible). Surface both the answer and
-			// the failure so the caller can inspect.
-			if stderr != "" {
-				return agent.RunResult{}, fmt.Errorf("codex: exit: %w (last answer: %q; stderr: %s)", waitErr, finalText, stderr)
-			}
-			return agent.RunResult{}, fmt.Errorf("codex: exit: %w (last answer: %q)", waitErr, finalText)
-		}
-		if stderr != "" {
-			return agent.RunResult{}, fmt.Errorf("codex: exit: %w (stderr: %s)", waitErr, stderr)
-		}
-		return agent.RunResult{}, fmt.Errorf("codex: exit: %w", waitErr)
+	// Shared error formatting with runCodexReviewPlain. waitErr is
+	// surfaced first (jsonReadErr is usually just "broken pipe on
+	// closed child" noise); stderr is trimmed here once.
+	stderrStr := strings.TrimSpace(stderrDrain.bytes())
+	if err := formatCodexExitError(waitErr, stderrStr, finalText, "answer"); err != nil {
+		return agent.RunResult{}, err
 	}
+	// NDJSON-specific: a parse error on a clean exit is still a
+	// failure (we couldn't extract session/model/usage).
 	if jsonReadErr != nil && !errors.Is(jsonReadErr, io.EOF) {
-		stderr := strings.TrimSpace(stderrBuf.String())
-		if stderr != "" {
+		if stderrStr != "" {
 			return agent.RunResult{}, fmt.Errorf("codex: stdout: %w (stderr: %s)", jsonReadErr, stderr)
 		}
 		return agent.RunResult{}, fmt.Errorf("codex: stdout: %w", jsonReadErr)
-	}
-	if finalText == "" {
-		// Process exited 0 but produced no stdout AND no -o file
-		// content. Unusual; treat as failure so /gtw commit
-		// doesn't silently treat as success.
-		stderr := strings.TrimSpace(stderrBuf.String())
-		if stderr != "" {
-			return agent.RunResult{}, fmt.Errorf("codex: empty answer (stderr: %s)", stderr)
-		}
-		return agent.RunResult{}, fmt.Errorf("codex: empty answer")
 	}
 	return result, nil
 }
@@ -352,21 +304,55 @@ func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) (args []
 	if cfg.Subcommand != "" {
 		subcmd = cfg.Subcommand
 	}
-	args = []string{subcmd,
-		// Mirror the app-server's two permission defaults
-		// (session.go:262-265): never ask + full FS access.
-		// Verified on codex 0.145.0 — equivalent combination
-		// flag. Avoids the need to pass `-c approval_policy=...
-		// -c sandbox_mode=...` separately.
-		"--dangerously-bypass-approvals-and-sandbox",
-		// Workspace. Both -C and cmd.Dir (set by runPrintMode)
-		// for belt-and-braces.
-		"-C", cfg.Workspace,
-		// Skip the git-repo guard. /gtw commit may run from a
-		// freshly-created worktree that isn't a git repo from
-		// codex's perspective (e.g. sub-dir of main checkout).
-		// App-server mode doesn't have this guard; exec does.
-		"--skip-git-repo-check",
+	args = []string{subcmd}
+
+	// Permission + git-repo flags are SUBCOMMAND-SPECIFIC:
+	//
+	//   - `codex exec` accepts --dangerously-bypass-approvals-and-sandbox
+	//     and --skip-git-repo-check (verified on codex 0.145.0).
+	//   - `codex review` does NOT — its `--help` only lists
+	//     `--base / --uncommitted / --commit / -c / --enable /
+	//     --disable / --title`. Passing the exec-only flags to
+	//     `codex review` makes it exit 2 with
+	//     "unexpected argument '--dangerously-bypass-approvals-and-sandbox'".
+	//
+	// For `review` we mirror the equivalent "never ask + full FS"
+	// semantics via the `-c` config-override form (which `codex
+	// review` DOES accept). Without permission bypass, codex
+	// review would prompt the user for every file read on a
+	// multi-file PR — fatal for a non-interactive print-mode
+	// subprocess whose stdin is closed.
+	if subcmd == "exec" {
+		args = append(args,
+			// Mirror the app-server's two permission defaults
+			// (session.go:262-265): never ask + full FS access.
+			"--dangerously-bypass-approvals-and-sandbox",
+			// Workspace. Both -C and cmd.Dir (set by runPrintMode)
+			// for belt-and-braces.
+			"-C", cfg.Workspace,
+			// Skip the git-repo guard. /gtw commit may run from a
+			// freshly-created worktree that isn't a git repo from
+			// codex's perspective (e.g. sub-dir of main checkout).
+			// App-server mode doesn't have this guard; exec does.
+			"--skip-git-repo-check",
+		)
+	} else {
+		// codex review (and any future subcommand that doesn't
+		// accept the exec-only flags). Use -c overrides to land
+		// the same non-interactive permission posture.
+		//
+		// `codex review --help` lists:
+		//   -c <key=value>  --strict-config
+		//   --uncommitted   --base <BRANCH>  --commit <SHA>
+		//   --enable / --disable / --title
+		// It has NO `-C` (workspace) flag — review runs in
+		// argv[0]'s cwd, which runPrintMode already sets via
+		// cmd.Dir = cfg.Workspace. Passing `-C` here makes
+		// review exit 2 with "unexpected argument '-C' found".
+		args = append(args,
+			"-c", "approval_policy=never",
+			"-c", "sandbox_mode=danger-full-access",
+		)
 	}
 
 	// Subcommand-specific flags (e.g. codex review's
@@ -545,6 +531,91 @@ func extractModelFromError(msg string) string {
 	return rest[:j]
 }
 
+// stderrDrain captures a subprocess's stderr to a capped buffer in
+// a background goroutine. Shared between runPrintMode (exec) and
+// runCodexReviewPlain (review) so both surfaces have IDENTICAL
+// stderr capture semantics — the prior duplication (verified by
+// the bug where `codex review` was routed through runPrintMode's
+// NDJSON parser and its plain-text output was silently dropped)
+// is what made the surfaces drift; extracting here means any
+// future cap / cancellation tweak applies to both at once.
+type stderrDrain struct {
+	buf       *strings.Builder
+	truncated bool
+	done      chan struct{}
+}
+
+// startStderrDrain launches the capture goroutine. Caller MUST
+// call wait() after cmd.Wait to ensure no bytes are lost before
+// reading bytes().
+func startStderrDrain(ctx context.Context, r io.Reader) *stderrDrain {
+	d := &stderrDrain{
+		buf:  &strings.Builder{},
+		done: make(chan struct{}),
+	}
+	go func() {
+		defer close(d.done)
+		chunk := make([]byte, 4096)
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			n, err := r.Read(chunk)
+			if n > 0 {
+				if d.buf.Len() < stderrCapBytes {
+					room := stderrCapBytes - d.buf.Len()
+					if n > room {
+						d.buf.Write(chunk[:room])
+						d.truncated = true
+					} else {
+						d.buf.Write(chunk[:n])
+					}
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return d
+}
+
+func (d *stderrDrain) wait()             { <-d.done }
+func (d *stderrDrain) bytes() string     { return d.buf.String() }
+func (d *stderrDrain) truncatedFlag() bool { return d.truncated }
+
+// formatCodexExitError returns the canonical "codex: exit: ..." /
+// "codex: empty <label>" error for runPrintMode (exec) and
+// runCodexReviewPlain (review). Shared so both surfaces report
+// identical failure shape (same waitErr/stderr/finalText
+// precedence rules). Returns nil when both waitErr is nil and
+// finalText is non-empty (success path — caller builds the result
+// directly).
+//
+// emptyLabel distinguishes the two paths in error messages:
+// "answer" (exec) or "review answer" (review).
+func formatCodexExitError(waitErr error, stderr, finalText, emptyLabel string) error {
+	if waitErr != nil {
+		if finalText != "" {
+			if stderr != "" {
+				return fmt.Errorf("codex: exit: %w (last answer: %q; stderr: %s)", waitErr, finalText, stderr)
+			}
+			return fmt.Errorf("codex: exit: %w (last answer: %q)", waitErr, finalText)
+		}
+		if stderr != "" {
+			return fmt.Errorf("codex: exit: %w (stderr: %s)", waitErr, stderr)
+		}
+		return fmt.Errorf("codex: exit: %w", waitErr)
+	}
+	if finalText == "" {
+		if stderr != "" {
+			return fmt.Errorf("codex: empty %s (stderr: %s)", emptyLabel, stderr)
+		}
+		return fmt.Errorf("codex: empty %s", emptyLabel)
+	}
+	return nil
+}
+
 // truncateForLog shortens a line for inclusion in error / log
 // messages. Caps at 200 bytes so a multi-MB garbage frame
 // doesn't blow up the log line.
@@ -574,9 +645,18 @@ func errStr(err error) string {
 // we fall back to --uncommitted (working-tree scan only) and log a
 // warning so the user knows the coverage is reduced.
 //
-// Output: stdout is the codex review text (stdio, not JSON — codex
-// review is designed for human reading). The bridge's Review method
-// passes it through FormatReviewMessage for the canonical preamble.
+// Output: stdout is the codex review text (plain text, NOT NDJSON —
+// `codex review` is a non-interactive CLI tool; its --help lists no
+// --json / -o flag). The bridge's Review method passes it through
+// FormatReviewMessage for the canonical preamble.
+//
+// Plumbing: `runCodexReviewPlain` (this file) is the right shape for
+// `review` — spawn with the review flags, read stdout to EOF, return.
+// `runPrintMode` is the `exec` shape — spawn with `--json -o <tmp>
+// -- <prompt>`, parse NDJSON events, read final answer from the
+// tempfile. We do NOT reuse runPrintMode here because review rejects
+// every exec-only flag (`--json`, `-o`, `--dangerously-bypass-…`,
+// `--skip-git-repo-check`) with exit 2.
 func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
 	// Build the review subcommand args. --base <default> is the
 	// important one; we detect <default> via git commands.
@@ -593,12 +673,113 @@ func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig) (age
 	revCfg.Subcommand = "review"
 	revCfg.ExtraFlags = extra
 
-	// Reuse runPrintMode's full subprocess plumbing (NDJSON parse,
-	// tempfile -o, stderr drain, exit handling). Pass empty blocks
-	// because the `review` subcommand doesn't take a prompt in
-	// the same way `exec` does — the [PROMPT] is appended to
-	// review instructions only, and we have none.
-	return runPrintMode(ctx, s, revCfg, nil)
+	return runCodexReviewPlain(ctx, s, revCfg)
+}
+
+// runCodexReviewPlain is the review-specific runner: spawns
+// `codex review` with the flags buildPrintArgs assembled (subcmd
+// branch picks `-c approval_policy=…` + `-c sandbox_mode=…`, NO
+// `-C`/`--json`/`-o`/`--skip-git-repo-check`/exec-only flags), reads
+// stdout to EOF as plain text, returns. No NDJSON parser, no
+// `-o` tempfile, no `--json` flag.
+//
+// Mirrors runPrintMode's stderr-drain + ctx-cancel + exit-error
+// surfacing shape so the same error messages reach the user.
+func runCodexReviewPlain(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
+	if cfg.Workspace == "" {
+		return agent.RunResult{}, fmt.Errorf("codex: workspace is required")
+	}
+
+	startTime := time.Now()
+
+	prefixArgs, _ := buildPrintArgs(cfg, nil)
+
+	cmd := agent.NewCmd(ctx, s.command, prefixArgs...)
+	cmd.Dir = cfg.Workspace // review has no -C; runs in cwd
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return agent.RunResult{}, fmt.Errorf("codex: stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdout.Close()
+		return agent.RunResult{}, fmt.Errorf("codex: stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return agent.RunResult{}, fmt.Errorf("codex: start: %w", err)
+	}
+	pid := cmd.Process.Pid
+
+	cLog("ReviewMode Start",
+		"command", s.command,
+		"mode", "review",
+		"workspace", cfg.Workspace,
+		"args_count", len(prefixArgs),
+		"pid", pid)
+
+	// Shared stderr capture with runPrintMode — same semantics,
+	// same cap, same ctx-cancel behaviour. See stderrDrain doc.
+	stderrDrain := startStderrDrain(ctx, stderr)
+
+	// Drain stdout to EOF (synchronously). Review output is the
+	// review text itself — unlike `codex exec`, there's no NDJSON
+	// event stream + -o tempfile split. The whole stdout IS the
+	// final answer.
+	stdoutBuf := &strings.Builder{}
+	{
+		buf := make([]byte, 4096)
+		for {
+			if ctx.Err() != nil {
+				break
+			}
+			n, rErr := stdout.Read(buf)
+			if n > 0 {
+				stdoutBuf.Write(buf[:n])
+			}
+			if rErr != nil {
+				break
+			}
+		}
+	}
+
+	waitErr := cmd.Wait()
+	stderrDrain.wait()
+
+	elapsedMs := time.Since(startTime).Milliseconds()
+	finalText := strings.TrimSpace(stdoutBuf.String())
+
+	subtype := "completed"
+	if waitErr != nil {
+		subtype = "failed"
+	}
+
+	cLog("ReviewMode Exit",
+		"pid", pid,
+		"mode", "review",
+		"elapsed_ms", elapsedMs,
+		"wait_err", errStr(waitErr),
+		"stderr_bytes", len(stderrDrain.bytes()),
+		"stderr_truncated", stderrDrain.truncatedFlag(),
+		"stdout_bytes", stdoutBuf.Len())
+
+	result := agent.RunResult{
+		Text:       finalText,
+		DurationMs: elapsedMs,
+		Subtype:    subtype,
+	}
+
+	// Shared error formatting with runPrintMode (see
+	// formatCodexExitError doc). Identical waitErr/stderr/
+	// finalText precedence rules so the two surfaces report the
+	// same failure shape.
+	stderrStr := strings.TrimSpace(stderrDrain.bytes())
+	if err := formatCodexExitError(waitErr, stderrStr, finalText, "review answer"); err != nil {
+		return agent.RunResult{}, err
+	}
+	return result, nil
 }
 
 // detectDefaultBranch finds the repo's default branch name
@@ -626,6 +807,11 @@ func detectDefaultBranch(ctx context.Context, workspace string) string {
 			}
 		}
 	}
-	// Final fallback: guess "main".
-	return "main"
+	// Final fallback: return "" so the caller falls back to
+	// --uncommitted per the documented contract (F-review.md §13).
+	// Returning a hard-coded "main" here would shadow the caller's
+	// else-branch: codex review would then try --base main on
+	// master-only / no-remote repos and fail instead of gracefully
+	// scanning the working tree.
+	return ""
 }

@@ -24,8 +24,8 @@ func (f *fakeStarter) Start(context.Context, StartConfig) (*Agent, error) {
 func (f *fakeStarter) RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error) {
 	return f.runOnce(ctx, cfg, blocks)
 }
-func (f *fakeStarter) Review(context.Context, ReviewContext) error {
-	return errors.New("fakeStarter: Review not implemented (we test Review directly)")
+func (f *fakeStarter) Review(context.Context, ReviewContext) (RunResult, error) {
+	return RunResult{}, errors.New("fakeStarter: Review not implemented (we test Review directly)")
 }
 
 // TestStandardPrompt_Structure verifies the prompt contains the
@@ -140,35 +140,26 @@ func TestErrReviewNotSupported_Sentinel(t *testing.T) {
 	}
 }
 
-// TestReview_RejectsNilInject verifies the defensive guard.
-// The dispatcher wires Inject to as.SendBlocks, so nil would
-// only happen on a misuse — but failing fast beats panicking
-// inside the bridge loop.
+// TestReview_RejectsNilInject: removed in v9. The bridge no longer
+// holds an Inject callback (the /review dispatcher owns Inject
+// after the bridge returns). See TestReview_ReturnsRunResult for
+// the new contract. Kept as a stub so anyone grepping for the
+// old test name finds this migration note.
 func TestReview_RejectsNilInject(t *testing.T) {
-	err := Review(context.Background(), nil, ReviewContext{
-		Workspace: "/some/path",
-		Inject:    nil,
-	})
-	if err == nil {
-		t.Fatal("Review with nil Inject should error, got nil")
-	}
-	if !strings.Contains(err.Error(), "Inject is nil") {
-		t.Errorf("Review nil-Inject error %q, want it to mention Inject", err)
-	}
+	t.Skip("Inject was removed from ReviewContext in v9; see TestReview_ReturnsRunResult for the new contract")
 }
 
-// TestReview_InjectsFormattedReview verifies the happy path:
-// Review calls s.RunOnce with StandardPrompt, captures the
-// returned RunResult.Text, wraps it in formatReviewMessage (which
-// adds a "## Code review of <workspace>" preamble), and injects
-// the wrapped result via rc.Inject.
+// TestReview_ReturnsRunResult verifies the happy path: Review
+// calls s.RunOnce with StandardPrompt, captures the returned
+// RunResult, and returns it (RAW — no FormatReviewMessage wrap,
+// no Inject). The /review dispatcher is responsible for wrapping
+// and routing to AS + channel.
 //
 // Uses a fakeStarter that records the prompt it received and
 // returns a canned RunResult.Text — no real subprocess is spawned.
-func TestReview_InjectsFormattedReview(t *testing.T) {
+func TestReview_ReturnsRunResult(t *testing.T) {
 	const reviewText = "## Summary\nThe diff is fine."
 
-	var gotInjected []ContentBlock
 	var capturedRunOnceBlocks []ContentBlock
 	var capturedRunOnceWorkspace string
 
@@ -182,14 +173,10 @@ func TestReview_InjectsFormattedReview(t *testing.T) {
 		},
 	}
 
-	rc := ReviewContext{
-		Workspace: "/ws",
-		Inject: func(_ context.Context, blocks []ContentBlock) error {
-			gotInjected = append([]ContentBlock(nil), blocks...)
-			return nil
-		},
-	}
-	if err := Review(context.Background(), fs, rc); err != nil {
+	rc := ReviewContext{Workspace: "/ws"}
+
+	result, err := Review(context.Background(), fs, rc)
+	if err != nil {
 		t.Fatalf("Review returned error: %v", err)
 	}
 
@@ -209,17 +196,10 @@ func TestReview_InjectsFormattedReview(t *testing.T) {
 		t.Errorf("RunOnce block text != StandardPrompt() — bridge should send the shared prompt")
 	}
 
-	// Verify the injected content is the formatted review result,
-	// not the raw prompt — main sees findings, not "go review".
-	if len(gotInjected) != 1 {
-		t.Fatalf("Review injected %d blocks, want 1", len(gotInjected))
-	}
-	if gotInjected[0].Type != ContentText {
-		t.Errorf("injected block type %q, want %q", gotInjected[0].Type, ContentText)
-	}
-	want := "## Code review of /ws (run by \"fake\")\n\n(current branch vs default branch; run via /review)\n\n" + reviewText
-	if gotInjected[0].Text != want {
-		t.Errorf("injected text mismatch:\n got  %q\n want %q", gotInjected[0].Text, want)
+	// Verify the returned RunResult.Text is the RAW review body,
+	// not wrapped in FormatReviewMessage (that's the caller's job).
+	if result.Text != reviewText {
+		t.Errorf("returned Text mismatch:\n got  %q\n want %q", result.Text, reviewText)
 	}
 }
 
@@ -236,15 +216,9 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 			return RunResult{}, runOnceErr
 		},
 	}
-	var injected int
-	rc := ReviewContext{
-		Workspace: "/ws",
-		Inject: func(_ context.Context, _ []ContentBlock) error {
-			injected++
-			return nil
-		},
-	}
-	err := Review(context.Background(), fs, rc)
+	rc := ReviewContext{Workspace: "/ws"}
+
+	result, err := Review(context.Background(), fs, rc)
 	if err == nil {
 		t.Fatal("Review should error on RunOnce failure, got nil")
 	}
@@ -254,7 +228,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 	if !errors.Is(err, runOnceErr) {
 		t.Errorf("error chain lost original: got %v, want wrap of %v", err, runOnceErr)
 	}
-	if injected != 0 {
-		t.Errorf("Inject was called %d times after RunOnce failure, want 0", injected)
+	if result.Text != "" {
+		t.Errorf("RunResult.Text on failure = %q, want empty", result.Text)
 	}
 }

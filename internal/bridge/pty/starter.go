@@ -165,6 +165,6 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // coding agent, can't read git diff, can't output structured
 // review. Return ErrReviewNotSupported so the /review dispatcher
 // can surface a friendly "agent X 暂不支持 /review" reply.
-func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
-	return agent.ErrReviewNotSupported
+func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) (agent.RunResult, error) {
+	return agent.RunResult{}, agent.ErrReviewNotSupported
 }

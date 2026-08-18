@@ -24,8 +24,8 @@ func (f *fakeAgent) Start(context.Context, StartConfig) (*Agent, error) {
 func (f *fakeAgent) RunOnce(context.Context, StartConfig, []ContentBlock) (RunResult, error) {
 	return RunResult{}, errors.New("fakeAgent: RunOnce not implemented")
 }
-func (f *fakeAgent) Review(context.Context, ReviewContext) error {
-	return ErrReviewNotSupported
+func (f *fakeAgent) Review(context.Context, ReviewContext) (RunResult, error) {
+	return RunResult{}, ErrReviewNotSupported
 }
 
 func TestRegisterAndGet(t *testing.T) {

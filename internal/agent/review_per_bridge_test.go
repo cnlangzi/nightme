@@ -78,15 +78,9 @@ func TestReview_UsesSharedPrompt(t *testing.T) {
 		},
 	}
 
-	var gotInjected []agent.ContentBlock
-	rc := agent.ReviewContext{
-		Workspace: workspace,
-		Inject: func(_ context.Context, blocks []agent.ContentBlock) error {
-			gotInjected = append([]agent.ContentBlock(nil), blocks...)
-			return nil
-		},
-	}
-	if err := agent.Review(context.Background(), fs, rc); err != nil {
+	rc := agent.ReviewContext{Workspace: workspace}
+	result, err := agent.Review(context.Background(), fs, rc)
+	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
 
@@ -101,18 +95,10 @@ func TestReview_UsesSharedPrompt(t *testing.T) {
 		t.Errorf("RunOnce prompt != StandardPrompt() — bridge should send the shared prompt")
 	}
 
-	// 3. The injected message is the formatted review result
-	// (## Code review of <workspace> preamble + raw review),
-	// not the raw prompt.
-	if len(gotInjected) != 1 {
-		t.Fatalf("Inject received %d blocks, want 1", len(gotInjected))
-	}
-	if gotInjected[0].Type != agent.ContentText {
-		t.Errorf("injected block type %q, want %q", gotInjected[0].Type, agent.ContentText)
-	}
-	want := "## Code review of " + workspace + " (run by \"fake\")\n\n(current branch vs default branch; run via /review)\n\n## Summary\nThe diff is fine."
-	if gotInjected[0].Text != want {
-		t.Errorf("injected text mismatch:\n got  %q\n want %q", gotInjected[0].Text, want)
+	// 3. v9: Review returns the RAW RunResult (no FormatReviewMessage
+	// wrap, no Inject). The dispatcher wraps and routes from here.
+	if result.Text != "## Summary\nThe diff is fine." {
+		t.Errorf("Review returned Text %q, want raw review body (no preamble)", result.Text)
 	}
 }
 
@@ -129,15 +115,8 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 		},
 	}
 
-	var injected int
-	rc := agent.ReviewContext{
-		Workspace: "/ws",
-		Inject: func(_ context.Context, _ []agent.ContentBlock) error {
-			injected++
-			return nil
-		},
-	}
-	err := agent.Review(context.Background(), fs, rc)
+	rc := agent.ReviewContext{Workspace: "/ws"}
+	result, err := agent.Review(context.Background(), fs, rc)
 	if err == nil {
 		t.Fatal("Review should error on RunOnce failure, got nil")
 	}
@@ -147,8 +126,8 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 	if !errors.Is(err, runOnceErr) {
 		t.Errorf("error chain lost original: got %v, want wrap of %v", err, runOnceErr)
 	}
-	if injected != 0 {
-		t.Errorf("Inject was called %d times after RunOnce failure, want 0", injected)
+	if result.Text != "" {
+		t.Errorf("RunResult.Text on failure = %q, want empty", result.Text)
 	}
 }
 
@@ -158,10 +137,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 // matches on ==, not errors.Is).
 func TestPtyStarter_ReviewReturnsNotSupported(t *testing.T) {
 	s := pty.NewStarter("bash", "bash", nil, nil, 0, 0)
-	err := s.Review(context.Background(), agent.ReviewContext{
-		Workspace: "/ws",
-		Inject:    func(_ context.Context, _ []agent.ContentBlock) error { return nil },
-	})
+	_, err := s.Review(context.Background(), agent.ReviewContext{Workspace: "/ws"})
 	if err == nil {
 		t.Fatal("pty Starter.Review should return error, got nil")
 	}
@@ -189,6 +165,6 @@ func (t *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, e
 func (t *testStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return t.runOnce(ctx, cfg, blocks)
 }
-func (t *testStarter) Review(context.Context, agent.ReviewContext) error {
-	return errors.New("testStarter: Review not implemented (we test Review directly)")
+func (t *testStarter) Review(context.Context, agent.ReviewContext) (agent.RunResult, error) {
+	return agent.RunResult{}, errors.New("testStarter: Review not implemented (we test Review directly)")
 }

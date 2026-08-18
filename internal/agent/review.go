@@ -55,13 +55,6 @@ type ReviewContext struct {
 	// directory so it can run `git diff` against the current
 	// branch.
 	Workspace string
-
-	// Inject sends the given blocks into the main chat session as
-	// a user turn. dispatcher wires this to
-	// as.SendBlocks(ctx, blocks). The review findings arrive as a
-	// user message in main chat, so the main agent sees them and
-	// can act on "fix the blockers"-style follow-ups.
-	Inject func(ctx context.Context, blocks []ContentBlock) error
 }
 
 // ErrReviewNotSupported is returned by Starter.Review when the agent
@@ -103,11 +96,7 @@ var ErrReviewNotSupported = errors.New("agent: /review not supported")
 // richer multi-agent review, instead of going through
 // StandardPrompt + the bridge's print-mode). v1 ships with all
 // 5 coding bridges delegating to Review.
-func Review(ctx context.Context, s Starter, rc ReviewContext) error {
-	if rc.Inject == nil {
-		return errors.New("agent: ReviewContext.Inject is nil")
-	}
-
+func Review(ctx context.Context, s Starter, rc ReviewContext) (RunResult, error) {
 	result, err := s.RunOnce(ctx, StartConfig{
 		Workspace: rc.Workspace,
 	}, []ContentBlock{{
@@ -115,14 +104,10 @@ func Review(ctx context.Context, s Starter, rc ReviewContext) error {
 		Text: StandardPrompt(),
 	}})
 	if err != nil {
-		return fmt.Errorf("agent %s: review one-shot failed: %w",
+		return RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
 			s.Info().Name, err)
 	}
-
-	return rc.Inject(ctx, []ContentBlock{{
-		Type: ContentText,
-		Text: FormatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
-	}})
+	return result, nil
 }
 
 // FormatReviewMessage wraps the raw review output in a small

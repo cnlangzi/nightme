@@ -142,7 +142,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Review implements /review for dsh: delegate to shared
 // StandardPrompt. dsh's chat agent reads git diff and outputs
 // the structured review.
-func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
+func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) (agent.RunResult, error) {
 	return agent.Review(ctx, s, rc)
 }
 

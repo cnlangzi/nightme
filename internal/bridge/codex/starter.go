@@ -94,20 +94,13 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // reusing it is strictly better than reverse-engineering the same
 // review into a generic prompt-mode call.
 //
-// Output is wrapped in agent.FormatReviewMessage (the canonical
-// preamble) by the caller. If body parsing fails (anomalous
-// format), FormatReviewMessage falls back to raw output with a
-// warning log.
-func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
-	result, err := runCodexReview(ctx, s, agent.StartConfig{
+// v9: returns the raw RunResult from runCodexReview — the /review
+// dispatcher in internal/command/review/cmd.go wraps it in
+// agent.FormatReviewMessage and routes to BOTH the AS (via
+// as.SendBlocks) and the channel (via the chat session's emitter).
+// The bridge no longer owns presentation or distribution.
+func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) (agent.RunResult, error) {
+	return runCodexReview(ctx, s, agent.StartConfig{
 		Workspace: rc.Workspace,
 	})
-	if err != nil {
-		return fmt.Errorf("agent %s: review one-shot failed: %w",
-			s.Info().Name, err)
-	}
-	return rc.Inject(ctx, []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: agent.FormatReviewMessage(rc.Workspace, s.Info().Name, result.Text),
-	}})
 }

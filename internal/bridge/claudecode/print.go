@@ -454,6 +454,22 @@ func appendAuditFields(result agent.RunResult) string {
 // task; reusing it is strictly better than reverse-engineering
 // the same prompt into a generic prompt-mode call.
 //
+// IMPORTANT — the positional `[command]` slot in
+// `claude [options] [command] [prompt]` does NOT take a leading slash.
+// Verified on Claude Code 2.1.220:
+//
+//   - `claude -p /code-review …` → claude treats `/code-review` as a
+//     regular prompt, runs zero turns, returns empty `result`
+//     (the slash command is never invoked).
+//   - `claude -p code-review …` → claude dispatches to the
+//     `code-review` slash command; the multi-agent pipeline fires
+//     (observed 36+ turns reading repo files, writing findings, etc.).
+//
+// The pre-v9 code passed `"/code-review"` (with slash) which made every
+// /review run on claude return silently empty — exactly the "review 跑
+// claude 没结果" symptom. Strip the slash before passing (see args
+// below).
+//
 // Output: the standard claude stream-json transcript. The shared
 // print-stream parser extracts the final text into RunResult.Text
 // (same path as runPrintMode, so output handling is identical).
@@ -467,13 +483,15 @@ func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConf
 	// target flag; future v2 can pass rc.Comment or a parsed target.
 	// Default is the canonical "review current branch vs default"
 	// behaviour, which matches our /review dispatch.
+	//
+	// Pass the command WITHOUT the leading slash — see doc above.
 	args := []string{
-		"-p", "/code-review",
+		"-p", "code-review",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "bypassPermissions",
 	}
 
 	startTime := time.Now()
-	return runPrintModeWithPrompt(ctx, s, cfg, args, "/code-review", startTime)
+	return runPrintModeWithPrompt(ctx, s, cfg, args, "code-review", startTime)
 }

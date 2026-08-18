@@ -1,6 +1,6 @@
 //go:build windows
 
-package agent
+package proc
 
 import (
 	"context"
@@ -21,18 +21,19 @@ import (
 // a new console window on the user's desktop — visible as a
 // flashing black rectangle in the taskbar, one per spawn.
 //
-// Exported so callers that build *exec.Cmd outside of NewCmd
-// (today: internal/bridge/pty/pty.go via gopty.Cmd, which
-// embeds *exec.Cmd but routes through go-pty's own spawn
-// path) can apply the same flag via HideWindow and stay
-// consistent with what NewCmd does for the rest of the
-// codebase.
+// Exported so callers that build *syscall.SysProcAttr outside
+// of proc.New (today: internal/bridge/pty/pty.go via
+// gopty.Cmd, which is a sibling type to *exec.Cmd — same
+// SysProcAttr field but no embedding, and routes through
+// go-pty's own spawn path) can apply the same flag via
+// HideWindow and stay consistent with what proc.New does for
+// the rest of the codebase.
 //
 // On non-Windows platforms CreateNoWindow is a build-time
 // placeholder; HideWindow is a no-op there.
 const CreateNoWindow = 0x08000000
 
-// NewCmd is the SOLE spawn recipe in nightme on Windows.
+// proc.New is the SOLE spawn recipe in nightme on Windows.
 // Every *exec.Cmd that nightme hands to Start / Run / Output
 // must come from this helper; direct os/exec.Command[Context]
 // calls in production code are forbidden because they bypass
@@ -84,7 +85,7 @@ const CreateNoWindow = 0x08000000
 // bridge on Windows still works for single-pid Process.Signal
 // / Kill, because SignalProcessGroup's Windows fallback
 // already collapses to single-pid semantics.
-func NewCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 	resolved := name
 	if lp, err := exec.LookPath(name); err == nil {
 		resolved = lp
@@ -94,9 +95,9 @@ func NewCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 
 // launchOnWindows picks the right exec.Cmd shape for the
 // resolved target AND applies CREATE_NO_WINDOW before
-// returning. Split out from NewCmd so the routing is
+// returning. Split out from proc.New so the routing is
 // table-driven and individually unit-testable. See the file
-// doc comment on NewCmd for the matrix.
+// doc comment on proc.New for the matrix.
 //
 // resolved is the absolute path returned by exec.LookPath (or
 // the original name if LookPath failed). args are appended
@@ -111,11 +112,11 @@ func NewCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 // for .cmd/.bat/.ps1, which is exactly the gap this whole
 // file exists to close.
 //
-// The returned *exec.Cmd ALWAYS has CREATE_NO_WINDOW on its
+// The returned *exec.Cmd ALWAYS has CreateNoWindow on its
 // SysProcAttr.CreationFlags — there is no separate "set
 // after" step that a caller could forget. PTY users (which
 // can't route through exec.CommandContext because go-pty owns
-// the cmd) call HideWindow directly with their *exec.Cmd to
+// the cmd) call HideWindow directly with their SysProcAttr to
 // apply the same flag with the same merge semantics.
 func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec.Cmd {
 	var cmd *exec.Cmd
@@ -144,27 +145,28 @@ func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec
 	return cmd
 }
 
-// HideWindow sets CREATE_NO_WINDOW on the supplied
-// SysProcAttr and returns it (a fresh struct is allocated
-// when attr is nil, so callers can chain the assignment:
-// `cmd.SysProcAttr = agent.HideWindow(cmd.SysProcAttr)`).
-// An existing non-nil attr is preserved — CREATE_NO_WINDOW
+// HideWindow sets CreateNoWindow on the supplied SysProcAttr
+// and returns it (a fresh struct is allocated when attr is
+// nil, so callers can chain the assignment:
+// `cmd.SysProcAttr = proc.HideWindow(cmd.SysProcAttr)`).
+// An existing non-nil attr is preserved — CreateNoWindow
 // is merged with any caller-provided flags rather than
 // replacing them.
 //
 // The signature takes *syscall.SysProcAttr (the underlying
 // field type) rather than *exec.Cmd because the PTY path
 // (internal/bridge/pty/pty.go) uses go-pty's gopty.Cmd, which
-// is a sibling struct to *exec.Cmd — same SysProcAttr field,
-// but a different concrete type. By keying on the field type
-// the helper works for both shapes and stays platform-
-// agnostic (the Unix build of HideWindow is a no-op).
+// is a sibling type to *exec.Cmd — same SysProcAttr field
+// shape, but a different concrete type (no embedding). By
+// keying on the field type the helper works for both shapes
+// and stays platform-agnostic (the Unix build of HideWindow
+// is a no-op).
 //
 // Production code that owns a plain *exec.Cmd should route
-// through NewCmd instead — NewCmd applies this flag at
+// through proc.New instead — proc.New applies this flag at
 // construction time. HideWindow exists for the PTY escape
 // hatch (gopty.Cmd is built via ptmx.Command, not
-// exec.CommandContext, so NewCmd can't apply it for them) and
+// exec.CommandContext, so proc.New can't apply it for them) and
 // for tests that need to pin the merge behaviour in isolation.
 func HideWindow(attr *syscall.SysProcAttr) *syscall.SysProcAttr {
 	if attr == nil {
@@ -174,9 +176,9 @@ func HideWindow(attr *syscall.SysProcAttr) *syscall.SysProcAttr {
 	return attr
 }
 
-// applyHideWindow is the shared implementation behind NewCmd.
+// applyHideWindow is the shared implementation behind proc.New.
 // Mirrors HideWindow but applies it to a *exec.Cmd in-place.
-// Kept unexported so the public surface is "NewCmd" +
+// Kept unexported so the public surface is "proc.New" +
 // "HideWindow".
 func applyHideWindow(cmd *exec.Cmd) {
 	if cmd == nil {

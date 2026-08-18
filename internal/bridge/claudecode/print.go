@@ -77,6 +77,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // claudeLog is a thin wrapper around slog.Default() that scopes
@@ -165,32 +166,32 @@ func runPrintModeWithPrompt(
 	prompt string,
 	startTime time.Time,
 ) (agent.RunResult, error) {
-	cmd := agent.NewCmd(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace
+	child := proc.New(ctx, s.command, args...)
+	child.Dir = cfg.Workspace
 	// Forward cfg.Env the same way Start does (append to os.Environ,
 	// cfg wins on conflict). Without this, /gtw commit-time env
 	// overrides (custom API keys, MCP credentials) are silently
 	// dropped on the print-mode path.
 	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), cfg.Env...)
+		child.Env = append(os.Environ(), cfg.Env...)
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("claudecode: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
 		return agent.RunResult{}, fmt.Errorf("claudecode: stderr pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		return agent.RunResult{}, fmt.Errorf("claudecode: start: %w", err)
 	}
-	pid := cmd.Process.Pid
+	pid := child.Process.Pid
 
 	claudeLog("PrintMode Start",
 		"command", s.command, "workspace", cfg.Workspace,
@@ -243,7 +244,7 @@ func runPrintModeWithPrompt(
 	// auth errors, etc. land there. The wait+reap path is
 	// shared between success and failure so neither path loses
 	// diagnostic info.
-	waitErr := cmd.Wait()
+	waitErr := child.Wait()
 	<-stderrDone
 
 	claudeLog("PrintMode Exit",
@@ -319,7 +320,7 @@ func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, e
 	for scanner.Scan() {
 		// Honour ctx cancellation between lines so we exit
 		// promptly when the caller's deadline fires. The
-		// process is killed by agent.NewCmd (which wraps
+		// process is killed by proc.New (which wraps
 		// exec.CommandContext) when ctx is cancelled — we
 		// just stop reading here and let runPrintMode's
 		// cmd.Wait() reap the SIGKILLed process.

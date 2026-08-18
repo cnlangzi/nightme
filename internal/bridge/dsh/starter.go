@@ -74,7 +74,7 @@ func (s *Starter) Info() agent.Info {
 // Note: this only verifies existence — we discard the resolved
 // path. PATH resolution at spawn time happens implicitly inside
 // exec.CommandContext at cmd.Start(); runPrintMode passes the
-// unresolved name to agent.NewCmd and the kernel + Go stdlib do
+// unresolved name to proc.New and the kernel + Go stdlib do
 // the rest. We don't cache the LookPath result because user-side
 // PATH edits should take effect without restarting the daemon.
 func (s *Starter) Detect() error {

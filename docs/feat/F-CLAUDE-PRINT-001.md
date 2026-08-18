@@ -111,7 +111,7 @@ Start 路径(`Starter.Start` → `newDriver`)完全不动——chat session
 镜像 `pi.Starter.RunOnce` → `pi.runPrintMode`(细节见
 `internal/bridge/pi/print_unix.go:79`):
 
-1. `agent.NewCmd(ctx, command, args...)` 起进程,`cmd.Dir = workspace`
+1. `proc.New(ctx, command, args...)` 起进程,`cmd.Dir = workspace`
 2. `stdout` / `stderr` 走 `cmd.StdoutPipe` / `cmd.StderrPipe`
 3. 后台 goroutine drain stderr 到 `strings.Builder`(失败路径带
    stderr 一起 wrap 进 error)

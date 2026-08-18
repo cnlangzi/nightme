@@ -1,6 +1,6 @@
 //go:build windows
 
-package agent
+package proc
 
 import (
 	"context"
@@ -9,17 +9,17 @@ import (
 	"testing"
 )
 
-// TestNewCmd_WrapsCmdFiles pins the .cmd/.bat wrapping so a
+// TestNew_WrapsCmdFiles pins the .cmd/.bat wrapping so a
 // future refactor that drops the cmd.exe /d /c shim
 // (and re-introduces ERROR_INVALID_PARAMETER 87 on every
 // Node-style shim install) is caught by CI before it ships.
-func TestNewCmd_WrapsCmdFiles(t *testing.T) {
+func TestNew_WrapsCmdFiles(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // isolate LookPath
 
-	cmd := NewCmd(context.Background(), "pi", "--mode", "rpc")
+	cmd := New(context.Background(), "pi", "--mode", "rpc")
 
 	if cmd.Path == "" {
-		t.Fatal("NewCmd returned an empty Path")
+		t.Fatal("New returned an empty Path")
 	}
 	lower := strings.ToLower(cmd.Path)
 	if !strings.HasSuffix(lower, "cmd.exe") {
@@ -28,36 +28,36 @@ func TestNewCmd_WrapsCmdFiles(t *testing.T) {
 		// is covered by the integration tests on a real
 		// Windows runner; here we only assert the happy path
 		// when a batch file IS resolvable.
-		t.Skipf("NewCmd could not resolve a batch file in PATH (cmd.Path=%q); wrapper untested", cmd.Path)
+		t.Skipf("New could not resolve a batch file in PATH (cmd.Path=%q); wrapper untested", cmd.Path)
 	}
 	// The wrapper inserts /d /c <resolved> in front of the
 	// user args. Assert the order matches Microsoft's
 	// documented workaround.
 	if len(cmd.Args) < 4 {
-		t.Fatalf("NewCmd argv = %v; want at least 4 entries (cmd.exe /d /c <path> ...)", cmd.Args)
+		t.Fatalf("New argv = %v; want at least 4 entries (cmd.exe /d /c <path> ...)", cmd.Args)
 	}
 	if cmd.Args[0] != "/d" || cmd.Args[1] != "/c" {
-		t.Errorf("NewCmd argv = %v; want first two entries to be /d / c", cmd.Args)
+		t.Errorf("New argv = %v; want first two entries to be /d / c", cmd.Args)
 	}
 	wantExt := ".cmd"
 	if !strings.HasSuffix(strings.ToLower(cmd.Args[2]), wantExt) &&
 		!strings.HasSuffix(strings.ToLower(cmd.Args[2]), ".bat") {
-		t.Errorf("NewCmd argv[2] = %q; want a .cmd or .bat path", cmd.Args[2])
+		t.Errorf("New argv[2] = %q; want a .cmd or .bat path", cmd.Args[2])
 	}
 	if got, want := cmd.Args[3:], []string{"--mode", "rpc"}; !equalStrings(got, want) {
-		t.Errorf("NewCmd user args = %v; want %v (user args must come after /c <path>)", got, want)
+		t.Errorf("New user args = %v; want %v (user args must come after /c <path>)", got, want)
 	}
 }
 
-// TestNewCmd_DirectExePath verifies the native-binary branch:
-// when the resolved path ends in .exe, NewCmd must NOT wrap it
+// TestNew_DirectExePath verifies the native-binary branch:
+// when the resolved path ends in .exe, New must NOT wrap it
 // in cmd.exe /d /c — that would force an extra shell layer on
 // every invocation, and breaks arg parsing for binaries that
 // don't tolerate cmd.exe's quote-stripping rules.
 //
 // We exercise the routing through launchOnWindows so a future
 // refactor that drops the extension switch is caught in CI.
-func TestNewCmd_DirectExePath(t *testing.T) {
+func TestNew_DirectExePath(t *testing.T) {
 	cmd := launchOnWindows(context.Background(),
 		`C:\Tools\pi.exe`, "--mode", "rpc")
 	if !strings.EqualFold(cmd.Path, `C:\Tools\pi.exe`) {
@@ -68,11 +68,11 @@ func TestNewCmd_DirectExePath(t *testing.T) {
 	}
 }
 
-// TestNewCmd_PS1WrapsPowerShell pins the .ps1 → powershell
+// TestNew_PS1WrapsPowerShell pins the .ps1 → powershell
 // branch so a regression that drops the PowerShell wrap (and
 // re-introduces ERROR_INVALID_PARAMETER on .ps1 installs) is
 // caught by CI.
-func TestNewCmd_PS1WrapsPowerShell(t *testing.T) {
+func TestNew_PS1WrapsPowerShell(t *testing.T) {
 	cmd := launchOnWindows(context.Background(),
 		`C:\Tools\pi.ps1`, "-Mode", "rpc")
 	// exec.LookPath resolves "powershell.exe" to its full path
@@ -98,9 +98,9 @@ func TestNewCmd_PS1WrapsPowerShell(t *testing.T) {
 	}
 }
 
-// TestNewCmd_JSWrapsNode pins the .js → node branch so a
+// TestNew_JSWrapsNode pins the .js → node branch so a
 // regression that drops the node.exe wrap is caught.
-func TestNewCmd_JSWrapsNode(t *testing.T) {
+func TestNew_JSWrapsNode(t *testing.T) {
 	cmd := launchOnWindows(context.Background(),
 		`C:\Tools\pi.js`, "--mode", "rpc")
 	if !strings.HasSuffix(strings.ToLower(cmd.Path), "node.exe") {
@@ -114,10 +114,10 @@ func TestNewCmd_JSWrapsNode(t *testing.T) {
 	}
 }
 
-// TestNewCmd_NoExtensionDirect verifies that a path with no
+// TestNew_NoExtensionDirect verifies that a path with no
 // extension (or an unrecognised one) falls through to direct
 // execution — the same fallback Linux/macOS use.
-func TestNewCmd_NoExtensionDirect(t *testing.T) {
+func TestNew_NoExtensionDirect(t *testing.T) {
 	cmd := launchOnWindows(context.Background(),
 		`C:\Tools\pi`, "--mode", "rpc")
 	if !strings.EqualFold(cmd.Path, `C:\Tools\pi`) {
@@ -172,8 +172,8 @@ func TestIsWindowsBatchExt(t *testing.T) {
 	}
 }
 
-// TestNewCmd_SetsCreateNoWindow pins the most important
-// regression: every *exec.Cmd returned from NewCmd must have
+// TestNew_SetsCreateNoWindow pins the most important
+// regression: every *exec.Cmd returned from New must have
 // CREATE_NO_WINDOW set on SysProcAttr.CreationFlags. Without
 // this, every spawn of a Windows console binary (cmd.exe
 // wrapping a .cmd shim, node.exe, powershell.exe, …) pops a
@@ -186,7 +186,7 @@ func TestIsWindowsBatchExt(t *testing.T) {
 // (no separate "set after" step), so the production path is
 // a single call — a future refactor that drops the flag in
 // any branch gets caught here.
-func TestNewCmd_SetsCreateNoWindow(t *testing.T) {
+func TestNew_SetsCreateNoWindow(t *testing.T) {
 	cases := []struct {
 		name     string
 		resolved string
@@ -262,7 +262,7 @@ func TestHideWindow_NilSysProcAttr(t *testing.T) {
 	}
 }
 
-// TestNewCmd_EnvFormat pins the most pernicious Windows bug
+// TestNew_EnvFormat pins the most pernicious Windows bug
 // we fixed in this file's siblings (internal/bridge/...):
 // cmd.Env must contain only KEY=VALUE strings, never bare
 // values. Windows CreateProcess rejects bare entries with
@@ -273,23 +273,23 @@ func TestHideWindow_NilSysProcAttr(t *testing.T) {
 // name as a bare string to env" — this test is the schema
 // check for that contract. We can't easily assert against
 // the bridge code from here (it lives in another package),
-// but we can assert that NewCmd's own behaviour doesn't
+// but we can assert that New's own behaviour doesn't
 // introduce a bare string: when we hand it the path of a
 // .cmd shim, the resulting cmd.Env is whatever the caller
 // set, and we never auto-append.
-func TestNewCmd_DoesNotAppendBareEnv(t *testing.T) {
+func TestNew_DoesNotAppendBareEnv(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // isolate LookPath
 
 	// Force the wrapper path: a known .cmd shim, name doesn't
 	// matter, what matters is the resolved extension.
-	cmd := NewCmd(context.Background(), "pi", "--mode", "rpc")
+	cmd := New(context.Background(), "pi", "--mode", "rpc")
 	if cmd.Path == "" {
-		t.Fatal("NewCmd returned empty Path")
+		t.Fatal("New returned empty Path")
 	}
 	if !strings.HasSuffix(strings.ToLower(cmd.Path), "cmd.exe") {
 		// LookPath fell back to the raw name; we can't assert
 		// on extension behaviour without a real .cmd on PATH.
-		t.Skipf("NewCmd could not resolve a .cmd (cmd.Path=%q); skipping env-format assertion",
+		t.Skipf("New could not resolve a .cmd (cmd.Path=%q); skipping env-format assertion",
 			cmd.Path)
 	}
 	// cmd.Env at this point is whatever the OS-default was
@@ -297,7 +297,7 @@ func TestNewCmd_DoesNotAppendBareEnv(t *testing.T) {
 	// path is not in cmd.Env as a bare string.
 	for _, e := range cmd.Env {
 		if e == "pi" || e == "claude" || e == "codex" || e == "opencode" {
-			t.Errorf("NewCmd left bare agent name in cmd.Env: %q (Windows CreateProcess rejects this with ERROR_INVALID_PARAMETER 87)", e)
+			t.Errorf("New left bare agent name in cmd.Env: %q (Windows CreateProcess rejects this with ERROR_INVALID_PARAMETER 87)", e)
 		}
 	}
 }

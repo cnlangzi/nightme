@@ -39,10 +39,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -75,21 +75,18 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		return fmt.Errorf("resolve nightme executable: %w", err)
 	}
 
-	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
-	child.SysProcAttr = &windows.SysProcAttr{
-		// DETACHED_PROCESS: no console inheritance. Required
-		// because `nightme start` was launched from a console;
-		// without this the daemon would tie up the user's
-		// terminal until it exits.
-		//
-		// CREATE_NEW_PROCESS_GROUP: the daemon becomes the
-		// root of a new process group. Ctrl-C / Ctrl-Break
-		// from any other console won't reach it.
-		//
-		// CREATE_PRESERVE_CODE_AUTHZ_LEVEL / no flags are
-		// needed for our use.
-		CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
+	child := proc.New(ctx, executable, daemonChildCommand, "--channel", opts.channel)
+	// proc.New on Windows already set CreationFlags |= CREATE_NO_WINDOW
+	// (so the daemon child does not pop a visible console). Merge
+	// rather than replace: DETACHED_PROCESS (no console inheritance)
+	// and CREATE_NEW_PROCESS_GROUP (own process group — Ctrl-C from
+	// any other console won't reach the daemon). Without the merge,
+	// the daemon pops a flashing console window on every `nightme
+	// start` from a console.
+	if child.SysProcAttr == nil {
+		child.SysProcAttr = &windows.SysProcAttr{}
 	}
+	child.SysProcAttr.CreationFlags |= windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP
 	child.Stdin = nil
 	child.Stdout = nil
 	// Panics (in ANY goroutine) and runtime fatals write to stderr

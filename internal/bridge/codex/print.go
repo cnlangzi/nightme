@@ -106,6 +106,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // stderrCapBytes bounds the stderr buffer kept in memory across a
@@ -154,24 +155,24 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		prompt,
 	)
 
-	cmd := agent.NewCmd(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace // belt-and-braces with -C
+	child := proc.New(ctx, s.command, args...)
+	child.Dir = cfg.Workspace // belt-and-braces with -C
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("codex: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
 		return agent.RunResult{}, fmt.Errorf("codex: stderr pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		return agent.RunResult{}, fmt.Errorf("codex: start: %w", err)
 	}
-	pid := cmd.Process.Pid
+	pid := child.Process.Pid
 
 	cLog("PrintMode Start",
 		"command", s.command,
@@ -219,7 +220,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		}
 	})
 
-	waitErr := cmd.Wait()
+	waitErr := child.Wait()
 	stderrDrain.wait()
 
 	elapsedMs := time.Since(startTime).Milliseconds()
@@ -292,7 +293,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 // tempfile path / context state). The Starter is not used here
 // because argv is fully determined by cfg + blocks; the cmd
 // binary itself (s.command) is supplied by the caller via
-// agent.NewCmd.
+// proc.New.
 //
 // No error return: encoding blocks into argv + prompt has no
 // failure mode that isn't a caller bug (empty ContentImage.Path
@@ -686,24 +687,24 @@ func runCodexReviewPlain(ctx context.Context, command, workspace string, reviewF
 		"-c", "sandbox_mode=danger-full-access",
 	}, reviewFlags...)
 
-	cmd := agent.NewCmd(ctx, command, args...)
-	cmd.Dir = workspace // review has no -C; runs in cwd
+	child := proc.New(ctx, command, args...)
+	child.Dir = workspace // review has no -C; runs in cwd
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("codex: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
 		return agent.RunResult{}, fmt.Errorf("codex: stderr pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		return agent.RunResult{}, fmt.Errorf("codex: start: %w", err)
 	}
-	pid := cmd.Process.Pid
+	pid := child.Process.Pid
 
 	cLog("ReviewMode Start",
 		"command", command,
@@ -737,7 +738,7 @@ func runCodexReviewPlain(ctx context.Context, command, workspace string, reviewF
 		}
 	}
 
-	waitErr := cmd.Wait()
+	waitErr := child.Wait()
 	stderrDrain.wait()
 
 	elapsedMs := time.Since(startTime).Milliseconds()
@@ -780,9 +781,9 @@ func runCodexReviewPlain(ctx context.Context, command, workspace string, reviewF
 func detectDefaultBranch(ctx context.Context, workspace string) string {
 	// git symbolic-ref refs/remotes/origin/HEAD — most reliable on
 	// cloned repos.
-	cmd := agent.NewCmd(ctx, "git",
+	child := proc.New(ctx, "git",
 		"-C", workspace, "symbolic-ref", "refs/remotes/origin/HEAD")
-	out, err := cmd.Output()
+	out, err := child.Output()
 	if err == nil {
 		ref := strings.TrimSpace(string(out))
 		if strings.HasPrefix(ref, "refs/remotes/origin/") {
@@ -790,8 +791,8 @@ func detectDefaultBranch(ctx context.Context, workspace string) string {
 		}
 	}
 	// git remote show origin — fallback for shallow clones.
-	cmd = agent.NewCmd(ctx, "git", "-C", workspace, "remote", "show", "origin")
-	out, err = cmd.Output()
+	child = proc.New(ctx, "git", "-C", workspace, "remote", "show", "origin")
+	out, err = child.Output()
 	if err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.HasPrefix(line, "HEAD branch: ") {

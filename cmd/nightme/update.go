@@ -7,9 +7,9 @@
 //
 // Internal layering (not user-visible):
 //
-//   internal/updater/check.go      — Lookup / MatchAsset / compare
-//   internal/updater/download.go   — Download / SHA256SUMS / ExtractArchive
-//   internal/updater/install.go    — Install / swap binary / restart daemon
+//	internal/updater/check.go      — Lookup / MatchAsset / compare
+//	internal/updater/download.go   — Download / SHA256SUMS / ExtractArchive
+//	internal/updater/install.go    — Install / swap binary / restart daemon
 //
 // The three files mirror the three stages but the CLI
 // surface stays single-verb. We picked this layout because
@@ -18,7 +18,7 @@
 // internal functions from both the CLI shell and the REPL
 // keeps the two paths in lock-step.
 //
-// Stage gating
+// # Stage gating
 //
 // CLI (bare `nightme update`):
 //   - check fails / up-to-date     → exit 0
@@ -31,12 +31,12 @@
 //   - check OK                     → ask y/N
 //   - y            → ask download vs skip
 //   - download OK  → ask install vs skip (matches the
-//                    "可中途取消,跳过下载/安装" requirement:
-//                    Ctrl-C during download AND a y/N gate
-//                    before install)
+//     "可中途取消,跳过下载/安装" requirement:
+//     Ctrl-C during download AND a y/N gate
+//     before install)
 //   - y            → install + restart + exit
 //
-// Restart policy
+// # Restart policy
 //
 // Bare CLI: after install the binary is re-exec'd (with the
 // user's original argv) so the running process is replaced
@@ -51,10 +51,12 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"io"
 	"os"
 	"os/exec"
@@ -85,12 +87,12 @@ import (
 //	--yes / -y        accept every stage without y/N prompts (CI mode)
 func newUpdateCmd() *cobra.Command {
 	var (
-		tag        string
-		quiet      bool
-		noInstall  bool
-		noRestart  bool
-		yes        bool
-		fromRepl   bool
+		tag       string
+		quiet     bool
+		noInstall bool
+		noRestart bool
+		yes       bool
+		fromRepl  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -253,7 +255,7 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		dlRes = &updater.DownloadResult{
 			Asset:       *asset,
 			StagingPath: wantArchive,
-			Bytes:        info.Size(),
+			Bytes:       info.Size(),
 			SHA256Hex:   sum,
 		}
 	} else {
@@ -339,7 +341,7 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 // bad install) we surface the error so the operator can
 // recover manually by re-running.
 func execAndExit(out io.Writer, binary string, argv []string) error {
-	cmd := exec.Command(binary, argv[1:]...)
+	cmd := proc.New(context.Background(), binary, argv[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -414,7 +416,7 @@ func runRestartInline(out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, "restart")
+	cmd := proc.New(context.Background(), exe, "restart")
 	cmd.Stdout = out
 	cmd.Stderr = out
 	return cmd.Run()

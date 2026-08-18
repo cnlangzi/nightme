@@ -1247,3 +1247,80 @@ canonical format 不是"必须 parse agent 输出成结构化" — 它是**两�
 - `internal/bridge/claudecode/print.go` — `runCodeReviewPrintMode` (v8 已加)
 - `internal/bridge/claudecode/starter.go` — `Review` 改用 `runCodeReviewPrintMode` (v8 已加)
 - `internal/agent/review_per_bridge_test.go` — doc 注释更新为 §13 规则
+
+---
+
+## 14. Slash command 路由不变式(framework 规则,所有 command 适用)
+
+夜城的核心契约,**所有 slash command**(包括 `/review`)遵循这条规则:
+
+```
+match prefix?
+  ├─ NO → fall through to agent as plain text message
+  │        (current selected AS handles it as a normal user message)
+  └─ YES → dispatcher takes ownership
+           ├─ args valid → run command → return Reply (Consumed: true)
+           ├─ args invalid → return error reply (Consumed: true)
+           └─ runtime error → return error reply (Consumed: true)
+```
+
+实现位置:
+- `internal/command/commander.go` Match() — prefix check
+- `internal/command/commander.go` Dispatch() — returns `&SlashOutput{Consumed: ..., Reply: ...}`
+- `internal/gateway/inbound/command.go` tryCommandDispatch() — routes based on Match result
+
+**关键不变量**:
+- 一旦 prefix 匹配,**消息归 dispatcher 拥有**,不再 fall through
+- 不论 args 对错,CommandResult.Consumed 都是 true
+- "fall through to agent" **仅** 适用于 prefix 没匹配的情况
+
+### 14.1 `command.Reply` 统一模式
+
+```go
+// 任何 dispatcher 的 inline reply 用法:
+return command.Reply(ctx, rt, "❌ error message"), nil
+```
+
+`command.Reply` 内部设 `Consumed: true` + `Reply: "..."`,runtime 会:
+1. 把 Reply emit 到 channel
+2. 不调 agent(message 已被 dispatcher 拥有)
+
+### 14.2 这个 rule 在 `/review` 上的应用
+
+`internal/command/review/cmd.go` 在两种情况下调 `command.Reply`:
+
+| 场景 | Reply | Consumed |
+|---|---|---|
+| `parseReviewArgs` error(`unknown arg`) | `❌ unknown arg X` | true |
+| 缺 active agent | `❌ 当前没有 active agent...` | true |
+| 未指定 `--agent` 但 agent 没注册 | `❌ unknown agent X` | true |
+| `starter.Review` error | `❌ /review 失败: ...` | true(`cs.Emitter().Send` 异步) |
+| 成功 | (无 inline reply,review 内容异步 inject) | true |
+
+任何一种 err,**消息不落到 agent**。
+
+### 14.3 例子:为什么 `/revieww`(拼错了)会 fall through
+
+`/revieww` 中 `Match()` 找不到 `revieww` 的 prefix → fall through → agent 看到原始文本,可能会问 "你刚才说 /revieww 是什么意思?"
+
+`/review --agent codex`(拼错了 flag,kebab vs em-dash)→ `Match()` 找到 `review` prefix → dispatcher 跑 → `parseReviewArgs` error → `❌ unknown arg '—agent'` → agent 看不到原消息。
+
+### 14.4 测试覆盖
+
+`internal/command/review/cmd_test.go::TestSpec_RejectsArgs` 覆盖:
+- 位置 arg (`["review", "foo"]`)
+- 多个位置 arg
+- 未知 flag (`--base`)
+- em-dash (`-agent` vs `—agent`)
+
+每个 case 验证 `Reply` 包含 "❌ unknown arg" 和 offending token,**验证 dispatcher 没 fall through**。
+
+### 14.5 这条规则不只针对 `/review`
+
+适用于所有 slash command:
+- `/cwd /path/with spaces` — multi-token path → `command.Reply` "Too many arguments" + Consumed=true
+- `/think on` → `cs.SetThinkMode` → Reply
+- `/use <unknown-agent>` → `command.Reply` "unknown agent" + Consumed=true
+- `/stop` → no args → Reply
+
+每个 dispatcher 都有自己的 error path,但都通过 `command.Reply` 保持 Consumed=true。

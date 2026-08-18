@@ -122,26 +122,31 @@ jobs:
       - name: Build smoke binary
         shell: bash
         run: |
-          # On Windows the binary needs an explicit .exe suffix
-          # when -o is used; on Linux/macOS no extension is fine.
-          # Without this, the next step's `$bin` resolves to a
-          # path that doesn't exist on Windows runners and exits
-          # 127 ("command not found").
-          bin="dist/nightme"
+          # Use the canonical build entry points so CI exercises
+          # exactly what a developer would run locally:
+          #   - Windows: build.bat (cmd-native, also documents
+          #     how Windows users build without GnuWin32 make)
+          #   - Linux/macOS: make build (uses LDFLAGS from the
+          #     Makefile to bake version metadata in)
+          # Both produce bin/nightme[.exe] with version metadata
+          # baked in via -ldflags. Going through these scripts
+          # (rather than a bare 'go build' here) means a
+          # regression in build.bat or the Makefile LDFLAGS list
+          # surfaces as a failing CI gate instead of a Windows-
+          # only user-facing "version unknown" surprise.
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            bin="dist/nightme.exe"
+            ./build.bat
+          else
+            make build
           fi
-          mkdir -p dist
-          go build -o "$bin" ./cmd/nightme
-          echo "Built: $bin"
 
       - name: Verify bare REPL (banner + dispatch matrix)
         shell: bash
         run: |
-          # Same binary-name convention as Build smoke binary.
-          bin="./dist/nightme"
+          # build.bat → bin/nightme.exe, make build → bin/nightme.
+          bin="./bin/nightme"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            bin="./dist/nightme.exe"
+            bin="./bin/nightme.exe"
           fi
           # Three independent lines: a known-good command
           # (version), an unknown command (catches banner-

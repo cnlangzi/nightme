@@ -1,6 +1,6 @@
 # Telegram Channel - Topic 方案与接入设计
 
-> **Status**: design / 方案定稿（待实现）
+> **Status**: implemented (核心场景) + 已知 gap 跟踪（见 §14）
 > **Scope**: nightme Telegram Bot API 适配器（`internal/channel/telegram/*`）
 > **目的**: 在 Telegram Forum Supergroup 中，将主窗口作为会话入口，将每个 qino 会话映射为一个 Topic，并在 Topic 内承载占位状态、thinking、工具调用、结果和交互卡。
 > **Related docs**:
@@ -330,10 +330,40 @@ Telegram 没有类似飞书注册 API 的“扫码后自动创建 Bot”能力�
 4. 输入以 bot 结尾的唯一 username
 5. 保存 BotFather 返回的 Bot Token
 6. 执行 nightme login telegram
-7. 输入 Bot Token
-8. 将 Bot 添加到已开启 Topics 的 Forum Supergroup
-9. 启动 nightme daemon
+7. CLI 打印 BotFather 走查步骤 + 提示输入 Token
+8. 输入 Token 后自动调用 getMe 校验（拒绝 user account）
+9. CLI 校验通过后原子写入 config.yaml（chmod 0600）
+10. 将 Bot 添加到已开启 Topics 的 Forum Supergroup
+11. 启动 nightme daemon（nightme start --channel=telegram）
 ```
+
+`nightme login telegram` 的实现要点：
+- 不做 QR 扫码（飞书模式）。Telegram 没有第三方代注册 bot 的接口。
+- 打印 @BotFather 走查步骤（12 行说明，适配 80x24 终端）。
+- 从 stdin 读取 token，过滤空白行，10 分钟超时。
+- 调用 `getMe` 校验 token 是否属于 bot 账号（拒绝 user account token）。
+- 校验通过后回写 `cfg.Telegram.BotToken`，原子写入 config.yaml。
+- 也支持手动编辑 `~/.nightme/config.yaml` 的 `telegram.bot_token`
+  字段（适用于无法用交互式 CLI 的场景，例如远程 headless 服务器）。
+
+### Greeting 发送流程
+
+`nightme login telegram` 在 token 写入 config 后会**主动发送**问候消息给 bot 的 owner：
+
+1. CLI 提示用户在 Telegram 客户端打开 `@<bot_username>`，发送任意消息（`/start` 是惯例）。
+2. CLI 启动 getUpdates long-polling（25 秒每次，最多 2 分钟），等待**第一条私聊**消息。
+3. 收到合法私聊消息后，CLI 用 sendMessage 把 canonical 双语 greeting
+   （与飞书的 GreetingTexts() 共用）逐条发给 owner 的 chat_id。
+4. 2 分钟内用户没消息：CLI 友好提示"你可以稍后 /start"，不报错。
+   daemon 启动后用户消息进来时会正常处理。
+
+实现细节：
+- 只接私聊消息（chat.type == "private"）；群消息跳过，避免在群里广播 greeting。
+- 跳过 bot-from 消息（防止把别的 bot 的消息误认为 owner）。
+- greeting 内容：`Hi, this is NightMe 👋. Your pair programmer.` /
+  `Set it running. Stay in the loop from your phone, on your terms 🚀.`
+  （英语先发，中文跟随 —— 与飞书 GreetingTexts() 保持一致。）
+- 错误是 soft-failure：greeting 失败不回滚 token 写入。
 
 Bot Token 属于敏感凭证，应像 App Secret 一样保存在本机配置中，不得通过群消息、命令行参数日志或普通遥测上报。配置应遵守现有 nightme 凭证权限和敏感字段脱敏规则。
 
@@ -1470,3 +1500,410 @@ health.go      Bot API、polling、Topic 状态健康快照
 - Telegram Adapter 内部完成 Markdown、HTML 转义和消息拆分。
 - LLM 原始 Markdown 不需要改变 Agent 输出协议。
 - callback 重复、消息删除、Bot 权限变化和 429 都有明确处理。
+
+## 14. 已知限制 / Gap（截至本次实现）
+
+下面这些是文档里讨论过、Telegram Bot API 的能力差距或实现优先级选择导致没做的点。每条都标明属于哪一类：
+
+| 类别 | 说明 |
+|---|---|
+| **限制** | Telegram Bot API 本身不支持，靠 adapter 怎么写都做不到 |
+| **降级** | 飞书有原生能力、Telegram 没有对应物，已用近似手段实现 |
+| **未实现** | 设计上想做、但目前没实现（不在本期 scope） |
+
+### 14.1 限制类（API 做不到）
+
+#### L1. 没有"卡片"概念，Telegram 不支持结构化 card 元素
+- 飞书用 `<div>` / `<form>` / `<hr>` 等元素构成 receipt card，可以原位 append 多条 log entry。
+- Telegram 只能 `editMessageText` 整体替换文本，不能 append 单条 log entry。
+- 后果：长回复（一个 turn 100+ 行）会变成 Topic 内 100+ 条独立消息。
+- 缓解：所有 reply 已经在 Topic 内（不污染主窗口），用户可折叠 Topic；设计上接受了这个 trade-off。
+- 未来替代方案见 14.3 未实现类（receipt-on-edit）。
+
+#### L2. `editMessageText` 整体替换，48 小时内有效
+- Telegram 没有 "append to existing message" 语义。所有"原位更新"都是替换全部文本。
+- 每次 edit 都需要重新发送**全部**历史文本（如果想保留之前的内容）。
+- 单条消息文本上限 4096 字符。
+- 文本消息编辑受 48 小时限制（`editMessageReplyMarkup` / `editMessageMedia` 无限制）。
+
+#### L3. callback_data 64 字节限制
+- 已用 `shortID(req[:8] + "-" + req[len-8:])` 应对，完整 RequestID 走 state store 反查。
+- 但如果 RequestID 数量爆炸增长，shortID 可能碰撞（8+8 hex = 16 字节，碰撞概率按 1/2^64 估算，安全）。
+
+#### L4. ForceReply 仅对下一条用户消息生效
+- 用户发了别的消息后，force_reply 自动失效。
+- 多问题向导场景下，如果用户在 ForceReply 期间发了不相关的消息，ForceReply prompt 会沉默失效。
+- 缓解：handler 内检查 `pendingInput` 状态，未匹配则当普通消息处理。
+
+#### L5. 没有 `reply_in_thread` 等价物
+- 飞书 reply_in_thread 把消息收到 thread drawer，主消息流只剩 1 条气泡。
+- Telegram 的 `reply_to_message_id` 只在视觉上"引用"，消息本身仍然显示在 Topic 主消息流。
+- 后果：bot 收到用户消息后的所有 OutReply 都堆在 Topic 时间线上，无折叠效果。
+- 设计上靠 Topic 自身隔离来替代。
+
+#### L6. 没有 markdown 原生支持，只能用受限 HTML 子集
+- Telegram 只支持 `<b>` `<i>` `<u>` `<s>` `<strike>` `<del>` `<code>` `<pre>` `<a href>` `<tg-spoiler>` 这几个标签。
+- Markdown 表格、复杂布局、颜色、字号全部不支持。
+- 已实现 `RenderMarkdown`（标题/列表/代码块/链接/粗体/斜体/spoiler/blockquote/表格/水平线/HorizontalRule）+ HTML 转义。
+- 但**颜色**没有替代（飞书可用 `<font color="grey">`），用 emoji + 粗体近似。
+
+#### L7. 没有"原生 task list" / checklist 元素
+- 飞书 receipt 用 `<checkbox>` 元素。
+- Telegram 只能用文本 `[x]` / `[ ]` / `[~]` 模拟。无法点击切换。
+- 后果：用户不能在 Telegram 内更新 task 状态，必须等下一个 OutTaskUpdate 自动重发。
+
+#### L8. 没有 "Mini App form" 原生输入控件（除 ForceReply）
+- 飞书的 form 可以让用户在卡片内填多个字段一次提交。
+- Telegram 只支持 ForceReply（单次单字段）+ Web App（要 URL、要 HTTPS、自行实现）。
+- 后果：复杂多字段输入（如"输入仓库名 + 分支名"）要走两轮：先 option 选择字段类型，再 ForceReply 输入内容。
+
+#### L9. `editForumTopic` 只能改名称/图标，不能改"正文"
+- Telegram Forum Topic 本身没有消息正文，`editForumTopic` 只接受 name + icon_custom_emoji。
+- 这意味着 Topic 永远是"空容器"，永远要靠内部的占位消息表达"会话状态"。
+- 已确认无替代方案。
+
+### 14.2 降级类（用近似手段实现，已 work）
+
+#### D1. OutReply / OutResult / OutThinking / OutTool 都用独立消息
+- 飞书 receipt 把这些都装在一张 card 内，通过 div 元素结构区分。
+- Telegram 没有等价物，每条 OutReply / OutTool / OutThinking 都是独立消息。
+- 视觉区分靠 emoji 前缀：`💭` thinking / `🔧` tool / `✅` tool_end / `📝` result。
+- Topic 内的可读性靠消息时间线排序，不靠布局结构。
+
+#### D2. OutError 渲染为带 ⚠️ 标题的纯文本消息
+- 飞书 `encodeErrorCard(title, body)` 用红色 card 元素 + 标题。
+- Telegram 没有红色 card。降级为 `⚠️ <error title>\n\n<body>\n\n<pre>stderr tail</pre>`。
+
+#### D3. OutCommandReply 走纯文本，不进入 markdown 渲染
+- 飞书走独立顶层 Create 通道。
+- Telegram 同样 sendMessage 但跳过 `RenderMarkdown`（slash 命令输出已是纯文本，再渲染一遍会有 `<` `>` 转义问题）。
+
+#### D4. `addReaction` / `deleteReaction` 都用 `setMessageReaction`
+- Telegram 没有"删除单个 reaction"的 API，"删除"通过 `reaction: []` 实现。
+- Adapter 层在日志上区分意图，但 Telegram 看到的是同一个 API 调用。
+
+#### D5. OutHeartbeat 走占位消息 PATCH
+- 飞书有 receipt header 区域专门承载 heartbeat，PATCH 时不影响 log entries。
+- Telegram 占位消息就是"Working..."那一条，PATCH 直接改文本（替换 thinking/tool 计数）。
+- 缺点：占位消息上**不能**同时显示工作状态和历史 thinking/log（飞书可以分层）。
+
+### 14.3 未实现类（设计意图存在，本次没做）
+
+#### N1. Rolling-log receipt card
+- 飞书 F-25/F-40：长回复 PATCH 同一张 card，多 div 元素累积。
+- Telegram 技术上能做（一条 message + 多次 `editMessageText`），但每次 edit 都重发全部历史。
+- **本期决定不实现**，因为：
+  1. Topic 内已经隔离 reply 流（核心价值"主窗口不污染"已达成）
+  2. 实现复杂：需要 adapter 内维护 full-text history、4096 char 限制下需要 overflow rollover 策略
+  3. 视觉收益相对 Topic 已经带来的隔离较小
+- **未来重做评估**：如果用户反馈"Topic 内 reply 太多看不清"再回来做。届时需要：
+  - 一个 receipt message ID per turn
+  - 全 history 字符串拼接 + overflow 检测
+  - 与 OutThinking / OutToolStart / OutToolEnd / OutHeartbeat 的整合规则
+
+#### N2. `pendingHeartbeats` 缓冲（feishu F-63.1）
+- 飞书：在 receipt 还没创建前缓存 heartbeat snapshot，receipt 一旦创建立即应用。
+- Telegram 当前实现在 C2（C2 已实现 OutHeartbeat 自动创建 placeholder）。但**没有 buffer**：第一次 OutHeartbeat 创建占位并 PATCH，后续 OutHeartbeat 走 PATCH。
+- **缺失的部分**：如果在 placeholder 创建**之前**就有心跳进入且创建失败，没有重试机制。
+- **缓解**：placeholder 创建失败时 OutHeartbeat 走 fallback（发独立消息），不丢数据。
+
+#### N3. OutResult 之前显示 `✅ 完成` reaction
+- 飞书：OnPromptEnded 给 receipt 加 ✅ reaction，**不**编辑文本。
+- 当前 Telegram：OnPromptEnded 把占位消息文本改成 `<b>✅ Completed</b>`。
+- **设计意图改用 setMessageReaction 实现**，本次没改，留待后续。
+- 替换理由：当前实现把占位文本改成 "Completed" 后，下一次 turn 开始时无法回退到 "Working..."。
+
+#### N4. Orphan reply fallback（feishu `postOrphanReplyCard`）
+- 飞书：SendCard 失败时降级到顶层 Create。
+- Telegram：sendMessage 失败 → retry 3 次 → 仍失败就返回 error，runtime 看到 error。
+- **缓解**：已有 retry 层兜底 transient 错误；如果用户配置 bot 权限问题（terminal 错误）确实无解。
+- **未来**：可以加"orphan fallback"用 `chat_id` 直接发（绕过 topic_id），但当前实现的 retry 已经覆盖 90% 场景。
+
+#### N5. 编辑消息用 `msg.ReplyTo` 作为锚点
+- 飞书：OutReply 携带 `msg.ReplyTo`（user message id），receipt 锚定到该用户消息。
+- Telegram：Send() 当前完全忽略 `msg.ReplyTo`。
+- **影响有限**：Telegram Topic 本身就是 scope，不需要锚定到 user message。`reply_to_message_id` 在 Topic 内也只起视觉引用作用，不影响消息流。
+- **未来**：如果要做"reply-only"模式（即只回复某条用户消息但不开新 bubble），可以用 `reply_to_message_id` 实现。
+
+#### N6. 心跳 header 的 agent identity 注入（session_id / model / agent_name）
+- 飞书：receipt header 行有 "Agent · Model · Session"。
+- Telegram 当前 OutInit 已 silent drop（见 C1），占位消息上也没有 header。
+- 状态丢失：用户进入 Topic 后看不到当前 turn 的 session 标识。
+- **未来**：占位消息 PATCH 时把 SessionID / Model / AgentName 拼到 heartbeat 文本头部。
+
+### 14.4 实现优先级建议
+
+如果未来要做 follow-up，建议按这个顺序：
+
+1. **N3**（OnPromptEnded 用 reaction 而非改文本）—— 1 行改动，恢复力强。
+2. **N6**（占位 header 加 session identity）—— 小改，提升可观测性。
+3. **N4**（orphan fallback）—— 中等改，覆盖极端场景。
+4. **N2**（pendingHeartbeats）—— 中等改，但 C2 已经覆盖大部分场景。
+5. **N1**（rolling-log receipt）—— 大改，需要权衡 4096 限制 + 历史重发成本。
+6. **N5**（用 ReplyTo）—— 视觉改进，影响小。
+
+### 14.5 本次实现完成（C1, C2）
+
+| ID | 内容 | 状态 |
+|---|---|---|
+| C1 | OutInit silent drop（与 feishu F-44 对齐） | 已实现 |
+| C2 | OutHeartbeat 路径 ensurePlaceholderForHeartbeat（占位缺失时自动创建） | 已实现 |
+
+后续修订请直接在本节追加，并把对应 issue 编号填进去。
+
+## 15. Telegram 独有、未利用的能力
+
+下面这些 API 飞书**没有**对应物，Telegram 原生支持但当前 adapter 没有用。每条标出"对应飞书体验"和"启用后能补齐哪个 gap"，便于后续讨论优先级。
+
+### 15.1 P1 - `pinChatMessage` 钉住最终结果
+
+**能力**：`pinChatMessage(chat_id, message_id)` 把任意消息钉在 Topic（或群组）顶部。
+
+**对应飞书体验**：飞书没有 pin 概念。
+
+**补齐的 gap**：
+- 用户痛点：长 Topic 内回复滚动后，用户很难找到 OutResult 的最终答案。
+- 启用后：每个 turn 结束后自动把 OutResult 消息 pin 在 Topic 顶部；新一轮开始时 unpin 旧 result。
+
+**当前为什么没做**：
+- 14.3 N1（rolling-log receipt）的替代方案：如果不做 receipt，pin 是次优选择 —— 视觉上不那么"集成"，但用户能找到结果。
+- 14.3 N3（OnPromptEnded 用 reaction 而非改文本）的延伸：可以在 ✅ reaction 之外再叠加 pin，提升发现性。
+
+**工作量估算**：~15 行（OutResult 后调 pin；新一轮 unpin 旧 result）。
+
+**风险 / 边界**：
+- pinChatMessage 调用也有速率限制（每个 chat 5 次/min）。
+- 多 Topic 同 chat 时，pin 在 chat 级别可见，跨 Topic 共享 pin 位 —— 可能造成 pin 抖动。
+- 解决：每个 chat 只 pin 当前 turn 的 result，unpin 之前的。
+
+### 15.2 P2 - `deleteMessage` 删除占位消息
+
+**能力**：`deleteMessage(chat_id, message_id)` 删除任何消息（48 小时内）。
+
+**对应飞书体验**：飞书 receipt 不能"删除"（会丢上下文）。
+
+**补齐的 gap**：
+- 14.3 N3 的"Topic 流更干净"版本：OnPromptEnded 时删占位，配合 ✅ reaction 作为完成标识。
+- 14.3 D5 的扩展：占位消息不再需要"原地切换 Working ↔ Completed"。
+
+**当前为什么没做**：
+- 删除消息看起来"激进"，用户可能依赖占位消息作为会话时间线锚点。
+- 飞书没有等价操作可对比，没经验数据。
+
+**工作量估算**：~10 行（OnPromptEnded 时调 deleteMessage 替代 editMessageText）。
+
+**风险 / 边界**：
+- 删除后用户没法"回到这条占位看历史"——但 Topic 内其他消息仍然是时间线。
+- 必须配合 ✅ reaction（不能既删又没标识）。
+
+### 15.3 P3 - OnPromptEnded 用 ✅ reaction + delete placeholder 组合
+
+**能力**：组合 P2 + setMessageReaction("✅")。
+
+**对应飞书体验**：飞书 receipt 不删但加 ✅ reaction。
+
+**补齐的 gap**：
+- 14.3 N3 的最佳实现：视觉上看到 ✅（reaction）+ Topic 流不堆 "✅ Completed" 文本。
+
+**当前为什么没做**：见 14.3 N3。
+
+**工作量估算**：~15 行。
+
+**风险 / 边界**：同 P2。
+
+### 15.4 P4 - `editMessageReplyMarkup` 只更新键盘
+
+**能力**：`editMessageReplyMarkup(chat_id, msg_id, keyboard)` 单独更新消息的 keyboard，**不**改 text。
+
+**对应飞书体验**：飞书 PATCH card 必须整体替换 schema。
+
+**补齐的 gap**：
+- 当前实现每次点 button 都 `editMessageText(text + keyboard)`，触发 markdown 重新渲染（耗时、可能引入渲染差异）。
+- Choice settle 时只更新 keyboard（移除其他按钮）应走 editMessageReplyMarkup，不动 text。
+
+**当前为什么没做**：
+- 当前实现是 `editMessageText(text, keyboard)`，简化实现。
+- 性能影响在小流量下看不出来，未做 profile。
+
+**工作量估算**：~20 行（patchChoice settle 路径改用 editMessageReplyMarkup）。
+
+**风险 / 边界**：
+- 没发现 Telegram API 差异。
+- 收益主要是性能（少一次 markdown parse）和一致性（不会因为 markdown 渲染规则变化导致已 settle 的 choice 文本微变）。
+
+### 15.5 P5 - `sendMediaGroup` 批量附件
+
+**能力**：`sendMediaGroup(chat_id, media[])` 一次发送最多 10 个 media（photo/video）作为**一条**消息的相册。
+
+**对应飞书体验**：飞书 upload_file 可以批量（im.message.batch_send），但实现细节不同。
+
+**补齐的 gap**：
+- 当前附件下载 + 上传：每个图片/视频单独 `sendPhoto` / `sendVideo`，多附件变成多条消息。
+- 多张图体验差：用户收不到"相册视图"，需要滑动。
+
+**当前为什么没做**：
+- 当前 attachments.go 按 1 个 media 1 条消息处理。
+- 实现 batch 需要改 attachment pipeline（流式而非全部加载后批量）。
+
+**工作量估算**：~30 行（attachment 收集路径 + sendMediaGroup 调用）。
+
+**风险 / 边界**：
+- sendMediaGroup 不支持 caption（caption 必须是 media[0] 的 caption，其他 media 无 caption）。
+- 混合类型（photo + video）OK，但 document 不能混在 media group 里。
+- 如果用户发的是 11+ 张图，需要 fallback 成多条 media group 消息。
+
+### 15.6 P6 - `unpinAllChatMessages` 清理历史 pin
+
+**能力**：`unpinAllChatMessages(chat_id)` 清空 chat 内所有 pin。
+
+**对应飞书体验**：飞书没有 pin。
+
+**补齐的 gap**：
+- Bot 维护时（升级、迁移）可能留下过时 pin。
+- 单元测试 / 集成测试需要在每个 case 之间清理 pin。
+
+**当前为什么没做**：产品需求不明确。
+
+**工作量估算**：~5 行（暴露为 adapter method + 测试 helper）。
+
+### 15.7 P7 - `sendChatAction` 显示 typing 状态
+
+**能力**：`sendChatAction(chat_id, action="typing")` 在 chat 内显示"bot 正在输入..."指示。
+
+**对应飞书体验**：飞书 SDK 内置 typing indicator。
+
+**补齐的 gap**：
+- 当前用户发完消息后，bot 处理期间 Topic 内**无任何反馈**直到第一条 OutReply 或 OutHeartbeat 到达。
+- typing 状态让用户立即知道"bot 收到了，正在处理"。
+
+**当前为什么没做**：
+- typing 状态默认 5 秒过期，需要持续刷新（每 4-5 秒重发）。
+- LLM turn 通常 < 5s 时不需要，但长 turn（>10s）用户体验差。
+- 之前没考虑过补这个细节。
+
+**工作量估算**：~25 行（adapter 持有 typing goroutine；在 OutReply 第一次到达时停止）。
+
+**风险 / 边界**：
+- typing 不能跨 Topic（typing 显示在 chat 级别，不是 topic 级别）—— 用户在 main window 也会看到。
+- 频率限制：typing 调用本身也吃 API 配额（每个 chat 1 次/5s）。
+- 如果 chat 不是 forum，typing 显示在 main window 会让用户觉得 bot 在 main window 回复 —— 实际只是 feedback。
+
+### 15.8 P8 - `sendPoll` 作为 Choice 的另一种渲染
+
+**能力**：`sendPoll(chat_id, question, options[])` 发一个 poll。
+
+**对应飞书体验**：飞书 AskUserQuestion 用 `<select>` form components。
+
+**补齐的 gap**：
+- 飞书 AskUserQuestion 用 form 让用户填答案。
+- Telegram 可以用 sendPoll 实现"让用户选 1-N 个选项"——但**不是 1:1 等价**：
+  - sendPoll 选项数不限
+  - 选项是文字标签
+  - 用户选完后 poll 自动 settle
+  - 但选项 ID 跟 ChoiceOption.ID 的映射需要 adapter 自己做
+  - 不能做"输入自定义答案"（除非 poll 之外再补 ForceReply）
+
+**当前为什么没做**：
+- 已经用 InlineKeyboardMarkup 实现了 Choice，体验够用。
+- sendPoll 是**可选替代**，不是必须。
+
+**工作量估算**：~80 行（sendPoll 作为 OutChoice 的另一种渲染 + 监听 poll_answer update）。
+
+**风险 / 边界**：
+- sendPoll 投完票后自动 settle，bot 收 `poll_answer` update —— 需要处理新的 update 类型。
+- 选项不能像 InlineKeyboard 那样灵活（不支持 emoji icon、不支持 URL 等）。
+
+### 15.9 优先级建议
+
+按 ROI 排序（参考 14.4）：
+
+| 优先级 | 项 | 工作量 | 价值 | 理由 |
+|---|---|---|---|---|
+| 1 | **P3** reaction + delete placeholder | ~15 行 | 高 | 替换 N3，最干净的实现 |
+| 2 | **P1** pin OutResult | ~15 行 | 高 | UX 提升大（长 Topic 内找答案） |
+| 3 | **P7** typing indicator | ~25 行 | 中 | 长 turn 反馈 |
+| 4 | **P4** editMessageReplyMarkup 单独更新 | ~20 行 | 低 | 性能优化 |
+| 5 | **P5** sendMediaGroup | ~30 行 | 低 | 少见场景 |
+| 6 | **P2** deleteMessage（仅作为 P3 子步骤） | ~10 行 | 中 | 已在 P3 中 |
+| 7 | **P6** unpinAllChatMessages | ~5 行 | 极低 | 测试维护 |
+| 8 | **P8** sendPoll 替代 Choice | ~80 行 | 中 | 可选替代方案，争议大 |
+
+### 15.10 与已有 gap 的关系
+
+| Telegram 能力 | 补齐的 gap |
+|---|---|
+| P1 pin | N1（rolling-log 替代方案） |
+| P2 delete | N3 变体 |
+| P3 reaction+delete | N3 最佳实现 |
+| P4 edit markup | D1（thinking/tool 独立消息优化） |
+| P5 media group | 附件流程优化 |
+| P7 typing | 用户反馈体验（不在 §14 内） |
+
+后续讨论时优先关注 P1/P3/P7（性价比最高）。
+
+
+## 16. 网络代理
+
+Telegram Bot API 在某些网络环境（如中国大陆）下不可达。nightme **默认继承** 标准代理环境变量，无需任何配置。
+
+### 16.1 支持的环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `HTTP_PROXY` | HTTP 请求的代理 URL（如 `http://127.0.0.1:7890`） |
+| `HTTPS_PROXY` | HTTPS 请求的代理 URL（对 `api.telegram.org` 生效） |
+| `NO_PROXY` | 不走代理的域名/网段（逗号分隔） |
+| `ALL_PROXY` | 兜底代理，HTTP_PROXY/HTTPS_PROXY 未设置时生效 |
+
+Go 标准库的 `http.ProxyFromEnvironment` 自动读取这些变量，无需 nightme 介入。
+
+### 16.2 使用示例
+
+**Clash / Surge（mixed-port 模式，HTTP 代理）**：
+```bash
+export HTTPS_PROXY=http://127.0.0.1:7890
+nightme start --channel=telegram
+```
+
+**v2ray / shadowsocks（SOCKS5 代理）**：
+SOCKS5 代理无法通过环境变量直接配置，需要在系统层做透明代理转发。
+或者用 `proxychains` / `tsocks` 之类的工具包装 nightme：
+```bash
+proxychains4 nightme start --channel=telegram
+```
+
+**不走某些域名**：
+```bash
+export NO_PROXY=localhost,127.0.0.1,*.internal
+nightme start --channel=telegram
+```
+
+### 16.3 内部实现
+
+所有 outbound HTTP 请求统一走 `internal/httpclient` 包：
+
+```go
+import "github.com/cnlangzi/nightme/internal/httpclient"
+
+client := httpclient.Default()           // 45s timeout, proxy from env
+client := httpclient.DefaultWithTimeout(10*time.Second)
+```
+
+该包封装的原则：
+- 唯一职责：把 `&http.Client{Timeout: ...}` 集中到一个地方，避免散落重复
+- 默认行为：复用 `http.DefaultTransport`（已经指向 `http.ProxyFromEnvironment`）
+- 不做 retry / rate limit / logging —— 这些由调用层组合（参考 `internal/channel/telegram/retry.go` 和 `ratelimit.go`）
+
+被改造的位置：
+- `internal/updater` —— 检查 GitHub release
+- `internal/version` —— 检查 nightme.dev 版本
+- `internal/bridge/dsh/host` —— dsh 主机 RPC
+- `internal/channel/telegram` —— Telegram Bot API
+- `internal/login/telegram` —— login 时的 `getMe` 校验
+
+### 16.4 不暴露代理配置的原因
+
+不提供 `cfg.Telegram.ProxyURL` 之类的配置项，原因：
+- 代理需求来自环境（用户机器的网络），不是配置决策
+- 配置项会被各种 secret 管理工具、CI/CD 流水线暴露在 diff 里
+- 环境变量是 OS-level 的标准机制，工具链（Docker、Kubernetes、systemd）都支持

@@ -192,10 +192,12 @@ docs/
 ├── PRD.md                 ← Layer 1: 产品
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
+├── CHANNEL.md             ← 多 channel 架构定稿（per-channel Manager + Emitter + 懒加载 restore）
 ├── feat/                  ← Layer 4: 每个 feature 的实现
 ├── bridge/                ← 各 agent bridge 协议（claude / dsh / …）
-└── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑**）
-    └── feishu-cards.md    ← 改按钮 / form / AskUserQuestion 先读这份
+└── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑** / Telegram Topic）
+    ├── feishu-cards.md    ← 改按钮 / form / AskUserQuestion 先读这份
+    └── telegram.md        ← Telegram Forum Supergroup Topic 方案
 ```
 
 ---
@@ -218,3 +220,4 @@ docs/
 
 - 初始：建立 4 层文档结构 + 命名约定 + 决策树
 - 2026-08-17：补 `docs/channel/` / `docs/bridge/` 在目录示意里的位置；飞书交互卡踩坑进 `channel/feishu-cards.md`
+- 2026-08-18：新增顶层 `docs/CHANNEL.md`（多 channel 架构设计定稿）；FEATURES.md §9 / SPEC.md §1.1+§1.3+§11.1 同步；`channel/telegram.md` 在 FEATURES.md §4.2 加索引。架构变更：per-channel `chatsession.Manager`、per-channel `outbound.Emitter`、懒加载 restore、`channel.Registry` 接入点、OCP 干净（接入新 channel = 1 个 adapter + 1 个 init）

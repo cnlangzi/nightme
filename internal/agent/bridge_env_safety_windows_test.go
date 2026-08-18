@@ -37,9 +37,9 @@ import (
 
 // bridgeDirs is the set of packages that produce *exec.Cmd for
 // the runtime. Each one must compose env from KEY=VALUE entries
-// only. A package that uses something other than agent.NewCmd to
+// only. A package that uses something other than proc.New to
 // spawn the agent binary should be reviewed and either migrated
-// to NewCmd or added to this list with explicit justification.
+// to proc.New or added to this list with explicit justification.
 var bridgeDirs = []string{
 	"internal/bridge/claudecode",
 	"internal/bridge/codex",

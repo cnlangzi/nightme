@@ -171,7 +171,7 @@ kill "$pid" 2>/dev/null || true
 
 | Agent | npm 包 | 来源 / 验证锚 |
 |---|---|---|
-| `claude` | `@anthropic-ai/claude-code` | `internal/agent/exec_windows.go:43` 注释引用 + Anthropic 官方 setup 文档 |
+| `claude` | `@anthropic-ai/claude-code` | `internal/proc/exec_windows.go:43` 注释引用 + Anthropic 官方 setup 文档 |
 | `codex` | `@openai/codex` | `docs/WINDOWS.md:183` "npm 包内的 codex.cmd" + OpenAI 官方 docs |
 | `opencode` | `opencode-ai` | `docs/WINDOWS.md:184` |
 | `pi` | `@earendil-works/pi-coding-agent` | `docs/bridge/pi.md:271` |

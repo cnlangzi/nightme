@@ -92,6 +92,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // stderrCapBytes bounds the stderr buffer kept in memory across a
@@ -271,7 +272,7 @@ func truncatePrintLogLine(s string) string {
 //
 // IMPORTANT: the prompt is appended as the FINAL element of the
 // returned slice. The caller (runPrintMode) MUST pass the slice
-// to agent.NewCmd as-is — never reach into `args` to drop the
+// to proc.New as-is — never reach into `args` to drop the
 // tail. The previous shape `(args, prompt string)` made the
 // "append prompt to args" step a separate concern at the call
 // site and was missed in the original implementation; the
@@ -378,8 +379,8 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// of flags) without re-deriving either.
 	promptBytes := len(args[len(args)-1])
 
-	cmd := agent.NewCmd(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace // belt-and-braces with --dir
+	child := proc.New(ctx, s.command, args...)
+	child.Dir = cfg.Workspace // belt-and-braces with --dir
 
 	// Forward cfg.Env the same way Start does (append to
 	// os.Environ, cfg wins on conflict). Without this, /gtw
@@ -387,24 +388,24 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// credentials) are silently dropped on the print-mode
 	// path.
 	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), cfg.Env...)
+		child.Env = append(os.Environ(), cfg.Env...)
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("opencode: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
 		return agent.RunResult{}, fmt.Errorf("opencode: stderr pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		return agent.RunResult{}, fmt.Errorf("opencode: start: %w", err)
 	}
-	pid := cmd.Process.Pid
+	pid := child.Process.Pid
 
 	oLog("PrintMode Start",
 		"command", s.command,
@@ -454,7 +455,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		handleRunEvent(ev, &state)
 	})
 
-	waitErr := cmd.Wait()
+	waitErr := child.Wait()
 	<-stderrDone
 
 	elapsedMs := time.Since(startTime).Milliseconds()
@@ -513,7 +514,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	if state.errMsg != "" {
 		// Captured from the `error` wire event before the
 		// process exited cleanly. Per opencode run.ts, this
-		// path also sets exitCode=1 but `cmd.Wait` returns
+		// path also sets exitCode=1 but `child.Wait` returns
 		// nil in some bash-pipe edge cases — defensive
 		// capture here. Preserve partial text the same way the
 		// waitErr branch does, so the caller sees both the

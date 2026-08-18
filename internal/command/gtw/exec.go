@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/timeouts"
@@ -60,7 +60,7 @@ func runCmd(ctx context.Context, dir, name string, args ...string) (stdout, stde
 		ctx, cancel = context.WithTimeout(ctx, timeouts.CLI)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := proc.New(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

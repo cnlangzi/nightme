@@ -17,9 +17,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"io"
 	"os"
-	"os/exec"
 	"runtime/debug"
 	"strconv"
 	"syscall"
@@ -59,7 +59,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	defer readyR.Close()
 
-	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
+	child := proc.New(ctx, executable, daemonChildCommand, "--channel", opts.channel)
 	child.Env = append(os.Environ(), daemonLockFDEnv+"=3", readyFDEnv+"=4")
 	child.ExtraFiles = []*os.File{lock.File(), readyW}
 	child.Stdin = nil
@@ -82,7 +82,15 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		defer closeStderr()
 	}
 	child.Stderr = stderrSink
-	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// GUARD: do not re-assign child.SysProcAttr below; proc.New
+	// (internal/proc/exec_unix.go) sets it to
+	// &syscall.SysProcAttr{Setsid: true} when it spawns the child.
+	// The previous shape here re-assigned SysProcAttr to a fresh
+	// literal — a no-op today (same value) but a future foot-gun:
+	// any extra field proc.New adds (CLOSE_ON_EXEC, …) would be
+	// silently wiped by the wholesale struct literal. Add a unit
+	// test (daemon_lifecycle_unix_test.go) if a runtime check
+	// feels needed; the expression form is intentionally avoided.
 
 	if err := child.Start(); err != nil {
 		_ = readyW.Close()

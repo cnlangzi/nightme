@@ -17,11 +17,19 @@ import (
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
-func executeShell(ctx context.Context, cwd, cmd string, extraEnv []string) *result {
+func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string) *result {
 	start := time.Now()
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	// Route through proc.New so the platform-specific
+	// SysProcAttr lives in one place: Setsid on Unix (so the
+	// shell child becomes the leader of its own session and
+	// process group; same reasoning as the agent bridges —
+	// /dev/tty inheritance can't wedge the shell event loop),
+	// CREATE_NO_WINDOW on Windows (handled by dispatch_windows.go).
+	c := proc.New(ctx, "sh", "-c", cmdline)
 	c.Dir = cwd
 	// Parent env first, then caller-supplied vars on top. A
 	// duplicate key in extraEnv intentionally overrides the
@@ -39,7 +47,7 @@ func executeShell(ctx context.Context, cwd, cmd string, extraEnv []string) *resu
 		Consumed: true,
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
-		Cmd:      cmd,
+		Cmd:      cmdline,
 		Cwd:      cwd,
 		Duration: dur,
 	}

@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"os"
 	"os/exec"
 	"time"
@@ -47,10 +48,10 @@ const cpACPChinese = 936
 // single argument and let cmd.exe handle its own parsing —
 // this matches how Windows users actually type commands in
 // cmd.exe interactively.
-func executeShell(ctx context.Context, cwd, cmd string, extraEnv []string) *result {
+func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string) *result {
 	start := time.Now()
 
-	c := exec.CommandContext(ctx, "cmd", "/c", cmd)
+	c := proc.New(ctx, "cmd", "/c", cmdline)
 	c.Dir = cwd
 	// Parent env first, then caller-supplied vars on top.
 	c.Env = append(os.Environ(), extraEnv...)
@@ -83,7 +84,7 @@ func executeShell(ctx context.Context, cwd, cmd string, extraEnv []string) *resu
 		Stderr:   decode(stderrRaw.Bytes(), dec),
 		ExitCode: exitCode,
 		Duration: dur,
-		Cmd:      cmd,
+		Cmd:      cmdline,
 		Cwd:      cwd,
 	}
 	r.Reply = renderSummary(r)

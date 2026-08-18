@@ -50,7 +50,7 @@ func (r *Router) tryActionDispatch(ctx context.Context, mgr *chatsession.Manager
 	// for the full rationale — same shell.Dispatcher pattern.
 	go func() {
 		defer r.execWg.Done()
-		r.runAction(context.Background(), msg)
+		r.runAction(context.Background(), mgr, msg)
 	}()
 	return true, &CommandResult{Consumed: true}, nil
 }
@@ -73,14 +73,14 @@ func (r *Router) tryActionDispatch(ctx context.Context, mgr *chatsession.Manager
 // HandleReaction can't take down the daemon). Matches the
 // behaviour of runCommand / runMessage — slog.Default().Error
 // surfaces the panic to the daemon log so it's never silent.
-func (r *Router) runAction(ctx context.Context, msg *messages.InboundMessage) {
+func (r *Router) runAction(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			slog.Default().Error("inbound: runAction panicked",
 				"chat_id", msg.ChatID, "panic", rec)
 		}
 	}()
-	r.dispatchAction(ctx, msg)
+	r.dispatchAction(ctx, mgr, msg)
 }
 
 // dispatchAction hands the reaction / action to the wired
@@ -99,9 +99,9 @@ func (r *Router) runAction(ctx context.Context, msg *messages.InboundMessage) {
 // the routing logic is testable without spawning goroutines,
 // and so any future sync caller (tests, debug fixture) can
 // still invoke it directly.
-func (r *Router) dispatchAction(ctx context.Context, msg *messages.InboundMessage) *CommandResult {
+func (r *Router) dispatchAction(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) *CommandResult {
 	if msg.Action != nil {
-		r.dispatchPermissionClick(msg)
+		r.dispatchPermissionClick(mgr, msg)
 		return &CommandResult{Consumed: true}
 	}
 	router, ok := r.requireAction()
@@ -128,14 +128,18 @@ type permissionSender interface {
 // approval / AskUserQuestion. Does not fall through to
 // HandleInbound — that would enqueue a new prompt while dsh is
 // still blocked on question/requested.
-func (r *Router) dispatchPermissionClick(msg *messages.InboundMessage) {
+//
+// v1.3+ multi-channel: routes through the per-channel mgr
+// (passed from the pump closure) instead of the router-level
+// csMgr stub.
+func (r *Router) dispatchPermissionClick(mgr *chatsession.Manager, msg *messages.InboundMessage) {
 	option := strings.TrimSpace(msg.Action.Option)
 	if option == "" {
 		slog.Default().Warn("inbound: card action missing option",
 			"chat_id", msg.ChatID)
 		return
 	}
-	if err := r.csMgr.SendPermission(msg.ChatID, option); err != nil {
+	if err := mgr.SendPermission(msg.ChatID, option); err != nil {
 		slog.Default().Warn("inbound: SendPermission failed",
 			"chat_id", msg.ChatID, "err", err)
 	}

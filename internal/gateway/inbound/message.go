@@ -88,6 +88,11 @@ func (r *Router) runMessage(ctx context.Context, mgr *chatsession.Manager, msg *
 	// inbound.New). The per-channel mgr has the per-channel
 	// Emitter wired, so cs.Emitter() inside HandleInbound's
 	// error paths posts to the right channel.
+	if mgr == nil {
+		slog.Default().Warn("inbound: runMessage called with nil mgr",
+			"chat_id", msg.ChatID)
+		return
+	}
 	if err := mgr.HandleInbound(ctx, msg); err != nil {
 		slog.Default().Warn("inbound: HandleInbound failed",
 			"chat_id", msg.ChatID, "err", err)

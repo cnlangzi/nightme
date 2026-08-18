@@ -98,9 +98,9 @@ type Asset struct {
 // SHA256SUMS without a second API call) with the user-
 // facing Latest string and the Outdated bool.
 //
-//   Latest  — tag of the release we're targeting (e.g. "v0.3.7")
-//   Outdated — true when current < latest under semver rules
-//   Release — full *Release for stages 2 + 3
+//	Latest  — tag of the release we're targeting (e.g. "v0.3.7")
+//	Outdated — true when current < latest under semver rules
+//	Release — full *Release for stages 2 + 3
 type CheckResult struct {
 	Latest   string
 	Outdated bool
@@ -234,6 +234,7 @@ type DownloadResult struct {
 	StagingPath string // absolute path under stagingDir
 	SHA256Hex   string // hex-encoded hash of the downloaded bytes
 	Bytes       int64  // total bytes written (== Asset.Size on success)
+	Cached      bool   // true when a local archive already matched SHA256SUMS
 }
 
 // Download fetches the asset to stagingDir/<asset.Name> with
@@ -276,6 +277,13 @@ func Download(
 		return nil, fmt.Errorf("mkdir staging dir: %w", err)
 	}
 	stagingPath := filepath.Join(stagingDir, asset.Name)
+
+	// 2b. Reuse a previously downloaded archive when its
+	// sha256 still matches the published SHA256SUMS. Size is
+	// a cheap reject; the hash is the actual gate.
+	if cached := verifyLocalArchive(stagingPath, wantSum, asset); cached != nil {
+		return cached, nil
+	}
 
 	// 3. Fetch the asset with a SHA256 tee so we don't need
 	// a second pass to verify. Progress is reported on every
@@ -323,6 +331,46 @@ func Download(
 		SHA256Hex:   gotSum,
 		Bytes:       asset.Size,
 	}, nil
+}
+
+// verifyLocalArchive returns a Cached DownloadResult when
+// path exists and its sha256 matches wantSum. A size mismatch
+// or any read error falls through to a fresh download
+// (returns nil) rather than failing closed — the published
+// sums are the source of truth, a leftover partial file is
+// just junk to overwrite.
+func verifyLocalArchive(path, wantSum string, asset *Asset) *DownloadResult {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if asset.Size > 0 && info.Size() != asset.Size {
+		return nil
+	}
+	gotSum, err := hashFile(path)
+	if err != nil || gotSum != wantSum {
+		return nil
+	}
+	return &DownloadResult{
+		Asset:       *asset,
+		StagingPath: path,
+		SHA256Hex:   gotSum,
+		Bytes:       info.Size(),
+		Cached:      true,
+	}
+}
+
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // lookupSHA256 fetches the SHA256SUMS file for the release
@@ -508,7 +556,7 @@ func formatBytes(n int64) string {
 //
 // Layout (width = 30 cells):
 //
-//   [==============              ]  47% 1.2 MB / 2.6 MB  4.3 MB/s  ETA 5s
+//	[==============              ]  47% 1.2 MB / 2.6 MB  4.3 MB/s  ETA 5s
 //
 // total <= 0 (server omitted Content-Length) renders an
 // indeterminate bar that only shows downloaded bytes —

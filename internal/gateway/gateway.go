@@ -43,6 +43,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
+
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -215,28 +216,38 @@ func (r *Router) pumpOne(ctx context.Context, p Pump) {
 // production code, the per-pump pumpOne calls
 // r.inbound.Dispatch directly with the per-pump mgr —
 // DispatchInbound's single-mgr path is the legacy contract.
+//
+// v1.3+ multi-channel: prefer the inbound.Router's own csMgr
+// (which the test path wires with an Emitter) so test scenarios
+// that drive DispatchInbound without calling AttachPumps still
+// get the per-test Emitter on the ChatSession. Production paths
+// always call AttachPumps so mgrFallback is set; this fallback
+// is only reachable for tests + direct legacy callers.
 func (r *Router) DispatchInbound(ctx context.Context, msg *messages.InboundMessage) (*inbound.CommandResult, error) {
 	if msg == nil {
 		return nil, errors.New("gateway: nil message")
 	}
-	return r.inbound.Dispatch(ctx, r.mgrFallback, msg)
+	mgr := r.mgrFallback
+	if mgr == nil && r.inbound != nil {
+		// Tests that pre-date AttachPumps wire their Emitter
+		// onto the inbound.Router's csMgr before constructing
+		// the gateway. Reuse that csMgr so the reply path
+		// resolves to the test's recording Emitter, not a
+		// fresh empty chat session.
+		mgr = r.inbound.CsMgr()
+	}
+	if mgr == nil {
+		mgr = chatsession.NewManager()
+	}
+	return r.inbound.Dispatch(ctx, mgr, msg)
 }
 
 // --- v1.1 binding table (commit 3) ----------------------------------
 
-// BindingEntry is the (chat_id → session_id) row stored in
-// chat_sessions.json. See internal/registry for the persisted
-// schema.
-type BindingEntry struct {
-	ChatID    string
-	SessionID string
-	Workspace string
-	Agent     string
-}
-
 // Bind registers the binding (chatID → sessionID). Called by
 // the /cwd handler after it creates a fresh session via
-// MemoryManager.Register.
+// MemoryManager.Register. The BindingEntry type itself lives in
+// binding.go (canonical location per SPEC §1.2).
 func (r *Router) Bind(chatID, sessionID, workspace, agent string) *BindingEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()

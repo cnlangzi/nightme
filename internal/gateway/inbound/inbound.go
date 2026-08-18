@@ -278,6 +278,17 @@ func (r *Router) requireAction() (ReactionRouter, bool) {
 // NOT call this; daemon shutdown observes ctx cancellation
 // in the goroutines themselves (mirroring the shell.Dispatcher
 // pattern documented in internal/shell/dispatch.go).
+
+// CsMgr returns the chatsession.Manager that backs this router
+// (the constructor's csMgr arg, which tests use to wire Emitter
+// in the v1.3+ multi-channel path before calling gateway.New).
+// Production paths go through AttachPumps + the per-channel
+// mgr; this getter is only useful for legacy single-mgr callers
+// that drive DispatchInbound without AttachPumps (e.g. the v0.x
+// e2e_slash_test regression guard).
+func (r *Router) CsMgr() *chatsession.Manager {
+	return r.csMgr
+}
 //
 // Safe to call multiple times — WaitGroup.Wait on a drained
 // group is a fast no-op. Safe to call concurrently with

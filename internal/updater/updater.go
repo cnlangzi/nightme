@@ -50,6 +50,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/httpclient"
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
@@ -169,7 +170,7 @@ func Lookup(ctx context.Context, repo, tag string) (*Release, error) {
 	req.Header.Set("User-Agent", "nightme-updater/1.0")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	client := &http.Client{Timeout: DefaultTimeout}
+	client := httpclient.Default()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("lookup release: %w", err)
@@ -344,7 +345,7 @@ func lookupSHA256(ctx context.Context, release *Release, assetName string) (stri
 	if err != nil {
 		return "", fmt.Errorf("build checksums request: %w", err)
 	}
-	client := &http.Client{Timeout: DefaultTimeout}
+	client := httpclient.Default()
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download checksums: %w", err)
@@ -395,7 +396,7 @@ func fetchWithProgress(
 	req.Header.Set("User-Agent", "nightme-updater/1.0")
 	req.Header.Set("Accept", "application/octet-stream")
 
-	client := &http.Client{Timeout: DefaultTimeout}
+	client := httpclient.Default()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download asset: %w", err)

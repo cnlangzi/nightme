@@ -52,6 +52,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/httpclient"
 	"golang.org/x/mod/semver"
 )
 
@@ -85,7 +86,7 @@ type Checker struct {
 	VersionURL string
 
 	// HTTPClient is the transport used for the fetch. nil
-	// falls back to &http.Client{Timeout: httpTimeout}.
+	// falls back to httpclient.DefaultWithTimeout(httpTimeout).
 	HTTPClient *http.Client
 
 	// Now lets tests pin "time" without sleeping. nil = time.Now.
@@ -110,7 +111,7 @@ type Checker struct {
 func DefaultChecker(dataDir string) (*Checker, string) {
 	c := &Checker{
 		VersionURL: DefaultVersionURL,
-		HTTPClient: &http.Client{Timeout: httpTimeout},
+		HTTPClient: httpclient.DefaultWithTimeout(httpTimeout),
 		Now:        time.Now,
 	}
 	if dataDir != "" {
@@ -219,7 +220,7 @@ func (c *Checker) now() time.Time {
 func (c *Checker) httpDo(req *http.Request) (*http.Response, error) {
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: httpTimeout}
+		client = httpclient.DefaultWithTimeout(httpTimeout)
 	}
 	return client.Do(req)
 }

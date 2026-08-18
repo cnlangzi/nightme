@@ -33,7 +33,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
@@ -118,21 +117,17 @@ type ShellOutput struct {
 // the gateway or the runtime shim.
 //
 // Dispatcher is stateless and safe for concurrent use.
-type Dispatcher struct {
-	emitter outbound.Emitter
-}
+type Dispatcher struct{}
 
-// NewDispatcher constructs a Dispatcher that posts replies via
-// the given outbound.Emitter.
+// NewDispatcher constructs a Dispatcher. v1.3+ multi-channel: the
+// Emitter is no longer held in the Dispatcher — the per-channel
+// chatsession.Manager (passed to Handle per call) carries the
+// Emitter bound to the channel that produced the inbound.
 //
-// Emitter may be nil: the dispatcher will still parse prefix
-// and spawn the async goroutine, but the result reply is silently
-// dropped. This lets the runtime keep the dispatcher wired even
-// if the channel layer is unavailable (e.g. during shutdown),
-// and gives tests a way to assert the Consumed contract without
-// mocking an emitter.
-func NewDispatcher(emitter outbound.Emitter) *Dispatcher {
-	return &Dispatcher{emitter: emitter}
+// Tests can pass nil mgr to assert the Consumed contract without
+// mocking an emitter; the result reply is silently dropped.
+func NewDispatcher() *Dispatcher {
+	return &Dispatcher{}
 }
 
 // Handle is the package's single runtime entry point. It runs
@@ -152,20 +147,22 @@ func NewDispatcher(emitter outbound.Emitter) *Dispatcher {
 //     exit (success, failure, panic) so the channel can render
 //     the completion reaction.
 //
+// v1.3+ multi-channel: mgr is the per-channel chatsession.Manager
+// that produced the inbound. The Emitter used to post replies
+// comes from mgr — that's the channel that owns this chatID.
+//
 // Handle does NOT take a context.Context parameter — by design.
 // The async goroutine uses context.Background() so the shell
 // command outlives any inbound-ctx cancellation (including the
 // daemon shutdown triggered by `!make restart`). Adding a ctx
 // parameter would be misleading: callers might assume cancelling
-// it cancels the shell command, which it wouldn't. (Mirrors the
-// pre-refactor doc; the rationale survived the Sender→Emitter
-// swap.)
+// it cancels the shell command, which it wouldn't.
 //
 // Panic safety: the background goroutine recovers from any
 // panic so a misbehaving shell command (or an emitter bug)
 // cannot crash the daemon process. The panic is logged and
 // swallowed — the user loses a reply but the daemon stays up.
-func (d *Dispatcher) Handle(cs *chatsession.ChatSession, ir InboundRequest) (*ShellOutput, bool) {
+func (d *Dispatcher) Handle(mgr *chatsession.Manager, cs *chatsession.ChatSession, ir InboundRequest) (*ShellOutput, bool) {
 	if _, matched := parseShell(ir.Text); !matched {
 		// Fall-through contract: not a !cmd, gateway continues
 		// to tryMessageDispatch. No MessageState emission — we
@@ -180,7 +177,7 @@ func (d *Dispatcher) Handle(cs *chatsession.ChatSession, ir InboundRequest) (*Sh
 	// docs/feat/slash-command-reactions.md.
 	chatsession.PublishMessageState(cs, ir.MessageID, agent.MessageQueued)
 
-	go d.runShell(cs, ir)
+	go d.runShell(mgr, cs, ir)
 
 	return &ShellOutput{Consumed: true}, true
 }
@@ -199,7 +196,10 @@ func (d *Dispatcher) Handle(cs *chatsession.ChatSession, ir InboundRequest) (*Sh
 // The MessageDone emit is the FIRST defer so it runs LAST (LIFO
 // defer order). All three modes above exit through the defer,
 // guaranteeing the user always sees ✅ for any matched !cmd.
-func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
+//
+// v1.3+ multi-channel: mgr carries the per-channel Emitter used
+// to post the reply. Same mgr is forwarded from Handle.
+func (d *Dispatcher) runShell(mgr *chatsession.Manager, cs *chatsession.ChatSession, ir InboundRequest) {
 	// LIFO: this defer runs LAST (after the inner defer recovers
 	// from panic). Putting MessageDone here guarantees ✅ fires
 	// on every exit path — success, error, panic.
@@ -218,13 +218,17 @@ func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
 	defer cancel()
 
 	out := dispatch(shellCtx, ir.Request)
-	if !out.Consumed || out.Reply == "" || d.emitter == nil {
+	if !out.Consumed || out.Reply == "" || mgr == nil {
 		return
 	}
 
 	replyCtx, cancel := context.WithTimeout(context.Background(), timeouts.Reply)
 	defer cancel()
-	if err := d.emitter.Send(replyCtx, messages.OutboundMessage{
+	emitter := mgr.Emitter()
+	if emitter == nil {
+		return
+	}
+	if err := emitter.Send(replyCtx, messages.OutboundMessage{
 		ChatID:  ir.ChatID,
 		Kind:    messages.OutCommandReply,
 		Text:    out.Reply,

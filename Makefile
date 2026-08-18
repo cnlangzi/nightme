@@ -9,6 +9,16 @@ LDFLAGS       := -X github.com/cnlangzi/nightme/internal/version.Version=$(VERSI
                 -X github.com/cnlangzi/nightme/internal/version.GitCommit=$(GIT_COMMIT) \
                 -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(BUILD_DATE)
 
+# Windows icon / manifest embedding runs through go-winres, which
+# produces cmd/nightme/rsrc_windows_<arch>.syso from winres.json.
+# Go's linker auto-includes any *.syso in the main package's source
+# dir, so once winres runs the resulting binary carries the icon +
+# DPI-aware manifest. The .syso files are git-ignored — they are
+# generated, not source.
+WINRES        ?= go-winres
+WINRES_JSON   ?= assets/winres.json
+SYSO_PKG      ?= cmd/nightme
+
 # Cross-compile knobs. Defaults track the host so `make release`
 # on a developer laptop produces a native binary; CI overrides
 # GOOS/GOARCH per matrix row.
@@ -30,13 +40,31 @@ help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} \
 		/^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
+.PHONY: winres
+winres: ## Embed Windows icon + manifest into cmd/nightme/rsrc_windows_*.syso (no-op off-Windows).
+	@if [ "$(GOOS)" = "windows" ]; then \
+		command -v $(WINRES) >/dev/null 2>&1 || { \
+			echo "[winres] $(WINRES) not on PATH; installing via 'go install'..."; \
+			$(GO) install github.com/tc-hib/go-winres@latest; \
+		}; \
+		cd $(SYSO_PKG) && \
+		$(WINRES) make \
+			--in $(WINRES_JSON) \
+			--out rsrc \
+			--arch 386,amd64,arm64 \
+			--product-version $(VERSION) \
+			--file-version $(VERSION); \
+	else \
+		echo "[winres] GOOS=$(GOOS) != windows; skipping"; \
+	fi
+
 .PHONY: build
-build: ## Compile binary to bin/nightme[.exe] with version metadata.
+build: winres ## Compile binary to bin/nightme[.exe] with version metadata.
 	@mkdir -p bin
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/nightme
 
 .PHONY: release
-release: ## Build a versioned binary into dist/nightme-<GOOS>-<GOARCH>[.exe].
+release: winres ## Build a versioned binary into dist/nightme-<GOOS>-<GOARCH>[.exe].
 	@mkdir -p $(BIN_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -ldflags '$(LDFLAGS)' -o $(RELEASE_BIN) ./cmd/nightme
 

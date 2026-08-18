@@ -30,6 +30,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/channel/bot"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/config"
@@ -46,6 +47,7 @@ type Deps struct {
 	OpenAgentSessions func(*config.Config) (*registry.AgentSessionFile, error)
 	BuildAgents       func(*config.Config) *agent.Registry
 	NewChannel        func(*config.Config) (channel.Channel, error)
+	NewBot            func(*config.Config) (channel.Channel, error)
 	Signals           <-chan os.Signal
 	SkipFeishuLogin   bool
 	OnReady           func()
@@ -93,6 +95,23 @@ func WithChannel(deps Deps, channelName string) (Deps, error) {
 		return deps, fmt.Errorf("runtime: unknown channel %q (want feishu or echo)", channelName)
 	}
 	return deps, nil
+}
+
+// WithBot enables the bot channel. bot is a workflow automation
+// driver — it pushes synthesized messages into its own Incoming(),
+// where the gateway's pumpInbound reads them, and it captures
+// agent replies via Send(). When NewBot is non-nil, runtime
+// attaches BOTH the primary channel (feishu/echo) and bot to
+// the gateway, so messages from both sources are dispatched
+// through the same inbound chain.
+func WithBot(deps Deps, workflowsDir string) Deps {
+	deps.NewBot = func(_ *config.Config) (channel.Channel, error) {
+		return bot.New(bot.Config{
+			WorkflowsDir: workflowsDir,
+			ActionsDir:   filepath.Join(workflowsDir, "actions"),
+		}), nil
+	}
+	return deps
 }
 
 // defaultOpenChatSessions opens chat_sessions.json relative to

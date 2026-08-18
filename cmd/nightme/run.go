@@ -5,6 +5,7 @@
 // file is a thin cobra adapter:
 //
 //   - parse --channel
+//   - parse --workflows-dir (optional; enables bot channel)
 //   - build runtime.Deps
 //   - install signal handling via runtime.RunOptions
 //   - call runtime.Runner.Run(ctx)

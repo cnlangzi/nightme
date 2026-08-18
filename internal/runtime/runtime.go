@@ -38,6 +38,7 @@ import (
 	"syscall"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
@@ -219,6 +220,19 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	}
 	if ch == nil {
 		return errors.New("run: channel is nil")
+	}
+
+	// Build bot channel (optional — only if NewBot is set). bot is a
+	// workflow automation driver; it's a peer of feishu/echo and
+	// gets attached to the same gateway. Its synthesized messages
+	// (workflow prompts, /gtw fix slash commands) flow through the
+	// same inbound.Dispatch chain as real feishu messages.
+	var botCh channel.Channel
+	if deps.NewBot != nil {
+		botCh, err = deps.NewBot(cfg)
+		if err != nil {
+			return fmt.Errorf("run: create bot channel: %w", err)
+		}
 	}
 
 	// Build the ChatSession manager.
@@ -492,7 +506,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// Attach AFTER construction (see the note at the declaration
 	// site above): the gateway needs its channel binding before
 	// Start pumps inbound messages.
-	gwImpl.AttachChannels(ch)
+	if botCh != nil {
+		gwImpl.AttachChannels(ch, botCh)
+	} else {
+		gwImpl.AttachChannels(ch)
+	}
 
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE

@@ -602,9 +602,12 @@ func (b *Bot) fireWorkflow(ctx context.Context, wf *wfe.Workflow, ev wfe.Event, 
     b.driveRun(ctx, r)
 
     // 4. cleanup
-    if r.workflow.UsesGTW() {  // workflow used /gtw fix
-        b.gtwRunner.Close(runID)
-    }
+    // Note: bot does NOT call /gtw close. The worktree is the
+    // workflow's responsibility — the workflow can include a step
+    // that sends "/gtw close <key>" as a prompt body, or the user
+    // can manually run /gtw close after the workflow finishes. bot
+    // has no opinion on this; its only job is to deliver messages
+    // through the channel.
 }
 ```
 
@@ -1100,6 +1103,62 @@ loop:
 ```
 
 `/gtw fix` **不是 bot 自己调的**。bot 只是发了一条 `/gtw fix <key>` 消息。nightme 现有的 `/gtw fix` command handler 处理它。**bot 不知道也不关心 `/gtw fix` 内部**。
+
+### 5.5 Workflow pattern for `/gtw fix` and `/gtw close`
+
+Workflows use `/gtw fix` and `/gtw close` by **sending the corresponding slash-command messages** in `prompt` steps. The workflow body is the slash command; the existing nightme command handler does the work. bot has no special API for these commands.
+
+**Example workflow that fixes an issue and posts a notification:**
+
+```yaml
+name: issue-fixer
+workspaces: [~/work/nightme]
+on:
+  issue:
+    events: [opened, labeled]
+
+jobs:
+  fix:
+    steps:
+      # Step 1: send "/gtw fix" to the chat. The command handler
+      # creates a worktree and dispatches the issue to the agent.
+      # The reply is the agent's fix summary.
+      - id: fix-it
+        prompt: "/gtw fix ${{ event.issue.number }}"
+        agent: codex
+
+      # Step 2: ask the agent to write a PR description for the fix.
+      # (Same chat, same worktree, same agent session.)
+      - id: write-pr-desc
+        prompt: "Write a PR description for the fix you just made."
+        if: ${{ steps.fix-it.outputs.text != '' }}
+        agent: codex
+
+      # Step 3: send "/gtw close" to clean up the worktree.
+      - id: cleanup
+        run: echo "/gtw close ${{ steps.fix-it.outputs.worktree }}"
+        # Note: this is a shell echo, not a prompt. v0 doesn't
+        # dispatch via SendPrompt; if you want it to run through
+        # the channel, use a prompt step.
+```
+
+**Why this is the right pattern:**
+
+- `/gtw fix` and `/gtw close` are **existing nightme slash commands** registered in nightme's command dispatcher.
+- bot has **no special handling** for them. It pushes the message into `bot.Incoming()`, the gateway routes it via `tryCommandDispatch`, the existing handler runs.
+- The workflow author decides when to invoke these commands by including a `prompt` (or `run`) step with the right message body.
+- Cleanup (`/gtw close`) is **the workflow's responsibility**, not bot's. The workflow can include a cleanup step or rely on the user to run it manually.
+
+**What bot knows vs. doesn't know:**
+
+| Knows | Doesn't know |
+|---|---|
+| The chatID (run-scoped unique) | That `/gtw fix` was invoked |
+| The workspace (from workflow) | What worktree path was created |
+| The workflow's prompt body (sends it) | The agent's response content (only delivers to reply chan) |
+| When agent replies come back | When the worktree is cleaned up |
+
+bot is a transparent message pipe. The workflow + existing nightme slash commands + agent are the active participants.
 
 ---
 

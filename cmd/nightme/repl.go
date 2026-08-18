@@ -150,18 +150,16 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 	// the new binary — we restart the daemon and tell the user
 	// to exit + re-enter `nightme`.
 	//
-	// Non-TTY stdin (scripting, CI smoke tests) passes a nil
-	// Reader so promptForUpdateIfOutdated falls through its
-	// "no line source → be silent" branch. This is also the
-	// correct behavior for piping — the prompt would deadlock
-	// otherwise, since it blocks on a y/N that the pipe never
-	// sends in any meaningful order. Without this guard,
-	// reeflective/readline v1.3.0 raises "Incorrect function"
-	// (Win32 ERROR_INVALID_FUNCTION) on Windows when stdin is a
-	// pipe: it assumes a real console handle for ReadConsoleInput
-	// and fails fast. The TTY check (vs hardcoding the env var)
-	// means interactive users still get the prompt, and piped
-	// users on every OS skip it cleanly.
+	// Non-TTY stdin (scripting, pipe-fed CI smoke tests) passes
+	// a nil Reader so promptForUpdateIfOutdated falls through
+	// its "no line source → be silent" branch. Without this
+	// guard, reeflective/readline v1.3.0 raises "Incorrect
+	// function" (Win32 ERROR_INVALID_FUNCTION) on Windows
+	// when stdin is a pipe: it assumes a real console handle
+	// for ReadConsoleInput and fails fast. The TTY check (vs
+	// hardcoding the env var) means interactive users still
+	// get the prompt, and piped users on every OS skip it
+	// cleanly.
 	var reader func() (string, error)
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		reader = rl.Readline

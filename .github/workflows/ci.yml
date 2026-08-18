@@ -158,12 +158,26 @@ jobs:
           #
           # Pipe-fed stdin triggers runREPLInteractive's
           # isatty.IsTerminal guard (see repl.go), which
-          # causes the version-check prompt to fall through
-          # silently rather than try to read y/N from the
-          # pipe. Without that guard, reeflective/readline
-          # raises "Incorrect function" (Win32
-          # ERROR_INVALID_FUNCTION) on Windows because it
-          # expects a real console handle for ReadConsoleInput.
+          # causes the runREPL → runREPLWith (scanner)
+          # path. The scanner path is what the user-visible
+          # TestREPL_* unit tests exercise, so this step
+          # is the binary-level smoke covering everything
+          # below: build, exec, dispatch, output.
+          #
+          # Caveat (intentional): stdin is a pipe, so
+          # readline falls back to non-raw mode. The
+          # platform-specific raw-mode bug fixed in
+          # fix-erpl-on-windows (chzyer/readline
+          # mis-parsing printable bytes as ANSI escapes
+          # on Windows) does NOT reproduce in this
+          # pipe-fed path — that class needs an
+          # interactive Windows runner with a real PTY.
+          # What this gate DOES catch: every code path
+          # that does NOT depend on raw mode, which is
+          # the larger regression surface. The TTY path
+          # is verified by the 139 in-package TestREPL_*
+          # tests + manual Windows smoke (see PR
+          # description).
           out=$(printf 'version\nabcdefghijklmnopqrstuvwxyz0123456789\nexit\n' \
                   | "$bin" 2>&1)
           echo "$out"

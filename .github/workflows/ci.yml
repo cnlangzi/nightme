@@ -138,12 +138,21 @@ jobs:
       - name: Verify bare REPL (banner + dispatch matrix)
         shell: bash
         run: |
-          set -e
           # Same binary-name convention as Build smoke binary.
           bin="./dist/nightme"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             bin="./dist/nightme.exe"
           fi
+          # Force a writable, isolated config directory so the
+          # binary's config.LoadDefault() always succeeds and we
+          # don't pollute the runner's home directory. Without
+          # this, on a fresh runner where $HOME points at the
+          # agent's own home, we may trip a permission check
+          # (config.yaml dir creation) and exit 1 before the
+          # REPL is reached.
+          export HOME="$RUNNER_TEMP"
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/.config"
+          mkdir -p "$HOME/.nightme"
           # Three independent lines: a known-good command
           # (version), an unknown command (catches banner-
           # quote-of-typed-string behavior), and exit.
@@ -151,8 +160,19 @@ jobs:
           # intentionally broad — any of them silently
           # dropped by the dispatcher would break one of
           # the substring assertions below.
+          # Capture stdout+stderr together; keep the exit
+          # code so a binary crash surfaces as a distinct
+          # error rather than a silent empty `out`.
           out=$(printf 'version\nabcdefghijklmnopqrstuvwxyz0123456789\nexit\n' \
                   | "$bin" 2>&1)
+          bin_status=${PIPESTATUS[0]}
+          if [ "$bin_status" -ne 0 ]; then
+            echo "::error::REPL binary exited with status $bin_status"
+            echo "----- captured output -----"
+            echo "$out"
+            echo "----- end output -----"
+            exit 1
+          fi
           echo "$out"
           # Banner contract: every registered user-facing
           # subcommand must appear. If a future refactor

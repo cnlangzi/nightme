@@ -276,10 +276,13 @@ func TestProvider_Greet_SendsBodiesToFirstPrivateMessage(t *testing.T) {
 		t.Fatalf("Greet: %v", err)
 	}
 
-	// Canonical greeting has 2 bodies × 2 languages = 4 sendMessage
-	// calls. Assert at least 4.
-	if got := server.sendMessageHit.Load(); got != 4 {
-		t.Fatalf("sendMessage hits = %d, want 4", got)
+	// Telegram only sends the English copy of each body (2 bodies
+	// × 1 language = 2 sendMessage calls). Chinese is skipped on
+	// purpose: Telegram doesn't have a Feishu-style bilingual post
+	// envelope, so the CN halves would just be noise to an
+	// English-only user.
+	if got := server.sendMessageHit.Load(); got != 2 {
+		t.Fatalf("sendMessage hits = %d, want 2", got)
 	}
 	if !strings.Contains(out.String(), "Greeting sent") {
 		t.Fatalf("output missing success message: %q", out.String())
@@ -357,9 +360,10 @@ func TestProvider_Greet_IgnoresGroupMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Greet: %v", err)
 	}
-	// 4 sendMessage (greeting bodies); group message was skipped.
-	if got := server.sendMessageHit.Load(); got != 4 {
-		t.Fatalf("sendMessage hits = %d, want 4 (group msg skipped, private msg greeted)", got)
+	// 2 sendMessage (English-only greeting bodies); group message
+	// was skipped, private message greeted.
+	if got := server.sendMessageHit.Load(); got != 2 {
+		t.Fatalf("sendMessage hits = %d, want 2 (group msg skipped, private msg greeted)", got)
 	}
 }
 

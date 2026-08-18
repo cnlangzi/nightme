@@ -352,8 +352,8 @@ Telegram 没有类似飞书注册 API 的“扫码后自动创建 Bot”能力�
 
 1. CLI 提示用户在 Telegram 客户端打开 `@<bot_username>`，发送任意消息（`/start` 是惯例）。
 2. CLI 启动 getUpdates long-polling（25 秒每次，最多 2 分钟），等待**第一条私聊**消息。
-3. 收到合法私聊消息后，CLI 用 sendMessage 把 canonical 双语 greeting
-   （与飞书的 GreetingTexts() 共用）逐条发给 owner 的 chat_id。
+3. 收到合法私聊消息后，CLI 用 sendMessage 把 canonical greeting（只发英语
+   副本）发给 owner 的 chat_id。
 4. 2 分钟内用户没消息：CLI 友好提示"你可以稍后 /start"，不报错。
    daemon 启动后用户消息进来时会正常处理。
 
@@ -362,7 +362,8 @@ Telegram 没有类似飞书注册 API 的“扫码后自动创建 Bot”能力�
 - 跳过 bot-from 消息（防止把别的 bot 的消息误认为 owner）。
 - greeting 内容：`Hi, this is NightMe 👋. Your pair programmer.` /
   `Set it running. Stay in the loop from your phone, on your terms 🚀.`
-  （英语先发，中文跟随 —— 与飞书 GreetingTexts() 保持一致。）
+  只发英语：Telegram 没有飞书那种 post 双语信封，默认英语客户端也
+  不会渲染中文，多发只会成噪音。中文副本留给飞书的 post envelope。
 - 错误是 soft-failure：greeting 失败不回滚 token 写入。
 
 Bot Token 属于敏感凭证，应像 App Secret 一样保存在本机配置中，不得通过群消息、命令行参数日志或普通遥测上报。配置应遵守现有 nightme 凭证权限和敏感字段脱敏规则。

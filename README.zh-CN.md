@@ -386,6 +386,7 @@ paths:
 | [`docs/PRD.md`](./docs/PRD.md) | 产品定义——做什么、为什么做、为谁做。不讲技术。 |
 | [`docs/SPEC.md`](./docs/SPEC.md) | 技术架构——组件、数据流、NFR。 |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | 功能索引——每个 F-XX 一行。 |
+| [`docs/WORKFLOW.md`](./docs/WORKFLOW.md) | Workflow YAML 参考——触发器、步骤、表达式。 |
 | [`docs/feat/`](./docs/feat/) | 每个 feature 的设计文档。 |
 | [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、dsh、opencode、pi。 |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | 飞书 adapter 参考（渲染规则、卡片语义、线程路由）。 |
@@ -413,6 +414,7 @@ cmd/nightme/                       # cobra CLI (start / stop / restart / status 
 configs/                           # example YAML config
 docs/
   PRD.md SPEC.md FEATURES.md       # 3-layer doc model
+  WORKFLOW.md                      # workflow YAML 参考（schema / 触发器 / 步骤）
   feat/                            # F-XX per-feature design
   bridge/  channel/  flow/         # per-subsystem design
   images/                          # README-served screenshots

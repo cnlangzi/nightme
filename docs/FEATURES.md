@@ -89,7 +89,24 @@
 
 三个 toggle 模式一致：ChatSession 上挂 mode 字段 + Gateway dispatcher 入口 gate + Channel 自治渲染。
 
-## 8. 范围外（明确不做）
+## 8. Workflow 引擎
+
+| 功能 | 设计文档 |
+|------|----------|
+| Workflow YAML 配置参考（schema / 触发器 / 步骤 / 表达式）| [WORKFLOW.md](./WORKFLOW.md) |
+| 5 类触发器：`schedule` / `pull_request` / `branch` / `issue` / `mention` | [WORKFLOW.md](./WORKFLOW.md) §3 |
+| 两种 step：`run`（shell）/ `prompt`（agent） | [WORKFLOW.md](./WORKFLOW.md) §5 |
+| 顶层 `worker` 字段（并发 worker pool）| [WORKFLOW.md](./WORKFLOW.md) §2 |
+| `${{ ... }}` 表达式（`event.*` / `steps.*.outputs.*` / `needs.*.outputs.*`）| [WORKFLOW.md](./WORKFLOW.md) §6 |
+| 复用本地 agent 环境变量（不管理 agent，只调度）| [WORKFLOW.md](./WORKFLOW.md) §5.2 |
+| `bot` channel 运行时架构（与 feishu 平级，走 Channel interface）| [WORKFLOW.md](./WORKFLOW.md) §8 |
+| 触发器 → 虚拟 chat 映射 | [WORKFLOW.md](./WORKFLOW.md) §8.3 |
+| `prompt` 步骤作为合成消息经 Gateway 派发 | [WORKFLOW.md](./WORKFLOW.md) §8.4 |
+| Run 状态持久化（`~/.nightme/workflows/state/`）| [WORKFLOW.md](./WORKFLOW.md) §8.5 |
+
+Workflow 文件位置：`~/.nightme/workflows/*.yaml`，按 `name:` 去重，热加载。
+
+## 9. 范围外（明确不做）
 
 | ❌ 不做 | 原因 |
 |---------|------|

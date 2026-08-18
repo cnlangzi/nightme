@@ -32,6 +32,14 @@ nightme 的文档按**内容性质**分 4 层，每层职责单一、不重叠�
 | **FEATURES** | `FEATURES.md` | F-XX 功能列表（含设计文档链接） | 详细设计、代码、edge cases |
 | **feat/** | `feat/F-XX-name.md` | 单个 feature 的详细设计：接口、struct、实现、edge cases、测试 | 跨 feature 的架构描述、产品定位 |
 
+**顶层参考文档**（不属于 4 层模型，是面向使用者的 reference 文档）：
+
+| 文件 | 用途 |
+|------|------|
+| `WORKFLOW.md` | Workflow YAML 的 schema / 触发器 / 步骤 / 表达式参考 |
+| `E2E_TESTING.md` | 飞书端到端测试 + 故障排查 |
+| `WINDOWS.md` | Windows 平台适配说明 |
+
 ---
 
 ## 3. 分类决策树
@@ -192,6 +200,9 @@ docs/
 ├── PRD.md                 ← Layer 1: 产品
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
+├── WORKFLOW.md            ← Workflow YAML 配置参考（schema / 触发器 / 步骤）
+├── E2E_TESTING.md         ← 飞书端到端测试手册
+├── WINDOWS.md             ← Windows 平台适配说明
 ├── feat/                  ← Layer 4: 每个 feature 的实现
 ├── bridge/                ← 各 agent bridge 协议（claude / dsh / …）
 └── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑**）
@@ -218,3 +229,4 @@ docs/
 
 - 初始：建立 4 层文档结构 + 命名约定 + 决策树
 - 2026-08-17：补 `docs/channel/` / `docs/bridge/` 在目录示意里的位置；飞书交互卡踩坑进 `channel/feishu-cards.md`
+- 2026-08-18：补 `docs/WORKFLOW.md` 顶层参考文档；§2 加"顶层参考文档"小节，§8 目录树同步更新

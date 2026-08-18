@@ -8,6 +8,13 @@
 *.so
 *.dylib
 
+# Windows resource objects (regenerated on demand by `make winres`
+# / build.bat from winres.json + cmd/nightme/logo.ico + manifest.xml).
+# Git-ignored because they are build artifacts, not source — keeping
+# them out of the tree lets `logo.ico` / `winres.json` / `manifest.xml`
+# stay the single source of truth.
+/cmd/nightme/rsrc_windows_*.syso
+
 # Test artifacts
 *.test
 *.out

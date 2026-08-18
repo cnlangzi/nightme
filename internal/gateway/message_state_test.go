@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound/teststubs"
 	"github.com/cnlangzi/nightme/internal/gatewaytest"
@@ -94,17 +95,18 @@ func TestEmitMessageState_TranslatesToOutbound(t *testing.T) {
 }
 
 // TestEmitMessageState_NoChannelDrops verifies that emitMessageState
-// is a silent drop when no channel is registered for the chat
-// (per F-31 §9: never block caller, log warn).
+// v1.3+ multi-channel: emitMessageState picks the first
+// attached Pump's channel. The legacy "no default channel"
+// drop path is gone — every attached channel is reachable.
+// The test is preserved as a smoke test that the call
+// doesn't panic on an unknown chatID.
 func TestEmitMessageState_NoChannelDrops(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	// Clear defaultChannel fallback so unknown chatID has no path.
-	gw.mu.Lock()
-	gw.defaultChannel = nil
-	gw.mu.Unlock()
+	// The helper picks the first Pump's channel; this is the
+	// single attached test channel, so the call sends to it.
 	emitMessageState(gw, "oc_unknown", "om_msg", agent.MessageQueued)
-	if len(ch.sends) != 0 {
-		t.Errorf("got %d sends; want 0 (no channel registered)", len(ch.sends))
+	if len(ch.sends) != 1 {
+		t.Errorf("got %d sends; want 1 (first attached pump is the helper's channel)", len(ch.sends))
 	}
 }
 
@@ -162,21 +164,15 @@ func newWiredRouter(t *testing.T) (*Router, *fakeChannel) {
 	t.Helper()
 	ch := &fakeChannel{}
 	ir := inbound.New(
-		teststubs.NewMessage(nil),          // mgr=nil — chain never reaches GetOrCreate
+		chatsession.NewManager(),            // mgr — never reached; stub never invokes GetOrCreate
 		teststubs.AlwaysFallThrough{},      // commander: never claims
 		teststubs.AlwaysFallThroughShell{}, // shell: never claims
 		teststubs.NewReaction(false),       // reaction router: never claims
 		&gatewaytest.NoopEmitter{},         // F-59: emitter moved into inbound.Router
 		"primary",
 	)
-	gw := New(ir, &gatewaytest.NoopEmitter{})
-	gw.AttachChannels(ch)
-	// Resolve-channel path uses g.chatToChan populated by pumpInbound
-	// in production; for tests, seed it directly.
-	gw.mu.Lock()
-	gw.chatToChan["oc_chat"] = ch
-	gw.defaultChannel = ch
-	gw.mu.Unlock()
+	gw := New(ir)
+	gw.AttachPumps(Pump{Channel: ch, Manager: chatsession.NewManager()})
 	return gw, ch
 }
 

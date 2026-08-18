@@ -34,8 +34,14 @@ import (
 // Persistence: chat_sessions.json + agent_sessions.json are left
 // in place. The Manager has been writing through to them
 // throughout the run via WithPersistence.
+//
+// v1.3+ multi-channel: ShutdownRun takes a single channel + mgr
+// (the legacy single-channel path used by v0.x tests). New
+// callers should use ShutdownRunMulti, which iterates all
+// per-channel mgrs in runtime.allMgrs and stops every
+// successfully-started channel.
 func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, prReg *prcache.Registry, logger *slog.Logger) error {
-	_ = out // future shutdown status line
+	_ = out
 	_ = asFile
 	if logger == nil {
 		logger = slog.Default()
@@ -51,41 +57,73 @@ func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 		}
 	}
 
-	// Cancel every per-AgentSession PR-cache refresh goroutine
-	// so the daemon doesn't exit mid-`gh pr list`. Best-effort:
-	// the goroutines are stateless (HTTP/git calls), so a missed
-	// cancel only wastes a few round-trips, not state corruption.
-	// We do this BEFORE persisting chat state so any in-flight
-	// refresh that was about to land back into a Cache sees the
-	// cancel signal at its next checkpoint and exits silently.
 	if prReg != nil {
 		prReg.CloseAll()
 	}
 
-	if mgr != nil {
-		// Persist final state.
-		for _, cs := range mgr.List() {
-			// Touch lastInteractionAt so the entry is fresh on disk.
-			cs.SetSelectedAgent(cs.SelectedAgent()) // no-op write trigger via the locked path
-		}
-	}
-
-	// Best-effort: flush registry stores.
-	if csFile != nil {
-		// Upsert each ChatSession so the file reflects current state.
-		for _, cs := range mgr.List() {
-			_ = csFile.Upsert(cs.Entry())
-		}
-	}
-
-	// dsh is intentionally NOT torn down here. The shared dsh
-	// host is a persistent service — left running across daemon
-	// restarts so the next lazy start (via host.EnsureSharedHost)
-	// can reuse it via DiscoverExisting on port 3080. The daemon
-	// process exiting does not signal dsh; SIGKILL/SIGKILL-grace
-	// failures on shutdown used to be the dominant source of
-	// "child did not exit within SIGKILL grace" errors in
-	// daemon-stderr.log.
+	persistChatStates(mgr, csFile)
 
 	return firstErr
+}
+
+// ShutdownRunMulti is the v1.3+ multi-channel shutdown path.
+// It stops every channel the runtime successfully started and
+// flushes state for every per-channel Manager in runtime.allMgrs.
+func ShutdownRunMulti(
+	out io.Writer,
+	chs []channel.Channel,
+	csFile *registry.ChatSessionFile,
+	asFile *registry.AgentSessionFile,
+	prReg *prcache.Registry,
+	logger *slog.Logger,
+) error {
+	_ = out
+	_ = asFile
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var firstErr error
+	for _, ch := range chs {
+		if ch == nil {
+			continue
+		}
+		if err := ch.Stop(shutdownCtx); err != nil {
+			firstErr = fmt.Errorf("run: stop channel %s: %w", ch.Name(), err)
+			logger.Warn("channel stop failed", "name", ch.Name(), "err", err)
+		}
+	}
+
+	if prReg != nil {
+		prReg.CloseAll()
+	}
+
+	// Persist final state from every per-channel mgr.
+	allMgrsMu.RLock()
+	mgrs := append([]*chatsession.Manager(nil), allMgrs...)
+	allMgrsMu.RUnlock()
+	for _, mgr := range mgrs {
+		if mgr == nil {
+			continue
+		}
+		persistChatStates(mgr, csFile)
+	}
+
+	return firstErr
+}
+
+// persistChatStates walks every chat in mgr and upserts into csFile.
+// Centralized so ShutdownRun and ShutdownRunMulti stay in sync.
+func persistChatStates(mgr *chatsession.Manager, csFile *registry.ChatSessionFile) {
+	if mgr == nil || csFile == nil {
+		return
+	}
+	for _, cs := range mgr.List() {
+		// Touch lastInteractionAt so the entry is fresh on disk.
+		cs.SetSelectedAgent(cs.SelectedAgent()) // no-op write trigger
+		_ = csFile.Upsert(cs.Entry())
+	}
 }

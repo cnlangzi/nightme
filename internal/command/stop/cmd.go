@@ -66,7 +66,7 @@ func (f *Factory) Spec() command.Spec {
 //     StopSelectedAgent. Wrap the per-call Result with
 //     FormatStopResult and reply.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if cs == nil {
 		return command.Reply(ctx, rt, "No active chat session."), nil

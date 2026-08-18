@@ -27,6 +27,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -35,7 +36,7 @@ import (
 // non-nil result, but the actual HandleInbound call runs in a
 // spawned goroutine (F-59) so a slow inbound pipeline can
 // never block the monitor.
-func (r *Router) tryMessageDispatch(ctx context.Context, msg *messages.InboundMessage) (bool, *CommandResult, error) {
+func (r *Router) tryMessageDispatch(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) (bool, *CommandResult, error) {
 	// F-59 async dispatch — HandleInbound may resolve a
 	// ChatSession (GetOrCreate), evaluate WatchMode, walk the
 	// InputBuffer FSM, and resolve / spawn an AgentSession.
@@ -46,9 +47,16 @@ func (r *Router) tryMessageDispatch(ctx context.Context, msg *messages.InboundMe
 	// F-59 ctx policy: goroutine outlives inbound-ctx cancellation
 	// (daemon shutdown). See inbound/command.go's tryCommandDispatch
 	// for the full rationale.
+	//
+	// v1.3+ multi-channel: capture the per-call mgr so the
+	// goroutine routes HandleInbound to the channel's own
+	// chatsession.Manager (which carries the per-channel
+	// Emitter). Using r.csMgr here would silently black-hole
+	// every message from non-primary channels.
+	localMgr := mgr
 	go func() {
 		defer r.execWg.Done()
-		r.runMessage(context.Background(), msg)
+		r.runMessage(context.Background(), localMgr, msg)
 	}()
 	// Consumed=false (zero value of the struct) is the v0.x
 	// contract: the message branch is a "fire and forget" for
@@ -68,14 +76,24 @@ func (r *Router) tryMessageDispatch(ctx context.Context, msg *messages.InboundMe
 // Panic-safe so a misbehaving ChatSession.HandleInbound can't
 // crash the daemon — same guard F-59 adds to the other run*
 // helpers.
-func (r *Router) runMessage(ctx context.Context, msg *messages.InboundMessage) {
+func (r *Router) runMessage(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			slog.Default().Error("inbound: runMessage panicked",
 				"chat_id", msg.ChatID, "panic", rec)
 		}
 	}()
-	if err := r.csMgr.HandleInbound(ctx, msg); err != nil {
+	// v1.3+ multi-channel: use the per-channel mgr passed in
+	// rather than r.csMgr (which is the noOpMgr stub set in
+	// inbound.New). The per-channel mgr has the per-channel
+	// Emitter wired, so cs.Emitter() inside HandleInbound's
+	// error paths posts to the right channel.
+	if mgr == nil {
+		slog.Default().Warn("inbound: runMessage called with nil mgr",
+			"chat_id", msg.ChatID)
+		return
+	}
+	if err := mgr.HandleInbound(ctx, msg); err != nil {
 		slog.Default().Warn("inbound: HandleInbound failed",
 			"chat_id", msg.ChatID, "err", err)
 	}

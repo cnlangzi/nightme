@@ -21,17 +21,17 @@
 // in a small self-update helper, but the check layer should
 // stay minimal and predictable.
 //
-// Endpoint choice
+// # Endpoint choice
 //
 // The version endpoint is https://nightme.dev/api/version. The
 // response shape (observed 2026-08-17):
 //
-//   {
-//     "current":     "dev",
-//     "latest_cli":  "0.3.7",
-//     "commit":      "unknown",
-//     "updated_at":  "2026-08-17T06:56:53.154834639+08:00"
-//   }
+//	{
+//	  "current":     "dev",
+//	  "latest_cli":  "0.3.7",
+//	  "commit":      "unknown",
+//	  "updated_at":  "2026-08-17T06:56:53.154834639+08:00"
+//	}
 //
 // We read `latest_cli` as the latest version. `current` is the
 // server-side "currently recommended" pointer; if `latest_cli`
@@ -52,6 +52,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/httpclient"
 	"golang.org/x/mod/semver"
 )
 
@@ -85,7 +86,7 @@ type Checker struct {
 	VersionURL string
 
 	// HTTPClient is the transport used for the fetch. nil
-	// falls back to &http.Client{Timeout: httpTimeout}.
+	// falls back to httpclient.DefaultWithTimeout(httpTimeout).
 	HTTPClient *http.Client
 
 	// Now lets tests pin "time" without sleeping. nil = time.Now.
@@ -110,7 +111,7 @@ type Checker struct {
 func DefaultChecker(dataDir string) (*Checker, string) {
 	c := &Checker{
 		VersionURL: DefaultVersionURL,
-		HTTPClient: &http.Client{Timeout: httpTimeout},
+		HTTPClient: httpclient.DefaultWithTimeout(httpTimeout),
 		Now:        time.Now,
 	}
 	if dataDir != "" {
@@ -219,7 +220,7 @@ func (c *Checker) now() time.Time {
 func (c *Checker) httpDo(req *http.Request) (*http.Response, error) {
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: httpTimeout}
+		client = httpclient.DefaultWithTimeout(httpTimeout)
 	}
 	return client.Do(req)
 }
@@ -305,8 +306,8 @@ func (c *Checker) fetchLatest(ctx context.Context) (string, error) {
 // JSON so external tooling (or `cat version-check.json` from
 // a debugger) reads cleanly.
 type cacheEntry struct {
-	Latest     string    `json:"latest_version"`
-	CheckedAt  time.Time `json:"checked_at"`
+	Latest    string    `json:"latest_version"`
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 // readCache returns (entry, true) when the file exists and
@@ -345,13 +346,30 @@ func (c *Checker) writeCache(e cacheEntry) error {
 	return os.WriteFile(c.CachePath, data, 0o600)
 }
 
-// normalize strips a leading "v" so "v0.2.0" and "0.2.0" both
-// compare correctly. golang.org/x/mod/semver requires the "v"
-// prefix, so we add it back inside compare().
+// normalize strips a leading "v"/"V" so "v0.2.0" and "0.2.0"
+// both compare correctly. golang.org/x/mod/semver requires
+// the "v" prefix, so we add it back inside canonical().
 func normalize(v string) string {
 	v = strings.TrimSpace(v)
 	v = strings.TrimPrefix(v, "v")
+	v = strings.TrimPrefix(v, "V")
 	return v
+}
+
+// Normalize is the exported form of normalize. Callers that
+// display or persist a version should use this so GitHub's
+// "v0.3.10" and nightme.dev's "0.3.10" render the same.
+func Normalize(v string) string { return normalize(v) }
+
+// Tag returns the GitHub-style tag ("v0.3.10") for a version
+// written either with or without the leading v. Empty input
+// stays empty.
+func Tag(v string) string {
+	n := normalize(v)
+	if n == "" {
+		return ""
+	}
+	return "v" + n
 }
 
 // canonical returns the form semver.Compare expects ("v0.2.0").
@@ -382,6 +400,18 @@ func isOutdated(current, latest string) bool {
 		return cur < lat
 	}
 	return semver.Compare(cur, lat) < 0
+}
+
+// Equal reports whether a and b name the same release,
+// ignoring a leading "v" and surrounding whitespace.
+// "0.3.10" and "v0.3.10" are equal; "0.3.10" and "0.3.11"
+// are not.
+func Equal(a, b string) bool {
+	ca, cb := canonical(a), canonical(b)
+	if ca == "v0.0.0" || cb == "v0.0.0" {
+		return normalize(a) == normalize(b) && normalize(a) != ""
+	}
+	return semver.Compare(ca, cb) == 0
 }
 
 // IsOutdated is the exported alias used by other packages

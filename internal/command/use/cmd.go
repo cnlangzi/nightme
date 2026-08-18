@@ -57,7 +57,7 @@ func (f *Factory) Spec() command.Spec {
 //	/use (no selectedCwd yet)        → reply "send /cwd <path> first"
 //	/use unknown-agent             → reply "unknown agent"
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if len(input.Args) < 2 {
 		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil

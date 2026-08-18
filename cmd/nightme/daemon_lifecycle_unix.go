@@ -59,7 +59,14 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	defer readyR.Close()
 
-	child := proc.New(ctx, executable, daemonChildCommand, "--channel", opts.channel)
+	// v1.3+ multi-channel: --channel flag removed from the
+	// daemon child command. Channel selection is driven by cfg
+	// credentials (runtime's channel.BuildAll auto-starts every
+	// channel with valid creds); the hidden --channel flag in
+	// daemon_lifecycle.go is for back-compat with old CLI scripts.
+	// main refactor (#221) unified spawn behind proc.New; we keep
+	// the multi-channel removal on top of that.
+	child := proc.New(ctx, executable, daemonChildCommand)
 	child.Env = append(os.Environ(), daemonLockFDEnv+"=3", readyFDEnv+"=4")
 	child.ExtraFiles = []*os.File{lock.File(), readyW}
 	child.Stdin = nil
@@ -189,7 +196,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	return nil
 }
 
-func runDaemonChild(cmd *cobra.Command, channelName string, reg *cmdRegistry) (retErr error) {
+func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	lockFD, err := strconv.Atoi(os.Getenv(daemonLockFDEnv))
 	if err != nil || lockFD < 3 {
 		return fmt.Errorf("%s must be launched by `nightme start` or `nightme restart`", daemonChildCommand)
@@ -249,7 +256,7 @@ func runDaemonChild(cmd *cobra.Command, channelName string, reg *cmdRegistry) (r
 	status := daemoncontrol.Status{
 		PID:       os.Getpid(),
 		StartedAt: time.Now().UTC(),
-		Channel:   channelName,
+		Channel:   "multi", // v1.3+: multiple channels auto-start; legacy field set to "multi"
 		Version:   version.String(),
 		LogPath:   cfg.Logging.File,
 	}
@@ -263,7 +270,6 @@ func runDaemonChild(cmd *cobra.Command, channelName string, reg *cmdRegistry) (r
 	go func() { serveErr <- server.Serve() }()
 
 	deps := runtime.DefaultDeps()
-	deps, _ = runtime.WithChannel(deps, channelName)
 	deps.OnReady = func() {
 		server.SetReady()
 		writeBootstrap(bootstrapMessage{Ready: true})
@@ -284,7 +290,7 @@ func runDaemonChild(cmd *cobra.Command, channelName string, reg *cmdRegistry) (r
 	// is a clean way to keep the two loops coupled.
 	err = runTrayOwning(cmd, deps, trayOptions{
 		reg:              reg,
-		channelName:      channelName,
+		channelName:      "multi", // v1.3+: every channel with valid creds auto-starts; tray's Status row shows this label
 		logger:           loggerFromContext(cmd.Context()),
 		onStopRequest:    onStopRequestDefault,
 		onRestartRequest: onRestartRequestDefault,

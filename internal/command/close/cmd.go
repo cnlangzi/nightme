@@ -93,7 +93,7 @@ func (f *Factory) Spec() command.Spec {
 //     /close (no args) → CloseAllAgents.
 //  4. Wrap the per-entry Result slice with FormatResults and reply.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if cs == nil {
 		return command.Reply(ctx, rt, "No active chat session to close."), nil

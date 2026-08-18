@@ -26,58 +26,23 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
 )
 
 // ─── MessageHandler (chatsession.Manager) ──────────────────────────
 
-// Message is a no-op MessageHandler. HandleInbound returns
-// nil without side effects. GetOrCreate forwards to the
-// provided Manager so the dispatch chain can resolve a real
-// ChatSession (the commander / shell shim closures call
-// cs.Emitter() during dispatch and would nil-deref with a
-// nil cs).
+// NewMessage returns the underlying *chatsession.Manager
+// directly. v1.3+ multi-channel: the inbound.Router accepts a
+// concrete *chatsession.Manager as its csMgr field; tests
+// no longer need the old MessageHandler interface. The
+// per-call GetOrCreate is exercised through the real Manager.
 //
 // Pass mgr=nil if your test never reaches the command or
-// shell branch; the stub's HandleInbound still does nothing
-// in that case.
-type Message struct {
-	mgr  *chatsession.Manager
-	mu   sync.Mutex
-	hits atomic.Int32
-	text string
-}
-
-func NewMessage(mgr *chatsession.Manager) *Message {
-	return &Message{mgr: mgr}
-}
-
-func (m *Message) HandleInbound(_ context.Context, msg *messages.InboundMessage) error {
-	m.mu.Lock()
-	m.text = msg.Text
-	m.mu.Unlock()
-	m.hits.Add(1)
-	return nil
-}
-
-func (m *Message) GetOrCreate(chatID, primary string) (*chatsession.ChatSession, error) {
-	if m.mgr == nil {
-		return nil, nil
-	}
-	return m.mgr.GetOrCreate(chatID, primary)
-}
-
-// Hits returns the number of times HandleInbound has been
-// called. Concurrent-safe.
-func (m *Message) Hits() int32 { return m.hits.Load() }
-
-// Text returns the Text of the most recent message that hit
-// HandleInbound. Empty string if no message has been seen.
-func (m *Message) Text() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.text
+// shell branch; the dispatch chain will get cs=nil from
+// GetOrCreate and the commander / shell shims short-circuit
+// gracefully.
+func NewMessage(mgr *chatsession.Manager) *chatsession.Manager {
+	return mgr
 }
 
 // ─── CommandDispatcher (command.Commander) ─────────────────────────
@@ -112,7 +77,7 @@ func (c *Commander) Recognize(text string, result Result) {
 	c.Recognized[text] = &result
 }
 
-func (c *Commander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
+func (c *Commander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.Manager, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
 	c.calls.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -151,7 +116,7 @@ func (c *Commander) Calls() int32 { return c.calls.Load() }
 // only care about one branch.
 type AlwaysFallThrough struct{}
 
-func (AlwaysFallThrough) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
+func (AlwaysFallThrough) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.Manager, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
 	return nil, false, nil
 }
 
@@ -188,7 +153,7 @@ func (s *Shell) Recognize(text string) {
 	s.Recognized[text] = true
 }
 
-func (s *Shell) Handle(_ *chatsession.ChatSession, ir shell.InboundRequest) (*shell.ShellOutput, bool) {
+func (s *Shell) Handle(_ *chatsession.Manager, _ *chatsession.ChatSession, ir shell.InboundRequest) (*shell.ShellOutput, bool) {
 	s.calls.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -205,7 +170,7 @@ func (s *Shell) Calls() int32 { return s.calls.Load() }
 // that only care about one branch.
 type AlwaysFallThroughShell struct{}
 
-func (AlwaysFallThroughShell) Handle(_ *chatsession.ChatSession, _ shell.InboundRequest) (*shell.ShellOutput, bool) {
+func (AlwaysFallThroughShell) Handle(_ *chatsession.Manager, _ *chatsession.ChatSession, _ shell.InboundRequest) (*shell.ShellOutput, bool) {
 	return nil, false
 }
 

@@ -26,7 +26,7 @@ func TestFactory_Handle_NoArgs_RepliesUsage(t *testing.T) {
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestFactory_Handle_NonexistentPath_RejectsEarly(t *testing.T) {
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "/nonexistent-path-xyz"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestFactory_Handle_RegularFile_RejectsNotDirectory(t *testing.T) {
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", file}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestFactory_Handle_ValidDir_SetsActiveCwd(t *testing.T) {
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", tmp}}
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestFactory_Handle_FullWidthPath_Normalised(t *testing.T) {
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "／tmp"}}
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestFactory_Handle_TooManyArgs_Rejected(t *testing.T) {
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "first", "second"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestFactory_Handle_MultilinePath_Rejected(t *testing.T) {
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "/tmp\n/etc"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

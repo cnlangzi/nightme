@@ -31,7 +31,7 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := steerpkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, nil,
 		command.SlashInput{ChatID: "no-such-chat"})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -51,7 +51,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	f := steerpkg.NewFactory(mgr)
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"steer"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -73,7 +73,7 @@ func TestFactory_Handle_EmptyBody_RepliesUsage(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID: "c1",
 			Args:   []string{"steer"},
@@ -95,7 +95,7 @@ func TestFactory_Handle_PrependsMessage(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID:    "c1",
 			MessageID: "m_steer",
@@ -126,7 +126,7 @@ func TestFactory_Handle_MultiWordBody(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID:    "c1",
 			MessageID: "m_steer_2",
@@ -154,7 +154,7 @@ func TestFactory_Handle_FullWidthSlash_ArgsAlreadySet(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID:    "c1",
 			MessageID: "m_steer_fw",
@@ -195,7 +195,7 @@ func TestFactory_Handle_LongBody_RuneTruncation(t *testing.T) {
 		args = append(args, string(r))
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID:    "c1",
 			MessageID: "m_long",
@@ -256,7 +256,7 @@ func TestFactory_Handle_QueueGrows(t *testing.T) {
 		t.Fatalf("precondition QueueLen: got %d, want 1", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID:    "c1",
 			MessageID: "m_steer_ahead",

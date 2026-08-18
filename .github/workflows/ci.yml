@@ -5,26 +5,33 @@ on:
     branches: [main]
 
 jobs:
-  # The Go test suite runs on every platform we ship binaries for:
-  # linux/amd64, windows/amd64, darwin/arm64 (Apple Silicon), and
-  # darwin/amd64 (Intel — macos-13 runner). GitHub Actions UI
-  # auto-expands the matrix axis as a sub-line under the job name,
-  # so this single entry shows as four parallel rows.
+  # The Go test suite runs on every OS family we ship binaries for:
+  # linux, windows, and macOS. GitHub Actions UI auto-expands the
+  # matrix axis as a sub-line under the job name, so this single
+  # entry shows as three parallel rows.
   #
-  # Why all four instead of just linux: a sizeable slice of the
-  # codebase carries `//go:build !windows` (daemoncontrol AF_UNIX
-  # sockets, Setpgid in claudecode, …) or `//go:build !unix`
-  # (Windows-only syscall wrappers). Linux-only coverage hides
-  # Windows regressions; Windows-only coverage hides Unix
-  # regressions. darwin coverage matters because Go's runtime
-  # scheduling differs on macOS (different M:N goroutine/thread
-  # ratios, different mmap behavior under cgo) and some bugs only
-  # surface there.
+  # Why all three: a sizeable slice of the codebase carries
+  # `//go:build !windows` (daemoncontrol AF_UNIX sockets, Setpgid
+  # in claudecode, …) or `//go:build !unix` (Windows-only syscall
+  # wrappers). Linux-only coverage hides Windows regressions;
+  # Windows-only coverage hides Unix regressions. darwin coverage
+  # matters because Go's runtime scheduling differs on macOS
+  # (different M:N goroutine/thread ratios, different mmap
+  # behavior under cgo) and some bugs only surface there.
+  #
+  # Why no arch axis (no separate Intel-vs-ARM entries): nightme
+  # is Go + Node.js npm. Go's runtime treats amd64 and arm64 as
+  # equivalent tier-1; npm auto-picks the right .node binary for
+  # the host arch. Adding `macos-13` (Intel x86_64) alongside
+  # `macos-latest` (Apple Silicon arm64) tested arch, not OS — and
+  # arch doesn't gate nightme's behavior. The OS coverage we have
+  # is the minimal-but-sufficient set: each entry is a host OS
+  # nightme doesn't otherwise exercise.
   #
   # Conditional logic inside the matrix: ubuntu gets `-race
-  # -coverprofile` (the actual coverage gate), the other three
-  # get `-count=1` plain test. Race is 2-3× slower and coverage
-  # upload is linux-only by repo convention (the badge lives on
+  # -coverprofile` (the actual coverage gate), the other two get
+  # `-count=1` plain test. Race is 2-3× slower and coverage upload
+  # is linux-only by repo convention (the badge lives on
   # linux/amd64). The `-count=1` on the non-ubuntu rows disables
   # the Go test cache so a flaky test that "passed yesterday"
   # can't hide a real regression on a different platform.
@@ -38,7 +45,6 @@ jobs:
           - ubuntu-latest
           - windows-latest
           - macos-latest
-          - macos-13
     steps:
       - uses: actions/checkout@v5
 
@@ -215,16 +221,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Full 4-platform matrix on purpose. Same axes as `test` —
-        # every platform we ship a binary for, we also verify
-        # the bridge can actually start every AI coding agent on
-        # that platform. macos-13 (Intel) is included alongside
-        # macos-latest (Apple Silicon) because some agent CLIs
-        # ship arm64-only .node binaries that fail to load on
-        # x86_64 darwin — and the CI cache key doesn't catch
-        # that. Each runner reports independently so a Linux-only
-        # npm registry hiccup doesn't gate Windows / macOS.
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        # 3-OS matrix on purpose. Same axes as `test` — every OS
+        # we ship a binary for, we also verify the bridge can
+        # actually start every AI coding agent on that OS. Arch
+        # (Intel vs Apple Silicon) is intentionally NOT a matrix
+        # axis: nightme is Go + npm, both treat amd64 and arm64
+        # equivalently, and adding `macos-13` would re-test the
+        # same OS layer with negligible signal. Each runner
+        # reports independently so a Linux-only npm registry
+        # hiccup doesn't gate Windows / macOS.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
 

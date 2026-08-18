@@ -45,7 +45,7 @@ nightme 的验证覆盖分五层,从下到上:
             │  4. startup (CI smoke)        │   ← 本文档;四平台 runner
             │     无 apikey,只验启动        │     每个 PR 必跑
             ├───────────────────────────────┤
-            │  3. 单元 + race + coverage    │   ← test job (matrix: 4 OS)
+            │  3. 单元 + race + coverage    │   ← test job (matrix: 3 OS)
             │     fake driver,bridge logic  │     每个 PR 必跑
             ├───────────────────────────────┤
    ─────────┤  2. 编译时跨平台 vet/build    │   ─────── bridge 边界 ────────
@@ -197,9 +197,8 @@ kill "$pid" 2>/dev/null || true
 test
   ├─ ubuntu-latest      ← race + coverage,真实 coverage gate
   ├─ windows-latest
-  ├─ macos-latest       ← Apple Silicon (arm64)
-  └─ macos-13           ← Intel (x86_64)
-  ~3-6 min (4 runners 并行)
+  └─ macos-latest
+  ~3-5 min (3 runners 并行)
 
 build
   ├─ windows / amd64
@@ -211,22 +210,29 @@ build
 startup
   ├─ ubuntu-latest
   ├─ windows-latest
-  ├─ macos-latest
-  └─ macos-13
-  needs: [test, build]   ~3-5 min (4 runners 并行)
+  └─ macos-latest
+  needs: [test, build]   ~3-5 min (3 runners 并行)
 ```
 
 **依赖顺序**:`test` 是根,`build` 必须等 `test`(确保代码至少编译/单测过),`startup` 必须等 `test` + `build`(确保代码编译 + 跨平台编译都绿才有意义跑 spawn smoke)。
 
-**为什么全 4 平台**:开发以 macOS 为主力,但**macos-13 (Intel) ≠ macos-latest (Apple Silicon)**,部分 agent CLI 装出来是 arm64-only 的 .node binary,在 x86_64 darwin 上加载直接 fail —— 这种 bug 只有跨 arch CI 才捕得到。同理 darwin/amd64 ≠ linux/amd64 ≠ windows/amd64,任何一个缺失都代表"那个平台的用户跑不动"。
+**为什么是这 3 个 OS,而不是更多或更少**:每个 OS 都是 nightme 触达独占行为的家族,不可互相替代:
+
+| OS | 触达的独占行为 | 砍掉会丢什么 |
+|---|---|---|
+| `ubuntu-latest` | `//go:build !windows` 测试、AF_UNIX sockets、Setpgid、glibc、`/proc`、Linux PTY | Linux syscall wrapper / IPC 回归 |
+| `windows-latest` | `.cmd` shim 路由、`CREATE_NO_WINDOW`、named pipes、ConPTY、MSYS 路径翻译 | **就是 dsh-on-Windows 那类 bug** |
+| `macos-latest` | BSD process signals、APFS、macOS PTY、macOS syscall wrapper | BSD signal 转发 / macOS-only edge case |
+
+**为什么不加 `macos-13` (Intel x86_64)**:nightme 是 Go + Node.js npm —— Go runtime 把 amd64 和 arm64 当等价 tier-1,nightme 不写汇编;`npm install` 自动按 host arch 拉对应 .node binary。**arch 不 gate 行为**,所以 `macos-13` 测试的是 OS 跟 `macos-latest` 一样的 darwin 层 + 不同的 arch,边际价值 ≈ 0。`build` job 仍然 cross-compile 到 4 个 GOOS/GOARCH,这是**release distribution 决策**(用户在不同 arch 机器上下载不同 binary),跟 CI 覆盖是两件事。
 
 **为什么 fail-fast: false**:`npm install -g` 可能因 registry / 网络问题在某一两个 OS 上挂,不应连带把另外的 OS gate 也拖红。每个 runner 独立报 pass/fail,CI UI 上一眼看出"哪个 OS 挂了、哪个过了"。
 
-**为什么 startup 挂链尾**:startup 是文件里最贵的 gate(npm install × 5 × 4 OSes + 5 spawn 尝试 × 8s 观察)。任何前置红了再启动 startup 就是纯烧 hosted runner 配额。挂链尾 = cheap-first / expensive-last。
+**为什么 startup 挂链尾**:startup 是文件里最贵的 gate(npm install × 5 × 3 OSes + 5 spawn 尝试 × 8s 观察)。任何前置红了再启动 startup 就是纯烧 hosted runner 配额。挂链尾 = cheap-first / expensive-last。
 
-**已知 trade-off**:`build` 的 4 个 target 都在 ubuntu 上编,所以跨平台 runtime 真假要靠 `test` 和 `startup` 覆盖。这两个 job 各自的 4 个 runner 互相独立、并行启动,所以**没有跨 OS 闲置**(对比旧的 `agent-smoke` 单 job matrix,旧版每个 runner 要等所有前置,有 ~6 min 闲置)。
+**已知 trade-off**:`build` 的 4 个 target 都在 ubuntu 上编,所以跨平台 runtime 真假要靠 `test` 和 `startup` 覆盖。这两个 job 各自的 3 个 runner 互相独立、并行启动,**没有跨 OS 闲置**。
 
-如果 CI 时间预算吃紧,可拆 `startup` 成 4 个独立 job(每个 OS 一个 needs 链),消掉"linux runner 等 windows runner 跑完"那种 idle —— 但目前单 job 矩阵更易配置,值得保留。
+如果 CI 时间预算吃紧,可拆 `startup` 成 3 个独立 job(每个 OS 一个 needs 链),消掉"linux runner 等 windows runner 跑完"那种 idle —— 但目前单 job 矩阵更易配置,值得保留。
 
 ---
 
@@ -282,7 +288,7 @@ echo "OK: all 5 agents across 5 gates"
 
 ### 6.2 为什么 CI 不能只信 dev 笔记本测试
 
-开发在 macOS / Linux 笔记本上跑同一组 gate 通常全绿,但 CI 还是独立跑全部 4 平台,原因:
+开发在 macOS / Linux 笔记本上跑同一组 gate 通常全绿,但 CI 还是独立跑 3 个 OS hosted runner,原因:
 
 | 维度 | dev 笔记本 | hosted runner |
 |---|---|---|
@@ -291,9 +297,11 @@ echo "OK: all 5 agents across 5 gates"
 | shell env | 累积多年的 alias / export / oh-my-zsh / brew shellenv | 默认 bash,无 user-level rc |
 | node 版本 | 跟着 brew / nvm 升级漂移 | Node 20 LTS(pinned) |
 | 用户态 `/tmp` | 跟其他 dev session 共享 | 每次 fresh |
-| CPU 架构 | dev 用啥就是啥(Intel vs ARM Mac) | 4 个独立平台各自验证(linux/amd64, windows/amd64, darwin/arm64, darwin/amd64) |
+| OS 内核版本 | dev 用啥就是啥(可能落后 2-3 个 minor) | 各 runner 跑当前 LTS 内核 |
 
-CI 跟 dev 环境不一致时,**几乎总是 CI 才对**(dev 环境有噪声掩盖 bug)。这就是为什么即使 macOS / Linux 已被开发者每天覆盖,CI 也要再独立跑全部 4 平台。`macos-13`(Intel x86_64)这个 entry 尤其关键 —— 90% 的现代 dev Mac 是 Apple Silicon,Intel Mac 的 bug 在 dev 侧几乎测不到,只能在 CI 里 catch。
+CI 跟 dev 环境不一致时,**几乎总是 CI 才对**(dev 环境有噪声掩盖 bug)。这就是为什么即使 macOS / Linux 已被开发者每天覆盖,CI 也要再独立跑 3 个 hosted runner——它们捕的是**OS 行为差异**(Linux 跟 Windows 跟 macOS 的内核、syscall、shell 都不一样),这些差异 dev 侧没法同时摸到。
+
+**为什么不验 arch**:nightme 是 Go + Node.js npm。Go runtime 把 amd64 和 arm64 当等价 tier-1(夜me不写汇编),`npm install` 自动按 host arch 拉对应 .node binary —— **arch 不 gate 行为**。如果 dev 用的是 Apple Silicon Mac,跟 `macos-latest` runner 同一个 arch(arm64),那 dev + CI 已经在测同一个 arch 了;如果是 Intel Mac,`build` job 的 `darwin/amd64` cross-compile target 已经在 compile 端验过 darwin/x86_64。runtime 端没有"只在某个 arch 上坏的 nightme 代码路径"这个 gap。
 
 ---
 

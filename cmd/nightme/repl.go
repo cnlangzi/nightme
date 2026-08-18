@@ -99,7 +99,10 @@ func (w shellWriter) Write(p []byte) (int, error) {
 // read error. Production path uses reeflective/readline for line
 // editing and in-memory history.
 func runREPL(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) error {
-	return runREPLInteractive(root, reg, logger)
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		return runREPLInteractive(root, reg, logger)
+	}
+	return runREPLWith(root, reg, logger, os.Stdin, os.Stdout)
 }
 
 // runREPLInteractive drives the REPL with reeflective/readline so

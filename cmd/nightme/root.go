@@ -9,6 +9,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	// Register channel Builders via init() so the channel.Registry
+	// sees every available channel. Drop the blank assignment if
+	// the test build needs to disable one; production runtime
+	// always uses both.
+	_ "github.com/cnlangzi/nightme/internal/channel/feishu"
+	_ "github.com/cnlangzi/nightme/internal/channel/telegram"
+
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/version"
 )

@@ -216,7 +216,7 @@ func TestHandler_NoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := stoppkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, nil,
 		command.SlashInput{ChatID: "no-such-chat"})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -242,7 +242,7 @@ func TestHandler_UsageError(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"stop", "extra"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -263,7 +263,7 @@ func TestHandler_NoTurnInFlight(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := stoppkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -284,7 +284,7 @@ func TestHandler_Stopped(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := stoppkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)

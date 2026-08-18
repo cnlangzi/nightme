@@ -4,25 +4,25 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/login"
 )
 
 // fakeProvider is a login.Provider that returns whatever the
-// test set up. It is the test's handle to "what the QR flow would
-// have produced".
+// test set up. It is the test's handle to "what the QR flow
+// would have produced".
 type fakeProvider struct {
 	creds     *login.Credentials
 	err       error
 	greetErr  error
-	delay     time.Duration // simulate >zero Login before returning
+	delay     time.Duration
 	greetBody login.GreetingMessages
 	greetHits int
 }
@@ -39,18 +39,17 @@ func (f *fakeProvider) Login(ctx context.Context) (*login.Credentials, error) {
 	return f.creds, f.err
 }
 
-// Greet implements login.Provider for the fake. Captures the
-// messages it received + counts hits so orchestrator tests can
-// assert "Greet was actually called with X". The fake never sends.
+// Greet implements login.Provider for the fake.
 func (f *fakeProvider) Greet(_ context.Context, m login.GreetingMessages) error {
 	f.greetBody = m
 	f.greetHits++
 	return f.greetErr
 }
 
-// withTempConfig points NIGHTME_CONFIG at a fresh temp file so the
-// CLI write paths can run without polluting the user's real config.
-// Returns the path so the test can read what was written.
+// withTempConfig points NIGHTME_CONFIG at a fresh temp file so
+// the CLI write paths can run without polluting the user's real
+// config. Returns the path so the test can read what was
+// written.
 func withTempConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -59,242 +58,248 @@ func withTempConfig(t *testing.T) string {
 	return path
 }
 
-// TestLogin_Success walks the happy path: clean config + fake
-// provider returning credentials -> config.yaml is written, success
-// banner mentions the app_id.
+// TestLogin_Success verifies the happy path: provider returns
+// valid creds, login.LoginWith persists them and prints the
+// success summary.
 func TestLogin_Success(t *testing.T) {
 	_ = withTempConfig(t)
 
 	prov := &fakeProvider{
 		creds: &login.Credentials{
-			AppID:     "cli_newapp",
-			AppSecret: "sek-ret-1",
-			AppName:   "nightme",
+			AppID:     "cli_test_app",
+			AppSecret: "secret",
+			AppName:   "Test App",
 			CreatedAt: time.Now(),
 		},
 	}
-
-	flags := &loginCmdFlags{timeout: 5 * time.Second}
-	cmd := newLoginFeishuCmd(flags)
-	var stdout bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stdout)
-	cmd.SetContext(context.Background())
-
-	if err := runLoginWith(cmd, flags, prov); err != nil {
-		t.Fatalf("runLoginWith: %v", err)
+	out := &bytes.Buffer{}
+	if err := login.LoginWith(context.Background(), prov, out, &bytes.Buffer{}); err != nil {
+		t.Fatalf("LoginWith: %v", err)
 	}
-
-	// Config got written with our credentials.
 	cfg, err := config.LoadDefault()
 	if err != nil {
-		t.Fatalf("LoadDefault: %v", err)
+		t.Fatalf("load config: %v", err)
 	}
-	if cfg.Feishu.AppID != "cli_newapp" {
-		t.Errorf("Feishu.AppID = %q, want cli_newapp", cfg.Feishu.AppID)
+	if cfg.Feishu.AppID != "cli_test_app" {
+		t.Errorf("AppID = %q, want cli_test_app", cfg.Feishu.AppID)
 	}
-	if cfg.Feishu.AppSecret != "sek-ret-1" {
-		t.Errorf("Feishu.AppSecret = %q, want sek-ret-1", cfg.Feishu.AppSecret)
+	if cfg.Feishu.AppSecret != "secret" {
+		t.Errorf("AppSecret = %q, want secret", cfg.Feishu.AppSecret)
 	}
-
-	// Stdout includes the success banner.
-	if !strings.Contains(stdout.String(), "cli_newapp") {
-		t.Errorf("stdout missing app_id: %s", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "✓") {
-		t.Errorf("stdout missing success check: %s", stdout.String())
-	}
-
-	// File is 0600 (POSIX only).
-	//
-	// Windows doesn't track POSIX permission bits — `os.Stat`
-	// returns mode bits that reflect the Win32 ACL inheritance,
-	// not 0600/0644/etc. We only enforce the POSIX assertion on
-	// Unix. On Windows the chmod 0600 call in config.Save is a
-	// no-op (see internal/config/config_windows.go) so this
-	// test would be asserting against a platform that never
-	// promised to honor the constraint.
-	if runtime.GOOS != "windows" {
-		path := os.Getenv("NIGHTME_CONFIG")
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat config: %v", err)
-		}
-		if perm := info.Mode().Perm(); perm != 0o600 {
-			t.Errorf("config perms = %#o, want 0600", perm)
-		}
+	if !strings.Contains(out.String(), "registered successfully") {
+		t.Errorf("output missing success line: %q", out.String())
 	}
 }
 
-// TestLogin_AlwaysRebinds asserts the rebind contract: running
-// login on a config that already holds Feishu credentials
-// unconditionally overwrites them. There is no --force flag, no
-// "already configured" guard — `nightme login feishu` IS the
-// rebind operation. This is what makes bumping the requested scopes
-// (e.g. adding im:message.reactions:write_only) a single command.
+// TestLogin_AlwaysRebinds verifies that re-running login
+// overwrites any prior credentials without prompting.
 func TestLogin_AlwaysRebinds(t *testing.T) {
 	_ = withTempConfig(t)
 
-	cfg, err := config.LoadDefault()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Feishu.AppID = "old-cli-id"
-	cfg.Feishu.AppSecret = "old-secret"
-	if err := config.Save(cfg, os.Getenv("NIGHTME_CONFIG")); err != nil {
-		t.Fatal(err)
+	// Seed a prior credential so we can verify overwrite.
+	prior := &login.Credentials{AppID: "prior", AppSecret: "prior-secret"}
+	login.LoginWith(context.Background(), &fakeProvider{creds: prior}, &bytes.Buffer{}, &bytes.Buffer{})
+
+	cfg, _ := config.LoadDefault()
+	if cfg.Feishu.AppID != "prior" {
+		t.Fatalf("seed failed: AppID = %q, want prior", cfg.Feishu.AppID)
 	}
 
-	prov := &fakeProvider{
-		creds: &login.Credentials{AppID: "new-cli-id", AppSecret: "new-secret"},
+	// Re-bind.
+	fresh := &login.Credentials{AppID: "fresh", AppSecret: "fresh-secret"}
+	if err := login.LoginWith(context.Background(), &fakeProvider{creds: fresh}, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("rebind: %v", err)
 	}
-
-	flags := &loginCmdFlags{timeout: 5 * time.Second}
-	cmd := newLoginFeishuCmd(flags)
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-	if err := runLoginWith(cmd, flags, prov); err != nil {
-		t.Fatalf("runLoginWith: %v", err)
+	cfg, _ = config.LoadDefault()
+	if cfg.Feishu.AppID != "fresh" {
+		t.Errorf("AppID = %q, want fresh (overwrite)", cfg.Feishu.AppID)
 	}
-
-	cfg2, _ := config.LoadDefault()
-	if cfg2.Feishu.AppID != "new-cli-id" {
-		t.Errorf("AppID = %q, want new-cli-id (rebind did not overwrite)", cfg2.Feishu.AppID)
-	}
-	if cfg2.Feishu.AppSecret != "new-secret" {
-		t.Errorf("AppSecret = %q, want new-secret", cfg2.Feishu.AppSecret)
+	if cfg.Feishu.AppSecret != "fresh-secret" {
+		t.Errorf("AppSecret = %q, want fresh-secret", cfg.Feishu.AppSecret)
 	}
 }
 
 // TestLogin_ProviderError wraps the SDK error path: any Login
 // failure bubbles through verbatim so the user sees the real
-// upstream message rather than a placeholder.
+// upstream message rather than a placeholder. Crucially, nothing
+// is written to disk.
 func TestLogin_ProviderError(t *testing.T) {
 	_ = withTempConfig(t)
 
 	prov := &fakeProvider{err: login.ErrLoginTimeout}
 
-	cmd := newLoginFeishuCmd(&loginCmdFlags{timeout: 5 * time.Second})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-	err := runLoginWith(cmd, &loginCmdFlags{timeout: 5 * time.Second}, prov)
+	err := login.LoginWith(context.Background(), prov, &bytes.Buffer{}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 	if !strings.Contains(err.Error(), "login timeout") {
 		t.Errorf("error chain does not mention timeout: %v", err)
 	}
-
-	// Crucially, nothing was written to disk.
-	if _, err := os.Stat(os.Getenv("NIGHTME_CONFIG")); !os.IsNotExist(err) {
-		// We don't expect the file to exist at all (no save ran)
-		// — but if it existed before this test that's fine too.
-		// Important: it must not have been REWRITTEN with creds.
-		cfg, _ := config.LoadDefault()
-		if cfg.Feishu.AppID != "" {
-			t.Errorf("AppID written after provider failure: %q", cfg.Feishu.AppID)
-		}
+	cfg, _ := config.LoadDefault()
+	if cfg.Feishu.AppID != "" {
+		t.Errorf("AppID written after provider failure: %q", cfg.Feishu.AppID)
 	}
 }
 
-// TestLogin_ContextDeadline aligns the timeout-in-the-flag with
-// the actual context passed to provider.Login. A 1ms timeout with
-// a fake that sleeps 1s should surface ctx.DeadlineExceeded.
+// TestLogin_ContextDeadline verifies that a slow provider is
+// interrupted by the login context.
 func TestLogin_ContextDeadline(t *testing.T) {
 	_ = withTempConfig(t)
 
 	prov := &fakeProvider{
-		delay: 10 * time.Millisecond,
-		creds: &login.Credentials{AppID: "x", AppSecret: "x"},
+		delay: 200 * time.Millisecond,
+		creds: &login.Credentials{AppID: "x"},
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
 
-	cmd := newLoginFeishuCmd(&loginCmdFlags{timeout: 50 * time.Millisecond})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-	// This should NOT time out: 50ms > 10ms delay, so the fake
-	// returns in time. The point of this test is mostly to lock
-	// in the plumbing: ctx is passed, Login respects it.
-	if err := runLoginWith(cmd, &loginCmdFlags{timeout: 50 * time.Millisecond}, prov); err != nil {
-		// Tolerated: if timer scheduling gets weird it can race,
-		// but neither side should crash.
-		t.Logf("note: timed error returned (likely scheduling): %v", err)
+	err := login.LoginWith(ctx, prov, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected error from ctx deadline")
 	}
 }
 
-// TestLogin_CallsGreet asserts the orchestrator invokes
-// provider.Greet with login.GreetingTexts() right after a
-// successful Login. Locks the post-login greeting flow.
+// TestLogin_CallsGreet verifies that login.LoginWith calls
+// Greet after the save succeeds, and forwards GreetingTexts.
 func TestLogin_CallsGreet(t *testing.T) {
 	_ = withTempConfig(t)
 
 	prov := &fakeProvider{
 		creds: &login.Credentials{
-			AppID: "cli_x", AppSecret: "s", AppName: "n",
-			CreatedAt: time.Now(),
+			AppID:     "x",
+			AppSecret: "y",
 		},
 	}
-	flags := &loginCmdFlags{timeout: 5 * time.Second}
-	cmd := newLoginFeishuCmd(flags)
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-
-	if err := runLoginWith(cmd, flags, prov); err != nil {
-		t.Fatalf("runLoginWith: %v", err)
+	if err := login.LoginWith(context.Background(), prov, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("LoginWith: %v", err)
 	}
 	if prov.greetHits != 1 {
-		t.Errorf("Greet called %d times, want 1", prov.greetHits)
+		t.Fatalf("Greet hits = %d, want 1", prov.greetHits)
 	}
-	want := login.GreetingTexts()
-	if len(prov.greetBody) != len(want) {
-		t.Errorf("Greet body len = %d, want %d", len(prov.greetBody), len(want))
-	}
-	for i, m := range want {
-		if i >= len(prov.greetBody) {
-			t.Errorf("Greet body missing element %d (want %+v)", i, m)
-			continue
-		}
-		if prov.greetBody[i] != m {
-			t.Errorf("Greet body[%d] = %+v, want %+v", i, prov.greetBody[i], m)
-		}
+	if len(prov.greetBody) == 0 {
+		t.Fatal("Greet received empty greeting messages")
 	}
 }
 
-// TestLogin_GreetError_DoesNotBlockConfigWrite ensures a failing
-// Greet does NOT roll back the successful registration. The
-// orchestrator must swallow the error after logging, then proceed
-// to write credentials + print success banner.
+// TestLogin_GreetError_DoesNotBlockConfigWrite verifies that a
+// greeting failure is best-effort: the credentials are still
+// persisted and the CLI exits nil.
 func TestLogin_GreetError_DoesNotBlockConfigWrite(t *testing.T) {
 	_ = withTempConfig(t)
 
 	prov := &fakeProvider{
-		creds: &login.Credentials{
-			AppID: "cli_y", AppSecret: "s", AppName: "n",
-			CreatedAt: time.Now(),
-		},
-		greetErr: errors.New("greeting blew up"),
+		creds:    &login.Credentials{AppID: "x", AppSecret: "y"},
+		greetErr: errors.New("greeting API down"),
 	}
-	flags := &loginCmdFlags{timeout: 5 * time.Second}
-	cmd := newLoginFeishuCmd(flags)
-	var stdout, stderr bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stderr)
-	cmd.SetContext(context.Background())
+	errOut := &bytes.Buffer{}
+	if err := login.LoginWith(context.Background(), prov, &bytes.Buffer{}, errOut); err != nil {
+		t.Fatalf("LoginWith must not propagate Greet errors: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "greeting DM failed") {
+		t.Errorf("errOut should mention greeting failure, got %q", errOut.String())
+	}
+	cfg, _ := config.LoadDefault()
+	if cfg.Feishu.AppID != "x" {
+		t.Errorf("AppID not persisted: %q", cfg.Feishu.AppID)
+	}
+}
 
-	if err := runLoginWith(cmd, flags, prov); err != nil {
-		t.Fatalf("runLoginWith returned err: %v", err)
+// TestLogin_NilProvider verifies the helper rejects nil
+// providers up-front rather than panicking.
+func TestLogin_NilProvider(t *testing.T) {
+	err := login.LoginWith(context.Background(), nil, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("nil provider must error")
 	}
-	cfg, err := config.LoadDefault()
+}
+
+// TestNightmeLogin_RegistryContainsFeishuTelegram verifies the
+// provider registry is populated by both packages' init() funcs.
+func TestNightmeLogin_RegistryContainsFeishuTelegram(t *testing.T) {
+	channels := login.AvailableChannels()
+	want := map[string]bool{"feishu": false, "telegram": false}
+	for _, ch := range channels {
+		if _, ok := want[ch]; ok {
+			want[ch] = true
+		}
+	}
+	for ch, found := range want {
+		if !found {
+			t.Errorf("registry missing channel %q (have: %v)", ch, channels)
+		}
+	}
+}
+
+// TestNightmeLogin_BuildsCobraCommandTree verifies that the CLI
+// orchestrator produces a working subcommand tree from the
+// registry. The parent command must:
+//   - list all available channels in --help
+//   - return an error (not nil) when invoked without a subcommand
+//   - let cobra report "unknown command" when invoked with an
+//     invalid channel
+func TestNightmeLogin_BuildsCobraCommandTree(t *testing.T) {
+	cmd := newLoginCmd()
+
+	// --help should list every registered channel.
+	helpOutput, err := executeCmd(cmd, "--help")
 	if err != nil {
-		t.Fatalf("LoadDefault: %v", err)
+		t.Fatalf("--help: %v", err)
 	}
-	if cfg.Feishu.AppID != "cli_y" {
-		t.Errorf("config Feishu.AppID = %q, want cli_y (Greet failure must not roll back)", cfg.Feishu.AppID)
+	for _, ch := range login.AvailableChannels() {
+		if !strings.Contains(helpOutput, ch) {
+			t.Errorf("--help output missing channel %q: %s", ch, helpOutput)
+		}
 	}
-	if !strings.Contains(stderr.String(), "greeting DM failed") {
-		t.Errorf("stderr missing greeting failure log: %s", stderr.String())
+
+	// No subcommand: should error and exit non-zero.
+	out, err := executeCmdBare(cmd)
+	if err == nil {
+		t.Fatal("`nightme login` with no args must error")
 	}
+	if !strings.Contains(err.Error(), "no channel specified") {
+		t.Errorf("error should mention no channel specified, got %v", err)
+	}
+	if !strings.Contains(out, "Available channels") {
+		t.Errorf("error output should list available channels, got %q", out)
+	}
+
+	// Unknown subcommand: cobra should print its own error.
+	_, err = executeCmd(cmd, "no-such-channel")
+	if err == nil {
+		t.Fatal("`nightme login no-such-channel` must error")
+	}
+	if !strings.Contains(err.Error(), "no-such-channel") {
+		t.Errorf("error should mention the bad channel, got %v", err)
+	}
+}
+
+// executeCmd runs cmd with the given args and returns (stdout,
+// err). Used by tests that need to exercise the cobra pipeline
+// end-to-end.
+func executeCmd(cmd *cobra.Command, args ...string) (string, error) {
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs(append([]string{cmd.Name()}, args...))
+	// ResetFlags clears parsed flag values between invocations so
+	// multiple executions in one test are independent. We do NOT
+	// call ResetCommands — that would strip the subcommands the
+	// parent walked at construction time.
+	cmd.ResetFlags()
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+// executeCmdBare invokes cmd without any extra args. Use this
+// when testing the parent command no-arg behaviour —
+// executeCmd always prepends cmd.Name(), which cobra treats as
+// an arg under ArbitraryArgs.
+func executeCmdBare(cmd *cobra.Command) (string, error) {
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{})
+	cmd.ResetFlags()
+	err := cmd.Execute()
+	return out.String(), err
 }

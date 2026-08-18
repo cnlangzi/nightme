@@ -32,6 +32,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -42,7 +43,7 @@ import (
 // no registered factory (e.g. "/etc/passwd"). When Match
 // reports yes, it spawns a goroutine that runs commander.Dispatch
 // and emits the reply, then returns handled=true synchronously.
-func (r *Router) tryCommandDispatch(ctx context.Context, msg *messages.InboundMessage) (bool, *CommandResult, error) {
+func (r *Router) tryCommandDispatch(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) (bool, *CommandResult, error) {
 	commander, ok := r.requireCommander()
 	if !ok {
 		return false, nil, nil
@@ -122,7 +123,7 @@ func (r *Router) runCommand(ctx context.Context, commander CommandDispatcher, ms
 		// F-58 TODO: thread primary agent through RuntimeServices
 		// explicitly; current Commander implementations don't
 		// need it (they read cs.SelectedAgent()).
-	}, cs, command.SlashInput{
+	}, r.csMgr, cs, command.SlashInput{
 		ChatID:     msg.ChatID,
 		UserID:     msg.UserID,
 		Text:       msg.Text,

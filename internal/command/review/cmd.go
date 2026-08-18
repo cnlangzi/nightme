@@ -139,7 +139,7 @@ func parseReviewArgs(argv []string) (Spec, error) {
 // (readpump → translate → emit), automatically tagged with
 // agentbar / usagebar footer.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	// Parse args. /review supports ONE optional flag: --agent/-a
 	// to specify which coding agent runs the review (overriding

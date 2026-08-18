@@ -16,6 +16,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
 )
@@ -29,7 +30,7 @@ import (
 // loaded) falls through to tryMessageDispatch so the user
 // can still talk to the agent. Same contract as the v0.x
 // runtime shim.
-func (r *Router) tryShellDispatch(ctx context.Context, msg *messages.InboundMessage) (bool, *CommandResult, error) {
+func (r *Router) tryShellDispatch(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) (bool, *CommandResult, error) {
 	sh, ok := r.requireShell()
 	if !ok {
 		return false, nil, nil
@@ -40,7 +41,7 @@ func (r *Router) tryShellDispatch(ctx context.Context, msg *messages.InboundMess
 			"chat_id", msg.ChatID, "err", err)
 		return false, nil, nil
 	}
-	result, handled := sh.Handle(cs, shell.InboundRequest{
+	result, handled := sh.Handle(r.csMgr, cs, shell.InboundRequest{
 		Request: shell.Request{
 			Text: msg.Text,
 			Cwd:  cs.SelectedCwd(),

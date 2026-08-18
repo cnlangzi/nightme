@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"github.com/cnlangzi/nightme/internal/httpclient"
 )
 
 // Health probe tuning. Constants rather than options because the
@@ -104,7 +105,7 @@ func NewHealthProbe(clientGetter func() *Client, onFailure func(), logger *slog.
 		path:         healthProbePath,
 		closed:       make(chan struct{}),
 		done:         make(chan struct{}),
-		http:         &http.Client{Timeout: healthProbeTimeout},
+		http:         httpclient.DefaultWithTimeout(healthProbeTimeout),
 	}
 }
 

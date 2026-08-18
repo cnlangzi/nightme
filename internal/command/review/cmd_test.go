@@ -150,7 +150,7 @@ func TestSpec_AcceptsNoArgs(t *testing.T) {
 func dispatchWithNoCS(t *testing.T, args []string) (*command.SlashOutput, error) {
 	t.Helper()
 	f := NewFactory(nil) // mgr is unused for the arg check path
-	return f.Handle(context.Background(), command.RuntimeServices{}, nil, command.SlashInput{
+	return f.Handle(context.Background(), command.RuntimeServices{}, nil, nil, command.SlashInput{
 		ChatID:     "test-chat",
 		UserID:     "test-user",
 		Text:       "/" + strings.Join(args, " "),

@@ -54,10 +54,22 @@ func init() {
 		handlerDeps, _ := d.GTWExt.(HandlerDeps)
 		mgr := NewManager()
 		mgr.SetHandlerDeps(handlerDeps)
-		mgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-			cs, _ := d.Manager.GetOrCreate(chatID, d.Primary)
-			return cs
-		})
+		// v1.3+ multi-channel: prefer ChatSessionLookup (set by
+		// the runtime to runtime.findChatSession) so /gtw replies
+		// land on the originating channel. Fall back to the
+		// single-mgr path for legacy deployments that don't
+		// wire the lookup — d.Manager is the primary (first)
+		// per-channel mgr in multi-channel mode, which would
+		// otherwise route every chat through the first channel's
+		// Emitter.
+		lookup := d.ChatSessionLookup
+		if lookup == nil {
+			lookup = func(chatID string) *chatsession.ChatSession {
+				cs, _ := d.Manager.GetOrCreate(chatID, d.Primary)
+				return cs
+			}
+		}
+		mgr.SetGetChatSession(lookup)
 		return NewFactoryWithDeps(mgr, handlerDeps)
 	})
 }
@@ -262,7 +274,7 @@ func (f *Factory) Spec() command.Spec {
 // Args[0]. Tests written against this factory use the
 // "Args[0] = subcommand" convention because the commander
 // is bypassed; production callers must go through commander.
-func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 2 {
 		return &command.SlashOutput{
 			Reply:    f.Spec().Usage,

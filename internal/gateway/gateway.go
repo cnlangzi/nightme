@@ -1,43 +1,37 @@
-// Package gateway — the inbound pump and binding table for every
-// IM Channel attached to the daemon. It owns transport (reading
-// InboundMessage from each channel, multiplexing into a central
-// dispatch channel) and routing (which chat belongs to which
-// channel), and delegates per-message dispatch to a wired
-// *inbound.Router.
+// Package gateway — the multi-channel inbound pump and the
+// chat → session binding table. v1.3+ multi-channel: each
+// attached (Channel, Manager) tuple runs its own pumpOne
+// goroutine that calls the shared inbound.Router's Dispatch
+// with the per-channel Manager (the chatID → channel mapping
+// is implicit via the per-pump mgr closure).
 //
 // Layered architecture (top-down, no cycles):
 //
-//	gateway                — pump + binding table
+//	gateway                — multi-pump + binding table
 //	  └─ inbound (package)  — priority dispatch chain
 //	                         (chatsession / command / shell / services)
 //
 // Gateway itself does NOT know about chatsession, command,
 // shell, or services. The dispatch chain is constructed by
-// the runtime (cmd/nightme/run.go) and passed to New. This
-// keeps the layering clean: every dependency points downward
-// (gateway → inbound → dispatch targets), never up.
+// the runtime (cmd/nightme/run.go) and passed to New.
 //
 // Responsibilities:
-//
-//   - AttachChannels + Start/Stop lifecycle + the per-channel
-//     pumpInbound goroutine.
-//   - chatToChan + defaultChannel routing table (which Channel
-//     serves which chatID; used for outbound Channel resolution
-//     from a chatID).
+//   - AttachPumps: register (Channel, Manager) tuples. Each
+//     tuple gets its own pumpOne goroutine on Start.
+//   - Start / Stop lifecycle.
 //   - DispatchInbound: thin delegate to the wired
-//     *inbound.Router. Returns *inbound.CommandResult
-//     (defined in the inbound package — gateway has no
-//     per-dispatch state of its own).
+//     *inbound.Router, used by the v0.x single-channel tests
+//     and the legacy call sites.
 //   - Bind / LookupByChat / ListBindings / RestoreBindings /
 //     Unbind: the chat → ChatSession binding table (v1.2
-//     surface; reserved for future multi-session work).
+//     surface).
 //
-// F-58 history: gateway previously exposed a `Gateway`
-// interface with a `Router = gateway` type alias. The interface
-// was dropped in favour of a single explicit `Router` struct —
-// production code always type-asserted to *Router immediately
-// after New, so the interface had no implementors and no
-// consumers that benefited from the abstraction.
+// v1.3 history: AttachChannels + pumpInbound + dispatchLoop
+// (the central goroutine that read from a fan-in channelCh
+// and called DispatchInbound) were replaced with AttachPumps
+// + pumpOne. Each pump's goroutine calls Dispatch directly
+// with its own mgr, eliminating the routing table
+// (chatToChan / defaultChannel / channelCh).
 package gateway
 
 import (
@@ -47,116 +41,97 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// Router is the inbound pump + binding table. Constructed
-// once per daemon via New; the runtime holds the *Router and
-// uses it to AttachChannels / Start / Stop / DispatchInbound.
+// Router is the multi-pump + binding table. Constructed once
+// per daemon via New; the runtime holds the *Router and calls
+// AttachPumps + Start + Stop.
 type Router struct {
 	mu sync.RWMutex
-
-	// emitter (set via New) is the outbound chokepoint every
-	// downstream caller goes through for send-side operations.
-	// The runtime injects an outbound.Emitter at construction;
-	// the gateway stores it for chat-session bind / wire
-	// helpers to fetch via the Emitter() method.
-	emitter outbound.Emitter
 
 	// inbound is the dispatch chain. Set at New; the gateway
 	// delegates DispatchInbound to it.
 	inbound *inbound.Router
 
-	// Stage 2 / v1.2 pump state. fields below are read/written under mu.
-	channels       []channel.Channel
-	channelCh      chan messages.InboundMessage
-	stopCh         chan struct{}
-	stopOnce       sync.Once
-	wg             sync.WaitGroup
-	chatToChan     map[string]channel.Channel // ChatID -> the channel that owns the chat
-	defaultChannel channel.Channel            // fallback channel for chats we haven't seen yet
+	// v1.3+ multi-channel pump state.
+	pumps    []Pump
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 
 	// v1.2 binding table (chat_id → session_id). Owned by Router.
 	bindings map[string]*BindingEntry
+
+	// mgrFallback is the chatsession.Manager of the first
+	// attached pump. It is used by the legacy DispatchInbound
+	// path (single-channel tests and the v0.x call sites) when
+	// no Pump context is available. Set automatically when
+	// AttachPumps is called.
+	mgrFallback *chatsession.Manager
 }
 
-// New constructs a Router (the inbound pump + binding table).
+// Pump pairs a channel with its per-channel chatsession.Manager.
+// The Manager owns the ChatSession for the chatID and carries
+// the Emitter bound to the channel that produced the inbound.
+// Each Pump runs its own pumpOne goroutine.
+type Pump struct {
+	Channel channel.Channel
+	Manager *chatsession.Manager
+}
+
+// New constructs a Router (the multi-pump + binding table).
 //
-// ir is the dispatch chain. em is the outbound chokepoint.
-// Both are required and must be non-nil — the gateway is
-// useless without either.
+// ir is the dispatch chain. It is required and must be
+// non-nil — the gateway is useless without it.
 //
 // Runtime wiring (cmd/nightme/run.go):
 //
-//	gw := gateway.New(inbound.New(mgr, commander, shellDisp, action, em, primary), em)
-func New(ir *inbound.Router, em outbound.Emitter) *Router {
+//	for _, ch := range deps.NewChannels(cfg) {
+//	    mgr := buildStack(ch, ...)
+//	    pumps = append(pumps, gateway.Pump{Channel: ch, Manager: mgr})
+//	}
+//	gw := gateway.New(inbound.New(commander, shellDispatcher, reactionRouter, cfg.Primary))
+//	gw.AttachPumps(pumps...)
+//	gw.Start(ctx)
+func New(ir *inbound.Router) *Router {
 	if ir == nil {
 		panic("gateway.New: inbound.Router must not be nil")
 	}
-	if em == nil {
-		panic("gateway.New: Emitter must not be nil")
-	}
 	return &Router{
-		inbound:     ir,
-		emitter:     em,
-		chatToChan:  make(map[string]channel.Channel),
-		bindings:    make(map[string]*BindingEntry),
+		inbound:  ir,
+		bindings: make(map[string]*BindingEntry),
 	}
 }
 
-// Emitter returns the outbound chokepoint bound to this Router.
-// The runtime (cmd/nightme) fetches it once after New to bind
-// the same Emitter to chatsession.Manager (so every chat
-// session's outbound path goes through this single chokepoint).
-//
-// Lock-free: emitter is set once at construction.
-func (r *Router) Emitter() outbound.Emitter {
-	return r.emitter
-}
-
-// ResolveChannel is the IM Channel that serves chatID. F-58:
-// was exported so cmd/nightme could look up a chat's channel
-// for the v0.x WithChannel shim; no production caller remains
-// after the shims were deleted. Kept as a package-private
-// helper (resolveChannel, below) for any future debug /
-// recovery path that needs chatID → Channel.
-func (r *Router) ResolveChannel(chatID string) channel.Channel {
-	return r.resolveChannel(chatID)
-}
-
-// AttachChannels registers the channels the gateway will read from
-// and dispatch to. Multi-channel is supported.
-func (r *Router) AttachChannels(channels ...channel.Channel) {
+// AttachPumps registers one (Channel, Manager) tuple per
+// channel. Must be called before Start. The first pump's
+// Manager is captured as the mgrFallback for the legacy
+// DispatchInbound path.
+func (r *Router) AttachPumps(pumps ...Pump) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.channels = append(r.channels, channels...)
-	if len(channels) > 0 {
-		for _, c := range channels {
-			if c != nil {
-				r.defaultChannel = c
-				break
-			}
-		}
+	r.pumps = append(r.pumps, pumps...)
+	if r.mgrFallback == nil && len(pumps) > 0 && pumps[0].Manager != nil {
+		r.mgrFallback = pumps[0].Manager
 	}
 }
 
-// DispatchInbound is the inboundDispatcher entry point. Thin
-// delegate to the wired *inbound.Router — gateway itself owns
-// no dispatch logic.
+// Emitter returns the outbound chokepoint bound at
+// construction. Reserved for back-compat with v0.x call sites
+// that fetched the Emitter via Router.Emitter(); production
+// multi-channel code uses Manager.emitter (per-channel).
 //
-// Returns (nil, nil) when msg is nil (defensive; the pump
-// should never produce a nil message but tests sometimes do).
-func (r *Router) DispatchInbound(ctx context.Context, msg *messages.InboundMessage) (*inbound.CommandResult, error) {
-	if msg == nil {
-		return nil, errors.New("gateway: nil message")
-	}
-	return r.inbound.Dispatch(ctx, msg)
-}
+// Returns nil for v1.3+ Routers (no shared emitter). Use
+// ch.Manager.Emitter() instead.
+func (r *Router) Emitter() *struct{} { return nil }
 
-// Start launches the per-channel inbound pump and the central
-// dispatch loop. Blocks until ctx is cancelled or Stop is called.
+// Start launches one pumpOne goroutine per attached pump. Each
+// pump reads from its own channel and calls the shared
+// dispatch chain with its own mgr (per-channel). Blocks until
+// ctx is cancelled or Stop is called.
 func (r *Router) Start(ctx context.Context) error {
 	r.mu.Lock()
 	if r.stopCh != nil {
@@ -164,38 +139,25 @@ func (r *Router) Start(ctx context.Context) error {
 		return errors.New("gateway: already started")
 	}
 	r.stopCh = make(chan struct{})
-	// channelCh buffers messages between pumpInbound and the
-	// dispatchLoop monitor. Sized to absorb bursty inbound
-	// (chatty group / multi-channel storm) without back-pressuring
-	// the per-channel SDK pumps. Each slot is a single
-	// messages.InboundMessage struct — 4096 is comfortably above
-	// realistic per-daemon message rates (Feishu's per-bot QPS
-	// bound is far lower) and keeps the monitor unblocked even
-	// under load spikes.
-	r.channelCh = make(chan messages.InboundMessage, 4096)
-	chans := r.channels
+	pumps := r.pumps
 	r.mu.Unlock()
 
-	if len(chans) == 0 {
+	if len(pumps) == 0 {
 		r.mu.Lock()
 		r.stopCh = nil
-		r.channelCh = nil
 		r.mu.Unlock()
-		return errors.New("gateway: no channels attached")
+		return errors.New("gateway: no pumps attached")
 	}
 
-	for _, ch := range chans {
+	for _, p := range pumps {
+		p := p
 		r.wg.Add(1)
-		go r.pumpInbound(ctx, ch)
+		go r.pumpOne(ctx, p)
 	}
-
-	r.wg.Add(1)
-	go r.dispatchLoop(ctx)
-
 	return nil
 }
 
-// Stop signals all dispatch goroutines to exit and waits for them
+// Stop signals all pump goroutines to exit and waits for them
 // to drain. Idempotent.
 func (r *Router) Stop(ctx context.Context) error {
 	r.mu.Lock()
@@ -215,11 +177,14 @@ func (r *Router) Stop(ctx context.Context) error {
 	}
 }
 
-// pumpInbound reads messages.InboundMessage from ch.Incoming()
-// and pushes it into the central dispatch channel.
-func (r *Router) pumpInbound(ctx context.Context, ch channel.Channel) {
+// pumpOne is the per-channel pump goroutine. It reads
+// InboundMessage from p.Channel.Incoming() and calls the
+// shared dispatch chain with p.Manager. The closure captures
+// p, so each pump knows which channel + mgr it serves — no
+// routing table needed.
+func (r *Router) pumpOne(ctx context.Context, p Pump) {
 	defer r.wg.Done()
-	in := ch.Incoming()
+	in := p.Channel.Incoming()
 	for {
 		select {
 		case <-ctx.Done():
@@ -230,89 +195,48 @@ func (r *Router) pumpInbound(ctx context.Context, ch channel.Channel) {
 			if !ok {
 				return
 			}
-			r.mu.Lock()
-			r.chatToChan[msg.ChatID] = ch
-			r.mu.Unlock()
-			select {
-			case r.channelCh <- msg:
-			case <-ctx.Done():
-				return
-			case <-r.stopCh:
-				return
-			}
-		}
-	}
-}
-
-// dispatchLoop reads from the central messages.InboundMessage
-// channel and routes through the wired *inbound.Router.
-//
-// F-59: this loop is now a pure monitor — it only feeds the
-// priority chain and never blocks on the actual command /
-// action / message work. Each try*Dispatch inside
-// *inbound.Router runs its real work in a spawned goroutine
-// and writes the resulting reply through the wired Emitter
-// from inside the goroutine. The result.Reply emit that lived
-// here before F-59 is gone: the priority chain's
-// CommandResult carries Consumed/Dropped (for fall-through
-// arbitration) and an empty Reply field (always — replies are
-// async now). Slow commands (gtw commit / pr) cannot block
-// the loop, so cross-chat inbound latency is bounded by the
-// goroutine launch cost, not by any single command's
-// wall-clock time.
-func (r *Router) dispatchLoop(ctx context.Context) {
-	defer r.wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-r.stopCh:
-			return
-		case msg, ok := <-r.channelCh:
-			if !ok {
-				return
-			}
-			// F-59: result.Reply is no longer populated — the
-			// reply path lives inside each try*Dispatch's run*
-			// goroutine (see inbound/command.go's runCommand,
-			// action.go's runAction, message.go's runMessage,
-			// shell.go's existing async shell.Dispatcher.Handle).
-			// The CommandResult's Consumed/Dropped flags are
-			// still meaningful for chain arbitration and
-			// observability, but Reply is always empty here.
-			if _, err := r.DispatchInbound(withRouter(ctx, r), &msg); err != nil {
+			// Per-pump mgr: the chat this msg came from is
+			// in this pump's chatID namespace (chatIDs are
+			// channel-namespaced naturally), so the mgr closure
+			// is the right one to resolve / persist it.
+			if _, err := r.inbound.Dispatch(ctx, p.Manager, &msg); err != nil {
 				slog.Default().Warn("gateway: dispatch failed",
-					"chat_id", msg.ChatID, "err", err)
+					"channel", p.Channel.Name(),
+					"chat_id", msg.ChatID,
+					"err", err)
 			}
 		}
 	}
 }
 
-// withRouter installs r into ctx so handlers that need it can
-// recover it without taking it as a closure. Currently unused
-// by production code (the only handler that historically read
-// gateway from ctx — /help — does so via direct injection in
-// cmd/nightme); kept as a private helper so dispatchLoop can
-// still install the router in ctx without taking it as an
-// explicit parameter.
-func withRouter(ctx context.Context, r *Router) context.Context {
-	return context.WithValue(ctx, routerKey{}, r)
+// DispatchInbound is a thin delegate to the wired
+// *inbound.Router. Used by the v0.x single-channel call sites
+// (and tests that pre-date AttachPumps). For multi-channel
+// production code, the per-pump pumpOne calls
+// r.inbound.Dispatch directly with the per-pump mgr —
+// DispatchInbound's single-mgr path is the legacy contract.
+func (r *Router) DispatchInbound(ctx context.Context, msg *messages.InboundMessage) (*inbound.CommandResult, error) {
+	if msg == nil {
+		return nil, errors.New("gateway: nil message")
+	}
+	return r.inbound.Dispatch(ctx, r.mgrFallback, msg)
 }
-
-// routerKey is the unexported context key. Kept private —
-// no external package currently reads the router back out of
-// ctx.
-type routerKey struct{}
 
 // --- v1.1 binding table (commit 3) ----------------------------------
 
+// BindingEntry is the (chat_id → session_id) row stored in
+// chat_sessions.json. See internal/registry for the persisted
+// schema.
+type BindingEntry struct {
+	ChatID    string
+	SessionID string
+	Workspace string
+	Agent     string
+}
+
 // Bind registers the binding (chatID → sessionID). Called by
 // the /cwd handler after it creates a fresh session via
-// MemoryManager.Register. Workspace / Agent are denormalized
-// onto the row so subsequent /cwd replies don't have to
-// re-query the session. The chatType argument was removed in
-// F-33 (D1); nightme no longer carries chat-type at the
-// binding layer.
+// MemoryManager.Register.
 func (r *Router) Bind(chatID, sessionID, workspace, agent string) *BindingEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -359,21 +283,9 @@ func (r *Router) RestoreBindings(entries []BindingEntry) {
 }
 
 // Unbind removes the binding for chatID without affecting the
-// underlying session. Reserved for v0.4 multi-session; not
-// used by current handlers.
+// underlying session.
 func (r *Router) Unbind(chatID string) {
 	r.mu.Lock()
 	delete(r.bindings, chatID)
 	r.mu.Unlock()
-}
-
-// resolveChannel returns the channel that owns chatID, falling
-// back to the default channel for chats we haven't seen yet.
-func (r *Router) resolveChannel(chatID string) channel.Channel {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if ch, ok := r.chatToChan[chatID]; ok && ch != nil {
-		return ch
-	}
-	return r.defaultChannel
 }

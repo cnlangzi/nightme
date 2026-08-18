@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -32,7 +33,7 @@ import (
 // pattern (msg.Reaction != nil || msg.Action != nil) lives
 // HERE so the chain itself never inspects the message shape.
 // Match is synchronous; actual dispatch runs in a goroutine.
-func (r *Router) tryActionDispatch(ctx context.Context, msg *messages.InboundMessage) (bool, *CommandResult, error) {
+func (r *Router) tryActionDispatch(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) (bool, *CommandResult, error) {
 	if msg.Reaction == nil && msg.Action == nil {
 		return false, nil, nil
 	}
@@ -134,13 +135,7 @@ func (r *Router) dispatchPermissionClick(msg *messages.InboundMessage) {
 			"chat_id", msg.ChatID)
 		return
 	}
-	sender, ok := r.csMgr.(permissionSender)
-	if !ok {
-		slog.Default().Warn("inbound: MessageHandler does not support SendPermission",
-			"chat_id", msg.ChatID)
-		return
-	}
-	if err := sender.SendPermission(msg.ChatID, option); err != nil {
+	if err := r.csMgr.SendPermission(msg.ChatID, option); err != nil {
 		slog.Default().Warn("inbound: SendPermission failed",
 			"chat_id", msg.ChatID, "err", err)
 	}

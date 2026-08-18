@@ -24,12 +24,3 @@ package gateway
 // /use reply ("Now using <agent>, pid=<N>, cwd=<ws>") without
 // re-querying the session.
 //
-// Backward-compat: pre-F-33 registry files contain a `chatType`
-// JSON field; Go's json.Unmarshal tolerates unknown fields, so old
-// files continue to load. The field is simply ignored.
-type BindingEntry struct {
-	ChatID    string
-	SessionID string
-	Workspace string
-	Agent     string
-}

@@ -221,8 +221,8 @@ func (r *replyingCommander) Match(text string) (string, bool) {
 	return r.commander.Match(text)
 }
 
-func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
-	out, handled, err := r.commander.Dispatch(ctx, rt, cs, input)
+func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
+	out, handled, err := r.commander.Dispatch(ctx, rt, mgr, cs, input)
 	if err != nil {
 		errText := "❌ " + err.Error()
 		ch := cs.Emitter()
@@ -350,14 +350,14 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 	// real commander + no-op stubs for the other three slots.
 	noop := &gatewaytest.NoopEmitter{}
 	ir := inbound.New(
-		&e2eStubMgr{mgr: mgr},
+		mgr,
 		newRuntimeShim(mgr, reg, "echo"),
-		shell.NewDispatcher(nil),
+		shell.NewDispatcher(),
 		&e2eStubRouter{},
 		noop,
 		"echo",
 	)
-	gw := gateway.New(ir, noop)
+	gw := gateway.New(ir)
 
 	return &wiredHarness{echoCh: echoCh, mgr: mgr, gw: gw}
 }

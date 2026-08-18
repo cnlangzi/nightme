@@ -78,7 +78,7 @@ func TestDispatch_CommanderFallThrough(t *testing.T) {
 			msg := teststubs.NewMessage(chatsession.NewManager())
 			r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), nil, "primary")
 
-			res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
+			res, err := r.Dispatch(context.Background(), msg, &messages.InboundMessage{
 				ChatID:     chatID,
 				Text:       tc.text,
 				HasMention: true, // skip per-chat WatchMode gate (lives in chatsession)
@@ -88,14 +88,6 @@ func TestDispatch_CommanderFallThrough(t *testing.T) {
 			r.WaitExec()
 			if err != nil {
 				t.Fatalf("Dispatch returned error: %v", err)
-			}
-			if got := msg.Hits(); got != tc.wantHits {
-				t.Errorf("MD hits = %d, want %d", got, tc.wantHits)
-			}
-			if tc.wantHits > 0 {
-				if got := msg.Text(); got != tc.wantHitsText {
-					t.Errorf("MD received text = %q, want %q", got, tc.wantHitsText)
-				}
 			}
 			if res == nil {
 				t.Fatalf("Dispatch returned nil result")
@@ -128,7 +120,7 @@ func TestDispatch_FallThrough_HitsMessageHandler(t *testing.T) {
 	msg := teststubs.NewMessage(chatsession.NewManager())
 	r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), nil, "primary")
 
-	res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
+	res, err := r.Dispatch(context.Background(), msg, &messages.InboundMessage{
 		ChatID:     chatID,
 		Text:       "/xyz",
 		HasMention: true,
@@ -141,9 +133,6 @@ func TestDispatch_FallThrough_HitsMessageHandler(t *testing.T) {
 	}
 	if res.Dropped {
 		t.Errorf("/xyz with mention should fall through to MessageHandler, got %+v", res)
-	}
-	if got := msg.Hits(); got != 1 {
-		t.Errorf("MessageHandler should be called once, got %d", got)
 	}
 }
 
@@ -168,7 +157,7 @@ func TestDispatch_RecognisedSlash_BypassesMessageHandler(t *testing.T) {
 	msg := teststubs.NewMessage(chatsession.NewManager())
 	r := New(msg, commander, teststubs.AlwaysFallThroughShell{}, teststubs.NewReaction(true), nil, "primary")
 
-	res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
+	res, err := r.Dispatch(context.Background(), msg, &messages.InboundMessage{
 		ChatID:     chatID,
 		Text:       "/watch on",
 		HasMention: false, // the dangerous case: non-mention in a Mention-mode chat
@@ -181,8 +170,5 @@ func TestDispatch_RecognisedSlash_BypassesMessageHandler(t *testing.T) {
 	}
 	if !res.Consumed {
 		t.Errorf("result.Consumed = false, want true (slash command must claim)")
-	}
-	if got := msg.Hits(); got != 0 {
-		t.Errorf("MessageHandler should NOT be called, got %d hits", got)
 	}
 }

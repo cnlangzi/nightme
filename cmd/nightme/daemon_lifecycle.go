@@ -38,6 +38,12 @@ const (
 )
 
 type daemonOptions struct {
+	// v1.3+ multi-channel: --channel flag removed. Channel
+	// selection is driven by config credentials (cfg.Feishu.* /
+	// cfg.Telegram.*); runtime's channel.BuildAll auto-starts
+	// every channel with valid creds. Retained here only as
+	// "opts.channel" in status output for back-compat with the
+	// daemoncontrol.Status.Channel field (see Status init below).
 	channel string
 }
 
@@ -105,8 +111,14 @@ func newRestartCmd() *cobra.Command {
 }
 
 func addDaemonOptionFlags(cmd *cobra.Command, opts *daemonOptions) {
-	cmd.Flags().StringVar(&opts.channel, "channel", opts.channel,
-		"Channel implementation: feishu (default) or echo (smoke test)")
+	// v1.3+ multi-channel: --channel flag removed. We keep a
+	// hidden marker flag so old scripts that pass --channel
+	// still parse (the value is ignored at startup; runtime's
+	// BuildAll decides what to actually start based on
+	// config credentials). Hidden via cmd.Flags().MarkHidden.
+	cmd.Flags().StringVar(&opts.channel, "channel", "multi",
+		"(deprecated, v1.3+ multi-channel) Channel implementation — ignored; runtime reads cfg credentials")
+	cmd.Flags().MarkHidden("channel")
 }
 
 func loadLifecyclePaths() (*config.Config, daemoncontrol.Paths, error) {
@@ -251,11 +263,23 @@ func runRestart(cmd *cobra.Command, opts daemonOptions) error {
 }
 
 func validateDaemonOptions(opts daemonOptions) error {
-	if opts.channel != "feishu" && opts.channel != "echo" {
+	// v1.3+ multi-channel: the legacy --channel flag is
+	// preserved for back-compat (so old scripts parse) but the
+	// value is ignored. Runtime's channel.BuildAll decides what
+	// to start based on config credentials. Accept "multi" (the
+	// new default) and the legacy names ("feishu" / "telegram")
+	// for any scripts still passing them; reject anything else
+	// to surface typos. Note: "echo" was a v0.x smoke-test
+	// channel wired through Deps.NewChannels and is no longer
+	// in the registry — passing it silently does nothing at
+	// runtime, so we reject it as a typo.
+	switch opts.channel {
+	case "multi", "feishu", "telegram", "":
+		return nil
+	default:
 		return nmerrors.New(nmerrors.CodeValidationError,
-			fmt.Sprintf("unknown channel %q (want feishu or echo)", opts.channel))
+			fmt.Sprintf("unknown channel %q (deprecated --channel flag is ignored at startup; runtime reads cfg credentials)", opts.channel))
 	}
-	return nil
 }
 
 // daemonChildCommand is the hidden subcommand the forked daemon
@@ -273,16 +297,14 @@ func isDaemonChild(argv []string) bool {
 }
 
 func newDaemonCmd() *cobra.Command {
-	var channelName string
 	cmd := &cobra.Command{
 		Use:    daemonChildCommand,
 		Short:  "Internal daemon process",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDaemonChild(cmd, channelName)
+			return runDaemonChild(cmd)
 		},
 	}
-	cmd.Flags().StringVar(&channelName, "channel", "feishu", "Channel implementation")
 	return cmd
 }

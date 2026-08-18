@@ -59,7 +59,12 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	defer readyR.Close()
 
-	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
+	// v1.3+ multi-channel: --channel flag removed from the
+	// daemon child command. Channel selection is driven by cfg
+	// credentials (runtime's channel.BuildAll auto-starts every
+	// channel with valid creds); the hidden --channel flag in
+	// daemon_lifecycle.go is for back-compat with old CLI scripts.
+	child := exec.Command(executable, daemonChildCommand)
 	child.Env = append(os.Environ(), daemonLockFDEnv+"=3", readyFDEnv+"=4")
 	child.ExtraFiles = []*os.File{lock.File(), readyW}
 	child.Stdin = nil
@@ -181,7 +186,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	return nil
 }
 
-func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
+func runDaemonChild(cmd *cobra.Command) (retErr error) {
 	lockFD, err := strconv.Atoi(os.Getenv(daemonLockFDEnv))
 	if err != nil || lockFD < 3 {
 		return fmt.Errorf("%s must be launched by `nightme start` or `nightme restart`", daemonChildCommand)
@@ -241,7 +246,7 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	status := daemoncontrol.Status{
 		PID:       os.Getpid(),
 		StartedAt: time.Now().UTC(),
-		Channel:   channelName,
+		Channel:   "multi", // v1.3+: multiple channels auto-start; legacy field set to "multi"
 		Version:   version.String(),
 		LogPath:   cfg.Logging.File,
 	}
@@ -255,7 +260,6 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	go func() { serveErr <- server.Serve() }()
 
 	deps := runtime.DefaultDeps()
-	deps, _ = runtime.WithChannel(deps, channelName)
 	deps.OnReady = func() {
 		server.SetReady()
 		writeBootstrap(bootstrapMessage{Ready: true})

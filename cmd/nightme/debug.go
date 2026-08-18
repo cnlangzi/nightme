@@ -203,12 +203,12 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 	// gtw ReactionRouter for action dispatch.
 	ir := inbound.New(mgr,
 		noopCommander{},
-		shell.NewDispatcher(nil),
+		shell.NewDispatcher(),
 		gtwRouter,
 		captured.Emitter(),
 		"primary")
-	gw := gateway.New(ir, captured.Emitter())
-	gw.AttachChannels(captured)
+	gw := gateway.New(ir)
+	gw.AttachPumps(gateway.Pump{Channel: captured, Manager: mgr})
 
 	return &debugFixture{
 		cs:       cs,
@@ -451,7 +451,7 @@ func (c *capturingChannel) Emitter() outbound.Emitter {
 // command dispatch.
 type noopCommander struct{}
 
-func (noopCommander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
+func (noopCommander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.Manager, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
 	return nil, false, nil
 }
 

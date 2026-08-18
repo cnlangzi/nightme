@@ -75,7 +75,12 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		return fmt.Errorf("resolve nightme executable: %w", err)
 	}
 
-	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
+	// v1.3+ multi-channel: --channel flag removed from the
+	// daemon child command. Channel selection is driven by cfg
+	// credentials (runtime's channel.BuildAll auto-starts every
+	// channel with valid creds); the hidden --channel flag in
+	// daemon_lifecycle.go is for back-compat with old CLI scripts.
+	child := exec.Command(executable, daemonChildCommand)
 	child.SysProcAttr = &windows.SysProcAttr{
 		// DETACHED_PROCESS: no console inheritance. Required
 		// because `nightme start` was launched from a console;
@@ -199,7 +204,7 @@ func exitCodeOf(state *os.ProcessState) int {
 // ready (code=...)" and the stack lands in the stderr capture file.
 // The Unix recover exists only to turn an otherwise information-free
 // EOF on that pipe into a real message.
-func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
+func runDaemonChild(cmd *cobra.Command) (retErr error) {
 	// Take the daemon lock ourselves. Unlike Unix, we can't
 	// inherit the parent's fd — LockFileEx is per-handle, so
 	// the parent closing its copy would release the lock. The
@@ -227,7 +232,7 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	status := daemoncontrol.Status{
 		PID:       os.Getpid(),
 		StartedAt: time.Now().UTC(),
-		Channel:   channelName,
+		Channel:   "multi", // v1.3+ multi-channel; legacy field
 		Version:   version.String(),
 		LogPath:   cfg.Logging.File,
 	}
@@ -240,7 +245,6 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	go func() { serveErr <- server.Serve() }()
 
 	deps := runtime.DefaultDeps()
-	deps, _ = runtime.WithChannel(deps, channelName)
 	deps.OnReady = func() {
 		server.SetReady()
 	}

@@ -182,6 +182,14 @@ func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, block
 	return agent.RunResult{Text: r.runOnceText}, r.runOnceErr
 }
 
+// Review is unimplemented for the gtw-push test fake — push tests
+// never invoke /review, so returning ErrReviewNotSupported keeps
+// the agent.Starter interface satisfied without affecting push
+// semantics.
+func (r *recordingAgent) Review(_ context.Context, _ agent.StartConfig) (agent.RunResult, error) {
+	return agent.RunResult{}, agent.ErrReviewNotSupported
+}
+
 // withAgent swaps agent.Builtins for a local registry containing
 // just the supplied fakes. Restores on test cleanup.
 func withAgent(t *testing.T, agents ...*recordingAgent) {

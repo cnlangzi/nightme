@@ -40,6 +40,20 @@ const (
 	// that LLM agents run.
 	Hook = 30 * time.Minute
 
+	// Review caps a single /review RunOnce invocation. Identical
+	// to Agent (30 min) — review is an LLM-driven audit task with
+	// multi-step git inspection, so the LLM-era budget applies.
+	//
+	// Why we can be generous: /review runs the review in a
+	// RunOnce subprocess (see internal/agent/review.go's
+	// Review). The 30-min deadline only kills that subprocess;
+	// the main chat session is untouched and gets a clean
+	// "review timed out" reply. Pre-RunOnce architectures (where
+	// /review blocked the main turn) had to be conservative
+	// because a stuck review also killed the user's main
+	// conversation — that's no longer the case.
+	Review = 30 * time.Minute
+
 	// CLI caps git / gh / glab subprocess calls. 5 min is generous
 	// for normal network RTT against GitHub / GitLab APIs; anything
 	// longer is almost always a network stall — kill and surface,

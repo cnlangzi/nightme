@@ -95,7 +95,8 @@ jobs:
       #     the Makefile (and the matching section in build.bat)
       #   - Windows: go-winres injects logo.ico + manifest.xml as
       #     cmd/nightme/rsrc_windows_*.syso (auto-linked)
-      #   - macOS: tray-assets generates trayTemplate.icns
+      #   - macOS: tray-assets generates trayTemplate.icns, and
+      #     app-bundle wraps bin/nightme into dist/NightMe.app
       #   - Linux: tray-assets generates tray.png
       # A bare `go build` here would silently drop every embed step
       # and the release binary would have no icon, no manifest, and
@@ -107,6 +108,13 @@ jobs:
         run: |
           if [ "${{ matrix.goos }}" = "windows" ]; then
             ./build.bat
+          elif [ "${{ matrix.goos }}" = "darwin" ]; then
+            # macOS ships the .app bundle alongside the bare
+            # binary so Finder-installed users get the proper
+            # menu-bar icon without having to run `make
+            # app-bundle` themselves.
+            make build
+            make app-bundle
           else
             make build
           fi
@@ -122,6 +130,17 @@ jobs:
           cp "bin/${{ matrix.binary }}" "$STAGE/${{ matrix.binary }}"
           cp LICENSE  "$STAGE/LICENSE"
           cp README.md "$STAGE/README.md"
+          # macOS: also stage the .app bundle so the tar.gz
+          # archive carries it. The dedicated .app-only zip is
+          # produced by the Archive step below.
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            if [ -d "dist/NightMe.app" ]; then
+              cp -R "dist/NightMe.app" "$STAGE/NightMe.app"
+            else
+              echo "::error::dist/NightMe.app missing after 'make app-bundle' (build step did not run app-bundle?)"
+              exit 1
+            fi
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Archive
@@ -136,9 +155,29 @@ jobs:
           STAGE="dist/stage/${GOOS}-${GOARCH}"
           case "$ARCHIVE" in
             tar.gz)
-              tar -C "$STAGE" -czf \
-                "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
-                ${{ matrix.binary }} LICENSE README.md
+              # macOS: include the .app bundle alongside the
+              # bare binary. Linux: just the binary.
+              if [ "${GOOS}" = "darwin" ]; then
+                tar -C "$STAGE" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                  ${{ matrix.binary }} NightMe.app LICENSE README.md
+              else
+                tar -C "$STAGE" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                  ${{ matrix.binary }} LICENSE README.md
+              fi
+              # macOS-only: a separate .app-only zip for
+              # Finder-native install. macOS users typically
+              # double-click the .zip in Safari → drag the
+              # extracted .app to /Applications. The
+              # tar.gz's embedded NightMe.app also works
+              # but requires the user to know to extract
+              # the .app; .zip is the discoverable path.
+              if [ "${GOOS}" = "darwin" ]; then
+                python3 -m zipfile -c \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}-app.zip" \
+                  "$STAGE/NightMe.app"
+              fi
               ;;
             zip)
               # python3 is preinstalled on the three hosted runners
@@ -157,7 +196,11 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/nightme_*.${{ matrix.archive }}
+          # Match the main archive AND, on macOS, the .app-only
+          # zip (so both end up under one artifact namespace).
+          path: |
+            dist/nightme_*.${{ matrix.archive }}
+            dist/nightme_*-app.zip
           if-no-files-found: error
 
   release:

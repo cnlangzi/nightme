@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
@@ -183,8 +182,10 @@ func TestIsWindowsBatchExt(t *testing.T) {
 //
 // This test walks EVERY launch branch (direct exe, .cmd/.bat
 // wrapper, .ps1, .js, no-extension) and asserts the flag is
-// set. A future refactor that drops hideWindow in any branch
-// gets caught here.
+// set. launchOnWindows applies CREATE_NO_WINDOW internally
+// (no separate "set after" step), so the production path is
+// a single call — a future refactor that drops the flag in
+// any branch gets caught here.
 func TestNewCmd_SetsCreateNoWindow(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -200,15 +201,12 @@ func TestNewCmd_SetsCreateNoWindow(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := launchOnWindows(context.Background(), tc.resolved, "--mode", "rpc")
-			// Apply hideWindow the same way NewCmd does so the
-			// test mirrors the production path.
-			hideWindow(cmd)
 			if cmd.SysProcAttr == nil {
-				t.Fatalf("SysProcAttr nil after hideWindow on %s", tc.name)
+				t.Fatalf("SysProcAttr nil after launchOnWindows on %s", tc.name)
 			}
-			if cmd.SysProcAttr.CreationFlags&createNoWindow == 0 {
+			if cmd.SysProcAttr.CreationFlags&CreateNoWindow == 0 {
 				t.Errorf("%s: CreationFlags=0x%x, missing CREATE_NO_WINDOW (0x%x)",
-					tc.name, cmd.SysProcAttr.CreationFlags, createNoWindow)
+					tc.name, cmd.SysProcAttr.CreationFlags, CreateNoWindow)
 			}
 		})
 	}
@@ -218,54 +216,50 @@ func TestNewCmd_SetsCreateNoWindow(t *testing.T) {
 // merge-not-replace semantics: a future bridge that pre-sets
 // SysProcAttr.CreationFlags (e.g. for CREATE_NEW_PROCESS_GROUP
 // or EXTENDED_STARTUPINFO_PRESENT) must NOT have those flags
-// silently dropped when NewCmd applies hideWindow. Otherwise
-// the bridge would lose its own group / handle semantics and
-// the next spawned tool subprocess could leak past the bridge
-// exit.
+// silently dropped when HideWindow applies CREATE_NO_WINDOW.
+// Otherwise the bridge would lose its own group / handle
+// semantics and the next spawned tool subprocess could leak
+// past the bridge exit.
 func TestHideWindow_MergesWithExistingFlags(t *testing.T) {
 	const wantOther = 0x00000200 // CREATE_NEW_PROCESS_GROUP, picked for its bit
-	cmd := exec.CommandContext(context.Background(), `C:\Tools\pi.exe`)
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: wantOther}
+	attr := &syscall.SysProcAttr{CreationFlags: wantOther}
 
-	hideWindow(cmd)
+	got := HideWindow(attr)
 
-	got := cmd.SysProcAttr.CreationFlags
-	if got&createNoWindow == 0 {
-		t.Errorf("hideWindow dropped CREATE_NO_WINDOW: got=0x%x, want bit 0x%x set", got, createNoWindow)
+	if got.CreationFlags&CreateNoWindow == 0 {
+		t.Errorf("HideWindow dropped CREATE_NO_WINDOW: got=0x%x, want bit 0x%x set",
+			got.CreationFlags, CreateNoWindow)
 	}
-	if got&wantOther == 0 {
-		t.Errorf("hideWindow wiped existing flag: got=0x%x, want bit 0x%x preserved", got, wantOther)
+	if got.CreationFlags&wantOther == 0 {
+		t.Errorf("HideWindow wiped existing flag: got=0x%x, want bit 0x%x preserved",
+			got.CreationFlags, wantOther)
 	}
-	if got != wantOther|createNoWindow {
-		t.Errorf("hideWindow: got=0x%x, want exactly 0x%x (OR of pre-existing and CREATE_NO_WINDOW)",
-			got, wantOther|createNoWindow)
+	if got.CreationFlags != wantOther|CreateNoWindow {
+		t.Errorf("HideWindow: got=0x%x, want exactly 0x%x (OR of pre-existing and CREATE_NO_WINDOW)",
+			got.CreationFlags, wantOther|CreateNoWindow)
+	}
+	// HideWindow must return the SAME pointer the caller
+	// passed in, not a fresh allocation that the caller would
+	// have to remember to assign back.
+	if got != attr {
+		t.Errorf("HideWindow returned a new struct instead of mutating in-place; got=%p want=%p", got, attr)
 	}
 }
 
 // TestHideWindow_NilSysProcAttr covers the case where the
 // caller hasn't set SysProcAttr at all (the common case for
-// every bridge). hideWindow must allocate the struct rather
-// than nil-deref.
+// every bridge). HideWindow must allocate the struct rather
+// than nil-deref, and return the new struct so the caller can
+// assign it back.
 func TestHideWindow_NilSysProcAttr(t *testing.T) {
-	cmd := exec.CommandContext(context.Background(), `C:\Tools\pi.exe`)
-	if cmd.SysProcAttr != nil {
-		t.Fatalf("exec.CommandContext should leave SysProcAttr nil")
+	got := HideWindow(nil)
+	if got == nil {
+		t.Fatal("HideWindow(nil) returned nil; expected a freshly allocated SysProcAttr")
 	}
-	hideWindow(cmd)
-	if cmd.SysProcAttr == nil {
-		t.Fatal("hideWindow did not allocate SysProcAttr")
+	if got.CreationFlags&CreateNoWindow == 0 {
+		t.Errorf("HideWindow(nil): CreationFlags=0x%x, missing CREATE_NO_WINDOW",
+			got.CreationFlags)
 	}
-	if cmd.SysProcAttr.CreationFlags&createNoWindow == 0 {
-		t.Errorf("hideWindow on nil SysProcAttr: CreationFlags=0x%x, missing CREATE_NO_WINDOW",
-			cmd.SysProcAttr.CreationFlags)
-	}
-}
-
-// TestHideWindow_NilCmd covers the defensive guard: passing
-// nil must be a no-op rather than a panic. A future caller
-// that mis-wires a nil *exec.Cmd shouldn't crash the bridge.
-func TestHideWindow_NilCmd(t *testing.T) {
-	hideWindow(nil) // must not panic
 }
 
 // TestNewCmd_EnvFormat pins the most pernicious Windows bug

@@ -39,6 +39,14 @@ package main
 
 import _ "embed"
 
+// //go:embed is a compiler directive, but the embed package
+// must still be in the import set of the file that uses it.
+// The blank import is the conventional form for the
+// "directive only" case — we bind the embedded bytes to
+// package-level []byte variables and never reach for
+// embed.FS at runtime, so the package itself contributes
+// nothing beyond compiler metadata.
+
 //go:embed assets/logo-32.ico
 var logoICO32 []byte
 

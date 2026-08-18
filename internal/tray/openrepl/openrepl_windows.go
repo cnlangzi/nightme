@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"os/exec"
 	"syscall"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // open spawns a new console window that runs `nightme.exe` (REPL
@@ -37,6 +39,12 @@ func open() error {
 	if err != nil {
 		return fmt.Errorf("openrepl: nightme.exe not on PATH: %w", err)
 	}
+	// Resolve cmd.exe via %ComSpec% (set on every standard
+	// Windows install) with an explicit fallback for the
+	// rare case where the user cleared it. Reuses the same
+	// helper as the daemon's spawn recipe so this codepath
+	// can't drift from the rest of the codebase.
+	cmdExe := proc.ComSpecOrDefault()
 	// cmd.exe /c start "title" cmd /k <bin>
 	//
 	// Args layout (verbatim, including quoting rules):
@@ -52,7 +60,7 @@ func open() error {
 	//
 	// SysProcAttr stays nil so the new window is a normal
 	// console (not a hidden one).
-	cmd := exec.Command("cmd.exe", "/c", "start", "NightMe REPL", "cmd", "/k", bin)
+	cmd := exec.Command(cmdExe, "/c", "start", "NightMe REPL", "cmd", "/k", bin)
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("openrepl: start cmd /k: %w", err)

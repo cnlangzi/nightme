@@ -86,15 +86,18 @@ func openMac() error {
 		go func() { _ = cmd.Wait() }()
 		return nil
 	}
-	// Last-resort fallback: `open -a Terminal` via Launch
-	// Services. If the user has set a different default
-	// terminal, this routes there. Slightly more "magic" but
-	// keeps the feature working on machines where neither
-	// iTerm2 nor the Apple-bundled Terminal.app is callable
-	// via AppleScript (e.g. locked-down MDM profiles).
-	cmd := exec.Command("open", "-a", "Terminal", "--args", "nightme")
+	// Last-resort fallback: try AppleScript on Terminal.app
+	// directly (the upper attempts checked for the .app
+	// bundle's existence, but the bundle could exist without
+	// AppleScript being enabled — e.g. an MDM profile that
+	// blocks the previous osascript call. Use a fresh
+	// process so the failure mode is "open a Terminal
+	// window" rather than "report an error to the daemon
+	// log", which is what the user wants at this point.
+	script := `tell application "Terminal" to do script "nightme"`
+	cmd := exec.Command("osascript", "-e", script)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("openrepl: 'open -a Terminal': %w", err)
+		return fmt.Errorf("openrepl: osascript (fallback) for Terminal: %w", err)
 	}
 	go func() { _ = cmd.Wait() }()
 	return nil
@@ -160,17 +163,12 @@ func openLinux() error {
 			continue
 		}
 		cmd := exec.Command(bin, argv[1:]...)
-		// Terminal emulators must inherit stdin (some
-		// emulators ignore argv and read commands from
-		// stdin otherwise) and they must NOT inherit the
-		// daemon's stderr (we don't want the terminal's
-		// banner or ours to leak into daemon-stderr.log).
-		// stdout we leave as /dev/null because the
-		// terminal will not produce useful stdout — its
-		// window IS the output.
-		cmd.Stdin = nil
-		cmd.Stdout = nil
-		cmd.Stderr = nil
+		// exec.Command defaults: Stdin/Stdout/Stderr are nil,
+		// which exec/start interprets as /dev/null for the
+		// child. We rely on that — leaving them nil keeps
+		// the terminal's window-bring-up noise out of
+		// daemon-stderr.log and stops the daemon's stderr
+		// from leaking into the new terminal.
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("openrepl: %s: %w", bin, err)
 		}

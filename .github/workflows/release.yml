@@ -196,11 +196,15 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}
-          # Match the main archive AND, on macOS, the .app-only
-          # zip (so both end up under one artifact namespace).
-          path: |
-            dist/nightme_*.${{ matrix.archive }}
-            dist/nightme_*-app.zip
+          path: dist/nightme_*.${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload .app bundle (macOS only)
+        if: matrix.goos == 'darwin'
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}-app
+          path: dist/nightme_*-app.zip
           if-no-files-found: error
 
   release:

@@ -76,11 +76,26 @@ import (
 // openrepl.
 const trayDebounce = 500 * time.Millisecond
 
-// lastClickNS is the unix-nanosecond timestamp of the most recent
-// primary-item click that was honoured. atomic.Int64 so the
-// load-store is concurrency-safe across the systray event loop
-// goroutine and any future re-entrant caller.
-var lastClickNS atomic.Int64
+// clickTracker debounces a single menu item. Each menu item gets
+// its own clickTracker instance so clicks on different items are
+// independent — a single global debouncer (the v1 design) would
+// drop the second click on a DIFFERENT item if the user happened
+// to click two items in quick succession.
+//
+// Atomic so the load-store is concurrency-safe across the
+// systray event loop goroutine and any future re-entrant caller.
+type clickTracker struct {
+	lastNS atomic.Int64
+}
+
+func (c *clickTracker) allow(now int64) bool {
+	prev := c.lastNS.Load()
+	if prev != 0 && now-prev < int64(trayDebounce) {
+		return false
+	}
+	c.lastNS.Store(now)
+	return true
+}
 
 // trayOptions collects the runtime dependencies the tray builder
 // needs to wire up menu items. The two callbacks (onStop /
@@ -116,8 +131,8 @@ type trayOptions struct {
 // runtime has returned AND the systray event loop has been
 // released. It is the daemon child's "main loop" replacement: it
 // owns the goroutine that runs runtime.Run, and it owns the
-// systray native loop, and the two are coupled by a single
-// shared error variable and systray.Quit().
+// systray native loop, and the two are coupled via a single
+// channel and systray.Quit().
 //
 // Returns whatever error the daemon runtime produced (nil for
 // graceful shutdown). Click errors are logged but never
@@ -133,14 +148,12 @@ func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) e
 		runErrCh <- runRunWith(cmd, runDeps)
 	}()
 
-	// systray.Run blocks until systray.Quit() is called. We
-	// call Quit from a watcher goroutine that observes the
-	// runtime's exit. When Quit fires, systray runs the
-	// onExit callback and Run returns; we then read the
-	// runtime's exit code and return it to the caller.
-	var runErr error
+	// Watcher goroutine: when the runtime returns, release
+	// the systray native loop. The channel close (implicit
+	// when runRunWith returns) synchronises the value
+	// delivery with the read below on the calling thread.
 	go func() {
-		runErr = <-runErrCh
+		<-runErrCh
 		systray.Quit()
 	}()
 
@@ -149,7 +162,13 @@ func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) e
 		func() { /* onExit: systray native cleanup is automatic */ },
 	)
 
-	return runErr
+	// After systray.Run returns, read the runtime's exit
+	// code on the same goroutine. The watcher goroutine
+	// received it from runErrCh (with channel-close
+	// synchronisation); reading it again on this thread is
+	// safe because runErrCh has buffer 1 and no other
+	// receiver is competing.
+	return <-runErrCh
 }
 
 // trayOnReady is the systray onReady callback. It runs in
@@ -175,22 +194,23 @@ func trayOnReady(opts trayOptions) {
 
 	systray.AddSeparator()
 
-	// Primary actions. Each handler is debounced to absorb
-	// accidental double-clicks.
+	// Primary actions. Each gets its own clickTracker (per-item
+	// debouncer) so a quick succession of clicks on DIFFERENT
+	// items isn't treated as a single noisy burst.
 	openREPL := systray.AddMenuItem("Open REPL", "Spawn a new terminal running the nightme REPL")
-	restart := systray.AddMenuItem("Restart", "Stop this daemon and start a fresh one in the background")
+	restart := systray.AddMenuItem("Restart", "Stop this daemon (re-run `nightme start` to bring a fresh one up)")
 	stop := systray.AddMenuItem("Stop", "Gracefully stop the nightme daemon")
-	go handleClick(openREPL, "open-repl", func() {
+	go handleClick(openREPL, func() {
 		if err := openrepl.Open(); err != nil {
 			logClickErr(opts.logger, "open-repl", err)
 		}
 	})
-	go handleClick(restart, "restart", func() {
+	go handleClick(restart, func() {
 		if opts.onRestartRequest != nil {
 			opts.onRestartRequest()
 		}
 	})
-	go handleClick(stop, "stop", func() {
+	go handleClick(stop, func() {
 		if opts.onStopRequest != nil {
 			opts.onStopRequest()
 		}
@@ -208,11 +228,15 @@ func trayOnReady(opts trayOptions) {
 	cmds.Disable()
 	for _, item := range opts.reg.TrayItems() {
 		cmdItem := cmds.AddSubMenuItem(item.Title, item.Tooltip)
-		// Capture loop variable for the goroutine.
-		captured := item
-		go handleClick(cmdItem, captured.Title, func() {
-			if err := tray.Invoke(captured.Command); err != nil {
-				logClickErr(opts.logger, "command:"+captured.Title, err)
+		// Go 1.22+ has per-iteration loop variable scoping,
+		// so the explicit `captured := item` from the
+		// v1 design is no longer needed. Keeping the
+		// pointer to `item` is enough; the closure below
+		// captures the per-iteration value.
+		ci := item
+		go handleClick(cmdItem, func() {
+			if err := tray.Invoke(ci.Command); err != nil {
+				logClickErr(opts.logger, "command:"+ci.Title, err)
 			}
 		})
 	}
@@ -222,7 +246,7 @@ func trayOnReady(opts trayOptions) {
 	// Quit = stop + release tray. See file doc comment for
 	// the rationale on merging Quit with Stop.
 	quit := systray.AddMenuItem("Quit", "Stop the daemon and release the tray icon")
-	go handleClick(quit, "quit", func() {
+	go handleClick(quit, func() {
 		if opts.onStopRequest != nil {
 			opts.onStopRequest()
 		}
@@ -231,21 +255,26 @@ func trayOnReady(opts trayOptions) {
 
 // handleClick is the shared click-dispatch helper. It drains the
 // menu item's ClickedCh (one signal per click) and applies the
-// trayDebounce. Returns immediately on debounce so the systray
-// event loop is never blocked.
+// per-item debouncer. Returns immediately on debounce so the
+// systray event loop is never blocked.
 //
 // The wrapped action runs in its own goroutine so the click
 // drain is not coupled to action completion — even a hung action
 // (e.g. a CLI command that blocks on stdin) does not freeze
 // subsequent clicks.
-func handleClick(item *systray.MenuItem, label string, action func()) {
+//
+// Note: each handleClick invocation creates its OWN clickTracker.
+// Sharing one debouncer across all items would drop the second
+// click on a different item if the user clicked two items in
+// quick succession (an obvious UX bug). The per-item tracker
+// here matches what users expect from a native menu: a click on
+// each item is evaluated independently.
+func handleClick(item *systray.MenuItem, action func()) {
+	var tracker clickTracker
 	for range item.ClickedCh {
-		now := time.Now().UnixNano()
-		prev := lastClickNS.Load()
-		if prev != 0 && now-prev < int64(trayDebounce) {
+		if !tracker.allow(time.Now().UnixNano()) {
 			continue
 		}
-		lastClickNS.Store(now)
 		go action()
 	}
 }

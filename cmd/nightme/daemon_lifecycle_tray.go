@@ -46,9 +46,14 @@ func onStopRequestDefault() {
 // `nightme start` to bring a fresh daemon up. The
 // supervisor-aware restart (where the current process spawns
 // its own replacement and exits atomically with respect to the
-// daemon lock) is deferred to a follow-up because it requires
-// a parent-or-supervisor contract that nightme does not yet
-// have.
+// daemon lock — see the file doc on tray.go) is deferred to a
+// follow-up because it requires a parent-or-supervisor contract
+// that nightme does not yet have.
+//
+// Kept as a separate function (not just an alias for
+// onStopRequestDefault) so the call site in daemon_lifecycle_*.go
+// stays readable and so a future supervisor-aware replacement
+// is a one-function change.
 func onRestartRequestDefault() {
 	onStopRequestDefault()
 }

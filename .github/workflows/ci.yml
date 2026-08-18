@@ -150,22 +150,18 @@ jobs:
           # intentionally broad — any of them silently
           # dropped by the dispatcher would break one of
           # the substring assertions below.
-          # Capture stdout+stderr to a tempfile so we can
-          # both assert against it and dump it on failure
-          # without losing data to command substitution.
-          tmp=$(mktemp)
-          bin_status=0
-          printf 'version\nabcdefghijklmnopqrstuvwxyz0123456789\nexit\n' \
-            | "$bin" >"$tmp" 2>&1 || bin_status=$?
-          if [ "$bin_status" -ne 0 ]; then
-            echo "::error::REPL binary exited with status $bin_status"
-            echo "----- captured output -----"
-            cat "$tmp"
-            echo "----- end output -----"
-            exit 1
-          fi
-          cat "$tmp"
-          out=$(cat "$tmp")
+          #
+          # Pipe-fed stdin triggers runREPLInteractive's
+          # isatty.IsTerminal guard (see repl.go), which
+          # causes the version-check prompt to fall through
+          # silently rather than try to read y/N from the
+          # pipe. Without that guard, reeflective/readline
+          # raises "Incorrect function" (Win32
+          # ERROR_INVALID_FUNCTION) on Windows because it
+          # expects a real console handle for ReadConsoleInput.
+          out=$(printf 'version\nabcdefghijklmnopqrstuvwxyz0123456789\nexit\n' \
+                  | "$bin" 2>&1)
+          echo "$out"
           # Banner contract: every registered user-facing
           # subcommand must appear. If a future refactor
           # drops cmdRegistry or breaks the banner loop,

@@ -58,6 +58,7 @@ func TestSpec_RejectsArgs(t *testing.T) {
 		{"single extra arg", []string{"review", "foo"}, "foo"},
 		{"multiple extra args", []string{"review", "foo", "bar"}, "foo"},
 		{"flag-looking arg", []string{"review", "--base", "main"}, "--base"},
+		{"em-dash variant", []string{"review", "—agent", "codex"}, "—agent"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -272,7 +272,7 @@ func isDaemonChild(argv []string) bool {
 	return len(argv) > 1 && argv[1] == daemonChildCommand
 }
 
-func newDaemonCmd() *cobra.Command {
+func newDaemonCmd(reg *cmdRegistry) *cobra.Command {
 	var channelName string
 	cmd := &cobra.Command{
 		Use:    daemonChildCommand,
@@ -280,7 +280,7 @@ func newDaemonCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDaemonChild(cmd, channelName)
+			return runDaemonChild(cmd, channelName, reg)
 		},
 	}
 	cmd.Flags().StringVar(&channelName, "channel", "feishu", "Channel implementation")

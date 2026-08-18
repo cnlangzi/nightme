@@ -108,8 +108,17 @@ ifeq ($(GOOS),darwin)
 	@echo "[tray-assets] built $(TRAY_TEMPLATE_22) $(TRAY_TEMPLATE_44) $(TRAY_TEMPLATE_66) $(TRAY_ICNS)"
 else ifeq ($(GOOS),linux)
 	@command -v convert >/dev/null 2>&1 || { echo "ImageMagick 'convert' required"; exit 1; }
+	@# Linux tray icon (full color, 64x64).
 	@convert logo.png -resize 64x64 $(TRAY_PNG)
-	@echo "[tray-assets] built $(TRAY_PNG)"
+	@# macOS menu-bar template (alpha-only mono, three sizes).
+	# ImageMagick's -alpha Extract + -negate produces a black-on-
+	# transparent mask that Cocoa treats as a template icon.
+	# On a real macOS dev box, 'make tray-assets' (GOOS=darwin)
+	# regenerates these with sips for sharper anti-aliasing.
+	@convert logo.png -alpha extract -resize 22x22 $(TRAY_TEMPLATE_22)
+	@convert logo.png -alpha extract -resize 44x44 $(TRAY_TEMPLATE_44)
+	@convert logo.png -alpha extract -resize 66x66 $(TRAY_TEMPLATE_66)
+	@echo "[tray-assets] built $(TRAY_PNG) + $(TRAY_TEMPLATE_22) $(TRAY_TEMPLATE_44) $(TRAY_TEMPLATE_66) (alpha-only template placeholders)"
 else
 	@echo "[tray-assets] GOOS=$(GOOS): Windows uses logo.ico via go-winres; skipping"
 endif

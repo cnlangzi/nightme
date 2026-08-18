@@ -111,7 +111,10 @@ func addLifecycleCommands(reg *cmdRegistry) {
 	// _daemon is the forked child process entry point — internal,
 	// not user-facing. Registered in the cobra tree so the binary
 	// can dispatch into it, but hidden from help and the REPL banner.
-	reg.addHidden(newDaemonCmd())
+	// reg is passed in so the daemon child can wire its systray
+	// "Commands" submenu off the same registry the REPL banner
+	// renders from — one source of truth for both surfaces.
+	reg.addHidden(newDaemonCmd(reg))
 }
 
 func Execute(logger *slog.Logger) {

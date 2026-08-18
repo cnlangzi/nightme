@@ -121,13 +121,25 @@ jobs:
       # on raw mode, which is the larger regression surface.
       - name: Build smoke binary
         shell: bash
-        run: go build -o dist/nightme ./cmd/nightme
+        run: |
+          # On Windows the binary needs an explicit .exe suffix
+          # when -o is used; on Linux/macOS no extension is fine.
+          # Without this, the next step's `$bin` resolves to a
+          # path that doesn't exist on Windows runners and exits
+          # 127 ("command not found").
+          bin="dist/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="dist/nightme.exe"
+          fi
+          mkdir -p dist
+          go build -o "$bin" ./cmd/nightme
+          echo "Built: $bin"
 
       - name: Verify bare REPL (banner + dispatch matrix)
         shell: bash
         run: |
           set -e
-          # Binary name differs per OS runner.
+          # Same binary-name convention as Build smoke binary.
           bin="./dist/nightme"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             bin="./dist/nightme.exe"

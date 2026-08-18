@@ -51,6 +51,7 @@ import (
 	_ "github.com/cnlangzi/nightme/internal/command/cwd"
 	_ "github.com/cnlangzi/nightme/internal/command/newcmd"
 	_ "github.com/cnlangzi/nightme/internal/command/queue"
+	_ "github.com/cnlangzi/nightme/internal/command/review"
 	_ "github.com/cnlangzi/nightme/internal/command/steer"
 	_ "github.com/cnlangzi/nightme/internal/command/stop"
 	_ "github.com/cnlangzi/nightme/internal/command/think"

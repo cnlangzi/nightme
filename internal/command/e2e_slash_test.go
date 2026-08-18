@@ -133,6 +133,13 @@ func (a *echoAgent) Close() error {
 	return nil
 }
 
+// Review is unimplemented for the e2e echo fake — echo tests
+// don't drive /review. Return ErrReviewNotSupported to satisfy
+// the agent.Starter interface.
+func (a *echoAgent) Review(_ context.Context, _ agent.StartConfig) (agent.RunResult, error) {
+	return agent.RunResult{}, agent.ErrReviewNotSupported
+}
+
 var _ agent.Starter = (*echoAgent)(nil)
 
 // echoDriver forwards driver calls back to an echoAgent.

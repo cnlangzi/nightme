@@ -5,7 +5,7 @@
 > - 架构 + Windows 陷阱 → [`docs/WINDOWS.md`](./WINDOWS.md)
 > - 单 bridge 协议 → [`docs/bridge/`](./bridge/)
 > - Feishu 端到端 → [`docs/E2E_TESTING.md`](./E2E_TESTING.md)
-> - CI 配置 → [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) `agent-smoke` job
+> - CI 配置 → [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) `startup` job
 
 ---
 
@@ -19,7 +19,7 @@
 
 1. 开发团队主要在 macOS 上日常测试,这段代码肉眼可读、看起来合理,没人去 verify 注释的真伪;
 2. 现有 Go 测试套件对 spawn-touching 路径大量使用 `//go:build !windows` / `//go:build !unix` 跳过(`grep -rn 'go:build !windows' internal/` 命中 ~30 处),Windows 分支在 CI 里覆盖率本就稀疏;
-3. `cross-compile` job 在 ubuntu 上交叉编译到 `windows/amd64` **只跑 build,不跑 test**,所以编译过的代码没人验证它真能跑;
+3. `build` job 在 ubuntu 上交叉编译到 `windows/amd64` **只跑 build,不跑 test**,所以编译过的代码没人验证它真能跑;
 4. 没有 e2e 级别的"装 agent → 起 nightme → 看 agent 启动" gate。
 
 **实际后果**:
@@ -29,7 +29,7 @@
 - 用户要么以为 nightme 不支持 dsh,要么 hack `config.yaml` 加 user-defined 走 PTY 兜底,丢掉结构化能力;
 - 修复点在 PR review 里被三连 reviewer 都误以为是"作者有意识地屏蔽 Windows",差点被回滚。
 
-修复只动了一行 (`if runtime.GOOS != "windows"` 包装层) + 注释改写,但**没有 CI 防护栏的话,下次重构还会悄悄回滚**——这正是 `agent-smoke` 这个 job 存在的理由。
+修复只动了一行 (`if runtime.GOOS != "windows"` 包装层) + 注释改写,但**没有 CI 防护栏的话,下次重构还会悄悄回滚**——这正是 `startup` 这个 job 存在的理由。
 
 ---
 
@@ -42,20 +42,20 @@ nightme 的验证覆盖分五层,从下到上:
             │  5. 真实 e2e (Feishu 端到端)  │   ← docs/E2E_TESTING.md
             │     需 apikey + 真机/Live    │     PR 不能强制跑(配额 + 密钥)
             ├───────────────────────────────┤
-            │  4. agent-smoke (CI smoke)    │   ← 本文档;三平台 runner
+            │  4. startup (CI smoke)        │   ← 本文档;四平台 runner
             │     无 apikey,只验启动        │     每个 PR 必跑
             ├───────────────────────────────┤
-            │  3. 单元 + race + coverage    │   ← test job
-            │     fake driver,bridge logic  │     每个 PR 必跑 (linux)
+            │  3. 单元 + race + coverage    │   ← test job (matrix: 4 OS)
+            │     fake driver,bridge logic  │     每个 PR 必跑
             ├───────────────────────────────┤
    ─────────┤  2. 编译时跨平台 vet/build    │   ─────── bridge 边界 ────────
-            │     GOOS 切换但不实际跑       │     cross-compile job
+            │     GOOS 切换但不实际跑       │     build job (cross-compile)
             ├───────────────────────────────┤
-            │  1. 静态检查 (go vet)         │   ← test / cross-compile job
+            │  1. 静态检查 (go vet)         │   ← test / build job
             └───────────────────────────────┘
 ```
 
-`agent-smoke` 占据第 4 层:**编译过 + 单元测试过 + 跨平台编译过** → 真起一次看 spawn 是否活着。它补的不是"功能正确性"(那是 fake driver 单测的活),而是"启动路径在每个平台上都通"——这层正好是现有套件覆盖最薄的地方。
+`startup` 占据第 4 层:**编译过 + 单元测试过 + 跨平台编译过** → 真起一次看 spawn 是否活着。它补的不是"功能正确性"(那是 fake driver 单测的活),而是"启动路径在每个平台上都通"——这层正好是现有套件覆盖最薄的地方。
 
 ---
 
@@ -71,7 +71,7 @@ nightme 的验证覆盖分五层,从下到上:
 | 4 | **必须真有响应才算启动成功** | "spawn 后 6 秒还活着 = pass"(hung 也"活着") | "spawn 后 8 秒内输出 size > banner = pass" |
 | 5 | **不断言响应内容** | grep "API key error" / "model reply" 之类 | 只断言 size > threshold(任何 byte 都是 pass) |
 | 6 | **官方安装方式优先于 curl-pipe** | `curl … \| bash` 在 CI 里 cert/geo/版本都抖 | `npm install -g <official-package>` 跨平台 deterministic |
-| 7 | **挂在依赖链尾,cheap-first / expensive-last** | agent-smoke 在 test 之后就起 | agent-smoke 等 `test` + `test-windows` + `cross-compile` 都绿 |
+| 7 | **挂在依赖链尾,cheap-first / expensive-last** | startup 在 test 之后就起 | startup 等 `test` + `build` 都绿 |
 
 ---
 
@@ -191,24 +191,42 @@ kill "$pid" 2>/dev/null || true
 
 ## 5. CI Workflow 拓扑
 
+三个 job 三个名词,全是 matrix 模式,GitHub Actions UI 自动把每个矩阵轴展开成 job 名下的二级行:
+
 ```
-test (ubuntu build + race + coverage)        ~1-2 min
-  ├─→ test-windows (windows build + tests)   ~2-3 min
-  ├─→ cross-compile (4-target matrix)        ~2-3 min (并行)
-  └─→ agent-smoke (matrix: ubuntu/windows/macos)
-       needs: [test, test-windows, cross-compile]
-       ~3-5 min × 3 runners
+test
+  ├─ ubuntu-latest      ← race + coverage,真实 coverage gate
+  ├─ windows-latest
+  ├─ macos-latest       ← Apple Silicon (arm64)
+  └─ macos-13           ← Intel (x86_64)
+  ~3-6 min (4 runners 并行)
+
+build
+  ├─ windows / amd64
+  ├─ windows / arm64
+  ├─ darwin / amd64
+  └─ darwin / arm64
+  needs: test            ~2-3 min (4 targets 并行,全在 ubuntu 上 cross-compile)
+
+startup
+  ├─ ubuntu-latest
+  ├─ windows-latest
+  ├─ macos-latest
+  └─ macos-13
+  needs: [test, build]   ~3-5 min (4 runners 并行)
 ```
 
-**为什么挂在末尾**:`agent-smoke` 是文件里最贵的 gate(npm install × 5 × 3 OSes + 5 spawn 尝试 × 8s 观察)。任何前置红了,跑这层就是纯烧钱。挂在链尾 = cheap-first / expensive-last。
+**依赖顺序**:`test` 是根,`build` 必须等 `test`(确保代码至少编译/单测过),`startup` 必须等 `test` + `build`(确保代码编译 + 跨平台编译都绿才有意义跑 spawn smoke)。
 
-**为什么 fail-fast: false**:`npm install -g` 可能因 registry / 网络问题在某一两个 OS 上挂,不应连带把另外两个 OS 的 gate 也拖红。每个 runner 独立报 pass/fail。
+**为什么全 4 平台**:开发以 macOS 为主力,但**macos-13 (Intel) ≠ macos-latest (Apple Silicon)**,部分 agent CLI 装出来是 arm64-only 的 .node binary,在 x86_64 darwin 上加载直接 fail —— 这种 bug 只有跨 arch CI 才捕得到。同理 darwin/amd64 ≠ linux/amd64 ≠ windows/amd64,任何一个缺失都代表"那个平台的用户跑不动"。
 
-**为什么显式包含 macos-latest**:开发团队以 macOS 为主力,日常覆盖率高,但**CI 必须独立跑 macos-latest 才能捕"只有 clean hosted runner 才能暴露"的回归**——具体见 §6.2。
+**为什么 fail-fast: false**:`npm install -g` 可能因 registry / 网络问题在某一两个 OS 上挂,不应连带把另外的 OS gate 也拖红。每个 runner 独立报 pass/fail,CI UI 上一眼看出"哪个 OS 挂了、哪个过了"。
 
-**已知 trade-off**:每个 `agent-smoke` runner 要等所有 3 个前置完成才启动。Linux runner 要等 `test-windows`(Windows hosted runner,~2 min),Windows runner 要等 `cross-compile`(ubuntu 上跑,~2 min),macOS runner 也要等所有 3 个。三个 runner 各浪费 ~2 min,合计 ~6 min 闲置。
+**为什么 startup 挂链尾**:startup 是文件里最贵的 gate(npm install × 5 × 4 OSes + 5 spawn 尝试 × 8s 观察)。任何前置红了再启动 startup 就是纯烧 hosted runner 配额。挂链尾 = cheap-first / expensive-last。
 
-如果 CI 时间预算吃紧,可拆成 3 个独立 job(每个 OS 一个 needs 链),消掉跨 OS 等待。本次保持单 job 优先。
+**已知 trade-off**:`build` 的 4 个 target 都在 ubuntu 上编,所以跨平台 runtime 真假要靠 `test` 和 `startup` 覆盖。这两个 job 各自的 4 个 runner 互相独立、并行启动,所以**没有跨 OS 闲置**(对比旧的 `agent-smoke` 单 job matrix,旧版每个 runner 要等所有前置,有 ~6 min 闲置)。
+
+如果 CI 时间预算吃紧,可拆 `startup` 成 4 个独立 job(每个 OS 一个 needs 链),消掉"linux runner 等 windows runner 跑完"那种 idle —— 但目前单 job 矩阵更易配置,值得保留。
 
 ---
 
@@ -262,30 +280,31 @@ done
 echo "OK: all 5 agents across 5 gates"
 ```
 
-### 6.2 为什么 CI 不能只信 macOS dev 测试
+### 6.2 为什么 CI 不能只信 dev 笔记本测试
 
-开发在 macOS 笔记本上跑同一组 gate 通常全绿,但 CI 还是独立跑 macos-latest,原因:
+开发在 macOS / Linux 笔记本上跑同一组 gate 通常全绿,但 CI 还是独立跑全部 4 平台,原因:
 
-| 维度 | macOS dev | macos-latest hosted runner |
+| 维度 | dev 笔记本 | hosted runner |
 |---|---|---|
 | `~/.dsh/settings.yaml` | 真用户配置(可能漏 API key 也"假装能跑") | clean,无配置 |
 | `PATH` | 装着 10 个没列在 builtin 里的 binary(可能掩盖 PATH 顺序问题) | 只有 npm bin + 系统 PATH |
-| shell env | 累积多年的 alias / export / oh-my-zsh | 默认 bash,无 user-level rc |
-| node 版本 | 跟着 brew 升级漂移 | Node 20 LTS(pinned) |
+| shell env | 累积多年的 alias / export / oh-my-zsh / brew shellenv | 默认 bash,无 user-level rc |
+| node 版本 | 跟着 brew / nvm 升级漂移 | Node 20 LTS(pinned) |
 | 用户态 `/tmp` | 跟其他 dev session 共享 | 每次 fresh |
+| CPU 架构 | dev 用啥就是啥(Intel vs ARM Mac) | 4 个独立平台各自验证(linux/amd64, windows/amd64, darwin/arm64, darwin/amd64) |
 
-CI macos-latest 跑出来跟 dev mac 不一致时,**几乎总是 CI 才对**(dev 环境有噪声掩盖 bug)。这就是为什么即使 macOS 已被开发者每天覆盖,CI 也要再独立跑一次。
+CI 跟 dev 环境不一致时,**几乎总是 CI 才对**(dev 环境有噪声掩盖 bug)。这就是为什么即使 macOS / Linux 已被开发者每天覆盖,CI 也要再独立跑全部 4 平台。`macos-13`(Intel x86_64)这个 entry 尤其关键 —— 90% 的现代 dev Mac 是 Apple Silicon,Intel Mac 的 bug 在 dev 侧几乎测不到,只能在 CI 里 catch。
 
 ---
 
 ## 7. 加一个新 builtin agent 的 checklist
 
-要在 `cmd/nightme/agents.go` 加一个新的 builtin agent(比如 `gemini`),必须同步改 CI:
+要在 `cmd/nightme/agents.go` 加一个新的 builtin agent(比如 `gemini`),必须同步改 CI 的 **`startup` job**:
 
 ```diff
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -234,12 +234,14 @@
+@@ startup job: install step @@
          # bash is also a builtin (PTY fallback) but it's a
          # platform-provided binary — apt bash on Linux/macOS,
          # n/a on stock Windows. It's covered by unix-only Go
@@ -300,14 +319,21 @@ CI macos-latest 跑出来跟 dev mac 不一致时,**几乎总是 CI 才对**(dev
          npm install -g @earendil-works/pi-coding-agent
          npm install -g @deepseek-ai/dsh
 +        npm install -g @google/gemini-cli
-@@ -250,7 +252,7 @@
-           for agent in claude codex opencode pi dsh; do
+
+@@ startup job: each subsequent gate (PATH / --help / agents / spawn) @@
+-          for agent in claude codex opencode pi dsh; do
 +          for agent in claude codex opencode pi dsh gemini; do
              path=$(command -v "$agent" 2>/dev/null || true)
              ...
 ```
 
-每个 gate 的 `for agent in …` 列表加新名字,**一处都不能漏** —— 这是为什么 5 个 gate 都在同一个文件里集中维护,而不是分散在 N 个 yaml 文件里。
+**5 处 for-loop 都要加新名字**(每层 gate 一个):`PATH` check / `--help` check / `nightme agents` 列名 grep / `nightme test --agent X` spawn — 漏任何一处都会让新 builtin 在那一层静默 fail。grep anchor:
+
+```
+$ grep -n "for agent in claude codex opencode pi dsh" .github/workflows/ci.yml
+```
+
+会列出所有 5 个,逐一对照即可。
 
 新增 builtin 同步必做:**找到 package name 的官方锚点**(agent 自己的 setup docs / WINDOWS.md / bridge 的 Detect 错误信息),写到注释里。下次有人怀疑包名错了能立刻 trace 回来源。
 
@@ -335,7 +361,7 @@ CI macos-latest 跑出来跟 dev mac 不一致时,**几乎总是 CI 才对**(dev
 
 几个明确的增强方向,留给后续 PR:
 
-1. **拆 agent-smoke 成 3 个独立 job** —— 每个 OS 一份 needs 链,消掉 §5 提到的 ~6 min 闲置
+1. **拆 startup 成 4 个独立 job** —— 每个 OS 一份 needs 链,理论上能再省点 wall-clock,但目前 startup 内部已是 4 runner 并行,边际收益小
 2. **加 `--version` 比对** —— 在 Gate 2 之后断言每个 agent >= 已知最低版本,捕"装出来的 binary 缺关键 flag"的回归
 3. **响应内容 sanity-check** —— 不断言内容,但断言"响应里至少有一个换行"或"响应不是只 echo 我发的那一行" —— 进一步区分 PTY echo-only 和真 acknowledge
 4. **加 matrix entry:每个 agent 单独跑**(现在 5 agents 串行)—— 大幅减少 wall-clock 但增加 setup 时间,trade-off 不明显

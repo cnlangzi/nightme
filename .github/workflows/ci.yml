@@ -5,9 +5,40 @@ on:
     branches: [main]
 
 jobs:
+  # The Go test suite runs on every platform we ship binaries for:
+  # linux/amd64, windows/amd64, darwin/arm64 (Apple Silicon), and
+  # darwin/amd64 (Intel — macos-13 runner). GitHub Actions UI
+  # auto-expands the matrix axis as a sub-line under the job name,
+  # so this single entry shows as four parallel rows.
+  #
+  # Why all four instead of just linux: a sizeable slice of the
+  # codebase carries `//go:build !windows` (daemoncontrol AF_UNIX
+  # sockets, Setpgid in claudecode, …) or `//go:build !unix`
+  # (Windows-only syscall wrappers). Linux-only coverage hides
+  # Windows regressions; Windows-only coverage hides Unix
+  # regressions. darwin coverage matters because Go's runtime
+  # scheduling differs on macOS (different M:N goroutine/thread
+  # ratios, different mmap behavior under cgo) and some bugs only
+  # surface there.
+  #
+  # Conditional logic inside the matrix: ubuntu gets `-race
+  # -coverprofile` (the actual coverage gate), the other three
+  # get `-count=1` plain test. Race is 2-3× slower and coverage
+  # upload is linux-only by repo convention (the badge lives on
+  # linux/amd64). The `-count=1` on the non-ubuntu rows disables
+  # the Go test cache so a flaky test that "passed yesterday"
+  # can't hide a real regression on a different platform.
   test:
-    name: Build + Vet + Test
-    runs-on: ubuntu-latest
+    needs: []
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+          - macos-13
     steps:
       - uses: actions/checkout@v5
 
@@ -17,69 +48,29 @@ jobs:
           cache: true
 
       - name: Build
+        shell: bash
         run: go build ./...
 
       - name: Vet
+        shell: bash
         run: go vet ./...
 
       - name: Test (race + coverage)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Test
+        if: matrix.os != 'ubuntu-latest'
+        shell: bash
+        run: go test -count=1 ./...
+
       - name: Upload coverage
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v6
         with:
           name: coverage-linux-amd64
           path: coverage.out
-
-  # Windows-hosted test runner. Runs the same `go test` command
-  # as the linux job, but on a real windows-latest hosted runner
-  # so windows-tagged tests (`//go:build windows`) actually run
-  # and unix-tagged tests (`//go:build !windows`) are skipped
-  # by the Go build system instead of failing to compile.
-  #
-  # Required because some tests use platform-only syscalls
-  # (e.g. AF_UNIX sockets in daemoncontrol, Setpgid in
-  # claudecode agent_interrupt_unix_test.go) that intentionally
-  # don't compile on Windows. Without a Windows-hosted runner,
-  # those tags just mean "never tested" — a Windows-only
-  # regression would slip past CI. The cross-compile job
-  # below (still compile-only) catches build breaks; this job
-  # catches runtime regressions.
-  #
-  # Fail-fast gate: `test` runs first as the cheap linux/amd64
-  # signal — any regression there short-circuits the windows
-  # runner entirely instead of burning a paid hosted runner on
-  # a known-broken tree.
-  test-windows:
-    name: Build + Vet + Test (windows/amd64)
-    needs: test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build
-        shell: bash
-        run: go build ./...
-
-      - name: Vet
-        shell: bash
-        run: go vet ./...
-
-      - name: Test
-        # -count=1 disables the Go test cache so a flaky test that
-        # "passed yesterday" can't hide a real regression. We do
-        # NOT pass -race here because race costs 2-3x runtime
-        # and the coverage gate is on the linux job above; race
-        # detection is exercised on linux where the gate matters
-        # most.
-        shell: bash
-        run: go test -count=1 ./...
 
   # Cross-compile check. Runs on ubuntu-latest (cheapest runner)
   # and cross-compiles to Windows + macOS to catch OS-conditional
@@ -101,8 +92,7 @@ jobs:
   # parallel with a failing test. The cross-compile matrix itself
   # still runs in parallel after the gate (peak 4); `fail-fast:
   # false` keeps all four targets reporting even when one breaks.
-  cross-compile:
-    name: Cross-compile (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
+  build:
     needs: test
     runs-on: ubuntu-latest
     strategy:
@@ -219,21 +209,22 @@ jobs:
   # spawn observation against a tree that already failed `go vet`
   # would be wasted spend. Putting starter detection at the end of
   # the chain is the cheap-first / expensive-last convention.
-  agent-smoke:
-    name: Agent install + startup (${{ matrix.os }})
-    needs: [test, test-windows, cross-compile]
+  startup:
+    needs: [test, build]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Full platform matrix on purpose. macOS is the dev team's
-        # daily-driver OS, so bugs there get caught by humans first,
-        # but CI still runs macos-latest to catch regressions that
-        # only surface on a clean hosted runner (no ~/.dsh/settings,
-        # no leaked shell env, no per-user config). Linux + Windows
-        # are the platforms dev DOESN'T run on daily — those are
-        # where this gate's signal matters most.
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Full 4-platform matrix on purpose. Same axes as `test` —
+        # every platform we ship a binary for, we also verify
+        # the bridge can actually start every AI coding agent on
+        # that platform. macos-13 (Intel) is included alongside
+        # macos-latest (Apple Silicon) because some agent CLIs
+        # ship arm64-only .node binaries that fail to load on
+        # x86_64 darwin — and the CI cache key doesn't catch
+        # that. Each runner reports independently so a Linux-only
+        # npm registry hiccup doesn't gate Windows / macOS.
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
     steps:
       - uses: actions/checkout@v5
 

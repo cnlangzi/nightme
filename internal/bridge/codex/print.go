@@ -299,68 +299,30 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 // is silently dropped, mirroring the long-lived bridge's
 // SendBlocks). If a future flag requires validation, add the
 // error return then.
+// buildPrintArgs assembles argv for `codex exec <prompt>`. Only
+// used by RunOnce. The codex review subcommand lives in
+// runCodexReviewPlain and assembles its own argv (the two
+// subcommands take disjoint flag sets — see runCodexReview for
+// why review doesn't reuse this function).
 func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) (args []string, prompt string) {
-	subcmd := "exec"
-	if cfg.Subcommand != "" {
-		subcmd = cfg.Subcommand
-	}
-	args = []string{subcmd}
+	args = []string{"exec"}
 
-	// Permission + git-repo flags are SUBCOMMAND-SPECIFIC:
-	//
-	//   - `codex exec` accepts --dangerously-bypass-approvals-and-sandbox
-	//     and --skip-git-repo-check (verified on codex 0.145.0).
-	//   - `codex review` does NOT — its `--help` only lists
-	//     `--base / --uncommitted / --commit / -c / --enable /
-	//     --disable / --title`. Passing the exec-only flags to
-	//     `codex review` makes it exit 2 with
-	//     "unexpected argument '--dangerously-bypass-approvals-and-sandbox'".
-	//
-	// For `review` we mirror the equivalent "never ask + full FS"
-	// semantics via the `-c` config-override form (which `codex
-	// review` DOES accept). Without permission bypass, codex
-	// review would prompt the user for every file read on a
-	// multi-file PR — fatal for a non-interactive print-mode
-	// subprocess whose stdin is closed.
-	if subcmd == "exec" {
-		args = append(args,
-			// Mirror the app-server's two permission defaults
-			// (session.go:262-265): never ask + full FS access.
-			"--dangerously-bypass-approvals-and-sandbox",
-			// Workspace. Both -C and cmd.Dir (set by runPrintMode)
-			// for belt-and-braces.
-			"-C", cfg.Workspace,
-			// Skip the git-repo guard. /gtw commit may run from a
-			// freshly-created worktree that isn't a git repo from
-			// codex's perspective (e.g. sub-dir of main checkout).
-			// App-server mode doesn't have this guard; exec does.
-			"--skip-git-repo-check",
-		)
-	} else {
-		// codex review (and any future subcommand that doesn't
-		// accept the exec-only flags). Use -c overrides to land
-		// the same non-interactive permission posture.
-		//
-		// `codex review --help` lists:
-		//   -c <key=value>  --strict-config
-		//   --uncommitted   --base <BRANCH>  --commit <SHA>
-		//   --enable / --disable / --title
-		// It has NO `-C` (workspace) flag — review runs in
-		// argv[0]'s cwd, which runPrintMode already sets via
-		// cmd.Dir = cfg.Workspace. Passing `-C` here makes
-		// review exit 2 with "unexpected argument '-C' found".
-		args = append(args,
-			"-c", "approval_policy=never",
-			"-c", "sandbox_mode=danger-full-access",
-		)
-	}
-
-	// Subcommand-specific flags (e.g. codex review's
-	// `--base <defaultBranch>`). Placed after the common flags
-	// but before any -i / positional args.
-	if len(cfg.ExtraFlags) > 0 {
-		args = append(args, cfg.ExtraFlags...)
-	}
+	// Mirror the app-server's two permission defaults
+	// (session.go:262-265): never ask + full FS access. Verified
+	// on codex 0.145.0 — equivalent combination flag. Avoids the
+	// need to pass `-c approval_policy=... -c sandbox_mode=...`
+	// separately.
+	args = append(args,
+		"--dangerously-bypass-approvals-and-sandbox",
+		// Workspace. Both -C and cmd.Dir (set by runPrintMode)
+		// for belt-and-braces.
+		"-C", cfg.Workspace,
+		// Skip the git-repo guard. /gtw commit may run from a
+		// freshly-created worktree that isn't a git repo from
+		// codex's perspective (e.g. sub-dir of main checkout).
+		// App-server mode doesn't have this guard; exec does.
+		"--skip-git-repo-check",
+	)
 
 	// Encode blocks preserving order. Each block contributes
 	// exactly one entry to promptParts (the human-readable
@@ -653,14 +615,32 @@ func errStr(err error) string {
 // Plumbing: `runCodexReviewPlain` (this file) is the right shape for
 // `review` — spawn with the review flags, read stdout to EOF, return.
 // `runPrintMode` is the `exec` shape — spawn with `--json -o <tmp>
-// -- <prompt>`, parse NDJSON events, read final answer from the
-// tempfile. We do NOT reuse runPrintMode here because review rejects
-// every exec-only flag (`--json`, `-o`, `--dangerously-bypass-…`,
-// `--skip-git-repo-check`) with exit 2.
+// runCodexReview assembles argv for `codex review` and spawns
+// the subprocess. We do NOT reuse runPrintMode's plumbing
+// because:
+//   - `codex review` rejects every exec-only flag (`--json`,
+//     `-o`, `--dangerously-bypass-…`, `--skip-git-repo-check`)
+//     with exit 2 (verified on codex-cli 0.145.0).
+//   - `codex review` outputs plain text on stdout (no NDJSON
+//     events, no `-o` tempfile write). The shared stderr-drain
+//     + exit-error formatting is the only thing the two paths
+//     have in common (handled by stderrDrain + formatCodexExitError
+//     in print.go).
+//
+// argv layout (verified on codex-cli 0.145.0):
+//   `codex review
+//      -c approval_policy=never
+//      -c sandbox_mode=danger-full-access
+//      --base <defaultBranch>          ← OR --uncommitted fallback
+//      [-- <prompt>]                   ← review has no positional,
+//                                          but `--` is harmless
+//
+// F-review.md §13 "codex/claude use native review" rule: invoking
+// the native subcommand instead of our generic StandardPrompt.
 func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
-	// Build the review subcommand args. --base <default> is the
-	// important one; we detect <default> via git commands.
-	extra := []string{}
+	// Build the review-specific extra flags. --base <default> is
+	// the important one; we detect <default> via git commands.
+	var extra []string
 	if defaultBase := detectDefaultBranch(ctx, cfg.Workspace); defaultBase != "" {
 		extra = []string{"--base", defaultBase}
 	} else {
@@ -668,34 +648,46 @@ func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig) (age
 			"workspace", cfg.Workspace)
 		extra = []string{"--uncommitted"}
 	}
-
-	revCfg := cfg
-	revCfg.Subcommand = "review"
-	revCfg.ExtraFlags = extra
-
-	return runCodexReviewPlain(ctx, s, revCfg)
+	return runCodexReviewPlain(ctx, s.command, cfg.Workspace, extra)
 }
 
 // runCodexReviewPlain is the review-specific runner: spawns
-// `codex review` with the flags buildPrintArgs assembled (subcmd
-// branch picks `-c approval_policy=…` + `-c sandbox_mode=…`, NO
-// `-C`/`--json`/`-o`/`--skip-git-repo-check`/exec-only flags), reads
+// `codex review` with the argv the caller assembled, drains
 // stdout to EOF as plain text, returns. No NDJSON parser, no
 // `-o` tempfile, no `--json` flag.
 //
 // Mirrors runPrintMode's stderr-drain + ctx-cancel + exit-error
-// surfacing shape so the same error messages reach the user.
-func runCodexReviewPlain(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
-	if cfg.Workspace == "" {
+// surfacing shape (via stderrDrain + formatCodexExitError) so the
+// two surfaces report the same failure shape.
+func runCodexReviewPlain(ctx context.Context, command, workspace string, reviewFlags []string) (agent.RunResult, error) {
+	if workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("codex: workspace is required")
 	}
 
 	startTime := time.Now()
 
-	prefixArgs, _ := buildPrintArgs(cfg, nil)
+	// codex review argv — see runCodexReview doc.
+	//
+	// We DO NOT use buildPrintArgs here: the two subcommands have
+	// disjoint flag sets (exec uses --dangerously-bypass-… / -C /
+	// --skip-git-repo-check; review uses -c approval_policy=… /
+	// -c sandbox_mode=…). Sharing argv-assembly would force one
+	// or the other to express itself in the wrong dialect.
+	//
+	// `-c approval_policy=never` + `-c sandbox_mode=danger-full-access`
+	// is the review-side equivalent of the exec flag set — both
+	// land the same "never ask + full FS" posture so review
+	// doesn't prompt the user for every file read on a multi-file
+	// PR (fatal for a non-interactive subprocess whose stdin
+	// is closed).
+	args := append([]string{
+		"review",
+		"-c", "approval_policy=never",
+		"-c", "sandbox_mode=danger-full-access",
+	}, reviewFlags...)
 
-	cmd := agent.NewCmd(ctx, s.command, prefixArgs...)
-	cmd.Dir = cfg.Workspace // review has no -C; runs in cwd
+	cmd := agent.NewCmd(ctx, command, args...)
+	cmd.Dir = workspace // review has no -C; runs in cwd
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -714,10 +706,10 @@ func runCodexReviewPlain(ctx context.Context, s *Starter, cfg agent.StartConfig)
 	pid := cmd.Process.Pid
 
 	cLog("ReviewMode Start",
-		"command", s.command,
+		"command", command,
 		"mode", "review",
-		"workspace", cfg.Workspace,
-		"args_count", len(prefixArgs),
+		"workspace", workspace,
+		"args_count", len(args),
 		"pid", pid)
 
 	// Shared stderr capture with runPrintMode — same semantics,

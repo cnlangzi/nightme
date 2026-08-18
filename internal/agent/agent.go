@@ -626,21 +626,6 @@ type StartConfig struct {
 	// <id>`); bridges that don't (ACP / Pi / PTY) silently ignore it.
 	// Empty means "no --resume; start a fresh session".
 	SessionID string
-
-	// Subcommand overrides the print-mode subcommand (default
-	// "exec"). Bridges that have a native review subcommand (codex
-	// → "review") set this to dispatch through the native path
-	// instead of going through the generic prompt-mode subcommand.
-	// Empty means "use the bridge's default" (almost always "exec").
-	// F-review.md §13 "codex/claude use native review" rule.
-	Subcommand string
-
-	// ExtraFlags are extra argv flags appended after the subcommand
-	// and before any -i / positional args. Used by bridges that
-	// need flags specific to a subcommand (e.g. codex review
-	// passes `--base <defaultBranch>`). Most callers leave this
-	// empty.
-	ExtraFlags []string
 }
 
 // AgentSpec is the static, read-only description of an agent.

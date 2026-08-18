@@ -56,7 +56,7 @@ func init() {
 	// Cross-platform: dsh ships as a Node.js CLI; on Windows the
 	// npm installer drops a `dsh.cmd` shim which proc.New's
 	// Windows branch routes through cmd.exe /d /c (see
-	// internal/proc/exec_windows.go:96 launchOnWindows). The
+	// internal/proc/exec_windows.go launchOnWindows). The
 	// bridge code itself is stdlib-only and has no runtime.GOOS
 	// gate inside. If dsh is not installed Detect() returns a
 	// clear "not found in PATH" error at spawn time, not at

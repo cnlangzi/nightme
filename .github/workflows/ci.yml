@@ -290,7 +290,7 @@ jobs:
   # future platform-specific spawn breakage) before merge. The Go
   # test suite alone is not enough: the spawn-touching tests carry
   # `//go:build !windows` (or unix-only) tags, so the Windows
-  # branches of agent.NewCmd / agentregistry / each bridge's Start
+  # branches of proc.New / agentregistry / each bridge's Start
   # see far less hands-on coverage without an explicit cross-platform
   # smoke gate.
   #
@@ -406,7 +406,7 @@ jobs:
           #
           # Package sources / verification:
           #   claude  → @anthropic-ai/claude-code
-          #             (per internal/agent/exec_windows.go:43 +
+          #             (per internal/proc/exec_windows.go +
           #              Anthropic's setup docs)
           #   codex   → @openai/codex
           #             (per docs/WINDOWS.md:183 "npm 包内的

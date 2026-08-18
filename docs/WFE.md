@@ -64,6 +64,7 @@ Workflows are read from:
 |---|---|---|---|---|
 | `name` | string | ✅ | — | Unique workflow identifier; surfaces in logs and notifications. |
 | `workspaces` | string[] | ✅ | — | **List of CWDs this workflow operates on.** Each workspace is a local directory (typically a git checkout). The workflow's triggers fire only for events on these workspaces; every run executes `chdir` into one of them. |
+| `agent` | string | ❌ | (nightme default) | **Default agent for this workflow's `prompt` steps.** Applied via the `/use agent <name>` slash command that bot pushes into `bot.Incoming()` at run start. Step-level `agent:` overrides this; if both are absent, the nightme primary agent (`cfg.Primary`) is used. |
 | `worker` | int | ❌ | `1` | Max parallel instances when the trigger fires concurrently. |
 | `on` | object | ✅ | — | Trigger spec (see §3). |
 | `jobs` | map | ✅ | — | Named jobs to run in order (see §4). |
@@ -73,6 +74,7 @@ Minimal skeleton:
 ```yaml
 name: my-workflow
 workspaces: [~/work/myproject]                # ← required: which CWDs
+agent: codex                                  # ← optional: workflow default agent
 worker: 1
 on:
   schedule:
@@ -83,7 +85,96 @@ jobs:
       - run: echo "hello"
 ```
 
+**Full example** (uses every top-level field + every step kind + every trigger kind):
+
+```yaml
+name: full-demo
+workspaces: [~/work/nightme]                  # which CWDs this applies to
+agent: codex                                  # default agent for all prompt steps
+worker: 3                                     # up to 3 parallel runs
+
+on:                                           # multiple triggers OR'd
+  schedule:
+    - cron: '0 9 * * *'                      # nightly at 9 AM
+  pull_request:
+    branches: [main, develop]                 # PRs to main or develop
+    events: [opened, synchronize]              # opened or new commit pushed
+  branch:
+    patterns: ['release/*']                   # release branches
+    events: [pushed]
+  issue:
+    events: [opened, labeled]                 # new or labeled issues
+  mention:                                     # @owner mention
+    commands: [review, fix]                   # only review or fix mentions
+
+jobs:
+  prepare:                                     # one job
+    steps:
+      - id: setup
+        run: echo "starting at $(date)"
+        env:
+          TZ: UTC
+
+  review:                                     # another job; runs in parallel with prepare
+    needs: [prepare]                          # wait for prepare
+    steps:
+      # 1. shell step: run a script
+      - id: lint
+        run: ./scripts/lint.sh
+        continue-on-error: true                # don't fail the whole run on lint
+
+      # 2. prompt step: ask the agent (inherits workflow-level agent: codex)
+      - id: ai
+        if: ${{ success() }}                  # skip if lint failed (due to continue-on-error)
+        prompt: |
+          Review this PR.
+          Title: ${{ event.title }}
+          Author: ${{ event.author }}
+        env:
+          REVIEW_DEPTH: deep
+
+      # 3. prompt step with step-level agent override
+      - id: critical-look
+        if: ${{ steps.ai.outputs.verdict == 'needs-fix' }}
+        prompt: "Double-check the AI's review."
+        agent: claude                         # override the workflow default for this step
+
+      # 4. use step: invoke a bot-injected action
+      - id: notify
+        if: ${{ always() }}
+        use: notify
+        with:
+          channel: feishu
+          target: oc_xxx
+          message: "PR ${{ event.title }}: ${{ steps.ai.outputs.verdict }}"
+
+      # 5. use step: user-defined action script
+      - id: cleanup
+        if: ${{ always() }}
+        use: cleanup-tmp-files
+        with:
+          paths: [/tmp/pr-${{ event.number }}]
+```
+
+This example demonstrates every feature in one workflow:
+- All 5 trigger kinds (`schedule` / `pull_request` / `branch` / `issue` / `mention`)
+- Both `cron` style and `command` style for `mention`
+- All 3 step kinds (`run` / `prompt` / `use`)
+- Step-level overrides (agent: claude on critical-look)
+- Conditional execution (`if:` expressions)
+- Cross-job dependency (`needs: [prepare]`)
+- Job-level env merging
+- `continue-on-error` for graceful degradation
+
 **Why `workspaces` (plural, array)**: one workflow can apply to many projects. e.g. the same `nightly-cleanup` workflow might run on every checkout under `~/work/*`. The array is the trigger filter: a trigger event for workspace X only fires workflows whose `workspaces` list contains X.
+
+**Agent resolution priority** (highest first):
+
+1. **Step-level** `prompt.agent` (e.g. `- prompt: "..."` + `agent: codex` on the step)
+2. **Workflow-level** `agent` (this field)
+3. **nightme default** (`cfg.Primary` in `nightme.yaml`)
+
+When bot runs the workflow, only the resolved agent is set on the chat via `/use agent <name>`. The other levels are not pushed as messages (avoids redundant `/use agent` calls).
 
 ---
 
@@ -281,9 +372,19 @@ Supports both **inline** and **file** modes (mirrors GitHub Actions `run`):
 | Field | Type | Required | Purpose |
 |---|---|---|---|
 | `prompt` | string | ✅ | The prompt text (supports `${{ ... }}` expressions). |
-| `agent` | string | ❌ | Local agent name (`codex`, `claude`, `pi`, `opencode`, `dsh`). Defaults to the owner's configured primary agent. |
+| `agent` | string | ❌ | Local agent name (`codex`, `claude`, `pi`, `opencode`, `dsh`). Defaults to the workflow-level `agent:` (§2) or, if absent, the nightme primary agent (`cfg.Primary`). |
 
 **Scope note**: nightme only **invokes** the agent — it does not install, configure, or store credentials. The agent binary must be on `$PATH` and have its own environment (API keys, config) ready. This is a "reuse the local env" model, not a "manage the agent" model.
+
+**Agent resolution** (highest priority first):
+
+1. **Step-level** `agent:` on the prompt step
+2. **Workflow-level** `agent:` (§2 top-level field)
+3. **nightme default** (`cfg.Primary` in `nightme.yaml`)
+
+When bot runs the workflow, it determines the resolved agent and pushes a single `/use agent <name>` slash command into `bot.Incoming()` at run start. The chat's active agent is set before any `prompt` step runs, so every subsequent prompt dispatches to the right agent.
+
+**Why a workflow-level `agent:`**: the same workflow often needs the same agent across all its `prompt` steps. Setting it once at the workflow level avoids repeating `agent: codex` on every step. Step-level `agent:` is for the rare case where one step needs a different agent.
 
 ### 5.3 `use` — invoke a bot-injected action
 

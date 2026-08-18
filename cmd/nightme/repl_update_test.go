@@ -454,10 +454,10 @@ func TestPrompt_InvalidAnswerThenNoRePrompt(t *testing.T) {
 // NOT inject version-prompt text into the output when stdin is
 // empty. This is the contract the pre-prompt tests rely on.
 func TestRunREPLWith_NoVersionChatter(t *testing.T) {
-	root := newTestRoot()
+	root, reg := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader(""), &buf); err != nil {
+	if err := runREPLWith(root, reg, nil, strings.NewReader(""), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	if strings.Contains(buf.String(), "Update now?") {
@@ -470,7 +470,7 @@ func TestRunREPLWith_NoVersionChatter(t *testing.T) {
 // All flags live on the parent `update` command (no
 // subcommands). The cobra tree must advertise every one.
 func TestUpdate_AllInOneFlags(t *testing.T) {
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -529,7 +529,7 @@ func TestUpdate_AllInOneNoInstallHappyPath(t *testing.T) {
 	// DataDir, so we point at a temp dir.
 	t.Setenv("NIGHTME_PATHS_DATA_DIR", t.TempDir())
 
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -588,7 +588,7 @@ func TestUpdate_CacheHitSkipsDownload(t *testing.T) {
 		t.Fatalf("seed archive: %v", err)
 	}
 
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -616,7 +616,7 @@ func TestUpdate_AllInOneRefusesEmptyDataDir(t *testing.T) {
 	// override and using a non-existent HOME.
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -631,7 +631,7 @@ func TestUpdate_AllInOneRefusesEmptyDataDir(t *testing.T) {
 // shape: --help must NOT list subcommands. If a future
 // commit accidentally re-adds them, this test catches it.
 func TestUpdate_HelpLongIsSingleVerb(t *testing.T) {
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)

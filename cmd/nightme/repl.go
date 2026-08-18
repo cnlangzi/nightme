@@ -7,13 +7,25 @@
 // over.
 //
 // Design notes (per the doc-only v0.2 spec we sketched with Devin):
-//   - Production uses chzyer/readline for line editing and history
-//     (↑/↓ navigate, in-memory only — no on-disk persistence).
+//   - Production uses github.com/reeflective/readline for line
+//     editing and history (↑/↓ navigate, in-memory only — no
+//     on-disk persistence). Swapped from chzyer/readline in
+//     fix-erpl-on-windows because chzyer drops printable characters
+//     on Windows when its ANSI/VT escape handling mis-fires (the
+//     user-visible symptom was 'f' character going missing on
+//     Windows consoles). reeflective/readline is a more mature
+//     pure-Go library with proper Windows console VT support and
+//     has stable tagged releases (we pin v1.3.0).
 //   - Tests use a scanner-based path (runREPLWith) that injects an
 //     io.Reader so the existing 9 unit tests stay simple and
 //     independent of TTY.
 //   - runREPL is the production entry; runREPLWith is the testable
 //     core. Both share dispatchREPLLine for command execution.
+//
+// The REPL banner's "Common:" section is no longer hard-coded here.
+// It is rendered from registry.entries by buildBanner, so adding a
+// new subcommand is a single reg.add() call (see subcommand.go and
+// root.go) — the cobra tree and the banner cannot drift apart.
 package main
 
 import (
@@ -25,38 +37,22 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/chzyer/readline"
+	"github.com/reeflective/readline"
 	"github.com/spf13/cobra"
 
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 )
 
-// replBanner explains the available surface. Kept short so the
-// first-time user can scan it in a glance and the returning user
-// can ignore it. Updated to mention every registered subcommand
-// name so /help is not needed for the common path.
-//
-// The banner is printed via the %s placeholder, which runREPLInteractive
-// and runREPLWith fill with bannerWithVersion() (ASCII logo + the
-// shared version.String() line). Tests pin substrings — see
-// TestREPL_EOF for the substring contract.
-const replBanner = `%s
+// replBannerHeader is the part of the banner that does NOT depend on
+// the registry. The "Common:" list itself comes from reg.banner(),
+// spliced in between the header and the "Shell:" footer.
+const replBannerHeader = `%s
 Interactive shell. Type a command and press Enter.
 
 Common:
-  list            list sessions
-  agents          list registered agents
-  login feishu    QR Feishu registration
-  test ...        spawn CLI in PTY (Ctrl-C to end)
-  start           start daemon in the background
-  status          show daemon status
-  logs [--lines N] tail daemon log (Ctrl-C to exit follow)
-  restart         gracefully replace daemon
-  stop            gracefully stop daemon
-  help            full command list
-  version         version info
-  update          check for a newer release
+`
 
+const replBannerFooter = `
 Shell:
   exit / quit     leave shell
   Ctrl-D          leave shell
@@ -64,51 +60,90 @@ Shell:
 
 nightme> `
 
-// runREPL is the no-args entry point invoked from Execute(). It
-// blocks until the user exits via EOF, "exit"/"quit", or a fatal
-// read error. Production path uses chzyer/readline for line editing
-// and persistent history.
-func runREPL(root *cobra.Command, logger *slog.Logger) error {
-	return runREPLInteractive(root, logger)
+// buildBanner renders the full REPL banner: version line + intro +
+// "Common:" entries from the registry + shell hints + trailing
+// prompt. versionLine is the ASCII logo + version metadata returned
+// by bannerWithVersion(). reg supplies the "Common:" section.
+//
+// Tests pin substrings of this output (see TestREPL_EOF) — the
+// "Common:" header is preserved exactly, so adding new commands
+// does not break the substring contract.
+func buildBanner(versionLine string, reg *cmdRegistry) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, replBannerHeader, versionLine)
+	b.WriteString(reg.banner())
+	b.WriteString(replBannerFooter)
+	return b.String()
 }
 
-// runREPLInteractive drives the REPL with chzyer/readline so the user
-// gets ↑/↓ history navigation, in-line editing, and Ctrl-C handling.
-// History is held in memory only — no on-disk persistence (per
-// Devin's explicit ask: "history in memory is enough").
+// shellWriter adapts reeflective/readline's Shell.Printf into an
+// io.Writer so dispatchREPLLine (which is shared with the
+// scanner-based test path that uses a bytes.Buffer) can stay
+// io.Writer-agnostic.
+//
+// We use Printf("%s", string(p)) rather than Printf(string(p)) so
+// that literal '%' bytes in the payload are not interpreted as
+// fmt verbs. reeflective's Printf uses fmt.Sprintf under the hood,
+// so this is correct: the format string is fixed ("%s"), the only
+// variadic argument is the data.
+type shellWriter struct{ rl *readline.Shell }
+
+func (w shellWriter) Write(p []byte) (int, error) {
+	return w.rl.Printf("%s", string(p))
+}
+
+// runREPL is the no-args entry point invoked from Execute(). It
+// blocks until the user exits via EOF, "exit"/"quit", or a fatal
+// read error. Production path uses reeflective/readline for line
+// editing and in-memory history.
+func runREPL(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) error {
+	return runREPLInteractive(root, reg, logger)
+}
+
+// runREPLInteractive drives the REPL with reeflective/readline so
+// the user gets ↑/↓ history navigation, in-line editing, and
+// Ctrl-C / Ctrl-D handling. History is held in memory only — no
+// on-disk persistence (per Devin's explicit ask: "history in
+// memory is enough").
 //
 // Errors from readline (other than user-initiated EOF / interrupt)
 // bubble up; the caller (Execute) prints them and exits with the
 // appropriate error code.
-func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
+//
+// Note on reeflective specifics:
+//   - NewShell() returns a fully configured *Shell with sensible
+//     defaults; we only override the primary prompt.
+//   - Shell.Readline() restores the terminal to cooked mode on
+//     every return (Ctrl-C, Ctrl-D, or accepted line), so writes
+//     through shellWriter in dispatchREPLLine happen in cooked mode
+//     and the terminal stays sane across REPL turns.
+//   - reeflective auto-restores terminal state on exit — no
+//     Close() method to defer (unlike chzyer).
+func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) error {
 	if logger != nil {
 		logger.Info("repl started")
 	}
 
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:            "nightme> ",
-		InterruptPrompt:   "^C",
-		HistorySearchFold: true,
-		// No FuncFilterInputRune: chzyer/readline handles arrow
-		// keys (\x1b[A / \x1b[B) and Ctrl-C at its own level; an
-		// overzealous filter on our side would drop the leading
-		// ESC of those sequences and break navigation.
-	})
-	if err != nil {
-		return fmt.Errorf("readline init: %w", err)
-	}
-	defer func() { _ = rl.Close() }()
+	rl := readline.NewShell()
+	rl.Prompt.Primary(func() string { return "nightme> " })
 
-	out := rl.Stdout()
-	fmt.Fprintf(out, replBanner, bannerWithVersion())
+	out := shellWriter{rl: rl}
+
+	// Banner goes below the (still-cooked) terminal before the
+	// first Readline() takes over. shellWriter.Printf is designed
+	// for inter-prompt messaging; calling it here with no prior
+	// prompt is the same as fmt.Fprint to the raw terminal.
+	if _, err := out.Write([]byte(buildBanner(bannerWithVersion(), reg))); err != nil {
+		return fmt.Errorf("write banner: %w", err)
+	}
 
 	// Version-check prompt: once per REPL startup. The prompt
-// drives the three internal stages (check / download / install)
-// interactively, gating each on its own y/N. Ctrl-C mid-download
-// aborts cleanly; declining install keeps the staged archive
-// for a later `nightme update`. The REPL prompt never exec's
-// the new binary — we restart the daemon and tell the user
-// to exit + re-enter `nightme`.
+	// drives the three internal stages (check / download / install)
+	// interactively, gating each on its own y/N. Ctrl-C mid-download
+	// aborts cleanly; declining install keeps the staged archive
+	// for a later `nightme update`. The REPL prompt never exec's
+	// the new binary — we restart the daemon and tell the user
+	// to exit + re-enter `nightme`.
 	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
 		Out:    out,
 		Reader: rl.Readline,
@@ -121,11 +156,15 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 		case errors.Is(err, readline.ErrInterrupt):
 			// Ctrl-C at the prompt cancels the current line and
 			// stays in the REPL. We don't print anything — the
-			// terminal already echoed ^C.
+			// terminal already echoed ^C (reeflective handles this
+			// natively, unlike chzyer which needed InterruptPrompt).
 			continue
 		case errors.Is(err, io.EOF):
-			// Ctrl-D — clean exit.
-			fmt.Fprintln(out)
+			// Ctrl-D — clean exit. Trailing newline so the
+			// host shell prompt starts on its own line (raw
+			// mode leaves the cursor at end-of-line, not
+			// beginning-of-new-line).
+			_, _ = out.Write([]byte("\n"))
 			return nil
 		case err != nil:
 			return err
@@ -161,7 +200,8 @@ func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out
 	root.SetContext(withLogger(context.Background(), logger))
 	// Route command output (cobra leaf's OutOrStdout) through the
 	// REPL's writer so the banner / prompt / dispatch all share
-	// the same destination. Tests inject a bytes.Buffer here.
+	// the same destination. Tests inject a bytes.Buffer here;
+	// production passes a shellWriter that routes through readline.
 	root.SetOut(out)
 	root.SetErr(out)
 
@@ -180,12 +220,12 @@ func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out
 //
 // readline-specific behavior (↑/↓ history, line editing) is
 // exercised in interactive testing; this path is the contract.
-func runREPLWith(root *cobra.Command, logger *slog.Logger, in io.Reader, out io.Writer) error {
+func runREPLWith(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger, in io.Reader, out io.Writer) error {
 	if logger != nil {
 		logger.Info("repl started")
 	}
 
-	fmt.Fprintf(out, replBanner, bannerWithVersion())
+	fmt.Fprint(out, buildBanner(bannerWithVersion(), reg))
 
 	// runREPLWith is the test-driven path; passing nil Reader
 	// makes the prompt fall through to the "stdin unavailable"

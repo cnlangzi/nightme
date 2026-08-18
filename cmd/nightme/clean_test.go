@@ -12,7 +12,7 @@ import (
 )
 
 func TestCleanCommandSurface(t *testing.T) {
-	root := newRootCmd()
+	root, _ := newRootCmd()
 	cmd, _, err := root.Find([]string{"clean"})
 	if err != nil || cmd == nil {
 		t.Fatalf("clean not registered: err=%v", err)

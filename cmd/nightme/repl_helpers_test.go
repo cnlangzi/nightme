@@ -20,7 +20,7 @@ import (
 // real command must dispatch.
 func TestDispatchREPLLine(t *testing.T) {
 	newRoot := func() *cobra.Command {
-		r := newRootCmd()
+		r, _ := newRootCmd()
 		r.SetOut(&bytes.Buffer{})
 		r.SetErr(&bytes.Buffer{})
 		return r

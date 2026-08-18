@@ -2,8 +2,6 @@
 
 package main
 
-import "github.com/spf13/cobra"
-
 // addUnixOnlyCommands registers commands that depend on Unix-only
 // surfaces — currently just `nightme doctor`, which queries the
 // running daemon via daemoncontrol.GetHealth (that part is
@@ -14,6 +12,6 @@ import "github.com/spf13/cobra"
 // The cross-platform daemon lifecycle commands (start / stop /
 // restart / status / _daemon) are registered separately via
 // addLifecycleCommands in root.go so Windows can pick them up.
-func addUnixOnlyCommands(root *cobra.Command) {
-	root.AddCommand(newDoctorCmd())
+func addUnixOnlyCommands(reg *cmdRegistry) {
+	reg.add(newDoctorCmd(), "doctor          diagnose the running daemon")
 }

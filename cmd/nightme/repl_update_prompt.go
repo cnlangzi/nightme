@@ -17,8 +17,8 @@
 //     download-cache shortcut reuses it).
 //
 // We deliberately do NOT exec the new binary from inside the
-// REPL. The chzyer/readline instance owns TTY state that
-// doesn't survive exec; we restart the daemon (so a fresh
+// REPL. The readline shell owns the TTY in raw mode and that
+// state doesn't survive exec; we restart the daemon (so a fresh
 // shell sees the new daemon) and tell the user to exit +
 // re-enter `nightme` to load the new binary.
 //
@@ -51,7 +51,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/chzyer/readline"
+	"github.com/reeflective/readline"
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/updater"

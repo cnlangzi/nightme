@@ -646,14 +646,26 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	ev.Workspace = d.session.workspace
 	ev.Branch = d.session.branch
 
+	// DEBUG(F-codex-stopped-stuck): every event that the translator
+	// hands to deliver() must show up here. If the bug is "agent
+	// stops responding after a while", the missing
+	// [codex] deliver pushed kind=EventAgentDone line is the smoking
+	// gun — codex emitted turn/completed, translator built the Done,
+	// but it never made it onto d.session.events.
+	cLog("deliver push", "kind", ev.Kind.String(),
+		"q_len",  len(d.session.events),
+		"q_cap",  cap(d.session.events))
+
 	select {
 	case d.session.events <- ev:
+		cLog("deliver pushed", "kind", ev.Kind.String())
 	case <-d.session.closed:
 		cLog("deliver dropped (session closed)", "kind", ev.Kind.String())
 	case <-d.session.exitDone:
 		// lifecycle closed exitDone after cmd.Wait returned;
 		// the bridge is being torn down. Drop silently — nobody
 		// will read this anyway.
+		cLog("deliver dropped (exitDone)", "kind", ev.Kind.String())
 	}
 	return ev
 }

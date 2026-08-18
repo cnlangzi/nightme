@@ -54,6 +54,19 @@ feishu:
   verification_token: ""
   encrypt_key: ""
 
+telegram:
+  # Create a bot with @BotFather and use its token here.
+  bot_token: ""
+  mode: polling
+  polling_timeout: 30
+  # Optional webhook settings. Polling is the default and is
+  # sufficient for a daemon without a public HTTPS endpoint.
+  webhook_url: ""
+  webhook_secret: ""
+  # In groups, process only commands, replies, and bot mentions by default.
+  group_require_mention: true
+  topic_mode: separate
+
 session:
   # Initial PTY size for new sessions.
   default_pty_cols: 80

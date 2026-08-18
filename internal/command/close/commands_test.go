@@ -25,7 +25,7 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 	f := NewFactory(mgr)
 	input := command.SlashInput{ChatID: "no-such-chat"}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, nil, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	f := NewFactory(mgr)
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"close"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -66,7 +66,7 @@ func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"close", " "}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -88,7 +88,7 @@ func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"close", "codex"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -124,7 +124,7 @@ func TestFactory_Handle_NoArg_ClosesAllInCwd(t *testing.T) {
 		t.Fatalf("activeAgent: want claude, got %q", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"close"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -162,7 +162,7 @@ func TestFactory_Handle_NoArg_ClosesEveryAgentInCwd(t *testing.T) {
 		t.Fatalf("pre: pool size want 2 (claude + codex in /tmp), got %d", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"close"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -201,7 +201,7 @@ func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 		t.Fatalf("pre: pool size want 2, got %d", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"close", "codex"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)

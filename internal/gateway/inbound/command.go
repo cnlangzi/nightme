@@ -32,7 +32,9 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -42,7 +44,7 @@ import (
 // no registered factory (e.g. "/etc/passwd"). When Match
 // reports yes, it spawns a goroutine that runs commander.Dispatch
 // and emits the reply, then returns handled=true synchronously.
-func (r *Router) tryCommandDispatch(ctx context.Context, msg *messages.InboundMessage) (bool, *CommandResult, error) {
+func (r *Router) tryCommandDispatch(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) (bool, *CommandResult, error) {
 	commander, ok := r.requireCommander()
 	if !ok {
 		return false, nil, nil
@@ -70,7 +72,7 @@ func (r *Router) tryCommandDispatch(ctx context.Context, msg *messages.InboundMe
 	r.execWg.Add(1)
 	go func() {
 		defer r.execWg.Done()
-		r.runCommand(context.Background(), commander, msg)
+		r.runCommand(context.Background(), mgr, commander, msg)
 	}()
 
 	// F-51 fall-through contract preserved: we already know this
@@ -86,15 +88,10 @@ func (r *Router) tryCommandDispatch(ctx context.Context, msg *messages.InboundMe
 // runCommand is the body of the goroutine spawned by
 // tryCommandDispatch. Resolves the ChatSession, invokes
 // commander.Dispatch, and writes the resulting reply through
-// the wired Emitter. Panic-safe so a misbehaving command
-// factory cannot crash the daemon.
-//
-// The emitter used here is r.emitter (captured at Router
-// construction). Emitting from inside the goroutine is what
-// makes the dispatch non-blocking — outbound messages
-// arriving from long-running commands no longer block
-// dispatchLoop.
-func (r *Router) runCommand(ctx context.Context, commander CommandDispatcher, msg *messages.InboundMessage) {
+// the per-call Emitter (cs.Emitter()) so replies land on the
+// originating channel. r.emitter is kept only as the fallback
+// for paths that never resolve a ChatSession (e.g. early errors).
+func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, commander CommandDispatcher, msg *messages.InboundMessage) {
 	// Defer recover MUST be first so a panic in GetOrCreate
 	// (e.g. nil deref in chatsession code) is caught and the
 	// goroutine doesn't crash the daemon. Matches runAction /
@@ -103,11 +100,14 @@ func (r *Router) runCommand(ctx context.Context, commander CommandDispatcher, ms
 		if rec := recover(); rec != nil {
 			slog.Default().Error("inbound: runCommand panicked",
 				"chat_id", msg.ChatID, "panic", rec)
-			r.emitReply(ctx, msg, "❌ internal error (see daemon log)")
+			r.emitReply(ctx, nil, msg, "❌ internal error (see daemon log)")
 		}
 	}()
 
-	cs, err := r.csMgr.GetOrCreate(msg.ChatID, r.primary)
+	// v1.3+ multi-channel: resolve the ChatSession through the
+	// per-channel mgr passed by the pump's closure, not the
+	// router-level csMgr stub (which is the legacy noOpMgr).
+	cs, err := mgr.GetOrCreate(msg.ChatID, r.primary)
 	if err != nil || cs == nil {
 		slog.Default().Warn("inbound: GetOrCreate failed in runCommand",
 			"chat_id", msg.ChatID, "err", err)
@@ -122,7 +122,7 @@ func (r *Router) runCommand(ctx context.Context, commander CommandDispatcher, ms
 		// F-58 TODO: thread primary agent through RuntimeServices
 		// explicitly; current Commander implementations don't
 		// need it (they read cs.SelectedAgent()).
-	}, cs, command.SlashInput{
+	}, mgr, cs, command.SlashInput{
 		ChatID:     msg.ChatID,
 		UserID:     msg.UserID,
 		Text:       msg.Text,
@@ -130,7 +130,7 @@ func (r *Router) runCommand(ctx context.Context, commander CommandDispatcher, ms
 		HasMention: msg.HasMention,
 	})
 	if err != nil {
-		r.emitReply(ctx, msg, "❌ "+err.Error())
+		r.emitReply(ctx, cs, msg, "❌ "+err.Error())
 		return
 	}
 	if out == nil {
@@ -143,22 +143,41 @@ func (r *Router) runCommand(ctx context.Context, commander CommandDispatcher, ms
 	// session's Emitter". routeOutbound below mirrors the
 	// replyingCommander shim in internal/command/e2e_slash_test.go
 	// so production behaviour matches the documented contract.
-	r.routeOutbound(ctx, out.Outbound)
+	r.routeOutbound(ctx, cs, out.Outbound)
 	if out.Reply != "" {
-		r.emitReply(ctx, msg, out.Reply)
+		r.emitReply(ctx, cs, msg, out.Reply)
 	}
 }
 
-// emitReply writes a single outbound reply to the wired
-// Emitter, anchored to the original user message so the
-// channel renders it as a thread reply (Feishu) / in-place
-// edit (Slack) / DOM append (Web). Shared by runCommand,
-// runAction, runShell, runMessage and the F-59 fallback paths.
-func (r *Router) emitReply(ctx context.Context, msg *messages.InboundMessage, text string) {
-	if text == "" || r.emitter == nil {
+// resolveEmitter picks the per-channel Emitter from cs (set by
+// buildStack for each channel) and falls back to the router's
+// fallback Emitter when cs is nil or has no Emitter bound.
+// The fallback path is what tests that drive the dispatch chain
+// directly (with a stub router csMgr) rely on; production
+// always uses the per-channel Emitter.
+func (r *Router) resolveEmitter(cs *chatsession.ChatSession) outbound.Emitter {
+	if cs != nil {
+		if em := cs.Emitter(); em != nil {
+			return em
+		}
+	}
+	return r.emitter
+}
+
+// emitReply writes a single outbound reply through the per-channel
+// Emitter (cs.Emitter()) so replies land on the originating
+// channel. Falls back to r.emitter when cs is nil or has no
+// Emitter bound (which is rare in production — every runX takes
+// a ChatSession path; tests that drive the dispatch chain
+// directly are the common fallback user). Anchored to the
+// original user message so the channel renders it as a thread
+// reply (Feishu) / in-place edit (Slack) / DOM append (Web).
+func (r *Router) emitReply(ctx context.Context, cs *chatsession.ChatSession, msg *messages.InboundMessage, text string) {
+	em := r.resolveEmitter(cs)
+	if text == "" || em == nil {
 		return
 	}
-	if sendErr := r.emitter.Send(ctx, messages.OutboundMessage{
+	if sendErr := em.Send(ctx, messages.OutboundMessage{
 		ChatID:  msg.ChatID,
 		Kind:    messages.OutReply,
 		Text:    text,
@@ -170,15 +189,17 @@ func (r *Router) emitReply(ctx context.Context, msg *messages.InboundMessage, te
 }
 
 // routeOutbound forwards the explicit Outbound list from a
-// SlashOutput through the wired Emitter. Every kind — including
-// OutChoice / OutChoicePatch — goes through Send; Channel routes
-// by Kind and correlates choice prompts via Choice.RequestID.
-func (r *Router) routeOutbound(ctx context.Context, outbound []messages.OutboundMessage) {
-	if len(outbound) == 0 || r.emitter == nil {
+// SlashOutput through the per-channel Emitter (cs.Emitter()).
+// Every kind — including OutChoice / OutChoicePatch — goes
+// through Send; Channel routes by Kind and correlates choice
+// prompts via Choice.RequestID.
+func (r *Router) routeOutbound(ctx context.Context, cs *chatsession.ChatSession, outbound []messages.OutboundMessage) {
+	em := r.resolveEmitter(cs)
+	if len(outbound) == 0 || em == nil {
 		return
 	}
 	for _, ob := range outbound {
-		if err := r.emitter.Send(ctx, ob); err != nil {
+		if err := em.Send(ctx, ob); err != nil {
 			slog.Default().Warn("inbound: outbound Send failed", "kind", ob.Kind, "err", err)
 		}
 	}

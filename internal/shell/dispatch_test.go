@@ -13,6 +13,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -417,7 +418,7 @@ func TestDispatcherHandle_NonShellText(t *testing.T) {
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
 	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
 	for _, text := range []string{
 		"hello",
@@ -431,7 +432,7 @@ func TestDispatcherHandle_NonShellText(t *testing.T) {
 			em.calls = nil
 			em.gotReply.Store(false)
 
-			out, handled := d.Handle(cs, InboundRequest{
+			out, handled := d.Handle(testMgr(t), cs, InboundRequest{
 				Request:   Request{Text: text, Cwd: t.TempDir()},
 				ChatID:    "oc_test",
 				MessageID: "om_test",
@@ -463,9 +464,9 @@ func TestDispatcherHandle_ShellCommand(t *testing.T) {
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
 	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
-	out, handled := d.Handle(cs, InboundRequest{
+	out, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
 		Request:   Request{Text: "!echo hello-shell", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_test",
@@ -493,7 +494,7 @@ func TestDispatcherHandle_ShellCommand(t *testing.T) {
 	}
 }
 
-// TestDispatcherHandle_NilEmitter verifies that NewDispatcher(nil)
+// TestDispatcherHandle_NilEmitter verifies that NewDispatcher()
 // doesn't panic — the dispatcher still consumes shell commands
 // (returns Consumed=true) but silently drops the reply. Lets the
 // runtime stay wired during channel outages.
@@ -501,9 +502,9 @@ func TestDispatcherHandle_NilEmitter(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("echo path uses sh -c; skip on Windows")
 	}
-	d := NewDispatcher(nil) // emitter = nil
+	d := NewDispatcher() // emitter = nil
 
-	out, handled := d.Handle(&chatsession.ChatSession{}, InboundRequest{
+	out, handled := d.Handle(nil, &chatsession.ChatSession{}, InboundRequest{
 		Request: Request{Text: "!echo ok", Cwd: t.TempDir()},
 	})
 	if !handled || out == nil || !out.Consumed {
@@ -512,7 +513,7 @@ func TestDispatcherHandle_NilEmitter(t *testing.T) {
 	// The goroutine's `d.emitter == nil` short-circuit returns
 	// before any Send call. No panic occurs, no reply is
 	// dispatched. The point of this test is to confirm
-	// NewDispatcher(nil) doesn't panic and Handle still returns
+	// NewDispatcher() doesn't panic and Handle still returns
 	// the consumed=true contract.
 }
 
@@ -532,9 +533,9 @@ func TestDispatcherHandle_EmitsQueuedThenDone(t *testing.T) {
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
 	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
-	out, handled := d.Handle(cs, InboundRequest{
+	out, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
 		Request:   Request{Text: "!echo queued-done", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_qd",
@@ -571,12 +572,11 @@ func TestDispatcherHandle_EmitsQueuedThenDone(t *testing.T) {
 func TestDispatcherHandle_FallThroughEmitsNothing(t *testing.T) {
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
-	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
 	for _, text := range []string{"hello", "/etc/passwd", "!   ", "echo !hi"} {
 		cap.calls = nil
-		_, handled := d.Handle(cs, InboundRequest{
+		_, handled := d.Handle(testMgr(t), cs, InboundRequest{
 			Request:   Request{Text: text, Cwd: t.TempDir()},
 			ChatID:    "oc_test",
 			MessageID: "om_x",
@@ -602,9 +602,9 @@ func TestDispatcherHandle_NilMessageIDSkipsEmit(t *testing.T) {
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
 	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
-	_, handled := d.Handle(cs, InboundRequest{
+	_, handled := d.Handle(testMgr(t), cs, InboundRequest{
 		Request: Request{Text: "!echo empty-id", Cwd: t.TempDir()},
 		ChatID:  "oc_test",
 		// MessageID: "" — explicitly empty
@@ -626,9 +626,9 @@ func TestDispatcherHandle_NilCSSkipsEmit(t *testing.T) {
 		t.Skip("echo path uses sh -c; skip on Windows")
 	}
 	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
-	out, handled := d.Handle(nil, InboundRequest{
+	out, handled := d.Handle(nil, nil, InboundRequest{
 		Request:   Request{Text: "!echo nil-cs", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_nil",
@@ -653,9 +653,9 @@ func TestDispatcherHandle_ZeroValueCSDoesNotPanic(t *testing.T) {
 		t.Skip("echo path uses sh -c; skip on Windows")
 	}
 	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
-	out, handled := d.Handle(&chatsession.ChatSession{}, InboundRequest{
+	out, handled := d.Handle(testMgrWithEmitter(t, em), &chatsession.ChatSession{}, InboundRequest{
 		Request:   Request{Text: "!echo zero-cs", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_zv",
@@ -686,9 +686,13 @@ func TestDispatcherHandle_ReplySendFailed(t *testing.T) {
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
 	em := &fakeEmitter{sendErr: errors.New("emitter down")}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
-	_, handled := d.Handle(cs, InboundRequest{
+	// v1.3+ multi-channel: mgr carries the per-channel Emitter.
+	// Build a real chatsession.Manager, wire em, and pass it.
+	mgr := chatsession.NewManager().WithEmitter(em)
+
+	_, handled := d.Handle(mgr, cs, InboundRequest{
 		Request:   Request{Text: "!echo send-fails", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_sendfail",
@@ -742,9 +746,9 @@ func TestDispatcherHandle_PanicStillEmitsDone(t *testing.T) {
 	}
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
-	d := NewDispatcher(panickingEmitter{})
+	d := NewDispatcher()
 
-	_, handled := d.Handle(cs, InboundRequest{
+	_, handled := d.Handle(testMgr(t), cs, InboundRequest{
 		Request:   Request{Text: "!echo panic-me", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_panic",
@@ -789,9 +793,9 @@ func TestDispatcherHandle_ShellCommandFails(t *testing.T) {
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
 	em := &fakeEmitter{}
-	d := NewDispatcher(em)
+	d := NewDispatcher()
 
-	_, handled := d.Handle(cs, InboundRequest{
+	_, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
 		Request:   Request{Text: "!false", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_fail",
@@ -828,4 +832,24 @@ func TestDispatcherHandle_ShellCommandFails(t *testing.T) {
 	if states[1].state != agent.MessageDone {
 		t.Errorf("states[1] = %v, want MessageDone (failure path must still emit Done)", states[1].state)
 	}
+}
+
+// testMgr returns a real *chatsession.Manager for shell.Handle.
+// v1.3+ multi-channel: Handle takes a per-channel Manager that
+// carries the per-channel Emitter used for outbound. The shell
+// tests need a Manager; most don't wire an Emitter because the
+// test only checks Consumed/Reply (the synchronous return),
+// not the async reply post.
+func testMgr(t *testing.T) *chatsession.Manager {
+	t.Helper()
+	return chatsession.NewManager()
+}
+
+// testMgrWithEmitter returns a real *chatsession.Manager with
+// the given Emitter wired. v1.3+ multi-channel: shell.Handle
+// uses mgr.Emitter() for outbound, so the test Manager must
+// carry the Emitter for the reply to be sent.
+func testMgrWithEmitter(t *testing.T, em outbound.Emitter) *chatsession.Manager {
+	t.Helper()
+	return chatsession.NewManager().WithEmitter(em)
 }

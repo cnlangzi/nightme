@@ -1,29 +1,43 @@
-// runtime.go — Runner struct + the wiring orchestrator.
+// runtime.go — Runner struct + the multi-channel wiring
+// orchestrator (v1.3+).
 //
 // `Runner.Run` is the daemon entrypoint that the cmd/nightme CLI
-// shell calls after parsing --channel and filling Deps. It runs
-// the 7-step wiring sequence:
+// shell calls after filling Deps. It runs the 4-phase wire:
 //
-//  1. Load config (cfg) and registry stores (csFile, asFile)
-//  2. Build agent registry (agents) + IM channel (ch); ch.Start
-//  3. Build chatsession.Manager (mgr) with spawner + persistence
-//  4. Build shared outbound infra:
-//     - prcache.Registry (per-AS PR cache)
-//     - gtw.HandlerDeps (git runner, HTTP prober)
-//     - outbound.Emitter (the single outbound chokepoint;
-//       holds ch and the GitStatusLookup closure that reads
-//       mgr.Get(chatID) → cs.GitStatus(ctx))
-//  5. Build gtw.Manager, ReactionRouter, command.Commander,
-//     shell.Dispatcher (the command-adapter layer)
-//  6. Build gateway.Router (messageDispatcher + em); wire
-//     gwImpl.WithCommander / WithShellDispatch / WithActionHandler
-//  7. mgr.WithEmitter(em) + WireRuntimeCallbacksAndRestore (must
-//     precede gwImpl.Start; the latter depends on chat sessions
-//     having their per-bus subscribers installed)
+//  1. shared resources — cfg / csFile / asFile / agents /
+//     prCache / gtwDeps (read-only once per daemon)
+//  2. shared wiring    — gtwMgr (with findChatSession-aware
+//     SetGetChatSession) / reactionRouter / commander /
+//     shellDispatcher / inbound.Router; these all use
+//     runtime.findChatSession to resolve the per-chat mgr
+//     (the per-channel mgr is the "owner" of each chatID
+//     because it's the one that bound the channel's Emitter)
+//  3. buildStack (per channel) — ch.Start + chatsession.Manager
+//     + outbound.Emitter + WireRuntimeCallbacksAndRestore;
+//     stash mgr in runtime.allMgrs; build gateway.Pump
+//  4. start — gateway.AttachPumps + gateway.Start
+//
+// Per-chat restore is lazy (Manager.GetOrCreate on first inbound),
+// so the daemon reaches ready without a synchronous chat_sessions
+// scan. The per-channel Manager's GetOrCreate reads csFile and
+// hydrates the entry on first hit.
 //
 // The CLI shell owns cobra plumbing, signal handling, and the
 // logger installation. Runner.Run takes the logger explicitly
 // so it doesn't depend on cobra's context-with-logger trick.
+//
+// v1.3+ invariants enforced here:
+//   - runtime.allMgrs lists every per-channel chatsession.Manager.
+//   - runtime.findChatSession(chatID) walks allMgrs (in-memory
+//     first, then GetOrCreate per mgr) and returns the owning
+//     ChatSession. The first mgr to successfully GetOrCreate a
+//     chatID becomes its owner (chatID → mgr is implicit via
+//     the chatID-namespaced-per-channel fact; feishu oc_* vs
+//     telegram numeric IDs don't collide in practice).
+//   - Each mgr has its own per-channel Emitter bound; outbound
+//     from that mgr's ChatSessions goes to the right channel.
+//   - No shared "default channel" or chatID → channel routing
+//     table exists anywhere in the daemon.
 
 package runtime
 
@@ -35,9 +49,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
@@ -49,6 +66,7 @@ import (
 	// an empty registry.
 	_ "github.com/cnlangzi/nightme/internal/command/close"
 	_ "github.com/cnlangzi/nightme/internal/command/cwd"
+	_ "github.com/cnlangzi/nightme/internal/command/gtw"
 	_ "github.com/cnlangzi/nightme/internal/command/newcmd"
 	_ "github.com/cnlangzi/nightme/internal/command/queue"
 	_ "github.com/cnlangzi/nightme/internal/command/review"
@@ -161,17 +179,29 @@ func (d Deps) fillDefaults() Deps {
 	if d.BuildAgents == nil {
 		d.BuildAgents = def.BuildAgents
 	}
-	if d.NewChannel == nil {
-		d.NewChannel = def.NewChannel
+	if d.NewChannels == nil {
+		d.NewChannels = def.NewChannels
 	}
 	return d
 }
 
-// runDaemon is the daemon core. Wires chatsession.Manager +
-// Spawner + EventCallback; runs the gateway until signal /
-// context cancel.
+// runDaemon is the daemon core. v1.3+ multi-channel 4-phase
+// wire:
 //
-// See Runner.Run doc for the full 7-step wiring sequence.
+//	1. shared resources  — cfg / csFile / asFile / agents / prCache / gtwDeps
+//	2. shared wiring     — gtwMgr / reactionRouter / commander /
+//	                        shellDispatcher / inbound.Router
+//	                        (all use runtime.findChatSession for the
+//	                        per-chat mgr lookup)
+//	3. buildStack        — for each registered channel with valid
+//	                        credentials: ch.Start + chatsession.Manager
+//	                        + outbound.Emitter + WireCallbacks; stash
+//	                        mgr in runtime.allMgrs; build gateway.Pump
+//	4. start              — gateway.AttachPumps + gateway.Start
+//
+// Per-chat restore is lazy (Manager.GetOrCreate on first inbound),
+// so the daemon reaches ready without a synchronous chat_sessions
+// scan. See CHANNEL.md §3 for the full flow diagram.
 func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Signal, logger *slog.Logger) error {
 	cfg, err := deps.LoadConfig()
 	if err != nil {
@@ -179,9 +209,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	}
 	if cfg == nil {
 		return errors.New("run: load config: returned nil config")
-	}
-	if !deps.SkipFeishuLogin && (cfg.Feishu.AppID == "" || cfg.Feishu.AppSecret == "") {
-		return errors.New("run: Feishu credentials are not configured; run `nightme login feishu`")
 	}
 
 	csFile, err := deps.OpenChatSessions(cfg)
@@ -214,39 +241,21 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// by dsh's own session.fork at first use, not by a boot-time
 	// RecoverAll pass. See dsh.newDriver → handshakeSession.
 
-	ch, err := deps.NewChannel(cfg)
-	if err != nil {
-		return fmt.Errorf("run: create channel: %w", err)
-	}
-	if ch == nil {
-		return errors.New("run: channel is nil")
-	}
-
-	// Build the ChatSession manager.
+	// Shared spawner — every per-channel mgr uses this so the
+	// agent registry is the single source of truth for which
+	// agents can be spawned.
 	spawner := chatsession.NewRegistrySpawner(agents)
-	mgr := chatsession.NewManager().
-		WithSpawner(spawner).
-		WithPersistence(csFile, asFile)
 
-	// startChannel wires the channel and starts its connection.
-	if err := ch.Start(ctx); err != nil {
-		logger.Error("channel disconnected", "reason", err)
-		return fmt.Errorf("run: start channel: %w", err)
+	// v1.3+ multi-channel: scan the registry for every channel
+	// with valid credentials. A channel whose builder returns
+	// an error (missing creds) is skipped — runtime keeps going
+	// with whatever subset of channels did start.
+	chs, err := deps.NewChannels(cfg)
+	if err != nil {
+		return fmt.Errorf("run: new channels: %w", err)
 	}
-	logger.Info("channel connected")
-	fmt.Fprintln(out, "Channel connected")
-
-	// Phase 2.1: Channel interface carries its own logger +
-	// health snapshot — no feishu-specific type assertion here.
-	ch.SetLogger(logger)
-
-	// F-40: register the WS lifecycle snapshot with the daemoncontrol
-	// server so `nightme health` can answer. ch.HealthSnapshot
-	// is implemented by every Channel (feishu returns its
-	// WSHealthSnapshot JSON-encoded; echo returns Name() + an
-	// empty payload).
-	if deps.RegisterHealth != nil {
-		deps.RegisterHealth(ch.HealthSnapshot)
+	if len(chs) == 0 {
+		return fmt.Errorf("run: no channels configured; run `nightme login <channel>` first")
 	}
 
 	// Build the router wiring (slashCommandDispatcher +
@@ -330,102 +339,22 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		},
 	}
 
-	// emitter is the single daemon-wide outbound chokepoint.
-	// Constructed here (before gateway.New) so the Gateway can
-	// hold the reference at construction time — every
-	// downstream send (runtime pump / slash command /
-	// MessageState / PATCH) flows through the same Emitter
-	// instance. Manager.WithEmitter (further down) binds the
-	// same Emitter to every ChatSession.
-	//
-	// F-CLAUDE-PRINT-002 + fix-status-bar-git: GitStatus stamping
-	// is centralized at the Emitter chokepoint via the
-	// GitStatusLookup closure below. chatsession owns the
-	// snapshot; the Emitter stamps it on every Send
-	// whose msg.GitStatus is nil. Business code never reads
-	// GitStatus directly.
-	em := outbound.New(ch, outbound.Options{
-		// GitStatusLookup reaches the chatsession via mgr.Get and
-		// delegates to cs.GitStatus(ctx). The lookup is invoked for
-		// every Send whose msg.GitStatus is nil — the
-		// SINGLE chokepoint where every outbound message picks up
-		// its git snapshot. ChatSession.GitStatus rebuilds the
-		// snapshot from scratch on every call (no per-chat cache
-		// layer): CollectGit runs `git status --porcelain --branch`
-		// synchronously against SelectedCwd with a 3s timeout cap,
-		// and LookupPR runs prcache.Cache.MaybeRefresh + PR() so
-		// every read also nudges the PR refresh. See
-		// chatsession.GitStatus for the contract.
-		GitStatusLookup: func(ctx context.Context, chatID string) *messages.GitStatus {
-			cs := mgr.Get(chatID)
-			if cs == nil {
-				return nil
-			}
-			return cs.GitStatus(ctx)
-		},
-	})
-
-	// Bind the same Emitter to chatsession.Manager so its
-	// HandleInbound error-reply paths inherit the StatusBar
-	// footer (no-workspace / spawn-failed / queue-full).
-	mgr.WithEmitter(em).WithPrimaryAgent(cfg.Primary).
-		WithGitStatusDeps(gitStatusDeps)
-
-	// F-58: gateway is now a thin pump + binding table. The
-	// dispatch chain lives in *inbound.Router (constructed
-	// below, after commander / shellDispatcher / router are
-	// built). The four direct dependencies here match the
-	// priority chain in inbound.Dispatch:
-	//   1. command.Commander  (/-prefixed text)
-	//   2. shell.Dispatcher   (!-prefixed text)
-	//   3. chatsession.Manager (default — agent loop)
-	//   4. services.ReactionRouter (msg.Reaction / msg.Action)
-	// Note: the ReactionRouter is consulted FIRST in the
-	// chain (action events carry empty Text and must not fall
-	// through to a slash command). Order of the four
-	// constructor arguments does NOT match the priority
-	// order; see internal/gateway/inbound/inbound.go for the
-	// actual chain slice.
-	// gwImpl is constructed below, once inbound.Router exists. It
-	// is deliberately NOT declared here as a nil *gateway.Router:
-	// a nil declaration this far from the assignment is what let
-	// `gwImpl.AttachChannels(ch)` drift ABOVE the constructor
-	// during the F-58 refactor, which made every daemon start
-	// SIGSEGV on a nil receiver. Declare-at-assignment keeps that
-	// class of reordering a compile error instead of a crash.
-
-	// All chat-session commands (/cwd /use /kill /new /watch /think
-	// /tools) and /gtw are SlashCommandFactory implementations
-	// implementations registered with reg.Register below. The legacy
-	// gateway.RegisterChatSessionCommands helper is deleted;
-	// gateway only sees the slash-command path via WithCommander
-	// (the shim below) and the reaction path via WithActionHandler.
-
-	// F-XX: gtw directly uses *chatsession.ChatSession (the
-	// Sender interface is gone). Wiring is now:
-	//   (a) gtw.Manager owns the state,
-	//   (b) services.ReactionRouter dispatches reactions,
-	//   (c) command.Commander routes slash commands,
-	//   (d) this runtime shim translates *messages.InboundMessage
-	//       ↔ command.SlashInput / *CommandResult,
-	//   (e) SetGetChatSession hands gtw a per-chat lookup so
-	//       RunFix / HandleDraftReaction can call
-	//       cs.SelectedCwd / SetSelectedCwd / QueueUserMessage
-	//       directly.
+	// Per-channel mgr construction happens in buildStack
+	// (Phase 3). The shared singletons below (gtwMgr, reactionRouter,
+	// commander, shellDispatcher, inbound.Router) use
+	// findChatSession to resolve per-chat sessions; they do not
+	// hold a reference to any single mgr.
 
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 
-	// chatID → ChatSession lookup. The runtime owns this closure
-	// so gtw's reaction / fix handlers can call into the
-	// chatsession API without re-implementing GetOrCreate.
-	// (Replaces the per-channel-resolver pattern that was used
-	// when chatsession carried a per-chat Channel. Now that
-	// chatsession holds a shared Emitter, only a shared CS
-	// lookup is needed here.)
+	// chatID → ChatSession lookup. v1.3+ multi-channel: walk
+	// allMgrs to find the per-channel mgr that owns chatID.
+	// Each mgr lazily hydrates its own chats from csFile on
+	// miss; the first mgr whose GetOrCreate succeeds owns
+	// the chat going forward.
 	gtwMgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		cs, _ := mgr.GetOrCreate(chatID, cfg.Primary)
-		return cs
+		return findChatSession(chatID, cfg.Primary)
 	})
 
 	// Phase 2.3: command/* packages self-register via init()
@@ -434,74 +363,107 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// extension deps, then fetches the populated registry.
 
 	// Wire gtw's per-process state. gtw's init() builder does
-	// the heavy lifting (creating its own *Manager, calling
-	// SetHandlerDeps + SetGetChatSession), but the runtime
-	// owns the gtw.HandleReaction registration with the
-	// reaction router (the router itself isn't a factory
-	// pattern).
-	command.SetDeps(command.Deps{
-		Manager: mgr,
-		Primary: cfg.Primary,
-		GTWExt:  gtwDeps,
-	})
+	// Per-channel mgr construction happens in buildStack
+	// (Phase 3). The shared singletons below (gtwMgr, reactionRouter,
+	// commander, shellDispatcher, inbound.Router) use
+	// findChatSession to resolve per-chat sessions; they do not
+	// hold a reference to any single mgr.
 
 	// Reaction router (services) — gtw's ReactionRouter
-	// dispatches msg.Reaction / msg.Action events. The
-	// handler is built from gtw.NewManager() inside gtw's
-	// init closure above, but we still need a reference to
-	// it here to register with the router. Easiest: create
-	// the same Manager + SetHandlerDeps once more, and reuse
-	// the router.Register pattern from the v0.x code.
+	// dispatches msg.Reaction / msg.Action events.
 	router := commandServices.NewReactionRouter()
 	router.Register("*", gtwMgr.HandleReaction)
 
-	// Slash command registry + commander. After SetDeps above
+	// Slash command registry + commander. After SetDeps
 	// every command/* package's init() has produced a factory;
 	// Default() returns the populated registry.
+	//
+	// v1.3+ multi-channel: Deps.Manager is the FIRST per-channel
+	// chatsession.Manager (any of them works — they all share
+	// csFile/asFile, so GetOrCreate resolves the right chat
+	// regardless of which mgr owns the chatID). The runtime's
+	// own dispatch (tryMessageDispatch, inbound.Router.Dispatch)
+	// passes the per-call mgr from the pump, so this single
+	// mgr in Deps.Manager is only a fallback for command-level
+	// lookups (gtw's GetContext path).
+	primaryMgr := firstMgr()
+	command.SetDeps(command.Deps{
+		Manager: primaryMgr,
+		Primary: cfg.Primary,
+		// Cross-mgr lookup: gtw uses this to find the ChatSession
+		// owned by the originating channel so reactions + /gtw
+		// replies route through the right Emitter. findChatSession
+		// takes (chatID, primary); ChatSessionLookup is single-arg.
+		ChatSessionLookup: func(chatID string) *chatsession.ChatSession {
+			return findChatSession(chatID, cfg.Primary)
+		},
+		GTWExt: gtwDeps,
+	})
 	reg := command.Default()
 	commander := command.NewCommander(reg)
 
 	// shellDispatcher owns the full shell-dispatch flow:
 	// prefix detection, framework ⏳→✅ MessageState emission,
-	// async exec, result posting. The shim in cmd/nightme/run.go
-	// only does type adaptation — see shell.Dispatcher.Handle
-	// for the actual logic. shell.Dispatcher takes the shared
-	// outbound.Emitter directly (post-F-XX Sender removal), so
-	// all outbound messages — including shell replies — flow
-	// through the same chokepoint as slash commands, regular
-	// messages, and receipt cards.
-	shellDispatcher := shell.NewDispatcher(mgr.Emitter())
+	// async exec, result posting.
+	shellDispatcher := shell.NewDispatcher()
 
-	// F-watch §3.1.1: the per-chat WatchMode gate used to be wired
-	// here via gwImpl.WithWatchModeResolver. It moved into
-	// chatsession.Manager.AcceptInbound (called from
-	// newMessageDispatcher below) so the policy sits next to its
-	// state — no more callback injection across the import
-	// boundary. See internal/chatsession/manager.go AcceptInbound.
+	// Build the dispatch chain (shared, used by all channels).
+	// v1.3+ multi-channel: each pump's mgr closure is the
+	// "current" mgr for that channel; the dispatcher takes
+	// mgr per call. The Emitter argument is the per-call
+	// fallback used by emitReply for command error paths —
+	// the real outbound goes through cs.Emitter() inside
+	// cmd.Handle. Pass a no-op Emitter; the error path
+	// logs the failure and returns a SlashOutput to the
+	// dispatch chain.
+	ir := inbound.New(
+		newNoOpMgr(), // csMgr: not used at the dispatcher level; the dispatch chain takes mgr per call. See inbound.Dispatch.
+		commander,
+		shellDispatcher,
+		router,
+		&noOpEmitter{},
+		cfg.Primary,
+	)
 
-	// F-51: the action handler now routes through
-	// services.ReactionRouter instead of calling
-	// chatsession.ChatSession.HandleAction (chatsession no
-	// longer dispatches reactions). The shim translates
-	// F-58: build the dispatch chain. The *inbound.Router owns
-	// the four direct dependencies (chatsession, command, shell,
-	// action) and walks them in priority order. Replaces the v0.x
-	// shim closures (WithCommander / WithShellDispatch /
-	// WithActionHandler) that used to live here.
-	ir := inbound.New(mgr, commander, shellDispatcher, router, em, cfg.Primary)
-	gwImpl := gateway.New(ir, em)
-	// Attach AFTER construction (see the note at the declaration
-	// site above): the gateway needs its channel binding before
-	// Start pumps inbound messages.
-	gwImpl.AttachChannels(ch)
-
-	// WithOnCreate fires for both restored (RestoreFromRegistry)
-	// and future (GetOrCreate) ChatSessions. Place BEFORE
-	// RestoreFromRegistry so restored chats get their handlers.
-	if err := WireRuntimeCallbacksAndRestore(mgr, em, logger, gitStatusDeps, ch); err != nil {
-		return fmt.Errorf("run: wire+restore: %w", err)
+	// ── Phase 3: buildStack per channel ────────────────────────
+	stackOpts := buildStackOpts{
+		spawner:       spawner,
+		csFile:        csFile,
+		asFile:        asFile,
+		primaryAgent:  cfg.Primary,
+		gitStatusDeps: gitStatusDeps,
+		logger:        logger,
 	}
 
+	var pumps []gateway.Pump
+	startedChannels := []channel.Channel{}
+	for _, ch := range chs {
+		if err := ch.Start(ctx); err != nil {
+			logger.Error("channel start failed",
+				"name", ch.Name(), "err", err)
+			continue
+		}
+		ch.SetLogger(logger)
+		fmt.Fprintf(out, "Channel %s connected\n", ch.Name())
+
+		pump, err := buildStack(ch, stackOpts, registerMgrInAllMgrs)
+		if err != nil {
+			return fmt.Errorf("run: build channel %s: %w", ch.Name(), err)
+		}
+		pumps = append(pumps, pump)
+		startedChannels = append(startedChannels, ch)
+
+		if deps.RegisterHealth != nil {
+			deps.RegisterHealth(ch.HealthSnapshot)
+		}
+	}
+	if len(pumps) == 0 {
+		return errors.New("run: all channels failed to start; check creds and logs")
+	}
+
+	// ── Phase 4: start gateway ────────────────────────────────
+	gwImpl := gateway.New(ir)
+	gwImpl.AttachPumps(pumps...)
 	if err := gwImpl.Start(ctx); err != nil {
 		return fmt.Errorf("run: start gateway: %w", err)
 	}
@@ -512,7 +474,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	}
 
 	logger.Info("daemon running",
-		"chat_sessions", len(mgr.List()),
+		"channels", len(pumps),
 		"primary", cfg.Primary)
 
 	// Block on signal or context cancellation.
@@ -523,12 +485,236 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 			fmt.Fprintf(out, "[nightme] received %s\n", sig)
 		}
 	}
-	return ShutdownRun(out, ch, mgr, csFile, asFile, prCacheReg, logger)
+	return ShutdownRunMulti(out, startedChannels, csFile, asFile, prCacheReg, logger)
 }
 
 // Ensure unused imports stay declared (some are referenced in
-// deeper runtime files that we'll add next; these locals let
-// the file compile before handler.go / dispatcher.go are wired).
+// ─────────────────────────────────────────────────────────────────
+// v1.3+ multi-channel plumbing
+// ─────────────────────────────────────────────────────────────────
+//
+// allMgrs lists every per-channel chatsession.Manager owned by
+// the daemon. Each channel adapter gets its own Manager at
+// startup; chatIDs are channel-namespaced so a chat lookup
+// naturally resolves to exactly one Manager.
+//
+// Concurrency: populated during the 3rd wire phase
+// (buildStack, single-threaded) and read by:
+//   - the gateway pumpOne goroutine (per channel)
+//   - the gtw reaction handler (event-driven)
+//   - findChatSession (event-driven, called by gtw / command)
+//
+// We use a sync.RWMutex so reads (lookup) don't block each other.
+var (
+	allMgrsMu sync.RWMutex
+	allMgrs   []*chatsession.Manager
+)
+
+// firstMgr returns any per-channel chatsession.Manager from
+// allMgrs, or nil if no channels are attached. Used as a
+// fallback "primary" manager for command.Deps (gtw's
+// GetContext, slash command lookups). The runtime's own
+// dispatch path uses per-call mgr from the pump closure, so
+// this fallback is only for command-level lookups that aren't
+// routed through Dispatch(ctx, mgr, msg).
+//
+// Any per-channel mgr works because all mgrs share the same
+// csFile and asFile; GetOrCreate resolves the chat regardless
+// of which mgr owns it.
+func firstMgr() *chatsession.Manager {
+	allMgrsMu.RLock()
+	defer allMgrsMu.RUnlock()
+	if len(allMgrs) == 0 {
+		return nil
+	}
+	return allMgrs[0]
+}
+
+// findChatSession returns the ChatSession that owns chatID.
+//
+// Lookup order:
+//  1. in-memory hit (mgr.Get) — covers chats hydrated on a
+//     previous GetOrCreate call in this daemon's lifetime
+//  2. lazy hydrate via mgr.GetOrCreate — fires Manager's
+//     hydrateFromEntry path (reads csFile, restores AgentSession
+//     pool, fires onCreate for handler installation)
+//
+// We walk every per-channel mgr. The first one that returns
+// the chat wins. chatID namespacing across channels (feishu
+// oc_* vs telegram numeric IDs) is what makes this unambiguous
+// in practice — a feishu chatID never collides with a telegram
+// chatID, so the iteration always finds exactly one mgr.
+//
+// Returns nil only if every mgr.GetOrCreate failed (which
+// shouldn't happen — the mgr's own persistence layer is the
+// source of truth; failing means csFile is corrupt).
+func findChatSession(chatID, primaryAgent string) *chatsession.ChatSession {
+	allMgrsMu.RLock()
+	mgrs := append([]*chatsession.Manager(nil), allMgrs...)
+	allMgrsMu.RUnlock()
+
+	for _, mgr := range mgrs {
+		if cs := mgr.Get(chatID); cs != nil {
+			return cs
+		}
+	}
+	for _, mgr := range mgrs {
+		cs, err := mgr.GetOrCreate(chatID, primaryAgent)
+		if err == nil && cs != nil {
+			return cs
+		}
+	}
+	return nil
+}
+
+// buildStackOpts bundles the per-channel dependencies that
+// buildStack needs. spawner / csFile / asFile / primaryAgent
+// are shared across channels (per-daemon); the rest are
+// per-channel.
+type buildStackOpts struct {
+	spawner       chatsession.Spawner
+	csFile        *registry.ChatSessionFile
+	asFile        *registry.AgentSessionFile
+	primaryAgent  string
+	gitStatusDeps chatsession.GitStatusDeps
+	logger        *slog.Logger
+}
+
+// buildStack wires one channel: starts the channel, constructs
+// a per-channel chatsession.Manager + outbound.Emitter, installs
+// the runtime handlers, registers the Manager in runtime.allMgrs,
+// and returns a gateway.Pump for the gateway to attach.
+//
+// registerMgr is called to stash the freshly-built mgr in
+// runtime.allMgrs. Passing the callback as a parameter (rather
+// than reaching for the package var directly) keeps buildStack
+// testable in isolation.
+func buildStack(
+	ch channel.Channel,
+	opts buildStackOpts,
+	registerMgr func(*chatsession.Manager),
+) (gateway.Pump, error) {
+	if ch == nil {
+		return gateway.Pump{}, errors.New("runtime: buildStack: nil channel")
+	}
+
+	// Per-channel Manager. Declared FIRST so the Emitter's
+	// GitStatusLookup closure (created below) can capture mgr
+	// by reference — Go doesn't allow forward references in
+	// closure bodies even though the variable is in scope.
+	mgr := chatsession.NewManager().
+		WithSpawner(opts.spawner).
+		WithPersistence(opts.csFile, opts.asFile).
+		WithPrimaryAgent(opts.primaryAgent).
+		WithGitStatusDeps(opts.gitStatusDeps)
+
+	// Per-channel Emitter: wraps the channel adapter + a
+	// per-mgr GitStatusLookup closure. The closure reads from
+	// THIS mgr (not allMgrs) so the snapshot reflects the
+	// per-channel chat session, not some other channel's.
+	em := outbound.New(ch, outbound.Options{
+		GitStatusLookup: func(ctx context.Context, chatID string) *messages.GitStatus {
+			cs := mgr.Get(chatID)
+			if cs == nil {
+				return nil
+			}
+			return cs.GitStatus(ctx)
+		},
+	})
+
+	// Bind the per-channel Emitter to this mgr so new
+	// ChatSessions inherit it. MUST happen BEFORE
+	// WireRuntimeCallbacksAndRestore: that call may trigger
+	// onCreate for hydrated chats (v0.x RestoreFromRegistry path),
+	// and onCreate sets cs.emitter from m.emitter — which must
+	// already be wired.
+	mgr.WithEmitter(em)
+
+	// Register the mgr BEFORE WireRuntimeCallbacksAndRestore:
+	// the latter calls mgr.WithOnCreate, which fires for both
+	// hydrated chats (legacy v0.x RestoreFromRegistry) and
+	// new GetOrCreate calls. Registering first means any
+	// onCreate can be observed by other goroutines.
+	if registerMgr != nil {
+		registerMgr(mgr)
+	}
+
+	// Install the runtime handlers (EventHandler /
+	// MessageStateBus / PromptEndBus). This call must happen
+	// BEFORE Start so the channel is in a known state when the
+	// first inbound arrives; the per-ChatSession subscriptions
+	// are wired via Manager.WithOnCreate, and onCreate fires
+	// both for hydrated chats and for new GetOrCreate calls.
+	if err := WireRuntimeCallbacksAndRestore(
+		mgr, em, opts.logger,
+		opts.gitStatusDeps,
+		ch,
+	); err != nil {
+		return gateway.Pump{}, fmt.Errorf("run: wire channel %s: %w", ch.Name(), err)
+	}
+
+	return gateway.Pump{Channel: ch, Manager: mgr}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Legacy stubs (kept here to avoid breaking unrelated tooling
+// before handler.go / dispatcher.go land; replaced in the
+// per-channel wiring pass).
+// ─────────────────────────────────────────────────────────────────
 var (
 	_ = io.Discard
 )
+
+// registerMgrInAllMgrs stashes m into the package-level allMgrs
+// slice. It is passed as the registerMgr callback to
+// buildStack so buildStack doesn't reach for the package var
+// directly (improves testability).
+func registerMgrInAllMgrs(m *chatsession.Manager) {
+	allMgrsMu.Lock()
+	allMgrs = append(allMgrs, m)
+	allMgrsMu.Unlock()
+}
+
+// unregisterMgrFromAllMgrs removes m (used by tests to
+// clean up after a buildStack). Production never calls this.
+func unregisterMgrFromAllMgrs(m *chatsession.Manager) {
+	allMgrsMu.Lock()
+	defer allMgrsMu.Unlock()
+	out := allMgrs[:0]
+	for _, x := range allMgrs {
+		if x != m {
+			out = append(out, x)
+		}
+	}
+	allMgrs = out
+}
+
+// noOpMgr satisfies the csMgr argument of inbound.New without
+// exposing any single per-channel Manager. v1.3+ multi-channel:
+// the dispatcher takes mgr per call via the per-pump pump
+// closure; the constructor-level csMgr field is only used for
+// legacy tryMessageDispatch paths and the inbound.Router's
+// own emitReply path (which itself routes through cs.Emitter).
+// Since the production code path always passes a real mgr via
+// Dispatch(ctx, mgr, msg), this stub is never actually invoked
+// against real data — it's only there to satisfy the inbound.New
+// signature.
+func newNoOpMgr() *chatsession.Manager {
+	// Build a real (uninitialized) chatsession.Manager. It's
+	// only used for inbound.New's signature; the per-call dispatch
+	// path supplies the real mgr. We don't wire persistence,
+	// spawner, or emitter — the stub's methods are never invoked
+	// in production (per-call dispatch replaces them).
+	return chatsession.NewManager()
+}
+
+// noOpEmitter satisfies outbound.Emitter for the
+// dispatch-chain fallback path. The real outbound goes through
+// cs.Emitter() inside cmd.Handle; this stub only matters if
+// the dispatcher wants to send a reply without a per-channel
+// cs, which doesn't happen in v1.3+ (every Dispatch has a real
+// cs from GetOrCreate).
+type noOpEmitter struct{}
+
+func (noOpEmitter) Send(_ context.Context, _ messages.OutboundMessage) error { return nil }
+func (noOpEmitter) Patch(_ context.Context, _ messages.OutboundMessage) error { return nil }

@@ -29,7 +29,7 @@ func TestDispatchREPLLine(t *testing.T) {
 	t.Run("exit returns done", func(t *testing.T) {
 		root := newRoot()
 		var buf bytes.Buffer
-		done, err := dispatchREPLLine(root, nil, "exit", &buf)
+		done, err := dispatchREPLLine(root, nil, "exit", &buf, true)
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}
@@ -41,10 +41,25 @@ func TestDispatchREPLLine(t *testing.T) {
 		}
 	})
 
+	t.Run("exit without reprinting prompt", func(t *testing.T) {
+		root := newRoot()
+		var buf bytes.Buffer
+		done, err := dispatchREPLLine(root, nil, "exit", &buf, false)
+		if err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		if !done {
+			t.Errorf("done = false, want true for exit")
+		}
+		if buf.String() != "bye\n" {
+			t.Errorf("interactive exit should be exactly bye+newline, got %q", buf.String())
+		}
+	})
+
 	t.Run("quit returns done", func(t *testing.T) {
 		root := newRoot()
 		var buf bytes.Buffer
-		done, err := dispatchREPLLine(root, nil, "  quit  ", &buf)
+		done, err := dispatchREPLLine(root, nil, "  quit  ", &buf, true)
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}
@@ -56,7 +71,7 @@ func TestDispatchREPLLine(t *testing.T) {
 	t.Run("empty line returns not-done", func(t *testing.T) {
 		root := newRoot()
 		var buf bytes.Buffer
-		done, err := dispatchREPLLine(root, nil, "   ", &buf)
+		done, err := dispatchREPLLine(root, nil, "   ", &buf, true)
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}
@@ -68,7 +83,7 @@ func TestDispatchREPLLine(t *testing.T) {
 	t.Run("command dispatches and re-prompts", func(t *testing.T) {
 		root := newRoot()
 		var buf bytes.Buffer
-		done, err := dispatchREPLLine(root, nil, "version", &buf)
+		done, err := dispatchREPLLine(root, nil, "version", &buf, true)
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}

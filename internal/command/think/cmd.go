@@ -45,7 +45,7 @@ func (f *Factory) Spec() command.Spec {
 
 // Handle implements command.SlashCommandFactory.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 if len(input.Args) < 2 {
 		return command.Reply(ctx, rt, fmt.Sprintf(
 			"Current think mode: %s\nUsage: /think on | /think off",

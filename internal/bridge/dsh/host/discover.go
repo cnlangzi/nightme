@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+	"github.com/cnlangzi/nightme/internal/httpclient"
 )
 
 // defaultDSHPort is the port both `dsh web` (browser) and our shared
@@ -139,7 +140,7 @@ func probeDescribe(ctx context.Context, baseURL string) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{Timeout: probeTimeout}
+	httpClient := httpclient.DefaultWithTimeout(probeTimeout)
 	httpResp, err := httpClient.Do(req)
 	if err != nil {
 		// Transport error here means TCP got past probeLive but

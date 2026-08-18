@@ -54,15 +54,23 @@ type SlashCommandFactory interface {
 	// registration.
 	Spec() Spec
 	// Handle dispatches one inbound that named this command.
-	// The command receives a *chatsession.ChatSession that has
-	// already been GetOrCreate'd by the runtime; commands can
-	// read/write per-chat state via cs.SetXxx / cs.GetXxx and
-	// send replies via cs.Emitter().Send.
+	//
+	// v1.3+ multi-channel: mgr is the per-channel chatsession.Manager
+	// that produced the inbound — it owns the ChatSession the user
+	// is talking from, and its Emitter is bound to the channel
+	// that delivered the message. Factories MUST use this mgr
+	// (not any stashed mgr) for any per-chat lookup, so the
+	// right chat goes to the right channel on outbound.
+	//
+	// The runtime has already GetOrCreate'd cs before calling Handle;
+	// commands can read/write per-chat state via cs.SetXxx / cs.GetXxx
+	// and send replies via cs.Emitter().Send (which routes to
+	// mgr.emitter = the originating channel's Send).
 	//
 	// Handle is responsible for parsing args out of input.Text
 	// and returning a SlashOutput. nil error means success
 	// (even if the result's Reply is empty).
-	Handle(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, error)
+	Handle(ctx context.Context, rt RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, error)
 }
 
 // Registry holds the command dispatch table. The runtime

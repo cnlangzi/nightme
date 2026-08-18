@@ -48,73 +48,8 @@ func TestDefaultDeps_HasProductionHooks(t *testing.T) {
 	if d.BuildAgents == nil {
 		t.Error("BuildAgents is nil")
 	}
-	if d.NewChannel == nil {
-		t.Error("NewChannel is nil")
-	}
-}
-
-// TestWithChannel_Echo_SkipsFeishuLogin verifies the echo
-// channel path doesn't error out on missing Feishu
-// credentials (echo is a smoke-test channel with no network).
-// The daemon expects SkipFeishuLogin to be true so the
-// orchestrator skips the cfg.Feishu.AppID guard.
-func TestWithChannel_Echo_SkipsFeishuLogin(t *testing.T) {
-	d := DefaultDeps()
-	d, err := WithChannel(d, "echo")
-	if err != nil {
-		t.Fatalf("WithChannel echo: %v", err)
-	}
-	if !d.SkipFeishuLogin {
-		t.Error("SkipFeishuLogin = false, want true (echo path skips Feishu creds check)")
-	}
-	// NewChannel should now produce a working echo.Channel.
-	ch, err := d.NewChannel(nil)
-	if err != nil {
-		t.Fatalf("NewChannel: %v", err)
-	}
-	if _, ok := ch.(*echo.Channel); !ok {
-		t.Errorf("NewChannel returned %T, want *echo.Channel", ch)
-	}
-}
-
-// TestWithChannel_FeishuDefault verifies the feishu branch
-// leaves SkipFeishuLogin at zero (production requires
-// Feishu.AppID + AppSecret to be set).
-func TestWithChannel_FeishuDefault(t *testing.T) {
-	d := DefaultDeps()
-	d, err := WithChannel(d, "feishu")
-	if err != nil {
-		t.Fatalf("WithChannel feishu: %v", err)
-	}
-	if d.SkipFeishuLogin {
-		t.Error("SkipFeishuLogin = true, want false (feishu path requires credentials)")
-	}
-}
-
-// TestWithChannel_EmptyIsFeishu documents the legacy behaviour:
-// an empty channelName is treated as "feishu" (the default).
-func TestWithChannel_EmptyIsFeishu(t *testing.T) {
-	d := DefaultDeps()
-	d, err := WithChannel(d, "")
-	if err != nil {
-		t.Fatalf("WithChannel \"\": %v", err)
-	}
-	if d.SkipFeishuLogin {
-		t.Error("SkipFeishuLogin = true, want false (empty defaults to feishu)")
-	}
-}
-
-// TestWithChannel_UnknownErrors verifies the unknown-name
-// branch surfaces a friendly error so the CLI shell can exit
-// non-zero instead of silently defaulting to feishu.
-func TestWithChannel_UnknownErrors(t *testing.T) {
-	d := DefaultDeps()
-	_, err := WithChannel(d, "slack")
-	if err == nil {
-		t.Fatal("WithChannel slack: want error, got nil")
-	}
-	if !contains(err.Error(), "slack") {
-		t.Errorf("error %q should mention the bad channel name", err)
+	if d.NewChannels == nil {
+		t.Error("NewChannels is nil")
 	}
 }
 

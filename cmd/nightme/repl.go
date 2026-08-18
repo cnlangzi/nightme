@@ -43,6 +43,7 @@ import (
 	"github.com/spf13/cobra"
 
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/version"
 )
 
 // replBannerHeader is the part of the banner that does NOT depend on
@@ -59,13 +60,14 @@ Shell:
   exit / quit     leave shell
   Ctrl-D          leave shell
   Ctrl-C at prompt cancels the current line
-
-nightme> `
+`
 
 // buildBanner renders the full REPL banner: version line + intro +
-// "Common:" entries from the registry + shell hints + trailing
-// prompt. versionLine is the ASCII logo + version metadata returned
-// by bannerWithVersion(). reg supplies the "Common:" section.
+// "Common:" entries from the registry + shell hints. The trailing
+// "nightme> " prompt is NOT part of the banner — the interactive
+// path lets readline print it after the version-check prompt, and
+// the scanner path (runREPLWith) prints it itself so tests keep a
+// stable "banner then prompt" transcript.
 //
 // Tests pin substrings of this output (see TestREPL_EOF) — the
 // "Common:" header is preserved exactly, so adding new commands
@@ -76,22 +78,6 @@ func buildBanner(versionLine string, reg *cmdRegistry) string {
 	b.WriteString(reg.banner())
 	b.WriteString(replBannerFooter)
 	return b.String()
-}
-
-// shellWriter adapts reeflective/readline's Shell.Printf into an
-// io.Writer so dispatchREPLLine (which is shared with the
-// scanner-based test path that uses a bytes.Buffer) can stay
-// io.Writer-agnostic.
-//
-// We use Printf("%s", string(p)) rather than Printf(string(p)) so
-// that literal '%' bytes in the payload are not interpreted as
-// fmt verbs. reeflective's Printf uses fmt.Sprintf under the hood,
-// so this is correct: the format string is fixed ("%s"), the only
-// variadic argument is the data.
-type shellWriter struct{ rl *readline.Shell }
-
-func (w shellWriter) Write(p []byte) (int, error) {
-	return w.rl.Printf("%s", string(p))
 }
 
 // runREPL is the no-args entry point invoked from Execute(). It
@@ -119,9 +105,11 @@ func runREPL(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) error {
 //   - NewShell() returns a fully configured *Shell with sensible
 //     defaults; we only override the primary prompt.
 //   - Shell.Readline() restores the terminal to cooked mode on
-//     every return (Ctrl-C, Ctrl-D, or accepted line), so writes
-//     through shellWriter in dispatchREPLLine happen in cooked mode
-//     and the terminal stays sane across REPL turns.
+//     every return. Command output and "bye" therefore go to
+//     os.Stdout with fmt, NOT rl.Printf — Printf redisplays
+//     "nightme> " and sends ESC[6n, which leaks as ^[[row;colR
+//     once the process exits (the DSR reply is echoed by the
+//     cooked tty).
 //   - reeflective auto-restores terminal state on exit — no
 //     Close() method to defer (unlike chzyer).
 func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) error {
@@ -129,46 +117,40 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 		logger.Info("repl started")
 	}
 
-	rl := readline.NewShell()
-	rl.Prompt.Primary(func() string { return "nightme> " })
-
-	out := shellWriter{rl: rl}
-
-	// Banner goes below the (still-cooked) terminal before the
-	// first Readline() takes over. shellWriter.Printf is designed
-	// for inter-prompt messaging; calling it here with no prior
-	// prompt is the same as fmt.Fprint to the raw terminal.
-	if _, err := out.Write([]byte(buildBanner(bannerWithVersion(), reg))); err != nil {
+	// Banner + version prompt happen on the still-cooked
+	// terminal, BEFORE readline takes over. rl.Printf /
+	// rl.Readline send an ESC[6n cursor-position probe and
+	// redraw "nightme> " — using them here leaked ^[[row;colR
+	// and tore the banner apart.
+	if _, err := os.Stdout.Write([]byte(buildBanner(bannerWithVersion(), reg))); err != nil {
 		return fmt.Errorf("write banner: %w", err)
 	}
 
-	// Version-check prompt: once per REPL startup. The prompt
-	// drives the three internal stages (check / download / install)
-	// interactively, gating each on its own y/N. Ctrl-C mid-download
-	// aborts cleanly; declining install keeps the staged archive
-	// for a later `nightme update`. The REPL prompt never exec's
-	// the new binary — we restart the daemon and tell the user
-	// to exit + re-enter `nightme`.
-	//
-	// Non-TTY stdin (scripting, pipe-fed CI smoke tests) passes
-	// a nil Reader so promptForUpdateIfOutdated falls through
-	// its "no line source → be silent" branch. Without this
-	// guard, reeflective/readline v1.3.0 raises "Incorrect
-	// function" (Win32 ERROR_INVALID_FUNCTION) on Windows
-	// when stdin is a pipe: it assumes a real console handle
-	// for ReadConsoleInput and fails fast. The TTY check (vs
-	// hardcoding the env var) means interactive users still
-	// get the prompt, and piped users on every OS skip it
-	// cleanly.
-	var reader func() (string, error)
+	// Blocking version check (HTTP timeout 5s) with a visible
+	// countdown. Timeout / network failure / up-to-date → skip
+	// silently. Outdated → Update now? [y/N] then download then
+	// Install now? [y/N], all via plain stdin/stdout. Then we
+	// construct the readline shell.
 	if isatty.IsTerminal(os.Stdin.Fd()) {
-		reader = rl.Readline
+		ctx := context.Background()
+		logf := func(format string, args ...any) {
+			if logger != nil {
+				logger.Warn(fmt.Sprintf(format, args...))
+			}
+		}
+		checker, _ := version.DefaultChecker(resolveDataDir())
+		res := checkWithCountdown(ctx, os.Stdout, checker, version.Version, logf)
+		_ = promptForUpdateIfOutdated(ctx, &PromptDeps{
+			VersionCheck:       &res,
+			Out:                os.Stdout,
+			Reader:             newStdinLineReader(),
+			Logger:             logger,
+			ReExecAfterInstall: true,
+		})
 	}
-	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Out:    out,
-		Reader: reader,
-		Logger: logger,
-	})
+
+	rl := readline.NewShell()
+	rl.Prompt.Primary(func() string { return "nightme> " })
 
 	for {
 		line, err := rl.Readline()
@@ -184,13 +166,16 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 			// host shell prompt starts on its own line (raw
 			// mode leaves the cursor at end-of-line, not
 			// beginning-of-new-line).
-			_, _ = out.Write([]byte("\n"))
+			fmt.Fprintln(os.Stdout)
 			return nil
 		case err != nil:
 			return err
 		}
 
-		done, err := dispatchREPLLine(root, logger, line, out)
+		// printPrompt=false: the next Readline() paints
+		// "nightme> ". Printing it here via rl.Printf would
+		// probe the cursor and leak ^[[row;colR on exit.
+		done, err := dispatchREPLLine(root, logger, line, os.Stdout, false)
 		if err != nil {
 			return err
 		}
@@ -204,10 +189,12 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 // production (readline) path and the test (scanner) path. Returns
 // done=true when the user typed exit/quit; otherwise dispatches and
 // returns done=false so the outer loop can read another line.
-func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out io.Writer) (bool, error) {
+func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out io.Writer, printPrompt bool) (bool, error) {
 	line = strings.TrimSpace(line)
 	if line == "" {
-		fmt.Fprint(out, "nightme> ")
+		if printPrompt {
+			fmt.Fprint(out, "nightme> ")
+		}
 		return false, nil
 	}
 	if line == "exit" || line == "quit" {
@@ -221,7 +208,8 @@ func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out
 	// Route command output (cobra leaf's OutOrStdout) through the
 	// REPL's writer so the banner / prompt / dispatch all share
 	// the same destination. Tests inject a bytes.Buffer here;
-	// production passes a shellWriter that routes through readline.
+	// the interactive path uses os.Stdout (cooked, after
+	// Readline returns).
 	root.SetOut(out)
 	root.SetErr(out)
 
@@ -229,7 +217,9 @@ func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out
 		code := nmerrors.ExitCode(err)
 		fmt.Fprintf(out, "Error: %v (exit %d)\n", err, code)
 	}
-	fmt.Fprint(out, "nightme> ")
+	if printPrompt {
+		fmt.Fprint(out, "nightme> ")
+	}
 	return false, nil
 }
 
@@ -246,13 +236,12 @@ func runREPLWith(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger, in 
 	}
 
 	fmt.Fprint(out, buildBanner(bannerWithVersion(), reg))
+	fmt.Fprint(out, "nightme> ")
 
 	// runREPLWith is the test-driven path; passing nil Reader
 	// makes the prompt fall through to the "stdin unavailable"
 	// branch, which is what the existing TestREPL_* suite
 	// expects (no version-check chatter in the transcript).
-	// The dedicated TestREPL_*VersionPrompt exercises the
-	// real prompt path through the dedicated helper.
 	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
 		Out:    out,
 		Logger: logger,
@@ -273,7 +262,7 @@ func runREPLWith(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger, in 
 			return nil
 		}
 
-		done, err := dispatchREPLLine(root, logger, scanner.Text(), out)
+		done, err := dispatchREPLLine(root, logger, scanner.Text(), out, true)
 		if err != nil {
 			return err
 		}

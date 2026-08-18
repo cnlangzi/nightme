@@ -129,10 +129,10 @@ func parseReviewArgs(argv []string) (Spec, error) {
 //  2. Resolve the current chat's selected AgentSession.
 //  3. Look up the corresponding Starter from agent.Builtins (it's
 //     keyed by agent name).
-//  4. Build an agent.ReviewContext with the chat session's
-//     selected cwd and the AgentSession's SendBlocks callback.
+//  4. Build an agent.StartConfig with the chat session's
+//     selected cwd.
 //  5. Delegate to starter.Review — the bridge's Starter owns the
-//     actual prompt injection (most call agent.Review).
+//     actual prompt invocation (most call agent.Review).
 //
 // Returns Consumed=true and NO reply — the review appears
 // asynchronously through the chat session's normal event pipeline
@@ -144,10 +144,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// Parse args. /review supports ONE optional flag: --agent/-a
 	// to specify which coding agent runs the review (overriding
 	// the default of the current selected AS). Findings always
-	// land in the current selected AS — see ReviewContext.Inject
-	// below. Multiple /review commands in parallel run on
-	// different agents and feed back into the same AS, matching
-	// the user's "different reviewers, single chat" workflow.
+	// land in the current selected AS (via as.SendBlocks in the
+	// goroutine below). Multiple /review commands in parallel
+	// run on different agents and feed back into the same AS,
+	// matching the user's "different reviewers, single chat"
+	// workflow.
 	//
 	// parseReviewArgs is the single source of truth for arg
 	// validation (rejects unknown flags + positional names with

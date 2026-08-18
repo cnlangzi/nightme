@@ -41,6 +41,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -79,7 +80,7 @@ func TestReview_UsesSharedPrompt(t *testing.T) {
 	}
 
 	rc := agent.StartConfig{Workspace: workspace}
-	result, err := agent.Review(context.Background(), fs, rc)
+	result, err := fs.Review(context.Background(), rc)
 	if err != nil {
 		t.Fatalf("Review: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 	}
 
 	rc := agent.StartConfig{Workspace: "/ws"}
-	result, err := agent.Review(context.Background(), fs, rc)
+	result, err := fs.Review(context.Background(), rc)
 	if err == nil {
 		t.Fatal("Review should error on RunOnce failure, got nil")
 	}
@@ -165,6 +166,14 @@ func (t *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, e
 func (t *testStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return t.runOnce(ctx, cfg, blocks)
 }
-func (t *testStarter) Review(context.Context, agent.StartConfig) (agent.RunResult, error) {
-	return agent.RunResult{}, errors.New("testStarter: Review not implemented (we test Review directly)")
+func (t *testStarter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	result, err := t.RunOnce(ctx, cfg, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: agent.StandardPrompt(),
+	}})
+	if err != nil {
+		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
+			t.Info().Name, err)
+	}
+	return result, nil
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -24,8 +25,16 @@ func (f *fakeStarter) Start(context.Context, StartConfig) (*Agent, error) {
 func (f *fakeStarter) RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error) {
 	return f.runOnce(ctx, cfg, blocks)
 }
-func (f *fakeStarter) Review(context.Context, StartConfig) (RunResult, error) {
-	return RunResult{}, errors.New("fakeStarter: Review not implemented (we test Review directly)")
+func (f *fakeStarter) Review(ctx context.Context, cfg StartConfig) (RunResult, error) {
+	result, err := f.RunOnce(ctx, cfg, []ContentBlock{{
+		Type: ContentText,
+		Text: StandardPrompt(),
+	}})
+	if err != nil {
+		return RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
+			f.Info().Name, err)
+	}
+	return result, nil
 }
 
 // TestStandardPrompt_Structure verifies the prompt contains the
@@ -175,7 +184,7 @@ func TestReview_ReturnsRunResult(t *testing.T) {
 
 	rc := StartConfig{Workspace: "/ws"}
 
-	result, err := Review(context.Background(), fs, rc)
+	result, err := fs.Review(context.Background(), rc)
 	if err != nil {
 		t.Fatalf("Review returned error: %v", err)
 	}
@@ -218,7 +227,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 	}
 	rc := StartConfig{Workspace: "/ws"}
 
-	result, err := Review(context.Background(), fs, rc)
+	result, err := fs.Review(context.Background(), rc)
 	if err == nil {
 		t.Fatal("Review should error on RunOnce failure, got nil")
 	}

@@ -33,7 +33,6 @@
 package agent
 
 import (
-	"context"
 	"errors"
 	"fmt"
 )
@@ -45,44 +44,6 @@ import (
 // "agent X does not support /review" reply — it doesn't poison the
 // chat with a generic bridge error.
 var ErrReviewNotSupported = errors.New("agent: /review not supported")
-
-// Review is the canonical /review implementation.
-//
-// Bridges that don't need custom review behavior should call this
-// from their Review method:
-//
-//	func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
-//	    return agent.Review(ctx, s, cfg)
-//	}
-//
-// Review runs the bridge's RunOnce with StandardPrompt and
-// cfg.Workspace as the working directory. RunOnce is a one-shot
-// subprocess that streams agent events and returns when the
-// terminal reply arrives. The fresh subprocess:
-//
-//   - Has its own context window — main chat context is NOT
-//     polluted by review reasoning.
-//   - Has its own timeouts (the dispatcher wraps us in
-//     timeouts.Review = 30 min).
-//   - Streams events the same way /gtw commit does; we just
-//     capture RunResult.Text at the end.
-//
-// Bridges are free to override Starter.Review entirely (e.g.
-// claude uses its built-in /code-review slash trigger for richer
-// multi-agent review; codex uses the `codex review` native
-// subcommand). Bridges without a native review path (dsh,
-// opencode, pi, acp) delegate to this function.
-func Review(ctx context.Context, s Starter, cfg StartConfig) (RunResult, error) {
-	result, err := s.RunOnce(ctx, cfg, []ContentBlock{{
-		Type: ContentText,
-		Text: StandardPrompt(),
-	}})
-	if err != nil {
-		return RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
-			s.Info().Name, err)
-	}
-	return result, nil
-}
 
 // FormatReviewMessage wraps the raw review output in a small
 // preamble so the main agent (which receives this as a user

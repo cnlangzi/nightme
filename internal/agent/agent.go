@@ -1159,9 +1159,11 @@ type Starter interface {
 	//     --skip-git-repo-check — uses its own argv assembly in
 	//     print.go, NOT runPrintMode)
 	//
-	// Bridges that have NO native review subcommand delegate to
-	// agent.Review(ctx, s, cfg) which runs the canonical StandardPrompt
-	// via a fresh RunOnce subprocess:
+	// Bridges that have NO native review subcommand call
+	// s.RunOnce(ctx, cfg, [StandardPrompt()]) inline — the
+	// canonical review path is "spawn a fresh subprocess with the
+	// shared prompt" and inlining keeps the contract symmetric
+	// with RunOnce:
 	//   - dsh, opencode, pi, acp
 	//
 	// Return ErrReviewNotSupported when this agent type cannot do

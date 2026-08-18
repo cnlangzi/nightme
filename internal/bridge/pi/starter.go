@@ -108,5 +108,13 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // StandardPrompt. pi's chat agent reads git diff and outputs
 // the structured review.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
-	return agent.Review(ctx, s, cfg)
+	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: agent.StandardPrompt(),
+	}})
+	if err != nil {
+		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
+			s.Info().Name, err)
+	}
+	return result, nil
 }

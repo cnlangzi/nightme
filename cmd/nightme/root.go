@@ -56,20 +56,29 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 
 	// User-facing commands. Banner entries are aligned to column 16
 	// (cmd-use + spaces + one-line description). Adding a new
-	// subcommand is exactly one reg.add() call — the cobra tree and
-	// the REPL banner stay in lockstep.
-	reg.add(newTestCmd(),    "test ...        spawn CLI in PTY (Ctrl-C to end)")
-	reg.add(newListCmd(),    "list            list sessions")
-	reg.add(newKillCmd(),    "kill            terminate agent processes")
-	reg.add(newAgentsCmd(),  "agents          list registered agents")
-	reg.add(newLoginCmd(),   "login feishu    QR Feishu registration")
-	reg.add(newNameCmd(),    "name [value]    show/set this instance's name")
-	reg.add(newLogsCmd(),    "logs [--lines N] tail daemon log (Ctrl-C to exit)")
-	reg.add(newCleanCmd(),   "clean           truncate logs + remove attachments")
-	reg.add(newConfigCmd(),  "config          interactive configuration menu")
-	reg.add(newVersionCmd(), "version         version info")
-	reg.add(newUpdateCmd(),  "update          check for a newer release")
-	reg.add(newDebugCmd(),   "debug           exercise reaction/action flow")
+	// subcommand is exactly one reg.add() call — the cobra tree,
+	// the REPL banner, and the tray Commands submenu stay in
+	// lockstep.
+	//
+	// addNoTray entries below are the commands that, if triggered
+	// from a tray menu click, would either block the tray event
+	// loop (anything that needs a TTY or stdin) or duplicate an
+	// already-on-the-tray item. The barrier for "is this safe
+	// from a tray click" is: "does this command exit within
+	// seconds without user input and without claiming a TTY?".
+	// If yes, reg.add; if no, reg.addNoTray.
+	reg.addNoTray(newTestCmd(),   "test ...        spawn CLI in PTY (Ctrl-C to end)")
+	reg.add(newListCmd(),         "list            list sessions")
+	reg.add(newKillCmd(),         "kill            terminate agent processes")
+	reg.add(newAgentsCmd(),       "agents          list registered agents")
+	reg.addNoTray(newLoginCmd(),  "login feishu    QR Feishu registration")
+	reg.add(newNameCmd(),         "name [value]    show/set this instance's name")
+	reg.addNoTray(newLogsCmd(),   "logs [--lines N] tail daemon log (Ctrl-C to exit)")
+	reg.add(newCleanCmd(),        "clean           truncate logs + remove attachments")
+	reg.addNoTray(newConfigCmd(), "config          interactive configuration menu")
+	reg.add(newVersionCmd(),      "version         version info")
+	reg.addNoTray(newUpdateCmd(), "update          check for a newer release")
+	reg.addNoTray(newDebugCmd(),  "debug           exercise reaction/action flow")
 
 	addLifecycleCommands(reg)
 	addUnixOnlyCommands(reg)
@@ -87,11 +96,18 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 // Kept here in root.go so a single edit point covers both Unix
 // and Windows; root_unix.go and root_windows.go only differ in
 // what they add on top (Unix: doctor; Windows: nothing extra).
+//
+// All four lifecycle commands go through addNoTray: the tray has
+// its own Restart / Stop / Status items that operate on the
+// running daemon via direct signal/IPC, and exposing the same
+// verbs as "Commands" submenu entries would invite a double-click
+// race (tray Restart + Commands/restart at the same time). status
+// is also on the tray as a non-clickable info row.
 func addLifecycleCommands(reg *cmdRegistry) {
-	reg.add(newStartCmd(),   "start           start daemon in the background")
-	reg.add(newStatusCmd(),  "status          show daemon status")
-	reg.add(newStopCmd(),    "stop            gracefully stop daemon")
-	reg.add(newRestartCmd(), "restart         gracefully replace daemon")
+	reg.addNoTray(newStartCmd(),   "start           start daemon in the background")
+	reg.addNoTray(newStatusCmd(),  "status          show daemon status")
+	reg.addNoTray(newStopCmd(),    "stop            gracefully stop daemon")
+	reg.addNoTray(newRestartCmd(), "restart         gracefully replace daemon")
 	// _daemon is the forked child process entry point — internal,
 	// not user-facing. Registered in the cobra tree so the binary
 	// can dispatch into it, but hidden from help and the REPL banner.

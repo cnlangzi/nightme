@@ -36,7 +36,7 @@ nightme 的文档按**内容性质**分 4 层，每层职责单一、不重叠�
 
 | 文件 | 用途 |
 |------|------|
-| `WORKFLOW.md` | Workflow YAML 的 schema / 触发器 / 步骤 / 表达式参考 |
+| `WFE.md` | Workflow YAML 配置 + 引擎运行时架构（schema / 触发器 / 步骤 / bot↔wfe 边界）|
 | `E2E_TESTING.md` | 飞书端到端测试 + 故障排查 |
 | `WINDOWS.md` | Windows 平台适配说明 |
 
@@ -200,7 +200,7 @@ docs/
 ├── PRD.md                 ← Layer 1: 产品
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
-├── WORKFLOW.md            ← Workflow YAML 配置参考（schema / 触发器 / 步骤）
+├── WFE.md                 ← Workflow YAML 配置 + 引擎运行时架构（schema / 触发器 / 步骤 / bot↔wfe 边界）
 ├── E2E_TESTING.md         ← 飞书端到端测试手册
 ├── WINDOWS.md             ← Windows 平台适配说明
 ├── feat/                  ← Layer 4: 每个 feature 的实现
@@ -230,3 +230,4 @@ docs/
 - 初始：建立 4 层文档结构 + 命名约定 + 决策树
 - 2026-08-17：补 `docs/channel/` / `docs/bridge/` 在目录示意里的位置；飞书交互卡踩坑进 `channel/feishu-cards.md`
 - 2026-08-18：补 `docs/WORKFLOW.md` 顶层参考文档；§2 加"顶层参考文档"小节，§8 目录树同步更新
+- 2026-08-18：`docs/WORKFLOW.md` → `docs/WFE.md`；§5 加 `use` 步骤（bot 注入 action）；§8 重写为 bot-as-host / wfe-as-library 架构

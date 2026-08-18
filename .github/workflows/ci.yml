@@ -223,8 +223,8 @@ jobs:
     name: Agent install + startup (${{ matrix.os }})
     needs: [test, test-windows, cross-compile]
     runs-on: ${{ matrix.os }}
-    fail-fast: false
     strategy:
+      fail-fast: false
       matrix:
         # Full platform matrix on purpose. macOS is the dev team's
         # daily-driver OS, so bugs there get caught by humans first,

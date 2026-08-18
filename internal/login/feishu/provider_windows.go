@@ -3,10 +3,11 @@
 package feishu
 
 import (
+	"context"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"io"
 	"os"
-	"os/exec"
 	"syscall"
 	"time"
 	"unsafe"
@@ -27,23 +28,23 @@ import (
 //
 // Instead we render the QR ourselves, in three tiers of fallback:
 //
-//   1. Windows Terminal (Cascadia Code, VT processing on, detected
-//      via WT_SESSION env var): RenderANSI — 24-bit ANSI color
-//      half-block. Inline in the terminal, no external file. The
-//      best UX, immune to font glyph issues because the colors do
-//      the work.
+//  1. Windows Terminal (Cascadia Code, VT processing on, detected
+//     via WT_SESSION env var): RenderANSI — 24-bit ANSI color
+//     half-block. Inline in the terminal, no external file. The
+//     best UX, immune to font glyph issues because the colors do
+//     the work.
 //
-//   2. Legacy conhost (cmd.exe, Windows PowerShell with the default
-//      Consolas / Cascadia Code font, or any conhost where VT
-//      processing is off): RenderASCII — half-block Unicode chars
-//      (▀▄█), with the console output code page forced to UTF-8
-//      first via enableConsoleOutputUTF8 and the console font set
-//      to a known-good face via ensureConsoleFont.
+//  2. Legacy conhost (cmd.exe, Windows PowerShell with the default
+//     Consolas / Cascadia Code font, or any conhost where VT
+//     processing is off): RenderASCII — half-block Unicode chars
+//     (▀▄█), with the console output code page forced to UTF-8
+//     first via enableConsoleOutputUTF8 and the console font set
+//     to a known-good face via ensureConsoleFont.
 //
-//   3. Universal fallback: WritePNGToDesktop — a 512×512 PNG on
-//      the user's Desktop, auto-opened via `cmd /c start "" <path>`
-//      so the default photo viewer (Photos on Win10/11) pops up.
-//      Always works regardless of font, code page, or Win version.
+//  3. Universal fallback: WritePNGToDesktop — a 512×512 PNG on
+//     the user's Desktop, auto-opened via `cmd /c start "" <path>`
+//     so the default photo viewer (Photos on Win10/11) pops up.
+//     Always works regardless of font, code page, or Win version.
 func (f *Provider) renderQRPlatform(url string) {
 	// Set the console output code page to UTF-8 before printing
 	// anything. On legacy conhost this is the difference between
@@ -342,7 +343,7 @@ func isWindowsTerminal() bool {
 // detect a missing handler. We don't wait for the launched app
 // (Photos, etc.) to exit.
 func openWithDefaultApp(path string) error {
-	c := exec.Command("cmd", "/c", "start", "", path)
+	c := proc.New(context.Background(), "cmd", "/c", "start", "", path)
 	c.Stdout = nil
 	c.Stderr = nil
 	return c.Run()

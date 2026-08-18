@@ -139,7 +139,7 @@ JSON-RPC 模式。
 ### `runPrintMode` 形态
 
 ```text
-agent.NewCmd(ctx, s.command, args...)    ← 一次性启子进程
+proc.New(ctx, s.command, args...)    ← 一次性启子进程
   ├ cmd.Dir = cfg.Workspace
   ├ cmd.StdoutPipe() → runNDJSON()        ← 解析 thread.started + turn.completed.usage
   └ cmd.StderrPipe() → goroutine drain    ← 仅失败路径 wrap 进 error

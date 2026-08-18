@@ -27,6 +27,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agent/procutil"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // ─── constants & exported errors ───
@@ -182,30 +183,30 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	env := append([]string(nil), cfg.Env...)
 
-	// Spawn via the agent.NewCmd helper so the platform-specific
+	// Spawn via the proc.New helper so the platform-specific
 	// SysProcAttr (Setsid on unix, no-op on Windows) is in one
-	// place — see internal/agent/exec_unix.go for the rationale.
-	cmd := agent.NewCmd(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace
-	cmd.Env = append(os.Environ(), env...)
+	// place — see internal/proc/exec_unix.go for the rationale.
+	child := proc.New(ctx, s.command, args...)
+	child.Dir = cfg.Workspace
+	child.Env = append(os.Environ(), env...)
 
-	stdin, err := cmd.StdinPipe()
+	stdin, err := child.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("claudecode: stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("claudecode: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		return nil, fmt.Errorf("claudecode: stderr pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
@@ -215,12 +216,12 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	branch := detectBranch(cfg.Workspace)
 
 	live := &driver{
-		cmd:         cmd,
+		cmd:         child,
 		stdin:       bufio.NewWriter(stdin),
 		events:      make(chan agent.AgentEvent, eventsBufferSize),
 		stderrLines:      make(chan string, 64),
 		stderrTail:       agent.NewStderrRingBuffer(agent.StderrTailBytes),
-		pid:         cmd.Process.Pid,
+		pid:         child.Process.Pid,
 		agentName:   s.name,
 		workspace:   cfg.Workspace,
 		branch:      branch,
@@ -280,7 +281,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	logger := slog.Default()
 	// pumpStream + stderr-drain take 2 slots in pumpWG. The
 	// events-channel close is owned by lifecycle() (was pumpStream
-	// before refactor) so lifecycle has the cmd.Wait result +
+	// before refactor) so lifecycle has the child.Wait result +
 	// stderr tail available when emitting the EventAgentError.
 	// Diagnostic on non-graceful exit. Mirrors dsh / pi / codex /
 	// opencode — claudecode was the outlier.
@@ -342,7 +343,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		_ = drainStderr(stderr, logger, live.stderrLines, live.stderrTail)
 	})
 
-	// lifecycle — single owner of cmd.Wait + close(events) +
+	// lifecycle — single owner of child.Wait + close(events) +
 	// close(exitDone). On non-graceful exit it emits an
 	// EventAgentError with a structured Diagnostic so the runtime /
 	// recovery policy / /diagnose can act on it. Mirrors dsh/pi/
@@ -1107,7 +1108,7 @@ func detectBranch(workspace string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git",
+	cmd := proc.New(ctx, "git",
 		"-C", workspace,
 		"symbolic-ref", "--short", "HEAD")
 	out, err := cmd.Output()

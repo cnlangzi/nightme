@@ -289,7 +289,7 @@ func TestListCmdKeepExitedFlag(t *testing.T) {
 // `test` or `list` from the root command. Users would notice but
 // tests catch regressions cheaply.
 func TestNewRootCmdHasSubcommands(t *testing.T) {
-	root := newRootCmd()
+	root, _ := newRootCmd()
 	want := map[string]bool{"test": false, "list": false}
 	for _, c := range root.Commands() {
 		if _, ok := want[c.Name()]; ok {

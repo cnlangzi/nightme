@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // stderrCapBytes bounds the stderr tail we keep on memory and
@@ -84,7 +85,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	args := append([]string{}, s.args...)
 	args = append(args, "--", prompt)
 
-	cmd := agent.NewCmd(ctx, s.command, args...)
+	cmd := proc.New(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 
 	// Inject the one knob nightme is allowed to override:

@@ -13,6 +13,8 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/login"
+	_ "github.com/cnlangzi/nightme/internal/channel/feishu"
+	_ "github.com/cnlangzi/nightme/internal/login/telegram"
 )
 
 // fakeProvider is a login.Provider that returns whatever the

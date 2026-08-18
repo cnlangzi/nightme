@@ -46,7 +46,7 @@ PR 186 引入 Windows CI runner 后，暴露了 13 个 pre-existing 平台问题
 | 现象 | 根因 | 修复锚点 |
 |------|------|---------|
 | `fork/exec C:\WINDOWS\system32\cmd.exe: The parameter is incorrect.` | env 里有裸字符串（无 `KEY=VALUE` 格式），`CreateProcess` 拒绝 | 不要往 `cmd.Env` 追加裸字符串；详见 §2 |
-| `fork/exec <path>.cmd: The parameter is incorrect.` | 直接用 `.cmd` 路径作为 `lpApplicationName` | 用 `agent.NewCmd`，自动包 `cmd.exe /d /c`；详见 §3 |
+| `fork/exec <path>.cmd: The parameter is incorrect.` | 直接用 `.cmd` 路径作为 `lpApplicationName` | 用 `proc.New`，自动包 `cmd.exe /d /c`；详见 §3 |
 | `.exe` 装了但仍走 `cmd.exe /d /c` | LookPath 顺序把 `.cmd` 排在前面 | 当前行为可以接受；如要绕开，配置 `agent_cmd.exe` 显式路径；详见 §3.4 |
 | Agent 启动后立刻退出 | `Setsid` 不可用 + 进程组信号被误用 | Windows 下 `agent.SignalProcessGroup` 已经退化为单 pid 信号；详见 §5 |
 | child 的 `pwd` 报告 `/c/Users/...` 而不是 `C:\Users\...` | MSYS libc getcwd() 翻译（**`MSYS_NO_PATHCONV=1` 不影响 getcwd**） | 不要测 child stdout 验证 CWD；测 sentinel file（filesystem 操作不经过 MSYS libc） |
@@ -186,9 +186,9 @@ nightme 支持的 4 个 CLI，在 Windows 上有以下分发形式（按 PATHEXT
 
 **关键事实**：几乎所有分发都是「先放个 `.cmd` shim 在 PATH 顶层，shim 内部再去调 `.exe`」。所以 **LookPath 100% 返回 `.cmd` 路径**。
 
-### 3.2 启动矩阵（`agent.NewCmd`）
+### 3.2 启动矩阵（`proc.New`）
 
-`internal/agent/exec_windows.go` 的 `launchOnWindows` 是单一入口，按扩展名路由：
+`internal/proc/exec_windows.go` 的 `launchOnWindows` 是单一入口，按扩展名路由：
 
 | 扩展名 | 启动方式 | 何时触发 |
 |--------|----------|----------|
@@ -197,11 +197,11 @@ nightme 支持的 4 个 CLI，在 Windows 上有以下分发形式（按 PATHEXT
 | `.ps1` | `exec.CommandContext(powershell.exe, -NoProfile -NonInteractive -ExecutionPolicy Bypass -File resolved, args...)` | 备用 |
 | `.js` | `exec.CommandContext(node.exe, resolved, args...)` | 备用 |
 
-**所有 4 个 bridge 都通过 `agent.NewCmd` 启动**——没有「各自实现一套」的地方。
+**所有 4 个 bridge 都通过 `proc.New` 启动**——没有「各自实现一套」的地方。
 
 ```go
 // claudecode.go / pi/agent.go / codex/session.go / opencode/server.go
-cmd := agent.NewCmd(ctx, command, args...)  // ← 统一入口
+cmd := proc.New(ctx, command, args...)  // ← 统一入口
 cmd.Dir = cfg.Workspace
 cmd.Env = append(os.Environ(), cfg.Env...)   // ← 注意 §2
 ```
@@ -230,7 +230,7 @@ lpCommandLine     = cmd /d /c "<resolved>" <args...>
   ```
 - 或在用户配置里覆盖 `command` 字段。
 
-**不要**在 bridge 包里做 LookPath 重定向——那是 `agent.NewCmd` 的活。
+**不要**在 bridge 包里做 LookPath 重定向——那是 `proc.New` 的活。
 
 ---
 
@@ -327,7 +327,7 @@ err := cmd.Start() // ✅ nil
 
 ### 4.5 CI 覆盖
 
-`internal/agent/exec_windows_test.go` 已有 5 个回归测试（`TestNewCmd_*`），任何 CI runner 上跑 `go test ./internal/agent/...` 都会覆盖 launch matrix。**不要**靠 Unix CI 替代 Windows 真机测。
+`internal/proc/exec_windows_test.go` 已有 5 个回归测试（`TestNew_*`），任何 CI runner 上跑 `go test ./internal/proc/...` 都会覆盖 launch matrix。**不要**靠 Unix CI 替代 Windows 真机测。
 
 ---
 
@@ -388,10 +388,10 @@ err := cmd.Start() // ✅ nil
 
 | 主题 | 位置 |
 |------|------|
-| 启动矩阵（路由） | `internal/agent/exec_windows.go` → `launchOnWindows` |
-| 启动矩阵（单元测试） | `internal/agent/exec_windows_test.go` → `TestNewCmd_*` |
-| Unix 端等价（Setsid） | `internal/agent/exec_unix.go` → `NewCmd` |
-| 信号 / pgroup 退路 | `internal/agent/signal_windows.go` |
+| 启动矩阵（路由） | `internal/proc/exec_windows.go` → `launchOnWindows` |
+| 启动矩阵（单元测试） | `internal/proc/exec_windows_test.go` → `TestNew_*` |
+| Unix 端等价（Setsid） | `internal/proc/exec_unix.go` → `proc.New` |
+| 信号 / pgroup 退路 | `internal/proc/exec_windows.go`（`hideWindow` / `applyHideWindow`） |
 | pi bridge spawn 调用 | `internal/bridge/pi/agent.go` → `newDriver` |
 | claude bridge spawn 调用 | `internal/bridge/claudecode/claudecode.go` → `newDriver` |
 | codex bridge spawn 调用 | `internal/bridge/codex/session.go` → `newSession` |
@@ -421,7 +421,7 @@ err := cmd.Start() // ✅ nil
 
 - 2026-08-13：建立本文档
   - §2 env 格式校验 bug（claudecode / pi 已修）
-  - §3 启动矩阵统一进 `agent.NewCmd`
+  - §3 启动矩阵统一进 `proc.New`
   - §4 真机测试方法 + 一次性 4-agent 复现脚本
   - §5-6 Windows 专属信号 / 调试 checklist
   - §7-8 代码锚点 + 已知 limitation

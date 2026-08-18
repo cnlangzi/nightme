@@ -9,6 +9,8 @@ import (
 	"os"
 
 	gopty "github.com/aymanbagabas/go-pty"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // Transport is a transparent byte pipe to a child process running under
@@ -56,6 +58,12 @@ func NewTransport(workspace, command string, args []string, env []string, cols, 
 	cmd := ptmx.Command(command, args...)
 	cmd.Dir = workspace
 	cmd.Env = append(os.Environ(), env...)
+	// Apply CREATE_NO_WINDOW via proc.HideWindow so PTY-spawned
+	// children on Windows don't pop a visible console window.
+	// gopty.Cmd is a sibling struct to *exec.Cmd (same SysProcAttr
+	// field, different concrete type) — HideWindow keys on the
+	// SysProcAttr field type so it works for both shapes.
+	cmd.SysProcAttr = proc.HideWindow(cmd.SysProcAttr)
 
 	if err := cmd.Start(); err != nil {
 		_ = ptmx.Close()

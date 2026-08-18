@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -34,6 +33,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
 
@@ -1137,7 +1137,7 @@ func errStr(err error) string {
 func detectBranch(workspace string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", workspace, "symbolic-ref", "--short", "HEAD").Output()
+	out, err := proc.New(ctx, "git", "-C", workspace, "symbolic-ref", "--short", "HEAD").Output()
 	if err != nil {
 		return ""
 	}

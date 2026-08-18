@@ -38,31 +38,12 @@ import (
 	"fmt"
 )
 
-// ReviewContext is passed to Starter.Review by the /review dispatcher.
-// It carries the workspace path and an Inject callback the bridge
-// uses to send the review findings back into the main chat session
-// (after the one-shot review completes).
-//
-// Inject is the chokepoint: dispatcher closes over
-// cs.SelectedAgentSession().SendBlocks so the bridge never touches
-// AgentSession or chat-session plumbing directly. This keeps
-// bridges focused on "given a chat agent, run a review and
-// report back" without coupling them to chat-session lifecycle
-// details.
-type ReviewContext struct {
-	// Workspace is the chat session's selected cwd
-	// (cs.SelectedCwd()). The one-shot review runs in this
-	// directory so it can run `git diff` against the current
-	// branch.
-	Workspace string
-}
-
 // ErrReviewNotSupported is returned by Starter.Review when the agent
 // type cannot do review (currently pty/bash fallback).
 //
 // The /review dispatcher surfaces this as a friendly
-// "agent X 暂不支持 /review" reply — it doesn't poison the chat
-// with a generic bridge error.
+// "agent X does not support /review" reply — it doesn't poison the
+// chat with a generic bridge error.
 var ErrReviewNotSupported = errors.New("agent: /review not supported")
 
 // Review is the canonical /review implementation.
@@ -70,12 +51,12 @@ var ErrReviewNotSupported = errors.New("agent: /review not supported")
 // Bridges that don't need custom review behavior should call this
 // from their Review method:
 //
-//	func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) error {
-//	    return agent.Review(ctx, s, rc)
+//	func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+//	    return agent.Review(ctx, s, cfg)
 //	}
 //
 // Review runs the bridge's RunOnce with StandardPrompt and
-// rc.Workspace as the working directory. RunOnce is a one-shot
+// cfg.Workspace as the working directory. RunOnce is a one-shot
 // subprocess that streams agent events and returns when the
 // terminal reply arrives. The fresh subprocess:
 //
@@ -86,20 +67,13 @@ var ErrReviewNotSupported = errors.New("agent: /review not supported")
 //   - Streams events the same way /gtw commit does; we just
 //     capture RunResult.Text at the end.
 //
-// After RunOnce returns, we inject the captured findings as a
-// user message into the main chat session via rc.Inject. The main
-// agent sees the review in its context and can act on follow-up
-// "fix the blockers" instructions naturally.
-//
 // Bridges are free to override Starter.Review entirely (e.g.
-// claude could use its built-in /code-review slash trigger for
-// richer multi-agent review, instead of going through
-// StandardPrompt + the bridge's print-mode). v1 ships with all
-// 5 coding bridges delegating to Review.
-func Review(ctx context.Context, s Starter, rc ReviewContext) (RunResult, error) {
-	result, err := s.RunOnce(ctx, StartConfig{
-		Workspace: rc.Workspace,
-	}, []ContentBlock{{
+// claude uses its built-in /code-review slash trigger for richer
+// multi-agent review; codex uses the `codex review` native
+// subcommand). Bridges without a native review path (dsh,
+// opencode, pi, acp) delegate to this function.
+func Review(ctx context.Context, s Starter, cfg StartConfig) (RunResult, error) {
+	result, err := s.RunOnce(ctx, cfg, []ContentBlock{{
 		Type: ContentText,
 		Text: StandardPrompt(),
 	}})

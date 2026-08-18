@@ -99,8 +99,6 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // agent.FormatReviewMessage and routes to BOTH the AS (via
 // as.SendBlocks) and the channel (via the chat session's emitter).
 // The bridge no longer owns presentation or distribution.
-func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) (agent.RunResult, error) {
-	return runCodexReview(ctx, s, agent.StartConfig{
-		Workspace: rc.Workspace,
-	})
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	return runCodexReview(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
 }

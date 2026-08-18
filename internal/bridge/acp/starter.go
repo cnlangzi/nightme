@@ -110,8 +110,8 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // acp is the generic ACP-protocol bridge; opencode is the only
 // built-in that uses it. Review here serves both acp as a Starter
 // and any future acp-backed agent that registers itself.
-func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) (agent.RunResult, error) {
-	return agent.Review(ctx, s, rc)
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	return agent.Review(ctx, s, cfg)
 }
 
 // collectResult sends blocks to a live *agent.Agent and drains

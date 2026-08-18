@@ -78,7 +78,7 @@ func TestReview_UsesSharedPrompt(t *testing.T) {
 		},
 	}
 
-	rc := agent.ReviewContext{Workspace: workspace}
+	rc := agent.StartConfig{Workspace: workspace}
 	result, err := agent.Review(context.Background(), fs, rc)
 	if err != nil {
 		t.Fatalf("Review: %v", err)
@@ -115,7 +115,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 		},
 	}
 
-	rc := agent.ReviewContext{Workspace: "/ws"}
+	rc := agent.StartConfig{Workspace: "/ws"}
 	result, err := agent.Review(context.Background(), fs, rc)
 	if err == nil {
 		t.Fatal("Review should error on RunOnce failure, got nil")
@@ -137,7 +137,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 // matches on ==, not errors.Is).
 func TestPtyStarter_ReviewReturnsNotSupported(t *testing.T) {
 	s := pty.NewStarter("bash", "bash", nil, nil, 0, 0)
-	_, err := s.Review(context.Background(), agent.ReviewContext{Workspace: "/ws"})
+	_, err := s.Review(context.Background(), agent.StartConfig{Workspace: "/ws"})
 	if err == nil {
 		t.Fatal("pty Starter.Review should return error, got nil")
 	}
@@ -165,6 +165,6 @@ func (t *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, e
 func (t *testStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return t.runOnce(ctx, cfg, blocks)
 }
-func (t *testStarter) Review(context.Context, agent.ReviewContext) (agent.RunResult, error) {
+func (t *testStarter) Review(context.Context, agent.StartConfig) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("testStarter: Review not implemented (we test Review directly)")
 }

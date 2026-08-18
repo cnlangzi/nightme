@@ -186,7 +186,7 @@ func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, block
 // never invoke /review, so returning ErrReviewNotSupported keeps
 // the agent.Starter interface satisfied without affecting push
 // semantics.
-func (r *recordingAgent) Review(_ context.Context, _ agent.ReviewContext) (agent.RunResult, error) {
+func (r *recordingAgent) Review(_ context.Context, _ agent.StartConfig) (agent.RunResult, error) {
 	return agent.RunResult{}, agent.ErrReviewNotSupported
 }
 

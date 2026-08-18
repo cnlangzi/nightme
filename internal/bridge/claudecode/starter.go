@@ -185,7 +185,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Other bridges (dsh / opencode / pi / acp) don't have native
 // review; they delegate to agent.Review which uses StandardPrompt.
 // pty returns ErrReviewNotSupported.
-func (s *Starter) Review(ctx context.Context, rc agent.ReviewContext) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
 	return runCodeReviewPrintMode(ctx, s, agent.StartConfig{
 		Workspace: rc.Workspace,
 	})

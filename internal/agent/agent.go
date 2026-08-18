@@ -1136,6 +1136,13 @@ type Starter interface {
 	// chat session's emitter, so the user sees the findings directly
 	// in chat without waiting for the AS's downstream reply).
 	//
+	// Takes StartConfig (not a dedicated ReviewContext) because the
+	// only review-specific data we needed was Workspace, and that
+	// field already exists on StartConfig. Reusing StartConfig keeps
+	// the bridge signature symmetric with RunOnce / Start and avoids
+	// a one-field type that leaks "review is a special thing"
+	// framing into the agent package.
+	//
 	// ===== F-review.md §13 "codex/claude use native review" rule =====
 	//
 	// Bridges that have a native review subcommand MUST invoke it
@@ -1149,11 +1156,11 @@ type Starter interface {
 	//   - codex:      `codex review --base <default-branch>` (subcommand;
 	//     review rejects exec-only flags like --json / -o /
 	//     --dangerously-bypass-approvals-and-sandbox / -C /
-	//     --skip-git-repo-check — use `runCodexReviewPlain`, NOT
-	//     `runPrintMode`)
+	//     --skip-git-repo-check — uses its own argv assembly in
+	//     print.go, NOT runPrintMode)
 	//
 	// Bridges that have NO native review subcommand delegate to
-	// agent.Review(ctx, s, rc) which runs the canonical StandardPrompt
+	// agent.Review(ctx, s, cfg) which runs the canonical StandardPrompt
 	// via a fresh RunOnce subprocess:
 	//   - dsh, opencode, pi, acp
 	//
@@ -1162,15 +1169,7 @@ type Starter interface {
 	// friendly "agent X does not support /review" reply (via
 	// cs.Emitter().Send from the async goroutine, since the inline
 	// reply is already gone by the time the bridge returns).
-	//
-	// Why the bridge doesn't Inject: prior versions of this contract
-	// passed rc.Inject as a callback the bridge was responsible for
-	// invoking. That conflated "produce data" with "distribute data",
-	// and forced callers that wanted the channel-side fan-out to add
-	// an OnResult callback to recover the text the bridge had
-	// swallowed. The current contract returns the RunResult and lets
-	// the caller choose all distribution paths in one place.
-	Review(ctx context.Context, rc ReviewContext) (RunResult, error)
+	Review(ctx context.Context, cfg StartConfig) (RunResult, error)
 }
 
 // Errors surfaced by the registry.

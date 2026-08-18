@@ -24,7 +24,7 @@ func (f *fakeStarter) Start(context.Context, StartConfig) (*Agent, error) {
 func (f *fakeStarter) RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error) {
 	return f.runOnce(ctx, cfg, blocks)
 }
-func (f *fakeStarter) Review(context.Context, ReviewContext) (RunResult, error) {
+func (f *fakeStarter) Review(context.Context, StartConfig) (RunResult, error) {
 	return RunResult{}, errors.New("fakeStarter: Review not implemented (we test Review directly)")
 }
 
@@ -146,7 +146,7 @@ func TestErrReviewNotSupported_Sentinel(t *testing.T) {
 // the new contract. Kept as a stub so anyone grepping for the
 // old test name finds this migration note.
 func TestReview_RejectsNilInject(t *testing.T) {
-	t.Skip("Inject was removed from ReviewContext in v9; see TestReview_ReturnsRunResult for the new contract")
+	t.Skip("Inject was removed from StartConfig in v9; see TestReview_ReturnsRunResult for the new contract")
 }
 
 // TestReview_ReturnsRunResult verifies the happy path: Review
@@ -173,7 +173,7 @@ func TestReview_ReturnsRunResult(t *testing.T) {
 		},
 	}
 
-	rc := ReviewContext{Workspace: "/ws"}
+	rc := StartConfig{Workspace: "/ws"}
 
 	result, err := Review(context.Background(), fs, rc)
 	if err != nil {
@@ -216,7 +216,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 			return RunResult{}, runOnceErr
 		},
 	}
-	rc := ReviewContext{Workspace: "/ws"}
+	rc := StartConfig{Workspace: "/ws"}
 
 	result, err := Review(context.Background(), fs, rc)
 	if err == nil {

@@ -217,7 +217,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		)), nil
 	}
 
-	rc := agent.ReviewContext{
+	rc := agent.StartConfig{
 		Workspace: cs.SelectedCwd(),
 	}
 

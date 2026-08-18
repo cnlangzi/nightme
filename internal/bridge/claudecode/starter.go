@@ -186,7 +186,5 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // review; they delegate to agent.Review which uses StandardPrompt.
 // pty returns ErrReviewNotSupported.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
-	return runCodeReviewPrintMode(ctx, s, agent.StartConfig{
-		Workspace: rc.Workspace,
-	})
+	return runCodeReviewPrintMode(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
 }

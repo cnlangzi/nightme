@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  NightMe.app Info.plist.
+
+  Build flow: 'make app-bundle' copies bin/nightme (the binary
+  built by 'make build' on macOS) into
+  NightMe.app/Contents/MacOS/nightme and drops this plist at
+  NightMe.app/Contents/Info.plist. The app bundle is what
+  'open -a' or Finder double-click launches; running
+  NightMe.app/Contents/MacOS/nightme directly from a terminal
+  also works.
+
+  Two keys are not defaults:
+
+    LSUIElement = true  — the app does not show up in the Dock
+                          or the Cmd-Tab app switcher. The
+                          whole point of NightMe is the
+                          menu-bar icon; a Dock entry would
+                          be visual noise.
+
+    CFBundleIconFile    — points at AppIcon.icns, which
+                           'make app-bundle' copies from
+                           cmd/nightme/assets/trayTemplate.icns
+                           (itself produced by 'make tray-assets'
+                           via sips+iconutil). This is what
+                           Finder shows for the .app and what
+                           the menu-bar icon falls back to if
+                           the runtime template icon fails to
+                           load.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>NightMe</string>
+    <key>CFBundleDisplayName</key>
+    <string>NightMe</string>
+    <key>CFBundleExecutable</key>
+    <string>nightme</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.cnlangzi.nightme</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>NSAppleScriptEnabled</key>
+    <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <true/>
+    <key>NSSupportsSuddenTermination</key>
+    <true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>NightMe REPL session</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+    </array>
+</dict>
+</plist>

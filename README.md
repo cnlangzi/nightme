@@ -115,6 +115,27 @@ Three ways to get `nightme` on your machine:
    ```
 
    `make dev` runs nightme directly from source using the example
+   config in `./configs/`. For a proper release-style build (with
+   the Windows icon embedded, macOS menu-bar template icons, and
+   version metadata baked in), use `make build` or `make release`.
+
+4. **macOS .app bundle** (optional, for the menu-bar experience):
+
+   A bare `nightme` binary on macOS still works, but the menu-bar
+   icon falls back to the generic executable glyph. To get the
+   proper icon, build the .app bundle:
+
+   ```bash
+   make build              # bin/nightme + cmd/nightme/assets/trayTemplate.icns
+   make app-bundle         # dist/NightMe.app
+   cp -R dist/NightMe.app /Applications/
+   open /Applications/NightMe.app
+   ```
+
+   The .app has `LSUIElement=true`, so it shows no Dock entry —
+   just the menu-bar icon. Closing the app from the menu (Stop /
+   Quit) gracefully exits the daemon.
+
    config — no separate build step needed.
 
 ---

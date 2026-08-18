@@ -31,7 +31,15 @@ func loggerFromContext(ctx context.Context) *slog.Logger {
 	return slog.Default()
 }
 
-func newRootCmd() *cobra.Command {
+// newRootCmd builds the cobra command tree AND the REPL banner list
+// in one pass via cmdRegistry. Every subcommand that should appear in
+// the REPL's "Common:" section must go through reg.add(); the cobra
+// tree and the banner can no longer drift apart.
+//
+// Returns (root, reg). The reg is consumed by the REPL banner
+// renderer (buildBanner in repl.go); pass it through if you build a
+// different entry point that needs the banner.
+func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	root := &cobra.Command{
 		Use: "nightme", Short: "Bridge AI Coding CLIs to IM channels",
 		Long: "nightme is a single-process daemon that bridges AI Coding\n" +
@@ -43,21 +51,29 @@ func newRootCmd() *cobra.Command {
 	}
 	root.SetVersionTemplate(bannerWithVersion() + "\n")
 	root.Version = version.Version
-	root.AddCommand(newTestCmd())
-	root.AddCommand(newListCmd())
-	root.AddCommand(newKillCmd())
-	root.AddCommand(newAgentsCmd())
-	root.AddCommand(newLoginCmd())
-	root.AddCommand(newNameCmd())
-	root.AddCommand(newLogsCmd())
-	root.AddCommand(newCleanCmd())
-	root.AddCommand(newConfigCmd())
-	root.AddCommand(newVersionCmd())
-	root.AddCommand(newUpdateCmd())
-	root.AddCommand(newDebugCmd())
-	addLifecycleCommands(root)
-	addUnixOnlyCommands(root)
-	return root
+
+	reg := newCmdRegistry(root)
+
+	// User-facing commands. Banner entries are aligned to column 16
+	// (cmd-use + spaces + one-line description). Adding a new
+	// subcommand is exactly one reg.add() call — the cobra tree and
+	// the REPL banner stay in lockstep.
+	reg.add(newTestCmd(),    "test ...        spawn CLI in PTY (Ctrl-C to end)")
+	reg.add(newListCmd(),    "list            list sessions")
+	reg.add(newKillCmd(),    "kill            terminate agent processes")
+	reg.add(newAgentsCmd(),  "agents          list registered agents")
+	reg.add(newLoginCmd(),   "login feishu    QR Feishu registration")
+	reg.add(newNameCmd(),    "name [value]    show/set this instance's name")
+	reg.add(newLogsCmd(),    "logs [--lines N] tail daemon log (Ctrl-C to exit)")
+	reg.add(newCleanCmd(),   "clean           truncate logs + remove attachments")
+	reg.add(newConfigCmd(),  "config          interactive configuration menu")
+	reg.add(newVersionCmd(), "version         version info")
+	reg.add(newUpdateCmd(),  "update          check for a newer release")
+	reg.add(newDebugCmd(),   "debug           exercise reaction/action flow")
+
+	addLifecycleCommands(reg)
+	addUnixOnlyCommands(reg)
+	return root, reg
 }
 
 // addLifecycleCommands registers the cross-platform daemon
@@ -71,23 +87,26 @@ func newRootCmd() *cobra.Command {
 // Kept here in root.go so a single edit point covers both Unix
 // and Windows; root_unix.go and root_windows.go only differ in
 // what they add on top (Unix: doctor; Windows: nothing extra).
-func addLifecycleCommands(root *cobra.Command) {
-	root.AddCommand(newStartCmd())
-	root.AddCommand(newStatusCmd())
-	root.AddCommand(newStopCmd())
-	root.AddCommand(newRestartCmd())
-	root.AddCommand(newDaemonCmd())
+func addLifecycleCommands(reg *cmdRegistry) {
+	reg.add(newStartCmd(),   "start           start daemon in the background")
+	reg.add(newStatusCmd(),  "status          show daemon status")
+	reg.add(newStopCmd(),    "stop            gracefully stop daemon")
+	reg.add(newRestartCmd(), "restart         gracefully replace daemon")
+	// _daemon is the forked child process entry point — internal,
+	// not user-facing. Registered in the cobra tree so the binary
+	// can dispatch into it, but hidden from help and the REPL banner.
+	reg.addHidden(newDaemonCmd())
 }
 
 func Execute(logger *slog.Logger) {
-	root := newRootCmd()
+	root, reg := newRootCmd()
 	// Bare invocation (no args) routes into the REPL instead of
 	// silently exiting. Anything else flows through the existing
 	// cobra path unchanged.
 	if len(os.Args) == 1 {
 		root.SetContext(withLogger(context.Background(), logger))
 		Recover(root, logger)
-		if err := runREPL(root, logger); err != nil {
+		if err := runREPL(root, reg, logger); err != nil {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 			os.Exit(nmerrors.ExitCode(err))
 		}

@@ -17,7 +17,7 @@ import (
 )
 
 func TestLogsCommandSurface(t *testing.T) {
-	root := newRootCmd()
+	root, _ := newRootCmd()
 	cmd, _, err := root.Find([]string{"logs"})
 	if err != nil || cmd == nil {
 		t.Fatalf("logs not registered: err=%v", err)

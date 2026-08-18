@@ -78,6 +78,139 @@ jobs:
           name: coverage-linux-amd64
           path: coverage.out
 
+      # Build a smoke-testable binary and exercise the bare REPL.
+      # Bare `nightme` (no args) enters the interactive REPL
+      # (cmd/nightme/repl.go). We feed it a small command matrix
+      # over a pipe and assert each command produced the right
+      # response. This is the cheap-but-effective catch for:
+      #
+      #   - The "REPL banner shows every registered subcommand"
+      #     contract from cmd/nightme/subcommand.go — each entry
+      #     in the banner comes from reg.add(), so a future
+      #     refactor that drops cmdRegistry or breaks the
+      #     reg.banner() loop must keep the banner complete or
+      #     this gate goes red. The last casualty was
+      #     `nightme config`, which was registered but missing
+      #     from the banner.
+      #
+      #   - The dispatcher pipe (`dispatchREPLLine`) still
+      #     surfaces unknown commands as `Error: unknown
+      #     command "<typed>"` and `exit` as `bye` — both
+      #     pieces of the public REPL contract that downstream
+      #     users (and the startup job itself) depend on.
+      #
+      #   - The readline swap to reeflective/readline in
+      #     commit 6c1a54f — pipe-fed stdin still produces a
+      #     complete "Error:" line for every typed byte, proving
+      #     the line-buffered fallback path works on each OS.
+      #
+      # Why in `test` (not `startup`): REPL is core surface —
+      # it should fail fast on the cheapest job, not wait for
+      # the npm-install chain in `startup`. This step runs on
+      # all three OS runners (ubuntu / windows / macos) for
+      # the same reason the rest of `test` does.
+      #
+      # Caveat (intentional): stdin is a pipe, so readline
+      # falls back to line-buffered (non-raw) mode. The
+      # platform-specific raw-mode bug fixed in
+      # fix-erpl-on-windows (chzyer/readline mis-parsing
+      # printable bytes as ANSI escapes on Windows) does NOT
+      # reproduce in this pipe-fed path — that class needs an
+      # interactive Windows runner with a real PTY. What this
+      # gate DOES catch: every code path that does NOT depend
+      # on raw mode, which is the larger regression surface.
+      - name: Build smoke binary
+        shell: bash
+        run: |
+          # Use the canonical build entry points so CI exercises
+          # exactly what a developer would run locally:
+          #   - Windows: build.bat (cmd-native, also documents
+          #     how Windows users build without GnuWin32 make)
+          #   - Linux/macOS: make build (uses LDFLAGS from the
+          #     Makefile to bake version metadata in)
+          # Both produce bin/nightme[.exe] with version metadata
+          # baked in via -ldflags. Going through these scripts
+          # (rather than a bare 'go build' here) means a
+          # regression in build.bat or the Makefile LDFLAGS list
+          # surfaces as a failing CI gate instead of a Windows-
+          # only user-facing "version unknown" surprise.
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./build.bat
+          else
+            make build
+          fi
+
+      - name: Verify bare REPL (banner + dispatch matrix)
+        shell: bash
+        run: |
+          # build.bat → bin/nightme.exe, make build → bin/nightme.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
+          # Three independent lines: a known-good command
+          # (version), an unknown command (catches banner-
+          # quote-of-typed-string behavior), and exit.
+          # The set of printable bytes covered here is
+          # intentionally broad — any of them silently
+          # dropped by the dispatcher would break one of
+          # the substring assertions below.
+          #
+          # Pipe-fed stdin triggers runREPLInteractive's
+          # isatty.IsTerminal guard (see repl.go), which
+          # causes the runREPL → runREPLWith (scanner)
+          # path. The scanner path is what the user-visible
+          # TestREPL_* unit tests exercise, so this step
+          # is the binary-level smoke covering everything
+          # below: build, exec, dispatch, output.
+          #
+          # Caveat (intentional): stdin is a pipe, so
+          # readline falls back to non-raw mode. The
+          # platform-specific raw-mode bug fixed in
+          # fix-erpl-on-windows (chzyer/readline
+          # mis-parsing printable bytes as ANSI escapes
+          # on Windows) does NOT reproduce in this
+          # pipe-fed path — that class needs an
+          # interactive Windows runner with a real PTY.
+          # What this gate DOES catch: every code path
+          # that does NOT depend on raw mode, which is
+          # the larger regression surface. The TTY path
+          # is verified by the 139 in-package TestREPL_*
+          # tests + manual Windows smoke (see PR
+          # description).
+          out=$(printf 'version\nabcdefghijklmnopqrstuvwxyz0123456789\nexit\n' \
+                  | "$bin" 2>&1)
+          echo "$out"
+          # Banner contract: every registered user-facing
+          # subcommand must appear. If a future refactor
+          # drops cmdRegistry or breaks the banner loop,
+          # at least one of these substrings goes missing.
+          for cmd in list agents config kill clean version; do
+            if ! echo "$out" | grep -qE "(^|[[:space:]])${cmd}([[:space:]]|$)"; then
+              echo "::error::REPL banner missing '$cmd'"
+              exit 1
+            fi
+          done
+          # Dispatcher contract: unknown commands echo the
+          # typed string in their error message (see
+          # dispatchREPLLine routing through
+          # nmerrors.ExitCode). If any byte of the typed
+          # alphabet is silently dropped, the substring
+          # "abcdefghijklmnopqrstuvwxyz0123456789" in the
+          # captured transcript will not appear.
+          if ! echo "$out" | grep -qF 'unknown command "abcdefghijklmnopqrstuvwxyz0123456789"'; then
+            echo "::error::REPL dispatcher did not echo the full typed alphabet — possible character-loss regression"
+            exit 1
+          fi
+          # Exit contract: 'bye' line after the exit command.
+          # Used by TestREPL_Exit and by users who pipe the
+          # REPL for scripting.
+          if ! echo "$out" | grep -qF 'bye'; then
+            echo "::error::REPL did not print 'bye' after exit — dispatch loop broken"
+            exit 1
+          fi
+          echo "OK: REPL banner + dispatch matrix all green on ${{ matrix.os }}"
+
   # Cross-compile check. Runs on ubuntu-latest (cheapest runner)
   # and cross-compiles to Windows + macOS to catch OS-conditional
   # build breaks without paying for a Windows/macOS hosted

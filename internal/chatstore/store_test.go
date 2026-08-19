@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // newTestStore creates a Store backed by a temp file. Each test gets a
@@ -265,6 +267,38 @@ func TestGet_CopyReturned(t *testing.T) {
 	}
 }
 
+// TestGet_DeepCopyPointerField verifies the deep-copy contract for
+// the only pointer field on ChatSessionEntry (SelectedAgentSessionID).
+// A shallow copy would let the caller overwrite the in-memory record
+// via the shared pointer; this guards against regressions.
+func TestGet_DeepCopyPointerField(t *testing.T) {
+	store := newTestStore(t)
+	id := "as_target"
+	if err := store.Save(&registry.ChatSessionEntry{
+		ID:                     "cs_chat-1",
+		ChatID:                 "chat-1",
+		PrimaryAgent:           "claude",
+		SelectedAgentSessionID: &id,
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// First read captures a pointer to the field-target.
+	before, _ := store.Get("chat-1")
+	if before.SelectedAgentSessionID == nil || *before.SelectedAgentSessionID != "as_target" {
+		t.Fatalf("first Get: SelectedAgentSessionID = %v, want as_target", before.SelectedAgentSessionID)
+	}
+
+	// Mutate the field on the returned copy. If Get shallow-copied
+	// the *string, this would leak into the in-memory record.
+	*before.SelectedAgentSessionID = "as_overwritten"
+
+	after, _ := store.Get("chat-1")
+	if after.SelectedAgentSessionID == nil || *after.SelectedAgentSessionID != "as_target" {
+		t.Fatalf("second Get: SelectedAgentSessionID = %v, want as_target (deep-copy broken)", after.SelectedAgentSessionID)
+	}
+}
+
 // TestList verifies the snapshot semantics.
 func TestList(t *testing.T) {
 	store := newTestStore(t)
@@ -384,5 +418,5 @@ func copyFile(src, dst string) error {
 	return osWriteFile(dst, data)
 }
 
-func osReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+func osReadFile(path string) ([]byte, error)     { return os.ReadFile(path) }
 func osWriteFile(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }

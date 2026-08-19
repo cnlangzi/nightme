@@ -40,13 +40,8 @@ type Store struct {
 	path string
 
 	mu      sync.Mutex
-	entries map[string]*ChatSessionEntry
+	entries map[string]*registry.ChatSessionEntry
 }
-
-// ChatSessionEntry is a type alias so callers can refer to the entry
-// shape without importing registry. (The struct itself is defined in
-// registry; re-exporting it here keeps call sites clean.)
-type ChatSessionEntry = registry.ChatSessionEntry
 
 // New loads (or initializes) the chat session file at path. A missing
 // file yields an empty store; a corrupt file is backed up to
@@ -54,21 +49,21 @@ type ChatSessionEntry = registry.ChatSessionEntry
 func New(path string) (*Store, error) {
 	s := &Store{
 		path:    path,
-		entries: make(map[string]*ChatSessionEntry),
+		entries: make(map[string]*registry.ChatSessionEntry),
 	}
 
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
 		var container struct {
-			Version      int                          `json:"version"`
-			ChatSessions map[string]*ChatSessionEntry `json:"chatSessions"`
+			Version      int                                   `json:"version"`
+			ChatSessions map[string]*registry.ChatSessionEntry `json:"chatSessions"`
 		}
 		if err := json.Unmarshal(data, &container); err != nil {
 			if backupErr := registry.BackupCorrupt(path, data); backupErr != nil {
 				return nil, fmt.Errorf("chat_sessions: corrupt %s and backup failed: %w", path, backupErr)
 			}
-			s.entries = make(map[string]*ChatSessionEntry)
+			s.entries = make(map[string]*registry.ChatSessionEntry)
 		} else {
 			if container.ChatSessions != nil {
 				s.entries = container.ChatSessions
@@ -90,8 +85,8 @@ func (s *Store) Path() string { return s.path }
 // s.mu. Atomic write (temp + fsync + rename + chmod 0600).
 func (s *Store) save() error {
 	container := struct {
-		Version      int                          `json:"version"`
-		ChatSessions map[string]*ChatSessionEntry `json:"chatSessions"`
+		Version      int                                   `json:"version"`
+		ChatSessions map[string]*registry.ChatSessionEntry `json:"chatSessions"`
 	}{
 		Version:      registry.ChatSessionFileVersion,
 		ChatSessions: s.entries,
@@ -130,30 +125,43 @@ func (s *Store) save() error {
 }
 
 // Get returns a copy of the entry for chatID, or (nil, false) if the
-// chatID is unknown. The returned entry is a fresh copy; mutating it
-// has no effect on the in-memory record. Safe for concurrent use.
-func (s *Store) Get(chatID string) (*ChatSessionEntry, bool) {
+// chatID is unknown. The returned entry is a fresh copy (including
+// pointer fields, so mutating any field — including
+// SelectedAgentSessionID — has no effect on the in-memory record).
+// Safe for concurrent use.
+func (s *Store) Get(chatID string) (*registry.ChatSessionEntry, bool) {
 	s.mu.Lock()
 	e, ok := s.entries[chatID]
 	s.mu.Unlock()
 	if !ok {
 		return nil, false
 	}
-	cp := *e
-	return &cp, true
+	return deepCopyEntry(e), true
 }
 
 // List returns a snapshot of all in-memory entries. Each returned
-// entry is a fresh copy. Order is unspecified.
-func (s *Store) List() []*ChatSessionEntry {
+// entry is a fresh copy (incl. pointer fields). Order is unspecified.
+func (s *Store) List() []*registry.ChatSessionEntry {
 	s.mu.Lock()
-	out := make([]*ChatSessionEntry, 0, len(s.entries))
+	out := make([]*registry.ChatSessionEntry, 0, len(s.entries))
 	for _, e := range s.entries {
-		cp := *e
-		out = append(out, &cp)
+		out = append(out, deepCopyEntry(e))
 	}
 	s.mu.Unlock()
 	return out
+}
+
+// deepCopyEntry returns a copy of e whose pointer fields do not
+// alias the original. ChatSessionEntry has only one pointer field
+// (SelectedAgentSessionID); the rest are value types and the
+// struct shallow copy covers them.
+func deepCopyEntry(e *registry.ChatSessionEntry) *registry.ChatSessionEntry {
+	cp := *e
+	if e.SelectedAgentSessionID != nil {
+		v := *e.SelectedAgentSessionID
+		cp.SelectedAgentSessionID = &v
+	}
+	return &cp
 }
 
 // Save writes entry to the in-memory map and atomically persists
@@ -167,7 +175,7 @@ func (s *Store) List() []*ChatSessionEntry {
 // in writeLocked held f.mu while the writer's chatstore wrapper
 // held r.mu for the same entry struct). The single-mutex design
 // eliminates that race.
-func (s *Store) Save(entry *ChatSessionEntry) error {
+func (s *Store) Save(entry *registry.ChatSessionEntry) error {
 	if entry == nil {
 		return errors.New("chatstore: nil entry")
 	}
@@ -182,7 +190,7 @@ func (s *Store) Save(entry *ChatSessionEntry) error {
 // LastInteractionAt is bumped and the file is rewritten.
 //
 // Concurrency: holds s.mu across the mutation AND save().
-func (s *Store) Bootstrap(chatID, primaryAgent string) (*ChatSessionEntry, error) {
+func (s *Store) Bootstrap(chatID, primaryAgent string) (*registry.ChatSessionEntry, error) {
 	if chatID == "" {
 		return nil, errors.New("chatstore: empty chatID")
 	}
@@ -192,7 +200,7 @@ func (s *Store) Bootstrap(chatID, primaryAgent string) (*ChatSessionEntry, error
 		if primaryAgent == "" {
 			return nil, errors.New("chatstore: chatID not on disk; need primaryAgent to create")
 		}
-		s.entries[chatID] = &ChatSessionEntry{
+		s.entries[chatID] = &registry.ChatSessionEntry{
 			ID:                "cs_" + chatID,
 			ChatID:            chatID,
 			PrimaryAgent:      primaryAgent,

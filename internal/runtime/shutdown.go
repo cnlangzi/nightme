@@ -5,9 +5,9 @@
 package runtime
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"log/slog"
 	"time"
@@ -116,15 +116,31 @@ func ShutdownRunMulti(
 	return firstErr
 }
 
-// persistChatStates walks every chat in mgr and upserts into csFile.
-// Centralized so ShutdownRun and ShutdownRunMulti stay in sync.
+// persistChatStates walks every chat in mgr and saves the current
+// ChatSessionEntry to chat_sessions.json (one Save per chat — the
+// last Save wins for the whole map; earlier Saves re-write the file
+// with a snapshot that has at most one chat's entry mutating). A
+// single batched Save would be cheaper (one marshal + one fsync),
+// but the per-chat Save path matches the rest of the chat session
+// persistence contract. Centralized so ShutdownRun and
+// ShutdownRunMulti stay in sync.
+//
+// v1.3: kept simple (no batched save) to avoid introducing a new
+// mutex protocol on chatstore. The shutdown write path is single-
+// threaded (channel stopped, no concurrent setters) so contention
+// is not on the critical path here.
 func persistChatStates(mgr *chatsession.Manager, csFile *chatstore.Store) {
 	if mgr == nil || csFile == nil {
 		return
 	}
 	for _, cs := range mgr.List() {
-		// Touch lastInteractionAt so the entry is fresh on disk.
-		cs.SetSelectedAgent(cs.SelectedAgent()) // no-op write trigger
+		// ChatSession.persistChatEntry builds the entry snapshot
+		// under cs.mu.RLock so LastInteractionAt and the other
+		// fields are consistent at one moment in time. The legacy
+		// "no-op write trigger" SetSelectedAgent(cs.SelectedAgent())
+		// was dropped here: chatstore's no-op short-circuit returns
+		// nil without bumping LastInteractionAt or saving, so it
+		// accomplished nothing.
 		_ = csFile.Save(cs.Entry())
 	}
 }

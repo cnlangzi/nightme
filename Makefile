@@ -130,14 +130,27 @@ else
 endif
 
 .PHONY: build
-build: winres tray-assets ## Compile binary to bin/nightme[.exe] with version metadata.
+build: winres ## Compile binary to bin/nightme[.exe] with version metadata.
 	@mkdir -p bin
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/nightme
 
 .PHONY: release
-release: winres tray-assets ## Build a versioned binary into dist/nightme-<GOOS>-<GOARCH>[.exe] (host-only).
+release: winres ## Build a versioned binary into dist/nightme-<GOOS>-<GOARCH>[.exe] (host-only).
 	@mkdir -p $(BIN_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -ldflags '$(LDFLAGS)' -o $(RELEASE_BIN) ./cmd/nightme
+
+# tray-assets is intentionally NOT in the build/release dependency
+# chain. The tray-icon byte payload that //go:embed resolves in
+# cmd/nightme/tray_assets.go is committed to the repo (Linux:
+# assets/tray.png; macOS: assets/trayTemplate{,_@2x,_@3x}.png;
+# Windows: assets/logo-32.ico — produced by go-winres from
+# assets/winres.json). CI and release pipelines consume the
+# pre-built assets directly; ImageMagick is NOT installed on
+# the hosted runners (the prior setup tried to invoke convert
+# on every Linux build, which fails with 'ImageMagick
+# required'). `make tray-assets` exists for dev use (e.g. a
+# dev who wants to regenerate the macOS templates with sips
+# for sharper anti-aliasing) and is otherwise a no-op.
 
 .PHONY: app-bundle
 app-bundle: build ## Wrap bin/nightme into dist/NightMe.app (macOS only).

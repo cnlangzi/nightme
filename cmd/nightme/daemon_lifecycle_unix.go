@@ -17,9 +17,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"io"
 	"os"
-	"os/exec"
 	"runtime/debug"
 	"strconv"
 	"syscall"
@@ -59,7 +59,14 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	defer readyR.Close()
 
-	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
+	// v1.3+ multi-channel: --channel flag removed from the
+	// daemon child command. Channel selection is driven by cfg
+	// credentials (runtime's channel.BuildAll auto-starts every
+	// channel with valid creds); the hidden --channel flag in
+	// daemon_lifecycle.go is for back-compat with old CLI scripts.
+	// main refactor (#221) unified spawn behind proc.New; we keep
+	// the multi-channel removal on top of that.
+	child := proc.New(ctx, executable, daemonChildCommand)
 	child.Env = append(os.Environ(), daemonLockFDEnv+"=3", readyFDEnv+"=4")
 	child.ExtraFiles = []*os.File{lock.File(), readyW}
 	child.Stdin = nil
@@ -82,7 +89,15 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		defer closeStderr()
 	}
 	child.Stderr = stderrSink
-	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// GUARD: do not re-assign child.SysProcAttr below; proc.New
+	// (internal/proc/exec_unix.go) sets it to
+	// &syscall.SysProcAttr{Setsid: true} when it spawns the child.
+	// The previous shape here re-assigned SysProcAttr to a fresh
+	// literal — a no-op today (same value) but a future foot-gun:
+	// any extra field proc.New adds (CLOSE_ON_EXEC, …) would be
+	// silently wiped by the wholesale struct literal. Add a unit
+	// test (daemon_lifecycle_unix_test.go) if a runtime check
+	// feels needed; the expression form is intentionally avoided.
 
 	if err := child.Start(); err != nil {
 		_ = readyW.Close()
@@ -181,7 +196,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	return nil
 }
 
-func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
+func runDaemonChild(cmd *cobra.Command) (retErr error) {
 	lockFD, err := strconv.Atoi(os.Getenv(daemonLockFDEnv))
 	if err != nil || lockFD < 3 {
 		return fmt.Errorf("%s must be launched by `nightme start` or `nightme restart`", daemonChildCommand)
@@ -241,7 +256,7 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	status := daemoncontrol.Status{
 		PID:       os.Getpid(),
 		StartedAt: time.Now().UTC(),
-		Channel:   channelName,
+		Channel:   "multi", // v1.3+: multiple channels auto-start; legacy field set to "multi"
 		Version:   version.String(),
 		LogPath:   cfg.Logging.File,
 	}
@@ -255,7 +270,6 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	go func() { serveErr <- server.Serve() }()
 
 	deps := runtime.DefaultDeps()
-	deps, _ = runtime.WithChannel(deps, channelName)
 	deps.OnReady = func() {
 		server.SetReady()
 		writeBootstrap(bootstrapMessage{Ready: true})

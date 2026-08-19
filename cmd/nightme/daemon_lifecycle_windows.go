@@ -39,10 +39,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -75,21 +75,25 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		return fmt.Errorf("resolve nightme executable: %w", err)
 	}
 
-	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
-	child.SysProcAttr = &windows.SysProcAttr{
-		// DETACHED_PROCESS: no console inheritance. Required
-		// because `nightme start` was launched from a console;
-		// without this the daemon would tie up the user's
-		// terminal until it exits.
-		//
-		// CREATE_NEW_PROCESS_GROUP: the daemon becomes the
-		// root of a new process group. Ctrl-C / Ctrl-Break
-		// from any other console won't reach it.
-		//
-		// CREATE_PRESERVE_CODE_AUTHZ_LEVEL / no flags are
-		// needed for our use.
-		CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
+	// v1.3+ multi-channel: --channel flag removed from the
+	// daemon child command. Channel selection is driven by cfg
+	// credentials (runtime's channel.BuildAll auto-starts every
+	// channel with valid creds); the hidden --channel flag in
+	// daemon_lifecycle.go is for back-compat with old CLI scripts.
+	// main refactor (#221) unified spawn behind proc.New; we keep
+	// the multi-channel removal on top of that.
+	child := proc.New(ctx, executable, daemonChildCommand)
+	// proc.New on Windows already set CreationFlags |= CREATE_NO_WINDOW
+	// (so the daemon child does not pop a visible console). Merge
+	// rather than replace: DETACHED_PROCESS (no console inheritance)
+	// and CREATE_NEW_PROCESS_GROUP (own process group — Ctrl-C from
+	// any other console won't reach the daemon). Without the merge,
+	// the daemon pops a flashing console window on every `nightme
+	// start` from a console.
+	if child.SysProcAttr == nil {
+		child.SysProcAttr = &windows.SysProcAttr{}
 	}
+	child.SysProcAttr.CreationFlags |= windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP
 	child.Stdin = nil
 	child.Stdout = nil
 	// Panics (in ANY goroutine) and runtime fatals write to stderr
@@ -199,7 +203,7 @@ func exitCodeOf(state *os.ProcessState) int {
 // ready (code=...)" and the stack lands in the stderr capture file.
 // The Unix recover exists only to turn an otherwise information-free
 // EOF on that pipe into a real message.
-func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
+func runDaemonChild(cmd *cobra.Command) (retErr error) {
 	// Take the daemon lock ourselves. Unlike Unix, we can't
 	// inherit the parent's fd — LockFileEx is per-handle, so
 	// the parent closing its copy would release the lock. The
@@ -227,7 +231,7 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	status := daemoncontrol.Status{
 		PID:       os.Getpid(),
 		StartedAt: time.Now().UTC(),
-		Channel:   channelName,
+		Channel:   "multi", // v1.3+ multi-channel; legacy field
 		Version:   version.String(),
 		LogPath:   cfg.Logging.File,
 	}
@@ -240,7 +244,6 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	go func() { serveErr <- server.Serve() }()
 
 	deps := runtime.DefaultDeps()
-	deps, _ = runtime.WithChannel(deps, channelName)
 	deps.OnReady = func() {
 		server.SetReady()
 	}

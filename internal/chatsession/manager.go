@@ -242,14 +242,21 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 		emitter = m.emitter
 		m.mu.RUnlock()
 
-		cs, err := New(chatID, primaryAgent)
+		// v1.3+ multi-channel lazy restore: before allocating a
+		// fresh ChatSession, check csFile (in-memory index) for
+		// a persisted entry matching chatID. If present, hydrate
+		// the ChatSession from that entry — restore its per-chat
+		// state (selectedCwd/Agent, WatchMode/ThinkMode/ToolsMode,
+		// lastInteractionAt) and the AgentSession pool as Detached.
+		// csFile is the same file the eager Manager.RestoreFromRegistry
+		// used to read on startup, but the work is deferred to
+		// first-use per-chat now, eliminating the startup-time I/O
+		// and the cross-channel partition problem (chatID is namespaced
+		// per channel; the entry is created in the Manager whose
+		// channel produced the first inbound after restart).
+		cs, err := m.constructChatSession(chatID, primaryAgent, spawner, csFile, asFile, emitter)
 		if err != nil {
 			return nil, err
-		}
-		cs.WithSpawner(spawner).
-			WithPersistence(csFile, asFile)
-		if emitter != nil {
-			cs.WithEmitter(emitter)
 		}
 
 		// Phase 3: re-lock for the insert + onCreate publish.
@@ -257,11 +264,22 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 		defer m.mu.Unlock()
 		if existing, ok := m.sessions[chatID]; ok {
 			// Another goroutine won the race; discard our construction.
-			// The discarded cs is never visible to anyone (we never
-			// ran onCreate, never registered it, never started any
-			// background goroutine that holds it). The AgentSession
-			// pool is empty so there's nothing to clean up; if a
-			// future change populates the pool here, add a cs.Close.
+			// The discarded cs (the `cs` from Phase 2 above) is
+			// never visible to anyone — we never ran onCreate, never
+			// registered it, never started any background goroutine
+			// that holds it.
+			//
+			// NOTE on cleanup: hydrateFromEntry DOES populate the
+			// pool, and attachAgentSubscription subscribes a closure
+			// to each AS's EventBus that captures `cs`. The closure
+			// keeps the discarded cs alive until the AS bus is
+			// closed — which never happens for a never-spawned
+			// Detached AS. This is a small, bounded memory leak per
+			// race occurrence (one orphan cs + its Detached pool,
+			// only visible if the chatID is hit concurrently across
+			// goroutines on first use after restart). A proper fix
+			// requires a ChatSession.Close that closes the buses and
+			// cancels ctx; out of scope here.
 			return existing, nil
 		}
 		m.sessions[chatID] = cs
@@ -277,6 +295,91 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 	return cs, nil // existing cs → emitter already bound
 }
 
+// constructChatSession builds a ChatSession for chatID, either by
+// hydrating from a persisted csFile entry (if present) or by
+// allocating a fresh one. Runs OUTSIDE m.mu (caller is responsible
+// for the lock).
+//
+// Hydration path:
+//   - csFile.GetByChat(chatID) returns the entry → call hydrateFromEntry
+//   - otherwise → New(chatID, primaryAgent) and wire deps
+//
+// The hydration path also seeds the AgentSession pool from asFile
+// (filtered by the entry's chatSessionId). FromAgentSessionEntry
+// already demotes any StatusRunning to StatusDetached, so
+// LookupSelectedAgentSession will re-spawn on the next call.
+func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
+	if csFile != nil {
+		if entry, ok := csFile.GetByChat(chatID); ok {
+			return m.hydrateFromEntry(entry, spawner, csFile, asFile, emitter)
+		}
+	}
+	cs, err := New(chatID, primaryAgent)
+	if err != nil {
+		return nil, err
+	}
+	cs.WithSpawner(spawner).
+		WithPersistence(csFile, asFile)
+	if emitter != nil {
+		cs.WithEmitter(emitter)
+	}
+	return cs, nil
+}
+
+// hydrateFromEntry rebuilds a ChatSession from a persisted entry.
+// Per-chat state (selectedCwd/Agent, WatchMode/ThinkMode/ToolsMode,
+// watcherHintEmitted, lastInteractionAt) is restored; the
+// AgentSession pool is seeded from asFile (filtered by entry.ID).
+// selectedAS is forced to nil because the in-memory process handle
+// is lost on restart (the next LookupSelectedAgentSession will
+// spawn fresh and re-populate selectedAS).
+func (m *Manager) hydrateFromEntry(entry *registry.ChatSessionEntry, spawner Spawner, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
+	cs, err := New(entry.ChatID, entry.PrimaryAgent)
+	if err != nil {
+		return nil, err
+	}
+	cs.WithSpawner(spawner).
+		WithPersistence(csFile, asFile)
+	if emitter != nil {
+		cs.WithEmitter(emitter)
+	}
+	cs.selectedCwd = entry.SelectedCwd
+	cs.selectedAgent = entry.SelectedAgent
+	// Registry persists bare int; ChatSession fields are typed
+	// enums. Cast on read — Go zero-value semantics preserve the
+	// safe default when the int is 0.
+	cs.watchMode = WatchMode(entry.WatchMode) // 0 == WatchModeMention (default, safe)
+	cs.thinkMode = ThinkMode(entry.ThinkMode) // 0 == ThinkModeShow (default; preserve F-thread-route behavior)
+	cs.toolsMode = ToolsMode(entry.ToolsMode) // 0 == ToolsModeHide (default; quiet by default)
+	cs.watcherHintEmitted = entry.WatcherHintEmitted
+	cs.lastInteractionAt = entry.LastInteractionAt
+	// commit fix-6: clear selectedAS on restore. The persisted
+	// selectedAgentSessionId points at an AgentSession whose
+	// handle is in-memory only (lost on restart). Leaving the
+	// pointer set would cause SendBlocks (called by the default
+	// FlushHook) to return ErrNotRunning and silently drop user
+	// messages. The next LookupSelectedAgentSession will spawn
+	// fresh and re-populate selectedAS.
+	cs.selectedAS = nil
+	// Seed the pool from the agent_sessions.json entries that
+	// belong to this ChatSession. FromAgentSessionEntry has
+	// already demoted any StatusRunning to StatusDetached, so
+	// LookupSelectedAgentSession will re-spawn on the next call.
+	if asFile != nil {
+		for _, aEntry := range asFile.List() {
+			if aEntry.ChatSessionID == entry.ID {
+				cs.attachAgentSession(FromAgentSessionEntry(aEntry))
+			}
+		}
+	}
+	// F-62 §3.3.1: in-flight messages are NOT pushed back into
+	// cs.queue at restore (see Manager.RestoreFromRegistry for the
+	// full rationale — the queue is chat-level and would bleed
+	// the previous (agent, cwd)'s hung messages into the new
+	// TryFlush's batch).
+	return cs, nil
+}
+
 // WithEmitter binds the single daemon-wide outbound chokepoint
 // to the Manager. Every ChatSession created (or restored) after
 // this call is bound to the same Emitter via
@@ -288,7 +391,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // tolerated by GetOrCreate: tests that don't exercise the
 // outbound path can construct ChatSessions without one
 // (cs.Emitter() returns nil; senders must nil-check before
-// Send / SendCard).
+// Send).
 //
 // Concurrency: the write is published through m.mu so
 // concurrent GetOrCreate calls see a consistent value (RLock

@@ -66,7 +66,7 @@ func (f *Factory) Spec() command.Spec {
 // Existence check: we reject non-existent paths at /cwd time so
 // the agent doesn't fail later with a confusing spawn error.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if len(input.Args) < 2 {
 		return command.Reply(ctx, rt, "Usage: /cwd <path>"), nil

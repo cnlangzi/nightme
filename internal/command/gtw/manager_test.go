@@ -178,9 +178,9 @@ func TestManager_SetGetChatSession(t *testing.T) {
 func TestManager_HandleReaction_NoDraft(t *testing.T) {
 	m := newTestManager()
 	consumed := m.HandleReaction(context.Background(), ReactionEvent{
-		ChatID:      "c1",
-		TargetMsgID: "msg-1",
-		Emoji:       "✅",
+		ChatID:    "c1",
+		RequestID: "msg-1",
+		Emoji:     "✅",
 	})
 	if consumed {
 		t.Errorf("no draft → expected consumed=false")
@@ -344,4 +344,3 @@ func TestManager_ModeFromPayload(t *testing.T) {
 		t.Errorf("IssueID=0 → %q, want %q (legacy zero treated as Remote)", got, ModeRemote)
 	}
 }
-

@@ -3,6 +3,7 @@
 > **关联文档**：
 > - 产品定位 → [`PRD.md`](./PRD.md)
 > - 技术架构 → [`SPEC.md`](./SPEC.md)
+> - 多 channel 架构 → [`CHANNEL.md`](./CHANNEL.md)
 
 本文档是 nightme 的**功能索引**。每项功能的设计细节见对应文档。
 
@@ -18,6 +19,8 @@
 | 消息透传（Channel → AgentSession via Gateway）| [feat/F-message-flow.md](./feat/F-message-flow.md) |
 | 输出推送（AgentSession Events → Channel）| [feat/F-message-flow.md](./feat/F-message-flow.md) |
 | Command Gateway + Binding 表 + 职责隔离 | [feat/F-gateway.md](./feat/F-gateway.md) |
+| **多 channel 并行接入**（feishu + telegram + slack + ...）| [**CHANNEL.md**](./CHANNEL.md) |
+| Channel interface 抽象 + Channel Registry（OCP 接入点）| [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) + [CHANNEL.md](./CHANNEL.md) §4.1 |
 
 ## 2. ChatSession 会话模型
 
@@ -43,7 +46,9 @@
 | Channel interface 抽象 | [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) |
 | Agent 抽象（`AgentSpec` / `Starter` interface + `Agent` runtime handle）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) |
 
-## 4. Channel 渲染（飞书 IM）
+## 4. Channel 渲染
+
+### 4.1 飞书 IM
 
 | 功能 | 设计文档 |
 |------|----------|
@@ -64,6 +69,15 @@
 | OutResult 独立 Reply（不再 fold receipt）| [channel/feishu-rendering.md](./channel/feishu-rendering.md) |
 | Feishu 限速 / 重试 / WS 重连（可靠性）| [channel/feishu-reliability.md](./channel/feishu-reliability.md) |
 | Feishu Onboarding（附件透传 / App QR 注册）| [channel/feishu-onboarding.md](./channel/feishu-onboarding.md) |
+
+### 4.2 Telegram IM
+
+| 功能 | 设计文档 |
+|------|----------|
+| Telegram Forum Supergroup Topic 方案（每个 chat → 一个 Topic）| [channel/telegram.md](./channel/telegram.md) |
+| Telegram Bot API 限速（per-chat / global QPS）| [channel/telegram.md](./channel/telegram.md) |
+| Telegram Polling / Webhook 双模式 | [channel/telegram.md](./channel/telegram.md) |
+| Telegram Inline Keyboard / CallbackQuery → Choice 归一化 | [channel/telegram.md](./channel/telegram.md) |
 
 ## 5. 配置 / 数据模型
 
@@ -98,3 +112,26 @@
 | LLM 编排 / Code review / 提示词改写 | 透传原则 |
 | 接管用户已有的 shell / terminal multiplexer | 进程归属原则 |
 | Multi-user RBAC / 云端 SaaS | 单用户独占假设 |
+
+## 9. 多 channel 架构（v1.3+）
+
+详细设计见 [`CHANNEL.md`](./CHANNEL.md)。
+
+**核心能力**：
+- 所有有凭据的 channel（feishu / telegram / slack / 未来）自动并行启动，无需 `--channel` flag
+- 每个 channel 一个 `chatsession.Manager`（per-channel session 隔离，chatID 天然 namespaced）
+- 每个 channel 一个 `outbound.Emitter`（= 该 channel 自己，无 router 无 multi 概念）
+- ChatSession 不知道 channel（无 `channelName` 字段，持久化 schema 零变更）
+- Restore 懒加载：首次 `GetOrCreate(chatID)` 时 `csFile.GetByChat(chatID)` 命中即 hydrate
+- 入站 partition 隐式由 pump goroutine 闭包决定
+- 共享 components（`inbound.Router` / `command.Factory` / `shell.Dispatcher` / `gtw.Manager`）持 mgr per call
+- OCP：接入新 channel = 1 个 adapter 文件 + 1 个 `init()` 注册到 `channel.Registry`
+
+**已实现的 channel**：
+- feishu（[channel/feishu-rendering.md](./channel/feishu-rendering.md)）
+- telegram（[channel/telegram.md](./channel/telegram.md)）
+
+**未来接入的 channel**（roadmap）：
+- slack
+- web (browser UI)
+- 任何符合 `channel.Channel` 接口的 IM 协议

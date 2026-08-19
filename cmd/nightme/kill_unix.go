@@ -5,8 +5,9 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"os/exec"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -116,7 +117,7 @@ const defunctComm = "<defunct>"
 // is available on every unix nightme targets. We ask for `comm=`
 // (no header) so the output is a single bare name or path.
 func processCommand(pid int) (string, error) {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	out, err := proc.New(context.Background(), "ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 	if err != nil {
 		return "", err
 	}

@@ -6,7 +6,7 @@
 //  1. Some caller (the runtime event pump, a slash command handler,
 //     the message-dispatcher error path, ...) builds an
 //     messages.OutboundMessage.
-//  2. The caller passes it to Emitter.Send / Emitter.SendCard.
+//  2. The caller passes it to Emitter.Send.
 //  3. Emitter stamps the chatsession's GitStatus snapshot (via
 //     the injected GitStatusLookup closure) when the message
 //     doesn't carry one yet — workspace / git context is always
@@ -21,7 +21,7 @@
 // could land on multiple outbound paths with subtly different
 // mutation semantics. The Emitter is now the single chokepoint:
 // GitStatusLookup (set once in cmd/nightme/run.go's runDaemon)
-// is invoked for every Send / SendCard whose msg.GitStatus is
+// is invoked for every Send whose msg.GitStatus is
 // nil. Business code never touches GitStatus directly —
 // runtime/handler.go and eventbus.go drop the stamps, gtw
 // dispatchers stop pre-filling out.GitStatus. ChatSession owns
@@ -51,9 +51,9 @@ import (
 )
 
 // Channel adapters (Feishu, echo test stub, ...) implement
-// channel.Channel with all six methods; that automatically
-// satisfies the constructor's channel.Channel parameter. No
-// alias needed — outbound takes channel.Channel directly.
+// channel.Channel; that automatically satisfies the constructor's
+// channel.Channel parameter. No alias needed — outbound takes
+// channel.Channel directly.
 //
 // F-CLAUDE-PRINT-002 + fix-status-bar-git: GitStatus stamping is
 // now done by the Emitter at the single chokepoint, not at every
@@ -65,7 +65,7 @@ import (
 //     PR is a synchronous prcache.Cache.PR() read. There is no
 //     per-chat cache layer; freshness is the explicit goal.
 //   - The Emitter's GitStatusLookup (wired once by runtime) is
-//     invoked for every Send / SendCard whose msg.GitStatus is
+//     invoked for every Send whose msg.GitStatus is
 //     nil, returning the freshly-built snapshot.
 //   - Business code (runtime pump, slash commands, gtw replies)
 //     sends through em.Send without touching GitStatus directly.
@@ -79,8 +79,8 @@ import (
 // working — no churn at the construction site. GitStatusLookup
 // is the only field for now; nil is safe (skips stamping).
 type Options struct {
-	// GitStatusLookup, if non-nil, is invoked for every Send /
-	// SendCard whose msg.GitStatus is nil. Returns the chat's
+	// GitStatusLookup, if non-nil, is invoked for every Send
+	// whose msg.GitStatus is nil. Returns the chat's
 	// pull-on-read snapshot; nil means "no chat / no workspace"
 	// and the renderer drops the git line.
 	GitStatusLookup func(ctx context.Context, chatID string) *messages.GitStatus
@@ -93,7 +93,6 @@ type Options struct {
 // dispatcher closure, the MessageStateBus subscribers.
 type Emitter interface {
 	Send(ctx context.Context, msg messages.OutboundMessage) error
-	SendCard(ctx context.Context, msg messages.OutboundMessage) (msgID string, err error)
 }
 
 // New constructs the default Emitter implementation. ch must be
@@ -110,11 +109,6 @@ type emitImpl struct {
 func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	e.stampGitStatus(ctx, &msg)
 	return e.ch.Send(ctx, msg)
-}
-
-func (e *emitImpl) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	e.stampGitStatus(ctx, &msg)
-	return e.ch.SendCard(ctx, msg)
 }
 
 // stampGitStatus attaches the chat's git snapshot to msg if not

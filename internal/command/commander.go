@@ -80,7 +80,13 @@ type Commander interface {
 	// via mgr.GetOrCreate(chatID, primaryAgent). Dispatch itself
 	// does not GetOrCreate (it has no *chatsession.Manager); it
 	// only passes the cs through to cmd.Handle.
-	Dispatch(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error)
+	//
+	// v1.3+ multi-channel: mgr is the per-channel
+	// chatsession.Manager that produced the inbound. Dispatch
+	// forwards mgr to cmd.Handle so commands can do per-chat
+	// lookups (mgr.Get / mgr.SendPermission / mgr.RestoreFromRegistry)
+	// against the channel that owns this chatID.
+	Dispatch(ctx context.Context, rt RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error)
 }
 
 // NewCommander constructs a Commander backed by reg. The
@@ -179,7 +185,7 @@ func (c *commander) Match(text string) (string, bool) {
 // from every other slash command's UX.
 //
 // See docs/feat/slash-command-reactions.md for the full design rationale.
-func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error) {
+func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error) {
 	cmdName, trailingArgs, isCommand := c.extractCommand(input)
 	if !isCommand {
 		// Not a slash command at all (no "/" prefix, or just "/").
@@ -214,7 +220,7 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatse
 	// for nil sessions / synthetic inbounds (no MessageID).
 	chatsession.PublishMessageState(cs, input.MessageID, agent.MessageQueued)
 
-	out, err := cmd.Handle(ctx, rt, cs, input)
+	out, err := cmd.Handle(ctx, rt, mgr, cs, input)
 
 	// Framework ✅ — fires unconditionally after cmd.Handle returns
 	// (success or error). For a nil cs / empty MessageID the helper

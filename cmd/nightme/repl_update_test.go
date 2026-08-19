@@ -119,28 +119,21 @@ func TestPrompt_OutdatedYes(t *testing.T) {
 
 	got := out.String()
 	for _, want := range []string{
-		"nightme v9.9.9 is available",
+		"Update available",
+		"9.9.9",
 		"Update now?",
+		"download failed",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q\n--- full output ---\n%s", want, got)
 		}
-	}
-	if !strings.Contains(got, ": y\n") {
-		t.Errorf("expected echoed 'y' in output:\n%s", got)
 	}
 	// One y at Update; the prompt falls through after
 	// stage-2's "no asset" error without asking Install.
 	if idx != 1 {
 		t.Errorf("Reader called %d times, want 1", idx)
 	}
-	// Stage 2's failure must surface a clear "download
-	// failed" line so the user knows what to do next.
-	if !strings.Contains(got, "download failed") {
-		t.Errorf("expected 'download failed' in output:\n%s", got)
-	}
 }
-
 
 // TestPrompt_ThreeStagesY_Y_Y is the happy path: user
 // accepts each of the three y/N prompts in turn. The
@@ -350,8 +343,7 @@ func TestPrompt_NetworkFailureIsSilent(t *testing.T) {
 // Reader. We must NOT print anything (the existing TestREPL_*
 // suite asserts on the runREPLWith output and the version
 // prompt must not leak into that transcript). Production
-// callers (runREPLInteractive) always wire a Reader via
-// rl.Readline, so the silent-no-Reader branch is test-only.
+// callers (runREPLInteractive) wire cooked stdin as Reader.
 func TestPrompt_NoReaderIsSilent(t *testing.T) {
 	checker := newTestChecker(t, "v9.9.9")
 	var out bytes.Buffer
@@ -449,15 +441,88 @@ func TestPrompt_InvalidAnswerThenNoRePrompt(t *testing.T) {
 	}
 }
 
+// TestPrompt_VersionCheckDrivesPrompt covers the production
+// wiring: runREPLInteractive runs the countdown Check, then
+// passes VersionCheck in so promptForUpdateIfOutdated does
+// not hit the network again.
+func TestPrompt_VersionCheckDrivesPrompt(t *testing.T) {
+	var out bytes.Buffer
+	calls := 0
+	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		VersionCheck: &version.CheckResult{Latest: "v9.9.9", Outdated: true},
+		Out:          &out,
+		Reader: func() (string, error) {
+			calls++
+			return "n\n", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("Reader called %d times, want 1", calls)
+	}
+	got := out.String()
+	if !strings.Contains(got, "Update available") {
+		t.Errorf("missing availability line:\n%s", got)
+	}
+	if !strings.Contains(got, "9.9.9") {
+		t.Errorf("missing latest version:\n%s", got)
+	}
+	if !strings.Contains(got, "Update now?") {
+		t.Errorf("missing Update prompt:\n%s", got)
+	}
+	if strings.Contains(got, "Install now?") {
+		t.Errorf("declining Update should not reach Install:\n%s", got)
+	}
+}
+
+// TestWaitCheckCountdown_InstantResult verifies a cache-hit
+// style Check (result already on the channel) paints the
+// countdown once then clears it without waiting out the
+// timeout.
+func TestWaitCheckCountdown_InstantResult(t *testing.T) {
+	ch := make(chan version.CheckResult, 1)
+	ch <- version.CheckResult{Latest: "1.2.3", Outdated: true}
+
+	var out bytes.Buffer
+	got := waitCheckCountdown(context.Background(), &out, 5, time.Hour, ch)
+	if got.Latest != "1.2.3" {
+		t.Errorf("Latest = %q, want 1.2.3", got.Latest)
+	}
+	s := out.String()
+	if !strings.Contains(s, "Checking for updates... 5s") {
+		t.Errorf("missing countdown paint:\n%q", s)
+	}
+}
+
+// TestWaitCheckCountdown_TimeoutSkips returns a zero result
+// when Check never completes, so the caller falls through to
+// the shell without prompting.
+func TestWaitCheckCountdown_TimeoutSkips(t *testing.T) {
+	ch := make(chan version.CheckResult) // never sent
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	var out bytes.Buffer
+	got := waitCheckCountdown(ctx, &out, 5, time.Millisecond, ch)
+	if got.Latest != "" || got.Outdated {
+		t.Errorf("timeout should skip, got %+v", got)
+	}
+	if !strings.Contains(out.String(), "Checking for updates...") {
+		t.Errorf("expected countdown text, got %q", out.String())
+	}
+}
+
 // TestRunREPLWith_NoVersionChatter confirms that the existing
 // REPL scanner path (used by the legacy TestREPL_* suite) does
 // NOT inject version-prompt text into the output when stdin is
 // empty. This is the contract the pre-prompt tests rely on.
 func TestRunREPLWith_NoVersionChatter(t *testing.T) {
-	root := newTestRoot()
+	root, reg := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader(""), &buf); err != nil {
+	if err := runREPLWith(root, reg, nil, strings.NewReader(""), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	if strings.Contains(buf.String(), "Update now?") {
@@ -470,7 +535,7 @@ func TestRunREPLWith_NoVersionChatter(t *testing.T) {
 // All flags live on the parent `update` command (no
 // subcommands). The cobra tree must advertise every one.
 func TestUpdate_AllInOneFlags(t *testing.T) {
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -529,7 +594,7 @@ func TestUpdate_AllInOneNoInstallHappyPath(t *testing.T) {
 	// DataDir, so we point at a temp dir.
 	t.Setenv("NIGHTME_PATHS_DATA_DIR", t.TempDir())
 
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -540,14 +605,11 @@ func TestUpdate_AllInOneNoInstallHappyPath(t *testing.T) {
 
 	got := buf.String()
 	for _, want := range []string{
-		"[1/3] check",
-		"current:",
-		"latest:",
-		"newer release available",
-		"[2/3] download",
-		"sha256:",
-		"[3/3] install",
-		"--no-install set; stopping before swap",
+		"Update available",
+		"9.9.9",
+		"sha256",
+		"--no-install",
+		"stopping before swap",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q\n--- full output ---\n%s", want, got)
@@ -571,9 +633,9 @@ func TestUpdate_CacheHitSkipsDownload(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("NIGHTME_PATHS_DATA_DIR", dataDir)
 
-	// Pre-populate the staging dir with an archive of the
-	// exact same size as the asset the fixture advertises.
-	// The cache-hit branch keys on size match.
+	// Pre-populate the staging dir with the exact archive
+	// the fixture's SHA256SUMS describes. Download must
+	// hash it, match, and skip the asset GET.
 	wantExt := "tar.gz"
 	if runtime.GOOS == "windows" {
 		wantExt = "zip"
@@ -588,7 +650,7 @@ func TestUpdate_CacheHitSkipsDownload(t *testing.T) {
 		t.Fatalf("seed archive: %v", err)
 	}
 
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -597,11 +659,11 @@ func TestUpdate_CacheHitSkipsDownload(t *testing.T) {
 		t.Fatalf("update --no-install (cache hit): %v\n%s", err, buf.String())
 	}
 	got := buf.String()
-	if !strings.Contains(got, "cache hit:") {
-		t.Errorf("expected cache-hit message; got:\n%s", got)
-	}
 	if !strings.Contains(got, "skipping download") {
 		t.Errorf("expected 'skipping download'; got:\n%s", got)
+	}
+	if !strings.Contains(got, "sha256 verified") {
+		t.Errorf("expected sha256 verified; got:\n%s", got)
 	}
 }
 
@@ -616,7 +678,7 @@ func TestUpdate_AllInOneRefusesEmptyDataDir(t *testing.T) {
 	// override and using a non-existent HOME.
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -631,7 +693,7 @@ func TestUpdate_AllInOneRefusesEmptyDataDir(t *testing.T) {
 // shape: --help must NOT list subcommands. If a future
 // commit accidentally re-adds them, this test catches it.
 func TestUpdate_HelpLongIsSingleVerb(t *testing.T) {
-	root := newTestRoot()
+	root, _ := newTestRoot()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)

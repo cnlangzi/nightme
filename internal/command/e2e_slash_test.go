@@ -33,17 +33,17 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/command/newcmd"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/gatewaytest"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
 )
 
@@ -88,7 +88,7 @@ func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
 }
 func (a *echoAgent) SendPermission(string) error { return nil }
 func (a *echoAgent) New(context.Context) error   { return nil }
-func (a *echoAgent) Stop(context.Context) error { return agent.ErrNotSupported }
+func (a *echoAgent) Stop(context.Context) error  { return agent.ErrNotSupported }
 func (a *echoAgent) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	if err := a.SendBlocks(ctx, blocks); err != nil {
 		return agent.RunResult{}, err
@@ -133,6 +133,13 @@ func (a *echoAgent) Close() error {
 	return nil
 }
 
+// Review is unimplemented for the e2e echo fake — echo tests
+// don't drive /review. Return ErrReviewNotSupported to satisfy
+// the agent.Starter interface.
+func (a *echoAgent) Review(_ context.Context, _ agent.StartConfig) (agent.RunResult, error) {
+	return agent.RunResult{}, agent.ErrReviewNotSupported
+}
+
 var _ agent.Starter = (*echoAgent)(nil)
 
 // echoDriver forwards driver calls back to an echoAgent.
@@ -145,16 +152,17 @@ func (d *echoDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *echoDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *echoDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *echoDriver) Close() error                   { return d.inner.Close() }
+func (d *echoDriver) Stop(ctx context.Context) error  { return d.inner.Stop(ctx) }
+func (d *echoDriver) Close() error                    { return d.inner.Close() }
 func (d *echoDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
+
 // echoSpawner is a Spawner that hands out fresh echoAgent instances.
 type echoSpawner struct {
-	mu       sync.Mutex
+	mu      sync.Mutex
 	nextPID int
-	last     *echoAgent
+	last    *echoAgent
 }
 
 func newEchoSpawner() *echoSpawner { return &echoSpawner{} }
@@ -213,8 +221,8 @@ func (r *replyingCommander) Match(text string) (string, bool) {
 	return r.commander.Match(text)
 }
 
-func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
-	out, handled, err := r.commander.Dispatch(ctx, rt, cs, input)
+func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
+	out, handled, err := r.commander.Dispatch(ctx, rt, mgr, cs, input)
 	if err != nil {
 		errText := "❌ " + err.Error()
 		ch := cs.Emitter()
@@ -242,13 +250,7 @@ func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServ
 		if ch == nil {
 			continue
 		}
-		if ob.Kind == messages.OutCardPatch {
-			_ = ch.Send(ctx, ob)
-		} else if ob.Card != nil {
-			_, _ = ch.SendCard(ctx, ob)
-		} else {
-			_ = ch.Send(ctx, ob)
-		}
+		_ = ch.Send(ctx, ob)
 	}
 	return out, true, nil
 }
@@ -286,7 +288,7 @@ func (e2eStubRouter) Handle(_ context.Context, _ string, _ commandServices.React
 // Wraps a channel.Channel into an outbound.Emitter so the e2e
 // test can exercise the chat-session-bound Emitter path without
 // dragging in the runtime wiring from cmd/nightme. PATCH semantics
-// are encoded as Kind=OutCardPatch (the wrap just forwards to
+// are encoded as Kind=OutChoicePatch (the wrap just forwards to
 // Send with the same Kind).
 
 type testChannelWrap struct {
@@ -295,13 +297,6 @@ type testChannelWrap struct {
 
 func (w *testChannelWrap) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	return w.ch.Send(ctx, msg)
-}
-
-func (w *testChannelWrap) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	if err := w.ch.Send(ctx, msg); err != nil {
-		return "", err
-	}
-	return "", nil
 }
 
 var _ outbound.Emitter = (*testChannelWrap)(nil)
@@ -314,9 +309,6 @@ type noopEmitter struct{}
 
 func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {
 	return nil
-}
-func (noopEmitter) SendCard(context.Context, messages.OutboundMessage) (string, error) {
-	return "", nil
 }
 
 // ─── Wiring helper ───────────────────────────────────────────────────
@@ -358,14 +350,14 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 	// real commander + no-op stubs for the other three slots.
 	noop := &gatewaytest.NoopEmitter{}
 	ir := inbound.New(
-		&e2eStubMgr{mgr: mgr},
+		mgr,
 		newRuntimeShim(mgr, reg, "echo"),
-		shell.NewDispatcher(nil),
+		shell.NewDispatcher(),
 		&e2eStubRouter{},
 		noop,
 		"echo",
 	)
-	gw := gateway.New(ir, noop)
+	gw := gateway.New(ir)
 
 	return &wiredHarness{echoCh: echoCh, mgr: mgr, gw: gw}
 }

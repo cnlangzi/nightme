@@ -422,6 +422,12 @@ func (c *rpcClient) handleFrame(line []byte, onError func(error)) {
 			onError(fmt.Errorf("%w: bad notification envelope: %v", ErrMalformedJSON, err))
 			return
 		}
+		// DEBUG(F-codex-stopped-stuck): first sentinel on the wire
+		// → translator chain. Every notification from codex must be
+		// logged here. If we see codex sending turn/completed but
+		// no matching deliver pushed kind=EventAgentDone, the bug
+		// is between this line and the deliver call.
+		cLog("rpc notification", "method", env.Method)
 		if c.onNotification != nil {
 			c.onNotification(env.Method, env.Params)
 		}

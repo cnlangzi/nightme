@@ -59,6 +59,41 @@ echo [build.bat] ERROR: `go` not on PATH. Install Go 1.21+ and retry. 1>&2
 exit /b 1
 :preconditions_ok
 
+REM ---- embed Windows icon + manifest via go-winres ----
+REM Produces cmd\nightme\rsrc_windows_<arch>.syso which the Go
+REM linker auto-picks up from the main package's source dir and
+REM embeds into the .exe's PE .rsrc section. Without this step the
+REM .exe shows the default go toolchain icon.
+where go-winres >nul 2>&1
+if errorlevel 1 goto install_winres
+goto have_winres
+:install_winres
+echo [build.bat] go-winres not on PATH; installing via `go install`...
+go install github.com/tc-hib/go-winres@latest
+if errorlevel 1 goto winres_install_failed
+REM Make sure GOPATH\bin is on PATH for this script in case the
+REM user has not added it to their system PATH yet.
+for /f "tokens=*" %%g in ('go env GOPATH') do set "NM_GOPATH=%%g"
+if defined NM_GOPATH set "PATH=!NM_GOPATH!\bin;%PATH%"
+where go-winres >nul 2>&1
+if errorlevel 1 goto winres_install_failed
+goto have_winres
+:winres_install_failed
+echo [build.bat] ERROR: failed to install go-winres. Add %GOPATH%\bin to PATH or install manually. 1>&2
+exit /b 1
+:have_winres
+
+pushd cmd\nightme
+go-winres make --in assets\winres.json --out rsrc --arch 386,amd64,arm64 --product-version !VERSION! --file-version !VERSION!
+set "WINRES_RC=!errorlevel!"
+popd
+if !WINRES_RC! neq 0 goto winres_failed
+goto winres_ok
+:winres_failed
+echo [build.bat] ERROR: go-winres make failed. 1>&2
+exit /b 1
+:winres_ok
+
 if not exist bin mkdir bin
 
 echo [build.bat] VERSION    = !VERSION!

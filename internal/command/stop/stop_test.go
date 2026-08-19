@@ -7,9 +7,9 @@
 package stop_test
 
 import (
-	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"strings"
 	"testing"
 
@@ -34,8 +34,8 @@ func (s *stubStoppable) SendBlocks(_ context.Context, _ []agent.ContentBlock) er
 	return nil
 }
 func (s *stubStoppable) SendPermission(_ string) error { return nil }
-func (s *stubStoppable) Reset(_ context.Context) error  { return nil }
-func (s *stubStoppable) Close() error                   { return nil }
+func (s *stubStoppable) Reset(_ context.Context) error { return nil }
+func (s *stubStoppable) Close() error                  { return nil }
 func (s *stubStoppable) Keepalive(_ context.Context, _ func(context.Context) error) error {
 	return nil
 }
@@ -49,10 +49,7 @@ func (s *stubStoppable) Stop(_ context.Context) error {
 // the channel surface.
 type nopCh struct{}
 
-func (nopCh) Send(_ context.Context, _ messages.OutboundMessage) error { return nil }
-func (nopCh) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
-	return "", nil
-}
+func (nopCh) Send(_ context.Context, _ messages.OutboundMessage) error  { return nil }
 func (nopCh) Patch(_ context.Context, _ messages.OutboundMessage) error { return nil }
 
 // setupSelectedAS wires up a ChatSession + selected AgentSession +
@@ -219,7 +216,7 @@ func TestHandler_NoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := stoppkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, nil,
 		command.SlashInput{ChatID: "no-such-chat"})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -245,7 +242,7 @@ func TestHandler_UsageError(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"stop", "extra"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -266,7 +263,7 @@ func TestHandler_NoTurnInFlight(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := stoppkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -287,7 +284,7 @@ func TestHandler_Stopped(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := stoppkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)

@@ -44,7 +44,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // webURLParseTimeout bounds waiting for dsh web to print its bound
@@ -593,22 +593,22 @@ func (h *SharedHost) tryRespawn() error {
 // back to --port 0 would split sessions across instances if the
 // user's dsh is on a different port.
 func spawnAndWire(ctx context.Context, opts SharedHostOptions, logger *slog.Logger) (*exec.Cmd, *Client, error) {
-	cmd := agent.NewCmd(ctx, opts.HostCmd, "--profile", "web")
-	cmd.Dir = opts.Workspace
-	cmd.Env = append(os.Environ(),
+	child := proc.New(ctx, opts.HostCmd, "--profile", "web")
+	child.Dir = opts.Workspace
+	child.Env = append(os.Environ(),
 		"DSH_PERMISSION_MODE="+opts.PermissionMode,
 	)
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		return nil, nil, fmt.Errorf("dsh.host: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
 		return nil, nil, fmt.Errorf("dsh.host: stderr pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		return nil, nil, fmt.Errorf("dsh.host: spawn: %w", err)
@@ -628,19 +628,19 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, logger *slog.Logg
 	defer urlCancel()
 	baseURL, err := parseWebURL(urlCtx, stdout)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = child.Process.Kill()
+		_ = child.Wait()
 		_ = stdout.Close()
 		return nil, nil, fmt.Errorf("dsh.host: parse web url: %w", err)
 	}
 
 	cli := New(baseURL, logger)
 	if err := cli.Start(ctx); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = child.Process.Kill()
+		_ = child.Wait()
 		return nil, nil, fmt.Errorf("dsh.host: client start: %w", err)
 	}
-	return cmd, cli, nil
+	return child, cli, nil
 }
 
 // spawnOnce is the watchdog's per-attempt spawn wrapper around

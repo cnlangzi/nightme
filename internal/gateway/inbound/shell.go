@@ -16,6 +16,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
 )
@@ -29,18 +30,20 @@ import (
 // loaded) falls through to tryMessageDispatch so the user
 // can still talk to the agent. Same contract as the v0.x
 // runtime shim.
-func (r *Router) tryShellDispatch(ctx context.Context, msg *messages.InboundMessage) (bool, *CommandResult, error) {
+func (r *Router) tryShellDispatch(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) (bool, *CommandResult, error) {
 	sh, ok := r.requireShell()
 	if !ok {
 		return false, nil, nil
 	}
-	cs, err := r.csMgr.GetOrCreate(msg.ChatID, r.primary)
+	// v1.3+ multi-channel: resolve through the per-channel mgr
+	// from the pump closure, not the router-level csMgr stub.
+	cs, err := mgr.GetOrCreate(msg.ChatID, r.primary)
 	if err != nil || cs == nil {
 		slog.Default().Warn("inbound: GetOrCreate failed in tryShellDispatch",
 			"chat_id", msg.ChatID, "err", err)
 		return false, nil, nil
 	}
-	result, handled := sh.Handle(cs, shell.InboundRequest{
+	result, handled := sh.Handle(mgr, cs, shell.InboundRequest{
 		Request: shell.Request{
 			Text: msg.Text,
 			Cwd:  cs.SelectedCwd(),

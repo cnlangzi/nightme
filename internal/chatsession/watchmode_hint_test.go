@@ -52,11 +52,11 @@ func makeHintTestManager(t *testing.T, storePath string) (*Manager, *testEmitter
 // for HandleInbound to take the drop branch without panicking.
 func newDropInboundMessage(chatID string) *messages.InboundMessage {
 	return &messages.InboundMessage{
-		ChatID:    chatID,
-		UserID:    "u_test",
-		Text:      "hi everyone",
-		MessageID: "msg-1",
-		Time:      time.Now(),
+		ChatID:     chatID,
+		UserID:     "u_test",
+		Text:       "hi everyone",
+		MessageID:  "msg-1",
+		Time:       time.Now(),
 		HasMention: false, // group message that didn't @ bot
 	}
 }
@@ -715,7 +715,7 @@ func TestManager_HintPerChatLockIndependence(t *testing.T) {
 	// for chat A only.
 	releaseA := make(chan struct{})
 	em := &blockingEmitter{
-		releaseA: releaseA,
+		releaseA:      releaseA,
 		defaultResult: &messages.OutboundMessage{},
 	}
 	mgr.WithEmitter(em)
@@ -788,9 +788,9 @@ func TestManager_HintPerChatLockIndependence(t *testing.T) {
 // channel-adapter call without standing up a real Channel.
 type blockingEmitter struct {
 	outbound.Emitter // embedded so we satisfy the interface; nil-default methods never called
-	releaseA        chan struct{}
-	defaultResult   *messages.OutboundMessage
-	mu              sync.Mutex
+	releaseA         chan struct{}
+	defaultResult    *messages.OutboundMessage
+	mu               sync.Mutex
 }
 
 func (b *blockingEmitter) Send(ctx context.Context, msg messages.OutboundMessage) error {
@@ -807,10 +807,6 @@ func (b *blockingEmitter) Send(ctx context.Context, msg messages.OutboundMessage
 	}
 	b.mu.Unlock()
 	return nil
-}
-
-func (b *blockingEmitter) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
-	return "", nil
 }
 
 // Compile-time guard: blockingEmitter must satisfy outbound.Emitter.

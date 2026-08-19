@@ -18,11 +18,15 @@ import (
 // `gtw.ReactionEvent` are deleted; all callers reference this
 // type directly or via the command.ReactionEvent alias.
 type ReactionEvent struct {
-	// TargetMsgID is the bot's message id that the user
-	// reacted to. The reaction router's handler (e.g.
-	// gtw.Manager) uses this to look up the relevant state
-	// (e.g. a draft card).
+	// TargetMsgID is the channel-native message id the user
+	// reacted to or clicked. Diagnostic only — business
+	// handlers must not use it as a draft / card lookup key.
 	TargetMsgID string
+	// RequestID is the business correlation id copied from
+	// Choice.RequestID when the Channel recognised the target as
+	// a choice prompt. gtw drafts are keyed by this, not
+	// by the platform message id.
+	RequestID string
 	// Emoji is the raw reaction emoji ("✅" / "🆕" / "🔗" /
 	// "❌" / "🔄" / "🤝" for gtw; varies per command).
 	Emoji string

@@ -21,7 +21,7 @@ type stubDispatcher struct {
 	reply string
 }
 
-func (s *stubDispatcher) Dispatch(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
+func (s *stubDispatcher) Dispatch(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
 	return &command.SlashOutput{Consumed: true, Reply: s.reply}, true, nil
 }
 
@@ -54,7 +54,7 @@ func (stubMessageHandler) GetOrCreate(chatID, primaryAgent string) (*chatsession
 // framework emissions).
 type stubShell struct{}
 
-func (stubShell) Handle(_ *chatsession.ChatSession, _ shell.InboundRequest) (*shell.ShellOutput, bool) {
+func (stubShell) Handle(_ *chatsession.Manager, _ *chatsession.ChatSession, _ shell.InboundRequest) (*shell.ShellOutput, bool) {
 	return nil, false
 }
 
@@ -78,12 +78,6 @@ func (r *recordingEmitter) Send(ctx context.Context, msg messages.OutboundMessag
 	defer r.mu.Unlock()
 	r.out = append(r.out, msg)
 	return nil
-}
-func (r *recordingEmitter) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.out = append(r.out, msg)
-	return "card-id", nil
 }
 func (r *recordingEmitter) Record() []messages.OutboundMessage {
 	r.mu.Lock()
@@ -130,7 +124,7 @@ func TestDispatchLoop_ForwardsSlashReply(t *testing.T) {
 	em := &recordingEmitter{}
 	want := "Now using pi (pid=12345, cwd=/tmp, source=spawn)"
 
-	r := New(inbound.New(stubMessageHandler{}, &stubDispatcher{reply: want}, stubShell{}, stubAction{}, em, "claude"), em)
+	r := New(inbound.New(chatsession.NewManager(), &stubDispatcher{reply: want}, stubShell{}, stubAction{}, em, "claude"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

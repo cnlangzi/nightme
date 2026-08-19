@@ -77,6 +77,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // claudeLog is a thin wrapper around slog.Default() that scopes
@@ -148,33 +149,49 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// chat session's environment (CLAUDE.md / hooks / MCP /
 	// OAuth). See the package doc above.
 	args, prompt := buildPrintArgs(blocks)
+	return runPrintModeWithPrompt(ctx, s, cfg, args, prompt, startTime)
+}
 
-	cmd := agent.NewCmd(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace
+// runPrintModeWithPrompt is the shared implementation: buildPrintArgs
+// (or override) has already produced the argv + prompt; this
+// function handles the subprocess plumbing (start, drain stderr,
+// translate stdout events, capture result). The `startTime`
+// parameter is passed in so both callers get a consistent timer
+// baseline.
+func runPrintModeWithPrompt(
+	ctx context.Context,
+	s *Starter,
+	cfg agent.StartConfig,
+	args []string,
+	prompt string,
+	startTime time.Time,
+) (agent.RunResult, error) {
+	child := proc.New(ctx, s.command, args...)
+	child.Dir = cfg.Workspace
 	// Forward cfg.Env the same way Start does (append to os.Environ,
 	// cfg wins on conflict). Without this, /gtw commit-time env
 	// overrides (custom API keys, MCP credentials) are silently
 	// dropped on the print-mode path.
 	if len(cfg.Env) > 0 {
-		cmd.Env = append(os.Environ(), cfg.Env...)
+		child.Env = append(os.Environ(), cfg.Env...)
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("claudecode: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
 		return agent.RunResult{}, fmt.Errorf("claudecode: stderr pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
 		return agent.RunResult{}, fmt.Errorf("claudecode: start: %w", err)
 	}
-	pid := cmd.Process.Pid
+	pid := child.Process.Pid
 
 	claudeLog("PrintMode Start",
 		"command", s.command, "workspace", cfg.Workspace,
@@ -227,7 +244,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// auth errors, etc. land there. The wait+reap path is
 	// shared between success and failure so neither path loses
 	// diagnostic info.
-	waitErr := cmd.Wait()
+	waitErr := child.Wait()
 	<-stderrDone
 
 	claudeLog("PrintMode Exit",
@@ -303,7 +320,7 @@ func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, e
 	for scanner.Scan() {
 		// Honour ctx cancellation between lines so we exit
 		// promptly when the caller's deadline fires. The
-		// process is killed by agent.NewCmd (which wraps
+		// process is killed by proc.New (which wraps
 		// exec.CommandContext) when ctx is cancelled — we
 		// just stop reading here and let runPrintMode's
 		// cmd.Wait() reap the SIGKILLed process.
@@ -427,4 +444,55 @@ func errStr(err error) string {
 // grepping daemon logs can correlate.
 func appendAuditFields(result agent.RunResult) string {
 	return agent.FormatSessionID(result.SessionID) + agent.FormatUsage(result.Usage)
+}
+
+// runCodeReviewPrintMode runs `claude -p "/code-review"` against
+// the workspace. This is the bridge's native review path
+// (F-review.md §13 "codex/claude use native review" rule): we
+// invoke Claude Code's built-in slash command instead of running
+// our generic StandardPrompt via `claude -p "<prompt>"`. The chat
+// agent already has a multi-agent review pipeline tuned for this
+// task; reusing it is strictly better than reverse-engineering
+// the same prompt into a generic prompt-mode call.
+//
+// IMPORTANT — the positional `[command]` slot in
+// `claude [options] [command] [prompt]` does NOT take a leading slash.
+// Verified on Claude Code 2.1.220:
+//
+//   - `claude -p /code-review …` → claude treats `/code-review` as a
+//     regular prompt, runs zero turns, returns empty `result`
+//     (the slash command is never invoked).
+//   - `claude -p code-review …` → claude dispatches to the
+//     `code-review` slash command; the multi-agent pipeline fires
+//     (observed 36+ turns reading repo files, writing findings, etc.).
+//
+// The pre-v9 code passed `"/code-review"` (with slash) which made every
+// /review run on claude return silently empty — exactly the "review 跑
+// claude 没结果" symptom. Strip the slash before passing (see args
+// below).
+//
+// Output: the standard claude stream-json transcript. The shared
+// print-stream parser extracts the final text into RunResult.Text
+// (same path as runPrintMode, so output handling is identical).
+func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
+	if cfg.Workspace == "" {
+		return agent.RunResult{}, fmt.Errorf("claudecode: workspace is required")
+	}
+
+	// /code-review takes an optional positional [target] argument
+	// (file path / PR # / branch / ref range). v1 has no user-facing
+	// target flag; future v2 can pass rc.Comment or a parsed target.
+	// Default is the canonical "review current branch vs default"
+	// behaviour, which matches our /review dispatch.
+	//
+	// Pass the command WITHOUT the leading slash — see doc above.
+	args := []string{
+		"-p", "code-review",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--permission-mode", "bypassPermissions",
+	}
+
+	startTime := time.Now()
+	return runPrintModeWithPrompt(ctx, s, cfg, args, "code-review", startTime)
 }

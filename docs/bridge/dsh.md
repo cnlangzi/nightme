@@ -301,7 +301,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
         return nil, fmt.Errorf("dsh: workspace is required")
     }
     
-    cmd := agent.NewCmd(ctx, "dsh", "--profile", "web", "--port", "0")
+    cmd := proc.New(ctx, "dsh", "--profile", "web", "--port", "0")
     cmd.Dir = cfg.Workspace
     cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
     

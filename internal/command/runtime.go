@@ -58,10 +58,28 @@ type Config struct {
 type Deps struct {
 	// Manager is the chatsession.Manager every command reaches
 	// into for cs.GetOrCreate / cs.SetXxx.
+	//
+	// v1.3+ multi-channel: with multiple per-channel mgrs, this
+	// is the FIRST one built (the runtime's primaryMgr) and is
+	// only used as a fallback. Commands that need to find the
+	// chatID's owning mgr across all channels MUST prefer
+	// ChatSessionLookup (set by the runtime to a closure that
+	// walks allMgrs). Commands that always have cs already in
+	// hand (the common case for slash commands) don't need to
+	// resolve the mgr at all — the per-call mgr argument to
+	// Handle() is the one bound to cs's Emitter.
 	Manager *chatsession.Manager
 	// Primary is the primary agent name; gtw's per-chat
 	// lookup uses it as the GetOrCreate fallback.
 	Primary string
+	// ChatSessionLookup resolves chatID → *chatsession.ChatSession
+	// across every per-channel mgr (v1.3+ multi-channel). The
+	// gtw command uses it instead of Manager.GetOrCreate so
+	// reactions / context lookups land on the right mgr — the
+	// Emitter bound to that CS is the one for the chat's
+	// originating channel. nil = no lookup; gtw falls back to
+	// Manager.GetOrCreate (single-mgr deployments).
+	ChatSessionLookup func(chatID string) *chatsession.ChatSession
 	// GTWExt is the gtw.HandlerDeps the gtw command needs
 	// (git runner, HTTP prober, PR invalidator). Typed as
 	// `any` to avoid command ↔ gtw import cycle (gtw already

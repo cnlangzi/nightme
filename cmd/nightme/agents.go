@@ -53,13 +53,16 @@ func init() {
 	// DSH_PERMISSION_MODE=danger-full-access; model / provider /
 	// credentials flow from the user's `~/.dsh/settings.yaml` +
 	// `~/.dsh/.credentials.yaml`. See docs/feat/F-dsh-bridge.md.
-	if runtime.GOOS != "windows" {
-		// dsh is a Node.js CLI; Windows support is a non-goal per
-		// the dsh project. Skip registration on Windows so
-		// `nightme agents` doesn't list a permanently-broken
-		// entry there.
-		agent.Builtins.Register(dsh.NewStarter("dsh"))
-	}
+	//
+	// Cross-platform: dsh ships as a Node.js CLI; on Windows the
+	// npm installer drops a `dsh.cmd` shim which proc.New's
+	// Windows branch routes through cmd.exe /d /c (see
+	// internal/proc/exec_windows.go launchOnWindows). The
+	// bridge code itself is stdlib-only and has no runtime.GOOS
+	// gate inside. If dsh is not installed Detect() returns a
+	// clear "not found in PATH" error at spawn time, not at
+	// registration time.
+	agent.Builtins.Register(dsh.NewStarter("dsh"))
 
 	// opencode — the `opencode acp` Agent Client Protocol bridge.
 	// Long-lived chat sessions spawn `opencode acp` under a PTY

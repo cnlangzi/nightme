@@ -13,7 +13,7 @@ import (
 // Factory implements command.SlashCommandFactory for /gtw.
 //
 // It holds the per-process *Manager (gtw state) and the
-// runtime's HandlerDeps (Send / SendCard / Git / Prober /
+// runtime's HandlerDeps (Git / Prober /
 // Detect / Now). The runtime constructs one Factory at startup
 // and registers it with command.Registry.
 //
@@ -54,10 +54,22 @@ func init() {
 		handlerDeps, _ := d.GTWExt.(HandlerDeps)
 		mgr := NewManager()
 		mgr.SetHandlerDeps(handlerDeps)
-		mgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-			cs, _ := d.Manager.GetOrCreate(chatID, d.Primary)
-			return cs
-		})
+		// v1.3+ multi-channel: prefer ChatSessionLookup (set by
+		// the runtime to runtime.findChatSession) so /gtw replies
+		// land on the originating channel. Fall back to the
+		// single-mgr path for legacy deployments that don't
+		// wire the lookup — d.Manager is the primary (first)
+		// per-channel mgr in multi-channel mode, which would
+		// otherwise route every chat through the first channel's
+		// Emitter.
+		lookup := d.ChatSessionLookup
+		if lookup == nil {
+			lookup = func(chatID string) *chatsession.ChatSession {
+				cs, _ := d.Manager.GetOrCreate(chatID, d.Primary)
+				return cs
+			}
+		}
+		mgr.SetGetChatSession(lookup)
 		return NewFactoryWithDeps(mgr, handlerDeps)
 	})
 }
@@ -262,7 +274,7 @@ func (f *Factory) Spec() command.Spec {
 // Args[0]. Tests written against this factory use the
 // "Args[0] = subcommand" convention because the commander
 // is bypassed; production callers must go through commander.
-func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 2 {
 		return &command.SlashOutput{
 			Reply:    f.Spec().Usage,
@@ -847,22 +859,22 @@ func (s *managerContextSlot) Store(c Context) {
 	s.mgr.SetContext(s.chatID, c)
 }
 
-// managerDraftsMap adapts Manager to the legacy DraftsMap
+// managerDraftsMap adapts Manager to the DraftsMap
 // interface (Store / Take / Lookup / Count) used by RunFix /
-// HandleAction. Drafts are keyed by (chatID, userMsgID) on the
+// HandleAction. Drafts are keyed by (chatID, requestID) on the
 // Manager; the shim pins chatID.
 type managerDraftsMap struct {
 	mgr    *Manager
 	chatID string
 }
 
-func (d *managerDraftsMap) Store(userMsgID string, draft *Draft) {
-	d.mgr.StoreDraft(d.chatID, userMsgID, draft)
+func (d *managerDraftsMap) Store(requestID string, draft *Draft) {
+	d.mgr.StoreDraft(d.chatID, requestID, draft)
 }
-func (d *managerDraftsMap) Take(userMsgID string) *Draft {
-	return d.mgr.TakeDraft(d.chatID, userMsgID)
+func (d *managerDraftsMap) Take(requestID string) *Draft {
+	return d.mgr.TakeDraft(d.chatID, requestID)
 }
-func (d *managerDraftsMap) Lookup(userMsgID string) *Draft {
-	return d.mgr.GetDraft(d.chatID, userMsgID)
+func (d *managerDraftsMap) Lookup(requestID string) *Draft {
+	return d.mgr.GetDraft(d.chatID, requestID)
 }
 func (d *managerDraftsMap) Count() int { return d.mgr.DraftCount(d.chatID) }

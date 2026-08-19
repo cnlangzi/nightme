@@ -74,7 +74,7 @@ func (s *Starter) Info() agent.Info {
 // Note: this only verifies existence — we discard the resolved
 // path. PATH resolution at spawn time happens implicitly inside
 // exec.CommandContext at cmd.Start(); runPrintMode passes the
-// unresolved name to agent.NewCmd and the kernel + Go stdlib do
+// unresolved name to proc.New and the kernel + Go stdlib do
 // the rest. We don't cache the LookPath result because user-side
 // PATH edits should take effect without restarting the daemon.
 func (s *Starter) Detect() error {
@@ -135,6 +135,21 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	result, err := runPrintMode(ctx, s, cfg, blocks)
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
+	}
+	return result, nil
+}
+
+// Review implements /review for dsh: delegate to shared
+// StandardPrompt. dsh's chat agent reads git diff and outputs
+// the structured review.
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: agent.StandardPrompt(),
+	}})
+	if err != nil {
+		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
+			s.Info().Name, err)
 	}
 	return result, nil
 }

@@ -103,6 +103,25 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return s.collectResult(ctx, a, blocks)
 }
 
+// Review implements /review for the acp bridge: delegate to shared
+// StandardPrompt. The acp-driven chat agent (used by opencode)
+// reads git diff and outputs the structured review.
+//
+// acp is the generic ACP-protocol bridge; opencode is the only
+// built-in that uses it. Review here serves both acp as a Starter
+// and any future acp-backed agent that registers itself.
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: agent.StandardPrompt(),
+	}})
+	if err != nil {
+		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
+			s.Info().Name, err)
+	}
+	return result, nil
+}
+
 // collectResult sends blocks to a live *agent.Agent and drains
 // its Events channel until the turn ends. Extracted from
 // RunOnce so the dispatch logic can be unit-tested with a

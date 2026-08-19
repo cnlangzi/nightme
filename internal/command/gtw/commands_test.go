@@ -45,7 +45,7 @@ func TestFactory_Handle_NoArgs(t *testing.T) {
 	f := NewFactory(NewManager())
 	got, err := f.Handle(context.Background(),
 		command.RuntimeServices{},
-		cs,
+		nil, cs,
 		command.SlashInput{Text: "/gtw", Args: []string{"gtw"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -76,7 +76,7 @@ func TestFactory_Handle_Fix_NoArgs(t *testing.T) {
 	cs := &chatsession.ChatSession{}
 	f := NewFactory(NewManager())
 	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		cs,
+		nil, cs,
 	command.SlashInput{Text: "/gtw fix", Args: []string{"gtw", "fix"}})
 	if !got.Consumed {
 		t.Errorf("expected Consumed, got %+v", got)
@@ -92,7 +92,7 @@ func TestFactory_Handle_Fix_BadIssueID(t *testing.T) {
 	cs := &chatsession.ChatSession{}
 	f := NewFactory(NewManager())
 	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		cs,
+		nil, cs,
 	command.SlashInput{Text: "/gtw fix abc", Args: []string{"gtw", "fix", "abc"}})
 	if !got.Consumed {
 		t.Errorf("expected Consumed, got %+v", got)
@@ -111,7 +111,7 @@ func TestFactory_Handle_UnknownSubcommand(t *testing.T) {
 	cs := &chatsession.ChatSession{}
 	f := NewFactory(NewManager())
 	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		cs,
+		nil, cs,
 	command.SlashInput{Text: "/gtw bogus", Args: []string{"gtw", "bogus"}})
 	if !got.Consumed {
 		t.Errorf("expected Consumed, got %+v", got)

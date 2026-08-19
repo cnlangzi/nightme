@@ -1130,6 +1130,53 @@ type Starter interface {
 	// callers (e.g. /gtw commit, /gtw pr) that want a single
 	// synchronous turn and don't need the session handle.
 	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error)
+
+	// Review runs the /review slash command against this agent and
+	// returns the raw review output text. The bridge owns ONE thing:
+	// producing the review. The caller (the /review dispatcher in
+	// internal/command/review) is responsible for wrapping the text
+	// in agent.FormatReviewMessage and routing it to BOTH the
+	// AgentSession (via as.SendBlocks, so the main agent can act on
+	// "fix the blockers"-style follow-ups) and the channel (via the
+	// chat session's emitter, so the user sees the findings directly
+	// in chat without waiting for the AS's downstream reply).
+	//
+	// Takes StartConfig (not a dedicated ReviewContext) because the
+	// only review-specific data we needed was Workspace, and that
+	// field already exists on StartConfig. Reusing StartConfig keeps
+	// the bridge signature symmetric with RunOnce / Start and avoids
+	// a one-field type that leaks "review is a special thing"
+	// framing into the agent package.
+	//
+	// ===== F-review.md §13 "codex/claude use native review" rule =====
+	//
+	// Bridges that have a native review subcommand MUST invoke it
+	// directly instead of running our generic StandardPrompt:
+	//   - claudecode: `claude -p code-review` (built-in slash command;
+	//     note: NO leading slash in `[command]` slot — verified
+	//     2.1.220 that `claude -p /code-review` runs 0 turns and
+	//     returns empty result, while `claude -p code-review`
+	//     dispatches the slash command and fires the multi-agent
+	//     pipeline)
+	//   - codex:      `codex review --base <default-branch>` (subcommand;
+	//     review rejects exec-only flags like --json / -o /
+	//     --dangerously-bypass-approvals-and-sandbox / -C /
+	//     --skip-git-repo-check — uses its own argv assembly in
+	//     print.go, NOT runPrintMode)
+	//
+	// Bridges that have NO native review subcommand call
+	// s.RunOnce(ctx, cfg, [StandardPrompt()]) inline — the
+	// canonical review path is "spawn a fresh subprocess with the
+	// shared prompt" and inlining keeps the contract symmetric
+	// with RunOnce:
+	//   - dsh, opencode, pi, acp
+	//
+	// Return ErrReviewNotSupported when this agent type cannot do
+	// review (e.g. pty/bash fallback). The dispatcher surfaces a
+	// friendly "agent X does not support /review" reply (via
+	// cs.Emitter().Send from the async goroutine, since the inline
+	// reply is already gone by the time the bridge returns).
+	Review(ctx context.Context, cfg StartConfig) (RunResult, error)
 }
 
 // Errors surfaced by the registry.

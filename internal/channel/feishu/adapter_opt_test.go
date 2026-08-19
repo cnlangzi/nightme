@@ -13,6 +13,10 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
+func qopts(labels ...string) []messages.ChoiceOption {
+	return messages.ChoiceOptionsFromLabels(labels)
+}
+
 type patchLog struct {
 	mu     sync.Mutex
 	id     string
@@ -78,16 +82,16 @@ func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 	a.updateFunc = patches.hook()
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
 			Body:      "question: 何时检查版本? [仅 REPL 启动(裸 nightme) | REPL + 所有 CLI 子命令]",
-			Options:   []string{wantOption, "REPL + 所有 CLI 子命令"},
+			Options:   qopts(wantOption, "REPL + 所有 CLI 子命令"),
 			RequestID: "req-1",
 		},
 	}); err != nil {
-		t.Fatalf("Send(OutCard): %v", err)
+		t.Fatalf("Send(OutChoice): %v", err)
 	}
 
 	resp, err := a.handleCardAction(context.Background(), &larkcallback.CardActionTriggerEvent{
@@ -156,20 +160,18 @@ func TestHandleCardAction_OptPushesInboundAction(t *testing.T) {
 	}
 }
 
-func TestBuildInteractiveCard_PermissionButtonsStacked(t *testing.T) {
-	raw, err := buildInteractiveCard(&messages.Card{
+func TestBuildInteractiveCard_QuestionButtonsStacked(t *testing.T) {
+	raw, err := buildInteractiveCard(&messages.Choice{
 		Title:     "Action Needed",
 		RequestID: "r1",
-		Kind:      messages.CardKindPermission,
-		Questions: []messages.CardQuestion{{
+		Kind:      messages.ChoiceKindQuestion,
+		Questions: []messages.ChoiceQuestion{{
 			ID:       "q1",
 			Header:   "Trigger",
 			Question: "何时检查版本?",
-			Options: []string{
-				"仅 REPL 启动(裸 nightme)",
+			Options: qopts("仅 REPL 启动(裸 nightme)",
 				"REPL + 所有 CLI 子命令",
-				"你指定别的",
-			},
+				"你指定别的"),
 		}},
 	})
 	if err != nil {
@@ -209,18 +211,20 @@ func TestBuildInteractiveCard_PermissionButtonsStacked(t *testing.T) {
 	if !strings.Contains(raw, `"name":"opt_0"`) {
 		t.Error("option buttons inside a form need a unique name")
 	}
+	if !strings.Contains(raw, "👉 Action Needed") {
+		t.Error("Question kind must keep the 👉 title prefix")
+	}
 }
 
 func TestBuildInteractiveCard_QuestionWizardTitle(t *testing.T) {
-	raw, err := buildInteractiveCard(&messages.Card{
+	raw, err := buildInteractiveCard(&messages.Choice{
 		Title:     "Action Needed",
 		RequestID: "r1",
-		Kind:      messages.CardKindPermission,
-		Questions: []messages.CardQuestion{
-			{ID: "q1", Header: "Trigger", Question: "何时检查?", Options: []string{"A", "B"}},
-			{ID: "q2", Header: "Source", Question: "怎么查?", Options: []string{"C"}},
+		Kind:      messages.ChoiceKindQuestion,
+		Questions: []messages.ChoiceQuestion{
+			{ID: "q1", Header: "Trigger", Question: "何时检查?", Options: qopts("A", "B")},
+			{ID: "q2", Header: "Source", Question: "怎么查?", Options: qopts("C")},
 		},
-		Picks: make([]string, 2),
 	})
 	if err != nil {
 		t.Fatalf("buildInteractiveCard: %v", err)
@@ -260,29 +264,29 @@ func TestHandleCardAction_QuestionWizardBatchesOnLastClick(t *testing.T) {
 	a.updateFunc = patches.hook()
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
+			Kind:      messages.ChoiceKindQuestion,
 			RequestID: "req-wiz",
-			Questions: []messages.CardQuestion{
+			Questions: []messages.ChoiceQuestion{
 				{
 					ID:       "q-trigger",
 					Header:   "Trigger",
 					Question: "何时检查版本?",
-					Options:  []string{opt1, "REPL + 所有 CLI 子命令"},
+					Options:  qopts(opt1, "REPL + 所有 CLI 子命令"),
 				},
 				{
 					ID:       "q-source",
 					Header:   "Source",
 					Question: "怎么查?",
-					Options:  []string{opt2, "go-github-selfupdate"},
+					Options:  qopts(opt2, "go-github-selfupdate"),
 				},
 			},
-			Picks: make([]string, 2),
 		},
 	}); err != nil {
-		t.Fatalf("Send(OutCard): %v", err)
+		t.Fatalf("Send(OutChoice): %v", err)
 	}
 
 	click := func(option string) *larkcallback.CardActionTriggerResponse {
@@ -380,16 +384,16 @@ func TestHandleCardAction_QuestionWizardSkipThenAnswer(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_skip",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
+			Kind:      messages.ChoiceKindQuestion,
 			RequestID: "req-skip",
-			Questions: []messages.CardQuestion{
-				{ID: "q1", Header: "Q1", Question: "one", Options: []string{"A"}},
-				{ID: "q2", Header: "Q2", Question: "two", Options: []string{"B"}},
+			Questions: []messages.ChoiceQuestion{
+				{ID: "q1", Header: "Q1", Question: "one", Options: qopts("A")},
+				{ID: "q2", Header: "Q2", Question: "two", Options: qopts("B")},
 			},
-			Picks: make([]string, 2),
 		},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -465,7 +469,7 @@ func stackedColumnSets(t *testing.T, raw string) []map[string]any {
 	return sets
 }
 
-func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
+func TestSend_OutChoicePatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	a := testAdapter(t)
 	const (
 		chatID = "oc_settle"
@@ -477,27 +481,27 @@ func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	var patches patchLog
 	a.updateFunc = patches.hook()
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: chatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Waiting for approval",
 			Body:      "Bash: escalate sandbox",
-			Options:   []string{"Allow once", "Reject"},
+			Options:   qopts("Allow once", "Reject"),
 			RequestID: "req-settle",
 		},
 	}); err != nil {
-		t.Fatalf("Send OutCard: %v", err)
+		t.Fatalf("Send OutChoice: %v", err)
 	}
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCardPatch,
+		Kind:   messages.OutChoicePatch,
 		ChatID: chatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title: "Waiting for approval",
 			Body:  "✓ **allowed-once**（dashboard）",
-			Kind:  messages.CardKindPermission,
+			Kind:  messages.ChoiceKindPermission,
 		},
 	}); err != nil {
-		t.Fatalf("Send OutCardPatch: %v", err)
+		t.Fatalf("Send OutChoicePatch: %v", err)
 	}
 	_, patchedBodies := patches.wait(t, 1)
 	patched := patchedBodies[0]
@@ -509,13 +513,70 @@ func TestSend_OutCardPatch_EmptyReplyToSettlesLastCard(t *testing.T) {
 	}
 }
 
+func TestSend_OutChoicePatch_ByRequestID_NotLastCard(t *testing.T) {
+	a := testAdapter(t)
+	const chatID = "oc_two"
+	ids := []string{"om_first", "om_second"}
+	n := 0
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		id := ids[n]
+		n++
+		return id, nil
+	}
+	var patches patchLog
+	a.updateFunc = patches.hook()
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoice,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:     "first",
+			Body:      "card one",
+			Options:   qopts("A"),
+			RequestID: "req-first",
+		},
+	}); err != nil {
+		t.Fatalf("Send first OutChoice: %v", err)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoice,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:     "second",
+			Body:      "card two",
+			Options:   qopts("B"),
+			RequestID: "req-second",
+		},
+	}); err != nil {
+		t.Fatalf("Send second OutChoice: %v", err)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoicePatch,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:     "first",
+			Body:      "patched first",
+			RequestID: "req-first",
+			Settled:   true,
+		},
+	}); err != nil {
+		t.Fatalf("Send OutChoicePatch: %v", err)
+	}
+	patchedID, patchedBodies := patches.wait(t, 1)
+	if patchedID != "om_first" {
+		t.Errorf("PATCH target = %q, want om_first (RequestID, not last card)", patchedID)
+	}
+	if !strings.Contains(patchedBodies[0], "patched first") {
+		t.Errorf("PATCH body missing outcome; got %s", patchedBodies[0])
+	}
+}
+
 func TestBuildInteractiveCard_ApprovalHasNoCustomInput(t *testing.T) {
-	raw, err := buildInteractiveCard(&messages.Card{
+	raw, err := buildInteractiveCard(&messages.Choice{
 		Title:     "Waiting for approval",
 		Body:      "Bash: escalate sandbox",
-		Options:   []string{"Allow once", "Reject"},
+		Options:   qopts("Allow once", "Reject"),
 		RequestID: "r-appr",
-		Kind:      messages.CardKindPermission,
+		Kind:      messages.ChoiceKindPermission,
 	})
 	if err != nil {
 		t.Fatalf("buildInteractiveCard: %v", err)
@@ -529,6 +590,113 @@ func TestBuildInteractiveCard_ApprovalHasNoCustomInput(t *testing.T) {
 	if strings.Contains(raw, `"tag":"form"`) {
 		t.Error("approval card must not include a form")
 	}
+	if !strings.Contains(raw, "👉 Waiting for approval") {
+		t.Error("Permission kind must keep the 👉 title prefix")
+	}
+}
+
+func gtwDecisionOptions() []messages.ChoiceOption {
+	return []messages.ChoiceOption{
+		{ID: "act:/gtw/branch-newv2", Emoji: "🆕", Label: "用 -v2 新分支"},
+		{ID: "act:/gtw/branch-join", Emoji: "🔗", Label: "加入现有协作"},
+		{ID: "act:/gtw/cancel", Emoji: "❌", Label: "取消"},
+	}
+}
+
+func TestBuildInteractiveCard_DecisionSettledHighlightsSelectedID(t *testing.T) {
+	opts := gtwDecisionOptions()
+	raw, err := buildInteractiveCard(&messages.Choice{
+		Title:      "⚠️ 分支已存在",
+		Body:       "branch: fix/42",
+		RequestID:  "gtw-fix-om1",
+		Kind:       messages.ChoiceKindDecision,
+		Options:    opts,
+		Settled:    true,
+		SelectedID: "act:/gtw/branch-newv2",
+	})
+	if err != nil {
+		t.Fatalf("buildInteractiveCard: %v", err)
+	}
+	if strings.Contains(raw, "👉") {
+		t.Errorf("Decision must not get 👉; got %s", raw)
+	}
+	if strings.Contains(raw, `"tag":"form"`) {
+		t.Error("Decision must not wrap buttons in a form")
+	}
+	if !strings.Contains(raw, `"tag":"column_set"`) {
+		t.Error("Decision should use equal-width column_set")
+	}
+	if strings.Contains(raw, `"width":"fill"`) {
+		t.Error("Decision buttons must not use stacked fill width")
+	}
+	if !strings.Contains(raw, `"type":"success"`) {
+		t.Error("selected option must use success type")
+	}
+	if !strings.Contains(raw, "✓ 🆕 用 -v2 新分支") {
+		t.Error("selected option must match by ID (act:/gtw/...), not emoji")
+	}
+	if strings.Contains(raw, "✓ 🔗") || strings.Contains(raw, "✓ ❌") {
+		t.Error("unselected options must not get the ✓ prefix")
+	}
+	if !strings.Contains(raw, `"action":"act:/gtw/branch-newv2"`) {
+		t.Error("button value must keep the act: ID")
+	}
+	if strings.Count(raw, `"disabled":true`) < 3 {
+		t.Errorf("every settled Decision button should be disabled; got %s", raw)
+	}
+}
+
+func TestSend_OutChoicePatch_DecisionKeepsButtonsAndHighlights(t *testing.T) {
+	a := testAdapter(t)
+	const (
+		chatID = "oc_gtw"
+		msgID  = "om_gtw"
+	)
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		return msgID, nil
+	}
+	var patches patchLog
+	a.updateFunc = patches.hook()
+	opts := gtwDecisionOptions()
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoice,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:     "⚠️ 分支已存在",
+			Body:      "branch: fix/42",
+			RequestID: "gtw-fix-om1",
+			Kind:      messages.ChoiceKindDecision,
+			Options:   opts,
+		},
+	}); err != nil {
+		t.Fatalf("Send OutChoice: %v", err)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:   messages.OutChoicePatch,
+		ChatID: chatID,
+		Choice: &messages.Choice{
+			Title:      "⚠️ 分支已存在",
+			Body:       "branch: fix/42",
+			RequestID:  "gtw-fix-om1",
+			Kind:       messages.ChoiceKindDecision,
+			Options:    opts,
+			Settled:    true,
+			SelectedID: "act:/gtw/branch-newv2",
+		},
+	}); err != nil {
+		t.Fatalf("Send OutChoicePatch: %v", err)
+	}
+	_, bodies := patches.wait(t, 1)
+	patched := bodies[0]
+	if !strings.Contains(patched, `"tag":"button"`) {
+		t.Errorf("gtw PATCH must keep buttons; got %s", patched)
+	}
+	if !strings.Contains(patched, "✓ 🆕 用 -v2 新分支") {
+		t.Errorf("gtw PATCH must highlight SelectedID; got %s", patched)
+	}
+	if strings.Contains(patched, "👉") {
+		t.Errorf("gtw PATCH must not add 👉; got %s", patched)
+	}
 }
 
 func TestHandleCardAction_OneShotSkip(t *testing.T) {
@@ -540,15 +708,15 @@ func TestHandleCardAction_OneShotSkip(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_oneshot_skip",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
+			Kind:      messages.ChoiceKindQuestion,
 			RequestID: "req-oneshot-skip",
-			Questions: []messages.CardQuestion{
-				{ID: "q1", Header: "Q1", Question: "which?", Options: []string{"A", "B"}},
+			Questions: []messages.ChoiceQuestion{
+				{ID: "q1", Header: "Q1", Question: "which?", Options: qopts("A", "B")},
 			},
-			Picks: make([]string, 1),
 		},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -588,15 +756,15 @@ func TestHandleCardAction_OneShotCustomSubmit(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_oneshot_custom",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
+			Kind:      messages.ChoiceKindQuestion,
 			RequestID: "req-oneshot-custom",
-			Questions: []messages.CardQuestion{
-				{ID: "q1", Question: "which?", Options: []string{"A", "B"}},
+			Questions: []messages.ChoiceQuestion{
+				{ID: "q1", Question: "which?", Options: qopts("A", "B")},
 			},
-			Picks: make([]string, 1),
 		},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -648,15 +816,15 @@ func TestHandleCardAction_CustomSubmitEmptyToasts(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_empty_custom",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
+			Kind:      messages.ChoiceKindQuestion,
 			RequestID: "req-empty-custom",
-			Questions: []messages.CardQuestion{
-				{ID: "q1", Question: "which?", Options: []string{"A"}},
+			Questions: []messages.ChoiceQuestion{
+				{ID: "q1", Question: "which?", Options: qopts("A")},
 			},
-			Picks: make([]string, 1),
 		},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -695,16 +863,16 @@ func TestHandleCardAction_QuestionWizardCustomThenSkip(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: "oc_custom_skip",
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
+			Kind:      messages.ChoiceKindQuestion,
 			RequestID: "req-custom-skip",
-			Questions: []messages.CardQuestion{
-				{ID: "q1", Header: "Q1", Question: "one", Options: []string{"A"}},
-				{ID: "q2", Header: "Q2", Question: "two", Options: []string{"B"}},
+			Questions: []messages.ChoiceQuestion{
+				{ID: "q1", Header: "Q1", Question: "one", Options: qopts("A")},
+				{ID: "q2", Header: "Q2", Question: "two", Options: qopts("B")},
 			},
-			Picks: make([]string, 2),
 		},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -777,21 +945,19 @@ func TestHandleCardAction_FormSubmitOptIndexName(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:   messages.OutCard,
+		Kind:   messages.OutChoice,
 		ChatID: wantChatID,
-		Card: &messages.Card{
+		Choice: &messages.Choice{
 			Title:     "Action Needed",
+			Kind:      messages.ChoiceKindQuestion,
 			RequestID: "req-form-opt",
-			Questions: []messages.CardQuestion{{
+			Questions: []messages.ChoiceQuestion{{
 				ID:       "q-commit",
 				Question: "怎么办?",
-				Options: []string{
-					wantOption,
+				Options: qopts(wantOption,
 					"接受 endpoint 改名 commit message",
-					"放手,改用顶层 fixup commit",
-				},
+					"放手,改用顶层 fixup commit"),
 			}},
-			Picks: make([]string, 1),
 		},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -834,20 +1000,20 @@ func TestHandleCardAction_FormSubmitOptIndexName(t *testing.T) {
 }
 
 func TestResolveCardAction_FormNames(t *testing.T) {
-	card := &messages.Card{
-		Questions: []messages.CardQuestion{{
-			Options: []string{"A", "B"},
+	card := &messages.Choice{
+		Questions: []messages.ChoiceQuestion{{
+			Options: qopts("A", "B"),
 		}},
 	}
 	got := resolveCardAction(&larkcallback.CardActionTriggerRequest{
 		Action: &larkcallback.CallBackAction{Name: "opt_1"},
-	}, card)
+	}, card, nil)
 	if got != "opt:B" {
 		t.Errorf("opt_1 = %q, want opt:B", got)
 	}
 	got = resolveCardAction(&larkcallback.CardActionTriggerRequest{
 		Action: &larkcallback.CallBackAction{Name: "skip_question"},
-	}, card)
+	}, card, nil)
 	if got != "skip:" {
 		t.Errorf("skip_question = %q, want skip:", got)
 	}
@@ -856,7 +1022,7 @@ func TestResolveCardAction_FormNames(t *testing.T) {
 			Name:  "opt_0",
 			Value: map[string]any{"action": "opt:override"},
 		},
-	}, card)
+	}, card, nil)
 	if got != "opt:override" {
 		t.Errorf("value.action should win over name; got %q", got)
 	}
@@ -879,8 +1045,8 @@ func callbackCardJSON(t *testing.T, resp *larkcallback.CardActionTriggerResponse
 
 func TestRememberOptCard_KeepsPreviousForStaleClick(t *testing.T) {
 	a := testAdapter(t)
-	oldCard := &messages.Card{Title: "old", RequestID: "r1", Questions: []messages.CardQuestion{{ID: "q1", Question: "a"}}}
-	newCard := &messages.Card{Title: "new", RequestID: "r2", Questions: []messages.CardQuestion{{ID: "q2", Question: "b"}}}
+	oldCard := &messages.Choice{Title: "old", RequestID: "r1", Questions: []messages.ChoiceQuestion{{ID: "q1", Question: "a"}}}
+	newCard := &messages.Choice{Title: "new", RequestID: "r2", Questions: []messages.ChoiceQuestion{{ID: "q2", Question: "b"}}}
 	a.rememberOptCard("oc_1", "om_old", oldCard)
 	a.rememberOptCard("oc_1", "om_new", newCard)
 	if got := a.getOptCard("om_old"); got == nil || got.Title != "old" {

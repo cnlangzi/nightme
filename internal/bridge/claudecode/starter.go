@@ -161,3 +161,30 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	}
 	return result, nil
 }
+
+// Review implements /review for the claudecode bridge.
+//
+// F-review.md §13 "codex/claude use native review" rule: when the
+// underlying CLI has a built-in review pathway, we invoke it
+// directly instead of running our generic StandardPrompt. Claude
+// Code has `code-review` built in (a multi-agent review pipeline
+// tuned for the task); invoking it via `claude -p code-review`
+// (NO leading slash — verified 2.1.220) is strictly better than
+// reverse-engineering the same review into a generic prompt-mode
+// call. Runs `runCodeReviewPrintMode` which produces the same
+// wire-format output as runPrintMode (stream-json), so the
+// result handling is unchanged.
+//
+// v9: returns the raw RunResult from runCodeReviewPrintMode — the
+// /review dispatcher in internal/command/review/cmd.go wraps it
+// in agent.FormatReviewMessage and routes to BOTH the AS (via
+// as.SendBlocks) and the channel (via the chat session's
+// emitter). The bridge no longer owns presentation or
+// distribution.
+//
+// Other bridges (dsh / opencode / pi / acp) don't have native
+// review; they delegate to agent.Review which uses StandardPrompt.
+// pty returns ErrReviewNotSupported.
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	return runCodeReviewPrintMode(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
+}

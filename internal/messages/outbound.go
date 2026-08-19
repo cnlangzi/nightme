@@ -42,8 +42,11 @@ const (
 	// used in v1.3 (append-only); reserved for channels that
 	// support mutable state markers (e.g. Web UI).
 	OutMessageStateRemoved
-	// OutCard sends an interactive card (permission request, etc.).
-	OutCard
+	// OutChoice sends an interactive choice prompt (permission,
+	// question, gtw decision). Channel may render it as a native
+	// card; the abstract payload is Choice, not a platform
+	// card schema. Errors use OutError.
+	OutChoice
 	// OutResult is the assistant's final reply for the turn. Sourced
 	// from agent.EventAgentResult (Claude Code: result.Result). Channels
 	// render it with a distinct icon (e.g. 📝) so users can tell
@@ -84,12 +87,11 @@ const (
 	// valid "clear the checklist" signal.
 	OutTaskUpdate
 
-	// OutCardPatch (F-46) replaces the body of an existing
-	// interactive card message in place (Feishu PATCH). Used by
-	// gtw.HandleAction follow-ups to disable the original decision
-	// card after the user has picked. ReplyTo carries the bot-side
-	// message id to PATCH; Card holds the new payload.
-	OutCardPatch
+	// OutChoicePatch updates an existing choice prompt in place.
+	// Channel correlates via Choice.RequestID. Settled + SelectedID
+	// describe the outcome; Channel paints chrome. Callers must not
+	// put a platform message id in ReplyTo.
+	OutChoicePatch
 
 	// OutError surfaces a non-graceful bridge child process exit
 	// (EventAgentError with a populated Diagnostic). Carries the
@@ -148,8 +150,8 @@ func (k OutboundKind) String() string {
 		return "message_state"
 	case OutMessageStateRemoved:
 		return "message_state_removed"
-	case OutCard:
-		return "card"
+	case OutChoice:
+		return "choice"
 	case OutResult:
 		return "result"
 	case OutInit:
@@ -160,8 +162,8 @@ func (k OutboundKind) String() string {
 		return "task_create"
 	case OutTaskUpdate:
 		return "task_update"
-	case OutCardPatch:
-		return "card_patch"
+	case OutChoicePatch:
+		return "choice_patch"
 	case OutError:
 		return "error"
 	case OutHeartbeat:
@@ -187,8 +189,9 @@ type OutboundMessage struct {
 	// ToolInfo for the rationale (gateway transports the unified
 	// tool concept; channel decides how to render it).
 	Text string
-	// Card carries the interactive card payload for OutCard.
-	Card *Card
+	// Choice carries the interactive choice payload for OutChoice
+	// / OutChoicePatch (permission, question, gtw decision).
+	Choice *Choice
 	// Tool carries the typed payload for OutToolStart / OutToolEnd.
 	// nil for other Kinds. Gateway populates this from
 	// AgentEvent.ToolStart / ToolEnd in translate(); channels

@@ -25,17 +25,13 @@ import (
 type fakeChannel struct {
 	name      string
 	sendCalls int32
-	cardCalls int32
 	sendErr   error
-	cardErr   error
-	cardMsgID string
 	lastSent  messages.OutboundMessage
-	lastCard  messages.OutboundMessage
 }
 
-func (f *fakeChannel) Name() string { return f.name }
-func (f *fakeChannel) Start(_ context.Context) error { return nil }
-func (f *fakeChannel) Stop(_ context.Context) error { return nil }
+func (f *fakeChannel) Name() string                             { return f.name }
+func (f *fakeChannel) Start(_ context.Context) error            { return nil }
+func (f *fakeChannel) Stop(_ context.Context) error             { return nil }
 func (f *fakeChannel) Incoming() <-chan messages.InboundMessage { return nil }
 
 func (f *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
@@ -44,15 +40,9 @@ func (f *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) erro
 	return f.sendErr
 }
 
-func (f *fakeChannel) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
-	atomic.AddInt32(&f.cardCalls, 1)
-	f.lastCard = msg
-	return f.cardMsgID, f.cardErr
-}
-
 // Channel-interface extensions (Phase 2.1 + 2.2). fakeChannel
 // has no live state — all three are trivial fallbacks.
-func (f *fakeChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (f *fakeChannel) OnPromptEnded(_ context.Context, _, _ string) {}
 func (f *fakeChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return f.name, json.RawMessage("{}"), nil
 }
@@ -107,30 +97,29 @@ func TestEmitter_Passthrough_Send(t *testing.T) {
 	}
 }
 
-func TestEmitter_Passthrough_SendCard(t *testing.T) {
-	// SendCard also pure passthrough — returns the channel's
-	// messageID and forwards the message.
-	fc := &fakeChannel{name: "test", cardMsgID: "msg-123"}
+func TestEmitter_Passthrough_OutChoice(t *testing.T) {
+	fc := &fakeChannel{name: "test"}
 	em := New(fc, Options{})
 
 	in := messages.OutboundMessage{
-		ChatID:  "c1",
-		Kind:    messages.OutCard,
-		Text:    "card-body",
-		ReplyTo: "user-msg-1",
+		ChatID: "c1",
+		Kind:   messages.OutChoice,
+		Choice: &messages.Choice{
+			Title:     "pick",
+			RequestID: "req-1",
+		},
 	}
-	id, err := em.SendCard(context.Background(), in)
-	if err != nil {
-		t.Fatalf("SendCard err: %v", err)
+	if err := em.Send(context.Background(), in); err != nil {
+		t.Fatalf("Send err: %v", err)
 	}
-	if id != "msg-123" {
-		t.Errorf("msgID = %q, want msg-123", id)
+	if atomic.LoadInt32(&fc.sendCalls) != 1 {
+		t.Errorf("sendCalls = %d, want 1", fc.sendCalls)
 	}
-	if atomic.LoadInt32(&fc.cardCalls) != 1 {
-		t.Errorf("cardCalls = %d, want 1", fc.cardCalls)
+	if fc.lastSent.Kind != messages.OutChoice {
+		t.Errorf("Kind = %v, want OutChoice", fc.lastSent.Kind)
 	}
-	if fc.lastCard.Text != "card-body" {
-		t.Errorf("Card text = %q, want card-body", fc.lastCard.Text)
+	if fc.lastSent.Choice == nil || fc.lastSent.Choice.RequestID != "req-1" {
+		t.Errorf("Choice = %+v, want RequestID=req-1", fc.lastSent.Choice)
 	}
 }
 

@@ -49,10 +49,10 @@ const (
 // wants to translate clicks — both sides MUST agree on the exact
 // spelling. The renderer currently emits:
 //
-//	act:/gtw/branch-newv2   → ReactionNewV2   (BranchExistsCard)
-//	act:/gtw/branch-join    → ReactionJoin    (BranchExistsCard)
-//	act:/gtw/cancel         → ReactionCancel  (BranchExistsCard + WorktreeFailCard)
-//	act:/gtw/worktree-retry → ReactionRetry   (WorktreeFailCard)
+//	act:/gtw/branch-newv2   → ReactionNewV2   (BranchExistsChoice)
+//	act:/gtw/branch-join    → ReactionJoin    (BranchExistsChoice)
+//	act:/gtw/cancel         → ReactionCancel  (BranchExistsChoice + WorktreeFailChoice)
+//	act:/gtw/worktree-retry → ReactionRetry   (WorktreeFailChoice)
 //
 // reaction_test.go pins this contract by walking every Choice in
 // both rendered cards and asserting ActionLookup recognises it.

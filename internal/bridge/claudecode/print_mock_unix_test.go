@@ -32,7 +32,7 @@ import (
 // each repeat filepath.Abs and the value is captured before any
 // test cwd-shifting happens.
 //
-// exec.CommandContext (and thus agent.NewCmd) routes the binary
+// exec.CommandContext (and thus proc.New) routes the binary
 // through exec.LookPath, which only consults PATH. A relative
 // path would not be found, so the mock must be invoked by its
 // absolute path.

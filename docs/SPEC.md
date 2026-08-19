@@ -72,8 +72,8 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 | 组件 | 职责 | 它**不知道** |
 |------|------|------------|
 | **Channel Adapter** | IM 协议编解码；`Send(OutboundMessage)` 渲染；**自管** receipt card / thread / DOM 节点的完整生命周期（含 cold-create / PATCH / 终态） | ChatSession、AgentSession、workspace、agent、binding、任何渲染状态 |
-| **Gateway** | 中枢 orchestrator：slash command 路由（**通过 Commander 抽象，不直接 import handlers_*.go**）、binding 表（chat_id ↔ ChatSession）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度、outbound 路由（stamp `ReplyTo=userMsgID` 送到对应 Channel） | IM 协议细节、agent 内部协议、PTY/ACP 细节、Channel 内部渲染状态、命令实现细节（具体命令实现住 `internal/command/<name>/`） |
-| **Slash Command Layer**（Commander）住 `internal/command/`，由 `SlashCommandFactory` 装配 | 命令抽象层：定义 `Commander` / `SlashCommandFactory` / `SlashRegistry` / `RuntimeServices` 接口；声明 `ReactionRouter` 服务接口；提供通用 `preflight` / `reply` helper。各命令子包（`internal/command/<name>/cmd.go`）实现 `SlashCommandFactory`，Factory 构造函数直接拿 `*chatsession.Manager` | 命令的具体业务逻辑由各 `<name>` 子包实现；command 包本身**不** import gtw / gateway / channel 具体类（chatsession 是命令 Factory 的直接依赖） |
+| **Gateway** | 中枢 orchestrator：slash command 路由（**通过 Commander 抽象，不直接 import handlers_*.go**）、binding 表（chat_id ↔ ChatSession）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度、outbound 路由（stamp `ReplyTo=userMsgID` 送到对应 Channel）、**多 channel 并行 pump（每 channel 一个 pump goroutine → 共享 inbound.Router 派发到 per-channel chatsession.Manager）** | IM 协议细节、agent 内部协议、PTY/ACP 细节、Channel 内部渲染状态、命令实现细节（具体命令实现住 `internal/command/<name>/`）、**chatID→channel 路由表**（partition 由 pump goroutine 闭包隐式决定） |
+| **Slash Command Layer**（Commander）住 `internal/command/`，由 `SlashCommandFactory` 装配 | 命令抽象层：定义 `Commander` / `SlashCommandFactory` / `SlashRegistry` / `RuntimeServices` 接口；声明 `ReactionRouter` 服务接口；提供通用 `preflight` / `reply` helper。各命令子包（`internal/command/<name>/cmd.go`）实现 `SlashCommandFactory`，**Factory 不持 mgr 字段**——`Handle(ctx, mgr, input)` 接受 mgr per call（v1.3+ 多 channel 下 mgr 不可绑死）；shared `command.Registry` 跨所有 channel 共享 | 命令的具体业务逻辑由各 `<name>` 子包实现；command 包本身**不** import gtw / gateway / channel 具体类（chatsession 是命令 Factory 的直接依赖） |
 | **ChatSession** | per chat 的会话上下文（持久化）：selectedCwd / selectedAgent / primaryAgent / InputBuffer FSM / AgentSession 池索引（注意：单 turn userMsgID 锚点 F-53 起迁移至 `AgentSession.currentPrompt.LastMessageID`，不再由 ChatSession 持有） | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染；**slash command 详情；任何命令包路径；gtw / command / gateway 任何具体类型的名字**（强化） |
 | **AgentSession**（住 `internal/agentsession/`）| CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、Channel、slash command |
 | **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、ChatSession、Channel |
@@ -126,8 +126,16 @@ CS 通过 type aliases 暴露 AS 类型保持调用面简洁（`chatsession.Agen
 - **`AgentSession` 不 import `channel/` 也不 import `ChatSession`**（纯进程句柄）
 - **Gateway 不 import `channel/feishu`**（只 import `channel.Channel` interface）
 - **`ChatSession` 不知道 Channel**（只持有 Gateway 注入的 callback）
+- **`ChatSession` 不知道自己是哪个 channel**（无 `channelName` 字段，持久化 schema 零变更）——channel 归属由"该 ChatSession 落在哪个 chatsession.Manager"隐式决定
 - **`AgentSession` 知道自己的 `(agent, cwd)` immutable 标识**
-- **Channel 接口不暴露 ChatSession、AgentSession、binding、任何 receipt 概念**——Channel 自管渲染状态（receipt card / thread / DOM 节点），Gateway 一概不知。`Channel` interface 6 个方法：`Name / Start / Stop / Incoming / Send / SendCard`（`SendCard` 为 F-46 决策卡新增，返回 bot-side message_id 用于 PATCH correlation）
+- **多 channel 并行接入**（v1.3 起）：所有已 login 的 channel 自动启动，无需 `--channel` flag；接入新 channel = 1 个 adapter 文件 + 1 个 `init()` 注册到 `channel.Registry`；runtime / gateway / chatsession / command 零修改
+- **Per-channel `chatsession.Manager`**：每个 channel 一个 `Manager` 实例，`sessions map[chatID]*ChatSession` 装该 channel 的 chat；`Manager.emitter` 是该 channel 的 `outbound.Emitter`（= channel 自己，无 router 无 multi 概念）
+- **Per-channel `outbound.Emitter` 单 channel 单一对象**：`outbound.New(ch, opts)` 直接拿 channel 构造；ChatSession.emitter 在 Manager 构造时绑定，ChatSession 继承；出站路径 `cs.emitter.Send(msg)` = `ch.Send(msg)`，**无 routing 表、无查表、无多 channel 概念**
+- **Restore 懒加载**：daemon 启动时**不**调 `Manager.RestoreFromRegistry`；`Manager.GetOrCreate(chatID)` 在 in-memory miss 时走 `csFile.GetByChat(chatID)` 命中即 hydrate（恢复 selectedCwd/Agent/WatchMode/ThinkMode/ToolsMode + AgentSession 池 Detached），miss 才 `New`。`Manager.RestoreFromRegistry` 方法保留（21 个测试 caller 不破）但 runtime 路径不调
+- **入站 partition 由 pump goroutine 闭包隐式决定**：`gw.pumpOne` 闭包 capture `(channel, mgr)`，dispatch chain 用 mgr per call；新 chatID 落到产生它的 channel 的 Manager；chatID 跨 channel 不撞（feishu `oc_*` vs telegram 数字，天然 namespace 分离）
+- **共享 components 跨 mgr 查找**：`gtw.Manager` / `gitStatusLookup` / `command.Registry` 共享，通过 `runtime.findChatSession(chatID)` 跨 `runtime.allMgrs` 线性扫（N=2-3 时 O(N) 无压力）；这些组件无 `mgr` 字段，handle 由 dispatch chain 透传
+- **gw 持 `[]gateway.Pump`**：每个 `Pump = { Channel channel.Channel; Manager *chatsession.Manager }`；删 `chatToChan` / `defaultChannel` / `channelCh` / `pumpInbound` / `dispatchLoop` / `resolveChannel` 等冗余 routing 表（partition 隐式，不再需要查表）
+- **Channel 接口不暴露 ChatSession、AgentSession、binding、任何 receipt 概念**——Channel 自管渲染状态（receipt card / thread / DOM 节点），Gateway 一概不知。`Channel` 的唯一出站方法是 `Send(OutboundMessage)`；交互卡相关是 Channel 私有的（`Choice.RequestID` → 平台 message id），调用方不拿 bot-side message id，也不另开 `SendCard` / `SendAction`
 - **`agentSession.Events()` chan 的唯一消费者是 session 自己的 readPump**；ChatSession 通过 `ChatSession.EventCallback` 接收事件，**不直接读 chan**（沿用 修复）
 - **ChatSession 内 `(agent, cwd)` 唯一索引**（不是全局唯一；不同 ChatSession 可有独立 `(claude, /path/A)` AgentSession）
 - **`/use` 不重启进程**：永远复用 pool 中的现有 AgentSession，找不到才 spawn 新进程
@@ -414,7 +422,7 @@ channel.Send(ctx, OutboundMessage)
   │   ├ 命中 → PATCH / 更新（receipt card 追加内容、thread 发新回复、DOM 节点 in-place 编辑）
   │   └ miss → cold-create 一个新 receipt（userMsgID 作为 key），然后追加
   ├ (OutMessageState case) → AddReaction on Meta["message_id"] → 用户消息挂 ⏳/🔄/✅/❌
-  └ (OutCard case) → 发交互卡片（permission prompt 等）
+  └ (OutChoice case) → 发交互卡片（permission prompt 等）
 ```
 
 **关键不变量**：
@@ -627,11 +635,11 @@ OutboundMessage{
 
 详见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md)（历史参考）+ [`feat/F-53-message-prompt-lifecycle.md`](./feat/F-53-message-prompt-lifecycle.md)（ 权威定义）。
 
-### 2.6 Interactive Decision Cards
+### 2.6 Interactive Choices
 
 **核心问题**：gtw 决策卡的 branch-exists / worktree-fail 场景（[`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3.3）此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
 
-**F-46**：决策面改为**交互卡**；用户选择后**原地更新**同一张卡（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。
+**F-46**：决策面改为**交互选择**（`OutChoice`）；用户选择后**原地更新**同一张 UI（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。Channel 可把它渲染成原生 card。
 
 **概念数据流**：
 
@@ -645,7 +653,7 @@ Channel：平台点击 → 归一化为 InboundMessage{Reaction|Action}
 Gateway：dispatchAction → ChatSession.HandleAction
         │
         ▼
-gtw：消费 draft → 执行决策 → 发出 OutCardPatch（或无 bot 卡 id 时退化为文本）
+gtw：消费 draft → 执行决策 → 发出 OutChoicePatch（或无 bot 卡 id 时退化为文本）
         │
         ▼
 Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现）
@@ -655,9 +663,9 @@ Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现�
 
 | 概念 | 含义 |
 |---|---|
-| `OutCard` | 发出一张新的交互决策卡 |
-| `OutCardPatch` | 原地更新已发出的决策卡 |
-| typed `Card` | kind / choices / chosen / disabled —— 描述决策面，不含平台 schema |
+| `OutChoice` | 发出一次新的交互选择（permission / question / gtw decision） |
+| `OutChoicePatch` | 原地结算或更新已发出的选择（`Settled` + 可选 `SelectedID`） |
+| typed `Choice` | RequestID / Kind / Title / Body / Options / Questions —— 描述要选什么，不含平台 chrome |
 | 边界归一化 | 平台按钮点击在 Channel 边界折成既有 reaction/action 通路，与 emoji 汇合 |
 
 **不变式**：
@@ -713,7 +721,7 @@ command.ReactionRouter 内部：
 gtw.Manager.HandleReaction(ev)
   ├ 查自己的 states / drafts map(不再走 chatsession.gtwContext)
   ├ dispatch 到 executeBranchExistsAction / executeWorktreeFailAction
-  ├ 执行动作 + 发 OutCardPatch / OutReply
+  ├ 执行动作 + 发 OutChoicePatch / OutReply
   └ 返 true / false 给 router
 ```
 
@@ -744,13 +752,13 @@ type ReactionRouter interface {
 **§2.6 ↔ §2.7 配合**：
 - §2.6 解决"decision card 按钮如何变成 reaction"（Channel 边界归一化）
 - §2.7 解决"reaction 由谁分发"（runtime ReationRouter，与 ChatSession 解耦）
-- 两件事独立但组合工作：decision-card 点击 → Channel 归一化为 reaction → router.Handle → gtw.Manager → OutCardPatch
+- 两件事独立但组合工作：decision-card 点击 → Channel 归一化为 reaction → router.Handle → gtw.Manager → OutChoicePatch
 
 **不变式**：
 - §1.3 现有不变式"ChatSession 不 import channel/feishu"保持
 - §1.3 **新增**"ChatSession 不 import command/、不 import gtw"（反应分发器不在 ChatSession）
 - §1.3 **新增**"reaction 不走 ChatSession.HandleAction"（handle action 必须走 ReactionRouter）
-- §2.6 决策卡 §2.6 不变式全部保留（按钮归一化、typed Card、不引入第二条生命周期）
+- §2.6 决策卡 §2.6 不变式全部保留（按钮归一化、typed Choice、不引入第二条生命周期）
 - gateway 持有了 `ReactionRouter`，但只通过接口持有，不直接实现
 
 **实现细节**（ReactionRouter 的具体实现策略、gtw.Manager 注册时机、`/gtw test` UAT）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3 / §5。
@@ -1085,7 +1093,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | # | 决策 | 结论 |
 |---|------|------|
 | **Q1** | 技术栈 | **Go 1.22+** |
-| **Q2** | MVP Channel | **只飞书** + Channel interface 抽象 |
+| **Q2** | Channel 多寡 | **多 channel 并行接入**（v1.3 起）：所有已 login 的 channel 全部自动启动；`channel.Registry` OCP 接入点；`feishu` + `telegram` 已实现，slack / web 是 roadmap。Channel interface 抽象不变。详见 [`CHANNEL.md`](./CHANNEL.md) |
 | **Q3** | MVP Agent | **只 Claude Code** + Agent 抽象（`AgentSpec` / `Starter` interface）|
 | **Q4** | Session 路由 | **Chat ↔ ChatSession 1:1**（Gateway 持有 binding 表）|
 | **Q5** | CLI spawn 方式 | **自己 PTY**（aymanbagabas/go-pty）|
@@ -1099,6 +1107,8 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | **Q13** | AgentSession 唯一性 | **`(agent, cwd)` per ChatSession 唯一**；不同 ChatSession 可独立 |
 | **Q14** | `session.Events()` 单消费者 | **readPump only**；ChatSession 通过 EventCallback 接收 |
 | **Q15** | `/cwd` / `/use` 对 AgentSession 的影响 | **不杀任何 AgentSession**；pool 保留老 entry，切回能复用 |
+| **Q16** | 多 channel 的 chatsession 归属 | **per-channel `chatsession.Manager`**：每个 channel 一个 `Manager`，chatID 天然 namespaced；ChatSession 不知道自己是哪个 channel（无 `channelName` 字段，持久化 schema 零变更）；入站 partition 隐式由 gw pump goroutine 闭包决定 |
+| **Q17** | 多 channel 的 restore | **懒加载**：`Manager.GetOrCreate(chatID)` in-memory miss 时走 `csFile.GetByChat(chatID)` 命中即 hydrate，miss 才 `New`；daemon 启动时**不**做全量 restore。`Manager.RestoreFromRegistry` 方法保留（21 个测试 caller 不破）但 runtime 路径不调 |
 
 **已确认（2026-08-03，F-watch 锁定）**：
 - **Q-W1** ✅ 新增 `/watch on|off` slash command 控制 per-chat `WatchMode`：`WatchModeMention`（默认，只 @ 收）/ `WatchModeAll`（全收）；由 Gateway dispatcher 在 `Handle` 入口 gate
@@ -1120,66 +1130,105 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 ## 11.1 Daemon startup flow
 
-`nightme run` 启动顺序（见 `cmd/nightme/run.go::runDaemon`）：
+`nightme run` 启动顺序（v1.3 起：多 channel + 懒加载 restore；见 `cmd/nightme/run.go::runDaemon` 与 [`CHANNEL.md`](./CHANNEL.md) §3）：
 
 ```
+=== 阶段 1: 共享资源 ===
 1.  loadConfig()                                 # ~/.nightme/config.yaml
 2.  openChatSessions() / openAgentSessions()     # chat_sessions.json / agent_sessions.json
+                                              # (整文件加载到 csFile.entries / asFile.entries in-memory)
 3.  removeLegacyRegistryFile(cfg)                # 归档 registry.json 为 .v1.bak
 4.  buildAgents(cfg)                             # cfg.Agents → agent.Registry
-5.  deps.newChannel(cfg) + ch.Start(ctx)         # Feishu / echo channel 启动 WS
-6.  spawner := chatsession.NewRegistrySpawner(agents)
-7.  mgr := chatsession.NewManager().WithSpawner(spawner).WithPersistence(csFile, asFile)
-8.  em := outbound.New(ch, outbound.Options{StatusBarSource: newRuntimeStatusBarSource(mgr, prCacheReg, gtwDeps)})
-       mgr.WithChannelResolver(func(string) chatsession.Channel { return newChannelWrap(em) })
-9.  gtwMgr := gtw.NewManager(); gtwMgr.SetHandlerDeps(...); gtwMgr.SetGetChatSession(...)
-10. router := commandServices.NewReactionRouter(); router.Register("*", gtwMgr.HandleReaction)
-11. reg := command.NewRegistry(); reg.Register(gtw / watch / think / tools / cwd / use / close / stop / newcmd)
-       commander := command.NewCommander(reg)
-12. shellDispatcher := shell.NewDispatcher(mgr.Emitter())  # shell 走共享 outbound.Emitter,跟 command / 普通消息同一条消息路径(F-XX Sender→Emitter 重构后)
-13. ir := inbound.New(mgr, commander, shellDispatcher, router, cfg.Primary)
-       gwImpl := gateway.New(ir, em)
-       # inbound.Router owns the 4-branch dispatch chain (tryAction /
-       # tryCommand / tryShell / tryMessage) — F-58 replaced the v0.x
-       # shim closures (WithCommander / WithShellDispatch /
-       # WithActionHandler) and the standalone messageDispatcher
-       # pointer that gateway.New used to take.
-14. wireRuntimeCallbacksAndRestore(mgr, gwImpl, prCacheReg, ...)
-       — mgr.WithOnCreate(...) 必须在 RestoreFromRegistry 之前调，
-         否则恢复的 ChatSession 上的 onCreate 钩子永不触发
-15. mgr.RestoreFromRegistry()                    # 重建内存中 ChatSession 池 (AgentSession 状态=Detached)
-16. gwImpl.AttachChannels(ch) + gwImpl.Start(ctx)
-17. block on signal / ctx.Done()
-18. shutdownRun: stop channel + persist final state（不杀 agent 进程;
-       AgentSession 在 registry 以 Detached 保留,下次启动经
-       RestoreFromRegistry + LookupSelectedAgentSession 自动 reuse 或 re-spawn）
+5.  prCacheReg := &prcache.Registry{}
+    gtwDeps := gtw.HandlerDeps{Git, Prober, PRCache: prCacheReg}
+
+=== 阶段 2: 共享编排（无 mgr 依赖） ===
+6.  gtwMgr := gtw.NewManager(); gtwMgr.SetHandlerDeps(gtwDeps)
+    gtwMgr.SetGetChatSession(runtime.findChatSession)  # 跨 mgr 线性扫
+7.  reactionRouter := commandServices.NewReactionRouter()
+    reactionRouter.Register("*", gtwMgr.HandleReaction)
+8.  gitStatusLookup := func(ctx, chatID) *GitStatus {
+        cs := runtime.findChatSession(chatID)  # 共享 closure
+        if cs == nil { return nil }
+        return cs.GitStatus(ctx)
+    }
+9.  command.SetDeps(command.Deps{Primary: cfg.Primary, GTWExt: gtwDeps})
+    reg := command.Default()  # 已注册的 slash command factory
+    commander := command.NewCommander(reg)
+10. shellDispatcher := shell.NewDispatcher()    # 不再持 registry；持 mgr per call
+11. ir := inbound.New(commander, shellDispatcher, reactionRouter, cfg.Primary)
+                                              # 共享单例；4-branch dispatch chain
+                                              # Dispatch(ctx, mgr, msg) mgr per call
+
+=== 阶段 3: 启动 channels，逐个 buildStack ===
+12. chs, _ := deps.NewChannels(cfg)              # channel.BuildAll(cfg) 扫 registry 逐个构造
+    for _, ch := range chs {
+        if err := ch.Start(ctx); err != nil {
+            logger.Error("channel start failed", "name", ch.Name(), "err", err)
+            continue                            # 单 channel 失败不阻塞其他
+        }
+        ch.SetLogger(logger)
+        mgr := buildStack(ch, buildStackOpts{
+            Agents: agents, CSFile: csFile, ASFile: asFile,
+            Primary: cfg.Primary, GitStatusLookup: gitStatusLookup,
+        })
+        # buildStack 内部：
+        #   spawner := chatsession.NewRegistrySpawner(opts.Agents)
+        #   mgr := chatsession.NewManager().WithSpawner(spawner).WithPersistence(...)
+        #   em := outbound.New(ch, opts)  # 单 channel Emitter
+        #   mgr.WithEmitter(em).WithPrimaryAgent(...)
+        #   mgr.WithOnCreate(runtimeHooks)  # 每个 mgr 独立装 onCreate
+        #   return mgr
+        runtime.allMgrs = append(runtime.allMgrs, mgr)  # 包私有，跨 mgr 查找用
+        pumps = append(pumps, gateway.Pump{Channel: ch, Manager: mgr})
+        if deps.RegisterHealth != nil {
+            deps.RegisterHealth(ch.HealthSnapshot)
+        }
+    }
+
+=== 阶段 4: 启动 gw（不调 RestoreFromRegistry！） ===
+13. gw := gateway.New(ir)                         # 共享 ir，不持 em
+14. gw.AttachPumps(pumps...)
+15. gw.Start(ctx)                                # 每 pump 启一个 pumpOne goroutine
+                                              # pumpOne 闭包 capture (channel, mgr)
+                                              # 读 ch.Incoming() → r.dispatcher.Dispatch(ctx, p.Manager, msg)
+16. block on signal / ctx.Done()
+17. shutdownRun: stop all channels + persist final state
+    # 不杀 agent 进程；AgentSession 在 registry 以 Detached 保留
+    # 下次启动经 lazy hydrate（首次 GetOrCreate）+ LookupSelectedAgentSession
+    # 自动 reuse 或 re-spawn
 ```
 
 **关键不变量**：
-- Step 8 的 `em`（outbound.Emitter）是所有出站消息的统一咽喉（runtime event pump / slash command / MessageState 三条路径都走它），负责把 `StatusBar` footer 盖到每条消息上
-- Step 10 的 `commandServices.ReactionRouter` 单例持 `map[chatID]handler`，gtw 通过 `Register("*", gtwMgr.HandleReaction)` 注册自己；Channel adapter 把 decision-card 按钮归一化为既有 reaction 通路（与 emoji reaction 汇合）
-- Step 11 的 `command.NewRegistry` + `commander.Dispatch` 取代了 之前的 `gateway.RegisterChatSessionCommands`；Gateway 只持有 commander shim，不知道任何命令实现细节
-- Step 13 的 `inbound.Router` 4-branch dispatch chain 解耦:`/cwd` `/use` `/gtw` 等所有 slash command 走 `commander.Dispatch`;`!cmd` 走 `shell.Dispatcher.Handle`;reaction / action 事件走 `services.ReactionRouter`(F-58 替代了 v0.x 的 `WithCommander` + `WithShellDispatch` + `WithActionHandler` 三个 shim closure)
-- Step 14 的 `wireRuntimeCallbacksAndRestore` 把 `WithOnCreate` 与 `RestoreFromRegistry` 绑成一对，防止 restored ChatSession 漏装 EventHandler / MessageStateBus subscriber（详见 `cmd/nightme/run.go` 注释）
-- Step 15 后所有 AgentSession 是 `Detached`（无进程）；用户第一次发消息 → `LookupSelectedAgentSession` → `Spawner.Spawn`
+
+- **每个 channel 一份完整 stack**：Channel + chatsession.Manager（per-channel）+ outbound.Emitter（= 该 channel 自己）。gw 持 `[]gateway.Pump`，每 Pump 闭包 capture `(channel, mgr)`
+- **共享 singletons**：`inbound.Router` / `command.Commander` / `shell.Dispatcher` / `gtw.Manager` / `commandServices.ReactionRouter` 全部共享单例；`Dispatch(ctx, mgr, msg)` / `Factory.Handle(ctx, mgr, input)` / `Dispatcher.Handle(ctx, mgr, msg)` 全部接受 mgr per call；共享组件不持 `mgr` 字段
+- **懒加载 restore**：daemon 启动时**不**做全量 restore。`csFile` / `asFile` 在 `OpenChatSessionFile` 时已全量加载到内存的 `entries map`；`Manager.GetOrCreate(chatID)` 在 in-memory miss 时走 `csFile.GetByChat(chatID)` 命中即 hydrate，miss 才 `New`
+- **每个 mgr 独立装 onCreate**：`buildStack` 内部 `mgr.WithOnCreate(runtimeHooks)`，**先于**该 mgr 第一次 `GetOrCreate` 触发；确保 lazy hydrate 出来的 ChatSession 也能装上 EventHandler / MessageStateBus subscriber
+- **outbound 路径无 routing**：`cs.emitter.Send(msg)` = `ch.Send(msg)`，单 channel 直接送；`outbound.Emitter` 仍是单一对象（per-Manager 持有），无 multi 概念
+- **跨 mgr 共享查找**：`runtime.findChatSession(chatID)` 线性扫 `runtime.allMgrs`（N=2-3 无压力），给 gtw / gitStatusLookup 用；未来 N 增长再考虑 channel-level 索引
+- **OCP 接入点**：`channel.Registry`（`internal/channel/registry.go`）—— 加新 channel = 1 个 `channel/<name>/init.go` 调 `channel.Register("<name>", NewAdapter)`，runtime / gateway / chatsession / command 全部零修改
+- **多 channel 凭据 / login**：`nightme login <channel>` 按 `provider.Name()` 分派写 `cfg.<channel>.{...}`，互不干扰；`runDaemon` 通过 `channel.BuildAll(cfg)` 自动识别有凭据的 channel
 
 ---
 
 ## 11.2 Restart semantics
 
-Daemon 重启后（用户发送 SIGINT 然后再启 `nightme run`）：
+Daemon 重启后（用户发送 SIGINT 然后再启 `nightme run`，v1.3 起）：
 
 | 数据 | 行为 |
 |---|---|
 | `cfg.Primary` | 重新读取配置。**不影响已存在的 ChatSession.primaryAgent**（Q-A snapshot）。 |
-| `chat_sessions.json` | 全量恢复为 in-memory ChatSession。`selectedCwd`、`selectedAgent`、`primaryAgent` 复原。 |
-| `agent_sessions.json` | 恢复为 in-memory AgentSession，**全部 `Status=Detached`，PID=0**。 |
+| `chat_sessions.json` | **懒加载**（v1.3+）：启动时**不**做全量恢复；`csFile` 整文件加载到 in-memory `entries map`；首次 `GetOrCreate(chatID)` 命中即 hydrate（`selectedCwd` / `selectedAgent` / `primaryAgent` / `watchMode` / `thinkMode` / `toolsMode` 复原），miss 才新建。`chatID` 跨 channel 不撞（feishu `oc_*` vs telegram 数字 namespace 天然分离）|
+| `agent_sessions.json` | 跟 `chat_sessions.json` 一起懒 hydrate：hydrate ChatSession 时同步按 `chatSessionId` 过滤加载 AgentSession 池，**全部 `Status=Detached`，PID=0** |
 | v1.x `registry.json` | 备份为 `.v1.bak`，不恢复数据（见 MIGRATION.md）。 |
+| 各 channel Adapter | 启动时按 `channel.BuildAll(cfg)` 自动构造并 `Start`；channel 失败不影响其他 |
 
 **用户感知**：
-- 第一次发消息会卡 ~100ms-2s（Spawner 重新 fork）。后续消息即时。
+- 第一次发消息会卡 ~100ms-2s（Spawner 重新 fork + 首次 lazy hydrate 多一次 `csFile.GetByChat` in-memory O(N) 查表）。后续消息即时。
 - 已 `/cwd` 但从未 `/use` 的 chat：发消息时 Spawner 触发 `/use` 等价的 lazy spawn（不是 `/use` 显式命令）。
 - 显式 `/use` 过的 chat：第一次发消息触发 lazy spawn（因为没有运行中的进程）。
+- 没启动的 channel（如只配了 feishu 的用户跑 daemon）只有 feishu Manager，telegram 不在 `allMgrs` 里，不影响。
 
 ---
 

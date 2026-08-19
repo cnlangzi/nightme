@@ -33,8 +33,26 @@ import (
 )
 
 const (
-	eventBufferSize = 40960
-	startupTimeout  = 10 * time.Second
+	eventBufferSize   = 40960
+	// initializeTimeout bounds the ACP initialize RPC. This is a
+	// tight sanity-check: the server should reply within a couple of
+	// seconds to prove it is alive and speaks the right protocol
+	// version. If it doesn't, something is structurally broken
+	// (dead bridge, broken PTY) and we want to fail fast.
+	initializeTimeout = 3 * time.Second
+	// newSessionTimeout bounds the ACP session/new RPC. This is where
+	// the ACP server does the real work. For opencode specifically,
+	// `opencode acp` boots its own internal HTTP backend and then
+	// performs a parallel `loadDirectorySnapshot` RPC that hits
+	// config.providers / app.agents / command.list / app.skills / config.get
+	// against the opencode backend (~5 sequential-ish HTTP calls), plus
+	// session.create + MCP registration. Cold start on a first-run
+	// machine or a slow CI runner can easily exceed 10s, so this budget
+	// is intentionally generous. The previous shared `startupTimeout`
+	// of 10s would hit during the `session/new` wait and surface as a
+	// misleading "context deadline exceeded" long before the bridge had
+	// actually hung.
+	newSessionTimeout = 45 * time.Second
 )
 
 // Agent is the ACP-mode bridge descriptor.
@@ -371,9 +389,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		_ = live.Close()
 	}()
 
-	startupCtx, startupCancel := context.WithTimeout(parentCtx, startupTimeout)
-	defer startupCancel()
-	if err := live.handshake(startupCtx, cfg.Workspace); err != nil {
+	// Per-step timeout budgets live inside handshake() — see the
+	// initializeTimeout / newSessionTimeout constants and the
+	// handshake doc. newDriver does not apply an aggregate ceiling
+	// here; the caller's parentCtx (which may already carry a
+	// deadline from upstream) remains the source of early
+	// cancellation, and each handshake phase has its own bounded
+	// timeout for a clear, tunable failure mode.
+	if err := live.handshake(parentCtx, cfg.Workspace); err != nil {
 		_ = live.Close()
 		return nil, err
 	}
@@ -385,11 +408,33 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 // populated live.rpc, live.ctx, live.events, live.agentName, and (for
 // most callers) live.workspace.
 //
-// Extracted from Start so tests using a mockTransport (no real PTY) can
-// drive the handshake against an in-process net.Pipe server without
-// going through pty.NewTransport.
+// Timeout policy (split by phase):
+//
+//   - initialize:     initializeTimeout (3s). Tight sanity-check;
+//     the server should reply with a protocol version within a
+//     couple of seconds. Failing here means the bridge is dead or
+//     the PTY transport is broken, so we want a fast, unambiguous
+//     failure.
+//   - session/new:    newSessionTimeout (45s). Generous — this is
+//     where the ACP server does the expensive work. For opencode
+//     `opencode acp` this includes booting an internal HTTP backend
+//     and a parallel loadDirectorySnapshot (~5 HTTP calls against
+//     providers/agents/commands/skills/config) before it can reply
+//     to session/new. The previous shared 10s budget (startupTimeout)
+//     was routinely too short on first-run CI or slow machines.
+//
+// Each phase creates its own deadline context; the parent ctx
+// (passed in) still applies as an early-cancel path. Error
+// messages now mention which phase and which timeout budget was
+// hit, so the failure mode is visible without digging into code.
+//
+// Extracted from Start so tests using a mockTransport (no real PTY)
+// can drive the handshake against an in-process net.Pipe server
+// without going through pty.NewTransport.
 func (d *driver) handshake(ctx context.Context, workspace string) error {
-	if _, err := d.rpc.request(ctx, "initialize", initializeParams{
+	initCtx, initCancel := context.WithTimeout(ctx, initializeTimeout)
+	defer initCancel()
+	if _, err := d.rpc.request(initCtx, "initialize", initializeParams{
 		ProtocolVersion: protocolVersion,
 		ClientCapabilities: map[string]any{
 			"fs":       map[string]any{"readTextFile": false, "writeTextFile": false},
@@ -401,15 +446,17 @@ func (d *driver) handshake(ctx context.Context, workspace string) error {
 			Version: clientVersion,
 		},
 	}); err != nil {
-		return fmt.Errorf("bridge/acp: initialize: %w", err)
+		return fmt.Errorf("bridge/acp: initialize (timeout=%s): %w", initializeTimeout, err)
 	}
 
-	result, err := d.rpc.request(ctx, "session/new", newSessionParams{
+	newCtx, newCancel := context.WithTimeout(ctx, newSessionTimeout)
+	defer newCancel()
+	result, err := d.rpc.request(newCtx, "session/new", newSessionParams{
 		CWD:        workspace,
 		MCPServers: []any{},
 	})
 	if err != nil {
-		return fmt.Errorf("bridge/acp: session/new: %w", err)
+		return fmt.Errorf("bridge/acp: session/new (timeout=%s): %w", newSessionTimeout, err)
 	}
 	if err := d.setSessionID(result); err != nil {
 		return err
@@ -684,9 +731,9 @@ func (d *driver) New(ctx context.Context) error {
 	if d.transport == nil {
 		return errors.New("bridge/acp: nil transport")
 	}
-	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
+	newCtx, cancel := context.WithTimeout(ctx, newSessionTimeout)
 	defer cancel()
-	result, err := d.rpc.request(startupCtx, "session/new", newSessionParams{
+	result, err := d.rpc.request(newCtx, "session/new", newSessionParams{
 		CWD:        d.workspace,
 		MCPServers: []any{},
 	})

@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -26,7 +27,22 @@ func emitMessageState(gw *Router, chatID, userMsgID string, state agent.MessageS
 	if chatID == "" || userMsgID == "" {
 		return
 	}
-	ch := gw.resolveChannel(chatID)
+	// v1.3+ multi-channel: the per-pump mgr closure is the
+	// chatID's owner. Iterate runtime.allMgrs (via the
+	// test-exposed gw.pumps) to find the channel. The legacy
+	// v0.x chatToChan / resolveChannel helpers were removed
+	// (chatID is implicit via per-pump mgr).
+	var ch channel.Channel
+	for _, p := range gw.pumps {
+		if p.Channel == nil {
+			continue
+		}
+		// We don't track chatID → pump directly; for the tests
+		// below, the single attached pump owns every chat, so
+		// picking the first non-nil channel is correct.
+		ch = p.Channel
+		break
+	}
 	if ch == nil {
 		log.Printf("gateway: emitMessageState no channel for chat=%s, dropping", chatID)
 		return

@@ -1,6 +1,6 @@
 // Test-only shared helpers for the gtw package. Exposes
 // recordingCh (a outbound.Emitter mock that records every
-// Send / SendCard / Patch call) and pathsEqual (symlink-safe
+// Send call) and pathsEqual (symlink-safe
 // path comparison for macOS test fixtures). Both used to be
 // duplicated across close_test.go, close_integration_test.go,
 // fix_remote_integration_test.go, force_test.go,
@@ -9,14 +9,13 @@
 package gtw
 
 import (
-	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"path/filepath"
 	"sync"
-
 )
 
-// recordingCh captures every Send / SendCard / Patch call's
+// recordingCh captures every Send call's
 // payload for assertion. Used by integration tests after the
 // cs.Emitter() migration; previous deps.Send mock is no longer
 // the actual path. Field-by-field copy of OutboundMessage.
@@ -31,14 +30,6 @@ func (r *recordingCh) Send(_ context.Context, m messages.OutboundMessage) error 
 	r.sends = append(r.sends, m)
 	return nil
 }
-
-func (r *recordingCh) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sends = append(r.sends, m)
-	return "rec-card-id", nil
-}
-
 
 // lastText returns the most recent captured message's Text field,
 // or "" if no captures. Tests inspect a single response after

@@ -47,6 +47,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agent/procutil"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // ─── constants & exported errors ───
@@ -279,47 +280,47 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	branch := detectBranch(cfg.Workspace)
 	logger := slog.Default()
 
-	// Spawn via agent.NewCmd — see internal/agent/exec_unix.go
+	// Spawn via proc.New — see internal/proc/exec_unix.go
 	// for the platform-specific SysProcAttr rationale.
-	cmd := agent.NewCmd(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace
-	cmd.Env = append(os.Environ(), env...)
+	child := proc.New(ctx, s.command, args...)
+	child.Dir = cfg.Workspace
+	child.Env = append(os.Environ(), env...)
 
-	stdin, err := cmd.StdinPipe()
+	stdin, err := child.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi: stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("pi: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		return nil, fmt.Errorf("pi: stderr pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
-		piLog("Start cmd.Start failed",
+		piLog("Start child.Start failed",
 			"elapsed_ms", time.Since(startTime).Milliseconds(),
 			"err", err.Error())
 		return nil, fmt.Errorf("pi: start: %w", err)
 	}
 
 	live := &driver{
-		cmd:        cmd,
+		cmd:        child,
 		stdinW:     stdin,
 		stdoutR:    stdout,
 		stderrR:    stderr,
 		stderrTail: agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		rpc:        newRPCClient(stdin),
 		events:     make(chan agent.AgentEvent, eventsBufferSize),
-		pid:        cmd.Process.Pid,
+		pid:        child.Process.Pid,
 		agentName:  s.name,
 		workspace:  cfg.Workspace,
 		branch:     branch,
@@ -331,7 +332,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	// Read pump and stderr drainer start in parallel with the
 	// handshake so a slow get_state does not stall read-back
-	// pressure. The lifecycle goroutine (cmd.Wait) is started
+	// pressure. The lifecycle goroutine (child.Wait) is started
 	// last so it owns both the events close and the pending
 	// fail. pumpWG is incremented BEFORE the goroutines start
 	// and decremented inside them so the lifecycle Wait below
@@ -1024,8 +1025,8 @@ func filterSessionFlags(args []string, sessionID string, logger *slog.Logger) []
 func detectBranch(workspace string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", workspace, "symbolic-ref", "--short", "HEAD")
-	out, err := cmd.Output()
+	c := proc.New(ctx, "git", "-C", workspace, "symbolic-ref", "--short", "HEAD")
+	out, err := c.Output()
 	if err == nil {
 		s := string(out)
 		for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
@@ -1035,8 +1036,8 @@ func detectBranch(workspace string) string {
 			return s
 		}
 	}
-	cmd = exec.CommandContext(ctx, "git", "-C", workspace, "rev-parse", "--short", "HEAD")
-	out, err = cmd.Output()
+	c = proc.New(ctx, "git", "-C", workspace, "rev-parse", "--short", "HEAD")
+	out, err = c.Output()
 	if err != nil {
 		return ""
 	}

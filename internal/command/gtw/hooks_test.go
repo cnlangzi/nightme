@@ -1,9 +1,9 @@
 package gtw
 
 import (
-	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -581,9 +581,6 @@ func (c *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) erro
 	c.sent = append(c.sent, msg.Text)
 	return nil
 }
-func (c *fakeChannel) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
-	return "", nil
-}
 func (c *fakeChannel) Patch(_ context.Context, _ messages.OutboundMessage) error {
 	return nil
 }
@@ -899,13 +896,20 @@ var errBoom = errors.New("boom")
 // fakeAgent (registry_test.go).
 type testStarter struct{ name string }
 
-func (s *testStarter) Info() agent.Info              { return agent.NewInfo(s.name, agent.ModePTY, "", nil, nil) }
-func (s *testStarter) Detect() error                  { return nil }
+func (s *testStarter) Info() agent.Info { return agent.NewInfo(s.name, agent.ModePTY, "", nil, nil) }
+func (s *testStarter) Detect() error    { return nil }
 func (s *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("testStarter: Start not implemented")
 }
 func (s *testStarter) RunOnce(context.Context, agent.StartConfig, []agent.ContentBlock) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("testStarter: RunOnce not implemented")
+}
+
+// Review is unimplemented for the priority-resolver test fake.
+// ResolveAgent doesn't drive /review, so returning
+// ErrReviewNotSupported is fine.
+func (s *testStarter) Review(context.Context, agent.StartConfig) (agent.RunResult, error) {
+	return agent.RunResult{}, agent.ErrReviewNotSupported
 }
 
 // cfgIsZero reports whether cfg has every field at its zero value.

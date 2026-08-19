@@ -27,6 +27,14 @@
 //     would freeze the menu until the call returns. The pattern
 //     is: handler spawns a goroutine and returns immediately.
 //
+//  4. On headless systems the systray native init is unreliable
+//     (GTK cannot open DISPLAY). runTrayOwning detects this via
+//     isHeadless() (tray_headless_*.go) and skips the systray
+//     branch entirely, falling through to the plain runtime
+//     loop. recover() around systray.Run catches the
+//     not-caught-by-detection cases (X server dies mid-run,
+//     partial init panic) so the daemon survives a tray crash.
+//
 // Menu layout (all items are top-level — no submenus):
 //
 //   Running        (disabled info row)
@@ -49,7 +57,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -132,7 +143,25 @@ type trayOptions struct {
 // in (rather than constructed here) so the call site can apply
 // the same dependency-injection rules the existing runRunWith
 // path already enforces.
+//
+// Headless short-circuit (Linux only — see tray_headless_*.go):
+// when no GUI session is detected, runTrayOwning skips the
+// systray branch entirely and just runs the runtime loop on
+// this thread. CLI / REPL control of the daemon still works
+// (daemoncontrol IPC runs over the Unix socket).
 func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) error {
+	// Strict scheme: when we can't be sure a GUI session is
+	// reachable, skip the tray rather than crash inside GTK.
+	if isHeadless() {
+		if opts.logger != nil {
+			opts.logger.Info("system tray disabled (no GUI session detected); running runtime loop directly",
+				"xdg_session_type", os.Getenv("XDG_SESSION_TYPE"),
+				"display", os.Getenv("DISPLAY"),
+				"wayland_display", os.Getenv("WAYLAND_DISPLAY"))
+		}
+		return runRunWith(cmd, runDeps)
+	}
+
 	runErrCh := make(chan error, 1)
 	go func() {
 		runErrCh <- runRunWith(cmd, runDeps)
@@ -145,6 +174,45 @@ func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) e
 	go func() {
 		<-runErrCh
 		systray.Quit()
+	}()
+
+	// Recover fallback for the not-caught-by-detection cases:
+	// getlantern/systray's native init can panic in odd
+	// situations (X server dies mid-run, partial GTK init,
+	// Wayland compositor protocol mismatch). The detection
+	// above is conservative but cannot cover every runtime
+	// failure mode. If a panic does escape, log it and let
+	// the daemon continue running without the tray UI —
+	// runtime lives in its own goroutine, so status / stop /
+	// restart still work over daemoncontrol's socket.
+	//
+	// Scope: recover only catches panics on the calling
+	// goroutine's call stack. systray's CGo callbacks run in
+	// goroutines the library itself spawns; those panics
+	// cannot be intercepted here. The native-init panic that
+	// is the original failure mode DOES propagate through
+	// this defer.
+	defer func() {
+		if r := recover(); r != nil {
+			// debug.Stack preserves the goroutine's full
+			// stack at the panic site. systray/GTK/Wayland
+			// crashes are often CGo errors that surface
+			// as opaque panic values; the stack is the
+			// only signal telling us which native frame
+			// actually blew up. Includes all goroutines
+			// (debug.Stack docs), so any helper goroutine
+			// state is captured too.
+			stack := string(debug.Stack())
+			if opts.logger != nil {
+				opts.logger.Warn("system tray crashed; daemon continues without tray UI",
+					"panic", fmt.Sprint(r),
+					"stack", stack)
+			}
+			// systray.Run has returned (the panic reached
+			// this defer). Runtime is still alive in its
+			// own goroutine; fall through to the wait
+			// below for the runtime's exit code.
+		}
 	}()
 
 	systray.Run(

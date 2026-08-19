@@ -86,6 +86,7 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	reg.add(newVersionCmd(),      "version         version info")
 	reg.addNoTray(newUpdateCmd(), "update          check for a newer release")
 	reg.addNoTray(newDebugCmd(),  "debug           exercise reaction/action flow")
+	reg.addNoTray(newWorkflowCmd(), "workflow ...   list/show/run workflow YAMLs")
 
 	addLifecycleCommands(reg)
 	addUnixOnlyCommands(reg)

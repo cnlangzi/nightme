@@ -218,9 +218,12 @@ type driver struct {
 
 	// turnMu serializes SendBlocks calls so a second prompt
 	// cannot start before the first one is acknowledged by Pi. It
-	// also guards the turnActive flag.
-	turnMu     sync.Mutex
-	turnActive bool
+	// also guards the turnActive flag AND inFlightPromptID —
+	// Stop reads the id under turnMu so a failResponse racing
+	// SendBlocks's clear can never target a stale id.
+	turnMu            sync.Mutex
+	turnActive        bool
+	inFlightPromptID  string // request id of the prompt RPC currently waiting in SendBlocks; "" if idle
 
 	translator *translator
 
@@ -489,11 +492,20 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 		d.turnMu.Unlock()
 		return ErrTurnBusy
 	}
+	// Allocate the prompt request id BEFORE flipping turnActive so
+	// Stop can't race a zero id — if Stop runs while turnActive is
+	// false it has nothing to fail anyway, but the order matters:
+	// any code path that sees turnActive=true must also be able
+	// to read a non-empty inFlightPromptID. Keeping both writes
+	// under the same lock makes that contract trivial.
+	promptID := d.rpc.nextRequestID()
 	d.turnActive = true
+	d.inFlightPromptID = promptID
 	d.turnMu.Unlock()
 	defer func() {
 		d.turnMu.Lock()
 		d.turnActive = false
+		d.inFlightPromptID = ""
 		d.turnMu.Unlock()
 	}()
 
@@ -539,9 +551,10 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 		"pid", d.pid,
 		"parent_has_deadline", ctxHasDeadline(ctx),
 		"call_has_deadline", ctxHasDeadline(callCtx),
+		"prompt_id", promptID,
 	)
 	params := promptParams{Message: messageText, Images: images}
-	resp, err := d.rpc.request(callCtx, "prompt", params, "")
+	resp, err := d.rpc.request(callCtx, "prompt", params, promptID)
 	if err != nil {
 		return err
 	}
@@ -656,10 +669,70 @@ func (d *driver) New(ctx context.Context) error {
 // KindPromptEnded handler.
 //
 // Returns ErrNotSupported if the bridge is not started yet.
+// Stop sends an `abort` RPC to the pi session. The pi --mode rpc
+// protocol exposes an abort command that cancels the in-flight turn
+// and (per the wire contract) forces the agent_settled event to fire.
+// The pi process stays alive; the bridge observes the boundary and
+// the next SendBlocks can proceed once the chat layer's TryFlush
+// loop sees IsReady() flip back to true.
+//
+// Pre-fix regression (fix-pi-stop, 2026-08-19): Stop only sent the
+// abort RPC and returned. The original `prompt` RPC that
+// SendBlocks was waiting on never received a response — pi only
+// acks `abort`, not the abandoned `prompt` — so SendBlocks's
+// `defer turnActive=false` never ran. turnActive stayed true for
+// up to promptTimeout (90s), and every subsequent SendBlocks
+// bounced off ErrTurnBusy. The chat layer saw no events from the
+// new prompt and (mis)read it as "pi stopped responding".
+//
+// Fix has two pieces:
+//
+//  1. Before sending abort, fail the in-flight prompt RPC (if any)
+//     via rpcClient.failResponse. SendBlocks's pending channel
+//     closes, the function returns ErrSessionClosed immediately,
+//     the defer fires, turnActive flips false. Submit's error
+//     path then rolls back currentPrompt + IsReady=true so the
+//     next TryFlush lands a fresh prompt without waiting for
+//     promptTimeout.
+//
+//  2. Send the abort RPC and wait for its response (success /
+//     reject). Pi is responsible for emitting `agent_settled` to
+//     mark the turn boundary on its end; that flows through
+//     readPump → translate → EventAgentDone → the chat layer's
+//     readpumpLoop which calls endPrompt → IsReady=true. If pi
+//     is well-behaved (the documented contract), this happens
+//     within a few hundred ms of the abort response; if not, the
+//     HungPrompt watchdog will eventually mark the AS Suspect.
+//
+// Stop is fire-and-forget: it returns as soon as the abort RPC
+// completes (success or failure) and does NOT wait for agent_settled.
+// The chat layer coordinates the turn-end → next-submit transition
+// via its existing KindPromptEnded handler.
 func (d *driver) Stop(ctx context.Context) error {
 	if d.rpc == nil {
 		return agent.ErrNotSupported
 	}
+
+	// Step 1: fail the in-flight prompt RPC so SendBlocks
+	// unblocks NOW instead of waiting promptTimeout for a
+	// response that pi will never send.
+	//
+	// Snapshot the id under turnMu so we never race SendBlocks's
+	// defer clear — both write/delete inFlightPromptID under the
+	// same lock, so the read here either sees the current id or
+	// "" (no prompt in flight). failResponse("") is a no-op.
+	d.turnMu.Lock()
+	pendingID := d.inFlightPromptID
+	d.turnMu.Unlock()
+	if pendingID != "" {
+		d.rpc.failResponse(pendingID, ErrTurnAborted)
+	}
+
+	// Step 2: tell pi to abort. Pi's contract is to emit
+	// agent_settled after this so the chat layer can flip
+	// IsReady; that's a wire-protocol guarantee, not something we
+	// can enforce from here. The watchdog backstops a non-emitter
+	// pi.
 	stopCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	resp, err := d.rpc.request(stopCtx, "abort", map[string]any{}, "abort-1")

@@ -41,7 +41,17 @@ const MaxFrameSize = 4 * 1024 * 1024
 // ErrSessionClosed is returned by request when the session has been
 // (or is being) closed. Callers (notably SendBlocks) should treat
 // this as a terminal error and not retry.
+// ErrSessionClosed is returned by request when the session has been
+// (or is being) closed. Callers (notably SendBlocks) should treat
+// this as a terminal error and not retry.
 var ErrSessionClosed = errors.New("pi: session closed")
+
+// ErrTurnAborted is returned by request when the in-flight turn was
+// failed explicitly (e.g. by driver.Stop during /stop). The bridge
+// process is still alive and the session is still usable for a
+// subsequent SendBlocks; the caller just got notified that this
+// particular prompt's response was abandoned.
+var ErrTurnAborted = errors.New("pi: turn aborted")
 
 // ErrTurnBusy is returned by SendBlocks when a previous prompt is
 // still awaiting its ack response. Pi is single-turn per process
@@ -247,6 +257,11 @@ func (c *rpcClient) dispatchResponse(env responseEnvelope) {
 // after cmd.Wait returns AND from readPump on its way out (see the
 // note in readPump). Idempotent: the second call finds an empty
 // pending map and is effectively a no-op aside from the closed flag.
+// failPending aborts every registered waiter with the given error
+// and marks the client closed. Called from the lifecycle goroutine
+// after cmd.Wait returns AND from readPump on its way out (see the
+// note in readPump). Idempotent: the second call finds an empty
+// pending map and is effectively a no-op aside from the closed flag.
 func (c *rpcClient) failPending(err error) {
 	c.closed.Store(true)
 	c.pendingMu.Lock()
@@ -257,6 +272,38 @@ func (c *rpcClient) failPending(err error) {
 	for _, ch := range pending {
 		close(ch)
 	}
+}
+
+// failResponse is the targeted twin of failPending: it closes the
+// channel registered for a single request id so exactly one
+// outstanding request() call returns immediately. Used by driver.Stop
+// to unblock the SendBlocks goroutine that's hung on the original
+// prompt RPC — pi doesn't respond to that RPC after abort, and
+// waiting for promptTimeout (90s) would leave turnActive stuck and
+// every subsequent SendBlocks bouncing off ErrTurnBusy.
+//
+// Returns true if a channel was found and closed. False if id is
+// unknown (already responded to, or already cancelled). Does NOT
+// mark the client closed — the session is still usable for a
+// follow-up prompt.
+func (c *rpcClient) failResponse(id string, err error) bool {
+	if id == "" {
+		return false
+	}
+	key := bytesToID(json.RawMessage(jsonString(id)))
+	c.pendingMu.Lock()
+	ch, ok := c.pending[key]
+	if ok {
+		delete(c.pending, key)
+	}
+	c.pendingMu.Unlock()
+	if !ok {
+		piLog("rpc.failResponse no-op", "id", id, "cause", errStr(err))
+		return false
+	}
+	piLog("rpc.failResponse", "id", id, "cause", errStr(err))
+	close(ch)
+	return true
 }
 
 // errStr is a tiny nil-safe error stringifier for log fields.

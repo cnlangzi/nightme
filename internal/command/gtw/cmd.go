@@ -49,27 +49,19 @@ func NewFactoryWithDeps(mgr *Manager, deps HandlerDeps) *Factory {
 // every registered builder. GTWExt carries gtw.HandlerDeps
 // (typed as `any` in command.Deps to avoid command ↔ gtw
 // import cycle).
+//
+// gtw reads only d.GTWExt. Every *chatsession.ChatSession
+// reference is supplied passively: slash commands receive cs
+// from the dispatcher parameter; reactions receive cs from
+// the runtime-layer wrapper that resolves cs before calling
+// HandleReaction. No cs lookup, cache, or chat-session store
+// lives in this package — by construction there is no path
+// for stale-cache / cross-channel-cwd-loss bugs.
 func init() {
 	command.RegisterBuilder(func(d command.Deps) command.SlashCommandFactory {
 		handlerDeps, _ := d.GTWExt.(HandlerDeps)
 		mgr := NewManager()
 		mgr.SetHandlerDeps(handlerDeps)
-		// v1.3+ multi-channel: prefer ChatSessionLookup (set by
-		// the runtime to runtime.findChatSession) so /gtw replies
-		// land on the originating channel. Fall back to the
-		// single-mgr path for legacy deployments that don't
-		// wire the lookup — d.Manager is the primary (first)
-		// per-channel mgr in multi-channel mode, which would
-		// otherwise route every chat through the first channel's
-		// Emitter.
-		lookup := d.ChatSessionLookup
-		if lookup == nil {
-			lookup = func(chatID string) *chatsession.ChatSession {
-				cs, _ := d.Manager.GetOrCreate(chatID, d.Primary)
-				return cs
-			}
-		}
-		mgr.SetGetChatSession(lookup)
 		return NewFactoryWithDeps(mgr, handlerDeps)
 	})
 }
@@ -308,7 +300,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 // F-51: command.Commander prefixes Args with the command name
 // ("gtw"), then the subcommand ("fix"), then the subcommand's
 // args. So Args[2] is the first user-supplied token.
-func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 3 {
 		return &command.SlashOutput{
 			Reply:    "Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>",
@@ -352,15 +344,13 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 		}
 	}
 
-	// Resolve per-chat ChatSession. The runtime wires a lookup
-	// at startup that lazy-creates a *chatsession.ChatSession on
-	// first GetChatSession miss.
-	cs := f.mgr.GetChatSession(input.ChatID)
-	if cs == nil || cs.SelectedCwd() == "" {
-		return &command.SlashOutput{
-			Reply:    command.NoActiveCwdReply,
-			Consumed: true,
-		}, nil
+	// cs is supplied by the dispatcher — the same ChatSession
+	// that /cwd, /use, /close and other slash commands see in
+	// the same chat. No second lookup, no cache that could go
+	// stale.
+	_, failOut := command.RequireActiveCwd(cs)
+	if failOut != nil {
+		return failOut, nil
 	}
 
 	// Load user-level hook config (silent if missing). The
@@ -499,14 +489,7 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // the per-chat Manager state, deps are forwarded verbatim, and
 // the reply path is RunClose's own cs.Emitter() (no extra wiring).
 // Wrapped in withHooks so close.before / close.after fire.
-func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	cs := f.mgr.GetChatSession(input.ChatID)
-	if cs == nil {
-		return &command.SlashOutput{
-			Reply:    "No active chat session.",
-			Consumed: true,
-		}, nil
-	}
+func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
 
 	cfg, loadNotes := Load()
@@ -648,8 +631,7 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 // user needs).
 //
 // Wrapped in withHooks so sync.before / sync.after fire.
-func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	cs := f.mgr.GetChatSession(input.ChatID)
+func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	cwd, failOut := command.RequireActiveCwd(cs)
 	if failOut != nil {
 		return failOut, nil

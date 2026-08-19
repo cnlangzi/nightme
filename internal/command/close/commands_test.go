@@ -10,7 +10,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := NewFactory(chatsession.NewManager())
+	f := NewFactory()
 	s := f.Spec()
 	if s.Name != "close" {
 		t.Fatalf("Spec.Name = %q, want close", s.Name)
@@ -21,8 +21,7 @@ func TestFactory_Spec(t *testing.T) {
 }
 
 func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
-	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "no-such-chat"}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, nil, input)
@@ -41,7 +40,7 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 // RequireActiveCwd preflight fires before any pool lookup.
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
@@ -62,7 +61,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 // mistyped the agent name.
 func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -80,7 +79,7 @@ func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 // ErrAgentNotFound from CloseOne is surfaced as a friendly reply.
 func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	// Materialize (claude, /tmp) so the pool isn't empty.
@@ -114,7 +113,7 @@ func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 // that resumes the conversation via --resume <sessionID>.
 func TestFactory_Handle_NoArg_ClosesAllInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
@@ -146,7 +145,7 @@ func TestFactory_Handle_NoArg_ClosesAllInCwd(t *testing.T) {
 // isolation invariant; this one covers the handler dispatch).
 func TestFactory_Handle_NoArg_ClosesEveryAgentInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
@@ -185,7 +184,7 @@ func TestFactory_Handle_NoArg_ClosesEveryAgentInCwd(t *testing.T) {
 // sibling still running.
 func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {

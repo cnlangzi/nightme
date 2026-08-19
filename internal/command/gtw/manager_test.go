@@ -2,7 +2,6 @@ package gtw
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,11 +9,12 @@ import (
 )
 
 // fakeChatSession returns a minimal *chatsession.ChatSession for
-// Manager tests. Production wiring uses real chatsession.New +
-// real mgr.GetOrCreate; tests just need a stable pointer with a
-// settable cwd. We use chatsession.New directly (rather than
-// embedding a smaller interface) because Manager.chatSessions
-// is typed as *chatsession.ChatSession — no duck typing.
+// Manager tests. Production wiring passes cs into HandleReaction
+// directly (the runtime-layer wrapper resolves it before calling
+// gtw). Tests just need a stable pointer with a settable cwd.
+// We use chatsession.New directly (rather than embedding a
+// smaller interface) because HandleReaction is typed against
+// *chatsession.ChatSession — no duck typing.
 func fakeChatSession(id, cwd string) *chatsession.ChatSession {
 	cs, _ := chatsession.New(id, "test-agent")
 	if cwd != "" {
@@ -141,13 +141,6 @@ func TestManager_Reset(t *testing.T) {
 	m := newTestManager()
 	m.SetContext("c1", Context{Mode: ModeRemote, State: StateFixing})
 	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixBranchExists})
-	m.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		return fakeChatSession(chatID, "/code/A")
-	})
-	// Warm the cache via the lookup.
-	if m.GetChatSession("c1") == nil {
-		t.Fatalf("expected lookup to populate cache, got nil")
-	}
 
 	m.Reset("c1")
 	if m.HasContext("c1") {
@@ -156,32 +149,16 @@ func TestManager_Reset(t *testing.T) {
 	if m.DraftCount("c1") != 0 {
 		t.Errorf("Reset should clear drafts")
 	}
-	if m.GetChatSession("c1") == nil {
-		t.Errorf("Reset should NOT clear the ChatSession lookup closure (subsequent GetChatSession should still resolve via the closure)")
-	}
-}
-
-func TestManager_SetGetChatSession(t *testing.T) {
-	m := newTestManager()
-	if m.GetChatSession("c1") != nil {
-		t.Errorf("expected nil ChatSession initially")
-	}
-	cs := fakeChatSession("c1", "/code/A")
-	m.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		return cs
-	})
-	if got := m.GetChatSession("c1"); got != cs {
-		t.Errorf("expected lookup to return the cached fake ChatSession")
-	}
 }
 
 func TestManager_HandleReaction_NoDraft(t *testing.T) {
 	m := newTestManager()
+	cs := fakeChatSession("c1", "/code/A")
 	consumed := m.HandleReaction(context.Background(), ReactionEvent{
 		ChatID:    "c1",
 		RequestID: "msg-1",
 		Emoji:     "✅",
-	})
+	}, cs)
 	if consumed {
 		t.Errorf("no draft → expected consumed=false")
 	}
@@ -189,9 +166,22 @@ func TestManager_HandleReaction_NoDraft(t *testing.T) {
 
 func TestManager_HandleReaction_EmptyEvent(t *testing.T) {
 	m := newTestManager()
-	consumed := m.HandleReaction(context.Background(), ReactionEvent{})
+	cs := fakeChatSession("c1", "")
+	consumed := m.HandleReaction(context.Background(), ReactionEvent{}, cs)
 	if consumed {
 		t.Errorf("empty event → expected consumed=false")
+	}
+}
+
+func TestManager_HandleReaction_NilCS(t *testing.T) {
+	m := newTestManager()
+	consumed := m.HandleReaction(context.Background(), ReactionEvent{
+		ChatID:    "c1",
+		RequestID: "msg-1",
+		Emoji:     "✅",
+	}, nil)
+	if consumed {
+		t.Errorf("nil cs → expected consumed=false (no panic)")
 	}
 }
 
@@ -201,95 +191,6 @@ func TestManager_TakeDraftRemovesEmptyMap(t *testing.T) {
 	m.TakeDraft("c1", "m1")
 	if got := m.ListDrafts("c1"); len(got) != 0 {
 		t.Errorf("expected empty drafts after take, got %d", len(got))
-	}
-}
-
-// TestManager_SetGetChatSession_LazyCreate covers the F-XX
-// wiring path: the runtime installs a chatSessionLookup;
-// GetChatSession calls it on first miss and caches the result.
-// Without this, /gtw fix and reaction paths would nil-deref.
-func TestManager_SetGetChatSession_LazyCreate(t *testing.T) {
-	m := newTestManager()
-	calls := 0
-	m.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		calls++
-		return fakeChatSession(chatID, "/code/A")
-	})
-
-	// First call: factory invoked, ChatSession cached.
-	cs1 := m.GetChatSession("c1")
-	if cs1 == nil {
-		t.Fatalf("expected ChatSession after factory call, got nil")
-	}
-	if calls != 1 {
-		t.Errorf("expected 1 factory call, got %d", calls)
-	}
-	if cs1.SelectedCwd() != "/code/A" {
-		t.Errorf("expected cwd /code/A, got %q", cs1.SelectedCwd())
-	}
-
-	// Second call: same ChatSession (cache hit, no new factory call).
-	cs2 := m.GetChatSession("c1")
-	if cs2 != cs1 {
-		t.Errorf("expected cached ChatSession, got different instance")
-	}
-	if calls != 1 {
-		t.Errorf("expected factory to be called once, got %d calls", calls)
-	}
-}
-
-// TestManager_SetGetChatSession_NilFallback covers the case
-// where the lookup returns nil (e.g. the chat session can't be
-// created). GetChatSession should return nil, not crash.
-func TestManager_SetGetChatSession_NilFallback(t *testing.T) {
-	m := newTestManager()
-	m.SetGetChatSession(func(chatID string) *chatsession.ChatSession { return nil })
-	if cs := m.GetChatSession("c1"); cs != nil {
-		t.Errorf("expected nil when lookup returns nil, got %v", cs)
-	}
-}
-
-// TestManager_SetGetChatSession_NotInstalled covers the legacy
-// path (lookup never installed). GetChatSession returns nil;
-// callers must handle nil (gtw commands fail loudly rather than
-// silently corrupting state).
-func TestManager_SetGetChatSession_NotInstalled(t *testing.T) {
-	m := newTestManager()
-	if cs := m.GetChatSession("c1"); cs != nil {
-		t.Errorf("expected nil when no lookup installed, got %v", cs)
-	}
-}
-
-// TestManager_SetGetChatSession_ConcurrentSafety exercises the
-// race-detector. Multiple goroutines call GetChatSession for
-// the same chatID simultaneously; the lookup must be called
-// exactly once (or at most a small constant number of times
-// due to benign races — the exact count is implementation-
-// defined; what matters is no panic / no data race).
-func TestManager_SetGetChatSession_ConcurrentSafety(t *testing.T) {
-	m := newTestManager()
-	var calls atomic.Int32
-	m.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		calls.Add(1)
-		return fakeChatSession(chatID, "/code/"+chatID)
-	})
-	done := make(chan struct{})
-	for i := 0; i < 20; i++ {
-		go func() {
-			_ = m.GetChatSession("c1")
-			done <- struct{}{}
-		}()
-	}
-	for i := 0; i < 20; i++ {
-		<-done
-	}
-	if calls.Load() == 0 {
-		t.Errorf("expected lookup to be called at least once")
-	}
-	// Allow some benign races but verify the cached value
-	// is consistent.
-	if cs := m.GetChatSession("c1"); cs == nil || cs.SelectedCwd() != "/code/c1" {
-		t.Errorf("expected cached ChatSession for c1, got %v", cs)
 	}
 }
 

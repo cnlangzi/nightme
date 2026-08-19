@@ -257,7 +257,6 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	// block there).
 	err = runTrayOwning(cmd, deps, trayOptions{
 		reg:              reg,
-		channelName:      "multi", // v1.3+: every channel with valid creds auto-starts; tray's Status row shows this label
 		logger:           loggerFromContext(cmd.Context()),
 		onStopRequest:    onStopRequestDefault,
 		onRestartRequest: onRestartRequestDefault,

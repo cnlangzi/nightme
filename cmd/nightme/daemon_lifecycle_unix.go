@@ -290,7 +290,6 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	// is a clean way to keep the two loops coupled.
 	err = runTrayOwning(cmd, deps, trayOptions{
 		reg:              reg,
-		channelName:      "multi", // v1.3+: every channel with valid creds auto-starts; tray's Status row shows this label
 		logger:           loggerFromContext(cmd.Context()),
 		onStopRequest:    onStopRequestDefault,
 		onRestartRequest: onRestartRequestDefault,

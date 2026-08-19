@@ -13,6 +13,7 @@
 package runtime
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"encoding/json"
 	"io"
@@ -85,7 +86,7 @@ func (c *capturedSends) reset()                { c.mu.Lock(); c.n = 0; c.mu.Unlo
 func setupWire(t *testing.T) (buildStackOpts, *capturedSends) {
 	t.Helper()
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
+	csFile, err := chatstore.New(filepath.Join(dir, "chat_sessions.json"))
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}

@@ -6,6 +6,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"path/filepath"
 	"testing"
 
@@ -20,7 +21,7 @@ import (
 // deferred to the first inbound from that chat.
 func TestGetOrCreate_LazyHydrateFromCSFile(t *testing.T) {
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
+	csFile, err := chatstore.New(filepath.Join(dir, "chat_sessions.json"))
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}
@@ -37,8 +38,8 @@ func TestGetOrCreate_LazyHydrateFromCSFile(t *testing.T) {
 		ThinkMode:     0, // default = Show
 		ToolsMode:     0, // default = Hide
 	}
-	if err := csFile.Upsert(entry); err != nil {
-		t.Fatalf("csFile.Upsert: %v", err)
+	if err := csFile.Save(entry); err != nil {
+		t.Fatalf("csFile.Save: %v", err)
 	}
 
 	// Build a real Manager. WithPersistence wires it to csFile.
@@ -81,19 +82,19 @@ func TestGetOrCreate_LazyHydrateFromCSFile(t *testing.T) {
 // guards that contract.
 func TestGetOrCreate_NoEagerRestore(t *testing.T) {
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
+	csFile, err := chatstore.New(filepath.Join(dir, "chat_sessions.json"))
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}
 
 	// Pre-seed 5 entries.
 	for i := 0; i < 5; i++ {
-		if err := csFile.Upsert(&registry.ChatSessionEntry{
+		if err := csFile.Save(&registry.ChatSessionEntry{
 			ID:          "cs_" + string(rune('a'+i)),
 			ChatID:      "oc_" + string(rune('a'+i)),
 			PrimaryAgent: "claude",
 		}); err != nil {
-			t.Fatalf("csFile.Upsert: %v", err)
+			t.Fatalf("csFile.Save: %v", err)
 		}
 	}
 
@@ -118,7 +119,7 @@ func TestGetOrCreate_NoEagerRestore(t *testing.T) {
 // must be returned by cs.AgentSessionsInCwd after hydrate.
 func TestHydrateFromEntry_AgentSessionPool(t *testing.T) {
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
+	csFile, err := chatstore.New(filepath.Join(dir, "chat_sessions.json"))
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}
@@ -134,8 +135,8 @@ func TestHydrateFromEntry_AgentSessionPool(t *testing.T) {
 		SelectedCwd: "/code/x",
 		PrimaryAgent: "claude",
 	}
-	if err := csFile.Upsert(csEntry); err != nil {
-		t.Fatalf("csFile.Upsert: %v", err)
+	if err := csFile.Save(csEntry); err != nil {
+		t.Fatalf("csFile.Save: %v", err)
 	}
 	asEntry := &registry.AgentSessionEntry{
 		ID:            "as_pool",

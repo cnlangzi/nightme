@@ -12,7 +12,7 @@ import (
 // backupCorrupt moves the offending bytes to <path>.bak so a
 // human can inspect them later. Best-effort: any failure is
 // returned to the caller.
-func backupCorrupt(path string, data []byte) error {
+func BackupCorrupt(path string, data []byte) error {
 	bak := path + ".bak"
 	if err := os.WriteFile(bak, data, 0o600); err != nil {
 		return err

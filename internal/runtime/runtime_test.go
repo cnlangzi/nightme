@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -762,10 +763,10 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 // AgentSessionFile. Mirrors chatsession.newTestStores but lives in
 // runtime (cross-package helpers in test packages aren't
 // visible by default).
-func newWireTestStores(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessionFile) {
+func newWireTestStores(t *testing.T) (*chatstore.Store, *registry.AgentSessionFile) {
 	t.Helper()
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
+	csFile, err := chatstore.New(filepath.Join(dir, "chat_sessions.json"))
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}
@@ -778,7 +779,7 @@ func newWireTestStores(t *testing.T) (*registry.ChatSessionFile, *registry.Agent
 
 // seedPersistedChatForWire writes one ChatSessionEntry so
 // RestoreFromRegistry has something to restore.
-func seedPersistedChatForWire(t *testing.T, csFile *registry.ChatSessionFile, chatID, primary string) {
+func seedPersistedChatForWire(t *testing.T, csFile *chatstore.Store, chatID, primary string) {
 	t.Helper()
 	entry := &registry.ChatSessionEntry{
 		ID:                "cs_" + chatID,
@@ -789,7 +790,7 @@ func seedPersistedChatForWire(t *testing.T, csFile *registry.ChatSessionFile, ch
 		CreatedAt:         time.Now(),
 		LastInteractionAt: time.Now(),
 	}
-	if err := csFile.Upsert(entry); err != nil {
+	if err := csFile.Save(entry); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"bytes"
 	"io"
 	"os"
@@ -20,10 +21,10 @@ import (
 // and a detached Codex session. Exited rows are added by callers via
 // addExitedToFixture. The returned *registry.AgentSessionFile lets
 // callers assert on-disk side effects after the loader runs.
-func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessionFile, *registry.AgentSessionEntry, *registry.AgentSessionEntry) {
+func listFixture(t *testing.T) (*chatstore.Store, *registry.AgentSessionFile, *registry.AgentSessionEntry, *registry.AgentSessionEntry) {
 	t.Helper()
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
+	csFile, err := chatstore.New(filepath.Join(dir, "chat_sessions.json"))
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}
@@ -45,7 +46,7 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 		CreatedAt:         now,
 		LastInteractionAt: now,
 	}
-	if err := csFile.Upsert(cs1); err != nil {
+	if err := csFile.Save(cs1); err != nil {
 		t.Fatalf("Upsert cs1: %v", err)
 	}
 
@@ -76,7 +77,7 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 		CreatedAt:         now.Add(-time.Hour),
 		LastInteractionAt: now.Add(-30 * time.Minute),
 	}
-	if err := csFile.Upsert(cs2); err != nil {
+	if err := csFile.Save(cs2); err != nil {
 		t.Fatalf("Upsert cs2: %v", err)
 	}
 

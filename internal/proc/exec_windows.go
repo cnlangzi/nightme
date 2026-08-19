@@ -33,12 +33,45 @@ import (
 // placeholder; HideWindow is a no-op there.
 const CreateNoWindow = 0x08000000
 
-// proc.New is the SOLE spawn recipe in nightme on Windows.
-// Every *exec.Cmd that nightme hands to Start / Run / Output
-// must come from this helper; direct os/exec.Command[Context]
-// calls in production code are forbidden because they bypass
-// CREATE_NO_WINDOW and the resulting child pops a visible
-// console window (the "flashing black rectangle" symptom).
+// Options controls spawn behaviour. The zero value is NOT the
+// safe default — HideWindow=false means "visible window". Use
+// New() (which passes HideWindow=true) for the default hide-
+// window behaviour; use NewVisible() when the child needs a
+// visible console (the tray's terminal spawn path).
+type Options struct {
+	// HideWindow, when true, sets CREATE_NO_WINDOW on the
+	// child's SysProcAttr so it never allocates a visible
+	// console. The default for daemon-internal command
+	// execution is true (hide) — every proc.New() caller gets
+	// this for free. Set to false only for tray-spawned
+	// terminals that the user needs to see.
+	HideWindow bool
+}
+
+// New is the backward-compatible spawn recipe: always hides the
+// window. Every existing caller (bridges, update, lifecycle,
+// shell dispatch, gtw exec) routes through here and gets the
+// same behaviour as before this Options refactor.
+func New(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return NewWith(ctx, Options{HideWindow: true}, name, args...)
+}
+
+// NewVisible is the convenience wrapper for NewWith with
+// HideWindow=false — the child gets a visible console window.
+// Used by the tray (internal/tray/openrepl) to spawn terminal
+// windows that the user needs to interact with.
+func NewVisible(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return NewWith(ctx, Options{HideWindow: false}, name, args...)
+}
+
+// NewWith is the configurable spawn recipe. See Options for the
+// available knobs. proc.New is the SOLE spawn recipe in
+// nightme on Windows — every *exec.Cmd that nightme hands to
+// Start / Run / Output must come from here or its wrappers;
+// direct os/exec.Command[Context] calls in production code are
+// forbidden because they bypass CREATE_NO_WINDOW and the
+// resulting child pops a visible console window (the "flashing
+// black rectangle" symptom).
 //
 // Routing matrix (mirrors the cmd-launcher rules; full
 // rationale follows):
@@ -48,11 +81,13 @@ const CreateNoWindow = 0x08000000
 //	.ps1 (PowerShell script)     → exec.CommandContext(powershell.exe, -NoProfile, -NonInteractive, -ExecutionPolicy Bypass, -File <resolved>, args...)
 //	.js  (Node.js script)        → exec.CommandContext(node.exe, <resolved>, args...)
 //
-// Each returned *exec.Cmd has CREATE_NO_WINDOW baked into its
-// SysProcAttr at construction time (see launchOnWindows), so
-// the child never allocates a visible console — nightme talks
-// to it via stdin / stdout / stderr pipes, no UI surface
-// needed.
+// When opts.HideWindow is true (the default via New), each
+// returned *exec.Cmd has CREATE_NO_WINDOW baked into its
+// SysProcAttr at construction time (see launchOnWindowsWith),
+// so the child never allocates a visible console. When false
+// (NewVisible / tray path), CREATE_NO_WINDOW is skipped so the
+// child gets a visible console — used for tray-spawned
+// terminals.
 //
 // Why this matters: every Windows install where an agent
 // binary is shipped as a Node-style shim (pi-node's
@@ -85,23 +120,36 @@ const CreateNoWindow = 0x08000000
 // bridge on Windows still works for single-pid Process.Signal
 // / Kill, because SignalProcessGroup's Windows fallback
 // already collapses to single-pid semantics.
-func New(ctx context.Context, name string, args ...string) *exec.Cmd {
+func NewWith(ctx context.Context, opts Options, name string, args ...string) *exec.Cmd {
 	resolved := name
 	if lp, err := exec.LookPath(name); err == nil {
 		resolved = lp
 	}
-	return launchOnWindows(ctx, resolved, args...)
+	return launchOnWindowsWith(ctx, opts, resolved, args...)
 }
 
-// launchOnWindows picks the right exec.Cmd shape for the
-// resolved target AND applies CREATE_NO_WINDOW before
-// returning. Split out from proc.New so the routing is
+// launchOnWindows is the backward-compatible wrapper around
+// launchOnWindowsWith that always hides the window. Retained
+// so existing unit tests (which call launchOnWindows directly
+// and assert CREATE_NO_WINDOW is set) don't need a signature
+// change.
+func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec.Cmd {
+	return launchOnWindowsWith(ctx, Options{HideWindow: true}, resolved, args...)
+}
+
+// launchOnWindowsWith picks the right exec.Cmd shape for the
+// resolved target AND conditionally applies CREATE_NO_WINDOW
+// before returning. Split out from NewWith so the routing is
 // table-driven and individually unit-testable. See the file
-// doc comment on proc.New for the matrix.
+// doc comment on NewWith for the matrix.
 //
 // resolved is the absolute path returned by exec.LookPath (or
 // the original name if LookPath failed). args are appended
 // verbatim after the interpreter / /d /c / -File marker.
+//
+// When opts.HideWindow is true, the returned *exec.Cmd has
+// CreateNoWindow on its SysProcAttr.CreationFlags. When false,
+// SysProcAttr is left nil so the child gets a visible console.
 //
 // Note: when resolved has no extension (or an unknown one) we
 // fall through to exec.CommandContext(resolved, args...) —
@@ -111,14 +159,7 @@ func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 // figures out the interpreter; on Windows that's not safe
 // for .cmd/.bat/.ps1, which is exactly the gap this whole
 // file exists to close.
-//
-// The returned *exec.Cmd ALWAYS has CreateNoWindow on its
-// SysProcAttr.CreationFlags — there is no separate "set
-// after" step that a caller could forget. PTY users (which
-// can't route through exec.CommandContext because go-pty owns
-// the cmd) call HideWindow directly with their SysProcAttr to
-// apply the same flag with the same merge semantics.
-func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec.Cmd {
+func launchOnWindowsWith(ctx context.Context, opts Options, resolved string, args ...string) *exec.Cmd {
 	var cmd *exec.Cmd
 	switch strings.ToLower(filepath.Ext(resolved)) {
 	case ".cmd", ".bat":
@@ -141,7 +182,9 @@ func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec
 		// PATH search.
 		cmd = exec.CommandContext(ctx, resolved, args...)
 	}
-	applyHideWindow(cmd)
+	if opts.HideWindow {
+		applyHideWindow(cmd)
+	}
 	return cmd
 }
 

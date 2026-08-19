@@ -31,13 +31,13 @@
 //
 //   Running        (disabled info row)
 //   ─────────
-//   Open            → openrepl.OpenCmd() (spawn a terminal with the REPL)
-//   Logs            → openrepl.OpenCmd("logs") (spawn a terminal tailing the log)
+//   Open            → proc.OpenTerminal() (spawn a terminal with the REPL)
+//   Logs            → proc.OpenTerminal("logs") (spawn a terminal tailing the log)
 //   Restart         → caller callback (spawn new _daemon child, SIGTERM self)
 //   Stop            → caller callback (trigger runtime graceful shutdown)
 //   ─────────
 //   list / kill / agents / name / clean / version
-//                   → openrepl.OpenCmd(title) — spawn terminal running `nightme <title>`
+//                   → proc.OpenTerminal(title) — spawn terminal running `nightme <title>`
 //
 // The subcommands are top-level items, NOT children of a disabled
 // submenu. The v1 design put them under a disabled "Commands"
@@ -48,6 +48,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -55,8 +56,8 @@ import (
 	"github.com/getlantern/systray"
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/runtime"
-	"github.com/cnlangzi/nightme/internal/tray/openrepl"
 )
 
 // trayDebounce is the minimum interval between two clicks being
@@ -65,10 +66,9 @@ import (
 // "Restart" because the first click didn't visibly do anything),
 // and long enough that a macOS touchpad double-tap from a single
 // user gesture does not spawn two REPL windows / send two
-// SIGTERMs. The openrepl package has its own debouncer too, but
-// having one at the click-dispatch level catches the other
-// primaries (Stop / Restart / Commands) which don't go through
-// openrepl.
+// SIGTERMs. (Previously openrepl carried its own debouncer;
+// that layer was removed when terminal-spawn moved into proc —
+// the tray click-level debounce is the single guard now.)
 const trayDebounce = 500 * time.Millisecond
 
 // clickTracker debounces a single menu item. Each menu item gets
@@ -204,12 +204,12 @@ func trayOnReady(opts trayOptions) {
 	stop := systray.AddMenuItem("Stop", "Gracefully stop the nightme daemon")
 
 	go handleClick(openREPL, func() {
-		if err := openrepl.OpenCmd(); err != nil {
+		if err := proc.OpenTerminal(context.Background(), "nightme"); err != nil {
 			logClickErr(opts.logger, "open-repl", err)
 		}
 	})
 	go handleClick(logs, func() {
-		if err := openrepl.OpenCmd("logs"); err != nil {
+		if err := proc.OpenTerminal(context.Background(), "nightme", "logs"); err != nil {
 			logClickErr(opts.logger, "open-logs", err)
 		}
 	})
@@ -231,13 +231,13 @@ func trayOnReady(opts trayOptions) {
 	// REPL banner so the tray menu reads the same as the REPL
 	// "Common:" list. Each is a top-level item (clickable, not
 	// greyed out) that opens a terminal running `nightme <title>`
-	// via openrepl.OpenCmd — the same path as Open / Logs, giving
+	// via proc.OpenTerminal — the same path as Open / Logs, giving
 	// every command a real TTY and visible output.
 	for _, item := range opts.reg.TrayItems() {
 		cmdItem := systray.AddMenuItem(item.Title, item.Tooltip)
 		ci := item
 		go handleClick(cmdItem, func() {
-			if err := openrepl.OpenCmd(ci.Title); err != nil {
+			if err := proc.OpenTerminal(context.Background(), "nightme", ci.Title); err != nil {
 				logClickErr(opts.logger, "command:"+ci.Title, err)
 			}
 		})

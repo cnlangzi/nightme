@@ -4,6 +4,7 @@ package proc
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,17 +35,19 @@ import (
 const CreateNoWindow = 0x08000000
 
 // Options controls spawn behaviour. The zero value is NOT the
-// safe default — HideWindow=false means "visible window". Use
+// safe default — HideWindow=false means "don't hide". Use
 // New() (which passes HideWindow=true) for the default hide-
-// window behaviour; use NewVisible() when the child needs a
-// visible console (the tray's terminal spawn path).
+// window behaviour. Set to false only when you explicitly need
+// the child to inherit a visible console — note that on a
+// detached daemon (no parent console) this still produces NO
+// visible window; for a guaranteed-visible terminal window use
+// OpenTerminal instead.
 type Options struct {
 	// HideWindow, when true, sets CREATE_NO_WINDOW on the
 	// child's SysProcAttr so it never allocates a visible
 	// console. The default for daemon-internal command
 	// execution is true (hide) — every proc.New() caller gets
-	// this for free. Set to false only for tray-spawned
-	// terminals that the user needs to see.
+	// this for free.
 	HideWindow bool
 }
 
@@ -54,14 +57,6 @@ type Options struct {
 // same behaviour as before this Options refactor.
 func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 	return NewWith(ctx, Options{HideWindow: true}, name, args...)
-}
-
-// NewVisible is the convenience wrapper for NewWith with
-// HideWindow=false — the child gets a visible console window.
-// Used by the tray (internal/tray/openrepl) to spawn terminal
-// windows that the user needs to interact with.
-func NewVisible(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return NewWith(ctx, Options{HideWindow: false}, name, args...)
 }
 
 // NewWith is the configurable spawn recipe. See Options for the
@@ -84,10 +79,12 @@ func NewVisible(ctx context.Context, name string, args ...string) *exec.Cmd {
 // When opts.HideWindow is true (the default via New), each
 // returned *exec.Cmd has CREATE_NO_WINDOW baked into its
 // SysProcAttr at construction time (see launchOnWindowsWith),
-// so the child never allocates a visible console. When false
-// (NewVisible / tray path), CREATE_NO_WINDOW is skipped so the
-// child gets a visible console — used for tray-spawned
-// terminals.
+// so the child never allocates a visible console. When false,
+// CREATE_NO_WINDOW is skipped — but note the daemon itself is
+// a detached background process with no console, so a child
+// built with HideWindow=false will NOT get a visible window
+// either (there is no parent console to inherit). For a
+// guaranteed-visible terminal window use OpenTerminal.
 //
 // Why this matters: every Windows install where an agent
 // binary is shipped as a Node-style shim (pi-node's
@@ -233,12 +230,10 @@ func applyHideWindow(cmd *exec.Cmd) {
 // ComSpecOrDefault returns %ComSpec% (set on every standard
 // Windows install) with an explicit fallback for the rare
 // case where the user cleared it. Exported because callers
-// outside the proc package (notably internal/tray/openrepl
-// which spawns a new console window for the REPL from the
-// tray) need the same resolution rule that the daemon
-// spawn recipe uses, and a hand-rolled copy in openrepl
-// would drift the moment either side changed its mind about
-// the fallback path.
+// outside the proc package need the same resolution rule that
+// the daemon spawn recipe uses, and a hand-rolled copy would
+// drift the moment either side changed its mind about the
+// fallback path.
 func ComSpecOrDefault() string {
 	if c := os.Getenv("ComSpec"); c != "" {
 		return c
@@ -261,4 +256,43 @@ func isWindowsBatchExt(ext string) bool {
 		return true
 	}
 	return false
+}
+
+// OpenTerminal spawns a NEW visible console window that runs
+// `name args...` and keeps it open after the command exits
+// (cmd /k). Unlike New/NewWith — which build a child that
+// inherits (or not) the daemon's absent console — OpenTerminal
+// uses `cmd /c start "title" cmd /k <name> [args]` to
+// allocate a fresh console for the child, so the user
+// always sees a window regardless of whether the daemon has
+// one.
+//
+// Fire-and-forget: the helper reaps the short-lived `cmd /c
+// start` helper in a goroutine and returns nil on successful
+// launch; the visible window is its own process whose lifetime
+// is independent of the caller. Use this for tray menu clicks
+// that need to show the user a terminal (REPL, logs tail,
+// interactive subcommands).
+//
+// name is resolved via exec.LookPath so a bare "nightme" works
+// regardless of install location (scoop / chocolatey / manual
+// PATH copy). The window title is derived from name + args for
+// at-a-glance identification in the taskbar.
+func OpenTerminal(ctx context.Context, name string, args ...string) error {
+	bin, err := exec.LookPath(name)
+	if err != nil {
+		return fmt.Errorf("proc: %s not on PATH: %w", name, err)
+	}
+	cmdExe := ComSpecOrDefault()
+	title := name
+	if len(args) > 0 {
+		title = name + " " + strings.Join(args, " ")
+	}
+	fullArgs := append([]string{"/c", "start", title, "cmd", "/k", bin}, args...)
+	cmd := NewWith(ctx, Options{HideWindow: false}, cmdExe, fullArgs...)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("proc: start terminal: %w", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

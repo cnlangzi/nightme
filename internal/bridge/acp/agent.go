@@ -407,7 +407,9 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 // can drive the handshake against an in-process net.Pipe server
 // without going through pty.NewTransport.
 func (d *driver) handshake(ctx context.Context, workspace string) error {
+	acpLog("handshake start", "agent", d.agentName, "workspace", workspace)
 	initCtx, initCancel := context.WithTimeout(ctx, initializeTimeout)
+	initStart := time.Now()
 	defer initCancel()
 	if _, err := d.rpc.request(initCtx, "initialize", initializeParams{
 		ProtocolVersion: protocolVersion,
@@ -421,18 +423,27 @@ func (d *driver) handshake(ctx context.Context, workspace string) error {
 			Version: clientVersion,
 		},
 	}); err != nil {
+		acpLog("handshake initialize failed",
+			"agent", d.agentName, "elapsed_ms", time.Since(initStart).Milliseconds(), "err", err.Error())
 		return fmt.Errorf("bridge/acp: initialize (timeout=%s): %w", initializeTimeout, err)
 	}
+	acpLog("handshake initialize ok",
+		"agent", d.agentName, "elapsed_ms", time.Since(initStart).Milliseconds())
 
 	newCtx, newCancel := context.WithTimeout(ctx, newSessionTimeout)
+	newStart := time.Now()
 	defer newCancel()
 	result, err := d.rpc.request(newCtx, "session/new", newSessionParams{
 		CWD:        workspace,
 		MCPServers: []any{},
 	})
 	if err != nil {
+		acpLog("handshake session/new failed",
+			"agent", d.agentName, "elapsed_ms", time.Since(newStart).Milliseconds(), "err", err.Error())
 		return fmt.Errorf("bridge/acp: session/new (timeout=%s): %w", newSessionTimeout, err)
 	}
+	acpLog("handshake session/new ok",
+		"agent", d.agentName, "elapsed_ms", time.Since(newStart).Milliseconds())
 	if err := d.setSessionID(result); err != nil {
 		return err
 	}
@@ -706,6 +717,7 @@ func (d *driver) New(ctx context.Context) error {
 	if d.transport == nil {
 		return errors.New("bridge/acp: nil transport")
 	}
+	newStart := time.Now()
 	newCtx, cancel := context.WithTimeout(ctx, newSessionTimeout)
 	defer cancel()
 	result, err := d.rpc.request(newCtx, "session/new", newSessionParams{
@@ -713,8 +725,10 @@ func (d *driver) New(ctx context.Context) error {
 		MCPServers: []any{},
 	})
 	if err != nil {
-		return fmt.Errorf("bridge/acp: session/new: %w", err)
+		acpLog("New session/new failed", "agent", d.agentName, "elapsed_ms", time.Since(newStart).Milliseconds(), "err", err.Error())
+		return fmt.Errorf("bridge/acp: session/new (timeout=%s): %w", newSessionTimeout, err)
 	}
+	acpLog("New session/new ok", "agent", d.agentName, "elapsed_ms", time.Since(newStart).Milliseconds())
 	// Re-arm connectedSent so emitConnected fires again with the
 	// new id. We reuse permissionMu (which already serializes
 	// connectedSent writes through setSessionID/emitConnected) as
@@ -1271,6 +1285,16 @@ func (d *driver) emit(event agent.AgentEvent) {
 // the public methods. The package-private starter half is type-checked
 // in starter.go via the same agentDriver interface declaration.
 var _ agentDriver = (*driver)(nil)
+
+// acpLog is a debug-level log helper for the acp bridge.
+// The acp bridge is shared across multiple agent registrations
+// (opencode today, future ACP backends later), so it logs under
+// a per-agent label rather than a fixed package name. This keeps
+// acp's own logs clean and lets the caller's slog context carry
+// the agent identity.
+func acpLog(msg string, args ...any) {
+	slog.Debug("acp: "+msg, args...)
+}
 
 // agentDriver is the local alias for the agent.driver interface so
 // this file can compile-time check driver satisfies it without

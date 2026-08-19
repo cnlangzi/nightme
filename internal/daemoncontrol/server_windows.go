@@ -29,6 +29,9 @@ import (
 
 // HealthProvider is defined in server.go (cross-platform).
 
+// osExit + the starting-state fast-path live in stop_fastpath.go
+// so the unix and windows servers share one definition.
+
 type Server struct {
 	pipeName string
 
@@ -251,6 +254,16 @@ func (s *Server) handle(conn *pipeInstance) {
 		_ = WriteResult(conn, HealthPayload{Channel: channel, Health: snapshot})
 	case "stop":
 		s.stopOnce.Do(func() {
+			// Mirror server_unix.go's stop handler. See
+			// stop_fastpath.go for the shared fast-path rationale
+			// and stop_fastpath_test.go for the cross-platform
+			// coverage. CAS closes the Load/Store race with
+			// SetReady() — losing the CAS means the runtime has
+			// armed its wait select, so we fall through to the
+			// graceful cancel path.
+			if s.state.CompareAndSwap("starting", "stopping") {
+				startingStateStopAck(conn)
+			}
 			s.state.Store("stopping")
 			if s.cancel != nil {
 				s.cancel()

@@ -16,6 +16,9 @@ import (
 
 // ErrNotRunning is defined cross-platform in protocol.go.
 
+// osExit + the starting-state fast-path live in stop_fastpath.go
+// so the unix and windows servers share one definition.
+
 type Server struct {
 	listener  *net.UnixListener
 	path      string
@@ -129,6 +132,18 @@ func (s *Server) handle(conn *net.UnixConn) {
 		_ = WriteResult(conn, HealthPayload{Channel: channel, Health: snapshot})
 	case "stop":
 		s.stopOnce.Do(func() {
+			// CAS "starting" → "stopping". If the CAS succeeds we
+			// are still in the window where SetReady() has NOT
+			// fired — cancel() would be unconsumed by runDaemon's
+			// wait select. The fast-path writes a stop ack, closes
+			// the conn (Unix sockets don't flush send buffer on
+			// exit), and calls osExit to release the daemon flock.
+			// If SetReady() raced ahead, the CAS fails and we fall
+			// through to the graceful cancel path below. See
+			// stop_fastpath.go for the full rationale.
+			if s.state.CompareAndSwap("starting", "stopping") {
+				startingStateStopAck(conn)
+			}
 			s.state.Store("stopping")
 			if s.cancel != nil {
 				s.cancel()

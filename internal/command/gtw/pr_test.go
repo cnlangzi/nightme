@@ -1571,9 +1571,6 @@ func TestFactory_Handle_RoutesToPR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chatsession.New: %v", err)
 	}
-	gtwMgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		return cs
-	})
 	ch := rec
 
 	out, err := f.Handle(context.Background(),

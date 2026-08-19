@@ -349,15 +349,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 
-	// chatID → ChatSession lookup. v1.3+ multi-channel: walk
-	// allMgrs to find the per-channel mgr that owns chatID.
-	// Each mgr lazily hydrates its own chats from csFile on
-	// miss; the first mgr whose GetOrCreate succeeds owns
-	// the chat going forward.
-	gtwMgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		return findChatSession(chatID, cfg.Primary)
-	})
-
 	// Phase 2.3: command/* packages self-register via init()
 	// — see internal/command/runtime.go. The orchestrator just
 	// calls SetDeps once with the manager + primary + gtw
@@ -372,8 +363,21 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 
 	// Reaction router (services) — gtw's ReactionRouter
 	// dispatches msg.Reaction / msg.Action events.
+	//
+	// gtw.Manager.HandleReaction is intentionally cs-blind (the
+	// gtw package owns NO chat-session read logic — see
+	// internal/command/gtw/manager.go doc). We resolve cs here
+	// via findChatSession so the reaction path sees the same
+	// per-channel session a slash command would see, and pass
+	// the result through.
 	router := commandServices.NewReactionRouter()
-	router.Register("*", gtwMgr.HandleReaction)
+	router.Register("*", func(ctx context.Context, ev commandServices.ReactionEvent) bool {
+		cs := findChatSession(ev.ChatID, cfg.Primary)
+		if cs == nil {
+			return false
+		}
+		return gtwMgr.HandleReaction(ctx, ev, cs)
+	})
 
 	// Slash command registry + commander. After SetDeps
 	// every command/* package's init() has produced a factory;
@@ -391,13 +395,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	command.SetDeps(command.Deps{
 		Manager: primaryMgr,
 		Primary: cfg.Primary,
-		// Cross-mgr lookup: gtw uses this to find the ChatSession
-		// owned by the originating channel so reactions + /gtw
-		// replies route through the right Emitter. findChatSession
-		// takes (chatID, primary); ChatSessionLookup is single-arg.
-		ChatSessionLookup: func(chatID string) *chatsession.ChatSession {
-			return findChatSession(chatID, cfg.Primary)
-		},
+		// GTWExt carries gtw's HandlerDeps. Chat-session lookup
+		// for the gtw reaction path is wired inline at the
+		// ReactionRouter.Register call below (see the wrapper
+		// closure that resolves cs via findChatSession before
+		// calling gtwMgr.HandleReaction).
 		GTWExt: gtwDeps,
 	})
 	reg := command.Default()

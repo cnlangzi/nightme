@@ -180,17 +180,21 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 		Now:    func() time.Time { return timeNow() },
 	}
 
-	// 4. F-51: build a fresh gtw.Manager + services.ReactionRouter
-	// and register gtwMgr.HandleReaction. The gateway's
-	// WithActionHandler below calls router.Handle for each
-	// reaction event. (Pre-F-51 this was
-	// gateway.RegisterGTWAction(mgr, gtwDeps), which installed
-	// SetActionHandler on each ChatSession. F-51 removed that
-	// path — reactions are now router-based.)
+	// 4. F-51: build a fresh gtw.Manager + services.ReactionRouter.
+	// gtw.Manager.HandleReaction now takes the cs reference from
+	// the caller (gtw owns no chat-session read logic), so the
+	// router handler resolves cs via the chatsession.Manager
+	// before forwarding — same pattern as the production runtime.
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 	gtwRouter := commandServices.NewReactionRouter()
-	gtwRouter.Register("*", gtwMgr.HandleReaction)
+	gtwRouter.Register("*", func(ctx context.Context, ev commandServices.ReactionEvent) bool {
+		cs, _ := mgr.GetOrCreate(ev.ChatID, "primary")
+		if cs == nil {
+			return false
+		}
+		return gtwMgr.HandleReaction(ctx, ev, cs)
+	})
 
 	// 5. Create the ChatSession — triggers the WithOnCreate
 	// callback, which installs the SetActionHandler.

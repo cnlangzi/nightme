@@ -17,23 +17,20 @@ import (
 // looks like; chatsession is unaware.
 //
 // The runtime instantiates one Manager per process and shares
-// it across all chats. Per-chat substate (states / drafts /
-// chatSessions cache) is keyed by chatID and protected by a
-// single sync.RWMutex.
+// it across all chats. Per-chat substate (states / drafts) is
+// keyed by chatID and protected by a single sync.RWMutex.
+//
+// ChatSession references are NOT stored or looked up here.
+// Slash command paths receive cs from the dispatcher parameter;
+// reaction paths receive cs from the runtime-layer wrapper that
+// resolves cs before calling HandleReaction. Keeping cs read
+// logic out of gtw prevents accidental misuse (e.g. a slash
+// command querying a different mgr's cache and missing the
+// just-updated cwd).
 type Manager struct {
-	mu           sync.RWMutex
-	states       map[string]Context                  // chatID -> active /gtw fix snapshot
-	drafts       map[string]map[string]*Draft        // chatID -> requestID -> pending draft
-	chatSessions map[string]*chatsession.ChatSession // chatID -> live ChatSession (cached per factory invocation)
-
-	// chatSessionLookup is the runtime-supplied closure that
-	// resolves a chatID to its *chatsession.ChatSession on
-	// demand. Called lazily on GetChatSession miss. Set via
-	// SetGetChatSession at runtime startup. nil = no factory;
-	// GetChatSession returns nil and the gtw command fails
-	// loudly (rather than silently corrupting state with a nil
-	// deref).
-	chatSessionLookup func(chatID string) *chatsession.ChatSession
+	mu     sync.RWMutex
+	states map[string]Context           // chatID -> active /gtw fix snapshot
+	drafts map[string]map[string]*Draft // chatID -> requestID -> pending draft
 
 	// now is overridable for tests; defaults to time.Now.
 	now func() time.Time
@@ -45,84 +42,15 @@ type Manager struct {
 }
 
 // NewManager returns an empty Manager ready to receive per-chat
-// state. ChatSession lookup is wired at runtime.
+// state. ChatSession references are passed in by callers (slash
+// command dispatcher parameter; reaction wrapper in runtime)
+// and are never cached here.
 func NewManager() *Manager {
 	return &Manager{
-		states:       make(map[string]Context),
-		drafts:       make(map[string]map[string]*Draft),
-		chatSessions: make(map[string]*chatsession.ChatSession),
-		now:          time.Now,
+		states: make(map[string]Context),
+		drafts: make(map[string]map[string]*Draft),
+		now:    time.Now,
 	}
-}
-
-// SetGetChatSession installs a closure that resolves chatID to
-// its *chatsession.ChatSession on demand. The factory is called
-// under the manager's read lock; the result is cached, so
-// subsequent GetChatSession calls are O(1).
-//
-// F-XX runtime wiring: cmd/nightme/run.go installs a closure
-// that holds a *chatsession.Manager reference. The closure
-// delegates to mgr.GetOrCreate(chatID, primary) so per-chat
-// session materialisation follows the same path as the
-// runtime's other consumers.
-//
-// Tests install a closure that returns a per-chat fake
-// *chatsession.ChatSession (see manager_test.go's
-// fakeChatSession helper).
-//
-// nil disables the lazy path (GetChatSession returns nil).
-//
-// F-XX: replaces the old SetSender / SetChatSession pair —
-// the runtime never needs to pre-populate; the closure-based
-// lookup is enough.
-func (m *Manager) SetGetChatSession(fn func(chatID string) *chatsession.ChatSession) {
-	m.mu.Lock()
-	m.chatSessionLookup = fn
-	m.mu.Unlock()
-}
-
-// GetChatSession returns the *chatsession.ChatSession
-// registered for chatID. If none is pre-registered AND a
-// chatSessionLookup is installed, the lookup is called once
-// and the result is cached. Returns nil when no ChatSession is
-// available.
-//
-// Used internally by RunFix / HandleDraftReaction to access
-// SelectedCwd / SetSelectedCwd / QueueUserMessage without going
-// through an interface boundary.
-//
-// F-XX: replaces GetSender.
-func (m *Manager) GetChatSession(chatID string) *chatsession.ChatSession {
-	if chatID == "" {
-		return nil
-	}
-	m.mu.RLock()
-	cs, ok := m.chatSessions[chatID]
-	lookup := m.chatSessionLookup
-	m.mu.RUnlock()
-	if ok {
-		return cs
-	}
-	if lookup == nil {
-		return nil
-	}
-	// Call lookup outside the lock (lookup may itself acquire
-	// other locks — e.g. *chatsession.Manager.GetOrCreate takes
-	// a write lock).
-	fresh := lookup(chatID)
-	if fresh == nil {
-		return nil
-	}
-	m.mu.Lock()
-	// Double-check after re-acquiring: another goroutine may
-	// have raced us to install a ChatSession.
-	if existing, ok := m.chatSessions[chatID]; ok {
-		m.mu.Unlock()
-		return existing
-	}
-	m.chatSessions[chatID] = fresh
-	m.mu.Unlock()
-	return fresh
 }
 
 // --- context (per-chat fix snapshot) ---
@@ -243,13 +171,13 @@ func (m *Manager) ClearDrafts(chatID string) {
 	m.mu.Unlock()
 }
 
-// Reset clears all state for chatID (context + drafts +
-// ChatSession cache). Used by `nightme gtw reset` debug command.
+// Reset clears all state for chatID (context + drafts).
+// Used by `nightme gtw reset` debug command. ChatSession
+// references are not cached here, so nothing else to clear.
 func (m *Manager) Reset(chatID string) {
 	m.mu.Lock()
 	delete(m.states, chatID)
 	delete(m.drafts, chatID)
-	delete(m.chatSessions, chatID)
 	m.mu.Unlock()
 }
 
@@ -265,10 +193,13 @@ func (m *Manager) SetHandlerDeps(deps HandlerDeps) {
 	m.mu.Unlock()
 }
 
-// HandleReaction is the callback gtw registers with
-// services.ReactionRouter at startup. Looks up the chatID's
-// drafts map and dispatches to the per-draft action executor
-// (action.go's HandleDraftReaction).
+// HandleReaction is the per-event reaction executor gtw exposes
+// to the runtime. The runtime wraps it with a closure that
+// resolves *chatsession.ChatSession from ev.ChatID and passes
+// the result here — gtw does NOT do cs lookup itself.
+//
+// Looks up the chatID's drafts map and dispatches to the
+// per-draft action executor (action.go's HandleDraftReaction).
 //
 // Returns true if a draft was found and acted on (consumed);
 // false if no draft matched OR deps is not yet wired
@@ -280,9 +211,16 @@ func (m *Manager) SetHandlerDeps(deps HandlerDeps) {
 //	router := services.NewReactionRouter()
 //	gtwMgr := gtw.NewManager()
 //	gtwMgr.SetHandlerDeps(deps)
-//	router.Register("*", gtwMgr.HandleReaction)
-func (m *Manager) HandleReaction(ctx context.Context, ev services.ReactionEvent) bool {
+//	router.Register("*", func(ctx context.Context, ev services.ReactionEvent) bool {
+//	    cs := findChatSession(ev.ChatID, cfg.Primary)
+//	    if cs == nil { return false }
+//	    return gtwMgr.HandleReaction(ctx, ev, cs)
+//	})
+func (m *Manager) HandleReaction(ctx context.Context, ev services.ReactionEvent, cs *chatsession.ChatSession) bool {
 	if ev.RequestID == "" || ev.ChatID == "" {
+		return false
+	}
+	if cs == nil {
 		return false
 	}
 	m.mu.RLock()
@@ -295,7 +233,7 @@ func (m *Manager) HandleReaction(ctx context.Context, ev services.ReactionEvent)
 			"request_id", ev.RequestID)
 		return false
 	}
-	consumed, err := HandleDraftReaction(ctx, m, deps, ev)
+	consumed, err := HandleDraftReaction(ctx, m, deps, cs, ev)
 	if err != nil {
 		slog.Default().Error("gtw: HandleReaction error",
 			"err", err,

@@ -49,22 +49,22 @@ import (
 // Holds *chatsession.Manager directly (mirrors /cwd, /think, /use)
 // so the runtime can construct it via the package init() without
 // pulling in extra runtime deps.
-type Factory struct {
-	mgr *chatsession.Manager
-}
+type Factory struct {}
 
 // init self-registers the /review command. Each command package's
 // init() calls RegisterBuilder; the runtime orchestrator calls
 // SetDeps once at startup to finalize every registered builder.
 func init() {
 	command.RegisterBuilder(func(d command.Deps) command.SlashCommandFactory {
-		return NewFactory(d.Manager)
+		return NewFactory()
 	})
 }
 
-// NewFactory constructs a Factory backed by mgr.
-func NewFactory(mgr *chatsession.Manager) *Factory {
-	return &Factory{mgr: mgr}
+// NewFactory constructs a Factory. command/* factories do not
+// receive a *chatsession.Manager — cs comes from the dispatcher
+// parameter at Handle time.
+func NewFactory() *Factory {
+	return &Factory{}
 }
 
 // Spec implements command.SlashCommandFactory.

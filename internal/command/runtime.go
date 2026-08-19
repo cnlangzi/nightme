@@ -4,8 +4,6 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // RuntimeServices aggregates the dependencies a slash command
@@ -56,20 +54,6 @@ type Config struct {
 // from Deps. The orchestrator calls SetDeps once at startup
 // to finalize every registered builder.
 type Deps struct {
-	// Manager is the chatsession.Manager every command reaches
-	// into for cs.GetOrCreate / cs.SetXxx.
-	//
-	// v1.3+ multi-channel: with multiple per-channel mgrs, this
-	// is the FIRST one built (any of them works — they all
-	// share csFile/asFile, so GetOrCreate resolves the right
-	// chat regardless of which mgr owns the chatID). Commands
-	// that always have cs already in hand (the common case for
-	// slash commands) don't need to resolve the mgr at all —
-	// the per-call mgr argument to Handle() is the one bound
-	// to cs's Emitter. gtw no longer reads from this field —
-	// it receives cs purely from the dispatcher parameter and
-	// from the runtime-layer reaction wrapper.
-	Manager *chatsession.Manager
 	// Primary is the primary agent name.
 	Primary string
 	// GTWExt is the gtw.HandlerDeps the gtw command needs

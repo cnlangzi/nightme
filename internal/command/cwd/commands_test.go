@@ -13,7 +13,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := NewFactory(chatsession.NewManager())
+	f := NewFactory()
 	s := f.Spec()
 	if s.Name != "cwd" {
 		t.Fatalf("Spec.Name = %q, want cwd", s.Name)
@@ -22,7 +22,7 @@ func TestFactory_Spec(t *testing.T) {
 
 func TestFactory_Handle_NoArgs_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
@@ -37,7 +37,7 @@ func TestFactory_Handle_NoArgs_RepliesUsage(t *testing.T) {
 
 func TestFactory_Handle_NonexistentPath_RejectsEarly(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "/nonexistent-path-xyz"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
@@ -59,7 +59,7 @@ func TestFactory_Handle_RegularFile_RejectsNotDirectory(t *testing.T) {
 	}
 
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", file}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
@@ -75,7 +75,7 @@ func TestFactory_Handle_RegularFile_RejectsNotDirectory(t *testing.T) {
 func TestFactory_Handle_ValidDir_SetsActiveCwd(t *testing.T) {
 	tmp := t.TempDir()
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", tmp}}
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
@@ -120,7 +120,7 @@ func TestFactory_Handle_FullWidthPath_Normalised(t *testing.T) {
 	// resolvePath classifies it as absolute (no $HOME
 	// prefix in the reply).
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "／tmp"}}
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
@@ -144,7 +144,7 @@ func TestFactory_Handle_FullWidthPath_Normalised(t *testing.T) {
 // silently using only "foo".
 func TestFactory_Handle_TooManyArgs_Rejected(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "first", "second"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
@@ -164,7 +164,7 @@ func TestFactory_Handle_TooManyArgs_Rejected(t *testing.T) {
 // rather than passing it to os.Stat.
 func TestFactory_Handle_MultilinePath_Rejected(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "/tmp\n/etc"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")

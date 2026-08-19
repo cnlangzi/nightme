@@ -10,7 +10,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := NewFactory(chatsession.NewManager())
+	f := NewFactory()
 	s := f.Spec()
 	if s.Name != "new" {
 		t.Fatalf("Spec.Name = %q, want new", s.Name)
@@ -19,7 +19,7 @@ func TestFactory_Spec(t *testing.T) {
 
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"new"}}
 
@@ -34,7 +34,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 
 func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	// Pre-populate activeCwd so the preflight passes; the empty
 	// string after /new should trigger the usage reply.
 	cs, _ := mgr.GetOrCreate("c1", "claude")
@@ -53,7 +53,7 @@ func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 
 func TestFactory_Handle_NoSessions_RepliesNoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 

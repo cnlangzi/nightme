@@ -30,19 +30,21 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /new.
-type Factory struct {
-	mgr            *chatsession.Manager
-}
+type Factory struct{}
 
-// NewFactory constructs a Factory backed by mgr.
+// NewFactory constructs a Factory. command/* factories do not
+// receive a *chatsession.Manager — cs comes from the dispatcher
+// parameter at Handle time. /new uses the per-call mgr parameter
+// for persistAgentSession, never holding a chatsession reference
+// across calls.
 func init() {
 	command.RegisterBuilder(func(d command.Deps) command.SlashCommandFactory {
-		return NewFactory(d.Manager)
+		return NewFactory()
 	})
 }
 
-func NewFactory(mgr *chatsession.Manager) *Factory {
-	return &Factory{mgr: mgr}
+func NewFactory() *Factory {
+	return &Factory{}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -90,10 +92,10 @@ agentName := ""
 		if r.Session == nil || r.Error != nil {
 			continue
 		}
-		if f.mgr != nil {
+		if mgr != nil {
 			// Persist so the new (post-bridge-New) state survives
 			// daemon restart, even if no further turn completes.
-			if persistErr := f.mgr.PersistAgentSession(r.Session); persistErr != nil {
+			if persistErr := mgr.PersistAgentSession(r.Session); persistErr != nil {
 				// Don't clobber the primary error if
 				// NewActiveAgentSessions already returned one
 				// — log and move on.

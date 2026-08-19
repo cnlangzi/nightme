@@ -213,10 +213,9 @@ func TestFormatStopResult_NotSupported(t *testing.T) {
 // TestHandler_NoSession — the /stop handler with an unknown chat
 // ID replies with the canonical "No active chat session." message.
 func TestHandler_NoSession(t *testing.T) {
-	mgr := chatsession.NewManager()
-	f := stoppkg.NewFactory(mgr)
+	f := stoppkg.NewFactory()
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, nil,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, nil,
 		command.SlashInput{ChatID: "no-such-chat"})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -233,7 +232,7 @@ func TestHandler_NoSession(t *testing.T) {
 // rejects with "Usage: /stop".
 func TestHandler_UsageError(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := stoppkg.NewFactory(mgr)
+	f := stoppkg.NewFactory()
 
 	// Build a ChatSession so the chat-existence preflight passes.
 	cs, _ := mgr.GetOrCreate("c1", "claude")
@@ -260,8 +259,7 @@ func TestHandler_UsageError(t *testing.T) {
 // flight" message.
 func TestHandler_NoTurnInFlight(t *testing.T) {
 	cs, _, _ := setupSelectedAS(t, "claude", "/tmp", true)
-	mgr := chatsession.NewManager()
-	f := stoppkg.NewFactory(mgr)
+	f := stoppkg.NewFactory()
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})
@@ -281,8 +279,7 @@ func TestHandler_NoTurnInFlight(t *testing.T) {
 // "Next prompt will take over" hint.
 func TestHandler_Stopped(t *testing.T) {
 	cs, _, stub := setupSelectedAS(t, "claude", "/tmp", false)
-	mgr := chatsession.NewManager()
-	f := stoppkg.NewFactory(mgr)
+	f := stoppkg.NewFactory()
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})

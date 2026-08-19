@@ -383,17 +383,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// every command/* package's init() has produced a factory;
 	// Default() returns the populated registry.
 	//
-	// v1.3+ multi-channel: Deps.Manager is the FIRST per-channel
-	// chatsession.Manager (any of them works — they all share
-	// csFile/asFile, so GetOrCreate resolves the right chat
-	// regardless of which mgr owns the chatID). The runtime's
-	// own dispatch (tryMessageDispatch, inbound.Router.Dispatch)
-	// passes the per-call mgr from the pump, so this single
-	// mgr in Deps.Manager is only a fallback for command-level
-	// lookups (gtw's GetContext path).
-	primaryMgr := firstMgr()
+	// command/* factories do not take a *chatsession.Manager.
+	// ChatSession references are supplied passively: slash
+	// commands receive cs from the dispatcher parameter;
+	// reactions receive cs from the runtime-layer wrapper that
+	// resolves cs before calling gtwMgr.HandleReaction.
 	command.SetDeps(command.Deps{
-		Manager: primaryMgr,
 		Primary: cfg.Primary,
 		// GTWExt carries gtw's HandlerDeps. Chat-session lookup
 		// for the gtw reaction path is wired inline at the
@@ -512,26 +507,6 @@ var (
 	allMgrsMu sync.RWMutex
 	allMgrs   []*chatsession.Manager
 )
-
-// firstMgr returns any per-channel chatsession.Manager from
-// allMgrs, or nil if no channels are attached. Used as a
-// fallback "primary" manager for command.Deps (gtw's
-// GetContext, slash command lookups). The runtime's own
-// dispatch path uses per-call mgr from the pump closure, so
-// this fallback is only for command-level lookups that aren't
-// routed through Dispatch(ctx, mgr, msg).
-//
-// Any per-channel mgr works because all mgrs share the same
-// csFile and asFile; GetOrCreate resolves the chat regardless
-// of which mgr owns it.
-func firstMgr() *chatsession.Manager {
-	allMgrsMu.RLock()
-	defer allMgrsMu.RUnlock()
-	if len(allMgrs) == 0 {
-		return nil
-	}
-	return allMgrs[0]
-}
 
 // findChatSession returns the ChatSession that owns chatID.
 //

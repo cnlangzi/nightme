@@ -26,7 +26,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := queuepkg.NewFactory(chatsession.NewManager())
+	f := queuepkg.NewFactory()
 	s := f.Spec()
 	if s.Name != "queue" {
 		t.Fatalf("Spec.Name = %q, want queue", s.Name)
@@ -37,8 +37,7 @@ func TestFactory_Spec(t *testing.T) {
 }
 
 func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
-	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, nil,
 		command.SlashInput{ChatID: "no-such-chat"})
@@ -57,7 +56,7 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 // RequireActiveCwd preflight fires before any QueueUserMessage.
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
@@ -78,7 +77,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 // /queue by mistake.
 func TestFactory_Handle_EmptyBody_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -110,7 +109,7 @@ func TestFactory_Handle_EmptyBody_RepliesUsage(t *testing.T) {
 // integration tests in internal/chatsession.
 func TestFactory_Handle_AppendsMessage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -141,7 +140,7 @@ func TestFactory_Handle_AppendsMessage(t *testing.T) {
 // survive the slash dispatch.
 func TestFactory_Handle_MultiWordBody(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -169,7 +168,7 @@ func TestFactory_Handle_MultiWordBody(t *testing.T) {
 // both prefixes. The handler should still see the trailing args.
 func TestFactory_Handle_FullWidthSlash_ArgsAlreadySet(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -197,7 +196,7 @@ func TestFactory_Handle_FullWidthSlash_ArgsAlreadySet(t *testing.T) {
 // the IM card payload).
 func TestFactory_Handle_LongBody_RuneTruncation(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -324,7 +323,7 @@ func TestBuildMessage_KindAlwaysQueue(t *testing.T) {
 // is non-interrupting and appends to tail).
 func TestFactory_Handle_QueueGrows(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -367,7 +366,7 @@ func TestFactory_Handle_QueueGrows(t *testing.T) {
 // "Queued: …" reply but no actual enqueue happened).
 func TestFactory_Handle_EmptyMessageID_RepliesDiagnostic(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := queuepkg.NewFactory(mgr)
+	f := queuepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 

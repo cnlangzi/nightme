@@ -10,7 +10,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := NewFactory(chatsession.NewManager())
+	f := NewFactory()
 	s := f.Spec()
 	if s.Name != "think" {
 		t.Fatalf("Spec.Name = %q, want think", s.Name)
@@ -19,7 +19,7 @@ func TestFactory_Spec(t *testing.T) {
 
 func TestFactory_Handle_NoArgs_ReportsCurrentMode(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "c1", Args: []string{"think"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
@@ -37,7 +37,7 @@ func TestFactory_Handle_NoArgs_ReportsCurrentMode(t *testing.T) {
 
 func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	ctx := context.Background()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
@@ -62,7 +62,7 @@ func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 
 func TestFactory_Handle_UnknownMode_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr)
+	f := NewFactory()
 	input := command.SlashInput{ChatID: "c1", Args: []string{"think", "maybe"}}
 
 	cs, _ := mgr.GetOrCreate(input.ChatID, "test")

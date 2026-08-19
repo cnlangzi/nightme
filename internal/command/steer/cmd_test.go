@@ -17,7 +17,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := steerpkg.NewFactory(chatsession.NewManager())
+	f := steerpkg.NewFactory()
 	s := f.Spec()
 	if s.Name != "steer" {
 		t.Fatalf("Spec.Name = %q, want steer", s.Name)
@@ -28,8 +28,7 @@ func TestFactory_Spec(t *testing.T) {
 }
 
 func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
-	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, nil,
 		command.SlashInput{ChatID: "no-such-chat"})
@@ -48,7 +47,7 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 // RequireActiveCwd preflight fires before any SteerUserMessage.
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
@@ -69,7 +68,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 // /steer by mistake.
 func TestFactory_Handle_EmptyBody_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -91,7 +90,7 @@ func TestFactory_Handle_EmptyBody_RepliesUsage(t *testing.T) {
 // message body lands at the head (no other items in the queue).
 func TestFactory_Handle_PrependsMessage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -122,7 +121,7 @@ func TestFactory_Handle_PrependsMessage(t *testing.T) {
 // survive the slash dispatch.
 func TestFactory_Handle_MultiWordBody(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -150,7 +149,7 @@ func TestFactory_Handle_MultiWordBody(t *testing.T) {
 // both prefixes. The handler should still see the trailing args.
 func TestFactory_Handle_FullWidthSlash_ArgsAlreadySet(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -178,7 +177,7 @@ func TestFactory_Handle_FullWidthSlash_ArgsAlreadySet(t *testing.T) {
 // the IM card payload).
 func TestFactory_Handle_LongBody_RuneTruncation(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
@@ -237,7 +236,7 @@ func TestFactory_Handle_LongBody_RuneTruncation(t *testing.T) {
 // PushFront.)
 func TestFactory_Handle_QueueGrows(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := steerpkg.NewFactory(mgr)
+	f := steerpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 

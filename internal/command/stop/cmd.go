@@ -31,19 +31,19 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /stop.
-type Factory struct {
-	mgr *chatsession.Manager
-}
+type Factory struct {}
 
-// NewFactory constructs a Factory backed by mgr.
+// NewFactory constructs a Factory. command/* factories do not
+// receive a *chatsession.Manager — cs comes from the dispatcher
+// parameter at Handle time.
 func init() {
 	command.RegisterBuilder(func(d command.Deps) command.SlashCommandFactory {
-		return NewFactory(d.Manager)
+		return NewFactory()
 	})
 }
 
-func NewFactory(mgr *chatsession.Manager) *Factory {
-	return &Factory{mgr: mgr}
+func NewFactory() *Factory {
+	return &Factory{}
 }
 
 // Spec implements command.SlashCommandFactory.

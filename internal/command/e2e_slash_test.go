@@ -342,7 +342,7 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 	// RequireActiveCwd early-exit reply ("No active workspace…")
 	// and, if a fix binds the channel, the real reset path.
 	reg := command.NewRegistry()
-	reg.Register(newcmd.NewFactory(mgr))
+	reg.Register(newcmd.NewFactory())
 
 	// Gateway with a no-op MessageDispatcher (the test only
 	// exercises the slash command path, never the agent loop).

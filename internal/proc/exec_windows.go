@@ -274,14 +274,31 @@ func isWindowsBatchExt(ext string) bool {
 // that need to show the user a terminal (REPL, logs tail,
 // interactive subcommands).
 //
-// name is resolved via exec.LookPath so a bare "nightme" works
-// regardless of install location (scoop / chocolatey / manual
-// PATH copy). The window title is derived from name + args for
-// at-a-glance identification in the taskbar.
+// Path resolution: bin is taken from os.Executable() (the
+// absolute path of the running nightme binary), NOT from
+// exec.LookPath(name). The tray is only ever clicked by the
+// daemon child, which IS nightme — so the running binary IS
+// the one the user wants the new window to invoke. This
+// sidesteps the `go install` / scoop / chocolatey PATH
+// ambiguity that LookPath cannot resolve when the binary
+// isn't on %PATH%.
+//
+// Keep-open: `cmd /k` keeps the spawned cmd window open
+// after nightme exits, so any error output stays visible
+// (analogous to the macOS / Linux `read` suffix). No extra
+// suffix needed.
+//
+// The window title is derived from name + args for at-a-glance
+// identification in the taskbar; the bare name (e.g. "nightme")
+// reads better as a title than the full resolved path.
+//
+// name is currently IGNORED for path resolution but still used
+// for the window title — see the matching note on the Unix
+// version.
 func OpenTerminal(ctx context.Context, name string, args ...string) error {
-	bin, err := exec.LookPath(name)
+	bin, err := currentExePath()
 	if err != nil {
-		return fmt.Errorf("proc: %s not on PATH: %w", name, err)
+		return err
 	}
 	cmdExe := ComSpecOrDefault()
 	title := name

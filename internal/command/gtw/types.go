@@ -31,8 +31,10 @@
 // SetSelectedCwd, QueueUserMessage) — F-XX removed the Sender
 // interface indirection that the previous F-51 design used.
 //
-// `cmd/nightme/run.go` wires per-chat *ChatSession lookup into
-// `Manager` via SetGetChatSession at startup.
+// gtw never reads or stores *ChatSession on its own: slash
+// commands receive cs from the dispatcher parameter; reactions
+// receive cs from the runtime-layer wrapper. See manager.go for
+// the wiring contract.
 package gtw
 
 import (

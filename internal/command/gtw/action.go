@@ -14,12 +14,9 @@ import (
 
 // HandleDraftReaction is the per-draft action router. It is called
 // by Manager.HandleReaction (which is the registered reaction
-// handler at services.ReactionRouter startup).
-//
-// Replaces the pre-F-51 `HandleAction(ctx, deps, cs, slot,
-// drafts, ev)` signature with `(ctx, m, deps, ev)` — the Manager
-// owns context + drafts + per-chat ChatSession lookup, so the
-// slot / drafts / cs parameters collapse into one *Manager.
+// handler at services.ReactionRouter startup). The ChatSession
+// reference is supplied by the runtime-layer wrapper — gtw does
+// NOT do cs lookup itself.
 //
 // Returns (true, nil) when the reaction was consumed (a draft was
 // found AND the emoji was one of the documented set for that draft
@@ -35,6 +32,7 @@ func HandleDraftReaction(
 	ctx context.Context,
 	m *Manager,
 	deps HandlerDeps,
+	cs *chatsession.ChatSession,
 	ev services.ReactionEvent,
 ) (bool, error) {
 	slog.Default().Warn("F-46 debug: HandleDraftReaction entry",
@@ -56,7 +54,6 @@ func HandleDraftReaction(
 		"request_id", ev.RequestID,
 		"draft_kind", string(draft.Kind),
 		"choice_posted", draft.ChoicePosted)
-	cs := m.GetChatSession(ev.ChatID)
 	switch draft.Kind {
 	case DraftFixBranchExists:
 		return executeBranchExistsAction(ctx, m, deps, cs, ev, draft), nil

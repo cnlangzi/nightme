@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
+	github.com/getlantern/systray v1.2.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.10
@@ -27,7 +28,6 @@ require (
 	github.com/getlantern/hex v0.0.0-20190417191902-c6586a6fe0b7 // indirect
 	github.com/getlantern/hidden v0.0.0-20190325191715-f02dbb02be55 // indirect
 	github.com/getlantern/ops v0.0.0-20190325191751-d70cb0d6f85f // indirect
-	github.com/getlantern/systray v1.2.2 // indirect
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -36,5 +36,4 @@ require (
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/u-root/u-root v0.16.0 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
 )

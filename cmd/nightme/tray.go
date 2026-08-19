@@ -13,13 +13,13 @@
 //     learns about the first's completion via systray.Quit() and
 //     a shared error variable.
 //
-//  2. The set of menu items must stay in sync with the cobra
-//     subcommand tree and the REPL banner. cmdRegistry.TrayItems
-//     (subcommand.go) is the single source of truth; this file
-//     is a consumer, not a re-derivation. The lifecycle commands
-//     (start/stop/restart/status) and the TTY-bound commands
-//     (test/login/logs/config/update/debug) are filtered out by
-//     the registry's addNoTray path so they do not appear here.
+//  2. The subcommand section is driven by cmdRegistry.TrayItems
+//     (subcommand.go), the single source of truth shared with
+//     the REPL banner and the CLI tree. This file is a consumer,
+//     not a re-derivation. Lifecycle commands (start/stop/restart/
+//     status) and TTY-bound commands (test/login/logs/config/
+//     update/debug) are filtered out by the registry's addNoTray
+//     path so they do not appear here.
 //
 //  3. Click actions must not block the tray event loop. Each
 //     click handler runs in systray's event goroutine; a handler
@@ -27,31 +27,28 @@
 //     would freeze the menu until the call returns. The pattern
 //     is: handler spawns a goroutine and returns immediately.
 //
-// Three primary menu items live outside the dynamic "Commands"
-// submenu because they need extra logic, not just a cobra
-// re-dispatch:
+// Menu layout (all items are top-level — no submenus):
 //
-//   - Open REPL  → internal/tray/openrepl.Open() (spawns a new
-//                  terminal window with `nightme` REPL mode)
-//   - Restart    → caller-supplied callback that spawns a new
-//                  _daemon child and signals the current one
-//                  to exit (default impl in daemon_lifecycle_*.go)
-//   - Stop       → caller-supplied callback that triggers the
-//                  runtime's graceful shutdown (default sends
-//                  SIGTERM to self)
+//   Running        (disabled info row)
+//   ─────────
+//   Open            → proc.OpenTerminal() (spawn a terminal with the REPL)
+//   Logs            → proc.OpenTerminal("logs") (spawn a terminal tailing the log)
+//   Restart         → caller callback (spawn new _daemon child, SIGTERM self)
+//   Stop            → caller callback (trigger runtime graceful shutdown)
+//   ─────────
+//   list / kill / agents / name / clean / version
+//                   → proc.OpenTerminal(title) — spawn terminal running `nightme <title>`
 //
-// Quit is the systray.Quit-only release. In v1 Quit is
-// equivalent to Stop — "release tray but keep daemon running" is
-// a footgun (the user expects the daemon to stop when they close
-// the menu-bar icon) and we have no clean way to drop only the
-// systray handle. If a future feature wants that, the cleanest
-// split is to make the daemon outlive multiple systray lifetimes
-// and expose that as a separate "Hide" item.
+// The subcommands are top-level items, NOT children of a disabled
+// submenu. The v1 design put them under a disabled "Commands"
+// parent; on Windows, disabling the parent cascades MF_GRAYED to
+// every child, making them all appear unclickable. Top-level items
+// are always interactive regardless of platform.
 
 package main
 
 import (
-	"fmt"
+	"context"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -59,9 +56,8 @@ import (
 	"github.com/getlantern/systray"
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/runtime"
-	"github.com/cnlangzi/nightme/internal/tray"
-	"github.com/cnlangzi/nightme/internal/tray/openrepl"
 )
 
 // trayDebounce is the minimum interval between two clicks being
@@ -70,10 +66,9 @@ import (
 // "Restart" because the first click didn't visibly do anything),
 // and long enough that a macOS touchpad double-tap from a single
 // user gesture does not spawn two REPL windows / send two
-// SIGTERMs. The openrepl package has its own debouncer too, but
-// having one at the click-dispatch level catches the other
-// primaries (Stop / Restart / Commands) which don't go through
-// openrepl.
+// SIGTERMs. (Previously openrepl carried its own debouncer;
+// that layer was removed when terminal-spawn moved into proc —
+// the tray click-level debounce is the single guard now.)
 const trayDebounce = 500 * time.Millisecond
 
 // clickTracker debounces a single menu item. Each menu item gets
@@ -105,13 +100,8 @@ func (c *clickTracker) allow(now int64) bool {
 // where it already lives for `nightme start`.
 type trayOptions struct {
 	// reg is the cmdRegistry whose TrayItems() drives the
-	// "Commands" submenu. Must be non-nil.
+	// subcommand section below the separator. Must be non-nil.
 	reg *cmdRegistry
-	// channelName is the channel the daemon was started with
-	// (e.g. "feishu", "echo"). Surfaced in the Status info
-	// row so the user can see at a glance which mode the
-	// running daemon is in.
-	channelName string
 	// logger receives structured error logs when a click
 	// handler fails. May be nil (handler logs to slog.Default).
 	logger *slog.Logger
@@ -177,32 +167,50 @@ func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) e
 //
 // The menu is rebuilt from scratch on every onReady. systray does
 // not support a "menu" object that is mutated; the contract is
-// "build the whole tree in onReady". For our 13 items this is
-// instantaneous and gives a clean state on every daemon start.
+// "build the whole tree in onReady".
+//
+// Layout:
+//
+//	Running          (disabled info row)
+//	─────────
+//	Open / Logs / Restart / Stop   (primary actions)
+//	─────────
+//	list / kill / agents / ...     (subcommands from TrayItems)
+//
+// The subcommands are top-level items, NOT children of a disabled
+// submenu. The v1 design put them under a disabled "Commands"
+// parent; on Windows, disabling the parent cascades MF_GRAYED to
+// every child, making them all appear unclickable. Top-level items
+// are always interactive regardless of platform.
 func trayOnReady(opts trayOptions) {
-	systray.SetTitle("NightMe")
 	systray.SetTooltip("NightMe daemon — click to open the menu")
 	applyIcon()
 
-	// Disabled info row at the top so the user can see at a
-	// glance whether the daemon is the one they expect.
-	statusItem := systray.AddMenuItem(
-		fmt.Sprintf("Status: running · %s", opts.channelName),
-		"Read-only status line — the running channel is shown for at-a-glance confirmation",
-	)
+	// Read-only status row. Kept minimal — just "Running" —
+	// because the daemon now auto-starts every channel with
+	// valid creds, so a single channel label would be misleading
+	// and listing all of them would overflow the menu width.
+	statusItem := systray.AddMenuItem("Running", "nightme daemon is running")
 	statusItem.Disable()
 
 	systray.AddSeparator()
 
 	// Primary actions. Each gets its own clickTracker (per-item
-	// debouncer) so a quick succession of clicks on DIFFERENT
-	// items isn't treated as a single noisy burst.
-	openREPL := systray.AddMenuItem("Open REPL", "Spawn a new terminal running the nightme REPL")
-	restart := systray.AddMenuItem("Restart", "Stop this daemon (re-run `nightme start` to bring a fresh one up)")
+	// debouncer) so rapid clicks on DIFFERENT items are still
+	// honoured independently.
+	openREPL := systray.AddMenuItem("Open", "Spawn a new terminal running the nightme REPL")
+	logs := systray.AddMenuItem("Logs", "Open a terminal showing the daemon log (tail -f)")
+	restart := systray.AddMenuItem("Restart", "Restart the nightme daemon")
 	stop := systray.AddMenuItem("Stop", "Gracefully stop the nightme daemon")
+
 	go handleClick(openREPL, func() {
-		if err := openrepl.Open(); err != nil {
+		if err := proc.OpenTerminal(context.Background(), "nightme"); err != nil {
 			logClickErr(opts.logger, "open-repl", err)
+		}
+	})
+	go handleClick(logs, func() {
+		if err := proc.OpenTerminal(context.Background(), "nightme", "logs"); err != nil {
+			logClickErr(opts.logger, "open-logs", err)
 		}
 	})
 	go handleClick(restart, func() {
@@ -218,39 +226,22 @@ func trayOnReady(opts trayOptions) {
 
 	systray.AddSeparator()
 
-	// "Commands" submenu — built from cmdRegistry.TrayItems.
-	// Order matches the REPL banner order so a user who has
-	// the REPL banner memorised finds the same verbs in the
-	// same sequence in the tray. The parent itself is
-	// informational (disabled) — only the children are
-	// clickable.
-	cmds := systray.AddMenuItem("Commands", "Submenu mirroring the REPL 'Common:' list (lifecycle + TTY commands are filtered out)")
-	cmds.Disable()
+	// Subcommands — built from cmdRegistry.TrayItems(), the same
+	// source the REPL banner and CLI tree use. Order matches the
+	// REPL banner so the tray menu reads the same as the REPL
+	// "Common:" list. Each is a top-level item (clickable, not
+	// greyed out) that opens a terminal running `nightme <title>`
+	// via proc.OpenTerminal — the same path as Open / Logs, giving
+	// every command a real TTY and visible output.
 	for _, item := range opts.reg.TrayItems() {
-		cmdItem := cmds.AddSubMenuItem(item.Title, item.Tooltip)
-		// Go 1.22+ has per-iteration loop variable scoping,
-		// so the explicit `captured := item` from the
-		// v1 design is no longer needed. Keeping the
-		// pointer to `item` is enough; the closure below
-		// captures the per-iteration value.
+		cmdItem := systray.AddMenuItem(item.Title, item.Tooltip)
 		ci := item
 		go handleClick(cmdItem, func() {
-			if err := tray.Invoke(ci.Command); err != nil {
+			if err := proc.OpenTerminal(context.Background(), "nightme", ci.Title); err != nil {
 				logClickErr(opts.logger, "command:"+ci.Title, err)
 			}
 		})
 	}
-
-	systray.AddSeparator()
-
-	// Quit = stop + release tray. See file doc comment for
-	// the rationale on merging Quit with Stop.
-	quit := systray.AddMenuItem("Quit", "Stop the daemon and release the tray icon")
-	go handleClick(quit, func() {
-		if opts.onStopRequest != nil {
-			opts.onStopRequest()
-		}
-	})
 }
 
 // handleClick is the shared click-dispatch helper. It drains the

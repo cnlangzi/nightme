@@ -24,6 +24,7 @@
 package runtime
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ import (
 // and call channel.Register from the adapter's init().
 type Deps struct {
 	LoadConfig        func() (*config.Config, error)
-	OpenChatSessions  func(*config.Config) (*registry.ChatSessionFile, error)
+	OpenChatSessions  func(*config.Config) (*chatstore.Store, error)
 	OpenAgentSessions func(*config.Config) (*registry.AgentSessionFile, error)
 	BuildAgents       func(*config.Config) *agent.Registry
 	NewChannels       func(*config.Config) ([]channel.Channel, error)
@@ -76,12 +77,12 @@ func DefaultDeps() Deps {
 
 // defaultOpenChatSessions opens chat_sessions.json relative to
 // cfg.Paths.DataDir.
-func defaultOpenChatSessions(cfg *config.Config) (*registry.ChatSessionFile, error) {
+func defaultOpenChatSessions(cfg *config.Config) (*chatstore.Store, error) {
 	path, err := ChatSessionsPath(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return registry.OpenChatSessionFile(path)
+	return chatstore.New(path)
 }
 
 // defaultOpenAgentSessions opens agent_sessions.json relative to

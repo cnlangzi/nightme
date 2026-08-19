@@ -130,3 +130,18 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return runPrintMode(ctx, s, cfg, blocks)
 }
+
+// Review implements /review for the cursor bridge: delegate to shared
+// StandardPrompt. Cursor CLI has no native review subcommand, so we
+// run the standard prompt via print-mode one-shot.
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: agent.StandardPrompt(),
+	}})
+	if err != nil {
+		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
+			s.Info().Name, err)
+	}
+	return result, nil
+}

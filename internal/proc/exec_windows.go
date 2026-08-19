@@ -122,7 +122,7 @@ func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec
 	var cmd *exec.Cmd
 	switch strings.ToLower(filepath.Ext(resolved)) {
 	case ".cmd", ".bat":
-		cmd = exec.CommandContext(ctx, comspecOrDefault(),
+		cmd = exec.CommandContext(ctx, ComSpecOrDefault(),
 			append([]string{"/d", "/c", resolved}, args...)...)
 	case ".ps1":
 		cmd = exec.CommandContext(ctx, "powershell.exe",

@@ -79,71 +79,33 @@ func (s *Starter) Detect() error {
 }
 
 // Start spawns `opencode acp` under a PTY (via the generic acp
-// bridge), runs the initialize + session/new handshake, installs
-// the opencode-specific sessionUpdate translator, and returns a
-// live *agent.Agent.
+// bridge), runs the initialize + session/new handshake, and returns
+// a live *agent.Agent.
 //
 // The runtime state (transport / rpc / events / driver) lives
-// inside the generic acp bridge — this package only contributes:
-//
-//   - The sessionUpdate → AgentEvent translator (update.go),
-//     installed via SetUpdateHandler after Start returns.
-//   - Per-bridge session context fields (AgentName=opencode,
-//     Workspace=cfg.Workspace) stamped on every event.
+// inside the generic acp bridge. The built-in text buffering in the
+// ACP bridge handles agent_message_chunk / agent_thought_chunk
+// accumulation and sentence-level flushing — no per-bridge
+// UpdateHandler or FlushHandler is needed.
 //
 // cfg.SessionID, when non-empty, is reserved for v2 ACP
 // session/load wiring. Today the bridge always opens a fresh
 // session; resume via cfg.SessionID is implemented in codex /
 // pi bridges already and will follow the same shape here in v2.
-//
-// Race note: SetUpdateHandler must be called BEFORE the readPump
-// observes the first session/update. The race-free storage is
-// the acp bridge's atomic.Pointer on d.updateHandler, but the
-// acp readPump goroutine is started inside acpStarter.Start —
-// so by the time SetUpdateHandler returns, early sessionUpdate
-// notifications could already be in flight. For opencode's
-// fresh-session path this is a no-op (no notifications arrive
-// before the client's first session/prompt). It will matter
-// once v2 wires session/load replay.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, errors.New("opencode: workspace is required")
 	}
 	// The generic acp bridge handles spawn + JSON-RPC + PTY +
-	// Stop / Reset / Permission. We inject the opencode-specific
-	// sessionUpdate translator via SetUpdateHandler after Start
-	// returns the live *agent.Agent.
+	// Stop / Reset / Permission. The built-in text buffering in
+	// the ACP bridge now handles agent_message_chunk /
+	// agent_thought_chunk accumulation and sentence-level flushing,
+	// so no per-bridge UpdateHandler or FlushHandler is needed.
 	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
 	a, err := acpStarter.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
-
-	// Walk back to the *acp.driver through the public Driver()
-	// accessor. This is a type assertion, but Driver() is the
-	// documented bridge-extension point — see internal/agent
-	// agent.go §Driver. The Driver() interface{} return type is
-	// package-private by design; bridge-specific extensions
-	// like this one consume it via SetUpdateHandler / View which
-	// we expose just for this purpose.
-	drv, ok := a.Driver().(*acp.DriverHandle)
-	if !ok || drv == nil {
-		// Defensive: should never happen because acp.NewStarter
-		// always constructs *driver. If a future refactor
-		// changes this, fall back to a no-op update handler.
-		oLog("Start: could not access acp driver; sessionUpdate translator disabled",
-			"driver_type", fmt.Sprintf("%T", a.Driver()))
-		return a, nil
-	}
-	updater := newUpdateHandler(cfg.Workspace)
-	drv.SetUpdateHandler(updater.asUpdateHandler())
-	// Wire the per-turn flush hook the generic acp bridge invokes
-	// right before EventAgentDone. Without this the trailing text
-	// the agent produced after the last sentence-end stays in
-	// textBuf until the turn-end drop — the user would see only
-	// the partial reply with no Done / no result card. See
-	// F-OPENCODE-ACP-MIGRATION §5.2 (drain-on-turn-end).
-	drv.SetFlushHandler(updater.Flush)
 	return a, nil
 }
 

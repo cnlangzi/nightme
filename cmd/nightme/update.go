@@ -7,9 +7,9 @@
 //
 // Internal layering (not user-visible):
 //
-//   internal/updater/check.go      — Lookup / MatchAsset / compare
-//   internal/updater/download.go   — Download / SHA256SUMS / ExtractArchive
-//   internal/updater/install.go    — Install / swap binary / restart daemon
+//	internal/updater/check.go      — Lookup / MatchAsset / compare
+//	internal/updater/download.go   — Download / SHA256SUMS / ExtractArchive
+//	internal/updater/install.go    — Install / swap binary / restart daemon
 //
 // The three files mirror the three stages but the CLI
 // surface stays single-verb. We picked this layout because
@@ -18,7 +18,7 @@
 // internal functions from both the CLI shell and the REPL
 // keeps the two paths in lock-step.
 //
-// Stage gating
+// # Stage gating
 //
 // CLI (bare `nightme update`):
 //   - check fails / up-to-date     → exit 0
@@ -31,12 +31,12 @@
 //   - check OK                     → ask y/N
 //   - y            → ask download vs skip
 //   - download OK  → ask install vs skip (matches the
-//                    "可中途取消,跳过下载/安装" requirement:
-//                    Ctrl-C during download AND a y/N gate
-//                    before install)
+//     "可中途取消,跳过下载/安装" requirement:
+//     Ctrl-C during download AND a y/N gate
+//     before install)
 //   - y            → install + restart + exit
 //
-// Restart policy
+// # Restart policy
 //
 // Bare CLI: after install the binary is re-exec'd (with the
 // user's original argv) so the running process is replaced
@@ -51,10 +51,10 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"errors"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/proc"
 	"io"
 	"os"
 	"os/exec"
@@ -85,12 +85,12 @@ import (
 //	--yes / -y        accept every stage without y/N prompts (CI mode)
 func newUpdateCmd() *cobra.Command {
 	var (
-		tag        string
-		quiet      bool
-		noInstall  bool
-		noRestart  bool
-		yes        bool
-		fromRepl   bool
+		tag       string
+		quiet     bool
+		noInstall bool
+		noRestart bool
+		yes       bool
+		fromRepl  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -181,113 +181,70 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 
 	ctx := cmd.Context()
 
-	// Banner so the user can read what kind of operation
-	// is about to run BEFORE the first stage header
-	// appears. The "[1/3] check" line by itself doesn't say
-	// what we're checking, and a user pasting this into a
-	// bug report needs the verb visible at the top.
-	fmt.Fprintln(out, "nightme update — installing the latest release")
-	fmt.Fprintln(out, "  stages: 1/3 check → 2/3 download → 3/3 install")
-	fmt.Fprintln(out)
-
-	// Stage 1: check.
-	fmt.Fprintln(out, "[1/3] check")
 	res, err := updater.Check(ctx, opts.tag)
 	if err != nil {
-		fmt.Fprintf(errOut, "check failed: %v\n", err)
+		fmt.Fprintf(errOut, "  %s  check failed: %v\n", paintRed(out, "✗"), err)
 		return err
 	}
-	fmt.Fprintf(out, "  current: %s\n", version.Version)
-	fmt.Fprintf(out, "  latest:  %s\n", res.Latest)
+
+	current := displayVer(version.Version)
+	latest := displayVer(res.Latest)
+	fmt.Fprintln(out)
 	if !res.Outdated {
-		fmt.Fprintln(out, "  status:  up-to-date; nothing to do")
+		fmt.Fprintf(out, "  %s  Already up to date\n", paintGreen(out, "✓"))
+		fmt.Fprintf(out, "     %s\n", paintDim(out, current))
 		return nil
 	}
-	fmt.Fprintf(out, "  status:  newer release available (%s)\n", res.Latest)
+	fmt.Fprintf(out, "  %s  Update available\n", paintYellow(out, "▲"))
+	fmt.Fprintf(out, "     %s %s %s\n",
+		paintDim(out, current),
+		paintDim(out, "→"),
+		paint(out, ansiBold+ansiGreen, latest))
 
-	// Resolve the matching asset (we already know our
-	// OS/arch from runtime; MatchAsset filters on it).
 	asset := updater.MatchAsset(res.Release, res.Latest)
 	if asset == nil {
 		return fmt.Errorf("no release asset for %s/%s in %s; available: %s",
 			runtime.GOOS, runtime.GOARCH, res.Latest, assetNames(res.Release.Assets))
 	}
 
-	// Stage 2: download. If the staging dir already holds the
-	// archive + SHA256SUMS for this exact release + asset, we
-	// skip the re-fetch and reuse the staged file. This is what
-	// lets the REPL prompt do "check + download" → "ask y/N" →
-	// "install" in two separate cobra invocations: the first
-	// invocation leaves the staging dir in place; the second
-	// sees it and goes straight to install.
-	fmt.Fprintln(out, "[2/3] download")
 	stagingDir, err := updater.StagingDir(dataDir, res.Latest)
 	if err != nil {
 		return err
 	}
-	// Print "what / where from / where to" BEFORE the progress
-	// bar so the user knows what's about to download. These lines
-	// stay put; the bar overwrites itself with \r on every tick.
-	fmt.Fprintf(out, "  asset:    %s\n", asset.Name)
-	fmt.Fprintf(out, "  from:     %s\n", asset.BrowserDownloadURL)
-	fmt.Fprintf(out, "  to:       %s\n", stagingDir)
-	wantExt := "tar.gz"
-	if runtime.GOOS == "windows" {
-		wantExt = "zip"
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  %s  %s  %s\n",
+		paintCyan(out, "↓"),
+		asset.Name,
+		paintDim(out, updater.FormatBytes(asset.Size)))
+	progress := updater.QuietProgress
+	if !opts.quiet {
+		progress = updater.NewASCIIProgressBar(out, asset.Size)
 	}
-	wantArchive := filepath.Join(stagingDir, fmt.Sprintf("nightme_%s_%s_%s.%s",
-		strings.TrimPrefix(res.Latest, "v"), runtime.GOOS, runtime.GOARCH, wantExt))
-	var dlRes *updater.DownloadResult
-	if info, err := os.Stat(wantArchive); err == nil && info.Size() == asset.Size {
-		// Cache hit. Compute SHA256 for the trailer so the
-		// output is identical to a fresh download's; install
-		// doesn't use the value (extract just opens the
-		// archive) but the operator transcript looks
-		// consistent.
-		sum, err := sha256OfFile(wantArchive)
-		if err != nil {
-			return fmt.Errorf("compute cached sha256: %w", err)
-		}
-		fmt.Fprintf(out, "  cache hit: %s (size %d) — skipping download\n",
-			wantArchive, info.Size())
-		dlRes = &updater.DownloadResult{
-			Asset:       *asset,
-			StagingPath: wantArchive,
-			Bytes:        info.Size(),
-			SHA256Hex:   sum,
-		}
-	} else {
-		progress := updater.QuietProgress
-		if !opts.quiet {
-			progress = updater.NewASCIIProgressBar(out, asset.Size)
-		}
-		dlRes, err = updater.Download(ctx, res.Release, asset, stagingDir, progress)
-		if err != nil {
-			fmt.Fprintf(errOut, "download failed: %v\n", err)
-			return err
-		}
-		fmt.Fprintln(out) // newline after the bar
+	dlRes, err := updater.Download(ctx, res.Release, asset, stagingDir, progress)
+	if err != nil {
+		fmt.Fprintf(errOut, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
+		return err
 	}
-	fmt.Fprintf(out, "  size:     %s\n", updater.FormatBytes(dlRes.Bytes))
-	fmt.Fprintf(out, "  sha256:   %s\n", dlRes.SHA256Hex)
+	if dlRes.Cached {
+		fmt.Fprintf(out, "  %s  sha256 verified — skipping download\n", paintGreen(out, "✓"))
+	} else if !opts.quiet {
+		fmt.Fprintln(out)
+	}
+	fmt.Fprintf(out, "  %s  Staged %s  %s\n",
+		paintGreen(out, "✓"),
+		dlRes.Asset.Name,
+		paintDim(out, updater.FormatBytes(dlRes.Bytes)+", sha256="+dlRes.SHA256Hex))
 
-	// Optional: --no-install stops here. We print the stage
-	// header even on the skip path so the user sees the
-	// three-stage progress; the trailer makes the skip
-	// explicit.
 	if opts.noInstall {
-		fmt.Fprintln(out, "[3/3] install (skipped)")
-		fmt.Fprintln(out, "  --no-install set; stopping before swap")
+		fmt.Fprintf(out, "  %s  --no-install; stopping before swap\n", paintDim(out, "→"))
 		return nil
 	}
 
-	// Stage 3: install.
-	fmt.Fprintln(out, "[3/3] install")
+	fmt.Fprintln(out)
 	binary, err := updater.ExtractArchive(dlRes.StagingPath, stagingDir)
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
-	fmt.Fprintf(out, "  extracted: %s\n", binary)
 
 	targetPath, err := os.Executable()
 	if err != nil {
@@ -297,36 +254,32 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 	if err != nil {
 		return fmt.Errorf("install: %w", err)
 	}
-	fmt.Fprintf(out, "  installed: %s\n", installRes.NewBinaryPath)
-	fmt.Fprintf(out, "  backup:    %s\n", installRes.OldBinaryPath)
+	fmt.Fprintf(out, "  %s  installed %s\n", paintGreen(out, "✓"), installRes.NewBinaryPath)
+	fmt.Fprintf(out, "     %s %s\n", paintDim(out, "backup"), paintDim(out, installRes.OldBinaryPath))
 
-	// Optional: --no-restart skips the daemon restart but
-	// still prints the "now restart your shell" hint.
 	if !opts.noRestart {
 		running, _ := daemonIsRunning(cfg)
 		if running {
-			fmt.Fprintln(out, "  → restarting nightme daemon…")
+			fmt.Fprintf(out, "  %s  restarting daemon…\n", paintDim(out, "→"))
 			if err := runRestartInline(out); err != nil {
-				fmt.Fprintf(errOut, "  warning: daemon restart failed: %v\n", err)
-				fmt.Fprintln(errOut, "           run `nightme restart` manually.")
+				fmt.Fprintf(errOut, "  %s  daemon restart failed: %v\n", paintYellow(out, "!"), err)
+				fmt.Fprintln(errOut, "     run `nightme restart` manually.")
 			} else {
-				fmt.Fprintln(out, "  ✓ daemon restarted on the new binary")
+				fmt.Fprintf(out, "  %s  daemon restarted\n", paintGreen(out, "✓"))
 			}
 		} else {
-			fmt.Fprintln(out, "  no daemon running; skipping restart")
+			fmt.Fprintf(out, "  %s  no daemon running\n", paintDim(out, "→"))
 		}
 	}
 
-	// Success trailer. Bare CLI re-execs the new binary;
-	// the REPL driver stops here so readline state survives
-	// (the user restarts the REPL manually to load the
-	// new binary).
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "✓ updated to", res.Latest)
 	if opts.fromRepl {
-		fmt.Fprintln(out, "  exit this REPL and re-enter `nightme` to load the new binary.")
+		fmt.Fprintf(out, "  %s  Installed %s — exit and re-enter `nightme` to load the new binary.\n",
+			paintGreen(out, "✓"), latest)
 		return nil
 	}
+	fmt.Fprintf(out, "  %s  Installed %s — restarting into the new binary.\n",
+		paintGreen(out, "✓"), latest)
 	return execAndExit(out, targetPath, os.Args)
 }
 
@@ -339,7 +292,7 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 // bad install) we surface the error so the operator can
 // recover manually by re-running.
 func execAndExit(out io.Writer, binary string, argv []string) error {
-	cmd := exec.Command(binary, argv[1:]...)
+	cmd := proc.New(context.Background(), binary, argv[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -366,23 +319,6 @@ func assetNames(assets []updater.Asset) string {
 		names = append(names, a.Name)
 	}
 	return strings.Join(names, ", ")
-}
-
-// sha256OfFile hashes a single file and returns the hex
-// digest. Used by the download-cache-hit path so the
-// transcript's "sha256:" line is populated even when we
-// skipped the live fetch.
-func sha256OfFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // daemonIsRunning reports whether a nightme daemon is up.
@@ -414,7 +350,7 @@ func runRestartInline(out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, "restart")
+	cmd := proc.New(context.Background(), exe, "restart")
 	cmd.Stdout = out
 	cmd.Stderr = out
 	return cmd.Run()

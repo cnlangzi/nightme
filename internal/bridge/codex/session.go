@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // ─── constants & exported vars ───
@@ -240,26 +241,26 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 		argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", cfg.effort))
 	}
 
-	cmd := agent.NewCmd(ctx, cfg.command, argv...)
-	cmd.Dir = cfg.workspace
-	cmd.Env = append(os.Environ(), cfg.env...)
+	child := proc.New(ctx, cfg.command, argv...)
+	child.Dir = cfg.workspace
+	child.Env = append(os.Environ(), cfg.env...)
 
-	stdin, err := cmd.StdinPipe()
+	stdin, err := child.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("codex: stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("codex: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		return nil, fmt.Errorf("codex: stderr pipe: %w", err)
 	}
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
@@ -268,12 +269,12 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	parentCtx, cancel := context.WithCancel(ctx)
 	s := &session{
-		cmd:               cmd,
+		cmd:               child,
 		stdinW:            stdin,
 		stdoutR:           stdout,
 		stderrR:           stderr,
 		events:            make(chan agent.AgentEvent, eventBufferSize),
-		pid:               cmd.Process.Pid,
+		pid:               child.Process.Pid,
 		agentName:         cfg.name,
 		workspace:         cfg.workspace,
 		branch:            detectBranch(cfg.workspace),
@@ -625,7 +626,7 @@ func (s *session) Close() error {
 // directory, or "" if not a git repo / detection fails. Mirrors pi's
 // helper so the runtime can stamp Branch on every event the same way.
 func detectBranch(dir string) string {
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
+	cmd := proc.New(context.Background(), "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

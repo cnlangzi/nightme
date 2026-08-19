@@ -32,14 +32,6 @@ nightme 的文档按**内容性质**分 4 层，每层职责单一、不重叠�
 | **FEATURES** | `FEATURES.md` | F-XX 功能列表（含设计文档链接） | 详细设计、代码、edge cases |
 | **feat/** | `feat/F-XX-name.md` | 单个 feature 的详细设计：接口、struct、实现、edge cases、测试 | 跨 feature 的架构描述、产品定位 |
 
-**顶层参考文档**（不属于 4 层模型，是面向使用者的 reference 文档）：
-
-| 文件 | 用途 |
-|------|------|
-| `WFE.md` | Workflow YAML 配置 + 引擎运行时架构（schema / 触发器 / 步骤 / bot↔wfe 边界）|
-| `E2E_TESTING.md` | 飞书端到端测试 + 故障排查 |
-| `WINDOWS.md` | Windows 平台适配说明 |
-
 ---
 
 ## 3. 分类决策树
@@ -200,13 +192,12 @@ docs/
 ├── PRD.md                 ← Layer 1: 产品
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
-├── WFE.md                 ← Workflow YAML 配置 + 引擎运行时架构（schema / 触发器 / 步骤 / bot↔wfe 边界）
-├── E2E_TESTING.md         ← 飞书端到端测试手册
-├── WINDOWS.md             ← Windows 平台适配说明
+├── CHANNEL.md             ← 多 channel 架构定稿（per-channel Manager + Emitter + 懒加载 restore）
 ├── feat/                  ← Layer 4: 每个 feature 的实现
 ├── bridge/                ← 各 agent bridge 协议（claude / dsh / …）
-└── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑**）
-    └── feishu-cards.md    ← 改按钮 / form / AskUserQuestion 先读这份
+└── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑** / Telegram Topic）
+    ├── feishu-cards.md    ← 改按钮 / form / AskUserQuestion 先读这份
+    └── telegram.md        ← Telegram Forum Supergroup Topic 方案
 ```
 
 ---
@@ -229,5 +220,4 @@ docs/
 
 - 初始：建立 4 层文档结构 + 命名约定 + 决策树
 - 2026-08-17：补 `docs/channel/` / `docs/bridge/` 在目录示意里的位置；飞书交互卡踩坑进 `channel/feishu-cards.md`
-- 2026-08-18：补 `docs/WORKFLOW.md` 顶层参考文档；§2 加"顶层参考文档"小节，§8 目录树同步更新
-- 2026-08-18：`docs/WORKFLOW.md` → `docs/WFE.md`；§5 加 `use` 步骤（bot 注入 action）；§8 重写为 bot-as-host / wfe-as-library 架构
+- 2026-08-18：新增顶层 `docs/CHANNEL.md`（多 channel 架构设计定稿）；FEATURES.md §9 / SPEC.md §1.1+§1.3+§11.1 同步；`channel/telegram.md` 在 FEATURES.md §4.2 加索引。架构变更：per-channel `chatsession.Manager`、per-channel `outbound.Emitter`、懒加载 restore、`channel.Registry` 接入点、OCP 干净（接入新 channel = 1 个 adapter + 1 个 init）

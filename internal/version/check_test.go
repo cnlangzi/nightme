@@ -19,7 +19,7 @@ import (
 func stubVersionHandler(version string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"current":    "dev", // intentionally "dev" so we can
+			"current": "dev", // intentionally "dev" so we can
 			// catch a regression where the decoder
 			// picks `current` over `latest_cli`.
 			"latest_cli": version,
@@ -40,6 +40,8 @@ func TestIsOutdated(t *testing.T) {
 		{"older minor", "0.1.0", "0.2.0", true},
 		{"older major", "0.1.0", "1.0.0", true},
 		{"equal", "0.2.0", "0.2.0", false},
+		{"equal mixed prefix", "0.3.10", "v0.3.10", false},
+		{"equal mixed prefix reverse", "v0.3.10", "0.3.10", false},
 		{"newer", "0.3.0", "0.2.0", false},
 		{"strip v on current", "v0.1.0", "v0.2.0", true},
 		{"strip v on latest", "0.1.0", "v0.2.0", true},
@@ -55,10 +57,33 @@ func TestIsOutdated(t *testing.T) {
 	}
 }
 
+func TestEqual(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"0.3.10", "0.3.10", true},
+		{"0.3.10", "v0.3.10", true},
+		{"v0.3.10", "0.3.10", true},
+		{"V0.3.10", "0.3.10", true},
+		{"  v0.3.10  ", "0.3.10", true},
+		{"0.3.10", "0.3.11", false},
+		{"0.3.10", "v0.3.11", false},
+		{"", "", false},
+		{"dev", "dev", true},
+	}
+	for _, tt := range tests {
+		if got := Equal(tt.a, tt.b); got != tt.want {
+			t.Errorf("Equal(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
 func TestNormalize(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"0.2.0", "0.2.0"},
 		{"v0.2.0", "0.2.0"},
+		{"V0.2.0", "0.2.0"},
 		{"  v0.2.0  ", "0.2.0"},
 		{"  0.2.0\n", "0.2.0"},
 		{"", ""},
@@ -66,6 +91,21 @@ func TestNormalize(t *testing.T) {
 	for _, tt := range tests {
 		if got := normalize(tt.in); got != tt.want {
 			t.Errorf("normalize(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestTag(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"0.3.10", "v0.3.10"},
+		{"v0.3.10", "v0.3.10"},
+		{"V0.3.10", "v0.3.10"},
+		{"  0.3.10  ", "v0.3.10"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := Tag(tt.in); got != tt.want {
+			t.Errorf("Tag(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }
@@ -96,9 +136,9 @@ func TestChecker_FetchLatest(t *testing.T) {
 func TestChecker_FetchLatest_FallbackOnCurrentOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"current":     "0.5.0",
-			"latest_cli":  "0.6.0",
-			"updated_at":  "2026-01-01T00:00:00Z",
+			"current":    "0.5.0",
+			"latest_cli": "0.6.0",
+			"updated_at": "2026-01-01T00:00:00Z",
 		})
 	}))
 	defer srv.Close()

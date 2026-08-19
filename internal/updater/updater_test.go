@@ -22,12 +22,12 @@ import (
 // /repos/<repo>/... prefix so the production URL builder hits
 // the same router.
 type fixture struct {
-	repo     string
-	tag      string
+	repo      string
+	tag       string
 	assetBody []byte
 	assetName string
-	sums     string
-	srv      *httptest.Server
+	sums      string
+	srv       *httptest.Server
 }
 
 func newFixture(t *testing.T, tag, version, assetBody string) *fixture {
@@ -441,6 +441,9 @@ func TestDownload_EndToEnd(t *testing.T) {
 	if res.SHA256Hex != wantHex {
 		t.Errorf("SHA256Hex = %q, want %q", res.SHA256Hex, wantHex)
 	}
+	if res.Cached {
+		t.Errorf("first Download reported Cached=true; want a live fetch")
+	}
 
 	// File on disk matches.
 	gotBody, err := os.ReadFile(res.StagingPath)
@@ -497,5 +500,101 @@ func TestDownload_SHA256Mismatch(t *testing.T) {
 	entries, _ := os.ReadDir(stagingDir)
 	if len(entries) != 0 {
 		t.Errorf("staging dir not cleaned up after mismatch: %v", entries)
+	}
+}
+
+// TestDownload_ReusesVerifiedCache: a second Download of the
+// same asset must hash the staged file against SHA256SUMS and
+// skip the archive GET when they match.
+func TestDownload_ReusesVerifiedCache(t *testing.T) {
+	body := "cached-archive-body"
+	f := newFixture(t, "v9.9.9", "9.9.9", body)
+	rel := &Release{
+		TagName: "v9.9.9",
+		Assets: []Asset{
+			{Name: "SHA256SUMS.txt", BrowserDownloadURL: f.srvURL() + "/repos/" + f.repo + "/asset/sums"},
+			{Name: f.assetName, BrowserDownloadURL: f.srvURL() + "/repos/" + f.repo + "/asset/binary", Size: int64(len(body))},
+		},
+	}
+	asset := MatchAsset(rel, "9.9.9")
+	if asset == nil {
+		t.Fatal("MatchAsset returned nil")
+	}
+	stagingDir := t.TempDir()
+
+	first, err := Download(context.Background(), rel, asset, stagingDir, QuietProgress)
+	if err != nil {
+		t.Fatalf("first Download: %v", err)
+	}
+	if first.Cached {
+		t.Fatal("first Download reported Cached=true")
+	}
+
+	var binaryHits int32
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/asset/sums"):
+			_, _ = io.WriteString(w, f.sums)
+		case strings.HasSuffix(r.URL.Path, "/asset/binary"):
+			atomic.AddInt32(&binaryHits, 1)
+			http.Error(w, "should not re-download", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	second, err := Download(context.Background(), rel, asset, stagingDir, QuietProgress)
+	if err != nil {
+		t.Fatalf("second Download: %v", err)
+	}
+	if !second.Cached {
+		t.Fatal("second Download should reuse the staged archive")
+	}
+	if second.SHA256Hex != first.SHA256Hex {
+		t.Errorf("cached SHA256Hex = %q, want %q", second.SHA256Hex, first.SHA256Hex)
+	}
+	if atomic.LoadInt32(&binaryHits) != 0 {
+		t.Errorf("archive was re-downloaded (%d GETs); sha256 match should skip it", binaryHits)
+	}
+}
+
+// TestDownload_RedownloadsOnBadCache: a staged file whose
+// hash does not match SHA256SUMS is overwritten, not trusted.
+func TestDownload_RedownloadsOnBadCache(t *testing.T) {
+	body := "real-body"
+	f := newFixture(t, "v9.9.9", "9.9.9", body)
+	rel := &Release{
+		TagName: "v9.9.9",
+		Assets: []Asset{
+			{Name: "SHA256SUMS.txt", BrowserDownloadURL: f.srvURL() + "/repos/" + f.repo + "/asset/sums"},
+			{Name: f.assetName, BrowserDownloadURL: f.srvURL() + "/repos/" + f.repo + "/asset/binary", Size: int64(len(body))},
+		},
+	}
+	asset := MatchAsset(rel, "9.9.9")
+	if asset == nil {
+		t.Fatal("MatchAsset returned nil")
+	}
+	stagingDir := t.TempDir()
+	stagingPath := filepath.Join(stagingDir, asset.Name)
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(stagingPath, []byte("tampered-or-partial"), 0o600); err != nil {
+		t.Fatalf("seed bad cache: %v", err)
+	}
+
+	res, err := Download(context.Background(), rel, asset, stagingDir, QuietProgress)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if res.Cached {
+		t.Fatal("bad cache must not be reused")
+	}
+	got, err := os.ReadFile(res.StagingPath)
+	if err != nil {
+		t.Fatalf("read staged: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("staged body = %q, want %q", got, body)
 	}
 }

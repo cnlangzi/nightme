@@ -1,24 +1,25 @@
-// Package main — `nightme run` long-running Feishu daemon (CLI shell).
+// Package main — `nightme run` long-running multi-channel daemon (CLI shell).
 //
 // The wiring, event-bus subscription, restore, shutdown, and the
-// 7-step runtime orchestrator all live in internal/runtime. This
+// 4-phase runtime orchestrator all live in internal/runtime. This
 // file is a thin cobra adapter:
 //
-//   - parse --channel
-//   - parse --workflows-dir (optional; enables bot channel)
-//   - build runtime.Deps
+//   - build runtime.Deps (channel registry auto-resolves via NewChannels)
 //   - install signal handling via runtime.RunOptions
 //   - call runtime.Runner.Run(ctx)
 //
+// v1.3+ multi-channel: the legacy --channel flag has been removed
+// from `nightme run`; channels auto-start based on cfg credentials.
+//
 // The cmd/nightme tests that touch the runtime internals
 // directly (newEventHandler, wireRuntimeCallbacksAndRestore,
-// markPromptDone, shutdownRun) import internal/runtime as
-// `runtime` and call the exported equivalents there.
-
+// shutdownRunMulti) import internal/runtime as `runtime` and
+// call the exported equivalents there.
 package main
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -28,42 +29,39 @@ import (
 	"github.com/cnlangzi/nightme/internal/runtime"
 )
 
-// newRunCmd builds the long-running Feishu daemon command.
+// newRunCmd builds the long-running channel daemon command.
+// v1.3+ multi-channel: the --channel flag has been removed.
+// All channels with valid credentials in the config file
+// (channel.BuildAll) auto-start.
 func newRunCmd() *cobra.Command {
-	var channelName string
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Start the Feishu daemon (ChatSession-based runtime)",
-		Long: "run starts the Feishu WebSocket channel and serves a Gateway " +
-			"router on top of it. Slash commands (/cwd, /use, /kill, /help) " +
+		Short: "Start the channel daemon (ChatSession-based runtime)",
+		Long: "run starts every configured IM channel and serves a Gateway " +
+			"router on top of them. Slash commands (/cwd, /use, /kill, /help) " +
 			"drive session lifecycle; plain text is forwarded to the live " +
 			"agent behind the chat's active AgentSession.\n\n" +
-			"On shutdown the daemon stops the channel and persists final " +
+			"On shutdown the daemon stops the channels and persists final " +
 			"state. Agent processes are LONG-LIVED and intentionally NOT " +
 			"killed by nightme — they survive nightme restart via the " +
 			"Detached registry state, and `nightme run` (or /use) re-attaches " +
 			"to them on next start. Use `/kill` from the relevant chat to " +
 			"terminate agent processes.\n\n" +
-			"Pass --channel=echo to run the daemon with the echo channel " +
-			"(a no-network stub that prints outbound messages to stdout). " +
-			"Useful for smoke tests.",
+			"Channel selection is driven by config credentials (channel.BuildAll " +
+			"iterates the registry and skips builders that return 'missing creds'). " +
+			"See docs/CHANNEL.md for the OCP registration pattern.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRun(cmd, channelName)
+			return runRun(cmd)
 		},
 	}
-	cmd.Flags().StringVar(&channelName, "channel", "feishu",
-		"Channel implementation: feishu (default) or echo (smoke test)")
 	return cmd
 }
 
-// runRun dispatches to the daemon. Channel selection via
-// the --channel flag (feishu | echo).
-func runRun(cmd *cobra.Command, channelName string) error {
+// runRun dispatches to the daemon. v1.3+ multi-channel: every
+// channel with valid credentials auto-starts (channel.BuildAll
+// iterates the registry).
+func runRun(cmd *cobra.Command) error {
 	deps := runtime.DefaultDeps()
-	deps, err := runtime.WithChannel(deps, channelName)
-	if err != nil {
-		return err
-	}
 	return runRunWith(cmd, deps)
 }
 
@@ -74,15 +72,13 @@ func runRunWith(cmd *cobra.Command, deps runtime.Deps) error {
 	if cmd == nil {
 		return errCmdRequired
 	}
-	out := cmd.OutOrStdout()
-	logger := loggerFromContext(cmd.Context())
 
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	runner := runtime.RunWith(deps, runtime.RunOptions{
-		Out:    out,
-		Logger: logger,
+		Out:    cmd.OutOrStdout(),
+		Logger: slog.Default(),
 		SigCh:  sigCh,
 	})
 	return runner.Run(cmd.Context())

@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"github.com/cnlangzi/nightme/internal/httpclient"
 )
 
 // ─── Envelope types (mirrors of dsh/protocol.go) ────────────────────
@@ -123,7 +124,7 @@ func NewRPCClient(baseURL string) *RPCClient {
 	baseURL = strings.TrimRight(baseURL, "/")
 	return &RPCClient{
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: httpClientTimeout},
+		http:    httpclient.DefaultWithTimeout(httpClientTimeout),
 	}
 }
 

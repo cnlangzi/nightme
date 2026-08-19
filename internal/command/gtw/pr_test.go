@@ -1556,8 +1556,9 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 // early return).
 func TestFactory_Handle_RoutesToPR(t *testing.T) {
 	withCwd(t, "/") // force the no-workspace / no-yml branch
-	mgr := NewManager()
-	f := NewFactoryWithDeps(mgr, HandlerDeps{})
+	gtwMgr := NewManager()
+	csMgr := chatsession.NewManager() // v1.3+: Handle takes chatsession.Manager
+	f := NewFactoryWithDeps(gtwMgr, HandlerDeps{})
 
 	// Wire a real ChatSession so dispatchPR's cs.Emitter()
 	// sends the reply somewhere we can observe. We use the
@@ -1570,13 +1571,13 @@ func TestFactory_Handle_RoutesToPR(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chatsession.New: %v", err)
 	}
-	mgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
+	gtwMgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
 		return cs
 	})
 	ch := rec
 
 	out, err := f.Handle(context.Background(),
-		command.RuntimeServices{}, cs,
+		command.RuntimeServices{}, csMgr, cs,
 		command.SlashInput{
 			Args:      []string{"gtw", "pr"},
 			ChatID:    "chat-pr-test",

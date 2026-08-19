@@ -14,104 +14,64 @@
 //     OnTurnEnded → flush via the runtime-installed FlushHook).
 //
 // The cmd/nightme/run.go file is now a thin cobra adapter that
-// parses --channel, fills in Deps, and calls Runner.Run.
+// v1.3+ multi-channel: the CLI shell fills in Deps (channel
+// registry auto-resolves via NewChannels) and calls Runner.Run.
+// The legacy --channel flag is removed.
 //
-// All construction seams live in Deps; every helper that needs to
-// be testable directly (NewEventHandler, WireRuntimeCallbacksAndRestore,
+// All construction seams live in Deps; every helper that needs
+// to be testable directly (NewEventHandler, WireRuntimeCallbacksAndRestore,
 // MarkPromptDone, ShutdownRun, NewMessageDispatcher) is exported.
 package runtime
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/channel/bot"
-	"github.com/cnlangzi/nightme/internal/channel/echo"
-	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // Deps holds the construction seams for the daemon: every
 // dependency is injectable for deterministic tests. Nil fields
-// fall back to the production defaults applied by Runner.Run
-// (matching the v0.x cmd/nightme/run.go behaviour).
+// fall back to the production defaults applied by Runner.Run.
+//
+// v1.3+ multi-channel: NewChannels returns every channel with
+// valid credentials; the runtime auto-starts them all. Adding a
+// new channel is an OCP extension — implement channel.Channel
+// and call channel.Register from the adapter's init().
 type Deps struct {
 	LoadConfig        func() (*config.Config, error)
 	OpenChatSessions  func(*config.Config) (*registry.ChatSessionFile, error)
 	OpenAgentSessions func(*config.Config) (*registry.AgentSessionFile, error)
 	BuildAgents       func(*config.Config) *agent.Registry
-	NewChannel        func(*config.Config) (channel.Channel, error)
-	NewBot            func(*config.Config) (channel.Channel, error)
+	NewChannels       func(*config.Config) ([]channel.Channel, error)
 	Signals           <-chan os.Signal
-	SkipFeishuLogin   bool
 	OnReady           func()
 
-	// RegisterHealth, if non-nil, is called after the channel is
-	// constructed and started. The closure receives the channel's
-	// HealthSnapshot function directly (Phase 2.1: every Channel
-	// implements HealthSnapshot itself — no feishu type assertion
-	// needed at the runtime layer).
+	// RegisterHealth, if non-nil, is called once per channel
+	// (v1.3+ multi-channel: one snapshot per attached Channel,
+	// not a single shared one). The closure receives the
+	// channel's HealthSnapshot function.
 	RegisterHealth func(snapshot func() (string, json.RawMessage, error))
 }
 
 // DefaultDeps returns the production Deps: real config loader,
 // real registry stores under cfg.Paths.DataDir, real agent
-// registry, and feishu.NewAdapter as the channel. CLI/test
-// callers override individual hooks (echo for smoke tests,
-// temp-dir stores for harness, …).
+// registry, and channel.BuildAll (the registry-driven
+// multi-channel builder). CLI/test callers override individual
+// hooks (echo for smoke tests, temp-dir stores for harness).
 func DefaultDeps() Deps {
 	return Deps{
 		LoadConfig:        config.LoadDefault,
 		OpenChatSessions:  defaultOpenChatSessions,
 		OpenAgentSessions: defaultOpenAgentSessions,
 		BuildAgents:       defaultBuildAgents,
-		NewChannel: func(cfg *config.Config) (channel.Channel, error) {
-			return feishu.NewAdapter(cfg)
-		},
+		NewChannels:       channel.BuildAll,
 	}
-}
-
-// WithChannel selects the channel implementation (feishu | echo).
-// Unknown channel names return an error so the CLI shell can
-// surface a friendly message and exit non-zero. The echo
-// selection sets SkipFeishuLogin so the runtime doesn't error
-// out on missing Feishu credentials.
-func WithChannel(deps Deps, channelName string) (Deps, error) {
-	switch channelName {
-	case "feishu", "":
-		// default — feishu.NewAdapter (already wired by DefaultDeps)
-	case "echo":
-		deps.SkipFeishuLogin = true
-		deps.NewChannel = func(*config.Config) (channel.Channel, error) {
-			return echo.New("echo", os.Stdout), nil
-		}
-	default:
-		return deps, fmt.Errorf("runtime: unknown channel %q (want feishu or echo)", channelName)
-	}
-	return deps, nil
-}
-
-// WithBot enables the bot channel. bot is a workflow automation
-// driver — it pushes synthesized messages into its own Incoming(),
-// where the gateway's pumpInbound reads them, and it captures
-// agent replies via Send(). When NewBot is non-nil, runtime
-// attaches BOTH the primary channel (feishu/echo) and bot to
-// the gateway, so messages from both sources are dispatched
-// through the same inbound chain.
-func WithBot(deps Deps, workflowsDir string) Deps {
-	deps.NewBot = func(_ *config.Config) (channel.Channel, error) {
-		return bot.New(bot.Config{
-			WorkflowsDir: workflowsDir,
-			ActionsDir:   filepath.Join(workflowsDir, "actions"),
-		}), nil
-	}
-	return deps
 }
 
 // defaultOpenChatSessions opens chat_sessions.json relative to
@@ -143,34 +103,6 @@ func defaultBuildAgents(cfg *config.Config) *agent.Registry {
 	return agentregistry.Build(cfg, "")
 }
 
-// RemoveLegacyRegistryFile is best-effort cleanup of the v0.1
-// registry.json (the v1.2 daemon no longer reads it). Exported
-// so the CLI's `list` command can call it directly without
-// having its own copy.
-func RemoveLegacyRegistryFile(cfg *config.Config) error {
-	path, err := legacyRegistryPath(cfg)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	bak := path + ".v1.bak"
-	if _, err := os.Stat(bak); err == nil {
-		// Backup already exists — leave both files alone.
-		return nil
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.Rename(path, bak); err != nil {
-		return err
-	}
-	return nil
-}
-
 // ChatSessionsPath returns the absolute path to chat_sessions.json
 // under cfg.Paths.DataDir. Exported so the CLI's `list` command
 // can resolve the same file the daemon writes.
@@ -191,15 +123,4 @@ func AgentSessionsPath(cfg *config.Config) (string, error) {
 		return "", err
 	}
 	return filepath.Join(base, "agent_sessions.json"), nil
-}
-
-// legacyRegistryPath returns the absolute path to the v0.1
-// registry.json that the v1.2 daemon no longer writes.
-// Unexported — only RemoveLegacyRegistryFile uses it.
-func legacyRegistryPath(cfg *config.Config) (string, error) {
-	base, err := filepath.Abs(cfg.Paths.DataDir)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "registry.json"), nil
 }

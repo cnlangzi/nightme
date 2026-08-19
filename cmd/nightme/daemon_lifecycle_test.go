@@ -16,7 +16,7 @@ import (
 )
 
 func TestRootLifecycleCommandSurface(t *testing.T) {
-	root := newRootCmd()
+	root, _ := newRootCmd()
 	for _, name := range []string{"start", "status", "stop", "restart", "logs"} {
 		cmd, _, err := root.Find([]string{name})
 		if err != nil || cmd == root || cmd.Name() != name {

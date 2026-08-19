@@ -85,3 +85,20 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return runPrintMode(ctx, s, cfg, blocks)
 }
+
+// Review implements /review for codex. F-review.md §13
+// "codex/claude use native review" rule: codex has a native
+// `codex review` subcommand, so we invoke it directly instead of
+// running our generic StandardPrompt via `codex exec <prompt>`.
+// The native subcommand is structured for the review task —
+// reusing it is strictly better than reverse-engineering the same
+// review into a generic prompt-mode call.
+//
+// v9: returns the raw RunResult from runCodexReview — the /review
+// dispatcher in internal/command/review/cmd.go wraps it in
+// agent.FormatReviewMessage and routes to BOTH the AS (via
+// as.SendBlocks) and the channel (via the chat session's emitter).
+// The bridge no longer owns presentation or distribution.
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+	return runCodexReview(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
+}

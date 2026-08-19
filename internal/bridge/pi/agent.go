@@ -47,6 +47,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agent/procutil"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // ─── constants & exported errors ───
@@ -217,9 +218,13 @@ type driver struct {
 
 	// turnMu serializes SendBlocks calls so a second prompt
 	// cannot start before the first one is acknowledged by Pi. It
-	// also guards the turnActive flag.
-	turnMu     sync.Mutex
-	turnActive bool
+	// also guards the turnActive flag AND inFlightPromptID —
+	// Stop reads the id under turnMu so a failResponse racing
+	// SendBlocks's clear can never target a stale id.
+	turnMu           sync.Mutex
+	turnActive       bool
+	inFlightPromptID string             // request id of the prompt RPC currently parked in SendBlocks; "" if idle
+	promptCancel     context.CancelFunc // cancel for the in-flight prompt's callCtx; nil if idle
 
 	translator *translator
 
@@ -279,47 +284,47 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	branch := detectBranch(cfg.Workspace)
 	logger := slog.Default()
 
-	// Spawn via agent.NewCmd — see internal/agent/exec_unix.go
+	// Spawn via proc.New — see internal/proc/exec_unix.go
 	// for the platform-specific SysProcAttr rationale.
-	cmd := agent.NewCmd(ctx, s.command, args...)
-	cmd.Dir = cfg.Workspace
-	cmd.Env = append(os.Environ(), env...)
+	child := proc.New(ctx, s.command, args...)
+	child.Dir = cfg.Workspace
+	child.Env = append(os.Environ(), env...)
 
-	stdin, err := cmd.StdinPipe()
+	stdin, err := child.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi: stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdout, err := child.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 		return nil, fmt.Errorf("pi: stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		return nil, fmt.Errorf("pi: stderr pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	if err := child.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
-		piLog("Start cmd.Start failed",
+		piLog("Start child.Start failed",
 			"elapsed_ms", time.Since(startTime).Milliseconds(),
 			"err", err.Error())
 		return nil, fmt.Errorf("pi: start: %w", err)
 	}
 
 	live := &driver{
-		cmd:        cmd,
+		cmd:        child,
 		stdinW:     stdin,
 		stdoutR:    stdout,
 		stderrR:    stderr,
 		stderrTail: agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		rpc:        newRPCClient(stdin),
 		events:     make(chan agent.AgentEvent, eventsBufferSize),
-		pid:        cmd.Process.Pid,
+		pid:        child.Process.Pid,
 		agentName:  s.name,
 		workspace:  cfg.Workspace,
 		branch:     branch,
@@ -331,7 +336,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	// Read pump and stderr drainer start in parallel with the
 	// handshake so a slow get_state does not stall read-back
-	// pressure. The lifecycle goroutine (cmd.Wait) is started
+	// pressure. The lifecycle goroutine (child.Wait) is started
 	// last so it owns both the events close and the pending
 	// fail. pumpWG is incremented BEFORE the goroutines start
 	// and decremented inside them so the lifecycle Wait below
@@ -488,11 +493,25 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 		d.turnMu.Unlock()
 		return ErrTurnBusy
 	}
+	// Register turnActive + inFlightPromptID + promptCancel
+	// atomically under turnMu. promptCancel is the cancel func
+	// for the callCtx we'll pass to rpc.request; publishing it
+	// here lets Stop cancel the in-flight prompt's context as a
+	// fallback when the snapshot races SendBlocks's lock
+	// acquisition (Stop's first snapshot can land BEFORE
+	// SendBlocks has set inFlightPromptID, in which case
+	// failResponse would be a no-op — see Stop's polling loop).
+	promptID := d.rpc.nextRequestID()
 	d.turnActive = true
+	d.inFlightPromptID = promptID
+	d.promptCancel = cancelCall
 	d.turnMu.Unlock()
 	defer func() {
+		cancelCall()
 		d.turnMu.Lock()
 		d.turnActive = false
+		d.inFlightPromptID = ""
+		d.promptCancel = nil
 		d.turnMu.Unlock()
 	}()
 
@@ -538,9 +557,10 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 		"pid", d.pid,
 		"parent_has_deadline", ctxHasDeadline(ctx),
 		"call_has_deadline", ctxHasDeadline(callCtx),
+		"prompt_id", promptID,
 	)
 	params := promptParams{Message: messageText, Images: images}
-	resp, err := d.rpc.request(callCtx, "prompt", params, "")
+	resp, err := d.rpc.request(callCtx, "prompt", params, promptID)
 	if err != nil {
 		return err
 	}
@@ -655,13 +675,131 @@ func (d *driver) New(ctx context.Context) error {
 // KindPromptEnded handler.
 //
 // Returns ErrNotSupported if the bridge is not started yet.
+// Stop sends an `abort` RPC to the pi session. The pi --mode rpc
+// protocol exposes an abort command that cancels the in-flight turn
+// and (per the wire contract) forces the agent_settled event to fire.
+// The pi process stays alive; the bridge observes the boundary and
+// the next SendBlocks can proceed once the chat layer's TryFlush
+// loop sees IsReady() flip back to true.
+//
+// Pre-fix regression (fix-pi-stop, 2026-08-19): Stop only sent the
+// abort RPC and returned. The original `prompt` RPC that
+// SendBlocks was waiting on never received a response — pi only
+// acks `abort`, not the abandoned `prompt` — so SendBlocks's
+// `defer turnActive=false` never ran. turnActive stayed true for
+// up to promptTimeout (90s), and every subsequent SendBlocks
+// bounced off ErrTurnBusy. The chat layer saw no events from the
+// new prompt and (mis)read it as "pi stopped responding".
+//
+// Fix has two pieces:
+//
+//  1. Before sending abort, fail the in-flight prompt RPC (if any)
+//     via rpcClient.failResponse. SendBlocks's pending channel
+//     closes, the function returns ErrSessionClosed immediately,
+//     the defer fires, turnActive flips false. Submit's error
+//     path then rolls back currentPrompt + IsReady=true so the
+//     next TryFlush lands a fresh prompt without waiting for
+//     promptTimeout.
+//
+//  2. Send the abort RPC and wait for its response (success /
+//     reject). Pi is responsible for emitting `agent_settled` to
+//     mark the turn boundary on its end; that flows through
+//     readPump → translate → EventAgentDone → the chat layer's
+//     readpumpLoop which calls endPrompt → IsReady=true. If pi
+//     is well-behaved (the documented contract), this happens
+//     within a few hundred ms of the abort response; if not, the
+//     HungPrompt watchdog will eventually mark the AS Suspect.
+//
+// Stop is fire-and-forget: it returns as soon as the abort RPC
+// completes (success or failure) and does NOT wait for agent_settled.
+// The chat layer coordinates the turn-end → next-submit transition
+// via its existing KindPromptEnded handler.
+// Stop sends an `abort` RPC to the pi session. The pi --mode rpc
+// protocol exposes an abort command that cancels the in-flight turn
+// and (per the wire contract) forces the agent_settled event to fire.
+// The pi process stays alive; the bridge observes the boundary and
+// the next SendBlocks can proceed once the chat layer's TryFlush
+// loop sees IsReady() flip back to true.
+//
+// Two cancellation paths run in parallel so the fix is robust to
+// the race window between Stop's first snapshot and SendBlocks's
+// turnMu.Lock:
+//   - failResponse(id) closes the pending channel for the
+//     in-flight prompt RPC (visible to Stop once SendBlocks has
+//     installed inFlightPromptID under turnMu).
+//   - cancelFn() cancels the prompt's callCtx directly (visible
+//     to Stop once SendBlocks has installed promptCancel under
+//     turnMu; both writes happen in the same critical section,
+//     so either both are visible or neither is).
+// SendBlocks's select in rpc.request wakes on either signal and
+// returns — the defer then clears turnActive and Submit rolls
+// back IsReady=true.
+//
+// The snapshot polls briefly (up to 5ms total, 500µs steps) to
+// catch the narrow case where Stop's first snapshot lands BEFORE
+// SendBlocks has acquired turnMu. Without the poll, a Stop fired
+// in that ~microsecond window would see no prompt and let
+// SendBlocks proceed unchallenged, hanging on the prompt RPC
+// until promptTimeout (90s).
+//
+// Stop is fire-and-forget: it returns as soon as the abort RPC
+// completes (success or failure) and does NOT wait for
+// agent_settled. The chat layer coordinates the turn-end →
+// next-submit transition via its existing KindPromptEnded handler.
 func (d *driver) Stop(ctx context.Context) error {
 	if d.rpc == nil {
 		return agent.ErrNotSupported
 	}
+
+	// Snapshot the in-flight prompt's id and cancel func under
+	// turnMu. The brief poll catches the rare race where Stop
+	// runs before SendBlocks has acquired turnMu.
+	snap := func() (pendingID string, cancelFn context.CancelFunc) {
+		d.turnMu.Lock()
+		pendingID = d.inFlightPromptID
+		cancelFn = d.promptCancel
+		d.turnMu.Unlock()
+		return
+	}
+	pendingID, cancelFn := snap()
+	if pendingID == "" && cancelFn == nil {
+		// Re-poll for up to 5ms. SendBlocks reaches turnMu in
+		// microseconds; the poll is generous.
+		deadline := time.Now().Add(5 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			select {
+			case <-time.After(500 * time.Microsecond):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			pendingID, cancelFn = snap()
+			if pendingID != "" || cancelFn != nil {
+				break
+			}
+		}
+	}
+	if pendingID != "" {
+		d.rpc.failResponse(pendingID, ErrTurnAborted)
+	}
+	if cancelFn != nil {
+		cancelFn()
+	}
+
+	// Tell pi to abort. Pi's contract is to emit agent_settled
+	// after this so the chat layer can flip IsReady; that's a
+	// wire-protocol guarantee, not something we can enforce
+	// from here. The watchdog backstops a non-emitter pi.
+	//
+	// Use a unique id per Stop call (auto-assigned by
+	// rpc.request when the hint is "") so concurrent /stop
+	// double-taps don't collide on the pending map. The earlier
+	// fixed "abort-1" id made the second call orphan the first
+	// caller's channel — dispatchResponse finds the second
+	// caller's slot and the first caller's ch blocks until
+	// handshakeTimeout.
 	stopCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	resp, err := d.rpc.request(stopCtx, "abort", map[string]any{}, "abort-1")
+	resp, err := d.rpc.request(stopCtx, "abort", map[string]any{}, "")
 	if err != nil {
 		return fmt.Errorf("pi: stop: %w", err)
 	}
@@ -1024,8 +1162,8 @@ func filterSessionFlags(args []string, sessionID string, logger *slog.Logger) []
 func detectBranch(workspace string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", workspace, "symbolic-ref", "--short", "HEAD")
-	out, err := cmd.Output()
+	c := proc.New(ctx, "git", "-C", workspace, "symbolic-ref", "--short", "HEAD")
+	out, err := c.Output()
 	if err == nil {
 		s := string(out)
 		for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
@@ -1035,8 +1173,8 @@ func detectBranch(workspace string) string {
 			return s
 		}
 	}
-	cmd = exec.CommandContext(ctx, "git", "-C", workspace, "rev-parse", "--short", "HEAD")
-	out, err = cmd.Output()
+	c = proc.New(ctx, "git", "-C", workspace, "rev-parse", "--short", "HEAD")
+	out, err = c.Output()
 	if err != nil {
 		return ""
 	}

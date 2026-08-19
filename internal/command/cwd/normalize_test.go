@@ -112,3 +112,80 @@ func TestNormalizePathInput_FullBlockSweep(t *testing.T) {
 		t.Errorf("full-block normalisation wrong:\n got  %q\n want %q", got, want.String())
 	}
 }
+
+// TestNormalizePathInput_IMRichText strips IM-emitted link
+// markup. Without this, pasting a URL into the chat input
+// causes /cwd to receive "<a href="...">visible text</a>"
+// (because feishu/lark/slack/teams all wrap links). The path
+// resolver rejects the raw markup; stripping extracts the
+// visible text so the user's intent is preserved.
+func TestNormalizePathInput_IMRichText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "feishu link card (quoted href)",
+			in:   `<a href="https://github.com/cnlangzi/nightme">cnlangzi/nightme</a>`,
+			want: "cnlangzi/nightme",
+		},
+		{
+			name: "feishu link card (single-quoted href)",
+			in:   `<a href='https://github.com/cnlangzi/nightme'>cnlangzi/nightme</a>`,
+			want: "cnlangzi/nightme",
+		},
+		{
+			name: "link card with full path inside label",
+			in:   `<a href="https://example.com">/Users/geax/code/myproj</a>`,
+			want: "/Users/geax/code/myproj",
+		},
+		{
+			name: "link card with no label falls back to href",
+			in:   `<a href="/Users/geax/code/myproj"></a>`,
+			want: "/Users/geax/code/myproj",
+		},
+		{
+			name: "no markup, untouched",
+			in:   "/Users/geax/code/myproj",
+			want: "/Users/geax/code/myproj",
+		},
+		{
+			name: "empty link tag is removed",
+			in:   `<a href=""></a>`,
+			want: "",
+		},
+		{
+			name: "link tag with extra attributes (feishu posts)",
+			in:   `<a href="https://github.com/cnlangzi/nightme" target="_blank">cnlangzi/nightme</a>`,
+			want: "cnlangzi/nightme",
+		},
+		{
+			name: "full-width slash inside link",
+			// After IM mangling: full-width ／ becomes / via
+			// the existing normalize table; the link strip
+			// runs first (extracts visible text), then the
+			// full-width map runs on the extracted text.
+			in:   `<a href="https://github.com/cnlangzi/nightme">／Users／geax</a>`,
+			want: "/Users/geax",
+		},
+		{
+			name: "uppercase tag (Slack / Teams occasionally emit <A ...>)",
+			in:   `<A HREF="https://example.com">/Users/geax/code</A>`,
+			want: "/Users/geax/code",
+		},
+		{
+			name: "mixed case tag (the regex matches case-insensitively)",
+			in:   `<A href="/Users/geax/code">x</a>`,
+			want: "x",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizePathInput(tc.in)
+			if got != tc.want {
+				t.Errorf("normalizePathInput(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

@@ -50,11 +50,10 @@ func TestRunDaemon_ReachesReady(t *testing.T) {
 		OpenChatSessions:  defaults.OpenChatSessions,
 		OpenAgentSessions: defaults.OpenAgentSessions,
 		BuildAgents:       func(cfg *config.Config) *agent.Registry { return agentregistry.Build(cfg, "") },
-		NewChannel: func(*config.Config) (channel.Channel, error) {
-			return ch, nil
+		NewChannels: func(*config.Config) ([]channel.Channel, error) {
+			return []channel.Channel{ch}, nil
 		},
-		SkipFeishuLogin: true,
-		OnReady:         func() { close(ready) },
+		OnReady: func() { close(ready) },
 	}
 
 	runner := runtime.RunWith(deps, runtime.RunOptions{

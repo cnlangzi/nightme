@@ -99,20 +99,28 @@ type (
 	// (running inside the runCommand goroutine). See F-59.
 	CommandDispatcher interface {
 		Match(text string) (cmdName string, matched bool)
-		Dispatch(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error)
+		// v1.3+ multi-channel: mgr is the per-channel chatsession.Manager
+		// that produced the inbound. Dispatch forwards mgr to
+		// cmd.Handle so commands can resolve cross-channel state
+		// (mgr.Get / mgr.SendPermission) against the channel that
+		// owns this chatID. cs is the ChatSession GetOrCreate'd
+		// from mgr by the runtime before Dispatch is called.
+		Dispatch(ctx context.Context, rt command.RuntimeServices, mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error)
 	}
 
 	// ShellDispatcher is shell.Dispatcher: the inbound.Router's
 	// shell branch (tryShellDispatch) resolves the chat session,
 	// builds an InboundRequest, and calls Handle. The signature
 	// is symmetric with command.Commander.Dispatch — both take
-	// the per-chat ChatSession, both return a (*Output, bool)
-	// pair (bool = handled). shell.Handle does NOT take a
+	// the per-channel chatsession.Manager + per-chat ChatSession,
+	// both return a (*Output, bool) pair (bool = handled).
+	// v1.3+ multi-channel: mgr is the per-channel chatsession.Manager
+	// that produced the inbound. shell.Handle does NOT take a
 	// context.Context because the spawned goroutine intentionally
 	// outlives any inbound ctx (see internal/shell/dispatch.go
 	// Dispatcher.Handle doc for the full rationale).
 	ShellDispatcher interface {
-		Handle(cs *chatsession.ChatSession, ir shell.InboundRequest) (*shell.ShellOutput, bool)
+		Handle(mgr *chatsession.Manager, cs *chatsession.ChatSession, ir shell.InboundRequest) (*shell.ShellOutput, bool)
 	}
 
 	// ReactionRouter is services.ReactionRouter: the inbound.Router's
@@ -132,7 +140,7 @@ type (
 type Router struct {
 	mu sync.RWMutex
 
-	csMgr     MessageHandler
+	csMgr     *chatsession.Manager
 	commander CommandDispatcher
 	shell     ShellDispatcher
 	action    ReactionRouter
@@ -171,7 +179,7 @@ type Router struct {
 // at first dispatch). em may be nil in test contexts where the
 // reply-emit path is intentionally disabled; the run* helpers
 // no-op when emitter is nil.
-func New(csMgr MessageHandler, commander CommandDispatcher, sh ShellDispatcher, action ReactionRouter, em outbound.Emitter, primaryAgent string) *Router {
+func New(csMgr *chatsession.Manager, commander CommandDispatcher, sh ShellDispatcher, action ReactionRouter, em outbound.Emitter, primaryAgent string) *Router {
 	if csMgr == nil {
 		panic("inbound.New: chatsession.Manager must not be nil")
 	}
@@ -205,17 +213,34 @@ func New(csMgr MessageHandler, commander CommandDispatcher, sh ShellDispatcher, 
 // Returns (nil, nil) only if the chain fails to claim (which
 // can't happen today — tryMessageDispatch always claims —
 // but the empty-chain behaviour is preserved as a safety net).
-func (r *Router) Dispatch(ctx context.Context, msg *messages.InboundMessage) (*CommandResult, error) {
+// Dispatch is the priority chain entry point. Walks the four
+// tryDispatch methods in order; the first one that claims the
+// input (returns handled=true) wins. The chain itself does
+// NOT inspect msg.Reaction / msg.Action / msg.Text at the top
+// level — each tryDispatch owns its own pattern matching. To
+// add a new dispatch mode, add a tryDispatch method + one
+// entry in the chain slice below.
+//
+// v1.3+ multi-channel: mgr is the per-channel chatsession.Manager
+// that produced the inbound. Each try method uses mgr to
+// resolve the right ChatSession (mgr.GetOrCreate) and pass it
+// to the underlying command / shell handler, so commands and
+// shell results route back to the right channel's Emitter.
+//
+// Returns (nil, nil) only if the chain fails to claim (which
+// can't happen today — tryMessageDispatch always claims —
+// but the empty-chain behaviour is preserved as a safety net).
+func (r *Router) Dispatch(ctx context.Context, mgr *chatsession.Manager, msg *messages.InboundMessage) (*CommandResult, error) {
 	if msg == nil {
 		return nil, nil
 	}
-	for _, try := range []func(context.Context, *messages.InboundMessage) (bool, *CommandResult, error){
+	for _, try := range []func(context.Context, *chatsession.Manager, *messages.InboundMessage) (bool, *CommandResult, error){
 		r.tryActionDispatch,
 		r.tryCommandDispatch,
 		r.tryShellDispatch,
 		r.tryMessageDispatch,
 	} {
-		handled, result, err := try(ctx, msg)
+		handled, result, err := try(ctx, mgr, msg)
 		if err != nil {
 			return nil, err
 		}
@@ -253,6 +278,17 @@ func (r *Router) requireAction() (ReactionRouter, bool) {
 // NOT call this; daemon shutdown observes ctx cancellation
 // in the goroutines themselves (mirroring the shell.Dispatcher
 // pattern documented in internal/shell/dispatch.go).
+
+// CsMgr returns the chatsession.Manager that backs this router
+// (the constructor's csMgr arg, which tests use to wire Emitter
+// in the v1.3+ multi-channel path before calling gateway.New).
+// Production paths go through AttachPumps + the per-channel
+// mgr; this getter is only useful for legacy single-mgr callers
+// that drive DispatchInbound without AttachPumps (e.g. the v0.x
+// e2e_slash_test regression guard).
+func (r *Router) CsMgr() *chatsession.Manager {
+	return r.csMgr
+}
 //
 // Safe to call multiple times — WaitGroup.Wait on a drained
 // group is a fast no-op. Safe to call concurrently with

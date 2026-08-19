@@ -8,8 +8,8 @@
 // The historical `_unix_test.go` naming in the other bridges
 // (codex / claudecode / pi) reflects their tests using Unix-only
 // syscalls (procfs, signal, pty). opencode's print-mode path
-// runs through agent.NewCmd — which itself splits Unix/Windows
-// in internal/agent/exec_{unix,windows}.go — so the spawn glue
+// runs through proc.New — which itself splits Unix/Windows
+// in internal/proc/exec_{unix,windows}.go — so the spawn glue
 // here is portable. We name the file after what it tests
 // (stub-driven end-to-end) rather than a platform the test is
 // locked to.

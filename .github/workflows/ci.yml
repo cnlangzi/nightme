@@ -5,9 +5,46 @@ on:
     branches: [main]
 
 jobs:
+  # The Go test suite runs on every OS family we ship binaries for:
+  # linux, windows, and macOS. GitHub Actions UI auto-expands the
+  # matrix axis as a sub-line under the job name, so this single
+  # entry shows as three parallel rows.
+  #
+  # Why all three: a sizeable slice of the codebase carries
+  # `//go:build !windows` (daemoncontrol AF_UNIX sockets, Setpgid
+  # in claudecode, …) or `//go:build !unix` (Windows-only syscall
+  # wrappers). Linux-only coverage hides Windows regressions;
+  # Windows-only coverage hides Unix regressions. darwin coverage
+  # matters because Go's runtime scheduling differs on macOS
+  # (different M:N goroutine/thread ratios, different mmap
+  # behavior under cgo) and some bugs only surface there.
+  #
+  # Why no arch axis (no separate Intel-vs-ARM entries): nightme
+  # is Go + Node.js npm. Go's runtime treats amd64 and arm64 as
+  # equivalent tier-1; npm auto-picks the right .node binary for
+  # the host arch. Adding `macos-13` (Intel x86_64) alongside
+  # `macos-latest` (Apple Silicon arm64) tested arch, not OS — and
+  # arch doesn't gate nightme's behavior. The OS coverage we have
+  # is the minimal-but-sufficient set: each entry is a host OS
+  # nightme doesn't otherwise exercise.
+  #
+  # Conditional logic inside the matrix: ubuntu gets `-race
+  # -coverprofile` (the actual coverage gate), the other two get
+  # `-count=1` plain test. Race is 2-3× slower and coverage upload
+  # is linux-only by repo convention (the badge lives on
+  # linux/amd64). The `-count=1` on the non-ubuntu rows disables
+  # the Go test cache so a flaky test that "passed yesterday"
+  # can't hide a real regression on a different platform.
   test:
-    name: Build + Vet + Test
-    runs-on: ubuntu-latest
+    needs: []
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -16,111 +53,269 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Linux needs GTK3 + AppIndicator dev headers for the
+      # systray CGo dependency. macOS / Windows runners ship
+      # Cocoa / Win32 by default; no extra step needed. The
+      # system-tray icon (cmd/nightme/tray.go) is the only
+      # piece of nightme that pulls CGo, so this install is
+      # the single new CI dependency for the tray rollout.
+      - name: Install systray build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+
       - name: Build
+        shell: bash
         run: go build ./...
 
       - name: Vet
+        shell: bash
         run: go vet ./...
 
       - name: Test (race + coverage)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Test
+        if: matrix.os != 'ubuntu-latest'
+        shell: bash
+        run: go test -count=1 ./...
+
       - name: Upload coverage
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v6
         with:
           name: coverage-linux-amd64
           path: coverage.out
 
-  # Windows-hosted test runner. Runs the same `go test` command
-  # as the linux job, but on a real windows-latest hosted runner
-  # so windows-tagged tests (`//go:build windows`) actually run
-  # and unix-tagged tests (`//go:build !windows`) are skipped
-  # by the Go build system instead of failing to compile.
+      # Build a smoke-testable binary and exercise the bare REPL.
+      # Bare `nightme` (no args) enters the interactive REPL
+      # (cmd/nightme/repl.go). We feed it a small command matrix
+      # over a pipe and assert each command produced the right
+      # response. This is the cheap-but-effective catch for:
+      #
+      #   - The "REPL banner shows every registered subcommand"
+      #     contract from cmd/nightme/subcommand.go — each entry
+      #     in the banner comes from reg.add(), so a future
+      #     refactor that drops cmdRegistry or breaks the
+      #     reg.banner() loop must keep the banner complete or
+      #     this gate goes red. The last casualty was
+      #     `nightme config`, which was registered but missing
+      #     from the banner.
+      #
+      #   - The dispatcher pipe (`dispatchREPLLine`) still
+      #     surfaces unknown commands as `Error: unknown
+      #     command "<typed>"` and `exit` as `bye` — both
+      #     pieces of the public REPL contract that downstream
+      #     users (and the startup job itself) depend on.
+      #
+      #   - The readline swap to reeflective/readline in
+      #     commit 6c1a54f — pipe-fed stdin still produces a
+      #     complete "Error:" line for every typed byte, proving
+      #     the line-buffered fallback path works on each OS.
+      #
+      # Why in `test` (not `startup`): REPL is core surface —
+      # it should fail fast on the cheapest job, not wait for
+      # the npm-install chain in `startup`. This step runs on
+      # all three OS runners (ubuntu / windows / macos) for
+      # the same reason the rest of `test` does.
+      #
+      # Caveat (intentional): stdin is a pipe, so readline
+      # falls back to line-buffered (non-raw) mode. The
+      # platform-specific raw-mode bug fixed in
+      # fix-erpl-on-windows (chzyer/readline mis-parsing
+      # printable bytes as ANSI escapes on Windows) does NOT
+      # reproduce in this pipe-fed path — that class needs an
+      # interactive Windows runner with a real PTY. What this
+      # gate DOES catch: every code path that does NOT depend
+      # on raw mode, which is the larger regression surface.
+      - name: Build smoke binary
+        shell: bash
+        run: |
+          # Use the canonical build entry points so CI exercises
+          # exactly what a developer would run locally:
+          #   - Windows: build.bat (cmd-native, also documents
+          #     how Windows users build without GnuWin32 make)
+          #   - Linux/macOS: make build (uses LDFLAGS from the
+          #     Makefile to bake version metadata in)
+          # Both produce bin/nightme[.exe] with version metadata
+          # baked in via -ldflags. Going through these scripts
+          # (rather than a bare 'go build' here) means a
+          # regression in build.bat or the Makefile LDFLAGS list
+          # surfaces as a failing CI gate instead of a Windows-
+          # only user-facing "version unknown" surprise.
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./build.bat
+          else
+            make build
+          fi
+
+      - name: Verify bare REPL (banner + dispatch matrix)
+        shell: bash
+        run: |
+          # build.bat → bin/nightme.exe, make build → bin/nightme.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
+          # Three independent lines: a known-good command
+          # (version), an unknown command (catches banner-
+          # quote-of-typed-string behavior), and exit.
+          # The set of printable bytes covered here is
+          # intentionally broad — any of them silently
+          # dropped by the dispatcher would break one of
+          # the substring assertions below.
+          #
+          # Pipe-fed stdin triggers runREPLInteractive's
+          # isatty.IsTerminal guard (see repl.go), which
+          # causes the runREPL → runREPLWith (scanner)
+          # path. The scanner path is what the user-visible
+          # TestREPL_* unit tests exercise, so this step
+          # is the binary-level smoke covering everything
+          # below: build, exec, dispatch, output.
+          #
+          # Caveat (intentional): stdin is a pipe, so
+          # readline falls back to non-raw mode. The
+          # platform-specific raw-mode bug fixed in
+          # fix-erpl-on-windows (chzyer/readline
+          # mis-parsing printable bytes as ANSI escapes
+          # on Windows) does NOT reproduce in this
+          # pipe-fed path — that class needs an
+          # interactive Windows runner with a real PTY.
+          # What this gate DOES catch: every code path
+          # that does NOT depend on raw mode, which is
+          # the larger regression surface. The TTY path
+          # is verified by the 139 in-package TestREPL_*
+          # tests + manual Windows smoke (see PR
+          # description).
+          out=$(printf 'version\nabcdefghijklmnopqrstuvwxyz0123456789\nexit\n' \
+                  | "$bin" 2>&1)
+          echo "$out"
+          # Banner contract: every registered user-facing
+          # subcommand must appear. If a future refactor
+          # drops cmdRegistry or breaks the banner loop,
+          # at least one of these substrings goes missing.
+          for cmd in list agents config kill clean version; do
+            if ! echo "$out" | grep -qE "(^|[[:space:]])${cmd}([[:space:]]|$)"; then
+              echo "::error::REPL banner missing '$cmd'"
+              exit 1
+            fi
+          done
+          # Dispatcher contract: unknown commands echo the
+          # typed string in their error message (see
+          # dispatchREPLLine routing through
+          # nmerrors.ExitCode). If any byte of the typed
+          # alphabet is silently dropped, the substring
+          # "abcdefghijklmnopqrstuvwxyz0123456789" in the
+          # captured transcript will not appear.
+          if ! echo "$out" | grep -qF 'unknown command "abcdefghijklmnopqrstuvwxyz0123456789"'; then
+            echo "::error::REPL dispatcher did not echo the full typed alphabet — possible character-loss regression"
+            exit 1
+          fi
+          # Exit contract: 'bye' line after the exit command.
+          # Used by TestREPL_Exit and by users who pipe the
+          # REPL for scripting.
+          if ! echo "$out" | grep -qF 'bye'; then
+            echo "::error::REPL did not print 'bye' after exit — dispatch loop broken"
+            exit 1
+          fi
+          echo "OK: REPL banner + dispatch matrix all green on ${{ matrix.os }}"
+
+  # Per-agent install + bridge-spawn smoke gate. Runs on ubuntu +
+  # windows + macos in parallel; each runner installs every npm-
+  # distributed agent using each project's officially-supported
+  # install method, verifies it is on PATH, and exercises the
+  # bridge's spawn machinery against it.
   #
-  # Required because some tests use platform-only syscalls
-  # (e.g. AF_UNIX sockets in daemoncontrol, Setpgid in
-  # claudecode agent_interrupt_unix_test.go) that intentionally
-  # don't compile on Windows. Without a Windows-hosted runner,
-  # those tags just mean "never tested" — a Windows-only
-  # regression would slip past CI. The cross-compile job
-  # below (still compile-only) catches build breaks; this job
-  # catches runtime regressions.
+  # Motivation: dev workstations skew heavily to macOS in this team,
+  # but CI must cover all three hosted runners explicitly — that's
+  # what catches the dsh-on-Windows regression class (and any
+  # future platform-specific spawn breakage) before merge. The Go
+  # test suite alone is not enough: the spawn-touching tests carry
+  # `//go:build !windows` (or unix-only) tags, so the Windows
+  # branches of proc.New / agentregistry / each bridge's Start
+  # see far less hands-on coverage without an explicit cross-platform
+  # smoke gate.
   #
-  # Fail-fast gate: `test` runs first as the cheap linux/amd64
-  # signal — any regression there short-circuits the windows
-  # runner entirely instead of burning a paid hosted runner on
-  # a known-broken tree.
-  test-windows:
-    name: Build + Vet + Test (windows/amd64)
+  # We deliberately do NOT try to verify model responses — CI has
+  # no API keys configured. The signal we care about is "did the
+  # bridge successfully reach, start, and elicit a response from
+  # the agent binary". An "API key not configured" message from
+  # the agent itself counts as a successful response: it proves
+  # the bridge launched the binary AND the binary got far enough
+  # into its startup to attempt the first API call. We just check
+  # that some response was produced, not what it says.
+  #
+  # Five independent gates per agent, in increasing integration
+  # depth (each catches a different failure class):
+  #
+  #   1. binary on PATH            — install + PATH plumbing both work
+  #   2. binary --help             — the CLI loads, parses argv, and
+  #                                  prints usage without auth or
+  #                                  network (responds to a command)
+  #   3. `nightme agents`          — the bridge knows about the
+  #                                  builtin (catches the dsh-on-
+  #                                  Windows regression class — the
+  #                                  fix this whole branch exists for)
+  #   4. `nightme test --agent X`  — the bridge actually launches
+  #                                  the agent through its native
+  #                                  protocol layer (PTY for claude,
+  #                                  stdio JSON-RPC for codex/opencode/pi,
+  #                                  shared-host for dsh). Process
+  #                                  must produce response output
+  #                                  beyond nightme's own banner —
+  #                                  not just stay running. Anything
+  #                                  beyond the banner (auth error,
+  #                                  prompt echo, model reply) is a
+  #                                  pass. Banner-only is a fail
+  #                                  (hung / no acknowledgement).
+  #
+  # Why matrix but not fail-fast: a Linux-only npm registry hiccup
+  # should not short-circuit the Windows / macOS runners' signal,
+  # and vice versa. Each runner's pass/fail is independent.
+  #
+  # Why this job sits at the END of the dependency chain (needs the
+  # single preceding job, `test`): starter detection is the
+  # most expensive gate in the file (npm install × 5 agents × 3 OSes
+  # + 5 spawn attempts × 8s observation each), so we want it to run
+  # only after the cheaper gate has gone green. The full chain is:
+  #
+  #     test  (3-OS build + vet + tests; race + coverage on ubuntu)
+  #       └── agent-smoke  (this job — npm install + spawn smoke
+  #                         on ubuntu + windows + macos)
+  #
+  # If `test` is red, agent-smoke never starts — burning hosted
+  # runner minutes on npm install + 40s of spawn observation against
+  # a tree that already failed `go vet` would be wasted spend.
+  # Putting starter detection at the end of the chain is the
+  # cheap-first / expensive-last convention.
+  #
+  # Note: the cross-compile `build` job that used to live between
+  # `test` and this one was removed — `test` already builds on each
+  # of the three hosted runners (linux / windows / macos), and this
+  # job rebuilds on the same three runners before exercising the
+  # bridges. Cross-compile had no test coverage to add; it only
+  # surfaced `//go:build` mismatches that `go vet` in `test` would
+  # catch on the relevant native runner anyway.
+  startup:
     needs: test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build
-        shell: bash
-        run: go build ./...
-
-      - name: Vet
-        shell: bash
-        run: go vet ./...
-
-      - name: Test
-        # -count=1 disables the Go test cache so a flaky test that
-        # "passed yesterday" can't hide a real regression. We do
-        # NOT pass -race here because race costs 2-3x runtime
-        # and the coverage gate is on the linux job above; race
-        # detection is exercised on linux where the gate matters
-        # most.
-        shell: bash
-        run: go test -count=1 ./...
-
-  # Cross-compile check. Runs on ubuntu-latest (cheapest runner)
-  # and cross-compiles to Windows + macOS to catch OS-conditional
-  # build breaks without paying for a Windows/macOS hosted
-  # runner on every PR.
-  #
-  # Why no tests: the test suite contains platform-specific files
-  # tagged with `//go:build !windows` (e.g. daemoncontrol tests for
-  # AF_UNIX sockets, Setpgid in claudecode agent_interrupt_unix_test.go)
-  # that intentionally don't compile on Windows. The actual Windows
-  # test run happens in the test-windows job above — a real
-  # windows-latest hosted runner that picks up the windows-tagged
-  # tests (`//go:build windows`) and skips the unix-tagged ones
-  # via the Go build system.
-  #
-  # Fail-fast gate: `test` runs first as the cheap linux/amd64
-  # signal — any regression there short-circuits the cross-compile
-  # runners entirely instead of burning 4 runner minutes in
-  # parallel with a failing test. The cross-compile matrix itself
-  # still runs in parallel after the gate (peak 4); `fail-fast:
-  # false` keeps all four targets reporting even when one breaks.
-  cross-compile:
-    name: Cross-compile (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
-    needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - GOOS: windows
-            GOARCH: amd64
-            binary: nightme.exe
-          - GOOS: windows
-            GOARCH: arm64
-            binary: nightme.exe
-          - GOOS: darwin
-            GOARCH: amd64
-            binary: nightme
-          - GOOS: darwin
-            GOARCH: arm64
-            binary: nightme
+        # 3-OS matrix on purpose. Same axes as `test` — every OS
+        # we ship a binary for, we also verify the bridge can
+        # actually start every AI coding agent on that OS. Arch
+        # (Intel vs Apple Silicon) is intentionally NOT a matrix
+        # axis: nightme is Go + npm, both treat amd64 and arm64
+        # equivalently, and adding `macos-13` would re-test the
+        # same OS layer with negligible signal. Each runner
+        # reports independently so a Linux-only npm registry
+        # hiccup doesn't gate Windows / macOS.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -129,22 +324,237 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
-        env:
-          GOOS: ${{ matrix.target.GOOS }}
-          GOARCH: ${{ matrix.target.GOARCH }}
-          CGO_ENABLED: "0"
-        run: go build -o dist/${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}/${{ matrix.target.binary }} ./cmd/nightme
-
-      - name: Vet (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
-        env:
-          GOOS: ${{ matrix.target.GOOS }}
-          GOARCH: ${{ matrix.target.GOARCH }}
-        run: go vet ./...
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v6
+      # setup-node is needed for the npm-distributed agents. Node
+      # 20 LTS matches what the opencode-ai installer expects per
+      # its package.json engines field; bumping to a newer LTS is
+      # fine but unnecessary for this smoke check.
+      - uses: actions/setup-node@v6
         with:
-          name: nightme-${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}
-          path: dist/${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}/${{ matrix.target.binary }}
-          if-no-files-found: error
+          node-version: '20'
+
+      # Linux needs GTK3 + AppIndicator dev headers for the
+      # systray CGo dependency (the 'go build' step below
+      # links against -lgtk-3 / -layatana-appindicator3).
+      # Mirrors the same step in the 'test' job — both jobs
+      # run on ubuntu-latest and both call go build ./...
+      # (or its dist/nightme equivalent). macOS / Windows
+      # runners ship Cocoa / Win32 by default and need no
+      # extra install.
+      - name: Install systray build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Build nightme
+        shell: bash
+        run: go build -o dist/nightme ./cmd/nightme
+
+      - name: Install agents (officially-supported methods per agent)
+        shell: bash
+        run: |
+          set -e
+          # Every agent here ships its CLI as an npm package
+          # published by the project itself — `npm install -g
+          # <name>` IS the officially-supported install method
+          # for all 5, on every platform. Some agents also offer
+          # curl-pipe installers for users who don't want npm on
+          # PATH; those are noted below but not used here
+          # because (a) `npm install -g` already covers them and
+          # (b) curl scripts are flaky in CI (cert pinning,
+          # geo-restrictions, release-channel pin) where npm
+          # resolves deterministically via the registry.
+          #
+          # bash is also a builtin (PTY fallback) but it's a
+          # platform-provided binary — apt bash on Linux/macOS,
+          # n/a on stock Windows. It's covered by unix-only Go
+          # tests, not this gate.
+          #
+          # Package sources / verification:
+          #   claude  → @anthropic-ai/claude-code
+          #             (per internal/proc/exec_windows.go +
+          #              Anthropic's setup docs)
+          #   codex   → @openai/codex
+          #             (per docs/WINDOWS.md:183 "npm 包内的
+          #              codex.cmd" + OpenAI's install docs)
+          #   opencode→ opencode-ai
+          #             (per docs/WINDOWS.md:184; opencode also
+          #              publishes a curl installer at
+          #              opencode.ai/install as a second official
+          #              channel — npm install is the
+          #              CI-deterministic equivalent)
+          #   pi      → @earendil-works/pi-coding-agent
+          #             (per docs/bridge/pi.md:271)
+          #   dsh     → @deepseek-ai/dsh
+          #             (per internal/bridge/dsh/starter.go:82
+          #              Detect() error message + F-dsh-bridge.md)
+          npm install -g @anthropic-ai/claude-code
+          npm install -g @openai/codex
+          npm install -g opencode-ai
+          npm install -g @earendil-works/pi-coding-agent
+          npm install -g @deepseek-ai/dsh
+
+      - name: Verify each agent binary is on PATH
+        shell: bash
+        run: |
+          set -e
+          # bash on every hosted runner (Git Bash on Windows;
+          # bash on Linux/macOS) exposes `command -v` which
+          # resolves the same way nightme's bridge does —
+          # npm's bin dir for the active user, with PATHEXT
+          # ordering on Windows so .cmd shims win over no-
+          # extension names. macOS uses the standard POSIX
+          # execvp lookup; Linux ditto.
+          for agent in claude codex opencode pi dsh; do
+            path=$(command -v "$agent" 2>/dev/null || true)
+            if [ -z "$path" ]; then
+              echo "::error::$agent not on PATH after npm install -g"
+              exit 1
+            fi
+            echo "OK: $agent → $path"
+          done
+
+      - name: Verify each agent CLI responds to --help
+        shell: bash
+        run: |
+          set -e
+          # `--help` is the cheapest "responds to a command" probe:
+          # the binary loads, parses argv, walks its command table,
+          # prints usage, and exits — none of which require auth,
+          # network, or a workspace. This is what the user means
+          # by "对指令有响应": the CLI's command-dispatch layer
+          # works on this platform.
+          #
+          # We accept any non-empty output — wording varies
+          # ("Usage: claude [...]" / "codex-cli 0.145.0 ... USAGE"
+          # / opencode's TUI help / pi's interactive help / dsh's
+          # one-shot usage). Absence of output means the CLI
+          # crashed before printing.
+          for agent in claude codex opencode pi dsh; do
+            output=$("$agent" --help 2>&1) || true
+            if [ -z "$output" ]; then
+              echo "::error::$agent --help produced no output"
+              exit 1
+            fi
+            echo "OK: $agent --help responded ($(echo "$output" | wc -l) lines)"
+          done
+
+      - name: Verify nightme agents lists every builtin
+        shell: bash
+        run: |
+          set -e
+          out=$(./dist/nightme agents)
+          echo "$out"
+          # Match by word boundary (column-leading NAME in the
+          # table format "NAME\tCOMMAND\tARGS"). We do NOT
+          # require an exact match against the agent set — user-
+          # configured extras in $NIGHTME_CONFIG are additive and
+          # shouldn't fail this gate, so we check subset rather
+          # than equality.
+          #
+          # This step is the regression catch for the dsh-on-
+          # Windows fix: a future refactor that re-gates dsh
+          # behind runtime.GOOS would land here as a missing
+          # row on the windows-latest runner.
+          for agent in claude codex opencode pi dsh; do
+            if ! echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)"; then
+              echo "::error::nightme agents did not list $agent"
+              exit 1
+            fi
+            echo "OK: nightme agents lists $agent"
+          done
+
+      - name: Verify nightme bridge spawns each agent (response required)
+        shell: bash
+        run: |
+          set -e
+          # This is the "nightme 的启动测试" gate: invoke nightme
+          # through its own CLI surface (`nightme test`), let the
+          # bridge drive the spawn, and verify the child actually
+          # produced output beyond nightme's own banner.
+          #
+          # Why "must have response" and not just "must still be
+          # alive": a hung agent that never acknowledges the input
+          # passes a pure-aliveness check but fails the user's
+          # "执行成功" criterion. We require SOME output beyond the
+          # banner — auth-error / prompt-echo / model-reply all
+          # qualify, because each proves the bridge launched the
+          # binary AND the binary got past pure startup into "I
+          # have an opinion about this prompt" territory. Content
+          # is not inspected — only presence.
+          #
+          # Why we don't grep for a specific protocol response:
+          # each agent uses a different wire (PTY echo for claude,
+          # stdio JSON-RPC initialize for codex/opencode/pi,
+          # shared-host 3080-port web for dsh), so a content-based
+          # check would couple this gate to a single bridge's
+          # protocol. Byte threshold + observation window is the
+          # cross-protocol signal.
+          workspace=$(mktemp -d)
+          for agent in claude codex opencode pi dsh; do
+            echo "--- bridge spawn: $agent ---"
+            out_file=$(mktemp)
+            # Spawn `nightme test` in the background. We feed it
+            # a one-line prompt + immediate EOF on stdin:
+            #   - PTY agents (claude) echo the line, then sit at
+            #     the user prompt waiting for more input (passes
+            #     the "have response" gate immediately).
+            #   - stdio JSON-RPC agents (codex / opencode / pi)
+            #     parse the line, fail with a framing/protocol
+            #     error, log it to stderr (passes the gate).
+            #   - dsh shared-host binds 127.0.0.1:3080 and prints
+            #     the URL on stdout (passes the gate).
+            set +e
+            printf 'PONG\n' | ./dist/nightme test \
+                --agent "$agent" \
+                --workspace "$workspace" \
+                >"$out_file" 2>&1 &
+            pid=$!
+            # Wait up to 8 seconds for output to grow past the
+            # banner. Nightme's banner is exactly:
+            #   "[nightme] session <id> started in <ws> (agent=…, args=…)\n"
+            # which is ~80–120 bytes. We poll the output file
+            # every 0.5s for size > 150 bytes; first observation
+            # past that threshold is the "agent acknowledged"
+            # signal we care about.
+            banner_threshold=150
+            deadline=$(( $(date +%s) + 8 ))
+            acknowledged=0
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              size=$(wc -c < "$out_file" 2>/dev/null | tr -d ' ' || echo 0)
+              if [ "$size" -gt "$banner_threshold" ]; then
+                acknowledged=1
+                break
+              fi
+              if ! kill -0 "$pid" 2>/dev/null; then
+                # Process exited — no point waiting longer. If
+                # we never crossed the threshold, captured
+                # output is what we get.
+                break
+              fi
+              sleep 0.5
+            done
+            # Always tear down the spawned process; CI doesn't
+            # leave orphans behind regardless of pass/fail.
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            output=$(cat "$out_file")
+            if [ "$acknowledged" -eq 1 ]; then
+              echo "OK: $agent acknowledged within window ($(wc -c < "$out_file" | tr -d ' ') bytes)"
+              continue
+            fi
+            # Never crossed the banner threshold. Could be:
+            #   (a) bridge couldn't find/launch the binary  → FAIL
+            #   (b) agent is genuinely hung (no auth error,
+            #       no echo, no protocol log)               → FAIL
+            # In both cases the surface symptom is identical
+            # from CI's perspective: no agent response within
+            # 8s. We surface the captured output so the
+            # post-mortem is one click away.
+            echo "::error::$agent: no response within 8s (bridge failed to launch, or agent hung)"
+            echo "----- captured output -----"
+            echo "$output"
+            echo "----- end output -----"
+            exit 1
+          done

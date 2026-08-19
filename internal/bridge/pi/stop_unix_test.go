@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Regression tests for the /stop → "no events from pi after abort"
 // bug (fix-pi-stop, 2026-08-19).
 //

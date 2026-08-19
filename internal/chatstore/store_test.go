@@ -3,6 +3,7 @@ package chatstore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -420,3 +421,99 @@ func copyFile(src, dst string) error {
 
 func osReadFile(path string) ([]byte, error)     { return os.ReadFile(path) }
 func osWriteFile(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }
+
+// TestNew_MigratesLegacyIDKeyedFormat is the regression test for the
+// cross-version format drift found during review of F-CHATSTORE-001.
+// Legacy chat_sessions.json files (written by the old
+// registry.ChatSessionFile) keyed the chatSessions map by entry.ID
+// ("cs_<chatID>"). The new Store keys by entry.ChatID. Without
+// migration, the old entry is invisible to chatID-indexed lookups,
+// Bootstrap re-creates a fresh empty entry, and the stale "cs_*"
+// key orphans alongside the new key on every save.
+//
+// Fix (Plan B): New() re-keys by e.ChatID on load; the first save()
+// rewrites the whole file with normalized keys. No version bump —
+// reading is bidirectionally compatible.
+func TestNew_MigratesLegacyIDKeyedFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat_sessions.json")
+	// Legacy shape: map key == entry.ID ("cs_42"), ChatID == "42".
+	legacy := `{"version":1,"chatSessions":{"cs_42":{"id":"cs_42","chatId":"42","primaryAgent":"codex","selectedCwd":"/old"}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// After migration the entry must be reachable by chatID.
+	e, ok := s.Get("42")
+	if !ok {
+		t.Fatal("legacy entry not found by chatID after migration")
+	}
+	if e.PrimaryAgent != "codex" {
+		t.Errorf("PrimaryAgent = %q, want codex", e.PrimaryAgent)
+	}
+	if e.SelectedCwd != "/old" {
+		t.Errorf("SelectedCwd = %q, want /old", e.SelectedCwd)
+	}
+	if e.ID != "cs_42" {
+		t.Errorf("ID field = %q, want cs_42 (field preserved, only the map key changed)", e.ID)
+	}
+
+	// Bootstrap on an existing chatID must now hit the "already
+	// exists" branch instead of re-creating. Before the fix this
+	// returned a "need primaryAgent" error or clobbered the entry.
+	bootstrapped, err := s.Bootstrap("42", "")
+	if err != nil {
+		t.Fatalf("Bootstrap existing: %v", err)
+	}
+	if bootstrapped.SelectedCwd != "/old" {
+		t.Errorf("Bootstrap clobbered existing fields: SelectedCwd = %q, want /old", bootstrapped.SelectedCwd)
+	}
+	if bootstrapped.PrimaryAgent != "codex" {
+		t.Errorf("Bootstrap clobbered PrimaryAgent = %q, want codex", bootstrapped.PrimaryAgent)
+	}
+
+	// Trigger one save and verify the on-disk map is now keyed by
+	// chatID ("42"), with no stale "cs_42" key surviving.
+	if err := s.SetSelectedCwd("42", "/new"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read disk: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, `"42":`) {
+		t.Errorf("disk not keyed by chatID; body: %s", body)
+	}
+	if strings.Contains(body, `"cs_42":`) {
+		t.Errorf("legacy key leaked past save; body: %s", body)
+	}
+}
+
+// TestNew_NewFormatIsNoOpMigration verifies that a file already in
+// the new format (key == chatID) loads unchanged — migration is a
+// no-op when e.ChatID == k.
+func TestNew_NewFormatIsNoOpMigration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat_sessions.json")
+	fresh := `{"version":1,"chatSessions":{"42":{"id":"cs_42","chatId":"42","primaryAgent":"codex"}}}`
+	if err := os.WriteFile(path, []byte(fresh), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if e, ok := s.Get("42"); !ok || e.PrimaryAgent != "codex" {
+		t.Fatalf("new-format entry lost after migration: %+v", e)
+	}
+	if len(s.entries) != 1 {
+		t.Errorf("entries len = %d, want 1 (migration must not duplicate)", len(s.entries))
+	}
+}

@@ -64,10 +64,28 @@ func New(path string) (*Store, error) {
 				return nil, fmt.Errorf("chat_sessions: corrupt %s and backup failed: %w", path, backupErr)
 			}
 			s.entries = make(map[string]*registry.ChatSessionEntry)
-		} else {
-			if container.ChatSessions != nil {
-				s.entries = container.ChatSessions
+		} else if container.ChatSessions != nil {
+			// Re-key by entry.ChatID so the in-memory map matches the
+			// index used by every accessor (Get/SetXxx/Bootstrap all
+			// look up by chatID). Legacy files written by the old
+			// registry.ChatSessionFile keyed the map by entry.ID
+			// ("cs_<chatID>"); left as-is, those entries would be
+			// invisible to the chatID-indexed lookups and would
+			// orphan alongside a fresh chatID-keyed copy. This is a
+			// one-shot migration: the next save() rewrites the whole
+			// file with the normalized keys, so old "cs_*" keys do
+			// not survive past the first persist. No version bump —
+			// both old and new files are v1; reading is bidirectionally
+			// compatible (new files have e.ChatID == key, a no-op here).
+			migrated := make(map[string]*registry.ChatSessionEntry, len(container.ChatSessions))
+			for k, e := range container.ChatSessions {
+				key := k
+				if e != nil && e.ChatID != "" {
+					key = e.ChatID
+				}
+				migrated[key] = e
 			}
+			s.entries = migrated
 		}
 	case errors.Is(err, os.ErrNotExist):
 		// Nothing to do — empty store.

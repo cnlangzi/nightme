@@ -21,7 +21,9 @@ func TestLimiter_ImmediateWhenBucketFull(t *testing.T) {
 
 func TestLimiter_BlocksWhenBucketEmpty(t *testing.T) {
 	// RatePerSec=10, Burst=1 → after the first Wait, we should
-	// wait ~100ms before the next token is available.
+	// wait ~100ms before the next token is available. Upper bound
+	// is generous to accommodate timer coalescing on macOS and
+	// system load during CI.
 	l := NewLimiter(&LimiterConfig{RatePerSec: 10, Burst: 1}, nil)
 	if err := l.Wait(context.Background()); err != nil {
 		t.Fatalf("first Wait: %v", err)
@@ -34,7 +36,7 @@ func TestLimiter_BlocksWhenBucketEmpty(t *testing.T) {
 	if elapsed < 50*time.Millisecond {
 		t.Fatalf("second Wait should block ~100ms, elapsed=%v", elapsed)
 	}
-	if elapsed > 500*time.Millisecond {
+	if elapsed > 2*time.Second {
 		t.Fatalf("second Wait blocked too long, elapsed=%v", elapsed)
 	}
 }

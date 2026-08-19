@@ -46,6 +46,18 @@ type fakeCall struct {
 }
 
 func (f *fakeAPI) call(ctx context.Context, method string, params map[string]any, result any) error {
+	// Mirror a real HTTP client's ctx-honouring behaviour so
+	// that pollLoop, which checks err after every call, actually
+	// observes a cancelled context. Without this, every test
+	// case that calls Start() leaks a pollLoop goroutine —
+	// fakeAPI returns nil indefinitely and the loop never
+	// breaks. On Windows CI's 7GB hosted runner this OOMs the
+	// test binary after ~150 test cases have piled up
+	// goroutines (each one burns ~8KB stack + the per-call
+	// allocations). See PR #224 windows-latest job 95925744882.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.callCount++

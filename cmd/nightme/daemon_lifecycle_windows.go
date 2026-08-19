@@ -203,7 +203,7 @@ func exitCodeOf(state *os.ProcessState) int {
 // ready (code=...)" and the stack lands in the stderr capture file.
 // The Unix recover exists only to turn an otherwise information-free
 // EOF on that pipe into a real message.
-func runDaemonChild(cmd *cobra.Command) (retErr error) {
+func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	// Take the daemon lock ourselves. Unlike Unix, we can't
 	// inherit the parent's fd — LockFileEx is per-handle, so
 	// the parent closing its copy would release the lock. The
@@ -251,7 +251,17 @@ func runDaemonChild(cmd *cobra.Command) (retErr error) {
 		server.SetHealthProvider(fn)
 	}
 	cmd.SetContext(withLogger(ctx, loggerFromContext(cmd.Context())))
-	err = runRunWith(cmd, deps)
+	// Same threading-model flip as Unix: runtime in goroutine,
+	// runTrayOwning owns the main thread (or in Windows' case,
+	// the cobra-dispatched thread; systray.Run is happy to
+	// block there).
+	err = runTrayOwning(cmd, deps, trayOptions{
+		reg:              reg,
+		channelName:      "multi", // v1.3+: every channel with valid creds auto-starts; tray's Status row shows this label
+		logger:           loggerFromContext(cmd.Context()),
+		onStopRequest:    onStopRequestDefault,
+		onRestartRequest: onRestartRequestDefault,
+	})
 	_ = server.Close()
 	// Give Serve a brief window to unwind before we return; on
 	// Windows the process-exit path is what actually unblocks

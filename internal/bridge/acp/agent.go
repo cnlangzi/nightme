@@ -27,6 +27,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
@@ -150,6 +152,24 @@ type driver struct {
 	// error) and by Close as a safety net.
 	pendingTurnMu     sync.Mutex
 	pendingTurnActive bool
+
+	// ─── built-in text buffering ─────────────────────────────────
+	// textBuf accumulates agent_message_chunk payloads (reply text).
+	// thoughtBuf accumulates agent_thought_chunk payloads (reasoning).
+	// Both are flushed on sentence-terminating punctuation (".?!。！？"),
+	// on tool_call boundaries, and at turn-end via flushTextBuffers.
+	//
+	// This replaces the per-bridge buffering that opencode/cursor
+	// previously implemented in their UpdateHandler — all ACP
+	// bridges now get automatic sentence-level batching.
+	textBuf    *strings.Builder
+	thoughtBuf *strings.Builder
+	textMu     sync.Mutex
+
+	// thinkingPrefix marks reasoning text so the gateway can route
+	// it to the thinking surface (OutThinking) rather than the reply
+	// surface (OutReply). Matches pi/dsh/opencode conventions.
+	thinkingPrefix string
 }
 
 
@@ -336,13 +356,16 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	parentCtx, cancel := context.WithCancel(ctx)
 	live := &driver{
-				transport: transport,
-		rpc:       newRPCClient(transport),
-		ctx:       parentCtx,
-		cancel:    cancel,
-		agentName: s.name,
-		workspace: cfg.Workspace,
-		events:    make(chan agent.AgentEvent, eventBufferSize),
+		transport:      transport,
+		rpc:            newRPCClient(transport),
+		ctx:            parentCtx,
+		cancel:         cancel,
+		agentName:      s.name,
+		workspace:      cfg.Workspace,
+		events:         make(chan agent.AgentEvent, eventBufferSize),
+		textBuf:        &strings.Builder{},
+		thoughtBuf:     &strings.Builder{},
+		thinkingPrefix: "[思考] ",
 	}
 	// readPump is the per-session long-lived read loop. Wrap in
 	// agent.SafeGo (outer, daemon-level safety net) +
@@ -639,9 +662,9 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		// succeed. Emit Error so the runtime can render a
 		// "turn cancelled" footer instead of a normal
 		// completed card.
-		// Flush any buffered text the bridge-specific translator is
-		// holding onto so a cancelled turn does not silently drop
-		// the trailing fragment.
+		// Flush built-in buffers first, then bridge-specific buffers
+		// so a cancelled turn does not silently drop trailing fragments.
+		d.flushTextBuffers()
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
@@ -650,6 +673,7 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 			Err:  errors.New("bridge/acp: turn cancelled"),
 		})
 	case "max_tokens":
+		d.flushTextBuffers()
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
@@ -658,6 +682,7 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 			Err:  errors.New("bridge/acp: turn exceeded max_tokens"),
 		})
 	case "refusal":
+		d.flushTextBuffers()
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
@@ -672,12 +697,13 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		// how the opencode-serve bridge's session.status:idle
 		// translation worked.
 		//
-		// Flush any buffered text BEFORE EventAgentDone so the
-		// final send_card carries the whole accumulated reply
+		// Flush built-in buffers first, then bridge-specific buffers,
+		// so the final send_card carries the whole accumulated reply
 		// rather than just the chunked preview. Without this the
 		// turn-end silently swallows whatever text the buffer is
 		// still holding (the trailing fragment after the last
 		// agent_message_chunk).
+		d.flushTextBuffers()
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
@@ -1186,8 +1212,8 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 				"kind", kind, "err", err.Error())
 		}
 		// The handler now owns the full sessionUpdate stream — the
-		// built-in 4-case fallback below stays out of the way so
-		// every chunk is delivered exactly once. The all-or-nothing
+		// built-in fallback below stays out of the way so every
+		// chunk is delivered exactly once. The all-or-nothing
 		// ownership is intentional: a bridge installing an
 		// UpdateHandler has full domain knowledge of its own server's
 		// sessionUpdate variants and cannot leave any kind to the
@@ -1199,26 +1225,73 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 		return
 	}
 
+	// ─── built-in text buffering ─────────────────────────────
+	// Text chunks are buffered and flushed on sentence-terminating
+	// punctuation (".?!。！？"), on tool boundaries, and at turn-end.
+	// This gives all ACP bridges automatic sentence-level batching
+	// without per-bridge UpdateHandler boilerplate.
 	switch kind {
-	case "agent_message_chunk", "agent_thought_chunk":
+	case "agent_message_chunk":
 		var content struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			d.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
+			d.textMu.Lock()
+			d.textBuf.WriteString(content.Text)
+			if endsWithSentencePunctuation(d.textBuf.String()) {
+				d.textMu.Unlock()
+				d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+				d.flushBuffer(d.textBuf, "")
+			} else {
+				d.textMu.Unlock()
+			}
+		}
+	case "agent_thought_chunk":
+		var content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
+			d.textMu.Lock()
+			d.thoughtBuf.WriteString(content.Text)
+			if endsWithSentencePunctuation(d.thoughtBuf.String()) {
+				d.textMu.Unlock()
+				d.flushBuffer(d.textBuf, "")
+				d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+			} else {
+				d.textMu.Unlock()
+			}
 		}
 	case "tool_call":
+		// Tool boundary: flush both buffers so the user sees
+		// in-progress content before the tool receipt appears.
+		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+		d.flushBuffer(d.textBuf, "")
 		d.handleToolStart(params.Update)
 	case "tool_call_update":
 		d.handleToolEnd(params.Update)
 	case "message_chunk":
+		// Legacy message_chunk: buffer like agent_message_chunk.
 		var content struct {
 			Text string `json:"text"`
 		}
-		if json.Unmarshal(update.Content, &content) == nil {
-			d.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
+		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
+			d.textMu.Lock()
+			d.textBuf.WriteString(content.Text)
+			if endsWithSentencePunctuation(d.textBuf.String()) {
+				d.textMu.Unlock()
+				d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+				d.flushBuffer(d.textBuf, "")
+			} else {
+				d.textMu.Unlock()
+			}
 		}
+	default:
+		// Unknown kind: flush both buffers so trailing text is
+		// not lost before the next recognized event.
+		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+		d.flushBuffer(d.textBuf, "")
 	}
 }
 
@@ -1321,6 +1394,70 @@ func (d *driver) emit(event agent.AgentEvent) {
 	case d.events <- event:
 	case <-d.ctx.Done():
 	}
+}
+
+// ─── built-in text buffering helpers ──────────────────────────────
+
+// flushBuffer drains `buf` into a single EventAgentText and clears
+// it. No-op when the buffer is empty or all-whitespace. When `prefix`
+// is non-empty (e.g. thinkingPrefix) it is prepended to the content
+// so the gateway can route thinking payloads to the reasoning surface.
+//
+// The caller must NOT hold d.textMu when calling this — flushBuffer
+// acquires the lock internally for the String/Reset/Emit sequence.
+func (d *driver) flushBuffer(buf *strings.Builder, prefix string) {
+	if buf == nil {
+		return
+	}
+	d.textMu.Lock()
+	text := strings.TrimSpace(buf.String())
+	buf.Reset()
+	d.textMu.Unlock()
+	if text == "" {
+		return
+	}
+	if prefix != "" {
+		text = prefix + text
+	}
+	d.emit(agent.AgentEvent{
+		Kind:      agent.EventAgentText,
+		Text:      text,
+		SessionID: d.sessionID,
+		AgentName: d.agentName,
+		Workspace: d.workspace,
+	})
+}
+
+// flushTextBuffers drains both the reply buffer (textBuf) and the
+// reasoning buffer (thoughtBuf). Called at turn-end and on tool
+// boundaries so no trailing text is silently dropped.
+func (d *driver) flushTextBuffers() {
+	d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+	d.flushBuffer(d.textBuf, "")
+}
+
+// endsWithSentencePunctuation reports whether s ends with a sentence-
+// terminating punctuation mark — ASCII ".!?" or full-width
+// "。！？" — after trimming trailing whitespace.
+func endsWithSentencePunctuation(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := len(s) - 1; i >= 0; i-- {
+		r, size := utf8.DecodeLastRuneInString(s[:i+1])
+		if size == 0 {
+			return false
+		}
+		if !unicode.IsSpace(r) {
+			switch r {
+			case '.', '?', '!', '。', '！', '？':
+				return true
+			default:
+				return false
+			}
+		}
+	}
+	return false
 }
 
 // Compile-time guarantee that *driver satisfies the package-private

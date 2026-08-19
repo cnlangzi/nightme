@@ -27,6 +27,7 @@
 | 功能 | 设计文档 |
 |------|----------|
 | ChatSession 模型（per chat 持久化会话上下文）| [feat/F-chat-session.md](./feat/F-chat-session.md) |
+| chatstore 抽象 + 修 lost-update race | [**F-CHATSTORE-001**](./feat/F-CHATSTORE-001-chat-session-persistence.md) |
 | `/use <agent>` 命令 | [feat/F-chat-session.md](./feat/F-chat-session.md) |
 | AgentSession 池（`(agent, cwd)` 1:1 池化）| [feat/F-chat-session.md](./feat/F-chat-session.md) |
 | `/new` slash command | [feat/F-chat-session.md](./feat/F-chat-session.md) |

@@ -32,6 +32,7 @@
 package main
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -145,7 +146,7 @@ func loadConfig() (*config.Config, error) {
 // warn is the destination for non-fatal diagnostic output. Callers
 // pass cmd.ErrOrStderr() so output respects the cobra context (in
 // particular, --json output to stdout is not interleaved).
-func openV12Stores(cfg *config.Config, warn io.Writer) (*registry.ChatSessionFile, *registry.AgentSessionFile, error) {
+func openV12Stores(cfg *config.Config, warn io.Writer) (*chatstore.Store, *registry.AgentSessionFile, error) {
 	dir := cfg.Paths.DataDir
 	if dir == "" {
 		dir = "."
@@ -172,7 +173,7 @@ func openV12Stores(cfg *config.Config, warn io.Writer) (*registry.ChatSessionFil
 		return nil, nil, err
 	}
 
-	csFile, err := registry.OpenChatSessionFile(csPath)
+	csFile, err := chatstore.New(csPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open chat_sessions.json: %w", err)
 	}
@@ -190,7 +191,7 @@ func openV12Stores(cfg *config.Config, warn io.Writer) (*registry.ChatSessionFil
 // entries deleted. The GC is performed in a single batched
 // DeleteMany call so N exited entries cost one file rewrite, not N.
 func loadListRows(
-	csFile *registry.ChatSessionFile,
+	csFile *chatstore.Store,
 	asFile *registry.AgentSessionFile,
 	all, keepExited bool,
 ) ([]listRow, int, error) {

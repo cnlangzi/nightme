@@ -42,6 +42,7 @@
 package runtime
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
 	"fmt"
@@ -573,7 +574,7 @@ func findChatSession(chatID, primaryAgent string) *chatsession.ChatSession {
 // per-channel.
 type buildStackOpts struct {
 	spawner       chatsession.Spawner
-	csFile        *registry.ChatSessionFile
+	csFile        *chatstore.Store
 	asFile        *registry.AgentSessionFile
 	primaryAgent  string
 	gitStatusDeps chatsession.GitStatusDeps

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -40,7 +41,7 @@ type Manager struct {
 	spawner Spawner
 
 	// persistence (both optional, nil means in-memory only)
-	csFile *registry.ChatSessionFile
+	csFile *chatstore.Store
 	asFile *registry.AgentSessionFile
 
 	// onCreate fires once for every newly-created ChatSession,
@@ -115,7 +116,7 @@ func (m *Manager) WithSpawner(s Spawner) *Manager {
 }
 
 // WithPersistence attaches registry stores (also shared-able).
-func (m *Manager) WithPersistence(csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile) *Manager {
+func (m *Manager) WithPersistence(csFile *chatstore.Store, asFile *registry.AgentSessionFile) *Manager {
 	m.mu.Lock()
 	m.csFile = csFile
 	m.asFile = asFile
@@ -232,7 +233,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 		// (see cs.Emitter doc).
 		var (
 			spawner Spawner
-			csFile  *registry.ChatSessionFile
+			csFile  *chatstore.Store
 			asFile  *registry.AgentSessionFile
 			emitter outbound.Emitter
 		)
@@ -301,16 +302,16 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // for the lock).
 //
 // Hydration path:
-//   - csFile.GetByChat(chatID) returns the entry → call hydrateFromEntry
+//   - csFile.Get(chatID) returns the entry → call hydrateFromEntry
 //   - otherwise → New(chatID, primaryAgent) and wire deps
 //
 // The hydration path also seeds the AgentSession pool from asFile
 // (filtered by the entry's chatSessionId). FromAgentSessionEntry
 // already demotes any StatusRunning to StatusDetached, so
 // LookupSelectedAgentSession will re-spawn on the next call.
-func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
+func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
 	if csFile != nil {
-		if entry, ok := csFile.GetByChat(chatID); ok {
+		if entry, ok := csFile.Get(chatID); ok {
 			return m.hydrateFromEntry(entry, spawner, csFile, asFile, emitter)
 		}
 	}
@@ -333,7 +334,7 @@ func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spaw
 // selectedAS is forced to nil because the in-memory process handle
 // is lost on restart (the next LookupSelectedAgentSession will
 // spawn fresh and re-populate selectedAS).
-func (m *Manager) hydrateFromEntry(entry *registry.ChatSessionEntry, spawner Spawner, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
+func (m *Manager) hydrateFromEntry(entry *registry.ChatSessionEntry, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
 	cs, err := New(entry.ChatID, entry.PrimaryAgent)
 	if err != nil {
 		return nil, err

@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"fmt"
 	"io"
@@ -40,7 +41,7 @@ import (
 // callers should use ShutdownRunMulti, which iterates all
 // per-channel mgrs in runtime.allMgrs and stops every
 // successfully-started channel.
-func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, prReg *prcache.Registry, logger *slog.Logger) error {
+func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *chatstore.Store, asFile *registry.AgentSessionFile, prReg *prcache.Registry, logger *slog.Logger) error {
 	_ = out
 	_ = asFile
 	if logger == nil {
@@ -72,7 +73,7 @@ func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 func ShutdownRunMulti(
 	out io.Writer,
 	chs []channel.Channel,
-	csFile *registry.ChatSessionFile,
+	csFile *chatstore.Store,
 	asFile *registry.AgentSessionFile,
 	prReg *prcache.Registry,
 	logger *slog.Logger,
@@ -117,13 +118,13 @@ func ShutdownRunMulti(
 
 // persistChatStates walks every chat in mgr and upserts into csFile.
 // Centralized so ShutdownRun and ShutdownRunMulti stay in sync.
-func persistChatStates(mgr *chatsession.Manager, csFile *registry.ChatSessionFile) {
+func persistChatStates(mgr *chatsession.Manager, csFile *chatstore.Store) {
 	if mgr == nil || csFile == nil {
 		return
 	}
 	for _, cs := range mgr.List() {
 		// Touch lastInteractionAt so the entry is fresh on disk.
 		cs.SetSelectedAgent(cs.SelectedAgent()) // no-op write trigger
-		_ = csFile.Upsert(cs.Entry())
+		_ = csFile.Save(cs.Entry())
 	}
 }

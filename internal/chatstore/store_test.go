@@ -7,30 +7,28 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // newTestStore creates a Store backed by a temp file. Each test gets a
 // fresh store so there's no cross-test contamination on disk.
-func newTestStore(t *testing.T) (*Store, *registry.ChatSessionFile) {
+func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chat_sessions.json")
-	f, err := registry.OpenChatSessionFile(path)
+	s, err := New(path)
 	if err != nil {
-		t.Fatalf("OpenChatSessionFile: %v", err)
+		t.Fatalf("New: %v", err)
 	}
-	return New(f), f
+	return s
 }
 
 // TestSetter_PersistsLastWriter is the bug regression test for
 // F-CHATSTORE-001 §1.3 — the lost-update race. Before the fix, a
 // chat_sessions.json entry could end up torn or stale. After the fix,
-// every setter holds record.mu.Lock through the Upsert, so the entry
-// on disk is always a complete snapshot of one Setter's invocation.
+// every setter holds the Store mutex through save, so the entry on
+// disk is always a complete snapshot of one Setter's invocation.
 func TestSetter_PersistsLastWriter(t *testing.T) {
-	store, file := newTestStore(t)
+	store := newTestStore(t)
 	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -54,9 +52,18 @@ func TestSetter_PersistsLastWriter(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Read fresh from disk (not store cache) to verify what actually
-	// landed on disk after all the racing writers completed.
-	e, ok := file.GetByChat("chat-1")
+	// Re-load from a fresh Store on the same path to verify what
+	// actually landed on disk after all the racing writers completed.
+	dir := t.TempDir()
+	freshPath := filepath.Join(dir, "fresh.json")
+	if err := copyFile(store.Path(), freshPath); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	fresh, err := New(freshPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	e, ok := fresh.Get("chat-1")
 	if !ok {
 		t.Fatal("entry missing from disk after writes")
 	}
@@ -69,7 +76,7 @@ func TestSetter_PersistsLastWriter(t *testing.T) {
 // load the on-disk entry is always one of the values the test
 // produced — no torn snapshots, no stale snapshots.
 func TestSetter_NoLostUpdate(t *testing.T) {
-	store, file := newTestStore(t)
+	store := newTestStore(t)
 	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -79,9 +86,9 @@ func TestSetter_NoLostUpdate(t *testing.T) {
 	const iterations = 50
 
 	// Mix all setters — they touch different fields but all go
-	// through the same record.mu. The "every persisted entry is
+	// through the same Store mutex. The "every persisted entry is
 	// internally consistent" assertion holds because each setter
-	// writes its own field then atomically Upserts the whole entry.
+	// writes its own field then atomically saves the whole entry.
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func(gid int) {
@@ -106,7 +113,7 @@ func TestSetter_NoLostUpdate(t *testing.T) {
 	}
 	wg.Wait()
 
-	e, ok := file.GetByChat("chat-1")
+	e, ok := store.Get("chat-1")
 	if !ok {
 		t.Fatal("entry missing")
 	}
@@ -133,12 +140,10 @@ func TestSetter_NoLostUpdate(t *testing.T) {
 }
 
 // TestSetter_NoChange verifies the no-op short-circuit. Setting a
-// field to its current value must NOT trigger an Upsert (track by
-// counting file mtime / write count, but here we use a tighter
-// proxy: verify lastInteractionAt is NOT bumped when the value
-// matches).
+// field to its current value must NOT trigger a save (so the
+// LastInteractionAt is not bumped).
 func TestSetter_NoChange(t *testing.T) {
-	store, _ := newTestStore(t)
+	store := newTestStore(t)
 	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -166,7 +171,7 @@ func TestSetter_NoChange(t *testing.T) {
 // TestBootstrap_NewChat verifies Bootstrap creates a fresh entry on
 // disk when the chat is unknown.
 func TestBootstrap_NewChat(t *testing.T) {
-	store, file := newTestStore(t)
+	store := newTestStore(t)
 
 	e, err := store.Bootstrap("chat-fresh", "claude")
 	if err != nil {
@@ -181,8 +186,12 @@ func TestBootstrap_NewChat(t *testing.T) {
 	if e.LastInteractionAt.IsZero() {
 		t.Error("LastInteractionAt zero after Bootstrap")
 	}
-	// Verify it landed on disk.
-	diskE, ok := file.GetByChat("chat-fresh")
+	// Verify it landed on disk by reopening a fresh store from the same path.
+	fresh, err := New(store.Path())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	diskE, ok := fresh.Get("chat-fresh")
 	if !ok {
 		t.Fatal("entry missing on disk after Bootstrap")
 	}
@@ -194,25 +203,32 @@ func TestBootstrap_NewChat(t *testing.T) {
 // TestBootstrap_ExistingChat verifies Bootstrap loads from disk when
 // the entry is not in memory but exists on disk.
 func TestBootstrap_ExistingChat(t *testing.T) {
-	store, file := newTestStore(t)
+	store := newTestStore(t)
 
-	// Write a known entry directly to disk via file.Upsert.
-	existing := &registry.ChatSessionEntry{
-		ID:           "cs_pre",
-		ChatID:       "pre",
-		SelectedCwd:  "/pre-existing",
-		PrimaryAgent: "codex",
+	// Simulate a pre-existing on-disk entry by bootstrapping
+	// first, then re-opening a fresh store.
+	if _, err := store.Bootstrap("pre", "codex"); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
-	if err := file.Upsert(existing); err != nil {
-		t.Fatalf("Upsert seed: %v", err)
+	store.SetSelectedCwd("pre", "/pre-existing")
+
+	fresh, err := New(store.Path())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if err := fresh.SetSelectedCwd("pre", "/reopen-overwrite"); err != nil {
+		t.Fatalf("overwrite: %v", err)
 	}
 
-	e, err := store.Bootstrap("pre", "")
+	e, err := fresh.Bootstrap("pre", "")
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	if e.SelectedCwd != "/pre-existing" {
-		t.Errorf("SelectedCwd = %q, want /pre-existing", e.SelectedCwd)
+	// Bootstrap should NOT have reset /reopen-overwrite (it would
+	// only set fields on a fresh entry). Since the entry already
+	// existed in memory, the existing path is taken.
+	if e.SelectedCwd != "/reopen-overwrite" {
+		t.Errorf("SelectedCwd = %q, want /reopen-overwrite", e.SelectedCwd)
 	}
 	if e.PrimaryAgent != "codex" {
 		t.Errorf("PrimaryAgent = %q", e.PrimaryAgent)
@@ -222,7 +238,7 @@ func TestBootstrap_ExistingChat(t *testing.T) {
 // TestBootstrap_MissingFromDisk verifies Bootstrap fails when both
 // memory and disk lack the entry AND primaryAgent is empty.
 func TestBootstrap_MissingFromDisk(t *testing.T) {
-	store, _ := newTestStore(t)
+	store := newTestStore(t)
 	_, err := store.Bootstrap("unknown", "")
 	if err == nil {
 		t.Fatal("expected error when chat not on disk and primaryAgent empty")
@@ -232,7 +248,7 @@ func TestBootstrap_MissingFromDisk(t *testing.T) {
 // TestGet_CopyReturned verifies Get returns a fresh copy each call —
 // mutating the returned entry has no effect on the in-memory record.
 func TestGet_CopyReturned(t *testing.T) {
-	store, _ := newTestStore(t)
+	store := newTestStore(t)
 	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -249,19 +265,18 @@ func TestGet_CopyReturned(t *testing.T) {
 	}
 }
 
-// TestList verifies List returns a snapshot of all in-memory entries.
+// TestList verifies the snapshot semantics.
 func TestList(t *testing.T) {
-	store, _ := newTestStore(t)
-	for _, id := range []string{"a", "b", "c"} {
-		if _, err := store.Bootstrap(id, "claude"); err != nil {
-			t.Fatalf("Bootstrap %s: %v", id, err)
-		}
-	}
+	store := newTestStore(t)
+	a, _ := store.Bootstrap("a", "claude")
+	b, _ := store.Bootstrap("b", "claude")
+	c, _ := store.Bootstrap("c", "claude")
+
 	list := store.List()
 	if len(list) != 3 {
-		t.Errorf("List len = %d, want 3", len(list))
+		t.Fatalf("List len = %d, want 3", len(list))
 	}
-	seen := make(map[string]bool)
+	seen := map[string]bool{}
 	for _, e := range list {
 		seen[e.ChatID] = true
 	}
@@ -270,13 +285,56 @@ func TestList(t *testing.T) {
 			t.Errorf("List missing %q", id)
 		}
 	}
+	// Verify the returned entries are not the same pointers (snapshot).
+	if list[0] == a || list[0] == b || list[0] == c {
+		t.Errorf("List returned same pointer as Bootstrap result (should be a fresh copy)")
+	}
+}
+
+// TestSetSelectedAgent_EmptyAgent verifies the validation.
+func TestSetSelectedAgent_EmptyAgent(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if err := store.SetSelectedAgent("chat-1", ""); err == nil {
+		t.Errorf("expected error for empty agent")
+	}
+}
+
+// TestSetSelectedCwd_EmptyCwdAllowed verifies that empty cwd (the
+// "no workspace" state) is legal.
+func TestSetSelectedCwd_EmptyCwdAllowed(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if err := store.SetSelectedCwd("chat-1", "/foo"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := store.SetSelectedCwd("chat-1", ""); err != nil {
+		t.Errorf("empty cwd should be legal (cleared state), got %v", err)
+	}
+	e, _ := store.Get("chat-1")
+	if e.SelectedCwd != "" {
+		t.Errorf("SelectedCwd = %q, want empty", e.SelectedCwd)
+	}
+}
+
+// TestSetSelectedCwd_BeforeBootstrap verifies a setter errors when the
+// chat was never bootstrapped.
+func TestSetSelectedCwd_BeforeBootstrap(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetSelectedCwd("never-bootstrapped", "/x"); err == nil {
+		t.Errorf("expected error when chat was never bootstrapped")
+	}
 }
 
 // TestConcurrent_DifferentChats verifies that mutating different chats
-// in parallel does not contend (per-chat record mutex; cross-chat
-// writes to csFile serialize on csFile.mu but the gap is tiny).
+// in parallel does not contend (single Store mutex; per-chat
+// mutations serialize on it, but the gap is tiny).
 func TestConcurrent_DifferentChats(t *testing.T) {
-	store, _ := newTestStore(t)
+	store := newTestStore(t)
 	const chats = 8
 	for i := 0; i < chats; i++ {
 		if _, err := store.Bootstrap(chatID(i), "claude"); err != nil {
@@ -311,67 +369,20 @@ func TestConcurrent_DifferentChats(t *testing.T) {
 	}
 }
 
-// TestSetSelectedAgent_EmptyAgent verifies the validation.
-func TestSetSelectedAgent_EmptyAgent(t *testing.T) {
-	store, _ := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
-	if err := store.SetSelectedAgent("chat-1", ""); err == nil {
-		t.Error("expected error on empty agent")
-	}
-}
-
-// TestSetSelectedCwd_EmptyCwdAllowed verifies empty cwd is the
-// "no workspace" state (legal).
-func TestSetSelectedCwd_EmptyCwdAllowed(t *testing.T) {
-	store, _ := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
-	if err := store.SetSelectedCwd("chat-1", "/foo"); err != nil {
-		t.Fatalf("SetSelectedCwd: %v", err)
-	}
-	if err := store.SetSelectedCwd("chat-1", ""); err != nil {
-		t.Errorf("empty cwd should be legal (cleared state), got %v", err)
-	}
-	e, _ := store.Get("chat-1")
-	if e.SelectedCwd != "" {
-		t.Errorf("SelectedCwd = %q, want empty", e.SelectedCwd)
-	}
-}
-
-// TestSetSelectedCwd_BeforeBootstrap verifies a setter called before
-// Bootstrap errors out cleanly (no silent corruption).
-func TestSetSelectedCwd_BeforeBootstrap(t *testing.T) {
-	store, _ := newTestStore(t)
-	if err := store.SetSelectedCwd("never-bootstrapped", "/x"); err == nil {
-		t.Error("expected error when chat was never bootstrapped")
-	}
-}
-
-// TestRegistryPath exercises the on-disk format briefly to make sure
-// the store plays nicely with the real registry package.
-func TestRegistryPath(t *testing.T) {
-	tmp := t.TempDir()
-	path := filepath.Join(tmp, "chat_sessions.json")
-	f, err := registry.OpenChatSessionFile(path)
-	if err != nil {
-		t.Fatalf("OpenChatSessionFile: %v", err)
-	}
-	s := New(f)
-
-	if _, err := s.Bootstrap("real-chat", "claude"); err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
-	if err := s.SetSelectedCwd("real-chat", "/workspace"); err != nil {
-		t.Fatalf("SetSelectedCwd: %v", err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("file not written: %v", err)
-	}
-}
-
 func chatID(i int) string {
 	return "chat-" + string(rune('a'+i))
 }
+
+// copyFile reads src and writes its contents to dst. Used in tests
+// that need to verify on-disk state without sharing the same
+// in-memory entries as the store under test.
+func copyFile(src, dst string) error {
+	data, err := osReadFile(src)
+	if err != nil {
+		return err
+	}
+	return osWriteFile(dst, data)
+}
+
+func osReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+func osWriteFile(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }

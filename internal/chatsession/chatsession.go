@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
@@ -215,7 +216,7 @@ type ChatSession struct {
 	lastInteractionAt time.Time
 
 	// Persistence handles (optional — nil means no persistence).
-	csFile *registry.ChatSessionFile
+	csStore *chatstore.Store
 	asFile *registry.AgentSessionFile
 
 	// spawner is used by LookupSelectedAgentSession to fork new
@@ -378,9 +379,9 @@ func New(chatID, primaryAgent string) (*ChatSession, error) {
 
 // WithPersistence attaches registry stores. Both can be nil (no
 // persistence); typically both are non-nil in production.
-func (cs *ChatSession) WithPersistence(csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile) *ChatSession {
+func (cs *ChatSession) WithPersistence(csFile *chatstore.Store, asFile *registry.AgentSessionFile) *ChatSession {
 	cs.mu.Lock()
-	cs.csFile = csFile
+	cs.csStore = csFile
 	cs.asFile = asFile
 	cs.mu.Unlock()
 	return cs
@@ -2306,10 +2307,10 @@ func (cs *ChatSession) persistChatEntry() {
 // persistChatEntryLocked writes ChatSessionEntry. Caller must hold
 // cs.mu (RLock or Lock).
 func (cs *ChatSession) persistChatEntryLocked() {
-	if cs.csFile == nil {
+	if cs.csStore == nil {
 		return
 	}
-	_ = cs.csFile.Upsert(cs.entryLocked())
+	_ = cs.csStore.Save(cs.entryLocked())
 }
 
 // newAgentSessionID returns a unique ID for an AgentSession. v1.2

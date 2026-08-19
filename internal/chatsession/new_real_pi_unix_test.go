@@ -23,6 +23,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
 	"strings"
@@ -57,7 +58,7 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	requireRealPi(t)
 
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(dir + "/chat_sessions.json")
+	csFile, err := chatstore.New(dir + "/chat_sessions.json")
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}

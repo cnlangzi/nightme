@@ -7,6 +7,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/registry"
@@ -14,10 +15,10 @@ import (
 
 // newTestStores returns a ChatSessionFile + AgentSessionFile pair
 // rooted in t.TempDir() — auto-cleaned at test exit.
-func newTestStores(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessionFile) {
+func newTestStores(t *testing.T) (*chatstore.Store, *registry.AgentSessionFile) {
 	t.Helper()
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(dir + "/chat_sessions.json")
+	csFile, err := chatstore.New(dir + "/chat_sessions.json")
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}

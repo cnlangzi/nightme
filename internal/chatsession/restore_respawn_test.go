@@ -45,7 +45,7 @@ func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 		CreatedAt:            time.Now(),
 		LastInteractionAt:    time.Now(),
 	}
-	if err := csFile.Upsert(csEntry); err != nil {
+	if err := csFile.Save(csEntry); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 		CreatedAt:            time.Now(),
 		LastInteractionAt:    time.Now(),
 	}
-	if err := csFile.Upsert(csEntry); err != nil {
+	if err := csFile.Save(csEntry); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}
 
@@ -179,7 +179,7 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 	csIDCopy := csID
-	if err := csFile.Upsert(&registry.ChatSessionEntry{
+	if err := csFile.Save(&registry.ChatSessionEntry{
 		ID:                     csID,
 		ChatID:                 chatID,
 		SelectedCwd:              "/code/bailing",
@@ -258,7 +258,7 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 	asID := entry.ID
-	if err := csFile.Upsert(&registry.ChatSessionEntry{
+	if err := csFile.Save(&registry.ChatSessionEntry{
 		ID:                   entry.ChatSessionID,
 		ChatID:               "oc_restored",
 		SelectedCwd:            entry.Cwd,

@@ -227,6 +227,20 @@ func (a *Adapter) Stop(ctx context.Context) error {
 
 func (a *Adapter) pollLoop(ctx context.Context) {
 	for {
+		// Honour cancellation at the top of every iteration,
+		// not just inside the err-handling branches below. A
+		// successful api.call that races with Stop() would
+		// otherwise loop forever — the daemon's Stop() fires
+		// a.cancel(), ctx is done, but the loop's only exit
+		// paths are inside the err branch and the (rare)
+		// apiErr.RetryAfter branch. This guard is what lets
+		// Stop() actually drain the goroutine (PR #224
+		// windows-latest job 95925744882 was OOMing because
+		// fakeAPI in tests didn't propagate ctx and the
+		// loop spun forever).
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		// telegram's getUpdates response has `result` as a JSON
 		// ARRAY of Update objects. Unmarshal directly into []Update
 		// rather than into a wrapper struct (api.go's `call`

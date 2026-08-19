@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // runPrintMode spawns `agent -p "prompt" --output-format text`
@@ -46,7 +47,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	args := []string{"-p", prompt, "--output-format", "text"}
 	args = append(args, cfg.Args...)
 
-	cmd := agent.NewCmd(ctx, s.command, args...)
+	cmd := proc.New(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 
 	// Forward cfg.Env the same way Start does (append to

@@ -41,16 +41,14 @@ const MaxFrameSize = 4 * 1024 * 1024
 // ErrSessionClosed is returned by request when the session has been
 // (or is being) closed. Callers (notably SendBlocks) should treat
 // this as a terminal error and not retry.
-// ErrSessionClosed is returned by request when the session has been
-// (or is being) closed. Callers (notably SendBlocks) should treat
-// this as a terminal error and not retry.
 var ErrSessionClosed = errors.New("pi: session closed")
 
-// ErrTurnAborted is returned by request when the in-flight turn was
-// failed explicitly (e.g. by driver.Stop during /stop). The bridge
-// process is still alive and the session is still usable for a
-// subsequent SendBlocks; the caller just got notified that this
-// particular prompt's response was abandoned.
+// ErrTurnAborted is the cause that driver.Stop logs when it calls
+// failResponse on an in-flight prompt RPC. The waiter never sees
+// it as a return value — failResponse closes the pending channel
+// unconditionally, which the request() select reads as !ok and maps
+// to ErrSessionClosed. Exported so Stop / tests can label the
+// shutdown reason in logs without string-matching.
 var ErrTurnAborted = errors.New("pi: turn aborted")
 
 // ErrTurnBusy is returned by SendBlocks when a previous prompt is
@@ -255,13 +253,11 @@ func (c *rpcClient) dispatchResponse(env responseEnvelope) {
 // failPending aborts every registered waiter with the given error
 // and marks the client closed. Called from the lifecycle goroutine
 // after cmd.Wait returns AND from readPump on its way out (see the
-// note in readPump). Idempotent: the second call finds an empty
-// pending map and is effectively a no-op aside from the closed flag.
-// failPending aborts every registered waiter with the given error
-// and marks the client closed. Called from the lifecycle goroutine
-// after cmd.Wait returns AND from readPump on its way out (see the
-// note in readPump). Idempotent: the second call finds an empty
-// pending map and is effectively a no-op aside from the closed flag.
+// failPending aborts every registered waiter and marks the client
+// closed. Called from the lifecycle goroutine after cmd.Wait returns
+// AND from readPump on its way out (see the note in readPump).
+// Idempotent: the second call finds an empty pending map and is
+// effectively a no-op aside from the closed flag.
 func (c *rpcClient) failPending(err error) {
 	c.closed.Store(true)
 	c.pendingMu.Lock()

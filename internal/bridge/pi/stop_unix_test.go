@@ -56,6 +56,34 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// waitForTurnActive polls the driver until inFlightPromptID +
+// promptCancel are both set under turnMu, or the deadline
+// expires. Used to synchronize E2E tests with the moment
+// SendBlocks has registered its prompt — preferable to a fixed
+// sleep because it adapts to CI jitter and gives a deterministic
+// "parked" signal rather than guessing a worst-case latency.
+//
+// Returns the promptID so tests can correlate the parked id with
+// subsequent RPC log lines if they want.
+func waitForTurnActive(t *testing.T, d *driver, deadline time.Duration) string {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	var id string
+	for time.Now().Before(end) {
+		d.turnMu.Lock()
+		id = d.inFlightPromptID
+		active := d.turnActive
+		hasCancel := d.promptCancel != nil
+		d.turnMu.Unlock()
+		if id != "" && active && hasCancel {
+			return id
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("SendBlocks did not park on prompt RPC within %s; turnActive or promptCancel not set", deadline)
+	return ""
+}
+
 // mockControlFile is a tmpfile path the tests pass via
 // MOCK_PI_CONTROL_FILE so the running mock script can be told to
 // switch modes mid-test. Env vars are baked into the subprocess
@@ -181,11 +209,11 @@ func TestStop_FailsInFlightPromptRPC(t *testing.T) {
 		resultCh <- sendResult{err: err, d: time.Since(start)}
 	}()
 
-	// Give the bridge a moment to actually write the prompt RPC
-	// and enter the pending wait. Without this yield Stop might
-	// fire failResponse before the prompt id is registered,
-	// missing the regression entirely.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for SendBlocks to actually park on the prompt RPC.
+	// Polling is more robust than a fixed sleep — the prompt id
+	// is observable on the driver once turnMu is held.
+	d := driverOf(t, sess)
+	waitForTurnActive(t, d, 2*time.Second)
 
 	// Stop. With the fix, the hung prompt RPC's channel is
 	// closed and SendBlocks returns ErrSessionClosed within a
@@ -222,18 +250,22 @@ func TestStop_FailsInFlightPromptRPC(t *testing.T) {
 	}
 
 	// Driver state must be clean: turnActive=false and the
-	// in-flight id cleared, otherwise the next SendBlocks would
-	// ErrTurnBusy.
-	d := driverOf(t, sess)
+	// in-flight id + promptCancel cleared, otherwise the next
+	// SendBlocks would ErrTurnBusy or hang forever. (d was
+	// already bound from the pre-Stop poll.)
 	d.turnMu.Lock()
 	active := d.turnActive
 	pendingID := d.inFlightPromptID
+	cancelFn := d.promptCancel
 	d.turnMu.Unlock()
 	if active {
 		t.Errorf("turnActive still true after Stop; next SendBlocks would ErrTurnBusy (regression)")
 	}
 	if pendingID != "" {
 		t.Errorf("inFlightPromptID still %q after Stop; defer did not clear it", pendingID)
+	}
+	if cancelFn != nil {
+		t.Errorf("promptCancel still non-nil after Stop; defer did not clear it")
 	}
 }
 
@@ -259,7 +291,10 @@ func TestStop_AllowsNewPromptAfterAbort(t *testing.T) {
 			{Type: agent.ContentText, Text: "hung first"},
 		})
 	}()
-	time.Sleep(200 * time.Millisecond) // let the prompt id register
+	// Wait for the prompt to park (more reliable than a fixed
+	// sleep; the prompt id is visible once SendBlocks holds
+	// turnMu).
+	waitForTurnActive(t, driverOf(t, sess), 2*time.Second)
 
 	if err := sess.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -315,7 +350,7 @@ func TestStop_PiSilentAfterAbort_AllowsNewPrompt(t *testing.T) {
 			{Type: agent.ContentText, Text: "hung first"},
 		})
 	}()
-	time.Sleep(200 * time.Millisecond)
+	waitForTurnActive(t, driverOf(t, sess), 2*time.Second)
 
 	// Stop: mock answers abort (success) but emits NO
 	// agent_settled. failResponse must still unblock the hung
@@ -349,6 +384,109 @@ func TestStop_PiSilentAfterAbort_AllowsNewPrompt(t *testing.T) {
 }
 
 // ─── unit tests for the new primitives ──────────────────────────────
+
+// TestStop_NoInFlightPrompt covers the pendingID="" branch of Stop.
+// With no prompt parked in SendBlocks, Stop must not hang on the
+// poll loop's 5ms re-snapshot window or on the abort RPC; it
+// should return promptly after sending abort. This is the common
+// case in production (user hits /stop between turns).
+func TestStop_NoInFlightPrompt(t *testing.T) {
+	workspace := t.TempDir()
+	ctrl := newMockControlFile(t)
+	sess, cleanup := startMockBridge(t, workspace, ctrl)
+	defer cleanup()
+
+	start := time.Now()
+	if err := sess.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop with no in-flight prompt returned %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Errorf("Stop with no in-flight prompt took %s; should be < 1s", elapsed)
+	}
+
+	// Bridge is still healthy — a follow-up prompt must
+	// succeed normally.
+	ctrl.setMode(t, "all")
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "after no-op stop"},
+	}); err != nil {
+		t.Fatalf("SendBlocks after no-op Stop returned %v", err)
+	}
+	got := drainEventsUntilDone(t, sess, 3*time.Second)
+	if got.Done == nil || got.Done.Reason != "settled" {
+		t.Fatalf("post-no-op prompt: bad termination, events=%v", got.Kinds)
+	}
+}
+
+// TestStop_ConcurrentDoubleTap covers a /stop double-tap (or two
+// callers racing the same chat session). Both Stop calls snapshot
+// the same in-flight id and BOTH register abort RPCs with id
+// "abort-1". The second abort call would normally collide on the
+// pending map (key already present from the first call) and block
+// until handshakeTimeout. The fix tolerates this because the
+// second failResponse on the prompt id is a no-op (id already
+// failed), and the second abort RPC is harmless (pi sees two
+// abort commands, second is a no-op).
+//
+// Wire shape: abort-only so the prompt hangs and the abort RPC
+// returns success.
+func TestStop_ConcurrentDoubleTap(t *testing.T) {
+	workspace := t.TempDir()
+	ctrl := newMockControlFile(t)
+	sess, cleanup := startMockBridge(t, workspace, ctrl)
+	defer cleanup()
+
+	ctrl.setMode(t, "abort-only")
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- sess.SendBlocks(context.Background(), []agent.ContentBlock{
+			{Type: agent.ContentText, Text: "hung first"},
+		})
+	}()
+	waitForTurnActive(t, driverOf(t, sess), 2*time.Second)
+
+	// Two Stop calls fired in parallel — neither should hang
+	// past the 10s handshakeTimeout.
+	type stopResult struct {
+		err error
+		d   time.Duration
+	}
+	results := make(chan stopResult, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			start := time.Now()
+			err := sess.Stop(context.Background())
+			results <- stopResult{err: err, d: time.Since(start)}
+		}()
+	}
+
+	deadline := time.After(5 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				t.Errorf("Stop #%d returned %v after %s", i, r.err, r.d)
+			}
+			if r.d > 3*time.Second {
+				t.Errorf("Stop #%d took %s; concurrent Stops should not serialize", i, r.d)
+			}
+			t.Logf("Stop returned in %s", r.d)
+		case <-deadline:
+			t.Fatal("concurrent Stops did not both return within 5s")
+		}
+	}
+
+	// SendBlocks must still unblock.
+	select {
+	case err := <-firstErr:
+		if err == nil {
+			t.Errorf("SendBlocks returned nil after double-Stop; failResponse did not unblock it")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("SendBlocks did not unblock after double-Stop")
+	}
+}
 
 // TestFailResponse_TargetedClose is the unit test for the new
 // rpcClient.failResponse helper. failPending closes every pending

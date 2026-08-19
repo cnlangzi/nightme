@@ -1,6 +1,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"strings"
 	"sync"
@@ -150,7 +151,7 @@ func TestManager_ErrNoSelectedChatSessionMessage(t *testing.T) {
 // seedPersistedChatSession writes a minimal ChatSessionEntry to
 // the given store so RestoreFromRegistry has something to rebuild.
 // Used by the WithOnCreate regression tests below.
-func seedPersistedChatSession(t *testing.T, csFile *registry.ChatSessionFile, chatID, primary string) string {
+func seedPersistedChatSession(t *testing.T, csFile *chatstore.Store, chatID, primary string) string {
 	t.Helper()
 	csID := "cs_" + chatID
 	entry := &registry.ChatSessionEntry{
@@ -163,7 +164,7 @@ func seedPersistedChatSession(t *testing.T, csFile *registry.ChatSessionFile, ch
 		CreatedAt:         time.Now(),
 		LastInteractionAt: time.Now(),
 	}
-	if err := csFile.Upsert(entry); err != nil {
+	if err := csFile.Save(entry); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}
 	return csID

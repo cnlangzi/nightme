@@ -12,6 +12,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
 	"path/filepath"
@@ -22,7 +23,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // makeHintTestManager builds a Manager wired with both the
@@ -31,13 +31,13 @@ import (
 // persistence is exercised). Pass empty path to skip persistence
 // — useful for tests that don't care about cross-restart
 // behaviour.
-func makeHintTestManager(t *testing.T, storePath string) (*Manager, *testEmitter, *registry.ChatSessionFile) {
+func makeHintTestManager(t *testing.T, storePath string) (*Manager, *testEmitter, *chatstore.Store) {
 	t.Helper()
 	em := &testEmitter{}
 	mgr := NewManager().WithEmitter(em)
-	var csFile *registry.ChatSessionFile
+	var csFile *chatstore.Store
 	if storePath != "" {
-		f, err := registry.OpenChatSessionFile(storePath)
+		f, err := chatstore.New(storePath)
 		if err != nil {
 			t.Fatalf("OpenChatSessionFile(%q): %v", storePath, err)
 		}
@@ -100,7 +100,7 @@ func TestManager_FirstDrop_EmitsHint(t *testing.T) {
 
 	// Registry tombstone must be persisted. We don't assert on
 	// the file format — just that GetByChat reports the flag.
-	entry, ok := csFile.GetByChat("oc_hint")
+	entry, ok := csFile.Get("oc_hint")
 	if !ok {
 		t.Fatalf("registry has no entry for chat after hint")
 	}
@@ -171,7 +171,7 @@ func TestManager_HintPersistsAcrossRestart(t *testing.T) {
 
 	// Sanity: the on-disk entry still carries the flag (the
 	// hydration just mirrors what's on disk; both must agree).
-	entry, ok := csFile2.GetByChat("oc_restart")
+	entry, ok := csFile2.Get("oc_restart")
 	if !ok {
 		t.Fatalf("phase 2: reopened file has no entry for chat")
 	}
@@ -300,7 +300,7 @@ func TestManager_HintPersistsWithoutFullChatSession(t *testing.T) {
 		t.Fatalf("emitter Send calls = %d, want 1", got)
 	}
 
-	entry, ok := csFile.GetByChat("oc_brand_new")
+	entry, ok := csFile.Get("oc_brand_new")
 	if !ok {
 		t.Fatalf("registry has no entry for chat after hint")
 	}
@@ -387,7 +387,7 @@ func TestManager_HintDoesNotBumpLastInteractionAt(t *testing.T) {
 	// caller's in-memory clock resolution. Reading the entry
 	// bypasses any race between the SetWatchMode write and
 	// subsequent in-memory reads.
-	baselineEntry, ok := csFile.GetByChat("oc_idle")
+	baselineEntry, ok := csFile.Get("oc_idle")
 	if !ok {
 		t.Fatalf("baseline entry missing from registry")
 	}
@@ -413,7 +413,7 @@ func TestManager_HintDoesNotBumpLastInteractionAt(t *testing.T) {
 
 	// And the on-disk entry must agree — the persisted
 	// timestamp must match what was there before the hint.
-	entry, ok := csFile.GetByChat("oc_idle")
+	entry, ok := csFile.Get("oc_idle")
 	if !ok {
 		t.Fatalf("registry has no entry for chat after hint")
 	}
@@ -425,7 +425,7 @@ func TestManager_HintDoesNotBumpLastInteractionAt(t *testing.T) {
 
 // TestManager_HintSurvivesSetWatchMode: regression test for the
 // entryLocked tombstone-clobber bug. Before the fix, the hint
-// flag was persisted only via a direct csFile.Upsert in
+// flag was persisted only via a direct csFile.Save in
 // maybeEmitWatcherHint, but every other persist path
 // (SetWatchMode / SetThinkMode / SetToolsMode / SetSelectedCwd
 // / ClearSelectedCwd / QueueUserMessage) calls
@@ -478,7 +478,7 @@ func TestManager_HintSurvivesSetWatchMode(t *testing.T) {
 
 	// On-disk entry must also carry the flag. This is the
 	// assertion that pre-fix would have failed.
-	entry, ok := csFile.GetByChat("oc_clobber")
+	entry, ok := csFile.Get("oc_clobber")
 	if !ok {
 		t.Fatalf("after SetWatchMode: registry lost entry for chat")
 	}
@@ -545,7 +545,7 @@ func TestManager_HintSurvivesRestore(t *testing.T) {
 	}
 
 	// On-disk entry must also carry the flag.
-	entry, ok := csFile2.GetByChat("oc_restore")
+	entry, ok := csFile2.Get("oc_restore")
 	if !ok {
 		t.Fatalf("phase 2: on-disk entry missing")
 	}
@@ -590,7 +590,7 @@ func TestManager_HintRetriesOnSendFailure(t *testing.T) {
 	if cs.WatcherHintEmitted() {
 		t.Errorf("after Send failure: WatcherHintEmitted = true, want false (must not stamp on Send error)")
 	}
-	if entry, ok := csFile.GetByChat("oc_retry"); ok && entry.WatcherHintEmitted {
+	if entry, ok := csFile.Get("oc_retry"); ok && entry.WatcherHintEmitted {
 		t.Errorf("after Send failure: on-disk WatcherHintEmitted = true, want false")
 	}
 
@@ -619,7 +619,7 @@ func TestManager_HintRetriesOnSendFailure(t *testing.T) {
 		// though the user only sees the third one.
 		t.Errorf("Sent records = %d, want 3 (every Send call recorded, but only the third is user-visible)", got)
 	}
-	if entry, ok := csFile.GetByChat("oc_retry"); !ok || !entry.WatcherHintEmitted {
+	if entry, ok := csFile.Get("oc_retry"); !ok || !entry.WatcherHintEmitted {
 		t.Errorf("after Send recovery: on-disk WatcherHintEmitted = false, want true")
 	}
 

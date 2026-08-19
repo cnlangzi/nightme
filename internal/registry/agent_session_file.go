@@ -39,7 +39,7 @@ func OpenAgentSessionFile(path string) (*AgentSessionFile, error) {
 			AgentSessions map[string]*AgentSessionEntry `json:"agentSessions"`
 		}
 		if err := json.Unmarshal(data, &container); err != nil {
-			if backupErr := backupCorrupt(path, data); backupErr != nil {
+			if backupErr := BackupCorrupt(path, data); backupErr != nil {
 				return nil, fmt.Errorf("agent_sessions: corrupt %s and backup failed: %w", path, backupErr)
 			}
 			f.entries = make(map[string]*AgentSessionEntry)

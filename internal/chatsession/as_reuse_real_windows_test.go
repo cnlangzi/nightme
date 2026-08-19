@@ -19,6 +19,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"os"
 	"os/exec"
@@ -41,7 +42,7 @@ func TestAS_ReuseAcrossMessages_RealPi(t *testing.T) {
 	os.Setenv("NIGHTME_PI_DEBUG", "0")
 
 	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(dir + "/chat_sessions.json")
+	csFile, err := chatstore.New(dir + "/chat_sessions.json")
 	if err != nil {
 		t.Fatalf("OpenChatSessionFile: %v", err)
 	}

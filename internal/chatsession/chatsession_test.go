@@ -1,6 +1,7 @@
 package chatsession
 
 import (
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
 	"path/filepath"
@@ -251,8 +252,8 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	asPath := filepath.Join(dir, "agent_sessions.json")
 
 	// Write phase.
-	csFile, asFile, err := func() (*registry.ChatSessionFile, *registry.AgentSessionFile, error) {
-		csFile, err := registry.OpenChatSessionFile(csPath)
+	csFile, asFile, err := func() (*chatstore.Store, *registry.AgentSessionFile, error) {
+		csFile, err := chatstore.New(csPath)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -273,7 +274,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	cs.LookupSelectedAgentSession()
 
 	// Read phase: reload from disk.
-	csFile2, err := registry.OpenChatSessionFile(csPath)
+	csFile2, err := chatstore.New(csPath)
 	if err != nil {
 		t.Fatalf("reopen chat: %v", err)
 	}
@@ -282,7 +283,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		t.Fatalf("reopen agent: %v", err)
 	}
 
-	entry, ok := csFile2.GetByChat("oc_xxx")
+	entry, ok := csFile2.Get("oc_xxx")
 	if !ok {
 		t.Fatalf("ChatSessionEntry should be persisted by chatID")
 	}

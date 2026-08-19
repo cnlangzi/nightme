@@ -53,6 +53,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Linux needs GTK3 + AppIndicator dev headers for the
+      # systray CGo dependency. macOS / Windows runners ship
+      # Cocoa / Win32 by default; no extra step needed. The
+      # system-tray icon (cmd/nightme/tray.go) is the only
+      # piece of nightme that pulls CGo, so this install is
+      # the single new CI dependency for the tray rollout.
+      - name: Install systray build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+
       - name: Build
         shell: bash
         run: go build ./...
@@ -211,73 +224,6 @@ jobs:
           fi
           echo "OK: REPL banner + dispatch matrix all green on ${{ matrix.os }}"
 
-  # Cross-compile check. Runs on ubuntu-latest (cheapest runner)
-  # and cross-compiles to Windows + macOS to catch OS-conditional
-  # build breaks without paying for a Windows/macOS hosted
-  # runner on every PR.
-  #
-  # Why no tests: the test suite contains platform-specific files
-  # tagged with `//go:build !windows` (e.g. daemoncontrol tests for
-  # AF_UNIX sockets, Setpgid in claudecode agent_interrupt_unix_test.go)
-  # that intentionally don't compile on Windows. The actual Windows
-  # test run happens in the test-windows job above — a real
-  # windows-latest hosted runner that picks up the windows-tagged
-  # tests (`//go:build windows`) and skips the unix-tagged ones
-  # via the Go build system.
-  #
-  # Fail-fast gate: `test` runs first as the cheap linux/amd64
-  # signal — any regression there short-circuits the cross-compile
-  # runners entirely instead of burning 4 runner minutes in
-  # parallel with a failing test. The cross-compile matrix itself
-  # still runs in parallel after the gate (peak 4); `fail-fast:
-  # false` keeps all four targets reporting even when one breaks.
-  build:
-    needs: test
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - GOOS: windows
-            GOARCH: amd64
-            binary: nightme.exe
-          - GOOS: windows
-            GOARCH: arm64
-            binary: nightme.exe
-          - GOOS: darwin
-            GOARCH: amd64
-            binary: nightme
-          - GOOS: darwin
-            GOARCH: arm64
-            binary: nightme
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
-        env:
-          GOOS: ${{ matrix.target.GOOS }}
-          GOARCH: ${{ matrix.target.GOARCH }}
-          CGO_ENABLED: "0"
-        run: go build -o dist/${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}/${{ matrix.target.binary }} ./cmd/nightme
-
-      - name: Vet (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
-        env:
-          GOOS: ${{ matrix.target.GOOS }}
-          GOARCH: ${{ matrix.target.GOARCH }}
-        run: go vet ./...
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: nightme-${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}
-          path: dist/${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}/${{ matrix.target.binary }}
-          if-no-files-found: error
-
   # Per-agent install + bridge-spawn smoke gate. Runs on ubuntu +
   # windows + macos in parallel; each runner installs every npm-
   # distributed agent using each project's officially-supported
@@ -332,24 +278,30 @@ jobs:
   # and vice versa. Each runner's pass/fail is independent.
   #
   # Why this job sits at the END of the dependency chain (needs the
-  # three preceding jobs, not just `test`): starter detection is the
+  # single preceding job, `test`): starter detection is the
   # most expensive gate in the file (npm install × 5 agents × 3 OSes
   # + 5 spawn attempts × 8s observation each), so we want it to run
-  # only after every cheaper gate has gone green. The full chain is:
+  # only after the cheaper gate has gone green. The full chain is:
   #
-  #     test (linux build + race-tested coverage)
-  #       ├── test-windows    (windows build + tests)
-  #       ├── cross-compile   (4-target build matrix)
-  #       └── agent-smoke     (this job — npm install + spawn smoke
-  #                            on ubuntu + windows + macos)
+  #     test  (3-OS build + vet + tests; race + coverage on ubuntu)
+  #       └── agent-smoke  (this job — npm install + spawn smoke
+  #                         on ubuntu + windows + macos)
   #
-  # If any of the three predecessors is red, agent-smoke never
-  # starts — burning hosted runner minutes on npm install + 40s of
-  # spawn observation against a tree that already failed `go vet`
-  # would be wasted spend. Putting starter detection at the end of
-  # the chain is the cheap-first / expensive-last convention.
+  # If `test` is red, agent-smoke never starts — burning hosted
+  # runner minutes on npm install + 40s of spawn observation against
+  # a tree that already failed `go vet` would be wasted spend.
+  # Putting starter detection at the end of the chain is the
+  # cheap-first / expensive-last convention.
+  #
+  # Note: the cross-compile `build` job that used to live between
+  # `test` and this one was removed — `test` already builds on each
+  # of the three hosted runners (linux / windows / macos), and this
+  # job rebuilds on the same three runners before exercising the
+  # bridges. Cross-compile had no test coverage to add; it only
+  # surfaced `//go:build` mismatches that `go vet` in `test` would
+  # catch on the relevant native runner anyway.
   startup:
-    needs: [test, build]
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -379,6 +331,21 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
+
+      # Linux needs GTK3 + AppIndicator dev headers for the
+      # systray CGo dependency (the 'go build' step below
+      # links against -lgtk-3 / -layatana-appindicator3).
+      # Mirrors the same step in the 'test' job — both jobs
+      # run on ubuntu-latest and both call go build ./...
+      # (or its dist/nightme equivalent). macOS / Windows
+      # runners ship Cocoa / Win32 by default and need no
+      # extra install.
+      - name: Install systray build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
 
       - name: Build nightme
         shell: bash

@@ -122,7 +122,7 @@ func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec
 	var cmd *exec.Cmd
 	switch strings.ToLower(filepath.Ext(resolved)) {
 	case ".cmd", ".bat":
-		cmd = exec.CommandContext(ctx, comspecOrDefault(),
+		cmd = exec.CommandContext(ctx, ComSpecOrDefault(),
 			append([]string{"/d", "/c", resolved}, args...)...)
 	case ".ps1":
 		cmd = exec.CommandContext(ctx, "powershell.exe",
@@ -187,10 +187,16 @@ func applyHideWindow(cmd *exec.Cmd) {
 	cmd.SysProcAttr = HideWindow(cmd.SysProcAttr)
 }
 
-// comspecOrDefault returns %ComSpec% (set on every standard
+// ComSpecOrDefault returns %ComSpec% (set on every standard
 // Windows install) with an explicit fallback for the rare
-// case where the user cleared it.
-func comspecOrDefault() string {
+// case where the user cleared it. Exported because callers
+// outside the proc package (notably internal/tray/openrepl
+// which spawns a new console window for the REPL from the
+// tray) need the same resolution rule that the daemon
+// spawn recipe uses, and a hand-rolled copy in openrepl
+// would drift the moment either side changed its mind about
+// the fallback path.
+func ComSpecOrDefault() string {
 	if c := os.Getenv("ComSpec"); c != "" {
 		return c
 	}

@@ -9,9 +9,32 @@ permissions:
   contents: write
 
 jobs:
+  # 3-OS × 2-arch matrix. Each target builds on its own native
+  # hosted runner because the release pipeline now depends on
+  # platform-specific tooling that does not survive cross-compile
+  # from a single Linux runner:
+  #
+  #   - macOS: trayTemplate.icns needs sips + iconutil (macOS-only
+  #     Xcode CLT); systray uses Cocoa CGo
+  #   - Windows: rsrc_windows_*.syso needs go-winres (Windows-only
+  #     resource compiler); systray uses Win32 CGo
+  #   - Linux: systray needs libgtk-3-dev + libayatana-appindicator3-dev
+  #     (apt-only); CGo cross from non-Linux to Linux is fragile
+  #
+  # Cost: 6 native runner-minutes per release instead of 1 ubuntu
+  # runner doing 6 cross-compile. Acceptable because release runs
+  # only on tag push (low frequency) and a broken release is more
+  # expensive than the runner budget.
+  #
+  # macOS .app bundle: not shipped in the release. Users running
+  # macOS as a daemon host build it locally via
+  #   make build && make app-bundle && cp -R dist/NightMe.app /Applications/
+  # The bare `nightme` binary in the tar.gz is the right payload
+  # for `brew install` / `npm install -g` style packaging; .app is
+  # a GUI-only convenience that does not need to be in the archive.
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -19,23 +42,35 @@ jobs:
           # linux + darwin: tar.gz convention
           - goos: linux
             goarch: amd64
+            os: ubuntu-latest
             archive: tar.gz
+            binary: nightme
           - goos: linux
             goarch: arm64
+            os: ubuntu-latest
             archive: tar.gz
+            binary: nightme
           - goos: darwin
             goarch: amd64
+            os: macos-latest
             archive: tar.gz
+            binary: nightme
           - goos: darwin
             goarch: arm64
+            os: macos-latest
             archive: tar.gz
+            binary: nightme
           # windows: zip convention (users expect .zip for .exe)
           - goos: windows
             goarch: amd64
+            os: windows-latest
             archive: zip
+            binary: nightme.exe
           - goos: windows
             goarch: arm64
+            os: windows-latest
             archive: zip
+            binary: nightme.exe
     steps:
       - uses: actions/checkout@v5
 
@@ -44,64 +79,114 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Cross-compile on a single Linux runner — nightme is pure
-      # Go across all platforms (the daemoncontrol/server split
-      # into _unix / _windows files keeps the unix socket model
-      # out of the Windows path), so building for darwin and
-      # windows from linux is safe.
-      - name: Resolve version metadata
-        id: meta
+      # Linux needs GTK3 + AppIndicator dev headers for systray's
+      # CGo dependency. macOS / Windows runners ship Cocoa / Win32
+      # by default; no extra step needed.
+      - name: Install systray build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          # Strip leading 'v' from tag (v1.2.3 → 1.2.3) for archive names.
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
 
+      # Delegate to the canonical build entry points so the release
+      # binary is byte-for-byte what `make build` / `build.bat`
+      # produces locally:
+      #   - LDFLAGS: VERSION, GIT_COMMIT, BUILD_DATE baked in via
+      #     the Makefile (and the matching section in build.bat)
+      #   - Windows: go-winres injects logo.ico + manifest.xml as
+      #     cmd/nightme/rsrc_windows_*.syso (auto-linked)
+      #   - macOS: tray-assets generates trayTemplate.icns, and
+      #     app-bundle wraps bin/nightme into dist/NightMe.app
+      #   - Linux: tray-assets generates tray.png
+      # A bare `go build` here would silently drop every embed step
+      # and the release binary would have no icon, no manifest, and
+      # no version metadata — three independent regressions in one
+      # missing line. shell: bash so the same script works on all
+      # three runners (Git Bash is preinstalled on windows-latest).
       - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+        shell: bash
+        run: |
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ./build.bat
+          elif [ "${{ matrix.goos }}" = "darwin" ]; then
+            # macOS ships the .app bundle alongside the bare
+            # binary so Finder-installed users get the proper
+            # menu-bar icon without having to run `make
+            # app-bundle` themselves.
+            make build
+            make app-bundle
+          else
+            make build
+          fi
+
+      - name: Stage archive
+        id: meta
+        shell: bash
         run: |
           set -euo pipefail
-          BINARY="nightme"
-          if [ "$GOOS" = "windows" ]; then
-            BINARY="nightme.exe"
-          fi
-          STAGE="dist/stage/${GOOS}-${GOARCH}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="dist/stage/${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p "$STAGE"
-          go build -trimpath \
-            -ldflags "-s -w \
-              -X github.com/cnlangzi/nightme/internal/version.Version=${{ github.ref_name }} \
-              -X github.com/cnlangzi/nightme/internal/version.GitCommit=${{ steps.meta.outputs.short_sha }} \
-              -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -o "$STAGE/$BINARY" ./cmd/nightme
+          cp "bin/${{ matrix.binary }}" "$STAGE/${{ matrix.binary }}"
           cp LICENSE  "$STAGE/LICENSE"
           cp README.md "$STAGE/README.md"
+          # macOS: also stage the .app bundle so the tar.gz
+          # archive carries it. The dedicated .app-only zip is
+          # produced by the Archive step below.
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            if [ -d "dist/NightMe.app" ]; then
+              cp -R "dist/NightMe.app" "$STAGE/NightMe.app"
+            else
+              echo "::error::dist/NightMe.app missing after 'make app-bundle' (build step did not run app-bundle?)"
+              exit 1
+            fi
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Archive
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           ARCHIVE: ${{ matrix.archive }}
+        shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
           STAGE="dist/stage/${GOOS}-${GOARCH}"
           case "$ARCHIVE" in
             tar.gz)
-              tar -C "$STAGE" -czf \
-                "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
-                nightme LICENSE README.md
+              # macOS: include the .app bundle alongside the
+              # bare binary. Linux: just the binary.
+              if [ "${GOOS}" = "darwin" ]; then
+                tar -C "$STAGE" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                  ${{ matrix.binary }} NightMe.app LICENSE README.md
+              else
+                tar -C "$STAGE" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                  ${{ matrix.binary }} LICENSE README.md
+              fi
+              # macOS-only: a separate .app-only zip for
+              # Finder-native install. macOS users typically
+              # double-click the .zip in Safari → drag the
+              # extracted .app to /Applications. The
+              # tar.gz's embedded NightMe.app also works
+              # but requires the user to know to extract
+              # the .app; .zip is the discoverable path.
+              if [ "${GOOS}" = "darwin" ]; then
+                python3 -m zipfile -c \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}-app.zip" \
+                  "$STAGE/NightMe.app"
+              fi
               ;;
             zip)
-              # python3 is preinstalled on ubuntu-latest runners and
-              # avoids needing the `zip` apt package. Paths are
-              # workspace-root-relative (the step's cwd) so we don't
-              # need an inner cd that would shift the output path.
+              # python3 is preinstalled on the three hosted runners
+              # (Windows ships it as both `python` and `python3`).
+              # Using it avoids needing the `zip` apt package on
+              # Linux and PowerShell Compress-Archive on Windows.
               python3 -m zipfile -c \
                 "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.zip" \
-                "$STAGE/nightme.exe" \
+                "$STAGE/${{ matrix.binary }}" \
                 "$STAGE/LICENSE" \
                 "$STAGE/README.md"
               ;;
@@ -112,6 +197,14 @@ jobs:
         with:
           name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/nightme_*.${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload .app bundle (macOS only)
+        if: matrix.goos == 'darwin'
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}-app
+          path: dist/nightme_*-app.zip
           if-no-files-found: error
 
   release:

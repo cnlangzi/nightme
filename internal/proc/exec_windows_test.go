@@ -134,13 +134,13 @@ func TestNew_NoExtensionDirect(t *testing.T) {
 func TestComspecOrDefault(t *testing.T) {
 	t.Run("uses ComSpec when set", func(t *testing.T) {
 		t.Setenv("ComSpec", `C:\Custom\cmd.exe`)
-		if got := comspecOrDefault(); got != `C:\Custom\cmd.exe` {
+		if got := ComSpecOrDefault(); got != `C:\Custom\cmd.exe` {
 			t.Errorf("comspecOrDefault = %q; want %q", got, `C:\Custom\cmd.exe`)
 		}
 	})
 	t.Run("falls back when ComSpec is empty", func(t *testing.T) {
 		t.Setenv("ComSpec", "")
-		if got := comspecOrDefault(); got == "" {
+		if got := ComSpecOrDefault(); got == "" {
 			t.Errorf("comspecOrDefault returned empty string; expected fallback")
 		}
 	})

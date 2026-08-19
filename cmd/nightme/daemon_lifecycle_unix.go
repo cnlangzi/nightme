@@ -196,7 +196,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	return nil
 }
 
-func runDaemonChild(cmd *cobra.Command) (retErr error) {
+func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 	lockFD, err := strconv.Atoi(os.Getenv(daemonLockFDEnv))
 	if err != nil || lockFD < 3 {
 		return fmt.Errorf("%s must be launched by `nightme start` or `nightme restart`", daemonChildCommand)
@@ -282,7 +282,19 @@ func runDaemonChild(cmd *cobra.Command) (retErr error) {
 		server.SetHealthProvider(fn)
 	}
 	cmd.SetContext(withLogger(ctx, loggerFromContext(cmd.Context())))
-	err = runRunWith(cmd, deps)
+	// Threading model: the runtime is blocking, systray.Run is
+	// blocking on the same thread. We flip the model by running
+	// the runtime in a goroutine and letting runTrayOwning own
+	// the main thread. On macOS this is mandatory (Cocoa's
+	// NSApp must run on the main thread); on Linux/Windows it
+	// is a clean way to keep the two loops coupled.
+	err = runTrayOwning(cmd, deps, trayOptions{
+		reg:              reg,
+		channelName:      "multi", // v1.3+: every channel with valid creds auto-starts; tray's Status row shows this label
+		logger:           loggerFromContext(cmd.Context()),
+		onStopRequest:    onStopRequestDefault,
+		onRestartRequest: onRestartRequestDefault,
+	})
 	if err != nil && server.Status().State == "starting" {
 		writeBootstrap(bootstrapMessage{Error: err.Error()})
 	}

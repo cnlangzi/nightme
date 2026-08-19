@@ -296,14 +296,14 @@ func isDaemonChild(argv []string) bool {
 	return len(argv) > 1 && argv[1] == daemonChildCommand
 }
 
-func newDaemonCmd() *cobra.Command {
+func newDaemonCmd(reg *cmdRegistry) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    daemonChildCommand,
 		Short:  "Internal daemon process",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDaemonChild(cmd)
+			return runDaemonChild(cmd, reg)
 		},
 	}
 	return cmd

@@ -38,7 +38,10 @@ func TestNew_SetsSysProcAttrSetsid(t *testing.T) {
 // Tested as a pure function so it doesn't need osascript,
 // Terminal.app, or any of the Linux emulators installed.
 func TestBuildTerminalShellCommand(t *testing.T) {
-	const keepOpen = `; echo; read -p 'press enter to close'`
+	// Reuse the production keep-open constant so a future
+	// edit to keepOpenShellSuffix can't drift away from the
+	// pinned shell command in this test (and vice versa).
+	keepOpen := keepOpenShellSuffix
 
 	cases := []struct {
 		name string
@@ -153,13 +156,23 @@ func TestShellQuoteAndAppleScriptEscape(t *testing.T) {
 	// escapeAppleScriptString cases. The interesting ones
 	// are the literal double-quote (AppleScript would treat
 	// the inner `"` as the closing delimiter) and backslash
-	// (AppleScript treats `\` as an escape introducer).
+	// (AppleScript treats `\` as an escape introducer). The
+	// combined `"` + `\` case validates that the two
+	// ReplaceAll calls compose correctly — escape order
+	// matters (backslash first, otherwise we'd double-escape
+	// the backslashes introduced by the `"` pass).
 	asCases := []struct {
 		in, want string
 	}{
+		// Empty input must remain empty — protects against
+		// future regressions in empty-string handling.
+		{"", ""},
 		{"/usr/local/bin/nightme", "/usr/local/bin/nightme"},
 		{`/Users/x/"test"/nightme`, `/Users/x/\"test\"/nightme`},
 		{`/Users/test\foo/nightme`, `/Users/test\\foo/nightme`},
+		// Combined `"` + `\` in one path — the realistic
+		// worst case (a directory name with both).
+		{`/Users/x/"test\foo"/nightme`, `/Users/x/\"test\\foo\"/nightme`},
 		{`"`, `\"`},
 		{`\`, `\\`},
 	}

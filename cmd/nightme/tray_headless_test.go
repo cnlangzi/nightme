@@ -25,7 +25,7 @@ func TestIsHeadless_NonLinuxAlwaysFalse(t *testing.T) {
 //	------------------------------------------------------------
 //	empty             empty    empty            →  true
 //	"tty"             empty    empty            →  true
-//	"tty"             ":0"     empty            →  true (tty wins)
+//	"tty"             ":0"     empty            →  false (X-forwarding: trust DISPLAY)
 //	"unspecified"     empty    empty            →  true (unspecified != GUI)
 //	"x11"             empty    empty            →  false (trust session type)
 //	"wayland"         empty    empty            →  false (trust session type)
@@ -48,8 +48,10 @@ func TestIsHeadless_LinuxStrictRules(t *testing.T) {
 		want        bool
 	}{
 		{"all empty", "", "", "", true},
-		{"tty overrides empty", "tty", "", "", true},
-		{"tty overrides display", "tty", ":0", "", true},
+		{"tty with empty env", "tty", "", "", true},
+		// ssh -X forwarding: tty session but DISPLAY is set
+		// to the forwarded socket — must NOT be headless.
+		{"tty with forwarded display", "tty", ":0", "", false},
 		{"unspecified with empty vars", "unspecified", "", "", true},
 		{"x11 without display", "x11", "", "", false},
 		{"wayland without wayland_display", "wayland", "", "", false},

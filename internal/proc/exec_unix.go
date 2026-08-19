@@ -125,7 +125,8 @@ func OpenTerminal(ctx context.Context, name string, args ...string) error {
 // paths containing spaces).
 //
 // Keep-open suffix: the spawned shell command is suffixed with
-// `; echo; read -p 'press enter to close'`. Without this, any
+// `; echo ; printf 'press enter to close\n' ; read dummy` (see
+// keepOpenShellSuffix). Without this, any
 // subcommand that exits (nightme logs when the user Ctrl-Cs it,
 // nightme list, etc.) closes the Terminal window immediately,
 // taking any error output with it. The trailing `read` waits for
@@ -176,13 +177,36 @@ func openTerminalMac(ctx context.Context, args []string) error {
 	return nil
 }
 
+// keepOpenShellSuffix is the POSIX-compatible keep-open suffix
+// appended to the spawned shell command. Read together with the
+// command by `sh -c` (Linux) or the shell that Terminal.app
+// hands the string to (macOS):
+//
+//	<command> ; echo ; printf 'press enter to close\n' ; read dummy
+//
+// The trailing `read` blocks until the user presses Enter, so
+// the terminal window stays around long enough for the user to
+// read whatever output nightme produced (including error
+// messages) instead of vanishing the instant the command exits.
+//
+// `read -p` is a bash-ism; it isn't supported by dash (the
+// default /bin/sh on Debian / Ubuntu) or other minimal POSIX
+// shells. `printf '…\n'; read dummy` is the portable equivalent
+// — every shell implementing POSIX `read` accepts an unnamed
+// variable to read into. Windows uses `cmd /k` for the same
+// effect and doesn't touch this constant.
+//
+// Exposed at package scope so the keep-open pattern can't drift
+// between the helper that emits it and the tests that pin it.
+const keepOpenShellSuffix = `; echo ; printf 'press enter to close\n' ; read dummy`
+
 // buildTerminalShellCommand assembles the inner shell command
 // string that drives the spawned terminal window. exe is the
 // absolute path of the nightme binary (typically from
 // os.Executable()); args are the CLI subcommand arguments. The
-// result is wrapped in a `; echo; read -p 'press enter to close'`
-// suffix so the terminal stays open after nightme exits and the
-// user can read any error output.
+// result is wrapped in keepOpenShellSuffix so the terminal stays
+// open after nightme exits and the user can read any error
+// output.
 //
 // Each component is shell-quoted via shellQuote (single-quoted
 // with embedded ' escaped as '\”), so the result is shell-safe
@@ -202,7 +226,7 @@ func buildTerminalShellCommand(exe string, args []string) string {
 	for _, a := range args {
 		parts = append(parts, shellQuote(a))
 	}
-	return strings.Join(parts, " ") + `; echo; read -p 'press enter to close'`
+	return strings.Join(parts, " ") + keepOpenShellSuffix
 }
 
 // shellQuote wraps s in single quotes for safe inclusion in a
@@ -261,7 +285,7 @@ func appInstalled(appName string) bool {
 //     previous design passed the bare name `nightme` and
 //     relied on each emulator's default shell sourcing the
 //     user's profile — usually true, occasionally not.
-//   - Keep-open suffix: `; echo; read -p 'press enter to close'`
+//   - Keep-open suffix: `; echo ; printf 'press enter to close\n' ; read dummy`
 //     keeps the window around after nightme exits so the user
 //     can read any error output (see buildTerminalShellCommand).
 //

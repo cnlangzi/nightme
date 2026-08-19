@@ -60,6 +60,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -193,9 +194,19 @@ func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) e
 	// this defer.
 	defer func() {
 		if r := recover(); r != nil {
+			// debug.Stack preserves the goroutine's full
+			// stack at the panic site. systray/GTK/Wayland
+			// crashes are often CGo errors that surface
+			// as opaque panic values; the stack is the
+			// only signal telling us which native frame
+			// actually blew up. Includes all goroutines
+			// (debug.Stack docs), so any helper goroutine
+			// state is captured too.
+			stack := string(debug.Stack())
 			if opts.logger != nil {
 				opts.logger.Warn("system tray crashed; daemon continues without tray UI",
-					"panic", fmt.Sprint(r))
+					"panic", fmt.Sprint(r),
+					"stack", stack)
 			}
 			// systray.Run has returned (the panic reached
 			// this defer). Runtime is still alive in its

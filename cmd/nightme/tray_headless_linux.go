@@ -20,17 +20,28 @@
 // Rule (strict scheme — false positives only cost a tray icon,
 // false negatives make the daemon unstartable):
 //
-//   1. XDG_SESSION_TYPE == "tty"   — explicit "no GUI" signal
-//                                    from logind / systemd.
-//   2. DISPLAY and WAYLAND_DISPLAY both empty — the failing
-//                                    scenario this rule targets.
+//   - XDG_SESSION_TYPE ∈ {x11, wayland} → not headless. Trust
+//     the session manager: it claims a display exists. Some
+//     Wayland compositors do not propagate WAYLAND_DISPLAY into
+//     forked children, so trusting the session type is the safer
+//     call.
 //
-// XDG_SESSION_TYPE=x11 / wayland are treated as trust signals:
-// the session manager says a display exists, so we attempt the
-// tray even if the corresponding env var is missing. (Wayland
-// compositors vary; some don't export WAYLAND_DISPLAY into
-// forked children. Trusting XDG_SESSION_TYPE=wayland is the
-// safer call.)
+//   - Otherwise (XDG_SESSION_TYPE unset, "tty", "unspecified",
+//     "classic", "remote", …): not headless iff either DISPLAY
+//     or WAYLAND_DISPLAY is set. This covers:
+//
+//   - `ssh -X` / `ssh -Y`: XDG_SESSION_TYPE=tty but DISPLAY
+//     points to the forwarded socket — we MUST respect the
+//     user's intent to forward X, not disable the tray.
+//   - plain tty session with no display env: still treated as
+//     headless.
+//   - unset / unspecified session type with no env: still
+//     treated as headless.
+//
+// The previous version of this rule short-circuited on
+// XDG_SESSION_TYPE=tty alone, which incorrectly classified
+// ssh -X sessions as headless and silently disabled a tray the
+// user had explicitly asked for.
 
 package main
 
@@ -38,21 +49,15 @@ import "os"
 
 func isHeadless() bool {
 	switch os.Getenv("XDG_SESSION_TYPE") {
-	case "tty":
-		// Explicit "no GUI session" signal from logind /
-		// systemd — trust it over whatever DISPLAY might say.
-		return true
 	case "x11", "wayland":
-		// Session manager claims a display exists. Trust it:
-		// some Wayland compositors do not propagate
-		// WAYLAND_DISPLAY into forked children, so the env
-		// probe alone would (incorrectly) flag them headless.
+		// Session manager claims a display exists. Trust it
+		// (see comment above).
 		return false
 	}
-	// XDG_SESSION_TYPE unset, "unspecified", "classic",
-	// "remote", or anything else is not a positive "I have a
-	// display" signal. Fall through to the env-var probe —
-	// if both DISPLAY and WAYLAND_DISPLAY are empty the daemon
-	// has nothing to attach to.
+	// Anything else (unset / tty / unspecified / classic /
+	// remote / …): defer to the env-var probe. The daemon is
+	// headless only if no display env var is set — that
+	// covers plain tty sessions while still honouring
+	// X-forwarding where DISPLAY is explicitly set.
 	return os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
 }

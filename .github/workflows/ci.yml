@@ -332,6 +332,21 @@ jobs:
         with:
           node-version: '20'
 
+      # Linux needs GTK3 + AppIndicator dev headers for the
+      # systray CGo dependency (the 'go build' step below
+      # links against -lgtk-3 / -layatana-appindicator3).
+      # Mirrors the same step in the 'test' job — both jobs
+      # run on ubuntu-latest and both call go build ./...
+      # (or its dist/nightme equivalent). macOS / Windows
+      # runners ship Cocoa / Win32 by default and need no
+      # extra install.
+      - name: Install systray build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+
       - name: Build nightme
         shell: bash
         run: go build -o dist/nightme ./cmd/nightme

@@ -68,13 +68,20 @@ var trayPNG []byte
 // full multi-res .ico, systray wants this one).
 func IconWindows() []byte { return logoICO32 }
 
-// IconDarwin returns the macOS menu-bar template icon bytes
-// (alpha-only black mask, three sizes packed as a single
-// multi-resolution PNG via SetTemplateIcon's 3-arg form). The
-// caller passes them to systray.SetTemplateIcon(template1x,
-// template2x, template3x).
-func IconDarwin() (one, two, three []byte) {
-	return trayTemplatePNG, trayTemplatePNG2x, trayTemplatePNG3x
+// IconDarwin returns the (template, regular) icon bytes for
+// macOS. systray.SetTemplateIcon takes exactly two []byte:
+// the template (alpha-only mask that Cocoa auto-inverts for
+// dark menu bars) and the regular (a non-template fallback
+// used when the host does not honour the template flag).
+//
+// We pass a single 22x22 template; Cocoa scales it via NSImage
+// for HiDPI on its own (the @2x / @3x PNGs in the assets
+// directory are kept as dev-side regenerable sources but not
+// fed to systray — the API doesn't take multi-resolution
+// input). The regular fallback is the same 64x64 PNG we ship
+// for Linux; macOS scales it for the menu bar too.
+func IconDarwin() (template, regular []byte) {
+	return trayTemplatePNG, trayPNG
 }
 
 // IconLinux returns the Linux system-tray icon bytes (64x64 RGBA

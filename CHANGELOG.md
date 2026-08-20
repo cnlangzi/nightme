@@ -333,6 +333,143 @@ proof.
 - `internal/command/gtw/README.md`: no change (emoji + IM
   card conventions unchanged).
 
+### `gtw`: `/gtw fix` auto-bootstraps `nightme/*` labels (F-59)
+
+The `/gtw fix` ID-mode flow now bootstraps the six `nightme/*`
+state labels on the target repository before applying
+`nightme/wip`. Before F-59 the flow hard-coded the label set in
+`internal/command/gtw/types.go` (`LabelWIP` / `LabelReady` /
+`LabelReviewing` / `LabelRevise` / `LabelDone` / `LabelStuck`)
+and assumed they already existed on the repo. `gh issue edit
+--add-label` does not auto-create labels — it errors out with
+`'nightme/wip' not found` and `gh issue edit` exits 1. The
+fix flow then triggered the v1.x atomic rollback
+(worktree + branch removed), surfacing the underlying bootstrap
+gap as a confusing user-visible failure.
+
+Real trigger case: `/gtw fix 235` on `cnlangzi/nightme` —
+the repo had no `nightme/*` labels and the entire fix
+flow rolled back at the AddIssueLabel step despite
+worktree/branch/.gitignore all succeeding. F-59 makes the
+fix flow self-bootstrapping so this class of failure is
+impossible on a clean repo.
+
+**Interface change**
+
+- `internal/command/gtw.GitProvider`: added
+  `CreateLabel(ctx, owner, repo, name, color, description) error`.
+  Contract: idempotent — creates the label if missing, no-op if
+  it already exists. Color / description are **not** propagated
+  to existing labels (humans who hand-tuned a label don't get
+  silently overwritten on every `/gtw fix`).
+- `internal/command/gtw.GitHubProvider.CreateLabel`: runs
+  `gh label create <name> --color <color> --description
+  <description> --repo <owner>/<repo>` and treats exit 1 +
+  stderr containing `already exists` as success. The
+  `--force` flag was deliberately **not** passed: `--force`
+  would update the existing label's color / description,
+  contradicting the documented no-op-on-existing contract.
+  Code review on the first implementation caught this
+  contract violation; the fix mirrors the GitLab
+  implementation's stderr-sniff approach (F-59 review
+  feedback). Both platforms now implement the contract
+  identically.
+- `internal/command/gtw.GitLabProvider.CreateLabel`: runs
+  `glab label create --name <name> --color <color>
+  --description <description> --repo <owner>/<repo>`, treats
+  exit ≠ 0 + stderr containing `already exists` / `Already
+  exists` as success (glab 1.82 has no `--force` flag).
+
+**Flow change (`runFixRemote` §5.2)**
+
+The ID-mode flow gains a new step between WorktreeAdd and
+AddIssueLabel:
+
+```
+WorktreeAdd                         (existing, unchanged)
+EnsureGitignore + CommitGitignore   (existing, unchanged)
+ensureGtwLabels(provider, owner, repo)   (NEW)
+AddIssueLabel(LabelWIP)                  (existing, unchanged)
+WriteGTWYml                         (existing, unchanged)
+slot.Store(StateFixing)             (existing, unchanged)
+reply(success card)                 (existing, unchanged)
+dispatch issue to agent             (existing, unchanged)
+```
+
+`ensureGtwLabels` iterates `AllLabels` in order and calls
+`provider.CreateLabel` six times. The first error short-circuits
+the loop and triggers `rollbackLabelStep` (the new shared
+atomic-rollback helper). All 6 calls are serial (parallel is
+possible but ~300-500 ms total is acceptable; serial keeps
+error attribution simple).
+
+**Refactor: shared rollback helper**
+
+The pre-F-59 AddIssueLabel-failure block in `runFixRemote` had a
+~30-line three-state rollback (clean / partial / fully stuck)
+that was copy-pasted into the CreateLabel-failure path.
+F-59 extracts it to `rollbackLabelStep(ctx, deps, repoRoot,
+worktreePath, branch, issueID, head)` so the three-state
+branch lives in exactly one place. Future gtw flows that
+modify remote labels (`/gtw push` adding `nightme/reviewing`,
+`/gtw close` adding `nightme/done`, etc.) can reuse the same
+helper.
+
+**Atomic semantics preserved**
+
+The v1.x "fix is atomic with the label" contract
+(`WorktreeAdd` + `branch` + `LabelWIP` form a single
+transaction; any label-side failure rolls back the worktree
++ branch) is preserved end-to-end. Two existing
+integration tests cover the contract:
+
+- `TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch`
+  (pre-F-59): AddIssueLabel failure path through `rollbackLabelStep`.
+- `TestFixRemote_CreateLabelFailure_RollsBack` (new): bootstrap
+  failure mid-loop (fail on `AllLabels[1]` = `LabelReady`) —
+  pins that the loop short-circuits, AddIssueLabel is never called,
+  worktree + branch are removed, the reply echoes the
+  provider error verbatim.
+
+**Tests**
+
+- `TestFixRemote_HappyPath` (extended): asserts CreateLabel
+  is called exactly 6 times, in `AllLabels` order, with
+  `LabelMetaFor(name)` color/description, all BEFORE AddIssueLabel
+  in the chronological call slice.
+- `TestFixRemote_CreateLabelFailure_RollsBack` (new): per-name
+  error injection on `AllLabels[1]`; asserts loop short-circuit,
+  atomic rollback, and reply content.
+- `fakeGitProvider` (extended): `CreateLabel` implementation +
+  `SetCreateLabelErr` + `SetCreateLabelErrFor(name, err)` per-name
+  injection; `fakeProviderCall` struct gains `Color` /
+  `Description` fields.
+- `provider_create_label_test.go` (new): stub-CLI runner tests
+  for both `GitHubProvider.CreateLabel` and
+  `GitLabProvider.CreateLabel`. Pins the exact argv built by
+  each implementation — explicitly asserts `--force` is **not**
+  passed to `gh`. The contract-violation caught in F-59 code
+  review (first implementation used `--force` and would overwrite
+  human-tuned labels) is now a regression test.
+
+**Docs**
+
+- [`docs/feat/F-59-gtw-label-bootstrap.md`](docs/feat/F-59-gtw-label-bootstrap.md):
+  full design + bootstrap algorithm + atomic-rollback contract +
+  error-handling matrix + decision records (why no
+  pre-`WorktreeAdd` bootstrap; why no `gh label list` pre-check).
+- [`docs/feat/F-gtw.md` §A3](./docs/feat/F-gtw.md): short
+  summary pointing to F-59.
+- `internal/command/gtw/README.md`: no change (IM card format
+  unchanged — the failure card text differs by one phrase
+  only).
+
+**Bug-fix scope**
+
+This entry fixes a regression surfaced by #235 but does **not**
+address the underlying push-readiness bug #235 reports. That
+remains a separate work item.
+
 ### `gtw`: split `/gtw push` into `/gtw commit` + `/gtw push` (F-XX)
 
 The combined `/gtw push` (which both committed via a one-shot
@@ -518,7 +655,7 @@ body (fenced markdown block), and then calls `gh pr create` or
 through the same dispatch code path via the unified
 `GitProvider.CreatePR` interface (added to provider.go; both
 implementations live next to the existing `GetIssue` /
-`AddLabel` / `RemoveLabel` methods).
+`AddIssueLabel` / `RemoveIssueLabel` methods).
 
 - **Head unpushed check**: refuses when `rev-list @{u}..HEAD > 0`
   and points the user at `/gtw push first`. No silent push.

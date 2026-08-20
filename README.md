@@ -261,7 +261,8 @@ Three subcommands chain into a complete **local multi-branch development workflo
    You keep chatting in your main chat.
 
    For the GitHub / GitLab flow, use `/gtw fix <issue-id>` to
-   pin the worktree to a remote issue.
+   pin the worktree to a remote issue. First-time use on a new
+   repo just works — no setup needed.
 
 2. **hooks fire automatically** — the dev environment rebuilds
    itself in the new worktree. CodeGraph re-indexes, `npm install`

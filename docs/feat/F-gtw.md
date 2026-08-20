@@ -1178,3 +1178,21 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 
 ---
 
+
+---
+
+## A3. F-59: `/gtw fix` 自动 bootstrap `nightme/*` 标签
+
+> **Source**: [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)
+>
+> **Issue**: #235（`/gtw push` readiness bug —— 触发本次重构的载体
+> case：第一次在 `cnlangzi/nightme` 跑 `/gtw fix 235` 撞到了
+> `'nightme/wip' not found`）
+>
+> **改动摘要**：`GitProvider` 接口加 `CreateLabel` 方法；
+> `runFixRemote` §5.2 在 `WorktreeAdd` 之后、`AddIssueLabel` 之前
+> 串行 bootstrap 6 个 `nightme/*` 标签；AddIssueLabel / CreateLabel
+> 失败的回滚逻辑抽成 `rollbackLabelStep` helper 集中维护。
+
+详细设计、错误处理矩阵、决策记录、不在范围内的 followups
+见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。

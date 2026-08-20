@@ -1047,7 +1047,7 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 - `rootID != "" && replyInThread == false` → `ReplyInBoth`（reply 端点 + 字段省略；不能简化成 `.ReplyInThread(replyInThread)`，否则 false 路径多 28 字节破坏 pre-F-37 idempotency cache — 由 `ReplyInBoth` 不调 `.ReplyInThread(...)` 保证）
 
 **Channel-side emoji 装饰（F-44 revert #2 引入的视觉模式）**：
-- `OutReply` rolling-log 内每条 entry 前缀 💬（`buildReceiptCard` 渲染时附加）
+- `OutReply` rolling-log 内每条 entry 无 icon 前缀（OutReply 是流延续，非新条目；`buildReceiptCard` 不附加 emoji）
 - `OutThinking` thread 抽屉内每条 body 前缀 💭（`postThreadMarkdownReply` 在 caller 附加）
 - `OutCompaction` 主 chat 内 "✶ Compacting…"（adapter.go 硬编码）
 - `OutTask*` receipt card 内 "📋 Tasks" markdown header（`buildTaskChecklistChunks` 附加）

@@ -3,9 +3,9 @@
 //
 // Post-F-44 the receipt card carries two sections:
 //
-//	💬 chunk 1   ⬅ F-44 revert: OutReply folds into the rolling log
-//	💬 chunk 2   ⬅   (each entry split into 1+ div elements)
-//	💬 chunk 3
+//	chunk 1   ⬅ F-44 revert: OutReply folds into the rolling log
+//	chunk 2   ⬅   (each entry split into 1+ div elements)
+//	chunk 3   (OutReply entries carry no icon prefix — stream continuation, not a new entry)
 //	📋 Tasks     ⬅ F-38: agent task checklist (F-44 simplified
 //	  - [ ] Subject       surface — no header / footer / evicted
 //	  - [x] Subject       marker, just the two sections above)

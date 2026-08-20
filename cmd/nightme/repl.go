@@ -131,6 +131,14 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 	// silently. Outdated → Update now? [y/N] then download then
 	// Install now? [y/N], all via plain stdin/stdout. Then we
 	// construct the readline shell.
+	//
+	// The styled prompt path mutates the host console mode
+	// (saveAndEnableVT turns on ENABLE_VIRTUAL_TERMINAL_PROCESSING
+	// so paintYellow / paintCyan emit real ANSI). We restore
+	// the original mode before constructing the readline shell
+	// — readline reads the parent console mode at ConPTY /
+	// raw-mode setup time and a VT-on console left over from
+	// the prompt phase was the root cause of the REPL hang.
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		ctx := context.Background()
 		logf := func(format string, args ...any) {
@@ -140,6 +148,8 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 		}
 		checker, _ := version.DefaultChecker(resolveDataDir())
 		res := checkWithCountdown(ctx, os.Stdout, checker, version.Version, logf)
+
+		savedMode, vtOK := saveAndEnableVT(os.Stdout)
 		_ = promptForUpdateIfOutdated(ctx, &PromptDeps{
 			VersionCheck:       &res,
 			Out:                os.Stdout,
@@ -147,6 +157,9 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 			Logger:             logger,
 			ReExecAfterInstall: true,
 		})
+		if vtOK {
+			restoreConsoleMode(os.Stdout, savedMode)
+		}
 	}
 
 	rl := readline.NewShell()

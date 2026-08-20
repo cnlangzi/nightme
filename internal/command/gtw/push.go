@@ -245,6 +245,28 @@ func unpushedIsZero(ctx context.Context, deps HandlerDeps, c Context) (bool, err
 	return n == 0, nil
 }
 
+// isBenignNoUpstream reports whether stderr is one of git's
+// "no upstream" error shapes that countUnpushed /
+// listUnpushedCommits treat as a benign "0 unpushed" answer rather
+// than a real failure:
+//
+//   - "no upstream configured" — branch.<name>.merge is unset.
+//   - "not stored as a remote-tracking branch" — merge IS set but
+//     the remote-tracking ref is missing (ghost upstream; older
+//     git).
+//
+// Centralised so the two call sites can't drift. See
+// countUnpushed's doc for why this is defensive hardening rather
+// than the primary fix for the ghost-upstream case (that lives at
+// the readiness gate: parseBranchHeader flags `[gone]` →
+// HasNothingToPush returns false → dispatchPush pushes, and
+// `git push -u` materialises the tracking ref so @{u} resolves
+// cleanly by the time this verify runs).
+func isBenignNoUpstream(stderr string) bool {
+	return strings.Contains(stderr, "no upstream configured") ||
+		strings.Contains(stderr, "not stored as a remote-tracking branch")
+}
+
 // countUnpushed returns the count of commits on the named branch
 // that have no upstream counterpart.
 //
@@ -275,10 +297,32 @@ func countUnpushed(ctx context.Context, worktree, branch string, deps HandlerDep
 		}
 		return n, nil
 	}
-	// git emits "fatal: no upstream configured for branch '<name>'"
-	// on stderr when @{u} is unset; that's our "0 unpushed" signal.
-	// Any other stderr is a real git error and must propagate.
-	if strings.Contains(stderr, "no upstream configured") {
+	// git emits distinct "no upstream" errors on stderr when
+	// `branch@{u}` can't resolve; both are benign "0 unpushed"
+	// signals (see isBenignNoUpstream), not real failures:
+	//
+	//   fatal: no upstream configured for branch '<name>'
+	//     branch.<name>.merge is unset (first push of a fresh
+	//     branch).
+	//
+	//   fatal: upstream branch 'refs/heads/<name>' not stored as
+	//   a remote-tracking branch
+	//     branch.<name>.merge IS set ("ghost upstream") but
+	//     refs/remotes/origin/<name> is missing.
+	//
+	// NOTE: this is DEFENSIVE hardening only. The primary fix for
+	// the ghost-upstream case lives at the readiness gate:
+	// parseBranchHeader flags the `[gone]` porcelain token →
+	// HasNothingToPush returns false → dispatchPush pushes, and
+	// `git push -u origin <branch>` materialises the tracking ref,
+	// so by the time this verify runs @{u} resolves cleanly. This
+	// match is belt-and-suspenders for older git versions (whose
+	// rev-list emits "not stored" rather than the modern "ambiguous
+	// argument … unknown revision") and narrow races that still
+	// reach rev-list with the ghost error. Real failures (corrupt
+	// worktree, permission denied, …) match neither string and
+	// propagate below.
+	if isBenignNoUpstream(stderr) {
 		return 0, nil
 	}
 	return 0, fmt.Errorf("count unpushed commits: %w (stderr: %s)", err, strings.TrimSpace(stderr))
@@ -292,8 +336,9 @@ func countUnpushed(ctx context.Context, worktree, branch string, deps HandlerDep
 func listUnpushedCommits(ctx context.Context, worktree, branch string, deps HandlerDeps) ([]string, error) {
 	out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--oneline", branch+"@{u}.."+branch)
 	if err != nil {
-		// Same "no upstream" → empty list semantics as countUnpushed.
-		if strings.Contains(stderr, "no upstream configured") {
+		// Same benign "no upstream" → empty-list semantics as
+		// countUnpushed (see isBenignNoUpstream).
+		if isBenignNoUpstream(stderr) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("list unpushed commits: %w (stderr: %s)", err, strings.TrimSpace(stderr))

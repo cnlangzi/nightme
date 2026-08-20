@@ -54,7 +54,17 @@ type GitStatusSnapshot struct {
 	AheadOfRemote int
 	BehindRemote  int
 	HasUpstream   bool
-	HasConflicts  bool
+	// UpstreamGone is true when the branch has an upstream configured
+	// (HasUpstream=true, so `git status` prints "## b...origin/b [gone]")
+	// but refs/remotes/origin/<branch> no longer exists locally — the
+	// remote branch was deleted (and pruned), a `git push -u` was
+	// rejected but still wrote branch.<name>.merge, or a manual
+	// `git branch --set-upstream-to=origin/<b>` ran without a fetch.
+	// git cannot compute AheadOfRemote in this state, so it reports
+	// [gone] with ahead=0; see HasNothingToPush for why this flag must
+	// short-circuit that predicate to false.
+	UpstreamGone bool
+	HasConflicts bool
 }
 
 // PR is the abstract cross-platform handle for a single Pull
@@ -130,7 +140,16 @@ func (s *GitStatusSnapshot) WorkingTreeIsClean() bool {
 //
 //   - the working tree is fully committed (WorkingTreeIsClean), AND
 //   - the branch exists on origin (HasUpstreamBranch), AND
-//   - local is at upstream tip (AheadOfRemote == 0)
+//   - local is at upstream tip (AheadOfRemote == 0), AND
+//   - the upstream is NOT gone (issue #235: a "ghost upstream" —
+//     branch.<name>.merge configured but refs/remotes/origin/<name>
+//     missing — makes `git status --porcelain --branch` emit
+//     `## branch...origin/branch [gone]`, which parseBranchHeader reads
+//     as HasUpstream=true, ahead=0. Without the UpstreamGone guard this
+//     predicate would wrongly bail with "nothing to push" and strand
+//     genuinely-unpushed commits; the push must instead proceed so
+//     `git push -u origin <branch>` re-publishes the branch and
+//     materialises the tracking ref.)
 //
 // Note that "no upstream at all" deliberately returns FALSE — a branch
 // that has never been pushed is exactly the case /gtw push needs to handle
@@ -139,7 +158,8 @@ func (s *GitStatusSnapshot) WorkingTreeIsClean() bool {
 func (s *GitStatusSnapshot) HasNothingToPush() bool {
 	return s.WorkingTreeIsClean() &&
 		s.HasUpstreamBranch() &&
-		s.AheadOfRemote == 0
+		s.AheadOfRemote == 0 &&
+		!s.UpstreamGone
 }
 
 // PushBlockReason returns the single hard-refuse reason for /gtw push, or

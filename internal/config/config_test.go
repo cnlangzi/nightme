@@ -85,8 +85,14 @@ func TestDefaults(t *testing.T) {
 	if cfg.Session.OutputFlushIntervalMs != 200 {
 		t.Errorf("default Session.OutputFlushIntervalMs = %d, want 200", cfg.Session.OutputFlushIntervalMs)
 	}
-	if cfg.Logging.Level != "info" {
-		t.Errorf("default Logging.Level = %q, want info", cfg.Logging.Level)
+	// Logging.Level is intentionally left empty when unset so
+	// internal/logging.levelFor can apply the WARN default.
+	// Loading config must not override that — otherwise the
+	// interactive REPL / tray would leak INFO chatter despite
+	// the logger's own default. Tests for the WARN default
+	// live in internal/logging.
+	if cfg.Logging.Level != "" {
+		t.Errorf("default Logging.Level = %q, want \"\" (resolved by logging package)", cfg.Logging.Level)
 	}
 
 	// DataDir should have ~ expanded to the real home directory.

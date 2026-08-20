@@ -115,7 +115,7 @@ func TestBuildTerminalShellCommand(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildTerminalShellCommand(tc.exe, tc.args)
+			got := buildTerminalShellCommand(tc.exe, tc.args, keepOpen)
 			if got != tc.want {
 				t.Errorf("buildTerminalShellCommand(%q, %v):\n  got  = %q\n  want = %q",
 					tc.exe, tc.args, got, tc.want)

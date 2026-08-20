@@ -154,7 +154,7 @@ func openTerminalMac(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cmdStr := escapeAppleScriptString(buildTerminalShellCommand(exe, args))
+	cmdStr := escapeAppleScriptString(buildTerminalShellCommand(exe, args, ""))
 
 	// Terminal.app only. See function doc for why iTerm2 is
 	// intentionally not tried. Three things have to happen for
@@ -195,24 +195,28 @@ end tell`
 	return nil
 }
 
-// keepOpenShellSuffix is the POSIX-compatible keep-open suffix
-// appended to the spawned shell command. Read together with the
-// command by `sh -c` (Linux) or the shell that Terminal.app
-// hands the string to (macOS):
+// keepOpenShellSuffix is the POSIX keep-open suffix appended
+// to the spawned shell command on Linux. The trailing `read`
+// blocks until the user presses Enter, so the terminal window
+// stays around long enough for the user to read whatever
+// output nightme produced (including error messages) instead
+// of vanishing the instant the command exits.
 //
-//	<command> ; echo ; printf 'press enter to close\n' ; read dummy
-//
-// The trailing `read` blocks until the user presses Enter, so
-// the terminal window stays around long enough for the user to
-// read whatever output nightme produced (including error
-// messages) instead of vanishing the instant the command exits.
+// On Linux this is necessary because most terminal emulators
+// (gnome-terminal, konsole, xterm, …) close the window when
+// the spawned shell exits. On macOS Terminal.app's
+// `do script` already leaves the new window / tab open after
+// the spawned shell exits (the shell session persists and
+// returns to its prompt), so this suffix is unnecessary
+// there and only adds a `press enter to close` noise line to
+// every tray-spawned terminal. macOS therefore omits the suffix
+// at build time (see buildTerminalShellCommand).
 //
 // `read -p` is a bash-ism; it isn't supported by dash (the
 // default /bin/sh on Debian / Ubuntu) or other minimal POSIX
 // shells. `printf '…\n'; read dummy` is the portable equivalent
 // — every shell implementing POSIX `read` accepts an unnamed
-// variable to read into. Windows uses `cmd /k` for the same
-// effect and doesn't touch this constant.
+// variable to read into.
 //
 // Exposed at package scope so the keep-open pattern can't drift
 // between the helper that emits it and the tests that pin it.
@@ -238,13 +242,36 @@ const keepOpenShellSuffix = `; echo ; printf 'press enter to close\n' ; read dum
 //
 // Exposed at package scope so it can be unit-tested without
 // invoking osascript / Terminal.app / gnome-terminal.
-func buildTerminalShellCommand(exe string, args []string) string {
+// buildTerminalShellCommand assembles the inner shell command
+// string that drives the spawned terminal window. exe is the
+// absolute path of the nightme binary (typically from
+// os.Executable()); args are the CLI subcommand arguments.
+//
+// suffix is appended verbatim after a single space — the
+// default is keepOpenShellSuffix, which most terminal
+// emulators on Linux need to keep their window open. macOS
+// passes the empty string because Terminal.app's
+// `do script` already keeps the window open after the shell
+// exits.
+//
+// Each component is shell-quoted via shellQuote (single-quoted
+// with embedded ' escaped as '\”), so the result is shell-safe
+// regardless of the contents of exe or args — spaces, quotes,
+// backslashes, and other metacharacters. The suffix itself
+// uses single quotes too: a non-login shell (the default on
+// both macOS and fresh Linux DE sessions) treats single-quoted
+// strings literally. macOS AppleScript layers add another
+// quoting layer; see escapeAppleScriptString for that side.
+//
+// Exposed at package scope so it can be unit-tested without
+// invoking osascript / Terminal.app / gnome-terminal.
+func buildTerminalShellCommand(exe string, args []string, suffix string) string {
 	parts := make([]string, 0, len(args)+1)
 	parts = append(parts, shellQuote(exe))
 	for _, a := range args {
 		parts = append(parts, shellQuote(a))
 	}
-	return strings.Join(parts, " ") + keepOpenShellSuffix
+	return strings.Join(parts, " ") + suffix
 }
 
 // shellQuote wraps s in single quotes for safe inclusion in a
@@ -306,7 +333,7 @@ func openTerminalLinux(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	shellCmd := buildTerminalShellCommand(exe, args)
+	shellCmd := buildTerminalShellCommand(exe, args, keepOpenShellSuffix)
 
 	// Each probe lists the emulator binary plus its "run a
 	// command" prefix (some want --, some want -e, some want

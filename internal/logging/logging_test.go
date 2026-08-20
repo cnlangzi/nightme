@@ -16,7 +16,7 @@ import (
 func TestLogger_WritesToFile(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "sub", "nightme.log")
-	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: logPath}})
+	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: logPath, Level: "info"}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestLogger_FilePermissions(t *testing.T) {
 
 func TestLogger_Format(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nightme.log")
-	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: path}})
+	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: path, Level: "info"}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestLogger_TeesToStdoutAndStderr(t *testing.T) {
 		_ = wErr.Close()
 	})
 
-	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: logPath}})
+	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: logPath, Level: "info"}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -179,7 +179,11 @@ func TestLogger_TeesToStdoutAndStderr(t *testing.T) {
 }
 
 func TestLogger_LevelParsing(t *testing.T) {
-	cases := map[string]string{"": "INFO", "debug": "DEBUG", "info": "INFO", "warn": "WARN", "error": "ERROR", "TRACE": "INFO"}
+	// Default is WARN now (not INFO) — see levelFor doc. Unknown
+	// / empty / unrecognised values fall through to the default
+	// rather than to INFO, so an interactive surface (REPL, tray)
+	// doesn't leak INFO chatter by default.
+	cases := map[string]string{"": "WARN", "debug": "DEBUG", "info": "INFO", "warn": "WARN", "error": "ERROR", "TRACE": "WARN"}
 	for input, want := range cases {
 		if got := levelFor(input).String(); got != want {
 			t.Errorf("levelFor(%q) = %s, want %s", input, got, want)
@@ -222,7 +226,7 @@ func TestNewQuiet_FileOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = Close(lg) })
 
-	lg.Info("quiet-me", "kind", "file-only")
+	lg.Warn("quiet-me", "kind", "file-only")
 
 	_ = wOut.Close()
 	_ = wErr.Close()

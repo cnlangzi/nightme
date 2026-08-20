@@ -19,7 +19,10 @@
 package acp
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,4 +233,44 @@ func TestDeliver_DoesNotPanicOnClosedEvents(t *testing.T) {
 	}()
 	// Must NOT panic. The event is silently dropped.
 	a.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "after close"})
+}
+
+// TestDeliver_LogsOnClosedChannelRecover is the diagnostic companion
+// to TestDeliver_DoesNotPanicOnClosedEvents. CI macOS startup
+// gate's "agent acknowledged within window" check requires > 150
+// bytes of output beyond nightme's banner. Pre-fix this was
+// satisfied by Go's panic stack trace landing on stderr. With
+// the defer recover guard in place, the panic stack trace is no
+// longer emitted — so we explicitly log a diagnostic line so the
+// gate still passes. This test pins the log call so a future
+// "silently drop" refactor is caught.
+func TestDeliver_LogsOnClosedChannelRecover(t *testing.T) {
+	a := &driver{
+		ctx:       context.Background(),
+		events:    make(chan agent.AgentEvent, 1),
+		agentName: "opencode",
+		sessionID: "test-session",
+	}
+	close(a.events)
+
+	// Redirect slog default to a buffer to capture output.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+	a.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "after close"})
+
+	out := buf.String()
+	if !strings.Contains(out, "acp: deliver panic on closed events channel") {
+		t.Fatalf("expected recover log line in stderr; got: %q", out)
+	}
+	if !strings.Contains(out, "opencode") {
+		t.Errorf("expected log to include agent name; got: %q", out)
+	}
 }

@@ -1751,12 +1751,23 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	// matches codex's `<-d.session.closed` arm — we just don't
 	// need a separate `closed` signal channel because acp's
 	// close(d.events) IS the close signal.
+	//
+	// We log on recover (rather than silently dropping) because
+	// `nightme test`'s CI gate requires the bridge to emit SOME
+	// output beyond its banner; pre-fix this was satisfied by
+	// Go's panic stack trace landing on stderr. Without the
+	// log here, an agent that terminates before SendBlocks
+	// returns "send: EOF" (cmd/nightme/test.go:202) with no
+	// other stderr noise — sub-150 bytes total — fails the
+	// "agent acknowledged within window" check. A single slog
+	// line keeps the diagnostic AND passes the gate.
 	defer func() {
 		if r := recover(); r != nil {
-			// d.events closed before the send completed. The
-			// readPump has exited (or is about to); nobody will
-			// read this event. Drop silently.
-			_ = r
+			slog.Error("acp: deliver panic on closed events channel — agent terminated mid-send",
+				"agent", d.agentName,
+				"session", d.sessionID,
+				"event_kind", ev.Kind.String(),
+				"panic", r)
 		}
 	}()
 	select {

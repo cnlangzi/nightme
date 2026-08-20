@@ -219,3 +219,77 @@ func TestReadLine_StripsNewline(t *testing.T) {
 		t.Errorf("got %q, want hello", got)
 	}
 }
+
+func TestConfigNameMenu_Set(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
+
+	seed := &config.Config{Primary: "claude"}
+	if err := config.Save(seed, cfgPath); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, _ := config.Load(cfgPath)
+
+	var buf bytes.Buffer
+	in := strings.NewReader("my-laptop\n")
+	if err := configNameMenu(cfg, in, &buf); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	cfg2, _ := config.Load(cfgPath)
+	if cfg2.Name != "my-laptop" {
+		t.Errorf("Name = %q, want my-laptop", cfg2.Name)
+	}
+	if !strings.Contains(buf.String(), "Name set to") {
+		t.Errorf("output missing confirmation: %s", buf.String())
+	}
+}
+
+func TestConfigNameMenu_EmptyKeepsCurrent(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
+
+	seed := &config.Config{Primary: "claude", Name: "existing"}
+	if err := config.Save(seed, cfgPath); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg, _ := config.Load(cfgPath)
+
+	var buf bytes.Buffer
+	in := strings.NewReader("\n")
+	if err := configNameMenu(cfg, in, &buf); err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+
+	cfg2, _ := config.Load(cfgPath)
+	if cfg2.Name != "existing" {
+		t.Errorf("Name = %q after empty input, want existing", cfg2.Name)
+	}
+	if !strings.Contains(buf.String(), "No changes") {
+		t.Errorf("output missing no-change message: %s", buf.String())
+	}
+}
+
+func TestConfigNameMenu_RequiresExistingConfig(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
+
+	// No config file on disk.
+	cfg := &config.Config{Primary: "claude"}
+
+	var buf bytes.Buffer
+	in := strings.NewReader("new-name\n")
+	err := configNameMenu(cfg, in, &buf)
+	if err == nil {
+		t.Fatal("expected error when config file missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "no config file") {
+		t.Errorf("error %q should mention missing config file", err.Error())
+	}
+}

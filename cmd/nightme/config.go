@@ -4,12 +4,14 @@
 // minimal and explicit; for non-trivial choices (e.g. "which agent
 // should be primary?"), interactive mode is the recommended path.
 //
-// Current submenu: only "Agents" (per Devin 2026-08-02). Other
-// sections (feishu / session / logging / paths) deferred to F-XX.
+// Current submenus: Name (show/set instance name) and Agents
+// (pick primary agent). Other sections (feishu / session / logging
+// / paths) deferred to F-XX.
 package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,11 +29,11 @@ import (
 func newConfigCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "config",
-		Short: "Interactive configuration (currently: pick primary agent)",
+		Short: "Interactive configuration (instance name, primary agent)",
 		Long: "Enter an interactive menu for nightme configuration.\n" +
-			"Currently the only submenu is Agents, which lets you pick\n" +
-			"the primary agent (global default) from the merged list of\n" +
-			"built-in and user-configured agents.",
+			"Currently the submenus are Name (show/set the instance\n" +
+			"name) and Agents (pick the primary agent from the merged\n" +
+			"list of built-in and user-configured agents).",
 		RunE: runConfig,
 	}
 }
@@ -53,13 +55,18 @@ func configInteractive(cfg *config.Config, in io.Reader, out io.Writer) error {
 	for {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Main menu:")
-		fmt.Fprintln(out, "  [1] Agents")
+		fmt.Fprintln(out, "  [1] Name    show/set instance name")
+		fmt.Fprintln(out, "  [2] Agents")
 		fmt.Fprintln(out, "  [q] Quit")
 		fmt.Fprint(out, "> ")
 
 		choice := readLine(in)
 		switch strings.TrimSpace(choice) {
 		case "1":
+			if err := configNameMenu(cfg, in, out); err != nil {
+				fmt.Fprintf(out, "Error: %v\n", err)
+			}
+		case "2":
 			if err := configAgentsMenu(cfg, in, out); err != nil {
 				fmt.Fprintf(out, "Error: %v\n", err)
 			}
@@ -67,7 +74,7 @@ func configInteractive(cfg *config.Config, in io.Reader, out io.Writer) error {
 			fmt.Fprintln(out, "Bye.")
 			return nil
 		default:
-			fmt.Fprintln(out, "Unknown choice; try [1] or [q].")
+			fmt.Fprintln(out, "Unknown choice; try [1], [2] or [q].")
 		}
 	}
 }
@@ -167,6 +174,43 @@ func configAgentsMenu(cfg *config.Config, in io.Reader, out io.Writer) error {
 		return fmt.Errorf("save config: %w", err)
 	}
 	fmt.Fprintf(out, "✓ Saved to %s\n", config.DefaultPath())
+	return nil
+}
+
+// configNameMenu shows the current instance name and lets the user
+// set a new one. Empty input keeps the current name unchanged.
+func configNameMenu(cfg *config.Config, in io.Reader, out io.Writer) error {
+	current := config.EffectiveName(cfg)
+
+	fmt.Fprintf(out, "\nCurrent name: %s\n", current)
+	fmt.Fprintln(out, "Enter new name (empty to keep current):")
+	fmt.Fprint(out, "> ")
+
+	value := readLine(in)
+	value = strings.TrimSpace(value)
+
+	if value == "" {
+		fmt.Fprintln(out, "No changes.")
+		return nil
+	}
+
+	path := config.DefaultPath()
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf(
+			"name: no config file at %q — run `nightme login` first",
+			path,
+		)
+	} else if err != nil {
+		return fmt.Errorf("name: stat %s: %w", path, err)
+	}
+
+	cfg.Name = value
+	if err := config.SaveDefault(cfg); err != nil {
+		return fmt.Errorf("name: save config: %w", err)
+	}
+
+	fmt.Fprintf(out, "✓ Name set to %q.\n", value)
+	fmt.Fprintf(out, "  Saved to: %s\n", path)
 	return nil
 }
 

@@ -73,7 +73,7 @@ type Config struct {
 // The hostname fallback is NOT written back to c.Name: doing so
 // would silently modify the user's config.yaml on first run. If the
 // caller wants the host as the "real" name, they should run
-// `nightme name <hostname>` explicitly.
+// `nightme config` → Name explicitly.
 func EffectiveName(c *Config) string {
 	if c != nil && c.Name != "" {
 		return c.Name

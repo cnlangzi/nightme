@@ -1566,6 +1566,30 @@ func (as *AgentSession) HandlePTYRestart(ctx context.Context, launcher Spawner) 
 
 // Close terminates the bridge child (sends shutdown signal to the
 // underlying bridge). Idempotent. Marks status=Exited on success.
+//
+// fix-bridge-stuck: this method is now AUTHORITATIVE for the
+// AgentSession state machine, not a "signal and hope". On entry,
+// before invoking the slow bridge Close, we:
+//
+//  1. close readpumpStop so the per-AS readpump exits — without
+//     this, the readpump's `eventQueue <- ...` select would only
+//     unblock on readpumpStop (no other code closes it), and a
+//     full eventQueue (4096) would wedge the readpump indefinitely
+//     while the bridge's events channel is closing.
+//  2. wait for readpumpDone so we know the readpump is actually
+//     gone before we sync state (otherwise endPrompt below could
+//     race with the readpump's own endPrompt on the same prompt).
+//  3. set status=Exited BEFORE endPrompt so the chat layer's
+//     TryFlush on the resulting KindPromptEnded event skips Submit
+//     (sees StatusExited) instead of racing a dying bridge.
+//  4. endPrompt(PromptEndUserKilled) clears currentPrompt and
+//     flips IsReady=true so the next TryFlush unblocks immediately
+//     (after respawn), without waiting for the bridge protocol to
+//     emit a terminal event.
+//
+// close.go still calls SetExited(0) as a safety net — that call is
+// idempotent (routeEvent guards with `if as.Status() == StatusExited
+// { return }`) so the duplication is harmless.
 func (as *AgentSession) Close() error {
 	as.asMu.Lock()
 	// F-61: mark this death as user-initiated so the Lifecycle
@@ -1574,7 +1598,43 @@ func (as *AgentSession) Close() error {
 	// a freshly-spawned bridge that the user didn't ask for.
 	as.closedByUser = true
 	h := as.handle
+	stop := as.readpumpStop
+	done := as.readpumpDone
 	as.asMu.Unlock()
+
+	// (1)+(2) force the readpump out so eventQueue push can't
+	// wedge. Same idempotent close pattern as Shutdown (step 2).
+	if stop != nil {
+		select {
+		case <-stop:
+			// already closed (e.g. Shutdown ran first)
+		default:
+			close(stop)
+		}
+	}
+	if done != nil {
+		<-done
+	}
+
+	// Reset readpumpStarted so the next Spawn → startReadPump
+	// launches a fresh readpump on the new handle. Without this,
+	// startReadPump's idempotency guard sees readpumpStarted=true
+	// (set by the first Spawn, never cleared because Close
+	// doesn't touch the field) and skips launching — leaving the
+	// post-Close respawn's bridge events with no reader. The OLD
+	// readpump is dead (we waited on done above), so we MUST mark
+	// the slot as available again. Same fix HandlePTYRestart
+	// applies for the same reason.
+	as.asMu.Lock()
+	as.readpumpStarted = false
+	as.asMu.Unlock()
+
+	// (3)+(4) sync the state machine. Order matters: SetExited
+	// must precede endPrompt so the chat pump's TryFlush on the
+	// KindPromptEnded event sees StatusExited and skips Submit.
+	as.SetExited(0)
+	as.endPrompt(PromptEndUserKilled)
+
 	if h == nil {
 		return nil // not running
 	}

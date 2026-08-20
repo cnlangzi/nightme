@@ -245,11 +245,12 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 		snap.HasUpstream = false
 	default:
 		// Active branch line: "name[...upstream[ [ahead N][, behind M]]]".
-		name, hasUpstream, ahead, behind := parseBranchHeader(header)
+		name, hasUpstream, ahead, behind, gone := parseBranchHeader(header)
 		snap.Branch = name
 		snap.HasUpstream = hasUpstream
 		snap.AheadOfRemote = ahead
 		snap.BehindRemote = behind
+		snap.UpstreamGone = gone
 	}
 
 	// Parse status entries (remaining lines).
@@ -352,17 +353,26 @@ func isConflictXY(line string) bool {
 }
 
 // parseBranchHeader extracts (localBranchName, hasUpstream,
-// aheadCount) from a `##` header line body. Examples:
+// aheadCount, behindCount, gone) from a `##` header line body.
+// Examples:
 //
-//	"main"                              -> ("main", false, 0)
-//	"main...origin/main"                -> ("main", true,  0)
-//	"main...origin/main [ahead 3]"      -> ("main", true,  3)
-//	"feat/x...origin/feat/x [ahead 3, behind 1]" -> ("feat/x", true, 3)
+//	"main"                              -> ("main", false, 0, 0, false)
+//	"main...origin/main"                -> ("main", true,  0, 0, false)
+//	"main...origin/main [ahead 3]"      -> ("main", true,  3, 0, false)
+//	"feat/x...origin/feat/x [ahead 3, behind 1]" -> ("feat/x", true, 3, 1, false)
+//	"chore...origin/chore [gone]"        -> ("chore", true, 0, 0, true)
 //
-// Returns (name, false, 0) when the header doesn't match the
-// expected shape (defensive — git could theoretically add new
+// The `[gone]` token (issue #235) means branch.<name>.merge is
+// configured but refs/remotes/origin/<name> no longer exists
+// locally — the "ghost upstream" state. git can't compute
+// ahead/behind without a tracking ref, so it reports [gone] with
+// ahead=0/behind=0; the `gone` flag lets HasNothingToPush refuse
+// to treat that as "nothing to push" and strand unpushed commits.
+//
+// Returns (name, false, 0, 0, false) when the header doesn't match
+// the expected shape (defensive — git could theoretically add new
 // forms).
-func parseBranchHeader(header string) (name string, hasUpstream bool, ahead, behind int) {
+func parseBranchHeader(header string) (name string, hasUpstream bool, ahead, behind int, gone bool) {
 	// Strip the optional " [ahead N[, behind M]]" suffix.
 	headerMain := header
 	if idx := strings.Index(headerMain, " ["); idx >= 0 {
@@ -370,10 +380,17 @@ func parseBranchHeader(header string) (name string, hasUpstream bool, ahead, beh
 		if end := strings.Index(suffix, "]"); end >= 0 {
 			suffix = suffix[:end]
 		}
-		// Inside the brackets: "ahead N" / "behind M" / "ahead N, behind M".
+		// Inside the brackets: "ahead N" / "behind M" /
+		// "ahead N, behind M" / "gone". The forms are mutually
+		// exclusive in real git ([gone] implies no tracking ref,
+		// so ahead/behind can't be computed), but the loop treats
+		// each comma-part independently so a future/odd combination
+		// still parses without dropping data.
 		for _, part := range strings.Split(suffix, ", ") {
 			part = strings.TrimSpace(part)
 			switch {
+			case part == "gone":
+				gone = true
 			case strings.HasPrefix(part, "ahead "):
 				if n, err := strconv.Atoi(strings.TrimSpace(part[len("ahead "):])); err == nil {
 					ahead = n
@@ -398,7 +415,7 @@ func parseBranchHeader(header string) (name string, hasUpstream bool, ahead, beh
 	}
 
 	name = strings.TrimSpace(headerMain)
-	return name, hasUpstream, ahead, behind
+	return name, hasUpstream, ahead, behind, gone
 }
 
 // CollectPR resolves the workspace's remote + provider and asks

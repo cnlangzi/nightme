@@ -20,9 +20,9 @@ import (
 //
 // One-off: each Run returns the captured stdout/stderr/error triple.
 type pushGit struct {
-	mu                    sync.Mutex
-	responses             map[string]pushGitResp
-	responsesByArgs       map[string]pushGitResp
+	mu              sync.Mutex
+	responses       map[string]pushGitResp
+	responsesByArgs map[string]pushGitResp
 	// seqResponses[prefix] is the ordered list of responses
 	// onSeq registered; the Nth call matching prefix gets the
 	// Nth entry, last entry reused once exhausted. Call count
@@ -941,6 +941,165 @@ func TestCountUnpushed_RealErrorPropagates(t *testing.T) {
 	_, err := countUnpushed(context.Background(), mustPwd(t), "wt", HandlerDeps{Git: git})
 	if err == nil {
 		t.Fatalf("non-upstream error must propagate; got nil")
+	}
+}
+
+// TestCountUnpushed_UpstreamConfigured_NotStoredAsRemote —
+// DEFENSIVE hardening for the ghost-upstream stderr shape (issue
+// #235). branch.<name>.merge is configured but
+// refs/remotes/origin/<name> is missing, so older git's
+// `git rev-list branch@{u}..branch` fails with "fatal: upstream
+// branch 'refs/heads/<name>' not stored as a remote-tracking
+// branch". isBenignNoUpstream treats that as a benign "0 unpushed"
+// answer rather than a hard failure.
+//
+// NOTE: this exercises the countUnpushed belt-and-suspenders only.
+// The PRIMARY fix for #235 is at the readiness gate (parseBranchHeader
+// flags `[gone]` → HasNothingToPush returns false → the push
+// actually runs and `git push -u` materialises the tracking ref,
+// so this verify path is normally unreachable) — see
+// TestHasNothingToPush_GoneUpstream and TestRunPush_GoneUpstream_Pushes.
+func TestCountUnpushed_UpstreamConfigured_NotStoredAsRemote(t *testing.T) {
+	git := newPushGit()
+	git.on("rev-list", "",
+		"fatal: upstream branch 'refs/heads/chore-docs-init' not stored as a remote-tracking branch",
+		errors.New("exit status 128"))
+
+	withCwd(t, t.TempDir())
+	n, err := countUnpushed(context.Background(), mustPwd(t), "chore-docs-init", HandlerDeps{Git: git})
+	if err != nil {
+		t.Fatalf("ghost upstream should not error; got %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 unpushed, got %d", n)
+	}
+}
+
+// TestHasNothingToPush_GoneUpstream — the PRIMARY fix for issue
+// #235: a clean branch whose upstream is "gone" (branch.<name>.merge
+// set but refs/remotes/origin/<name> missing → porcelain
+// "## b...origin/b [gone]") must NOT be reported as "nothing to
+// push". Pre-fix, parseBranchHeader read [gone] as HasUpstream=true,
+// ahead=0, so HasNothingToPush returned true and dispatchPush
+// short-circuited — stranding genuinely-unpushed commits. The
+// UpstreamGone flag makes the predicate return false so the push
+// proceeds and `git push -u` re-publishes the branch.
+func TestHasNothingToPush_GoneUpstream(t *testing.T) {
+	gone := messages.GitStatusSnapshot{
+		Branch:       "chore-docs-init",
+		HasUpstream:  true,
+		UpstreamGone: true,
+	}
+	if !gone.WorkingTreeIsClean() {
+		t.Fatalf("setup: snapshot must be clean")
+	}
+	if gone.HasNothingToPush() {
+		t.Fatalf("gone-upstream clean branch must NOT be 'nothing to push' — it needs publishing")
+	}
+
+	// Sanity: the same branch with a live, in-sync upstream IS
+	// nothing to push (the gone flag is what flips the answer).
+	live := gone
+	live.UpstreamGone = false
+	if !live.HasNothingToPush() {
+		t.Fatalf("in-sync clean branch with a live upstream should be 'nothing to push'")
+	}
+}
+
+// TestParseBranchHeader_GoneUpstream pins the porcelain→snapshot
+// translation for the `[gone]` token: hasUpstream=true (the
+// "## b...origin/b" part is present), ahead/behind=0 (git can't
+// compute them without a tracking ref), and gone=true (the token
+// that HasNothingToPush gates on).
+func TestParseBranchHeader_GoneUpstream(t *testing.T) {
+	name, hasUpstream, ahead, behind, gone := parseBranchHeader(
+		"chore-docs-init...origin/chore-docs-init [gone]")
+	if name != "chore-docs-init" || !hasUpstream || ahead != 0 || behind != 0 || !gone {
+		t.Fatalf("gone header mis-parsed: name=%q hasUpstream=%v ahead=%d behind=%d gone=%v",
+			name, hasUpstream, ahead, behind, gone)
+	}
+
+	// In-sync (no [gone]) must NOT set gone — regression guard.
+	_, _, _, _, gone2 := parseBranchHeader("chore-docs-init...origin/chore-docs-init")
+	if gone2 {
+		t.Fatalf("in-sync header must not set gone")
+	}
+}
+
+// TestRunPush_GoneUpstream_Pushes — end-to-end gate fix: a clean
+// branch in the ghost-upstream ([gone]) state must reach
+// programmaticPush (not short-circuit to "nothing to push"). The
+// push materialises the tracking ref and lands the commits, so
+// verify succeeds and the success card renders.
+func TestRunPush_GoneUpstream_Pushes(t *testing.T) {
+	rig := newPushTestRig(t)
+	rig.installDeps(t, "chore-docs-init")
+	// [gone]: merge configured, tracking ref missing. Pre-fix this
+	// snapshot → HasNothingToPush=true → "nothing to push" (bug).
+	setupPushMocks(rig.git, "chore-docs-init", messages.GitStatusSnapshot{
+		Branch:       "chore-docs-init",
+		HasUpstream:  true,
+		UpstreamGone: true,
+	})
+	// origin/<branch> does NOT exist (ghost) → originBefore="" →
+	// first-push rev-range path.
+	rig.git.onArgs([]string{"rev-parse", "--verify", "origin/chore-docs-init"},
+		"", "fatal: unknown revision or path not in the working tree: 'origin/chore-docs-init'", errors.New("exit status 128"))
+	rig.git.onArgs([]string{"push", "-u", "origin", "chore-docs-init"},
+		"To origin\n * [new branch]      chore-docs-init -> chore-docs-init\n", "", nil)
+	// Post-push verify: `git push -u` materialised the tracking ref,
+	// so @{u} resolves and countUnpushed reports 0.
+	rig.git.on("rev-list", "0", "", nil)
+	// firstPushRevRange → DefaultBranch lookup.
+	rig.git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"},
+		"origin/main", "", nil)
+	// first-push fallback log: the 2 commits this push landed.
+	rig.git.onArgs([]string{"log", "--oneline", "origin/main..origin/chore-docs-init"},
+		"abc1234 doc 1\ndef5678 doc 2\n", "", nil)
+
+	s := captureCh(t, rig.cs)
+	_, err := dispatchPush(context.Background(), rig.cs,
+		HandlerDeps{Git: rig.git}, "chat", "msg", pushArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPush err: %v", err)
+	}
+	pushed := false
+	for _, c := range rig.git.calls {
+		if len(c.args) >= 2 && c.args[0] == "push" && c.args[1] == "-u" {
+			pushed = true
+		}
+	}
+	if !pushed {
+		t.Fatalf("ghost-upstream [gone] must still push, got calls=%v", rig.git.calls)
+	}
+	r := s.lastText()
+	if strings.Contains(r, "nothing to push") {
+		t.Fatalf("[gone] must not short-circuit to 'nothing to push', got:\n%s", r)
+	}
+	if !strings.Contains(r, "✅ pushed 2 commit(s)") {
+		t.Fatalf("expected success card counting the 2 pushed commits, got:\n%s", r)
+	}
+}
+
+// TestListUnpushedCommits_UpstreamConfigured_NotStoredAsRemote —
+// the ghost-upstream stderr shape must map to an empty commit
+// list, mirroring countUnpushed's benign semantics. Without this,
+// the verify-failed diagnostic's unpushedCommitsForDisplay would
+// surface a spurious "list unpushed commits" error on top of the
+// (already-fixed) count failure.
+func TestListUnpushedCommits_UpstreamConfigured_NotStoredAsRemote(t *testing.T) {
+	git := newPushGit()
+	git.on("rev-list", "",
+		"fatal: upstream branch 'refs/heads/chore-docs-init' not stored as a remote-tracking branch",
+		errors.New("exit status 128"))
+
+	withCwd(t, t.TempDir())
+	commits, err := listUnpushedCommits(context.Background(), mustPwd(t), "chore-docs-init", HandlerDeps{Git: git})
+	if err != nil {
+		t.Fatalf("ghost upstream should not error; got %v", err)
+	}
+	if len(commits) != 0 {
+		t.Fatalf("expected empty list, got %v", commits)
 	}
 }
 

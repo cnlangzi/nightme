@@ -95,7 +95,7 @@ func dispatchPR(
 	// conflicts) plus the legacy "branch in sync with base"
 	// status. PRBlockReason is priority-ordered so the user
 	// sees ONE actionable message per /gtw pr attempt.
-	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
+	snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
@@ -188,6 +188,25 @@ func dispatchPR(
 					"❌ a PR for %s already exists — check your repo's PR list.",
 					c.Branch)), nil
 		}
+		// F-237: defense in depth for the stale-cached-upstream
+		// hole. CollectReadinessForDispatch should already have
+		// caught this via `git ls-remote`, but the probe can
+		// miss three cases:
+		//   - ls-remote network error during probe (graceful
+		//     fallback leaves HasUpstream=true)
+		//   - race: branch deleted from origin between probe
+		//     and CreatePR
+		//   - future gh / GitHub Enterprise message drift
+		//
+		// In all three, gh returns one of the GraphQL validator
+		// messages below. The originals are concatenated and
+		// four lines long — useless for the user. Map them to
+		// the same friendly hint PRBlockReason would have
+		// rendered if the probe had been able to see the lie.
+		if ghMessage, ok := mapGhHeadMissingToHint(err); ok {
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				ghMessage), nil
+		}
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ create PR failed: %v", err)), nil
 	}
@@ -221,6 +240,48 @@ func dispatchPR(
 	// no-stamp reply — they're not the agent-result surface.
 	return replyAgent(ctx, cs.Emitter(), chatID, messageID,
 		card, agentName, runRes), nil
+}
+
+// mapGhHeadMissingToHint translates the four common gh GraphQL
+// "head ref is bad" error messages into the same friendly
+// "/gtw push first" hint PRBlockReason would have rendered
+// upstream. Returns (msg, true) when the hint applies; ("",
+// false) when err doesn't match any of the known patterns —
+// the caller falls through to the generic error reply.
+//
+// F-237: CollectReadinessForDispatch should already have
+// caught the stale-cached-upstream case via `git ls-remote`,
+// but the probe can miss three cases (network blip /
+// origin-deleted-between-probe-and-create / future gh message
+// drift). This helper is the safety net for those cases so
+// the user never sees the raw four-line GraphQL diagnostic.
+//
+// Pattern match is by substring on err.Error() — the CreatePR
+// wrapper formats the gh CLI's stderr into the error message
+// verbatim (see provider.GitHubProvider.CreatePR), so any
+// gh-emitted phrase survives. We match four substrings because
+// they are the GraphQL validator fields that fire on the
+// "head not on origin" path; other validation failures (auth,
+// label missing, repo not found) keep their own behaviour.
+// No typo: "Base sha can't be blank" / "Head sha can't be
+// blank" are the literal GraphQL field names from
+// createPullRequest; matching them lets us cover the case
+// where gh computes an empty SHA from a missing head ref.
+func mapGhHeadMissingToHint(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "Head ref must be a branch"),
+		strings.Contains(msg, "No commits between"),
+		strings.Contains(msg, "Head sha can't be blank"),
+		strings.Contains(msg, "Base sha can't be blank"):
+		return "❌ branch has no upstream on origin\n" +
+			"\n" +
+			"💡 hint: /gtw push first to publish the branch to origin, then /gtw pr", true
+	}
+	return "", false
 }
 
 // buildPRPrompt renders the text block the agent receives.

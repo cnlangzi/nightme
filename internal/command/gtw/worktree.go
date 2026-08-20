@@ -98,6 +98,52 @@ func BranchExists(ctx context.Context, dir, branch string, git GitRunner) (bool,
 	return false, nil
 }
 
+// RemoteBranchExists reports whether branch exists on the
+// origin remote. Equivalent to
+// git ls-remote --heads origin <branch> -- empty stdout means
+// the branch is not on origin; any non-empty line (one per ref)
+// means it is.
+//
+// F-237: git status --porcelain --branch trusts local config
+// (branch.<name>.{remote,merge}) and the cached
+// refs/remotes/origin/<branch> SHA. A branch that was pushed
+// then deleted server-side -- or pulled into a sibling worktree
+// from a stale clone -- leaves a cached tracking ref whose
+// ## branch...origin/branch porcelain header makes
+// CollectReadiness believe the branch is on origin when it
+// actually is not. RemoteBranchExists is the probe that catches
+// that lie (see CollectReadinessForDispatch / verifyUpstreamOnOrigin).
+//
+// Returns (false, nil) on:
+//   - empty git ls-remote output (branch truly absent on origin)
+//   - exit-zero with no refs (no upstream branch matching <branch>)
+//
+// Returns (false, err) only when git itself failed (no origin
+// remote, network down, etc.). Callers should treat this as
+// "cannot verify" rather than "definitely absent" -- see the
+// graceful-fallback logic in verifyUpstreamOnOrigin.
+//
+// The output of git ls-remote --heads origin <branch> is
+// <sha>	refs/heads/<branch> per matching ref; we do not
+// parse the SHA, only check for non-empty output. The CLI
+// strips trailing newlines so a single matching ref produces
+// a single non-empty line.
+func RemoteBranchExists(ctx context.Context, dir, branch string, git GitRunner) (bool, error) {
+	out, stderr, err := git.Run(ctx, dir, "ls-remote", "--heads", "origin", branch)
+	if err != nil {
+		// git ls-remote writes "fatal: origin does not appear
+		// to be a git repository" / "fatal: unable to access" to
+		// stderr on the common failure modes. Surface the wrapped
+		// error verbatim so the caller can decide whether to
+		// degrade or escalate.
+		if stderr != "" {
+			return false, fmt.Errorf("git ls-remote --heads origin %s: %s", branch, strings.TrimSpace(stderr))
+		}
+		return false, fmt.Errorf("git ls-remote --heads origin %s: %w", branch, err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // CurrentBranch returns the active branch name, or "" if the repo
 // is in detached HEAD state. Used by rebuildGTWContext to figure
 // out whether the current cwd is part of an active /gtw fix.
@@ -213,29 +259,29 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	}
 
 	// Step 5: pull --rebase. We pass explicit `<remote>
-// <branch>` so the command works on local branches that
-// have no upstream-tracking config. We use `--rebase` rather
-// than the default merge-style pull, OR `--ff-only`, for a
-// concrete UX reason:
-//
-//   - `--ff-only` rejects when the user's local main has
-//     un-pushed commits — every experiment the user did
-//     since their last pull blocks /gtw fix until they
-//     manually merge upstream. UX-hostile.
-//   - `--rebase` (default-style merge) creates a merge
-//     commit on the user's main — surprising for a tool
-//     they thought was just "create a worktree".
-//   - `--rebase` is the modern recommended default for
-//     upstream-tracking branches (per git docs and most
-//     major project READMEs). It replays the user's local
-//     commits on top of upstream, exactly matching the
-//     "I want my work to look like I started from the
-//     latest upstream" intent that drives /gtw fix.
-//
-// Mid-rebase conflicts leave the repo in a half-rebased
-// state; we surface the conflict (and the abort command)
-// verbatim so the user can `git rebase --abort` and retry
-// after resolving manually.
+	// <branch>` so the command works on local branches that
+	// have no upstream-tracking config. We use `--rebase` rather
+	// than the default merge-style pull, OR `--ff-only`, for a
+	// concrete UX reason:
+	//
+	//   - `--ff-only` rejects when the user's local main has
+	//     un-pushed commits — every experiment the user did
+	//     since their last pull blocks /gtw fix until they
+	//     manually merge upstream. UX-hostile.
+	//   - `--rebase` (default-style merge) creates a merge
+	//     commit on the user's main — surprising for a tool
+	//     they thought was just "create a worktree".
+	//   - `--rebase` is the modern recommended default for
+	//     upstream-tracking branches (per git docs and most
+	//     major project READMEs). It replays the user's local
+	//     commits on top of upstream, exactly matching the
+	//     "I want my work to look like I started from the
+	//     latest upstream" intent that drives /gtw fix.
+	//
+	// Mid-rebase conflicts leave the repo in a half-rebased
+	// state; we surface the conflict (and the abort command)
+	// verbatim so the user can `git rebase --abort` and retry
+	// after resolving manually.
 	pullOut, stderr, err := deps.Git.Run(ctx, repoRoot,
 		"pull", "--rebase", "origin", branch)
 	if err != nil {

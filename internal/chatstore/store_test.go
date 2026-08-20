@@ -3,7 +3,6 @@ package chatstore
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,7 +31,7 @@ func newTestStore(t *testing.T) *Store {
 // disk is always a complete snapshot of one Setter's invocation.
 func TestSetter_PersistsLastWriter(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+	if _, err := store.Bootstrap("tg_chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
@@ -42,13 +41,13 @@ func TestSetter_PersistsLastWriter(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if err := store.SetSelectedCwd("chat-1", "/path/A"); err != nil {
+			if err := store.SetSelectedCwd("tg_chat-1", "/path/A"); err != nil {
 				t.Errorf("SetSelectedCwd A: %v", err)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if err := store.SetSelectedCwd("chat-1", "/path/B"); err != nil {
+			if err := store.SetSelectedCwd("tg_chat-1", "/path/B"); err != nil {
 				t.Errorf("SetSelectedCwd B: %v", err)
 			}
 		}()
@@ -66,7 +65,7 @@ func TestSetter_PersistsLastWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	e, ok := fresh.Get("chat-1")
+	e, ok := fresh.Get("tg_chat-1")
 	if !ok {
 		t.Fatal("entry missing from disk after writes")
 	}
@@ -80,7 +79,7 @@ func TestSetter_PersistsLastWriter(t *testing.T) {
 // produced — no torn snapshots, no stale snapshots.
 func TestSetter_NoLostUpdate(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+	if _, err := store.Bootstrap("tg_chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
@@ -99,24 +98,24 @@ func TestSetter_NoLostUpdate(t *testing.T) {
 			for j := 0; j < iterations; j++ {
 				switch (gid + j) % 6 {
 				case 0:
-					_ = store.SetSelectedCwd("chat-1", "/x")
+					_ = store.SetSelectedCwd("tg_chat-1", "/x")
 				case 1:
-					_ = store.SetSelectedAgent("chat-1", "codex")
+					_ = store.SetSelectedAgent("tg_chat-1", "codex")
 				case 2:
-					_ = store.SetWatchMode("chat-1", 1)
+					_ = store.SetWatchMode("tg_chat-1", 1)
 				case 3:
-					_ = store.SetThinkMode("chat-1", 1)
+					_ = store.SetThinkMode("tg_chat-1", 1)
 				case 4:
-					_ = store.SetToolsMode("chat-1", 1)
+					_ = store.SetToolsMode("tg_chat-1", 1)
 				case 5:
-					_ = store.SetWatcherHintEmitted("chat-1", true)
+					_ = store.SetWatcherHintEmitted("tg_chat-1", true)
 				}
 			}
 		}(i)
 	}
 	wg.Wait()
 
-	e, ok := store.Get("chat-1")
+	e, ok := store.Get("tg_chat-1")
 	if !ok {
 		t.Fatal("entry missing")
 	}
@@ -147,25 +146,25 @@ func TestSetter_NoLostUpdate(t *testing.T) {
 // LastInteractionAt is not bumped).
 func TestSetter_NoChange(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+	if _, err := store.Bootstrap("tg_chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
 	// First call sets the value + bumps LastInteractionAt.
-	if err := store.SetSelectedCwd("chat-1", "/workspace"); err != nil {
+	if err := store.SetSelectedCwd("tg_chat-1", "/workspace"); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	first, _ := store.Get("chat-1")
+	first, _ := store.Get("tg_chat-1")
 	firstAt := first.LastInteractionAt
 
 	// Sleep so any subsequent bump would be visibly later.
 	time.Sleep(2 * time.Millisecond)
 
 	// Second call with the SAME value should be a no-op.
-	if err := store.SetSelectedCwd("chat-1", "/workspace"); err != nil {
+	if err := store.SetSelectedCwd("tg_chat-1", "/workspace"); err != nil {
 		t.Fatalf("SetSelectedCwd second: %v", err)
 	}
-	second, _ := store.Get("chat-1")
+	second, _ := store.Get("tg_chat-1")
 	if !second.LastInteractionAt.Equal(firstAt) {
 		t.Errorf("no-op setter bumped LastInteractionAt: %v → %v", firstAt, second.LastInteractionAt)
 	}
@@ -176,14 +175,14 @@ func TestSetter_NoChange(t *testing.T) {
 func TestBootstrap_NewChat(t *testing.T) {
 	store := newTestStore(t)
 
-	e, err := store.Bootstrap("chat-fresh", "claude")
+	e, err := store.Bootstrap("tg_chat-fresh", "claude")
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 	if e.PrimaryAgent != "claude" {
 		t.Errorf("PrimaryAgent = %q, want claude", e.PrimaryAgent)
 	}
-	if e.ID != "cs_chat-fresh" {
+	if e.ID != "cs_tg_chat-fresh" {
 		t.Errorf("ID = %q, want cs_chat-fresh", e.ID)
 	}
 	if e.LastInteractionAt.IsZero() {
@@ -194,7 +193,7 @@ func TestBootstrap_NewChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	diskE, ok := fresh.Get("chat-fresh")
+	diskE, ok := fresh.Get("tg_chat-fresh")
 	if !ok {
 		t.Fatal("entry missing on disk after Bootstrap")
 	}
@@ -210,20 +209,20 @@ func TestBootstrap_ExistingChat(t *testing.T) {
 
 	// Simulate a pre-existing on-disk entry by bootstrapping
 	// first, then re-opening a fresh store.
-	if _, err := store.Bootstrap("pre", "codex"); err != nil {
+	if _, err := store.Bootstrap("tg_pre", "codex"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	store.SetSelectedCwd("pre", "/pre-existing")
+	store.SetSelectedCwd("tg_pre", "/pre-existing")
 
 	fresh, err := New(store.Path())
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if err := fresh.SetSelectedCwd("pre", "/reopen-overwrite"); err != nil {
+	if err := fresh.SetSelectedCwd("tg_pre", "/reopen-overwrite"); err != nil {
 		t.Fatalf("overwrite: %v", err)
 	}
 
-	e, err := fresh.Bootstrap("pre", "")
+	e, err := fresh.Bootstrap("tg_pre", "")
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -242,7 +241,7 @@ func TestBootstrap_ExistingChat(t *testing.T) {
 // memory and disk lack the entry AND primaryAgent is empty.
 func TestBootstrap_MissingFromDisk(t *testing.T) {
 	store := newTestStore(t)
-	_, err := store.Bootstrap("unknown", "")
+	_, err := store.Bootstrap("tg_unknown", "")
 	if err == nil {
 		t.Fatal("expected error when chat not on disk and primaryAgent empty")
 	}
@@ -252,17 +251,17 @@ func TestBootstrap_MissingFromDisk(t *testing.T) {
 // mutating the returned entry has no effect on the in-memory record.
 func TestGet_CopyReturned(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+	if _, err := store.Bootstrap("tg_chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	if err := store.SetSelectedCwd("chat-1", "/x"); err != nil {
+	if err := store.SetSelectedCwd("tg_chat-1", "/x"); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	e1, _ := store.Get("chat-1")
+	e1, _ := store.Get("tg_chat-1")
 	e1.SelectedCwd = "/mutated"
 
-	e2, _ := store.Get("chat-1")
+	e2, _ := store.Get("tg_chat-1")
 	if e2.SelectedCwd != "/x" {
 		t.Errorf("Get returned a shared pointer: e2.SelectedCwd = %q after mutating e1", e2.SelectedCwd)
 	}
@@ -276,8 +275,8 @@ func TestGet_DeepCopyPointerField(t *testing.T) {
 	store := newTestStore(t)
 	id := "as_target"
 	if err := store.Save(&registry.ChatSessionEntry{
-		ID:                     "cs_chat-1",
-		ChatID:                 "chat-1",
+		ID:                     "cs_tg_chat-1",
+		ChatID:                 "tg_chat-1",
 		PrimaryAgent:           "claude",
 		SelectedAgentSessionID: &id,
 	}); err != nil {
@@ -285,7 +284,7 @@ func TestGet_DeepCopyPointerField(t *testing.T) {
 	}
 
 	// First read captures a pointer to the field-target.
-	before, _ := store.Get("chat-1")
+	before, _ := store.Get("tg_chat-1")
 	if before.SelectedAgentSessionID == nil || *before.SelectedAgentSessionID != "as_target" {
 		t.Fatalf("first Get: SelectedAgentSessionID = %v, want as_target", before.SelectedAgentSessionID)
 	}
@@ -294,7 +293,7 @@ func TestGet_DeepCopyPointerField(t *testing.T) {
 	// the *string, this would leak into the in-memory record.
 	*before.SelectedAgentSessionID = "as_overwritten"
 
-	after, _ := store.Get("chat-1")
+	after, _ := store.Get("tg_chat-1")
 	if after.SelectedAgentSessionID == nil || *after.SelectedAgentSessionID != "as_target" {
 		t.Fatalf("second Get: SelectedAgentSessionID = %v, want as_target (deep-copy broken)", after.SelectedAgentSessionID)
 	}
@@ -329,10 +328,10 @@ func TestList(t *testing.T) {
 // TestSetSelectedAgent_EmptyAgent verifies the validation.
 func TestSetSelectedAgent_EmptyAgent(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+	if _, err := store.Bootstrap("tg_chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	if err := store.SetSelectedAgent("chat-1", ""); err == nil {
+	if err := store.SetSelectedAgent("tg_chat-1", ""); err == nil {
 		t.Errorf("expected error for empty agent")
 	}
 }
@@ -341,16 +340,16 @@ func TestSetSelectedAgent_EmptyAgent(t *testing.T) {
 // "no workspace" state) is legal.
 func TestSetSelectedCwd_EmptyCwdAllowed(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Bootstrap("chat-1", "claude"); err != nil {
+	if _, err := store.Bootstrap("tg_chat-1", "claude"); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	if err := store.SetSelectedCwd("chat-1", "/foo"); err != nil {
+	if err := store.SetSelectedCwd("tg_chat-1", "/foo"); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	if err := store.SetSelectedCwd("chat-1", ""); err != nil {
+	if err := store.SetSelectedCwd("tg_chat-1", ""); err != nil {
 		t.Errorf("empty cwd should be legal (cleared state), got %v", err)
 	}
-	e, _ := store.Get("chat-1")
+	e, _ := store.Get("tg_chat-1")
 	if e.SelectedCwd != "" {
 		t.Errorf("SelectedCwd = %q, want empty", e.SelectedCwd)
 	}
@@ -434,7 +433,13 @@ func osWriteFile(path string, data []byte) error { return os.WriteFile(path, dat
 // Fix (Plan B): New() re-keys by e.ChatID on load; the first save()
 // rewrites the whole file with normalized keys. No version bump —
 // reading is bidirectionally compatible.
-func TestNew_MigratesLegacyIDKeyedFormat(t *testing.T) {
+// TestNew_RejectsLegacyIDKeyedFormat verifies that the loader
+// refuses to silently rewrite cs_<chatID>-keyed legacy files.
+// Operators must migrate by hand (the file format is simple
+// enough — re-key by entry.ChatID, then prefix with the
+// appropriate channel tag) instead of having the daemon silently
+// mutate the on-disk format.
+func TestNew_RejectsLegacyIDKeyedFormat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chat_sessions.json")
 	// Legacy shape: map key == entry.ID ("cs_42"), ChatID == "42".
@@ -443,66 +448,38 @@ func TestNew_MigratesLegacyIDKeyedFormat(t *testing.T) {
 		t.Fatalf("write legacy: %v", err)
 	}
 
-	s, err := New(path)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	// After migration the entry must be reachable by chatID.
-	e, ok := s.Get("42")
-	if !ok {
-		t.Fatal("legacy entry not found by chatID after migration")
-	}
-	if e.PrimaryAgent != "codex" {
-		t.Errorf("PrimaryAgent = %q, want codex", e.PrimaryAgent)
-	}
-	if e.SelectedCwd != "/old" {
-		t.Errorf("SelectedCwd = %q, want /old", e.SelectedCwd)
-	}
-	if e.ID != "cs_42" {
-		t.Errorf("ID field = %q, want cs_42 (field preserved, only the map key changed)", e.ID)
-	}
-
-	// Bootstrap on an existing chatID must now hit the "already
-	// exists" branch instead of re-creating. Before the fix this
-	// returned a "need primaryAgent" error or clobbered the entry.
-	bootstrapped, err := s.Bootstrap("42", "")
-	if err != nil {
-		t.Fatalf("Bootstrap existing: %v", err)
-	}
-	if bootstrapped.SelectedCwd != "/old" {
-		t.Errorf("Bootstrap clobbered existing fields: SelectedCwd = %q, want /old", bootstrapped.SelectedCwd)
-	}
-	if bootstrapped.PrimaryAgent != "codex" {
-		t.Errorf("Bootstrap clobbered PrimaryAgent = %q, want codex", bootstrapped.PrimaryAgent)
-	}
-
-	// Trigger one save and verify the on-disk map is now keyed by
-	// chatID ("42"), with no stale "cs_42" key surviving.
-	if err := s.SetSelectedCwd("42", "/new"); err != nil {
-		t.Fatalf("SetSelectedCwd: %v", err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read disk: %v", err)
-	}
-	body := string(raw)
-	if !strings.Contains(body, `"42":`) {
-		t.Errorf("disk not keyed by chatID; body: %s", body)
-	}
-	if strings.Contains(body, `"cs_42":`) {
-		t.Errorf("legacy key leaked past save; body: %s", body)
+	if _, err := New(path); err == nil {
+		t.Fatal("expected New to reject legacy ID-keyed format, got no error")
 	}
 }
 
-// TestNew_NewFormatIsNoOpMigration verifies that a file already in
-// the new format (key == chatID) loads unchanged — migration is a
-// no-op when e.ChatID == k.
-func TestNew_NewFormatIsNoOpMigration(t *testing.T) {
+// TestNew_RejectsBareDigitKey verifies that bare-digit chatIDs
+// (the pre-stable-chatID-era on-disk format) are rejected. The
+// daemon does not silently rewrite them.
+func TestNew_RejectsBareDigitKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chat_sessions.json")
-	fresh := `{"version":1,"chatSessions":{"42":{"id":"cs_42","chatId":"42","primaryAgent":"codex"}}}`
-	if err := os.WriteFile(path, []byte(fresh), 0o600); err != nil {
+	bare := `{"version":1,"chatSessions":{"42":{"id":"cs_42","chatId":"42","primaryAgent":"codex"}}}`
+	if err := os.WriteFile(path, []byte(bare), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if _, err := New(path); err == nil {
+		t.Fatal("expected New to reject bare-digit chatID, got no error")
+	}
+}
+
+// TestNew_TelegramFormat_LoadsCleanly verifies the happy path:
+// a properly-prefixed chat_sessions.json (the format the
+// stable-chatID refactor mandates) loads without any rewriting.
+// Both "tg_<chatid>" DM and "tg_<chatid>:<thread_id>" topic
+// keys round-trip through Bootstrap → setter → reload.
+func TestNew_TelegramFormat_LoadsCleanly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat_sessions.json")
+	// Initial state: two Telegram chats, one DM and one topic.
+	initial := `{"version":1,"chatSessions":{"tg_8684538097":{"id":"cs_8684538097","chatId":"tg_8684538097","primaryAgent":"claude","selectedCwd":"/Users/..."},"tg_-10012345:42":{"id":"cs_-10012345:42","chatId":"tg_-10012345:42","primaryAgent":"claude","selectedCwd":"/work"}}}`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -510,10 +487,18 @@ func TestNew_NewFormatIsNoOpMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if e, ok := s.Get("42"); !ok || e.PrimaryAgent != "codex" {
-		t.Fatalf("new-format entry lost after migration: %+v", e)
+
+	for _, id := range []string{"tg_8684538097", "tg_-10012345:42"} {
+		e, ok := s.Get(id)
+		if !ok {
+			t.Errorf("entry %q not loaded", id)
+			continue
+		}
+		if e.ChatID != id {
+			t.Errorf("entry %q has ChatID %q", id, e.ChatID)
+		}
 	}
-	if len(s.entries) != 1 {
-		t.Errorf("entries len = %d, want 1 (migration must not duplicate)", len(s.entries))
+	if len(s.entries) != 2 {
+		t.Errorf("entries len = %d, want 2", len(s.entries))
 	}
 }

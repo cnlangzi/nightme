@@ -1306,51 +1306,61 @@ func TestAdapter_StatePersistAcrossReload(t *testing.T) {
 	// Note: state may be reloaded by NewAdapterWithClient.
 }
 
-func TestAdapter_SessionChatID_Shared(t *testing.T) {
+// TestAdapter_SessionChatID_Stable is the post-stable-chatID
+// contract: chatID is always "tg_<chat.id>[:thread_id]". The
+// two former topic_mode tests (Shared / Separate) are merged
+// here because the unified rule makes the distinction obsolete.
+func TestAdapter_SessionChatID_Stable(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	a.config.TopicMode = "shared"
-	if got := a.sessionChatID("100", 42); got != "100" {
-		t.Fatalf("shared mode should keep raw chatID, got %q", got)
+	cases := []struct {
+		name      string
+		rawChatID string
+		threadID  int
+		want      string
+	}{
+		{"dm", "100", 0, "tg_100"},
+		{"group main window", "100", 42, "tg_100:42"},
+		{"group topic 42", "100", 42, "tg_100:42"},
+		{"group topic 88", "100", 88, "tg_100:88"},
+		{"negative group id", "-10012345", 42, "tg_-10012345:42"},
+		{"private with thread_id > 0 still prefixed", "1234567890", 999999, "tg_1234567890:999999"},
 	}
-	if got := a.sessionChatID("100", 0); got != "100" {
-		t.Fatalf("topicID=0 should keep raw chatID, got %q", got)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := a.sessionChatID(tt.rawChatID, tt.threadID); got != tt.want {
+				t.Errorf("sessionChatID(%q, %d) = %q, want %q",
+					tt.rawChatID, tt.threadID, got, tt.want)
+			}
+		})
 	}
 }
 
-func TestAdapter_SessionChatID_Separate(t *testing.T) {
+// TestAdapter_SessionTopicID_Stable replaces the legacy
+// shared/separate topic-resolution tests. The new sessionTopicID
+// is a pure function over the chatID string: it strips the "tg_"
+// prefix and parses the optional ":thread_id" suffix. No state
+// lookup is involved.
+func TestAdapter_SessionTopicID_Stable(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	a.config.TopicMode = "separate"
-	if got := a.sessionChatID("100", 42); got != "100:42" {
-		t.Fatalf("separate mode should compose chatID:topicID, got %q", got)
+	tests := []struct {
+		chatID string
+		want   int
+	}{
+		{"tg_100", 0},
+		{"tg_100:42", 42},
+		{"tg_100:7", 7},
+		{"tg_-10012345:88", 88},
+		{"tg_abc:notanumber", 0}, // parse failure → treat as bare chatID
+		{"oc_xxxxx", 0},          // non-telegram → 0
+		{"100", 0},               // legacy bare-digit → 0 (no tg_ prefix)
+		{"", 0},                  // empty → 0
 	}
-	// topicID=0 falls back to raw chatID (used for p2p with no topic).
-	if got := a.sessionChatID("100", 0); got != "100" {
-		t.Fatalf("separate mode with topicID=0 should fall back, got %q", got)
-	}
-}
-
-func TestAdapter_SessionTopicID_Shared(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	a.config.TopicMode = "shared"
-	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42})
-	if got := a.sessionTopicID("100"); got != 42 {
-		t.Fatalf("shared mode should resolve via topicForChat, got %d", got)
-	}
-}
-
-func TestAdapter_SessionTopicID_Separate(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	a.config.TopicMode = "separate"
-	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42})
-	if got := a.sessionTopicID("100:42"); got != 42 {
-		t.Fatalf("separate mode should parse ChatID, got %d", got)
-	}
-	if got := a.sessionTopicID("100:7"); got != 7 {
-		t.Fatalf("separate mode should fall back to parsed topicID, got %d", got)
-	}
-	// Malformed ChatID in separate mode: returns 0.
-	if got := a.sessionTopicID("100"); got != 0 {
-		t.Fatalf("separate mode with bare chatID should return 0, got %d", got)
+	for _, tt := range tests {
+		t.Run(tt.chatID, func(t *testing.T) {
+			if got := a.sessionTopicID(tt.chatID); got != tt.want {
+				t.Errorf("sessionTopicID(%q) = %d, want %d", tt.chatID, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1574,12 +1584,14 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_SkipsOnZeroTopic(t *testing.T) {
 
 func TestAdapter_Send_OutHeartbeat_CreatesPlaceholderOnDemand(t *testing.T) {
 	a, api := newTestAdapter(t)
-	// Seed a chat_id → topic mapping (shared mode default).
+	// Seed a chat_id → topic mapping. The outbound chatID is now
+	// wrapped in "tg_<chat.id>:<thread_id>" form by the adapter;
+	// the underlying state key remains the raw Telegram chat_id.
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42})
 	// First heartbeat arrives before any user message triggered
 	// handleMessage's ensurePlaceholder (race condition).
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "100",
+		ChatID: "tg_100:42",
 		Kind:   messages.OutHeartbeat,
 		Text:   "ignored when heartbeat present",
 		Heartbeat: &messages.HeartbeatSnapshot{

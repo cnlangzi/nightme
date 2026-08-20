@@ -19,7 +19,10 @@
 package acp
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,5 +199,78 @@ func TestEventBufferSize_Pinned(t *testing.T) {
 	const want = 40960
 	if eventBufferSize != want {
 		t.Fatalf("eventBufferSize = %d, want %d — regression: cap was lowered, events may drop under load", eventBufferSize, want)
+	}
+}
+
+// TestDeliver_DoesNotPanicOnClosedEvents is the regression test for
+// the "send on closed channel" panic observed on CI macOS when
+// readPump crashes and `defer close(d.events)` fires before the
+// pending SendBlocks producer reaches the select arm. The defer
+// recover in deliver() must silently drop the event instead of
+// taking the bridge down.
+//
+// Pre-fix: the acp bridge died with `panic: send on closed
+// channel` whenever the agent subprocess terminated between the
+// readPump's last scan and the producer's send. macOS ARM CI
+// exposed this race reliably (faster agent teardown) while Linux
+// / Windows CI happened to interleave slower.
+//
+// White-box (package acp) — constructs a driver with a pre-closed
+// events channel and asserts deliver() returns without panicking.
+func TestDeliver_DoesNotPanicOnClosedEvents(t *testing.T) {
+	a := &driver{
+		ctx:    context.Background(),
+		events: make(chan agent.AgentEvent, 1),
+	}
+	// Simulate readPump's `defer close(d.events)` firing
+	// before the producer reaches deliver().
+	close(a.events)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("deliver panicked on closed events channel: %v — defer recover guard regressed", r)
+		}
+	}()
+	// Must NOT panic. The event is silently dropped.
+	a.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "after close"})
+}
+
+// TestDeliver_LogsOnClosedChannelRecover is the diagnostic companion
+// to TestDeliver_DoesNotPanicOnClosedEvents. CI macOS startup
+// gate's "agent acknowledged within window" check requires > 150
+// bytes of output beyond nightme's banner. Pre-fix this was
+// satisfied by Go's panic stack trace landing on stderr. With
+// the defer recover guard in place, the panic stack trace is no
+// longer emitted — so we explicitly log a diagnostic line so the
+// gate still passes. This test pins the log call so a future
+// "silently drop" refactor is caught.
+func TestDeliver_LogsOnClosedChannelRecover(t *testing.T) {
+	a := &driver{
+		ctx:       context.Background(),
+		events:    make(chan agent.AgentEvent, 1),
+		agentName: "opencode",
+		sessionID: "test-session",
+	}
+	close(a.events)
+
+	// Redirect slog default to a buffer to capture output.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+	a.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "after close"})
+
+	out := buf.String()
+	if !strings.Contains(out, "acp: deliver panic on closed events channel") {
+		t.Fatalf("expected recover log line in stderr; got: %q", out)
+	}
+	if !strings.Contains(out, "opencode") {
+		t.Errorf("expected log to include agent name; got: %q", out)
 	}
 }

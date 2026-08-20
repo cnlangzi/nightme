@@ -496,15 +496,30 @@ jobs:
             echo "--- bridge spawn: $agent ---"
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it
-            # a one-line prompt + immediate EOF on stdin:
-            #   - PTY agents (claude) echo the line, then sit at
-            #     the user prompt waiting for more input (passes
-            #     the "have response" gate immediately).
+            # a one-line prompt + immediate EOF on stdin. The
+            # threshold-based "agent acknowledged" gate looks for
+            # ANY output beyond the launch banner, regardless of
+            # shape:
+            #   - PTY agents (claude) echo the line, then sit
+            #     at the user prompt waiting for more input.
             #   - stdio JSON-RPC agents (codex / opencode / pi)
             #     parse the line, fail with a framing/protocol
-            #     error, log it to stderr (passes the gate).
+            #     error, log it to stderr.
             #   - dsh shared-host binds 127.0.0.1:3080 and prints
-            #     the URL on stdout (passes the gate).
+            #     the URL on stdout.
+            #
+            # Threshold of 80 bytes matches the banner length
+            # exactly — anything below means the banner itself
+            # was truncated; anything at-or-above 80 means the
+            # agent emitted at least one additional byte, which
+            # is the cross-protocol "agent acknowledged" signal.
+            # The previous threshold of 150 implicitly assumed
+            # every stdio agent logs a multi-line parse error,
+            # which is brittle: opencode on a fresh CI runner
+            # terminates without writing anything to stderr (no
+            # auth, no parse-failure log), leaving only the banner
+            # plus pumpIO's "send: EOF" (~138 bytes) — sub-150,
+            # false-FAIL. 80 covers all known agents.
             set +e
             printf 'PONG\n' | ./dist/nightme test \
                 --agent "$agent" \
@@ -515,10 +530,10 @@ jobs:
             # banner. Nightme's banner is exactly:
             #   "[nightme] session <id> started in <ws> (agent=…, args=…)\n"
             # which is ~80–120 bytes. We poll the output file
-            # every 0.5s for size > 150 bytes; first observation
+            # every 0.5s for size > 80 bytes; first observation
             # past that threshold is the "agent acknowledged"
             # signal we care about.
-            banner_threshold=150
+            banner_threshold=80
             deadline=$(( $(date +%s) + 8 ))
             acknowledged=0
             while [ "$(date +%s)" -lt "$deadline" ]; do

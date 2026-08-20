@@ -126,21 +126,22 @@ func MergeAgents(cfg *config.Config) []AgentChoice {
 // configAgentsMenu shows the merged list and lets the user pick
 // one as the new primary agent. Saves to the config file on
 // successful selection.
+//
+// The list renders only the index and name — bridge and command
+// columns from the original layout were redundant for the "pick
+// a primary" use case (the name uniquely identifies an agent;
+// the bridge/command are already visible via `nightme agents`).
 func configAgentsMenu(cfg *config.Config, in io.Reader, out io.Writer) error {
 	merged := MergeAgents(cfg)
 
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Agents (merged: builtins + your config):")
+	fmt.Fprintln(out, "Agents:")
 	for i, a := range merged {
 		marker := "  "
 		if a.Name == cfg.Primary {
 			marker = "* "
 		}
-		bridge := a.Bridge
-		if bridge == "" {
-			bridge = "?"
-		}
-		fmt.Fprintf(out, "  %s[%d] %-10s  %-8s  %s\n", marker, i+1, a.Name, "("+bridge+")", a.Command)
+		fmt.Fprintf(out, "  %s[%d] %s\n", marker, i+1, a.Name)
 	}
 
 	fmt.Fprintf(out, "\nCurrent primary: %s\n", cfg.Primary)

@@ -75,8 +75,9 @@ func dispatchCommit(
 		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
 	}
 
-	// 1b. Refuse detached HEAD. Mirrors dispatchPush PRBlockReason
-	// case 1 — keep the two gates' policy symmetrical.
+	// 1b. Refuse detached HEAD. Mirrors dispatchPush's
+	// "snap.Branch == \"\"" early-return — keep the two
+	// gates' policy symmetrical.
 	if snap.Branch == "" {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ detached HEAD — checkout a named branch first"), nil

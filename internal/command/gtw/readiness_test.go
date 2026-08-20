@@ -1,20 +1,23 @@
 package gtw
 
-// F-57 readiness test fixtures.
+// Test fixtures shared by /gtw push, /gtw commit, and /gtw pr
+// dispatch tests.
 //
-// setupReadiness(rig, snap) is the shared helper both /gtw push
-// and /gtw pr tests use to mock a single `git status --porcelain
-// --branch --untracked-files=normal` invocation. It derives the
-// porcelain output from a messages.GitStatusSnapshot and also
-// stubs the auxiliary probes (DefaultBranch / countBaseAhead /
-// rev-parse for the non-worktree path) so dispatchPush and
-// dispatchPR can run end-to-end without the test author having
-// to assemble the porcelain string by hand.
+// setupReadiness(rig, snap) is the shared helper that mocks the
+// git calls those dispatchers make end-to-end:
+//   - `git status --porcelain --branch` (runtime footer render
+//     path; dispatch paths no longer read the body after the
+//     2-gate refactor)
+//   - `git ls-remote --heads origin <branch>` (gate 1 of /gtw pr)
+//   - `git symbolic-ref --short refs/remotes/origin/HEAD`
+//     (DefaultBranch, used by push + pr)
+//   - the two `git rev-parse` calls loadDispatchContext makes in
+//     the non-worktree fallback
 //
-// Per the F-57 migration §9 step 5: "testharness_test.go (或新
-// 文件)" — choosing a dedicated file so the readiness fixtures
-// can grow alongside the §8 test matrix without bloating the
-// existing setupPRGit / pushGit helpers.
+// Tests that need to exercise gate-1 fail override the
+// ls-remote mock with an empty-string response. setupPRGit
+// adds a GitHub-shaped origin URL so resolveProvider succeeds
+// without Detect firing its HTTP probe.
 
 import (
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -120,52 +123,48 @@ func porcelainFromSnapshot(snap messages.GitStatusSnapshot) string {
 var statusCmd = []string{"status", "--porcelain", "--branch", "--untracked-files=normal"}
 
 // setupReadiness configures a rig's pushGit with responses for
-// the readiness pre-flight. It does NOT configure push execution
-// (programmaticPushWithRetry uses different argv keys; tests that
-// drive push to completion must register those separately).
+// /gtw pr's two readiness gates + DefaultBranch +
+// loadDispatchContext's non-worktree fallback. It does NOT
+// configure push execution (programmaticPushWithRetry uses
+// different argv keys; tests that drive push to completion must
+// register those separately).
 //
 // What it does mock:
 //   - `git status --porcelain --branch --untracked-files=normal`
-//     → porcelainFromSnapshot(snap)
+//     → porcelainFromSnapshot(snap) — runtime footer render path
+//     reads this; dispatch paths no longer do.
+//   - `git ls-remote --heads origin <branch>`
+//     → "abc1234\trefs/heads/<branch>" (gate 1 of /gtw pr;
+//     tests that want to exercise gate-1 fail override with "")
 //   - `git symbolic-ref --short refs/remotes/origin/HEAD`
 //     → "origin/main" (DefaultBranch)
-//   - `git rev-list --count main..HEAD`
-//     → "5" (countBaseAhead default — happy path; tests that
-//     exercise the "nothing new to PR yet" branch override)
 //   - the two `git rev-parse` calls loadDispatchContext makes in
 //     the non-worktree fallback
 //
-// Tests pass `branch` to control the upstream ref (snap.Branch is
-// what the porcelain header says; the worktree branch name from
-// the yml is what /gtw pr sees in `c.Branch`). For the standard
-// case they're identical; tests that need to exercise the
-// "branch in yml != header" edge case can pass different values.
+// Tests pass `branch` to control the upstream ref (snap.Branch
+// is what the porcelain header says; the worktree branch name
+// from the yml is what /gtw pr sees in `c.Branch`). For the
+// standard case they're identical; tests that need to exercise
+// the "branch in yml != header" edge case can pass different
+// values.
 func setupReadiness(rig *prTestRig, branch string, snap messages.GitStatusSnapshot) {
-	// CollectReadiness — the F-57 single source of truth.
+	// Runtime footer render path — ChatSession.GitStatus rebuilds
+	// the snapshot on every stamp, so it still needs the
+	// porcelain mock. Dispatch paths don't read the body.
 	rig.git.onArgs(statusCmd, porcelainFromSnapshot(snap), "", nil)
 
-	// F-237: dispatch paths go through CollectReadinessForDispatch,
-	// which runs `git ls-remote --heads origin <branch>` to
-	// verify the cached upstream ref isn't stale. Default to a
-	// non-empty response so existing tests (which assume the
-	// upstream really exists on origin) keep passing without
-	// each test having to register the probe mock. Tests that
-	// want to exercise the stale-cached case override this with
-	// an empty-string response.
+	// Gate 1 of /gtw pr: origin/<branch> ref exists. Default to
+	// a non-empty response so existing tests (which assume the
+	// upstream really exists on origin) keep passing. Tests that
+	// want to exercise gate-1 fail override this with "".
 	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", branch},
 		"abc1234	refs/heads/"+branch, "", nil)
 
-	// DefaultBranch (used by both dispatchPush and dispatchPR for
-	// the success-card revRange / PR base ref). DefaultBranch does
-	// strings.TrimPrefix(out, "origin/") so the mock must NOT
-	// include the "refs/remotes/" prefix.
+	// DefaultBranch (used by dispatchPR for the PR base ref).
+	// DefaultBranch does strings.TrimPrefix(out, "origin/") so
+	// the mock must NOT include the "refs/remotes/" prefix.
 	rig.git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"},
 		"origin/main", "", nil)
-
-	// countBaseAhead — only /gtw pr reaches this. Default to 5
-	// (happy path "has stuff to PR"). Tests that want the
-	// "nothing new to PR yet" reply override via onArgs directly.
-	rig.git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, "5", "", nil)
 
 	// Non-worktree fallback: loadDispatchContext reads these
 	// when there's no .nightme/gtw.yml. Tests that go through
@@ -175,8 +174,8 @@ func setupReadiness(rig *prTestRig, branch string, snap messages.GitStatusSnapsh
 	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, branch, "", nil)
 }
 
-// itoa10 lives in commit_push_test.go (older code) — we reuse it
-// here for the readiness fixture.
+// itoa10 lives in push_test.go — we reuse it here for the
+// readiness fixture.
 
 // setupPushMocks is the push-test equivalent of setupReadiness.
 // The F-56 push tests already wire their own deps.Git and chat

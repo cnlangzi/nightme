@@ -59,6 +59,15 @@ type fakeGitProvider struct {
 	createPRResp string
 	createPRErr  error
 
+	// FindOpenPRForBranch response. findOpenPRResp is the PR
+	// the fake returns when findOpenPRErr is nil. findOpenPRErr
+	// wins when non-nil. Mirrors the prByHead / prErr split
+	// (FindOpenPRForBranch and GetPR share the same shape, but
+	// different error semantics — FindOpenPRForBranch is the
+	// /gtw pr precheck where every error is surfaced).
+	findOpenPRResp *PR
+	findOpenPRErr  error
+
 	// GetPR response. prByHead[head] is returned when GetPR is
 	// called with the matching head branch; prErr[head] wins
 	// when set (overrides prByHead). Missing key returns
@@ -210,6 +219,25 @@ func (f *fakeGitProvider) SetCreatePRErr(err error) {
 	f.createPRErr = err
 }
 
+// SetFindOpenPRResp registers the response for FindOpenPRForBranch.
+// Pass nil to simulate "no PR yet" (gate 2 pass); pass a
+// non-nil PR to simulate "already open" (gate 2 fail).
+func (f *fakeGitProvider) SetFindOpenPRResp(pr *PR) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findOpenPRResp = pr
+}
+
+// SetFindOpenPRErr registers an error response for
+// FindOpenPRForBranch — e.g. ErrCLINotInstalled or a wrapped
+// unknown stderr. Wraps errors.Is-friendly sentinels so the
+// dispatcher's switch can use errors.Is cleanly.
+func (f *fakeGitProvider) SetFindOpenPRErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findOpenPRErr = err
+}
+
 // SetPR registers `pr` as the response for GetPR(head). Tests
 // use this to simulate a repository where the current head
 // branch has an associated open PR / MR.
@@ -347,6 +375,37 @@ func (f *fakeGitProvider) CreatePR(_ context.Context, owner, repo, base, head, t
 	})
 	f.mu.Unlock()
 	return url, err
+}
+
+// FindOpenPRForBranch is the fake implementation of
+// GitProvider.FindOpenPRForBranch. Like the real providers, it
+// returns (nil, nil) when no PR is set — that means "no PR
+// yet", which is gate 2's pass condition.
+//
+// Unlike GetPR, FindOpenPRForBranch errors propagate verbatim:
+// dispatchPR surfaces them with a `❌ check existing PR: <err>`
+// prefix, so the test must wrap any non-nil error in a way that
+// errors.Is can resolve (or that stringifies to a useful
+// diagnostic). See SetFindOpenPRErr.
+func (f *fakeGitProvider) FindOpenPRForBranch(_ context.Context, owner, repo, head string) (*PR, error) {
+	f.mu.Lock()
+	pr := f.findOpenPRResp
+	err := f.findOpenPRErr
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "FindOpenPRForBranch",
+		Owner:  owner,
+		Repo:   repo,
+		Head:   head,
+	})
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if pr == nil {
+		return nil, nil
+	}
+	cp := *pr
+	return &cp, nil
 }
 
 func (f *fakeGitProvider) GetPR(_ context.Context, owner, repo, head string) (*PR, error) {

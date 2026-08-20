@@ -1,8 +1,6 @@
 package messages
 
 import (
-	"fmt"
-
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
@@ -95,7 +93,7 @@ type PR struct {
 // and /gtw pr compose to make their business decisions. They are deliberately
 // pure functions on the snapshot — they do NOT call into the gtw package,
 // touch git, or know anything about the push/pr commands' UX. The push and
-// pr layers add their own composition logic (PushBlockReason / PRBlockReason)
+// pr layers add their own composition logic (PushBlockReason)
 // on top.
 //
 // Keeping these predicates in the messages package (where the struct lives)
@@ -178,81 +176,7 @@ func (s *GitStatusSnapshot) PushBlockReason() string {
 	return ""
 }
 
-// IsReadyForPR reports whether /gtw pr should proceed past the readiness
-// gate. A worktree is "ready" iff:
-//
-//   - the branch exists on origin (HasUpstreamBranch), AND
-//   - local branch tip == upstream tip (LocalIsAtUpstreamTip), AND
-//   - working tree is fully committed (WorkingTreeIsClean)
-//
-// /gtw push's successful exit guarantees this (modulo race); see F-57 §5
-// for the continuity proof.
-func (s *GitStatusSnapshot) IsReadyForPR() bool {
-	return s.HasUpstreamBranch() && s.LocalIsAtUpstreamTip() && s.WorkingTreeIsClean()
-}
 
-// PRBlockReason returns the single actionable reason /gtw pr is being
-// refused, in priority order (hard blocks first, then cleanup nudges).
-//
-// Priority rationale:
-//  1. Branch == "" (detached HEAD) — refuse first; there's no ref to PR
-//     from. Cannot be "fixed" by /gtw push; the user must checkout.
-//  2. HasConflicts — refuse; resolve manually.
-//  3. !HasUpstream — this is the bug case F-57 fixes: branch was never
-//     pushed to origin. Direct the user to /gtw push.
-//  4. AheadOfRemote > 0 — local has unpushed commits; direct to push.
-//     NOTE: if BOTH ahead > 0 AND behind > 0 (diverged — local
-//     rebased on stale origin), the ahead branch wins. User must
-//     push first; the resulting push will fail if remote has new
-//     commits, but that's the "git push --force-with-lease" path,
-//     not a /gtw pr concern.
-//  5. BehindRemote > 0 — remote moved forward; user must rebase.
-//  6. Added / Deleted / Modified > 0 — working tree dirty. /gtw
-//     push no longer auto-commits; direct to /gtw commit first.
-//     All three categories share a single hint line so /gtw pr's
-//     refusal reads as one "working tree has uncommitted work"
-//     statement, not three.
-//  7. Untracked > 0 — git add, then commit, then push, then pr.
-//
-// The function returns "" when IsReadyForPR() returns true (no block).
-// Callers should check IsReadyForPR first and call PRBlockReason only on
-// the negative path, but the "" return here is also safe to ignore.
-func (s *GitStatusSnapshot) PRBlockReason() string {
-	switch {
-	case s.Branch == "":
-		return "❌ detached HEAD — checkout a named branch first"
-	case s.HasConflicts:
-		return "❌ worktree has unmerged paths (merge/rebase conflict)\n" +
-			"\n" +
-			"💡 hint: resolve conflicts and `git add`, then /gtw pr"
-	case !s.HasUpstream:
-		return "❌ branch has no upstream on origin\n" +
-			"\n" +
-			"💡 hint: /gtw push first to publish the branch to origin, then /gtw pr"
-	case s.AheadOfRemote > 0:
-		return fmt.Sprintf(
-			"⚠️ %d commit(s) made locally but not pushed\n"+
-				"\n"+
-				"💡 hint: /gtw push first, then /gtw pr", s.AheadOfRemote)
-	case s.BehindRemote > 0:
-		return fmt.Sprintf(
-			"⚠️ origin/%s is %d commit(s) ahead of your local branch\n"+
-				"\n"+
-				"💡 hint: `git pull --rebase`, then /gtw pr", s.Branch, s.BehindRemote)
-	case s.Added+s.Deleted+s.Modified > 0:
-		return fmt.Sprintf(
-			"⚠️ %d file(s) changed but not committed\n"+
-				"\n"+
-				"💡 hint: /gtw commit first, then /gtw push, then /gtw pr",
-			s.Added+s.Deleted+s.Modified)
-	case s.Untracked > 0:
-		return fmt.Sprintf(
-			"⚠️ %d new file(s) not added to git\n"+
-				"\n"+
-				"💡 hint: git add them, then /gtw commit, then /gtw push, then /gtw pr", s.Untracked)
-	}
-	return ""
-}
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,
 // representing a tool call (start or end). It captures the

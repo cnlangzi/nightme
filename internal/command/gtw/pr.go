@@ -12,19 +12,32 @@ package gtw
 //   - wip/gtw-pr.md       (design rationale, IM-friendly card, prompts)
 //   - wip/gtw-pr-plan.md  (implementation phases, edge-case table)
 //
-// Flow (mirrors wip/gtw-pr.md §3):
+// Flow:
 //
 //  1. Locate selectedCwd + .nightme/gtw.yml → Context.
 //  2. Resolve default branch via DefaultBranch(repoRoot).
-//  3. Reject if head has unpushed commits (hint: /gtw push first).
-//  4. Reject if rev-list --count base..HEAD == 0 (nothing to PR).
-//  5. Pick an agent (-a override → SelectedAgent), one-shot RunOnce
-//     to generate the PR text.
-//  6. parsePRReply extracts (title, body) from the fenced block.
-//  7. Pick a provider (yml Repo/Provider wins; otherwise
+//  3. Gate 1: `git ls-remote --heads origin <branch>` confirms the
+//     ref really exists on origin. Refused = user has never
+//     pushed (or it was deleted); hint: /gtw push first.
+//  4. Pick a provider (yml Repo/Provider wins; otherwise
 //     RemoteOriginURL + Detect).
+//  5. Gate 2: provider.FindOpenPRForBranch returns the single open
+//     PR for this head, or nil if none exists. nil = proceed;
+//     non-nil = "already open", surface the URL.
+//  6. Pick an agent (-a override → SelectedAgent), one-shot RunOnce
+//     to generate the PR text.
+//  7. parsePRReply extracts (title, body) from the fenced block.
 //  8. provider.CreatePR → URL.
 //  9. Reply with ✅ PR opened + branch / base / url / worktree card.
+//
+// Pre-PR state (detached HEAD / uncommitted / untracked / ahead vs
+// upstream / ahead vs base / behind vs upstream / merge conflicts /
+// no upstream tracking) is NOT gated here — that's the user's
+// responsibility under the new design. gh/glab's own response is
+// the final word on whether the platform accepts the request.
+//
+// See dispatchPR's doc comment for the "known error → friendly
+// hint, unknown error → verbatim" error contract.
 
 import (
 	"context"
@@ -60,9 +73,25 @@ type prArgs struct {
 	Agent string
 }
 
-// dispatchPR is the entry point for `/gtw pr [-a <agent>]`.
-// Mirrors dispatchPush's structure: read yml → early-return
-// checks → RunOnce → provider call → IM-friendly card.
+// dispatchPR implements /gtw pr. The readiness contract is
+// narrower than /gtw commit + /gtw push — we only gate on two
+// conditions:
+//
+//  1. origin/<branch> ref exists (git layer; RemoteBranchExists)
+//  2. no open PR for this branch (provider layer; FindOpenPRForBranch)
+//
+// Everything else (detached HEAD / uncommitted / untracked /
+// ahead vs upstream / ahead vs base / behind vs upstream /
+// merge conflicts / no upstream tracking) is the user's
+// responsibility: /gtw pr attempts to open a PR regardless,
+// and lets gh/glab's own error message be the final word on
+// whether the platform accepts it.
+//
+// Known errors get friendly hints with a next-step suggestion;
+// unknown errors propagate verbatim. The contract is implemented
+// at the helper layer (RemoteBranchExists, GitHub/GitLab
+// providers via wrapCreatePRError / wrapListPRError) —
+// dispatchPR just dispatches on errors.Is.
 //
 // All non-success paths return nil error + a Result whose
 // Reply has already been sent via cs.Emitter() — the same
@@ -88,49 +117,58 @@ func dispatchPR(
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
-	// F-57: single readiness gate. Replaces the old
-	// countUnpushed + nested uncommitted/untracked if-ladder.
-	// The snapshot covers all six dimensions (D1 detached /
-	// D2 upstream / D3 ahead / D4 behind / D5 dirty / D6
-	// conflicts) plus the legacy "branch in sync with base"
-	// status. PRBlockReason is priority-ordered so the user
-	// sees ONE actionable message per /gtw pr attempt.
-	snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
+	// --- gate 1: origin/<branch> ref exists -------------------------
+	// RemoteBranchExists wraps known stderr fragments (auth /
+	// network / not-a-repo) with a friendly hint, and propagates
+	// unknown stderr verbatim. We deliberately do NOT fall back
+	// to "no upstream" on transient errors: telling the user
+	// "push first" when the real problem is the network would
+	// mislead them into running the wrong next step.
+	headExists, err := RemoteBranchExists(ctx, c.Worktree, c.Branch, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ read worktree status: %v", err)), nil
+			fmt.Sprintf("❌ %v", err)), nil
 	}
-	if snap == nil {
-		// CollectReadiness returns (nil, nil) on non-repo / empty /
-		// git error (see git_status.go). From /gtw pr's perspective
-		// "no snapshot" means "can't prove the worktree is ready" —
-		// fail closed rather than fall through and call gh against
-		// an unverified state.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ cannot read worktree git status — refusing to open a PR\n"+
-				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
-	}
-	if reason := snap.PRBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
-	}
-
-	// PR-worthiness check (orthogonal to readiness): is there
-	// actually anything on this branch that isn't already in
-	// base? With the readiness gate passed we know the tree is
-	// clean and the branch is in sync with origin, so "ahead=0
-	// vs base" really means "nothing to ship" — no need for
-	// the legacy nested uncommitted-hint cascade.
-	ahead, err := countBaseAhead(ctx, c.Worktree, baseBranch, deps)
-	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ count commits ahead of base: %v", err)), nil
-	}
-	if ahead == 0 {
+	if !headExists {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
-				"✅ branch %s is in sync with %s — nothing new to PR yet\n"+
-					"hint: make some changes, then /gtw commit, then /gtw push, then /gtw pr.",
-				c.Branch, baseBranch)), nil
+				"❌ origin/%s does not exist — /gtw push first to publish the branch to origin",
+				c.Branch)), nil
+	}
+
+	// --- pick provider (must precede gate 2) ------------------------
+	provider, owner, repo, err := resolveProvider(ctx, c, deps)
+	if err != nil {
+		// resolveProvider already produces friendly messages
+		// (no `origin` remote / invalid URL / unsupported
+		// platform). Echo verbatim.
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ %v", err)), nil
+	}
+
+	// --- gate 2: no open PR for this branch -------------------------
+	// FindOpenPRForBranch translates ErrCLINotInstalled when the
+	// gh/glab binary is missing; unknown stderr propagates
+	// verbatim. Returning (nil, nil) means "no PR yet" — gate
+	// passed, proceed to CreatePR.
+	existing, err := provider.FindOpenPRForBranch(ctx, owner, repo, c.Branch)
+	if err != nil {
+		// FindOpenPRForBranch can return ErrCLINotInstalled (when
+		// gh/glab is missing) — the "check existing PR" prefix
+		// would mislead the user about the actual problem, so
+		// surface the install hint without a gate-2 prefix.
+		if errors.Is(err, ErrCLINotInstalled) {
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ %v", err)), nil
+		}
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ check existing PR: %v", err)), nil
+	}
+	if existing != nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf(
+				"❌ branch %s already has an open PR (#%d): %s",
+				c.Branch, existing.Number, existing.URL)), nil
 	}
 
 	// --- run agent --------------------------------------------------
@@ -160,55 +198,37 @@ func dispatchPR(
 				perr, indentLines(text, "  "))), nil
 	}
 
-	// --- pick provider ----------------------------------------------
-	provider, owner, repo, err := resolveProvider(ctx, c, deps)
-	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ %v", err)), nil
-	}
-
 	url, err := provider.CreatePR(ctx, owner, repo, baseBranch, c.Branch, title, body)
 	if err != nil {
-		if errors.Is(err, ErrPRExists) {
-			// (No explicit chatsession refresh needed here:
-			// ChatSession.GitStatus rebuilds its snapshot on every
-			// call, and the prcache.Cache.PR() read picks up the
-			// existing PR on the next stamp via the per-stamp
-			// MaybeRefresh trigger. ErrPRExists is a side-branch
-			// that uses a no-stamp reply, so the lack of
-			// pre-write here is harmless — footer update flows
-			// through the next user-driven stamp.)
-			//
-			// Friendly reuse — the user already opened a PR
-			// for this branch. We don't have the URL from
-			// gh/glab stderr reliably across versions, so we
-			// just point them at the repo.
+		// Known error contract:
+		//   - ErrStaleUpstream: race window — branch existed at
+		//     gate 1 but was deleted before CreatePR. Same
+		//     friendly hint as gate 1's "no upstream" miss.
+		//   - ErrPRExists: race window — no PR at gate 2 but
+		//     one was opened before CreatePR. Point at the
+		//     repo list (we don't have a reliable URL from
+		//     gh/glab stderr across versions).
+		//   - ErrCLINotInstalled: surface the install hint.
+		//   - default: unknown — propagate verbatim, NO
+		//     translation, NO masking.
+		switch {
+		case errors.Is(err, ErrStaleUpstream):
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf(
+					"❌ origin/%s no longer exists — /gtw push first to republish",
+					c.Branch)), nil
+		case errors.Is(err, ErrPRExists):
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf(
 					"❌ a PR for %s already exists — check your repo's PR list.",
 					c.Branch)), nil
-		}
-		// F-237: defense in depth for the stale-cached-upstream
-		// hole. CollectReadinessForDispatch should already have
-		// caught this via `git ls-remote`, but the probe can
-		// miss three cases:
-		//   - ls-remote network error during probe (graceful
-		//     fallback leaves HasUpstream=true)
-		//   - race: branch deleted from origin between probe
-		//     and CreatePR
-		//   - future gh / GitHub Enterprise message drift
-		//
-		// In all three, gh returns one of the GraphQL validator
-		// messages below. The originals are concatenated and
-		// four lines long — useless for the user. Map them to
-		// the same friendly hint PRBlockReason would have
-		// rendered if the probe had been able to see the lie.
-		if ghMessage, ok := mapGhHeadMissingToHint(err); ok {
+		case errors.Is(err, ErrCLINotInstalled):
 			return reply(ctx, cs.Emitter(), chatID, messageID,
-				ghMessage), nil
+				fmt.Sprintf("❌ %v", err)), nil
+		default:
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ create PR failed: %v", err)), nil
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ create PR failed: %v", err)), nil
 	}
 
 	card := renderPROpenedCard(c, baseBranch, url)
@@ -240,48 +260,6 @@ func dispatchPR(
 	// no-stamp reply — they're not the agent-result surface.
 	return replyAgent(ctx, cs.Emitter(), chatID, messageID,
 		card, agentName, runRes), nil
-}
-
-// mapGhHeadMissingToHint translates the four common gh GraphQL
-// "head ref is bad" error messages into the same friendly
-// "/gtw push first" hint PRBlockReason would have rendered
-// upstream. Returns (msg, true) when the hint applies; ("",
-// false) when err doesn't match any of the known patterns —
-// the caller falls through to the generic error reply.
-//
-// F-237: CollectReadinessForDispatch should already have
-// caught the stale-cached-upstream case via `git ls-remote`,
-// but the probe can miss three cases (network blip /
-// origin-deleted-between-probe-and-create / future gh message
-// drift). This helper is the safety net for those cases so
-// the user never sees the raw four-line GraphQL diagnostic.
-//
-// Pattern match is by substring on err.Error() — the CreatePR
-// wrapper formats the gh CLI's stderr into the error message
-// verbatim (see provider.GitHubProvider.CreatePR), so any
-// gh-emitted phrase survives. We match four substrings because
-// they are the GraphQL validator fields that fire on the
-// "head not on origin" path; other validation failures (auth,
-// label missing, repo not found) keep their own behaviour.
-// No typo: "Base sha can't be blank" / "Head sha can't be
-// blank" are the literal GraphQL field names from
-// createPullRequest; matching them lets us cover the case
-// where gh computes an empty SHA from a missing head ref.
-func mapGhHeadMissingToHint(err error) (string, bool) {
-	if err == nil {
-		return "", false
-	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "Head ref must be a branch"),
-		strings.Contains(msg, "No commits between"),
-		strings.Contains(msg, "Head sha can't be blank"),
-		strings.Contains(msg, "Base sha can't be blank"):
-		return "❌ branch has no upstream on origin\n" +
-			"\n" +
-			"💡 hint: /gtw push first to publish the branch to origin, then /gtw pr", true
-	}
-	return "", false
 }
 
 // buildPRPrompt renders the text block the agent receives.
@@ -751,34 +729,8 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 	return prov, owner, repo, nil
 }
 
-// countBaseAhead returns the number of commits on HEAD that are
-// not in `base` (`git rev-list --count base..HEAD`). Used to
-// reject "/gtw pr" when the branch is at base (nothing to PR).
-//
-// `<base>` might not exist as a local ref (e.g. when the user
-// invoked /gtw pr from a manually-created worktree that never
-// ran /gtw fix's `git checkout <base>` step). In that case the
-// local ref is `origin/<base>`; we retry with the remote form
-// before giving up. This matches what /gtw fix gets for free
-// because RefreshDefaultBranch checks the local branch out
-// first; /gtw pr has no such precondition so we handle it here.
-func countBaseAhead(ctx context.Context, worktree, base string, deps HandlerDeps) (int, error) {
-	ranges := []string{base + "..HEAD", "origin/" + base + "..HEAD"}
-	var lastStderr string
-	for _, rng := range ranges {
-		out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--count", rng)
-		if err == nil {
-			n, perr := atoi(strings.TrimSpace(out))
-			if perr != nil {
-				return 0, perr
-			}
-			return n, nil
-		}
-		lastStderr = strings.TrimSpace(stderr)
-	}
-	return 0, fmt.Errorf("rev-list --count %s..HEAD (also tried origin/%s..HEAD): %s",
-		base, base, lastStderr)
-}
+
+	
 
 // renderPROpenedCard renders the IM-friendly success card.
 // Format 1 (gtw/README.md §2.1): ✅ title + `→ field: value`

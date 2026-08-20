@@ -83,10 +83,15 @@ func (s *Starter) Detect() error {
 // a live *agent.Agent.
 //
 // The runtime state (transport / rpc / events / driver) lives
-// inside the generic acp bridge. The built-in text buffering in the
-// ACP bridge handles agent_message_chunk / agent_thought_chunk
-// accumulation and sentence-level flushing — no per-bridge
-// UpdateHandler or FlushHandler is needed.
+// inside the generic acp bridge. opencode emits no vendor-private
+// sessionUpdate kinds or JSON-RPC methods that the generic acp
+// fallback does not already handle, so no per-bridge
+// UpdateHandler is installed here — the built-in text buffering
+// (agent_message_chunk / agent_thought_chunk / usage_update /
+// session.status / etc.) all lives in the generic bridge.
+// If a future opencode version adds PRIVATE protocol extensions,
+// a thin per-bridge UpdateHandler can be installed via
+// (*driver).SetUpdateHandler(...) — see docs/bridge/acp.md §2.3.
 //
 // cfg.SessionID, when non-empty, is reserved for v2 ACP
 // session/load wiring. Today the bridge always opens a fresh
@@ -98,9 +103,12 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	}
 	// The generic acp bridge handles spawn + JSON-RPC + PTY +
 	// Stop / Reset / Permission. The built-in text buffering in
-	// the ACP bridge now handles agent_message_chunk /
-	// agent_thought_chunk accumulation and sentence-level flushing,
-	// so no per-bridge UpdateHandler or FlushHandler is needed.
+	// the ACP bridge handles agent_message_chunk /
+	// agent_thought_chunk accumulation and sentence-level flushing.
+	// The full sessionUpdate surface (agent_message_chunk /
+	// tool_call / tool_call_update / usage_update / session.status
+	// / session_info_update / ...) is recognised by the generic
+	// fallback — no per-bridge translator needed.
 	acpStarter := acp.NewStarter(s.name, s.command, s.args, nil, 0, 0)
 	a, err := acpStarter.Start(ctx, cfg)
 	if err != nil {

@@ -110,11 +110,18 @@ func NewEventHandler(
 				}
 			}
 		}
-		// F-45 §1.4: capture model on first EventAgentReady. Independent
-		// of the SessionID capture above (some bridges may emit
-		// one without the other). SetModel is idempotent — empty
-		// incoming values don't overwrite.
-		if ev.Kind == agent.EventAgentReady && ev.Model != "" {
+		// F-45 §1.4: capture model. Originally only on
+		// EventAgentReady (matching the SessionID capture above);
+		// broadened to ANY non-empty ev.Model so bridges whose
+		// wire doesn't carry the model at handshake (e.g. ACP,
+		// whose initialize / session/new responses don't report
+		// it) can still populate s.Model() from a later
+		// usage_update / session_info_update that the bridge
+		// stamps via deliver(). SetModel is idempotent — empty
+		// incoming values don't overwrite, so the broadened
+		// guard is safe for existing bridges that already
+		// populate Ready.Model.
+		if ev.Model != "" {
 			s.SetModel(ev.Model)
 		}
 		// Per-event usage flows from bridge → out.Usage (via

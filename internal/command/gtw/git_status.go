@@ -100,6 +100,15 @@ type GitStatusSnapshot = messages.GitStatusSnapshot
 // /gtw push, and /gtw pr readiness gates. All three commands call
 // it at entry; see docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
 // so push and commit gate on the same git truth.
+//
+// Note (F-237): the porcelain header trusts local config and
+// cached remote-tracking refs, so HasUpstream=true here does NOT
+// guarantee the branch is on origin — it just means local git
+// believes it is. Dispatch entry points that gate on upstream
+// truth (e.g. /gtw pr) should call CollectReadinessForDispatch
+// instead so a fresh `git ls-remote` probe can catch the stale
+// cached-ref case. The runtime footer path keeps using this
+// function to avoid an extra network round-trip on every stamp.
 func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
 	out, stderr, err := git.Run(ctx, dir, "status", "--porcelain", "--branch",
 		"--untracked-files=normal")
@@ -116,6 +125,82 @@ func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatu
 		return nil, nil
 	}
 	return snap, nil
+}
+
+// CollectReadinessForDispatch is CollectReadiness plus a
+// fresh `git ls-remote --heads origin <branch>` probe that
+// catches the F-237 stale-cached-upstream bug.
+//
+// Bug shape: when branch.<name>.{remote,merge} is set in local
+// git config AND refs/remotes/origin/<branch> is present as a
+// cached remote-tracking ref BUT the branch was actually
+// deleted server-side (or pulled into a sibling worktree from
+// a stale clone), `git status --porcelain --branch` reports
+// `## branch...origin/branch` with ahead=0/behind=0. The
+// readiness gate's !HasUpstream check falls through, /gtw pr
+// reaches gh, and gh explodes with a 4-line GraphQL diagnostic
+// because the head ref isn't a branch on origin.
+//
+// Fix shape: after parsing the porcelain header, when
+// HasUpstream=true we run a cheap `git ls-remote --heads origin
+// <branch>` and treat empty output as "the cached ref lies —
+// behave as if HasUpstream=false". AheadOfRemote / BehindRemote
+// are zeroed in lockstep because they were derived against the
+// cached SHA and are now meaningless (the branch isn't on
+// origin to be ahead/behind of).
+//
+// Failure mode: a network blip / missing origin remote makes
+// `git ls-remote` exit non-zero. We log nothing (no logger in
+// scope) and leave the porcelain truth alone rather than flip
+// a passing gate to failing on a transient outage — the
+// dispatchPR defense-in-depth in pr.go catches the actual gh
+// rejection if the cached ref really was stale and we got past
+// the gate on a fluke.
+//
+// Callers: dispatchPR, dispatchPush, dispatchCommit. NOT the
+// runtime footer path (ChatSession.GitStatus) — that one runs
+// on every outbound stamp with a 3s budget and would pay for
+// a network call per render. The footer doesn't gate on
+// HasUpstream truth, so the porcelain approximation is fine.
+func CollectReadinessForDispatch(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
+	snap, err := CollectReadiness(ctx, dir, git)
+	if err != nil || snap == nil {
+		return snap, err
+	}
+	verifyUpstreamOnOrigin(ctx, dir, snap, git)
+	return snap, nil
+}
+
+// verifyUpstreamOnOrigin mutates snap in place when the cached
+// upstream ref is stale. No-op when the snapshot is nil,
+// detached-HEAD, or already HasUpstream=false (no upstream to
+// verify). On `git ls-remote` error the snapshot is left
+// unchanged — see CollectReadinessForDispatch for the rationale.
+func verifyUpstreamOnOrigin(ctx context.Context, dir string, snap *GitStatusSnapshot, git GitRunner) {
+	if snap == nil || snap.Branch == "" || !snap.HasUpstream {
+		// Detached HEAD (snap.Branch=="") or porcelain already
+		// said no upstream — nothing to verify, and nothing to
+		// flip.
+		return
+	}
+	exists, err := RemoteBranchExists(ctx, dir, snap.Branch, git)
+	if err != nil {
+		// Cannot reach origin / no origin remote / etc.
+		// Graceful fallback: keep the porcelain truth. The
+		// dispatchPR stderr mapper in pr.go is the safety net
+		// for the rare case where the cached ref really is
+		// stale and we just couldn't tell.
+		return
+	}
+	if !exists {
+		// Cached upstream lied. Zero out the fields whose values
+		// were derived against the cached SHA — they're now
+		// meaningless and would otherwise let the gate fall
+		// through to "ahead=0 / behind=0 / clean" → ready.
+		snap.HasUpstream = false
+		snap.AheadOfRemote = 0
+		snap.BehindRemote = 0
+	}
 }
 
 // parsePorcelainBranchStatus parses the exact output format of

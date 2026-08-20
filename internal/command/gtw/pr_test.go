@@ -1259,6 +1259,199 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 	}
 }
 
+// TestDispatchPR_StaleCachedUpstream (F-237 regression test).
+//
+// Repro: local git config has branch.fix-install.{remote,merge}
+// set AND refs/remotes/origin/fix-install exists as a cached
+// remote-tracking ref, but the branch was deleted server-side.
+// `git status --porcelain --branch` still reports
+// `## fix-install...origin/fix-install` with ahead=0/behind=0,
+// so the F-57 readiness gate falls through, /gtw pr reaches
+// gh, and gh explodes with the four-line GraphQL diagnostic.
+//
+// Fix verification: setupReadiness is configured so that
+// `git status` reports a porcelain header claiming upstream
+// but `git ls-remote --heads origin fix-install` returns empty.
+// CollectReadinessForDispatch should flip HasUpstream=false and
+// the documented "no upstream" PRBlockReason should fire BEFORE
+// the agent / CreatePR is reached. dispatchPR must NOT invoke
+// the provider.
+func TestDispatchPR_StaleCachedUpstream(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "fix-install"})
+	setupReadiness(rig, "fix-install", messages.GitStatusSnapshot{
+		Branch:      "fix-install",
+		HasUpstream: true, // porcelain header claims an upstream
+	})
+	// setupReadiness defaults the ls-probe to a non-empty
+	// response (confirming the upstream). Override AFTER so the
+	// empty response wins; this is the F-237 stale-cached-ref
+	// condition.
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "fix-install"}, "", "", nil)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "branch has no upstream on origin") {
+		t.Fatalf("expected no-upstream reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "/gtw push first to publish the branch") {
+		t.Fatalf("expected /gtw push hint, got:\n%s", r)
+	}
+	// Invariant: dispatchPR must NOT have invoked gh — the gate
+	// caught the stale cached ref before reaching CreatePR.
+	for _, c := range rig.git.calls {
+		if len(c.args) > 0 && c.args[0] == "ls-remote" {
+			// ls-remote is expected (the probe). Anything else
+			// from the provider path is not.
+			continue
+		}
+		_ = c // no further assertion; rig.git.calls includes every git call
+	}
+	// The provider's CreatePR must not have been called.
+	for _, c := range rig.prov.calls {
+		if c.Method == "CreatePR" {
+			t.Fatalf("CreatePR must NOT have been called; the gate caught the stale ref. calls=%+v", rig.prov.calls)
+		}
+	}
+}
+
+// TestDispatchPR_LSRemoteErrorBypassesProbe (F-237 graceful-
+// fallback verification). When `git ls-remote` errors (network
+// blip, no origin remote, etc.) the probe must NOT flip
+// HasUpstream=false — that would turn a passing gate into a
+// failing one on a transient outage. The dispatch falls
+// through; the pr.go defense-in-depth catches the actual gh
+// rejection (covered by TestDispatchPR_CreatePRStaleUpstreamFallback).
+func TestDispatchPR_LSRemoteErrorBypassesProbe(t *testing.T) {
+	// Verification that the ls-remote probe's graceful fallback
+	// does NOT flip HasUpstream=false on transient errors. The
+	// clean snap (HasUpstream=true, ahead=0, behind=0, no
+	// dirty files) means the gate would fire "no upstream" if
+	// the probe had lied; the dispatch reaching CreatePR is the
+	// signal that the graceful fallback worked.
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "feature/x"})
+	setupReadiness(rig, "feature/x", messages.GitStatusSnapshot{
+		Branch:      "feature/x",
+		HasUpstream: true,
+	})
+	// Override the default ls-remote response AFTER setupReadiness
+	// so the error response wins. Graceful fallback: the probe
+	// error must NOT flip HasUpstream to false.
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "feature/x"},
+		"", "fatal: unable to access", errors.New("exit 128"))
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/42")
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	// Graceful fallback: the dispatch reached CreatePR (no
+	// gate failure) and got a happy URL back.
+	r := s.lastText()
+	if !strings.Contains(r, "PR opened") {
+		t.Fatalf("expected PR-opened card (graceful fallback), got:\n%s", r)
+	}
+	// Cross-check: the no-upstream reply must NOT have fired.
+	if strings.Contains(r, "branch has no upstream on origin") {
+		t.Fatalf("graceful fallback failed — gate fired no-upstream; got:\n%s", r)
+	}
+}
+
+// TestDispatchPR_CreatePRStaleUpstreamFallback (F-237 defense-
+// in-depth). Even when the ls-remote probe is bypassed (network
+// error → graceful fallback leaves HasUpstream=true), if gh
+// rejects with one of the documented GraphQL validator messages
+// we MUST surface the friendly "/gtw push first" hint instead
+// of leaking the raw four-line diagnostic. The dispatch would
+// otherwise reach CreatePR with a stale cached ref and blow up.
+func TestDispatchPR_CreatePRStaleUpstreamFallback(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "fix-install"})
+	setupReadiness(rig, "fix-install", messages.GitStatusSnapshot{
+		Branch:      "fix-install",
+		HasUpstream: true,
+	})
+	// Force ls-remote to error AFTER setupReadiness so the
+	// probe doesn't catch the stale ref — we want to verify the
+	// pr.go mapper catches it via the gh stderr fallback.
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "fix-install"},
+		"", "fatal: unable to access", errors.New("exit 128"))
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	// Build an error that mimics the gh stderr the bug report
+	// quoted: four GraphQL validator messages concatenated.
+	ghErr := fmt.Errorf(
+		"gh pr create: exit status 1: pull request create failed: "+
+			"GraphQL: Head sha can't be blank, Base sha can't be blank, "+
+			"No commits between main and fix-install, Head ref must be a branch (createPullRequest)")
+	rig.prov.SetCreatePRErr(ghErr)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "branch has no upstream on origin") {
+		t.Fatalf("expected friendly no-upstream reply (defense in depth), got:\n%s", r)
+	}
+	if !strings.Contains(r, "/gtw push first to publish the branch") {
+		t.Fatalf("expected /gtw push hint, got:\n%s", r)
+	}
+	// Invariant: the raw GraphQL diagnostic must NOT leak.
+	if strings.Contains(r, "GraphQL:") {
+		t.Fatalf("raw GraphQL diagnostic leaked; got:\n%s", r)
+	}
+}
+
+// TestMapGhHeadMissingToHint covers the stderr mapper directly.
+func TestMapGhHeadMissingToHint(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", errors.New("401 Unauthorized"), false},
+		{"head ref must be a branch", errors.New("gh pr create: GraphQL: Head ref must be a branch"), true},
+		{"no commits between", errors.New("gh pr create: No commits between main and fix-install"), true},
+		{"head sha can't be blank", errors.New("gh pr create: GraphQL: Head sha can't be blank"), true},
+		{"base sha can't be blank", errors.New("gh pr create: GraphQL: Base sha can't be blank"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, ok := mapGhHeadMissingToHint(tc.err)
+			if ok != tc.want {
+				t.Fatalf("ok: got %v, want %v", ok, tc.want)
+			}
+			if !ok {
+				if msg != "" {
+					t.Fatalf("non-empty msg on miss: %q", msg)
+				}
+				return
+			}
+			if !strings.Contains(msg, "branch has no upstream on origin") {
+				t.Fatalf("hint missing canonical prefix; got %q", msg)
+			}
+			if !strings.Contains(msg, "/gtw push first") {
+				t.Fatalf("hint missing /gtw push first guidance; got %q", msg)
+			}
+		})
+	}
+}
+
 // -----------------------------------------------------------------------------
 // countBaseAhead (sanity; used by dispatchPR)
 // -----------------------------------------------------------------------------

@@ -317,16 +317,22 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 		return
 	}
 	chatID := strconv.FormatInt(message.Chat.ID, 10)
-	topicID, err := a.ensureTopic(ctx, message)
+	threadID, err := a.ensureTopic(ctx, message)
 	if err != nil {
 		a.logger.Warn("telegram: ensure topic failed", "chat_id", chatID, "err", err)
 		return
 	}
-	if topicID > 0 {
-		if err := a.ensurePlaceholder(ctx, chatID, topicID, message.MessageID); err != nil {
-			a.logger.Warn("telegram: ensure placeholder failed", "chat_id", chatID, "topic_id", topicID, "err", err)
+	// Placeholder ("Working...") only applies to real Telegram
+	// topics (thread_id > 0). Main-window / private messages
+	// have no placeholder — replies land as standalone messages.
+	if threadID > 0 {
+		if err := a.ensurePlaceholder(ctx, chatID, threadID, message.MessageID); err != nil {
+			a.logger.Warn("telegram: ensure placeholder failed", "chat_id", chatID, "thread_id", threadID, "err", err)
 		}
 	}
+	// Adapt the rest of the function to thread_id / state-key
+	// variables rather than the legacy topicID name.
+	topicID := threadID
 	attachments, err := a.attachments(ctx, message, chatID)
 	if err != nil && a.logger != nil {
 		a.logger.Warn("telegram: download attachments failed", "chat_id", chatID, "message_id", message.MessageID, "err", err)
@@ -373,7 +379,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 // that have at least one emoji in the new reaction list — pure
 // removals (NewReaction empty) are reported with Emoji="" so the
 // runtime can clear its state.
-func (a *Adapter) handleMessageReaction(ctx context.Context, update *MessageReactionUpdate) {
+func (a *Adapter) handleMessageReaction(_ context.Context, update *MessageReactionUpdate) {
 	if update == nil || update.User.ID == 0 {
 		return
 	}
@@ -409,7 +415,7 @@ func (a *Adapter) handleMessageReaction(ctx context.Context, update *MessageReac
 // runtime doesn't act on bot lifecycle today, but a future
 // self-healing path (e.g. drop the chat from state when the bot
 // is kicked) can hook here.
-func (a *Adapter) handleMyChatMember(ctx context.Context, update *ChatMemberUpdate) {
+func (a *Adapter) handleMyChatMember(_ context.Context, update *ChatMemberUpdate) {
 	if update == nil || update.NewChatMember == nil {
 		return
 	}
@@ -426,7 +432,7 @@ func (a *Adapter) handleMyChatMember(ctx context.Context, update *ChatMemberUpda
 // handleChatMember is fired when a non-bot user joins/leaves a
 // chat. We log only; the runtime doesn't act on user membership
 // today.
-func (a *Adapter) handleChatMember(ctx context.Context, update *ChatMemberUpdate) {
+func (a *Adapter) handleChatMember(_ context.Context, update *ChatMemberUpdate) {
 	if update == nil || update.NewChatMember == nil {
 		return
 	}
@@ -469,39 +475,46 @@ func closedChannel() <-chan struct{} {
 	return channel
 }
 
-func (a *Adapter) ensureTopic(ctx context.Context, message *Message) (int, error) {
-	chatID := strconv.FormatInt(message.Chat.ID, 10)
+// ensureTopic returns the thread_id a Telegram update should be
+// routed to. It is a pure function of the incoming message — no
+// daemons state, no config, no sentinel topic creation.
+//
+// Behavior:
+//   - private chat                       → (0, nil)
+//   - message in a real Telegram topic   → (message.MessageThreadID, nil)
+//   - group / supergroup main window     → (0, nil)
+//
+// We no longer auto-create a "nightme" sentinel topic for the
+// main window (deleted in the 2026-08 refactor). The chatID for
+// a main-window message is "tg_<chatid>" (no thread suffix), and
+// replies land directly in the main window. This makes chatID a
+// stable function of (chat.id, thread_id) — see docs/CHANNEL.md
+// §5.5 for the stability contract.
+func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) {
+	if message == nil {
+		return 0, nil
+	}
 	if message.Chat.Type == "private" {
 		return 0, nil
 	}
 	if message.MessageThreadID > 0 {
-		state, _ := a.state.topic(chatID, message.MessageThreadID)
-		if state == nil {
-			state = &TopicState{ChatID: chatID, TopicID: message.MessageThreadID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-			if err := a.state.putTopic(state); err != nil {
+		// Persist the (chat_id, thread_id) pair so the next
+		// message in the same Telegram topic can do lookups
+		// against the same TopicState. Idempotent on repeat.
+		chatID := strconv.FormatInt(message.Chat.ID, 10)
+		if _, ok := a.state.topic(chatID, message.MessageThreadID); !ok {
+			if err := a.state.putTopic(&TopicState{
+				ChatID:    chatID,
+				TopicID:   message.MessageThreadID,
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			}); err != nil {
 				return 0, err
 			}
 		}
 		return message.MessageThreadID, nil
 	}
-	if state, ok := a.state.topicForChat(chatID); ok {
-		return state.TopicID, nil
-	}
-	name := "nightme"
-	if message.From != nil && message.From.Username != "" {
-		name += " · " + message.From.Username
-	} else if message.From != nil {
-		name += " · " + strconv.FormatInt(message.From.ID, 10)
-	}
-	topicID, err := a.createTopic(ctx, chatID, name)
-	if err != nil {
-		return 0, err
-	}
-	state := &TopicState{ChatID: chatID, TopicID: topicID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	if err := a.state.putTopic(state); err != nil {
-		return 0, err
-	}
-	return topicID, nil
+	return 0, nil
 }
 
 func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID, userMessageID int) error {
@@ -683,6 +696,16 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 	return a.state.putChoice(state)
 }
 
+// Send is the single outbound egress for the telegram adapter.
+//
+// msg.ChatID is the channel-namespaced form ("tg_<chat.id>[:thread_id]")
+// the inbound adapter stamps on every update. The Telegram Bot
+// API expects the raw chat.id, so we strip the "tg_" prefix once
+// at the top of Send and pass the raw chatID to every downstream
+// Telegram call (sendMessage / editMessageText / sendMediaGroup /
+// setMessageReaction / etc.). This keeps the API surface
+// exclusively in raw form while the rest of the runtime sees
+// the namespaced form.
 func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -690,6 +713,15 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	if msg.ChatID == "" {
 		return errors.New("telegram: outbound ChatID is empty")
 	}
+	rawChatID, _, ok := splitSessionID(msg.ChatID)
+	if !ok {
+		// Non-telegram chatID (e.g. someone wired the wrong
+		// adapter) — fall back to the raw value so the API
+		// call still goes through (and Telegram will reject
+		// it with a clear error, which the runtime logs).
+		rawChatID = msg.ChatID
+	}
+	topicID := a.sessionTopicID(msg.ChatID)
 	// Drop empty text for kinds that carry plain text. Avoids
 	// Telegram rejecting sendMessage with empty text, and keeps
 	// the topic from accumulating empty bubbles (matches Feishu
@@ -700,7 +732,6 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			return nil
 		}
 	}
-	topicID := a.sessionTopicID(msg.ChatID)
 	switch msg.Kind {
 	case messages.OutChoice:
 		return a.sendChoice(ctx, msg)
@@ -712,16 +743,16 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			// stable anchor to PATCH. handleMessage normally
 			// creates it; this catches the case where it
 			// failed or the heartbeat raced ahead.
-			if messageID, err := a.ensurePlaceholderForHeartbeat(ctx, msg.ChatID, topicID); err == nil && messageID > 0 {
+			if messageID, err := a.ensurePlaceholderForHeartbeat(ctx, rawChatID, topicID); err == nil && messageID > 0 {
 				text := "🤖 Working..."
 				if msg.Heartbeat != nil {
 					text = heartbeatText(msg.Heartbeat)
 				}
-				return a.editTelegramMessage(ctx, msg.ChatID, messageID, renderInlineText(text), nil)
+				return a.editTelegramMessage(ctx, rawChatID, messageID, renderInlineText(text), nil)
 			}
 		}
 		// Fallback: standalone heartbeat bubble in the topic.
-		return a.sendRenderedText(ctx, msg.ChatID, topicID, msg.Text)
+		return a.sendRenderedText(ctx, rawChatID, topicID, msg.Text)
 	case messages.OutMessageState:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageState missing MessageState or MessageID")
@@ -730,7 +761,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		if err != nil {
 			return err
 		}
-		return a.setMessageReaction(ctx, msg.ChatID, messageID, msg.MessageState.Emoji)
+		return a.setMessageReaction(ctx, rawChatID, messageID, msg.MessageState.Emoji)
 	case messages.OutMessageStateRemoved:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageStateRemoved missing MessageState or MessageID")
@@ -739,17 +770,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		if err != nil {
 			return err
 		}
-		return a.setMessageReaction(ctx, msg.ChatID, messageID, "")
+		return a.setMessageReaction(ctx, rawChatID, messageID, "")
 	case messages.OutToolStart, messages.OutToolEnd:
-		return a.sendRenderedText(ctx, msg.ChatID, topicID, formatTool(msg))
+		return a.sendRenderedText(ctx, rawChatID, topicID, formatTool(msg))
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
-		return a.sendRenderedText(ctx, msg.ChatID, topicID, formatTaskList(msg.TaskList))
+		return a.sendRenderedText(ctx, rawChatID, topicID, formatTaskList(msg.TaskList))
 	case messages.OutError:
 		text := msg.Text
 		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 			text += "\n\n<pre>" + escapeHTML(msg.Diagnostic.StderrTail) + "</pre>"
 		}
-		return a.sendRenderedText(ctx, msg.ChatID, topicID, text)
+		return a.sendRenderedText(ctx, rawChatID, topicID, text)
 	case messages.OutInit:
 		// Silent drop — matches feishu F-44. The Init payload
 		// (session_id, model, agent name, …) is still on the
@@ -761,7 +792,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// §14 Known Limitations).
 		return nil
 	default:
-		return a.sendRenderedText(ctx, msg.ChatID, topicID, msg.Text)
+		return a.sendRenderedText(ctx, rawChatID, topicID, msg.Text)
 	}
 }
 

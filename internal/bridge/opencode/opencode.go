@@ -29,11 +29,22 @@
 // SSE event translation, ~400 lines of stream-buffer bookkeeping,
 // ~300 lines of HTTP serve plumbing, and 9 endpoint-specific
 // tests. The same generic acp bridge used by codex / pi / future
-// ACP backends now serves opencode, with a thin per-bridge
-// UpdateHandler that translates the 5 sessionUpdate variants
-// opencode actually emits on the wire (user_message_chunk,
-// agent_message_chunk, agent_thought_chunk, tool_call,
-// tool_call_update — see update.go for the full routing table).
+// ACP backends now serves opencode. As of this package's current
+// revision, opencode emits no VENDOR-PRIVATE sessionUpdate kinds
+// or JSON-RPC methods that the generic acp fallback does not
+// already handle — every common surface (agent_message_chunk,
+// agent_thought_chunk, tool_call, tool_call_update, usage_update,
+// session.status, session_info_update) is recognised by
+// internal/bridge/acp/agent.go::handleSessionUpdate. opencode
+// therefore does NOT install a per-bridge UpdateHandler; this
+// package only supplies the spawn recipe, the print-mode one-
+// shot path, and the package-level debug logger.
+//
+// If a future opencode version adds a PRIVATE protocol layer
+// (e.g. an opencode-only slash-command notification kind not in
+// the ACP spec), a thin per-bridge UpdateHandler can be installed
+// via (*driver).SetUpdateHandler(...) — see docs/bridge/acp.md
+// §2.3 for the "vendor-private only" rule.
 //
 // Historical `opencode serve` artifacts
 //

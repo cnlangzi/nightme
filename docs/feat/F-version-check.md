@@ -95,20 +95,41 @@ the prompt still has something to say.
 
 ### 3.2 REPL wiring
 
-```go
-// in runREPLInteractive (after banner):
-_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-    Out:    rl.Stdout(),
-    Reader: rl.Readline,
-    Logger: logger,
-})
+`runREPL` picks one of three paths per host:
 
-// in runREPLWith (test-driven scanner path):
-_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-    Out:    out,
-    Logger: logger,           // Reader deliberately nil → silent
-})
+| Path                | When                                         | Version check |
+|---------------------|----------------------------------------------|----------------|
+| `runREPLInteractive` | tty + VT (Windows Terminal / ConPTY / POSIX) | yes, before `readline.NewShell()` |
+| `runREPLScanner`    | tty but no VT (classic cmd.exe)              | yes, before the first `nightme> ` |
+| `runREPLWith`       | non-tty (piped / redirected stdin)           | no — a piped first line must not be eaten as a y/N answer |
+
+The two "yes" paths share `runStartupUpdateCheck(out, logger, reader)`,
+which runs `checkWithCountdown` (5s, writes a countdown line to
+`out`) then `promptForUpdateIfOutdated` (reads one cooked-stdin
+line for the y/N answer). It must run on a COOKED terminal —
+before `readline.NewShell()` on the readline path, and stdin is
+always cooked on the scanner path.
+
+```go
+// shared helper — called by runREPLInteractive and runREPLScanner:
+runStartupUpdateCheck(os.Stdout, logger, newStdinLineReader())
+
+// runREPLWith (test / non-tty) deliberately skips it, so unit-test
+// transcripts and `echo "exit" | nightme` invocations stay clean.
 ```
+
+`readlineUsable()` (see `repl_console_windows.go` /
+`repl_console_unix.go`) gates the readline path: it returns true
+only when stdin is a tty AND stdout's console already has
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING`. We never call
+`SetConsoleMode` to force the bit on — enabling VT on a classic
+cmd.exe hangs `reeflective/readline` at startup (the "Plan C"
+regression, commit 6d29c03), and with VT off readline floods
+literal CSI (`nightme> [1 q[?25l[120D...`). So cmd.exe falls back
+to `runREPLScanner`, which keeps the update flow but loses inline
+editing / ↑/↓ history on that one host. Restoring those needs a
+Win32-native editor (ReadConsoleInputW +
+SetConsoleCursorPosition, no ANSI), tracked as follow-up work.
 
 ### 3.3 New subcommand
 
@@ -154,7 +175,7 @@ should not be blocked by an offline environment.
 | Reader returns read error      | Silent + "read error: …" line             |
 | User types "?" / empty / "n"   | Silent (no install hint printed)          |
 | User types "y" / "yes"         | Echo "y", print install instructions      |
-| Nil Reader (runREPLWith only)  | Silent (test-only branch)                 |
+| Non-tty path (`runREPLWith`)  | Silent (version check skipped)             |
 
 ---
 
@@ -210,6 +231,6 @@ The actual download / verify / replace path for
 - `cmd/nightme/repl_update_test.go` (10 cases) — every
   row of the failure-mode table above plus the
   "no re-prompt on garbage input" guard.
-- Existing `TestREPL_*` suite (9 cases) — unchanged; the
-  `runREPLWith` path's nil-Reader branch keeps the banner
-  transcript free of prompt chatter.
+- Existing `TestREPL_*` suite (9 cases) — unchanged; `runREPLWith`
+  (the test / non-tty path) skips the version check entirely, so the
+  banner transcript stays free of countdown + y-N chatter.

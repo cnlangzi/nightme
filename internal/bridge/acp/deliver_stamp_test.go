@@ -499,16 +499,18 @@ func TestSendBlocks_ResetsTurnSettled(t *testing.T) {
 	d.turnSettledMu.Unlock()
 
 	// ─── Simulate SendBlocks's reset path ─────────────────────
-	// The actual reset happens at the top of SendBlocks after
-	// pendingTurnActive=true. Mirror that exact sequence here so
-	// a future SendBlocks refactor that drops the reset fails
-	// this test loudly.
+	// SendBlocks itself is too heavy to call directly here (it
+	// requires a live rpc + transport + handshake). Its turn-
+	// reset is factored into resetTurnState — we exercise the
+	// same helper to assert turn 2's terminal signal still emits.
+	// The pendingTurnActive dance is a deliberate approximation
+	// of SendBlocks's busy-guard window (the test pins the
+	// "reset happens AFTER busy-guard acquisition" invariant
+	// by mimicking the sequence).
 	d.pendingTurnMu.Lock()
 	d.pendingTurnActive = true
 	d.pendingTurnMu.Unlock()
-	d.turnSettledMu.Lock()
-	d.turnSettled = false
-	d.turnSettledMu.Unlock()
+	d.resetTurnState()
 	d.pendingTurnMu.Lock()
 	d.pendingTurnActive = false
 	d.pendingTurnMu.Unlock()
@@ -517,7 +519,7 @@ func TestSendBlocks_ResetsTurnSettled(t *testing.T) {
 	d.turnSettledMu.Lock()
 	if d.turnSettled {
 		d.turnSettledMu.Unlock()
-		t.Fatal("turnSettled stuck true after SendBlocks reset; " +
+		t.Fatal("turnSettled stuck true after resetTurnState; " +
 			"this is the multi-turn hang bug — P0")
 	}
 	d.turnSettledMu.Unlock()
@@ -559,13 +561,13 @@ func TestTranslatePromptResponse_ResetsTurnSettled(t *testing.T) {
 		t.Fatal("turn 1: timed out")
 	}
 
-	// Simulate SendBlocks's reset.
+	// Simulate SendBlocks's reset via the same helper SendBlocks
+	// uses, so the test pins the helper's contract rather than
+	// the exact mutex sequence.
 	d.pendingTurnMu.Lock()
 	d.pendingTurnActive = true
 	d.pendingTurnMu.Unlock()
-	d.turnSettledMu.Lock()
-	d.turnSettled = false
-	d.turnSettledMu.Unlock()
+	d.resetTurnState()
 	d.pendingTurnMu.Lock()
 	d.pendingTurnActive = false
 	d.pendingTurnMu.Unlock()

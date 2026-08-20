@@ -209,6 +209,24 @@ type driver struct {
 }
 
 
+// resetTurnState clears the per-turn dedup flag so the next
+// SendBlocks call starts a fresh turn-end emission window. Called
+// at the top of SendBlocks after the busy-guard acquisition; the
+// state is reset there (not in New()) because turn-end and turn-
+// start are paired within SendBlocks's busy-guard window, and the
+// runtime calls SendBlocks for every turn.
+//
+// Factored out of SendBlocks so the regression test
+// (TestSendBlocks_ResetsTurnSettled) doesn't have to mirror the
+// exact mutex sequence inline — if SendBlocks's preamble
+// evolves (e.g. adds a third flag), the test updates with it
+// automatically.
+func (d *driver) resetTurnState() {
+	d.turnSettledMu.Lock()
+	d.turnSettled = false
+	d.turnSettledMu.Unlock()
+}
+
 // SessionView is the read-only handle the bridge-specific
 // UpdateHandler receives. It exposes only the surface a translator
 // needs (events channel for emission, session id for stamping)
@@ -592,9 +610,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	// Reset happens AFTER the busy-guard acquisition so a second
 	// SendBlocks call that gets ErrTurnBusy does not clear turn 1's
 	// dedup state out from under it.
-	d.turnSettledMu.Lock()
-	d.turnSettled = false
-	d.turnSettledMu.Unlock()
+	d.resetTurnState()
 
 	defer func() {
 		d.pendingTurnMu.Lock()
@@ -1554,14 +1570,20 @@ func (d *driver) handleSessionStatus(raw json.RawMessage) {
 	if h := d.flushHandler.Load(); h != nil {
 		(*h)(d.View())
 	}
+	// Critical sections are kept narrow and non-nested: take
+	// turnSettledMu first for the dedup decision, release, then
+	// take lastUsageMu for the stash clear. The two mutexes are
+	// never held simultaneously, so future code that adds a third
+	// mutex (e.g. for d.model) cannot deadlock against this
+	// pattern.
 	d.turnSettledMu.Lock()
 	already := d.turnSettled
 	d.turnSettled = true
+	d.turnSettledMu.Unlock()
 	d.lastUsageMu.Lock()
 	usage := d.lastUsage
 	d.lastUsage = nil
 	d.lastUsageMu.Unlock()
-	d.turnSettledMu.Unlock()
 	if !already {
 		d.deliver(agent.AgentEvent{
 			Kind: agent.EventAgentDone,

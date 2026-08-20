@@ -139,7 +139,7 @@ if ev.Model == ""    { ev.Model = d.model }
 
 ### 3.3 model 字段的并发安全
 
-`d.model` 是**多写少读多写**状态：
+`d.model` 是**多写少读**状态：
 
 - **写**：`handleUsageUpdate` / `handleSessionInfoUpdate` 在 readPump goroutine 上写
 - **读**：`deliver()` 在任何 goroutine 上读（handshake、SendBlocks via `translatePromptResponse`、`flushBuffer`、`emitConnected` 都可能调）

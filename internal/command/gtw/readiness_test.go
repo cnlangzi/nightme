@@ -51,6 +51,11 @@ func porcelainFromSnapshot(snap messages.GitStatusSnapshot) string {
 			header += "...origin/" + snap.Branch
 		}
 		switch {
+		case snap.UpstreamGone:
+			// [gone] is mutually exclusive with ahead/behind in real
+			// git (no tracking ref → nothing to diff against), so it
+			// takes precedence here. See parseBranchHeader.
+			header += " [gone]"
 		case snap.AheadOfRemote > 0 && snap.BehindRemote > 0:
 			header += " [ahead " + itoa10(snap.AheadOfRemote) +
 				", behind " + itoa10(snap.BehindRemote) + "]"

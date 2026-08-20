@@ -66,6 +66,41 @@ var AllLabels = []string{
 	LabelRevise, LabelDone, LabelStuck,
 }
 
+// LabelMeta carries the colour and description applied when
+// CreateLabel bootstraps a label that doesn't yet exist on the
+// remote repo. Centralised here so AllLabels and the bootstrap
+// metadata stay in lockstep — adding a new state label requires
+// only one edit (the AllLabels slice plus a labelMeta entry).
+//
+// Colour is the 6-character hex WITHOUT a leading '#'. Description
+// is English-only because the gtw command is /gtw; localisation
+// would live in a separate message catalogue, not here.
+type LabelMeta struct {
+	Color       string
+	Description string
+}
+
+var labelMeta = map[string]LabelMeta{
+	LabelWIP:       {Color: "fbca04", Description: "Work in progress (claimed by /gtw fix)"},
+	LabelReady:     {Color: "0e8a16", Description: "Ready for review"},
+	LabelReviewing: {Color: "1d76db", Description: "Under review"},
+	LabelRevise:    {Color: "e4e669", Description: "Needs revision"},
+	LabelDone:      {Color: "5319e7", Description: "Completed"},
+	LabelStuck:     {Color: "b60205", Description: "Stuck / blocked"},
+}
+
+// LabelMetaFor returns the colour / description registered for
+// `name`. Falls back to a neutral grey + blank description when
+// `name` is not a known gtw label (e.g. an external label passed
+// through CreateLabel) so callers can use it as the single source
+// of metadata without checking membership.
+func LabelMetaFor(name string) LabelMeta {
+	if m, ok := labelMeta[name]; ok {
+		return m
+	}
+	return LabelMeta{Color: "ededed", Description: ""}
+}
+
 // State is the gtw lifecycle stage cached on the platform's
 // label.
 //

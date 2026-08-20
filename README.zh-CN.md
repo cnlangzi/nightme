@@ -250,7 +250,7 @@ GitHub / GitLab issues 是任务流——每次 `/gtw fix` 钉到一个 issue，
 
 1. **`/gtw fix -n <branch>`** — 在刚刚最新的 main 上开一个新 worktree（叫 `<branch>`），起一个 one-shot agent 干任务。纯本地——不需要 GitHub issue。你在主 chat 继续聊。
 
-   走 GitHub / GitLab 流程的话，用 `/gtw fix <issue-id>` 把 worktree 钉到远程 issue。
+   走 GitHub / GitLab 流程的话，用 `/gtw fix <issue-id>` 把 worktree 钉到远程 issue。第一次跑什么都不用配，开箱即用。
 
 2. **hooks 自动跑** — 新 worktree 里开发环境自己重新装起来。CodeGraph 重新索引，`npm install` / `go mod download` / `cargo build`——你项目要啥就装啥。编辑 `~/.nightme/gtw.yml`：
 

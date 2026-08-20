@@ -12,8 +12,8 @@ import (
 // end-to-end without touching github.com / gitlab.com.
 //
 // Tests construct one via newFakeGitProvider(kind, host),
-// seed it via SetIssue / SetGetIssueErr / SetAddLabelErr /
-// SetRemoveLabelErr, then wire the package-level fakeDetect
+// seed it via SetIssue / SetGetIssueErr / SetAddIssueLabelErr /
+// SetRemoveIssueLabelErr, then wire the package-level fakeDetect
 // into deps.Detect so runFixRemote's `detect(ctx, remoteURL,
 // prober)` returns it.
 //
@@ -35,10 +35,23 @@ type fakeGitProvider struct {
 	issueByID map[int]*Issue
 	issueErr  map[int]error
 
-	// Generic response for AddLabel / RemoveLabel. Returning
+	// Generic response for AddIssueLabel / RemoveIssueLabel. Returning
 	// nil = success.
-	addLabelErr    error
-	removeLabelErr error
+	addIssueLabelErr    error
+	removeIssueLabelErr error
+
+	// Generic response for CreateLabel. Returning nil = success.
+	// Used by tests that simulate a label-create failure
+	// (network / 403 / etc.) on the bootstrap path.
+	createLabelErr error
+
+	// Per-name response for CreateLabel. When a label name is
+	// present in this map, createLabelErrFor[name] is returned
+	// INSTEAD of the generic createLabelErr. Lets tests pin a
+	// failure to a specific bootstrap step (e.g. "fail on the
+	// second label, succeed on the first") to verify the
+	// loop short-circuits mid-iteration.
+	createLabelErrFor map[string]error
 
 	// CreatePR response. createPRResp is the URL the fake
 	// returns when createPRErr is nil. createPRErr wins when
@@ -62,12 +75,18 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "AddLabel" / "RemoveLabel" / "CreatePR" / "GetPR"
+	Method string // "GetIssue" / "AddIssueLabel" / "RemoveIssueLabel" / "CreatePR" / "GetPR" / "CreateLabel"
 	Owner  string
 	Repo   string
 	ID     int
-	Label  string // only set for AddLabel / RemoveLabel
+	Label  string // only set for AddIssueLabel / RemoveIssueLabel / CreateLabel
 	Head   string // only set for CreatePR / GetPR
+
+	// CreateLabel-only fields. Empty for the other methods.
+	// Stored so tests can assert colour / description were
+	// threaded through LabelMetaFor correctly.
+	Color       string
+	Description string
 
 	// CreatePR-only fields. Empty for the other methods.
 	Base    string
@@ -80,13 +99,14 @@ type fakeProviderCall struct {
 // seed issue maps / errors before driving /gtw fix.
 func newFakeGitProvider(kind ProviderKind, host string) *fakeGitProvider {
 	return &fakeGitProvider{
-		kind:      kind,
-		host:      host,
-		version:   "v0.0.0-test",
-		issueByID: make(map[int]*Issue),
-		issueErr:  make(map[int]error),
-		prByHead:  make(map[string]*PR),
-		prErr:     make(map[string]error),
+		kind:               kind,
+		host:               host,
+		version:            "v0.0.0-test",
+		issueByID:          make(map[int]*Issue),
+		issueErr:           make(map[int]error),
+		prByHead:           make(map[string]*PR),
+		prErr:              make(map[string]error),
+		createLabelErrFor:  make(map[string]error),
 	}
 }
 
@@ -125,20 +145,49 @@ func (f *fakeGitProvider) SetGetIssueErr(id int, err error) {
 	delete(f.issueByID, id)
 }
 
-// SetAddLabelErr configures the response for all AddLabel calls.
-// Used to simulate a label-API failure (network / 403 / etc.).
-func (f *fakeGitProvider) SetAddLabelErr(err error) {
+// SetAddIssueLabelErr configures the response for all AddIssueLabel
+// calls. Used to simulate a label-API failure (network / 403 / etc.).
+func (f *fakeGitProvider) SetAddIssueLabelErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.addLabelErr = err
+	f.addIssueLabelErr = err
 }
 
-// SetRemoveLabelErr configures the response for all RemoveLabel
+// SetRemoveIssueLabelErr configures the response for all RemoveIssueLabel
 // calls.
-func (f *fakeGitProvider) SetRemoveLabelErr(err error) {
+func (f *fakeGitProvider) SetRemoveIssueLabelErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.removeLabelErr = err
+	f.removeIssueLabelErr = err
+}
+
+// SetCreateLabelErr configures the response for all CreateLabel
+// calls. Used by the bootstrap-failure tests
+// (TestFixRemote_CreateLabelFailure_RollsBack et al.) to
+// simulate a label-create API failure.
+func (f *fakeGitProvider) SetCreateLabelErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createLabelErr = err
+}
+
+// SetCreateLabelErrFor configures CreateLabel(name) to return
+// `err`. Overrides the generic SetCreateLabelErr for the named
+// label only. Use this to simulate a mid-loop bootstrap
+// failure: previous labels in AllLabels succeed, the named
+// one fails, and subsequent ones never run (loop short-
+// circuits). Pass err=nil to remove the override.
+func (f *fakeGitProvider) SetCreateLabelErrFor(name string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.createLabelErrFor == nil {
+		f.createLabelErrFor = map[string]error{}
+	}
+	if err == nil {
+		delete(f.createLabelErrFor, name)
+		return
+	}
+	f.createLabelErrFor[name] = err
 }
 
 // SetCreatePRResp configures the response for all CreatePR
@@ -193,7 +242,7 @@ func (f *fakeGitProvider) Calls() []fakeProviderCall {
 }
 
 // CallsByMethod filters Calls() by method name. Sugar for tests
-// that only care about e.g. AddLabel calls.
+// that only care about e.g. AddIssueLabel calls.
 func (f *fakeGitProvider) CallsByMethod(method string) []fakeProviderCall {
 	out := []fakeProviderCall{}
 	for _, c := range f.Calls() {
@@ -234,22 +283,50 @@ func (f *fakeGitProvider) GetIssue(_ context.Context, owner, repo string, id int
 	return &cp, nil
 }
 
-func (f *fakeGitProvider) AddLabel(_ context.Context, owner, repo string, id int, label string) error {
+func (f *fakeGitProvider) AddIssueLabel(_ context.Context, owner, repo string, id int, label string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, fakeProviderCall{
-		Method: "AddLabel", Owner: owner, Repo: repo, ID: id, Label: label,
+		Method: "AddIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
 	})
-	err := f.addLabelErr
+	err := f.addIssueLabelErr
 	f.mu.Unlock()
 	return err
 }
 
-func (f *fakeGitProvider) RemoveLabel(_ context.Context, owner, repo string, id int, label string) error {
+func (f *fakeGitProvider) RemoveIssueLabel(_ context.Context, owner, repo string, id int, label string) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, fakeProviderCall{
-		Method: "RemoveLabel", Owner: owner, Repo: repo, ID: id, Label: label,
+		Method: "RemoveIssueLabel", Owner: owner, Repo: repo, ID: id, Label: label,
 	})
-	err := f.removeLabelErr
+	err := f.removeIssueLabelErr
+	f.mu.Unlock()
+	return err
+}
+
+// CreateLabel records the call and returns createLabelErr (nil
+// by default). Per-name overrides via SetCreateLabelErrFor win
+// over the generic createLabelErr — tests that simulate a
+// mid-loop failure use the per-name API to pin the failing
+// label; tests that simulate a blanket bootstrap failure use
+// SetCreateLabelErr.
+//
+// Mirrors the AddIssueLabel / RemoveIssueLabel pattern so tests
+// can assert chronological ordering (e.g. all 6 CreateLabels
+// BEFORE AddIssueLabel) via CallsByMethod.
+func (f *fakeGitProvider) CreateLabel(_ context.Context, owner, repo, name, color, description string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, fakeProviderCall{
+		Method:      "CreateLabel",
+		Owner:       owner,
+		Repo:        repo,
+		Label:       name,
+		Color:       color,
+		Description: description,
+	})
+	err := f.createLabelErr
+	if specific, ok := f.createLabelErrFor[name]; ok {
+		err = specific
+	}
 	f.mu.Unlock()
 	return err
 }

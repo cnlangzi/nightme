@@ -331,7 +331,20 @@ func (p *Provider) readToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("telegram: read token: %w", err)
 	}
+	// line == "" means the scanner reached EOF without seeing a
+	// non-empty line. If ctx was cancelled concurrently, honour
+	// the cancellation contract — return ErrLoginTimeout instead of
+	// falling through to the empty-token error. Without this
+	// guard, the select above races between `<-done` (goroutine
+	// closing EOF fast) and `<-ctx.Done()`; the goroutine can win
+	// when input is empty AND ctx is already cancelled at Login
+	// entry, producing the misleading "empty token" error. The
+	// contract `TestProvider_Login_ContextCancelled` asserts is
+	// "ctx cancellation wins" — enforce it explicitly here.
 	if line == "" {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("telegram: %w: %v", login.ErrLoginTimeout, ctxErr)
+		}
 		return "", fmt.Errorf("telegram: %w: empty token", login.ErrLoginFailed)
 	}
 	return line, nil

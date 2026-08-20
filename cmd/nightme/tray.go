@@ -13,13 +13,19 @@
 //     learns about the first's completion via systray.Quit() and
 //     a shared error variable.
 //
-//  2. The subcommand section is driven by cmdRegistry.TrayItems
-//     (subcommand.go), the single source of truth shared with
-//     the REPL banner and the CLI tree. This file is a consumer,
-//     not a re-derivation. Lifecycle commands (start/stop/restart/
-//     status) and TTY-bound commands (test/login/logs/config/
-//     update/debug) are filtered out by the registry's addNoTray
-//     path so they do not appear here.
+//  2. The subcommand section is hand-grouped into Sessions /
+//     Setup / About submenus (with Logs sitting at the top as
+//     its own row, since it's the command users reach for most
+//     often after Console). The cliTitles used as argv to
+//     proc.OpenTerminal match the cobra subcommand names that
+//     cmdRegistry registers, so adding a new reg.add() cobra
+//     command is a prerequisite for surfacing it in the tray —
+//     but the grouping itself is owned here. Lifecycle commands
+//     (start/stop/restart/status) and TTY-bound commands
+//     (test/login/logs/debug) remain addNoTray so they don't
+//     drift into the submenu list. (config and update were
+//     briefly addNoTray too, but they're now reg.add() so the
+//     REPL banner reflects the full user-facing surface.)
 //
 //  3. Click actions must not block the tray event loop. Each
 //     click handler runs in systray's event goroutine; a handler
@@ -35,23 +41,26 @@
 //     not-caught-by-detection cases (X server dies mid-run,
 //     partial init panic) so the daemon survives a tray crash.
 //
-// Menu layout (all items are top-level — no submenus):
+// Menu layout:
 //
-//   Running        (disabled info row)
+//   🟢 NightMe is running        (disabled info row)
 //   ─────────
-//   Open            → proc.OpenTerminal() (spawn a terminal with the REPL)
-//   Logs            → proc.OpenTerminal("logs") (spawn a terminal tailing the log)
-//   Restart         → caller callback (spawn new _daemon child, SIGTERM self)
-//   Stop            → caller callback (trigger runtime graceful shutdown)
+//   >_  Console                  → proc.OpenTerminal() (spawn REPL)
 //   ─────────
-//   list / kill / agents / name / clean / version
-//                   → proc.OpenTerminal(title) — spawn terminal running `nightme <title>`
+//   Logs                         → proc.OpenTerminal("logs")
+//   Sessions >                   → list / kill
+//   Setup >                      → config / agents / name / clean
+//   About >                      → version / doctor
+//   ─────────
+//   ⓘ  Download Update           (hidden unless a newer release exists)
+//   ↻  Restart                   → caller callback (respawn _daemon)
+//   ⏻  Quit                      → caller callback (graceful daemon stop)
 //
-// The subcommands are top-level items, NOT children of a disabled
-// submenu. The v1 design put them under a disabled "Commands"
-// parent; on Windows, disabling the parent cascades MF_GRAYED to
-// every child, making them all appear unclickable. Top-level items
-// are always interactive regardless of platform.
+// The subcommands are grouped into Sessions / Setup / About submenus
+// rather than rendered as flat top-level items. The earlier flat
+// layout exposed them all under a disabled "Commands" parent, which
+// on Windows cascades MF_GRAYED to every child and made them appear
+// unclickable. Submenus are clickable regardless of platform.
 
 package main
 
@@ -67,8 +76,10 @@ import (
 	"github.com/getlantern/systray"
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/runtime"
+	"github.com/cnlangzi/nightme/internal/version"
 )
 
 // trayDebounce is the minimum interval between two clicks being
@@ -237,79 +248,203 @@ func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) e
 // not support a "menu" object that is mutated; the contract is
 // "build the whole tree in onReady".
 //
-// Layout:
+// Layout (matches the file-level Menu layout block):
 //
-//	Running          (disabled info row)
+//	🟢 NightMe is running        (disabled info row)
 //	─────────
-//	Open / Logs / Restart / Stop   (primary actions)
+//	>_  Console                  (primary action)
 //	─────────
-//	list / kill / agents / ...     (subcommands from TrayItems)
+//	Logs / Sessions > / Setup > / About >
+//	─────────
+//	ⓘ  Download Update (hidden until newer release exists)
+//	↻  Restart / ⏻  Quit
 //
-// The subcommands are top-level items, NOT children of a disabled
-// submenu. The v1 design put them under a disabled "Commands"
-// parent; on Windows, disabling the parent cascades MF_GRAYED to
-// every child, making them all appear unclickable. Top-level items
-// are always interactive regardless of platform.
+// The subcommand section is grouped into Sessions / Setup / About
+// submenus rather than rendered as a flat list — see the file
+// header for the rationale (Windows MF_GRAYED cascade).
 func trayOnReady(opts trayOptions) {
 	systray.SetTooltip("NightMe daemon — click to open the menu")
 	applyIcon()
 
-	// Read-only status row. Kept minimal — just "Running" —
-	// because the daemon now auto-starts every channel with
-	// valid creds, so a single channel label would be misleading
-	// and listing all of them would overflow the menu width.
-	statusItem := systray.AddMenuItem("Running", "nightme daemon is running")
+	// Status row. \U0001F7E2 is the green-circle emoji — the
+	// row stays disabled so it doesn't fire a handler, but
+	// the emoji glyph itself renders green regardless of the
+	// row's enabled state because it's a coloured codepoint.
+	statusItem := systray.AddMenuItem(
+		"\U0001F7E2  NightMe is running",
+		"nightme daemon is running",
+	)
 	statusItem.Disable()
 
 	systray.AddSeparator()
 
-	// Primary actions. Each gets its own clickTracker (per-item
-	// debouncer) so rapid clicks on DIFFERENT items are still
-	// honoured independently.
-	openREPL := systray.AddMenuItem("Open", "Spawn a new terminal running the nightme REPL")
-	logs := systray.AddMenuItem("Logs", "Open a terminal showing the daemon log (tail -f)")
-	restart := systray.AddMenuItem("Restart", "Restart the nightme daemon")
-	stop := systray.AddMenuItem("Stop", "Gracefully stop the nightme daemon")
+	// Primary actions — no icons. Plain text keeps them
+	// visually quieter than the lifecycle cluster below, so
+	// the eye lands on "Open Terminal" / "View Logs" first
+	// without competing with the icon-heavy bottom group.
+	openREPL := systray.AddMenuItem(">_  Console", "Spawn a new terminal running the nightme REPL")
 
 	go handleClick(openREPL, func() {
 		if err := proc.OpenTerminal(context.Background(), "nightme"); err != nil {
 			logClickErr(opts.logger, "open-repl", err)
 		}
 	})
+
+	systray.AddSeparator()
+
+	// Second cluster — terminal-bound commands that open a
+	// maximized, focused Terminal.app tab via proc.OpenTerminal
+	// (the same path as Console above, so every command gets
+	// a real TTY and visible output).
+	//
+	// Logs sits at the top of this group because it's the
+	// command users reach for most often after Console. The
+	// three submenus below it group the remaining subcommands
+	// by intent (Sessions = runtime state, Setup = configuration,
+	// About = diagnostics) rather than mirroring the REPL banner
+	// order — grouping is the stronger signal here.
+	logs := systray.AddMenuItem("Logs", "Open a terminal showing the daemon log (tail -f)")
 	go handleClick(logs, func() {
 		if err := proc.OpenTerminal(context.Background(), "nightme", "logs"); err != nil {
 			logClickErr(opts.logger, "open-logs", err)
 		}
 	})
+
+	// Submenus — no icons. Sessions / Setup / About each get
+	// their own clickTracker so rapid clicks across different
+	// submenus are honoured independently.
+	sessions := systray.AddMenuItem("Sessions", "Session-related commands")
+	addTerminalSubItem(sessions, opts, "List", "list", "List active agent sessions")
+	addTerminalSubItem(sessions, opts, "Kill", "kill", "Kill every active agent process")
+
+	setup := systray.AddMenuItem("Setup", "Configuration commands")
+	addTerminalSubItem(setup, opts, "Config", "config", "Interactive configuration menu")
+	addTerminalSubItem(setup, opts, "Agents", "agents", "Manage configured agents")
+	addTerminalSubItem(setup, opts, "Name", "name", "Set chat display names")
+	addTerminalSubItem(setup, opts, "Clean", "clean", "Truncate logs and remove attachments")
+
+	about := systray.AddMenuItem("About", "Diagnostic commands")
+	addTerminalSubItem(about, opts, "Version", "version", "Show nightme version")
+	addTerminalSubItem(about, opts, "Doctor", "doctor", "Run nightme doctor")
+
+	systray.AddSeparator()
+
+	// Icon-only cluster. These three carry icons because
+	// they're the highest-stakes actions in the menu:
+	// update (network), restart (daemon-lifecycle), quit
+	// (terminating this very icon). Icons reinforce that the
+	// user is in the "system control" zone.
+	//
+	// Docker Desktop renders SF Symbol-style monochrome
+	// glyphs. getlantern/systray doesn't expose per-item
+	// images, so we approximate with single-character
+	// Unicode symbols — all the same nominal width as ⏻ so
+	// the text column stays aligned across the three rows.
+	//
+	// Download Update starts hidden: the background version
+	// check only shows it (along with the separator above)
+	// when a newer version actually exists. Up-to-date
+	// installations see just Restart + Quit in this cluster.
+	updateItem := systray.AddMenuItem("ⓘ  Download Update", "Check for and install a newer nightme release")
+	updateItem.Hide()
+	go handleClick(updateItem, func() {
+		if err := proc.OpenTerminal(context.Background(), "nightme", "update"); err != nil {
+			logClickErr(opts.logger, "update", err)
+		}
+	})
+
+	// Background version check. Hits nightme.dev (or the cache
+	// populated by an earlier check within the last 24h), then
+	// patches the menu item's title in place. Done off the
+	// systray event loop thread so the click handler stays
+	// snappy and a slow network never blocks trayOnReady.
+	//
+	// Title format mirrors Docker Desktop's badge style:
+	//   - up-to-date:    ⓘ  Download Update    v0.1.0
+	//   - newer exists:  ⓘ  Download Update    v0.1.0 → v0.2.0
+	// The arrow uses U+2192 (rightwards arrow), not "->", so
+	// the suffix reads as "version progression" rather than
+	// shell syntax. We re-use the same Checker as the REPL
+	// startup prompt so the 24h throttle cache is shared
+	// between the two surfaces — opening the tray menu after a
+	// REPL start shouldn't trigger a second second API hit.
+	go decorateUpdateItem(updateItem)
+
+	restart := systray.AddMenuItem("↻  Restart", "Restart the nightme daemon")
 	go handleClick(restart, func() {
 		if opts.onRestartRequest != nil {
 			opts.onRestartRequest()
 		}
 	})
-	go handleClick(stop, func() {
+
+	quit := systray.AddMenuItem("⏻  Quit", "Stop the daemon and remove the tray icon")
+	go handleClick(quit, func() {
 		if opts.onStopRequest != nil {
 			opts.onStopRequest()
 		}
 	})
+}
 
-	systray.AddSeparator()
-
-	// Subcommands — built from cmdRegistry.TrayItems(), the same
-	// source the REPL banner and CLI tree use. Order matches the
-	// REPL banner so the tray menu reads the same as the REPL
-	// "Common:" list. Each is a top-level item (clickable, not
-	// greyed out) that opens a terminal running `nightme <title>`
-	// via proc.OpenTerminal — the same path as Open / Logs, giving
-	// every command a real TTY and visible output.
-	for _, item := range opts.reg.TrayItems() {
-		cmdItem := systray.AddMenuItem(item.Title, item.Tooltip)
-		ci := item
-		go handleClick(cmdItem, func() {
-			if err := proc.OpenTerminal(context.Background(), "nightme", ci.Title); err != nil {
-				logClickErr(opts.logger, "command:"+ci.Title, err)
-			}
-		})
+// decorateUpdateItem runs a background version check and
+// shows item only when a newer version exists, with title
+// "<current> → <latest>". Up-to-date installations leave
+// the item hidden — the menu simply omits the row. It is
+// fire-and-forget: a network failure or unparseable
+// response leaves the item hidden rather than failing
+// the tray.
+//
+// The check shares the 24h on-disk cache with the REPL
+// startup prompt (internal/version.DefaultChecker reads
+// cfg.Paths.DataDir/version-check.json), so a user who
+// already answered the REPL prompt doesn't see the tray
+// re-fetch the same data within the throttle window.
+func decorateUpdateItem(item *systray.MenuItem) {
+	dataDir := ""
+	if cfg, err := config.LoadDefault(); err == nil && cfg != nil {
+		dataDir = cfg.Paths.DataDir
 	}
+	checker, _ := version.DefaultChecker(dataDir)
+	if checker == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	res := checker.Check(ctx, version.Version, func(format string, args ...any) {
+		slog.Default().Warn(fmt.Sprintf("version check: "+format, args...))
+	})
+
+	if res.Latest == "" || !res.Outdated {
+		// Up to date, or no usable result — leave the
+		// item hidden. Earlier separator still renders;
+		// that mirrors Docker Desktop, which also keeps
+		// the bottom separator even when the cluster
+		// above it has only one item.
+		return
+	}
+
+	current := displayVer(version.Version)
+	latest := displayVer(res.Latest)
+	item.SetTitle("ⓘ  Download Update    " + current + "  →  " + latest)
+	item.Show()
+}
+
+// addTerminalSubItem adds a child item under parent that opens a
+// maximized, focused Terminal.app tab running `nightme <cliTitle>`
+// when clicked. parent is a sub-menu item created via
+// systray.AddMenuItem / MenuItem.AddSubMenuItem; cliTitle is the
+// lowercase cobra subcommand name and must match exactly (used as
+// argv[1] to proc.OpenTerminal). displayTitle is what the user sees
+// in the menu — independent from cliTitle so we can capitalise here
+// without breaking the CLI.
+func addTerminalSubItem(parent *systray.MenuItem, opts trayOptions, displayTitle, cliTitle, tooltip string) {
+	item := parent.AddSubMenuItem(displayTitle, tooltip)
+	go handleClick(item, func() {
+		if err := proc.OpenTerminal(context.Background(), "nightme", cliTitle); err != nil {
+			logClickErr(opts.logger, "command:"+cliTitle, err)
+		}
+	})
 }
 
 // handleClick is the shared click-dispatch helper. It drains the

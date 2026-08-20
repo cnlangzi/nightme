@@ -75,8 +75,9 @@ func dispatchPush(
 	// `git push -u origin HEAD` either fails with "no upstream
 	// branch" or — worse — lands an anonymous ref on origin. The
 	// user should checkout a named branch first. Mirrors the
-	// dispatchPR PRBlockReason case 1 (the two gates share the
-	// same readiness snapshot, so the policy stays consistent).
+	// dispatchPR's pre-refactor "snap.Branch == \"\"" early-return
+	// (the two gates share the same readiness snapshot, so the
+	// policy stays consistent).
 	if snap.Branch == "" {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ detached HEAD — checkout a named branch first"), nil

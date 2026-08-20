@@ -108,7 +108,7 @@ func executeBranchExistsAction(
 					"⚠️ Cancelled fix #%d locally, but could not reach the provider to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
 					p.IssueID, providerErr, p.IssueID, p.IssueID)
 			default:
-				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
+				_ = provider.RemoveIssueLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
 		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
@@ -218,7 +218,7 @@ func executeWorktreeFailAction(
 					"⚠️ Cancelled fix #%d locally, but could not reach the provider to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
 					p.IssueID, providerErr, p.IssueID, p.IssueID)
 			default:
-				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
+				_ = provider.RemoveIssueLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
 		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)

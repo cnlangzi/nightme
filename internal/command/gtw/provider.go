@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -144,6 +147,19 @@ type GitProvider interface {
 	// exist" or "401 Unauthorized").
 	CreatePR(ctx context.Context, owner, repo, base, head, title, body string) (string, error)
 
+	// FindOpenPRForBranch returns the single open pull request
+	// (GitHub) or merge request (GitLab) whose head branch
+	// matches `head`, or (nil, nil) when no open PR exists.
+	//
+	// Distinct from GetPR: FindOpenPRForBranch is used by
+	// /gtw pr's precheck (the "already open?" gate), where
+	// every error must be surfaced to the user verbatim. GetPR
+	// is used by the footer render path, where "no PR" and
+	// "API failed" collapse into the same fail-soft response.
+	// Errors returned here follow the known-error / unknown-
+	// pass-through contract — see wrapListPRError.
+	FindOpenPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error)
+
 	// GetPR returns the open pull request (GitHub) or merge
 	// request (GitLab) whose head branch matches `head`, or
 	// (nil, nil) when no open PR currently exists for that
@@ -196,6 +212,183 @@ var ErrInvalidRemoteURL = errors.New("gtw: invalid remote URL")
 // friendly "PR already exists" message with the existing URL
 // when available.
 var ErrPRExists = errors.New("gtw: PR already exists")
+
+// ErrCLINotInstalled is returned by GitHub/GitLab providers when
+// the underlying `gh` / `glab` binary is missing on PATH. Wrapping
+// `ErrCLINotInstalled` lets dispatchPR surface a single friendly
+// "install via brew install gh" hint that covers both platforms
+// instead of leaking the raw exec.LookPath error.
+//
+// Detection lives in isExecutableNotFound (below) — the wrapper
+// preserves the provider name so the hint can be platform-specific.
+var ErrCLINotInstalled = errors.New("gtw: provider CLI not installed")
+
+// ErrStaleUpstream is returned by GitHub/GitLab providers when
+// the platform rejects CreatePR because the head branch is
+// missing on the origin (or the cached SHA is stale). It is the
+// race-window safety net for /gtw pr's precheck: the dispatch
+// already verified `git ls-remote --heads origin <branch>`
+// succeeded, but the branch may have been deleted (or the cached
+// SHA replaced) between probe and CreatePR.
+//
+// Detection lives in isStaleUpstreamGH / isStaleUpstreamGL
+// (below). Both match known stderr substrings; unknown stderr
+// is propagated verbatim, NOT translated into ErrStaleUpstream.
+var ErrStaleUpstream = errors.New("gtw: head branch missing on origin")
+
+// isExecutableNotFound reports whether err originates from
+// os/exec failing to find the binary on PATH (the common case
+// when `gh` / `glab` isn't installed). Covers both the modern
+// *exec.Error wrapping exec.ErrNotFound (returned by
+// os/exec.Command.Start / LookPath) and the *fs.PathError with
+// syscall.ENOENT that some Go runtimes surface.
+//
+// We deliberately do NOT match generic "command not found"
+// substrings inside stderr — the stderr-based detection is
+// unreliable across shells / i18n. The exec.Error /
+// fs.PathError unwrap is the only stable signal.
+func isExecutableNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var execErr *exec.Error
+	if errors.As(err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
+		return true
+	}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.ENOENT) {
+		return true
+	}
+	return false
+}
+
+// ghStaleUpstreamSubstrings are the four GraphQL field names
+// createPullRequest surfaces for "head ref is bad / branch
+// missing on origin". These are the literals GitHub's GraphQL
+// validator returns; see F-237 for the original bug.
+//
+// Pattern match is by substring on stderr — the GitHub provider
+// wraps stderr verbatim into the error (see
+// GitHubProvider.CreatePR). Any gh-emitted phrase survives the
+// wrap; non-matching stderr falls through to the generic
+// error path.
+var ghStaleUpstreamSubstrings = []string{
+	"Head ref must be a branch",
+	"No commits between",
+	"Head sha can't be blank",
+	"Base sha can't be blank",
+}
+
+// glStaleUpstreamSubstrings are the glab-side equivalents for
+// "source branch missing on origin". glab's HTTP layer surfaces
+// these directly in stderr / error message; substring match on
+// stderr is the same stable channel used by the GitHub side.
+//
+// "Branch not found" matches glab's API 404 message; "Source
+// branch does not exist" matches the validation error;
+// "404 Not Found" matches the raw HTTP layer. The list is
+// deliberately narrow — unknown stderr is propagated verbatim,
+// NOT translated into ErrStaleUpstream.
+var glStaleUpstreamSubstrings = []string{
+	"Source branch does not exist",
+	"Branch not found",
+	"404 Not Found",
+}
+
+// isStaleUpstreamGH reports whether stderr matches any of the
+// known gh "head ref is bad" GraphQL validator messages.
+func isStaleUpstreamGH(stderr string) bool {
+	for _, s := range ghStaleUpstreamSubstrings {
+		if strings.Contains(stderr, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStaleUpstreamGL reports whether stderr matches any of the
+// known glab "source branch missing" messages.
+func isStaleUpstreamGL(stderr string) bool {
+	for _, s := range glStaleUpstreamSubstrings {
+		if strings.Contains(stderr, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapCreatePRError is the shared CreatePR error-mapping helper
+// for GitHub/GitLab. Known failure modes (CLI not installed /
+// stale upstream / PR exists) are translated into sentinel
+// errors; unknown stderr is wrapped verbatim so dispatchPR can
+// surface it to the user without distortion.
+//
+// Returns the new error (always non-nil when called with a
+// non-nil input). err is the original; stderr is the trimmed
+// subprocess stderr (may be empty); providerName is "gh" or
+// "glab" — used only in the ErrCLINotInstalled hint.
+func wrapCreatePRError(err error, stderr, providerName string) error {
+	if err == nil {
+		return nil
+	}
+	if isExecutableNotFound(err) {
+		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
+			ErrCLINotInstalled, providerName, providerName,
+			providerCLIInstallURL(providerName), err)
+	}
+	trimmed := strings.TrimSpace(stderr)
+	switch providerName {
+	case "gh":
+		if isStaleUpstreamGH(trimmed) {
+			return fmt.Errorf("%w: %s", ErrStaleUpstream, trimmed)
+		}
+	case "glab":
+		if isStaleUpstreamGL(trimmed) {
+			return fmt.Errorf("%w: %s", ErrStaleUpstream, trimmed)
+		}
+	}
+	if strings.Contains(trimmed, "already exists") {
+		return fmt.Errorf("%w: %s", ErrPRExists, trimmed)
+	}
+	if trimmed != "" {
+		return fmt.Errorf("%s pr/mr create: %v: %s", providerName, err, trimmed)
+	}
+	return fmt.Errorf("%s pr/mr create: %w", providerName, err)
+}
+
+// wrapListPRError is the FindOpenPRForBranch / GetPR shared
+// error-mapping helper. Only ErrCLINotInstalled is translated;
+// stale-upstream / already-exists don't apply to a list call.
+// Unknown stderr is wrapped verbatim.
+func wrapListPRError(err error, stderr, providerName string) error {
+	if err == nil {
+		return nil
+	}
+	if isExecutableNotFound(err) {
+		return fmt.Errorf("%w: %s — install via `brew install %s` or visit https://%s (%w)",
+			ErrCLINotInstalled, providerName, providerName,
+			providerCLIInstallURL(providerName), err)
+	}
+	trimmed := strings.TrimSpace(stderr)
+	if trimmed != "" {
+		return fmt.Errorf("%s pr/mr list: %v: %s", providerName, err, trimmed)
+	}
+	return fmt.Errorf("%s pr/mr list: %w", providerName, err)
+}
+
+// providerCLIInstallURL returns the install page for the named
+// provider CLI (gh / glab). Empty string is returned for
+// unknown names — wrapCreatePRError / wrapListPRError fall back
+// to the brew hint only.
+func providerCLIInstallURL(name string) string {
+	switch name {
+	case "gh":
+		return "cli.github.com"
+	case "glab":
+		return "gitlab.com/gitlab-org/cli"
+	}
+	return ""
+}
 
 // ParseRepoOwner splits a "<owner>/<repo>" string into its two
 // components. The git CLI prints "origin\thttps://github.com/foo/bar"
@@ -805,10 +998,11 @@ func (c *GitHubProvider) CreateLabel(ctx context.Context, owner, repo, name, col
 
 // CreatePR runs `gh pr create --base <base> --head <head> --title
 // <title> --body <body> --repo <owner>/<repo>`. The head branch must
-// already be pushed to origin (dispatchPR's F-57 readiness gate
-// enforces this via snap.LocalIsAtUpstreamTip() — i.e. local HEAD
-// == origin/<branch> tip); if not, gh prints "head ref doesn't
-// exist" and we forward that stderr to the user.
+// already be pushed to origin (dispatchPR's first readiness gate
+// enforces this via `git ls-remote --heads origin <branch>` —
+// see pr.go's gate 1); if not, gh prints a "head ref" GraphQL
+// validator error and wrapCreatePRError translates it to
+// ErrStaleUpstream.
 //
 // gh exits 0 with the PR URL on stdout when the PR is created;
 // non-zero + stderr "already exists" → ErrPRExists; any other
@@ -824,12 +1018,54 @@ func (c *GitHubProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 	}
 	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
 	if err != nil {
-		if strings.Contains(stderr, "already exists") {
-			return "", fmt.Errorf("%w: %s", ErrPRExists, strings.TrimSpace(stderr))
-		}
-		return "", fmt.Errorf("gh pr create: %v: %s", err, strings.TrimSpace(stderr))
+		return "", wrapCreatePRError(err, stderr, "gh")
 	}
 	return strings.TrimSpace(stdout), nil
+}
+
+// FindOpenPRForBranch runs `gh pr list --head <head> --state
+// open --json number,url,state --repo <owner>/<repo>` and returns
+// the freshest matching open PR. Returns (nil, nil) on empty list
+// — the common case when the branch has never had a PR opened.
+//
+// Error contract: known failure modes (CLI not installed) are
+// translated to ErrCLINotInstalled; everything else is wrapped
+// verbatim. Stale-upstream doesn't apply to a list call (gh
+// returns empty list, not an error, when the head doesn't exist
+// on origin), so it has no special handling here.
+func (c *GitHubProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
+	args := []string{
+		"pr", "list",
+		"--head", head,
+		"--state", "open",
+		"--json", "number,url,state",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	if err != nil {
+		return nil, wrapListPRError(err, stderr, "gh")
+	}
+	out := strings.TrimSpace(stdout)
+	if out == "" || out == "[]" {
+		return nil, nil
+	}
+	var rows []struct {
+		Number int    `json:"number"`
+		URL    string `json:"url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, fmt.Errorf("gh pr list: decode json: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	row := rows[0]
+	state := strings.ToLower(row.State)
+	if state == "" {
+		state = "open"
+	}
+	return &PR{Number: row.Number, URL: row.URL, State: state}, nil
 }
 
 // GetPR runs `gh pr list --head <head> --state open --json
@@ -1033,12 +1269,55 @@ func (c *GitLabProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 	}
 	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
 	if err != nil {
-		if strings.Contains(stderr, "already exists") {
-			return "", fmt.Errorf("%w: %s", ErrPRExists, strings.TrimSpace(stderr))
-		}
-		return "", fmt.Errorf("glab mr create: %v: %s", err, strings.TrimSpace(stderr))
+		return "", wrapCreatePRError(err, stderr, "glab")
 	}
 	return strings.TrimSpace(stdout), nil
+}
+
+// FindOpenPRForBranch runs `glab mr list --source-branch <head>
+// --state opened --output json --repo <owner>/<repo>` and
+// returns the freshest matching opened MR. Returns (nil, nil)
+// on empty list — the common case when the branch has never had
+// an MR opened.
+//
+// Error contract: known failure modes (CLI not installed) are
+// translated to ErrCLINotInstalled; everything else is wrapped
+// verbatim. Stale-upstream doesn't apply to a list call (glab
+// returns empty list, not an error, when the source branch
+// doesn't exist), so it has no special handling here.
+func (c *GitLabProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
+	args := []string{
+		"mr", "list",
+		"--source-branch", head,
+		"--state", "opened",
+		"--output", "json",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
+	if err != nil {
+		return nil, wrapListPRError(err, stderr, "glab")
+	}
+	out := strings.TrimSpace(stdout)
+	if out == "" || out == "[]" {
+		return nil, nil
+	}
+	var rows []struct {
+		IID    int    `json:"iid"`
+		WebURL string `json:"web_url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	row := rows[0]
+	state := strings.ToLower(row.State)
+	if state == "" {
+		state = "open"
+	}
+	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
 }
 
 // GetPR runs `glab mr list --source-branch <head> --state opened

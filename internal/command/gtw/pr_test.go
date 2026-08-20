@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -677,8 +680,7 @@ func TestDispatchPR_DefaultBranchFails(t *testing.T) {
 // it as Worktree / RepoRoot.
 //
 // loadDispatchContext reads cs.SelectedCwd() (not system pwd),
-// so we need both. The system-pwd fallback is kept for push
-// tests that haven't been migrated yet (commit_push_test.go).
+// so we need both.
 func setupPRWorktree(t *testing.T, rig *prTestRig, ctx Context) string {
 	t.Helper()
 	tmp := t.TempDir()
@@ -694,116 +696,50 @@ func setupPRWorktree(t *testing.T, rig *prTestRig, ctx Context) string {
 	return tmp
 }
 
-// setupPRGit configures the rig with the F-57 readiness snapshot
-// derived from the legacy (unpushed, ahead) numeric API. F-57
-// replaced countUnpushed + nested preflight with a single
-// CollectReadiness call; tests still need a happy-path "no
-// unreadiness" snapshot plus a controllable countBaseAhead.
+// setupPRGit configures the rig for the dispatch paths that need
+// a "happy-path" git surface: setupReadiness's gate-1 ls-remote
+// pass + DefaultBranch + loadDispatchContext non-worktree mocks,
+// plus a GitHub-shaped origin URL so resolveProvider succeeds
+// without Detect firing its HTTP probe.
 //
-// (unpushed, ahead) → snapshot translation:
-//
-//	unpushed → snap.AheadOfRemote (always with HasUpstream=true)
-//	ahead    → rev-list main..HEAD  (registered separately)
-//
-// Tests exercising the new "branch has no upstream" / "behind"
-// / "conflict" / "uncommitted" branches should call
-// setupReadiness directly with a hand-built snapshot rather
-// than this shim.
-func setupPRGit(rig *prTestRig, branch string, unpushed, ahead int) {
+// The historical (unpushed, ahead) numeric shape predates the
+// 2-gate refactor — dispatchPR no longer reads AheadOfRemote, so
+// `unpushed` is forwarded only for snap construction (kept as a
+// parameter so the read is honest about what it currently does;
+// `ahead` was dropped in the refactor since rev-list is no
+// longer called).
+func setupPRGit(rig *prTestRig, branch string, unpushed int) {
 	snap := messages.GitStatusSnapshot{
 		Branch:        branch,
 		HasUpstream:   true,
 		AheadOfRemote: unpushed,
 	}
 	setupReadiness(rig, branch, snap)
-	// setupReadiness defaults countBaseAhead to "5"; override with
-	// the per-test value here.
-	rig.git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, itoa10(ahead), "", nil)
+	// resolveProvider's RemoteOriginURL probe needs a non-empty
+	// origin URL. Default to a GitHub-shaped URL; tests that
+	// exercise GitLab detection override this.
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 }
 
-func TestDispatchPR_NothingToPR(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt-empty",
-	})
-	setupPRGit(rig, "wt-empty", 0, 0) // 0 ahead → "nothing to PR"
-	rig.installDeps()
 
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
-	}
-	r := s.lastText()
-	if !strings.Contains(r, "nothing new to PR yet") {
-		t.Fatalf("expected nothing-to-PR reply, got:\n%s", r)
-	}
-}
-
-// TestDispatchPR_NothingToPR_UncommittedHints — F-57 SUPERSEDED.
-//
-// The pre-F-57 behaviour this test asserted ("when ahead of base
-// is 0 but the tree is dirty, dispatchPR should still point the
-// user at /gtw push") is now structurally impossible: with the
-// readiness gate in front, an uncommitted-tree snapshot returns
-// "1 file(s) changed but not committed" from PRBlockReason and
-// never reaches the countBaseAhead==0 branch. See
-// TestDispatchPR_Uncommitted (F-57 §8.3 matrix) for the new
-// test of this dimension.
-
-// F-57 §8.3 readiness matrix tests.
-//
-// The shared rig is set up via setupPRWorktree (yml present, branch
-// = "wt") then setupReadiness with the dimension-under-test.
-// All tests assert two invariants:
-//   1. the dispatch never calls gh (verify via rig.git.calls)
-//   2. the reply contains the dimension's distinctive substring
-// (the substring check is loose enough to survive IM-text
-// rewordings, tight enough to catch the wrong dimension being
-// matched).
-//
-// dispatchPR's only "happy path" beyond readiness is agent +
-// CreatePR, which the readiness matrix deliberately does NOT
-// exercise — that path is covered by the original pre-F-57
-// TestDispatchPR_ResolveProvider_DetectFallback +
-// TestDispatchPR_CreatePRFails + happy-path tests (already in
-// place, rewired through setupReadiness in the prior commit).
-
-func TestDispatchPR_DetachedHead(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "wt-detached"})
-	// F-57: Branch==="" is the only way the parser produces
-	// "## HEAD (no branch)" / "(HEAD detached at ...)".
-	snap := messages.GitStatusSnapshot{Branch: ""}
-	setupReadiness(rig, "wt-detached", snap)
-	rig.installDeps()
-
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
-	}
-	r := s.lastText()
-	if !strings.Contains(r, "detached HEAD") {
-		t.Fatalf("expected detached-HEAD reply, got:\n%s", r)
-	}
-}
-
-func TestDispatchPR_NoUpstream(t *testing.T) {
-	// F-57: the case that triggered this design — local branch
-	// has never been pushed to origin. Pre-F-57 the readiness
-	// gate mistakenly let this through (the old countUnpushed
-	// helper returned 0 on 'no upstream configured'); gh then
-	// rejected with 'Head ref must be a branch'. The new
-	// PRBlockReason explicit branch catches it here.
+// TestDispatchPR_NoOriginBranch covers the gate-1 "origin/<branch>
+// does not exist" path. The local branch exists, the worktree
+// is clean, but `git ls-remote --heads origin <branch>` returns
+// empty — the branch was never pushed (or was deleted from
+// origin). dispatchPR must short-circuit before reaching
+// resolveProvider / FindOpenPRForBranch and tell the user to
+// run /gtw push first.
+func TestDispatchPR_NoOriginBranch(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{Branch: "wt-noup"})
-	snap := messages.GitStatusSnapshot{
+	// setupReadiness defaults the ls-remote probe to a
+	// non-empty response. Override AFTER so the empty
+	// response wins — gate 1 fails.
+	setupReadiness(rig, "wt-noup", messages.GitStatusSnapshot{
 		Branch:      "wt-noup",
-		HasUpstream: false, //  // explicit
-	}
-	setupReadiness(rig, "wt-noup", snap)
+		HasUpstream: true, // porcelain claims upstream, but origin doesn't have it
+	})
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "wt-noup"}, "", "", nil)
 	rig.installDeps()
 
 	cs := rig.cs
@@ -813,35 +749,35 @@ func TestDispatchPR_NoUpstream(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "branch has no upstream on origin") {
-		t.Fatalf("expected no-upstream reply, got:\n%s", r)
+	if !strings.Contains(r, "origin/wt-noup does not exist") {
+		t.Fatalf("expected no-origin-branch reply, got:\n%s", r)
 	}
-	if !strings.Contains(r, "/gtw push first to publish the branch") {
+	if !strings.Contains(r, "/gtw push first") {
 		t.Fatalf("expected /gtw push hint, got:\n%s", r)
 	}
-	// Invariant: dispatchPR must NOT have invoked gh.
-	for _, c := range rig.git.calls {
-		if len(c.args) > 0 && c.args[0] == "push" {
-			t.Fatalf("unexpected push invocation: %v", c.args)
+	// Invariant: gate 1 short-circuited BEFORE provider
+	// resolution. Neither FindOpenPRForBranch nor CreatePR
+	// may have been called.
+	for _, c := range rig.prov.calls {
+		if c.Method == "FindOpenPRForBranch" || c.Method == "CreatePR" {
+			t.Fatalf("gate 1 must short-circuit before provider; call=%s", c.Method)
 		}
 	}
 }
 
-func TestDispatchPR_AheadOfUpstream(t *testing.T) {
-	// Distinguishes "ahead=3 vs origin" (must push) from "ahead=0
-	// vs origin + ahead=5 vs base" (ready to PR). PRBlockReason
-	// fires BEFORE countBaseAhead, so the user sees the
-	// "push first" hint even if the branch has plenty of
-	// ahead-of-base content.
+// TestDispatchPR_LSRemoteAuthError — known ls-remote stderr
+// fragment ("could not read Username") must surface the raw
+// stderr AND a friendly credential hint. The user should
+// understand both what went wrong and what to do.
+func TestDispatchPR_LSRemoteAuthError(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "wt-ahead"})
-	snap := messages.GitStatusSnapshot{
-		Branch:        "wt-ahead",
-		HasUpstream:   true,
-		AheadOfRemote: 3,
-	}
-	setupReadiness(rig, "wt-ahead", snap)
-	// SetupReadiness defaults countBaseAhead to "5"; keep that.
+	setupPRWorktree(t, rig, Context{Branch: "wt-auth"})
+	setupReadiness(rig, "wt-auth", messages.GitStatusSnapshot{
+		Branch: "wt-auth",
+	})
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "wt-auth"},
+		"", "fatal: could not read Username for 'https://x.test/repo.git': terminal prompts disabled",
+		errors.New("exit 128"))
 	rig.installDeps()
 
 	cs := rig.cs
@@ -851,21 +787,30 @@ func TestDispatchPR_AheadOfUpstream(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "3 commit(s) made locally but not pushed") {
-		t.Fatalf("expected ahead-of-upstream reply, got:\n%s", r)
+	if !strings.Contains(r, "could not read Username") {
+		t.Fatalf("expected raw auth stderr in reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "credential") {
+		t.Fatalf("expected credential hint, got:\n%s", r)
+	}
+	// Invariant: gate 1 errors out BEFORE provider resolution.
+	for _, c := range rig.prov.calls {
+		if c.Method == "FindOpenPRForBranch" || c.Method == "CreatePR" {
+			t.Fatalf("gate 1 ls-remote error must short-circuit before provider; call=%s", c.Method)
+		}
 	}
 }
 
-func TestDispatchPR_BehindUpstream(t *testing.T) {
+// TestDispatchPR_LSRemoteNetworkError — known ls-remote stderr
+// fragment ("unable to access") must surface the raw stderr
+// AND a friendly network hint.
+func TestDispatchPR_LSRemoteNetworkError(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "wt-behind"})
-	snap := messages.GitStatusSnapshot{
-		Branch:        "wt-behind",
-		HasUpstream:   true,
-		AheadOfRemote: 0,
-		BehindRemote:  2,
-	}
-	setupReadiness(rig, "wt-behind", snap)
+	setupPRWorktree(t, rig, Context{Branch: "wt-net"})
+	setupReadiness(rig, "wt-net", messages.GitStatusSnapshot{Branch: "wt-net"})
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "wt-net"},
+		"", "fatal: unable to access 'https://x.test/repo.git/': Could not resolve host: x.test",
+		errors.New("exit 128"))
 	rig.installDeps()
 
 	cs := rig.cs
@@ -875,30 +820,28 @@ func TestDispatchPR_BehindUpstream(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "is 2 commit(s) ahead of your local branch") {
-		t.Fatalf("expected behind-upstream reply, got:\n%s", r)
+	if !strings.Contains(r, "unable to access") {
+		t.Fatalf("expected raw network stderr in reply, got:\n%s", r)
 	}
-	if !strings.Contains(r, "git pull --rebase") {
-		t.Fatalf("expected rebase hint, got:\n%s", r)
+	if !strings.Contains(r, "network") && !strings.Contains(r, "origin remote") {
+		t.Fatalf("expected network/origin hint, got:\n%s", r)
 	}
 }
 
-// TestDispatchPR_DivergedAheadAndBehind pins the F-57 priority
-// order documented in messages/footer.go PRBlockReason (line 191-196):
-// when a branch is BOTH ahead>0 AND behind>0 (diverged after a
-// remote force-push), the ahead branch wins — the user is told to
-// /gtw push first, then rebase. The natural 'put hard-blocks first'
-// reorder would silently regress this without any test failure.
-func TestDispatchPR_DivergedAheadAndBehind(t *testing.T) {
+// TestDispatchPR_LSRemoteUnknownErrorPassThrough — UNKNOWN
+// stderr must NOT be matched against the known-fragment table.
+// The reply must contain the raw stderr verbatim AND must NOT
+// contain any of the known-fragment hints (auth / network /
+// not-a-repo) NOR the "no upstream" / "/gtw push first" reply
+// — that would mislead the user into running the wrong next
+// step.
+func TestDispatchPR_LSRemoteUnknownErrorPassThrough(t *testing.T) {
+	const weirdStderr = "fatal: some weird git error that we don't recognize: xyz"
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "wt-diverged"})
-	snap := messages.GitStatusSnapshot{
-		Branch:        "wt-diverged",
-		HasUpstream:   true,
-		AheadOfRemote: 3,
-		BehindRemote:  5,
-	}
-	setupReadiness(rig, "wt-diverged", snap)
+	setupPRWorktree(t, rig, Context{Branch: "wt-weird"})
+	setupReadiness(rig, "wt-weird", messages.GitStatusSnapshot{Branch: "wt-weird"})
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "wt-weird"},
+		"", weirdStderr, errors.New("exit 128"))
 	rig.installDeps()
 
 	cs := rig.cs
@@ -908,82 +851,378 @@ func TestDispatchPR_DivergedAheadAndBehind(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "3 commit(s) made locally but not pushed") {
-		t.Fatalf("expected ahead-wins reply, got:\n%s", r)
+	if !strings.Contains(r, weirdStderr) {
+		t.Fatalf("unknown stderr must pass through verbatim; got:\n%s", r)
+	}
+	// Invariant: the reply must NOT mention any of the known
+	// fragments' hints — that would be the system guessing at
+	// the wrong next step.
+	for _, banned := range []string{
+		"credential",         // auth hint
+		"network connectivity", // network hint
+		"origin remote",      // auth hint (alt wording)
+		"origin should point", // not-a-repo hint
+		"does not exist",     // gate-1 fail reply
+		"/gtw push first",    // gate-1 fail reply
+	} {
+		if strings.Contains(r, banned) {
+			t.Fatalf("unknown stderr must NOT be translated; got %q in:\n%s", banned, r)
+		}
+	}
+}
+
+// TestDispatchPR_LSRemoteNotARepository — third known-fragment
+// case: git ls-remote writes "fatal: 'origin' does not appear
+// to be a git repository" when the remote URL points somewhere
+// that isn't a git server. The reply must surface the raw
+// stderr AND a hint pointing at `git remote -v`.
+func TestDispatchPR_LSRemoteNotARepository(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-norepo"})
+	setupReadiness(rig, "wt-norepo", messages.GitStatusSnapshot{Branch: "wt-norepo"})
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "wt-norepo"},
+		"", "fatal: 'origin' does not appear to be a git repository",
+		errors.New("exit 128"))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "does not appear to be a git repository") {
+		t.Fatalf("expected raw stderr in reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "git remote -v") {
+		t.Fatalf("expected `git remote -v` hint, got:\n%s", r)
+	}
+}
+
+// TestRemoteBranchExists_EmptyStderr — when `git ls-remote`
+// errors with NO stderr (context cancellation, broken pipe,
+// ENOSPC on a tmpfs), the wrapper must surface the underlying
+// err.Error() verbatim. This is the production-mode error path
+// most likely to fire when the binary itself is fine but the
+// I/O failed mid-call; we want a useful diagnostic, not a
+// misleading hint.
+func TestRemoteBranchExists_EmptyStderr(t *testing.T) {
+	g := newPushGit()
+	g.onArgs([]string{"ls-remote", "--heads", "origin", "wt-io"},
+		"", "", errors.New("write | pipe: broken pipe"))
+
+	_, err := RemoteBranchExists(context.Background(), "/w", "wt-io", g)
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	// Invariant: the wrapped err preserves the original message.
+	if !strings.Contains(err.Error(), "broken pipe") {
+		t.Fatalf("expected underlying err preserved; got %v", err)
+	}
+	// Invariant: NO known-fragment hint — empty stderr means we
+	// can't tell whether the failure matches auth / network /
+	// not-a-repo, so we MUST NOT guess.
+	for _, banned := range []string{
+		"credential",
+		"network connectivity",
+		"git remote -v",
+	} {
+		if strings.Contains(err.Error(), banned) {
+			t.Fatalf("empty stderr must not be translated; got %q in %v", banned, err)
+		}
+	}
+}
+
+// TestDispatchPR_ExistingPR — gate 2 fires when the provider
+// returns an existing open PR for the head. dispatchPR must
+// surface the URL/number and short-circuit before reaching
+// CreatePR.
+func TestDispatchPR_ExistingPR(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-existing"})
+	setupReadiness(rig, "wt-existing", messages.GitStatusSnapshot{
+		Branch:      "wt-existing",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetFindOpenPRResp(&PR{Number: 42, URL: "https://github.com/octocat/hello/pull/42", State: "open"})
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "already has an open PR") {
+		t.Fatalf("expected existing-PR reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "#42") {
+		t.Fatalf("expected PR number #42 in reply, got:\n%s", r)
+	}
+	// Invariant: CreatePR must NOT have been called.
+	for _, c := range rig.prov.calls {
+		if c.Method == "CreatePR" {
+			t.Fatalf("CreatePR must NOT be called when an existing PR is found; calls=%+v", rig.prov.calls)
+		}
+	}
+}
+
+// TestDispatchPR_FindOpenPRErrCLINotInstalled — gh/glab binary
+// missing on PATH → ErrCLINotInstalled → friendly install hint.
+// Distinct from "no upstream" / "auth failed" — this one
+// specifically says "install via brew install gh".
+func TestDispatchPR_FindOpenPRErrCLINotInstalled(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-no-gh"})
+	setupReadiness(rig, "wt-no-gh", messages.GitStatusSnapshot{
+		Branch:      "wt-no-gh",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetFindOpenPRErr(fmt.Errorf("%w: gh — install via `brew install gh`", ErrCLINotInstalled))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "install via `brew install gh`") {
+		t.Fatalf("expected gh install hint, got:\n%s", r)
+	}
+}
+
+// TestDispatchPR_FindOpenPRUnknownErrorPassThrough — unknown
+// FindOpenPRForBranch error propagates verbatim. The reply must
+// contain the raw err string and must NOT add a friendly hint
+// that would mislead the user.
+func TestDispatchPR_FindOpenPRUnknownErrorPassThrough(t *testing.T) {
+	const weirdErr = "gh pr list: 502 Bad Gateway (we have never seen this before)"
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-502"})
+	setupReadiness(rig, "wt-502", messages.GitStatusSnapshot{
+		Branch:      "wt-502",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetFindOpenPRErr(errors.New(weirdErr))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, weirdErr) {
+		t.Fatalf("unknown err must pass through verbatim; got:\n%s", r)
+	}
+	if !strings.Contains(r, "check existing PR") {
+		t.Fatalf("reply must mention gate 2 context; got:\n%s", r)
+	}
+}
+
+// TestDispatchPR_CreateStaleUpstreamRace — gate 1 passed
+// (origin/<branch> existed at probe time) but the branch was
+// deleted before CreatePR ran. gh now returns a known
+// "head ref" GraphQL validator error → wrapCreatePRError
+// wraps it as ErrStaleUpstream → dispatchPR echoes the same
+// friendly hint as gate 1's no-upstream miss.
+func TestDispatchPR_CreateStaleUpstreamRace(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-race"})
+	setupReadiness(rig, "wt-race", messages.GitStatusSnapshot{
+		Branch:      "wt-race",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	// gate 1 already verified upstream exists (setupReadiness
+	// default). Force CreatePR to return ErrStaleUpstream by
+	// simulating the gh GraphQL validator message.
+	ghErr := fmt.Errorf("%w: GraphQL: Head ref must be a branch, No commits between main and wt-race",
+		ErrStaleUpstream)
+	rig.prov.SetCreatePRErr(ghErr)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "origin/wt-race no longer exists") {
+		t.Fatalf("expected stale-upstream race reply, got:\n%s", r)
 	}
 	if !strings.Contains(r, "/gtw push first") {
-		t.Fatalf("expected /gtw push hint (ahead wins over behind), got:\n%s", r)
+		t.Fatalf("expected /gtw push hint, got:\n%s", r)
 	}
-	if strings.Contains(r, "git pull --rebase") {
-		t.Fatalf("did not expect rebase hint on diverged state — ahead wins; got:\n%s", r)
+	// Invariant: the raw GraphQL diagnostic must NOT leak.
+	if strings.Contains(r, "GraphQL:") {
+		t.Fatalf("raw GraphQL diagnostic leaked; got:\n%s", r)
 	}
 }
 
-func TestDispatchPR_Uncommitted(t *testing.T) {
+// TestDispatchPR_AlreadyExistsRace — gate 2 reported no PR but
+// CreatePR loses the race (someone opened a PR between probe
+// and create). gh returns ErrPRExists → friendly reply.
+func TestDispatchPR_AlreadyExistsRace(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-race2"})
+	setupReadiness(rig, "wt-race2", messages.GitStatusSnapshot{
+		Branch:      "wt-race2",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	// gate 2 returns nil (no PR at probe time) — default fake state.
+	rig.prov.SetCreatePRErr(fmt.Errorf("%w: a PR already exists for this branch", ErrPRExists))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "a PR for wt-race2 already exists") {
+		t.Fatalf("expected ErrPRExists reply, got:\n%s", r)
+	}
+}
+
+// TestDispatchPR_CreateStaleUpstreamRace_GitLab — same race
+// shape as TestDispatchPR_CreateStaleUpstreamRace, but driven
+// through the GitLab-typed fake so the glab stderr substring
+// table (Source branch does not exist / Branch not found /
+// 404 Not Found) is exercised at the dispatch level. The
+// helper-level TestWrapCreatePRError_StaleUpstreamGL covers
+// the substring detection; this test pins that the dispatch
+// path also surfaces the right reply.
+func TestDispatchPR_CreateStaleUpstreamRace_GitLab(t *testing.T) {
+	rig := newPRTestRig(t)
+	// Re-key the rig's provider to GitLab.
+	rig.prov = newFakeGitProvider(ProviderGitLab, "gitlab.com")
+	setupPRWorktree(t, rig, Context{Branch: "wt-gl-race"})
+	setupReadiness(rig, "wt-gl-race", messages.GitStatusSnapshot{
+		Branch:      "wt-gl-race",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@gitlab.com:acme/demo.git", "", nil)
+	// glab's "Source branch does not exist" → ErrStaleUpstream
+	// via wrapCreatePRError's `gl` table.
+	rig.prov.SetCreatePRErr(fmt.Errorf("%w: Source branch does not exist", ErrStaleUpstream))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "origin/wt-gl-race no longer exists") {
+		t.Fatalf("expected stale-upstream race reply, got:\n%s", r)
+	}
+	if strings.Contains(r, "Source branch does not exist") {
+		t.Fatalf("raw glab stderr leaked; got:\n%s", r)
+	}
+}
+
+// TestDispatchPR_CreatePR_CLINotInstalled — race-window guard:
+// CreatePR returns ErrCLINotInstalled (e.g. gh was uninstalled
+// between gate 2 and CreatePR). dispatchPR surfaces the
+// install hint.
+func TestDispatchPR_CreatePR_CLINotInstalled(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-no-gh2"})
+	setupReadiness(rig, "wt-no-gh2", messages.GitStatusSnapshot{
+		Branch:      "wt-no-gh2",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRErr(fmt.Errorf("%w: gh — install via `brew install gh`", ErrCLINotInstalled))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "install via `brew install gh`") {
+		t.Fatalf("expected gh install hint, got:\n%s", r)
+	}
+}
+
+// TestDispatchPR_CreatePR_UnknownErrorPassThrough — unknown
+// CreatePR stderr propagates verbatim. The reply must contain
+// the raw stderr and NOT a friendly translation.
+func TestDispatchPR_CreatePR_UnknownErrorPassThrough(t *testing.T) {
+	const weirdErr = "gh pr create: 403 Forbidden: API rate limit exceeded"
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-403"})
+	setupReadiness(rig, "wt-403", messages.GitStatusSnapshot{
+		Branch:      "wt-403",
+		HasUpstream: true,
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRErr(errors.New(weirdErr))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "403 Forbidden") {
+		t.Fatalf("unknown stderr must pass through verbatim; got:\n%s", r)
+	}
+	if !strings.Contains(r, "create PR failed") {
+		t.Fatalf("reply must mention create-PR-failed context; got:\n%s", r)
+	}
+	// Invariant: must NOT match the stale-upstream / install / exists branches.
+	for _, banned := range []string{
+		"no longer exists",
+		"already exists",
+		"install via `brew install",
+	} {
+		if strings.Contains(r, banned) {
+			t.Fatalf("unknown stderr must NOT trigger known-error branch; got %q in:\n%s", banned, r)
+		}
+	}
+}
+
+// TestDispatchPR_DirtyNoLongerGate — F-237 design intent:
+// dirty working tree, untracked files, ahead-of-base, behind
+// upstream, merge conflicts are all the user's responsibility
+// under the new design (/gtw pr attempts to open regardless).
+// gh/glab will reject if their model of reality disagrees.
+// This test pins the new behavior so future regressions to
+// the 6-dim gate are caught.
+func TestDispatchPR_DirtyNoLongerGate(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{Branch: "wt-dirty"})
-	snap := messages.GitStatusSnapshot{
+	setupReadiness(rig, "wt-dirty", messages.GitStatusSnapshot{
 		Branch:      "wt-dirty",
 		HasUpstream: true,
-		//Modified: 2, // produced via porcelainFromSnapshot
-	}
-	// Use raw setupReadiness but we want Modified=2; build snap
-	// explicitly then call setupReadiness — but setupReadiness
-	// takes snap directly. Just set Modified=2.
-	snap.Modified = 2
-	setupReadiness(rig, "wt-dirty", snap)
-	rig.installDeps()
-
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
-	}
-	r := s.lastText()
-	if !strings.Contains(r, "2 file(s) changed but not committed") {
-		t.Fatalf("expected uncommitted reply, got:\n%s", r)
-	}
-	if !strings.Contains(r, "/gtw commit first") {
-		t.Fatalf("expected /gtw commit hint, got:\n%s", r)
-	}
-}
-
-func TestDispatchPR_Untracked(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "wt-untracked"})
-	snap := messages.GitStatusSnapshot{
-		Branch:      "wt-untracked",
-		HasUpstream: true,
-		Untracked:   3,
-	}
-	setupReadiness(rig, "wt-untracked", snap)
-	rig.installDeps()
-
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
-	}
-	r := s.lastText()
-	if !strings.Contains(r, "3 new file(s) not added to git") {
-		t.Fatalf("expected untracked reply, got:\n%s", r)
-	}
-}
-
-func TestDispatchPR_HasConflicts(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "wt-conflict"})
-	snap := messages.GitStatusSnapshot{
-		Branch:        "wt-conflict",
-		HasUpstream:   true,
+		// All the dimensions that used to gate, now allowed through:
+		Modified:      3,
+		Untracked:     2,
+		AheadOfRemote: 5,
+		BehindRemote:  2,
 		HasConflicts:  true,
-		Modified:      1, // 1 modified entry; conflicts are tracked separately via Conflicts (set by HasConflicts=true below)
-		AheadOfRemote: 0,
-		BehindRemote:  0,
-	}
-	setupReadiness(rig, "wt-conflict", snap)
+	})
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/42")
 	rig.installDeps()
 
 	cs := rig.cs
@@ -993,59 +1232,47 @@ func TestDispatchPR_HasConflicts(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	// PRBlockReason priority: conflicts come BEFORE uncommitted,
-	// so the conflict message wins even when Uncommitted > 0.
-	if !strings.Contains(r, "unmerged paths") {
-		t.Fatalf("expected conflict reply, got:\n%s", r)
+	if !strings.Contains(r, "PR opened") {
+		t.Fatalf("dirty worktree should NOT gate under new design; got:\n%s", r)
 	}
-}
-
-func TestDispatchPR_ReadyNothingNew(t *testing.T) {
-	// All six readiness dimensions pass, but countBaseAhead is 0.
-	// This is the legitimate "nothing new to PR yet" path —
-	// distinct from the readiness failures above.
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "wt-nothing"})
-	snap := messages.GitStatusSnapshot{
-		Branch:      "wt-nothing",
-		HasUpstream: true,
+	// Invariant: CreatePR must have been called.
+	called := false
+	for _, c := range rig.prov.calls {
+		if c.Method == "CreatePR" {
+			called = true
+		}
 	}
-	setupReadiness(rig, "wt-nothing", snap)
-	rig.git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, "0", "", nil)
-	rig.installDeps()
-
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
-	}
-	r := s.lastText()
-	if !strings.Contains(r, "nothing new to PR yet") {
-		t.Fatalf("expected nothing-to-PR reply, got:\n%s", r)
+	if !called {
+		t.Fatalf("CreatePR must be called for the dirty-worktree case")
 	}
 }
 
 func TestDispatchPR_NoAgentSelected(t *testing.T) {
-	// Tests the "no agent selected" early-return branch of
-	// dispatchPR. We don't need a yml — the early-return fires
-	// before any git state is consulted, so loadDispatchContext's
-	// git-derive path is fine and we only need to mock the
-	// rev-parse calls it makes. No setupPRWorktree + override
-	// dance — the test's cwd IS the worktree.
+	// Tests the "no agent selected" failure path: dispatchPR
+	// must reach runAgentFor (gates 1 + 2 passed with mocked
+	// provider), and runAgentFor must report no-agent-selected
+	// via agent.Builtins being empty AND the chat having no
+	// selected agent.
+	withAgent(t) // empty agent registry
+
 	tmp := t.TempDir()
 	withCwd(t, tmp)
-	// Unregister the recordingAgent so SelectedAgent() returns "".
-	withAgent(t) // empty registry
-
 	git := newPushGit()
-	setupPRGit(&prTestRig{git: git}, "feat/manual", 0, 5)
+	// loadDispatchContext's git-derive path needs rev-parse mocks
+	// (no .nightme/gtw.yml in this test).
+	git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
+	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
+	git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"}, "origin/main", "", nil)
+	git.onArgs([]string{"ls-remote", "--heads", "origin", "feat/manual"},
+		"abc1234\trefs/heads/feat/manual\n", "", nil)
+	git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	deps := HandlerDeps{Git: git, Detect: fakeDetect(prov)}
 
-	cs := &chatsession.ChatSession{} // no SetSelectedAgent
+	cs := &chatsession.ChatSession{} // no SetSelectedAgent → empty selection
 	_ = cs.SetSelectedCwd(tmp)
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1060,7 +1287,7 @@ func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
 	rig.agent.runOnceErr = errors.New("boom")
-	setupPRGit(rig, "wt", 0, 5)
+	setupPRGit(rig, "wt", 0)
 	rig.installDeps()
 
 	cs := rig.cs
@@ -1086,7 +1313,7 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 	// falls through to the "first non-empty line" path; see
 	// the parsePRReply unit tests for those cases.
 	rig.agent.runOnceText = "   \n\n  \n"
-	setupPRGit(rig, "wt", 0, 5)
+	setupPRGit(rig, "wt", 0)
 	rig.installDeps()
 
 	cs := rig.cs
@@ -1116,7 +1343,7 @@ func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
 	rig.agent.runOnceText = "feat(gtw): add per-instance name\n\n" +
 		"This is the descriptive body.\n\n" +
 		"- bullet one\n- bullet two\n"
-	setupPRGit(rig, "wt", 0, 5)
+	setupPRGit(rig, "wt", 0)
 	// Configure the fake git so resolveProvider's Detect
 	// path returns our fake provider — without a remote URL,
 	// dispatchPR short-circuits with "no `origin` remote".
@@ -1200,7 +1427,7 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
-	setupPRGit(rig, "wt", 0, 5)
+	setupPRGit(rig, "wt", 0)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
 	rig.installDeps()
@@ -1221,7 +1448,7 @@ func TestDispatchPR_CreatePRExists(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
-	setupPRGit(rig, "wt", 0, 5)
+	setupPRGit(rig, "wt", 0)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(fmt.Errorf("%w: a PR for this branch already exists", ErrPRExists))
 	rig.installDeps()
@@ -1242,7 +1469,7 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
-	setupPRGit(rig, "wt", 0, 5)
+	setupPRGit(rig, "wt", 0)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(errors.New("401 Unauthorized"))
 	rig.installDeps()
@@ -1259,248 +1486,307 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 	}
 }
 
-// TestDispatchPR_StaleCachedUpstream (F-237 regression test).
-//
-// Repro: local git config has branch.fix-install.{remote,merge}
-// set AND refs/remotes/origin/fix-install exists as a cached
-// remote-tracking ref, but the branch was deleted server-side.
-// `git status --porcelain --branch` still reports
-// `## fix-install...origin/fix-install` with ahead=0/behind=0,
-// so the F-57 readiness gate falls through, /gtw pr reaches
-// gh, and gh explodes with the four-line GraphQL diagnostic.
-//
-// Fix verification: setupReadiness is configured so that
-// `git status` reports a porcelain header claiming upstream
-// but `git ls-remote --heads origin fix-install` returns empty.
-// CollectReadinessForDispatch should flip HasUpstream=false and
-// the documented "no upstream" PRBlockReason should fire BEFORE
-// the agent / CreatePR is reached. dispatchPR must NOT invoke
-// the provider.
-func TestDispatchPR_StaleCachedUpstream(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "fix-install"})
-	setupReadiness(rig, "fix-install", messages.GitStatusSnapshot{
-		Branch:      "fix-install",
-		HasUpstream: true, // porcelain header claims an upstream
-	})
-	// setupReadiness defaults the ls-probe to a non-empty
-	// response (confirming the upstream). Override AFTER so the
-	// empty response wins; this is the F-237 stale-cached-ref
-	// condition.
-	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "fix-install"}, "", "", nil)
-	rig.installDeps()
+// -----------------------------------------------------------------------------
+// Provider error mapping — wrapCreatePRError / wrapListPRError
+// -----------------------------------------------------------------------------
 
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
+// TestWrapCreatePRError_CLINotInstalled — gh/glab missing on
+// PATH → ErrCLINotInstalled. The provider name is preserved in
+// the hint so GitLab users see `brew install glab`.
+func TestWrapCreatePRError_CLINotInstalled(t *testing.T) {
+	err := wrapCreatePRError(&exec.Error{Name: "gh", Err: exec.ErrNotFound}, "", "gh")
+	if err == nil {
+		t.Fatalf("expected non-nil error")
 	}
-	r := s.lastText()
-	if !strings.Contains(r, "branch has no upstream on origin") {
-		t.Fatalf("expected no-upstream reply, got:\n%s", r)
+	if !errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
 	}
-	if !strings.Contains(r, "/gtw push first to publish the branch") {
-		t.Fatalf("expected /gtw push hint, got:\n%s", r)
+	if !strings.Contains(err.Error(), "install via `brew install gh`") {
+		t.Fatalf("expected gh install hint, got %v", err)
 	}
-	// Invariant: dispatchPR must NOT have invoked gh — the gate
-	// caught the stale cached ref before reaching CreatePR.
-	for _, c := range rig.git.calls {
-		if len(c.args) > 0 && c.args[0] == "ls-remote" {
-			// ls-remote is expected (the probe). Anything else
-			// from the provider path is not.
-			continue
+	if !strings.Contains(err.Error(), "cli.github.com") {
+		t.Fatalf("expected install URL, got %v", err)
+	}
+}
+
+func TestWrapCreatePRError_CLINotInstalled_GitLab(t *testing.T) {
+	err := wrapCreatePRError(&exec.Error{Name: "glab", Err: exec.ErrNotFound}, "", "glab")
+	if !errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "install via `brew install glab`") {
+		t.Fatalf("expected glab install hint, got %v", err)
+	}
+}
+
+// TestWrapCreatePRError_StaleUpstreamGH — gh GraphQL validator
+// messages get translated to ErrStaleUpstream. Each known
+// substring in the table maps to the sentinel; the rest of the
+// stderr is preserved verbatim.
+func TestWrapCreatePRError_StaleUpstreamGH(t *testing.T) {
+	cases := []string{
+		"gh pr create: Head ref must be a branch",
+		"gh pr create: No commits between main and feat",
+		"gh pr create: Head sha can't be blank",
+		"gh pr create: Base sha can't be blank",
+	}
+	for _, stderr := range cases {
+		err := wrapCreatePRError(errors.New("exit 1"), stderr, "gh")
+		if !errors.Is(err, ErrStaleUpstream) {
+			t.Fatalf("expected ErrStaleUpstream for %q, got %v", stderr, err)
 		}
-		_ = c // no further assertion; rig.git.calls includes every git call
-	}
-	// The provider's CreatePR must not have been called.
-	for _, c := range rig.prov.calls {
-		if c.Method == "CreatePR" {
-			t.Fatalf("CreatePR must NOT have been called; the gate caught the stale ref. calls=%+v", rig.prov.calls)
+		if !strings.Contains(err.Error(), stderr) {
+			t.Fatalf("expected raw stderr preserved; got %v", err)
 		}
 	}
 }
 
-// TestDispatchPR_LSRemoteErrorBypassesProbe (F-237 graceful-
-// fallback verification). When `git ls-remote` errors (network
-// blip, no origin remote, etc.) the probe must NOT flip
-// HasUpstream=false — that would turn a passing gate into a
-// failing one on a transient outage. The dispatch falls
-// through; the pr.go defense-in-depth catches the actual gh
-// rejection (covered by TestDispatchPR_CreatePRStaleUpstreamFallback).
-func TestDispatchPR_LSRemoteErrorBypassesProbe(t *testing.T) {
-	// Verification that the ls-remote probe's graceful fallback
-	// does NOT flip HasUpstream=false on transient errors. The
-	// clean snap (HasUpstream=true, ahead=0, behind=0, no
-	// dirty files) means the gate would fire "no upstream" if
-	// the probe had lied; the dispatch reaching CreatePR is the
-	// signal that the graceful fallback worked.
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "feature/x"})
-	setupReadiness(rig, "feature/x", messages.GitStatusSnapshot{
-		Branch:      "feature/x",
-		HasUpstream: true,
-	})
-	// Override the default ls-remote response AFTER setupReadiness
-	// so the error response wins. Graceful fallback: the probe
-	// error must NOT flip HasUpstream to false.
-	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "feature/x"},
-		"", "fatal: unable to access", errors.New("exit 128"))
-	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
-	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/42")
-	rig.installDeps()
-
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
+// TestWrapCreatePRError_StaleUpstreamGL — glab equivalents.
+func TestWrapCreatePRError_StaleUpstreamGL(t *testing.T) {
+	cases := []string{
+		"glab mr create: Source branch does not exist",
+		"glab mr create: Branch not found",
+		"glab mr create: 404 Not Found",
 	}
-	// Graceful fallback: the dispatch reached CreatePR (no
-	// gate failure) and got a happy URL back.
-	r := s.lastText()
-	if !strings.Contains(r, "PR opened") {
-		t.Fatalf("expected PR-opened card (graceful fallback), got:\n%s", r)
-	}
-	// Cross-check: the no-upstream reply must NOT have fired.
-	if strings.Contains(r, "branch has no upstream on origin") {
-		t.Fatalf("graceful fallback failed — gate fired no-upstream; got:\n%s", r)
+	for _, stderr := range cases {
+		err := wrapCreatePRError(errors.New("exit 1"), stderr, "glab")
+		if !errors.Is(err, ErrStaleUpstream) {
+			t.Fatalf("expected ErrStaleUpstream for %q, got %v", stderr, err)
+		}
 	}
 }
 
-// TestDispatchPR_CreatePRStaleUpstreamFallback (F-237 defense-
-// in-depth). Even when the ls-remote probe is bypassed (network
-// error → graceful fallback leaves HasUpstream=true), if gh
-// rejects with one of the documented GraphQL validator messages
-// we MUST surface the friendly "/gtw push first" hint instead
-// of leaking the raw four-line diagnostic. The dispatch would
-// otherwise reach CreatePR with a stale cached ref and blow up.
-func TestDispatchPR_CreatePRStaleUpstreamFallback(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{Branch: "fix-install"})
-	setupReadiness(rig, "fix-install", messages.GitStatusSnapshot{
-		Branch:      "fix-install",
-		HasUpstream: true,
-	})
-	// Force ls-remote to error AFTER setupReadiness so the
-	// probe doesn't catch the stale ref — we want to verify the
-	// pr.go mapper catches it via the gh stderr fallback.
-	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", "fix-install"},
-		"", "fatal: unable to access", errors.New("exit 128"))
-	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
-	// Build an error that mimics the gh stderr the bug report
-	// quoted: four GraphQL validator messages concatenated.
-	ghErr := fmt.Errorf(
-		"gh pr create: exit status 1: pull request create failed: "+
-			"GraphQL: Head sha can't be blank, Base sha can't be blank, "+
-			"No commits between main and fix-install, Head ref must be a branch (createPullRequest)")
-	rig.prov.SetCreatePRErr(ghErr)
-	rig.installDeps()
-
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
-	}
-	r := s.lastText()
-	if !strings.Contains(r, "branch has no upstream on origin") {
-		t.Fatalf("expected friendly no-upstream reply (defense in depth), got:\n%s", r)
-	}
-	if !strings.Contains(r, "/gtw push first to publish the branch") {
-		t.Fatalf("expected /gtw push hint, got:\n%s", r)
-	}
-	// Invariant: the raw GraphQL diagnostic must NOT leak.
-	if strings.Contains(r, "GraphQL:") {
-		t.Fatalf("raw GraphQL diagnostic leaked; got:\n%s", r)
+// TestWrapCreatePRError_AlreadyExists — "already exists" → ErrPRExists.
+func TestWrapCreatePRError_AlreadyExists(t *testing.T) {
+	err := wrapCreatePRError(errors.New("exit 1"), "already exists", "gh")
+	if !errors.Is(err, ErrPRExists) {
+		t.Fatalf("expected ErrPRExists, got %v", err)
 	}
 }
 
-// TestMapGhHeadMissingToHint covers the stderr mapper directly.
-func TestMapGhHeadMissingToHint(t *testing.T) {
+// TestWrapCreatePRError_UnknownPassThrough — unknown stderr
+// propagates verbatim, no translation, no sentinel.
+func TestWrapCreatePRError_UnknownPassThrough(t *testing.T) {
+	const weird = "gh pr create: 403 Forbidden: API rate limit exceeded"
+	err := wrapCreatePRError(errors.New("exit 1"), weird, "gh")
+	if err == nil {
+		t.Fatalf("expected non-nil")
+	}
+	if errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("unknown stderr must not match CLI-not-installed; got %v", err)
+	}
+	if errors.Is(err, ErrStaleUpstream) {
+		t.Fatalf("unknown stderr must not match stale-upstream; got %v", err)
+	}
+	if errors.Is(err, ErrPRExists) {
+		t.Fatalf("unknown stderr must not match already-exists; got %v", err)
+	}
+	if !strings.Contains(err.Error(), weird) {
+		t.Fatalf("unknown stderr must pass through verbatim; got %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// wrapListPRError — symmetric coverage for the list-call wrapper.
+// Only CLI-not-installed is translated; stale-upstream / exists
+// don't apply to a list call.
+// -----------------------------------------------------------------------------
+
+func TestWrapListPRError_CLINotInstalled(t *testing.T) {
+	err := wrapListPRError(&exec.Error{Name: "gh", Err: exec.ErrNotFound}, "", "gh")
+	if !errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "install via `brew install gh`") {
+		t.Fatalf("expected gh install hint, got %v", err)
+	}
+}
+
+func TestWrapListPRError_UnknownPassThrough(t *testing.T) {
+	const weird = "gh pr list: 502 Bad Gateway"
+	err := wrapListPRError(errors.New("exit 1"), weird, "gh")
+	if err == nil {
+		t.Fatal("expected non-nil")
+	}
+	if errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("unknown stderr must not match CLI-not-installed; got %v", err)
+	}
+	if !strings.Contains(err.Error(), weird) {
+		t.Fatalf("unknown stderr must pass through verbatim; got %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Production GitHubProvider.FindOpenPRForBranch — direct unit
+// coverage for the CLI argv shape, JSON decode, empty-list
+// short-circuit, and stderr-mapping paths.
+// -----------------------------------------------------------------------------
+
+// runGH stubs the gh CLI: stdout / stderr / err are returned
+// for the (cwd, args...) invocation. Mirrors the shape
+// production uses via ExecCLIRunner.
+type runGH struct {
+	out   string
+	err   string
+	fail  error
+	calls int
+	last  []string
+}
+
+func (r *runGH) Run(_ context.Context, _ string, args ...string) (string, string, error) {
+	r.calls++
+	r.last = args
+	return r.out, r.err, r.fail
+}
+
+func TestGitHubFindOpenPRForBranch_Success(t *testing.T) {
+	gh := &runGH{out: `[{"number":42,"url":"https://github.com/o/r/pull/42","state":"OPEN"}]`}
+	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr == nil {
+		t.Fatal("expected non-nil PR")
+	}
+	if pr.Number != 42 || pr.URL != "https://github.com/o/r/pull/42" || pr.State != "open" {
+		t.Fatalf("got %+v", pr)
+	}
+	// Argv shape: `pr list --head <head> --state open --json
+	// number,url,state --repo <owner>/<repo>`.
+	want := []string{"pr", "list", "--head", "feat", "--state", "open",
+		"--json", "number,url,state", "--repo", "octocat/hello"}
+	if !equalStrings(gh.last, want) {
+		t.Fatalf("argv: got %v want %v", gh.last, want)
+	}
+}
+
+func TestGitHubFindOpenPRForBranch_EmptyList(t *testing.T) {
+	gh := &runGH{out: "[]"}
+	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr != nil {
+		t.Fatalf("expected nil PR, got %+v", pr)
+	}
+}
+
+func TestGitHubFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
+	gh := &runGH{fail: &exec.Error{Name: "gh", Err: exec.ErrNotFound}}
+	p := &GitHubProvider{Worktree: "/w", Runner: gh}
+	_, err := p.FindOpenPRForBranch(context.Background(), "octocat", "hello", "feat")
+	if !errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
+	}
+}
+
+// TestGitLabFindOpenPRForBranch_EmptyList — minimum smoke for
+// the GitLab side: argv shape + empty-list short-circuit.
+func TestGitLabFindOpenPRForBranch_EmptyList(t *testing.T) {
+	gh := &runGH{out: "[]"}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.FindOpenPRForBranch(context.Background(), "acme", "demo", "feat")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr != nil {
+		t.Fatalf("expected nil PR, got %+v", pr)
+	}
+	// GitLab argv shape: `mr list --source-branch <head> --state
+	// opened --output json --repo <owner>/<repo>`.
+	want := []string{"mr", "list", "--source-branch", "feat",
+		"--state", "opened", "--output", "json", "--repo", "acme/demo"}
+	if !equalStrings(gh.last, want) {
+		t.Fatalf("argv: got %v want %v", gh.last, want)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestIsExecutableNotFound — the helper must distinguish
+// "binary missing" from generic subprocess errors. We test
+// both the *exec.Error path (LookPath miss) and *fs.PathError
+// path (Start miss).
+func TestIsExecutableNotFound(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
 		want bool
 	}{
-		{"nil error", nil, false},
-		{"unrelated error", errors.New("401 Unauthorized"), false},
-		{"head ref must be a branch", errors.New("gh pr create: GraphQL: Head ref must be a branch"), true},
-		{"no commits between", errors.New("gh pr create: No commits between main and fix-install"), true},
-		{"head sha can't be blank", errors.New("gh pr create: GraphQL: Head sha can't be blank"), true},
-		{"base sha can't be blank", errors.New("gh pr create: GraphQL: Base sha can't be blank"), true},
+		{"nil", nil, false},
+		{"exec.LookPath miss", &exec.Error{Name: "gh", Err: exec.ErrNotFound}, true},
+		{"PathError ENOENT", &fs.PathError{Op: "fork/exec", Path: "/usr/bin/gh", Err: syscall.ENOENT}, true},
+		{"generic error", errors.New("exit 1"), false},
+		{"wrapped exec.LookPath miss", fmt.Errorf("outer: %w", &exec.Error{Name: "glab", Err: exec.ErrNotFound}), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, ok := mapGhHeadMissingToHint(tc.err)
-			if ok != tc.want {
-				t.Fatalf("ok: got %v, want %v", ok, tc.want)
-			}
-			if !ok {
-				if msg != "" {
-					t.Fatalf("non-empty msg on miss: %q", msg)
-				}
-				return
-			}
-			if !strings.Contains(msg, "branch has no upstream on origin") {
-				t.Fatalf("hint missing canonical prefix; got %q", msg)
-			}
-			if !strings.Contains(msg, "/gtw push first") {
-				t.Fatalf("hint missing /gtw push first guidance; got %q", msg)
+			if got := isExecutableNotFound(tc.err); got != tc.want {
+				t.Fatalf("isExecutableNotFound(%v): got %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
 }
 
-// -----------------------------------------------------------------------------
-// countBaseAhead (sanity; used by dispatchPR)
-// -----------------------------------------------------------------------------
-
-func TestCountBaseAhead(t *testing.T) {
-	g := newPushGit()
-	g.on("rev-list", "5", "", nil)
-	n, err := countBaseAhead(context.Background(), "/w", "main", HandlerDeps{Git: g})
-	if err != nil {
-		t.Fatalf("err: %v", err)
+// TestIsStaleUpstreamGH / TestIsStaleUpstreamGL — substring
+// matchers used by wrapCreatePRError.
+func TestIsStaleUpstreamGH(t *testing.T) {
+	for _, ok := range []string{
+		"Head ref must be a branch",
+		"No commits between main and feature/x",
+		"Head sha can't be blank",
+		"Base sha can't be blank",
+	} {
+		if !isStaleUpstreamGH(ok) {
+			t.Fatalf("expected match for %q", ok)
+		}
 	}
-	if n != 5 {
-		t.Fatalf("want 5, got %d", n)
-	}
-	if len(g.calls) != 1 || g.calls[0].args[0] != "rev-list" {
-		t.Fatalf("git calls: %+v", g.calls)
-	}
-}
-
-// TestCountBaseAhead_OriginFallback covers the "main only exists
-// as origin/main" case (manual git worktree add without
-// /gtw fix's `git checkout main` step). The first rev-list
-// call fails; the second (origin/main..HEAD) succeeds.
-func TestCountBaseAhead_OriginFallback(t *testing.T) {
-	g := newPushGit()
-	// First call: main doesn't resolve → error
-	g.onArgs([]string{"rev-list", "--count", "main..HEAD"},
-		"", "fatal: ambiguous argument 'main..HEAD'",
-		errors.New("exit 128"))
-	// Second call (origin/main..HEAD) → success
-	g.onArgs([]string{"rev-list", "--count", "origin/main..HEAD"},
-		"3", "", nil)
-	n, err := countBaseAhead(context.Background(), "/w", "main", HandlerDeps{Git: g})
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if n != 3 {
-		t.Fatalf("want 3, got %d", n)
-	}
-	// Both calls must have happened (the first was tried and
-	// failed before we fell back).
-	if len(g.calls) != 2 {
-		t.Fatalf("git calls: %d, want 2: %+v", len(g.calls), g.calls)
+	// Negatives — must NOT match.
+	for _, no := range []string{
+		"",
+		"401 Unauthorized",
+		"403 Forbidden: API rate limit exceeded",
+		"Branch not found",
+	} {
+		if isStaleUpstreamGH(no) {
+			t.Fatalf("expected no-match for %q", no)
+		}
 	}
 }
 
-// TestResolveProvider_FromYml_SplitOwnerRepo ensures the yml
-// path splits "octocat/hello" correctly (cheap first-slash
-// helper, NOT ParseRepoOwner which needs a host prefix).
+func TestIsStaleUpstreamGL(t *testing.T) {
+	for _, ok := range []string{
+		"Source branch does not exist",
+		"Branch not found",
+		"404 Not Found",
+	} {
+		if !isStaleUpstreamGL(ok) {
+			t.Fatalf("expected match for %q", ok)
+		}
+	}
+	for _, no := range []string{
+		"",
+		"401 Unauthorized",
+		"Head ref must be a branch",
+	} {
+		if isStaleUpstreamGL(no) {
+			t.Fatalf("expected no-match for %q", no)
+		}
+	}
+}
+
 func TestResolveProvider_FromYml_SplitOwnerRepo(t *testing.T) {
 	rig := newPRTestRig(t)
 	rig.deps = HandlerDeps{Git: rig.git}
@@ -1565,7 +1851,7 @@ func TestDispatchPR_AgentFlagOverride(t *testing.T) {
 	_ = cs.SetSelectedCwd(tmp)
 
 	git := newPushGit()
-	setupPRGit(&prTestRig{git: git, agent: opencode}, "feat/manual", 0, 5)
+	setupPRGit(&prTestRig{git: git, agent: opencode}, "feat/manual", 0)
 	git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreatePRResp("https://github.com/octocat/hello/pull/1")
@@ -1714,6 +2000,8 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 	git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"}, "origin/main", "", nil)
 	git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, "5", "", nil)
 	git.onArgs([]string{"rev-list", "--count", "origin/main..HEAD"}, "5", "", nil)
+	git.onArgs([]string{"ls-remote", "--heads", "origin", "feat/manual"},
+		"abc1234\trefs/heads/feat/manual\n", "", nil)
 	git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")

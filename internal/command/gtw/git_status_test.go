@@ -194,18 +194,16 @@ func TestCollectReadinessForDispatch_StaleCachedUpstreamFlipped(t *testing.T) {
 	if snap.BehindRemote != 0 {
 		t.Fatalf("BehindRemote: got %d, want 0 (same reason)", snap.BehindRemote)
 	}
-	// Critical invariant: PRBlockReason picks the documented
-	// "no upstream" case now that HasUpstream is false.
-	reason := snap.PRBlockReason()
-	if reason == "" {
-		t.Fatal("expected PRBlockReason to fire (snap should be unread for PR)")
-	}
-	if !strings.Contains(reason, "branch has no upstream on origin") {
-		t.Fatalf("expected no-upstream reply, got:\n%s", reason)
-	}
-	if !strings.Contains(reason, "/gtw push first to publish the branch") {
-		t.Fatalf("expected /gtw push hint, got:\n%s", reason)
-	}
+	// Critical invariant: with HasUpstream=false the snap now
+	// says "no upstream" regardless of what porcelain originally
+	// claimed. /gtw push and /gtw commit both consume this flag
+	// through HasNothingToPush / PushBlockReason and proceed
+	// along the "first-push" path; /gtw pr reaches gate 1 via
+	// its own direct `git ls-remote --heads origin <branch>`
+	// call (which will independently confirm origin actually
+	// has the ref) and so is unaffected by this snap field.
+	// The snap itself only needs to carry the HasUpstream
+	// flag flip; downstream consumers do their own checks.
 }
 
 func TestCollectReadinessForDispatch_LSRemoteErrorFallback(t *testing.T) {

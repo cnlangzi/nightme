@@ -1196,3 +1196,91 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 
 详细设计、错误处理矩阵、决策记录、不在范围内的 followups
 见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。
+
+---
+
+## A4. `/gtw pr` 收窄到 2 闸门(2-gate refactor)
+
+> **Source**: branch `fix-gtw-pr-gitlab` — 把 `/gtw pr` 的 readiness
+> 从 A2 设计的 6 维 snapshot gate 收窄到两道独立闸门。
+>
+> **改动动机**:产品决策 — `/gtw pr` 的语义 = "帮我尝试开 PR,前序
+> 状态我自己负责"。`/gtw pr` 不应该再把 ahead / behind / dirty /
+> conflicts / detached 当作硬拒条件 — 这些都是 gh/glab 自己会
+> 处理的领域;我们卡在这条线上只会让用户在最后一步看到一堆 nudge,
+> 跟"执行命令"的语义冲突。
+
+### A4.1 新设计(2 闸门)
+
+| 闸门 | 实现 | 失败提示 |
+|---|---|---|
+| 1. `origin/<branch>` ref 存在 | `RemoteBranchExists(ctx, dir, branch,)` → `git ls-remote --heads origin <branch>` 直接调 | `❌ origin/<branch> does not exist — /gtw push first` |
+| 2. 没有已开 PR | `provider.FindOpenPRForBranch(owner, repo, head)` → `gh pr list --head ...` / `glab mr list --source-branch ...` | `❌ branch <branch> already has an open PR (#N): <url>` |
+
+两道闸都通过 → 直接 `CreatePR`,**不再**评估 ahead/behind/dirty/conflicts/detached/no-tracking-ref。
+
+### A4.2 错误契约:known → 友好提示,unknown → 原文透传
+
+每个底层 helper 自己判断 known / unknown,自己拼友好 hint(包带
+ sentinel error)。`dispatchPR` 只用 `errors.Is` 分流:
+
+| 错误源 | known stderr / 信号 | sentinel | unknown 行为 |
+|---|---|---|---|
+| `RemoteBranchExists` | `could not read Username` / `unable to access` / `does not appear to be a git repository` | (带 hint 字符串) | 原 stderr 透传,**绝不**二次翻译 |
+| `provider.{FindOpenPRForBranch,CreatePR}` | `gh` / `glab` 可执行文件不存在 | `ErrCLINotInstalled` | 原 stderr 透传 |
+| `provider.CreatePR` race-window | gh GraphQL 4 条 / glab 3 条 "head missing on origin" | `ErrStaleUpstream` | 原 stderr 透传 |
+| `provider.CreatePR` race-window | `already exists` | `ErrPRExists`(已存在) | 原 stderr 透传 |
+
+helper 实现位于:
+- `internal/command/gtw/worktree.go::RemoteBranchExists`(lsRemoteKnownErrors 表)
+- `internal/command/gtw/provider.go::wrapCreatePRError` / `wrapListPRError`
+- `internal/command/gtw/provider.go::isExecutableNotFound` / `isStaleUpstreamGH` / `isStaleUpstreamGL`
+
+### A4.3 A2 设计的哪些部分保留 / 哪些被替换
+
+| A2 设计元素 | 状态 |
+|---|---|
+| `CollectReadinessForDispatch` / `verifyUpstreamOnOrigin`(A2 §A2.F-237)| **保留**给 `/gtw push` 和 `/gtw commit` 用 — 它们的 stale-cached-ref 探测仍是真 bug;**移除** PR 路径的调用 |
+| `GitStatusSnapshot` 字段 / `parsePorcelainBranchStatus` / `parseBranchHeader` | **保留** — runtime footer 还在用 |
+| `WorkingTreeIsClean` / `HasNothingToPush` / `PushBlockReason` / `HasUpstreamBranch` / `LocalIsAtUpstreamTip` / `UpstreamGone` 字段 | **保留** — push 路径的 `HasNothingToPush` 仍消费 `HasUpstreamBranch` + `UpstreamGone` |
+| `PRBlockReason` / `IsReadyForPR` | **删除** — 0 caller |
+| `dispatchPR` 的 6 维 `if reason := snap.PRBlockReason()` 分支 | **删除** |
+| `countBaseAhead` + "nothing new to PR yet" 分支 | **删除** — ahead=0 也发,gh/glab 自己说 |
+| `mapGhHeadMissingToHint` 字符串翻译 | **删除** — 替换为 sentinel-based flow + `provider.isStaleUpstream*` helper |
+
+### A4.4 为什么 PR 路径独立,不复用 push 的 `verifyUpstreamOnOrigin`
+
+PR 路径用的是**直接 ls-remote**,不 mutate snap,不 mutate snap 就
+不需要 push 那条 "CollectReadiness + verifyUpstreamOnOrigin" 链。
+两条路径语义不同:
+
+- push: 需要 stale-cached-ref 检测(避免 push 把 stale `ahead=0`
+  当成"nothing to push"漏推)
+- pr: 只需要 ls-remote **单次**返回 — 没 ref 就拒绝,有就 pass
+
+强行共用 `CollectReadinessForDispatch` 让 PR 路径付了它不需要的代价
+(多一次 git status 调用,多一次 snap mutate),也得承担 push 的
+graceful-fallback-on-network-error 语义(错误路径更曲折)。
+
+### A4.5 测试覆盖
+
+`internal/command/gtw/pr_test.go` 共 ~30 个测试,涵盖:
+- 两道闸的 pass / fail 各路径
+- 已知 stderr 翻译(auth / network / not-a-repo)
+- 未知 stderr passthrough(关键不变量 — 不能匹配任何 known fragment)
+- race-window 兜底(branch 被删 / PR 被人开了 / gh/glab 突然没装)
+- dirty / ahead / behind / conflicts 不再 gate
+- helper 单元测试(`wrapCreatePRError` / `wrapListPRError` /
+  `isExecutableNotFound` / `isStaleUpstream*`)
+- production `GitHubProvider.FindOpenPRForBranch` / `GitLabProvider.FindOpenPRForBranch` 直接单元测试(argv shape + JSON decode + empty list)
+
+### A4.6 不在范围内
+
+- `/gtw commit` / `/gtw push` 的 readiness 完全不动 — 它们的语义
+  (本地状态决定能不能 push / commit)没变
+- 不引入"如果 dispatchPR 失败,自动 revert gh 状态"的逻辑 —
+  gh/glab 创建 PR 失败本来就只是拒绝,无需回滚
+- 不改 `loadDispatchContext` 的 detached HEAD 检查 — yml 路径
+  (`Branch == ""` reject)和非 worktree 路径(`branch == "HEAD"`
+  reject)仍守住 dispatchPR 入口
+- F-237 的 `verifyUpstreamOnOrigin` 不删 — push/commit 仍在用

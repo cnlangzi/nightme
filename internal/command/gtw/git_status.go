@@ -326,7 +326,7 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 // 3×3 = 9 codes — UU / UA / UD / AU / AA / AD / DU / DA / DD —
 // all unmerged merge/rebase states. isConflictXY is the SINGLE
 // source of truth for this classification in the gtw package;
-// other readiness predicates (PushBlockReason / PRBlockReason)
+// other readiness predicates (PushBlockReason)
 // branch on the resulting HasConflicts flag rather than re-running
 // the detection. (Pre-F-57 there was a sibling push.go helper
 // that this function mirrored; F-57 collapsed the two call sites

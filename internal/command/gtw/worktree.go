@@ -128,16 +128,63 @@ func BranchExists(ctx context.Context, dir, branch string, git GitRunner) (bool,
 // parse the SHA, only check for non-empty output. The CLI
 // strips trailing newlines so a single matching ref produces
 // a single non-empty line.
+// lsRemoteKnownErrors maps a known git ls-remote stderr fragment
+// to a friendly hint string. Each fragment is the literal
+// substring we match on; the hint is appended after the trimmed
+// stderr so the original message is still visible.
+//
+// "could not read Username" — git's auth-prompt failure on an
+// HTTPS remote without cached credentials.
+// "unable to access" — DNS / network failure to origin.
+// "does not appear to be a git repository" — origin URL points
+// somewhere that isn't a git server.
+//
+// Unmatched stderr falls through to the generic wrap path —
+// dispatchPR surfaces the raw stderr verbatim, NEVER
+// reinterpreted as one of the known fragments. The user's
+// product principle: known errors get friendly hints; unknown
+// errors get the truth.
+var lsRemoteKnownErrors = []struct {
+	fragment string
+	hint     string
+}{
+	{"could not read Username", "hint: configure git credentials (e.g. `gh auth login` or `git config credential.helper`)"},
+	{"unable to access", "hint: check network connectivity and the origin remote URL (`git remote -v`)"},
+	{"does not appear to be a git repository", "hint: verify `git remote -v` — origin should point at the same host as the PR target"},
+}
+
+// RemoteBranchExists reports whether `branch` is present on the
+// origin remote's refs/heads namespace via
+// `git ls-remote --heads origin <branch>`. The CLI strips trailing
+// newlines so a single matching ref produces a single non-empty
+// line.
+//
+// Error contract:
+//   - known stderr fragments (auth / network / not-a-repo) →
+//     wrapped error includes the original stderr PLUS a friendly
+//     hint pointing at the next step;
+//   - unknown stderr → wrapped verbatim, NO hint attached;
+//   - empty stderr → wrapped from the underlying exec error.
+//
+// Used by /gtw pr's first readiness gate ("origin/<branch>
+// ref exists"). The PR dispatcher surfaces the error directly;
+// we deliberately do NOT silently fall back to "no upstream"
+// on transient errors — that would mislead the user into
+// running /gtw push when the real problem is the network.
 func RemoteBranchExists(ctx context.Context, dir, branch string, git GitRunner) (bool, error) {
 	out, stderr, err := git.Run(ctx, dir, "ls-remote", "--heads", "origin", branch)
 	if err != nil {
-		// git ls-remote writes "fatal: origin does not appear
-		// to be a git repository" / "fatal: unable to access" to
-		// stderr on the common failure modes. Surface the wrapped
-		// error verbatim so the caller can decide whether to
-		// degrade or escalate.
-		if stderr != "" {
-			return false, fmt.Errorf("git ls-remote --heads origin %s: %s", branch, strings.TrimSpace(stderr))
+		trimmed := strings.TrimSpace(stderr)
+		for _, k := range lsRemoteKnownErrors {
+			if strings.Contains(trimmed, k.fragment) {
+				return false, fmt.Errorf("git ls-remote --heads origin %s: %s\n%s",
+					branch, trimmed, k.hint)
+			}
+		}
+		// Unknown stderr — preserve verbatim, no hint. The user
+		// can read the original git message and decide.
+		if trimmed != "" {
+			return false, fmt.Errorf("git ls-remote --heads origin %s: %s", branch, trimmed)
 		}
 		return false, fmt.Errorf("git ls-remote --heads origin %s: %w", branch, err)
 	}

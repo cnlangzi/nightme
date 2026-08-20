@@ -198,3 +198,36 @@ func TestEventBufferSize_Pinned(t *testing.T) {
 		t.Fatalf("eventBufferSize = %d, want %d — regression: cap was lowered, events may drop under load", eventBufferSize, want)
 	}
 }
+
+// TestDeliver_DoesNotPanicOnClosedEvents is the regression test for
+// the "send on closed channel" panic observed on CI macOS when
+// readPump crashes and `defer close(d.events)` fires before the
+// pending SendBlocks producer reaches the select arm. The defer
+// recover in deliver() must silently drop the event instead of
+// taking the bridge down.
+//
+// Pre-fix: the acp bridge died with `panic: send on closed
+// channel` whenever the agent subprocess terminated between the
+// readPump's last scan and the producer's send. macOS ARM CI
+// exposed this race reliably (faster agent teardown) while Linux
+// / Windows CI happened to interleave slower.
+//
+// White-box (package acp) — constructs a driver with a pre-closed
+// events channel and asserts deliver() returns without panicking.
+func TestDeliver_DoesNotPanicOnClosedEvents(t *testing.T) {
+	a := &driver{
+		ctx:    context.Background(),
+		events: make(chan agent.AgentEvent, 1),
+	}
+	// Simulate readPump's `defer close(d.events)` firing
+	// before the producer reaches deliver().
+	close(a.events)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("deliver panicked on closed events channel: %v — defer recover guard regressed", r)
+		}
+	}()
+	// Must NOT panic. The event is silently dropped.
+	a.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "after close"})
+}

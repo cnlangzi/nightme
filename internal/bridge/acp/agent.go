@@ -1742,6 +1742,23 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 		ev.Model = d.model
 		d.modelMu.Unlock()
 	}
+	// Defensive recover: when readPump panics (agent crash,
+	// json parse error, etc.) its `defer close(d.events)` fires
+	// before d.ctx is cancelled, so the `<-d.ctx.Done()` arm is
+	// not yet ready. Without the recover the closed-channel send
+	// panics with "send on closed channel", which crashes the
+	// bridge and takes down the daemon. Recover is cheap and
+	// matches codex's `<-d.session.closed` arm — we just don't
+	// need a separate `closed` signal channel because acp's
+	// close(d.events) IS the close signal.
+	defer func() {
+		if r := recover(); r != nil {
+			// d.events closed before the send completed. The
+			// readPump has exited (or is about to); nobody will
+			// read this event. Drop silently.
+			_ = r
+		}
+	}()
 	select {
 	case d.events <- ev:
 	case <-d.ctx.Done():

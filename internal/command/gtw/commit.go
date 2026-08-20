@@ -57,7 +57,7 @@ func dispatchCommit(
 	// F-57: same single readiness snapshot push uses. Sharing the
 	// snapshot across /gtw commit and /gtw push keeps the two
 	// gates reading the same truth.
-	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
+	snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
@@ -132,7 +132,7 @@ func dispatchCommit(
 	// (the false-success class verify caught), or — much rarer —
 	// a state where the commit landed but the agent's tooling
 	// added a conflict entry. We cannot trust the original snap.
-	snap, err = CollectReadiness(ctx, c.Worktree, deps.Git)
+	snap, err = CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ re-read worktree status after agent: %v", err)), nil

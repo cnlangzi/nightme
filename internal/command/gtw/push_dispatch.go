@@ -50,7 +50,7 @@ func dispatchPush(
 	// snap is the same one /gtw pr and /gtw commit use, so
 	// the gates read the same truth (continuity is structural
 	// — see F-57 §5).
-	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
+	snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil

@@ -139,6 +139,17 @@ func setupReadiness(rig *prTestRig, branch string, snap messages.GitStatusSnapsh
 	// CollectReadiness — the F-57 single source of truth.
 	rig.git.onArgs(statusCmd, porcelainFromSnapshot(snap), "", nil)
 
+	// F-237: dispatch paths go through CollectReadinessForDispatch,
+	// which runs `git ls-remote --heads origin <branch>` to
+	// verify the cached upstream ref isn't stale. Default to a
+	// non-empty response so existing tests (which assume the
+	// upstream really exists on origin) keep passing without
+	// each test having to register the probe mock. Tests that
+	// want to exercise the stale-cached case override this with
+	// an empty-string response.
+	rig.git.onArgs([]string{"ls-remote", "--heads", "origin", branch},
+		"abc1234	refs/heads/"+branch, "", nil)
+
 	// DefaultBranch (used by both dispatchPush and dispatchPR for
 	// the success-card revRange / PR base ref). DefaultBranch does
 	// strings.TrimPrefix(out, "origin/") so the mock must NOT

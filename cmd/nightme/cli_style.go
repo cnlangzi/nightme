@@ -2,17 +2,27 @@ package main
 
 import (
 	"io"
-	"os"
-
-	"github.com/mattn/go-isatty"
 
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
 // Tiny ANSI helpers for the REPL update prompt. No colour
 // library: the rest of the CLI (banner, etc.) stays
-// dependency-free, and we honour NO_COLOR + non-TTY writers
-// so tests see plain text.
+// dependency-free.
+//
+// paint() either wraps s with an SGR sequence (when
+// styleEnabled returns true) or returns s verbatim (when
+// it returns false). On Windows styleEnabled is hard-wired
+// to false — the banner / y-N update prompt stays as
+// plain Unicode glyphs that the Windows console renders
+// natively without VT, so no ANSI leaks on a classic cmd.exe
+// (whose output buffer lacks ENABLE_VIRTUAL_TERMINAL_PROCESSING).
+// reeflective/readline itself is gated by readlineUsable()
+// in repl_console_windows.go: on a no-VT cmd.exe the REPL
+// falls back to the scanner path rather than running
+// readline (which floods garbage with VT off, or hangs with
+// VT on). paint() is therefore never the seam that decides
+// VT — it just stays plain text.
 
 const (
 	ansiReset  = "\x1b[0m"
@@ -26,18 +36,10 @@ const (
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-func styleEnabled(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	fd := f.Fd()
-	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
-}
-
+// paint wraps s with the given SGR code + reset. When
+// styleEnabled returns false (Windows hosts, NO_COLOR set,
+// non-*os.File writer) it returns s verbatim — pure plain
+// text, no codes at all.
 func paint(w io.Writer, code, s string) string {
 	if s == "" || !styleEnabled(w) {
 		return s

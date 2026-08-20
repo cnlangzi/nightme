@@ -191,14 +191,15 @@ func TestConfigAgentsMenu_CancelWithQ(t *testing.T) {
 func TestConfigInteractive_QuitImmediately(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
 
-	cfg, err := config.LoadDefault()
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		t.Fatalf("LoadDefault: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 
 	var buf bytes.Buffer
-	if err := configInteractive(cfg, strings.NewReader("q\n"), &buf); err != nil {
+	if err := configInteractive(cfg, cfgPath, strings.NewReader("q\n"), &buf); err != nil {
 		t.Fatalf("configInteractive: %v", err)
 	}
 
@@ -234,8 +235,8 @@ func TestConfigNameMenu_Set(t *testing.T) {
 
 	var buf bytes.Buffer
 	in := strings.NewReader("my-laptop\n")
-	if err := configNameMenu(cfg, in, &buf); err != nil {
-		t.Fatalf("set: %v", err)
+	if err := configNameMenu(cfg, cfgPath, in, &buf); err != nil {
+		t.Fatalf("configNameMenu: %v", err)
 	}
 
 	cfg2, _ := config.Load(cfgPath)
@@ -261,7 +262,7 @@ func TestConfigNameMenu_EmptyKeepsCurrent(t *testing.T) {
 
 	var buf bytes.Buffer
 	in := strings.NewReader("\n")
-	if err := configNameMenu(cfg, in, &buf); err != nil {
+	if err := configNameMenu(cfg, cfgPath, in, &buf); err != nil {
 		t.Fatalf("empty: %v", err)
 	}
 
@@ -285,7 +286,7 @@ func TestConfigNameMenu_RequiresExistingConfig(t *testing.T) {
 
 	var buf bytes.Buffer
 	in := strings.NewReader("new-name\n")
-	err := configNameMenu(cfg, in, &buf)
+	err := configNameMenu(cfg, cfgPath, in, &buf)
 	if err == nil {
 		t.Fatal("expected error when config file missing, got nil")
 	}

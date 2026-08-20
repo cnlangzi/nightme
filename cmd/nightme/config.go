@@ -39,16 +39,21 @@ func newConfigCmd() *cobra.Command {
 }
 
 func runConfig(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadDefault()
+	path := config.DefaultPath()
+	cfg, err := config.Load(path)
 	if err != nil {
 		return err
 	}
-	return configInteractive(cfg, os.Stdin, os.Stdout)
+	return configInteractive(cfg, path, os.Stdin, os.Stdout)
 }
 
 // configInteractive drives the top-level menu loop. Extracted for
-// testability: callers can pass any io.Reader/Writer.
-func configInteractive(cfg *config.Config, in io.Reader, out io.Writer) error {
+// testability: callers can pass any io.Reader/Writer. path is the
+// config path the menu was loaded from, threaded down to submenus
+// that need to round-trip a Save back to the same location — without
+// this, a caller using $NIGHTME_CONFIG=/some/other.yaml would see
+// the menu save to the default path instead.
+func configInteractive(cfg *config.Config, path string, in io.Reader, out io.Writer) error {
 	fmt.Fprintln(out, "nightme config — interactive")
 	fmt.Fprintln(out, "===========================")
 
@@ -63,7 +68,7 @@ func configInteractive(cfg *config.Config, in io.Reader, out io.Writer) error {
 		choice := readLine(in)
 		switch strings.TrimSpace(choice) {
 		case "1":
-			if err := configNameMenu(cfg, in, out); err != nil {
+			if err := configNameMenu(cfg, path, in, out); err != nil {
 				fmt.Fprintf(out, "Error: %v\n", err)
 			}
 		case "2":
@@ -179,7 +184,14 @@ func configAgentsMenu(cfg *config.Config, in io.Reader, out io.Writer) error {
 
 // configNameMenu shows the current instance name and lets the user
 // set a new one. Empty input keeps the current name unchanged.
-func configNameMenu(cfg *config.Config, in io.Reader, out io.Writer) error {
+//
+// path is where the config was loaded from and where the new name
+// will be saved. Callers should pass that path explicitly (see
+// configInteractive) rather than letting this function resolve it
+// from config.DefaultPath() — the latter would silently diverge
+// when the menu was loaded from a non-default location (e.g. one
+// pointed at by $NIGHTME_CONFIG).
+func configNameMenu(cfg *config.Config, path string, in io.Reader, out io.Writer) error {
 	current := config.EffectiveName(cfg)
 
 	fmt.Fprintf(out, "\nCurrent name: %s\n", current)
@@ -194,19 +206,18 @@ func configNameMenu(cfg *config.Config, in io.Reader, out io.Writer) error {
 		return nil
 	}
 
-	path := config.DefaultPath()
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf(
-			"name: no config file at %q — run `nightme login` first",
+			"config name: no config file at %q — run `nightme login` first",
 			path,
 		)
 	} else if err != nil {
-		return fmt.Errorf("name: stat %s: %w", path, err)
+		return fmt.Errorf("config name: stat %s: %w", path, err)
 	}
 
 	cfg.Name = value
-	if err := config.SaveDefault(cfg); err != nil {
-		return fmt.Errorf("name: save config: %w", err)
+	if err := config.Save(cfg, path); err != nil {
+		return fmt.Errorf("config name: save config: %w", err)
 	}
 
 	fmt.Fprintf(out, "✓ Name set to %q.\n", value)

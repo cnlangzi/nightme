@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,17 @@ type Store struct {
 // New loads (or initializes) the chat session file at path. A missing
 // file yields an empty store; a corrupt file is backed up to
 // <path>.bak and the store is reset to empty.
+// New loads (or initializes) the chat_sessions.json store.
+//
+// Every entry's map key MUST equal its ChatID field, and every
+// ChatID MUST start with a channel-namespaced prefix (Telegram:
+// "tg_", Feishu: "oc_", etc.). See docs/CHANNEL.md §5.5 and
+// docs/channel/telegram.md §5.1 for the channel-namespacing rule.
+//
+// Loading does no migration or rewriting: any entry whose map key
+// disagrees with e.ChatID, or whose ChatID is missing a channel
+// prefix, is rejected with an error so the operator can fix the
+// file by hand. The daemon will NOT silently rewrite on-disk data.
 func New(path string) (*Store, error) {
 	s := &Store{
 		path:    path,
@@ -65,27 +77,18 @@ func New(path string) (*Store, error) {
 			}
 			s.entries = make(map[string]*registry.ChatSessionEntry)
 		} else if container.ChatSessions != nil {
-			// Re-key by entry.ChatID so the in-memory map matches the
-			// index used by every accessor (Get/SetXxx/Bootstrap all
-			// look up by chatID). Legacy files written by the old
-			// registry.ChatSessionFile keyed the map by entry.ID
-			// ("cs_<chatID>"); left as-is, those entries would be
-			// invisible to the chatID-indexed lookups and would
-			// orphan alongside a fresh chatID-keyed copy. This is a
-			// one-shot migration: the next save() rewrites the whole
-			// file with the normalized keys, so old "cs_*" keys do
-			// not survive past the first persist. No version bump —
-			// both old and new files are v1; reading is bidirectionally
-			// compatible (new files have e.ChatID == key, a no-op here).
-			migrated := make(map[string]*registry.ChatSessionEntry, len(container.ChatSessions))
 			for k, e := range container.ChatSessions {
-				key := k
-				if e != nil && e.ChatID != "" {
-					key = e.ChatID
+				if e == nil {
+					continue
 				}
-				migrated[key] = e
+				if e.ChatID != k {
+					return nil, fmt.Errorf("chat_sessions: %s has key %q but entry.ChatID %q — every entry must be keyed by ChatID", path, k, e.ChatID)
+				}
+				if !strings.HasPrefix(k, "tg_") && !strings.HasPrefix(k, "oc_") {
+					return nil, fmt.Errorf("chat_sessions: %s entry %q is not channel-prefixed (must be \"tg_...\" or \"oc_...\")", path, k)
+				}
+				s.entries[k] = e
 			}
-			s.entries = migrated
 		}
 	case errors.Is(err, os.ErrNotExist):
 		// Nothing to do — empty store.

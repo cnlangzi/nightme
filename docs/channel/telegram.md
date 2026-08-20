@@ -196,25 +196,84 @@ qino 可以通过占位消息、摘要和状态更新控制噪音，但不应宣
 
 ## 5. 标识与持久化
 
-建议在 ChatSession / Binding 层增加 Telegram 专用字段，而不把 Telegram 原生 ID 写入 Gateway 通用协议：
+### 5.1 chatID 命名空间（InboundMessage.ChatID）
 
-```text
-ChatSession
-├── ChatID                 # 现有 qino 聊天标识
-├── TelegramChatID         # Telegram chat_id
-├── TelegramTopicID        # message_thread_id
-├── TelegramPlaceholderID  # 占位消息 message_id，可选
-└── MessageID              # 当前入站消息 message_id
+每条 Telegram update 映射到 InboundMessage.ChatID 时，**先加 `tg_` 前缀**:
+
+```go
+// telegram adapter 的纯函数
+func sessionChatID(rawChatID string, threadID int) string {
+    const prefix = "tg_"
+    if threadID > 0 {
+        return prefix + rawChatID + ":" + strconv.Itoa(threadID)
+    }
+    return prefix + rawChatID
+}
 ```
 
-发送消息时的路由规则：
+| 场景 | Telegram 原生字段 | **InboundMessage.ChatID** |
+|---|---|---|
+| DM (private) | chat.id = `8684538097` | `tg_8684538097` |
+| 群主窗口 (Forum 关) | chat.id = `-10012345` | `tg_-10012345` |
+| 群主窗口 (Forum 开) | chat.id = `-10012345`, thread_id = 0 | `tg_-10012345` |
+| 群内 topic 42 | chat.id = `-10012345`, thread_id = 42 | `tg_-10012345:42` |
+| 群内 topic 88 | chat.id = `-10012345`, thread_id = 88 | `tg_-10012345:88` |
+
+**稳定性约束**（核心）：
+
+1. chatID 必须是 update 内容的纯函数 — 不依赖 daemon state、不依赖 config
+2. 同一 DM / 同一群 / 同一 topic 跨 daemon 重启 / 升级 / 状态文件丢失, chatID 永远一致
+3. **不允许在 chatID 拼接中引用任何运行时状态**（如自动创建的 sentinel topic ID）
+4. **不允许在 chatID 拼接中引用任何配置**（如 `topic_mode: separate` vs `shared`）
+5. 旧 binary 不会产生新格式的 chatID —— 升级到本版本后启动时跑一次迁移,把旧的纯数字 chatID 加 `tg_` 前缀
+
+反向 split (`splitSessionID`) 也必须是纯函数,确保 inbound 和 outbound 两侧始终看到同一 chatID。
+
+### 5.2 不需要 ChatSession 加 Telegram 专用字段
+
+修订前的设计曾考虑在 ChatSession 加 Telegram 专用字段（`TelegramChatID` / `TelegramTopicID` / `TelegramPlaceholderID`）。**修订后不需要**——这些状态走 Telegram adapter 自己的 state file,ChatSession 完全不感知 IM 协议细节:
 
 ```text
-topic_id 非空
+ChatSession          ← chatsession 包,不知道 telegram
+├── ChatID            ← tg_<chat.id>[:thread_id]   (跟其他 channel 共用)
+├── SelectedCwd       ← /cwd 设
+├── SelectedAgent     ← /use 设
+└── InputBuffer FSM   ← 通用
+```
+
+`tg_` 前缀让 ChatSession 这层就跟飞书的 `oc_<hex>` 一样不透明——它只是收到一个 string,用它作 chatstore 的 key。
+
+### 5.3 路由规则（基于 tg_ 前缀）
+
+发送消息时的拆分:
+
+```go
+// 解析 chatID → (rawChatID, threadID)
+func splitSessionID(sessionID string) (rawChatID string, threadID int, ok bool) {
+    if !strings.HasPrefix(sessionID, "tg_") {
+        return "", 0, false
+    }
+    body := sessionID[3:]                          // strip "tg_"
+    if idx := strings.Index(body, ":"); idx < 0 {
+        return body, 0, true
+    }
+    tid, _ := strconv.Atoi(body[idx+1:])
+    return body[:idx], tid, true
+}
+```
+
+发送消息时的路由规则:
+
+```text
+threadID > 0
   ├── sendMessage / sendPhoto / sendDocument / sendMediaGroup
-  │     └── 携带 message_thread_id
+  │     └── 携带 message_thread_id = threadID
   └── editMessageText / editMessageReplyMarkup
         └── 使用 chat_id + message_id，不需要 message_thread_id
+
+threadID == 0
+  ├── sendMessage → 主窗口 / 私聊
+  └── editMessageText → 占位消息(主窗口场景已废弃见§11.7)
 ```
 
 所有回调处理都必须以 `callback_query.message.message_id` 为准查找原卡；不能只按 `callback_data` 中的 `message_id` 盲信，因为 Telegram 的 `callback_data` 是适配器自己编码的字段。
@@ -237,8 +296,8 @@ Topic 方案要求：
 - 占位消息被用户删除：重新发送状态消息并替换 `placeholder_message_id`，不能继续调用旧的 `editMessageText`。
 - 消息超过 Telegram 文本长度限制：按 API 限制拆分，结果消息保留顺序并明确 continuation。
 - Bot 被移出群组或权限变化：进入降级路径；在主窗口发送一次不可恢复的连接错误，而不是继续静默丢弃。
-- 多个 chat 共享一个 Telegram 群组：按 `chat_id + message_thread_id` 路由，不能只用群组 `chat_id`。
-- 同一 Topic 被重复创建：通过持久化的 `message_thread_id` 查重，避免重启 daemon 后为同一会话创建多个 Topic。
+- 多个 chat 共享一个 Telegram 群组：按 `tg_<chat.id>:<thread_id>` 路由,不能只靠群组 `chat.id`——chatID 必须含 thread_id 才能 partition。
+- 同一 Topic 被重复创建：Telegram 原生 message_thread_id 唯一——adapter 只需用 thread_id 而非自建 sentinel topic,见 §5.1 修订。
 
 ## 8. 实施顺序
 
@@ -273,8 +332,8 @@ Topic 方案要求：
 
 ## 9. 验收标准
 
-- 用户在主窗口发送消息后，不会看到 qino 的 thinking/tools 堆积在主窗口。
-- daemon 重启后仍能通过 `chat_id + message_thread_id` 找回原 Topic。
+- 同一 DM / 同一群 / 同一 topic 跨 daemon 重启, chatID 永远稳定 (`tg_<chatid>[:thread_id]`) —— 见 §5.1 稳定性约束。
+- 升级到本版本后, 启动时跑一次迁移把旧的纯数字 chatID 加 `tg_` 前缀 —— 见 §5.1 稳定性约束 5。
 - 每个 qino 会话默认只有一个工作 Topic，Topic 内允许按时间顺序出现多条消息。
 - Topic 内的占位状态可以通过 `placeholder_message_id` 原位更新。
 - thinking、tool start、tool end 全部在 Topic 内可见，顺序不丢失。
@@ -415,29 +474,30 @@ telegram:
 
 ### 10.5 Topic 路由与消息发送
 
-用户自建 Bot 模式下，Topic 仍由每个 daemon 自己管理：
+Telegram 消息通过 `chat.id` + `message_thread_id` 两个 native 字段拼出稳定的 InboundMessage.ChatID,不再由 daemon 自建 sentinel topic:
 
 ```text
-主窗口用户消息
-        │
-        ▼
-读取 chat_id + user_id
-        │
-        ▼
-查找本地 message_thread_id
-        │
-        ├── 已有 Topic ──► 使用原 Topic
-        │
-        └── 没有 Topic ──► createForumTopic
-                                  │
-                                  ▼
-                         保存 message_thread_id
-                                  │
-                                  ▼
-                         发送占位消息并保存 message_id
+主窗口用户消息 (thread_id=0)
+       │
+       ▼
+chatID = "tg_<chat.id>"             ← 主窗口直接用 chat.id
+   │
+   ▼
+InboundMessage 进入 chatstore
+（chatstore 的 key = "tg_<chat.id>"）
+
+
+群内 topic 42 用户消息 (thread_id=42)
+       │
+       ▼
+chatID = "tg_<chat.id>:42"          ← 真有 topic 时加 thread_id
+   │
+   ▼
+InboundMessage 进入 chatstore
+（chatstore 的 key = "tg_<chat.id>:42"）
 ```
 
-所有发送方法都携带 Topic ID：
+所有发送方法都携带 Topic ID（仅当 thread_id > 0 时）：
 
 ```json
 {
@@ -447,13 +507,9 @@ telegram:
 }
 ```
 
-占位消息的更新仍然使用：
+Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeholder_message_id, text)` 原地更新。主窗口消息不再有占位 / sentinel topic 概念 —— OutHeartbeat / OutToolStart 等独立消息直接发到主窗口。
 
-```text
-editMessageText(chat_id, placeholder_message_id, text)
-```
-
-而不是使用 `editForumTopic`。`editForumTopic` 只修改 Topic 名称或图标，不修改 Topic 内正文。
+`editForumTopic` 只修改 Topic 名称或图标，不修改 Topic 内正文，**不能**用来做占位更新。
 
 ### 10.6 与现有架构的映射
 
@@ -475,22 +531,22 @@ Gateway、Chatsession 和 Agent 继续使用现有 `messages` 类型，不感知
 ### 10.7 该模式的边界
 
 - 用户必须先通过 `@BotFather` 手动创建 Bot。
-- Bot Token 不能共享，不能由多个 daemon 共同轮询。
-- Topic 方案要求目标群组是 Forum Supergroup；普通群组没有 Forum Topic。
-- 私聊没有 Forum Topic，只能退化为普通消息。
-- 用户需要自行配置 Bot 的群组权限；如果 Bot 没有发消息、创建 Topic 或管理 Topic 的权限，qino 必须在主窗口明确报错，而不是静默丢弃。
-- 由于 Bot 是用户自己的，qino 只能控制该 Bot，不能帮助用户恢复或修改 BotFather 账号凭证。
-- 二维码可以简化“把已有 Bot 添加到群组”的步骤，但不能实现飞书式的全自动应用注册。
+- Bot Token 不能共享,不能由多个 daemon 共同轮询。
+- 群组可以是普通群(不开启 Forum)或 Forum Supergroup —— 都可以聊天,只有后者有 message_thread_id 概念(见 §5.1)
+- 私聊没有 Forum Topic,直接走 chat_id
+- 用户需要自行配置 Bot 的群组权限;如果 Bot 没有发消息或管理 Topic 的权限, qino 必须在 reply 里明确报错,而不是静默丢弃
+- 由于 Bot 是用户自己的, qino 只能控制该 Bot, 不能帮助用户恢复或修改 BotFather 账号凭证
+- 二维码可以简化"把已有 Bot 添加到群组"的步骤, 但不能实现飞书式的全自动应用注册
 
 ### 10.8 本方案验收补充
 
-- 每个 daemon 只使用一个自己的 Bot Token。
-- `getUpdates` / Webhook 更新不会被其他 daemon 重复消费。
-- Bot Token、用户文本和附件不会写入普通日志。
-- 用户通过 BotFather 创建 Bot 后，可以按 CLI 引导完成 Token 配置、群组添加和 daemon 启动。
-- 主窗口只作为入口，所有 thinking、tools、结果和交互卡都进入对应 Topic。
-- daemon 重启后可以恢复 `chat_id + message_thread_id + placeholder_message_id`。
-- 用户从 `@BotFather` 执行 `/token` 或 `/revoke` 后，qino 能在下次启动时检测凭证失效并给出明确修复提示。
+- 每个 daemon 只使用一个自己的 Bot Token
+- `getUpdates` / Webhook 更新不会被其他 daemon 重复消费
+- Bot Token、用户文本和附件不会写入普通日志
+- 用户通过 BotFather 创建 Bot 后, 可以按 CLI 引导完成 Token 配置、群组添加和 daemon 启动
+- 同一 DM / 同一群 / 同一 topic 跨 daemon 重启, chatID 永远稳定 (`tg_<chatid>[:thread_id]`)
+- daemon 重启后可以恢复 `chat_id + message_thread_id + placeholder_message_id` (topic 内的占位消息)
+- 用户从 `@BotFather` 执行 `/token` 或 `/revoke` 后, qino 能在下次启动时检测凭证失效并给出明确修复提示
 
 ## 11. 用户自建 Bot 与多群组开通指南
 
@@ -588,7 +644,8 @@ telegram:
 
   routing:
     chat_id_per_workspace: true
-    topic_mode: separate
+    # 不再有 topic_mode: separate / shared 配置 — 见 §5.1 / §11.6
+    # 修订。chatID 拼接 tg_<chatid>[:thread_id] 已经天然 partition。
 
   access:
     # 私聊默认处理
@@ -597,7 +654,7 @@ telegram:
     group_require_mention: true
 ```
 
-实际配置字段名应与后续 `Config` 实现保持一致；这里的语义是：每个 Telegram `chat_id` 作为一个 workspace，Forum Topic 作为独立 qino 会话。
+实际配置字段名应与后续 `Config` 实现保持一致；这里的语义是：每个 Telegram `chat_id` 作为一个 workspace，Forum Topic 因为 chatID 后缀了 thread_id 天然隔成独立 ChatSession。
 
 ### 11.6 多群组如何工作
 
@@ -613,51 +670,74 @@ Telegram getUpdates ─┼─► 群组 B chat_id=-100222
                               │
               ┌───────────────┼───────────────┐
               ▼               ▼               ▼
-          qino 工作区 A   qino 工作区 B   qino 工作区 C
+            会话 A          会话 B          会话 C
+          (tg_-100111)   (tg_-100222)   (tg_-100333)
 ```
 
-每次收到消息后，适配器使用以下字段路由：
+每次收到消息后，适配器使用以下字段路由（拼出 `tg_` 前缀的 chatID）：
 
 ```text
-chat.id              → qino ChatID
-message_thread_id    → Telegram Topic ID
-from.id              → Telegram UserID
-message.message_id   → Telegram MessageID
+chat.id + message_thread_id
+    │
+    ├─ thread_id == 0  → "tg_<chat.id>"              (DM / 群主窗口)
+    └─ thread_id  > 0  → "tg_<chat.id>:<thread_id>"  (群内 topic)
+
+from.id              → qino UserID
+message.message_id   → qino MessageID
 ```
 
-建议的持久化关系：
+建议的持久化关系（chatstore key 已经是 `tg_` 前缀）：
 
 ```text
-chat_id
+chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
   └── user_id
-        └── message_thread_id
-              └── placeholder_message_id
+        └── message_thread_id  ← Telegram 内部用,不入 ChatSession
+              └── placeholder_message_id  ← Telegram adapter 自己的 state file
 ```
 
-同一个群组内的不同 Topic 默认使用独立 `ChatSession`：
+不同的 Topic 永远走不同 ChatSession（chatID 已含 topic 后缀,天然 partition）：
 
 ```text
-群组 A
-├── Topic 42 → qino 会话 A-42
-└── Topic 88 → qino 会话 A-88
+群组 A (-100111)
+├── Topic 42 → 会话 "tg_-100111:42"
+├── Topic 88 → 会话 "tg_-100111:88"
+└── 主窗口    → 会话 "tg_-100111"          (thread_id=0)
 ```
 
-如果产品希望群组内所有 Topic 共用 Agent Session，可将 `topic_mode` 改为 `shared`。
+**修订 (2026-08)**：**不再有 `topic_mode: separate` / `shared` 这个配置**。`tg_<chat.id>:<thread_id>` 拼接已经天然把每个 topic 隔成独立 ChatSession，不同 topic 永久走不同 cs,不需要 sentinel topic / shared mode 这些复杂机制。Q: 旧 binary 怎么过渡？A: 见 §5.1 末"稳定性约束 5"和迁移说明。
 
 ### 11.7 主窗口、Topic 和监听模式
 
-用户在主窗口发送消息后，Bot 可以在该群组创建或复用 Topic：
+主窗口消息直接在主窗口回,不再创建 sentinel topic。Bot 收到群主窗口消息后,chatID = `tg_-10012345` (无 thread_id 后缀),所有回复走主窗口:
 
 ```text
-主窗口 / General Topic
-└── 用户消息
-    └── qino 创建或查找 message_thread_id
-        └── 在 Topic 中发送占位消息
-            ├── thinking
-            ├── tool start
-            ├── tool end
-            └── result
+群主窗口 (Forum-enabled)
+└── 用户消息 (thread_id=0)
+    └── adapter 拼 chatID = "tg_-10012345"
+        └── 走普通 slash / agent 流程
+            ├── thinking → 独立消息
+            ├── tool start → 独立消息
+            ├── tool end → 独立消息
+            └── result → 独立消息
 ```
+
+```text
+群内 topic 42
+└── 用户消息 (thread_id=42)
+    └── adapter 拼 chatID = "tg_-10012345:42"
+        └── 走普通 slash / agent 流程 (与主窗口一样)
+            ├── thinking → 独立消息
+            ├── tool start → 独立消息
+            ├── tool end → 独立消息
+            └── result → 独立消息
+```
+
+**修订 (2026-08)**：原来的"主窗口创建 nightme sentinel topic"流程删除。理由:
+- `tg_<chat.id>:<thread_id>` 拼接让 chatID 已经是(chat, topic)二元组的纯函数 — 不需要 Telegram 给你分配任何 sentinel topic
+- sentinel topic 由 Telegram 分配,ID 不可控,daemon 重启 / state 丢失会导致 ID 漂移 → 违反 chatID 稳定性约束
+- 编译选项里去掉了 `topic_mode: separate` / `shared` 开关(§11.6 修订)
+
+主窗口消息不再有占位消息(placeholder)概念——所有 OutHeartbeat / OutToolStart 走独立消息,OutReply 是同一消息上的 editMessageText(最长 4096 字符,超长拆分)。topic 内的消息仍然用占位消息做"Working..."(因为 Topic 本身就是 scope,主窗口太嘈杂时 Topic 内的占位有用)。
 
 如果群组没有开启 Privacy Mode，Bot 会收到更多群组普通消息。qino 不应默认把每条群消息都交给 Agent，而应继续遵守群组 mention 策略：
 

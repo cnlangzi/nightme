@@ -142,6 +142,15 @@ const (
 	// command before process exit. Phase 0 does not distinguish
 	// user-initiated kills from ProcessDied; reserved.
 	PromptEndUserKilled
+
+	// PromptEndUserStopped: endPrompt called by /stop slash
+	// command. The bridge process MAY continue running (per-
+	// bridge Stop semantics — see internal/command/stop), but
+	// the in-flight Prompt is over from the user's POV and
+	// IsReady must flip true synchronously so the next TryFlush
+	// can land, without waiting for the bridge protocol to emit
+	// a terminal event.
+	PromptEndUserStopped
 )
 
 // String renders a PromptEndReason for logs / diagnostics.
@@ -157,6 +166,8 @@ func (r PromptEndReason) String() string {
 		return "stalled-killed"
 	case PromptEndUserKilled:
 		return "user-killed"
+	case PromptEndUserStopped:
+		return "user-stopped"
 	}
 	return "unknown"
 }

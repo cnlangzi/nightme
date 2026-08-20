@@ -25,6 +25,26 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// readpumpStallThreshold (fix-bridge-stuck) is the per-loop "no
+// events for N seconds while in-flight" detector. When the readpump
+// is mid-Prompt (IsReady=false, Status=Running) and no bridge event
+// has arrived for this duration, we mark the AS suspect with reason
+// "readpump_stalled" so the prober can revive it.
+//
+// Why this exists: HungPrompt (5min) is the watchdog's last-resort
+// recovery for a "bridge alive but protocol deadlocked" scenario.
+// readpumpStallThreshold is a much earlier signal — typically
+// triggered while the bridge is still in early thinking phases —
+// that gives the prober a Suspect-marked AS to act on instead of
+// waiting for the full HungPrompt window.
+//
+// Tuning: 60s. Shorter risks false positives on slow-but-correct
+// turns (Claude Opus thinking can take 60-90s before the first
+// EventAgentText). Longer loses the value of this detector.
+// Empirically: a healthy bridge emits at least an EventAgentReady
+// or first EventAgentText within 30s of Submit; 60s is twice that.
+const readpumpStallThreshold = 60 * time.Second
+
 // startReadPump launches the readpump goroutine if not already running.
 // Single-launch guard via `readpumpStarted`.
 //
@@ -91,11 +111,35 @@ func (as *AgentSession) readpumpLoop() {
 	}
 	events := handle.Events()
 
+	// fix-bridge-stuck: per-loop stall detector. Reset on every
+	// observed event so a healthy-but-slow turn (long thinking,
+	// tool calls) does not trip the threshold. Only when the
+	// select genuinely sees nothing for readpumpStallThreshold
+	// AND the AS is mid-Prompt do we mark Suspect.
+	stallTimer := time.NewTimer(readpumpStallThreshold)
+	defer stallTimer.Stop()
+
 	// Phase 2: event loop.
 	for {
 		select {
 		case <-as.readpumpStop:
 			return
+		case <-stallTimer.C:
+			// fix-bridge-stuck: silence detector. Only fires
+			// when in-flight (IsReady=false) AND the bridge is
+			// supposed to be alive (StatusRunning). /close
+			// path (StatusExited) and idle (IsReady=true) are
+			// not stalls — those are intentional steady
+			// states.
+			if !as.IsReady() && as.Status() == StatusRunning {
+				slog.Warn("agentsession: readpump stalled (no events in threshold while in-flight); marking suspect",
+					"as_id", as.ID,
+					"threshold", readpumpStallThreshold)
+				as.SetSuspect("readpump_stalled")
+			}
+			// Reset so we keep flagging — the prober is the
+			// one with the actual cooldown / respawn decision.
+			stallTimer.Reset(readpumpStallThreshold)
 		case ev, ok := <-events:
 			if !ok {
 				// Channel closed: process exited (or Shutdown
@@ -106,6 +150,15 @@ func (as *AgentSession) readpumpLoop() {
 				as.emitLifecycleLocked(StatusExited)
 				return
 			}
+
+			// Activity observed — reset stall timer.
+			if !stallTimer.Stop() {
+				select {
+				case <-stallTimer.C:
+				default:
+				}
+			}
+			stallTimer.Reset(readpumpStallThreshold)
 
 			// Enrich event with anchor info from currentPrompt.
 			as.asMu.RLock()
@@ -262,6 +315,22 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 // internal endPrompt — pushes a KindPromptEnded event and clears
 // currentPrompt.
 func (as *AgentSession) EndPromptForTest(reason PromptEndReason) {
+	as.endPrompt(reason)
+}
+
+// EndPrompt (fix-bridge-stuck) is the public, control-class entry
+// point for ending the in-flight Prompt. The /stop and /close
+// command paths drive this synchronously so the local state
+// machine (IsReady=true, currentPrompt=nil) updates without
+// waiting for the bridge protocol to emit a terminal event. See
+// StopSelectedAgent (internal/command/stop) and AgentSession.Close
+// for the call paths; behavior is identical to the internal
+// endPrompt — push KindPromptEnded onto eventQueue, interrupt
+// on readpumpStop to avoid deadlock with Shutdown.
+//
+// Internal callers should keep using endPrompt directly; this is
+// just the exported surface for cross-package control commands.
+func (as *AgentSession) EndPrompt(reason PromptEndReason) {
 	as.endPrompt(reason)
 }
 

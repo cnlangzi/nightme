@@ -15,56 +15,55 @@ func TestDisplayVer(t *testing.T) {
 	}
 }
 
-// TestYesNoPrompt_BufferFallback verifies the no-VT fallback
-// path: when the writer is not a *os.File (here bytes.Buffer,
-// which is what every test uses), styleEnabled returns false
-// and paint emits the SGR parameter as visible ASCII text
-// rather than a real CSI sequence. The "[y/N]" marker and
-// the question text are still readable; the user sees the
-// "[36m" prefix as a hint of which style would have applied.
+// TestYesNoPrompt_BufferFallback verifies the no-VT path:
+// when the writer is not a *os.File (here bytes.Buffer),
+// styleEnabled returns false and paint emits pure plain
+// text — no ANSI codes, no visible "[36m" labels either.
+// The "?" question-mark icon and the [y/N] marker stay
+// readable; the terminal sees a clean ASCII stream.
 func TestYesNoPrompt_BufferFallback(t *testing.T) {
 	var buf bytes.Buffer
 	got := yesNoPrompt(&buf, "Update now?")
 	if !strings.Contains(got, "Update now?") || !strings.Contains(got, "[y/N]") {
 		t.Errorf("yesNoPrompt = %q", got)
 	}
-	// No raw ESC byte — the fallback strips it.
+	// No raw ESC byte — identity fallback.
 	if strings.ContainsRune(got, '\x1b') {
 		t.Errorf("buffer fallback should not emit ESC byte: %q", got)
 	}
-	// The visible SGR prefix is present.
-	if !strings.Contains(got, "[36m") {
-		t.Errorf("buffer fallback should emit visible [36m, got %q", got)
+	// No visible SGR labels either — pure plain text.
+	if strings.Contains(got, "[36m") {
+		t.Errorf("buffer fallback should not emit visible [36m, got %q", got)
+	}
+	if !strings.Contains(got, "?") {
+		t.Errorf("yesNoPrompt should contain the ? glyph, got %q", got)
 	}
 }
 
-// TestPaint_NonVT_FallbackAscii exercises every helper on a
-// non-*os.File writer and confirms none emit a real CSI byte.
-// Each helper also leaves a visible "[Nm" trail so an
-// operator looking at logs from a no-VT host can still tell
-// what style would have applied.
-func TestPaint_NonVT_FallbackAscii(t *testing.T) {
+// TestPaint_NonVT_Identity confirms every helper on a
+// non-*os.File writer (the test path) returns its argument
+// verbatim. No ANSI, no visible labels — pure identity.
+func TestPaint_NonVT_Identity(t *testing.T) {
 	var buf bytes.Buffer
 	cases := []struct {
-		name    string
-		got     string
-		wantTag string
+		name string
+		got  string
 	}{
-		{"red", paintRed(&buf, "x"), "[31m"},
-		{"green", paintGreen(&buf, "x"), "[32m"},
-		{"yellow", paintYellow(&buf, "x"), "[33m"},
-		{"cyan", paintCyan(&buf, "x"), "[36m"},
-		{"dim", paintDim(&buf, "x"), "[2m"},
+		{"red", paintRed(&buf, "x")},
+		{"green", paintGreen(&buf, "x")},
+		{"yellow", paintYellow(&buf, "x")},
+		{"cyan", paintCyan(&buf, "x")},
+		{"dim", paintDim(&buf, "x")},
 	}
 	for _, c := range cases {
+		if c.got != "x" {
+			t.Errorf("%s: identity fallback should return %q, got %q", c.name, "x", c.got)
+		}
 		if strings.ContainsRune(c.got, '\x1b') {
-			t.Errorf("%s: fallback must not emit ESC byte, got %q", c.name, c.got)
+			t.Errorf("%s: identity fallback must not emit ESC byte, got %q", c.name, c.got)
 		}
-		if !strings.Contains(c.got, c.wantTag) {
-			t.Errorf("%s: fallback should emit %s, got %q", c.name, c.wantTag, c.got)
-		}
-		if !strings.Contains(c.got, "[0m") {
-			t.Errorf("%s: fallback should emit [0m reset, got %q", c.name, c.got)
+		if strings.Contains(c.got, "[") {
+			t.Errorf("%s: identity fallback must not emit visible [, got %q", c.name, c.got)
 		}
 	}
 }
@@ -75,23 +74,5 @@ func TestPaint_EmptyString(t *testing.T) {
 	var buf bytes.Buffer
 	if got := paintRed(&buf, ""); got != "" {
 		t.Errorf("paintRed(\"\") = %q, want \"\"", got)
-	}
-}
-
-// TestStripCSI confirms the helper that backs the no-VT
-// fallback path. CSI sequences ("\x1b[Nm") become their
-// visible ASCII equivalent ("[Nm"); non-CSI strings are
-// returned unchanged.
-func TestStripCSI(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"\x1b[33m", "[33m"},
-		{"\x1b[33m\x1b[1m", "[33m[1m"},
-		{"plain", "plain"},
-		{"", ""},
-	}
-	for _, c := range cases {
-		if got := stripCSI(c.in); got != c.want {
-			t.Errorf("stripCSI(%q) = %q, want %q", c.in, got, c.want)
-		}
 	}
 }

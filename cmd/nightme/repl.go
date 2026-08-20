@@ -132,13 +132,14 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 	// Install now? [y/N], all via plain stdin/stdout. Then we
 	// construct the readline shell.
 	//
-	// The styled prompt path keeps the console in its original
-	// mode on Windows — paint() falls back to visible ASCII
-	// ("[33m[1m▲[0m") instead of real ANSI so the prompt
-	// stays readable on hosts that don't have VT on by default.
-	// VT is enabled later, JUST before readline takes over, so
-	// readline's CSI sequences are interpreted by the terminal
-	// instead of being rendered as literal escape text.
+	// On Windows paint() returns plain text (styleEnabled is
+	// hard-wired to false in cli_style_windows.go). We don't
+	// touch the host console mode at all here — no
+	// SetConsoleMode, no probe. readline takes over with the
+	// console in whatever state it was at process start; if
+	// that state isn't usable for readline on this host,
+	// the fix moves to the REPL mechanism itself
+	// (runREPLWith instead of runREPLInteractive).
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		ctx := context.Background()
 		logf := func(format string, args ...any) {
@@ -156,19 +157,6 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 			ReExecAfterInstall: true,
 		})
 	}
-
-	// Enable VT for readline's lifetime. readline sends CSI
-	// sequences (cursor positioning, screen clear, hide/show
-	// cursor) that need VT processing to be interpreted.
-	// We restore the original mode when runREPLInteractive
-	// returns — using defer so a panic during readline
-	// initialisation still resets the console.
-	savedMode, vtOK := saveAndEnableVT(os.Stdout)
-	defer func() {
-		if vtOK {
-			restoreConsoleMode(os.Stdout, savedMode)
-		}
-	}()
 
 	rl := readline.NewShell()
 	rl.Prompt.Primary(func() string { return "nightme> " })

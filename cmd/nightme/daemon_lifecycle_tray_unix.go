@@ -23,9 +23,11 @@
 package main
 
 import (
+	"context"
 	"os"
-	"os/exec"
 	"syscall"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 func onStopRequestDefault() {
@@ -47,7 +49,12 @@ func onRestartRequestDefault() {
 		onStopRequestDefault()
 		return
 	}
-	cmd := exec.Command(exe, "_daemon")
+	// Spawn through proc.New so the child gets the same
+	// platform-specific spawn recipe (Setsid on Unix,
+	// CREATE_NO_WINDOW on Windows) as the rest of the
+	// codebase — no inconsistent detach / TTY inheritance
+	// vs the daemon lifecycle commands.
+	cmd := proc.New(context.Background(), exe, "_daemon")
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil

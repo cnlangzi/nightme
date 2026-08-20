@@ -14,15 +14,16 @@
 //     a shared error variable.
 //
 //  2. The subcommand section is hand-grouped into Sessions /
-//     Setup / About submenus (with Logs sitting at the top as
-//     its own row, since it's the command users reach for most
-//     often after Console). The cliTitles used as argv to
-//     proc.OpenTerminal match the cobra subcommand names that
-//     cmdRegistry registers, so adding a new reg.add() cobra
-//     command is a prerequisite for surfacing it in the tray —
-//     but the grouping itself is owned here. Lifecycle commands
-//     (start/stop/restart/status) and TTY-bound commands
-//     (test/login/logs/debug) remain addNoTray so they don't
+//     Setup submenus (with Logs and Doctor sitting at the top
+//     as their own rows, since they're the commands users reach
+//     for most often after Console). The cliTitles used as
+//     argv to proc.OpenTerminal match the cobra subcommand
+//     names that cmdRegistry registers, so adding a new
+//     reg.add() cobra command is a prerequisite for surfacing
+//     it in the tray — but the grouping itself is owned here.
+//     Lifecycle commands (start/stop/restart/status) and
+//     TTY-bound commands (test/login/logs/debug) remain
+//     addNoTray so they don't
 //     drift into the submenu list. (config and update were
 //     briefly addNoTray too, but they're now reg.add() so the
 //     REPL banner reflects the full user-facing surface.)
@@ -43,21 +44,26 @@
 //
 // Menu layout:
 //
-//   🟢 NightMe is running        (disabled info row)
+//   🟢 NightMe v<ver> is running (disabled info row)
 //   ─────────
 //   >_  Console                  → proc.OpenTerminal() (spawn REPL)
 //   ─────────
-//   Logs                         → proc.OpenTerminal("logs")
-//   Sessions >                   → list / kill
-//   Setup >                      → config / agents / name / clean
-//   About >                      → version / doctor
+//   Logs >         view           → proc.OpenTerminal("logs")
+//                  clean          → proc.OpenTerminal("clean")
+//   Sessions >     list           → proc.OpenTerminal("list")
+//                  kill           → proc.OpenTerminal("kill")
+//   Config                       → proc.OpenTerminal("config")
+//   About >       agents          → proc.OpenTerminal("agents")
+//                  name           → proc.OpenTerminal("name")
+//                  doctor         → proc.OpenTerminal("doctor")
 //   ─────────
 //   ⓘ  Download Update           (hidden unless a newer release exists)
 //   ↻  Restart                   → caller callback (respawn _daemon)
 //   ⏻  Quit                      → caller callback (graceful daemon stop)
 //
-// The subcommands are grouped into Sessions / Setup / About submenus
-// rather than rendered as flat top-level items. The earlier flat
+// The terminal-bound one-shots (Logs, Doctor) sit at the top of
+// the second cluster; the deeper "configure / manage" actions
+// live under Sessions / Setup submenus. The earlier flat
 // layout exposed them all under a disabled "Commands" parent, which
 // on Windows cascades MF_GRAYED to every child and made them appear
 // unclickable. Submenus are clickable regardless of platform.
@@ -270,8 +276,22 @@ func trayOnReady(opts trayOptions) {
 	// row stays disabled so it doesn't fire a handler, but
 	// the emoji glyph itself renders green regardless of the
 	// row's enabled state because it's a coloured codepoint.
+	//
+	// Format: 🟢 NightMe[<name>] v<version> is running.
+	// - `<name>` is the daemon's configured instance name
+	//   (cfg.Name) with hostname fallback via
+	//   config.EffectiveName, so users with multiple daemons
+	//   can tell them apart at a glance.
+	// - `<version>` is the compiled-in version.Version,
+	//   same string the REPL banner and `nightme version`
+	//   print. Showing it here means the user never needs to
+	//   dig into a submenu to learn which build is live.
+	instanceName := "unknown"
+	if cfg, err := config.LoadDefault(); err == nil && cfg != nil {
+		instanceName = config.EffectiveName(cfg)
+	}
 	statusItem := systray.AddMenuItem(
-		"\U0001F7E2  NightMe is running",
+		"\U0001F7E2  NightMe[" + instanceName + "] v" + version.Version + " is running",
 		"nightme daemon is running",
 	)
 	statusItem.Disable()
@@ -292,40 +312,32 @@ func trayOnReady(opts trayOptions) {
 
 	systray.AddSeparator()
 
-	// Second cluster — terminal-bound commands that open a
-	// maximized, focused Terminal.app tab via proc.OpenTerminal
-	// (the same path as Console above, so every command gets
-	// a real TTY and visible output).
-	//
-	// Logs sits at the top of this group because it's the
-	// command users reach for most often after Console. The
-	// three submenus below it group the remaining subcommands
-	// by intent (Sessions = runtime state, Setup = configuration,
-	// About = diagnostics) rather than mirroring the REPL banner
-	// order — grouping is the stronger signal here.
-	logs := systray.AddMenuItem("Logs", "Open a terminal showing the daemon log (tail -f)")
-	go handleClick(logs, func() {
-		if err := proc.OpenTerminal(context.Background(), "nightme", "logs"); err != nil {
-			logClickErr(opts.logger, "open-logs", err)
+	// Submenus + Config. Three of the four items in this cluster
+	// are submenus so the parent item carries the verb and each
+	// sub-item carries the noun (Logs > view / clean); Config
+	// stays a flat top-level item because it has no peer actions
+	// to group with. Items inside each submenu spawn a maximized,
+		// focused Terminal.app tab via proc.OpenTerminal — the
+	// same path as Console above, so every command gets a real
+		// TTY and visible output.
+	logsMenu := systray.AddMenuItem("Logs", "")
+	addTerminalSubItem(logsMenu, opts, "▸ logs: \ttail daemon log", "logs", "")
+	addTerminalSubItem(logsMenu, opts, "▸ clean: \ttruncate logs + attachments", "clean", "")
+
+	sessions := systray.AddMenuItem("Sessions", "")
+	addTerminalSubItem(sessions, opts, "▸ list: \tshow active sessions", "list", "")
+	addTerminalSubItem(sessions, opts, "▸ kill: \tterminate agent procs", "kill", "")
+
+	configItem := systray.AddMenuItem("Config…", "")
+	go handleClick(configItem, func() {
+		if err := proc.OpenTerminal(context.Background(), "nightme", "config"); err != nil {
+			logClickErr(opts.logger, "config", err)
 		}
 	})
 
-	// Submenus — no icons. Sessions / Setup / About each get
-	// their own clickTracker so rapid clicks across different
-	// submenus are honoured independently.
-	sessions := systray.AddMenuItem("Sessions", "Session-related commands")
-	addTerminalSubItem(sessions, opts, "List", "list", "List active agent sessions")
-	addTerminalSubItem(sessions, opts, "Kill", "kill", "Kill every active agent process")
-
-	setup := systray.AddMenuItem("Setup", "Configuration commands")
-	addTerminalSubItem(setup, opts, "Config", "config", "Interactive configuration menu")
-	addTerminalSubItem(setup, opts, "Agents", "agents", "Manage configured agents")
-	addTerminalSubItem(setup, opts, "Name", "name", "Set chat display names")
-	addTerminalSubItem(setup, opts, "Clean", "clean", "Truncate logs and remove attachments")
-
-	about := systray.AddMenuItem("About", "Diagnostic commands")
-	addTerminalSubItem(about, opts, "Version", "version", "Show nightme version")
-	addTerminalSubItem(about, opts, "Doctor", "doctor", "Run nightme doctor")
+	about := systray.AddMenuItem("About", "")
+	addTerminalSubItem(about, opts, "▸ agents: \tmanage configured agents", "agents", "")
+	addTerminalSubItem(about, opts, "▸ doctor: \tdiagnose the daemon", "doctor", "")
 
 	systray.AddSeparator()
 
@@ -393,6 +405,16 @@ func trayOnReady(opts trayOptions) {
 // response leaves the item hidden rather than failing
 // the tray.
 //
+// Log level for the version-check error path is DEBUG,
+// not WARN. A tray that logs a "version check: ..." WARN
+// every time the user opens the menu while offline / behind
+// a captive portal / during a CDN hiccup would be noisy
+// without being actionable — the UI is already correct
+// (item hidden, click still routes to the manual upgrade
+// path). The REPL startup prompt uses a separate callback
+// at WARN because that's a user-facing decision point;
+// the tray is not.
+//
 // The check shares the 24h on-disk cache with the REPL
 // startup prompt (internal/version.DefaultChecker reads
 // cfg.Paths.DataDir/version-check.json), so a user who
@@ -405,6 +427,10 @@ func decorateUpdateItem(item *systray.MenuItem) {
 	}
 	checker, _ := version.DefaultChecker(dataDir)
 	if checker == nil {
+		// Misconfig (no data dir resolution path at all) is
+		// silent: the tray surface is decorative, and the
+		// user has bigger problems if the daemon can't
+		// locate its own config. Don't add log noise.
 		return
 	}
 
@@ -412,7 +438,10 @@ func decorateUpdateItem(item *systray.MenuItem) {
 	defer cancel()
 
 	res := checker.Check(ctx, version.Version, func(format string, args ...any) {
-		slog.Default().Warn(fmt.Sprintf("version check: "+format, args...))
+		// Transient network / parsing errors are DEBUG.
+		// See the function comment for why this isn't
+		// WARN — the UI is correct without the log.
+		slog.Default().Debug(fmt.Sprintf("version check: "+format, args...))
 	})
 
 	if res.Latest == "" || !res.Outdated {

@@ -431,8 +431,9 @@ func ParseRepoOwner(remoteURL string) (owner, repo string, err error) {
 //	https://host/path.git                     → host
 //	http://host/path.git                      → host
 //	ssh://git@host/path.git                   → host  (ssh://)
-//	ssh://user@host:port/path.git             → host  (ssh:// with userinfo+port)
+//	ssh://user@host:port/path.git             → host:port (ssh:// with userinfo+port)
 //	git@host:path.git                         → host  (scp-style — legacy SSH form)
+//	git@host:port:path.git                    → host:port (scp-style with explicit port — git supports this; see git-clone docs)
 //	git://host/path.git                       → host  (rare but valid Git protocol)
 //	https://user:token@host/path.git          → host  (userinfo stripped; common with gh / glab auth helper)
 //	https://host/path.git?ref=main#frag       → host  (query + fragment stripped)
@@ -495,20 +496,37 @@ func parseRemoteHost(remoteURL string) (host string, err error) {
 	// 4. Strip trailing ".git" suffix.
 	u = strings.TrimSuffix(u, ".git")
 
-	// 5. Convert the FIRST ":" to "/" ONLY for scp-style URLs
-	//    (`git@host:path` — colon is the host/path separator). For
-	//    URL-style (`https://host:port/path` — colon is the port
-	//    separator), keep the colon so the port stays attached to
-	//    the host.
+	// 5. Three-way colon disambiguation:
 	//
-	//    Heuristic: a scp-style separator is followed by a path
-	//    component (no leading "/"); a port separator is followed
-	//    by digits + ("/" | end-of-string).
+	//      URL-style with port:    https://host:NNNN/path
+	//        → first colon is the port separator, keep it; the
+	//          split below extracts host:NNNN as one piece.
+	//
+	//      SCP-style with port:    git@host:NNNN:path
+	//        → first colon is port separator, second is path
+	//          separator. Convert the second colon to "/" so the
+	//          split below extracts host:NNNN cleanly. This is the
+	//          case that breaks without isSCPStylePort — see
+	//          TestParseRemoteHost_SCPWithPort.
+	//
+	//      SCP-style without port: git@host:path
+	//        → first colon is the path separator, convert to "/".
+	//
+	//    Heuristic: URL-style port → digits + ("/" | "?" | "#" |
+	//    end-of-string). SCP-style port → digits + ":" + path.
+	//    Otherwise treat the colon as a path separator.
 	if i := strings.Index(u, ":"); i >= 0 {
 		rest := u[i+1:]
-		if isPort(rest) {
-			// port colon — keep as-is
-		} else {
+		switch {
+		case isPort(rest):
+			// URL-style port — keep as-is.
+		case isSCPStylePort(rest):
+			// SCP-style port: keep "host:NNNN", convert the
+			// SECOND colon (after the digits) to "/".
+			second := strings.Index(rest, ":")
+			u = u[:i+1+second] + "/" + rest[second+1:]
+		default:
+			// SCP-style path colon — convert to "/".
 			u = u[:i] + "/" + rest
 		}
 	}
@@ -545,6 +563,35 @@ func isPort(s string) bool {
 		return true
 	}
 	return false
+}
+
+// isSCPStylePort reports whether s looks like the SCP-style
+// "port:path" fragment — digits followed by a colon and a path.
+// This is the `git@host:NNNN:path.git` form where the colon
+// between the port number and the path is the same character
+// that separates host from port. Distinct from isPort: URL-style
+// ports are digits-followed-by-slash, scp-style ports are
+// digits-followed-by-colon.
+//
+// Without this helper, parseRemoteHost sees the second `:` in
+// `host:NNNN:path` and treats the first `:` as the scp-style
+// host/path separator, swallowing the port and breaking the
+// self-hosted GitLab-on-non-default-port case.
+func isSCPStylePort(s string) bool {
+	if s == "" {
+		return false
+	}
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return false // no leading digits
+	}
+	if i >= len(s) {
+		return false // bare digits with nothing after — degenerate
+	}
+	return s[i] == ':'
 }
 
 // redactForDisplay returns a credential-free version of remoteURL

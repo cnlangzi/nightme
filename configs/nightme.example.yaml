@@ -5,9 +5,9 @@
 # tell apart multiple machines running the daemon (in logs / IM
 # message headers / gateway registrations, once those start using
 # it). Leave blank to fall back to os.Hostname() at runtime — the
-# fallback is NOT persisted to this file. Set with
-# `nightme name <value>`. To clear, delete this line and re-run any
-# command that rewrites config.yaml (or just edit the file).
+# fallback is NOT persisted to this file. Set via `nightme config`
+# → Name. To clear, delete this line and re-run any command that
+# rewrites config.yaml (or just edit the file).
 # name: macbook-pro
 
 # Primary (default) agent name. Used when no /use <name> is given.

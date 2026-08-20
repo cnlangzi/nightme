@@ -321,9 +321,12 @@ func applyDefaults(c *Config) {
 	if c.Session.OutputFlushIntervalMs == 0 {
 		c.Session.OutputFlushIntervalMs = 200
 	}
-	if c.Logging.Level == "" {
-		c.Logging.Level = "info"
-	}
+	// Logging.Level intentionally left empty when unset. The
+	// logger resolves "" to WARN via internal/logging.levelFor
+	// — the "interactive surface shouldn't leak INFO chatter"
+	// default that hard-coding "info" here used to break. Users
+	// who want verbose logs set cfg.Logging.Level = "info" /
+	// "debug" explicitly.
 	if c.Paths.DataDir == "" {
 		c.Paths.DataDir = "~/.nightme"
 	}

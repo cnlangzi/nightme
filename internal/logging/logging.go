@@ -15,12 +15,21 @@ func levelFor(s string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug":
 		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
 	case "warn", "warning":
 		return slog.LevelWarn
 	case "error":
 		return slog.LevelError
 	default:
-		return slog.LevelInfo
+		// Default is WARN, not INFO: the interactive surfaces
+		// (REPL, tray-spawned terminals) emit "repl started"
+		// / "command started" at INFO that pollute the user's
+		// view. They remain available in nightme.log when the
+		// user explicitly opts in via cfg.Logging.Level =
+		// "info" / "debug". Subscribers who want the previous
+		// behaviour can set cfg.Logging.Level = "info".
+		return slog.LevelWarn
 	}
 }
 

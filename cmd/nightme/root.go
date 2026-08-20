@@ -82,9 +82,9 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	reg.add(newNameCmd(),         "name [value]    show/set this instance's name")
 	reg.addNoTray(newLogsCmd(),   "logs [--lines N] tail daemon log (Ctrl-C to exit)")
 	reg.add(newCleanCmd(),        "clean           truncate logs + remove attachments")
-	reg.addNoTray(newConfigCmd(), "config          interactive configuration menu")
+	reg.add(newConfigCmd(), "config          interactive configuration menu")
 	reg.add(newVersionCmd(),      "version         version info")
-	reg.addNoTray(newUpdateCmd(), "update          check for a newer release")
+	reg.add(newUpdateCmd(), "update          check for a newer release")
 	reg.addNoTray(newDebugCmd(),  "debug           exercise reaction/action flow")
 	reg.addNoTray(newWorkflowCmd(), "workflow ...   list/show/run workflow YAMLs")
 
@@ -142,9 +142,6 @@ func Execute(logger *slog.Logger) {
 
 	root.SetContext(withLogger(context.Background(), logger))
 	Recover(root, logger)
-	if logger != nil {
-		logger.Info("command started", "args", os.Args[1:])
-	}
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(nmerrors.ExitCode(err))

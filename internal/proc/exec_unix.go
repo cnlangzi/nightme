@@ -5,7 +5,6 @@ package proc
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -102,10 +101,27 @@ func OpenTerminal(ctx context.Context, name string, args ...string) error {
 	return openTerminalLinux(ctx, args)
 }
 
-// openTerminalMac drives Terminal.app or iTerm2 via AppleScript.
-// iTerm2 is tried first because its "create window with default
-// profile command" form is the cleanest UX (no "press Return to
-// run" prompt that Terminal.app shows).
+// openTerminalMac drives Terminal.app via AppleScript.
+//
+// Why Terminal.app only — no iTerm2. We previously preferred iTerm2
+// because its "create window with default profile command" form
+// was claimed to be cleaner UX. It isn't: that AppleScript
+// command does NOT hand the string to a shell — iTerm2
+// tokenizes the command string on whitespace and execve's the
+// first token with the rest as argv. So a command like
+// `'/path/to/nightme' 'kill'; echo ; printf '...'; read dummy`
+// is split into ["/path/to/nightme", "kill;", "echo", ";" ...],
+// and nightme receives `kill;` (or `kill ;` after iTerm's quote
+// stripping) as its subcommand name. cobra then errors with
+// `Error: unknown command "kill ;" for "nightme"` — the exact
+// bug the user reported.
+//
+// Terminal.app's `do script`, by contrast, hands the string to
+// the user's default shell (zsh on stock macOS), which parses
+// the `;` separators and quotes correctly. So we drive
+// Terminal.app only; iTerm2 users still get the same UX (a
+// fresh terminal running their nightme command), just driven
+// by Terminal.app instead.
 //
 // Path resolution: we use os.Executable() (the absolute path of
 // the currently-running nightme binary) instead of exec.LookPath,
@@ -138,63 +154,69 @@ func openTerminalMac(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cmdStr := escapeAppleScriptString(buildTerminalShellCommand(exe, args))
+	cmdStr := escapeAppleScriptString(buildTerminalShellCommand(exe, args, ""))
 
-	candidates := []struct {
-		app  string
-		snip string
-	}{
-		{
-			app:  "iTerm",
-			snip: `tell application "iTerm" to create window with default profile command "%s"`,
-		},
-		{
-			app:  "Terminal",
-			snip: `tell application "Terminal" to do script "%s"`,
-		},
-	}
-	for _, c := range candidates {
-		if !appInstalled(c.app) {
-			continue
-		}
-		cmd := NewWith(ctx, Options{}, "osascript", "-e", fmt.Sprintf(c.snip, cmdStr))
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("proc: osascript for %s: %w", c.app, err)
-		}
-		go func() { _ = cmd.Wait() }()
-		return nil
-	}
-	// Last-resort fallback: try AppleScript on Terminal.app
-	// directly (the bundle could exist without AppleScript
-	// being enabled — e.g. an MDM profile that blocks the
-	// previous osascript call).
-	cmd := NewWith(ctx, Options{}, "osascript", "-e",
-		fmt.Sprintf(`tell application "Terminal" to do script "%s"`, cmdStr))
+	// Terminal.app only. See function doc for why iTerm2 is
+	// intentionally not tried. Three things have to happen for
+	// a tray click to be visibly responsive:
+	//
+	//   1. The new tab has to land in a window that's maximized
+	//      to the desktop — `set zoomed of front window to true`
+	//      is Terminal's native maximize (it's the green button
+	//      click). `set bounds to screen size` is too crude: it
+	//      overlaps the menu bar and looks wrong on Retina where
+	//      point vs pixel bounds diverge. zoomed respects both.
+	//   2. Terminal.app has to come to the front. `activate`
+	//      alone works on a single-space setup, but on a
+	//      multi-Space setup the window stays on whichever
+	//      Space Terminal.app was last active on — i.e. the
+	//      user's empty Desktop, hidden behind whatever they
+	//      were actually looking at. The followup System Events
+	//      `set frontmost of process "Terminal" to true` is the
+	//      only thing that reliably migrates the window onto
+	//      the current Space.
+	//   3. The tab must exist before we maximise — `do script`
+	//      is synchronous in AppleScript (the tab is created
+	//      before the next line runs), so the ordering below is
+	//      already correct.
+	const snip = `tell application "Terminal"
+    do script "%s"
+    set zoomed of front window to true
+    activate
+end tell
+tell application "System Events"
+    set frontmost of process "Terminal" to true
+end tell`
+	cmd := NewWith(ctx, Options{}, "osascript", "-e", fmt.Sprintf(snip, cmdStr))
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("proc: osascript (fallback) for Terminal: %w", err)
+		return fmt.Errorf("proc: osascript for Terminal: %w", err)
 	}
 	go func() { _ = cmd.Wait() }()
 	return nil
 }
 
-// keepOpenShellSuffix is the POSIX-compatible keep-open suffix
-// appended to the spawned shell command. Read together with the
-// command by `sh -c` (Linux) or the shell that Terminal.app
-// hands the string to (macOS):
+// keepOpenShellSuffix is the POSIX keep-open suffix appended
+// to the spawned shell command on Linux. The trailing `read`
+// blocks until the user presses Enter, so the terminal window
+// stays around long enough for the user to read whatever
+// output nightme produced (including error messages) instead
+// of vanishing the instant the command exits.
 //
-//	<command> ; echo ; printf 'press enter to close\n' ; read dummy
-//
-// The trailing `read` blocks until the user presses Enter, so
-// the terminal window stays around long enough for the user to
-// read whatever output nightme produced (including error
-// messages) instead of vanishing the instant the command exits.
+// On Linux this is necessary because most terminal emulators
+// (gnome-terminal, konsole, xterm, …) close the window when
+// the spawned shell exits. On macOS Terminal.app's
+// `do script` already leaves the new window / tab open after
+// the spawned shell exits (the shell session persists and
+// returns to its prompt), so this suffix is unnecessary
+// there and only adds a `press enter to close` noise line to
+// every tray-spawned terminal. macOS therefore omits the suffix
+// at build time (see buildTerminalShellCommand).
 //
 // `read -p` is a bash-ism; it isn't supported by dash (the
 // default /bin/sh on Debian / Ubuntu) or other minimal POSIX
 // shells. `printf '…\n'; read dummy` is the portable equivalent
 // — every shell implementing POSIX `read` accepts an unnamed
-// variable to read into. Windows uses `cmd /k` for the same
-// effect and doesn't touch this constant.
+// variable to read into.
 //
 // Exposed at package scope so the keep-open pattern can't drift
 // between the helper that emits it and the tests that pin it.
@@ -220,13 +242,36 @@ const keepOpenShellSuffix = `; echo ; printf 'press enter to close\n' ; read dum
 //
 // Exposed at package scope so it can be unit-tested without
 // invoking osascript / Terminal.app / gnome-terminal.
-func buildTerminalShellCommand(exe string, args []string) string {
+// buildTerminalShellCommand assembles the inner shell command
+// string that drives the spawned terminal window. exe is the
+// absolute path of the nightme binary (typically from
+// os.Executable()); args are the CLI subcommand arguments.
+//
+// suffix is appended verbatim after a single space — the
+// default is keepOpenShellSuffix, which most terminal
+// emulators on Linux need to keep their window open. macOS
+// passes the empty string because Terminal.app's
+// `do script` already keeps the window open after the shell
+// exits.
+//
+// Each component is shell-quoted via shellQuote (single-quoted
+// with embedded ' escaped as '\”), so the result is shell-safe
+// regardless of the contents of exe or args — spaces, quotes,
+// backslashes, and other metacharacters. The suffix itself
+// uses single quotes too: a non-login shell (the default on
+// both macOS and fresh Linux DE sessions) treats single-quoted
+// strings literally. macOS AppleScript layers add another
+// quoting layer; see escapeAppleScriptString for that side.
+//
+// Exposed at package scope so it can be unit-tested without
+// invoking osascript / Terminal.app / gnome-terminal.
+func buildTerminalShellCommand(exe string, args []string, suffix string) string {
 	parts := make([]string, 0, len(args)+1)
 	parts = append(parts, shellQuote(exe))
 	for _, a := range args {
 		parts = append(parts, shellQuote(a))
 	}
-	return strings.Join(parts, " ") + keepOpenShellSuffix
+	return strings.Join(parts, " ") + suffix
 }
 
 // shellQuote wraps s in single quotes for safe inclusion in a
@@ -257,19 +302,7 @@ func escapeAppleScriptString(s string) string {
 // install path"; this is the same heuristic the osascript
 // runtime uses when it can't find the app, so a match here means
 // AppleScript will succeed.
-func appInstalled(appName string) bool {
-	paths := []string{
-		"/Applications/" + appName + ".app",
-		"/System/Applications/" + appName + ".app",
-		"/Applications/Utilities/" + appName + ".app",
-	}
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
-}
+
 
 // openTerminalLinux probes a fixed list of terminal emulators in
 // preference order, executing the first one found on $PATH.
@@ -300,7 +333,7 @@ func openTerminalLinux(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	shellCmd := buildTerminalShellCommand(exe, args)
+	shellCmd := buildTerminalShellCommand(exe, args, keepOpenShellSuffix)
 
 	// Each probe lists the emulator binary plus its "run a
 	// command" prefix (some want --, some want -e, some want

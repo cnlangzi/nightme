@@ -43,6 +43,20 @@ type LogEntry struct {
 	Text string
 }
 
+// newOutReplyEntry builds a rolling-log entry for one OutReply text
+// chunk. OutReply is a stream continuation, not a new entry, so the
+// entry carries NO icon prefix — buildReceiptCard prepends entry.Icon
+// only when non-empty, so an empty Icon renders the chunk verbatim.
+// Centralising construction here means a future change to OutReply's
+// visual semantics (re-introduce a glyph, fold tool-result lines in
+// with their own icon, …) touches one site, not every OutReply call
+// site in adapter.go. See the result_render.go doc ("OutReply adds
+// none — it's a stream continuation, not a new entry") for the
+// design intent.
+func newOutReplyEntry(text string) LogEntry {
+	return LogEntry{Icon: "", Text: text}
+}
+
 // ErrReceiptOverflow is returned by AppendEntry when adding the
 // entry would push the card past the element-count or envelope-
 // size limit. The caller is expected to:

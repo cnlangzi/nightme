@@ -1781,8 +1781,13 @@ func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 		t.Errorf("reply_in_thread = true, want false (ReplyInBoth: reply_in_thread field omitted)")
 	}
 	// Body must be Card 2.0 JSON with the chunk embedded.
-	if !strings.Contains(got.Body, "💬 first chunk of the reply") {
-		t.Errorf("body missing entry text (want 💬 prefix + chunk), got %q", got.Body)
+	if !strings.Contains(got.Body, "first chunk of the reply") {
+		t.Errorf("body missing entry text, got %q", got.Body)
+	}
+	// OutReply is a stream continuation, not a new entry — it must
+	// NOT carry the 💬 icon prefix (see result_render.go doc).
+	if strings.Contains(got.Body, "💬") {
+		t.Errorf("body should not carry 💬 icon prefix for OutReply, got %q", got.Body)
 	}
 	// Receipt IS created — F-44 revert: OutReply folds.
 	a.mu.RLock()
@@ -2142,8 +2147,12 @@ func TestSend_OutReply_NilStatusBar_NoFooterSection(t *testing.T) {
 		t.Fatalf("Send(OutReply nil ctx): %v", err)
 	}
 
-	if !strings.Contains(gotBody, "💬 no-session-ctx chunk") {
+	if !strings.Contains(gotBody, "no-session-ctx chunk") {
 		t.Errorf("entry text missing from card body: %q", gotBody)
+	}
+	// OutReply must not carry the 💬 icon prefix.
+	if strings.Contains(gotBody, "💬") {
+		t.Errorf("body should not carry 💬 icon prefix for OutReply, got %q", gotBody)
 	}
 	// No footer section when ctx is nil.
 	if strings.Contains(gotBody, `"tag":"hr"`) {

@@ -132,13 +132,13 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 	// Install now? [y/N], all via plain stdin/stdout. Then we
 	// construct the readline shell.
 	//
-	// The styled prompt path mutates the host console mode
-	// (saveAndEnableVT turns on ENABLE_VIRTUAL_TERMINAL_PROCESSING
-	// so paintYellow / paintCyan emit real ANSI). We restore
-	// the original mode before constructing the readline shell
-	// — readline reads the parent console mode at ConPTY /
-	// raw-mode setup time and a VT-on console left over from
-	// the prompt phase was the root cause of the REPL hang.
+	// The styled prompt path keeps the console in its original
+	// mode on Windows — paint() falls back to visible ASCII
+	// ("[33m[1m▲[0m") instead of real ANSI so the prompt
+	// stays readable on hosts that don't have VT on by default.
+	// VT is enabled later, JUST before readline takes over, so
+	// readline's CSI sequences are interpreted by the terminal
+	// instead of being rendered as literal escape text.
 	if isatty.IsTerminal(os.Stdin.Fd()) {
 		ctx := context.Background()
 		logf := func(format string, args ...any) {
@@ -148,8 +148,6 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 		}
 		checker, _ := version.DefaultChecker(resolveDataDir())
 		res := checkWithCountdown(ctx, os.Stdout, checker, version.Version, logf)
-
-		savedMode, vtOK := saveAndEnableVT(os.Stdout)
 		_ = promptForUpdateIfOutdated(ctx, &PromptDeps{
 			VersionCheck:       &res,
 			Out:                os.Stdout,
@@ -157,10 +155,20 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 			Logger:             logger,
 			ReExecAfterInstall: true,
 		})
+	}
+
+	// Enable VT for readline's lifetime. readline sends CSI
+	// sequences (cursor positioning, screen clear, hide/show
+	// cursor) that need VT processing to be interpreted.
+	// We restore the original mode when runREPLInteractive
+	// returns — using defer so a panic during readline
+	// initialisation still resets the console.
+	savedMode, vtOK := saveAndEnableVT(os.Stdout)
+	defer func() {
 		if vtOK {
 			restoreConsoleMode(os.Stdout, savedMode)
 		}
-	}
+	}()
 
 	rl := readline.NewShell()
 	rl.Prompt.Primary(func() string { return "nightme> " })

@@ -8,28 +8,29 @@ import (
 
 // Tiny ANSI helpers for the REPL update prompt. No colour
 // library: the rest of the CLI (banner, etc.) stays
-// dependency-free, and we honour NO_COLOR + non-TTY writers
-// so tests see plain text.
+// dependency-free.
 //
-// styleEnabled is split by platform — the implementation in
-// this file is the cross-platform surface (constant table,
-// paint(), helpers, displayVer, yesNoPrompt). The TTY probe
-// lives in:
-//   - cli_style_windows.go  (//go:build windows): VT-aware,
-//     probes ENABLE_VIRTUAL_TERMINAL_PROCESSING and enables
-//     it on demand. Falls back to plain text on legacy
-//     conhost that can't be coerced into VT mode.
-//   - cli_style_unix.go     (//go:build !windows): keeps the
-//     original isatty.IsTerminal || IsCygwinTerminal probe.
+// styleEnabled is hard-wired to false. Plan C (the VT-aware
+// platform split in cli_style_unix.go / cli_style_windows.go)
+// was tried first; the `SetConsoleMode` call that probes for
+// `ENABLE_VIRTUAL_TERMINAL_PROCESSING` left the host console
+// in a state that broke readline's ConPTY / raw-mode setup on
+// the user's machine — the REPL hung at the y/N prompt (the
+// prompt painted, but `readline.NewShell().Readline()` never
+// produced a `nightme> ` prompt).
 //
-// If Plan C (the VT-aware split) turns out to still misbehave
-// on a particular Windows host, the trivial fallback is to
-// inline `func styleEnabled(io.Writer) bool { return false }`
-// here and delete the two platform files. paint() already
-// treats a false return as "no ANSI", so tests stay green and
-// the REPL update prompt falls back to plain Unicode glyphs
-// (▲ ✓ ✗ →) which Windows console has rendered natively
-// since NT 5.1.
+// Returning false here makes paint() the identity function,
+// so every helper (paintRed / Green / Yellow / Cyan / Dim)
+// returns its argument verbatim. The REPL update prompt
+// falls back to plain Unicode glyphs (▲ ✓ ✗ →) that Windows
+// console has rendered natively since NT 5.1. Users keep the
+// symbol; they lose the colour. Trade accepted.
+//
+// To restore colour: re-introduce cli_style_unix.go and
+// cli_style_windows.go with the GetConsoleMode probe only
+// (drop the SetConsoleMode call), then change styleEnabled to
+// dispatch by runtime.GOOS. That variant is in git history at
+// commit 9c258f8.
 
 const (
 	ansiReset  = "\x1b[0m"
@@ -42,6 +43,14 @@ const (
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// styleEnabled is the fallback path — always plain. The
+// plan-C VT-aware split is preserved in git history for a
+// future attempt that doesn't touch the host console mode.
+func styleEnabled(w io.Writer) bool {
+	_ = w
+	return false
+}
 
 func paint(w io.Writer, code, s string) string {
 	if s == "" || !styleEnabled(w) {

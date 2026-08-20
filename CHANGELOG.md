@@ -23,6 +23,44 @@ and button green/grey live in the Feishu adapter. Errors stay
 `"choice_patch"`. Feishu helpers (`buildInteractiveCard`,
 `SendCardForReceipt`, `optCards`) keep their Card names.
 
+### REPL: gate readline by host VT support; restore update prompt on cmd.exe
+
+The bare-`nightme` interactive shell now picks one of three
+paths in `runREPL`, instead of always handing off to
+`reeflective/readline` on any tty:
+
+- **tty + VT** (Windows Terminal / ConPTY / POSIX tty) →
+  `runREPLInteractive` (readline): line editing + ↑/↓ history.
+- **tty, no VT** (classic cmd.exe) → new `runREPLScanner`
+  (scanner): reliable line-by-line input, keeps the startup
+  version-check + `Update now? [y/N]` prompt, but no inline
+  editing / history on that one host.
+- **non-tty** (piped / redirected stdin) → `runREPLWith`
+  (scanner): unchanged, skips the version check so a piped
+  first line is not eaten as a y/N answer.
+
+`readlineUsable()` (`repl_console_windows.go` /
+`repl_console_unix.go`) detects whether stdout's console
+already has `ENABLE_VIRTUAL_TERMINAL_PROCESSING` and **never
+calls `SetConsoleMode` to force it on** — enabling VT on a
+classic cmd.exe hangs `reeflective/readline` at startup (the
+"Plan C" regression, commit `6d29c03`), and with VT off the
+library floods literal CSI (`nightme> [1 q[?25l[120D...`).
+
+The startup version check + y/N flow is extracted into a
+shared `runStartupUpdateCheck(out, logger, reader)` helper
+called by both `runREPLInteractive` and `runREPLScanner`;
+the scanner loop is extracted into `scanRePLLoop`, shared by
+`runREPLScanner` and `runREPLWith`. `runREPLWith` (the test
+entry) still skips the version check so `TestREPL_*`
+transcripts stay clean.
+
+**Known limitation**: classic cmd.exe loses inline editing
+and ↑/↓ history (reeflective is unusable there). Windows
+Terminal is unaffected. Restoring the feature on cmd.exe
+needs a Win32-native editor (`ReadConsoleInputW` +
+`SetConsoleCursorPosition`, no ANSI) — tracked as follow-up.
+
 ### opencode bridge: migrate from HTTP serve to ACP
 
 The `opencode` integration is migrated from the proprietary

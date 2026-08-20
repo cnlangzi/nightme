@@ -397,6 +397,9 @@ err := cmd.Start() // ✅ nil
 | codex bridge spawn 调用 | `internal/bridge/codex/session.go` → `newSession` |
 | opencode bridge spawn 调用 | `internal/bridge/opencode/server.go` → `startServer` |
 | Bridge 注册表 | `cmd/nightme/agents.go` |
+| REPL console 门控（VT 检测） | `cmd/nightme/repl_console_windows.go` → `readlineUsable`；stub 在 `repl_console_unix.go` |
+| REPL 三路分发 | `cmd/nightme/repl.go` → `runREPL`（tty+VT → `runREPLInteractive` / tty 无 VT → `runREPLScanner` / non-tty → `runREPLWith`） |
+| REPL 版本检查共享 helper | `cmd/nightme/repl.go` → `runStartupUpdateCheck` + `scanRePLLoop` |
 
 ---
 
@@ -407,10 +410,18 @@ err := cmd.Start() // ✅ nil
 - **`.js` 直调**：当前实现走 `node.exe`，但 pi-node / npm shim 路径上几乎没有用户只装 `.js` 没装 `.cmd` 的场景——这是 defensive，未来按需启用。
 - **`%ComSpec` 重定向**：用户自定义 `ComSpec` 时 `comspecOrDefault` 会尊重；测试覆盖。
 - **`PATHEXT` 顺序**：当前 `.cmd` 永远赢过 `.exe`，因为 npm shim 把 `.cmd` 放在 PATH 顶层；如果用户只有 `.exe` 没 `.cmd`，自动命中 `.exe` 分支（无 wrapper），无需手工配置。
+- **cmd.exe 行编辑 / 历史缺失**：经典 cmd.exe（输出 console 无 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`）上 `reeflective/readline` 不可用——VT 关则 CSI 乱码（`nightme> [1 q[?25l[120D...`），VT 开则库启动时挂起（“Plan C” 回归，commit `6d29c03`）。`runREPL` 在此主机回退到 `runREPLScanner`（scanner + 版本更新 prompt），但**无行内编辑 / ↑/↓ 历史**。Windows Terminal / ConPTY 不受影响（走 `runREPLInteractive`，完整 readline）。恢复 cmd.exe 行编辑需 Win32-native 编辑器（`ReadConsoleInputW` + `SetConsoleCursorPosition`，不走 ANSI）——列为 follow-up。
 
 ---
 
 ## 9. 变更记录
+
+- 2026-08-21：REPL Windows console 门控 + 版本更新 prompt 回到 cmd.exe
+  - `runREPL` 改三路分发：tty+VT → `runREPLInteractive`(readline)；tty 无 VT（经典 cmd.exe）→ 新 `runREPLScanner`；non-tty → `runREPLWith`
+  - 新增 `readlineUsable()`（`repl_console_windows.go` / `_unix.go`）：检测 stdout 的 `ENABLE_VIRTUAL_TERMINAL_PROCESSING`，**绝不 `SetConsoleMode` 开启**（开启会让 reeflective 启动挂起——Plan C 回归 `6d29c03`；关闭则 CSI 乱码）
+  - 版本更新 prompt 抽成共享 helper `runStartupUpdateCheck`，`runREPLInteractive` 与 `runREPLScanner` 都跑；`runREPLWith`（测试 / non-tty）仍跳过以保 transcript 干净。scanner 循环抽成 `scanRePLLoop` 共享
+  - cmd.exe 上行编辑 / ↑/↓ 历史仍缺（reeflective 在该 host 不可用），需 Win32-native 编辑器 follow-up
+  - `paint()` 保持 identity（Windows `styleEnabled` 恒 false）
 
 - 2026-08-15：fix-stop 沉淀跨平台经验规则
   - 新增 §0.0 七条跨平台经验规则（按重要度排序）

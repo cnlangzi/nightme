@@ -85,10 +85,25 @@ func buildBanner(versionLine string, reg *cmdRegistry) string {
 // read error. Production path uses reeflective/readline for line
 // editing and in-memory history.
 func runREPL(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) error {
-	if isatty.IsTerminal(os.Stdin.Fd()) {
+	switch {
+	case readlineUsable():
+		// tty + VT (Windows Terminal / ConPTY / POSIX tty):
+		// full readline — line editing, ↑/↓ history, Ctrl-C/D.
 		return runREPLInteractive(root, reg, logger)
+	case isatty.IsTerminal(os.Stdin.Fd()):
+		// tty but no VT (classic cmd.exe): reeflective/readline
+		// is unusable here (VT-off floods literal CSI; VT-on
+		// hangs at startup), so fall back to the scanner-based
+		// REPL — still interactive, still gets the startup
+		// version check + "Update now? [y/N]" prompt. No
+		// inline editing / history on this one host.
+		return runREPLScanner(root, reg, logger)
+	default:
+		// non-tty (piped / redirected stdin): scanner, and skip
+		// the version check so the first piped line is not eaten
+		// as a y/N answer.
+		return runREPLWith(root, reg, logger, os.Stdin, os.Stdout)
 	}
-	return runREPLWith(root, reg, logger, os.Stdin, os.Stdout)
 }
 
 // runREPLInteractive drives the REPL with reeflective/readline so
@@ -132,31 +147,17 @@ func runREPLInteractive(root *cobra.Command, reg *cmdRegistry, logger *slog.Logg
 	// Install now? [y/N], all via plain stdin/stdout. Then we
 	// construct the readline shell.
 	//
-	// On Windows paint() returns plain text (styleEnabled is
-	// hard-wired to false in cli_style_windows.go). We don't
-	// touch the host console mode at all here — no
-	// SetConsoleMode, no probe. readline takes over with the
-	// console in whatever state it was at process start; if
-	// that state isn't usable for readline on this host,
-	// the fix moves to the REPL mechanism itself
-	// (runREPLWith instead of runREPLInteractive).
-	if isatty.IsTerminal(os.Stdin.Fd()) {
-		ctx := context.Background()
-		logf := func(format string, args ...any) {
-			if logger != nil {
-				logger.Warn(fmt.Sprintf(format, args...))
-			}
-		}
-		checker, _ := version.DefaultChecker(resolveDataDir())
-		res := checkWithCountdown(ctx, os.Stdout, checker, version.Version, logf)
-		_ = promptForUpdateIfOutdated(ctx, &PromptDeps{
-			VersionCheck:       &res,
-			Out:                os.Stdout,
-			Reader:             newStdinLineReader(),
-			Logger:             logger,
-			ReExecAfterInstall: true,
-		})
-	}
+	// Startup version check + "Update now? [y/N]" runs on the
+	// still-cooked terminal, BEFORE readline takes over. Shared
+	// with runREPLScanner (the no-VT tty path) so classic cmd.exe
+	// gets the same update flow as Windows Terminal. The helper
+	// writes a 5s countdown line then, if a newer release is
+	// cached/found, prompts y/N and reads one cooked-stdin line.
+	// Neither step needs VT: the glyphs (▲ ✓ ✗) render natively
+	// and the y/N reads cooked stdin. We do NOT call
+	// SetConsoleMode here — the host either already has VT
+	// (readline works) or runREPL routed it to the scanner path.
+	runStartupUpdateCheck(os.Stdout, logger, newStdinLineReader())
 
 	rl := readline.NewShell()
 	rl.Prompt.Primary(func() string { return "nightme> " })
@@ -232,10 +233,16 @@ func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out
 	return false, nil
 }
 
-// runREPLWith is the testable core. It uses bufio.Scanner on the
-// supplied io.Reader so unit tests can drive the REPL without a TTY.
-// Behavior matches runREPLInteractive for the cases the tests cover:
-// EOF exits, exit/quit says "bye", unknown commands print "Error:".
+// runREPLWith is the test / non-tty core: bufio.Scanner on the
+// supplied io.Reader so unit tests can drive the REPL without a TTY
+// and so piped-stdin invocations (echo "exit" | nightme) work. It
+// deliberately skips the startup version check — test transcripts
+// stay free of countdown + y-N chatter, and a piped first line is
+// not eaten as a y/N answer. Interactive no-VT ttys (classic cmd.exe)
+// go through runREPLScanner instead, which runs the version check
+// between the banner and the first prompt. Behavior matches
+// runREPLInteractive for the cases the tests cover: EOF exits,
+// exit/quit says "bye", unknown commands print "Error:".
 //
 // readline-specific behavior (↑/↓ history, line editing) is
 // exercised in interactive testing; this path is the contract.
@@ -247,15 +254,46 @@ func runREPLWith(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger, in 
 	fmt.Fprint(out, buildBanner(bannerWithVersion(), reg))
 	fmt.Fprint(out, "nightme> ")
 
-	// runREPLWith is the test-driven path; passing nil Reader
-	// makes the prompt fall through to the "stdin unavailable"
-	// branch, which is what the existing TestREPL_* suite
-	// expects (no version-check chatter in the transcript).
-	_ = promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Out:    out,
-		Logger: logger,
-	})
+	return scanREPLLoop(root, logger, in, out)
+}
 
+// runStartupUpdateCheck runs the blocking version probe (5s
+// countdown written to out) and, if a newer release is cached or
+// found, the "Update now? [y/N]" prompt + download/install flow.
+// Shared by runREPLInteractive (readline path) and runREPLScanner
+// (no-VT tty path) so both get the same startup update experience.
+//
+// reader is the cooked-stdin line source for the y/N answer
+// (newStdinLineReader in production); pass nil to skip the y/N.
+//
+// This must run on a COOKED terminal: it writes a countdown line
+// and reads a y/N line via plain stdin/stdout, neither of which
+// tolerates raw mode. On the readline path it is called before
+// readline.NewShell(); on the scanner path stdin is always cooked.
+func runStartupUpdateCheck(out io.Writer, logger *slog.Logger, reader func() (string, error)) {
+	ctx := context.Background()
+	logf := func(format string, args ...any) {
+		if logger != nil {
+			logger.Warn(fmt.Sprintf(format, args...))
+		}
+	}
+	checker, _ := version.DefaultChecker(resolveDataDir())
+	res := checkWithCountdown(ctx, out, checker, version.Version, logf)
+	_ = promptForUpdateIfOutdated(ctx, &PromptDeps{
+		VersionCheck:       &res,
+		Out:                out,
+		Reader:             reader,
+		Logger:             logger,
+		ReExecAfterInstall: true,
+	})
+}
+
+// scanREPLLoop is the shared scanner core: read lines from in,
+// dispatch each via dispatchREPLLine (which reprints "nightme> "
+// after every command), and return on clean EOF, exit/quit, or a
+// read/dispatch error. Used by both the test / non-tty path
+// (runREPLWith) and the production no-VT tty path (runREPLScanner).
+func scanREPLLoop(root *cobra.Command, logger *slog.Logger, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -279,4 +317,30 @@ func runREPLWith(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger, in 
 			return nil
 		}
 	}
+}
+
+// runREPLScanner is the production REPL for a real tty that
+// reeflective/readline can't drive — i.e. a classic cmd.exe whose
+// output console lacks ENABLE_VIRTUAL_TERMINAL_PROCESSING (VT-off
+// floods literal CSI; VT-on hangs the library — see
+// repl_console_windows.go). It reuses the scanner core (scanREPLLoop)
+// but inserts the startup version check + "Update now? [y/N]" flow
+// between the banner and the first "nightme> " prompt, so cmd.exe
+// users get the same update experience as Windows Terminal users.
+//
+// History / inline line-editing are NOT available on this path —
+// only readline (runREPLInteractive) provides those, and only on
+// VT-capable hosts. Restoring them on cmd.exe needs a Win32-native
+// editor (ReadConsoleInputW + SetConsoleCursorPosition, no ANSI).
+func runREPLScanner(root *cobra.Command, reg *cmdRegistry, logger *slog.Logger) error {
+	if logger != nil {
+		logger.Info("repl started")
+	}
+
+	out := os.Stdout
+	fmt.Fprint(out, buildBanner(bannerWithVersion(), reg))
+	runStartupUpdateCheck(out, logger, newStdinLineReader())
+	fmt.Fprint(out, "nightme> ")
+
+	return scanREPLLoop(root, logger, os.Stdin, out)
 }

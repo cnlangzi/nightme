@@ -13,15 +13,16 @@ import (
 // paint() either wraps s with an SGR sequence (when
 // styleEnabled returns true) or returns s verbatim (when
 // it returns false). On Windows styleEnabled is hard-wired
-// to false — no console mode probing, no SetConsoleMode,
-// no visible "[33m" codes either. We emit pure plain text
-// and let readline do whatever it does next; if readline's
-// CSI sequences render as literal text on a particular
-// host (because that host doesn't have
-// ENABLE_VIRTUAL_TERMINAL_PROCESSING), the fix has to move
-// to the REPL mechanism (scanner-based runREPLWith instead
-// of readline-driven runREPLInteractive), not to the
-// prompt's output format.
+// to false — the banner / y-N update prompt stays as
+// plain Unicode glyphs that the Windows console renders
+// natively without VT, so no ANSI leaks on a classic cmd.exe
+// (whose output buffer lacks ENABLE_VIRTUAL_TERMINAL_PROCESSING).
+// reeflective/readline itself is gated by readlineUsable()
+// in repl_console_windows.go: on a no-VT cmd.exe the REPL
+// falls back to the scanner path rather than running
+// readline (which floods garbage with VT off, or hangs with
+// VT on). paint() is therefore never the seam that decides
+// VT — it just stays plain text.
 
 const (
 	ansiReset  = "\x1b[0m"

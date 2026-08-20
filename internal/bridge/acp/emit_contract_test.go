@@ -1,4 +1,4 @@
-// Regression tests for the acp bridge's emit() / emitConnected()
+// Regression tests for the acp bridge's deliver() / emitConnected()
 // contract.
 //
 // These lock in the "no default: instant drop" producer-side
@@ -10,11 +10,11 @@
 // session id, and --resume would replay a dead session on daemon
 // restart.
 //
-// emit() already used the correct pattern (ctx.Done fallback only)
-// but had no test pinning it; the tests below also lock it down.
+// deliver() already uses the correct pattern (ctx.Done fallback only)
+// and is locked down by the tests below.
 //
 // The tests are white-box (package acp) and construct a minimal
-// Agent with only the fields emit() / emitConnected() read. No real
+// Agent with only the fields deliver() / emitConnected() read. No real
 // ACP bridge is launched — these run in milliseconds.
 package acp
 
@@ -26,12 +26,12 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// TestEmit_NoInstantDrop verifies that emit() does NOT fall through
+// TestDeliver_NoInstantDrop verifies that deliver() does NOT fall through
 // to a `default:` instant-drop when the channel is full. Filling
-// the channel to capacity, calling emit() in a goroutine, and
+// the channel to capacity, calling deliver() in a goroutine, and
 // asserting the goroutine is still blocked after 1 s catches any
 // regression that re-adds the instant-drop branch.
-func TestEmit_NoInstantDrop(t *testing.T) {
+func TestDeliver_NoInstantDrop(t *testing.T) {
 	a := &driver{
 		ctx:    context.Background(),
 		events: make(chan agent.AgentEvent, eventBufferSize),
@@ -43,7 +43,7 @@ func TestEmit_NoInstantDrop(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		a.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: "real"})
+		a.deliver(agent.AgentEvent{Kind: agent.EventAgentText, Text: "real"})
 		close(done)
 	}()
 
@@ -64,10 +64,10 @@ func TestEmit_NoInstantDrop(t *testing.T) {
 	}
 }
 
-// TestEmit_UnblocksOnCtxDone verifies the teardown signal: when the
-// bridge context is cancelled, emit() must exit (rather than leak
+// TestDeliver_UnblocksOnCtxDone verifies the teardown signal: when the
+// bridge context is cancelled, deliver() must exit (rather than leak
 // the producer goroutine).
-func TestEmit_UnblocksOnCtxDone(t *testing.T) {
+func TestDeliver_UnblocksOnCtxDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &driver{
 		ctx:    ctx,
@@ -79,7 +79,7 @@ func TestEmit_UnblocksOnCtxDone(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		a.emit(agent.AgentEvent{})
+		a.deliver(agent.AgentEvent{})
 		close(done)
 	}()
 
@@ -99,12 +99,12 @@ func TestEmit_UnblocksOnCtxDone(t *testing.T) {
 	}
 }
 
-// TestEmitConnected_NoInstantDrop is the specific regression for
+// TestDeliverConnected_NoInstantDrop is the specific regression for
 // emitConnected(). Pre-alignment this function had a `default:`
 // branch that silently dropped EventAgentReady — the canonical
 // "session id lost" failure mode. The test asserts the call blocks
 // rather than returning immediately when the channel is full.
-func TestEmitConnected_NoInstantDrop(t *testing.T) {
+func TestDeliverConnected_NoInstantDrop(t *testing.T) {
 	a := &driver{
 		ctx:           context.Background(),
 		events:        make(chan agent.AgentEvent, eventBufferSize),
@@ -150,9 +150,9 @@ func TestEmitConnected_NoInstantDrop(t *testing.T) {
 	}
 }
 
-// TestEmitConnected_UnblocksOnCtxDone: the teardown path for
+// TestDeliverConnected_UnblocksOnCtxDone: the teardown path for
 // emitConnected.
-func TestEmitConnected_UnblocksOnCtxDone(t *testing.T) {
+func TestDeliverConnected_UnblocksOnCtxDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &driver{
 		ctx:           ctx,

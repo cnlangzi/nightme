@@ -189,21 +189,24 @@ opencode 1.18.18 acp server 实际产出的 sessionUpdate 类型(`/tmp/acp-event
 
 ### 3.1 SessionUpdate 路由表
 
-| ACP sessionUpdate | 含义(opencode 1.18) | AgentEvent 映射 | 备注 |
+| ACP sessionUpdate | 含义(opencode 1.18) | AgentEvent 映射 | 处理位置 |
 |---|---|---|---|
-| `user_message_chunk` | 回放用户消息(replay) | (drop) | 已经在飞书侧有 ID,不需要回显 |
-| `agent_message_chunk` | assistant 文本流 | `EventAgentText{Text}` | 跟 claudecode / pi 的 stream-json 一致 |
-| `agent_thought_chunk` | reasoning / thinking 文本流 | `EventAgentText{Text="[思考] " + ...}` | 跟 opencode serve 路径的 [思考] 前缀一致 |
-| `tool_call` (status=pending) | 工具调用开始 | `EventAgentToolStart{ID, Name, Args}` | Args 来自 `rawInput` JSON 字符串 |
-| `tool_call_update` (status=running) | 工具运行中 | (可选)更新 output | 飞书 / tui 渲染层支持增量就 emit `EventAgentToolStart`;不支持就 drop |
-| `tool_call_update` (status=completed) | 工具完成 | `EventAgentToolEnd{ID, Name, Output}` | Output 来自 `rawOutput` |
-| `tool_call_update` (status=errored) | 工具失败 | `EventAgentToolEnd{ID, Name, Err}` | Err 来自 `rawOutput.error` |
-| `usage_update` | token 用量 / context window | stash 到 `lastUsage` | 在 turn-end (`EventAgentDone`) 时落到 `Done.Usage` |
-| `available_commands_update` | 可用 slash command 列表 | log only | 不路由到 runtime(`plans/slash-command-reactions` 落地后再 wire) |
-| `current_mode_update` | 模式变更(build/plan) | log only | opencode 1.18.18 偶发空 payload,留 v2 |
-| `config_option_update` | 配置变更 | log only | 同上 |
-| `session_info_update` | session metadata 变化 | log only | 留 v2,做 future 的 session title UI |
-| `plan` | 任务规划 | log only(v1); v2 wire `EventAgentTaskCreate/Update` | F-? 还没立项,留 v2 |
+| `user_message_chunk` | 回放用户消息(replay) | (drop) | **generic fallback** |
+| `agent_message_chunk` | assistant 文本流 | `EventAgentText{Text}` | **generic fallback** |
+| `agent_thought_chunk` | reasoning / thinking 文本流 | `EventAgentText{Text="[思考] " + ...}` | **generic fallback** |
+| `tool_call` (status=pending) | 工具调用开始 | `EventAgentToolStart{ID, Name, Args}` | **generic fallback** |
+| `tool_call_update` (status=running) | 工具运行中 | (可选)更新 output | **generic fallback**（status=running 当前 drop，飞书/tui 不渲染 mid-progress）|
+| `tool_call_update` (status=completed) | 工具完成 | `EventAgentToolEnd{ID, Name, Output}` | **generic fallback** |
+| `tool_call_update` (status=errored) | 工具失败 | `EventAgentToolEnd{ID, Name, Err}` | **generic fallback** |
+| `usage_update` | token 用量 / context window | stash 到 `lastUsage`; turn-end 落 `Done.Usage` | **generic fallback** |
+| `session.status` (idle) | turn-end signal | `EventAgentDone{Reason:"settled", Usage: lastUsage}` | **generic fallback** |
+| `session_info_update` | session metadata 变化 | `model` 字段写 `d.model`（其他字段 reserved）| **generic fallback** |
+| `available_commands_update` | 可用 slash command 列表 | log only | **generic fallback** default（v2 wire `plans/slash-command-reactions`）|
+| `current_mode_update` | 模式变更(build/plan) | log only | **generic fallback** default（opencode 1.18.18 偶发空 payload,留 v2）|
+| `config_option_update` | 配置变更 | log only | **generic fallback** default |
+| `plan` | 任务规划 | log only(v1); v2 wire `EventAgentTaskCreate/Update` | **generic fallback** default |
+
+> **更新（v0.x）**：上表所有 kind 自 [date of fix-acp-model PR] 起由 **generic fallback**（`internal/bridge/acp/agent.go::handleSessionUpdate`）接管，opencode **不再需要**写自己的 `update.go`。§4.4 的设计仍保留作为"opencode 未来如果引入 vendor-private 协议时可参照"的模板，但**当前不需要落地**。详见 `docs/bridge/acp.md` §1.1 / §2.3。
 
 ### 3.2 SessionRequest / Notification 路由
 
@@ -218,9 +221,14 @@ opencode 1.18.18 acp server 实际产出的 sessionUpdate 类型(`/tmp/acp-event
 | `session/update` notification | A→C | **本次新增**:完整 sessionUpdate 路由表 |
 | `session/status` event | A→C(`session.status` type=idle) | **本次新增**:`EventAgentDone{Reason="settled"}` |
 
-### 3.3 AgentEvent emission 规则
+### 3.3 AgentEvent emission 规则（已被 generic fallback 取代）
+
+> **更新（v0.x）**：本节原本描述的 opencode `update.go` 设计**不再需要落地**。所有 emission 规则已由 `internal/bridge/acp/agent.go::handleSessionUpdate` 的 generic fallback 实现。opencode 直接走 generic，不装任何 per-bridge UpdateHandler。完整 mapping 见 [docs/bridge/acp.md §2.1](../../bridge/acp.md)。
+>
+>下面是**历史设想**的 opencode `update.go` 实现，仅作为"未来如需 vendor-private 协议扩展"的参考模板保留：
 
 ```go
+// (历史草图 — 当前不实现；保留作为扩展模板)
 // text / reasoning
 case "user_message_chunk":     // drop
 case "agent_message_chunk":    emit(EventAgentText{Text: chunk.content.text})
@@ -333,7 +341,19 @@ func (s *acpStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks 
 }
 ```
 
-但等等,**简单复用 `acp.NewStarter` 不够** —— opencode acp server 产出的 sessionUpdate 类型(`agent_thought_chunk`、`usage_update`、`tool_call_update.status=errored` 等)需要专门翻译,而 `internal/bridge/acp/agent.go` 的 `handleSessionUpdate` 只硬编码了 4 个 case。
+> **更新（v0.x）**：原 §4.2 设计 `internal/bridge/opencode/update.go` + `SetUpdateHandler()` 路径**不再落地**。
+>
+> 经验证，opencode 1.18.x wire 实际产出的所有 sessionUpdate 类型（包括 `usage_update`、`session.status:idle`、`session_info_update` 等）都已落在 [docs/bridge/acp.md §2.1](../../bridge/acp.md) 列出的"generic fallback"覆盖范围内。直接复用 `acp.NewStarter` 就够 —— 不需要任何 per-bridge translator。
+>
+> 本节保留作为"未来 opencode 引入 vendor-private 协议时可参照"的设计模板，但**当前不需要落地**。如果未来 opencode 添加 ACP spec 之外的私有 sessionUpdate kind 或 JSON-RPC method，模式如下：
+>
+> ```go
+> drv.SetUpdateHandler(opencodeSessionDecorator)  // 或 SetMethodHandler
+> ```
+>
+> 详见 `docs/bridge/acp.md` §2.3 / §6 的扩展点 API。
+
+~~但等等,**简单复用 `acp.NewStarter` 不够** —— opencode acp server 产出的 sessionUpdate 类型(`agent_thought_chunk`、`usage_update`、`tool_call_update.status=errored` 等)需要专门翻译,而 `internal/bridge/acp/agent.go` 的 `handleSessionUpdate` 只硬编码了 4 个 case。~~（历史描述，已被上面的更新取代）
 
 **两个选择**:
 
@@ -763,12 +783,8 @@ NIGHTME_OPENCODE_E2E=1 go test -tags 'unix opencode_real_e2e' \
   - [x] `Detect()` LookPath
   - [x] `Start()` 委派 `acp.NewStarter(...).Start()` + `drv.SetUpdateHandler(newUpdateHandler(...))`
   - [x] `RunOnce()` 委派 `print.go::runPrintMode`
-- [x] `internal/bridge/opencode/update.go`:
-  - [x] `newUpdateHandler(a, workspace) acp.UpdateHandler` 路由 5 个 opencode 真实发出的 sessionUpdate + 1 个 default log-only 分支
-  - [x] `decodeTextChunk(raw) string` helper
-  - [x] ~~`percent(used, size) float64`~~ → 已删除(usage_update 分支整体裁掉,见 §收尾)
-- [x] `internal/bridge/opencode/update_test.go`:
-  - [x] 11 个单测覆盖 text/thought/tool/permission/stop/unknown/malformed/decode 各分支(原计划 8 个,实际多了 TypeAssertionIsStable 等)
+- [x] ~~`internal/bridge/opencode/update.go`~~ → **已不需要**。opencode 直接走 generic fallback（见 [docs/bridge/acp.md §2.1](../../bridge/acp.md)）；`usage_update` / `session.status` / `session_info_update` / `agent_thought_chunk` 等全部由 generic 接管。仅当 opencode 引入 vendor-private 协议时才需要落地 `update.go`（§4.2 设计保留作模板）。
+- [x] ~~`internal/bridge/opencode/update_test.go`~~ → **已不需要**（原因同 update.go）。通用 fallback 的测试在 `internal/bridge/acp/deliver_stamp_test.go` 覆盖（13 个新测试）。
 - [x] ~~`internal/bridge/opencode/acp_integration_test.go`~~ → 不再需要,acp 桥本身的 `acp_test.go` 已覆盖;opencode 端的 e2e 走 `internal/bridge/opencode/starter_test.go` 的 Detect 路径
 - [x] `cmd/nightme/agents.go`:
   - [x] 改默认 `opencode` 为 `opencode.NewStarter("opencode", "opencode", []string{"acp"})`

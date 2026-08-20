@@ -170,6 +170,42 @@ type driver struct {
 	// it to the thinking surface (OutThinking) rather than the reply
 	// surface (OutReply). Matches pi/dsh/opencode conventions.
 	thinkingPrefix string
+
+	// model is the bridge-local cached model name. Captured from
+	// vendor-extension sessionUpdate payloads (usage_update.model,
+	// session_info_update.model). May stay empty if the server
+	// never reports one — runtime tolerates empty Model and the
+	// footer just omits the model segment.
+	//
+	// Concurrent. Writers are handleUsageUpdate /
+	// handleSessionInfoUpdate on the readPump goroutine; readers
+	// are deliver() called from any goroutine (handshake,
+	// SendBlocks via translatePromptResponse, flushTextBuffers).
+	// Without modelMu the race detector flags this as a torn
+	// string read (P1). Contention is low — writers fire at most
+	// a handful of times per turn — so a plain Mutex is fine.
+	model   string
+	modelMu sync.Mutex
+
+	// lastUsage is the per-turn usage snapshot. Written by
+	// handleUsageUpdate on usage_update sessionUpdate; consumed
+	// (and cleared) by translatePromptResponse and
+	// handleSessionStatus at turn-end. nil = "no usage reported".
+	//
+	// Concurrent: handleUsageUpdate writes, the two turn-end
+	// handlers read+clear. A small mutex protects the pointer.
+	lastUsage   *agent.UsageInfo
+	lastUsageMu sync.Mutex
+
+	// turnSettled guards against emitting EventAgentDone twice
+	// within the same turn. Opencode acp fires both the
+	// session/prompt RESPONSE (synchronous, translatePromptResponse
+	// path) AND the session.status:idle notification
+	// (asynchronous, handleSessionStatus path) for the same turn;
+	// we keep the first and drop the second. Reset on every New()
+	// when the session id rolls.
+	turnSettled   bool
+	turnSettledMu sync.Mutex
 }
 
 
@@ -544,6 +580,22 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	}
 	d.pendingTurnActive = true
 	d.pendingTurnMu.Unlock()
+
+	// Reset the turn-end dedup flag for the new turn. The previous
+	// turn's terminal paths (translatePromptResponse success /
+	// cancelled / max_tokens / refusal, handleSessionStatus, the
+	// unparseable-response fallback) set turnSettled=true; without
+	// an explicit reset here, the new turn would see turnSettled=true
+	// and silently skip its own EventAgentDone emit — the busy guard
+	// would never clear and the spinner would hang forever (P0).
+	//
+	// Reset happens AFTER the busy-guard acquisition so a second
+	// SendBlocks call that gets ErrTurnBusy does not clear turn 1's
+	// dedup state out from under it.
+	d.turnSettledMu.Lock()
+	d.turnSettled = false
+	d.turnSettledMu.Unlock()
+
 	defer func() {
 		d.pendingTurnMu.Lock()
 		d.pendingTurnActive = false
@@ -636,18 +688,31 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		// Unparseable response — emit Done with reason
 		// "settled" so the runtime clears the busy guard.
 		// Without this the user is stuck on the spinner.
-		d.emit(agent.AgentEvent{
-			Kind: agent.EventAgentDone,
-			Done: &agent.AgentDoneEvent{Reason: "settled"},
-		})
+		d.turnSettledMu.Lock()
+		already := d.turnSettled
+		d.turnSettled = true
+		d.turnSettledMu.Unlock()
+		if !already {
+			d.deliver(agent.AgentEvent{
+				Kind: agent.EventAgentDone,
+				Done: &agent.AgentDoneEvent{Reason: "settled"},
+			})
+		}
 		return
 	}
 
-	// usage is optional — a successful turn with empty usage
-	// emits Done without a Usage field (acceptable: channels
-	// render zero-usage turns without a footer line).
-	var usage *agent.UsageInfo
-	if resp.Usage != nil {
+	// Prefer the usage_update snapshot (last-mile accuracy — it
+	// reflects the model that actually ran, including any post-
+	// prompt switches). Fall back to the prompt-response payload
+	// when the server doesn't emit usage_update (some ACP servers
+	// only include usage in the synchronous session/prompt reply).
+	// Also clear lastUsage after consuming so the next turn
+	// doesn't inherit stale tokens.
+	d.lastUsageMu.Lock()
+	usage := d.lastUsage
+	d.lastUsage = nil
+	d.lastUsageMu.Unlock()
+	if usage == nil && resp.Usage != nil {
 		usage = &agent.UsageInfo{
 			InputTokens:              resp.Usage.InputTokens,
 			OutputTokens:             resp.Usage.OutputTokens,
@@ -668,7 +733,16 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
-		d.emit(agent.AgentEvent{
+		// Bump turnSettled so a trailing session.status:idle
+		// (opencode fires both prompt response + status:idle
+		// for the same turn) doesn't synthesise a Done card
+		// after the Error. The turn IS terminal here; the
+		// next SendBlocks will reset the flag via New() or
+		// pendingTurnMu release path.
+		d.turnSettledMu.Lock()
+		d.turnSettled = true
+		d.turnSettledMu.Unlock()
+		d.deliver(agent.AgentEvent{
 			Kind: agent.EventAgentError,
 			Err:  errors.New("bridge/acp: turn cancelled"),
 		})
@@ -677,7 +751,15 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
-		d.emit(agent.AgentEvent{
+		// Bump turnSettled so a trailing session.status:idle
+		// (opencode fires both prompt response + status:idle
+		// for the same turn) doesn't synthesise a Done card
+		// after the Error. Original behaviour (pre-fix) only
+		// emitted Error here; we preserve that.
+		d.turnSettledMu.Lock()
+		d.turnSettled = true
+		d.turnSettledMu.Unlock()
+		d.deliver(agent.AgentEvent{
 			Kind: agent.EventAgentError,
 			Err:  errors.New("bridge/acp: turn exceeded max_tokens"),
 		})
@@ -686,7 +768,10 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
-		d.emit(agent.AgentEvent{
+		d.turnSettledMu.Lock()
+		d.turnSettled = true
+		d.turnSettledMu.Unlock()
+		d.deliver(agent.AgentEvent{
 			Kind: agent.EventAgentError,
 			Err:  errors.New("bridge/acp: turn refused by content filter"),
 		})
@@ -707,8 +792,18 @@ func (d *driver) translatePromptResponse(raw json.RawMessage) {
 		if h := d.flushHandler.Load(); h != nil {
 			(*h)(d.View())
 		}
-		done := &agent.AgentDoneEvent{Reason: "settled", Usage: usage}
-		d.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: done})
+		// turnSettled guards against the same turn also firing
+		// session.status:idle (opencode does this). First
+		// signal wins; handleSessionStatus sees turnSettled=true
+		// and skips its own EventAgentDone emit.
+		d.turnSettledMu.Lock()
+		already := d.turnSettled
+		d.turnSettled = true
+		d.turnSettledMu.Unlock()
+		if !already {
+			done := &agent.AgentDoneEvent{Reason: "settled", Usage: usage}
+			d.deliver(agent.AgentEvent{Kind: agent.EventAgentDone, Done: done})
+		}
 	}
 }
 
@@ -920,28 +1015,44 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 
 // ─── per-bridge extension hooks ──────────────────────────────────
 
-// SetUpdateHandler installs a bridge-specific translator for
-// session/update notifications. Subsequent updates route through
-// the handler BEFORE the built-in 4-case fallback runs; the
-// handler is responsible for emitting AgentEvents and may either
-// fully replace the default behaviour (most common) or layer on
-// top (rare; needed if a future acp spec adds a sessionUpdate
-// variant that the fallback should still handle).
+// SetUpdateHandler installs a per-bridge translator for
+// VENDOR-PRIVATE protocol extensions that the generic ACP
+// fallback does not cover. The handler receives raw
+// session/update params.update payloads BEFORE the built-in
+// fallback runs.
 //
-// Must be called BEFORE the readPump observes the first
-// session/update. The runtime sets the handler from
-// `Starter.Start`'s post-handshake window — see opencode bridge
-// for the canonical pattern. Calling after the read pump has
-// started racing updates is racy (some updates may go to the old
-// handler or the fallback).
+// USE THIS FOR: vendor-private sessionUpdate kinds or
+// JSON-RPC methods that are NOT in the ACP spec and NOT
+// covered by the generic fallback. Examples:
+//   - cursor's cursor/update_todos (JSON-RPC method, routed
+//     via SetMethodHandler instead — see below)
+//   - vendor-private slash-command notifications
+//   - any non-standard sessionUpdate shape a future CLI
+//     might emit that the spec doesn't mandate
 //
-// Pass nil to revert to the built-in 4-case behaviour.
+// DO NOT USE THIS FOR: anything the ACP spec or its common
+// vendor extensions define. The generic fallback in
+// handleSessionUpdate now covers the standard surface —
+// usage_update, session.status, session_info_update,
+// agent_message_chunk, agent_thought_chunk, tool_call,
+// tool_call_update, message_chunk. New ACP-spec kinds should
+// be added to the fallback, NOT to a per-bridge translator.
 //
-// Designed for bridge-specific translators that need to handle
-// sessionUpdate variants the generic acp bridge does not
-// recognize (opencode's agent_thought_chunk, future per-agent
-// acp backends). The opencode bridge is the first user
-// (F-OPENCODE-ACP-MIGRATION).
+// Lifetime: must be called BEFORE the readPump observes the
+// first session/update. The runtime sets the handler from
+// `Starter.Start`'s post-handshake window. Calling after the
+// read pump has started racing updates is racy (some updates
+// may go to the old handler or the fallback). Stored as
+// atomic.Pointer so the writer / reader race is lock-free.
+//
+// All-or-nothing ownership: a non-nil handler replaces the
+// built-in fallback wholesale (no partial override) to prevent
+// double-emission on kinds the handler handles. Pass nil to
+// revert to the built-in fallback.
+//
+// For unrecognized JSON-RPC METHODS (not sessionUpdate kinds),
+// use SetMethodHandler instead — same lifetime contract, same
+// "vendor-private only" semantic.
 func (d *driver) SetUpdateHandler(h UpdateHandler) {
 	if h == nil {
 		d.updateHandler.Store(nil)
@@ -1010,7 +1121,9 @@ func (d *driver) View() *SessionView {
 
 // setSessionID parses the session/new response and synthesizes the
 // EventAgentReady so the runtime can capture the resume id uniformly
-// with Claude Code / Pi.
+// with Claude Code / Pi. Model is captured later (via usage_update /
+// session_info_update) and stamped on subsequent events by deliver();
+// see emitConnected for the full rationale.
 func (d *driver) setSessionID(result json.RawMessage) error {
 	var response struct {
 		SessionID      string `json:"sessionId"`
@@ -1040,16 +1153,21 @@ func (d *driver) emitConnected() {
 		return
 	}
 	d.connectedSent = true
-	ev := agent.AgentEvent{
+	// Model is intentionally left blank here. ACP's initialize
+	// and session/new responses do not carry a model name — it
+	// only appears in vendor-extension sessionUpdate payloads
+	// (usage_update.model, session_info_update.model) that fire
+	// AFTER handshake. deliver() stamps d.model on every event,
+	// so once the model is captured the runtime sees it on the
+	// next Text / Tool / Result / Done event (see runtime/handler.go
+	// SetModel capture path). The Empty Ready.Model is therefore
+	// benign — runtime tolerates it (SetModel no-ops on empty).
+	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
 		SessionID: d.sessionID,
 		AgentName: d.agentName,
 		Workspace: d.workspace,
-	}
-	select {
-	case d.events <- ev:
-	case <-d.ctx.Done():
-	}
+	})
 }
 
 func (d *driver) readPump() {
@@ -1287,11 +1405,185 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 				d.textMu.Unlock()
 			}
 		}
+	case "usage_update":
+		// Per-turn token usage from the server's usage sessionUpdate.
+		// Two common shapes:
+		//   - opencode: { used, size, cost }   (cumulative "used" only)
+		//   - ACP spec: { inputTokens, outputTokens, cacheRead, ... }
+		// Both are accepted; standard shape wins when populated.
+		// The snapshot is stashed into d.lastUsage and lands on the
+		// turn-end EventAgentDone.Usage (translatePromptResponse
+		// prefers lastUsage; falls back to response.Usage).
+		d.handleUsageUpdate(params.Update)
+		// usage_update is a status event, NOT a tool boundary —
+		// do not flush text buffers here.
+	case "session.status":
+		// Vendor-extension turn-end signal (opencode acp sends
+		// session.status:{status:"idle"} as a sessionUpdate
+		// rather than resolving the synchronous session/prompt
+		// response). Some ACP servers fire BOTH this AND the
+		// prompt response; turnSettled in handleSessionStatus
+		// dedupes so we only emit EventAgentDone once per turn.
+		d.handleSessionStatus(params.Update)
+	case "session_info_update":
+		// Vendor-extension session metadata update. Currently
+		// only the model field is consumed; title / description
+		// are reserved for future use (e.g. /rename slash
+		// command forwarding to the chat header).
+		d.handleSessionInfoUpdate(params.Update)
 	default:
 		// Unknown kind: flush both buffers so trailing text is
 		// not lost before the next recognized event.
 		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
 		d.flushBuffer(d.textBuf, "")
+	}
+}
+
+// handleUsageUpdate parses a sessionUpdate of kind "usage_update"
+// and stashes the resulting UsageInfo into d.lastUsage. Two
+// wire shapes are supported:
+//
+//   - opencode shape: { used, size, cost } — cumulative tokens
+//     used in the model's context; "size" is the model's context
+//     window. Mapped to InputTokens + ContextWindow + pct.
+//   - ACP-spec shape: { inputTokens, outputTokens, cacheRead, ...,
+//     costUSD, model } — full per-turn breakdown. Used verbatim.
+//
+// The model's `model` field (when present) is also captured into
+// d.model so deliver() stamps it on every subsequent event.
+//
+// All-zero payloads are treated as "no usage reported" and do
+// NOT clear a previously-stashed snapshot (the most-recent
+// non-zero wins).
+func (d *driver) handleUsageUpdate(raw json.RawMessage) {
+	var u struct {
+		// opencode shape (docs/feat/F-OPENCODE-ACP-MIGRATION §3.1).
+		Used int64   `json:"used"`
+		Size int64   `json:"size"`
+		Cost float64 `json:"cost"`
+
+		// ACP-spec shape — permissive so both flavours parse.
+		InputTokens              int     `json:"inputTokens"`
+		OutputTokens             int     `json:"outputTokens"`
+		CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
+		CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
+		TotalTokens              int     `json:"totalTokens"`
+		CostUSD                  float64 `json:"costUSD"`
+
+		// vendor-extension model discovery (some servers
+		// include the active model on usage_update).
+		Model string `json:"model"`
+	}
+	// json.Unmarshal error → all zero → no-op (matches
+	// claudecode decodeUsage's permissive style).
+	_ = json.Unmarshal(raw, &u)
+
+	info := &agent.UsageInfo{}
+	// Standard ACP shape wins when populated (more granular
+	// input/output/cache split).
+	if u.InputTokens+u.OutputTokens+u.CacheReadInputTokens+
+		u.CacheCreationInputTokens > 0 || u.TotalTokens > 0 {
+		info.InputTokens = u.InputTokens
+		info.OutputTokens = u.OutputTokens
+		info.CacheReadInputTokens = u.CacheReadInputTokens
+		info.CacheCreationInputTokens = u.CacheCreationInputTokens
+		info.CostUSD = u.CostUSD
+	} else if u.Used > 0 || u.Size > 0 || u.Cost > 0 {
+		// opencode fallback: lump "used" into InputTokens
+		// (opencode reports cumulative context usage, not the
+		// per-turn input/output breakdown).
+		info.InputTokens = int(u.Used)
+		info.CostUSD = u.Cost
+	}
+	// ContextWindow + pct: opencode gives Size directly; for
+	// the standard shape we don't recompute (consistent with
+	// claudecode: pct is bridge-local, only computed when the
+	// wire reports the window).
+	if u.Size > 0 {
+		info.ContextWindow = int(u.Size)
+		if info.InputTokens+info.OutputTokens+
+			info.CacheCreationInputTokens+info.CacheReadInputTokens > 0 {
+			used := info.InputTokens + info.OutputTokens +
+				info.CacheCreationInputTokens + info.CacheReadInputTokens
+			info.ContextWindowPct = float64(used) / float64(u.Size) * 100
+		}
+	}
+	// All-zero payloads do NOT clear a previously-stashed
+	// snapshot — the most-recent non-zero wins. This protects
+	// against servers that emit a final zero-cost usage_update
+	// as a "stream end" marker.
+	if info.InputTokens+info.OutputTokens+
+		info.CacheCreationInputTokens+info.CacheReadInputTokens > 0 ||
+		info.CostUSD > 0 || info.ContextWindow > 0 {
+		d.lastUsageMu.Lock()
+		d.lastUsage = info
+		d.lastUsageMu.Unlock()
+	}
+
+	// Model capture (vendor-extension field). Write protected by
+	// modelMu — readers in deliver() can run on any goroutine
+	// (see model field doc).
+	if u.Model != "" {
+		d.modelMu.Lock()
+		d.model = u.Model
+		d.modelMu.Unlock()
+	}
+}
+
+// handleSessionStatus parses a sessionUpdate of kind
+// "session.status" and, on status=idle, treats it as a turn-end
+// signal — flushes both buffers and emits EventAgentDone{Reason:
+// "settled", Usage: d.lastUsage}.
+//
+// turnSettled guards against emitting EventAgentDone twice for
+// the same turn when both session.status:idle AND the
+// synchronous session/prompt response arrive (opencode acp does
+// this; the prompt response path is translatePromptResponse).
+//
+// For error terminations (cancelled / max_tokens / refusal) the
+// prompt-response path also bumps turnSettled so this handler
+// won't synthesise a stray Done after an Error.
+func (d *driver) handleSessionStatus(raw json.RawMessage) {
+	var st struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(raw, &st) != nil || st.Status != "idle" {
+		return
+	}
+	d.flushTextBuffers()
+	if h := d.flushHandler.Load(); h != nil {
+		(*h)(d.View())
+	}
+	d.turnSettledMu.Lock()
+	already := d.turnSettled
+	d.turnSettled = true
+	d.lastUsageMu.Lock()
+	usage := d.lastUsage
+	d.lastUsage = nil
+	d.lastUsageMu.Unlock()
+	d.turnSettledMu.Unlock()
+	if !already {
+		d.deliver(agent.AgentEvent{
+			Kind: agent.EventAgentDone,
+			Done: &agent.AgentDoneEvent{Reason: "settled", Usage: usage},
+		})
+	}
+}
+
+// handleSessionInfoUpdate parses a sessionUpdate of kind
+// "session_info_update" and captures the vendor-extension model
+// field (if present) into d.model. Other fields (title,
+// description, ...) are reserved for future use and currently
+// ignored — see docs/bridge/acp.md §2.1 for the full kind table.
+func (d *driver) handleSessionInfoUpdate(raw json.RawMessage) {
+	var info struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(raw, &info)
+	if info.Model != "" {
+		d.modelMu.Lock()
+		d.model = info.Model
+		d.modelMu.Unlock()
 	}
 }
 
@@ -1389,11 +1681,60 @@ func (d *driver) handleToolEnd(raw json.RawMessage) {
 	})
 }
 
-func (d *driver) emit(event agent.AgentEvent) {
+// deliver is the single producer-side send path. It stamps the
+// per-event context fields (SessionID / Model / AgentName /
+// Workspace) on every event before sending, so downstream
+// consumers (runtime, gateway, channel adapters) see a uniform
+// AgentEvent envelope regardless of which bridge helper
+// constructed it. Already-set fields are preserved; empty fields
+// are filled from bridge-local state.
+//
+// Mirrors codex/agent.go::deliver() — the difference is that
+// acp's per-event fields are mostly captured from handshake /
+// usage_update / session_info_update rather than from explicit
+// thread/start responses. Model may be empty when the server
+// doesn't report one; runtime tolerates empty Model and the
+// footer just omits the model segment.
+//
+// The send blocks on ctx.Done (no instant drop) — same contract
+// as the pre-fix emit() and codex's deliver. emit()'s regression
+// test (TestDeliver_NoInstantDrop, formerly TestEmit_NoInstantDrop)
+// still pins this contract via the deliver wrapper below.
+func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
+	if ev.SessionID == "" {
+		ev.SessionID = d.sessionID
+	}
+	if ev.AgentName == "" {
+		ev.AgentName = d.agentName
+	}
+	if ev.Workspace == "" {
+		ev.Workspace = d.workspace
+	}
+	if ev.Model == "" {
+		// Snapshot d.model under modelMu. handleUsageUpdate /
+		// handleSessionInfoUpdate write on the readPump
+		// goroutine; deliver() runs on any goroutine
+		// (handshake, SendBlocks via translatePromptResponse,
+		// flushBuffer). Race detector requires this.
+		d.modelMu.Lock()
+		ev.Model = d.model
+		d.modelMu.Unlock()
+	}
 	select {
-	case d.events <- event:
+	case d.events <- ev:
 	case <-d.ctx.Done():
 	}
+	return ev
+}
+
+// emit is kept as a void wrapper for callers that don't care
+// about the return value (panicDeliver / historical call sites
+// that pre-date the deliver refactor). New code should call
+// deliver() directly so the stamped-and-returned event stays
+// visible to the caller (useful when the caller wants to log it
+// after the send completes).
+func (d *driver) emit(ev agent.AgentEvent) {
+	d.deliver(ev)
 }
 
 // ─── built-in text buffering helpers ──────────────────────────────
@@ -1419,12 +1760,11 @@ func (d *driver) flushBuffer(buf *strings.Builder, prefix string) {
 	if prefix != "" {
 		text = prefix + text
 	}
-	d.emit(agent.AgentEvent{
-		Kind:      agent.EventAgentText,
-		Text:      text,
-		SessionID: d.sessionID,
-		AgentName: d.agentName,
-		Workspace: d.workspace,
+	// deliver() stamps SessionID/AgentName/Workspace/Model
+	// automatically — no need to fill them here.
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentText,
+		Text: text,
 	})
 }
 

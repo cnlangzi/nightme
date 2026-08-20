@@ -940,8 +940,9 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 // would be pulled into the thread drawer. Top-level Create
 // guarantees the rolling-log card stays visible in main chat.
 // The trade-off is no "Reply to <sender>" header on the card
-// (acceptable: the rolling-log card's own entries visually
-// establish "this is the bot's reply").
+// (acceptable: the rolling-log card's own entries — plain reply
+// text with no per-entry icon — visually establish "this is the
+// bot's reply").
 //
 // Subsequent chunks (OutReply events) hit the receipt.AppendEntry
 // path which PATCHes the same card. AppendEntry's pre-render
@@ -978,9 +979,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	}
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
-	transient.entries = []LogEntry{
-		{Icon: "", Text: firstEntryText},
-	}
+	transient.entries = []LogEntry{newOutReplyEntry(firstEntryText)}
 	transient.footerLines = footerLines
 	transient.promptState = agentsession.PromptRunning
 	transient.initializing = true
@@ -1090,7 +1089,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 // arrives with a different reply target, it gets its own card via
 // the same helper (or a receipt if a userMsgID shows up later).
 func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, footerLines []string) error {
-	entries := []LogEntry{{Icon: "", Text: text}}
+	entries := []LogEntry{newOutReplyEntry(text)}
 	body, _, err := buildReceiptCard(entries, nil, footerLines, nil)
 	if err != nil {
 		return fmt.Errorf("feishu: build orphan reply card: %w", err)
@@ -1353,7 +1352,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			// the receipt to a fresh top-level placeholder card so
 			// subsequent chunks PATCH that new card instead of
 			// producing a stream of N standalone bubbles.
-			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "", Text: text}, footerLines); err != nil {
+			if err := receipt.AppendEntryWithFooter(ctx, newOutReplyEntry(text), footerLines); err != nil {
 				if !errors.Is(err, ErrReceiptOverflow) {
 					return err
 				}
@@ -1366,7 +1365,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				// would race with a concurrent SetTaskList from the
 				// bridge event pump.
 				body, _, buildErr := buildReceiptCard(
-					[]LogEntry{{Icon: "", Text: text}},
+					[]LogEntry{newOutReplyEntry(text)},
 					receipt.Tasks(),
 					footerLines,
 					nil,
@@ -1412,7 +1411,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 					// emitted above.
 					return sendErr
 				}
-				receipt.RolloverTo(msgID, LogEntry{Icon: "", Text: text}, footerLines)
+				receipt.RolloverTo(msgID, newOutReplyEntry(text), footerLines)
 				return nil
 			}
 		}

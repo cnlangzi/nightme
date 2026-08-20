@@ -157,14 +157,36 @@ func openTerminalMac(ctx context.Context, args []string) error {
 	cmdStr := escapeAppleScriptString(buildTerminalShellCommand(exe, args))
 
 	// Terminal.app only. See function doc for why iTerm2 is
-	// intentionally not tried. The trailing `activate` brings
-	// Terminal.app to the front so the freshly-opened tab is
-	// visible — without it, the tab is created in a background
-	// Terminal window and the user sees "no response" because
-	// nothing visible happens on their screen until they
-	// manually switch to Terminal.
-	const snip = `tell application "Terminal" to do script "%s"
-activate application "Terminal"`
+	// intentionally not tried. Three things have to happen for
+	// a tray click to be visibly responsive:
+	//
+	//   1. The new tab has to land in a window that's maximized
+	//      to the desktop — `set zoomed of front window to true`
+	//      is Terminal's native maximize (it's the green button
+	//      click). `set bounds to screen size` is too crude: it
+	//      overlaps the menu bar and looks wrong on Retina where
+	//      point vs pixel bounds diverge. zoomed respects both.
+	//   2. Terminal.app has to come to the front. `activate`
+	//      alone works on a single-space setup, but on a
+	//      multi-Space setup the window stays on whichever
+	//      Space Terminal.app was last active on — i.e. the
+	//      user's empty Desktop, hidden behind whatever they
+	//      were actually looking at. The followup System Events
+	//      `set frontmost of process "Terminal" to true` is the
+	//      only thing that reliably migrates the window onto
+	//      the current Space.
+	//   3. The tab must exist before we maximise — `do script`
+	//      is synchronous in AppleScript (the tab is created
+	//      before the next line runs), so the ordering below is
+	//      already correct.
+	const snip = `tell application "Terminal"
+    do script "%s"
+    set zoomed of front window to true
+    activate
+end tell
+tell application "System Events"
+    set frontmost of process "Terminal" to true
+end tell`
 	cmd := NewWith(ctx, Options{}, "osascript", "-e", fmt.Sprintf(snip, cmdStr))
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("proc: osascript for Terminal: %w", err)

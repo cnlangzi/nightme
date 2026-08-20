@@ -119,7 +119,6 @@ type TelegramConfig struct {
 	WebhookURL          string `yaml:"webhook_url"`
 	WebhookSecret       string `yaml:"webhook_secret"`
 	GroupRequireMention *bool  `yaml:"group_require_mention"`
-	TopicMode           string `yaml:"topic_mode"`
 }
 
 func (t *TelegramConfig) RequireMentionInGroup() bool {
@@ -339,9 +338,6 @@ func applyDefaults(c *Config) {
 	if c.Telegram.GroupRequireMention == nil {
 		value := true
 		c.Telegram.GroupRequireMention = &value
-	}
-	if c.Telegram.TopicMode == "" {
-		c.Telegram.TopicMode = "separate"
 	}
 }
 

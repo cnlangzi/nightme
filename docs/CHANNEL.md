@@ -21,9 +21,10 @@
 | # | 不变量 | 违反后果 |
 |---|--------|---------|
 | 1 | 所有有凭据的 channel 自动启动，无需 `--channel` flag | 用户体验断（v0.1 现状：feishu 凭据缺失就 exit 7） |
-| 2 | 每个 channel 一个 `chatsession.Manager`（chatID 天然 namespaced） | 跨 channel 撞 chatID |
+| 2 | 每个 channel 一个 `chatsession.Manager`（chatID 由 channel 自己加前缀天然 namespaced：`tg_<digits>` / `oc_<hex>` / Slack `<vendor>_<id>`） | 跨 channel 撞 chatID |
 | 3 | 每个 channel 一个 `outbound.Emitter` = 该 channel 自己 | 引入"multi emitter"伪概念 |
 | 4 | ChatSession 不需要知道 channel（无 `channelName` 字段，持久化 schema 零变更） | 持久化耦合 |
+| 9 | chatID 是 (channel, rawChatID, thread_id) 的纯函数,不带可变的 daemon state | 漂移 / 孤儿 entry |
 | 5 | restore = 懒加载：首次 `GetOrCreate(chatID)` 时 `csFile.GetByChat(chatID)` 命中就 hydrate，miss 就新建 | 启动时 I/O + partition 难题 |
 | 6 | 入站：gw pump goroutine 闭包 capture `(channel, mgr)`，dispatch chain 用 mgr per call | routing 概念泄漏 |
 | 7 | 出站：`cs.emitter.Send(msg)` = `ch.Send(msg)`，无 routing 表 | 多余抽象 |
@@ -548,7 +549,7 @@ func LoginWith(ctx, provider, out, errOut) error {
 | Entry 字段 | 用途 | 来源 |
 |---|---|---|
 | `id` | ChatSession ID | 构造时生成 |
-| `chatId` | **唯一 key** | Channel 消息自带 |
+| `chatId` | **唯一 key** | Channel 消息自带（带 channel 前缀：`tg_<digits>` / `oc_<hex>` / `<vendor>_<id>`） |
 | `selectedCwd` | /cwd 设 | user command |
 | `selectedAgent` | /use 设 | user command |
 | `primaryAgent` | 创建时 snapshot | cfg.Primary |
@@ -597,7 +598,28 @@ mgr.GetOrCreate(chatID, primaryAgent)
 cs.emitter = mgr.emitter = 该 mgr 对应的 channel 的 Emitter
 ```
 
-**chatID 不会跨 channel 撞**（feishu `oc_*` / telegram 数字 / 各自平台 namespace）。chatID 唯一性是隐式 partition 的基础。
+**chatID 不会跨 channel 撞**（每 channel 用自己的 prefix 隔离：`tg_<digits>` / `oc_<hex>` / 各平台 namespace）。chatID 唯一性是隐式 partition 的基础。详见 §5.5。
+
+### 5.5 chatID 命名空间规则
+
+每条 channel 必须在 chatID 前加自己的 channel-specific 前缀，保证跨 channel 物理隔离：
+
+| Channel | chatID 形式 | 来源 |
+|---|---|---|
+| Telegram | `tg_<chat.id>` 或 `tg_<chat.id>:<thread_id>` | telegram adapter 的 `sessionChatID` 加前缀（topic 实际存在时） |
+| Feishu | `oc_<hex>` | Feishu API 自带 |
+| 未来 Slack/Lark | `<vendor>_<id>` | 各 adapter 自己加 |
+
+**稳定性约束**（关键）：
+
+1. **chatID 必须是 update 内容的纯函数**,不依赖 daemon state / config
+2. 同一 DM / 同一群 / 同一 topic 跨 daemon 重启 / 升级 / 状态文件丢失,chatID 永远一致
+3. **不允许在 chatID 拼接中引用任何运行时状态**(如自动创建的 sentinel topic ID)
+4. **不允许在 chatID 拼接中引用任何配置**(如 `topic_mode: separate` vs `shared`)
+
+违反这些约束会导致 chatID 漂移,旧 entry 变孤儿——这正是 `feature/telegram` 分支 `/cwd` 后 `/gtw fix` 报 "No active workspace" 的根因。
+
+反向 split (`splitSessionID`) 也必须是纯函数,确保 inbound 和 outbound 两侧始终看到同一 chatID。
 
 ---
 

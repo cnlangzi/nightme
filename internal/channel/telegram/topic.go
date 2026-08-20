@@ -111,58 +111,75 @@ func (a *Adapter) sendRenderedText(ctx context.Context, chatID string, topicID i
 	return a.sendText(ctx, chatID, topicID, rendered)
 }
 
-func (a *Adapter) topicForChat(chatID string) int {
-	if state, ok := a.state.topicForChat(chatID); ok {
-		return state.TopicID
+// chatIDPrefix is the Telegram channel namespace tag attached to
+// every InboundMessage.ChatID by the adapter. It exists so that
+// Telegram chatIDs (which are raw integers) cannot collide with
+// chatIDs from other channels (Feishu uses "oc_<hex>" natively;
+// Slack and future channels will pick their own prefix).
+const chatIDPrefix = "tg_"
+
+// sessionChatID maps a Telegram update to a stable, channel-
+// namespaced chatID used by the inbound pipeline.
+//
+// Format:
+//   "tg_" + chat.id                    (private DM / group main window)
+//   "tg_" + chat.id + ":" + thread_id  (user is in a real Telegram topic)
+//
+// The result is a pure function of (chat.id, thread_id). It does
+// NOT depend on:
+//   - The daemon's internal state (auto-created sentinel topics)
+//   - Whether the chat has Forum Topics enabled
+//
+// The same chat therefore always produces the same chatID, across
+// daemon restarts, config changes, and state file loss. This is
+// the contract that lets /cwd in DM persist and find the same
+// ChatSession on the next message.
+func (a *Adapter) sessionChatID(rawChatID string, threadID int) string {
+	if threadID > 0 {
+		return chatIDPrefix + rawChatID + ":" + strconv.Itoa(threadID)
 	}
-	return 0
+	return chatIDPrefix + rawChatID
 }
 
-// sessionTopicID resolves the topic_id to send into given a
-// session ChatID. In shared mode (default), ChatID is the raw
-// chat_id and we look up the (single) topic for that chat. In
-// separate mode, ChatID has the form "chat_id:topic_id" and we
-// parse the trailing integer.
+// sessionTopicID resolves the thread_id to send into given a
+// session ChatID. Pure function over the chatID string: strips
+// the "tg_" prefix, parses the optional ":thread_id" suffix,
+// and returns 0 when the caller is in a non-topic message
+// (private DM / group main window / channel).
 func (a *Adapter) sessionTopicID(sessionID string) int {
 	if a == nil {
 		return 0
 	}
-	if a.config.TopicMode == "separate" {
-		if chatID, topicID, ok := splitSessionID(sessionID); ok {
-			if state, ok2 := a.state.topic(chatID, topicID); ok2 {
-				return state.TopicID
-			}
-			return topicID
-		}
+	_, threadID, ok := splitSessionID(sessionID)
+	if !ok {
 		return 0
 	}
-	return a.topicForChat(sessionID)
+	return threadID
 }
 
-// sessionChatID constructs the inbound ChatID from the raw
-// Telegram chat_id and topic_id. In shared mode, all topics in a
-// chat share the same ChatSession; in separate mode, each topic
-// gets its own ChatSession.
-func (a *Adapter) sessionChatID(chatID string, topicID int) string {
-	if a != nil && a.config.TopicMode == "separate" && topicID > 0 {
-		return chatID + ":" + strconv.Itoa(topicID)
+// splitSessionID parses "tg_<chat.id>[:thread_id]" into parts.
+// Returns ok=false when the input is missing the "tg_" prefix
+// (caller treats it as a non-telegram chatID; feishu's "oc_<hex>"
+// stays untouched by the telegram adapter) or when the body
+// after the prefix is empty.
+func splitSessionID(sessionID string) (rawChatID string, threadID int, ok bool) {
+	if !strings.HasPrefix(sessionID, chatIDPrefix) {
+		return "", 0, false
 	}
-	return chatID
-}
-
-// splitSessionID parses a separate-mode ChatID "chat_id:topic_id"
-// into its parts. Returns ok=false if ChatID has no ":" suffix.
-func splitSessionID(sessionID string) (string, int, bool) {
-	idx := strings.LastIndex(sessionID, ":")
-	if idx <= 0 || idx >= len(sessionID)-1 {
-		return sessionID, 0, false
+	body := sessionID[len(chatIDPrefix):]
+	if body == "" {
+		return "", 0, false
 	}
-	chatID := sessionID[:idx]
-	topicID, err := strconv.Atoi(sessionID[idx+1:])
+	// body is either "chatid" or "chatid:thread_id"
+	idx := strings.Index(body, ":")
+	if idx < 0 {
+		return body, 0, true
+	}
+	tid, err := strconv.Atoi(body[idx+1:])
 	if err != nil {
-		return sessionID, 0, false
+		return body, 0, true
 	}
-	return chatID, topicID, true
+	return body[:idx], tid, true
 }
 
 func (a *Adapter) choiceKeyboard(state *ChoiceState) map[string]any {

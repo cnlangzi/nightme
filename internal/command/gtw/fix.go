@@ -218,7 +218,7 @@ func forceCleanWorktreePath(ctx context.Context, repoRoot, worktreePath string, 
 //  4. PreflightWorktreeCreate → catches path / branch / parent
 //     errors before WorktreeAdd.
 //  5. BranchExists? → DraftFixBranchExists card.
-//  6. AddLabel(LabelWIP); on WorktreeAdd failure RemoveLabel
+//  6. AddIssueLabel(LabelWIP); on WorktreeAdd failure RemoveIssueLabel
 //     and emit DraftFixWorktreeFail card.
 //  7. SetSelectedCwd → slot.Store(ModeRemote).
 //  8. Render success card.
@@ -272,7 +272,7 @@ func runFixRemote(
 	}
 	// The worktree doesn't exist yet at this point — runFixRemote
 	// runs BEFORE WorktreeAdd so we can use provider hints to name
-	// the worktree. But provider.GetIssue / AddLabel calls below
+	// the worktree. But provider.GetIssue / AddIssueLabel calls below
 	// still need a valid CWD so `gh` can fork `git`. Pass repoRoot
 	// — it's always a real directory (we just computed it from
 	// `git rev-parse --show-toplevel`), so the CWD contract holds
@@ -414,7 +414,7 @@ func runFixRemote(
 	// on the remote issue tracker — applied AFTER the worktree
 	// exists so a label API failure cannot leave us needing to
 	// undo. If WorktreeAdd fails we surface the git error and
-	// bail out without touching the label; if AddLabel fails
+	// bail out without touching the label; if AddIssueLabel fails
 	// later, the worktree is already real and the user has a
 	// usable setup, label or not.
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
@@ -447,7 +447,7 @@ func runFixRemote(
 	// fixes contending for the same issue with no way for either
 	// side to detect the conflict.
 	//
-	// v1.x: the fix is atomic with the label. AddLabel failure
+	// v1.x: the fix is atomic with the label. AddIssueLabel failure
 	// rolls back the worktree AND the branch so the user can fix
 	// the underlying cause (token scope, network, missing label,
 	// rate limit, etc.) and re-run /gtw fix from a clean state.
@@ -462,48 +462,38 @@ func runFixRemote(
 	// cause. No manual `gh`/`glab` retry command is suggested:
 	// the whole point of atomic semantics is that the user just
 	// re-runs /gtw fix once the cause is fixed.
-	if err := provider.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
-		wtErr := WorktreeRemove(ctx, repoRoot, worktreePath, true /* force */, deps.Git)
-		// Branch delete runs only if the worktree came out cleanly.
-		// Otherwise we leave the branch for the user to handle
-		// alongside the worktree so they keep a consistent mental
-		// model of "the worktree is gone, the branch references it".
-		var branchErr error
-		if wtErr == nil {
-			_, stderr, brErr := deps.Git.Run(ctx, repoRoot, "branch", "-D", branch)
-			if brErr != nil {
-				branchErr = fmt.Errorf("%w: %s", brErr, strings.TrimSpace(stderr))
-			}
-		}
+	// --- ensure gtw labels exist on the repo (§5.2.④) ---------------
+	// v1.x: /gtw fix bootstraps the `nightme/*` label set on the
+	// first run against any repo. /gtw fix 235 failed outright
+	// because `nightme/wip` was missing — `gh issue edit
+	// --add-label` errors with "'nightme/wip' not found" rather
+	// than creating the label. ensureGtwLabels calls `gh label
+	// create --force` / `glab label create` (both idempotent)
+	// for every entry in AllLabels BEFORE the AddIssueLabel step, so
+	// AddIssueLabel always succeeds on a freshly-cloned repo.
+	//
+	// Failure semantics: any CreateLabel error rolls back the
+	// worktree + branch via the same atomic path as an AddIssueLabel
+	// failure. The error is echoed verbatim so the user sees
+	// whether the root cause is a token-scope issue, a network
+	// blip, or a missing repo permission (gh/glab's own message
+	// is the most actionable hint available).
+	//
+	// Implementation note: AllLabels is short (6 entries); the
+	// calls are serial, not parallel, because (a) /gtw fix is
+	// one-shot per invocation and a few hundred ms of latency
+	// is acceptable, (b) serial calls keep error attribution
+	// simple when one of the 6 fails, and (c) gh/glab's own
+	// rate-limit handling gets a clean per-call retry surface.
+	if err := ensureGtwLabels(ctx, provider, owner, repo); err != nil {
+		body := rollbackLabelStep(ctx, deps, repoRoot, worktreePath, branch, issueID,
+			fmt.Sprintf("❌ Could not ensure gtw labels on %s/%s: %v\n", owner, repo, err))
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+	}
 
-		head := fmt.Sprintf("❌ Could not add label %q to issue #%d: %v\n", LabelWIP, issueID, err)
-		var body string
-		switch {
-		case wtErr == nil && branchErr == nil:
-			body = head +
-				"worktree and branch have been rolled back.\n" +
-				"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
-		case wtErr == nil && branchErr != nil:
-			body = head +
-				fmt.Sprintf("rolled back worktree at %s, but branch %q still exists.\n", worktreePath, branch) +
-				fmt.Sprintf("  [rollback warning] %v\n", branchErr) +
-				fmt.Sprintf("  please clean up manually: `git branch -D %s`\n", branch) +
-				"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
-		default:
-			// wtErr != nil: worktree remove failed. Branch is
-			// untouched (and likely still attached to the stuck
-			// worktree). User has to clean up BOTH.
-			wtMsg := "unknown error"
-			if wtErr != nil {
-				wtMsg = wtErr.Error()
-			}
-			body = head +
-				"could not roll back automatically:\n" +
-				fmt.Sprintf("  [worktree] %s\n", wtMsg) +
-				fmt.Sprintf("    clean up with: `git worktree remove --force %s`\n", worktreePath) +
-				fmt.Sprintf("  [branch] %q likely still attached — clean up with: `git branch -D %s`\n", branch, branch) +
-				"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
-		}
+	if err := provider.AddIssueLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
+		body := rollbackLabelStep(ctx, deps, repoRoot, worktreePath, branch, issueID,
+			fmt.Sprintf("❌ Could not add label %q to issue #%d: %v\n", LabelWIP, issueID, err))
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
@@ -529,7 +519,7 @@ func runFixRemote(
 //  6. SetSelectedCwd → slot.Store(ModeLocal, Issue=-1).
 //  7. Render the simplified local success card.
 //
-// Local mode does NOT call provider.GetIssue / AddLabel /
+// Local mode does NOT call provider.GetIssue / AddIssueLabel /
 // QueueUserMessage — the user is opting into a no-remote flow
 // that should work even in repos without an `origin`.
 func runFixLocal(
@@ -1062,6 +1052,103 @@ func gtwChoiceToGateway(in Choice) *messages.Choice {
 		Body:      in.Body,
 		Options:   opts,
 		RequestID: in.RequestID,
+	}
+}
+
+// ensureGtwLabels bootstraps the full AllLabels set on the
+// remote repo via provider.CreateLabel. The order matches
+// AllLabels (display order) so that any error message naming
+// the failing label matches what the user sees in /gtw push
+// or /gtw pr's UI. The first failure short-circuits the loop
+// and is returned verbatim — subsequent labels stay
+// un-bootstrapped until the user fixes the cause and re-runs
+// /gtw fix, at which point the loop picks up where it left
+// off because CreateLabel is idempotent.
+//
+// Why serial, not parallel: AllLabels has 6 entries; gh/glab's
+// own retry / rate-limit handling gets a cleaner surface when
+// each call is its own round-trip. The /gtw fix user is happy
+// to wait a few hundred ms in exchange for a clear error
+// attribution when one label fails.
+//
+// Returns nil when every label is bootstrapped (created or
+// already present). The caller (runFixRemote's AddIssueLabel path)
+// treats nil as success and proceeds to the AddIssueLabel step.
+func ensureGtwLabels(ctx context.Context, provider GitProvider, owner, repo string) error {
+	for _, name := range AllLabels {
+		meta := LabelMetaFor(name)
+		if err := provider.CreateLabel(ctx, owner, repo, name, meta.Color, meta.Description); err != nil {
+			return fmt.Errorf("ensure %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// rollbackLabelStep rolls back the worktree + branch created by
+// the /gtw fix flow when the post-WorktreeAdd label step
+// (CreateLabel or AddIssueLabel) fails. Returns the user-facing
+// reply body, which the caller hands to reply(). The shape of
+// the three error branches (clean / partial / fully stuck) is
+// preserved verbatim from the v1.x atomic semantics — only the
+// error-message prefix changes.
+//
+// head is the leading "❌ Could not ... : <err>" line that
+// distinguishes CreateLabel failures from AddIssueLabel failures.
+// The trailing "fix the cause and re-run /gtw fix <id>" hint
+// is identical in both cases because both share the same
+// root-cause class: label-state coordination with the remote
+// issue tracker.
+//
+// The helper centralises the rollback so CreateLabel and
+// AddIssueLabel failure paths stay in lockstep; adding a new
+// post-worktree label step in the future only requires one
+// rollbackLabelStep call instead of duplicating the
+// three-branch switch.
+func rollbackLabelStep(
+	ctx context.Context,
+	deps HandlerDeps,
+	repoRoot, worktreePath, branch string,
+	issueID int,
+	head string,
+) string {
+	wtErr := WorktreeRemove(ctx, repoRoot, worktreePath, true /* force */, deps.Git)
+	// Branch delete runs only if the worktree came out cleanly.
+	// Otherwise we leave the branch for the user to handle
+	// alongside the worktree so they keep a consistent mental
+	// model of "the worktree is gone, the branch references it".
+	var branchErr error
+	if wtErr == nil {
+		_, stderr, brErr := deps.Git.Run(ctx, repoRoot, "branch", "-D", branch)
+		if brErr != nil {
+			branchErr = fmt.Errorf("%w: %s", brErr, strings.TrimSpace(stderr))
+		}
+	}
+
+	switch {
+	case wtErr == nil && branchErr == nil:
+		return head +
+			"worktree and branch have been rolled back.\n" +
+			"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
+	case wtErr == nil && branchErr != nil:
+		return head +
+			fmt.Sprintf("rolled back worktree at %s, but branch %q still exists.\n", worktreePath, branch) +
+			fmt.Sprintf("  [rollback warning] %v\n", branchErr) +
+			fmt.Sprintf("  please clean up manually: `git branch -D %s`\n", branch) +
+			"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
+	default:
+		// wtErr != nil: worktree remove failed. Branch is
+		// untouched (and likely still attached to the stuck
+		// worktree). User has to clean up BOTH.
+		wtMsg := "unknown error"
+		if wtErr != nil {
+			wtMsg = wtErr.Error()
+		}
+		return head +
+			"could not roll back automatically:\n" +
+			fmt.Sprintf("  [worktree] %s\n", wtMsg) +
+			fmt.Sprintf("    clean up with: `git worktree remove --force %s`\n", worktreePath) +
+			fmt.Sprintf("  [branch] %q likely still attached — clean up with: `git branch -D %s`\n", branch, branch) +
+			"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
 	}
 }
 

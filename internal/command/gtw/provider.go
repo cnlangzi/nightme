@@ -101,11 +101,34 @@ type GitProvider interface {
 	// ErrIssueNotFound when the platform responds 404.
 	GetIssue(ctx context.Context, owner, repo string, id int) (*Issue, error)
 
-	// AddLabel adds `label` to the issue. Idempotent.
-	AddLabel(ctx context.Context, owner, repo string, id int, label string) error
+	// AddIssueLabel attaches `label` to the issue. Requires the label
+	// to already exist in the repository's label catalog — callers
+	// uncertain about catalog state must call CreateLabel first.
+	// Idempotent: re-adding an already-attached label is a no-op.
+	AddIssueLabel(ctx context.Context, owner, repo string, id int, label string) error
 
-	// RemoveLabel removes `label` from the issue. Idempotent.
-	RemoveLabel(ctx context.Context, owner, repo string, id int, label string) error
+	// CreateLabel creates `label` in the repository's label catalog
+	// with the given color (6-char hex, no leading '#') and
+	// description. Idempotent: when the label already exists, the
+	// call is a no-op — color and description are NOT propagated,
+	// so humans who hand-tuned a label don't get silently
+	// overwritten on every /gtw fix.
+	//
+	// On failure (network / token scope / API rate-limit), the
+	// raw provider stderr is preserved so callers can surface the
+	// cause verbatim. The label set is small (see AllLabels in
+	// types.go); call sites loop over AllLabels and treat the
+	// first error as fatal.
+	//
+	// See docs/feat/F-59-gtw-label-bootstrap.md for the bootstrap
+	// rationale: without CreateLabel, `gh issue edit --add-label`
+	// on a freshly-cloned repo errors out with "'nightme/wip'
+	// not found" and the /gtw fix flow has no way to recover.
+	CreateLabel(ctx context.Context, owner, repo, name, color, description string) error
+
+	// RemoveIssueLabel removes `label` from the issue. Idempotent:
+	// removing an already-absent label is a no-op.
+	RemoveIssueLabel(ctx context.Context, owner, repo string, id int, label string) error
 
 	// CreatePR opens a pull request (GitHub) or merge request
 	// (GitLab). We keep the method name uniform across
@@ -708,8 +731,11 @@ func extractGitHubAttachments(body string) []IssueAttachment {
 	return out
 }
 
-// AddLabel runs `gh issue edit <id> --add-label <label> --repo ...`.
-func (c *GitHubProvider) AddLabel(ctx context.Context, owner, repo string, id int, label string) error {
+// AddIssueLabel runs `gh issue edit <id> --add-label <label> --repo ...`.
+// The label must already exist in the repository's catalog; use
+// CreateLabel first if uncertain. gh does not auto-create labels
+// here (would fail with '"<label>" not found' on a fresh repo).
+func (c *GitHubProvider) AddIssueLabel(ctx context.Context, owner, repo string, id int, label string) error {
 	_, stderr, err := c.runner().Run(ctx, "gh",
 		"issue", "edit", fmt.Sprintf("%d", id),
 		"--repo", owner+"/"+repo,
@@ -721,8 +747,8 @@ func (c *GitHubProvider) AddLabel(ctx context.Context, owner, repo string, id in
 	return nil
 }
 
-// RemoveLabel runs `gh issue edit <id> --remove-label <label> --repo ...`.
-func (c *GitHubProvider) RemoveLabel(ctx context.Context, owner, repo string, id int, label string) error {
+// RemoveIssueLabel runs `gh issue edit <id> --remove-label <label> --repo ...`.
+func (c *GitHubProvider) RemoveIssueLabel(ctx context.Context, owner, repo string, id int, label string) error {
 	_, stderr, err := c.runner().Run(ctx, "gh",
 		"issue", "edit", fmt.Sprintf("%d", id),
 		"--repo", owner+"/"+repo,
@@ -732,6 +758,49 @@ func (c *GitHubProvider) RemoveLabel(ctx context.Context, owner, repo string, id
 		return fmt.Errorf("gh issue edit --remove-label: %v: %s", err, stderr)
 	}
 	return nil
+}
+
+// CreateLabel runs `gh label create <name> --color <color>
+// --description <description> --repo <owner>/<repo>`. Idempotent:
+// gh creates the label if missing. When the label already exists,
+// gh exits 1 with stderr
+//
+// 	label with name "<name>" already exists; use `--force` to update
+// 	its color and description
+//
+// We deliberately DO NOT pass --force: --force would update the
+// existing label's color / description, which contradicts the
+// GitProvider.CreateLabel contract ("existing labels are no-ops;
+// color / description are NOT propagated"). Humans who hand-tuned
+// a label's color or description must not have their changes
+// silently overwritten on every /gtw fix.
+//
+// The "already exists" stderr substring is sniffed as success —
+// mirroring the GitLab implementation, which also lacks an
+// explicit idempotency flag. gh's stderr wording has been stable
+// since gh 2.0 (when `gh label create` shipped); the substring
+// match is case-sensitive to avoid false positives on unrelated
+// errors like "label name contains invalid characters" or 403
+// permission denied.
+func (c *GitHubProvider) CreateLabel(ctx context.Context, owner, repo, name, color, description string) error {
+	args := []string{
+		"label", "create", name,
+		"--repo", owner + "/" + repo,
+		"--color", color,
+		"--description", description,
+	}
+	_, stderr, err := c.runner().Run(ctx, "gh", args...)
+	if err == nil {
+		return nil
+	}
+	// gh stderr for an existing label: 'label with name "<name>"
+	// already exists; use `--force` to update its color and
+	// description'. Match the substring exactly; the surrounding
+	// text is not relied on.
+	if strings.Contains(stderr, "already exists") {
+		return nil
+	}
+	return fmt.Errorf("gh label create: %v: %s", err, strings.TrimSpace(stderr))
 }
 
 // CreatePR runs `gh pr create --base <base> --head <head> --title
@@ -882,8 +951,10 @@ func (c *GitLabProvider) GetIssue(ctx context.Context, owner, repo string, id in
 	}, nil
 }
 
-// AddLabel runs `glab issue update <id> --label <label> --repo ...`.
-func (c *GitLabProvider) AddLabel(ctx context.Context, owner, repo string, id int, label string) error {
+// AddIssueLabel runs `glab issue update <id> --label <label> --repo ...`.
+// The label must already exist in the repository's catalog; use
+// CreateLabel first if uncertain.
+func (c *GitLabProvider) AddIssueLabel(ctx context.Context, owner, repo string, id int, label string) error {
 	_, stderr, err := c.runner().Run(ctx, "glab",
 		"issue", "update", fmt.Sprintf("%d", id),
 		"--repo", owner+"/"+repo,
@@ -895,8 +966,8 @@ func (c *GitLabProvider) AddLabel(ctx context.Context, owner, repo string, id in
 	return nil
 }
 
-// RemoveLabel runs `glab issue update <id> --unlabel <label> --repo ...`.
-func (c *GitLabProvider) RemoveLabel(ctx context.Context, owner, repo string, id int, label string) error {
+// RemoveIssueLabel runs `glab issue update <id> --unlabel <label> --repo ...`.
+func (c *GitLabProvider) RemoveIssueLabel(ctx context.Context, owner, repo string, id int, label string) error {
 	_, stderr, err := c.runner().Run(ctx, "glab",
 		"issue", "update", fmt.Sprintf("%d", id),
 		"--repo", owner+"/"+repo,
@@ -906,6 +977,37 @@ func (c *GitLabProvider) RemoveLabel(ctx context.Context, owner, repo string, id
 		return fmt.Errorf("glab issue update --unlabel: %v: %s", err, stderr)
 	}
 	return nil
+}
+
+// CreateLabel runs `glab label create --name <name> --color <color>
+// --description <description> --repo <owner>/<repo>`. glab does
+// NOT have a `--force` flag (as of 1.82.x), so we treat the
+// "already exists" stderr as success — equivalent to gh's
+// --force but via stderr sniffing rather than an explicit flag.
+//
+// "already exists" substring covers both 1.x and the older
+// "Label already exists" wording; the match is case-sensitive
+// to avoid false positives on unrelated errors. A truly broken
+// state (e.g. label-create permission denied on a 403) will
+// surface a different stderr and reach the caller unchanged.
+func (c *GitLabProvider) CreateLabel(ctx context.Context, owner, repo, name, color, description string) error {
+	args := []string{
+		"label", "create",
+		"--repo", owner + "/" + repo,
+		"--name", name,
+		"--color", color,
+		"--description", description,
+	}
+	_, stderr, err := c.runner().Run(ctx, "glab", args...)
+	if err == nil {
+		return nil
+	}
+	// glab 1.x prints the message in English; older versions
+	// occasionally capitalised "Label" — match both.
+	if strings.Contains(stderr, "already exists") || strings.Contains(stderr, "Already exists") {
+		return nil
+	}
+	return fmt.Errorf("glab label create: %v: %s", err, strings.TrimSpace(stderr))
 }
 
 // CreatePR runs `glab mr create --target-branch <base> --source-branch

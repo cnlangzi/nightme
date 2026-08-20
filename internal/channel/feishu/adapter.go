@@ -940,7 +940,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 // would be pulled into the thread drawer. Top-level Create
 // guarantees the rolling-log card stays visible in main chat.
 // The trade-off is no "Reply to <sender>" header on the card
-// (acceptable: the rolling-log card's own 💬 entries visually
+// (acceptable: the rolling-log card's own entries visually
 // establish "this is the bot's reply").
 //
 // Subsequent chunks (OutReply events) hit the receipt.AppendEntry
@@ -979,7 +979,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	transient.entries = []LogEntry{
-		{Icon: "💬", Text: firstEntryText},
+		{Icon: "", Text: firstEntryText},
 	}
 	transient.footerLines = footerLines
 	transient.promptState = agentsession.PromptRunning
@@ -1090,7 +1090,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 // arrives with a different reply target, it gets its own card via
 // the same helper (or a receipt if a userMsgID shows up later).
 func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, footerLines []string) error {
-	entries := []LogEntry{{Icon: "💬", Text: text}}
+	entries := []LogEntry{{Icon: "", Text: text}}
 	body, _, err := buildReceiptCard(entries, nil, footerLines, nil)
 	if err != nil {
 		return fmt.Errorf("feishu: build orphan reply card: %w", err)
@@ -1353,7 +1353,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			// the receipt to a fresh top-level placeholder card so
 			// subsequent chunks PATCH that new card instead of
 			// producing a stream of N standalone bubbles.
-			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footerLines); err != nil {
+			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "", Text: text}, footerLines); err != nil {
 				if !errors.Is(err, ErrReceiptOverflow) {
 					return err
 				}
@@ -1366,7 +1366,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				// would race with a concurrent SetTaskList from the
 				// bridge event pump.
 				body, _, buildErr := buildReceiptCard(
-					[]LogEntry{{Icon: "💬", Text: text}},
+					[]LogEntry{{Icon: "", Text: text}},
 					receipt.Tasks(),
 					footerLines,
 					nil,
@@ -1412,7 +1412,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 					// emitted above.
 					return sendErr
 				}
-				receipt.RolloverTo(msgID, LogEntry{Icon: "💬", Text: text}, footerLines)
+				receipt.RolloverTo(msgID, LogEntry{Icon: "", Text: text}, footerLines)
 				return nil
 			}
 		}
@@ -1513,7 +1513,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// with ONLY reactions when the bridge stalls (no events
 		// arrive from the agent). Showing the placeholder card at
 		// MessageQueued gives the user immediate visual feedback
-		// ("💬 Working...") so a wedged bridge is at least
+		// ("🤖 Working...") so a wedged bridge is at least
 		// observable. The first OutReply / OutResult PATCHes this
 		// same card in place (the existing receipt path), so the
 		// cold-start path in ensureReceiptForReply stays a

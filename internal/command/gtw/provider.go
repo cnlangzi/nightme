@@ -643,6 +643,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 	// Order: GitLab first (cheaper, more deterministic), then
 	// GitHub. Single-probe failure is not fatal; we move on.
 	if body, err := prober.Probe(ctx, host, "/api/v4/version"); err == nil {
+		// Strong fingerprint: GitLab's version object.
 		var v struct {
 			Version  string `json:"version"`
 			Revision string `json:"revision"`
@@ -650,13 +651,29 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 		if json.Unmarshal(body, &v) == nil && (v.Version != "" || v.Revision != "") {
 			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, nil
 		}
+		// Soft fingerprint: GitLab's auth/permission error envelope.
+		// /api/v4 is GitLab-only — GitHub Enterprise uses /api/v3, so
+		// a response with the GitLab envelope ({"message":"401
+		// Unauthorized"} etc.) at this path is GitLab-shaped. This
+		// catches auth-protected self-hosted GitLab reachable only
+		// via plain HTTP (corporate proxy blocks :443), where
+		// /api/v4/version answers 401 instead of 200.
+		var env struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &env) == nil && env.Message != "" {
+			return &GitLabProvider{host: host, Worktree: worktree}, nil
+		}
 	}
 	if body, err := prober.Probe(ctx, host, "/api/v3/meta"); err == nil {
 		var meta map[string]json.RawMessage
 		if json.Unmarshal(body, &meta) == nil {
-			// GitHub's /api/v3/meta returns
+			// GitHub Enterprise's /api/v3/meta returns
 			// {"verifiable_password_authentication":..., ...}.
-			// No top-level "version" but identifiable by content.
+			// We deliberately do NOT loosen this branch to
+			// "any JSON body" the way the /api/v4 probe is:
+			// GitLab answers 404 with a JSON envelope on
+			// /api/v3/meta, which would misclassify as GitHub.
 			if _, hasGH := meta["verifiable_password_authentication"]; hasGH {
 				return &GitHubProvider{host: host, Worktree: worktree}, nil
 			}
@@ -687,9 +704,14 @@ func NewProvider(kind ProviderKind, host, worktree string) (GitProvider, error) 
 // canned JSON for fixture-driven unit tests.
 type HTTPProber interface {
 	// Probe issues a GET <host><path> and returns the response
-	// body on 200. Any non-200 status, network error, TLS
-	// error, or timeout returns an error — callers (Detect)
-	// treat errors as "this endpoint is not it" and move on.
+	// body on 2xx/3xx/4xx. Any non-5xx response counts as
+	// "this endpoint actually responded" — including 401 auth-
+	// required, which Detect fingerprints via the GitLab /
+	// GitHub Enterprise error envelope. Transport failure and
+	// 5xx return an error so callers (Detect) can move on.
+	//
+	// Implementations may apply scheme fallback (HTTPS then
+	// HTTP) — see ExecHTTPProber for the production behaviour.
 	Probe(ctx context.Context, host, path string) ([]byte, error)
 }
 
@@ -709,20 +731,35 @@ type ExecHTTPProber struct {
 }
 
 // Probe implements HTTPProber.
+//
+// Scheme fallback: tries HTTPS first, then plain HTTP on the same
+// path on transport error (DNS / TCP / TLS / proxy CONNECT-tunnel
+// refusal / timeout) or 5xx. The fallback is essential for
+// internal self-hosted GitLab / GitHub Enterprise — many of those
+// instances run on bare IPs behind a corporate HTTP proxy that
+// refuses CONNECT to :443, but expose the API on plain HTTP. HTTPS
+// alone would silently fail with "502 CONNECT tunnel failed" and
+// return ErrUnsupportedProvider to /gtw pr.
+//
+// Returns the response body on 2xx/3xx/4xx (any status that proves
+// the endpoint actually responded — including 401 auth-required,
+// which Detect fingerprints as a GitLab / GitHub Enterprise error
+// envelope). 5xx and transport failure of BOTH schemes return an
+// error.
+//
+// Total wall-clock is bounded by a single Timeout budget shared
+// across both schemes via context.WithTimeout — a stuck HTTPS
+// connect caps at 3s, then HTTP gets the remaining time.
 func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, error) {
 	if p == nil {
 		p = &ExecHTTPProber{}
 	}
-	if p.Timeout == 0 {
-		p.Timeout = 3 * time.Second
+	timeout := p.Timeout
+	if timeout == 0 {
+		timeout = 3 * time.Second
 	}
-	url := "https://" + host + path
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "nightme-git-provider-detect/1.0")
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var transport http.RoundTripper = http.DefaultTransport
 	if p.InsecureSkipVerify {
@@ -730,19 +767,40 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 	}
-	cli := &http.Client{
-		Timeout:   p.Timeout,
-		Transport: transport,
+	cli := &http.Client{Transport: transport}
+
+	if body, ok := probeOnce(ctx, cli, "https://"+host+path); ok {
+		return body, nil
 	}
+	if body, ok := probeOnce(ctx, cli, "http://"+host+path); ok {
+		return body, nil
+	}
+	return nil, fmt.Errorf("probe %s%s: both https and http failed", host, path)
+}
+
+// probeOnce issues a single GET against url. Returns (body, true)
+// on 2xx/3xx/4xx; returns (nil, false) on transport error or 5xx
+// so the caller can try the next scheme.
+func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "nightme-git-provider-detect/1.0")
 	resp, err := cli.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("probe %s: status %d", url, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false
 	}
-	return io.ReadAll(resp.Body)
+	if resp.StatusCode >= 500 {
+		return nil, false
+	}
+	return body, true
 }
 
 // CLIRunner abstracts gh / glab. Same pattern as GitRunner: tests

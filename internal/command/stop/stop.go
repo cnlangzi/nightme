@@ -85,6 +85,19 @@ type Result struct {
 //
 // Pool / selectedAS / agent_sessions.json state is intentionally
 // NOT touched here. /stop is "pause execution"; /close is "tear down".
+//
+// fix-bridge-stuck: /stop is now AUTHORITATIVE for the local state
+// machine, not a fire-and-forget protocol signal. The Prompt is
+// ended via as.endPrompt(PromptEndUserStopped) BEFORE h.Stop is
+// called, so IsReady flips true synchronously and the next TryFlush
+// can land immediately — without waiting for the bridge protocol
+// to emit a terminal event (which the bridge might never do for a
+// wedged turn, leaving the system stuck on HungPrompt 5min +
+// prober 10min cooldown).
+//
+// h.Stop is still called (best-effort) so the bridge has a chance
+// to acknowledge / cancel cleanly. Its return value is for the
+// reply row only — local state does not depend on it.
 func StopSelectedAgent(c *Cmd) (Result, error) {
 	if c == nil || c.CS == nil {
 		return Result{}, ErrNoContext
@@ -116,6 +129,15 @@ func StopSelectedAgent(c *Cmd) (Result, error) {
 		return result, nil
 	}
 
+	// AUTHORITATIVE: end the prompt synchronously so the next
+	// TryFlush unblocks. This is the fix for /stop getting stuck
+	// when the bridge swallows the stop signal (or hangs) and
+	// never emits EventAgentDone/Error — pre-fix, IsReady stayed
+	// false until HungPrompt 5min fired.
+	as.EndPrompt(chatsession.PromptEndUserStopped)
+
+	// best-effort: tell the bridge. Local state is already
+	// updated above; this call's only consumer is the reply row.
 	if err := h.Stop(c.Ctx); err != nil {
 		if errors.Is(err, agent.ErrNotSupported) {
 			result.Action = "not-supported"

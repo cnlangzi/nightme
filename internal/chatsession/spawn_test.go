@@ -151,7 +151,15 @@ func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string
 		return s.spawnFn(name, cwd)
 	}
 	key := spawnKey{name, cwd}
-	if f, ok := s.fakes[key]; ok {
+	// If the existing fake is closed (its events channel was
+	// Close()'d by a prior test step), create a fresh one — this
+	// mirrors a real Spawner forking a new process whose events
+	// channel is brand new, not a re-used dead one. Without this,
+	// a post-Close respawn would return a handle whose events chan
+	// is already closed, and a freshly-started readpump would
+	// observe !ok on its first iteration and immediately tear the
+	// AS back down to Exited.
+	if f, ok := s.fakes[key]; ok && !f.closed {
 		return f.buildLive(), nil
 	}
 	f := newFakeAgentSession(10000 + s.calls)

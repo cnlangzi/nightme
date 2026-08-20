@@ -69,7 +69,9 @@ const (
 	KindPromptEnded = agentsession.KindPromptEnded
 	KindLifecycle   = agentsession.KindLifecycle
 
-	PromptEndClean = agentsession.PromptEndClean
+	PromptEndClean         = agentsession.PromptEndClean
+	PromptEndUserKilled    = agentsession.PromptEndUserKilled
+	PromptEndUserStopped   = agentsession.PromptEndUserStopped
 )
 
 // MessageKind is a type alias (re-export).

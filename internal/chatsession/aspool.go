@@ -25,6 +25,7 @@ type asPoolKey struct {
 type AgentSessionPool struct {
 	mu    sync.RWMutex
 	byKey map[asPoolKey]*AgentSession
+	byID  map[string]*AgentSession // secondary index — FindByID is O(1)
 
 	// resolveMu serializes cold Lookup create+spawn per key so
 	// concurrent miss paths cannot Put distinct AS objects or
@@ -36,6 +37,7 @@ type AgentSessionPool struct {
 func NewAgentSessionPool() *AgentSessionPool {
 	return &AgentSessionPool{
 		byKey: make(map[asPoolKey]*AgentSession),
+		byID:  make(map[string]*AgentSession),
 	}
 }
 
@@ -79,6 +81,9 @@ func (p *AgentSessionPool) Put(chatID string, as *AgentSession) {
 	key := makeAsPoolKey(chatID, as.Cwd, as.Agent)
 	p.mu.Lock()
 	p.byKey[key] = as
+	if as.ID != "" {
+		p.byID[as.ID] = as
+	}
 	p.mu.Unlock()
 }
 
@@ -98,6 +103,9 @@ func (p *AgentSessionPool) GetOrPut(chatID string, as *AgentSession) *AgentSessi
 		return existing
 	}
 	p.byKey[key] = as
+	if as.ID != "" {
+		p.byID[as.ID] = as
+	}
 	return as
 }
 
@@ -107,7 +115,12 @@ func (p *AgentSessionPool) Delete(chatID, cwd, agent string) {
 		return
 	}
 	p.mu.Lock()
-	delete(p.byKey, makeAsPoolKey(chatID, cwd, agent))
+	if existing, ok := p.byKey[makeAsPoolKey(chatID, cwd, agent)]; ok {
+		delete(p.byKey, makeAsPoolKey(chatID, cwd, agent))
+		if existing != nil && existing.ID != "" {
+			delete(p.byID, existing.ID)
+		}
+	}
 	p.mu.Unlock()
 }
 
@@ -119,12 +132,7 @@ func (p *AgentSessionPool) FindByID(id string) *AgentSession {
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	for _, as := range p.byKey {
-		if as != nil && as.ID == id {
-			return as
-		}
-	}
-	return nil
+	return p.byID[id]
 }
 
 // ListByChatCwd returns every AS for chatID whose Cwd matches cwd

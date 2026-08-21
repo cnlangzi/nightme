@@ -231,6 +231,7 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 	results := make([]Result, len(snapshot))
 	closeCh := make(chan closeOutcome, len(snapshot))
 	var wg sync.WaitGroup
+	alive := 0
 	for i, as := range snapshot {
 		results[i] = Result{
 			Agent:       as.Agent,
@@ -243,6 +244,7 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 			continue
 		}
 		results[i].Action = "closed"
+		alive++
 		wg.Add(1)
 		go func(i int, as *chatsession.AgentSession) {
 			defer wg.Done()
@@ -261,22 +263,12 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 			"limit", closeGraceTotal)
 	}
 
-	// 4. Drain closeCh into Result. closeCh is buffered to
-	//    len(snapshot), so receiving up to that many items
-	//    guarantees every alive entry has at least attempted
-	//    its send. We deliberately do NOT close(closeCh):
-	//    a goroutine wedged in as.Close() may unblock after
-	//    the timeout and try to send on a closed channel,
-	//    which panics the daemon. Buffered channel + no close
-	//    lets late senders complete silently; the buffered
-	//    item is GC'd when nothing references it.
-	//
-	//    Stragglers (Close never returned after an additional
-	//    grace window) are logged and abandoned — the bridge
-	//    is wedged beyond our control, the goroutine will
-	//    eventually exit on its own.
+	// 4. Drain closeCh for alive entries only. Stale rows never
+	//    send — waiting on len(snapshot) would always time out
+	//    when any entry was already exited (Windows CI / cold
+	//    Lookup without a live bridge).
 	drained := 0
-	for drained < len(snapshot) {
+	for drained < alive {
 		select {
 		case oc := <-closeCh:
 			if oc.err != nil {
@@ -287,7 +279,7 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 		case <-time.After(2 * time.Second):
 			slog.Warn("closeAllAgents: stragglers after timeout",
 				"drained", drained,
-				"expected", len(snapshot))
+				"expected", alive)
 			return results, nil
 		}
 	}

@@ -1654,14 +1654,9 @@ func (cs *ChatSession) detachAgentSession(as *AgentSession) {
 // detachActiveWorkingSetLocked removes every actively mounted
 // AgentSession while preserving the global warm pool and subscriptions.
 // Caller must hold cs.mu for writing.
-func (cs *ChatSession) detachActiveWorkingSetLocked() []*AgentSession {
-	detached := make([]*AgentSession, 0, len(cs.pool))
-	for _, as := range cs.pool {
-		detached = append(detached, as)
-	}
+func (cs *ChatSession) detachActiveWorkingSetLocked() {
 	cs.pool = make(map[agentCwdKey]*AgentSession)
 	cs.selectedAS = nil
-	return detached
 }
 
 // selectAgentSessionLocked makes as the chat's active AgentSession and
@@ -1761,8 +1756,19 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 
 	// Serialize cold resolve+spawn for this key (docs/CHATSTORE.md
 	// review: concurrent miss must not create divergent AS objects).
-	unlockResolve := asPool.lockResolve(cs.ChatID, selectedCwd, selectedAgent)
-	defer unlockResolve()
+	// The unlock closure is captured in a variable so the recursion
+	// branch below can release the per-key lock BEFORE recursing —
+	// otherwise a rapid /cwd A → /cwd B → /cwd A sequence would
+	// re-enter the same non-reentrant sync.Mutex and deadlock (the
+	// outer call still holds lockResolve(A) via defer while the
+	// inner recursive call tries to acquire it again).
+	var unlockResolve func()
+	unlockResolve = asPool.lockResolve(cs.ChatID, selectedCwd, selectedAgent)
+	defer func() {
+		if unlockResolve != nil {
+			unlockResolve()
+		}
+	}()
 
 	as := asPool.Get(cs.ChatID, selectedCwd, selectedAgent)
 	hadPrior := as != nil
@@ -1802,8 +1808,14 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	cs.mu.Lock()
 	// A concurrent /cwd or /use changed the target while disk lookup
 	// was in progress. Leave the resolved AS warm and retry the new key.
+	// Release the per-key resolve lock BEFORE recursing — see the
+	// unlockResolve variable comment above for the deadlock scenario.
 	if cs.selectedCwd != selectedCwd || cs.selectedAgent != selectedAgent {
 		cs.mu.Unlock()
+		if unlockResolve != nil {
+			unlockResolve()
+			unlockResolve = nil
+		}
 		return cs.LookupSelectedAgentSession()
 	}
 	// Another concurrent lookup may already have mounted a live entry.
@@ -2439,17 +2451,6 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		// bump) preserves it instead of clobbering back to false.
 		WatcherHintEmitted: cs.watcherHintEmitted,
 	}
-}
-
-// persistChatEntry writes the ChatSessionEntry to disk (if persistence
-// is configured). Best-effort: errors are returned but not propagated
-// through call sites (logged at higher level).
-func (cs *ChatSession) persistChatEntry() {
-}
-
-// persistChatEntryLocked writes ChatSessionEntry. Caller must hold
-// cs.mu (RLock or Lock).
-func (cs *ChatSession) persistChatEntryLocked() {
 }
 
 // newAgentSessionID returns a unique ID for an AgentSession. v1.2

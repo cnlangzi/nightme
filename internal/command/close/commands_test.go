@@ -2,12 +2,19 @@ package close
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 )
+
+func testCwd(t *testing.T) string {
+	t.Helper()
+	// SetSelectedCwd filepath.Cleans; on Windows "/tmp" → `\tmp`.
+	return filepath.Clean("/tmp")
+}
 
 func TestFactory_Spec(t *testing.T) {
 	f := NewFactory()
@@ -63,7 +70,7 @@ func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetSelectedCwd("/tmp")
+	_ = cs.SetSelectedCwd(testCwd(t))
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"close", " "}})
@@ -81,8 +88,9 @@ func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetSelectedCwd("/tmp")
-	// Materialize (claude, /tmp) so the pool isn't empty.
+	cwd := testCwd(t)
+	_ = cs.SetSelectedCwd(cwd)
+	// Materialize (claude, cwd) so the pool isn't empty.
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
@@ -92,7 +100,7 @@ func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if !strings.Contains(out.Reply, `No codex session`) || !strings.Contains(out.Reply, "/tmp") {
+	if !strings.Contains(out.Reply, `No codex session`) || !strings.Contains(out.Reply, cwd) {
 		t.Fatalf("Reply should name the missing agent + cwd: %q", out.Reply)
 	}
 	// (claude, /tmp) survives — only the targeted entry was closed
@@ -115,7 +123,8 @@ func TestFactory_Handle_NoArg_ClosesAllInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetSelectedCwd("/tmp")
+	cwd := testCwd(t)
+	_ = cs.SetSelectedCwd(cwd)
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
@@ -128,7 +137,7 @@ func TestFactory_Handle_NoArg_ClosesAllInCwd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if !strings.Contains(out.Reply, "claude") || !strings.Contains(out.Reply, "/tmp") {
+	if !strings.Contains(out.Reply, "claude") || !strings.Contains(out.Reply, cwd) {
 		t.Fatalf("Reply should name the closed entry: %q", out.Reply)
 	}
 	// /close preserves the AgentSession entry — next user message
@@ -147,7 +156,8 @@ func TestFactory_Handle_NoArg_ClosesEveryAgentInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetSelectedCwd("/tmp")
+	cwd := testCwd(t)
+	_ = cs.SetSelectedCwd(cwd)
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession (claude): %v", err)
 	}
@@ -158,7 +168,7 @@ func TestFactory_Handle_NoArg_ClosesEveryAgentInCwd(t *testing.T) {
 		t.Fatalf("LookupSelectedAgentSession (codex): %v", err)
 	}
 	if got := len(cs.Pool()); got != 2 {
-		t.Fatalf("pre: pool size want 2 (claude + codex in /tmp), got %d", got)
+		t.Fatalf("pre: pool size want 2 (claude + codex in %s), got %d", cwd, got)
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
@@ -186,7 +196,8 @@ func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetSelectedCwd("/tmp")
+	cwd := testCwd(t)
+	_ = cs.SetSelectedCwd(cwd)
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession (claude): %v", err)
 	}

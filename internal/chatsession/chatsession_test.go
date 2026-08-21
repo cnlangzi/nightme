@@ -627,7 +627,6 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 func TestChatSession_GitStatus_NoCacheBehavior(t *testing.T) {
 	t.Run("unwired deps returns nil", func(t *testing.T) {
 		cs, _ := New("t_unwired", "claude")
-		cs.persistChatEntry() // no-op without stores; safe
 		if got := cs.GitStatus(context.Background()); got != nil {
 			t.Fatalf("GitStatus with zero deps = %+v, want nil", got)
 		}

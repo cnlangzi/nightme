@@ -148,6 +148,14 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	defer as.Shutdown()
+	// Synchronous barrier: install the EventBus subscription on
+	// the freshly-created AS right now, rather than waiting up to
+	// 100ms for PumpEvents' next scan tick. The previous version
+	// raced that tick — fine locally, occasionally losing under
+	// the race detector on CI (2s deadline hit before the
+	// subscription came up). See AttachPendingSubscriptions'
+	// doc comment for the production/test split.
+	cs.AttachPendingSubscriptions()
 	fake := spawner.lastFake
 	if fake == nil {
 		t.Fatal("spawner did not capture fakeAgentSession")
@@ -233,6 +241,9 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	defer as.Shutdown()
+	// Synchronous barrier: see the matching call in
+	// TestIntegration_AgentEvent_ReachesChannel for the rationale.
+	cs.AttachPendingSubscriptions()
 	fake := spawner.lastFake
 	if fake == nil {
 		t.Fatal("spawner did not capture fakeAgentSession")

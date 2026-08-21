@@ -438,6 +438,7 @@ Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute keys contai
 | [`docs/PRD.md`](./docs/PRD.md) | Product definition — what / why / for whom. No tech. |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Technical architecture — components, data flow, NFRs. |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table. |
+| [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + engine runtime architecture — triggers, steps, bot↔wfe boundary. |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs. |
 | [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi. |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | Feishu adapter reference (rendering rules, card semantics, thread routing). |
@@ -465,6 +466,7 @@ cmd/nightme/                       # cobra CLI (start / stop / restart / status 
 configs/                           # example YAML config
 docs/
   PRD.md SPEC.md FEATURES.md       # 3-layer doc model
+  WFE.md                           # workflow YAML + engine runtime (schema / triggers / steps / bot↔wfe)
   feat/                            # F-XX per-feature design
   bridge/  channel/  flow/         # per-subsystem design
   images/                          # README-served screenshots

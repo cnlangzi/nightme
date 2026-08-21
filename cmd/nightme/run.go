@@ -15,11 +15,11 @@
 // directly (newEventHandler, wireRuntimeCallbacksAndRestore,
 // shutdownRunMulti) import internal/runtime as `runtime` and
 // call the exported equivalents there.
-
 package main
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -72,15 +72,13 @@ func runRunWith(cmd *cobra.Command, deps runtime.Deps) error {
 	if cmd == nil {
 		return errCmdRequired
 	}
-	out := cmd.OutOrStdout()
-	logger := loggerFromContext(cmd.Context())
 
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	runner := runtime.RunWith(deps, runtime.RunOptions{
-		Out:    out,
-		Logger: logger,
+		Out:    cmd.OutOrStdout(),
+		Logger: slog.Default(),
 		SigCh:  sigCh,
 	})
 	return runner.Run(cmd.Context())

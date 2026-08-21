@@ -18,8 +18,8 @@
 // registry auto-resolves via NewChannels) and calls Runner.Run.
 // The legacy --channel flag is removed.
 //
-// All construction seams live in Deps; every helper that needs to
-// be testable directly (NewEventHandler, WireRuntimeCallbacksAndRestore,
+// All construction seams live in Deps; every helper that needs
+// to be testable directly (NewEventHandler, WireRuntimeCallbacksAndRestore,
 // MarkPromptDone, ShutdownRun, NewMessageDispatcher) is exported.
 package runtime
 
@@ -104,34 +104,6 @@ func defaultBuildAgents(cfg *config.Config) *agent.Registry {
 	return agentregistry.Build(cfg, "")
 }
 
-// RemoveLegacyRegistryFile is best-effort cleanup of the v0.1
-// registry.json (the v1.2 daemon no longer reads it). Exported
-// so the CLI's `list` command can call it directly without
-// having its own copy.
-func RemoveLegacyRegistryFile(cfg *config.Config) error {
-	path, err := legacyRegistryPath(cfg)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	bak := path + ".v1.bak"
-	if _, err := os.Stat(bak); err == nil {
-		// Backup already exists — leave both files alone.
-		return nil
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.Rename(path, bak); err != nil {
-		return err
-	}
-	return nil
-}
-
 // ChatSessionsPath returns the absolute path to chat_sessions.json
 // under cfg.Paths.DataDir. Exported so the CLI's `list` command
 // can resolve the same file the daemon writes.
@@ -152,15 +124,4 @@ func AgentSessionsPath(cfg *config.Config) (string, error) {
 		return "", err
 	}
 	return filepath.Join(base, "agent_sessions.json"), nil
-}
-
-// legacyRegistryPath returns the absolute path to the v0.1
-// registry.json that the v1.2 daemon no longer writes.
-// Unexported — only RemoveLegacyRegistryFile uses it.
-func legacyRegistryPath(cfg *config.Config) (string, error) {
-	base, err := filepath.Abs(cfg.Paths.DataDir)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "registry.json"), nil
 }

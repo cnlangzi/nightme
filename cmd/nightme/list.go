@@ -154,15 +154,8 @@ func openV12Stores(cfg *config.Config, warn io.Writer) (*chatstore.Store, *regis
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create data dir %s: %w", dir, err)
 	}
-	// Tidy up the obsolete v1.x registry.json (the v1.2 daemon
-	// no longer reads it; we archive the file to .v1.bak so a
-	// human can recover v1.x data after upgrading).
-	if err := runtime.RemoveLegacyRegistryFile(cfg); err != nil {
-		// Non-fatal: the listing still works.
-		if warn != nil {
-			fmt.Fprintf(warn, "list: remove legacy registry: %v\n", err)
-		}
-	}
+	// (legacy registry cleanup removed in v1.3+; v0.1 file no
+	// longer exists in this codebase)
 
 	csPath, err := runtime.ChatSessionsPath(cfg)
 	if err != nil {

@@ -104,7 +104,29 @@
 
 三个 toggle 模式一致：ChatSession 上挂 mode 字段 + Gateway dispatcher 入口 gate + Channel 自治渲染。
 
-## 8. 范围外（明确不做）
+## 8. Workflow 引擎
+
+| 功能 | 设计文档 |
+|------|----------|
+| Workflow YAML + 引擎运行时架构（schema / 触发器 / 步骤 / 表达式 / bot↔wfe 边界）| [WFE.md](./WFE.md) |
+| 5 类触发器：`schedule` / `pull_request` / `branch` / `issue` / `mention` | [WFE.md](./WFE.md) §3 |
+| 三种 step：`run`（shell）/ `prompt`（agent）/ `use`（action）| [WFE.md](./WFE.md) §5 |
+| 顶层 `worker` 字段（并发 worker pool）| [WFE.md](./WFE.md) §2 |
+| `${{ ... }}` 表达式（`event.*` / `steps.*.outputs.*` / `needs.*.outputs.*` / `env.*`）| [WFE.md](./WFE.md) §6 |
+| 复用本地 agent 环境变量（不管理 agent，只调度）| [WFE.md](./WFE.md) §5.2 |
+| `use` 步骤 = 扩展点（bot 注入 action；内置 + `~/.nightme/workflows/actions/*.sh`）| [WFE.md](./WFE.md) §5.3 |
+| `bot` subsystem 作为 host（跟 `/gtw` 平级；不实现 `Channel` interface；持 `NightmeChannel` / `ActionRegistry` / `os/exec` 等资源 channels）| [WFE.md](./WFE.md) §8.1 |
+| `wfe` 库 = 纯库（无 I/O / 无 clock / 无 secrets；Tick 推进 state）| [WFE.md](./WFE.md) §8.2 |
+| Runtime interface（4 方法：RunShell / SendPrompt / RunAction / Now）| [WFE.md](./WFE.md) §8.4 |
+| Action 注入模型（ActionRegistry + ShellAction 包装用户脚本）| [WFE.md](./WFE.md) §8.5 |
+| 触发器 → 虚拟 chat 映射 | [WFE.md](./WFE.md) §8.6 |
+| `prompt` 步骤作为合成消息经 Gateway 派发 | [WFE.md](./WFE.md) §8.7 |
+| Run 状态持久化（`~/.nightme/workflows/state/`）| [WFE.md](./WFE.md) §8.8 |
+| **实现设计（包结构 / Tick 状态机 / StateStore / ActionRegistry / 灰度上线）**| [feat/F-workflow-engine.md](./feat/F-workflow-engine.md) |
+
+Workflow 文件位置：`~/.nightme/workflows/*.yaml`，按 `name:` 去重，热加载。Engine 入口：`internal/wfe/`，host：`internal/channel/bot/`。
+
+## 9. 范围外（明确不做）
 
 | ❌ 不做 | 原因 |
 |---------|------|

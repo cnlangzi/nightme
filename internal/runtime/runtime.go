@@ -221,11 +221,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		return fmt.Errorf("run: open agent_sessions: %w", err)
 	}
 
-	// Tidy up the obsolete v0.1 registry.json (the v1.2 daemon
-	// no longer reads it). Best-effort.
-	if err := RemoveLegacyRegistryFile(cfg); err != nil {
-		logger.Warn("remove legacy registry.json", "err", err)
-	}
+	// (legacy registry.json cleanup removed — v0.1 file no longer
+	// exists in v1.3+)
 
 	agents := deps.BuildAgents(cfg)
 	if agents == nil {

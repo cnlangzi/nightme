@@ -379,8 +379,21 @@ func TestHandleCardAction_SkipsLogOnEmptyChatID(t *testing.T) {
 	log.SetOutput(w)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	// Event with no Event at all → ContextOpenChatID returns "".
-	event := &larkcallback.CardActionTriggerEvent{}
+	// Event with Event non-nil but Context nil → ContextOpenChatID
+	// returns "" via the new chatID-empty gate. The previous setup
+	// (`&CardActionTriggerEvent{}`) short-circuited at the
+	// `event.Event == nil` guard before reaching this gate, so the
+	// test passed trivially regardless of whether the gate existed.
+	// Reach the unknown-action fallback by giving Event a non-nil
+	// Action whose resolved string is neither "act:", "opt:",
+	// "skip:", nor "custom:" — so the switch falls through to the
+	// chatID-log block where the new gate sits.
+	event := &larkcallback.CardActionTriggerEvent{
+		Event: &larkcallback.CardActionTriggerRequest{
+			// Context intentionally nil to trigger the chatID-empty path.
+			Action: &larkcallback.CallBackAction{Name: "unknown_action"},
+		},
+	}
 	_, _ = a.handleCardAction(context.Background(), event)
 
 	_ = w.Close()

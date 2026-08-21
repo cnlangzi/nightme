@@ -199,28 +199,85 @@ func (s *Server) Serve() error {
 		default:
 		}
 
-		// Overlapped ConnectNamedPipe so we can interleave
-		// accept + Close. Close() CancelIoEx's any handle
-		// listed in s.pending, which unblocks ConnectNamedPipe
-		// with ERROR_OPERATION_ABORTED.
-		overlapped := &windows.Overlapped{}
-		if err := windows.ConnectNamedPipe(h, overlapped); err != nil {
-			if !errors.Is(err, windows.ERROR_IO_PENDING) &&
-				!errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
-				s.untrackPipe(h)
-				_ = windows.CloseHandle(h)
-				if errors.Is(err, windows.ERROR_OPERATION_ABORTED) {
-					return nil
-				}
-				return fmt.Errorf("daemon control: connect pipe: %w", err)
+		// Wait for a client to connect (or for Close() to cancel
+		// us) BEFORE handing the handle to handle().
+		//
+		// ConnectNamedPipe on a FILE_FLAG_OVERLAPPED handle
+		// returns ERROR_IO_PENDING immediately when no client is
+		// waiting — it does NOT block. If we spawned handle()
+		// right away, handle()'s synchronous ReadFile (nil
+		// overlapped) on a still-listening instance would return
+		// ERROR_PIPE_LISTENING ("Waiting for a process to open
+		// the other end of the pipe") and the connection would
+		// be torn down before any client could connect. The
+		// accept loop would then busy-spin creating and
+		// destroying instances — the pipe server would work
+		// only by winning a connect race, and stop / status
+		// RPCs would intermittently time out.
+		//
+		// The fix is the documented overlapped pattern: arm an
+		// event in the OVERLAPPED, then block in
+		// GetOverlappedResult until a client connects (event
+		// signaled) or Close() CancelIoEx's the pending connect
+		// (result ERROR_OPERATION_ABORTED). This turns the
+		// accept loop into a true blocking accept, matching
+		// Unix's listener.AcceptUnix().
+		connected, err := acceptNamedPipe(h)
+		if err != nil {
+			s.untrackPipe(h)
+			_ = windows.CloseHandle(h)
+			if errors.Is(err, windows.ERROR_OPERATION_ABORTED) {
+				return nil
 			}
+			return fmt.Errorf("daemon control: connect pipe: %w", err)
 		}
+		_ = connected // a client connected; nothing else to check
 
 		// Spawn the per-connection goroutine; it owns the
 		// handle from here and is responsible for Close +
 		// untrack.
 		conn := &pipeInstance{handle: h}
 		go s.handle(conn)
+	}
+}
+
+// acceptNamedPipe blocks until a client connects to the pipe
+// instance h (created with FILE_FLAG_OVERLAPPED). Returns nil
+// error once a client is connected. Returns
+// ERROR_OPERATION_ABORTED when Close() cancelled the pending
+// connect via CancelIoEx.
+//
+// The event is created per-accept (one syscall) and closed before
+// returning; the handle stays overlapped so handle()'s subsequent
+// synchronous ReadFile/WriteFile work the same way they did
+// before — the connect phase is the only one that needed an
+// explicit wait, because the listen state has no client to block
+// on.
+func acceptNamedPipe(h windows.Handle) (bool, error) {
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return false, fmt.Errorf("create accept event: %w", err)
+	}
+	defer windows.CloseHandle(event)
+
+	overlapped := &windows.Overlapped{HEvent: event}
+	switch cnErr := windows.ConnectNamedPipe(h, overlapped); {
+	case cnErr == nil, errors.Is(cnErr, windows.ERROR_PIPE_CONNECTED):
+		// A client had already connected between CreateNamedPipe
+		// and ConnectNamedPipe (ERROR_PIPE_CONNECTED), or the
+		// connect completed synchronously. Either way a client is
+		// on the other end; no wait needed.
+		return true, nil
+	case errors.Is(cnErr, windows.ERROR_IO_PENDING):
+		// Normal path: the connect is pending. Block until a
+		// client connects or Close() cancels us.
+		var transferred uint32
+		if err := windows.GetOverlappedResult(h, overlapped, &transferred, true); err != nil {
+			return false, err
+		}
+		return true, nil
+	default:
+		return false, cnErr
 	}
 }
 
@@ -253,6 +310,17 @@ func (s *Server) handle(conn *pipeInstance) {
 		}
 		_ = WriteResult(conn, HealthPayload{Channel: channel, Health: snapshot})
 	case "stop":
+		// Untrack this connection before writing the ack so
+		// Close()'s CancelIoEx sweep cannot abort the in-flight
+		// WriteFile. On Unix, Close() only closes the listener —
+		// in-flight conns are untouched, so the original
+		// cancel-then-write order is safe. On Windows, Close()
+		// CancelIoEx's every handle in s.pending, so if cancel()
+		// fired first and shutdown was quick the ack write would
+		// be aborted and stopDaemon would time out (the client
+		// never sees the response). The deferred untrackPipe is
+		// a no-op once we've removed it here.
+		s.untrackPipe(conn.handle)
 		s.stopOnce.Do(func() {
 			// Mirror server_unix.go's stop handler. See
 			// stop_fastpath.go for the shared fast-path rationale

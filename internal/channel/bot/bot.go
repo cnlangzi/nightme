@@ -26,7 +26,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
@@ -77,17 +76,6 @@ type Config struct {
 	// StateDir is where bot persists per-run state. Defaults to
 	// ~/.nightme/workflows/state/ if empty.
 	StateDir string
-
-	// EventSource, if non-nil, is bot's source of git events
-	// (v0: gtw.PollingEventSource; future: webhook). When nil,
-	// bot runs in cron-only mode.
-	EventSource gtw.EventSource
-
-	// GitProvider is the existing nightme GitProvider (used by the
-	// EventSource for polling via the gh/glab CLI). When nil, the
-	// default EventSource (if any) is responsible for its own CLI
-	// invocation.
-	GitProvider gtw.GitProvider
 }
 
 // New constructs a Bot. Workflows are loaded from cfg.WorkflowsDir
@@ -150,9 +138,6 @@ func (b *Bot) Start(ctx context.Context) error {
 
 	// 5. start trigger manager
 	b.triggers = newTriggerManager(b.workflows, wsMap, b.onTrigger, b.logger)
-	if b.cfg.EventSource != nil {
-		b.triggers.setEventSource(b.cfg.EventSource)
-	}
 	return b.triggers.Start(ctx)
 }
 

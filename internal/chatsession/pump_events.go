@@ -49,6 +49,25 @@ func (cs *ChatSession) attachAllPendingSubscriptions() {
 	}
 }
 
+// AttachPendingSubscriptions is the public, synchronous counterpart
+// to PumpEvents' 100ms scan tick. Production callers should rely on
+// PumpEvents — its scan interval is intentionally coarse (100ms) so
+// idle sessions don't pay per-tick CPU cost. Tests that need to
+// inject events immediately after creating an AgentSession should
+// call this before pushing, so the subscription is installed before
+// any event can land on the AS's EventBus:
+//
+//	as, err := cs.LookupSelectedAgentSession()
+//	cs.AttachPendingSubscriptions()    // synchronous barrier
+//	fakeBridge.PushEvent(...)          // safe — subscription is up
+//
+// Idempotent: calling it while PumpEvents is running is safe — both
+// paths take the same per-AS lock and check cs.subs before
+// subscribing.
+func (cs *ChatSession) AttachPendingSubscriptions() {
+	cs.attachAllPendingSubscriptions()
+}
+
 // attachAgentSubscription installs one EventBus subscription on as
 // (if not already present) that forwards every EnrichedEvent to
 // cs.routeEvent. Idempotent.

@@ -431,8 +431,9 @@ func ParseRepoOwner(remoteURL string) (owner, repo string, err error) {
 //	https://host/path.git                     → host
 //	http://host/path.git                      → host
 //	ssh://git@host/path.git                   → host  (ssh://)
-//	ssh://user@host:port/path.git             → host  (ssh:// with userinfo+port)
+//	ssh://user@host:port/path.git             → host:port (ssh:// with userinfo+port)
 //	git@host:path.git                         → host  (scp-style — legacy SSH form)
+//	git@host:port:path.git                    → host:port (scp-style with explicit port — git supports this; see git-clone docs)
 //	git://host/path.git                       → host  (rare but valid Git protocol)
 //	https://user:token@host/path.git          → host  (userinfo stripped; common with gh / glab auth helper)
 //	https://host/path.git?ref=main#frag       → host  (query + fragment stripped)
@@ -495,20 +496,37 @@ func parseRemoteHost(remoteURL string) (host string, err error) {
 	// 4. Strip trailing ".git" suffix.
 	u = strings.TrimSuffix(u, ".git")
 
-	// 5. Convert the FIRST ":" to "/" ONLY for scp-style URLs
-	//    (`git@host:path` — colon is the host/path separator). For
-	//    URL-style (`https://host:port/path` — colon is the port
-	//    separator), keep the colon so the port stays attached to
-	//    the host.
+	// 5. Three-way colon disambiguation:
 	//
-	//    Heuristic: a scp-style separator is followed by a path
-	//    component (no leading "/"); a port separator is followed
-	//    by digits + ("/" | end-of-string).
+	//      URL-style with port:    https://host:NNNN/path
+	//        → first colon is the port separator, keep it; the
+	//          split below extracts host:NNNN as one piece.
+	//
+	//      SCP-style with port:    git@host:NNNN:path
+	//        → first colon is port separator, second is path
+	//          separator. Convert the second colon to "/" so the
+	//          split below extracts host:NNNN cleanly. This is the
+	//          case that breaks without isSCPStylePort — see
+	//          TestParseRemoteHost_SCPWithPort.
+	//
+	//      SCP-style without port: git@host:path
+	//        → first colon is the path separator, convert to "/".
+	//
+	//    Heuristic: URL-style port → digits + ("/" | "?" | "#" |
+	//    end-of-string). SCP-style port → digits + ":" + path.
+	//    Otherwise treat the colon as a path separator.
 	if i := strings.Index(u, ":"); i >= 0 {
 		rest := u[i+1:]
-		if isPort(rest) {
-			// port colon — keep as-is
-		} else {
+		switch {
+		case isPort(rest):
+			// URL-style port — keep as-is.
+		case isSCPStylePort(rest):
+			// SCP-style port: keep "host:NNNN", convert the
+			// SECOND colon (after the digits) to "/".
+			second := strings.Index(rest, ":")
+			u = u[:i+1+second] + "/" + rest[second+1:]
+		default:
+			// SCP-style path colon — convert to "/".
 			u = u[:i] + "/" + rest
 		}
 	}
@@ -545,6 +563,35 @@ func isPort(s string) bool {
 		return true
 	}
 	return false
+}
+
+// isSCPStylePort reports whether s looks like the SCP-style
+// "port:path" fragment — digits followed by a colon and a path.
+// This is the `git@host:NNNN:path.git` form where the colon
+// between the port number and the path is the same character
+// that separates host from port. Distinct from isPort: URL-style
+// ports are digits-followed-by-slash, scp-style ports are
+// digits-followed-by-colon.
+//
+// Without this helper, parseRemoteHost sees the second `:` in
+// `host:NNNN:path` and treats the first `:` as the scp-style
+// host/path separator, swallowing the port and breaking the
+// self-hosted GitLab-on-non-default-port case.
+func isSCPStylePort(s string) bool {
+	if s == "" {
+		return false
+	}
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return false // no leading digits
+	}
+	if i >= len(s) {
+		return false // bare digits with nothing after — degenerate
+	}
+	return s[i] == ':'
 }
 
 // redactForDisplay returns a credential-free version of remoteURL
@@ -643,6 +690,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 	// Order: GitLab first (cheaper, more deterministic), then
 	// GitHub. Single-probe failure is not fatal; we move on.
 	if body, err := prober.Probe(ctx, host, "/api/v4/version"); err == nil {
+		// Strong fingerprint: GitLab's version object.
 		var v struct {
 			Version  string `json:"version"`
 			Revision string `json:"revision"`
@@ -650,13 +698,29 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree s
 		if json.Unmarshal(body, &v) == nil && (v.Version != "" || v.Revision != "") {
 			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, nil
 		}
+		// Soft fingerprint: GitLab's auth/permission error envelope.
+		// /api/v4 is GitLab-only — GitHub Enterprise uses /api/v3, so
+		// a response with the GitLab envelope ({"message":"401
+		// Unauthorized"} etc.) at this path is GitLab-shaped. This
+		// catches auth-protected self-hosted GitLab reachable only
+		// via plain HTTP (corporate proxy blocks :443), where
+		// /api/v4/version answers 401 instead of 200.
+		var env struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &env) == nil && env.Message != "" {
+			return &GitLabProvider{host: host, Worktree: worktree}, nil
+		}
 	}
 	if body, err := prober.Probe(ctx, host, "/api/v3/meta"); err == nil {
 		var meta map[string]json.RawMessage
 		if json.Unmarshal(body, &meta) == nil {
-			// GitHub's /api/v3/meta returns
+			// GitHub Enterprise's /api/v3/meta returns
 			// {"verifiable_password_authentication":..., ...}.
-			// No top-level "version" but identifiable by content.
+			// We deliberately do NOT loosen this branch to
+			// "any JSON body" the way the /api/v4 probe is:
+			// GitLab answers 404 with a JSON envelope on
+			// /api/v3/meta, which would misclassify as GitHub.
 			if _, hasGH := meta["verifiable_password_authentication"]; hasGH {
 				return &GitHubProvider{host: host, Worktree: worktree}, nil
 			}
@@ -687,9 +751,14 @@ func NewProvider(kind ProviderKind, host, worktree string) (GitProvider, error) 
 // canned JSON for fixture-driven unit tests.
 type HTTPProber interface {
 	// Probe issues a GET <host><path> and returns the response
-	// body on 200. Any non-200 status, network error, TLS
-	// error, or timeout returns an error — callers (Detect)
-	// treat errors as "this endpoint is not it" and move on.
+	// body on 2xx/3xx/4xx. Any non-5xx response counts as
+	// "this endpoint actually responded" — including 401 auth-
+	// required, which Detect fingerprints via the GitLab /
+	// GitHub Enterprise error envelope. Transport failure and
+	// 5xx return an error so callers (Detect) can move on.
+	//
+	// Implementations may apply scheme fallback (HTTPS then
+	// HTTP) — see ExecHTTPProber for the production behaviour.
 	Probe(ctx context.Context, host, path string) ([]byte, error)
 }
 
@@ -709,20 +778,35 @@ type ExecHTTPProber struct {
 }
 
 // Probe implements HTTPProber.
+//
+// Scheme fallback: tries HTTPS first, then plain HTTP on the same
+// path on transport error (DNS / TCP / TLS / proxy CONNECT-tunnel
+// refusal / timeout) or 5xx. The fallback is essential for
+// internal self-hosted GitLab / GitHub Enterprise — many of those
+// instances run on bare IPs behind a corporate HTTP proxy that
+// refuses CONNECT to :443, but expose the API on plain HTTP. HTTPS
+// alone would silently fail with "502 CONNECT tunnel failed" and
+// return ErrUnsupportedProvider to /gtw pr.
+//
+// Returns the response body on 2xx/3xx/4xx (any status that proves
+// the endpoint actually responded — including 401 auth-required,
+// which Detect fingerprints as a GitLab / GitHub Enterprise error
+// envelope). 5xx and transport failure of BOTH schemes return an
+// error.
+//
+// Total wall-clock is bounded by a single Timeout budget shared
+// across both schemes via context.WithTimeout — a stuck HTTPS
+// connect caps at 3s, then HTTP gets the remaining time.
 func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, error) {
 	if p == nil {
 		p = &ExecHTTPProber{}
 	}
-	if p.Timeout == 0 {
-		p.Timeout = 3 * time.Second
+	timeout := p.Timeout
+	if timeout == 0 {
+		timeout = 3 * time.Second
 	}
-	url := "https://" + host + path
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "nightme-git-provider-detect/1.0")
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var transport http.RoundTripper = http.DefaultTransport
 	if p.InsecureSkipVerify {
@@ -730,19 +814,40 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 	}
-	cli := &http.Client{
-		Timeout:   p.Timeout,
-		Transport: transport,
+	cli := &http.Client{Transport: transport}
+
+	if body, ok := probeOnce(ctx, cli, "https://"+host+path); ok {
+		return body, nil
 	}
+	if body, ok := probeOnce(ctx, cli, "http://"+host+path); ok {
+		return body, nil
+	}
+	return nil, fmt.Errorf("probe %s%s: both https and http failed", host, path)
+}
+
+// probeOnce issues a single GET against url. Returns (body, true)
+// on 2xx/3xx/4xx; returns (nil, false) on transport error or 5xx
+// so the caller can try the next scheme.
+func probeOnce(ctx context.Context, cli *http.Client, url string) ([]byte, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "nightme-git-provider-detect/1.0")
 	resp, err := cli.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("probe %s: status %d", url, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false
 	}
-	return io.ReadAll(resp.Body)
+	if resp.StatusCode >= 500 {
+		return nil, false
+	}
+	return body, true
 }
 
 // CLIRunner abstracts gh / glab. Same pattern as GitRunner: tests

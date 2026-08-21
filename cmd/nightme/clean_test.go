@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,13 +19,14 @@ func TestCleanCommandSurface(t *testing.T) {
 	if !cmd.Runnable() {
 		t.Fatal("clean has no RunE")
 	}
-	// clean is intentionally flag-free — the operator is expected
-	// to know what they are asking for. Reject any drift that adds
-	// flags silently.
-	count := 0
-	cmd.Flags().VisitAll(func(*pflag.Flag) { count++ })
-	if count != 0 {
-		t.Errorf("clean has %d flags; want 0 (the command is intentionally flag-free)", count)
+	// The default mode remains flag-free in behavior, while --all opts into
+	// the explicitly destructive full-reset mode.
+	all := cmd.Flags().Lookup("all")
+	if all == nil {
+		t.Fatal("clean --all flag is missing")
+	}
+	if all.DefValue != "false" {
+		t.Errorf("clean --all default = %q, want false", all.DefValue)
 	}
 }
 
@@ -246,5 +246,110 @@ func TestRunClean_InboxLivesInHOME(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), dataDirInbox) {
 		t.Errorf("output should NOT reference bogus %s, got: %s", dataDirInbox, buf.String())
+	}
+}
+
+func TestRunClean_AllRemovesKnownNightmeState(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	t.Setenv("NIGHTME_CONFIG", filepath.Join(home, ".nightme", "config.yaml"))
+	t.Setenv("NIGHTME_PATHS_DATA_DIR", "")
+	t.Setenv("NIGHTME_LOGGING_FILE", "")
+	t.Setenv("NIGHTME_STDERR_FILE", "")
+
+	// Keep the config minimal so logging falls back to ~/.nightme/nightme.log
+	// and the daemon log falls back to <DataDir>/daemon-stderr.log.
+	cfg := struct {
+		Paths struct {
+			DataDir string `yaml:"data_dir"`
+		} `yaml:"paths"`
+	}{}
+	cfg.Paths.DataDir = dataDir
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, ".nightme", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	files := map[string][]byte{
+		filepath.Join(home, ".nightme", "nightme.log"):    []byte("log"),
+		filepath.Join(dataDir, "daemon-stderr.log"):       []byte("stderr"),
+		filepath.Join(dataDir, "daemon-stderr.log.1"):     []byte("old stderr"),
+		filepath.Join(dataDir, "chat_sessions.json"):      []byte("chat"),
+		filepath.Join(dataDir, "agent_sessions.json"):     []byte("agent"),
+		filepath.Join(dataDir, "chat_sessions.json.bak"):  []byte("chat backup"),
+		filepath.Join(dataDir, "agent_sessions.json.bak"): []byte("agent backup"),
+		filepath.Join(dataDir, "telegram_state.json"):     []byte("telegram"),
+		filepath.Join(dataDir, "registry.json"):           []byte("legacy registry"),
+		filepath.Join(dataDir, "registry.json.v1.bak"):    []byte("legacy registry backup"),
+		filepath.Join(dataDir, "version-check.json"):      []byte("version"),
+		filepath.Join(dataDir, "daemon.sock"):             []byte("socket"),
+		filepath.Join(dataDir, "daemon.lock"):             []byte("lock"),
+		filepath.Join(dataDir, "lifecycle.lock"):          []byte("lifecycle"),
+		filepath.Join(dataDir, ".config-old.yaml.tmp"):    []byte("temp"),
+		filepath.Join(dataDir, ".chat_sessions-old.tmp"):  []byte("temp"),
+		filepath.Join(dataDir, ".agent_sessions-old.tmp"): []byte("temp"),
+		filepath.Join(dataDir, ".telegram-state-old.tmp"): []byte("temp"),
+	}
+	for path, data := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	updatesDir := filepath.Join(dataDir, "updates", "v0.3.10")
+	if err := os.MkdirAll(updatesDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(updatesDir, "nightme.tar.gz"), []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inboxDir := filepath.Join(home, ".nightme", "inbox", "chat-1")
+	if err := os.MkdirAll(inboxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inboxDir, "file.txt"), []byte("attachment"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Unknown data must survive --all; it removes known artifacts, not the
+	// entire DataDir tree.
+	unknown := filepath.Join(dataDir, "unknown.txt")
+	if err := os.WriteFile(unknown, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := runCleanWithOptions(&buf, true); err != nil {
+		t.Fatalf("runCleanWithOptions: %v\noutput: %s", err, buf.String())
+	}
+	for path := range files {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("known path still exists after --all: %s (err=%v)", path, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "updates")); !os.IsNotExist(err) {
+		t.Errorf("update cache still exists after --all (err=%v)", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".nightme")); !os.IsNotExist(err) {
+		t.Errorf("home .nightme directory still exists after --all (err=%v)", err)
+	}
+	if _, err := os.Lstat(unknown); err != nil {
+		t.Errorf("unknown DataDir file was removed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "removed") {
+		t.Errorf("expected removal output, got %q", buf.String())
 	}
 }

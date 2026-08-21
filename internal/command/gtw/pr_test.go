@@ -1857,16 +1857,27 @@ func TestGitLabArgv_NoStateFlag(t *testing.T) {
 // trimmed to the fields our parser actually consumes). Ensures
 // the JSON tags (`iid`, `web_url`, `state`) match glab's actual
 // schema and that the parser tolerates the documented field set.
-func TestGitLabParseMRList_FromWWWGitLabCom(t *testing.T) {
-	// Captured from `glab mr list --source-branch
-	// workday-sync-team-page-2026-08-21-74 --output json --repo
-	// gitlab-com/www-gitlab-com` on 2026-08-21. Trimmed to the
-	// fields GitLabProvider.FindOpenPRForBranch / GetPR actually
-	// decode; the full payload has dozens more fields that we
-	// ignore. The point of this fixture is to pin the schema the
-	// production code relies on, so a future glab release that
-	// renames `iid` -> `mr_iid` or `web_url` -> `url` breaks the
-	// test BEFORE the change reaches production.
+// TestGitLabParseMRList_SchemaPinFromGlab182 is a hermetic
+// schema-pin test. The fixture JSON is a CAPTURE of the real
+// `glab mr list --output json` payload shape observed against
+// https://gitlab.com/gitlab-com/www-gitlab-com.git on 2026-08-21
+// (glab 1.82.0), trimmed to the fields GitLabProvider's parser
+// actually decodes.
+//
+// Why this exists: pin the JSON tag set (`iid`, `web_url`,
+// `state`) so a future glab release that renames `iid` -> `mr_iid`
+// or `web_url` -> `url` breaks the test BEFORE the change reaches
+// production. The MR IID (144062) and the branch name are just
+// fixture data — the test does NOT hit the live API and the
+// real MR's lifecycle (opened/merged/closed/deleted) is
+// completely irrelevant. `runGH` is a stub CLIRunner that
+// returns the fixture verbatim; if `glab` is not on PATH, the
+// test still passes.
+//
+// For a real-API end-to-end check see
+// TestRealGLAB_WWWGitLabCom_MRListArgs (gated on
+// NIGHTME_REAL_GLAB=1 — see pr_realglab_unix_test.go).
+func TestGitLabParseMRList_SchemaPinFromGlab182(t *testing.T) {
 	const sample = `[
 		{
 			"iid": 144062,
@@ -1909,7 +1920,22 @@ func TestGitLabParseMRList_FromWWWGitLabCom(t *testing.T) {
 // reaching production. The expected argv reflects the live
 // behaviour observed on glab 1.82.0 against
 // https://gitlab.com/gitlab-com/www-gitlab-com.git.
-func TestGitLabProvider_LiveWWWGitLabCom_MRListArgs(t *testing.T) {
+// TestGitLabArgvPin_NoStateFlag_AgainstWWWGitLabComOwnerRepo
+// pins the argv shape using the exact owner/repo that
+// originally surfaced the 2026-08-21 "Unknown flag: --state"
+// bug (https://gitlab.com/gitlab-com/www-gitlab-com.git) and
+// the branch name that triggered it (chore-docs-init). The
+// word "OwnerRepo" instead of "Live" in the test name is
+// deliberate: this test is HERMETIC — runGH is a stub that
+// returns "[]" without invoking glab. The owner/repo/branch
+// triple is just a fixture pin so a future refactor that
+// re-introduces `--state` (or changes the argv in any other
+// silent way) is caught BEFORE the change reaches production.
+//
+// For a real-API argv check see
+// TestRealGLAB_WWWGitLabCom_MRListArgs (gated on
+// NIGHTME_REAL_GLAB=1).
+func TestGitLabArgvPin_NoStateFlag_AgainstWWWGitLabComOwnerRepo(t *testing.T) {
 	gh := &runGH{out: "[]"}
 	p := &GitLabProvider{Worktree: "/w", Runner: gh}
 	_, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "chore-docs-init")

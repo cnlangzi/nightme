@@ -7,8 +7,8 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/proc"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -148,7 +148,7 @@ const commTruncLen = 15
 // DIFFERENT, and a 15-character prefix match is strong evidence it
 // was not.
 func sameCommand(actual, want string) bool {
-	a, w := filepath.Base(actual), filepath.Base(want)
+	a, w := pathutil.Base(actual), pathutil.Base(want)
 	if a == w {
 		return true
 	}

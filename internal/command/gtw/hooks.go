@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/shell"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
@@ -136,7 +136,8 @@ func Load() (Config, LoadNotes) {
 		// surface and no useful warning we can write.
 		return cfg, notes
 	}
-	path := filepath.Join(home, ".nightme", "gtw.yml")
+	// F-PATHUTIL-001 §13.3.1: pathutil.Join for separator consistency.
+	path := pathutil.Join(home, ".nightme", "gtw.yml")
 
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

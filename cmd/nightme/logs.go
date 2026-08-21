@@ -37,6 +37,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 	"github.com/cnlangzi/nightme/internal/logging"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 const (
@@ -118,8 +119,17 @@ func resolveLogPath(cfg *config.Config) (string, error) {
 	// unreachable in practice. The filepath.Abs call below is
 	// useful only when the user supplies a relative path in
 	// Logging.File; errors from it are non-fatal.
+	//
+	// F-PATHUTIL-001: follow the filepath.Abs with a NormalizeForOS
+	// so a forward-slash Logging.File on Windows ("F:/nightme/
+	// nightme.log") lands at "F:\nightme\nightme.log" — otherwise
+	// the daemon's log-rotation OpenFile rejects the mixed-
+	// separator form.
 	if abs, err := filepath.Abs(p); err == nil {
 		p = abs
+	}
+	if n, err := pathutil.NormalizeForOS(p); err == nil {
+		p = n
 	}
 	return p, nil
 }

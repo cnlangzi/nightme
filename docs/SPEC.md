@@ -674,7 +674,7 @@ Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现�
 - §1.3：Channel 不 import chatsession；决策卡 ≠ receipt card（Receipt 自治不变）
 - 不引入第二条「卡片专属」生命周期与 emoji reaction 分叉
 
-**实现细节**（button value 编码、action 目录、Feishu 视觉、`/gtw test` debug UAT）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md)。
+**实现细节**（button value 编码、action 目录、Feishu 视觉）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md)。
 
 ### 2.7 Reaction 路由
 
@@ -761,7 +761,7 @@ type ReactionRouter interface {
 - §2.6 决策卡 §2.6 不变式全部保留（按钮归一化、typed Choice、不引入第二条生命周期）
 - gateway 持有了 `ReactionRouter`，但只通过接口持有，不直接实现
 
-**实现细节**（ReactionRouter 的具体实现策略、gtw.Manager 注册时机、`/gtw test` UAT）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3 / §5。
+**实现细节**（ReactionRouter 的具体实现策略、gtw.Manager 注册时机）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3 / §5。
 
 ---
 

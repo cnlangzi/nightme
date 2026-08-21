@@ -85,7 +85,6 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	reg.add(newConfigCmd(), "config          interactive configuration menu")
 	reg.add(newVersionCmd(),      "version         version info")
 	reg.add(newUpdateCmd(), "update          check for a newer release")
-	reg.addNoTray(newDebugCmd(),  "debug           exercise reaction/action flow")
 
 	addLifecycleCommands(reg)
 	addUnixOnlyCommands(reg)

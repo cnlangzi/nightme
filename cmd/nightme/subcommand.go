@@ -99,7 +99,7 @@ func (r *cmdRegistry) add(cmd *cobra.Command, bannerLine string) {
 // but NOT the tray menu. Use for commands that, when triggered from
 // a tray click, would be either redundant (start / stop / restart
 // are already on the tray as primary items) or unsafe (run blocks
-// forever; debug reads stdin and would hang the tray).
+// forever and would hang the tray).
 func (r *cmdRegistry) addNoTray(cmd *cobra.Command, bannerLine string) {
 	r.root.AddCommand(cmd)
 	r.entries = append(r.entries, bannerEntry{entry: bannerLine})

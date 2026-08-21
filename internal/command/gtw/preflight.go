@@ -3,7 +3,8 @@ package gtw
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // preflightOrphanYml is the single guard for /gtw fix. gtw is
@@ -50,7 +51,12 @@ import (
 // Returns nil if SelectedCwd has no yml, or a user-friendly
 // error reply text otherwise.
 func preflightOrphanYml(selectedCwd string) error {
-	target := filepath.Join(selectedCwd, nightmeDirName, gtwYmlName)
+	// F-PATHUTIL-001 §13.3.1: pathutil.Join for cross-platform
+	// separator handling. selectedCwd is normally already-
+	// normalized (came through /cwd or WorktreePath), but using
+	// pathutil here keeps the rule "every path op goes through
+	// pathutil" without exceptions.
+	target := pathutil.Join(selectedCwd, nightmeDirName, gtwYmlName)
 	if _, err := os.Stat(target); err == nil {
 		return fmt.Errorf(
 			"❌ %s already exists\n"+

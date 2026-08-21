@@ -13,11 +13,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // Factory is the command.SlashCommandFactory for /cwd.
@@ -157,6 +157,11 @@ func errHomeUnset(err error) error {
 // expandTilde expands a leading "~" or "~/" to the user's home
 // directory. "~" alone becomes $HOME; "~/foo" becomes $HOME/foo.
 // Returns the input unchanged if it doesn't start with "~".
+//
+// F-PATHUTIL-001 §13.3.3: route the home-relative join through
+// pathutil.Join so the platform-specific separator handling
+// (backslashes on Windows, forward slashes on Unix) is
+// consistent with every other path operation in this package.
 func expandTilde(path string) (string, error) {
 	if path == "" {
 		return path, nil
@@ -169,7 +174,7 @@ func expandTilde(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(home, path[2:]), nil
+		return pathutil.Join(home, path[2:]), nil
 	}
 	return path, nil
 }

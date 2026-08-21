@@ -2,10 +2,11 @@ package gtw
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // ccPrefixRE matches conventional-commit / bracketed-tag prefixes
@@ -166,10 +167,18 @@ func DeriveBranchFromName(name string) (string, error) {
 // so build tools, linters, and codegraph don't see duplicate
 // sources (F-45 §6.2).
 func WorktreePath(repoRoot, slug string) string {
-	repoRoot = filepath.Clean(repoRoot)
-	parent := filepath.Dir(repoRoot)
-	repoName := filepath.Base(repoRoot)
-	return filepath.Join(parent, repoName+"."+LabelPrefix, slug)
+	// F-PATHUTIL-001 §5.2: route through pathutil so the
+	// platform-specific normalization (forward-slash → backslash on
+	// Windows) is consistent with every other path operation in the
+	// package. RepoRoot is what `git rev-parse --show-toplevel`
+	// returns, which on Windows is "F:/foo" (forward slashes);
+	// without the normalization the worktree path is a mixed-form
+	// string that confuses downstream `git worktree add` /
+	// `git worktree remove`.
+	repoRoot, _ = pathutil.NormalizeForOS(repoRoot)
+	parent := pathutil.Dir(repoRoot)
+	repoName := pathutil.Base(repoRoot)
+	return pathutil.Join(parent, repoName+"."+LabelPrefix, slug)
 }
 
 // BranchVariant returns a `-v2`/`-v3`/... variant of the branch

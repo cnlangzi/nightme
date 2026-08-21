@@ -28,6 +28,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/logging"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 func newCleanCmd() *cobra.Command {
@@ -84,7 +85,13 @@ func runCleanWithOptions(out io.Writer, all bool) error {
 	if err != nil {
 		return fmt.Errorf("clean: resolve log path: %w", err)
 	}
-	if abs, err := filepath.Abs(logPath); err == nil {
+	// F-PATHUTIL-001 §13.3.1: NormalizeForOS covers the
+	// Abs-equivalent AND the forward-slash → backslash fixup for
+	// Windows. cfg-supplied log paths in YAML commonly come in
+	// forward-slash form on Windows; without the Normalize, the
+	// daemon's log-rotation OpenFile rejects "F:/nightme/
+	// nightme.log" as a mixed-separator path.
+	if abs, err := pathutil.NormalizeForOS(logPath); err == nil {
 		logPath = abs
 	}
 	stderrPath, err := daemonStderrPath(cfg)
@@ -101,7 +108,8 @@ func runCleanWithOptions(out io.Writer, all bool) error {
 	if err != nil {
 		return fmt.Errorf("clean: resolve home: %w", err)
 	}
-	inboxDir := filepath.Join(home, ".nightme", "inbox")
+	// F-PATHUTIL-001 §13.3.1: pathutil.Join for the inbox path.
+	inboxDir := pathutil.Join(home, ".nightme", "inbox")
 
 	if all {
 		return cleanAll(out, cfg, logPath, stderrPath, inboxDir)
@@ -149,23 +157,33 @@ func cleanAll(
 		return err
 	}
 
+	// F-PATHUTIL-001: cfg.Paths.DataDir is user-supplied YAML
+	// and on Windows is commonly written with forward slashes
+	// (Git Bash / WSL habits). filepath.Abs converts a relative
+	// path to absolute; pathutil.NormalizeForOS then ensures
+	// Windows uses backslashes — otherwise dataPaths below
+	// produces mixed-separator entries that os.RemoveAll
+	// rejects.
 	dataDir := cfg.Paths.DataDir
 	if abs, err := filepath.Abs(dataDir); err == nil {
 		dataDir = abs
 	}
+	if n, err := pathutil.NormalizeForOS(dataDir); err == nil {
+		dataDir = n
+	}
 	dataPaths := []string{
-		filepath.Join(dataDir, "chat_sessions.json"),
-		filepath.Join(dataDir, "agent_sessions.json"),
-		filepath.Join(dataDir, "chat_sessions.json.bak"),
-		filepath.Join(dataDir, "agent_sessions.json.bak"),
-		filepath.Join(dataDir, "telegram_state.json"),
-		filepath.Join(dataDir, "registry.json"),
-		filepath.Join(dataDir, "registry.json.v1.bak"),
-		filepath.Join(dataDir, "version-check.json"),
-		filepath.Join(dataDir, "daemon.sock"),
-		filepath.Join(dataDir, "daemon.lock"),
-		filepath.Join(dataDir, "lifecycle.lock"),
-		filepath.Join(dataDir, "updates"),
+		pathutil.Join(dataDir, "chat_sessions.json"),
+		pathutil.Join(dataDir, "agent_sessions.json"),
+		pathutil.Join(dataDir, "chat_sessions.json.bak"),
+		pathutil.Join(dataDir, "agent_sessions.json.bak"),
+		pathutil.Join(dataDir, "telegram_state.json"),
+		pathutil.Join(dataDir, "registry.json"),
+		pathutil.Join(dataDir, "registry.json.v1.bak"),
+		pathutil.Join(dataDir, "version-check.json"),
+		pathutil.Join(dataDir, "daemon.sock"),
+		pathutil.Join(dataDir, "daemon.lock"),
+		pathutil.Join(dataDir, "lifecycle.lock"),
+		pathutil.Join(dataDir, "updates"),
 	}
 	for _, path := range dataPaths {
 		if err := removePath(out, path); err != nil {
@@ -182,7 +200,7 @@ func cleanAll(
 		".agent_sessions-*.tmp",
 		".telegram-state-*.tmp",
 	} {
-		matches, err := filepath.Glob(filepath.Join(dataDir, pattern))
+		matches, err := filepath.Glob(pathutil.Join(dataDir, pattern))
 		if err != nil {
 			return fmt.Errorf("clean: glob %s: %w", pattern, err)
 		}
@@ -204,7 +222,7 @@ func cleanAll(
 
 	// The inbox is always under the home .nightme directory. --all removes
 	// the directory itself, not just its contents.
-	if err := removePath(out, filepath.Dir(inboxDir)); err != nil {
+	if err := removePath(out, pathutil.Dir(inboxDir)); err != nil {
 		return err
 	}
 	return nil
@@ -269,7 +287,7 @@ func removeInbox(out io.Writer, dir string) error {
 	}
 	removed := 0
 	for _, e := range entries {
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+		if err := os.RemoveAll(pathutil.Join(dir, e.Name())); err != nil {
 			return fmt.Errorf("clean: remove %s (after %d/%d entries): %w", e.Name(), removed, len(entries), err)
 		}
 		removed++

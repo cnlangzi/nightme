@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -78,8 +78,11 @@ const nightmeDirName = ".nightme"
 const gtwYmlName = "gtw.yml"
 
 // gtwYmlPath is a small helper used by both Write and Read.
+// F-PATHUTIL-001 §13.3.1: route through pathutil.Join so the
+// platform-specific separator handling is consistent with every
+// other path operation in this package.
 func gtwYmlPath(worktreePath string) string {
-	return filepath.Join(worktreePath, nightmeDirName, gtwYmlName)
+	return pathutil.Join(worktreePath, nightmeDirName, gtwYmlName)
 }
 
 // ErrGtwYmlExists is returned by WriteGTWYml when the file is
@@ -106,7 +109,8 @@ var ErrGtwYmlExists = errors.New("gtw: .nightme/gtw.yml already exists")
 // `git worktree remove`. Keeping the write and the commit as
 // separate steps lets tests cover each one in isolation.
 func EnsureGitignore(worktreePath string) error {
-	giPath := filepath.Join(worktreePath, ".gitignore")
+	// F-PATHUTIL-001 §13.3.1: pathutil.Join for separator consistency.
+	giPath := pathutil.Join(worktreePath, ".gitignore")
 
 	existing, readErr := os.ReadFile(giPath)
 	if readErr != nil && !os.IsNotExist(readErr) {
@@ -209,6 +213,15 @@ func CommitGitignoreIfDirty(ctx context.Context, worktreePath string, git GitRun
 // signals an unfinished /gtw close (or a concurrent chat).
 // Callers should translate this into a "first run /gtw close"
 // reply and not silently overwrite.
+//
+// F-PATHUTIL-001 §13.3.1: yml is the durable path carrier;
+// normalize Worktree / RepoRoot at the write boundary so the
+// on-disk form is platform-canonical regardless of which OS
+// wrote it (git on Windows returns forward-slash paths, and a
+// mixed / inconsistent yml triggers downstream `git worktree
+// remove` "Invalid argument" errors). Normalize errors are
+// non-fatal here — we fall back to the raw string, matching
+// the read-side permissiveness.
 func WriteGTWYml(worktreePath string, c Context, now func() time.Time) error {
 	if worktreePath == "" {
 		return errors.New("gtw: WriteGTWYml: empty worktreePath")
@@ -224,12 +237,23 @@ func WriteGTWYml(worktreePath string, c Context, now func() time.Time) error {
 		return fmt.Errorf("stat gtw.yml: %w", err)
 	}
 
-	dir := filepath.Dir(target)
+	dir := pathutil.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir .nightme: %w", err)
 	}
 
 	doc := c.toYmlDoc(now().UTC())
+	// Normalize at the write boundary so the on-disk form is
+	// always the canonical OS-local form. ReadGTWYml also
+	// normalizes defensively (in case the yml was hand-edited
+	// or written by a different tool), but writing canonical
+	// means round-trip identity: read(p) == p.
+	if n, err := pathutil.NormalizeForOS(doc.Worktree); err == nil {
+		doc.Worktree = n
+	}
+	if n, err := pathutil.NormalizeForOS(doc.RepoRoot); err == nil {
+		doc.RepoRoot = n
+	}
 	out, err := yaml.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("marshal gtw.yml: %w", err)
@@ -246,6 +270,16 @@ func WriteGTWYml(worktreePath string, c Context, now func() time.Time) error {
 // a Context. Returns the underlying error (typically
 // os.ErrNotExist) if the file is missing — callers should treat
 // that as "no active fix in this worktree".
+//
+// F-PATHUTIL-001 §5.2: yml is the durable path carrier; both
+// Worktree and RepoRoot are Normalized at the read boundary so
+// downstream callers see the platform-canonical form regardless
+// of how the yml was written (git emits forward slashes on
+// Windows; some external tools emit backslashes; hand-edited
+// yml is anyone's guess). Without this normalization, a yml
+// written by `git rev-parse --show-toplevel` ("F:/...") is
+// passed verbatim to `git worktree remove`, which fails on
+// Windows with ERROR_INVALID_PARAMETER.
 func ReadGTWYml(worktreePath string) (Context, error) {
 	target := gtwYmlPath(worktreePath)
 	raw, err := os.ReadFile(target)
@@ -259,8 +293,25 @@ func ReadGTWYml(worktreePath string) (Context, error) {
 	if doc.RepoRoot == "" {
 		return Context{}, errors.New("gtw.yml: repoRoot is empty")
 	}
-	if !filepath.IsAbs(doc.RepoRoot) {
+	// F-PATHUTIL-001 §13.3.1: pathutil.IsAbs for cross-platform
+	// consistency. On Windows the absolute check accepts drive-
+	// rooted, root-relative, and UNC forms (the same set
+	// pathutil.NormalizeForOS produces).
+	if !pathutil.IsAbs(doc.RepoRoot) {
 		return Context{}, fmt.Errorf("gtw.yml: repoRoot %q is not an absolute path", doc.RepoRoot)
+	}
+	// Normalize at the yml boundary so every downstream caller
+	// (RunClose, deriveHookContext, preflightOrphanYml, …) can
+	// treat Worktree / RepoRoot as already-canonical. Errors
+	// from NormalizeForOS are non-fatal here: a malformed path
+	// is already a "yml is malformed" case, and the previous
+	// behaviour was to pass it through; we preserve that
+	// permissiveness rather than failing the read.
+	if n, err := pathutil.NormalizeForOS(doc.Worktree); err == nil {
+		doc.Worktree = n
+	}
+	if n, err := pathutil.NormalizeForOS(doc.RepoRoot); err == nil {
+		doc.RepoRoot = n
 	}
 	return doc.toContext(), nil
 }

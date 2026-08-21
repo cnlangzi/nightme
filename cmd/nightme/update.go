@@ -58,7 +58,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -67,6 +66,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
@@ -364,7 +364,15 @@ func resolveInstallVersion(dataDir, tag string) (string, error) {
 	if tag != "" {
 		return strings.TrimPrefix(tag, "v"), nil
 	}
-	updatesDir := filepath.Join(dataDir, "updates")
+	// F-PATHUTIL-001: cfg.Paths.DataDir is user-supplied via YAML
+	// and on Windows is commonly written with forward slashes
+	// (Git Bash / WSL habits). Normalize before joining so the
+	// staging directory comes out as "F:\nightme\updates" not
+	// "F:/nightme\updates" (which os.ReadDir on Windows rejects).
+	if n, err := pathutil.NormalizeForOS(dataDir); err == nil {
+		dataDir = n
+	}
+	updatesDir := pathutil.Join(dataDir, "updates")
 	entries, err := os.ReadDir(updatesDir)
 	if err != nil {
 		if os.IsNotExist(err) {

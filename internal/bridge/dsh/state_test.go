@@ -371,7 +371,7 @@ func TestWireState_ApplyTodoProjection_FieldNameDrift_SurfacesFailure(t *testing
 //   1. The items DO get skipped (so the production failure mode
 //      is detectable in tests, not hidden behind a passing test).
 //   2. wireState.unknownCount is bumped, so DumpWireStats surfaces
-//      the failure to ops via `nightme debug dsh dump-wire`.
+//      the failure to ops via the unknownCount column.
 //
 // If dsh's real wire is later probed and the field names are confirmed
 // wrong, the struct tags MUST be updated — keeping this test
@@ -411,8 +411,8 @@ func TestWireState_ApplyTodoWrite_FieldNameDrift_SurfacesFailure(t *testing.T) {
 
 	// The fix: when items get skipped due to wire drift, the
 	// silent failure must be visible in DumpWireStats so ops can
-	// see "bridge isn't picking up dsh's todos" via
-	// `nightme debug dsh dump-wire` (unknownCount column).
+	// see "bridge isn't picking up dsh's todos" via the
+	// unknownCount column.
 	unknownTotal, _ := st.DumpWireStats()
 	if unknownTotal == 0 {
 		t.Fatal("expected unknownCount > 0 after drifted-wire skip —\n"+

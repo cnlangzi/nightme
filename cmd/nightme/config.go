@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 func newConfigCmd() *cobra.Command {
@@ -238,6 +238,6 @@ func readLine(in io.Reader) string {
 // ensureParentDir is a small helper for code paths that write files
 // outside the standard config.Save path. Exported for test use.
 func ensureParentDir(path string) error {
-	dir := filepath.Dir(path)
+	dir := pathutil.Dir(path)
 	return os.MkdirAll(dir, 0o700)
 }

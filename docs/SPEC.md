@@ -674,7 +674,7 @@ Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现�
 - §1.3：Channel 不 import chatsession；决策卡 ≠ receipt card（Receipt 自治不变）
 - 不引入第二条「卡片专属」生命周期与 emoji reaction 分叉
 
-**实现细节**（button value 编码、action 目录、Feishu 视觉、`/gtw test` debug UAT）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md)。
+**实现细节**（button value 编码、action 目录、Feishu 视觉）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md)。
 
 ### 2.7 Reaction 路由
 
@@ -761,7 +761,7 @@ type ReactionRouter interface {
 - §2.6 决策卡 §2.6 不变式全部保留（按钮归一化、typed Choice、不引入第二条生命周期）
 - gateway 持有了 `ReactionRouter`，但只通过接口持有，不直接实现
 
-**实现细节**（ReactionRouter 的具体实现策略、gtw.Manager 注册时机、`/gtw test` UAT）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3 / §5。
+**实现细节**（ReactionRouter 的具体实现策略、gtw.Manager 注册时机）：见 [`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3 / §5。
 
 ---
 
@@ -1233,3 +1233,102 @@ Daemon 重启后（用户发送 SIGINT 然后再启 `nightme run`，v1.3 起）�
 ---
 
 ## 12. 文档层级
+---
+
+## 13. 跨平台类库使用规范（Cross-Platform Library Discipline）
+
+### 13.1 原则
+
+> **任何跨平台行为 / 平台相关行为的代码，必须集中在专门命名的包内；调用方禁止散落 `filepath.*`、`os/exec` 直连、或 `runtime.GOOS` 分支判断。**
+
+这条铁律源自 [`WINDOWS.md`](./WINDOWS.md) 中记录的多次"Windows 上 git 报错 `Invalid argument`"、"PowerShell 路径转换异常"等问题的根因——同一个平台问题被多个 caller 各自解决一遍,谁也没解决彻底。
+
+### 13.2 已有的跨平台类库（"集中营"）
+
+nightme 已经沉淀了几个跨平台类库,**任何新增代码碰到对应场景必须使用它们,禁止重复造轮子**:
+
+| 包 | 职责 | 关键 API |
+|----|------|---------|
+| `internal/proc` | 跨平台子进程 spawn 与 console 行为 | `proc.New(ctx, name, args...)`、`proc.HideWindow`、`proc.ComSpecOrDefault`、`proc.OpenTerminal` |
+| `internal/command/cwd` | `/cwd` 命令的 orchestration + OS 调用(`os.Stat` 校验目录存在性);**路径解析全部委托给 pathutil**(2026-08-21 迁移完成) | `verifyDirectory`(平台分流 OS 调用)、`expandTilde`(HOME 相对解析,这是 cwd 独有的语义) |
+| `internal/pathutil` *(本规范新增,见 [`feat/F-PATHUTIL-001.md`](./feat/F-PATHUTIL-001-unified-path.md))* | 统一的路径规范化、跨平台等价比较、子路径归属判断、IME/CJK 规范化 | `NormalizeForOS`、`NormalizeForGit`、`Equal`、`IsUnder`、`FromSlash`、`ToSlash`、`Clean`、`Join`、`IsAbs`、`Base`、`Dir`、`NormalizeInput`、`NormalizeIMRichText` |
+
+### 13.3 使用规则
+
+#### 13.3.1 路径相关 — **必须**走 `internal/pathutil`
+
+| 场景 | 必须用 | 禁止 |
+|------|--------|------|
+| 判断绝对路径 | `pathutil.IsAbs` 或 `NormalizeForOS` | `filepath.IsAbs` |
+| 拼接路径 | `pathutil.Join` | `filepath.Join` |
+| 清理路径字符串 | `pathutil.Clean` 或 `NormalizeForOS` | `filepath.Clean` |
+| 比较两个路径是否同一 | `pathutil.Equal` | `==`、`strings.EqualFold`、`filepath.Clean(a) == filepath.Clean(b)` |
+| 喂给 `git.Run` / 任何 git argv | `pathutil.NormalizeForGit` | 直接透传 |
+| 喂给 `os.Stat` / `os.Open` / 任何 OS 调用 | `pathutil.NormalizeForOS` | 直接透传 |
+| 转换分隔符 | `pathutil.FromSlash` / `ToSlash` | `filepath.FromSlash` / `filepath.ToSlash` |
+| 写进 yml / json 持久化 | `pathutil.NormalizeForOS` 之后再写 | 原样写 |
+| 从 yml / json 读出 | `pathutil.NormalizeForOS` 之后再用 | 原样用 |
+
+#### 13.3.2 子进程 spawn — **必须**走 `internal/proc`
+
+| 场景 | 必须用 | 禁止 |
+|------|--------|------|
+| 任何 `*exec.Cmd` 构造 | `proc.New(ctx, name, args...)` 或 `proc.NewWith(ctx, opts, ...)` | `exec.CommandContext(...)`、`exec.Command(...)` |
+| 需要新开可见终端窗口(tray 用) | `proc.OpenTerminal` | 手搓 `cmd /c start` |
+| Windows 下隐藏子进程 console | `proc.New` (默认 HideWindow=true) 或 `proc.HideWindow` | 手设 `syscall.SysProcAttr.CreationFlags \|= 0x08000000` |
+| 解析 `%ComSpec%` | `proc.ComSpecOrDefault` | `os.Getenv("ComSpec")` 加 fallback |
+
+#### 13.3.3 `/cwd` 命令专属 — 必须用 `internal/command/cwd`
+
+| 场景 | 必须用 | 禁止 |
+|------|--------|------|
+| 解析 `/cwd <arg>` 的原始输入 | `cwd::normalizePathInput` → `cwd::expandTilde` → `cwd::resolvePath` → `cwd::verifyDirectory` | 自写 `~` 展开、自写驱动判断、自写存在性检查 |
+
+### 13.4 反模式(出现一个就拒绝合并)
+
+```go
+// ❌ 错误:直接用 filepath 做平台相关判断
+if filepath.IsAbs(path) { ... }
+
+// ❌ 错误:在 caller 里做平台分流
+if runtime.GOOS == "windows" {
+    path = strings.ReplaceAll(path, "/", "\\")
+}
+
+// ❌ 错误:跨平台等价比较用字节级 ==
+if filepath.Clean(a) == filepath.Clean(b) { ... }   // Windows 上大小写敏感,误判
+
+// ❌ 错误:跨平台 spawn 用 exec.Command 直连
+cmd := exec.CommandContext(ctx, "git", args...)    // Windows 下不隐藏 console + .cmd shim 失败
+
+// ❌ 错误:把 yml 路径字段原样透传给 git
+git.Run(ctx, c.RepoRoot, "worktree", "remove", c.Worktree)   // 见 F-PATHUTIL-001
+```
+
+### 13.5 例外与边界
+
+- **`runtime.GOOS` 的合法使用**:仅在 `path_unix.go` / `path_windows.go` 这类**已存在的分流文件**内部;**禁止**在新 caller 里写 `if runtime.GOOS == ...`
+- **build tag 平台分流文件**:仅在 `internal/pathutil/`、`internal/proc/`、`internal/command/cwd/` 这三个包内允许新增 `//go:build windows` 文件;其它包遇到平台差异应**先考虑**在以上三个包内增加 helper
+- **测试例外**:`*_test.go` 里为验证 build-tag 行为可以临时用 `runtime.GOOS`,但不应在生产逻辑里用
+
+### 13.6 新增跨平台类库的流程
+
+如果发现现有三个包(`proc` / `cwd` / `pathutil`)都覆盖不到某个新场景,按以下流程处理:
+
+1. **先开 issue / discussion** 描述场景、为什么现有包不够
+2. **新建包** 命名遵循 `internal/<domain>`(如 `internal/terminal`、`internal/envutil`),不要在已存在的业务包里塞跨平台逻辑
+3. **写 feat spec** 在 `docs/feat/` 下,模板参考 [`feat/F-PATHUTIL-001.md`](./feat/F-PATHUTIL-001-unified-path.md)
+4. **更新本节** §13.2 的"已有的跨平台类库"表格,把新包登记进去
+5. **强制迁移** 已有 caller 到新包,禁止共存期超过一个 minor 版本
+
+### 13.7 历史教训(为何这条规范存在)
+
+记录几个真实发生过的"应该走集中类库但没走"的事件:
+
+1. **gtw close 在 Windows 报错 `Invalid argument`** — `git worktree remove` 收到带前斜杠的路径(`F:/...`),git 内部转换触发 `ERROR_INVALID_PARAMETER`。根因:yml 读端未规范化,调用方未走集中包。修复后归并到 `pathutil`。详见 [`feat/F-PATHUTIL-001.md`](./feat/F-PATHUTIL-001-unified-path.md) §1.1。
+2. **Windows console 黑框闪烁** — 早期 `exec.Command` 直连,未走 `proc.New`,子进程弹出可见 console。修复:`proc.New` 强制 `CREATE_NO_WINDOW`。
+3. **Windows 上 `.cmd` shim 无法启动** — `exec.CommandContext("claude.cmd", ...)` 触发 `ERROR_INVALID_PARAMETER`(`lpApplicationName` 不接受 `.cmd`)。修复:`proc::launchOnWindowsWith` 按扩展名路由(`cmd.exe /d /c` / `powershell.exe -File` / `node.exe`)。
+
+每多一个 caller 走捷径,就多一个潜在 bug 候补。规范的价值不在"代码变长",在"问题集中"。
+
+---

@@ -185,6 +185,15 @@ func launchOnWindowsWith(ctx context.Context, opts Options, resolved string, arg
 	return cmd
 }
 
+// SetCloseOnExec is a no-op on Windows. Handle inheritance is
+// opt-in there — CreateProcess only passes the handles Go
+// explicitly lists — so there is no inherited-descriptor leak
+// to disarm. See the Unix implementation (exec_unix.go) for the
+// flock-lifetime problem this solves on POSIX.
+func SetCloseOnExec(_ *os.File) error {
+	return nil
+}
+
 // HideWindow sets CreateNoWindow on the supplied SysProcAttr
 // and returns it (a fresh struct is allocated when attr is
 // nil, so callers can chain the assignment:

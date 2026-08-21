@@ -48,11 +48,11 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/httpclient"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"golang.org/x/mod/semver"
 )
 
@@ -115,7 +115,18 @@ func DefaultChecker(dataDir string) (*Checker, string) {
 		Now:        time.Now,
 	}
 	if dataDir != "" {
-		c.CachePath = filepath.Join(dataDir, "version-check.json")
+		// F-PATHUTIL-001 §13.3.1: pathutil.Join for cross-
+		// platform separator handling, AND NormalizeForOS on
+		// dataDir first because cfg.Paths.DataDir is user-
+		// supplied (YAML) and on Windows is commonly written
+		// with forward slashes (Git Bash / WSL copy-paste
+		// habits). Without the Normalize, filepath.Join would
+		// return "F:/foo\version-check.json" — a mixed-
+		// separator path that os.OpenFile on Windows rejects.
+		if n, err := pathutil.NormalizeForOS(dataDir); err == nil {
+			dataDir = n
+		}
+		c.CachePath = pathutil.Join(dataDir, "version-check.json")
 		return c, c.CachePath
 	}
 	return c, ""
@@ -336,7 +347,11 @@ func (c *Checker) writeCache(e cacheEntry) error {
 	if c.CachePath == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(c.CachePath), 0o700); err != nil {
+	// F-PATHUTIL-001 §13.3.1: pathutil.Dir for the cache parent.
+	// c.CachePath is already in canonical form (DefaultChecker
+	// NormalizeForOS'd dataDir before joining), so this is
+	// equivalent to filepath.Dir but keeps the rule honest.
+	if err := os.MkdirAll(pathutil.Dir(c.CachePath), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(e, "", "  ")

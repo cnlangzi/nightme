@@ -219,8 +219,8 @@ func (s *wireState) applyEventLocked(env sessionEventEnvelope) []agent.AgentEven
 // dLog at Debug (invisible in production) and still emit
 // EventAgentTaskCreate{Items:[]}, which Feishu renders as
 // "clear the checklist". Now the path logs at Warn AND bumps
-// wireState.unknownCount so `nightme debug dsh dump-wire` shows
-// the failure mode to ops.
+// wireState.unknownCount, which DumpWireStats exposes for ops
+// triage alongside the recent wire-frame ring buffer.
 func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.AgentEvent {
 	var data todoWriteData
 	if err := json.Unmarshal(env.Data, &data); err != nil {
@@ -245,9 +245,9 @@ func (s *wireState) applyTodoWriteLocked(env sessionEventEnvelope) []agent.Agent
 			// schema drift (todoItem struct json tags don't match
 			// dsh's real wire field names). Don't poison the map
 			// with an empty-string key (would collapse all such
-			// items into one), but DO surface the failure so ops
-			// can see "bridge isn't picking up dsh's todos" via
-			// nightme debug dsh dump-wire (unknownCount column).
+			// items into one), but DO surface the failure via
+			// DumpWireStats's unknownCount so ops can see
+			// "bridge isn't picking up dsh's todos".
 			skipped++
 			continue
 		}
@@ -528,8 +528,8 @@ func (s *wireState) incUnknown() {
 // current unknown-event counter and a chronological slice of the
 // last 64 raw mux frames.
 //
-// P4 observability. Called from a future debug command (e.g.
-// `nightme debug dsh dump-wire` — to be added separately).
+// P4 observability. Exposed for unit tests and any future
+// ops-facing surface; not currently wired to a CLI subcommand.
 func (s *wireState) DumpWireStats() (unknownCount uint64, frames []wireFrame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

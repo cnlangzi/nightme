@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/newcmd"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // statPath is the os.Stat function used by RunClose to detect
@@ -139,7 +139,19 @@ func RunClose(
 	// a transient or permission failure on a path that may
 	// still be there in a moment — preserve all state, surface
 	// the stat error as an IM reply, and let the user retry.
-	if _, statErr := statPath(selectedCwd); statErr != nil {
+	//
+	// F-PATHUTIL-001 §5.2: Normalize selectedCwd before stat so
+	// a SelectedCwd stored with forward slashes (the common
+	// form coming from `git rev-parse --show-toplevel` on
+	// Windows, and what auto-restored ChatSessions may carry)
+	// reaches os.Stat in canonical form. Without this, a path
+	// like "F:/foo" might stat-fail on a case-sensitive Win32
+	// API even though the directory exists.
+	normalizedCwd := selectedCwd
+	if n, err := pathutil.NormalizeForOS(selectedCwd); err == nil {
+		normalizedCwd = n
+	}
+	if _, statErr := statPath(normalizedCwd); statErr != nil {
 		if !os.IsNotExist(statErr) {
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ cannot reach workspace: %s\n(stat: %v)\n"+
@@ -148,8 +160,15 @@ func RunClose(
 					"agent sessions are left intact.", selectedCwd, statErr)), nil
 		}
 		cur := slot.Load()
+		// F-PATHUTIL-001 §5.2: same-case/same-slash comparison
+		// bug as the fix.go call sites — the slot was written
+		// with backslash form (WorktreePath → pathutil) but
+		// selectedCwd may carry forward slashes (auto-restored
+		// or pre-migration yml). pathutil.Equal collapses both
+		// axes so the "is this the chat's active worktree?"
+		// decision stays correct on Windows.
 		slotMatched := cur.Worktree != "" &&
-			filepath.Clean(cur.Worktree) == filepath.Clean(selectedCwd)
+			pathutil.Equal(cur.Worktree, selectedCwd)
 		// Always tear down ASes pinned to the unreachable path —
 		// they are orphaned regardless of slot state.
 		droppedN, _ := cs.EvictAgentSessionsInCwd(selectedCwd)
@@ -418,7 +437,7 @@ func assertWorktreeClean(ctx context.Context, dir string, deps HandlerDeps) erro
 	}
 	var body strings.Builder
 	body.WriteString("❌ worktree has uncommitted changes — commit or stash before closing:\n")
-	fmt.Fprintf(&body, "  %s\n", filepath.Join(dir, "(worktree)"))
+	fmt.Fprintf(&body, "  %s\n", pathutil.Join(dir, "(worktree)"))
 	for _, line := range preview {
 		fmt.Fprintf(&body, "  %s\n", line)
 	}

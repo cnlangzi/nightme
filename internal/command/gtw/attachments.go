@@ -8,11 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // downloadHTTPClient is the http.Client used by
@@ -55,11 +55,11 @@ func downloadAttachments(ctx context.Context, atts []IssueAttachment, destDir st
 		// Defensive: make sure filename can't escape destDir.
 		// Strip any path components (slashes, "..") that a
 		// malicious provider response could inject.
-		name = filepath.Base(name)
+		name = pathutil.Base(name)
 		if name == "." || name == "/" || name == "" {
 			name = fmt.Sprintf("attachment-%d", i)
 		}
-		dest := filepath.Join(destDir, name)
+		dest := pathutil.Join(destDir, name)
 
 		mimeType, body, err := fetchAttachment(ctx, att.URL)
 		if err != nil {
@@ -131,7 +131,7 @@ func fetchAttachment(ctx context.Context, url string) (string, []byte, error) {
 // writes — we don't want attachments showing up in `git
 // status` and tripping the /gtw close dirty check.
 func attachmentsDir(worktreePath string, issueID int) string {
-	return filepath.Join(worktreePath, nightmeDirName, "attachments",
+	return pathutil.Join(worktreePath, nightmeDirName, "attachments",
 		fmt.Sprintf("issue-%d", issueID))
 }
 

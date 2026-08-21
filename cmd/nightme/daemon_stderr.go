@@ -41,6 +41,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 const (
@@ -70,11 +71,21 @@ func daemonStderrPath(cfg *config.Config) (string, error) {
 	if cfg != nil && cfg.Paths.DataDir != "" {
 		dir = cfg.Paths.DataDir
 	}
+	// F-PATHUTIL-001: cfg.Paths.DataDir is user-supplied YAML
+	// and on Windows is commonly written with forward slashes
+	// (Git Bash / WSL habits). filepath.Abs converts a relative
+	// path to absolute; pathutil.NormalizeForOS then ensures the
+	// Windows form uses backslashes — otherwise the daemon-stderr
+	// path would land at "F:/nightme\daemon-stderr.log" and
+	// Win32 OpenFile rejects the mixed-separator form.
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve data dir %s: %w", dir, err)
 	}
-	return filepath.Join(abs, daemonStderrName), nil
+	if n, err := pathutil.NormalizeForOS(abs); err == nil {
+		abs = n
+	}
+	return pathutil.Join(abs, daemonStderrName), nil
 }
 
 // openDaemonStderr opens the capture file for append, rotating a
@@ -89,7 +100,7 @@ func openDaemonStderr(cfg *config.Config) (*os.File, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if dir := filepath.Dir(path); dir != "" {
+	if dir := pathutil.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, path, fmt.Errorf("create %s: %w", dir, err)
 		}

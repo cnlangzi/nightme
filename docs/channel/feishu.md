@@ -2080,8 +2080,6 @@ case gateway.OutReply, gateway.OutResult,
 - PATCH `/im/v1/messages/{id}` 端点不变，Feishu 自家 SDK
 
 **已知设计决定**：
-- `gtwTestSeedDraft` 必须设 `ChoiceRequestID: "gtw-test-" + userMsgID`——和 `sendScenarioCard` 的 RequestID 公式一致。PATCH 路径的 `buildInteractiveCard` 拿这个值，**没值就 fail "card missing request_id"**。
-- `/gtw test` 不 auto-dispatch——demo 模式让用户自己点。auto-mode 留给 `/gtw test auto <emoji>`。
 - `OutChoice`（出新卡）的 `ReplyTo` 缺省 empty（顶层卡）。`OutChoicePatch`（PATCH 已有卡）的 `ReplyTo` 必填 = bot card msg id。
 
 **不变式**：

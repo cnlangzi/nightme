@@ -18,7 +18,8 @@ package cwd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // resolvePath turns an already-tilde-expanded path into an
@@ -29,15 +30,24 @@ import (
 //
 //	/cwd /abs/path  → /abs/path
 //	/cwd foo        → $HOME/foo
+//
+// F-PATHUTIL-001 §13.3.3: path shape normalization goes through
+// pathutil; only the HOME-relative fallback (which pathutil
+// deliberately does NOT do — see F-PATHUTIL-001 §4.3) lives
+// here.
 func resolvePath(expanded string) (string, error) {
-	if filepath.IsAbs(expanded) {
-		return filepath.Abs(expanded)
+	abs, err := pathutil.NormalizeForOS(expanded)
+	if err != nil {
+		return "", err
+	}
+	if pathutil.IsAbs(abs) {
+		return abs, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", errHomeUnset(err)
 	}
-	return filepath.Abs(filepath.Join(home, expanded))
+	return pathutil.Join(home, expanded), nil
 }
 
 // verifyDirectory checks that abs is a directory the user can

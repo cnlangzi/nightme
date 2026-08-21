@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // HandleDraftReaction is the per-draft action router. It is called
@@ -331,8 +331,13 @@ func repoRootFromChatSession(cs *chatsession.ChatSession) string {
 	if cwd == "" {
 		return ""
 	}
-	worktreeParent := filepath.Dir(cwd)
-	if strings.HasSuffix(filepath.Base(worktreeParent), ".nightme") {
+	// F-PATHUTIL-001 §13.3.1: pathutil.Dir / pathutil.Base for
+	// sibling-worktree detection. cwd comes from SelectedCwd
+	// (already-normalized) so the result is equivalent to
+	// filepath.*; using pathutil keeps the rule "no caller
+	// inlines filepath" honest.
+	worktreeParent := pathutil.Dir(cwd)
+	if strings.HasSuffix(pathutil.Base(worktreeParent), ".nightme") {
 		return strings.TrimSuffix(worktreeParent, ".nightme")
 	}
 	return worktreeParent

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // GitRunner abstracts the git CLI. The default implementation uses
@@ -292,8 +294,8 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	if err != nil {
 		return "", "", fmt.Errorf("git rev-parse --git-common-dir in %s: %w", repoRoot, err)
 	}
-	gitDir := filepath.Clean(filepath.Join(repoRoot, strings.TrimSpace(gitDirRaw)))
-	commonDir := filepath.Clean(filepath.Join(repoRoot, strings.TrimSpace(commonDirRaw)))
+	gitDir := pathutil.Clean(pathutil.Join(repoRoot, strings.TrimSpace(gitDirRaw)))
+	commonDir := pathutil.Clean(pathutil.Join(repoRoot, strings.TrimSpace(commonDirRaw)))
 	if gitDir != commonDir {
 		return "", "", fmt.Errorf(
 			"❌ %s is a linked worktree; default-branch refresh must run from the primary checkout. /cwd into the main repo first.",
@@ -386,11 +388,32 @@ func WorktreeListPath(ctx context.Context, dir, branch string, git GitRunner) (s
 //
 // when newBranch is empty (used by the §5.3.1 "join existing"
 // branch of the decision card, where the branch already exists).
+// F-PATHUTIL-001 §5.2: the worktree path is Normalized for git
+// before being added to argv. On Windows, a yml-derived
+// `c.Worktree` of "F:/foo" (forward slashes from git's
+// rev-parse output) would otherwise reach `git worktree add` as
+// "F:/foo" and trigger the same ERROR_INVALID_PARAMETER class of
+// errors that WorktreeRemove used to hit.
+//
+// An empty path is a hard error here (not silently forwarded to
+// git): it indicates an upstream caller passed a malformed value,
+// and the user-visible git error would be opaque. Wrap the
+// NormalizeForGit error in the WorktreeError shape so the
+// /gtw fix/close path produces a clear error reply instead
+// of "fatal: ".
 func WorktreeAdd(ctx context.Context, dir, newBranch, path, base string, git GitRunner) error {
 	args := []string{"worktree", "add"}
 	if newBranch != "" {
 		args = append(args, "-b", newBranch)
 	}
+	np, err := pathutil.NormalizeForGit(path)
+	if err != nil {
+		return &WorktreeError{
+			Op:  "worktree_add",
+			Err: fmt.Errorf("normalize worktree path %q: %w", path, err),
+		}
+	}
+	path = np
 	args = append(args, path)
 	if base != "" {
 		args = append(args, base)
@@ -420,6 +443,21 @@ func WorktreeAdd(ctx context.Context, dir, newBranch, path, base string, git Git
 // too, so the user can opt into destroying uncommitted edits in one
 // flag.
 //
+// F-PATHUTIL-001 §5.2 (regression for the gtw-close "Invalid
+// argument" bug on Windows): the worktree path is Normalized for
+// git before being added to argv. Without this, a yml whose
+// `Worktree` is "F:/foo" (forward slashes from git's
+// `rev-parse --show-toplevel` output) is passed verbatim to git,
+// which forwards it to RemoveDirectoryW as-is and fails with
+// ERROR_INVALID_PARAMETER. NormalizeForGit forces backslash
+// form on Windows.
+//
+// Empty-path is a hard error: same rationale as WorktreeAdd —
+// the yml field is mandatory (ReadGTWYml validates Worktree !=
+// "") so reaching here with "" is an upstream bug, and we'd
+// rather say so than forward "git worktree remove ''" and get
+// a cryptic "fatal: " from git.
+//
 // On failure the returned *WorktreeError carries the git stderr
 // tail so the caller can render a useful "why did it fail" reply.
 func WorktreeRemove(ctx context.Context, dir, path string, force bool, git GitRunner) error {
@@ -427,6 +465,14 @@ func WorktreeRemove(ctx context.Context, dir, path string, force bool, git GitRu
 	if force {
 		args = append(args, "--force")
 	}
+	np, err := pathutil.NormalizeForGit(path)
+	if err != nil {
+		return &WorktreeError{
+			Op:  "worktree_remove",
+			Err: fmt.Errorf("normalize worktree path %q: %w", path, err),
+		}
+	}
+	path = np
 	args = append(args, path)
 	_, stderr, err := git.Run(ctx, dir, args...)
 	if err != nil {
@@ -527,7 +573,7 @@ func PreflightWorktreeCreate(ctx context.Context, repoRoot, branch, worktreePath
 		return fmt.Errorf("stat worktree path %q: %w", worktreePath, err)
 	}
 
-	parent := filepath.Dir(worktreePath)
+	parent := pathutil.Dir(worktreePath)
 	parentInfo, parentStatErr := os.Stat(parent)
 	switch {
 	case parentStatErr == nil:
@@ -545,7 +591,7 @@ func PreflightWorktreeCreate(ctx context.Context, repoRoot, branch, worktreePath
 		// missing parent is fine — as long as the GRANDPARENT
 		// (the directory that would contain the to-be-created
 		// parent) is writable. Probe writability there.
-		grandparent := filepath.Dir(parent)
+		grandparent := pathutil.Dir(parent)
 		probeDir, err := os.MkdirTemp(grandparent, ".gtw-grandparent-probe-*")
 		if err != nil {
 			return fmt.Errorf(

@@ -112,49 +112,13 @@ func TestResolvePath_UNC(t *testing.T) {
 	}
 }
 
-// TestIsWindowsDriveRel exhaustively covers the helper
-// that drives the drive-relative rejection. It lives in
-// this Windows-only file because isWindowsDriveRel is
-// defined in path_windows.go; the function is pure so
-// the table stays easy to audit.
-func TestIsWindowsDriveRel(t *testing.T) {
-	tests := []struct {
-		in   string
-		want bool
-	}{
-		// Drive-relative — should be rejected.
-		{"C:", true},
-		{"C:foo", true},
-		{"C:.", true},
-		{"C:..", true},
-		{"c:", true}, // case-insensitive
-		{"c:foo", true},
-		{"Z:foo", true},
-
-		// Drive-rooted — should NOT be rejected.
-		{"C:\\foo", false},
-		{"C:/foo", false},
-		{"C:\\", false},
-		{"C:/", false},
-		{"c:\\foo", false},
-		{"c:/foo", false},
-
-		// Not drive paths at all.
-		{"", false},
-		{"/foo", false},
-		{"\\foo", false},
-		{"foo", false},
-		{":foo", false},    // not a drive letter
-		{"1:foo", false},   // digit prefix
-		{"\\C:foo", false}, // separator first
-		{"\\\\server\\share", false},
-	}
-	for _, tc := range tests {
-		if got := isWindowsDriveRel(tc.in); got != tc.want {
-			t.Errorf("isWindowsDriveRel(%q) = %v, want %v", tc.in, got, tc.want)
-		}
-	}
-}
+// TestIsWindowsDriveRel: REMOVED in F-PATHUTIL-001. The helper
+// lived here to drive resolvePath's drive-relative rejection;
+// after F-PATHUTIL-001 it lives in internal/pathutil/
+// path_windows.go::isWindowsDriveRel (tested in
+// internal/pathutil/path_windows_test.go::TestIsWindowsDriveRel
+// with the same exhaustive table). Keeping it here would
+// require a parallel implementation; the test is in pathutil now.
 
 // TestVerifyDirectory_DriveRoot covers the Windows drive
 // root case (C:\). The drive root IS a directory and must

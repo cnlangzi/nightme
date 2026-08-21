@@ -5,10 +5,13 @@ package proc
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // CreateNoWindow is a build-time placeholder on non-Windows
@@ -57,6 +60,32 @@ func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd
+}
+
+// SetCloseOnExec arms FD_CLOEXEC on f's descriptor so it is NOT
+// inherited by processes this one later execs.
+//
+// The caller that needs this is anyone adopting a descriptor
+// handed over via exec.Cmd.ExtraFiles: forkExec deliberately
+// clears FD_CLOEXEC on those so the child can see them, and
+// os.NewFile does not re-arm it. A long-lived daemon that spawns
+// subprocesses (shell !cmd, gtw hooks, agent bridges) would
+// otherwise leak the descriptor into every one of them — which
+// matters most for flock, whose lock is bound to the open file
+// description and therefore outlives the daemon as long as any
+// descendant still holds a copy.
+//
+// No-op on Windows (see exec_windows.go): CreateProcess only
+// passes explicitly-listed handles, so there is nothing to
+// disarm.
+func SetCloseOnExec(f *os.File) error {
+	if f == nil {
+		return nil
+	}
+	if _, err := unix.FcntlInt(f.Fd(), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+		return fmt.Errorf("set FD_CLOEXEC: %w", err)
+	}
+	return nil
 }
 
 // HideWindow is a no-op on non-Windows platforms. The Windows

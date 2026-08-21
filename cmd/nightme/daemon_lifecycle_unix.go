@@ -215,6 +215,16 @@ func runDaemonChild(cmd *cobra.Command, reg *cmdRegistry) (retErr error) {
 		return errors.New("open daemon readiness pipe")
 	}
 	defer readyFile.Close()
+	// Same inherited-fd hazard as the lock above (armed inside
+	// daemoncontrol.LockFromFile): the write end of the readiness
+	// pipe arrives without FD_CLOEXEC. Any subprocess spawned
+	// before OnReady fires would hold a copy, so the parent's
+	// readyR would never see EOF even if this daemon died — the
+	// parent would sit out the full 15s startupWait instead of
+	// reporting the real crash.
+	if err := proc.SetCloseOnExec(readyFile); err != nil {
+		return fmt.Errorf("arm readiness pipe: %w", err)
+	}
 	writeBootstrap := func(msg bootstrapMessage) {
 		_ = json.NewEncoder(readyFile).Encode(msg)
 		_ = readyFile.Close()

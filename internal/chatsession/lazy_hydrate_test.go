@@ -29,9 +29,9 @@ func TestGetOrCreate_LazyHydrateFromCSFile(t *testing.T) {
 	// Pre-seed a persisted entry for chatID "oc_xxx" (feishu
 	// namespace). The in-memory Manager has nothing.
 	entry := &registry.ChatSessionEntry{
-		ID:           "cs_1",
-		ChatID:       "oc_xxx",
-		SelectedCwd:  "/code/bailing",
+		ID:            "cs_1",
+		ChatID:        "oc_xxx",
+		SelectedCwd:   "/code/bailing",
 		SelectedAgent: "claude",
 		PrimaryAgent:  "claude",
 		WatchMode:     0, // default = Mention
@@ -90,8 +90,8 @@ func TestGetOrCreate_NoEagerRestore(t *testing.T) {
 	// Pre-seed 5 entries.
 	for i := 0; i < 5; i++ {
 		if err := csFile.Save(&registry.ChatSessionEntry{
-			ID:          "cs_" + string(rune('a'+i)),
-			ChatID:      "oc_" + string(rune('a'+i)),
+			ID:           "cs_" + string(rune('a'+i)),
+			ChatID:       "oc_" + string(rune('a'+i)),
 			PrimaryAgent: "claude",
 		}); err != nil {
 			t.Fatalf("csFile.Save: %v", err)
@@ -113,10 +113,9 @@ func TestGetOrCreate_NoEagerRestore(t *testing.T) {
 	}
 }
 
-// TestHydrateFromEntry_AgentSessionPool verifies that the
-// AgentSession pool is restored on hydrate (Detached state;
-// LookupSelectedAgentSession will re-spawn). The pool entries
-// must be returned by cs.AgentSessionsInCwd after hydrate.
+// TestHydrateFromEntry_AgentSessionPool verifies that hydrate leaves
+// the active pool empty and Lookup mounts the matching persisted AS
+// through the process-wide warm pool.
 func TestHydrateFromEntry_AgentSessionPool(t *testing.T) {
 	dir := t.TempDir()
 	csFile, err := chatstore.New(filepath.Join(dir, "chat_sessions.json"))
@@ -130,9 +129,9 @@ func TestHydrateFromEntry_AgentSessionPool(t *testing.T) {
 
 	// Pre-seed cs + as entries.
 	csEntry := &registry.ChatSessionEntry{
-		ID:          "cs_pool",
-		ChatID:      "oc_pool",
-		SelectedCwd: "/code/x",
+		ID:           "cs_pool",
+		ChatID:       "oc_pool",
+		SelectedCwd:  "/code/x",
 		PrimaryAgent: "claude",
 	}
 	if err := csFile.Save(csEntry); err != nil {
@@ -149,15 +148,31 @@ func TestHydrateFromEntry_AgentSessionPool(t *testing.T) {
 		t.Fatalf("asFile.Upsert: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	pool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(pool)
 	cs, err := mgr.GetOrCreate("oc_pool", "claude")
 	if err != nil {
 		t.Fatalf("GetOrCreate: %v", err)
 	}
 
+	if got := len(cs.Pool()); got != 0 {
+		t.Fatalf("pool after hydrate: got %d, want 0 until Lookup", got)
+	}
+	as, err := cs.LookupSelectedAgentSession()
+	if err != nil {
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
+	}
+	if as.ID != asEntry.ID {
+		t.Fatalf("mounted AS ID = %q, want persisted %q", as.ID, asEntry.ID)
+	}
+	if pool.Get("oc_pool", "/code/x", "claude") != as {
+		t.Fatal("Lookup did not register the hydrated AS in AgentSessionPool")
+	}
 	agents := cs.AgentSessionsInCwd("/code/x")
 	if len(agents) != 1 {
-		t.Fatalf("AgentSessionsInCwd: got %d, want 1 (entry should be hydrated)", len(agents))
+		t.Fatalf("AgentSessionsInCwd after Lookup: got %d, want 1", len(agents))
 	}
 	// AgentSession's Agent field is the type alias (string)
 	// representing the agent name. Hydration must preserve it.

@@ -428,6 +428,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		spawner:       spawner,
 		csFile:        csFile,
 		asFile:        asFile,
+		asPool:        chatsession.NewAgentSessionPool(),
 		primaryAgent:  cfg.Primary,
 		gitStatusDeps: gitStatusDeps,
 		logger:        logger,
@@ -527,18 +528,13 @@ var (
 // shouldn't happen — the mgr's own persistence layer is the
 // source of truth; failing means csFile is corrupt).
 func findChatSession(chatID, primaryAgent string) *chatsession.ChatSession {
+	_ = primaryAgent // retained for call-site compatibility; never creates
 	allMgrsMu.RLock()
 	mgrs := append([]*chatsession.Manager(nil), allMgrs...)
 	allMgrsMu.RUnlock()
 
 	for _, mgr := range mgrs {
 		if cs := mgr.Get(chatID); cs != nil {
-			return cs
-		}
-	}
-	for _, mgr := range mgrs {
-		cs, err := mgr.GetOrCreate(chatID, primaryAgent)
-		if err == nil && cs != nil {
 			return cs
 		}
 	}
@@ -553,6 +549,7 @@ type buildStackOpts struct {
 	spawner       chatsession.Spawner
 	csFile        *chatstore.Store
 	asFile        *registry.AgentSessionFile
+	asPool        *chatsession.AgentSessionPool // process-wide; shared across Managers
 	primaryAgent  string
 	gitStatusDeps chatsession.GitStatusDeps
 	logger        *slog.Logger
@@ -583,6 +580,7 @@ func buildStack(
 	mgr := chatsession.NewManager().
 		WithSpawner(opts.spawner).
 		WithPersistence(opts.csFile, opts.asFile).
+		WithAgentSessionPool(opts.asPool).
 		WithPrimaryAgent(opts.primaryAgent).
 		WithGitStatusDeps(opts.gitStatusDeps)
 

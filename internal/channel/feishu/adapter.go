@@ -3845,11 +3845,17 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return nil
 	}
-	message := event.Event.Message
-	chatID := stringValue(message.ChatId)
+	// F-fix-feishu-chat-id: chatID extraction is the single source of
+	// truth — SessionChatID is a pure function of the incoming event.
+	// All three inbound paths (handleMessage / handleReactionCreated /
+	// handleCardAction) route through this builder so the same chat
+	// always produces the same chatID, regardless of which event family
+	// nightme sees first. See docs/channel/feishu.md "chatID = sessionChatID".
+	chatID := SessionChatID(receiveV1Source{event: event})
 	if chatID == "" {
 		return nil
 	}
+	message := event.Event.Message
 	content := stringValue(message.Content)
 	msgType := stringValue(message.MessageType)
 	text, attachments, blocks := extractAttachments(msgType, content)
@@ -4098,9 +4104,12 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 	}
 	// chat_id lives at the top level of the JSON envelope in
 	// the SDK's Body field (not in any typed struct field).
-	// Parse it once here rather than plumbing a generic raw
-	// access path through the gateway layer.
-	chatID := extractReactionChatID(event)
+	// SessionChatID routes through the same builder as the other
+	// inbound events — the actual envelope parsing is delegated
+	// to reactionV3Source.EnvelopeChatID (which calls
+	// extractReactionChatID internally). See
+	// docs/channel/feishu.md "chatID = sessionChatID".
+	chatID := SessionChatID(reactionV3Source{event: event})
 
 	if messageID == "" || chatID == "" {
 		a.logger.Debug("feishu: reaction event missing message_id or chat_id; dropping",
@@ -4192,9 +4201,14 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 	}
 
 	// Unknown / no prefix — fall back to the F-46 prototype log so
-	// future extensions can still see the click in stdout.
-	log.Printf("feishu: card action received chat=%s action=%s",
-		req.Context.OpenChatID, actionStr)
+	// future extensions can still see the click in stdout. Skip
+	// the log when no chatID is resolvable (Context is nil) since
+	// there's no useful target to log and "chat=" is noise.
+	chatID := SessionChatID(cardActionSource{event: event})
+	if chatID != "" {
+		log.Printf("feishu: card action received chat=%s action=%s",
+			chatID, actionStr)
+	}
 	return &larkcallback.CardActionTriggerResponse{
 		Toast: &larkcallback.Toast{
 			Type:    "info",
@@ -4270,7 +4284,7 @@ func (a *Adapter) handleActCardAction(
 		}, nil
 	}
 
-	chatID := event.Event.Context.OpenChatID
+	chatID := SessionChatID(cardActionSource{event: event})
 	botMsgID := event.Event.Context.OpenMessageID
 	userID := ""
 	if event.Event.Operator != nil {
@@ -4361,7 +4375,7 @@ func (a *Adapter) handleOptCardAction(
 		}, nil
 	}
 
-	chatID := event.Event.Context.OpenChatID
+	chatID := SessionChatID(cardActionSource{event: event})
 	botMsgID := event.Event.Context.OpenMessageID
 	userID := ""
 	if event.Event.Operator != nil {
@@ -4872,18 +4886,12 @@ func messageTime(value *string) time.Time {
 	return time.Now()
 }
 
-func stringValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
-// extractReactionChatID pulls the chat_id from the raw JSON
-// envelope of a `im.message.reaction.created_v1` event. The
-// typed SDK struct (P2MessageReactionCreatedV1Data) does not
-// expose chat_id, but the underlying JSON does — it's a sibling
-// of `event` in the wrapper body.
+// extractReactionChatID is the internal helper for the
+// reaction-v3 envelope path. It pulls the chat_id from the raw
+// JSON envelope of a `im.message.reaction.created_v1` event,
+// because the typed SDK struct (P2MessageReactionCreatedV1Data)
+// does not expose chat_id as a typed field — it's a sibling of
+// `event` in the raw envelope body.
 //
 // The expected shape is:
 //
@@ -4893,16 +4901,25 @@ func stringValue(value *string) string {
 // source v3.9.9.)
 //
 // Returns "" if the event, its body, or the chat_id field is
-// missing or malformed. The caller treats "" as a drop.
+// missing or malformed. The caller (reactionV3Source.EnvelopeChatID)
+// treats "" as a drop.
+//
+// This is **not** the entry point for chatID extraction. The
+// entry point is SessionChatID (in session_chatid.go), which
+// routes through reactionV3Source.EnvelopeChatID → this function.
+// All three Feishu inbound handlers (handleMessage /
+// handleReactionCreated / handleCardAction) route through that
+// single builder, so the same chat always produces the same
+// chatID. See docs/channel/feishu.md "chatID = sessionChatID".
 func extractReactionChatID(event *larkim.P2MessageReactionCreatedV1) string {
-	if event == nil || len(event.Body) == 0 {
+	if event == nil || event.EventReq == nil || len(event.EventReq.Body) == 0 {
 		return ""
 	}
 	// We only need chat_id; avoid unmarshalling the whole event.
 	var wrap struct {
 		ChatID string `json:"chat_id"`
 	}
-	if err := json.Unmarshal(event.Body, &wrap); err != nil {
+	if err := json.Unmarshal(event.EventReq.Body, &wrap); err != nil {
 		return ""
 	}
 	return wrap.ChatID

@@ -196,13 +196,14 @@ func TestFindChatSession_RoutesChatToFirstMgr(t *testing.T) {
 	alpha := allMgrs[0]
 	beta := allMgrs[1]
 
-	// The chatID is namespaced per channel in production; in
-	// this test both mgrs hydrate on the first findChatSession
-	// call. The first mgr (alpha) wins. Beta must not own the
-	// chat.
+	// findChatSession is Get-only (docs/CHATSTORE.md); create via
+	// the owning channel's Manager first.
+	if _, err := alpha.GetOrCreate("shared_chat", "claude"); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
 	cs := findChatSession("shared_chat", "claude")
 	if cs == nil {
-		t.Fatal("findChatSession: no chat created")
+		t.Fatal("findChatSession: expected existing chat")
 	}
 	if alpha.Get("shared_chat") == nil {
 		t.Error("alpha should own shared_chat")

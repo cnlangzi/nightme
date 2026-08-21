@@ -12,9 +12,9 @@
 package chatsession
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -34,7 +34,9 @@ import (
 func makeHintTestManager(t *testing.T, storePath string) (*Manager, *testEmitter, *chatstore.Store) {
 	t.Helper()
 	em := &testEmitter{}
-	mgr := NewManager().WithEmitter(em)
+	mgr := NewManager().
+		WithEmitter(em).
+		WithPrimaryAgent("claude")
 	var csFile *chatstore.Store
 	if storePath != "" {
 		f, err := chatstore.New(storePath)

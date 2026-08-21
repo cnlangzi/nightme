@@ -5,18 +5,27 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
+func mountPersistedASForTest(t *testing.T, cs *ChatSession, pool *AgentSessionPool, asFile *registry.AgentSessionFile, chatID, asID string) *AgentSession {
+	t.Helper()
+	entry, ok := asFile.Get(asID)
+	if !ok {
+		t.Fatalf("persisted AS %s missing", asID)
+	}
+	as := FromAgentSessionEntry(entry)
+	pool.Put(chatID, as)
+	cs.mu.Lock()
+	cs.attachAgentSessionLocked(as)
+	cs.selectAgentSessionLocked(as)
+	cs.mu.Unlock()
+	return as
+}
+
 // TestRestoreFromRegistry_HydratesASInMemoryNotQueue asserts that
-// an AgentSessionEntry written with non-empty InFlightMessages is
-// re-hydrated into the AS's in-memory mirror at restore, but is
-// NOT pushed back into cs.queue (F-62 §3.3.1). The AS keeps the
-// SessionID verbatim so the next Spawn can issue --resume. The
-// in-flight mirror is then cleared by the next chat-session "new
-// session" boundary (SetSelectedCwd / SetSelectedAgent /
-// LookupSelectedAgentSession hadPrior).
+// restore leaves cs.pool and cs.queue empty. Rebuilding the persisted
+// entry for lazy mounting preserves its in-flight mirror and SessionID.
 func TestRestoreFromRegistry_HydratesASInMemoryNotQueue(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	chatID := "oc_replay"
@@ -54,7 +63,10 @@ func TestRestoreFromRegistry_HydratesASInMemoryNotQueue(t *testing.T) {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -71,18 +83,12 @@ func TestRestoreFromRegistry_HydratesASInMemoryNotQueue(t *testing.T) {
 		t.Errorf("F-62: cs.queue after restore = %v, want empty (no replay)", got)
 	}
 
-	// AS is in the pool with original identity and SessionID.
-	pool := cs.Pool()
-	var found *agentsession.AgentSession
-	for _, as := range pool {
-		if as.ID == asID {
-			found = as
-			break
-		}
+	if got := len(cs.Pool()); got != 0 {
+		t.Fatalf("active pool after restore = %d, want 0 until Lookup", got)
 	}
-	if found == nil {
-		t.Fatalf("AS %s not in pool after restore", asID)
-	}
+	entry, _ := asFile.Get(asID)
+	found := FromAgentSessionEntry(entry)
+	globalPool.Put(chatID, found)
 	if found.SessionID() != "sess-resume-xyz" {
 		t.Errorf("restored SessionID = %q, want sess-resume-xyz", found.SessionID())
 	}
@@ -120,7 +126,10 @@ func TestRestoreFromRegistry_LegacyEntryWithoutInFlightMessages(t *testing.T) {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -156,7 +165,10 @@ func TestRestoreFromRegistry_EmptyInFlightSlice(t *testing.T) {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -171,13 +183,9 @@ func TestRestoreFromRegistry_EmptyInFlightSlice(t *testing.T) {
 }
 
 // TestRestoreFromRegistry_MultipleAgentSessionsEachHydrateOwn
-// asserts that when multiple ASes coexist in one chat (different
-// (agent, cwd) tuples), each AS re-hydrates its own in-flight
-// mirror at restore — but cs.queue stays empty (F-62 §3.3.1). The
-// "new session" boundary (SetSelectedCwd / SetSelectedAgent /
-// LookupSelectedAgentSession hadPrior) is what decides which
-// (agent, cwd)'s in-flight lives or dies; restore itself does not
-// decide routing.
+// asserts that multiple persisted ASes remain independent while
+// restore leaves the active pool and queue empty. Lazy rebuilding
+// preserves each entry's own in-flight mirror.
 func TestRestoreFromRegistry_MultipleAgentSessionsEachHydrateOwn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	chatID := "oc_multi"
@@ -213,7 +221,10 @@ func TestRestoreFromRegistry_MultipleAgentSessionsEachHydrateOwn(t *testing.T) {
 		t.Fatalf("Upsert as_b: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -230,18 +241,18 @@ func TestRestoreFromRegistry_MultipleAgentSessionsEachHydrateOwn(t *testing.T) {
 		t.Errorf("F-62: cs.queue after restore = %v, want empty", got)
 	}
 
-	// Each AS holds its own in-flight in memory; both are preserved
-	// until one of them is selected and the (agent, cwd) boundary
-	// fires (ClearInFlight on the off-focus AS).
-	byIDs := map[string]*agentsession.AgentSession{}
-	for _, as := range cs.Pool() {
-		byIDs[as.ID] = as
+	if got := len(cs.Pool()); got != 0 {
+		t.Fatalf("active pool after restore = %d, want 0 until Lookup", got)
 	}
-	if a := byIDs["as_a"]; a == nil || len(a.Entry().InFlightMessages) != 1 ||
+	for _, id := range []string{"as_a", "as_b"} {
+		entry, _ := asFile.Get(id)
+		globalPool.Put(chatID, FromAgentSessionEntry(entry))
+	}
+	if a := globalPool.Get(chatID, "/code/A", "claude"); a == nil || len(a.Entry().InFlightMessages) != 1 ||
 		a.Entry().InFlightMessages[0].ID != "m_a_1" {
 		t.Errorf("as_a in-flight = %+v, want [m_a_1]", a)
 	}
-	if b := byIDs["as_b"]; b == nil || len(b.Entry().InFlightMessages) != 1 ||
+	if b := globalPool.Get(chatID, "/code/B", "codex"); b == nil || len(b.Entry().InFlightMessages) != 1 ||
 		b.Entry().InFlightMessages[0].ID != "m_b_1" {
 		t.Errorf("as_b in-flight = %+v, want [m_b_1]", b)
 	}
@@ -257,13 +268,13 @@ func TestRestoreFromRegistry_MultipleAgentSessionsEachHydrateOwn(t *testing.T) {
 // TestRestoreFromRegistry_ResumeAfterSpawnClearsInFlight asserts
 // the end-to-end F-62 contract:
 //
-//   1. RestoreFromRegistry hydrates the AS in-memory mirror only;
-//      cs.queue stays empty.
-//   2. The next LookupSelectedAgentSession on the hadPrior branch
-//      (F-62 §3.3.3) clears the AS's in-flight mirror and persists
-//      the empty state — Spawn then resolves with the captured
-//      SessionID preserved (so --resume works), but the abandoned
-//      message is gone before any new TryFlush can pick it up.
+//  1. RestoreFromRegistry hydrates the AS in-memory mirror only;
+//     cs.queue stays empty.
+//  2. The next LookupSelectedAgentSession on the hadPrior branch
+//     (F-62 §3.3.3) clears the AS's in-flight mirror and persists
+//     the empty state — Spawn then resolves with the captured
+//     SessionID preserved (so --resume works), but the abandoned
+//     message is gone before any new TryFlush can pick it up.
 func TestRestoreFromRegistry_ResumeAfterSpawnClearsInFlight(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	chatID := "oc_resume"
@@ -342,7 +353,6 @@ func TestRestoreFromRegistry_ResumeAfterSpawnClearsInFlight(t *testing.T) {
 	}
 }
 
-
 // TestSetSelectedCwd_ClearsOldASInFlight asserts the F-62 §3.3.2
 // contract: when the user /cwd's to a different workspace, the
 // previously-selected AS's in-flight mirror is cleared (in-memory
@@ -395,7 +405,10 @@ func TestSetSelectedCwd_ClearsOldASInFlight(t *testing.T) {
 		t.Fatalf("Upsert new AS: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -409,6 +422,9 @@ func TestSetSelectedCwd_ClearsOldASInFlight(t *testing.T) {
 	if err := cs.SetSelectedCwd("/code/A"); err != nil {
 		t.Fatalf("initial SetSelectedCwd: %v", err)
 	}
+	oldAS := mountPersistedASForTest(t, cs, globalPool, asFile, chatID, oldASID)
+	newAS := FromAgentSessionEntry(newEntry)
+	globalPool.Put(chatID, newAS)
 
 	// Now /cwd to /code/B — the chat-session "new session"
 	// boundary. F-62 §3.3.2 must clear the old AS's in-flight.
@@ -416,17 +432,11 @@ func TestSetSelectedCwd_ClearsOldASInFlight(t *testing.T) {
 		t.Fatalf("switch SetSelectedCwd: %v", err)
 	}
 
-	// Find the old AS in the pool and verify its in-flight
-	// mirror is empty (in-memory).
-	var oldAS *agentsession.AgentSession
-	for _, as := range cs.Pool() {
-		if as.ID == oldASID {
-			oldAS = as
-			break
-		}
+	if got := len(cs.Pool()); got != 0 {
+		t.Fatalf("active pool after cwd switch = %d, want 0", got)
 	}
-	if oldAS == nil {
-		t.Fatalf("old AS %s missing from pool", oldASID)
+	if warm := globalPool.Get(chatID, "/code/A", "claude"); warm != oldAS {
+		t.Fatalf("old AS was not retained warm in AgentSessionPool")
 	}
 	if got := oldAS.Entry().InFlightMessages; len(got) != 0 {
 		t.Errorf("F-62 §3.3.2: old AS.inFlightMessages after /cwd = %v, want empty", got)
@@ -441,16 +451,9 @@ func TestSetSelectedCwd_ClearsOldASInFlight(t *testing.T) {
 		t.Errorf("F-62 §3.3.2: persisted old AS.InFlightMessages = %v, want empty", reread.InFlightMessages)
 	}
 
-	// New AS is untouched.
-	var newAS *agentsession.AgentSession
-	for _, as := range cs.Pool() {
-		if as.ID == newASID {
-			newAS = as
-			break
-		}
-	}
-	if newAS == nil {
-		t.Fatalf("new AS %s missing from pool", newASID)
+	// New AS stays warm and untouched; cwd switching does not pre-mount it.
+	if warm := globalPool.Get(chatID, "/code/B", "claude"); warm != newAS {
+		t.Fatalf("new AS %s missing from AgentSessionPool", newASID)
 	}
 	if got := newAS.Entry().InFlightMessages; len(got) != 1 || got[0].ID != "m_new_1" {
 		t.Errorf("new AS.inFlightMessages = %v, want [m_new_1] (must be untouched)", got)
@@ -468,7 +471,7 @@ func TestSetSelectedCwd_SameCwdIsNoop(t *testing.T) {
 
 	now := time.Now()
 	asID := "as_cwd_same"
-	if err := asFile.Upsert(&registry.AgentSessionEntry{
+	asEntry := &registry.AgentSessionEntry{
 		ID:            asID,
 		ChatSessionID: csID,
 		Agent:         "claude",
@@ -479,11 +482,15 @@ func TestSetSelectedCwd_SameCwdIsNoop(t *testing.T) {
 		InFlightMessages: []registry.InFlightMessageRef{
 			{ID: "m_keep_1", Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "kept"}}, ReceivedAt: now},
 		},
-	}); err != nil {
+	}
+	if err := asFile.Upsert(asEntry); err != nil {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -492,26 +499,19 @@ func TestSetSelectedCwd_SameCwdIsNoop(t *testing.T) {
 	if err := cs.SetSelectedCwd("/code/same"); err != nil {
 		t.Fatalf("first SetSelectedCwd: %v", err)
 	}
+	as := mountPersistedASForTest(t, cs, globalPool, asFile, chatID, asID)
 	// Re-assert the same cwd.
 	if err := cs.SetSelectedCwd("/code/same"); err != nil {
 		t.Fatalf("second SetSelectedCwd: %v", err)
 	}
 
-	var as *agentsession.AgentSession
-	for _, x := range cs.Pool() {
-		if x.ID == asID {
-			as = x
-			break
-		}
-	}
-	if as == nil {
-		t.Fatalf("AS %s missing from pool", asID)
+	if active := cs.Pool(); len(active) != 1 || active[0] != as {
+		t.Fatalf("same-cwd setter detached AS %s", asID)
 	}
 	if got := as.Entry().InFlightMessages; len(got) != 1 || got[0].ID != "m_keep_1" {
 		t.Errorf("AS.inFlightMessages after same-cwd /cwd = %v, want [m_keep_1] (no spurious drop)", got)
 	}
 }
-
 
 // TestSetSelectedAgent_ClearsOldAgentInFlight asserts the F-62
 // §3.3.3 contract: when the user /use's to a different agent, the
@@ -548,7 +548,10 @@ func TestSetSelectedAgent_ClearsOldAgentInFlight(t *testing.T) {
 		t.Fatalf("Upsert old AS: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -565,6 +568,7 @@ func TestSetSelectedAgent_ClearsOldAgentInFlight(t *testing.T) {
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("initial SetSelectedAgent: %v", err)
 	}
+	oldAS := mountPersistedASForTest(t, cs, globalPool, asFile, chatID, oldASID)
 
 	// Now /use codex — the chat-session "new session" boundary on
 	// agent switch. F-62 §3.3.3 must clear the old claude AS's
@@ -573,15 +577,8 @@ func TestSetSelectedAgent_ClearsOldAgentInFlight(t *testing.T) {
 		t.Fatalf("switch SetSelectedAgent: %v", err)
 	}
 
-	var oldAS *agentsession.AgentSession
-	for _, as := range cs.Pool() {
-		if as.ID == oldASID {
-			oldAS = as
-			break
-		}
-	}
-	if oldAS == nil {
-		t.Fatalf("old AS %s missing from pool", oldASID)
+	if warm := globalPool.Get(chatID, "/code/A", "claude"); warm != oldAS {
+		t.Fatalf("old AS %s missing from AgentSessionPool", oldASID)
 	}
 	if got := oldAS.Entry().InFlightMessages; len(got) != 0 {
 		t.Errorf("F-62 §3.3.3: old AS.inFlightMessages after /use = %v, want empty", got)
@@ -608,7 +605,7 @@ func TestSetSelectedAgent_SameAgentIsNoop(t *testing.T) {
 
 	now := time.Now()
 	asID := "as_use_same"
-	if err := asFile.Upsert(&registry.AgentSessionEntry{
+	asEntry := &registry.AgentSessionEntry{
 		ID:            asID,
 		ChatSessionID: csID,
 		Agent:         "claude",
@@ -619,11 +616,15 @@ func TestSetSelectedAgent_SameAgentIsNoop(t *testing.T) {
 		InFlightMessages: []registry.InFlightMessageRef{
 			{ID: "m_keep_use_1", Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "kept"}}, ReceivedAt: now},
 		},
-	}); err != nil {
+	}
+	if err := asFile.Upsert(asEntry); err != nil {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 
-	mgr := NewManager().WithPersistence(csFile, asFile)
+	globalPool := NewAgentSessionPool()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool)
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
 	}
@@ -635,20 +636,14 @@ func TestSetSelectedAgent_SameAgentIsNoop(t *testing.T) {
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("first SetSelectedAgent: %v", err)
 	}
+	as := mountPersistedASForTest(t, cs, globalPool, asFile, chatID, asID)
 	// Re-assert the same agent.
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("second SetSelectedAgent: %v", err)
 	}
 
-	var as *agentsession.AgentSession
-	for _, x := range cs.Pool() {
-		if x.ID == asID {
-			as = x
-			break
-		}
-	}
-	if as == nil {
-		t.Fatalf("AS %s missing from pool", asID)
+	if active := cs.Pool(); len(active) != 1 || active[0] != as {
+		t.Fatalf("same-agent setter detached AS %s", asID)
 	}
 	if got := as.Entry().InFlightMessages; len(got) != 1 || got[0].ID != "m_keep_use_1" {
 		t.Errorf("AS.inFlightMessages after same-agent /use = %v, want [m_keep_use_1] (no spurious drop)", got)

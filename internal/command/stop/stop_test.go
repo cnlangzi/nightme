@@ -9,7 +9,6 @@ package stop_test
 import (
 	"context"
 	"errors"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"strings"
 	"testing"
 
@@ -18,6 +17,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	stoppkg "github.com/cnlangzi/nightme/internal/command/stop"
+	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // stubStoppable implements the agent.driver contract with the
@@ -60,6 +61,7 @@ func setupSelectedAS(t *testing.T, agentName, cwd string, isReady bool) (*chatse
 	mgr := chatsession.NewManager()
 	cs, _ := mgr.GetOrCreate("c1", agentName)
 	cs.WithPersistence(nil, nil) //nolint:revive // test setup
+	cwd = pathutil.Clean(cwd)
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
@@ -132,7 +134,7 @@ func TestStopSelectedAgent_Stopped(t *testing.T) {
 	if stub.stopped != 1 {
 		t.Errorf("bridge.Stop called %d times, want 1", stub.stopped)
 	}
-	if result.Agent != "claude" || result.Cwd != "/tmp" {
+	if result.Agent != "claude" || !pathutil.Equal(result.Cwd, "/tmp") {
 		t.Errorf("result = %+v, want (claude, /tmp)", result)
 	}
 }

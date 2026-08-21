@@ -125,7 +125,7 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	// the reply text via cs.Emitter().
 	rec := &closeTestRecCh{}
 	cs, _ := chatsession.New("chat-close-"+t.Name(), "test-agent")
-	cs.WithEmitter(rec)
+	cs.WithEmitter(rec).WithAgentSessionPool(chatsession.NewAgentSessionPool())
 	_ = cs.SetSelectedCwd("/tmp/start") // neutral starting cwd; tests overwrite
 	rig.cs = cs
 	rig.rec = rec
@@ -947,17 +947,17 @@ func TestRunClose_Success_ResetsRepoRootAgentContext(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
-	// repoRoot AS must still be in the pool (StatusExited was
-	// preserved — step 10 marked-fresh, didn't drop). Its
-	// SessionID must be empty now.
+	// repoRoot AS SessionID must be cleared (step 10). It may remain
+	// warm in asPool without being remounted into cs.pool.
 	if got := repoAS.SessionID(); got != "" {
 		t.Errorf("repoRoot AS SessionID after close = %q, want empty (step 10 must clear)", got)
 	}
-	// The worktree-pinned ASes must be gone — proves step 2.5
-	// fired before step 10 and that step 10 didn't re-evict
-	// repoRoot survivors (matched by Cwd == repoRoot only).
-	if n := len(rig.cs.Pool()); n != 1 {
-		t.Errorf("pool after close = %d entries, want 1 (the repoRoot survivor)", n)
+	if n := len(rig.cs.AgentSessionsForCwd(repoRoot)); n != 1 {
+		t.Errorf("asPool/repoRoot after close = %d entries, want 1 (the repoRoot survivor)", n)
+	}
+	// Worktree-pinned ASes must be gone from asPool.
+	if n := len(rig.cs.AgentSessionsForCwd(wt)); n != 0 {
+		t.Errorf("worktree asPool after close = %d, want 0", n)
 	}
 
 	// Card count: SkipRefreshDefaultBranch=true means no sync

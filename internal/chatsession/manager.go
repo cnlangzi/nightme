@@ -44,6 +44,11 @@ type Manager struct {
 	csFile *chatstore.Store
 	asFile *registry.AgentSessionFile
 
+	// asPool is the process-wide live/warm AgentSession registry
+	// (docs/CHATSTORE.md). Shared across Managers; injected into
+	// every ChatSession at GetOrCreate. nil = tests without pool.
+	asPool *AgentSessionPool
+
 	// onCreate fires once for every newly-created ChatSession,
 	// before GetOrCreate returns. Used by the runtime to wire
 	// per-ChatSession handlers (e.g. MessageStateBus in
@@ -122,6 +127,22 @@ func (m *Manager) WithPersistence(csFile *chatstore.Store, asFile *registry.Agen
 	m.asFile = asFile
 	m.mu.Unlock()
 	return m
+}
+
+// WithAgentSessionPool attaches the process-wide warm AS pool.
+// Call once at runtime startup; GetOrCreate injects it into each CS.
+func (m *Manager) WithAgentSessionPool(pool *AgentSessionPool) *Manager {
+	m.mu.Lock()
+	m.asPool = pool
+	m.mu.Unlock()
+	return m
+}
+
+// AgentSessionPool returns the wired pool (may be nil in tests).
+func (m *Manager) AgentSessionPool() *AgentSessionPool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.asPool
 }
 
 // WithOnCreate registers a callback fired on every newly-created
@@ -236,26 +257,18 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 			csFile  *chatstore.Store
 			asFile  *registry.AgentSessionFile
 			emitter outbound.Emitter
+			asPool  *AgentSessionPool
 		)
 		spawner = m.spawner
 		csFile = m.csFile
 		asFile = m.asFile
 		emitter = m.emitter
+		asPool = m.asPool
 		m.mu.RUnlock()
 
-		// v1.3+ multi-channel lazy restore: before allocating a
-		// fresh ChatSession, check csFile (in-memory index) for
-		// a persisted entry matching chatID. If present, hydrate
-		// the ChatSession from that entry — restore its per-chat
-		// state (selectedCwd/Agent, WatchMode/ThinkMode/ToolsMode,
-		// lastInteractionAt) and the AgentSession pool as Detached.
-		// csFile is the same file the eager Manager.RestoreFromRegistry
-		// used to read on startup, but the work is deferred to
-		// first-use per-chat now, eliminating the startup-time I/O
-		// and the cross-channel partition problem (chatID is namespaced
-		// per channel; the entry is created in the Manager whose
-		// channel produced the first inbound after restart).
-		cs, err := m.constructChatSession(chatID, primaryAgent, spawner, csFile, asFile, emitter)
+		// docs/CHATSTORE.md: Bootstrap create-or-load; hydrate does
+		// NOT attach AgentSessions (on-demand via Lookup).
+		cs, err := m.constructChatSession(chatID, primaryAgent, spawner, csFile, asFile, emitter, asPool)
 		if err != nil {
 			return nil, err
 		}
@@ -296,88 +309,64 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 	return cs, nil // existing cs → emitter already bound
 }
 
-// constructChatSession builds a ChatSession for chatID, either by
-// hydrating from a persisted csFile entry (if present) or by
-// allocating a fresh one. Runs OUTSIDE m.mu (caller is responsible
-// for the lock).
-//
-// Hydration path:
-//   - csFile.Get(chatID) returns the entry → call hydrateFromEntry
-//   - otherwise → New(chatID, primaryAgent) and wire deps
-//
-// The hydration path also seeds the AgentSession pool from asFile
-// (filtered by the entry's chatSessionId). FromAgentSessionEntry
-// already demotes any StatusRunning to StatusDetached, so
-// LookupSelectedAgentSession will re-spawn on the next call.
-func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
+// constructChatSession builds a ChatSession for chatID via
+// chatstore.Bootstrap (create-or-load). AS are NOT attached here —
+// LookupSelectedAgentSession mounts from asPool / asFile on demand
+// (docs/CHATSTORE.md).
+func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter outbound.Emitter, asPool *AgentSessionPool) (*ChatSession, error) {
+	var entry *registry.ChatSessionEntry
 	if csFile != nil {
-		if entry, ok := csFile.Get(chatID); ok {
-			return m.hydrateFromEntry(entry, spawner, csFile, asFile, emitter)
+		var err error
+		entry, err = csFile.Bootstrap(chatID, primaryAgent)
+		if err != nil {
+			return nil, err
 		}
 	}
-	cs, err := New(chatID, primaryAgent)
+	seedAgent := primaryAgent
+	if entry != nil {
+		if entry.PrimaryAgent != "" {
+			seedAgent = entry.PrimaryAgent
+		}
+		// Prefer persisted SelectedAgent when present.
+		if entry.SelectedAgent != "" {
+			seedAgent = entry.SelectedAgent
+		}
+	}
+	cs, err := New(chatID, seedAgent)
 	if err != nil {
 		return nil, err
 	}
-	cs.WithSpawner(spawner).
-		WithPersistence(csFile, asFile)
-	if emitter != nil {
-		cs.WithEmitter(emitter)
+	if entry != nil {
+		// Align ID with store (same formula as deriveIDFromChatID /
+		// Bootstrap: "cs_"+chatID). Prefer store's ID if set.
+		if entry.ID != "" {
+			cs.ID = entry.ID
+		}
+		cs.primaryAgent = entry.PrimaryAgent
+		if cs.primaryAgent == "" {
+			cs.primaryAgent = primaryAgent
+		}
+		cs.selectedCwd = entry.SelectedCwd
+		cs.selectedAgent = entry.SelectedAgent
+		if cs.selectedAgent == "" {
+			cs.selectedAgent = cs.primaryAgent
+		}
+		cs.watchMode = WatchMode(entry.WatchMode)
+		cs.thinkMode = ThinkMode(entry.ThinkMode)
+		cs.toolsMode = ToolsMode(entry.ToolsMode)
+		cs.watcherHintEmitted = entry.WatcherHintEmitted
+		cs.lastInteractionAt = entry.LastInteractionAt
+		if !entry.CreatedAt.IsZero() {
+			cs.createdAt = entry.CreatedAt
+		}
 	}
-	return cs, nil
-}
-
-// hydrateFromEntry rebuilds a ChatSession from a persisted entry.
-// Per-chat state (selectedCwd/Agent, WatchMode/ThinkMode/ToolsMode,
-// watcherHintEmitted, lastInteractionAt) is restored; the
-// AgentSession pool is seeded from asFile (filtered by entry.ID).
-// selectedAS is forced to nil because the in-memory process handle
-// is lost on restart (the next LookupSelectedAgentSession will
-// spawn fresh and re-populate selectedAS).
-func (m *Manager) hydrateFromEntry(entry *registry.ChatSessionEntry, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter outbound.Emitter) (*ChatSession, error) {
-	cs, err := New(entry.ChatID, entry.PrimaryAgent)
-	if err != nil {
-		return nil, err
-	}
-	cs.WithSpawner(spawner).
-		WithPersistence(csFile, asFile)
-	if emitter != nil {
-		cs.WithEmitter(emitter)
-	}
-	cs.selectedCwd = entry.SelectedCwd
-	cs.selectedAgent = entry.SelectedAgent
-	// Registry persists bare int; ChatSession fields are typed
-	// enums. Cast on read — Go zero-value semantics preserve the
-	// safe default when the int is 0.
-	cs.watchMode = WatchMode(entry.WatchMode) // 0 == WatchModeMention (default, safe)
-	cs.thinkMode = ThinkMode(entry.ThinkMode) // 0 == ThinkModeShow (default; preserve F-thread-route behavior)
-	cs.toolsMode = ToolsMode(entry.ToolsMode) // 0 == ToolsModeHide (default; quiet by default)
-	cs.watcherHintEmitted = entry.WatcherHintEmitted
-	cs.lastInteractionAt = entry.LastInteractionAt
-	// commit fix-6: clear selectedAS on restore. The persisted
-	// selectedAgentSessionId points at an AgentSession whose
-	// handle is in-memory only (lost on restart). Leaving the
-	// pointer set would cause SendBlocks (called by the default
-	// FlushHook) to return ErrNotRunning and silently drop user
-	// messages. The next LookupSelectedAgentSession will spawn
-	// fresh and re-populate selectedAS.
 	cs.selectedAS = nil
-	// Seed the pool from the agent_sessions.json entries that
-	// belong to this ChatSession. FromAgentSessionEntry has
-	// already demoted any StatusRunning to StatusDetached, so
-	// LookupSelectedAgentSession will re-spawn on the next call.
-	if asFile != nil {
-		for _, aEntry := range asFile.List() {
-			if aEntry.ChatSessionID == entry.ID {
-				cs.attachAgentSession(FromAgentSessionEntry(aEntry))
-			}
-		}
+	cs.WithSpawner(spawner).
+		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(asPool)
+	if emitter != nil {
+		cs.WithEmitter(emitter)
 	}
-	// F-62 §3.3.1: in-flight messages are NOT pushed back into
-	// cs.queue at restore (see Manager.RestoreFromRegistry for the
-	// full rationale — the queue is chat-level and would bleed
-	// the previous (agent, cwd)'s hung messages into the new
-	// TryFlush's batch).
 	return cs, nil
 }
 
@@ -839,6 +828,10 @@ func (m *Manager) List() []*ChatSession {
 //
 // v1.2 commit 8a: this is a placeholder; full restore integration
 // with the v1.x binding table arrives in commit 8b.
+// RestoreFromRegistry rebuilds in-memory ChatSessions from
+// chatstore without attaching AgentSessions (docs/CHATSTORE.md:
+// AS mount is on-demand via Lookup). Kept for tests; production
+// WireRuntimeCallbacksAndRestore no longer calls this.
 func (m *Manager) RestoreFromRegistry() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -847,73 +840,48 @@ func (m *Manager) RestoreFromRegistry() error {
 		return nil
 	}
 
-	// Index persisted AgentSession entries by chatSessionId so we
-	// can populate each ChatSession's pool after we create it.
-	agentsByCS := make(map[string][]*AgentSession)
-	if m.asFile != nil {
-		for _, aEntry := range m.asFile.List() {
-			as := FromAgentSessionEntry(aEntry)
-			agentsByCS[aEntry.ChatSessionID] = append(agentsByCS[aEntry.ChatSessionID], as)
-		}
-	}
-
 	for _, entry := range m.csFile.List() {
-		cs, err := New(entry.ChatID, entry.PrimaryAgent)
+		if _, exists := m.sessions[entry.ChatID]; exists {
+			continue
+		}
+		seed := entry.SelectedAgent
+		if seed == "" {
+			seed = entry.PrimaryAgent
+		}
+		cs, err := New(entry.ChatID, seed)
 		if err != nil {
 			slog.Default().Warn("Manager.RestoreFromRegistry: New failed; skipping chat",
 				"chat_id", entry.ChatID, "err", err)
 			continue
 		}
+		if entry.ID != "" {
+			cs.ID = entry.ID
+		}
 		cs.WithSpawner(m.spawner).
-			WithPersistence(m.csFile, m.asFile)
-		// Bind the Manager's shared emitter; nil is permitted
-		// here (restored sessions may legitimately be opened
-		// before WithEmitter is called) — callers must
-		// nil-check via cs.Emitter().
+			WithPersistence(m.csFile, m.asFile).
+			WithAgentSessionPool(m.asPool)
 		if m.emitter != nil {
 			cs.WithEmitter(m.emitter)
 		}
+		cs.primaryAgent = entry.PrimaryAgent
 		cs.selectedCwd = entry.SelectedCwd
 		cs.selectedAgent = entry.SelectedAgent
-		// Registry persists bare int; ChatSession fields are
-		// typed enums. Cast on read — Go zero-value semantics
-		// preserve the safe default when the int is 0.
-		cs.watchMode = WatchMode(entry.WatchMode) // 0 == WatchModeMention (default, safe)
-		cs.thinkMode = ThinkMode(entry.ThinkMode) // 0 == ThinkModeShow (default; preserve F-thread-route behavior)
-		cs.toolsMode = ToolsMode(entry.ToolsMode) // 0 == ToolsModeHide (default; quiet by default)
+		if cs.selectedAgent == "" {
+			cs.selectedAgent = cs.primaryAgent
+		}
+		cs.watchMode = WatchMode(entry.WatchMode)
+		cs.thinkMode = ThinkMode(entry.ThinkMode)
+		cs.toolsMode = ToolsMode(entry.ToolsMode)
 		cs.watcherHintEmitted = entry.WatcherHintEmitted
 		cs.lastInteractionAt = entry.LastInteractionAt
-		// commit fix-6: clear selectedAS on restore. The persisted
-		// selectedAgentSessionId points at an AgentSession whose
-		// handle is in-memory only (lost on restart). Leaving the
-		// pointer set would cause SendBlocks (called by the default
-		// FlushHook) to return ErrNotRunning and silently drop user
-		// messages. The next LookupSelectedAgentSession will spawn
-		// fresh and re-populate selectedAS.
-		cs.selectedAS = nil
-		// Seed the pool from the agent_sessions.json entries that
-		// belong to this ChatSession. FromAgentSessionEntry has
-		// already demoted any StatusRunning to StatusDetached, so
-		// LookupSelectedAgentSession will re-spawn on the next call.
-		for _, as := range agentsByCS[entry.ID] {
-			cs.attachAgentSession(as)
+		if !entry.CreatedAt.IsZero() {
+			cs.createdAt = entry.CreatedAt
 		}
-
-		// F-62 §3.3.1: in-flight messages are NOT pushed back into
-		// cs.queue at restore. The queue is chat-level and would
-		// bleed the previous (agent, cwd)'s hung messages into the
-		// new TryFlush's batch — both cross-AS misdelivery and
-		// receipt-card anchor drift. Drop on the (agent, cwd)
-		// "new session" boundary instead (see SetSelectedCwd /
-		// LookupSelectedAgentSession hadPrior). The registry's
-		// InFlightMessages slice stays on disk for audit and is
-		// cleared by the next ClearInFlight; the runtime in-memory
-		// view is what we re-hydrate per AS.
+		cs.selectedAS = nil
+		// Deliberately do NOT attach AgentSessions — Lookup mounts
+		// from asPool / asFile on demand.
 
 		m.sessions[entry.ChatID] = cs
-
-		// Fire onCreate so the runtime can wire per-ChatSession
-		// handlers uniformly across fresh + restored chats.
 		if m.onCreate != nil {
 			m.onCreate(cs)
 		}

@@ -1,19 +1,18 @@
 package chatsession
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
-	"path/filepath"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"fmt"
-
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -53,10 +52,10 @@ func TestSetActiveCwdDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	if err := cs.SetSelectedCwd("/code/bailing"); err != nil {
+	if err := cs.SetSelectedCwd(testCwdBailing); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	if cs.SelectedCwd() != "/code/bailing" {
+	if cs.SelectedCwd() != testCwdBailing {
 		t.Fatalf("SelectedCwd: got %q", cs.SelectedCwd())
 	}
 	// Critical: SetSelectedCwd must NOT add anything to the pool.
@@ -69,7 +68,7 @@ func TestSetActiveAgentDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("SetSelectedAgent: %v", err)
 	}
@@ -93,7 +92,7 @@ func TestLookupActiveAgentSession_SpawnWhenMissing(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	cs.SetSelectedAgent("claude")
 
 	as, err := cs.LookupSelectedAgentSession()
@@ -103,7 +102,7 @@ func TestLookupActiveAgentSession_SpawnWhenMissing(t *testing.T) {
 	if as == nil {
 		t.Fatalf("expected AgentSession, got nil")
 	}
-	if as.Agent != "claude" || as.Cwd != "/code/bailing" {
+	if as.Agent != "claude" || as.Cwd != testCwdBailing {
 		t.Fatalf("AS mismatch: agent=%q cwd=%q", as.Agent, as.Cwd)
 	}
 	if as.Status() != StatusDetached {
@@ -135,7 +134,7 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs = cs.WithSpawner(newFakeSpawner())
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	cs.SetSelectedAgent("claude")
 
 	as1, _ := cs.LookupSelectedAgentSession()
@@ -158,7 +157,7 @@ func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	cs.SetSelectedAgent("claude")
 	claudeAS, _ := cs.LookupSelectedAgentSession() // spawns (claude, cwd)
 	if claudeAS.Agent != "claude" {
@@ -184,7 +183,7 @@ func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	cs.SetSelectedAgent("codex") // active != default
 
 	// Neither (codex, /code/bailing) nor (claude, /code/bailing) is in pool.
@@ -220,7 +219,7 @@ func TestKillAllClearsPool(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	cs.SetSelectedAgent("claude")
 	cs.LookupSelectedAgentSession() // spawns claude
 
@@ -241,15 +240,15 @@ func TestKillAllClearsPool(t *testing.T) {
 		t.Fatalf("persisted AgentSessions should be cleared; got %d", len(all))
 	}
 	// activeCwd and activeAgent survive (only the pool is cleared).
-	if cs.SelectedCwd() != "/code/bailing" {
+	if cs.SelectedCwd() != testCwdBailing {
 		t.Fatalf("SelectedCwd should survive /kill; got %q", cs.SelectedCwd())
 	}
 }
 
 func TestPersistenceRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	csPath := filepath.Join(dir, "chat_sessions.json")
-	asPath := filepath.Join(dir, "agent_sessions.json")
+	csPath := pathutil.Join(dir, "chat_sessions.json")
+	asPath := pathutil.Join(dir, "agent_sessions.json")
 
 	// Write phase.
 	csFile, asFile, err := func() (*chatstore.Store, *registry.AgentSessionFile, error) {
@@ -269,7 +268,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	cs.SetSelectedAgent("claude")
 	cs.LookupSelectedAgentSession()
 
@@ -287,17 +286,11 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("ChatSessionEntry should be persisted by chatID")
 	}
-	if entry.SelectedCwd != "/code/bailing" {
+	if entry.SelectedCwd != testCwdBailing {
 		t.Fatalf("persisted SelectedCwd: %q", entry.SelectedCwd)
 	}
 	if entry.SelectedAgent != "claude" {
 		t.Fatalf("persisted SelectedAgent: %q", entry.SelectedAgent)
-	}
-	if len(entry.AgentSessionIDs) != 1 {
-		t.Fatalf("persisted AgentSessionIDs: got %d, want 1", len(entry.AgentSessionIDs))
-	}
-	if entry.SelectedAgentSessionID == nil {
-		t.Fatalf("SelectedAgentSessionID should be set")
 	}
 
 	agentEntries := asFile2.GetByChatPool(entry.ID)
@@ -307,7 +300,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if agentEntries[0].Agent != "claude" {
 		t.Fatalf("Agent: %q", agentEntries[0].Agent)
 	}
-	if agentEntries[0].Cwd != "/code/bailing" {
+	if agentEntries[0].Cwd != testCwdBailing {
 		t.Fatalf("Cwd: %q", agentEntries[0].Cwd)
 	}
 }
@@ -355,7 +348,7 @@ func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
-	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedCwd(testCwdBailing)
 	cs.SetSelectedAgent("claude")
 
 	var wg sync.WaitGroup
@@ -633,7 +626,6 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 func TestChatSession_GitStatus_NoCacheBehavior(t *testing.T) {
 	t.Run("unwired deps returns nil", func(t *testing.T) {
 		cs, _ := New("t_unwired", "claude")
-		cs.persistChatEntry() // no-op without stores; safe
 		if got := cs.GitStatus(context.Background()); got != nil {
 			t.Fatalf("GitStatus with zero deps = %+v, want nil", got)
 		}

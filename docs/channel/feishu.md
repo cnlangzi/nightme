@@ -1496,6 +1496,7 @@ WebSearch  -> 10 results
 
 ## 14. 变更日志
 
+- **2026-08-21** - chatID 收口到 `SessionChatID` 包级纯函数（fix-feishu-chat-id）。三处 inbound 入口（`handleMessage` / `handleReactionCreated` / `handleCardAction` 全部子路径）统一走 `SessionChatID(source)`，不再各自取 SDK 字段。详见 §21 契约。**不做** `on_<hex>` 兼容 / 不做迁移 / 不做 `IsValidFeishuChatID` 格式校验 — SDK 给啥用啥，空就 drop。改动文件：`internal/channel/feishu/session_chatid.go`（新增，含 `SessionChatIDSource` interface + 3 source adapters + `SessionChatID` 包级函数 + 移动过来的 `stringValue` helper）+ `internal/channel/feishu/session_chatid_test.go`（新增 9 类测试）+ `internal/channel/feishu/adapter.go`（三处入口改走包级函数，删除 `stringValue` 副本，删除 `extractReactionChatID` 公开契约语义）。
 - **2026-08-17** - 交互卡（AskUserQuestion form / `card.action.trigger` / 回调必须回卡）抽到 [`feishu-cards.md`](./feishu-cards.md)，避免下次从零对照官方文档。本节 footer / receipt 坑仍在 §6 / §13.23。
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
 - **2026-08-03(同日增量)** - 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
@@ -1509,6 +1510,7 @@ WebSearch  -> 10 results
 - **2026-08-04(同日增量 F-39)** - 加入 §13.16(F-39 决策):OutResult 不再 fold 进 rolling-log receipt card(原 §13.3 F-37 方案 dedup 协调对长答复静默丢字),改为独立 reply 投递到 userMsgID;三段 dispatch(无 markdown → text;tables>5 → post+md;默认 → Card 2.0 multi-div via `splitMarkdownForDivs`)。新建 [`docs/feat/F-39-result-as-new-reply.md`](../feat/F-39-result-as-new-reply.md) 作为权威设计;`docs/SPEC.md` §0.8 + §11 backlog 同步登记;§12 映射表 OutResult 行更新。
 - **2026-08-04(同日增量 F-40)** - 加入 §13.19(F-40 决策):(a) `OutText` 改名 `OutReply`(语义更准确);(b) `eventToEntry(EventText)` 删 600B truncate → `buildReceiptCard` 用 F-37 `splitMarkdownForDivs` 拆多 div;(c) OutReply 超限改独立 reply(`runes > perEntryMaxRunes(8000)` 或 receipt `entries >= replyMaxEntries(45)` → `sendReplyAsMessage` 投递 ReplyInThreadAndChat);(d) 迟到 OutReply(receipt 已 StateCompleted)走独立 reply,保证完整回复链不丢。新建 [`docs/feat/F-40-outreply-overflow.md`](../feat/F-40-outreply-overflow.md) 作为权威设计;`docs/SPEC.md` §0.9 同步加变更摘要;§12 映射表 OutText → OutReply 行更新(含超限独立 reply 描述)。
 - **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
+
 
 ### 13.16 🎯 F-39 决策 (2026-08-04):OutResult → 独立 Reply(反转 §13.3 旧结构)
 
@@ -3028,3 +3030,85 @@ type GreetingMessages []GreetingBody
 ## 20. 变更日志追加
 
 - **2026-08-12** - 加入 §19: Greeting Localization 调研与选型。Strategy B（bilingual post envelope）替代 Strategy A（按 tenant_brand 单语言 text）。实测验证 Feishu `post` envelope 的 `zh_cn` + `en_us` 双 locale 块在客户端按 receiver UI 渲染；API response echo 字段误导（只显示一条 locale）但客户端体验正常。改动：`internal/login/greeting.go` 数据结构从 `{English, Chinese []string}` 改为 `[]GreetingBody`；`internal/login/feishu/provider.go` Greet 循环发送 bilingual post；`tenantBrand` 字段删除。
+## 21. chatID 契约 (Fix-Feishu-Chat-ID) (2026-08-21)
+
+**入口唯一性**:Feishu adapter 的 chatID 提取,统一通过 `SessionChatID(event SessionChatIDSource) string` (包级函数,非 method) 纯函数。三处 inbound 入口全部走它:
+
+| 入口 | source 类型 | 字段路径 |
+|------|------------|---------|
+| `handleMessage`(`im.message.receive_v1`) | `receiveV1Source` | `event.Event.Message.ChatId` (typed struct) |
+| `handleReactionCreated`(`im.message.reaction.created_v1`) | `reactionV3Source` | envelope `chat_id` (raw JSON,typed struct 未暴露) |
+| `handleCardAction` (`act:` / `opt:` / `skip:` / `custom:` 全部分支 + 未知 action fallback) | `cardActionSource` | `event.Event.Context.OpenChatID` (typed struct) |
+
+**契约**:
+
+- `SessionChatID` 是 incoming event 的纯函数 — 无 daemon state、无 config、无 SDK 版本检测、无格式校验、无迁移。
+- 同一 chat 在三个 source 路径下产出同一字符串(由 `TestSessionChatID_AllSourcesAgree` 锁死)。任何 source 漂移视为 SDK bug,而不是 chatID 适配层兜底。
+- 缺数据返回 `""`,所有入口按 `""` → drop 处理(语义对齐 `extractReactionChatID` 旧行为)。
+- **不做** `oc_` 前缀校验 — SDK 给啥用啥,空就 drop。
+- **不做** `on_<hex>` → `oc_<hex>` 迁移 — 老 chat 直接走 `""` drop,user 自负责。
+- **不做** `IsValidFeishuChatID` 之类的 helper — 任何"格式校验"代码 review 直接打回。
+
+**调用站点**(`internal/channel/feishu/adapter.go`):
+
+```go
+// handleMessage:
+chatID := SessionChatID(receiveV1Source{event: event})
+
+// handleReactionCreated:
+chatID := SessionChatID(reactionV3Source{event: event})
+
+// handleCardAction (含 handleActCardAction / handleOptCardAction / 未知 action fallback):
+chatID := SessionChatID(cardActionSource{event: event})
+```
+
+**`extractReactionChatID` 降级**:不再是 chatID 提取入口,降级为 `reactionV3Source.EnvelopeChatID` 的内部 helper(从 envelope JSON 解析 `chat_id`)。注意它是 unexported,只被 `reactionV3Source` 调用。
+
+**接口定义**(`internal/channel/feishu/session_chatid.go`):
+
+```go
+type SessionChatIDSource interface {
+    TypedChatID() string       // EventMessage.ChatId
+    EnvelopeChatID() string    // reaction v3 envelope "chat_id"
+    ContextOpenChatID() string // CardAction.Context.OpenChatID
+}
+
+func SessionChatID(event SessionChatIDSource) string {
+    if v := event.TypedChatID(); v != "" { return v }
+    if v := event.EnvelopeChatID(); v != "" { return v }
+    if v := event.ContextOpenChatID(); v != "" { return v }
+    return ""
+}
+```
+
+**对比 §1.3 对照表**(跟 [`docs/CHANNEL.md` §5.5](../CHANNEL.md) 的 chatID 稳定性契约):
+
+| CHANNEL.md §5.5 要求 | 当前实现 |
+|---|---|
+| chatID 必须是 incoming 内容的纯函数 | ✅ `SessionChatID` 无任何 state/config 依赖 |
+| 不依赖 daemon state / config | ✅ |
+| 不在 chatID 拼接中引用运行时状态 | ✅ |
+| 不在 chatID 拼接中引用配置 | ✅ |
+| 反向 split 也是纯函数 | N/A — Feishu 不需要 split,`oc_<hex>` 直接用 |
+| 跨重启 / 升级 chatID 一致 | ✅ — 同一 chat 跨 SessionChatID 调用产生同一字符串 |
+
+**对比 §1.3 已锁不变式**(`docs/SPEC.md` §1.3):
+
+- ✅ Channel 自管 chat 语义:ChatID 仍由 Channel 自治,Gateway / ChatSession 只见字符串
+- ✅ 不在抽象层引入 thread 字段:`SessionChatID` 返回 `oc_<hex>`,thread / topic 概念不进 ChatID
+- ✅ `InboundMessage.ChatID` 字段不变 (`oc_<hex>` raw 字符串),下游 Gateway / ChatSession / Registry 零修改
+
+**测试**(`internal/channel/feishu/session_chatid_test.go`):
+
+1. `TestSessionChatID_PureFunction` — 同 input × 100 次迭代,产出同字符串
+2. `TestSessionChatID_AllSourcesAgree` — 同 chatID 走三种 source 产出同字符串(锁死防漂移)
+3. `TestSessionChatID_EmptyDrops` — 缺数据 → `""`
+4. `TestSessionChatID_NoFormatValidation` — 不做 `oc_` 前缀校验
+5. `TestSessionChatID_RouteOrder` — fallback 顺序:TypedChatID → EnvelopeChatID → ContextOpenChatID
+6. `TestSessionChatID_DispatchesOverWire` — E2E:实际 `handleMessage` 路径下产出跟直接 `SessionChatID` 调用一致
+7. `TestSessionChatID_EmptyHandleDrops` — 空 chatID 不 publish
+
+**作用域**:
+- 不引入 `tg_` / `fs_` 等 channel prefix — Feishu 原生 `oc_<hex>` 跨 channel 天然 namespaced,跟 [`docs/CHANNEL.md` §5.5 表格](../CHANNEL.md) 一致
+- 不动 `csFile.Get(chatID)` / `Manager.GetOrCreate` / `ChatSession.ChatID` 链 — 下游 zero-touch
+- 不动 `OutboundMessage.ChatID` 字段 — 仍由 channel adapter 自治

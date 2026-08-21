@@ -17,9 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -69,9 +69,9 @@ const (
 	KindPromptEnded = agentsession.KindPromptEnded
 	KindLifecycle   = agentsession.KindLifecycle
 
-	PromptEndClean         = agentsession.PromptEndClean
-	PromptEndUserKilled    = agentsession.PromptEndUserKilled
-	PromptEndUserStopped   = agentsession.PromptEndUserStopped
+	PromptEndClean       = agentsession.PromptEndClean
+	PromptEndUserKilled  = agentsession.PromptEndUserKilled
+	PromptEndUserStopped = agentsession.PromptEndUserStopped
 )
 
 // MessageKind is a type alias (re-export).
@@ -136,6 +136,11 @@ type ChatSession struct {
 	ChatID string
 
 	mu sync.RWMutex
+
+	// routeMu serializes store-backed routing setters so disk writes
+	// and the in-memory cache cannot complete out of order across
+	// concurrent /cwd /use /watch mutations (docs/CHATSTORE.md).
+	routeMu sync.Mutex
 
 	// gitStatusDeps bundles the CollectGit + LookupPR closures the
 	// runtime injects at startup; ChatSession.GitStatus reads them
@@ -219,7 +224,8 @@ type ChatSession struct {
 
 	// Persistence handles (optional — nil means no persistence).
 	csStore *chatstore.Store
-	asFile *registry.AgentSessionFile
+	asFile  *registry.AgentSessionFile
+	asPool  *AgentSessionPool // global warm pool; nil in some tests
 
 	// spawner is used by LookupSelectedAgentSession to fork new
 	// children on miss. nil means no spawn (test-friendly default;
@@ -389,6 +395,17 @@ func (cs *ChatSession) WithPersistence(csFile *chatstore.Store, asFile *registry
 	return cs
 }
 
+// WithAgentSessionPool attaches the process-wide warm AgentSession pool.
+func (cs *ChatSession) WithAgentSessionPool(p *AgentSessionPool) *ChatSession {
+	if cs == nil {
+		return cs
+	}
+	cs.mu.Lock()
+	cs.asPool = p
+	cs.mu.Unlock()
+	return cs
+}
+
 // WithSpawner attaches a Spawner used by LookupSelectedAgentSession
 // to fork child processes. nil means no spawn (lookup returns
 // AgentSession with status=Detached, no process running).
@@ -462,44 +479,82 @@ type ResetResult struct {
 	Session *AgentSession
 }
 
-// SetSelectedCwd changes the active workspace. Does NOT spawn or kill
-// any AgentSession; the pool is preserved. Next message triggers
-// LookupSelectedAgentSession which may spawn or reuse.
+// clearQueueOnCwdBoundary drains the inbound queue at a cwd
+// boundary. Tolerates a nil queue (tests that construct a bare
+// ChatSession{} without New).
+func (cs *ChatSession) clearQueueOnCwdBoundary() {
+	if cs == nil || cs.queue == nil {
+		return
+	}
+	for _, msg := range cs.queue.Clear() {
+		cs.emitMessageDropped(msg)
+	}
+}
+
+// ensureStoreBootstrapped creates a chatstore entry for this CS if
+// persistence is wired and the chatID is not yet on disk. Used by
+// store-first setters so tests that call WithPersistence without an
+// explicit Bootstrap still work (production GetOrCreate always
+// Bootstraps first — docs/CHATSTORE.md).
+func (cs *ChatSession) ensureStoreBootstrapped() error {
+	if cs == nil || cs.csStore == nil {
+		return nil
+	}
+	if _, ok := cs.csStore.Get(cs.ChatID); ok {
+		return nil
+	}
+	primary := cs.primaryAgent
+	if primary == "" {
+		primary = cs.selectedAgent
+	}
+	_, err := cs.csStore.Bootstrap(cs.ChatID, primary)
+	return err
+}
+
+// SetSelectedCwd changes the active workspace. Stops active interaction
+// with the previous cwd's working set (docs/CHATSTORE.md): AS stay in
+// the global asPool warm; EventBus subscriptions are kept. Does NOT
+// spawn. Next LookupSelectedAgentSession mounts from asPool/asFile.
 func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 	if cwd == "" {
 		return errors.New("chatsession: empty cwd")
 	}
-	cs.mu.Lock()
+	cwd = filepath.Clean(cwd)
 
-	// F-62 §3.3.2: chat-session "new session" boundary. The previous
-	// (agent, cwd) focus is lost — its in-flight mirror is dropped
-	// (in-memory + on-disk) so the next TryFlush never carries the
-	// old AS's hung messages into the new cwd's batch. Capture the
-	// old AS pointer while holding cs.mu; the actual clear runs
-	// AFTER we release cs.mu, mirroring the persistChatEntry path
-	// below (release-then-persist). This avoids holding cs.mu
-	// across ClearInFlight's own disk write.
-	var oldAS *agentsession.AgentSession
-	if cs.selectedCwd != "" && cs.selectedCwd != cwd {
-		if a, ok := cs.pool[agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}]; ok {
-			oldAS = a
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
+
+	cs.mu.RLock()
+	unchanged := filepath.Clean(cs.selectedCwd) == cwd
+	cs.mu.RUnlock()
+	if unchanged {
+		return nil
+	}
+	if cs.csStore != nil {
+		if err := cs.ensureStoreBootstrapped(); err != nil {
+			return err
+		}
+		if err := cs.csStore.SetSelectedCwd(cs.ChatID, cwd); err != nil {
+			return err
 		}
 	}
 
+	cs.mu.Lock()
+	oldAS := cs.selectedAS
+	if oldAS != nil &&
+		oldAS.Agent == cs.selectedAgent &&
+		filepath.Clean(oldAS.Cwd) == cwd {
+		oldAS = nil
+	}
+	cs.detachActiveWorkingSetLocked()
 	cs.selectedCwd = cwd
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
 
-	// Drop the old AS's in-flight mirror outside cs.mu.
-	// ClearInFlight is idempotent and self-locks on asMu; the
-	// resulting disk write runs concurrently with other chat
-	// operations, which is fine because it is a chat-scoped
-	// reorg with no observable race window from the caller's side.
 	if oldAS != nil {
 		oldAS.ClearInFlight()
 	}
-
-	cs.persistChatEntry()
+	cs.clearQueueOnCwdBoundary()
 
 	// No cache to invalidate anymore: GitStatus(ctx) now rebuilds
 	// a fresh snapshot on every call, so the next outbound stamp
@@ -517,11 +572,20 @@ func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 // types — switching from group to DM and back preserves the
 // user's last-set preference.
 func (cs *ChatSession) SetWatchMode(mode WatchMode) error {
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
+	if cs.csStore != nil {
+		if err := cs.ensureStoreBootstrapped(); err != nil {
+			return err
+		}
+		if err := cs.csStore.SetWatchMode(cs.ChatID, int(mode)); err != nil {
+			return err
+		}
+	}
 	cs.mu.Lock()
 	cs.watchMode = mode
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
-	cs.persistChatEntry()
 	return nil
 }
 
@@ -541,11 +605,20 @@ func (cs *ChatSession) SetWatchMode(mode WatchMode) error {
 // mutex, write, persist, release. The lock is NOT held across
 // any channel.Send reply call.
 func (cs *ChatSession) SetThinkMode(mode ThinkMode) error {
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
+	if cs.csStore != nil {
+		if err := cs.ensureStoreBootstrapped(); err != nil {
+			return err
+		}
+		if err := cs.csStore.SetThinkMode(cs.ChatID, int(mode)); err != nil {
+			return err
+		}
+	}
 	cs.mu.Lock()
 	cs.thinkMode = mode
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
-	cs.persistChatEntry()
 	return nil
 }
 
@@ -557,25 +630,30 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	if agent == "" {
 		return errors.New("chatsession: empty agent")
 	}
-	cs.mu.Lock()
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
 
-	// F-62 §3.3.2 (extended to /use): chat-session "new session"
-	// boundary on agent switch. The previous (oldAgent, cwd) focus
-	// is lost — its in-flight mirror is dropped (in-memory +
-	// on-disk) so no future LookupSelectedAgentSession can route
-	// the old agent's hung messages into the new agent's batch.
-	//
-	// Capture the old AS pointer while holding cs.mu; the actual
-	// clear runs AFTER we release cs.mu, mirroring the
-	// persistChatEntry path below (release-then-persist).
-	var oldAS *agentsession.AgentSession
-	if cs.selectedAgent != "" && cs.selectedAgent != agent {
-		oldKey := agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}
-		if a, ok := cs.pool[oldKey]; ok {
-			oldAS = a
+	cs.mu.RLock()
+	unchanged := cs.selectedAgent == agent
+	cs.mu.RUnlock()
+	if unchanged {
+		return nil
+	}
+	if cs.csStore != nil {
+		if err := cs.ensureStoreBootstrapped(); err != nil {
+			return err
+		}
+		if err := cs.csStore.SetSelectedAgent(cs.ChatID, agent); err != nil {
+			return err
 		}
 	}
-
+	cs.mu.Lock()
+	changed := cs.selectedAgent != agent
+	var oldAS *AgentSession
+	if changed {
+		oldAS = cs.selectedAS
+		cs.selectedAS = nil
+	}
 	cs.selectedAgent = agent
 	// F-53: no more `currentTurnUserMsgID` to clear — the anchor
 	// now lives on `AgentSession.currentPrompt.LastMessageID`,
@@ -604,8 +682,6 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	if oldAS != nil {
 		oldAS.ClearInFlight()
 	}
-
-	cs.persistChatEntry()
 	return nil
 }
 
@@ -653,21 +729,21 @@ func (cs *ChatSession) SelectedCwd() string {
 // produces nothing usable. formatGitLine drops the footer line
 // on nil — same contract as before the refactor.
 func (cs *ChatSession) GitStatus(ctx context.Context) *messages.GitStatus {
+	return cs.GitStatusAt(ctx, cs.SelectedCwd(), cs.SelectedAgentSession())
+}
+
+// GitStatusAt rebuilds a git footer for an explicit workspace /
+// AgentSession. Warm AgentEvent outbounds must pass the envelope
+// AS cwd — not SelectedCwd — so footer metadata matches the
+// emitting session (docs/CHATSTORE.md §3.3).
+func (cs *ChatSession) GitStatusAt(ctx context.Context, cwd string, as *AgentSession) *messages.GitStatus {
 	deps := cs.gitStatusDeps
 	if deps.CollectGit == nil && deps.LookupPR == nil {
 		return nil
 	}
-	cwd := cs.SelectedCwd()
 	if cwd == "" {
 		return nil
 	}
-	// F-45 §1.7 git-status safety net: keep a hard 3s cap on the
-	// `git status` subprocess so a hung git cannot wedge an
-	// outbound stamp. The runtime's pump path reaches us with
-	// `context.Background()` (no parent deadline); without this
-	// cap a stalled git would block the handler indefinitely.
-	// LookupPR is synchronous (prcache.Cache.PR) and bounded, so
-	// it does not need the same cap.
 	var snap *messages.GitStatusSnapshot
 	if deps.CollectGit != nil {
 		runCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -675,17 +751,8 @@ func (cs *ChatSession) GitStatus(ctx context.Context) *messages.GitStatus {
 		cancel()
 	}
 	var pr *messages.PR
-	if deps.LookupPR != nil {
-		if as := cs.SelectedAgentSession(); as != nil {
-			// Per-stamp TTL check: prcache.Cache.MaybeRefresh is
-			// sync (no I/O) and conditional (only spawns a goroutine
-			// when the 60s TTL has elapsed). The cost on every stamp
-			// is one mutex acquire + one time check; the actual
-			// `gh/glab` round-trip happens in the background, off
-			// the stamp's critical path. Pass cwd so the refresh
-			// resolves the same workspace we just snapshotted above.
-			pr = deps.LookupPR(as.ID, cwd)
-		}
+	if deps.LookupPR != nil && as != nil {
+		pr = deps.LookupPR(as.ID, cwd)
 	}
 	return &messages.GitStatus{
 		Workspace:   cwd,
@@ -727,11 +794,26 @@ func (cs *ChatSession) WithGitStatusDeps(deps GitStatusDeps) *ChatSession {
 // tear down in-flight sessions should follow up with
 // EvictAgentSessionsInCwd.
 func (cs *ChatSession) ClearSelectedCwd() {
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
+	if cs.csStore != nil {
+		if err := cs.ensureStoreBootstrapped(); err != nil {
+			return
+		}
+		if err := cs.csStore.SetSelectedCwd(cs.ChatID, ""); err != nil {
+			return
+		}
+	}
 	cs.mu.Lock()
+	oldAS := cs.selectedAS
+	cs.detachActiveWorkingSetLocked()
 	cs.selectedCwd = ""
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
-	cs.persistChatEntry()
+	if oldAS != nil {
+		oldAS.ClearInFlight()
+	}
+	cs.clearQueueOnCwdBoundary()
 
 	// No cache to clear anymore — ChatSession.GitStatus checks
 	// cwd on every call and returns nil when cwd == "".
@@ -796,10 +878,19 @@ func (cs *ChatSession) WatcherHintEmitted() bool {
 // SetToolsMode — take ChatSession mutex, write field, release,
 // persist. The lock is NOT held across any channel.Send call.
 func (cs *ChatSession) MarkWatcherHintEmitted() error {
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
+	if cs.csStore != nil {
+		if err := cs.ensureStoreBootstrapped(); err != nil {
+			return err
+		}
+		if err := cs.csStore.SetWatcherHintEmitted(cs.ChatID, true); err != nil {
+			return err
+		}
+	}
 	cs.mu.Lock()
 	cs.watcherHintEmitted = true
 	cs.mu.Unlock()
-	cs.persistChatEntry()
 	return nil
 }
 
@@ -821,11 +912,20 @@ func (cs *ChatSession) MarkWatcherHintEmitted() error {
 // ChatSession mutex, write, persist, release. The lock is NOT
 // held across any channel.Send reply call.
 func (cs *ChatSession) SetToolsMode(mode ToolsMode) error {
+	cs.routeMu.Lock()
+	defer cs.routeMu.Unlock()
+	if cs.csStore != nil {
+		if err := cs.ensureStoreBootstrapped(); err != nil {
+			return err
+		}
+		if err := cs.csStore.SetToolsMode(cs.ChatID, int(mode)); err != nil {
+			return err
+		}
+	}
 	cs.mu.Lock()
 	cs.toolsMode = mode
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
-	cs.persistChatEntry()
 	return nil
 }
 
@@ -863,14 +963,9 @@ func (cs *ChatSession) Pool() []*AgentSession {
 }
 
 // LookupAS returns the AgentSession with the given ID from the
-// pool, or nil if not present. Used by event subscribers to
-// recover the source AS from an AgentSessionID carried on
-// each event (multi-as Phase 1: source AS comes from the
-// event, not from cs.selectedAS).
-//
-// Returns nil if the AS is no longer in the pool (e.g. after
-// a concurrent /kill). Subscribers must handle nil. nil-safe
-// on cs and on empty id.
+// active pool or the global warm asPool, or nil if not present.
+// Used by event subscribers to recover the source AS from an
+// AgentSessionID (warm ASes are not in cs.pool after /cwd).
 func (cs *ChatSession) LookupAS(id string) *AgentSession {
 	if cs == nil || id == "" {
 		return nil
@@ -879,6 +974,12 @@ func (cs *ChatSession) LookupAS(id string) *AgentSession {
 		if as.ID == id {
 			return as
 		}
+	}
+	cs.mu.RLock()
+	asPool := cs.asPool
+	cs.mu.RUnlock()
+	if asPool != nil {
+		return asPool.FindByID(id)
 	}
 	return nil
 }
@@ -1480,7 +1581,12 @@ func (cs *ChatSession) AttachAgentSessionForTest(as *AgentSession) {
 	}
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
+	asPool := cs.asPool
+	chatID := cs.ChatID
 	cs.mu.Unlock()
+	if asPool != nil {
+		asPool.Put(chatID, as)
+	}
 }
 
 // SelectedAgentSessionForTest installs as as the chat's
@@ -1543,6 +1649,14 @@ func (cs *ChatSession) detachAgentSession(as *AgentSession) {
 		return
 	}
 	delete(cs.pool, agentCwdKey{Agent: as.Agent, Cwd: as.Cwd})
+}
+
+// detachActiveWorkingSetLocked removes every actively mounted
+// AgentSession while preserving the global warm pool and subscriptions.
+// Caller must hold cs.mu for writing.
+func (cs *ChatSession) detachActiveWorkingSetLocked() {
+	cs.pool = make(map[agentCwdKey]*AgentSession)
+	cs.selectedAS = nil
 }
 
 // selectAgentSessionLocked makes as the chat's active AgentSession and
@@ -1621,88 +1735,111 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 		return nil, ErrNoSelectedAgent
 	}
 
-	// commit fix-6: pool hit only returns if the entry is still
-	// Running. A Detached entry (process state unknown after
-	// restart) or Exited entry (CLI died) falls through to the
-	// spawn path below.
-	if as, ok := cs.pool[agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
+	selectedCwd := cs.selectedCwd
+	selectedAgent := cs.selectedAgent
+	poolKey := agentCwdKey{Agent: selectedAgent, Cwd: selectedCwd}
+	if as, ok := cs.pool[poolKey]; ok && as.Status() == StatusRunning && as.Handle() != nil {
 		cs.selectAgentSessionLocked(as)
 		cs.mu.Unlock()
-		// Pool hit: install subscription if not already present.
-		// attachAgentSubscription is idempotent.
 		cs.attachAgentSubscription(as)
 		return as, nil
 	}
 
-	// Reuse a non-Running pool entry (Detached after daemon restart,
-	// or Exited after CLI died) when one exists for this (agent,
-	// cwd) tuple. The existing entry preserves identity and
-	// — critically — the captured SessionID from the prior run, so
-	// the next Spawn replays `--resume <id>` to the bridge. Creating
-	// a fresh entry here would discard the resume id and force a
-	// brand-new agent session after every daemon restart.
-	poolKey := agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}
-	existingAS, hadPrior := cs.pool[poolKey]
-	// F-62 §3.3.3b: capture the old AS that needs its in-flight
-	// mirror dropped. Renamed from `newAS` to `existingAS` because
-	// the variable actually holds the OLD/reused AS on the hadPrior
-	// path — the `new` name was misleading fresh readers into
-	// thinking it was the freshly-created AS (which is on the
-	// !hadPrior path and has no in-flight to clear).
-	//
-	// Capture the pointer while holding cs.mu; the actual clear
-	// runs AFTER we release cs.mu, mirroring the SetSelectedCwd /
-	// SetSelectedAgent release-then-persist pattern. This avoids
-	// holding cs.mu across ClearInFlight's own disk write.
-	var oldASForClear *agentsession.AgentSession
-	if hadPrior {
-		oldASForClear = existingAS
-	}
-	var as *agentsession.AgentSession
-	if !hadPrior {
-		as = NewAgentSession(
-			newAgentSessionID(),
-			cs.ID,
-			cs.selectedAgent,
-			cs.selectedCwd,
-			nil,
-		)
-		cs.attachAgentSessionLocked(as)
-	} else {
-		as = existingAS
-	}
-	// If hadPrior, the entry's ID + SessionID + Args are preserved
-	// from the prior construction or RestoreFromRegistry. Spawn
-	// will fork a new process and SetRunning will clear the stale
-	// exit code and flip stat back to Running.
-	cs.selectAgentSessionLocked(as)
-	if cs.asFile != nil {
-		_ = cs.asFile.Upsert(as.Entry())
-	}
-
-	// commit 7: actually fork the child via the configured Spawner.
-	// If no Spawner is set (test-friendly default), the
-	// AgentSession stays in status=Detached with no process — the
-	// caller can still see it in the pool, but SendBlocks will
-	// return ErrNotRunning until a Spawner is wired in.
+	// Snapshot dependencies, then do global-pool and disk I/O without
+	// holding cs.mu. A non-running local entry is retained as a
+	// compatibility fallback for tests that do not inject asPool.
+	localPrior := cs.pool[poolKey]
+	asPool := cs.asPool
+	asFile := cs.asFile
 	spawner := cs.spawner
 	cs.mu.Unlock()
 
-	// F-62 §3.3.3b: drop the existing AS's in-flight mirror
-	// outside cs.mu. The previous in-flight slice is stale (from a
-	// hung or detached prior process); the new spawn starts fresh
-	// and the next flush will pick up only the user's new
-	// messages. ClearInFlight is idempotent and self-locks on
-	// asMu.
-	if oldASForClear != nil {
-		oldASForClear.ClearInFlight()
+	// Serialize cold resolve+spawn for this key (docs/CHATSTORE.md
+	// review: concurrent miss must not create divergent AS objects).
+	// The unlock closure is captured in a variable so the recursion
+	// branch below can release the per-key lock BEFORE recursing —
+	// otherwise a rapid /cwd A → /cwd B → /cwd A sequence would
+	// re-enter the same non-reentrant sync.Mutex and deadlock (the
+	// outer call still holds lockResolve(A) via defer while the
+	// inner recursive call tries to acquire it again).
+	var unlockResolve func()
+	unlockResolve = asPool.lockResolve(cs.ChatID, selectedCwd, selectedAgent)
+	defer func() {
+		if unlockResolve != nil {
+			unlockResolve()
+		}
+	}()
+
+	as := asPool.Get(cs.ChatID, selectedCwd, selectedAgent)
+	hadPrior := as != nil
+	if as == nil && localPrior != nil {
+		as = asPool.GetOrPut(cs.ChatID, localPrior)
+		hadPrior = true
+	}
+
+	if as == nil && asFile != nil {
+		wantCwd := filepath.Clean(selectedCwd)
+		for _, entry := range asFile.List() {
+			if entry.ChatSessionID == cs.ID &&
+				filepath.Clean(entry.Cwd) == wantCwd &&
+				entry.Agent == selectedAgent {
+				candidate := FromAgentSessionEntry(entry)
+				as = asPool.GetOrPut(cs.ChatID, candidate)
+				hadPrior = true
+				break
+			}
+		}
+	}
+
+	if as == nil {
+		candidate := NewAgentSession(
+			newAgentSessionID(),
+			cs.ID,
+			selectedAgent,
+			selectedCwd,
+			nil,
+		)
+		as = asPool.GetOrPut(cs.ChatID, candidate)
+		if as == candidate && asFile != nil {
+			_ = asFile.Upsert(as.Entry())
+		}
+	}
+
+	cs.mu.Lock()
+	// A concurrent /cwd or /use changed the target while disk lookup
+	// was in progress. Leave the resolved AS warm and retry the new key.
+	// Release the per-key resolve lock BEFORE recursing — see the
+	// unlockResolve variable comment above for the deadlock scenario.
+	if cs.selectedCwd != selectedCwd || cs.selectedAgent != selectedAgent {
+		cs.mu.Unlock()
+		if unlockResolve != nil {
+			unlockResolve()
+			unlockResolve = nil
+		}
+		return cs.LookupSelectedAgentSession()
+	}
+	// Another concurrent lookup may already have mounted a live entry.
+	if mounted := cs.pool[poolKey]; mounted != nil &&
+		mounted.Status() == StatusRunning && mounted.Handle() != nil {
+		cs.selectAgentSessionLocked(mounted)
+		cs.mu.Unlock()
+		cs.attachAgentSubscription(mounted)
+		return mounted, nil
+	}
+	cs.attachAgentSessionLocked(as)
+	cs.selectAgentSessionLocked(as)
+	cs.mu.Unlock()
+	cs.attachAgentSubscription(as)
+
+	if as.Status() == StatusRunning && as.Handle() != nil {
+		return as, nil
+	}
+	if hadPrior {
+		as.ClearInFlight()
 	}
 
 	var spawnErr error
 	if spawner != nil {
-		// Spawn outside of cs.mu: avoids holding the write lock
-		// across a fork+exec. We re-acquire mu for the subsequent
-		// persistence + selectedAS assignment.
 		spawnErr = as.Spawn(context.Background(), spawner)
 
 		// fix-stop (2026-08-15): when the bridge rejected the
@@ -1724,39 +1861,19 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 		// the dispatcher can render it.
 		if spawnErr != nil && errors.Is(spawnErr, agent.ErrResumeUnhealthy) {
 			slog.Warn("chatsession: spawn retry without resume id after ErrResumeUnhealthy",
-				"chat_id", cs.ChatID, "as_id", as.ID, "agent", cs.selectedAgent)
+				"chat_id", cs.ChatID, "as_id", as.ID, "agent", selectedAgent)
 			spawnErr = as.Spawn(context.Background(), spawner)
 		}
 	}
 
-	cs.mu.Lock()
 	if spawner != nil {
 		if spawnErr != nil {
-			// Spawn failed; keep the entry in the pool but mark
-			// detached so the next lookup can re-attempt. Caller
-			// will see an error from LookupSelectedAgentSession.
-			cs.mu.Unlock()
-			cs.attachAgentSubscription(as)
-			return as, fmt.Errorf("chatsession: spawn failed (selectedAgent=%q, cwd=%q): %w", cs.selectedAgent, cs.selectedCwd, spawnErr)
+			return as, fmt.Errorf("chatsession: spawn failed (selectedAgent=%q, cwd=%q): %w", selectedAgent, selectedCwd, spawnErr)
 		}
-		// Refresh registry entry with updated PID/Status.
-		if cs.asFile != nil {
-			_ = cs.asFile.Upsert(as.Entry())
+		if asFile != nil {
+			_ = asFile.Upsert(as.Entry())
 		}
 	}
-
-	cs.persistChatEntryLocked()
-	cs.mu.Unlock()
-	// Install the bus subscription OUTSIDE cs.mu — see the lock
-	// ordering note in attachAgentSubscription. attachAgentSubscription
-	// is idempotent so a race with PumpEvents' periodic scan is safe.
-	cs.attachAgentSubscription(as)
-
-	// commit 8c: readPump is NOT auto-started here. The runtime
-	// (cmd/nightme) explicitly calls cs.StartReadPump() after
-	// the spawn resolves, typically from the /use handler or first
-	// message dispatch. Tests that don't go through the runtime
-	// are unaffected (no leak).
 
 	return as, nil
 }
@@ -1783,6 +1900,24 @@ func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
 		}
 	}
 	return out
+}
+
+// AgentSessionsForCwd returns AS for cwd from the global asPool
+// when wired (includes warm), else falls back to cs.pool. Used by
+// /close so parked warm sessions for the selected cwd are still
+// terminated (docs/CHATSTORE.md §7.4).
+func (cs *ChatSession) AgentSessionsForCwd(cwd string) []*AgentSession {
+	if cwd == "" {
+		return nil
+	}
+	cs.mu.RLock()
+	asPool := cs.asPool
+	chatID := cs.ChatID
+	cs.mu.RUnlock()
+	if asPool != nil {
+		return asPool.ListByChatCwd(chatID, cwd)
+	}
+	return cs.AgentSessionsInCwd(cwd)
 }
 
 // DropAgentSession is the per-entry cleanup primitive used by
@@ -1818,14 +1953,19 @@ func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 		return
 	}
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	cs.detachAgentSubscriptionLocked(as)
 	cs.detachAgentSession(as)
 	if cs.selectedAS == as {
 		cs.selectedAS = nil
 	}
-	if cs.asFile != nil {
-		_ = cs.asFile.Delete(as.ID)
+	asPool := cs.asPool
+	asFile := cs.asFile
+	chatID := cs.ChatID
+	cs.mu.Unlock()
+
+	asPool.Delete(chatID, as.Cwd, as.Agent)
+	if asFile != nil {
+		_ = asFile.Delete(as.ID)
 	}
 }
 
@@ -1949,12 +2089,16 @@ func (cs *ChatSession) EvictAgentSessionsInCwd(cwd string) (int, []DropResult) {
 		return 0, nil
 	}
 
-	// Snapshot via the shared helper so this and
-	// AgentSessionsInCwd can never disagree about what "in
-	// cwd" means. AgentSessionsInCwd takes cs.mu.RLock()
-	// itself; close/drop happens outside the lock so we
-	// don't hold it across potentially-slow bridge Close calls.
-	snapshot := cs.AgentSessionsInCwd(cwd)
+	cs.mu.RLock()
+	asPool := cs.asPool
+	chatID := cs.ChatID
+	cs.mu.RUnlock()
+	var snapshot []*AgentSession
+	if asPool != nil {
+		snapshot = asPool.ListByChatCwd(chatID, cwd)
+	} else {
+		snapshot = cs.AgentSessionsInCwd(cwd)
+	}
 	if len(snapshot) == 0 {
 		return 0, nil
 	}
@@ -2073,19 +2217,37 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		cs.mu.RUnlock()
 		return 0, 0, nil, nil
 	}
+	asPool := cs.asPool
+	chatID := cs.ChatID
 	cs.mu.RUnlock()
 
-	// 1. Snapshot ALL (cwd, [agentName]) targets (no lock held across
-	//    bridge calls). F-43 §5.4: dead/detached entries are NOT
-	//    silently skipped — their stale SessionID would resurrect a
-	//    dead session on next spawn, defeating /new's intent.
-	cs.mu.RLock()
+	// Snapshot targets from asPool (warm + active) without
+	// permanently remounting warm ASes into cs.pool — /new must
+	// reset SessionIDs but must not enlarge the active working
+	// set / prober scan (docs/CHATSTORE.md).
+	seen := make(map[string]struct{})
 	targets := make([]*AgentSession, 0)
+	if asPool != nil {
+		for _, as := range asPool.ListByChatCwd(chatID, cwd) {
+			if as == nil {
+				continue
+			}
+			if agentName != "" && as.Agent != agentName {
+				continue
+			}
+			targets = append(targets, as)
+			seen[as.ID] = struct{}{}
+		}
+	}
+	cs.mu.RLock()
 	for _, as := range cs.pool {
-		if as.Cwd != cwd {
+		if as == nil || as.Cwd != cwd {
 			continue
 		}
 		if agentName != "" && as.Agent != agentName {
+			continue
+		}
+		if _, ok := seen[as.ID]; ok {
 			continue
 		}
 		targets = append(targets, as)
@@ -2260,6 +2422,11 @@ func (cs *ChatSession) CreatedAt() time.Time {
 // LastInteractionAt returns when this ChatSession last had user
 // interaction.
 func (cs *ChatSession) LastInteractionAt() time.Time {
+	if cs != nil && cs.csStore != nil {
+		if entry, ok := cs.csStore.Get(cs.ChatID); ok && entry != nil {
+			return entry.LastInteractionAt
+		}
+	}
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.lastInteractionAt
@@ -2267,52 +2434,23 @@ func (cs *ChatSession) LastInteractionAt() time.Time {
 
 // entryLocked is the same as Entry but assumes cs.mu is held.
 func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
-	agentIDs := make([]string, 0, len(cs.pool))
-	var activeASID *string
-	for _, as := range cs.pool {
-		agentIDs = append(agentIDs, as.ID)
-		if cs.selectedAS != nil && as.ID == cs.selectedAS.ID {
-			id := as.ID
-			activeASID = &id
-		}
-	}
 	return &registry.ChatSessionEntry{
-		ID:                     cs.ID,
-		ChatID:                 cs.ChatID,
-		SelectedCwd:            cs.selectedCwd,
-		SelectedAgent:          cs.selectedAgent,
-		PrimaryAgent:           cs.primaryAgent,
-		AgentSessionIDs:        agentIDs,
-		SelectedAgentSessionID: activeASID,
-		CreatedAt:              cs.createdAt,
-		LastInteractionAt:      cs.lastInteractionAt,
-		WatchMode:              int(cs.watchMode),
-		ThinkMode:              int(cs.thinkMode),
-		ToolsMode:              int(cs.toolsMode),
+		ID:                cs.ID,
+		ChatID:            cs.ChatID,
+		SelectedCwd:       cs.selectedCwd,
+		SelectedAgent:     cs.selectedAgent,
+		PrimaryAgent:      cs.primaryAgent,
+		CreatedAt:         cs.createdAt,
+		LastInteractionAt: cs.lastInteractionAt,
+		WatchMode:         int(cs.watchMode),
+		ThinkMode:         int(cs.thinkMode),
+		ToolsMode:         int(cs.toolsMode),
 		// F-watch: propagate the hint tombstone so any persist
 		// path (SetWatchMode / SetThinkMode / SetToolsMode / SetSelectedCwd
 		// / ClearSelectedCwd / QueueUserMessage's lastInteractionAt
 		// bump) preserves it instead of clobbering back to false.
 		WatcherHintEmitted: cs.watcherHintEmitted,
 	}
-}
-
-// persistChatEntry writes the ChatSessionEntry to disk (if persistence
-// is configured). Best-effort: errors are returned but not propagated
-// through call sites (logged at higher level).
-func (cs *ChatSession) persistChatEntry() {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	cs.persistChatEntryLocked()
-}
-
-// persistChatEntryLocked writes ChatSessionEntry. Caller must hold
-// cs.mu (RLock or Lock).
-func (cs *ChatSession) persistChatEntryLocked() {
-	if cs.csStore == nil {
-		return
-	}
-	_ = cs.csStore.Save(cs.entryLocked())
 }
 
 // newAgentSessionID returns a unique ID for an AgentSession. v1.2

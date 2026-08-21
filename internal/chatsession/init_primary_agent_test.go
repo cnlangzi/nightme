@@ -29,6 +29,9 @@ func TestNew_PrimaryAgentSeedsActiveAgent(t *testing.T) {
 // LookupSelectedAgentSession fails with ErrNoSelectedAgent.
 func TestNew_EmptyPrimaryAgent_SelectedAgentEmpty(t *testing.T) {
 	csFile, asFile := newTestStores(t)
+	if _, err := csFile.Bootstrap("oc_xxx", "claude"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	cs, _ := New("oc_xxx", "")
 	cs = cs.WithPersistence(csFile, asFile)
 
@@ -36,7 +39,9 @@ func TestNew_EmptyPrimaryAgent_SelectedAgentEmpty(t *testing.T) {
 		t.Fatalf("SelectedAgent: got %q, want empty (no primary)", cs.SelectedAgent())
 	}
 
-	cs.SetSelectedCwd("/code/bailing")
+	if err := cs.SetSelectedCwd("/code/bailing"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
 	_, err := cs.LookupSelectedAgentSession()
 	if err == nil {
 		t.Fatalf("expected error when activeAgent is empty")

@@ -766,6 +766,8 @@ func (m *Manager) maybeEmitWatcherHint(ctx context.Context, msg *messages.Inboun
 			"chat_id", msg.ChatID, "err", err)
 		return
 	}
+	slog.Default().Info("chatsession: watcher hint sent",
+		"chat_id", msg.ChatID, "user_msg_id", msg.MessageID)
 
 	// Send succeeded — stamp + persist so future drops
 	// short-circuit. MarkWatcherHintEmitted goes through

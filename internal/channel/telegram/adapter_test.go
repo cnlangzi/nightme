@@ -51,15 +51,6 @@ func TestNewAdapter_EmptyToken(t *testing.T) {
 	}
 }
 
-func TestNewAdapter_BadMode(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Telegram.BotToken = "x"
-	cfg.Telegram.Mode = "weird"
-	if _, err := NewAdapter(cfg); err == nil {
-		t.Fatal("bad mode must error")
-	}
-}
-
 func TestNewAdapter_DefaultsPollingTimeout(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Telegram.BotToken = "x"
@@ -156,8 +147,12 @@ func TestAdapter_HealthSnapshot(t *testing.T) {
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if parsed["mode"] != "polling" {
-		t.Fatalf("mode = %v", parsed["mode"])
+	// Schema: username, connected, offset. mode was removed in
+	// the polling-only refactor — see docs/channel/telegram.md §10.4.
+	for _, key := range []string{"username", "connected", "offset"} {
+		if _, ok := parsed[key]; !ok {
+			t.Fatalf("missing key %q in %v", key, parsed)
+		}
 	}
 }
 
@@ -576,6 +571,9 @@ func TestAdapter_HandleUpdate_PrivateMessage(t *testing.T) {
 }
 
 func TestAdapter_HandleUpdate_GroupWithoutMention(t *testing.T) {
+	// Channel layer must NOT filter on its own — non-mention group
+	// messages are forwarded to chatsession.Manager.HandleInbound,
+	// which runs the watchMode gate (AcceptInbound).
 	a, _ := newTestAdapter(t)
 	a.config.PollingTimeout = 1
 	ctx, cancel := context.WithCancel(context.Background())
@@ -593,9 +591,9 @@ func TestAdapter_HandleUpdate_GroupWithoutMention(t *testing.T) {
 		},
 	})
 	select {
-	case msg := <-a.Incoming():
-		t.Fatalf("unexpected inbound %+v", msg)
+	case <-a.Incoming():
 	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected inbound (channel does not filter)")
 	}
 }
 
@@ -626,10 +624,12 @@ func TestAdapter_HandleUpdate_GroupWithMention(t *testing.T) {
 	}
 }
 
-func TestAdapter_HandleUpdate_GroupNoMentionRequired(t *testing.T) {
+func TestAdapter_HandleUpdate_GroupNonMentionPublished(t *testing.T) {
+	// Channel layer must NOT filter on its own — even non-mention
+	// group messages are forwarded to chatsession.Manager.HandleInbound,
+	// which then runs the watchMode gate (see chatsession.AcceptInbound).
+	// This guarantees the watch hint tombstone path works for telegram.
 	a, _ := newTestAdapter(t)
-	cfgFalse := false
-	a.config.GroupRequireMention = &cfgFalse
 	a.config.PollingTimeout = 1
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

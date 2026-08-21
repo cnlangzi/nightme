@@ -113,26 +113,8 @@ type FeishuRateLimitConfig struct {
 }
 
 type TelegramConfig struct {
-	BotToken            string `yaml:"bot_token"`
-	Mode                string `yaml:"mode"`
-	PollingTimeout      int    `yaml:"polling_timeout"`
-	WebhookURL          string `yaml:"webhook_url"`
-	WebhookSecret       string `yaml:"webhook_secret"`
-	GroupRequireMention *bool  `yaml:"group_require_mention"`
-}
-
-func (t *TelegramConfig) RequireMentionInGroup() bool {
-	if t == nil || t.GroupRequireMention == nil {
-		return true
-	}
-	return *t.GroupRequireMention
-}
-
-func (c *Config) TelegramGroupRequireMention() bool {
-	if c == nil {
-		return true
-	}
-	return c.Telegram.RequireMentionInGroup()
+	BotToken       string `yaml:"bot_token"`
+	PollingTimeout int    `yaml:"polling_timeout"`
 }
 
 // AgentsConfig is REMOVED in v1.2 (post interactive-config refactor).
@@ -329,15 +311,8 @@ func applyDefaults(c *Config) {
 	if c.Paths.DataDir == "" {
 		c.Paths.DataDir = "~/.nightme"
 	}
-	if c.Telegram.Mode == "" {
-		c.Telegram.Mode = "polling"
-	}
 	if c.Telegram.PollingTimeout == 0 {
 		c.Telegram.PollingTimeout = 30
-	}
-	if c.Telegram.GroupRequireMention == nil {
-		value := true
-		c.Telegram.GroupRequireMention = &value
 	}
 }
 
@@ -360,23 +335,9 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("NIGHTME_TELEGRAM_BOT_TOKEN"); v != "" {
 		c.Telegram.BotToken = v
 	}
-	if v := os.Getenv("NIGHTME_TELEGRAM_MODE"); v != "" {
-		c.Telegram.Mode = v
-	}
 	if v := os.Getenv("NIGHTME_TELEGRAM_POLLING_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Telegram.PollingTimeout = n
-		}
-	}
-	if v := os.Getenv("NIGHTME_TELEGRAM_WEBHOOK_URL"); v != "" {
-		c.Telegram.WebhookURL = v
-	}
-	if v := os.Getenv("NIGHTME_TELEGRAM_WEBHOOK_SECRET"); v != "" {
-		c.Telegram.WebhookSecret = v
-	}
-	if v := os.Getenv("NIGHTME_TELEGRAM_GROUP_REQUIRE_MENTION"); v != "" {
-		if parsed, err := strconv.ParseBool(v); err == nil {
-			c.Telegram.GroupRequireMention = &parsed
 		}
 	}
 	if v := os.Getenv("NIGHTME_PRIMARY"); v != "" {

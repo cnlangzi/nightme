@@ -11,6 +11,16 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Telegram: polling-only mode + channel layer cleanup
+
+`internal/config.TelegramConfig` is now `{bot_token, polling_timeout}` only. `webhook_url`, `webhook_secret`, `mode`, `group_require_mention` are gone — long polling is the only supported receive path, and the group mention gate lives in `chatsession.WatchMode` (`/watch all|mention|off`), not in config. Old config keys are silently ignored.
+
+`internal/channel/telegram.Adapter` no longer filters at the channel layer. Every inbound Telegram message — DM, group `@bot`, group plain text, reply to bot, `/command` — is published to `chatsession.Manager.HandleInbound`, which runs `AcceptInbound` and decides drop / dispatch / watch-hint. This makes the first-time `chatsession: drop non-mention group message` watch hint actually fire for Telegram, matching Feishu's behaviour. `hasMention` detection on the channel side stays (DM = true; group `@bot` / reply to bot / `/command` = true; otherwise false).
+
+`telegram: incoming` log line is now emitted on every inbound — same shape as Feishu's `feishu: incoming`, fixing the previous debug blind spot. `telegram: started` no longer carries `mode`.
+
+Config compatibility: `~/.nightme/config.yaml` with `telegram.mode`, `telegram.webhook_url`, `telegram.webhook_secret`, `telegram.group_require_mention`, or `telegram.topic_mode` parses fine (unknown keys ignored) but the values do nothing. Migrate by deleting those lines.
+
 ### OutChoice model
 
 Interactive prompts on the abstract outbound surface are

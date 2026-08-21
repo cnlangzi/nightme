@@ -2,13 +2,10 @@ package telegram
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,7 +30,6 @@ type Adapter struct {
 	dataDir   string
 	ctx       context.Context
 	cancel    context.CancelFunc
-	webhook   *http.Server
 	mu        sync.Mutex
 	started   bool
 	stopped   bool
@@ -53,13 +49,6 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	if botToken == "" {
 		return nil, errors.New("telegram: bot_token is required")
 	}
-	mode := strings.ToLower(strings.TrimSpace(cfg.Telegram.Mode))
-	if mode == "" {
-		mode = "polling"
-	}
-	if mode != "polling" && mode != "webhook" {
-		return nil, fmt.Errorf("telegram: unsupported mode %q", mode)
-	}
 	timeout := cfg.Telegram.PollingTimeout
 	if timeout <= 0 {
 		timeout = 30
@@ -68,7 +57,6 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		timeout = 50
 	}
 	cfgCopy := cfg.Telegram
-	cfgCopy.Mode = mode
 	cfgCopy.PollingTimeout = timeout
 	dataDir := cfg.Paths.DataDir
 	if dataDir == "" {
@@ -104,9 +92,6 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		state = &stateStore{topics: make(map[string]*TopicState), choices: make(map[string]*ChoiceState)}
 	}
 	copy := cfg.Telegram
-	if copy.Mode == "" {
-		copy.Mode = "polling"
-	}
 	if copy.PollingTimeout == 0 {
 		copy.PollingTimeout = 30
 	}
@@ -171,15 +156,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 		a.Stop(context.Background())
 		return errors.New("telegram: getMe returned empty username")
 	}
-	if a.config.Mode == "webhook" {
-		if err := a.startWebhook(a.ctx); err != nil {
-			a.Stop(context.Background())
-			return err
-		}
-	} else {
-		go a.pollLoop(a.ctx)
-	}
-	a.logger.Info("telegram: started", "mode", a.config.Mode, "username", a.botName)
+	go a.pollLoop(a.ctx)
+	a.logger.Info("telegram: started", "username", a.botName)
 	return nil
 }
 
@@ -200,15 +178,9 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	}
 	a.stopped = true
 	cancel := a.cancel
-	server := a.webhook
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
-	}
-	if server != nil {
-		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancelShutdown()
-		_ = server.Shutdown(shutdownContext)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -222,10 +194,32 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	a.logger.Info("telegram: stopped", "username", a.botName)
 	return nil
 }
 
+// pollLoopGuard is a process-wide singleton gate. If a buggy
+// runtime path somehow creates and Starts multiple Adapter
+// instances (we've seen this in the wild — see the 409-Conflict
+// diagnosis in the fix-telegram branch), each one would spawn
+// its own pollLoop and race Telegram's getUpdates long-poll
+// slot, causing perpetual 409s. The first pollLoop to acquire
+// this guard wins; all subsequent ones exit immediately. The
+// underlying multi-Adapter bug is still there (root cause TBD),
+// but this stops the runtime symptom and lets the daemon
+// actually deliver messages in the meantime.
+var pollLoopGuard sync.Once
+
 func (a *Adapter) pollLoop(ctx context.Context) {
+	started := false
+	pollLoopGuard.Do(func() { started = true })
+	if !started {
+		a.logger.Error("telegram: pollLoop already running in this process; "+
+			"this adapter is a duplicate. Suppressing to avoid 409 Conflict. "+
+			"Investigate why runtime created >1 Adapter for telegram.",
+			"this_adapter", fmt.Sprintf("%p", a))
+		return
+	}
 	for {
 		// Honour cancellation at the top of every iteration,
 		// not just inside the err-handling branches below. A
@@ -313,9 +307,6 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 		text = message.Caption
 	}
 	hasMention := a.hasMention(message, text)
-	if message.Chat.Type != "private" && a.config.RequireMentionInGroup() && !hasMention {
-		return
-	}
 	chatID := strconv.FormatInt(message.Chat.ID, 10)
 	threadID, err := a.ensureTopic(ctx, message)
 	if err != nil {
@@ -367,6 +358,15 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	if inbound.Blocks == nil {
 		inbound.Blocks = a.BuildBlocks(text, attachments)
 	}
+	a.logger.Info("telegram: incoming",
+		"chat_id", chatID,
+		"chat_type", message.Chat.Type,
+		"thread_id", topicID,
+		"user_id", userID(message),
+		"has_mention", hasMention,
+		"message_id", message.MessageID,
+		"text_len", len(text),
+	)
 	a.publish(inbound)
 }
 
@@ -457,6 +457,17 @@ func (a *Adapter) publish(inbound messages.InboundMessage) {
 	select {
 	case a.incoming <- inbound:
 	case <-a.ctxDone():
+		// Adapter is shutting down — drop silently. This is the
+		// expected race window when Stop() is called mid-publish.
+		a.logger.Warn("telegram: publish dropped (adapter stopping)",
+			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID)
+	default:
+		// incoming channel is full (buffer=128). Runtime is not
+		// draining Inbound — likely a chatsession pump stall.
+		// Surface this loudly; otherwise the user sees nothing.
+		a.logger.Warn("telegram: publish dropped (incoming channel full)",
+			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID,
+			"buffer_size", cap(a.incoming))
 	}
 }
 
@@ -511,6 +522,11 @@ func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) 
 			}); err != nil {
 				return 0, err
 			}
+			a.logger.Debug("telegram: topic created",
+				"chat_id", chatID,
+				"thread_id", message.MessageThreadID,
+				"trigger_message_id", message.MessageID,
+			)
 		}
 		return message.MessageThreadID, nil
 	}
@@ -530,7 +546,15 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 		state.PlaceholderMessageID = result.MessageID
 		state.UserMessageID = strconv.Itoa(userMessageID)
 		state.LastMessageID = result.MessageID
-		return a.state.putTopic(state)
+		if err := a.state.putTopic(state); err != nil {
+			return err
+		}
+		a.logger.Debug("telegram: placeholder created",
+			"chat_id", chatID,
+			"thread_id", topicID,
+			"placeholder_message_id", result.MessageID,
+		)
+		return nil
 	}
 	state.UserMessageID = strconv.Itoa(userMessageID)
 	return a.state.putTopic(state)
@@ -639,9 +663,6 @@ func (a *Adapter) hasMention(message *Message, text string) bool {
 	if strings.HasPrefix(strings.TrimSpace(text), "/") {
 		return true
 	}
-	if a.botName == "" {
-		return !a.config.RequireMentionInGroup()
-	}
 	return strings.Contains(strings.ToLower(text), "@"+strings.ToLower(a.botName))
 }
 
@@ -706,10 +727,22 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 // setMessageReaction / etc.). This keeps the API surface
 // exclusively in raw form while the rest of the runtime sees
 // the namespaced form.
-func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
+func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Most call send sites (chatsession, runtime dispatcher, shell)
+	// don't log Send errors — they bubble up. Log here so every
+	// outgoing failure leaves a trace, regardless of caller.
+	defer func() {
+		if err != nil {
+			a.logger.Warn("telegram: outgoing failed",
+				"chat_id", msg.ChatID,
+				"kind", msg.Kind.String(),
+				"err", err,
+			)
+		}
+	}()
 	if msg.ChatID == "" {
 		return errors.New("telegram: outbound ChatID is empty")
 	}
@@ -810,7 +843,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	payload, _ := json.Marshal(map[string]any{"mode": a.config.Mode, "username": a.botName, "connected": a.started && !a.stopped, "offset": a.offset})
+	payload, _ := json.Marshal(map[string]any{"username": a.botName, "connected": a.started && !a.stopped, "offset": a.offset})
 	return "telegram", payload, nil
 }
 
@@ -832,48 +865,6 @@ func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []
 	return blocks
 }
 
-func (a *Adapter) startWebhook(ctx context.Context) error {
-	if a.config.WebhookURL == "" {
-		return errors.New("telegram: webhook_url is required in webhook mode")
-	}
-	if a.config.WebhookSecret == "" {
-		return errors.New("telegram: webhook_secret is required in webhook mode")
-	}
-	if err := a.api.call(ctx, "setWebhook", map[string]any{"url": a.config.WebhookURL, "secret_token": a.config.WebhookSecret}, nil); err != nil {
-		return err
-	}
-	parsed, err := url.Parse(a.config.WebhookURL)
-	if err != nil || parsed.Host == "" {
-		return errors.New("telegram: webhook_url must include a host")
-	}
-	a.webhook = &http.Server{Addr: parsed.Host, Handler: http.HandlerFunc(a.HandleWebhook)}
-	go func() {
-		if err := a.webhook.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
-			a.logger.Warn("telegram: webhook server failed", "err", err)
-		}
-	}()
-	return nil
-}
-
-func (a *Adapter) HandleWebhook(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
-		writer.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	expected := a.config.WebhookSecret
-	provided := request.Header.Get("X-Telegram-Bot-Api-Secret-Token")
-	if expected == "" || subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) != 1 {
-		writer.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	var update Update
-	if err := json.NewDecoder(request.Body).Decode(&update); err != nil {
-		writer.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	a.handleUpdate(request.Context(), update)
-	writer.WriteHeader(http.StatusOK)
-}
 
 func formatTool(msg messages.OutboundMessage) string {
 	if msg.Tool == nil {

@@ -285,7 +285,7 @@ Topic 方案要求：
 1. 群组是 **Forum Supergroup**；普通群组没有 Forum Topic。
 2. 群组已开启 Topics。
 3. Bot 是群组成员，并具备创建/管理 Topic 所需的权限；建议配置为管理员。
-4. Bot 使用长轮询（`getUpdates`）或 Webhook 接收 `Message`、`CallbackQuery` 和 `MessageReactionUpdated` 等更新。
+4. Bot 使用长轮询（`getUpdates`）接收 `Message`、`CallbackQuery` 和 `MessageReactionUpdated` 等更新。每个 Bot 只能有一个 `getUpdates` consumer,daemon 重启时用持久化的 `update_id + 1` 继续消费。
 5. 私聊没有 Forum Topic；私聊只能退化为普通消息，并在文档和 UI 中明确标注。
 6. Topic 内发送的所有事件都必须显式携带正确的 `message_thread_id`。
 
@@ -303,8 +303,7 @@ Topic 方案要求：
 
 ### Phase 1：基础 Topic 收发
 
-- 增加 Telegram 配置、Bot token 和连接模式。
-- 实现长轮询或 Webhook 更新入口。
+- 增加 Telegram 配置、Bot token 和长轮询接收。
 - 实现私聊和群组消息的基础 `InboundMessage` 映射。
 - 实现 Topic 查重、创建和持久化。
 
@@ -328,7 +327,7 @@ Topic 方案要求：
 - 增加主窗口不发送中间事件、Topic 内事件完整累积的回归测试。
 - 增加 daemon 重启后的 Topic 恢复测试。
 - 增加 `message_thread_id` / `message_id` 持久化与迁移测试。
-- 增加权限、限流、Webhook 签名、Topic 关闭和消息删除测试。
+- 增加权限、限流、Topic 关闭和消息删除测试。
 
 ## 9. 验收标准
 
@@ -447,30 +446,15 @@ https://t.me/<bot_username>?startgroup
 
 ### 10.4 接入方式
 
-第一版默认采用 Long Polling，避免每个用户都需要公网 HTTPS Webhook 地址：
+nightme 只支持 Long Polling 模式,不实现 Webhook。每个 Bot 必须由持有它的 daemon 自己消费 `getUpdates`,**不能把同一个 Bot Token 复制给多个 daemon** —— 否则会重复消费或丢消息。
+
+`TelegramConfig` 字段只有两个:
 
 ```yaml
 telegram:
-  mode: polling
-  bot_token: "<local secret>"
-  polling:
-    timeout: 30
-  require_forum: true
-  create_topic_per_chat: true
+  bot_token: "<BotFather token>"
+  polling_timeout: 30   # getUpdates 长轮询秒数,1-50,默认 30
 ```
-
-后续可为有公网入口的部署增加 Webhook：
-
-```yaml
-telegram:
-  mode: webhook
-  bot_token: "<local secret>"
-  webhook:
-    url: "https://nightme.example.com/telegram/webhook"
-    secret: "<random verification secret>"
-```
-
-无论使用 Polling 还是 Webhook，接收方都必须是该 daemon 自己；不能把同一个 Bot Token 复制给多个 daemon。
 
 ### 10.5 Topic 路由与消息发送
 
@@ -517,12 +501,12 @@ Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeho
 
 | 通用能力 | Telegram Adapter |
 | --- | --- |
-| `Start` | 启动 Polling 或 Webhook 接收循环 |
+| `Start` | 启动 Polling 接收循环 |
 | `Incoming` | 发布转换后的 `messages.InboundMessage` |
 | `Send` | 发送 `OutReply`、`OutResult`、工具和错误消息 |
 | `Send` | 所有 `OutboundKind` 的唯一出口；交互选择也走这里 |
 | `OnPromptEnded` | 更新占位消息或添加终态 reaction |
-| `HealthSnapshot` | 汇报 API、Polling、Webhook 和 Topic 状态 |
+| `HealthSnapshot` | 汇报 API、Polling 和 Topic 状态 |
 | `SetLogger` | 输出 Telegram 收发和重试日志 |
 | `BuildBlocks` | 将文本、caption、附件转换为统一内容块 |
 
@@ -541,7 +525,7 @@ Gateway、Chatsession 和 Agent 继续使用现有 `messages` 类型，不感知
 ### 10.8 本方案验收补充
 
 - 每个 daemon 只使用一个自己的 Bot Token
-- `getUpdates` / Webhook 更新不会被其他 daemon 重复消费
+- `getUpdates` 更新不会被其他 daemon 重复消费
 - Bot Token、用户文本和附件不会写入普通日志
 - 用户通过 BotFather 创建 Bot 后, 可以按 CLI 引导完成 Token 配置、群组添加和 daemon 启动
 - 同一 DM / 同一群 / 同一 topic 跨 daemon 重启, chatID 永远稳定 (`tg_<chatid>[:thread_id]`)
@@ -634,27 +618,11 @@ Privacy Mode 的开关是 BotFather 配置，Telegram Bot API 没有对应的修
 
 ```yaml
 telegram:
-  mode: polling
   bot_token: "<BotFather token>"
-
-  listen:
-    private_chats: true
-    groups: true
-    forum_topics: true
-
-  routing:
-    chat_id_per_workspace: true
-    # 不再有 topic_mode: separate / shared 配置 — 见 §5.1 / §11.6
-    # 修订。chatID 拼接 tg_<chatid>[:thread_id] 已经天然 partition。
-
-  access:
-    # 私聊默认处理
-    private_require_allowlist: true
-    # 群组默认只处理命令、回复和 mention
-    group_require_mention: true
+  polling_timeout: 30
 ```
 
-实际配置字段名应与后续 `Config` 实现保持一致；这里的语义是：每个 Telegram `chat_id` 作为一个 workspace，Forum Topic 因为 chatID 后缀了 thread_id 天然隔成独立 ChatSession。
+`TelegramConfig` 只有这两个字段。群组 mention gate 不再走配置,而是按 `chatsession.WatchMode`(`/watch all|mention|off`)在 chatsession 层判定 —— 详见 §11.7。
 
 ### 11.6 多群组如何工作
 
@@ -806,7 +774,7 @@ https://t.me/<bot_username>?startgroup
 
 Telegram 没有提供“列出 Bot 已加入全部群组”的 Bot API 接口。daemon 应通过更新流接收新消息，并持久化已收到的 `chat_id`、`user_id` 和 `message_thread_id`；不要把“从本地配置文件恢复完整群组列表”当作 Telegram 提供的功能。
 
-重启后使用 `update_id + 1` 作为 `getUpdates` offset，继续消费尚未确认的更新。Webhook 场景则需要通过持久化更新去重和重试机制处理重复投递。
+重启后使用 `update_id + 1` 作为 `getUpdates` offset,继续消费尚未确认的更新。daemon 持久化 `offset` 到 telegram_state.json,重启后无缝接续。
 
 ### 11.10 开通验收
 
@@ -1151,17 +1119,15 @@ BotFather 的二维码能力边界：
 
 ### 13.3 接收模式
 
-第一版推荐 Long Polling：
+**唯一支持 Long Polling**。每个 Bot 只能有一个 `getUpdates` consumer。
 
 ```yaml
 telegram:
-  mode: polling
   bot_token: "<local secret>"
-  polling:
-    timeout: 30
+  polling_timeout: 30
 ```
 
-每个 Bot 只能有一个 `getUpdates` consumer。daemon 重启时使用持久化的 `update_id + 1` 继续消费。后续可以为具有公网入口的实例增加 Webhook，并使用 Webhook secret 验证请求来源。
+daemon 重启时使用持久化的 `update_id + 1` 继续消费。**不实现 Webhook 模式** —— 这避免每个用户都需要公网 HTTPS 入口和 secret 校验逻辑。
 
 接收到的更新至少包括：
 
@@ -1451,29 +1417,11 @@ Telegram Renderer
 
 ```yaml
 telegram:
-  mode: polling
   bot_token: "<local secret>"
-  polling:
-    timeout: 30
-  listen:
-    private_chats: true
-    groups: true
-    forum_topics: true
-  routing:
-    chat_id_per_workspace: true
-    topic_mode: separate
-  access:
-    private_require_allowlist: true
-    group_require_mention: true
-  interaction:
-    custom_input: force_reply
-    card_state_store: local
-  messages:
-    thinking_mode: topic
-    tools_mode: topic
-    heartbeat_mode: edit_placeholder
-    long_result: split_in_topic
+  polling_timeout: 30
 ```
+
+> 早期设计曾考虑 `listen` / `routing` / `access` / `interaction` / `messages` 等多个分组,本次实现只保留 `bot_token` 和 `polling_timeout`。群组 mention gate 走 `chatsession.WatchMode`(`/watch all|mention|off`),不再用 config 控制。
 
 实际字段名在实现时应以 `internal/config.Config` 为准。Bot Token 必须遵循本机凭证权限和敏感字段脱敏规则。
 
@@ -1522,7 +1470,6 @@ health.go      Bot API、polling、Topic 状态健康快照
 - callback callback_id 做幂等。
 - ChoiceState 在多问题向导和 ForceReply 等待期间可恢复。
 - 发送错误按 `retry_after` 处理 429。
-- Webhook 使用 secret header 验证请求。
 - Topic 或占位消息删除后可安全重建。
 - 用户输入和 LLM 输出都要 HTML 转义。
 - 不在主窗口静默处理 Topic 相关失败，应发送明确错误。

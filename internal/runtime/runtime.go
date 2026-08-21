@@ -68,9 +68,12 @@ import (
 	_ "github.com/cnlangzi/nightme/internal/command/close"
 	_ "github.com/cnlangzi/nightme/internal/command/cwd"
 	_ "github.com/cnlangzi/nightme/internal/command/gtw"
-	// bot registers itself with channel.BuildAll via its init() — the
-	// blank import ensures that init() actually runs at daemon start.
-	_ "github.com/cnlangzi/nightme/internal/channel/bot"
+	// bot's channel.Register is temporarily disabled — its init()
+	// is no longer triggered here, so bot does not auto-start with
+	// the daemon. The workflow CLI (cmd/nightme/workflow.go) still
+	// imports bot for the dry-run flow. Re-enable by restoring:
+	//     _ "github.com/cnlangzi/nightme/internal/channel/bot"
+	// once we're ready to bring bot back into the runtime.
 	_ "github.com/cnlangzi/nightme/internal/command/newcmd"
 	_ "github.com/cnlangzi/nightme/internal/command/queue"
 	_ "github.com/cnlangzi/nightme/internal/command/review"

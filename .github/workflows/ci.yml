@@ -336,8 +336,8 @@ jobs:
       # systray CGo dependency (the 'go build' step below
       # links against -lgtk-3 / -layatana-appindicator3).
       # Mirrors the same step in the 'test' job — both jobs
-      # run on ubuntu-latest and both call go build ./...
-      # (or its dist/nightme equivalent). macOS / Windows
+      # run on ubuntu-latest and both build the nightme binary
+      # (which links the systray CGo dependency). macOS / Windows
       # runners ship Cocoa / Win32 by default and need no
       # extra install.
       - name: Install systray build deps (Linux)
@@ -349,7 +349,27 @@ jobs:
 
       - name: Build nightme
         shell: bash
-        run: go build -o dist/nightme ./cmd/nightme
+        run: |
+          # Use the canonical build entry points (mirrors the
+          # `test` job's `Build smoke binary` step) so CI builds
+          # exactly what a developer ships:
+          #   - Windows: build.bat (cmd-native, also documents
+          #     how Windows users build without GnuWin32 make)
+          #   - Linux/macOS: make build (uses LDFLAGS from the
+          #     Makefile to bake version metadata in)
+          # Both produce bin/nightme[.exe] with version metadata
+          # baked in via -ldflags. Going through these scripts
+          # (rather than a bare 'go build -o dist/nightme')
+          # means a regression in build.bat or the Makefile
+          # LDFLAGS list surfaces as a failing CI gate instead
+          # of a Windows-only user-facing "version unknown"
+          # surprise — and the daemon lifecycle + agent-spawn
+          # steps below all consume bin/nightme[.exe].
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./build.bat
+          else
+            make build
+          fi
 
       # Daemon lifecycle smoke (start / stop / restart / status) on
       # every shipped OS. This is the regression gate for the
@@ -386,9 +406,14 @@ jobs:
           NIGHTME_FEISHU_APP_SECRET: ci
           NIGHTME_FEISHU_VERIFICATION_TOKEN: ci
         run: |
-          bin="./dist/nightme"
+          # build.bat → bin/nightme.exe, make build → bin/nightme
+          # (see the `Build nightme` step above). Both bake
+          # version metadata in via -ldflags, which `nightme
+          # status` reports — a regression in the LDFLAGS list
+          # surfaces here as a "version unknown" row.
+          bin="./bin/nightme"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            bin="./dist/nightme.exe"
+            bin="./bin/nightme.exe"
           fi
           # Isolate all daemon state (config, lock, pipe, log,
           # crash capture) under one deterministic temp dir per
@@ -570,7 +595,12 @@ jobs:
         shell: bash
         run: |
           set -e
-          out=$(./dist/nightme agents)
+          # build.bat → bin/nightme.exe, make build → bin/nightme.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
+          out=$("$bin" agents)
           echo "$out"
           # Match by word boundary (column-leading NAME in the
           # table format "NAME\tCOMMAND\tARGS"). We do NOT
@@ -595,6 +625,11 @@ jobs:
         shell: bash
         run: |
           set -e
+          # build.bat → bin/nightme.exe, make build → bin/nightme.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
           # This is the "nightme 的启动测试" gate: invoke nightme
           # through its own CLI surface (`nightme test`), let the
           # bridge drive the spawn, and verify the child actually
@@ -647,7 +682,7 @@ jobs:
             # plus pumpIO's "send: EOF" (~138 bytes) — sub-150,
             # false-FAIL. 80 covers all known agents.
             set +e
-            printf 'PONG\n' | ./dist/nightme test \
+            printf 'PONG\n' | "$bin" test \
                 --agent "$agent" \
                 --workspace "$workspace" \
                 >"$out_file" 2>&1 &

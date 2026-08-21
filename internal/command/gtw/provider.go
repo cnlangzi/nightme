@@ -1233,6 +1233,119 @@ type GitLabProvider struct {
 	version string
 }
 
+// FindOpenPRForBranch runs `glab mr list --source-branch <head>
+// --output json --repo <owner>/<repo>` and returns the first
+// matching MR. Returns (nil, nil) on empty list — the common
+// case when the branch has never had an MR opened.
+//
+// glab mr list's default state is "open" (regression: prior
+// versions of this code passed `--state opened`, which started
+// erroring with "Unknown flag: --state" on glab 1.36+ — the
+// `--state` flag was removed from glab mr list in favour of
+// dedicated boolean flags --closed/--merged/--draft; the default
+// behaviour is exactly what we want, so we omit the flag
+// entirely. See https://docs.gitlab.com/cli/mr/list/).
+//
+// Error contract: known failure modes (CLI not installed) are
+// translated to ErrCLINotInstalled; everything else is wrapped
+// verbatim. Stale-upstream doesn't apply to a list call (glab
+// returns empty list, not an error, when the source branch
+// doesn't exist), so it has no special handling here.
+func (c *GitLabProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
+	args := []string{
+		"mr", "list",
+		"--source-branch", head,
+		"--output", "json",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
+	if err != nil {
+		return nil, wrapListPRError(err, stderr, "glab")
+	}
+	out := strings.TrimSpace(stdout)
+	if out == "" || out == "[]" {
+		return nil, nil
+	}
+	var rows []struct {
+		IID    int    `json:"iid"`
+		WebURL string `json:"web_url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	row := rows[0]
+	state := strings.ToLower(row.State)
+	if state == "" {
+		state = "open"
+	}
+	// glab reports "opened" not "open" — normalise to the
+	// convention the PR.State comment documents ("open") so
+	// downstream consumers don't have to know the platform.
+	if state == "opened" {
+		state = "open"
+	}
+	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
+}
+
+// GetPR runs `glab mr list --source-branch <head> --output json
+// --repo <owner>/<repo>` and returns the first matching MR.
+//
+// glab's --output json shape: array of objects with `iid`,
+// `web_url`, `state` (lowercase: "opened" / "closed" / "merged").
+// "opened" is GitLab's term for the equivalent of GitHub's "open".
+//
+// Regression: prior versions passed `--state opened` here too.
+// glab 1.36+ removed `--state` from `mr list` (default is open;
+// dedicated flags --closed/--merged/--draft cover the others) and
+// returned `Unknown flag: --state`. The fix is the same as
+// FindOpenPRForBranch: drop the flag entirely.
+//
+// Returns (nil, nil) when no MR matches the head branch — same
+// fail-soft contract as GitHubProvider.GetPR.
+func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*PR, error) {
+	args := []string{
+		"mr", "list",
+		"--source-branch", head,
+		"--output", "json",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
+	if err != nil {
+		return nil, fmt.Errorf("glab mr list --source-branch %s: %v: %s", head, err, strings.TrimSpace(stderr))
+	}
+	out := strings.TrimSpace(stdout)
+	if out == "" || out == "[]" {
+		return nil, nil
+	}
+	var rows []struct {
+		IID    int    `json:"iid"`
+		WebURL string `json:"web_url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	row := rows[0]
+	state := strings.ToLower(row.State)
+	if state == "" {
+		state = "opened"
+	}
+	// glab reports "opened" not "open" — normalise to the
+	// convention the PR.State comment documents ("open") so
+	// downstream consumers don't have to know the platform.
+	if state == "opened" {
+		state = "open"
+	}
+	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
+}
+
 // Kind implements GitProvider.
 func (c *GitLabProvider) Kind() ProviderKind { return ProviderGitLab }
 
@@ -1379,99 +1492,3 @@ func (c *GitLabProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 	return strings.TrimSpace(stdout), nil
 }
 
-// FindOpenPRForBranch runs `glab mr list --source-branch <head>
-// --state opened --output json --repo <owner>/<repo>` and
-// returns the freshest matching opened MR. Returns (nil, nil)
-// on empty list — the common case when the branch has never had
-// an MR opened.
-//
-// Error contract: known failure modes (CLI not installed) are
-// translated to ErrCLINotInstalled; everything else is wrapped
-// verbatim. Stale-upstream doesn't apply to a list call (glab
-// returns empty list, not an error, when the source branch
-// doesn't exist), so it has no special handling here.
-func (c *GitLabProvider) FindOpenPRForBranch(ctx context.Context, owner, repo, head string) (*PR, error) {
-	args := []string{
-		"mr", "list",
-		"--source-branch", head,
-		"--state", "opened",
-		"--output", "json",
-		"--repo", owner + "/" + repo,
-	}
-	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
-	if err != nil {
-		return nil, wrapListPRError(err, stderr, "glab")
-	}
-	out := strings.TrimSpace(stdout)
-	if out == "" || out == "[]" {
-		return nil, nil
-	}
-	var rows []struct {
-		IID    int    `json:"iid"`
-		WebURL string `json:"web_url"`
-		State  string `json:"state"`
-	}
-	if err := json.Unmarshal([]byte(out), &rows); err != nil {
-		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	row := rows[0]
-	state := strings.ToLower(row.State)
-	if state == "" {
-		state = "open"
-	}
-	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
-}
-
-// GetPR runs `glab mr list --source-branch <head> --state opened
-// --output json --repo <owner>/<repo>` and returns the first
-// matching MR.
-//
-// glab's --output json shape: array of objects with `iid`,
-// `web_url`, `state` (lowercase: "opened" / "closed" / "merged").
-// "opened" is GitLab's term for the equivalent of GitHub's "open".
-//
-// Returns (nil, nil) when no MR matches the head branch — same
-// fail-soft contract as GitHubProvider.GetPR.
-func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*PR, error) {
-	args := []string{
-		"mr", "list",
-		"--source-branch", head,
-		"--state", "opened",
-		"--output", "json",
-		"--repo", owner + "/" + repo,
-	}
-	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
-	if err != nil {
-		return nil, fmt.Errorf("glab mr list --source-branch %s: %v: %s", head, err, strings.TrimSpace(stderr))
-	}
-	out := strings.TrimSpace(stdout)
-	if out == "" || out == "[]" {
-		return nil, nil
-	}
-	var rows []struct {
-		IID    int    `json:"iid"`
-		WebURL string `json:"web_url"`
-		State  string `json:"state"`
-	}
-	if err := json.Unmarshal([]byte(out), &rows); err != nil {
-		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
-	}
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	row := rows[0]
-	state := strings.ToLower(row.State)
-	if state == "" {
-		state = "opened"
-	}
-	// glab reports "opened" not "open" — normalise to the
-	// convention the PR.State comment documents ("open") so
-	// downstream consumers don't have to know the platform.
-	if state == "opened" {
-		state = "open"
-	}
-	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
-}

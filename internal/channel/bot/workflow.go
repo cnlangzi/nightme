@@ -212,14 +212,20 @@ func mergeEnv(base, override map[string]string) map[string]string {
 }
 
 // sanitize converts a workspace path into a runID-safe component.
-// Strips leading slashes (root), replaces remaining slashes with
-// '_'. Replaces '~' with 'home' to avoid shell-meaningful chars.
+// Cross-platform: filepath.Clean on Windows converts "/" to "\"
+// AFTER Clean, so ToSlash must run AFTER Clean to keep "/" as
+// the canonical separator. Replaces '~' with 'home' to avoid
+// shell-meaningful chars.
 func sanitize(workspace string) string {
 	s := workspace
 	if len(s) > 0 && s[0] == '~' {
 		s = "home" + s[1:]
 	}
+	// Clean first (collapses "..", removes double slashes, etc).
+	// Then ToSlash to normalize Windows "\" back to "/" so the
+	// TrimLeft below strips the root prefix consistently.
 	s = filepath.Clean(s)
+	s = filepath.ToSlash(s)
 	s = strings.TrimLeft(s, "/")
 	r := strings.NewReplacer(
 		"/", "_",

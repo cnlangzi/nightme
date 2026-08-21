@@ -185,6 +185,12 @@ func TestSanitize(t *testing.T) {
 		{"/tmp/foo", "tmp_foo"},
 		{"./relative", "relative"},
 		{"a:b/c d", "a_b_c_d"},
+		// Windows: filepath.Clean converts "/" → "\", so
+		// sanitize must ToSlash first to avoid leading "\"
+		// surviving TrimLeft("/"). Colon → '_' and slash
+		// immediately after → '_' (both characters
+		// independently replaced).
+		{`C:\Users\alice\work`, "C__Users_alice_work"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {

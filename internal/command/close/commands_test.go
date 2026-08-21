@@ -2,18 +2,18 @@ package close
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 func testCwd(t *testing.T) string {
 	t.Helper()
-	// SetSelectedCwd filepath.Cleans; on Windows "/tmp" → `\tmp`.
-	return filepath.Clean("/tmp")
+	// SetSelectedCwd cleans; pathutil.Clean matches OS separators.
+	return pathutil.Clean("/tmp")
 }
 
 func TestFactory_Spec(t *testing.T) {

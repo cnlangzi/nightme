@@ -3,17 +3,16 @@ package chatsession
 import (
 	"context"
 	"errors"
-	"github.com/cnlangzi/nightme/internal/chatstore"
-	"path/filepath"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"fmt"
-
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -241,15 +240,15 @@ func TestKillAllClearsPool(t *testing.T) {
 		t.Fatalf("persisted AgentSessions should be cleared; got %d", len(all))
 	}
 	// activeCwd and activeAgent survive (only the pool is cleared).
-	if cs.SelectedCwd() != "/code/bailing" {
+	if !pathutil.Equal(cs.SelectedCwd(), "/code/bailing") {
 		t.Fatalf("SelectedCwd should survive /kill; got %q", cs.SelectedCwd())
 	}
 }
 
 func TestPersistenceRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	csPath := filepath.Join(dir, "chat_sessions.json")
-	asPath := filepath.Join(dir, "agent_sessions.json")
+	csPath := pathutil.Join(dir, "chat_sessions.json")
+	asPath := pathutil.Join(dir, "agent_sessions.json")
 
 	// Write phase.
 	csFile, asFile, err := func() (*chatstore.Store, *registry.AgentSessionFile, error) {
@@ -287,7 +286,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("ChatSessionEntry should be persisted by chatID")
 	}
-	if entry.SelectedCwd != "/code/bailing" {
+	if !pathutil.Equal(entry.SelectedCwd, "/code/bailing") {
 		t.Fatalf("persisted SelectedCwd: %q", entry.SelectedCwd)
 	}
 	if entry.SelectedAgent != "claude" {
@@ -301,7 +300,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if agentEntries[0].Agent != "claude" {
 		t.Fatalf("Agent: %q", agentEntries[0].Agent)
 	}
-	if agentEntries[0].Cwd != "/code/bailing" {
+	if !pathutil.Equal(agentEntries[0].Cwd, "/code/bailing") {
 		t.Fatalf("Cwd: %q", agentEntries[0].Cwd)
 	}
 }

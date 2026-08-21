@@ -294,14 +294,17 @@ func trayOnReady(opts trayOptions) {
 	//   can tell them apart at a glance.
 	// - `<version>` is the compiled-in version.Version,
 	//   same string the REPL banner and `nightme version`
-	//   print. Showing it here means the user never needs to
-	//   dig into a submenu to learn which build is live.
+	//   print, routed through displayVer so a leading "v"
+	//   (which `git describe --tags` injects via ldflags)
+	//   is stripped before it reaches the UI. Showing it
+	//   here means the user never needs to dig into a
+	//   submenu to learn which build is live.
 	instanceName := "unknown"
 	if cfg, err := config.LoadDefault(); err == nil && cfg != nil {
 		instanceName = config.EffectiveName(cfg)
 	}
 	statusItem := systray.AddMenuItem(
-		"\U0001F7E2  NightMe[" + instanceName + "] v" + version.Version + " is running",
+		"\U0001F7E2  NightMe["+instanceName+"] v"+displayVer(version.Version)+" is running",
 		"nightme daemon is running",
 	)
 	statusItem.Disable()

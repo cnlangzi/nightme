@@ -1684,6 +1684,8 @@ func TestGitHubFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
 
 // TestGitLabFindOpenPRForBranch_EmptyList — minimum smoke for
 // the GitLab side: argv shape + empty-list short-circuit.
+// TestGitLabFindOpenPRForBranch_EmptyList — minimum smoke for
+// the GitLab side: argv shape + empty-list short-circuit.
 func TestGitLabFindOpenPRForBranch_EmptyList(t *testing.T) {
 	gh := &runGH{out: "[]"}
 	p := &GitLabProvider{Worktree: "/w", Runner: gh}
@@ -1694,10 +1696,232 @@ func TestGitLabFindOpenPRForBranch_EmptyList(t *testing.T) {
 	if pr != nil {
 		t.Fatalf("expected nil PR, got %+v", pr)
 	}
-	// GitLab argv shape: `mr list --source-branch <head> --state
-	// opened --output json --repo <owner>/<repo>`.
+	// GitLab argv shape: `mr list --source-branch <head> --output
+	// json --repo <owner>/<repo>`. Critically: NO `--state` flag —
+	// glab 1.36+ removed `--state` from `mr list` (default is open;
+	// dedicated flags --closed/--merged/--draft cover the others).
+	// Regression guard for the "Unknown flag: --state" failure
+	// reported 2026-08-21 against fix-glab-pr.
 	want := []string{"mr", "list", "--source-branch", "feat",
-		"--state", "opened", "--output", "json", "--repo", "acme/demo"}
+		"--output", "json", "--repo", "acme/demo"}
+	if !equalStrings(gh.last, want) {
+		t.Fatalf("argv: got %v want %v", gh.last, want)
+	}
+}
+
+// TestGitLabFindOpenPRForBranch_Success — happy path: a single
+// opened MR is returned with the platform-normalised state.
+func TestGitLabFindOpenPRForBranch_Success(t *testing.T) {
+	gh := &runGH{out: `[{"iid":144062,"web_url":"https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062","state":"opened"}]`}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr == nil {
+		t.Fatal("expected non-nil PR")
+	}
+	if pr.Number != 144062 {
+		t.Errorf("number: got %d want 144062", pr.Number)
+	}
+	if pr.URL != "https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062" {
+		t.Errorf("url: got %q", pr.URL)
+	}
+	// "opened" is glab's term for GitHub's "open" — normalise so
+	// downstream consumers don't have to know the platform.
+	if pr.State != "open" {
+		t.Errorf("state: got %q want %q (normalised from opened)", pr.State, "open")
+	}
+}
+
+// TestGitLabFindOpenPRForBranch_MultipleRows — when several MRs
+// match the source branch (rare but possible during re-pushes or
+// cross-fork reopens), we return the first row. The contract
+// comment doesn't promise freshness ordering; pinning behaviour
+// so a future swap doesn't silently change which row wins.
+func TestGitLabFindOpenPRForBranch_MultipleRows(t *testing.T) {
+	gh := &runGH{out: `[
+		{"iid":100,"web_url":"https://gitlab.com/o/r/-/merge_requests/100","state":"opened"},
+		{"iid":101,"web_url":"https://gitlab.com/o/r/-/merge_requests/101","state":"opened"}
+	]`}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr == nil || pr.Number != 100 {
+		t.Fatalf("expected MR #100, got %+v", pr)
+	}
+}
+
+// TestGitLabFindOpenPRForBranch_CLINotInstalled — `glab` missing
+// from PATH must surface as ErrCLINotInstalled via wrapListPRError,
+// the same way the GitHub path does.
+func TestGitLabFindOpenPRForBranch_CLINotInstalled(t *testing.T) {
+	gh := &runGH{fail: &exec.Error{Name: "glab", Err: exec.ErrNotFound}}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	_, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
+	if !errors.Is(err, ErrCLINotInstalled) {
+		t.Fatalf("expected ErrCLINotInstalled, got %v", err)
+	}
+}
+
+// TestGitLabGetPR_EmptyList — no matching MR returns (nil, nil)
+// with no error.
+func TestGitLabGetPR_EmptyList(t *testing.T) {
+	gh := &runGH{out: "[]"}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.GetPR(context.Background(), "o", "r", "feat")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr != nil {
+		t.Fatalf("expected nil PR, got %+v", pr)
+	}
+}
+
+// TestGitLabGetPR_Success — single MR round-trip with the
+// platform-normalised state.
+func TestGitLabGetPR_Success(t *testing.T) {
+	gh := &runGH{out: `[{"iid":144062,"web_url":"https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062","state":"opened"}]`}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.GetPR(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr == nil {
+		t.Fatal("expected non-nil PR")
+	}
+	if pr.Number != 144062 {
+		t.Errorf("number: got %d want 144062", pr.Number)
+	}
+	if pr.State != "open" {
+		t.Errorf("state: got %q want %q (normalised from opened)", pr.State, "open")
+	}
+}
+
+// TestGitLabFindOpenPRForBranch_BlankStateDefaultsToOpen —
+// glab occasionally omits the `state` field for very fresh MRs
+// (or older self-hosted versions). The contract is that we
+// default to "open" so the footer doesn't render an empty state.
+func TestGitLabFindOpenPRForBranch_BlankStateDefaultsToOpen(t *testing.T) {
+	gh := &runGH{out: `[{"iid":7,"web_url":"https://gitlab.com/o/r/-/merge_requests/7","state":""}]`}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr == nil || pr.State != "open" {
+		t.Fatalf("expected state=open fallback, got %+v", pr)
+	}
+}
+
+// TestGitLabArgv_NoStateFlag — direct regression test for the
+// 2026-08-21 production failure reported against fix-glab-pr:
+//
+//	check existing PR: glab pr/mr list: exit status 1: ERROR
+//	Unknown flag: --state.
+//	Try --help for usage.
+//
+// glab 1.36+ removed `--state` from `mr list` (default is open;
+// dedicated flags --closed/--merged/--draft cover the others).
+// If a future refactor re-introduces `--state` here, this test
+// fails before the change reaches production.
+func TestGitLabArgv_NoStateFlag(t *testing.T) {
+	for _, name := range []string{"FindOpenPRForBranch", "GetPR"} {
+		t.Run(name, func(t *testing.T) {
+			gh := &runGH{out: "[]"}
+			p := &GitLabProvider{Worktree: "/w", Runner: gh}
+			var err error
+			switch name {
+			case "FindOpenPRForBranch":
+				_, err = p.FindOpenPRForBranch(context.Background(), "o", "r", "feat")
+			case "GetPR":
+				_, err = p.GetPR(context.Background(), "o", "r", "feat")
+			}
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			for i, a := range gh.last {
+				if a == "--state" {
+					t.Fatalf("argv at index %d contains --state flag — glab 1.36+ removed this flag from `mr list`; default is open. argv=%v", i, gh.last)
+				}
+			}
+		})
+	}
+}
+
+// TestGitLabParseMRList_FromWWWGitLabCom — the real glab mr
+// list --output json payload shape observed against
+// https://gitlab.com/gitlab-com/www-gitlab-com.git (N=1 row,
+// trimmed to the fields our parser actually consumes). Ensures
+// the JSON tags (`iid`, `web_url`, `state`) match glab's actual
+// schema and that the parser tolerates the documented field set.
+func TestGitLabParseMRList_FromWWWGitLabCom(t *testing.T) {
+	// Captured from `glab mr list --source-branch
+	// workday-sync-team-page-2026-08-21-74 --output json --repo
+	// gitlab-com/www-gitlab-com` on 2026-08-21. Trimmed to the
+	// fields GitLabProvider.FindOpenPRForBranch / GetPR actually
+	// decode; the full payload has dozens more fields that we
+	// ignore. The point of this fixture is to pin the schema the
+	// production code relies on, so a future glab release that
+	// renames `iid` -> `mr_iid` or `web_url` -> `url` breaks the
+	// test BEFORE the change reaches production.
+	const sample = `[
+		{
+			"iid": 144062,
+			"target_branch": "master",
+			"source_branch": "workday-sync-team-page-2026-08-21-74",
+			"project_id": 7764,
+			"title": "Workday Sync to Team Page - 2026-08-21",
+			"state": "opened",
+			"created_at": "2026-08-21T01:06:00.207Z",
+			"updated_at": "2026-08-21T01:11:08.890Z",
+			"web_url": "https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062"
+		}
+	]`
+	gh := &runGH{out: sample}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	pr, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "workday-sync-team-page-2026-08-21-74")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if pr == nil {
+		t.Fatal("expected non-nil PR")
+	}
+	if pr.Number != 144062 {
+		t.Errorf("number: got %d want 144062", pr.Number)
+	}
+	if pr.URL != "https://gitlab.com/gitlab-com/www-gitlab-com/-/merge_requests/144062" {
+		t.Errorf("url: got %q", pr.URL)
+	}
+	if pr.State != "open" {
+		t.Errorf("state: got %q want %q (normalised from opened)", pr.State, "open")
+	}
+}
+
+// TestGitLabProvider_LiveWWWGitLabCom_MRListArgs — argv shape
+// assertion against the production provider using the exact
+// owner/repo that pioneered the fix-glab-pr reproduction. The
+// test doesn't shell out to glab (CI is hermetic), but it does
+// pin the argv so a refactor that re-introduces `--state` (or
+// adds a flag that breaks glab's parser) is caught before
+// reaching production. The expected argv reflects the live
+// behaviour observed on glab 1.82.0 against
+// https://gitlab.com/gitlab-com/www-gitlab-com.git.
+func TestGitLabProvider_LiveWWWGitLabCom_MRListArgs(t *testing.T) {
+	gh := &runGH{out: "[]"}
+	p := &GitLabProvider{Worktree: "/w", Runner: gh}
+	_, err := p.FindOpenPRForBranch(context.Background(), "gitlab-com", "www-gitlab-com", "chore-docs-init")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	want := []string{
+		"mr", "list",
+		"--source-branch", "chore-docs-init",
+		"--output", "json",
+		"--repo", "gitlab-com/www-gitlab-com",
+	}
 	if !equalStrings(gh.last, want) {
 		t.Fatalf("argv: got %v want %v", gh.last, want)
 	}

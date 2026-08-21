@@ -141,9 +141,8 @@ func renderFixLocalSuccessCard(branch, worktree string) string {
 }
 
 // BranchExistsChoice builds the §5.3.1 interactive decision card.
-// This is the single source of truth for production `/gtw fix`
-// (emitBranchExistsDraft) and for debug `/gtw test` scenarios that
-// exercise the same card shape — debug must not re-hardcode Choices.
+// This is the single source of truth for the production `/gtw fix`
+// (emitBranchExistsDraft) — callers must not re-hardcode Choices.
 //
 // F-XX: handles both ID-mode (IssueID > 0) and local-mode
 // (IssueID == -1) drafts. Local-mode drafts have no issue

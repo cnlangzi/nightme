@@ -432,7 +432,6 @@ grep -l "projection\|view:\|host.*computed" internal/bridge/*/protocol.go
 **包含**:
 - `state.go`: 加 `wireRingBuffer` (最近 64 帧 raw frame)
 - `state.go`: unknown event type 升级到 Warn 级别 + 计数
-- 新增 `dump.go` + debug 命令: `nightme debug dsh dump-wire`
 - `doc.go`: 加 ring buffer dump 说明
 
 **工作量**: 1 PR / 1 天
@@ -453,7 +452,7 @@ grep -l "projection\|view:\|host.*computed" internal/bridge/*/protocol.go
 |---|---|---|
 | To-dos 面板仍为空 | 直播缺 `todo/write`;或只靠投影但 `value` 是数组而 decoder 当 object 解;或 resume 没读 history `projections` | 先确认 `todo/write` 字段是 `todos` 不是 `items`;投影形状见 [dsh-api.md §3.4.3](../bridge/dsh-api.md);`step/*` **不是**清单 |
 | Tool 状态更新滞后 | View 没接进 wireState.tools | 确认 P3 已落地 |
-| `unknown event type` 大量出现 | dsh 加了新 SessionEvent,注册表没追上 | `nightme debug dsh dump-wire` 看最近的 wire 帧,在 eventRegistry 加 handler |
+| `unknown event type` 大量出现 | dsh 加了新 SessionEvent,注册表没追上 | 在测试里通过 `DumpWireStats` 看最近的 wire 帧,在 eventRegistry 加 handler |
 | 锁死锁 | dispatcher handler 内部加锁 + 调用方已持锁 | 改用单源真值;或 dispatcher 入口统一 acquire |
 | regression 测试通过但生产仍坏 | testdata fixture 与真实 wire 字段名不一致 | 重跑 wire-probe,更新 fixture |
 

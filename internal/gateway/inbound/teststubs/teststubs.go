@@ -2,8 +2,7 @@
 // inbound.Router dependency. Used by the dispatch_*_test.go
 // files in the same parent package and (via direct import)
 // by external packages that need to exercise the dispatch
-// chain end-to-end (cmd/nightme/debug.go's noopCommander,
-// internal/command/e2e_slash_test.go's e2eStubMgr).
+// chain end-to-end (internal/command/e2e_slash_test.go's e2eStubMgr).
 //
 // Why a dedicated package: each test file in the inbound
 // suite was originally creating its own per-test stub type,

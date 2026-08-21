@@ -22,7 +22,7 @@
 //     reg.add() cobra command is a prerequisite for surfacing
 //     it in the tray — but the grouping itself is owned here.
 //     Lifecycle commands (start/stop/restart/status) and
-//     TTY-bound commands (test/login/logs/debug) remain
+//     TTY-bound commands (test/login/logs) remain
 //     addNoTray so they don't
 //     drift into the submenu list. (config and update were
 //     briefly addNoTray too, but they're now reg.add() so the

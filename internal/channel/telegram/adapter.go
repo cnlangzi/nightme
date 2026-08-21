@@ -194,6 +194,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	a.logger.Info("telegram: stopped", "username", a.botName)
 	return nil
 }
 
@@ -338,6 +339,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	}
 	a.logger.Info("telegram: incoming",
 		"chat_id", chatID,
+		"chat_type", message.Chat.Type,
 		"thread_id", topicID,
 		"user_id", userID(message),
 		"has_mention", hasMention,
@@ -434,6 +436,17 @@ func (a *Adapter) publish(inbound messages.InboundMessage) {
 	select {
 	case a.incoming <- inbound:
 	case <-a.ctxDone():
+		// Adapter is shutting down — drop silently. This is the
+		// expected race window when Stop() is called mid-publish.
+		a.logger.Warn("telegram: publish dropped (adapter stopping)",
+			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID)
+	default:
+		// incoming channel is full (buffer=128). Runtime is not
+		// draining Inbound — likely a chatsession pump stall.
+		// Surface this loudly; otherwise the user sees nothing.
+		a.logger.Warn("telegram: publish dropped (incoming channel full)",
+			"chat_id", inbound.ChatID, "user_msg_id", inbound.MessageID,
+			"buffer_size", cap(a.incoming))
 	}
 }
 
@@ -488,6 +501,11 @@ func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) 
 			}); err != nil {
 				return 0, err
 			}
+			a.logger.Debug("telegram: topic created",
+				"chat_id", chatID,
+				"thread_id", message.MessageThreadID,
+				"trigger_message_id", message.MessageID,
+			)
 		}
 		return message.MessageThreadID, nil
 	}
@@ -507,7 +525,15 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 		state.PlaceholderMessageID = result.MessageID
 		state.UserMessageID = strconv.Itoa(userMessageID)
 		state.LastMessageID = result.MessageID
-		return a.state.putTopic(state)
+		if err := a.state.putTopic(state); err != nil {
+			return err
+		}
+		a.logger.Debug("telegram: placeholder created",
+			"chat_id", chatID,
+			"thread_id", topicID,
+			"placeholder_message_id", result.MessageID,
+		)
+		return nil
 	}
 	state.UserMessageID = strconv.Itoa(userMessageID)
 	return a.state.putTopic(state)
@@ -680,10 +706,22 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 // setMessageReaction / etc.). This keeps the API surface
 // exclusively in raw form while the rest of the runtime sees
 // the namespaced form.
-func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
+func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Most call send sites (chatsession, runtime dispatcher, shell)
+	// don't log Send errors — they bubble up. Log here so every
+	// outgoing failure leaves a trace, regardless of caller.
+	defer func() {
+		if err != nil {
+			a.logger.Warn("telegram: outgoing failed",
+				"chat_id", msg.ChatID,
+				"kind", msg.Kind.String(),
+				"err", err,
+			)
+		}
+	}()
 	if msg.ChatID == "" {
 		return errors.New("telegram: outbound ChatID is empty")
 	}

@@ -286,6 +286,12 @@ func (a *Adapter) handleForceReply(ctx context.Context, message *Message) bool {
 	default:
 		return false
 	}
+	a.logger.Debug("telegram: force_reply matched",
+		"chat_id", chatID,
+		"reply_to_message_id", replyToID,
+		"request_id", state.RequestID,
+		"choice_kind", choiceKindName(state.Choice.Kind),
+	)
 	return true
 }
 

@@ -164,7 +164,6 @@ form submit **经常省略** `value.action`，只带 `Action.Name`。
 | 10 | 自定义+选项一起 POST，host 拒 | respond 4xx / mux 不匹配 | 非 multi 不能 `custom`+`selected` | Submit = 空 selected + custom；点选项 = 无 custom |
 | 11 | 主聊天打了一段话，题还在 | 当新 user prompt | 有意为之 | 只有卡上 Skip/Submit/选项才答 |
 | 12 | PATCH 了但按钮还在 | `buildInteractiveCard` 失败被吞 | `RequestID` 空 | 出卡和 PATCH 用同一 RequestID；看 `feishu: outgoing patch_message` err |
-| 13 | `/gtw test` 卡一出来就变已选 | 旧 auto-dispatch | demo 不该替用户点 | `/gtw test` 只出卡 |
 | 14 | debug log 文件里没有 | 打了 `slog.Default()` | Default 未 `SetDefault` | 用 adapter `a.logger` 或进程已 SetDefault |
 | 15 | 点 Allow once 却出了 Type your answer | 审批卡走了 question chrome | Kind/标题分错 | approval = Waiting for approval，无 form |
 

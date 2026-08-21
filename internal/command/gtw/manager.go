@@ -162,7 +162,7 @@ func (m *Manager) DraftCount(chatID string) int {
 }
 
 // ClearDrafts drops every pending draft for chatID. Used by
-// `/gtw test reset` and any future "abort all cards" path.
+// any future "abort all cards" path.
 // Does not touch the context state — call ClearContext
 // separately when both must go.
 func (m *Manager) ClearDrafts(chatID string) {

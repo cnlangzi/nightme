@@ -462,7 +462,7 @@ CI runs on GitHub Actions (`.github/workflows/ci.yml`) for every push and pull r
 ### Project layout
 
 ```
-cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / agents / name / debug)
+cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / agents / name)
 configs/                           # example YAML config
 docs/
   PRD.md SPEC.md FEATURES.md       # 3-layer doc model

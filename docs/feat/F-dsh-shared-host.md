@@ -351,13 +351,12 @@ standardRegistry = map[string]frameHandler{
   #!/bin/bash
   ./bin/nightme _daemon &
   sleep 5
-  ./bin/nightme debug chat <chat-id>      # 触发 dsh session
+  # 触发 dsh session + 重启 dsh 后验证 recovery
   kill -TERM $(pgrep -f 'dsh.*--profile web')
   sleep 3
   dsh --profile web --port 3080 &         # 重启 dsh
   sleep 5
-  ./bin/nightme debug prompt <chat-id> "hello again"
-  # 期望:OutReply 正常,dsh sessionId 跟之前一致
+  # 此时给主聊天发任意 user prompt,期望:OutReply 正常,dsh sessionId 跟之前一致
   ```
 - 灾难恢复:kill dsh + 重启 daemon 双双发生,验证仍能恢复
 

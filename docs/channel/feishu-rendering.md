@@ -5187,7 +5187,6 @@ type ChoiceKind int
 const (
     ChoiceKindPermission ChoiceKind = iota  // Action Needed（👉 前缀；AskUserQuestion / 权限点选）
     ChoiceKindDecision                     // 决策卡（无 👉，自带 Choices，等宽 column_set）
-    ChoiceKindPreview                      // /gtw test card 预览（无 👉，无 action）
 )
 ```
 
@@ -5334,9 +5333,9 @@ func (a *Adapter) handleActCardAction(
 
 ```go
 var gtwActionPrefixes = map[string]ReactionKind{
-    "act:/gtw/branch-newv2":   ReactionNewV2,  // /gtw test three
-    "act:/gtw/branch-join":    ReactionJoin,   // /gtw test three
-    "act:/gtw/worktree-retry": ReactionRetry,  // /gtw test ok
+    "act:/gtw/branch-newv2":   ReactionNewV2,
+    "act:/gtw/branch-join":    ReactionJoin,
+    "act:/gtw/worktree-retry": ReactionRetry,
     "act:/gtw/cancel":         ReactionCancel, // any decision card
 }
 
@@ -5485,7 +5484,6 @@ func emitBranchExistsDraft(...) (*Result, error) {
 ### 5.2 集成测试
 
 - `internal/gateway/dispatch_action_test.go::TestDispatch_CardAction_RoutesToGTW`：合成 `card.action.trigger` → 走完 `gtw.HandleAction` → 验证 dispatched `ReactionEvent`
-- `/gtw test ok`（用户已测的）保留 pipeline exercise，新增 `/gtw test card-patch` 验证 PATCH 路径
 
 ### 5.3 手动验证
 
@@ -5566,7 +5564,7 @@ internal/gateway/gateway.go::dispatchAction
 生产 trampoline：cs := mgr.Get(msg.ChatID) → cs.HandleAction(ctx, ev)
    ├─ cs == nil?  ── 岔路 B：return false
    └─ cs.onReaction(ctx, ev)        ← 由 `internal/command/gtw/` 的 reaction handling 装上（原 `internal/gateway/handlers_gtw.go::wireGTWActionOnSession`；F-102 重构后 `gtw` 整体迁到 `internal/command/gtw/`，reaction 路由走 `services.ReactionRouter`，已不再走 `cs.SetActionHandler`）
-        在 runGTWTestScenario / SetActionHandler 装上        注册 closure
+        （`SetActionHandler` 仅 debug 时代使用；生产路径是 `cs.onReaction`）
         │
         ▼
 gtw.HandleAction → executeXxxAction → emitFollowUp
@@ -5609,13 +5607,13 @@ Feishu SDK 的 `event.Action.Option` 字段是 `select_static` 组件的选项�
 
 | 前缀 | 语义 | F-46 落地 |
 | --- | --- | --- |
-| `act:/gtw/branch-newv2` | branch-exists �（`/gtw test three`） | ✅ 已实现 |
-| `act:/gtw/branch-join` | branch-exists 🔗（`/gtw test three`） | ✅ 已实现 |
-| `act:/gtw/worktree-retry` | §5.3.3 🔄（`/gtw test ok`） | ✅ 已实现 |
+| `act:/gtw/branch-newv2` | branch-exists 🆕 | ✅ 已实现 |
+| `act:/gtw/branch-join` | branch-exists 🔗 | ✅ 已实现 |
+| `act:/gtw/worktree-retry` | §5.3.3 🔄 | ✅ 已实现 |
 | `act:/gtw/cancel` | 任意决策卡 ❌ | ✅ 已实现 |
 | `nav:/xxx` / `cmd:/xxx` / `act:/gtw/label-force` | 导航 / 命令 / §5.3.2 强制接管 | ❌ 未进 map（F-47/48/49） |
 
-`ActionLookup` 只收录**当前卡面真实发出的** action；占位 / alias（`label-force`、`worktree-cancel`）已从 map 清掉，避免与 `/gtw test` 场景脱节。
+`ActionLookup` 只收录**当前卡面真实发出的** action；占位 / alias（`label-force`、`worktree-cancel`）已从 map 清掉。
 
 #### 10.2.3 PATCH 视觉：颜色反转 + 完整 label + 无 "已选择" 头
 
@@ -5625,24 +5623,6 @@ PATCH 后的卡布局（`buildCardButtons` 中处理）：
 - **没选的按钮**：`type: "default"` 灰描边 + `disabled: true` + 完整 label（如 `❌ 取消`）。完整 label 解决"用户只看 icon 不知道意思"的痛点。
 - **body 不再有"✅ 已选择 X"独立行**——那个是冗余的视觉噪声，PATCH 后的按钮绿色已经传达"已选"语义。
 - body 只剩原始 body + 底部一行 `Retry failed: ...`（来自 `m.PatchResult`）。
-
-#### 10.2.4 `ChoiceRequestID` stamping：测试栈的 PATCH 死代码
-
-**Bug 现象**：`/gtw test ok` synthetic reaction 跑通（`consumed=true dropped=false (handler acted)`），但 `emitFollowUp` 之后日志里**没有 `patch_message`**。
-
-**根因**：`gtwTestSeedDraft` 设的 `chatsession.GTWDraft` **没有 `ChoiceRequestID` 字段**。`sendScenarioCard` 算的是 `"gtw-test-" + userMsgID`，但 `gtwTestSeedDraft` 不知道。`gtwTestRekeyDraft` 把 draft 从 `om_test_ok` 移到 `cardMsgID`，但 `ChoiceRequestID` 还是空。
-
-`gtwSendAdapter` PATCH 路径把这个空 RequestID 传给 Feishu adapter 的 `OutChoicePatch` case → `buildInteractiveCard` 看到空 RequestID → return error `"feishu: card missing request_id"`。这个 error 被 `_ = deps.Send(...)` 静默吞掉。
-
-**修法**：`gtwTestSeedDraft` 直接硬编码 `ChoiceRequestID: "gtw-test-" + userMsgID`，和 `sendScenarioCard` 的 `RequestID` 计算公式保持一致。PATCH 路径就通了。
-
-#### 10.2.5 `/gtw test ok` 是 UAT demo，**不** auto-dispatch
-
-`runGTWTestScenario` 早期实现里**有** `gw.DispatchInbound(synthetic reaction)`，导致用户还没点，卡就自己 PATCH 了——卡立刻显示 `✅ 已选择 🔄 + Retry failed`。这是反 UX：用户失去了"点按钮反馈"的动作。
-
-**设计决定**：`/gtw test` 改为纯 demo 模式。出卡 + 提示文字"请点卡片按钮"。**完全 auto-dispatch 取消**。让真实 E2E 不能在没有 Feishu 真实账号的情况下跑，那 demo 模式就够用。
-
-如果将来要自动化 E2E，加 `/gtw test auto <emoji>` 子模式，但不要默认 auto。
 
 #### 10.2.6 统一 logger：打通 `slog.Default()` 和 plumbed logger
 
@@ -5698,7 +5678,6 @@ Execute(logger)
 | 后续 | 1d | `select_static` 下拉组件（替换 button 列表的 UX 增强） |
 | 后续 | 2d | form input（删除模式多选表单）|
 | 后续 | 1d | 卡 disable 后 emoji reaction 行为审计（应该 noop）|
-| 后续 | 1d | `/gtw test auto <emoji>` 自动化 E2E 子模式（默认 OFF）|
 | 后续 | 1d | 真实飞书 iOS / Android / Web 三端视觉回归（success type 按钮绿色渲染一致性）|
 
 这些留给 F-47+。

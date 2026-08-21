@@ -5,6 +5,18 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
+// stringValue dereferences a *string, returning "" when nil. Used
+// by the source adapters to read Message.ChatId and similar
+// optional SDK fields. Lived in adapter.go before the
+// SessionChatID refactor; moved here so session_chatid.go is
+// self-contained (no implicit dependency on the adapter file).
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 // SessionChatIDSource is the minimal interface SessionChatID needs
 // from any Feishu inbound event. Three concrete implementations —
 // one per inbound event family — populate exactly one of the three
@@ -23,6 +35,9 @@ type SessionChatIDSource interface {
 // extraction across all Feishu inbound events. Pure function of
 // the incoming event payload — no daemon state, no config, no
 // SDK version detection, no format validation, no migration.
+// The function deliberately takes no Adapter receiver: it is a
+// pure function, not a method. Adding a receiver would imply
+// state that does not exist.
 //
 // Modern Feishu SDK returns oc_<hex> from every chat-field
 // populator. The three fallback paths must converge on the same
@@ -44,7 +59,7 @@ type SessionChatIDSource interface {
 // SDK upgrades. This is the contract that lets /cwd in DM persist
 // and find the same ChatSession on the next message — see
 // docs/CHANNEL.md §5.5 for the cross-channel stability contract.
-func (a *Adapter) SessionChatID(event SessionChatIDSource) string {
+func SessionChatID(event SessionChatIDSource) string {
 	if v := event.TypedChatID(); v != "" {
 		return v
 	}

@@ -2,6 +2,11 @@ package feishu
 
 import (
 	"context"
+	"io"
+	"log"
+	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,11 +86,10 @@ func fakeCardActionEmpty() *larkcallback.CardActionTriggerEvent {
 // Same input → same output across many invocations. Confirms
 // SessionChatID has no hidden state and no side effects.
 func TestSessionChatID_PureFunction(t *testing.T) {
-	a := testAdapter(t)
 	e := receiveV1Source{event: fakeReceiveV1("oc_abc123")}
 
 	for i := range 100 {
-		if got := a.SessionChatID(e); got != "oc_abc123" {
+		if got := SessionChatID(e); got != "oc_abc123" {
 			t.Fatalf("iteration %d: got %q, want %q", i, got, "oc_abc123")
 		}
 	}
@@ -97,7 +101,6 @@ func TestSessionChatID_PureFunction(t *testing.T) {
 // against chatID drift (which is what made /new look like it
 // wiped cwd).
 func TestSessionChatID_AllSourcesAgree(t *testing.T) {
-	a := testAdapter(t)
 	const chatID = "oc_real_user_42"
 
 	sources := []SessionChatIDSource{
@@ -106,7 +109,7 @@ func TestSessionChatID_AllSourcesAgree(t *testing.T) {
 		cardActionSource{event: fakeCardAction(chatID)},
 	}
 	for i, src := range sources {
-		if got := a.SessionChatID(src); got != chatID {
+		if got := SessionChatID(src); got != chatID {
 			t.Errorf("source %d: got %q, want %q", i, got, chatID)
 		}
 	}
@@ -116,7 +119,6 @@ func TestSessionChatID_AllSourcesAgree(t *testing.T) {
 // Every source returns "" when there is no chatID-shaped data in
 // the event. SessionChatID must return "" (not zero, not panic).
 func TestSessionChatID_EmptyDrops(t *testing.T) {
-	a := testAdapter(t)
 	cases := []struct {
 		name string
 		src  SessionChatIDSource
@@ -130,7 +132,7 @@ func TestSessionChatID_EmptyDrops(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := a.SessionChatID(tc.src); got != "" {
+			if got := SessionChatID(tc.src); got != "" {
 				t.Errorf("got %q, want empty", got)
 			}
 		})
@@ -144,8 +146,6 @@ func TestSessionChatID_EmptyDrops(t *testing.T) {
 // chats get through unchanged and the caller (Manager.GetOrCreate)
 // routes them as-is.
 func TestSessionChatID_NoFormatValidation(t *testing.T) {
-	a := testAdapter(t)
-
 	cases := []struct {
 		name string
 		src  SessionChatIDSource
@@ -158,7 +158,7 @@ func TestSessionChatID_NoFormatValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := a.SessionChatID(tc.src); got != tc.want {
+			if got := SessionChatID(tc.src); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
@@ -170,15 +170,13 @@ func TestSessionChatID_NoFormatValidation(t *testing.T) {
 // first one wins. Verifies the fallback order: TypedChatID →
 // EnvelopeChatID → ContextOpenChatID.
 func TestSessionChatID_RouteOrder(t *testing.T) {
-	a := testAdapter(t)
-
-	if got := a.SessionChatID(receiveV1Source{event: fakeReceiveV1("oc_typed")}); got != "oc_typed" {
+	if got := SessionChatID(receiveV1Source{event: fakeReceiveV1("oc_typed")}); got != "oc_typed" {
 		t.Errorf("typed-only: got %q, want oc_typed", got)
 	}
-	if got := a.SessionChatID(reactionV3Source{event: fakeReactionV3("oc_envelope")}); got != "oc_envelope" {
+	if got := SessionChatID(reactionV3Source{event: fakeReactionV3("oc_envelope")}); got != "oc_envelope" {
 		t.Errorf("envelope-only: got %q, want oc_envelope", got)
 	}
-	if got := a.SessionChatID(cardActionSource{event: fakeCardAction("oc_context")}); got != "oc_context" {
+	if got := SessionChatID(cardActionSource{event: fakeCardAction("oc_context")}); got != "oc_context" {
 		t.Errorf("context-only: got %q, want oc_context", got)
 	}
 }
@@ -222,3 +220,173 @@ func TestSessionChatID_EmptyHandleDrops(t *testing.T) {
 		// good — handler dropped
 	}
 }
+
+// --- TestExtractReactionChatID_NilEventReq ---
+// Lock the nil-pointer fix at adaptation.go: extractReactionChatID
+// must return "" (not panic) when the SDK event has a nil
+// EventReq. This is what happens when the Feishu SDK delivers an
+// event with the body already parsed away (e.g. when the WS
+// dispatcher short-circuits). Without the EventReq nil check, the
+// function used to dereference event.Body and panic.
+func TestExtractReactionChatID_NilEventReq(t *testing.T) {
+	// (1) Direct nil-event: extractReactionChatID returns "".
+	if got := extractReactionChatID(nil); got != "" {
+		t.Errorf("nil event: got %q, want empty", got)
+	}
+
+	// (2) Event present but EventReq nil: extractReactionChatID
+	// returns "" without panic. This is the case that used to
+	// crash via the implicit Body access on a nil embedded
+	// pointer.
+	ev := &larkim.P2MessageReactionCreatedV1{}
+	if got := extractReactionChatID(ev); got != "" {
+		t.Errorf("non-nil event with nil EventReq: got %q, want empty", got)
+	}
+
+	// (3) EventReq present but Body empty: still returns "".
+	ev2 := &larkim.P2MessageReactionCreatedV1{
+		EventReq: &larkevent.EventReq{},
+	}
+	if got := extractReactionChatID(ev2); got != "" {
+		t.Errorf("nil Body: got %q, want empty", got)
+	}
+
+	// (4) EventReq present with malformed body: returns "".
+	ev3 := &larkim.P2MessageReactionCreatedV1{
+		EventReq: &larkevent.EventReq{Body: []byte("not json")},
+	}
+	if got := extractReactionChatID(ev3); got != "" {
+		t.Errorf("malformed body: got %q, want empty", got)
+	}
+}
+
+// --- TestSessionChatID_Concurrent ---
+// 50 goroutines call SessionChatID concurrently with the same
+// source. All must observe the same string. Also serves as a
+// -race smoke test: source adapters read only the input event
+// payload, no shared writable state.
+func TestSessionChatID_Concurrent(t *testing.T) {
+	const chatID = "oc_concurrent_test"
+	const goroutines = 50
+	e := receiveV1Source{event: fakeReceiveV1(chatID)}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	failures := 0
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got := SessionChatID(e)
+			mu.Lock()
+			if got != chatID {
+				failures++
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if failures > 0 {
+		t.Errorf("%d goroutines saw wrong chatID", failures)
+	}
+}
+
+// --- TestHandleCardAction_DispatchesChatID ---
+// E2E: when a card action click lands via handleCardAction with
+// the act: prefix → handleActCardAction, the synthetic inbound
+// message must carry the chatID from Context.OpenChatID. This is
+// the path that previously drifted if anyone reverted the
+// SessionChatID refactor back to direct OpenChatID access.
+func TestHandleCardAction_DispatchesChatID(t *testing.T) {
+	a := testAdapter(t)
+	const chatID = "oc_card_action_test"
+	const botMsgID = "om_card_action_test"
+
+	event := &larkcallback.CardActionTriggerEvent{
+		Event: &larkcallback.CardActionTriggerRequest{
+			Operator: &larkcallback.Operator{OpenID: "ou_user"},
+			Action: &larkcallback.CallBackAction{
+				Value: map[string]any{
+					"action":     "act:/gtw/branch-newv2",
+					"request_id": "req-card-test",
+				},
+			},
+			Context: &larkcallback.Context{
+				OpenChatID:    chatID,
+				OpenMessageID: botMsgID,
+			},
+		},
+	}
+	if _, err := a.handleCardAction(context.Background(), event); err != nil {
+		t.Fatalf("handleCardAction: %v", err)
+	}
+	select {
+	case got := <-a.Incoming():
+		if got.ChatID != chatID {
+			t.Errorf("incoming.ChatID = %q, want %q", got.ChatID, chatID)
+		}
+		if got.Reaction == nil {
+			t.Fatal("incoming.Reaction is nil")
+		}
+		if got.Reaction.ChatID != chatID {
+			t.Errorf("incoming.Reaction.ChatID = %q, want %q", got.Reaction.ChatID, chatID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for incoming message")
+	}
+}
+
+// --- TestHandleMessage_DispatchesChatID ---
+// Mirror version of TestSessionChatID_DispatchesOverWire — kept
+// here so all dispatch-side tests live next to the SessionChatID
+// builder. Verifies the receive_v1 wire path lands `chatID` on
+// the inbound channel.
+func TestHandleMessage_DispatchesChatID(t *testing.T) {
+	a := testAdapter(t)
+	const chatID = "oc_recv_dispatch_test"
+
+	event := fakeReceiveV1(chatID)
+	if err := a.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+	select {
+	case got := <-a.Incoming():
+		if got.ChatID != chatID {
+			t.Errorf("incoming.ChatID = %q, want %q", got.ChatID, chatID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for incoming message")
+	}
+}
+
+// --- TestHandleCardAction_SkipsLogOnEmptyChatID ---
+// When the card action event has no Context (and therefore no
+// chatID), the unknown-action fallback log.Printf must NOT
+// produce "chat=" noise. We capture stdout and assert it doesn't
+// contain the F-46 prototype log prefix.
+func TestHandleCardAction_SkipsLogOnEmptyChatID(t *testing.T) {
+	a := testAdapter(t)
+
+	// Capture stdout to inspect the log.Printf.
+	origStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = origStdout
+		_ = w.Close()
+		_, _ = io.ReadAll(r)
+	})
+	log.SetOutput(w)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	// Event with no Event at all → ContextOpenChatID returns "".
+	event := &larkcallback.CardActionTriggerEvent{}
+	_, _ = a.handleCardAction(context.Background(), event)
+
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if strings.Contains(string(out), "feishu: card action received chat=") {
+		t.Errorf("unexpected log output on empty chatID: %s", string(out))
+	}
+}
+

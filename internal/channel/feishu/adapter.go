@@ -3851,7 +3851,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	// handleCardAction) route through this builder so the same chat
 	// always produces the same chatID, regardless of which event family
 	// nightme sees first. See docs/channel/feishu.md "chatID = sessionChatID".
-	chatID := a.SessionChatID(receiveV1Source{event: event})
+	chatID := SessionChatID(receiveV1Source{event: event})
 	if chatID == "" {
 		return nil
 	}
@@ -4109,7 +4109,7 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 	// to reactionV3Source.EnvelopeChatID (which calls
 	// extractReactionChatID internally). See
 	// docs/channel/feishu.md "chatID = sessionChatID".
-	chatID := a.SessionChatID(reactionV3Source{event: event})
+	chatID := SessionChatID(reactionV3Source{event: event})
 
 	if messageID == "" || chatID == "" {
 		a.logger.Debug("feishu: reaction event missing message_id or chat_id; dropping",
@@ -4201,10 +4201,14 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 	}
 
 	// Unknown / no prefix — fall back to the F-46 prototype log so
-	// future extensions can still see the click in stdout.
-	chatID := a.SessionChatID(cardActionSource{event: event})
-	log.Printf("feishu: card action received chat=%s action=%s",
-		chatID, actionStr)
+	// future extensions can still see the click in stdout. Skip
+	// the log when no chatID is resolvable (Context is nil) since
+	// there's no useful target to log and "chat=" is noise.
+	chatID := SessionChatID(cardActionSource{event: event})
+	if chatID != "" {
+		log.Printf("feishu: card action received chat=%s action=%s",
+			chatID, actionStr)
+	}
 	return &larkcallback.CardActionTriggerResponse{
 		Toast: &larkcallback.Toast{
 			Type:    "info",
@@ -4280,7 +4284,7 @@ func (a *Adapter) handleActCardAction(
 		}, nil
 	}
 
-	chatID := a.SessionChatID(cardActionSource{event: event})
+	chatID := SessionChatID(cardActionSource{event: event})
 	botMsgID := event.Event.Context.OpenMessageID
 	userID := ""
 	if event.Event.Operator != nil {
@@ -4371,7 +4375,7 @@ func (a *Adapter) handleOptCardAction(
 		}, nil
 	}
 
-	chatID := a.SessionChatID(cardActionSource{event: event})
+	chatID := SessionChatID(cardActionSource{event: event})
 	botMsgID := event.Event.Context.OpenMessageID
 	userID := ""
 	if event.Event.Operator != nil {
@@ -4880,13 +4884,6 @@ func messageTime(value *string) time.Time {
 		}
 	}
 	return time.Now()
-}
-
-func stringValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }
 
 // extractReactionChatID is the internal helper for the

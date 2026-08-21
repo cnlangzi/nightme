@@ -198,7 +198,28 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	return nil
 }
 
+// pollLoopGuard is a process-wide singleton gate. If a buggy
+// runtime path somehow creates and Starts multiple Adapter
+// instances (we've seen this in the wild — see the 409-Conflict
+// diagnosis in the fix-telegram branch), each one would spawn
+// its own pollLoop and race Telegram's getUpdates long-poll
+// slot, causing perpetual 409s. The first pollLoop to acquire
+// this guard wins; all subsequent ones exit immediately. The
+// underlying multi-Adapter bug is still there (root cause TBD),
+// but this stops the runtime symptom and lets the daemon
+// actually deliver messages in the meantime.
+var pollLoopGuard sync.Once
+
 func (a *Adapter) pollLoop(ctx context.Context) {
+	started := false
+	pollLoopGuard.Do(func() { started = true })
+	if !started {
+		a.logger.Error("telegram: pollLoop already running in this process; "+
+			"this adapter is a duplicate. Suppressing to avoid 409 Conflict. "+
+			"Investigate why runtime created >1 Adapter for telegram.",
+			"this_adapter", fmt.Sprintf("%p", a))
+		return
+	}
 	for {
 		// Honour cancellation at the top of every iteration,
 		// not just inside the err-handling branches below. A

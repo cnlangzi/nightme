@@ -139,7 +139,9 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 		// The synchronous respawn path (KindLifecycle below) handles
 		// bridge deaths; this timer catches the rarer "bridge alive
 		// but hung" case where no event ever fires.
-		cs.Watchdog().disarmHungPrompt()
+		if as == cs.SelectedAgentSession() {
+			cs.Watchdog().disarmHungPrompt()
+		}
 		as.ClearSuspect()
 		// After a PromptEnds, the AS is ready again. TryFlush
 		// will pick up the queued messages if any.
@@ -167,7 +169,9 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 			// fire later and mark the freshly-respawned bridge
 			// as Suspect("hung_prompt") — wrong: the respawned
 			// bridge just started, the previous one died.
-			cs.Watchdog().disarmHungPrompt()
+			if as == cs.SelectedAgentSession() {
+				cs.Watchdog().disarmHungPrompt()
+			}
 			// Use the AS's actual agent name (e.g. "dsh", "codex")
 			// instead of a hardcoded "claude" — pre-fix the log
 			// line said "claude process exited" even when the

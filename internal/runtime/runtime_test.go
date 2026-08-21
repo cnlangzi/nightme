@@ -382,7 +382,6 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 // Model / Agent (no tokens to display). The runtime is a passive
 // pass-through; nil Usage means the footer Line 2 is omitted.
 
-
 // TestEventHandler_Chain_UsageFlowsFromResultEventToFooter exercises
 // the full F-55 chain end-to-end on the runtime side:
 //
@@ -815,6 +814,14 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
 		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 	}
+	for _, chatID := range []string{"oc_alpha", "oc_beta"} {
+		if _, err := mgr.GetOrCreate(chatID, "claude"); err != nil {
+			t.Fatalf("GetOrCreate(%s): %v", chatID, err)
+		}
+	}
+	if got := len(mgr.List()); got != 2 {
+		t.Fatalf("mgr.List len = %d, want 2", got)
+	}
 
 	for _, cs := range mgr.List() {
 		if cs.AgentEventBus.Len() == 0 {
@@ -844,6 +851,9 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 
 	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
 		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
+	}
+	if _, err := mgr.GetOrCreate("oc_drop", "claude"); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
 	}
 
 	csList := mgr.List()
@@ -919,6 +929,9 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar(t *testing.T)
 		if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
 			t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 		}
+		if _, err := mgr.GetOrCreate("oc_stamp_full", "claude"); err != nil {
+			t.Fatalf("GetOrCreate: %v", err)
+		}
 
 		csList := mgr.List()
 		if len(csList) != 1 {
@@ -979,6 +992,9 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar(t *testing.T)
 		if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
 			t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 		}
+		if _, err := mgr.GetOrCreate("oc_stamp_no_sid", "claude"); err != nil {
+			t.Fatalf("GetOrCreate: %v", err)
+		}
 
 		csList := mgr.List()
 		if len(csList) != 1 {
@@ -1027,6 +1043,9 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar(t *testing.T)
 
 		if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
 			t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
+		}
+		if _, err := mgr.GetOrCreate("oc_stamp_nil", "claude"); err != nil {
+			t.Fatalf("GetOrCreate: %v", err)
 		}
 
 		csList := mgr.List()
@@ -1134,7 +1153,6 @@ type messageStateCall struct {
 	UserMsgID string
 	State     agent.MessageState
 }
-
 
 // TestShutdownRun_CloseAllCancelsCaches verifies the daemon
 // shutdown hook drains every per-AgentSession PR-cache refresh

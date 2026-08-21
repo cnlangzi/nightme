@@ -219,7 +219,7 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 
 	// 1. Snapshot entries in selectedCwd (read-only — ChatSession
 	//    returns a fresh slice).
-	snapshot := cs.AgentSessionsInCwd(cwd)
+	snapshot := cs.AgentSessionsForCwd(cwd)
 	if len(snapshot) == 0 {
 		return nil, nil
 	}

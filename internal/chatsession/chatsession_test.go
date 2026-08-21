@@ -1,9 +1,9 @@
 package chatsession
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -292,12 +292,6 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	}
 	if entry.SelectedAgent != "claude" {
 		t.Fatalf("persisted SelectedAgent: %q", entry.SelectedAgent)
-	}
-	if len(entry.AgentSessionIDs) != 1 {
-		t.Fatalf("persisted AgentSessionIDs: got %d, want 1", len(entry.AgentSessionIDs))
-	}
-	if entry.SelectedAgentSessionID == nil {
-		t.Fatalf("SelectedAgentSessionID should be set")
 	}
 
 	agentEntries := asFile2.GetByChatPool(entry.ID)

@@ -197,7 +197,12 @@ func WireRuntimeCallbacksAndRestore(
 			// wrap currently does the type conversion; a
 			// multi-channel variant would resolve the underlying
 			// channel.Channel first and wrap-emit it).
-			if as := cs.SelectedAgentSession(); as != nil {
+			if as := cs.LookupAS(e.AgentSessionID); as != nil {
+				out.AgentName = as.Agent
+				out.Workspace = as.Cwd
+				out.SessionID = as.SessionID()
+			} else if as := cs.SelectedAgentSession(); as != nil {
+				// Fallback for legacy events without AgentSessionID.
 				out.AgentName = as.Agent
 				out.Workspace = as.Cwd
 				out.SessionID = as.SessionID()
@@ -250,5 +255,5 @@ func WireRuntimeCallbacksAndRestore(
 		// happens at daemon exit; for /kill, immediately).
 		go cs.PumpEvents(context.Background())
 	})
-	return mgr.RestoreFromRegistry()
+	return nil // lazy restore via GetOrCreate → Bootstrap (docs/CHATSTORE.md)
 }

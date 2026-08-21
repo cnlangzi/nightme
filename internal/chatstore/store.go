@@ -210,6 +210,9 @@ func (s *Store) Save(entry *registry.ChatSessionEntry) error {
 // entry already exists, the call is a no-op for that field but
 // LastInteractionAt is bumped and the file is rewritten.
 //
+// Returns a deep copy (same as Get) so concurrent Bootstrap callers
+// cannot race on the internal map entry pointer.
+//
 // Concurrency: holds s.mu across the mutation AND save().
 func (s *Store) Bootstrap(chatID, primaryAgent string) (*registry.ChatSessionEntry, error) {
 	if chatID == "" {
@@ -225,6 +228,7 @@ func (s *Store) Bootstrap(chatID, primaryAgent string) (*registry.ChatSessionEnt
 			ID:                "cs_" + chatID,
 			ChatID:            chatID,
 			PrimaryAgent:      primaryAgent,
+			SelectedAgent:     primaryAgent, // seed active agent (docs/CHATSTORE.md)
 			CreatedAt:         time.Now(),
 			LastInteractionAt: time.Now(),
 		}
@@ -236,7 +240,7 @@ func (s *Store) Bootstrap(chatID, primaryAgent string) (*registry.ChatSessionEnt
 	if err := s.save(); err != nil {
 		return nil, err
 	}
-	return s.entries[chatID], nil
+	return deepCopyEntry(s.entries[chatID]), nil
 }
 
 // SetSelectedCwd changes the active workspace for chatID. An empty
@@ -341,7 +345,8 @@ func (s *Store) SetToolsMode(chatID string, mode int) error {
 }
 
 // SetWatcherHintEmitted stamps the one-time /watch hint tombstone.
-// See SetSelectedCwd for the concurrency contract.
+// Does NOT bump LastInteractionAt — the hint is a system event, not
+// a user interaction (docs/CHATSTORE.md / F-watch).
 func (s *Store) SetWatcherHintEmitted(chatID string, v bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -353,6 +358,5 @@ func (s *Store) SetWatcherHintEmitted(chatID string, v bool) error {
 		return nil
 	}
 	e.WatcherHintEmitted = v
-	e.LastInteractionAt = time.Now()
 	return s.save()
 }

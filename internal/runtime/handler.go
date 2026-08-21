@@ -201,6 +201,11 @@ func NewEventHandler(
 		if out.Workspace == "" {
 			out.Workspace = s.Cwd
 		}
+		// Pre-stamp git from the emitting AS so warm events don't
+		// pick up SelectedCwd via Emitter.GitStatusLookup (§3.3).
+		if out.GitStatus == nil && s != nil && s.Cwd != "" && cs != nil {
+			out.GitStatus = cs.GitStatusAt(context.Background(), s.Cwd, s)
+		}
 
 		// ══════════════════════════════════════════════════════════════════
 		// ⭐ F-63 核心不变量:Heartbeat 观测必须在 Policy 链之前 ⭐

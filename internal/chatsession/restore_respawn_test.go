@@ -35,23 +35,25 @@ func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 	csEntry := &registry.ChatSessionEntry{
-		ID:                   csID,
-		ChatID:               chatID,
+		ID:                     csID,
+		ChatID:                 chatID,
 		SelectedCwd:            "/code/bailing",
 		SelectedAgent:          "claude",
-		PrimaryAgent:         "claude",
-		AgentSessionIDs:      []string{asID},
+		PrimaryAgent:           "claude",
+		AgentSessionIDs:        []string{asID},
 		SelectedAgentSessionID: &asID,
-		CreatedAt:            time.Now(),
-		LastInteractionAt:    time.Now(),
+		CreatedAt:              time.Now(),
+		LastInteractionAt:      time.Now(),
 	}
 	if err := csFile.Save(csEntry); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}
 
+	globalPool := NewAgentSessionPool()
 	// Restore on a new manager.
 	mgr := NewManager().
 		WithPersistence(csFile, asFile).
+		WithAgentSessionPool(globalPool).
 		WithSpawner(newFakeSpawner())
 	if err := mgr.RestoreFromRegistry(); err != nil {
 		t.Fatalf("RestoreFromRegistry: %v", err)
@@ -68,18 +70,13 @@ func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 		t.Fatalf("ActiveAS should be nil after restore; got %v", cs.SelectedAgentSession())
 	}
 
-	// The pool entry's status must be Demoted (not Running) so the
-	// next Spawn will re-fork.
-	var as *AgentSession
-	for _, candidate := range cs.Pool() {
-		if candidate.Agent == "claude" && candidate.Cwd == "/code/bailing" {
-			as = candidate
-			break
-		}
+	if got := len(cs.Pool()); got != 0 {
+		t.Fatalf("active pool after restore = %d, want 0 until Lookup", got)
 	}
-	if as == nil {
-		t.Fatalf("Pool entry not found")
-	}
+	// Hydration happens lazily from asFile; rebuilding the entry must
+	// demote the stale running state before it enters the warm pool.
+	as := FromAgentSessionEntry(entries)
+	globalPool.Put(chatID, as)
 	if as.Status() != StatusDetached {
 		t.Fatalf("status: got %q, want Detached (Demoted from Running on restart)", as.Status())
 	}
@@ -110,15 +107,15 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 		t.Fatalf("Upsert AS: %v", err)
 	}
 	csEntry := &registry.ChatSessionEntry{
-		ID:                   csID,
-		ChatID:               chatID,
+		ID:                     csID,
+		ChatID:                 chatID,
 		SelectedCwd:            "/code/bailing",
 		SelectedAgent:          "claude",
-		PrimaryAgent:         "claude",
-		AgentSessionIDs:      []string{asID},
+		PrimaryAgent:           "claude",
+		AgentSessionIDs:        []string{asID},
 		SelectedAgentSessionID: &asID,
-		CreatedAt:            time.Now(),
-		LastInteractionAt:    time.Now(),
+		CreatedAt:              time.Now(),
+		LastInteractionAt:      time.Now(),
 	}
 	if err := csFile.Save(csEntry); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
@@ -174,7 +171,7 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 		Agent:         "claude",
 		Cwd:           "/code/bailing",
 		Status:        registry.StatusDetached,
-		SessionID:      "sess-from-prior-run",
+		SessionID:     "sess-from-prior-run",
 	}); err != nil {
 		t.Fatalf("Upsert AS: %v", err)
 	}
@@ -182,11 +179,11 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 	if err := csFile.Save(&registry.ChatSessionEntry{
 		ID:                     csID,
 		ChatID:                 chatID,
-		SelectedCwd:              "/code/bailing",
-		SelectedAgent:            "claude",
+		SelectedCwd:            "/code/bailing",
+		SelectedAgent:          "claude",
 		PrimaryAgent:           "claude",
 		AgentSessionIDs:        []string{asID},
-		SelectedAgentSessionID:   &csIDCopy,
+		SelectedAgentSessionID: &csIDCopy,
 	}); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}
@@ -238,7 +235,7 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 		Agent:         "claude",
 		Cwd:           "/tmp/ws",
 		Status:        registry.StatusRunning, // demoted to Detached by FromAgentSessionEntry
-		SessionID:      "resume-xyz",
+		SessionID:     "resume-xyz",
 	}
 	as := FromAgentSessionEntry(entry)
 	if as == nil {
@@ -259,12 +256,12 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	}
 	asID := entry.ID
 	if err := csFile.Save(&registry.ChatSessionEntry{
-		ID:                   entry.ChatSessionID,
-		ChatID:               "oc_restored",
+		ID:                     entry.ChatSessionID,
+		ChatID:                 "oc_restored",
 		SelectedCwd:            entry.Cwd,
 		SelectedAgent:          entry.Agent,
-		PrimaryAgent:         entry.Agent,
-		AgentSessionIDs:      []string{asID},
+		PrimaryAgent:           entry.Agent,
+		AgentSessionIDs:        []string{asID},
 		SelectedAgentSessionID: &asID,
 	}); err != nil {
 		t.Fatalf("Upsert CS: %v", err)

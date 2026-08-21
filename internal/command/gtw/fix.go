@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
@@ -336,12 +336,16 @@ func runFixRemote(
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
-		// Normalize both sides: git porcelain paths are absolute but
-		// may carry trailing slashes or ./ components depending on
-		// platform; WorktreePath returns a Clean result. Compare
-		// through filepath.Clean to keep the recovery check in
-		// lockstep with PreflightWorktreeCreate.
-		if existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath) {
+		// F-PATHUTIL-001 §5.2: compare via pathutil.Equal instead
+		// of the raw filepath.Clean equality. The Clean equality
+		// is case-sensitive on Windows (so "C:\Foo" and
+		// "c:\foo" spuriously miss-match) and slash-sensitive
+		// (so "C:/foo" from `git rev-parse` does not equal the
+		// backslash form WorktreePath produces). pathutil.Equal
+		// handles both. See PreflightWorktreeCreate's
+		// canonical-path logic for the parallel concern on the
+		// preflight side.
+		if existingPath != "" && pathutil.Equal(existingPath, worktreePath) {
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
@@ -555,9 +559,11 @@ func runFixLocal(
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
-		// See runFixRemote: normalize both sides so porcelain's
-		// sometimes-dirty paths compare equal to WorktreePath.
-		if existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath) {
+		// See runFixRemote: pathutil.Equal handles Windows
+		// case- and slash-insensitivity so the recovery check
+		// matches regardless of which form git's porcelain output
+		// emitted.
+		if existingPath != "" && pathutil.Equal(existingPath, worktreePath) {
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}

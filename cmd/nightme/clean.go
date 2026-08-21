@@ -1,41 +1,21 @@
 // Package main — `nightme clean` subcommand.
 //
-// Clears volatile runtime data so the operator can recover disk
-// space without losing durable state. Scope is intentionally narrow:
-// the two log files (nightme.log + daemon-stderr.log) and the
-// per-session attachment inbox under $HOME/.nightme/inbox.
-// Anything that holds session state or is required by the daemon
-// lifecycle (agent_sessions.json, chat_sessions.json, *.lock,
-// *.sock) is left alone.
+// The default clean command clears volatile runtime data without losing
+// durable state. With --all, it becomes a full local reset: it removes the
+// config, session stores, corruption backups, daemon lifecycle files, update
+// cache, known atomic-write leftovers, and the entire $HOME/.nightme
+// directory.
 //
 // The inbox path is fixed at $HOME/.nightme/inbox to match
-// internal/channel/feishu.defaultInboxBaseDir, which is what
-// actually downloads attachments — it does not honour Paths.DataDir
-// (see feishu.InboxBaseDir). If a future change moves the inbox
-// under DataDir, both sites must move together; this comment is the
-// tripwire.
+// internal/channel/feishu.defaultInboxBaseDir, which is what actually
+// downloads attachments — it does not honour Paths.DataDir (see
+// feishu.InboxBaseDir). If a future change moves the inbox under DataDir, both
+// sites must move together; this comment is the tripwire.
 //
-// Behaviour is deliberately destructive: no flags, no dry-run, no
-// confirmation prompt. The user is expected to know what they are
-// asking for. Side-effects on a running daemon:
-//
-//   - nightme.log is held open with O_APPEND by the daemon's
-//     slog writer. Truncating the file in place leaves the
-//     writer's per-fd offset untouched, so subsequent writes
-//     write into a sparse file at the previous offset. The next
-//     daemon restart reopens the file from offset 0 and the
-//     log returns to normal. Acceptable for a manual cleanup;
-//     operators who want a clean handoff should `nightme stop`
-//     first.
-//   - daemon-stderr.log is only written by the daemon at panic
-//     time (rare), so the same caveat is even less likely to
-//     bite.
-//   - inbox entries are per-session attachment directories. If
-//     an agent is still mid-turn when clean runs, the agent's
-//     reference to LocalPath will point to a now-deleted file.
-//     The next inbound message from the same chat recreates the
-//     directory, so the worst case is one failed prompt rather
-//     than a crash.
+// Neither mode has a dry-run or confirmation prompt. The default mode only
+// truncates logs and removes inbox contents, preserving configuration and
+// session state. --all deletes durable state and lifecycle files, so stop the
+// daemon before using it.
 package main
 
 import (
@@ -51,35 +31,55 @@ import (
 )
 
 func newCleanCmd() *cobra.Command {
+	var all bool
 	cmd := &cobra.Command{
 		Use:   "clean",
-		Short: "Truncate log files and delete downloaded attachments",
+		Short: "Truncate logs and delete downloaded attachments",
 		Long: "clean zeroes out nightme.log and daemon-stderr.log, and\n" +
 			"removes every entry under $HOME/.nightme/inbox (the per-session\n" +
 			"directory of attachments downloaded from inbound messages).\n" +
-			"The inbox path is fixed at $HOME/.nightme/inbox regardless of\n" +
-			"Paths.DataDir — it tracks the Feishu attachment inbox, which\n" +
-			"is also pinned to the home directory.\n" +
-			"Session JSON files, lock files, and the daemon socket are\n" +
-			"left untouched. Runs as a destructive operation — no flags,\n" +
-			"no dry-run, no confirmation.",
+			"The default preserves configuration, session state, lock files, the\n" +
+			"daemon socket, and corruption backups.\n\n" +
+			"--all performs a full local reset. In addition to the default cleanup,\n" +
+			"it removes the config, chat/agent session stores, daemon lifecycle\n" +
+			"files, update and version-check caches, daemon-stderr.log.1, known\n" +
+			"atomic-write temp files, and the entire $HOME/.nightme directory.\n" +
+			"Worktree .nightme/attachments are left untouched. Stop the daemon\n" +
+			"before using --all; the default mode only truncates logs and removes\n" +
+			"inbox contents.\n" +
+			"Runs as a destructive operation — no dry-run and no confirmation.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClean(cmd.OutOrStdout())
+			return runCleanWithOptions(cmd.OutOrStdout(), all)
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false,
+		"also remove durable state, config, lifecycle files, and caches")
 	return cmd
 }
 
-// runClean resolves the three target paths and clears each in
-// turn. Each step is best-effort: a missing log file is reported
-// as "missing" and treated as a no-op, so a fresh install doesn't
-// fail. A missing inbox is the same. Other errors abort.
+// runClean keeps the original no-flag behavior for callers and tests.
 func runClean(out io.Writer) error {
+	return runCleanWithOptions(out, false)
+}
+
+// runCleanWithOptions resolves the three baseline paths and then applies the
+// selected cleanup mode. A missing baseline path is reported as a no-op; other
+// errors abort.
+func runCleanWithOptions(out io.Writer, all bool) error {
 	cfg, err := config.LoadDefault()
 	if err != nil {
-		return fmt.Errorf("clean: load config: %w", err)
+		if !all {
+			return fmt.Errorf("clean: load config: %w", err)
+		}
+		// --all must still be useful when config.yaml is corrupt. Fall back
+		// to the shipped defaults, then continue using the default paths.
+		cfg, err = config.Load("")
+		if err != nil {
+			return fmt.Errorf("clean: load default config after corrupt config: %w", err)
+		}
 	}
+
 	logPath, err := logging.Path(cfg)
 	if err != nil {
 		return fmt.Errorf("clean: resolve log path: %w", err)
@@ -91,16 +91,21 @@ func runClean(out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("clean: resolve stderr path: %w", err)
 	}
+
 	// Inbox lives at $HOME/.nightme/inbox, NOT <DataDir>/inbox. The
-	// Feishu adapter pins the download inbox to the home directory
-	// via defaultInboxBaseDir, regardless of Paths.DataDir; clean
-	// must target the same path or it will silently miss the real
-	// inbox when DataDir is customised.
+	// Feishu adapter pins the download inbox to the home directory via
+	// defaultInboxBaseDir, regardless of Paths.DataDir; clean must target
+	// the same path or it will silently miss the real inbox when DataDir is
+	// customised.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("clean: resolve home: %w", err)
 	}
 	inboxDir := filepath.Join(home, ".nightme", "inbox")
+
+	if all {
+		return cleanAll(out, cfg, logPath, stderrPath, inboxDir)
+	}
 
 	if err := truncateLog(out, logPath); err != nil {
 		return err
@@ -114,9 +119,117 @@ func runClean(out io.Writer) error {
 	return nil
 }
 
+// cleanAll removes the baseline artifacts and every known durable/runtime
+// artifact owned by nightme. It removes the entire home .nightme directory at
+// the end, while keeping custom DataDir files outside the home directory
+// unless they match a known nightme artifact.
+func cleanAll(
+	out io.Writer,
+	cfg *config.Config,
+	logPath string,
+	stderrPath string,
+	inboxDir string,
+) error {
+	if cfg == nil {
+		return fmt.Errorf("clean: nil config")
+	}
+
+	// Delete configured/current log paths rather than truncating them: --all
+	// means remove the artifacts entirely.
+	if err := removePath(out, logPath); err != nil {
+		return err
+	}
+	if err := removePath(out, stderrPath); err != nil {
+		return err
+	}
+	if err := removePath(out, stderrPath+".1"); err != nil {
+		return err
+	}
+	if err := removeInbox(out, inboxDir); err != nil {
+		return err
+	}
+
+	dataDir := cfg.Paths.DataDir
+	if abs, err := filepath.Abs(dataDir); err == nil {
+		dataDir = abs
+	}
+	dataPaths := []string{
+		filepath.Join(dataDir, "chat_sessions.json"),
+		filepath.Join(dataDir, "agent_sessions.json"),
+		filepath.Join(dataDir, "chat_sessions.json.bak"),
+		filepath.Join(dataDir, "agent_sessions.json.bak"),
+		filepath.Join(dataDir, "telegram_state.json"),
+		filepath.Join(dataDir, "registry.json"),
+		filepath.Join(dataDir, "registry.json.v1.bak"),
+		filepath.Join(dataDir, "version-check.json"),
+		filepath.Join(dataDir, "daemon.sock"),
+		filepath.Join(dataDir, "daemon.lock"),
+		filepath.Join(dataDir, "lifecycle.lock"),
+		filepath.Join(dataDir, "updates"),
+	}
+	for _, path := range dataPaths {
+		if err := removePath(out, path); err != nil {
+			return err
+		}
+	}
+
+	// These are the atomic-write temp patterns used by config, chat store,
+	// agent session store, and Telegram state. Only match patterns owned by
+	// nightme.
+	for _, pattern := range []string{
+		".config-*.yaml.tmp",
+		".chat_sessions-*.tmp",
+		".agent_sessions-*.tmp",
+		".telegram-state-*.tmp",
+	} {
+		matches, err := filepath.Glob(filepath.Join(dataDir, pattern))
+		if err != nil {
+			return fmt.Errorf("clean: glob %s: %w", pattern, err)
+		}
+		for _, path := range matches {
+			if err := removePath(out, path); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The config is not necessarily under DataDir: NIGHTME_CONFIG may point
+	// elsewhere. It is still a known nightme-owned artifact, so --all removes
+	// it at its effective config path.
+	if configPath := config.DefaultPath(); configPath != "" {
+		if err := removePath(out, configPath); err != nil {
+			return err
+		}
+	}
+
+	// The inbox is always under the home .nightme directory. --all removes
+	// the directory itself, not just its contents.
+	if err := removePath(out, filepath.Dir(inboxDir)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// removePath removes either a file or a directory and reports the result.
+// A missing path is an explicit no-op, matching truncateLog and removeInbox.
+func removePath(out io.Writer, path string) error {
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(out, "✓ %s  (missing)\n", path)
+			return nil
+		}
+		return fmt.Errorf("clean: stat %s: %w", path, err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("clean: remove %s: %w", path, err)
+	}
+	fmt.Fprintf(out, "✓ %s  removed\n", path)
+	return nil
+}
+
 // truncateLog empties path in place. A missing file is reported
-// explicitly and treated as a no-op so a fresh install doesn't
-// fail. Other errors propagate.
+// explicitly and treated as a no-op so a fresh install doesn't fail. Other
+// errors propagate.
 func truncateLog(out io.Writer, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -137,11 +250,10 @@ func truncateLog(out io.Writer, path string) error {
 	return nil
 }
 
-// removeInbox deletes every entry directly under dir. The
-// directory itself is preserved so the next download can recreate
-// files without a MkdirAll race. Subdirectories are removed
-// recursively because each session's attachments typically live in
-// their own subdir.
+// removeInbox deletes every entry directly under dir. The directory itself is
+// preserved so the next download can recreate files without a MkdirAll race.
+// Subdirectories are removed recursively because each session's attachments
+// typically live in their own subdir.
 func removeInbox(out io.Writer, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

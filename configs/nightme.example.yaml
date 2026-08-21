@@ -57,15 +57,10 @@ feishu:
 telegram:
   # Create a bot with @BotFather and use its token here.
   bot_token: ""
-  mode: polling
+  # Long polling only — webhook mode is not supported.
   polling_timeout: 30
-  # Optional webhook settings. Polling is the default and is
-  # sufficient for a daemon without a public HTTPS endpoint.
-  webhook_url: ""
-  webhook_secret: ""
-  # In groups, process only commands, replies, and bot mentions by default.
-  group_require_mention: true
-  topic_mode: separate
+  # Group mention gate is controlled per-chat via /watch all|mention|off,
+  # not by config. Default is mention-only on first contact.
 
 session:
   # Initial PTY size for new sessions.

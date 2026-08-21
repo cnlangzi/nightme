@@ -2,13 +2,10 @@ package telegram
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,7 +30,6 @@ type Adapter struct {
 	dataDir   string
 	ctx       context.Context
 	cancel    context.CancelFunc
-	webhook   *http.Server
 	mu        sync.Mutex
 	started   bool
 	stopped   bool
@@ -53,13 +49,6 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	if botToken == "" {
 		return nil, errors.New("telegram: bot_token is required")
 	}
-	mode := strings.ToLower(strings.TrimSpace(cfg.Telegram.Mode))
-	if mode == "" {
-		mode = "polling"
-	}
-	if mode != "polling" && mode != "webhook" {
-		return nil, fmt.Errorf("telegram: unsupported mode %q", mode)
-	}
 	timeout := cfg.Telegram.PollingTimeout
 	if timeout <= 0 {
 		timeout = 30
@@ -68,7 +57,6 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		timeout = 50
 	}
 	cfgCopy := cfg.Telegram
-	cfgCopy.Mode = mode
 	cfgCopy.PollingTimeout = timeout
 	dataDir := cfg.Paths.DataDir
 	if dataDir == "" {
@@ -104,9 +92,6 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		state = &stateStore{topics: make(map[string]*TopicState), choices: make(map[string]*ChoiceState)}
 	}
 	copy := cfg.Telegram
-	if copy.Mode == "" {
-		copy.Mode = "polling"
-	}
 	if copy.PollingTimeout == 0 {
 		copy.PollingTimeout = 30
 	}
@@ -171,15 +156,8 @@ func (a *Adapter) Start(ctx context.Context) error {
 		a.Stop(context.Background())
 		return errors.New("telegram: getMe returned empty username")
 	}
-	if a.config.Mode == "webhook" {
-		if err := a.startWebhook(a.ctx); err != nil {
-			a.Stop(context.Background())
-			return err
-		}
-	} else {
-		go a.pollLoop(a.ctx)
-	}
-	a.logger.Info("telegram: started", "mode", a.config.Mode, "username", a.botName)
+	go a.pollLoop(a.ctx)
+	a.logger.Info("telegram: started", "username", a.botName)
 	return nil
 }
 
@@ -200,15 +178,9 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	}
 	a.stopped = true
 	cancel := a.cancel
-	server := a.webhook
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
-	}
-	if server != nil {
-		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancelShutdown()
-		_ = server.Shutdown(shutdownContext)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -313,9 +285,6 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 		text = message.Caption
 	}
 	hasMention := a.hasMention(message, text)
-	if message.Chat.Type != "private" && a.config.RequireMentionInGroup() && !hasMention {
-		return
-	}
 	chatID := strconv.FormatInt(message.Chat.ID, 10)
 	threadID, err := a.ensureTopic(ctx, message)
 	if err != nil {
@@ -367,6 +336,14 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	if inbound.Blocks == nil {
 		inbound.Blocks = a.BuildBlocks(text, attachments)
 	}
+	a.logger.Info("telegram: incoming",
+		"chat_id", chatID,
+		"thread_id", topicID,
+		"user_id", userID(message),
+		"has_mention", hasMention,
+		"message_id", message.MessageID,
+		"text_len", len(text),
+	)
 	a.publish(inbound)
 }
 
@@ -639,9 +616,6 @@ func (a *Adapter) hasMention(message *Message, text string) bool {
 	if strings.HasPrefix(strings.TrimSpace(text), "/") {
 		return true
 	}
-	if a.botName == "" {
-		return !a.config.RequireMentionInGroup()
-	}
 	return strings.Contains(strings.ToLower(text), "@"+strings.ToLower(a.botName))
 }
 
@@ -810,7 +784,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	payload, _ := json.Marshal(map[string]any{"mode": a.config.Mode, "username": a.botName, "connected": a.started && !a.stopped, "offset": a.offset})
+	payload, _ := json.Marshal(map[string]any{"username": a.botName, "connected": a.started && !a.stopped, "offset": a.offset})
 	return "telegram", payload, nil
 }
 
@@ -832,48 +806,6 @@ func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []
 	return blocks
 }
 
-func (a *Adapter) startWebhook(ctx context.Context) error {
-	if a.config.WebhookURL == "" {
-		return errors.New("telegram: webhook_url is required in webhook mode")
-	}
-	if a.config.WebhookSecret == "" {
-		return errors.New("telegram: webhook_secret is required in webhook mode")
-	}
-	if err := a.api.call(ctx, "setWebhook", map[string]any{"url": a.config.WebhookURL, "secret_token": a.config.WebhookSecret}, nil); err != nil {
-		return err
-	}
-	parsed, err := url.Parse(a.config.WebhookURL)
-	if err != nil || parsed.Host == "" {
-		return errors.New("telegram: webhook_url must include a host")
-	}
-	a.webhook = &http.Server{Addr: parsed.Host, Handler: http.HandlerFunc(a.HandleWebhook)}
-	go func() {
-		if err := a.webhook.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
-			a.logger.Warn("telegram: webhook server failed", "err", err)
-		}
-	}()
-	return nil
-}
-
-func (a *Adapter) HandleWebhook(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
-		writer.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-	expected := a.config.WebhookSecret
-	provided := request.Header.Get("X-Telegram-Bot-Api-Secret-Token")
-	if expected == "" || subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) != 1 {
-		writer.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	var update Update
-	if err := json.NewDecoder(request.Body).Decode(&update); err != nil {
-		writer.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	a.handleUpdate(request.Context(), update)
-	writer.WriteHeader(http.StatusOK)
-}
 
 func formatTool(msg messages.OutboundMessage) string {
 	if msg.Tool == nil {

@@ -88,7 +88,12 @@ func TestEqual_ByteExact(t *testing.T) {
 		{"/foo", "/bar", false},
 		{"/foo", "/foobar", false},
 		{"", "", true}, // Clean("") returns "."
-		{"foo", "FOO", true}, // Unix IS case-sensitive but Clean doesn't lowercase — Equal here is byte-exact
+		// NOTE: do NOT add a case-sensitivity row here. Unix
+		// case-sensitivity is a platform-specific contract locked
+		// by TestEqual_CaseSensitiveOnUnix below; Windows' case-
+		// insensitivity is locked by TestEqual_CaseInsensitive in
+		// path_windows_test.go. Mixing the two in this table is
+		// what produced the true/false typo that red-lined CI.
 	}
 	for _, tc := range cases {
 		if got := Equal(tc.a, tc.b); got != tc.want {

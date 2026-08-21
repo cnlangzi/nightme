@@ -336,8 +336,8 @@ jobs:
       # systray CGo dependency (the 'go build' step below
       # links against -lgtk-3 / -layatana-appindicator3).
       # Mirrors the same step in the 'test' job — both jobs
-      # run on ubuntu-latest and both call go build ./...
-      # (or its dist/nightme equivalent). macOS / Windows
+      # run on ubuntu-latest and both build the nightme binary
+      # (which links the systray CGo dependency). macOS / Windows
       # runners ship Cocoa / Win32 by default and need no
       # extra install.
       - name: Install systray build deps (Linux)
@@ -349,7 +349,158 @@ jobs:
 
       - name: Build nightme
         shell: bash
-        run: go build -o dist/nightme ./cmd/nightme
+        run: |
+          # Use the canonical build entry points (mirrors the
+          # `test` job's `Build smoke binary` step) so CI builds
+          # exactly what a developer ships:
+          #   - Windows: build.bat (cmd-native, also documents
+          #     how Windows users build without GnuWin32 make)
+          #   - Linux/macOS: make build (uses LDFLAGS from the
+          #     Makefile to bake version metadata in)
+          # Both produce bin/nightme[.exe] with version metadata
+          # baked in via -ldflags. Going through these scripts
+          # (rather than a bare 'go build -o dist/nightme')
+          # means a regression in build.bat or the Makefile
+          # LDFLAGS list surfaces as a failing CI gate instead
+          # of a Windows-only user-facing "version unknown"
+          # surprise — and the daemon lifecycle + agent-spawn
+          # steps below all consume bin/nightme[.exe].
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./build.bat
+          else
+            make build
+          fi
+
+      # Daemon lifecycle smoke (start / stop / restart / status) on
+      # every shipped OS. This is the regression gate for the
+      # Windows daemon-control fixes (named-pipe accept loop,
+      # tray shutdown deadlock, start-while-running false success)
+      # and their Unix/macOS equivalents. A future change that
+      # breaks `nightme start` on any one OS lands here as a red
+      # row BEFORE the expensive npm-install + agent-spawn chain
+      # below burns runner minutes.
+      #
+      # The gate runs on all three matrix OSes (linux / windows /
+      # macos) for the same reason the rest of the job does: the
+      # daemon code is split across `//go:build windows` /
+      # `!windows` files (named pipe vs AF_UNIX, systray threading)
+      # and a regression in either half only surfaces on the OS
+      # that exercises it. Linux CI is headless (no DISPLAY) so
+      # the daemon takes the headless tray path there; Windows +
+      # macOS exercise the systray.Run path that the tray.go fix
+      # targets.
+      #
+      # Isolation: NIGHTME_CONFIG points at a non-existent file
+      # (Load returns defaults, no error) and NIGHTME_PATHS_DATA_DIR
+      # at a temp dir, so the daemon never touches the runner's
+      # real ~/.nightme (config / lock / pipe / log). Fake feishu
+      # creds are required because the runtime errors with "no
+      # channels configured" before SetReady when zero channels
+      # build — with creds present the feishu builder accepts the
+      # channel (the WS connection then fails+reconnects in a
+      # goroutine, non-fatal) and the daemon reaches "ready".
+      - name: Verify daemon lifecycle (start/stop/restart/status)
+        shell: bash
+        env:
+          NIGHTME_FEISHU_APP_ID: ci
+          NIGHTME_FEISHU_APP_SECRET: ci
+          NIGHTME_FEISHU_VERIFICATION_TOKEN: ci
+        run: |
+          # build.bat → bin/nightme.exe, make build → bin/nightme
+          # (see the `Build nightme` step above). Both bake
+          # version metadata in via -ldflags, which `nightme
+          # status` reports — a regression in the LDFLAGS list
+          # surfaces here as a "version unknown" row.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
+          # Isolate all daemon state (config, lock, pipe, log,
+          # crash capture) under one deterministic temp dir per
+          # job. $RUNNER_TEMP is a clean, native-path temp GitHub
+          # Actions provisions per job (D:\a\_temp on Windows,
+          # /home/runner/work/_temp on Linux, similar on macOS) —
+          # using it (rather than `mktemp -d`) avoids MSYS-path
+          # resolution quirks where a `/tmp/...` value handed to
+          # the Windows binary can resolve to a different native
+          # path than the shell sees, which on some runners left
+          # the daemon polling a pipe the child never bound.
+          root="${RUNNER_TEMP:-$(mktemp -d)}/nightme-daemon-test"
+          rm -rf "$root"
+          mkdir -p "$root"
+          export NIGHTME_CONFIG="$root/config.yaml"   # non-existent → defaults
+          export NIGHTME_PATHS_DATA_DIR="$root/data"  # lock + pipe + stderr
+          export NIGHTME_LOGGING_FILE="$root/nightme.log"
+          stderr="$root/data/daemon-stderr.log"
+          # Always tear down a stray daemon so a mid-script
+          # failure does not leave the process running on the
+          # runner (the runner is ephemeral, but a leaked daemon
+          # would hold the lock and cascade-fail later steps).
+          trap '[ -n "$bin" ] && "$bin" stop >/dev/null 2>&1 || true' EXIT
+
+          fail=0
+          # check <desc> <actual> <expected-regex>
+          check() {
+            if printf '%s' "$2" | grep -qE -- "$3"; then
+              echo "OK: $1"
+            else
+              echo "::error::$1 — expected /$3/, got:"
+              printf '%s\n' "$2" | sed 's/^/    /'
+              fail=1
+            fi
+          }
+
+          echo '--- status on cold start (expect: not running) ---'
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "cold status reports not running" "$out" 'not running|not currently running|is not running'
+
+          echo '--- start ---'
+          out=$("$bin" start 2>&1 || true)
+          echo "$out"
+          check "start reports started" "$out" 'daemon started \(pid='
+          # `start` already waits for Ping=ready before returning,
+          # but give slow CI runners a grace window.
+          sleep 2
+
+          echo '--- status (expect: ready) ---'
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "status reports ready" "$out" 'ready'
+          if [ "$fail" = "1" ] && [ -f "$stderr" ]; then
+            echo '----- daemon stderr -----'; cat "$stderr"; echo '----- end stderr -----'
+          fi
+
+          echo '--- start while running (expect: already running) ---'
+          out=$("$bin" start 2>&1 || true)
+          echo "$out"
+          check "second start reports already running" "$out" 'already running'
+
+          echo '--- restart ---'
+          out=$("$bin" restart 2>&1 || true)
+          echo "$out"
+          check "restart reports started" "$out" 'daemon started \(pid='
+          sleep 2
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "status reports ready after restart" "$out" 'ready'
+
+          echo '--- stop ---'
+          out=$("$bin" stop 2>&1 || true)
+          echo "$out"
+          check "stop reports stopped" "$out" 'daemon stopped'
+
+          echo '--- status after stop (expect: not running) ---'
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "status after stop reports not running" "$out" 'not running|not currently running|is not running'
+
+          if [ "$fail" != "0" ]; then
+            echo "::error::daemon lifecycle gate failed on ${{ matrix.os }}"
+            [ -f "$stderr" ] && { echo '----- daemon stderr -----'; cat "$stderr"; }
+            exit 1
+          fi
+          echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
 
       - name: Install agents (officially-supported methods per agent)
         shell: bash
@@ -444,7 +595,12 @@ jobs:
         shell: bash
         run: |
           set -e
-          out=$(./dist/nightme agents)
+          # build.bat → bin/nightme.exe, make build → bin/nightme.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
+          out=$("$bin" agents)
           echo "$out"
           # Match by word boundary (column-leading NAME in the
           # table format "NAME\tCOMMAND\tARGS"). We do NOT
@@ -469,6 +625,11 @@ jobs:
         shell: bash
         run: |
           set -e
+          # build.bat → bin/nightme.exe, make build → bin/nightme.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
           # This is the "nightme 的启动测试" gate: invoke nightme
           # through its own CLI surface (`nightme test`), let the
           # bridge drive the spawn, and verify the child actually
@@ -521,7 +682,7 @@ jobs:
             # plus pumpIO's "send: EOF" (~138 bytes) — sub-150,
             # false-FAIL. 80 covers all known agents.
             set +e
-            printf 'PONG\n' | ./dist/nightme test \
+            printf 'PONG\n' | "$bin" test \
                 --agent "$agent" \
                 --workspace "$workspace" \
                 >"$out_file" 2>&1 &

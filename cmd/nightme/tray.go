@@ -180,16 +180,26 @@ func runTrayOwning(cmd *cobra.Command, runDeps runtime.Deps, opts trayOptions) e
 	}
 
 	runErrCh := make(chan error, 1)
+	runtimeDone := make(chan struct{})
 	go func() {
 		runErrCh <- runRunWith(cmd, runDeps)
+		close(runtimeDone)
 	}()
 
 	// Watcher goroutine: when the runtime returns, release
-	// the systray native loop. The channel close (implicit
-	// when runRunWith returns) synchronises the value
-	// delivery with the read below on the calling thread.
+	// the systray native loop. We watch a SEPARATE
+	// runtimeDone signal (closed after the runErrCh send) so
+	// the watcher does NOT consume the runErrCh value — the
+	// calling thread reads it via `return <-runErrCh` below.
+	// The previous shape read runErrCh directly here, which
+	// raced the main return: on platforms where systray.Run
+	// blocks (Windows / macOS), the watcher always won the
+	// single buffered value, leaving `return <-runErrCh`
+	// blocked forever — the daemon shutdown completed but
+	// the process never exited, so `nightme stop` timed out
+	// at 15s with the lock still held.
 	go func() {
-		<-runErrCh
+		<-runtimeDone
 		systray.Quit()
 	}()
 

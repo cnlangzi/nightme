@@ -150,6 +150,27 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			}
 			ok, err := daemoncontrol.Ping(paths.Socket, startReadyPingTimeout)
 			if err == nil && ok {
+				// Verify the ready daemon is OUR child, not a
+				// pre-existing one. Unlike Unix (where the parent
+				// holds the daemon lock before spawning, so a
+				// second `start` fails immediately with "already
+				// running"), on Windows the parent does NOT hold
+				// the lock — the child takes its own. So a
+				// `nightme start` issued while a daemon is
+				// already up races the child's TryLock against the
+				// existing daemon: the child exits with "already
+				// running" while the parent's Ping succeeds against
+				// the OLD daemon. Without this PID check, `start`
+				// would falsely report "started".
+				if st, serr := daemoncontrol.GetStatus(paths.Socket, startReadyPingTimeout); serr == nil && st.PID != pid {
+					if stderrPath != "" {
+						return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+							"nightme daemon is already running (pid=%d); child stderr: %s",
+							st.PID, stderrPath))
+					}
+					return nmerrors.New(nmerrors.CodeBridgeError,
+						"nightme daemon is already running")
+				}
 				// Release the parent-side handle so the kernel does
 				// not block daemon shutdown on the parent process's
 				// own termination. If Release fails the daemon is

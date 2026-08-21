@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 var ErrLocked = errors.New("daemon control: lock is held")
@@ -41,6 +43,28 @@ func LockFromFile(f *os.File) (*Lock, error) {
 	}
 	if _, err := f.Stat(); err != nil {
 		return nil, fmt.Errorf("validate inherited lock: %w", err)
+	}
+	// The fd arrived via ExtraFiles, so forkExec cleared FD_CLOEXEC
+	// on it and os.NewFile does not re-arm it. Without this, every
+	// process the daemon later execs (!cmd shell, gtw hooks, agent
+	// bridges) inherits the descriptor and keeps the flock alive
+	// after the daemon itself exits — flock is bound to the open
+	// file description, not the process. `nightme restart` run from
+	// inside such a child then stops the daemon successfully but
+	// can never reclaim the lock: stopDaemon spins for 15s and
+	// startDaemon is never reached. Re-arm here, at the single
+	// adoption point.
+	//
+	// Worth being explicit about the flock shape: the inherited fd
+	// is a forkExec-dup of the same open file description that
+	// TryLock acquired in the parent — so the LOCK_EX is on the
+	// description, and both fds share it. Closing only the parent's
+	// copy (Lock.CloseLocalCopy) leaves the inherited copy still
+	// holding the lock, and a descendant that further inherits fd
+	// 3 continues to hold it after the daemon exits. That is the
+	// whole reason CLOEXEC must be armed here, before any exec.
+	if err := proc.SetCloseOnExec(f); err != nil {
+		return nil, fmt.Errorf("arm inherited lock: %w", err)
 	}
 	return &Lock{file: f}, nil
 }

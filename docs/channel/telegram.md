@@ -826,6 +826,7 @@ turn 1: 用户发 "hi 1" (userMsgID=10)
 **v7 改进**：
 - **Placeholder 也用 reply chain** 挂到 user message（之前是独立消息，现在视觉上是 user message 下的 reply 群）
 - **占位文本带 `⏱ HH:MM:SS` 时间戳**（`⏱ 15:18:08`），user 一眼看到 "agent 在 15:18:30 还在跑"
+- **Race-window guard**（codex review 2026-08-22）：`ensurePlaceholderForHeartbeat` 在 `state.UserMessageID == ""` 时返回 `(0, nil)` 而不是 lazy-create。旧行为会 orphan 一个 placeholder（handleMessage 后续 `ensurePlaceholder` 会覆盖 `state.PlaceholderMessageID`，但旧 P1 已经在 chat 里没有被 PATCH 也没有 🎉）。新行为让 handleMessage 创建 canonical placeholder，heartbeat 走 silent drop。
 
 #### 11.11.2 视觉
 
@@ -1946,7 +1947,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 |---|---|---|
 | C1 | OutInit silent drop（与 feishu F-44 对齐） | 已实现 |
 | C2 | OutHeartbeat 路径 ensurePlaceholderForHeartbeat（占位缺失时自动创建） | 已实现 |
-| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v7 修订**（v3 placeholder 自己也 reply 到 user msg + 占位文本 `⏱ HH:MM:SS` 时间戳；v6.3 单 emoji 预算保留） |
+| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v7.1 修订**（v7 + codex review race guard：ensurePlaceholderForHeartbeat 在 UserMessageID 未设时 return (0, nil) 防止 orphan placeholder） |
 | C4 | 2026-08-22 reaction chatID namespacing（修 `handleMessageReaction` 用 raw chatID 导致 emoji reaction 进不了 gtw 的 bug） | 已实现 |
 | C5 | 2026-08-22 stateStore TTL on-load prune（30 天未活动 topic 自动清理） | 已实现 |
 | C6 | 2026-08-22 sendChoice / patchChoice / handleInputClick / handleForceReply / callback wizard editMessageText 把 session ChatID 传给 Telegram API 的生产路径 bug（修 `rawChatIDFromSession` helper） | 已实现 |

@@ -611,9 +611,22 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 // by the OutHeartbeat PATCH path and by Send prelude's
 // placeholderAnchor resolution.
 //
+// Race-window guard (2026-08-22, codex review): if the
+// ChatSession state has no UserMessageID set yet (handleMessage
+// hasn't run yet for this turn), we DON'T lazy-create — the
+// created placeholder would be orphan-raced: handleMessage's
+// subsequent ensurePlaceholder call would overwrite
+// state.PlaceholderMessageID with a new placeholder, leaving
+// the heartbeat-created bubble in the chat as a permanent
+// "🤖 Working..." without terminal PATCH or 🎉 reaction.
+// Returning (0, nil) is safe: Send's OutHeartbeat path
+// silently drops when placeholderAnchor == 0 (the in-turn status
+// ticker is then conveyed only after handleMessage lands).
+//
 // Topic mode and DM mode behave the same: return existing
 // placeholder if state.PlaceholderMessageID > 0, otherwise
-// create one. The placeholder is the per-turn status ticker
+// create one (only when UserMessageID is set, see above).
+// The placeholder is the per-turn status ticker
 // (Working… → ✅ Completed); reply chain goes to userMsgID.
 // See docs/channel/telegram.md §11.11.
 func (a *Adapter) ensurePlaceholderForHeartbeat(ctx context.Context, chatID string, topicID int) (int, error) {
@@ -621,7 +634,18 @@ func (a *Adapter) ensurePlaceholderForHeartbeat(ctx context.Context, chatID stri
 	if ok && state.PlaceholderMessageID > 0 {
 		return state.PlaceholderMessageID, nil
 	}
-	result, err := a.sendTelegramMessage(ctx, chatID, topicID, 0, "<b>🤖 Working...</b>", nil)
+	// Race-window guard: handleMessage hasn't populated the state
+	// yet. Wait for it instead of creating a placeholder that
+	// will be orphan'd by the subsequent ensurePlaceholder call.
+	if !ok || state.UserMessageID == "" {
+		return 0, nil
+	}
+	// Genuine "placeholder was supposed to exist but didn't" case
+	// (e.g., ensurePlaceholder failed with transient network
+	// error). Create one now.
+	now := time.Now().UTC()
+	initialText := "<b>🤖 Working...</b> · ⏱ " + now.Format("15:04:05")
+	result, err := a.sendTelegramMessage(ctx, chatID, topicID, 0, initialText, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -949,24 +973,29 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	}
 }
 
-// OnPromptEnded marks the turn as done by stamping a ✅ reaction
-// on BOTH the user message and the per-turn placeholder. This
-// mirrors the Feishu receipt UX (AddReaction on userMsgID +
-// SetPromptState on the receipt card) without PATCHing the
-// placeholder's text to "✅ Completed" — the placeholder keeps
-// its last heartbeat text ("💭 N · 🔧 M" or "🤖 Working...")
-// as the in-turn status ticker. The ✅ reaction on both
-// surfaces is the sole terminal-state indicator.
+// OnPromptEnded marks the turn as done by stamping a 🎉
+// reaction on the per-turn placeholder.
+//
+// v6.3: Telegram bot single-reaction budget — the user
+// message's reaction slot is reserved for MessageSubmitted
+// ("AI thinking"). OnPromptEnded does NOT overwrite that
+// slot with 🎉; the terminal visual is conveyed via the
+// per-turn placeholder's 🎉 reaction.
+//
+// userMsgID is part of the interface contract (and the runtime
+// still threads it through eventbus e.UserMsgID) but is no longer
+// consumed by this adapter — the placeholder's identity is
+// already pinned by state.PlaceholderMessageID. The parameter
+// is kept in the signature to match the channel.Channel
+// interface contract; callers should not rely on this side
+// reacting on the user message.
 //
 // chatID accepts both forms: the namespaced session form
 // ("tg_<chatid>[:thread_id]") that the runtime passes, and the
 // raw form used by direct unit tests. splitSessionID returns
 // ok=false for the raw form so we fall back to using chatID as
 // the raw chat id (matches the existing TopicState key shape).
-//
-// userMsgID is required: it identifies the user message that
-// triggered the prompt and is the target of the ✅ reaction.
-// See docs/channel/telegram.md §11.11 (v4).
+// See docs/channel/telegram.md §11.11 (v6.3).
 func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	if chatID == "" {
 		return

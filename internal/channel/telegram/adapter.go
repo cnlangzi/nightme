@@ -594,29 +594,42 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	if !ok {
 		state = &TopicState{ChatID: chatID, TopicID: topicID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	}
-	// Always create a NEW placeholder for this user message.
-	// Even if state already has a PlaceholderMessageID from the
-	// previous turn, that placeholder belongs to the previous
-	// turn — leave it alone and emit a fresh one.
-	//
-	// v7: the placeholder is a reply to the user message
-	// (reply_to_message_id) so the entire turn (placeholder +
-	// OutXxx) hangs under the user's "hi" as a visual thread.
-	// Initial text also carries the timestamp (`⏱ HH:MM:SS`) so
-	// the user can see when the turn started, matching the
-	// heartbeat format.
-	initialText := placeholderInitialText(time.Now().UTC())
-	result, err := a.sendTelegramMessage(ctx, chatID, topicID, userMessageID, initialText, nil)
+	// Drop any in-memory chain for this turn — the previous turn's
+	// chunks stay in Telegram chat (frozen, no further edits) but we
+	// don't track them anymore. Next Out* gets a fresh chain.
+	if a.chains != nil {
+		a.chains.purge(chatID, topicID)
+	}
+
+	// Cold-create the first chunk via send. Header carries the
+	// turn-start timestamp; body holds no entries yet (segments
+	// arrive on Out* events). v9 chains start with header-only.
+	header := placeholderInitialText(time.Now().UTC())
+	result, err := a.sendTelegramMessage(ctx, chatID, topicID, userMessageID, header, nil)
 	if err != nil {
 		return err
 	}
+
+	// Materialise the in-memory chain so ensurePlaceholderForHeartbeat
+	// / Send can resolve it without recreating.
+	chain := a.chains.getOrCreate(chatID, topicID)
+	chain.mu.Lock()
+	chain.chunks = []*placeholderChunk{{
+		messageID:  int64(result.MessageID),
+		headerLine: header,
+	}}
+	chain.cursor = 0
+	chain.dirty = false
+	chain.lastFooter = nil
+	chain.mu.Unlock()
+
 	state.PlaceholderMessageID = result.MessageID
 	state.LastMessageID = result.MessageID
 	state.UserMessageID = strconv.Itoa(userMessageID)
-	a.logger.Debug("telegram: placeholder created",
+	a.logger.Debug("telegram: chain created (v9)",
 		"chat_id", chatID,
 		"thread_id", topicID,
-		"placeholder_message_id", result.MessageID,
+		"chunk_message_id", result.MessageID,
 		"user_message_id", userMessageID,
 	)
 	return a.state.putTopic(state)
@@ -913,24 +926,14 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		return a.patchChoice(ctx, msg)
 	case messages.OutHeartbeat:
 		// PATCH the per-turn placeholder for live "Working..."
-		// status. Both topic and DM have a placeholder (per the
-		// v3 contract — see §11.11). If the placeholder anchor
-		// resolved to 0 (e.g., first heartbeat raced ahead of
-		// handleMessage and the lazy create failed), silently
-		// drop — OutMessageState already carries ⏳/🔄/✅.
-		//
-		// §18: the placeholder carries the StatusBar trailer so
-		// identity / usage / git stay visible alongside the
-		// status line. Goes through the same renderBodyWithStatusBar
-		// helper as the text-bubble paths so the rendering
-		// pipeline is shared.
+		// v9: heartbeat only PATCHes the active chunk's headerLine
+		// (in-memory). The next debounce flush writes the full
+		// rendered text to Telegram. If no chunk exists yet (the
+		// first heartbeat raced ahead of handleMessage), silently
+		// drop — OutMessageState's 👌 reaction already announces
+		// the turn.
 		if placeholderAnchor > 0 {
-			status := "🤖 Working..."
-			if msg.Heartbeat != nil {
-				status = heartbeatText(msg.Heartbeat)
-			}
-			return a.editTelegramMessage(ctx, rawChatID, placeholderAnchor,
-				a.renderBodyWithStatusBar(status, &msg), nil)
+			return a.patchChainHeader(ctx, rawChatID, topicID, msg)
 		}
 		return nil
 	case messages.OutMessageState:
@@ -985,31 +988,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// (e.g., MessageDropped).
 		return a.setMessageReactions(ctx, rawChatID, messageID, nil)
 	case messages.OutToolStart, messages.OutToolEnd:
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor,
-			a.renderBodyWithStatusBar(formatTool(msg), &msg))
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+			formatTool(msg))
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor,
-			a.renderBodyWithStatusBar(formatTaskList(msg.TaskList), &msg))
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+			formatTaskList(msg.TaskList))
 	case messages.OutError:
-		// OutError carries a pre-escaped <pre>stderr</pre> HTML
-		// fragment. Going through renderBodyWithStatusBar would
-		// run RenderMarkdown once here, then sendRenderedText
-		// would run it again — the second pass would
-		// escapeHTML the literal "<pre>" / "</pre>" tags it
-		// doesn't recognise, producing "&lt;pre&gt;…&lt;/pre&gt;"
-		// in the wire payload. The pre-existing behaviour
-		// (TestAdapter_Send_OutError_Diagnostic) already locks
-		// the single-escape output, so we stitch the StatusBar
-		// panel in raw form and let sendRenderedText's one
-		// RenderMarkdown pass handle the escape consistently.
 		text := msg.Text
 		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 			text += "\n\n<pre>" + escapeHTML(msg.Diagnostic.StderrTail) + "</pre>"
 		}
-		if snap := statusbar.StatusBarLines(&msg); len(snap) > 0 {
-			text += "\n\n" + statusbar.RenderPanel(snap)
-		}
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor, text)
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, text)
 	case messages.OutInit:
 		// Silent drop — matches feishu F-44. The Init payload
 		// (session_id, model, agent name, …) is still on the
@@ -1020,13 +1009,83 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		return nil
 	default:
 		// OutReply / OutResult / OutThinking / OutCommandReply:
-		// every text-emitting kind passes through here. Each
-		// bubble carries the StatusBar trailer so identity /
-		// usage / git stay visible per-message — Telegram has no
-		// card concept, so we can't fold them into a single
-		// container like Feishu does. See §18.
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor,
-			a.renderBodyWithStatusBar(msg.Text, &msg))
+		// every text-emitting kind folds onto the active chain
+		// chunk (v9 §11.12). StatusBar trailing only lands on
+		// segments produced by footer-bearing kinds (OutReply /
+		// OutResult / OutTaskCreate / OutTaskUpdate); see
+		// §11.12.6 for the in-memory footer semantics.
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, msg.Text)
+	}
+}
+
+// appendSegmentForKind is the v9 chain ingest helper. Single
+// point of entry for every Out* kind that maps onto a chain
+// segment (OutReply / OutResult / OutThinking / OutToolStart /
+// OutToolEnd / OutError / OutTaskCreate / OutTaskUpdate). It
+// computes whether the current event is footer-bearing
+// (drives whether lastFooter is refreshed) and hands off to
+// the package-level appendSegment primitive. Always schedules
+// a debounced flush on return so the active chunk's text gets
+// back to Telegram.
+func (a *Adapter) appendSegmentForKind(
+	ctx context.Context,
+	msg messages.OutboundMessage,
+	rawChatID string,
+	topicID, userMessageID int,
+	segment string,
+) error {
+	if strings.TrimSpace(segment) == "" {
+		return nil
+	}
+	chain := a.chains.getOrCreate(rawChatID, topicID)
+
+	// Footer-bearing kinds carry session context for StatusBar.
+	// Others (OutThinking / OutToolStart / OutToolEnd /
+	// OutError) leave lastFooter untouched (§11.12.6).
+	var sb []string
+	switch msg.Kind {
+	case messages.OutReply, messages.OutResult,
+		messages.OutTaskCreate, messages.OutTaskUpdate:
+		sb = statusbar.StatusBarLines(&msg)
+	}
+
+	userMsgID, err := strconv.Atoi(strconv.Itoa(userMessageID))
+	if err != nil {
+		return err
+	}
+	if err := appendSegment(
+		ctx, chain,
+		rawChatID, topicID, userMsgID,
+		segment+"\n", sb,
+		a.chainSendFn(), a.chainEditFn(ctx),
+	); err != nil {
+		return err
+	}
+
+	scheduleFlushDebounced(chain, rawChatID, topicID, userMessageID)
+	return nil
+}
+
+// chainSendFn returns a closure bound to the Adapter's sendTelegramMessage
+// for use by the package-level appendSegment primitive. Sends via the
+// existing rate limiter / retry pipeline (commit #2 wires this to the
+// Adapter apiClient through sendTelegramMessage).
+func (a *Adapter) chainSendFn() sendChunkFn {
+	return func(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error) {
+		res, err := a.sendTelegramMessage(ctx, chatID, topicID, replyToMessageID, text, nil)
+		if err != nil {
+			return 0, err
+		}
+		return int64(res.MessageID), nil
+	}
+}
+
+// chainEditFn returns a closure bound to the Adapter's editTelegramMessage.
+// Long-text overflow path in flushChainNow may need to issue multiple
+// edits — each one goes through apiCall's rate limit / retry pipeline.
+func (a *Adapter) chainEditFn(ctx context.Context) editChunkFn {
+	return func(ctx context.Context, chatID string, messageID int64, text string) error {
+		return a.editTelegramMessage(ctx, chatID, int(messageID), text, nil)
 	}
 }
 
@@ -1062,31 +1121,83 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 		rawChatID = chatID
 	}
 	topicID := a.sessionTopicID(chatID)
-	state, ok := a.state.topic(rawChatID, topicID)
-	if !ok {
+
+	// v9: chain is the truth. Resolve the active chunk via
+	// chainLRU (not state.PlaceholderMessageID which is now
+	// read-only back-compat). Flush the in-memory buffer to
+	// Telegram first so the [reaction] lands on a fully-rendered
+	// chunk.
+	chain := a.chains.getOrCreate(rawChatID, topicID)
+	if chain.cursor < 0 {
+		a.chains.purge(rawChatID, topicID)
 		return
 	}
-	// v6.3: Telegram bot single-reaction budget — the user
-	// message's reaction slot is reserved for MessageSubmitted
-	// (👌). OnPromptEnded does NOT overwrite that slot; the
-	// terminal visual is conveyed via the per-turn placeholder's
-	// 🎉 reaction below.
-	//
-	// 🎉 is in the official Telegram ReactionTypeEmoji
-	// whitelist (see gist.github.com/Soulter/3f22c8e.../
-	// reactions-txt for the canonical list). Earlier designs
-	// tried ✅ for "Done" but U+2705 is OUTSIDE the whitelist
-	// and Telegram returns REACTION_INVALID — see docs/channel/
-	// telegram.md §11.11.3 for the live API probe that
-	// motivated the fall-back.
-	//
-	// 🎉 on per-turn placeholder — NO text PATCH; placeholder
-	// keeps its last heartbeat text.
-	if state.PlaceholderMessageID > 0 {
-		_ = a.setMessageReactions(ctx, rawChatID, state.PlaceholderMessageID, []map[string]any{
-			{"type": "emoji", "emoji": "🎉"},
-		})
+
+	// Best-effort flush before stamping the terminal reaction.
+	if err := flushChainNow(
+		ctx, chain,
+		rawChatID, topicID, atoiUserMsgID(userMsgID),
+		a.chainEditFn(ctx), a.chainSendFn(),
+	); err != nil && a.logger != nil {
+		a.logger.Warn("telegram: OnPromptEnded flush failed",
+			"chat_id", rawChatID, "err", err)
 	}
+
+	cur := chain.chunks[chain.cursor]
+	if cur != nil {
+		// [reaction] on the active chunk. v6.3 single-reaction
+		// budget on USER MSG slot is preserved; this stamp lands
+		// on the placeholder, not the user's original message.
+		// [emoji] is in the official ReactionTypeEmoji whitelist
+		// ([other emoji] U+2705 was rejected by Telegram API).
+		_ = a.setMessageReactions(ctx, rawChatID, int(cur.messageID),
+			[]map[string]any{{"type": "emoji", "emoji": "\U0001F389"}})
+	}
+
+	// Turn-end cleanup: forget the in-memory chain. Frozen
+	// chunks remain in chat as historical evidence (no edit
+	// touches them again). Next user message re-materialises
+	// a fresh chain via ensurePlaceholder.
+	a.chains.purge(rawChatID, topicID)
+}
+
+// patchChainHeader refreshes the active chunk's headerLine
+// (in-memory) and arms the debounced flush. Bound to the
+// OutHeartbeat Send case (v9 §11.12.8). Header text is the same
+// "💭 N · 🔧 M · ⏱ ..." shape as v8's heartbeat.
+func (a *Adapter) patchChainHeader(
+	ctx context.Context,
+	chatID string,
+	topicID int,
+	msg messages.OutboundMessage,
+) error {
+	chain := a.chains.getOrCreate(chatID, topicID)
+	chain.mu.Lock()
+	if chain.cursor < 0 {
+		chain.mu.Unlock()
+		return nil
+	}
+	cur := chain.chunks[chain.cursor]
+	status := "🤖 Working..."
+	if msg.Heartbeat != nil {
+		status = heartbeatText(msg.Heartbeat)
+	}
+	cur.headerLine = status + " · ⏱ " + time.Now().UTC().Format("15:04:05")
+	chain.dirty = true
+	chain.mu.Unlock()
+
+	scheduleFlushDebounced(chain, chatID, topicID, 0)
+	return nil
+}
+
+// atoiUserMsgID parses the userMsgID (string) back to int for
+// the reply_to chain message ID. Returns 0 on failure.
+func atoiUserMsgID(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // renderBodyWithStatusBar appends the per-turn StatusBar footer

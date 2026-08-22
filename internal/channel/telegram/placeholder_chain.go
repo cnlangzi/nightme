@@ -145,3 +145,20 @@ func (l *chainLRU) reset() {
 	l.chains = make(map[chainKey]*placeholderChain)
 	l.order = nil
 }
+
+// purge removes the chain for (chatID, topicID) if present. Called by
+// ensurePlaceholder when a new user message arrives so the previous
+// turn's chain is forgotten (its frozen chunks remain in chat as
+// historical evidence).
+func (l *chainLRU) purge(chatID string, topicID int) {
+	key := chainKey{chatID: chatID, topicID: topicID}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.chains, key)
+	for i, k := range l.order {
+		if k == key {
+			l.order = append(l.order[:i], l.order[i+1:]...)
+			return
+		}
+	}
+}

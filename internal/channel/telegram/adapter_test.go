@@ -625,10 +625,16 @@ func TestAdapter_Send_OutHeartbeat_WithTopic(t *testing.T) {
 // the agent was last alive.
 func TestAdapter_Send_OutHeartbeat_AppendsTimestamp(t *testing.T) {
 	a, api := newTestAdapter(t)
-	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50})
+	// Seed with both PlaceholderMessageID and UserMessageID so
+	// the v6.1+ race guard lets the heartbeat path find the
+	// existing placeholder and PATCH it. The ChatID is the
+	// namespaced session form ("tg_<id>:<thread>") that the
+	// runtime produces; splitSessionID parses this into (raw=100,
+	// topic=1) for the state key + thread_id.
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50, UserMessageID: "10"})
 	now := time.Date(2026, 8, 22, 15, 18, 8, 0, time.UTC)
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID:    "100",
+		ChatID:    "tg_100:1",
 		Kind:      messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 5, ToolCount: 7, LastBeatAt: now},
 	}); err != nil {
@@ -2276,8 +2282,12 @@ func TestAdapter_Send_OutInitDropEvenWithText(t *testing.T) {
 
 func TestAdapter_EnsurePlaceholderForHeartbeat_CreatesWhenMissing(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	// Seed a topic WITHOUT a placeholder.
-	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42})
+	// Seed a topic WITHOUT a placeholder but WITH UserMessageID
+	// (the v6.1+ race-window guard requires UserMessageID to be
+	// set before this function will lazy-create a placeholder; the
+	// race-window defer is covered by
+	// TestAdapter_EnsurePlaceholderForHeartbeat_DeferWhenNoUserMsgID).
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, UserMessageID: "10"})
 	messageID, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 42)
 	if err != nil {
 		t.Fatalf("ensurePlaceholderForHeartbeat: %v", err)
@@ -2309,22 +2319,17 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_ReusesExisting(t *testing.T) {
 	}
 }
 
-// TestAdapter_EnsurePlaceholderForHeartbeat_CreatesInDM locks the
-// 2026-08-22 plan-C change: topicID=0 (DM / main-window) now
-// lazy-creates a placeholder the same way real topics do, so
-// OutXxx bubbles have a stable reply_to_message_id anchor.
-//
-// Previously topicID <= 0 short-circuited to (0, nil) — DM had no
-// placeholder and no way to visually chain OutReply / OutTool to
-// a status ticker. See docs/channel/telegram.md §11.11.
 // TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates locks the
 // 2026-08-22 v3 contract: ensurePlaceholderForHeartbeat creates
 // a placeholder in DM (topicID == 0) just like topic mode, when
-// state.PlaceholderMessageID == 0. Returns the new id. Topic mode
-// is unchanged. Used by OutHeartbeat / first-Send-race to ensure
-// the placeholder always exists when an emit needs to PATCH it.
+// state.PlaceholderMessageID == 0 AND state.UserMessageID is
+// already set (race-window guard: no UserMessageID → defer to
+// handleMessage). Returns the new id. Topic mode is unchanged.
 func TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates(t *testing.T) {
 	a, _ := newTestAdapter(t)
+	// Simulate that handleMessage has run (UserMessageID set) but
+	// the placeholder creation failed. Heartbeat now lazy-creates.
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "10"})
 	messageID, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 0)
 	if err != nil {
 		t.Fatalf("ensurePlaceholderForHeartbeat DM: %v", err)
@@ -2348,6 +2353,7 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates(t *testing.T) {
 		t.Fatalf("second call must reuse placeholder, got %d want %d", again, messageID)
 	}
 	// Topic mode unchanged.
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, UserMessageID: "10"})
 	topicID, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 42)
 	if err != nil {
 		t.Fatalf("ensurePlaceholderForHeartbeat topic: %v", err)
@@ -2357,14 +2363,26 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates(t *testing.T) {
 	}
 }
 
-func TestAdapter_Send_OutHeartbeat_CreatesPlaceholderOnDemand(t *testing.T) {
+// TestAdapter_Send_OutHeartbeat_DeferWhenNoUserMsgID locks the
+// 2026-08-22 codex review race-window guard: when a heartbeat
+// arrives BEFORE handleMessage runs (state has no UserMessageID
+// yet), ensurePlaceholderForHeartbeat must NOT lazy-create a
+// placeholder. The created placeholder would be orphan'd by
+// the subsequent handleMessage.ensurePlaceholder call (which
+// always creates a fresh per-turn placeholder), leaving a
+// permanent "🤖 Working..." bubble in the chat with no
+// terminal PATCH or 🎉 reaction.
+//
+// New behavior (codex review): return (0, nil) when state has
+// no UserMessageID — Send's OutHeartbeat path silently drops
+// the heartbeat (acceptable degradation: status ticker is
+// conveyed only after handleMessage lands and creates the
+// canonical placeholder).
+func TestAdapter_Send_OutHeartbeat_DeferWhenNoUserMsgID(t *testing.T) {
 	a, api := newTestAdapter(t)
-	// Seed a chat_id → topic mapping. The outbound chatID is now
-	// wrapped in "tg_<chat.id>:<thread_id>" form by the adapter;
-	// the underlying state key remains the raw Telegram chat_id.
-	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42})
-	// First heartbeat arrives before any user message triggered
-	// handleMessage's ensurePlaceholder (race condition).
+	// Seed state with topic mapping but NO UserMessageID — simulates
+	// the race where heartbeat arrives before handleMessage.
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, UserMessageID: ""})
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_100:42",
 		Kind:   messages.OutHeartbeat,
@@ -2376,25 +2394,32 @@ func TestAdapter_Send_OutHeartbeat_CreatesPlaceholderOnDemand(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	// Verify: one sendMessage (placeholder creation) + one
-	// editMessageText (heartbeat PATCH).
-	var sawSend, sawEdit bool
+	// v6.1+ race guard: ensurePlaceholderForHeartbeat must NOT
+	// call sendMessage when state.UserMessageID is empty (would
+	// orphan the placeholder). Send's OutHeartbeat path silently
+	// drops on placeholderAnchor == 0.
 	for _, call := range api.snapshotCalls() {
 		if call.Method == "sendMessage" {
-			sawSend = true
-		}
-		if call.Method == "editMessageText" {
-			sawEdit = true
+			t.Fatalf("race guard: heartbeat must NOT sendMessage when state.UserMessageID empty; got params=%+v", call.Params)
 		}
 	}
-	if !sawSend {
-		t.Fatal("expected sendMessage to create placeholder")
+	state, _ := a.state.topic("100", 42)
+	if state.PlaceholderMessageID != 0 {
+		t.Fatalf("race guard: state.PlaceholderMessageID must stay 0; got %d", state.PlaceholderMessageID)
 	}
-	if !sawEdit {
-		t.Fatal("expected editMessageText to PATCH heartbeat")
+}
+
+// TestAdapter_EnsurePlaceholderForHeartbeat_DeferWhenNoUserMsgID
+// locks the lower-level race guard: ensurePlaceholderForHeartbeat
+// returns (0, nil) when state has no UserMessageID yet.
+func TestAdapter_EnsurePlaceholderForHeartbeat_DeferWhenNoUserMsgID(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, UserMessageID: ""})
+	messageID, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 42)
+	if err != nil {
+		t.Fatalf("ensurePlaceholderForHeartbeat: %v", err)
 	}
-	state, ok := a.state.topic("100", 42)
-	if !ok || state.PlaceholderMessageID <= 0 {
-		t.Fatalf("placeholder not persisted: %+v", state)
+	if messageID != 0 {
+		t.Fatalf("race guard: must return 0 (no UserMessageID yet), got %d", messageID)
 	}
 }

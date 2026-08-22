@@ -86,11 +86,17 @@ func (a *Adapter) editTelegramKeyboard(ctx context.Context, chatID string, messa
 	}, nil)
 }
 
-// setMessageReactions replaces the reaction list on a message with
-// the supplied list. Telegram's setMessageReaction is a SET
-// semantic — to APPEND, callers must send the full cumulative
-// list (see allReactionsUpTo in adapter.go for the lifecycle
-// 👌 → 👌+🤔 → 👌+🤔+🎉 sequence).
+// setMessageReactions replaces the reaction list on a message
+// with the supplied list. Telegram's setMessageReaction is a SET
+// semantic (each call REPLACES the entire list).
+//
+// v6.1+ contract: callers always pass a single-emoji list.
+// Telegram bots are limited to ONE reaction per message; the
+// adapter reserves the user-message reaction slot for
+// MessageSubmitted ("AI thinking") and the placeholder-message
+// reaction slot for OnPromptEnded ("done / 🎉"). Queued and
+// Done are silent drops on the user message — they don't burn
+// the reaction slot.
 //
 // Pass an empty (non-nil) slice to clear all reactions on the
 // message — the Telegram API distinguishes [] (clear) from

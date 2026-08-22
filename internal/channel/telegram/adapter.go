@@ -631,7 +631,7 @@ func placeholderInitialText(now time.Time) string {
 // subsequent ensurePlaceholder call would overwrite
 // state.PlaceholderMessageID with a new placeholder, leaving
 // the heartbeat-created bubble in the chat as a permanent
-// "🤖 Working..." without terminal PATCH or ✅ reaction.
+// "🤖 Working..." without terminal PATCH or 🎉 reaction.
 // Returning (0, nil) is safe: Send's OutHeartbeat path
 // silently drops when placeholderAnchor == 0 (the in-turn status
 // ticker is then conveyed only after handleMessage lands).
@@ -1022,7 +1022,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 // message's reaction slot is reserved for MessageSubmitted
 // ("AI thinking"). OnPromptEnded does NOT overwrite that
 // slot with 👌; the terminal visual is conveyed via the
-// per-turn placeholder's ✅ reaction.
+// per-turn placeholder's 🎉 reaction.
 //
 // userMsgID is part of the interface contract (and the runtime
 // still threads it through eventbus e.UserMsgID) but is no longer
@@ -1077,11 +1077,14 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 // renderBodyWithStatusBar appends the per-turn StatusBar footer
 // to a message body when one is available, then renders the
 // combined text through RenderMarkdown (Telegram restricted
-// HTML subset). The footer is wrapped in a Q2-style ASCII panel
-// (statusbar.RenderPanel — top-left ┌ + bottom-right ┘ corners)
-// so users can tell at a glance "this is session metadata, not
-// reply content". Returns body unchanged when StatusBar is empty
-// so a chunk with all-zero statusbar fields (e.g. a streaming
+// HTML subset). The footer is wrapped in a chevron-tail ASCII
+// panel (statusbar.RenderPanel — ┌/└ on the left, `›` chevron
+// tail on the right) so users can tell at a glance "this is
+// session metadata, not reply content". The right side opens
+// outward because StatusBar content can extend right and a
+// closed `┐`/`┘` would imply a hard boundary that doesn't
+// exist. Returns body unchanged when StatusBar is empty so a
+// chunk with all-zero statusbar fields (e.g. a streaming
 // OutReply that hasn't received its terminal Usage yet) just
 // omits the trailer — zero-omit per F-45 §1.6.
 //

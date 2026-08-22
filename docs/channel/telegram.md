@@ -822,7 +822,7 @@ turn 1: 用户发 "hi 1" (userMsgID=10)
         state.PlaceholderMessageID = 700   (P1 的 id)
         state.UserMessageID       = "10"
     ├─ runtime emit MessageQueued(10)   → silent drop (v6.3 单 emoji 预算)
-    ├─ runtime emit MessageSubmitted(10)→ setMessageReaction(10, 🤔)
+    ├─ runtime emit MessageSubmitted(10)→ setMessageReaction(10, 👌)
     ├─ OutHeartbeat                    → editMessageText(700, "💭 2 · 🔧 1 · ⏱ 15:18:30")
     ├─ OutReply/Tool/Result             → sendMessage(reply_to_message_id=10, ...)
     └─ OnPromptEnded                    → setMessageReaction(700, 🎉)  ← v6.3: 不动 user msg reaction
@@ -839,13 +839,13 @@ turn 1: 用户发 "hi 1" (userMsgID=10)
 #### 11.11.2 视觉
 
 ```text
-Devin: hi 1  (react: 🤔)                          11:50
+Devin: hi 1  (react: 👌)                          11:50
 nightme: (reply to hi 1) 🤖 Working... · ⏱ 15:18:08  ← P1 (v7: reply chain)
                      (react: 🎉 when done)
                      ├─ (PATCH) 💭 2 · 🔧 1 · ⏱ 15:18:25
                      ├─ (reply to hi 1) User keeps sending...
                      └─ (reply to hi 1) Hi! 👋 ...
-Devin: hi 2  (react: 🤔)                          11:55
+Devin: hi 2  (react: 👌)                          11:55
 nightme: (reply to hi 2) 🤖 Working... · ⏱ 15:18:08  ← P2 (v7: reply chain)
                      (react: 🎉 when done)
                      ├─ (PATCH) 💭 1 · 🔧 0 · ⏱ 15:18:35
@@ -884,13 +884,13 @@ nightme 当前采用:
 | 语义 | emoji |
 | --- | --- |
 | **OK / 确认** | 👌 👍 ❤ 🤝 👏 |
-| **庆祝 / 完成** | 🎉 🥳 🤩 💯 🏆 ✨(✨ 不在白名单)|
+| **庆祝 / 完成** | 🎉 🥳 🤩 💯 🏆 ✨(✨ 不在白名单) |
 | **思考 / 困惑** | 🤔 😐 🤨 🧐 🕊 |
 | **强烈反应** | 🤯 😱 🤬 😡 🤮 💩 |
 | **喜爱** | 🥰 😍 😘 ❤️‍🔥 💋 💘 |
-| **笑** | 😁 🤣 😂(不在白名单)|
+| **笑** | 😁 🤣 😂(不在白名单) |
 | **哭 / 同情** | 😢 😭 😨 😐 |
-| **工具 / 工作** | 👨‍💻 🤓 🛠(不在白名单)|
+| **工具 / 工作** | 👨‍💻 🤓 🛠(不在白名单) |
 | **季节 / 节日** | 🎃 🎄 🎅 ☃ |
 | **动物** | 🐳 🦄 🕊 👻 |
 | **食物** | 🍌 🍓 🍾 🌭 💊 |
@@ -898,10 +898,11 @@ nightme 当前采用:
 | **手势 / 表情** | 🖕 ✍ 🤗 🫡 💅 👀 🙈 😇 🙉 🙊 😎 |
 | **手指 / 人物** | 👾 🤷 🤷‍♂️ 🤷‍♀️ |
 | **天气 / 自然** | ⚡ 🌭 🏆 💯 |
-| **常用但** ❌**不在**白名单**(会被 API 拒) | ✅ ⭐ 🧠 🌟 🥳 ✨ 🙏(✅ 在)|
+| **常用但** ❌**不在**白名单**(会被 API 拒) | ✅ ⭐ 🧠 🌟 🥳 ✨ 🙏(✅ 在) |
 | **白名单内** ✅ 可用 | 👌 🎉 👏 💯 🤝 👀 🙏(🙏 在) |
 
 **重点提醒**:
+
 - ✅ U+2705 **不在** 白名单(`REACTION_INVALID`);🎉 是最直接的 "Done" 替代
 - 🧠 🟢 ⭐ 🟡(彩色圆圈 emoji 部分)在白名单外
 - `🙏` 在白名单(常被误以为不在,因为它常被错认成 fold-hands)
@@ -952,17 +953,17 @@ Done      → silent drop   (OnPromptEnded 在 placeholder 上贴 ✅)
 ```text
 Devin: hi
 nightme: 🤖 Working... ← placeholder
-            (用户消息上: 🤔 一直挂着,直到下次 turn)
+            (用户消息上: 👌 一直挂着,直到下次 turn)
             (placeholder 文本: "💭 2 · 🔧 1" 持续更新)
 OnPromptEnded:
             (placeholder 文本: 不再 PATCH, 保持 "💭 2 · 🔧 1")
             (placeholder reaction: 🎉 贴上)
-            (user msg reaction: 仍为 🤔 不变,留给下一 turn 看新进度)
+            (user msg reaction: 仍为 👌 不变,留给下一 turn 看新进度)
 ```
 
 **实现细节**：
 
-- `mapStateToTelegramEmoji(state)`：v6.3 只对 `MessageSubmitted` 返回 `🤔`，其他 silent drop
+- `mapStateToTelegramEmoji(state)`：v6.3 只对 `MessageSubmitted` 返回 `👌`，其他 silent drop
 - `setMessageReactions(ctx, chatID, msgID, [reactions])` 接收 list 形参
 - 同一 state 重复 set 是 idempotent（`messageStates` LRU dedup）
 - `OnPromptEnded` 不再对 user message 贴 reaction（保留 reaction slot），只对 placeholder 贴 🎉
@@ -982,8 +983,8 @@ Future work: 如果 Telegram 放宽 JSON API 白名单，可以重新启用 v4 �
 | `ensurePlaceholder` | 每条 user msg 创建新 P_N | 同上 |
 | `OutHeartbeat` | `editMessageText(P_N)` PATCH（in-turn status） | 同上 |
 | `OutReply/OutTool/OutThinking/OutResult/OutError/OutChoice` | Topic 内独立消息 + `message_thread_id` + `reply_to_message_id=userMsgID` | 主窗口消息 + `reply_to_message_id=userMsgID` |
-| `OnPromptEnded` | ✅ reaction on userMsg + ✅ reaction on P_N（**无文本 PATCH**） | 同上 |
-| 👌/🧠/✅ reaction | runtime eventbus 触发 + OnPromptEnded hook 触发 | 同上 |
+| `OnPromptEnded` | 🎉 reaction on **P_N only**（userMsg 留 👌 不动，v6.3 单 reaction 预算） | 同上 |
+| `👌` reaction | runtime eventbus 触发 → `MessageSubmitted` → `setMessageReaction(userMsgID, 👌)` | 同上 |
 
 #### 11.11.5 chatID 稳定性约束保持
 
@@ -1010,9 +1011,9 @@ Future work: 如果 Telegram 放宽 JSON API 白名单，可以重新启用 v4 �
 | OutToolStart/End | append div | 独立 reply to user msg |
 | OutReply | 独立气泡（F-44 后） | 独立 reply to user msg |
 | OutResult | 独立气泡（F-39 后） | 独立 reply to user msg |
-| **user message 状态** | 👌 / 🔄 / ✅ **reaction** (AddReaction) | 👌 / 🧠 / ✅ **reaction** (setMessageReaction) |
-| **card / placeholder 状态** | ✅ header (SetPromptState) | ✅ **reaction** (setMessageReaction on placeholder) |
-| 终态 | ✅ reaction + card header ✅ | ✅ reaction on user msg + ✅ reaction on placeholder |
+| **user message 状态** | 👌 / 🔄 / ✅ **reaction** (AddReaction) | 👌 **reaction** (setMessageReaction；✅ 在 JSON body 白名单外拒收) |
+| **card / placeholder 状态** | ✅ header (SetPromptState) | 🎉 **reaction** (setMessageReaction on placeholder) |
+| 终态 | ✅ reaction + card header ✅ | user msg 留 👌 不动（v6.3 单 reaction 预算）；placeholder 贴 🎉 |
 
 两个维度正交：**状态走 reaction**（user msg 和 placeholder 两边都贴），**内容走 reply chain**（锚 user msg）。
 
@@ -1026,10 +1027,10 @@ Choice card 也 `reply_to_message_id = userMsgID`，让权限/问题卡片挂在
 - 每条用户消息进来 → `ensurePlaceholder` **新建** bot 占位，更新 `state.UserMessageID` 和 `state.PlaceholderMessageID`
 - 同一 turn 的 `OutReply` / `OutThinking` / `OutTool*` / `OutResult` / `OutError` / `OutChoice` 都带 `reply_to_message_id = userMsgID`（topic 还带 `message_thread_id`）
 - `OutHeartbeat` PATCH 当前 turn 的占位文本（`🤖 Working...` 或 `💭 N · 🔧 M`）—— 不 PATCH 为 ✅ Completed
-- 运行时 eventbus → OutMessageState → `setMessageReaction(userMsgID, 👌 / 🧠)`（MessageDone 不在 async dispatch emit，由 `OnPromptEnded` 兜底）
-- `OnPromptEnded` 调 `setMessageReaction(userMsgID, ✅)` + `setMessageReaction(PlaceholderMessageID, ✅)`，**不调 editMessageText**
+- 运行时 eventbus → OutMessageState → `setMessageReaction(userMsgID, 👌)`（MessageDone 不在 async dispatch emit，由 `OnPromptEnded` 兜底）
+- `OnPromptEnded` 调 `setMessageReaction(PlaceholderMessageID, 🎉)`（**不**碰 user message；保留 👌 让下一 turn 的状态可见），**不调 editMessageText**
 - 跨 turn：老占位 P_N-1 留作时间线证据（不被 ✅ Completed PATCH，但保持 working / heartbeat 文本）
-- 测试矩阵：`TestMapStateToTelegramEmoji` (👌/🧠/✅) / `TestAdapter_Send_OutMessageState` (🧠) / `TestAdapter_Send_OutMessageState_QueuedRenders` (👌) / `TestAdapter_Send_OutMessageState_DoneRenders` (✅) / `TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder` (✅×2, no editMessageText) / `TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
+- 测试矩阵：`TestMapStateToTelegramEmoji` (👌) / `TestAdapter_Send_OutMessageState_SubmittedRenders` (👌) / `TestAdapter_Send_OutMessageState_QueuedRenders` (silent drop) / `TestAdapter_Send_OutMessageState_DoneRenders` (silent drop) / `TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder` (🎉 ×1 on placeholder, NO reaction on user msg) / `TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
 - placeholder 缺失（首次 OutHeartbeat 比 handleMessage 快）→ `ensurePlaceholderForHeartbeat` 懒创建，不丢事件
 - 跨 turn：老占位 P_N-1 留作时间线状态标记（不动），新 turn 创建 P_N 独立承载新状态
 - 测试矩阵：`TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestAdapter_Send_Topic_NoReplyToPlaceholder`（**已替换为 replyToUserMessage 版本**）/ `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
@@ -2341,21 +2342,22 @@ Line 3: 📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N ·
 
 每行 zero-omit（F-45 §1.6）。整行字段全空 → 该行不渲染。StatusBar 完全为空 → 不发 panel，只发 body。
 
-Telegram adapter 用 `statusbar.RenderPanel(lines)` 把三行包成 **4-corner ASCII frame marker**（`┌ ┐` 顶 + `└ ┘` 底，无 `│` 侧栏）：
+Telegram adapter 用 `statusbar.RenderPanel(lines)` 把三行包成 **chevron-tail ASCII frame marker**（左 `┌` / `└`，右 `›`，无 `│` 侧栏）：
 
 ```text
 [message body]
 
-┌────────────────────────────┐
+┌─────────────────────────────›
   🤖: claude · MiniMax-M3[1m] · 61c4ec9d-dbb0-418c-bbe7-8d4bfbc1a135
   💰:「 31.1k / 128 / 37 · 3.1% (1M) · $0.157 」
   📁: cnlangzi/nightme · ⎇ main
-└────────────────────────────┘
+└─────────────────────────────›
 ```
 
 **保守设计（Android 折行修复，迭代 30 → 15 → 8 → 16）**：
 
 迭代历史：
+
 1. **30 字符** —— iOS 安全，Android 实测折行
 2. **15 字符** —— Android 仍折行
 3. **8 字符**(`┌──────┐`)—— Android 不折行但太稀疏（"分隔栏的字符太短了"）
@@ -2383,10 +2385,10 @@ Bars 左端是 `┌` / `└`（方角，"从此处开始"），右端是 `›`�
 
 | Kind | 行为 |
 | --- | --- |
-| `OutReply` / `OutResult` / `OutCommandReply` / `OutThinking` / `OutTaskCreate` / `OutTaskUpdate` | `body + "\n\n---\n" + StatusBar`，整体走 `RenderMarkdown`（`<b>` `<code>` `<a>` 受限 HTML 子集） |
-| `OutToolStart` / `OutToolEnd` | `formatTool(msg)`（🔧/✅ prefix + tool name + args/output）+ StatusBar trailer |
-| `OutError` | `body + "<pre>" + escapeHTML(StderrTail) + "</pre>"` + StatusBar（raw 拼接，**不走** RenderMarkdown，因为预 escape 的 `<pre>` 标签会被 RenderMarkdown 当字面量再次 escape） |
-| `OutHeartbeat`（占位 PATCH） | `status line + "\n\n---\n" + StatusBar`，整体走 RenderMarkdown |
+| `OutReply` / `OutResult` / `OutCommandReply` / `OutThinking` / `OutTaskCreate` / `OutTaskUpdate` | `body + "\n\n" + statusbar.RenderPanel(lines)`，整体走 `RenderMarkdown`（`<b>` `<code>` `<a>` 受限 HTML 子集；panel 边框是 box-drawing 字符不走 HTML parser） |
+| `OutToolStart` / `OutToolEnd` | `formatTool(msg)`（🔧/✅ prefix + tool name + args/output）+ `RenderPanel` trailer |
+| `OutError` | `body + "<pre>" + escapeHTML(StderrTail) + "</pre>"` + `RenderPanel`（raw 拼接，**不走** RenderMarkdown，因为预 escape 的 `<pre>` 标签会被 RenderMarkdown 当字面量再次 escape —— 与 panel 同理手工 stitch） |
+| `OutHeartbeat`（占位 PATCH） | `status line + "\n\n" + statusbar.RenderPanel(lines)`，整体走 RenderMarkdown |
 | `OutChoice` / `OutChoicePatch` | **不挂**（InlineKeyboard 自含，挂 footer 污染选择 UI） |
 | `OutMessageState` / `OutMessageStateRemoved` | **不挂**（reactions 独立轨道，§14.1） |
 | `OutInit` | **不挂**（silent drop，F-44 对齐） |
@@ -2412,10 +2414,10 @@ per-turn 占位的两步生命周期：
 ```text
 turn N：用户发 "hi N"
     └─ handleMessage 时刻 →  placeholder = "🤖 Working... · ⏱ HH:MM:SS"            (无 footer)
-    └─ 首次 OutHeartbeat PATCH →  "💭 0 · 🔧 0 · ⏱ HH:MM:SS ──────── <footer>"   (footer 落地)
-    └─ 后续 OutHeartbeat        →  "💭 2 · 🔧 1 · ⏱ HH:MM:SS ──────── <footer>"
-    └─ OutResult                →  "[result text] ──────── <footer>"   (独立气泡)
-    └─ OnPromptEnded            →  不改 placeholder 文本，贴 🎉 reaction
+    └─ 首次 OutHeartbeat PATCH →  "💭 0 · 🔧 0 · ⏱ HH:MM:SS ┌─…─›\n│<panel>│\n└─…─›"   (panel 落地)
+    └─ 后续 OutHeartbeat        →  status line + RenderPanel
+    └─ OutResult                →  "[result text] ┌─…─›\n│<panel>│\n└─…─›"   (独立气泡)
+    └─ OnPromptEnded            →  不改 placeholder 文本，贴 🎉 reaction on placeholder
 ```
 
 `ensurePlaceholder` 和 `ensurePlaceholderForHeartbeat`（race-window 懒创建）走同一 `placeholderInitialText(now)` helper，保证两路创建不会漂移。
@@ -2430,7 +2432,7 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 
 | | feishu | Telegram |
 | --- | --- | --- |
-| StatusBar 载体 | Card footer（`<hr> + <div text_color="grey">`） | 文本 trailer（`──────── + 三行`） |
+| StatusBar 载体 | Card footer（`<hr> + <div text_color="grey">`） | 文本 panel（`┌─…─›` + 三行 + `└─…─›`） |
 | 同 turn 内 StatusBar 重复 | 否（footer 跟 card 一对一） | 是（每条消息都拼一次） |
 | Streaming chunk 渲染 | PATCH 同一张 card 累积 div | 每条 sendMessage 独立气泡 + trailer |
 | 编辑语义 | card 整体 PATCH（50 元素 / 30KB 上限） | 整体替换 text（4096 字符 + 48h 上限，见 §15 L2） |
@@ -2446,7 +2448,7 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 - [x] `OutHeartbeat` 占位 PATCH 拼接 footer
 - [x] `OutChoice` / `OutMessageState*` / `OutInit` 不挂
 - [x] 无 cache —— `StatusBarLines(&msg)` 纯 consumer，零状态
-- [x] 测试矩阵（11 个 case）：`TestAdapter_Send_DM_OutReply_AppendsStatusBar` / `OutResult` / `OutThinking` / `OutToolStart` / `OutCommandReply` / `OutError` / `OutHeartbeat_PATCHesPlaceholderWithStatusBar` / `OutReply_NoFieldsNoCache_NoTrailer` / `OutChoice_NoStatusBar` / `OutMessageState_NoTextChange` / `Topic_OutReply_AppendsStatusBar` / `OutReply_OutOrderPreservesCache`
+- [x] 测试矩阵（15 个 case）：`TestAdapter_Send_DM_OutReply_AppendsStatusBar` / `OutResult` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutTaskCreate` / `OutCommandReply` / `OutError` / `OutError_NoDiagnostic_AppendsStatusBar` / `OutHeartbeat_PATCHesPlaceholderWithStatusBar` / `OutReply_NoFieldsNoCache_NoTrailer` / `OutChoice_NoStatusBar` / `OutMessageState_NoTextChange` / `Topic_OutReply_AppendsStatusBar` / `OutReply_OutOrderPreservesCache`
 - [x] feishu 16 个测试不变，迁移后零回归
 
 ### 18.8 已知限制

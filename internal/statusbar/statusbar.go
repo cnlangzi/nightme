@@ -49,7 +49,8 @@ import (
 const PanelMaxWidth = 16
 
 // RenderPanel wraps the StatusBar lines in a four-corner ASCII
-// "frame marker": ┌ ┐ on top, └ ┘ on bottom, with NO
+// "frame marker": ┌ on top-left, └ on bottom-left, `›`
+// chevron tail on the right (top + bottom), with NO
 // side-bar `│` characters (open left/right edges). The four
 // corners mark "this is session metadata" without forcing the
 // content lines to a fixed width — Telegram's proportional
@@ -57,11 +58,22 @@ const PanelMaxWidth = 16
 // alignment on the sides would visually break when content
 // lines wrap.
 //
-// Width is max(PanelMinWidth, longest_line) clamped to
-// PanelMaxWidth — no `│`-side padding overhead. Returns ""
-// for an empty lines slice so callers can skip the trailer
-// cheaply.
+// Width is fixed at PanelMaxWidth (16) — bars must not wrap
+// on Android chat bubble. Content lines render verbatim and
+// may extend past the bars; wrapping on narrow screens is
+// acceptable (per "宁愿短点也不要折行" — bars short, content
+// can wrap). Returns "" for an empty lines slice so callers
+// can skip the trailer cheap.
 //
+// panelTopBar / panelBottomBar are hoisted to package vars
+// because PanelMaxWidth is a const and the bars are
+// immutable for the process lifetime. Hoisting avoids the
+// `strings.Repeat` allocations on every Send (dozens per turn).
+var (
+	panelTopBar    = "┌" + strings.Repeat("─", PanelMaxWidth-2) + "›"
+	panelBottomBar = "└" + strings.Repeat("─", PanelMaxWidth-2) + "›"
+)
+
 // Design choice (left-closed + chevron tail): left side has
 // `┌` / `└` square-anchored corners so the panel "starts
 // here". Right side ends with `›` chevron tails — not a
@@ -74,17 +86,8 @@ func RenderPanel(lines []string) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	// Bars (top + bottom) are anchored to PanelMaxWidth so
-	// they never wrap on mobile. Content lines render verbatim
-	// — long lines may wrap on narrow screens, which is
-	// acceptable. Per user preference: bars must not wrap,
-	// content can.
-	width := PanelMaxWidth
-	barLen := width - 2 // 1 (left corner) + barLen dashes + 1 (right chevron)
-	top := "┌" + strings.Repeat("─", barLen) + "›"
-	bottom := "└" + strings.Repeat("─", barLen) + "›"
 	parts := make([]string, 0, len(lines)+2)
-	parts = append(parts, top)
+	parts = append(parts, panelTopBar)
 	// Each content line gets a 2-space left indent so the icon
 	// (🤖/💰/📁) doesn't sit flush against the left edge of
 	// the panel — leaves visual whitespace that frames the
@@ -93,7 +96,7 @@ func RenderPanel(lines []string) string {
 	for _, line := range lines {
 		parts = append(parts, "  "+line)
 	}
-	parts = append(parts, bottom)
+	parts = append(parts, panelBottomBar)
 	return strings.Join(parts, "\n")
 }
 

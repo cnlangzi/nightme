@@ -320,9 +320,17 @@ func TestAdapter_Send_DM_OutReply_NoFieldsNoCache_NoTrailer(t *testing.T) {
 	if !strings.Contains(text, "lonely message") {
 		t.Errorf("body missing; got %q", text)
 	}
-	// No divider when there's no StatusBar to attach.
-	if strings.Contains(text, "────────") {
-		t.Errorf("unexpected divider with no cache and no fields; got %q", text)
+	// No panel border when there's no StatusBar to attach.
+	// `────────` is no longer produced by any code path (the
+	// pre-panel implementation used `---` markdown as divider
+	// and RenderMarkdown converted it to `────────`; after the
+	// chevron-tail panel, the only horizontal bars are the
+	// `─` chars inside `┌─…─›` / `└─…─›` — which never appear
+	// here because StatusBarLines returns nil).
+	for _, want := range []string{"┌", "└", "›", "🤖", "💰", "📁"} {
+		if strings.Contains(text, want) {
+			t.Errorf("no-trailer reply should not contain %q; got %q", want, text)
+		}
 	}
 }
 

@@ -273,6 +273,26 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 			Consumed: true,
 		}, nil
 	}
+
+	// Per-chat run lock: previous /gtw for this chatID must
+	// complete before the next one starts. F-59 made every
+	// slash command async (a fresh goroutine per inbound), so
+	// without serialisation two /gtw calls landing back-to-back
+	// would race on Manager.states / Manager.drafts / the
+	// worktree directory / cs.SelectedCwd / the agent session.
+	//
+	// chatID == "" → runLockFor returns nil and we no-op (tests
+	// drive Handle directly with empty ChatID; production always
+	// has one). defer covers all return paths below (unknown
+	// subcommand, subcommand errors, normal completion).
+	//
+	// Cross-chat independence: chat A's long /gtw fix does not
+	// block chat B's /gtw commit; the lock is per chatID.
+	if mu := f.mgr.runLockFor(input.ChatID); mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+
 	switch input.Args[1] {
 	case "fix":
 		return f.runFix(ctx, rt, cs, input)

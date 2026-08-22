@@ -278,9 +278,18 @@ func ChoiceOptionsFromLabels(labels []string) []ChoiceOption {
 	return out
 }
 
+// MessageStatePayload carries the data an adapter needs to render a
+// per-message state reaction on top of the originating inbound user
+// message. The adapter decides HOW to render each state (feishu uses
+// its predefined emoji_type set; telegram uses unicode codepoints);
+// the runtime only forwards the abstract State value.
+//
+// ReactionID is reserved for platforms that return an opaque handle
+// when adding a reaction (so the adapter can address it on removal).
+// Telegram's setMessageReaction replaces the entire reaction set and
+// does not return per-emoji IDs, so ReactionID stays "" for telegram.
 type MessageStatePayload struct {
 	State      agent.MessageState
 	MessageID  string
 	ReactionID string
-	Emoji      string
 }

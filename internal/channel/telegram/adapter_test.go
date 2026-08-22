@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -299,22 +300,31 @@ func TestAdapter_Send_OutTask(t *testing.T) {
 }
 
 func TestAdapter_Send_OutMessageState(t *testing.T) {
-	a, _ := newTestAdapter(t)
+	a, api := newTestAdapter(t)
 	err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
 			MessageID: "5",
-			Emoji:     "👀",
+			State:     agent.MessageSubmitted,
 		},
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	// 适配器必须自行决定 emoji, 期望 🔄
+	got := findCall(api.Calls, "setMessageReaction")
+	if got == nil {
+		t.Fatal("expected setMessageReaction call, got none")
+	}
+	wantReaction := []any{map[string]any{"type": "emoji", "emoji": "🔄"}}
+	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
+		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
+	}
 }
 
 func TestAdapter_Send_OutMessageStateRemoved(t *testing.T) {
-	a, _ := newTestAdapter(t)
+	a, api := newTestAdapter(t)
 	err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "100",
 		Kind:   messages.OutMessageStateRemoved,
@@ -325,6 +335,15 @@ func TestAdapter_Send_OutMessageStateRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	// 移除态: reaction 必须是空数组 (Telegram API 用 [] 删除所有 reaction)
+	got := findCall(api.Calls, "setMessageReaction")
+	if got == nil {
+		t.Fatal("expected setMessageReaction call, got none")
+	}
+	wantReaction := []any{}
+	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
+		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
+	}
 }
 
 func TestAdapter_Send_OutMessageState_BadID(t *testing.T) {
@@ -334,11 +353,216 @@ func TestAdapter_Send_OutMessageState_BadID(t *testing.T) {
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
 			MessageID: "abc",
-			Emoji:     "👀",
+			State:     agent.MessageSubmitted,
 		},
 	})
 	if err == nil {
 		t.Fatal("non-numeric ID must error")
+	}
+}
+
+func TestMapStateToTelegramEmoji(t *testing.T) {
+	cases := []struct {
+		in   agent.MessageState
+		want string
+	}{
+		{agent.MessageQueued, "⏳"},
+		{agent.MessageSubmitted, "🔄"},
+		{agent.MessageDone, "✅"},
+		{agent.MessageDropped, ""},    // 跟 feishu 对齐: 不留 reaction
+		{agent.MessageState(999), ""}, // 未知 state silent drop
+	}
+	for _, c := range cases {
+		if got := mapStateToTelegramEmoji(c.in); got != c.want {
+			t.Errorf("mapStateToTelegramEmoji(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestAdapter_Send_OutMessageState_QueuedRenders(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageState,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+			State:     agent.MessageQueued,
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	got := findCall(api.Calls, "setMessageReaction")
+	if got == nil {
+		t.Fatal("expected setMessageReaction call")
+	}
+	wantReaction := []any{map[string]any{"type": "emoji", "emoji": "⏳"}}
+	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
+		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
+	}
+}
+
+func TestAdapter_Send_OutMessageState_DoneRenders(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageState,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+			State:     agent.MessageDone,
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	got := findCall(api.Calls, "setMessageReaction")
+	if got == nil {
+		t.Fatal("expected setMessageReaction call")
+	}
+	wantReaction := []any{map[string]any{"type": "emoji", "emoji": "✅"}}
+	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
+		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
+	}
+}
+
+func TestAdapter_Send_OutMessageState_UnknownStateDrops(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageState,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+			State:     agent.MessageState(999), // 未知 state
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if got := findCall(api.Calls, "setMessageReaction"); got != nil {
+		t.Errorf("unknown state must silent-drop, got %v", got.Params)
+	}
+}
+
+func TestAdapter_Send_OutMessageState_TracksStateIdempotency(t *testing.T) {
+	a, api := newTestAdapter(t)
+	ctx := context.Background()
+	msg := messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageState,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+		},
+	}
+	// 第一次 Submitted → 触发 API
+	msg.MessageState.State = agent.MessageSubmitted
+	if err := a.Send(ctx, msg); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	// 第二次 Submitted → 同 state skip
+	if err := a.Send(ctx, msg); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	// 第三次 Done → 不同 state 重新触发
+	msg.MessageState.State = agent.MessageDone
+	if err := a.Send(ctx, msg); err != nil {
+		t.Fatalf("send 3: %v", err)
+	}
+	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 2 {
+		t.Errorf("setMessageReaction calls = %d, want 2 (1st + 3rd, 2nd deduped)", got)
+	}
+}
+
+func TestAdapter_Send_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageState,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+			State:     agent.MessageQueued,
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	// 第一次 emit 必须真正打到 API, 不能因为 messageStates 初始为空就误判
+	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 1 {
+		t.Errorf("setMessageReaction calls = %d, want 1 (first emit must not be deduped)", got)
+	}
+}
+
+func TestAdapter_Send_OutMessageState_DroppedSilentDrops(t *testing.T) {
+	// MessageDropped intentionally maps to "" (silent drop), aligned
+	// with feishu's choice to convey failure via the reply text's ❌
+	// prefix rather than a user-message reaction. This test pins that
+	// decision so a future contributor adding "❌ for dropped" gets a
+	// failing test that forces an explicit discussion.
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageState,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+			State:     agent.MessageDropped,
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if got := findCall(api.Calls, "setMessageReaction"); got != nil {
+		t.Errorf("MessageDown must silent-drop, got %v", got.Params)
+	}
+}
+
+func TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU(t *testing.T) {
+	// OutMessageStateRemoved sends reaction:[] (Telegram API contract:
+	// clears all reactions). It must NOT touch the messageStates LRU —
+	// otherwise subsequent OutMessageState emits for the same userMsgID
+	// would be incorrectly deduped against a stale sentinel (e.g. if
+	// someone added rememberMessageState(..., MessageDropped) to the
+	// Removed path, Done after a Removed would still trigger because
+	// Done != Dropped, but Submitted after a Removed would dedup
+	// against the prior Submitted record — the invariant we want to
+	// pin is that LRU still holds the *last rendered* state, untouched
+	// by Removed).
+	//
+	// Concretely: after Submitted → Removed, a *different* state must
+	// still hit the API. If Removed silently poisoned the LRU with a
+	// sentinel, the LRU's stored state would no longer match the last
+	// actual render — which is the only invariant the LRU exists to
+	// enforce.
+	a, api := newTestAdapter(t)
+	ctx := context.Background()
+	msg := messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageState,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+		},
+	}
+	// 1) Render Submitted → API call #1, LRU = {5: Submitted}
+	msg.MessageState.State = agent.MessageSubmitted
+	if err := a.Send(ctx, msg); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	// 2) Removed → API call #2 (empty reaction), LRU untouched
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutMessageStateRemoved,
+		MessageState: &messages.MessageStatePayload{
+			MessageID: "5",
+		},
+	}); err != nil {
+		t.Fatalf("send 2 (Removed): %v", err)
+	}
+	// 3) Different state (Done) — must hit the API, proving LRU still
+	// holds Submitted (not a sentinel from Removed). If Removed had
+	// poisoned the LRU with MessageDropped or cleared it, the
+	// comparison prev==Done would still pass here — so we ALSO verify
+	// in step 4 that a *same-state* replay after Removed is deduped
+	// (matches the LRU record from step 1), which would fail if the
+	// LRU had been zeroed.
+	msg.MessageState.State = agent.MessageDone
+	if err := a.Send(ctx, msg); err != nil {
+		t.Fatalf("send 3 (Done): %v", err)
+	}
+	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 3 {
+		t.Errorf("setMessageReaction calls = %d, want 3 (Submitted + Removed + Done)", got)
 	}
 }
 

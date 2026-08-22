@@ -2408,7 +2408,7 @@ func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
 // the caller's footerLines is nil/empty (e.g. a test stub that
 // invokes ensureReceiptForTyping directly without going through
 // the runtime eventbus subscriber — production at MessageQueued
-// always passes formatStatusBarLines(&msg) after fix-placehold-card),
+// always passes statusbar.StatusBarLines(&msg) after fix-placehold-card),
 // the placeholder card omits the footer entirely. The hr divider
 // is also absent. This is now a niche path used only by unit tests
 // and any future caller that doesn't have a StatusBar to render.

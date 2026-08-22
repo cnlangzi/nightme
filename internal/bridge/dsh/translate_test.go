@@ -6,7 +6,7 @@
 // EventAgentResult.Usage / EventAgentDone.Usage fields — the
 // receipt footer's "Line 2" already renders from these via
 // gateway/outbound/translate.go → messages.OutboundMessage.Usage
-// → channel/feishu/usage_footer.go.
+// → internal/statusbar/statusbar.go.
 //
 // No new fields, no new types. The path is:
 //

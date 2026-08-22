@@ -16,7 +16,7 @@ AgentBar 渲染关键的字段：
 
 后果：`replyAgent`（`internal/command/gtw/agent_reply.go`）把
 `RunResult` 抄到 `OutboundMessage` 时，`out.Model` / `out.SessionID`
-是空，`channel/feishu/usage_footer.go:188-198` 的 AgentBar 渲染只
+是空，`statusbar.StatusBarLines` (原 `channel/feishu/usage_footer.go:188-198`,2026-08-22 plan-D 抽到 `internal/statusbar` 共享包)的 AgentBar 渲染只
 剩 `🤖: pi`，没有 `· <model> · <sid>`。
 
 UsageBar 同源：`parsePrintStream` 把 `EventAgentResult.Usage` 抄到
@@ -107,7 +107,7 @@ go test ./internal/bridge/pi/ -run "PrintMode|PeekPrintMeta|AppendAuditFields" -
 --- PASS
 ```
 
-`replyAgent` → `OutboundMessage` → `usage_footer.formatStatusBarLines`
+`replyAgent` → `OutboundMessage` → `statusbar.StatusBarLines`(原 `usage_footer.formatStatusBarLines`,2026-08-22 plan-D 抽到 `internal/statusbar` 共享包)
 的链路完全没动，所以 AgentBar 现在渲染成：
 
 ```

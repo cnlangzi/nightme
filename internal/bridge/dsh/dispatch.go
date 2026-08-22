@@ -441,7 +441,7 @@ func handleAssistantMessage(env sessionEventEnvelope, view json.RawMessage, tr *
 	// Per-turn usage block → flows into EventAgentResult.Usage at
 	// turn/end (which the runtime's receipt-footer Line 2 already
 	// renders via gateway/outbound/translate.go → feishu
-	// usage_footer.go). Pre-fix this was dropped on the floor.
+	// internal/statusbar/statusbar.go). Pre-fix this was dropped on the floor.
 	if u := usageToAgent(data.Usage); u != nil {
 		tr.lastUsage = u
 	}

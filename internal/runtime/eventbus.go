@@ -160,10 +160,10 @@ func WireRuntimeCallbacksAndRestore(
 			// internal/chatsession/manager.go::HandleInbound),
 			// so cs.selectedAS is set by the time this
 			// subscriber runs. The Feishu adapter then calls
-			// formatStatusBarLines(&msg) (instead of the pre-fix
+			// statusbar.StatusBarLines(&msg) (instead of the pre-fix
 			// `nil`) and AgentBar renders on the first frame.
 			//
-			// Empty fields are safe: formatStatusBarLines
+			// Empty fields are safe: statusbar.StatusBarLines
 			// treats the all-empty case as "no AgentBar line"
 			// (back-compat with framework slash / shell
 			// dispatches that still emit via PublishMessageState

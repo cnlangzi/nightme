@@ -312,13 +312,13 @@ func TestAdapter_Send_OutMessageState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	// 适配器必须自行决定 emoji, 期望 🤔 (v6.3: 单 reaction 预算, 只 Submitted 贴)
+	// 适配器必须自行决定 emoji, 期望 👌 (v6.3: 单 reaction 预算, 只 Submitted 贴)
 	got := findCall(api.Calls, "setMessageReaction")
 	if got == nil {
 		t.Fatal("expected setMessageReaction call, got none")
 	}
 	wantReaction := []any{
-		map[string]any{"type": "emoji", "emoji": "🤔"},
+		map[string]any{"type": "emoji", "emoji": "👌"},
 	}
 	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
 		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
@@ -369,12 +369,12 @@ func TestMapStateToTelegramEmoji(t *testing.T) {
 		want string
 	}{
 		// v6.3: Telegram bot single-reaction budget — only
-		// MessageSubmitted emits 🤔 ("AI thinking"). Queued
-		// and Done are silent drops; their visuals are conveyed
-		// via placeholder text PATCH (Queued) and the placeholder
-		// 🎉 reaction (Done — handled in OnPromptEnded).
+		// MessageSubmitted emits 👌 ("AI thinking" via OK-hand).
+		// Queued and Done are silent drops; their visuals are
+		// conveyed via placeholder text PATCH (Queued) and the
+		// placeholder ✅ reaction (Done — handled in OnPromptEnded).
 		{agent.MessageQueued, ""},
-		{agent.MessageSubmitted, "🤔"},
+		{agent.MessageSubmitted, "👌"},
 		{agent.MessageDone, ""},
 		{agent.MessageDropped, ""},    // 跟 feishu 对齐: 不留 reaction
 		{agent.MessageState(999), ""}, // 未知 state silent drop
@@ -415,7 +415,7 @@ func TestAdapter_Send_OutMessageState_QueuedRenders(t *testing.T) {
 
 // TestAdapter_Send_OutMessageState_DoneRenders locks the
 // v6.3 single-reaction budget: MessageDone is a silent drop
-// on the user message. The terminal 🎉 reaction lives on the
+// on the user message. The terminal ✅ reaction lives on the
 // per-turn placeholder (set by OnPromptEnded), not on the user
 // message. Reserving the user-message reaction slot for
 // MessageSubmitted only preserves the "thinking" visual for
@@ -544,7 +544,7 @@ func TestAdapter_Send_OutMessageState_DroppedSilentDrops(t *testing.T) {
 // are silent drops, so this test only exercises Submitted
 // transitions through Removed:
 //
-//   1st Submitted  → 1 setMessageReaction (🤔), LRU = {5: Submitted}
+//   1st Submitted  → 1 setMessageReaction (👌), LRU = {5: Submitted}
 //   Removed        → 1 setMessageReaction ([]), LRU untouched
 //   2nd Submitted  → dedup'd (0 extra) — proves LRU still holds
 //                    Submitted (if Removed had zeroed the LRU, this
@@ -1196,7 +1196,7 @@ func TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder(t *testing.T) {
 
 	// v6.3: ONLY the placeholder gets a 🎉 reaction. The user
 	// message's single-reaction slot is reserved for
-	// MessageSubmitted ("AI thinking") — OnPromptEnded must NOT
+	// MessageSubmitted ("👌") — OnPromptEnded must NOT
 	// overwrite it with 🎉.
 	var (
 		placeholderCalls int
@@ -2371,7 +2371,7 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates(t *testing.T) {
 // the subsequent handleMessage.ensurePlaceholder call (which
 // always creates a fresh per-turn placeholder), leaving a
 // permanent "🤖 Working..." bubble in the chat with no
-// terminal PATCH or 🎉 reaction.
+// terminal PATCH or ✅ reaction.
 //
 // New behavior (codex review): return (0, nil) when state has
 // no UserMessageID — Send's OutHeartbeat path silently drops

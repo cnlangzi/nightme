@@ -485,3 +485,34 @@ footer 反映的是用户工作区「刚改完的文件」,而 cs 层 cache 在�
 - 或在 cs 层加 inflight fan-in(只在「N 个 goroutine 同时 stamp 同 chat」时复用同一次 git 的 inflight 结果;串行 readpump 不受益)
 
 本变更没引入 inflight;commit 时记录这个 follow-up。
+
+---
+
+## 后续:2026-08-22 plan-D 重生 `internal/statusbar` 包(telegram StatusBar 全量贴附)
+
+本文档第 1-3 批描述的"**`internal/statusbar` 整个包消失**"仍然成立 —— 旧的 `stamp.go` / `build.go` / `runtime.go` 已经被删,`OutboundMessage` 直接承载 flat 字段(AgentName / Model / SessionID / Usage / GitStatus)。
+
+但 2026-08-22 plan-D(telegram StatusBar 全量贴附,见 `docs/channel/telegram.md` §18)把 `formatStatusBarLines` 从 `internal/channel/feishu/usage_footer.go` 抽到**新**的 `internal/statusbar` 包 —— 仅作为**纯 renderer**,无 stamp / build / runtime 逻辑:
+
+| 时期 | `internal/statusbar` 角色 | 文件 |
+|---|---|---|
+| F-CLAUDE-PRINT-002 之前 | 包存在:stamp / build / runtime helpers,负责"在 OutboundMessage 上 stamp StatusBar" | `stamp.go` / `build.go` / `runtime.go`(本文档第 1-3 批描述) |
+| F-CLAUDE-PRINT-002 之后 | 包**删除**,flat fields 直接上 `OutboundMessage` | (空) |
+| 2026-08-22 plan-D 之后 | 包**重生**:纯 renderer `StatusBarLines(msg) []string`,feishu + telegram adapter 都消费它 | `statusbar.go`(单文件,无 stamp / build / runtime 概念) |
+
+**两个角色不冲突**:旧包是"stamping helper"(已经把责任推到 gateway),新包是"rendering helper"(channel 侧消费 OutboundMessage flat fields)。新包不持有任何 state,不修改 msg,纯函数 + 零依赖 `internal/messages`。
+
+新包消费方:
+
+```go
+import "github.com/cnlangzi/nightme/internal/statusbar"
+
+lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
+```
+
+调用方:
+
+- `internal/channel/feishu/adapter.go`(5 处 `formatStatusBarLines(&msg)` → `statusbar.StatusBarLines(&msg)`)
+- `internal/channel/telegram/adapter.go`(Send switch 的所有 text 出口 + OutHeartbeat 占位 PATCH,通过 `renderBodyWithStatusBar` helper 拼 trailer;`OutError` raw 拼接分支也直接调 `statusbar.RenderPanel`)
+
+测试矩阵:`internal/statusbar/statusbar_test.go` 15 个 `Test*` 函数(从 feishu `usage_footer_test.go` 全量迁移)+ 1 个 8 行 table-driven `TestStatusBarLines_OmitsZeroSegments` 子用例。

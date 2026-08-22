@@ -94,7 +94,7 @@ func (a *Adapter) editTelegramKeyboard(ctx context.Context, chatID string, messa
 // Telegram bots are limited to ONE reaction per message; the
 // adapter reserves the user-message reaction slot for
 // MessageSubmitted ("AI thinking") and the placeholder-message
-// reaction slot for OnPromptEnded ("done / 🎉"). Queued and
+// reaction slot for OnPromptEnded ("done / ✅"). Queued and
 // Done are silent drops on the user message — they don't burn
 // the reaction slot.
 //

@@ -337,18 +337,9 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	if err != nil && a.logger != nil {
 		a.logger.Warn("telegram: download attachments failed", "chat_id", chatID, "message_id", message.MessageID, "err", err)
 	}
-	a.state.mu.Lock()
-	needsSave := false
-	if stored, ok := a.state.topics[a.state.topicKey(chatID, topicID)]; ok {
-		if stored.UserMessageID != strconv.Itoa(message.MessageID) {
-			stored.UserMessageID = strconv.Itoa(message.MessageID)
-			needsSave = true
-		}
-	}
-	a.state.mu.Unlock()
-	if needsSave {
-		_ = a.state.save()
-	}
+	// (UserMessageID is already updated by ensurePlaceholder above;
+	// this redundant block was removed in the 2026-08-22 plan-C
+	// revision since ensurePlaceholder now persists state.)
 	if a.handleForceReply(ctx, message) {
 		return
 	}
@@ -566,63 +557,65 @@ func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) 
 	return 0, nil
 }
 
+// ensurePlaceholder materialises the per-turn placeholder
+// message and pins the user-message anchor for this turn.
+//
+// Each user message triggers a NEW placeholder. The previous
+// turn's placeholder is left untouched (it was already PATCHed
+// to `<b>✅ Completed</b>` by OnPromptEnded and stays in the
+// Telegram timeline as that turn's permanent status marker).
+//
+// OutXxx bubbles carry `reply_to_message_id = userMsgID` so the
+// reply chain hangs under the user's own message ("hi"),
+// not under the placeholder. The placeholder is the turn's
+// status ticker (Working… → ✅ Completed), not the reply anchor.
+// See docs/channel/telegram.md §11.11.
 func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID, userMessageID int) error {
 	state, ok := a.state.topic(chatID, topicID)
 	if !ok {
 		state = &TopicState{ChatID: chatID, TopicID: topicID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	}
-	if state.PlaceholderMessageID == 0 {
-		result, err := a.sendTelegramMessage(ctx, chatID, topicID, 0, "<b>🤖 Working...</b>", nil)
-		if err != nil {
-			return err
-		}
-		state.PlaceholderMessageID = result.MessageID
-		state.UserMessageID = strconv.Itoa(userMessageID)
-		state.LastMessageID = result.MessageID
-		if err := a.state.putTopic(state); err != nil {
-			return err
-		}
-		a.logger.Debug("telegram: placeholder created",
-			"chat_id", chatID,
-			"thread_id", topicID,
-			"placeholder_message_id", result.MessageID,
-		)
-		return nil
+	// Always create a NEW placeholder for this user message.
+	// Even if state already has a PlaceholderMessageID from the
+	// previous turn, that placeholder belongs to the previous
+	// turn — leave it alone and emit a fresh one.
+	//
+	// v7: the placeholder is a reply to the user message
+	// (reply_to_message_id) so the entire turn (placeholder +
+	// OutXxx) hangs under the user's "hi" as a visual thread.
+	// Initial text also carries the timestamp (`⏱ HH:MM:SS`) so
+	// the user can see when the turn started, matching the
+	// heartbeat format.
+	now := time.Now().UTC()
+	initialText := "<b>🤖 Working...</b> · ⏱ " + now.Format("15:04:05")
+	result, err := a.sendTelegramMessage(ctx, chatID, topicID, userMessageID, initialText, nil)
+	if err != nil {
+		return err
 	}
+	state.PlaceholderMessageID = result.MessageID
+	state.LastMessageID = result.MessageID
 	state.UserMessageID = strconv.Itoa(userMessageID)
+	a.logger.Debug("telegram: placeholder created",
+		"chat_id", chatID,
+		"thread_id", topicID,
+		"placeholder_message_id", result.MessageID,
+		"user_message_id", userMessageID,
+	)
 	return a.state.putTopic(state)
 }
 
-// ensurePlaceholderForHeartbeat lazily creates the placeholder
-// message if it does not already exist, returning the message id
-// the caller should PATCH. Used by the OutHeartbeat path so the
-// first heartbeat always has a stable anchor even if the
-// handleMessage-side ensurePlaceholder failed (e.g. transient
-// network error after retries were exhausted, or a heartbeat that
-// races ahead of the user-message handler finishing).
+// ensurePlaceholderForHeartbeat returns the placeholder message
+// id for the current turn, creating one if missing (e.g., when
+// the first OutHeartbeat races ahead of handleMessage's
+// ensurePlaceholder, or after a transient network failure). Used
+// by the OutHeartbeat PATCH path and by Send prelude's
+// placeholderAnchor resolution.
 //
-// Works for both real Telegram topics (topicID > 0) and DM /
-// main-window (topicID == 0); in the DM case the placeholder is
-// the visual anchor every OutXxx bubble replies to (see
-// docs/channel/telegram.md §11.11).
-//
-// Concurrency note: ensurePlaceholder (handleMessage-side) and
-// ensurePlaceholderForHeartbeat (Send-side) are not mutex-
-// coordinated. In the steady-state runtime flow both run on the
-// same goroutine — handleMessage publishes the inbound before
-// the resulting ChatSession emits any OutXxx, so the two calls
-// are strictly ordered per chatID and the second call always
-// observes the first call's putTopic. A theoretical race where
-// handleMessage is still mid-ensurePlaceholder (sendMessage
-// issued but putTopic not yet committed) when Send runs would
-// cause this function to send a SECOND placeholder message in
-// Telegram. This race is structurally impossible in the current
-// runtime: chatsession.AcceptInbound is called synchronously
-// from the inbound pump goroutine and emits no OutXxx before
-// HandleInbound returns, so Send cannot run concurrently with
-// handleMessage for the same chatID. If future runtime changes
-// break that ordering (e.g., fire-and-forget accept), wire a
-// per-chatID mutex around ensurePlaceholder and this function.
+// Topic mode and DM mode behave the same: return existing
+// placeholder if state.PlaceholderMessageID > 0, otherwise
+// create one. The placeholder is the per-turn status ticker
+// (Working… → ✅ Completed); reply chain goes to userMsgID.
+// See docs/channel/telegram.md §11.11.
 func (a *Adapter) ensurePlaceholderForHeartbeat(ctx context.Context, chatID string, topicID int) (int, error) {
 	state, ok := a.state.topic(chatID, topicID)
 	if ok && state.PlaceholderMessageID > 0 {
@@ -830,11 +823,23 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// "🤖 Working..." to Telegram.
 		return nil
 	}
-	// Resolve the per-turn placeholder anchor up front. In real
-	// topics (topicID > 0) the anchor is whatever the
-	// handleMessage-side ensurePlaceholder persisted; in DM /
-	// main-window (topicID == 0) we lazy-create it here so the
-	// first OutXxx bubble in a turn has something to reply to.
+	// Resolve anchors up front. Two distinct concepts (both used
+	// in BOTH topic and DM mode — per-user-message semantics):
+	//
+	//   placeholderAnchor — the per-turn "🤖 Working..." bot
+	//     message id. Each user message creates a fresh one.
+	//     Used by OutHeartbeat (PATCH status text) and
+	//     OnPromptEnded (PATCH to ✅ Completed). The previous
+	//     turn's placeholder stays in the Telegram timeline as
+	//     that turn's permanent status marker.
+	//
+	//   replyAnchor — reply_to_message_id for OutXxx bubbles.
+	//     Always the user message id that triggered this turn
+	//     (TopicState.UserMessageID). Reply chain hangs under
+	//     the user's own "hi" message in both DM and topic
+	//     modes, so the user sees their own message at the top
+	//     of the chain.
+	//
 	// See docs/channel/telegram.md §11.11 for the full UX.
 	placeholderAnchor, placeholderErr := a.ensurePlaceholderForHeartbeat(ctx, rawChatID, topicID)
 	if placeholderErr != nil && a.logger != nil {
@@ -844,17 +849,11 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			"err", placeholderErr,
 		)
 	}
-	// Reply chain (reply_to_message_id = placeholder) is a
-	// DM-only visual cue. Real Telegram topics already group
-	// their events via message_thread_id; threading every
-	// OutXxx through reply_to_message_id=placeholder there would
-	// make every bubble show "replying to 🤖 Working..." in the
-	// client UI, which is redundant and visually noisy. The
-	// placeholder in topic mode is used only for OutHeartbeat
-	// PATCH and OnPromptEnded ✅ Completed edits.
 	var replyAnchor int
-	if topicID == 0 {
-		replyAnchor = placeholderAnchor
+	if state, ok := a.state.topic(rawChatID, topicID); ok {
+		if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
+			replyAnchor = uid
+		}
 	}
 	switch msg.Kind {
 	case messages.OutChoice:
@@ -862,12 +861,12 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	case messages.OutChoicePatch:
 		return a.patchChoice(ctx, msg)
 	case messages.OutHeartbeat:
-		// PATCH the placeholder so the topic / DM main window
-		// shows live "Working..." progress without spawning a
-		// new bubble. placeholderAnchor was resolved at the top
-		// of Send via ensurePlaceholderForHeartbeat, so this
-		// works for both real topics (topicID > 0) and DM /
-		// main-window (topicID == 0).
+		// PATCH the per-turn placeholder for live "Working..."
+		// status. Both topic and DM have a placeholder (per the
+		// v3 contract — see §11.11). If the placeholder anchor
+		// resolved to 0 (e.g., first heartbeat raced ahead of
+		// handleMessage and the lazy create failed), silently
+		// drop — OutMessageState already carries ⏳/🔄/✅.
 		if placeholderAnchor > 0 {
 			text := "🤖 Working..."
 			if msg.Heartbeat != nil {
@@ -875,10 +874,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			}
 			return a.editTelegramMessage(ctx, rawChatID, placeholderAnchor, renderInlineText(text), nil)
 		}
-		// Fallback: standalone heartbeat bubble. Should be
-		// rare — placeholderAnchor resolution only fails when
-		// the lazy send above returned an error.
-		return a.sendRenderedText(ctx, rawChatID, topicID, 0, msg.Text)
+		return nil
 	case messages.OutMessageState:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageState missing MessageState or MessageID")
@@ -890,7 +886,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		state := msg.MessageState.State
 		emoji := mapStateToTelegramEmoji(state)
 		if emoji == "" {
-			return nil // 未知 state silent drop, 跟 feishu 对齐
+			return nil // 未知 state silent drop, 跟 feishu 对位
 		}
 		// 幂等: 同 state 跳过 API 调用, 避免 Telegram API 抖动。
 		// 跟 feishu 的 messageStates LRU 行为对称。
@@ -901,7 +897,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		if err != nil {
 			return err
 		}
-		if err := a.setMessageReaction(ctx, rawChatID, messageID, emoji); err != nil {
+		// v6.1: Telegram bots are limited to ONE reaction per
+		// message (REACTIONS_TOO_MANY if you try to set >1). The
+		// cumulative 👌+🤔+🎉 list from v6 would error out. Each
+		// state emits a single reaction that REPLACES the prior
+		// one (Telegram setMessageReaction is SET, not append) —
+		// the user sees the emoji CHANGE as state progresses:
+		//   Queued    → 👌 (received)
+		//   Submitted → 🤔 (thinking, replaces 👌)
+		//   Done      → 🎉 (complete, replaces 🤔)
+		reactions := []map[string]any{{"type": "emoji", "emoji": emoji}}
+		if err := a.setMessageReactions(ctx, rawChatID, messageID, reactions); err != nil {
 			return err
 		}
 		a.rememberMessageState(msg.MessageState.MessageID, state)
@@ -914,7 +920,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		if err != nil {
 			return err
 		}
-		return a.setMessageReaction(ctx, rawChatID, messageID, "")
+		// OutMessageStateRemoved clears the entire reaction list
+		// (no emoji). Caller uses this to explicitly drop reactions
+		// (e.g., MessageDropped).
+		return a.setMessageReactions(ctx, rawChatID, messageID, nil)
 	case messages.OutToolStart, messages.OutToolEnd:
 		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor, formatTool(msg))
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
@@ -940,17 +949,24 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	}
 }
 
-// OnPromptEnded flips the placeholder message text from
-// "🤖 Working..." to "<b>✅ Completed</b>" once the agent turn is
-// done. Works for both real Telegram topics (topicID > 0) and
-// DM / main-window (topicID == 0) — see docs/channel/telegram.md
-// §11.11 for the DM placeholder + reply-chain UX.
+// OnPromptEnded marks the turn as done by stamping a ✅ reaction
+// on BOTH the user message and the per-turn placeholder. This
+// mirrors the Feishu receipt UX (AddReaction on userMsgID +
+// SetPromptState on the receipt card) without PATCHing the
+// placeholder's text to "✅ Completed" — the placeholder keeps
+// its last heartbeat text ("💭 N · 🔧 M" or "🤖 Working...")
+// as the in-turn status ticker. The ✅ reaction on both
+// surfaces is the sole terminal-state indicator.
 //
 // chatID accepts both forms: the namespaced session form
 // ("tg_<chatid>[:thread_id]") that the runtime passes, and the
 // raw form used by direct unit tests. splitSessionID returns
 // ok=false for the raw form so we fall back to using chatID as
 // the raw chat id (matches the existing TopicState key shape).
+//
+// userMsgID is required: it identifies the user message that
+// triggered the prompt and is the target of the ✅ reaction.
+// See docs/channel/telegram.md §11.11 (v4).
 func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	if chatID == "" {
 		return
@@ -961,10 +977,24 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	}
 	topicID := a.sessionTopicID(chatID)
 	state, ok := a.state.topic(rawChatID, topicID)
-	if !ok || state.PlaceholderMessageID <= 0 {
+	if !ok {
 		return
 	}
-	_ = a.editTelegramMessage(ctx, rawChatID, state.PlaceholderMessageID, "<b>✅ Completed</b>", nil)
+	// v6.3: Telegram bot single-reaction budget — the user
+	// message's reaction slot is reserved for MessageSubmitted
+	// ("AI thinking"). OnPromptEnded does NOT overwrite that
+	// slot with 🎉; the terminal visual is conveyed via the
+	// per-turn placeholder's 🎉 reaction below. (v6.1 used to
+	// stack 🎉 on the user message here, which overwrote the
+	// thinking reaction and lost mid-turn state visibility.)
+	//
+	// 🎉 on per-turn placeholder — NO text PATCH; placeholder
+	// keeps its last heartbeat text.
+	if state.PlaceholderMessageID > 0 {
+		_ = a.setMessageReactions(ctx, rawChatID, state.PlaceholderMessageID, []map[string]any{
+			{"type": "emoji", "emoji": "🎉"},
+		})
+	}
 }
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
@@ -1056,11 +1086,21 @@ func formatInit(msg messages.OutboundMessage) string {
 	return strings.Join(parts, " · ")
 }
 
+// heartbeatText renders the in-turn status ticker. v7 added the
+// `⏱ HH:MM:SS` timestamp so the user can see when the last
+// heartbeat was emitted (≈ "agent is alive at this clock time").
+// The wall clock is taken from snapshot.LastBeatAt which the
+// chatsession heartbeat tracker refreshes on every think/tool
+// event (see internal/chatsession/heartbeat.go).
 func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	if snapshot == nil {
 		return "🤖 Working..."
 	}
-	return "💭 " + strconv.Itoa(snapshot.ThinkCount) + " · 🔧 " + strconv.Itoa(snapshot.ToolCount)
+	text := "💭 " + strconv.Itoa(snapshot.ThinkCount) + " · 🔧 " + strconv.Itoa(snapshot.ToolCount)
+	if !snapshot.LastBeatAt.IsZero() {
+		text += " · ⏱ " + snapshot.LastBeatAt.UTC().Format("15:04:05")
+	}
+	return text
 }
 
 func renderInlineText(text string) string {
@@ -1149,14 +1189,30 @@ func (a *Adapter) apiCall(ctx context.Context, method string, params map[string]
 // the reply text's ❌ prefix rather than a user-message reaction, and
 // telegram follows the same convention to keep the cross-channel
 // rendering consistent.
+// mapStateToTelegramEmoji converts a runtime MessageState into
+// the unicode emoji that Telegram's setMessageReaction accepts.
+//
+// v6.3: Telegram bots can only set ONE reaction per message.
+// Spending the single slot on the most informative state
+// (MessageSubmitted = "AI thinking") keeps the user informed
+// during the long-running async turn, when no other UI signal
+// is changing. MessageQueued is too transient to be useful
+// (gone within ~50ms in a healthy run), MessageDone is captured
+// separately by the per-turn placeholder text PATCH + 🎉
+// reaction on the placeholder message (see OnPromptEnded).
+//
+// Probed via live API (docs/channel/telegram.md §11.11.3):
+//   - MessageQueued    → "" (silent drop; placeholder text
+//                          "🤖 Working..." already announces the
+//                          message reached the adapter)
+//   - MessageSubmitted → 🤔  ("AI thinking")
+//   - MessageDone      → "" (silent drop; OnPromptEnded
+//                          handles terminal state on the
+//                          placeholder message instead)
 func mapStateToTelegramEmoji(state agent.MessageState) string {
 	switch state {
-	case agent.MessageQueued:
-		return "⏳"
 	case agent.MessageSubmitted:
-		return "🔄"
-	case agent.MessageDone:
-		return "✅"
+		return "🤔"
 	}
 	return ""
 }

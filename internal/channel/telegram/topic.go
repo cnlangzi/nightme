@@ -86,15 +86,30 @@ func (a *Adapter) editTelegramKeyboard(ctx context.Context, chatID string, messa
 	}, nil)
 }
 
-func (a *Adapter) setMessageReaction(ctx context.Context, chatID string, messageID int, emoji string) error {
-	reaction := []any{}
-	if emoji != "" {
-		reaction = append(reaction, map[string]any{"type": "emoji", "emoji": emoji})
+// setMessageReactions replaces the reaction list on a message with
+// the supplied list. Telegram's setMessageReaction is a SET
+// semantic — to APPEND, callers must send the full cumulative
+// list (see allReactionsUpTo in adapter.go for the lifecycle
+// 👌 → 👌+🤔 → 👌+🤔+🎉 sequence).
+//
+// Pass an empty (non-nil) slice to clear all reactions on the
+// message — the Telegram API distinguishes [] (clear) from
+// missing/null (no change).
+func (a *Adapter) setMessageReactions(ctx context.Context, chatID string, messageID int, reactions []map[string]any) error {
+	if reactions == nil {
+		reactions = []map[string]any{}
+	}
+	// Convert to []any so the wire format is consistent with
+	// the rest of the outbound params (every Channel call site
+	// builds `[]any{...}` not `[]map[string]any{...}`).
+	asAny := make([]any, len(reactions))
+	for i, r := range reactions {
+		asAny[i] = r
 	}
 	return a.apiCall(ctx, "setMessageReaction", map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
-		"reaction":   reaction,
+		"reaction":   asAny,
 	}, nil)
 }
 

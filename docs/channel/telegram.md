@@ -802,49 +802,48 @@ Telegram Bot API 在 `chat.type == "private"`（DM）里不支持 Forum Topic，
 
 v4 把 Telegram DM/topic 的视觉状态完全用 **message reactions** 表达（跟 Feishu receipt `AddReaction` + `SetPromptState` 对位），**不再 PATCH 占位文本为 `<b>✅ Completed</b>`**。
 
-#### 11.11.1 v4 核心契约
+#### 11.11.1 v3 + v6.3 + v7 核心契约
 
-每个用户消息进来 → `ensurePlaceholder` 创建**新的** `<b>🤖 Working...</b>` bot 占位（per-turn）。同一 turn 的所有 OutXxx reply chain 锚到该 turn 自己的 userMsgID。**turn 状态三段 reaction 贴在 user message 上**：
+每个用户消息进来 → `ensurePlaceholder` 创建**新的** bot 占位（per-turn），并通过 **`reply_to_message_id = userMessageID` 挂在用户消息下**（v7 改进）。同一 turn 的所有 OutXxx **以及 placeholder 自身** 都在 user message 的 reply thread 下，组成一个统一的对话气泡组。
 
-| 阶段 | 来源 | Reaction on user msg |
-|---|---|---|
-| `MessageQueued` (Queued) | runtime eventbus → OutMessageState | 👌（"我收到了"） |
-| `MessageSubmitted` (Submitted) | runtime eventbus → OutMessageState | 🧠（"AI 在想"） |
-| `PromptEnded` | `OnPromptEnded` hook | ✅（"完成"） |
-
-`OnPromptEnded` **同时**对 placeholder 消息贴 ✅（不是 PATCH 文本）—— 跟 Feishu `SetPromptState(PromptDone)` 在 receipt card header 上标 ✅ 的视觉对位。
+占位文本承载 turn 状态（含 `⏱ HH:MM:SS` 时间戳 —— v7 改进）：
 
 ```text
 turn 1: 用户发 "hi 1" (userMsgID=10)
-    └─ ensurePlaceholder 创建 P1 = "🤖 Working..." bot 占位
+    └─ ensurePlaceholder 创建 P1 = "🤖 Working... · ⏱ 15:18:08" bot 占位
+                       (v7: reply_to_message_id=10, 挂在用户消息下)
         state.PlaceholderMessageID = 700   (P1 的 id)
         state.UserMessageID       = "10"
-    ├─ runtime emit MessageQueued(10)   → setMessageReaction(10, 👌)
-    ├─ runtime emit MessageSubmitted(10)→ setMessageReaction(10, 🧠)
-    ├─ OutHeartbeat                    → editMessageText(700, "💭 2 · 🔧 1")
+    ├─ runtime emit MessageQueued(10)   → silent drop (v6.3 单 emoji 预算)
+    ├─ runtime emit MessageSubmitted(10)→ setMessageReaction(10, 🤔)
+    ├─ OutHeartbeat                    → editMessageText(700, "💭 2 · 🔧 1 · ⏱ 15:18:30")
     ├─ OutReply/Tool/Result             → sendMessage(reply_to_message_id=10, ...)
-    └─ OnPromptEnded                    → setMessageReaction(10, ✅)
-                                          setMessageReaction(700, ✅)  ← placeholder 自己也贴
-                                       (不再 editMessageText(P_N, "<b>✅ Completed</b>"))
+    └─ OnPromptEnded                    → setMessageReaction(700, 🎉)  ← v6.3: 不动 user msg reaction
 ```
+
+**v6.3 单 emoji 预算**（user 决定）：Telegram bot 一次只能贴 1 个 reaction 到单条消息。预算用在最有信息量的 state（`MessageSubmitted` = 🤔 "AI 在想"），其他 silent drop。
+
+**v7 改进**：
+- **Placeholder 也用 reply chain** 挂到 user message（之前是独立消息，现在视觉上是 user message 下的 reply 群）
+- **占位文本带 `⏱ HH:MM:SS` 时间戳**（`⏱ 15:18:08`），user 一眼看到 "agent 在 15:18:30 还在跑"
 
 #### 11.11.2 视觉
 
 ```text
-Devin: hi 1  (react: 👌 → 🧠 → ✅)              11:50
-nightme: 🤖 Working...  ← P1 (per-turn 占位)
-            ├─ (PATCH) 💭 2 · 🔧 1             11:51  ← status ticker
-            (react: ✅)                       11:51  ← placeholder 自己贴
-            └─ (reply to hi 1) User keeps sending...
-            └─ (reply to hi 1) Hi! 👋 ...
-Devin: hi 2  (react: 👌 → 🧠 → ✅)              11:55
-nightme: 🤖 Working...  ← P2 (新 turn 占位)
-            ├─ (PATCH) 💭 1 · 🔧 0             11:55
-            (react: ✅)                       11:55
-            └─ (reply to hi 2) Hi! 👋 ...
+Devin: hi 1  (react: 🤔)                          11:50
+nightme: (reply to hi 1) 🤖 Working... · ⏱ 15:18:08  ← P1 (v7: reply chain)
+                     (react: 🎉 when done)
+                     ├─ (PATCH) 💭 2 · 🔧 1 · ⏱ 15:18:25
+                     ├─ (reply to hi 1) User keeps sending...
+                     └─ (reply to hi 1) Hi! 👋 ...
+Devin: hi 2  (react: 🤔)                          11:55
+nightme: (reply to hi 2) 🤖 Working... · ⏱ 15:18:08  ← P2 (v7: reply chain)
+                     (react: 🎉 when done)
+                     ├─ (PATCH) 💭 1 · 🔧 0 · ⏱ 15:18:35
+                     └─ (reply to hi 2) Hi! 👋 ...
 ```
 
-每个 turn 的 reply chain 在自己的 user msg 下（视觉上下文正确）；每个 turn 的 placeholder 文本承载 in-turn 状态 ticker（Working / 💭 N·🔧 M）；✅ 终态完全靠 reaction，**不动占位文本**。
+**v7 改进**：所有 bot 消息（placeholder + OutXxx）**都挂在 user message 下**，形成统一 reply thread。占位文本带 `⏱ HH:MM:SS` 时间戳，user 一眼看到 "agent 正在 15:18:25 处理"。
 
 #### 11.11.3 emoji 选择（v5）+ append 语义（v6）
 
@@ -1947,7 +1946,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 |---|---|---|
 | C1 | OutInit silent drop（与 feishu F-44 对齐） | 已实现 |
 | C2 | OutHeartbeat 路径 ensurePlaceholderForHeartbeat（占位缺失时自动创建） | 已实现 |
-| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v6.3 修订**（单 emoji 预算：只 MessageSubmitted 贴 🤔；Telegram bot 单 reaction 限制适配） |
+| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v7 修订**（v3 placeholder 自己也 reply 到 user msg + 占位文本 `⏱ HH:MM:SS` 时间戳；v6.3 单 emoji 预算保留） |
 | C4 | 2026-08-22 reaction chatID namespacing（修 `handleMessageReaction` 用 raw chatID 导致 emoji reaction 进不了 gtw 的 bug） | 已实现 |
 | C5 | 2026-08-22 stateStore TTL on-load prune（30 天未活动 topic 自动清理） | 已实现 |
 | C6 | 2026-08-22 sendChoice / patchChoice / handleInputClick / handleForceReply / callback wizard editMessageText 把 session ChatID 传给 Telegram API 的生产路径 bug（修 `rawChatIDFromSession` helper） | 已实现 |

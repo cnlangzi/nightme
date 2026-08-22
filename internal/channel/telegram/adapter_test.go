@@ -601,6 +601,11 @@ func TestAdapter_Send_OutHeartbeat_NoTopic(t *testing.T) {
 	}
 }
 
+// TestAdapter_Send_OutHeartbeat_WithTopic locks the v7 PATCH
+// payload format. v7 added `⏱ HH:MM:SS` from snapshot.LastBeatAt
+// so the user can see when the last heartbeat was emitted. The
+// snapshot here is built without LastBeatAt set, so the suffix
+// is omitted (heartbeatText skips it for zero-value time).
 func TestAdapter_Send_OutHeartbeat_WithTopic(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50})
@@ -611,6 +616,32 @@ func TestAdapter_Send_OutHeartbeat_WithTopic(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
+	}
+}
+
+// TestAdapter_Send_OutHeartbeat_AppendsTimestamp locks the
+// v7 PATCH payload with a non-zero LastBeatAt. The placeholder
+// text must end with `⏱ HH:MM:SS` so the user can see when
+// the agent was last alive.
+func TestAdapter_Send_OutHeartbeat_AppendsTimestamp(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50})
+	now := time.Date(2026, 8, 22, 15, 18, 8, 0, time.UTC)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "100",
+		Kind:      messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 5, ToolCount: 7, LastBeatAt: now},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	edit := findCall(api.snapshotCalls(), "editMessageText")
+	if edit == nil {
+		t.Fatal("expected editMessageText")
+	}
+	text, _ := edit.Params["text"].(string)
+	want := "💭 5 · 🔧 7 · ⏱ 15:18:08"
+	if text != want {
+		t.Fatalf("heartbeat text = %q, want %q", text, want)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // sendMessageText returns the text of the first sendMessage
@@ -81,7 +82,7 @@ func TestAdapter_Send_DM_OutReply_AppendsStatusBar(t *testing.T) {
 		t.Errorf("body missing in rendered text: %q", text)
 	}
 	// All three StatusBar lines should be present.
-	for _, want := range []string{"🤖: claude · opus-4-5 · sess-1", "💰:「", "📁: code/nightme"} {
+	for _, want := range []string{"🤖: claude · opus-4-5 · sess-1", "💰:「", "📁: " + pathutil.FromSlash("code/nightme")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered text missing %q; got %q", want, text)
 		}
@@ -198,7 +199,7 @@ func TestAdapter_Send_DM_OutResult_AppendsStatusBar(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	text := sendMessageText(api.snapshotCalls())
-	for _, want := range []string{"result body", "🤖: claude", "💰:「", "📁: code/nightme"} {
+	for _, want := range []string{"result body", "🤖: claude", "💰:「", "📁: " + pathutil.FromSlash("code/nightme")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered text missing %q; got %q", want, text)
 		}

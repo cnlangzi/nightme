@@ -1,6 +1,6 @@
 # Telegram Channel - Topic 方案与接入设计
 
-> **Status**: implemented (核心场景) + 已知 gap 跟踪（见 §15）
+> **Status**: implemented (v8 per-turn 占位) + v9 chain rolling log 即将落地（见 §11.12）。已知 gap 跟踪见 §15。
 > **Scope**: nightme Telegram Bot API 适配器（`internal/channel/telegram/*`）
 > **目的**: 在 Telegram Forum Supergroup 中，将主窗口作为会话入口，将每个 qino 会话映射为一个 Topic，并在 Topic 内承载占位状态、thinking、工具调用、结果和交互卡。
 > **Related docs**:
@@ -722,7 +722,7 @@ chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
 - `OutHeartbeat` PATCH 当前 turn 的占位文本（`🤖 Working...` / `💭 N · 🔧 M`）—— 是 in-turn 状态 ticker，**不再 PATCH 为 `<b>✅ Completed</b>`**。
 - 跨 turn：老占位留作时间线状态标记（不被 ✅ PATCH、保持 working / heartbeat 文本），新 turn 创建新占位独立承载新状态。
 
-详细方案见 §11.11。
+详细方案见 §11.11（v4 历史快照）。当前即将演进到 **v9 per-turn multi-chunk chain rolling log**，见 §11.12。
 
 如果群组没有开启 Privacy Mode，Bot 会收到更多群组普通消息。qino 不应默认把每条群消息都交给 Agent，而应继续遵守群组 mention 策略：
 
@@ -804,6 +804,8 @@ Telegram 没有提供“列出 Bot 已加入全部群组”的 Bot API 接口。
 - Token 失效、权限不足、群组不是 Forum 等错误都有明确提示。
 
 ### 11.11 per-turn placeholder + reaction-driven state（v4）
+
+> ▶ **本节为 v4 / v8 历史快照**。当前实现即将演进到 **v9 per-turn multi-chunk chain rolling log**（见 §11.12）。v9 把"独立 bubble + 单一占位 ticker"合并成一条 chain 内的 active chunk + frozen chunks 全量回写，保留 Telegram 不支持 append 的硬约束同时获得飞书式 fold 视觉。v9 落地后，本节内容继续保留作设计决策历史。
 
 Telegram Bot API 在 `chat.type == "private"`（DM）里不支持 Forum Topic，没有 `createForumTopic` / `message_thread_id` 概念。飞书靠 `reply_in_thread` 把中间事件折进 drawer，Telegram 没有等价物。
 
@@ -1034,6 +1036,394 @@ Choice card 也 `reply_to_message_id = userMsgID`，让权限/问题卡片挂在
 - placeholder 缺失（首次 OutHeartbeat 比 handleMessage 快）→ `ensurePlaceholderForHeartbeat` 懒创建，不丢事件
 - 跨 turn：老占位 P_N-1 留作时间线状态标记（不动），新 turn 创建 P_N 独立承载新状态
 - 测试矩阵：`TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestAdapter_Send_Topic_NoReplyToPlaceholder`（**已替换为 replyToUserMessage 版本**）/ `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
+
+## 11.12 per-turn multi-chunk chain rolling log（v9）
+
+> **v9 = §11.11 v8 的进化版**。落地中，分多 commit 推进，详细 diff 见 §11.12.15。本节是 spec，不是已实现的描述。
+
+### 11.12.1 核心思路与 v4 / v8 的差异
+
+§11.11 v4 / v8 的视觉模型是双轨制：
+- 一张 per-turn 占位 + `OutHeartbeat` PATCH 文本 + `OnPromptEnded` 贴 🎉
+- 7 种 text-emitting kind（OutReply/OutThinking/OutToolStart/End/OutResult/OutError/OutTask*）**各自发独立 bubble**，每条都钉 userMsgID 的 reply chain
+
+后果：长 turn → chat 里出现几十条分散的小 bubble，占位本身不携带任何事件历史。
+
+v9 把这两轨**合并成一条 chain**：
+- 占位从一个常量 → 链子 `placeholderChain{chunks, cursor, lastFooter}`，每个 chunk 是一个独立的 Telegram message
+- 7 种 text-emitting kind 不再发独立 bubble，全部 append 成单行 segment，**进当前 active chunk 的内存 buffer**
+- buffer 累计 3500 chars raw → 当前 chunk 锁死 + 新建 chunk 接上
+- 全量回写走 `editMessageText(activeChunkID, render(buffer))`，**保留 Telegram 不支持 append 的硬约束**
+
+借用飞书 receipt card 的 fold 进同一 surface 的视觉模型，但用 debounce + chunk rotation 解决 Telegram 的全量替换本质。
+
+### 11.12.2 数据模型（纯内存，不持久化）
+
+```go
+// internal/channel/telegram/placeholder_chain.go
+
+type chainKey struct {
+    chatID  string        // 原始 chat.id（无 tg_ 前缀）
+    topicID int           // 0 表示 DM / 主窗口
+}
+
+type placeholderChain struct {
+    mu            sync.Mutex
+    chunks        []*placeholderChunk
+    cursor        int                 // 当前可写 chunk 的 index；-1 = 空链
+    lastFooter    []string            // 最近一次 footer-bearing 事件留下的 3 行 StatusBar
+    dirty         bool                // 内存有更新未写回 Telegram（debounce 用）
+    debounceTimer *time.Timer         // 当前 pending 的 debounce flush
+}
+
+type placeholderChunk struct {
+    messageID  int64
+    buf        strings.Builder       // 累积的 segments
+    charCount  int                   // buf.Len() 快照（避免每步 query）
+    isFull     bool                  // 锁死后不再 editMessageText
+    headerLine string                // 最近一次的 working / 💭 N · 🔧 M
+}
+
+// chainLRU 是 Adapter 的内存索引，提供容量上限 + LRU 驱逐
+type chainLRU struct {
+    mu     sync.Mutex
+    cap    int                      // 默认 1000
+    chains map[chainKey]*placeholderChain
+    order  []chainKey               // LRU 顺序（最近访问在尾）
+}
+```
+
+**不持久化**：
+- `TopicState.PlaceholderChunkIDs` 不写
+- chain 内的 `buf` / `headerLine` / `lastFooter` 全部是纯内存字段
+- daemon 重启 = chain 失；下次事件来时 `cursor=-1` → 走"建第一张 chunk"路径（旧 frozen chunks 留在 chat 里作为历史证据，没人再去 editMessageText）
+
+`TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。
+
+### 11.12.3 三档阈值
+
+| 阈值 | 值 | 触发条件 |
+|---|---|---|
+| 单 chunk 缓冲上限 | **3500** chars (raw) | `cur.charCount + len(segment) > 3500` → 锁当前 + 新建 chunk |
+| 单 chunk 渲染硬上限 | **3900** chars (rendered) | `len(rendered) > 3900` 时调 `splitTelegramText` 切多张 message |
+| Telegram API 硬限 | **4096** chars | `editMessageText` API 直接拒绝超长，**永不发送** |
+
+3500 - 3900 = 400 chars 给 HTML escape + emoji 字节增长。
+3900 - 4096 = 196 chars 给 Telegram 内部 buffer。
+复用 `maxTelegramTextLength = 3900`（已在 `topic.go:12` 定义）。
+
+### 11.12.4 事件映射（每 Out* 进哪条路径）
+
+| Kind | 路径 | segment 格式 |
+|---|---|---|
+| `OutReply` | `appendSegment` | `<text>\n`（流延续，无 icon） |
+| `OutResult` | `appendSegment` | `📝 <text>\n` |
+| `OutThinking` | `appendSegment` | `💭 <text>\n` |
+| `OutToolStart` | `appendSegment` | `● <name>(<args truncated>)\n` ← `formatToolStartCall` |
+| `OutToolEnd` | `appendSegment` | `⎿  <one-line summary>\n` ← `summarizeToolResult` |
+| `OutError` | `appendSegment` | `❌ <text>\n` |
+| `OutTaskCreate` | `appendSegment` | `📋 🆕 <subject>\n` |
+| `OutTaskUpdate` | `appendSegment` | `📋 <status emoji> <subject>\n` |
+| `OutHeartbeat` | `patchActiveHeader` | （无 segment，刷新 active chunk headerLine） |
+| `OutChoice` / `OutChoicePatch` | 独立 `sendMessage` + InlineKeyboard | （不进 chain） |
+| `OutCommandReply` | 独立 `sendMessage` + text | （不进 chain） |
+| `OutMessageState` / `OutMessageStateRemoved` | reaction 路径（`setMessageReactions`） | （不动） |
+| `OutInit` | silent drop | — |
+
+### 11.12.5 核心 API
+
+```go
+// appendSegment 是热路径入口，所有 Out* 都过这里
+// 语义：memory update + 标记 dirty（触发 debounce）
+func (a *Adapter) appendSegment(
+    ctx context.Context,
+    chatID string,
+    topicID int,
+    userMessageID int,
+    segment string,
+    statusBarLines []string,    // nil = 不动 footer；非空 = 刷新 footer
+) error
+
+// debounce timer fires 调 / OnPromptEnded / Stop / 测试用
+// 全量同步写回 active chunk
+func (a *Adapter) flushChainNow(
+    ctx context.Context,
+    chain *placeholderChain,
+    chatID string,
+    topicID int,
+    userMessageID int,
+) error
+
+// scheduleFlushDebounced 内部 helper：重置 / 起 250ms timer
+func (a *Adapter) scheduleFlushDebounced(
+    chain *placeholderChain,
+    chatID string,
+    topicID int,
+    userMessageID int,
+) error
+
+// getOrCreateChain 内部 helper：LRU look-up + 上限驱逐
+func (a *Adapter) getOrCreateChain(chatID string, topicID int) *placeholderChain
+
+// patchActiveHeader 内部 helper：OutHeartbeat 专用，只动 active chunk 的 headerLine
+func (a *Adapter) patchActiveHeader(
+    ctx context.Context,
+    chatID string,
+    topicID int,
+    headerLine string,
+    statusBarLines []string,
+) error
+
+// activeChunkMessageID 是 OnPromptEnded 用的：返回 chain.cursor 指向 chunk 的 messageID
+func (a *Adapter) activeChunkMessageID(chatID string, topicID int) (int64, bool)
+```
+
+### 11.12.6 Footer 内存语义
+
+每 chunk **最多一个 footer**（footer-bearing 事件来时刷新），无 footer-bearing 事件发生过 → 该 chunk 上**没有 footer section**。
+
+**footer-bearing 事件的判定**（runtime 端 stamp `OutboundMessage.SessionContext`）：
+- ✓ `OutReply` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate`（4 个 main-chat kind）
+- ✗ `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutError` / `OutInit` / `OutHeartbeat`
+
+行为：
+- 收到 footer-bearing 事件 → 更新 `chain.lastFooter` → 后续全量渲染带上新 footer
+- 收到非 footer-bearing 事件 → 只 append segment，`lastFooter` 不动
+- 新 chunk 创建时如果 `chain.lastFooter != nil` → **沿用**上一 chunk 的 footer（防止 footer 突然消失）
+- 重启后第一次 footer-bearing 事件之前 → 链上无 footer section（内存不持久化）
+
+### 11.12.7 编辑频率控制（debounce + 1-Hz 自然上限）
+
+#### 11.12.7.1 单 chunk debounce 250ms
+
+```go
+// appendSegment 调用末尾
+chain.mu.Lock()
+chain.dirty = true
+chain.mu.Unlock()
+
+timer := chain.debounceTimer
+if timer != nil { timer.Stop() }
+chain.debounceTimer = time.AfterFunc(250 * time.Millisecond, func() {
+    a.flushChainNow(...)
+})
+```
+
+- 250ms 内新事件来 → 重置 timer，**不发新 Telegram call**
+- timer fires → `flushChainNow` 调 `editMessageText(activeChunk, render(buf))`
+- burst 30 events/s 全合并成 1 edit → 实测命中数远低于 Telegram 的 1/sec/message / 20/day/message 限流（feishu §13.10 之外独有的"denounce 合并批量 update"模式）
+
+#### 11.12.7.2 单 segment 超长 fallback
+
+`OutReply` / `OutResult` 等 payload 文本 > 3500 chars（rare）：
+- 仍 append 一次（segment 是 raw，不切字段）
+- 渲染后 `len(rendered) > 3900` → 调 `splitTelegramText(rendered, 3900)` 切多张
+- 第一张 `editMessageText(chunk.messageID)`；后续多张 `sendMessage(reply_to=userMsgID)`
+- 当前 chunk 的 `messageID` 改为最后一片 → 后续 PATCH 自动延续
+
+### 11.12.8 OutHeartbeat 路径
+
+```go
+case messages.OutHeartbeat:
+    if placeholderAnchor > 0 {
+        chain := a.getOrCreateChain(rawChatID, topicID)
+        chain.mu.Lock()
+        cur := chain.chunks[chain.cursor]
+        cur.headerLine = fmt.Sprintf(
+            "💭 %d · 🔧 %d · ⏱ %s", thinkingCount, toolCount,
+            time.Now().UTC().Format("15:04:05"),
+        )
+        chain.dirty = true
+        chain.mu.Unlock()
+        a.scheduleFlushDebounced(chain, rawChatID, topicID, replyAnchor)
+    }
+    return nil
+```
+
+- 只 PATCH active chunk 的 `headerLine`，**不动 buf** 和 lastFooter
+- 其他 frozen chunks 永远不动
+- `placeholderAnchor` 仍由 `ensurePlaceholderForHeartbeat` 解析（race-window guard 保留）
+
+### 11.12.9 OnPromptEnded 路径
+
+```go
+func (a *Adapter) OnPromptEnded(ctx, chatID, topicID, userMsgID) {
+    chain := a.getOrCreateChain(chatID, topicID)
+    if err := a.flushChainNow(ctx, chain, chatID, topicID, userMsgID); err != nil { /* log warn */ }
+    if cur := chain.chunks[chain.cursor]; cur != nil {
+        a.setMessageReactions(ctx, chatID, cur.messageID,
+            []map[string]any{{"type": "emoji", "emoji": "🎉"}})
+    }
+    // turn-end: 清空 chain 内容；chain 仍在 LRU 里（key 复用）
+    chain.cursor = -1
+    chain.chunks = nil
+    chain.lastFooter = nil
+}
+```
+
+新 turn 开始 → `OutX` 来时 `cursor=-1` → `appendSegment` 走"建第一张 chunk"路径 → 新 chunk 钉 userMsgID。旧 frozen chunks 留在 chat 里是历史证据。
+
+### 11.12.10 重启后的 chain loss 行为
+
+**重启前**：chat 里看到 P1/P2/P3（frozen，各自带终态 footer）
+**重启后**：`chains` map 空
+- 下次 `OutX`：`cursor=-1` → "建第一张"路径 → `sendMessage` 新 P_new 钉 userMsgID
+- 用户视觉：chat 里出现 P_new 跟在所有老 frozen P 后面，**老 P 不再被编辑**
+
+**取舍**：chain 不持久化避免 LRU 复杂度上升 + state schema 不变；接受"重启 = chain 重启"语义。与 §11.11 v8 的"`PlaceholderMessageID` 持久化但不含 buf"取舍同源。
+
+### 11.12.11 Topic vs DM
+
+| 行为 | topic (thread_id > 0) | DM (thread_id == 0) |
+|---|---|---|
+| chain 创建 | OutX/OutHeartbeat 来时 | 同 |
+| chunk `sendMessage` 带 `message_thread_id` | ✅ | ✗ |
+| chunk `reply_to_message_id` | `userMessageID` | `userMessageID` |
+| frozen chunk 处理 | 保持 frozen，不动 | 同 |
+| turn-end 清 cursor + chunks + lastFooter | ✅ | ✅ |
+| `OnPromptEnded` 🎉 on active chunk | ✅ | ✅ |
+
+### 11.12.12 跟飞书 receipt 语义对位（v9）
+
+| 维度 | Feishu receipt | Telegram v9 |
+|---|---|---|
+| Surface | 单一 receipt Card 2.0，PATCH 复用 | chain of N chunks，editMessageText 复用 active |
+| 状态 ticker | header PATCH（card body） | active chunk headerLine PATCH |
+| OutThinking | append div 进 card body | append segment 进 active chunk buffer |
+| OutToolStart/End | 合并 thread reply（Start+End merge，F-38） | 同 chunk buffer 内两 segment |
+| OutReply | 独立 reply（F-44 后） | append segment 进 active chunk buffer |
+| OutResult | 独立 reply（F-39 后） | append segment（📝 prefix）进 active chunk |
+| user message 状态 | AddReaction（append-only 多 emoji 堆叠） | setMessageReaction（单 emoji 槽） |
+| placeholder / 终态 | ✅ header SetPromptState | 🎉 setMessageReactions on active chunk |
+| 终态 | ✅ reaction + card header ✅ | user msg 留 👌 不动；active chunk 贴 🎉 |
+| Footer | card `<hr>` + 灰色 markdown（3 行） | chunk 末尾 renderPanel(lastFooter)（仅 active chunk） |
+| Persist | receipt state 进 MemoryStore | **chain 不持久化**（重启失） |
+| 4096 / 30KB 限制 | 30KB body + 50 elements | 4096 chars ×N chunks（debounce 内合并） |
+| OutToolStart dump | summarize_tool.go（call + result 双行） | 复刻 feishu 同款（emoji 风格统一） |
+
+### 11.12.13 长文本与 Markdown 渲染
+
+#### OutResult 进 chain 而非独立 reply
+
+飞书 F-39 决策：OutResult 独立 reply 投递到 userMsgID（避免 dedup bug）。Telegram 没 dedup 问题（chain 的 buf 累积即同一 surface），进 chain 是合理选择。要求 OutResult text ≤ 3500 一次；超出 → §11.12.7.2 split。
+
+#### Markdown 渲染
+
+- `parse_mode=HTML` 走现有 `RenderMarkdown`，不切 MarkdownV2（escape 脆弱，参考 feishu.md §13.19）
+- Feishu §13.17 / §13.19 同款 sanitize pipeline（非 HTTP URL → plain、fence newline、image strip、heading demotion）
+
+### 11.12.14 summarize_tool 复用（同款）
+
+新文件 `internal/channel/telegram/summarize_tool.go`，从 feishu 平移：
+
+```go
+package telegram
+
+import (
+    "fmt"
+    "path/filepath"
+    "strings"
+)
+
+const toolCallArgsMaxBytes = 100  // args 字节上限
+
+// formatToolStartCall produces the "call" line for chain entry,
+// matching Claude Code's terminal UX:
+//   `● Bash(go build ./... 2>&1; echo "EXIT=$?")`
+//   `● Read(/tmp/foo.go)`
+func formatToolStartCall(name, args string) string {
+    if args == "" { return "● " + name }
+    return "● " + name + "(" + displayToolArgs(args) + ")"
+}
+
+func displayToolArgs(args string) string {
+    if compact := compactJSONToolArgs(args); compact != "" { return compact }
+    return truncate(args, toolCallArgsMaxBytes)
+}
+
+// summarizeToolResult produces the "result" line:
+//   `⎿  📄 Read → 47 lines`
+//   `⎿  ❌ Bash failed: exit code 1`
+func summarizeToolResult(name, output string, err error) string {
+    if err != nil {
+        return fmt.Sprintf("⎿  ❌ %s failed: %s", name, err.Error())
+    }
+    switch strings.ToLower(name) {
+    case "read":       return "⎿  📄 Read → " + itoa(countLines(output)) + " lines"
+    case "write":      return "⎿  📝 Write → " + itoa(len(output)) + " bytes"
+    case "edit", "multiedit": return "⎿  ✏️  applied"
+    case "bash":       return "⎿  💻 Bash → " + itoa(countLines(output)) + " lines"
+    case "grep":       return "⎿  🔍 Grep → " + itoa(countLines(output)) +
+                              " matches across " + itoa(countUniqueFiles(output)) + " files"
+    case "glob":       return "⎿  📂 Glob → " + itoa(countLines(output)) + " files"
+    case "webfetch":   return "⎿  🌐 WebFetch → " + itoa(len(output)) + " chars fetched"
+    case "websearch":  return "⎿  🔎 WebSearch → " + itoa(countLines(output)) + " results"
+    default:           return "⎿  🔧 " + name + " → " + itoa(len(output)) + " bytes"
+    }
+}
+
+// 共用 helpers: countLines, countUniqueFiles, truncate, compactJSONToolArgs
+// 跟 feishu summarize_tool.go 一致; 想 100% reuse 也可以提一个 internal/summarizetool package
+```
+
+### 11.12.15 实施清单（commit 顺序）
+
+1. `[telegram] port summarize_tool from feishu` — 新增 `internal/channel/telegram/summarize_tool.go`，平移 feishu 公式
+2. `[telegram] add placeholder_chain skeleton` — 新增 `internal/channel/telegram/placeholder_chain.go`，含 chainLRU
+3. `[telegram] rewrite formatTool → call helpers` — `formatTool` 内联实现替换为 `formatToolStartCall` + `summarizeToolResult`
+4. `[telegram] migrate ensurePlaceholder → chain` — `ensurePlaceholder` delegate 到 `appendSegment` 创建第一张 chunk
+5. `[telegram] rewrite Send: OutReply/OutResult/OutThinking/OutTool*/OutError/OutTask* → appendSegment` — 8 个 kind 全部走 chain
+6. `[telegram] rewrite OutHeartbeat → patchActiveHeader + debounce` — `OutHeartbeat` case 改为 headerLine-only 路径
+7. `[telegram] rewrite OnPromptEnded → flushChain + 🎉 + cursor=-1` — `OnPromptEnded` case 走新流程
+8. `[telegram] prune `PlaceholderChunkIDs` from TopicState` — state schema 还原，无新字段
+9. `[telegram] tests: summarize_tool_test.go` — 平移 feishu 那 5 case
+10. `[telegram] tests: placeholder_chain_test.go` — 9 case（见 §11.12.16）
+11. `[telegram] update adapter_test.go` — 老 v8 测试改写为 v9 chain 行为断言
+
+每 commit 必跑：
+- `go test ./...`
+- `golangci-lint`
+- Telegram 实机 dotest（项目通常用 `cmd/probe-telegram` 或类似）
+
+### 11.12.16 验收 / 测试矩阵
+
+| Case | 验证 |
+|---|---|
+| `TestChain_FirstEvent_CreatesFirstChunk` | OutReply 在空 chain → 一张 chunk with single segment |
+| `TestChain_SingleChunkWithinThreshold` | 10 events ≤ 3500 chars → 都进同一 chunk |
+| `TestChain_Overflow_CreatesSecondChunk` | 3500 + 100 → chunk 1 锁，chunk 2 新建 |
+| `TestChain_MultipleOverflow_ThreeChunks_FirstTwoFrozen` | 3 chunks 后，frozen 1/2 再发 events 不动 |
+| `TestChain_FooterRefresh_OnlyOnFooterBearingEvent` | OutThinking 不动 lastFooter；OutReply 刷新 |
+| `TestChain_NewChunk_InheritsLastFooter` | overflow 时新 chunk 沿用 lastFooter |
+| `TestChain_LRUEviction_PopOldest` | 1001 chain 创建 → 最早 evict |
+| `TestChain_AfterRestart_StartsFreshChunk` | restart → next event → new chunk（旧 frozen 仍在 chat） |
+| `TestChain_Debounce_MergesBurstEvents` | 30 events in 100ms → 1 Telegram editMessageText |
+| `TestSummarizeToolEnd_*`（5 case 平移） | per-tool-type summary 形状 |
+| `TestSummarizeToolEnd_LongArgs_TruncatesAt100Bytes` | args 长度 |
+| `TestSend_OutToolStart_UsesFormatToolStartCall` | ToolStart segment 是 `● name(args)` |
+| `TestSend_OutToolEnd_UsesSummarizeToolResult` | ToolEnd segment 是 `⎿  📄 Read → N lines` |
+| `TestAdapter_Send_OutHeartbeat_PATCHesActiveChunkHeader` | heartbeat → chunk.headerLine 更新 + debounce flush |
+| `TestAdapter_OnPromptEnded_DM_RendersOnLastChunk` | 🎉 贴在 `chain.cursor` 指向的 chunk |
+| `TestAdapter_OnPromptEnded_DM_ResetsCursorForNextTurn` | cursor 清 -1，下 turn 新链 |
+| `TestAdapter_Send_DM_OutReply_FoldsIntoChain` | OutReply 不发独立 bubble，进 active chunk |
+| `TestAdapter_Send_Topic_OutReply_FoldsIntoChain` | topic 路径同上 |
+
+老 v8 测试（`TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` 等）**保留**验证 "新 turn 创建新 chunk"，改写为对 chain 行为做新断言。
+
+### 11.12.17 已知限制
+
+| Limit | 描述 | 缓解 / 后续 |
+|---|---|---|
+| 单 chunk 渲染后超 3900 | 调 `splitTelegramText` 切多张；多 message 在 chat 里不连号 | 接受；极少触发（Tool summarize 保证 segment 短小）|
+| 重启后老 chunk 不被编辑 | chain 不持久化，frozen 自然冷冻 | 接受；视觉一致（old frozen 本就是历史）|
+| LRU cap = 1000 | 1001 chat 同时活跃 → 最早 chain evict | 可调；1MB 内存上限 |
+| chain.cursor / chunks / lastFooter 不持久化 | daemon 重启 = chain 重建 | 接受（与 §11.11 v8 取舍同源）|
+| 没用 Telegram Premium 付费能力 | 长 message 默认 fold 等 | backlog |
+| `sendMessage` 同一 chat 串行速率 | agent turn 短时间内 burst 占位新建 chunk → 5 QPS per-chat 有封顶 | debounce 已经合并 hot path；overflow chunk 是冷路径，300-500ms 间隔足够 |
+
+### 11.12.18 变更日志
+
+- **2026-08-22** - 引入 v9 per-turn multi-chunk chain rolling log，替换 v4 / v8 的"单占位 + 独立 bubble"双轨制。新增文件：`internal/channel/telegram/placeholder_chain.go`（含 chainLRU）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移）。改动：`Adapter.Send` 8 个 Out* case 重写为 `appendSegment` 路径 / `OutHeartbeat` 改 `patchActiveHeader` / `OnPromptEnded` 改 flushChain + 🎉 + cursor reset / `formatTool` 改为调 summarize helpers / `ensurePlaceholder` delegate 到 chain。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。完整 spec 见 §11.12.1-§11.12.17。§11.11 保留为 v4 / v8 历史快照。
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 
@@ -1786,7 +2176,7 @@ Telegram Channel 自治实现 `MessageState`（user-message reaction）与 `Card
 | 轨道 | 源 | 抽象事件 | 渲染目标 | Telegram 实现 |
 | --- | --- | --- | --- | --- |
 | **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, MessageState: {State, MessageID}}` | **userMsgID** | `setMessageReaction(userMsgID, emoji)` |
-| **Card Body** | Topic placeholder（C2） + 事件流 | `OutboundMessage{Kind: OutHeartbeat/OutTool*/OutThinking/...}` | placeholder_message_id / Topic 内独立消息 | `editMessageText` / `sendMessage` |
+| **Card Body（v9 chain）** | Topic placeholder chain（C2 链子，per-turn N 个 chunks）+ 事件流 | `OutboundMessage{Kind: OutHeartbeat/OutTool*/OutThinking/...}` | **active chunk messageID**（chain.cursor 指向）/ frozen chunks 不动 | `editMessageText(activeChunk, render(buf))`（debounce 合并 burst）/ 新建 chunk 时 `sendMessage` |
 
 两者完全独立：一个失败不影响另一个（`MessageState` 渲染失败仅 log warn，不阻塞 card body）；都按 userMsgID / chatID 索引，但服务不同语义。详见 [`docs/feat/F-31-message-state.md`](../feat/F-31-message-state.md) 与 `SPEC.md §2.5`。
 
@@ -2457,3 +2847,8 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 - OutError 的 `<pre>` 块被 RenderMarkdown 二次 escape（§18.5），修法 = 走 raw HTML 路径
 - Markdown 表格 / 颜色 / 字号 / `<hr>` 仍不支持（§15 L6）
 - StatusBar 本身走纯文本（emoji + 中点 `·` + 半角空格），没用 `<b>` `<code>` 强调（避免 OutError 那类 escape 边界），视觉不如 feishu grey footer，但 parse 零失败
+
+## 19. 变更日志
+
+- **2026-08-22（v9 chain rolling log）** - 引入 per-turn multi-chunk chain，替代 v4 / v8 的"单占位 + 独立 bubble"双轨制。完整 spec 见 §11.12。新增文件：`internal/channel/telegram/placeholder_chain.go`（chainKey / placeholderChain / placeholderChunk / chainLRU，含 `appendSegment` / `flushChainNow` / `scheduleFlushDebounced` / `getOrCreateChain` / `patchActiveHeader` / `activeChunkMessageID`）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移，含 `formatToolStartCall` / `summarizeToolResult` / `displayToolArgs` / `compactJSONToolArgs` / `countLines` / `countUniqueFiles` / `truncate`）。改动：`Adapter.Send` 8 个 Out* case（OutReply/OutResult/OutThinking/OutToolStart/OutToolEnd/OutError/OutTaskCreate/OutTaskUpdate）重写为 `appendSegment` 路径；`OutHeartbeat` 改 `patchActiveHeader` + 走 debounce；`OnPromptEnded` 改 `flushChainNow` + 🎉 on active chunk + cursor reset；`formatTool` 内联实现替换为调 summarize helpers；`ensurePlaceholder` delegate 到 `appendSegment` 创建第一张 chunk。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。`TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。debounce window = 250 ms。LRU cap = 1000 chains。阈值三档：3500 chars raw buffer / 3900 chars rendered split / 4096 chars Telegram 硬限。Footer 内存语义：每 chunk 最多一个 footer，footer-bearing 事件（OutReply / OutResult / OutTaskCreate / OutTaskUpdate）来时刷新，其他不动。重启后 chain 失 = 下次事件来时建新 chunk（旧 frozen chunks 在 chat 里保留为历史证据）。
+

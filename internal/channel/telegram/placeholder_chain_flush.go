@@ -233,43 +233,43 @@ func flushChainNow(
 // will invoke flushChainNow. Bursts of appendSegment calls within the
 // window coalesce into a single editMessageText — see docs §11.12.7.
 //
-// Returns nil immediately. The actual flush result is dropped (logged
-// at the Adapter boundary). Errors here should not abort the chat
-// flow.
+// editFn and sendFn are passed in by the caller (the Adapter wraps its
+// apiClient + rate-limiter pipeline; tests supply test doubles). The
+// closures do NOT capture the request's context.Background() ctx because
+// the debounce fires 250ms+ after the request may have returned
+// (request ctx cancelled). The timer creates a fresh background ctx
+// with a 5s timeout.
+//
+// chain.debounceTimer access is serialised under chain.mu so the
+// Stop/Replace pair is atomic with respect to other appends.
+//
+// Returns nil immediately. The actual flush result is dropped
+// (errors are surfaced via the timer's own logger elsewhere; chat
+// flow should not abort on flush failures).
 func scheduleFlushDebounced(
 	chain *placeholderChain,
+	editFn editChunkFn,
+	sendFn sendChunkFn,
 	chatID string,
 	topicID int,
 	userMessageID int,
 ) {
+	chain.mu.Lock()
 	if chain.debounceTimer != nil {
 		chain.debounceTimer.Stop()
 	}
 	chain.debounceTimer = time.AfterFunc(250*time.Millisecond, func() {
-		// Use background; debounce fires after caller may have moved on.
-		// Adapter will log/handle errors in its own flushChainNow
-		// implementation (commit #5).
+		// Fresh ctx: the original request that scheduled this
+		// flush may have already finished (timing window is
+		// 250ms+; Send returns synchronously after the in-memory
+		// append, but the timer is keyed off that exact moment).
+		// The 5s budget is enough for one Telegram edit round-trip.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = flushChainNow(
-			ctx, chain,
-			chatID, topicID, userMessageID,
-			// The Adapter attaches its own edit/send closures once
-			// wiring is complete; for the skeleton Commit#2 we just
-			// log the event via no-op closures.
-			noopEdit, noopSend,
-		)
+		_ = flushChainNow(ctx, chain, chatID, topicID, userMessageID,
+			editFn, sendFn)
 	})
-}
-
-// noopEdit / noopSend are stand-ins so commit #2 compiles cleanly.
-// Commit #5 swaps these for the real Telegram edit/send closures when
-// the Adapter integration lands.
-func noopEdit(_ context.Context, _ string, _ int64, _ string) error {
-	return nil
-}
-func noopSend(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
-	return 0, nil
+	chain.mu.Unlock()
 }
 
 // renderActiveChunkBody builds the (raw, pre-RenderMarkdown) text

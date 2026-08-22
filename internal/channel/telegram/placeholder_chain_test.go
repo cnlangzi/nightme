@@ -9,6 +9,13 @@ import (
 	"time"
 )
 
+// noSendFn is a test-double sendFn that fails if ever invoked.
+// Tests that expect no sendMessage (e.g. dirty=false flushChainNow)
+// wire this in to catch unexpected send calls.
+func noSendFn(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+	return 0, errors.New("sendFn should not be called in this test")
+}
+
 // ---------------------------------------------------------------------------
 // v9 chain primitives — pure in-memory unit tests. Integration with the
 // Telegram API is exercised via adapter_test.go (commit #9/11 backlog).
@@ -226,7 +233,11 @@ func TestFlushChainNow_NoOpWhenClean(t *testing.T) {
 		edits++
 		return nil
 	}
-	if err := flushChainNow(context.Background(), chain, "c", 0, 10, editFn, noopSend); err != nil {
+	noSend := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		t.Fatalf("clean chain should not call sendFn")
+		return 0, nil
+	}
+	if err := flushChainNow(context.Background(), chain, "c", 0, 10, editFn, noSend); err != nil {
 		t.Fatal(err)
 	}
 	if edits != 0 {
@@ -256,7 +267,7 @@ func TestFlushChainNow_RendersHeaderBufFooter(t *testing.T) {
 
 	if err := flushChainNow(context.Background(), chain,
 		"c", 0, 10,
-		editFn, noopSend,
+		editFn, noSendFn,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -286,8 +297,16 @@ func TestScheduleFlushDebounced_MergesBurst(t *testing.T) {
 	chain.dirty = true
 
 	// Schedule 5 flushes within 250ms; only the last should fire.
+	captureEdits := 0
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		captureEdits++
+		return nil
+	}
+	noSend := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		return 0, nil
+	}
 	for i := 0; i < 5; i++ {
-		scheduleFlushDebounced(chain, "c", 0, 10)
+		scheduleFlushDebounced(chain, editFn, noSend, "c", 0, 10)
 		time.Sleep(20 * time.Millisecond)
 	}
 	// Wait one full debounce window + a generous margin.

@@ -933,7 +933,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// drop — OutMessageState's 👌 reaction already announces
 		// the turn.
 		if placeholderAnchor > 0 {
-			return a.patchChainHeader(ctx, rawChatID, topicID, msg)
+			return a.patchChainHeader(rawChatID, topicID, msg)
 		}
 		return nil
 	case messages.OutMessageState:
@@ -1053,19 +1053,23 @@ func (a *Adapter) appendSegmentForKind(
 		ctx, chain,
 		rawChatID, topicID, userMessageID,
 		segment+"\n", sb,
-		a.chainSendFn(), a.chainEditFn(ctx),
+		a.chainSendFn(), a.chainEditFn(),
 	); err != nil {
 		return err
 	}
 
-	scheduleFlushDebounced(chain, rawChatID, topicID, userMessageID)
+	scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+		rawChatID, topicID, userMessageID)
 	return nil
 }
 
 // chainSendFn returns a closure bound to the Adapter's sendTelegramMessage
-// for use by the package-level appendSegment primitive. Sends via the
-// existing rate limiter / retry pipeline (commit #2 wires this to the
-// Adapter apiClient through sendTelegramMessage).
+// for use by the package-level appendSegment primitive. The closure
+// does NOT capture any external context — every call passes its own
+// ctx (which the flushChainNow / debounce-timer paths provide
+// fresh, e.g., ctx.WithTimeout(context.Background(), 5*time.Second)).
+// Capturing the request ctx here would break debounced flushes that
+// fire AFTER the original Request context has been cancelled.
 func (a *Adapter) chainSendFn() sendChunkFn {
 	return func(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error) {
 		res, err := a.sendTelegramMessage(ctx, chatID, topicID, replyToMessageID, text, nil)
@@ -1077,9 +1081,11 @@ func (a *Adapter) chainSendFn() sendChunkFn {
 }
 
 // chainEditFn returns a closure bound to the Adapter's editTelegramMessage.
-// Long-text overflow path in flushChainNow may need to issue multiple
-// edits — each one goes through apiCall's rate limit / retry pipeline.
-func (a *Adapter) chainEditFn(ctx context.Context) editChunkFn {
+// Same context-capture caveat as chainSendFn: every call passes its own
+// ctx. Long-text overflow path in flushChainNow may need to issue
+// multiple edits — each one goes through apiCall's rate limit / retry
+// pipeline.
+func (a *Adapter) chainEditFn() editChunkFn {
 	return func(ctx context.Context, chatID string, messageID int64, text string) error {
 		return a.editTelegramMessage(ctx, chatID, int(messageID), text, nil)
 	}
@@ -1133,7 +1139,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	if err := flushChainNow(
 		ctx, chain,
 		rawChatID, topicID, atoiUserMsgID(userMsgID),
-		a.chainEditFn(ctx), a.chainSendFn(),
+		a.chainEditFn(), a.chainSendFn(),
 	); err != nil && a.logger != nil {
 		a.logger.Warn("telegram: OnPromptEnded flush failed",
 			"chat_id", rawChatID, "err", err)
@@ -1162,7 +1168,6 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 // OutHeartbeat Send case (v9 §11.12.8). Header text is the same
 // "💭 N · 🔧 M · ⏱ ..." shape as v8's heartbeat.
 func (a *Adapter) patchChainHeader(
-	ctx context.Context,
 	chatID string,
 	topicID int,
 	msg messages.OutboundMessage,
@@ -1182,7 +1187,8 @@ func (a *Adapter) patchChainHeader(
 	chain.dirty = true
 	chain.mu.Unlock()
 
-	scheduleFlushDebounced(chain, chatID, topicID, 0)
+	scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+		chatID, topicID, 0)
 	return nil
 }
 
@@ -1196,48 +1202,16 @@ func atoiUserMsgID(s string) int {
 	return n
 }
 
-// renderBodyWithStatusBar appends the per-turn StatusBar footer
-// to a message body when one is available, then renders the
-// combined text through RenderMarkdown (Telegram restricted
-// HTML subset). The footer is wrapped in a chevron-tail ASCII
-// panel (statusbar.RenderPanel — ┌/└ on the left, `›` chevron
-// tail on the right) so users can tell at a glance "this is
-// session metadata, not reply content". The right side opens
-// outward because StatusBar content can extend right and a
-// closed `┐`/`┘` would imply a hard boundary that doesn't
-// exist. Returns body unchanged when StatusBar is empty so a
-// chunk with all-zero statusbar fields (e.g. a streaming
-// OutReply that hasn't received its terminal Usage yet) just
-// omits the trailer — zero-omit per F-45 §1.6.
+// renderBodyWithStatusBar was the v8 trailing-StatusBar helper.
+// v9 chain removed the per-bubble StatusBar trailer; it now lives
+// in chain.lastFooter (§11.12.6) and is rendered by the active
+// chunk's body assembly. The helper is removed; callers in v8 used
+// it through sendRenderedText which v9 no longer routes.
 //
-// The body itself is plain text — RenderMarkdown treats it as
-// markdown source and converts to <b>/<i>/<code>/<a>. Pre-escaped
-// HTML fragments (e.g. OutError's <pre>stderr</pre> block) must
-// NOT go through this helper — use sendRenderedText directly so
-// RenderMarkdown doesn't re-parse them and break the literal tags.
-//
-// No cache: per the F-44 / fix-placehold-card contract, every
-// OutboundMessage that reaches Send has AgentName / Model /
-// SessionID / GitStatus stamped by runtime/chatsession, and
-// Usage is filled at terminal. StatusBarLines is a pure
-// consumer of msg fields — we render what's there, nothing
-// more. See docs/channel/telegram.md §18.
-func (a *Adapter) renderBodyWithStatusBar(body string, msg *messages.OutboundMessage) string {
-	snap := statusbar.StatusBarLines(msg)
-	if len(snap) == 0 {
-		return body
-	}
-	full := body + "\n\n" + statusbar.RenderPanel(snap)
-	rendered, err := RenderMarkdown(full)
-	if err != nil {
-		// Mirror renderInlineText: RenderMarkdown failure → fall
-		// back to escapeHTML on the raw combined string. StatusBar
-		// lines + panel borders are plain text so this preserves
-		// them verbatim.
-		return escapeHTML(full)
-	}
-	return rendered
-}
+// No replacement: callers that still want body+StatusBar-flat-text
+// rendering should compose statusbar.StatusBarLines(msg) +
+// statusbar.RenderPanel(snap) themselves (callers are app-internal
+// — currently none).
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()
@@ -1323,22 +1297,10 @@ func formatTaskList(taskList *agent.AgentTaskListEvent) string {
 	return result.String()
 }
 
-func formatInit(msg messages.OutboundMessage) string {
-	parts := make([]string, 0, 4)
-	if msg.AgentName != "" {
-		parts = append(parts, "Agent: "+msg.AgentName)
-	}
-	if msg.Model != "" {
-		parts = append(parts, "Model: "+msg.Model)
-	}
-	if msg.SessionID != "" {
-		parts = append(parts, "Session: "+msg.SessionID)
-	}
-	if len(parts) == 0 {
-		return msg.Text
-	}
-	return strings.Join(parts, " · ")
-}
+// formatInit was the v8 OutInit pre-render helper. v9 silenced
+// OutInit (matches feishu F-44); session identity now travels
+// through StatusBar on every footer-bearing outbound message.
+// Removed.
 
 // heartbeatText renders the in-turn status ticker. v7 added the
 // `⏱ HH:MM:SS` timestamp so the user can see when the last

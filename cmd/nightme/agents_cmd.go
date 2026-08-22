@@ -20,8 +20,10 @@
 //   - Header + rows are column-aligned via tabwriter. No field is
 //     truncated: every value (NAME, COMMAND, ARGS) is printed
 //     verbatim so operators can copy-paste the command line.
-//   - The "(default: X)" footer comes from cfg.Primary, falling
-//     back to the v0.1 hard-coded "claude" if unset.
+//   - The "(default: X)" footer comes from cfg.Primary. When
+//     cfg.Primary is empty (no auto-detectable builtin, no user
+//     config) the footer is omitted — see
+//     docs/primary-agent-detection.md for the resolution chain.
 //   - Registry build reuses agentregistry.Build so the CLI view
 //     matches what the daemon would actually see at startup.
 package main
@@ -74,6 +76,11 @@ func newAgentsCmd() *cobra.Command {
 // runAgents loads the config, builds the same agent registry the
 // daemon would use, and prints every entry as a table (default) or
 // JSON array (--json).
+//
+// cfg.Primary already reflects auto-detection by the time we read
+// it — config.LoadDefault runs the probe-and-persist step on empty
+// Primary — so the footer below just forwards what the daemon
+// would itself bind to a new ChatSession.
 func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 	cfg, err := config.LoadDefault()
 	if err != nil {
@@ -83,15 +90,11 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 	reg := agentregistry.Build(cfg, "")
 	specs := reg.List()
 	rows := collectAgents(specs) //nolint:staticcheck
-	defaultName := cfg.Primary
-	if defaultName == "" {
-		defaultName = "claude"
-	}
 
 	if f.jsonOutput {
 		return printAgentsJSON(cmd.OutOrStdout(), rows)
 	}
-	printAgentsTable(cmd.OutOrStdout(), rows, defaultName)
+	printAgentsTable(cmd.OutOrStdout(), rows, cfg.Primary)
 	return nil
 }
 
@@ -126,7 +129,9 @@ const (
 // printAgentsTable writes the human-readable table to w. The header
 // is always emitted so users see an unambiguous "registry is empty"
 // instead of "did the command run?". The "(default: X)" footer only
-// prints when there is at least one row.
+// prints when there is a row to attach it to AND a primary is set —
+// a bare "(default: )" footer when no builtin is detectable would
+// just confuse operators.
 func printAgentsTable(w io.Writer, rows []agentRow, defaultName string) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tCOMMAND\tARGS")

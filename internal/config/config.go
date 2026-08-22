@@ -3,23 +3,32 @@
 //
 // Resolution order (later wins):
 //
-//  1. Hard-coded defaults applied to every Config.
+//  1. Hard-coded defaults applied to every Config (applyDefaults).
 //  2. Values deserialized from the YAML file (if Load finds it).
 //  3. Values from NIGHTME_<SECTION>_<KEY> environment variables.
+//  4. (LoadDefault only) Auto-detect cfg.Primary by probing the
+//     registered builtins in registration order. The first one
+//     whose Detect() succeeds becomes Primary and is persisted
+//     to disk so subsequent starts don't re-probe. See
+//     docs/primary-agent-detection.md for the full rationale.
 //
-// Environment variables are useful for secrets (Feishu AppSecret) and
-// CI overrides; the YAML file is the source of truth for humans.
+// Environment variables are useful for secrets (Feishu AppSecret)
+// and CI overrides; the YAML file is the source of truth for
+// humans.
 package config
 
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // Config is the root of the on-disk configuration. Field tags drive
@@ -204,8 +213,65 @@ func DefaultPath() string {
 
 // LoadDefault loads Config from DefaultPath(). If the file is missing
 // it returns a Config populated entirely from defaults (no error).
+//
+// When cfg.Primary is still empty after Load (no YAML value, no
+// env override), LoadDefault probes agent.Builtins in registration
+// order — see internal/agent/registry.go — and uses the first
+// Starter whose Detect() succeeds. The chosen agent name is then
+// persisted via SaveDefault so subsequent starts skip probing.
+//
+// If no builtin is detectable, cfg.Primary stays empty and the
+// caller (typically the daemon's GetOrCreate → chatstore.Bootstrap
+// path) surfaces a "need primaryAgent to create" error. We do
+// NOT write an empty Primary to disk on failure — leaving the
+// field unset lets the user keep editing the file by hand or
+// installing an agent before the next start.
+//
+// See docs/primary-agent-detection.md for the full rationale.
 func LoadDefault() (*Config, error) {
-	return Load(DefaultPath())
+	cfg, err := Load(DefaultPath())
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Primary == "" {
+		if detected := detectPrimaryFromBuiltins(); detected != "" {
+			cfg.Primary = detected
+			if saveErr := SaveDefault(cfg); saveErr != nil {
+				// Non-fatal: the in-memory cfg is correct for this
+				// process, but the next start will re-probe. Log
+				// so operators can spot a misconfigured home dir
+				// or read-only filesystem.
+				slog.Default().Warn("config: failed to persist auto-detected primary",
+					"primary", detected,
+					"err", saveErr)
+			}
+		}
+	}
+	return cfg, nil
+}
+
+// detectPrimaryFromBuiltins iterates agent.Builtins in registration
+// order (cmd/nightme/agents.go init) and returns the name of the
+// first Starter whose Detect() reports the binary is available.
+// Returns "" when nothing is detectable.
+//
+// Kept as a tiny pure helper so LoadDefault's control flow stays
+// readable; no side effects, no logging, no I/O beyond Detect().
+//
+// PTY-backed starters are NOT excluded here — internal/bridge/pty
+// is intentionally absent from agent.Builtins (see
+// docs/primary-agent-detection.md §"Why PTY is not in Builtins"),
+// so this function simply never sees them.
+func detectPrimaryFromBuiltins() string {
+	for _, s := range agent.Builtins.List() {
+		if s == nil {
+			continue
+		}
+		if err := s.Detect(); err == nil {
+			return s.Info().Name
+		}
+	}
+	return ""
 }
 
 // SaveDefault writes cfg atomically to DefaultPath(). Directories
@@ -286,10 +352,13 @@ func Load(path string) (*Config, error) {
 
 // applyDefaults populates zero-valued fields with the shipped
 // defaults. It does not overwrite non-zero values.
+//
+// NOTE: cfg.Primary is intentionally NOT defaulted here. The
+// default is resolved at LoadDefault time by probing
+// agent.Builtins, so that the active agent reflects what the
+// user actually has installed rather than a hard-coded name.
+// See docs/primary-agent-detection.md.
 func applyDefaults(c *Config) {
-	if c.Primary == "" {
-		c.Primary = "claude"
-	}
 	if c.Session.DefaultPtyCols == 0 {
 		c.Session.DefaultPtyCols = 80
 	}

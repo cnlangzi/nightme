@@ -8,20 +8,27 @@
 //  1. Implement a `Starter` (Info/Detect/Start) in the relevant
 //     `internal/bridge/<protocol>/` package (or extend one). Use
 //     the bridge's exported `NewStarter(...)` constructor.
-//  2. Add a Builtins.Register line below.
+//  2. Add a Builtins.Register line below — append to the END of
+//     the existing list. Registration order drives primary-agent
+//     auto-detection (see docs/primary-agent-detection.md), so
+//     inserting earlier pushes other agents down the priority
+//     chain.
 //
 // There is no name-based dispatch table elsewhere in the binary —
 // if an agent is not listed here and not in user config, /run
 // returns "unknown agent". This is intentional.
 //
 // Cross-platform: this file compiles on both Unix and Windows.
-// The bash entry below is the only one with a runtime GOOS gate,
-// since `bash` is not on PATH on a stock Windows install.
+// All builtin starters are cross-platform — binary-not-found
+// errors surface from Detect() at spawn time, never at
+// registration. The internal/bridge/pty package is shared
+// infrastructure (used by bridges that need a PTY transport and
+// by user-defined cfg.Agents entries) and is intentionally NOT
+// registered here; see docs/primary-agent-detection.md §"Why
+// PTY is not in Builtins".
 package main
 
 import (
-	"runtime"
-
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
@@ -29,7 +36,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/dsh"
 	"github.com/cnlangzi/nightme/internal/bridge/opencode"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
-	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
 
 func init() {
@@ -103,16 +109,5 @@ func init() {
 	// the structured bridge only works for builtin registration,
 	// not for the PTY fallback in agentregistry.Build.
 	agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))
-
-	// bash — example PTY-backed entry. Shows the registration
-	// shape for any binary the user might want to launch without
-	// an ACP/JSON-IO layer. Unix-only: Windows has no `bash` on
-	// PATH (cmd.exe + PowerShell are the shells of record there;
-	// WSL / git-bash are user-installed). The nightly Windows
-	// users that want a shell fallback can add a user-defined
-	// entry in their config.yaml.
-	if runtime.GOOS != "windows" {
-		agent.Builtins.Register(pty.NewStarter("bash", "bash", nil, nil, 0, 0))
-	}
 }
 

@@ -153,7 +153,9 @@ Topic
 | `OutError` | 新建错误消息或更新占位消息 | Topic | 是 |
 | `OutTaskCreate` / `OutTaskUpdate` | 更新 Task 消息或占位消息 | Topic | 建议使用可更新消息 |
 | `OutMessageState` | `setMessageReaction` | 对应入站用户消息 | 是 |
-| `OutCommandReply` | 发送普通消息 | Topic | 是 |
+| `OutCommandReply` | 发送普通消息 + 末尾拼 StatusBar | Topic | 是 |
+
+**所有 text 出口**(`OutReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate` / `OutError` / `OutCommandReply`)和 `OutHeartbeat` 占位 PATCH,body 末尾都拼 StatusBar 三行 footer(🤖 Identity / 💰 Usage / 📁 Git),用 `────────` 分隔。详见 §18。`OutChoice` / `OutMessageState*` / `OutInit` 不挂(分别走 InlineKeyboard card / reactions / silent drop)。
 
 第一版建议采用“**占位状态 + 事件详情**”双层策略：
 
@@ -1885,6 +1887,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 - 飞书有 receipt header 区域专门承载 heartbeat，PATCH 时不影响 log entries。
 - Telegram 占位消息就是"Working..."那一条，PATCH 直接改文本（替换 thinking/tool 计数）。
 - 缺点：占位消息上**不能**同时显示工作状态和历史 thinking/log（飞书可以分层）。
+- **§18 plan-D 改进**：占位 PATCH 文本由 `[status line] + ──────── + StatusBar` 三段组成，每条 OutHeartbeat 都重新拼接 footer；用户一眼看到当前 turn 的 identity / usage / git。详见 §18.4。
 
 ### 15.3 未实现类（设计意图存在，本次没做）
 
@@ -1951,6 +1954,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 | C4 | 2026-08-22 reaction chatID namespacing（修 `handleMessageReaction` 用 raw chatID 导致 emoji reaction 进不了 gtw 的 bug） | 已实现 |
 | C5 | 2026-08-22 stateStore TTL on-load prune（30 天未活动 topic 自动清理） | 已实现 |
 | C6 | 2026-08-22 sendChoice / patchChoice / handleInputClick / handleForceReply / callback wizard editMessageText 把 session ChatID 传给 Telegram API 的生产路径 bug（修 `rawChatIDFromSession` helper） | 已实现 |
+| C7 | 2026-08-22 plan-D StatusBar 全量贴附：抽 `internal/statusbar` 共享包，feishu adapter 切到 `statusbar.StatusBarLines`，telegram adapter 所有 text 出口拼 StatusBar trailer，占位 PATCH 也带 footer，详见 §18 | 已实现 |
 
 后续修订请直接在本节追加，并把对应 issue 编号填进去。
 
@@ -2210,3 +2214,102 @@ client := httpclient.DefaultWithTimeout(10*time.Second)
 - 代理需求来自环境（用户机器的网络），不是配置决策
 - 配置项会被各种 secret 管理工具、CI/CD 流水线暴露在 diff 里
 - 环境变量是 OS-level 的标准机制，工具链（Docker、Kubernetes、systemd）都支持
+
+## 18. StatusBar 全量贴附（2026-08-22 plan-D）
+
+Telegram 没有"card"结构（见 §15 L1），"rolling-log card"模式（feishu F-25 / F-40）做不到 —— 同一张消息上 append 多条 log entry，本质依赖飞书 `<div>` 累积结构。Telegram 的 `editMessageText` 是整体替换 + 48h 限制 + 4096 字符上限，无法承载 turn 长 content。
+
+**结论**：每条发出的文本消息都附 StatusBar trailer，而不是依赖单一占位或卡片。
+
+### 18.1 字段与渲染
+
+StatusBar 三行由 `internal/statusbar.StatusBarLines(&msg)` 生成，从 `OutboundMessage` flat 字段读取：
+
+```text
+Line 1: 🤖: AgentName · Model · SessionID       (Identity)
+Line 2: 💰:「 new / cache / out · X% (window) · $cost 」   (Usage)
+Line 3: 📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N · [#PR](url)   (GitStatus)
+```
+
+每行 zero-omit（F-45 §1.6）。整行字段全空 → 该行不渲染。StatusBar 完全为空 → 不发 divider，只发 body。
+
+完整契约 / 测试在 `internal/statusbar/statusbar_test.go`（从 feishu F-45 §1.6 的 `usage_footer_test.go` 迁移，15 个 `Test*` 函数 + 1 个 8 行 table-driven 子用例，全覆盖）。
+
+### 18.2 贴附规则
+
+| Kind | 行为 |
+|---|---|
+| `OutReply` / `OutResult` / `OutCommandReply` / `OutThinking` / `OutTaskCreate` / `OutTaskUpdate` | `body + "\n\n---\n" + StatusBar`，整体走 `RenderMarkdown`（`<b>` `<code>` `<a>` 受限 HTML 子集） |
+| `OutToolStart` / `OutToolEnd` | `formatTool(msg)`（🔧/✅ prefix + tool name + args/output）+ StatusBar trailer |
+| `OutError` | `body + "<pre>" + escapeHTML(StderrTail) + "</pre>"` + StatusBar（raw 拼接，**不走** RenderMarkdown，因为预 escape 的 `<pre>` 标签会被 RenderMarkdown 当字面量再次 escape） |
+| `OutHeartbeat`（占位 PATCH） | `status line + "\n\n---\n" + StatusBar`，整体走 RenderMarkdown |
+| `OutChoice` / `OutChoicePatch` | **不挂**（InlineKeyboard 自含，挂 footer 污染选择 UI） |
+| `OutMessageState` / `OutMessageStateRemoved` | **不挂**（reactions 独立轨道，§14.1） |
+| `OutInit` | **不挂**（silent drop，F-44 对齐） |
+
+### 18.3 无 cache —— pure consumer 契约
+
+`StatusBarLines(&msg)` 是 `internal/statusbar` 的纯 renderer，**不持有任何 state**：
+
+- `Identity`（AgentName / Model / SessionID）：由 `MessageStateBus` subscriber 在 dispatch 路径 stamp 到 OutboundMessage（F-44 / fix-placehold-card）
+- `Usage`：由 bridge 在终态 OutResult 上填（Claude Code `result.usage + result.modelUsage`，Pi `message_end.usage`）；streaming 中间 chunk 该字段为 nil → `StatusBarLines` zero-omit Line 2（F-45 §1.6）
+- `GitStatus`：由 chatsession 在 `SetSelectedCwd` / `/gtw commit` / `/gtw pr` 时刷，runtime 透传
+
+到 `Send` 时，**该有的字段都已经填好**；空就是空（zero-omit 兜底，不发空 divider）。早期曾考虑过加 `lastStatusBar` 跨 chunk fallback 缓存，后来撤掉——理由是这等于在 channel 层帮 runtime 兜"忘填字段"的责任，违反职责边界。F-45 的 zero-omit + F-44 的 Identity stamp 已经覆盖所有"空字段"场景。
+
+
+
+### 18.4 占位（PATCH）也带 footer
+
+per-turn 占位的两步生命周期：
+
+**Step 1：handleMessage 创建占位**（`ensurePlaceholder`）—— 文本是裸的 `<b>🤖 Working...</b> · ⏱ HH:MM:SS`，**不含 footer**。原因：handleMessage 这一刻 OutboundMessage 还没生成，runtime 还没 stamp Identity / Usage / GitStatus —— 没东西可拼。等 runtime 出 OutMessageState / OutReply 时再决定 footer 内容。
+
+**Step 2：首次 OutHeartbeat PATCH 叠加 footer** —— `[status line] + \n\n---\n + StatusBar`（走 `renderBodyWithStatusBar`）。后续每条 OutHeartbeat 都重新拼接 footer：
+
+```text
+turn N：用户发 "hi N"
+    └─ handleMessage 时刻 →  placeholder = "🤖 Working... · ⏱ HH:MM:SS"            (无 footer)
+    └─ 首次 OutHeartbeat PATCH →  "💭 0 · 🔧 0 · ⏱ HH:MM:SS ──────── <footer>"   (footer 落地)
+    └─ 后续 OutHeartbeat        →  "💭 2 · 🔧 1 · ⏱ HH:MM:SS ──────── <footer>"
+    └─ OutResult                →  "[result text] ──────── <footer>"   (独立气泡)
+    └─ OnPromptEnded            →  不改 placeholder 文本，贴 🎉 reaction
+```
+
+`ensurePlaceholder` 和 `ensurePlaceholderForHeartbeat`（race-window 懒创建）走同一 `placeholderInitialText(now)` helper，保证两路创建不会漂移。
+
+### 18.5 OutError 的特殊处理
+
+OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签。但当前 `RenderMarkdown` 不识别已存在的 `<pre>` 标签，会作为字面量再次 escapeHTML，产生 `&lt;pre&gt;...&lt;/pre&gt;`。这是**预先存在**的行为（`internal/channel/telegram/render.go` 全局 escapeHTML 策略），跟 StatusBar 无关 —— 锁在 `TestAdapter_Send_DM_OutError_AppendsStatusBar`。
+
+未来要让 stderr 显示为真正的 `<pre>` 块，需要绕过 RenderMarkdown 走 raw HTML 路径（参考 feishu `sendRawOutText`）；本次不动。
+
+### 18.6 跟 feishu 的差异
+
+| | feishu | Telegram |
+|---|---|---|
+| StatusBar 载体 | Card footer（`<hr> + <div text_color="grey">`） | 文本 trailer（`──────── + 三行`） |
+| 同 turn 内 StatusBar 重复 | 否（footer 跟 card 一对一） | 是（每条消息都拼一次） |
+| Streaming chunk 渲染 | PATCH 同一张 card 累积 div | 每条 sendMessage 独立气泡 + trailer |
+| 编辑语义 | card 整体 PATCH（50 元素 / 30KB 上限） | 整体替换 text（4096 字符 + 48h 上限，见 §15 L2） |
+| Edit 触发条件 | AppendEntry / RolloverTo | 每条 OutXxx 都触发 |
+
+**为什么 Telegram 选择"重复"而非"折叠"**：无 card 元素 + 无原生 divider，只能重复。Topic 本身已经在做 turn 范围隔离（主窗口不污染，§11.7），trailer 的重复换来"每条消息自含上下文"的 UX 收益。
+
+### 18.7 验收清单
+
+- [x] `internal/statusbar/statusbar.go` export `StatusBarLines`，feishu adapter 5 处 `formatStatusBarLines` 调用全部切到 `statusbar.StatusBarLines`（`internal/channel/feishu/adapter.go`）
+- [x] feishu `usage_footer.go` / `usage_footer_test.go` 已删除（按 `no-type-aliases` 不留薄壳）
+- [x] telegram adapter Send switch 的 text 出口全走 `renderBodyWithStatusBar`（OutError 走 raw 拼接特例）
+- [x] `OutHeartbeat` 占位 PATCH 拼接 footer
+- [x] `OutChoice` / `OutMessageState*` / `OutInit` 不挂
+- [x] 无 cache —— `StatusBarLines(&msg)` 纯 consumer，零状态
+- [x] 测试矩阵（11 个 case）：`TestAdapter_Send_DM_OutReply_AppendsStatusBar` / `OutResult` / `OutThinking` / `OutToolStart` / `OutCommandReply` / `OutError` / `OutHeartbeat_PATCHesPlaceholderWithStatusBar` / `OutReply_NoFieldsNoCache_NoTrailer` / `OutChoice_NoStatusBar` / `OutMessageState_NoTextChange` / `Topic_OutReply_AppendsStatusBar` / `OutReply_OutOrderPreservesCache`
+- [x] feishu 16 个测试不变，迁移后零回归
+
+### 18.8 已知限制
+
+- StatusBar 在每条消息上重复，长 turn 会产生 N 份同形 footer。Topic 内可折叠视觉隔离缓解，但仍是平台 trade-off（§15 L5）
+- OutError 的 `<pre>` 块被 RenderMarkdown 二次 escape（§18.5），修法 = 走 raw HTML 路径
+- Markdown 表格 / 颜色 / 字号 / `<hr>` 仍不支持（§15 L6）
+- StatusBar 本身走纯文本（emoji + 中点 `·` + 半角空格），没用 `<b>` `<code>` 强调（避免 OutError 那类 escape 边界），视觉不如 feishu grey footer，但 parse 零失败

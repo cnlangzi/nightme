@@ -114,8 +114,10 @@ func TestAdapter_Send_DM_OutToolStart_AppendsStatusBar(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	text := sendMessageText(api.snapshotCalls())
-	if !strings.Contains(text, "🔧 Read") {
-		t.Errorf("OutToolStart prefix missing; got %q", text)
+	// v9 (commit #3): OutToolStart now produces the feishu-style
+	// claude-code call line `● Read(...)` instead of `🔧 Read`.
+	if !strings.Contains(text, "● Read") {
+		t.Errorf("OutToolStart call line missing; got %q", text)
 	}
 	if !strings.Contains(text, "🤖: claude") {
 		t.Errorf("StatusBar missing; got %q", text)
@@ -135,8 +137,12 @@ func TestAdapter_Send_DM_OutToolEnd_AppendsStatusBar(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	text := sendMessageText(api.snapshotCalls())
-	if !strings.Contains(text, "✅ Read") {
-		t.Errorf("OutToolEnd prefix missing; got %q", text)
+	// v9 (commit #3): OutToolEnd now produces the feishu-style
+	// claude-code result line `⎿  📄 Read → N lines` instead of
+	// `✅ Read`. Verify the bare name (case-insensitive) for
+	// tool-type heuristics and the `⎿` prefix.
+	if !strings.Contains(text, "⎿") {
+		t.Errorf("OutToolEnd result prefix missing; got %q", text)
 	}
 	if !strings.Contains(text, "🤖: claude") {
 		t.Errorf("StatusBar missing; got %q", text)

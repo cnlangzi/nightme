@@ -1944,17 +1944,20 @@ func TestFormatTool(t *testing.T) {
 	if formatTool(messages.OutboundMessage{}) != "" {
 		t.Fatal("empty tool")
 	}
-	if !strings.Contains(formatTool(messages.OutboundMessage{
+	// v9 (commit #3): call / result lines now match feishu's
+	// claude-code-style format. ToolStart emits a `● name(args)`
+	// call line; ToolEnd emits a `⎿  …` result summary.
+	if got := formatTool(messages.OutboundMessage{
 		Kind: messages.OutToolStart,
 		Tool: &messages.ToolInfo{Name: "read", Args: "x"},
-	}), "🔧") {
-		t.Fatal("start emoji")
+	}); got != "● read(x)" {
+		t.Fatalf("ToolStart = %q, want %q", got, "● read(x)")
 	}
-	if !strings.Contains(formatTool(messages.OutboundMessage{
+	if got := formatTool(messages.OutboundMessage{
 		Kind: messages.OutToolEnd,
 		Tool: &messages.ToolInfo{Name: "read", Output: "ok"},
-	}), "✅") {
-		t.Fatal("end emoji")
+	}); got != "⎿  📄 Read → 1 lines" {
+		t.Fatalf("ToolEnd = %q, want %q", got, "⎿  📄 Read → 1 lines")
 	}
 }
 

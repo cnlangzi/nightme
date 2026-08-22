@@ -1049,13 +1049,9 @@ func (a *Adapter) appendSegmentForKind(
 		sb = statusbar.StatusBarLines(&msg)
 	}
 
-	userMsgID, err := strconv.Atoi(strconv.Itoa(userMessageID))
-	if err != nil {
-		return err
-	}
 	if err := appendSegment(
 		ctx, chain,
-		rawChatID, topicID, userMsgID,
+		rawChatID, topicID, userMessageID,
 		segment+"\n", sb,
 		a.chainSendFn(), a.chainEditFn(ctx),
 	); err != nil {

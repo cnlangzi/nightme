@@ -32,6 +32,27 @@ type Manager struct {
 	states map[string]Context           // chatID -> active /gtw fix snapshot
 	drafts map[string]map[string]*Draft // chatID -> requestID -> pending draft
 
+	// runs is the per-chat run lock that serialises /gtw
+	// subcommand execution. Acquired at the top of
+	// Factory.Handle (cmd.go), released on Handle return.
+	//
+	// Rationale: F-59 made every slash command async (a fresh
+	// goroutine per inbound), which means two /gtw fix / push /
+	// pr calls landing in quick succession now race against
+	// each other on Manager.states, Manager.drafts, the worktree
+	// directory, cs.SelectedCwd, and the agent session. The
+	// chatID is the natural serialisation boundary — two chats
+	// must remain independent — so we lazy-allocate one mutex
+	// per chatID and never free it. Never-freeing matches the
+	// chatsession.Manager.hintLocks policy: freeing a *sync.Mutex
+	// while another goroutine is blocked on it would race.
+	//
+	// Memory: one *sync.Mutex + sync.Map overhead (~80 bytes)
+	// per chatID seen. A busy daemon with thousands of chats
+	// sees sub-megabyte footprint; cleanup isn't worth the
+	// race risk.
+	runs sync.Map // map[chatID]*sync.Mutex
+
 	// now is overridable for tests; defaults to time.Now.
 	now func() time.Time
 	// deps is the HandlerDeps shared by all reaction handlers
@@ -51,6 +72,40 @@ func NewManager() *Manager {
 		drafts: make(map[string]map[string]*Draft),
 		now:    time.Now,
 	}
+}
+
+// --- run lock (per-chat serialisation) ---
+
+// runLockFor returns the per-chat mutex that serialises /gtw
+// subcommand execution for chatID. Factory.Handle acquires it
+// before the subcommand switch and releases it via defer on
+// every return path (early validation, unknown subcommand,
+// normal completion).
+//
+// chatID == "" returns nil so the caller can no-op safely in
+// tests and synthetic inputs that drive Handle directly
+// without a ChatID. Callers MUST nil-check the return value
+// before Lock; the defer Unlock must also be guarded:
+//
+//	if mu := mgr.runLockFor(input.ChatID); mu != nil {
+//	    mu.Lock()
+//	    defer mu.Unlock()
+//	}
+//
+// Per-chat (not Manager-wide) so a slow /gtw commit in chat A
+// never blocks /gtw sync in chat B. Lazily allocated via
+// sync.Map.LoadOrStore; entries are never freed (see the runs
+// field doc for the rationale).
+func (m *Manager) runLockFor(chatID string) *sync.Mutex {
+	if chatID == "" {
+		return nil
+	}
+	if v, ok := m.runs.Load(chatID); ok {
+		return v.(*sync.Mutex)
+	}
+	mu := &sync.Mutex{}
+	actual, _ := m.runs.LoadOrStore(chatID, mu)
+	return actual.(*sync.Mutex)
 }
 
 // --- context (per-chat fix snapshot) ---

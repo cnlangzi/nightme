@@ -631,7 +631,7 @@ func placeholderInitialText(now time.Time) string {
 // subsequent ensurePlaceholder call would overwrite
 // state.PlaceholderMessageID with a new placeholder, leaving
 // the heartbeat-created bubble in the chat as a permanent
-// "🤖 Working..." without terminal PATCH or 🎉 reaction.
+// "🤖 Working..." without terminal PATCH or ✅ reaction.
 // Returning (0, nil) is safe: Send's OutHeartbeat path
 // silently drops when placeholderAnchor == 0 (the in-turn status
 // ticker is then conveyed only after handleMessage lands).
@@ -941,14 +941,16 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			return err
 		}
 		// v6.1: Telegram bots are limited to ONE reaction per
-		// message (REACTIONS_TOO_MANY if you try to set >1). The
-		// cumulative 👌+🤔+🎉 list from v6 would error out. Each
+		// message (REACTIONS_TOO_MANY if you try to set >1). Each
 		// state emits a single reaction that REPLACES the prior
 		// one (Telegram setMessageReaction is SET, not append) —
 		// the user sees the emoji CHANGE as state progresses:
-		//   Queued    → 👌 (received)
-		//   Submitted → 🤔 (thinking, replaces 👌)
-		//   Done      → 🎉 (complete, replaces 🤔)
+		//   Queued    → "" (silent drop; placeholder text
+		//     "🤖 Working..." already announces arrival)
+		//   Submitted → 👌 (thinking — replaces prior emoji on
+		//     the single reaction slot)
+		//   Done      → "" (silent drop; OnPromptEnded stamps
+		//     ✅ on the per-turn placeholder instead)
 		reactions := []map[string]any{{"type": "emoji", "emoji": emoji}}
 		if err := a.setMessageReactions(ctx, rawChatID, messageID, reactions); err != nil {
 			return err
@@ -983,14 +985,14 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// in the wire payload. The pre-existing behaviour
 		// (TestAdapter_Send_OutError_Diagnostic) already locks
 		// the single-escape output, so we stitch the StatusBar
-		// trailer in raw form and let sendRenderedText's one
+		// panel in raw form and let sendRenderedText's one
 		// RenderMarkdown pass handle the escape consistently.
 		text := msg.Text
 		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 			text += "\n\n<pre>" + escapeHTML(msg.Diagnostic.StderrTail) + "</pre>"
 		}
 		if snap := statusbar.StatusBarLines(&msg); len(snap) > 0 {
-			text += "\n\n---\n" + strings.Join(snap, "\n")
+			text += "\n\n" + statusbar.RenderPanel(snap)
 		}
 		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor, text)
 	case messages.OutInit:
@@ -1013,14 +1015,14 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	}
 }
 
-// OnPromptEnded marks the turn as done by stamping a 🎉
+// OnPromptEnded marks the turn as done by stamping a ✅
 // reaction on the per-turn placeholder.
 //
 // v6.3: Telegram bot single-reaction budget — the user
 // message's reaction slot is reserved for MessageSubmitted
 // ("AI thinking"). OnPromptEnded does NOT overwrite that
-// slot with 🎉; the terminal visual is conveyed via the
-// per-turn placeholder's 🎉 reaction.
+// slot with 👌; the terminal visual is conveyed via the
+// per-turn placeholder's ✅ reaction.
 //
 // userMsgID is part of the interface contract (and the runtime
 // still threads it through eventbus e.UserMsgID) but is no longer
@@ -1051,11 +1053,17 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	}
 	// v6.3: Telegram bot single-reaction budget — the user
 	// message's reaction slot is reserved for MessageSubmitted
-	// ("AI thinking"). OnPromptEnded does NOT overwrite that
-	// slot with 🎉; the terminal visual is conveyed via the
-	// per-turn placeholder's 🎉 reaction below. (v6.1 used to
-	// stack 🎉 on the user message here, which overwrote the
-	// thinking reaction and lost mid-turn state visibility.)
+	// (👌). OnPromptEnded does NOT overwrite that slot; the
+	// terminal visual is conveyed via the per-turn placeholder's
+	// 🎉 reaction below.
+	//
+	// 🎉 is in the official Telegram ReactionTypeEmoji
+	// whitelist (see gist.github.com/Soulter/3f22c8e.../
+	// reactions-txt for the canonical list). Earlier designs
+	// tried ✅ for "Done" but U+2705 is OUTSIDE the whitelist
+	// and Telegram returns REACTION_INVALID — see docs/channel/
+	// telegram.md §11.11.3 for the live API probe that
+	// motivated the fall-back.
 	//
 	// 🎉 on per-turn placeholder — NO text PATCH; placeholder
 	// keeps its last heartbeat text.
@@ -1069,7 +1077,10 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 // renderBodyWithStatusBar appends the per-turn StatusBar footer
 // to a message body when one is available, then renders the
 // combined text through RenderMarkdown (Telegram restricted
-// HTML subset). Returns body unchanged when StatusBar is empty
+// HTML subset). The footer is wrapped in a Q2-style ASCII panel
+// (statusbar.RenderPanel — top-left ┌ + bottom-right ┘ corners)
+// so users can tell at a glance "this is session metadata, not
+// reply content". Returns body unchanged when StatusBar is empty
 // so a chunk with all-zero statusbar fields (e.g. a streaming
 // OutReply that hasn't received its terminal Usage yet) just
 // omits the trailer — zero-omit per F-45 §1.6.
@@ -1091,12 +1102,13 @@ func (a *Adapter) renderBodyWithStatusBar(body string, msg *messages.OutboundMes
 	if len(snap) == 0 {
 		return body
 	}
-	full := body + "\n\n---\n" + strings.Join(snap, "\n")
+	full := body + "\n\n" + statusbar.RenderPanel(snap)
 	rendered, err := RenderMarkdown(full)
 	if err != nil {
 		// Mirror renderInlineText: RenderMarkdown failure → fall
 		// back to escapeHTML on the raw combined string. StatusBar
-		// lines are plain text so this preserves them verbatim.
+		// lines + panel borders are plain text so this preserves
+		// them verbatim.
 		return escapeHTML(full)
 	}
 	return rendered
@@ -1302,21 +1314,22 @@ func (a *Adapter) apiCall(ctx context.Context, method string, params map[string]
 // during the long-running async turn, when no other UI signal
 // is changing. MessageQueued is too transient to be useful
 // (gone within ~50ms in a healthy run), MessageDone is captured
-// separately by the per-turn placeholder text PATCH + 🎉
+// separately by the per-turn placeholder text PATCH + ✅
 // reaction on the placeholder message (see OnPromptEnded).
 //
 // Probed via live API (docs/channel/telegram.md §11.11.3):
 //   - MessageQueued    → "" (silent drop; placeholder text
 //     "🤖 Working..." already announces the
 //     message reached the adapter)
-//   - MessageSubmitted → 🤔  ("AI thinking")
+//   - MessageSubmitted → 👌  ("AI thinking" — OK-hand emoji,
+//     the single reaction slot is reserved for the long-running
+//     async turn)
 //   - MessageDone      → "" (silent drop; OnPromptEnded
-//     handles terminal state on the
-//     placeholder message instead)
+//     stamps ✅ on the per-turn placeholder instead)
 func mapStateToTelegramEmoji(state agent.MessageState) string {
 	switch state {
 	case agent.MessageSubmitted:
-		return "🤔"
+		return "👌"
 	}
 	return ""
 }

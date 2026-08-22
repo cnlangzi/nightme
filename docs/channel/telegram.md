@@ -4,12 +4,14 @@
 > **Scope**: nightme Telegram Bot API 适配器（`internal/channel/telegram/*`）
 > **目的**: 在 Telegram Forum Supergroup 中，将主窗口作为会话入口，将每个 qino 会话映射为一个 Topic，并在 Topic 内承载占位状态、thinking、工具调用、结果和交互卡。
 > **Related docs**:
+>
 > - [feishu.md](./feishu.md) - 飞书 receipt、reply-in-thread 和交互卡实现
 > - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) - Channel 抽象与 Gateway 边界
 > - [F-message-flow.md](../feat/F-message-flow.md) - 消息生命周期
 > - [SPEC.md](../SPEC.md) - 统一消息模型
 >
 > **Telegram 官方文档**:
+>
 > - [Telegram Bot API](https://core.telegram.org/bots/api)
 > - [`createForumTopic`](https://core.telegram.org/bots/api#createforumtopic)
 > - [`Message`](https://core.telegram.org/bots/api#message)
@@ -214,7 +216,7 @@ func sessionChatID(rawChatID string, threadID int) string {
 ```
 
 | 场景 | Telegram 原生字段 | **InboundMessage.ChatID** |
-|---|---|---|
+| --- | --- | --- |
 | DM (private) | chat.id = `8684538097` | `tg_8684538097` |
 | 群主窗口 (Forum 关) | chat.id = `-10012345` | `tg_-10012345` |
 | 群主窗口 (Forum 开) | chat.id = `-10012345`, thread_id = 0 | `tg_-10012345` |
@@ -400,6 +402,7 @@ Telegram 没有类似飞书注册 API 的“扫码后自动创建 Bot”能力�
 ```
 
 `nightme login telegram` 的实现要点：
+
 - 不做 QR 扫码（飞书模式）。Telegram 没有第三方代注册 bot 的接口。
 - 打印 @BotFather 走查步骤（12 行说明，适配 80x24 终端）。
 - 从 stdin 读取 token，过滤空白行，10 分钟超时。
@@ -420,6 +423,7 @@ Telegram 没有类似飞书注册 API 的“扫码后自动创建 Bot”能力�
    daemon 启动后用户消息进来时会正常处理。
 
 实现细节：
+
 - 只接私聊消息（chat.type == "private"）；群消息跳过，避免在群里广播 greeting。
 - 跳过 bot-from 消息（防止把别的 bot 的消息误认为 owner）。
 - greeting 内容：`Hi, this is NightMe 👋. Your pair programmer.` /
@@ -705,6 +709,7 @@ chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
 ```
 
 **修订 (2026-08)**：原来的"主窗口创建 nightme sentinel topic"流程删除。理由:
+
 - `tg_<chat.id>:<thread_id>` 拼接让 chatID 已经是(chat, topic)二元组的纯函数 — 不需要 Telegram 给你分配任何 sentinel topic
 - sentinel topic 由 Telegram 分配,ID 不可控,daemon 重启 / state 丢失会导致 ID 漂移 → 违反 chatID 稳定性约束
 - 编译选项里去掉了 `topic_mode: separate` / `shared` 开关(§11.6 修订)
@@ -823,9 +828,10 @@ turn 1: 用户发 "hi 1" (userMsgID=10)
     └─ OnPromptEnded                    → setMessageReaction(700, 🎉)  ← v6.3: 不动 user msg reaction
 ```
 
-**v6.3 单 emoji 预算**（user 决定）：Telegram bot 一次只能贴 1 个 reaction 到单条消息。预算用在最有信息量的 state（`MessageSubmitted` = 🤔 "AI 在想"），其他 silent drop。
+**v6.3 单 emoji 预算**（user 决定）：Telegram bot 一次只能贴 1 个 reaction 到单条消息。预算用在最有信息量的 state（`MessageSubmitted` = 👌 "AI 在想"），其他 silent drop。
 
 **v7 改进**：
+
 - **Placeholder 也用 reply chain** 挂到 user message（之前是独立消息，现在视觉上是 user message 下的 reply 群）
 - **占位文本带 `⏱ HH:MM:SS` 时间戳**（`⏱ 15:18:08`），user 一眼看到 "agent 在 15:18:30 还在跑"
 - **Race-window guard**（codex review 2026-08-22）：`ensurePlaceholderForHeartbeat` 在 `state.UserMessageID == ""` 时返回 `(0, nil)` 而不是 lazy-create。旧行为会 orphan 一个 placeholder（handleMessage 后续 `ensurePlaceholder` 会覆盖 `state.PlaceholderMessageID`，但旧 P1 已经在 chat 里没有被 PATCH 也没有 🎉）。新行为让 handleMessage 创建 canonical placeholder，heartbeat 走 silent drop。
@@ -848,17 +854,70 @@ nightme: (reply to hi 2) 🤖 Working... · ⏱ 15:18:08  ← P2 (v7: reply chai
 
 **v7 改进**：所有 bot 消息（placeholder + OutXxx）**都挂在 user message 下**，形成统一 reply thread。占位文本带 `⏱ HH:MM:SS` 时间戳，user 一眼看到 "agent 正在 15:18:25 处理"。
 
-#### 11.11.3 emoji 选择（v5）+ append 语义（v6）
+#### 11.11.3 emoji 选择
 
-v5 (2026-08-22) 用 live API probe 确认了 Telegram Bot API `setMessageReaction` 的**JSON body 白名单**：
+Telegram Bot API 的 `setMessageReaction` 走固定 `ReactionTypeEmoji` 白名单(见 [gist.github.com/Soulter/3f22c8.../reactions-txt](https://gist.github.com/Soulter/3f22c8e5f9c7e152e967e8bc28c97fc9))。白名单外 emoji(包括 ✅ U+2705) API 返 `REACTION_INVALID`。
 
-| 阶段 | emoji | 语义 |
-|---|---|---|
-| 👌 MessageQueued | "收到 / OK" | 轻量确认 |
-| 🤔 MessageSubmitted | "AI 思考" | 跟 ChatGPT / Claude / Copilot 等行业惯例对齐（替代 v4 的 🧠，🧠 在 JSON API 里 REACTION_INVALID） |
-| 🎉 MessageDone | "完成 / 庆祝" | 通用（替代 v4 的 ✅，✅ 在 JSON API 里 REACTION_INVALID） |
+nightme 当前采用:
 
-**关键约束**：`setMessageReaction` 的 JSON body 变体只接受 Telegram emoji 白名单。🧠、✅、🥳、⭐、🙄 等在 JSON body 下返 `REACTION_INVALID`；form-data body 变体则宽松得多（能接受几乎所有 unicode）。nightme daemon 用 JSON body，所以受此白名单限制。
+| 阶段 | emoji | 语义 | 贴哪条消息 |
+| --- | --- | --- | --- |
+| MessageSubmitted | 👌 OK-hand | "AI thinking" | user message(占单 reaction slot) |
+| OnPromptEnded | 🎉 party popper | "完成 / 庆祝" | per-turn placeholder(独立消息,不复用 slot) |
+
+`✅` 不可用 —— U+2705 check mark 不在 ReactionTypeEmoji 白名单里。v4 → v6.3 → v8(v8 = 现在的 plan-D 状态)讨论过程中,曾用 ✅ / 🎉 两种,最终 v5 live probe 确认 ✅ 被拒,稳定落 🎉。若后续 Telegram 把 ✅ 加进白名单,可考虑切回 ✅("完成" 语义更克制)。
+
+**v6.3 单 emoji 预算**:user message 的单 reaction slot 留给最长持续的状态(MessageSubmitted);placeholder 单独有 reaction slot,装终态。两边不冲突。
+
+#### 11.11.3.1 Telegram ReactionTypeEmoji 白名单(2026-08 snapshot)
+
+来源:[gist.github.com/Soulter/3f22c8e5f9c7e152e967e8bc28c97fc9](https://gist.github.com/Soulter/3f22c8e5f9c7e152e967e8bc28c97fc9) —— Telegram 官方 `ReactionTypeEmoji` 列表。下一次接入新 reaction / 排查 `REACTION_INVALID` 时查这里。
+
+完整列表(80 个 emoji,按原始顺序):
+
+```text
+👍 👎 ❤ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 🐳 ❤️‍🔥 🌚 🌭 💯 🤣 ⚡ 🍌 🏆 💔  😐 🍓 🍾 💋 🖕 😈 😴 😭  👻 👨‍💻 👀 🎃 🙈 😇 😨 🤝 ✍ 🤗 🫡 🎅 🎄 ☃ 💅 🤪 🗿 🆒 💘 🙉 🦄 😘 💊 🙊 😎 👾 🤷‍♂️ 🤷 🤷‍♀️ 😡
+```
+
+按语义分组(便于查询):
+
+| 语义 | emoji |
+| --- | --- |
+| **OK / 确认** | 👌 👍 ❤ 🤝 👏 |
+| **庆祝 / 完成** | 🎉 🥳 🤩 💯 🏆 ✨(✨ 不在白名单)|
+| **思考 / 困惑** | 🤔 😐 🤨 🧐 🕊 |
+| **强烈反应** | 🤯 😱 🤬 😡 🤮 💩 |
+| **喜爱** | 🥰 😍 😘 ❤️‍🔥 💋 💘 |
+| **笑** | 😁 🤣 😂(不在白名单)|
+| **哭 / 同情** | 😢 😭 😨 😐 |
+| **工具 / 工作** | 👨‍💻 🤓 🛠(不在白名单)|
+| **季节 / 节日** | 🎃 🎄 🎅 ☃ |
+| **动物** | 🐳 🦄 🕊 👻 |
+| **食物** | 🍌 🍓 🍾 🌭 💊 |
+| **神秘 / 离奇** | 🗿 🤡 🥱 🥴 🌚 |
+| **手势 / 表情** | 🖕 ✍ 🤗 🫡 💅 👀 🙈 😇 🙉 🙊 😎 |
+| **手指 / 人物** | 👾 🤷 🤷‍♂️ 🤷‍♀️ |
+| **天气 / 自然** | ⚡ 🌭 🏆 💯 |
+| **常用但** ❌**不在**白名单**(会被 API 拒) | ✅ ⭐ 🧠 🌟 🥳 ✨ 🙏(✅ 在)|
+| **白名单内** ✅ 可用 | 👌 🎉 👏 💯 🤝 👀 🙏(🙏 在) |
+
+**重点提醒**:
+- ✅ U+2705 **不在** 白名单(`REACTION_INVALID`);🎉 是最直接的 "Done" 替代
+- 🧠 🟢 ⭐ 🟡(彩色圆圈 emoji 部分)在白名单外
+- `🙏` 在白名单(常被误以为不在,因为它常被错认成 fold-hands)
+- 🙏= fold-hands(白色),🫰= crossed-fingers(可能不在白名单)
+
+**怎么验证未来候选 emoji**:用 `cmd/probe-reaction/main.go`(已删除,需要时重建)或写 ad-hoc 脚本:
+
+```bash
+curl -s "https://api.telegram.org/bot$TOKEN/setMessageReaction" \
+     -d chat_id=$CHAT_ID \
+     -d message_id=$MSG_ID \
+     -d 'reaction=[{"type":"emoji","emoji":"<candidate>"}]'
+# 返回 {"ok":true,...} 即白名单内;{"ok":false,"error_code":400,"description":"Bad Request: REACTION_INVALID"} 即白名单外
+```
+
+未来若 Telegram 扩展白名单,把新 emoji 加进 `mapStateToTelegramEmoji` 即可(`internal/channel/telegram/adapter.go` 中的 switch)。
 
 v4 的 👌/🧠/✅ 全部失败。v5 probe 结果（35 个候选 emoji 实测）：
 
@@ -870,19 +929,20 @@ v4 的 👌/🧠/✅ 全部失败。v5 probe 结果（35 个候选 emoji 实测�
 
 **Telegram 平台硬限制**：bot 在 `setMessageReaction` 一次调用中只能设 **1 个 reaction** 到单条消息（实测发 2 个 emoji 会返 `REACTIONS_TOO_MANY`，`max_reaction_count=11` 是 chat-level 总反应种类上限，bot 单 reactor 上限仍是 1）。
 
-**v6 原始设想**（累计 list 模拟 append）：❌ 不可行 ——Telegram 拒绝 `[👌, 🤔, 🎉]` list。
+**v6 原始设想**（累计 list 模拟 append）：❌ 不可行 ——Telegram 拒绝 `[👌, 🤔, ✅]` list。
 
 **v6.1 实际实现**：每个 state emit 1 个 reaction，**SET 语义**（覆盖而非 append）。
 
-**v6.3 进一步收紧**（user 决定）：单 reaction 预算用在最有信息量的 state —— **`MessageSubmitted = 🤔`**。
+**v6.3 进一步收紧**（user 决定）：单 reaction 预算用在最有信息量的 state —— **`MessageSubmitted = 👌`**。
 
 ```text
 Queued    → silent drop   (placeholder 文本 PATCH "🤖 Working..." 承担 "收到" 视觉)
-Submitted → 🤔            (单 reaction slot 固定给 "AI thinking")
-Done      → silent drop   (OnPromptEnded 在 placeholder 上贴 🎉)
+Submitted → 👌            (单 reaction slot 固定给 "AI thinking")
+Done      → silent drop   (OnPromptEnded 在 placeholder 上贴 ✅)
 ```
 
 **为什么这样**：
+
 - `Queued` 太瞬时（消息到 adapter 立刻变 `Submitted`），reaction 来不及显示就变
 - `Done` 终态由 placeholder 文本 PATCH + placeholder 🎉 reaction 承担，user message 上不再贴
 - `Submitted` 是 turn 中持续时间最长的状态，最值得让 user 看到"AI 在想"
@@ -901,12 +961,14 @@ OnPromptEnded:
 ```
 
 **实现细节**：
+
 - `mapStateToTelegramEmoji(state)`：v6.3 只对 `MessageSubmitted` 返回 `🤔`，其他 silent drop
 - `setMessageReactions(ctx, chatID, msgID, [reactions])` 接收 list 形参
 - 同一 state 重复 set 是 idempotent（`messageStates` LRU dedup）
 - `OnPromptEnded` 不再对 user message 贴 reaction（保留 reaction slot），只对 placeholder 贴 🎉
 
 **对比飞书**：
+
 - Feishu `AddReaction` 是 append-by-design，每条 user message 可以累积多个 reaction
 - Telegram 平台硬限制只能 1 个 reaction 在 user message 上
 - 这是 Telegram 平台 vs 飞书平台的根本 UX 差异，无法 workaround
@@ -916,7 +978,7 @@ Future work: 如果 Telegram 放宽 JSON API 白名单，可以重新启用 v4 �
 #### 11.11.4 Topic 路径同样适用
 
 | 行为 | topic (thread_id>0) | DM (thread_id==0) |
-|---|---|---|
+| --- | --- | --- |
 | `ensurePlaceholder` | 每条 user msg 创建新 P_N | 同上 |
 | `OutHeartbeat` | `editMessageText(P_N)` PATCH（in-turn status） | 同上 |
 | `OutReply/OutTool/OutThinking/OutResult/OutError/OutChoice` | Topic 内独立消息 + `message_thread_id` + `reply_to_message_id=userMsgID` | 主窗口消息 + `reply_to_message_id=userMsgID` |
@@ -930,7 +992,7 @@ Future work: 如果 Telegram 放宽 JSON API 白名单，可以重新启用 v4 �
 跟历次方案对比：
 
 | | sentinel topic（已废弃） | v1 (跨 turn 复用占位) | v2 (DM 无占位) | v3 (每 turn 占位 + 文本 ✅) | **v4 (每 turn 占位 + reaction ✅)** |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 占位 ID 来源 | Telegram 分配（不可控） | 1 个/chat 复用 | DM 无 | 每 turn 新建 | **每 turn 新建** |
 | reply chain 锚 | — | bot 占位（不直观） | user msg | user msg | **user msg**（topic + DM 一致） |
 | daemon 重启后 chatID 一致 | ❌ 可能漂移 | ✅ | ✅ | ✅ | ✅ |
@@ -942,7 +1004,7 @@ Future work: 如果 Telegram 放宽 JSON API 白名单，可以重新启用 v4 �
 #### 11.11.6 跟飞书 receipt 的语义对位
 
 | | Feishu receipt | Telegram v4 |
-|---|---|---|
+| --- | --- | --- |
 | 状态 ticker | ✅ header PATCH（card） | placeholder PATCH（Working / 💭 N·🔧 M） |
 | OutThinking | append div | 独立 reply to user msg |
 | OutToolStart/End | append div | 独立 reply to user msg |
@@ -1721,7 +1783,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 Telegram Channel 自治实现 `MessageState`（user-message reaction）与 `Card Body`（Topic 内的占位 / 事件详情）两条完全独立的渲染轨道，对齐 [docs/channel/feishu.md §6.6](./feishu.md) 的契约：
 
 | 轨道 | 源 | 抽象事件 | 渲染目标 | Telegram 实现 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, MessageState: {State, MessageID}}` | **userMsgID** | `setMessageReaction(userMsgID, emoji)` |
 | **Card Body** | Topic placeholder（C2） + 事件流 | `OutboundMessage{Kind: OutHeartbeat/OutTool*/OutThinking/...}` | placeholder_message_id / Topic 内独立消息 | `editMessageText` / `sendMessage` |
 
@@ -1786,7 +1848,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 `internal/channel/telegram/adapter_test.go` 锁死的契约：
 
 | 测试 | 锁死什么 |
-|---|---|
+| --- | --- |
 | `TestMapStateToTelegramEmoji` | 4 态映射 + `MessageDropped` silent drop + 未知 state silent drop |
 | `TestAdapter_Send_OutMessageState_QueuedRenders` / `_SubmittedRenders` / `_DoneRenders` | 每个非空映射都打到 `setMessageReaction` + reaction 字段正确 |
 | `TestAdapter_Send_OutMessageState_UnknownStateDrops` | 未知 state 不调 API |
@@ -1801,7 +1863,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 下面这些是文档里讨论过、Telegram Bot API 的能力差距或实现优先级选择导致没做的点。每条都标明属于哪一类：
 
 | 类别 | 说明 |
-|---|---|
+| --- | --- |
 | **限制** | Telegram Bot API 本身不支持，靠 adapter 怎么写都做不到 |
 | **降级** | 飞书有原生能力、Telegram 没有对应物，已用近似手段实现 |
 | **未实现** | 设计上想做、但目前没实现（不在本期 scope） |
@@ -1809,6 +1871,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 ### 15.1 限制类（API 做不到）
 
 #### L1. 没有"卡片"概念，Telegram 不支持结构化 card 元素
+
 - 飞书用 `<div>` / `<form>` / `<hr>` 等元素构成 receipt card，可以原位 append 多条 log entry。
 - Telegram 只能 `editMessageText` 整体替换文本，不能 append 单条 log entry。
 - 后果：长回复（一个 turn 100+ 行）会变成 Topic 内 100+ 条独立消息。
@@ -1816,48 +1879,57 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 - 未来替代方案见 14.3 未实现类（receipt-on-edit）。
 
 #### L2. `editMessageText` 整体替换，48 小时内有效
+
 - Telegram 没有 "append to existing message" 语义。所有"原位更新"都是替换全部文本。
 - 每次 edit 都需要重新发送**全部**历史文本（如果想保留之前的内容）。
 - 单条消息文本上限 4096 字符。
 - 文本消息编辑受 48 小时限制（`editMessageReplyMarkup` / `editMessageMedia` 无限制）。
 
 #### L3. callback_data 64 字节限制
+
 - 已用 `shortID(req[:8] + "-" + req[len-8:])` 应对，完整 RequestID 走 state store 反查。
 - 但如果 RequestID 数量爆炸增长，shortID 可能碰撞（8+8 hex = 16 字节，碰撞概率按 1/2^64 估算，安全）。
 
 #### L4. ForceReply 仅对下一条用户消息生效
+
 - 用户发了别的消息后，force_reply 自动失效。
 - 多问题向导场景下，如果用户在 ForceReply 期间发了不相关的消息，ForceReply prompt 会沉默失效。
 - 缓解：handler 内检查 `pendingInput` 状态，未匹配则当普通消息处理。
 
 #### L5. 没有 `reply_in_thread` 等价物
+
 - 飞书 reply_in_thread 把消息收到 thread drawer，主消息流只剩 1 条气泡。
 - Telegram 的 `reply_to_message_id` 只在视觉上"引用"，消息本身仍然显示在 Topic 主消息流。
 - 后果：bot 收到用户消息后的所有 OutReply 都堆在 Topic 时间线上，无折叠效果。
 - 设计上靠 Topic 自身隔离来替代。
 
 #### L6. 没有 markdown 原生支持，只能用受限 HTML 子集
+
 - Telegram 只支持 `<b>` `<i>` `<u>` `<s>` `<strike>` `<del>` `<code>` `<pre>` `<a href>` `<tg-spoiler>` 这几个标签。
 - Markdown 表格、复杂布局、颜色、字号全部不支持。
 - 已实现 `RenderMarkdown`（标题/列表/代码块/链接/粗体/斜体/spoiler/blockquote/表格/水平线/HorizontalRule）+ HTML 转义。
 - 但**颜色**没有替代（飞书可用 `<font color="grey">`），用 emoji + 粗体近似。
 
 #### L7. 没有"原生 task list" / checklist 元素
+
 - 飞书 receipt 用 `<checkbox>` 元素。
 - Telegram 只能用文本 `[x]` / `[ ]` / `[~]` 模拟。无法点击切换。
 - 后果：用户不能在 Telegram 内更新 task 状态，必须等下一个 OutTaskUpdate 自动重发。
 
 #### L8. 没有 "Mini App form" 原生输入控件（除 ForceReply）
+
 - 飞书的 form 可以让用户在卡片内填多个字段一次提交。
 - Telegram 只支持 ForceReply（单次单字段）+ Web App（要 URL、要 HTTPS、自行实现）。
 - 后果：复杂多字段输入（如"输入仓库名 + 分支名"）要走两轮：先 option 选择字段类型，再 ForceReply 输入内容。
 
 #### L9. `editForumTopic` 只能改名称/图标，不能改"正文"
+
 - Telegram Forum Topic 本身没有消息正文，`editForumTopic` 只接受 name + icon_custom_emoji。
 - 这意味着 Topic 永远是"空容器"，永远要靠内部的占位消息表达"会话状态"。
 - 已确认无替代方案。
 
 #### L10. Telegram reaction update 不带 `message_thread_id`
+
 - `MessageReactionUpdate`（`setMessageReaction` 触发的 👍/✅/🔄 等 emoji 反应）只携带 `chat.id` 和 `message_id`，没有 `message_thread_id`。
 - 后果：topic 内的 reaction 永远路由不到该 topic 的 ChatSession（chatID 不带 thread 后缀），只能路由到 chat-level ChatSession。
 - 实际影响：gtw drafts 存在 topic 内时（`tg_<chatid>:<thread_id>`），用户给 topic 内 message 加 ✅ reaction **无法触发** gtw draft 处理。DM 和群主窗口的反应（无 thread）正常工作。
@@ -1866,24 +1938,29 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 ### 15.2 降级类（用近似手段实现，已 work）
 
 #### D1. OutReply / OutResult / OutThinking / OutTool 都用独立消息
+
 - 飞书 receipt 把这些都装在一张 card 内，通过 div 元素结构区分。
 - Telegram 没有等价物，每条 OutReply / OutTool / OutThinking 都是独立消息。
 - 视觉区分靠 emoji 前缀：`💭` thinking / `🔧` tool / `✅` tool_end / `📝` result。
 - Topic 内的可读性靠消息时间线排序，不靠布局结构。
 
 #### D2. OutError 渲染为带 ⚠️ 标题的纯文本消息
+
 - 飞书 `encodeErrorCard(title, body)` 用红色 card 元素 + 标题。
 - Telegram 没有红色 card。降级为 `⚠️ <error title>\n\n<body>\n\n<pre>stderr tail</pre>`。
 
 #### D3. OutCommandReply 走纯文本，不进入 markdown 渲染
+
 - 飞书走独立顶层 Create 通道。
 - Telegram 同样 sendMessage 但跳过 `RenderMarkdown`（slash 命令输出已是纯文本，再渲染一遍会有 `<` `>` 转义问题）。
 
 #### D4. `addReaction` / `deleteReaction` 都用 `setMessageReaction`
+
 - Telegram 没有"删除单个 reaction"的 API，"删除"通过 `reaction: []` 实现。
 - Adapter 层在日志上区分意图，但 Telegram 看到的是同一个 API 调用。
 
 #### D5. OutHeartbeat 走占位消息 PATCH
+
 - 飞书有 receipt header 区域专门承载 heartbeat，PATCH 时不影响 log entries。
 - Telegram 占位消息就是"Working..."那一条，PATCH 直接改文本（替换 thinking/tool 计数）。
 - 缺点：占位消息上**不能**同时显示工作状态和历史 thinking/log（飞书可以分层）。
@@ -1892,6 +1969,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 ### 15.3 未实现类（设计意图存在，本次没做）
 
 #### N1. Rolling-log receipt card
+
 - 飞书 F-25/F-40：长回复 PATCH 同一张 card，多 div 元素累积。
 - Telegram 技术上能做（一条 message + 多次 `editMessageText`），但每次 edit 都重发全部历史。
 - **本期决定不实现**，因为：
@@ -1904,30 +1982,35 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
   - 与 OutThinking / OutToolStart / OutToolEnd / OutHeartbeat 的整合规则
 
 #### N2. `pendingHeartbeats` 缓冲（feishu F-63.1）
+
 - 飞书：在 receipt 还没创建前缓存 heartbeat snapshot，receipt 一旦创建立即应用。
 - Telegram 当前实现在 C2（C2 已实现 OutHeartbeat 自动创建 placeholder）。但**没有 buffer**：第一次 OutHeartbeat 创建占位并 PATCH，后续 OutHeartbeat 走 PATCH。
 - **缺失的部分**：如果在 placeholder 创建**之前**就有心跳进入且创建失败，没有重试机制。
 - **缓解**：placeholder 创建失败时 OutHeartbeat 走 fallback（发独立消息），不丢数据。
 
 #### N3. OutResult 之前显示 `✅ 完成` reaction
+
 - 飞书：OnPromptEnded 给 receipt 加 ✅ reaction，**不**编辑文本。
 - 当前 Telegram：OnPromptEnded 把占位消息文本改成 `<b>✅ Completed</b>`。
 - **设计意图改用 setMessageReaction 实现**，本次没改，留待后续。
 - 替换理由：当前实现把占位文本改成 "Completed" 后，下一次 turn 开始时无法回退到 "Working..."。
 
 #### N4. Orphan reply fallback（feishu `postOrphanReplyCard`）
+
 - 飞书：SendCard 失败时降级到顶层 Create。
 - Telegram：sendMessage 失败 → retry 3 次 → 仍失败就返回 error，runtime 看到 error。
 - **缓解**：已有 retry 层兜底 transient 错误；如果用户配置 bot 权限问题（terminal 错误）确实无解。
 - **未来**：可以加"orphan fallback"用 `chat_id` 直接发（绕过 topic_id），但当前实现的 retry 已经覆盖 90% 场景。
 
 #### N5. 编辑消息用 `msg.ReplyTo` 作为锚点
+
 - 飞书：OutReply 携带 `msg.ReplyTo`（user message id），receipt 锚定到该用户消息。
 - Telegram：Send() 当前完全忽略 `msg.ReplyTo`。
 - **影响有限**：Telegram Topic 本身就是 scope，不需要锚定到 user message。`reply_to_message_id` 在 Topic 内也只起视觉引用作用，不影响消息流。
 - **未来**：如果要做"reply-only"模式（即只回复某条用户消息但不开新 bubble），可以用 `reply_to_message_id` 实现。
 
 #### N6. 心跳 header 的 agent identity 注入（session_id / model / agent_name）
+
 - 飞书：receipt header 行有 "Agent · Model · Session"。
 - Telegram 当前 OutInit 已 silent drop（见 C1），占位消息上也没有 header。
 - 状态丢失：用户进入 Topic 后看不到当前 turn 的 session 标识。
@@ -1947,7 +2030,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 ### 15.5 本次实现完成（C1, C2）
 
 | ID | 内容 | 状态 |
-|---|---|---|
+| --- | --- | --- |
 | C1 | OutInit silent drop（与 feishu F-44 对齐） | 已实现 |
 | C2 | OutHeartbeat 路径 ensurePlaceholderForHeartbeat（占位缺失时自动创建） | 已实现 |
 | C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v7.1 修订**（v7 + codex review race guard：ensurePlaceholderForHeartbeat 在 UserMessageID 未设时 return (0, nil) 防止 orphan placeholder） |
@@ -1969,16 +2052,19 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书没有 pin 概念。
 
 **补齐的 gap**：
+
 - 用户痛点：长 Topic 内回复滚动后，用户很难找到 OutResult 的最终答案。
 - 启用后：每个 turn 结束后自动把 OutResult 消息 pin 在 Topic 顶部；新一轮开始时 unpin 旧 result。
 
 **当前为什么没做**：
+
 - 14.3 N1（rolling-log receipt）的替代方案：如果不做 receipt，pin 是次优选择 —— 视觉上不那么"集成"，但用户能找到结果。
 - 14.3 N3（OnPromptEnded 用 reaction 而非改文本）的延伸：可以在 ✅ reaction 之外再叠加 pin，提升发现性。
 
 **工作量估算**：~15 行（OutResult 后调 pin；新一轮 unpin 旧 result）。
 
 **风险 / 边界**：
+
 - pinChatMessage 调用也有速率限制（每个 chat 5 次/min）。
 - 多 Topic 同 chat 时，pin 在 chat 级别可见，跨 Topic 共享 pin 位 —— 可能造成 pin 抖动。
 - 解决：每个 chat 只 pin 当前 turn 的 result，unpin 之前的。
@@ -1990,16 +2076,19 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书 receipt 不能"删除"（会丢上下文）。
 
 **补齐的 gap**：
+
 - 14.3 N3 的"Topic 流更干净"版本：OnPromptEnded 时删占位，配合 ✅ reaction 作为完成标识。
 - 14.3 D5 的扩展：占位消息不再需要"原地切换 Working ↔ Completed"。
 
 **当前为什么没做**：
+
 - 删除消息看起来"激进"，用户可能依赖占位消息作为会话时间线锚点。
 - 飞书没有等价操作可对比，没经验数据。
 
 **工作量估算**：~10 行（OnPromptEnded 时调 deleteMessage 替代 editMessageText）。
 
 **风险 / 边界**：
+
 - 删除后用户没法"回到这条占位看历史"——但 Topic 内其他消息仍然是时间线。
 - 必须配合 ✅ reaction（不能既删又没标识）。
 
@@ -2010,6 +2099,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书 receipt 不删但加 ✅ reaction。
 
 **补齐的 gap**：
+
 - 14.3 N3 的最佳实现：视觉上看到 ✅（reaction）+ Topic 流不堆 "✅ Completed" 文本。
 
 **当前为什么没做**：见 14.3 N3。
@@ -2025,16 +2115,19 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书 PATCH card 必须整体替换 schema。
 
 **补齐的 gap**：
+
 - 当前实现每次点 button 都 `editMessageText(text + keyboard)`，触发 markdown 重新渲染（耗时、可能引入渲染差异）。
 - Choice settle 时只更新 keyboard（移除其他按钮）应走 editMessageReplyMarkup，不动 text。
 
 **当前为什么没做**：
+
 - 当前实现是 `editMessageText(text, keyboard)`，简化实现。
 - 性能影响在小流量下看不出来，未做 profile。
 
 **工作量估算**：~20 行（patchChoice settle 路径改用 editMessageReplyMarkup）。
 
 **风险 / 边界**：
+
 - 没发现 Telegram API 差异。
 - 收益主要是性能（少一次 markdown parse）和一致性（不会因为 markdown 渲染规则变化导致已 settle 的 choice 文本微变）。
 
@@ -2045,16 +2138,19 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书 upload_file 可以批量（im.message.batch_send），但实现细节不同。
 
 **补齐的 gap**：
+
 - 当前附件下载 + 上传：每个图片/视频单独 `sendPhoto` / `sendVideo`，多附件变成多条消息。
 - 多张图体验差：用户收不到"相册视图"，需要滑动。
 
 **当前为什么没做**：
+
 - 当前 attachments.go 按 1 个 media 1 条消息处理。
 - 实现 batch 需要改 attachment pipeline（流式而非全部加载后批量）。
 
 **工作量估算**：~30 行（attachment 收集路径 + sendMediaGroup 调用）。
 
 **风险 / 边界**：
+
 - sendMediaGroup 不支持 caption（caption 必须是 media[0] 的 caption，其他 media 无 caption）。
 - 混合类型（photo + video）OK，但 document 不能混在 media group 里。
 - 如果用户发的是 11+ 张图，需要 fallback 成多条 media group 消息。
@@ -2066,6 +2162,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书没有 pin。
 
 **补齐的 gap**：
+
 - Bot 维护时（升级、迁移）可能留下过时 pin。
 - 单元测试 / 集成测试需要在每个 case 之间清理 pin。
 
@@ -2080,10 +2177,12 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书 SDK 内置 typing indicator。
 
 **补齐的 gap**：
+
 - 当前用户发完消息后，bot 处理期间 Topic 内**无任何反馈**直到第一条 OutReply 或 OutHeartbeat 到达。
 - typing 状态让用户立即知道"bot 收到了，正在处理"。
 
 **当前为什么没做**：
+
 - typing 状态默认 5 秒过期，需要持续刷新（每 4-5 秒重发）。
 - LLM turn 通常 < 5s 时不需要，但长 turn（>10s）用户体验差。
 - 之前没考虑过补这个细节。
@@ -2091,6 +2190,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **工作量估算**：~25 行（adapter 持有 typing goroutine；在 OutReply 第一次到达时停止）。
 
 **风险 / 边界**：
+
 - typing 不能跨 Topic（typing 显示在 chat 级别，不是 topic 级别）—— 用户在 main window 也会看到。
 - 频率限制：typing 调用本身也吃 API 配额（每个 chat 1 次/5s）。
 - 如果 chat 不是 forum，typing 显示在 main window 会让用户觉得 bot 在 main window 回复 —— 实际只是 feedback。
@@ -2102,6 +2202,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 **对应飞书体验**：飞书 AskUserQuestion 用 `<select>` form components。
 
 **补齐的 gap**：
+
 - 飞书 AskUserQuestion 用 form 让用户填答案。
 - Telegram 可以用 sendPoll 实现"让用户选 1-N 个选项"——但**不是 1:1 等价**：
   - sendPoll 选项数不限
@@ -2111,12 +2212,14 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
   - 不能做"输入自定义答案"（除非 poll 之外再补 ForceReply）
 
 **当前为什么没做**：
+
 - 已经用 InlineKeyboardMarkup 实现了 Choice，体验够用。
 - sendPoll 是**可选替代**，不是必须。
 
 **工作量估算**：~80 行（sendPoll 作为 OutChoice 的另一种渲染 + 监听 poll_answer update）。
 
 **风险 / 边界**：
+
 - sendPoll 投完票后自动 settle，bot 收 `poll_answer` update —— 需要处理新的 update 类型。
 - 选项不能像 InlineKeyboard 那样灵活（不支持 emoji icon、不支持 URL 等）。
 
@@ -2125,7 +2228,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 按 ROI 排序（参考 14.4）：
 
 | 优先级 | 项 | 工作量 | 价值 | 理由 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | **P3** reaction + delete placeholder | ~15 行 | 高 | 替换 N3，最干净的实现 |
 | 2 | **P1** pin OutResult | ~15 行 | 高 | UX 提升大（长 Topic 内找答案） |
 | 3 | **P7** typing indicator | ~25 行 | 中 | 长 turn 反馈 |
@@ -2138,7 +2241,7 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 ### 16.10 与已有 gap 的关系
 
 | Telegram 能力 | 补齐的 gap |
-|---|---|
+| --- | --- |
 | P1 pin | N1（rolling-log 替代方案） |
 | P2 delete | N3 变体 |
 | P3 reaction+delete | N3 最佳实现 |
@@ -2148,7 +2251,6 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 
 后续讨论时优先关注 P1/P3/P7（性价比最高）。
 
-
 ## 17. 网络代理
 
 Telegram Bot API 在某些网络环境（如中国大陆）下不可达。nightme **默认继承** 标准代理环境变量，无需任何配置。
@@ -2156,7 +2258,7 @@ Telegram Bot API 在某些网络环境（如中国大陆）下不可达。nightm
 ### 17.1 支持的环境变量
 
 | 变量 | 作用 |
-|---|---|
+| --- | --- |
 | `HTTP_PROXY` | HTTP 请求的代理 URL（如 `http://127.0.0.1:7890`） |
 | `HTTPS_PROXY` | HTTPS 请求的代理 URL（对 `api.telegram.org` 生效） |
 | `NO_PROXY` | 不走代理的域名/网段（逗号分隔） |
@@ -2167,6 +2269,7 @@ Go 标准库的 `http.ProxyFromEnvironment` 自动读取这些变量，无需 ni
 ### 17.2 使用示例
 
 **Clash / Surge（mixed-port 模式，HTTP 代理）**：
+
 ```bash
 export HTTPS_PROXY=http://127.0.0.1:7890
 nightme start --channel=telegram
@@ -2175,11 +2278,13 @@ nightme start --channel=telegram
 **v2ray / shadowsocks（SOCKS5 代理）**：
 SOCKS5 代理无法通过环境变量直接配置，需要在系统层做透明代理转发。
 或者用 `proxychains` / `tsocks` 之类的工具包装 nightme：
+
 ```bash
 proxychains4 nightme start --channel=telegram
 ```
 
 **不走某些域名**：
+
 ```bash
 export NO_PROXY=localhost,127.0.0.1,*.internal
 nightme start --channel=telegram
@@ -2197,11 +2302,13 @@ client := httpclient.DefaultWithTimeout(10*time.Second)
 ```
 
 该包封装的原则：
+
 - 唯一职责：把 `&http.Client{Timeout: ...}` 集中到一个地方，避免散落重复
 - 默认行为：复用 `http.DefaultTransport`（已经指向 `http.ProxyFromEnvironment`）
 - 不做 retry / rate limit / logging —— 这些由调用层组合（参考 `internal/channel/telegram/retry.go` 和 `ratelimit.go`）
 
 被改造的位置：
+
 - `internal/updater` —— 检查 GitHub release
 - `internal/version` —— 检查 nightme.dev 版本
 - `internal/bridge/dsh/host` —— dsh 主机 RPC
@@ -2211,6 +2318,7 @@ client := httpclient.DefaultWithTimeout(10*time.Second)
 ### 17.4 不暴露代理配置的原因
 
 不提供 `cfg.Telegram.ProxyURL` 之类的配置项，原因：
+
 - 代理需求来自环境（用户机器的网络），不是配置决策
 - 配置项会被各种 secret 管理工具、CI/CD 流水线暴露在 diff 里
 - 环境变量是 OS-level 的标准机制，工具链（Docker、Kubernetes、systemd）都支持
@@ -2231,14 +2339,50 @@ Line 2: 💰:「 new / cache / out · X% (window) · $cost 」   (Usage)
 Line 3: 📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N · [#PR](url)   (GitStatus)
 ```
 
-每行 zero-omit（F-45 §1.6）。整行字段全空 → 该行不渲染。StatusBar 完全为空 → 不发 divider，只发 body。
+每行 zero-omit（F-45 §1.6）。整行字段全空 → 该行不渲染。StatusBar 完全为空 → 不发 panel，只发 body。
 
-完整契约 / 测试在 `internal/statusbar/statusbar_test.go`（从 feishu F-45 §1.6 的 `usage_footer_test.go` 迁移，15 个 `Test*` 函数 + 1 个 8 行 table-driven 子用例，全覆盖）。
+Telegram adapter 用 `statusbar.RenderPanel(lines)` 把三行包成 **4-corner ASCII frame marker**（`┌ ┐` 顶 + `└ ┘` 底，无 `│` 侧栏）：
+
+```text
+[message body]
+
+┌────────────────────────────┐
+  🤖: claude · MiniMax-M3[1m] · 61c4ec9d-dbb0-418c-bbe7-8d4bfbc1a135
+  💰:「 31.1k / 128 / 37 · 3.1% (1M) · $0.157 」
+  📁: cnlangzi/nightme · ⎇ main
+└────────────────────────────┘
+```
+
+**保守设计（Android 折行修复，迭代 30 → 15 → 8 → 16）**：
+
+迭代历史：
+1. **30 字符** —— iOS 安全，Android 实测折行
+2. **15 字符** —— Android 仍折行
+3. **8 字符**(`┌──────┐`)—— Android 不折行但太稀疏（"分隔栏的字符太短了"）
+4. **16 字符**(`┌──────────────›`)—— 当前；Android chat bubble 仍安全，视觉有 frame 感(2026-08-22 user feedback)
+
+当前 `PanelMaxWidth = 16`，bars 形如：
+
+```text
+┌──────────────›
+  🤖: claude · opus-4-5 · 61c4ec9d-dbb0-418c-bbe7-8d4bfbc1a135
+  💰:「 31.1k / 128 / 37 · 3.1% (1M) · $0.157 」
+  📁: cnlangzi/nightme · ⎇ main
+└──────────────›
+```
+
+**右收口设计**（2026-08-22 user feedback）：
+
+Bars 左端是 `┌` / `└`（方角，"从此处开始"），右端是 `›`（chevron tail，"向右继续"）。**不**用闭合的 `┐` / `┘`，因为 StatusBar 内容可能向右延伸超出 bars，硬闭合会暗示一个不存在的边界。`›` 是 CLI / 编辑器 fold-marker 通用约定，传达"信息从这里流向右边"的延续感。
+
+内容行原样输出（每行前缀 2 空格做左边栏留白），**不截断** —— 长 StatusBar 行（如 Identity 带完整 session ID ~50 字符）可延伸超出栏宽，在窄屏自然换行。无 `│` 侧栏 —— 内容换行不受 panel 几何约束。
+
+完整契约 / 测试在 `internal/statusbar/statusbar_test.go`（从 feishu F-45 §1.6 的 `usage_footer_test.go` 迁移，15 个 `StatusBarLines` 测试 + 5 个 `RenderPanel` 测试）。
 
 ### 18.2 贴附规则
 
 | Kind | 行为 |
-|---|---|
+| --- | --- |
 | `OutReply` / `OutResult` / `OutCommandReply` / `OutThinking` / `OutTaskCreate` / `OutTaskUpdate` | `body + "\n\n---\n" + StatusBar`，整体走 `RenderMarkdown`（`<b>` `<code>` `<a>` 受限 HTML 子集） |
 | `OutToolStart` / `OutToolEnd` | `formatTool(msg)`（🔧/✅ prefix + tool name + args/output）+ StatusBar trailer |
 | `OutError` | `body + "<pre>" + escapeHTML(StderrTail) + "</pre>"` + StatusBar（raw 拼接，**不走** RenderMarkdown，因为预 escape 的 `<pre>` 标签会被 RenderMarkdown 当字面量再次 escape） |
@@ -2256,8 +2400,6 @@ Line 3: 📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N ·
 - `GitStatus`：由 chatsession 在 `SetSelectedCwd` / `/gtw commit` / `/gtw pr` 时刷，runtime 透传
 
 到 `Send` 时，**该有的字段都已经填好**；空就是空（zero-omit 兜底，不发空 divider）。早期曾考虑过加 `lastStatusBar` 跨 chunk fallback 缓存，后来撤掉——理由是这等于在 channel 层帮 runtime 兜"忘填字段"的责任，违反职责边界。F-45 的 zero-omit + F-44 的 Identity stamp 已经覆盖所有"空字段"场景。
-
-
 
 ### 18.4 占位（PATCH）也带 footer
 
@@ -2287,7 +2429,7 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 ### 18.6 跟 feishu 的差异
 
 | | feishu | Telegram |
-|---|---|---|
+| --- | --- | --- |
 | StatusBar 载体 | Card footer（`<hr> + <div text_color="grey">`） | 文本 trailer（`──────── + 三行`） |
 | 同 turn 内 StatusBar 重复 | 否（footer 跟 card 一对一） | 是（每条消息都拼一次） |
 | Streaming chunk 渲染 | PATCH 同一张 card 累积 div | 每条 sendMessage 独立气泡 + trailer |

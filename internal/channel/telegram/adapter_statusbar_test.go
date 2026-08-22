@@ -86,10 +86,18 @@ func TestAdapter_Send_DM_OutReply_AppendsStatusBar(t *testing.T) {
 			t.Errorf("rendered text missing %q; got %q", want, text)
 		}
 	}
-	// Divider (rendered from "---" markdown line) should
-	// separate the body from the trailer.
-	if !strings.Contains(text, "────────") {
-		t.Errorf("rendered text missing divider; got %q", text)
+	// Chevron-tail panel: ┌ └ on left, › on right. NO closed
+	// `┐` / `┘` (right side opens toward content).
+	for _, want := range []string{"┌", "└", "›"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("rendered text missing %q; got %q", want, text)
+		}
+	}
+	if strings.Contains(text, "┐") || strings.Contains(text, "┘") {
+		t.Errorf("rendered text must not have closed right corners ┐ / ┘; got %q", text)
+	}
+	if strings.Contains(text, "│ ") || strings.HasSuffix(text, " │\n") {
+		t.Errorf("rendered text must not have │ side borders; got %q", text)
 	}
 }
 
@@ -288,7 +296,7 @@ func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholderWithStatusBar(t *testing
 	if !ok {
 		t.Fatal("expected editMessageText for heartbeat")
 	}
-	for _, want := range []string{"💭 2", "🔧 1", "────────", "🤖: claude · opus-4-5 · sess-1"} {
+	for _, want := range []string{"💭 2", "🔧 1", "┌", "└", "›", "🤖: claude · opus-4-5 · sess-1"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("placeholder PATCH missing %q; got %q", want, text)
 		}

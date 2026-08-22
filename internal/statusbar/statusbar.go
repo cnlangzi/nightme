@@ -35,6 +35,68 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
+// PanelMaxWidth anchors the top/bottom bars so they never wrap
+// on mobile. 2026-08 user feedback on Android client iteration:
+//   - 30 → wraps
+//   - 15 → wraps
+//   - 8  → no wrap but feels too sparse
+//   - 16 → current (2026-08-22 user feedback "再增加一倍");
+//          still narrow enough for Android chat bubble but
+//          visually substantive as a frame marker.
+// Content lines render verbatim and may extend past the bars
+// (acceptable per "宁愿短点也不要折行" — bars short, content
+// can wrap).
+const PanelMaxWidth = 16
+
+// RenderPanel wraps the StatusBar lines in a four-corner ASCII
+// "frame marker": ┌ ┐ on top, └ ┘ on bottom, with NO
+// side-bar `│` characters (open left/right edges). The four
+// corners mark "this is session metadata" without forcing the
+// content lines to a fixed width — Telegram's proportional
+// font wraps at ~35-40 chars on phones, and any forced
+// alignment on the sides would visually break when content
+// lines wrap.
+//
+// Width is max(PanelMinWidth, longest_line) clamped to
+// PanelMaxWidth — no `│`-side padding overhead. Returns ""
+// for an empty lines slice so callers can skip the trailer
+// cheaply.
+//
+// Design choice (left-closed + chevron tail): left side has
+// `┌` / `└` square-anchored corners so the panel "starts
+// here". Right side ends with `›` chevron tails — not a
+// closed `┐` / `┘` corner — because StatusBar content can
+// extend right and we don't want to imply a hard boundary
+// that doesn't exist. The chevron tail reads as "this status
+// info continues to the right" (CLI / editor fold-marker
+// convention).
+func RenderPanel(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	// Bars (top + bottom) are anchored to PanelMaxWidth so
+	// they never wrap on mobile. Content lines render verbatim
+	// — long lines may wrap on narrow screens, which is
+	// acceptable. Per user preference: bars must not wrap,
+	// content can.
+	width := PanelMaxWidth
+	barLen := width - 2 // 1 (left corner) + barLen dashes + 1 (right chevron)
+	top := "┌" + strings.Repeat("─", barLen) + "›"
+	bottom := "└" + strings.Repeat("─", barLen) + "›"
+	parts := make([]string, 0, len(lines)+2)
+	parts = append(parts, top)
+	// Each content line gets a 2-space left indent so the icon
+	// (🤖/💰/📁) doesn't sit flush against the left edge of
+	// the panel — leaves visual whitespace that frames the
+	// content as "indented status", not "bordered box". Long
+	// lines extend past the bars and wrap on narrow screens.
+	for _, line := range lines {
+		parts = append(parts, "  "+line)
+	}
+	parts = append(parts, bottom)
+	return strings.Join(parts, "\n")
+}
+
 // StatusBarLines renders the per-turn session footer from an
 // OutboundMessage's flat fields. Returns nil when there is
 // nothing meaningful to show so callers can skip footer

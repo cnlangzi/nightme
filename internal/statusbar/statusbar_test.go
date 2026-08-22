@@ -16,10 +16,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+// utf8 is still needed for rune-count assertions on bar widths.
 
 // emptyOut returns a minimal OutboundMessage with all identity
 // fields zero — the renderer must treat it as "no footer".
@@ -300,6 +303,128 @@ func TestStatusBarLines_FullFooter(t *testing.T) {
 	}
 	if !strings.Contains(got[2], "[#42]") {
 		t.Errorf("Line 3 should include PR link, got %q", got[2])
+	}
+}
+
+func TestRenderPanel_EmptyLines(t *testing.T) {
+	// No StatusBar → no panel. Caller should skip trailer
+	// cheaply when StatusBarLines returns nil.
+	if got := RenderPanel(nil); got != "" {
+		t.Errorf("RenderPanel(nil) = %q, want empty", got)
+	}
+	if got := RenderPanel([]string{}); got != "" {
+		t.Errorf("RenderPanel([]) = %q, want empty", got)
+	}
+}
+
+func TestRenderPanel_Shape(t *testing.T) {
+	// Locks the 4-corner design: ┌ ┐ on top, └ ┘ on bottom,
+	// NO │ side borders (content sits flush left, free to wrap
+	// on narrow screens).
+	lines := []string{
+		"🤖: claude · opus-4-5",
+		"📁: cnlangzi/nightme · ⎇ main",
+	}
+	got := RenderPanel(lines)
+	parts := strings.Split(got, "\n")
+	if len(parts) != len(lines)+2 {
+		t.Fatalf("expected %d parts (top + %d lines + bottom), got %d:\n%q",
+			len(lines)+2, len(lines), len(parts), got)
+	}
+	// Top: ┌ ──── ›   (left square, right chevron tail —
+	// "starts here, continues right")
+	if !strings.HasPrefix(parts[0], "┌") {
+		t.Errorf("top line must start with ┌; got %q", parts[0])
+	}
+	if !strings.HasSuffix(parts[0], "›") {
+		t.Errorf("top line must end with › chevron tail; got %q", parts[0])
+	}
+	// Bottom: └ ──── ›  (same shape — left square, right chevron)
+	if !strings.HasPrefix(parts[len(parts)-1], "└") {
+		t.Errorf("bottom line must start with └; got %q", parts[len(parts)-1])
+	}
+	if !strings.HasSuffix(parts[len(parts)-1], "›") {
+		t.Errorf("bottom line must end with › chevron tail; got %q", parts[len(parts)-1])
+	}
+	// Middle lines: 2-space left indent + verbatim content,
+	// NO │ prefix/suffix.
+	for i, line := range parts[1 : len(parts)-1] {
+		if strings.HasPrefix(line, "│") || strings.HasSuffix(line, "│") {
+			t.Errorf("middle line %d must not have │ side borders; got %q", i, line)
+		}
+		want := "  " + lines[i]
+		if line != want {
+			t.Errorf("middle line %d = %q, want %q (with 2-space indent)", i, line, want)
+		}
+	}
+	// Top and bottom widths must match.
+	if w1, w2 := utf8.RuneCountInString(parts[0]), utf8.RuneCountInString(parts[len(parts)-1]); w1 != w2 {
+		t.Errorf("top width = %d, bottom width = %d (must match)", w1, w2)
+	}
+}
+
+func TestRenderPanel_BarsAlwaysAtMaxWidth(t *testing.T) {
+	// Bars anchor at PanelMaxWidth (30) regardless of content
+	// length. This is the conservative contract: top/bottom
+	// borders must NEVER wrap on mobile, content is free to.
+	lines := []string{"x"} // very short content
+	got := RenderPanel(lines)
+	parts := strings.Split(got, "\n")
+	if w := utf8.RuneCountInString(parts[0]); w != PanelMaxWidth {
+		t.Errorf("top width = %d runes, want PanelMaxWidth=%d (short content)", w, PanelMaxWidth)
+	}
+	if w := utf8.RuneCountInString(parts[len(parts)-1]); w != PanelMaxWidth {
+		t.Errorf("bottom width = %d runes, want PanelMaxWidth=%d", w, PanelMaxWidth)
+	}
+}
+
+func TestRenderPanel_ContentNotTruncated(t *testing.T) {
+	// Conservative contract: bars are at PanelMaxWidth (no wrap),
+	// but content lines render VERBATIM and may extend past the
+	// bars. Wrapping on mobile is acceptable — truncation is NOT.
+	long := "🤖: claude · opus-4-5 · 61c4ec9d-dbb0-418c-bbe7-8d4bfbc1a135"
+	got := RenderPanel([]string{long})
+	parts := strings.Split(got, "\n")
+	// Bar width is bounded.
+	if w := utf8.RuneCountInString(parts[0]); w != PanelMaxWidth {
+		t.Errorf("top width = %d runes, want %d", w, PanelMaxWidth)
+	}
+	// Content is preserved verbatim (with the 2-space indent).
+	want := "  " + long
+	if parts[1] != want {
+		t.Errorf("content truncated/modified:\n  got:  %q\n  want: %q", parts[1], want)
+	}
+	// No ellipsis — content is full.
+	if strings.Contains(parts[1], "…") {
+		t.Errorf("content must not have `…` suffix; got %q", parts[1])
+	}
+}
+
+func TestRenderPanel_LeftIndent(t *testing.T) {
+	// Locks the 2-space left indent that gives the icon a
+	// visual margin from the panel's left edge — design choice
+	// per user feedback ("左边栏流出一点留白"). Content
+	// renders verbatim AFTER the indent; long content extends
+	// past the bars (acceptable).
+	lines := []string{
+		"🤖: claude · opus-4-5",
+		"💰:「 12.3k / 200 · $0.087 」",
+		"📁: cnlangzi/nightme · ⎇ main",
+	}
+	got := RenderPanel(lines)
+	parts := strings.Split(got, "\n")
+	if len(parts) != len(lines)+2 {
+		t.Fatalf("expected %d parts, got %d", len(lines)+2, len(parts))
+	}
+	for i, line := range parts[1 : len(parts)-1] {
+		if !strings.HasPrefix(line, "  ") {
+			t.Errorf("middle line %d must start with 2-space indent; got %q", i, line)
+		}
+		// Strip the indent and check the rest matches verbatim.
+		stripped := strings.TrimPrefix(line, "  ")
+		if stripped != lines[i] {
+			t.Errorf("middle line %d content = %q, want verbatim %q", i, stripped, lines[i])
+		}
 	}
 }
 

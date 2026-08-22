@@ -6,7 +6,7 @@
 // onto every OutboundMessage via internal/runtime/handler.go:184-195
 // (per-event stamping from AgentSession state) + gateway.Translate
 // (Usage from EventAgentResult.Usage). The footer renderer in
-// channel/feishu/usage_footer.go reads those flat fields back off
+// internal/statusbar/statusbar.go reads those flat fields back off
 // the OutboundMessage and renders Line 1 (agentbar: 🤖: Agent ·
 // Model · SessionID) + Line 2 (usagebar: 💰:「 in/out · X% · $cost 」).
 //

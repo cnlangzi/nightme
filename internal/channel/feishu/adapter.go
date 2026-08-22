@@ -30,6 +30,7 @@ import (
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 const maxMessageBytes = 3800
@@ -1332,7 +1333,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// count — the per-line array ensures buildReceiptCard
 		// emits one <hr> + <div> block at the bottom instead of
 		// N+1 copies inline.
-		footerLines := formatStatusBarLines(&msg)
+		footerLines := statusbar.StatusBarLines(&msg)
 		if msg.ReplyTo == "" {
 			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
@@ -1524,14 +1525,14 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// internal/chatsession/manager.go::HandleInbound), and the
 		// MessageStateBus subscriber stamps AgentName / Workspace /
 		// SessionID onto this OutboundMessage. We therefore call
-		// formatStatusBarLines(&msg) here so AgentBar (and the
+		// statusbar.StatusBarLines(&msg) here so AgentBar (and the
 		// workspace line, when present) renders on the placeholder
 		// from the very first emit — no longer deferred to the
 		// first OutReply / AppendEntryWithFooter. The pre-fix
 		// comment ("placeholder shows up before the runtime has the
 		// AS handle") no longer applies.
 		if state == agent.MessageQueued {
-			footerLines := formatStatusBarLines(&msg)
+			footerLines := statusbar.StatusBarLines(&msg)
 			if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, footerLines); err != nil {
 				// Non-fatal: the reaction still fires, and the
 				// first OutReply will retry the cold-start card.
@@ -1742,7 +1743,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// uses the same shared cardFooterElements helper, so
 		// OutResult and OutReply cards now render identical
 		// footers.
-		footerLines := formatStatusBarLines(&msg)
+		footerLines := statusbar.StatusBarLines(&msg)
 		// F-39 + F-44 follow-up: deliver the full result as a
 		// top-level Create (PR #47's ReplyInChat surface) — see
 		// OutReply case above for the parent-thread rationale that
@@ -1852,7 +1853,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// orphan path fell through to sendRawOutText (plain text
 		// checklist), violating the "main-chat is card" invariant
 		// F-46 established for OutReply / OutResult.
-		footerLines := formatStatusBarLines(&msg)
+		footerLines := statusbar.StatusBarLines(&msg)
 		if msg.ReplyTo == "" {
 			return a.postOrphanTaskCard(ctx, msg.ChatID, msg.TaskList, footerLines)
 		}

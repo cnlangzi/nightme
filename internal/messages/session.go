@@ -12,7 +12,7 @@ import (
 // the per-chatsession snapshot rebuilt fresh on every read by
 // ChatSession.GitStatus(ctx); the runtime event hook stamps it
 // onto every outbound via the Emitter's GitStatusLookup closure.
-// Channel adapters read this directly via formatStatusBarLines →
+// Channel adapters read this directly via statusbar.StatusBarLines →
 // formatGitLine.
 //
 // Sourced from chatsession: each ChatSession.GitStatus call

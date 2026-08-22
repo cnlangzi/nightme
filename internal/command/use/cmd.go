@@ -98,7 +98,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// confirmation. The plain `command.Reply` path goes through
 	// Router.emitReply, which constructs the OutboundMessage with
 	// ONLY ChatID/Kind/Text/ReplyTo — AgentName/Model/SessionID
-	// stay empty, so formatStatusBarLines drops the entire AgentBar
+	// stay empty, so statusbar.StatusBarLines drops the entire AgentBar
 	// line and the placeholder card keeps showing the previous
 	// agent's identity until the next bridge EventAgentReady arrives
 	// (never, on the pool-reuse path where no new spawn happens).

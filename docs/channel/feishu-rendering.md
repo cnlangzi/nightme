@@ -4391,7 +4391,7 @@ type GitStatusSnapshot struct {
 }
 ```
 
-**Render 路径**（`internal/channel/feishu/usage_footer.go::formatStatusBarLines`）：
+**Render 路径**（`internal/statusbar/statusbar.go::StatusBarLines`,原 `internal/channel/feishu/usage_footer.go::formatStatusBarLines`,2026-08-22 plan-D 抽到共享包）：
 - 现有 line 1 / line 2 不变
 - 新增 line 3：`formatGitLine(ctx)` 返回非空时 append
 - `formatGitLine` 内部调 `formatWorkspacePath`（无 HOME 处理、≤ 2 组件完整、> 2 截尾）
@@ -4564,7 +4564,7 @@ State 流转图（见下 §1.9）加一条 compaction 分支：
 
 #### 1.8.8 F-49 不在 F-45 PR scope
 
-F-49 是独立 PR（详见 §7 实施计划），不在 F-45 当初落地范围内。F-45 的 footer helper `formatStatusBarLines` 在 F-49 PR 里加 `🗜 N` 段；其余文件（AgentSession / StatusBar / newEventHandler / bridges）都是 F-49 新增改动，与 F-45 已落地的代码解耦。
+F-49 是独立 PR（详见 §7 实施计划），不在 F-45 当初落地范围内。F-45 的 footer helper `formatStatusBarLines`（现 `statusbar.StatusBarLines`）在 F-49 PR 里加 `🗜 N` 段；其余文件（AgentSession / StatusBar / newEventHandler / bridges）都是 F-49 新增改动，与 F-45 已落地的代码解耦。
 
 ### 1.9 State 流转
 
@@ -4620,7 +4620,7 @@ type StatusBar struct {
 
 Separator 沿用 ` · ` middle-dot（与 Line 1 已有 `Agent · Model`、Line 2 已有 `new / cache / out` 同一族）；不引入新符号。
 
-Leading-separator caveat：`SessionID != "" && Agent == "" && Model == ""` 时渲染成 `🤖: · <sid>`（前置 `·`）。在生产路径上 `stampFromAS` 的 materialize 条件保证至少有 1 个字段非空，但单 SessionID 触发 footer 时仍会出现该形态。判定为可接受——文档在 `formatStatusBarLines` 注释 + `usage_footer_test.go::TestFormatSessionFooterLines_SessionIDOnly` 锁定行为，避免后续 PR "修 leading dot" 时无意回退。
+Leading-separator caveat：`SessionID != "" && Agent == "" && Model == ""` 时渲染成 `🤖: · <sid>`（前置 `·`）。在生产路径上 `stampFromAS` 的 materialize 条件保证至少有 1 个字段非空，但单 SessionID 触发 footer 时仍会出现该形态。判定为可接受——文档在 `statusbar.StatusBarLines` 注释（原 `formatStatusBarLines`）+ `statusbar_test.go::TestStatusBarLines_SessionIDOnly`（原 `usage_footer_test.go::TestFormatSessionFooterLines_SessionIDOnly`,2026-08-22 plan-D 迁到共享包）锁定行为，避免后续 PR "修 leading dot" 时无意回退。
 
 **(3) Line 1 / Line 3 emoji 加 `:` 后缀**
 
@@ -4647,7 +4647,7 @@ type StatusBar struct {
 }
 ```
 
-**Render 路径**（`internal/channel/feishu/usage_footer.go::formatStatusBarLines`）：
+**Render 路径**（`internal/statusbar/statusbar.go::StatusBarLines`,原 `internal/channel/feishu/usage_footer.go::formatStatusBarLines`,2026-08-22 plan-D 抽到共享包）：
 - Line 1 idParts：`["🤖:", ctx.Agent, "·", ctx.Model, "·", ctx.SessionID]`（Agent / Model / SessionID 各自独立 omit）
 - Line 3 formatGitLine：`parts := []string{"📁: " + ws, ...}`（emoji 头部加 `:`）
 - Line 2 不变

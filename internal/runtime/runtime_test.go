@@ -502,7 +502,7 @@ func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 	}
 
 	// Footer Line 2 will read these exact fields downstream
-	// (see internal/channel/feishu/usage_footer.go). Locking
+	// (see internal/statusbar/statusbar.go). Locking
 	// in the values the channel WILL see.
 	t.Logf("footer Line 2 inputs: in=%d cache_creation=%d cache_read=%d out=%d window=%d pct=%.2f cost=%.3f",
 		inTok, cacheCr, cacheRd, outTok, win, pct, cost)
@@ -903,19 +903,19 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 // the Feishu placeholder card render AgentBar from the very first
 // MessageQueued emit (see
 // internal/channel/feishu/adapter.go::Send →
-// ensureReceiptForTyping → formatStatusBarLines).
+// ensureReceiptForTyping → statusbar.StatusBarLines).
 //
 // Three sub-tests:
 //
 //  1. AS with all three fields populated → OutboundMessage gets
 //     all three stamped verbatim.
 //  2. AS with SessionID empty (pre-EventAgentReady) → AgentName /
-//     Workspace still stamped; SessionID stays "". formatStatusBarLines
+//     Workspace still stamped; SessionID stays "". statusbar.StatusBarLines
 //     omits the empty SessionID segment but the AgentBar line
 //     still renders.
 //  3. selectedAS nil (legacy framework path: slash command /
 //     shell dispatch with no AS in scope) → all three fields
-//     empty. formatStatusBarLines treats the all-empty case as
+//     empty. statusbar.StatusBarLines treats the all-empty case as
 //     "no AgentBar line" (back-compat).
 func TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar(t *testing.T) {
 	t.Run("stamps AgentBar when selectedAS populated", func(t *testing.T) {
@@ -979,7 +979,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar(t *testing.T)
 		// hasn't reported its SessionID yet. The subscriber
 		// should still stamp Agent / Cwd so the placeholder
 		// card shows the AgentBar identity line (sans the
-		// trailing SessionID segment). formatStatusBarLines
+		// trailing SessionID segment). statusbar.StatusBarLines
 		// omits the empty SessionID segment via the
 		// "SessionID omitted when '' (F-56)" rule.
 		csFile, asFile := newWireTestStores(t)
@@ -1031,7 +1031,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar(t *testing.T)
 		// MessageQueued via PublishMessageState without a
 		// resolved AS in scope. The subscriber must NOT fake a
 		// default — selectedAS is nil → all three fields stay
-		// empty → formatStatusBarLines drops the AgentBar line
+		// empty → statusbar.StatusBarLines drops the AgentBar line
 		// entirely (no misleading "🤖: " header on a slash
 		// command placeholder card).
 		csFile, asFile := newWireTestStores(t)

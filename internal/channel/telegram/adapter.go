@@ -48,6 +48,11 @@ type Adapter struct {
 	// internal/channel/feishu/adapter.go).
 	muMessageStates sync.Mutex
 	messageStates   map[string]agent.MessageState
+
+	// chains is the v9 per-turn placeholder chain index (see
+	// docs/channel/telegram.md §11.12.2). Pure in-memory; never
+	// persisted to telegram_state.json. Reset on Adapter.Stop.
+	chains *chainLRU
 }
 
 func NewAdapter(cfg *config.Config) (*Adapter, error) {
@@ -86,6 +91,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		callbacks: make(map[string]struct{}),
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
+		chains:    newChainLRU(defaultChainLRUCap),
 	}, nil
 }
 
@@ -118,6 +124,7 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		callbacks: make(map[string]struct{}),
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
+		chains:    newChainLRU(defaultChainLRUCap),
 	}
 }
 
@@ -179,6 +186,11 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		a.stopped = true
 		close(a.incoming)
 		a.mu.Unlock()
+		// Drop in-memory chain index on cold-stop. (Chains are
+		// per-process anyway; explicit reset documents intent.)
+		if a.chains != nil {
+			a.chains.reset()
+		}
 		return nil
 	}
 	if a.stopped {
@@ -188,6 +200,9 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	a.stopped = true
 	cancel := a.cancel
 	a.mu.Unlock()
+	if a.chains != nil {
+		a.chains.reset()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -1142,29 +1157,42 @@ func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []
 	return blocks
 }
 
+// formatTool produces a single-line chain segment for the active
+// placeholder chunk. v9 dispatches the call line and result line to
+// separate helpers (formatToolStartCall / summarizeToolResult) —
+// feishu parallel from internal/channel/feishu/summarize_tool.go.
+//
+// OutToolStart emits a "call" line:
+//   `● Bash(ls -la)`
+//
+// OutToolEnd emits a one-line "result" line that hides raw output:
+//   `⎿  📄 Read → 47 lines`
+//
+// PII posture: raw output is NEVER included in the result line —
+// only the byte/lines/file-count heuristic. Custom / unknown tools
+// report only the byte count.
+//
+// Falls back to msg.Text when msg.Tool is nil (defensive — the
+// dispatch in Send already guards this, but formatTool is also
+// reachable from places that haven't been migrated yet).
 func formatTool(msg messages.OutboundMessage) string {
 	if msg.Tool == nil {
+		if msg.Text == "" {
+			return ""
+		}
 		return msg.Text
 	}
 	name := msg.Tool.Name
 	if name == "" {
 		name = "tool"
 	}
-	prefix := "🔧"
-	if msg.Kind == messages.OutToolEnd {
-		prefix = "✅"
+	switch msg.Kind {
+	case messages.OutToolStart:
+		return formatToolStartCall(name, msg.Tool.Args)
+	case messages.OutToolEnd:
+		return summarizeToolResult(name, msg.Tool.Output, msg.Err)
 	}
-	result := prefix + " " + name
-	if msg.Tool.Args != "" {
-		result += "\n" + msg.Tool.Args
-	}
-	if msg.Tool.Output != "" {
-		result += "\n" + msg.Tool.Output
-	}
-	if msg.Err != nil {
-		result += "\n⚠️ " + msg.Err.Error()
-	}
-	return result
+	return ""
 }
 
 func formatTaskList(taskList *agent.AgentTaskListEvent) string {

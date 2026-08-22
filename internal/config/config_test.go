@@ -1,9 +1,13 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 func TestLoadExample(t *testing.T) {
@@ -70,8 +74,13 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("Load(\"\") error: %v", err)
 	}
 
-	if cfg.Primary != "claude" {
-		t.Errorf("default Primary = %q, want claude", cfg.Primary)
+	// Primary has no hardcoded default — applyDefaults leaves it
+	// empty and the auto-detect layer (LoadDefault) picks it up
+	// from agent.Builtins on a real startup. Documenting the
+	// behaviour here so a future reader doesn't "fix" the
+	// emptiness back to a hardcoded name.
+	if cfg.Primary != "" {
+		t.Errorf("default Primary = %q, want \"\" (resolved by LoadDefault auto-detect)", cfg.Primary)
 	}
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("default Session.DefaultPtyCols = %d, want 80", cfg.Session.DefaultPtyCols)
@@ -150,8 +159,9 @@ func TestMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(missing) returned error: %v (want nil — defaults only)", err)
 	}
-	if cfg.Primary != "claude" {
-		t.Errorf("Primary = %q, want claude (default for missing file)", cfg.Primary)
+	// No hardcoded Primary default — see TestDefaults comment.
+	if cfg.Primary != "" {
+		t.Errorf("Primary = %q, want \"\" (no hardcoded default; auto-detect is LoadDefault's job)", cfg.Primary)
 	}
 }
 
@@ -178,4 +188,97 @@ func TestEnvOverrideInvalidNumber(t *testing.T) {
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("Session.DefaultPtyCols = %d, want 80 (default after invalid override)", cfg.Session.DefaultPtyCols)
 	}
+}
+
+// TestLoadDefault_AutoDetectsPersistsAndIsIdempotent verifies the
+// full LoadDefault auto-detect path: a fresh temp config file with
+// no `primary:` line should be filled in by probing agent.Builtins
+// and the choice should be persisted to disk so a second LoadDefault
+// is a no-op.
+//
+// IMPORTANT: agent.Builtins is empty in this test binary because
+// the only place that calls Builtins.Register is cmd/nightme/agents.go
+// (package main), which is not transitively imported here. So the
+// test must register its own starter — otherwise detection always
+// returns "" and the persist branch is never exercised. Mirror the
+// pattern from internal/command/gtw/hooks_test.go:512-521.
+func TestLoadDefault_AutoDetectsPersistsAndIsIdempotent(t *testing.T) {
+	// Seed a uniquely-named starter. Detect() succeeds unconditionally
+	// so this starter is guaranteed to win the Builtins.List() probe.
+	const testName = "detect-persist-test"
+	prev, _ := agent.Builtins.Get(testName)
+	t.Cleanup(func() {
+		if prev != nil {
+			// Re-register any previously-registered entry under the
+			// same name to keep order stable across runs of this test
+			// within the same binary. Builtins has no Unregister; if
+			// nothing was previously registered, the entry stays —
+			// that's fine, the name is unique and never collides.
+			_ = agent.Builtins.Register(prev)
+		}
+	})
+	_ = agent.Builtins.Register(&detectPersistTestStarter{name: testName})
+
+	cfgFile := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgFile)
+	t.Setenv("NIGHTME_PRIMARY", "")
+
+	// First call: triggers detect + persist.
+	first, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("first LoadDefault: %v", err)
+	}
+	if first.Primary != testName {
+		t.Fatalf("first LoadDefault Primary = %q, want %q — detect branch did not fire", first.Primary, testName)
+	}
+
+	// Verify the choice landed on disk.
+	if _, err := os.Stat(cfgFile); err != nil {
+		t.Fatalf("config file %s was not written after auto-detect: %v", cfgFile, err)
+	}
+	onDisk, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("re-read config after auto-detect: %v", err)
+	}
+	if onDisk.Primary != testName {
+		t.Errorf("persisted Primary = %q, in-memory = %q — SaveDefault did not run",
+			onDisk.Primary, testName)
+	}
+
+	// Second call: Primary already set, must be a no-op (still
+	// the same value, file not rewritten — we can't easily detect
+	// "file not rewritten" without fs stat timestamps, so we just
+	// re-check the value).
+	second, err := LoadDefault()
+	if err != nil {
+		t.Fatalf("second LoadDefault: %v", err)
+	}
+	if second.Primary != testName {
+		t.Errorf("second LoadDefault Primary = %q, want %q — non-idempotent",
+			second.Primary, testName)
+	}
+}
+
+// detectPersistTestStarter is a minimal agent.Starter that always
+// reports its binary as "available" via Detect(). The other Starter
+// methods are stubbed because LoadDefault's auto-detect path only
+// calls Detect(); Start/RunOnce/Review never run from this test.
+//
+// ModePTY is irrelevant to this test — detection doesn't inspect
+// the mode — but matches the convention in internal/command/gtw/hooks_test.go
+// (testStarter) so future readers see a familiar shape.
+type detectPersistTestStarter struct{ name string }
+
+func (s *detectPersistTestStarter) Info() agent.Info {
+	return agent.NewInfo(s.name, agent.ModePTY, "", nil, nil)
+}
+func (s *detectPersistTestStarter) Detect() error { return nil }
+func (s *detectPersistTestStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
+	return nil, errors.New("detectPersistTestStarter: Start not implemented")
+}
+func (s *detectPersistTestStarter) RunOnce(context.Context, agent.StartConfig, []agent.ContentBlock) (agent.RunResult, error) {
+	return agent.RunResult{}, errors.New("detectPersistTestStarter: RunOnce not implemented")
+}
+func (s *detectPersistTestStarter) Review(context.Context, agent.StartConfig) (agent.RunResult, error) {
+	return agent.RunResult{}, errors.New("detectPersistTestStarter: Review not implemented")
 }

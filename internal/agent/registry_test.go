@@ -108,6 +108,60 @@ func TestListEmpty(t *testing.T) {
 	}
 }
 
+// TestList_PreservesInsertionOrder verifies that List() returns
+// starters in first-registration order — the invariant that
+// config.LoadDefault auto-detection depends on. Re-Register of
+// an existing name must NOT move the entry to the tail of the
+// order slice, because that would silently shift the auto-detect
+// priority chain every time a bridge package got re-imported.
+//
+// This test is the contract test for docs/primary-agent-detection.md
+// — if it starts failing, every consumer of List() iteration order
+// (auto-detect, /agents listing, etc.) is now non-deterministic.
+func TestList_PreservesInsertionOrder(t *testing.T) {
+	r := New()
+	want := []string{"claude", "codex", "opencode", "pi"}
+
+	// Deliberately out of alphabetical order to make a bug obvious.
+	for _, n := range want {
+		if replaced := r.Register(&fakeAgent{name: n, mode: ModeACP}); replaced {
+			t.Fatalf("first Register(%q) should not report replacement", n)
+		}
+	}
+
+	got := r.List()
+	if len(got) != len(want) {
+		t.Fatalf("List() returned %d agents, want %d", len(got), len(want))
+	}
+	for i, a := range got {
+		if a.Info().Name != want[i] {
+			t.Errorf("List()[%d] = %q, want %q (insertion order must be preserved)",
+				i, a.Info().Name, want[i])
+		}
+	}
+
+	// Re-register "codex" with a different mode — pointer must
+	// update, but List() must keep "codex" at index 1.
+	updated := &fakeAgent{name: "codex", mode: ModeSDK}
+	if replaced := r.Register(updated); !replaced {
+		t.Fatalf("re-Register(codex) should report replacement=true")
+	}
+	got = r.List()
+	if len(got) != len(want) {
+		t.Fatalf("List() after re-Register returned %d agents, want %d", len(got), len(want))
+	}
+	for i, n := range want {
+		if got[i].Info().Name != n {
+			t.Errorf("List()[%d] after re-Register = %q, want %q (replacement must not move entry)",
+				i, got[i].Info().Name, n)
+		}
+	}
+	// And the replacement pointer must actually be live.
+	if got[1] != updated {
+		t.Errorf("replaced entry pointer not updated in List()")
+	}
+}
+
 func TestModeString(t *testing.T) {
 	cases := map[Mode]string{
 		ModeACP: "acp",

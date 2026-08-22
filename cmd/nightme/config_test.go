@@ -161,7 +161,12 @@ func TestConfigAgentsMenu_CancelWithQ(t *testing.T) {
 	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
 	t.Setenv("NIGHTME_CONFIG", cfgPath)
 
-	cfg, err := config.Load(cfgPath) // defaults: Primary=claude
+	// Load (not LoadDefault) so the auto-detect layer doesn't
+	// mutate cfg.Primary before the menu runs — the test is
+	// about what the menu does, not about config resolution.
+	// Post-fix: Load leaves Primary empty (no hardcoded default),
+	// so the "unchanged" baseline is "".
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -180,7 +185,7 @@ func TestConfigAgentsMenu_CancelWithQ(t *testing.T) {
 		// Actually wait — Load returns defaults if file missing, so
 		// success here just means "Load worked with defaults".
 		// Verify the in-memory cfg is unchanged.
-		if cfg.Primary != "claude" {
+		if cfg.Primary != "" {
 			t.Errorf("Primary mutated to %q after cancel", cfg.Primary)
 		}
 	}

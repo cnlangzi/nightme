@@ -1,6 +1,6 @@
 # Telegram Channel - Topic 方案与接入设计
 
-> **Status**: implemented (核心场景) + 已知 gap 跟踪（见 §14）
+> **Status**: implemented (核心场景) + 已知 gap 跟踪（见 §15）
 > **Scope**: nightme Telegram Bot API 适配器（`internal/channel/telegram/*`）
 > **目的**: 在 Telegram Forum Supergroup 中，将主窗口作为会话入口，将每个 qino 会话映射为一个 Topic，并在 Topic 内承载占位状态、thinking、工具调用、结果和交互卡。
 > **Related docs**:
@@ -1529,7 +1529,89 @@ health.go      Bot API、polling、Topic 状态健康快照
 - LLM 原始 Markdown 不需要改变 Agent 输出协议。
 - callback 重复、消息删除、Bot 权限变化和 429 都有明确处理。
 
-## 14. 已知限制 / Gap（截至本次实现）
+## 14. MessageState 与 Card 独立轨道（v1.3 自治实现）
+
+### 14.1 两条轨道
+
+Telegram Channel 自治实现 `MessageState`（user-message reaction）与 `Card Body`（Topic 内的占位 / 事件详情）两条完全独立的渲染轨道，对齐 [docs/channel/feishu.md §6.6](./feishu.md) 的契约：
+
+| 轨道 | 源 | 抽象事件 | 渲染目标 | Telegram 实现 |
+|---|---|---|---|---|
+| **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, MessageState: {State, MessageID}}` | **userMsgID** | `setMessageReaction(userMsgID, emoji)` |
+| **Card Body** | Topic placeholder（C2） + 事件流 | `OutboundMessage{Kind: OutHeartbeat/OutTool*/OutThinking/...}` | placeholder_message_id / Topic 内独立消息 | `editMessageText` / `sendMessage` |
+
+两者完全独立：一个失败不影响另一个（`MessageState` 渲染失败仅 log warn，不阻塞 card body）；都按 userMsgID / chatID 索引，但服务不同语义。详见 [`docs/feat/F-31-message-state.md`](../feat/F-31-message-state.md) 与 `SPEC.md §2.5`。
+
+### 14.2 state → emoji 映射（Channel 自治）
+
+```go
+// internal/channel/telegram/adapter.go
+func mapStateToTelegramEmoji(state agent.MessageState) string {
+    switch state {
+    case agent.MessageQueued:    return "⏳"
+    case agent.MessageSubmitted: return "🔄"
+    case agent.MessageDone:      return "✅"
+    }
+    return ""
+}
+```
+
+跟 `internal/channel/feishu/adapter.go::mapStateToFeishuEmoji` 对位，但有两个本质差异：
+
+1. **Emoji 形态**：Telegram reaction 接受 unicode codepoint（用户消息上直接显示 ⏳/🔄/✅）；Feishu 用预定义 `emoji_type` 名（`OneSecond`/`OnIt`/`DONE`），因为 Feishu reaction 服务拒绝 unicode 输入（返回 `99992354 data not found`，见 [feishu.md §6.6.3](./feishu.md)）。
+2. **MessageDropped**：Telegram 当前不映射（silent drop），跟 Feishu 对齐 —— 失败由 reply 文本的 ❌ 前缀表达，不在 user-message reaction 上叠加 ❌。
+
+未知 state 返回 `""` 让 caller silent drop，跟 Feishu 的 forward-compatible 行为一致。
+
+### 14.3 字段删除决策（2026-08-22 fix-telegram）
+
+`messages.MessageStatePayload.Emoji` 字段**已删除**。
+
+- **删除理由**：该字段原本设计为 runtime 半成品 emoji，但 `runtime/eventbus.go` 唯一一处生产 `MessageStatePayload` 的代码不填该字段（只设 `State` / `MessageID`）；同时 `mapStateToTelegramEmoji` / `mapStateToFeishuEmoji` 都是 Channel 自治的，从不读 `Emoji` 字段。该字段在 production 路径上是纯传输浪费。
+- **新的契约**：runtime 只 forward `agent.MessageState` 抽象枚举；每个 Channel adapter 自维护 state→emoji 映射函数（不依赖 payload 字段）。
+- **wire format 兼容性**：`MessageStatePayload` 是 `internal/` 内部类型，无对外 wire format 暴露，删除零影响。
+- **反向回归保护**：如果未来有人重构加回 `Emoji` 字段并期望 adapter 用它，编译会直接报错（telegram `adapter.go` 不再读该字段 + 测试 fixture 已用 `State` 字段）。
+
+### 14.4 幂等（避免 Telegram API 抖动）
+
+Adapter 维护 `messageStates map[userMsgID]agent.MessageState`：
+
+- 同 state 第二次 emit 跳过 `setMessageReaction` 调用，节省 API 配额。
+- **关键陷阱**：`agent.MessageState` 的零值是 `MessageQueued`，跟首次合法 emit 重合 —— 必须用 `bool ok` 区分"未记录"和"记录了 MessageQueued"。`lastMessageState` 返回 `(state, ok)`，`bool ok` 是 load-bearing（见 `adapter.go::lastMessageState` 注释）。
+- **OutMessageStateRemoved 不更新 LRU**：删除态只调 `setMessageReaction(reaction: [])`，不调用 `rememberMessageState`。这保证后续 `OutMessageState` emit 仍按真实最后渲染状态判等，不会被一个 sentinel 污染。
+
+### 14.5 append-only 语义
+
+Telegram reaction API 是 append-only：`setMessageReaction` 每次用新列表**整体替换** reaction set，但不支持按 emoji id 删除单个 reaction。
+
+- ⏳ → 🔄 → ✅ 在用户消息上**累积**为三个独立 reaction，形成完整状态轨迹。
+- Telegram 每条消息允许 11+ 种 reaction 类型，4 态未超上限。
+- 未来需要"删单个 reaction"：跟 Feishu 一样实现 `OutMessageStateRemoved` 携带 `ReactionID`，调 `setMessageReaction(reaction: [])`（Telegram 不支持按 ID 删，只能整体替换 —— Telegram 实际只有"全清"语义）。
+
+### 14.6 ChatSession 侧契约
+
+- `chatsession.EmitMessageState(userMsgID, state)`（`internal/chatsession/chatsession.go`）发布 `MessageStateEvent` 到 `cs.MessageStateBus`。
+- `internal/runtime/eventbus.go` 的 `MessageStateBus` subscriber（每个 ChatSession 一个）把 `MessageStateEvent` 翻译为 `OutboundMessage{Kind: OutMessageState}` 并通过 `em.Send` 发出。
+- Adapter case 在 `Send` 里消费，跟 Feishu 对位：判 emoji → 判 dedup → `strconv.Atoi(MessageID)` → `setMessageReaction` → `rememberMessageState`。
+
+runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 telegram（feishu 原本就走 `mapStateToFeishuEmoji(state)` 自决路径，未受字段删除影响）。
+
+### 14.7 测试契约
+
+`internal/channel/telegram/adapter_test.go` 锁死的契约：
+
+| 测试 | 锁死什么 |
+|---|---|
+| `TestMapStateToTelegramEmoji` | 4 态映射 + `MessageDropped` silent drop + 未知 state silent drop |
+| `TestAdapter_Send_OutMessageState_QueuedRenders` / `_SubmittedRenders` / `_DoneRenders` | 每个非空映射都打到 `setMessageReaction` + reaction 字段正确 |
+| `TestAdapter_Send_OutMessageState_UnknownStateDrops` | 未知 state 不调 API |
+| `TestAdapter_Send_OutMessageState_DroppedSilentDrops` | `MessageDropped` 显式不渲染（防未来"加 ❌"误改） |
+| `TestAdapter_Send_OutMessageState_TracksStateIdempotency` | 同 state 第二次 skip + 不同 state 第三次触发 |
+| `TestAdapter_Send_OutMessageState_FirstReceivedNotSkipped` | 第一次 emit 不被零值误判为已记录（lock 住 `bool ok`） |
+| `TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU` | Removed 不污染 LRU：后续不同 state 仍触发 |
+| `TestAdapter_Send_OutMessageState_BadID` | 非数字 MessageID 报错，不污染 LRU |
+
+## 15. 已知限制 / Gap（截至本次实现）
 
 下面这些是文档里讨论过、Telegram Bot API 的能力差距或实现优先级选择导致没做的点。每条都标明属于哪一类：
 
@@ -1539,7 +1621,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 | **降级** | 飞书有原生能力、Telegram 没有对应物，已用近似手段实现 |
 | **未实现** | 设计上想做、但目前没实现（不在本期 scope） |
 
-### 14.1 限制类（API 做不到）
+### 15.1 限制类（API 做不到）
 
 #### L1. 没有"卡片"概念，Telegram 不支持结构化 card 元素
 - 飞书用 `<div>` / `<form>` / `<hr>` 等元素构成 receipt card，可以原位 append 多条 log entry。
@@ -1590,7 +1672,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - 这意味着 Topic 永远是"空容器"，永远要靠内部的占位消息表达"会话状态"。
 - 已确认无替代方案。
 
-### 14.2 降级类（用近似手段实现，已 work）
+### 15.2 降级类（用近似手段实现，已 work）
 
 #### D1. OutReply / OutResult / OutThinking / OutTool 都用独立消息
 - 飞书 receipt 把这些都装在一张 card 内，通过 div 元素结构区分。
@@ -1615,7 +1697,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - Telegram 占位消息就是"Working..."那一条，PATCH 直接改文本（替换 thinking/tool 计数）。
 - 缺点：占位消息上**不能**同时显示工作状态和历史 thinking/log（飞书可以分层）。
 
-### 14.3 未实现类（设计意图存在，本次没做）
+### 15.3 未实现类（设计意图存在，本次没做）
 
 #### N1. Rolling-log receipt card
 - 飞书 F-25/F-40：长回复 PATCH 同一张 card，多 div 元素累积。
@@ -1659,7 +1741,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - 状态丢失：用户进入 Topic 后看不到当前 turn 的 session 标识。
 - **未来**：占位消息 PATCH 时把 SessionID / Model / AgentName 拼到 heartbeat 文本头部。
 
-### 14.4 实现优先级建议
+### 15.4 实现优先级建议
 
 如果未来要做 follow-up，建议按这个顺序：
 
@@ -1670,7 +1752,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 5. **N1**（rolling-log receipt）—— 大改，需要权衡 4096 限制 + 历史重发成本。
 6. **N5**（用 ReplyTo）—— 视觉改进，影响小。
 
-### 14.5 本次实现完成（C1, C2）
+### 15.5 本次实现完成（C1, C2）
 
 | ID | 内容 | 状态 |
 |---|---|---|
@@ -1679,11 +1761,11 @@ health.go      Bot API、polling、Topic 状态健康快照
 
 后续修订请直接在本节追加，并把对应 issue 编号填进去。
 
-## 15. Telegram 独有、未利用的能力
+## 16. Telegram 独有、未利用的能力
 
 下面这些 API 飞书**没有**对应物，Telegram 原生支持但当前 adapter 没有用。每条标出"对应飞书体验"和"启用后能补齐哪个 gap"，便于后续讨论优先级。
 
-### 15.1 P1 - `pinChatMessage` 钉住最终结果
+### 16.1 P1 - `pinChatMessage` 钉住最终结果
 
 **能力**：`pinChatMessage(chat_id, message_id)` 把任意消息钉在 Topic（或群组）顶部。
 
@@ -1704,7 +1786,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - 多 Topic 同 chat 时，pin 在 chat 级别可见，跨 Topic 共享 pin 位 —— 可能造成 pin 抖动。
 - 解决：每个 chat 只 pin 当前 turn 的 result，unpin 之前的。
 
-### 15.2 P2 - `deleteMessage` 删除占位消息
+### 16.2 P2 - `deleteMessage` 删除占位消息
 
 **能力**：`deleteMessage(chat_id, message_id)` 删除任何消息（48 小时内）。
 
@@ -1724,7 +1806,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - 删除后用户没法"回到这条占位看历史"——但 Topic 内其他消息仍然是时间线。
 - 必须配合 ✅ reaction（不能既删又没标识）。
 
-### 15.3 P3 - OnPromptEnded 用 ✅ reaction + delete placeholder 组合
+### 16.3 P3 - OnPromptEnded 用 ✅ reaction + delete placeholder 组合
 
 **能力**：组合 P2 + setMessageReaction("✅")。
 
@@ -1739,7 +1821,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 
 **风险 / 边界**：同 P2。
 
-### 15.4 P4 - `editMessageReplyMarkup` 只更新键盘
+### 16.4 P4 - `editMessageReplyMarkup` 只更新键盘
 
 **能力**：`editMessageReplyMarkup(chat_id, msg_id, keyboard)` 单独更新消息的 keyboard，**不**改 text。
 
@@ -1759,7 +1841,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - 没发现 Telegram API 差异。
 - 收益主要是性能（少一次 markdown parse）和一致性（不会因为 markdown 渲染规则变化导致已 settle 的 choice 文本微变）。
 
-### 15.5 P5 - `sendMediaGroup` 批量附件
+### 16.5 P5 - `sendMediaGroup` 批量附件
 
 **能力**：`sendMediaGroup(chat_id, media[])` 一次发送最多 10 个 media（photo/video）作为**一条**消息的相册。
 
@@ -1780,7 +1862,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - 混合类型（photo + video）OK，但 document 不能混在 media group 里。
 - 如果用户发的是 11+ 张图，需要 fallback 成多条 media group 消息。
 
-### 15.6 P6 - `unpinAllChatMessages` 清理历史 pin
+### 16.6 P6 - `unpinAllChatMessages` 清理历史 pin
 
 **能力**：`unpinAllChatMessages(chat_id)` 清空 chat 内所有 pin。
 
@@ -1794,7 +1876,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 
 **工作量估算**：~5 行（暴露为 adapter method + 测试 helper）。
 
-### 15.7 P7 - `sendChatAction` 显示 typing 状态
+### 16.7 P7 - `sendChatAction` 显示 typing 状态
 
 **能力**：`sendChatAction(chat_id, action="typing")` 在 chat 内显示"bot 正在输入..."指示。
 
@@ -1816,7 +1898,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - 频率限制：typing 调用本身也吃 API 配额（每个 chat 1 次/5s）。
 - 如果 chat 不是 forum，typing 显示在 main window 会让用户觉得 bot 在 main window 回复 —— 实际只是 feedback。
 
-### 15.8 P8 - `sendPoll` 作为 Choice 的另一种渲染
+### 16.8 P8 - `sendPoll` 作为 Choice 的另一种渲染
 
 **能力**：`sendPoll(chat_id, question, options[])` 发一个 poll。
 
@@ -1841,7 +1923,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 - sendPoll 投完票后自动 settle，bot 收 `poll_answer` update —— 需要处理新的 update 类型。
 - 选项不能像 InlineKeyboard 那样灵活（不支持 emoji icon、不支持 URL 等）。
 
-### 15.9 优先级建议
+### 16.9 优先级建议
 
 按 ROI 排序（参考 14.4）：
 
@@ -1856,7 +1938,7 @@ health.go      Bot API、polling、Topic 状态健康快照
 | 7 | **P6** unpinAllChatMessages | ~5 行 | 极低 | 测试维护 |
 | 8 | **P8** sendPoll 替代 Choice | ~80 行 | 中 | 可选替代方案，争议大 |
 
-### 15.10 与已有 gap 的关系
+### 16.10 与已有 gap 的关系
 
 | Telegram 能力 | 补齐的 gap |
 |---|---|
@@ -1865,16 +1947,16 @@ health.go      Bot API、polling、Topic 状态健康快照
 | P3 reaction+delete | N3 最佳实现 |
 | P4 edit markup | D1（thinking/tool 独立消息优化） |
 | P5 media group | 附件流程优化 |
-| P7 typing | 用户反馈体验（不在 §14 内） |
+| P7 typing | 用户反馈体验（不在 §15 内） |
 
 后续讨论时优先关注 P1/P3/P7（性价比最高）。
 
 
-## 16. 网络代理
+## 17. 网络代理
 
 Telegram Bot API 在某些网络环境（如中国大陆）下不可达。nightme **默认继承** 标准代理环境变量，无需任何配置。
 
-### 16.1 支持的环境变量
+### 17.1 支持的环境变量
 
 | 变量 | 作用 |
 |---|---|
@@ -1885,7 +1967,7 @@ Telegram Bot API 在某些网络环境（如中国大陆）下不可达。nightm
 
 Go 标准库的 `http.ProxyFromEnvironment` 自动读取这些变量，无需 nightme 介入。
 
-### 16.2 使用示例
+### 17.2 使用示例
 
 **Clash / Surge（mixed-port 模式，HTTP 代理）**：
 ```bash
@@ -1906,7 +1988,7 @@ export NO_PROXY=localhost,127.0.0.1,*.internal
 nightme start --channel=telegram
 ```
 
-### 16.3 内部实现
+### 17.3 内部实现
 
 所有 outbound HTTP 请求统一走 `internal/httpclient` 包：
 
@@ -1929,7 +2011,7 @@ client := httpclient.DefaultWithTimeout(10*time.Second)
 - `internal/channel/telegram` —— Telegram Bot API
 - `internal/login/telegram` —— login 时的 `getMe` 校验
 
-### 16.4 不暴露代理配置的原因
+### 17.4 不暴露代理配置的原因
 
 不提供 `cfg.Telegram.ProxyURL` 之类的配置项，原因：
 - 代理需求来自环境（用户机器的网络），不是配置决策

@@ -39,6 +39,14 @@ type Adapter struct {
 	callbacks map[string]struct{}
 	limiter   *Limiter
 	retry     RetryConfig
+
+	// muMessageStates guards messageStates. The map stores the last
+	// rendered MessageState per userMsgID so duplicate emits of the
+	// same state can short-circuit without hitting Telegram's API.
+	// Mirrors feishu's messageStates dedup (see
+	// internal/channel/feishu/adapter.go).
+	muMessageStates sync.Mutex
+	messageStates   map[string]agent.MessageState
 }
 
 func NewAdapter(cfg *config.Config) (*Adapter, error) {
@@ -790,11 +798,29 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageState missing MessageState or MessageID")
 		}
+		// Channel自治: 用 State 调自己的映射函数, 不读 payload 字段。
+		// (MessageStatePayload.Emoji 已删除 — runtime 不再生产半成品 emoji,
+		//  每个 channel 自维护 state → emoji 映射, 跟 feishu 的
+		//  mapStateToFeishuEmoji 对位。详见 docs/channel/telegram.md §14。)
+		state := msg.MessageState.State
+		emoji := mapStateToTelegramEmoji(state)
+		if emoji == "" {
+			return nil // 未知 state silent drop, 跟 feishu 对齐
+		}
+		// 幂等: 同 state 跳过 API 调用, 避免 Telegram API 抖动。
+		// 跟 feishu 的 messageStates LRU 行为对称。
+		if prev, ok := a.lastMessageState(msg.MessageState.MessageID); ok && prev == state {
+			return nil
+		}
 		messageID, err := strconv.Atoi(msg.MessageState.MessageID)
 		if err != nil {
 			return err
 		}
-		return a.setMessageReaction(ctx, rawChatID, messageID, msg.MessageState.Emoji)
+		if err := a.setMessageReaction(ctx, rawChatID, messageID, emoji); err != nil {
+			return err
+		}
+		a.rememberMessageState(msg.MessageState.MessageID, state)
+		return nil
 	case messages.OutMessageStateRemoved:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageStateRemoved missing MessageState or MessageID")
@@ -1003,6 +1029,67 @@ func (a *Adapter) apiCall(ctx context.Context, method string, params map[string]
 	return WithTransientRetry(ctx, opts, func() error {
 		return a.api.call(ctx, method, params, result)
 	})
+}
+
+// mapStateToTelegramEmoji converts a runtime MessageState into the
+// unicode emoji that Telegram's setMessageReaction accepts.
+//
+// Mirrors internal/channel/feishu/adapter.go::mapStateToFeishuEmoji in
+// shape and contract: the adapter decides the emoji, NOT the runtime.
+// Telegram reactions are unicode codepoints (Feishu uses predefined
+// emoji_type identifiers — OneSecond/OnIt/DONE — because the Feishu
+// reaction service rejects unicode input with code 99992354; see
+// docs/channel/feishu.md §6.6.3). Telegram accepts unicode directly.
+//
+// Unknown states return "" so callers can silent-drop, matching feishu's
+// forward-compatible behaviour.
+//
+// MessageDropped is intentionally unmapped: feishu conveys failure via
+// the reply text's ❌ prefix rather than a user-message reaction, and
+// telegram follows the same convention to keep the cross-channel
+// rendering consistent.
+func mapStateToTelegramEmoji(state agent.MessageState) string {
+	switch state {
+	case agent.MessageQueued:
+		return "⏳"
+	case agent.MessageSubmitted:
+		return "🔄"
+	case agent.MessageDone:
+		return "✅"
+	}
+	return ""
+}
+
+// lastMessageState returns the last rendered MessageState for userMsgID
+// and whether an entry exists. The bool distinguishes "never rendered"
+// (no entry, no API call wasted) from "rendered MessageQueued earlier"
+// (entry present, may dedup against a re-emit of the same state).
+//
+// MessageState's zero value is MessageQueued — the first valid state we
+// render — so the bool is load-bearing: returning just agent.MessageState
+// would falsely dedup the very first emit of MessageQueued.
+func (a *Adapter) lastMessageState(userMsgID string) (agent.MessageState, bool) {
+	a.muMessageStates.Lock()
+	defer a.muMessageStates.Unlock()
+	s, ok := a.messageStates[userMsgID]
+	return s, ok
+}
+
+// rememberMessageState records the last rendered MessageState for
+// userMsgID so the next emit can dedup via lastMessageState.
+//
+// The map is lazily allocated on first use; nil-safe under muMessageStates.
+// No LRU eviction today — userMsgID churn is bounded by inbound message
+// volume (one entry per user message that ever enters the system), which
+// in practice stays well under a few thousand per daemon session.
+// Revisit if memory pressure surfaces.
+func (a *Adapter) rememberMessageState(userMsgID string, state agent.MessageState) {
+	a.muMessageStates.Lock()
+	defer a.muMessageStates.Unlock()
+	if a.messageStates == nil {
+		a.messageStates = make(map[string]agent.MessageState)
+	}
+	a.messageStates[userMsgID] = state
 }
 
 var _ channel.Channel = (*Adapter)(nil)

@@ -272,8 +272,8 @@ threadID > 0
         └── 使用 chat_id + message_id，不需要 message_thread_id
 
 threadID == 0
-  ├── sendMessage → 主窗口 / 私聊
-  └── editMessageText → 占位消息(主窗口场景已废弃见§11.7)
+  ├── sendMessage → 主窗口 / 私聊（DM 带 reply_to_message_id = placeholder；topic 模式下不带。plan-C 修订）
+  └── editMessageText → 占位消息 (DM / 主窗口同样 PATCH；plan-C 修订，详见 §11.11)
 ```
 
 所有回调处理都必须以 `callback_query.message.message_id` 为准查找原卡；不能只按 `callback_data` 中的 `message_id` 盲信，因为 Telegram 的 `callback_data` 是适配器自己编码的字段。
@@ -491,7 +491,7 @@ InboundMessage 进入 chatstore
 }
 ```
 
-Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeholder_message_id, text)` 原地更新。主窗口消息不再有占位 / sentinel topic 概念 —— OutHeartbeat / OutToolStart 等独立消息直接发到主窗口。
+Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeholder_message_id, text)` 原地更新。**DM / 主窗口（thread_id=0）现在也建占位消息（plan-C 修订）**，DM 的 OutXxx 走 `reply_to_message_id = placeholder` 形成视觉 chain；真实 topic 内 OutXxx 仍保持独立消息（`message_thread_id` 已分组），占位只用于 OutHeartbeat PATCH 和 ✅ Completed。详见 §11.11。
 
 `editForumTopic` 只修改 Topic 名称或图标，不修改 Topic 内正文，**不能**用来做占位更新。
 
@@ -705,7 +705,16 @@ chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
 - sentinel topic 由 Telegram 分配,ID 不可控,daemon 重启 / state 丢失会导致 ID 漂移 → 违反 chatID 稳定性约束
 - 编译选项里去掉了 `topic_mode: separate` / `shared` 开关(§11.6 修订)
 
-主窗口消息不再有占位消息(placeholder)概念——所有 OutHeartbeat / OutToolStart 走独立消息,OutReply 是同一消息上的 editMessageText(最长 4096 字符,超长拆分)。topic 内的消息仍然用占位消息做"Working..."(因为 Topic 本身就是 scope,主窗口太嘈杂时 Topic 内的占位有用)。
+**修订 (2026-08-22 plan-C)**：DM / 群主窗口（thread_id=0）也建立**占位 + reply chain**，让中间事件和终态 `✅ Completed` 可见。这是 Telegram 平台能力边界内能拿到的最像 topic 的形态：
+
+- 占位消息是 bot 自己发的 `🤖 Working...`，**不是 sentinel topic** —— 它是真实 Telegram message，`PlaceholderMessageID` 落 `telegram_state.json`，跨重启可 hydrate。
+- DM 下所有 `OutReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutResult` / `OutError` 都带 `reply_to_message_id = PlaceholderMessageID`，Telegram 客户端把它们视觉折叠成同一条 reply chain。
+- 真实 topic（thread_id > 0）下 OutXxx **不带** `reply_to_message_id`，保持原行为（独立消息 + `message_thread_id` 分组）；占位消息只用于 `OutHeartbeat` PATCH 和 `OnPromptEnded` ✅ Completed。
+- `OutHeartbeat` 在 DM 和 topic 都直接 `editMessageText(PlaceholderMessageID)` 原地 PATCH。
+- `OnPromptEnded` 在 DM 和 topic 都把占位文本改成 `<b>✅ Completed</b>`。
+- 用户发新消息时复用同一个 placeholder（key 是 `chatID|0`，天然去重），next turn 创建新 placeholder。
+
+详细方案见 §11.11。
 
 如果群组没有开启 Privacy Mode，Bot 会收到更多群组普通消息。qino 不应默认把每条群消息都交给 Agent，而应继续遵守群组 mention 策略：
 
@@ -782,10 +791,98 @@ Telegram 没有提供“列出 Bot 已加入全部群组”的 Bot API 接口。
 - Bot 能被手动加入多个群组。
 - 关闭 Privacy Mode 后，群组普通消息可以到达 nightme。
 - `chat_id` 能区分不同群组，相同群组内 `message_thread_id` 能区分不同 Topic。
-- 主窗口入口不会累积 qino 的 thinking、tools 和 receipt。
 - Topic 内可以按顺序看到 thinking、tools、结果和交互卡。
 - 群组 mention gate 和私聊行为符合预期。
 - Token 失效、权限不足、群组不是 Forum 等错误都有明确提示。
+
+### 11.11 DM 私聊的 placeholder + reply chain 模拟方案
+
+Telegram Bot API 在 `chat.type == "private"`（DM）里不支持 Forum Topic，没有 `createForumTopic` / `message_thread_id` 概念。飞书靠 `reply_in_thread` 把中间事件折进 drawer，Telegram 没有等价物。
+
+为了让 DM 用户也能追踪一个 turn 的完整事件流，adapter 走 **placeholder + reply chain**：
+
+#### 11.11.1 占位消息
+
+每次用户首条消息进 DM，`handleMessage` 调 `ensurePlaceholder` 创建一条 `🤖 Working...` bot 消息，存进 `TopicState{ChatID: chat.id, TopicID: 0, PlaceholderMessageID: ...}`。这个 key 是 `chatID|0`，**跟真实 topic 的 key 不冲突**。
+
+```text
+DM 消息流
+├─ user: "帮我修 bug"               (userMsgID=10)
+├─ bot: "🤖 Working..."             ← 占位 (PlaceholderMessageID = 700)
+│   └─ (reply) 💭 Thinking          ← reply_to_message_id=700
+│   └─ (reply) 🔧 Read foo.go       ← reply_to_message_id=700
+│   └─ (reply) ✅ Read done         ← reply_to_message_id=700
+│   └─ (reply) 📝 Result            ← reply_to_message_id=700
+└─ (OnPromptEnded) bot: PATCH 占位文本 → "<b>✅ Completed</b>"
+```
+
+#### 11.11.2 reply chain
+
+Telegram 客户端原生把 `reply_to_message_id` 视觉折叠成同一条 reply chain。用户在 DM 看到的就是：
+
+1. 一条 bot `🤖 Working...` 占位
+2. 占位下面挂一串 OutThinking/OutTool/OutReply/OutResult 气泡
+3. 终态占位变成 `✅ Completed`，明确标识本 turn 结束
+
+新 turn 进来复用同一占位（key 不变），next turn 开始新一轮。
+
+#### 11.11.3 跟 topic 路径的对位
+
+| 行为 | 真实 topic (thread_id>0) | DM (thread_id==0) |
+|---|---|---|
+| 占位 key | `chatID\|thread_id` | `chatID\|0` |
+| 何时创建 | `handleMessage` 第一条入站 | `handleMessage` 第一条入站（**plan-C 修订**) |
+| `OutHeartbeat` 行为 | `editMessageText(placeholder)` PATCH | 同上 |
+| `OutReply/OutTool/OutThinking/OutResult/OutError` | Topic 内独立消息 + `message_thread_id`（**不带** reply_to_message_id） | 主窗口独立消息 + `reply_to_message_id=placeholder` |
+| `OnPromptEnded` 行为 | PATCH 占位为 `✅ Completed` | 同上 |
+| `OutChoice` | Topic 内 InlineKeyboardMarkup + `message_thread_id`（**不带** reply_to_message_id） | 主窗口 InlineKeyboardMarkup + `reply_to_message_id=placeholder` |
+
+**Reply chain 是 DM-only**（plan-C 修订再修订）：真实 topic 内事件已经被 `message_thread_id` 分组，如果再加 `reply_to_message_id=placeholder`，每条事件都会在客户端显示"replying to 🤖 Working..."，冗余且视觉噪。Topic 的占位消息只用于 `OutHeartbeat` PATCH 和 `OnPromptEnded` ✅ Completed 两件事。`reply_to_message_id` 由 `Send` prelude 的 `if topicID == 0 { replyAnchor = placeholderAnchor }` 显式隔离。
+
+测试矩阵锁住该约束：`TestAdapter_Send_DM_UsesReplyToPlaceholder`（DM 必带）vs `TestAdapter_Send_Topic_NoReplyToPlaceholder`（topic 必不带）。
+
+#### 11.11.4 chatID 稳定性约束保持
+
+`sessionChatID(rawChatID, 0)` 仍是 `tg_<chatid>`，**纯函数**。PlaceholderMessageID 不进入 chatID 拼接，只作为持久化字段存在 `telegram_state.json`。§5.5 约束 1-4 全部满足。
+
+跟 §11.7 修订前的 sentinel topic 路线对比：
+
+| | sentinel topic（已废弃） | placeholder + reply chain（plan-C） |
+|---|---|---|
+| 占位 ID 来源 | Telegram 分配（不可控） | Telegram 分配，但只进 stateStore，不进 chatID |
+| daemon 重启后 chatID 一致 | ❌ ID 可能漂移 | ✅ chatID 仍是 `tg_<chatid>` |
+| 在 DM 里能跑 | ❌ Forum-only | ✅ 任意 DM |
+| 视觉折叠 | Forum topic 容器 | Telegram 原生 reply chain |
+| 用户体验 | 飞书 drawer 等价 | 视觉折叠 reply chain（不如 drawer，但比独立消息好） |
+
+#### 11.11.5 跟飞书 receipt 的语义差
+
+飞书 receipt 是**一张可原地更新的 card 累积全部事件**，Telegram placeholder **只承载状态**（Working... ↔ ✅ Completed）。所有事件详情（thinking / tool / result）依然是 Topic/DM 时间线上的独立消息。
+
+| | Feishu receipt | Telegram placeholder |
+|---|---|---|
+| 状态 ticker | ✅ header PATCH | ✅ status text PATCH |
+| OutThinking 进占位 | ✅ append div | ❌ 独立消息 |
+| OutToolStart/End 进占位 | ✅ append div | ❌ 独立消息 |
+| OutReply 进占位 | ❌ 独立气泡 (F-44) | ❌ 独立消息 |
+| OutResult 进占位 | ❌ 独立气泡 (F-39) | ❌ 独立消息 |
+| 终态 | ✅ header 改 ✅ | ✅ 文本改 ✅ |
+
+设计上的 trade-off：Telegram 的 `editMessageText` 整体替换 + 4096 字符上限让"rolling-log receipt"实现成本太高（每次 PATCH 重发全部历史），参见 §15.3 N1。placeholder + reply chain 是 Telegram 平台能力边界内**成本最低、视觉最接近 topic** 的方案。
+
+#### 11.11.6 OutChoice 在 DM
+
+Choice card 也会 `reply_to_message_id = placeholder`，让权限/问题卡片挂在占位下、视觉对齐。其他 OutXxx 同理。
+
+#### 11.11.7 验收
+
+- 同一 DM 跨 daemon 重启，chatID 仍是 `tg_<chatid>`，占位 MessageID 从 `telegram_state.json` hydrate
+- DM 首条用户消息进 → `TopicState{chatID, topicID=0, PlaceholderMessageID>0}` 持久化
+- 同一 DM 的 `OutReply` / `OutThinking` / `OutTool*` / `OutResult` / `OutError` / `OutChoice` 都带 `reply_to_message_id = PlaceholderMessageID`
+- `OutHeartbeat` 直接 `editMessageText(PlaceholderMessageID)`
+- `OnPromptEnded` 把占位文本 PATCH 为 `<b>✅ Completed</b>`
+- placeholder 缺失（首次 OutHeartbeat 比 handleMessage 快）→ `ensurePlaceholderForHeartbeat` 懒创建，不丢事件
+- 测试矩阵：`TestAdapter_HandleUpdate_DM_CreatesPlaceholder` / `TestAdapter_Send_DM_UsesReplyToPlaceholder` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder` / `TestAdapter_OnPromptEnded_DM_NoPlaceholder_NoOp` / `TestAdapter_Send_Topic_NoReplyToPlaceholder`（**DM-only 约束**） / `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable` / `TestAdapter_EnsurePlaceholderForHeartbeat_CreatesInDM`
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 
@@ -1672,6 +1769,12 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 - 这意味着 Topic 永远是"空容器"，永远要靠内部的占位消息表达"会话状态"。
 - 已确认无替代方案。
 
+#### L10. Telegram reaction update 不带 `message_thread_id`
+- `MessageReactionUpdate`（`setMessageReaction` 触发的 👍/✅/🔄 等 emoji 反应）只携带 `chat.id` 和 `message_id`，没有 `message_thread_id`。
+- 后果：topic 内的 reaction 永远路由不到该 topic 的 ChatSession（chatID 不带 thread 后缀），只能路由到 chat-level ChatSession。
+- 实际影响：gtw drafts 存在 topic 内时（`tg_<chatid>:<thread_id>`），用户给 topic 内 message 加 ✅ reaction **无法触发** gtw draft 处理。DM 和群主窗口的反应（无 thread）正常工作。
+- 修法（2026-08-22）：chat-level chatID 现在统一 namespaced（`tg_<chatid>`），DM / 主窗口 emoji reactions 能正常进 gtw draft 流程。Topic 内的 emoji reactions 仍是平台能力限制。
+
 ### 15.2 降级类（用近似手段实现，已 work）
 
 #### D1. OutReply / OutResult / OutThinking / OutTool 都用独立消息
@@ -1758,6 +1861,10 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 |---|---|---|
 | C1 | OutInit silent drop（与 feishu F-44 对齐） | 已实现 |
 | C2 | OutHeartbeat 路径 ensurePlaceholderForHeartbeat（占位缺失时自动创建） | 已实现 |
+| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | 已实现 |
+| C4 | 2026-08-22 reaction chatID namespacing（修 `handleMessageReaction` 用 raw chatID 导致 emoji reaction 进不了 gtw 的 bug） | 已实现 |
+| C5 | 2026-08-22 stateStore TTL on-load prune（30 天未活动 topic 自动清理） | 已实现 |
+| C6 | 2026-08-22 sendChoice / patchChoice / handleInputClick / handleForceReply / callback wizard editMessageText 把 session ChatID 传给 Telegram API 的生产路径 bug（修 `rawChatIDFromSession` helper） | 已实现 |
 
 后续修订请直接在本节追加，并把对应 issue 编号填进去。
 

@@ -611,6 +611,91 @@ func TestAdapter_Send_OutChoice_Valid(t *testing.T) {
 	}
 }
 
+// TestAdapter_Send_OutChoicePatch_NamespacedChatID_StripsTGPrefix
+// locks the 2026-08-22 fix on the patchChoice side: when
+// ChoiceState.ChatID is the namespaced session form (as it
+// always is in real runtime), editMessageText inside patchChoice
+// must strip the tg_ prefix before reaching the Telegram Bot
+// API. Same shape as the sendChoice fix but on the PATCH path.
+func TestAdapter_Send_OutChoicePatch_NamespacedChatID_StripsTGPrefix(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100:42", // runtime form: namespaced + thread suffix
+		Kind:   messages.OutChoice,
+		Choice: &messages.Choice{
+			RequestID: "req-ns-patch",
+			Kind:      messages.ChoiceKindPermission,
+			Title:     "Approve",
+			Options:   []messages.ChoiceOption{{ID: "yes", Label: "Yes"}},
+		},
+	}); err != nil {
+		t.Fatalf("send choice: %v", err)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100:42",
+		Kind:   messages.OutChoicePatch,
+		Choice: &messages.Choice{
+			RequestID:  "req-ns-patch",
+			Settled:    true,
+			SelectedID: "yes",
+		},
+	}); err != nil {
+		t.Fatalf("send patch: %v", err)
+	}
+	editCall := findCall(api.snapshotCalls(), "editMessageText")
+	if editCall == nil {
+		t.Fatal("expected editMessageText call")
+	}
+	chatID, _ := editCall.Params["chat_id"].(string)
+	if chatID != "100" {
+		t.Fatalf("editMessageText chat_id = %q, want raw %q (Telegram Bot API rejects tg_ prefix)", chatID, "100")
+	}
+}
+
+// TestAdapter_Send_OutChoice_NamespacedChatID_StripsTGPrefix
+// locks the 2026-08-22 fix for the production-time chatID bug
+// on the send side: Telegram Bot API rejects "tg_<digits>" as
+// chat_id. sendChoice must strip the prefix before calling
+// sendMessage. Previously it passed msg.ChatID (the session
+// form) straight through to the API call, which worked in unit
+// tests (where chatID is raw) but produced 400 Bad Request in
+// real runtime for every OutChoice.
+func TestAdapter_Send_OutChoice_NamespacedChatID_StripsTGPrefix(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100:42", // runtime-form: namespaced + thread suffix
+		Kind:   messages.OutChoice,
+		Choice: &messages.Choice{
+			RequestID: "req-namespace",
+			Kind:      messages.ChoiceKindPermission,
+			Title:     "Approve",
+			Options:   []messages.ChoiceOption{{ID: "yes", Label: "Yes"}},
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	sendCall := findCall(api.snapshotCalls(), "sendMessage")
+	if sendCall == nil {
+		t.Fatal("expected sendMessage call")
+	}
+	chatID, _ := sendCall.Params["chat_id"].(string)
+	if chatID != "100" {
+		t.Fatalf("sendMessage chat_id = %q, want raw %q (Telegram Bot API rejects tg_ prefix)", chatID, "100")
+	}
+	if threadID, _ := sendCall.Params["message_thread_id"].(int); threadID != 42 {
+		t.Fatalf("message_thread_id = %v, want 42", sendCall.Params["message_thread_id"])
+	}
+	// And ChoiceState stored the session form (for runtime routing),
+	// not the raw form.
+	state, ok := a.state.choiceByRequestID("req-namespace")
+	if !ok {
+		t.Fatal("ChoiceState not persisted")
+	}
+	if state.ChatID != "tg_100:42" {
+		t.Fatalf("ChoiceState.ChatID = %q, want session form tg_100:42 (runtime routing key)", state.ChatID)
+	}
+}
+
 func TestAdapter_Send_OutChoice_MissingRequestID(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	err := a.Send(context.Background(), messages.OutboundMessage{
@@ -789,8 +874,287 @@ func TestAdapter_HandleUpdate_PrivateMessage(t *testing.T) {
 		if msg.Text != "hello" {
 			t.Fatalf("text = %q", msg.Text)
 		}
+		if msg.ChatID != "tg_100" {
+			t.Fatalf("chatID = %q, want tg_100 (namespacing §5.5)", msg.ChatID)
+		}
+		if msg.MessageID != "2" {
+			t.Fatalf("MessageID = %q, want 2", msg.MessageID)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("no inbound")
+	}
+}
+
+// TestAdapter_HandleUpdate_DM_CreatesPlaceholder locks the
+// 2026-08-22 plan-C behaviour: a DM user message now causes a
+// TopicState{chatID, topicID=0, placeholderMessageID>0} to be
+// persisted, so subsequent OutXxx bubbles can reply_to_message_id
+// it. Previously DM had no TopicState entry at all.
+func TestAdapter_HandleUpdate_DM_CreatesPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	a.config.PollingTimeout = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func() { _ = a.Stop(context.Background()) }()
+	_ = a.Start(ctx)
+	a.handleUpdate(context.Background(), Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 7,
+			Date:      time.Now().Unix(),
+			Chat:      Chat{ID: 100, Type: "private"},
+			From:      &User{ID: 1},
+			Text:      "hi bot",
+		},
+	})
+	// First inbound is the user's "hi bot".
+	select {
+	case <-a.Incoming():
+	case <-time.After(time.Second):
+		t.Fatal("no inbound")
+	}
+	state, ok := a.state.topic("100", 0)
+	if !ok {
+		t.Fatal("DM TopicState{topicID=0} must be created on inbound")
+	}
+	if state.PlaceholderMessageID <= 0 {
+		t.Fatalf("DM placeholder id missing: %+v", state)
+	}
+	if state.UserMessageID != "7" {
+		t.Fatalf("UserMessageID drift: %q", state.UserMessageID)
+	}
+	// A sendMessage call must have produced the placeholder.
+	sawPlaceholderSend := false
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "sendMessage" {
+			continue
+		}
+		if text, ok := call.Params["text"].(string); ok && strings.Contains(text, "🤖 Working...") {
+			sawPlaceholderSend = true
+		}
+	}
+	if !sawPlaceholderSend {
+		t.Fatal("expected sendMessage with placeholder text")
+	}
+}
+
+// TestAdapter_Send_DM_UsesReplyToPlaceholder verifies that
+// OutReply / OutThinking / OutTool in DM carry
+// reply_to_message_id = PlaceholderMessageID so Telegram
+// visually chains the bubble under the per-turn "🤖 Working..."
+// anchor.
+func TestAdapter_Send_DM_UsesReplyToPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	// Simulate the inbound path having already created the DM placeholder.
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 501})
+	for _, kind := range []messages.OutboundKind{
+		messages.OutReply,
+		messages.OutThinking,
+		messages.OutToolStart,
+		messages.OutResult,
+	} {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "100",
+			Kind:   kind,
+			Text:   "body for " + kind.String(),
+		}); err != nil {
+			t.Fatalf("send %s: %v", kind, err)
+		}
+	}
+	// Every sendMessage call must carry reply_to_message_id = 501.
+	wantReply := 501
+	got := 0
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "sendMessage" {
+			continue
+		}
+		reply, ok := call.Params["reply_to_message_id"]
+		if !ok {
+			t.Fatalf("sendMessage for kind %v missing reply_to_message_id: params=%+v", call.Params["text"], call.Params)
+		}
+		if reply != wantReply {
+			t.Fatalf("sendMessage reply_to_message_id = %v, want %d", reply, wantReply)
+		}
+		// ChatID must be the raw form (Send strips tg_ prefix).
+		if chatID, _ := call.Params["chat_id"].(string); chatID != "100" {
+			t.Fatalf("sendMessage chat_id = %q, want raw %q", chatID, "100")
+		}
+		// DM must NOT carry message_thread_id.
+		if _, has := call.Params["message_thread_id"]; has {
+			t.Fatalf("DM sendMessage must not carry message_thread_id: %+v", call.Params)
+		}
+		got++
+	}
+	if got != 4 {
+		t.Fatalf("expected 4 sendMessage calls (one per kind), got %d", got)
+	}
+}
+
+// TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder locks the
+// DM heartbeat path: the same placeholder as OutReply anchors to
+// is now PATCH-ed with the heartbeat text instead of spawning a
+// standalone bubble.
+func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 777})
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "100",
+		Kind:      messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 2, ToolCount: 1},
+	}); err != nil {
+		t.Fatalf("send heartbeat: %v", err)
+	}
+	editCall := findCall(api.snapshotCalls(), "editMessageText")
+	if editCall == nil {
+		t.Fatal("expected editMessageText for DM heartbeat")
+	}
+	if mid, _ := editCall.Params["message_id"].(int); mid != 777 {
+		t.Fatalf("editMessageText message_id = %v, want 777", editCall.Params["message_id"])
+	}
+	if chatID, _ := editCall.Params["chat_id"].(string); chatID != "100" {
+		t.Fatalf("editMessageText chat_id = %q, want raw %q", chatID, "100")
+	}
+}
+
+// TestAdapter_Send_Topic_NoReplyToPlaceholder locks the plan-C
+// refinement: reply_to_message_id is DM-only. In real Telegram
+// topics (thread_id > 0) the message_thread_id already groups
+// events, so adding reply_to_message_id=placeholder would make
+// every event show "replying to 🤖 Working..." in the client UI,
+// which is redundant and noisy. The topic path's placeholder is
+// reserved for OutHeartbeat PATCH and OnPromptEnded ✅.
+func TestAdapter_Send_Topic_NoReplyToPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, PlaceholderMessageID: 800})
+	for _, kind := range []messages.OutboundKind{
+		messages.OutReply,
+		messages.OutThinking,
+		messages.OutToolStart,
+		messages.OutResult,
+	} {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_100:42",
+			Kind:   kind,
+			Text:   "body for " + kind.String(),
+		}); err != nil {
+			t.Fatalf("send %s: %v", kind, err)
+		}
+	}
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "sendMessage" {
+			continue
+		}
+		if _, has := call.Params["reply_to_message_id"]; has {
+			t.Fatalf("topic sendMessage must NOT carry reply_to_message_id (placeholder is status-only in topics); params=%+v", call.Params)
+		}
+		if mid, ok := call.Params["message_thread_id"].(int); !ok || mid != 42 {
+			t.Fatalf("topic sendMessage must carry message_thread_id=42, got %+v", call.Params["message_thread_id"])
+		}
+	}
+	// Sanity: heartbeat in topic still PATCHes the placeholder.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "tg_100:42",
+		Kind:      messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 1},
+	}); err != nil {
+		t.Fatalf("send topic heartbeat: %v", err)
+	}
+	editCall := findCall(api.snapshotCalls(), "editMessageText")
+	if editCall == nil {
+		t.Fatal("topic heartbeat must PATCH placeholder")
+	}
+	if mid, _ := editCall.Params["message_id"].(int); mid != 800 {
+		t.Fatalf("editMessageText message_id = %v, want 800 (placeholder)", editCall.Params["message_id"])
+	}
+}
+
+// TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder verifies the
+// 2026-08-22 plan-C change: OnPromptEnded now PATCHes the DM
+// placeholder too (previously topicID > 0 guard skipped it). The
+// ✅ Completed visual matches the topic path.
+func TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 909})
+	a.OnPromptEnded(context.Background(), "100", "1")
+	editCall := findCall(api.snapshotCalls(), "editMessageText")
+	if editCall == nil {
+		t.Fatal("expected editMessageText for DM OnPromptEnded")
+	}
+	if mid, _ := editCall.Params["message_id"].(int); mid != 909 {
+		t.Fatalf("editMessageText message_id = %v, want 909", editCall.Params["message_id"])
+	}
+	if text, _ := editCall.Params["text"].(string); !strings.Contains(text, "✅ Completed") {
+		t.Fatalf("editMessageText text = %q, want to contain ✅ Completed", text)
+	}
+}
+
+// TestAdapter_OnPromptEnded_DM_NoPlaceholder_NoOp locks the safe
+// fallback: DM with no TopicState at all must not error and must
+// not call editMessageText (no anchor to PATCH).
+func TestAdapter_OnPromptEnded_DM_NoPlaceholder_NoOp(t *testing.T) {
+	a, api := newTestAdapter(t)
+	a.OnPromptEnded(context.Background(), "100", "1")
+	if call := findCall(api.snapshotCalls(), "editMessageText"); call != nil {
+		t.Fatalf("expected no editMessageText with no placeholder, got %+v", call)
+	}
+}
+
+// TestStateStore_DM_Persistence locks the §11.11 contract that
+// DM placeholders survive daemon restart via telegram_state.json.
+// TopicState{topicID=0} must round-trip through newStateStore and
+// come back with the same PlaceholderMessageID — otherwise the
+// first OutXxx after a restart would lazy-create a NEW
+// placeholder and orphan the old one.
+func TestStateStore_DM_Persistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	store, err := newStateStore(path)
+	if err != nil {
+		t.Fatalf("newStateStore: %v", err)
+	}
+	if err := store.putTopic(&TopicState{
+		ChatID:               "100",
+		TopicID:              0,
+		PlaceholderMessageID: 1234,
+		UserMessageID:        "42",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+	store2, err := newStateStore(path)
+	if err != nil {
+		t.Fatalf("newStateStore reload: %v", err)
+	}
+	state, ok := store2.topic("100", 0)
+	if !ok {
+		t.Fatal("DM TopicState{topicID=0} did not round-trip across reload")
+	}
+	if state.PlaceholderMessageID != 1234 {
+		t.Fatalf("PlaceholderMessageID drift across reload: got %d, want 1234", state.PlaceholderMessageID)
+	}
+	if state.UserMessageID != "42" {
+		t.Fatalf("UserMessageID drift across reload: got %q", state.UserMessageID)
+	}
+}
+
+// TestSessionChatID_DM_StillStable is the plan-C regression
+// guard: chatID stability contract (docs/CHANNEL.md §5.5) must
+// remain pure-function-of-(chat.id, thread_id) after the DM
+// placeholder + reply-chain additions. If anyone re-introduces
+// daemon-state into sessionChatID this test fails.
+func TestSessionChatID_DM_StillStable(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	// Same DM (chatID=100, threadID=0) called repeatedly must
+	// always produce the same chatID regardless of state.
+	want := "tg_100"
+	for i := 0; i < 5; i++ {
+		got := a.sessionChatID("100", 0)
+		if got != want {
+			t.Fatalf("iter %d: sessionChatID(\"100\", 0) = %q, want %q", i, got, want)
+		}
+	}
+	// Negative group id is still prefixed (Telegram native).
+	if got := a.sessionChatID("-10012345", 0); got != "tg_-10012345" {
+		t.Fatalf("negative group chat id: got %q, want tg_-10012345", got)
 	}
 }
 
@@ -1643,6 +2007,17 @@ func TestAdapter_HandleMessageReaction_ForwardsInbound(t *testing.T) {
 		if msg.UserID != "7" {
 			t.Fatalf("user id=%q", msg.UserID)
 		}
+		// 2026-08-22 fix: reaction ChatID must be namespaced
+		// ("tg_<chatid>") to match the message path. Otherwise
+		// runtime.findChatSession cannot resolve the owning
+		// ChatSession and gtw emoji-reaction routing silently
+		// drops the event.
+		if msg.ChatID != "tg_100" {
+			t.Fatalf("ChatID = %q, want tg_100 (namespaced §5.5)", msg.ChatID)
+		}
+		if msg.Reaction.ChatID != "tg_100" {
+			t.Fatalf("Reaction.ChatID = %q, want tg_100 (namespaced)", msg.Reaction.ChatID)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("no inbound")
 	}
@@ -1795,14 +2170,37 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_ReusesExisting(t *testing.T) {
 	}
 }
 
-func TestAdapter_EnsurePlaceholderForHeartbeat_SkipsOnZeroTopic(t *testing.T) {
+// TestAdapter_EnsurePlaceholderForHeartbeat_CreatesInDM locks the
+// 2026-08-22 plan-C change: topicID=0 (DM / main-window) now
+// lazy-creates a placeholder the same way real topics do, so
+// OutXxx bubbles have a stable reply_to_message_id anchor.
+//
+// Previously topicID <= 0 short-circuited to (0, nil) — DM had no
+// placeholder and no way to visually chain OutReply / OutTool to
+// a status ticker. See docs/channel/telegram.md §11.11.
+func TestAdapter_EnsurePlaceholderForHeartbeat_CreatesInDM(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	messageID, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 0)
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatalf("ensurePlaceholderForHeartbeat: %v", err)
 	}
-	if messageID != 0 {
-		t.Fatalf("topicID=0 (p2p) must return 0, got %d", messageID)
+	if messageID <= 0 {
+		t.Fatalf("DM placeholder must be created, got %d", messageID)
+	}
+	state, ok := a.state.topic("100", 0)
+	if !ok {
+		t.Fatal("DM TopicState{topicID=0} not persisted")
+	}
+	if state.PlaceholderMessageID != messageID {
+		t.Fatalf("placeholder id drift: state=%d call=%d", state.PlaceholderMessageID, messageID)
+	}
+	// Second call must reuse the existing placeholder (idempotent).
+	again, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 0)
+	if err != nil {
+		t.Fatalf("ensurePlaceholderForHeartbeat second call: %v", err)
+	}
+	if again != messageID {
+		t.Fatalf("second call must reuse placeholder, got %d want %d", again, messageID)
 	}
 }
 

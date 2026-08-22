@@ -124,7 +124,7 @@ func (a *Adapter) handleQuestionClick(ctx context.Context, callback *CallbackQue
 		}
 		text := renderChoice(state)
 		keyboard := a.choiceKeyboard(state)
-		if err := a.editTelegramMessage(ctx, state.ChatID, state.MessageID, text, keyboard); err != nil && a.logger != nil {
+		if err := a.editTelegramMessage(ctx, rawChatIDFromSession(state.ChatID), state.MessageID, text, keyboard); err != nil && a.logger != nil {
 			a.logger.Warn("telegram: edit choice failed", "request_id", state.RequestID, "err", err)
 		}
 		a.answerCallback(ctx, callback.ID, "Recorded", false)
@@ -192,7 +192,7 @@ func (a *Adapter) handleInputClick(ctx context.Context, callback *CallbackQuery,
 		"input_field_placeholder": "Type your answer...",
 		"selective":               true,
 	}
-	result, err := a.sendTelegramMessage(ctx, state.ChatID, state.TopicID, escapeHTML(promptText), replyMarkup)
+	result, err := a.sendTelegramMessage(ctx, rawChatIDFromSession(state.ChatID), state.TopicID, 0, escapeHTML(promptText), replyMarkup)
 	if err != nil {
 		a.answerCallback(ctx, callback.ID, "Failed to open input", true)
 		if a.logger != nil {
@@ -257,7 +257,7 @@ func (a *Adapter) handleForceReply(ctx context.Context, message *Message) bool {
 			}
 			text := renderChoice(state)
 			keyboard := a.choiceKeyboard(state)
-			if err := a.editTelegramMessage(ctx, state.ChatID, state.MessageID, text, keyboard); err != nil && a.logger != nil {
+			if err := a.editTelegramMessage(ctx, rawChatIDFromSession(state.ChatID), state.MessageID, text, keyboard); err != nil && a.logger != nil {
 				a.logger.Warn("telegram: edit choice failed", "request_id", state.RequestID, "err", err)
 			}
 		} else {

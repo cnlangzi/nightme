@@ -10,9 +10,10 @@
 // Lifecycle model:
 //
 //   StartSharedHost(ctx, opts)
-//     1. exec `dsh --profile web --port 0` (or fallback to --port 0
-//        if the default 3080 is taken — see fallbackPort for the
-//        actual probe order)
+//     1. exec `dsh --profile web` (NO --port flag — dsh defaults to
+//        its canonical port 3080; we explicitly refuse anything
+//        other than 3080 to keep sessions from splitting across
+//        instances; see spawnAndWire + the port assertion below)
 //     2. read stdout until "dsh web: http://127.0.0.1:<port>" appears
 //     3. construct *host.Client rooted at that URL
 //     4. Client.Start pumps → mux/host WS connects

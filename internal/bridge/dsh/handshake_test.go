@@ -28,6 +28,8 @@ type handshakeMock struct {
 	historyCount   atomic.Int64
 	cancelCount    atomic.Int64
 	archiveCount   atomic.Int64
+	promptCount    atomic.Int64
+	promptFailNext atomic.Bool
 
 	mu               sync.Mutex
 	lastCreate       map[string]any
@@ -36,6 +38,9 @@ type handshakeMock struct {
 	mismatchAttach   bool
 	historyEvents    []map[string]any
 	nextFreshCounter atomic.Int64
+	lastPrompt       atomic.Value // map[string]any
+
+	respondText atomic.Value // string — when set, prompt handler synthesises a complete turn
 }
 
 func newHandshakeMock(t *testing.T) *handshakeMock {
@@ -48,6 +53,7 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/session.history", m.handleSessionHistory)
 	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace.archiveSession", m.handleWorkspaceArchiveSession)
+	mux.HandleFunc("/api/session.prompt", m.handleSessionPrompt)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
 	return m
@@ -189,6 +195,59 @@ func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *
 	writeOK(w, env.RPCID, map[string]any{
 		"archivedSessionIds": []string{payload.SessionID},
 	})
+}
+
+// dispatchAssistantMessage emits a synthetic assistant/message
+// mux frame so the driver's readPump pushes EventAgentText into
+// d.events. Tests that exercise drainForRunResult's full turn path
+// use this.
+func dispatchAssistantMessage(r *host.Router, sessionID, text string) {
+	payload := []byte(`{"sessionId":"` + sessionID + `","event":{"type":"assistant/message","data":{"message":{"role":"assistant","content":[{"type":"text","text":` + jsonString(text) + `}]}}}}`)
+	r.DispatchMux("session/event", "rpc-am-"+sessionID, payload)
+}
+
+// dispatchTurnEnd emits a synthetic turn/end mux frame so the
+// driver's readPump pushes EventAgentResult + EventAgentDone.
+func dispatchTurnEnd(r *host.Router, sessionID, stopReason string) {
+	payload := []byte(`{"sessionId":"` + sessionID + `","event":{"type":"turn/end","data":{"stopReason":"` + stopReason + `"}}}`)
+	r.DispatchMux("session/event", "rpc-te-"+sessionID, payload)
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// handleSessionPrompt returns OK and optionally synthesises a
+// complete turn via the host Router when respondText is set on
+// the mock. Tests that need drainForRunResult to exit cleanly call
+// m.setRespondText(...) before invoking Starter.RunOnce / SendBlocks.
+func (m *handshakeMock) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
+	m.promptCount.Add(1)
+	env := decodeEnvelope(r)
+	var payload map[string]any
+	_ = json.Unmarshal(env.Payload, &payload)
+	m.lastPrompt.Store(payload)
+
+	if m.promptFailNext.Load() {
+		m.promptFailNext.Store(false)
+		writeErr(w, env.RPCID, "bad-request", "synthetic failure for test")
+		return
+	}
+
+	// If respondText is set, dispatch synthetic mux frames so
+	// drainForRunResult sees a complete turn and returns.
+	if text, ok := m.respondText.Load().(string); ok && text != "" {
+		sid, _ := payload["sessionId"].(string)
+		if sid != "" {
+			if router := host.GetGlobal().Router; router != nil {
+				dispatchAssistantMessage(router, sid, text)
+				dispatchTurnEnd(router, sid, "stop")
+			}
+		}
+	}
+
+	writeOK(w, env.RPCID, map[string]any{"accepted": true})
 }
 
 func (m *handshakeMock) lastCreateCopy() map[string]any {

@@ -73,6 +73,15 @@ var ErrResumeUnhealthy = errors.New("dsh: resume session unhealthy")
 // see TestHandshakeSession_IndependentTimeouts for the pattern.
 var handshakeTimeout = 15 * time.Second
 
+// dLog is a thin wrapper around slog.Default for the dsh bridge's
+// package-level log lines. Debug level keeps production output
+// quiet; tests don't assert on logs. Lives here (rather than in
+// the deleted print.go) because session/dispatch are the heaviest
+// log producers.
+func dLog(msg string, args ...any) {
+	slog.Default().Debug(msg, args...)
+}
+
 // driver is the runtime half of the chat-session bridge in the
 // shared-host architecture. It owns:
 //   - a reference to the process-wide shared *host.Client

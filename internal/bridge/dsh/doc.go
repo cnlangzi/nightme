@@ -1,25 +1,30 @@
 // Package dsh is the nightme bridge for DeepSeek Harness (dsh).
 //
-// Two modes, two paths:
+// One mode, one path — `dsh --profile web` shared host serves
+// every dsh session, both long-lived chat and one-shot
+// RunOnce/Review. There is no headless subprocess path anymore:
 //
-//  1. Print-mode (`Starter.RunOnce` → `dsh --profile headless
-//     -- "<prompt>"`): one-shot CLI invocation. Final assistant
-//     text comes back on stdout. Bridges `/gtw commit`,
-//     `/gtw pr`, and `buildAgentPrompt`. **No `--resume`
-//     support** — dsh web's `headless` profile documents itself as
-//     "Answer one task, print the final assistant message, and
-//     exit"; each RunOnce spawns a fresh process with no carry-over.
-//     Callers that need multi-turn context for print-mode must use
-//     the chat-session path.
+//  1. `Starter.Start` (chat session, long-lived): the bridge
+//     looks up the shared dsh web daemon (lazy-started if needed;
+//     user-launched dsh on the canonical port 3080 is auto-
+//     attached via `host.EnsureSharedHost`), performs the
+//     `session.create` handshake, subscribes to the session's
+//     mux frames via the host's Router, and emits
+//     `EventAgentReady`. The returned `*agent.Agent` streams
+//     events until `Close()` is called.
 //
-//  2. Chat session (`Starter.Start` → `dsh --profile web --port 0`):
-//     long-lived process; the bridge dials two WebSocket downlinks
-//     (`/api/events.mux` + `/api/events.host`) and POSTs prompts
-//     via HTTP RPC (`/api/session.prompt`). Supports mixed
-//     text+image content blocks (dsh web accepts both `type:"text"`
-//     and `type:"image"` with base64 inline data; resource_link
-//     is rejected at the prompt boundary per 实机 HTTP probe
-//     2026-08-14).
+//  2. `Starter.RunOnce` / `Starter.Review` (one-shot): structurally
+//     `Start + drain + defer Close`. Each call opens a fresh
+//     sessionId on the shared host via `session.create {cwd}` (R2
+//     isolation is explicit, not implicit like dsh CLI's old
+//     headless path was), submits the prompt via `session.prompt`,
+//     drains the events channel for a terminal `EventAgentResult`,
+//     then `Close()` archives the session via
+//     `workspace.archiveSession` so the session does not pile up
+//     in dsh web's in-memory store. `cfg.SessionID` is ignored
+//     — RunOnce always creates a fresh session.
+//
+// Wire (HTTP + WebSocket on the canonical port 3080):
 //
 //     Resume: cfg.SessionID triggers POST /api/session.create
 //     {sessionId, cwd} — the dashboard "select a session" attach

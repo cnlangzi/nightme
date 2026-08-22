@@ -1,0 +1,261 @@
+package dsh
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+)
+
+// ─── TestStarter_Info_NoArgs ─────────────────────────────────────
+// Starter.Info().Args must be nil — Starter no longer spawns a
+// subprocess directly, the shared-host web does. nil prevents the
+// misleading impression that Starter is the spawner.
+func TestStarter_Info_NoArgs(t *testing.T) {
+	s := NewStarter("dsh")
+	info := s.Info()
+	if info.Name != "dsh" {
+		t.Errorf("Info.Name = %q, want dsh", info.Name)
+	}
+	if info.Mode != agent.ModeJSONIO {
+		t.Errorf("Info.Mode = %v, want ModeJSONIO", info.Mode)
+	}
+	if len(info.Args) != 0 {
+		t.Errorf("Info.Args = %v, want nil (Starter no longer spawns)", info.Args)
+	}
+}
+
+// ─── TestDrainForRunResult_EventAgentResult ──────────────────────
+// drainForRunResult must exit cleanly with the captured RunResult
+// when EventAgentResult is delivered.
+func TestDrainForRunResult_EventAgentResult(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	s := NewStarter("dsh")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	// Drain startup EventAgentReady so it doesn't clog the chan.
+	if !drainOneReady(t, a, 2*time.Second) {
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+
+	d, ok := a.Driver().(*driver)
+	if !ok {
+		t.Fatalf("a.Driver() = %T, want *driver", a.Driver())
+	}
+
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{
+			Text:    "drain ok",
+			Subtype: "success",
+		},
+	})
+
+	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "hi",
+	}})
+	if err != nil {
+		t.Fatalf("drainForRunResult: %v", err)
+	}
+	if res.Text != "drain ok" {
+		t.Errorf("RunResult.Text = %q, want %q", res.Text, "drain ok")
+	}
+	if !strings.HasPrefix(res.SessionID, "session-fresh-") {
+		t.Errorf("RunResult.SessionID = %q, want session-fresh-*", res.SessionID)
+	}
+}
+
+// ─── TestDrainForRunResult_DoneWithoutResult ──────────────────────
+// EventAgentDone without a preceding EventAgentResult must error
+// (the turn ended without producing assistant output).
+func TestDrainForRunResult_DoneWithoutResult(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+	s := NewStarter("dsh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if !drainOneReady(t, a, 2*time.Second) {
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+	d, _ := a.Driver().(*driver)
+
+	d.deliver(agent.AgentEvent{Kind: agent.EventAgentDone})
+
+	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "hi",
+	}})
+	if err == nil {
+		t.Fatal("want error when EventAgentDone fires without Result")
+	}
+	if !strings.Contains(err.Error(), "turn ended without result event") {
+		t.Errorf("err = %v; want 'turn ended without result event'", err)
+	}
+}
+
+// ─── TestDrainForRunResult_ErrorEvent ─────────────────────────────
+// EventAgentError must surface as a wrapped RunOnce error.
+func TestDrainForRunResult_ErrorEvent(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+	s := NewStarter("dsh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if !drainOneReady(t, a, 2*time.Second) {
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+	d, _ := a.Driver().(*driver)
+
+	wantErr := errors.New("upstream blew up")
+	d.deliver(agent.AgentEvent{Kind: agent.EventAgentError, Err: wantErr})
+
+	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "hi",
+	}})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want wrap of %v", err, wantErr)
+	}
+}
+
+// ─── TestRunOnce_StripsSessionID ───────────────────────────────────
+// cfg.SessionID must be ignored on RunOnce (Q1 decision: RunOnce
+// is always a fresh session). We verify by checking the
+// handshakeMock's createCount and the captured sessionId via
+// lastCreate payload — a fork attempt would have populated the
+// sessionId field in the payload.
+func TestRunOnce_StripsSessionID(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	s := NewStarter("dsh")
+
+	// Override RunOnce to use a very short ctx so the drain exits
+	// via deadline (we only care about the side effects, not the
+	// drain's terminal event). The archive still happens in
+	// defer Close.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, _ = s.RunOnce(ctx, agent.StartConfig{
+		Workspace: "/tmp/ws",
+		SessionID: "session-stale-from-caller",
+	}, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "should ignore",
+	}})
+	// We expect RunOnce to fail with context-deadline. That's fine
+	// — we only care about whether session.fork was attempted.
+
+	// mock.handleSessionCreate's logic: if payload["sessionId"]
+	// was non-empty, the mock echoes that id (fork attach); if
+	// empty, the mock returns session-fresh-N. We seeded
+	// cfg.SessionID = "session-stale-from-caller", so if RunOnce
+	// did NOT strip it, the lastCreate payload would carry it
+	// and mock.createIDs[0] would be that id. After stripping,
+	// the lastCreate payload has no sessionId field, and the mock
+	// returns a fresh id.
+	if got := mock.createCount.Load(); got == 0 {
+		t.Fatal("session.create never fired; RunOnce did not reach Start")
+	}
+	// Look up the most recent id the mock returned. If
+	// RunOnce hadn't stripped cfg.SessionID, this would be
+	// "session-stale-from-caller" (fork attach semantics).
+	ids := mock.createdIDs()
+	if len(ids) == 0 {
+		t.Fatal("no created session ids recorded")
+	}
+	last := ids[len(ids)-1]
+	if last == "session-stale-from-caller" {
+		t.Fatalf("RunOnce forked cfg.SessionID %q instead of creating fresh", last)
+	}
+	if !strings.HasPrefix(last, "session-fresh-") {
+		t.Fatalf("RunOnce returned id %q; want session-fresh-*", last)
+	}
+}
+
+// ─── TestRunOnce_ArchiveOnClose ───────────────────────────────────
+// The defer a.Close() must drive workspace.archiveSession
+// (R4 — keep dsh web's in-memory store clean).
+func TestRunOnce_ArchiveOnClose(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	s := NewStarter("dsh")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Use a goroutine to break out of RunOnce after the archive
+	// fires. RunOnce's drain will block on events; we use a
+	// short ctx so it exits via deadline, and the archive still
+	// happens in defer Close.
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		_, _ = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/ws"},
+			[]agent.ContentBlock{{Type: agent.ContentText, Text: "ping"}})
+	}()
+	<-ctx.Done()
+	<-doneCh
+
+	// Give Close a moment to land.
+	deadline := time.Now().Add(2 * time.Second)
+	for mock.archiveCount.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := mock.archiveCount.Load(); got == 0 {
+		t.Fatalf("workspace.archiveSession never fired; defer Close did not run archive")
+	}
+}
+
+// ─── helpers ────────────────────────────────────────────────────────
+
+// drainOneReady consumes one AgentEventReady from a.Events() within
+// the timeout. Used to clear the startup EventAgentReady before
+// injecting terminal events.
+func drainOneReady(t *testing.T, a *agent.Agent, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case ev, ok := <-a.Events():
+			if !ok {
+				return false
+			}
+			if ev.Kind == agent.EventAgentReady {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}

@@ -51,14 +51,24 @@ func init() {
 	// the legacy `codex exec` backend.
 	agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))
 
-	// dsh — DeepSeek Harness print-mode bridge. Spawns
-	// `dsh --profile headless -- "<prompt>"` per call; one-shot
-	// only (no chat session — dsh's headless profile does not
-	// support --resume). Per the agent-no-config-tampering
-	// principle, the bridge only injects cmd.Dir (workspace) and
-	// DSH_PERMISSION_MODE=danger-full-access; model / provider /
-	// credentials flow from the user's `~/.dsh/settings.yaml` +
-	// `~/.dsh/.credentials.yaml`. See docs/feat/F-dsh-bridge.md.
+	// dsh — DeepSeek Harness bridge. One mode, one path: every dsh
+	// session (chat session + RunOnce + Review) goes through the
+	// shared `dsh --profile web` daemon (canonical port 3080).
+	// Start holds a long-lived *Agent; RunOnce is structurally
+	// Start + drain + defer Close — the Close path archives the
+	// session via workspace.archiveSession so it doesn't pile up
+	// in dsh web's in-memory store. cfg.SessionID on RunOnce is
+	// always ignored — every RunOnce gets a fresh sessionId for
+	// explicit isolation from the chat session's context.
+	//
+	// Per the agent-no-config-tampering principle, the bridge only
+	// injects cmd.Dir (workspace) and DSH_PERMISSION_MODE=danger-
+	// full-access; model / provider / credentials flow from the
+	// user's `~/.dsh/settings.yaml` + `~/.dsh/.credentials.yaml`.
+	// See docs/bridge/dsh.md §15 for the migration rationale
+	// (RunOnce moved from --profile headless to the shared host
+	// on 2026-08-22 to get explicit sessionId isolation + avoid
+	// the per-call cold start cost).
 	//
 	// Cross-platform: dsh ships as a Node.js CLI; on Windows the
 	// npm installer drops a `dsh.cmd` shim which proc.New's

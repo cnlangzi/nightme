@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -203,6 +204,122 @@ func TestStateStore_EmptyPath(t *testing.T) {
 	}
 	if err := store.putTopic(&TopicState{ChatID: "100", TopicID: 1}); err != nil {
 		t.Fatalf("putTopic empty path: %v", err)
+	}
+}
+
+// TestStateStore_PruneOlderThan locks the on-load GC contract:
+// topics updated before the cutoff are removed; topics updated
+// after the cutoff are kept. Choices bound to a pruned topic are
+// also dropped (orphaned choices are unreachable). See
+// stateStoreTTL in state.go.
+//
+// putTopic always bumps UpdatedAt to now (active-write semantic),
+// so we seed the test fixtures by reaching into s.topics directly
+// to simulate entries that have been idle for days / months.
+func TestStateStore_PruneOlderThan(t *testing.T) {
+	store, err := newStateStore("")
+	if err != nil {
+		t.Fatalf("newStateStore: %v", err)
+	}
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.topics[store.topicKey("100", 1)] = &TopicState{
+		ChatID: "100", TopicID: 1,
+		UpdatedAt: now.Add(-1 * time.Hour), // fresh
+	}
+	store.topics[store.topicKey("100", 2)] = &TopicState{
+		ChatID: "100", TopicID: 2,
+		UpdatedAt: now.Add(-72 * time.Hour), // stale
+	}
+	store.topics[store.topicKey("200", 0)] = &TopicState{
+		ChatID: "200", TopicID: 0,
+		UpdatedAt: now.Add(-365 * 24 * time.Hour), // ancient
+	}
+	store.topics[store.topicKey("300", 0)] = &TopicState{
+		ChatID: "300", TopicID: 0,
+		UpdatedAt: time.Time{}, // legacy (zero)
+	}
+	store.choices["stale-choice"] = &ChoiceState{
+		RequestID: "stale-choice",
+		ChatID:    "100", TopicID: 2,
+		Choice: &messages.Choice{RequestID: "stale-choice", Kind: messages.ChoiceKindPermission},
+	}
+	store.choices["fresh-choice"] = &ChoiceState{
+		RequestID: "fresh-choice",
+		ChatID:    "100", TopicID: 1,
+		Choice: &messages.Choice{RequestID: "fresh-choice", Kind: messages.ChoiceKindPermission},
+	}
+	store.mu.Unlock()
+	cutoff := now.Add(-24 * time.Hour)
+	removed := store.pruneOlderThan(cutoff)
+	if removed != 3 {
+		t.Fatalf("pruneOlderThan removed = %d, want 3 (stale + ancient + legacy)", removed)
+	}
+	if _, ok := store.topic("100", 1); !ok {
+		t.Fatal("fresh topic must survive prune")
+	}
+	if _, ok := store.topic("100", 2); ok {
+		t.Fatal("stale topic must be pruned")
+	}
+	if _, ok := store.topic("200", 0); ok {
+		t.Fatal("ancient topic must be pruned")
+	}
+	if _, ok := store.topic("300", 0); ok {
+		t.Fatal("legacy (zero UpdatedAt) topic must be pruned")
+	}
+	if _, ok := store.choiceByRequestID("stale-choice"); ok {
+		t.Fatal("choice bound to pruned topic must be dropped")
+	}
+	if _, ok := store.choiceByRequestID("fresh-choice"); !ok {
+		t.Fatal("choice bound to live topic must survive prune")
+	}
+}
+
+// TestStateStore_NewStateStoreTrimsOnLoad locks that loading a
+// stale state file automatically trims entries older than
+// stateStoreTTL and persists the trimmed baseline back to disk.
+func TestStateStore_NewStateStoreTrimsOnLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	// First newStateStore creates the file with our seed entries.
+	store, err := newStateStore(path)
+	if err != nil {
+		t.Fatalf("newStateStore: %v", err)
+	}
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.topics[store.topicKey("100", 1)] = &TopicState{
+		ChatID: "100", TopicID: 1,
+		UpdatedAt: now.Add(-365 * 24 * time.Hour), // ancient
+	}
+	store.topics[store.topicKey("200", 0)] = &TopicState{
+		ChatID: "200", TopicID: 0,
+		UpdatedAt: now.Add(-1 * time.Hour), // fresh
+	}
+	store.mu.Unlock()
+	// Persist directly via save() (bypass putTopic which bumps UpdatedAt).
+	if err := store.save(); err != nil {
+		t.Fatalf("save seed: %v", err)
+	}
+	// Reload — on-load prune runs.
+	store2, err := newStateStore(path)
+	if err != nil {
+		t.Fatalf("reload newStateStore: %v", err)
+	}
+	if _, ok := store2.topic("100", 1); ok {
+		t.Fatal("ancient topic must be pruned on load")
+	}
+	if _, ok := store2.topic("200", 0); !ok {
+		t.Fatal("fresh topic must survive load")
+	}
+	// The on-load save() should have written the trimmed state
+	// back; verify by reading the raw JSON file directly.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	if string(data) == "" {
+		t.Fatal("state.json should have been rewritten by on-load prune")
 	}
 }
 

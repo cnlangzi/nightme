@@ -272,8 +272,10 @@ threadID > 0
         └── 使用 chat_id + message_id，不需要 message_thread_id
 
 threadID == 0
-  ├── sendMessage → 主窗口 / 私聊
-  └── editMessageText → 占位消息(主窗口场景已废弃见§11.7)
+  ├── sendMessage → 主窗口 / 私聊（带 reply_to_message_id = userMsgID；topic 模式下额外带 message_thread_id。v3 修订）
+  └── editMessageText → 占位消息（v3：每 turn 一个新占位，跨 turn 留作时间线状态标记；详见 §11.11）
+```
+
 ```
 
 所有回调处理都必须以 `callback_query.message.message_id` 为准查找原卡；不能只按 `callback_data` 中的 `message_id` 盲信，因为 Telegram 的 `callback_data` 是适配器自己编码的字段。
@@ -491,7 +493,7 @@ InboundMessage 进入 chatstore
 }
 ```
 
-Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeholder_message_id, text)` 原地更新。主窗口消息不再有占位 / sentinel topic 概念 —— OutHeartbeat / OutToolStart 等独立消息直接发到主窗口。
+Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeholder_message_id, text)` 原地更新。**DM / 主窗口（thread_id=0）走 v3**：每条用户消息进来新建一条 `<b>🤖 Working...</b>` 占位，所有 OutXxx reply_to_message_id 锚到**用户原消息**（不是占位），turn 终态 PATCH 占位为 `✅ Completed`。跨 turn 的占位自然堆叠但语义清晰（每个都是独立 turn 的 permanent status marker）。详见 §11.11。
 
 `editForumTopic` 只修改 Topic 名称或图标，不修改 Topic 内正文，**不能**用来做占位更新。
 
@@ -705,7 +707,15 @@ chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
 - sentinel topic 由 Telegram 分配,ID 不可控,daemon 重启 / state 丢失会导致 ID 漂移 → 违反 chatID 稳定性约束
 - 编译选项里去掉了 `topic_mode: separate` / `shared` 开关(§11.6 修订)
 
-主窗口消息不再有占位消息(placeholder)概念——所有 OutHeartbeat / OutToolStart 走独立消息,OutReply 是同一消息上的 editMessageText(最长 4096 字符,超长拆分)。topic 内的消息仍然用占位消息做"Working..."(因为 Topic 本身就是 scope,主窗口太嘈杂时 Topic 内的占位有用)。
+**修订 (2026-08-22 plan-C v4)**：DM / 群主窗口（thread_id=0）和真实 topic（thread_id > 0）走**统一的 per-turn 占位 + reaction-driven 状态**方案：
+
+- 每个用户消息进来 → `ensurePlaceholder` **新建**一条 bot 占位 `<b>🤖 Working...</b>`（不是 sentinel topic，是真实 Telegram message）。`PlaceholderMessageID` 和 `UserMessageID` 都覆盖到新 turn 的值。
+- 同一 turn 的所有 OutXxx（`OutReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutResult` / `OutError` / `OutChoice`）都带 `reply_to_message_id = UserMessageID`，让 reply chain 锚到**用户的原消息**（不是占位）。Topic 模式下额外带 `message_thread_id = thread_id`。
+- turn 状态走 **message reaction**：runtime `MessageStateBus` → `OutMessageState` 触发 `setMessageReaction(userMsgID, 👌/🧠)`；`OnPromptEnded` 触发 `setMessageReaction(userMsgID, ✅)` + `setMessageReaction(PlaceholderMessageID, ✅)`。
+- `OutHeartbeat` PATCH 当前 turn 的占位文本（`🤖 Working...` / `💭 N · 🔧 M`）—— 是 in-turn 状态 ticker，**不再 PATCH 为 `<b>✅ Completed</b>`**。
+- 跨 turn：老占位留作时间线状态标记（不被 ✅ PATCH、保持 working / heartbeat 文本），新 turn 创建新占位独立承载新状态。
+
+详细方案见 §11.11。
 
 如果群组没有开启 Privacy Mode，Bot 会收到更多群组普通消息。qino 不应默认把每条群消息都交给 Agent，而应继续遵守群组 mention 策略：
 
@@ -782,10 +792,182 @@ Telegram 没有提供“列出 Bot 已加入全部群组”的 Bot API 接口。
 - Bot 能被手动加入多个群组。
 - 关闭 Privacy Mode 后，群组普通消息可以到达 nightme。
 - `chat_id` 能区分不同群组，相同群组内 `message_thread_id` 能区分不同 Topic。
-- 主窗口入口不会累积 qino 的 thinking、tools 和 receipt。
 - Topic 内可以按顺序看到 thinking、tools、结果和交互卡。
 - 群组 mention gate 和私聊行为符合预期。
 - Token 失效、权限不足、群组不是 Forum 等错误都有明确提示。
+
+### 11.11 per-turn placeholder + reaction-driven state（v4）
+
+Telegram Bot API 在 `chat.type == "private"`（DM）里不支持 Forum Topic，没有 `createForumTopic` / `message_thread_id` 概念。飞书靠 `reply_in_thread` 把中间事件折进 drawer，Telegram 没有等价物。
+
+v4 把 Telegram DM/topic 的视觉状态完全用 **message reactions** 表达（跟 Feishu receipt `AddReaction` + `SetPromptState` 对位），**不再 PATCH 占位文本为 `<b>✅ Completed</b>`**。
+
+#### 11.11.1 v3 + v6.3 + v7 核心契约
+
+每个用户消息进来 → `ensurePlaceholder` 创建**新的** bot 占位（per-turn），并通过 **`reply_to_message_id = userMessageID` 挂在用户消息下**（v7 改进）。同一 turn 的所有 OutXxx **以及 placeholder 自身** 都在 user message 的 reply thread 下，组成一个统一的对话气泡组。
+
+占位文本承载 turn 状态（含 `⏱ HH:MM:SS` 时间戳 —— v7 改进）：
+
+```text
+turn 1: 用户发 "hi 1" (userMsgID=10)
+    └─ ensurePlaceholder 创建 P1 = "🤖 Working... · ⏱ 15:18:08" bot 占位
+                       (v7: reply_to_message_id=10, 挂在用户消息下)
+        state.PlaceholderMessageID = 700   (P1 的 id)
+        state.UserMessageID       = "10"
+    ├─ runtime emit MessageQueued(10)   → silent drop (v6.3 单 emoji 预算)
+    ├─ runtime emit MessageSubmitted(10)→ setMessageReaction(10, 🤔)
+    ├─ OutHeartbeat                    → editMessageText(700, "💭 2 · 🔧 1 · ⏱ 15:18:30")
+    ├─ OutReply/Tool/Result             → sendMessage(reply_to_message_id=10, ...)
+    └─ OnPromptEnded                    → setMessageReaction(700, 🎉)  ← v6.3: 不动 user msg reaction
+```
+
+**v6.3 单 emoji 预算**（user 决定）：Telegram bot 一次只能贴 1 个 reaction 到单条消息。预算用在最有信息量的 state（`MessageSubmitted` = 🤔 "AI 在想"），其他 silent drop。
+
+**v7 改进**：
+- **Placeholder 也用 reply chain** 挂到 user message（之前是独立消息，现在视觉上是 user message 下的 reply 群）
+- **占位文本带 `⏱ HH:MM:SS` 时间戳**（`⏱ 15:18:08`），user 一眼看到 "agent 在 15:18:30 还在跑"
+
+#### 11.11.2 视觉
+
+```text
+Devin: hi 1  (react: 🤔)                          11:50
+nightme: (reply to hi 1) 🤖 Working... · ⏱ 15:18:08  ← P1 (v7: reply chain)
+                     (react: 🎉 when done)
+                     ├─ (PATCH) 💭 2 · 🔧 1 · ⏱ 15:18:25
+                     ├─ (reply to hi 1) User keeps sending...
+                     └─ (reply to hi 1) Hi! 👋 ...
+Devin: hi 2  (react: 🤔)                          11:55
+nightme: (reply to hi 2) 🤖 Working... · ⏱ 15:18:08  ← P2 (v7: reply chain)
+                     (react: 🎉 when done)
+                     ├─ (PATCH) 💭 1 · 🔧 0 · ⏱ 15:18:35
+                     └─ (reply to hi 2) Hi! 👋 ...
+```
+
+**v7 改进**：所有 bot 消息（placeholder + OutXxx）**都挂在 user message 下**，形成统一 reply thread。占位文本带 `⏱ HH:MM:SS` 时间戳，user 一眼看到 "agent 正在 15:18:25 处理"。
+
+#### 11.11.3 emoji 选择（v5）+ append 语义（v6）
+
+v5 (2026-08-22) 用 live API probe 确认了 Telegram Bot API `setMessageReaction` 的**JSON body 白名单**：
+
+| 阶段 | emoji | 语义 |
+|---|---|---|
+| 👌 MessageQueued | "收到 / OK" | 轻量确认 |
+| 🤔 MessageSubmitted | "AI 思考" | 跟 ChatGPT / Claude / Copilot 等行业惯例对齐（替代 v4 的 🧠，🧠 在 JSON API 里 REACTION_INVALID） |
+| 🎉 MessageDone | "完成 / 庆祝" | 通用（替代 v4 的 ✅，✅ 在 JSON API 里 REACTION_INVALID） |
+
+**关键约束**：`setMessageReaction` 的 JSON body 变体只接受 Telegram emoji 白名单。🧠、✅、🥳、⭐、🙄 等在 JSON body 下返 `REACTION_INVALID`；form-data body 变体则宽松得多（能接受几乎所有 unicode）。nightme daemon 用 JSON body，所以受此白名单限制。
+
+v4 的 👌/🧠/✅ 全部失败。v5 probe 结果（35 个候选 emoji 实测）：
+
+| 白名单内（JSON ✓） | 白名单外（JSON ✗） |
+|---|---|
+| 👍 👎 👌 ❤ 🔥 🎉 👏 🙏 😁 🤔 💩 🤯 💯 👀 😐 🤝 🫡 🆒 🎃 😈 👻 | 🧠 ✅ 🥳 ⭐ 🙄 |
+
+#### 11.11.3.1 单 reaction 限制（v6.1 修订）+ 单 emoji 预算（v6.3）
+
+**Telegram 平台硬限制**：bot 在 `setMessageReaction` 一次调用中只能设 **1 个 reaction** 到单条消息（实测发 2 个 emoji 会返 `REACTIONS_TOO_MANY`，`max_reaction_count=11` 是 chat-level 总反应种类上限，bot 单 reactor 上限仍是 1）。
+
+**v6 原始设想**（累计 list 模拟 append）：❌ 不可行 ——Telegram 拒绝 `[👌, 🤔, 🎉]` list。
+
+**v6.1 实际实现**：每个 state emit 1 个 reaction，**SET 语义**（覆盖而非 append）。
+
+**v6.3 进一步收紧**（user 决定）：单 reaction 预算用在最有信息量的 state —— **`MessageSubmitted = 🤔`**。
+
+```text
+Queued    → silent drop   (placeholder 文本 PATCH "🤖 Working..." 承担 "收到" 视觉)
+Submitted → 🤔            (单 reaction slot 固定给 "AI thinking")
+Done      → silent drop   (OnPromptEnded 在 placeholder 上贴 🎉)
+```
+
+**为什么这样**：
+- `Queued` 太瞬时（消息到 adapter 立刻变 `Submitted`），reaction 来不及显示就变
+- `Done` 终态由 placeholder 文本 PATCH + placeholder 🎉 reaction 承担，user message 上不再贴
+- `Submitted` 是 turn 中持续时间最长的状态，最值得让 user 看到"AI 在想"
+
+**视觉**（user message 角度）：
+
+```text
+Devin: hi
+nightme: 🤖 Working... ← placeholder
+            (用户消息上: 🤔 一直挂着,直到下次 turn)
+            (placeholder 文本: "💭 2 · 🔧 1" 持续更新)
+OnPromptEnded:
+            (placeholder 文本: 不再 PATCH, 保持 "💭 2 · 🔧 1")
+            (placeholder reaction: 🎉 贴上)
+            (user msg reaction: 仍为 🤔 不变,留给下一 turn 看新进度)
+```
+
+**实现细节**：
+- `mapStateToTelegramEmoji(state)`：v6.3 只对 `MessageSubmitted` 返回 `🤔`，其他 silent drop
+- `setMessageReactions(ctx, chatID, msgID, [reactions])` 接收 list 形参
+- 同一 state 重复 set 是 idempotent（`messageStates` LRU dedup）
+- `OnPromptEnded` 不再对 user message 贴 reaction（保留 reaction slot），只对 placeholder 贴 🎉
+
+**对比飞书**：
+- Feishu `AddReaction` 是 append-by-design，每条 user message 可以累积多个 reaction
+- Telegram 平台硬限制只能 1 个 reaction 在 user message 上
+- 这是 Telegram 平台 vs 飞书平台的根本 UX 差异，无法 workaround
+
+Future work: 如果 Telegram 放宽 JSON API 白名单，可以重新启用 v4 的 👌/🧠/✅。`mapStateToTelegramEmoji` 的实现与白名单同步更新。
+
+#### 11.11.4 Topic 路径同样适用
+
+| 行为 | topic (thread_id>0) | DM (thread_id==0) |
+|---|---|---|
+| `ensurePlaceholder` | 每条 user msg 创建新 P_N | 同上 |
+| `OutHeartbeat` | `editMessageText(P_N)` PATCH（in-turn status） | 同上 |
+| `OutReply/OutTool/OutThinking/OutResult/OutError/OutChoice` | Topic 内独立消息 + `message_thread_id` + `reply_to_message_id=userMsgID` | 主窗口消息 + `reply_to_message_id=userMsgID` |
+| `OnPromptEnded` | ✅ reaction on userMsg + ✅ reaction on P_N（**无文本 PATCH**） | 同上 |
+| 👌/🧠/✅ reaction | runtime eventbus 触发 + OnPromptEnded hook 触发 | 同上 |
+
+#### 11.11.5 chatID 稳定性约束保持
+
+`sessionChatID(rawChatID, thread_id)` 仍是 `tg_<chatid>[:thread_id]`，纯函数。UserMessageID 和 PlaceholderMessageID 不进 chatID 拼接，只作为持久化字段存在 `telegram_state.json` 的 `TopicState`。§5.5 约束 1-4 全部满足。
+
+跟历次方案对比：
+
+| | sentinel topic（已废弃） | v1 (跨 turn 复用占位) | v2 (DM 无占位) | v3 (每 turn 占位 + 文本 ✅) | **v4 (每 turn 占位 + reaction ✅)** |
+|---|---|---|---|---|---|
+| 占位 ID 来源 | Telegram 分配（不可控） | 1 个/chat 复用 | DM 无 | 每 turn 新建 | **每 turn 新建** |
+| reply chain 锚 | — | bot 占位（不直观） | user msg | user msg | **user msg**（topic + DM 一致） |
+| daemon 重启后 chatID 一致 | ❌ 可能漂移 | ✅ | ✅ | ✅ | ✅ |
+| 在 DM 里能跑 | ❌ Forum-only | ✅ | ✅ | ✅ | ✅ |
+| Turn 状态视觉 | — | 占位文本 PATCH | reaction only | 占位文本 PATCH | **reaction on user msg + reaction on placeholder** |
+| Turn 终态 | — | 占位 "✅ Completed" | reaction on user | 占位 "✅ Completed" | **✅ reaction on both (no text PATCH)** |
+| 用户体验 | 飞书 drawer | 占位堆叠 | 飞书 receipt reaction | 占位堆叠 + ✅ | **飞书 receipt reaction 等价（user + card 都 ✅）** |
+
+#### 11.11.6 跟飞书 receipt 的语义对位
+
+| | Feishu receipt | Telegram v4 |
+|---|---|---|
+| 状态 ticker | ✅ header PATCH（card） | placeholder PATCH（Working / 💭 N·🔧 M） |
+| OutThinking | append div | 独立 reply to user msg |
+| OutToolStart/End | append div | 独立 reply to user msg |
+| OutReply | 独立气泡（F-44 后） | 独立 reply to user msg |
+| OutResult | 独立气泡（F-39 后） | 独立 reply to user msg |
+| **user message 状态** | 👌 / 🔄 / ✅ **reaction** (AddReaction) | 👌 / 🧠 / ✅ **reaction** (setMessageReaction) |
+| **card / placeholder 状态** | ✅ header (SetPromptState) | ✅ **reaction** (setMessageReaction on placeholder) |
+| 终态 | ✅ reaction + card header ✅ | ✅ reaction on user msg + ✅ reaction on placeholder |
+
+两个维度正交：**状态走 reaction**（user msg 和 placeholder 两边都贴），**内容走 reply chain**（锚 user msg）。
+
+#### 11.11.7 OutChoice 在 topic 和 DM
+
+Choice card 也 `reply_to_message_id = userMsgID`，让权限/问题卡片挂在用户原消息下、视觉对齐。topic 模式下还带 `message_thread_id` 进入对应 Topic。
+
+#### 11.11.8 验收
+
+- 同一 DM/topic 跨 daemon 重启，chatID 仍是 `tg_<chatid>[:thread_id]`，state 从 `telegram_state.json` hydrate
+- 每条用户消息进来 → `ensurePlaceholder` **新建** bot 占位，更新 `state.UserMessageID` 和 `state.PlaceholderMessageID`
+- 同一 turn 的 `OutReply` / `OutThinking` / `OutTool*` / `OutResult` / `OutError` / `OutChoice` 都带 `reply_to_message_id = userMsgID`（topic 还带 `message_thread_id`）
+- `OutHeartbeat` PATCH 当前 turn 的占位文本（`🤖 Working...` 或 `💭 N · 🔧 M`）—— 不 PATCH 为 ✅ Completed
+- 运行时 eventbus → OutMessageState → `setMessageReaction(userMsgID, 👌 / 🧠)`（MessageDone 不在 async dispatch emit，由 `OnPromptEnded` 兜底）
+- `OnPromptEnded` 调 `setMessageReaction(userMsgID, ✅)` + `setMessageReaction(PlaceholderMessageID, ✅)`，**不调 editMessageText**
+- 跨 turn：老占位 P_N-1 留作时间线证据（不被 ✅ Completed PATCH，但保持 working / heartbeat 文本）
+- 测试矩阵：`TestMapStateToTelegramEmoji` (👌/🧠/✅) / `TestAdapter_Send_OutMessageState` (🧠) / `TestAdapter_Send_OutMessageState_QueuedRenders` (👌) / `TestAdapter_Send_OutMessageState_DoneRenders` (✅) / `TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder` (✅×2, no editMessageText) / `TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
+- placeholder 缺失（首次 OutHeartbeat 比 handleMessage 快）→ `ensurePlaceholderForHeartbeat` 懒创建，不丢事件
+- 跨 turn：老占位 P_N-1 留作时间线状态标记（不动），新 turn 创建 P_N 独立承载新状态
+- 测试矩阵：`TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestAdapter_Send_Topic_NoReplyToPlaceholder`（**已替换为 replyToUserMessage 版本**）/ `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 
@@ -1672,6 +1854,12 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 - 这意味着 Topic 永远是"空容器"，永远要靠内部的占位消息表达"会话状态"。
 - 已确认无替代方案。
 
+#### L10. Telegram reaction update 不带 `message_thread_id`
+- `MessageReactionUpdate`（`setMessageReaction` 触发的 👍/✅/🔄 等 emoji 反应）只携带 `chat.id` 和 `message_id`，没有 `message_thread_id`。
+- 后果：topic 内的 reaction 永远路由不到该 topic 的 ChatSession（chatID 不带 thread 后缀），只能路由到 chat-level ChatSession。
+- 实际影响：gtw drafts 存在 topic 内时（`tg_<chatid>:<thread_id>`），用户给 topic 内 message 加 ✅ reaction **无法触发** gtw draft 处理。DM 和群主窗口的反应（无 thread）正常工作。
+- 修法（2026-08-22）：chat-level chatID 现在统一 namespaced（`tg_<chatid>`），DM / 主窗口 emoji reactions 能正常进 gtw draft 流程。Topic 内的 emoji reactions 仍是平台能力限制。
+
 ### 15.2 降级类（用近似手段实现，已 work）
 
 #### D1. OutReply / OutResult / OutThinking / OutTool 都用独立消息
@@ -1758,6 +1946,10 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 |---|---|---|
 | C1 | OutInit silent drop（与 feishu F-44 对齐） | 已实现 |
 | C2 | OutHeartbeat 路径 ensurePlaceholderForHeartbeat（占位缺失时自动创建） | 已实现 |
+| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v7 修订**（v3 placeholder 自己也 reply 到 user msg + 占位文本 `⏱ HH:MM:SS` 时间戳；v6.3 单 emoji 预算保留） |
+| C4 | 2026-08-22 reaction chatID namespacing（修 `handleMessageReaction` 用 raw chatID 导致 emoji reaction 进不了 gtw 的 bug） | 已实现 |
+| C5 | 2026-08-22 stateStore TTL on-load prune（30 天未活动 topic 自动清理） | 已实现 |
+| C6 | 2026-08-22 sendChoice / patchChoice / handleInputClick / handleForceReply / callback wizard editMessageText 把 session ChatID 传给 Telegram API 的生产路径 bug（修 `rawChatIDFromSession` helper） | 已实现 |
 
 后续修订请直接在本节追加，并把对应 issue 编号填进去。
 

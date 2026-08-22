@@ -26,13 +26,29 @@ func (a *Adapter) createTopic(ctx context.Context, chatID, name string) (int, er
 	return result.MessageThreadID, nil
 }
 
-func (a *Adapter) sendTelegramMessage(ctx context.Context, chatID string, topicID int, text string, keyboard map[string]any) (SendMessageResult, error) {
+// sendTelegramMessage is the single Telegram sendMessage egress.
+//
+// Parameters:
+//   - topicID > 0: route into a real Telegram Forum topic
+//     (message_thread_id set on the API call).
+//   - replyToMessageID > 0: pass as reply_to_message_id so Telegram
+//     visually chains the new bubble to the given message. Used in
+//     DM / main-window flows to tie OutThinking / OutTool /
+//     OutReply / OutResult to the per-turn placeholder message
+//     (see docs/channel/telegram.md §11.11).
+//   - text == "": omit text field — used by ForceReply prompts
+//     where only reply_markup carries semantic content. parse_mode
+//     is skipped when text is empty to avoid API rejection.
+func (a *Adapter) sendTelegramMessage(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string, keyboard map[string]any) (SendMessageResult, error) {
 	params := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
 	}
 	if topicID > 0 {
 		params["message_thread_id"] = topicID
+	}
+	if replyToMessageID > 0 {
+		params["reply_to_message_id"] = replyToMessageID
 	}
 	if text != "" {
 		params["parse_mode"] = "HTML"
@@ -70,15 +86,30 @@ func (a *Adapter) editTelegramKeyboard(ctx context.Context, chatID string, messa
 	}, nil)
 }
 
-func (a *Adapter) setMessageReaction(ctx context.Context, chatID string, messageID int, emoji string) error {
-	reaction := []any{}
-	if emoji != "" {
-		reaction = append(reaction, map[string]any{"type": "emoji", "emoji": emoji})
+// setMessageReactions replaces the reaction list on a message with
+// the supplied list. Telegram's setMessageReaction is a SET
+// semantic — to APPEND, callers must send the full cumulative
+// list (see allReactionsUpTo in adapter.go for the lifecycle
+// 👌 → 👌+🤔 → 👌+🤔+🎉 sequence).
+//
+// Pass an empty (non-nil) slice to clear all reactions on the
+// message — the Telegram API distinguishes [] (clear) from
+// missing/null (no change).
+func (a *Adapter) setMessageReactions(ctx context.Context, chatID string, messageID int, reactions []map[string]any) error {
+	if reactions == nil {
+		reactions = []map[string]any{}
+	}
+	// Convert to []any so the wire format is consistent with
+	// the rest of the outbound params (every Channel call site
+	// builds `[]any{...}` not `[]map[string]any{...}`).
+	asAny := make([]any, len(reactions))
+	for i, r := range reactions {
+		asAny[i] = r
 	}
 	return a.apiCall(ctx, "setMessageReaction", map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
-		"reaction":   reaction,
+		"reaction":   asAny,
 	}, nil)
 }
 
@@ -90,25 +121,30 @@ func (a *Adapter) downloadTelegramFile(ctx context.Context, fileID string) (stri
 	return result.FilePath, nil
 }
 
-func (a *Adapter) sendText(ctx context.Context, chatID string, topicID int, text string) error {
+// sendText sends already-rendered text, splitting at the 4096-char
+// Telegram ceiling. replyToMessageID is threaded through every
+// chunk so DM reply chains stay intact even when the rendered
+// output overflows one message (see docs/channel/telegram.md
+// §11.11).
+func (a *Adapter) sendText(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) error {
 	parts, err := splitTelegramText(text, maxTelegramTextLength)
 	if err != nil {
 		return err
 	}
 	for _, part := range parts {
-		if _, err := a.sendTelegramMessage(ctx, chatID, topicID, part, nil); err != nil {
+		if _, err := a.sendTelegramMessage(ctx, chatID, topicID, replyToMessageID, part, nil); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (a *Adapter) sendRenderedText(ctx context.Context, chatID string, topicID int, text string) error {
+func (a *Adapter) sendRenderedText(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) error {
 	rendered, err := RenderMarkdown(text)
 	if err != nil {
 		return err
 	}
-	return a.sendText(ctx, chatID, topicID, rendered)
+	return a.sendText(ctx, chatID, topicID, replyToMessageID, rendered)
 }
 
 // chatIDPrefix is the Telegram channel namespace tag attached to
@@ -117,6 +153,24 @@ func (a *Adapter) sendRenderedText(ctx context.Context, chatID string, topicID i
 // chatIDs from other channels (Feishu uses "oc_<hex>" natively;
 // Slack and future channels will pick their own prefix).
 const chatIDPrefix = "tg_"
+
+// rawChatIDFromSession strips the channel prefix from a session
+// ChatID for use in Telegram Bot API calls. The Bot API rejects
+// non-numeric chat_id values, so any adapter code that talks to
+// the API (sendMessage / editMessageText / setMessageReaction /
+// etc.) must convert the namespaced session form back to the raw
+// Telegram chat.id first.
+//
+// Falls back to the input on parse failure (e.g., a chatID
+// passed in raw form by a unit test) so the API call still
+// goes through and the API can reject it with a clear error.
+func rawChatIDFromSession(chatID string) string {
+	raw, _, ok := splitSessionID(chatID)
+	if !ok {
+		return chatID
+	}
+	return raw
+}
 
 // sessionChatID maps a Telegram update to a stable, channel-
 // namespaced chatID used by the inbound pipeline.

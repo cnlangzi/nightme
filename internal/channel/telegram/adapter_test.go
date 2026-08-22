@@ -312,12 +312,14 @@ func TestAdapter_Send_OutMessageState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	// 适配器必须自行决定 emoji, 期望 🔄
+	// 适配器必须自行决定 emoji, 期望 🤔 (v6.3: 单 reaction 预算, 只 Submitted 贴)
 	got := findCall(api.Calls, "setMessageReaction")
 	if got == nil {
 		t.Fatal("expected setMessageReaction call, got none")
 	}
-	wantReaction := []any{map[string]any{"type": "emoji", "emoji": "🔄"}}
+	wantReaction := []any{
+		map[string]any{"type": "emoji", "emoji": "🤔"},
+	}
 	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
 		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
 	}
@@ -366,9 +368,14 @@ func TestMapStateToTelegramEmoji(t *testing.T) {
 		in   agent.MessageState
 		want string
 	}{
-		{agent.MessageQueued, "⏳"},
-		{agent.MessageSubmitted, "🔄"},
-		{agent.MessageDone, "✅"},
+		// v6.3: Telegram bot single-reaction budget — only
+		// MessageSubmitted emits 🤔 ("AI thinking"). Queued
+		// and Done are silent drops; their visuals are conveyed
+		// via placeholder text PATCH (Queued) and the placeholder
+		// 🎉 reaction (Done — handled in OnPromptEnded).
+		{agent.MessageQueued, ""},
+		{agent.MessageSubmitted, "🤔"},
+		{agent.MessageDone, ""},
 		{agent.MessageDropped, ""},    // 跟 feishu 对齐: 不留 reaction
 		{agent.MessageState(999), ""}, // 未知 state silent drop
 	}
@@ -379,6 +386,13 @@ func TestMapStateToTelegramEmoji(t *testing.T) {
 	}
 }
 
+// TestAdapter_Send_OutMessageState_QueuedRenders locks the
+// v6.3 single-reaction budget: MessageQueued is a silent drop
+// on the user message. The bot reserves its only reaction
+// slot for MessageSubmitted ("AI thinking"). The placeholder
+// text "🤖 Working..." still gets PATCHed, so the user
+// sees the message-received visual without burning the reaction
+// slot.
 func TestAdapter_Send_OutMessageState_QueuedRenders(t *testing.T) {
 	a, api := newTestAdapter(t)
 	if err := a.Send(context.Background(), messages.OutboundMessage{
@@ -391,16 +405,21 @@ func TestAdapter_Send_OutMessageState_QueuedRenders(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	got := findCall(api.Calls, "setMessageReaction")
-	if got == nil {
-		t.Fatal("expected setMessageReaction call")
-	}
-	wantReaction := []any{map[string]any{"type": "emoji", "emoji": "⏳"}}
-	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
-		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
+	// No setMessageReaction call expected (v6.3 silent drop).
+	for _, call := range api.snapshotCalls() {
+		if call.Method == "setMessageReaction" {
+			t.Fatalf("v6.3 Queued must NOT call setMessageReaction; got params=%+v", call.Params)
+		}
 	}
 }
 
+// TestAdapter_Send_OutMessageState_DoneRenders locks the
+// v6.3 single-reaction budget: MessageDone is a silent drop
+// on the user message. The terminal 🎉 reaction lives on the
+// per-turn placeholder (set by OnPromptEnded), not on the user
+// message. Reserving the user-message reaction slot for
+// MessageSubmitted only preserves the "thinking" visual for
+// the entire async turn.
 func TestAdapter_Send_OutMessageState_DoneRenders(t *testing.T) {
 	a, api := newTestAdapter(t)
 	if err := a.Send(context.Background(), messages.OutboundMessage{
@@ -413,13 +432,10 @@ func TestAdapter_Send_OutMessageState_DoneRenders(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	got := findCall(api.Calls, "setMessageReaction")
-	if got == nil {
-		t.Fatal("expected setMessageReaction call")
-	}
-	wantReaction := []any{map[string]any{"type": "emoji", "emoji": "✅"}}
-	if !reflect.DeepEqual(got.Params["reaction"], wantReaction) {
-		t.Errorf("reaction = %v, want %v", got.Params["reaction"], wantReaction)
+	for _, call := range api.snapshotCalls() {
+		if call.Method == "setMessageReaction" {
+			t.Fatalf("v6.3 Done must NOT call setMessageReaction; got params=%+v", call.Params)
+		}
 	}
 }
 
@@ -440,6 +456,17 @@ func TestAdapter_Send_OutMessageState_UnknownStateDrops(t *testing.T) {
 	}
 }
 
+// TestAdapter_Send_OutMessageState_TracksStateIdempotency locks
+// the LRU dedup: same state twice in a row skips the second
+// call. v6.3 only emits for MessageSubmitted (Queued/Done are
+// silent drops), so this test exercises:
+//
+//   1st Submitted → 1 reaction call
+//   2nd Submitted (same) → dedup'd (0 extra)
+//   3rd Submitted again → dedup'd
+//
+// We don't transition to Done here because v6.3 makes Done a
+// silent drop; the LRU dedup path is what we're testing.
 func TestAdapter_Send_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	a, api := newTestAdapter(t)
 	ctx := context.Background()
@@ -459,16 +486,19 @@ func TestAdapter_Send_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	if err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
-	// 第三次 Done → 不同 state 重新触发
-	msg.MessageState.State = agent.MessageDone
+	// 第三次 Submitted (再试一次) → 还是 dedup
 	if err := a.Send(ctx, msg); err != nil {
 		t.Fatalf("send 3: %v", err)
 	}
-	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 2 {
-		t.Errorf("setMessageReaction calls = %d, want 2 (1st + 3rd, 2nd deduped)", got)
+	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 1 {
+		t.Errorf("setMessageReaction calls = %d, want 1 (only 1st; 2nd & 3rd deduped)", got)
 	}
 }
 
+// TestAdapter_Send_OutMessageState_FirstReceivedNotSkipped
+// (F-31 review fix): empty lastMessageState map must not make
+// the first emit look like a "repeat" and get deduped. v6.3
+// uses MessageSubmitted since Queued is a silent drop.
 func TestAdapter_Send_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 	a, api := newTestAdapter(t)
 	if err := a.Send(context.Background(), messages.OutboundMessage{
@@ -476,7 +506,7 @@ func TestAdapter_Send_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 		Kind:   messages.OutMessageState,
 		MessageState: &messages.MessageStatePayload{
 			MessageID: "5",
-			State:     agent.MessageQueued,
+			State:     agent.MessageSubmitted,
 		},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
@@ -509,23 +539,21 @@ func TestAdapter_Send_OutMessageState_DroppedSilentDrops(t *testing.T) {
 	}
 }
 
+// TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU
+// v6.3: only MessageSubmitted emits a reaction. Queued / Done
+// are silent drops, so this test only exercises Submitted
+// transitions through Removed:
+//
+//   1st Submitted  → 1 setMessageReaction (🤔), LRU = {5: Submitted}
+//   Removed        → 1 setMessageReaction ([]), LRU untouched
+//   2nd Submitted  → dedup'd (0 extra) — proves LRU still holds
+//                    Submitted (if Removed had zeroed the LRU, this
+//                    would emit a 3rd call)
+//
+// If Removed had silently poisoned the LRU, the 2nd Submitted
+// would either dedup against a stale sentinel (Removed-time state)
+// or be unexpectedly triggered — both are bugs the test catches.
 func TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU(t *testing.T) {
-	// OutMessageStateRemoved sends reaction:[] (Telegram API contract:
-	// clears all reactions). It must NOT touch the messageStates LRU —
-	// otherwise subsequent OutMessageState emits for the same userMsgID
-	// would be incorrectly deduped against a stale sentinel (e.g. if
-	// someone added rememberMessageState(..., MessageDropped) to the
-	// Removed path, Done after a Removed would still trigger because
-	// Done != Dropped, but Submitted after a Removed would dedup
-	// against the prior Submitted record — the invariant we want to
-	// pin is that LRU still holds the *last rendered* state, untouched
-	// by Removed).
-	//
-	// Concretely: after Submitted → Removed, a *different* state must
-	// still hit the API. If Removed silently poisoned the LRU with a
-	// sentinel, the LRU's stored state would no longer match the last
-	// actual render — which is the only invariant the LRU exists to
-	// enforce.
 	a, api := newTestAdapter(t)
 	ctx := context.Background()
 	msg := messages.OutboundMessage{
@@ -550,19 +578,14 @@ func TestAdapter_Send_OutMessageStateRemoved_DoesNotPolluteLRU(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send 2 (Removed): %v", err)
 	}
-	// 3) Different state (Done) — must hit the API, proving LRU still
-	// holds Submitted (not a sentinel from Removed). If Removed had
-	// poisoned the LRU with MessageDropped or cleared it, the
-	// comparison prev==Done would still pass here — so we ALSO verify
-	// in step 4 that a *same-state* replay after Removed is deduped
-	// (matches the LRU record from step 1), which would fail if the
-	// LRU had been zeroed.
-	msg.MessageState.State = agent.MessageDone
+	// 3) Same state again (Submitted) — must dedup against the LRU
+	// record from step 1, proving Removed did not clear or poison
+	// the LRU.
 	if err := a.Send(ctx, msg); err != nil {
-		t.Fatalf("send 3 (Done): %v", err)
+		t.Fatalf("send 3 (Submitted again): %v", err)
 	}
-	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 3 {
-		t.Errorf("setMessageReaction calls = %d, want 3 (Submitted + Removed + Done)", got)
+	if got := len(findCalls(api.Calls, "setMessageReaction")); got != 2 {
+		t.Errorf("setMessageReaction calls = %d, want 2 (Submitted + Removed; 2nd Submitted dedup'd)", got)
 	}
 }
 
@@ -578,6 +601,11 @@ func TestAdapter_Send_OutHeartbeat_NoTopic(t *testing.T) {
 	}
 }
 
+// TestAdapter_Send_OutHeartbeat_WithTopic locks the v7 PATCH
+// payload format. v7 added `⏱ HH:MM:SS` from snapshot.LastBeatAt
+// so the user can see when the last heartbeat was emitted. The
+// snapshot here is built without LastBeatAt set, so the suffix
+// is omitted (heartbeatText skips it for zero-value time).
 func TestAdapter_Send_OutHeartbeat_WithTopic(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50})
@@ -588,6 +616,32 @@ func TestAdapter_Send_OutHeartbeat_WithTopic(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
+	}
+}
+
+// TestAdapter_Send_OutHeartbeat_AppendsTimestamp locks the
+// v7 PATCH payload with a non-zero LastBeatAt. The placeholder
+// text must end with `⏱ HH:MM:SS` so the user can see when
+// the agent was last alive.
+func TestAdapter_Send_OutHeartbeat_AppendsTimestamp(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50})
+	now := time.Date(2026, 8, 22, 15, 18, 8, 0, time.UTC)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "100",
+		Kind:      messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 5, ToolCount: 7, LastBeatAt: now},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	edit := findCall(api.snapshotCalls(), "editMessageText")
+	if edit == nil {
+		t.Fatal("expected editMessageText")
+	}
+	text, _ := edit.Params["text"].(string)
+	want := "💭 5 · 🔧 7 · ⏱ 15:18:08"
+	if text != want {
+		t.Fatalf("heartbeat text = %q, want %q", text, want)
 	}
 }
 
@@ -608,6 +662,91 @@ func TestAdapter_Send_OutChoice_Valid(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
+	}
+}
+
+// TestAdapter_Send_OutChoicePatch_NamespacedChatID_StripsTGPrefix
+// locks the 2026-08-22 fix on the patchChoice side: when
+// ChoiceState.ChatID is the namespaced session form (as it
+// always is in real runtime), editMessageText inside patchChoice
+// must strip the tg_ prefix before reaching the Telegram Bot
+// API. Same shape as the sendChoice fix but on the PATCH path.
+func TestAdapter_Send_OutChoicePatch_NamespacedChatID_StripsTGPrefix(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100:42", // runtime form: namespaced + thread suffix
+		Kind:   messages.OutChoice,
+		Choice: &messages.Choice{
+			RequestID: "req-ns-patch",
+			Kind:      messages.ChoiceKindPermission,
+			Title:     "Approve",
+			Options:   []messages.ChoiceOption{{ID: "yes", Label: "Yes"}},
+		},
+	}); err != nil {
+		t.Fatalf("send choice: %v", err)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100:42",
+		Kind:   messages.OutChoicePatch,
+		Choice: &messages.Choice{
+			RequestID:  "req-ns-patch",
+			Settled:    true,
+			SelectedID: "yes",
+		},
+	}); err != nil {
+		t.Fatalf("send patch: %v", err)
+	}
+	editCall := findCall(api.snapshotCalls(), "editMessageText")
+	if editCall == nil {
+		t.Fatal("expected editMessageText call")
+	}
+	chatID, _ := editCall.Params["chat_id"].(string)
+	if chatID != "100" {
+		t.Fatalf("editMessageText chat_id = %q, want raw %q (Telegram Bot API rejects tg_ prefix)", chatID, "100")
+	}
+}
+
+// TestAdapter_Send_OutChoice_NamespacedChatID_StripsTGPrefix
+// locks the 2026-08-22 fix for the production-time chatID bug
+// on the send side: Telegram Bot API rejects "tg_<digits>" as
+// chat_id. sendChoice must strip the prefix before calling
+// sendMessage. Previously it passed msg.ChatID (the session
+// form) straight through to the API call, which worked in unit
+// tests (where chatID is raw) but produced 400 Bad Request in
+// real runtime for every OutChoice.
+func TestAdapter_Send_OutChoice_NamespacedChatID_StripsTGPrefix(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100:42", // runtime-form: namespaced + thread suffix
+		Kind:   messages.OutChoice,
+		Choice: &messages.Choice{
+			RequestID: "req-namespace",
+			Kind:      messages.ChoiceKindPermission,
+			Title:     "Approve",
+			Options:   []messages.ChoiceOption{{ID: "yes", Label: "Yes"}},
+		},
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	sendCall := findCall(api.snapshotCalls(), "sendMessage")
+	if sendCall == nil {
+		t.Fatal("expected sendMessage call")
+	}
+	chatID, _ := sendCall.Params["chat_id"].(string)
+	if chatID != "100" {
+		t.Fatalf("sendMessage chat_id = %q, want raw %q (Telegram Bot API rejects tg_ prefix)", chatID, "100")
+	}
+	if threadID, _ := sendCall.Params["message_thread_id"].(int); threadID != 42 {
+		t.Fatalf("message_thread_id = %v, want 42", sendCall.Params["message_thread_id"])
+	}
+	// And ChoiceState stored the session form (for runtime routing),
+	// not the raw form.
+	state, ok := a.state.choiceByRequestID("req-namespace")
+	if !ok {
+		t.Fatal("ChoiceState not persisted")
+	}
+	if state.ChatID != "tg_100:42" {
+		t.Fatalf("ChoiceState.ChatID = %q, want session form tg_100:42 (runtime routing key)", state.ChatID)
 	}
 }
 
@@ -789,8 +928,372 @@ func TestAdapter_HandleUpdate_PrivateMessage(t *testing.T) {
 		if msg.Text != "hello" {
 			t.Fatalf("text = %q", msg.Text)
 		}
+		if msg.ChatID != "tg_100" {
+			t.Fatalf("chatID = %q, want tg_100 (namespacing §5.5)", msg.ChatID)
+		}
+		if msg.MessageID != "2" {
+			t.Fatalf("MessageID = %q, want 2", msg.MessageID)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("no inbound")
+	}
+}
+
+// TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder locks the
+// 2026-08-22 v3 contract: each DM user message triggers a NEW
+// "🤖 Working..." bot placeholder. The previous turn's
+// placeholder is untouched (it was PATCHed to ✅ Completed and
+// stays in the Telegram timeline as that turn's permanent
+// status marker). UserMessageID is updated to the latest user
+// message id so OutXxx reply chain anchors under the user's
+// own "hi" message rather than under the placeholder.
+func TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	a.config.PollingTimeout = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func() { _ = a.Stop(context.Background()) }()
+	_ = a.Start(ctx)
+	a.handleUpdate(context.Background(), Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 7,
+			Date:      time.Now().Unix(),
+			Chat:      Chat{ID: 100, Type: "private"},
+			From:      &User{ID: 1},
+			Text:      "hi bot",
+		},
+	})
+	select {
+	case <-a.Incoming():
+	case <-time.After(time.Second):
+		t.Fatal("no inbound")
+	}
+	state, ok := a.state.topic("100", 0)
+	if !ok {
+		t.Fatal("DM TopicState{topicID=0} must exist after inbound")
+	}
+	if state.UserMessageID != "7" {
+		t.Fatalf("UserMessageID drift: %q (want 7)", state.UserMessageID)
+	}
+	if state.PlaceholderMessageID <= 0 {
+		t.Fatalf("DM must create per-turn placeholder, got %d", state.PlaceholderMessageID)
+	}
+	// v7: the placeholder sendMessage must:
+	//  1. carry reply_to_message_id = user message id (7), so the
+	//     placeholder hangs as a reply under the user's "hi".
+	//  2. text contains the "🤖 Working..." prefix and the
+	//     "⏱ HH:MM:SS" timestamp suffix.
+	var placeholderCall *fakeCall
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "sendMessage" {
+			continue
+		}
+		if text, ok := call.Params["text"].(string); ok && strings.Contains(text, "🤖 Working...") {
+			placeholderCall = &call
+			break
+		}
+	}
+	if placeholderCall == nil {
+		t.Fatal("expected sendMessage with placeholder text")
+	}
+	replyTo, ok := placeholderCall.Params["reply_to_message_id"]
+	if !ok {
+		t.Fatalf("v7 placeholder must carry reply_to_message_id (so it threads under user msg); got params=%+v", placeholderCall.Params)
+	}
+	if replyTo != 7 {
+		t.Fatalf("reply_to_message_id = %v, want 7 (user message id)", replyTo)
+	}
+	text, _ := placeholderCall.Params["text"].(string)
+	if !strings.Contains(text, "⏱ ") {
+		t.Fatalf("v7 placeholder text = %q, want to contain ⏱ HH:MM:SS timestamp", text)
+	}
+}
+
+// TestAdapter_Send_DM_UsesReplyToPlaceholder verifies that
+// OutReply / OutThinking / OutTool in DM carry
+// reply_to_message_id = PlaceholderMessageID so Telegram
+// visually chains the bubble under the per-turn "🤖 Working..."
+// anchor.
+// TestAdapter_Send_DM_RepliesToUserMessage locks the 2026-08-22
+// v3 reply anchor: in DM (topicID == 0), every OutXxx bubble
+// uses reply_to_message_id = TopicState.UserMessageID (the
+// user's own message). Placeholder is the per-turn status
+// ticker (handled separately by OutHeartbeat PATCH); OutXxx
+// reply chain does NOT anchor to the placeholder.
+func TestAdapter_Send_DM_RepliesToUserMessage(t *testing.T) {
+	a, api := newTestAdapter(t)
+	// Simulate the inbound path having recorded the user's
+	// message ID and created the per-turn placeholder. Both
+	// fields are present in real runtime.
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 800, UserMessageID: "42"})
+	for _, kind := range []messages.OutboundKind{
+		messages.OutReply,
+		messages.OutThinking,
+		messages.OutToolStart,
+		messages.OutResult,
+	} {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "100",
+			Kind:   kind,
+			Text:   "body for " + kind.String(),
+		}); err != nil {
+			t.Fatalf("send %s: %v", kind, err)
+		}
+	}
+	wantReply := 42
+	got := 0
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "sendMessage" {
+			continue
+		}
+		reply, ok := call.Params["reply_to_message_id"]
+		if !ok {
+			t.Fatalf("sendMessage for kind %v missing reply_to_message_id: params=%+v", call.Params["text"], call.Params)
+		}
+		if reply != wantReply {
+			t.Fatalf("sendMessage reply_to_message_id = %v, want %d (userMsgID, NOT placeholder)", reply, wantReply)
+		}
+		// ChatID must be the raw form (Send strips tg_ prefix).
+		if chatID, _ := call.Params["chat_id"].(string); chatID != "100" {
+			t.Fatalf("sendMessage chat_id = %q, want raw %q", chatID, "100")
+		}
+		// DM must NOT carry message_thread_id.
+		if _, has := call.Params["message_thread_id"]; has {
+			t.Fatalf("DM sendMessage must not carry message_thread_id: %+v", call.Params)
+		}
+		got++
+	}
+	if got != 4 {
+		t.Fatalf("expected 4 sendMessage calls (one per kind), got %d", got)
+	}
+}
+
+// TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder locks the
+// DM heartbeat path: the same placeholder as OutReply anchors to
+// is now PATCH-ed with the heartbeat text instead of spawning a
+// standalone bubble.
+// TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder locks the
+// 2026-08-22 v3 contract: OutHeartbeat PATCHes the per-turn
+// DM placeholder with the live think/tool count. The placeholder
+// is the status ticker; reply chain still anchors to the user
+// message id (handled in TestAdapter_Send_DM_RepliesToUserMessage).
+func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 777})
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "100",
+		Kind:      messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 2, ToolCount: 1},
+	}); err != nil {
+		t.Fatalf("send heartbeat: %v", err)
+	}
+	editCall := findCall(api.snapshotCalls(), "editMessageText")
+	if editCall == nil {
+		t.Fatal("expected editMessageText for DM heartbeat")
+	}
+	if mid, _ := editCall.Params["message_id"].(int); mid != 777 {
+		t.Fatalf("editMessageText message_id = %v, want 777 (placeholder)", editCall.Params["message_id"])
+	}
+	if chatID, _ := editCall.Params["chat_id"].(string); chatID != "100" {
+		t.Fatalf("editMessageText chat_id = %q, want raw %q", chatID, "100")
+	}
+	if text, _ := editCall.Params["text"].(string); !strings.Contains(text, "💭 2") || !strings.Contains(text, "🔧 1") {
+		t.Fatalf("editMessageText text = %q, want to contain think/tool counts", text)
+	}
+}
+
+// TestAdapter_Send_Topic_ReplyToUserMessageToo locks the
+// 2026-08-22 v3 contract: reply_to_message_id is per-turn
+// userMsgID, applies to BOTH topic and DM modes. Topic mode
+// carries message_thread_id for visual grouping AND
+// reply_to_message_id for content anchoring — the two are
+// orthogonal axes (grouping vs. context). OnPromptEnded and
+// OutHeartbeat still PATCH the per-turn placeholder.
+func TestAdapter_Send_Topic_ReplyToUserMessageToo(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, PlaceholderMessageID: 800, UserMessageID: "55"})
+	for _, kind := range []messages.OutboundKind{
+		messages.OutReply,
+		messages.OutThinking,
+		messages.OutToolStart,
+		messages.OutResult,
+	} {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_100:42",
+			Kind:   kind,
+			Text:   "body for " + kind.String(),
+		}); err != nil {
+			t.Fatalf("send %s: %v", kind, err)
+		}
+	}
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "sendMessage" {
+			continue
+		}
+		// Both topic_id (grouping) AND reply_to_message_id
+		// (content anchoring) must be present.
+		reply, hasReply := call.Params["reply_to_message_id"]
+		if !hasReply {
+			t.Fatalf("topic sendMessage must carry reply_to_message_id (userMsgID); params=%+v", call.Params)
+		}
+		if reply != 55 {
+			t.Fatalf("topic reply_to_message_id = %v, want 55 (userMsgID)", reply)
+		}
+		if mid, ok := call.Params["message_thread_id"].(int); !ok || mid != 42 {
+			t.Fatalf("topic sendMessage must carry message_thread_id=42, got %+v", call.Params["message_thread_id"])
+		}
+	}
+	// Sanity: heartbeat in topic still PATCHes the placeholder.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "tg_100:42",
+		Kind:      messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 1},
+	}); err != nil {
+		t.Fatalf("send topic heartbeat: %v", err)
+	}
+	editCall := findCall(api.snapshotCalls(), "editMessageText")
+	if editCall == nil {
+		t.Fatal("topic heartbeat must PATCH placeholder")
+	}
+	if mid, _ := editCall.Params["message_id"].(int); mid != 800 {
+		t.Fatalf("editMessageText message_id = %v, want 800 (placeholder)", editCall.Params["message_id"])
+	}
+}
+
+// TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder verifies the
+// 2026-08-22 plan-C change: OnPromptEnded now PATCHes the DM
+// placeholder too (previously topicID > 0 guard skipped it). The
+// ✅ Completed visual matches the topic path.
+// TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder locks the
+// 2026-08-22 v3 contract: OnPromptEnded PATCHes the per-turn
+// DM placeholder text to "<b>✅ Completed</b>". The placeholder
+// stays in the Telegram timeline as that turn's permanent
+// status marker. Same code path as topic mode (one branch —
+// placeholderMessageID is the only visual ✅ carrier).
+// TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder locks the
+// 2026-08-22 v4 contract: OnPromptEnded puts ✅ reactions on
+// BOTH the user message and the per-turn placeholder (Feishu
+// parity — AddReaction + SetPromptState). NO editMessageText
+// call — placeholder keeps its last heartbeat text.
+func TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 909})
+	a.OnPromptEnded(context.Background(), "100", "7")
+
+	// Must NOT PATCH placeholder text (v4 dropped "<b>✅ Completed</b>" PATCH).
+	for _, call := range api.snapshotCalls() {
+		if call.Method == "editMessageText" {
+			t.Fatalf("v4 OnPromptEnded must NOT call editMessageText; got params=%+v", call.Params)
+		}
+	}
+
+	// v6.3: ONLY the placeholder gets a 🎉 reaction. The user
+	// message's single-reaction slot is reserved for
+	// MessageSubmitted ("AI thinking") — OnPromptEnded must NOT
+	// overwrite it with 🎉.
+	var (
+		placeholderCalls int
+		userMsgCalls     int
+	)
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "setMessageReaction" {
+			continue
+		}
+		mid, _ := call.Params["message_id"].(int)
+		reactions, _ := call.Params["reaction"].([]any)
+		if len(reactions) != 1 {
+			t.Fatalf("reaction len = %d, want 1 (Telegram single-reaction limit)", len(reactions))
+		}
+		entry, _ := reactions[0].(map[string]any)
+		if e, _ := entry["emoji"].(string); e != "🎉" {
+			t.Fatalf("reaction emoji = %q, want 🎉", e)
+		}
+		switch mid {
+		case 7:
+			userMsgCalls++
+			t.Fatalf("v6.3 OnPromptEnded must NOT set reaction on user msg %d; reaction slot is reserved for MessageSubmitted", mid)
+		case 909:
+			placeholderCalls++
+		default:
+			t.Fatalf("unexpected reaction message_id = %d, want 909 (placeholder)", mid)
+		}
+	}
+	if placeholderCalls != 1 {
+		t.Fatalf("expected 1 placeholder reaction call, got %d", placeholderCalls)
+	}
+	if userMsgCalls != 0 {
+		t.Fatalf("v6.3 must NOT call setMessageReaction on user msg, got %d calls", userMsgCalls)
+	}
+}
+
+// TestAdapter_OnPromptEnded_DM_NoPlaceholder_NoOp locks the safe
+// fallback: DM with no TopicState at all must not error and must
+// not call editMessageText (no anchor to PATCH).
+func TestAdapter_OnPromptEnded_DM_NoPlaceholder_NoOp(t *testing.T) {
+	a, api := newTestAdapter(t)
+	a.OnPromptEnded(context.Background(), "100", "1")
+	if call := findCall(api.snapshotCalls(), "editMessageText"); call != nil {
+		t.Fatalf("expected no editMessageText with no placeholder, got %+v", call)
+	}
+}
+
+// TestStateStore_DM_Persistence locks the §11.11 contract that
+// DM placeholders survive daemon restart via telegram_state.json.
+// TopicState{topicID=0} must round-trip through newStateStore and
+// come back with the same PlaceholderMessageID — otherwise the
+// first OutXxx after a restart would lazy-create a NEW
+// placeholder and orphan the old one.
+func TestStateStore_DM_Persistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	store, err := newStateStore(path)
+	if err != nil {
+		t.Fatalf("newStateStore: %v", err)
+	}
+	if err := store.putTopic(&TopicState{
+		ChatID:               "100",
+		TopicID:              0,
+		PlaceholderMessageID: 1234,
+		UserMessageID:        "42",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+	store2, err := newStateStore(path)
+	if err != nil {
+		t.Fatalf("newStateStore reload: %v", err)
+	}
+	state, ok := store2.topic("100", 0)
+	if !ok {
+		t.Fatal("DM TopicState{topicID=0} did not round-trip across reload")
+	}
+	if state.PlaceholderMessageID != 1234 {
+		t.Fatalf("PlaceholderMessageID drift across reload: got %d, want 1234", state.PlaceholderMessageID)
+	}
+	if state.UserMessageID != "42" {
+		t.Fatalf("UserMessageID drift across reload: got %q", state.UserMessageID)
+	}
+}
+
+// TestSessionChatID_DM_StillStable is the plan-C regression
+// guard: chatID stability contract (docs/CHANNEL.md §5.5) must
+// remain pure-function-of-(chat.id, thread_id) after the DM
+// placeholder + reply-chain additions. If anyone re-introduces
+// daemon-state into sessionChatID this test fails.
+func TestSessionChatID_DM_StillStable(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	// Same DM (chatID=100, threadID=0) called repeatedly must
+	// always produce the same chatID regardless of state.
+	want := "tg_100"
+	for i := 0; i < 5; i++ {
+		got := a.sessionChatID("100", 0)
+		if got != want {
+			t.Fatalf("iter %d: sessionChatID(\"100\", 0) = %q, want %q", i, got, want)
+		}
+	}
+	// Negative group id is still prefixed (Telegram native).
+	if got := a.sessionChatID("-10012345", 0); got != "tg_-10012345" {
+		t.Fatalf("negative group chat id: got %q, want tg_-10012345", got)
 	}
 }
 
@@ -1643,6 +2146,17 @@ func TestAdapter_HandleMessageReaction_ForwardsInbound(t *testing.T) {
 		if msg.UserID != "7" {
 			t.Fatalf("user id=%q", msg.UserID)
 		}
+		// 2026-08-22 fix: reaction ChatID must be namespaced
+		// ("tg_<chatid>") to match the message path. Otherwise
+		// runtime.findChatSession cannot resolve the owning
+		// ChatSession and gtw emoji-reaction routing silently
+		// drops the event.
+		if msg.ChatID != "tg_100" {
+			t.Fatalf("ChatID = %q, want tg_100 (namespaced §5.5)", msg.ChatID)
+		}
+		if msg.Reaction.ChatID != "tg_100" {
+			t.Fatalf("Reaction.ChatID = %q, want tg_100 (namespaced)", msg.Reaction.ChatID)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("no inbound")
 	}
@@ -1795,14 +2309,51 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_ReusesExisting(t *testing.T) {
 	}
 }
 
-func TestAdapter_EnsurePlaceholderForHeartbeat_SkipsOnZeroTopic(t *testing.T) {
+// TestAdapter_EnsurePlaceholderForHeartbeat_CreatesInDM locks the
+// 2026-08-22 plan-C change: topicID=0 (DM / main-window) now
+// lazy-creates a placeholder the same way real topics do, so
+// OutXxx bubbles have a stable reply_to_message_id anchor.
+//
+// Previously topicID <= 0 short-circuited to (0, nil) — DM had no
+// placeholder and no way to visually chain OutReply / OutTool to
+// a status ticker. See docs/channel/telegram.md §11.11.
+// TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates locks the
+// 2026-08-22 v3 contract: ensurePlaceholderForHeartbeat creates
+// a placeholder in DM (topicID == 0) just like topic mode, when
+// state.PlaceholderMessageID == 0. Returns the new id. Topic mode
+// is unchanged. Used by OutHeartbeat / first-Send-race to ensure
+// the placeholder always exists when an emit needs to PATCH it.
+func TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	messageID, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 0)
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatalf("ensurePlaceholderForHeartbeat DM: %v", err)
 	}
-	if messageID != 0 {
-		t.Fatalf("topicID=0 (p2p) must return 0, got %d", messageID)
+	if messageID <= 0 {
+		t.Fatalf("DM must create placeholder, got %d", messageID)
+	}
+	state, ok := a.state.topic("100", 0)
+	if !ok {
+		t.Fatal("DM TopicState{topicID=0} not persisted")
+	}
+	if state.PlaceholderMessageID != messageID {
+		t.Fatalf("placeholder id drift: state=%d call=%d", state.PlaceholderMessageID, messageID)
+	}
+	// Second call must reuse the existing placeholder (idempotent).
+	again, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 0)
+	if err != nil {
+		t.Fatalf("ensurePlaceholderForHeartbeat second call: %v", err)
+	}
+	if again != messageID {
+		t.Fatalf("second call must reuse placeholder, got %d want %d", again, messageID)
+	}
+	// Topic mode unchanged.
+	topicID, err := a.ensurePlaceholderForHeartbeat(context.Background(), "100", 42)
+	if err != nil {
+		t.Fatalf("ensurePlaceholderForHeartbeat topic: %v", err)
+	}
+	if topicID <= 0 {
+		t.Fatalf("topic must create placeholder, got %d", topicID)
 	}
 }
 

@@ -53,6 +53,27 @@ type stateStore struct {
 	choices map[string]*ChoiceState
 }
 
+// stateStoreTTL bounds how long inactive TopicState / ChoiceState
+// entries survive a daemon restart. On newStateStore, entries
+// older than (now - TTL) are pruned and the trimmed state is
+// persisted. New inbound messages for the same chat recreate the
+// state lazily — see handleMessage.ensurePlaceholder.
+//
+// 30 days is generous enough to cover:
+//
+//   - users who open Telegram rarely but still want continuity
+//     (the placeholder they had on their last visit will be
+//     recreated on their next message, but the in-Telegram
+//     message itself is the visual anchor, not the adapter state)
+//   - power users who switch devices / restart daemons
+//
+// Trade-off: a placeholder created >30 days ago gets a fresh
+// message_id after a long idle period. The old Telegram message
+// remains in the user's history (Telegram owns it, we don't
+// delete); the user just sees a new "🤖 Working..." alongside
+// the old one if they reopen that DM.
+const stateStoreTTL = 30 * 24 * time.Hour
+
 func newStateStore(path string) (*stateStore, error) {
 	store := &stateStore{
 		path:    path,
@@ -78,6 +99,12 @@ func newStateStore(path string) (*stateStore, error) {
 	}
 	if persisted.Choices != nil {
 		store.choices = persisted.Choices
+	}
+	// Prune stale entries older than stateStoreTTL on load.
+	// Persist back if anything was removed so subsequent loads
+	// start from the trimmed baseline.
+	if store.pruneOlderThan(time.Now().UTC().Add(-stateStoreTTL)) > 0 {
+		_ = store.save()
 	}
 	return store, nil
 }
@@ -118,6 +145,51 @@ func (s *stateStore) putTopic(value *TopicState) error {
 	s.topics[s.topicKey(value.ChatID, value.TopicID)] = cloneTopic(value)
 	s.mu.Unlock()
 	return s.save()
+}
+
+// pruneOlderThan removes TopicState entries whose UpdatedAt is at
+// or before cutoff, plus any ChoiceState bound to those topics
+// (orphaned choices are unreachable and would leak). Returns the
+// number of TopicState entries removed. Caller decides whether to
+// save() — newStateStore does so automatically; mid-run callers
+// may batch the save.
+//
+// Used by newStateStore to bound the on-disk state file when a
+// user accumulates many inactive chats (block / mute / abandon).
+// See stateStoreTTL for the rationale.
+func (s *stateStore) pruneOlderThan(cutoff time.Time) int {
+	if cutoff.IsZero() {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for key, value := range s.topics {
+		if value == nil {
+			delete(s.topics, key)
+			continue
+		}
+		// UpdatedAt == zero means legacy state from before the
+		// field was added. Treat as ancient — prune so a buggy
+		// migration can't leak pre-existing entries indefinitely.
+		if value.UpdatedAt.IsZero() || !value.UpdatedAt.After(cutoff) {
+			delete(s.topics, key)
+			removed++
+		}
+	}
+	// Choices are pruned only if their topic is gone — a still-live
+	// topic keeps its in-flight ChoiceState even if the choice has
+	// been idle (e.g., user opened the prompt and walked away).
+	for reqID, value := range s.choices {
+		if value == nil {
+			delete(s.choices, reqID)
+			continue
+		}
+		if _, topicAlive := s.topics[s.topicKey(value.ChatID, value.TopicID)]; !topicAlive {
+			delete(s.choices, reqID)
+		}
+	}
+	return removed
 }
 
 func (s *stateStore) choiceByRequestID(requestID string) (*ChoiceState, bool) {

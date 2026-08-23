@@ -29,6 +29,9 @@
 | 8 | ocr 始终是被调用的**外部工具**(类 git),不进 agent 注册表 | 把狭义 agent 当 bridge,扭曲 bridge 语义 |
 | 9 | 大 changeset 按 ocr rule group 拆多 job,**每 job 独立 RunOnce / 独立 context**,不累积 | 单 context 塞全量 diff 爆窗口,或同进程多轮累积爆 |
 | 10 | 多 job **自动并发**(sem 上限),merge 后一次返回 | 顺序跑 N job 慢;无上限并发爆 token / 撞 API rate |
+| 11 | 多 job 时,**上层只看到一个 review lifecycle**(单 Ready / 单 Result) | chat channel 看到 N 个 ready / N 个 result,StatusBar 翻转混乱 |
+| 12 | per-job 内的 ToolStart 必须**等配对 ToolEnd 才转发**,Start/End 在外层 wire 上**连续** | 半截 tool 调用外发,chat 渲染混乱 |
+| 13 | 跨 job 的 EventAgentTaskCreate/Update **按 task ID 去重 merge**,同一 ID 多个 job 的最新版本只发一份 | chat checklist 看到 N 份重复 task 条目,数量 = N × tasks |
 
 ### 1.2 边界
 
@@ -134,24 +137,80 @@ Tier 2 按 ocr rule groups 拆多 job 时,核心是**每 job 独立 RunOnce / �
 
 ### 2.5.4 merge(一次返回)
 
-各 job 输出结构化 findings(path / content / start_line / end_line / category / severity),merge:
+各 job 输出**结构化 markdown**(`## Coverage` + `## Findings` schema)。LLM 自己解析——merge 阶段**不做**结构化解析、不按 severity 排序、不做 path 去重、不做 coverage 聚合。原因:
 
-- findings 合并 + 按 severity 排序(critical > high > medium > low)
-- 跨组 coverage_rate 汇总(total = Σ reviewable,reviewed = Σ reviewed,skipped = Σ skipped)
-- 拼一份 markdown,**一次返回**给 cmd.go(FormatReviewMessage + 双路分发)
+- 各 agent 输出的 schema 实现细节不一致(claude 的 confidence / codex 的 severity group / ocr 的 category enum 等),**结构不稳定**,统一解析器易碎
+- 主 agent(消费侧)对 markdown 是 LLM,**自然语言理解足以**接住 findings;结构化字段只是 optional hint
+- 降低 merge 路径的复杂度 = 降低 surface area = 减少回归风险
 
-按 rule group 拆时,一文件只在一组,findings 不重复;merge 仍按 path 去重保险。
+merge 步骤只有两步:
 
-### 2.5.5 sink 复用
+1. **按组标头拼接**:每组 `### Group: pattern X — files: A, B, C` 头 + 该组原文 markdown。失败组标 `### Group: pattern X — failed: <err>`。
+2. **一次返回**:合成的 RunResult 经 `FormatReviewMessage` 注入 AS + 发 channel 一次。
 
-cmd.go 的 sink(中间事件流式进 chat)被多 job 并发复用——sink 是 chan-based(线程安全),多 job 并发调它安全。用户看到:各 job 的思考 / 工具调用实时流进 chat(review 在跑),最终合并 findings 一次发回。可选给事件加 `[group]` 标记区分来源。
+partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline marker 出现在合并文本里;all-failed 才返回 first error wrapped with agent name。
+
+### 2.5.5 sink 契约:三相状态机 + per-job 配对
+
+多 job 时,cmd.go 喂给 DelegateReview 的 outer sink(`outbound.StreamRunOnceToEmitter`)必须**只看到一个 review lifecycle**,不能感知到内部 N 个并发 job。eventAggregator 用三相状态机实现这一契约:
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│   Phase 1 (buffering)                                                │
+│   ─────────────────                                                   │
+│   per-job 进来的所有事件进 perJob.initBuffer,**不外发**              │
+│   readyCount++; doneCount++(per-job terminalSeen 守卫防重复)         │
+│   当 readyCount == expected:                                          │
+│     ┌── 锁内 ─────────────────────────────────────────────────────┐  │
+│     │  phase = phaseStreaming                                       │  │
+│     │  snapshot 各 perJob.initBuffer,清空                          │  │
+│     │  构建 synthetic outer Ready(merged metadata,Source="")        │  │
+│     └──────────────────────────────────────────────────────────────┘  │
+│     ┌── 锁外 ─────────────────────────────────────────────────────┐  │
+│     │  outer(synthetic outer Ready)                                 │  │
+│     │  replay 各 perJob 的 snapshot → handleStreaming               │  │
+│     │    (应用 ToolStart/End 配对、Task 合并 ID 去重等)             │  │
+│     └──────────────────────────────────────────────────────────────┘  │
+├─────────────────────────────────────────────────────────────────────┤
+│   Phase 2 (streaming)                                                 │
+│   ───────────────────                                                 │
+│   live 事件到达 → handleStreaming 立刻处理:                          │
+│     - ToolStart → pendingToolStarts[ID] = ev(**不转发**)            │
+│     - ToolEnd   → 查 pendingToolStarts[ID],有则按 Start→End 连续    │
+│                   转发两条事件;无则 forward 孤儿 End                  │
+│     - TaskCreate/Update → 按 ID dedup 后 forward ONE merged snapshot │
+│     - Text / Permission → forward as-is,Source="group-N"             │
+│     - Result/Error → doneCount++(terminalSeen 守卫);不外发           │
+│   当 doneCount == expected:                                           │
+│     outer(synthetic outer Result,Source="") → Phase 3               │
+├─────────────────────────────────────────────────────────────────────┤
+│   Phase 3 (closed)                                                    │
+│   ────────────────                                                    │
+│   late events 忽略(已发出的 outer lifecycle 已闭合)                  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**关键设计**:
+
+- **#11 单 outer lifecycle**:上层只看到一次 `outer Ready` 和一次 `outer Result`。N 个 per-job Ready + N 个 per-job Result 在聚合器内消化掉,只在 all-wait 条件满足时各合成一个外发。
+- **#12 per-job ToolStart/End 配对**:每个 per-job 一个 `pendingToolStarts map[string]AgentEvent`。ToolStart 进缓冲不外发,等配对 ToolEnd 到达后**Start → End 顺序连续**转发两条事件。保证 chat 渲染层看到的 tool 调用是完整块,不出现半截 open call。
+- **#13 Task 跨 job 去重**:aggregator 维护 `tasks map[string]AgentTaskItem`,每个 TaskCreate/Update 进来按 ID 写入(latest wins),forward 一份合并 snapshot。避免 chat checklist 看到 N 份重复条目。
+- **进程事件实时流**:Phase 2 期间 process 事件立即外发(Source="group-N" 让 chat 渲染层区分),review 期间用户能实时看到 "[group-1] tool: Read /home/repo/foo.go" 这种进度。
+- **异序到达容错**:job-1 先报 Result、其他还没报 Ready 的情况:`doneCount > readyCount` 短暂成立,但**不**触发 outer Result(Phase 还在 buffering);等所有 Ready 后才触发 Phase 2,然后等所有 Done 才触发 outer Result。**Ready 优先于 Done 的合成外发**。
+- **Replay 一致性**:Phase 1→2 转换时,旧 initBuffer 经同一个 `handleStreaming` 路径走完配对/合并逻辑,与 live 事件应用**同一套规则**,行为完全一致。
+
+**为什么 outer sink 能安全接收**:outbound.StreamRunOnceToEmitter 底层是 chan-based,channel send 跨 goroutine 线程安全。aggregator 持锁区只做状态变更,`outer(ev)` 调用在锁外完成,避免持锁回调。
 
 ### 2.5.6 边界
 
 - **超大单组**:某 group diff 仍超大(如 `**/*.go` 100 文件 5000 行)→ per-file 截断兜底(§2.4 第 6 项);极端时按目录二次拆(留后续)。
 - **顺序 vs 并发**:默认并发(快);若并发有风险(如 agent 不支持并发 session),可降级顺序(loop 无 sem)——但已验证 delegate bridge 的 RunOnce 并发安全(dsh sessionId 多路复用 / 其他独立子进程),默认并发。
+- **跨 job 事件流交错**:Phase 2 期间不同 job 的 process 事件在 outer 上**可能交错**(Source="group-N" 区分);**同一 job 内部** ToolStart→ToolEnd 严格配对连续(per-job 缓冲保证)。
+- **Replay vs live 交错**:Phase 1→2 转换时,replay 处理 per-job 旧事件可能与同 job 新到的 live 事件在 outer 上交错。当前实现的已知 minor race:同 job 内 replay 事件 + live 事件少数情况下顺序非严格 chronological。后果仅为 chat 时间线略不规整,无功能影响。修复方案(若需要)是在转换时加 replay-in-progress barrier。
+- **未配对 ToolStart**:job 在 ToolStart 后异常结束(无对应 ToolEnd),该 Start 进 buffer 后永远不被 forward——这是合理行为,chat 不会看到半截 call;该 job 的 done 仍会按 Result/Error 触发。
+- **orphan ToolEnd**:配对 ToolStart 已先被 replay 转发过的罕见情况——orphan End 也 forward,chat 看到一条无 Start 的 End,可忽略。
 
-### 2.5.7 实现索引(v11)
+### 2.5.7 实现索引(v12)
 
 | 概念 | 实现位置 |
 | --- | --- |
@@ -159,21 +218,20 @@ cmd.go 的 sink(中间事件流式进 chat)被多 job 并发复用——sink 是
 | 多 job 并发编排(sem cap 4,N 个 goroutine,各自独立 ctx) | `internal/agent/delegate_review.go::delegateReviewMultiJob` |
 | per-group 提示词(context / file list / diff / rule / how-to / schema) | `internal/agent/delegate_review.go::assembleGroupPrompt` |
 | 按文件过滤 diff(`git diff -- <files...>`) | `internal/agent/delegate_review.go::groupFilteredDiff` |
-| 事件聚合器(N 个 per-job sink → 1 个 outer sink,合并 Ready / 抑制后续 Ready / 合并 terminal / 合成 outer Result) | `internal/agent/aggregate_sink.go::eventAggregator` |
-| 多 job 结果合并(按组标头拼接文本 + Usage 求和 + 部分失败兜底) | `internal/agent/delegate_review.go::mergeRunResults` |
-| 单元测试(聚合器 / 合并 / 并发) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go` |
+| **三相状态机 + per-job 配对缓冲**(Phase 1 buffering → Phase 2 streaming → Phase 3 closed;pendingToolStarts map per-job;Task 跨 job ID 去重;异序到达容错) | `internal/agent/aggregate_sink.go::eventAggregator` |
+| **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/delegate_review.go::mergeRunResults` |
+| 单元测试(聚合器 / 合并 / 并发 / 配对) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go` |
 
-**不变量 #9/#10 与实现的对应**:
+**不变量与实现的对应**:
 
-- **#9 独立 context 分 bundle**:`delegateReviewMultiJob` 启动 N 个 goroutine,每个跑独立 `s.RunOnce`(独立子进程 / 独立 context),不共享、不累积。
-- **#10 自动并发 + sem 上限 + merge 后一次返回**:`sem chan struct{}` cap 为 `maxConcurrentReviewJobs = 4`;所有 goroutine 通过 `wg.Wait()` 同步,`mergeRunResults` 一次产出最终 `RunResult`,经 `FormatReviewMessage` 注入 AS + 发 channel 一次。
-
-**事件侧 §2.5.5 "sink 复用" 的实现**:
-
-- cmd.go 传的 sink(`outbound.StreamRunOnceToEmitter`)是 chan-based,天然线程安全,直接喂给 aggregator 当 outer。
-- aggregator 在 `wrapJob` 闭包里给每个 per-job sink 加节流逻辑,只向外发:**第一个 per-job Ready**(作为 outer Ready,Source 重置为 `""`)+ **合成 outer Result**(所有 job terminal 后一次性发出,关闭 outer 生命周期)。
-- per-job 中间事件(Text / ToolStart/End / Permission / Task*)在聚合器层**丢弃**——避免 N 个 job 的中间事件交错塞爆 chat 频道(review 阶段中间事件本来就是观察性的;最终交付物是 cmd.go 的 `FormatReviewMessage` 文本)。
-- 部分 job 失败时(`mergeRunResults` 的 partial failure 分支),失败组以 `### Group: pattern X — failed: <err>` 形式出现在合并文本里,**不**升级为 merge 整体错误。
+- **#1 全异步**:`Handle` 立即返回,goroutine 跑 review,revCtx 派生自 chat session ctx。
+- **#2 / #9 RunOnce 隔离**:每个 per-job 是独立 `s.RunOnce`(独立子进程 + 独立 context),多 job 间不共享、不累积。
+- **#3 ctx 派生 + /close 取消**:所有 job 共用 `revCtx`(chat session ctx + 30min 超时)。
+- **#4 双路分发**:`FormatReviewMessage` 一次产出的合并文本 → 注入 AS(user turn)+ 发 channel 一次。
+- **#10 自动并发 + sem + merge 一次返回**:`sem chan struct{}` cap 为 `maxConcurrentReviewJobs = 4`;`wg.Wait()` 同步;`mergeRunResults` 一次产出最终 RunResult。
+- **#11 单 outer lifecycle**:eventAggregator 的三相状态机在 readyCount/doneCount all-wait 时各合成一次 outer Ready / outer Result,per-job lifecycle 不外泄。
+- **#12 per-job ToolStart/End 配对**:eventAggregator 的 `perJob.pendingToolStarts` 按 ID 缓冲 ToolStart,等配对 ToolEnd 时按 Start→End 顺序连续转发。
+- **#13 Task 跨 job 去重**:eventAggregator 的 `tasks map[string]AgentTaskItem`,latest-wins 写入,forward 合并 snapshot。
 
 ---
 

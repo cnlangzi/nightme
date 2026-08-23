@@ -405,3 +405,225 @@ func TestChain_RotateChunk_HeaderIsFreshNotInherited(t *testing.T) {
 		t.Logf("note: rotated header equals cold-create header (%q); timestamps may match", newHeader)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// §11.12.6 — data-driven footer policy + Render-always invariant.
+// Locks:
+//   - lastFooter is data-driven: any text-emitting kind carrying
+//     status data (AgentName/Model/SessionID/Usage) refreshes
+//     chain.lastFooter; the Kind itself is irrelevant.
+//   - Render always happens regardless of whether lastFooter was
+//     refreshed, because Telegram's editMessageText is a full body
+//     replace. Append-only events still drive flushChainNow.
+// ---------------------------------------------------------------------------
+
+// TestChain_RenderAlwaysHappen_EvenWhenLastFooterUnchanged locks the
+// §11.12.6 "Render 总是发生" invariant. When a non-status-bearing
+// event lands on a chain that already has a footer, lastFooter must
+// stay put — but the dirty flag must still flip and a flush must
+// still render the chain. Without this, lastFooter going stale on a
+// subsequent refresh would silently drop the rendered footer.
+func TestChain_RenderAlwaysHappen_EvenWhenLastFooterUnchanged(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var sent []string
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		sent = append(sent, text)
+		return int64(900 + len(sent)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	// First event carries status data — refreshes lastFooter.
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10,
+		"reply with status",
+		[]string{"🤖: claude · opus-4.5"},
+		sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	firstFooter := chain.lastFooter
+	if firstFooter == nil {
+		t.Fatal("expected lastFooter to be set after first event")
+	}
+
+	// Second event carries NO status data — lastFooter must stay,
+	// but dirty must flip so the next flush re-renders.
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10,
+		"second thought without status",
+		nil,
+		sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !chain.dirty {
+		t.Fatal("chain.dirty must be true even when lastFooter didn't change")
+	}
+	if chain.lastFooter == nil {
+		t.Fatal("lastFooter must NOT be cleared by a non-status-bearing event")
+	}
+	if len(chain.lastFooter) != len(firstFooter) {
+		t.Fatalf("lastFooter was mutated by a non-status event")
+	}
+}
+
+// TestChain_DataDrivenFooter_OutThinkingWithAgentName_RefreshesFooter
+// locks the §11.12.6 design intent: footer refresh is data-driven,
+// not Kind-locked. If runtime ever stamps AgentName on a
+// non-traditionally-footer-bearing kind (e.g. OutThinking), the
+// chain MUST still refresh lastFooter. This test simulates that by
+// passing a non-nil statusBarLines from the caller — which is
+// exactly what appendSegmentForKind does today for every
+// text-emitting kind via statusbar.StatusBarLines(&msg).
+func TestChain_DataDrivenFooter_OutThinkingWithAgentName_RefreshesFooter(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var sent []string
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		sent = append(sent, text)
+		return int64(910 + len(sent)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	// First event: no status data. lastFooter stays nil.
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10,
+		"plain thinking",
+		nil,
+		sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if chain.lastFooter != nil {
+		t.Fatal("lastFooter should be nil when caller passes nil statusBarLines")
+	}
+
+	// Second event: status data present, even though the simulated
+	// kind is OutThinking (which §11.12.6 docs as "通常不 stamp"
+	// — i.e. convention, not policy). chain.lastFooter MUST refresh.
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10,
+		"thinking with new agent context",
+		[]string{"🤖: gpt-5 · turbo"},
+		sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if chain.lastFooter == nil {
+		t.Fatal("lastFooter must refresh when statusBarLines is non-nil, regardless of Kind")
+	}
+	if got := chain.lastFooter[0]; got != "🤖: gpt-5 · turbo" {
+		t.Fatalf("lastFooter[0] = %q; want refreshed value", got)
+	}
+}
+
+// TestChain_NewChunk_InheritsLastFooter locks §11.12.6 third bullet
+// ("新 chunk 创建时如果 chain.lastFooter != nil → 沿用上一 chunk 的
+// footer") + §11.12.16 acceptance matrix item
+// TestChain_NewChunk_InheritsLastFooter. Without this, the footer
+// would silently disappear on every chunk rotation, leaving the
+// chat looking footer-less on chunks 2..N.
+func TestChain_NewChunk_InheritsLastFooter(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var sent []string
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		sent = append(sent, text)
+		return int64(920 + len(sent)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	// Cold-create with status data → lastFooter populated, chunk 0
+	// carries the rendered footer.
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10,
+		"first reply",
+		[]string{"🤖: claude"},
+		sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.chunks) != 1 || chain.chunks[0].footer == "" {
+		t.Fatal("first chunk should carry a rendered footer")
+	}
+	firstChunkFooter := chain.chunks[0].footer
+
+	// Trigger ROTATE with a huge second segment. Second chunk must
+	// inherit the footer from lastFooter, even though the new event
+	// itself carries nil statusBarLines (so lastFooter doesn't get
+	// re-stamped).
+	huge := strings.Repeat("y", chainChunkThresholdChars)
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10,
+		huge,
+		nil,
+		sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.chunks) != 2 {
+		t.Fatalf("expected 2 chunks after overflow; got %d", len(chain.chunks))
+	}
+	if chain.chunks[1].footer == "" {
+		t.Fatal("rotated chunk must inherit lastFooter; got empty footer")
+	}
+	if chain.chunks[1].footer != firstChunkFooter {
+		t.Fatalf("rotated chunk footer differs from first chunk; "+
+			"want inherited = %q, got %q", firstChunkFooter, chain.chunks[1].footer)
+	}
+}
+
+// TestChain_MultipleOverflow_ThreeChunks_FirstTwoFrozen locks §11.12.16
+// acceptance matrix item TestChain_MultipleOverflow_ThreeChunks_FirstTwoFrozen:
+// after two overflows the first two chunks become frozen and don't
+// accept subsequent appends. The active chunk is chunk[2].
+func TestChain_MultipleOverflow_ThreeChunks_FirstTwoFrozen(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var sent []string
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		sent = append(sent, text)
+		return int64(930 + len(sent)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	huge := strings.Repeat("z", chainChunkThresholdChars)
+
+	// Three appends, each one big enough to overflow the previous
+	// chunk. Expect 3 chunks: [0] frozen, [1] frozen, [2] active.
+	for i := 0; i < 3; i++ {
+		if err := appendSegment(context.Background(), chain,
+			"c1", 0, 10,
+			huge,
+			nil,
+			sendFn, editFn,
+		); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	if len(chain.chunks) != 3 {
+		t.Fatalf("expected 3 chunks after three overflows; got %d", len(chain.chunks))
+	}
+	if chain.cursor != 2 {
+		t.Fatalf("cursor should point to last chunk (2); got %d", chain.cursor)
+	}
+	for i := 0; i < 2; i++ {
+		if !chain.chunks[i].isChunkFull() {
+			t.Fatalf("chunk[%d] should be frozen after subsequent overflow", i)
+		}
+	}
+	if chain.chunks[2].isChunkFull() {
+		t.Fatal("chunk[2] (active) must NOT be marked full")
+	}
+}

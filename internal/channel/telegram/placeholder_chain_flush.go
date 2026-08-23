@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/statusbar"
@@ -212,7 +211,6 @@ func flushChainNow(
 		return nil
 	}
 	cur := chain.chunks[chain.cursor]
-	fmt.Println("FLUSH active chunk header:", cur.headerText(), "nchunks:", len(chain.chunks))
 
 	// renderActiveChunkBody returns the final HTML-ready body
 	// (header as raw HTML, buf through RenderMarkdown, footer as

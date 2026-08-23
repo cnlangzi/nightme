@@ -166,6 +166,19 @@ func delegateReviewMultiJob(
 	}
 	wg.Wait()
 
+	// Finding 3 from /review: safety net for the case where
+	// some per-job RunOnce never emitted a terminal event
+	// (spawn failure before the sink was wired, error path
+	// that bypassed the sink on some bridge, ctx cancellation
+	// that orphaned the subprocess). finalize synthesizes
+	// the missing terminals so doneCount reaches expected
+	// and the aggregator's outer Result fires — otherwise the
+	// chat lifecycle hangs at "review running…" until the
+	// 30-min revCtx timeout. Idempotent.
+	if agg != nil {
+		agg.finalize()
+	}
+
 	return mergeRunResults(s.Info().Name, groups, results, errs)
 }
 
@@ -741,21 +754,6 @@ func reviewWhatToLook() string {
 `
 }
 
-// assembleGroupPrompt builds a per-group review prompt for the multi-
-// job path. Mirrors assembleReviewPrompt's structure (context → files
-// → diffs → rules → how-to → output schema) but:
-//   - filters the file list to the group's Files (the rule explicitly
-//     enumerates them — ocr's authoritative assignment, not our
-//     heuristic)
-//   - filters the diff to those files via `git diff -- <files...>`
-//     (this is the smart-bundling payoff: each job's prompt contains
-//     only the diff slice it can actually review)
-//   - uses ONLY this group's rule (Tier 2 single-group case in
-//     multi-job context)
-//
-// Returns "" only when rc.workspace is empty — same fallback signal
-// as assembleReviewPrompt, so the caller's "fall back to
-// StandardPrompt" branch fires uniformly.
 // assembleGroupPrompt builds a per-group review prompt for the
 // multi-job path. Mirrors assembleReviewPrompt's structure
 // (context → files → diffs → rules → how-to → output schema)

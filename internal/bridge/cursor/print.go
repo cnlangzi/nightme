@@ -92,15 +92,37 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 
 	if err != nil {
 		stderr := strings.TrimSpace(string(output))
+		wrapped := error(err)
 		if stderr != "" {
-			return agent.RunResult{}, fmt.Errorf("cursor run: %w (stderr: %s)", err, stderr)
+			wrapped = fmt.Errorf("cursor run: %w (stderr: %s)", err, stderr)
+		} else {
+			wrapped = fmt.Errorf("cursor run: %w", err)
 		}
-		return agent.RunResult{}, fmt.Errorf("cursor run: %w", err)
+		// Finding 1 from /review: emit EventAgentError to the
+		// sink before returning so the aggregator's doneCount
+		// reaches expected (otherwise multi-job /review hangs
+		// forever because the chat lifecycle never closes).
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: cursorDiagnostic(agent.ClassifyExit(err, false), stderr),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 
 	text := strings.TrimSpace(string(output))
 	if text == "" {
-		return agent.RunResult{}, fmt.Errorf("cursor: empty answer")
+		wrapped := fmt.Errorf("cursor: empty answer")
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: cursorDiagnostic(agent.BridgeExitCleanExit, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 
 	result := agent.RunResult{
@@ -130,6 +152,21 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	}
 
 	return result, nil
+}
+
+// cursorDiagnostic is the BridgeDiagnostic payload attached to
+// EventAgentError events emitted from the cursor print-mode
+// failure paths. Mirrors codex/codexDiagnostic + pi/piDiagnostic
+// (same shape, AgentName="cursor"). Without this, Err-only
+// events are silently dropped by the upstream translate →
+// chat renderer pair.
+func cursorDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.BridgeDiagnostic {
+	return &agent.BridgeDiagnostic{
+		ExitKind:   exitKind,
+		StderrTail: stderr,
+		AgentName:  "cursor",
+		KilledAt:   time.Now(),
+	}
 }
 
 // extractText concatenates all ContentText blocks into a single prompt.

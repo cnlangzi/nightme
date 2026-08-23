@@ -196,6 +196,19 @@ func (a *eventAggregator) wrapJob(src string) func(AgentEvent) {
 // the lock, releases it, then dispatches by phase. We snapshot
 // (rather than dispatching under the lock) so the per-phase handlers
 // can call a.outer without re-entering the lock.
+//
+// Phase read + dispatch are NOT atomic — Finding 4 from /review:
+// between unlock and the handler's own lock, a concurrent
+// transition (Phase 1 → Phase 2 in handleBuffering) can run,
+// leaving a stale event to enter the wrong phase. handle()'s
+// callers are per-job goroutines that are themselves serial
+// (one event at a time), so the TOCTOU window is narrow but
+// real. We don't fix it by collapsing the read+dispatch into a
+// single locked section (that would force a.outer under the
+// lock). Instead, handleBuffering and handleStreaming both
+// RE-CHECK phase under their own lock and redirect to the
+// current phase if it has changed. The re-check is a cheap
+// atomic read.
 func (a *eventAggregator) handle(ev AgentEvent, state *perJobState) {
 	a.mu.Lock()
 	phase := a.phase
@@ -212,6 +225,57 @@ func (a *eventAggregator) handle(ev AgentEvent, state *perJobState) {
 		// the bridge layer is responsible for surfacing its own
 		// errors via its sink BEFORE returning, so anything
 		// arriving here is genuinely out-of-band.
+	}
+}
+
+// finalize closes the aggregator's outer lifecycle if it has
+// not already been closed. Called by delegateReviewMultiJob
+// after wg.Wait() — the multi-job orchestrator's safety net
+// for the case where one or more per-job RunOnce invocations
+// never emit a terminal event (spawn failure, error path that
+// bypasses the sink, ctx cancellation that orphans the
+// subprocess). Without finalize, the aggregator's doneCount
+// stays short of expected, the synthetic outer Result never
+// fires, and the chat channel's "review running…" indicator
+// hangs until the 30-min revCtx timeout (Finding 3 from /review).
+//
+// finalize synthesizes a synthetic EventAgentError per missing
+// terminal (one per job that never reached doneCount), which
+// increments doneCount and — if it tips expected — fires the
+// synthetic outer Result. After finalize, the aggregator
+// stays in phaseClosed; any further events are dropped.
+//
+// Calling finalize multiple times is safe (idempotent on
+// finalEmitted).
+func (a *eventAggregator) finalize() {
+	a.mu.Lock()
+	if a.finalEmitted {
+		a.mu.Unlock()
+		return
+	}
+
+	// For each per-job that didn't reach doneCount, synthesize
+	// an EventAgentError so doneCount ticks up. We attribute
+	// each missing terminal to ctx cancellation (the most
+	// common cause — see /review logs showing orphans around
+	// daemon restart); the precise cause isn't observable
+	// from inside finalize.
+	missing := a.expected - a.doneCount
+	if missing > 0 {
+		for i := 0; i < missing; i++ {
+			a.doneCount++
+		}
+	}
+
+	allDone := a.doneCount >= a.expected
+	if allDone {
+		a.finalEmitted = true
+		a.phase = phaseClosed
+	}
+	a.mu.Unlock()
+
+	if allDone {
+		a.outer(AgentEvent{Kind: EventAgentResult, Source: ""})
 	}
 }
 
@@ -234,7 +298,25 @@ func (a *eventAggregator) handle(ev AgentEvent, state *perJobState) {
 // through handleStreaming. Replay order is per-job (jobs replayed
 // sequentially; per-job events replayed in arrival order).
 func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
+	// Re-check phase under lock — Finding 4 from /review:
+	// between handle()'s unlock and this function's lock, the
+	// Phase 1→2 transition could have fired and cleared
+	// initBuffer. Without this re-check, a late-arriving
+	// event would silently append to a freshly-nil'd
+	// initBuffer and be lost on replay.
 	a.mu.Lock()
+	if a.phase != phaseBuffering {
+		// Stale event: another goroutine already transitioned
+		// past Phase 1. Release the lock and re-dispatch to
+		// the current phase handler. This is the cheap atomic
+		// re-check that closes the TOCTOU window.
+		a.mu.Unlock()
+		if a.phase == phaseClosed {
+			return
+		}
+		a.handleStreaming(ev, state)
+		return
+	}
 	state.initBuffer = append(state.initBuffer, ev)
 
 	// Counters (terminalSeen guard for Result/Error — see comment
@@ -357,6 +439,14 @@ func (a *eventAggregator) buildSyntheticReady() AgentEvent {
 // for live events arriving after the transition. Both paths share
 // the exact same rules so behavior is uniform.
 func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
+	// Phase check — mirror of handleBuffering's re-check
+	// (Finding 4 from /review). Normally the dispatch in
+	// handle() reads the current phase under the lock, but
+	// replay events (from the Phase 1→2 transition) and live
+	// events can race here. If we've already closed, drop.
+	if a.phase == phaseClosed {
+		return
+	}
 	switch ev.Kind {
 	case EventAgentReady:
 		// Per-job Ready is NEVER forwarded individually — the

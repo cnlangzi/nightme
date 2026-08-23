@@ -614,7 +614,7 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// Cold-create the first chunk via send. Header carries the
 	// turn-start timestamp; body holds no entries yet (segments
 	// arrive on Out* events). v9 chains start with header-only.
-	header := placeholderInitialText(time.Now())
+	header := heartbeatText(nil)
 	result, err := a.sendTelegramMessage(ctx, chatID, topicID, userMessageID, header, nil)
 	if err != nil {
 		return err
@@ -645,15 +645,13 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	return a.state.putTopic(state)
 }
 
-// placeholderInitialText is the canonical text for a freshly
-// created per-turn placeholder. Both ensurePlaceholder
-// (handleMessage path) and ensurePlaceholderForHeartbeat
-// (lazy-create fallback) use this so the two creation paths
-// can't drift apart on format. v7: timestamp `⏱ HH:MM:SS`
-// so the user can see when the turn started.
-func placeholderInitialText(now time.Time) string {
-	return "<b>🤖 Working...</b> · ⏱ " + now.Format("15:04:05")
-}
+// placeholderInitialText was the cold-create header formatter;
+// removed 2026-08-23 in favour of heartbeatText(nil) — both
+// produce identical output (`<b>🤖 Working...</b>`) and there
+// is no point keeping two functions in sync. Cold-create
+// callers (ensurePlaceholder / ensurePlaceholderForHeartbeat
+// / appendSegment case-1 / patchChainHeader fallback) now
+// invoke heartbeatText(nil) directly.
 
 // ensurePlaceholderForHeartbeat returns the placeholder message
 // id for the current turn, creating one if missing (e.g., when
@@ -694,7 +692,7 @@ func (a *Adapter) ensurePlaceholderForHeartbeat(ctx context.Context, chatID stri
 	// Genuine "placeholder was supposed to exist but didn't" case
 	// (e.g., ensurePlaceholder failed with transient network
 	// error). Create one now.
-	initialText := placeholderInitialText(time.Now())
+	initialText := heartbeatText(nil)
 	result, err := a.sendTelegramMessage(ctx, chatID, topicID, 0, initialText, nil)
 	if err != nil {
 		return 0, err
@@ -1218,7 +1216,7 @@ func (a *Adapter) patchChainHeader(
 	if msg.Heartbeat != nil {
 		chain.chunks[chain.cursor].headerLine = heartbeatText(msg.Heartbeat)
 	} else {
-		chain.chunks[chain.cursor].headerLine = placeholderInitialText(time.Now())
+		chain.chunks[chain.cursor].headerLine = heartbeatText(nil)
 	}
 	chain.dirty = true
 	chain.mu.Unlock()

@@ -1013,8 +1013,15 @@ func TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder(t *testing.T) {
 		t.Fatalf("reply_to_message_id = %v, want 7 (user message id)", replyTo)
 	}
 	text, _ := placeholderCall.Params["text"].(string)
-	if !strings.Contains(text, "⏱ ") {
-		t.Fatalf("v7 placeholder text = %q, want to contain ⏱ HH:MM:SS timestamp", text)
+	// v9 cold-create header = heartbeatText(nil) = `<b>🤖 Working...</b>`
+	// (no timestamp; the timestamp only arrives on the next
+	// OutHeartbeat, attributed to the activity's LastBeatAt).
+	if !strings.Contains(text, "<b>🤖 Working...</b>") {
+		t.Fatalf("v9 cold-create placeholder text = %q, want to contain %q",
+			text, "<b>🤖 Working...</b>")
+	}
+	if strings.Contains(text, "⏱") {
+		t.Fatalf("v9 cold-create placeholder must not carry ⏱ timestamp; got %q", text)
 	}
 }
 

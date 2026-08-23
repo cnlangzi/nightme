@@ -1502,21 +1502,38 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 			"chat_id", rawChatID, "err", err)
 	}
 
+	// v9 P2: 🎉 anchor selection — prefer the standalone result
+	// message (set by sendOutResultMessage) over the active chunk.
+	// Picking the result message ties the "completed" visual
+	// directly to the user-facing output instead of an arbitrary
+	// later activity segment. Zero resultMessageID means no
+	// OutResult landed this turn (error-only / tool-only /
+	// slash-only turns) — fall back to the active chunk to
+	// preserve v9 P1 behaviour.
 	chain.mu.Lock()
-	cur := chain.chunks[chain.cursor]
-	var curMessageID int64
-	if cur != nil {
-		curMessageID = cur.messageID
+	var (
+		targetID int64
+		cur      *chunkBody
+	)
+	if chain.cursor >= 0 {
+		cur = chain.chunks[chain.cursor]
+	}
+	targetID = chain.resultMessageID
+	if targetID == 0 && cur != nil {
+		targetID = cur.messageID
 	}
 	chain.mu.Unlock()
 
-	if curMessageID != 0 {
-		// [reaction] on the active chunk. v6.3 single-reaction
-		// budget on USER MSG slot is preserved; this stamp lands
-		// on the placeholder, not the user's original message.
-		// [emoji] is in the official ReactionTypeEmoji whitelist
-		// ([other emoji] U+2705 was rejected by Telegram API).
-		_ = a.setMessageReactions(ctx, rawChatID, int(curMessageID),
+	if targetID != 0 {
+		// [reaction] on the result message (preferred) or active
+		// chunk (fallback). v6.3 single-reaction budget on the
+		// USER MSG slot is preserved in both branches — the stamp
+		// lands on a bot-owned message, never on the user's
+		// original message. [emoji] is in the official
+		// ReactionTypeEmoji whitelist (✅ U+2705 was rejected by
+		// Telegram API in v5 live probes; 🎉 is the stable
+		// replacement).
+		_ = a.setMessageReactions(ctx, rawChatID, int(targetID),
 			[]map[string]any{{"type": "emoji", "emoji": "\U0001F389"}})
 	}
 

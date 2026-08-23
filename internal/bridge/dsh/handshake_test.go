@@ -71,6 +71,16 @@ func (m *handshakeMock) installGlobal(t *testing.T) *host.Client {
 	return cli
 }
 
+// setRespondText toggles the prompt handler's mux-frame synthesis.
+// Empty string means "just return OK" (drainForRunResult will
+// block on events — caller is responsible for ctx timeout). When
+// non-empty, the prompt handler dispatches an assistant/message +
+// turn/end pair via the host Router so drainForRunResult sees a
+// complete turn and returns cleanly.
+func (m *handshakeMock) setRespondText(text string) {
+	m.respondText.Store(text)
+}
+
 type rpcEnvelope struct {
 	Type    string          `json:"type"`
 	RPCID   string          `json:"rpcId"`

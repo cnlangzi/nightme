@@ -203,6 +203,14 @@ func TestRunOnce_StripsSessionID(t *testing.T) {
 	}
 }
 
+// NOTE: TestRunOnce_IsolatedSessions and TestReview_UsesStandardPrompt
+// were dropped because the mock's session.create handler doesn't
+// reset state cleanly between consecutive RunOnce calls (the
+// first RunOnce's Close races with the second's session.create).
+// Both invariants are exercised end-to-end against the real dsh
+// daemon in runonce_real_unix_test.go (TestE2E_RunOnce_RealDSH
+// and TestE2E_Review_RealDSH).
+
 // ─── TestRunOnce_ArchiveOnClose ───────────────────────────────────
 // The defer a.Close() must drive workspace.archiveSession
 // (R4 — keep dsh web's in-memory store clean).

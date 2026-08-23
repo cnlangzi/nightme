@@ -84,9 +84,9 @@ func (s *Starter) Detect() error {
 //
 // Start does:
 //   1. Run the resume-or-create handshake via the shared host.RPCClient.
-//      cfg.SessionID is honored: when non-empty, RunOnce dials
+//      cfg.SessionID is honored: when non-empty, Start dials
 //      `session.fork` (strict resume; failures bubble as
-//      agent.ErrResumeUnhealthy). When empty, RunOnce creates a
+//      agent.ErrResumeUnhealthy). When empty, Start creates a
 //      fresh session.
 //   2. Subscribe to this sessionId's mux frames via host.Router.
 //   3. Emit EventAgentReady with the resolved sessionId + model.
@@ -96,10 +96,9 @@ func (s *Starter) Detect() error {
 // the dsh session's cwd (passed to session.create).
 //
 // PID is 0 in the shared-host architecture — the dsh subprocess
-// belongs to the daemon, not to this session. Phase 1.5 (lifecycle
-// wrapper) will surface the host PID via host.Client for /diagnose
-// output; for now agent.Agent displays "shared host" in lieu of a
-// per-session pid.
+// belongs to the daemon, not to this session. agent.Agent displays
+// "shared host" in lieu of a per-session pid; the host's own PID
+// is reachable via host.GetSharedHost().PID() for /diagnose.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	d, err := newDriver(ctx, s, cfg)
 	if err != nil {
@@ -214,7 +213,8 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 			case agent.EventAgentResult:
 				if ev.Result == nil {
 					return agent.RunResult{}, fmt.Errorf(
-						"agent %s: result event with nil payload", name)
+						"agent %s: result event with nil payload%s",
+						name, auditFields(sessionID, model))
 				}
 				return agent.RunResult{
 					Text:       strings.TrimSpace(ev.Result.Text),
@@ -237,7 +237,8 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					return agent.RunResult{}, fmt.Errorf("agent %s: %w", name, ev.Err)
 				}
 				return agent.RunResult{}, fmt.Errorf(
-					"agent %s: error event with nil payload", name)
+					"agent %s: error event with nil payload%s",
+					name, auditFields(sessionID, model))
 			}
 			// EventAgentText / EventAgentToolStart/End / Permission /
 			// TaskCreate/Update: not consumed here. R3 will route
@@ -253,9 +254,13 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 
 // auditFields returns the "[session_id=…] [model=…]" suffix used on
 // dsh RunOnce failure paths. Reuses the shared agent.FormatSessionID
-// + agent.FormatModel helpers so the format stays consistent across
-// bridges (see claudecode.appendAuditFields / pi.appendAuditFields /
-// acp.appendAuditFields).
+// + agent.FormatModel helpers so the format stays grep-consistent
+// with acp.appendAuditFields (same signature).
+//
+// claudecode and pi have their own signature variants (taking
+// agent.RunResult directly); dsh follows the acp shape because we
+// only need session id + model — Usage/Subtype/etc. are noise on a
+// "drain exited early" error.
 func auditFields(sessionID, model string) string {
 	return agent.FormatSessionID(sessionID) + agent.FormatModel(model)
 }

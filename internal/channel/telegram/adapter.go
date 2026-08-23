@@ -1208,26 +1208,50 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// can't mirror the trim here).
 		body := "💭 " + msg.Text
 		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, body)
+	case messages.OutResult:
+		// v9 P2: OutResult is the user-facing final output of the
+		// turn. Fold it into the chain and you lose the visual
+		// difference between "thinking" / "tool call" / "result" —
+		// the chat becomes a wall of mixed segments. Instead, send
+		// it as a STANDALONE reply-anchored message with its own
+		// StatusBar trailer. The chain keeps handling the in-turn
+		// activity (thinking / tools / reply / error / task /
+		// command), and the result message becomes the
+		// OnPromptEnded 🎉 anchor (recorded on chain.resultMessageID).
+		// Long bodies (>3900 chars) split into multiple reply-anchored
+		// pieces; only the LAST piece's messageID is recorded —
+		// "last wins" semantics so the 🎉 lands on the visual end
+		// of the result block.
+		//
+		// Empty-text silent drop already happened at the top of
+		// Send, so msg.Text is non-empty here.
+		return a.sendOutResultMessage(ctx, msg, rawChatID, topicID, replyAnchor)
 	default:
-		// OutReply / OutResult / OutCommandReply:
-		// every text-emitting kind folds onto the active chain
-		// chunk (v9 §11.12). StatusBar trailing only lands on
-		// segments produced by footer-bearing kinds (OutReply /
-		// OutResult / OutTaskCreate / OutTaskUpdate); see
-		// §11.12.6 for the in-memory footer semantics.
+		// OutReply / OutCommandReply: every remaining text-emitting
+		// kind folds onto the active chain chunk (v9 §11.12).
+		// StatusBar trailing only lands on segments produced by
+		// footer-bearing kinds (OutReply / OutTaskCreate /
+		// OutTaskUpdate); see §11.12.6 for the in-memory footer
+		// semantics. OutResult is intentionally NOT here — handled
+		// by the explicit case above.
 		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, msg.Text)
 	}
 }
 
 // appendSegmentForKind is the v9 chain ingest helper. Single
 // point of entry for every Out* kind that maps onto a chain
-// segment (OutReply / OutResult / OutThinking / OutToolStart /
-// OutToolEnd / OutError / OutTaskCreate / OutTaskUpdate). It
-// computes whether the current event is footer-bearing
+// segment (OutReply / OutThinking / OutToolStart / OutToolEnd /
+// OutError / OutTaskCreate / OutTaskUpdate / OutCommandReply).
+// It computes whether the current event is footer-bearing
 // (drives whether lastFooter is refreshed) and hands off to
 // the package-level appendSegment primitive. Always schedules
 // a debounced flush on return so the active chunk's text gets
 // back to Telegram.
+//
+// v9 P2: OutResult no longer flows through this path — it goes
+// through sendOutResultMessage and lands as a standalone reply-
+// anchored Telegram message with its own StatusBar trailer. See
+// docs/channel/telegram.md §11.12.4.1 for the full rationale.
 func (a *Adapter) appendSegmentForKind(
 	ctx context.Context,
 	msg messages.OutboundMessage,
@@ -1245,11 +1269,12 @@ func (a *Adapter) appendSegmentForKind(
 	// integration). StatusBarLines returns nil when msg fields
 	// are absent, so non-statusbar kinds (e.g. raw OutReply with
 	// no AgentName/Model/SessionID) cleanly skip the footer.
-	// All v9 text-emitting kinds — OutReply / OutResult /
-	// OutThinking / OutToolStart / OutToolEnd / OutTaskCreate /
-	// OutTaskUpdate / OutError / OutCommandReply — go through
-	// this path. OutChoice / OutMessageState / OutMessageStateRemoved
-	// don't (handled separately in their own cases).
+	// All v9 text-emitting chain kinds — OutReply / OutThinking /
+	// OutToolStart / OutToolEnd / OutTaskCreate / OutTaskUpdate /
+	// OutError / OutCommandReply — go through this path.
+	// OutResult is NOT here (handled by sendOutResultMessage).
+	// OutChoice / OutMessageState / OutMessageStateRemoved don't
+	// (handled separately in their own cases).
 	var sb []string
 	if isTextEmittingKind(msg.Kind) {
 		sb = statusbar.StatusBarLines(&msg)
@@ -1269,15 +1294,110 @@ func (a *Adapter) appendSegmentForKind(
 	return nil
 }
 
+// sendOutResultMessage emits msg.Text as a standalone reply-anchored
+// Telegram message with its own StatusBar trailer. v9 P2 entry point
+// for OutResult — see docs/channel/telegram.md §11.12.4.1.
+//
+// Behaviour:
+//   - Single sendMessage when body + trailer ≤ 3900 chars.
+//   - splitTelegramText (>= 2 pieces) when body + trailer > 3900
+//     chars. Each piece gets its own sendMessage with
+//     reply_to_message_id=userMessageID so the whole block reads as
+//     one logical reply cluster under the user's message.
+//   - Only the LAST successfully-sent piece's messageID is
+//     recorded on chain.resultMessageID — "last wins" semantics so
+//     OnPromptEnded's 🎉 lands on the visual end of the result
+//     block (matches v9 P1's "🎉 on the last-active chunk"
+//     intuition, but now bound to the result message instead of an
+//     arbitrary later activity segment).
+//   - Empty text is silently dropped at the top of Send (caller
+//     invariant); we still trim here defensively for symmetry with
+//     appendSegmentForKind.
+//
+// Failure semantics: if any split piece's sendMessage fails, the
+// pieces that already shipped stay on Telegram as orphan history
+// (same as flushChainNow's trigger-3 / splitOversizedSegmentLocked
+// partial-failure behaviour). chain.resultMessageID is NOT updated
+// in that case, so OnPromptEnded falls back to the active chunk —
+// the user still gets a 🎉 somewhere, just not on a half-shipped
+// result block.
+func (a *Adapter) sendOutResultMessage(
+	ctx context.Context,
+	msg messages.OutboundMessage,
+	rawChatID string,
+	topicID, userMessageID int,
+) error {
+	if strings.TrimSpace(msg.Text) == "" {
+		return nil
+	}
+
+	// StatusBar trailer — every text-emitting kind carries §18
+	// trailer, OutResult included. StatusBarLines returns nil when
+	// msg has no status-bearing fields, in which case we skip the
+	// trailer cleanly (matches chain appendSegmentForKind's policy).
+	var trailer string
+	if sb := statusbar.StatusBarLines(&msg); sb != nil {
+		trailer = "\n────────\n" + statusbar.RenderPanel(sb)
+	}
+	full := msg.Text + trailer
+
+	var messageIDs []int64
+	if len(full) <= maxTelegramTextLength {
+		mid, err := a.sendResultChunk(ctx, rawChatID, topicID, userMessageID, full)
+		if err != nil {
+			return err
+		}
+		messageIDs = []int64{mid}
+	} else {
+		pieces, err := splitTelegramText(full, maxTelegramTextLength)
+		if err != nil {
+			return err
+		}
+		for _, p := range pieces {
+			mid, err := a.sendResultChunk(ctx, rawChatID, topicID, userMessageID, p)
+			if err != nil {
+				return err
+			}
+			messageIDs = append(messageIDs, mid)
+		}
+	}
+
+	// Record the LAST piece's messageID as the 🎉 anchor.
+	chain := a.chains.getOrCreate(rawChatID, topicID, userMessageID)
+	chain.mu.Lock()
+	chain.resultMessageID = messageIDs[len(messageIDs)-1]
+	chain.mu.Unlock()
+	return nil
+}
+
+// sendResultChunk sends one Telegram message carrying a result piece.
+// Reply chain anchored to the user's message so the result reads as a
+// reply cluster under "hi" (DM) or the topic's user message (Forum).
+// Pure helper — does not touch chain state. The caller (sendOutResultMessage)
+// records the resulting messageID on chain.resultMessageID.
+func (a *Adapter) sendResultChunk(
+	ctx context.Context,
+	rawChatID string,
+	topicID, userMessageID int,
+	text string,
+) (int64, error) {
+	res, err := a.sendTelegramMessage(ctx, rawChatID, topicID, userMessageID, text, nil)
+	if err != nil {
+		return 0, err
+	}
+	return int64(res.MessageID), nil
+}
+
 // isTextEmittingKind reports whether msg.Kind flows through the
 // chain-rolling-log path with a StatusBar trailer (v8 §18
 // contract). Excludes OutChoice (its own InlineKeyboard card),
 // OutMessageState / OutMessageStateRemoved (reactions, no text),
-// OutInit (silent drop), and OutHeartbeat (status ticker, not
-// entry text).
+// OutInit (silent drop), OutHeartbeat (status ticker, not entry
+// text), and OutResult (v9 P2 — handled by sendOutResultMessage
+// as a standalone reply, not a chain entry).
 func isTextEmittingKind(k messages.OutboundKind) bool {
 	switch k {
-	case messages.OutReply, messages.OutResult, messages.OutThinking,
+	case messages.OutReply, messages.OutThinking,
 		messages.OutToolStart, messages.OutToolEnd,
 		messages.OutTaskCreate, messages.OutTaskUpdate,
 		messages.OutError, messages.OutCommandReply:

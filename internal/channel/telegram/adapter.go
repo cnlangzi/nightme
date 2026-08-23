@@ -1059,13 +1059,18 @@ func (a *Adapter) appendSegmentForKind(
 	}
 	chain := a.chains.getOrCreate(rawChatID, topicID)
 
-	// Footer-bearing kinds carry session context for StatusBar.
-	// Others (OutThinking / OutToolStart / OutToolEnd /
-	// OutError) leave lastFooter untouched (§11.12.6).
+	// Every text-emitting OutboundKind gets the StatusBar
+	// snapshot appended (matches v8 contract from §18 trailer
+	// integration). StatusBarLines returns nil when msg fields
+	// are absent, so non-statusbar kinds (e.g. raw OutReply with
+	// no AgentName/Model/SessionID) cleanly skip the footer.
+	// All v9 text-emitting kinds — OutReply / OutResult /
+	// OutThinking / OutToolStart / OutToolEnd / OutTaskCreate /
+	// OutTaskUpdate / OutError / OutCommandReply — go through
+	// this path. OutChoice / OutMessageState / OutMessageStateRemoved
+	// don't (handled separately in their own cases).
 	var sb []string
-	switch msg.Kind {
-	case messages.OutReply, messages.OutResult,
-		messages.OutTaskCreate, messages.OutTaskUpdate:
+	if isTextEmittingKind(msg.Kind) {
 		sb = statusbar.StatusBarLines(&msg)
 	}
 
@@ -1081,6 +1086,23 @@ func (a *Adapter) appendSegmentForKind(
 	scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
 		rawChatID, topicID, userMessageID)
 	return nil
+}
+
+// isTextEmittingKind reports whether msg.Kind flows through the
+// chain-rolling-log path with a StatusBar trailer (v8 §18
+// contract). Excludes OutChoice (its own InlineKeyboard card),
+// OutMessageState / OutMessageStateRemoved (reactions, no text),
+// OutInit (silent drop), and OutHeartbeat (status ticker, not
+// entry text).
+func isTextEmittingKind(k messages.OutboundKind) bool {
+	switch k {
+	case messages.OutReply, messages.OutResult, messages.OutThinking,
+		messages.OutToolStart, messages.OutToolEnd,
+		messages.OutTaskCreate, messages.OutTaskUpdate,
+		messages.OutError, messages.OutCommandReply:
+		return true
+	}
+	return false
 }
 
 // chainSendFn returns a closure bound to the Adapter's sendTelegramMessage
@@ -1230,6 +1252,9 @@ func (a *Adapter) patchChainHeader(
 	} else {
 		chain.chunks[chain.cursor].setHeader(heartbeatText(nil))
 	}
+	a.logger.Info("telegram: heartbeat header set",
+		"chat_id", chatID, "header", chain.chunks[chain.cursor].headerText(),
+		"cursor", chain.cursor, "nchunks", len(chain.chunks))
 	chain.dirty = true
 	chain.mu.Unlock()
 

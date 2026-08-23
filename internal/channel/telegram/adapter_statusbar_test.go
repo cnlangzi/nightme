@@ -38,16 +38,84 @@ func sendMessageText(calls []fakeCall) string {
 // lastChunkText returns the rendered text of the active chain
 // chunk. v9: with the chain rolling log, segments accumulate via
 // editMessageText on the active chunk; only the cold-start chunk
-// was sent via sendMessage. Tests that previously checked
-// sendMessageText should now use this helper — it prefers the
-// most recent editMessageText (chain buffer state) and falls
-// back to the initial sendMessage when no edits have happened.
+// was sent via sendMessage.
 //
-// This helper keeps the v8 contract for the per-Kind body-content
-// assertions (the rendered chain chunk text contains the same
-// segments + footer as the v8 bubble would have) while
-// transparently adapting to v9's editMessageText path.
-func lastChunkText(calls []fakeCall) string {
+// If no editMessageText has happened yet (test forgot to drain
+// the 250ms debounce), this helper synchronously triggers a
+// flush on the adapter's active chain so the body it returns
+// reflects the post-debounce state. Without this, tests would
+// silently return the cold-start sendMessage body which lacks
+// the StatusBar footer.
+//
+// IMPORTANT: the API calls snapshot is taken AFTER flush so the
+// newly-recorded editMessageText is visible. (An earlier version
+// snapshotted before flush and missed the debounced edit,
+// returning the stale cold-create body.)
+//
+// Tests that previously checked sendMessageText directly should
+// now use this helper — it transparently adapts to v9's
+// editMessageText path while keeping the v8 per-Kind body
+// contract (rendered chain chunk text contains the same
+// segments + footer as the v8 bubble would have).
+func lastChunkText(t *testing.T, a *Adapter, _ []fakeCall) string {
+	t.Helper()
+	// Force-flush the active chain so chain.lastFooter /
+	// chain.chunks[cursor].entries are rendered and emitted
+	// via editMessageText. This brings the rendered body up to
+	// "what the user sees in chat at the end of a turn".
+	flushActiveChunkSync(t, a)
+	// Snapshot AFTER flush so the debounced editMessageText is
+	// visible in the log.
+	return editMessageTextOrSendMessage(snapshotFromAdapter(t, a))
+}
+
+func snapshotFromAdapter(t *testing.T, a *Adapter) []fakeCall {
+	t.Helper()
+	if fake, ok := a.api.(*fakeAPI); ok {
+		return fake.snapshotCalls()
+	}
+	return nil
+}
+
+// flushActiveChunkSync drains the chain's pending debounce by
+// invoking flushChainNow on the active chunk. If the chain has
+// nothing pending (dirty=false, cursor<0), it's a no-op.
+//
+// IMPORTANT: this helper does NOT hold chain.mu while calling
+// flushChainNow — that would deadlock against the chain.mu lock
+// acquired inside flushChainNow. Snapshot dirty/cursor under the
+// lock, drop it, then call flushChainNow (which takes its own
+// lock).
+func flushActiveChunkSync(t *testing.T, a *Adapter) {
+	t.Helper()
+	if a == nil || a.chains == nil {
+		return
+	}
+	a.chains.mu.Lock()
+	type pending struct {
+		ch *placeholderChain
+	}
+	var pendings []pending
+	for _, ch := range a.chains.chains {
+		ch.mu.Lock()
+		if ch.dirty && ch.cursor >= 0 {
+			pendings = append(pendings, pending{ch: ch})
+		}
+		ch.mu.Unlock()
+	}
+	a.chains.mu.Unlock()
+
+	for _, p := range pendings {
+		if err := flushChainNow(context.Background(), p.ch, "", 0, 0,
+			a.chainEditFn(), a.chainSendFn()); err != nil && a.logger != nil {
+			a.logger.Warn("telegram: test flush failed", "err", err)
+		}
+	}
+}
+
+// editMessageTextOrSendMessage returns the most recent
+// editMessageText body, falling back to sendMessageText.
+func editMessageTextOrSendMessage(calls []fakeCall) string {
 	if text, ok := editMessageText(calls); ok {
 		return text
 	}
@@ -96,7 +164,7 @@ func TestAdapter_Send_DM_OutReply_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "Hello from agent") {
 		t.Errorf("body missing in rendered text: %q", text)
 	}
@@ -122,7 +190,6 @@ func TestAdapter_Send_DM_OutReply_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutToolStart_AppendsStatusBar(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-buffer assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
@@ -133,7 +200,7 @@ func TestAdapter_Send_DM_OutToolStart_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	// v9 (commit #3): OutToolStart now produces the feishu-style
 	// claude-code call line `● Read(...)` instead of `🔧 Read`.
 	if !strings.Contains(text, "● Read") {
@@ -145,7 +212,6 @@ func TestAdapter_Send_DM_OutToolStart_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutToolEnd_AppendsStatusBar(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-buffer assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	// Locks the ✅ prefix branch of formatTool and confirms
 	// the Send switch routes OutToolEnd through
 	// renderBodyWithStatusBar just like OutToolStart.
@@ -157,7 +223,7 @@ func TestAdapter_Send_DM_OutToolEnd_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	// v9 (commit #3): OutToolEnd now produces the feishu-style
 	// claude-code result line `⎿  📄 Read → N lines` instead of
 	// `✅ Read`. Verify the bare name (case-insensitive) for
@@ -188,7 +254,7 @@ func TestAdapter_Send_DM_OutTaskCreate_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	for _, want := range []string{"Write tests", "Refactor", "🤖: claude"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("OutTaskCreate body missing %q; got %q", want, text)
@@ -197,7 +263,6 @@ func TestAdapter_Send_DM_OutTaskCreate_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutError_NoDiagnostic_AppendsStatusBar(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-buffer assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	// Locks the Diagnostic == nil branch: StatusBar still
 	// rides along after a bare-text OutError (no <pre>stderr
 	// fragment to escape).
@@ -207,7 +272,7 @@ func TestAdapter_Send_DM_OutError_NoDiagnostic_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), richOut(messages.OutError, "boom")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "boom") {
 		t.Errorf("OutError body missing; got %q", text)
 	}
@@ -226,7 +291,7 @@ func TestAdapter_Send_DM_OutResult_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), richOut(messages.OutResult, "result body")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	for _, want := range []string{"result body", "🤖: claude", "💰:「", "📁: " + pathutil.FromSlash("code/nightme")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered text missing %q; got %q", want, text)
@@ -235,7 +300,6 @@ func TestAdapter_Send_DM_OutResult_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutThinking_AppendsStatusBar(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-buffer assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
@@ -246,7 +310,7 @@ func TestAdapter_Send_DM_OutThinking_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), richOut(messages.OutThinking, "thinking body")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "thinking body") {
 		t.Errorf("OutThinking body missing; got %q", text)
 	}
@@ -258,14 +322,14 @@ func TestAdapter_Send_DM_OutThinking_AppendsStatusBar(t *testing.T) {
 
 
 func TestAdapter_Send_DM_OutCommandReply_AppendsStatusBar(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-buffer assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
 	if err := a.Send(context.Background(), richOut(messages.OutCommandReply, "slash output")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	debug_flush(t, a, api)
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "slash output") {
 		t.Errorf("body missing; got %q", text)
 	}
@@ -275,7 +339,6 @@ func TestAdapter_Send_DM_OutCommandReply_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutError_AppendsStatusBar(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-buffer assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
@@ -284,18 +347,20 @@ func TestAdapter_Send_DM_OutError_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
-	// OutError's <pre>stderr</pre> block is built by the
-	// adapter (escapeHTML on the StderrTail) and then passed
-	// through RenderMarkdown, which escapeHTMLs the literal
-	// "<pre>" / "</pre>" tags as well (it doesn't recognise
-	// them as safe HTML). The pre-existing behaviour surfaces
-	// "&lt;pre&gt;…&lt;/pre&gt;" in the wire payload — we
-	// lock that contract here, not the prettier behaviour
-	// (which would need to bypass RenderMarkdown for OutError).
-	// StatusBar still rides along after the escaped block.
-	if !strings.Contains(text, "&lt;pre&gt;Traceback...&lt;/pre&gt;") {
-		t.Errorf("stderr <pre> block (escapeHTML'd) missing; got %q", text)
+	text := lastChunkText(t, a, api.snapshotCalls())
+	// OutError's StderrTail flows through chunkBody.appendError
+	// which wraps in ```fences```. RenderMarkdown converts
+	// ``` to <pre> automatically (no double-escape). The wire
+	// payload shows <pre>...stderr...</pre> verbatim — the
+	// prettier pre-fix behaviour. StatusBar rides along after.
+	// v9 fence→<pre> preserves the inner newline. Match the open
+	// tag and the stderr payload separately so the assertion
+	// doesn't depend on whether the newline survives the render.
+	if !strings.Contains(text, "<pre>") || !strings.Contains(text, "</pre>") {
+		t.Errorf("stderr <pre>...</pre> block missing; got %q", text)
+	}
+	if !strings.Contains(text, "Traceback") {
+		t.Errorf("stderr payload missing; got %q", text)
 	}
 	if !strings.Contains(text, "🤖: claude") {
 		t.Errorf("StatusBar missing; got %q", text)
@@ -303,7 +368,6 @@ func TestAdapter_Send_DM_OutError_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholderWithStatusBar(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-headerLine assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 777, UserMessageID: "10"})
 
@@ -325,9 +389,9 @@ func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholderWithStatusBar(t *testing
 		t.Fatalf("send heartbeat: %v", err)
 	}
 
-	text, ok := editMessageText(api.snapshotCalls())
-	if !ok {
-		t.Fatal("expected editMessageText for heartbeat")
+	text := lastChunkText(t, a, api.snapshotCalls())
+	if text == "" {
+		t.Fatal("expected editMessageText body for heartbeat")
 	}
 	for _, want := range []string{"💭 2", "🔧 1", "┌", "└", "›", "🤖: claude · opus-4-5 · sess-1"} {
 		if !strings.Contains(text, want) {
@@ -337,7 +401,6 @@ func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholderWithStatusBar(t *testing
 }
 
 func TestAdapter_Send_DM_OutReply_NoFieldsNoCache_NoTrailer(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite — chunk headerLine always carries '🤖' so the no-trailer '🤖 absence' assertion no longer holds; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
@@ -350,21 +413,23 @@ func TestAdapter_Send_DM_OutReply_NoFieldsNoCache_NoTrailer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "lonely message") {
 		t.Errorf("body missing; got %q", text)
 	}
-	// No panel border when there's no StatusBar to attach.
-	// `────────` is no longer produced by any code path (the
-	// pre-panel implementation used `---` markdown as divider
-	// and RenderMarkdown converted it to `────────`; after the
-	// chevron-tail panel, the only horizontal bars are the
-	// `─` chars inside `┌─…─›` / `└─…─›` — which never appear
-	// here because StatusBarLines returns nil).
-	for _, want := range []string{"┌", "└", "›", "🤖", "💰", "📁"} {
+	// v9 chain: chunk header is always '<b>🤖 Working...</b>'
+	// (cold-create placeholder banner). With no msg fields,
+	// StatusBarLines returns nil so the footer is absent. Verify
+	// the FOOTER is absent (chevron-tail panel chars) but the
+	// header 🤖 is still present (chunk banner is unconditional).
+	for _, want := range []string{"┌", "└", "›", "💰", "📁"} {
 		if strings.Contains(text, want) {
-			t.Errorf("no-trailer reply should not contain %q; got %q", want, text)
+			t.Errorf("no-trailer reply should not contain StatusBar panel char %q; got %q",
+				want, text)
 		}
+	}
+	if !strings.Contains(text, "🤖") {
+		t.Errorf("chunk banner 🤖 should be present (cold-create header); got %q", text)
 	}
 }
 
@@ -467,11 +532,14 @@ func TestAdapter_Send_Topic_OutReply_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutReply_OutOrderPreservesCache(t *testing.T) {
-	t.Skip("v9 chain rolling log: rewrite to chain-buf ordering assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	// Two consecutive Sends of the same turn: the first seeds
 	// the cache (rich fields), the second also carries rich
-	// fields. Both bubbles must show the StatusBar.
-	a, api := newTestAdapter(t)
+	// fields. v9 chain: both segments fold into the SAME
+	// chunk (cold-create then in-place append). After
+	// debounced flush, the chain's rendered body should
+	// contain BOTH "first" and "second" entries plus the
+	// StatusBar.
+	a, _ := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
 	for _, text := range []string{"first", "second"} {
@@ -479,19 +547,27 @@ func TestAdapter_Send_DM_OutReply_OutOrderPreservesCache(t *testing.T) {
 			t.Fatalf("send %s: %v", text, err)
 		}
 	}
-	calls := api.snapshotCalls()
-	sendCount := 0
-	for _, call := range calls {
-		if call.Method != "sendMessage" {
-			continue
-		}
-		sendCount++
-		text, _ := call.Params["text"].(string)
-		if !strings.Contains(text, "🤖: claude") {
-			t.Errorf("send #%d missing StatusBar; got %q", sendCount, text)
-		}
+
+	text := lastChunkText(t, a, nil)
+	if !strings.Contains(text, "first") {
+		t.Errorf("chunk body missing first segment; got %q", text)
 	}
-	if sendCount != 2 {
-		t.Errorf("expected 2 sendMessage calls, got %d", sendCount)
+	if !strings.Contains(text, "second") {
+		t.Errorf("chunk body missing second segment; got %q", text)
+	}
+	if !strings.Contains(text, "🤖: claude") {
+		t.Errorf("StatusBar missing from rendered chunk; got %q", text)
+	}
+}
+// debug_flush prints the full API calls log — drop in to lastChunkText
+// helper when a test fails to see what's actually being recorded.
+func debug_flush(t *testing.T, a *Adapter, api *fakeAPI) {
+	t.Helper()
+	for i, call := range api.snapshotCalls() {
+		text := ""
+		if s, ok := call.Params["text"].(string); ok {
+			text = s
+		}
+		t.Logf("call %d: method=%s text=%q", i, call.Method, text)
 	}
 }

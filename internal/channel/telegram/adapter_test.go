@@ -624,6 +624,7 @@ func TestAdapter_Send_OutHeartbeat_WithTopic(t *testing.T) {
 // text must end with `⏱ HH:MM:SS` so the user can see when
 // the agent was last alive.
 func TestAdapter_Send_OutHeartbeat_AppendsTimestamp(t *testing.T) {
+	t.Skip("v9 chain: rewrite pending; tracked in §11.12.16 backlog. v8 expected multi-send-message / per-call reaction patterns that v9 chain consolidates into single sendMessage + debounced editMessageText.")
 	t.Skip("v9 chain rolling log: rewrite to chain-headerLine assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	// Seed with both PlaceholderMessageID and UserMessageID so
@@ -862,6 +863,7 @@ func TestAdapter_Send_OutChoice_DecisionKind(t *testing.T) {
 }
 
 func TestAdapter_Send_DropsLongText(t *testing.T) {
+	t.Skip("v9 chain: rewrite pending; tracked in §11.12.16 backlog. v8 expected multi-send-message / per-call reaction patterns that v9 chain consolidates into single sendMessage + debounced editMessageText.")
 	t.Skip("v9 chain rolling log: rewrite to chain-buffer split assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	long := strings.Repeat("x", 10000)
@@ -1037,6 +1039,7 @@ func TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder(t *testing.T) {
 // ticker (handled separately by OutHeartbeat PATCH); OutXxx
 // reply chain does NOT anchor to the placeholder.
 func TestAdapter_Send_DM_RepliesToUserMessage(t *testing.T) {
+	t.Skip("v9 chain: rewrite pending; tracked in §11.12.16 backlog. v8 expected multi-send-message / per-call reaction patterns that v9 chain consolidates into single sendMessage + debounced editMessageText.")
 	t.Skip("v9 chain rolling log: rewrite to chain-buf reply_to_message_id assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	// Simulate the inbound path having recorded the user's
@@ -1095,6 +1098,7 @@ func TestAdapter_Send_DM_RepliesToUserMessage(t *testing.T) {
 // is the status ticker; reply chain still anchors to the user
 // message id (handled in TestAdapter_Send_DM_RepliesToUserMessage).
 func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder(t *testing.T) {
+	t.Skip("v9 chain: rewrite pending; tracked in §11.12.16 backlog. v8 expected multi-send-message / per-call reaction patterns that v9 chain consolidates into single sendMessage + debounced editMessageText.")
 	t.Skip("v9 chain rolling log: rewrite to chain-headerLine assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 777})
@@ -1128,6 +1132,7 @@ func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder(t *testing.T) {
 // orthogonal axes (grouping vs. context). OnPromptEnded and
 // OutHeartbeat still PATCH the per-turn placeholder.
 func TestAdapter_Send_Topic_ReplyToUserMessageToo(t *testing.T) {
+	t.Skip("v9 chain: rewrite pending; tracked in §11.12.16 backlog. v8 expected multi-send-message / per-call reaction patterns that v9 chain consolidates into single sendMessage + debounced editMessageText.")
 	t.Skip("v9 chain rolling log: rewrite to chain-buf assertions with topic thread_id; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 42, PlaceholderMessageID: 800, UserMessageID: "55"})
@@ -1195,6 +1200,7 @@ func TestAdapter_Send_Topic_ReplyToUserMessageToo(t *testing.T) {
 // parity — AddReaction + SetPromptState). NO editMessageText
 // call — placeholder keeps its last heartbeat text.
 func TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder(t *testing.T) {
+	t.Skip("v9 chain: rewrite pending; tracked in §11.12.16 backlog. v8 expected multi-send-message / per-call reaction patterns that v9 chain consolidates into single sendMessage + debounced editMessageText.")
 	t.Skip("v9 chain rolling log: rewrite to active-chunk 🎉 reaction assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 909})

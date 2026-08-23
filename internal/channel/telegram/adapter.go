@@ -1000,17 +1000,25 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
 			formatTaskList(msg.TaskList))
 	case messages.OutError:
-		text := msg.Text
-		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
-			// v9 chain renders the segment via RenderMarkdown.
-			// RenderMarkdown converts ``` fenced blocks to
-			// <pre>...</pre> automatically — so emit the
-			// StderrTail as a fenced code block instead of
-			// hand-wrapping in <pre> tags. (Pre-wrap would
-			// get re-escaped by renderChunkBody's buf path.)
-			text += "\n\n```\n" + msg.Diagnostic.StderrTail + "\n```"
+		// OutError delegates to chunkBody.appendError via the
+		// appendErrorSegment chain business API. Adapter no longer
+		// makes the ```fences``` format decision — that's chunkBody's.
+		var stderr string
+		if msg.Diagnostic != nil {
+			stderr = msg.Diagnostic.StderrTail
 		}
-		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, text)
+		chain := a.chains.getOrCreate(rawChatID, topicID)
+		if err := appendErrorSegment(ctx, chain,
+			rawChatID, topicID, replyAnchor,
+			msg.Text, stderr, statusbar.StatusBarLines(&msg),
+			a.chainSendFn(), a.chainEditFn()); err != nil {
+			return err
+		}
+		// appendErrorSegment is data-only (no debounce schedule);
+		// adapter must schedule the flush after the mutation lands.
+		scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+			rawChatID, topicID, replyAnchor)
+		return nil
 	case messages.OutInit:
 		// Silent drop — matches feishu F-44. The Init payload
 		// (session_id, model, agent name, …) is still on the

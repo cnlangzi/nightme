@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/statusbar"
@@ -14,51 +13,17 @@ import (
 // These functions operate on a *placeholderChain retrieved via
 // chainLRU.getOrCreate. They do NOT talk to the Telegram API directly
 // — that responsibility lives on the Adapter (which owns the
-// apiClient). The Adapter supplies a telegramSender so this file
-// stays pure data-structures.
+// apiClient). The Adapter supplies send / edit closures (loose fns)
+// that this file consumes; the network abstraction stays in the
+// Adapter.
 // ---------------------------------------------------------------------------
 
-// telegramSender is the network abstraction Layer 5 (sender) of
-// the v9 chain OOP layering. The chain primitives (Layer 1 view +
-// Layer 2 chain) call into this interface; the Adapter supplies
-// the concrete impl that wraps sendTelegramMessage +
-// editTelegramMessage with the rate-limiter + retry pipeline.
-//
-// Send emits a new message; Edit replaces an existing message. Both
-// accept a fresh ctx per call (no closure capture) so the debounce
-// timer — which fires 250ms+ after the original request may have
-// returned — can use a context.Background()-derived ctx instead of
-// the cancelled Request ctx.
-type telegramSender interface {
-	Send(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error)
-	Edit(ctx context.Context, chatID string, messageID int64, text string) error
-}
-
-// telegramSenderImpl is a small adapter that satisfies the
-// telegramSender interface from two loose function values. Used
-// at the chain / appendSegment call sites so the chain primitives
-// depend on the interface (not loose fns) — keeps the Layer 5
-// abstraction coherent even though the existing function
-// signatures still take loose fns for legacy reasons.
-type telegramSenderImpl struct {
-	send sendChunkFn
-	edit editChunkFn
-}
-
-func (s telegramSenderImpl) Send(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error) {
-	return s.send(ctx, chatID, topicID, replyToMessageID, text)
-}
-
-func (s telegramSenderImpl) Edit(ctx context.Context, chatID string, messageID int64, text string) error {
-	return s.edit(ctx, chatID, messageID, text)
-}
-
-// sendChunkFn / editChunkFn remain as the underlying function
-// types — the existing appendSegment / flushChainNow signatures
-// take these loose fns. New code paths (test doubles, future
-// refactors) can wrap them with telegramSenderImpl and depend
-// on the interface. Adapter.chainSendFn / chainEditFn continue
-// to satisfy this contract.
+// sendChunkFn / editChunkFn are the loose function types the chain
+// primitives consume. The Adapter wraps sendTelegramMessage /
+// editTelegramMessage + rate-limiter + retry in closures that
+// satisfy this contract. (A telegramSender interface wrapper was
+// prototyped in commit d4349c1 but reverted — loose fns are
+// adequate for the current Layer 5 surface.)
 type sendChunkFn func(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error)
 type editChunkFn func(ctx context.Context, chatID string, messageID int64, text string) error
 
@@ -124,7 +89,7 @@ func appendSegment(
 	segment string,
 	statusBarLines []string,
 	sendFn sendChunkFn,
-	editFn editChunkFn,
+	_ editChunkFn,
 ) error {
 	chain.mu.Lock()
 	defer chain.mu.Unlock()
@@ -378,65 +343,103 @@ func scheduleFlushDebounced(
 	chain.mu.Unlock()
 }
 
-// renderChunkBody is the unified chunk-body composer used by every
-// outgoing Telegram path that needs a chunk's full body. It is a
-// thin wrapper around chunkBody.Compose() that takes string
-// components instead of *chunkBody (used by tests that don't need
-// the OOP wrapper). Production code calls chunkBody.Compose()
-// directly — this wrapper stays for legacy callers and tests.
-//
-// The three inputs are routed through different pipelines so
-// each section lands in the right form for parse_mode=HTML:
-//
-//   - headerLine: pre-baked HTML (e.g. '<b>💭 N · 🔧 M</b> · ⏱
-//     HH:MM:SS' from heartbeatText). Written verbatim. If we
-//     escape it, Telegram would render the tags as literal text.
-//
-//   - buf: plain text accumulated from formatted Out* events
-//     (formatTool / formatReply / formatTaskList / etc.). Run
-//     through RenderMarkdown which escapes '<', '>', '&' and
-//     converts light markdown (headings, lists, code fences,
-//     blockquotes) to HTML.
-//
-//   - footer: statusbar.RenderPanel output is already escape-safe
-//     (no HTML chars in StatusBar lines). Written verbatim.
-//
-// When flushedRenderedLen > 0 (overflow chain), only the
-// un-emitted tail of buf is rendered.
-func renderChunkBody(headerLine, buf, footer string, flushedRenderedLen int) string {
-	var b strings.Builder
-	b.WriteString(headerLine)
-	b.WriteByte('\n')
-	if buf != "" {
-		b.WriteString("────────\n")
-		var bufSrc string
-		if flushedRenderedLen > 0 && flushedRenderedLen < len(buf) {
-			bufSrc = buf[flushedRenderedLen:]
-		} else {
-			bufSrc = buf
-		}
-		renderedBuf, err := RenderMarkdown(bufSrc)
-		if err != nil {
-			renderedBuf = escapeHTML(bufSrc)
-		}
-		b.WriteString(renderedBuf)
-		if !strings.HasSuffix(bufSrc, "\n") {
-			b.WriteByte('\n')
-		}
-	}
-	if footer != "" {
-		b.WriteByte('\n')
-		b.WriteString(footer)
-	}
-	return b.String()
-}
-
-// renderActiveChunkBody is a render-only wrapper. It does NOT
-// mutate the chunk's footer — that's the caller's job. P2 fix
-// (2026-08-23): the prior implementation called cur.setFooter()
-// inside the render function, which violated Layer 4 separation
-// (renders don't mutate the data model). flushChainNow now
-// sets the footer before calling renderActiveChunkBody.
+// renderActiveChunkBody is a render-only wrapper around
+// chunkBody.Compose(). flushChainNow sets the footer before
+// calling this — renderActiveChunkBody does NOT mutate the
+// chunk (Layer 4 separation: renders don't touch the data
+// model).
 func renderActiveChunkBody(cur *chunkBody) string {
 	return cur.Compose()
+}
+
+// appendErrorSegment is the OutError-specific path. It mirrors
+// appendSegment's cold-create / append / overflow logic but
+// delegates to chunkBody.appendError so the ```fences```
+// wrapping decision stays in the data layer (Layer 3). Adapter
+// calls this from the OutError case instead of building the
+// fence string inline.
+//
+// IMPORTANT: this function does NOT schedule the debounce
+// flush. The caller (adapter OutError case) must schedule it
+// after the call returns, so the flush runs against the
+// up-to-date chain state. (Same contract as appendSegment.)
+func appendErrorSegment(
+	ctx context.Context,
+	chain *placeholderChain,
+	chatID string,
+	topicID int,
+	userMessageID int,
+	text, stderr string,
+	statusBarLines []string,
+	sendFn sendChunkFn,
+	_ editChunkFn,
+) error {
+	chain.mu.Lock()
+	defer chain.mu.Unlock()
+
+	if statusBarLines != nil {
+		chain.lastFooter = statusBarLines
+	}
+
+	for chain.cursor >= 0 &&
+		chain.chunks[chain.cursor].isChunkFull() &&
+		chain.cursor+1 < len(chain.chunks) {
+		chain.cursor++
+	}
+
+	// Cold-create.
+	if chain.cursor < 0 {
+		headerLine := heartbeatText(nil)
+		chunk := newChunkBody(0, headerLine)
+		chunk.appendError(text, stderr)
+		if chain.lastFooter != nil {
+			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+		}
+		body := chunk.Compose()
+		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		if err != nil {
+			return err
+		}
+		chunk.messageID = messageID
+		chain.chunks = []*chunkBody{chunk}
+		chain.cursor = 0
+		chain.dirty = true
+		return nil
+	}
+
+	// Append in place.
+	cur := chain.chunks[chain.cursor]
+	if !cur.isChunkFull() && cur.bufTextSize()+estimateErrorSize(stderr) <= chainChunkThresholdChars {
+		cur.appendError(text, stderr)
+		chain.dirty = true
+		return nil
+	}
+
+	// Overflow: rotate.
+	cur.markFull()
+	inheritedHeader := cur.headerText()
+	newChunk := newChunkBody(0, inheritedHeader)
+	newChunk.appendError(text, stderr)
+	if chain.lastFooter != nil {
+		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+	}
+	body := newChunk.Compose()
+	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+	if err != nil {
+		return err
+	}
+	newChunk.messageID = messageID
+	chain.chunks = append(chain.chunks, newChunk)
+	chain.cursor = len(chain.chunks) - 1
+	chain.dirty = true
+	return nil
+}
+
+// estimateErrorSize gives a rough budget for an OutError entry:
+// plain text length plus the ```fence``` wrapping overhead. The
+// fence adds ~10 chars regardless of stderr content, so the
+// chunk.bufTextSize check stays meaningful at the threshold
+// boundary.
+func estimateErrorSize(stderr string) int {
+	return 10 + len(stderr) + 1 // ~"```\n" + stderr + "\n```" + trailing newline
 }

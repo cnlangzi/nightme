@@ -74,12 +74,6 @@ func (b *chunkBody) appendEntry(text string) {
 	b.entries = append(b.entries, chunkEntry{text: text})
 }
 
-// appendEntryHTML adds a pre-baked HTML segment. Compose writes it
-// verbatim — no RenderMarkdown pass.
-func (b *chunkBody) appendEntryHTML(text string) {
-	b.entries = append(b.entries, chunkEntry{text: text, isHTML: true})
-}
-
 // appendError composes an OutError entry. text is the user-facing
 // short error (e.g. "tool exit 1"); stderr is the optional
 // diagnostic tail. The ```fences``` wrapper is intentionally
@@ -89,9 +83,7 @@ func (b *chunkBody) appendError(text, stderr string) {
 	body := text
 	if stderr != "" {
 		// ```fences``` → RenderMarkdown → <pre>...</pre>. This is
-		// the ONLY place we know stderr is multi-line. Any caller
-		// wanting pre-baked HTML should use appendEntryHTML
-		// directly with their own wrapper.
+		// the ONLY place we know stderr is multi-line.
 		body += "\n\n```\n" + stderr + "\n```"
 	}
 	b.entries = append(b.entries, chunkEntry{text: body})

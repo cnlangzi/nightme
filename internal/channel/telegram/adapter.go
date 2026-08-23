@@ -614,7 +614,7 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// Cold-create the first chunk via send. Header carries the
 	// turn-start timestamp; body holds no entries yet (segments
 	// arrive on Out* events). v9 chains start with header-only.
-	header := placeholderInitialText(time.Now().UTC())
+	header := placeholderInitialText(time.Now())
 	result, err := a.sendTelegramMessage(ctx, chatID, topicID, userMessageID, header, nil)
 	if err != nil {
 		return err
@@ -694,7 +694,7 @@ func (a *Adapter) ensurePlaceholderForHeartbeat(ctx context.Context, chatID stri
 	// Genuine "placeholder was supposed to exist but didn't" case
 	// (e.g., ensurePlaceholder failed with transient network
 	// error). Create one now.
-	initialText := placeholderInitialText(time.Now().UTC())
+	initialText := placeholderInitialText(time.Now())
 	result, err := a.sendTelegramMessage(ctx, chatID, topicID, 0, initialText, nil)
 	if err != nil {
 		return 0, err
@@ -1200,10 +1200,10 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 // The headerLine format is fully owned by the status function:
 // heartbeatText composes the full `<b>{status} · ⏱ HH:MM:SS</b>`
 // (with LastBeatAt as the timestamp); placeholderInitialText does
-// the same shape with time.Now(). patchChainHeader just picks
-// which formatter to call and stores the result. No markup or
-// timestamp composition happens here — that's the entire point
-// of the refactor.
+// the same shape with time.Now() (local). patchChainHeader just
+// picks which formatter to call and stores the result. No markup
+// or timestamp composition happens here — that's the entire
+// point of the refactor.
 func (a *Adapter) patchChainHeader(
 	chatID string,
 	topicID int,
@@ -1218,7 +1218,7 @@ func (a *Adapter) patchChainHeader(
 	if msg.Heartbeat != nil {
 		chain.chunks[chain.cursor].headerLine = heartbeatText(msg.Heartbeat)
 	} else {
-		chain.chunks[chain.cursor].headerLine = placeholderInitialText(time.Now().UTC())
+		chain.chunks[chain.cursor].headerLine = placeholderInitialText(time.Now())
 	}
 	chain.dirty = true
 	chain.mu.Unlock()
@@ -1351,6 +1351,11 @@ func formatTaskList(taskList *agent.AgentTaskListEvent) string {
 // activity time means the user sees "agent was last thinking
 // at HH:MM:SS", which is the v8 §11.11.1 v7 contract.
 //
+// Local-time rendering (no .UTC()): the user reads the bot's
+// chat in their own timezone and expects the wall-clock they
+// see on their phone, not UTC. We normalise via .Local() so a
+// snapshot stamped as UTC internally still renders as local.
+//
 // No snapshot → return the bare "🤖 Working..." banner without
 // a timestamp (we have nothing to attribute it to).
 func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
@@ -1360,7 +1365,7 @@ func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	text := fmt.Sprintf("<b>💭 %d · 🔧 %d</b>",
 		snapshot.ThinkCount, snapshot.ToolCount)
 	if !snapshot.LastBeatAt.IsZero() {
-		text += " · ⏱ " + snapshot.LastBeatAt.UTC().Format("15:04:05")
+		text += " · ⏱ " + snapshot.LastBeatAt.Local().Format("15:04:05")
 	}
 	return text
 }

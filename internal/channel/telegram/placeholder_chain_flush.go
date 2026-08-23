@@ -111,7 +111,7 @@ func appendSegment(
 
 	// 1. Empty chain → materialise the first chunk via send.
 	if chain.cursor < 0 {
-		headerLine := placeholderInitialText(time.Now().UTC())
+		headerLine := placeholderInitialText(time.Now())
 		body := headerLine + "\n────────\n" + segment
 		if chain.lastFooter != nil {
 			body += "\n\n" + statusbar.RenderPanel(chain.lastFooter)

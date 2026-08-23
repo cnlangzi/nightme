@@ -35,7 +35,7 @@ func TestGetOrCreate_LazyHydrateFromCSFile(t *testing.T) {
 		SelectedAgent: "claude",
 		PrimaryAgent:  "claude",
 		WatchMode:     0, // default = Mention
-		ThinkMode:     0, // default = Show
+		ThinkMode:     0, // default = Hide (off by default)
 		ToolsMode:     0, // default = Hide
 	}
 	if err := csFile.Save(entry); err != nil {

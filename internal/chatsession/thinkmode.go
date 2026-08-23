@@ -1,9 +1,9 @@
 // F-think §3.1.2: per-chat thinking-content display toggle.
 //
 // ThinkMode controls whether the chat renders the agent's
-// OutThinking events as Feishu thread cards (Show, default)
-// or drops them silently at the outbound EventHandler gate
-// (Hide).
+// OutThinking events as Feishu thread cards (Show) or drops
+// them silently at the outbound EventHandler gate (Hide,
+// default — off by default; opt in with /think on).
 //
 // F-CODEX-RUNONCE-REVIEW-EVENT: the enum stays in chatsession
 // (it's chat-session state, not an outbound concept). The
@@ -26,11 +26,10 @@ package chatsession
 
 // ThinkMode controls per-chat thinking-content visibility. The
 // enum is ordered such that the zero value is the default
-// ("show" — preserve the existing F-thread-route behavior);
-// this matters because restored ChatSessions whose registry
-// entry lacks the thinkMode field (older chat_sessions.json
-// files) decode to ThinkModeShow via Go's zero-value
-// semantics.
+// ("hide" — off by default); this matters because restored
+// ChatSessions whose registry entry lacks the thinkMode field
+// (older chat_sessions.json files) decode to ThinkModeHide via
+// Go's zero-value semantics.
 //
 // Slash-command syntax:
 //
@@ -47,18 +46,18 @@ package chatsession
 type ThinkMode int
 
 const (
-	// ThinkModeShow is the default: the runtime forwards every
-	// OutThinking event to the Channel, which renders it as a
-	// markdown card in the user-message thread.
-	ThinkModeShow ThinkMode = iota
-
-	// ThinkModeHide: the runtime drops OutThinking events at
-	// the EventHandler gate (after Translate + ReplyTo
+	// ThinkModeHide is the default: the runtime drops OutThinking
+	// events at the EventHandler gate (after Translate + ReplyTo
 	// stamping, before ch.Send). Other OutboundKinds — OutReply,
 	// OutResult, OutToolStart, OutToolEnd, OutInit, OutUsage —
-	// are unaffected. State is persisted so /think off
-	// survives daemon restart.
-	ThinkModeHide
+	// are unaffected. State is persisted so a chat that opted in
+	// to Show and then to Hide survives daemon restart as Hide.
+	ThinkModeHide ThinkMode = iota
+
+	// ThinkModeShow: the runtime forwards every OutThinking event
+	// to the Channel, which renders it as a markdown card in the
+	// user-message thread. Opt in via /think on.
+	ThinkModeShow
 )
 
 // String implements fmt.Stringer for log lines + reply text.
@@ -87,6 +86,6 @@ func ParseThinkMode(s string) (ThinkMode, bool) {
 	case "off", "hide":
 		return ThinkModeHide, true
 	default:
-		return ThinkModeShow, false
+		return ThinkModeHide, false
 	}
 }

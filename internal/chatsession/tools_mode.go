@@ -13,11 +13,11 @@
 // toggle is a per-chat on/off; the rendering decision is the
 // Feishu adapter's.
 //
-// Unlike ThinkMode (F-think §3.1.2) — whose default is Show
-// to preserve the existing F-thread-route behaviour —
-// ToolsMode defaults to Hide. Rationale: tool spam is the
-// loudest part of the agent progress stream and most users do
-// not want it by default. Users who care opt in via /tools on.
+// Like ThinkMode (F-think §3.1.2), ToolsMode defaults to
+// Hide. Rationale: tool-event and thinking-content spam is
+// the loudest part of the agent progress stream and most users
+// do not want either by default. Users who care opt in via
+// /tools on (tool cards) or /think on (thinking cards).
 // Mirrors WatchMode's "default = safe / quiet" pattern
 // (default = Mention, only @).
 //

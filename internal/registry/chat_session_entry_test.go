@@ -8,7 +8,8 @@ import (
 
 // TestChatSessionEntry_ThinkModeRoundTrip ensures the field
 // survives JSON marshal / unmarshal. Critical for restart
-// semantics: /think off must persist across `nightme run` restart.
+// semantics: an opted-in /think on must persist across
+// `nightme run` restart.
 //
 // Field types are bare int on the registry side; the enum types
 // (chatsession.ThinkMode / chatsession.WatchMode) encode the same
@@ -19,7 +20,7 @@ func TestChatSessionEntry_ThinkModeRoundTrip(t *testing.T) {
 		ID:        "cs_oc_x",
 		ChatID:    "oc_x",
 		WatchMode: 1, // == chatsession.WatchModeAll
-		ThinkMode: 1, // == chatsession.ThinkModeHide
+		ThinkMode: 1, // == chatsession.ThinkModeShow (opt-in /think on)
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -30,19 +31,19 @@ func TestChatSessionEntry_ThinkModeRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.ThinkMode != 1 {
-		t.Errorf("round-trip ThinkMode = %d, want 1 (ThinkModeHide)", got.ThinkMode)
+		t.Errorf("round-trip ThinkMode = %d, want 1 (ThinkModeShow)", got.ThinkMode)
 	}
 	if got.WatchMode != 1 {
 		t.Errorf("round-trip WatchMode = %d, want 1 (WatchModeAll)", got.WatchMode)
 	}
 }
 
-// TestChatSessionEntry_MissingThinkModeDefaultsToShow mirrors the
+// TestChatSessionEntry_MissingThinkModeDefaultsToHide mirrors the
 // forward-compat invariant: older chat_sessions.json files written
 // before F-think lack the thinkMode field. Go's zero-value
-// semantics must give them 0 == chatsession.ThinkModeShow (the
-// "preserve existing behavior" default).
-func TestChatSessionEntry_MissingThinkModeDefaultsToShow(t *testing.T) {
+// semantics must give them 0 == chatsession.ThinkModeHide (the
+// current default; off by default).
+func TestChatSessionEntry_MissingThinkModeDefaultsToHide(t *testing.T) {
 	// Hand-rolled JSON without thinkMode.
 	raw := []byte(`{
 		"id": "cs_oc_x",
@@ -57,7 +58,7 @@ func TestChatSessionEntry_MissingThinkModeDefaultsToShow(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.ThinkMode != 0 {
-		t.Errorf("missing-thinkMode default = %d, want 0 (ThinkModeShow)", got.ThinkMode)
+		t.Errorf("missing-thinkMode default = %d, want 0 (ThinkModeHide)", got.ThinkMode)
 	}
 	if got.WatchMode != 1 {
 		t.Errorf("WatchMode round-trip = %d, want 1 (WatchModeAll)", got.WatchMode)
@@ -66,18 +67,18 @@ func TestChatSessionEntry_MissingThinkModeDefaultsToShow(t *testing.T) {
 
 // TestChatSessionEntry_ThinkModeOmittedFromZeroValue locks the
 // on-disk file size invariant: the zero value (chatsession.
-// ThinkModeShow default) must NOT be written to disk. The
+// ThinkModeHide default) must NOT be written to disk. The
 // `omitempty` JSON tag must skip it so old-format files (no
 // thinkMode key) and new-format files (also no thinkMode key for
 // default-mode chats) are byte-identical. This keeps the
-// "missing field == zero == ThinkModeShow" invariant robust
+// "missing field == zero == ThinkModeHide" invariant robust
 // across upgrades.
 func TestChatSessionEntry_ThinkModeOmittedFromZeroValue(t *testing.T) {
 	entry := ChatSessionEntry{
 		ID:        "cs_oc_x",
 		ChatID:    "oc_x",
 		WatchMode: 0, // == chatsession.WatchModeMention (zero, omitted)
-		ThinkMode: 0, // == chatsession.ThinkModeShow (zero, omitted)
+		ThinkMode: 0, // == chatsession.ThinkModeHide (zero, omitted)
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {

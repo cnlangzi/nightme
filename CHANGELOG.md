@@ -71,6 +71,62 @@ Terminal is unaffected. Restoring the feature on cmd.exe
 needs a Win32-native editor (`ReadConsoleInputW` +
 `SetConsoleCursorPosition`, no ANSI) — tracked as follow-up.
 
+### `/think` defaults to off (Hide) — **breaking**
+
+The default `ChatSession.ThinkMode` flips from `ThinkModeShow`
+to `ThinkModeHide` — thinking content is off by default; opt
+in with `/think on`. Mirrors `/tools` (also Hide by default;
+quiet by default).
+
+**Behaviour change**
+
+- Fresh chats: `/think` (no arg) reports "Current think mode:
+  hide" and the runtime drops `OutThinking` events at the
+  EventHandler gate. Only final answers and tool summaries reach
+  the channel.
+- Existing chats whose `chat_sessions.json` lacks a `thinkMode`
+  field (the user never toggled `/think` explicitly; `omitempty`
+  dropped the zero): decode to 0, the new Hide. Intended default
+  flip — same UX as fresh chats.
+
+**No data migration. No backward compatibility.** This is a
+breaking change: chat_sessions.json files written by a pre-flip
+build encode `/think off` as `thinkMode: 1` (the old Hide
+value). After the flip that same numeric 1 is now
+`ThinkModeShow` (opt-in /think on), so users who explicitly
+disabled thinking before the upgrade will see thinking cards
+again after their first daemon restart post-upgrade. Re-issue
+`/think off` to restore their preference. Users who want
+thinking content visible after the upgrade issue `/think on`.
+
+**Files touched**
+
+- `internal/chatsession/thinkmode.go` — `ThinkModeHide`
+  becomes the iota-0 default, `ThinkModeShow` becomes 1
+  (opt-in). `ParseThinkMode` failure path returns the new
+  zero value (`ThinkModeHide`).
+- `internal/chatsession/chatsession.go` — `New()` initialises
+  `thinkMode` to `ThinkModeHide`; field-level comment on the
+  `thinkMode` field and the `ThinkMode()` accessor doc are
+  updated to reflect the off-by-default direction.
+- `internal/chatsession/tools_mode.go` — comparison comment
+  rewritten (both modes are now Hide by default).
+- `internal/registry/chat_session_entry.go` — mapping table
+  comment updated to `0 = ThinkModeHide (off by default)` /
+  `1 = ThinkModeShow`.
+- Tests: `internal/chatsession/thinkmode_test.go`
+  (`TestChatSession_New_DefaultThinkModeIsShow` →
+  `…IsHide`, `ParseThinkMode` failure return),
+  `internal/runtime/policy_test.go` (gating tests),
+  `internal/runtime/runtime_test.go` (three Show-mode tests
+  opt in to Show explicitly), `internal/registry/chat_session_
+  entry_test.go` (round-trip + missing-field assertions),
+  `internal/chatsession/lazy_hydrate_test.go` (seed entry
+  comment).
+- Docs: `docs/SPEC.md` (default-direction note + JSON
+  example), `docs/channel/feishu-rendering.md` (default
+  table + rationale paragraph rewritten for Hide-default).
+
 ### opencode bridge: migrate from HTTP serve to ACP
 
 The `opencode` integration is migrated from the proprietary

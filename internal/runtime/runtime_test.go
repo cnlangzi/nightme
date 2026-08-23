@@ -31,6 +31,11 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
+	// Default is Hide (off by default); opt in to Show so the
+	// think gate passes OutThinking through.
+	if err := cs.SetThinkMode(chatsession.ThinkModeShow); err != nil {
+		t.Fatalf("SetThinkMode(Show): %v", err)
+	}
 	logger := slog.Default()
 
 	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, chatsession.GitStatusDeps{})
@@ -203,7 +208,10 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 		Text: "[思考] reasoning",
 	}
 
-	// Phase 1: default Show → forwarded.
+	// Phase 1: opt in to Show → forwarded.
+	if err := cs.SetThinkMode(chatsession.ThinkModeShow); err != nil {
+		t.Fatalf("SetThinkMode(Show): %v", err)
+	}
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_1"})
 	if got := countNonHeartbeat(ch.Record()); got != 1 {
 		t.Fatalf("phase1 (Show) forwarded %d events; want 1", got)
@@ -626,8 +634,13 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 		Done: &agent.AgentDoneEvent{ExitCode: 0},
 	}, UserMsgID: "om_1"})
 
-	// (c) OutThinking — must not be dropped by /tools off
-	// (ThinkMode is the orthogonal gate; default Show passes it)
+	// (c) OutThinking — must not be dropped by /tools off.
+	// ThinkMode is the orthogonal gate; opt in to Show here so
+	// OutThinking is allowed through (the default is now Hide,
+	// off by default).
+	if err := cs.SetThinkMode(chatsession.ThinkModeShow); err != nil {
+		t.Fatalf("SetThinkMode(Show): %v", err)
+	}
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventAgentText,
 		Text: "[思考] reasoning",

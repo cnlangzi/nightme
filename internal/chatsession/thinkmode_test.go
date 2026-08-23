@@ -59,21 +59,22 @@ func TestParseThinkMode_UnknownRejects(t *testing.T) {
 			t.Errorf("ParseThinkMode(%q) ok=true, want false (got mode=%v)", in, got)
 		}
 		// Even on parse failure, the returned mode is the safe
-		// default (ThinkModeShow) — the caller ignores it on
-		// ok=false, but the function should still be total.
-		if got != ThinkModeShow {
-			t.Errorf("ParseThinkMode(%q) returned %v on failure, want ThinkModeShow", in, got)
+		// default (ThinkModeHide, the off-by-default zero value)
+		// — the caller ignores it on ok=false, but the function
+		// should still be total.
+		if got != ThinkModeHide {
+			t.Errorf("ParseThinkMode(%q) returned %v on failure, want ThinkModeHide", in, got)
 		}
 	}
 }
 
-// TestChatSession_New_DefaultThinkModeIsShow locks the safe-
+// TestChatSession_New_DefaultThinkModeIsHide locks the safe-
 // default invariant on the live ChatSession struct (not just the
 // enum). A fresh ChatSession created without a registry entry
-// must report ThinkMode() == ThinkModeShow.
-func TestChatSession_New_DefaultThinkModeIsShow(t *testing.T) {
+// must report ThinkMode() == ThinkModeHide (off by default).
+func TestChatSession_New_DefaultThinkModeIsHide(t *testing.T) {
 	cs, _ := New("oc_x", "claude")
-	if got := cs.ThinkMode(); got != ThinkModeShow {
-		t.Errorf("fresh ChatSession.ThinkMode() = %v, want ThinkModeShow", got)
+	if got := cs.ThinkMode(); got != ThinkModeHide {
+		t.Errorf("fresh ChatSession.ThinkMode() = %v, want ThinkModeHide", got)
 	}
 }

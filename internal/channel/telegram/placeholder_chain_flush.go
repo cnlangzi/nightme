@@ -180,6 +180,187 @@ func appendSegment(
 	return nil
 }
 
+// appendSegmentLocked is the lock-held variant of appendSegment for
+// callers that already hold chain.mu. Used by the OutToolStart path:
+// the Adapter needs to "append + record (chunkIdx, entryIdx) in the
+// toolPending FIFO" atomically — splitting that across two lock
+// windows would let an interleaved appendSegment steal the position
+// we'd then record, leaving a Start that we can never rewrite on
+// End. Caller MUST hold chain.mu; this function does NOT take it.
+//
+// Behaviour is byte-for-byte identical to appendSegment. The only
+// differences are the missing `chain.mu.Lock(); defer Unlock()` pair
+// and the return of the (chunkIdx, entryIdx) of the just-appended
+// entry so the caller can stash it in the toolPending FIFO.
+//
+// (-1, -1) means the segment was rejected: either empty (caller
+// pre-checks; mirrors appendSegment's silent drop), oversized so the
+// SPLIT path took over and split across N chunks (no single entry
+// to record — caller falls back to fresh appendSegment on End), or
+// the underlying sendFn failed (returns (-1, -1); the caller's
+// popToolStartEntry on End will miss → fall back to fresh append).
+func appendSegmentLocked(
+	ctx context.Context,
+	chain *placeholderChain,
+	chatID string,
+	topicID int,
+	userMessageID int,
+	segment string,
+	statusBarLines []string,
+	sendFn sendChunkFn,
+) (chunkIdx, entryIdx int) {
+	if statusBarLines != nil {
+		chain.lastFooter = statusBarLines
+	}
+
+	for chain.cursor >= 0 &&
+		chain.chunks[chain.cursor].isChunkFull() &&
+		chain.cursor+1 < len(chain.chunks) {
+		chain.cursor++
+	}
+
+	// §11.12.7.2 trigger 1: oversized segment → SPLIT. Unreachable
+	// in practice for OutTool segments (args capped at 100 bytes
+	// by toolCallArgsMaxBytes), but defended here so the contract
+	// matches appendSegment exactly. The SPLIT path produces
+	// entries across multiple chunks — no single (chunkIdx, entryIdx)
+	// to record, so we return (-1, -1) and let the caller fall back
+	// to a fresh appendSegment on End.
+	if len(segment) > chainChunkThresholdChars {
+		_ = splitOversizedSegmentLocked(ctx, chain, chatID, topicID, userMessageID, segment, sendFn)
+		return -1, -1
+	}
+
+	// 1. Empty chain → materialise the first chunk via send.
+	if chain.cursor < 0 {
+		headerLine := heartbeatText(nil)
+		chunk := newChunkBody(0, headerLine)
+		chunk.appendEntry(segment)
+		if chain.lastFooter != nil {
+			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+		}
+		body := chunk.Compose()
+		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		if err != nil {
+			return -1, -1
+		}
+		chunk.messageID = messageID
+		chain.chunks = []*chunkBody{chunk}
+		chain.cursor = 0
+		chain.dirty = true
+		return 0, len(chunk.entries) - 1
+	}
+
+	// 2. Try to append on the active chunk.
+	cur := chain.chunks[chain.cursor]
+	if !cur.isChunkFull() && cur.bufTextSize()+len(segment)+1 <= chainChunkThresholdChars {
+		cur.appendEntry(segment)
+		chain.dirty = true
+		return chain.cursor, len(cur.entries) - 1
+	}
+
+	// 3. Overflow → lock current chunk and materialise a fresh one.
+	cur.markFull()
+	newChunk := newChunkBody(0, heartbeatText(nil))
+	newChunk.appendEntry(segment)
+	if chain.lastFooter != nil {
+		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+	}
+	body := newChunk.Compose()
+	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+	if err != nil {
+		return -1, -1
+	}
+	newChunk.messageID = messageID
+	chain.chunks = append(chain.chunks, newChunk)
+	chain.cursor = len(chain.chunks) - 1
+	chain.dirty = true
+	return chain.cursor, len(newChunk.entries) - 1
+}
+
+// flushChunkAt recomposes chain.chunks[idx] and PATCHes its messageID.
+// Used by the OutToolStart → OutToolEnd merge path when the rewrite
+// lands in an earlier chunk (chain.cursor has advanced past it
+// because an intervening event rotated the chain). Mirrors
+// flushChainNow's "render + editFn" core but targets a specific
+// chunk instead of the active one — flushChainNow assumes the
+// cursor's chunk is the dirty one, which isn't true after rotation.
+//
+// Footer semantics: Compose() reads chain.lastFooter (the CURRENT
+// footer snapshot) every time it renders, so flushChunkAt will
+// PATCH the historical chunk with whatever footer is current. For
+// the cross-chunk tool-merge case this means a chunk that was
+// originally sent with footer F1 may get PATCHed with F2 — i.e.
+// the user sees the older message's footer "update" to match the
+// newer chunks. This is intentional and matches flushChainNow's
+// behaviour on the active chunk (which re-renders with the current
+// footer on every heartbeat-driven flush, so users already see
+// footers tick forward). The end state — all visible chunks show
+// the same footer at the same wall time — is actually MORE
+// consistent than the pre-fix behaviour, where the earlier chunk
+// would stay frozen at F1 while the active chunk advanced to F2.
+//
+// Caller MUST hold chain.mu; this function does NOT take it. The
+// single caller (Adapter.Send's OutToolEnd path) wraps both the
+// rewrite and this flush in one chain.mu critical section.
+//
+// Edge cases:
+//   - idx out of range or chunk has no messageID yet (cold-create
+//     pending — shouldn't happen since pushToolStartEntry only fires
+//     after a successful appendSegmentLocked send, but defensive):
+//     silently no-op.
+//   - rendered body exceeds maxTelegramTextLength (rare — would
+//     require a long start+result pair to push past 4096 after
+//     markdown expansion): truncate via splitTelegramText and PATCH
+//     the head piece. We avoid the full overflow-rotate dance here
+//     because the chunk's history is already shipped to Telegram;
+//     truncating preserves the caller's invariant that "later
+//     PATCHes never delete earlier shipped content".
+func flushChunkAt(
+	ctx context.Context,
+	chain *placeholderChain,
+	idx int,
+	chatID string,
+	_ int, // topicID unused: editFn is chat-scoped
+	_ int, // userMessageID unused: editFn is chat+message-scoped, not thread-scoped
+	editFn editChunkFn,
+) error {
+	if idx < 0 || idx >= len(chain.chunks) {
+		return nil
+	}
+	target := chain.chunks[idx]
+	if target.messageID == 0 {
+		// Cold-create pending — never sent. Nothing to PATCH;
+		// the next flushChainNow will pick up the rewritten entry.
+		return nil
+	}
+
+	target.setFooter(statusbar.RenderPanel(chain.lastFooter))
+	rendered := target.Compose()
+
+	if len(rendered) <= maxTelegramTextLength {
+		return editFn(ctx, chatID, target.messageIDValue(), rendered)
+	}
+
+	// Overflow during tool-merge PATCH: splitTelegramText preserves
+	// line breaks; we PATCH the head onto the existing messageID
+	// and the original chunks[] state stays intact so a later
+	// rewrite doesn't lose information. Truncating is a soft
+	// degradation — args are capped at 100 bytes by
+	// toolCallArgsMaxBytes, so reaching this branch means the
+	// chunk's accumulated content (not the tool line itself) is
+	// the dominant share, and the user's view is no worse than
+	// what the existing flushChainNow overflow path already does.
+	pieces, err := splitTelegramText(rendered, maxTelegramTextLength)
+	if err != nil {
+		return err
+	}
+	if len(pieces) == 0 {
+		return nil
+	}
+	return editFn(ctx, chatID, target.messageIDValue(), pieces[0])
+}
+
 // splitOversizedSegmentLocked handles §11.12.7.2 trigger 1: a single
 // segment is too long to fit in one Telegram message. The split
 // happens at append time (not flush time) because flushChainNow only

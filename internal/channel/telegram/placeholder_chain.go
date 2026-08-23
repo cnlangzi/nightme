@@ -63,6 +63,35 @@ type placeholderChain struct {
 	// debounceTimer is the currently pending debounce. Resets on every
 	// new event within the window so bursts coalesce.
 	debounceTimer *time.Timer
+
+	// toolPending is the FIFO of in-flight OutToolStart events for
+	// this turn. Each entry remembers where the start body landed so
+	// the matching OutToolEnd can rewrite that chunkEntry in place
+	// (`● Tool(args)` → `● Tool(args)\n⎿  result`), keeping both lines
+	// in a single Telegram message. FIFO ordering (push back, pop
+	// front) matches feishu's tool_thread_merge.go — most agents
+	// pair Start/End in order, and parallel tool_use pops the oldest
+	// first.
+	//
+	// Scoped per-chain so LRU eviction of an unrelated turn's chain
+	// drops its toolPending along with the chain. OutToolEnd that
+	// arrives after eviction falls back to a fresh appendSegment for
+	// the result line (start, if it landed in a still-live chunk,
+	// stays as a lone `●` — visible but not silently lost).
+	toolPending []toolPendingEntry
+}
+
+// toolPendingEntry is one in-flight OutToolStart. The matching
+// OutToolEnd rewrites chunks[chunkIdx].entries[entryIdx].text from
+// the original `● Tool(args)\n` to `startBody + "\n" + resultBody\n`,
+// so the call line and the result line render as one chunkEntry —
+// one Telegram message, exactly like feishu's PATCH-merge UX but
+// staying inside the chunked chain so the StatusBar / header /
+// footer render naturally around it.
+type toolPendingEntry struct {
+	chunkIdx  int
+	entryIdx  int
+	startBody string
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +190,14 @@ func (l *chainLRU) evictOldestLocked() {
 	if ok && chain != nil {
 		chain.mu.Lock()
 		stopDebounceTimer(chain)
+		// Drop any in-flight OutToolStart bookkeeping. The chain
+		// itself is being evicted; the chunks it owns stay on
+		// Telegram as historical evidence, but no future
+		// OutToolEnd will arrive at this adapter instance with
+		// a matching chain to consume it from. Clearing the
+		// FIFO here is hygienic — defensive against a stale
+		// reference lingering in some future caller.
+		chain.clearToolPending()
 		chain.mu.Unlock()
 	}
 }
@@ -189,4 +226,53 @@ func (l *chainLRU) purge(chatID string, topicID int, userMessageID int) {
 			return
 		}
 	}
+}
+
+// --- toolPending FIFO ------------------------------------------------
+//
+// pushToolStartEntry / popToolStartEntry / clearToolPending implement
+// the OutToolStart → OutToolEnd rewrite bookkeeping. Callers MUST
+// hold chain.mu. The Adapter layer takes the lock around both the
+// appendSegmentLocked (start path) and the pop+rewrite+flush
+// sequence (end path), so no extra locking is needed here.
+
+// pushToolStartEntry records where the start body landed so the
+// matching OutToolEnd can rewrite that chunkEntry in place. The
+// FIFO order matches feishu/tool_thread_merge.go — most agents
+// pair Start/End in order, and parallel tool_use pops the oldest
+// in-flight start first.
+func (c *placeholderChain) pushToolStartEntry(chunkIdx, entryIdx int, startBody string) {
+	c.toolPending = append(c.toolPending, toolPendingEntry{
+		chunkIdx:  chunkIdx,
+		entryIdx:  entryIdx,
+		startBody: startBody,
+	})
+}
+
+// popToolStartEntry returns and removes the front in-flight start.
+// Returns (_, false) when nothing is pending — caller should fall
+// back to a fresh appendSegment for the result body.
+func (c *placeholderChain) popToolStartEntry() (toolPendingEntry, bool) {
+	if len(c.toolPending) == 0 {
+		return toolPendingEntry{}, false
+	}
+	front := c.toolPending[0]
+	// Drop the front without retaining the backing array (long
+	// turns could otherwise pin a growing slice).
+	if len(c.toolPending) == 1 {
+		c.toolPending = nil
+	} else {
+		next := make([]toolPendingEntry, len(c.toolPending)-1)
+		copy(next, c.toolPending[1:])
+		c.toolPending = next
+	}
+	return front, true
+}
+
+// clearToolPending empties the FIFO. Called on chain.reset() /
+// LRU eviction so a future OutToolEnd on a recycled chain can't
+// accidentally rewrite a stale entry. Safe under mu; no-op when
+// the FIFO is already empty.
+func (c *placeholderChain) clearToolPending() {
+	c.toolPending = nil
 }

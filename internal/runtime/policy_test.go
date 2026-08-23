@@ -43,13 +43,18 @@ func makeEnvelope(cs *chatsession.ChatSession) chatsession.AgentEventEnvelope {
 }
 
 // TestThinkModeGatePolicy_ShowPassesThrough is the positive
-// half: default ThinkMode=Show must NOT drop OutThinking.
+// half: an opted-in chat with ThinkMode=Show must NOT drop
+// OutThinking. The default is now Hide (off by default); this
+// test first opts in via SetThinkMode(ThinkModeShow).
 // Mirrors the original TestEventHandler_ThinkGate_ShowPassesThrough
 // but at the policy level.
 func TestThinkModeGatePolicy_ShowPassesThrough(t *testing.T) {
 	cs := makeAS(t)
-	if got := cs.ThinkMode(); got != chatsession.ThinkModeShow {
-		t.Fatalf("fresh ChatSession ThinkMode = %q, want ThinkModeShow (default)", got)
+	if got := cs.ThinkMode(); got != chatsession.ThinkModeHide {
+		t.Fatalf("fresh ChatSession ThinkMode = %q, want ThinkModeHide (default; off by default)", got)
+	}
+	if err := cs.SetThinkMode(chatsession.ThinkModeShow); err != nil {
+		t.Fatalf("SetThinkMode(Show): %v", err)
 	}
 	p := ThinkModeGatePolicy(cs, slog.New(slog.NewTextHandler(testDevNull{t}, nil)))
 	out := &messages.OutboundMessage{Kind: messages.OutThinking, ChatID: cs.ChatID}

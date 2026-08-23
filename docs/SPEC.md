@@ -922,7 +922,7 @@ mergeToolReply(om_xxx, "● Bash(ls)\n⎿  💻 Bash → 3 lines")
 
 **Slash command**：`/tools on` / `/tools off` / `/tools`（无参 = 显示状态）。handler 由 Gateway dispatcher 处理，跟 `/cwd` `/use` `/close` `/watch` `/think` `/new` 同一路径。接受别名：`show`/`hide`。
 
-**默认方向（vs `/think`）**：`/think` 默认 Show（保留 F-thread-route 现有 UX —— 默认让用户看到 thinking）；`/tools` 默认 Hide（quiet by default —— 工具调用是 agent progress stream 中最吵的部分，多数用户不要；opt-in 才显示）。两者方向相反但都是"safe default"的不同解读。
+**默认方向（vs `/think`）**：`/think` 默认 Hide（off by default —— quiet by default；opt-in 才显示 thinking）；`/tools` 默认 Hide（quiet by default —— 工具调用是 agent progress stream 中最吵的部分，多数用户不要；opt-in 才显示）。两者方向一致：thinking 与 tool-event 都默认关闭，看到的是干净的 final answer。
 
 **持久化**：`ChatSessionEntry.ToolsMode` 字段（默认 ToolsModeHide）。缺失字段 fallback 到默认。
 
@@ -1012,7 +1012,7 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
       "createdAt":                "...",
       "lastInteractionAt":        "...",
       "watchMode":                0,                   // 0 = WatchModeMention (默认), 1 = WatchModeAll (F-watch)
-      "thinkMode":                0,                   // 0 = ThinkModeShow (默认), 1 = ThinkModeHide (F-think)
+      "thinkMode":                0,                   // 0 = ThinkModeHide (默认, off by default), 1 = ThinkModeShow (F-think)
       "toolsMode":                0                    // 0 = ToolsModeHide (默认), 1 = ToolsModeShow (F-38)
     }
   },

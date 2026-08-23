@@ -83,9 +83,14 @@ type ChatSessionEntry struct {
 	//
 	//	WatchMode 0 = chatsession.WatchModeMention (default; safe),
 	//	          1 = chatsession.WatchModeAll.
-	//	ThinkMode 0 = chatsession.ThinkModeShow (default;
-	//	          preserve F-thread-route behaviour),
-	//	          1 = chatsession.ThinkModeHide.
+	//	ThinkMode 0 = chatsession.ThinkModeHide (default; off by
+	//	          default — opt in to see thinking with /think on),
+	//	          1 = chatsession.ThinkModeShow. Entries written
+	//	          before the F-think-flip commit lack the
+	//	          thinkModeMigrated marker and are translated on
+	//	          load (thinkMode: 1 in the old encoding = Hide →
+	//	          0 in the new encoding = Hide; ThinkModeMigrated
+	//	          is then set so the translation doesn't repeat).
 	//	ToolsMode 0 = chatsession.ToolsModeHide (default; quiet),
 	//	          1 = chatsession.ToolsModeShow.
 	//

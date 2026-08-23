@@ -2069,19 +2069,26 @@ after Translate + ReplyTo stamping and before `ch.Send`.
 | `ToolsModeHide` (default, 0) | Drop `OutToolStart` and `OutToolEnd` at the gate | `/tools off` or fresh chat |
 | `ToolsModeShow` (1) | Forward to Channel; Feishu adapter merges each pair | `/tools on` |
 
-Default direction is **opposite** of `ThinkMode`:
-- `/think` defaults to `ThinkModeShow` (preserve existing
-  F-thread-route UX — users see thinking unless they opt out).
+Default direction is **the same** as `ToolsMode` (both
+quiet by default):
+- `/think` defaults to `ThinkModeHide` (off by default — thinking
+  spam is loud; opt in with `/think on`).
 - `/tools` defaults to `ToolsModeHide` (tool spam is the loudest
   part of the agent progress stream; quiet by default; opt in to
   see tools).
 
-Both defaults are "safe" but interpret safety differently:
-- Thinking content is information-dense and rare; losing it
-  silently is bad → default Show.
-- Tool calls are noise-dense and frequent; losing them silently
-  is OK because the receipt card still carries the final answer
-  → default Hide.
+Both defaults are "safe" by hiding the noisiest parts of the
+agent stream; users opt in to whichever they want surfaced.
+The default was historically `ThinkModeShow` for `ThinkMode`
+(preserve F-thread-route UX), but that flipped to
+`ThinkModeHide` — see CHANGELOG. Rationale (post-flip):
+- Thinking + tool-call events are both high-volume, low-signal
+  during the bulk of an agent turn; surfacing them by default
+  overwhelms the user-message thread with mid-turn noise.
+- Both are recoverable: the receipt card always carries the
+  final answer, and `/think on` / `/tools on` opt each in.
+- Visual symmetry between the two toggles (both off, both opt-
+  in) is easier to teach than "off, off, but thinking on."
 
 ### 2.2 Slash command
 

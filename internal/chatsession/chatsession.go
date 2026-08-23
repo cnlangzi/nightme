@@ -174,10 +174,12 @@ type ChatSession struct {
 	watchMode WatchMode
 
 	// F-think §3.1.2: per-chat thinking-content visibility. Default
-	// ThinkModeShow (runtime forwards OutThinking to the Channel,
-	// which renders it as a lark_md card in the user-message
-	// thread); /think off switches to ThinkModeHide (runtime
-	// drops OutThinking at the EventHandler gate). Unlike
+	// ThinkModeHide (runtime drops OutThinking at the
+	// EventHandler gate — thinking is the loudest part of the
+	// agent stream and most users want it off by default);
+	// /think on switches to ThinkModeShow (runtime forwards
+	// OutThinking to the Channel, which renders it as a
+	// lark_md card in the user-message thread). Unlike
 	// WatchMode this is chat-type-independent — DMs and group
 	// chats behave identically. See docs/SPEC.md §3.1.2.
 	thinkMode ThinkMode
@@ -362,7 +364,7 @@ func New(chatID, primaryAgent string) (*ChatSession, error) {
 		primaryAgent:      primaryAgent, // historical snapshot, read-only
 		pool:              make(map[agentCwdKey]*AgentSession),
 		watchMode:         WatchModeMention, // F-watch default
-		thinkMode:         ThinkModeShow,    // F-think default
+		thinkMode:         ThinkModeHide,    // F-think default (off by default)
 		toolsMode:         ToolsModeHide,    // F-38 default (quiet by default)
 		createdAt:         time.Now(),
 		lastInteractionAt: time.Now(),
@@ -837,9 +839,9 @@ func (cs *ChatSession) WatchMode() WatchMode {
 }
 
 // ThinkMode returns the current per-chat thinking-content
-// visibility. Default value when never set is ThinkModeShow
-// (set in New when the registry has no persisted value). See
-// docs/SPEC.md §3.1.2.
+// visibility. Default value when never set is ThinkModeHide
+// (set in New when the registry has no persisted value — off
+// by default; opt in with /think on). See docs/SPEC.md §3.1.2.
 func (cs *ChatSession) ThinkMode() ThinkMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

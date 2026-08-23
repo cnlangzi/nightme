@@ -859,18 +859,23 @@ func groupFilteredDiff(rc reviewContext, g *reviewGroup, args ...string) string 
 }
 
 // mergeRunResults combines N per-job RunResults into one final
-// RunResult. The merged Text concatenates each group's review under a
-// "### Group: pattern X" header so the user (and the main agent on
-// fix-up) can tell which group produced which finding. Usage is summed
-// across jobs; a single successful job's Text is returned as-is (no
-// extra headers).
+// RunResult. Per docs/REVIEW.md §2.5.4, the merge is intentionally
+// trivial: pure natural-language concat with group headers. No
+// structural parsing, no severity sort, no path dedup, no coverage
+// aggregation. The consumer (main agent receiving this as a user
+// turn via as.SendBlocks) is an LLM — prose comprehension is enough
+// to find the right findings for "fix blockers"-style follow-ups.
+//
+// Two-step merge:
+//  1. Per-group header + the group's original review text verbatim.
+//  2. Failed groups get an inline `### Group: pattern X — failed:
+//     <err>` marker (partial failure is non-fatal per §2.5.3).
 //
 // Error semantics: if ALL jobs errored, returns the first error wrapped
 // with the agent name (matches single-job error wrapping). If SOME
-// errored, the error is logged via slog but NOT returned — partial
-// findings are still useful, and surfacing a hard error would mask the
-// surviving groups' value. This matches the §2.5.3 contract: "single
-// job failure does not block; merge marks the group as failed".
+// errored, the error is NOT returned — partial findings are still
+// useful, and surfacing a hard error would mask the surviving groups'
+// value.
 func mergeRunResults(agentName string, groups []reviewGroup, results []RunResult, errs []error) (RunResult, error) {
 	if len(results) != len(groups) || len(errs) != len(groups) {
 		return RunResult{}, fmt.Errorf("agent %s: merge shape mismatch (groups=%d, results=%d, errs=%d)",
@@ -894,38 +899,19 @@ func mergeRunResults(agentName string, groups []reviewGroup, results []RunResult
 			agentName, len(groups), firstErr)
 	}
 
-	// Successful merge: concatenate group-by-group with markers so
-	// the merged text is traceable. Failed groups get a marker noting
-	// the failure (no findings; agent-side partial work not surfaced).
-	var text strings.Builder
-	var totalUsage UsageInfo
-	anySubtype := ""
+	// Successful merge: concatenate group-by-group. Top line is a
+	// quick human-readable summary; per-group headers let the main
+	// agent reference findings by pattern in fix-up follow-ups.
+	var b strings.Builder
+	fmt.Fprintf(&b, "Reviewed %d groups.\n\n", len(groups))
 	for i, g := range groups {
 		if errs[i] != nil {
-			fmt.Fprintf(&text, "### Group: pattern %s — failed: %v\n\n", g.Pattern, errs[i])
+			fmt.Fprintf(&b, "### Group: pattern %s — failed: %v\n\n", g.Pattern, errs[i])
 			continue
 		}
-		// Use "### Group: pattern X" header so the main agent (which
-		// receives this as a user message via as.SendBlocks) can
-		// reference findings by group in fix-up follow-ups.
-		fmt.Fprintf(&text, "### Group: pattern %s — files: %s\n\n%s\n\n",
+		fmt.Fprintf(&b, "### Group: pattern %s — files: %s\n\n%s\n\n",
 			g.Pattern, strings.Join(g.Files, ", "), results[i].Text)
-		if u := results[i].Usage; u != nil {
-			totalUsage.InputTokens += u.InputTokens
-			totalUsage.OutputTokens += u.OutputTokens
-			totalUsage.CacheReadInputTokens += u.CacheReadInputTokens
-		}
-		if results[i].Subtype != "" && anySubtype == "" {
-			anySubtype = results[i].Subtype
-		}
 	}
 
-	merged := RunResult{
-		Text:    strings.TrimSpace(text.String()),
-		Subtype: anySubtype,
-	}
-	if totalUsage.InputTokens > 0 || totalUsage.OutputTokens > 0 {
-		merged.Usage = &totalUsage
-	}
-	return merged, nil
+	return RunResult{Text: strings.TrimSpace(b.String())}, nil
 }

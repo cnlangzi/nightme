@@ -8,7 +8,7 @@ import (
 
 // TestMergeRunResults_SingleSuccess: trivial case — only one group
 // succeeded; merged Text is the single job's Text wrapped in a group
-// header.
+// header + a top-line "Reviewed N groups." summary.
 func TestMergeRunResults_SingleSuccess(t *testing.T) {
 	groups := []reviewGroup{{Pattern: "**/*.go", Files: []string{"a.go"}}}
 	results := []RunResult{{Text: "go findings"}}
@@ -18,17 +18,23 @@ func TestMergeRunResults_SingleSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	// Top-line summary
+	if !strings.HasPrefix(merged.Text, "Reviewed 1 groups.") {
+		t.Errorf("merged text missing 'Reviewed 1 groups.' summary; got:\n%s", merged.Text)
+	}
+	// Per-group header
 	if !strings.Contains(merged.Text, "### Group: pattern **/*.go") {
 		t.Errorf("merged text missing group header; got:\n%s", merged.Text)
 	}
+	// Original text preserved verbatim
 	if !strings.Contains(merged.Text, "go findings") {
 		t.Errorf("merged text missing job's findings; got:\n%s", merged.Text)
 	}
 }
 
-// TestMergeRunResults_PartialFailure: 1 of 2 jobs failed; the surviving
-// job's findings still flow through; failed job shows a failure marker
-// (no error returned from mergeRunResults).
+// TestMergeRunResults_PartialFailure: 1 of 2 jobs failed; the
+// surviving job's findings still flow through; failed job shows a
+// failure marker (no error returned from mergeRunResults).
 func TestMergeRunResults_PartialFailure(t *testing.T) {
 	groups := []reviewGroup{
 		{Pattern: "**/*.go", Files: []string{"a.go"}},
@@ -77,36 +83,29 @@ func TestMergeRunResults_AllFailed(t *testing.T) {
 	}
 }
 
-// TestMergeRunResults_UsageSummed: per-job Usage is summed across
-// successful groups (failed groups contribute nothing).
-func TestMergeRunResults_UsageSummed(t *testing.T) {
+// TestMergeRunResults_UsageNotAggregated: per v12 simplification,
+// mergeRunResults does NOT aggregate Usage — each job's usage stays
+// in its own RunResult, and the merged RunResult.Usage is left nil.
+// Aggregation was removed because the consumer (main agent on the
+// /review dispatcher path) doesn't read the merged Usage — only the
+// outer synthetic Result is consumed, and it carries no Text.
+func TestMergeRunResults_UsageNotAggregated(t *testing.T) {
 	groups := []reviewGroup{
 		{Pattern: "p1", Files: []string{"a"}},
 		{Pattern: "p2", Files: []string{"b"}},
-		{Pattern: "p3", Files: []string{"c"}},
 	}
 	results := []RunResult{
 		{Text: "x", Usage: &UsageInfo{InputTokens: 100, OutputTokens: 50, CacheReadInputTokens: 10}},
 		{Text: "y", Usage: &UsageInfo{InputTokens: 200, OutputTokens: 100, CacheReadInputTokens: 20}},
-		{Text: ""}, // failed
 	}
-	errs := []error{nil, nil, errors.New("crash")}
+	errs := []error{nil, nil}
 
 	merged, err := mergeRunResults("agent-x", groups, results, errs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if merged.Usage == nil {
-		t.Fatal("expected non-nil Usage after merge")
-	}
-	if got, want := merged.Usage.InputTokens, 300; got != want {
-		t.Errorf("InputTokens = %d, want %d", got, want)
-	}
-	if got, want := merged.Usage.OutputTokens, 150; got != want {
-		t.Errorf("OutputTokens = %d, want %d", got, want)
-	}
-	if got, want := merged.Usage.CacheReadInputTokens, 30; got != want {
-		t.Errorf("CacheReadInputTokens = %d, want %d", got, want)
+	if merged.Usage != nil {
+		t.Errorf("v12: mergeRunResults should NOT aggregate Usage; got %+v", merged.Usage)
 	}
 }
 
@@ -123,5 +122,38 @@ func TestMergeRunResults_ShapeMismatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "shape mismatch") {
 		t.Errorf("error message should mention shape mismatch; got %v", err)
+	}
+}
+
+// TestMergeRunResults_NoSortNoDedupNoCoverage: explicit assertion
+// that v12 merge is purely textual concat — no severity sort, no
+// path dedup, no coverage aggregation. Each group's findings are
+// preserved verbatim.
+func TestMergeRunResults_NoSortNoDedupNoCoverage(t *testing.T) {
+	groups := []reviewGroup{
+		{Pattern: "p1", Files: []string{"a"}},
+		{Pattern: "p2", Files: []string{"b"}},
+	}
+	// Intentionally give the "wrong" order / content to verify
+	// merge doesn't re-order / parse / re-format.
+	results := []RunResult{
+		{Text: "blocker: low-severity issue from group-1"},
+		{Text: "critical: high-severity issue from group-2"},
+	}
+	errs := []error{nil, nil}
+
+	merged, err := mergeRunResults("agent-x", groups, results, errs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Order must match input order (group-1 BEFORE group-2), NOT
+	// severity-sorted.
+	g1Idx := strings.Index(merged.Text, "low-severity issue from group-1")
+	g2Idx := strings.Index(merged.Text, "high-severity issue from group-2")
+	if g1Idx == -1 || g2Idx == -1 {
+		t.Fatalf("expected both findings in merged text; got:\n%s", merged.Text)
+	}
+	if g1Idx >= g2Idx {
+		t.Errorf("expected input-order (group-1 BEFORE group-2), NOT severity-sort; merged: %s", merged.Text)
 	}
 }

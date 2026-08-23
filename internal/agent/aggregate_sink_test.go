@@ -1,14 +1,16 @@
 package agent
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 )
 
-// sinkRecorder captures every AgentEvent passed to the outer sink in
-// order. Used as the test outer sink for eventAggregator tests — the
-// aggregator's contract is "N per-job streams → 1 outer stream", and
-// recording the outer stream is the easiest way to assert that.
+// sinkRecorder captures every AgentEvent forwarded to the outer sink
+// in arrival order. The aggregator's v12 contract is "N per-job
+// streams → 1 outer stream"; recording the outer stream is the
+// easiest way to assert that.
 type sinkRecorder struct {
 	mu     sync.Mutex
 	events []AgentEvent
@@ -30,174 +32,438 @@ func (r *sinkRecorder) snapshot() []AgentEvent {
 	return out
 }
 
-// TestEventAggregator_FirstReadyForwarded pins the #1 invariant: only
-// the FIRST per-job EventAgentReady is forwarded as the outer Ready
-// (with Source reset to ""). Subsequent per-job Ready events are
-// suppressed to avoid N redundant "🤖: agent X ready" header flips in
-// the chat channel's StatusBar.
-func TestEventAggregator_FirstReadyForwarded(t *testing.T) {
+// readyEvent builds a synthetic per-job Ready event. Source is set by
+// wrapJob, not the caller.
+func readyEvent(agentName, workspace, branch string) AgentEvent {
+	return AgentEvent{
+		Kind:      EventAgentReady,
+		AgentName: agentName,
+		Workspace: workspace,
+		Branch:    branch,
+	}
+}
+
+// resultEvent builds a synthetic per-job Result event.
+func resultEvent(text string) AgentEvent {
+	return AgentEvent{
+		Kind:   EventAgentResult,
+		Result: &AgentResultEvent{Text: text},
+	}
+}
+
+// errorEvent builds a synthetic per-job Error event.
+func errorEvent(err error) AgentEvent {
+	return AgentEvent{
+		Kind: EventAgentError,
+		Err:  err,
+	}
+}
+
+// TestEventAggregator_ReadyAllWait pins invariant #11: the synthetic
+// outer Ready fires only when ALL per-job Readys are observed. Until
+// then, the outer sink sees ZERO events.
+func TestEventAggregator_ReadyAllWait(t *testing.T) {
 	rec := &sinkRecorder{}
 	agg := newEventAggregator(rec.sink(), 3)
 
-	// Job 1: up-front Ready — this is the one that becomes the outer
-	// Ready. Source is reset to "".
-	agg.wrapJob("group-1")(AgentEvent{
-		Kind:      EventAgentReady,
-		AgentName: "agent-x",
-		Workspace: "/repo",
-	})
+	jobs := []func(AgentEvent){
+		agg.wrapJob("group-1"),
+		agg.wrapJob("group-2"),
+		agg.wrapJob("group-3"),
+	}
+	// Emit Readys in non-monotonic order to make sure the gate
+	// doesn't rely on arrival order.
+	jobs[1](readyEvent("a", "/repo", "main"))
+	jobs[0](readyEvent("a", "/repo", "main"))
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Errorf("after 2 of 3 Readys expected 0 outer events; got %d: %+v", len(got), got)
+	}
+	jobs[2](readyEvent("a", "/repo", "main"))
 
 	got := rec.snapshot()
 	if len(got) != 1 {
-		t.Fatalf("after first Ready expected 1 outer event, got %d: %+v", len(got), got)
+		t.Fatalf("after all 3 Readys expected exactly 1 outer Ready; got %d: %+v", len(got), got)
 	}
 	if got[0].Kind != EventAgentReady {
 		t.Errorf("event[0].Kind = %v, want EventAgentReady", got[0].Kind)
 	}
 	if got[0].Source != "" {
-		t.Errorf("event[0].Source = %q, want \"\" (Ready must reset Source to outer)", got[0].Source)
-	}
-	if got[0].AgentName != "agent-x" {
-		t.Errorf("event[0].AgentName = %q, want %q (forwarded from first job)", got[0].AgentName, "agent-x")
+		t.Errorf("synthetic outer Ready must have Source=\"\"; got %q", got[0].Source)
 	}
 }
 
-// TestEventAggregator_SubsequentReadyDropped: jobs 2/3/4's Ready are
-// dropped (the first Ready already signaled outer readiness).
-func TestEventAggregator_SubsequentReadyDropped(t *testing.T) {
-	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 4)
-
-	for i := 1; i <= 4; i++ {
-		agg.wrapJob("group-N")(AgentEvent{
-			Kind:      EventAgentReady,
-			AgentName: "x",
-		})
-	}
-
-	got := rec.snapshot()
-	if len(got) != 1 {
-		t.Errorf("expected exactly 1 outer Ready (first only), got %d", len(got))
-	}
-}
-
-// TestEventAggregator_IntermediateDropped pins the #2 invariant: per-
-// job intermediate events (Text / ToolStart / ToolEnd / Permission /
-// Task*) are dropped at the aggregator. The chat channel only sees
-// lifecycle markers; shipping N interleaved intermediate streams
-// would clutter the chat.
-//
-// Scenario: 1 of 2 expected jobs reaches its terminal. We expect the
-// outer sink to see ONLY the first Ready (1 event). The intermediate
-// Text/ToolStart/ToolEnd events are dropped, AND the per-job Result
-// is also dropped at the aggregator level (it counts toward done but
-// doesn't get forwarded — done < expected so no synthetic yet).
-func TestEventAggregator_IntermediateDropped(t *testing.T) {
+// TestEventAggregator_StreamAfterReady pin the buffering contract:
+// events arriving BEFORE all-Ready are NOT forwarded immediately;
+// they surface only after the synthetic outer Ready fires (via the
+// Phase 1→2 replay path).
+func TestEventAggregator_StreamAfterReady(t *testing.T) {
 	rec := &sinkRecorder{}
 	agg := newEventAggregator(rec.sink(), 2)
 
-	// Per-job: Ready → Text → ToolStart → ToolEnd → Result.
-	// expected=2, only job1 reaches terminal → no synthetic yet.
-	job1 := agg.wrapJob("group-1")
-	job1(AgentEvent{Kind: EventAgentReady})
-	job1(AgentEvent{Kind: EventAgentText, Text: "thinking..."})
-	job1(AgentEvent{Kind: EventAgentToolStart, ToolStart: &AgentToolStartEvent{Name: "grep"}})
-	job1(AgentEvent{Kind: EventAgentToolEnd, ToolEnd: &AgentToolEndEvent{Name: "grep"}})
-	job1(AgentEvent{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "findings"}})
+	j1 := agg.wrapJob("group-1")
+	j2 := agg.wrapJob("group-2")
 
+	// Phase 1: emit Ready + Text from job-1, then Ready from job-2.
+	j1(readyEvent("a", "/r", "main"))
+	j1(AgentEvent{Kind: EventAgentText, Text: "thinking in group-1"})
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Errorf("Phase 1 must not forward events; got %d: %+v", len(got), got)
+	}
+	j2(readyEvent("a", "/r", "main"))
+
+	// After all-Ready: synthetic Ready first, then the buffered Text.
 	got := rec.snapshot()
-	if len(got) != 1 {
-		t.Fatalf("expected exactly 1 outer event (Ready only — intermediate dropped, no synthetic yet), got %d: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 outer events (1 synthetic Ready + 1 replayed Text); got %d: %+v", len(got), got)
 	}
 	if got[0].Kind != EventAgentReady {
 		t.Errorf("event[0].Kind = %v, want EventAgentReady", got[0].Kind)
 	}
+	if got[0].Source != "" {
+		t.Errorf("event[0].Source = %q, want \"\"", got[0].Source)
+	}
+	if got[1].Kind != EventAgentText {
+		t.Errorf("event[1].Kind = %v, want EventAgentText", got[1].Kind)
+	}
+	if got[1].Source != "group-1" {
+		t.Errorf("event[1].Source = %q, want \"group-1\"", got[1].Source)
+	}
+	if got[1].Text != "thinking in group-1" {
+		t.Errorf("event[1].Text = %q, want %q", got[1].Text, "thinking in group-1")
+	}
 }
 
-// TestEventAggregator_TerminalIncrementsDone: each per-job terminal
-// increments the done counter; the synthetic outer Result fires only
-// when done == expected.
-func TestEventAggregator_TerminalIncrementsDone(t *testing.T) {
+// TestEventAggregator_ToolPairForwardedTogether pins invariant #12:
+// in Phase 2 (live streaming), per-job ToolStart is held until the
+// matching ToolEnd arrives; both events then forward contiguously in
+// (Start, End) order on the wire. Intermediate Text events arriving
+// BETWEEN Start and End are forwarded in arrival order — the pair is
+// the only thing that gets reordered (Start held until End).
+func TestEventAggregator_ToolPairForwardedTogether(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 1)
+
+	// Drive the gate first (1 expected).
+	j1 := agg.wrapJob("group-1")
+	j1(readyEvent("a", "/r", "main"))
+
+	// Now Phase 2. Emit: ToolStart (buffered), Text (forwarded
+	// immediately), ToolEnd (pairs with buffered Start → forward
+	// Start, End together).
+	j1(AgentEvent{
+		Kind: EventAgentToolStart,
+		ToolStart: &AgentToolStartEvent{
+			ID:   "t1",
+			Name: "Read",
+		},
+	})
+	j1(AgentEvent{Kind: EventAgentText, Text: "in-between thought"})
+	j1(AgentEvent{
+		Kind: EventAgentToolEnd,
+		ToolEnd: &AgentToolEndEvent{
+			ID:   "t1",
+			Name: "Read",
+		},
+	})
+
+	got := rec.snapshot()
+	// Expected order: synthetic Ready, Text (forwarded when it
+	// arrived), then ToolStart+ToolEnd (paired when End arrived).
+	if len(got) != 4 {
+		t.Fatalf("expected 4 outer events (Ready, Text, ToolStart, ToolEnd); got %d: %+v", len(got), got)
+	}
+	if got[0].Kind != EventAgentReady || got[0].Source != "" {
+		t.Errorf("event[0] = %+v, want synthetic outer Ready", got[0])
+	}
+	if got[1].Kind != EventAgentText || got[1].Text != "in-between thought" {
+		t.Errorf("event[1] = %+v, want EventAgentText 'in-between thought' (forwarded between Start and End)", got[1])
+	}
+	if got[2].Kind != EventAgentToolStart || got[2].ToolStart.ID != "t1" {
+		t.Errorf("event[2] = %+v, want EventAgentToolStart ID=t1", got[2])
+	}
+	if got[3].Kind != EventAgentToolEnd || got[3].ToolEnd.ID != "t1" {
+		t.Errorf("event[3] = %+v, want EventAgentToolEnd ID=t1", got[3])
+	}
+	// Critical: Start and End must be contiguous (events 2 and 3).
+	if got[2].Kind != EventAgentToolStart || got[3].Kind != EventAgentToolEnd {
+		t.Errorf("ToolStart/ToolEnd pair not contiguous: events[2]=%v, events[3]=%v", got[2].Kind, got[3].Kind)
+	}
+}
+
+// TestEventAggregator_ToolPairFromReplay pins the replay consistency
+// rule: a ToolStart/ToolEnd pair BUFFERED in Phase 1 must come out
+// paired during replay (Start → End contiguous). Requires expected=2
+// so the first per-job Ready doesn't immediately trigger the
+// transition.
+func TestEventAggregator_ToolPairFromReplay(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 2)
+
+	j1 := agg.wrapJob("group-1")
+	j2 := agg.wrapJob("group-2")
+	// job-1 emits Ready + tool pair during Phase 1 (only 1 of 2
+	// Readys — still buffering).
+	j1(readyEvent("a", "/r", "main"))
+	j1(AgentEvent{
+		Kind:      EventAgentToolStart,
+		ToolStart: &AgentToolStartEvent{ID: "t1", Name: "Read"},
+	})
+	j1(AgentEvent{
+		Kind:    EventAgentToolEnd,
+		ToolEnd: &AgentToolEndEvent{ID: "t1", Name: "Read"},
+	})
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("Phase 1 (only 1 of 2 Readys) must not forward; got %d events", len(got))
+	}
+	// job-2's Ready triggers transition + replay.
+	j2(readyEvent("a", "/r", "main"))
+
+	got := rec.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 outer events (synthetic Ready + paired Start/End); got %d: %+v", len(got), got)
+	}
+	if got[0].Kind != EventAgentReady || got[0].Source != "" {
+		t.Errorf("event[0] = %+v, want synthetic outer Ready", got[0])
+	}
+	if got[1].Kind != EventAgentToolStart || got[1].ToolStart.ID != "t1" {
+		t.Errorf("event[1] = %+v, want ToolStart ID=t1 (replayed)", got[1])
+	}
+	if got[2].Kind != EventAgentToolEnd || got[2].ToolEnd.ID != "t1" {
+		t.Errorf("event[2] = %+v, want ToolEnd ID=t1 (replayed)", got[2])
+	}
+}
+
+// TestEventAggregator_OrphanEndForwarded: a ToolEnd arriving without
+// a matching buffered ToolStart (e.g. bridge emitted End first, or
+// the Start was dropped earlier for some reason) is forwarded as a
+// single orphan event. Defensive — well-behaved bridges won't do
+// this, but the chat renderer should not crash on it.
+func TestEventAggregator_OrphanEndForwarded(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 1)
+
+	j1 := agg.wrapJob("group-1")
+	j1(readyEvent("a", "/r", "main"))
+	j1(AgentEvent{
+		Kind:    EventAgentToolEnd,
+		ToolEnd: &AgentToolEndEvent{ID: "never-matched", Name: "Bash"},
+	})
+
+	got := rec.snapshot()
+	// Expected: synthetic Ready + orphan ToolEnd (no Start preceded).
+	endCount := 0
+	for _, ev := range got {
+		if ev.Kind == EventAgentToolEnd {
+			endCount++
+		}
+	}
+	if endCount != 1 {
+		t.Errorf("expected 1 ToolEnd in outer events; got %d. events: %+v", endCount, got)
+	}
+}
+
+// TestEventAggregator_DoneAllWait pins the symmetric #11 invariant
+// for the terminal: the synthetic outer Result fires only when ALL
+// per-job terminals are observed. Per-job terminals are NOT
+// individually forwarded.
+func TestEventAggregator_DoneAllWait(t *testing.T) {
 	rec := &sinkRecorder{}
 	agg := newEventAggregator(rec.sink(), 3)
 
 	jobs := []func(AgentEvent){
-		agg.wrapJob("g-1"),
-		agg.wrapJob("g-2"),
-		agg.wrapJob("g-3"),
+		agg.wrapJob("group-1"),
+		agg.wrapJob("group-2"),
+		agg.wrapJob("group-3"),
 	}
-	// 3 Ready → 1 outer Ready (rest dropped).
+	// Drive all-Ready first.
 	for _, j := range jobs {
-		j(AgentEvent{Kind: EventAgentReady})
-	}
-	// 1 terminal of 3 → no synthetic yet.
-	jobs[0](AgentEvent{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "ok"}})
-
-	if got := rec.snapshot(); len(got) != 1 {
-		t.Fatalf("after 1 terminal of 3 expected no synthetic Result yet; got %d events: %+v", len(got), got)
+		j(readyEvent("a", "/r", "main"))
 	}
 
-	// 2nd terminal → still no synthetic.
-	jobs[1](AgentEvent{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "ok"}})
+	// Emit Result/Error out of order.
+	jobs[2](resultEvent("findings from group-3"))
+	jobs[0](errorEvent(errors.New("group-1 crashed")))
 
-	if got := rec.snapshot(); len(got) != 1 {
-		t.Fatalf("after 2 terminals of 3 still no synthetic; got %d events: %+v", len(got), got)
-	}
-
-	// 3rd terminal → synthetic outer Result fires.
-	jobs[2](AgentEvent{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "ok"}})
-
+	// Only 2 of 3 done; no synthetic Result yet.
 	got := rec.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("after 3rd terminal expected synthetic outer Result; got %d events: %+v", len(got), got)
+	resultCount := 0
+	for _, ev := range got {
+		if ev.Kind == EventAgentResult {
+			resultCount++
+		}
 	}
-	if got[1].Kind != EventAgentResult {
-		t.Errorf("event[1].Kind = %v, want EventAgentResult (synthetic outer)", got[1].Kind)
+	if resultCount != 0 {
+		t.Errorf("after 2 of 3 terminals expected 0 Result events; got %d. events: %+v", resultCount, got)
 	}
-	if got[1].Source != "" {
-		t.Errorf("event[1].Source = %q, want \"\" (synthetic outer marker)", got[1].Source)
+
+	jobs[1](resultEvent("findings from group-2"))
+
+	got = rec.snapshot()
+	resultCount = 0
+	var synthetic AgentEvent
+	for _, ev := range got {
+		if ev.Kind == EventAgentResult {
+			resultCount++
+			synthetic = ev
+		}
+	}
+	if resultCount != 1 {
+		t.Errorf("after all 3 terminals expected exactly 1 outer Result; got %d. events: %+v", resultCount, got)
+	}
+	if synthetic.Source != "" {
+		t.Errorf("synthetic outer Result must have Source=\"\"; got %q", synthetic.Source)
 	}
 }
 
-// TestEventAggregator_ErrorTerminalCounts: EventAgentError also
-// counts as terminal (per-job crash should not strand the outer
-// lifecycle).
-func TestEventAggregator_ErrorTerminalCounts(t *testing.T) {
+// TestEventAggregator_TaskListMerge pins invariant #13: per-job
+// TaskCreate/Update events with overlapping IDs are merged into ONE
+// snapshot (latest-wins) regardless of which job emitted them.
+func TestEventAggregator_TaskListMerge(t *testing.T) {
 	rec := &sinkRecorder{}
 	agg := newEventAggregator(rec.sink(), 2)
 
-	j1 := agg.wrapJob("g-1")
-	j2 := agg.wrapJob("g-2")
-	j1(AgentEvent{Kind: EventAgentReady})
-	j2(AgentEvent{Kind: EventAgentReady})
-	j1(AgentEvent{Kind: EventAgentError, Err: errSentinel("job-1 crashed")})
+	j1 := agg.wrapJob("group-1")
+	j2 := agg.wrapJob("group-2")
+	// Drive gate.
+	j1(readyEvent("a", "/r", "main"))
+	j2(readyEvent("a", "/r", "main"))
 
-	if got := rec.snapshot(); len(got) != 1 {
-		t.Fatalf("after 1 terminal of 2 (Error counts) no synthetic; got %d: %+v", len(got), got)
-	}
+	// Now streaming. Each job emits its own TaskCreate with
+	// overlapping + unique IDs.
+	j1(AgentEvent{
+		Kind: EventAgentTaskCreate,
+		TaskList: &AgentTaskListEvent{
+			Items: []AgentTaskItem{
+				{ID: "1", Subject: "group-1 task A", Status: TaskPending},
+				{ID: "3", Subject: "shared task", Status: TaskPending},
+			},
+		},
+	})
+	j2(AgentEvent{
+		Kind: EventAgentTaskUpdate,
+		TaskList: &AgentTaskListEvent{
+			Items: []AgentTaskItem{
+				{ID: "2", Subject: "group-2 task", Status: TaskInProgress},
+				{ID: "3", Subject: "shared task (updated by group-2)", Status: TaskCompleted},
+			},
+		},
+	})
 
-	j2(AgentEvent{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "ok"}})
+	// Each Task* event is forwarded as a merged snapshot; the
+	// final outer state should have 3 unique IDs, with "3" carrying
+	// the latest (group-2's update).
 	got := rec.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("after 2nd terminal expected synthetic; got %d events", len(got))
+	var last AgentEvent
+	for _, ev := range got {
+		if ev.Kind == EventAgentTaskUpdate || ev.Kind == EventAgentTaskCreate {
+			last = ev
+		}
 	}
-	if got[1].Kind != EventAgentResult {
-		t.Errorf("synthetic outer Kind = %v, want EventAgentResult", got[1].Kind)
+	if last.TaskList == nil {
+		t.Fatalf("expected at least one TaskCreate/Update in outer stream; got %+v", got)
+	}
+	gotIDs := map[string]AgentTaskItem{}
+	for _, it := range last.TaskList.Items {
+		gotIDs[it.ID] = it
+	}
+	if len(gotIDs) != 3 {
+		t.Errorf("expected 3 unique task IDs after merge; got %d. items: %+v", len(gotIDs), last.TaskList.Items)
+	}
+	if gotIDs["3"].Subject != "shared task (updated by group-2)" {
+		t.Errorf("task ID=3 should reflect latest write (group-2 update); got %+v", gotIDs["3"])
 	}
 }
 
-// errSentinel is a minimal sentinel-error helper for tests.
-type errSentinel string
+// TestEventAggregator_OutOfOrderReadyAndDone: a fast job reports
+// Result BEFORE all jobs have reached Ready. The aggregator must NOT
+// fire the synthetic outer Result early — it waits for the Ready
+// gate (REVIEW.md §2.5.5异序到达容错).
+func TestEventAggregator_OutOfOrderReadyAndDone(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 3)
 
-func (e errSentinel) Error() string { return string(e) }
+	j1 := agg.wrapJob("group-1")
+	j2 := agg.wrapJob("group-2")
+	j3 := agg.wrapJob("group-3")
+
+	// job-1 reports Ready + Result super-fast (before j2/j3 Ready).
+	j1(readyEvent("a", "/r", "main"))
+	j1(resultEvent("early group-1 findings"))
+
+	// j2 + j3 not Ready yet — outer should see ZERO events.
+	got := rec.snapshot()
+	if len(got) != 0 {
+		t.Errorf("Phase 1 (only 1 of 3 Readys) must not forward; got %d: %+v", len(got), got)
+	}
+
+	// Now j2 + j3 Ready → transition fires.
+	j2(readyEvent("a", "/r", "main"))
+	j3(readyEvent("a", "/r", "main"))
+
+	// Expect: synthetic outer Ready + replay of j1's buffered
+	// Result (which increments doneCount to 1 of 3 — NOT yet
+	// triggering synthetic outer Result).
+	got = rec.snapshot()
+	resultCount := 0
+	for _, ev := range got {
+		if ev.Kind == EventAgentResult {
+			resultCount++
+		}
+	}
+	if resultCount != 0 {
+		t.Errorf("after replay with 1 of 3 Done, expected 0 Result events; got %d. events: %+v", resultCount, got)
+	}
+
+	// Now j2 + j3 Result → doneCount == expected → synthetic outer
+	// Result fires.
+	j2(resultEvent("group-2 findings"))
+	j3(resultEvent("group-3 findings"))
+
+	got = rec.snapshot()
+	resultCount = 0
+	for _, ev := range got {
+		if ev.Kind == EventAgentResult {
+			resultCount++
+		}
+	}
+	if resultCount != 1 {
+		t.Errorf("after all terminals, expected exactly 1 outer Result; got %d. events: %+v", resultCount, got)
+	}
+}
+
+// TestEventAggregator_LateEventsDropped: events arriving after
+// phaseClosed are silently dropped. The chat has already received
+// the synthetic outer Result; further events are out-of-band.
+func TestEventAggregator_LateEventsDropped(t *testing.T) {
+	rec := &sinkRecorder{}
+	agg := newEventAggregator(rec.sink(), 1)
+
+	j1 := agg.wrapJob("group-1")
+	j1(readyEvent("a", "/r", "main"))
+	j1(resultEvent("done"))
+
+	// After Ready + Result, we're in phaseClosed.
+	got := rec.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 events (Ready + Result); got %d", len(got))
+	}
+
+	// Late event.
+	j1(AgentEvent{Kind: EventAgentText, Text: "this should be dropped"})
+
+	got = rec.snapshot()
+	if len(got) != 2 {
+		t.Errorf("late event should be dropped; outer event count = %d", len(got))
+	}
+}
 
 // TestEventAggregator_ConcurrentEmissions: N goroutines pump events
-// concurrently. Verifies that the aggregator's internal mutex is
-// sufficient — no panics, no lost updates, exactly one outer Ready +
-// one synthetic outer Result at the end.
+// concurrently. Verifies that the aggregator's mutex is sufficient —
+// no panics, no lost updates, exactly one synthetic outer Ready +
+// exactly one synthetic outer Result, regardless of interleaving.
 func TestEventAggregator_ConcurrentEmissions(t *testing.T) {
 	rec := &sinkRecorder{}
-	const N = 8
+	const N = 6
 	agg := newEventAggregator(rec.sink(), N)
 
 	var wg sync.WaitGroup
@@ -205,43 +471,61 @@ func TestEventAggregator_ConcurrentEmissions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sink := agg.wrapJob("g")
-			sink(AgentEvent{Kind: EventAgentReady})
-			// Some interleaved intermediate events (must be dropped).
+			sink := agg.wrapJob(fmt.Sprintf("group-%d", i))
+			sink(readyEvent("a", "/r", "main"))
+			// Some interleaved intermediate events.
 			sink(AgentEvent{Kind: EventAgentText, Text: "thinking"})
-			sink(AgentEvent{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "ok"}})
+			sink(AgentEvent{
+				Kind:      EventAgentToolStart,
+				ToolStart: &AgentToolStartEvent{ID: fmt.Sprintf("t-%d", i), Name: "Read"},
+			})
+			sink(AgentEvent{
+				Kind:    EventAgentToolEnd,
+				ToolEnd: &AgentToolEndEvent{ID: fmt.Sprintf("t-%d", i), Name: "Read"},
+			})
+			sink(resultEvent("done"))
 		}(i)
 	}
 	wg.Wait()
 
 	got := rec.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("expected exactly 2 outer events (1 Ready + 1 synthetic Result), got %d: %+v", len(got), got)
-	}
-	if got[0].Kind != EventAgentReady || got[1].Kind != EventAgentResult {
-		t.Errorf("event order = [%v, %v], want [Ready, Result]", got[0].Kind, got[1].Kind)
-	}
-}
 
-// TestEventAggregator_NoReadyNoSynthetic: a defensive check — if no
-// per-job Ready was emitted (extreme edge case: bridge crashed before
-// emitting Ready and then surfaced a terminal), the synthetic outer
-// Result still fires. This guards the "balanced lifecycle" invariant
-// even at the edge.
-func TestEventAggregator_NoReadyTerminalStillEmits(t *testing.T) {
-	rec := &sinkRecorder{}
-	agg := newEventAggregator(rec.sink(), 1)
-
-	// Terminal WITHOUT preceding Ready (degenerate path).
-	agg.wrapJob("g-1")(AgentEvent{Kind: EventAgentResult, Result: &AgentResultEvent{Text: "ok"}})
-
-	got := rec.snapshot()
-	// No outer Ready was emitted (firstReady stays false), but the
-	// synthetic Result still fires because done == expected.
-	if len(got) != 1 {
-		t.Fatalf("expected 1 event (synthetic Result); got %d: %+v", len(got), got)
+	// Count Ready / Result events.
+	readyCount := 0
+	resultCount := 0
+	for _, ev := range got {
+		if ev.Kind == EventAgentReady {
+			readyCount++
+		}
+		if ev.Kind == EventAgentResult {
+			resultCount++
+		}
 	}
-	if got[0].Kind != EventAgentResult {
-		t.Errorf("Kind = %v, want EventAgentResult", got[0].Kind)
+	if readyCount != 1 {
+		t.Errorf("expected exactly 1 synthetic outer Ready; got %d", readyCount)
+	}
+	if resultCount != 1 {
+		t.Errorf("expected exactly 1 synthetic outer Result; got %d", resultCount)
+	}
+
+	// Per-job, the (ToolStart, ToolEnd) pair must be contiguous.
+	for i := 0; i < N; i++ {
+		wantID := fmt.Sprintf("t-%d", i)
+		var startIdx, endIdx = -1, -1
+		for j, ev := range got {
+			if ev.Kind == EventAgentToolStart && ev.ToolStart != nil && ev.ToolStart.ID == wantID {
+				startIdx = j
+			}
+			if ev.Kind == EventAgentToolEnd && ev.ToolEnd != nil && ev.ToolEnd.ID == wantID {
+				endIdx = j
+			}
+		}
+		if startIdx == -1 || endIdx == -1 {
+			t.Errorf("job %d: tool pair not found (start=%d end=%d)", i, startIdx, endIdx)
+			continue
+		}
+		if endIdx != startIdx+1 {
+			t.Errorf("job %d: tool pair not contiguous (start=%d end=%d)", i, startIdx, endIdx)
+		}
 	}
 }

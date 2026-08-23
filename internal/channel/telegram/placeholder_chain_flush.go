@@ -355,27 +355,44 @@ func scheduleFlushDebounced(
 	chain.mu.Unlock()
 }
 
-// renderActiveChunkBody builds the (raw, pre-RenderMarkdown) text
-// content for the active chunk: header + entries + footer.
+// renderActiveChunkBody builds the (raw HTML) text content for
+// the active chunk: header + entries + footer.
 //
-// Note: when a chunk has flushedRenderedLen > 0, this renders
-// only the NOT-YET-EMITTED tail (buf[flushedRenderedLen:]). The
-// emitted prefix is already on Telegram in the locked chunks
-// preceding it (see flushChainNow's overflow path).
+// The headerLine is PRE-BAKED HTML (it carries <b>...</b> from
+// the status formatters; see heartbeatText). The buf is PLAIN
+// TEXT accumulated from formatted Out* events. We must NOT pass
+// the whole body through RenderMarkdown: RenderMarkdown calls
+// escapeHTML on its input, which would convert <b> to &lt;b&gt;
+// and Telegram would render the literal tag. Instead, we route
+// each section through the right pipeline:
+//
+//   - headerLine: written verbatim (it's already safe HTML)
+//   - buf:       passed through RenderMarkdown (handles <, &, >
+//                escape + light markdown → HTML)
+//   - footer:    statusbar.RenderPanel output is already
+//                escape-safe (no HTML chars in StatusBar lines)
+//
+// Note: when a chunk has flushedRenderedLen > 0, only the
+// not-yet-emitted tail of buf is rendered. The emitted prefix
+// lives on Telegram in the locked preceding chunks.
 func renderActiveChunkBody(cur *placeholderChunk, lastFooter []string) string {
 	var b strings.Builder
 	b.WriteString(cur.headerLine)
 	b.WriteByte('\n')
 	if cur.charCount > 0 {
 		b.WriteString("────────\n")
+		var bufSrc string
 		if cur.flushedRenderedLen > 0 && cur.flushedRenderedLen < cur.buf.Len() {
-			// Tail of an overflow chain: only render the
-			// not-yet-emitted remainder.
-			b.WriteString(cur.buf.String()[cur.flushedRenderedLen:])
+			bufSrc = cur.buf.String()[cur.flushedRenderedLen:]
 		} else {
-			b.WriteString(cur.buf.String())
+			bufSrc = cur.buf.String()
 		}
-		if !strings.HasSuffix(cur.buf.String(), "\n") {
+		renderedBuf, err := RenderMarkdown(bufSrc)
+		if err != nil {
+			renderedBuf = escapeHTML(bufSrc)
+		}
+		b.WriteString(renderedBuf)
+		if !strings.HasSuffix(bufSrc, "\n") {
 			b.WriteByte('\n')
 		}
 	}

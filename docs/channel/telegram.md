@@ -2799,7 +2799,7 @@ per-turn 占位的两步生命周期：
 
 **Step 1：handleMessage 创建占位**（`ensurePlaceholder`）—— 文本是裸的 `<b>🤖 Working...</b> · ⏱ HH:MM:SS`，**不含 footer**。原因：handleMessage 这一刻 OutboundMessage 还没生成，runtime 还没 stamp Identity / Usage / GitStatus —— 没东西可拼。等 runtime 出 OutMessageState / OutReply 时再决定 footer 内容。
 
-**Step 2：首次 OutHeartbeat PATCH 叠加 footer** —— `[status line] + \n\n---\n + StatusBar`（走 `renderBodyWithStatusBar`）。后续每条 OutHeartbeat 都重新拼接 footer：
+**Step 2：首次 OutHeartbeat PATCH 叠加 footer** —— `[status line] + \n\n---\n + StatusBar`（由 v9 chain 的 `renderActiveChunkBody` 拼装）。后续每条 OutHeartbeat 都重新拼接 footer：
 
 ```text
 turn N：用户发 "hi N"
@@ -2834,7 +2834,7 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 
 - [x] `internal/statusbar/statusbar.go` export `StatusBarLines`，feishu adapter 5 处 `formatStatusBarLines` 调用全部切到 `statusbar.StatusBarLines`（`internal/channel/feishu/adapter.go`）
 - [x] feishu `usage_footer.go` / `usage_footer_test.go` 已删除（按 `no-type-aliases` 不留薄壳）
-- [x] telegram adapter Send switch 的 text 出口全走 `renderBodyWithStatusBar`（OutError 走 raw 拼接特例）
+- [x] telegram adapter Send switch 的 text 出口全走 `appendSegmentForKind`（v9 chain 路径；chain 内部调 `renderActiveChunkBody`）。`renderBodyWithStatusBar` 在 v9 chain 重写时被删除（footer 语义迁到 `chain.lastFooter` + `renderActiveChunkBody`）
 - [x] `OutHeartbeat` 占位 PATCH 拼接 footer
 - [x] `OutChoice` / `OutMessageState*` / `OutInit` 不挂
 - [x] 无 cache —— `StatusBarLines(&msg)` 纯 consumer，零状态

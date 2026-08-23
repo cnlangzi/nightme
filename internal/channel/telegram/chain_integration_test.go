@@ -373,3 +373,58 @@ func TestChainAppendOnly_AfterStopFreshChain(t *testing.T) {
 	_ = sort.Strings // keep import future-proof
 	_ = agent.Agent{}
 }
+
+// TestChainOverflow_RotatesToNewChain — P0 #2 regression guard.
+// When buf + new segment would exceed chainChunkThresholdChars
+// (3500), appendSegment rotates to a brand-new chain chunk
+// rather than overrunning a single Telegram message. Pre-fix,
+// the rotation logic was sometimes skipped (race-window guard)
+// or actively disallowed by the chain's "single placeholder"
+// invariant; segments beyond the threshold were silently dropped.
+//
+// Drive the test by sending one big segment that exceeds the
+// threshold (4000 chars). Cold-start first with a tiny seg,
+// then this big one — must trigger rotation in appendSegment
+// path #3-#4.
+func TestChainOverflow_RotatesToNewChain(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "700", TopicID: 0,
+		PlaceholderMessageID: 1300, UserMessageID: "70"})
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "700", Kind: messages.OutReply, Text: "seed",
+	}); err != nil {
+		t.Fatalf("cold-start: %v", err)
+	}
+
+	chain := a.chains.getOrCreate("700", 0)
+	chain.mu.Lock()
+	prevChunks := len(chain.chunks)
+	chain.mu.Unlock()
+
+	// Send a single 4000-char segment — way over the 3500 threshold.
+	big := strings.Repeat("z", 4000)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "700", Kind: messages.OutReply, Text: big,
+	}); err != nil {
+		t.Fatalf("big-send: %v", err)
+	}
+
+	chain.mu.Lock()
+	newChunks := len(chain.chunks)
+	newCursor := chain.cursor
+	firstChunkIsFull := chain.chunks[0].isFull
+	chain.mu.Unlock()
+
+	if newChunks != prevChunks+1 {
+		t.Fatalf("overflow did not rotate exactly once: chunks=%d (was %d)",
+			newChunks, prevChunks)
+	}
+	if newCursor != prevChunks {
+		t.Fatalf("cursor didn't advance to new chunk: prev=%d new=%d",
+			prevChunks, newCursor)
+	}
+	if !firstChunkIsFull {
+		t.Fatalf("previous chunk should be locked after overflow rotation")
+	}
+}

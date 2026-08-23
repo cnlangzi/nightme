@@ -1,6 +1,6 @@
 # /review 设计
 
-> **Status**: 设计定稿(v11,含 ocr 委托模式三层分流 + 按 rule group 拆多 job 并发),待实施
+> **Status**: 设计定稿(v11,含 ocr 委托模式三层分流 + 按 rule group 拆多 job 并发);**§2.5 多 job 并发机制已实现**(`internal/agent/aggregate_sink.go` + `delegate_review.go::delegateReviewMultiJob`,详见 §2.5.7 实现索引)
 > **Scope**: `/review` slash 命令的架构、分流、数据流、生命周期与边界
 > **读者**: 参与 command / agent / bridge / chatsession 任一层,或想理解 review 设计意图的工程师
 > **Related docs**:
@@ -150,6 +150,30 @@ cmd.go 的 sink(中间事件流式进 chat)被多 job 并发复用——sink 是
 
 - **超大单组**:某 group diff 仍超大(如 `**/*.go` 100 文件 5000 行)→ per-file 截断兜底(§2.4 第 6 项);极端时按目录二次拆(留后续)。
 - **顺序 vs 并发**:默认并发(快);若并发有风险(如 agent 不支持并发 session),可降级顺序(loop 无 sem)——但已验证 delegate bridge 的 RunOnce 并发安全(dsh sessionId 多路复用 / 其他独立子进程),默认并发。
+
+### 2.5.7 实现索引(v11)
+
+| 概念 | 实现位置 |
+| --- | --- |
+| 三层分流入口(Tier 2 多 job / Tier 2 单 job / Tier 3 分支) | `internal/agent/delegate_review.go::DelegateReview` |
+| 多 job 并发编排(sem cap 4,N 个 goroutine,各自独立 ctx) | `internal/agent/delegate_review.go::delegateReviewMultiJob` |
+| per-group 提示词(context / file list / diff / rule / how-to / schema) | `internal/agent/delegate_review.go::assembleGroupPrompt` |
+| 按文件过滤 diff(`git diff -- <files...>`) | `internal/agent/delegate_review.go::groupFilteredDiff` |
+| 事件聚合器(N 个 per-job sink → 1 个 outer sink,合并 Ready / 抑制后续 Ready / 合并 terminal / 合成 outer Result) | `internal/agent/aggregate_sink.go::eventAggregator` |
+| 多 job 结果合并(按组标头拼接文本 + Usage 求和 + 部分失败兜底) | `internal/agent/delegate_review.go::mergeRunResults` |
+| 单元测试(聚合器 / 合并 / 并发) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go` |
+
+**不变量 #9/#10 与实现的对应**:
+
+- **#9 独立 context 分 bundle**:`delegateReviewMultiJob` 启动 N 个 goroutine,每个跑独立 `s.RunOnce`(独立子进程 / 独立 context),不共享、不累积。
+- **#10 自动并发 + sem 上限 + merge 后一次返回**:`sem chan struct{}` cap 为 `maxConcurrentReviewJobs = 4`;所有 goroutine 通过 `wg.Wait()` 同步,`mergeRunResults` 一次产出最终 `RunResult`,经 `FormatReviewMessage` 注入 AS + 发 channel 一次。
+
+**事件侧 §2.5.5 "sink 复用" 的实现**:
+
+- cmd.go 传的 sink(`outbound.StreamRunOnceToEmitter`)是 chan-based,天然线程安全,直接喂给 aggregator 当 outer。
+- aggregator 在 `wrapJob` 闭包里给每个 per-job sink 加节流逻辑,只向外发:**第一个 per-job Ready**(作为 outer Ready,Source 重置为 `""`)+ **合成 outer Result**(所有 job terminal 后一次性发出,关闭 outer 生命周期)。
+- per-job 中间事件(Text / ToolStart/End / Permission / Task*)在聚合器层**丢弃**——避免 N 个 job 的中间事件交错塞爆 chat 频道(review 阶段中间事件本来就是观察性的;最终交付物是 cmd.go 的 `FormatReviewMessage` 文本)。
+- 部分 job 失败时(`mergeRunResults` 的 partial failure 分支),失败组以 `### Group: pattern X — failed: <err>` 形式出现在合并文本里,**不**升级为 merge 整体错误。
 
 ---
 

@@ -561,6 +561,18 @@ type AgentEvent struct {
 	Workspace string
 	Branch    string
 
+	// Source is an optional, aggregator-set identifier for the
+	// sub-job that produced this event. Zero (= "") means
+	// "single-job / unscoped" — bridges never set it; only
+	// multi-job aggregators (DelegateReview's eventAggregator
+	// when Tier 2 has multiple rule groups) stamp a non-empty
+	// value before forwarding to the outer sink. Downstream
+	// consumers MAY render it as a "[group-N]" label or use it
+	// for log filtering. Forwarding layers (StreamRunOnceToEmitter
+	// → dispatchSinkEvent) treat it as opaque metadata — they do
+	// not consult it for policy / heartbeat decisions.
+	Source string
+
 	// ───── Action payload (per Kind; usually exactly one is meaningful) ─────
 	// Text is the payload for EventAgentText. Other Kinds leave it empty.
 	Text string

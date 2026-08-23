@@ -38,6 +38,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/proc"
@@ -66,6 +67,23 @@ const maxDiffLines = 2000
 func DelegateReview(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReview(ctx, cfg.Workspace)
 
+	// Multi-job fast path (docs/REVIEW.md §2.5): when Tier 2 returned
+	// ≥2 rule groups, fan out to N parallel RunOnce jobs — one per
+	// group, each with independent context + the aggregator sink that
+	// collapses N event streams into one outer lifecycle.
+	//
+	// Concurrency cap (maxConcurrentReviewJobs = 4) protects against
+	// token / API-rate blow-up on huge changesets. ctx cancel
+	// (parent is /review's revCtx) propagates to all in-flight jobs
+	// simultaneously — same /close / timeout guarantees as single-job.
+	if len(pre.ocrGroups) >= 2 {
+		return delegateReviewMultiJob(ctx, s, cfg, pre, opts...)
+	}
+
+	// Single-job path: Tier 2 with 0 or 1 group, Tier 3, or total
+	// precompute failure. assembleReviewPrompt handles all three via
+	// the same ocrRules-vs-built-in-rubric decision documented in
+	// assembleReviewPrompt's doc.
 	prompt := assembleReviewPrompt(pre)
 	if prompt == "" {
 		// Total precompute failure (no workspace): fall back to the
@@ -85,6 +103,72 @@ func DelegateReview(ctx context.Context, s Starter, cfg StartConfig, opts ...Run
 	return result, nil
 }
 
+// delegateReviewMultiJob runs one RunOnce per ocr rule group, in
+// parallel (sem-capped at maxConcurrentReviewJobs), each with a
+// per-group prompt + aggregator-wrapped sink. The aggregator collapses
+// N per-job Ready/terminal streams into one outer lifecycle so the
+// chat channel sees a single review run, not N interleaved ones.
+//
+// All jobs share ctx (= the parent /review revCtx): chat-session
+// close or /review timeout cancels every in-flight job at once. Per-
+// job errors are non-fatal — mergeRunResults records the failed
+// group's status and the surviving groups' findings still flow through
+// to the final deliverable.
+func delegateReviewMultiJob(
+	ctx context.Context,
+	s Starter,
+	cfg StartConfig,
+	pre reviewContext,
+	opts ...RunOnceOption,
+) (RunResult, error) {
+	groups := pre.ocrGroups
+
+	// Extract the outer sink (if any) and rebuild per-job opts with
+	// the aggregator's per-job sink replacing it. ParseRunOnceOptions
+	// is the single source of truth for option resolution; today the
+	// only RunOnceOption is WithEventSink, so this round-trip is
+	// lossless. Future options would need to be re-threaded here.
+	cfgOpts := ParseRunOnceOptions(opts)
+	var agg *eventAggregator
+	if cfgOpts.OnEvent != nil {
+		agg = newEventAggregator(cfgOpts.OnEvent, len(groups))
+	}
+
+	results := make([]RunResult, len(groups))
+	errs := make([]error, len(groups))
+	sem := make(chan struct{}, maxConcurrentReviewJobs)
+
+	var wg sync.WaitGroup
+	for i := range groups {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			prompt := assembleGroupPrompt(pre, &groups[i])
+			if prompt == "" {
+				prompt = StandardPrompt()
+			}
+
+			var runOpts []RunOnceOption
+			if agg != nil {
+				runOpts = []RunOnceOption{WithEventSink(agg.wrapJob(fmt.Sprintf("group-%d", i+1)))}
+			}
+
+			res, err := s.RunOnce(ctx, cfg, []ContentBlock{{
+				Type: ContentText,
+				Text: prompt,
+			}}, runOpts...)
+			results[i] = res
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	return mergeRunResults(s.Info().Name, groups, results, errs)
+}
+
 // reviewContext is the Go-side deterministic precompute shared by
 // Tier 2 and Tier 3. Every field is best-effort: empty/zero means
 // "could not compute; assembleReviewPrompt omits that section".
@@ -100,7 +184,23 @@ type reviewContext struct {
 	reviewable    []string
 	excluded      []string // "path (reason)" entries; Tier 2 only
 	// Tier 2 only (populated when ocr is available + produced rules):
-	ocrRules string // formatted rule groups from `ocr delegate rule`
+	ocrRules  string        // formatted rule groups from `ocr delegate rule` (markdown, single-job path)
+	ocrGroups []reviewGroup // parsed structured groups (multi-job path; parallel to ocrRules)
+}
+
+// reviewGroup is one rule group from `ocr delegate rule`. Pattern is
+// the glob ocr grouped by (e.g. "**/*.go"); Files is the per-group
+// file list (the rule explicitly enumerates them); Rule is the rule
+// text (the language-specific guidance for the group).
+//
+// Used by the multi-job path (docs/REVIEW.md §2.5): when ocr returns
+// ≥2 groups, DelegateReview runs one RunOnce per group with this
+// group's files + diff + rule — each in its own fresh subprocess /
+// independent context.
+type reviewGroup struct {
+	Pattern string
+	Files   []string
+	Rule    string
 }
 
 func precomputeReview(ctx context.Context, workspace string) reviewContext {
@@ -141,7 +241,16 @@ func precomputeReview(ctx context.Context, workspace string) reviewContext {
 			// under ARG_MAX on large changesets (SKILL: "fetch rules
 			// per-batch as you review"). Single-batch failure is
 			// non-fatal — other batches still contribute rules.
-			rc.ocrRules = runOcrDelegateRulesBatched(ctx, workspace, rc.reviewable)
+			//
+			// Two parallel forms are kept: ocrRules (markdown string,
+			// consumed by the single-job path's assembleReviewPrompt)
+			// and ocrGroups (structured, consumed by the multi-job
+			// path in DelegateReview). Both are populated from the
+			// same batched runOcrDelegateRulesBatched call so we
+			// don't double-spawn ocr.
+			rulesMarkdown, groups := runOcrDelegateRulesBatched(ctx, workspace, rc.reviewable)
+			rc.ocrRules = rulesMarkdown
+			rc.ocrGroups = groups
 		}
 	}
 
@@ -382,33 +491,43 @@ const ruleBatchSize = 50
 
 // runOcrDelegateRulesBatched runs `ocr delegate rule --format json
 // <paths...>` in ≤ruleBatchSize-path batches (SKILL Step 2) and
-// concatenates the rule groups. A single batch failing (ocr error,
-// JSON parse error) is non-fatal — other batches still contribute
-// their rules, so a transient failure on one slice doesn't blank the
-// whole rule section.
-func runOcrDelegateRulesBatched(ctx context.Context, workspace string, paths []string) string {
+// returns BOTH the concatenated markdown (single-job path) AND the
+// parsed structured groups (multi-job path). A single batch failing
+// (ocr error, JSON parse error) is non-fatal — other batches still
+// contribute their rules, so a transient failure on one slice doesn't
+// blank the whole rule section.
+//
+// Two parallel outputs are returned so precomputeReview can populate
+// BOTH rc.ocrRules (markdown, for assembleReviewPrompt) and
+// rc.ocrGroups (structured, for DelegateReview's multi-job path)
+// from a single ocr invocation chain — no double-spawn.
+func runOcrDelegateRulesBatched(ctx context.Context, workspace string, paths []string) (string, []reviewGroup) {
 	if len(paths) == 0 {
-		return ""
+		return "", nil
 	}
-	var all strings.Builder
+	var markdown strings.Builder
+	var groups []reviewGroup
 	for i := 0; i < len(paths); i += ruleBatchSize {
 		end := i + ruleBatchSize
 		if end > len(paths) {
 			end = len(paths)
 		}
-		if rules, ok := runOcrDelegateRuleBatch(ctx, workspace, paths[i:end]); ok {
-			all.WriteString(rules)
+		if md, gs, ok := runOcrDelegateRuleBatch(ctx, workspace, paths[i:end]); ok {
+			markdown.WriteString(md)
+			groups = append(groups, gs...)
 		}
 	}
-	return all.String()
+	return markdown.String(), groups
 }
 
 // runOcrDelegateRuleBatch runs one `ocr delegate rule` batch and
-// returns the rule groups formatted as a markdown section. ok=false
-// on any failure for this batch. proc.New routes the Windows .cmd
-// shim through cmd.exe /d /c (plain exec.Command would fail with
-// ERROR_INVALID_PARAMETER (87) on a .cmd target).
-func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []string) (string, bool) {
+// returns the rule groups as BOTH markdown (for the single-job
+// assembleReviewPrompt path) and structured []reviewGroup (for the
+// multi-job path). ok=false on any failure for this batch. proc.New
+// routes the Windows .cmd shim through cmd.exe /d /c (plain
+// exec.Command would fail with ERROR_INVALID_PARAMETER (87) on a
+// .cmd target).
+func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []string) (string, []reviewGroup, bool) {
 	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	args := append([]string{"delegate", "rule", "--format", "json"}, paths...)
@@ -416,7 +535,7 @@ func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []stri
 	cmd.Dir = workspace
 	out, err := cmd.Output()
 	if err != nil {
-		return "", false
+		return "", nil, false
 	}
 	var resp struct {
 		Groups []struct {
@@ -426,17 +545,23 @@ func runOcrDelegateRuleBatch(ctx context.Context, workspace string, paths []stri
 		} `json:"groups"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
-		return "", false
+		return "", nil, false
 	}
 	if len(resp.Groups) == 0 {
-		return "", false
+		return "", nil, false
 	}
-	var b strings.Builder
+	var markdown strings.Builder
+	var groups []reviewGroup
 	for _, g := range resp.Groups {
-		fmt.Fprintf(&b, "### Rule (pattern %s) — applies to: %s\n%s\n\n",
+		fmt.Fprintf(&markdown, "### Rule (pattern %s) — applies to: %s\n%s\n\n",
 			g.Pattern, strings.Join(g.Files, ", "), g.Rule)
+		groups = append(groups, reviewGroup{
+			Pattern: g.Pattern,
+			Files:   g.Files,
+			Rule:    g.Rule,
+		})
 	}
-	return b.String(), true
+	return markdown.String(), groups, true
 }
 
 // truncateDiff caps a diff section at maxDiffLines. Under the cap the
@@ -614,4 +739,193 @@ func reviewWhatToLook() string {
 - **Test gaps**: new code path with no test, behavioural change to existing function with no test update
 - **Simplification**: redundant code (DRY violations, dead code, unused params/imports), prefer existing helpers over new code, over-abstraction, naming clarity, unnecessary indirection
 `
+}
+
+// assembleGroupPrompt builds a per-group review prompt for the multi-
+// job path. Mirrors assembleReviewPrompt's structure (context → files
+// → diffs → rules → how-to → output schema) but:
+//   - filters the file list to the group's Files (the rule explicitly
+//     enumerates them — ocr's authoritative assignment, not our
+//     heuristic)
+//   - filters the diff to those files via `git diff -- <files...>`
+//     (this is the smart-bundling payoff: each job's prompt contains
+//     only the diff slice it can actually review)
+//   - uses ONLY this group's rule (Tier 2 single-group case in
+//     multi-job context)
+//
+// Returns "" only when rc.workspace is empty — same fallback signal
+// as assembleReviewPrompt, so the caller's "fall back to
+// StandardPrompt" branch fires uniformly.
+func assembleGroupPrompt(rc reviewContext, g *reviewGroup) string {
+	if rc.workspace == "" || g == nil {
+		return ""
+	}
+	var b strings.Builder
+
+	fmt.Fprintln(&b, "You are a senior engineer reviewing code changes for an upcoming pull request. Find real problems, not style lectures. Be specific, concrete, actionable.")
+
+	// --- Context ---
+	fmt.Fprintln(&b, "\n# Context (precomputed by /review — do NOT re-run git)")
+	fmt.Fprintf(&b, "- workspace: %s\n", rc.workspace)
+	if rc.defaultBranch != "" {
+		if rc.mergeBase != "" {
+			fmt.Fprintf(&b, "- base branch: %s (merge-base: %s)\n", rc.defaultBranch, rc.mergeBase)
+		} else {
+			fmt.Fprintf(&b, "- base branch: %s\n", rc.defaultBranch)
+		}
+	}
+	fmt.Fprintf(&b, "- rule group: pattern %s (%d files)\n", g.Pattern, len(g.Files))
+
+	// --- Files to review (group-filtered) ---
+	fmt.Fprintln(&b, "\n# Files to review")
+	fmt.Fprintln(&b, "Coverage is MANDATORY: every file below must end as `reviewed` or `skipped` with a concrete reason.")
+	for _, f := range g.Files {
+		fmt.Fprintf(&b, "- %s\n", f)
+	}
+
+	// --- Diffs (group-filtered via `git diff -- <files...>`) ---
+	committedArgs := []string{"diff"}
+	if rc.mergeBase != "" {
+		committedArgs = append(committedArgs, rc.mergeBase+"..HEAD")
+	}
+	committed := groupFilteredDiff(rc, g, committedArgs...)
+	staged := groupFilteredDiff(rc, g, "diff", "--staged")
+	unstaged := groupFilteredDiff(rc, g, "diff")
+	hasDiff := committed != "" || staged != "" || unstaged != ""
+	if hasDiff {
+		fmt.Fprintln(&b, "\n# Diffs (precomputed — the union below is the full diff to review for THIS group)")
+		if committed != "" {
+			label := rc.defaultBranch + "...HEAD"
+			if rc.mergeBase != "" {
+				label = rc.mergeBase + "..HEAD"
+			}
+			fmt.Fprintf(&b, "## Committed (%s) — group-filtered\n```\n%s\n```\n", label, committed)
+		}
+		if staged != "" {
+			fmt.Fprintf(&b, "## Staged — group-filtered\n```\n%s\n```\n", staged)
+		}
+		if unstaged != "" {
+			fmt.Fprintf(&b, "## Unstaged — group-filtered\n```\n%s\n```\n", unstaged)
+		}
+	}
+
+	// --- Rules + how-to (single group: ocr's rule + language-agnostic methodology) ---
+	fmt.Fprintln(&b, "\n# Review rules (matched per file by `ocr delegate` — LLM-free engineering)")
+	fmt.Fprintf(&b, "### Rule (pattern %s)\n%s\n", g.Pattern, g.Rule)
+	fmt.Fprintln(&b, "\n# How to review")
+	fmt.Fprint(&b, reviewHowTo())
+
+	// --- Output format (per-job) ---
+	fmt.Fprintln(&b, "\n# Output format")
+	fmt.Fprintln(&b, "Output a coverage summary, then one block per finding. Do not pad with generic advice.")
+	fmt.Fprintln(&b, "\n```")
+	fmt.Fprintln(&b, "## Coverage")
+	fmt.Fprintf(&b, "- total: %d\n", len(g.Files))
+	fmt.Fprintln(&b, "- reviewed: <N>")
+	fmt.Fprintln(&b, "- skipped: <N> (each with reason)")
+	fmt.Fprintln(&b, "- coverage_rate: <N>/<total>")
+	fmt.Fprintln(&b, "\n## Findings")
+	fmt.Fprintln(&b, "For each finding (omit fields you cannot determine; start_line/end_line both 0 = positioning failed):")
+	fmt.Fprintln(&b, "- path: <file>")
+	fmt.Fprintln(&b, "- start_line: <int>")
+	fmt.Fprintln(&b, "- end_line: <int>")
+	fmt.Fprintln(&b, "- category: bug|security|performance|maintainability|test|style|documentation|other")
+	fmt.Fprintln(&b, "- severity: critical|high|medium|low")
+	fmt.Fprintln(&b, "- content: <one-line issue + how to verify>")
+	fmt.Fprintln(&b, "```")
+	fmt.Fprintln(&b, "\nSeverity rubric: critical = breaks in production / loses data; high = real bug, user-visible pain; medium = quality / maintainability, not user-visible; low = nit / style, take-it-or-leave-it.")
+	fmt.Fprintln(&b, "If there are no findings, write \"No blockers; nothing material to flag.\" and still report coverage.")
+
+	return b.String()
+}
+
+// groupFilteredDiff runs `git diff <args...> -- <g.Files...>` in the
+// workspace and returns the diff trimmed, truncated per the standard
+// cap. "" on any error (per runGit convention). This is the smart-
+// bundling payoff: each per-group RunOnce sees ONLY the diff for its
+// group's files, keeping the prompt within context.
+func groupFilteredDiff(rc reviewContext, g *reviewGroup, args ...string) string {
+	if len(g.Files) == 0 {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	full := append([]string{}, args...)
+	full = append(full, "--")
+	full = append(full, g.Files...)
+	c := proc.New(ctx, "git", append([]string{"-C", rc.workspace}, full...)...)
+	out, _ := c.Output() // error swallowed: "" = "skip section", by design
+	return truncateDiff(strings.TrimSpace(string(out)))
+}
+
+// mergeRunResults combines N per-job RunResults into one final
+// RunResult. The merged Text concatenates each group's review under a
+// "### Group: pattern X" header so the user (and the main agent on
+// fix-up) can tell which group produced which finding. Usage is summed
+// across jobs; a single successful job's Text is returned as-is (no
+// extra headers).
+//
+// Error semantics: if ALL jobs errored, returns the first error wrapped
+// with the agent name (matches single-job error wrapping). If SOME
+// errored, the error is logged via slog but NOT returned — partial
+// findings are still useful, and surfacing a hard error would mask the
+// surviving groups' value. This matches the §2.5.3 contract: "single
+// job failure does not block; merge marks the group as failed".
+func mergeRunResults(agentName string, groups []reviewGroup, results []RunResult, errs []error) (RunResult, error) {
+	if len(results) != len(groups) || len(errs) != len(groups) {
+		return RunResult{}, fmt.Errorf("agent %s: merge shape mismatch (groups=%d, results=%d, errs=%d)",
+			agentName, len(groups), len(results), len(errs))
+	}
+
+	// All-failed path: surface the first error wrapped.
+	successCount := 0
+	var firstErr error
+	for _, err := range errs {
+		if err == nil {
+			successCount++
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if successCount == 0 && firstErr != nil {
+		return RunResult{}, fmt.Errorf("agent %s: all %d review jobs failed: %w",
+			agentName, len(groups), firstErr)
+	}
+
+	// Successful merge: concatenate group-by-group with markers so
+	// the merged text is traceable. Failed groups get a marker noting
+	// the failure (no findings; agent-side partial work not surfaced).
+	var text strings.Builder
+	var totalUsage UsageInfo
+	anySubtype := ""
+	for i, g := range groups {
+		if errs[i] != nil {
+			fmt.Fprintf(&text, "### Group: pattern %s — failed: %v\n\n", g.Pattern, errs[i])
+			continue
+		}
+		// Use "### Group: pattern X" header so the main agent (which
+		// receives this as a user message via as.SendBlocks) can
+		// reference findings by group in fix-up follow-ups.
+		fmt.Fprintf(&text, "### Group: pattern %s — files: %s\n\n%s\n\n",
+			g.Pattern, strings.Join(g.Files, ", "), results[i].Text)
+		if u := results[i].Usage; u != nil {
+			totalUsage.InputTokens += u.InputTokens
+			totalUsage.OutputTokens += u.OutputTokens
+			totalUsage.CacheReadInputTokens += u.CacheReadInputTokens
+		}
+		if results[i].Subtype != "" && anySubtype == "" {
+			anySubtype = results[i].Subtype
+		}
+	}
+
+	merged := RunResult{
+		Text:    strings.TrimSpace(text.String()),
+		Subtype: anySubtype,
+	}
+	if totalUsage.InputTokens > 0 || totalUsage.OutputTokens > 0 {
+		merged.Usage = &totalUsage
+	}
+	return merged, nil
 }

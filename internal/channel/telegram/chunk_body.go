@@ -74,6 +74,15 @@ func (b *chunkBody) appendEntry(text string) {
 	b.entries = append(b.entries, chunkEntry{text: text})
 }
 
+// appendEntryHTML adds an entry whose text is already rendered safe
+// HTML (e.g. the output of RenderMarkdown from the SPLIT path in
+// appendSegment / appendErrorSegment, §11.12.7.2 trigger 1).
+// Compose() must NOT re-run RenderMarkdown on these entries or the
+// pre-rendered tags would be double-escaped.
+func (b *chunkBody) appendEntryHTML(text string) {
+	b.entries = append(b.entries, chunkEntry{text: text, isHTML: true})
+}
+
 // appendError composes an OutError entry. text is the user-facing
 // short error (e.g. "tool exit 1"); stderr is the optional
 // diagnostic tail. The ```fences``` wrapper is intentionally

@@ -107,6 +107,18 @@ func appendSegment(
 		chain.cursor++
 	}
 
+	// §11.12.7.2 trigger 1: single oversized segment → SPLIT at
+	// append time. Without this, a 5000-char OutReply would push
+	// a body over Telegram's 4096 hard limit and the first
+	// sendMessage would be rejected by Telegram itself. The split
+	// path mints N Telegram messages (one per piece) all carrying
+	// the same headerLine (single heartbeatText(nil) call) so the
+	// chat shows them as visually continuous, distinguished from
+	// ROTATE chunks by their matching timestamps.
+	if len(segment) > chainChunkThresholdChars {
+		return splitOversizedSegmentLocked(ctx, chain, chatID, topicID, userMessageID, segment, sendFn)
+	}
+
 	// 1. Empty chain → materialise the first chunk via send.
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
@@ -163,6 +175,98 @@ func appendSegment(
 	}
 	newChunk.messageID = messageID
 	chain.chunks = append(chain.chunks, newChunk)
+	chain.cursor = len(chain.chunks) - 1
+	chain.dirty = true
+	return nil
+}
+
+// splitOversizedSegmentLocked handles §11.12.7.2 trigger 1: a single
+// segment is too long to fit in one Telegram message. The split
+// happens at append time (not flush time) because flushChainNow only
+// sees the rendered body AFTER sendMessage has already succeeded —
+// for an oversized raw segment, sendMessage itself is rejected by
+// Telegram's 4096 hard limit and we never reach flush.
+//
+// Behaviour:
+//   - The segment is rendered via RenderMarkdown ONCE, then split via
+//     splitTelegramText (line boundaries where possible, hard cut on
+//     single lines that exceed maxTelegramTextLength).
+//   - Each piece becomes its own Telegram message and its own chain
+//     chunk. Pieces 1..N-1 are frozen (markFull); piece N is the new
+//     active chunk and accepts subsequent appendSegment calls.
+//   - All chunks share the same headerLine from a single
+//     heartbeatText(nil) call, distinguishing SPLIT chunks visually
+//     from ROTATE chunks (whose timestamps differ).
+//   - All chunks share the same chain.lastFooter snapshot taken
+//     before the split. lastFooter is NOT refreshed during the split
+//     because the same OutboundMessage drives every piece; if the
+//     caller wanted to refresh, they would pass new statusBarLines
+//     on the next event, not this one.
+//
+// Partial-failure semantics: sendFn at piece k failing returns the
+// error. The chain.chunks slice is unmodified (no chunks appended
+// for any piece), so the chain is left in its pre-call state. The
+// first k-1 pieces that did reach Telegram remain in chat as orphan
+// history; subsequent appendSegment calls fall through to case 2/3
+// on the existing active chunk (which was markFull'd at step 3, so
+// case 2 misses and case 3 ROTATEs to a fresh chunk).
+//
+// Caller MUST hold chain.mu.
+func splitOversizedSegmentLocked(
+	ctx context.Context,
+	chain *placeholderChain,
+	chatID string,
+	topicID int,
+	userMessageID int,
+	segment string,
+	sendFn sendChunkFn,
+) error {
+	rendered, err := RenderMarkdown(segment)
+	if err != nil {
+		rendered = escapeHTML(segment)
+	}
+
+	pieces, err := splitTelegramText(rendered, maxTelegramTextLength)
+	if err != nil {
+		return err
+	}
+
+	// Mark the existing active chunk (if any) full — the SPLIT
+	// concludes the prior logical message. Subsequent entries land
+	// on the tail of the SPLIT, not on this chunk.
+	if chain.cursor >= 0 {
+		chain.chunks[chain.cursor].markFull()
+	}
+
+	headerLine := heartbeatText(nil)
+	footerSnapshot := chain.lastFooter
+
+	newChunks := make([]*chunkBody, 0, len(pieces))
+	for i, p := range pieces {
+		ch := newChunkBody(0, headerLine)
+		ch.appendEntryHTML(p)
+		if footerSnapshot != nil {
+			ch.setFooter(statusbar.RenderPanel(footerSnapshot))
+		}
+		body := ch.Compose()
+		mid, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		if err != nil {
+			// Partial failure: don't touch chain.chunks / cursor /
+			// dirty. The markFull on the prior active chunk above
+			// already happened; that doesn't affect subsequent
+			// chain writes (case 3 ROTATE just creates a fresh
+			// chunk regardless).
+			return err
+		}
+		ch.messageID = mid
+		// pieces 1..N-1 are frozen; piece N stays active.
+		if i < len(pieces)-1 {
+			ch.markFull()
+		}
+		newChunks = append(newChunks, ch)
+	}
+
+	chain.chunks = append(chain.chunks, newChunks...)
 	chain.cursor = len(chain.chunks) - 1
 	chain.dirty = true
 	return nil
@@ -389,6 +493,17 @@ func appendErrorSegment(
 		chain.cursor++
 	}
 
+	// §11.12.7.2 trigger 1 for OutError: an OutError whose
+	// rendered body (text + ```fences``` + stderr) exceeds
+	// chainChunkThresholdChars is split at append time, mirroring
+	// splitOversizedSegmentLocked for plain segments. estimateErrorSize
+	// is a rough pre-check — the real ceiling is enforced by
+	// Compose() once we know the exact fence overhead.
+	if estimateErrorSize(stderr) > chainChunkThresholdChars {
+		return splitOversizedErrorSegmentLocked(ctx, chain, chatID, topicID, userMessageID,
+			text, stderr, sendFn)
+	}
+
 	// Cold-create.
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
@@ -444,4 +559,73 @@ func appendErrorSegment(
 // boundary.
 func estimateErrorSize(stderr string) int {
 	return 10 + len(stderr) + 1 // ~"```\n" + stderr + "\n```" + trailing newline
+}
+
+// splitOversizedErrorSegmentLocked mirrors splitOversizedSegmentLocked
+// for the OutError path. Same trigger (single entry body exceeds the
+// buffer threshold), same split semantics (N Telegram messages,
+// pieces 1..N-1 frozen, piece N active, all sharing the same
+// headerLine).
+//
+// The split happens on the rendered body — that is, the body each
+// Telegram message will actually carry after markdown rendering and
+// fence wrapping. Each piece becomes its own chunk via
+// appendEntryHTML so Compose() doesn't re-render it.
+//
+// Caller MUST hold chain.mu.
+func splitOversizedErrorSegmentLocked(
+	ctx context.Context,
+	chain *placeholderChain,
+	chatID string,
+	topicID int,
+	userMessageID int,
+	text, stderr string,
+	sendFn sendChunkFn,
+) error {
+	// Build the body the same way chunkBody.appendError would:
+	// text + fence + stderr + fence, then run RenderMarkdown once.
+	body := text
+	if stderr != "" {
+		body += "\n\n```\n" + stderr + "\n```"
+	}
+	rendered, err := RenderMarkdown(body)
+	if err != nil {
+		rendered = escapeHTML(body)
+	}
+
+	pieces, err := splitTelegramText(rendered, maxTelegramTextLength)
+	if err != nil {
+		return err
+	}
+
+	if chain.cursor >= 0 {
+		chain.chunks[chain.cursor].markFull()
+	}
+
+	headerLine := heartbeatText(nil)
+	footerSnapshot := chain.lastFooter
+
+	newChunks := make([]*chunkBody, 0, len(pieces))
+	for i, p := range pieces {
+		ch := newChunkBody(0, headerLine)
+		ch.appendEntryHTML(p)
+		if footerSnapshot != nil {
+			ch.setFooter(statusbar.RenderPanel(footerSnapshot))
+		}
+		chunkBody := ch.Compose()
+		mid, err := sendFn(ctx, chatID, topicID, userMessageID, chunkBody)
+		if err != nil {
+			return err
+		}
+		ch.messageID = mid
+		if i < len(pieces)-1 {
+			ch.markFull()
+		}
+		newChunks = append(newChunks, ch)
+	}
+
+	chain.chunks = append(chain.chunks, newChunks...)
+	chain.cursor = len(chain.chunks) - 1
+	chain.dirty = true
+	return nil
 }

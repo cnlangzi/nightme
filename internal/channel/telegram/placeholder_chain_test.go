@@ -627,3 +627,269 @@ func TestChain_MultipleOverflow_ThreeChunks_FirstTwoFrozen(t *testing.T) {
 		t.Fatal("chunk[2] (active) must NOT be marked full")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// §11.12.7.2 trigger 1 — SPLIT path for single oversized segments.
+// Without the split path, a 5000-char raw segment would push the
+// composed body past Telegram's 4096 hard limit and the first
+// sendMessage would be rejected by Telegram itself. These tests
+// lock the split behaviour at the boundary cases.
+// ---------------------------------------------------------------------------
+
+// TestChain_OversizedSegment_SplitsIntoMultipleChunks drives the SPLIT
+// path by sending a segment longer than chainChunkThresholdChars (3500).
+// The result must be 2+ chain chunks (one Telegram message per piece).
+func TestChain_OversizedSegment_SplitsIntoMultipleChunks(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var sent []string
+	var sentMsgIDs []int64
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		sent = append(sent, text)
+		id := int64(940 + len(sent))
+		sentMsgIDs = append(sentMsgIDs, id)
+		return id, nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	// 5000-char segment: well past chainChunkThresholdChars (3500)
+	// and very likely past maxTelegramTextLength (3900) after
+	// markdown rendering, forcing splitTelegramText into multi-piece.
+	huge := strings.Repeat("x", 5000)
+
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10, huge, nil, sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sent) < 2 {
+		t.Fatalf("oversized segment should split into >=2 sendMessage calls; got %d", len(sent))
+	}
+	if len(chain.chunks) != len(sent) {
+		t.Fatalf("chain.chunks count (%d) must match sendMessage count (%d)",
+			len(chain.chunks), len(sent))
+	}
+	if chain.cursor != len(chain.chunks)-1 {
+		t.Fatalf("cursor should land on last piece; got %d, want %d",
+			chain.cursor, len(chain.chunks)-1)
+	}
+}
+
+// TestChain_SplitChunks_AllCarrySameTimestamp locks the SPLIT-vs-
+// ROTATE visual distinction. All SPLIT chunks share the same
+// headerLine from a single heartbeatText(nil) call, so their
+// `⏱ HH:MM:SS` strings are byte-identical.
+func TestChain_SplitChunks_AllCarrySameTimestamp(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	sendFn := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		return int64(950 + len(chain.chunks)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10, strings.Repeat("x", 5000), nil, sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.chunks) < 2 {
+		t.Skipf("split didn't produce 2+ chunks; cannot check timestamps")
+	}
+
+	first := chain.chunks[0].headerText()
+	for i := 1; i < len(chain.chunks); i++ {
+		if got := chain.chunks[i].headerText(); got != first {
+			t.Fatalf("chunk[%d] header %q differs from chunk[0] %q; "+
+				"SPLIT chunks must share the same heartbeatText(nil) output",
+				i, got, first)
+		}
+	}
+}
+
+// TestChain_SplitChunks_FirstPiecesAreFrozen locks the partial-freeze
+// semantics: pieces 1..N-1 are markFull'd, only the last piece stays
+// active and accepts subsequent appendSegment calls.
+func TestChain_SplitChunks_FirstPiecesAreFrozen(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	sendFn := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		return int64(960 + len(chain.chunks)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10, strings.Repeat("x", 5000), nil, sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	n := len(chain.chunks)
+	if n < 2 {
+		t.Skipf("split didn't produce 2+ chunks; got %d", n)
+	}
+
+	for i := 0; i < n-1; i++ {
+		if !chain.chunks[i].isChunkFull() {
+			t.Fatalf("chunk[%d] (frozen piece) must be markFull'd", i)
+		}
+	}
+	if chain.chunks[n-1].isChunkFull() {
+		t.Fatalf("chunk[%d] (active tail) must NOT be markFull'd", n-1)
+	}
+}
+
+// TestChain_SplitChunks_SubsequentEntryLandsOnLastPiece locks the
+// "active piece = tail" invariant: after a SPLIT, a subsequent
+// appendSegment call lands on the last piece (chain.cursor), not on
+// the first.
+func TestChain_SplitChunks_SubsequentEntryLandsOnLastPiece(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	sendFn := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		return int64(970 + len(chain.chunks)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10, strings.Repeat("x", 5000), nil, sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.chunks) < 2 {
+		t.Skipf("split didn't produce 2+ chunks")
+	}
+	tailIdx := chain.cursor
+	tailEntriesBefore := len(chain.chunks[tailIdx].entries)
+	chunksBefore := len(chain.chunks)
+
+	// Subsequent small entry. Case 2 (append-in-place) should land
+	// on chain.chunks[tailIdx] without minting a new chunk.
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10, "tiny follow-up", nil, sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(chain.chunks) != chunksBefore {
+		t.Fatalf("case 2 should append in place; chain.chunks grew from %d to %d",
+			chunksBefore, len(chain.chunks))
+	}
+	if chain.cursor != tailIdx {
+		t.Fatalf("cursor moved off tail piece; was %d, now %d", tailIdx, chain.cursor)
+	}
+	if len(chain.chunks[tailIdx].entries) != tailEntriesBefore+1 {
+		t.Fatalf("tail piece should have grown by 1 entry; was %d, now %d",
+			tailEntriesBefore, len(chain.chunks[tailIdx].entries))
+	}
+}
+
+// TestChain_OversizedError_SplitsIntoMultipleChunks mirrors
+// TestChain_OversizedSegment_SplitsIntoMultipleChunks for the
+// OutError path. A long stderr (>= chainChunkThresholdChars raw)
+// routes to splitOversizedErrorSegmentLocked.
+func TestChain_OversizedError_SplitsIntoMultipleChunks(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var sent []string
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		sent = append(sent, text)
+		return int64(980 + len(sent)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	// estimateErrorSize = 10 + len(stderr) + 1. Set stderr to
+	// 4000 chars → estimate 4011, comfortably over
+	// chainChunkThresholdChars (3500).
+	hugeStderr := strings.Repeat("e", 4000)
+
+	if err := appendErrorSegment(context.Background(), chain,
+		"c1", 0, 10,
+		"tool exit 1",
+		hugeStderr,
+		nil,
+		sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sent) < 2 {
+		t.Fatalf("oversized OutError should split into >=2 sendMessage calls; got %d", len(sent))
+	}
+	if len(chain.chunks) != len(sent) {
+		t.Fatalf("chain.chunks count (%d) must match sendMessage count (%d)",
+			len(chain.chunks), len(sent))
+	}
+}
+
+// TestChain_RotateAndSplitDistinguishedByHeader locks the visual
+// distinction between SPLIT and ROTATE. Both produce multi-chunk
+// chains but their chunks carry different timestamps:
+//   - SPLIT chunks share one heartbeatText(nil) call → identical
+//     headerLine across all chunks.
+//   - ROTATE chunks each take their own heartbeatText(nil) call →
+//     distinct headerLines (likely, even if they happen to share
+//     second-resolution timestamps).
+func TestChain_RotateAndSplitDistinguishedByHeader(t *testing.T) {
+	// SPLIT path
+	chainSplit := &placeholderChain{cursor: -1}
+	sendFnS := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		return int64(990 + len(chainSplit.chunks)), nil
+	}
+	editFnS := func(_ context.Context, _ string, _ int64, _ string) error { return nil }
+	if err := appendSegment(context.Background(), chainSplit,
+		"c1", 0, 10, strings.Repeat("a", 5000), nil, sendFnS, editFnS,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(chainSplit.chunks) < 2 {
+		t.Skipf("split path didn't produce 2+ chunks; cannot compare")
+	}
+	splitHeader0 := chainSplit.chunks[0].headerText()
+	splitHeader1 := chainSplit.chunks[1].headerText()
+	if splitHeader0 != splitHeader1 {
+		t.Fatalf("SPLIT chunks must share header; got %q vs %q",
+			splitHeader0, splitHeader1)
+	}
+
+	// ROTATE path: two separate appendSegment calls each big
+	// enough to overflow the previous chunk. Each call mints its
+	// own chunk via heartbeatText(nil) at a different moment, so
+	// headers should differ (unless the OS clock stayed on the
+	// same second — accept that as a tolerated race).
+	chainRotate := &placeholderChain{cursor: -1}
+	sendFnR := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		return int64(995 + len(chainRotate.chunks)), nil
+	}
+	editFnR := func(_ context.Context, _ string, _ int64, _ string) error { return nil }
+	for i := 0; i < 2; i++ {
+		if err := appendSegment(context.Background(), chainRotate,
+			"c1", 0, 10, strings.Repeat("b", chainChunkThresholdChars), nil, sendFnR, editFnR,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(chainRotate.chunks) != 2 {
+		t.Fatalf("rotate path expected 2 chunks; got %d", len(chainRotate.chunks))
+	}
+	// ROTATE chunks SHOULD have different headers (different
+	// heartbeatText calls). Identical headers here would mean the
+	// two appendSegment calls landed within the same second AND
+	// the test happens to have run on a low-resolution clock.
+	// We can't strictly assert inequality, but if both headers
+	// came from the same heartbeatText(nil) call (the way SPLIT
+	// would behave), that's a code bug.
+	if chainRotate.chunks[0].headerText() == chainRotate.chunks[1].headerText() {
+		t.Logf("note: rotate chunks share header %q; possibly same-second timestamp",
+			chainRotate.chunks[0].headerText())
+	}
+}

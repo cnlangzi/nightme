@@ -145,13 +145,11 @@ func (a *Adapter) sendText(ctx context.Context, chatID string, topicID int, repl
 	return nil
 }
 
-func (a *Adapter) sendRenderedText(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) error {
-	rendered, err := RenderMarkdown(text)
-	if err != nil {
-		return err
-	}
-	return a.sendText(ctx, chatID, topicID, replyToMessageID, rendered)
-}
+// sendRenderedText was the v8 per-bubble path: take raw text,
+// run RenderMarkdown, split at 3900 chars, send each piece.
+// v9 chain rolled all text-emitting Kinds into the chain
+// segment appendSegmentForKind path; no callers remain in
+// production code. Removed 2026-08-23 (codex review).
 
 // chatIDPrefix is the Telegram channel namespace tag attached to
 // every InboundMessage.ChatID by the adapter. It exists so that
@@ -260,7 +258,7 @@ func (a *Adapter) choiceKeyboard(state *ChoiceState) map[string]any {
 			label = option.ID
 		}
 		button := map[string]any{
-			"text":          escapeHTML(label),
+			"text":          escapeInline(label),
 			"callback_data": choiceCallbackData(state, index),
 		}
 		if len(state.Choice.Questions) > 0 {
@@ -316,16 +314,16 @@ func renderChoice(state *ChoiceState) string {
 	}
 	var body strings.Builder
 	body.WriteString("<b>")
-	body.WriteString(escapeHTML(title))
+	body.WriteString(escapeInline(title))
 	body.WriteString("</b>")
 	if len(choice.Questions) > 0 {
 		if state.Step < len(choice.Questions) {
 			body.WriteString("\n\n")
-			body.WriteString(escapeHTML(choice.Questions[state.Step].Question))
+			body.WriteString(escapeInline(choice.Questions[state.Step].Question))
 		}
 	} else if choice.Body != "" {
 		body.WriteString("\n\n")
-		body.WriteString(escapeHTML(choice.Body))
+		body.WriteString(escapeInline(choice.Body))
 	}
 	return body.String()
 }

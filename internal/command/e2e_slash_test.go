@@ -41,7 +41,6 @@ import (
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/gatewaytest"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
@@ -283,9 +282,9 @@ func (e2eStubRouter) Handle(_ context.Context, _ string, _ commandServices.React
 	return false
 }
 
-// ─── testChannelWrap (test-only outbound.Emitter adapter) ──────────
+// ─── testChannelWrap (test-only messages.Emitter adapter) ──────────
 //
-// Wraps a channel.Channel into an outbound.Emitter so the e2e
+// Wraps a channel.Channel into an messages.Emitter so the e2e
 // test can exercise the chat-session-bound Emitter path without
 // dragging in the runtime wiring from cmd/nightme. PATCH semantics
 // are encoded as Kind=OutChoicePatch (the wrap just forwards to
@@ -299,9 +298,9 @@ func (w *testChannelWrap) Send(ctx context.Context, msg messages.OutboundMessage
 	return w.ch.Send(ctx, msg)
 }
 
-var _ outbound.Emitter = (*testChannelWrap)(nil)
+var _ messages.Emitter = (*testChannelWrap)(nil)
 
-// noopEmitter is a do-nothing outbound.Emitter used by tests
+// noopEmitter is a do-nothing messages.Emitter used by tests
 // that drive the gateway but don't care about outbound flow
 // (the e2e harness already wires the real wrap above for the
 // chat-session path; this one is for the gateway's own reference).

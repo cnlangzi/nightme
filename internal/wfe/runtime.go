@@ -16,7 +16,7 @@ import (
 //   - RunShell: direct os/exec; cwd = run.Workspace
 //   - SendPrompt: push msg into bot.Incoming(); block waiting on
 //     the per-run reply channel; reply is delivered via bot.Send
-//     (called by the gateway's outbound.Emitter).
+//     (called by the gateway's messages.Emitter).
 //   - RunAction: ActionRegistry.Run(spec.Name, spec.With, spec.Env)
 //   - Now: time.Now (injected so wfe has no clock dependency)
 type Runtime interface {

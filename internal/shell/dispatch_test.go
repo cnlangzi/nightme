@@ -13,7 +13,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -317,7 +316,7 @@ func evalLinks(p string) string {
 //     don't emit
 // ---------------------------------------------------------------------------
 
-// fakeEmitter records each Send call. Implements outbound.Emitter
+// fakeEmitter records each Send call. Implements messages.Emitter
 // via the Send method.
 //
 // sendErr, when non-nil, is returned from Send — used to verify
@@ -849,7 +848,7 @@ func testMgr(t *testing.T) *chatsession.Manager {
 // the given Emitter wired. v1.3+ multi-channel: shell.Handle
 // uses mgr.Emitter() for outbound, so the test Manager must
 // carry the Emitter for the reply to be sent.
-func testMgrWithEmitter(t *testing.T, em outbound.Emitter) *chatsession.Manager {
+func testMgrWithEmitter(t *testing.T, em messages.Emitter) *chatsession.Manager {
 	t.Helper()
 	return chatsession.NewManager().WithEmitter(em)
 }

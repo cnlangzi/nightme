@@ -2176,14 +2176,40 @@ func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
 	t.Skip("F-CLAUDE-PRINT-002: stub pending rewrite")
 }
 
-func TestSend_OutInit_SilentDrop(t *testing.T) {
+func TestSend_OutInit_StampsFooterOnReceipt(t *testing.T) {
+	// F-44 follow-up: OutInit no longer silently drops. With a
+	// ReplyTo, the adapter looks up the existing receipt (created
+	// by the dispatcher for /review and /gtw) and stamps the
+	// StatusBar footer onto the receipt card via
+	// MessageReceipt.StampFooterLines → renderLocked → PATCH.
+	//
+	// Cold-start path (no pre-existing receipt; the dispatcher
+	// didn't pre-create one) flows through
+	// ensureReceiptForTyping's first-render branch — covered
+	// indirectly by the existing TestSend_OutReply placeholder
+	// path; no separate cold-start OutInit test needed because
+	// the rendering shape is identical to a placeholder receipt
+	// with a footer.
 	a := testAdapter(t)
-	var count int
+	var sentCount int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
-		count++
+		sentCount++
 		return "om_msg", nil
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	// Pre-register a receipt so the OutInit lands on the
+	// pre-existing-receipt branch (matches /review flow: dispatcher
+	// calls SendCardForReceipt, then bridge emits OutInit).
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:      messages.OutReply,
+		ChatID:    "oc_test",
+		ReplyTo:   "om_user",
+		Text:      "⌨️ Working...",
+	}); err != nil {
+		t.Fatalf("Send(OutReply placeholder): %v", err)
+	}
+	sentCount = 0 // reset — count only the OutInit's traffic
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		Kind:      messages.OutInit,
@@ -2197,8 +2223,40 @@ func TestSend_OutInit_SilentDrop(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send(OutInit): %v", err)
 	}
-	if count != 0 {
-		t.Errorf("send count = %d, want 0 (OutInit silent drop until footer PR)", count)
+	// OutInit on a pre-existing receipt must NOT issue a new send
+	// (would create a duplicate card); it must PATCH the existing
+	// receipt. sendFunc==0 means no new send; the receipt's own
+	// PatchMessage path runs and we don't count it here.
+	if sentCount != 0 {
+		t.Errorf("send count = %d, want 0 (OutInit must PATCH receipt, not send new card)", sentCount)
+	}
+}
+
+func TestSend_OutInit_OrphanSilent(t *testing.T) {
+	// Orphan OutInit (ReplyTo == "") — startup EventAgentReady or
+	// internal log. The adapter silently drops because we have no
+	// receipt to stamp. This is the rare path; the main /review and
+	// /gtw flows always pre-create a receipt.
+	a := testAdapter(t)
+	var sentCount int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sentCount++
+		return "om_msg", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:      messages.OutInit,
+		ChatID:    "oc_test",
+		ReplyTo:   "", // orphan — startup EventAgentReady
+		SessionID: "s_1",
+		Model:     "claude-sonnet-4-5",
+		AgentName: "claude",
+	}); err != nil {
+		t.Fatalf("Send(OutInit orphan): %v", err)
+	}
+	if sentCount != 0 {
+		t.Errorf("orphan OutInit send count = %d, want 0 (no receipt to stamp)", sentCount)
 	}
 }
 

@@ -72,7 +72,7 @@ var _ = slog.Default
 //     → inbound.Dispatch → tryCommandDispatch (for "/cwd ...")
 //     → ChatSession.HandleSlashCommand ("/cwd")
 //     → ChatSession's SelectedCwd is set
-//     → reply flows back through outbound.Emitter
+//     → reply flows back through messages.Emitter
 //     → bot.Send (delivered to the registered botRun.reply)
 //
 // If this test passes, the bot-as-channel design is verified:

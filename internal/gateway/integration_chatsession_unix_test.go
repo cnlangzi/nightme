@@ -23,7 +23,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// fakeCh is a minimal outbound.Emitter for tests in this package.
+// fakeCh is a minimal messages.Emitter for tests in this package.
 
 // T-alive: end-to-end integration test that reproduces the
 // "AgentSession events never reach the channel" regression
@@ -679,7 +679,7 @@ func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []strin
 	})
 }
 
-// noopEmitter is a test-only outbound.Emitter that does nothing.
+// noopEmitter is a test-only messages.Emitter that does nothing.
 type noopEmitter struct{}
 
 func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {

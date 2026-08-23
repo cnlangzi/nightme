@@ -879,7 +879,10 @@ buildThinkingCard("💭 <text>")  →  Card 2.0 JSON
 
 **职责边界**：
 - ChatSession：持有 `ThinkMode` 状态 + 提供 setter
-- runtime EventHandler（`cmd/nightme/run.go::newEventHandler`）：gate 决策点，读 `cs.ThinkMode()`
+- **Gate 决策点**（F-CODEX-RUNONCE-REVIEW-EVENT 之后的现状，两路共享同一份 policy）：
+  - `cmd/nightme/run.go::newEventHandler`（**长路径**，long-lived bridge 走 `cs.AgentEventBus` 的订阅器）—— 读 `cs.ThinkMode()`，对 `OutThinking` 应用 gate
+  - `internal/gateway/outbound/emitter_sink.go::dispatchSinkEvent`（**一次路径**，`StreamRunOnceToEmitter` 的 drain goroutine，`/gtw commit` / `/review -a foo` 等 one-shot 调用都走这里）—— 同样读 `cs.ThinkMode()`，对 `OutThinking` 应用 gate
+  - 两个 gate 共享 `internal/gateway/outbound/policy.go::ThinkModeGatePolicy`（F-CODEX-RUNONCE-REVIEW-EVENT 期间从 `internal/runtime/policy.go` 搬到 outbound，因为 policy 是 outbound 关注的事）
 - Channel adapter：照常处理到达的 OutboundMessage，不感知 ThinkMode
 
 **详细落地**：见 [`internal/command/think/cmd.go`](./internal/command/think/cmd.go) + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/thinking_card.go`](./internal/channel/feishu/thinking_card.go)。`/think` 由 `command.Commander`（[`internal/command/commander.go`](./internal/command/commander.go)）路由，ChatSession 持有 `ThinkMode` 状态、registry 侧 `ChatSessionEntry.ThinkMode` 持久化为裸 `int`，读侧由 `Manager.RestoreFromRegistry` 做 `ThinkMode(int)` cast。
@@ -928,7 +931,10 @@ mergeToolReply(om_xxx, "● Bash(ls)\n⎿  💻 Bash → 3 lines")
 
 **职责边界**：
 - ChatSession：持有 `ToolsMode` 状态 + 提供 setter
-- runtime EventHandler（`cmd/nightme/run.go::newEventHandler`）：gate 决策点，读 `cs.ToolsMode()`；仅对 `OutToolStart` / `OutToolEnd` 生效
+- **Gate 决策点**（F-CODEX-RUNONCE-REVIEW-EVENT 之后两路共享 policy，与 ThinkMode 同形）：
+  - `cmd/nightme/run.go::newEventHandler`（**长路径**）—— 读 `cs.ToolsMode()`；仅对 `OutToolStart` / `OutToolEnd` 生效
+  - `internal/gateway/outbound/emitter_sink.go::dispatchSinkEvent`（**一次路径**）—— 同样读 `cs.ToolsMode()`，对 `OutToolStart` / `OutToolEnd` 应用 gate
+  - 两个 gate 共享 `internal/gateway/outbound/policy.go::ToolsModeGatePolicy`（同 ThinkMode 一起搬到 outbound）
 - Channel adapter：照常处理到达的 OutboundMessage，不感知 ToolsMode；Feishu 自决是否合并
 - 合并实现：Feishu adapter 自治（`internal/channel/feishu/tool_thread_merge.go`）；不动抽象层
 

@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -789,7 +788,7 @@ func TestManager_HintPerChatLockIndependence(t *testing.T) {
 // TestManager_HintPerChatLockIndependence to simulate a slow
 // channel-adapter call without standing up a real Channel.
 type blockingEmitter struct {
-	outbound.Emitter // embedded so we satisfy the interface; nil-default methods never called
+	messages.Emitter // embedded so we satisfy the interface; nil-default methods never called
 	releaseA         chan struct{}
 	defaultResult    *messages.OutboundMessage
 	mu               sync.Mutex
@@ -811,5 +810,5 @@ func (b *blockingEmitter) Send(ctx context.Context, msg messages.OutboundMessage
 	return nil
 }
 
-// Compile-time guard: blockingEmitter must satisfy outbound.Emitter.
-var _ outbound.Emitter = (*blockingEmitter)(nil)
+// Compile-time guard: blockingEmitter must satisfy messages.Emitter.
+var _ messages.Emitter = (*blockingEmitter)(nil)

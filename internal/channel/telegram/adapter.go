@@ -569,10 +569,9 @@ func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) 
 	}
 	// DM / main-window: thread_id is 0. ensurePlaceholder is
 	// responsible for materialising a TopicState{topicID: 0}
-	// carrying the placeholder message id (see handleMessage
-	// and ensurePlaceholderForHeartbeat). Returning (0, nil) here
-	// keeps chatID stable ("tg_<chatid>") and lets the placeholder
-	// path own the stateStore write.
+	// carrying the placeholder message id (see handleMessage).
+	// Returning (0, nil) here keeps chatID stable ("tg_<chatid>")
+	// and lets the placeholder path own the stateStore write.
 	return 0, nil
 }
 
@@ -620,8 +619,9 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 		return err
 	}
 
-	// Materialise the in-memory chain so ensurePlaceholderForHeartbeat
-	// / Send can resolve it without recreating.
+	// Materialise the in-memory chain so subsequent Send() calls
+	// for Out* events (OutReply / OutToolStart / OutHeartbeat / …)
+	// can resolve this turn's chunks without recreating the chain.
 	chain := a.chains.getOrCreate(chatID, topicID, userMessageID)
 	chain.mu.Lock()
 	chunk := newChunkBody(int64(result.MessageID), header)
@@ -647,64 +647,29 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 // removed 2026-08-23 in favour of heartbeatText(nil) — both
 // produce identical output (`<b>🤖 Working...</b>`) and there
 // is no point keeping two functions in sync. Cold-create
-// callers (ensurePlaceholder / ensurePlaceholderForHeartbeat
-// / appendSegment case-1 / patchChainHeader fallback) now
-// invoke heartbeatText(nil) directly.
-
-// ensurePlaceholderForHeartbeat returns the placeholder message
-// id for the current turn, creating one if missing (e.g., when
-// the first OutHeartbeat races ahead of handleMessage's
-// ensurePlaceholder, or after a transient network failure). Used
-// by the OutHeartbeat PATCH path and by Send prelude's
-// placeholderAnchor resolution.
+// callers (ensurePlaceholder / appendSegment case-1 /
+// patchChainHeader fallback) now invoke heartbeatText(nil)
+// directly.
 //
-// Race-window guard (2026-08-22, codex review): if the
-// ChatSession state has no UserMessageID set yet (handleMessage
-// hasn't run yet for this turn), we DON'T lazy-create — the
-// created placeholder would be orphan-raced: handleMessage's
-// subsequent ensurePlaceholder call would overwrite
-// state.PlaceholderMessageID with a new placeholder, leaving
-// the heartbeat-created bubble in the chat as a permanent
-// "🤖 Working..." without terminal PATCH or 🎉 reaction.
-// Returning (0, nil) is safe: Send's OutHeartbeat path
-// silently drops when placeholderAnchor == 0 (the in-turn status
-// ticker is then conveyed only after handleMessage lands).
+// ensurePlaceholderForHeartbeat was removed on 2026-08-23 in
+// favour of the eager ensurePlaceholder-in-handleMessage path
+// + the Compose header-skip rule (§11.12.5). The lifecycle is:
+//   - handleMessage (per incoming user msg) calls
+//     ensurePlaceholder synchronously, before publishing the
+//     inbound. state.UserMessageID + state.PlaceholderMessageID
+//     are populated atomically with the chain entry, so any Out*
+//     that the runtime eventually emits finds a ready chain.
+//   - chunkBody.hasHeartbeat stays false for cold-create and
+//     for any non-agent turn (slash command reply, error path,
+//     reaction-only click). Compose's
+//     "render header iff hasHeartbeat || entries==empty" rule
+//     is what hides the legacy frozen-banner bug — see
+//     §11.12.5.
 //
-// Topic mode and DM mode behave the same: return existing
-// placeholder if state.PlaceholderMessageID > 0, otherwise
-// create one (only when UserMessageID is set, see above).
-// The placeholder is the per-turn status ticker
-// (Working… → ✅ Completed); reply chain goes to userMsgID.
-// See docs/channel/telegram.md §11.11.
-func (a *Adapter) ensurePlaceholderForHeartbeat(ctx context.Context, chatID string, topicID int) (int, error) {
-	state, ok := a.state.topic(chatID, topicID)
-	if ok && state.PlaceholderMessageID > 0 {
-		return state.PlaceholderMessageID, nil
-	}
-	// Race-window guard: handleMessage hasn't populated the state
-	// yet. Wait for it instead of creating a placeholder that
-	// will be orphan'd by the subsequent ensurePlaceholder call.
-	if !ok || state.UserMessageID == "" {
-		return 0, nil
-	}
-	// Genuine "placeholder was supposed to exist but didn't" case
-	// (e.g., ensurePlaceholder failed with transient network
-	// error). Create one now.
-	initialText := heartbeatText(nil)
-	result, err := a.sendTelegramMessage(ctx, chatID, topicID, 0, initialText, nil)
-	if err != nil {
-		return 0, err
-	}
-	if state == nil {
-		state = &TopicState{ChatID: chatID, TopicID: topicID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	}
-	state.PlaceholderMessageID = result.MessageID
-	state.LastMessageID = result.MessageID
-	if err := a.state.putTopic(state); err != nil {
-		return result.MessageID, err
-	}
-	return result.MessageID, nil
-}
+// What this removed: the lazy bootstrap attempt from Send()
+// (create placeholder on demand if handleMessage hadn't
+// shipped yet) was racy by design and got superseded by
+// simply not being needed.
 
 func (a *Adapter) attachments(ctx context.Context, message *Message, chatID string) ([]messages.Attachment, error) {
 	values := make([]attachmentSource, 0, 2)
@@ -893,32 +858,29 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// "🤖 Working..." to Telegram.
 		return nil
 	}
-	// Resolve anchors up front. Two distinct concepts (both used
-	// in BOTH topic and DM mode — per-user-message semantics):
+	// Resolve replyAnchor up front. reply_to_message_id for OutXxx
+	// bubbles — always the user message id that triggered this
+	// turn (TopicState.UserMessageID, populated eagerly by
+	// handleMessage → ensurePlaceholder). Reply chain hangs
+	// under the user's own "hi" message in both DM and topic
+	// modes, so the user sees their own message at the top of the
+	// chain.
 	//
-	//   placeholderAnchor — the per-turn "🤖 Working..." bot
-	//     message id. Each user message creates a fresh one.
-	//     Used by OutHeartbeat (PATCH status text) and
-	//     OnPromptEnded (PATCH to ✅ Completed). The previous
-	//     turn's placeholder stays in the Telegram timeline as
-	//     that turn's permanent status marker.
-	//
-	//   replyAnchor — reply_to_message_id for OutXxx bubbles.
-	//     Always the user message id that triggered this turn
-	//     (TopicState.UserMessageID). Reply chain hangs under
-	//     the user's own "hi" message in both DM and topic
-	//     modes, so the user sees their own message at the top
-	//     of the chain.
+	// The "placeholder message id" anchor (used to live here as
+	// placeholderAnchor) is no longer computed at Send-time. v9
+	// P1 (2026-08-23) removed ensurePlaceholderForHeartbeat
+	// entirely: the per-turn placeholder is created eagerly in
+	// handleMessage (chain → chunk body via ensurePlaceholder);
+	// OutHeartbeat's only job is to PATCH the active chunk's
+	// header (hasHeartbeat flips → Compose renders), and the
+	// chunk's Telegram messageID is resolved inside
+	// patchChainHeader via the chainLRU. No state lookup needed
+	// here. The legacy race-window guard (UserMessageID not yet
+	// populated → silent drop) is also gone: handleMessage is
+	// synchronous and writes state before publishing, so by the
+	// time any Out* reaches Send the chain is already in place.
 	//
 	// See docs/channel/telegram.md §11.11 for the full UX.
-	placeholderAnchor, placeholderErr := a.ensurePlaceholderForHeartbeat(ctx, rawChatID, topicID)
-	if placeholderErr != nil && a.logger != nil {
-		a.logger.Warn("telegram: placeholder resolve failed",
-			"chat_id", rawChatID,
-			"thread_id", topicID,
-			"err", placeholderErr,
-		)
-	}
 	var replyAnchor int
 	if state, ok := a.state.topic(rawChatID, topicID); ok {
 		if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
@@ -931,17 +893,16 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	case messages.OutChoicePatch:
 		return a.patchChoice(ctx, msg)
 	case messages.OutHeartbeat:
-		// PATCH the per-turn placeholder for live "Working..."
-		// v9: heartbeat only PATCHes the active chunk's headerLine
-		// (in-memory). The next debounce flush writes the full
-		// rendered text to Telegram. If no chunk exists yet (the
-		// first heartbeat raced ahead of handleMessage), silently
-		// drop — OutMessageState's 👌 reaction already announces
-		// the turn.
-		if placeholderAnchor > 0 {
-			return a.patchChainHeader(rawChatID, topicID, replyAnchor, msg)
-		}
-		return nil
+		// v9 P1 (2026-08-23): the eager ensurePlaceholder in
+		// handleMessage guarantees the chain + chunk exists before
+		// any Out* lands, so there is no race to guard against.
+		// patchChainHeader still defensively returns nil when
+		// chain.cursor < 0 (a transient / purged state) — that is
+		// its own correctness gate, not a placeholder-anchor
+		// resolution step. OutMessageState's 👌 reaction still
+		// announces the turn if a heartbeat ever gets silently
+		// dropped.
+		return a.patchChainHeader(rawChatID, topicID, replyAnchor, msg)
 	case messages.OutMessageState:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageState missing MessageState or MessageID")
@@ -1418,6 +1379,17 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 // picks which formatter to call and stores the result. No markup
 // or timestamp composition happens here — that's the entire
 // point of the refactor.
+//
+// v9 P1 (2026-08-23): use setHeaderFromHeartbeat (not setHeader)
+// on the real-heartbeat branch. This flips chunk.hasHeartbeat=true
+// so Compose's "render header iff hasHeartbeat || entries==empty"
+// rule starts respecting the new info. Cold-create path constructs
+// the chunk with the cold banner header directly via newChunkBody
+// (no setHeader call needed), keeping hasHeartbeat=false for
+// non-agent turns — which is exactly what hides the frozen
+// "🤖 Working..." banner that was the v8 bug. Overflow / split /
+// rotate / tail paths use inheritLatestHeader to copy the (header,
+// hasHeartbeat) pair from the prior active chunk.
 func (a *Adapter) patchChainHeader(
 	chatID string,
 	topicID int,
@@ -1431,8 +1403,20 @@ func (a *Adapter) patchChainHeader(
 		return nil
 	}
 	if msg.Heartbeat != nil {
-		chain.chunks[chain.cursor].setHeader(heartbeatText(msg.Heartbeat))
+		chain.chunks[chain.cursor].setHeaderFromHeartbeat(heartbeatText(msg.Heartbeat))
 	} else {
+		// OutHeartbeat always carries a Heartbeat payload in
+		// production (the gateway fills msg.Heartbeat before the
+		// Send case fires), but defensive fallback if a future
+		// caller forgets: reset to cold-create header text. NOTE:
+		// setHeader does NOT touch hasHeartbeat — if a previous
+		// heartbeat on this chunk had already flipped it true, it
+		// stays true. Compose will then render the cold banner
+		// header anyway because hasHeartbeat=true, which is a
+		// defensive inconsistency rather than the legacy silent-
+		// drop path. Acceptable: this branch only fires on a
+		// programmer error (missing Heartbeat payload) and the
+		// next legitimate OutHeartbeat will repair the state.
 		chain.chunks[chain.cursor].setHeader(heartbeatText(nil))
 	}
 	a.logger.Info("telegram: heartbeat header set",

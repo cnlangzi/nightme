@@ -7,7 +7,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Factory implements command.SlashCommandFactory for /gtw.
@@ -162,7 +162,7 @@ func (f *Factory) withHooks(
 	if len(before) == 0 && len(after) == 0 {
 		mainErr := main()
 		if block := formatLoadNotes(loadNotes); block != "" {
-			em := outbound.Emitter(nil)
+			em := messages.Emitter(nil)
 			if cs != nil {
 				em = cs.Emitter()
 			}
@@ -205,7 +205,7 @@ func (f *Factory) withHooks(
 	}
 	post := RunHooks(ctx, after, postHC, postCwd)
 
-	var em outbound.Emitter
+	var em messages.Emitter
 	if cs != nil {
 		em = cs.Emitter()
 	}

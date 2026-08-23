@@ -130,6 +130,14 @@ func appendSegment(
 		chunk.appendEntry(segment)
 		// Set the footer before computing the body so the cold-
 		// create render matches what subsequent flushes produce.
+		// P0 #1 fix: seed entries so the inlined segment is
+		// re-rendered on every subsequent flush. Without this,
+		// Compose() at the next flush would only render the
+		// cold-create header (and a footer if set) — overwriting
+		// the original message content with no body. The banner-
+		// hide rule (§11.12.5) means the rendered cold-create
+		// body is just the segment (header skipped because
+		// entries>0 && !hasHeartbeat), which is what the user sees.
 		if chain.lastFooter != nil {
 			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
 		}
@@ -154,16 +162,20 @@ func appendSegment(
 	}
 
 	// 3. Overflow → lock current chunk and materialise a fresh one.
-	// The new chunk's header is heartbeatText(nil) — its creation
-	// time, NOT cur.headerText(). This matches the SPLIT path
-	// (§11.12.7.2 trigger 1) which also uses heartbeatText(nil) for
-	// all its chunks. Each Telegram message's header reflects the
-	// time the message was actually sent, so users scrolling to the
-	// bottom of the chat see timestamps that monotonically advance.
-	// The next OutHeartbeat will refresh the new chunk's header
-	// forward to a fresh snapshot as usual.
+	// The new chunk inherits cur's (header, hasHeartbeat) pair via
+	// inheritLatestHeader so each frozen chunk reads as a
+	// chronological snapshot of the chain's active state at the
+	// moment it was born. patchChainHeader continues to update only
+	// chain.chunks[cursor] (the active chunk); frozen chunks stay
+	// frozen at their snapshot timestamp. This is what gives the
+	// chat scrollback a readable timeline of header snapshots
+	// instead of a flat latest-banner — the inverse of "fresh
+	// timestamp per message" semantics, by design (see §11.12.7.2
+	// for the historical "creation time" rationale, superseded by
+	// inherit-from-active as of 2026-08-23).
 	cur.markFull()
-	newChunk := newChunkBody(0, heartbeatText(nil))
+	newChunk := newChunkBody(0, "")
+	newChunk.inheritLatestHeader(cur)
 	newChunk.appendEntry(segment)
 	if chain.lastFooter != nil {
 		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
@@ -261,7 +273,8 @@ func appendSegmentLocked(
 
 	// 3. Overflow → lock current chunk and materialise a fresh one.
 	cur.markFull()
-	newChunk := newChunkBody(0, heartbeatText(nil))
+	newChunk := newChunkBody(0, "")
+	newChunk.inheritLatestHeader(cur)
 	newChunk.appendEntry(segment)
 	if chain.lastFooter != nil {
 		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
@@ -412,19 +425,24 @@ func splitOversizedSegmentLocked(
 		return err
 	}
 
-	// Mark the existing active chunk (if any) full — the SPLIT
-	// concludes the prior logical message. Subsequent entries land
-	// on the tail of the SPLIT, not on this chunk.
+	// Capture the active source chunk BEFORE markFull so we can
+	// inherit its (header, hasHeartbeat) snapshot onto each split
+	// piece. Frozen SPLIT pieces keep their at-creation snapshot
+	// forever (see ROTATE semantics in appendSegment case 3).
+	var inheritFrom *chunkBody
 	if chain.cursor >= 0 {
-		chain.chunks[chain.cursor].markFull()
+		inheritFrom = chain.chunks[chain.cursor]
+		inheritFrom.markFull()
 	}
 
-	headerLine := heartbeatText(nil)
 	footerSnapshot := chain.lastFooter
 
 	newChunks := make([]*chunkBody, 0, len(pieces))
 	for i, p := range pieces {
-		ch := newChunkBody(0, headerLine)
+		// Cold-construct with empty header so adopt doesn't
+		// overwrite a non-empty header with an empty source.
+		ch := newChunkBody(0, "")
+		ch.inheritLatestHeader(inheritFrom)
 		ch.appendEntryHTML(p)
 		if footerSnapshot != nil {
 			ch.setFooter(statusbar.RenderPanel(footerSnapshot))
@@ -570,11 +588,13 @@ func flushChainNow(
 		if err != nil {
 			return err
 		}
-		// Header reflects the time the tail chunk is being sent —
-		// matches the SPLIT path and appendSegment case 3, so all
-		// new chunks produced by the chain get a fresh timestamp
-		// rather than inheriting cur's potentially stale header.
-		tail := newChunkBody(int64(mid), heartbeatText(nil))
+		// The tail chunk inherits cur's (header, hasHeartbeat)
+		// snapshot so it doesn't restart at the cold "🤖
+		// Working..." banner when a real heartbeat has already
+		// landed. cur was frozen above; its (header, hasHeartbeat)
+		// are still readable for the adopt.
+		tail := newChunkBody(int64(mid), "")
+		tail.inheritLatestHeader(cur)
 		// Seed entries with the lastPiece content as a plain-text
 		// entry. flushedLen=0 because the entire content is in
 		// entries — Compose will render it. Future appends land
@@ -713,10 +733,13 @@ func appendErrorSegment(
 		return nil
 	}
 
-	// Overflow: rotate.
+	// Overflow: rotate. New chunk inherits cur's (header, hasHeartbeat)
+	// so the OutError overflow chunk reads as a chronological snapshot
+	// of the chain's active state at the moment the error overflowed
+	// — same semantics as the plain appendSegment case 3 ROTATE.
 	cur.markFull()
-	inheritedHeader := cur.headerText()
-	newChunk := newChunkBody(0, inheritedHeader)
+	newChunk := newChunkBody(0, "")
+	newChunk.inheritLatestHeader(cur)
 	newChunk.appendError(text, stderr)
 	if chain.lastFooter != nil {
 		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
@@ -779,16 +802,19 @@ func splitOversizedErrorSegmentLocked(
 		return err
 	}
 
+	// Capture source BEFORE markFull for inheritLatestHeader.
+	var inheritFrom *chunkBody
 	if chain.cursor >= 0 {
-		chain.chunks[chain.cursor].markFull()
+		inheritFrom = chain.chunks[chain.cursor]
+		inheritFrom.markFull()
 	}
 
-	headerLine := heartbeatText(nil)
 	footerSnapshot := chain.lastFooter
 
 	newChunks := make([]*chunkBody, 0, len(pieces))
 	for i, p := range pieces {
-		ch := newChunkBody(0, headerLine)
+		ch := newChunkBody(0, "")
+		ch.inheritLatestHeader(inheritFrom)
 		ch.appendEntryHTML(p)
 		if footerSnapshot != nil {
 			ch.setFooter(statusbar.RenderPanel(footerSnapshot))

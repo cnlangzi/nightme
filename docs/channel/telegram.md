@@ -1,6 +1,6 @@
 # Telegram Channel - Topic 方案与接入设计
 
-> **Status**: implemented (核心场景) + 已知 gap 跟踪（见 §15）
+> **Status**: implemented (v8 per-turn 占位) + v9 chain rolling log 即将落地（见 §11.12）。已知 gap 跟踪见 §15。
 > **Scope**: nightme Telegram Bot API 适配器（`internal/channel/telegram/*`）
 > **目的**: 在 Telegram Forum Supergroup 中，将主窗口作为会话入口，将每个 qino 会话映射为一个 Topic，并在 Topic 内承载占位状态、thinking、工具调用、结果和交互卡。
 > **Related docs**:
@@ -499,7 +499,7 @@ InboundMessage 进入 chatstore
 }
 ```
 
-Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeholder_message_id, text)` 原地更新。**DM / 主窗口（thread_id=0）走 v3**：每条用户消息进来新建一条 `<b>🤖 Working...</b>` 占位，所有 OutXxx reply_to_message_id 锚到**用户原消息**（不是占位），turn 终态 PATCH 占位为 `✅ Completed`。跨 turn 的占位自然堆叠但语义清晰（每个都是独立 turn 的 permanent status marker）。详见 §11.11。
+Topic 内的占位消息"Working..." 仍然用 `editMessageText(chat_id, placeholder_message_id, text)` 原地更新。**DM / 主窗口（thread_id=0）走 v3**：每条用户消息进来新建一条 `<b>🤖 Working...</b>` 占位（注意 v9 实际不再带 v7 的 `· ⏱ HH:MM:SS` 时间戳后缀 —— 那是 `placeholderInitialText(now)` helper 的老行为,v9 直接 `heartbeatText(nil)`,时间戳由首次 OutHeartbeat 通过 `LastBeatAt` 段补上),所有 OutXxx reply_to_message_id 锚到**用户原消息**（不是占位），turn 终态 PATCH 占位为 `✅ Completed`。跨 turn 的占位自然堆叠但语义清晰（每个都是独立 turn 的 permanent status marker）。banner 是否**绘制**以及显示内容**是什么**取决于 §11.12.5.1 (Compose header-skip rule) + §11.12.7.4 (inheritLatestHeader)。详见 §11.11。
 
 `editForumTopic` 只修改 Topic 名称或图标，不修改 Topic 内正文，**不能**用来做占位更新。
 
@@ -716,13 +716,14 @@ chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
 
 **修订 (2026-08-22 plan-C v4)**：DM / 群主窗口（thread_id=0）和真实 topic（thread_id > 0）走**统一的 per-turn 占位 + reaction-driven 状态**方案：
 
-- 每个用户消息进来 → `ensurePlaceholder` **新建**一条 bot 占位 `<b>🤖 Working...</b>`（不是 sentinel topic，是真实 Telegram message）。`PlaceholderMessageID` 和 `UserMessageID` 都覆盖到新 turn 的值。
+- 每个用户消息进来 → `ensurePlaceholder` **新建**一条 bot 占位 `<b>🤖 Working...</b>`（不是 sentinel topic，是真实 Telegram message）。`PlaceholderMessageID` 和 `UserMessageID` 都覆盖到新 turn 的值。**v9 实际**:cold-create 文本是裸的 `<b>🤖 Working...</b>`,**不带 v7 plan-C 时代**的 `· ⏱ HH:MM:SS` 后缀 —— 时间戳由首次 `OutHeartbeat` 通过 `LastBeatAt` 段补上(`patchChainHeader` → `setHeaderFromHeartbeat`)。占位**是否实际渲染 `<b>🤖 Working...</b>`** 取决于 §11.12.5.1:如果接下来立刻有 body 内容落定 (slash command / 出错等非 agent turn),Compose 把 banner 藏起来,用户只看 body 不挂 "Working..." 假 alive 信号。Agent turn 则正常推进。
 - 同一 turn 的所有 OutXxx（`OutReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutResult` / `OutError` / `OutChoice`）都带 `reply_to_message_id = UserMessageID`，让 reply chain 锚到**用户的原消息**（不是占位）。Topic 模式下额外带 `message_thread_id = thread_id`。
 - turn 状态走 **message reaction**：runtime `MessageStateBus` → `OutMessageState` 触发 `setMessageReaction(userMsgID, 👌/🧠)`；`OnPromptEnded` 触发 `setMessageReaction(userMsgID, ✅)` + `setMessageReaction(PlaceholderMessageID, ✅)`。
-- `OutHeartbeat` PATCH 当前 turn 的占位文本（`🤖 Working...` / `💭 N · 🔧 M`）—— 是 in-turn 状态 ticker，**不再 PATCH 为 `<b>✅ Completed</b>`**。
+- `OutHeartbeat` PATCH 当前 turn 的占位文本（`🤖 Working...` / `💭 N · 🔧 M`）—— 是 in-turn 状态 ticker,**只 PATCH active cursor chunk**(§11.12.8)。`📈` 占位字符串怎么**呈现**+ frozen chunks 怎么**展示**也取决于 §11.12.5.1 和 §11.12.7.4 —— 后者让 overflow / split / rotate / tail piece 在**出生时刻** inherit 当下 active 状态,所以老 frozen chunks 仍读得出当时的 think/tool 计数。
+- `OutHeartbeat` **不再 PATCH 为 `<b>✅ Completed</b>`**(由 `setMessageReaction(PlaceholderMessageID, 🎉)` 承担终态视觉)
 - 跨 turn：老占位留作时间线状态标记（不被 ✅ PATCH、保持 working / heartbeat 文本），新 turn 创建新占位独立承载新状态。
 
-详细方案见 §11.11。
+详细方案见 §11.11（v4 历史快照）。当前即将演进到 **v9 per-turn multi-chunk chain rolling log**，见 §11.12。
 
 如果群组没有开启 Privacy Mode，Bot 会收到更多群组普通消息。qino 不应默认把每条群消息都交给 Agent，而应继续遵守群组 mention 策略：
 
@@ -805,9 +806,17 @@ Telegram 没有提供“列出 Bot 已加入全部群组”的 Bot API 接口。
 
 ### 11.11 per-turn placeholder + reaction-driven state（v4）
 
+> ▶ **本节为 v4 / v8 历史快照**。当前实现即将演进到 **v9 per-turn multi-chunk chain rolling log**（见 §11.12）。v9 把"独立 bubble + 单一占位 ticker"合并成一条 chain 内的 active chunk + frozen chunks 全量回写，保留 Telegram 不支持 append 的硬约束同时获得飞书式 fold 视觉。v9 落地后，本节内容继续保留作设计决策历史。
+
 Telegram Bot API 在 `chat.type == "private"`（DM）里不支持 Forum Topic，没有 `createForumTopic` / `message_thread_id` 概念。飞书靠 `reply_in_thread` 把中间事件折进 drawer，Telegram 没有等价物。
 
 v4 把 Telegram DM/topic 的视觉状态完全用 **message reactions** 表达（跟 Feishu receipt `AddReaction` + `SetPromptState` 对位），**不再 PATCH 占位文本为 `<b>✅ Completed</b>`**。
+
+> **§11.11 是 v4 / v8 设计快照**。**当前实现的真实行为取决于**:
+> - **§11.12.5.1 Compose header-skip rule**(v9 P1)：决定 banner 是否绘制 —— entries 有内容但无心跳时,cold-create banner 隐藏
+> - **§11.12.7.4 inheritLatestHeader 契约**(v9 P1.1)：决定每个新 chunk 出生时**继承** active 状态而非 cold "🤖 Working..."
+>
+> 想了解 banner / chunk 的真实渲染,跳到 §11.12.5 / §11.12.7.4。本节作为设计决策历史保留。
 
 #### 11.11.1 v3 + v6.3 + v7 核心契约
 
@@ -817,13 +826,16 @@ v4 把 Telegram DM/topic 的视觉状态完全用 **message reactions** 表达�
 
 ```text
 turn 1: 用户发 "hi 1" (userMsgID=10)
-    └─ ensurePlaceholder 创建 P1 = "🤖 Working... · ⏱ 15:18:08" bot 占位
+    └─ ensurePlaceholder 创建 P1 = "<b>🤖 Working...</b>" bot 占位
                        (v7: reply_to_message_id=10, 挂在用户消息下)
+                       (v9: 纯裸文本,无 v7 plan-C 的 `· ⏱ HH:MM:SS` 后缀;
+                        时间戳由首次 OutHeartbeat 通过 LastBeatAt 段补)
         state.PlaceholderMessageID = 700   (P1 的 id)
         state.UserMessageID       = "10"
     ├─ runtime emit MessageQueued(10)   → silent drop (v6.3 单 emoji 预算)
     ├─ runtime emit MessageSubmitted(10)→ setMessageReaction(10, 👌)
-    ├─ OutHeartbeat                    → editMessageText(700, "💭 2 · 🔧 1 · ⏱ 15:18:30")
+    ├─ OutHeartbeat                    → patchChainHeader(700) → setHeaderFromHeartbeat("💭 2 · 🔧 1 · ⏱ 15:18:30")
+                                            (v9: 只 PATCH active cursor chunk,frozen chunks 不主动广播)
     ├─ OutReply/Tool/Result             → sendMessage(reply_to_message_id=10, ...)
     └─ OnPromptEnded                    → setMessageReaction(700, 🎉)  ← v6.3: 不动 user msg reaction
 ```
@@ -833,26 +845,30 @@ turn 1: 用户发 "hi 1" (userMsgID=10)
 **v7 改进**：
 
 - **Placeholder 也用 reply chain** 挂到 user message（之前是独立消息，现在视觉上是 user message 下的 reply 群）
-- **占位文本带 `⏱ HH:MM:SS` 时间戳**（`⏱ 15:18:08`），user 一眼看到 "agent 在 15:18:30 还在跑"
-- **Race-window guard**（codex review 2026-08-22）：`ensurePlaceholderForHeartbeat` 在 `state.UserMessageID == ""` 时返回 `(0, nil)` 而不是 lazy-create。旧行为会 orphan 一个 placeholder（handleMessage 后续 `ensurePlaceholder` 会覆盖 `state.PlaceholderMessageID`，但旧 P1 已经在 chat 里没有被 PATCH 也没有 🎉）。新行为让 handleMessage 创建 canonical placeholder，heartbeat 走 silent drop。
+- (v7 历史) **占位文本曾带 `⏱ HH:MM:SS` 时间戳** —— `placeholderInitialText(now)` helper 拼接当前时间,user 一眼看到 "agent 在 15:18:30 还在跑"。**v9 已移除**:cold-create 现在直接调 `heartbeatText(nil)` = `<b>🤖 Working...</b>`,时间戳由首次 `OutHeartbeat` 通过 `LastBeatAt` 段补上(因为 agent 才真正有"start time"可记)。一行好处:slash / error 等非 agent turn 占位不再带虚假的启动时间戳。
+- **(v9 P1, 2026-08-23) 懒汉路径 `ensurePlaceholderForHeartbeat` 移除**：handleMessage 的 `ensurePlaceholder` 是同步、阻塞、并在 publish 之前执行 —— 没有再需要 "OutHeartbeat 先于 handleMessage 抢跑" 的兜底。原先的 race-window guard（`state.UserMessageID == ""` → 返回 `(0, nil)`）随方法一起删除。改由 §11.12.5.1 的 Compose header-skip rule 承接"非 agent turn 不留 stale Working banner"的职责 —— 那是个更干净的位置（render-time 而不是 path-time）。
 
 #### 11.11.2 视觉
 
 ```text
 Devin: hi 1  (react: 👌)                          11:50
-nightme: (reply to hi 1) 🤖 Working... · ⏱ 15:18:08  ← P1 (v7: reply chain)
+nightme: (reply to hi 1) 🤖 Working...                ← P1 (v7 reply chain; v9 无 ⏱ 后缀)
+                       (v9 P1.1 占位文本无 v7 时间戳;首次 OutHeartbeat 由 LastBeatAt 段补)
                      (react: 🎉 when done)
                      ├─ (PATCH) 💭 2 · 🔧 1 · ⏱ 15:18:25
                      ├─ (reply to hi 1) User keeps sending...
                      └─ (reply to hi 1) Hi! 👋 ...
 Devin: hi 2  (react: 👌)                          11:55
-nightme: (reply to hi 2) 🤖 Working... · ⏱ 15:18:08  ← P2 (v7: reply chain)
+nightme: (reply to hi 2) 🤖 Working...                ← P2 (v7 reply chain; v9 无 ⏱ 后缀)
+                       (v9 P1.1 占位文本无 v7 时间戳)
                      (react: 🎉 when done)
                      ├─ (PATCH) 💭 1 · 🔧 0 · ⏱ 15:18:35
                      └─ (reply to hi 2) Hi! 👋 ...
 ```
 
-**v7 改进**：所有 bot 消息（placeholder + OutXxx）**都挂在 user message 下**，形成统一 reply thread。占位文本带 `⏱ HH:MM:SS` 时间戳，user 一眼看到 "agent 正在 15:18:25 处理"。
+**v7 改进**：所有 bot 消息（placeholder + OutXxx）**都挂在 user message 下**，形成统一 reply thread。
+
+**v9 修订**:不再有 `⏱ HH:MM:SS` 冷启动时间戳(参见 §11.11.1 v7 → v9 段落) — 时间戳由首次 OutHeartbeat 的 `LastBeatAt` 段补,frozen chunks(overflow / split / rotate / tail)在 §11.12.7.4 持有**出生时刻**的 snapshot,让 scrollback 读起来有时序感(§11.12.7.4 完整 timeline 实例)。
 
 #### 11.11.3 emoji 选择
 
@@ -937,7 +953,7 @@ v4 的 👌/🧠/✅ 全部失败。v5 probe 结果（35 个候选 emoji 实测�
 **v6.3 进一步收紧**（user 决定）：单 reaction 预算用在最有信息量的 state —— **`MessageSubmitted = 👌`**。
 
 ```text
-Queued    → silent drop   (placeholder 文本 PATCH "🤖 Working..." 承担 "收到" 视觉)
+Queued    → silent drop   (placeholder 文本 PATCH "🤖 Working..." 承担 "收到" 视觉;**v9 P1 修订**:如 §11.12.5.1,body 内容先于首次 OutHeartbeat 落地时 banner 自动隐藏,避免 stale Working 假 alive)
 Submitted → 👌            (单 reaction slot 固定给 "AI thinking")
 Done      → silent drop   (OnPromptEnded 在 placeholder 上贴 ✅)
 ```
@@ -952,7 +968,7 @@ Done      → silent drop   (OnPromptEnded 在 placeholder 上贴 ✅)
 
 ```text
 Devin: hi
-nightme: 🤖 Working... ← placeholder
+nightme: 🤖 Working... ← placeholder (v9 冷启动时 banner 仅在 entries 空时渲染)
             (用户消息上: 👌 一直挂着,直到下次 turn)
             (placeholder 文本: "💭 2 · 🔧 1" 持续更新)
 OnPromptEnded:
@@ -1023,17 +1039,791 @@ Choice card 也 `reply_to_message_id = userMsgID`，让权限/问题卡片挂在
 
 #### 11.11.8 验收
 
+> 本节是 v4 / v8 行为快照。**当前实现的真实验收为** §11.12.16 测试矩阵(覆盖 §11.12.5.1 Compose header-skip + §11.12.7.4 inheritLatestHeader + §11.11.8 本节原始契约)。下面条目仅作 spec 背景,具体验收 = §11.12.16。
+
 - 同一 DM/topic 跨 daemon 重启，chatID 仍是 `tg_<chatid>[:thread_id]`，state 从 `telegram_state.json` hydrate
 - 每条用户消息进来 → `ensurePlaceholder` **新建** bot 占位，更新 `state.UserMessageID` 和 `state.PlaceholderMessageID`
 - 同一 turn 的 `OutReply` / `OutThinking` / `OutTool*` / `OutResult` / `OutError` / `OutChoice` 都带 `reply_to_message_id = userMsgID`（topic 还带 `message_thread_id`）
-- `OutHeartbeat` PATCH 当前 turn 的占位文本（`🤖 Working...` 或 `💭 N · 🔧 M`）—— 不 PATCH 为 ✅ Completed
+- `OutHeartbeat` PATCH 当前 turn 的 active cursor chunk 文本（`🤖 Working...` 或 `💭 N · 🔧 M`)—— 不 PATCH 为 ✅ Completed。**v9 P1.1 修订**:只 PATCH active cursor,**不** 广播到所有 frozen chunks(避免 N×editMessageText 风暴);frozen chunks 在 §11.12.7.4 inheritLatestHeader 规则下保持**出生时刻**的 (header, hasHeartbeat) 快照,scrollback 仍读得出 think/tool 推进时序。**v9 P1 修订**:banner 是否绘制取决于 §11.12.5.1(非 agent turn 的 body+no-heartbeat 不画 banner)。
 - 运行时 eventbus → OutMessageState → `setMessageReaction(userMsgID, 👌)`（MessageDone 不在 async dispatch emit，由 `OnPromptEnded` 兜底）
 - `OnPromptEnded` 调 `setMessageReaction(PlaceholderMessageID, 🎉)`（**不**碰 user message；保留 👌 让下一 turn 的状态可见），**不调 editMessageText**
 - 跨 turn：老占位 P_N-1 留作时间线证据（不被 ✅ Completed PATCH，但保持 working / heartbeat 文本）
-- 测试矩阵：`TestMapStateToTelegramEmoji` (👌) / `TestAdapter_Send_OutMessageState_SubmittedRenders` (👌) / `TestAdapter_Send_OutMessageState_QueuedRenders` (silent drop) / `TestAdapter_Send_OutMessageState_DoneRenders` (silent drop) / `TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder` (🎉 ×1 on placeholder, NO reaction on user msg) / `TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
-- placeholder 缺失（首次 OutHeartbeat 比 handleMessage 快）→ `ensurePlaceholderForHeartbeat` 懒创建，不丢事件
+- 测试矩阵：`TestMapStateToTelegramEmoji` (👌) / `TestAdapter_Send_OutMessageState_SubmittedRenders` (👌) / `TestAdapter_Send_OutMessageState_QueuedRenders` (silent drop) / `TestAdapter_Send_OutMessageState_DoneRenders` (silent drop) / `TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder` (🎉 ×1 on placeholder, NO reaction on user msg) / `TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
+- placeholder 不再"懒创建"——`ensurePlaceholder` 在 handleMessage 同步预先建好；OutHeartbeat 走 patchChainHeader 直接 PATCH 已存在的 chunk header（第 1383 行的 `placeholderAnchor` race-window guard 已移除）
 - 跨 turn：老占位 P_N-1 留作时间线状态标记（不动），新 turn 创建 P_N 独立承载新状态
-- 测试矩阵：`TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestAdapter_Send_Topic_NoReplyToPlaceholder`（**已替换为 replyToUserMessage 版本**）/ `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
+- 测试矩阵：`TestAdapter_HandleUpdate_DM_CreatesPerTurnPlaceholder` / `TestAdapter_Send_DM_RepliesToUserMessage` / `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder` / `TestAdapter_OnPromptEnded_DM_PATCHesPlaceholder` / `TestAdapter_Send_Topic_ReplyToUserMessageToo` / `TestAdapter_Send_Topic_NoReplyToPlaceholder`（**已替换为 replyToUserMessage 版本**）/ `TestStateStore_DM_Persistence` / `TestSessionChatID_DM_StillStable`
+- v9 P1 增加：`TestRenderActiveChunkBody_SkipsHeaderWhenBodyButNoHeartbeat` / `TestRenderActiveChunkBody_HeaderAndBody` / `TestRenderActiveChunkBody_HeaderOnlyAfterHeartbeat`（§11.12.5.1）
+- (v9 P1 2026-08-23 移除) `TestAdapter_EnsurePlaceholderForHeartbeat_CreatesWhenMissing` / `TestAdapter_EnsurePlaceholderForHeartbeat_ReusesExisting` / `TestAdapter_EnsurePlaceholderForHeartbeat_DMCreates` / `TestAdapter_EnsurePlaceholderForHeartbeat_DeferWhenNoUserMsgID` / `TestAdapter_Send_OutHeartbeat_DeferWhenNoUserMsgID` —— 懒汉路径删除后随之清理
+
+## 11.12 per-turn multi-chunk chain rolling log（v9）
+
+> **v9 = §11.11 v8 的进化版**。落地中，分多 commit 推进，详细 diff 见 §11.12.15。本节是 spec，不是已实现的描述。
+
+### 11.12.1 核心思路与 v4 / v8 的差异
+
+§11.11 v4 / v8 的视觉模型是双轨制：
+- 一张 per-turn 占位 + `OutHeartbeat` PATCH 文本 + `OnPromptEnded` 贴 🎉
+- 7 种 text-emitting kind（OutReply/OutThinking/OutToolStart/End/OutResult/OutError/OutTask*）**各自发独立 bubble**，每条都钉 userMsgID 的 reply chain
+
+后果：长 turn → chat 里出现几十条分散的小 bubble，占位本身不携带任何事件历史。
+
+v9 把这两轨**合并成一条 chain**：
+- 占位从一个常量 → 链子 `placeholderChain{chunks, cursor, lastFooter}`，每个 chunk 是一个独立的 Telegram message
+- 7 种 text-emitting kind 不再发独立 bubble，全部 append 成单行 segment，**进当前 active chunk 的内存 buffer**
+- buffer 累计 3500 chars raw → 当前 chunk 锁死 + 新建 chunk 接上
+- 全量回写走 `editMessageText(activeChunkID, render(buffer))`，**保留 Telegram 不支持 append 的硬约束**
+
+借用飞书 receipt card 的 fold 进同一 surface 的视觉模型，但用 debounce + chunk rotation 解决 Telegram 的全量替换本质。
+
+### 11.12.2 数据模型（纯内存，OOP chunkBody）
+
+```go
+// internal/channel/telegram/placeholder_chain.go + chunk_body.go
+
+type chainKey struct {
+    chatID        string        // 原始 chat.id（无 tg_ 前缀）
+    topicID       int           // 0 表示 DM / 主窗口
+    userMessageID int           // 每个 user 消息一条独立 chain —— 锁死 back-to-back user msg 的 Out* 串扰
+}
+
+type placeholderChain struct {
+    mu            sync.Mutex
+    chunks        []*chunkBody         // OOP Layer 1 view type
+    cursor        int                  // 当前可写 chunk 的 index；-1 = 空链
+    lastFooter    []string             // 最近一次携带 status 数据的 Out* 留下的 StatusBar 行
+    dirty         bool                 // 内存有更新未写回 Telegram（debounce 用）
+    debounceTimer *time.Timer          // 当前 pending 的 debounce flush
+}
+
+// chunkBody — one Telegram message. Business code mutates fields
+// through methods (setHeader / setHeaderFromHeartbeat /
+// appendEntry / appendError / setFooter / markFull); Compose() is
+// the sole render path.
+type chunkBody struct {
+    messageID    int64
+    isFull       bool
+    header       string                  // pre-baked HTML (e.g. "<b>💭 1</b>")
+    hasHeartbeat bool                    // v9 P1 (§11.12.5.1): true once any OutHeartbeat
+                                        // patched this chunk's header. Compose uses it
+                                        // to decide whether to render header at all.
+    entries      []chunkEntry            // ordered log lines
+    footer       string                  // statusbar panel
+    flushedLen   int                     // overflow tracking (P0 #2 fix)
+}
+
+type chunkEntry struct {
+    text   string
+    isHTML bool                        // skip RenderMarkdown when true
+}
+
+// chunkBody API (Layer 1 business methods + Compose):
+//   setHeader(h)                  → status line (cold-create path: leaves hasHeartbeat=false)
+//   setHeaderFromHeartbeat(h)     → status line + flips hasHeartbeat=true (OutHeartbeat path)
+//   appendEntry(text)             → plain-text segment
+//   appendEntryHTML(text)         → pre-rendered HTML segment (SPLIT path, §11.12.7.2 trigger 1)
+//   appendError(text, stderr)     → wraps stderr in ```fences``` (Layer 3)
+//   setFooter(f)                  → statusbar panel
+//   markFull()                    → lock chunk
+//   freezeAfterOverflow(n)        → clear entries, set flushedLen
+//   markFlushedLen(n)             → record overflow emit bytes
+//   Compose()                     → safe-HTML wire format (header-skip rule per §11.12.5.1)
+
+// chainLRU is the Adapter-scoped index with cap-bounded LRU eviction.
+type chainLRU struct {
+    mu     sync.Mutex
+    cap    int                      // 默认 1000（按 user 消息计数，非按 chat）
+    chains map[chainKey]*placeholderChain
+    order  []chainKey               // LRU 顺序（最近访问在尾）
+}
+```
+
+**OOP 分层**：
+- **Layer 1 (data + view)**: chunkBody + chunkEntry + Compose() — 单条 Telegram 消息的数据 + 渲染
+- **Layer 2 (business API)**: chain 的 append / overflow / flush / purge 等业务方法
+- **Layer 3 (format decisions)**: chunkBody.appendError 把 ```fences``` 决策封装在数据层
+- **Layer 4 (UI text escape)**: escapeInline helper 收拢 InlineKeyboard 文本转义
+- **Layer 5 (network)**: sendTelegramMessage / editTelegramMessage
+
+**不持久化**：
+- `TopicState.PlaceholderChunkIDs` 不写
+- chain 内的 `entries` / `header` / `footer` / `lastFooter` 全部是纯内存字段
+- daemon 重启 = chain 失；下次事件来时 `cursor=-1` → 走"建第一张 chunk"路径（旧 frozen chunks 留在 chat 里作为历史证据，没人再去 editMessageText）
+
+`TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。
+
+**LRU cap 含义**：因 key 含 userMessageID，cap=1000 表示"1000 个 user 消息各持一条独立 chain"，而不是"1000 个 chat 各持一条 chain"。活跃 chat 跑 1000 turn 短期不会爆；不活跃 chat 的旧 chain 在 access-order 上被自动 evict。
+
+### 11.12.3 三档阈值
+
+| 阈值 | 值 | 触发条件 |
+|---|---|---|
+| 单 chunk 缓冲上限 | **3500** chars (raw) | `cur.charCount + len(segment) > 3500` → 锁当前 + 新建 chunk（ROTATE） |
+| 单 chunk 渲染硬上限 | **3900** chars (rendered) | `len(rendered) > 3900` → flushChainNow 触发 safety-net ROTATE |
+| Telegram API 硬限 | **4096** chars | `editMessageText` / `sendMessage` 直接拒绝超长，**永不发送** |
+
+3500 - 3900 = 400 chars 给 HTML escape + emoji 字节增长。
+3900 - 4096 = 196 chars 给 Telegram 内部 buffer。
+复用 `maxTelegramTextLength = 3900`（已在 `topic.go:12` 定义）。
+
+**为什么需要 SPLIT 路径**：单条 OutReply / OutResult 等 payload 可能本身就 > 4096 chars raw（例如用户粘贴长 stacktrace、agent 输出长文档）。这种情况即使 chain 是空的、即使 raw 累积阈值没触犯，第一条 `sendMessage` 仍会被 Telegram 拒。**SPLIT 路径**（§11.12.7.2 trigger 1）在 append 阶段把单条 entry 切成多张 Telegram message，绕开 API 硬限。
+
+### 11.12.4 事件映射（每 Out* 进哪条路径）
+
+| Kind | 路径 | segment 格式 |
+|---|---|---|
+| `OutReply` | `appendSegment` | `<text>\n`（流延续，无 icon） |
+| `OutResult` | `appendSegment` | `📝 <text>\n` |
+| `OutThinking` | `appendSegment` | `💭 <text>\n` |
+| `OutToolStart` | `appendSegment` | `● <name>(<args truncated>)\n` ← `formatToolStartCall` |
+| `OutToolEnd` | `appendSegment` | `⎿  <one-line summary>\n` ← `summarizeToolResult` |
+| `OutError` | `appendErrorSegment` (via `chunkBody.appendError` ```fences```) | `❌ <text>\n````<stderr>\n```` |
+| `OutTaskCreate` | `appendSegment` | `📋 🆕 <subject>\n` |
+| `OutTaskUpdate` | `appendSegment` | `📋 <status emoji> <subject>\n` |
+| `OutHeartbeat` | `patchActiveHeader` | （无 segment，刷新 active chunk headerLine） |
+| `OutChoice` / `OutChoicePatch` | 独立 `sendMessage` + InlineKeyboard | （不进 chain） |
+| `OutCommandReply` | `appendSegment` (折进 chain,带 StatusBar trailer) | `<text>\n` |
+| `OutMessageState` / `OutMessageStateRemoved` | reaction 路径（`setMessageReactions`） | （不动） |
+| `OutInit` | silent drop | — |
+
+**Out* payload 超长处理**：上面 8 个走 `appendSegment` / `appendErrorSegment` 的 kind 中，若单条 payload 自身 raw > 3500 chars（接近 4096 Telegram 硬限），§11.12.7.2 trigger 1 在 append 阶段直接 SPLIT 成多张 Telegram message，不再走普通 ROTATE。用户视觉上看到的是同时间戳的多片连续消息（视觉连续 vs ROTATE 的页面跳转）。
+
+### 11.12.5 核心 API
+
+```go
+// appendSegment 是热路径入口，所有 Out* 都过这里。
+// Package-level (not Adapter method)：caller 注入 sendFn / editFn
+// closure，测试用 test-double，生产用 Adapter.chainSendFn/chainEditFn。
+// Pre-check (§11.12.7.2 trigger 1): len(segment) > chainChunkThresholdChars
+// → splitOversizedSegmentLocked. 否则走 case 1/2/3 (cold-create /
+// append-in-place / rotate). Mutates chain state under chain.mu;
+// caller MUST NOT have chain.mu held when calling.
+func appendSegment(
+    ctx context.Context,
+    chain *placeholderChain,
+    chatID string,
+    topicID int,
+    userMessageID int,
+    segment string,
+    statusBarLines []string,    // nil = 不动 footer；非空 = 刷新 footer
+    sendFn sendChunkFn,
+    _ editChunkFn,               // unused; kept for signature symmetry
+) error
+
+// appendErrorSegment 是 OutError 专用路径。结构跟 appendSegment
+// 平行但走 chunkBody.appendError (```fences``` wrapping 在 Layer 3)。
+// 同样的 trigger 1 pre-check (estimateErrorSize > threshold) →
+// splitOversizedErrorSegmentLocked.
+func appendErrorSegment(
+    ctx context.Context,
+    chain *placeholderChain,
+    chatID string,
+    topicID int,
+    userMessageID int,
+    text, stderr string,
+    statusBarLines []string,
+    sendFn sendChunkFn,
+    _ editChunkFn,
+) error
+
+// flushChainNow 全量同步写回 active chunk. debounce timer fires /
+// OnPromptEnded / Stop / 测试用。No-op when chain.dirty=false.
+// §11.12.7.2 trigger 3 (safety net): len(rendered) > 3900 →
+// splitTelegramText + 多 chunk rotate (同 trigger 1 但走 flush 路径).
+func flushChainNow(
+    ctx context.Context,
+    chain *placeholderChain,
+    chatID string,
+    topicID int,
+    userMessageID int,
+    editFn editChunkFn,
+    sendFn sendChunkFn,
+) error
+
+// scheduleFlushDebounced arm 250ms timer. 重置之前的 timer 让 burst
+// 合并成 1 edit。Fresh ctx with 5s timeout (request ctx 已 cancel
+// 时 timer 还能 fire)。
+func scheduleFlushDebounced(
+    chain *placeholderChain,
+    editFn editChunkFn,
+    sendFn sendChunkFn,
+    chatID string,
+    topicID int,
+    userMessageID int,
+)
+
+// chains.getOrCreate / lookup / purge — chainLRU 方法。Key =
+// (chatID, topicID, userMessageID). cap = 1000 (per-user-msg, 见 §11.12.2).
+func (l *chainLRU) getOrCreate(chatID string, topicID, userMessageID int) *placeholderChain
+func (l *chainLRU) lookup(chatID string, topicID, userMessageID int) (*placeholderChain, bool)
+func (l *chainLRU) purge(chatID string, topicID, userMessageID int)
+
+// Adapter.patchChainHeader: OutHeartbeat 专用。setHeaderFromHeartbeat
+// (active chunk, heartbeatText(msg.Heartbeat)) —— 注意是 setHeaderFromHeartbeat
+// 不是 setHeader,前者会同时把 hasHeartbeat 翻成 true,触发 §11.12.5.1
+// 的"render 规则"。scheduleFlushDebounced。Adapter 方法(不像
+// appendSegment/flushChainNow 是 package-level),因为它要从 caller
+// 显式透传 replyAnchor。
+func (a *Adapter) patchChainHeader(
+    chatID string,
+    topicID int,
+    userMessageID int,
+    msg messages.OutboundMessage,
+) error
+```
+
+#### 11.12.5.1 Compose header-skip rule（v9 P1, 2026-08-23）
+
+替换掉原先的懒汉 placeholder-resolve 路径（`ensurePlaceholderForHeartbeat`），把"非 agent turn 不留 stale `🤖 Working...` banner"的职责挪到 render-time。这是 v9 唯一一处主动拒绝画 header 的位置。
+
+**规则**（`chunkBody.Compose` 实现）：
+
+```go
+renderHeader := b.hasHeartbeat || len(b.entries) == 0
+if renderHeader {
+    out.WriteString(b.header)
+    out.WriteByte('\n')
+    if len(b.entries) > 0 {
+        out.WriteString("────────────────\n")
+    }
+}
+// entries + footer 不受影响
+```
+
+**矩阵**（每个 case 都对应实际生产场景）：
+
+| 场景 | hasHeartbeat | entries | renderHeader | 用户看到 |
+|---|---|---|---|---|
+| Cold-create, body 空 | false | [] | true | `<b>🤖 Working...</b>` |
+| Slash command reply (`/gtw fix` → OutCommandReply) 走完无 OutHeartbeat | false | ["✅ Local worktree ready"] | **false** | 仅 `✅ Local worktree ready` ✅ |
+| Agent turn: cold-create → first OutHeartbeat | true | [] | true | `<b>💭 N · 🔧 M</b>` |
+| Agent turn: cold-create → first OutReply 但 heartbeat 落后 | false | ["first reply"] | **false** | 仅 reply 内容 |
+| Agent turn: heartbeat + body 都到了 | true | ["thought", "tool call"] | true | header + 分隔 + body |
+| (reaction / callback click)| — | — | — | reaction path 走 `handleMessageReaction` 不进 `handleMessage`,不创建 placeholder —— 无 banner、无 chain,跟 v9 P1 无关 |
+
+**为什么这么改**：
+
+- **原痛点**：v8 / v9 早期实现里,`ensurePlaceholder` 是饿汉（每个 incoming msg 立刻 sendMessage 占位),但 `OutHeartbeat` 是 agent 才会发的。非 agent 路径(slash command / reaction / WatchMode 拒绝 / spawn failed)的 placeholder 永远停在 `🤖 Working...`,直到下条 inbound 触发 `chains.purge` 才被遗忘。屏幕上一直挂着一行假的 "Working"。
+- **原 v9 尝试方案** (commit `33a1b81` 之前)：在 `Send()` 入口 lazy-create placeholder on demand (`ensurePlaceholderForHeartbeat`)。这个 path 跟饿汉 `ensurePlaceholder` 双发,偶尔孤儿 orphan 一条未被 patch 的占位。race-window guard `state.UserMessageID=="" → return (0, nil)` 被 codex review 标红过但不彻底。
+- **P1 真正修复的位置**：render-time 而不是 path-time。一条死规矩 "outHeartbeat 来过 → header 必出;否则只在 entries 空时出" 即可同时解决所有 turn path(slash / agent / error / reaction)的视觉问题,不需要 lazy 也不需要 lazy 的 race guard。
+
+**call site 配套改动**：
+
+- `chunkBody` 加 `hasHeartbeat bool` 字段 + `setHeaderFromHeartbeat(h)` 方法
+- `Compose()` 改"renderHeader = hasHeartbeat || entries empty"
+- `Adapter.patchChainHeader` 真分支从 `chunk.setHeader(...)` 改为 `chunk.setHeaderFromHeartbeat(...)`(cold-create / chain rotation / OutHeartbeat 兜底分支保持 `setHeader` —— 维持 `hasHeartbeat=false`)
+- `Adapter.Send` 删除 `placeholderAnchor, placeholderErr := a.ensurePlaceholderForHeartbeat(...)` + 错误日志块;OutHeartbeat case 简化为 `return a.patchChainHeader(...)`(去掉 `if placeholderAnchor > 0` guard,理由见下)
+- `ensurePlaceholderForHeartbeat` 方法 + 5 个对应测试删除(`TestAdapter_EnsurePlaceholderForHeartbeat_*` / `TestAdapter_Send_OutHeartbeat_DeferWhenNoUserMsgID`)
+- 加 4 个新测试(§11.12.16 矩阵)
+
+**为什么 OutHeartbeat 去掉 `if placeholderAnchor > 0` guard 是安全的**：guard 的存在理由是"handleMessage 还没 populate state 时别发 placeholder",但 handleMessage 的 `ensurePlaceholder` 是同步阻塞且先于 `a.publish(inbound)` 执行的,Send() 拿到的 OutHeartbeat 必然已经走过 handleMessage。chain + chunk 都已就绪 —— 唯一可能 cursor<0 的场景是"OnPromptEnded 之后 daemon 重启",那种 patchChainHeader 自己有 `if chain.cursor < 0 { return nil }` 兜底,不算 placeholder-anchor 解析的责任。
+
+**保留 v8 行为(intent unchanged)**：
+- agent turn: header 仍随心跳变化 (`💭 N · 🔧 M`、可能带 `⏱ HH:MM:SS`);separator + body 渲染 —— 等价于原先"方括号 banner + chunk 内容"
+- non-agent turn: 无 banner,而非 fake banner —— 比 v8 视觉更干净
+- reaction / callback click: 不创建 placeholder,完全静默(同 v9 早期)
+
+**与 §11.12.7.4 (inheritLatestHeader) 的关系**:
+- §11.12.5.1 决定**Compose 时**画不画 banner —— `hasHeartbeat || entries.empty`
+- §11.12.7.4 决定**chunk 出生时**带什么 (header, hasHeartbeat) —— inherit 当时的 active 状态
+- 这两条互补:§11.12.7.4 让 frozen chunks 出生时持有真实 heartbeat 快照(不放 fake "🤖 Working...");§11.12.5.1 让 cold-create 但已收到 body 的 chunk 不画 stale "🤖 Working..."(frozen banner-skip)
+
+### 11.12.6 Footer 内存语义
+
+每 chunk **最多一个 footer**（lastFooter 刷新时同步到 footer 字段），`lastFooter == nil` → 该 chunk 上**没有 footer section**。
+
+**lastFooter 刷新 = 数据驱动**（不是按 Kind 锁死）：
+- 事件携带 status 数据（`AgentName` / `Model` / `SessionID` / `Usage` 等至少一个非零）→ `statusbar.StatusBarLines(msg) != nil` → 刷 `chain.lastFooter`
+- 事件未携带 status 数据 → 返回 nil → `lastFooter` 不动
+- Kind 不参与 policy 决定 —— runtime 在哪个 kind 上 stamp status 字段是 runtime 的决定，chain 代码照单全收
+
+**runtime 当前 stamping 约定**（非强制，只是文档当前观察到的行为）：
+- 通常 stamp：`OutReply` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate`（4 个 main-chat kind）
+- 通常不 stamp：`OutThinking` / `OutToolStart` / `OutToolEnd` / `OutError` / `OutCommandReply` / `OutHeartbeat` / `OutInit`
+
+**Render 总是发生**：Telegram 不支持 append，每次 `editMessageText` 是 body 全量替换。所以即便 `lastFooter` 没变，新 `entries` 累积也要触发 Render。代码契约：
+- `chain.dirty = true` 在每个 `appendSegment` 路径（cold-create / append-in-place / rotate）都置位
+- `scheduleFlushDebounced` 在 `appendSegmentForKind` 返回前无条件调用
+- `flushChainNow` 不检查 `lastFooter` 是否变化，只检查 `chain.dirty`
+
+行为：
+- lastFooter 刷新 → 更新 `chain.lastFooter` → 后续全量渲染带上新 footer
+- lastFooter 不刷新 → `chain.lastFooter` 不动，但 Render 仍然发生（entries 累积 + footer 仍渲染上一份）
+- 新 chunk 创建时如果 `chain.lastFooter != nil` → **沿用**上一 chunk 的 footer（防止 footer 突然消失）
+- 重启后第一次携带 status 数据的事件之前 → 链上无 footer section（内存不持久化）
+
+### 11.12.7 编辑频率控制（debounce + 1-Hz 自然上限）
+
+#### 11.12.7.1 单 chunk debounce 250ms
+
+```go
+// appendSegment 调用末尾
+chain.mu.Lock()
+chain.dirty = true
+chain.mu.Unlock()
+
+timer := chain.debounceTimer
+if timer != nil { timer.Stop() }
+chain.debounceTimer = time.AfterFunc(250 * time.Millisecond, func() {
+    a.flushChainNow(...)
+})
+```
+
+- 250ms 内新事件来 → 重置 timer，**不发新 Telegram call**
+- timer fires → `flushChainNow` 调 `editMessageText(activeChunk, render(buf))`
+- burst 30 events/s 全合并成 1 edit → 实测命中数远低于 Telegram 的 1/sec/message / 20/day/message 限流（feishu §13.10 之外独有的"denounce 合并批量 update"模式）
+
+#### 11.12.7.2 三触发器 overflow 决策
+
+Telegram 的硬约束（不可 append + 4096 单消息上限 + 必须带 statusbar+heartbeat）决定了三种 overflow 路径必须在不同时间点走不同动作。下表是决策矩阵：
+
+| 触发条件 | 触发时机 | 动作 | 用户语义 |
+|---|---|---|---|
+| **Trigger 1**:单条 entry 自身 raw > 3500 chars | `appendSegment` / `appendErrorSegment` 入口 | **SPLIT** —— 该 entry 切成 N 张 Telegram message（同时间戳、同 footer） | "我一句话太长了"—— 视觉连续的多片 |
+| **Trigger 2**:当前 chunk `bufTextSize() + segment > 3500` raw | `appendSegment` case 3 / `appendErrorSegment` rotate 分支 | **ROTATE** —— 当前 chunk 锁死 + 新建 chunk 接收 entry | "我说了很多句"—— 页面跳转 |
+| **Trigger 3 (safety net)**:当前 chunk 渲染后 `len(rendered) > 3900` | `flushChainNow` 内 | **ROTATE** —— `splitTelegramText` 切多片 + 多 chunk 重排 | "raw 没超但渲染膨胀"—— safety net |
+
+**Trigger 1 SPLIT（单段超长）实现**：
+```
+appendSegment 入口加 pre-check:
+if len(segment) > chainChunkThresholdChars (3500) {
+    return splitOversizedSegmentLocked(...)
+}
+
+splitOversizedSegmentLocked:
+1. RenderMarkdown(segment) 一次 (escapeHTML fallback)
+2. splitTelegramText(rendered, maxTelegramTextLength=3900) → pieces[0..N-1]
+3. 若当前 active chunk 存在 → markFull (冻结) —— SPLIT 意味着这一逻辑消息结束
+4. 对每片 piece[i]:
+   - 创建 chunkBody(messageID=0, headerLine=heartbeatText(nil))
+   - appendEntryHTML(piece) // isHTML=true,跳过 RenderMarkdown (避免二次转义)
+   - 若 chain.lastFooter != nil → setFooter(RenderPanel(chain.lastFooter))
+   - body := Compose()
+   - mid := sendFn(chatID, topicID, userMessageID, body)
+   - chunk.messageID = mid
+   - 若 i < N-1 → markFull (frozen)
+5. chain.chunks = append(chain.chunks, newChunks...)
+6. chain.cursor = len(chain.chunks) - 1 (最后一片 = 新 active)
+7. chain.dirty = true
+```
+
+**关键 invariant**：
+- SPLIT 路径所有 chunks 共享**同一次** `heartbeatText(nil)` 调用 → header 时间戳完全一致 → 视觉连续
+- SPLIT 路径所有 chunks 共享**同一份** `chain.lastFooter`（SPLIT 期间 lastFooter 不刷新）
+- 最后一片是 active chunk；后续 entry 走 `appendSegment` case 2（append-in-place）追加在最后一片
+- 最后一片填满时 → 走 trigger 2 ROTATE → 新 chunk 接收
+- sendFn 部分失败（发到第 k 片失败）：**chain.chunks 完全未修改**（0 个新 chunks 跟踪，return err 在 `chain.chunks = append(...)` 之前）；前 k-1 片已发到 Telegram（orphan 历史，daemon 重启后消失）；链状态 = 调用前状态；后续 appendSegment 会因旧 active chunk 已 markFull → case 2 miss → case 3 ROTATE 到新 chunk。
+
+**Trigger 2 ROTATE（累积超长）实现**：即 `appendSegment` case 3 + `appendErrorSegment` overflow 分支。已有逻辑（markFull current + 创建新 chunk 接收 entry + lastFooter 继承 + **`newChunk.inheritLatestHeader(cur)` 拷贝 active chunk 的 (header, hasHeartbeat) 作为新 chunk 的快照，§11.12.7.4**)。
+
+**Trigger 3 ROTATE（safety net）实现**：`flushChainNow` 内 `len(rendered) > 3900` 分支：
+```
+1. pieces := splitTelegramText(rendered, 3900)
+2. pieces[0] → editMessageText(cur.messageID) (覆盖当前 chunk)
+3. cur.markFull() + cur.freezeAfterOverflow(len(pieces[0]))
+4. 对 pieces[1..N-2] 各 sendMessage 创建 frozen 中间 chunk (entries=nil, markFull)
+5. pieces[N-1] → sendMessage 创建新 active chunk, appendEntry(pieces[N-1], isHTML=false),
+   **inheritLatestHeader(cur)** ← 新 chunk header = active 状态的快照(§11.12.7.4)
+6. chain.cursor = len(chain.chunks) - 1
+```
+
+中间 chunk (pieces[1..N-2]) 是 **marker-only**：`entries=nil` + `markFull=true` + `flushedLen=len(p)`，Compose() 输出空字符串。隐式保证：`chain.cursor` 单调 forward，永不回退到中间 chunk。如果将来有人改 cursor 回退逻辑，会触发空 Compose → `editMessageText(messageID, "")` 把 Telegram 上的非空内容抹掉 — 此 invariant 由 review 维护。
+
+**与 v3 chain-key 修正的关系**：
+- Trigger 1 / 2 / 3 都在 `appendSegment` / `flushChainNow` 内执行，传入 `chatID`/`topicID`/`userMessageID` 三个参数（§11.12.2）
+- `chains.getOrCreate(chatID, topicID, userMessageID)` 返回的 chain 是这一 turn 独有的 — 跨 user msg 不串扰
+
+#### 11.12.7.4 inheritLatestHeader 契约（v9 P1.1, 2026-08-23 晚）
+
+**核心规则**:每条新创建的 chunk 必须是当前 active 状态的 (header, hasHeartbeat) 快照 — 不是冷 `heartbeatText(nil)` 通用 banner,也不是 chunk 自身的"创建时间"。
+
+**实现位置**:`chunkBody.inheritLatestHeader(src *chunkBody)` 拷贝 src.header 和 src.hasHeartbeat 到 receiver。src 为 nil 时 no-op(冷场路径用)。
+
+**调用点**:
+
+| 路径 | 之前 | 现在 |
+|---|---|---|
+| `appendSegment` case 3 (ROTATE) | `newChunkBody(0, heartbeatText(nil))` | `newChunkBody(0, ""); newChunk.inheritLatestHeader(cur)` |
+| `appendSegmentLocked` case 3 (OutToolStart ROTATE) | 同上 | 同上 |
+| `appendErrorSegment` overflow | `newChunkBody(0, cur.headerText())`(只 copy header) | `newChunkBody(0, ""); newChunk.inheritLatestHeader(cur)`(header + hasHeartbeat) |
+| `splitOversizedSegmentLocked` pieces | 全部 `heartbeatText(nil)` | 全部 `inheritLatestHeader(inheritFrom)`;inheritFrom 在 markFull 之前 capture |
+| `splitOversizedErrorSegmentLocked` pieces | 同上 | 同上 |
+| `flushChainNow` tail (trigger 3 last piece) | `newChunkBody(int64(mid), heartbeatText(nil))` | `newChunkBody(int64(mid), ""); newChunk.inheritLatestHeader(cur)` |
+
+**Cold-create 路径**(chain.cursor<0 = 该 turn 第一条 chunk)保持 `heartbeatText(nil)`:没有 source 可 inherit,用冷-create banner。
+
+**为什么不是 commit `a654fc3` 的"每条 message 的 header 反映创建时间"**:
+- 用户明确指出应该"完全继承最新的 HeatbeatHeadline" —— chain 的所有 chunk 在每一刻共享同一个 headline
+- 但 patchChainHeader 只更新 active cursor 的 chunk(避免 N 倍 editMessageText 风暴)
+- 所以走中间路线:每个 chunk 出生时 adopt 当时的 active 状态,然后冻结;后续 patchChainHeartbeat 只动 cursor,但 frozen chunks 读出来仍然有意义 —— 用户看到的是一组"快照"序列,可以从 banner 时序读出 agent 思考/工具推进的节奏(冷 banner → 💭 N → 💭 N+1 → ...)
+- 关闭 commit `aad7705` rationale:"每条 message 的 header 反映创建时间,而不是继承 active chunk 的状态" —— 错误决策,已 supersede
+
+**滚动 timeline 实例**(agent: 5 think, 2 tool, 5 more think, error):
+
+```
+[💭 5 · 🔧 2 · ⏱ 10:01:00]  long thinking text 1...      ← chunk A (frozen)
+[💭 5 · 🔧 2 · ⏱ 10:01:00]  long thinking text 2...      ← chunk B (frozen, SPLIT)
+[💭 5 · 🔧 2 · ⏱ 10:01:00]  more thinking...            ← chunk C (frozen)
+[💭 10 · 🔧 2 · ⏱ 10:01:30] (active, OutHeartbeat 后)    ← chunk D (active)
+[❌ tool failed: out of disk]                             ← chunk E (active, post-error)
+[💭 10 · 🔧 2 · ⏱ 10:01:30] 🎉                          ← chunk D 终态 (active)
+```
+
+关键观察:A/B/C 三块都冻结在"💭 5 · 🔧 2" 时刻(它们创建于 OutHeartbeat 之后但还没来下一个 heartbeat)—— 用户能数出来 "agent 想过 5 次,用过 2 个工具,然后接着想了 5 次,挂了"。
+
+**PatchChainHeader 仍只 PATCH active**:
+- patchChainHeader 维持"只更新 cursor chunk"的语义,不在所有 frozen 上广播 —— broadcast 会引发 N 倍 editMessageText,违反 §11.12.7.1 debounce budget 且破坏 chunk 时间线语义
+- 用户读 chat 时,frozen chunks 永远在它们各自的"冻结时刻"snapshot;active chunk 持续 PATCH 到最新
+- 这跟 §11.12.5.1 Compose header-skip rule 互补:Compose 让"body+no-heartbeat"不画 banner(防 stale 冻屏);inheritLatestHeader 让"body+with-heartbeat"画正确的 banner(防 cold-create 假 alive)
+
+### 11.12.8 OutHeartbeat 路径
+
+```go
+case messages.OutHeartbeat:
+    // v9 P1 (2026-08-23): the eager ensurePlaceholder in
+    // handleMessage guarantees the chain + chunk exists before
+    // any Out* lands, so there is no race to guard against.
+    // patchChainHeader still defensively returns nil when
+    // chain.cursor < 0 (a transient / purged state) — that is
+    // its own correctness gate, not a placeholder-anchor
+    // resolution step. OutMessageState's 👌 reaction still
+    // announces the turn if a heartbeat ever gets silently
+    // dropped.
+    return a.patchChainHeader(rawChatID, topicID, replyAnchor, msg)
+```
+
+`patchChainHeader` 内部：
+
+```go
+if msg.Heartbeat != nil {
+    chain.chunks[chain.cursor].setHeaderFromHeartbeat(heartbeatText(msg.Heartbeat))
+} else {
+    // defensive: gateway always populates msg.Heartbeat, but if
+    // a future caller forgets we keep hasHeartbeat=false so the
+    // banner-hide rule (§11.12.5.1) still applies
+    chain.chunks[chain.cursor].setHeader(heartbeatText(nil))
+}
+chain.dirty = true
+scheduleFlushDebounced(chain, ...)
+```
+
+要点：
+
+- **真分支用 `setHeaderFromHeartbeat`** —— 同时翻 `hasHeartbeat=true`,否则 §11.12.5.1 会一直 hide 掉 header
+- 只 PATCH active chunk 的 `header`，**不动 entries** 和 lastFooter（lastFooter 是数据驱动刷新，详见 §11.12.6）
+- header 是预烘焙 HTML（`<b>...</b>` 是字面量，不是 RenderMarkdown 产物）—— Compose() 走"header verbatim, entries RenderMarkdown, footer verbatim"三路分发，避免 `<b>` 被二次转义成 `&lt;b&gt;`
+- 其他 frozen chunks 永远不动
+- (v9 P1 移除) `placeholderAnchor` / `ensurePlaceholderForHeartbeat` —— handleMessage 已经 eager 建好,OutHeartbeat 不需要再二次确认
+- (v9 P1 移除) race-window guard —— handleMessage 是同步阻塞 + 先于 `a.publish(inbound)` 执行,race 不存在
+- `getOrCreateChain` 的第三个参数 `userMessageID` 见 §11.12.2 —— 锁死 back-to-back user msg 不串扰
+
+### 11.12.9 OnPromptEnded 路径
+
+```go
+// adapter.go:1159
+func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
+    ...
+    parsedUserMsgID := atoiUserMsgID(userMsgID)
+    chain := a.chains.getOrCreate(rawChatID, topicID, parsedUserMsgID)
+    chain.mu.Lock()
+    if chain.cursor < 0 {
+        stopDebounceTimer(chain)
+        chain.mu.Unlock()
+        a.chains.purge(rawChatID, topicID, parsedUserMsgID)
+        return
+    }
+    stopDebounceTimer(chain)
+    chain.mu.Unlock()
+    // Best-effort flush before stamping the terminal reaction.
+    if err := flushChainNow(ctx, chain, rawChatID, topicID, parsedUserMsgID,
+        a.chainEditFn(), a.chainSendFn()); err != nil { /* log warn */ }
+    chain.mu.Lock()
+    cur := chain.chunks[chain.cursor]
+    var curMessageID int64
+    if cur != nil { curMessageID = cur.messageID }
+    chain.mu.Unlock()
+    if curMessageID != 0 {
+        // 🎉 on the active chunk. v6.3 single-reaction budget on
+        // USER MSG slot is preserved; this stamp lands on the
+        // placeholder, not the user's original message.
+        _ = a.setMessageReactions(ctx, rawChatID, int(curMessageID),
+            []map[string]any{{"type": "emoji", "emoji": "\U0001F389"}})
+    }
+    // Turn-end cleanup: forget the in-memory chain. Frozen chunks
+    // remain in chat as historical evidence (no edit touches them
+    // again). Next user message re-materialises a fresh chain via
+    // ensurePlaceholder.
+    a.chains.purge(rawChatID, topicID, parsedUserMsgID)
+}
+```
+
+**关键 invariant**:
+- `stopDebounceTimer` 在 flush 前调用 (P1 #2 fix)，否则 orphan timer 会在 purge 后触发，ghost-edit 上一 turn 的 chunk messageID (违反 §11.12.9)。
+- 锁覆盖范围 `stopDebounceTimer → flushChainNow → 🎉 stamp` 整段，使 in-flight `scheduleFlushDebounced` from concurrent Send 不能 arm 一个在 purge 之后 fire 的 timer。
+- 🎉 emoji 用 `\U0001F389` (U+1F389 PARTY POPPER)，不在 Telegram API 黑名单里 (U+2705 ✅ 之前被 REACTIONS_TOO_MANY 拒过)。
+- 终态: `a.chains.purge` —— chain 对象从 LRU 移除 (key 含 userMessageID 所以只 purge 这一 turn 的 chain，不影响其他 chain)。
+
+### 11.12.10 重启后的 chain loss 行为
+
+**重启前**：chat 里看到 P1/P2/P3（frozen，各自带终态 footer）
+**重启后**：`chains` map 空
+- 下次 `OutX`：`cursor=-1` → "建第一张"路径 → `sendMessage` 新 P_new 钉 userMsgID
+- 用户视觉：chat 里出现 P_new 跟在所有老 frozen P 后面，**老 P 不再被编辑**
+
+**取舍**：chain 不持久化避免 LRU 复杂度上升 + state schema 不变；接受"重启 = chain 重启"语义。与 §11.11 v8 的"`PlaceholderMessageID` 持久化但不含 buf"取舍同源。
+
+### 11.12.11 Topic vs DM
+
+| 行为 | topic (thread_id > 0) | DM (thread_id == 0) |
+|---|---|---|
+| chain 创建 | OutX/OutHeartbeat 来时 | 同 |
+| chunk `sendMessage` 带 `message_thread_id` | ✅ | ✗ |
+| chunk `reply_to_message_id` | `userMessageID` | `userMessageID` |
+| frozen chunk 处理 | 保持 frozen，不动 | 同 |
+| turn-end 清 cursor + chunks + lastFooter | ✅ | ✅ |
+| `OnPromptEnded` 🎉 on active chunk | ✅ | ✅ |
+
+### 11.12.12 跟飞书 receipt 语义对位（v9）
+
+| 维度 | Feishu receipt | Telegram v9 |
+|---|---|---|
+| Surface | 单一 receipt Card 2.0，PATCH 复用 | chain of N chunks，editMessageText 复用 active |
+| 状态 ticker | header PATCH（card body） | active chunk headerLine PATCH |
+| OutThinking | append div 进 card body | append segment 进 active chunk buffer |
+| OutToolStart/End | 合并 thread reply（Start+End merge，F-38） | 同 chunk buffer 内两 segment |
+| OutReply | 独立 reply（F-44 后） | append segment 进 active chunk buffer |
+| OutResult | 独立 reply（F-39 后） | append segment（📝 prefix）进 active chunk |
+| user message 状态 | AddReaction（append-only 多 emoji 堆叠） | setMessageReaction（单 emoji 槽） |
+| placeholder / 终态 | ✅ header SetPromptState | 🎉 setMessageReactions on active chunk |
+| 终态 | ✅ reaction + card header ✅ | user msg 留 👌 不动；active chunk 贴 🎉 |
+| Footer | card `<hr>` + 灰色 markdown（3 行） | chunk 末尾 renderPanel(lastFooter)（仅 active chunk） |
+| Persist | receipt state 进 MemoryStore | **chain 不持久化**（重启失） |
+| 4096 / 30KB 限制 | 30KB body + 50 elements | 4096 chars ×N chunks（debounce 内合并） |
+| OutToolStart dump | summarize_tool.go（call + result 双行） | 复刻 feishu 同款（emoji 风格统一） |
+
+### 11.12.13 长文本与 Markdown 渲染
+
+#### OutResult 进 chain 而非独立 reply
+
+飞书 F-39 决策：OutResult 独立 reply 投递到 userMsgID（避免 dedup bug）。Telegram 没 dedup 问题（chain 的 buf 累积即同一 surface），进 chain 是合理选择。要求 OutResult text ≤ 3500 一次；超出 → §11.12.7.2 split。
+
+#### Markdown 渲染
+
+- `parse_mode=HTML` 走现有 `RenderMarkdown`，不切 MarkdownV2（escape 脆弱，参考 feishu.md §13.19）
+- Feishu §13.17 / §13.19 同款 sanitize pipeline（非 HTTP URL → plain、fence newline、image strip、heading demotion）
+
+### 11.12.14 summarize_tool 复用（同款）
+
+新文件 `internal/channel/telegram/summarize_tool.go`，从 feishu 平移：
+
+```go
+package telegram
+
+import (
+    "fmt"
+    "path/filepath"
+    "strings"
+)
+
+const toolCallArgsMaxBytes = 100  // args 字节上限
+
+// formatToolStartCall produces the "call" line for chain entry,
+// matching Claude Code's terminal UX:
+//   `● Bash(go build ./... 2>&1; echo "EXIT=$?")`
+//   `● Read(/tmp/foo.go)`
+func formatToolStartCall(name, args string) string {
+    if args == "" { return "● " + name }
+    return "● " + name + "(" + displayToolArgs(args) + ")"
+}
+
+func displayToolArgs(args string) string {
+    if compact := compactJSONToolArgs(args); compact != "" { return compact }
+    return truncate(args, toolCallArgsMaxBytes)
+}
+
+// summarizeToolResult produces the "result" line:
+//   `⎿  📄 Read → 47 lines`
+//   `⎿  ❌ Bash failed: exit code 1`
+func summarizeToolResult(name, output string, err error) string {
+    if err != nil {
+        return fmt.Sprintf("⎿  ❌ %s failed: %s", name, err.Error())
+    }
+    switch strings.ToLower(name) {
+    case "read":       return "⎿  📄 Read → " + itoa(countLines(output)) + " lines"
+    case "write":      return "⎿  📝 Write → " + itoa(len(output)) + " bytes"
+    case "edit", "multiedit": return "⎿  ✏️  applied"
+    case "bash":       return "⎿  💻 Bash → " + itoa(countLines(output)) + " lines"
+    case "grep":       return "⎿  🔍 Grep → " + itoa(countLines(output)) +
+                              " matches across " + itoa(countUniqueFiles(output)) + " files"
+    case "glob":       return "⎿  📂 Glob → " + itoa(countLines(output)) + " files"
+    case "webfetch":   return "⎿  🌐 WebFetch → " + itoa(len(output)) + " chars fetched"
+    case "websearch":  return "⎿  🔎 WebSearch → " + itoa(countLines(output)) + " results"
+    default:           return "⎿  🔧 " + name + " → " + itoa(len(output)) + " bytes"
+    }
+}
+
+// 共用 helpers: countLines, countUniqueFiles, truncate, compactJSONToolArgs
+// 跟 feishu summarize_tool.go 一致; 想 100% reuse 也可以提一个 internal/summarizetool package
+```
+
+### 11.12.15 实施清单（commit 顺序）
+
+实际 commit 顺序见 git log（`git log --oneline 84511ca..HEAD` on `fix-telegram-rolling-log` branch）。以下按主题分组列出关键 commit（哈希可能因后续 fix 而变化）：
+
+**v9 骨架**:
+- `[telegram] port summarize_tool from feishu` — 新增 `summarize_tool.go`
+- `[telegram] add placeholder_chain skeleton` — `placeholder_chain.go` + chainLRU
+
+**v9 Send 重写**:
+- `[telegram] rewrite formatTool → call helpers` — `formatTool` → `formatToolStartCall` + `summarizeToolResult`
+- `[telegram] rewrite Send: 8 Out* → appendSegment` — 8 个 kind 进 chain
+- `[telegram] rewrite OutHeartbeat → patchActiveHeader + debounce`
+- `[telegram] rewrite OnPromptEnded → flushChain + 🎉 + purge`
+
+**v9 测试 + 修**:
+- `[telegram] tests: placeholder_chain_test.go`
+- `[telegram] tests: chain_integration_test.go`
+- v9 chain 关键 fixes (P0 #1-3, P1 #1-2, P2 #1-2)
+
+**v9 后续打磨**:
+- `[telegram] chain: key LRU by userMessageID` (commit `a654fc3`) — back-to-back user msg race condition fix
+- `[telegram] chain: §11.12.7.2 SPLIT path for single oversized segments` (commit `aad7705`) — trigger 1 SPLIT 落地
+- `[telegram] chain: cleanup + footer regression tests + race fix` (commit `2e4fb85`)
+- `[telegram] chain: regression tests for chain-key-by-userMessageID` (commit `614922e`)
+
+**v9 P1 (2026-08-23) banner-hide 修复**:
+- `[telegram] chunkBody: hasHeartbeat + Compose header-skip rule` —— 加 `hasHeartbeat bool` 字段、`setHeaderFromHeartbeat` 方法、`Compose` renderHeader 决策(§11.12.5.1)
+- `[telegram] patchChainHeader: setHeaderFromHeartbeat` —— 真分支翻 `hasHeartbeat`,cold-create / 兜底分支保持 `setHeader`
+- `[telegram] Send: drop ensurePlaceholderForHeartbeat + placeholderAnchor` —— Send 入口不再 lazy resolve;OutHeartbeat case 简化成无条件 `patchChainHeader`
+- `[telegram] remove ensurePlaceholderForHeartbeat method + 5 tests` —— 移除懒汉路径;`TestAdapter_EnsurePlaceholderForHeartbeat_*` 和 `TestAdapter_Send_OutHeartbeat_DeferWhenNoUserMsgID` 删除
+- `[telegram] tests: Compose header-skip + banner-hide e2e` —— 4 个新 Compose unit test + 1 个 banner-hide 集成测
+- `[telegram] fix(docs): §11.11 / §11.12 sync` —— v9 P1 变更同步到 spec
+
+**v9 P1.1 (2026-08-23 晚) — inheritLatestHeader 翻转 ROTATE/SPLIT rationale**:
+- 推翻 commit `a654fc3` 的"ROTATE 用 heartbeatText(nil) 不是 cur.headerText()"决策 —— 正确语义是「每条 message 的 header 完全继承最新的 HeatbeatHeadline」,而不是"反映创建时间"
+- `[telegram] chunkBody: inheritLatestHeader(src)` ——  新增方法,拷贝 src 的 (header, hasHeartbeat) 对;nil src 是 no-op(cold-create 路径用)
+- `[telegram] placeholder_chain_flush: case 3 / appendErrorSegment overflow / SPLIT pieces / flushChainNow tail` —— 6 处全部从 `newChunkBody(0, heartbeatText(nil))` / `newChunkBody(int64(mid), heartbeatText(nil))` / `inheritedHeader := cur.headerText()` 改成 `newChunkBody(... , "")` 后 `inheritLatestHeader(cur)`。Cold-create 路径(chain.cursor<0 时)保留 heartbeatText(nil)
+- `[telegram] tests: TestChain_RotateChunk_HeaderIsFreshNotInherited → TestChain_RotateChunk_InheritsLatestHeader` —— 单测翻转:ROTATE 现在必须 inherit,与 `TestChain_FrozenChunkHeaderSurvivesAcrossSubsequentPatch` 一起锁住 "frozen chunks keep snapshot / cursor's chunk updates" 的双轨语义
+- `[telegram] tests: 4 new inheritLatestHeader tests` —— primitive 层 + 3 个集成层(rotate / split / flush tail)
+
+每 commit 必跑：
+- `go test ./internal/channel/telegram/`
+- `go test -race ./internal/channel/telegram/` (commit `2e4fb85` 后干净)
+- `golangci-lint`
+- Telegram 实机 dotest（项目通常用 `cmd/probe-telegram` 或类似）
+
+### 11.12.16 验收 / 测试矩阵
+
+实际测试名（`internal/channel/telegram/` 下）：
+
+**chain primitive 单测** (`placeholder_chain_test.go`):
+| 测试 | 验证 |
+|---|---|
+| `TestChainLRU_EvictOldestOnCap` | 1001 chain 创建 → 最早 evict |
+| `TestChainLRU_PurgeRemovesKey` | `purge` 后 key 移除 |
+| `TestChainLRU_ResetClearsAll` | `reset` 清空 |
+| `TestAppendSegment_CreatesFirstChunkWhenEmpty` | OutReply 在空 chain → 一张 chunk with single segment |
+| `TestAppendSegment_AppendsToActiveChunkWithinThreshold` | 10 events ≤ 3500 chars → 都进同一 chunk |
+| `TestAppendSegment_OverflowCreatesSecondChunk` | 累计 > 3500 → chunk 1 锁，chunk 2 新建 |
+| `TestAppendSegment_FooterRefreshOnlyOnFooterBearing` | 非 footer-bearing 不动 lastFooter；footer-bearing 刷新 |
+| `TestFlushChainNow_NoOpWhenClean` | `dirty=false` 时不调 editFn |
+| `TestFlushChainNow_RendersHeaderBufFooter` | header / buf / footer 渲染 |
+| `TestScheduleFlushDebounced_MergesBurst` | 250ms 内多次调用合并成 1 edit |
+| `TestRenderActiveChunkBody_HeaderOnly` | 无 entries → 无 separator;cold-create header 仍渲染 |
+| `TestRenderActiveChunkBody_SkipsHeaderWhenBodyButNoHeartbeat` (v9 P1 §11.12.5.1) | entries>0 + hasHeartbeat=false → 头被 hide |
+| `TestRenderActiveChunkBody_HeaderAndBody` (v9 P1 §11.12.5.1) | entries>0 + hasHeartbeat=true → 头回来 + 分隔线 + body |
+| `TestRenderActiveChunkBody_HeaderOnlyAfterHeartbeat` (v9 P1 §11.12.5.1) | entries 空 + hasHeartbeat=true → 头渲染(无 entries 所以无分隔)|
+
+**新增回归测试**（commit 3 / 4 / 5 后）:
+| 测试 | 验证 |
+|---|---|
+| `TestChain_RotateChunk_InheritsLatestHeader` (v9 P1.1) | ROTATE tail header inherit cur 的 (header, hasHeartbeat) —— §11.12.7.4 |
+| `TestChain_RenderAlwaysHappen_EvenWhenLastFooterUnchanged` | 非 footer-bearing event → lastFooter 不动，但 dirty=true 触发 Render |
+| `TestChain_DataDrivenFooter_OutThinkingWithAgentName_RefreshesFooter` | footer policy 数据驱动，Kind 不锁 |
+| `TestChain_NewChunk_InheritsLastFooter` | overflow 时新 chunk 沿用 lastFooter |
+| `TestChain_MultipleOverflow_ThreeChunks_FirstTwoFrozen` | 3 chunks 后，frozen 1/2 再发 events 不动 |
+| `TestChain_OversizedSegment_SplitsIntoMultipleChunks` | SPLIT trigger 1: len(segment) > 3500 → 多 chunks |
+| `TestChain_SplitChunks_AllCarrySameTimestamp` | SPLIT chunks 共享同一 heartbeatText(nil) 调用 |
+| `TestChain_SplitChunks_FirstPiecesAreFrozen` | pieces 1..N-1 markFull, 最后一片 active |
+| `TestChain_SplitChunks_SubsequentEntryLandsOnLastPiece` | SPLIT 后续 entry 落到最后一片 |
+| `TestChain_OversizedError_SplitsIntoMultipleChunks` | OutError SPLIT |
+| `TestChain_RotateAndSplitDistinguishedByHeader` | ROTATE/SPLIT 都 inherit cur —— 时间戳一致是设计预期(同源),不是 bug。Test 用 shared-header log 而非 fail |
+| `TestChain_BackToBackUserMessages_AreSeparateChains` | chain-key-by-userMessageID 隔离 |
+| `TestChain_DelayedOutReply_AfterNewUserMsg_DoesNotLeak` | 迟滞 OutReply 不串扰下一 turn |
+| `TestChain_Heartbeat_DoesNotCrossUserMessageBoundary` | heartbeat PATCH 不跨 turn |
+
+**adapter integration 测试** (`chain_integration_test.go`):
+| 测试 | 验证 |
+|---|---|
+| `TestAdapter_Send_OutReply_FoldsIntoChain` | OutReply 不发独立 bubble，进 active chunk |
+| `TestAdapter_Send_MultipleBurst_CoalesceIntoOneEdit` | burst 合并成 1 editMessageText |
+| `TestAdapter_OutHeartbeat_PATCHesActiveChunkHeader` | heartbeat → chunk.headerLine 更新 + debounce flush |
+| `TestAdapter_OnPromptEnded_DM_RendersOnActiveChunkThenPurges` | 🎉 贴在 active chunk + chain purge |
+| `TestAdapter_Send_OutError_FoldsIntoChainWithMarkdownFragment` | OutError 进 chain，stderr ```fences``` 渲染 |
+| `TestChainAppendOnly_AfterStopFreshChain` | daemon restart → next event → 新 chain |
+| `TestChain_HeartbeatBoldHeaderPreservedThroughFlush` | `<b>` 不被二次转义 |
+| `TestChain_OutErrorStderrTailRendersAsPreBlock` | stderr 渲染成 `<pre>` |
+| `TestChainOverflow_RotatesToNewChain` | ROTATE path (3500 raw overflow) |
+| `TestChainOverflow_TailHasNonEmptyEntries` | P0 #2 lock-in: tail chunk 保留 long-text content |
+
+**summarize_tool 测试** (`summarize_tool_test.go`):
+- `TestSummarizeToolResult_ClaudeStyle` (11 sub-tests: read / write / edit / multiedit / bash / grep / glob / webfetch / websearch / unknown / err)
+- `TestSummarizeToolLegCompat_FormatsMatchFeishu`
+
+**adapter_statusbar 测试** (`adapter_statusbar_test.go`): 15 个 StatusBar trailer 测试，验证 §18 contract (每个 text-emitting kind 都带 StatusBar trailer, 包括 `TestAdapter_Send_DM_OutCommandReply_AppendsStatusBar`)。
+
+**v9 P1 banner-hide 测试**:
+- `TestRenderActiveChunkBody_SkipsHeaderWhenBodyButNoHeartbeat` (placeholder_chain_test.go) — §11.12.5.1 主规则
+- `TestRenderActiveChunkBody_HeaderAndBody` (同上) — hasHeartbeat 后 separator 回来
+- `TestRenderActiveChunkBody_HeaderOnlyAfterHeartbeat` (同上) — 早 heartbeat 早独立头部
+- `TestAdapter_Send_DM_OutReply_NoFieldsNoCache_NoTrailer` 翻转 (adapter_statusbar_test.go) — body+no-heartbeat→无 `🤖` banner(原 v8 假设 "banner unconditional" 现在反过来)
+- (v9 P1 移除) `TestAdapter_EnsurePlaceholderForHeartbeat_CreatesWhenMissing` / `_ReusesExisting` / `_DMCreates` / `_DeferWhenNoUserMsgID` / `TestAdapter_Send_OutHeartbeat_DeferWhenNoUserMsgID` — 懒汉路径不再存在
+
+**v9 P1.1 inheritLatestHeader 测试**(§11.12.7.4):
+- `TestChunkBody_InheritLatestHeader_HeaderAndFlag` —— primitive: 拷贝 header + hasHeartbeat,nil src no-op
+- `TestChain_SplitOversizedSegment_AllPiecesInheritLatestHeader` —— SPLIT trigger 1:每块都 inherit
+- `TestChain_AppendErrorSegment_OverflowInheritsLatestHeader` —— OutError overflow ROTATE: 新 chunk inherit
+- `TestChain_FlushChainNow_TailInheritsLatestHeader` —— Trigger 3 tail piece: inherit
+- `TestChain_RotateChunk_InheritsLatestHeader` —— (替换 `TestChain_RotateChunk_HeaderIsFreshNotInherited`) case 3 ROTATE: 翻转单测契约
+
+### 11.12.17 已知限制
+
+| Limit | 描述 | 缓解 / 后续 |
+|---|---|---|
+| 单 chunk 渲染后超 3900 | `flushChainNow` 走 trigger 3 safety-net ROTATE，多 message 在 chat 里不连号 | 接受；极少触发（Tool summarize 保证 segment 短小）|
+| 单条 entry 自身超 3500 raw | SPLIT path (§11.12.7.2 trigger 1) 切成 N 张 Telegram message | 接受；同时间戳视觉连续 |
+| `splitTelegramText` 行内硬切可能落 HTML tag 中间 | 切到 `<a href="...` 等会被 Telegram 当字面文本 | 接受；罕见（markdown 渲染后单行超 3900 的概率极低） |
+| 重启后老 chunk 不被编辑 | chain 不持久化，frozen 自然冷冻 | 接受；视觉一致（old frozen 本就是历史）|
+| LRU cap = 1000 | **per-user-message**（key 含 userMessageID）：1001 个 user 消息同时活跃 → 最早 chain evict | 可调；1MB 内存上限 |
+| chain.cursor / chunks / lastFooter 不持久化 | daemon 重启 = chain 重建 | 接受（与 §11.11 v8 取舍同源）|
+| 没用 Telegram Premium 付费能力 | 长 message 默认 fold 等 | backlog |
+| `sendMessage` 同一 chat 串行速率 | agent turn 短时间内 burst 占位新建 chunk → 5 QPS per-chat 有封顶 | debounce 已经合并 hot path；overflow chunk 是冷路径，300-500ms 间隔足够 |
+| SPLIT partial-failure | sendFn 第 k 片失败时前 k-1 片 Telegram orphan 历史 | 接受；daemon 重启后消失；后续 appendSegment 走 case 3 ROTATE |
+
+### 11.12.18 变更日志
+
+- **2026-08-22** - 引入 v9 per-turn multi-chunk chain rolling log，替换 v4 / v8 的"单占位 + 独立 bubble"双轨制。新增文件：`internal/channel/telegram/placeholder_chain.go`（含 chainLRU）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移）。改动：`Adapter.Send` 8 个 Out* case 重写为 `appendSegment` 路径 / `OutHeartbeat` 改 `patchActiveHeader` / `OnPromptEnded` 改 flushChain + 🎉 + cursor reset / `formatTool` 改为调 summarize helpers / `ensurePlaceholder` delegate 到 chain。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。
+
+- **2026-08-22 (晚)** - 多次 P0/P1/P2 修复（P0 #1 cold-create 种子 entries，P0 #2 overflow tail 保留 content，P0 #3 case-3 内联 fast-forward 避免 mutex 重入，P1 byteOffset 死代码删除，P2 cold-start body 含 separator）。Commit `08f8f7e` 包含 codex review fixes。
+
+- **2026-08-22 (晚)** - chain integration tests `chain_integration_test.go` 加入。Commit `e355153`。
+
+- **2026-08-23** - §11.12.16 矩阵补完（`TestChainOverflow_TailHasNonEmptyEntries` P0 #2 lock-in 等），v9 chain codex review 收尾。
+
+- **2026-08-23** - `placeholder_chain_flush.go:217` 删除 debug `fmt.Println`；footer policy 改成数据驱动（`statusbar.StatusBarLines(msg) != nil` 决定 lastFooter 刷新，Kind 不锁）；`appendSegment` 每路径必 `dirty=true` + `scheduleFlushDebounced` 无条件调用，确保 Render 总发生。Commit `39579b8`。
+
+- **2026-08-23** - §18 StatusBar trailer 扩到所有 text-emitting kind（包括 OutThinking / OutToolStart / OutToolEnd / OutError / OutCommandReply）；`isTextEmittingKind` helper 收拢 policy。Commit `7bf76be`。
+
+- **2026-08-23** - **chainKey 加 userMessageID 字段**（commit `a654fc3`）—— 锁死 back-to-back user msg 的 Out* 串扰（race condition）。`getOrCreate / lookup / purge` 三个 chainLRU 方法加 userMessageID 参数；14 个 adapter.go call site 全部更新。`patchChainHeader` 加 userMessageID 显式参数（替代原 hardcoded 0）。**ROTATE tail header 改用 `heartbeatText(nil)`**（同 commit）—— ~~视觉连续性优先让位于"每条 message 的 header 反映创建时间"~~。**2026-08-23 (v9 P1.1) 推翻**:新 chunk header 不再"反映创建时间",而是完全 inherit 当时的 active 状态快照(`inheritLatestHeader`)。见 §11.12.7.4 + 同日 P1.1 变更日志。
+
+- **2026-08-23** - **SPLIT path 实现**（commit `aad7705`）—— §11.12.7.2 trigger 1 落地。`appendSegment` / `appendErrorSegment` 入口 pre-check（`len(segment) > chainChunkThresholdChars`）→ `splitOversizedSegmentLocked` / `splitOversizedErrorSegmentLocked`。`chunkBody.appendEntryHTML` 新方法（isHTML=true，Compose() 跳过 RenderMarkdown 避免二次转义）。6 个新 SPLIT 测试 + 1 个 ROTATE 测试数据修正（4000-char segment 改 3499-char，避开新 SPLIT 触发）。
+
+- **2026-08-23** - **3 个 chain-key isolation 回归测试**（commit `614922e`）：`TestChain_BackToBackUserMessages_AreSeparateChains` / `TestChain_DelayedOutReply_AfterNewUserMsg_DoesNotLeak` / `TestChain_Heartbeat_DoesNotCrossUserMessageBoundary`。
+
+- **2026-08-23** - **测试基础设施 race fix + footer 回归测试**（commit `2e4fb85`）：`sendMessageCounter` 改 `atomic.Int64`（pre-existing race 修干净，`go test -race` 现在 clean）；4 个 footer 回归测试（`TestChain_RenderAlwaysHappen_*` / `TestChain_DataDrivenFooter_*` / `TestChain_NewChunk_InheritsLastFooter` / `TestChain_MultipleOverflow_*`）；`fmt` import 清理。
+
+- **2026-08-23** - **Spec 同步**（commit `b68cc30`）：§11.12.2 chainKey + LRU cap 含义 / §11.12.3 阈值 + SPLIT rationale / §11.12.4 OutCommandReply + 超长处理段 / §11.12.6 数据驱动 footer + Render-always / §11.12.7.2 三触发器决策矩阵 / §11.12.8 heartbeat 例代码 / §11.12.10 chain loss / §11.12.11 Topic vs DM 不变。
+
+- **2026-08-23** - **Spec 进一步对齐**（本次 commit）：§11.12.2 chunkBody API 加 `appendEntryHTML` / §11.12.4 OutError 路径改为 `appendErrorSegment` / §11.12.5 核心 API 重写（package-level + chainLRU 实际签名）/ §11.12.7.2 trigger 1 partial-failure + trigger 3 step 5 header 来源 / §11.12.8 / §11.12.9 例代码改实际 / §11.12.15 commit 清单改 git log 引用 / §11.12.16 矩阵用实际 test 名 / §11.12.17 limits 表补 SPLIT + chain-key / §11.12.18 变更日志追加本批。
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 
@@ -1786,7 +2576,7 @@ Telegram Channel 自治实现 `MessageState`（user-message reaction）与 `Card
 | 轨道 | 源 | 抽象事件 | 渲染目标 | Telegram 实现 |
 | --- | --- | --- | --- | --- |
 | **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, MessageState: {State, MessageID}}` | **userMsgID** | `setMessageReaction(userMsgID, emoji)` |
-| **Card Body** | Topic placeholder（C2） + 事件流 | `OutboundMessage{Kind: OutHeartbeat/OutTool*/OutThinking/...}` | placeholder_message_id / Topic 内独立消息 | `editMessageText` / `sendMessage` |
+| **Card Body（v9 chain）** | Topic placeholder chain（C2 链子，per-turn N 个 chunks）+ 事件流 | `OutboundMessage{Kind: OutHeartbeat/OutTool*/OutThinking/...}` | **active chunk messageID**（chain.cursor 指向）/ frozen chunks 不动 | `editMessageText(activeChunk, render(buf))`（debounce 合并 burst）/ 新建 chunk 时 `sendMessage` |
 
 两者完全独立：一个失败不影响另一个（`MessageState` 渲染失败仅 log warn，不阻塞 card body）；都按 userMsgID / chatID 索引，但服务不同语义。详见 [`docs/feat/F-31-message-state.md`](../feat/F-31-message-state.md) 与 `SPEC.md §2.5`。
 
@@ -2033,8 +2823,8 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 | ID | 内容 | 状态 |
 | --- | --- | --- |
 | C1 | OutInit silent drop（与 feishu F-44 对齐） | 已实现 |
-| C2 | OutHeartbeat 路径 ensurePlaceholderForHeartbeat（占位缺失时自动创建） | 已实现 |
-| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v7.1 修订**（v7 + codex review race guard：ensurePlaceholderForHeartbeat 在 UserMessageID 未设时 return (0, nil) 防止 orphan placeholder） |
+| C2 | (v9 P1 2026-08-23 移除) OutHeartbeat 路径 ensurePlaceholderForHeartbeat 懒创建 —— handleMessage 的 ensurePlaceholder 已 eager 同步预先建好,OutHeartbeat 不需要再二次确认 | **已下线** |
+| C3 | 2026-08-22 plan-C：DM / 主窗口 placeholder + reply chain；详见 §11.11 | **v7.1 修订**（v7 + codex review race guard；2026-08-23 v9 P1 改为 Compose header-skip rule §11.12.5.1,原 lazy path 整条删除） |
 | C4 | 2026-08-22 reaction chatID namespacing（修 `handleMessageReaction` 用 raw chatID 导致 emoji reaction 进不了 gtw 的 bug） | 已实现 |
 | C5 | 2026-08-22 stateStore TTL on-load prune（30 天未活动 topic 自动清理） | 已实现 |
 | C6 | 2026-08-22 sendChoice / patchChoice / handleInputClick / handleForceReply / callback wizard editMessageText 把 session ChatID 传给 Telegram API 的生产路径 bug（修 `rawChatIDFromSession` helper） | 已实现 |
@@ -2407,20 +3197,20 @@ Bars 左端是 `┌` / `└`（方角，"从此处开始"），右端是 `›`�
 
 per-turn 占位的两步生命周期：
 
-**Step 1：handleMessage 创建占位**（`ensurePlaceholder`）—— 文本是裸的 `<b>🤖 Working...</b> · ⏱ HH:MM:SS`，**不含 footer**。原因：handleMessage 这一刻 OutboundMessage 还没生成，runtime 还没 stamp Identity / Usage / GitStatus —— 没东西可拼。等 runtime 出 OutMessageState / OutReply 时再决定 footer 内容。
+**Step 1：handleMessage 创建占位**（`ensurePlaceholder`）—— 文本是裸的 `<b>🤖 Working...</b>` (**v9 已不带 v7 plan-C 时代的 `· ⏱ HH:MM:SS` 冷启动后缀**,时间戳由首次 OutHeartbeat 的 `LastBeatAt` 段补上),**不含 footer**。原因:handleMessage 这一刻 OutboundMessage 还没生成,runtime 还没 stamp Identity / Usage / GitStatus —— 没东西可拼。等 runtime 出 OutMessageState / OutReply 时再决定 footer 内容。**v9 P1 附加**:banner 是否**绘制**取决于 §11.12.5.1 renderHeader 决策 —— 紧接着 slash command / OutError 等非 agent turn 的 body 内容落定时,banner 被 Compose 主动隐藏,转 body 单独渲染。
 
-**Step 2：首次 OutHeartbeat PATCH 叠加 footer** —— `[status line] + \n\n---\n + StatusBar`（走 `renderBodyWithStatusBar`）。后续每条 OutHeartbeat 都重新拼接 footer：
+**Step 2：首次 OutHeartbeat PATCH 叠加 footer** —— `[status line] + \n\n---\n + StatusBar`（由 v9 chain 的 `renderActiveChunkBody` 拼装）。后续每条 OutHeartbeat 都重新拼接 footer：
 
 ```text
 turn N：用户发 "hi N"
-    └─ handleMessage 时刻 →  placeholder = "🤖 Working... · ⏱ HH:MM:SS"            (无 footer)
+    └─ handleMessage 时刻 →  placeholder = "<b>🤖 Working...</b>"            (无 footer;无 v7 ⏱ 后缀)
     └─ 首次 OutHeartbeat PATCH →  "💭 0 · 🔧 0 · ⏱ HH:MM:SS ┌─…─›\n│<panel>│\n└─…─›"   (panel 落地)
     └─ 后续 OutHeartbeat        →  status line + RenderPanel
     └─ OutResult                →  "[result text] ┌─…─›\n│<panel>│\n└─…─›"   (独立气泡)
     └─ OnPromptEnded            →  不改 placeholder 文本，贴 🎉 reaction on placeholder
 ```
 
-`ensurePlaceholder` 和 `ensurePlaceholderForHeartbeat`（race-window 懒创建）走同一 `placeholderInitialText(now)` helper，保证两路创建不会漂移。
+`ensurePlaceholder`(handleMessage 同步饿汉路径)走 `heartbeatText(nil) == "<b>🤖 Working...</b>"` 这个 cold-create header。**(v9 P1 2026-08-23 移除)** 原来同源说明的 `ensurePlaceholderForHeartbeat`(Send 入口的 lazy 路径)整条删除 —— handleMessage 先于 publish 的同步性质让 race guard 不再需要,文档此处精简为单条路径。两条路原本共用 `placeholderInitialText(now)` helper,`placeholderInitialText` 本身也已并入 `heartbeatText(nil)`(无时间戳) —— cold-create banner 形如 `<b>🤖 Working...</b>`,时间戳由 OutHeartbeat 第一个 patch 在 `LastBeatAt` 段补上。
 
 ### 18.5 OutError 的特殊处理
 
@@ -2444,7 +3234,7 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 
 - [x] `internal/statusbar/statusbar.go` export `StatusBarLines`，feishu adapter 5 处 `formatStatusBarLines` 调用全部切到 `statusbar.StatusBarLines`（`internal/channel/feishu/adapter.go`）
 - [x] feishu `usage_footer.go` / `usage_footer_test.go` 已删除（按 `no-type-aliases` 不留薄壳）
-- [x] telegram adapter Send switch 的 text 出口全走 `renderBodyWithStatusBar`（OutError 走 raw 拼接特例）
+- [x] telegram adapter Send switch 的 text 出口全走 `appendSegmentForKind`（v9 chain 路径；chain 内部调 `renderActiveChunkBody`）。`renderBodyWithStatusBar` 在 v9 chain 重写时被删除（footer 语义迁到 `chain.lastFooter` + `renderActiveChunkBody`）
 - [x] `OutHeartbeat` 占位 PATCH 拼接 footer
 - [x] `OutChoice` / `OutMessageState*` / `OutInit` 不挂
 - [x] 无 cache —— `StatusBarLines(&msg)` 纯 consumer，零状态
@@ -2457,3 +3247,26 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 - OutError 的 `<pre>` 块被 RenderMarkdown 二次 escape（§18.5），修法 = 走 raw HTML 路径
 - Markdown 表格 / 颜色 / 字号 / `<hr>` 仍不支持（§15 L6）
 - StatusBar 本身走纯文本（emoji + 中点 `·` + 半角空格），没用 `<b>` `<code>` 强调（避免 OutError 那类 escape 边界），视觉不如 feishu grey footer，但 parse 零失败
+
+## 19. 变更日志
+
+- **2026-08-22（v9 chain rolling log）** - 引入 per-turn multi-chunk chain，替代 v4 / v8 的"单占位 + 独立 bubble"双轨制。完整 spec 见 §11.12。新增文件：`internal/channel/telegram/placeholder_chain.go`（chainKey / placeholderChain / placeholderChunk / chainLRU，含 `appendSegment` / `flushChainNow` / `scheduleFlushDebounced` / `getOrCreateChain` / `patchActiveHeader` / `activeChunkMessageID`）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移，含 `formatToolStartCall` / `summarizeToolResult` / `displayToolArgs` / `compactJSONToolArgs` / `countLines` / `countUniqueFiles` / `truncate`）。改动：`Adapter.Send` 8 个 Out* case（OutReply/OutResult/OutThinking/OutToolStart/OutToolEnd/OutError/OutTaskCreate/OutTaskUpdate）重写为 `appendSegment` 路径；`OutHeartbeat` 改 `patchActiveHeader` + 走 debounce；`OnPromptEnded` 改 `flushChainNow` + 🎉 on active chunk + cursor reset；`formatTool` 内联实现替换为调 summarize helpers；`ensurePlaceholder` delegate 到 `appendSegment` 创建第一张 chunk。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。`TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。debounce window = 250 ms。LRU cap = 1000 chains。阈值三档：3500 chars raw buffer / 3900 chars rendered split / 4096 chars Telegram 硬限。Footer 内存语义：每 chunk 最多一个 footer，footer-bearing 事件（OutReply / OutResult / OutTaskCreate / OutTaskUpdate）来时刷新，其他不动。重启后 chain 失 = 下次事件来时建新 chunk（旧 frozen chunks 在 chat 里保留为历史证据）。
+
+- **2026-08-23 (v9 P1) — banner-hide 修复 + 懒汉路径下线**。修复 v8 / v9 早期未解决的"非 agent turn 的 stale `🤖 Working...` banner 永不清除"问题。完整 spec 见 §11.12.5.1。
+  - `chunkBody` 加 `hasHeartbeat bool` 字段 + `setHeaderFromHeartbeat(h)` 方法（同步翻 flag）。`Compose()` 改 renderHeader 决策：`renderHeader = hasHeartbeat || len(entries) == 0` —— entries 有内容但无心跳时跳过 header,banner 藏起来,让 body 独自渲染;entries 空时仍然画 banner（cold-create alive 反馈）;hasHeartbeat 一旦为 true 后续都画 header（agent 真在跑）。
+  - `Adapter.patchChainHeader` 真分支从 `chunk.setHeader(...)` 改为 `setHeaderFromHeartbeat(...)`,翻 flag。cold-create / chain rotation / OutHeartbeat 兜底分支保持 `setHeader` 不动 flag。
+  - **懒汉路径整条删除**：`Send()` 入口去掉 `placeholderAnchor, placeholderErr := ensurePlaceholderForHeartbeat(...)` + 错误日志块;`OutHeartbeat` case 简化为 `return a.patchChainHeader(...)`(去掉 `if placeholderAnchor > 0` race guard,因为 handleMessage 已 eager 预先建好,无 race 可言);`ensurePlaceholderForHeartbeat` 方法体删除;`placeholder_chain.go` chainKey 顶部 doc 收紧(去掉 race-window sentinel 措辞);adapter.go 顶部 + ensurePlaceholder + Send 三处提及 ensurePlaceholderForHeartbeat 的 stale 注释更新或删除。
+  - 5 个旧测试删除(`TestAdapter_EnsurePlaceholderForHeartbeat_CreatesWhenMissing` / `_ReusesExisting` / `_DMCreates` / `_DeferWhenNoUserMsgID` / `TestAdapter_Send_OutHeartbeat_DeferWhenNoUserMsgID`)。
+  - 4 个新 unit test 加进 `placeholder_chain_test.go`:`TestRenderActiveChunkBody_HeaderOnly`(cold-create 路径保持 header 渲染)/ `_SkipsHeaderWhenBodyButNoHeartbeat`(主规则 —— entries>0 且 !hasHeartbeat 时 banner 藏掉)/ `_HeaderAndBody`(hasHeartbeat 后 separator 回来)/ `_HeaderOnlyAfterHeartbeat`(早 heartbeat 早独立 header)。
+  - 1 个 v8 假设翻转:`TestAdapter_Send_DM_OutReply_NoFieldsNoCache_NoTrailer` —— body+no-heartbeat 现在反过来不带 `🤖` banner(v8 假设 "banner unconditional" 不再成立)。
+  - 行为后果：slash command(`/gtw fix` → `OutCommandReply`)/ WatchMode 拒绝 / spawn failed(`OutError`)/ Agent turn 早于第一次心跳的 OutReply —— 这些路径之前各自挂着一行永远不更新的 `🤖 Working...`,现在 banner 立刻被替换/隐藏。Reaction-only click(无任何 Out*)保留 v8 行为(空 banner),已知遗留,无回归。Agent turn 视觉无变化。
+
+- **2026-08-23 (v9 P1.1) — inheritLatestHeader 翻转 ROTATE/SPLIT rationale**。推翻之前 `commit a654fc3 + aad7705` 引入的"新 chunk header 用 `heartbeatText(nil)` 反映创建时间"决策 —— 改回"完全继承最新的 HeatbeatHeadline"。完整 spec 见 §11.12.7.4。
+  - `chunkBody` 加 `inheritLatestHeader(src *chunkBody)` 方法,拷贝 src 的 (header, hasHeartbeat) 对;nil src 是 no-op。
+  - `placeholder_chain_flush.go` 6 处全部翻新:`appendSegment` case 3 / `appendSegmentLocked` case 3 / `appendErrorSegment` overflow / `splitOversizedSegmentLocked` pieces / `splitOversizedErrorSegmentLocked` pieces / `flushChainNow` tail piece —— 全部从 `newChunkBody(.., heartbeatText(nil))` 改为 `newChunkBody(.., ""); newChunk.inheritLatestHeader(cur)`。Cold-create 路径(chain.cursor<0)保留 `heartbeatText(nil)`,无 source 可 inherit。
+  - `TestChain_RotateChunk_HeaderIsFreshNotInherited` 翻转为 `TestChain_RotateChunk_InheritsLatestHeader` —— 单测契约从"ROTATE 不 inherit"改成"ROTATE 必须 inherit cur 快照"。
+  - 加 4 个新单测:`TestChunkBody_InheritLatestHeader_HeaderAndFlag` / `TestChain_SplitOversizedSegment_AllPiecesInheritLatestHeader` / `TestChain_AppendErrorSegment_OverflowInheritsLatestHeader` / `TestChain_FlushChainNow_TailInheritsLatestHeader`。
+  - `TestChain_RotateAndSplitDistinguishedByHeader` 行为变更解释:SPLIT 和 ROTATE 现在都 inherit cur 的 (header, hasHeartbeat),因此时间戳一致是设计预期 —— 测试中"shared-header 是 log 不是 fail"的注释已更新。
+  - 行为后果:frozen chunks 读出来仍然有意义 —— 用户可以从 banner 时序数出 agent 思考/工具推进节奏。`patchChainHeader` 维持"只更新 active cursor"的语义,避免 N 倍 `editMessageText` 风暴 —— 这是 inherit + patch 组合而非 broadcast 的关键。
+  - 关闭 commit `a654fc3` 的 "ROTATE tail header 用 `heartbeatText(nil)` 不是 `cur.headerText()`" 决策 —— 错判,supersede。
+

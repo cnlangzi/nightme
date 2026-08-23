@@ -744,7 +744,15 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       messages, anchoring them to the user
 //	                       message is unnecessary.
 //	OutThinking          → ReplyInThread (💭 line in side panel only).
-//	OutInit / OutUsage   → silent drop (F-44: footer design deferred).
+//	OutInit              → stamps StatusBar footer onto existing
+//	                       receipt card (F-44 follow-up; replaces
+//	                       the silent-drop behaviour so /review and
+//	                       /gtw receipt headers now show "🤖: agent ·
+//	                       model · session").
+//	OutUsage             → deprecated kind; usage is now co-located
+//	                       on OutResult.Usage (translate.go:280-283)
+//	                       and surfaces through OutResult's
+//	                       sendResultAsReply footer path.
 //
 // Errors from the underlying API are logged and returned; the
 // Gateway treats Send as fire-and-ack (no retry).
@@ -1770,10 +1778,40 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	// §1.3 / §1.9.
 
 	case messages.OutInit:
-		// F-44: silent drop. Same rationale as OutUsage — footer
-		// design deferred. OutboundMessage{Init} is preserved on
-		// the wire; only the channel-side render is skipped.
-		return nil
+		// F-44 follow-up: OutInit is the agent's bootstrap signal —
+		// SessionID + Model + AgentName + Workspace + Branch arrived.
+		// Until now this case silently dropped, so the receipt card's
+		// StatusBar never gained the "🤖: agent-name · model · session"
+		// header on one-shot / review flows. Now we stamp the
+		// rendered footer onto the existing receipt card via
+		// MessageReceipt.StampFooterLines (which re-renders through
+		// renderLocked).
+		//
+		// Orphan guard: when ReplyTo is empty (startup EventAgentReady
+		// or internal log) we have no receipt to stamp — silently
+		// drop, matching the pre-fix behaviour. The orphan path
+		// only fires for true orphan events; all real /review and
+		// /gtw callers pre-create a receipt via the dispatcher and
+		// stamp via the ReplyTo branch below.
+		footerLines := statusbar.StatusBarLines(&msg)
+		if msg.ReplyTo == "" {
+			return nil
+		}
+		// Look up the existing receipt (dispatcher pre-creates one
+		// for /review and /gtw). If absent, ensureReceiptForTyping
+		// creates a "⌨️ Working…" placeholder with the stamped
+		// footer (F-48: cold-start footer rendered up-front so the
+		// user sees the StatusBar before any reply chunk arrives).
+		r, _, err := a.ensureReceiptForTyping(
+			ctx, msg.ChatID, msg.ReplyTo, footerLines)
+		if err != nil {
+			return err
+		}
+		// ensureReceiptForTyping already stamps footerLines and
+		// creates the card on the cold-start path; for the
+		// pre-existing receipt case, StampFooterLines PATCHes
+		// the card with the new footer.
+		return r.StampFooterLines(ctx, footerLines)
 
 	case messages.OutError:
 		// Bridge died ungracefully. Render as a Feishu card (not a

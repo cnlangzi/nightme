@@ -48,6 +48,11 @@ type Adapter struct {
 	// internal/channel/feishu/adapter.go).
 	muMessageStates sync.Mutex
 	messageStates   map[string]agent.MessageState
+
+	// chains is the v9 per-turn placeholder chain index (see
+	// docs/channel/telegram.md §11.12.2). Pure in-memory; never
+	// persisted to telegram_state.json. Reset on Adapter.Stop.
+	chains *chainLRU
 }
 
 func NewAdapter(cfg *config.Config) (*Adapter, error) {
@@ -86,6 +91,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		callbacks: make(map[string]struct{}),
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
+		chains:    newChainLRU(defaultChainLRUCap),
 	}, nil
 }
 
@@ -118,6 +124,7 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		callbacks: make(map[string]struct{}),
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
+		chains:    newChainLRU(defaultChainLRUCap),
 	}
 }
 
@@ -179,6 +186,11 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		a.stopped = true
 		close(a.incoming)
 		a.mu.Unlock()
+		// Drop in-memory chain index on cold-stop. (Chains are
+		// per-process anyway; explicit reset documents intent.)
+		if a.chains != nil {
+			a.chains.reset()
+		}
 		return nil
 	}
 	if a.stopped {
@@ -188,6 +200,9 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	a.stopped = true
 	cancel := a.cancel
 	a.mu.Unlock()
+	if a.chains != nil {
+		a.chains.reset()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -554,10 +569,9 @@ func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) 
 	}
 	// DM / main-window: thread_id is 0. ensurePlaceholder is
 	// responsible for materialising a TopicState{topicID: 0}
-	// carrying the placeholder message id (see handleMessage
-	// and ensurePlaceholderForHeartbeat). Returning (0, nil) here
-	// keeps chatID stable ("tg_<chatid>") and lets the placeholder
-	// path own the stateStore write.
+	// carrying the placeholder message id (see handleMessage).
+	// Returning (0, nil) here keeps chatID stable ("tg_<chatid>")
+	// and lets the placeholder path own the stateStore write.
 	return 0, nil
 }
 
@@ -579,98 +593,83 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	if !ok {
 		state = &TopicState{ChatID: chatID, TopicID: topicID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	}
-	// Always create a NEW placeholder for this user message.
-	// Even if state already has a PlaceholderMessageID from the
-	// previous turn, that placeholder belongs to the previous
-	// turn — leave it alone and emit a fresh one.
+	// Drop any in-memory chain for this turn — the previous turn's
+	// chunks stay in Telegram chat (frozen, no further edits) but we
+	// don't track them anymore. Next Out* gets a fresh chain.
 	//
-	// v7: the placeholder is a reply to the user message
-	// (reply_to_message_id) so the entire turn (placeholder +
-	// OutXxx) hangs under the user's "hi" as a visual thread.
-	// Initial text also carries the timestamp (`⏱ HH:MM:SS`) so
-	// the user can see when the turn started, matching the
-	// heartbeat format.
-	initialText := placeholderInitialText(time.Now().UTC())
-	result, err := a.sendTelegramMessage(ctx, chatID, topicID, userMessageID, initialText, nil)
+	// P1 #2 fix (2026-08-23): also stop the previous chain's
+	// pending debounce timer before purging. Without this, an
+	// orphan timer fires after purge and ghost-edits the
+	// previous turn's chunk messageID (violating §11.12.9).
+	if a.chains != nil {
+		if prev, ok := a.chains.lookup(chatID, topicID, userMessageID); ok && prev != nil {
+			prev.mu.Lock()
+			stopDebounceTimer(prev)
+			prev.mu.Unlock()
+		}
+		a.chains.purge(chatID, topicID, userMessageID)
+	}
+
+	// Cold-create the first chunk via send. Header carries the
+	// turn-start timestamp; body holds no entries yet (segments
+	// arrive on Out* events). v9 chains start with header-only.
+	header := heartbeatText(nil)
+	result, err := a.sendTelegramMessage(ctx, chatID, topicID, userMessageID, header, nil)
 	if err != nil {
 		return err
 	}
+
+	// Materialise the in-memory chain so subsequent Send() calls
+	// for Out* events (OutReply / OutToolStart / OutHeartbeat / …)
+	// can resolve this turn's chunks without recreating the chain.
+	chain := a.chains.getOrCreate(chatID, topicID, userMessageID)
+	chain.mu.Lock()
+	chunk := newChunkBody(int64(result.MessageID), header)
+	chain.chunks = []*chunkBody{chunk}
+	chain.cursor = 0
+	chain.dirty = false
+	chain.lastFooter = nil
+	chain.mu.Unlock()
+
 	state.PlaceholderMessageID = result.MessageID
 	state.LastMessageID = result.MessageID
 	state.UserMessageID = strconv.Itoa(userMessageID)
-	a.logger.Debug("telegram: placeholder created",
+	a.logger.Debug("telegram: chain created (v9)",
 		"chat_id", chatID,
 		"thread_id", topicID,
-		"placeholder_message_id", result.MessageID,
+		"chunk_message_id", result.MessageID,
 		"user_message_id", userMessageID,
 	)
 	return a.state.putTopic(state)
 }
 
-// placeholderInitialText is the canonical text for a freshly
-// created per-turn placeholder. Both ensurePlaceholder
-// (handleMessage path) and ensurePlaceholderForHeartbeat
-// (lazy-create fallback) use this so the two creation paths
-// can't drift apart on format. v7: timestamp `⏱ HH:MM:SS`
-// so the user can see when the turn started.
-func placeholderInitialText(now time.Time) string {
-	return "<b>🤖 Working...</b> · ⏱ " + now.Format("15:04:05")
-}
-
-// ensurePlaceholderForHeartbeat returns the placeholder message
-// id for the current turn, creating one if missing (e.g., when
-// the first OutHeartbeat races ahead of handleMessage's
-// ensurePlaceholder, or after a transient network failure). Used
-// by the OutHeartbeat PATCH path and by Send prelude's
-// placeholderAnchor resolution.
+// placeholderInitialText was the cold-create header formatter;
+// removed 2026-08-23 in favour of heartbeatText(nil) — both
+// produce identical output (`<b>🤖 Working...</b>`) and there
+// is no point keeping two functions in sync. Cold-create
+// callers (ensurePlaceholder / appendSegment case-1 /
+// patchChainHeader fallback) now invoke heartbeatText(nil)
+// directly.
 //
-// Race-window guard (2026-08-22, codex review): if the
-// ChatSession state has no UserMessageID set yet (handleMessage
-// hasn't run yet for this turn), we DON'T lazy-create — the
-// created placeholder would be orphan-raced: handleMessage's
-// subsequent ensurePlaceholder call would overwrite
-// state.PlaceholderMessageID with a new placeholder, leaving
-// the heartbeat-created bubble in the chat as a permanent
-// "🤖 Working..." without terminal PATCH or 🎉 reaction.
-// Returning (0, nil) is safe: Send's OutHeartbeat path
-// silently drops when placeholderAnchor == 0 (the in-turn status
-// ticker is then conveyed only after handleMessage lands).
+// ensurePlaceholderForHeartbeat was removed on 2026-08-23 in
+// favour of the eager ensurePlaceholder-in-handleMessage path
+// + the Compose header-skip rule (§11.12.5). The lifecycle is:
+//   - handleMessage (per incoming user msg) calls
+//     ensurePlaceholder synchronously, before publishing the
+//     inbound. state.UserMessageID + state.PlaceholderMessageID
+//     are populated atomically with the chain entry, so any Out*
+//     that the runtime eventually emits finds a ready chain.
+//   - chunkBody.hasHeartbeat stays false for cold-create and
+//     for any non-agent turn (slash command reply, error path,
+//     reaction-only click). Compose's
+//     "render header iff hasHeartbeat || entries==empty" rule
+//     is what hides the legacy frozen-banner bug — see
+//     §11.12.5.
 //
-// Topic mode and DM mode behave the same: return existing
-// placeholder if state.PlaceholderMessageID > 0, otherwise
-// create one (only when UserMessageID is set, see above).
-// The placeholder is the per-turn status ticker
-// (Working… → ✅ Completed); reply chain goes to userMsgID.
-// See docs/channel/telegram.md §11.11.
-func (a *Adapter) ensurePlaceholderForHeartbeat(ctx context.Context, chatID string, topicID int) (int, error) {
-	state, ok := a.state.topic(chatID, topicID)
-	if ok && state.PlaceholderMessageID > 0 {
-		return state.PlaceholderMessageID, nil
-	}
-	// Race-window guard: handleMessage hasn't populated the state
-	// yet. Wait for it instead of creating a placeholder that
-	// will be orphan'd by the subsequent ensurePlaceholder call.
-	if !ok || state.UserMessageID == "" {
-		return 0, nil
-	}
-	// Genuine "placeholder was supposed to exist but didn't" case
-	// (e.g., ensurePlaceholder failed with transient network
-	// error). Create one now.
-	initialText := placeholderInitialText(time.Now().UTC())
-	result, err := a.sendTelegramMessage(ctx, chatID, topicID, 0, initialText, nil)
-	if err != nil {
-		return 0, err
-	}
-	if state == nil {
-		state = &TopicState{ChatID: chatID, TopicID: topicID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	}
-	state.PlaceholderMessageID = result.MessageID
-	state.LastMessageID = result.MessageID
-	if err := a.state.putTopic(state); err != nil {
-		return result.MessageID, err
-	}
-	return result.MessageID, nil
-}
+// What this removed: the lazy bootstrap attempt from Send()
+// (create placeholder on demand if handleMessage hadn't
+// shipped yet) was racy by design and got superseded by
+// simply not being needed.
 
 func (a *Adapter) attachments(ctx context.Context, message *Message, chatID string) ([]messages.Attachment, error) {
 	values := make([]attachmentSource, 0, 2)
@@ -859,32 +858,29 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// "🤖 Working..." to Telegram.
 		return nil
 	}
-	// Resolve anchors up front. Two distinct concepts (both used
-	// in BOTH topic and DM mode — per-user-message semantics):
+	// Resolve replyAnchor up front. reply_to_message_id for OutXxx
+	// bubbles — always the user message id that triggered this
+	// turn (TopicState.UserMessageID, populated eagerly by
+	// handleMessage → ensurePlaceholder). Reply chain hangs
+	// under the user's own "hi" message in both DM and topic
+	// modes, so the user sees their own message at the top of the
+	// chain.
 	//
-	//   placeholderAnchor — the per-turn "🤖 Working..." bot
-	//     message id. Each user message creates a fresh one.
-	//     Used by OutHeartbeat (PATCH status text) and
-	//     OnPromptEnded (PATCH to ✅ Completed). The previous
-	//     turn's placeholder stays in the Telegram timeline as
-	//     that turn's permanent status marker.
-	//
-	//   replyAnchor — reply_to_message_id for OutXxx bubbles.
-	//     Always the user message id that triggered this turn
-	//     (TopicState.UserMessageID). Reply chain hangs under
-	//     the user's own "hi" message in both DM and topic
-	//     modes, so the user sees their own message at the top
-	//     of the chain.
+	// The "placeholder message id" anchor (used to live here as
+	// placeholderAnchor) is no longer computed at Send-time. v9
+	// P1 (2026-08-23) removed ensurePlaceholderForHeartbeat
+	// entirely: the per-turn placeholder is created eagerly in
+	// handleMessage (chain → chunk body via ensurePlaceholder);
+	// OutHeartbeat's only job is to PATCH the active chunk's
+	// header (hasHeartbeat flips → Compose renders), and the
+	// chunk's Telegram messageID is resolved inside
+	// patchChainHeader via the chainLRU. No state lookup needed
+	// here. The legacy race-window guard (UserMessageID not yet
+	// populated → silent drop) is also gone: handleMessage is
+	// synchronous and writes state before publishing, so by the
+	// time any Out* reaches Send the chain is already in place.
 	//
 	// See docs/channel/telegram.md §11.11 for the full UX.
-	placeholderAnchor, placeholderErr := a.ensurePlaceholderForHeartbeat(ctx, rawChatID, topicID)
-	if placeholderErr != nil && a.logger != nil {
-		a.logger.Warn("telegram: placeholder resolve failed",
-			"chat_id", rawChatID,
-			"thread_id", topicID,
-			"err", placeholderErr,
-		)
-	}
 	var replyAnchor int
 	if state, ok := a.state.topic(rawChatID, topicID); ok {
 		if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
@@ -897,27 +893,16 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	case messages.OutChoicePatch:
 		return a.patchChoice(ctx, msg)
 	case messages.OutHeartbeat:
-		// PATCH the per-turn placeholder for live "Working..."
-		// status. Both topic and DM have a placeholder (per the
-		// v3 contract — see §11.11). If the placeholder anchor
-		// resolved to 0 (e.g., first heartbeat raced ahead of
-		// handleMessage and the lazy create failed), silently
-		// drop — OutMessageState already carries ⏳/🔄/✅.
-		//
-		// §18: the placeholder carries the StatusBar trailer so
-		// identity / usage / git stay visible alongside the
-		// status line. Goes through the same renderBodyWithStatusBar
-		// helper as the text-bubble paths so the rendering
-		// pipeline is shared.
-		if placeholderAnchor > 0 {
-			status := "🤖 Working..."
-			if msg.Heartbeat != nil {
-				status = heartbeatText(msg.Heartbeat)
-			}
-			return a.editTelegramMessage(ctx, rawChatID, placeholderAnchor,
-				a.renderBodyWithStatusBar(status, &msg), nil)
-		}
-		return nil
+		// v9 P1 (2026-08-23): the eager ensurePlaceholder in
+		// handleMessage guarantees the chain + chunk exists before
+		// any Out* lands, so there is no race to guard against.
+		// patchChainHeader still defensively returns nil when
+		// chain.cursor < 0 (a transient / purged state) — that is
+		// its own correctness gate, not a placeholder-anchor
+		// resolution step. OutMessageState's 👌 reaction still
+		// announces the turn if a heartbeat ever gets silently
+		// dropped.
+		return a.patchChainHeader(rawChatID, topicID, replyAnchor, msg)
 	case messages.OutMessageState:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageState missing MessageState or MessageID")
@@ -969,32 +954,191 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// (no emoji). Caller uses this to explicitly drop reactions
 		// (e.g., MessageDropped).
 		return a.setMessageReactions(ctx, rawChatID, messageID, nil)
-	case messages.OutToolStart, messages.OutToolEnd:
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor,
-			a.renderBodyWithStatusBar(formatTool(msg), &msg))
+	case messages.OutToolStart:
+		// PATCH-free Claude-Code-style two-line UX (mirrors
+		// feishu/tool_thread_merge.go semantics, but stays inside
+		// the chunked chain so the StatusBar / header / footer
+		// naturally wrap the tool pair).
+		//
+		// The call line (`● Tool(args)`) lands as a plain
+		// appendEntry on the active chunk, and we record its
+		// (chunkIdx, entryIdx) in chain.toolPending under one
+		// critical section. When the matching OutToolEnd arrives
+		// the rewrite mutates that same entry to
+		// `startBody + "\n" + resultBody`, so both `●` and `⎿`
+		// render as one chunkEntry → one Telegram message.
+		//
+		// Edge cases (all fall back to a fresh appendSegment for
+		// the result body on End so no data is silently dropped):
+		//   - sendFn fails during cold-create: chain still
+		//     materialises but messageID stays 0; push happens
+		//     anyway (the entry is real, just unsent) and End's
+		//     rewrite mutates the in-memory entry. The next
+		//     flushChainNow will pick it up if/when messageID
+		//     gets assigned.
+		//   - SPLIT path (segment > 3500 chars): unreachable for
+		//     tool segments (args are capped at 100 bytes by
+		//     toolCallArgsMaxBytes), but defended: (-1, -1) → no
+		//     toolPending push → End falls back to fresh append.
+		//   - msg.Tool == nil: gateway always populates ToolInfo
+		//     for OutToolStart, but the message contract doesn't
+		//     enforce it (any sender / test / replay path could
+		//     produce one). Old formatTool had a nil guard; this
+		//     rewrite drops it — we mirror the guard here so a
+		//     nil Tool falls back to the legacy text-only path
+		//     instead of NPE-ing on msg.Tool.Name.
+		if msg.Tool == nil {
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+				formatTool(msg))
+		}
+		startName := msg.Tool.Name
+		if startName == "" {
+			startName = "tool"
+		}
+		startBody := formatToolStartCall(startName, msg.Tool.Args)
+		startBodyNL := startBody + "\n"
+
+		chain := a.chains.getOrCreate(rawChatID, topicID, replyAnchor)
+		chain.mu.Lock()
+		chunkIdx, entryIdx := appendSegmentLocked(ctx, chain,
+			rawChatID, topicID, replyAnchor,
+			startBody, statusbar.StatusBarLines(&msg),
+			a.chainSendFn())
+		if chunkIdx >= 0 && entryIdx >= 0 {
+			chain.pushToolStartEntry(chunkIdx, entryIdx, startBodyNL)
+		}
+		chain.dirty = true
+		chain.mu.Unlock()
+		scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+			rawChatID, topicID, replyAnchor)
+		return nil
+
+	case messages.OutToolEnd:
+		// Rewrite the matching OutToolStart's chunkEntry in place
+		// so `● Tool(args)` and `⎿  result` render as one
+		// chunkEntry → one Telegram message (Claude-Code-style
+		// two-line UX, no PATCH overhead because Compose rebuilds
+		// the chunk body and the existing debounced flush handles
+		// the editMessageText).
+		//
+		// Fall-back ladder (each preserves the result line so the
+		// user always sees the tool completed):
+		//   1. No pending entry → fresh appendSegment for the
+		//      result. Happens when: End arrives before Start
+		//      (orphan / replay), chain was LRU-evicted between
+		//      Start and End, or Start's appendSegmentLocked
+		//      failed (chain never materialised).
+		//   2. Pending entry's chunk was freezeAfterOverflow'd
+		//      (entries==nil) → fresh appendSegment. The Start
+		//      entry's chunk materialised long content and was
+		//      split; we can't splice the result into the
+		//      discarded prefix.
+		//   3. Pending entry's chunk is still in chain.chunks but
+		//      not the active one (chain rotated between Start
+		//      and End): rewrite in place + flushChunkAt(idx) →
+		//      editMessageText on the historical messageID.
+		//   4. Pending entry's chunk IS the active chunk: rewrite
+		//      in place + scheduleFlushDebounced → normal flow.
+		//
+		// msg.Err vs msg.Tool.Err: the gateway translates
+		// EventAgentToolEnd → OutboundMessage{Tool: &ToolInfo{Err: ev.Err}}
+		// but does NOT set the message-level Err field. So
+		// msg.Err is always nil for OutToolEnd in practice; the
+		// canonical error lives on msg.Tool.Err. The pre-fix
+		// formatTool used msg.Err, which silently rendered all
+		// failed tools as success — using msg.Tool.Err here is
+		// a correctness fix, not a behaviour change.
+		if msg.Tool == nil {
+			// Same nil-guard as OutToolStart above — the legacy
+			// text-only path was the only way the old adapter
+			// could even reach this case without a Tool field.
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+				formatTool(msg))
+		}
+		endName := msg.Tool.Name
+		if endName == "" {
+			endName = "tool"
+		}
+		toolErr := msg.Tool.Err
+		resultBody := summarizeToolResult(endName, msg.Tool.Output, toolErr)
+
+		chain, ok := a.chains.lookup(rawChatID, topicID, replyAnchor)
+		if !ok || chain == nil {
+			// No chain at all — fall back to fresh append.
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+		chain.mu.Lock()
+		entry, hit := chain.popToolStartEntry()
+		if !hit {
+			chain.mu.Unlock()
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+		if entry.chunkIdx < 0 || entry.chunkIdx >= len(chain.chunks) {
+			chain.mu.Unlock()
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+		target := chain.chunks[entry.chunkIdx]
+		merged := entry.startBody + resultBody + "\n"
+		replaced := target.replaceEntry(entry.entryIdx, merged)
+		cursor := chain.cursor
+		chain.dirty = true
+		chain.mu.Unlock()
+
+		if !replaced {
+			// Fall-back 2: chunk was freezeAfterOverflow'd. The
+			// original `●` line is gone (entries==nil) so we can't
+			// splice; emit `⎿` as a fresh segment so the result is
+			// visible to the user. The `●` from the split-off chunk
+			// stays on Telegram as a "naked call" line — better than
+			// losing either signal.
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+
+		if entry.chunkIdx != cursor {
+			// Fall-back 3: rewrite landed in an earlier chunk.
+			// Flush that specific chunk's Telegram message via
+			// editMessageText. Schedule a normal debounced flush
+			// afterwards so the active chunk's dirty state still
+			// gets its editMessageText on the next tick.
+			if err := flushChunkAt(ctx, chain, entry.chunkIdx,
+				rawChatID, topicID, replyAnchor, a.chainEditFn()); err != nil {
+				a.logger.Warn("telegram: tool merge patch earlier chunk failed",
+					"chat_id", rawChatID,
+					"chunk_idx", entry.chunkIdx,
+					"err", err)
+			}
+		}
+		// Always schedule a flush — if the rewrite was in the
+		// active chunk (case 4) this is the only path that ships
+		// it; if it was cross-chunk (case 3) the active chunk may
+		// still be dirty from earlier events and the next
+		// flushChainNow will PATCH it.
+		scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+			rawChatID, topicID, replyAnchor)
+		return nil
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor,
-			a.renderBodyWithStatusBar(formatTaskList(msg.TaskList), &msg))
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+			formatTaskList(msg.TaskList))
 	case messages.OutError:
-		// OutError carries a pre-escaped <pre>stderr</pre> HTML
-		// fragment. Going through renderBodyWithStatusBar would
-		// run RenderMarkdown once here, then sendRenderedText
-		// would run it again — the second pass would
-		// escapeHTML the literal "<pre>" / "</pre>" tags it
-		// doesn't recognise, producing "&lt;pre&gt;…&lt;/pre&gt;"
-		// in the wire payload. The pre-existing behaviour
-		// (TestAdapter_Send_OutError_Diagnostic) already locks
-		// the single-escape output, so we stitch the StatusBar
-		// panel in raw form and let sendRenderedText's one
-		// RenderMarkdown pass handle the escape consistently.
-		text := msg.Text
-		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
-			text += "\n\n<pre>" + escapeHTML(msg.Diagnostic.StderrTail) + "</pre>"
+		// OutError delegates to chunkBody.appendError via the
+		// appendErrorSegment chain business API. Adapter no longer
+		// makes the ```fences``` format decision — that's chunkBody's.
+		var stderr string
+		if msg.Diagnostic != nil {
+			stderr = msg.Diagnostic.StderrTail
 		}
-		if snap := statusbar.StatusBarLines(&msg); len(snap) > 0 {
-			text += "\n\n" + statusbar.RenderPanel(snap)
+		chain := a.chains.getOrCreate(rawChatID, topicID, replyAnchor)
+		if err := appendErrorSegment(ctx, chain,
+			rawChatID, topicID, replyAnchor,
+			msg.Text, stderr, statusbar.StatusBarLines(&msg),
+			a.chainSendFn(), a.chainEditFn()); err != nil {
+			return err
 		}
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor, text)
+		// appendErrorSegment is data-only (no debounce schedule);
+		// adapter must schedule the flush after the mutation lands.
+		scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+			rawChatID, topicID, replyAnchor)
+		return nil
 	case messages.OutInit:
 		// Silent drop — matches feishu F-44. The Init payload
 		// (session_id, model, agent name, …) is still on the
@@ -1003,15 +1147,131 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// topic. Session identity shows up via the StatusBar
 		// trailer on every subsequent outbound message (see §18).
 		return nil
+	case messages.OutThinking:
+		// F-think parity with feishu: prefix the reasoning body
+		// with `💭 ` so the user can scan the chat and instantly
+		// see "this is the agent's thinking" without reading the
+		// full prose. Feishu does the same inline in
+		// postThreadMarkdownReply before rendering as lark_md;
+		// Telegram renders markdown via chunk_body.Compose's
+		// RenderMarkdown pass, so the prefix just needs to be in
+		// the segment text.
+		//
+		// Empty-text silent drop already happened at the top of
+		// Send (case messages.OutReply, ... OutThinking: if
+		// strings.TrimSpace(msg.Text) == "" { return nil }), so
+		// msg.Text here is non-empty. We DO NOT trim the body
+		// here — the user's whitespace is content. If a future
+		// caller bypasses the drop gate with all-whitespace
+		// text, appendSegmentForKind's own
+		// `strings.TrimSpace(segment) == ""` check at the top
+		// catches it (the prefix `💭 ` is non-whitespace so we
+		// can't mirror the trim here).
+		body := "💭 " + msg.Text
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, body)
 	default:
-		// OutReply / OutResult / OutThinking / OutCommandReply:
-		// every text-emitting kind passes through here. Each
-		// bubble carries the StatusBar trailer so identity /
-		// usage / git stay visible per-message — Telegram has no
-		// card concept, so we can't fold them into a single
-		// container like Feishu does. See §18.
-		return a.sendRenderedText(ctx, rawChatID, topicID, replyAnchor,
-			a.renderBodyWithStatusBar(msg.Text, &msg))
+		// OutReply / OutResult / OutCommandReply:
+		// every text-emitting kind folds onto the active chain
+		// chunk (v9 §11.12). StatusBar trailing only lands on
+		// segments produced by footer-bearing kinds (OutReply /
+		// OutResult / OutTaskCreate / OutTaskUpdate); see
+		// §11.12.6 for the in-memory footer semantics.
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, msg.Text)
+	}
+}
+
+// appendSegmentForKind is the v9 chain ingest helper. Single
+// point of entry for every Out* kind that maps onto a chain
+// segment (OutReply / OutResult / OutThinking / OutToolStart /
+// OutToolEnd / OutError / OutTaskCreate / OutTaskUpdate). It
+// computes whether the current event is footer-bearing
+// (drives whether lastFooter is refreshed) and hands off to
+// the package-level appendSegment primitive. Always schedules
+// a debounced flush on return so the active chunk's text gets
+// back to Telegram.
+func (a *Adapter) appendSegmentForKind(
+	ctx context.Context,
+	msg messages.OutboundMessage,
+	rawChatID string,
+	topicID, userMessageID int,
+	segment string,
+) error {
+	if strings.TrimSpace(segment) == "" {
+		return nil
+	}
+	chain := a.chains.getOrCreate(rawChatID, topicID, userMessageID)
+
+	// Every text-emitting OutboundKind gets the StatusBar
+	// snapshot appended (matches v8 contract from §18 trailer
+	// integration). StatusBarLines returns nil when msg fields
+	// are absent, so non-statusbar kinds (e.g. raw OutReply with
+	// no AgentName/Model/SessionID) cleanly skip the footer.
+	// All v9 text-emitting kinds — OutReply / OutResult /
+	// OutThinking / OutToolStart / OutToolEnd / OutTaskCreate /
+	// OutTaskUpdate / OutError / OutCommandReply — go through
+	// this path. OutChoice / OutMessageState / OutMessageStateRemoved
+	// don't (handled separately in their own cases).
+	var sb []string
+	if isTextEmittingKind(msg.Kind) {
+		sb = statusbar.StatusBarLines(&msg)
+	}
+
+	if err := appendSegment(
+		ctx, chain,
+		rawChatID, topicID, userMessageID,
+		segment+"\n", sb,
+		a.chainSendFn(), a.chainEditFn(),
+	); err != nil {
+		return err
+	}
+
+	scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+		rawChatID, topicID, userMessageID)
+	return nil
+}
+
+// isTextEmittingKind reports whether msg.Kind flows through the
+// chain-rolling-log path with a StatusBar trailer (v8 §18
+// contract). Excludes OutChoice (its own InlineKeyboard card),
+// OutMessageState / OutMessageStateRemoved (reactions, no text),
+// OutInit (silent drop), and OutHeartbeat (status ticker, not
+// entry text).
+func isTextEmittingKind(k messages.OutboundKind) bool {
+	switch k {
+	case messages.OutReply, messages.OutResult, messages.OutThinking,
+		messages.OutToolStart, messages.OutToolEnd,
+		messages.OutTaskCreate, messages.OutTaskUpdate,
+		messages.OutError, messages.OutCommandReply:
+		return true
+	}
+	return false
+}
+
+// chainSendFn returns a closure bound to the Adapter's sendTelegramMessage
+// for use by the package-level appendSegment primitive. The closure
+// does NOT capture any external context — every call passes its own
+// ctx (which the flushChainNow / debounce-timer paths provide
+// fresh, e.g., ctx.WithTimeout(context.Background(), 5*time.Second)).
+// Capturing the request ctx here would break debounced flushes that
+// fire AFTER the original Request context has been cancelled.
+func (a *Adapter) chainSendFn() sendChunkFn {
+	return func(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error) {
+		res, err := a.sendTelegramMessage(ctx, chatID, topicID, replyToMessageID, text, nil)
+		if err != nil {
+			return 0, err
+		}
+		return int64(res.MessageID), nil
+	}
+}
+
+// chainEditFn returns a closure bound to the Adapter's editTelegramMessage.
+// Same context-capture caveat as chainSendFn: every call passes its own
+// ctx. Long-text overflow path in flushChainNow may need to issue
+// multiple edits — each one goes through apiCall's rate limit / retry
+// pipeline.
+func (a *Adapter) chainEditFn() editChunkFn {
+	return func(ctx context.Context, chatID string, messageID int64, text string) error {
+		return a.editTelegramMessage(ctx, chatID, int(messageID), text, nil)
 	}
 }
 
@@ -1047,75 +1307,149 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 		rawChatID = chatID
 	}
 	topicID := a.sessionTopicID(chatID)
-	state, ok := a.state.topic(rawChatID, topicID)
-	if !ok {
+
+	// v9: chain is the truth. Resolve the active chunk via
+	// chainLRU (not state.PlaceholderMessageID which is now
+	// read-only back-compat). Flush the in-memory buffer to
+	// Telegram first so the [reaction] lands on a fully-rendered
+	// chunk.
+	parsedUserMsgID := atoiUserMsgID(userMsgID)
+	chain := a.chains.getOrCreate(rawChatID, topicID, parsedUserMsgID)
+
+	// P1 #2 fix (2026-08-23): take chain.mu for the full
+	// flush → stamp → purge sequence so an in-flight
+	// scheduleFlushDebounced from a concurrent Send can't
+	// arm a timer that fires AFTER we purge the chain (orphan
+	// timer editing the previous turn). We also cancel any
+	// currently-pending timer under the same lock so its
+	// stop/release ordering is unambiguous.
+	chain.mu.Lock()
+	if chain.cursor < 0 {
+		stopDebounceTimer(chain)
+		chain.mu.Unlock()
+		a.chains.purge(rawChatID, topicID, parsedUserMsgID)
 		return
 	}
-	// v6.3: Telegram bot single-reaction budget — the user
-	// message's reaction slot is reserved for MessageSubmitted
-	// (👌). OnPromptEnded does NOT overwrite that slot; the
-	// terminal visual is conveyed via the per-turn placeholder's
-	// 🎉 reaction below.
-	//
-	// 🎉 is in the official Telegram ReactionTypeEmoji
-	// whitelist (see gist.github.com/Soulter/3f22c8e.../
-	// reactions-txt for the canonical list). Earlier designs
-	// tried ✅ for "Done" but U+2705 is OUTSIDE the whitelist
-	// and Telegram returns REACTION_INVALID — see docs/channel/
-	// telegram.md §11.11.3 for the live API probe that
-	// motivated the fall-back.
-	//
-	// 🎉 on per-turn placeholder — NO text PATCH; placeholder
-	// keeps its last heartbeat text.
-	if state.PlaceholderMessageID > 0 {
-		_ = a.setMessageReactions(ctx, rawChatID, state.PlaceholderMessageID, []map[string]any{
-			{"type": "emoji", "emoji": "🎉"},
-		})
+	stopDebounceTimer(chain)
+	chain.mu.Unlock()
+
+	// Best-effort flush before stamping the terminal reaction.
+	if err := flushChainNow(
+		ctx, chain,
+		rawChatID, topicID, atoiUserMsgID(userMsgID),
+		a.chainEditFn(), a.chainSendFn(),
+	); err != nil && a.logger != nil {
+		a.logger.Warn("telegram: OnPromptEnded flush failed",
+			"chat_id", rawChatID, "err", err)
 	}
+
+	chain.mu.Lock()
+	cur := chain.chunks[chain.cursor]
+	var curMessageID int64
+	if cur != nil {
+		curMessageID = cur.messageID
+	}
+	chain.mu.Unlock()
+
+	if curMessageID != 0 {
+		// [reaction] on the active chunk. v6.3 single-reaction
+		// budget on USER MSG slot is preserved; this stamp lands
+		// on the placeholder, not the user's original message.
+		// [emoji] is in the official ReactionTypeEmoji whitelist
+		// ([other emoji] U+2705 was rejected by Telegram API).
+		_ = a.setMessageReactions(ctx, rawChatID, int(curMessageID),
+			[]map[string]any{{"type": "emoji", "emoji": "\U0001F389"}})
+	}
+
+	// Turn-end cleanup: forget the in-memory chain. Frozen
+	// chunks remain in chat as historical evidence (no edit
+	// touches them again). Next user message re-materialises
+	// a fresh chain via ensurePlaceholder.
+	a.chains.purge(rawChatID, topicID, parsedUserMsgID)
 }
 
-// renderBodyWithStatusBar appends the per-turn StatusBar footer
-// to a message body when one is available, then renders the
-// combined text through RenderMarkdown (Telegram restricted
-// HTML subset). The footer is wrapped in a chevron-tail ASCII
-// panel (statusbar.RenderPanel — ┌/└ on the left, `›` chevron
-// tail on the right) so users can tell at a glance "this is
-// session metadata, not reply content". The right side opens
-// outward because StatusBar content can extend right and a
-// closed `┐`/`┘` would imply a hard boundary that doesn't
-// exist. Returns body unchanged when StatusBar is empty so a
-// chunk with all-zero statusbar fields (e.g. a streaming
-// OutReply that hasn't received its terminal Usage yet) just
-// omits the trailer — zero-omit per F-45 §1.6.
+// patchChainHeader refreshes the active chunk's headerLine
+// (in-memory) and arms the debounced flush. Bound to the
+// OutHeartbeat Send case (v9 §11.12.8).
 //
-// The body itself is plain text — RenderMarkdown treats it as
-// markdown source and converts to <b>/<i>/<code>/<a>. Pre-escaped
-// HTML fragments (e.g. OutError's <pre>stderr</pre> block) must
-// NOT go through this helper — use sendRenderedText directly so
-// RenderMarkdown doesn't re-parse them and break the literal tags.
+// The headerLine format is fully owned by the status function:
+// heartbeatText composes the full `<b>{status} · ⏱ HH:MM:SS</b>`
+// (with LastBeatAt as the timestamp); placeholderInitialText does
+// the same shape with time.Now() (local). patchChainHeader just
+// picks which formatter to call and stores the result. No markup
+// or timestamp composition happens here — that's the entire
+// point of the refactor.
 //
-// No cache: per the F-44 / fix-placehold-card contract, every
-// OutboundMessage that reaches Send has AgentName / Model /
-// SessionID / GitStatus stamped by runtime/chatsession, and
-// Usage is filled at terminal. StatusBarLines is a pure
-// consumer of msg fields — we render what's there, nothing
-// more. See docs/channel/telegram.md §18.
-func (a *Adapter) renderBodyWithStatusBar(body string, msg *messages.OutboundMessage) string {
-	snap := statusbar.StatusBarLines(msg)
-	if len(snap) == 0 {
-		return body
+// v9 P1 (2026-08-23): use setHeaderFromHeartbeat (not setHeader)
+// on the real-heartbeat branch. This flips chunk.hasHeartbeat=true
+// so Compose's "render header iff hasHeartbeat || entries==empty"
+// rule starts respecting the new info. Cold-create path constructs
+// the chunk with the cold banner header directly via newChunkBody
+// (no setHeader call needed), keeping hasHeartbeat=false for
+// non-agent turns — which is exactly what hides the frozen
+// "🤖 Working..." banner that was the v8 bug. Overflow / split /
+// rotate / tail paths use inheritLatestHeader to copy the (header,
+// hasHeartbeat) pair from the prior active chunk.
+func (a *Adapter) patchChainHeader(
+	chatID string,
+	topicID int,
+	userMessageID int,
+	msg messages.OutboundMessage,
+) error {
+	chain := a.chains.getOrCreate(chatID, topicID, userMessageID)
+	chain.mu.Lock()
+	if chain.cursor < 0 {
+		chain.mu.Unlock()
+		return nil
 	}
-	full := body + "\n\n" + statusbar.RenderPanel(snap)
-	rendered, err := RenderMarkdown(full)
-	if err != nil {
-		// Mirror renderInlineText: RenderMarkdown failure → fall
-		// back to escapeHTML on the raw combined string. StatusBar
-		// lines + panel borders are plain text so this preserves
-		// them verbatim.
-		return escapeHTML(full)
+	if msg.Heartbeat != nil {
+		chain.chunks[chain.cursor].setHeaderFromHeartbeat(heartbeatText(msg.Heartbeat))
+	} else {
+		// OutHeartbeat always carries a Heartbeat payload in
+		// production (the gateway fills msg.Heartbeat before the
+		// Send case fires), but defensive fallback if a future
+		// caller forgets: reset to cold-create header text. NOTE:
+		// setHeader does NOT touch hasHeartbeat — if a previous
+		// heartbeat on this chunk had already flipped it true, it
+		// stays true. Compose will then render the cold banner
+		// header anyway because hasHeartbeat=true, which is a
+		// defensive inconsistency rather than the legacy silent-
+		// drop path. Acceptable: this branch only fires on a
+		// programmer error (missing Heartbeat payload) and the
+		// next legitimate OutHeartbeat will repair the state.
+		chain.chunks[chain.cursor].setHeader(heartbeatText(nil))
 	}
-	return rendered
+	a.logger.Info("telegram: heartbeat header set",
+		"chat_id", chatID, "header", chain.chunks[chain.cursor].headerText(),
+		"cursor", chain.cursor, "nchunks", len(chain.chunks))
+	chain.dirty = true
+	chain.mu.Unlock()
+
+	scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+		chatID, topicID, userMessageID)
+	return nil
 }
+
+// atoiUserMsgID parses the userMsgID (string) back to int for
+// the reply_to chain message ID. Returns 0 on failure.
+func atoiUserMsgID(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// renderBodyWithStatusBar was the v8 trailing-StatusBar helper.
+// v9 chain removed the per-bubble StatusBar trailer; it now lives
+// in chain.lastFooter (§11.12.6) and is rendered by the active
+// chunk's body assembly. The helper is removed; callers in v8 used
+// it through sendRenderedText which v9 no longer routes.
+//
+// No replacement: callers that still want body+StatusBar-flat-text
+// rendering should compose statusbar.StatusBarLines(msg) +
+// statusbar.RenderPanel(snap) themselves (callers are app-internal
+// — currently none).
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()
@@ -1142,29 +1476,42 @@ func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []
 	return blocks
 }
 
+// formatTool produces a single-line chain segment for the active
+// placeholder chunk. v9 dispatches the call line and result line to
+// separate helpers (formatToolStartCall / summarizeToolResult) —
+// feishu parallel from internal/channel/feishu/summarize_tool.go.
+//
+// OutToolStart emits a "call" line:
+//   `● Bash(ls -la)`
+//
+// OutToolEnd emits a one-line "result" line that hides raw output:
+//   `⎿  📄 Read → 47 lines`
+//
+// PII posture: raw output is NEVER included in the result line —
+// only the byte/lines/file-count heuristic. Custom / unknown tools
+// report only the byte count.
+//
+// Falls back to msg.Text when msg.Tool is nil (defensive — the
+// dispatch in Send already guards this, but formatTool is also
+// reachable from places that haven't been migrated yet).
 func formatTool(msg messages.OutboundMessage) string {
 	if msg.Tool == nil {
+		if msg.Text == "" {
+			return ""
+		}
 		return msg.Text
 	}
 	name := msg.Tool.Name
 	if name == "" {
 		name = "tool"
 	}
-	prefix := "🔧"
-	if msg.Kind == messages.OutToolEnd {
-		prefix = "✅"
+	switch msg.Kind {
+	case messages.OutToolStart:
+		return formatToolStartCall(name, msg.Tool.Args)
+	case messages.OutToolEnd:
+		return summarizeToolResult(name, msg.Tool.Output, msg.Err)
 	}
-	result := prefix + " " + name
-	if msg.Tool.Args != "" {
-		result += "\n" + msg.Tool.Args
-	}
-	if msg.Tool.Output != "" {
-		result += "\n" + msg.Tool.Output
-	}
-	if msg.Err != nil {
-		result += "\n⚠️ " + msg.Err.Error()
-	}
-	return result
+	return ""
 }
 
 func formatTaskList(taskList *agent.AgentTaskListEvent) string {
@@ -1188,47 +1535,47 @@ func formatTaskList(taskList *agent.AgentTaskListEvent) string {
 	return result.String()
 }
 
-func formatInit(msg messages.OutboundMessage) string {
-	parts := make([]string, 0, 4)
-	if msg.AgentName != "" {
-		parts = append(parts, "Agent: "+msg.AgentName)
-	}
-	if msg.Model != "" {
-		parts = append(parts, "Model: "+msg.Model)
-	}
-	if msg.SessionID != "" {
-		parts = append(parts, "Session: "+msg.SessionID)
-	}
-	if len(parts) == 0 {
-		return msg.Text
-	}
-	return strings.Join(parts, " · ")
-}
+// formatInit was the v8 OutInit pre-render helper. v9 silenced
+// OutInit (matches feishu F-44); session identity now travels
+// through StatusBar on every footer-bearing outbound message.
+// Removed.
 
-// heartbeatText renders the in-turn status ticker. v7 added the
-// `⏱ HH:MM:SS` timestamp so the user can see when the last
-// heartbeat was emitted (≈ "agent is alive at this clock time").
-// The wall clock is taken from snapshot.LastBeatAt which the
-// chatsession heartbeat tracker refreshes on every think/tool
-// event (see internal/chatsession/heartbeat.go).
+// heartbeatText composes the per-beat chunk header end-to-end:
+// status text + activity timestamp + bold markup. Same shape
+// as placeholderInitialText so both render the full
+// `<b>{status} · ⏱ HH:MM:SS</b>` line that becomes the
+// chunk's headerLine.
+//
+// Timestamp source: snapshot.LastBeatAt — the last think/tool
+// event wall-clock, refreshed by chatsession heartbeat tracker.
+// NOT time.Now() at heartbeat emission (those can diverge when
+// the heartbeat timer fires after agent stalls). Returning the
+// activity time means the user sees "agent was last thinking
+// at HH:MM:SS", which is the v8 §11.11.1 v7 contract.
+//
+// Local-time rendering (no .UTC()): the user reads the bot's
+// chat in their own timezone and expects the wall-clock they
+// see on their phone, not UTC. We normalise via .Local() so a
+// snapshot stamped as UTC internally still renders as local.
+//
+// No snapshot → return the bare "🤖 Working..." banner without
+// a timestamp (we have nothing to attribute it to).
 func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	if snapshot == nil {
-		return "🤖 Working..."
+		return "<b>🤖 Working...</b>"
 	}
-	text := "💭 " + strconv.Itoa(snapshot.ThinkCount) + " · 🔧 " + strconv.Itoa(snapshot.ToolCount)
+	text := fmt.Sprintf("<b>💭 %d · 🔧 %d</b>",
+		snapshot.ThinkCount, snapshot.ToolCount)
 	if !snapshot.LastBeatAt.IsZero() {
-		text += " · ⏱ " + snapshot.LastBeatAt.UTC().Format("15:04:05")
+		text += " · ⏱ " + snapshot.LastBeatAt.Local().Format("15:04:05")
 	}
 	return text
 }
 
-func renderInlineText(text string) string {
-	rendered, err := RenderMarkdown(text)
-	if err != nil {
-		return escapeHTML(text)
-	}
-	return rendered
-}
+// renderInlineText was a thin wrapper around RenderMarkdown +
+// escapeHTML fallback — same shape as the package-level
+// RenderMarkdown. Removed 2026-08-23 (chain unification).
+// All call sites should use RenderMarkdown directly.
 
 func userID(message *Message) string {
 	if message == nil || message.From == nil {

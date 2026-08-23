@@ -192,7 +192,7 @@ func (a *Adapter) handleInputClick(ctx context.Context, callback *CallbackQuery,
 		"input_field_placeholder": "Type your answer...",
 		"selective":               true,
 	}
-	result, err := a.sendTelegramMessage(ctx, rawChatIDFromSession(state.ChatID), state.TopicID, 0, escapeHTML(promptText), replyMarkup)
+	result, err := a.sendTelegramMessage(ctx, rawChatIDFromSession(state.ChatID), state.TopicID, 0, escapeInline(promptText), replyMarkup)
 	if err != nil {
 		a.answerCallback(ctx, callback.ID, "Failed to open input", true)
 		if a.logger != nil {

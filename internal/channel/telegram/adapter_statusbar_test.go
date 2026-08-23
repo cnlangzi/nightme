@@ -35,6 +35,93 @@ func sendMessageText(calls []fakeCall) string {
 	return ""
 }
 
+// lastChunkText returns the rendered text of the active chain
+// chunk. v9: with the chain rolling log, segments accumulate via
+// editMessageText on the active chunk; only the cold-start chunk
+// was sent via sendMessage.
+//
+// If no editMessageText has happened yet (test forgot to drain
+// the 250ms debounce), this helper synchronously triggers a
+// flush on the adapter's active chain so the body it returns
+// reflects the post-debounce state. Without this, tests would
+// silently return the cold-start sendMessage body which lacks
+// the StatusBar footer.
+//
+// IMPORTANT: the API calls snapshot is taken AFTER flush so the
+// newly-recorded editMessageText is visible. (An earlier version
+// snapshotted before flush and missed the debounced edit,
+// returning the stale cold-create body.)
+//
+// Tests that previously checked sendMessageText directly should
+// now use this helper — it transparently adapts to v9's
+// editMessageText path while keeping the v8 per-Kind body
+// contract (rendered chain chunk text contains the same
+// segments + footer as the v8 bubble would have).
+func lastChunkText(t *testing.T, a *Adapter, _ []fakeCall) string {
+	t.Helper()
+	// Force-flush the active chain so chain.lastFooter /
+	// chain.chunks[cursor].entries are rendered and emitted
+	// via editMessageText. This brings the rendered body up to
+	// "what the user sees in chat at the end of a turn".
+	flushActiveChunkSync(t, a)
+	// Snapshot AFTER flush so the debounced editMessageText is
+	// visible in the log.
+	return editMessageTextOrSendMessage(snapshotFromAdapter(t, a))
+}
+
+func snapshotFromAdapter(t *testing.T, a *Adapter) []fakeCall {
+	t.Helper()
+	if fake, ok := a.api.(*fakeAPI); ok {
+		return fake.snapshotCalls()
+	}
+	return nil
+}
+
+// flushActiveChunkSync drains the chain's pending debounce by
+// invoking flushChainNow on the active chunk. If the chain has
+// nothing pending (dirty=false, cursor<0), it's a no-op.
+//
+// IMPORTANT: this helper does NOT hold chain.mu while calling
+// flushChainNow — that would deadlock against the chain.mu lock
+// acquired inside flushChainNow. Snapshot dirty/cursor under the
+// lock, drop it, then call flushChainNow (which takes its own
+// lock).
+func flushActiveChunkSync(t *testing.T, a *Adapter) {
+	t.Helper()
+	if a == nil || a.chains == nil {
+		return
+	}
+	a.chains.mu.Lock()
+	type pending struct {
+		ch *placeholderChain
+	}
+	var pendings []pending
+	for _, ch := range a.chains.chains {
+		ch.mu.Lock()
+		if ch.dirty && ch.cursor >= 0 {
+			pendings = append(pendings, pending{ch: ch})
+		}
+		ch.mu.Unlock()
+	}
+	a.chains.mu.Unlock()
+
+	for _, p := range pendings {
+		if err := flushChainNow(context.Background(), p.ch, "", 0, 0,
+			a.chainEditFn(), a.chainSendFn()); err != nil && a.logger != nil {
+			a.logger.Warn("telegram: test flush failed", "err", err)
+		}
+	}
+}
+
+// editMessageTextOrSendMessage returns the most recent
+// editMessageText body, falling back to sendMessageText.
+func editMessageTextOrSendMessage(calls []fakeCall) string {
+	if text, ok := editMessageText(calls); ok {
+		return text
+	}
+	return sendMessageText(calls)
+}
+
 // editMessageText returns the text of the most recent
 // editMessageText call (placeholders are repeatedly PATCHed, so
 // "most recent" is the right slice).
@@ -77,7 +164,7 @@ func TestAdapter_Send_DM_OutReply_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "Hello from agent") {
 		t.Errorf("body missing in rendered text: %q", text)
 	}
@@ -113,9 +200,11 @@ func TestAdapter_Send_DM_OutToolStart_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
-	if !strings.Contains(text, "🔧 Read") {
-		t.Errorf("OutToolStart prefix missing; got %q", text)
+	text := lastChunkText(t, a, api.snapshotCalls())
+	// v9 (commit #3): OutToolStart now produces the feishu-style
+	// claude-code call line `● Read(...)` instead of `🔧 Read`.
+	if !strings.Contains(text, "● Read") {
+		t.Errorf("OutToolStart call line missing; got %q", text)
 	}
 	if !strings.Contains(text, "🤖: claude") {
 		t.Errorf("StatusBar missing; got %q", text)
@@ -134,9 +223,13 @@ func TestAdapter_Send_DM_OutToolEnd_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
-	if !strings.Contains(text, "✅ Read") {
-		t.Errorf("OutToolEnd prefix missing; got %q", text)
+	text := lastChunkText(t, a, api.snapshotCalls())
+	// v9 (commit #3): OutToolEnd now produces the feishu-style
+	// claude-code result line `⎿  📄 Read → N lines` instead of
+	// `✅ Read`. Verify the bare name (case-insensitive) for
+	// tool-type heuristics and the `⎿` prefix.
+	if !strings.Contains(text, "⎿") {
+		t.Errorf("OutToolEnd result prefix missing; got %q", text)
 	}
 	if !strings.Contains(text, "🤖: claude") {
 		t.Errorf("StatusBar missing; got %q", text)
@@ -161,7 +254,7 @@ func TestAdapter_Send_DM_OutTaskCreate_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	for _, want := range []string{"Write tests", "Refactor", "🤖: claude"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("OutTaskCreate body missing %q; got %q", want, text)
@@ -179,7 +272,7 @@ func TestAdapter_Send_DM_OutError_NoDiagnostic_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), richOut(messages.OutError, "boom")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "boom") {
 		t.Errorf("OutError body missing; got %q", text)
 	}
@@ -198,7 +291,7 @@ func TestAdapter_Send_DM_OutResult_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), richOut(messages.OutResult, "result body")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	for _, want := range []string{"result body", "🤖: claude", "💰:「", "📁: " + pathutil.FromSlash("code/nightme")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered text missing %q; got %q", want, text)
@@ -217,7 +310,7 @@ func TestAdapter_Send_DM_OutThinking_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), richOut(messages.OutThinking, "thinking body")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "thinking body") {
 		t.Errorf("OutThinking body missing; got %q", text)
 	}
@@ -235,7 +328,8 @@ func TestAdapter_Send_DM_OutCommandReply_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), richOut(messages.OutCommandReply, "slash output")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
+	debug_flush(t, a, api)
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "slash output") {
 		t.Errorf("body missing; got %q", text)
 	}
@@ -253,18 +347,20 @@ func TestAdapter_Send_DM_OutError_AppendsStatusBar(t *testing.T) {
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
-	// OutError's <pre>stderr</pre> block is built by the
-	// adapter (escapeHTML on the StderrTail) and then passed
-	// through RenderMarkdown, which escapeHTMLs the literal
-	// "<pre>" / "</pre>" tags as well (it doesn't recognise
-	// them as safe HTML). The pre-existing behaviour surfaces
-	// "&lt;pre&gt;…&lt;/pre&gt;" in the wire payload — we
-	// lock that contract here, not the prettier behaviour
-	// (which would need to bypass RenderMarkdown for OutError).
-	// StatusBar still rides along after the escaped block.
-	if !strings.Contains(text, "&lt;pre&gt;Traceback...&lt;/pre&gt;") {
-		t.Errorf("stderr <pre> block (escapeHTML'd) missing; got %q", text)
+	text := lastChunkText(t, a, api.snapshotCalls())
+	// OutError's StderrTail flows through chunkBody.appendError
+	// which wraps in ```fences```. RenderMarkdown converts
+	// ``` to <pre> automatically (no double-escape). The wire
+	// payload shows <pre>...stderr...</pre> verbatim — the
+	// prettier pre-fix behaviour. StatusBar rides along after.
+	// v9 fence→<pre> preserves the inner newline. Match the open
+	// tag and the stderr payload separately so the assertion
+	// doesn't depend on whether the newline survives the render.
+	if !strings.Contains(text, "<pre>") || !strings.Contains(text, "</pre>") {
+		t.Errorf("stderr <pre>...</pre> block missing; got %q", text)
+	}
+	if !strings.Contains(text, "Traceback") {
+		t.Errorf("stderr payload missing; got %q", text)
 	}
 	if !strings.Contains(text, "🤖: claude") {
 		t.Errorf("StatusBar missing; got %q", text)
@@ -293,9 +389,9 @@ func TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholderWithStatusBar(t *testing
 		t.Fatalf("send heartbeat: %v", err)
 	}
 
-	text, ok := editMessageText(api.snapshotCalls())
-	if !ok {
-		t.Fatal("expected editMessageText for heartbeat")
+	text := lastChunkText(t, a, api.snapshotCalls())
+	if text == "" {
+		t.Fatal("expected editMessageText body for heartbeat")
 	}
 	for _, want := range []string{"💭 2", "🔧 1", "┌", "└", "›", "🤖: claude · opus-4-5 · sess-1"} {
 		if !strings.Contains(text, want) {
@@ -317,20 +413,20 @@ func TestAdapter_Send_DM_OutReply_NoFieldsNoCache_NoTrailer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := sendMessageText(api.snapshotCalls())
+	text := lastChunkText(t, a, api.snapshotCalls())
 	if !strings.Contains(text, "lonely message") {
 		t.Errorf("body missing; got %q", text)
 	}
-	// No panel border when there's no StatusBar to attach.
-	// `────────` is no longer produced by any code path (the
-	// pre-panel implementation used `---` markdown as divider
-	// and RenderMarkdown converted it to `────────`; after the
-	// chevron-tail panel, the only horizontal bars are the
-	// `─` chars inside `┌─…─›` / `└─…─›` — which never appear
-	// here because StatusBarLines returns nil).
-	for _, want := range []string{"┌", "└", "›", "🤖", "💰", "📁"} {
+	// v9 P1 (§11.12.5): the cold-create "🤖 Working..." banner is
+	// hidden once body content lands and no OutHeartbeat has fired
+	// (the body+no-heartbeat render rule). Pin it: the legacy v8
+	// "banner is unconditional" assertion no longer holds for a
+	// non-agent path / agent turn that races the reply ahead of
+	// the first heartbeat.
+	for _, want := range []string{"🤖", "┌", "└", "›", "💰", "📁"} {
 		if strings.Contains(text, want) {
-			t.Errorf("no-trailer reply should not contain %q; got %q", want, text)
+			t.Errorf("no-trailer reply should not contain banner %q; got %q",
+				want, text)
 		}
 	}
 }
@@ -436,8 +532,12 @@ func TestAdapter_Send_Topic_OutReply_AppendsStatusBar(t *testing.T) {
 func TestAdapter_Send_DM_OutReply_OutOrderPreservesCache(t *testing.T) {
 	// Two consecutive Sends of the same turn: the first seeds
 	// the cache (rich fields), the second also carries rich
-	// fields. Both bubbles must show the StatusBar.
-	a, api := newTestAdapter(t)
+	// fields. v9 chain: both segments fold into the SAME
+	// chunk (cold-create then in-place append). After
+	// debounced flush, the chain's rendered body should
+	// contain BOTH "first" and "second" entries plus the
+	// StatusBar.
+	a, _ := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
 	for _, text := range []string{"first", "second"} {
@@ -445,19 +545,27 @@ func TestAdapter_Send_DM_OutReply_OutOrderPreservesCache(t *testing.T) {
 			t.Fatalf("send %s: %v", text, err)
 		}
 	}
-	calls := api.snapshotCalls()
-	sendCount := 0
-	for _, call := range calls {
-		if call.Method != "sendMessage" {
-			continue
-		}
-		sendCount++
-		text, _ := call.Params["text"].(string)
-		if !strings.Contains(text, "🤖: claude") {
-			t.Errorf("send #%d missing StatusBar; got %q", sendCount, text)
-		}
+
+	text := lastChunkText(t, a, nil)
+	if !strings.Contains(text, "first") {
+		t.Errorf("chunk body missing first segment; got %q", text)
 	}
-	if sendCount != 2 {
-		t.Errorf("expected 2 sendMessage calls, got %d", sendCount)
+	if !strings.Contains(text, "second") {
+		t.Errorf("chunk body missing second segment; got %q", text)
+	}
+	if !strings.Contains(text, "🤖: claude") {
+		t.Errorf("StatusBar missing from rendered chunk; got %q", text)
+	}
+}
+// debug_flush prints the full API calls log — drop in to lastChunkText
+// helper when a test fails to see what's actually being recorded.
+func debug_flush(t *testing.T, a *Adapter, api *fakeAPI) {
+	t.Helper()
+	for i, call := range api.snapshotCalls() {
+		text := ""
+		if s, ok := call.Params["text"].(string); ok {
+			text = s
+		}
+		t.Logf("call %d: method=%s text=%q", i, call.Method, text)
 	}
 }

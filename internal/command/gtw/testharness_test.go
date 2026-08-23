@@ -1,5 +1,5 @@
 // Test-only shared helpers for the gtw package. Exposes
-// recordingCh (a outbound.Emitter mock that records every
+// recordingCh (a messages.Emitter mock that records every
 // Send call) and pathsEqual (symlink-safe
 // path comparison for macOS test fixtures). Both used to be
 // duplicated across close_test.go, close_integration_test.go,

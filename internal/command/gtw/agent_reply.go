@@ -39,6 +39,7 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -116,7 +117,7 @@ func runAgentFor(
 	// events (thinking, tool calls, tool results, …) streaming
 	// into the chat while /gtw commit / /gtw pr runs. The drain
 	// goroutine lives on ctx; cancellation tears it down.
-	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), chatID, messageID, agentName)
+	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName)
 
 	res, err := a.RunOnce(ctx,
 		agent.StartConfig{Workspace: workspace},
@@ -157,7 +158,7 @@ func runAgentFor(
 // can keep their `return replyAgent(...), nil` shape.
 func replyAgent(
 	ctx context.Context,
-	em outbound.Emitter,
+	em messages.Emitter,
 	chatID, messageID, text, agentName string,
 	res agent.RunResult,
 ) *Result {

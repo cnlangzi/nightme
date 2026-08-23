@@ -45,7 +45,7 @@ func (s *stubStoppable) Stop(_ context.Context) error {
 	return s.stopErr
 }
 
-// nopCh satisfies outbound.Emitter for tests that need a
+// nopCh satisfies messages.Emitter for tests that need a
 // non-nil channel to construct a ChatSession but don't exercise
 // the channel surface.
 type nopCh struct{}

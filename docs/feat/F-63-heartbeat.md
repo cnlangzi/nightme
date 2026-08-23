@@ -47,6 +47,8 @@ UX 上必须满足:
 - **极简**:不要堆砌明细,只要"次数 + 最后时间"(用户原话)
 - **真实**:计数反映 agent **真实动作**,不反映显示策略
 - **抗丢**:`/think off` / `/tools off` 不能让计数失真——这两个开关只影响显示,不影响 agent 行为
+  - 长路径:`cmd/nightme/run.go::newEventHandler` gate drop 原始 `OutThinking` / `OutTool*`，但**之前**已经 `Observe` 过了
+  - 一次路径:`internal/gateway/outbound/emitter_sink.go::dispatchSinkEvent` 同样先 Observe、再 gate（同一不变量）
 - **复用现有机制**:不引入新管道,沿用 OutboundMessage 主链路
 
 ### 1.3 现有架构能复用的部分
@@ -62,7 +64,10 @@ UX 上必须满足:
 
 ### 目标
 
-- **观测在最高拦截点**:runtime handler 唯一入口 `HeartbeatTracker.Observe(userMsgID, out.Kind)`,所有 channel 共享同一计数器
+- **观测在最高拦截点**:两个出口都 call `HeartbeatTracker.Observe(userMsgID, out.Kind)`,共享同一计数器
+  - 长路径:`cmd/nightme/run.go::newEventHandler`（长-lived bridge 走 `cs.AgentEventBus` 的订阅器）
+  - 一次路径:`internal/gateway/outbound/emitter_sink.go::dispatchSinkEvent`（`StreamRunOnceToEmitter` 的 drain goroutine，`/gtw commit` / `/review -a foo` 等 one-shot 调用都走这里）
+  - 两条路径都遵循 F-63 核心不变量:在 policy chain 之前 Observe,以保证 `/think off` / `/tools off` 期间数字照常累计
 - **观测在 policy 之前**:`/think off` / `/tools off` 不影响计数(核心不变量,§3.2 详述)
 - **新增 `OutHeartbeat` OutboundKind**:走同一条 `em.Send`,adapter 在 `Send` 里识别并 PATCH receipt 顶部
 - **Feishu receipt 顶部 heartbeat header(两段互斥)**:
@@ -395,7 +400,8 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 | `/think on` `/tools on` (默认) | think × 3 + tool × 5 | 💭 卡片 ×3 + 🔧 行 ×5 + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS`(后半) |
 | `/think off` `/tools on` | think × 3 + tool × 5 | (无 thinking 卡片) + 🔧 行 ×5 + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
 | `/think on` `/tools off` | think × 3 + tool × 5 | 💭 卡片 ×3 + (无 tool 行) + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
-| `/think off` `/tools off` | think × 3 + tool × 5 | (无 thinking) + (无 tool) + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
+| `/think off` `/tools off` (长路径) | think × 3 + tool × 5 | (无 thinking) + (无 tool) + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
+| `/think off` `/tools off` (一次路径) | think × 3 + tool × 5 | (无 thinking) + (无 tool) + 💬 最终回复 | `💭 3 · 🔧 5 · ⏱ HH:MM:SS` ✓ 计数不变 |
 | 全开,单纯快速回答 (0 think + 0 tool) | 0 think + 0 tool + reply chunks | 💬 最终回复 | `🤖 Working`(前半,无 ⏱) |
 
 第 5 行:无 think/tool 活动时,头部回到前半部分静默占位。⏱ 时间戳只在后半部分出现 —— 既然"无活动"也意味头部不会持续变,⏱ 自然也无需"agent 还活着"的副信号。视觉更干净。

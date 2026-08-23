@@ -4,7 +4,7 @@
 // NewEventHandler is the per-cs factory the runtime installs
 // via WireRuntimeCallbacksAndRestore. The handler translates
 // AgentEvent → OutboundMessage and dispatches via the channel,
-// with a configurable OutboundPolicy chain layered between
+// with a configurable outbound.OutboundPolicy chain layered between
 // translate and send (see policy.go).
 //
 // The handler factory is exported so cmd/nightme tests (and
@@ -30,11 +30,11 @@ import (
 //
 // The optional policies slice lets callers customise the
 // post-translate behaviour (/think gate, /tools gate are the
-// defaults; see DefaultPolicies). GitStatus stamping is no longer
+// defaults; see outbound.DefaultPolicies). GitStatus stamping is no longer
 // a policy — it happens at the outbound Emitter chokepoint
 // (outbound.Options.GitStatusLookup) and is invisible here. When
-// policies is empty, DefaultPolicies is used. To add a custom
-// policy, append it after DefaultPolicies(...) — order
+// policies is empty, outbound.DefaultPolicies is used. To add a custom
+// policy, append it after outbound.DefaultPolicies(...) — order
 // matters; the first drop wins.
 //
 // chatID is passed by ChatSession's readPump directly (the
@@ -54,7 +54,7 @@ import (
 // FSM are Channel-internal; Gateway only knows about userMsgID.
 //
 // Per-cs construction (not per-Mgr): the F-think / F-tools
-// gates (now extracted as OutboundPolicy) read cs.ThinkMode() /
+// gates (now extracted as outbound.OutboundPolicy) read cs.ThinkMode() /
 // cs.ToolsMode() on every relevant event, and the readPump
 // fires only for ChatSessions that already exist, so the
 // ChatSession is statically known at install time. Capturing
@@ -69,12 +69,12 @@ import (
 // `chatsession.EventHandler` callback signature is gone — see
 // docs/feat/F-54-event-bus.md §3.5.
 func NewEventHandler(
-	em outbound.Emitter,
+	em messages.Emitter,
 	cs *chatsession.ChatSession,
 	mgr *chatsession.Manager,
 	logger *slog.Logger,
 	sbDeps chatsession.GitStatusDeps,
-	policies ...OutboundPolicy,
+	policies ...outbound.OutboundPolicy,
 ) func(env chatsession.AgentEventEnvelope) {
 	// Per-cs closure. No per-handler mutable state needed anymore:
 	// the bridge layer now attaches per-turn Usage to the SAME
@@ -85,7 +85,7 @@ func NewEventHandler(
 	// a single wire event; this collapsing was the bridge-layer
 	// artefact it dissolved.
 	if len(policies) == 0 {
-		policies = DefaultPolicies(sbDeps, cs, logger)
+		policies = outbound.DefaultPolicies(sbDeps, cs, logger)
 	}
 	return func(env chatsession.AgentEventEnvelope) {
 		chatID, s, ev, userMsgID := env.ChatID, env.AgentSession, env.Event, env.UserMsgID
@@ -259,7 +259,7 @@ func NewEventHandler(
 			}
 		}
 
-		// Apply OutboundPolicy chain. Each policy may mutate
+		// Apply outbound.OutboundPolicy chain. Each policy may mutate
 		// out (e.g. StatusBarStampPolicy fills out.StatusBar)
 		// or short-circuit with drop=true (e.g. ThinkMode /
 		// ToolsMode gates when the corresponding mode is Hide).

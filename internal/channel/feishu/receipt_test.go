@@ -240,10 +240,12 @@ func TestSetTaskList_NilListReturnsError(t *testing.T) {
 	}
 }
 
-// TestBuildReceiptCard_TaskOnly verifies that the F-44 simplified
-// buildReceiptCard emits ONLY task markdown elements — no header /
-// hr / footer sections (which were tied to OutReply / OutInit /
-// OutUsage writers that are now gone).
+// TestBuildReceiptCard_TaskOnly verifies that buildReceiptCard
+// with no footerLines emits ONLY task markdown elements — no
+// header / hr / footer sections. Footers appear only when the
+// caller (OutInit via StampFooterLines, or OutResult via
+// sendResultAsReply) passes footerLines. Negative assertions
+// below lock the "footer requires footerLines" invariant.
 func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 	r := &MessageReceipt{
 		chatID:    "oc_chat",
@@ -274,19 +276,25 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 		}
 	}
 
-	// F-44 negative: no header / hr / footer markers.
+	// Negative: with empty footerLines, no header / hr / footer
+	// markers. F-44 follow-up note: OutInit now stamps footer via
+	// StampFooterLines, which calls renderLocked AFTER populating
+	// r.footerLines, so the receipt-render path still picks up
+	// the footer. This test exercises the bare-tasks case (no
+	// StatusBar stamped) — the populated-footer case is covered
+	// by TestSend_OutInit_StampsFooterOnReceipt + TestSend_OutResult.
 	for _, absent := range []string{
-		`⏳`,        // PromptPending header
-		`🔄`,        // heartbeat (already retired pre-F-44)
-		`✅ 已完成`, // PromptSucceeded header
-		`❌`,        // PromptFailed header
-		`Agent:`,   // footer (deleted with OutInit silent drop)
-		`Workspace:`, // footer (deleted with OutInit silent drop)
-		`Tokens:`,   // footer (deleted with OutUsage silent drop)
-		`"tag":"hr"`, // hr divider (no longer needed)
+		`⏳`,         // PromptPending header
+		`🔄`,         // heartbeat (retired pre-F-44)
+		`✅ 已完成`,  // PromptSucceeded header
+		`❌`,         // PromptFailed header
+		`Agent:`,     // footer — only present when footerLines set
+		`Workspace:`, // footer — only present when footerLines set
+		`Tokens:`,    // footer — only present when footerLines set
+		`"tag":"hr"`, // hr divider — only present when footerLines set
 	} {
 		if strings.Contains(body, absent) {
-			t.Errorf("body should NOT contain %q after F-44 simplification\nbody: %s", absent, body)
+			t.Errorf("body should NOT contain %q when footerLines is empty\nbody: %s", absent, body)
 		}
 	}
 }
@@ -714,4 +722,57 @@ func TestTasks_NilReceiptReturnsNil(t *testing.T) {
 	if got := r.Tasks(); got != nil {
 		t.Errorf("nil.Tasks() = %v, want nil", got)
 	}
+}
+
+// TestStampFooterLines_FollowupF44 — F-44 follow-up: StampFooterLines
+// updates the receipt's footerLines and triggers a PATCH. Locks
+// the new OutInit handler's interaction with the receipt FSM.
+//
+// Three sub-cases:
+//   1. Pre-existing receipt → renderLocked's PATCH branch runs
+//      (PatchMessage observed by mockReceiptBot).
+//   2. Empty footerLines preserves a previously-stamped footer
+//      (symmetric with SetTaskListWithFooter's preserve-on-empty
+//      semantics).
+//   3. Nil receiver must not panic (guard matching the rest of
+//      the receipt API).
+func TestStampFooterLines_FollowupF44(t *testing.T) {
+	t.Run("patches pre-existing receipt", func(t *testing.T) {
+		bot := &mockReceiptBot{}
+		r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+		// Simulate a previously-sendCard'd receipt — renderLocked's
+		// PATCH branch fires when cardMsgID is non-empty.
+		r.cardMsgID = "om_card_existing"
+
+		footer := []string{"🤖 codex · MiniMax-M3 · session-abc"}
+		if err := r.StampFooterLines(context.Background(), footer); err != nil {
+			t.Fatalf("StampFooterLines: %v", err)
+		}
+		if len(r.footerLines) != 1 || r.footerLines[0] != footer[0] {
+			t.Errorf("r.footerLines = %v, want %v", r.footerLines, footer)
+		}
+	})
+
+	t.Run("empty footerLines preserves prior footer", func(t *testing.T) {
+		bot := &mockReceiptBot{}
+		r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
+		r.cardMsgID = "om_card"
+		prior := []string{"prior: agent · model"}
+		r.footerLines = prior
+
+		if err := r.StampFooterLines(context.Background(), nil); err != nil {
+			t.Fatalf("StampFooterLines(nil): %v", err)
+		}
+		if len(r.footerLines) != 1 || r.footerLines[0] != prior[0] {
+			t.Errorf("r.footerLines = %v, want preserved %v (preserve-on-empty)",
+				r.footerLines, prior)
+		}
+	})
+
+	t.Run("nil receiver is no-op", func(t *testing.T) {
+		var r *MessageReceipt
+		if err := r.StampFooterLines(context.Background(), []string{"x"}); err != nil {
+			t.Errorf("nil.StampFooterLines: %v, want nil", err)
+		}
+	})
 }

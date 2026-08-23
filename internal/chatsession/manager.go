@@ -24,7 +24,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
@@ -71,7 +70,7 @@ type Manager struct {
 	//
 	// Read under m.mu (RLock); written under m.mu (Lock) in
 	// WithEmitter. See GetOrCreate Phase 2 for the read site.
-	emitter outbound.Emitter
+	emitter messages.Emitter
 
 	// (no Manager-level gitStatusDeps — gitStatusDeps is
 	// per-ChatSession (cs.gitStatusDeps), wired by
@@ -256,7 +255,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 			spawner Spawner
 			csFile  *chatstore.Store
 			asFile  *registry.AgentSessionFile
-			emitter outbound.Emitter
+			emitter messages.Emitter
 			asPool  *AgentSessionPool
 		)
 		spawner = m.spawner
@@ -313,7 +312,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // chatstore.Bootstrap (create-or-load). AS are NOT attached here —
 // LookupSelectedAgentSession mounts from asPool / asFile on demand
 // (docs/CHATSTORE.md).
-func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter outbound.Emitter, asPool *AgentSessionPool) (*ChatSession, error) {
+func (m *Manager) constructChatSession(chatID, primaryAgent string, spawner Spawner, csFile *chatstore.Store, asFile *registry.AgentSessionFile, emitter messages.Emitter, asPool *AgentSessionPool) (*ChatSession, error) {
 	var entry *registry.ChatSessionEntry
 	if csFile != nil {
 		var err error
@@ -402,18 +401,18 @@ func (m *Manager) WithPrimaryAgent(name string) *Manager {
 	return m
 }
 
-func (m *Manager) WithEmitter(em outbound.Emitter) *Manager {
+func (m *Manager) WithEmitter(em messages.Emitter) *Manager {
 	m.mu.Lock()
 	m.emitter = em
 	m.mu.Unlock()
 	return m
 }
 
-// Emitter returns the wired outbound.Emitter, or nil if the
+// Emitter returns the wired messages.Emitter, or nil if the
 // runtime has not bound one yet. Used by HandleInbound's
 // error-reply path and by runtime shims that need to send
 // without going through a ChatSession.
-func (m *Manager) Emitter() outbound.Emitter {
+func (m *Manager) Emitter() messages.Emitter {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.emitter
@@ -496,7 +495,7 @@ func (m *Manager) AcceptInbound(chatID string, hasMention bool) bool {
 //  6. QueueUserMessage into the per-chat InputBuffer
 //
 // Error paths (no workspace / spawn failed / queue full) reply
-// through the wired outbound.Emitter (m.emitter) so they
+// through the wired messages.Emitter (m.emitter) so they
 // inherit the SessionContext footer.
 func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessage) error {
 	if msg == nil {
@@ -628,7 +627,7 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 }
 
 // sendError is a small helper that routes an error reply
-// through the wired outbound.Emitter. Returns whatever the
+// through the wired messages.Emitter. Returns whatever the
 // Emitter returns (typically nil; the Emitter logs Send
 // failures internally). Falls back to a log line if no
 // Emitter is wired (early-startup or test wiring).

@@ -513,6 +513,6 @@ lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
 调用方:
 
 - `internal/channel/feishu/adapter.go`(5 处 `formatStatusBarLines(&msg)` → `statusbar.StatusBarLines(&msg)`)
-- `internal/channel/telegram/adapter.go`(Send switch 的所有 text 出口 + OutHeartbeat 占位 PATCH,通过 `renderBodyWithStatusBar` helper 拼 trailer;`OutError` raw 拼接分支也直接调 `statusbar.RenderPanel`)
+- `internal/channel/telegram/adapter.go`(v8: Send switch 的所有 text 出口 + OutHeartbeat 占位 PATCH,通过 `renderBodyWithStatusBar` helper 拼 trailer;`OutError` raw 拼接分支也直接调 `statusbar.RenderPanel`. v9 chain rewrite 2026-08-22 删除了 `renderBodyWithStatusBar`,footer 语义迁到 `chain.lastFooter` + `placeholder_chain_flush.go::renderActiveChunkBody`,8 个 Out* kind 改成走 `appendSegmentForKind` 路径. 见 docs/channel/telegram.md §11.12.6 + §11.12.7)
 
 测试矩阵:`internal/statusbar/statusbar_test.go` 15 个 `Test*` 函数(从 feishu `usage_footer_test.go` 全量迁移)+ 1 个 8 行 table-driven `TestStatusBarLines_OmitsZeroSegments` 子用例。

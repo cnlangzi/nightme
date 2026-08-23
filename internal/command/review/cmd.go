@@ -276,7 +276,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		// and emitter.Send (channel emit) below as two separate
 		// product paths. No conflict: sink shows the process,
 		// the formatted text is the deliverable.
-		sink := outbound.StreamRunOnceToEmitter(revCtx, emitter, chatID, replyTo, runnerName)
+		sink := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
 
 		result, err := starter.Review(revCtx, rc, agent.WithEventSink(sink))
 		if err != nil {

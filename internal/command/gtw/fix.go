@@ -12,7 +12,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/prcache"
@@ -1180,6 +1179,6 @@ func rollbackLabelStep(
 // Emitter stamps GitStatus at the chokepoint (outbound.Options
 // .GitStatusLookup); callers don't need a ChatSession reference
 // here.
-func reply(ctx context.Context, em outbound.Emitter, chatID, messageID, text string) *Result {
+func reply(ctx context.Context, em messages.Emitter, chatID, messageID, text string) *Result {
 	return replyAgent(ctx, em, chatID, messageID, text, "", agent.RunResult{})
 }

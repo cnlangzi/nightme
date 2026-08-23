@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // fakeAPI is a configurable apiClient that records every call so
@@ -151,15 +152,15 @@ func mustMarshal(value any) []byte {
 	return data
 }
 
-var sendMessageCounter int
+var sendMessageCounter atomic.Int64
 
 func nextSendMessageID() int {
-	sendMessageCounter++
-	return 100 + sendMessageCounter
+	n := sendMessageCounter.Add(1)
+	return 100 + int(n)
 }
 
 func resetSendMessageCounter() {
-	sendMessageCounter = 0
+	sendMessageCounter.Store(0)
 }
 
 // findCalls returns the indices of f.Calls whose Method matches.

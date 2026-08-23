@@ -83,7 +83,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // per call, which is wasted work for one-shot uses (/gtw commit,
 // /gtw pr, buildAgentPrompt).
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks)
+	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for codex. F-review.md §13
@@ -99,6 +99,24 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // agent.FormatReviewMessage and routes to BOTH the AS (via
 // as.SendBlocks) and the channel (via the chat session's emitter).
 // The bridge no longer owns presentation or distribution.
+//
+// Per-call sink (opts.OnEvent): forwarded to runCodexReview →
+// runCodexReviewPlain so the chat channel's StatusBar / receipt
+// shows the same Ready → Text → Result lifecycle the live-*Agent
+// bridges (dsh/acp/…) emit. Without this forward, /review on codex
+// renders 30s of silence and then dumps the final text — see the
+// pre-fix regression this commit fixes.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runCodexReview(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
+	// Forward the full cfg, not just Workspace — Review callers
+	// (/review dispatcher) build cfg from the chat session's
+	// StartConfig and may carry Args / Env / PermissionMode that
+	// future flag mappings will need. The pre-fix shape
+	// (`agent.StartConfig{Workspace: cfg.Workspace}`) silently
+	// dropped those fields; runCodexReview today only reads
+	// Workspace, so the change is observationally a no-op, but
+	// it removes a future foot-gun. opts is forwarded so the
+	// sink (typically WithEventSink) sees the bridge's
+	// Ready → Text → Result lifecycle (see runCodexReviewPlain
+	// for the contract).
+	return runCodexReview(ctx, s, cfg, opts...)
 }

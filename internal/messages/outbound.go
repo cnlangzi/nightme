@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"context"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -115,7 +116,7 @@ const (
 	// by the runtime handler immediately after the
 	// HeartbeatTracker observes a countable OutboundKind
 	// (OutThinking / OutToolStart). The runtime emits it via the
-	// same outbound.Emitter.Send pipeline as every other kind, so
+	// same messages.Emitter.Send pipeline as every other kind, so
 	// it inherits telemetry / git-status / rate-limit behaviour
 	// without a separate code path.
 	//
@@ -338,4 +339,24 @@ type HeartbeatSnapshot struct {
 // with ThinkCount unchanged).
 func (s HeartbeatSnapshot) Empty() bool {
 	return s.ThinkCount == 0 && s.ToolCount == 0 && s.LastBeatAt.IsZero()
+}
+
+// Emitter is the canonical "send an outbound message" interface
+// every chat session / runtime handler / one-shot sink talks to.
+// The default implementation lives in internal/gateway/outbound
+// (it wraps a channel.Channel and applies the GitStatus stamp
+// before forwarding); tests and command dispatchers are free
+// to substitute their own.
+//
+// F-CODEX-RUNONCE-REVIEW-EVENT: Emitter used to live in
+// gateway/outbound. Moving it here lets `chatsession` hold an
+// Emitter field without importing `gateway/outbound`, which
+// closes the outbound → chatsession import cycle that would
+// otherwise block the policy move into outbound (see
+// docs/SPEC.md §3.1.2 / F-63-heartbeat.md §1.3). The interface
+// is one line + a context; the cost of moving it to a leaf
+// package is zero, and the result is a cleaner dependency graph
+// (outbound can now legitimately import chatsession).
+type Emitter interface {
+	Send(ctx context.Context, msg OutboundMessage) error
 }

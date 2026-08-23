@@ -34,7 +34,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -155,7 +154,7 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 // The fallback path is what tests that drive the dispatch chain
 // directly (with a stub router csMgr) rely on; production
 // always uses the per-channel Emitter.
-func (r *Router) resolveEmitter(cs *chatsession.ChatSession) outbound.Emitter {
+func (r *Router) resolveEmitter(cs *chatsession.ChatSession) messages.Emitter {
 	if cs != nil {
 		if em := cs.Emitter(); em != nil {
 			return em

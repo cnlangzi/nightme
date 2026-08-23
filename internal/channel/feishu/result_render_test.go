@@ -306,7 +306,71 @@ func TestBuildResultCardJSON_PreservesCodeBlock(t *testing.T) {
 	}
 }
 
+
 // ---------------------------------------------------------------------------
+// TestBuildResultCardJSON_BlankLineBeforeFooter: 2026-08-24 user
+// feedback "OutResult 的内容和 footer 中间应该增加一个空行, 方便
+// 阅读." — verify the rendered card inserts an empty <markdown>
+// element between the body content and the footer block so the
+// StatusBar box doesn't sit flush against the body text.
+func TestBuildResultCardJSON_BlankLineBeforeFooter(t *testing.T) {
+	body, err := buildResultCardJSON("hello world", []string{
+		"🤖: claude · opus-4-5",
+		"📁: code/nightme",
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	var envelope struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode: %v\nbody: %s", err, body)
+	}
+	// Expect 4 elements: body markdown, blank markdown, hr + footer markdown.
+	if len(envelope.Body.Elements) != 4 {
+		t.Fatalf("expected 4 elements (body + blank + hr + footer), got %d: %+v",
+			len(envelope.Body.Elements), envelope.Body.Elements)
+	}
+	if e := envelope.Body.Elements[0]; e["tag"] != "markdown" || e["content"] != "hello world" {
+		t.Errorf("elements[0] should be body markdown, got %+v", e)
+	}
+	if e := envelope.Body.Elements[1]; e["tag"] != "markdown" {
+		t.Errorf("elements[1] should be the blank-line markdown spacer, got tag=%v", e["tag"])
+	}
+	if e := envelope.Body.Elements[2]; e["tag"] != "hr" {
+		t.Errorf("elements[2] should be the hr divider, got tag=%v", e["tag"])
+	}
+	if e := envelope.Body.Elements[3]; e["tag"] != "markdown" {
+		t.Errorf("elements[3] should be the footer markdown, got tag=%v", e["tag"])
+	}
+}
+
+// TestBuildResultCardJSON_NoBlankLineWhenFooterEmpty: when there's
+// no footer (footerLines is nil/empty), no blank-line spacer is
+// inserted either — the blank line is a body/footer separator, not
+// unconditional.
+func TestBuildResultCardJSON_NoBlankLineWhenFooterEmpty(t *testing.T) {
+	body, err := buildResultCardJSON("hello world", nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	var envelope struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode: %v\nbody: %s", err, body)
+	}
+	if len(envelope.Body.Elements) != 1 {
+		t.Errorf("expected 1 element when footer is empty, got %d: %+v",
+			len(envelope.Body.Elements), envelope.Body.Elements)
+	}
+}
+
 // buildResultPayload dispatch
 // ---------------------------------------------------------------------------
 

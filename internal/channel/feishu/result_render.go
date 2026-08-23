@@ -154,7 +154,7 @@ func buildPostMdJSON(content string) (string, error) {
 // keeps them literal for Card bodies.
 func buildResultCardJSON(content string, footerLines []string) (string, error) {
 	chunks := splitMarkdownForDivs(content, divTextCharLimit)
-	elements := make([]map[string]any, 0, len(chunks)+2)
+	elements := make([]map[string]any, 0, len(chunks)+3)
 	for _, c := range chunks {
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
@@ -167,7 +167,17 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 	// cardFooterElements returns nil when footerLines is empty
 	// so callers can append unconditionally without an extra
 	// length check.
+	//
+	// Blank line between body and footer: insert a single
+	// empty <markdown> element so the StatusBar box doesn't
+	// sit flush against the body text. 2026-08-24 user
+	// feedback: "OutResult 的内容和 footer 中间应该增加一个
+	// 空行, 方便阅读."
 	if footer := cardFooterElements(footerLines); footer != nil {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": " ",
+		})
 		elements = append(elements, footer...)
 	}
 	card := map[string]any{

@@ -14,32 +14,53 @@ import (
 // These functions operate on a *placeholderChain retrieved via
 // chainLRU.getOrCreate. They do NOT talk to the Telegram API directly
 // — that responsibility lives on the Adapter (which owns the
-// apiClient). The Adapter is expected to pass a sender closure into
-// appendSegment so this file stays pure data-structures.
+// apiClient). The Adapter supplies a telegramSender so this file
+// stays pure data-structures.
 // ---------------------------------------------------------------------------
 
-// sendChunkFn is the abstraction over the Telegram sendMessage call.
-// Adapter supplies the concrete implementation.
+// telegramSender is the network abstraction Layer 5 (sender) of
+// the v9 chain OOP layering. The chain primitives (Layer 1 view +
+// Layer 2 chain) call into this interface; the Adapter supplies
+// the concrete impl that wraps sendTelegramMessage +
+// editTelegramMessage with the rate-limiter + retry pipeline.
 //
-// Returns the new message ID. Errors propagate up through appendSegment.
-type sendChunkFn func(
-	ctx context.Context,
-	chatID string,
-	topicID int,
-	replyToMessageID int,
-	text string,
-) (int64, error)
+// Send emits a new message; Edit replaces an existing message. Both
+// accept a fresh ctx per call (no closure capture) so the debounce
+// timer — which fires 250ms+ after the original request may have
+// returned — can use a context.Background()-derived ctx instead of
+// the cancelled Request ctx.
+type telegramSender interface {
+	Send(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error)
+	Edit(ctx context.Context, chatID string, messageID int64, text string) error
+}
 
-// editChunkFn is the abstraction over the Telegram editMessageText
-// call. The Adapter implementation handles debounce timing and rate
-// limiting. Each call passes its own ctx (no closure capture, see
-// adapter.chainEditFn).
-type editChunkFn func(
-	ctx context.Context,
-	chatID string,
-	messageID int64,
-	text string,
-) error
+// telegramSenderImpl is a small adapter that satisfies the
+// telegramSender interface from two loose function values. Used
+// at the chain / appendSegment call sites so the chain primitives
+// depend on the interface (not loose fns) — keeps the Layer 5
+// abstraction coherent even though the existing function
+// signatures still take loose fns for legacy reasons.
+type telegramSenderImpl struct {
+	send sendChunkFn
+	edit editChunkFn
+}
+
+func (s telegramSenderImpl) Send(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error) {
+	return s.send(ctx, chatID, topicID, replyToMessageID, text)
+}
+
+func (s telegramSenderImpl) Edit(ctx context.Context, chatID string, messageID int64, text string) error {
+	return s.edit(ctx, chatID, messageID, text)
+}
+
+// sendChunkFn / editChunkFn remain as the underlying function
+// types — the existing appendSegment / flushChainNow signatures
+// take these loose fns. New code paths (test doubles, future
+// refactors) can wrap them with telegramSenderImpl and depend
+// on the interface. Adapter.chainSendFn / chainEditFn continue
+// to satisfy this contract.
+type sendChunkFn func(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) (int64, error)
+type editChunkFn func(ctx context.Context, chatID string, messageID int64, text string) error
 
 // chainChunkThresholdChars = raw-buffer ceiling per chunk.
 // Above this, the next segment goes on a freshly-created chunk instead

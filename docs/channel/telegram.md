@@ -1057,10 +1057,10 @@ v9 把这两轨**合并成一条 chain**：
 
 借用飞书 receipt card 的 fold 进同一 surface 的视觉模型，但用 debounce + chunk rotation 解决 Telegram 的全量替换本质。
 
-### 11.12.2 数据模型（纯内存，不持久化）
+### 11.12.2 数据模型（纯内存，OOP chunkBody）
 
 ```go
-// internal/channel/telegram/placeholder_chain.go
+// internal/channel/telegram/placeholder_chain.go + chunk_body.go
 
 type chainKey struct {
     chatID  string        // 原始 chat.id（无 tg_ 前缀）
@@ -1069,22 +1069,41 @@ type chainKey struct {
 
 type placeholderChain struct {
     mu            sync.Mutex
-    chunks        []*placeholderChunk
-    cursor        int                 // 当前可写 chunk 的 index；-1 = 空链
-    lastFooter    []string            // 最近一次 footer-bearing 事件留下的 3 行 StatusBar
-    dirty         bool                // 内存有更新未写回 Telegram（debounce 用）
-    debounceTimer *time.Timer         // 当前 pending 的 debounce flush
+    chunks        []*chunkBody         // OOP Layer 1 view type
+    cursor        int                  // 当前可写 chunk 的 index；-1 = 空链
+    lastFooter    []string             // 最近一次 footer-bearing 事件留下的 3 行 StatusBar
+    dirty         bool                 // 内存有更新未写回 Telegram（debounce 用）
+    debounceTimer *time.Timer          // 当前 pending 的 debounce flush
 }
 
-type placeholderChunk struct {
+// chunkBody — one Telegram message. Business code mutates fields
+// through methods (setHeader / appendEntry / appendError /
+// setFooter / markFull); Compose() is the sole render path.
+type chunkBody struct {
     messageID  int64
-    buf        strings.Builder       // 累积的 segments
-    charCount  int                   // buf.Len() 快照（避免每步 query）
-    isFull     bool                  // 锁死后不再 editMessageText
-    headerLine string                // 最近一次的 working / 💭 N · 🔧 M
+    isFull     bool
+    header     string                  // pre-baked HTML (e.g. "<b>💭 1</b>")
+    entries    []chunkEntry            // ordered log lines
+    footer     string                  // statusbar panel
+    flushedLen int                     // overflow tracking (P0 #2 fix)
 }
 
-// chainLRU 是 Adapter 的内存索引，提供容量上限 + LRU 驱逐
+type chunkEntry struct {
+    text   string
+    isHTML bool                        // skip RenderMarkdown when true
+}
+
+// chunkBody API (Layer 1 business methods + Compose):
+//   setHeader(h)              → status line
+//   appendEntry(text)         → plain-text segment
+//   appendError(text, stderr) → wraps stderr in ```fences``` (Layer 3)
+//   setFooter(f)              → statusbar panel
+//   markFull()                → lock chunk
+//   freezeAfterOverflow(n)    → clear entries, set flushedLen
+//   markFlushedLen(n)         → record overflow emit bytes
+//   Compose()                 → safe-HTML wire format
+
+// chainLRU is the Adapter-scoped index with cap-bounded LRU eviction.
 type chainLRU struct {
     mu     sync.Mutex
     cap    int                      // 默认 1000
@@ -1093,9 +1112,16 @@ type chainLRU struct {
 }
 ```
 
+**OOP 分层**：
+- **Layer 1 (data + view)**: chunkBody + chunkEntry + Compose() — 单条 Telegram 消息的数据 + 渲染
+- **Layer 2 (business API)**: chain 的 append / overflow / flush / purge 等业务方法
+- **Layer 3 (format decisions)**: chunkBody.appendError 把 ```fences``` 决策封装在数据层
+- **Layer 4 (UI text escape)**: escapeInline helper 收拢 InlineKeyboard 文本转义
+- **Layer 5 (network)**: sendTelegramMessage / editTelegramMessage
+
 **不持久化**：
 - `TopicState.PlaceholderChunkIDs` 不写
-- chain 内的 `buf` / `headerLine` / `lastFooter` 全部是纯内存字段
+- chain 内的 `entries` / `header` / `footer` / `lastFooter` 全部是纯内存字段
 - daemon 重启 = chain 失；下次事件来时 `cursor=-1` → 走"建第一张 chunk"路径（旧 frozen chunks 留在 chat 里作为历史证据，没人再去 editMessageText）
 
 `TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。

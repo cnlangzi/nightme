@@ -1195,8 +1195,15 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 
 // patchChainHeader refreshes the active chunk's headerLine
 // (in-memory) and arms the debounced flush. Bound to the
-// OutHeartbeat Send case (v9 §11.12.8). Header text is the same
-// "💭 N · 🔧 M · ⏱ ..." shape as v8's heartbeat.
+// OutHeartbeat Send case (v9 §11.12.8).
+//
+// The headerLine format is fully owned by the status function:
+// heartbeatText composes the full `<b>{status} · ⏱ HH:MM:SS</b>`
+// (with LastBeatAt as the timestamp); placeholderInitialText does
+// the same shape with time.Now(). patchChainHeader just picks
+// which formatter to call and stores the result. No markup or
+// timestamp composition happens here — that's the entire point
+// of the refactor.
 func (a *Adapter) patchChainHeader(
 	chatID string,
 	topicID int,
@@ -1208,16 +1215,11 @@ func (a *Adapter) patchChainHeader(
 		chain.mu.Unlock()
 		return nil
 	}
-	cur := chain.chunks[chain.cursor]
-	status := "🤖 Working..."
 	if msg.Heartbeat != nil {
-		status = heartbeatText(msg.Heartbeat)
+		chain.chunks[chain.cursor].headerLine = heartbeatText(msg.Heartbeat)
+	} else {
+		chain.chunks[chain.cursor].headerLine = placeholderInitialText(time.Now().UTC())
 	}
-	// P2 fix (2026-08-23): match placeholderInitialText's bold
-	// markup. Pre-fix, OutHeartbeat would silently strip the <b>
-	// tags so the chunk header would render bolded once at
-	// cold-create, then plain-text thereafter. Now consistent.
-	cur.headerLine = "<b>" + status + "</b> · ⏱ " + time.Now().UTC().Format("15:04:05")
 	chain.dirty = true
 	chain.mu.Unlock()
 
@@ -1336,25 +1338,31 @@ func formatTaskList(taskList *agent.AgentTaskListEvent) string {
 // through StatusBar on every footer-bearing outbound message.
 // Removed.
 
-// heartbeatText renders the in-turn status ticker — just the think
-// and tool counts. The trailing ` · ⏱ HH:MM:SS` timestamp is
-// appended by patchChainHeader / placeholderInitialText (matches
-// the cold-create format), so callers MUST NOT include one here or
-// the user sees a duplicated timestamp like
-// `<b>💭 1 · 🔧 0 · ⏱ 00:46:31</b> · ⏱ 00:46:31`.
+// heartbeatText composes the per-beat chunk header end-to-end:
+// status text + activity timestamp + bold markup. Same shape
+// as placeholderInitialText so both render the full
+// `<b>{status} · ⏱ HH:MM:SS</b>` line that becomes the
+// chunk's headerLine.
 //
-// Why: snapshot.LastBeatAt is the last think/tool event wall-clock
-// (refreshed by chatsession heartbeat tracker); patchChainHeader
-// stamps `time.Now()` at the moment of the heartbeat emission.
-// They're usually within the same second, so rendering the
-// snapshot timestamp inside the status AND re-stamping the
-// current time produces two back-to-back ⏱ fields.
+// Timestamp source: snapshot.LastBeatAt — the last think/tool
+// event wall-clock, refreshed by chatsession heartbeat tracker.
+// NOT time.Now() at heartbeat emission (those can diverge when
+// the heartbeat timer fires after agent stalls). Returning the
+// activity time means the user sees "agent was last thinking
+// at HH:MM:SS", which is the v8 §11.11.1 v7 contract.
+//
+// No snapshot → return the bare "🤖 Working..." banner without
+// a timestamp (we have nothing to attribute it to).
 func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	if snapshot == nil {
-		return "🤖 Working..."
+		return "<b>🤖 Working...</b>"
 	}
-	return "💭 " + strconv.Itoa(snapshot.ThinkCount) +
-		" · 🔧 " + strconv.Itoa(snapshot.ToolCount)
+	text := fmt.Sprintf("<b>💭 %d · 🔧 %d</b>",
+		snapshot.ThinkCount, snapshot.ToolCount)
+	if !snapshot.LastBeatAt.IsZero() {
+		text += " · ⏱ " + snapshot.LastBeatAt.UTC().Format("15:04:05")
+	}
+	return text
 }
 
 func renderInlineText(text string) string {

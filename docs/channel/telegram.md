@@ -1097,8 +1097,8 @@ type placeholderChain struct {
 
 // chunkBody — one Telegram message. Business code mutates fields
 // through methods (setHeader / setHeaderFromHeartbeat /
-// appendEntry / appendError / setFooter / markFull); Compose() is
-// the sole render path.
+// appendEntry / appendError / setTaskList / setFooter / markFull);
+// Compose() is the sole render path.
 type chunkBody struct {
     messageID    int64
     isFull       bool
@@ -1107,6 +1107,10 @@ type chunkBody struct {
                                         // patched this chunk's header. Compose uses it
                                         // to decide whether to render header at all.
     entries      []chunkEntry            // ordered log lines
+    taskList     []agent.AgentTaskItem   // v9 P2 (§11.12.6.1): latest task snapshot;
+                                        // Compose renders <b>📋 Tasks</b> headline +
+                                        // task rows between entries and footer.
+                                        // Empty / nil → section omitted (no orphan title).
     footer       string                  // statusbar panel
     flushedLen   int                     // overflow tracking (P0 #2 fix)
 }
@@ -1122,11 +1126,15 @@ type chunkEntry struct {
 //   appendEntry(text)             → plain-text segment
 //   appendEntryHTML(text)         → pre-rendered HTML segment (SPLIT path, §11.12.7.2 trigger 1)
 //   appendError(text, stderr)     → wraps stderr in ```fences``` (Layer 3)
+//   setTaskList(items)            → replace task snapshot (§11.12.6.1); nil clears
+//   inheritLatestTaskList(src)    → copy src's taskList (§11.12.7.4-style inheritance)
+//   taskListText()                → current task snapshot (read-only probe)
 //   setFooter(f)                  → statusbar panel
 //   markFull()                    → lock chunk
 //   freezeAfterOverflow(n)        → clear entries, set flushedLen
 //   markFlushedLen(n)             → record overflow emit bytes
-//   Compose()                     → safe-HTML wire format (header-skip rule per §11.12.5.1)
+//   Compose()                     → safe-HTML wire format (header-skip rule per §11.12.5.1;
+//                                   task section rendered between entries and footer)
 
 // chainLRU is the Adapter-scoped index with cap-bounded LRU eviction.
 type chainLRU struct {
@@ -1138,15 +1146,15 @@ type chainLRU struct {
 ```
 
 **OOP 分层**：
-- **Layer 1 (data + view)**: chunkBody + chunkEntry + Compose() — 单条 Telegram 消息的数据 + 渲染
+- **Layer 1 (data + view)**: chunkBody + chunkEntry + Compose() — 单条 Telegram 消息的数据 + 渲染（taskList 是 header / entries / footer 之外的独立 section）
 - **Layer 2 (business API)**: chain 的 append / overflow / flush / purge 等业务方法
-- **Layer 3 (format decisions)**: chunkBody.appendError 把 ```fences``` 决策封装在数据层
+- **Layer 3 (format decisions)**: chunkBody.appendError 把 ```fences``` 决策封装在数据层；taskList 的 headline (`📋 Tasks`) + 行形态 (`- [ ]` / `- [x]`) 也归这里
 - **Layer 4 (UI text escape)**: escapeInline helper 收拢 InlineKeyboard 文本转义
 - **Layer 5 (network)**: sendTelegramMessage / editTelegramMessage
 
 **不持久化**：
 - `TopicState.PlaceholderChunkIDs` 不写
-- chain 内的 `entries` / `header` / `footer` / `lastFooter` 全部是纯内存字段
+- chain 内的 `entries` / `header` / `taskList` / `footer` / `lastFooter` 全部是纯内存字段
 - daemon 重启 = chain 失；下次事件来时 `cursor=-1` → 走"建第一张 chunk"路径（旧 frozen chunks 留在 chat 里作为历史证据，没人再去 editMessageText）
 
 `TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。
@@ -1177,15 +1185,15 @@ type chainLRU struct {
 | `OutToolStart` | `appendSegment` | `● <name>(<args truncated>)\n` ← `formatToolStartCall` |
 | `OutToolEnd` | `appendSegment` | `⎿  <one-line summary>\n` ← `summarizeToolResult` |
 | `OutError` | `appendErrorSegment` (via `chunkBody.appendError` ```fences```) | `❌ <text>\n````<stderr>\n```` |
-| `OutTaskCreate` | `appendSegment` | `📋 🆕 <subject>\n` |
-| `OutTaskUpdate` | `appendSegment` | `📋 <status emoji> <subject>\n` |
+| `OutTaskCreate` | `chunkBody.setTaskList` + `scheduleFlushDebounced`（§11.12.6.1）| 不进 entries；渲染为 `<b>📋 Tasks</b>` + task 行 section |
+| `OutTaskUpdate` | `chunkBody.setTaskList` + `scheduleFlushDebounced`（§11.12.6.1）| 同上；快照替换，整 section 重渲 |
 | `OutHeartbeat` | `patchActiveHeader` | （无 segment，刷新 active chunk headerLine） |
 | `OutChoice` / `OutChoicePatch` | 独立 `sendMessage` + InlineKeyboard | （不进 chain） |
 | `OutCommandReply` | `appendSegment` (折进 chain,带 StatusBar trailer) | `<text>\n` |
 | `OutMessageState` / `OutMessageStateRemoved` | reaction 路径（`setMessageReactions`） | （不动） |
 | `OutInit` | silent drop | — |
 
-**Out* payload 超长处理**：上面 8 个走 `appendSegment` / `appendErrorSegment` 的 kind 中，若单条 payload 自身 raw > 3500 chars（接近 4096 Telegram 硬限），§11.12.7.2 trigger 1 在 append 阶段直接 SPLIT 成多张 Telegram message，不再走普通 ROTATE。用户视觉上看到的是同时间戳的多片连续消息（视觉连续 vs ROTATE 的页面跳转）。
+**Out* payload 超长处理**：上面 6 个走 `appendSegment` / `appendErrorSegment` 的 kind 中（`OutReply` / `OutResult` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCommandReply`），若单条 payload 自身 raw > 3500 chars（接近 4096 Telegram 硬限），§11.12.7.2 trigger 1 在 append 阶段直接 SPLIT 成多张 Telegram message，不再走普通 ROTATE。用户视觉上看到的是同时间戳的多片连续消息（视觉连续 vs ROTATE 的页面跳转）。`OutTaskCreate` / `OutTaskUpdate` 走 taskList section（§11.12.6.1），不进 entries；超长由 task 行截断（feishu `checklistBudgetRunes` 同形）兜底。
 
 ### 11.12.5 核心 API
 
@@ -1223,6 +1231,36 @@ func appendErrorSegment(
     statusBarLines []string,
     sendFn sendChunkFn,
     _ editChunkFn,
+) error
+
+// setTaskList (v9 P2, §11.12.6.1) 是 OutTaskCreate / OutTaskUpdate
+// 的入口。整 section 替换：active chunk 的 taskList 字段被覆盖，
+// chain.lastTaskList 同步刷新，scheduleFlushDebounced 触发 Compose
+// 路径把 taskList 渲到 entries 和 footer 之间。
+//
+// 跟 appendSegment 的核心区别：
+//   - 不进 entries（taskList 是独立 section，不被正文行序污染）
+//   - 没有 3500 raw 阈值 → 不走 SPLIT；超长由 task 行渲染侧的
+//     checklistBudget（参考 feishu `buildTaskChecklistChunks`）兜底
+//   - statusBarLines（footer）参数保留 —— taskList 与 footer 仍然
+//     同事件落地的语义对称
+//
+// 冷启动（cursor<0）路径：先 materialise 一个空 entries 的 chunk，
+// setTaskList + setFooter 后 sendFn 发出第一条 Telegram message，
+// header / entries / task / footer 一次成型。空 items → 「clear
+// checklist」语义(active chunk.taskList 清零 + chain.lastTaskList
+// 置 nil);nil msg.TaskList → silent drop(adapter 入口守卫)
+// （跟当前 `formatTaskList` 的空返回对称）。
+func setTaskList(
+    ctx context.Context,
+    chain *placeholderChain,
+    chatID string,
+    topicID int,
+    userMessageID int,
+    items []agent.AgentTaskItem,
+    statusBarLines []string,
+    sendFn sendChunkFn,
+    editFn editChunkFn,
 ) error
 
 // flushChainNow 全量同步写回 active chunk. debounce timer fires /
@@ -1350,6 +1388,89 @@ if renderHeader {
 - lastFooter 不刷新 → `chain.lastFooter` 不动，但 Render 仍然发生（entries 累积 + footer 仍渲染上一份）
 - 新 chunk 创建时如果 `chain.lastFooter != nil` → **沿用**上一 chunk 的 footer（防止 footer 突然消失）
 - 重启后第一次携带 status 数据的事件之前 → 链上无 footer section（内存不持久化）
+
+#### 11.12.6.1 Task 内存语义（v9 P2, 2026-08-23）
+
+每 chunk **最多一个 task section**（`taskList []agent.AgentTaskItem`），与 `footer` 平级 —— 都属于 chunk 的「附属 section」，都不进 `entries` 行序。空切片 → section 完全不渲染（headline 也不出，避免「📋 Tasks」孤儿标题）。
+
+**数据形状**：
+
+```go
+type chunkBody struct {
+    ...
+    taskList []agent.AgentTaskItem   // 独立 section；nil/len==0 → 不渲染
+    footer   string                  // statusbar panel（同样附属 section）
+    ...
+}
+```
+
+**Compose 顺序**：
+
+```
+header → "────" → entries → (空 taskList 跳过) → "<b>📋 Tasks</b>\n" + taskLines → "\n" → footer
+```
+
+headline 是 pre-baked HTML（`"<b>📋 Tasks</b>"`，与 feishu `**📋 Tasks**` Markdown header 视觉对位），task 行走 RenderMarkdown（`renderInline` 兜底转义用户输入的 subject）。
+
+**taskList 行形态**（与 feishu `renderTaskLine` 对位）：
+
+| 状态 | 行形态 |
+|---|---|
+| `TaskPending` | `- [ ] <Subject>` |
+| `TaskInProgress` | `- [ ] <Subject> (<ActiveForm>)` ← 软后缀 |
+| `TaskCompleted` | `- [x] <Subject>` |
+| `TaskDeleted` | **过滤掉**（bridge transient 信号） |
+| `TaskCancelled` | **过滤掉**（cursor-only，feishu 同形过滤） |
+
+**rune budget**（与 feishu `checklistBudgetRunes` 对位）：
+
+- `taskSectionBudgetRunes = 3000`：headline + task rows 渲染后的总 rune 上限
+- 超 budget → 丢尾部行（整行 drop，不切 mid-row）；末行追加 `…` 后缀
+- 第一行就超 budget → emit `taskSectionOverflowPlaceholder`（`- [ ] …`），section 仍可见但只有占位行
+- budget 包含 headline（`<b>📋 Tasks</b>` 约 14 runes），所以纯 task 行的实际预算 ~2986 runes
+- 与 feishu 同步：bridge 发 100 长 task 时，渲染保留前 ~30 个完整行，后续 silent drop（用户看到 `…` 后缀）
+
+**lastTaskList 刷新 = 数据驱动**（与 lastFooter 同语义）：
+
+- `OutTaskCreate` / `OutTaskUpdate` 事件到达 → `setTaskList(msg.TaskList.Items)` → 覆盖 active chunk 的 `taskList` 字段 + `chain.lastTaskList` 同步
+- 空 items → 「clear checklist」语义:active chunk.taskList = nil + chain.lastTaskList = nil,下次 Compose 跳过 task section
+- nil msg.TaskList → silent drop(adapter 入口守卫):bridge 没附 task data,不进 chain,不发 Telegram message
+- 冷启动(cursor<0)+ 空 items → silent drop(双重防御):chain 上没东西可清,创建空 chunk 是浪费
+- `chain.dirty = true` 无条件置位；`scheduleFlushDebounced` 无条件调用
+- Render 总是发生 —— 即使 taskList 没变，新 entries 累积也要触发整 section 重渲
+
+**inheritLatestTaskList（继承语义，与 inheritLatestHeader 对位）**：
+
+- ROTATE / SPLIT 时新 chunk 通过 `inheritLatestTaskList(cur)` 拷贝 cur 的 `taskList` → frozen chunk 出生时持有当时的 task 快照
+- 后续 OutTaskUpdate 只刷新 active chunk 的 taskList —— frozen chunks 停留在历史快照，**符合 §11.12.7.4 的「inherit-from-active 而非 fresh-timestamp-per-chunk」语义**
+- 与 inheritLatestHeader 的本质区别：header 是「banner heartbeat 计数」，过时刻立即过期；task 是「已完成 / 待办 / 进行中」的状态列表，需要冻结以反映该 chunk 出生那一刻的计划 —— inherit 是必须的，否则 ROTATE 会把过去的 task 抹掉
+
+**为什么不进 entries**：task 是结构化数据（subject / status / activeForm 三元组），不是「流文本」。混进 entries 会导致：
+
+1. `💭 thinking` / `⎿ result` 行散落夹杂 `- [ ]` 行，扫描体验差
+2. 同一 task 在 status 变化（pending → in_progress → completed）时需要**整 section 替换**而不是「行序号增改」；entries 路径只能 append / replaceEntry，行级 in-place 状态切换语义不对位
+3. feishu 把 task 当独立 card section 渲染（见 feishu `SetTaskListWithFooter`），telegram 的 chain 既然要视觉对位，task 必须是独立 section 而非 entries 内联
+
+**与 footer 的对位**：
+
+| 字段 | 类型 | 来源 | Compose 位置 |
+|---|---|---|---|
+| `header` | `string` (pre-baked HTML) | heartbeat / cold-create banner | 顶部 |
+| `entries` | `[]chunkEntry` | appendSegment / appendError | header 之后 |
+| `taskList` | `[]AgentTaskItem` | setTaskList (OutTaskCreate/Update) | entries 之后、footer 之前 |
+| `footer` | `string` (pre-rendered panel) | statusbar.RenderPanel(lastFooter) | 底部 |
+
+**与 feishu `SetTaskListWithFooter` 对位**：
+
+| feishu | telegram |
+|---|---|
+| `MessageReceipt.tasks []AgentTaskItem` | `chunkBody.taskList []AgentTaskItem` |
+| `MessageReceipt.footerLines []string` | `chunkBody.footer string` |
+| `SetTaskListWithFooter(ctx, list, footerLines)` | `setTaskList(ctx, chain, ..., items, statusBarLines, sendFn, editFn)` |
+| card element: `<markdown>📋 Tasks</markdown> + tasks` | chunkBody section: `<b>📋 Tasks</b>` headline + task lines |
+| footer element: `<hr> + <markdown>grey footer</markdown>` | chunkBody trailing: `\n + footer` |
+| renderLocked (card rebuild) | Compose (chunk rebuild) |
+| active chunk only updated, frozen 保持历史 | active chunk only updated, frozen 保持历史 |
 
 ### 11.12.7 编辑频率控制（debounce + 1-Hz 自然上限）
 
@@ -1785,6 +1906,22 @@ func summarizeToolResult(name, output string, err error) string {
 - `TestChain_FlushChainNow_TailInheritsLatestHeader` —— Trigger 3 tail piece: inherit
 - `TestChain_RotateChunk_InheritsLatestHeader` —— (替换 `TestChain_RotateChunk_HeaderIsFreshNotInherited`) case 3 ROTATE: 翻转单测契约
 
+**v9 P2 task section 测试**(§11.12.6.1):
+- `TestRenderActiveChunkBody_TaskOnly` —— entries 空 + taskList 非空 → `<b>📋 Tasks</b>` headline + task lines + footer；无 orphan separator
+- `TestRenderActiveChunkBody_TaskAboveFooter` —— entries + taskList + footer → 渲染顺序严格为 entries → task section → footer
+- `TestRenderActiveChunkBody_NoTaskWhenEmpty` —— taskList 为 nil / len==0 → headline 不出,后续 footer 紧贴 entries
+- `TestRenderActiveChunkBody_TaskHeadlinePreservedThroughRender` —— `<b>` pre-baked HTML 不被 escapeHTML 二次转义
+- `TestChunkBody_SetTaskList_NilClears` —— primitive: nil → taskList 字段重置为 nil
+- `TestChunkBody_InheritLatestTaskList_CopiesAndFlag` —— primitive: 拷贝 src.taskList + nil src no-op
+- `TestChain_TaskListUpdate_RefreshesActiveChunkOnly` —— 多次 OutTaskUpdate → frozen chunk 不变,active chunk 更新(对位 §11.12.7.4 inheritLatestHeader 语义)
+- `TestChain_Rotate_InheritsLatestTaskList` —— ROTATE 时新 chunk 沿用 cur 的 taskList(防止 task 在 chunk 切换时丢失)
+- `TestChain_Split_InheritsLatestTaskList` —— SPLIT path 所有 pieces 都 inherit taskList
+- `TestChain_NewChunk_InheritsLastTaskList_OnColdCreate` —— cold-create 时若 chain.lastTaskList 非空 → materialise 第一张 chunk 时 setTaskList(避免 task 在冷启动时丢失)
+- `TestAdapter_OutTaskCreate_EmptyList_NoBubble` —— OutTaskCreate with nil items → silent drop,不发 Telegram message
+- `TestAdapter_OutTaskUpdate_ReplacesEntireSnapshot` —— OutTaskUpdate 全量替换 taskList(非 append / patch),与 feishu `SetTaskList` 对位
+- `TestAdapter_OutTaskCreate_RendersSectionAboveFooter` —— OutTaskCreate + statusbar 同时落地 → Compose 顺序为 entries → task → footer
+- `TestRenderActiveChunkBody_TaskInProgress_ShowsActiveFormSuffix` —— in_progress task 行带 `(ActiveForm)` 软后缀(feishu `renderTaskLine` 对位)
+
 ### 11.12.17 已知限制
 
 | Limit | 描述 | 缓解 / 后续 |
@@ -1824,6 +1961,20 @@ func summarizeToolResult(name, output string, err error) string {
 - **2026-08-23** - **Spec 同步**（commit `b68cc30`）：§11.12.2 chainKey + LRU cap 含义 / §11.12.3 阈值 + SPLIT rationale / §11.12.4 OutCommandReply + 超长处理段 / §11.12.6 数据驱动 footer + Render-always / §11.12.7.2 三触发器决策矩阵 / §11.12.8 heartbeat 例代码 / §11.12.10 chain loss / §11.12.11 Topic vs DM 不变。
 
 - **2026-08-23** - **Spec 进一步对齐**（本次 commit）：§11.12.2 chunkBody API 加 `appendEntryHTML` / §11.12.4 OutError 路径改为 `appendErrorSegment` / §11.12.5 核心 API 重写（package-level + chainLRU 实际签名）/ §11.12.7.2 trigger 1 partial-failure + trigger 3 step 5 header 来源 / §11.12.8 / §11.12.9 例代码改实际 / §11.12.15 commit 清单改 git log 引用 / §11.12.16 矩阵用实际 test 名 / §11.12.17 limits 表补 SPLIT + chain-key / §11.12.18 变更日志追加本批。
+
+- **2026-08-23（v9 P2 task section 抽象，本次 commit）**：
+  - **数据模型**：`chunkBody` 加 `taskList []agent.AgentTaskItem` 字段（与 header / entries / footer 平级的第 4 section）；`placeholderChain` 加 `lastTaskList []agent.AgentTaskItem` 镜像字段。
+  - **新方法**：`chunkBody.setTaskList(items)` / `inheritLatestTaskList(src)` / `taskListText()`；与 `setFooter` / `inheritLatestHeader` 形态完全对称。
+  - **业务路径**：新增 package-level `setTaskList(ctx, chain, ...)`；删除 `Adapter.formatTaskList` + `OutTaskCreate/OutTaskUpdate` 的 `appendSegmentForKind` 路径 → 改为 `chain.setTaskList(...)` + `scheduleFlushDebounced`。
+  - **Compose 顺序**：header → `────` → entries → (空 taskList 跳过) → `<b>📋 Tasks</b>` + task 行 → `\n` → footer。headline pre-baked HTML；task 行走 RenderMarkdown。
+  - **与 feishu `SetTaskListWithFooter` 对位**：taskList / footer 同事件落地；ROTATE / SPLIT 时 taskList 与 header 一起 inherit（frozen chunks 持有历史 task 快照）。
+  - **测试矩阵**：§11.12.16 增补 13 条 Compose primitive / Chain / Adapter 单元测试。
+  - **回归保护**：`formatTaskList` 删除；旧形态 `OutTaskCreate/Update` adapter 测试改写为新字段断言（taskList 字段存在性 / len / Compose 输出顺序）。
+  - **不持久化**：`taskList` / `lastTaskList` 纯内存字段；daemon 重启 = chain 重建，跟 entries / header / footer 同源。
+  - **silent drop 守卫（nil msg.TaskList）**：`Send()` 入口加 `if msg.TaskList == nil { return nil }` → silent drop，不进 chain、不发 Telegram message。Bridge 没附 task data 时走这条。
+  - **clear semantic（empty Items）**：`Send()` 不 silent drop；msg.TaskList 非 nil 但 Items 为空 → 调 setTaskList 让 active chunk.taskList 清零 + chain.lastTaskList = nil，下次 Compose 跳过 task section。与 feishu `SetTaskList([])` 对齐（feishu 也是 clear 而不是 silent drop）。
+  - **cold-create 防御**：setTaskList 在 cursor<0 且 len(items)==0 时 silent drop，避免创建空 chunk。
+  - **文档同步**：§11.12.2 chunkBody struct + API 加 `taskList` / `setTaskList` / `inheritLatestTaskList`；§11.12.4 事件映射 OutTask* 改写；§11.12.5 核心 API 加 `setTaskList`；§11.12.6.1 新增 task 内存语义段；§11.12.16 矩阵增 13 条；§11.12.18 变更日志追加本批。
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 

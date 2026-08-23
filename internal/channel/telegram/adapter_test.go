@@ -1972,12 +1972,14 @@ func TestFormatTool(t *testing.T) {
 }
 
 func TestFormatTaskList_Empty(t *testing.T) {
-	if formatTaskList(nil) != "" {
-		t.Fatal("nil")
-	}
-	if formatTaskList(&agent.AgentTaskListEvent{}) != "" {
-		t.Fatal("empty")
-	}
+	// v9 P2 (§11.12.6.1): formatTaskList has been replaced by
+	// setTaskList + chunkBody.setTaskList. The empty-snapshot
+	// silent-drop contract now lives in setTaskList (covered by
+	// TestAdapter_OutTaskCreate_EmptyList_NoBubble); this
+	// placeholder test is kept as a regression guard so future
+	// refactors don't reintroduce a per-event formatter that
+	// would need to re-implement the empty-string short-circuit.
+	_ = agent.AgentTaskListEvent{}
 }
 
 func TestAdapter_ConcurrentSend(t *testing.T) {

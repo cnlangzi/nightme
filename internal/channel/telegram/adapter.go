@@ -1117,8 +1117,47 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			rawChatID, topicID, replyAnchor)
 		return nil
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
-		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
-			formatTaskList(msg.TaskList))
+		// v9 P2 (§11.12.6.1): taskList is its own chunkBody
+		// section, not an entries row. Delegate to setTaskList
+		// which writes the taskList field and triggers a Compose
+		// re-render via scheduleFlushDebounced (we still need
+		// to schedule the flush — setTaskList mutates chain
+		// state but does NOT schedule the flush itself, mirroring
+		// appendErrorSegment's contract).
+		//
+		// Bridge payload contract (outbound.go OutTaskUpdate):
+		//   - msg.TaskList == nil       → bridge omitted task data
+		//                                 entirely; silent drop (no
+		//                                 chain mutation, no flush).
+		//                                 Mirrors v8 formatTaskList's
+		//                                 empty-string return for
+		//                                 nil TaskList.
+		//   - msg.TaskList != nil, len(Items) == 0
+		//                               → bridge "clear the checklist"
+		//                                 signal (per outbound.go
+		//                                 comment). setTaskList wipes
+		//                                 chain.lastTaskList + active
+		//                                 chunk.taskList so the
+		//                                 next render omits the
+		//                                 section entirely. Matches
+		//                                 feishu SetTaskList.
+		//   - msg.TaskList != nil, len(Items) > 0
+		//                               → populate / replace the
+		//                                 section. Same flow as
+		//                                 before.
+		if msg.TaskList == nil {
+			return nil
+		}
+		chain := a.chains.getOrCreate(rawChatID, topicID, replyAnchor)
+		if err := setTaskList(ctx, chain,
+			rawChatID, topicID, replyAnchor,
+			msg.TaskList.Items, statusbar.StatusBarLines(&msg),
+			a.chainSendFn(), a.chainEditFn()); err != nil {
+			return err
+		}
+		scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+			rawChatID, topicID, replyAnchor)
+		return nil
 	case messages.OutError:
 		// OutError delegates to chunkBody.appendError via the
 		// appendErrorSegment chain business API. Adapter no longer
@@ -1514,26 +1553,7 @@ func formatTool(msg messages.OutboundMessage) string {
 	return ""
 }
 
-func formatTaskList(taskList *agent.AgentTaskListEvent) string {
-	if taskList == nil || len(taskList.Items) == 0 {
-		return ""
-	}
-	var result strings.Builder
-	for _, item := range taskList.Items {
-		result.WriteString("- [")
-		if item.Status == agent.TaskCompleted {
-			result.WriteString("x")
-		} else if item.Status == agent.TaskInProgress {
-			result.WriteString("~")
-		} else {
-			result.WriteString(" ")
-		}
-		result.WriteString("] ")
-		result.WriteString(item.Subject)
-		result.WriteByte('\n')
-	}
-	return result.String()
-}
+
 
 // formatInit was the v8 OutInit pre-render helper. v9 silenced
 // OutInit (matches feishu F-44); session identity now travels

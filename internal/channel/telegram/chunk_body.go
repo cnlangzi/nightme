@@ -2,13 +2,24 @@ package telegram
 
 import (
 	"strings"
+	"unicode/utf8"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // ---------------------------------------------------------------------------
 // chunkBody — one Telegram message in the rolling-log chain. Encapsulates
-// the three pipeline-routed sections (header / entries / footer) and is
-// the SOLE producer of safe-HTML wire format via Compose(). Business
-// code mutates the fields; Compose() renders.
+// the four pipeline-routed sections (header / entries / taskList / footer)
+// and is the SOLE producer of safe-HTML wire format via Compose().
+// Business code mutates the fields; Compose() renders.
+//
+// taskList is the v9 P2 independent task section (see
+// docs/channel/telegram.md §11.12.6.1): renders as
+// `<b>📋 Tasks</b>` headline + a markdown todo-list of agent task
+// rows, positioned between entries and footer so the user sees the
+// per-turn plan as a visually distinct block (feishu `📋 Tasks` card
+// section parity). Empty / nil → section omitted entirely (no orphan
+// headline).
 //
 // Layer 1: data model + view formatting, encapsulated.
 // Layer 2 (chain) drives mutations through business methods.
@@ -17,6 +28,15 @@ import (
 // This split keeps adapter.go free of HTML decisions and ensures
 // any future change to chunk-body composition happens in one place.
 // ---------------------------------------------------------------------------
+
+// taskHeadline is the pre-baked HTML headline that prefixes the
+// task section in Compose(). Matches feishu's `**📋 Tasks**`
+// markdown heading in visual weight; pre-baked HTML keeps the
+// `<b>` tag out of RenderMarkdown's escape path (which would
+// double-escape it to `&lt;b&gt;`). Emitted only when taskList is
+// non-empty; Compose skips it otherwise so a stale empty checklist
+// never paints an orphan "📋 Tasks" banner.
+const taskHeadline = "<b>📋 Tasks</b>"
 
 // chunkEntry is one log line within a chunkBody. isHTML=true means
 // the text is already safe HTML (e.g. <pre>...</pre>) and must skip
@@ -28,7 +48,7 @@ type chunkEntry struct {
 }
 
 // chunkBody is one Telegram message. Business code mutates header,
-// entries, footer; Compose() is the only render path.
+// entries, taskList, footer; Compose() is the only render path.
 //
 // flushedLen tracks how many bytes of entries' rendered content
 // were emitted on the previous long-text split (overflow path).
@@ -43,6 +63,12 @@ type chunkEntry struct {
 // hides the legacy "🤖 Working..." banner on turn paths that produce
 // body content but no heartbeat (slash command replies, error-only
 // turns, reaction-only clicks). See docs/channel/telegram.md §11.12.5.
+//
+// taskList (v9 P2, §11.12.6.1) is the per-turn task snapshot held
+// independently of entries — refreshed wholesale by OutTaskCreate /
+// OutTaskUpdate via setTaskList; never mutated in place; never
+// appended to entries. Compose() emits the `<b>📋 Tasks</b>`
+// headline + task rows as a section between entries and footer.
 type chunkBody struct {
 	messageID int64
 	isFull    bool
@@ -57,7 +83,14 @@ type chunkBody struct {
 	hasHeartbeat bool
 
 	entries []chunkEntry
-	footer  string
+	// taskList is the latest agent task snapshot. Compose emits
+	// `<b>📋 Tasks</b>` + a markdown todo-list of one row per
+	// item when non-empty; nil / len==0 → section omitted entirely.
+	// Inherited by ROTATE / SPLIT tail chunks via
+	// inheritLatestTaskList so frozen chunks retain their birth
+	// snapshot. See docs/channel/telegram.md §11.12.6.1.
+	taskList []agent.AgentTaskItem
+	footer   string
 
 	flushedLen int
 }
@@ -189,6 +222,72 @@ func (b *chunkBody) appendError(text, stderr string) {
 // already escape-safe).
 func (b *chunkBody) setFooter(f string) { b.footer = f }
 
+// setTaskList replaces the per-turn task snapshot wholesale
+// (§11.12.6.1). nil / len==0 is valid — it clears the section
+// entirely (Compose omits the headline when the section is empty).
+//
+// The slice is defensively copied: callers (OutTaskCreate /
+// OutTaskUpdate) reuse the bridge-supplied snapshot for log
+// lines and post-render mutations would otherwise leak into the
+// chunkBody's frozen state. Idempotent on equal-content snapshots
+// at the call site (setTaskList always overwrites) — the chain
+// dirty / debounce logic at Layer 2 absorbs the no-op render cost.
+//
+// setTaskList does NOT touch entries / footer / header — the four
+// sections are independent. Adapters that need to refresh the
+// footer alongside the task list call setTaskList + setFooter in
+// sequence (mirroring the feishu SetTaskListWithFooter signature).
+func (b *chunkBody) setTaskList(items []agent.AgentTaskItem) {
+	if len(items) == 0 {
+		b.taskList = nil
+		return
+	}
+	copied := make([]agent.AgentTaskItem, len(items))
+	copy(copied, items)
+	b.taskList = copied
+}
+
+// inheritLatestTaskList copies src.taskList onto this chunk.
+// Used by ROTATE / SPLIT / cold-create paths so a newly-born
+// chunk carries the chain's most recent task snapshot at the
+// moment it was created, instead of starting from an empty
+// checklist.
+//
+// Symmetric with inheritLatestHeader (§11.12.7.4): the new chunk
+// reads as a chronological snapshot of the chain's active state
+// at its birth. Subsequent OutTaskUpdate events only refresh
+// chain.chunks[cursor] (the active chunk); frozen chunks stay
+// frozen at their birth snapshot — that's the intended behaviour
+// for "thinking → planning → executing" timelines where ROTATE
+// mid-task would otherwise erase the just-promoted plan.
+//
+// Caller MUST hold chain.mu (src is typically
+// chain.chunks[chain.cursor] pre-markFull, or any chunk already
+// known to be authoritative). nil src is a no-op so callers can
+// short-circuit "any chain state yet?" without a guard.
+func (b *chunkBody) inheritLatestTaskList(src *chunkBody) {
+	if src == nil {
+		return
+	}
+	if len(src.taskList) == 0 {
+		b.taskList = nil
+		return
+	}
+	copied := make([]agent.AgentTaskItem, len(src.taskList))
+	copy(copied, src.taskList)
+	b.taskList = copied
+}
+
+// taskListText returns the current task snapshot (read-only probe).
+// Returns nil when the section is empty. The returned slice is the
+// internal copy — callers MUST NOT mutate it (would corrupt the
+// chunkBody's frozen state). Used by chain rotation tests and
+// adapter-internal probes that want to inspect the section
+// without re-rendering.
+func (b *chunkBody) taskListText() []agent.AgentTaskItem {
+	return b.taskList
+}
+
 // markFull locks the chunk (no further appendEntry / appendError).
 // chain.rotate() and long-text overflow paths use this.
 func (b *chunkBody) markFull() { b.isFull = true }
@@ -207,6 +306,166 @@ func (b *chunkBody) freezeAfterOverflow(emittedBytes int) {
 // emitted during a long-text split (P0 #2 infrastructure).
 func (b *chunkBody) markFlushedLen(n int) { b.flushedLen = n }
 
+// renderTaskLine builds one row of the markdown todo list emitted
+// inside the task section. The shape matches feishu's
+// renderTaskLine (internal/channel/feishu/receipt_task.go) so the
+// two channels render identical plan rows.
+//
+//   - TaskPending    → - [ ] Subject
+//   - TaskInProgress → - [ ] Subject (ActiveForm)    (open box + soft suffix)
+//   - TaskCompleted  → - [x] Subject
+//
+// TaskDeleted / TaskCancelled are filtered out by Compose (defence
+// in depth — the bridge is supposed to drop them before emitting).
+// Empty Subject falls back to the id so a malformed snapshot still
+// produces a non-empty row.
+func renderTaskLine(it agent.AgentTaskItem) string {
+	checkbox := "- [ ]"
+	if it.Status == agent.TaskCompleted {
+		checkbox = "- [x]"
+	}
+	subject := strings.TrimSpace(it.Subject)
+	if subject == "" {
+		subject = it.ID
+	}
+	line := checkbox + " " + subject
+	if it.Status == agent.TaskInProgress && it.ActiveForm != "" {
+		line += " (" + it.ActiveForm + ")"
+	}
+	return line
+}
+
+// renderTaskSection builds the rendered task section (headline +
+// task rows) for Compose(). Returns "" when the section is empty
+// so Compose can short-circuit without a "did the section render
+// anything?" probe.
+//
+// The headline is pre-baked HTML (taskHeadline) — RenderMarkdown
+// is bypassed for it so `<b>` survives the pipeline. The task
+// rows are pre-formatted Markdown (`- [ ]` / `- [x]`) and piped
+// through RenderMarkdown so the Subject escapes cleanly and
+// inline emphasis / code spans / links still work. The whole
+// section is newline-joined into one string so the caller can
+// append it as one block.
+// taskSectionBudgetRunes is the maximum total rune length of the
+// rendered task section (headline + rows summed). Picked to
+// comfortably fit inside Telegram's 4096-char hard limit with
+// plenty of slack for header (~50 chars) + footer panel (~100
+// chars) + entries that may also be on the same chunk. Long task
+// lists are truncated at this budget — feishu uses the same shape
+// (checklistBudgetRunes). The truncation is applied per-row
+// (whole-row drop, never mid-row) so the markdown list shape
+// stays well-formed.
+const taskSectionBudgetRunes = 3000
+
+// taskSectionMore is the suffix appended to the LAST visible row
+// when the budget truncated the list. Pure ellipsis — no label —
+// keeps the visual shape of a single todo row and avoids
+// mixed-language suffixes (the user's locale may not be the
+// source-code author's). Mirrors feishu's checklistMore constant.
+const taskSectionMore = "…"
+
+// taskSectionOverflowPlaceholder is the single-row fallback when
+// the renderer drops every row to fit the budget. It is a single
+// todo row so the user still sees a checkbox block and the
+// section stays a well-formed markdown todo list. Mirrors
+// feishu's checklistOverflowPlaceholder.
+const taskSectionOverflowPlaceholder = "- [ ] …"
+
+// renderTaskSection builds the rendered task section (headline +
+// task rows) for Compose(). Returns "" when the section is empty
+// so Compose can short-circuit without a "did the section render
+// anything?" probe.
+//
+// Pipeline:
+//   1. Filter out rows whose status is terminal-but-not-rendered
+//      (TaskDeleted / TaskCancelled). Other statuses always render
+//      — better than silently dropping a row the bridge meant to
+//      surface.
+//   2. Drop trailing rows that would push the rendered rune count
+//      over taskSectionBudgetRunes. The last visible row gets a
+//      "…" suffix so the user sees the truncation.
+//   3. Prepend the pre-baked HTML headline (taskHeadline) — this
+//      is NOT run through RenderMarkdown so the `<b>` tags survive
+//      without double-escape.
+//   4. Pipe the row block through RenderMarkdown so the Subject
+//      escapes cleanly and any inline emphasis / code spans /
+//      links still work. The whole section is one string so the
+//      caller can append it as one block.
+//
+// taskSectionOverflowPlaceholder fires when EVERY row was dropped
+// — preserves the visual shape of a todo list (one open checkbox)
+// so the user still sees the section exists but is empty.
+func (b *chunkBody) renderTaskSection() string {
+	if len(b.taskList) == 0 {
+		return ""
+	}
+
+	// Filter rows first — filtered items must not consume the
+	// rune budget (they're invisible downstream).
+	visible := make([]agent.AgentTaskItem, 0, len(b.taskList))
+	for _, it := range b.taskList {
+		switch it.Status {
+		case agent.TaskDeleted, agent.TaskCancelled:
+			// Terminal statuses that don't make sense on a live
+			// checklist — drop them. TaskDeleted is the bridge's
+			// transient signal (see outbound.go); TaskCancelled is
+			// cursor-only and never reaches feishu's render path.
+			continue
+		}
+		visible = append(visible, it)
+	}
+	if len(visible) == 0 {
+		// Every item filtered out — treat as empty so the
+		// headline doesn't paint an orphan "📋 Tasks" banner.
+		return ""
+	}
+
+	// Rune-budgeted row selection. Each rendered row costs
+	// RuneCountInString(line) + 1 (joining newline); the budget
+	// is consumed by both rows AND the trailing "…" suffix that
+	// marks the truncation point.
+	rows := make([]string, 0, len(visible))
+	total := 0
+	rendered := 0
+	for _, it := range visible {
+		line := renderTaskLine(it)
+		cost := utf8.RuneCountInString(line) + 1
+		if total+cost > taskSectionBudgetRunes {
+			break
+		}
+		rows = append(rows, line)
+		total += cost
+		rendered++
+	}
+	if rendered == 0 {
+		// The first row alone overflowed the budget — emit a
+		// placeholder row so the section stays well-formed. The
+		// headline still renders above the placeholder so the
+		// user knows "the section exists but couldn't fit".
+		return taskHeadline + "\n" + taskSectionOverflowPlaceholder
+	}
+	omitted := len(visible) - rendered
+
+	joined := strings.Join(rows, "\n")
+	if omitted > 0 {
+		// Append an inline "…" tail to the LAST visible row so
+		// the markdown list shape is preserved (single trailing
+		// row stays a todo line). Matches feishu's `chunks[len-1]
+		// += " " + checklistMore` semantics.
+		joined += " " + taskSectionMore
+	}
+	renderedMarkdown, err := RenderMarkdown(joined)
+	if err != nil {
+		// Fallback: escapeHTML the whole joined text. Should be
+		// unreachable — renderTaskLine produces plain ASCII and
+		// RenderMarkdown handles arbitrary input — but kept
+		// symmetric with the entries RenderMarkdown path.
+		renderedMarkdown = escapeHTML(joined)
+	}
+	return taskHeadline + "\n" + renderedMarkdown
+}
+
 // --- View rendering ---------------------------------------------------
 
 // Compose returns the safe-HTML body for parse_mode=HTML send.
@@ -215,6 +474,9 @@ func (b *chunkBody) markFlushedLen(n int) { b.flushedLen = n }
 //   - header:    verbatim (already HTML, e.g. "<b>...</b>")
 //   - entries:   RenderMarkdown per entry (escape + light md →
 //                HTML); isHTML entries write verbatim
+//   - taskList:  pre-baked headline + RenderMarkdown over the
+//                joined task rows (§11.12.6.1); emitted between
+//                entries and footer when non-empty
 //   - footer:    verbatim (statusbar.RenderPanel output)
 //
 // Inter-entry separator: every entry is followed by '\n'. If the
@@ -231,12 +493,12 @@ func (b *chunkBody) markFlushedLen(n int) { b.flushedLen = n }
 // Overflow handling: skipFlushedPrefix returns the entry index
 // to start from. When flushedLen > 0 with no entries (the
 // overflow path cleared entries via freezeAfterOverflow), we
-// skip to the end and render only header + footer. The tail
-// chunk of an overflow carries pieces[N-1] as its first entry
-// (see flushChainNow) so the next flush re-renders with the
-// long-text content intact — without that, the next editMessageText
-// would overwrite pieces[N-1] with an empty body (P0 regression
-// guard).
+// skip to the end and render only header + task + footer. The
+// tail chunk of an overflow carries pieces[N-1] as its first
+// entry (see flushChainNow) so the next flush re-renders with
+// the long-text content intact — without that, the next
+// editMessageText would overwrite pieces[N-1] with an empty
+// body (P0 regression guard).
 //
 // Header-skip rule (§11.12.5): render the header IFF
 // `hasHeartbeat || len(entries) == 0`.
@@ -250,9 +512,13 @@ func (b *chunkBody) markFlushedLen(n int) { b.flushedLen = n }
 //     "🤖 Working..." banner forever.
 //   - First OutHeartbeat arrives (with or without entries) →
 //     hasHeartbeat flips true → header renders thereafter.
-//   - Footer (statusbar) renders IFF entries or header did
-//     (skip the orphan-footer case — there's no header separator
-//     line for it to flank against).
+//   - Task section (§11.12.6.1) renders IFF taskList is non-empty;
+//     its presence does NOT influence the header-skip rule (a
+//     task-only turn — no entries, no heartbeat — still shows
+//     "🤖 Working..." + headline + task rows + footer).
+//   - Footer (statusbar) renders IFF entries or header or task
+//     section did (skip the orphan-footer case — there's no
+//     header separator line for it to flank against).
 func (b *chunkBody) Compose() string {
 	var out strings.Builder
 
@@ -291,11 +557,32 @@ func (b *chunkBody) Compose() string {
 			}
 		}
 	}
-	// Footer: only render when at least one of (header, entries) did.
-	// Otherwise the footer floats with no chunk context (cold-create
-	// before any heartbeat or entry would emit an orphan trailing
-	// panel — ugly).
-	if b.footer != "" && (renderHeader || len(b.entries) > 0) {
+	// Task section (§11.12.6.1): rendered between entries and
+	// footer. renderTaskSection returns "" when the section is
+	// empty so the headline never paints as an orphan. The
+	// rendered block ends with '\n' so the trailing '\n' before
+	// the footer separator reads as a blank line — same shape as
+	// the entries→footer gap.
+	taskSection := b.renderTaskSection()
+	if taskSection != "" {
+		// Always emit a blank line before the task section so it
+		// visually separates from entries (and from the header
+		// divider when entries are empty). Matches the entries→
+		// footer gap shape.
+		out.WriteByte('\n')
+		out.WriteString(taskSection)
+		if !strings.HasSuffix(taskSection, "\n") {
+			out.WriteByte('\n')
+		}
+	}
+	// Footer: only render when at least one of (header, entries,
+	// task section) did. Otherwise the footer floats with no
+	// chunk context (cold-create before any heartbeat, entry, or
+	// task would emit an orphan trailing panel — ugly). Note
+	// that taskSection non-empty is a sufficient trigger even
+	// when entries is empty (task-only turn).
+	renderFooterAnchor := renderHeader || len(b.entries) > 0 || taskSection != ""
+	if b.footer != "" && renderFooterAnchor {
 		out.WriteByte('\n')
 		out.WriteString(b.footer)
 	}

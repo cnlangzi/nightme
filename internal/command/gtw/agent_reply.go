@@ -85,7 +85,7 @@ import (
 func runAgentFor(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
-	workspace, prompt string,
+	workspace, prompt, chatID, messageID string,
 	cliAgent, ymlAgent string,
 ) (agent.RunResult, string, error) {
 	agentName, agentNotes := ResolveAgent(cliAgent, ymlAgent, cs)
@@ -111,9 +111,17 @@ func runAgentFor(
 		Type: agent.ContentText,
 		Text: prompt,
 	}}
+
+	// Wire up the sink so the user sees the agent's intermediate
+	// events (thinking, tool calls, tool results, …) streaming
+	// into the chat while /gtw commit / /gtw pr runs. The drain
+	// goroutine lives on ctx; cancellation tears it down.
+	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), chatID, messageID, agentName)
+
 	res, err := a.RunOnce(ctx,
 		agent.StartConfig{Workspace: workspace},
 		blocks,
+		agent.WithEventSink(sink),
 	)
 	if err != nil {
 		return res, agentName, fmt.Errorf("❌ agent %s failed: %v", agentName, err)

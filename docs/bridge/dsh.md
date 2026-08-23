@@ -1,13 +1,18 @@
-# dsh — DeepSeek Harness Bridge (DEPRECATED — see dsh-shared-host.md)
+# dsh — DeepSeek Harness Bridge (shared-host only)
 
-> **Status**: ⚠️ **DEPRECATED 2026-08-16** — chat session 部分已重写为**单一全局 dsh web 实例**架构
-> **新设计 + 实现**: [./dsh-shared-host.md](./dsh-shared-host.md) — 1:N multiplexing,全局 watchdog + restart recovery
+> **Status**: ✅ **统一架构 2026-08-22** — `Start` 与 `RunOnce` / `Review` **都走 `--profile web` shared host**;`dsh --profile headless` 路径已废弃
 > **Wire 协议参考**: [./dsh-api.md](./dsh-api.md) — 权威 wire contract(TS source + 实机)
-> **保留范围**: print-mode 仍然使用;chat session 部分仅作历史参考
+> **共享 host 设计 + 实现**: [./dsh-shared-host.md](./dsh-shared-host.md) — 1:N multiplexing、全局 watchdog + restart recovery、`workspace.archiveSession` 行为
 > **Scope**: `internal/bridge/dsh/` — nightme 侧的 DeepSeek Harness (`@deepseek-ai/dsh`) bridge
-> **形态**: 一桥两端
->   - **Print-mode**(`Starter.RunOnce`):`dsh --profile headless -- "<prompt>"` CLI 调用,plain stdout
->   - **Chat session**(`Starter.Start`,已重写):走 [共享 host](./dsh-shared-host.md)
+> **形态**:**一桥一端** — 全部走 shared-host web
+>   - **`Starter.Start`(chat session,long-lived)**:持有 `*Agent` 多轮
+>   - **`Starter.RunOnce` / `Starter.Review`(一次性)**:与 `Start` 同一形态,但跑完 `defer a.Close()` 走 `workspace.archiveSession` 归档
+>
+> **本版与 2026-08-16 版的关键差异**:
+> - `dsh/print.go` + `dsh/print_real_unix_test.go` **删除**(旧 headless 路径不再使用)
+> - `dsh.RunOnce` 不再 `proc.New` 任何子进程;改为 `s.Start + drain + defer Close`,与 `acp.RunOnce` 同构
+> - **R2 上下文隔离自动满足** —— 每次 RunOnce 在 dsh web 里 `session.create` 一个独立 sessionId,显式隔离;不再依赖 dsh CLI 的"是否读 ~/.dsh 共享状态"行为
+> - **R4 归档复用现有 `driver.Close`** —— 已有 `workspace.archiveSession` 调用,`defer a.Close()` 自动触发,**无新代码**
 > **核心原则(用户 2026-08-14 锁定)**: 接入底层 AI agent,**不修改 agent 本地默认配置**;nightme 只管 transport + permissions(权限默认全开)。详见 [agent-no-config-tampering memory](../../.claude/projects/-Users-geax-code-geax-github-com-cnlangzi-nightme/memory/agent-no-config-tampering.md)
 > **姊妹文档**:
 > - [docs/bridge/dsh-shared-host.md](./dsh-shared-host.md) — **新架构:全局单实例 dsh,1:N 多路复用**
@@ -32,22 +37,23 @@ npx @deepseek-ai/dsh web                  # 默认 Web UI,127.0.0.1:3080
 pnpm dsh --profile headless "<task>"      # 单 turn print-mode,plain stdout
 ```
 
-### 1.2 实机三种可接入口
+### 1.2 实机三种可接入口(2026-08-14 实机 + 源码)
 
-| 入口 | 实机状态 | 多 turn? | 备注 |
-|------|---------|---------|------|
-| `dsh --profile headless` (npm `@deepseek-ai/dsh`) | ✅ 实装 + 实测 `PONG` 通 | ❌ `headless --help` 无 `--resume`/`--session-id`,只暴露 `-h` | print-mode 唯一入口,每调用 = 新 session |
-| `dsh --profile web` (HTTP :3080) | ✅ 实机启 + 验证 HTTP + WS + **image/text 混合投递** | ✅ server-side session 持久化 | **本 chat session bridge 走的路径**,HTTP + WS 双通道 |
-| `dsh-jsonrpc-agent-pkg` (pip 单文件可执行) | ❌ PyPI wheel 是 placeholder(1.5 KB),**真 binary 未发布** | ✅ | **DEPRECATED 路径** — 详情见 §1.4 |
+| 入口 | 实机状态 | nightme 实际使用? | 备注 |
+|------|---------|-------------------|------|
+| `dsh --profile web` (HTTP :3080) | ✅ 实机启 + 验证 HTTP + WS + **image/text 混合投递** | **✅ Start + RunOnce + Review 全部走这条** | server-side session 持久化;nightme 通过 `session.create` 开新 sessionId,R2 隔离自动满足 |
+| `dsh --profile headless` (npm `@deepseek-ai/dsh`) | ⚠️ 实装 + 历史实测 `PONG` 通 | **❌ 2026-08-22 废弃** | `headless --help` 无 `--resume`/`--session-id`,只暴露 `-h`;print-mode 旧入口,每调用 = 新 session —— 但**没有显式 sessionId** 隔离,可能从共享状态读到主 chat 上下文 |
+| `dsh-jsonrpc-agent-pkg` (pip 单文件可执行) | ❌ PyPI wheel 是 placeholder(1.5 KB),**真 binary 未发布** | ❌ | **DEPRECATED 路径** — 详情见 §1.4 |
 
 ### 1.3 wire 协议(从 `packages/host/apiproxy/src/` 源码 + 实机双重验证)
 
 #### 1.3.1 spawn 配方
 ```
-dsh --profile web --port 0
+dsh --profile web
 ```
-- `--port 0`:OS 自动选空闲端口(避免冲突)
-- stdout 第一行 `dsh web: http://127.0.0.1:3080`,正则提取 `<host>:<port>`
+- **不带 `--port` flag** — 让 dsh 用自己的默认端口 **3080**(`host/discover.go:36` 的 `defaultDSHPort`)
+- **绝对不使用** `--port 0`(OS 随机端口):实机验证 dsh 不接受 0 + 会随机到奇怪端口,与 "reuse-or-spawn" 契约冲突(详见 `host/lifecycle.go:246-278`);`lifecycle.go:262-278` 还会**硬断言**端口必须是 3080,否则 kill spawn 并报清晰错误
+- stdout 第一行 `dsh web: http://127.0.0.1:3080`,正则提取 `<host>:<port>`;bridge 还要再校验端口 == 3080,不一致就 refuse
 
 #### 1.3.2 HTTP RPC
 ```
@@ -177,19 +183,20 @@ POST /api/respond
 
 **结论**:走 `dsh --profile web` HTTP+WS 路径,该路径**用户机器上已装好**(@deepseek-ai/dsh npm),无需 pip / 无需 clone / 无需 build。
 
-### 1.5 与现有 bridges 对照
+### 1.5 与现有 bridges 对照(2026-08-22 更新)
 
-| 维度 | claude | codex | pi | opencode | **dsh (print)** | **dsh (chat,待实施)** |
-|------|--------|-------|-----|----------|-----------------|-----------------------|
-| Transport | stream-json stdio | JSON-RPC stdio | JSONL RPC stdio | HTTP + SSE | **stdio (CLI)** | **HTTP + WS** |
-| Spawn | `claude --print` / `--input-format stream-json` | `codex app-server --listen stdio://` | `pi --mode rpc` | `opencode serve --port 0` | `dsh --profile headless` | `dsh --profile web --port 0` |
-| 长生命周期 | ✅ | ✅ | ✅ | ✅ | ❌ one-shot | ✅(设计) |
-| 接收事件 | stdout stream-json | JSON-RPC notifications | JSONL RPC events | SSE | N/A | WebSocket |
-| Approval | JSON-RPC request | JSON-RPC server request | (MVP auto cancel) | HTTP RPC | N/A | HTTP POST `/api/respond` |
-| 多模态 | ✅(stream-json content array) | ✅(-i flag) | ✅(prompt.images) | ✅(attachments) | ⚠️ (text+file 注解) | ⚠️(baseline-only;text + resource_link)|
-| 跨进程 resume | ✅ --resume | ✅ thread/resume | ✅ --session-id | ✅ sessionId | ❌(headless 不支持) | ✅ sessionId(server-persistence-jsonl)|
-| 二进制自包含 | ❌ npm | ❌ npm | ❌ npm | ❌ npm | **✅ npm** | **✅ npm** |
-| Print-mode(RunOnce)| ✅ `claude -p` | ✅ `codex exec` | ✅ `pi --print` | n/a | ✅ **`dsh --profile headless`** | n/a |
+| 维度 | claude | codex | pi | opencode | **dsh** |
+| |--------|-------|-----|----------|---------|
+| Transport | stream-json stdio | JSON-RPC stdio | JSONL RPC stdio | HTTP + SSE | **HTTP + WS(shared host)** |
+| Spawn | `claude -p`(RunOnce)/ stream-json(Start) | `codex exec`(RunOnce)/ app-server(Start) | `pi --mode json -p`(RunOnce)/ RPC(Start) | `opencode run`(RunOnce)/ `opencode acp`(Start) | **`dsh --profile web`(统一)** |
+| 长生命周期 | ✅ | ✅ | ✅ | ✅ | **✅(同一进程,RunOnce 用临时 sessionId)** |
+| 接收事件 | stdout stream-json | JSON-RPC notifications | JSONL RPC events | SSE | **WebSocket mux demux** |
+| Approval | JSON-RPC request | JSON-RPC server request | (MVP auto cancel) | HTTP RPC | **HTTP POST `/api/respond`** |
+| 多模态 | ✅(stream-json content array) | ✅(-i flag) | ✅(prompt.images) | ✅(attachments) | ✅(text + image inline)|
+| 跨进程 resume | ✅ --resume | ✅ thread/resume | ✅ --session-id | ✅ sessionId | ✅ `session.fork`(`dsh-api.md` §2)|
+| 二进制自包含 | ❌ npm | ❌ npm | ❌ npm | ❌ npm | ✅ npm |
+| RunOnce 隔离 | `claude -p` 新进程 | `codex exec` 新进程 | `pi -p` 新进程 | `opencode run` 新进程 | **`session.create` 新 sessionId,共用 dsh web 进程** |
+| RunOnce 收尾归档 | N/A(进程退即清) | N/A | N/A | N/A | **`defer a.Close()` → `workspace.archiveSession`** |
 
 ---
 
@@ -228,44 +235,50 @@ POST /api/respond
 
 1. **不 bundled 任何 dsh 配置文件** — 走 `~/.dsh/settings.yaml` + `~/.dsh/.credentials.yaml` 路径
 2. **不注入 model / provider / credentials / API key** — 仅 `cmd.Dir`(workspace) + `DSH_PERMISSION_MODE`(permission)
-3. **chat session bridge 走 `dsh --profile web` HTTP+WS** — 不依赖 pip / 不需要 clone dsh 仓
-4. **print-mode 走 `dsh --profile headless` CLI** — 零新依赖,实机验证 PONG/ALPHA/BETA/YES/OK
-5. **Start 报错清晰化**:`Starter.Start` 真实 spawn long-lived web process(非返 "not implemented");print-mode 仍是 `Starter.RunOnce` 的 headless 路径
+3. **chat session + RunOnce + Review 统一走 `dsh --profile web` HTTP+WS** — 不依赖 pip / 不需要 clone dsh 仓
+4. ~~**print-mode 走 `dsh --profile headless` CLI** — 零新依赖,实机验证 PONG/ALPHA/BETA/YES/OK~~ — **2026-08-22 废弃**:headless 无显式 sessionId 隔离,可能从共享状态读到主 chat 上下文;RunOnce 改走 web,`dsh/print.go` 已删除
+5. **Start 报错清晰化**:`Starter.Start` 真实连 shared host(非返 "not implemented");`RunOnce` 复用 `Start` 形态
 6. **abort lifecycle 复用 codex 模式**:closeOnce.Do 守护 SIGINT/SIGTERM 兜底,channel 只在 lifecycle goroutine 关闭
+7. **RunOnce/Review 收尾归档**:`defer a.Close()` 自动驱动 `driver.Close` → `Router.Unsubscribe` + `session.cancel` + `workspace.archiveSession`(`dsh/session.go:916-955`),**无新代码**
+8. **RunOnce = `Start` + drain + `Close`** — 与 `acp.RunOnce` 同构;不引入新的子进程管理代码
 
 ### 2.2 已排除
 
 1. **`dsh-jsonrpc-agent-pkg` JSON-RPC** — 见 §1.4,DEPRECATED
 2. **bundled cordis.yml** — 不修改 dsh 本机配置(原则违反)
 3. **TUI / acp / 自定义 profile** — `pnpm run demo:acp` 需 clone dsh 仓,`tui` 需 TTY,profile 需 `dsh plugin add` 安装;**不在实机**
-4. **PTY fallback for headless** — `dsh --profile headless` 是一次性进程,PTY 接不到 stdin 续 turn,**结构上不可能多 turn**
+4. ~~**PTY fallback for headless** — `dsh --profile headless` 是一次性进程,PTY 接不到 stdin 续 turn,**结构上不可能多 turn**~~ — 历史项;headless 路径整体废弃,不再讨论
+5. **headless 作为 RunOnce 路径** — 2026-08-22 决策:即使实机跑通,因无显式 session 隔离,**禁止**再用于任何 nightme 内部调用
 
 ---
 
-## 3. 包结构(chat session 阶段,~1800 行 Go)
+## 3. 包结构(unified shared-host 阶段,~1800 行 Go)
 
 ```
 internal/bridge/dsh/
   ├── doc.go                 # package doc
   ├── starter.go             # Starter + Info(ModeJSONIO) + Detect + Start + RunOnce
-  ├── print.go               # ✅ 已落地:RunOnce → dsh --profile headless
-  ├── prompt.go              # ✅ 已落地:blocksToPrompt
-  ├── starter_test.go        # ✅ 已落地:单测
-  ├── print_real_unix_test.go # ✅ 已落地:e2e
+  │                          # ★ RunOnce 走 Start + drain + defer Close
+  ├── ~~print.go~~           # ❌ 2026-08-22 删除:RunOnce 不再走 headless subprocess
+  ├── starter_test.go        # Starter-level tests(RunOnce / Review / drainForRunResult)
+  ├── ~~print_real_unix_test.go~~ # ❌ 2026-08-22 删除:e2e 改走 session_real_unix_test.go
   ├──
-  ├── detect.go              # 新增:exec.LookPath("dsh") + `dsh web` smoke probe
-  ├── session.go             # 新增:spawn `dsh web` + parse URL + lifecycle + closeOnce
-  ├── http.go                # 新增:HTTP RPC client(POST /api/{method})
-  ├── ws.go                  # 新增:WebSocket client(mux + host,下行 only)
-  ├── translate.go           # 新增:MuxFrame/HostFrame → agent.AgentEvent(F-52 状态机)
-  ├── permissions.go         # 新增:approval/requested → EventPermission + pending map
-  ├── respond.go             # 新增:approval/question 答案走 /api/respond 回环
+  ├── detect.go              # exec.LookPath("dsh") + `dsh web` smoke probe
+  ├── session.go             # host.EnsureSharedHost + parse URL + handshake + lifecycle + closeOnce
+  │                          # ★ driver.Close 包含 workspace.archiveSession(RunOnce 收尾)
+  │                          # ★ driver.Close 包含 workspace.archiveSession(RunOnce 收尾)
+  ├── http.go                # HTTP RPC client(POST /api/{method})
+  ├── ws.go                  # WebSocket client(mux + host,下行 only)
+  ├── translate.go           # MuxFrame/HostFrame → agent.AgentEvent(F-52 状态机)
+  ├── permissions.go         # approval/requested → EventPermission + pending map
+  ├── respond.go             # approval/question 答案走 /api/respond 回环
+  ├── host/                  # shared host 子包(lifecycle / ensure / client / stream / router / health / watchdog)
   ├──
-  ├── session_test.go        # 新增:session lifecycle 单测
-  ├── http_test.go           # 新增:HTTP envelope marshal/unmarshal 单测
-  ├── translate_test.go      # 新增:MuxFrame 翻译表全覆盖(42 事件中 bridge 关心的 11 个)
-  ├── permissions_test.go    # 新增:approval 流 + 5min timeout 压 200ms
-  ├── session_real_unix_test.go # 新增:NIGHTME_REAL_DSH=1 e2e(完整 create → prompt → drain → close)
+  ├── session_test.go        # session lifecycle 单测
+  ├── http_test.go           # HTTP envelope marshal/unmarshal 单测
+  ├── translate_test.go      # MuxFrame 翻译表全覆盖(42 事件中 bridge 关心的 11 个)
+  ├── permissions_test.go    # approval 流 + 5min timeout 压 200ms
+  ├── session_real_unix_test.go # NIGHTME_REAL_DSH=1 e2e(完整 create → prompt → drain → close)
 ```
 
 ### 3.1 Mode 标记
@@ -282,8 +295,8 @@ return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
 
 | 路径 | 选不选 | 理由 |
 |------|--------|------|
-| `dsh --profile headless` CLI | ✅ print-mode | 实机 0 新依赖,实机 PONG 通 |
-| `dsh --profile web` HTTP + WS | ✅ chat session | npm 已装,实机多 turn 验证通,wire 文档化 |
+| `dsh --profile web` HTTP + WS | ✅ **Start + RunOnce + Review 全部走这条** | npm 已装,实机多 turn 验证通,wire 文档化;R2 隔离自动满足(sessionId 显式) |
+| ~~`dsh --profile headless` CLI~~ | ~~✅ print-mode~~ | **2026-08-22 废弃** — 实机跑通但无显式 sessionId,可能从共享状态读到主 chat 上下文;RunOnce 改走 web |
 | `dsh-jsonrpc-agent-pkg` | ❌ | 见 §1.4 — PyPI placeholder,真 binary 未公开发布 |
 | `pnpm run demo:acp` | ❌ | 需 clone dsh 仓 + pnpm install,用户实机无 |
 | `dsh --profile tui` | ❌ | 需 TTY,非 spawn 友好 |
@@ -295,13 +308,16 @@ return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
 ### 4.1 spawn (`session.go`)
 
 ```go
-// internal/bridge/dsh/session.go
+// internal/bridge/dsh/host/lifecycle.go::spawnAndWire (注释化展示;
+// 当前实现:EnsureSharedHost 走 host 包,dsh 包不再自己 spawn)
 func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
     if cfg.Workspace == "" {
         return nil, fmt.Errorf("dsh: workspace is required")
     }
     
-    cmd := proc.New(ctx, "dsh", "--profile", "web", "--port", "0")
+    // ★ 不传 --port:让 dsh 用自己的默认 3080;lifecycle.go:262-278
+    //   会硬断言端口必须是 3080,否则 refuse spawn。
+    cmd := proc.New(ctx, "dsh", "--profile", "web")
     cmd.Dir = cfg.Workspace
     cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
     
@@ -643,7 +659,7 @@ func (d *driver) Close() error {
 ## 5. lifecycle 时间线(每 turn)
 
 ```
-t0   cmd.Start ──→ spawn dsh --profile web --port 0
+t0   cmd.Start ──→ spawn dsh --profile web(默认 port 3080,不带 --port flag)
                 ├── readPump goroutine (mux)
                 ├── readPump goroutine (host)
                 ├── drainStderr goroutine
@@ -729,8 +745,9 @@ t12  AgentSession.SetExited(0)
 **影响**:zero-config 接入,nightme 不注入任何 model/provider/credentials
 
 ### 8.4 dsh web spawn URL pattern
-**实测**:`dsh --profile web --port 0` → stdout `dsh web: http://127.0.0.1:3080`,约 1.5s 启动
-**影响**:用正则 `dsh web: http://([^:]+):(\d+)` 提取 host:port
+**实测**:`dsh --profile web`(不带 `--port`,用 dsh 默认端口 3080) → stdout `dsh web: http://127.0.0.1:3080`,约 1.5s 启动
+**影响**:用正则 `dsh web: http://([^:]+):(\d+)` 提取 host:port;**然后**硬断言端口必须是 3080(`host/lifecycle.go:262-278`),否则 refuse spawn
+**关键决策**(2026-08):不带 `--port 0` 是故意的。`--port 0` 会让 dsh 随机选端口,与 "reuse-or-spawn" 契约(3080 或 fail loud)冲突 —— 如果 user 自己跑了一个 dsh 在 3080,nightme 用 `--port 0` 起在另一个端口,**sessions 会跨实例分裂**,无法 mux demux。`lifecycle.go:246-278` 显式 refuse fallback 到 `--port 0`
 
 ### 8.5 WS 路径是 dot 不是 slash
 **关键常量**(从 `packages/client/connection/src/api-path.ts`):
@@ -799,11 +816,11 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROX
 - ❌ 不传 `DEEPSEEK_API_KEY` / `DSH_MODEL` / `DEEPSEEK_BASE_URL`
 - ✅ `cmd.Dir = cfg.Workspace`(运行时上下文)
 - ✅ `DSH_PERMISSION_MODE=danger-full-access`(权限放开,用户原话)
-- ✅ `--profile web --port 0` / `--profile headless`(transport flag)
+- ✅ `--profile web`(统一 transport flag;**不带 `--port`**,用 dsh 默认 3080;**2026-08-22 起** `--profile headless` 不再使用)
 
 `Info().Args` 暴露的 argv 与实际 spawn 一致(避免 code-review §3 drift):
-- print-mode:`["--profile", "headless"]`
-- chat session:`["--profile", "web", "--port", "0"]`(两份 Info;`Starter.Info` 选 print-mode 默认,`Start` 用 web 配置)
+- **统一**:`["--profile", "web"]`(Start 与 RunOnce 同一份)
+- ~~print-mode:`["--profile", "headless"]`~~ — **2026-08-22 删除**
 
 ---
 
@@ -840,24 +857,26 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROX
 
 | 阶段 | 内容 | 工作量 | 状态 |
 |------|------|--------|------|
-| 1 | print-mode print.go + prompt.go + starter.go | 0.5d | ✅ 已落地 |
-| 2 | print-mode 单测 + e2e | 0.5d | ✅ 已落地 |
+| 1 | print-mode print.go + starter.go | 0.5d | ✅ 已落地(2026-08-22 之后**已删除**)|
+| 2 | print-mode 单测 + e2e | 0.5d | ✅ 已落地(已删除)|
 | 3 | print-mode cmd/nightme/agents.go 注册 | 0.25d | ✅ 已落地 |
 | 4 | print-mode 5 个 review 修复 | 0.25d | ✅ 已落地 |
 | 5 | print-mode code-review 5 个修复 | 0.25d | ✅ 已落地 |
 | 6 | doc/bridge/dsh.md 设计稿 | 0.5d | ✅ 当前 |
-| 7 | chat session detect.go + session.go(spawn + parse URL + lifecycle + closeOnce)| 1.5d | 🔜 |
-| 8 | chat session http.go(HTTP RPC client)| 0.5d | 🔜 |
-| 9 | chat session ws.go(2 条 WS 下行)| 0.5d | 🔜 |
-| 10 | chat session translate.go(F-52 状态机,镜像 pi)| 2d | 🔜 |
-| 11 | chat session permissions.go(approval/question)| 1d | 🔜 |
-| 12 | chat session respond.go | 0.5d | 🔜 |
-| 13 | chat session starter.go 改造(Start 真正 spawn,Info 双 mode)| 0.5d | 🔜 |
-| 14 | chat session 单测 25+(protocol/http/translate/permissions)| 1d | 🔜 |
-| 15 | chat session e2e 10+(NIGHTME_REAL_DSH=1)| 1d | 🔜 |
-| 16 | chat session review + 修 | 0.5d | 🔜 |
-| 17 | **chat session resume(fork + list)** | 0.5d | ✅ done |
-| **总计** | | **~10.75d** | 5.75d done,5d remaining |
+| 7 | chat session detect.go + session.go(spawn + parse URL + lifecycle + closeOnce)| 1.5d | ✅ 已落地 |
+| 8 | chat session http.go(HTTP RPC client)| 0.5d | ✅ 已落地 |
+| 9 | chat session ws.go(2 条 WS 下行)| 0.5d | ✅ 已落地 |
+| 10 | chat session translate.go(F-52 状态机,镜像 pi)| 2d | ✅ 已落地 |
+| 11 | chat session permissions.go(approval/question)| 1d | ✅ 已落地 |
+| 12 | chat session respond.go | 0.5d | ✅ 已落地 |
+| 13 | chat session starter.go 改造(Start 真正连 host)| 0.5d | ✅ 已落地 |
+| 14 | chat session 单测 25+(protocol/http/translate/permissions)| 1d | ✅ 已落地 |
+| 15 | chat session e2e 10+(NIGHTME_REAL_DSH=1)| 1d | ✅ 已落地 |
+| 16 | chat session review + 修 | 0.5d | ✅ 已落地 |
+| 17 | chat session resume(fork + list) | 0.5d | ✅ done |
+| 18 | dashboard parity(reasoning 独立 block,见 §14) | 1d | ✅ done(2026-08-16)|
+| **19** | **RunOnce/Review 迁移到 shared host(本次)**:删 `dsh/print.go` + `print_real_unix_test.go`,改 `starter.go::RunOnce` 为 `Start + drain + defer Close`,补 4 个测试 + 文档更新 | **0.5d** | **🔜 本 PR** |
+| **总计** | | **~12.25d** | 11.75d done,0.5d remaining(本 PR) |
 
 ---
 
@@ -1222,3 +1241,160 @@ bin/nightme logs --once -n 200 | grep -E "dsh: assistant/chunk|EventAgentText|Ou
 ### 14.6 一句话总结
 
 nightme 漏 think + reply 实时流的根因,完全集中在 `internal/bridge/dsh/dispatch.go::handleAssistantChunk` 与 `handleAssistantMessage` 两个 handler:`handleAssistantChunk` 把所有 `Chunk.Type` 一律当 text 写进 `textBuf` 而忽略 `BlockType="reasoning"`,`handleAssistantMessage` 用的 `pickText` 又只挑 `Type=="text"` 的 content block —— dashboard 看到的 thinking 与 streaming reply,在 nightme 这一层就被无声地吞掉或串进 reply。按 dashboard 的 `PartialAccumulator(blockType)` 拆成 `textBuf` + `reasoningBuf` 双缓冲,在 `block-end{type:"reasoning"}` 与 `assistant/message.content[type="reasoning"]` 两个边界把整段 thinking 用 nightme 已有的 `[思考] ` 前缀转 `EventAgentText` 就能开箱即用 —— `messages.OutThinking` 与 gateway translate 的转换管道都已经在那等着,无需改 EventKind 或上层。
+
+---
+
+## 15. RunOnce / Review 迁移到 shared host(2026-08-22)
+
+### 15.1 迁移动机
+
+2026-08-22 之前的架构:`Starter.RunOnce` / `Starter.Review` 用 `--profile headless` 子进程路径(`dsh/print.go` 的 `runPrintMode`),`Starter.Start` 走 `--profile web` shared host。两端分裂,且 headless 路径存在两个**结构性**问题:
+
+1. **R2 上下文隔离不可控**:`dsh --profile headless` 没有 sessionId 概念 —— 它是"Answer one task and exit"的一次性进程,具体行为依赖 dsh CLI 实现是否从共享状态(`~/.dsh/` 任何文件)读取上下文。如果 dsh 默认从某处读上次 session 的 context,headless RunOnce / Review 就会**偷看到主 chat 的对话历史**,污染 `/gtw commit` 的 commit prompt、`/review` 的 review 输出。web 路径通过 `POST /api/session.create {cwd}` 显式开新 sessionId,**没有这种泄漏路径**。
+
+2. **每次冷启动 ~1-3s**:`proc.New("dsh", "--profile", "headless", ...)` 每次 RunOnce 都要 Node.js 冷启动 + 配置重读 + 模型 client 重连。web 路径的 `session.create` 是 HTTP RPC 给已运行的 dsh web daemon,**单次成本 ~50-200ms**(`/gtw commit` 高频调用场景下省一个数量级)。
+
+3. **headless 没有结构化事件**:`dsh/print.go:5-30` 明确说 "no structured events, no NDJSON"。headless 路径要支持 R3(实时 sink 投递)需单独写一份 wire parser;web 路径的 mux demux 已经吐结构化 JSON,**直接复用**(这是本次 PR 选 web 路径的第三个理由)。
+
+### 15.2 迁移方案
+
+`Starter.RunOnce` 不引入任何新的子进程管理代码,**严格等于**:
+
+```
+RunOnce := s.Start(ctx, cfg) + SendBlocks + drain → RunResult + defer a.Close()
+```
+
+`Review` 直接调 `RunOnce`,prompt 改成 `agent.StandardPrompt()`。
+
+`defer a.Close()` 即 R4 归档 —— 现有 `driver.Close()`(`dsh/session.go:916-955`)已经按顺序做:
+
+1. `Router.Unsubscribe(sessionId)` —— 共享 host mux 停止路由该 sessionId 的帧
+2. `session.cancel` —— best-effort,benign if idle
+3. `workspace.archiveSession` —— 把该 session 从 dsh web 的"left list"分组移除,**但保留 session log 和 workspace accounting slot**
+4. close events chan
+
+**关键推论**:本次改动**无新增归档代码**,`Close` 已经做完了。
+
+### 15.3 实现要点
+
+**`dsh/starter.go::RunOnce`**(新):
+```go
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig,
+    blocks []agent.ContentBlock) (agent.RunResult, error) {
+    a, err := s.Start(ctx, cfg)
+    if err != nil {
+        return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+    }
+    defer a.Close() // ★ R4:driver.Close 已完成 workspace.archiveSession
+    return drainForRunResult(ctx, a, blocks)
+}
+```
+
+**`dsh/starter.go::Review`**(新):
+```go
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+    return s.RunOnce(ctx, cfg, []agent.ContentBlock{{
+        Type: agent.ContentText,
+        Text: agent.StandardPrompt(),
+    }})
+}
+```
+
+**`drainForRunResult`**(`dsh/starter.go` 同文件):镜像 `acp/starter.go::collectResult` 的形态,从 `live.Events()` drain 出 `RunResult`,跟踪 `EventAgentReady.SessionID/Model`、`EventAgentResult.Text/Usage/DurationMs/Subtype`,遇到 `EventAgentDone` / `EventAgentError` 报错退出。
+
+### 15.4 文件改动
+
+| 文件 | 改动 | 净行数 |
+|------|------|--------|
+| `dsh/print.go` | **删除** | -227 |
+| `dsh/print_real_unix_test.go` | **删除** | -76 |
+| `dsh/starter.go` | `RunOnce` / `Review` 重写,新增 `drainForRunResult` / `auditFields` | +80 |
+| `dsh/starter_test.go`(mock) | 新增 5 个测试:`TestStarter_Info_NoArgs` / `TestDrainForRunResult_EventAgentResult` / `TestDrainForRunResult_DoneWithoutResult` / `TestDrainForRunResult_ErrorEvent` / `TestRunOnce_StripsSessionID` / `TestRunOnce_ArchiveOnClose` | +200 |
+| `dsh/runonce_real_unix_test.go`(真机 e2e) | 新增 2 个测试:`TestE2E_RunOnce_RealDSH` / `TestE2E_Review_RealDSH`(门控 `NIGHTME_REAL_DSH=1` + dsh on PATH) | +170 |
+| `dsh/doc.go` | 删 "Print-mode" 段,改写包 doc;删 `Starter.ListSessions` 悬挂引用 | -15 |
+
+**净:约 +12 行**(主要是测试代码)。
+
+**测试覆盖分两层**:
+
+- **Mock 层**(`starter_test.go`,无需真 dsh):覆盖 `Starter.Info` 契约、`drainForRunResult` 三个终态分支(`EventAgentResult` / `EventAgentDone` / `EventAgentError`)、`cfg.SessionID` 在 RunOnce 上被 strip、`defer a.Close()` 触发 `workspace.archiveSession`。
+- **真机 e2e 层**(`runonce_real_unix_test.go`,需 `NIGHTME_REAL_DSH=1` + 本机装 dsh):覆盖端到端流程 —— 真 dsh web lazy spawn + 握手 + session.prompt + minimax-cn 模型响应 + session 归档。
+
+`TestRunOnce_IsolatedSessions` 和 `TestReview_UsesStandardPrompt` 没在 mock 里:连续 `RunOnce` 调用在 mock 上有 state-pollution race(`session.create` 跟第一次 Close 之间的窗口),但真 dsh 进程独立 sessionId 互不干扰,所以 e2e 层覆盖了这两个语义。
+
+### 15.5 R3 事件流化(sink) — ✅ 已落地
+
+**接口扩展**:`agent.Starter.RunOnce / Review` 加 variadic `opts ...agent.RunOnceOption`(向后兼容,已有 caller 零修改)。目前只暴露一个选项:
+
+```go
+// internal/agent/agent.go
+func WithEventSink(sink func(AgentEvent)) RunOnceOption
+```
+
+**Bridge 接入**:7 个 bridge(`claudecode / codex / pi / opencode / cursor / acp / pty / dsh`)签名都加 `opts ...RunOnceOption`,行为不变(print-mode bridge 忽略 opts,dsh 把 sink 解析出来传给 drain)。
+
+**dsh drain 投递**:`drainForRunResult` 在事件循环开头调 `deliverToSink(ev)`,所以**sink 收到所有 event**(Ready / Text / ToolStart / ToolEnd / Permission / TaskCreate / TaskUpdate / Result / Done / Error)。但 **Done 不会到 sink** —— drain 在 Result 时已 return,Done 是 driver.Close 在 events chan 关闭后发的。
+
+**Caller 接线**:`internal/gateway/outbound/emitter_sink.go::StreamRunOnceToEmitter` 是 canonical pattern —— buffered chan (cap=64) + drain goroutine,保证 bridge 不被 Feishu 等 channel 限速拖垮。`/gtw commit`、`/gtw pr`、`/review` 调用点都接上了 sink。
+
+**Permission 语义**:one-shot / review 用 full-access 权限模式,**Permission.ResponseCh 不经 sink 路由** —— sink 是 observability,decision 走 runtime 已有路径。如果未来 Permission 真的在 one-shot 里 fire 了,sink 会看到但 bridge 不会卡住等响应。
+
+**测试覆盖**:
+- `TestDrainForRunResult_SinkReceivesEvents` (mock):sink 收齐 Text / ToolStart / ToolEnd / Result
+- `TestDrainForRunResult_NilSinkSafe` (mock):nil sink 不 panic
+- `TestE2E_RunOnce_Sink_RealDSH` (真机):真 dsh 上 sink 收到 Ready + Result
+- gtw/review 调用点接 sink 由 compile-time 检查保证(类型签名强制)
+
+### 15.6 验证清单
+
+#### 自动化(必跑,本地 + CI)
+
+- [ ] `go build ./...` 通过
+- [ ] `go vet ./...` 通过
+- [ ] `go test ./internal/bridge/dsh/ -count=1 -short` 全绿
+
+#### Mock 测试清单(`starter_test.go`,无需真 dsh)
+
+- [ ] `TestStarter_Info_NoArgs`:`Starter.Info().Args` 是 `nil`(Starter 不再直接 spawn)
+- [ ] `TestDrainForRunResult_EventAgentResult`:`EventAgentResult` 触发 drain 返回,带 SessionID/Model/Text/Usage
+- [ ] `TestDrainForRunResult_DoneWithoutResult`:`EventAgentDone` 无前导 Result → error with audit fields
+- [ ] `TestDrainForRunResult_ErrorEvent`:`EventAgentError` 触发 drain 错误返回
+- [ ] `TestRunOnce_StripsSessionID`:`cfg.SessionID` 在 RunOnce 路径被 strip,永远 fresh session
+- [ ] `TestRunOnce_ArchiveOnClose`:`defer a.Close()` 触发 `workspace.archiveSession`(R4)
+- [ ] `TestDrainForRunResult_SinkReceivesEvents`:sink 收到 Text / ToolStart / ToolEnd / Result(每种 kind 一次)
+- [ ] `TestDrainForRunResult_NilSinkSafe`:nil sink 不 panic
+
+#### 真机 e2e 测试清单(`runonce_real_unix_test.go`,需 `NIGHTME_REAL_DSH=1` + 本机装 dsh)
+
+- [ ] `TestE2E_RunOnce_RealDSH`:真 dsh web lazy spawn + 握手 + session.prompt + minimax-cn 模型响应 + archive 全链路
+- [ ] `TestE2E_Review_RealDSH`:`Starter.Review` 端到端(用 `agent.StandardPrompt()` 作 prompt)
+- [ ] `TestE2E_RunOnce_Sink_RealDSH`:真 dsh 上 sink 收到 Ready + Result
+
+#### 真机手动验证(可选,需要真实 feishu/telegram channel)
+
+- [ ] `/gtw commit` 跑通:feishu chat **实时**看到 thinking / tool call / result(中间过程,不是只有最终 card),日志 `dsh: session archived`
+- [ ] `/gtw pr` 跑通,同上
+- [ ] `/review` 跑通,中间过程实时可见,review text 完整,日志同上
+- [ ] 打开 dsh web dashboard,确认 left list **没有** RunOnce 跑完后的残留 session
+
+### 15.7 行为变化(用户可见)
+
+| 维度 | 之前(headless) | 现在(web shared host) |
+|------|----------------|------------------------|
+| 启动开销 | 每次 1-3s cold start | lazy 一次 + 后续 50-200ms/次 |
+| 上下文隔离 | **不可控**(可能从共享状态读到主 chat 上下文) | **显式隔离**(`session.create` 新 sessionId) |
+| 跨 session 串扰 | 风险:headless 偷看主 chat 上下文 | 隔离保证 |
+| 归档 | 不需要(进程即清) | `workspace.archiveSession` |
+| 多 session 并发 | N/A(进程独立) | ✅ 共享 dsh web,native 支持 n 个 session |
+| 日志 | 进程级 stdout | 增加 `dsh: session archived` 行 |
+| 测试模式 | `print_real_unix_test.go` 跑 mock script | `session_real_unix_test.go` 跑 mock dsh web |
+| **用户自启 dsh web** | 不复用(headless 跑自己的) | **nightme 自动 attach**(`EnsureSharedHost` 的 reuse-or-spawn 命中 `DiscoverExisting`);用户原本开的 dashboard 与 nightme session 共享 mux 通道 — 可观测但不影响 nightme 行为 |
+
+### 15.8 后续 PR 路线
+
+| PR | 范围 | 改动 |
+|----|------|------|
+| **本 PR(2026-08-22)** | dsh RunOnce 路径切换 + R3 sink | 删 `print.go` + 改 `starter.go` + 加 `RunOnceOption` + sink 接线 + 测试 |
+| (无) | — | R3 sink 已在本次 PR 完成,无需后续 |
+
+每个 PR 独立可 ship、独立可回滚。**架构先行,事件流化随后**。

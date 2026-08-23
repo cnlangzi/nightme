@@ -154,7 +154,7 @@ func (e resumeUnhealthyError) Is(target error) bool {
 // held-stdin session for the chat-session use case where many
 // turns ride one bridge. RunOnce and Start share the same
 // Starter; only the spawn path differs.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := runPrintMode(ctx, s, cfg, blocks)
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
@@ -185,6 +185,6 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Other bridges (dsh / opencode / pi / acp) don't have native
 // review; they delegate to agent.Review which uses StandardPrompt.
 // pty returns ErrReviewNotSupported.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return runCodeReviewPrintMode(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
 }

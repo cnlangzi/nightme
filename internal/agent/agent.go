@@ -1129,7 +1129,12 @@ type Starter interface {
 	// a live *Agent for multi-turn / chat sessions; RunOnce is for
 	// callers (e.g. /gtw commit, /gtw pr) that want a single
 	// synchronous turn and don't need the session handle.
-	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error)
+	//
+	// opts configures per-call behaviour (see RunOnceOption).
+	// Bridges that don't support a given option ignore it — variadic
+	// opts keep this signature backwards-compatible with all
+	// existing RunOnce callers (no compile breakage).
+	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error)
 
 	// Review runs the /review slash command against this agent and
 	// returns the raw review output text. The bridge owns ONE thing:
@@ -1147,6 +1152,9 @@ type Starter interface {
 	// the bridge signature symmetric with RunOnce / Start and avoids
 	// a one-field type that leaks "review is a special thing"
 	// framing into the agent package.
+	//
+	// opts configures per-call behaviour (see RunOnceOption).
+	// Bridges that don't support a given option ignore it.
 	//
 	// ===== F-review.md §13 "codex/claude use native review" rule =====
 	//
@@ -1176,7 +1184,83 @@ type Starter interface {
 	// friendly "agent X does not support /review" reply (via
 	// cs.Emitter().Send from the async goroutine, since the inline
 	// reply is already gone by the time the bridge returns).
-	Review(ctx context.Context, cfg StartConfig) (RunResult, error)
+	//
+	// opts configures per-call behaviour (see RunOnceOption).
+	Review(ctx context.Context, cfg StartConfig, opts ...RunOnceOption) (RunResult, error)
+}
+
+// RunOnceOption configures per-call behaviour of Starter.RunOnce /
+// Starter.Review. Implementations are functional-options: each option
+// sets a field on the private runOnceConfig the bridge reads before
+// starting the call. Bridges that don't recognise a given option
+// silently ignore it (the option is kept in the package-private
+// config struct, not on the public Starter API).
+//
+// Today only WithEventSink is defined. The pattern is open for
+// future options (timeout overrides, abort hooks, etc.).
+type RunOnceOption func(*runOnceConfig)
+
+// runOnceConfig is the per-call config resolved from RunOnceOption
+// before RunOnce / Review drives the bridge. Field semantics:
+//
+//   - OnEvent (sink): every AgentEvent the bridge would have
+//     emitted to its internal *agent.Agent.Events() channel during
+//     the call is also delivered here, synchronously, in order.
+//     Bridges are NOT responsible for buffering / threading — the
+//     caller-side sink (typically outbound.StreamRunOnceToEmitter)
+//     MUST be non-blocking or it will stall the bridge's wire
+//     parser / drain loop. Empty (nil) means "no observer; behave
+//     as before this option existed".
+//
+// The struct is package-private so bridges don't accidentally grow
+// their own public RunOnceOption type. The "Options" pattern is
+// exposed via exported functional helpers (e.g. WithEventSink)
+// that callers compose freely.
+type runOnceConfig struct {
+	OnEvent func(AgentEvent)
+}
+
+// WithEventSink returns a RunOnceOption that installs sink as the
+// per-call AgentEvent observer. The sink is invoked synchronously by
+// the bridge for every event the bridge emits (including Ready /
+// Text / ToolStart / ToolEnd / Permission / TaskCreate / TaskUpdate
+// / Error / Done / Result). For one-shot / review flows where the
+// bridge has already drained to a terminal event before returning,
+// the sink also sees that final event.
+//
+// IMPORTANT — sink semantics:
+//   - sink is called on the bridge's own goroutine. If sink blocks
+//     (e.g. a slow channel send), the bridge stalls. Callers MUST
+//     use a buffered chan + drain goroutine (see
+//     outbound.StreamRunOnceToEmitter for the canonical pattern).
+//   - sink receives EVERY event. Bridges do NOT filter — that's
+//     the caller's job. A sink that only wants text can match on
+//     ev.Kind == EventAgentText.
+//   - One-shot flows (RunOnce / Review with full-access permission
+//     mode) do not await sink response. Sink is observational only.
+//     No Permission.ResponseCh is routed through here.
+func WithEventSink(sink func(AgentEvent)) RunOnceOption {
+	return func(c *runOnceConfig) { c.OnEvent = sink }
+}
+
+// ParseRunOnceOptions resolves a variadic RunOnceOption slice into
+// the private runOnceConfig that bridges read before driving the
+// call. Bridges that don't recognise a given option silently skip
+// it (the option setter on the config is just a no-op for fields
+// the bridge doesn't read). This is the canonical helper bridges
+// call from RunOnce / Review — never read opts by hand, since
+// future options may add fields without per-bridge plumbing.
+//
+//	opts := agent.ParseRunOnceOptions(runOpts)
+//	// opts.OnEvent is nil if no WithEventSink was passed
+func ParseRunOnceOptions(opts []RunOnceOption) runOnceConfig {
+	var cfg runOnceConfig
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	return cfg
 }
 
 // Errors surfaced by the registry.

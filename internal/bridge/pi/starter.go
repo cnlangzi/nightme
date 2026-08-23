@@ -96,7 +96,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // for the chat session's long-lived use case where multiple
 // turns ride one bridge. RunOnce and Start share the same
 // Starter; only the spawn path differs.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := runPrintMode(ctx, s, cfg, blocks)
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
@@ -107,7 +107,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Review implements /review for pi: delegate to shared
 // StandardPrompt. pi's chat agent reads git diff and outputs
 // the structured review.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: agent.StandardPrompt(),

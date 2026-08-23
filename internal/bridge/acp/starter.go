@@ -94,7 +94,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // flag (claudecode `claude -p`, codex `codex exec`, pi `pi -p`,
 // opencode `opencode run`) routes RunOnce through its own
 // print-mode spawn in print.go instead.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	a, err := s.Start(ctx, cfg)
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
@@ -110,7 +110,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // acp is the generic ACP-protocol bridge; opencode is the only
 // built-in that uses it. Review here serves both acp as a Starter
 // and any future acp-backed agent that registers itself.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: agent.StandardPrompt(),
@@ -142,7 +142,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunR
 //   - EventAgentError: wrapped error.
 //   - ctx canceled: ctx.Err().
 //   - events channel closed without result: error.
-func (s *Starter) collectResult(ctx context.Context, live *agent.Agent, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) collectResult(ctx context.Context, live *agent.Agent, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	name := live.Info.Name
 
 	// Track per-session identity (model + session id) from

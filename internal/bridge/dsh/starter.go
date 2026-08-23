@@ -1,33 +1,47 @@
 // starter.go — the spawn recipe for the dsh bridge.
 //
-// Starter is held in agent.Builtins as a singleton per agent name.
-// Lifecycle:
+// As of the 2026-08-22 RunOnce/Review migration (F-RUNONCE-WEB), the
+// dsh bridge no longer has a print-mode / headless subprocess path.
+// Both Starter.Start (long-lived chat) and Starter.RunOnce / Review
+// (one-shot) use the same shared-host web sessionId path: each call
+// drives a session.create on the shared `dsh --profile web` daemon
+// (canonical port 3080; see internal/bridge/dsh/host/lifecycle.go).
 //
-//	Build-time:    NewStarter → Register(Starter) → Builtins holds *Starter
-//	Spawn-time:    Builtins.Get → Starter.Info/Detect/RunOnce → RunResult
-//	Chat session:  Builtins.Get → Starter.Start returns error (not implemented)
+// dsh is therefore structurally a "live *Agent" bridge for both
+// Start and RunOnce: Starter.RunOnce is implemented as
 //
-// The runtime state for print-mode lives in runPrintMode (print.go)
-// and is re-created per RunOnce call. There is no long-lived child
-// process — dsh --profile headless is one-shot, and the bridge
-// mirrors that lifecycle.
+//	s.Start(ctx, cfg) + SendBlocks + drain → RunResult + defer a.Close()
+//
+// where Close() invokes the existing driver.Close path which already
+// does Router.Unsubscribe + session.cancel + workspace.archiveSession
+// (session.go:916-955). RunOnce never spawns its own subprocess and
+// never uses cfg.SessionID — every RunOnce is a fresh sessionId on
+// the shared host.
+//
+// Starter is reusable: agent.Builtins holds ONE *Starter for the
+// "dsh" name; every Spawn call invokes starter.Start and gets back
+// an independent *agent.Agent wrapping a fresh driver.
 package dsh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // Starter is the dsh spawn recipe. Held in agent.Builtins as a
-// singleton for the registered name (typically "dsh").
+// singleton for the "dsh" name.
 //
-// command is the executable name resolved via PATH at RunOnce
-// time (exec.LookPath in runPrintMode). The Starter itself does
-// not cache the absolute path so user-side PATH edits take effect
-// without restarting the daemon.
+// args is intentionally nil: Starter.Start does not spawn — it
+// looks up the shared *host.Client (lazy-started by
+// host.EnsureSharedHost). The actual `dsh --profile web` invocation
+// lives in internal/bridge/dsh/host/lifecycle.go::spawnAndWire. We
+// surface nil (rather than `["--profile", "web"]`) so Info().Args
+// does not mislead callers into thinking Starter is the spawner.
 type Starter struct {
 	name    string
 	command string
@@ -37,76 +51,54 @@ type Starter struct {
 // NewStarter constructs the dsh spawn recipe. Entry point used at
 // registration time (cmd/nightme/agents.go calls it from init()).
 //
-// args are the agent's static argv defaults (["--profile",
-// "headless"]). Defensively copied.
+// args is nil on purpose: the bridge no longer spawns a subprocess
+// directly — the shared-host web is the only spawn path, and it
+// lives in the host package. Info().Args mirrors that.
 func NewStarter(name string) *Starter {
 	return &Starter{
 		name:    name,
 		command: name,
-		args:    []string{"--profile", "headless"},
+		args:    nil,
 	}
 }
 
 // Info returns the fixed metadata for this starter. Observable at
 // any time; used by `nightme agents` and any other spec-only
-// consumer.
-//
-// Mode is reported as ModeJSONIO because dsh's `--profile headless`
-// returns its result on stdout in a structured (single-message)
-// form — closest match to the existing mode taxonomy. The bridge
-// does not stream events, but Mode is metadata-only and does not
-// gate capability checks elsewhere.
+// consumer. Args is nil — see Starter struct doc.
 func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
 }
 
-// Detect verifies the dsh binary resolves on PATH. Called by
-// Spawner before RunOnce (or before any future Start path); an
-// error aborts invocation with a clear install hint.
-//
-// PATH check only — we deliberately do NOT probe dsh's internal
-// config (`~/.dsh/settings.yaml`, `.credentials.yaml`) because
-// per the agent-no-config-tampering principle, nightme does not
-// own dsh's configuration lifecycle. If dsh is on PATH but its
-// config is broken, the user will see dsh's own error message
-// when runPrintMode spawns it.
-//
-// Note: this only verifies existence — we discard the resolved
-// path. PATH resolution at spawn time happens implicitly inside
-// exec.CommandContext at cmd.Start(); runPrintMode passes the
-// unresolved name to proc.New and the kernel + Go stdlib do
-// the rest. We don't cache the LookPath result because user-side
-// PATH edits should take effect without restarting the daemon.
+// Detect verifies the `dsh` binary resolves on PATH. Called by
+// Spawner before Start; an error aborts session creation with a
+// clear "dsh not installed" message.
 func (s *Starter) Detect() error {
-	if _, err := exec.LookPath(s.command); err != nil {
-		return fmt.Errorf("dsh: %q not found in PATH. Install via `npm install -g @deepseek-ai/dsh`", s.command)
-	}
-	return nil
+	_, err := exec.LookPath(s.command)
+	return err
 }
 
 // Start acquires a session on the shared dsh host. It does NOT spawn
 // a new dsh subprocess — that's cmd/nightme/main.go's responsibility,
-// which runs once at daemon boot. Start does:
+// which runs once at daemon boot via host.StartSharedHost (and stays
+// alive for the daemon's lifetime, with watchdog respawn).
+//
+// Start does:
 //   1. Run the resume-or-create handshake via the shared host.RPCClient.
+//      cfg.SessionID is honored: when non-empty, Start dials
+//      `session.fork` (strict resume; failures bubble as
+//      agent.ErrResumeUnhealthy). When empty, Start creates a
+//      fresh session.
 //   2. Subscribe to this sessionId's mux frames via host.Router.
 //   3. Emit EventAgentReady with the resolved sessionId + model.
 //
 // The returned *agent.Agent streams events on its Events channel for
-// as long as the host keeps the session attached.
-//
-// cfg.Workspace is the dsh session's cwd (passed to session.create).
-//
-// cfg.SessionID, when non-empty, triggers resume: the handshake
-// calls POST /api/session.create {sessionId, cwd} which re-attaches
-// the existing session (dashboard select). On attach failure
-// (session-conflict, transport, mismatched id) we refuse to spawn
-// rather than silently mint a new session — see handshakeSession.
+// as long as the host keeps the session attached. cfg.Workspace is
+// the dsh session's cwd (passed to session.create).
 //
 // PID is 0 in the shared-host architecture — the dsh subprocess
-// belongs to the daemon, not to this session. Phase 1.5 (lifecycle
-// wrapper) will surface the host PID via host.Client for `/diagnose`
-// output; for now agent.Agent displays "shared host" in lieu of
-// a per-session pid.
+// belongs to the daemon, not to this session. agent.Agent displays
+// "shared host" in lieu of a per-session pid; the host's own PID
+// is reachable via host.GetSharedHost().PID() for /diagnose.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	d, err := newDriver(ctx, s, cfg)
 	if err != nil {
@@ -115,74 +107,180 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), 0 /* shared-host pid; see comment above */, d.events, d), nil
 }
 
-// RunOnce is the one-shot counterpart to Start. Spawns a fresh
-// `dsh --profile headless -- "<prompt>"` process, captures the
-// final assistant text from stdout, and returns it as RunResult.
+// RunOnce is the one-shot counterpart to Start. Structurally it is
 //
-// dsh headless does NOT support stream-json / structured events
-// (unlike codex exec, claude -p, or pi --print). It writes the
-// final answer verbatim to stdout and exits. So the body here is
-// leaner than the other print-mode bridges: no NDJSON parser, no
-// tmpfile, no events chan. Plain spawn + read stdout.
+//	s.Start(ctx, cfg) + SendBlocks + drain → RunResult + defer a.Close()
 //
-// cmd.Dir is set to cfg.Workspace so the agent operates in the
-// user's chat workspace (per /cwd). dsh's bash / fs plugins read
-// `process.cwd()` (set by cmd.Dir) — we deliberately do NOT set
-// DSH_CWD env var because it would be redundant with cmd.Dir and
-// would conflict with the agent-no-config-tampering principle
-// (which says: don't override agent configuration knobs).
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-	result, err := runPrintMode(ctx, s, cfg, blocks)
+// so every RunOnce call opens a fresh sessionId on the shared host
+// (R2 — explicit isolation from the chat session's context, no
+// implicit reliance on dsh CLI's "did it read ~/.dsh shared state"
+// behaviour the way the old `--profile headless` path did) and
+// archives that session via workspace.archiveSession as part of
+// Close (R4 — dsh web's in-memory store doesn't pile up).
+//
+// cfg.SessionID is always ignored on RunOnce: every RunOnce is a
+// fresh sessionId. Callers that need to resume a specific session
+// must use Start directly.
+//
+// As of 2026-08-22, RunOnce no longer spawns any subprocess. The
+// shared dsh web daemon (started once per nightme daemon lifetime)
+// serves both this and Start; there is no `--profile headless`
+// code path left in this package.
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+	cfg2 := agent.ParseRunOnceOptions(opts)
+
+	// RunOnce always creates a fresh session, even when the caller
+	// passes cfg.SessionID. Strip it before delegating to Start so
+	// the handshake path doesn't try to `session.fork`.
+	fresh := cfg
+	fresh.SessionID = ""
+
+	a, err := s.Start(ctx, fresh)
 	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
+		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
-	return result, nil
+	// R4: defer Close drives Router.Unsubscribe + session.cancel +
+	// workspace.archiveSession (session.go:916-955). No new code
+	// needed — the chat-session lifecycle path is reused.
+	defer a.Close()
+	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent)
 }
 
-// Review implements /review for dsh: delegate to shared
-// StandardPrompt. dsh's chat agent reads git diff and outputs
-// the structured review.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
-	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
+// Review implements the `/review` slash command for dsh. It reuses
+// RunOnce with agent.StandardPrompt() as the single text block; the
+// /review dispatcher in internal/command/review/cmd.go wraps the
+// returned text in agent.FormatReviewMessage and routes it both to
+// the AS (so the main agent can act on "fix the blockers" follow-ups)
+// and to the channel emitter (so the user sees findings immediately).
+//
+// Because every RunOnce is a fresh sessionId on the shared host
+// (and Close archives the session on return), Review cannot leak
+// review reasoning back into the main chat session's context, and
+// the session does not pile up in dsh web's in-memory store.
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+	return s.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: agent.StandardPrompt(),
-	}})
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
-			s.Info().Name, err)
-	}
-	return result, nil
+	}}, opts...)
 }
 
-// ListSessions runs a one-shot list-sessions query. Bridge-specific
-// extension used by the runtime's resume picker.
+// drainForRunResult is the shared RunOnce / Review drain logic.
+// Mirrors acp/starter.go::collectResult in shape — both dsh and acp
+// are "live *Agent" bridges where RunOnce is a Start + drain +
+// Close variant.
 //
-// Each call spawns and closes a fresh dsh web process — just
-// enough to hit POST /api/session.list. The dsh web cold start
-// is ~1.5s (per docs/bridge/dsh.md §8.4) so this adds noticeable
-// latency to picker interactions; we accept the cost because
-// dsh's session.list is daemon-global (not per-CWD) and a stale
-// cached list would mislead the user.
+// We seed session id + model from the underlying *driver (set during
+// handshake) and also accept updates from a subsequent
+// EventAgentReady (the first one wins; subsequent Ready events after
+// a resume / re-handshake would belong to a different turn's audit
+// trail). The final text + per-turn metadata come from
+// EventAgentResult. EventAgentDone without a preceding
+// EventAgentResult is an error path (claudecode stream-json's
+// `result` event never fired) — we surface that rather than silently
+// returning an empty RunResult.
+func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent)) (agent.RunResult, error) {
+	name := a.Info.Name
+
+	// Seed from the *driver. By the time RunOnce calls drain, the
+	// handshake has already set d.sessionID and d.model; reading
+	// them here ensures RunResult has them even when the caller
+	// (e.g. the runtime readpump or a test) has already drained
+	// EventAgentReady off a.Events() before we got here.
+	var sessionID, model string
+	if d, ok := a.Driver().(*driver); ok {
+		sessionID = d.sessionID
+		model = d.model
+	}
+	var readySeen = sessionID != "" // already seeded from driver; suppress duplicate Ready
+
+	if err := a.SendBlocks(ctx, blocks); err != nil {
+		return agent.RunResult{}, fmt.Errorf("agent %s: send: %w", name, err)
+	}
+
+	// deliverToSink forwards every event to the caller-supplied
+	// sink (when set). Synchronous — the bridge's own goroutine
+	// drives this. Callers MUST ensure the sink is non-blocking
+	// (typically via a buffered chan + drain goroutine, see
+	// outbound.StreamRunOnceToEmitter). One-shot flows don't
+	// await sink response; sink is observational only.
+	deliverToSink := func(ev agent.AgentEvent) {
+		if sink != nil {
+			sink(ev)
+		}
+	}
+
+	for {
+		select {
+		case ev, ok := <-a.Events():
+			if !ok {
+				return agent.RunResult{}, fmt.Errorf(
+					"agent %s: events closed before result%s",
+					name, auditFields(sessionID, model))
+			}
+			deliverToSink(ev)
+			switch ev.Kind {
+			case agent.EventAgentReady:
+				if !readySeen {
+					readySeen = true
+					sessionID = ev.SessionID
+					model = ev.Model
+				}
+			case agent.EventAgentResult:
+				if ev.Result == nil {
+					return agent.RunResult{}, fmt.Errorf(
+						"agent %s: result event with nil payload%s",
+						name, auditFields(sessionID, model))
+				}
+				return agent.RunResult{
+					Text:       strings.TrimSpace(ev.Result.Text),
+					Usage:      ev.Result.Usage,
+					SessionID:  sessionID,
+					Model:      model,
+					DurationMs: ev.Result.DurationMs,
+					Subtype:    ev.Result.Subtype,
+				}, nil
+			case agent.EventAgentDone:
+				// Terminal without a result event: the turn settled
+				// without an assistant reply (likely an interrupted
+				// or empty turn). Surface as an error with the
+				// captured session/model so the caller can audit.
+				return agent.RunResult{}, fmt.Errorf(
+					"agent %s: turn ended without result event%s",
+					name, auditFields(sessionID, model))
+			case agent.EventAgentError:
+				if ev.Err != nil {
+					return agent.RunResult{}, fmt.Errorf("agent %s: %w", name, ev.Err)
+				}
+				return agent.RunResult{}, fmt.Errorf(
+					"agent %s: error event with nil payload%s",
+					name, auditFields(sessionID, model))
+			}
+			// EventAgentText / EventAgentToolStart/End / Permission /
+			// TaskCreate/Update: forwarded to sink (if set). Drain
+			// continues to wait for the terminal EventAgentResult /
+			// EventAgentDone / EventAgentError. One-shot calls run
+			// with full-access permission mode, so Permission events
+			// shouldn't normally fire — if they do, the sink sees
+			// them but no ResponseCh routing is performed (the user
+			// cannot approve from outside the one-shot flow).
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return agent.RunResult{}, fmt.Errorf("agent %s: canceled: %w", name, ctx.Err())
+			}
+			return agent.RunResult{}, fmt.Errorf("agent %s: %w", name, ctx.Err())
+		}
+	}
+}
+
+// auditFields returns the "[session_id=…] [model=…]" suffix used on
+// dsh RunOnce failure paths. Reuses the shared agent.FormatSessionID
+// + agent.FormatModel helpers so the format stays grep-consistent
+// with acp.appendAuditFields (same signature).
 //
-// The `limit` int parameter is accepted for signature parity with
-// the opencode bridge's Starter.ListSessions (opencode/starter.go
-// §147-157) so the runtime's picker path can dispatch uniformly
-// across bridges — but it is INTENTIONALLY ignored on the wire: the
-// 2026-08-15 实机 probe against dsh 0.1.0-rc.6 confirmed that dsh's
-// session.list ignores every paging field we tried (limit, pageSize,
-// count, max, etc.). The parameter is kept so the runtime can pass
-// its preferred default without branching per bridge.
-func (s *Starter) ListSessions(ctx context.Context, cfg agent.StartConfig, limit int) ([]Session, error) {
-	if cfg.Workspace == "" {
-		return nil, fmt.Errorf("dsh: workspace is required")
-	}
-	a, err := s.Start(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer a.Close()
-	d := a.Driver().(interface {
-		ListSessions(ctx context.Context) ([]Session, error)
-	})
-	return d.ListSessions(ctx)
+// claudecode and pi have their own signature variants (taking
+// agent.RunResult directly); dsh follows the acp shape because we
+// only need session id + model — Usage/Subtype/etc. are noise on a
+// "drain exited early" error.
+func auditFields(sessionID, model string) string {
+	return agent.FormatSessionID(sessionID) + agent.FormatModel(model)
 }

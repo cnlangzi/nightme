@@ -127,14 +127,14 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // buildAgentPrompt). Mirrors the codex/claudecode/pi/opencode
 // print-mode pattern: bypass the long-lived ACP bridge driver,
 // spawn a fresh process, capture stdout, reap on exit.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return runPrintMode(ctx, s, cfg, blocks)
 }
 
 // Review implements /review for the cursor bridge: delegate to shared
 // StandardPrompt. Cursor CLI has no native review subcommand, so we
 // run the standard prompt via print-mode one-shot.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: agent.StandardPrompt(),

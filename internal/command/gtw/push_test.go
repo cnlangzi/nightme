@@ -175,7 +175,7 @@ func (r *recordingAgent) Detect() error { return r.detectErr }
 func (r *recordingAgent) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("recordingAgent: Start not implemented")
 }
-func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, runOnceCall{workspace: cfg.Workspace, blocks: append([]agent.ContentBlock(nil), blocks...)})
@@ -186,7 +186,7 @@ func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, block
 // never invoke /review, so returning ErrReviewNotSupported keeps
 // the agent.Starter interface satisfied without affecting push
 // semantics.
-func (r *recordingAgent) Review(_ context.Context, _ agent.StartConfig) (agent.RunResult, error) {
+func (r *recordingAgent) Review(_ context.Context, _ agent.StartConfig, _ ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, agent.ErrReviewNotSupported
 }
 

@@ -132,6 +132,15 @@ type eventAggregator struct {
 	// an earlier Create with the same ID). Guarded by mu.
 	tasks map[string]AgentTaskItem
 
+	// firstJobMeta caches the metadata (SessionID / Model /
+	// AgentName / Workspace / Branch) from the first per-job Ready
+	// observed. Used to populate synthetic TaskCreate/Update
+	// events so they carry the same context as the synthetic
+	// outer Ready — parity with buildSyntheticReady's contract
+	// (Finding 3 from /review). Source field is preserved
+	// separately (per-job label). Guarded by mu.
+	firstJobMeta AgentEvent
+
 	// readyEmitted and finalEmitted are one-shot guards so the
 	// synthetic outer Ready / Result fires exactly once even under
 	// racy transitions. Guarded by mu.
@@ -229,10 +238,17 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 	state.initBuffer = append(state.initBuffer, ev)
 
 	// Counters (terminalSeen guard for Result/Error — see comment
-	// above).
+	// above). Also caches the first per-job Ready's metadata for
+	// the synthetic outer Ready + for parity on synthetic Task
+	// events (Finding 3 from /review — see firstJobMeta doc).
 	switch ev.Kind {
 	case EventAgentReady:
 		a.readyCount++
+		if a.firstJobMeta.SessionID == "" && a.firstJobMeta.AgentName == "" &&
+			a.firstJobMeta.Workspace == "" && a.firstJobMeta.Branch == "" &&
+			a.firstJobMeta.Model == "" {
+			a.firstJobMeta = ev
+		}
 	case EventAgentResult, EventAgentError:
 		if !state.terminalSeen {
 			state.terminalSeen = true
@@ -408,9 +424,14 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 		a.mu.Unlock()
 
 		a.outer(AgentEvent{
-			Kind:     ev.Kind,
-			TaskList: &AgentTaskListEvent{Items: items},
-			Source:   ev.Source,
+			Kind:      ev.Kind,
+			TaskList:  &AgentTaskListEvent{Items: items},
+			SessionID: a.firstJobMeta.SessionID,
+			Model:     a.firstJobMeta.Model,
+			AgentName: a.firstJobMeta.AgentName,
+			Workspace: a.firstJobMeta.Workspace,
+			Branch:    a.firstJobMeta.Branch,
+			Source:    ev.Source,
 		})
 
 	case EventAgentResult, EventAgentError:

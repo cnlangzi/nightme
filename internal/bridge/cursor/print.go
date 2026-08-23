@@ -29,13 +29,24 @@ import (
 // The process outputs plain text to stdout and exits — no JSON
 // events, no structured protocol.
 //
+// opts (when set via WithEventSink) wires a per-call observer
+// that receives an up-front Ready + a terminal Result/Done
+// (or Error on failure). Pre-fix opts were silently dropped
+// on the print-mode path (Finding 4 from /review), leaving
+// the chat sink permanently open. cursor's plain-text wire
+// has no per-event stream to forward — only lifecycle markers
+// make sense; intermediate Text/Tool events don't exist at
+// the bridge layer.
+//
 // Failure modes:
 //   - waitErr != nil  → model / CLI failure; surface stderr
 //   - empty finalText → model produced nothing; surface stderr
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("cursor: workspace is required")
 	}
+
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
 
 	prompt := extractText(blocks)
 	if prompt == "" {
@@ -56,6 +67,17 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// credentials) are silently dropped on the print-mode path.
 	if len(cfg.Env) > 0 {
 		cmd.Env = append(os.Environ(), cfg.Env...)
+	}
+
+	// Up-front Ready so the per-call sink sees the lifecycle
+	// start. cursor's wire carries no session / model / branch
+	// info, so only the static metadata is populated.
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind:      agent.EventAgentReady,
+			AgentName: s.Info().Name,
+			Workspace: cfg.Workspace,
+		})
 	}
 
 	output, err := cmd.CombinedOutput()
@@ -81,11 +103,33 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		return agent.RunResult{}, fmt.Errorf("cursor: empty answer")
 	}
 
-	return agent.RunResult{
+	result := agent.RunResult{
 		Text:       text,
 		DurationMs: elapsedMs,
 		Subtype:    "completed",
-	}, nil
+	}
+
+	// Success path: emit terminal Result + Done to the sink so
+	// the chat channel's outer lifecycle closes (Finding 4 from
+	// /review). Same minimal-lifecycle shape as opencode /
+	// codex / pi — cursor's plain-text wire carries no usage /
+	// model so those fields stay zero.
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentResult,
+			Result: &agent.AgentResultEvent{
+				Text:       result.Text,
+				DurationMs: result.DurationMs,
+				Subtype:    result.Subtype,
+			},
+		})
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentDone,
+			Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
+		})
+	}
+
+	return result, nil
 }
 
 // extractText concatenates all ContentText blocks into a single prompt.

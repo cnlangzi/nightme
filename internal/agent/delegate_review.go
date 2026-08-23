@@ -146,7 +146,7 @@ func delegateReviewMultiJob(
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			prompt := assembleGroupPrompt(pre, &groups[i])
+			prompt := assembleGroupPrompt(ctx, pre, &groups[i])
 			if prompt == "" {
 				prompt = StandardPrompt()
 			}
@@ -756,7 +756,27 @@ func reviewWhatToLook() string {
 // Returns "" only when rc.workspace is empty — same fallback signal
 // as assembleReviewPrompt, so the caller's "fall back to
 // StandardPrompt" branch fires uniformly.
-func assembleGroupPrompt(rc reviewContext, g *reviewGroup) string {
+// assembleGroupPrompt builds a per-group review prompt for the
+// multi-job path. Mirrors assembleReviewPrompt's structure
+// (context → files → diffs → rules → how-to → output schema)
+// but:
+//
+//   - filters the file list to the group's Files (the rule
+//     explicitly enumerates them — ocr's authoritative
+//     assignment, not our heuristic)
+//   - filters the diff to those files via `git diff -- <files...>`
+//     (this is the smart-bundling payoff: each job's prompt
+//     contains only the diff slice it can actually review)
+//   - uses ONLY this group's rule (Tier 2 single-group case
+//     in multi-job context)
+//
+// ctx is the per-job goroutine's review ctx so groupFilteredDiff's
+// git subprocesses inherit /close + 30-min timeout (Finding 1).
+//
+// Returns "" only when workspace is empty — same fallback
+// signal as assembleReviewPrompt, so the caller's "fall back to
+// StandardPrompt" branch fires uniformly.
+func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) string {
 	if rc.workspace == "" || g == nil {
 		return ""
 	}
@@ -784,13 +804,28 @@ func assembleGroupPrompt(rc reviewContext, g *reviewGroup) string {
 	}
 
 	// --- Diffs (group-filtered via `git diff -- <files...>`) ---
+	//
+	// Range strategy (mirrors assembleReviewPrompt §2.4):
+	//   - mergeBase known → use it (always resolvable; two-dot
+	//     form so a checkout with only the remote tracking ref
+	//     doesn't fail)
+	//   - mergeBase empty but defaultBranch known → fall back
+	//     to symbolic base...HEAD three-dot (e.g. orphan branch
+	//     / no common ancestor with ocr present). Finding 2
+	//     from /review: previously this branch ran `git diff`
+	//     with no range (= unstaged only), then mislabeled the
+	//     output as "Committed (origin/main...HEAD)".
+	//   - both empty → no committed section (workspace mode)
 	committedArgs := []string{"diff"}
-	if rc.mergeBase != "" {
+	switch {
+	case rc.mergeBase != "":
 		committedArgs = append(committedArgs, rc.mergeBase+"..HEAD")
+	case rc.defaultBranch != "":
+		committedArgs = append(committedArgs, rc.defaultBranch+"...HEAD")
 	}
-	committed := groupFilteredDiff(rc, g, committedArgs...)
-	staged := groupFilteredDiff(rc, g, "diff", "--staged")
-	unstaged := groupFilteredDiff(rc, g, "diff")
+	committed := groupFilteredDiff(ctx, rc, g, committedArgs...)
+	staged := groupFilteredDiff(ctx, rc, g, "diff", "--staged")
+	unstaged := groupFilteredDiff(ctx, rc, g, "diff")
 	hasDiff := committed != "" || staged != "" || unstaged != ""
 	if hasDiff {
 		fmt.Fprintln(&b, "\n# Diffs (precomputed — the union below is the full diff to review for THIS group)")
@@ -844,17 +879,32 @@ func assembleGroupPrompt(rc reviewContext, g *reviewGroup) string {
 // cap. "" on any error (per runGit convention). This is the smart-
 // bundling payoff: each per-group RunOnce sees ONLY the diff for its
 // group's files, keeping the prompt within context.
-func groupFilteredDiff(rc reviewContext, g *reviewGroup, args ...string) string {
+// groupFilteredDiff runs `git diff <args...> -- <g.Files...>` in
+// the workspace and returns the diff trimmed, truncated per the
+// standard cap. "" on any error (per runGit convention). This
+// is the smart-bundling payoff: each per-group RunOnce sees
+// ONLY the diff for its group's files, keeping the prompt within
+// context.
+//
+// ctx must be the per-job goroutine's review ctx (parent of the
+// goroutine, derived from chat session ctx + 30-min timeout) so
+// /close / timeout propagation reaches the git subprocess —
+// invariant #3 (REVIEW.md §1.1). Previously this derived a
+// fresh context.Background() (Finding 1 from /review), which
+// orphaned the subprocess when /close fired and violated the
+// invariant. The 30s cap is layered ON TOP of the parent ctx
+// (whichever deadline is earlier wins).
+func groupFilteredDiff(ctx context.Context, rc reviewContext, g *reviewGroup, args ...string) string {
 	if len(g.Files) == 0 {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	full := append([]string{}, args...)
 	full = append(full, "--")
 	full = append(full, g.Files...)
-	c := proc.New(ctx, "git", append([]string{"-C", rc.workspace}, full...)...)
-	out, _ := c.Output() // error swallowed: "" = "skip section", by design
+	c2 := proc.New(c, "git", append([]string{"-C", rc.workspace}, full...)...)
+	out, _ := c2.Output() // error swallowed: "" = "skip section", by design
 	return truncateDiff(strings.TrimSpace(string(out)))
 }
 

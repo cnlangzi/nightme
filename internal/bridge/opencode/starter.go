@@ -132,7 +132,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // is `opencode run --format json` and is not affected by the
 // ACP migration).
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks)
+	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for opencode: delegate to the shared

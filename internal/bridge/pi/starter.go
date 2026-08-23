@@ -92,12 +92,20 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // and reuses the shared JSON-event translator (translate.go)
 // because print-mode emits the same event format as RPC.
 //
+// opts (typically WithEventSink from /review, /gtw commit, etc.)
+// are forwarded to runPrintMode so per-call observers see the
+// Ready → Text → ToolStart/End → Result lifecycle — the same
+// shape the dsh / codex bridges emit. Without this forward,
+// callers had no visibility into the print-mode run (the bug
+// fixed in this revision: prior code accepted opts but silently
+// dropped them, leaving the chat sink permanently open).
+//
 // Start (above) is unchanged: it still opens an RPC session
 // for the chat session's long-lived use case where multiple
 // turns ride one bridge. RunOnce and Start share the same
 // Starter; only the spawn path differs.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	result, err := runPrintMode(ctx, s, cfg, blocks)
+	result, err := runPrintMode(ctx, s, cfg, blocks, opts...)
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
 	}

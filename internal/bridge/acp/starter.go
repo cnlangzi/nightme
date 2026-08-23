@@ -100,7 +100,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	defer a.Close()
-	return s.collectResult(ctx, a, blocks)
+	return s.collectResult(ctx, a, blocks, opts...)
 }
 
 // Review implements /review for the acp bridge: delegate to the
@@ -138,6 +138,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 //   - events channel closed without result: error.
 func (s *Starter) collectResult(ctx context.Context, live *agent.Agent, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	name := live.Info.Name
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
 
 	// Track per-session identity (model + session id) from
 	// EventAgentReady so the returned RunResult carries both.
@@ -156,6 +157,15 @@ func (s *Starter) collectResult(ctx context.Context, live *agent.Agent, blocks [
 		case ev, ok := <-live.Events():
 			if !ok {
 				return agent.RunResult{}, fmt.Errorf("agent %s: event stream closed without result%s", name, appendAuditFields(sessionID, model))
+			}
+			// Forward every event to the per-call sink so the
+			// chat channel sees the same Ready / Text / Tool /
+			// Result / Done lifecycle the long-lived bridge
+			// already streams to internal subscribers. Finding 4
+			// from /review: pre-fix opts were dropped here,
+			// leaving the sink permanently open.
+			if sink != nil {
+				sink(ev)
 			}
 			switch ev.Kind {
 			case agent.EventAgentReady:

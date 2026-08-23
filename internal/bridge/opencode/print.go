@@ -367,10 +367,12 @@ func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) []string
 //   - waitErr != nil  → model / CLI failure; surface stderr
 //   - errMsg set      → captured from `error` wire event
 //   - empty finalText → model produced nothing; surface stderr
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("opencode: workspace is required")
 	}
+
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
 
 	startTime := time.Now()
 	args := buildPrintArgs(cfg, blocks)
@@ -413,6 +415,18 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		"prompt_bytes", promptBytes,
 		"flag_count", len(args)-1, // excludes the trailing positional prompt
 		"pid", pid)
+
+	// Up-front Ready so the per-call sink observer sees the
+	// lifecycle start. SessionID/Model are filled in by
+	// runNDJSON below as the wire frames arrive; the
+	// up-front Ready uses the static metadata only (workspace).
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind:      agent.EventAgentReady,
+			AgentName: s.Info().Name,
+			Workspace: cfg.Workspace,
+		})
+	}
 
 	// Drain stderr in the background (mirrors codex / cc / pi).
 	// Honors ctx cancellation between reads so a cancelled
@@ -565,6 +579,29 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		}
 		return agent.RunResult{}, fmt.Errorf("opencode: empty answer")
 	}
+
+	// Success path: emit terminal Result + Done to the sink so
+	// the chat channel's outer lifecycle closes (Finding 4 from
+	// /review). Result carries the final text; Done is a paired
+	// turn-end marker mirroring the long-lived bridge drain's
+	// contract. opencode's print-mode wire doesn't carry usage /
+	// model so those fields stay zero — matching the existing
+	// RunResult population above.
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentResult,
+			Result: &agent.AgentResultEvent{
+				Text:       result.Text,
+				DurationMs: result.DurationMs,
+				Subtype:    result.Subtype,
+			},
+		})
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentDone,
+			Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
+		})
+	}
+
 	return result, nil
 }
 

@@ -128,7 +128,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // print-mode pattern: bypass the long-lived ACP bridge driver,
 // spawn a fresh process, capture stdout, reap on exit.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks)
+	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
 // Review implements /review for the cursor bridge: delegate to the

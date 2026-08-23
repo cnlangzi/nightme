@@ -145,13 +145,11 @@ func (a *Adapter) sendText(ctx context.Context, chatID string, topicID int, repl
 	return nil
 }
 
-func (a *Adapter) sendRenderedText(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) error {
-	rendered, err := RenderMarkdown(text)
-	if err != nil {
-		return err
-	}
-	return a.sendText(ctx, chatID, topicID, replyToMessageID, rendered)
-}
+// sendRenderedText was the v8 per-bubble path: take raw text,
+// run RenderMarkdown, split at 3900 chars, send each piece.
+// v9 chain rolled all text-emitting Kinds into the chain
+// segment appendSegmentForKind path; no callers remain in
+// production code. Removed 2026-08-23 (codex review).
 
 // chatIDPrefix is the Telegram channel namespace tag attached to
 // every InboundMessage.ChatID by the adapter. It exists so that

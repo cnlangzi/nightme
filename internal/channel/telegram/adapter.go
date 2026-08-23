@@ -1213,7 +1213,11 @@ func (a *Adapter) patchChainHeader(
 	if msg.Heartbeat != nil {
 		status = heartbeatText(msg.Heartbeat)
 	}
-	cur.headerLine = status + " · ⏱ " + time.Now().UTC().Format("15:04:05")
+	// P2 fix (2026-08-23): match placeholderInitialText's bold
+	// markup. Pre-fix, OutHeartbeat would silently strip the <b>
+	// tags so the chunk header would render bolded once at
+	// cold-create, then plain-text thereafter. Now consistent.
+	cur.headerLine = "<b>" + status + "</b> · ⏱ " + time.Now().UTC().Format("15:04:05")
 	chain.dirty = true
 	chain.mu.Unlock()
 

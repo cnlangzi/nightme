@@ -227,12 +227,12 @@ func flushChainNow(
 	}
 	cur := chain.chunks[chain.cursor]
 
-	body := renderActiveChunkBody(cur, chain.lastFooter)
-	rendered, err := RenderMarkdown(body)
-	if err != nil {
-		// Mirror the existing adapter escapeHTML fallback.
-		rendered = escapeHTML(body)
-	}
+	// renderActiveChunkBody returns the final HTML-ready body
+	// (header as raw HTML, buf through RenderMarkdown, footer as
+	// plain text). Do NOT pass it through RenderMarkdown again
+	// — that would re-escape the header's <b>...</b> tags and
+	// Telegram would render them as literal text.
+	rendered := renderActiveChunkBody(cur, chain.lastFooter)
 
 	if len(rendered) <= maxTelegramTextLength {
 		if err := editFn(ctx, chatID, cur.messageID, rendered); err != nil {

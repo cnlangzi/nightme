@@ -1126,7 +1126,6 @@ type chunkEntry struct {
 //   markFull()                    → lock chunk
 //   freezeAfterOverflow(n)        → clear entries, set flushedLen
 //   markFlushedLen(n)             → record overflow emit bytes
-//   headerIsFromHeartbeat()       → bool — test / adapter-internal probe
 //   Compose()                     → safe-HTML wire format (header-skip rule per §11.12.5.1)
 
 // chainLRU is the Adapter-scoped index with cap-bounded LRU eviction.

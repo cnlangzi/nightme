@@ -130,6 +130,14 @@ func appendSegment(
 		chunk.appendEntry(segment)
 		// Set the footer before computing the body so the cold-
 		// create render matches what subsequent flushes produce.
+		// P0 #1 fix: seed entries so the inlined segment is
+		// re-rendered on every subsequent flush. Without this,
+		// Compose() at the next flush would only render the
+		// cold-create header (and a footer if set) — overwriting
+		// the original message content with no body. The banner-
+		// hide rule (§11.12.5) means the rendered cold-create
+		// body is just the segment (header skipped because
+		// entries>0 && !hasHeartbeat), which is what the user sees.
 		if chain.lastFooter != nil {
 			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
 		}
@@ -726,9 +734,9 @@ func appendErrorSegment(
 	}
 
 	// Overflow: rotate. New chunk inherits cur's (header, hasHeartbeat)
-// so the OutError overflow chunk reads as a chronological snapshot
-// of the chain's active state at the moment the error overflowed
-// — same semantics as the plain appendSegment case 3 ROTATE.
+	// so the OutError overflow chunk reads as a chronological snapshot
+	// of the chain's active state at the moment the error overflowed
+	// — same semantics as the plain appendSegment case 3 ROTATE.
 	cur.markFull()
 	newChunk := newChunkBody(0, "")
 	newChunk.inheritLatestHeader(cur)

@@ -1383,11 +1383,13 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 // v9 P1 (2026-08-23): use setHeaderFromHeartbeat (not setHeader)
 // on the real-heartbeat branch. This flips chunk.hasHeartbeat=true
 // so Compose's "render header iff hasHeartbeat || entries==empty"
-// rule starts respecting the new info. Cold-create path stays on
-// setHeader (used in appendSegment / appendErrorSegment cold-create
-// branches and chain rotation), keeping hasHeartbeat=false for
+// rule starts respecting the new info. Cold-create path constructs
+// the chunk with the cold banner header directly via newChunkBody
+// (no setHeader call needed), keeping hasHeartbeat=false for
 // non-agent turns — which is exactly what hides the frozen
-// "🤖 Working..." banner that was the v8 bug.
+// "🤖 Working..." banner that was the v8 bug. Overflow / split /
+// rotate / tail paths use inheritLatestHeader to copy the (header,
+// hasHeartbeat) pair from the prior active chunk.
 func (a *Adapter) patchChainHeader(
 	chatID string,
 	topicID int,
@@ -1406,9 +1408,15 @@ func (a *Adapter) patchChainHeader(
 		// OutHeartbeat always carries a Heartbeat payload in
 		// production (the gateway fills msg.Heartbeat before the
 		// Send case fires), but defensive fallback if a future
-		// caller forgets: cold-create header text, hasHeartbeat
-		// stays false — Compose will skip the header once any
-		// entry lands, which matches the legacy silent-drop path.
+		// caller forgets: reset to cold-create header text. NOTE:
+		// setHeader does NOT touch hasHeartbeat — if a previous
+		// heartbeat on this chunk had already flipped it true, it
+		// stays true. Compose will then render the cold banner
+		// header anyway because hasHeartbeat=true, which is a
+		// defensive inconsistency rather than the legacy silent-
+		// drop path. Acceptable: this branch only fires on a
+		// programmer error (missing Heartbeat payload) and the
+		// next legitimate OutHeartbeat will repair the state.
 		chain.chunks[chain.cursor].setHeader(heartbeatText(nil))
 	}
 	a.logger.Info("telegram: heartbeat header set",

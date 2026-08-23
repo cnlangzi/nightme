@@ -42,6 +42,7 @@ package agent
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 // maxConcurrentReviewJobs caps how many parallel RunOnce jobs a single
@@ -115,8 +116,9 @@ type eventAggregator struct {
 	outer    func(AgentEvent)
 	expected int
 
-	mu     sync.Mutex
-	phase  aggregatorPhase
+	mu      sync.Mutex
+	emitMu  sync.Mutex // guards pairs of a.outer() calls (invariant #12)
+	phase  atomic.Int32 // Finding 3 from /review: atomic load/store (data race per Go mem model)
 	perJob map[string]*perJobState
 
 	// Counters incremented under mu. readyCount tracks per-job
@@ -209,7 +211,7 @@ func (a *eventAggregator) wrapJob(src string) func(AgentEvent) {
 // atomic read.
 func (a *eventAggregator) handle(ev AgentEvent, state *perJobState) {
 	a.mu.Lock()
-	phase := a.phase
+	phase := aggregatorPhase(a.phase.Load())
 	a.mu.Unlock()
 
 	switch phase {
@@ -265,7 +267,7 @@ func (a *eventAggregator) markJobDone() {
 	allDone := a.doneCount >= a.expected
 	if allDone {
 		a.finalEmitted = true
-		a.phase = phaseClosed
+		a.phase.Store(int32(phaseClosed))
 	}
 	a.mu.Unlock()
 
@@ -274,8 +276,22 @@ func (a *eventAggregator) markJobDone() {
 		// aggregator's emission. Result.Text intentionally
 		// empty: the merged review text is delivered via
 		// FormatReviewMessage from the /review dispatcher, not
-		// via this event.
-		a.outer(AgentEvent{Kind: EventAgentResult, Source: ""})
+		// via this event. Result is non-nil (an empty struct)
+		// so the upstream outbound.Translate doesn't drop it
+		// on its `if ev.Result == nil return false` guard
+		// — without non-nil Result, the chat channel's
+		// "review running…" indicator would never flip
+		// (Finding 2 from /review). Source="" marks the event
+		// as outer-emitted (vs per-job forwarded events).
+		// emitMu covers the synthetic Result so it doesn't
+		// interleave with a concurrent per-job pair emit.
+		a.emitMu.Lock()
+		a.outer(AgentEvent{
+			Kind:   EventAgentResult,
+			Result: &AgentResultEvent{},
+			Source: "",
+		})
+		a.emitMu.Unlock()
 	}
 }
 
@@ -314,12 +330,21 @@ func (a *eventAggregator) finalize() {
 	allDone := a.doneCount >= a.expected
 	if allDone {
 		a.finalEmitted = true
-		a.phase = phaseClosed
+		a.phase.Store(int32(phaseClosed))
 	}
 	a.mu.Unlock()
 
 	if allDone {
-		a.outer(AgentEvent{Kind: EventAgentResult, Source: ""})
+		// emitMu covers the synthetic Result so it doesn't
+		// interleave with a concurrent per-job pair emit
+		// (invariant #12).
+		a.emitMu.Lock()
+		a.outer(AgentEvent{
+			Kind:   EventAgentResult,
+			Result: &AgentResultEvent{},
+			Source: "",
+		})
+		a.emitMu.Unlock()
 	}
 }
 
@@ -349,13 +374,13 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 	// event would silently append to a freshly-nil'd
 	// initBuffer and be lost on replay.
 	a.mu.Lock()
-	if a.phase != phaseBuffering {
+	if aggregatorPhase(a.phase.Load()) != phaseBuffering {
 		// Stale event: another goroutine already transitioned
 		// past Phase 1. Release the lock and re-dispatch to
 		// the current phase handler. This is the cheap atomic
 		// re-check that closes the TOCTOU window.
 		a.mu.Unlock()
-		if a.phase == phaseClosed {
+		if aggregatorPhase(a.phase.Load()) == phaseClosed {
 			return
 		}
 		a.handleStreaming(ev, state)
@@ -368,13 +393,16 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 	// the synthetic outer Ready + for parity on synthetic Task
 	// events (Finding 3 from /review — see firstJobMeta doc).
 	//
-	// Note: doneCount is NOT incremented here on per-job
-	// EventAgentResult/EventAgentError. Completion is tracked
-	// at the orchestrator level (delegateReviewMultiJob calls
-	// agg.markJobDone() in each per-job goroutine's defer).
-	// This decoupling — sink events for observation, markJobDone
-	// for completion — means doneCount is guaranteed to reach
-	// expected even if a bridge's error path bypasses the sink.
+	// ToolStart in Phase 1: ALSO store in pendingToolStarts so
+	// a ToolEnd arriving AFTER the Phase 1→2 snapshot (which
+	// fires from a concurrent goroutine hitting expected) can
+	// still find the Start. Without this, the End falls into
+	// handleStreaming's orphan path and the Start is dropped
+	// from the initBuffer replay (which only sees Ready/Text
+	// for that job's slice) — invariant #12 broken. The pair
+	// is emitted in Phase 1 below if the End is also in Phase
+	// 1; the End in Phase 2 picks up the Start from
+	// pendingToolStarts and emits the pair atomically.
 	switch ev.Kind {
 	case EventAgentReady:
 		a.readyCount++
@@ -382,6 +410,57 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 			a.firstJobMeta.Workspace == "" && a.firstJobMeta.Branch == "" &&
 			a.firstJobMeta.Model == "" {
 			a.firstJobMeta = ev
+		}
+	case EventAgentToolStart:
+		if ev.ToolStart != nil && ev.ToolStart.ID != "" {
+			state.pendingToolStarts[ev.ToolStart.ID] = ev
+		}
+	case EventAgentToolEnd:
+		// Phase 1 End — try to pair with a buffered Start.
+		// If Start was buffered in Phase 1 (same goroutine sent
+		// them in sequence), pair emits here, atomically,
+		// BEFORE the initBuffer append so the pair is contiguous
+		// in outer regardless of phase transitions. If the
+		// lookup misses (Start hasn't arrived yet — out-of-
+		// order within Phase 1 is impossible by construction
+		// because a.mu serializes handleBuffering invocations),
+		// forward as orphan.
+		if ev.ToolEnd != nil && ev.ToolEnd.ID != "" {
+			startEv, ok := state.pendingToolStarts[ev.ToolEnd.ID]
+			if ok {
+				delete(state.pendingToolStarts, ev.ToolEnd.ID)
+			}
+			a.mu.Unlock()
+			if ok {
+				a.emitMu.Lock()
+				a.outer(startEv)
+				a.outer(ev)
+				a.emitMu.Unlock()
+				// Pop the just-appended End from initBuffer so
+				// the Phase 1→2 transition's replay doesn't re-emit
+				// the same pair (the default case appended End
+				// before this case ran; we just emitted it; pop it
+				// back off so replay skips it).
+				if n := len(state.initBuffer); n > 0 && state.initBuffer[n-1].Kind == EventAgentToolEnd {
+					state.initBuffer = state.initBuffer[:n-1]
+				}
+			} else {
+				a.emitMu.Lock()
+				a.outer(ev)
+				a.emitMu.Unlock()
+			}
+			a.mu.Lock()
+			// Re-check phase in case the transition fired
+			// between our unlock and relock. We need to bail
+			// out of handleBuffering's transition gate logic
+			// below — if we're past Phase 1, the transition
+			// handler already ran and our per-job state is in
+			// Phase 2 mode. Returning early is safe; the
+			// event has already been fully processed.
+			if aggregatorPhase(a.phase.Load()) != phaseBuffering {
+				a.mu.Unlock()
+				return
+			}
 		}
 	}
 
@@ -392,7 +471,7 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 	// readyCount — Ready is the gate, not Done.
 	if a.readyCount >= a.expected && !a.readyEmitted {
 		a.readyEmitted = true
-		a.phase = phaseStreaming
+		a.phase.Store(int32(phaseStreaming))
 
 		// Build synthetic outer Ready before releasing the lock so
 		// we observe a consistent per-job state.
@@ -411,7 +490,11 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 		// Outside lock: forward synthetic outer Ready, then replay.
 		// Replay goes through handleStreaming so the pairing /
 		// merging rules are uniform between replay and live events.
+		// emitMu covers the synthetic Ready so it doesn't
+		// interleave with a concurrent per-job pair emit.
+		a.emitMu.Lock()
 		a.outer(syntheticReady)
+		a.emitMu.Unlock()
 		for _, r := range replay {
 			for _, be := range r.events {
 				a.handleStreaming(be, r.state)
@@ -504,7 +587,7 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 	// handle() reads the current phase under the lock, but
 	// replay events (from the Phase 1→2 transition) and live
 	// events can race here. If we've already closed, drop.
-	if a.phase == phaseClosed {
+	if aggregatorPhase(a.phase.Load()) == phaseClosed {
 		return
 	}
 	switch ev.Kind {
@@ -540,18 +623,37 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 			a.mu.Unlock()
 
 			if ok {
-				// Forward the pair — Start first, then End, so the
-				// chat channel sees a complete tool call (open →
-				// close) as a contiguous block on the wire.
+				// Forward the pair ATOMICALLY — Start first, then
+				// End, with no other goroutine's a.outer() call
+				// allowed in between. Otherwise concurrent per-job
+				// goroutines can interleave their events between
+				// Start and End on the outer wire, breaking
+				// invariant #12 ("Start, End strictly contiguous
+				// per-job"). Finding 1 from /review: the previous
+				// code called a.outer() twice without locking,
+				// and -race testing reproduced the pair-loss
+				// failure mode ~16% of the time under load.
+				//
+				// emitMu is a SEPARATE mutex from a.mu so the
+				// emit critical section is short (two sends) and
+				// doesn't extend the time other goroutines spend
+				// waiting on the data-mutation lock. Inner lock
+				// taken here; outer outer() calls never nest.
+				a.emitMu.Lock()
 				a.outer(startEv)
 				a.outer(ev)
+				a.emitMu.Unlock()
 			} else {
 				// Orphan End (no matching buffered Start): forward
 				// anyway. Defensive — shouldn't happen with a
 				// well-behaved bridge, but the chat renderer can
 				// tolerate an orphan End (it just renders the
-				// result without a preceding open).
+				// result without a preceding open). emitMu still
+				// taken so the orphan's emit doesn't interleave
+				// with a paired emit on another goroutine.
+				a.emitMu.Lock()
 				a.outer(ev)
+				a.emitMu.Unlock()
 			}
 		}
 
@@ -573,6 +675,7 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 		}
 		a.mu.Unlock()
 
+		a.emitMu.Lock()
 		a.outer(AgentEvent{
 			Kind:      ev.Kind,
 			TaskList:  &AgentTaskListEvent{Items: items},
@@ -583,21 +686,45 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 			Branch:    a.firstJobMeta.Branch,
 			Source:    ev.Source,
 		})
+		a.emitMu.Unlock()
 
 	case EventAgentResult, EventAgentError:
-		// Per-job terminal — forwarded as observation so the
-		// chat channel can show per-job completion when the sink
-		// emits one. NOT counted toward doneCount here;
-		// completion is tracked at the orchestrator level
-		// (markJobDone). The synthetic outer Result fires
-		// from whichever path (markJobDone or finalize)
-		// first observes doneCount >= expected — single-shot
-		// via finalEmitted.
-		a.outer(ev)
+		// Per-job terminal — SUPPRESSED at the aggregator
+		// layer. REVIEW.md §2.5.5 specifies "Result/Error → 不
+		// 外发" (don't forward); invariant #11 requires the
+		// chat to see exactly ONE outer Result. Forwarding
+		// per-job terminals here would render N "📝 result"
+		// cards during the streaming phase — every group
+		// review would surface as its own card with the
+		// group's text — on top of the final merged-text
+		// reply via emitter.Send. The synthetic outer Result
+		// fired by markJobDone (or finalize) is the only
+		// Result the chat should observe. (Finding 2 from
+		// /review.)
+		//
+		// Per-job completion is tracked at the orchestrator
+		// level (delegateReviewMultiJob's defer markJobDone),
+		// NOT here. The sink's per-job terminal is purely a
+		// "this job returned" signal that the orchestrator
+		// already has via the goroutine's defer.
+		_ = ev // dropped
 
 	default:
 		// Text / Permission / PermissionSettled / unknown kinds:
 		// forward as-is. Source already stamped by wrapJob.
+		//
+		// emitMu serializes ALL outer() calls so a Text from one
+		// per-job cannot interleave between a sibling per-job's
+		// ToolStart / ToolEnd pair (invariant #12 — Finding 1
+		// from /review). Without this, the chat renderer can
+		// observe [Start_X, Text_Y, End_X] instead of the
+		// required [Start_X, End_X, ...]. The hot path is
+		// bounded: per-event emit is O(1) and chat channels
+		// already serialize inbound events on their own
+		// delivery queue, so emitMu contention is dominated by
+		// the upstream consumer.
+		a.emitMu.Lock()
 		a.outer(ev)
+		a.emitMu.Unlock()
 	}
 }

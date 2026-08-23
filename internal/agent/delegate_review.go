@@ -890,12 +890,6 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 // cap. "" on any error (per runGit convention). This is the smart-
 // bundling payoff: each per-group RunOnce sees ONLY the diff for its
 // group's files, keeping the prompt within context.
-// groupFilteredDiff runs `git diff <args...> -- <g.Files...>` in
-// the workspace and returns the diff trimmed, truncated per the
-// standard cap. "" on any error (per runGit convention). This
-// is the smart-bundling payoff: each per-group RunOnce sees
-// ONLY the diff for its group's files, keeping the prompt within
-// context.
 //
 // ctx must be the per-job goroutine's review ctx (parent of the
 // goroutine, derived from chat session ctx + 30-min timeout) so

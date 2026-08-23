@@ -312,24 +312,41 @@ func TestEventAggregator_ToolPairFromReplay(t *testing.T) {
 		Kind:    EventAgentToolEnd,
 		ToolEnd: &AgentToolEndEvent{ID: "t1", Name: "Read"},
 	})
-	if got := rec.snapshot(); len(got) != 0 {
-		t.Fatalf("Phase 1 (only 1 of 2 Readys) must not forward; got %d events", len(got))
+	// With the Phase 1 pair-emit fix (Finding 1 from /review),
+	// if both Start and End land in Phase 1, the pair emits
+	// ATOMICALLY before the transition — invariant #12 is
+	// preserved regardless of which goroutine the transition
+	// fires from. This test feeds both events in Phase 1 to
+	// exercise that path.
+	if got := rec.snapshot(); len(got) != 2 {
+		t.Fatalf("Phase 1 (Start + End before transition) must emit 2 pair events; got %d: %+v", len(got), got)
 	}
 	// job-2's Ready triggers transition + replay.
 	j2(readyEvent("a", "/r", "main"))
 
 	got := rec.snapshot()
+	// With the Phase 1 pair-emit fix, the order is:
+	//   [0] ToolStart (paired, emitted in Phase 1)
+	//   [1] ToolEnd   (paired, emitted in Phase 1)
+	//   [2] synthetic outer Ready (fired on j2's Ready reaching
+	//       expected; replay of j2's buffer emits no pair since
+	//       j2 only sent Ready)
+	// j1's initBuffer post-Phase-1-pair contains [Ready] only
+	// (Start was consumed by the Phase 1 pair emit, End was
+	// popped off). Replay of [Ready] → case EventAgentReady →
+	// drop (handleStreaming drops per-job Readys). So j1 emits
+	// 0 events from replay.
 	if len(got) != 3 {
-		t.Fatalf("expected 3 outer events (synthetic Ready + paired Start/End); got %d: %+v", len(got), got)
+		t.Fatalf("expected 3 outer events (Phase 1 pair + synthetic Ready); got %d: %+v", len(got), got)
 	}
-	if got[0].Kind != EventAgentReady || got[0].Source != "" {
-		t.Errorf("event[0] = %+v, want synthetic outer Ready", got[0])
+	if got[0].Kind != EventAgentToolStart || got[0].ToolStart.ID != "t1" {
+		t.Errorf("event[0] = %+v, want ToolStart ID=t1 (Phase 1 pair)", got[0])
 	}
-	if got[1].Kind != EventAgentToolStart || got[1].ToolStart.ID != "t1" {
-		t.Errorf("event[1] = %+v, want ToolStart ID=t1 (replayed)", got[1])
+	if got[1].Kind != EventAgentToolEnd || got[1].ToolEnd.ID != "t1" {
+		t.Errorf("event[1] = %+v, want ToolEnd ID=t1 (Phase 1 pair)", got[1])
 	}
-	if got[2].Kind != EventAgentToolEnd || got[2].ToolEnd.ID != "t1" {
-		t.Errorf("event[2] = %+v, want ToolEnd ID=t1 (replayed)", got[2])
+	if got[2].Kind != EventAgentReady || got[2].Source != "" {
+		t.Errorf("event[2] = %+v, want synthetic outer Ready", got[2])
 	}
 }
 
@@ -508,9 +525,14 @@ func TestEventAggregator_LateEventsDropped(t *testing.T) {
 	})
 
 	// After Ready + Result + markJobDone, we're in phaseClosed.
+	// Finding 2 fix: per-job Result/Error are SUPPRESSED at the
+	// aggregator layer (per REVIEW.md §2.5.5 "Result/Error → 不
+	// 外发"). Expected: 1 synthetic outer Ready (Source="") + 1
+	// synthetic outer Result (Source="") = 2 events. Per-job
+	// terminal events (even if they arrive) are not forwarded.
 	got := rec.snapshot()
-	if len(got) != 3 {
-		t.Fatalf("expected 3 events (Ready + per-job Result + synthetic outer Result); got %d: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 events (Ready + synthetic outer Result); got %d: %+v", len(got), got)
 	}
 
 	// Late event arrives via a fresh wrapJob (defensive — late
@@ -519,7 +541,7 @@ func TestEventAggregator_LateEventsDropped(t *testing.T) {
 	lateSink(AgentEvent{Kind: EventAgentText, Text: "this should be dropped"})
 
 	got = rec.snapshot()
-	if len(got) != 3 {
+	if len(got) != 2 {
 		t.Errorf("late event should be dropped; outer event count = %d", len(got))
 	}
 }

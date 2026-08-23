@@ -258,7 +258,7 @@ func (a *Adapter) choiceKeyboard(state *ChoiceState) map[string]any {
 			label = option.ID
 		}
 		button := map[string]any{
-			"text":          escapeHTML(label),
+			"text":          escapeInline(label),
 			"callback_data": choiceCallbackData(state, index),
 		}
 		if len(state.Choice.Questions) > 0 {
@@ -314,16 +314,16 @@ func renderChoice(state *ChoiceState) string {
 	}
 	var body strings.Builder
 	body.WriteString("<b>")
-	body.WriteString(escapeHTML(title))
+	body.WriteString(escapeInline(title))
 	body.WriteString("</b>")
 	if len(choice.Questions) > 0 {
 		if state.Step < len(choice.Questions) {
 			body.WriteString("\n\n")
-			body.WriteString(escapeHTML(choice.Questions[state.Step].Question))
+			body.WriteString(escapeInline(choice.Questions[state.Step].Question))
 		}
 	} else if choice.Body != "" {
 		body.WriteString("\n\n")
-		body.WriteString(escapeHTML(choice.Body))
+		body.WriteString(escapeInline(choice.Body))
 	}
 	return body.String()
 }

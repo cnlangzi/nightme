@@ -180,6 +180,26 @@ func safeLink(value string) bool {
 	return strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "tg://")
 }
 
+// escapeInline escapes text destined for Telegram InlineKeyboard
+// labels, button text, choice titles, or other UI surfaces that
+// ship with parse_mode=HTML. Converts `<`, `>`, `&` to their HTML
+// entities so user-supplied text renders as literal characters
+// rather than being parsed as HTML by Telegram's renderer.
+//
+// Distinct from chunkBody.Compose() (Layer 1 / view) which
+// routes header / entries / footer through different pipelines —
+// escapeInline is for non-chunk-body UI text where the entire
+// payload is escape-one-pass and the caller controls no
+// surrounding markup. RenderMarkdown paths should NOT use this;
+// they handle user markdown internally via escapeHTML.
+func escapeInline(value string) string {
+	return html.EscapeString(value)
+}
+
+// escapeHTML is the internal single-character escape used inside
+// RenderMarkdown. It exists as a named function so RenderMarkdown's
+// flow is grep-able; production code outside RenderMarkdown should
+// prefer escapeInline (UI text) or chunkBody.Compose (chunk bodies).
 func escapeHTML(value string) string {
 	return html.EscapeString(value)
 }

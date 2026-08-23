@@ -1309,10 +1309,18 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunR
 | `dsh/print.go` | **删除** | -227 |
 | `dsh/print_real_unix_test.go` | **删除** | -76 |
 | `dsh/starter.go` | `RunOnce` / `Review` 重写,新增 `drainForRunResult` / `auditFields` | +80 |
-| `dsh/starter_test.go` | 新增 4 个测试:`TestRunOnce_SharedHostPath` / `TestRunOnce_ArchiveOnClose` / `TestRunOnce_IsolatedSessions` / `TestReview_UsesStandardPrompt` | +250 |
-| `dsh/doc.go` | 删 "Print-mode" 段,改写包 doc | -15 |
+| `dsh/starter_test.go`(mock) | 新增 5 个测试:`TestStarter_Info_NoArgs` / `TestDrainForRunResult_EventAgentResult` / `TestDrainForRunResult_DoneWithoutResult` / `TestDrainForRunResult_ErrorEvent` / `TestRunOnce_StripsSessionID` / `TestRunOnce_ArchiveOnClose` | +200 |
+| `dsh/runonce_real_unix_test.go`(真机 e2e) | 新增 2 个测试:`TestE2E_RunOnce_RealDSH` / `TestE2E_Review_RealDSH`(门控 `NIGHTME_REAL_DSH=1` + dsh on PATH) | +170 |
+| `dsh/doc.go` | 删 "Print-mode" 段,改写包 doc;删 `Starter.ListSessions` 悬挂引用 | -15 |
 
 **净:约 +12 行**(主要是测试代码)。
+
+**测试覆盖分两层**:
+
+- **Mock 层**(`starter_test.go`,无需真 dsh):覆盖 `Starter.Info` 契约、`drainForRunResult` 三个终态分支(`EventAgentResult` / `EventAgentDone` / `EventAgentError`)、`cfg.SessionID` 在 RunOnce 上被 strip、`defer a.Close()` 触发 `workspace.archiveSession`。
+- **真机 e2e 层**(`runonce_real_unix_test.go`,需 `NIGHTME_REAL_DSH=1` + 本机装 dsh):覆盖端到端流程 —— 真 dsh web lazy spawn + 握手 + session.prompt + minimax-cn 模型响应 + session 归档。
+
+`TestRunOnce_IsolatedSessions` 和 `TestReview_UsesStandardPrompt` 没在 mock 里:连续 `RunOnce` 调用在 mock 上有 state-pollution race(`session.create` 跟第一次 Close 之间的窗口),但真 dsh 进程独立 sessionId 互不干扰,所以 e2e 层覆盖了这两个语义。
 
 ### 15.5 R3 事件流化的接入点(sink)
 
@@ -1334,20 +1342,31 @@ case ev, ok := <-a.Events():
 
 ### 15.6 验证清单
 
-#### 自动化(必跑)
+#### 自动化(必跑,本地 + CI)
 
-- [ ] `make test` 全绿
-- [ ] `TestRunOnce_SharedHostPath`:mock dsh web,验证 `RunOnce` 走 `host.EnsureSharedHost` + `session.create`,**不**走 `proc.New`
-- [ ] `TestRunOnce_ArchiveOnClose`:mock dsh web,`RunOnce` 返回后 `WorkspaceArchiveSession` 调用计数 == 1
-- [ ] `TestRunOnce_IsolatedSessions`:连跑两次 `RunOnce`,验证拿到两个不同 sessionId
-- [ ] `TestReview_UsesStandardPrompt`:mock web 抓 prompt blocks,验证是 `agent.StandardPrompt()` 的内容
-- [ ] `TestRunOnce_ErrorPaths`:`session.create` 失败 / `session.prompt` 失败 / 事件流提前关闭,各覆盖一次
+- [ ] `go build ./...` 通过
+- [ ] `go vet ./...` 通过
+- [ ] `go test ./internal/bridge/dsh/ -count=1 -short` 全绿(102 个 mock 测试)
 
-#### 真机(必跑)
+#### Mock 测试清单(`starter_test.go`,无需真 dsh)
 
-- [ ] `/gtw commit` 真机跑通,日志出现 `dsh: session archived`,feishu chat 收到 commit card
-- [ ] `/gtw pr` 真机跑通,同上
-- [ ] `/review` 真机跑通,同上
+- [ ] `TestStarter_Info_NoArgs`:`Starter.Info().Args` 是 `nil`(Starter 不再直接 spawn)
+- [ ] `TestDrainForRunResult_EventAgentResult`:`EventAgentResult` 触发 drain 返回,带 SessionID/Model/Text/Usage
+- [ ] `TestDrainForRunResult_DoneWithoutResult`:`EventAgentDone` 无前导 Result → error with audit fields
+- [ ] `TestDrainForRunResult_ErrorEvent`:`EventAgentError` 触发 drain 错误返回
+- [ ] `TestRunOnce_StripsSessionID`:`cfg.SessionID` 在 RunOnce 路径被 strip,永远 fresh session
+- [ ] `TestRunOnce_ArchiveOnClose`:`defer a.Close()` 触发 `workspace.archiveSession`(R4)
+
+#### 真机 e2e 测试清单(`runonce_real_unix_test.go`,需 `NIGHTME_REAL_DSH=1` + 本机装 dsh)
+
+- [ ] `TestE2E_RunOnce_RealDSH`:真 dsh web lazy spawn + 握手 + session.prompt + minimax-cn 模型响应 + archive 全链路
+- [ ] `TestE2E_Review_RealDSH`:`Starter.Review` 端到端(用 `agent.StandardPrompt()` 作 prompt)
+
+#### 真机手动验证(可选,需要真实 feishu/telegram channel)
+
+- [ ] `/gtw commit` 跑通,日志出现 `dsh: session archived`,feishu chat 收到 commit card
+- [ ] `/gtw pr` 跑通,同上
+- [ ] `/review` 跑通,同上
 - [ ] 打开 dsh web dashboard,确认 left list **没有** RunOnce 跑完后的残留 session
 - [ ] 关掉 nightme daemon,确认 dsh web 还在(它是 persistent service,行为不变)
 

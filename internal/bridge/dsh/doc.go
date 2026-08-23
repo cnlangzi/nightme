@@ -26,17 +26,20 @@
 //
 // Wire (HTTP + WebSocket on the canonical port 3080):
 //
-//     Resume: cfg.SessionID triggers POST /api/session.create
-//     {sessionId, cwd} — the dashboard "select a session" attach
-//     (dsh-api.md §2.1.3). Same id+cwd returns the same session and
-//     joins the mux live set. session-conflict / transport / a
-//     different returned id surface agent.ErrResumeUnhealthy so the
-//     runtime clears the stale sessionId and respawns fresh.
-//     F-DSH-NO-FORK (2026-08-16): session.fork mints a child and
-//     abandons the parent; we never call it. Mux session/event is
-//     the live path after attach; session.history backfill only
-//     fills gaps. Resume-picker support: `Starter.ListSessions`
-//     runs `POST /api/session.list` against the shared host.
+//     Resume: cfg.SessionID (Start path only — RunOnce strips it)
+//     triggers POST /api/session.create {sessionId, cwd} — the
+//     dashboard "select a session" attach (dsh-api.md §2.1.3).
+//     Same id+cwd returns the same session and joins the mux
+//     live set. session-conflict / transport / a different returned
+//     id surface agent.ErrResumeUnhealthy so the runtime clears the
+//     stale sessionId and respawns fresh. F-DSH-NO-FORK
+//     (2026-08-16): session.fork mints a child and abandons the
+//     parent; we never call it. Mux session/event is the live path
+//     after attach; session.history backfill only fills gaps.
+//     Session listing (for the resume picker UI): POST /api/session.list
+//     against the shared host is available via the *host.Client
+//     (not via the bridge's Starter — pickers go through their
+//     own host.Client handle).
 //
 // The bridge deliberately does NOT modify dsh's local default
 // configuration. Per the user's locked-in principle

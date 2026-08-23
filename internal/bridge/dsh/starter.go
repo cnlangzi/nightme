@@ -126,7 +126,9 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // shared dsh web daemon (started once per nightme daemon lifetime)
 // serves both this and Start; there is no `--profile headless`
 // code path left in this package.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+	cfg2 := agent.ParseRunOnceOptions(opts)
+
 	// RunOnce always creates a fresh session, even when the caller
 	// passes cfg.SessionID. Strip it before delegating to Start so
 	// the handshake path doesn't try to `session.fork`.
@@ -141,7 +143,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	// workspace.archiveSession (session.go:916-955). No new code
 	// needed — the chat-session lifecycle path is reused.
 	defer a.Close()
-	return drainForRunResult(ctx, a, blocks)
+	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent)
 }
 
 // Review implements the `/review` slash command for dsh. It reuses
@@ -155,11 +157,11 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // (and Close archives the session on return), Review cannot leak
 // review reasoning back into the main chat session's context, and
 // the session does not pile up in dsh web's in-memory store.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return s.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: agent.StandardPrompt(),
-	}})
+	}}, opts...)
 }
 
 // drainForRunResult is the shared RunOnce / Review drain logic.
@@ -176,7 +178,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunR
 // EventAgentResult is an error path (claudecode stream-json's
 // `result` event never fired) — we surface that rather than silently
 // returning an empty RunResult.
-func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent), opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	name := a.Info.Name
 
 	// Seed from the *driver. By the time RunOnce calls drain, the
@@ -195,6 +197,18 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 		return agent.RunResult{}, fmt.Errorf("agent %s: send: %w", name, err)
 	}
 
+	// deliverToSink forwards every event to the caller-supplied
+	// sink (when set). Synchronous — the bridge's own goroutine
+	// drives this. Callers MUST ensure the sink is non-blocking
+	// (typically via a buffered chan + drain goroutine, see
+	// outbound.StreamRunOnceToEmitter). One-shot flows don't
+	// await sink response; sink is observational only.
+	deliverToSink := func(ev agent.AgentEvent) {
+		if sink != nil {
+			sink(ev)
+		}
+	}
+
 	for {
 		select {
 		case ev, ok := <-a.Events():
@@ -203,6 +217,7 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					"agent %s: events closed before result%s",
 					name, auditFields(sessionID, model))
 			}
+			deliverToSink(ev)
 			switch ev.Kind {
 			case agent.EventAgentReady:
 				if !readySeen {
@@ -241,8 +256,13 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					name, auditFields(sessionID, model))
 			}
 			// EventAgentText / EventAgentToolStart/End / Permission /
-			// TaskCreate/Update: not consumed here. R3 will route
-			// these to a caller-supplied sink in a follow-up PR.
+			// TaskCreate/Update: forwarded to sink (if set). Drain
+			// continues to wait for the terminal EventAgentResult /
+			// EventAgentDone / EventAgentError. One-shot calls run
+			// with full-access permission mode, so Permission events
+			// shouldn't normally fire — if they do, the sink sees
+			// them but no ResponseCh routing is performed (the user
+			// cannot approve from outside the one-shot flow).
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return agent.RunResult{}, fmt.Errorf("agent %s: canceled: %w", name, ctx.Err())

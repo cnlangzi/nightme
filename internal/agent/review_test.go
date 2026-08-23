@@ -22,10 +22,10 @@ func (f *fakeStarter) Detect() error { return nil }
 func (f *fakeStarter) Start(context.Context, StartConfig) (*Agent, error) {
 	return nil, errors.New("fakeStarter: Start not implemented")
 }
-func (f *fakeStarter) RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error) {
+func (f *fakeStarter) RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption, opts ...RunOnceOption) (RunResult, error) {
 	return f.runOnce(ctx, cfg, blocks)
 }
-func (f *fakeStarter) Review(ctx context.Context, cfg StartConfig) (RunResult, error) {
+func (f *fakeStarter) Review(ctx context.Context, cfg StartConfig, opts ...RunOnceOption, opts ...RunOnceOption) (RunResult, error) {
 	result, err := f.RunOnce(ctx, cfg, []ContentBlock{{
 		Type: ContentText,
 		Text: StandardPrompt(),
@@ -175,7 +175,7 @@ func TestReview_ReturnsRunResult(t *testing.T) {
 	fs := &fakeStarter{
 		name: "fake",
 		mode: ModeJSONIO,
-		runOnce: func(_ context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error) {
+		runOnce: func(_ context.Context, cfg StartConfig, blocks []ContentBlock, opts ...RunOnceOption) (RunResult, error) {
 			capturedRunOnceWorkspace = cfg.Workspace
 			capturedRunOnceBlocks = append([]ContentBlock(nil), blocks...)
 			return RunResult{Text: reviewText}, nil
@@ -221,7 +221,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 	fs := &fakeStarter{
 		name: "fake",
 		mode: ModeJSONIO,
-		runOnce: func(_ context.Context, _ StartConfig, _ []ContentBlock) (RunResult, error) {
+		runOnce: func(_ context.Context, _ StartConfig, _ []ContentBlock, opts ...RunOnceOption) (RunResult, error) {
 			return RunResult{}, runOnceErr
 		},
 	}

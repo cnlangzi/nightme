@@ -1254,7 +1254,7 @@ nightme 漏 think + reply 实时流的根因,完全集中在 `internal/bridge/ds
 
 2. **每次冷启动 ~1-3s**:`proc.New("dsh", "--profile", "headless", ...)` 每次 RunOnce 都要 Node.js 冷启动 + 配置重读 + 模型 client 重连。web 路径的 `session.create` 是 HTTP RPC 给已运行的 dsh web daemon,**单次成本 ~50-200ms**(`/gtw commit` 高频调用场景下省一个数量级)。
 
-3. **headless 没有结构化事件**:`dsh/print.go:5-30` 明确说 "no structured events, no NDJSON"。如果后续要做 R3(实时 sink 投递),headless 路径需要单独写一份 wire parser;web 路径的 mux demux 已经吐结构化 JSON,**直接复用**。
+3. **headless 没有结构化事件**:`dsh/print.go:5-30` 明确说 "no structured events, no NDJSON"。headless 路径要支持 R3(实时 sink 投递)需单独写一份 wire parser;web 路径的 mux demux 已经吐结构化 JSON,**直接复用**(这是本次 PR 选 web 路径的第三个理由)。
 
 ### 15.2 迁移方案
 
@@ -1322,23 +1322,28 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunR
 
 `TestRunOnce_IsolatedSessions` 和 `TestReview_UsesStandardPrompt` 没在 mock 里:连续 `RunOnce` 调用在 mock 上有 state-pollution race(`session.create` 跟第一次 Close 之间的窗口),但真 dsh 进程独立 sessionId 互不干扰,所以 e2e 层覆盖了这两个语义。
 
-### 15.5 R3 事件流化的接入点(sink)
+### 15.5 R3 事件流化(sink) — ✅ 已落地
 
-本次**不**接入 sink —— 这是下一步单独的 PR,改动范围更大(需要扩展 `agent.Starter` 接口)。当前 `drainForRunResult` 的事件循环里**预留了 sink 注入点**:
+**接口扩展**:`agent.Starter.RunOnce / Review` 加 variadic `opts ...agent.RunOnceOption`(向后兼容,已有 caller 零修改)。目前只暴露一个选项:
 
 ```go
-case ev, ok := <-a.Events():
-    if !ok { /* ... */ }
-    // ★ 下一步:接入 sink 注入点
-    // if sink != nil { sink(ev) }
-    switch ev.Kind { /* ... */ }
+// internal/agent/agent.go
+func WithEventSink(sink func(AgentEvent)) RunOnceOption
 ```
 
-下一步 PR 计划:
-1. `agent.Starter.RunOnce / Review` 接口加 variadic `RunOnceOption`(向后兼容)
-2. `drainForRunResult` 接 sink,所有 `AgentEvent` 同步投递
-3. `gtw/agent_reply.go` 加 `outbound.StreamRunOnceToEmitter` helper(参考 `runtime.NewEventHandler`)
-4. `/gtw commit`、`/gtw pr`、`/review` 调用点接 sink,**用户能实时看到 RunOnce 期间的 thinking / tool / result**
+**Bridge 接入**:7 个 bridge(`claudecode / codex / pi / opencode / cursor / acp / pty / dsh`)签名都加 `opts ...RunOnceOption`,行为不变(print-mode bridge 忽略 opts,dsh 把 sink 解析出来传给 drain)。
+
+**dsh drain 投递**:`drainForRunResult` 在事件循环开头调 `deliverToSink(ev)`,所以**sink 收到所有 event**(Ready / Text / ToolStart / ToolEnd / Permission / TaskCreate / TaskUpdate / Result / Done / Error)。但 **Done 不会到 sink** —— drain 在 Result 时已 return,Done 是 driver.Close 在 events chan 关闭后发的。
+
+**Caller 接线**:`internal/gateway/outbound/emitter_sink.go::StreamRunOnceToEmitter` 是 canonical pattern —— buffered chan (cap=64) + drain goroutine,保证 bridge 不被 Feishu 等 channel 限速拖垮。`/gtw commit`、`/gtw pr`、`/review` 调用点都接上了 sink。
+
+**Permission 语义**:one-shot / review 用 full-access 权限模式,**Permission.ResponseCh 不经 sink 路由** —— sink 是 observability,decision 走 runtime 已有路径。如果未来 Permission 真的在 one-shot 里 fire 了,sink 会看到但 bridge 不会卡住等响应。
+
+**测试覆盖**:
+- `TestDrainForRunResult_SinkReceivesEvents` (mock):sink 收齐 Text / ToolStart / ToolEnd / Result
+- `TestDrainForRunResult_NilSinkSafe` (mock):nil sink 不 panic
+- `TestE2E_RunOnce_Sink_RealDSH` (真机):真 dsh 上 sink 收到 Ready + Result
+- gtw/review 调用点接 sink 由 compile-time 检查保证(类型签名强制)
 
 ### 15.6 验证清单
 
@@ -1346,7 +1351,7 @@ case ev, ok := <-a.Events():
 
 - [ ] `go build ./...` 通过
 - [ ] `go vet ./...` 通过
-- [ ] `go test ./internal/bridge/dsh/ -count=1 -short` 全绿(102 个 mock 测试)
+- [ ] `go test ./internal/bridge/dsh/ -count=1 -short` 全绿
 
 #### Mock 测试清单(`starter_test.go`,无需真 dsh)
 
@@ -1356,19 +1361,21 @@ case ev, ok := <-a.Events():
 - [ ] `TestDrainForRunResult_ErrorEvent`:`EventAgentError` 触发 drain 错误返回
 - [ ] `TestRunOnce_StripsSessionID`:`cfg.SessionID` 在 RunOnce 路径被 strip,永远 fresh session
 - [ ] `TestRunOnce_ArchiveOnClose`:`defer a.Close()` 触发 `workspace.archiveSession`(R4)
+- [ ] `TestDrainForRunResult_SinkReceivesEvents`:sink 收到 Text / ToolStart / ToolEnd / Result(每种 kind 一次)
+- [ ] `TestDrainForRunResult_NilSinkSafe`:nil sink 不 panic
 
 #### 真机 e2e 测试清单(`runonce_real_unix_test.go`,需 `NIGHTME_REAL_DSH=1` + 本机装 dsh)
 
 - [ ] `TestE2E_RunOnce_RealDSH`:真 dsh web lazy spawn + 握手 + session.prompt + minimax-cn 模型响应 + archive 全链路
 - [ ] `TestE2E_Review_RealDSH`:`Starter.Review` 端到端(用 `agent.StandardPrompt()` 作 prompt)
+- [ ] `TestE2E_RunOnce_Sink_RealDSH`:真 dsh 上 sink 收到 Ready + Result
 
 #### 真机手动验证(可选,需要真实 feishu/telegram channel)
 
-- [ ] `/gtw commit` 跑通,日志出现 `dsh: session archived`,feishu chat 收到 commit card
+- [ ] `/gtw commit` 跑通:feishu chat **实时**看到 thinking / tool call / result(中间过程,不是只有最终 card),日志 `dsh: session archived`
 - [ ] `/gtw pr` 跑通,同上
-- [ ] `/review` 跑通,同上
+- [ ] `/review` 跑通,中间过程实时可见,review text 完整,日志同上
 - [ ] 打开 dsh web dashboard,确认 left list **没有** RunOnce 跑完后的残留 session
-- [ ] 关掉 nightme daemon,确认 dsh web 还在(它是 persistent service,行为不变)
 
 ### 15.7 行为变化(用户可见)
 
@@ -1387,7 +1394,7 @@ case ev, ok := <-a.Events():
 
 | PR | 范围 | 改动 |
 |----|------|------|
-| **本 PR(2026-08-22)** | dsh RunOnce 路径切换 | 删 `print.go` + 改 `starter.go` + 测试 |
-| 后续 | `Starter.RunOnce` 接 sink | 扩 `agent.Starter` 接口 + dsh drain 加 sink + gtw 接 sink |
+| **本 PR(2026-08-22)** | dsh RunOnce 路径切换 + R3 sink | 删 `print.go` + 改 `starter.go` + 加 `RunOnceOption` + sink 接线 + 测试 |
+| (无) | — | R3 sink 已在本次 PR 完成,无需后续 |
 
 每个 PR 独立可 ship、独立可回滚。**架构先行,事件流化随后**。

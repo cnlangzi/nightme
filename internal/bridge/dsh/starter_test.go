@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ func TestDrainForRunResult_EventAgentResult(t *testing.T) {
 	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("drainForRunResult: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestDrainForRunResult_DoneWithoutResult(t *testing.T) {
 	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}})
+	}}, nil)
 	if err == nil {
 		t.Fatal("want error when EventAgentDone fires without Result")
 	}
@@ -141,7 +142,7 @@ func TestDrainForRunResult_ErrorEvent(t *testing.T) {
 	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}})
+	}}, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want wrap of %v", err, wantErr)
 	}
@@ -265,5 +266,139 @@ func drainOneReady(t *testing.T, a *agent.Agent, timeout time.Duration) bool {
 		case <-deadline:
 			return false
 		}
+	}
+}
+// ─── TestDrainForRunResult_SinkReceivesEvents ───────────────────
+// When a sink is supplied, drainForRunResult must invoke it
+// synchronously for every event read off a.Events(). The sink
+// receives Ready, Text, ToolStart, ToolEnd, Result, Done — every
+// Kind. The caller is responsible for non-blocking semantics
+// (see outbound.StreamRunOnceToEmitter for the canonical pattern);
+// drain just calls it.
+func TestDrainForRunResult_SinkReceivesEvents(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+	s := NewStarter("dsh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if !drainOneReady(t, a, 2*time.Second) {
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+	d, _ := a.Driver().(*driver)
+
+	// Push a mix of event kinds — Ready is already in the chan
+	// drain but the sink attached AFTER drainOneReady cleared it,
+	// so the sink will see only the events we push below.
+	var got []agent.EventKind
+	var mu sync.Mutex
+	sink := func(ev agent.AgentEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, ev.Kind)
+	}
+
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentText,
+		Text: "thinking about it...",
+	})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentToolStart,
+		ToolStart: &agent.AgentToolStartEvent{
+			ID: "tool-1", Name: "Bash", Args: `{"cmd":"ls"}`,
+		},
+	})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentToolEnd,
+		ToolEnd: &agent.AgentToolEndEvent{
+			ID: "tool-1", Name: "Bash", Output: "file1\nfile2\n",
+		},
+	})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{
+			Text:    "all done",
+			Subtype: "success",
+		},
+	})
+
+	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "hi",
+	}}, sink)
+	if err != nil {
+		t.Fatalf("drainForRunResult: %v", err)
+	}
+	if res.Text != "all done" {
+		t.Errorf("RunResult.Text = %q, want %q", res.Text, "all done")
+	}
+
+	// Snapshot got under lock; the sink was called from drain's
+	// goroutine and we read after drain returned.
+	mu.Lock()
+	defer mu.Unlock()
+	want := []agent.EventKind{
+		agent.EventAgentText,
+		agent.EventAgentToolStart,
+		agent.EventAgentToolEnd,
+		agent.EventAgentResult,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("sink got %d events, want %d: %v", len(got), len(want), got)
+	}
+	for i, k := range want {
+		if got[i] != k {
+			t.Errorf("sink event[%d] = %s, want %s", i, got[i], k)
+		}
+	}
+}
+
+// ─── TestDrainForRunResult_NilSinkSafe ───────────────────────────
+// A nil sink must not panic. drain is called by RunOnce / Review
+// without WithEventSink — the sink param is just nil.
+func TestDrainForRunResult_NilSinkSafe(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+	s := NewStarter("dsh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if !drainOneReady(t, a, 2*time.Second) {
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+	d, _ := a.Driver().(*driver)
+
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentText,
+		Text: "no sink, that's fine",
+	})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{Text: "ok"},
+	})
+
+	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "hi",
+	}}, nil)
+	if err != nil {
+		t.Fatalf("drainForRunResult with nil sink: %v", err)
+	}
+	if res.Text != "ok" {
+		t.Errorf("RunResult.Text = %q, want %q", res.Text, "ok")
 	}
 }

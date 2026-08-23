@@ -638,7 +638,7 @@ func errStr(err error) string {
 //
 // F-review.md §13 "codex/claude use native review" rule: invoking
 // the native subcommand instead of our generic StandardPrompt.
-func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
+func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	// Build the review-specific extra flags. --base <default> is
 	// the important one; we detect <default> via git commands.
 	var extra []string

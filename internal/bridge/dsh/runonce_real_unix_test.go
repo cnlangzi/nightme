@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,4 +169,80 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…(truncated)"
+}
+// TestE2E_RunOnce_Sink_RealDSH verifies that WithEventSink delivers
+// intermediate AgentEvents (Ready / Text / Result / Done) during a
+// real dsh web RunOnce. Confirms the end-to-end pipeline:
+// bridge → drain → sink callback runs synchronously per event.
+func TestE2E_RunOnce_Sink_RealDSH(t *testing.T) {
+	if os.Getenv("NIGHTME_REAL_DSH") == "" {
+		t.Skip("NIGHTME_REAL_DSH not set; skipping real dsh e2e")
+	}
+	if _, err := exec.LookPath("dsh"); err != nil {
+		t.Skipf("dsh not on PATH: %v", err)
+	}
+
+	workspace, err := os.MkdirTemp("", "dsh-runonce-sink-e2e-*")
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+
+	s := NewStarter("dsh")
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	var (
+		mu       sync.Mutex
+		events   []agent.AgentEvent
+		seenReady bool
+		seenRes  bool
+	)
+	sink := func(ev agent.AgentEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, ev)
+		if ev.Kind == agent.EventAgentReady {
+			seenReady = true
+		}
+		if ev.Kind == agent.EventAgentResult {
+			seenRes = true
+		}
+	}
+
+	res, err := s.RunOnce(ctx, agent.StartConfig{Workspace: workspace},
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "Reply with exactly: PONG"}},
+		agent.WithEventSink(sink),
+	)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if res.SessionID == "" {
+		t.Fatal("RunResult.SessionID empty")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// EventAgentDone is intentionally NOT observed — drain returns
+	// as soon as EventAgentResult fires (Result is the terminal for
+	// our purposes; Done is emitted by driver.Close on a closed
+	// events chan, after our drain has already exited).
+	if !seenReady {
+		t.Errorf("sink never saw EventAgentReady (events=%d, kinds=%v)",
+			len(events), kinds(events))
+	}
+	if !seenRes {
+		t.Errorf("sink never saw EventAgentResult (events=%d, kinds=%v)",
+			len(events), kinds(events))
+	}
+	t.Logf("E2E sink: sessionId=%s events=%d kinds=%v",
+		res.SessionID, len(events), kinds(events))
+}
+
+func kinds(evs []agent.AgentEvent) []string {
+	out := make([]string, len(evs))
+	for i, e := range evs {
+		out[i] = e.Kind.String()
+	}
+	return out
 }

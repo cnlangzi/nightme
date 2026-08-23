@@ -82,7 +82,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // paid the full app-server handshake + 5s closeDrainTimeout cost
 // per call, which is wasted work for one-shot uses (/gtw commit,
 // /gtw pr, buildAgentPrompt).
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return runPrintMode(ctx, s, cfg, blocks)
 }
 
@@ -99,6 +99,6 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // agent.FormatReviewMessage and routes to BOTH the AS (via
 // as.SendBlocks) and the channel (via the chat session's emitter).
 // The bridge no longer owns presentation or distribution.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return runCodexReview(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
 }

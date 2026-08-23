@@ -98,7 +98,7 @@ const ptyIdleTimeout = 3 * time.Second
 // CLI whose first byte takes >ptyIdleTimeout to appear (e.g.
 // shell wrapper initialization) would be declared done
 // prematurely with an empty reply.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	a, err := s.Start(ctx, cfg)
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
@@ -165,6 +165,6 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // coding agent, can't read git diff, can't output structured
 // review. Return ErrReviewNotSupported so the /review dispatcher
 // can surface a friendly "agent X 暂不支持 /review" reply.
-func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, agent.ErrReviewNotSupported
 }

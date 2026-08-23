@@ -276,9 +276,9 @@ func (s *detectPersistTestStarter) Detect() error { return nil }
 func (s *detectPersistTestStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("detectPersistTestStarter: Start not implemented")
 }
-func (s *detectPersistTestStarter) RunOnce(context.Context, agent.StartConfig, []agent.ContentBlock) (agent.RunResult, error) {
+func (s *detectPersistTestStarter) RunOnce(_ context.Context, _ agent.StartConfig, []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("detectPersistTestStarter: RunOnce not implemented")
 }
-func (s *detectPersistTestStarter) Review(context.Context, agent.StartConfig) (agent.RunResult, error) {
+func (s *detectPersistTestStarter) Review(_ context.Context, _ agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("detectPersistTestStarter: Review not implemented")
 }

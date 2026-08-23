@@ -111,7 +111,7 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 	runOnceErr := errors.New("fake: binary not on PATH")
 	fs := &testStarter{
 		info: agent.NewInfo("fake", agent.ModeJSONIO, "fake", nil, nil),
-		runOnce: func(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock) (agent.RunResult, error) {
+		runOnce: func(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 			return agent.RunResult{}, runOnceErr
 		},
 	}
@@ -155,7 +155,7 @@ func TestPtyStarter_ReviewReturnsNotSupported(t *testing.T) {
 // returns a canned RunResult.
 type testStarter struct {
 	info    agent.Info
-	runOnce func(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error)
+	runOnce func(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error)
 }
 
 func (t *testStarter) Info() agent.Info { return t.info }
@@ -163,10 +163,10 @@ func (t *testStarter) Detect() error     { return nil }
 func (t *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("testStarter: Start not implemented")
 }
-func (t *testStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (t *testStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return t.runOnce(ctx, cfg, blocks)
 }
-func (t *testStarter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunResult, error) {
+func (t *testStarter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := t.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: agent.StandardPrompt(),

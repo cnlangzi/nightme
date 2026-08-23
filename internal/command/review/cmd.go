@@ -40,6 +40,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
@@ -267,7 +268,17 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		revCtx, cancel := context.WithTimeout(cs.Context(), timeouts.Review)
 		defer cancel()
 
-		result, err := starter.Review(revCtx, rc)
+		// Wire up the sink so the user sees the review agent's
+		// intermediate events (thinking, tool calls, …) streaming
+		// into the chat while /review runs. Sink is purely
+		// observational — the formatted review text still flows
+		// through FormatReviewMessage + sendBlocks (AS inject)
+		// and emitter.Send (channel emit) below as two separate
+		// product paths. No conflict: sink shows the process,
+		// the formatted text is the deliverable.
+		sink := outbound.StreamRunOnceToEmitter(revCtx, emitter, chatID, replyTo, runnerName)
+
+		result, err := starter.Review(revCtx, rc, agent.WithEventSink(sink))
 		if err != nil {
 			slog.Default().Warn("/review failed",
 				"agent", runnerName,

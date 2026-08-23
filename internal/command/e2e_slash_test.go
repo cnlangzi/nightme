@@ -89,7 +89,7 @@ func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
 func (a *echoAgent) SendPermission(string) error { return nil }
 func (a *echoAgent) New(context.Context) error   { return nil }
 func (a *echoAgent) Stop(context.Context) error  { return agent.ErrNotSupported }
-func (a *echoAgent) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (a *echoAgent) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock, _ ...agent.RunOnceOption) (agent.RunResult, error) {
 	if err := a.SendBlocks(ctx, blocks); err != nil {
 		return agent.RunResult{}, err
 	}
@@ -136,7 +136,7 @@ func (a *echoAgent) Close() error {
 // Review is unimplemented for the e2e echo fake — echo tests
 // don't drive /review. Return ErrReviewNotSupported to satisfy
 // the agent.Starter interface.
-func (a *echoAgent) Review(_ context.Context, _ agent.StartConfig) (agent.RunResult, error) {
+func (a *echoAgent) Review(_ context.Context, _ agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, agent.ErrReviewNotSupported
 }
 

@@ -371,7 +371,7 @@ func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) erro
 func (f *integrationFake) SendPermission(string) error { return nil }
 func (f *integrationFake) New(context.Context) error   { return nil }
 func (f *integrationFake) Stop(context.Context) error  { return agent.ErrNotSupported }
-func (f *integrationFake) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func (f *integrationFake) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock, _ ...agent.RunOnceOption) (agent.RunResult, error) {
 	if err := f.SendBlocks(ctx, blocks); err != nil {
 		return agent.RunResult{}, err
 	}
@@ -436,7 +436,7 @@ func (f *integrationFake) FinishEvent() {
 // Review is unimplemented for the gateway integration fake —
 // integration tests don't drive /review. Return
 // ErrReviewNotSupported to satisfy the agent.Starter interface.
-func (f *integrationFake) Review(_ context.Context, _ agent.StartConfig) (agent.RunResult, error) {
+func (f *integrationFake) Review(_ context.Context, _ agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, agent.ErrReviewNotSupported
 }
 

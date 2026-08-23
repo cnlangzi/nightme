@@ -24,11 +24,13 @@ import (
 // separate chains so back-to-back user inputs don't bleed Out* events
 // across turns (see docs/channel/telegram.md §11.12.2).
 //
-// userMessageID == 0 is the race-window sentinel: handleMessage hasn't
-// run yet for this turn, ensurePlaceholderForHeartbeat returns (0,nil),
-// and OutHeartbeat/OutError that race ahead of handleMessage get a
-// scratch chain keyed on 0. ensurePlaceholder purges that scratch chain
-// when handleMessage finally lands, replacing it with the real key.
+// userMessageID == 0 is a "no user message yet" sentinel (e.g.,
+// a fresh cold-start where the inbound hasn't been received but
+// some Out* is firing — not expected in current production but
+// kept as defensive keying). ensurePlaceholder creates a fresh
+// chain keyed on the real user message id; any prior scratch
+// chain keyed on 0 is orphan and gets LRU-evicted on capacity
+// pressure rather than actively purged.
 type chainKey struct {
 	chatID        string
 	topicID       int

@@ -34,10 +34,27 @@ type chunkEntry struct {
 // were emitted on the previous long-text split (overflow path).
 // Compose skips this prefix so the tail's renderText isn't
 // shorter than the body actually shipped to Telegram.
+//
+// hasHeartbeat gates Compose's header-rendering decision. Cold-create
+// (ensurePlaceholder / appendSegment cold-create / split overflow)
+// starts it false; patchChainHeader flips it true on the first
+// OutHeartbeat, and Compose then ALWAYS renders the header. The
+// "render header iff hasHeartbeat || entries empty" rule is what
+// hides the legacy "🤖 Working..." banner on turn paths that produce
+// body content but no heartbeat (slash command replies, error-only
+// turns, reaction-only clicks). See docs/channel/telegram.md §11.12.5.
 type chunkBody struct {
 	messageID int64
 	isFull    bool
 	header    string
+
+	// hasHeartbeat is true once any OutHeartbeat has patched this
+	// chunk's header. Compose treats !hasHeartbeat && entries>0 as
+	// "render body only" — the cold-create "🤖 Working..." header
+	// disappears as soon as a real entry arrives, instead of
+	// lingering forever on a turn that has no agent (slash
+	// command / shell / WatchMode-rejected / spawn-failed).
+	hasHeartbeat bool
 
 	entries []chunkEntry
 	footer  string
@@ -46,8 +63,10 @@ type chunkBody struct {
 }
 
 // newChunkBody creates a fresh chunkBody with the given header and
-// messageID. No entries / footer yet — business code mutates those
-// via the methods below.
+// messageID. No entries / footer yet; hasHeartbeat starts false so
+// the cold-create "🤖 Working..." banner is rendered until an
+// OutHeartbeat (or no entries at all) decides otherwise. Business
+// code mutates those via the methods below.
 func newChunkBody(messageID int64, header string) *chunkBody {
 	return &chunkBody{
 		messageID: messageID,
@@ -60,13 +79,52 @@ func newChunkBody(messageID int64, header string) *chunkBody {
 // None of these methods touch HTML, parse_mode, or any other view
 // concern. They mutate the data model only.
 
-// setHeader replaces the chunk's status header. Used by
-// patchChainHeader on every OutHeartbeat and by cold-create.
+// setHeader replaces the chunk's status header WITHOUT flipping
+// hasHeartbeat. Cold-create uses this (heartbeatText(nil) banner)
+// so the chunk still respects "render header only if entries
+// empty" rule and can be replaced by the first real flush without
+// lingering.
 func (b *chunkBody) setHeader(h string) { b.header = h }
+
+// setHeaderFromHeartbeat replaces the chunk's status header AND
+// flips hasHeartbeat=true. patchChainHeader calls this on every
+// OutHeartbeat so subsequent Compose() renders the header
+// unconditionally — the agent is alive, show its counts.
+// Equivalent to setHeader + a "this is real heartbeat info"
+// marker. Cold-create must NOT call this; it would defeat the
+// skip-header rule for non-agent turns.
+func (b *chunkBody) setHeaderFromHeartbeat(h string) {
+	b.header = h
+	b.hasHeartbeat = true
+}
 
 // header returns the current header. Used by chain rotation to
 // inherit the previous chunk's last state on overflow.
 func (b *chunkBody) headerText() string { return b.header }
+
+// inheritLatestHeader copies src's (header, hasHeartbeat) pair
+// onto this chunk. Used by overflow / split / rotate / tail paths
+// in placeholder_chain_flush.go so every newly-created chunk
+// reads as a chronological snapshot of the chain's active state
+// at the moment it was born — not a cold "🤖 Working..." banner.
+//
+// E.g. agent emits "💭 5 · 🔧 2" heartbeat (chunk A.active),
+// then a long OutThinking overflows: chunk B inherits A's header
+// verbatim ("💭 5 · 🔧 2") and hasHeartbeat=true. Subsequent
+// heartbeats update A.active to "💭 6 · 🔧 2", but B is frozen at
+// "💭 5 · 🔧 2" — that's the intended chronological progression;
+// broadcasting on heartbeat would cost N edits per N chunks and
+// flatten the timeline.
+//
+// Caller MUST hold chain.mu (src is typically
+// chain.chunks[chain.cursor] pre-markFull).
+func (b *chunkBody) inheritLatestHeader(src *chunkBody) {
+	if src == nil {
+		return
+	}
+	b.header = src.header
+	b.hasHeartbeat = src.hasHeartbeat
+}
 
 // appendEntry adds a plain-text segment. The text goes through
 // RenderMarkdown at Compose time. Multi-line strings are accepted.
@@ -179,17 +237,39 @@ func (b *chunkBody) markFlushedLen(n int) { b.flushedLen = n }
 // long-text content intact — without that, the next editMessageText
 // would overwrite pieces[N-1] with an empty body (P0 regression
 // guard).
+//
+// Header-skip rule (§11.12.5): render the header IFF
+// `hasHeartbeat || len(entries) == 0`.
+//   - Cold-create, body empty → render "🤖 Working..." as the
+//     alive signal (hasHeartbeat=false but entries empty).
+//   - First entry arrives before any heartbeat → header is
+//     "🤖 Working..." but hasHeartbeat=false AND entries>0, so
+//     header is SKIPPED and the body renders on its own. This is
+//     the case that fixes the legacy bug where slash commands /
+//     reaction-only / WatchMode-rejected turns carried a frozen
+//     "🤖 Working..." banner forever.
+//   - First OutHeartbeat arrives (with or without entries) →
+//     hasHeartbeat flips true → header renders thereafter.
+//   - Footer (statusbar) renders IFF entries or header did
+//     (skip the orphan-footer case — there's no header separator
+//     line for it to flank against).
 func (b *chunkBody) Compose() string {
 	var out strings.Builder
-	out.WriteString(b.header)
-	out.WriteByte('\n')
+
+	renderHeader := b.hasHeartbeat || len(b.entries) == 0
+	if renderHeader {
+		out.WriteString(b.header)
+		out.WriteByte('\n')
+	}
 
 	if len(b.entries) > 0 {
-		// Separator is 16 chars of U+2500 box-drawing horizontal,
-		// matching statusbar.PanelMaxWidth so the divider line
-		// aligns with the footer's left/right brackets
-		// ┌─...─› / └─...─› on either side of the chunk body.
-		out.WriteString("────────────────\n")
+		if renderHeader {
+			// Separator is 16 chars of U+2500 box-drawing horizontal,
+			// matching statusbar.PanelMaxWidth so the divider line
+			// aligns with the footer's left/right brackets
+			// ┌─...─› / └─...─› on either side of the chunk body.
+			out.WriteString("────────────────\n")
+		}
 		startIdx := b.skipFlushedPrefix()
 		for i := startIdx; i < len(b.entries); i++ {
 			e := b.entries[i]
@@ -211,7 +291,11 @@ func (b *chunkBody) Compose() string {
 			}
 		}
 	}
-	if b.footer != "" {
+	// Footer: only render when at least one of (header, entries) did.
+	// Otherwise the footer floats with no chunk context (cold-create
+	// before any heartbeat or entry would emit an orphan trailing
+	// panel — ugly).
+	if b.footer != "" && (renderHeader || len(b.entries) > 0) {
 		out.WriteByte('\n')
 		out.WriteString(b.footer)
 	}

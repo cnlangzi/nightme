@@ -417,19 +417,17 @@ func TestAdapter_Send_DM_OutReply_NoFieldsNoCache_NoTrailer(t *testing.T) {
 	if !strings.Contains(text, "lonely message") {
 		t.Errorf("body missing; got %q", text)
 	}
-	// v9 chain: chunk header is always '<b>🤖 Working...</b>'
-	// (cold-create placeholder banner). With no msg fields,
-	// StatusBarLines returns nil so the footer is absent. Verify
-	// the FOOTER is absent (chevron-tail panel chars) but the
-	// header 🤖 is still present (chunk banner is unconditional).
-	for _, want := range []string{"┌", "└", "›", "💰", "📁"} {
+	// v9 P1 (§11.12.5): the cold-create "🤖 Working..." banner is
+	// hidden once body content lands and no OutHeartbeat has fired
+	// (the body+no-heartbeat render rule). Pin it: the legacy v8
+	// "banner is unconditional" assertion no longer holds for a
+	// non-agent path / agent turn that races the reply ahead of
+	// the first heartbeat.
+	for _, want := range []string{"🤖", "┌", "└", "›", "💰", "📁"} {
 		if strings.Contains(text, want) {
-			t.Errorf("no-trailer reply should not contain StatusBar panel char %q; got %q",
+			t.Errorf("no-trailer reply should not contain banner %q; got %q",
 				want, text)
 		}
-	}
-	if !strings.Contains(text, "🤖") {
-		t.Errorf("chunk banner 🤖 should be present (cold-create header); got %q", text)
 	}
 }
 

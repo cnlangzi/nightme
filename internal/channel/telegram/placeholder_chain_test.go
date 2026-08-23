@@ -324,7 +324,7 @@ func TestScheduleFlushDebounced_MergesBurst(t *testing.T) {
 
 func TestRenderActiveChunkBody_HeaderOnly(t *testing.T) {
 	cur := &chunkBody{header: "💭 3 · 🔧 1"}
-	body := renderActiveChunkBody(cur, nil)
+	body := renderActiveChunkBody(cur)
 	if !strings.HasPrefix(body, "💭 3 · 🔧 1") {
 		t.Fatalf("body should start with header; got %q", body)
 	}

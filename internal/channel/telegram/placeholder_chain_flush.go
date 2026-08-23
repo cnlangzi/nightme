@@ -254,7 +254,8 @@ func flushChainNow(
 	// plain text). Do NOT pass it through RenderMarkdown again
 	// — that would re-escape the header's <b>...</b> tags and
 	// Telegram would render them as literal text.
-	rendered := renderActiveChunkBody(cur, chain.lastFooter)
+	cur.setFooter(statusbar.RenderPanel(chain.lastFooter))
+	rendered := renderActiveChunkBody(cur)
 
 	if len(rendered) <= maxTelegramTextLength {
 		if err := editFn(ctx, chatID, cur.messageID, rendered); err != nil {
@@ -308,10 +309,13 @@ func flushChainNow(
 	}
 
 	// pieces[len(pieces)-1] → if there are ≥ 2 pieces, this
-	// becomes the new active chunk. entries stays empty until
-	// the next append; flushedLen tracks how much of the
-	// post-render (buf unknown) was already emitted so future
-	// renders over the new tail don't include it.
+	// becomes the new active chunk. CRITICAL: the tail carries
+	// pieces[N-1] as its first entry so subsequent flushes
+	// re-render the long-text content. Pre-fix (P0 data loss)
+	// the tail had empty entries, so the next OutHeartbeat
+	// patch would render "<header>\n<footer>" and editMessageText
+	// would erase the pieces[N-1] content from Telegram. Locked
+	// in by TestChain_OverflowTailRetainsContent regression.
 	if len(pieces) > 1 {
 		lastPiece := pieces[len(pieces)-1]
 		mid, err := sendFn(ctx, chatID, topicID, userMessageID, lastPiece)
@@ -319,7 +323,11 @@ func flushChainNow(
 			return err
 		}
 		tail := newChunkBody(int64(mid), cur.headerText())
-		tail.markFlushedLen(len(lastPiece))
+		// Seed entries with the lastPiece content as a plain-text
+		// entry. flushedLen=0 because the entire content is in
+		// entries — Compose will render it. Future appends land
+		// alongside via appendSegment path #2.
+		tail.appendEntry(lastPiece)
 		chain.chunks = append(chain.chunks, tail)
 		chain.cursor = len(chain.chunks) - 1
 		chain.dirty = false
@@ -423,14 +431,12 @@ func renderChunkBody(headerLine, buf, footer string, flushedRenderedLen int) str
 	return b.String()
 }
 
-// renderActiveChunkBody is the wrapper used inside the chain
-// package. Pass-through to chunkBody.Compose() with the footer
-// rendered via statusbar.RenderPanel. Kept as a separate function
-// so flushChainNow (and any chain-aware caller) doesn't need to
-// know the composition rules — they just hand over the chunk.
-func renderActiveChunkBody(cur *chunkBody, lastFooter []string) string {
-	if len(lastFooter) > 0 {
-		cur.setFooter(statusbar.RenderPanel(lastFooter))
-	}
+// renderActiveChunkBody is a render-only wrapper. It does NOT
+// mutate the chunk's footer — that's the caller's job. P2 fix
+// (2026-08-23): the prior implementation called cur.setFooter()
+// inside the render function, which violated Layer 4 separation
+// (renders don't mutate the data model). flushChainNow now
+// sets the footer before calling renderActiveChunkBody.
+func renderActiveChunkBody(cur *chunkBody) string {
 	return cur.Compose()
 }

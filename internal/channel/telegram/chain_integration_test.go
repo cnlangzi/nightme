@@ -521,3 +521,77 @@ func TestChainOverflow_RotatesToNewChain(t *testing.T) {
 		t.Fatalf("previous chunk should be locked after overflow rotation")
 	}
 }
+
+// TestChainOverflow_TailHasNonEmptyEntries is the focused P0
+// regression guard. The PRE-FIX behaviour was: tail.entries = []
+// (because freezeAfterOverflow cleared entries to nil). With
+// empty entries, tail.Compose() = "<header>\n<footer>" and
+// the next editMessageText erased pieces[N-1] content from
+// Telegram. POST-FIX: tail.appendEntry(lastPiece) seeds the
+// tail with the last piece's content so subsequent renders
+// include it.
+//
+// Note: the long-text is split across pieces. The tail only
+// holds pieces[N-1] (typically the LAST slice, smaller than
+// pieces[0]). We assert the tail entries are non-empty and
+// contain at least the tail fragment — not the entire original
+// long-text, which would be incorrect.
+func TestChainOverflow_TailHasNonEmptyEntries(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "1100", TopicID: 0,
+		PlaceholderMessageID: 2100, UserMessageID: "110"})
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "1100", Kind: messages.OutReply, Text: "seed",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// 4000-char payload → overflow triggers long-text split.
+	big := strings.Repeat("a", 4000)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "1100", Kind: messages.OutReply, Text: big,
+	}); err != nil {
+		t.Fatalf("big-send: %v", err)
+	}
+
+	drainDebouncedFlush(t, a, api)
+
+	chain := a.chains.getOrCreate("1100", 0)
+	chain.mu.Lock()
+	cur := chain.cursor
+	nChunks := len(chain.chunks)
+	tail := chain.chunks[cur]
+	tailEntries := tail.entriesJoined()
+	tailComposed := tail.Compose()
+	chain.mu.Unlock()
+
+	if nChunks < 2 {
+		t.Fatalf("expected ≥ 2 chunks after overflow; got %d", nChunks)
+	}
+	if cur < 1 {
+		t.Fatalf("cursor not advanced to tail; got %d", cur)
+	}
+
+	// P0 regression guard: tail.entries must be non-empty.
+	// Pre-fix tail.entries was [] so Compose() emitted only
+	// "<header>\n<footer>" and the next editMessageText
+	// erased pieces[N-1] content from Telegram.
+	if tailEntries == "" {
+		t.Fatal("P0 regression: tail.entries empty (pre-fix bug)")
+	}
+	if !strings.Contains(tailComposed, "a") {
+		t.Fatalf("tail.Compose() does not contain 'a' character; got %q",
+			tailComposed[:min(len(tailComposed), 100)])
+	}
+
+	// Also assert the tail.compose output is reasonably sized
+	// (≥ 50 chars of content). Pre-fix would render ~30 chars
+	// (just header + ──── + footer), giving ~50 chars total.
+	// Post-fix with the 4000-a long-text tail we expect
+	// header + separator + ≥50 a's + footer.
+	if len(tailComposed) < 100 {
+		t.Fatalf("tail.Compose() too short; got %d bytes (%q)",
+			len(tailComposed), tailComposed)
+	}
+}

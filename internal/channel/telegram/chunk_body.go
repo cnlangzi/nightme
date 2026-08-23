@@ -130,11 +130,26 @@ func (b *chunkBody) markFlushedLen(n int) { b.flushedLen = n }
 //                HTML); isHTML entries write verbatim
 //   - footer:    verbatim (statusbar.RenderPanel output)
 //
-// Pre-fix: three inline body-assembly sites in appendSegment
-// case-1/4 and flushChainNow built the body independently with
-// duplicated separator/footer logic. Post-fix: every outgoing
-// Telegram message in the chain goes through this method. Adding
-// a new section (e.g. status badges) is a single-line change here.
+// Inter-entry separator: every entry is followed by '\n'. If the
+// entry already ends with '\n' the trailing-newline guard keeps
+// the output tidy; if not, Compose adds it. Consecutive entries
+// always have a single '\n' between them so the rendered body
+// reads cleanly even when formatReply / formatTool produce
+// single-line outputs without trailing newlines.
+//
+// P1 fix (2026-08-23): the prior "if i > startIdx && byteOffset
+// == 0" block was dead code — byteOffset was always 0 from
+// skipFlushedPrefix. Removed.
+//
+// Overflow handling: skipFlushedPrefix returns the entry index
+// to start from. When flushedLen > 0 with no entries (the
+// overflow path cleared entries via freezeAfterOverflow), we
+// skip to the end and render only header + footer. The tail
+// chunk of an overflow carries pieces[N-1] as its first entry
+// (see flushChainNow) so the next flush re-renders with the
+// long-text content intact — without that, the next editMessageText
+// would overwrite pieces[N-1] with an empty body (P0 regression
+// guard).
 func (b *chunkBody) Compose() string {
 	var out strings.Builder
 	out.WriteString(b.header)
@@ -142,7 +157,7 @@ func (b *chunkBody) Compose() string {
 
 	if len(b.entries) > 0 {
 		out.WriteString("────────\n")
-		startIdx, byteOffset := b.skipFlushedPrefix()
+		startIdx := b.skipFlushedPrefix()
 		for i := startIdx; i < len(b.entries); i++ {
 			e := b.entries[i]
 			text := e.text
@@ -153,13 +168,12 @@ func (b *chunkBody) Compose() string {
 				}
 				text = rendered
 			}
-			if i > startIdx && byteOffset == 0 {
-				// separator between rendered entries
-				// (only on the un-emitted tail)
-			}
-			_ = byteOffset // reserved for byte-aware split logic
 			out.WriteString(text)
-			if !strings.HasSuffix(e.text, "\n") {
+			// Trailing newline guard: ensure every entry ends
+			// with '\n' so the next entry (or the separator
+			// before footer) reads cleanly. With this guard the
+			// inter-entry separator is implicitly '\n'.
+			if !strings.HasSuffix(text, "\n") {
 				out.WriteByte('\n')
 			}
 		}
@@ -172,22 +186,22 @@ func (b *chunkBody) Compose() string {
 }
 
 // skipFlushedPrefix returns the entry index to start rendering
-// from and a byte offset (currently unused but reserved for
-// byte-aware overflow tracking). On the long-text split path,
-// Compose skips the already-emitted prefix so the next flush
-// renders only the un-emitted remainder.
-func (b *chunkBody) skipFlushedPrefix() (int, int) {
+// from. flushedLen is reserved for future byte-aware overflow
+// tracking; today the overflow path clears entries via
+// freezeAfterOverflow and re-seeds the tail chunk's entries
+// with the pieces[N-1] content, so this is startIdx=len(entries)
+// when the chunk is a frozen overflow tail.
+func (b *chunkBody) skipFlushedPrefix() int {
 	if b.flushedLen == 0 {
-		return 0, 0
+		return 0
 	}
-	// Conservatively render from the beginning when we don't
-	// have byte-precise entry boundaries. The long-text path
-	// (commit 08f8f7e) resets entries to nil after split, so
-	// flushedLen > 0 with len(entries) == 0 is the common case.
+	// If entries is non-empty the chunk has been re-seeded
+	// with new content; render from the beginning. If entries
+	// is empty (frozen overflow tail), skip everything.
 	if len(b.entries) == 0 {
-		return 0, b.flushedLen
+		return len(b.entries)
 	}
-	return 0, b.flushedLen
+	return 0
 }
 
 // --- Convenience accessors ------------------------------------------

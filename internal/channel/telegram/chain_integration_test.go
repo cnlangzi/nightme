@@ -813,3 +813,414 @@ func TestChain_Heartbeat_DoesNotCrossUserMessageBoundary(t *testing.T) {
 		t.Fatalf("msg 2 chain reused msg 1's messageID: %d", chain2MsgID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// v9 P2 OutResult 独立消息 + 🎉 锚点切换 测试矩阵
+// （详见 docs/channel/telegram.md §11.12.4.1 + §11.12.9）
+//
+// OutResult 不再 fold 进 chain buffer —— 走独立 reply-anchored
+// sendMessage，body 含 result text + StatusBar trailer。
+// chain.resultMessageID 记录最后一片 result messageID。
+// OnPromptEnded 🎉 优先贴 result message，零值回退 active chunk。
+// ---------------------------------------------------------------------------
+
+// TestAdapter_Send_OutResult_SendsStandaloneReply 验证 v9 P2：
+// OutResult 走独立 sendMessage（reply_to_message_id=userMessageID），
+// body 含 result text + StatusBar 分隔 + trailer 三行；
+// chain.resultMessageID 记录 standalone messageID。
+func TestAdapter_Send_OutResult_SendsStandaloneReply(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{
+		ChatID: "500", TopicID: 0,
+		PlaceholderMessageID: 900, UserMessageID: "50",
+	})
+
+	// richOut hardcodes ChatID="100", so build the message inline
+	// with ChatID="500" to match the topic state we just put.
+	msg := messages.OutboundMessage{
+		ChatID:    "500",
+		Kind:      messages.OutResult,
+		Text:      "this is the result body",
+		AgentName: "claude",
+		Model:     "opus-4-5",
+		SessionID: "sess-1",
+		Usage: &agent.UsageInfo{
+			InputTokens: 12_300, OutputTokens: 1_500, CostUSD: 0.087,
+		},
+		GitStatus: &messages.GitStatus{
+			Workspace: "code/nightme",
+			Snapshot:  &messages.GitStatusSnapshot{Branch: "main", AheadOfRemote: 2},
+		},
+	}
+	if err := a.Send(context.Background(), msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// 1. Exactly one sendMessage call.
+	calls := api.snapshotCalls()
+	var sendCalls int
+	var sendCall *fakeCall
+	for index := range calls {
+		if calls[index].Method == "sendMessage" {
+			sendCalls++
+			sendCall = &calls[index]
+		}
+	}
+	if sendCalls != 1 {
+		t.Fatalf("OutResult must trigger exactly 1 sendMessage; got %d", sendCalls)
+	}
+
+	// 2. The sendMessage must carry reply_to_message_id = userMsgID.
+	if replyTo, _ := sendCall.Params["reply_to_message_id"].(int); replyTo != 50 {
+		t.Errorf("sendMessage reply_to_message_id = %d, want 50", replyTo)
+	}
+
+	// 3. Body must contain the result text + StatusBar separator + 3 trailer lines.
+	text, _ := sendCall.Params["text"].(string)
+	for _, want := range []string{
+		"this is the result body",
+		"────────",
+		"🤖: claude",
+		"💰:「",
+		"📁: ",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("OutResult standalone text missing %q; got %q", want, text)
+		}
+	}
+
+	// 4. chain.resultMessageID must equal the standalone messageID.
+	chain := a.chains.getOrCreate("500", 0, 50)
+	chain.mu.Lock()
+	defer chain.mu.Unlock()
+	if chain.resultMessageID == 0 {
+		t.Errorf("chain.resultMessageID not set after OutResult; want the sendMessage messageID")
+	}
+
+	// 5. OutResult is standalone — chain.cursor remains -1 (no chunk
+	// materialised) because the turn had no other activity. Chain
+	// only exists to carry resultMessageID; an empty chain is OK.
+	if chain.cursor >= 0 && len(chain.chunks[chain.cursor].entries) != 0 {
+		t.Errorf("OutResult must NOT add chain entries; got %d entries",
+			len(chain.chunks[chain.cursor].entries))
+	}
+}
+
+// TestAdapter_Send_OutResult_DoesNotChangeActiveChunkText 验证
+// OutResult 前后 active chunk 的 chain 文本完全一致 —
+// OutResult 是 out-of-band 的，不污染 chain 内任何 chunk 的 entries。
+func TestAdapter_Send_OutResult_DoesNotChangeActiveChunkText(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{
+		ChatID: "510", TopicID: 0,
+		PlaceholderMessageID: 910, UserMessageID: "51",
+	})
+
+	// Send a regular OutReply to seed chain with one entry.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "510", Kind: messages.OutReply,
+		Text: "thinking done", AgentName: "claude",
+	}); err != nil {
+		t.Fatalf("send reply: %v", err)
+	}
+	drainDebouncedFlush(t, a, api)
+
+	beforeText := chainSnapshot(a, "510", 0, 51)
+	if !strings.Contains(beforeText, "thinking done") {
+		t.Fatalf("chain before OutResult missing reply text: %q", beforeText)
+	}
+
+	// Now send an OutResult with ChatID matching the topic state.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "510", Kind: messages.OutResult,
+		Text: "FINAL ANSWER", AgentName: "claude",
+	}); err != nil {
+		t.Fatalf("send result: %v", err)
+	}
+
+	afterText := chainSnapshot(a, "510", 0, 51)
+	if afterText != beforeText {
+		t.Errorf("OutResult polluted chain entries\nbefore: %q\nafter:  %q", beforeText, afterText)
+	}
+}
+
+// TestAdapter_Send_OutResult_LongText_SplitsAcrossMultipleMessages
+// 验证 body + trailer > 3900 chars → 多片 sendMessage + 每片都带
+// reply_to_message_id=userMessageID + chain.resultMessageID 非零
+// (具体是哪一片由 sendMessageCounter 决定；"last wins" 由下一个测试
+// 覆盖)。
+func TestAdapter_Send_OutResult_LongText_SplitsAcrossMultipleMessages(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{
+		ChatID: "520", TopicID: 0,
+		PlaceholderMessageID: 920, UserMessageID: "52",
+	})
+
+	// Build a body that, after appending the StatusBar trailer, exceeds
+	// maxTelegramTextLength (3900). 4500 chars of 'x' + trailer > 3900.
+	longBody := strings.Repeat("x", 4500)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "520", Kind: messages.OutResult,
+		Text:   longBody,
+		AgentName: "claude",
+		Model:     "opus-4-5",
+		SessionID: "sess-1",
+		Usage: &agent.UsageInfo{
+			InputTokens: 12_300, OutputTokens: 1_500, CostUSD: 0.087,
+		},
+		GitStatus: &messages.GitStatus{
+			Workspace: "code/nightme",
+			Snapshot:  &messages.GitStatusSnapshot{Branch: "main", AheadOfRemote: 2},
+		},
+	}); err != nil {
+		t.Fatalf("send long result: %v", err)
+	}
+
+	// Collect every sendMessage call triggered by this OutResult.
+	calls := api.snapshotCalls()
+	var sendCalls []fakeCall
+	for _, c := range calls {
+		if c.Method == "sendMessage" {
+			sendCalls = append(sendCalls, c)
+		}
+	}
+	if len(sendCalls) < 2 {
+		t.Fatalf("expected ≥2 sendMessage calls for long result; got %d", len(sendCalls))
+	}
+
+	// Every piece must carry reply_to_message_id = 52.
+	for i, c := range sendCalls {
+		if replyTo, _ := c.Params["reply_to_message_id"].(int); replyTo != 52 {
+			t.Errorf("piece %d reply_to_message_id = %d, want 52", i, replyTo)
+		}
+	}
+
+	// chain.resultMessageID must be populated.
+	chain := a.chains.getOrCreate("520", 0, 52)
+	chain.mu.Lock()
+	defer chain.mu.Unlock()
+	if chain.resultMessageID == 0 {
+		t.Fatalf("chain.resultMessageID not set after long OutResult")
+	}
+}
+
+// TestAdapter_Send_OutResult_MultipleInOneTurn_LastWins 验证同 turn
+// 多条 OutResult → chain.resultMessageID 取最后一条的 messageID
+// （"last wins" 语义 — 🎉 落在最后一片 result 消息上）。
+func TestAdapter_Send_OutResult_MultipleInOneTurn_LastWins(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{
+		ChatID: "530", TopicID: 0,
+		PlaceholderMessageID: 930, UserMessageID: "53",
+	})
+
+	outMsg := func(text string) messages.OutboundMessage {
+		return messages.OutboundMessage{
+			ChatID: "530", Kind: messages.OutResult,
+			Text:   text, AgentName: "claude",
+			Model: "opus-4-5", SessionID: "sess-1",
+			Usage: &agent.UsageInfo{InputTokens: 100, OutputTokens: 50},
+		}
+	}
+
+	if err := a.Send(context.Background(), outMsg("first result")); err != nil {
+		t.Fatalf("send first: %v", err)
+	}
+	firstID := a.chains.getOrCreate("530", 0, 53).snapshotResultMessageIDLocked()
+
+	if err := a.Send(context.Background(), outMsg("second result")); err != nil {
+		t.Fatalf("send second: %v", err)
+	}
+	secondID := a.chains.getOrCreate("530", 0, 53).snapshotResultMessageIDLocked()
+
+	if firstID == 0 || secondID == 0 {
+		t.Fatalf("resultMessageID never set: first=%d second=%d", firstID, secondID)
+	}
+	if firstID == secondID {
+		t.Errorf("two OutResult landed on the same messageID; expected distinct IDs: first=%d second=%d",
+			firstID, secondID)
+	}
+
+	// After both sends, chain.resultMessageID must be the LAST one.
+	chain := a.chains.getOrCreate("530", 0, 53)
+	chain.mu.Lock()
+	finalID := chain.resultMessageID
+	chain.mu.Unlock()
+	if finalID != secondID {
+		t.Errorf("resultMessageID = %d, want %d (last-wins)", finalID, secondID)
+	}
+
+	// Sanity: there should be exactly 2 sendMessage calls (one per result).
+	calls := api.snapshotCalls()
+	var sendCount int
+	for _, c := range calls {
+		if c.Method == "sendMessage" {
+			sendCount++
+		}
+	}
+	if sendCount != 2 {
+		t.Errorf("expected 2 sendMessage calls (one per OutResult); got %d", sendCount)
+	}
+}
+
+// TestAdapter_OnPromptEnded_DM_StampsOnResultMessage 验证 v9 P2
+// OnPromptEnded 🎉 锚点切换：OutResult + OnPromptEnded → setMessageReaction
+// 命中 resultMessageID，不命中 active chunk messageID。
+func TestAdapter_OnPromptEnded_DM_StampsOnResultMessage(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{
+		ChatID: "540", TopicID: 0,
+		PlaceholderMessageID: 940, UserMessageID: "54",
+	})
+
+	// 1. Seed chain with one OutReply (so active chunk has a messageID).
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "540", Kind: messages.OutReply,
+		Text: "tool call summary", AgentName: "claude",
+	}); err != nil {
+		t.Fatalf("send reply: %v", err)
+	}
+	drainDebouncedFlush(t, a, api)
+	chain := a.chains.getOrCreate("540", 0, 54)
+	chain.mu.Lock()
+	activeChunkID := chain.chunks[chain.cursor].messageID
+	chain.mu.Unlock()
+	if activeChunkID == 0 {
+		t.Fatalf("active chunk has no messageID after OutReply")
+	}
+
+	// 2. Send OutResult — gets a standalone messageID recorded.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "540", Kind: messages.OutResult,
+		Text: "FINAL ANSWER", AgentName: "claude",
+		Model: "opus-4-5", SessionID: "sess-1",
+		Usage: &agent.UsageInfo{InputTokens: 100, OutputTokens: 50},
+	}); err != nil {
+		t.Fatalf("send result: %v", err)
+	}
+	chain.mu.Lock()
+	resultID := chain.resultMessageID
+	chain.mu.Unlock()
+	if resultID == 0 {
+		t.Fatalf("chain.resultMessageID not set after OutResult")
+	}
+	if resultID == activeChunkID {
+		t.Fatalf("resultID == activeChunkID; expected distinct messages: %d", resultID)
+	}
+
+	// 3. OnPromptEnded.
+	a.OnPromptEnded(context.Background(), "540", "54")
+
+	// 4. Find the 🎉 setMessageReaction and verify it hit resultID,
+	// NOT activeChunkID, NOT userMsgID (54).
+	var (
+		stampedResult  int
+		stampedActive  int
+		stampedUserMsg int
+	)
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "setMessageReaction" {
+			continue
+		}
+		mid, _ := call.Params["message_id"].(int)
+		mid64 := int64(mid)
+		if !hasEmojiReaction(call, "\U0001F389") {
+			continue
+		}
+		switch mid64 {
+		case resultID:
+			stampedResult++
+		case activeChunkID:
+			stampedActive++
+		case 54:
+			stampedUserMsg++
+		default:
+			// Some other target — we don't care for this assertion.
+		}
+	}
+	if stampedResult != 1 {
+		t.Errorf("🎉 should stamp ONCE on result message (id=%d); got %d", resultID, stampedResult)
+	}
+	if stampedActive != 0 {
+		t.Errorf("🎉 must NOT stamp on active chunk (id=%d); got %d", activeChunkID, stampedActive)
+	}
+	if stampedUserMsg != 0 {
+		t.Errorf("🎉 must NOT stamp on user msg (id=54); got %d (v6.3 single-reaction budget)", stampedUserMsg)
+	}
+}
+
+// TestAdapter_OnPromptEnded_NoOutResult_FallsBackToActiveChunk 验证
+// 无 OutResult 的 turn（纯 error / 纯 tool / 纯 slash command）回退到
+// active chunk 兜底，保住 v9 P1 行为。
+func TestAdapter_OnPromptEnded_NoOutResult_FallsBackToActiveChunk(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{
+		ChatID: "550", TopicID: 0,
+		PlaceholderMessageID: 950, UserMessageID: "55",
+	})
+
+	// Seed chain with one OutReply — no OutResult this turn.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "550", Kind: messages.OutReply,
+		Text: "thinking done", AgentName: "claude",
+	}); err != nil {
+		t.Fatalf("send reply: %v", err)
+	}
+	drainDebouncedFlush(t, a, api)
+	chain := a.chains.getOrCreate("550", 0, 55)
+	chain.mu.Lock()
+	activeChunkID := chain.chunks[chain.cursor].messageID
+	resultID := chain.resultMessageID // should be 0
+	chain.mu.Unlock()
+	if activeChunkID == 0 {
+		t.Fatalf("active chunk has no messageID")
+	}
+	if resultID != 0 {
+		t.Fatalf("resultMessageID unexpectedly non-zero: %d", resultID)
+	}
+
+	a.OnPromptEnded(context.Background(), "550", "55")
+
+	// 🎉 must stamp on activeChunkID (fallback path).
+	var stampedActive int
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "setMessageReaction" {
+			continue
+		}
+		if mid, _ := call.Params["message_id"].(int); int64(mid) == activeChunkID {
+			if hasEmojiReaction(call, "\U0001F389") {
+				stampedActive++
+			}
+		}
+	}
+	if stampedActive != 1 {
+		t.Errorf("🎉 should fall back to active chunk (id=%d); got %d stamps",
+			activeChunkID, stampedActive)
+	}
+}
+
+// snapshotResultMessageIDLocked returns chain.resultMessageID under
+// chain.mu. Used by tests that want to capture the value WITHOUT
+// racing the adapter's lock; the caller must NOT hold chain.mu.
+func (c *placeholderChain) snapshotResultMessageIDLocked() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resultMessageID
+}
+
+// hasEmojiReaction reports whether the given setMessageReaction
+// fakeCall has a single-emoji list containing the target emoji.
+// Mirrors the wire shape produced by setMessageReactions:
+//   reaction = []any{map[string]any{"type":"emoji","emoji":target}}
+func hasEmojiReaction(call fakeCall, target string) bool {
+	reactions, ok := call.Params["reaction"].([]any)
+	if !ok || len(reactions) != 1 {
+		return false
+	}
+	entry, ok := reactions[0].(map[string]any)
+	if !ok {
+		return false
+	}
+	emoji, _ := entry["emoji"].(string)
+	return emoji == target
+}

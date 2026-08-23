@@ -148,9 +148,18 @@ func appendSegment(
 	}
 
 	// 3. Overflow → lock current chunk and materialise a fresh one.
+	// The new chunk INHERITS cur.headerLine (the previous chunk's
+	// last headerLine — the latest heartbeat snapshot or the
+	// cold-create banner). The user's chat view therefore stays
+	// visually continuous across the page break: the new chunk's
+	// first line is the same status line that was just rendered
+	// on the previous chunk, and the next OutHeartbeat will
+	// patch it forward to a fresh snapshot. We intentionally do
+	// NOT use a '📄 (continued)' sentinel — the user perceives the
+	// chain as one timeline, not a paginated document.
 	cur.isFull = true
-	header := "📄 (continued)"
-	body := header + "\n────────\n" + segment
+	inheritedHeader := cur.headerLine
+	body := inheritedHeader + "\n────────\n" + segment
 	if chain.lastFooter != nil {
 		body += "\n\n" + statusbar.RenderPanel(chain.lastFooter)
 	}
@@ -160,7 +169,7 @@ func appendSegment(
 	}
 	newChunk := &placeholderChunk{
 		messageID:  messageID,
-		headerLine: header,
+		headerLine: inheritedHeader,
 	}
 	// P0 #1 fix: same rationale as case-1. The overflow chunk
 	// ships the segment inline AND records it in cur.buf so

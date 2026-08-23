@@ -31,7 +31,7 @@ func chainSnapshot(a *Adapter, chatID string, topicID int) string {
 	if chain.cursor < 0 {
 		return ""
 	}
-	return chain.chunks[chain.cursor].buf.String()
+	return chain.chunks[chain.cursor].entriesJoined()
 }
 
 // drainDebouncedFlush waits up to 600ms for the chain's pending
@@ -80,7 +80,7 @@ func TestAdapter_Send_OutReply_FoldsIntoChain(t *testing.T) {
 	chain.mu.Lock()
 	cursor := chain.cursor
 	chunksLen := len(chain.chunks)
-	firstBuf := chain.chunks[0].buf.String()
+	firstBuf := chain.chunks[0].entriesJoined()
 	chain.mu.Unlock()
 	if cursor != 0 || chunksLen != 1 {
 		t.Fatalf("cold-create state wrong: cursor=%d chunks=%d", cursor, chunksLen)
@@ -203,7 +203,7 @@ func TestAdapter_OutHeartbeat_PATCHesActiveChunkHeader(t *testing.T) {
 
 	chain := a.chains.getOrCreate("300", 0)
 	chain.mu.Lock()
-	header := chain.chunks[0].headerLine
+	header := chain.chunks[0].headerText()
 	chain.mu.Unlock()
 	if !strings.Contains(header, "💭 5") || !strings.Contains(header, "🔧 2") {
 		t.Fatalf("headerLine missing think/tool count; got %q", header)

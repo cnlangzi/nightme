@@ -624,10 +624,8 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// / Send can resolve it without recreating.
 	chain := a.chains.getOrCreate(chatID, topicID)
 	chain.mu.Lock()
-	chain.chunks = []*placeholderChunk{{
-		messageID:  int64(result.MessageID),
-		headerLine: header,
-	}}
+	chunk := newChunkBody(int64(result.MessageID), header)
+	chain.chunks = []*chunkBody{chunk}
 	chain.cursor = 0
 	chain.dirty = false
 	chain.lastFooter = nil
@@ -1220,9 +1218,9 @@ func (a *Adapter) patchChainHeader(
 		return nil
 	}
 	if msg.Heartbeat != nil {
-		chain.chunks[chain.cursor].headerLine = heartbeatText(msg.Heartbeat)
+		chain.chunks[chain.cursor].setHeader(heartbeatText(msg.Heartbeat))
 	} else {
-		chain.chunks[chain.cursor].headerLine = heartbeatText(nil)
+		chain.chunks[chain.cursor].setHeader(heartbeatText(nil))
 	}
 	chain.dirty = true
 	chain.mu.Unlock()

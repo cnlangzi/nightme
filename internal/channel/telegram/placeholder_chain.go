@@ -1,7 +1,6 @@
 package telegram
 
 import (
-	"strings"
 	"sync"
 	"time"
 )
@@ -29,10 +28,14 @@ type chainKey struct {
 // placeholderChain is the per-turn chain container. Holds at most one
 // *active* chunk (chain.cursor); older chunks are frozen (chunk.isFull)
 // and never re-rendered or re-PATCHed.
+//
+// chunks now hold the OOP chunkBody type (see chunk_body.go) —
+// business code mutates fields through chunkBody methods; rendering
+// is encapsulated in chunkBody.Compose().
 type placeholderChain struct {
 	mu sync.Mutex
 
-	chunks []*placeholderChunk
+	chunks []*chunkBody
 	// cursor is the index of the chunk that accepts new segments.
 	// -1 means the chain is empty (first event must materialise a chunk).
 	cursor int
@@ -50,29 +53,6 @@ type placeholderChain struct {
 	// debounceTimer is the currently pending debounce. Resets on every
 	// new event within the window so bursts coalesce.
 	debounceTimer *time.Timer
-}
-
-type placeholderChunk struct {
-	messageID  int64
-	buf        strings.Builder
-	charCount  int // buf.Len() snapshot; avoids per-step query
-	isFull     bool
-	headerLine string // "🤖 Working..." or "💭 N · 🔧 M · ⏱ HH:MM:SS"
-
-	// flushedRenderedLen is the byte-offset into cur.buf whose
-	// text has already been emitted on Telegram. It is > 0 only
-	// when the chunk is the tail of a long-text overflow
-	// (P0 #2 fix, see flushChainNow). The overflow chain chunks
-	// have empty buf but their rendered pieces were sized at
-	// splitTelegramText boundaries.
-	//
-	// Without this field, the overflow path would either
-	// re-render the entire pre-split buf onto the tail piece
-	// (overwriting the prefix pieces) or render past the
-	// already-flushed content. flushedRenderedLen + buf
-	// distinguishes "rendered buffer prefix" from "buffer
-	// remainder that needs to be re-edited next flush".
-	flushedRenderedLen int
 }
 
 // ---------------------------------------------------------------------------

@@ -82,6 +82,18 @@ const chainChunkThresholdChars = 3500
 // renderActiveChunkBody will produce on the next editMessageText;
 // otherwise the user briefly sees the separator appear "for free"
 // on the first event after cold-start.
+// bufTextSize returns the byte length of the chunk's rendered
+// entries (post-separator). Used to decide if a new segment
+// would push the chunk past the 3500-char threshold. O(n) on
+// entries; fine since chains are short.
+func (b *chunkBody) bufTextSize() int {
+	n := 0
+	for _, e := range b.entries {
+		n += len(e.text) + 1 // +1 for trailing newline separator
+	}
+	return n
+}
+
 func appendSegment(
 	ctx context.Context,
 	chain *placeholderChain,
@@ -104,7 +116,7 @@ func appendSegment(
 	// recursed into appendSegment with chain.mu held to handle this;
 	// sync.Mutex is not reentrant so we now use a loop instead.
 	for chain.cursor >= 0 &&
-		chain.chunks[chain.cursor].isFull &&
+		chain.chunks[chain.cursor].isChunkFull() &&
 		chain.cursor+1 < len(chain.chunks) {
 		chain.cursor++
 	}
@@ -112,31 +124,24 @@ func appendSegment(
 	// 1. Empty chain → materialise the first chunk via send.
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
-		footer := ""
+		chunk := newChunkBody(0, headerLine)
+		// P0 #1 fix: seed entries so subsequent renders include
+		// the inlined segment. Without this, Compose() produces
+		// header + ──── + footer (no segment) on the next flush
+		// and overwrites the original message content.
+		chunk.appendEntry(segment)
+		// Set the footer before computing the body so the cold-
+		// create render matches what subsequent flushes produce.
 		if chain.lastFooter != nil {
-			footer = statusbar.RenderPanel(chain.lastFooter)
+			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
 		}
-		// renderChunkBody is the unified entry for chunk-body
-		// composition (used by both sendMessage and editMessageText
-		// paths). Routes header verbatim, runs buf through
-		// RenderMarkdown, footer verbatim.
-		body := renderChunkBody(headerLine, segment, footer, 0)
+		body := chunk.Compose()
 		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
 		if err != nil {
 			return err
 		}
-		chunk := &placeholderChunk{
-			messageID:  messageID,
-			headerLine: headerLine,
-		}
-		// P0 #1 fix: seed cur.buf so subsequent renders include
-		// the inlined segment. Without this, renderActiveChunkBody
-		// produces header + ──── + footer (no segment) on the
-		// next flush and overwrites the original message content.
-		chunk.buf.WriteString(segment)
-		chunk.buf.WriteByte('\n')
-		chunk.charCount = len(segment) + 1
-		chain.chunks = []*placeholderChunk{chunk}
+		chunk.messageID = messageID
+		chain.chunks = []*chunkBody{chunk}
 		chain.cursor = 0
 		chain.dirty = true
 		return nil
@@ -144,10 +149,8 @@ func appendSegment(
 
 	// 2. Try to append on the active chunk.
 	cur := chain.chunks[chain.cursor]
-	if !cur.isFull && cur.charCount+len(segment)+1 <= chainChunkThresholdChars {
-		cur.buf.WriteString(segment)
-		cur.buf.WriteByte('\n')
-		cur.charCount += len(segment) + 1
+	if !cur.isChunkFull() && cur.bufTextSize()+len(segment)+1 <= chainChunkThresholdChars {
+		cur.appendEntry(segment)
 		chain.dirty = true
 		return nil
 	}
@@ -162,29 +165,19 @@ func appendSegment(
 	// patch it forward to a fresh snapshot. We intentionally do
 	// NOT use a '📄 (continued)' sentinel — the user perceives the
 	// chain as one timeline, not a paginated document.
-	cur.isFull = true
-	inheritedHeader := cur.headerLine
-	footer := ""
+	cur.markFull()
+	inheritedHeader := cur.headerText()
+	newChunk := newChunkBody(0, inheritedHeader)
+	newChunk.appendEntry(segment)
 	if chain.lastFooter != nil {
-		footer = statusbar.RenderPanel(chain.lastFooter)
+		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
 	}
-	// Same unified body composer as case-1; routes header as-is,
-	// runs segment through RenderMarkdown, footer as-is.
-	body := renderChunkBody(inheritedHeader, segment, footer, 0)
+	body := newChunk.Compose()
 	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
 	if err != nil {
 		return err
 	}
-	newChunk := &placeholderChunk{
-		messageID:  messageID,
-		headerLine: inheritedHeader,
-	}
-	// P0 #1 fix: same rationale as case-1. The overflow chunk
-	// ships the segment inline AND records it in cur.buf so
-	// subsequent renders match.
-	newChunk.buf.WriteString(segment)
-	newChunk.buf.WriteByte('\n')
-	newChunk.charCount = len(segment) + 1
+	newChunk.messageID = messageID
 	chain.chunks = append(chain.chunks, newChunk)
 	chain.cursor = len(chain.chunks) - 1
 	chain.dirty = true
@@ -269,17 +262,16 @@ func flushChainNow(
 	}
 
 	// pieces[0] → edit onto current chunk.
-	if err := editFn(ctx, chatID, cur.messageID, pieces[0]); err != nil {
+	if err := editFn(ctx, chatID, cur.messageIDValue(), pieces[0]); err != nil {
 		return err
 	}
-	cur.isFull = true
-	cur.buf.Reset()
-	cur.charCount = 0
-	// Save rendered[:len(pieces[0])] as the chunk's "frozen tail"
-	// emit, so re-renders on overflow chunks render only the
-	// remaining buf (which is the new appended content, not
-	// pieces[0]'s already-emitted text).
-	cur.flushedRenderedLen = len(pieces[0])
+	cur.markFull()
+	// Wipe entries but keep the chunk's messageID + flushedLen
+	// so subsequent renders on overflow chunks render only the
+	// remaining (new appended) content. After reset, Compose()
+	// emits just header + separator + footer (empty buf body),
+	// which matches what was sent in pieces[0].
+	cur.freezeAfterOverflow(len(pieces[0]))
 	chain.dirty = false
 
 	// pieces[1..N-1] → each becomes a fresh locked chain chunk.
@@ -288,18 +280,15 @@ func flushChainNow(
 		if err != nil {
 			return err
 		}
-		next := &placeholderChunk{
-			messageID:           int64(mid),
-			headerLine:          "",
-			flushedRenderedLen:  len(p),
-			isFull:              true,
-		}
+		next := newChunkBody(int64(mid), "")
+		next.markFull()
+		next.markFlushedLen(len(p))
 		chain.chunks = append(chain.chunks, next)
 	}
 
 	// pieces[len(pieces)-1] → if there are ≥ 2 pieces, this
-	// becomes the new active chunk. buf stays empty until the next
-	// append; flushedRenderedLen tracks how much of the
+	// becomes the new active chunk. entries stays empty until
+	// the next append; flushedLen tracks how much of the
 	// post-render (buf unknown) was already emitted so future
 	// renders over the new tail don't include it.
 	if len(pieces) > 1 {
@@ -308,11 +297,8 @@ func flushChainNow(
 		if err != nil {
 			return err
 		}
-		tail := &placeholderChunk{
-			messageID:          int64(mid),
-			headerLine:         cur.headerLine, // carry the working header into the tail
-			flushedRenderedLen: len(lastPiece),
-		}
+		tail := newChunkBody(int64(mid), cur.headerText())
+		tail.markFlushedLen(len(lastPiece))
 		chain.chunks = append(chain.chunks, tail)
 		chain.cursor = len(chain.chunks) - 1
 		chain.dirty = false
@@ -364,13 +350,11 @@ func scheduleFlushDebounced(
 }
 
 // renderChunkBody is the unified chunk-body composer used by every
-// outgoing Telegram path that needs a chunk's full body:
-//
-//   - appendSegment case-1 (cold-create sendMessage)
-//   - appendSegment case-4 (overflow sendMessage)
-//   - flushChainNow (subsequent editMessageText)
-//   - patchChainHeader calls it indirectly via renderActiveChunkBody
-//     → now also renderChunkBody — the only entry point
+// outgoing Telegram path that needs a chunk's full body. It is a
+// thin wrapper around chunkBody.Compose() that takes string
+// components instead of *chunkBody (used by tests that don't need
+// the OOP wrapper). Production code calls chunkBody.Compose()
+// directly — this wrapper stays for legacy callers and tests.
 //
 // The three inputs are routed through different pipelines so
 // each section lands in the right form for parse_mode=HTML:
@@ -388,15 +372,8 @@ func scheduleFlushDebounced(
 //   - footer: statusbar.RenderPanel output is already escape-safe
 //     (no HTML chars in StatusBar lines). Written verbatim.
 //
-// Callers MUST pre-stamp the headerLine (status formatters own
-// the bold + timestamp contract). Callers MUST pre-build buf
-// from plain-text segments only — if a caller needs to embed
-// HTML, route through a markdown feature (```fences``` → <pre>)
-// instead of pre-built HTML tags, so RenderMarkdown handles the
-// conversion at compose time.
-//
-// When the chunk has flushedRenderedLen > 0 (overflow chain),
-// only the un-emitted tail of buf is rendered.
+// When flushedRenderedLen > 0 (overflow chain), only the
+// un-emitted tail of buf is rendered.
 func renderChunkBody(headerLine, buf, footer string, flushedRenderedLen int) string {
 	var b strings.Builder
 	b.WriteString(headerLine)
@@ -426,14 +403,13 @@ func renderChunkBody(headerLine, buf, footer string, flushedRenderedLen int) str
 }
 
 // renderActiveChunkBody is the wrapper used inside the chain
-// package. Pass-through to renderChunkBody with the chunk's
-// current state. Kept as a separate function so flushChainNow
-// (and any chain-aware caller) doesn't need to know the
-// composition rules — they just hand over the chunk.
-func renderActiveChunkBody(cur *placeholderChunk, lastFooter []string) string {
-	footer := ""
+// package. Pass-through to chunkBody.Compose() with the footer
+// rendered via statusbar.RenderPanel. Kept as a separate function
+// so flushChainNow (and any chain-aware caller) doesn't need to
+// know the composition rules — they just hand over the chunk.
+func renderActiveChunkBody(cur *chunkBody, lastFooter []string) string {
 	if len(lastFooter) > 0 {
-		footer = statusbar.RenderPanel(lastFooter)
+		cur.setFooter(statusbar.RenderPanel(lastFooter))
 	}
-	return renderChunkBody(cur.headerLine, cur.buf.String(), footer, cur.flushedRenderedLen)
+	return cur.Compose()
 }

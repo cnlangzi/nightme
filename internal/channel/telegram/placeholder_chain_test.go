@@ -102,21 +102,21 @@ func TestAppendSegment_CreatesFirstChunkWhenEmpty(t *testing.T) {
 	// next flush's renderActiveChunkBody silently dropped it
 	// because it only reads cur.buf. After the fix, cur.buf
 	// seeds with the segment so re-renders include it.
-	if got := chain.chunks[0].buf.String(); got != "💭 first thought\n" {
+	if got := chain.chunks[0].entriesJoined(); got != "💭 first thought\n" {
 		t.Fatalf("first chunk buf = %q, want %q", got, "💭 first thought\n")
 	}
 	wantChars := len("💭 first thought\n")
-	if chain.chunks[0].charCount != wantChars {
+	if chain.chunks[0].entriesSize() != wantChars {
 		t.Fatalf("first chunk charCount = %d, want %d",
-			chain.chunks[0].charCount, wantChars)
+			chain.chunks[0].entriesSize(), wantChars)
 	}
 }
 
 func TestAppendSegment_AppendsToActiveChunkWithinThreshold(t *testing.T) {
 	chain := &placeholderChain{
-		chunks: []*placeholderChunk{{
+		chunks: []*chunkBody{{
 			messageID:  500,
-			headerLine: "💭 0 · 🔧 0 · ⏱ 00:00:00",
+			header: "💭 0 · 🔧 0 · ⏱ 00:00:00",
 		}},
 		cursor: 0,
 	}
@@ -145,16 +145,16 @@ func TestAppendSegment_AppendsToActiveChunkWithinThreshold(t *testing.T) {
 		t.Fatalf("expected 1 chunk; got %d", len(chain.chunks))
 	}
 	want := strings.Repeat("thought\n", 10)
-	if chain.chunks[0].buf.String() != want {
-		t.Fatalf("buf mismatch; got %q want %q", chain.chunks[0].buf.String(), want)
+	if chain.chunks[0].entriesJoined() != want {
+		t.Fatalf("buf mismatch; got %q want %q", chain.chunks[0].entriesJoined(), want)
 	}
 }
 
 func TestAppendSegment_OverflowCreatesSecondChunk(t *testing.T) {
 	chain := &placeholderChain{
-		chunks: []*placeholderChunk{{
+		chunks: []*chunkBody{{
 			messageID:  100,
-			headerLine: "💭 0",
+			header: "💭 0",
 		}},
 		cursor: 0,
 	}
@@ -188,7 +188,7 @@ func TestAppendSegment_OverflowCreatesSecondChunk(t *testing.T) {
 	if chain.cursor != 1 {
 		t.Fatalf("expected cursor at 1; got %d", chain.cursor)
 	}
-	if !chain.chunks[0].isFull {
+	if !chain.chunks[0].isChunkFull() {
 		t.Fatalf("first chunk should be locked")
 	}
 	if len(sends) != 1 {
@@ -249,9 +249,9 @@ func TestFlushChainNow_NoOpWhenClean(t *testing.T) {
 
 func TestFlushChainNow_RendersHeaderBufFooter(t *testing.T) {
 	chain := &placeholderChain{
-		chunks: []*placeholderChunk{{
+		chunks: []*chunkBody{{
 			messageID:  555,
-			headerLine: "🤖 Working... · ⏱ 12:34:56",
+			header: "🤖 Working... · ⏱ 12:34:56",
 		}},
 		cursor: 0,
 	}
@@ -289,9 +289,9 @@ func TestFlushChainNow_RendersHeaderBufFooter(t *testing.T) {
 
 func TestScheduleFlushDebounced_MergesBurst(t *testing.T) {
 	chain := &placeholderChain{
-		chunks: []*placeholderChunk{{
+		chunks: []*chunkBody{{
 			messageID:  42,
-			headerLine: "💭 0",
+			header: "💭 0",
 		}},
 		cursor: 0,
 		lastFooter: []string{"footer"},
@@ -323,7 +323,7 @@ func TestScheduleFlushDebounced_MergesBurst(t *testing.T) {
 }
 
 func TestRenderActiveChunkBody_HeaderOnly(t *testing.T) {
-	cur := &placeholderChunk{headerLine: "💭 3 · 🔧 1"}
+	cur := &chunkBody{header: "💭 3 · 🔧 1"}
 	body := renderActiveChunkBody(cur, nil)
 	if !strings.HasPrefix(body, "💭 3 · 🔧 1") {
 		t.Fatalf("body should start with header; got %q", body)

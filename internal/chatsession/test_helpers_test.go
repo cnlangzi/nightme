@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -31,7 +30,7 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 	}
 }
 
-// testEmitter is a minimal outbound.Emitter impl for in-package
+// testEmitter is a minimal messages.Emitter impl for in-package
 // tests. Records every Send so tests can assert what
 // was emitted. PATCH semantics are encoded as Kind=OutChoicePatch
 // in the message itself; the Send path applies the disabled-flag
@@ -40,7 +39,7 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 // Replaces the pre-refactor testChannel which implemented the
 // chatsession.Channel interface (deleted in Commit 4); the new
 // world has no chatsession.Channel — every chat session holds
-// an outbound.Emitter, so the test stub is an Emitter.
+// an messages.Emitter, so the test stub is an Emitter.
 type testEmitter struct {
 	Sent []messages.OutboundMessage
 
@@ -76,6 +75,6 @@ func makeBareAgentSession(t *testing.T, agentName, cwd string) *AgentSession {
 	return NewAgentSession(newAgentSessionID(), "cs_test", agentName, cwd, nil)
 }
 
-// Compile-time guard: testEmitter must satisfy outbound.Emitter so
+// Compile-time guard: testEmitter must satisfy messages.Emitter so
 // any signature drift in outbound is caught at test compile.
-var _ outbound.Emitter = (*testEmitter)(nil)
+var _ messages.Emitter = (*testEmitter)(nil)

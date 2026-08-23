@@ -106,6 +106,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
@@ -115,14 +116,78 @@ import (
 // failing child can OOM the bridge silently.
 const stderrCapBytes = 64 * 1024
 
+// codexSinkContext returns the three static fields that the
+// codex bridge stamps on its up-front Ready event and the
+// thread.started-driven Ready re-emit (AgentName / Workspace /
+// Branch). SessionID is NOT here — it's populated separately
+// when the NDJSON thread.started arrives (callers pass the
+// fresh thread_id directly to the Ready emit). Splitting
+// SessionID out of this helper avoids the "up-front Ready
+// without thread.started yet" race where we don't know the
+// thread_id at helper-call time.
+//
+// P2 follow-up: previously the codex bridge only populated
+// SessionID + Model on its sink events; AgentName / Workspace /
+// Branch were empty. downstream StatusBar (statusbar.go:154-209)
+// dropped Line 3 (the "📁 <ws> · ⎇ <branch> · +N · −N · ±N · …"
+// workspace / dirty-state summary) on every codex one-shot /
+// review receipt. This helper stamps all three so statusbar
+// renders the full three-line footer (dsh's drain shape —
+// internal/bridge/dsh/session.go:866-873).
+func codexSinkContext(s *Starter, cfg agent.StartConfig) (agentName string, workspace string, branch string) {
+	return s.name, cfg.Workspace, detectBranch(cfg.Workspace)
+}
+
 // runPrintMode spawns `codex exec` for one-shot invocations
 // (/gtw commit, /gtw pr, buildAgentPrompt). Mirrors claudecode/pi
 // print mode: bypass the long-lived bridge driver, spawn a fresh
 // process, capture stdout (--json) for metadata, capture the
 // final answer via -o <tmpfile>, reap on exit.
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+//
+// Per-call sink (opts.OnEvent): when present, the bridge emits
+// Ready → Text → Result (or Error on the failure path), matching
+// the dsh drain's contract. SessionID + Model are filled in
+// progressively: the NDJSON stream's `thread.started` event gives
+// us thread_id (we re-emit Ready when it arrives, since the
+// up-front Ready can't carry data we don't have yet) and
+// `item.completed` (error variant) yields the model name. nil
+// sink is fully supported (no-op on every emit), matching
+// `outbound.StreamRunOnceToEmitter`'s non-blocking contract.
+func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("codex: workspace is required")
+	}
+
+	agentName, workspace, branch := codexSinkContext(s, cfg)
+
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
+
+	// Up-front Ready so the chat channel's StatusBar / receipt
+	// header can flip from "agent X" placeholder to "agent X · …"
+	// before the long exec run starts. SessionID/Model are
+	// empty here; the NDJSON-driven branch below RE-emits Ready
+	// once we know them, so any consumer that snapshots on first
+	// Ready and ignores later ones will still see this one.
+	//
+	// Note: dsh emits EventAgentReady ONCE with all four
+	// (SessionID/Model/Workspace/Branch) populated — see
+	// internal/bridge/dsh/session.go:289-298. The print-mode
+	// here is different: `codex exec` exposes thread_id
+	// asynchronously via the `thread.started` NDJSON event, so
+	// we have to choose between an empty up-front Ready (this
+	// code) and a delayed Ready only after thread.started
+	// arrives (which would leave the chat StatusBar silent for
+	// the first few seconds of a long exec run). We chose the
+	// former so the user sees "🤖: codex · …" immediately;
+	// the thread.started-driven re-emit below upgrades the
+	// session id once it lands.
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind:      agent.EventAgentReady,
+			AgentName: agentName,
+			Workspace: workspace,
+			Branch:    branch,
+		})
 	}
 
 	startTime := time.Now()
@@ -135,7 +200,22 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// "user / codex" markers go to stderr.
 	tmpOut, err := os.CreateTemp("", "codex-print-*.txt")
 	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("codex: create tempfile: %w", err)
+		// Early-return failure: Ready was already emitted above
+		// (sink contract requires every Ready to be paired with a
+		// terminal event). Fire Error so the sink observes a
+		// complete lifecycle. Caller-side dispatcher (gtw/agent_reply.go)
+		// also surfaces the error via its own ❌ path; the sink
+		// notification is for the chat channel's StatusBar /
+		// receipt, independent of the formatted text.
+		wrapped := fmt.Errorf("codex: create tempfile: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	tmpPath := tmpOut.Name()
 	_ = tmpOut.Close()
@@ -160,17 +240,44 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 
 	stdout, err := child.StdoutPipe()
 	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("codex: stdout pipe: %w", err)
+		// Same sink contract: Ready was emitted above, so pair it
+		// with Error. See CreateTemp-failure branch above for the
+		// rationale.
+		wrapped := fmt.Errorf("codex: stdout pipe: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
-		return agent.RunResult{}, fmt.Errorf("codex: stderr pipe: %w", err)
+		wrapped := fmt.Errorf("codex: stderr pipe: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return agent.RunResult{}, fmt.Errorf("codex: start: %w", err)
+		wrapped := fmt.Errorf("codex: start: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	pid := child.Process.Pid
 
@@ -200,6 +307,27 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		case "thread.started":
 			if sessionID == "" && ev.ThreadID != "" {
 				sessionID = ev.ThreadID
+				// Re-emit Ready with the now-known session id.
+				// The up-front Ready (line above the spawn)
+				// arrived with empty fields; this one is the
+				// "real" Ready that lets the channel receipt
+				// header render "session <id> · …". We do NOT
+				// also re-emit on model discovery below —
+				// model arrives AFTER the assistant has already
+				// started, so re-emitting Ready twice would
+				// race the rolling-log; the single
+				// session-id-anchored Ready is enough for the
+				// /gtw commit + /gtw pr callers (they only
+				// care about the session id for correlation).
+				if sink != nil {
+					sink(agent.AgentEvent{
+						Kind:      agent.EventAgentReady,
+						SessionID: ev.ThreadID,
+						AgentName: agentName,
+						Workspace: workspace,
+						Branch:    branch,
+					})
+				}
 			}
 		case "item.completed":
 			// The first item.completed error event carries the
@@ -246,7 +374,22 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// non-zero and codex exec only writes on a successful turn.
 	finalBytes, fileErr := os.ReadFile(tmpPath)
 	if fileErr != nil && !errors.Is(fileErr, os.ErrNotExist) {
-		return agent.RunResult{}, fmt.Errorf("codex: read -o file: %w", fileErr)
+		wrapped := fmt.Errorf("codex: read -o file: %w", fileErr)
+		if sink != nil {
+			// stderrStr isn't computed until later in this
+			// function; at this point stderrDrain has captured
+			// whatever the child wrote, but we haven't
+			// trim-trimmed it yet. Pass raw for this error path
+			// — the renderer's first-line trim still applies
+			// (translate.go:210-213).
+			rawStderr := stderrDrain.bytes()
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, rawStderr),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	finalText := strings.TrimSpace(string(finalBytes))
 
@@ -264,15 +407,111 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// closed child" noise); stderr is trimmed here once.
 	stderrStr := strings.TrimSpace(stderrDrain.bytes())
 	if err := formatCodexExitError(waitErr, stderrStr, finalText, "answer"); err != nil {
+		// Surface the failure to the sink so the chat channel
+		// flips its receipt to an error state. We do this
+		// BEFORE returning so the /review dispatcher (which
+		// also emits a friendly "❌ /review failed" text via
+		// emitter.Send) sees a consistent picture: the sink
+		// shows the process state, the formatted text is the
+		// deliverable. Same split as the success path above
+		// (sink observes lifecycle, the dispatcher owns
+		// presentation).
+		//
+		// Diagnostic carries BridgeExitKind derived from waitErr
+		// so chat.translate renders "codex process exited
+		// (non-zero-exit)" — without it,
+		// outbound.Translate:188-202 silently drops the Event
+		// because Err-only events predate the Diagnostic field.
+		//
+		// Empty-answer special case: when waitErr is nil but
+		// formatCodexExitError returned non-nil, the only
+		// remaining failure mode is "subprocess exited cleanly
+		// but produced no stdout / no -o content". Calling
+		// ClassifyExit(nil, false) here would yield
+		// BridgeExitCleanExit, which the Feishu renderer
+		// (adapter.go:1772-1790) titles as
+		// "⚠️ codex bridge died (clean-exit)" — semantically
+		// wrong because the bridge didn't die; it just
+		// produced no output. Use BridgeExitUnknown so the
+		// title/body stay consistent ("codex: empty answer").
+		exitKind := agent.BridgeExitUnknown
+		if waitErr != nil {
+			exitKind = agent.ClassifyExit(waitErr, false)
+		}
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind: agent.EventAgentError,
+				Err:  err,
+				Diagnostic: codexDiagnostic(
+					exitKind,
+					stderrStr,
+				),
+			})
+		}
 		return agent.RunResult{}, err
 	}
 	// NDJSON-specific: a parse error on a clean exit is still a
 	// failure (we couldn't extract session/model/usage).
 	if jsonReadErr != nil && !errors.Is(jsonReadErr, io.EOF) {
+		// The subprocess exited cleanly (waitErr == nil at this
+		// point — formatCodexExitError passed above) but the
+		// stdout NDJSON stream was unparseable. BridgeExit-
+		// Unknown rather than CleanExit because the failure
+		// mode here is protocol-level, not exit-level.
 		if stderrStr != "" {
-			return agent.RunResult{}, fmt.Errorf("codex: stdout: %w (stderr: %s)", jsonReadErr, stderr)
+			// P1 follow-up: `stderr` here is the io.ReadCloser
+			// from child.StderrPipe() — formatting it with %s
+			// would render the *os.File pointer as garbage in
+			// the visible error body. Use stderrStr (the
+			// trim-trimmed captured content), matching the
+			// neighbouring codexDiagnostic call below.
+			err := fmt.Errorf("codex: stdout: %w (stderr: %s)", jsonReadErr, stderrStr)
+			if sink != nil {
+				sink(agent.AgentEvent{
+					Kind: agent.EventAgentError,
+					Err:  err,
+					Diagnostic: codexDiagnostic(
+						agent.BridgeExitUnknown,
+						stderrStr,
+					),
+				})
+			}
+			return agent.RunResult{}, err
 		}
-		return agent.RunResult{}, fmt.Errorf("codex: stdout: %w", jsonReadErr)
+		err := fmt.Errorf("codex: stdout: %w", jsonReadErr)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind: agent.EventAgentError,
+				Err:  err,
+				Diagnostic: codexDiagnostic(
+					agent.BridgeExitUnknown,
+					"",
+				),
+			})
+		}
+		return agent.RunResult{}, err
+	}
+
+	// Terminal event: hand the assembled RunResult to the sink
+	// so the chat channel can render the canonical
+	// "📝 <text> (12.3s)" line + footer tokens. Same shape as
+	// dsh's drain (starter.go:228-241) and the runCodexReview-
+	// Plain success branch.
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentResult,
+			Result: &agent.AgentResultEvent{
+				Text:       result.Text,
+				DurationMs: result.DurationMs,
+				Subtype:    result.Subtype,
+				Usage:      result.Usage,
+			},
+			SessionID: result.SessionID,
+			Model:     result.Model,
+			AgentName: agentName,
+			Workspace: workspace,
+			Branch:    branch,
+		})
 	}
 	return result, nil
 }
@@ -412,12 +651,42 @@ type codexExecEvent struct {
 	Usage    *codexExecUsage `json:"usage,omitempty"`    // turn.completed
 }
 
-// codexExecItem is the `item` payload inside item.completed events.
-// We only care about the error variant that carries the model name.
+// codexExecItem is the `item` payload inside item.* events
+// (item.started / item.updated / item.completed). Only the
+// fields relevant to the current item.type are populated; the
+// JSON decoder tolerates missing / extra fields, so different
+// item variants coexist without per-type wrapper structs.
+//
+// Field map (verified against `codex exec --json` 0.145+):
+//   - command_execution : Command, AggregatedOutput, ExitCode,
+//                         Status; emitted on started / completed
+//   - file_change       : Changes[]; emitted only on completed
+//   - reasoning         : Text; emitted only on completed (when
+//                         model_reasoning_summary=detailed)
+//   - agent_message     : Text; emitted only on completed — this
+//                         is the review's final answer and is
+//                         suppressed from the sink (P1 fix — see
+//                         runCodexReviewPlain doc)
+//   - mcp_tool_call     : Server, Tool, Arguments; emitted on
+//                         started / completed
+//   - error             : Message; emitted only on completed
 type codexExecItem struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Message string `json:"message,omitempty"` // error message
+	ID              string               `json:"id"`
+	Type            string               `json:"type"`
+	Message         string               `json:"message,omitempty"`         // error
+	Command         string               `json:"command,omitempty"`         // command_execution
+	AggregatedOutput string              `json:"aggregated_output,omitempty"` // command_execution completed
+	ExitCode        *int                 `json:"exit_code,omitempty"`      // command_execution completed (nil while in_progress)
+	Status          string               `json:"status,omitempty"`         // command_execution: in_progress | completed | failed
+	Text            string               `json:"text,omitempty"`           // agent_message / reasoning
+	Changes         []codexExecItemChange `json:"changes,omitempty"`       // file_change
+	Server          string               `json:"server,omitempty"`         // mcp_tool_call
+	Tool            string               `json:"tool,omitempty"`           // mcp_tool_call
+}
+
+type codexExecItemChange struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"` // "add" | "delete" | "update"
 }
 
 type codexExecUsage struct {
@@ -598,6 +867,43 @@ func errStr(err error) string {
 	}
 	return err.Error()
 }
+
+// codexDiagnostic builds the BridgeDiagnostic attached to every
+// EventAgentError emitted on the codex bridge. Required because
+// outbound.Translate (translate.go:188-202) returns `(zero, false)`
+// when ev.Diagnostic is nil — silent-drop by design — so an Error
+// event without Diagnostic never reaches the chat channel via the
+// sink pipeline (the dispatcher still surfaces a separate ❌
+// OutReply, but the chat receipt card stays at 🔄 because nothing
+// drives the runtime's endPrompt path for one-shot calls).
+//
+// exitKind follows agent.ClassifyExit's taxonomy:
+//
+//   - BridgeExitCleanExit       — subprocess finished cleanly
+//     (used when formatCodexExitError failed because finalText
+//     was empty but waitErr is nil).
+//   - BridgeExitNonZeroExit     — *exec.ExitError with positive
+//     code, e.g. codex review --base <branch> when no diff.
+//   - BridgeExitSignalKilled    — *exec.ExitError with negative
+//     code (SIGKILL from our ctx cancel).
+//   - BridgeExitUnknown         — spawn failure (no subprocess
+//     started), or NDJSON parse error on otherwise-clean exit.
+//     ClassifyExit also returns Unknown for these but we use
+//     the literal here to make the call-site intent explicit.
+//
+// stderr is the trim-trimmed stderr captured by stderrDrain.
+// For spawn-failure paths stderr is empty (we never started);
+// passing "" lets the renderer fall back to the synthesized
+// body (translate.go:216-227) instead of leaving the card
+// body blank.
+func codexDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.BridgeDiagnostic {
+	return &agent.BridgeDiagnostic{
+		ExitKind:   exitKind,
+		StderrTail: stderr,
+		AgentName:  "codex",
+		KilledAt:   time.Now(),
+	}
+}
 // runCodexReview runs `codex review --base <default>` against the
 // workspace. F-review.md §13 "codex/claude use native review" rule:
 // we invoke codex's built-in `review` subcommand instead of running
@@ -638,6 +944,11 @@ func errStr(err error) string {
 //
 // F-review.md §13 "codex/claude use native review" rule: invoking
 // the native subcommand instead of our generic StandardPrompt.
+//
+// opts is forwarded verbatim to runCodexReviewPlain so the sink
+// (typically installed via WithEventSink by the /review dispatcher)
+// sees the same Ready → Text → Result sequence the dsh bridge
+// emits. See runCodexReviewPlain for the per-call contract.
 func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	// Build the review-specific extra flags. --base <default> is
 	// the important one; we detect <default> via git commands.
@@ -649,100 +960,322 @@ func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig, opts
 			"workspace", cfg.Workspace)
 		extra = []string{"--uncommitted"}
 	}
-	return runCodexReviewPlain(ctx, s.command, cfg.Workspace, extra)
+	return runCodexReviewPlain(ctx, s, cfg, extra, opts...)
 }
 
 // runCodexReviewPlain is the review-specific runner: spawns
-// `codex review` with the argv the caller assembled, drains
-// stdout to EOF as plain text, returns. No NDJSON parser, no
-// `-o` tempfile, no `--json` flag.
+// `codex exec review` with `--json` + `-o <tmpfile>`, parses the
+// NDJSON event stream into AgentEvents for the sink, and reads
+// the final answer from the tempfile.
 //
-// Mirrors runPrintMode's stderr-drain + ctx-cancel + exit-error
-// surfacing shape (via stderrDrain + formatCodexExitError) so the
-// two surfaces report the same failure shape.
-func runCodexReviewPlain(ctx context.Context, command, workspace string, reviewFlags []string) (agent.RunResult, error) {
+// Why `codex exec review` (not `codex review`): `codex review`
+// is a non-interactive CLI whose only stdout is the final report
+// — no streaming events, no `--json`, no `-o. Using
+// `codex exec review --json -o <file>` keeps codex's review-tuned
+// system prompt (review-specific rubric / output format) and adds
+// the exec surface (NDJSON event stream + tempfile for the final
+// answer). Verified on codex-cli 0.149.0: 404 NDJSON events
+// observed during a real review (thread.started + ~400
+// item.command_execution / file_change / reasoning + 1 item.agent_message
+// + turn.completed).
+//
+// Per-call sink (opts.OnEvent): when present, the bridge emits
+//   - EventAgentReady up-front (placeholder session_id/model
+//     because codex review doesn't surface them on stdout; the
+//     thread.started-driven Ready later upgrades session_id if
+//     the NDJSON stream carries one — same shape as runPrintMode).
+//   - EventAgentToolStart / ToolEnd for each command_execution
+//     item.started / item.completed, with aggregated_output on
+//     the ToolEnd. Feishu's receipt rolling-log appends these as
+//     the standard "🔧 bash -lc ls" / "⎿ output" entries.
+//   - EventAgentText for reasoning items ("[思考] " prefix —
+//     gateway.Translate maps the prefix to OutOutMessage.Kind =
+//     OutThinking, which the Feishu adapter renders as a 💭 side
+//     line).
+//   - EventAgentText for file_change items ("📝 changed X files").
+//   - EventAgentToolStart / ToolEnd for mcp_tool_call items
+//     (Server.Tool as Name).
+//   - EventAgentResult on turn.completed with the final review
+//     text (read from the -o tempfile) and Usage from the
+//     turn.completed event. F-CODEX-DOUBLE-RENDER fix: the
+//     final answer is carried ONLY in Result, not as a separate
+//     EventAgentText — outbound.Translate would otherwise
+//     render it twice (OutReply from Text + OutResult from
+//     Result). dsh follows the same single-point shape
+//     (internal/bridge/dsh/dispatch.go gates Result.Text on
+//     textDelivered / pendingText).
+//   - EventAgentError on every failure path with a populated
+//     BridgeDiagnostic so outbound.Translate doesn't silently
+//     drop it (translate.go:188-202).
+//
+// nil sink is fully supported (no-op on every emit), matching
+// the `outbound.StreamRunOnceToEmitter` non-blocking contract.
+func runCodexReviewPlain(ctx context.Context, s *Starter, cfg agent.StartConfig, reviewFlags []string, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+	workspace := cfg.Workspace
 	if workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("codex: workspace is required")
 	}
 
+	command := s.command
+	agentName, _, branch := codexSinkContext(s, cfg)
+
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
+
+	// Up-front EventAgentReady so the chat channel's StatusBar /
+	// receipt header can flip from "agent X" placeholder to
+	// "agent X · …" before the long review run starts. The
+	// NDJSON-driven thread.started below re-emits Ready with
+	// the now-known session id (same pattern as runPrintMode —
+	// see comment in runPrintMode's NDJSON callback for the
+	// rationale). dsh's drain does the same up-front + filled-in
+	// pattern.
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind:      agent.EventAgentReady,
+			AgentName: agentName,
+			Workspace: workspace,
+			Branch:    branch,
+		})
+	}
+
 	startTime := time.Now()
 
-	// codex review argv — see runCodexReview doc.
+	// codex exec review argv layout (verified on codex-cli 0.149.0):
 	//
-	// We DO NOT use buildPrintArgs here: the two subcommands have
-	// disjoint flag sets (exec uses --dangerously-bypass-… / -C /
-	// --skip-git-repo-check; review uses -c approval_policy=… /
-	// -c sandbox_mode=…). Sharing argv-assembly would force one
-	// or the other to express itself in the wrong dialect.
+	//   codex exec review
+	//     --dangerously-bypass-approvals-and-sandbox
+	//     -C <workspace>
+	//     --skip-git-repo-check
+	//     --json
+	//     -o <tmpfile>
+	//     [reviewFlags...]  // --base / --uncommitted / --commit
+	//     --
+	//     (no positional — review's [PROMPT] conflicts with --base)
 	//
-	// `-c approval_policy=never` + `-c sandbox_mode=danger-full-access`
-	// is the review-side equivalent of the exec flag set — both
-	// land the same "never ask + full FS" posture so review
-	// doesn't prompt the user for every file read on a multi-file
-	// PR (fatal for a non-interactive subprocess whose stdin
-	// is closed).
-	args := append([]string{
-		"review",
-		"-c", "approval_policy=never",
-		"-c", "sandbox_mode=danger-full-access",
-	}, reviewFlags...)
+	// Flags rationale:
+	//   - `--dangerously-bypass-approvals-and-sandbox` is the
+	//     exec-side equivalent of `codex review`'s hard-coded
+	//     "non-interactive read-only" posture (which used to be
+	//     `-c approval_policy=never -c sandbox_mode=danger-full-access`
+	//     before codex exec review unified them). Without this
+	//     codex pauses on the first file read asking for approval,
+	//     which would hang the entire one-shot flow.
+	//   - `-C <workspace>` mirrors runPrintMode's `-C` so codex
+	//     resolves relative paths from the review target, not the
+	//     daemon's cwd.
+	//   - `--skip-git-repo-check` lets us call this from
+	//     non-git-repo workspaces (defensive; review subcommand
+	//     otherwise errors out with "/cwd is not a git
+	//     repository").
+	//   - `--json` is the streaming event stream. Without it
+	//     codex writes ONLY the final answer to stdout — same
+	//     problem we had with `codex review`.
+	//   - `-o <tmpfile>` is the final answer destination. We
+	//     read it back after turn.completed to assemble
+	//     RunResult.Text / Result.Text. Same mechanism as
+	//     runPrintMode's -o tempfile (verified on codex 0.145+
+	//     — writes ONLY the final agent_message, not tool calls).
+	//   - `[reviewFlags]` is the caller's chosen review target —
+	//     --base / --uncommitted / --commit, mutually exclusive
+	//     (verified on codex 0.149.0). Caller (runCodexReview)
+	//     picks one.
+	//   - `--` separator before the prompt is mandatory on
+	//     codex 0.149 when `--base` is present (mirrors the
+	//     runPrintMode `-i`-with-`--` fix).
+	//
+	// We DO NOT pass a positional [PROMPT]: review subcommand
+	// rejects `[PROMPT]` when `--base` / `--uncommitted` /
+	// `--commit` is also present (verified: `error: the argument
+	// '--base <BRANCH>' cannot be used with '[PROMPT]'`). The
+	// review-tuned rubric lives in codex's system prompt; we
+	// don't ship our own instructions.
+	//
+	// Create the -o target tempfile first so the path slots
+	// directly into the argv (no splice-after-the-fact). codex
+	// exec writes ONLY the final agent_message here (verified on
+	// 0.149.0); tool-call progress and "user / codex" markers go
+	// to stderr.
+	tmpOut, err := os.CreateTemp("", "codex-review-*.md")
+	if err != nil {
+		wrapped := fmt.Errorf("codex: create tempfile: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
+	}
+	tmpPath := tmpOut.Name()
+	_ = tmpOut.Close()
+	defer os.Remove(tmpPath)
+
+	args := []string{
+		// `-C` is a GLOBAL flag (verified by `codex --help`'s
+		// `-C, --cd <DIR>` listing) and must appear BEFORE
+		// `exec`. `--skip-git-repo-check`,
+		// `--dangerously-bypass-approvals-and-sandbox`,
+		// `--base`/`--uncommitted`/`--commit`, `--json`, `-o`,
+		// `--`, and any positional [PROMPT] are all per-subcommand
+		// (after `exec`). Placing `-C` after `exec` triggers
+		// "error: unexpected argument '-C' found" on codex 0.149
+		// — verified empirically.
+		"-C", workspace,
+		"exec", "review",
+		"--skip-git-repo-check",
+		"--dangerously-bypass-approvals-and-sandbox",
+	}
+	args = append(args, reviewFlags...)
+	args = append(args,
+		"--json",
+		"-o", tmpPath,
+		"--",
+	)
 
 	child := proc.New(ctx, command, args...)
-	child.Dir = workspace // review has no -C; runs in cwd
+	child.Dir = workspace
 
+	// Early-return failures below must each emit a terminal
+	// EventAgentError to the sink — the up-front EventAgentReady
+	// is already on the wire, so the sink would otherwise observe
+	// Ready-without-terminal. Same pattern as runPrintMode's
+	// spawn-failure branches.
 	stdout, err := child.StdoutPipe()
 	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("codex: stdout pipe: %w", err)
+		wrapped := fmt.Errorf("codex: stdout pipe: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	stderr, err := child.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()
-		return agent.RunResult{}, fmt.Errorf("codex: stderr pipe: %w", err)
+		wrapped := fmt.Errorf("codex: stderr pipe: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return agent.RunResult{}, fmt.Errorf("codex: start: %w", err)
+		wrapped := fmt.Errorf("codex: start: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	pid := child.Process.Pid
 
 	cLog("ReviewMode Start",
 		"command", command,
-		"mode", "review",
+		"mode", "exec-review",
 		"workspace", workspace,
 		"args_count", len(args),
 		"pid", pid)
 
-	// Shared stderr capture with runPrintMode — same semantics,
-	// same cap, same ctx-cancel behaviour. See stderrDrain doc.
 	stderrDrain := startStderrDrain(ctx, stderr)
 
-	// Drain stdout to EOF (synchronously). Review output is the
-	// review text itself — unlike `codex exec`, there's no NDJSON
-	// event stream + -o tempfile split. The whole stdout IS the
-	// final answer.
-	stdoutBuf := &strings.Builder{}
-	{
-		buf := make([]byte, 4096)
-		for {
-			if ctx.Err() != nil {
-				break
+	// Parse NDJSON events from stdout. runNDJSON scans line-by-line
+	// (matches one JSON object per line) and invokes cb for each.
+	// We translate each item.* event into the AgentEvent the
+	// bridge contract expects, then sink the event. AgentMessage
+	// events are SUPPRESSED here (P1 fix — see function doc);
+	// the final text comes from the -o tempfile on turn.completed
+	// and surfaces once via EventAgentResult.
+	//
+	// State carried across callbacks (closure):
+	//   - sessionID : updated by thread.started; stamped onto
+	//     the second EventAgentReady (see runPrintMode for the
+	//     same shape).
+	//   - model : updated by the first item.completed of type
+	//     "error" (codex CLI emits "Model metadata for `…` not
+	//     found" on every run; back-tick parse — see
+	//     extractModelFromError).
+	//   - usage : updated by turn.completed (last event wins,
+	//     matches runPrintMode's behaviour).
+	var sessionID string
+	var model string
+	var usage *agent.UsageInfo
+	jsonReadErr := runNDJSON(ctx, stdout, func(ev codexExecEvent) {
+		switch ev.Type {
+		case "thread.started":
+			if sessionID == "" && ev.ThreadID != "" {
+				sessionID = ev.ThreadID
+				// Re-emit Ready with the now-known session id.
+				// Same rationale as runPrintMode's NDJSON callback.
+				if sink != nil {
+					sink(agent.AgentEvent{
+						Kind:      agent.EventAgentReady,
+						SessionID: ev.ThreadID,
+						AgentName: agentName,
+						Workspace: workspace,
+						Branch:    branch,
+					})
+				}
 			}
-			n, rErr := stdout.Read(buf)
-			if n > 0 {
-				stdoutBuf.Write(buf[:n])
+		case "item.started":
+			if ev.Item == nil {
+				return
 			}
-			if rErr != nil {
-				break
+			translateItemStarted(sink, ev.Item)
+		case "item.updated", "item.completed":
+			if ev.Item == nil {
+				return
+			}
+			translateItemCompleted(sink, ev.Item)
+		case "turn.completed":
+			if ev.Usage != nil {
+				usage = codexExecUsageToUsageInfo(ev.Usage)
 			}
 		}
-	}
+		// Suppress agent_message events from the sink — the final
+		// text surfaces exactly once via EventAgentResult after
+		// turn.completed. The legacy extractModelFromError trick
+		// (see runPrintMode) is preserved by including it in the
+		// item.completed/updated translator for error items.
+		if ev.Item != nil && ev.Item.Type == "error" && model == "" {
+			if m := extractModelFromError(ev.Item.Message); m != "" {
+				model = m
+			}
+		}
+	})
 
 	waitErr := child.Wait()
 	stderrDrain.wait()
 
 	elapsedMs := time.Since(startTime).Milliseconds()
-	finalText := strings.TrimSpace(stdoutBuf.String())
+
+	// Read the -o file (final message). Missing file means the
+	// process died before writing — usually because exit was
+	// non-zero and codex only writes on a successful turn.
+	finalBytes, fileErr := os.ReadFile(tmpPath)
+	if fileErr != nil && !errors.Is(fileErr, os.ErrNotExist) {
+		wrapped := fmt.Errorf("codex: read -o file: %w", fileErr)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: codexDiagnostic(agent.BridgeExitUnknown, stderrDrain.bytes()),
+			})
+		}
+		return agent.RunResult{}, wrapped
+	}
+	finalText := strings.TrimSpace(string(finalBytes))
 
 	subtype := "completed"
 	if waitErr != nil {
@@ -751,15 +1284,19 @@ func runCodexReviewPlain(ctx context.Context, command, workspace string, reviewF
 
 	cLog("ReviewMode Exit",
 		"pid", pid,
-		"mode", "review",
+		"mode", "exec-review",
 		"elapsed_ms", elapsedMs,
 		"wait_err", errStr(waitErr),
 		"stderr_bytes", len(stderrDrain.bytes()),
 		"stderr_truncated", stderrDrain.truncatedFlag(),
-		"stdout_bytes", stdoutBuf.Len())
+		"stdout_bytes", finalText != "",
+		"session_id", sessionID)
 
 	result := agent.RunResult{
 		Text:       finalText,
+		Usage:      usage,
+		Model:      model,
+		SessionID:  sessionID,
 		DurationMs: elapsedMs,
 		Subtype:    subtype,
 	}
@@ -770,9 +1307,217 @@ func runCodexReviewPlain(ctx context.Context, command, workspace string, reviewF
 	// same failure shape.
 	stderrStr := strings.TrimSpace(stderrDrain.bytes())
 	if err := formatCodexExitError(waitErr, stderrStr, finalText, "review answer"); err != nil {
+		// Surface the failure to the sink so the chat channel
+		// flips its receipt to an error state. We do this
+		// BEFORE returning so the /review dispatcher (which
+		// also emits a friendly "❌ /review failed" text via
+		// emitter.Send) sees a consistent picture: the sink
+		// shows the process state, the formatted text is the
+		// deliverable.
+		//
+		// Diagnostic carries BridgeExitKind from agent.ClassifyExit
+		// when waitErr is set, else BridgeExitUnknown for the
+		// empty-answer case (subprocess exited cleanly but
+		// produced no stdout — see the matching comment in
+		// runPrintMode's analogous branch for the rationale).
+		exitKind := agent.BridgeExitUnknown
+		if waitErr != nil {
+			exitKind = agent.ClassifyExit(waitErr, false)
+		}
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind: agent.EventAgentError,
+				Err:  err,
+				Diagnostic: codexDiagnostic(
+					exitKind,
+					stderrStr,
+				),
+			})
+		}
 		return agent.RunResult{}, err
 	}
+
+	// P2 follow-up: NDJSON parse error is symmetric with
+	// runPrintMode — protocol-level failure (truncated frame,
+	// malformed JSON, oversized line) on an otherwise-clean exit
+	// must surface as an EventAgentError with BridgeExitUnknown,
+	// not be silently swallowed. The pre-fix `_ = jsonReadErr`
+	// was misleading: the "see runPrintMode's analogous comment"
+	// pointer didn't exist because runPrintMode fails on the
+	// same condition.
+	if jsonReadErr != nil && !errors.Is(jsonReadErr, io.EOF) {
+		var err error
+		if stderrStr != "" {
+			err = fmt.Errorf("codex: stdout: %w (stderr: %s)", jsonReadErr, stderrStr)
+		} else {
+			err = fmt.Errorf("codex: stdout: %w", jsonReadErr)
+		}
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind: agent.EventAgentError,
+				Err:  err,
+				Diagnostic: codexDiagnostic(
+					agent.BridgeExitUnknown,
+					stderrStr,
+				),
+			})
+		}
+		return agent.RunResult{}, err
+	}
+
+	// Terminal event: hand the assembled RunResult to the sink.
+	// F-CODEX-DOUBLE-RENDER fix: NO EventAgentText emit here —
+	// Result carries the final prose and outbound.Translate maps
+	// Result → OutResult → sendResultAsReply, which produces a
+	// single visible copy (vs the pre-fix double render via Text
+	// → OutReply + Result → OutResult). P2 follow-up: stamp
+	// AgentName/Workspace/Branch so statusbar renders the full
+	// three-line footer (dsh's drain shape — internal/bridge/
+	// dsh/session.go:866-873).
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentResult,
+			Result: &agent.AgentResultEvent{
+				Text:       result.Text,
+				DurationMs: result.DurationMs,
+				Subtype:    result.Subtype,
+				Usage:      result.Usage,
+			},
+			SessionID: result.SessionID,
+			Model:     result.Model,
+			AgentName: agentName,
+			Workspace: workspace,
+			Branch:    branch,
+		})
+	}
 	return result, nil
+}
+
+// translateItemStarted translates a `codex exec --json`
+// item.started event into one or more AgentEvents delivered to
+// the sink. Only `command_execution` and `mcp_tool_call` produce
+// a start event worth translating (the start of a shell command
+// or an MCP tool call). Other item types (reasoning, agent_message,
+// file_change, error) only emit on completed.
+//
+// Safe on nil sink / nil item — both are no-ops, matching
+// runNDJSON's tolerance for malformed lines.
+func translateItemStarted(sink func(agent.AgentEvent), item *codexExecItem) {
+	if sink == nil || item == nil {
+		return
+	}
+	switch item.Type {
+	case "command_execution":
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentToolStart,
+			ToolStart: &agent.AgentToolStartEvent{
+				ID:   item.ID,
+				Name: "bash",
+				Args: item.Command,
+			},
+		})
+	case "mcp_tool_call":
+		name := item.Server
+		if item.Tool != "" {
+			name = item.Server + "." + item.Tool
+		}
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentToolStart,
+			ToolStart: &agent.AgentToolStartEvent{
+				ID:   item.ID,
+				Name: name,
+				Args: "", // mcp_tool_call arguments are a JSON value; omit for now
+			},
+		})
+	}
+}
+
+// translateItemCompleted translates a `codex exec --json`
+// item.completed (or item.updated) event into AgentEvents.
+// Suppresses agent_message (P1 fix — final text comes from the
+// -o tempfile via EventAgentResult, not from the streaming agent_message).
+//
+// agent_message suppression rationale: emitting both an
+// EventAgentText for the agent_message AND an EventAgentResult
+// (with the same final text read from -o after turn.completed)
+// produces two visible copies via outbound.Translate
+// (OutReply from Text + OutResult from Result). Suppressing
+// here means the user sees a single copy via Result.
+func translateItemCompleted(sink func(agent.AgentEvent), item *codexExecItem) {
+	if sink == nil || item == nil {
+		return
+	}
+	switch item.Type {
+	case "command_execution":
+		// AgentToolEndEvent has no Err field; fold the exit code
+		// into the Output string when non-zero so the receipt
+		// card's "⎿ output" line shows the failure marker.
+		output := item.AggregatedOutput
+		if item.ExitCode != nil && *item.ExitCode != 0 {
+			output = fmt.Sprintf("[exit %d] %s", *item.ExitCode, output)
+		}
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentToolEnd,
+			ToolEnd: &agent.AgentToolEndEvent{
+				ID:     item.ID,
+				Name:   "bash",
+				Args:   item.Command,
+				Output: output,
+			},
+		})
+	case "file_change":
+		// Render a short summary as a single Text entry. The
+		// chat channel's outbound.Translate maps Text → OutReply,
+		// which folds into the receipt card rolling log.
+		paths := make([]string, 0, len(item.Changes))
+		for _, c := range item.Changes {
+			paths = append(paths, c.Path)
+		}
+		text := fmt.Sprintf("📝 changed %d file(s): %s",
+			len(paths), strings.Join(paths, ", "))
+		if len(paths) > 8 {
+			text = fmt.Sprintf("📝 changed %d file(s) (first 8: %s)",
+				len(paths), strings.Join(paths[:8], ", "))
+		}
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentText,
+			Text: text,
+		})
+	case "reasoning":
+		// Prefix with the gateway.Translate ThinkingPrefix sentinel
+		// so the channel adapter renders it as OutThinking (a 💭
+		// side line) instead of an OutReply bubble. See
+		// gateway/outbound/translate.go for the sentinel constant.
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentText,
+			Text: outbound.ThinkingPrefix + item.Text,
+		})
+	case "mcp_tool_call":
+		name := item.Server
+		if item.Tool != "" {
+			name = item.Server + "." + item.Tool
+		}
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentToolEnd,
+			ToolEnd: &agent.AgentToolEndEvent{
+				ID:     item.ID,
+				Name:   name,
+				Args:   "",
+				Output: item.AggregatedOutput,
+			},
+		})
+	case "agent_message":
+		// P1 fix: deliberately dropped. Final prose surfaces once
+		// via EventAgentResult after turn.completed (the text
+		// comes from the -o tempfile, not from this streaming
+		// event). See translateItemCompleted doc.
+	case "error":
+		// Codex CLI emits "Model metadata for `…` not found" on
+		// every run; parse it for the StatusBar model field.
+		// The actual error case (review_failed item.completed)
+		// also surfaces here — extractModelFromError returns ""
+		// for non-matching shapes, so non-model errors are no-op'd.
+	}
 }
 
 // detectDefaultBranch finds the repo's default branch name

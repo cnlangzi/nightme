@@ -34,9 +34,9 @@
 //     (messages.OutboundMessage, gateway.OutboundKind, etc.)
 //   - gateway does NOT import outbound — gateway is the shared
 //     type hub, outbound is the send-side behaviour
-//   - chatsession keeps its own outbound.Emitter interface
+//   - chatsession keeps its own messages.Emitter interface
 //     (takes chatsession.OutboundMessage); cmd/nightme's
-//     outbound.Emitter adapts that to messages.OutboundMessage
+//     messages.Emitter adapts that to messages.OutboundMessage
 //     and routes through Emitter, so slash command replies also
 //     pick up the GitStatus stamp.
 //
@@ -91,13 +91,20 @@ type Options struct {
 // every component that needs to send to a chat — the runtime
 // event pump, the slash command dispatcher, the message
 // dispatcher closure, the MessageStateBus subscribers.
-type Emitter interface {
-	Send(ctx context.Context, msg messages.OutboundMessage) error
-}
+//
+// F-CODEX-RUNONCE-REVIEW-EVENT: the Emitter interface itself
+// moved to internal/messages (as messages.Emitter) so that
+// chatsession can hold an Emitter field without importing
+// gateway/outbound. Without this move, adding gateway/outbound
+// → chatsession dependency (for the policy move) would re-open
+// the import cycle that the original closure-based wiring
+// worked around (see outbound.go:73-75 historical comment).
+// The implementation `emitImpl` stays here; only the interface
+// declaration moved.
 
 // New constructs the default Emitter implementation. ch must be
 // non-nil; opts.GitStatusLookup may be nil.
-func New(ch channel.Channel, opts Options) Emitter {
+func New(ch channel.Channel, opts Options) messages.Emitter {
 	return &emitImpl{ch: ch, gitStatusLookup: opts.GitStatusLookup}
 }
 

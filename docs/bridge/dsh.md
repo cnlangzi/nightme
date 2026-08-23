@@ -1337,6 +1337,15 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption
 
 **Caller 接线**:`internal/gateway/outbound/emitter_sink.go::StreamRunOnceToEmitter` 是 canonical pattern —— buffered chan (cap=64) + drain goroutine,保证 bridge 不被 Feishu 等 channel 限速拖垮。`/gtw commit`、`/gtw pr`、`/review` 调用点都接上了 sink。
 
+**Drain goroutine 跑完整出站管线**（F-CODEX-RUNONCE-REVIEW-EVENT 之后的现状，与 long-lived 路径共享同一份逻辑）:
+- `Translate(chatID, ev)`（`gateway/outbound/translate.go`）—— AgentEvent → OutboundMessage
+- Stamp `ReplyTo` + `AgentName`（如果 bridge 没填）
+- **think / tools gate**:`outbound.DefaultPolicies(sbDeps, cs, logger)` 同一份 policy chain，runtime handler 也在用 —— `/think off` 时 drop `OutThinking`，`/tools off` 时 drop `OutToolStart` / `OutToolEnd`
+- **Heartbeat observe**:`cs.Heartbeat().Observe(userMsgID, out.Kind)` 同一份 tracker，runtime handler 也在用 —— 计数器真实累计
+- `em.Send(ctx, out)`
+
+任何一步的 drop / observe 都和 long-lived path 走**同一份代码**（共享 `internal/gateway/outbound/policy.go::DefaultPolicies` 和 `chatsession.HeartbeatTracker`），所以 `/think off` 隐藏的 thinking **仍然被观测**，但不被渲染 —— F-63 "抗丢" 不变量在两条路径都成立。
+
 **Permission 语义**:one-shot / review 用 full-access 权限模式,**Permission.ResponseCh 不经 sink 路由** —— sink 是 observability,decision 走 runtime 已有路径。如果未来 Permission 真的在 one-shot 里 fire 了,sink 会看到但 bridge 不会卡住等响应。
 
 **测试覆盖**:

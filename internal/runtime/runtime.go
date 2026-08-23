@@ -13,7 +13,7 @@
 //     (the per-channel mgr is the "owner" of each chatID
 //     because it's the one that bound the channel's Emitter)
 //  3. buildStack (per channel) — ch.Start + chatsession.Manager
-//     + outbound.Emitter + WireRuntimeCallbacksAndRestore;
+//     + messages.Emitter + WireRuntimeCallbacksAndRestore;
 //     stash mgr in runtime.allMgrs; build gateway.Pump
 //  4. start — gateway.AttachPumps + gateway.Start
 //
@@ -196,7 +196,7 @@ func (d Deps) fillDefaults() Deps {
 //	                        per-chat mgr lookup)
 //	3. buildStack        — for each registered channel with valid
 //	                        credentials: ch.Start + chatsession.Manager
-//	                        + outbound.Emitter + WireCallbacks; stash
+//	                        + messages.Emitter + WireCallbacks; stash
 //	                        mgr in runtime.allMgrs; build gateway.Pump
 //	4. start              — gateway.AttachPumps + gateway.Start
 //
@@ -264,7 +264,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// the runtime pump and pick up the StatusBar footer. The
 	// old channel_wrap prepended its own Emitter wrap, so the
 	// bug class "error replies miss the footer" is now caught at
-	// compile time: the dispatcher is typed as outbound.Emitter
+	// compile time: the dispatcher is typed as messages.Emitter
 	// from the start.
 
 	// F-31 + F-think + F-38: install gw.OnMessageState AND the
@@ -553,7 +553,7 @@ type buildStackOpts struct {
 }
 
 // buildStack wires one channel: starts the channel, constructs
-// a per-channel chatsession.Manager + outbound.Emitter, installs
+// a per-channel chatsession.Manager + messages.Emitter, installs
 // the runtime handlers, registers the Manager in runtime.allMgrs,
 // and returns a gateway.Pump for the gateway to attach.
 //
@@ -681,7 +681,7 @@ func newNoOpMgr() *chatsession.Manager {
 	return chatsession.NewManager()
 }
 
-// noOpEmitter satisfies outbound.Emitter for the
+// noOpEmitter satisfies messages.Emitter for the
 // dispatch-chain fallback path. The real outbound goes through
 // cs.Emitter() inside cmd.Handle; this stub only matters if
 // the dispatcher wants to send a reply without a per-channel

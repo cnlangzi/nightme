@@ -2,7 +2,7 @@
 // channel that drives workflow YAML automations: it feeds trigger
 // events into its own Incoming() (where the gateway's pumpInbound
 // reads them), and receives agent replies via Send (called by the
-// gateway's outbound.Emitter).
+// gateway's messages.Emitter).
 //
 // Locked design invariant: bot does NOT import
 // internal/chatsession, internal/agentsession, or any other
@@ -154,7 +154,7 @@ func (b *Bot) Stop(_ context.Context) error {
 func (b *Bot) Incoming() <-chan messages.InboundMessage { return b.in }
 
 // Send implements channel.Channel. Called by the gateway's
-// outbound.Emitter when an agent reply is ready. bot looks up the
+// messages.Emitter when an agent reply is ready. bot looks up the
 // botRun for msg.ChatID and delivers msg.Text to the run's
 // reply channel.
 func (b *Bot) Send(_ context.Context, msg messages.OutboundMessage) error {

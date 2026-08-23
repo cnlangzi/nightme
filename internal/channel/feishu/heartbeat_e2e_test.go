@@ -1,7 +1,7 @@
 // Package feishu — F-63 end-to-end heartbeat test.
 //
 // Exercises the full path: bridge AgentEvent → handler (built
-// inline, see buildHandler below) → outbound.Emitter →
+// inline, see buildHandler below) → messages.Emitter →
 // *Adapter.Send → receiptFor → ApplyHeartbeat → renderLocked →
 // PATCH body containing the heartbeat header.
 //
@@ -79,7 +79,7 @@ func installReceipt(a *Adapter, bot receiptBot, chatID, userMsgID, msgID string)
 //	3. ⭐ Heartbeat observe (BEFORE policies — core invariant)
 //	4. Default policies (think / tools gate)
 //	5. em.Send
-func buildHandler(em outbound.Emitter, cs *chatsession.ChatSession, thinkMode chatsession.ThinkMode, toolsMode chatsession.ToolsMode) func(chatsession.AgentEventEnvelope) {
+func buildHandler(em messages.Emitter, cs *chatsession.ChatSession, thinkMode chatsession.ThinkMode, toolsMode chatsession.ToolsMode) func(chatsession.AgentEventEnvelope) {
 	_ = cs.SetThinkMode(thinkMode)
 	_ = cs.SetToolsMode(toolsMode)
 	return func(env chatsession.AgentEventEnvelope) {

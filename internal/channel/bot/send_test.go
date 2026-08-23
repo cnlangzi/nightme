@@ -9,7 +9,7 @@ import (
 )
 
 // TestBotSendRoutesReplyToRun verifies the lock-step design
-// invariant: when the gateway's outbound.Emitter calls bot.Send
+// invariant: when the gateway's messages.Emitter calls bot.Send
 // with a reply (carrying the chat's chatID), bot looks up the
 // botRun registered under that chatID and delivers msg.Text to
 // that run's reply channel. The waiting wfe.Tick goroutine
@@ -35,7 +35,7 @@ func TestBotSendRoutesReplyToRun(t *testing.T) {
 	b.runsByChatID[chatID] = run
 	b.muRuns.Unlock()
 
-	// Simulate the gateway's outbound.Emitter calling bot.Send
+	// Simulate the gateway's messages.Emitter calling bot.Send
 	// with an agent reply.
 	err := b.Send(context.Background(), messages.OutboundMessage{
 		ChatID: chatID,

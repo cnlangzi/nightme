@@ -901,7 +901,7 @@ func (s *testStarter) Detect() error    { return nil }
 func (s *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("testStarter: Start not implemented")
 }
-func (s *testStarter) RunOnce(_ context.Context, _ agent.StartConfig, []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
+func (s *testStarter) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock, _ ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("testStarter: RunOnce not implemented")
 }
 

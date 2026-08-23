@@ -21,10 +21,10 @@ func (f *fakeAgent) Detect() error       { return nil }
 func (f *fakeAgent) Start(context.Context, StartConfig) (*Agent, error) {
 	return nil, errors.New("fakeAgent: Start not implemented")
 }
-func (f *fakeAgent) RunOnce(_ context.Context, _ StartConfig, []ContentBlock, ...RunOnceOption, opts ...RunOnceOption) (RunResult, error) {
+func (f *fakeAgent) RunOnce(_ context.Context, _ StartConfig, _ []ContentBlock, _ ...RunOnceOption) (RunResult, error) {
 	return RunResult{}, errors.New("fakeAgent: RunOnce not implemented")
 }
-func (f *fakeAgent) Review(_ context.Context, _ StartConfig, ...RunOnceOption, opts ...RunOnceOption) (RunResult, error) {
+func (f *fakeAgent) Review(_ context.Context, _ StartConfig, _ ...RunOnceOption) (RunResult, error) {
 	return RunResult{}, ErrReviewNotSupported
 }
 

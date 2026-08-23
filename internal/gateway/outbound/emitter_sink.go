@@ -43,7 +43,6 @@ package outbound
 import (
 	"context"
 	"log/slog"
-	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -80,10 +79,7 @@ func StreamRunOnceToEmitter(ctx context.Context, em Emitter, chatID, replyTo, ag
 	// translates to OutboundMessage, and hands off to the Emitter.
 	// Decoupled from the bridge's drain loop so the bridge never
 	// waits on the Emitter (Feishu rate-limits, etc.).
-	var wg sync.WaitGroup
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -92,13 +88,22 @@ func StreamRunOnceToEmitter(ctx context.Context, em Emitter, chatID, replyTo, ag
 				if !ok {
 					return
 				}
-				dispatchSinkEvent(ctx, em, chatID, replyTo, agentName, ev)
+				dispatchSinkEvent(em, chatID, replyTo, agentName, ev)
 			}
 		}
 	}()
 
 	// Sink callback handed to the bridge. Synchronous on the
 	// bridge's goroutine; non-blocking on the internal chan.
+	//
+	// Backpressure policy: when the internal chan is full we DROP
+	// the event and log at debug level. The terminal
+	// EventAgentResult is therefore NOT guaranteed to reach the
+	// Emitter under heavy load — only the bridge's RunResult
+	// Text carries that, so callers must not rely on observing
+	// the result via the sink alone. This trade-off keeps the
+	// bridge's wire parser / drain loop from blocking on a slow
+	// Feishu card send.
 	return func(ev agent.AgentEvent) {
 		select {
 		case <-ctx.Done():
@@ -109,13 +114,6 @@ func StreamRunOnceToEmitter(ctx context.Context, em Emitter, chatID, replyTo, ag
 		case ch <- ev:
 			// Common path: event queued for drain.
 		default:
-			// Bridge is faster than the Emitter. Drop with a
-			// debug log so a slow / stalled Emitter doesn't stall
-			// the bridge's wire parser / drain loop. The terminal
-			// EventAgentResult always gets through (it's the last
-			// event before the bridge returns and its drain loop
-			// exits) — Translate still sees it on the same
-			// goroutine via deliverToSink.
 			slog.Default().Debug("outbound: sink buffer full; dropping event",
 				"kind", ev.Kind.String(),
 				"chat_id", chatID,
@@ -128,7 +126,7 @@ func StreamRunOnceToEmitter(ctx context.Context, em Emitter, chatID, replyTo, ag
 // and emits it. Mirrors the runtime.NewEventHandler path so the
 // chat sees the same shape for one-shot / review calls as it does
 // for primary chat sessions.
-func dispatchSinkEvent(ctx context.Context, em Emitter, chatID, replyTo, agentName string, ev agent.AgentEvent) {
+func dispatchSinkEvent(em Emitter, chatID, replyTo, agentName string, ev agent.AgentEvent) {
 	out, ok := Translate(chatID, ev)
 	if !ok {
 		return // Translate drops events that don't surface to the channel
@@ -147,6 +145,9 @@ func dispatchSinkEvent(ctx context.Context, em Emitter, chatID, replyTo, agentNa
 			"chat_id", chatID,
 			"err", err.Error())
 	}
-	_ = ctx // ctx is reserved for future per-event cancellation hooks
-	_ = messages.OutboundMessage{} // import anchor — messages is used by Translate above
 }
+
+// _ is the package-scope import anchor for messages —
+// Translate's signature uses it. Declared once at package init
+// rather than re-declared on every dispatchSinkEvent call.
+var _ messages.OutboundMessage

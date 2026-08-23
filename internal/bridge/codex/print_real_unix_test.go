@@ -347,7 +347,7 @@ func TestStarterRunOnce_Interface(t *testing.T) {
 	// interface (the actual guarantee comes from the compile
 	// error elsewhere; this is a friendly sanity check).
 	var _ interface {
-		RunOnce(_ context.Context, _ agent.StartConfig, []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error)
+		RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock, _ ...agent.RunOnceOption) (agent.RunResult, error)
 	} = s
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

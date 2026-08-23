@@ -220,7 +220,10 @@ func TestRunOnce_ArchiveOnClose(t *testing.T) {
 	mock.installGlobal(t)
 
 	s := NewStarter("dsh")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 200ms ctx is enough for the handshake + SendBlocks + archive
+	// path; drain blocks on events (no terminal delivered in this
+	// test) so we exit via deadline. The 5s default is wasted.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	// Use a goroutine to break out of RunOnce after the archive
@@ -236,10 +239,10 @@ func TestRunOnce_ArchiveOnClose(t *testing.T) {
 	<-ctx.Done()
 	<-doneCh
 
-	// Give Close a moment to land.
-	deadline := time.Now().Add(2 * time.Second)
+	// Poll for archive completion (cheap, max ~500ms).
+	deadline := time.Now().Add(500 * time.Millisecond)
 	for mock.archiveCount.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	if got := mock.archiveCount.Load(); got == 0 {
 		t.Fatalf("workspace.archiveSession never fired; defer Close did not run archive")

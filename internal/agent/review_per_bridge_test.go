@@ -68,7 +68,7 @@ func TestReview_UsesSharedPrompt(t *testing.T) {
 	var gotPrompt string
 	fs := &testStarter{
 		info: agent.NewInfo("fake", agent.ModeJSONIO, "fake", nil, nil),
-		runOnce: func(_ context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+		runOnce: func(_ context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, _ ...agent.RunOnceOption) (agent.RunResult, error) {
 			gotWorkspace = cfg.Workspace
 			if len(blocks) == 1 {
 				gotPrompt = blocks[0].Text

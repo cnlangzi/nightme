@@ -178,7 +178,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 // EventAgentResult is an error path (claudecode stream-json's
 // `result` event never fired) — we surface that rather than silently
 // returning an empty RunResult.
-func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent), opts ...agent.RunOnceOption) (agent.RunResult, error) {
+func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent)) (agent.RunResult, error) {
 	name := a.Info.Name
 
 	// Seed from the *driver. By the time RunOnce calls drain, the

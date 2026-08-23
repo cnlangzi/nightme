@@ -104,17 +104,12 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return result, nil
 }
 
-// Review implements /review for pi: delegate to shared
-// StandardPrompt. pi's chat agent reads git diff and outputs
-// the structured review.
+// Review implements /review for pi: delegate to the shared
+// agent.DelegateReview (three-tier dispatch, docs/REVIEW.md §2).
+// pi has no native review subcommand, so it runs the Go-precompute-
+// enhanced prompt via RunOnce — ocr delegate rules are folded in
+// when ocr is on $PATH. DelegateReview forwards opts (event sink)
+// and wraps errors with the agent name.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: agent.StandardPrompt(),
-	}})
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
-			s.Info().Name, err)
-	}
-	return result, nil
+	return agent.DelegateReview(ctx, s, cfg, opts...)
 }

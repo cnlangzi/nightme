@@ -3,6 +3,8 @@ package telegram
 import (
 	"sync"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // ---------------------------------------------------------------------------
@@ -57,6 +59,17 @@ type placeholderChain struct {
 	// across non-footer events. nil = no footer-bearing event happened
 	// yet → render emits no footer panel.
 	lastFooter []string
+
+	// lastTaskList (v9 P2, §11.12.6.1) is the most recent agent
+	// task snapshot the chain saw. Refreshed by OutTaskCreate /
+	// OutTaskUpdate; held stable across non-task events. nil = no
+	// task event happened yet, OR the last event cleared the
+	// checklist → render omits the task section entirely. ROTATE
+	// / SPLIT paths copy this onto newly-born chunks via
+	// inheritLatestTaskList so frozen chunks retain their birth
+	// task snapshot (mirrors lastFooter's role for ROTATE
+	// inheritance).
+	lastTaskList []agent.AgentTaskItem
 
 	// dirty is true when the in-memory chunk buffer diverges from the
 	// last Telegram-rendered text. flushChainNow consumes it.

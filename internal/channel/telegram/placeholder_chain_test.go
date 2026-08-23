@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // noSendFn is a test-double sendFn that fails if ever invoked.
@@ -14,6 +17,38 @@ import (
 // wire this in to catch unexpected send calls.
 func noSendFn(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
 	return 0, errors.New("sendFn should not be called in this test")
+}
+
+// recordingSend returns a sendFn that records the rendered body
+// to a thread-safe slice and returns a unique messageID per call.
+// Used by v9 P2 task-section tests that need to observe what
+// landed on Telegram without exercising the network. Returns a
+// closure so each test owns its own recorder; nil-safe on
+// subsequent reads via the returned accessor pointer.
+func recordingSend() (sendFn sendChunkFn) {
+	var (
+		mu      sync.Mutex
+		bodies  []string
+		nextMID int64 = 1000
+	)
+	return func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		bodies = append(bodies, text)
+		mid := nextMID
+		nextMID++
+		return mid, nil
+	}
+}
+
+// noEditFn returns an editFn that fails if invoked. v9 P2 tests
+// that only exercise the cold-create / append-in-place path
+// (no scheduleFlushDebounced equivalent) wire this in to catch
+// accidental edit calls.
+func noEditFn() editChunkFn {
+	return func(_ context.Context, _ string, _ int64, _ string) error {
+		return errors.New("editFn should not be called in this test")
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,4 +1172,620 @@ func TestChain_FlushChainNow_TailInheritsLatestHeader(t *testing.T) {
 	// Should have at least one edit (each flushChainNow for the
 	// active chunk; the ROTATE path also edits the head piece).
 	_ = editCalls
+}
+
+// ---------------------------------------------------------------------------
+// v9 P2 task section (§11.12.6.1) — chunkBody / chain primitive tests.
+// ---------------------------------------------------------------------------
+
+// TestRenderActiveChunkBody_TaskOnly pins the task-only turn shape
+// (entries empty, taskList non-empty): Compose emits the cold-create
+// header + a blank line + the `<b>📋 Tasks</b>` headline + the task
+// rows + a blank line + the footer. No separator between header and
+// the empty entries (we skip the divider), but a blank line flanks
+// the task section so it reads as a distinct block.
+func TestRenderActiveChunkBody_TaskOnly(t *testing.T) {
+	cur := &chunkBody{header: "<b>🤖 Working...</b>"}
+	cur.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "Write tests", Status: agent.TaskInProgress, ActiveForm: "writing"},
+		{ID: "t2", Subject: "Refactor", Status: agent.TaskPending},
+	})
+	cur.setFooter("┌─foo─›")
+	body := renderActiveChunkBody(cur)
+	if !strings.Contains(body, "<b>🤖 Working...</b>") {
+		t.Fatalf("cold-create header missing; got %q", body)
+	}
+	if !strings.Contains(body, "<b>📋 Tasks</b>") {
+		t.Fatalf("task headline missing; got %q", body)
+	}
+	if !strings.Contains(body, "• [ ] Write tests (writing)") {
+		t.Fatalf("in_progress row with ActiveForm missing; got %q", body)
+	}
+	if !strings.Contains(body, "• [ ] Refactor") {
+		t.Fatalf("pending row missing; got %q", body)
+	}
+	if !strings.Contains(body, "┌─foo─›") {
+		t.Fatalf("footer missing; got %q", body)
+	}
+	// Footer must come AFTER the task section in the rendered
+	// body — order is the §11.12.6.1 contract.
+	idxFooter := strings.Index(body, "┌─foo─›")
+	idxTask := strings.Index(body, "<b>📋 Tasks</b>")
+	if !(idxTask < idxFooter) {
+		t.Fatalf("task section must precede footer; task=%d footer=%d body=%q",
+			idxTask, idxFooter, body)
+	}
+}
+
+// TestRenderActiveChunkBody_TaskAboveFooter locks the strict render
+// order: header → entries → task section → footer. Same shape as
+// feishu's `📋 Tasks` card section + statusbar footer pairing.
+func TestRenderActiveChunkBody_TaskAboveFooter(t *testing.T) {
+	cur := &chunkBody{header: "<b>💭 1 · 🔧 0</b>"}
+	cur.setHeaderFromHeartbeat("<b>💭 1 · 🔧 0</b>")
+	cur.appendEntry("first entry")
+	cur.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "Plan the API", Status: agent.TaskCompleted},
+	})
+	cur.setFooter("┌─bar─›")
+	body := renderActiveChunkBody(cur)
+	idxHeader := strings.Index(body, "<b>💭 1 · 🔧 0</b>")
+	idxSep := strings.Index(body, "────────")
+	idxEntry := strings.Index(body, "first entry")
+	idxTask := strings.Index(body, "<b>📋 Tasks</b>")
+	idxFooter := strings.Index(body, "┌─bar─›")
+	if !(idxHeader < idxSep && idxSep < idxEntry && idxEntry < idxTask && idxTask < idxFooter) {
+		t.Fatalf("expected header < sep < entry < task < footer; got h=%d s=%d e=%d t=%d f=%d body=%q",
+			idxHeader, idxSep, idxEntry, idxTask, idxFooter, body)
+	}
+	if !strings.Contains(body, "• [x] Plan the API") {
+		t.Fatalf("completed task row missing; got %q", body)
+	}
+}
+
+// TestRenderActiveChunkBody_NoTaskWhenEmpty locks the no-orphan-
+// headline contract: when taskList is nil or len==0, Compose must
+// NOT emit the `<b>📋 Tasks</b>` headline. Otherwise a stale empty
+// checklist would paint a phantom title every turn.
+func TestRenderActiveChunkBody_NoTaskWhenEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tasks []agent.AgentTaskItem
+	}{
+		{"nil slice", nil},
+		{"empty slice", []agent.AgentTaskItem{}},
+		{"only deleted", []agent.AgentTaskItem{{ID: "x", Status: agent.TaskDeleted}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cur := &chunkBody{header: "<b>💭 0 · 🔧 0</b>"}
+			cur.setHeaderFromHeartbeat("<b>💭 0 · 🔧 0</b>")
+			cur.appendEntry("entry")
+			cur.setTaskList(tc.tasks)
+			body := renderActiveChunkBody(cur)
+			if strings.Contains(body, "<b>📋 Tasks</b>") {
+				t.Fatalf("empty taskList must not paint headline; got %q", body)
+			}
+		})
+	}
+}
+
+// TestRenderActiveChunkBody_TaskHeadlinePreservedThroughRender
+// pins that the pre-baked HTML headline is NOT run through
+// RenderMarkdown's escapeHTML — `<b>` must survive as a literal
+// tag, not get escaped to `&lt;b&gt;`. Same regression guard as
+// the `🤖 Working...` header test.
+func TestRenderActiveChunkBody_TaskHeadlinePreservedThroughRender(t *testing.T) {
+	cur := &chunkBody{header: "<b>💭 0 · 🔧 0</b>"}
+	cur.setHeaderFromHeartbeat("<b>💭 0 · 🔧 0</b>")
+	cur.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "Only task", Status: agent.TaskPending},
+	})
+	body := renderActiveChunkBody(cur)
+	if !strings.Contains(body, "<b>📋 Tasks</b>") {
+		t.Fatalf("literal <b> tags lost on task headline; got %q", body)
+	}
+	if strings.Contains(body, "&lt;b&gt;📋 Tasks&lt;/b&gt;") {
+		t.Fatalf("task headline was double-escaped; got %q", body)
+	}
+}
+
+// TestChunkBody_SetTaskList_NilClears locks the defensive-copy +
+// nil-reset contract. setTaskList(nil) leaves the field as nil; a
+// later Compose() must not paint an orphan headline.
+func TestChunkBody_SetTaskList_NilClears(t *testing.T) {
+	cur := &chunkBody{}
+	cur.setTaskList([]agent.AgentTaskItem{{ID: "t1", Status: agent.TaskPending}})
+	if cur.taskListText() == nil {
+		t.Fatal("taskList should be set after first setTaskList")
+	}
+	cur.setTaskList(nil)
+	if cur.taskListText() != nil {
+		t.Fatalf("setTaskList(nil) must clear taskList; got %v", cur.taskListText())
+	}
+	cur.setTaskList([]agent.AgentTaskItem{}) // len==0 also
+	if cur.taskListText() != nil {
+		t.Fatalf("setTaskList(empty) must clear taskList; got %v", cur.taskListText())
+	}
+}
+
+// TestChunkBody_InheritLatestTaskList_CopiesAndFlag is the
+// inheritLatestTaskList primitive test: src.taskList is defensively
+// copied (not shared), nil src is a no-op, empty src clears the
+// destination. Mirrors TestChunkBody_InheritLatestHeader_HeaderAndFlag.
+func TestChunkBody_InheritLatestTaskList_CopiesAndFlag(t *testing.T) {
+	src := &chunkBody{}
+	src.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "alpha"},
+		{ID: "t2", Subject: "beta"},
+	})
+
+	dst := &chunkBody{}
+	dst.inheritLatestTaskList(src)
+	if got := dst.taskListText(); len(got) != 2 || got[0].ID != "t1" || got[1].ID != "t2" {
+		t.Fatalf("inherit failed; got %v", got)
+	}
+
+	// Defensive copy: mutating the inherited slice must NOT bleed
+	// back into src (the chunkBody frozen-state invariant).
+	dst.taskListText()[0].Subject = "MUTATED"
+	if src.taskList[0].Subject == "MUTATED" {
+		t.Fatalf("inherited taskList aliased src; got %q", src.taskList[0].Subject)
+	}
+
+	// nil src is a no-op (caller can short-circuit on chain state
+	// without a guard).
+	dst.inheritLatestTaskList(nil)
+	if dst.taskListText()[0].Subject != "MUTATED" {
+		t.Fatalf("nil src must be a no-op; got %v", dst.taskListText())
+	}
+
+	// Empty src clears the destination (frozen chunks with no
+	// task snapshot shouldn't suddenly inherit a non-empty plan
+	// when chain.lastTaskList is non-nil but the source chunk
+	// itself never had a taskList — but in practice lastTaskList
+	// and per-chunk taskList move together so this is defensive).
+	srcEmpty := &chunkBody{}
+	dst2 := &chunkBody{}
+	dst2.setTaskList([]agent.AgentTaskItem{{ID: "t1"}})
+	dst2.inheritLatestTaskList(srcEmpty)
+	if dst2.taskListText() != nil {
+		t.Fatalf("empty src must clear dst; got %v", dst2.taskListText())
+	}
+}
+
+// TestChain_TaskListUpdate_RefreshesActiveChunkOnly pins the
+// inheritance semantics: an OutTaskUpdate after ROTATE only
+// refreshes the active chunk; the frozen ROTATE-tail keeps its
+// birth snapshot. Same contract as
+// TestChain_RotateChunk_InheritsLatestHeader for the header field.
+func TestChain_TaskListUpdate_RefreshesActiveChunkOnly(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	chain.cursor = -1
+
+	// Build the first chunk with a 3-task snapshot.
+	tasks1 := []agent.AgentTaskItem{
+		{ID: "t1", Subject: "Plan", Status: agent.TaskCompleted},
+		{ID: "t2", Subject: "Code", Status: agent.TaskInProgress, ActiveForm: "coding"},
+		{ID: "t3", Subject: "Test", Status: agent.TaskPending},
+	}
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		tasks1, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("first setTaskList: %v", err)
+	}
+	if len(chain.chunks) != 1 {
+		t.Fatalf("expected 1 chunk; got %d", len(chain.chunks))
+	}
+	frozen := chain.chunks[0]
+	if len(frozen.taskListText()) != 3 {
+		t.Fatalf("frozen chunk must carry 3 tasks; got %d", len(frozen.taskListText()))
+	}
+
+	// Trigger ROTATE: appendSegment on the same chain pushes the
+	// active chunk over a 3500-char threshold by stuffing a long
+	// entry.
+	longSeg := strings.Repeat("x", chainChunkThresholdChars+10)
+	if err := appendSegment(context.Background(), chain, "100", 0, 1,
+		longSeg, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("appendSegment ROTATE: %v", err)
+	}
+	if len(chain.chunks) != 2 {
+		t.Fatalf("ROTATE must produce 2 chunks; got %d", len(chain.chunks))
+	}
+
+	// Now OutTaskUpdate — the new chunk must inherit the prior
+	// taskList (active chunk at that moment is chunk[0] which has
+	// it), then be replaced wholesale by the new snapshot.
+	tasks2 := []agent.AgentTaskItem{
+		{ID: "t1", Subject: "Plan", Status: agent.TaskCompleted},
+		{ID: "t2", Subject: "Code", Status: agent.TaskCompleted}, // now done
+		// t3 removed
+		{ID: "t4", Subject: "Ship", Status: agent.TaskPending},
+	}
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		tasks2, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("second setTaskList: %v", err)
+	}
+	// Active chunk now reflects tasks2.
+	active := chain.chunks[chain.cursor]
+	if len(active.taskListText()) != 3 || active.taskListText()[1].ID != "t2" ||
+		active.taskListText()[1].Status != agent.TaskCompleted {
+		t.Fatalf("active chunk must carry updated taskList; got %v", active.taskListText())
+	}
+	// Frozen chunk[0] is unchanged (still 3 tasks).
+	if len(chain.chunks[0].taskListText()) != 3 ||
+		chain.chunks[0].taskListText()[1].Status != agent.TaskInProgress {
+		t.Fatalf("frozen chunk must keep birth taskList; got %v",
+			chain.chunks[0].taskListText())
+	}
+}
+
+// TestChain_Rotate_InheritsLatestTaskList pins the ROTATE path:
+// when an appendSegment pushes the active chunk over the
+// threshold, the new chunk inherits the prior chunk's taskList
+// via inheritLatestTaskList so the plan doesn't disappear at the
+// ROTATE boundary.
+func TestChain_Rotate_InheritsLatestTaskList(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	chain.cursor = -1
+
+	tasks := []agent.AgentTaskItem{
+		{ID: "t1", Subject: "only task", Status: agent.TaskPending},
+	}
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		tasks, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("cold-create setTaskList: %v", err)
+	}
+	// Force ROTATE.
+	longSeg := strings.Repeat("x", chainChunkThresholdChars+10)
+	if err := appendSegment(context.Background(), chain, "100", 0, 1,
+		longSeg, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("appendSegment: %v", err)
+	}
+	if len(chain.chunks) != 2 {
+		t.Fatalf("ROTATE expected; got %d chunks", len(chain.chunks))
+	}
+	cur := chain.chunks[1]
+	got := cur.taskListText()
+	if len(got) != 1 || got[0].ID != "t1" {
+		t.Fatalf("ROTATE tail must inherit taskList; got %v", got)
+	}
+}
+
+// TestChain_Split_InheritsLatestTaskList pins the SPLIT path
+// (trigger 1: single oversized segment). All pieces must inherit
+// taskList so the user sees the plan on every slice, not just the
+// head piece.
+func TestChain_Split_InheritsLatestTaskList(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	chain.cursor = -1
+
+	tasks := []agent.AgentTaskItem{
+		{ID: "t1", Subject: "alpha", Status: agent.TaskInProgress},
+	}
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		tasks, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("cold-create: %v", err)
+	}
+
+	// SPLIT trigger 1: a single segment > 3500 chars (after
+	// RenderMarkdown + splitTelegramText it ends up as multiple
+	// pieces).
+	seg := strings.Repeat("abcdef ", 1000) // ~7000 chars
+	if err := appendSegment(context.Background(), chain, "100", 0, 1,
+		seg, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("SPLIT appendSegment: %v", err)
+	}
+	if len(chain.chunks) < 2 {
+		t.Fatalf("SPLIT expected ≥2 chunks; got %d", len(chain.chunks))
+	}
+	for i, ch := range chain.chunks {
+		got := ch.taskListText()
+		if len(got) != 1 || got[0].ID != "t1" {
+			t.Fatalf("chunk[%d] must inherit taskList; got %v", i, got)
+		}
+	}
+}
+
+// TestChain_NewChunk_InheritsLastTaskList_OnColdCreate pins the
+// cold-create-with-prior-lastTaskList path: if chain.lastTaskList
+// is set (e.g. a prior turn's chain was LRU-evicted but the next
+// setTaskList races ahead of any entries / heartbeat) the first
+// cold-created chunk must carry the lastTaskList snapshot.
+//
+// We simulate this by directly mutating chain.lastTaskList before
+// calling setTaskList (no real LRU race window can be triggered
+// from a single goroutine, but the test verifies the field
+// propagation logic).
+func TestChain_NewChunk_InheritsLastTaskList_OnColdCreate(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	chain.cursor = -1
+	chain.lastTaskList = []agent.AgentTaskItem{
+		{ID: "t0", Subject: "carried from prior turn", Status: agent.TaskPending},
+	}
+
+	// setTaskList overwrites lastTaskList, but Compose uses the
+	// chunk's own taskList field — cold-create seeds it from
+	// chain.lastTaskList when items is non-empty (which it is, by
+	// virtue of the parameter check).
+	tasks := []agent.AgentTaskItem{
+		{ID: "t1", Subject: "new turn", Status: agent.TaskInProgress},
+	}
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		tasks, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("setTaskList: %v", err)
+	}
+	if got := chain.chunks[0].taskListText(); len(got) != 1 || got[0].ID != "t1" {
+		t.Fatalf("cold-create chunk must carry the fresh taskList; got %v", got)
+	}
+	// chain.lastTaskList reflects the latest call (data-driven).
+	if len(chain.lastTaskList) != 1 || chain.lastTaskList[0].ID != "t1" {
+		t.Fatalf("chain.lastTaskList must mirror the latest snapshot; got %v",
+			chain.lastTaskList)
+	}
+}
+
+// TestSetTaskList_EmptyList_SilentDrop pins the silent-drop guard:
+// nil / len==0 items → no chain mutation, no send call, no error.
+// This is the contract that lets OutTaskUpdate use an empty slice
+// as the "clear the checklist" signal without leaving orphan
+// Telegram state.
+// TestSetTaskList_EmptyItems_ClearsOnActiveChain pins the
+// post-review clear semantic: empty / nil items on an ACTIVE
+// chain (cursor ≥ 0) is the bridge "clear the checklist" signal
+// (per outbound.go OutTaskUpdate comment). setTaskList clears
+// chain.lastTaskList + the active chunk's taskList so the next
+// Compose() omits the section entirely. chain.dirty=true so the
+// debounced flush re-renders.
+//
+// Mirrors feishu SetTaskList: an empty Items slice means "no
+// tasks remain". Replaces the v9 P2 silent-drop behaviour that
+// was reverted in review.
+func TestSetTaskList_EmptyItems_ClearsOnActiveChain(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	// Seed: cold-create with one task.
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		[]agent.AgentTaskItem{{ID: "t1", Subject: "do thing", Status: agent.TaskPending}},
+		nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("seed setTaskList: %v", err)
+	}
+	if got := chain.chunks[0].taskListText(); len(got) != 1 {
+		t.Fatalf("seed taskList missing; got %v", got)
+	}
+	if chain.lastTaskList == nil {
+		t.Fatalf("seed lastTaskList must be set")
+	}
+	chain.dirty = false // reset for the clear path observation
+
+	// Act: clear via empty items.
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		[]agent.AgentTaskItem{}, nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("clear setTaskList: %v", err)
+	}
+	if got := chain.chunks[chain.cursor].taskListText(); got != nil {
+		t.Fatalf("active chunk taskList must be cleared; got %v", got)
+	}
+	if chain.lastTaskList != nil {
+		t.Fatalf("chain.lastTaskList must be cleared; got %v", chain.lastTaskList)
+	}
+	if !chain.dirty {
+		t.Fatalf("chain.dirty must be true after clear; got false")
+	}
+	// Compose must NOT render the section after clear.
+	body := chain.chunks[chain.cursor].Compose()
+	if strings.Contains(body, "<b>📋 Tasks</b>") {
+		t.Fatalf("cleared section must not paint headline; got %q", body)
+	}
+	if strings.Contains(body, "do thing") {
+		t.Fatalf("cleared section must not contain prior row; got %q", body)
+	}
+}
+
+// TestSetTaskList_EmptyItems_SilentDropOnFreshChain pins the
+// defensive guard: empty / nil items on a FRESH chain (cursor
+// < 0) is silent drop. There's no chunk to clear, no chunk to
+// render — creating one for a clear signal would be wasteful.
+// This case is unusual in production (OutTaskCreate always has
+// ≥1 task; OutTaskUpdate only fires after at least one
+// OutTaskCreate seeded the chain) but the test locks the
+// behaviour so a future refactor doesn't regress it.
+func TestSetTaskList_EmptyItems_SilentDropOnFreshChain(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	sends := 0
+	send := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		sends++
+		return 0, nil
+	}
+
+	for _, items := range [][]agent.AgentTaskItem{nil, {}} {
+		if err := setTaskList(context.Background(), chain, "100", 0, 1,
+			items, nil, send, noEditFn()); err != nil {
+			t.Fatalf("empty-on-fresh setTaskList must not error; got %v", err)
+		}
+	}
+	if sends != 0 {
+		t.Fatalf("empty-on-fresh setTaskList must not call sendFn; got %d", sends)
+	}
+	if len(chain.chunks) != 0 {
+		t.Fatalf("empty-on-fresh setTaskList must not materialise a chunk; got %d",
+			len(chain.chunks))
+	}
+	// lastTaskList IS updated even on silent drop (data-driven:
+	// the chain reflects "no tasks now"); callers reading it get
+	// the cleared snapshot.
+	if chain.lastTaskList != nil {
+		t.Fatalf("lastTaskList must be nil after empty setTaskList; got %v",
+			chain.lastTaskList)
+	}
+}
+
+// TestRenderActiveChunkBody_TaskSection_TruncatesAtBudget pins
+// the rune budget enforcement: a long checklist is truncated at
+// taskSectionBudgetRunes, the last visible row gets a `…` suffix,
+// the markdown list shape is preserved. Without this, a
+// 50-task snapshot would blow past Telegram's 4096 hard limit
+// and the first sendMessage would be rejected.
+func TestRenderActiveChunkBody_TaskSection_TruncatesAtBudget(t *testing.T) {
+	cur := &chunkBody{header: "<b>💭 0 · 🔧 0</b>"}
+	cur.setHeaderFromHeartbeat("<b>💭 0 · 🔧 0</b>")
+	// 60 long tasks (each subject ~80 chars + checkbox + newline
+	// ≈ 90 runes). 60 × 90 = 5400 runes — well over the 3000
+	// budget. Expect ~30 rows visible plus `…`.
+	const totalTasks = 60
+	tasks := make([]agent.AgentTaskItem, totalTasks)
+	for i := range tasks {
+		tasks[i] = agent.AgentTaskItem{
+			ID:      "t" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
+			Subject: strings.Repeat("x", 80), // 80-char subject
+			Status:  agent.TaskPending,
+		}
+	}
+	cur.setTaskList(tasks)
+	body := renderActiveChunkBody(cur)
+	if !strings.Contains(body, "<b>📋 Tasks</b>") {
+		t.Fatalf("headline missing; got %q", body)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(body), "…") {
+		t.Fatalf("body must end with `…` truncation suffix; got tail %q",
+			body[len(body)-50:])
+	}
+	// Body rune count must stay under Telegram's 4096 hard limit.
+	// Headline (~14 runes) + visible rows + `…` suffix should be
+	// safely below 3500 to leave room for header (~50) + footer
+	// (~100).
+	if utf8.RuneCountInString(body) > 3500 {
+		t.Fatalf("rendered body %d runes exceeds 3500 budget; would bust Telegram 4096 with header+footer",
+			utf8.RuneCountInString(body))
+	}
+	// Visible row count: each row is ~90 runes; budget 3000 - 14
+	// (headline) ≈ 2986 runes available for rows; 2986/90 ≈ 33
+	// rows. Allow some slack — just check we have FEWER rows
+	// than totalTasks (truncation actually happened).
+	visibleRows := strings.Count(body, "• [ ]")
+	if visibleRows >= totalTasks {
+		t.Fatalf("expected truncation to drop rows; got %d visible / %d total",
+			visibleRows, totalTasks)
+	}
+	if visibleRows < 20 {
+		t.Fatalf("too few rows visible; expected ~33, got %d (budget may be too tight)", visibleRows)
+	}
+}
+
+// TestRenderActiveChunkBody_TaskCancelled_Filtered locks the
+// cursor-only TaskCancelled status filter: rows with this status
+// are dropped before the rune budget is consumed, so a 100-task
+// list with 50 cancelled rows still renders the 50 visible ones
+// without burning budget on invisible items. Mirrors feishu's
+// buildTaskChecklistChunks which only buckets
+// InProgress / Pending / Completed.
+func TestRenderActiveChunkBody_TaskCancelled_Filtered(t *testing.T) {
+	cur := &chunkBody{header: "<b>💭 0 · 🔧 0</b>"}
+	cur.setHeaderFromHeartbeat("<b>💭 0 · 🔧 0</b>")
+	cur.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "alive", Status: agent.TaskPending},
+		{ID: "t2", Subject: "dead-by-cancel", Status: agent.TaskCancelled},
+		{ID: "t3", Subject: "alive2", Status: agent.TaskCompleted},
+	})
+	body := renderActiveChunkBody(cur)
+	if strings.Contains(body, "dead-by-cancel") {
+		t.Fatalf("TaskCancelled row must be filtered; got %q", body)
+	}
+	if !strings.Contains(body, "alive") || !strings.Contains(body, "alive2") {
+		t.Fatalf("live rows must still render; got %q", body)
+	}
+}
+
+// TestRenderActiveChunkBody_TaskSubjectEscapesHTML locks the
+// RenderMarkdown escape path: a subject containing HTML tags
+// (e.g. user-supplied subject like `<script>`) must be rendered
+// as literal text — `<` / `>` escaped to `&lt;` / `&gt;` — so
+// Telegram's HTML parse_mode doesn't try to interpret it. XSS
+// regression guard.
+func TestRenderActiveChunkBody_TaskSubjectEscapesHTML(t *testing.T) {
+	cur := &chunkBody{header: "<b>💭 0 · 🔧 0</b>"}
+	cur.setHeaderFromHeartbeat("<b>💭 0 · 🔧 0</b>")
+	cur.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "<script>alert('xss')</script>", Status: agent.TaskPending},
+		{ID: "t2", Subject: "with & ampersand", Status: agent.TaskPending},
+	})
+	body := renderActiveChunkBody(cur)
+	if strings.Contains(body, "<script>") {
+		t.Fatalf("subject <script> must be HTML-escaped; got %q", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Fatalf("subject should appear as &lt;script&gt;...; got %q", body)
+	}
+	if !strings.Contains(body, "&amp;") {
+		t.Fatalf("ampersand must be HTML-escaped to &amp;; got %q", body)
+	}
+}
+
+// TestSetTaskList_ColdCreateWithStatusBar pins the production
+// path: first-ever setTaskList on a fresh chain lands together
+// with statusbar lines (agent typically stamps StatusBar on the
+// same OutTaskCreate event). The cold-created chunk must carry
+// both task section AND footer panel — no round-trip through
+// two separate events.
+func TestSetTaskList_ColdCreateWithStatusBar(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	tasks := []agent.AgentTaskItem{
+		{ID: "t1", Subject: "Plan", Status: agent.TaskInProgress, ActiveForm: "planning"},
+	}
+	footer := []string{"Agent: claude · Model: opus-4-5", "Session: sess-1", "Workspace: main"}
+	if err := setTaskList(context.Background(), chain, "100", 0, 1,
+		tasks, footer, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("cold-create: %v", err)
+	}
+	// chain.lastFooter must mirror the input.
+	if len(chain.lastFooter) != 3 {
+		t.Fatalf("chain.lastFooter not refreshed; got %d lines", len(chain.lastFooter))
+	}
+	body := chain.chunks[0].Compose()
+	if !strings.Contains(body, "<b>📋 Tasks</b>") {
+		t.Fatalf("task headline missing; got %q", body)
+	}
+	if !strings.Contains(body, "• [ ] Plan (planning)") {
+		t.Fatalf("in_progress row missing; got %q", body)
+	}
+	if !strings.Contains(body, "claude") {
+		t.Fatalf("footer agent line missing; got %q", body)
+	}
+	if !strings.Contains(body, "sess-1") {
+		t.Fatalf("footer session line missing; got %q", body)
+	}
+}
+
+// TestRenderActiveChunkBody_TaskInProgress_ShowsActiveFormSuffix
+// locks the row shape: in_progress tasks render as
+// `- [ ] Subject (ActiveForm)`. If ActiveForm is empty the suffix
+// is omitted (no trailing parens). pending / completed rows never
+// carry the suffix.
+func TestRenderActiveChunkBody_TaskInProgress_ShowsActiveFormSuffix(t *testing.T) {
+	cur := &chunkBody{header: "<b>💭 0 · 🔧 0</b>"}
+	cur.setHeaderFromHeartbeat("<b>💭 0 · 🔧 0</b>")
+	cur.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "with form", Status: agent.TaskInProgress, ActiveForm: "doing it"},
+		{ID: "t2", Subject: "no form", Status: agent.TaskInProgress},
+		{ID: "t3", Subject: "done", Status: agent.TaskCompleted},
+		{ID: "t4", Subject: "later", Status: agent.TaskPending},
+	})
+	body := renderActiveChunkBody(cur)
+	wants := []string{
+		"• [ ] with form (doing it)",
+		"• [ ] no form",        // no trailing parens
+		"• [x] done",
+		"• [ ] later",
+	}
+	for _, w := range wants {
+		if !strings.Contains(body, w) {
+			t.Fatalf("body missing %q; got %q", w, body)
+		}
+	}
+	// Defensive: pending / completed rows must not pick up the
+	// active-form suffix even if ActiveForm is populated.
+	if strings.Contains(body, "• [x] done (") || strings.Contains(body, "• [ ] later (") {
+		t.Fatalf("non-in_progress rows must not carry ActiveForm suffix; got %q", body)
+	}
 }

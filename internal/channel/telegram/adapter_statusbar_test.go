@@ -237,10 +237,14 @@ func TestAdapter_Send_DM_OutToolEnd_AppendsStatusBar(t *testing.T) {
 }
 
 func TestAdapter_Send_DM_OutTaskCreate_AppendsStatusBar(t *testing.T) {
-	// formatTaskList produces a different body shape than
-	// formatTool — bullet list, not single-line prefix. A
-	// regression in either formatTaskList or the switch
-	// routing would slip through without this test.
+	// v9 P2 (§11.12.6.1): OutTaskCreate now writes taskList as
+	// an independent chunkBody section (between entries and
+	// footer). The body shape is a `<b>📋 Tasks</b>` headline
+	// + a markdown todo-list (one row per item) — different
+	// from the v8 formatTaskList bullet shape (which used `- [x]`
+	// not `- [x]`). A regression in either the section writer
+	// (setTaskList) or the section renderer (chunkBody.renderTaskSection)
+	// would slip through without this test.
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
@@ -255,7 +259,12 @@ func TestAdapter_Send_DM_OutTaskCreate_AppendsStatusBar(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	text := lastChunkText(t, a, api.snapshotCalls())
-	for _, want := range []string{"Write tests", "Refactor", "🤖: claude"} {
+	for _, want := range []string{
+		"📋 Tasks",       // §11.12.6.1 headline
+		"Write tests",    // in_progress row → "- [ ] Write tests (writing tests)"
+		"Refactor",       // completed row → "- [x] Refactor"
+		"🤖: claude",     // statusbar trailer still rides along
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("OutTaskCreate body missing %q; got %q", want, text)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
@@ -128,6 +129,9 @@ func appendSegment(
 		// header + ──── + footer (no segment) on the next flush
 		// and overwrites the original message content.
 		chunk.appendEntry(segment)
+		// Cold-create on appendSegment means no task snapshot has
+		// been set yet (setTaskList hasn't run on this turn); we
+		// don't synthesise one here.
 		// Set the footer before computing the body so the cold-
 		// create render matches what subsequent flushes produce.
 		// P0 #1 fix: seed entries so the inlined segment is
@@ -163,19 +167,21 @@ func appendSegment(
 
 	// 3. Overflow → lock current chunk and materialise a fresh one.
 	// The new chunk inherits cur's (header, hasHeartbeat) pair via
-	// inheritLatestHeader so each frozen chunk reads as a
-	// chronological snapshot of the chain's active state at the
-	// moment it was born. patchChainHeader continues to update only
-	// chain.chunks[cursor] (the active chunk); frozen chunks stay
-	// frozen at their snapshot timestamp. This is what gives the
-	// chat scrollback a readable timeline of header snapshots
-	// instead of a flat latest-banner — the inverse of "fresh
-	// timestamp per message" semantics, by design (see §11.12.7.2
-	// for the historical "creation time" rationale, superseded by
-	// inherit-from-active as of 2026-08-23).
+	// inheritLatestHeader AND cur's taskList via
+	// inheritLatestTaskList (§11.12.6.1) so each frozen chunk reads
+	// as a chronological snapshot of the chain's active state at
+	// the moment it was born. patchChainHeader continues to update
+	// only chain.chunks[cursor] (the active chunk); frozen chunks
+	// stay frozen at their snapshot timestamp / task plan. This is
+	// what gives the chat scrollback a readable timeline of header
+	// snapshots + task plans instead of a flat latest-banner —
+	// the inverse of "fresh timestamp per message" semantics, by
+	// design (see §11.12.7.2 for the historical "creation time"
+	// rationale, superseded by inherit-from-active as of 2026-08-23).
 	cur.markFull()
 	newChunk := newChunkBody(0, "")
 	newChunk.inheritLatestHeader(cur)
+	newChunk.inheritLatestTaskList(cur)
 	newChunk.appendEntry(segment)
 	if chain.lastFooter != nil {
 		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
@@ -426,9 +432,10 @@ func splitOversizedSegmentLocked(
 	}
 
 	// Capture the active source chunk BEFORE markFull so we can
-	// inherit its (header, hasHeartbeat) snapshot onto each split
-	// piece. Frozen SPLIT pieces keep their at-creation snapshot
-	// forever (see ROTATE semantics in appendSegment case 3).
+	// inherit its (header, hasHeartbeat) snapshot AND taskList
+	// (§11.12.6.1) onto each split piece. Frozen SPLIT pieces keep
+	// their at-creation snapshot forever (see ROTATE semantics in
+	// appendSegment case 3).
 	var inheritFrom *chunkBody
 	if chain.cursor >= 0 {
 		inheritFrom = chain.chunks[chain.cursor]
@@ -443,6 +450,7 @@ func splitOversizedSegmentLocked(
 		// overwrite a non-empty header with an empty source.
 		ch := newChunkBody(0, "")
 		ch.inheritLatestHeader(inheritFrom)
+		ch.inheritLatestTaskList(inheritFrom)
 		ch.appendEntryHTML(p)
 		if footerSnapshot != nil {
 			ch.setFooter(statusbar.RenderPanel(footerSnapshot))
@@ -734,12 +742,14 @@ func appendErrorSegment(
 	}
 
 	// Overflow: rotate. New chunk inherits cur's (header, hasHeartbeat)
-	// so the OutError overflow chunk reads as a chronological snapshot
-	// of the chain's active state at the moment the error overflowed
-	// — same semantics as the plain appendSegment case 3 ROTATE.
+	// AND cur's taskList (§11.12.6.1) so the OutError overflow chunk
+	// reads as a chronological snapshot of the chain's active state
+	// at the moment the error overflowed — same semantics as the
+	// plain appendSegment case 3 ROTATE.
 	cur.markFull()
 	newChunk := newChunkBody(0, "")
 	newChunk.inheritLatestHeader(cur)
+	newChunk.inheritLatestTaskList(cur)
 	newChunk.appendError(text, stderr)
 	if chain.lastFooter != nil {
 		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
@@ -752,6 +762,128 @@ func appendErrorSegment(
 	newChunk.messageID = messageID
 	chain.chunks = append(chain.chunks, newChunk)
 	chain.cursor = len(chain.chunks) - 1
+	chain.dirty = true
+	return nil
+}
+
+// setTaskList (v9 P2, §11.12.6.1) is the OutTaskCreate /
+// OutTaskUpdate entry point. It replaces the active chunk's
+// taskList field wholesale (no in-place patching) and triggers a
+// Compose re-render via the caller-supplied sendFn / editFn.
+//
+// Contract vs appendSegment:
+//   - taskList is its own Compose section (§11.12.6.1) — it is NOT
+//     folded into entries. setTaskList therefore does not check
+//     bufTextSize() and does not go through SPLIT / ROTATE for
+//     its own payload. taskList rendering is bounded by
+//     taskSection rune budget inside Compose (rows drop when over
+//     budget, mirroring feishu `checklistBudgetRunes`).
+//   - statusBarLines (footer) parameter is kept so the receipt can
+//     be refreshed in lockstep with the task list — same shape as
+//     feishu `SetTaskListWithFooter`. nil = no footer refresh
+//     (preserve lastFooter).
+//   - Caller MUST scheduleFlushDebounced after setTaskList returns
+//     — setTaskList mutates chain state but does NOT schedule the
+//     flush itself (mirrors appendErrorSegment's contract).
+//
+// Silent-drop guard (mirrors formatTaskList's empty-string
+// behaviour): nil / len==0 items → no chain mutation, no send /
+// edit call, no flush. The bridge may legitimately emit an
+// OutTaskUpdate with an empty slice (the "clear the checklist"
+// signal documented on OutTaskUpdate); setTaskList preserves
+// that semantic — the taskList section disappears on the next
+// flush but no orphan Telegram call is made.
+//
+// Caller MUST NOT hold chain.mu.
+func setTaskList(
+	ctx context.Context,
+	chain *placeholderChain,
+	chatID string,
+	topicID int,
+	userMessageID int,
+	items []agent.AgentTaskItem,
+	statusBarLines []string,
+	sendFn sendChunkFn,
+	_ editChunkFn,
+) error {
+	chain.mu.Lock()
+	defer chain.mu.Unlock()
+
+	if statusBarLines != nil {
+		chain.lastFooter = statusBarLines
+	}
+
+	// Update chain.lastTaskList unconditionally — even on empty
+	// items — so the next ROTATE / SPLIT inherits the "checklist
+	// has been cleared" signal. nil / len==0 items map to nil
+	// lastTaskList (mirrors how lastFooter's nil means "no
+	// statusbar-bearing event yet").
+	if len(items) == 0 {
+		chain.lastTaskList = nil
+	} else {
+		chain.lastTaskList = items
+	}
+
+	// Fast-forward past any pre-locked chunks, mirroring
+	// appendSegment's case-3 logic — keeps cursor / dirty
+	// invariants consistent across handlers.
+	for chain.cursor >= 0 &&
+		chain.chunks[chain.cursor].isChunkFull() &&
+		chain.cursor+1 < len(chain.chunks) {
+		chain.cursor++
+	}
+
+	// Empty items on a fresh chain: silent drop. The "clear
+	// checklist" semantic only makes sense when there IS a
+	// checklist to clear — a cold chain (cursor < 0) has no
+	// chunk yet, so creating one for a clear signal would be
+	// wasteful. Adapter-level guards (msg.TaskList == nil) handle
+	// the bridge "no task data attached" case at a higher level;
+	// this guards against the rare bridge "non-nil AgentTaskListEvent
+	// with empty Items arriving before ensurePlaceholder".
+	if len(items) == 0 && chain.cursor < 0 {
+		return nil
+	}
+
+	// Cold-create: materialise the first chunk via send. Header +
+	// entries-empty + (possibly empty) task section + footer one
+	// go. We do NOT call appendEntry on this path because the
+	// taskList is the section, not an entries row.
+	if chain.cursor < 0 {
+		headerLine := heartbeatText(nil)
+		chunk := newChunkBody(0, headerLine)
+		// setTaskList accepts empty / nil (clears the section);
+		// both paths are equivalent here since the chunk has no
+		// other content yet.
+		chunk.setTaskList(items)
+		if chain.lastFooter != nil {
+			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+		}
+		body := chunk.Compose()
+		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		if err != nil {
+			return err
+		}
+		chunk.messageID = messageID
+		chain.chunks = []*chunkBody{chunk}
+		chain.cursor = 0
+		chain.dirty = true
+		return nil
+	}
+
+	// Append-in-place: replace the active chunk's taskList in
+	// place. The active chunk's taskList is always overwritten
+	// by this call — there's no ROTATE gate. Empty items clears
+	// the section (renderTaskSection returns "" and the headline
+	// is omitted); non-empty items replaces the prior snapshot
+	// wholesale. taskList budget is enforced inside Compose's
+	// renderTaskSection, not at the chain level, so a giant
+	// checklist simply truncates rather than ROTATE'ing.
+	cur := chain.chunks[chain.cursor]
+	cur.setTaskList(items)
+	if chain.lastFooter != nil {
+		cur.setFooter(statusbar.RenderPanel(chain.lastFooter))
+	}
 	chain.dirty = true
 	return nil
 }
@@ -802,7 +934,8 @@ func splitOversizedErrorSegmentLocked(
 		return err
 	}
 
-	// Capture source BEFORE markFull for inheritLatestHeader.
+	// Capture source BEFORE markFull for inheritLatestHeader +
+	// inheritLatestTaskList (§11.12.6.1).
 	var inheritFrom *chunkBody
 	if chain.cursor >= 0 {
 		inheritFrom = chain.chunks[chain.cursor]
@@ -815,6 +948,7 @@ func splitOversizedErrorSegmentLocked(
 	for i, p := range pieces {
 		ch := newChunkBody(0, "")
 		ch.inheritLatestHeader(inheritFrom)
+		ch.inheritLatestTaskList(inheritFrom)
 		ch.appendEntryHTML(p)
 		if footerSnapshot != nil {
 			ch.setFooter(statusbar.RenderPanel(footerSnapshot))

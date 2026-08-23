@@ -16,7 +16,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -59,7 +58,7 @@ import (
 // value on every event.
 func WireRuntimeCallbacksAndRestore(
 	mgr *chatsession.Manager,
-	em outbound.Emitter,
+	em messages.Emitter,
 	logger *slog.Logger,
 	sbDeps chatsession.GitStatusDeps,
 	ch channel.Channel,

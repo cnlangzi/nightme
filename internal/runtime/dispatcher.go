@@ -23,7 +23,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -52,7 +51,7 @@ type MessageDispatchFunc = func(context.Context, *messages.InboundMessage) error
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)
 //  4. SetBusy on first event (drive FSM)
-func NewMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, ch channel.Channel, primary string, logger *slog.Logger) MessageDispatchFunc {
+func NewMessageDispatcher(mgr *chatsession.Manager, em messages.Emitter, ch channel.Channel, primary string, logger *slog.Logger) MessageDispatchFunc {
 	return func(ctx context.Context, msg *messages.InboundMessage) error {
 		if msg == nil {
 			return nil

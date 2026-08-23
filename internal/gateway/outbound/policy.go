@@ -1,34 +1,42 @@
 // policy.go — OutboundPolicy chain.
 //
-// NewEventHandler's per-event flow has three orthogonal policy
-// decisions layered after the wire-protocol plumbing (Translate
-// + ReplyTo stamp) and before em.Send:
+// OutboundPolicy is a per-event decision hook that runs AFTER
+// wire-protocol plumbing (Translate + ReplyTo stamp) and BEFORE
+// em.Send. Each policy may:
+//   - inspect / mutate the OutboundMessage (e.g. status-bar
+//     stamping), or
+//   - return drop=true to short-circuit the chain (the runtime
+//     skips em.Send for that event).
 //
-//   1. StatusBar stamp — add a footer to the four main-chat
-//      Kinds so the channel card carries the model + usage
-//      context (F-45 §2.5).
-//   2. /think gate — drop OutThinking when the chat's
-//      ThinkMode == Hide (F-think §3.1.2).
-//   3. /tools gate — drop OutToolStart / OutToolEnd when the
-//      chat's ToolsMode == Hide (F-38 §3.1.3).
+// The runtime wires the default policy set via DefaultPolicies();
+// tests can substitute a custom set via
+// NewEventHandler(..., policies...) to exercise edge cases
+// without spinning up an AgentSession.
 //
-// Pre-Phase-2.4 these three blocks were inlined in
-// NewEventHandler. The inlined form made the handler awkward to
-// extend (a future "filter by chat role" or "audit outbound
-// to file" policy would have to edit NewEventHandler) and
-// awkward to unit-test (each policy's decision logic was
-// tangled with Translate + Send).
+// F-CODEX-RUNONCE-REVIEW-EVENT: this file used to live in
+// internal/runtime/policy.go. The move to internal/gateway/outbound
+// is a pure relocation (no logic change) driven by the fact that
+// StreamRunOnceToEmitter::dispatchSinkEvent (one-shot path) now
+// applies the same gates + Heartbeat observe as the long-lived
+// runtime.NewEventHandler. Policy is about outbound rendering
+// decisions (think/tools gates), not about chat session internals
+// — it belongs in the outbound package, alongside Translate and
+// Emitter. Both runtime.NewEventHandler and dispatchSinkEvent
+// now call outbound.DefaultPolicies / outbound.ThinkModeGatePolicy
+// / outbound.ToolsModeGatePolicy directly, sharing the same
+// policy implementation. No new interface, no new struct.
 //
-// OutboundPolicy is the extracted interface. The runtime wires
-// the default three policies via DefaultPolicies(). Tests can
-// substitute a custom set via NewEventHandler(..., policies...)
-// to exercise edge cases without spinning up an AgentSession.
+// The Emitter interface itself lives in internal/messages (it
+// moved there in the same change so chatsession can hold an
+// Emitter field without importing outbound — that move is what
+// makes the outbound → chatsession import direction cycle-free).
 
-package runtime
+package outbound
 
 import (
 	"log/slog"
 
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -46,16 +54,16 @@ import (
 // Side-effecting observers belong on the Bus subscriptions
 // (MessageStateBus / AgentEventBus), not on the policy chain.
 type OutboundPolicy interface {
-	Apply(out *messages.OutboundMessage, env chatsession.AgentEventEnvelope) (drop bool)
+	Apply(out *messages.OutboundMessage, env agentsession.AgentEventEnvelope) (drop bool)
 }
 
 // PolicyFunc adapts an ordinary function to the OutboundPolicy
 // interface, so callers can write one-liners without declaring
 // a named type. Used by the default-policy constructors below.
-type PolicyFunc func(out *messages.OutboundMessage, env chatsession.AgentEventEnvelope) (drop bool)
+type PolicyFunc func(out *messages.OutboundMessage, env agentsession.AgentEventEnvelope) (drop bool)
 
 // Apply implements OutboundPolicy.
-func (f PolicyFunc) Apply(out *messages.OutboundMessage, env chatsession.AgentEventEnvelope) (drop bool) {
+func (f PolicyFunc) Apply(out *messages.OutboundMessage, env agentsession.AgentEventEnvelope) (drop bool) {
 	if f == nil {
 		return false
 	}
@@ -73,6 +81,9 @@ func (f PolicyFunc) Apply(out *messages.OutboundMessage, env chatsession.AgentEv
 //
 //	NewEventHandler(em, cs, mgr, logger, sbDeps,
 //	    DefaultPolicies(sbDeps, cs, logger)...)
+//
+// F-CODEX-RUNONCE-REVIEW-EVENT: StreamRunOnceToEmitter's drain
+// goroutine calls this too — same gate logic, one source of truth.
 func DefaultPolicies(sbDeps chatsession.GitStatusDeps, cs *chatsession.ChatSession, logger *slog.Logger) []OutboundPolicy {
 	return []OutboundPolicy{
 		ThinkModeGatePolicy(cs, logger),
@@ -91,7 +102,7 @@ func DefaultPolicies(sbDeps chatsession.GitStatusDeps, cs *chatsession.ChatSessi
 // A nil logger means "silent" — production never passes nil
 // but a future caller might.
 func ThinkModeGatePolicy(cs *chatsession.ChatSession, logger *slog.Logger) OutboundPolicy {
-	return PolicyFunc(func(out *messages.OutboundMessage, env chatsession.AgentEventEnvelope) bool {
+	return PolicyFunc(func(out *messages.OutboundMessage, env agentsession.AgentEventEnvelope) bool {
 		if out.Kind != messages.OutThinking {
 			return false
 		}
@@ -125,7 +136,7 @@ func ThinkModeGatePolicy(cs *chatsession.ChatSession, logger *slog.Logger) Outbo
 // on) is a Feishu-adapter concern; this gate just decides
 // whether the event reaches the Channel at all.
 func ToolsModeGatePolicy(cs *chatsession.ChatSession, logger *slog.Logger) OutboundPolicy {
-	return PolicyFunc(func(out *messages.OutboundMessage, env chatsession.AgentEventEnvelope) bool {
+	return PolicyFunc(func(out *messages.OutboundMessage, env agentsession.AgentEventEnvelope) bool {
 		if out.Kind != messages.OutToolStart && out.Kind != messages.OutToolEnd {
 			return false
 		}
@@ -148,7 +159,3 @@ func ToolsModeGatePolicy(cs *chatsession.ChatSession, logger *slog.Logger) Outbo
 		return true
 	})
 }
-
-// (envAgentSession helper was removed — the only caller
-// inlined env.AgentSession directly. Add back if tests
-// need a per-call seam.)

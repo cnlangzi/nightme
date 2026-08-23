@@ -5,6 +5,15 @@
 // or drops them silently at the outbound EventHandler gate
 // (Hide).
 //
+// F-CODEX-RUNONCE-REVIEW-EVENT: the enum stays in chatsession
+// (it's chat-session state, not an outbound concept). The
+// policies that consume it (ThinkModeGatePolicy,
+// ToolsModeGatePolicy) move to internal/gateway/outbound, but
+// the enums themselves remain here. The outbound package's
+// policy fns reach in via `*chatsession.ChatSession.ThinkMode()`,
+// which is fine because outbound → chatsession is a one-way
+// dependency (chatsession doesn't import outbound).
+//
 // Lives in chatsession (next to its reader: ChatSession holds
 // it, SetThinkMode mutates it, runtime's EventHandler gate
 // consults it). The registry-side ChatSessionEntry persists

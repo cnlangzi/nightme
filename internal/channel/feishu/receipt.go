@@ -392,6 +392,58 @@ func (r *MessageReceipt) SetPromptState(ctx context.Context, state chatsession.P
 	}
 }
 
+// StampFooterLines (F-44 follow-up) replaces the receipt card's
+// StatusBar footer in place and re-renders via renderLocked. Used
+// by the adapter's OutInit handler to surface the agent's
+// bootstrap data (SessionID / Model / AgentName / Workspace /
+// Branch) on the existing receipt card instead of silently
+// dropping the event (the previous F-44 behaviour).
+//
+// Locking: holds r.mu through renderLocked, matching the existing
+// AppendEntryWithFooter / SetTaskListWithFooter pattern.
+//
+// Nil-safe: returns nil when called on a nil receiver, matching
+// the existing guard pattern.
+//
+// Empty footerLines is a no-op when an existing footer is already
+// stamped (preserve-on-empty semantics, symmetric with
+// SetTaskListWithFooter / AppendEntryWithFooter): a transient
+// empty StatusBar between turns doesn't wipe a previously-
+// rendered footer.
+//
+// Cold-start edge case: if cardMsgID is still empty (the cold-
+// start sendCard hasn't returned yet, or this is an orphan
+// event without a receipt), renderLocked's own `if r.cardMsgID
+// == ""` branch will issue the FIRST sendCard with the stamped
+// footer. That's the right behaviour for `/review -a foo` paths
+// where the dispatcher pre-creates a placeholder receipt and
+// the bridge emits OutInit before any text — we want the
+// StatusBar to land on the FIRST card, not the second.
+func (r *MessageReceipt) StampFooterLines(ctx context.Context, footerLines []string) error {
+	if r == nil {
+		return nil
+	}
+	// P1 follow-up: hold r.mu through renderLocked. renderLocked
+	// reads entries / tasks / footerLines / heartbeat / cardMsgID
+	// / lastBody / lastBodyPatch (see its docstring at
+	// receipt.go:628-629 and the buildReceiptCard call inside).
+	// Releasing the lock between the footerLines update and the
+	// render lets a concurrent goroutine — e.g. the runtime
+	// dispatching an OutReply AppendEntryWithFooter while the
+	// bridge sink emits OutInit StampFooterLines — observe a
+	// torn state (one writer's footer with another writer's
+	// tasks / entries) and ship a PATCH that diverges from
+	// either caller's intent. Same pattern as
+	// AppendEntryWithFooter / SetTaskListWithFooter (both hold
+	// r.mu through renderLocked).
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(footerLines) > 0 {
+		r.footerLines = footerLines
+	}
+	return r.renderLocked(ctx)
+}
+
 // AppendEntry appends a new rolling-log entry (typically an OutReply
 // text chunk from the agent's stream-json) and re-renders the card.
 //

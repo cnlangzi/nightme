@@ -45,6 +45,8 @@ import (
 	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -68,7 +70,21 @@ const sinkBufferSize = 64
 //
 // Returns nil when em is nil — callers may use this to avoid
 // guarding every call site.
-func StreamRunOnceToEmitter(ctx context.Context, em Emitter, chatID, replyTo, agentName string) func(agent.AgentEvent) {
+//
+// F-CODEX-RUNONCE-REVIEW-EVENT: cs + logger are threaded so
+// dispatchSinkEvent can apply the same DefaultPolicies chain
+// (think gate / tools gate) and HeartbeatTracker.Observe that
+// the long-lived runtime.NewEventHandler applies. Both paths
+// call outbound.DefaultPolicies / cs.Heartbeat() directly — single
+// source of truth. Pass cs=nil + logger=nil to fall back to the
+// pre-Plan-B behavior (no gates, no heartbeat observe).
+func StreamRunOnceToEmitter(
+	ctx context.Context,
+	em messages.Emitter,
+	cs *chatsession.ChatSession,
+	logger *slog.Logger,
+	chatID, replyTo, agentName string,
+) func(agent.AgentEvent) {
 	if em == nil {
 		return func(agent.AgentEvent) {}
 	}
@@ -88,7 +104,7 @@ func StreamRunOnceToEmitter(ctx context.Context, em Emitter, chatID, replyTo, ag
 				if !ok {
 					return
 				}
-				dispatchSinkEvent(em, chatID, replyTo, agentName, ev)
+				dispatchSinkEvent(ctx, em, cs, logger, chatID, replyTo, agentName, ev)
 			}
 		}
 	}()
@@ -125,8 +141,17 @@ func StreamRunOnceToEmitter(ctx context.Context, em Emitter, chatID, replyTo, ag
 // dispatchSinkEvent translates one AgentEvent to an OutboundMessage
 // and emits it. Mirrors the runtime.NewEventHandler path so the
 // chat sees the same shape for one-shot / review calls as it does
-// for primary chat sessions.
-func dispatchSinkEvent(em Emitter, chatID, replyTo, agentName string, ev agent.AgentEvent) {
+// for primary chat sessions. cs may be nil (one-shot without a
+// chat session) — the policy chain short-circuits and the
+// heartbeat observe is skipped, matching pre-Plan-B behavior.
+func dispatchSinkEvent(
+	ctx context.Context,
+	em messages.Emitter,
+	cs *chatsession.ChatSession,
+	logger *slog.Logger,
+	chatID, replyTo, agentName string,
+	ev agent.AgentEvent,
+) {
 	out, ok := Translate(chatID, ev)
 	if !ok {
 		return // Translate drops events that don't surface to the channel
@@ -135,7 +160,49 @@ func dispatchSinkEvent(em Emitter, chatID, replyTo, agentName string, ev agent.A
 	if out.AgentName == "" {
 		out.AgentName = agentName
 	}
-	if err := em.Send(context.Background(), out); err != nil {
+
+	// F-CODEX-RUNONCE-REVIEW-EVENT: apply the same think / tools
+	// gate the long-lived runtime.NewEventHandler applies
+	// (shared via outbound.DefaultPolicies — moved out of runtime
+	// in this change).
+	//
+	// Order: Translate → Observe (heartbeat) + OutHeartbeat
+	// follow-up emit → Policy gate → em.Send. The Observe-before-
+	// Policy invariant is what makes /think off / /tools off
+	// still increment counters in the receipt header (F-63 §3.2)
+	// — even when the gate drops the rendering, the counter
+	// reflects the agent's real activity. Mirrors the runtime
+	// handler's order exactly (runtime/handler.go:219-250).
+	if cs != nil {
+		env := agentsession.AgentEventEnvelope{
+			ChatID:    chatID,
+			UserMsgID: replyTo,
+		}
+		// 1. Observe FIRST — heartbeat counter increments even when
+		//    the policy gate below drops the message.
+		if hb := cs.Heartbeat(); hb != nil && replyTo != "" {
+			if hb.Observe(replyTo, out.Kind) {
+				snap := hb.Snapshot(replyTo)
+				if !snap.Empty() {
+					_ = em.Send(ctx, messages.OutboundMessage{
+						ChatID:    chatID,
+						Kind:      messages.OutHeartbeat,
+						ReplyTo:   replyTo,
+						Heartbeat: &snap,
+					})
+				}
+			}
+		}
+		// 2. THEN policy gate — may drop the message; the heartbeat
+		//    update above already reached the channel.
+		for _, pol := range DefaultPolicies(chatsession.GitStatusDeps{}, cs, logger) {
+			if pol.Apply(&out, env) {
+				return // dropped by gate; counter already incremented
+			}
+		}
+	}
+
+	if err := em.Send(ctx, out); err != nil {
 		// Channel-side errors are not the caller's problem — log
 		// and continue. The bridge's RunResult carries the text
 		// independently so /gtw commit still has its outcome even
@@ -146,8 +213,3 @@ func dispatchSinkEvent(em Emitter, chatID, replyTo, agentName string, ev agent.A
 			"err", err.Error())
 	}
 }
-
-// _ is the package-scope import anchor for messages —
-// Translate's signature uses it. Declared once at package init
-// rather than re-declared on every dispatchSinkEvent call.
-var _ messages.OutboundMessage

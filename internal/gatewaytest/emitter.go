@@ -9,7 +9,7 @@
 // itself is internal so production binaries don't pull in
 // test-only code.
 //
-// Why messages.OutboundMessage: outbound.Emitter's parameter
+// Why messages.OutboundMessage: messages.Emitter's parameter
 // is messages.OutboundMessage directly. Using messages.* keeps
 // gatewaytest a leaf (it can't import outbound, which would
 // create a cycle: gateway → outbound, and gateway tests
@@ -23,7 +23,7 @@ import (
 )
 
 // emitterLike is the local structural interface that NoopEmitter
-// must satisfy. outbound.Emitter has the same method set (Send
+// must satisfy. messages.Emitter has the same method set (Send
 // on messages.OutboundMessage), so the single
 // concrete type satisfies it via Go's structural interface
 // satisfaction. We assert this with a local interface so the
@@ -34,14 +34,14 @@ type emitterLike interface {
 }
 
 // NoopEmitter is a do-nothing implementation that satisfies
-// outbound.Emitter. Tests use it to construct a Gateway (which
+// messages.Emitter. Tests use it to construct a Gateway (which
 // requires an Emitter at New() time) or to bind to a
 // ChatSession without exercising the outbound path. Send
 // returns nil.
 type NoopEmitter struct{}
 
 // Compile-time guard: NoopEmitter must satisfy the local
-// emitterLike shape. Any drift in outbound.Emitter's signature
+// emitterLike shape. Any drift in messages.Emitter's signature
 // will surface at test compile time as a "wrong type for method
 // Send" or similar at the test call sites.
 var _ emitterLike = NoopEmitter{}

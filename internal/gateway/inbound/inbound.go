@@ -39,7 +39,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
 )
@@ -155,7 +154,7 @@ type Router struct {
 	// goroutines. The wired Emitter is held here so each run*
 	// goroutine can write its reply without having to
 	// recover the gateway.Router from context.
-	emitter outbound.Emitter
+	emitter messages.Emitter
 
 	// execWg tracks the F-59 async-dispatch goroutines
 	// (runCommand / runAction / runMessage). Production
@@ -179,7 +178,7 @@ type Router struct {
 // at first dispatch). em may be nil in test contexts where the
 // reply-emit path is intentionally disabled; the run* helpers
 // no-op when emitter is nil.
-func New(csMgr *chatsession.Manager, commander CommandDispatcher, sh ShellDispatcher, action ReactionRouter, em outbound.Emitter, primaryAgent string) *Router {
+func New(csMgr *chatsession.Manager, commander CommandDispatcher, sh ShellDispatcher, action ReactionRouter, em messages.Emitter, primaryAgent string) *Router {
 	if csMgr == nil {
 		panic("inbound.New: chatsession.Manager must not be nil")
 	}

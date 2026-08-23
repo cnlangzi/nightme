@@ -60,7 +60,7 @@ type Request struct {
 // InboundRequest is what the runtime shim hands to
 // Dispatcher.Handle. It augments Request with routing info so
 // the shell package can post replies through the wired
-// outbound.Emitter.
+// messages.Emitter.
 //
 // ChatID is the routing target for replies. MessageID is the
 // user-side message id; used as the ReplyTo anchor for the

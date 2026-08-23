@@ -21,7 +21,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/command/services"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
@@ -316,7 +315,7 @@ type ChatSession struct {
 	// test paths may pass a fake. Immutable post-binding; no
 	// lock needed. nil means "no emitter bound yet" — commands
 	// must nil-check via Emitter() before calling Send.
-	emitter outbound.Emitter
+	emitter messages.Emitter
 
 	// watchdog (F-61) is the per-chat diagnostic timer. nil
 	// until lazily initialized by Watchdog(). Owned by the chat
@@ -1031,7 +1030,7 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // Send.
 //
 // Lock-free: emitter is set once and never mutated.
-func (cs *ChatSession) Emitter() outbound.Emitter {
+func (cs *ChatSession) Emitter() messages.Emitter {
 	if cs == nil {
 		return nil
 	}
@@ -1057,7 +1056,7 @@ func (cs *ChatSession) Heartbeat() *HeartbeatTracker {
 //
 // Test paths can use this to inject a fake; production wiring
 // goes through Manager.WithEmitter → Manager.GetOrCreate.
-func (cs *ChatSession) WithEmitter(em outbound.Emitter) *ChatSession {
+func (cs *ChatSession) WithEmitter(em messages.Emitter) *ChatSession {
 	if cs == nil {
 		return cs
 	}

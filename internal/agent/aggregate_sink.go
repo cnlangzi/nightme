@@ -80,6 +80,12 @@ const (
 // perJobState is per-source state held by the aggregator. One
 // perJobState is allocated per wrapJob call (i.e. one per parallel
 // RunOnce job).
+//
+// Note: doneCount is NOT tracked per-job in this struct. It's
+// driven from the orchestrator (delegateReviewMultiJob calls
+// agg.markJobDone() in each per-job goroutine's defer block —
+// see markJobDone's doc for why sink-event-driven counting was
+// replaced with completion-driven counting).
 type perJobState struct {
 	// pendingToolStarts is the per-job ToolStart buffer keyed by
 	// AgentToolStartEvent.ID. When a ToolEnd with a matching ID
@@ -95,14 +101,6 @@ type perJobState struct {
 	// merging apply uniformly (the same rules govern replay and live
 	// events). Cleared after replay to release memory.
 	initBuffer []AgentEvent
-
-	// terminalSeen is the dedup guard for doneCount. Set the first
-	// time a Result/Error event is observed for this job (either in
-	// phaseBuffering or phaseStreaming); subsequent Result/Error
-	// events for the same job — e.g. the same event replayed during
-	// the Phase 1→2 transition AND any later late event — must not
-	// double-count toward doneCount.
-	terminalSeen bool
 }
 
 // eventAggregator merges N per-job AgentEvent streams into one outer
@@ -228,25 +226,76 @@ func (a *eventAggregator) handle(ev AgentEvent, state *perJobState) {
 	}
 }
 
-// finalize closes the aggregator's outer lifecycle if it has
-// not already been closed. Called by delegateReviewMultiJob
-// after wg.Wait() — the multi-job orchestrator's safety net
-// for the case where one or more per-job RunOnce invocations
-// never emit a terminal event (spawn failure, error path that
-// bypasses the sink, ctx cancellation that orphans the
-// subprocess). Without finalize, the aggregator's doneCount
-// stays short of expected, the synthetic outer Result never
-// fires, and the chat channel's "review running…" indicator
-// hangs until the 30-min revCtx timeout (Finding 3 from /review).
+// markJobDone is called by the orchestrator's per-job goroutine
+// in a defer (delegateReviewMultiJob). It is the canonical
+// "this job's RunOnce returned" signal — fired once per
+// goroutine regardless of success or failure, and INDEPENDENT
+// of whether the sink ever received a terminal event.
 //
-// finalize synthesizes a synthetic EventAgentError per missing
-// terminal (one per job that never reached doneCount), which
-// increments doneCount and — if it tips expected — fires the
-// synthetic outer Result. After finalize, the aggregator
-// stays in phaseClosed; any further events are dropped.
+// Why this design (refactor from /review): previously doneCount
+// was sink-driven (incremented when EventAgentResult/Error
+// arrived at the aggregator). That worked for happy paths but
+// silently failed when a bridge's error path bypassed the sink
+// (Findings 1 & 2 from /review): doneCount stayed short of
+// expected and the aggregator hung in phaseStreaming until the
+// 30-min revCtx timeout. Completion-driven counting sidesteps
+// the entire failure mode:
 //
-// Calling finalize multiple times is safe (idempotent on
-// finalEmitted).
+//   - spawn fail before sink wiring → defer still fires markJobDone
+//   - error path bypasses sink → defer still fires markJobDone
+//   - ctx cancel orphans subprocess → goroutine returns → defer fires
+//   - happy path → defer fires alongside the sink terminal
+//
+// In every case doneCount increments exactly once per goroutine.
+// When doneCount hits expected, the synthetic outer Result fires
+// (single-shot via finalEmitted). Idempotent: a second call is
+// a no-op (early-out under the lock).
+//
+// The aggregator's outer sink callback runs OUTSIDE the lock so
+// the callback can't re-enter the aggregator under a held mutex
+// (mirrors handleBuffering's transition path — see the comment
+// at the top of handle()).
+func (a *eventAggregator) markJobDone() {
+	a.mu.Lock()
+	if a.finalEmitted {
+		a.mu.Unlock()
+		return
+	}
+	a.doneCount++
+	allDone := a.doneCount >= a.expected
+	if allDone {
+		a.finalEmitted = true
+		a.phase = phaseClosed
+	}
+	a.mu.Unlock()
+
+	if allDone {
+		// Synthetic outer Result — Source="" marks it as the
+		// aggregator's emission. Result.Text intentionally
+		// empty: the merged review text is delivered via
+		// FormatReviewMessage from the /review dispatcher, not
+		// via this event.
+		a.outer(AgentEvent{Kind: EventAgentResult, Source: ""})
+	}
+}
+
+// finalize is the post-wg.Wait() safety net called by
+// delegateReviewMultiJob. With completion-driven counting
+// (markJobDone in each per-job goroutine's defer), every
+// running goroutine is guaranteed to call markJobDone when it
+// returns — so after wg.Wait() doneCount is guaranteed to
+// equal expected and the outer Result has already fired from
+// the goroutine that drove doneCount over the threshold.
+//
+// finalize() therefore becomes a near no-op — it only fires
+// the outer Result if for some reason markJobDone was never
+// called for a job (e.g., a future test mock without a defer,
+// or a goroutine that exits via os.Exit). Idempotent.
+//
+// Kept as a public API entry point so the orchestrator's
+// post-wg.Wait() call site stays simple — one finalize call
+// at the bottom, no "did we miss any?" arithmetic at the
+// call site.
 func (a *eventAggregator) finalize() {
 	a.mu.Lock()
 	if a.finalEmitted {
@@ -254,17 +303,12 @@ func (a *eventAggregator) finalize() {
 		return
 	}
 
-	// For each per-job that didn't reach doneCount, synthesize
-	// an EventAgentError so doneCount ticks up. We attribute
-	// each missing terminal to ctx cancellation (the most
-	// common cause — see /review logs showing orphans around
-	// daemon restart); the precise cause isn't observable
-	// from inside finalize.
+	// Compute how many per-job slots never got a markJobDone
+	// (defensive — under normal operation this is 0 because
+	// every goroutine's defer fires).
 	missing := a.expected - a.doneCount
 	if missing > 0 {
-		for i := 0; i < missing; i++ {
-			a.doneCount++
-		}
+		a.doneCount = a.expected
 	}
 
 	allDone := a.doneCount >= a.expected
@@ -323,6 +367,14 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 	// above). Also caches the first per-job Ready's metadata for
 	// the synthetic outer Ready + for parity on synthetic Task
 	// events (Finding 3 from /review — see firstJobMeta doc).
+	//
+	// Note: doneCount is NOT incremented here on per-job
+	// EventAgentResult/EventAgentError. Completion is tracked
+	// at the orchestrator level (delegateReviewMultiJob calls
+	// agg.markJobDone() in each per-job goroutine's defer).
+	// This decoupling — sink events for observation, markJobDone
+	// for completion — means doneCount is guaranteed to reach
+	// expected even if a bridge's error path bypasses the sink.
 	switch ev.Kind {
 	case EventAgentReady:
 		a.readyCount++
@@ -330,11 +382,6 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 			a.firstJobMeta.Workspace == "" && a.firstJobMeta.Branch == "" &&
 			a.firstJobMeta.Model == "" {
 			a.firstJobMeta = ev
-		}
-	case EventAgentResult, EventAgentError:
-		if !state.terminalSeen {
-			state.terminalSeen = true
-			a.doneCount++
 		}
 	}
 
@@ -426,11 +473,11 @@ func (a *eventAggregator) buildSyntheticReady() AgentEvent {
 //     ev.TaskList.Items into the cross-job tasks map (latest-wins
 //     by AgentTaskItem.ID), then forward ONE snapshot event with
 //     the merged items.
-//   - EventAgentResult / EventAgentError → increment doneCount
-//     (terminalSeen guard) and, if this is the terminal that pushes
-//     doneCount to expected, fire the synthetic outer Result and
-//     transition to phaseClosed. The per-job terminal itself is NOT
-//     forwarded individually — the chat sees ONE Result.
+//   - EventAgentResult / EventAgentError → forwarded to outer as
+//     observation (chat wants to see per-job completion status
+//     when available). NOT counted here — doneCount is driven by
+//     the orchestrator's per-job goroutine via markJobDone (see
+//     "Completion-driven counting" rationale below).
 //   - All other events (EventAgentText, EventAgentPermission,
 //     EventAgentPermissionSettled, etc.) → forwarded as-is with the
 //     Source label already stamped by wrapJob.
@@ -438,6 +485,19 @@ func (a *eventAggregator) buildSyntheticReady() AgentEvent {
 // handleStreaming is invoked both during the Phase 1→2 replay and
 // for live events arriving after the transition. Both paths share
 // the exact same rules so behavior is uniform.
+//
+// **Completion-driven counting** (refactor from /review):
+// doneCount was previously incremented here when a per-job
+// terminal arrived. That worked for happy paths but failed
+// silently on the broken paths: bridges whose error-path
+// bypassed the sink left doneCount short of expected, stranding
+// the aggregator in phaseStreaming. The fix: each per-job
+// goroutine in delegateReviewMultiJob now calls markJobDone()
+// in its defer block — once per goroutine, regardless of
+// RunOnce outcome or sink behavior. This guarantees doneCount
+// reaches expected after wg.Wait(). The synthetic outer Result
+// is fired by the goroutine that drove doneCount to expected
+// (single-shot via finalEmitted).
 func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 	// Phase check — mirror of handleBuffering's re-check
 	// (Finding 4 from /review). Normally the dispatch in
@@ -525,32 +585,15 @@ func (a *eventAggregator) handleStreaming(ev AgentEvent, state *perJobState) {
 		})
 
 	case EventAgentResult, EventAgentError:
-		// Per-job terminal. NOT forwarded individually (#11) — the
-		// chat sees ONE outer Result. Count toward doneCount with
-		// the terminalSeen guard so replay doesn't double-count
-		// (Phase 1 already incremented when the event first
-		// arrived; the replay processes it again under handleStreaming
-		// but the guard short-circuits).
-		a.mu.Lock()
-		if !state.terminalSeen {
-			state.terminalSeen = true
-			a.doneCount++
-		}
-		allDone := a.doneCount >= a.expected && !a.finalEmitted
-		if allDone {
-			a.finalEmitted = true
-			a.phase = phaseClosed
-		}
-		a.mu.Unlock()
-
-		if allDone {
-			// Synthetic outer Result — Source="" marks it as the
-			// aggregator's emission. Result.Text intentionally
-			// empty: the merged review text is delivered via
-			// FormatReviewMessage from the /review dispatcher, not
-			// via this event.
-			a.outer(AgentEvent{Kind: EventAgentResult, Source: ""})
-		}
+		// Per-job terminal — forwarded as observation so the
+		// chat channel can show per-job completion when the sink
+		// emits one. NOT counted toward doneCount here;
+		// completion is tracked at the orchestrator level
+		// (markJobDone). The synthetic outer Result fires
+		// from whichever path (markJobDone or finalize)
+		// first observes doneCount >= expected — single-shot
+		// via finalEmitted.
+		a.outer(ev)
 
 	default:
 		// Text / Permission / PermissionSettled / unknown kinds:

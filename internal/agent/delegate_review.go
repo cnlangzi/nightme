@@ -144,6 +144,19 @@ func delegateReviewMultiJob(
 		sem <- struct{}{}
 		go func(i int) {
 			defer wg.Done()
+			// Completion-driven counting (refactor from /review):
+			// every per-job goroutine contributes exactly one
+			// markJobDone, regardless of RunOnce outcome or
+			// sink behavior. The last goroutine to defer runs
+			// markJobDone FIRST (LIFO), so the very last one to
+			// call drives doneCount to expected and fires the
+			// synthetic outer Result. Without this defer,
+			// doneCount is at the mercy of which sinks fire
+			// which terminals -- a single broken sink strands
+			// the chat lifecycle (Findings 1 & 2 from /review).
+			if agg != nil {
+				defer agg.markJobDone()
+			}
 			defer func() { <-sem }()
 
 			prompt := assembleGroupPrompt(ctx, pre, &groups[i])

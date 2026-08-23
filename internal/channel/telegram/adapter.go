@@ -1335,9 +1335,18 @@ func (a *Adapter) sendOutResultMessage(
 	// trailer, OutResult included. StatusBarLines returns nil when
 	// msg has no status-bearing fields, in which case we skip the
 	// trailer cleanly (matches chain appendSegmentForKind's policy).
+	//
+	// No horizontal-rule separator between result body and trailer
+	// here — the trailer's box-drawing frame (┌──› / └──›) provides
+	// its own visual boundary. v9 P2 first cut had "\n────────\n"
+	// but user feedback was that the extra divider felt heavy on a
+	// standalone reply-anchored message; chain chunks keep the
+	// separator (chunk_body.Compose still emits "────────────────\n"
+	// between entries and footer) because there the rule separates
+	// a long activity log from its summary footer.
 	var trailer string
 	if sb := statusbar.StatusBarLines(&msg); sb != nil {
-		trailer = "\n────────\n" + statusbar.RenderPanel(sb)
+		trailer = "\n" + statusbar.RenderPanel(sb)
 	}
 	full := msg.Text + trailer
 

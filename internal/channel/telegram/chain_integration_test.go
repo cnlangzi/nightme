@@ -875,11 +875,12 @@ func TestAdapter_Send_OutResult_SendsStandaloneReply(t *testing.T) {
 		t.Errorf("sendMessage reply_to_message_id = %d, want 50", replyTo)
 	}
 
-	// 3. Body must contain the result text + StatusBar separator + 3 trailer lines.
+	// 3. Body must contain the result text directly followed by 3 trailer
+	// lines (no horizontal-rule separator — the trailer's ┌──› box-drawing
+	// frame already provides the visual boundary, user feedback 2026-08-24).
 	text, _ := sendCall.Params["text"].(string)
 	for _, want := range []string{
 		"this is the result body",
-		"────────",
 		"🤖: claude",
 		"💰:「",
 		"📁: ",

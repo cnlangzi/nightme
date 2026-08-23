@@ -1204,17 +1204,18 @@ nightme: 🤖 Working...                            ← chunk #0 placeholder / a
          ⎿  📝 Write → 42 bytes                   ← chunk #1 (ROTATE)
 [独立新消息] reply_to_message_id = 42
 nightme: 这是一个简单的 http server ...            ← result body
-        ────────                                  ← StatusBar 分隔
-        🤖: claude                                ← StatusBar trailer
-        💰:「$0.05」
-        📁: code/nightme
-        [🎉 reaction]                              ← OnPromptEnded 贴这里
+        ┌──────────────›                          ← StatusBar trailer 边框
+        │  🤖: claude · opus-4-5 · sess-1
+        │  💰:「$0.05」
+        │  📁: code/nightme
+        └───────────────›                          (无中间 ──────── 分隔;
+        [🎉 reaction]                               trailer 自带 frame 边界)
 ```
 
 **核心契约**：
 
 1. **OutResult 不进 chain**。`Send()` 把 OutResult 从 default 分支挑出走 `sendOutResultMessage` helper —— 直接调 `sendTelegramMessage(chat_id, topic_id, reply_to_message_id=userMsgID, text=result+trailer)`，每条 OutResult 都是独立的 Telegram message。
-2. **StatusBar trailer 一致**。所有 text-emitting kind 都带 §18 trailer，OutResult 也不例外 —— body 末尾追加 `\n────────\n🤖 / 💰 / 📁` 三行。
+2. **StatusBar trailer 一致，无中间分隔**。所有 text-emitting kind 都带 §18 trailer，OutResult 也不例外 —— body 末尾追加 `\n` + `statusbar.RenderPanel(sb)` 三行（`🤖 / 💰 / 📁`，box-drawing frame `┌──› / └──›` 提供视觉边界）。**OutResult standalone 不画 `────────` 横线**（2026-08-24 user feedback：trailer 自带 frame，分隔线反而让 result message 显得"断裂"）。**Chain chunk 仍然画 `────────────────` 分隔线**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行），因为 chain 上 entries 是一长串 activity log，footer 是状态 summary，两者之间需要强分隔。
 3. **长 result 自动 split**。`len(result+trailer) > 3900` → `splitTelegramText` 切成多片，每片单独 sendMessage（都带 `reply_to_message_id=userMsgID`，视觉上是 user msg 下的一组 reply 簇）。只有**最后一片**的 messageID 记录到 `chain.resultMessageID`（参见 §11.12.4.1.1）。
 4. **OnPromptEnded 🎉 锚点切换**。优先选 `chain.resultMessageID`；零值（turn 没收到任何 OutResult —— 纯 error / 纯 tool / 纯 slash command）回退到 active chunk 的 messageID，保住 v9 P1 行为。详见 §11.12.9。
 5. **chain 仍然承载中间产物**。OutReply / OutThinking / OutToolStart / OutToolEnd / OutError / OutTaskCreate / OutTaskUpdate / OutCommandReply 全部继续走 `appendSegment` —— 这套不动。
@@ -1941,6 +1942,8 @@ func summarizeToolResult(name, output string, err error) string {
 - **2026-08-23** - **Spec 进一步对齐**（本次 commit）：§11.12.2 chunkBody API 加 `appendEntryHTML` / §11.12.4 OutError 路径改为 `appendErrorSegment` / §11.12.5 核心 API 重写（package-level + chainLRU 实际签名）/ §11.12.7.2 trigger 1 partial-failure + trigger 3 step 5 header 来源 / §11.12.8 / §11.12.9 例代码改实际 / §11.12.15 commit 清单改 git log 引用 / §11.12.16 矩阵用实际 test 名 / §11.12.17 limits 表补 SPLIT + chain-key / §11.12.18 变更日志追加本批。
 
 - **2026-08-24** - **v9 P2 OutResult 独立消息**：对齐飞书 F-39 决策。`Send(OutResult)` 从 default 分支挑出走 `sendOutResultMessage` helper，直接 `sendTelegramMessage(reply_to_message_id=userMsgID, text=result+StatusBar trailer)`。新增 `placeholderChain.resultMessageID` 字段记录最后一片 result messageID；长 result > 3900 chars 走 `splitTelegramText` 切多片。`OnPromptEnded` 🎉 锚点改为 `chain.resultMessageID` 优先、零值回退 active chunk（保住 error-only / tool-only / slash-only turn 行为）。改动：`adapter.go` Send / OnPromptEnded + `placeholder_chain.go` struct；新增 helper `sendOutResultMessage` / `sendResultChunk`。**对齐项**：§11.12.4 表格 OutResult 行 + §11.12.4.1 新增（独立消息契约 + resultMessageID 字段语义）+ §11.12.9 代码示例 + §11.12.11 table 行 + §11.12.12 三栏飞书对位 + §11.12.13 长文本段 + §11.12.16 测试矩阵。**commit 拆解**：`chain: add resultMessageID anchor field` → `Send: split OutResult → standalone sendOutResultMessage` → `OnPromptEnded: prefer resultMessageID over active chunk` → `tests: OutResult standalone message + 🎉 anchor switch` → `docs: §11.12 v9 P2 OutResult 独立消息`。
+
+- **2026-08-24** - **v9 P2.1 OutResult standalone 移除中间分隔线**（user feedback on first dotest）。`sendOutResultMessage` 不再在 result body 和 trailer 之间插入 `\n────────\n` —— trailer 自带 `┌──› / └──›` box-drawing 边框提供视觉边界，额外横线让 standalone reply-anchored message 看起来"断裂"。`adapter.go` sendOutResultMessage helper 改为 `trailer = "\n" + statusbar.RenderPanel(sb)`。**chain chunk 仍保留 `────────────────` 分隔**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行）—— chain 上的 entries 是 activity log 序列，footer 是状态 summary，两者之间需要强分隔。**测试更新**：`TestAdapter_Send_OutResult_SendsStandaloneReply` 移除 `────────` 断言（其他 trailer 三行断言保留）。**doc 更新**：§11.12.4.1 视觉示例 + §11.12.4.1 契约第 2 条 + §11.12.18 变更日志（本条）。
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 

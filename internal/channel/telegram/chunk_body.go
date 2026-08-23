@@ -83,6 +83,34 @@ func (b *chunkBody) appendEntryHTML(text string) {
 	b.entries = append(b.entries, chunkEntry{text: text, isHTML: true})
 }
 
+// replaceEntry overwrites the text of entries[idx]. Used by the
+// OutToolStart → OutToolEnd merge path: the start body lands as a
+// plain appendEntry, and the matching End mutates that same entry
+// in place to `<start>\n<result>` so the two lines render as one
+// chunkEntry (and therefore one Telegram message).
+//
+// Returns false when the rewrite can't be applied:
+//   - entries is nil (chunk went through freezeAfterOverflow after
+//     a long-text split; entries were cleared to free memory)
+//   - idx is out of range (defensive — caller passed a stale index)
+//
+// The caller falls back to a fresh appendSegment for the result
+// body in either case so the data is never silently dropped. We
+// do NOT auto-create the entry — that would corrupt Compose's
+// invariant that entries reflect only what the user explicitly
+// emitted, and could leave the chunk's flushedLen inconsistent
+// with what's actually on Telegram.
+func (b *chunkBody) replaceEntry(idx int, text string) bool {
+	if b.entries == nil {
+		return false
+	}
+	if idx < 0 || idx >= len(b.entries) {
+		return false
+	}
+	b.entries[idx].text = text
+	return true
+}
+
 // appendError composes an OutError entry. text is the user-facing
 // short error (e.g. "tool exit 1"); stderr is the optional
 // diagnostic tail. The ```fences``` wrapper is intentionally

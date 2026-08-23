@@ -2436,3 +2436,407 @@ func TestAdapter_EnsurePlaceholderForHeartbeat_DeferWhenNoUserMsgID(t *testing.T
 		t.Fatalf("race guard: must return 0 (no UserMessageID yet), got %d", messageID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// OutToolStart → OutToolEnd merge (chunked in-place rewrite) + OutThinking
+// `💭 ` prefix. The merge is the v9 chunked equivalent of feishu's PATCH
+// merge: instead of two thread replies, we land `● Tool(args)` and
+// `⎿  result` as a single chunkEntry so a single Telegram message renders
+// both lines. Cross-chunk rotation still rewrites the original chunk in
+// place via flushChunkAt. The prefix parity with feishu keeps the UX
+// identical across channels.
+// ---------------------------------------------------------------------------
+
+// inspectChain returns the chain for (rawChatID, topicID, replyAnchor)
+// with mu held. Used by the merge tests to read entries[] / chunks[] /
+// toolPending state without racing the adapter's writers. The caller
+// must call chain.mu.Unlock() when done.
+func inspectChain(t *testing.T, a *Adapter, rawChatID string, topicID, replyAnchor int) *placeholderChain {
+	t.Helper()
+	chain, ok := a.chains.lookup(rawChatID, topicID, replyAnchor)
+	if !ok {
+		t.Fatalf("chain not found for (%q, %d, %d)", rawChatID, topicID, replyAnchor)
+	}
+	chain.mu.Lock()
+	return chain
+}
+
+func TestAdapter_OutTool_StartEnd_SameChunkMerged(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "read", Args: "{\"path\":\"/x\"}"},
+	}); err != nil {
+		t.Fatalf("send start: %v", err)
+	}
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutToolEnd,
+		Tool:   &messages.ToolInfo{Name: "read", Output: "ok"},
+	}); err != nil {
+		t.Fatalf("send end: %v", err)
+	}
+
+	chain := inspectChain(t, a, "100", 0, 0)
+	defer chain.mu.Unlock()
+
+	if got := len(chain.chunks); got != 1 {
+		t.Fatalf("chunks = %d, want 1 (start+end must land on the same chunk)", got)
+	}
+	entries := chain.chunks[0].entries
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1 (start entry should be rewritten in place)", len(entries))
+	}
+	got := entries[0].text
+	wantPrefix := "● read("
+	wantSuffixStart := ")\n⎿  📄 Read → "
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("merged entry text = %q, want prefix %q", got, wantPrefix)
+	}
+	if !strings.Contains(got, wantSuffixStart) {
+		t.Errorf("merged entry text = %q, want substring %q (the `⎿` result line)", got, wantSuffixStart)
+	}
+	if !strings.HasSuffix(got, "\n") {
+		t.Errorf("merged entry text = %q, want trailing newline", got)
+	}
+	if got := len(chain.toolPending); got != 0 {
+		t.Errorf("toolPending = %d, want 0 (End should pop the Start entry)", got)
+	}
+}
+
+func TestAdapter_OutTool_StartEnd_CrossChunk_PatchesEarlier(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "read", Args: "{\"path\":\"/x\"}"},
+	}); err != nil {
+		t.Fatalf("send start: %v", err)
+	}
+
+	// Push a long OutReply to force chain rotation. chainChunkThresholdChars
+	// is 3500; the read call is ~30 bytes, plus appendSegmentForKind
+	// appends "\n" so the segment that reaches appendSegment is ~3491
+	// bytes. We want len(segment) > cur.bufTextSize() but ≤ 3500 — that
+	// hits appendSegment case-3 (markFull + new chunk), not the
+	// single-oversized-segment SPLIT path (which would create N chunks
+	// for the OutReply alone). 3490-byte text → 3491-byte segment →
+	// rotation. The earlier chunk's messageID stays set from its initial
+	// sendMessage so flushChunkAt has a target to PATCH.
+	longReply := strings.Repeat("a", 3490)
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutReply,
+		Text:   longReply,
+	}); err != nil {
+		t.Fatalf("send long reply: %v", err)
+	}
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutToolEnd,
+		Tool:   &messages.ToolInfo{Name: "read", Output: "ok"},
+	}); err != nil {
+		t.Fatalf("send end: %v", err)
+	}
+
+	chain := inspectChain(t, a, "100", 0, 0)
+	defer chain.mu.Unlock()
+
+	if got := len(chain.chunks); got != 2 {
+		t.Fatalf("chunks = %d, want 2 (long OutReply must rotate the chain)", got)
+	}
+	// Earlier chunk (idx 0): the read call entry should be rewritten
+	// in place to `● read(...)\n⎿  📄 Read → 1 lines\n`.
+	if entries := chain.chunks[0].entries; len(entries) != 1 {
+		t.Fatalf("chunks[0].entries = %d, want 1", len(entries))
+	} else {
+		got := entries[0].text
+		if !strings.HasPrefix(got, "● read(") || !strings.Contains(got, "⎿  📄 Read → 1 lines") {
+			t.Errorf("chunks[0].entries[0].text = %q, want merged `● …\n⎿ …`", got)
+		}
+	}
+	if chain.chunks[0].messageID == 0 {
+		t.Error("chunks[0].messageID = 0, want non-zero (earlier chunk must have been sent so flushChunkAt has a target)")
+	}
+	// Later chunk (idx 1): only the OutReply lives there — the read
+	// pair stays in chunks[0] (the rewrite target).
+	for i, e := range chain.chunks[1].entries {
+		if strings.Contains(e.text, "● read(") || strings.Contains(e.text, "⎿") {
+			t.Errorf("chunks[1].entries[%d] = %q, want no tool lines (they belong to chunks[0])", i, e.text)
+		}
+	}
+	if got := len(chain.toolPending); got != 0 {
+		t.Errorf("toolPending = %d, want 0", got)
+	}
+}
+
+func TestAdapter_OutTool_EndWithoutStart_FallsBack(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	// OutToolEnd with no prior OutToolStart — chain exists (created
+	// by the cold-create path inside appendSegmentForKind), toolPending
+	// is empty → pop returns false → fall back to fresh appendSegment.
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutToolEnd,
+		Tool:   &messages.ToolInfo{Name: "read", Output: "ok"},
+	}); err != nil {
+		t.Fatalf("send end: %v", err)
+	}
+
+	chain := inspectChain(t, a, "100", 0, 0)
+	defer chain.mu.Unlock()
+
+	if got := len(chain.chunks); got != 1 {
+		t.Fatalf("chunks = %d, want 1", got)
+	}
+	entries := chain.chunks[0].entries
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	got := entries[0].text
+	if !strings.HasPrefix(got, "⎿  📄 Read → 1 lines") {
+		t.Errorf("entries[0].text = %q, want `⎿  📄 Read → …` (fresh-segment fallback)", got)
+	}
+	if strings.HasPrefix(got, "●") {
+		t.Errorf("entries[0].text = %q, want no `●` line (no matching Start)", got)
+	}
+}
+
+func TestAdapter_OutTool_Parallel_FIFO(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	// Two tool calls fired in parallel: StartA, StartB, EndA, EndB.
+	// FIFO order means EndA rewrites StartA and EndB rewrites StartB.
+	for _, name := range []string{"read", "bash"} {
+		if err := a.Send(ctx, messages.OutboundMessage{
+			ChatID: "100",
+			Kind:   messages.OutToolStart,
+			Tool:   &messages.ToolInfo{Name: name, Args: "{}"},
+		}); err != nil {
+			t.Fatalf("send start %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"read", "bash"} {
+		if err := a.Send(ctx, messages.OutboundMessage{
+			ChatID: "100",
+			Kind:   messages.OutToolEnd,
+			Tool:   &messages.ToolInfo{Name: name, Output: "ok-" + name},
+		}); err != nil {
+			t.Fatalf("send end %s: %v", name, err)
+		}
+	}
+
+	chain := inspectChain(t, a, "100", 0, 0)
+	defer chain.mu.Unlock()
+
+	if got := len(chain.chunks); got != 1 {
+		t.Fatalf("chunks = %d, want 1", got)
+	}
+	entries := chain.chunks[0].entries
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2 (StartA + StartB, each rewritten by its matching End)", len(entries))
+	}
+	if !strings.Contains(entries[0].text, "⎿  📄 Read → 1 lines") {
+		t.Errorf("entries[0].text = %q, want Read result (FIFO: EndA → StartA)", entries[0].text)
+	}
+	if !strings.Contains(entries[1].text, "⎿  💻 Bash → 1 lines") {
+		t.Errorf("entries[1].text = %q, want Bash result (FIFO: EndB → StartB)", entries[1].text)
+	}
+	if got := len(chain.toolPending); got != 0 {
+		t.Errorf("toolPending = %d, want 0", got)
+	}
+}
+
+func TestAdapter_OutThinking_PrefixesDropletEmoji(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutThinking,
+		Text:   "let me reason about this...",
+	}); err != nil {
+		t.Fatalf("send thinking: %v", err)
+	}
+
+	chain := inspectChain(t, a, "100", 0, 0)
+	defer chain.mu.Unlock()
+
+	if got := len(chain.chunks); got != 1 {
+		t.Fatalf("chunks = %d, want 1", got)
+	}
+	entries := chain.chunks[0].entries
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	got := entries[0].text
+	if !strings.HasPrefix(got, "💭 ") {
+		t.Errorf("entries[0].text = %q, want `💭 ` prefix (mirrors feishu)", got)
+	}
+	if !strings.Contains(got, "let me reason about this...") {
+		t.Errorf("entries[0].text = %q, want body to follow the prefix", got)
+	}
+}
+
+func TestAdapter_OutThinking_EmptySilentDrop(t *testing.T) {
+	// Empty-text silent drop must still apply to OutThinking — the
+	// `💭 ` prefix is added AFTER the drop check, so no orphan
+	// `💭 ` line ever lands in chat.
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutThinking,
+		Text:   "   \n  ",
+	}); err != nil {
+		t.Fatalf("send thinking: %v", err)
+	}
+
+	// No chain should have been created — empty text means we never
+	// reached the appendSegmentForKind path.
+	if _, ok := a.chains.lookup("100", 0, 0); ok {
+		t.Error("chain was created for empty OutThinking; silent drop should skip it entirely")
+	}
+}
+
+func TestChain_ClearToolPending_OnLRUEviction(t *testing.T) {
+	// LRU eviction drops the chain's toolPending entries — defensive
+	// against a stale reference lingering past the eviction boundary.
+	a, _ := newTestAdapter(t)
+
+	chain := a.chains.getOrCreate("100", 0, 0)
+	chain.pushToolStartEntry(0, 0, "● read()\n")
+	if got := len(chain.toolPending); got != 1 {
+		t.Fatalf("after push, toolPending = %d, want 1", got)
+	}
+
+	// Direct call — easier than filling LRU to capacity.
+	chain.mu.Lock()
+	chain.clearToolPending()
+	chain.mu.Unlock()
+
+	chain.mu.Lock()
+	defer chain.mu.Unlock()
+	if got := len(chain.toolPending); got != 0 {
+		t.Errorf("after clearToolPending, toolPending = %d, want 0", got)
+	}
+}
+
+func TestChunkBody_ReplaceEntry_Bounds(t *testing.T) {
+	// replaceEntry must return false on out-of-range indices and on
+	// chunks whose entries were cleared by freezeAfterOverflow — the
+	// fallback ladder in OutToolEnd relies on these contracts.
+	c := newChunkBody(0, "")
+	c.appendEntry("a")
+	c.appendEntry("b")
+
+	if !c.replaceEntry(0, "A") || c.entries[0].text != "A" {
+		t.Errorf("replaceEntry(0) failed; entries=%+v", c.entries)
+	}
+	if c.replaceEntry(5, "x") {
+		t.Error("replaceEntry(5) returned true; want false (out of range)")
+	}
+	if c.replaceEntry(-1, "x") {
+		t.Error("replaceEntry(-1) returned true; want false (negative index)")
+	}
+	c.freezeAfterOverflow(100)
+	if c.replaceEntry(0, "x") {
+		t.Error("replaceEntry after freeze returned true; want false (entries cleared)")
+	}
+}
+
+func TestAdapter_OutTool_Start_NilTool_LegacyFallback(t *testing.T) {
+	// The gateway always populates msg.Tool for OutToolStart, but
+	// the message contract doesn't enforce it — and the pre-fix
+	// formatTool had a `msg.Tool == nil` guard. The new merge
+	// rewrite path drops into that guard so a sender / replay /
+	// future test that forgets Tool doesn't NPE; instead it
+	// falls back to the legacy text-only path (which itself
+	// yields "" for nil-Tool + empty-Text → silent drop).
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutToolStart,
+		// Tool: nil — contract violation; expect legacy fallback.
+		Text: "",
+	}); err != nil {
+		t.Fatalf("send nil-tool start: %v", err)
+	}
+	// Empty Text → formatTool returns "" → appendSegmentForKind's
+	// TrimSpace guard drops it. No chain should have been created.
+	if _, ok := a.chains.lookup("100", 0, 0); ok {
+		t.Error("nil-Tool + empty-Text OutToolStart must silent-drop; chain was created")
+	}
+}
+
+func TestAdapter_OutTool_End_NilTool_LegacyFallback(t *testing.T) {
+	// Same nil-Tool contract test for End. End has no pending
+	// entry to pop (no Start preceded it), so even without the
+	// nil-guard we'd fall through to appendSegmentForKind — but
+	// the resultBody computation NPEs on msg.Tool.Output before
+	// that. The nil-guard makes this path total.
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutToolEnd,
+		// Tool: nil.
+		Text: "fallback text",
+	}); err != nil {
+		t.Fatalf("send nil-tool end: %v", err)
+	}
+	// formatTool's nil-Tool + non-empty-Text path returns msg.Text
+	// verbatim → chunk entry is "fallback text\n" (appendSegmentForKind
+	// adds the trailing \n separator). The result line `⎿` / `●`
+	// formatting is skipped — that's the cost of the legacy
+	// fallback; nil-Tool is a contract violation, not a happy path.
+	chain := inspectChain(t, a, "100", 0, 0)
+	defer chain.mu.Unlock()
+	if got := len(chain.chunks); got != 1 {
+		t.Fatalf("chunks = %d, want 1", got)
+	}
+	if got := chain.chunks[0].entries[0].text; got != "fallback text\n" {
+		t.Errorf("entries[0].text = %q, want %q (legacy text-only path; appendSegmentForKind adds the trailing \\n)", got, "fallback text\n")
+	}
+}
+
+func TestAdapter_OutThinking_PreservesWhitespace(t *testing.T) {
+	// The OutThinking prefix path must NOT trim the body —
+	// `strings.TrimSpace(msg.Text)` would silently eat user
+	// whitespace that the reasoning actually contained. Drop
+	// happens once, at the top of Send, against msg.Text itself.
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+
+	if err := a.Send(ctx, messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutThinking,
+		Text:   "  hello world  \n\n",
+	}); err != nil {
+		t.Fatalf("send thinking: %v", err)
+	}
+	chain := inspectChain(t, a, "100", 0, 0)
+	defer chain.mu.Unlock()
+	// Body is `  hello world  \n\n` → prefix adds `💭 ` →
+	// `💭   hello world  \n\n` → appendSegmentForKind appends
+	// the trailing `\n` separator. The inner whitespace MUST be
+	// preserved byte-for-byte (this is the whole point of dropping
+	// TrimSpace from the prefix path).
+	want := "💭   hello world  \n\n\n"
+	if got := chain.chunks[0].entries[0].text; got != want {
+		t.Errorf("entries[0].text = %q, want %q (prefix + whitespace preserved + trailing \\n)", got, want)
+	}
+}

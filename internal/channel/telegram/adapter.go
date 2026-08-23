@@ -993,9 +993,168 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// (no emoji). Caller uses this to explicitly drop reactions
 		// (e.g., MessageDropped).
 		return a.setMessageReactions(ctx, rawChatID, messageID, nil)
-	case messages.OutToolStart, messages.OutToolEnd:
-		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
-			formatTool(msg))
+	case messages.OutToolStart:
+		// PATCH-free Claude-Code-style two-line UX (mirrors
+		// feishu/tool_thread_merge.go semantics, but stays inside
+		// the chunked chain so the StatusBar / header / footer
+		// naturally wrap the tool pair).
+		//
+		// The call line (`● Tool(args)`) lands as a plain
+		// appendEntry on the active chunk, and we record its
+		// (chunkIdx, entryIdx) in chain.toolPending under one
+		// critical section. When the matching OutToolEnd arrives
+		// the rewrite mutates that same entry to
+		// `startBody + "\n" + resultBody`, so both `●` and `⎿`
+		// render as one chunkEntry → one Telegram message.
+		//
+		// Edge cases (all fall back to a fresh appendSegment for
+		// the result body on End so no data is silently dropped):
+		//   - sendFn fails during cold-create: chain still
+		//     materialises but messageID stays 0; push happens
+		//     anyway (the entry is real, just unsent) and End's
+		//     rewrite mutates the in-memory entry. The next
+		//     flushChainNow will pick it up if/when messageID
+		//     gets assigned.
+		//   - SPLIT path (segment > 3500 chars): unreachable for
+		//     tool segments (args are capped at 100 bytes by
+		//     toolCallArgsMaxBytes), but defended: (-1, -1) → no
+		//     toolPending push → End falls back to fresh append.
+		//   - msg.Tool == nil: gateway always populates ToolInfo
+		//     for OutToolStart, but the message contract doesn't
+		//     enforce it (any sender / test / replay path could
+		//     produce one). Old formatTool had a nil guard; this
+		//     rewrite drops it — we mirror the guard here so a
+		//     nil Tool falls back to the legacy text-only path
+		//     instead of NPE-ing on msg.Tool.Name.
+		if msg.Tool == nil {
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+				formatTool(msg))
+		}
+		startName := msg.Tool.Name
+		if startName == "" {
+			startName = "tool"
+		}
+		startBody := formatToolStartCall(startName, msg.Tool.Args)
+		startBodyNL := startBody + "\n"
+
+		chain := a.chains.getOrCreate(rawChatID, topicID, replyAnchor)
+		chain.mu.Lock()
+		chunkIdx, entryIdx := appendSegmentLocked(ctx, chain,
+			rawChatID, topicID, replyAnchor,
+			startBody, statusbar.StatusBarLines(&msg),
+			a.chainSendFn())
+		if chunkIdx >= 0 && entryIdx >= 0 {
+			chain.pushToolStartEntry(chunkIdx, entryIdx, startBodyNL)
+		}
+		chain.dirty = true
+		chain.mu.Unlock()
+		scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+			rawChatID, topicID, replyAnchor)
+		return nil
+
+	case messages.OutToolEnd:
+		// Rewrite the matching OutToolStart's chunkEntry in place
+		// so `● Tool(args)` and `⎿  result` render as one
+		// chunkEntry → one Telegram message (Claude-Code-style
+		// two-line UX, no PATCH overhead because Compose rebuilds
+		// the chunk body and the existing debounced flush handles
+		// the editMessageText).
+		//
+		// Fall-back ladder (each preserves the result line so the
+		// user always sees the tool completed):
+		//   1. No pending entry → fresh appendSegment for the
+		//      result. Happens when: End arrives before Start
+		//      (orphan / replay), chain was LRU-evicted between
+		//      Start and End, or Start's appendSegmentLocked
+		//      failed (chain never materialised).
+		//   2. Pending entry's chunk was freezeAfterOverflow'd
+		//      (entries==nil) → fresh appendSegment. The Start
+		//      entry's chunk materialised long content and was
+		//      split; we can't splice the result into the
+		//      discarded prefix.
+		//   3. Pending entry's chunk is still in chain.chunks but
+		//      not the active one (chain rotated between Start
+		//      and End): rewrite in place + flushChunkAt(idx) →
+		//      editMessageText on the historical messageID.
+		//   4. Pending entry's chunk IS the active chunk: rewrite
+		//      in place + scheduleFlushDebounced → normal flow.
+		//
+		// msg.Err vs msg.Tool.Err: the gateway translates
+		// EventAgentToolEnd → OutboundMessage{Tool: &ToolInfo{Err: ev.Err}}
+		// but does NOT set the message-level Err field. So
+		// msg.Err is always nil for OutToolEnd in practice; the
+		// canonical error lives on msg.Tool.Err. The pre-fix
+		// formatTool used msg.Err, which silently rendered all
+		// failed tools as success — using msg.Tool.Err here is
+		// a correctness fix, not a behaviour change.
+		if msg.Tool == nil {
+			// Same nil-guard as OutToolStart above — the legacy
+			// text-only path was the only way the old adapter
+			// could even reach this case without a Tool field.
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
+				formatTool(msg))
+		}
+		endName := msg.Tool.Name
+		if endName == "" {
+			endName = "tool"
+		}
+		toolErr := msg.Tool.Err
+		resultBody := summarizeToolResult(endName, msg.Tool.Output, toolErr)
+
+		chain, ok := a.chains.lookup(rawChatID, topicID, replyAnchor)
+		if !ok || chain == nil {
+			// No chain at all — fall back to fresh append.
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+		chain.mu.Lock()
+		entry, hit := chain.popToolStartEntry()
+		if !hit {
+			chain.mu.Unlock()
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+		if entry.chunkIdx < 0 || entry.chunkIdx >= len(chain.chunks) {
+			chain.mu.Unlock()
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+		target := chain.chunks[entry.chunkIdx]
+		merged := entry.startBody + resultBody + "\n"
+		replaced := target.replaceEntry(entry.entryIdx, merged)
+		cursor := chain.cursor
+		chain.dirty = true
+		chain.mu.Unlock()
+
+		if !replaced {
+			// Fall-back 2: chunk was freezeAfterOverflow'd. The
+			// original `●` line is gone (entries==nil) so we can't
+			// splice; emit `⎿` as a fresh segment so the result is
+			// visible to the user. The `●` from the split-off chunk
+			// stays on Telegram as a "naked call" line — better than
+			// losing either signal.
+			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, resultBody)
+		}
+
+		if entry.chunkIdx != cursor {
+			// Fall-back 3: rewrite landed in an earlier chunk.
+			// Flush that specific chunk's Telegram message via
+			// editMessageText. Schedule a normal debounced flush
+			// afterwards so the active chunk's dirty state still
+			// gets its editMessageText on the next tick.
+			if err := flushChunkAt(ctx, chain, entry.chunkIdx,
+				rawChatID, topicID, replyAnchor, a.chainEditFn()); err != nil {
+				a.logger.Warn("telegram: tool merge patch earlier chunk failed",
+					"chat_id", rawChatID,
+					"chunk_idx", entry.chunkIdx,
+					"err", err)
+			}
+		}
+		// Always schedule a flush — if the rewrite was in the
+		// active chunk (case 4) this is the only path that ships
+		// it; if it was cross-chunk (case 3) the active chunk may
+		// still be dirty from earlier events and the next
+		// flushChainNow will PATCH it.
+		scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
+			rawChatID, topicID, replyAnchor)
+		return nil
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
 		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
 			formatTaskList(msg.TaskList))
@@ -1027,8 +1186,30 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// topic. Session identity shows up via the StatusBar
 		// trailer on every subsequent outbound message (see §18).
 		return nil
+	case messages.OutThinking:
+		// F-think parity with feishu: prefix the reasoning body
+		// with `💭 ` so the user can scan the chat and instantly
+		// see "this is the agent's thinking" without reading the
+		// full prose. Feishu does the same inline in
+		// postThreadMarkdownReply before rendering as lark_md;
+		// Telegram renders markdown via chunk_body.Compose's
+		// RenderMarkdown pass, so the prefix just needs to be in
+		// the segment text.
+		//
+		// Empty-text silent drop already happened at the top of
+		// Send (case messages.OutReply, ... OutThinking: if
+		// strings.TrimSpace(msg.Text) == "" { return nil }), so
+		// msg.Text here is non-empty. We DO NOT trim the body
+		// here — the user's whitespace is content. If a future
+		// caller bypasses the drop gate with all-whitespace
+		// text, appendSegmentForKind's own
+		// `strings.TrimSpace(segment) == ""` check at the top
+		// catches it (the prefix `💭 ` is non-whitespace so we
+		// can't mirror the trim here).
+		body := "💭 " + msg.Text
+		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, body)
 	default:
-		// OutReply / OutResult / OutThinking / OutCommandReply:
+		// OutReply / OutResult / OutCommandReply:
 		// every text-emitting kind folds onto the active chain
 		// chunk (v9 §11.12). StatusBar trailing only lands on
 		// segments produced by footer-bearing kinds (OutReply /

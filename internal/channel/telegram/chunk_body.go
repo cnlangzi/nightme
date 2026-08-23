@@ -148,7 +148,11 @@ func (b *chunkBody) Compose() string {
 	out.WriteByte('\n')
 
 	if len(b.entries) > 0 {
-		out.WriteString("────────\n")
+		// Separator is 16 chars of U+2500 box-drawing horizontal,
+		// matching statusbar.PanelMaxWidth so the divider line
+		// aligns with the footer's left/right brackets
+		// ┌─...─› / └─...─› on either side of the chunk body.
+		out.WriteString("────────────────\n")
 		startIdx := b.skipFlushedPrefix()
 		for i := startIdx; i < len(b.entries); i++ {
 			e := b.entries[i]

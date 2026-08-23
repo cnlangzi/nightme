@@ -1336,21 +1336,25 @@ func formatTaskList(taskList *agent.AgentTaskListEvent) string {
 // through StatusBar on every footer-bearing outbound message.
 // Removed.
 
-// heartbeatText renders the in-turn status ticker. v7 added the
-// `⏱ HH:MM:SS` timestamp so the user can see when the last
-// heartbeat was emitted (≈ "agent is alive at this clock time").
-// The wall clock is taken from snapshot.LastBeatAt which the
-// chatsession heartbeat tracker refreshes on every think/tool
-// event (see internal/chatsession/heartbeat.go).
+// heartbeatText renders the in-turn status ticker — just the think
+// and tool counts. The trailing ` · ⏱ HH:MM:SS` timestamp is
+// appended by patchChainHeader / placeholderInitialText (matches
+// the cold-create format), so callers MUST NOT include one here or
+// the user sees a duplicated timestamp like
+// `<b>💭 1 · 🔧 0 · ⏱ 00:46:31</b> · ⏱ 00:46:31`.
+//
+// Why: snapshot.LastBeatAt is the last think/tool event wall-clock
+// (refreshed by chatsession heartbeat tracker); patchChainHeader
+// stamps `time.Now()` at the moment of the heartbeat emission.
+// They're usually within the same second, so rendering the
+// snapshot timestamp inside the status AND re-stamping the
+// current time produces two back-to-back ⏱ fields.
 func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	if snapshot == nil {
 		return "🤖 Working..."
 	}
-	text := "💭 " + strconv.Itoa(snapshot.ThinkCount) + " · 🔧 " + strconv.Itoa(snapshot.ToolCount)
-	if !snapshot.LastBeatAt.IsZero() {
-		text += " · ⏱ " + snapshot.LastBeatAt.UTC().Format("15:04:05")
-	}
-	return text
+	return "💭 " + strconv.Itoa(snapshot.ThinkCount) +
+		" · 🔧 " + strconv.Itoa(snapshot.ToolCount)
 }
 
 func renderInlineText(text string) string {

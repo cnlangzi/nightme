@@ -597,7 +597,17 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// Drop any in-memory chain for this turn — the previous turn's
 	// chunks stay in Telegram chat (frozen, no further edits) but we
 	// don't track them anymore. Next Out* gets a fresh chain.
+	//
+	// P1 #2 fix (2026-08-23): also stop the previous chain's
+	// pending debounce timer before purging. Without this, an
+	// orphan timer fires after purge and ghost-edits the
+	// previous turn's chunk messageID (violating §11.12.9).
 	if a.chains != nil {
+		if prev, ok := a.chains.lookup(chatID, topicID); ok && prev != nil {
+			prev.mu.Lock()
+			stopDebounceTimer(prev)
+			prev.mu.Unlock()
+		}
 		a.chains.purge(chatID, topicID)
 	}
 
@@ -1130,10 +1140,23 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	// Telegram first so the [reaction] lands on a fully-rendered
 	// chunk.
 	chain := a.chains.getOrCreate(rawChatID, topicID)
+
+	// P1 #2 fix (2026-08-23): take chain.mu for the full
+	// flush → stamp → purge sequence so an in-flight
+	// scheduleFlushDebounced from a concurrent Send can't
+	// arm a timer that fires AFTER we purge the chain (orphan
+	// timer editing the previous turn). We also cancel any
+	// currently-pending timer under the same lock so its
+	// stop/release ordering is unambiguous.
+	chain.mu.Lock()
 	if chain.cursor < 0 {
+		stopDebounceTimer(chain)
+		chain.mu.Unlock()
 		a.chains.purge(rawChatID, topicID)
 		return
 	}
+	stopDebounceTimer(chain)
+	chain.mu.Unlock()
 
 	// Best-effort flush before stamping the terminal reaction.
 	if err := flushChainNow(
@@ -1145,14 +1168,21 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 			"chat_id", rawChatID, "err", err)
 	}
 
+	chain.mu.Lock()
 	cur := chain.chunks[chain.cursor]
+	var curMessageID int64
 	if cur != nil {
+		curMessageID = cur.messageID
+	}
+	chain.mu.Unlock()
+
+	if curMessageID != 0 {
 		// [reaction] on the active chunk. v6.3 single-reaction
 		// budget on USER MSG slot is preserved; this stamp lands
 		// on the placeholder, not the user's original message.
 		// [emoji] is in the official ReactionTypeEmoji whitelist
 		// ([other emoji] U+2705 was rejected by Telegram API).
-		_ = a.setMessageReactions(ctx, rawChatID, int(cur.messageID),
+		_ = a.setMessageReactions(ctx, rawChatID, int(curMessageID),
 			[]map[string]any{{"type": "emoji", "emoji": "\U0001F389"}})
 	}
 

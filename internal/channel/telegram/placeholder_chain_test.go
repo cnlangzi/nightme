@@ -97,16 +97,18 @@ func TestAppendSegment_CreatesFirstChunkWhenEmpty(t *testing.T) {
 	if chain.chunks[0].messageID != 700 {
 		t.Fatalf("chunk.messageID = %d, want 700", chain.chunks[0].messageID)
 	}
-	// First chunk path: buf is empty (the segment was rendered
-	// into the sendMessage body, not accumulated). Subsequent
-	// appendSegment calls feed the buf.
-	if chain.chunks[0].buf.Len() != 0 {
-		t.Fatalf("first chunk buf should be empty; got %q",
-			chain.chunks[0].buf.String())
+	// First chunk path: the segment IS in buf (P0 #1 fix).
+	// Pre-fix the segment was only in the sendMessage body; the
+	// next flush's renderActiveChunkBody silently dropped it
+	// because it only reads cur.buf. After the fix, cur.buf
+	// seeds with the segment so re-renders include it.
+	if got := chain.chunks[0].buf.String(); got != "💭 first thought\n" {
+		t.Fatalf("first chunk buf = %q, want %q", got, "💭 first thought\n")
 	}
-	if chain.chunks[0].charCount != 0 {
-		t.Fatalf("first chunk charCount should be 0; got %d",
-			chain.chunks[0].charCount)
+	wantChars := len("💭 first thought\n")
+	if chain.chunks[0].charCount != wantChars {
+		t.Fatalf("first chunk charCount = %d, want %d",
+			chain.chunks[0].charCount, wantChars)
 	}
 }
 

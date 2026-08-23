@@ -58,6 +58,21 @@ type placeholderChunk struct {
 	charCount  int // buf.Len() snapshot; avoids per-step query
 	isFull     bool
 	headerLine string // "🤖 Working..." or "💭 N · 🔧 M · ⏱ HH:MM:SS"
+
+	// flushedRenderedLen is the byte-offset into cur.buf whose
+	// text has already been emitted on Telegram. It is > 0 only
+	// when the chunk is the tail of a long-text overflow
+	// (P0 #2 fix, see flushChainNow). The overflow chain chunks
+	// have empty buf but their rendered pieces were sized at
+	// splitTelegramText boundaries.
+	//
+	// Without this field, the overflow path would either
+	// re-render the entire pre-split buf onto the tail piece
+	// (overwriting the prefix pieces) or render past the
+	// already-flushed content. flushedRenderedLen + buf
+	// distinguishes "rendered buffer prefix" from "buffer
+	// remainder that needs to be re-edited next flush".
+	flushedRenderedLen int
 }
 
 // ---------------------------------------------------------------------------
@@ -126,15 +141,38 @@ func (l *chainLRU) touchLocked(key chainKey) {
 	l.order = append(l.order, key)
 }
 
+// lookup returns the chain for (chatID, topicID) without modifying
+// LRU access order. Adapters call this when they need to inspect
+// a chain (e.g. ensuring its debounce timer is stopped before a
+// purge) without advancing it to the tail.
+func (l *chainLRU) lookup(chatID string, topicID int) (*placeholderChain, bool) {
+	key := chainKey{chatID: chatID, topicID: topicID}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c, ok := l.chains[key]
+	return c, ok
+}
+
 // evictOldestLocked removes the head-of-order chain. Must hold mu.
 // Aborts silently when chains is empty (defensive — caller must check).
+//
+// P2 fix (2026-08-23): also stop the evicted chain's pending
+// debounce timer. Without this, an orphan timer fires 250 ms
+// later and ghost-edits the evicted chain's chunk messageID —
+// visible to the user as text from a now-untracked chain.
 func (l *chainLRU) evictOldestLocked() {
 	if len(l.order) == 0 {
 		return
 	}
 	old := l.order[0]
 	l.order = l.order[1:]
+	chain, ok := l.chains[old]
 	delete(l.chains, old)
+	if ok && chain != nil {
+		chain.mu.Lock()
+		stopDebounceTimer(chain)
+		chain.mu.Unlock()
+	}
 }
 
 // reset clears all chains. Called on Adapter.Stop to drop in-memory

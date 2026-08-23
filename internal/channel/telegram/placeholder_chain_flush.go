@@ -12,14 +12,14 @@ import (
 // v9 chain rolling log — flush / debounce / append primitives.
 //
 // These functions operate on a *placeholderChain retrieved via
-// chainLRU.getOrCreate. They do NOT talk to the Telegram API directly —
-// that responsibility lives on the Adapter (which owns the apiClient).
-// The Adapter is expected to pass a sender closure into appendSegment
-// so this file stays pure data-structures.
+// chainLRU.getOrCreate. They do NOT talk to the Telegram API directly
+// — that responsibility lives on the Adapter (which owns the
+// apiClient). The Adapter is expected to pass a sender closure into
+// appendSegment so this file stays pure data-structures.
 // ---------------------------------------------------------------------------
 
 // sendChunkFn is the abstraction over the Telegram sendMessage call.
-// Adapter supplies the concrete implementation in commit #5.
+// Adapter supplies the concrete implementation.
 //
 // Returns the new message ID. Errors propagate up through appendSegment.
 type sendChunkFn func(
@@ -30,8 +30,10 @@ type sendChunkFn func(
 	text string,
 ) (int64, error)
 
-// editChunkFn is the abstraction over the Telegram editMessageText call.
-// The Adapter implementation handles debounce timing and rate limiting.
+// editChunkFn is the abstraction over the Telegram editMessageText
+// call. The Adapter implementation handles debounce timing and rate
+// limiting. Each call passes its own ctx (no closure capture, see
+// adapter.chainEditFn).
 type editChunkFn func(
 	ctx context.Context,
 	chatID string,
@@ -40,8 +42,8 @@ type editChunkFn func(
 ) error
 
 // chainChunkThresholdChars = raw-buffer ceiling per chunk.
-// Above this, the next segment goes on a freshly-created chunk instead of
-// the active one. See docs/channel/telegram.md §11.12.3.
+// Above this, the next segment goes on a freshly-created chunk instead
+// of the active one. See docs/channel/telegram.md §11.12.3.
 const chainChunkThresholdChars = 3500
 
 // appendSegment is the hot path. Inbound segment lands on the chain's
@@ -53,9 +55,33 @@ const chainChunkThresholdChars = 3500
 // statusBarLines != nil means "footer refresh on next render" —
 // chain.lastFooter is replaced with this snapshot.
 //
-// User-messageID is the user message that triggered this turn; every new
-// chunk is reply_to=userMessageID so the chain hangs under the user's
-// own message (per §11.12.11).
+// User-messageID is the user message that triggered this turn; every
+// new chunk is reply_to=userMessageID so the chain hangs under the
+// user's own message (per §11.12.11).
+//
+// P0 #1 fix (2026-08-23): both case-1 (cold-create) and case-4
+// (overflow chunk materialisation) now seed the new chunk's buf with
+// the inlined segment. Before this fix, the initial sendMessage body
+// contained the segment while cur.buf stayed empty — the very next
+// flush via renderActiveChunkBody would silently drop the first
+// segment because it only renders cur.buf, not the segment that's
+// already on Telegram. After this fix, subsequent renders include
+// the segment in the rendered buf, so editMessageText body stays
+// consistent with the original sendMessage body.
+//
+// P0 #3 fix (2026-08-23): the previous case-3 ("chain has a
+// pre-existing next chunk slot, advance cursor and recurse") called
+// appendSegment recursively while still holding chain.mu —
+// sync.Mutex is not reentrant, so any future change that exercised
+// this path would deadlock the goroutine. The case-3 logic is now
+// inlined as a fast-forward loop at the top of the function; we
+// never recurse with chain.mu held.
+//
+// P2 fix (2026-08-23): cold-start body now includes the
+// `────────` separator so the rendered shape is identical to what
+// renderActiveChunkBody will produce on the next editMessageText;
+// otherwise the user briefly sees the separator appear "for free"
+// on the first event after cold-start.
 func appendSegment(
 	ctx context.Context,
 	chain *placeholderChain,
@@ -70,13 +96,23 @@ func appendSegment(
 	chain.mu.Lock()
 	defer chain.mu.Unlock()
 
+	if statusBarLines != nil {
+		chain.lastFooter = statusBarLines
+	}
+
+	// Fast-forward past any pre-locked chunks. The previous code
+	// recursed into appendSegment with chain.mu held to handle this;
+	// sync.Mutex is not reentrant so we now use a loop instead.
+	for chain.cursor >= 0 &&
+		chain.chunks[chain.cursor].isFull &&
+		chain.cursor+1 < len(chain.chunks) {
+		chain.cursor++
+	}
+
 	// 1. Empty chain → materialise the first chunk via send.
 	if chain.cursor < 0 {
 		headerLine := placeholderInitialText(time.Now().UTC())
-		body := headerLine + "\n" + segment
-		if statusBarLines != nil {
-			chain.lastFooter = statusBarLines
-		}
+		body := headerLine + "\n────────\n" + segment
 		if chain.lastFooter != nil {
 			body += "\n\n" + statusbar.RenderPanel(chain.lastFooter)
 		}
@@ -84,12 +120,20 @@ func appendSegment(
 		if err != nil {
 			return err
 		}
-		chain.chunks = []*placeholderChunk{{
+		chunk := &placeholderChunk{
 			messageID:  messageID,
 			headerLine: headerLine,
-		}}
+		}
+		// P0 #1 fix: seed cur.buf so subsequent renders include
+		// the inlined segment. Without this, renderActiveChunkBody
+		// produces header + ──── + footer (no segment) on the
+		// next flush and overwrites the original message content.
+		chunk.buf.WriteString(segment)
+		chunk.buf.WriteByte('\n')
+		chunk.charCount = len(segment) + 1
+		chain.chunks = []*placeholderChunk{chunk}
 		chain.cursor = 0
-		chain.dirty = false // freshly created; already aligned with Telegram
+		chain.dirty = true
 		return nil
 	}
 
@@ -99,69 +143,64 @@ func appendSegment(
 		cur.buf.WriteString(segment)
 		cur.buf.WriteByte('\n')
 		cur.charCount += len(segment) + 1
-		if statusBarLines != nil {
-			chain.lastFooter = statusBarLines
-		}
 		chain.dirty = true
 		return nil
 	}
 
-	// 3. Active chunk is full → lock it and either recycle the next
-	// slot in the existing slice or materialise a fresh chunk.
+	// 3. Overflow → lock current chunk and materialise a fresh one.
 	cur.isFull = true
-
-	if chain.cursor+1 < len(chain.chunks) {
-		// Existing next chunk (rare — only after a forced hydrate
-		// pre-seeds multiple chunks). Advance cursor; segment is now
-		// appended below in the recursive case.
-		chain.cursor++
-		return appendSegment(
-			ctx, chain,
-			chatID, topicID, userMessageID,
-			segment, statusBarLines,
-			sendFn, editFn,
-		)
-	}
-
-	// 4. Materialise a new chunk (the common cold case).
 	header := "📄 (continued)"
 	body := header + "\n────────\n" + segment
-	if statusBarLines != nil {
-		chain.lastFooter = statusBarLines
-	}
 	if chain.lastFooter != nil {
 		body += "\n\n" + statusbar.RenderPanel(chain.lastFooter)
 	}
 	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
 	if err != nil {
-		// Roll back the cursor if we already advanced; otherwise the
-		// chain.cursor points at the freshly-locked chunk. (Defensive —
-		// the appendSegment contract guarantees cursor hasn't advanced
-		// yet at this point in the cold path.)
 		return err
 	}
-	chain.chunks = append(chain.chunks, &placeholderChunk{
+	newChunk := &placeholderChunk{
 		messageID:  messageID,
 		headerLine: header,
-	})
+	}
+	// P0 #1 fix: same rationale as case-1. The overflow chunk
+	// ships the segment inline AND records it in cur.buf so
+	// subsequent renders match.
+	newChunk.buf.WriteString(segment)
+	newChunk.buf.WriteByte('\n')
+	newChunk.charCount = len(segment) + 1
+	chain.chunks = append(chain.chunks, newChunk)
 	chain.cursor = len(chain.chunks) - 1
-	chain.dirty = false // fresh chunk is already aligned
+	chain.dirty = true
 	return nil
+}
+
+// stopDebounceTimer stops the chain's pending debounce flush timer
+// if any. Caller MUST hold chain.mu.
+//
+// This is exported as a method-style helper (with chain.mu held by
+// the caller) so OnPromptEnded and the LRU evict path can both
+// safely cancel timers without racing with scheduleFlushDebounced.
+func stopDebounceTimer(chain *placeholderChain) {
+	if chain.debounceTimer != nil {
+		chain.debounceTimer.Stop()
+		chain.debounceTimer = nil
+	}
 }
 
 // flushChainNow synchronously renders the active chunk's text and
 // pushes it via editChunkFn. No-op when the chain is clean.
 //
-// Long-text guard: if the rendered body exceeds maxTelegramTextLength
-// (3900 chars), the body is split via splitTelegramText into multiple
-// messages. The first piece is edited onto the active chunk; the
-// remainder becomes NEW messages (sent via sendFn-style logic — but
-// inline here since we don't need the reply-chain semantics for the
-// tail pieces; they hang off the active chunk directly via consecutive
-// sends). The active chunk's messageID is updated to point at the last
-// piece so subsequent PATCHes continue on the tail.
-//
-// This is the safety valve for the rare single-segment overflow path.
+// P0 #2 fix (2026-08-23): when the rendered body exceeds
+// maxTelegramTextLength (3900 chars — Telegram's hard limit is 4096),
+// the previous code split the rendered body into pieces[1..] and
+// edited each onto a chain.tail — but kept cur.buf as the FULL
+// pre-split content, so the next flush would re-render the full
+// content onto the tail piece (deleting the prefix pieces from
+// the user's view). The fix is to rotate the chain: edit
+// pieces[0] onto cur, lock cur, append pieces[1..N-1] as fresh
+// chain chunks (each with its own messageID and an empty buf),
+// then advance the cursor to the last new chunk. Subsequent
+// appends land on the new chunk; cur is frozen and never re-rendered.
 func flushChainNow(
 	ctx context.Context,
 	chain *placeholderChain,
@@ -182,8 +221,7 @@ func flushChainNow(
 	body := renderActiveChunkBody(cur, chain.lastFooter)
 	rendered, err := RenderMarkdown(body)
 	if err != nil {
-		// Mirror the existing adapter escapeHTML fallback (see
-		// renderBodyWithStatusBar in adapter.go).
+		// Mirror the existing adapter escapeHTML fallback.
 		rendered = escapeHTML(body)
 	}
 
@@ -195,53 +233,92 @@ func flushChainNow(
 		return nil
 	}
 
-	// Long-text overflow path. Split, edit first, send the rest as
-	// continuation messages after the active chunk in the chat.
+	// Overflow path: rotate into multiple chain chunks instead
+	// of editing a single tail. Each piece is its own message
+	// on Telegram and its own chain.chunks entry.
+	//
+	// We split at line boundaries (splitTelegramText preserves
+	// line breaks until a piece would exceed the limit). The
+	// split-points are at character indices IN THE RENDERED
+	// STRING; rendered is the source-of-truth for what we've
+	// emitted, so we treat it as such for buf bookkeeping too.
 	pieces, err := splitTelegramText(rendered, maxTelegramTextLength)
 	if err != nil {
 		return err
 	}
-	var lastID int64 = cur.messageID
-	for i, p := range pieces {
-		if i == 0 {
-			if err := editFn(ctx, chatID, cur.messageID, p); err != nil {
-				return err
-			}
-			lastID = cur.messageID
-			continue
-		}
-		// Continuation: a fresh message hanging off the previous one
-		// via reply_to_message_id. We use userMessageID for the FIRST
-		// continuation (so it stays in the reply chain under the user's
-		// original message) and the previous piece's id for the rest.
-		replyTo := userMessageID
-		if i > 1 {
-			replyTo = int(lastID)
-		}
-		mid, err := sendFn(ctx, chatID, topicID, replyTo, p)
+	if len(pieces) == 0 {
+		chain.dirty = false
+		return nil
+	}
+
+	// pieces[0] → edit onto current chunk.
+	if err := editFn(ctx, chatID, cur.messageID, pieces[0]); err != nil {
+		return err
+	}
+	cur.isFull = true
+	cur.buf.Reset()
+	cur.charCount = 0
+	// Save rendered[:len(pieces[0])] as the chunk's "frozen tail"
+	// emit, so re-renders on overflow chunks render only the
+	// remaining buf (which is the new appended content, not
+	// pieces[0]'s already-emitted text).
+	cur.flushedRenderedLen = len(pieces[0])
+	chain.dirty = false
+
+	// pieces[1..N-1] → each becomes a fresh locked chain chunk.
+	for _, p := range pieces[1 : len(pieces)-1] {
+		mid, err := sendFn(ctx, chatID, topicID, userMessageID, p)
 		if err != nil {
 			return err
 		}
-		lastID = mid
+		next := &placeholderChunk{
+			messageID:           int64(mid),
+			headerLine:          "",
+			flushedRenderedLen:  len(p),
+			isFull:              true,
+		}
+		chain.chunks = append(chain.chunks, next)
 	}
-	cur.messageID = lastID
-	chain.dirty = false
+
+	// pieces[len(pieces)-1] → if there are ≥ 2 pieces, this
+	// becomes the new active chunk. buf stays empty until the next
+	// append; flushedRenderedLen tracks how much of the
+	// post-render (buf unknown) was already emitted so future
+	// renders over the new tail don't include it.
+	if len(pieces) > 1 {
+		lastPiece := pieces[len(pieces)-1]
+		mid, err := sendFn(ctx, chatID, topicID, userMessageID, lastPiece)
+		if err != nil {
+			return err
+		}
+		tail := &placeholderChunk{
+			messageID:          int64(mid),
+			headerLine:         cur.headerLine, // carry the working header into the tail
+			flushedRenderedLen: len(lastPiece),
+		}
+		chain.chunks = append(chain.chunks, tail)
+		chain.cursor = len(chain.chunks) - 1
+		chain.dirty = false
+	}
+
 	return nil
 }
 
 // scheduleFlushDebounced arms (or resets) a 250ms debounce timer that
-// will invoke flushChainNow. Bursts of appendSegment calls within the
-// window coalesce into a single editMessageText — see docs §11.12.7.
+// will invoke flushChainNow. Bursts of appendSegment calls within
+// the window coalesce into a single editMessageText — see docs
+// §11.12.7.
 //
-// editFn and sendFn are passed in by the caller (the Adapter wraps its
-// apiClient + rate-limiter pipeline; tests supply test doubles). The
-// closures do NOT capture the request's context.Background() ctx because
-// the debounce fires 250ms+ after the request may have returned
-// (request ctx cancelled). The timer creates a fresh background ctx
-// with a 5s timeout.
+// editFn and sendFn are passed in by the caller (the Adapter wraps
+// its apiClient + rate-limiter pipeline; tests supply test doubles).
+// The closures do NOT capture the request's context.Context
+// because the debounce fires 250ms+ after the request may have
+// returned (request ctx cancelled). The timer creates a fresh
+// background ctx with a 5s timeout.
 //
 // chain.debounceTimer access is serialised under chain.mu so the
-// Stop/Replace pair is atomic with respect to other appends.
+// Stop/Replace pair is atomic with respect to other appends and
+// the OnPromptEnded purge path.
 //
 // Returns nil immediately. The actual flush result is dropped
 // (errors are surfaced via the timer's own logger elsewhere; chat
@@ -255,15 +332,12 @@ func scheduleFlushDebounced(
 	userMessageID int,
 ) {
 	chain.mu.Lock()
-	if chain.debounceTimer != nil {
-		chain.debounceTimer.Stop()
-	}
+	stopDebounceTimer(chain)
 	chain.debounceTimer = time.AfterFunc(250*time.Millisecond, func() {
 		// Fresh ctx: the original request that scheduled this
-		// flush may have already finished (timing window is
-		// 250ms+; Send returns synchronously after the in-memory
-		// append, but the timer is keyed off that exact moment).
-		// The 5s budget is enough for one Telegram edit round-trip.
+		// flush may have already finished by the time we fire
+		// (the 250ms+ window matches that pattern). 5s budget
+		// is enough for one Telegram edit round-trip.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = flushChainNow(ctx, chain, chatID, topicID, userMessageID,
@@ -274,13 +348,24 @@ func scheduleFlushDebounced(
 
 // renderActiveChunkBody builds the (raw, pre-RenderMarkdown) text
 // content for the active chunk: header + entries + footer.
+//
+// Note: when a chunk has flushedRenderedLen > 0, this renders
+// only the NOT-YET-EMITTED tail (buf[flushedRenderedLen:]). The
+// emitted prefix is already on Telegram in the locked chunks
+// preceding it (see flushChainNow's overflow path).
 func renderActiveChunkBody(cur *placeholderChunk, lastFooter []string) string {
 	var b strings.Builder
 	b.WriteString(cur.headerLine)
 	b.WriteByte('\n')
 	if cur.charCount > 0 {
 		b.WriteString("────────\n")
-		b.WriteString(cur.buf.String())
+		if cur.flushedRenderedLen > 0 && cur.flushedRenderedLen < cur.buf.Len() {
+			// Tail of an overflow chain: only render the
+			// not-yet-emitted remainder.
+			b.WriteString(cur.buf.String()[cur.flushedRenderedLen:])
+		} else {
+			b.WriteString(cur.buf.String())
+		}
 		if !strings.HasSuffix(cur.buf.String(), "\n") {
 			b.WriteByte('\n')
 		}

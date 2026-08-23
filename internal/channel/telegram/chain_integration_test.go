@@ -80,13 +80,15 @@ func TestAdapter_Send_OutReply_FoldsIntoChain(t *testing.T) {
 	chain.mu.Lock()
 	cursor := chain.cursor
 	chunksLen := len(chain.chunks)
-	firstBufLen := chain.chunks[0].buf.Len()
+	firstBuf := chain.chunks[0].buf.String()
 	chain.mu.Unlock()
 	if cursor != 0 || chunksLen != 1 {
 		t.Fatalf("cold-create state wrong: cursor=%d chunks=%d", cursor, chunksLen)
 	}
-	if firstBufLen != 0 {
-		t.Fatalf("first cold-create buf should be empty; got %d bytes", firstBufLen)
+	// P0 #1 fix (2026-08-23): cold-create now seeds cur.buf
+	// with the segment so subsequent renders include it.
+	if !strings.Contains(firstBuf, "Hello world from agent") {
+		t.Fatalf("cold-create buf missing first segment: %q", firstBuf)
 	}
 
 	// Second OutReply → accumulates into buf.
@@ -110,11 +112,21 @@ func TestAdapter_Send_OutReply_FoldsIntoChain(t *testing.T) {
 	drainDebouncedFlush(t, a, api)
 	edits := 0
 	editsOk := false
+	firstSegmentPersistent := false
 	for _, call := range api.snapshotCalls() {
-		if call.Method == "editMessageText" {
-			edits++
-			if text, ok := call.Params["text"].(string); ok &&
-				strings.Contains(text, "second thought from agent") {
+		if call.Method != "editMessageText" {
+			continue
+		}
+		edits++
+		if text, ok := call.Params["text"].(string); ok {
+			// P0 #1 regression guard: the very first
+			// segment ("Hello world from agent") MUST be in
+			// at least one editMessageText body. Pre-fix
+			// it would silently drop on the second flush.
+			if strings.Contains(text, "Hello world from agent") {
+				firstSegmentPersistent = true
+			}
+			if strings.Contains(text, "second thought from agent") {
 				editsOk = true
 			}
 		}
@@ -124,6 +136,9 @@ func TestAdapter_Send_OutReply_FoldsIntoChain(t *testing.T) {
 	}
 	if !editsOk {
 		t.Fatalf("editMessageText was called but body did not contain buffered segment")
+	}
+	if !firstSegmentPersistent {
+		t.Fatalf("P0 #1 regression: first cold-start segment missing from later flush")
 	}
 }
 

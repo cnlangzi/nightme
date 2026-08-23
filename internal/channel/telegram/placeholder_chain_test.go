@@ -23,41 +23,41 @@ func noSendFn(_ context.Context, _ string, _ int, _ int, _ string) (int64, error
 
 func TestChainLRU_EvictOldestOnCap(t *testing.T) {
 	l := newChainLRU(2)
-	a := l.getOrCreate("chat-1", 0)
+	a := l.getOrCreate("chat-1", 0, 100)
 	a.cursor = -1
-	b := l.getOrCreate("chat-2", 0)
+	b := l.getOrCreate("chat-2", 0, 200)
 	b.cursor = -1
 
 	// First c evict "chat-1" (it's the LRU — head-of-order).
-	c := l.getOrCreate("chat-3", 0)
+	c := l.getOrCreate("chat-3", 0, 300)
 	c.cursor = -1
 
-	if _, ok := l.chains[chainKey{chatID: "chat-1", topicID: 0}]; ok {
+	if _, ok := l.chains[chainKey{chatID: "chat-1", topicID: 0, userMessageID: 100}]; ok {
 		t.Fatalf("expected chat-1 evicted")
 	}
-	if _, ok := l.chains[chainKey{chatID: "chat-2", topicID: 0}]; !ok {
+	if _, ok := l.chains[chainKey{chatID: "chat-2", topicID: 0, userMessageID: 200}]; !ok {
 		t.Fatalf("chat-2 should still be present (was touched last)")
 	}
-	if _, ok := l.chains[chainKey{chatID: "chat-3", topicID: 0}]; !ok {
+	if _, ok := l.chains[chainKey{chatID: "chat-3", topicID: 0, userMessageID: 300}]; !ok {
 		t.Fatalf("chat-3 should be the newest")
 	}
 }
 
 func TestChainLRU_PurgeRemovesKey(t *testing.T) {
 	l := newChainLRU(10)
-	a := l.getOrCreate("chat-x", 42)
+	a := l.getOrCreate("chat-x", 42, 999)
 	a.cursor = -1
 
-	l.purge("chat-x", 42)
-	if _, ok := l.chains[chainKey{chatID: "chat-x", topicID: 42}]; ok {
+	l.purge("chat-x", 42, 999)
+	if _, ok := l.chains[chainKey{chatID: "chat-x", topicID: 42, userMessageID: 999}]; ok {
 		t.Fatal("expected chat-x purged")
 	}
 }
 
 func TestChainLRU_ResetClearsAll(t *testing.T) {
 	l := newChainLRU(10)
-	l.getOrCreate("a", 0)
-	l.getOrCreate("b", 0)
+	l.getOrCreate("a", 0, 1)
+	l.getOrCreate("b", 0, 2)
 	l.reset()
 	if len(l.chains) != 0 || len(l.order) != 0 {
 		t.Fatalf("expected empty after reset; got %d chains", len(l.chains))
@@ -330,5 +330,78 @@ func TestRenderActiveChunkBody_HeaderOnly(t *testing.T) {
 	}
 	if strings.Contains(body, "────────") {
 		t.Fatalf("no entries → no separator; got %q", body)
+	}
+}
+
+// TestChain_RotateChunk_HeaderIsFreshNotInherited locks the §11.12.7.2
+// invariant that ROTATE produces a chunk whose header reflects its
+// creation time, NOT the previous chunk's header. Without this, the
+// tail chunk's `⏱ HH:MM:SS` would be the timestamp of the last
+// OutHeartbeat (potentially minutes/hours old), confusing users who
+// scroll to the bottom of the chat.
+func TestChain_RotateChunk_HeaderIsFreshNotInherited(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var sentBodies []string
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		sentBodies = append(sentBodies, text)
+		return int64(800 + len(sentBodies)), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		return nil
+	}
+
+	// Cold-create with a segment that fits on one chunk. After this
+	// call, chunk[0] has the cold-create headerLine (heartbeatText(nil)
+	// from the cold-create path).
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10, "first reply", nil, sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(sentBodies) != 1 {
+		t.Fatalf("expected 1 sendMessage after cold-create; got %d", len(sentBodies))
+	}
+	originalHeader := chain.chunks[0].headerText()
+	if originalHeader == "" {
+		t.Fatal("cold-create chunk should have a header")
+	}
+
+	// Force the active chunk to look "stale" by stamping it with a
+	// long-outdated heartbeat timestamp — this simulates a turn where
+	// the last OutHeartbeat fired minutes ago, so cur.headerText() is
+	// the stale timestamp. Then trigger ROTATE.
+	stale := "<b>💭 99 · 🔧 99</b> · ⏱ 00:00:00"
+	chain.chunks[chain.cursor].setHeader(stale)
+
+	// Append a segment big enough to overflow the chunk and force
+	// case 3 (ROTATE) — bufTextSize already includes the first entry
+	// from cold-create, so a 3500-char segment definitely overflows.
+	huge := strings.Repeat("x", chainChunkThresholdChars)
+	if err := appendSegment(context.Background(), chain,
+		"c1", 0, 10, huge, nil, sendFn, editFn,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.chunks) != 2 {
+		t.Fatalf("expected 2 chunks after overflow; got %d", len(chain.chunks))
+	}
+
+	// The newly rotated chunk (chain[1) MUST NOT inherit the stale
+	// header — it must reflect a fresh heartbeatText(nil) call. We
+	// don't pin the exact string (it includes a live timestamp),
+	// just verify it's neither empty nor the stale value.
+	newHeader := chain.chunks[1].headerText()
+	if newHeader == "" {
+		t.Fatal("rotated chunk must have a header (heartbeatText(nil) call)")
+	}
+	if newHeader == stale {
+		t.Fatalf("rotated chunk inherited stale cur.headerText()=%q; expected fresh heartbeatText(nil)", newHeader)
+	}
+	if newHeader == originalHeader {
+		// Could theoretically happen if the cold-create header and
+		// the rotation happen in the same second — not a bug. Log
+		// for visibility but don't fail.
+		t.Logf("note: rotated header equals cold-create header (%q); timestamps may match", newHeader)
 	}
 }

@@ -24,8 +24,8 @@ import (
 // chainSnapshot returns the current buf (segments accumulated since
 // cold-start) under chain.mu. Used by tests to inspect chain state
 // without triggering a flush.
-func chainSnapshot(a *Adapter, chatID string, topicID int) string {
-	chain := a.chains.getOrCreate(chatID, topicID)
+func chainSnapshot(a *Adapter, chatID string, topicID int, userMessageID int) string {
+	chain := a.chains.getOrCreate(chatID, topicID, userMessageID)
 	chain.mu.Lock()
 	defer chain.mu.Unlock()
 	if chain.cursor < 0 {
@@ -76,7 +76,7 @@ func TestAdapter_Send_OutReply_FoldsIntoChain(t *testing.T) {
 		t.Fatalf("first send: %v", err)
 	}
 
-	chain := a.chains.getOrCreate("100", 0)
+	chain := a.chains.getOrCreate("100", 0, 10)
 	chain.mu.Lock()
 	cursor := chain.cursor
 	chunksLen := len(chain.chunks)
@@ -105,7 +105,7 @@ func TestAdapter_Send_OutReply_FoldsIntoChain(t *testing.T) {
 	// After second send, buf has the second segment.
 	// chainSnapshot uses cursor alignment; ensure we read after
 	// the second send's appendSegment path completed.
-	if !strings.Contains(chainSnapshot(a, "100", 0), "second thought from agent") {
+	if !strings.Contains(chainSnapshot(a, "100", 0, 10), "second thought from agent") {
 		t.Fatalf("buf missing second reply text")
 	}
 
@@ -201,7 +201,7 @@ func TestAdapter_OutHeartbeat_PATCHesActiveChunkHeader(t *testing.T) {
 		t.Fatalf("send heartbeat: %v", err)
 	}
 
-	chain := a.chains.getOrCreate("300", 0)
+	chain := a.chains.getOrCreate("300", 0, 30)
 	chain.mu.Lock()
 	header := chain.chunks[0].headerText()
 	chain.mu.Unlock()
@@ -328,7 +328,7 @@ func TestAdapter_Send_OutError_FoldsIntoChainWithMarkdownFragment(t *testing.T) 
 		t.Fatalf("second send: %v", err)
 	}
 
-	if !strings.Contains(chainSnapshot(a, "500", 0), "second error") {
+	if !strings.Contains(chainSnapshot(a, "500", 0, 50), "second error") {
 		t.Fatalf("buf missing second error text")
 	}
 
@@ -490,7 +490,7 @@ func TestChainOverflow_RotatesToNewChain(t *testing.T) {
 		t.Fatalf("cold-start: %v", err)
 	}
 
-	chain := a.chains.getOrCreate("700", 0)
+	chain := a.chains.getOrCreate("700", 0, 70)
 	chain.mu.Lock()
 	prevChunks := len(chain.chunks)
 	chain.mu.Unlock()
@@ -557,7 +557,7 @@ func TestChainOverflow_TailHasNonEmptyEntries(t *testing.T) {
 
 	drainDebouncedFlush(t, a, api)
 
-	chain := a.chains.getOrCreate("1100", 0)
+	chain := a.chains.getOrCreate("1100", 0, 110)
 	chain.mu.Lock()
 	cur := chain.cursor
 	nChunks := len(chain.chunks)

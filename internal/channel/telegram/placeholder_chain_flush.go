@@ -143,18 +143,16 @@ func appendSegment(
 	}
 
 	// 3. Overflow → lock current chunk and materialise a fresh one.
-	// The new chunk INHERITS cur.headerLine (the previous chunk's
-	// last headerLine — the latest heartbeat snapshot or the
-	// cold-create banner). The user's chat view therefore stays
-	// visually continuous across the page break: the new chunk's
-	// first line is the same status line that was just rendered
-	// on the previous chunk, and the next OutHeartbeat will
-	// patch it forward to a fresh snapshot. We intentionally do
-	// NOT use a '📄 (continued)' sentinel — the user perceives the
-	// chain as one timeline, not a paginated document.
+	// The new chunk's header is heartbeatText(nil) — its creation
+	// time, NOT cur.headerText(). This matches the SPLIT path
+	// (§11.12.7.2 trigger 1) which also uses heartbeatText(nil) for
+	// all its chunks. Each Telegram message's header reflects the
+	// time the message was actually sent, so users scrolling to the
+	// bottom of the chat see timestamps that monotonically advance.
+	// The next OutHeartbeat will refresh the new chunk's header
+	// forward to a fresh snapshot as usual.
 	cur.markFull()
-	inheritedHeader := cur.headerText()
-	newChunk := newChunkBody(0, inheritedHeader)
+	newChunk := newChunkBody(0, heartbeatText(nil))
 	newChunk.appendEntry(segment)
 	if chain.lastFooter != nil {
 		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
@@ -289,7 +287,11 @@ func flushChainNow(
 		if err != nil {
 			return err
 		}
-		tail := newChunkBody(int64(mid), cur.headerText())
+		// Header reflects the time the tail chunk is being sent —
+		// matches the SPLIT path and appendSegment case 3, so all
+		// new chunks produced by the chain get a fresh timestamp
+		// rather than inheriting cur's potentially stale header.
+		tail := newChunkBody(int64(mid), heartbeatText(nil))
 		// Seed entries with the lastPiece content as a plain-text
 		// entry. flushedLen=0 because the entire content is in
 		// entries — Compose will render it. Future appends land

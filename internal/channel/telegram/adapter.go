@@ -603,12 +603,12 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// orphan timer fires after purge and ghost-edits the
 	// previous turn's chunk messageID (violating §11.12.9).
 	if a.chains != nil {
-		if prev, ok := a.chains.lookup(chatID, topicID); ok && prev != nil {
+		if prev, ok := a.chains.lookup(chatID, topicID, userMessageID); ok && prev != nil {
 			prev.mu.Lock()
 			stopDebounceTimer(prev)
 			prev.mu.Unlock()
 		}
-		a.chains.purge(chatID, topicID)
+		a.chains.purge(chatID, topicID, userMessageID)
 	}
 
 	// Cold-create the first chunk via send. Header carries the
@@ -622,7 +622,7 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 
 	// Materialise the in-memory chain so ensurePlaceholderForHeartbeat
 	// / Send can resolve it without recreating.
-	chain := a.chains.getOrCreate(chatID, topicID)
+	chain := a.chains.getOrCreate(chatID, topicID, userMessageID)
 	chain.mu.Lock()
 	chunk := newChunkBody(int64(result.MessageID), header)
 	chain.chunks = []*chunkBody{chunk}
@@ -939,7 +939,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// drop — OutMessageState's 👌 reaction already announces
 		// the turn.
 		if placeholderAnchor > 0 {
-			return a.patchChainHeader(rawChatID, topicID, msg)
+			return a.patchChainHeader(rawChatID, topicID, replyAnchor, msg)
 		}
 		return nil
 	case messages.OutMessageState:
@@ -1007,7 +1007,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		if msg.Diagnostic != nil {
 			stderr = msg.Diagnostic.StderrTail
 		}
-		chain := a.chains.getOrCreate(rawChatID, topicID)
+		chain := a.chains.getOrCreate(rawChatID, topicID, replyAnchor)
 		if err := appendErrorSegment(ctx, chain,
 			rawChatID, topicID, replyAnchor,
 			msg.Text, stderr, statusbar.StatusBarLines(&msg),
@@ -1057,7 +1057,7 @@ func (a *Adapter) appendSegmentForKind(
 	if strings.TrimSpace(segment) == "" {
 		return nil
 	}
-	chain := a.chains.getOrCreate(rawChatID, topicID)
+	chain := a.chains.getOrCreate(rawChatID, topicID, userMessageID)
 
 	// Every text-emitting OutboundKind gets the StatusBar
 	// snapshot appended (matches v8 contract from §18 trailer
@@ -1171,7 +1171,8 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	// read-only back-compat). Flush the in-memory buffer to
 	// Telegram first so the [reaction] lands on a fully-rendered
 	// chunk.
-	chain := a.chains.getOrCreate(rawChatID, topicID)
+	parsedUserMsgID := atoiUserMsgID(userMsgID)
+	chain := a.chains.getOrCreate(rawChatID, topicID, parsedUserMsgID)
 
 	// P1 #2 fix (2026-08-23): take chain.mu for the full
 	// flush → stamp → purge sequence so an in-flight
@@ -1184,7 +1185,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	if chain.cursor < 0 {
 		stopDebounceTimer(chain)
 		chain.mu.Unlock()
-		a.chains.purge(rawChatID, topicID)
+		a.chains.purge(rawChatID, topicID, parsedUserMsgID)
 		return
 	}
 	stopDebounceTimer(chain)
@@ -1222,7 +1223,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	// chunks remain in chat as historical evidence (no edit
 	// touches them again). Next user message re-materialises
 	// a fresh chain via ensurePlaceholder.
-	a.chains.purge(rawChatID, topicID)
+	a.chains.purge(rawChatID, topicID, parsedUserMsgID)
 }
 
 // patchChainHeader refreshes the active chunk's headerLine
@@ -1239,9 +1240,10 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 func (a *Adapter) patchChainHeader(
 	chatID string,
 	topicID int,
+	userMessageID int,
 	msg messages.OutboundMessage,
 ) error {
-	chain := a.chains.getOrCreate(chatID, topicID)
+	chain := a.chains.getOrCreate(chatID, topicID, userMessageID)
 	chain.mu.Lock()
 	if chain.cursor < 0 {
 		chain.mu.Unlock()
@@ -1259,7 +1261,7 @@ func (a *Adapter) patchChainHeader(
 	chain.mu.Unlock()
 
 	scheduleFlushDebounced(chain, a.chainEditFn(), a.chainSendFn(),
-		chatID, topicID, 0)
+		chatID, topicID, userMessageID)
 	return nil
 }
 

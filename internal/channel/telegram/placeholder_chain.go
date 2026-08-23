@@ -18,11 +18,21 @@ import (
 // fresh chunk. See §11.12.10 for the trade-off rationale.
 // ---------------------------------------------------------------------------
 
-// chainKey indexes a chain by (chatID, topicID). DM (thread_id == 0)
-// is a distinct chain from a real Forum topic on the same chatID.
+// chainKey indexes a chain by (chatID, topicID, userMessageID). DM
+// (thread_id == 0) is a distinct chain from a real Forum topic on the
+// same chatID; user messages with different reply anchors live on
+// separate chains so back-to-back user inputs don't bleed Out* events
+// across turns (see docs/channel/telegram.md §11.12.2).
+//
+// userMessageID == 0 is the race-window sentinel: handleMessage hasn't
+// run yet for this turn, ensurePlaceholderForHeartbeat returns (0,nil),
+// and OutHeartbeat/OutError that race ahead of handleMessage get a
+// scratch chain keyed on 0. ensurePlaceholder purges that scratch chain
+// when handleMessage finally lands, replacing it with the real key.
 type chainKey struct {
-	chatID  string
-	topicID int
+	chatID        string
+	topicID       int
+	userMessageID int
 }
 
 // placeholderChain is the per-turn chain container. Holds at most one
@@ -81,14 +91,14 @@ func newChainLRU(cap int) *chainLRU {
 	}
 }
 
-// getOrCreateChain returns the chain for (chatID, topicID), creating it
-// if absent. Updates LRU access order. Evicts the oldest chain when the
-// index is full.
+// getOrCreateChain returns the chain for (chatID, topicID, userMessageID),
+// creating it if absent. Updates LRU access order. Evicts the oldest chain
+// when the index is full.
 //
 // Pre-condition: a.mu MUST NOT be held when calling this (the function
 // takes its own lock).
-func (l *chainLRU) getOrCreate(chatID string, topicID int) *placeholderChain {
-	key := chainKey{chatID: chatID, topicID: topicID}
+func (l *chainLRU) getOrCreate(chatID string, topicID int, userMessageID int) *placeholderChain {
+	key := chainKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -121,12 +131,12 @@ func (l *chainLRU) touchLocked(key chainKey) {
 	l.order = append(l.order, key)
 }
 
-// lookup returns the chain for (chatID, topicID) without modifying
-// LRU access order. Adapters call this when they need to inspect
-// a chain (e.g. ensuring its debounce timer is stopped before a
-// purge) without advancing it to the tail.
-func (l *chainLRU) lookup(chatID string, topicID int) (*placeholderChain, bool) {
-	key := chainKey{chatID: chatID, topicID: topicID}
+// lookup returns the chain for (chatID, topicID, userMessageID) without
+// modifying LRU access order. Adapters call this when they need to
+// inspect a chain (e.g. ensuring its debounce timer is stopped before
+// a purge) without advancing it to the tail.
+func (l *chainLRU) lookup(chatID string, topicID int, userMessageID int) (*placeholderChain, bool) {
+	key := chainKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	c, ok := l.chains[key]
@@ -164,12 +174,12 @@ func (l *chainLRU) reset() {
 	l.order = nil
 }
 
-// purge removes the chain for (chatID, topicID) if present. Called by
-// ensurePlaceholder when a new user message arrives so the previous
-// turn's chain is forgotten (its frozen chunks remain in chat as
-// historical evidence).
-func (l *chainLRU) purge(chatID string, topicID int) {
-	key := chainKey{chatID: chatID, topicID: topicID}
+// purge removes the chain for (chatID, topicID, userMessageID) if present.
+// Called by ensurePlaceholder when a new user message arrives so the
+// previous turn's chain is forgotten (its frozen chunks remain in chat
+// as historical evidence).
+func (l *chainLRU) purge(chatID string, topicID int, userMessageID int) {
+	key := chainKey{chatID: chatID, topicID: topicID, userMessageID: userMessageID}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.chains, key)

@@ -1944,15 +1944,6 @@ func TestChoiceKindName(t *testing.T) {
 	}
 }
 
-func TestRenderInlineText(t *testing.T) {
-	if got := renderInlineText(""); got != "" {
-		t.Fatalf("empty = %q", got)
-	}
-	if got := renderInlineText("**bold**"); !strings.Contains(got, "<b>bold</b>") {
-		t.Fatalf("inline = %q", got)
-	}
-}
-
 func TestFormatTool(t *testing.T) {
 	if formatTool(messages.OutboundMessage{}) != "" {
 		t.Fatal("empty tool")

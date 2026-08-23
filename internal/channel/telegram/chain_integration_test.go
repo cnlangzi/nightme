@@ -374,7 +374,100 @@ func TestChainAppendOnly_AfterStopFreshChain(t *testing.T) {
 	_ = agent.Agent{}
 }
 
-// TestChainOverflow_RotatesToNewChain — P0 #2 regression guard.
+// TestChain_HeartbeatBoldHeaderPreservedThroughFlush — regression
+// guard for the "<b>...</b>" double-escape bug. Pre-fix the
+// flushChainNow path ran RenderMarkdown on the entire body
+// (header + buf + footer), which escapeHTML'd the heartbeat
+// status's <b> tags. Telegram then rendered them as literal
+// "<b>💭 1 · 🔧 0</b> · ⏱ HH:MM:SS" text instead of bold.
+//
+// Lock: after OutHeartbeat → debounced flush, the rendered
+// editMessageText body MUST contain the actual <b> tag
+// characters (not the HTML-escaped &lt;b&gt; entity).
+func TestChain_HeartbeatBoldHeaderPreservedThroughFlush(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "800", TopicID: 0,
+		PlaceholderMessageID: 1400, UserMessageID: "80"})
+
+	// First OutReply cold-creates the chain.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "800", Kind: messages.OutReply, Text: "seed",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// First heartbeat — sets headerLine to <b>💭 1 · 🔧 0</b>.
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "800", Kind: messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{
+			ThinkCount: 1, ToolCount: 0,
+			LastBeatAt: time.Date(2026, 8, 22, 9, 45, 15, 0, time.Local),
+		},
+	})
+
+	drainDebouncedFlush(t, a, api)
+
+	// Find the most recent editMessageText body.
+	var lastEdit string
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "editMessageText" {
+			continue
+		}
+		if text, ok := call.Params["text"].(string); ok {
+			lastEdit = text
+		}
+	}
+	if lastEdit == "" {
+		t.Fatal("no editMessageText body captured")
+	}
+	if !strings.Contains(lastEdit, "<b>💭 1 · 🔧 0</b>") {
+		t.Fatalf("editMessageText body missing raw <b>...</b> tags; got %q", lastEdit)
+	}
+	if strings.Contains(lastEdit, "&lt;b&gt;") {
+		t.Fatalf("editMessageText body has HTML-escaped &lt;b&gt; entity; got %q", lastEdit)
+	}
+}
+
+// TestChain_OutErrorStderrTailRendersAsPreBlock — regression guard
+// for the OutError <pre>-wrap re-escape bug. Pre-fix the
+// StderrTail was wrapped in <pre>...</pre> HTML inline, then run
+// through renderChunkBody → RenderMarkdown escapeHTML'd the
+// tags. Fix: emit ``` fences (RenderMarkdown converts to
+// <pre>...</pre> automatically).
+func TestChain_OutErrorStderrTailRendersAsPreBlock(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "900", TopicID: 0,
+		PlaceholderMessageID: 1500, UserMessageID: "90"})
+
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "900", Kind: messages.OutError,
+		Text: "tool exit 1",
+		Diagnostic: &agent.BridgeDiagnostic{
+			StderrTail: "ENOENT: no such file",
+		},
+	})
+
+	drainDebouncedFlush(t, a, api)
+
+	var lastEdit string
+	for _, call := range api.snapshotCalls() {
+		if call.Method != "editMessageText" {
+			continue
+		}
+		if text, ok := call.Params["text"].(string); ok {
+			lastEdit = text
+		}
+	}
+	if lastEdit == "" {
+		t.Fatal("no editMessageText body captured")
+	}
+	if !strings.Contains(lastEdit, "<pre>") {
+		t.Fatalf("editMessageText body missing <pre> for StderrTail; got %q", lastEdit)
+	}
+	if strings.Contains(lastEdit, "&lt;pre&gt;") {
+		t.Fatalf("editMessageText body has HTML-escaped &lt;pre&gt; entity; got %q", lastEdit)
+	}
+}
 // When buf + new segment would exceed chainChunkThresholdChars
 // (3500), appendSegment rotates to a brand-new chain chunk
 // rather than overrunning a single Telegram message. Pre-fix,

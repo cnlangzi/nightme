@@ -112,10 +112,15 @@ func appendSegment(
 	// 1. Empty chain → materialise the first chunk via send.
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
-		body := headerLine + "\n────────\n" + segment
+		footer := ""
 		if chain.lastFooter != nil {
-			body += "\n\n" + statusbar.RenderPanel(chain.lastFooter)
+			footer = statusbar.RenderPanel(chain.lastFooter)
 		}
+		// renderChunkBody is the unified entry for chunk-body
+		// composition (used by both sendMessage and editMessageText
+		// paths). Routes header verbatim, runs buf through
+		// RenderMarkdown, footer verbatim.
+		body := renderChunkBody(headerLine, segment, footer, 0)
 		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
 		if err != nil {
 			return err
@@ -159,10 +164,13 @@ func appendSegment(
 	// chain as one timeline, not a paginated document.
 	cur.isFull = true
 	inheritedHeader := cur.headerLine
-	body := inheritedHeader + "\n────────\n" + segment
+	footer := ""
 	if chain.lastFooter != nil {
-		body += "\n\n" + statusbar.RenderPanel(chain.lastFooter)
+		footer = statusbar.RenderPanel(chain.lastFooter)
 	}
+	// Same unified body composer as case-1; routes header as-is,
+	// runs segment through RenderMarkdown, footer as-is.
+	body := renderChunkBody(inheritedHeader, segment, footer, 0)
 	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
 	if err != nil {
 		return err
@@ -355,37 +363,51 @@ func scheduleFlushDebounced(
 	chain.mu.Unlock()
 }
 
-// renderActiveChunkBody builds the (raw HTML) text content for
-// the active chunk: header + entries + footer.
+// renderChunkBody is the unified chunk-body composer used by every
+// outgoing Telegram path that needs a chunk's full body:
 //
-// The headerLine is PRE-BAKED HTML (it carries <b>...</b> from
-// the status formatters; see heartbeatText). The buf is PLAIN
-// TEXT accumulated from formatted Out* events. We must NOT pass
-// the whole body through RenderMarkdown: RenderMarkdown calls
-// escapeHTML on its input, which would convert <b> to &lt;b&gt;
-// and Telegram would render the literal tag. Instead, we route
-// each section through the right pipeline:
+//   - appendSegment case-1 (cold-create sendMessage)
+//   - appendSegment case-4 (overflow sendMessage)
+//   - flushChainNow (subsequent editMessageText)
+//   - patchChainHeader calls it indirectly via renderActiveChunkBody
+//     → now also renderChunkBody — the only entry point
 //
-//   - headerLine: written verbatim (it's already safe HTML)
-//   - buf:       passed through RenderMarkdown (handles <, &, >
-//                escape + light markdown → HTML)
-//   - footer:    statusbar.RenderPanel output is already
-//                escape-safe (no HTML chars in StatusBar lines)
+// The three inputs are routed through different pipelines so
+// each section lands in the right form for parse_mode=HTML:
 //
-// Note: when a chunk has flushedRenderedLen > 0, only the
-// not-yet-emitted tail of buf is rendered. The emitted prefix
-// lives on Telegram in the locked preceding chunks.
-func renderActiveChunkBody(cur *placeholderChunk, lastFooter []string) string {
+//   - headerLine: pre-baked HTML (e.g. '<b>💭 N · 🔧 M</b> · ⏱
+//     HH:MM:SS' from heartbeatText). Written verbatim. If we
+//     escape it, Telegram would render the tags as literal text.
+//
+//   - buf: plain text accumulated from formatted Out* events
+//     (formatTool / formatReply / formatTaskList / etc.). Run
+//     through RenderMarkdown which escapes '<', '>', '&' and
+//     converts light markdown (headings, lists, code fences,
+//     blockquotes) to HTML.
+//
+//   - footer: statusbar.RenderPanel output is already escape-safe
+//     (no HTML chars in StatusBar lines). Written verbatim.
+//
+// Callers MUST pre-stamp the headerLine (status formatters own
+// the bold + timestamp contract). Callers MUST pre-build buf
+// from plain-text segments only — if a caller needs to embed
+// HTML, route through a markdown feature (```fences``` → <pre>)
+// instead of pre-built HTML tags, so RenderMarkdown handles the
+// conversion at compose time.
+//
+// When the chunk has flushedRenderedLen > 0 (overflow chain),
+// only the un-emitted tail of buf is rendered.
+func renderChunkBody(headerLine, buf, footer string, flushedRenderedLen int) string {
 	var b strings.Builder
-	b.WriteString(cur.headerLine)
+	b.WriteString(headerLine)
 	b.WriteByte('\n')
-	if cur.charCount > 0 {
+	if buf != "" {
 		b.WriteString("────────\n")
 		var bufSrc string
-		if cur.flushedRenderedLen > 0 && cur.flushedRenderedLen < cur.buf.Len() {
-			bufSrc = cur.buf.String()[cur.flushedRenderedLen:]
+		if flushedRenderedLen > 0 && flushedRenderedLen < len(buf) {
+			bufSrc = buf[flushedRenderedLen:]
 		} else {
-			bufSrc = cur.buf.String()
+			bufSrc = buf
 		}
 		renderedBuf, err := RenderMarkdown(bufSrc)
 		if err != nil {
@@ -396,9 +418,22 @@ func renderActiveChunkBody(cur *placeholderChunk, lastFooter []string) string {
 			b.WriteByte('\n')
 		}
 	}
-	if len(lastFooter) > 0 {
+	if footer != "" {
 		b.WriteByte('\n')
-		b.WriteString(statusbar.RenderPanel(lastFooter))
+		b.WriteString(footer)
 	}
 	return b.String()
+}
+
+// renderActiveChunkBody is the wrapper used inside the chain
+// package. Pass-through to renderChunkBody with the chunk's
+// current state. Kept as a separate function so flushChainNow
+// (and any chain-aware caller) doesn't need to know the
+// composition rules — they just hand over the chunk.
+func renderActiveChunkBody(cur *placeholderChunk, lastFooter []string) string {
+	footer := ""
+	if len(lastFooter) > 0 {
+		footer = statusbar.RenderPanel(lastFooter)
+	}
+	return renderChunkBody(cur.headerLine, cur.buf.String(), footer, cur.flushedRenderedLen)
 }

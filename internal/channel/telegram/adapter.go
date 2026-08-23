@@ -1004,7 +1004,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	case messages.OutError:
 		text := msg.Text
 		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
-			text += "\n\n<pre>" + escapeHTML(msg.Diagnostic.StderrTail) + "</pre>"
+			// v9 chain renders the segment via RenderMarkdown.
+			// RenderMarkdown converts ``` fenced blocks to
+			// <pre>...</pre> automatically — so emit the
+			// StderrTail as a fenced code block instead of
+			// hand-wrapping in <pre> tags. (Pre-wrap would
+			// get re-escaped by renderChunkBody's buf path.)
+			text += "\n\n```\n" + msg.Diagnostic.StderrTail + "\n```"
 		}
 		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, text)
 	case messages.OutInit:
@@ -1368,13 +1374,10 @@ func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	return text
 }
 
-func renderInlineText(text string) string {
-	rendered, err := RenderMarkdown(text)
-	if err != nil {
-		return escapeHTML(text)
-	}
-	return rendered
-}
+// renderInlineText was a thin wrapper around RenderMarkdown +
+// escapeHTML fallback — same shape as the package-level
+// RenderMarkdown. Removed 2026-08-23 (chain unification).
+// All call sites should use RenderMarkdown directly.
 
 func userID(message *Message) string {
 	if message == nil || message.From == nil {

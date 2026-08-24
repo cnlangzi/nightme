@@ -280,7 +280,7 @@ jobs:
   # Why this job sits at the END of the dependency chain (needs the
   # single preceding job, `test`): starter detection is the
   # most expensive gate in the file (npm install × 5 agents × 3 OSes
-  # + 1 curl-pipe install × 3 OSes + 6 spawn attempts × 8s
+  # + 1 curl-pipe install × 3 OSes + 6 spawn attempts × 15s
   # observation each), so we want it to run only after the cheaper
   # gate has gone green. The full chain is:
   #
@@ -784,13 +784,27 @@ jobs:
             # auth, no parse-failure log), leaving only the banner
             # plus pumpIO's "send: EOF" (~138 bytes) — sub-150,
             # false-FAIL. 80 covers all known agents.
+            #
+            # Observation window of 15s (was 8s): the dsh
+            # bridge's own webURLParseTimeout is 10s
+            # (internal/bridge/dsh/host/lifecycle.go:53) and
+            # cursor's first `agent acp` invocation on macOS
+            # can take 8-12s as it loads ~/.cursor/ state
+            # before the ACP initialize handshake completes.
+            # 8s windows gave dsh ≈6.4s and cursor ≈12s+ on
+            # a slow macos-latest runner, hitting the deadline
+            # in the order they happened to run. 15s gives
+            # all agents comfortable headroom (claude ≈0.7s,
+            # codex ≈1.3s, opencode ≈5s, pi ≈2s, dsh ≈6.4s,
+            # cursor ≈8-12s) while still catching a hung
+            # agent within ~2× its expected cold-start cost.
             set +e
             printf 'PONG\n' | "$bin" test \
                 --agent "$agent" \
                 --workspace "$workspace" \
                 >"$out_file" 2>&1 &
             pid=$!
-            # Wait up to 8 seconds for output to grow past the
+            # Wait up to 15 seconds for output to grow past the
             # banner. Nightme's banner is exactly:
             #   "[nightme] session <id> started in <ws> (agent=…, args=…)\n"
             # which is ~80–120 bytes. We poll the output file
@@ -798,7 +812,7 @@ jobs:
             # past that threshold is the "agent acknowledged"
             # signal we care about.
             banner_threshold=80
-            deadline=$(( $(date +%s) + 8 ))
+            deadline=$(( $(date +%s) + 15 ))
             acknowledged=0
             while [ "$(date +%s)" -lt "$deadline" ]; do
               size=$(wc -c < "$out_file" 2>/dev/null | tr -d ' ' || echo 0)
@@ -829,9 +843,9 @@ jobs:
             #       no echo, no protocol log)               → FAIL
             # In both cases the surface symptom is identical
             # from CI's perspective: no agent response within
-            # 8s. We surface the captured output so the
+            # 15s. We surface the captured output so the
             # post-mortem is one click away.
-            echo "::error::$agent: no response within 8s (bridge failed to launch, or agent hung)"
+            echo "::error::$agent: no response within 15s (bridge failed to launch, or agent hung)"
             echo "----- captured output -----"
             echo "$output"
             echo "----- end output -----"

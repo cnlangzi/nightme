@@ -249,7 +249,7 @@ jobs:
   # into its startup to attempt the first API call. We just check
   # that some response was produced, not what it says.
   #
-  # Five independent gates per agent, in increasing integration
+  # Six independent gates per agent, in increasing integration
   # depth (each catches a different failure class):
   #
   #   1. binary on PATH            — install + PATH plumbing both work
@@ -263,14 +263,14 @@ jobs:
   #   4. `nightme test --agent X`  — the bridge actually launches
   #                                  the agent through its native
   #                                  protocol layer (PTY for claude,
-  #                                  stdio JSON-RPC for codex/opencode/pi,
-  #                                  shared-host for dsh). Process
-  #                                  must produce response output
-  #                                  beyond nightme's own banner —
-  #                                  not just stay running. Anything
-  #                                  beyond the banner (auth error,
-  #                                  prompt echo, model reply) is a
-  #                                  pass. Banner-only is a fail
+  #                                  stdio JSON-RPC for codex/opencode/
+  #                                  pi/cursor, shared-host for dsh).
+  #                                  Process must produce response
+  #                                  output beyond nightme's own
+  #                                  banner — not just stay running.
+  #                                  Anything beyond the banner (auth
+  #                                  error, prompt echo, model reply)
+  #                                  is a pass. Banner-only is a fail
   #                                  (hung / no acknowledgement).
   #
   # Why matrix but not fail-fast: a Linux-only npm registry hiccup
@@ -280,8 +280,9 @@ jobs:
   # Why this job sits at the END of the dependency chain (needs the
   # single preceding job, `test`): starter detection is the
   # most expensive gate in the file (npm install × 5 agents × 3 OSes
-  # + 5 spawn attempts × 8s observation each), so we want it to run
-  # only after the cheaper gate has gone green. The full chain is:
+  # + 1 curl-pipe install × 3 OSes + 6 spawn attempts × 15s
+  # observation each), so we want it to run only after the cheaper
+  # gate has gone green. The full chain is:
   #
   #     test  (3-OS build + vet + tests; race + coverage on ubuntu)
   #       └── agent-smoke  (this job — npm install + spawn smoke
@@ -325,12 +326,23 @@ jobs:
           cache: true
 
       # setup-node is needed for the npm-distributed agents. Node
-      # 20 LTS matches what the opencode-ai installer expects per
-      # its package.json engines field; bumping to a newer LTS is
-      # fine but unnecessary for this smoke check.
+      # 22 LTS is the floor: as of mid-2026, several transitive
+      # deps under `@earendil-works/pi-coding-agent` declare
+      # engines that no longer accept Node 20 —
+      #   - commander@15.0.0       → node >=22.12.0
+      #   - @earendil-works/pi-ai  → node >=22.19.0
+      # and npm prints EBADENGINE warnings on Node 20 even
+      # though install still succeeds (the agents themselves
+      # run fine because they're plain ESM). Bumping to Node
+      # 22 LTS silences the warnings and matches the engines
+      # floor for the next agent update. Pinning to a specific
+      # 22.x patch is left to actions/setup-node's default
+      # resolution — actions/setup-node@v6 already caches
+      # by exact version internally so a future runner-image
+      # bump won't silently drift the smoke gate.
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
 
       # Linux needs GTK3 + AppIndicator dev headers for the
       # systray CGo dependency (the 'go build' step below
@@ -506,16 +518,34 @@ jobs:
         shell: bash
         run: |
           set -e
-          # Every agent here ships its CLI as an npm package
+          # 5 of the 6 agents ship their CLI as npm packages
           # published by the project itself — `npm install -g
           # <name>` IS the officially-supported install method
-          # for all 5, on every platform. Some agents also offer
-          # curl-pipe installers for users who don't want npm on
-          # PATH; those are noted below but not used here
-          # because (a) `npm install -g` already covers them and
-          # (b) curl scripts are flaky in CI (cert pinning,
-          # geo-restrictions, release-channel pin) where npm
-          # resolves deterministically via the registry.
+          # for those, on every platform. opencode also offers
+          # a curl installer as a second official channel;
+          # we still use the npm one here because npm resolves
+          # deterministically via the registry where curl
+          # scripts are flaky in CI (cert pinning,
+          # geo-restrictions, release-channel pin).
+          #
+          # cursor is the exception: Cursor CLI does NOT
+          # publish to npm. Its only officially-supported
+          # install method is the curl-pipe script at
+          # https://cursor.com/install (per docs/bridge/
+          # cursor.md §2.1 + cmd/nightme/agents.go:108-113).
+          # The bash installer (curl ... | bash) drops the
+          # binary as `agent` (not `cursor`) into
+          # ~/.local/bin/agent on Linux/macOS, alongside a
+          # legacy `cursor-agent` symlink. The Windows
+          # PowerShell installer (irm '...?win32=true' | iex,
+          # in the dedicated step below) drops `cursor-agent.cmd`
+          # on PATH and additionally copies it to `agent.cmd`
+          # as a courtesy alias. Both `~/.local/bin` (linux/
+          # macos) and %LOCALAPPDATA%\cursor-agent (Windows)
+          # are on PATH for the hosted runner user.
+          # We accept the curl-pipe flakiness surface for
+          # cursor alone because there is no alternative —
+          # npm install @cursor/cli does not exist.
           #
           # bash is also a builtin (PTY fallback) but it's a
           # platform-provided binary — apt bash on Linux/macOS,
@@ -540,11 +570,106 @@ jobs:
           #   dsh     → @deepseek-ai/dsh
           #             (per internal/bridge/dsh/starter.go:82
           #              Detect() error message + F-dsh-bridge.md)
+          #   cursor  → see "Install cursor CLI" step below.
+          #             The official installer is the SAME URL
+          #             on every platform (https://cursor.com/
+          #             install), but the user-agent / query
+          #             hint routes it to a different branch:
+          #               * unix    → curl ... | bash    (this step)
+          #               * windows → irm '...?win32=true' | iex
+          #                           (separate pwsh step)
+          #             Both branches install `cursor-agent`
+          #             on PATH (the binary name the bridge
+          #             spawns via exec.LookPath per cmd/nightme/
+          #             agents.go:108-116). The bash installer
+          #             creates it as a legacy symlink alongside
+          #             the primary `agent`; the PowerShell
+          #             installer creates it as the real entry
+          #             and additionally copies it to `agent.cmd`
+          #             as a courtesy alias. npm install
+          #             @cursor/cli does not
+          #             exist — the official installers are the
+          #             only supported channel.
           npm install -g @anthropic-ai/claude-code
           npm install -g @openai/codex
           npm install -g opencode-ai
           npm install -g @earendil-works/pi-coding-agent
           npm install -g @deepseek-ai/dsh
+          # Cursor CLI on unix: official curl-pipe bash installer.
+          # Drops `agent` into ~/.local/bin/agent (primary) plus
+          # `cursor-agent` legacy symlink alongside — both on
+          # PATH for the hosted runner user. The Windows leg
+          # uses the separate pwsh step below; running the bash
+          # installer from Git Bash would fail with "Unsupported
+          # operating system: MINGW64_NT-..." because the bash
+          # branch has no Windows code path (case "${OS}" in
+          # Linux*|Darwin*)).
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            curl -fsSL https://cursor.com/install | bash
+          fi
+
+      # Cursor CLI on windows-latest: official PowerShell
+      # installer per https://cursor.com/docs/cli/installation.
+      # The query hint `?win32=true` switches the installer
+      # script to its pure-PowerShell branch (the bash branch
+      # has no Windows code path — it bails on `uname -s`
+      # output of MINGW64_NT-... that Git Bash produces).
+      # The PowerShell branch downloads the Windows zip from
+      # https://downloads.cursor.com/lab/{ver}/windows/x64/
+      # agent-cli-package.zip, extracts to
+      # %LOCALAPPDATA%\cursor-agent\versions\{ver}\ (with
+      # dist-package renamed to the version), copies
+      # cursor-agent.cmd / .exe / .ps1 up one level, and
+      # aliases them as agent.cmd / agent.exe / agent.ps1 so
+      # `agent` resolves on PATH to the same binary the
+      # bridge spawns via exec.LookPath("agent") on every
+      # platform.
+      #
+      # The script also writes %LOCALAPPDATA%\cursor-agent to
+      # the user PATH. GitHub Actions' ::add-path:: directive
+      # propagates that to subsequent bash / pwsh steps in
+      # this job — without it the Git Bash PATH/--help/spawn
+      # gates below would not see agent.cmd via PATHEXT.
+      - name: Install cursor CLI (Windows — official PowerShell installer)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Official PowerShell installer per
+          # https://cursor.com/docs/cli/installation. The
+          # ?win32=true query hint switches the installer to its
+          # pure-PowerShell branch (the bash branch at the same
+          # URL has no Windows code path and bails on Git Bash's
+          # `uname -s` output of MINGW64_NT-...). This branch
+          # downloads the Windows zip, extracts to
+          # %LOCALAPPDATA%\cursor-agent\versions\{ver}\, and
+          # drops `cursor-agent.cmd` on PATH. We do not add any
+          # aliasing logic of our own — bridge spawns `cursor-agent`
+          # directly (cmd/nightme/agents.go), matching what every
+          # user gets from the official installer.
+          irm 'https://cursor.com/install?win32=true' | iex
+          $agentPath = "$env:LOCALAPPDATA\cursor-agent"
+          if (-not (Test-Path "$agentPath\cursor-agent.cmd")) {
+            Write-Host "::error::cursor install did not produce $agentPath\cursor-agent.cmd"
+            exit 1
+          }
+          Write-Host "OK: cursor installed → $agentPath\cursor-agent.cmd"
+          # Expose the install dir to the bash PATH/--help/
+          # bridge-spawn gates below. ::add-path:: was deprecated
+          # in 2020 (https://github.blog/changelog/2020-10-01-
+          # github-actions-deprecating-set-env-and-add-path-commands/)
+          # and now fails with "The `add-path` command is disabled";
+          # the official replacement is to append the directory to
+          # the $GITHUB_PATH env file, which GitHub Actions reads
+          # after the step and prepends to PATH for all subsequent
+          # steps in the job. Git Bash then resolves cursor-agent
+          # via PATHEXT (cursor-agent.cmd). Out-File -Append is
+          # used instead of Add-Content because pwsh's pipeline-
+          # based form avoids any encoding / BOM edge cases that
+          # have been observed to truncate a single line at the
+          # 32k mark.
+          "$agentPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
       - name: Verify each agent binary is on PATH
         shell: bash
@@ -557,10 +682,63 @@ jobs:
           # ordering on Windows so .cmd shims win over no-
           # extension names. macOS uses the standard POSIX
           # execvp lookup; Linux ditto.
-          for agent in claude codex opencode pi dsh; do
-            path=$(command -v "$agent" 2>/dev/null || true)
+          #
+          # cursor's binary is named `cursor-agent` on disk
+          # (per cmd/nightme/agents.go — `cursor.NewStarter(
+          # "cursor", "cursor-agent", []string{"acp"})`).
+          # The bridge's Detect() does `exec.LookPath(
+          # "cursor-agent")`, so this gate must resolve the
+          # same string. The official installer drops this
+          # on PATH on every platform:
+          #   unix    → bash installer creates
+          #             ~/.local/bin/cursor-agent (legacy
+          #             symlink alongside the primary agent)
+          #   windows → PowerShell installer (the
+          #             ?win32=true step above) creates
+          #             %LOCALAPPDATA%\cursor-agent\
+          #             cursor-agent.cmd; GITHUB_PATH
+          #             exposes the dir to subsequent
+          #             bash steps so Git Bash resolves
+          #             it via PATHEXT.
+          # agent_to_binary maps agent name → exec.LookPath
+          # target so the loop stays uniform across all 6.
+          #
+          # Diagnostic on failure: Git Bash on windows-latest
+          # should pick up %LOCALAPPDATA%\cursor-agent from the
+          # previous step's GITHUB_PATH write (translated to MSYS
+          # path). If `command -v cursor-agent` fails despite the
+          # OK line in the install step, print the resolved PATH
+          # and ls the candidate dirs so the post-mortem shows
+          # whether the dir was actually added.
+          for agent in claude codex opencode pi dsh cursor; do
+            case "$agent" in
+              cursor) bin=cursor-agent ;;
+              *)      bin="$agent" ;;
+            esac
+            # Git Bash's `command -v` is a pure POSIX lookup —
+            # it does NOT apply Windows PATHEXT, so on
+            # windows-latest the bare `cursor-agent` won't
+            # resolve to `cursor-agent.cmd`. Try the .cmd
+            # variant as a fallback. (The Go bridge's
+            # exec.LookPath on Windows DOES apply PATHEXT, so
+            # production spawns `cursor-agent` directly; this
+            # is purely a CI-gate quirk.)
+            path=$(command -v "$bin" 2>/dev/null \
+                   || command -v "$bin.cmd" 2>/dev/null \
+                   || true)
             if [ -z "$path" ]; then
-              echo "::error::$agent not on PATH after npm install -g"
+              echo "::error::$agent (binary '$bin') not on PATH after install"
+              echo "----- PATH diagnostic -----"
+              echo "PATH=$PATH"
+              echo "command -v cursor-agent:"
+              command -v cursor-agent || true
+              echo "ls of candidate dirs:"
+              for d in "$LOCALAPPDATA/cursor-agent" "$HOME/.local/bin" "/c/Users/runneradmin/AppData/Local/cursor-agent"; do
+                if [ -d "$d" ]; then
+                  echo "  $d:"
+                  ls "$d" | sed 's/^/    /'
+                fi
+              done
               exit 1
             fi
             echo "OK: $agent → $path"
@@ -580,12 +758,37 @@ jobs:
           # We accept any non-empty output — wording varies
           # ("Usage: claude [...]" / "codex-cli 0.145.0 ... USAGE"
           # / opencode's TUI help / pi's interactive help / dsh's
-          # one-shot usage). Absence of output means the CLI
-          # crashed before printing.
-          for agent in claude codex opencode pi dsh; do
-            output=$("$agent" --help 2>&1) || true
+          # one-shot usage / cursor's `cursor-agent --help`
+          # printing `agent <subcommand> ...` usage). Absence
+          # of output means the CLI crashed before printing.
+          #
+          # Same agent→binary mapping as the PATH step: cursor's
+          # binary is `cursor-agent` on every platform (no
+          # alias indirection — the Windows installer's
+          # alias-creation block was an installer courtesy
+          # we deliberately do not rely on), so we invoke
+          # `cursor-agent --help` to match what the bridge
+          # does at spawn time. PATHEXT on windows-latest
+          # lets Git Bash's `$bin --help` resolve to
+          # cursor-agent.cmd.
+          for agent in claude codex opencode pi dsh cursor; do
+            case "$agent" in
+              cursor) bin=cursor-agent ;;
+              *)      bin="$agent" ;;
+            esac
+            # Same PATHEXT quirk as the PATH step: Git Bash
+            # can't `exec` a bare `cursor-agent` because it's
+            # actually a .cmd shim. Run the .cmd variant
+            # directly — its body calls PowerShell →
+            # cursor-agent.ps1 → node index.js, which prints
+            # `agent <subcommand> ...` usage either way.
+            if [ "${{ matrix.os }}" = "windows-latest" ] && [ "$bin" = "cursor-agent" ]; then
+              output=$("cursor-agent.cmd" --help 2>&1) || true
+            else
+              output=$("$bin" --help 2>&1) || true
+            fi
             if [ -z "$output" ]; then
-              echo "::error::$agent --help produced no output"
+              echo "::error::$agent (binary '$bin') --help produced no output"
               exit 1
             fi
             echo "OK: $agent --help responded ($(echo "$output" | wc -l) lines)"
@@ -613,7 +816,7 @@ jobs:
           # Windows fix: a future refactor that re-gates dsh
           # behind runtime.GOOS would land here as a missing
           # row on the windows-latest runner.
-          for agent in claude codex opencode pi dsh; do
+          for agent in claude codex opencode pi dsh cursor; do
             if ! echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)"; then
               echo "::error::nightme agents did not list $agent"
               exit 1
@@ -647,13 +850,23 @@ jobs:
           #
           # Why we don't grep for a specific protocol response:
           # each agent uses a different wire (PTY echo for claude,
-          # stdio JSON-RPC initialize for codex/opencode/pi,
+          # stdio JSON-RPC initialize for codex/opencode/pi/cursor,
           # shared-host 3080-port web for dsh), so a content-based
           # check would couple this gate to a single bridge's
           # protocol. Byte threshold + observation window is the
           # cross-protocol signal.
+          #
+          # cursor is included on every platform — the Windows
+          # PowerShell installer (separate pwsh step above)
+          # extracts the Windows zip to
+          # %LOCALAPPDATA%\cursor-agent and emits the install
+          # dir to GITHUB_PATH so Git Bash's PATH/--help/
+          # bridge-spawn gates can resolve cursor-agent.cmd
+          # via PATHEXT. The bridge's
+          # exec.LookPath("cursor-agent") therefore works
+          # identically on linux / macos / windows.
           workspace=$(mktemp -d)
-          for agent in claude codex opencode pi dsh; do
+          for agent in claude codex opencode pi dsh cursor; do
             echo "--- bridge spawn: $agent ---"
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it
@@ -663,9 +876,11 @@ jobs:
             # shape:
             #   - PTY agents (claude) echo the line, then sit
             #     at the user prompt waiting for more input.
-            #   - stdio JSON-RPC agents (codex / opencode / pi)
+            #   - stdio JSON-RPC agents (codex / opencode / pi / cursor)
             #     parse the line, fail with a framing/protocol
-            #     error, log it to stderr.
+            #     error, log it to stderr. (cursor goes through
+            #     the generic acp bridge — same JSON-RPC 2.0
+            #     wire as opencode.)
             #   - dsh shared-host binds 127.0.0.1:3080 and prints
             #     the URL on stdout.
             #
@@ -681,13 +896,28 @@ jobs:
             # auth, no parse-failure log), leaving only the banner
             # plus pumpIO's "send: EOF" (~138 bytes) — sub-150,
             # false-FAIL. 80 covers all known agents.
+            #
+            # Observation window of 15s (was 8s): the dsh
+            # bridge's own webURLParseTimeout is 10s
+            # (internal/bridge/dsh/host/lifecycle.go:53) and
+            # cursor's first `cursor-agent acp` invocation on
+            # macOS can take 8-12s as it loads ~/.cursor/ state
+            # before the ACP initialize handshake completes.
+            # The 8s window gave dsh ≈6.4s and cursor ≈12s+ on
+            # a slow macos-latest runner, hitting the deadline
+            # in whichever order they happened to run. 15s
+            # gives all agents comfortable headroom (claude
+            # ≈0.7s, codex ≈1.3s, opencode ≈5s, pi ≈2s, dsh
+            # ≈6.4s, cursor ≈8-12s) while still catching a
+            # hung agent within ~2× its expected cold-start
+            # cost.
             set +e
             printf 'PONG\n' | "$bin" test \
                 --agent "$agent" \
                 --workspace "$workspace" \
                 >"$out_file" 2>&1 &
             pid=$!
-            # Wait up to 8 seconds for output to grow past the
+            # Wait up to 15 seconds for output to grow past the
             # banner. Nightme's banner is exactly:
             #   "[nightme] session <id> started in <ws> (agent=…, args=…)\n"
             # which is ~80–120 bytes. We poll the output file
@@ -695,7 +925,7 @@ jobs:
             # past that threshold is the "agent acknowledged"
             # signal we care about.
             banner_threshold=80
-            deadline=$(( $(date +%s) + 8 ))
+            deadline=$(( $(date +%s) + 15 ))
             acknowledged=0
             while [ "$(date +%s)" -lt "$deadline" ]; do
               size=$(wc -c < "$out_file" 2>/dev/null | tr -d ' ' || echo 0)
@@ -726,9 +956,9 @@ jobs:
             #       no echo, no protocol log)               → FAIL
             # In both cases the surface symptom is identical
             # from CI's perspective: no agent response within
-            # 8s. We surface the captured output so the
+            # 15s. We surface the captured output so the
             # post-mortem is one click away.
-            echo "::error::$agent: no response within 8s (bridge failed to launch, or agent hung)"
+            echo "::error::$agent: no response within 15s (bridge failed to launch, or agent hung)"
             echo "----- captured output -----"
             echo "$output"
             echo "----- end output -----"

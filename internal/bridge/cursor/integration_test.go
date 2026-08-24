@@ -55,7 +55,7 @@ type pipeSession struct {
 func startPipeSession(t *testing.T, workspace string) *pipeSession {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	cmd := exec.CommandContext(ctx, "agent", "acp")
+	cmd := exec.CommandContext(ctx, "cursor-agent", "acp")
 	cmd.Dir = workspace
 	stdinW, _ := cmd.StdinPipe()
 	stdoutR, _ := cmd.StdoutPipe()
@@ -477,7 +477,7 @@ func (rc *rawCapture) dump(t *testing.T) {
 func startRawSession(t *testing.T, workspace string) (*pipeSession, *rawCapture) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	cmd := exec.CommandContext(ctx, "agent", "acp")
+	cmd := exec.CommandContext(ctx, "cursor-agent", "acp")
 	cmd.Dir = workspace
 	stdinW, _ := cmd.StdinPipe()
 	stdoutR, _ := cmd.StdoutPipe()
@@ -540,8 +540,8 @@ func (s *pipeSession) readLoopCapture(r *bufio.Reader, cap *rawCapture) {
 // ─── Integration Tests ────────────────────────────────────────────
 
 func skipNoAgent(t *testing.T) {
-	if _, err := exec.LookPath("agent"); err != nil {
-		t.Skip("agent not on PATH")
+	if _, err := exec.LookPath("cursor-agent"); err != nil {
+		t.Skip("cursor-agent not on PATH")
 	}
 }
 

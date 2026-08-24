@@ -15,7 +15,7 @@
 ### 1.1 传输选型
 
 ```text
-nightme ──PTY JSON-RPC 2.0──> agent acp [--sandbox disabled]
+nightme ──PTY JSON-RPC 2.0──> cursor-agent acp [--sandbox disabled]
 ```
 
 Cursor CLI 原生支持 **ACP (Agent Client Protocol)**，与 opencode 使用相同的协议。我们可以**完全复用现有的 `internal/bridge/acp` 包**，只需创建一个薄包装层。
@@ -34,7 +34,7 @@ internal/bridge/
 └── cursor/           # 新增：cursor 包装 acp
     ├── starter.go    # 包装 acp.NewStarter
     ├── cursor.go     # 包级常量 + debug 日志
-    └── print.go      # RunOnce print-mode (agent -p)
+    └── print.go      # RunOnce print-mode (cursor-agent -p)
 ```
 
 ---
@@ -93,9 +93,9 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | protocolVersion | 1 (数值类型) | ✅ 完全兼容 |
 | clientInfo.name | 自由指定 | ✅ |
 | agentCapabilities | loadSession, mcpCapabilities, promptCapabilities, sessionCapabilities | ✅ |
-| authMethods | cursor_login（需先 `agent login`） | ⚠️ 需要用户登录 |
-| 命令名 | `agent`（不是 `cursor`） | ✅ 可配置 |
-| ACP 启动参数 | `agent acp` | ✅ 可配置 |
+| authMethods | cursor_login（需先 `cursor-agent login`） | ⚠️ 需要用户登录 |
+| 命令名 | `cursor-agent`（不是 `cursor`） | ✅ 可配置 |
+| ACP 启动参数 | `cursor-agent acp` | ✅ 可配置 |
 
 ---
 
@@ -107,7 +107,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 internal/bridge/cursor/
 ├── starter.go      # Starter 实现（包装 acp.NewStarter）
 ├── cursor.go       # 包级常量 + debug 日志
-└── print.go        # RunOnce print-mode (agent -p)
+└── print.go        # RunOnce print-mode (cursor-agent -p)
 ```
 
 ### 3.2 cursor.go — 包级常量与日志
@@ -115,20 +115,23 @@ internal/bridge/cursor/
 ```go
 // Package cursor is the nightme bridge for the Cursor CLI.
 //
-// Cursor CLI natively supports ACP via `agent acp` command.
-// This package wraps the generic acp bridge, similar to opencode.
+// Cursor CLI natively supports ACP via `cursor-agent acp` (the
+// canonical real binary the official installer drops on PATH;
+// `agent` is a primary alias the bash installer creates and
+// a courtesy copy the PowerShell installer makes). This package
+// wraps the generic acp bridge, similar to opencode.
 //
 // Two spawn paths:
 //
-//   - Start (long-lived chat session) → `agent acp` over PTY.
-//     Reuses the generic ACP bridge for protocol handling.
+//   - Start (long-lived chat session) → `cursor-agent acp` over
+//     PTY. Reuses the generic ACP bridge for protocol handling.
 //     No sessionUpdate translator needed (unlike opencode) —
 //     Cursor's sessionUpdate events are handled by the generic
 //     acp bridge's fallback path.
 //
 //   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
-//     `agent -p "prompt" --output-format text`. The process
-//     exits after the turn.
+//     `cursor-agent -p "prompt" --output-format text`. The
+//     process exits after the turn.
 package cursor
 
 import (
@@ -166,8 +169,9 @@ func cLog(msg string, args ...any) {
 ```go
 // starter.go — the spawn recipe for the cursor ACP bridge.
 //
-// Cursor CLI natively supports ACP via `agent acp` command.
-// This package wraps the generic acp bridge, similar to opencode.
+// Cursor CLI natively supports ACP via `cursor-agent acp`
+// command. This package wraps the generic acp bridge, similar
+// to opencode.
 //
 // The two paths share the same Starter; only RunOnce and the
 // print-mode spawn in print.go differ from Start and the
@@ -216,7 +220,7 @@ func (s *Starter) Detect() error {
 	return err
 }
 
-// Start spawns `agent acp` under a PTY (via the generic acp bridge),
+// Start spawns `cursor-agent acp` under a PTY (via the generic acp bridge),
 // runs the initialize + session/new handshake, and returns a live
 // *agent.Agent.
 //
@@ -245,10 +249,10 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 }
 
 // RunOnce is the one-shot counterpart to Start. Spawns
-// `agent -p "prompt" --output-format text` directly and returns the
+// `cursor-agent -p "prompt" --output-format text` directly and returns the
 // agent's final text.
 //
-// Cursor's print-mode uses `agent -p` (not ACP), which is simpler
+// Cursor's print-mode uses `cursor-agent -p` (not ACP), which is simpler
 // and faster for one-shot invocations (/gtw commit, buildAgentPrompt).
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	return runPrintMode(ctx, s, cfg, blocks)
@@ -258,9 +262,9 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 ### 3.4 print.go — RunOnce 实现
 
 ```go
-// print.go — one-shot print mode for cursor using `agent -p`.
+// print.go — one-shot print mode for cursor using `cursor-agent -p`.
 //
-// Cursor CLI has a built-in print-mode: `agent -p "prompt"
+// Cursor CLI has a built-in print-mode: `cursor-agent -p "prompt"
 // --output-format text`. The process exits after the turn —
 // no multi-turn, no events channel. This mirrors the print-mode
 // path in codex/claudecode/pi/opencode bridges.
@@ -277,7 +281,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// runPrintMode spawns `agent -p "prompt"` for one-shot invocations.
+// runPrintMode spawns `cursor-agent -p "prompt"` for one-shot invocations.
 // The process exits after the turn — no multi-turn, no events channel.
 func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
@@ -359,13 +363,25 @@ import "github.com/cnlangzi/nightme/internal/bridge/cursor"
 func init() {
     // ... existing registrations ...
 
-    // cursor — the `agent acp` Agent Client Protocol bridge.
-    // Cursor CLI natively supports ACP via `agent acp` command.
-    // Reuses the generic ACP bridge for protocol handling.
+    // cursor — the `cursor-agent acp` Agent Client Protocol
+    // bridge. Cursor CLI natively supports ACP via
+    // `cursor-agent acp` command. Reuses the generic ACP
+    // bridge for protocol handling.
     //
-    // Note: The binary name is `agent`, not `cursor`. Users must
-    // ensure `agent` is on PATH after installing Cursor CLI.
-    agent.Builtins.Register(cursor.NewStarter("cursor", "agent", []string{"acp"}))
+    // Note: The bridge binary name is `cursor-agent`, the
+    // canonical real entry point the official installer
+    // drops on PATH on every platform:
+    //   unix    → bash installer creates it as a legacy
+    //             symlink alongside the primary `agent`
+    //             (https://cursor.com/install)
+    //   windows → PowerShell installer (https://cursor.com/
+    //             install?win32=true) creates cursor-agent.cmd
+    //             as the primary and copies it to agent.cmd
+    //             as a courtesy alias.
+    // Bridge picks the canonical name (not the alias) so
+    // detection works on every platform without mirroring
+    // the installer's alias logic.
+    agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
 }
 ```
 
@@ -376,8 +392,8 @@ func init() {
 agents:
   - name: cursor
     bridge: cursor
-    command: agent  # Cursor CLI binary name
-    # Bridge spawns `agent acp` under PTY
+    command: cursor-agent  # Cursor CLI binary name
+    # Bridge spawns `cursor-agent acp` under PTY
     # User's local Cursor CLI configuration and auth state are reused
 ```
 
@@ -387,7 +403,7 @@ agents:
 agents:
   - name: cursor
     bridge: cursor
-    command: /custom/path/to/agent
+    command: /custom/path/to/cursor-agent
     args: ["acp", "--sandbox", "disabled"]  # 可选：禁用 sandbox
 ```
 
@@ -410,7 +426,7 @@ nightme 作为本机 daemon，**直接复用用户已完成的认证和配置状
 |--------|----------|--------------|
 | claude | `~/.claude/` 配置 | 只调用 `claude` 命令 |
 | codex | `~/.codex/` 配置 | 只调用 `codex` 命令 |
-| cursor | `~/.cursor/` 配置 | 只调用 `agent` 命令 |
+| cursor | `~/.cursor/` 配置 | 只调用 `cursor-agent` 命令 |
 
 **原则**：本机能跑，nightme 就能跑。CLI 本身处理所有认证和状态管理。
 
@@ -423,13 +439,13 @@ nightme 作为本机 daemon，**直接复用用户已完成的认证和配置状
 curl https://cursor.com/install -fsS | bash
 
 # 2. 登录 Cursor（只需一次，之后状态持久化在 ~/.cursor/）
-agent login
+cursor-agent login
 
 # 3. 验证本机可以正常运行
-agent -p "hello" --output-format text
+cursor-agent -p "hello" --output-format text
 ```
 
-nightme 启动时只做一件事：调用 `agent` 命令。如果本机 CLI 能跑，nightme 就能跑。
+nightme 启动时只做一件事：调用 `cursor-agent` 命令（官方 installer 在 PATH 上创建的"真名字"binary）。如果本机 CLI 能跑，nightme 就能跑。
 
 ### 5.3 Sandbox 模式（可选）
 
@@ -446,7 +462,7 @@ Cursor CLI 支持 sandbox 控制，但这由用户在本机配置，nightme 不�
 agents:
   - name: cursor
     bridge: cursor
-    command: agent
+    command: cursor-agent
     args: ["acp", "--sandbox", "disabled"]
 ```
 
@@ -484,10 +500,10 @@ session/prompt ──> session/update* ──> session/idle ──> EventAgentRe
 
 | 维度 | opencode | cursor |
 |------|----------|--------|
-| 二进制名 | `opencode` | `agent` |
-| ACP 启动参数 | `opencode acp` | `agent acp` |
+| 二进制名 | `opencode` | `cursor-agent` |
+| ACP 启动参数 | `opencode acp` | `cursor-agent acp` |
 | sessionUpdate 翻译器 | 需要（opencode 特定事件：user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, tool_call_update） | **不需要**（通用 ACP fallback 即可） |
-| print-mode | `opencode run --format json` | `agent -p` (直接文本输出) |
+| print-mode | `opencode run --format json` | `cursor-agent -p` (直接文本输出) |
 | 本地配置 | `~/.opencode/` | `~/.cursor/` |
 | 代码量 | ~800 行（starter + update + print + opencode.go） | ~150 行（starter + print + cursor.go） |
 
@@ -501,7 +517,7 @@ opencode 的翻译器处理 5 种特定 sessionUpdate 变体（agent_message_chu
 
 | 场景 | 处理 |
 |------|------|
-| `agent` 不在 PATH | Detect 返回 error，nightme 提示安装 |
+| `cursor-agent` 不在 PATH | Detect 返回 error，nightme 提示安装 |
 | 未登录 | ACP 握手失败，错误信息会提示用户 |
 | Cursor CLI 版本不兼容 | protocolVersion 不匹配时报错 |
 | ACP 协议变化 | 通用 acp bridge 已处理，cursor 层无需修改 |
@@ -519,7 +535,7 @@ opencode 的翻译器处理 5 种特定 sessionUpdate 变体（agent_message_chu
 // internal/bridge/cursor/starter_test.go
 
 func TestStarter_Info(t *testing.T) {
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     info := s.Info()
     if info.Name != "cursor" {
         t.Errorf("expected name cursor, got %s", info.Name)
@@ -530,10 +546,10 @@ func TestStarter_Info(t *testing.T) {
 }
 
 func TestStarter_Detect(t *testing.T) {
-    if _, err := exec.LookPath("agent"); err != nil {
+    if _, err := exec.LookPath("cursor-agent"); err != nil {
         t.Skip("agent not on PATH")
     }
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     if err := s.Detect(); err != nil {
         t.Errorf("Detect failed: %v", err)
     }
@@ -554,7 +570,7 @@ func TestStarter_Detect_NotFound(t *testing.T) {
 
 func requireRealCursor(t *testing.T) {
     t.Helper()
-    if _, err := exec.LookPath("agent"); err != nil {
+    if _, err := exec.LookPath("cursor-agent"); err != nil {
         t.Skipf("agent binary not on PATH: %v", err)
     }
 }
@@ -562,7 +578,7 @@ func requireRealCursor(t *testing.T) {
 func TestE2E_FreshSession(t *testing.T) {
     requireRealCursor(t)
 
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     ctx := context.Background()
     cfg := agent.StartConfig{
         Workspace: t.TempDir(),
@@ -588,7 +604,7 @@ func TestE2E_FreshSession(t *testing.T) {
 func TestE2E_PrintMode(t *testing.T) {
     requireRealCursor(t)
 
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     ctx := context.Background()
     cfg := agent.StartConfig{
         Workspace: t.TempDir(),
@@ -629,12 +645,12 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 
 | 症状 | 根因 | 修法 |
 |------|------|------|
-| `cursor: agent not found` | agent 不在 PATH | 安装 Cursor CLI |
+| `cursor: cursor-agent not found` | cursor-agent 不在 PATH | 安装 Cursor CLI |
 | `cursor: workspace is required` | cfg.Workspace 为空 | 检查配置 |
-| ACP 握手失败 | CLI 未登录或配置问题 | 用户在本机验证 `agent acp` 是否正常 |
+| ACP 握手失败 | CLI 未登录或配置问题 | 用户在本机验证 `cursor-agent acp` 是否正常 |
 | 权限请求无响应 | ACP permission 机制问题 | 检查 ACP bridge 的 permissions.go |
 | session 卡死 | events channel 消费者问题 | 检查 AS readpump |
-| print-mode 超时 | agent -p 执行时间过长 | 检查 Cursor CLI 本地环境（模型、proxy） |
+| print-mode 超时 | cursor-agent -p 执行时间过长 | 检查 Cursor CLI 本地环境（模型、proxy） |
 | print-mode 空输出 | prompt 为空或 CLI 异常 | 检查 blocks 内容 + stderr |
 
 ---
@@ -667,7 +683,7 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 
 在 `cmd/nightme/agents.go` 的 `init()` 中添加：
 ```go
-agent.Builtins.Register(cursor.NewStarter("cursor", "agent", []string{"acp"}))
+agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
 ```
 
 ### Step 5: 编写测试

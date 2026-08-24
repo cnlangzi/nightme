@@ -325,12 +325,23 @@ jobs:
           cache: true
 
       # setup-node is needed for the npm-distributed agents. Node
-      # 20 LTS matches what the opencode-ai installer expects per
-      # its package.json engines field; bumping to a newer LTS is
-      # fine but unnecessary for this smoke check.
+      # 22 LTS is the floor: as of mid-2026, several transitive
+      # deps under `@earendil-works/pi-coding-agent` declare
+      # engines that no longer accept Node 20 —
+      #   - commander@15.0.0       → node >=22.12.0
+      #   - @earendil-works/pi-ai  → node >=22.19.0
+      # and npm prints EBADENGINE warnings on Node 20 even
+      # though install still succeeds (the agents themselves
+      # run fine because they're plain ESM). Bumping to Node
+      # 22 LTS silences the warnings and matches the engines
+      # floor for the next agent update. Pinning to a specific
+      # 22.x patch is left to actions/setup-node's default
+      # resolution — actions/setup-node@v6 already caches
+      # by exact version internally so a future runner-image
+      # bump won't silently drift the smoke gate.
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
 
       # Linux needs GTK3 + AppIndicator dev headers for the
       # systray CGo dependency (the 'go build' step below

@@ -27,9 +27,7 @@ type handshakeMock struct {
 	workspaceCount atomic.Int64
 	historyCount   atomic.Int64
 	cancelCount    atomic.Int64
-	archiveCount    atomic.Int64
-	deleteCount     atomic.Int64 // Close calls workspace.delete (driver-owned workspace cleanup)
-	dedupWorkspace  atomic.Bool  // when true, handleWorkspaceCreate returns created:false
+	archiveCount   atomic.Int64 // Close calls workspace.archiveSession (repo-scoped workspace survives)
 	promptCount    atomic.Int64
 	promptFailNext atomic.Bool
 
@@ -55,7 +53,6 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/session.history", m.handleSessionHistory)
 	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace.archiveSession", m.handleWorkspaceArchiveSession)
-	mux.HandleFunc("/api/workspace.delete", m.handleWorkspaceDelete)
 	mux.HandleFunc("/api/session.prompt", m.handleSessionPrompt)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
@@ -132,22 +129,15 @@ func writeErr(w http.ResponseWriter, rpcID, code, msg string) {
 // the dedup-hit path (createFreshSession found an existing
 // workspace for the same path) flip m.dedupWorkspace to true.
 // handleWorkspaceCreate mirrors the dsh wire contract:
-// `{workspace, created: bool}` (dsh-api.md §2.4.2). The mock
-// returns created=true by default; tests that need to exercise
-// the dedup-hit path (createFreshSession found an existing
-// workspace for the same path) flip m.dedupWorkspace to true.
-//
-// Each call returns a fresh workspaceId ("ws-mock-1", "ws-mock-2",
-// ...) so Reset path tests can verify that the OLD workspace gets
-// torn down (Reset must capture the previous id before
-// createFreshSession overwrites it).
+// `{workspace, created: bool}` (dsh-api.md §2.4.2). The `created`
+// boolean is logged but otherwise ignored — workspace ownership
+// no longer tracked at the bridge level (commit 5a6bee0 reverted
+// to repo-scoped workspaces that survive across drivers).
+// Each call returns a fresh workspaceId ("ws-mock-1", ...) so
+// Reset / multi-RunOnce tests can distinguish workspaces.
 func (m *handshakeMock) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 	m.workspaceCount.Add(1)
 	env := decodeEnvelope(r)
-	created := true
-	if m.dedupWorkspace.Load() {
-		created = false
-	}
 	idx := m.workspaceCount.Load() - 1
 	wsID := fmt.Sprintf("ws-mock-%d", idx+1)
 	writeOK(w, env.RPCID, map[string]any{
@@ -156,7 +146,7 @@ func (m *handshakeMock) handleWorkspaceCreate(w http.ResponseWriter, r *http.Req
 			"path":        "/tmp/ws",
 			"title":       "ws",
 		},
-		"created": created,
+		"created": true,
 	})
 }
 
@@ -232,21 +222,7 @@ func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *
 	})
 }
 
-// handleWorkspaceDelete mirrors the dsh wire contract: POST
-// /api/workspace.delete {workspaceId}. Counter increments so tests
-// can assert that Close tore down its own workspace (close-tied
-// cleanup — each driver owns its workspace, see driver.Close).
-func (m *handshakeMock) handleWorkspaceDelete(w http.ResponseWriter, r *http.Request) {
-	m.deleteCount.Add(1)
-	env := decodeEnvelope(r)
-	var payload struct {
-		WorkspaceID string `json:"workspaceId"`
-	}
-	_ = json.Unmarshal(env.Payload, &payload)
-	writeOK(w, env.RPCID, map[string]any{
-		"deletedWorkspaceIds": []string{payload.WorkspaceID},
-	})
-}
+
 
 // dispatchAssistantMessage emits a synthetic assistant/message
 // mux frame so the driver's readPump pushes EventAgentText into
@@ -510,8 +486,8 @@ func TestReset_InPlaceSingleCreate(t *testing.T) {
 	if mock.cancelCount.Load() < 1 {
 		t.Fatalf("session.cancel calls = %d, want >= 1 for the old session", mock.cancelCount.Load())
 	}
-	if mock.deleteCount.Load() != 1 {
-		t.Fatalf("workspace.delete calls = %d, want 1 (Reset tears down the OLD workspace that createFreshSession just replaced — fixes the workspace leak that prior commit 02da551 introduced for the Reset path)", mock.deleteCount.Load())
+	if mock.archiveCount.Load() != 0 {
+		t.Fatalf("workspace.archiveSession calls = %d, want 0 (Reset does NOT touch the workspace — repo-scoped workspace survives across /new resets in the same repo)", mock.archiveCount.Load())
 	}
 
 	select {
@@ -578,8 +554,8 @@ func TestClose_ArchivesSession(t *testing.T) {
 	if err := d.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if mock.deleteCount.Load() < 1 {
-		t.Fatal("Close did not POST /api/workspace.delete (driver-owned workspace cleanup)")
+	if mock.archiveCount.Load() < 1 {
+		t.Fatal("Close did not POST /api/workspace.archiveSession (workspace survives, session row hidden)")
 	}
 	if mock.cancelCount.Load() < 1 {
 		t.Fatal("Close did not POST /api/session.cancel before archive")

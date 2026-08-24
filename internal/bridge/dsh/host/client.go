@@ -377,25 +377,32 @@ type WorkspaceSummary struct {
 //
 // Callers driving ephemeral sessions (Starter.RunOnce / Review /
 // Starter.Start fresh path) gate ownership cleanup on `created`.
-func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, bool, error) {
+// WorkspaceCreate resolves or creates one workspace for `path`.
+// The dsh wire is idempotent by path: an already-owned path returns
+// the existing workspace (dsh-api.md §2.4.2). Callers driving
+// ephemeral sessions in repo-scoped workspaces (Starter.RunOnce /
+// Review / Starter.Start) use this as a "get-or-create" — no
+// ownership tracking, no per-driver cleanup on Close (the
+// workspace survives across sessions, see driver.Close which
+// uses workspace.archiveSession instead of workspace.delete).
+func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, error) {
 	resp, err := c.Post(ctx, "workspace.create", map[string]any{"path": path})
 	if err != nil {
-		return WorkspaceSummary{}, false, err
+		return WorkspaceSummary{}, err
 	}
 	if !resp.Result.OK {
-		return WorkspaceSummary{}, false, fmt.Errorf("dsh.host: workspace.create: %s", resp.Result.ErrorMessage())
+		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create: %s", resp.Result.ErrorMessage())
 	}
 	var value struct {
 		Workspace WorkspaceSummary `json:"workspace"`
-		Created   bool             `json:"created"`
 	}
 	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
-		return WorkspaceSummary{}, false, fmt.Errorf("dsh.host: workspace.create decode: %w", err)
+		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create decode: %w", err)
 	}
 	if value.Workspace.WorkspaceID == "" {
-		return WorkspaceSummary{}, false, fmt.Errorf("dsh.host: workspace.create: empty workspaceId in response")
+		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create: empty workspaceId in response")
 	}
-	return value.Workspace, value.Created, nil
+	return value.Workspace, nil
 }
 
 // WorkspaceArchiveSession is the dashboard session-row context menu

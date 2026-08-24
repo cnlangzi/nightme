@@ -100,17 +100,6 @@ type driver struct {
 	workspace string
 	agentName string
 
-	// workspaceID is the dsh workspace we created in
-	// createFreshSession (lazy — empty when attachSession was used
-	// for a resume, since attaching to an existing sessionId does
-	// not allocate a new workspace). Tracked so Close can issue a
-	// workspace.delete RPC for the workspace WE created, instead
-	// of letting stale workspaces pile up in dsh's in-memory store
-	// (each RunOnce / Review previously created a fresh workspace
-	// but only archived its session on close, leaving the empty
-	// workspace behind). See Close() for the cleanup RPC choice.
-	workspaceID string
-
 	// model is the model's authoritative selection captured at
 	// session-create time via /api/session.models. Bridge stamps
 	// it onto EventAgentReady.Model so the runtime's receipt
@@ -439,19 +428,22 @@ func (d *driver) attachSession(ctx context.Context, sessionID, cwd string) error
 }
 
 // createFreshSession allocates a new dsh session in a workspace
-// keyed by cwd. workspace.create is idempotent by path: an
-// already-owned path returns the existing workspace with
-// `created == false` (dsh-api.md §2.4.2). We stamp d.workspaceID
-// ONLY when we actually allocated the workspace — on a dedup
-// hit we leave d.workspaceID untouched so Close's
-// `workspace.delete` does not rip the workspace out from under
-// other drivers / dashboard sessions living in the same cwd.
+// keyed by the GIT REPO root (not cwd — see detectRepoRoot).
+// Workspace is repo-scoped, so a chat session and a /review run
+// in different subdirs of the same repo share the workspace,
+// and the workspace survives across sessions (Close uses
+// workspace.archiveSession, never delete). workspace.create
+// is idempotent by path: an already-owned repo returns the
+// existing workspace with `created == false` (dsh-api.md
+// §2.4.2); the driver doesn't care who created it.
 //
-// Does not mutate d.sessionID — callers assign on success so Reset
-// can create the replacement before dropping the old subscription.
+// Does not mutate d.sessionID — callers assign on success so
+// Reset can create the replacement before dropping the old
+// subscription.
 func (d *driver) createFreshSession(ctx context.Context, workspace string) (string, error) {
+	repoRoot := detectRepoRoot(workspace)
 	wsCtx, wsCancel := context.WithTimeout(ctx, handshakeTimeout)
-	ws, created, err := d.cli.RPC.WorkspaceCreate(wsCtx, workspace)
+	ws, err := d.cli.RPC.WorkspaceCreate(wsCtx, repoRoot)
 	wsCancel()
 	if err != nil {
 		return "", fmt.Errorf("dsh: workspace.create: %w", err)
@@ -481,17 +473,11 @@ func (d *driver) createFreshSession(ctx context.Context, workspace string) (stri
 		"session_id", scVal.SessionID,
 		"workspace_id", ws.WorkspaceID,
 		"cwd", workspace,
-		"workspace_created", created)
-	// Track the workspace for Close cleanup ONLY when we
-	// actually created it. attachSession path skips
-	// createFreshSession entirely (d.workspaceID stays ""),
-	// and on a create-by-path dedup hit (created == false)
-	// the workspace is shared with other drivers / dashboard
-	// sessions — tearing it down on Close would rip the
-	// shared workspace out from under them.
-	if created {
-		d.workspaceID = ws.WorkspaceID
-	}
+		"repo_root", repoRoot)
+	// Workspace is repo-scoped and shared across drivers.
+	 // archiveSession on Close takes sessionId (hides our row)
+	 // and leaves the workspace alive for sibling / future
+	 // drivers in the same repo.
 	return scVal.SessionID, nil
 }
 
@@ -869,15 +855,9 @@ func (d *driver) Reset(ctx context.Context) error {
 	}
 
 	oldID := d.sessionID
-	// Capture the old workspace ID BEFORE createFreshSession
-	// potentially overwrites d.workspaceID. createFreshSession
-	// only stamps d.workspaceID on `created == true` (see its
-	// doc); a dedup hit would keep d.workspaceID pointing at a
-	// workspace we did NOT own, so the cleanup below must gate
-	// on `d.workspaceID != ""` and skip it on dedup. We do the
-	// tear-down AFTER createFreshSession succeeds so a failed
-	// fresh-create leaves the old workspace intact.
-	oldWorkspaceID := d.workspaceID
+	// Workspace is repo-scoped and shared — Reset does NOT tear
+	// down the old workspace. The /new semantics are "fresh
+	// session in the same repo", not "fresh repo".
 	newID, err := d.createFreshSession(ctx, d.workspace)
 	if err != nil {
 		return err
@@ -888,23 +868,6 @@ func (d *driver) Reset(ctx context.Context) error {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = d.cli.RPC.SessionCancel(cancelCtx, oldID)
 		cancel()
-		// Tear down the workspace we previously created (Skip when
-		// d.workspaceID was empty — attachSession / dedup-hit paths
-		// never owned a workspace, so deleting would damage other
-		// drivers in the same cwd). Best-effort: a stale workspace
-		// leak is less harmful than blocking Reset on cleanup.
-		if oldWorkspaceID != "" && oldWorkspaceID != d.workspaceID {
-			teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			if err := d.cli.RPC.WorkspaceDelete(teardownCtx, oldWorkspaceID); err != nil {
-				dLog("dsh: workspace.delete on reset: %v",
-					"workspace_id", oldWorkspaceID, "err", errStr(err))
-			} else {
-				slogDefault().Info("dsh: workspace deleted (reset)",
-					"workspace_id", oldWorkspaceID,
-					"old_session_id", oldID)
-			}
-			teardownCancel()
-		}
 	}
 
 	d.sessionID = newID
@@ -978,23 +941,20 @@ func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
 
 // Close shuts the bridge session down. Idempotent.
 //
-// This is the bridge session end-of-life. Each driver owns its own
-// workspace (created in createFreshSession — see the workspaceID
-// field doc), so cleanup can fully tear it down without affecting
-// other sessions in the same cwd:
+// This is the dashboard session-row context menu "Archive Session":
 //  1. Unsubscribe from the shared host's Router — the global mux
 //     pump stops routing frames for this sessionId.
 //  2. session.cancel so any in-flight turn settles (same RPC as
 //     the InputBar stop button; benign if already idle).
-//  3. workspace.delete for the workspace WE created — drops the
-//     session row AND the workspace container from dsh's
-//     in-memory store. Skipped when attachSession was used (the
-//     workspace pre-existed and may still host other live
-//     sessions — see workspaceID field doc for the lazy-set rule).
-//     We previously called workspace.archiveSession instead,
-//     which left empty workspaces behind (each RunOnce / Review
-//     created a fresh workspace via createFreshSession; archiving
-//     only hid the session, not the container).
+//  3. workspace.archiveSession — drops the row from every grouping
+//     surface (left list) while keeping the workspace alive. The
+//     workspace is keyed by the git repo (see createFreshSession),
+//     so multiple sessions across the same repo share one
+//     workspace — we MUST NOT delete it on close, or the next
+//     /review run in this repo would lose its sibling chat
+//     session's left-list grouping. There is no session.delete
+//     on the wire (dsh-api.md §2: sessions.* has no delete; archive
+//     lives under workspace.*).
 //  4. Close events chan — the runtime's readpump drains then exits.
 //
 // We DO NOT kill the dsh subprocess — that's the daemon's
@@ -1016,30 +976,24 @@ func (d *driver) Close() error {
 		// on a sessionId nobody can answer anymore.
 		d.cli.Router.Unsubscribe(d.sessionID)
 		if d.sessionID != "" {
-			// session.cancel and workspace.delete each get their own
-			// context so a slow cancel can't eat the budget that
-			// delete would have used (one shared ctx would mean
-			// cancel stalls → delete never fires → workspace leaks).
 			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			if err := d.cli.RPC.SessionCancel(cancelCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
 				dLog("dsh: session.cancel on close: %v", err)
 			}
 			cancelCancel()
-			// Tear down the workspace we created in createFreshSession
-			// (skipped on attachSession path AND on dedup-hit where
-			// created was false — see workspaceID field doc).
-			if d.workspaceID != "" {
-				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				if err := d.cli.RPC.WorkspaceDelete(deleteCtx, d.workspaceID); err != nil && !isBenignCancelErr(err) {
-					dLog("dsh: workspace.delete on close: %v",
-						"workspace_id", d.workspaceID, "err", errStr(err))
-				} else {
-					slogDefault().Info("dsh: workspace deleted",
-						"workspace_id", d.workspaceID,
-						"session_id", d.sessionID)
-				}
-				deleteCancel()
+			// archiveSession: drops the session row from dsh's left
+			// list (and the workspace's sessionIds), keeps the
+			// repo-scoped workspace alive for sibling / future
+			// drivers. Reverting from workspace.delete (02da551 /
+			// 5a6bee0) was wrong: delete tore down the shared
+			// workspace, wiping every other driver's session.
+			archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := d.cli.RPC.WorkspaceArchiveSession(archiveCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
+				dLog("dsh: workspace.archiveSession on close: %v", err)
+			} else {
+				slogDefault().Info("dsh: session archived", "session_id", d.sessionID)
 			}
+			archiveCancel()
 		}
 		// Close events AFTER unsubscribe so the runtime drains any
 		// frames already routed to handleMuxFrame (and thus into
@@ -1238,6 +1192,30 @@ func detectBranch(workspace string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// detectRepoRoot shells out to `git -C <workspace> rev-parse
+// --show-toplevel` and returns the absolute path of the git
+// repo's working root. Used by createFreshSession to key the
+// dsh workspace by REPO, not cwd — so a chat session and a
+// /review run in different subdirs of the same repo share the
+// same workspace, and the workspace survives across sessions
+// (archive on close, never delete). Returns dir unchanged when
+// cwd is not inside a git repo (claudecode does the same; lets
+// /review etc. still work outside any repo, with cwd-keyed
+// workspaces that never tear each other down either).
+func detectRepoRoot(workspace string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := proc.New(ctx, "git", "-C", workspace, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return workspace
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return workspace
+	}
+	return root
 }
 
 // slogDefault is a thin indirection so tests can override the

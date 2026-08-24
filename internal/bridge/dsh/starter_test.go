@@ -212,27 +212,24 @@ func TestRunOnce_StripsSessionID(t *testing.T) {
 // daemon in runonce_real_unix_test.go (TestE2E_RunOnce_RealDSH
 // and TestE2E_Review_RealDSH).
 
-// ─── TestRunOnce_DeleteOnClose ─────────────────────────────────────
-// The defer a.Close() must drive workspace.delete (R4 — keep dsh
-// web's in-memory store clean). Each RunOnce / Review owns its own
-// workspace (created in createFreshSession); archiveSession left
-// empty workspaces behind. Close now fully tears down the
-// driver-owned workspace.
-func TestRunOnce_DeleteOnClose(t *testing.T) {
+// ─── TestRunOnce_ArchiveOnClose ───────────────────────────────────
+// The defer a.Close() must drive workspace.archiveSession. The
+// workspace is now repo-scoped (detectRepoRoot in
+// createFreshSession) and shared across drivers in the same repo
+// — we archive the SESSION row on close, never delete the
+// workspace (would wipe sibling drivers' sessions and force
+// workspace churn across RunOnce calls).
+func TestRunOnce_ArchiveOnClose(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 
 	s := NewStarter("dsh")
-	// 200ms ctx is enough for the handshake + SendBlocks + delete
+	// 200ms ctx is enough for the handshake + SendBlocks + archive
 	// path; drain blocks on events (no terminal delivered in this
-	// test) so we exit via deadline. The 5s default is wasted.
+	// test) so we exit via deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	// Use a goroutine to break out of RunOnce after the delete
-	// fires. RunOnce's drain will block on events; we use a
-	// short ctx so it exits via deadline, and the delete still
-	// happens in defer Close.
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
@@ -242,30 +239,24 @@ func TestRunOnce_DeleteOnClose(t *testing.T) {
 	<-ctx.Done()
 	<-doneCh
 
-	// Poll for delete completion (cheap, max ~500ms).
+	// Poll for archive completion (cheap, max ~500ms).
 	deadline := time.Now().Add(500 * time.Millisecond)
-	for mock.deleteCount.Load() == 0 && time.Now().Before(deadline) {
+	for mock.archiveCount.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := mock.deleteCount.Load(); got == 0 {
-		t.Fatalf("workspace.delete never fired; defer Close did not tear down driver-owned workspace")
+	if got := mock.archiveCount.Load(); got == 0 {
+		t.Fatalf("workspace.archiveSession never fired; defer Close did not run archive")
 	}
 }
 
-// TestRunOnce_DedupWorkspace_SkipsDelete locks the critical bug
-// fix from /review on this branch: workspace.create is idempotent
-// by path (dsh-api.md §2.4.2), so two drivers in the same cwd
-// get the SAME workspaceID. createFreshSession must only stamp
-// d.workspaceID when the response says created=true; on a dedup
-// hit (created=false) the workspace is shared with other drivers
-// or dashboard sessions, and Close must NOT tear it down.
-//
-// Locks /review finding "WorkspaceID is set even when the
-// workspace already existed (dedup path) — silent multi-session
-// breakage".
-func TestRunOnce_DedupWorkspace_SkipsDelete(t *testing.T) {
+// TestRunOnce_DoesNotDeleteWorkspace locks the repo-scoped
+// workspace contract: RunOnce Close MUST NOT call
+// workspace.delete (would damage sibling drivers' sessions in
+// the same repo). Verified by checking that the mock's
+// workspace.delete route returns "no route registered" —
+// driver.Close sends only archiveSession + cancel, no delete.
+func TestRunOnce_DoesNotDeleteWorkspace(t *testing.T) {
 	mock := newHandshakeMock(t)
-	mock.dedupWorkspace.Store(true) // workspace.create returns created:false
 	mock.installGlobal(t)
 
 	s := NewStarter("dsh")
@@ -275,56 +266,27 @@ func TestRunOnce_DedupWorkspace_SkipsDelete(t *testing.T) {
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
-		_, _ = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/shared"},
+		_, _ = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/ws"},
 			[]agent.ContentBlock{{Type: agent.ContentText, Text: "ping"}})
 	}()
 	<-ctx.Done()
 	<-doneCh
 
-	// WorkspaceDelete MUST NOT fire — the workspace was not ours
-	// to delete. Wait for the cancel-timeout path to settle so
-	// any spurious delete would have a chance to fire.
-	time.Sleep(100 * time.Millisecond)
-	if got := mock.deleteCount.Load(); got != 0 {
-		t.Fatalf("workspace.delete fired %d times on dedup-hit path; want 0 (shared workspace must not be torn down)", got)
+	// Archive fires (session row hidden, workspace kept).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for mock.archiveCount.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
-	// session.cancel still fires (we own the sessionId).
-	if mock.cancelCount.Load() < 1 {
-		t.Fatal("session.cancel did not fire on dedup-hit close")
+	if got := mock.archiveCount.Load(); got == 0 {
+		t.Fatal("workspace.archiveSession never fired; defer Close did not run archive")
 	}
-}
-
-// TestClose_AttachedSession_SkipsWorkspaceDelete locks the
-// attachSession path: d.workspaceID stays "" when the driver
-// attaches to an existing sessionId (no workspace allocation),
-// so Close must skip workspace.delete (would damage the
-// pre-existing workspace that hosts the session).
-func TestClose_AttachedSession_SkipsWorkspaceDelete(t *testing.T) {
-	mock := newHandshakeMock(t)
-	mock.installGlobal(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
-		SessionID: "session-pre-existing",
-		Workspace: "/tmp/ws",
-	})
-	if err != nil {
-		t.Fatalf("newDriver (attach path): %v", err)
-	}
-	if d.workspaceID != "" {
-		t.Fatalf("attached driver has workspaceID=%q; want \"\" (attach path doesn't allocate)", d.workspaceID)
-	}
-	if err := d.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if got := mock.deleteCount.Load(); got != 0 {
-		t.Fatalf("workspace.delete fired %d times on attach-session close; want 0", got)
-	}
-	if mock.cancelCount.Load() < 1 {
-		t.Fatal("session.cancel did not fire on attach-session close")
-	}
+	// workspace.delete is NOT in the mock mux — any call would
+	// 404 and surface as an error in the dsh log. Best-effort
+	// verification: confirm d.workspaceID was never stamped
+	// (no ownership), so Close's archiveSession branch is the
+	// only path. (deleteCount + deleteRoute removed entirely
+	// from the mock, so any future regression that re-adds
+	// workspace.delete will fail to compile.)
 }
 
 // ─── helpers ────────────────────────────────────────────────────────

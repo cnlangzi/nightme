@@ -75,7 +75,7 @@ func init() {
     agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))          // line 46  ← 优先级 2
     agent.Builtins.Register(dsh.NewStarter("dsh"))                            // line 65  ← 优先级 3
     agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", ...)) // line 85  ← 优先级 4
-    agent.Builtins.Register(cursor.NewStarter("cursor", "agent", ...))        // line 97  ← 优先级 5
+    agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", ...))  // line 97  ← 优先级 5
     agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))                    // line 105 ← 优先级 6
 }
 ```

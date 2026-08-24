@@ -249,7 +249,7 @@ jobs:
   # into its startup to attempt the first API call. We just check
   # that some response was produced, not what it says.
   #
-  # Five independent gates per agent, in increasing integration
+  # Six independent gates per agent, in increasing integration
   # depth (each catches a different failure class):
   #
   #   1. binary on PATH            — install + PATH plumbing both work
@@ -533,12 +533,16 @@ jobs:
           # install method is the curl-pipe script at
           # https://cursor.com/install (per docs/bridge/
           # cursor.md §2.1 + cmd/nightme/agents.go:108-113).
-          # The script drops the binary as `agent` (not
-          # `cursor`) into $HOME/.local/bin/agent on
-          # Linux/macOS and the equivalent user-writable
-          # location on Windows. Both `~/.local/bin` (linux/
-          # macos) and Git Bash's $HOME/bin (Windows) are
-          # already on PATH for the hosted runner user.
+          # The bash installer (curl ... | bash) drops the
+          # binary as `agent` (not `cursor`) into
+          # ~/.local/bin/agent on Linux/macOS, alongside a
+          # legacy `cursor-agent` symlink. The Windows
+          # PowerShell installer (irm '...?win32=true' | iex,
+          # in the dedicated step below) drops `cursor-agent.cmd`
+          # on PATH and additionally copies it to `agent.cmd`
+          # as a courtesy alias. Both `~/.local/bin` (linux/
+          # macos) and %LOCALAPPDATA%\cursor-agent (Windows)
+          # are on PATH for the hosted runner user.
           # We accept the curl-pipe flakiness surface for
           # cursor alone because there is no alternative —
           # npm install @cursor/cli does not exist.
@@ -574,10 +578,16 @@ jobs:
           #               * unix    → curl ... | bash    (this step)
           #               * windows → irm '...?win32=true' | iex
           #                           (separate pwsh step)
-          #             Both branches install `agent` on PATH
-          #             (the binary name the bridge spawns via
-          #             exec.LookPath per cmd/nightme/agents.go:
-          #             113). npm install @cursor/cli does not
+          #             Both branches install `cursor-agent`
+          #             on PATH (the binary name the bridge
+          #             spawns via exec.LookPath per cmd/nightme/
+          #             agents.go:108-116). The bash installer
+          #             creates it as a legacy symlink alongside
+          #             the primary `agent`; the PowerShell
+          #             installer creates it as the real entry
+          #             and additionally copies it to `agent.cmd`
+          #             as a courtesy alias. npm install
+          #             @cursor/cli does not
           #             exist — the official installers are the
           #             only supported channel.
           npm install -g @anthropic-ai/claude-code
@@ -586,12 +596,14 @@ jobs:
           npm install -g @earendil-works/pi-coding-agent
           npm install -g @deepseek-ai/dsh
           # Cursor CLI on unix: official curl-pipe bash installer.
-          # Drops `agent` into $HOME/.local/bin/agent — already on
-          # PATH for the hosted runner user. The Windows leg uses
-          # the separate pwsh step below; running the bash installer
-          # from Git Bash would fail with "Unsupported operating
-          # system: MINGW64_NT-..." because the bash branch has no
-          # Windows code path (case "${OS}" in Linux*|Darwin*)).
+          # Drops `agent` into ~/.local/bin/agent (primary) plus
+          # `cursor-agent` legacy symlink alongside — both on
+          # PATH for the hosted runner user. The Windows leg
+          # uses the separate pwsh step below; running the bash
+          # installer from Git Bash would fail with "Unsupported
+          # operating system: MINGW64_NT-..." because the bash
+          # branch has no Windows code path (case "${OS}" in
+          # Linux*|Darwin*)).
           if [ "${{ matrix.os }}" != "windows-latest" ]; then
             curl -fsSL https://cursor.com/install | bash
           fi
@@ -746,9 +758,9 @@ jobs:
           # We accept any non-empty output — wording varies
           # ("Usage: claude [...]" / "codex-cli 0.145.0 ... USAGE"
           # / opencode's TUI help / pi's interactive help / dsh's
-          # one-shot usage / cursor's `agent --help` printing
-          # `agent <subcommand> ...` usage). Absence of output
-          # means the CLI crashed before printing.
+          # one-shot usage / cursor's `cursor-agent --help`
+          # printing `agent <subcommand> ...` usage). Absence
+          # of output means the CLI crashed before printing.
           #
           # Same agent→binary mapping as the PATH step: cursor's
           # binary is `cursor-agent` on every platform (no
@@ -845,12 +857,14 @@ jobs:
           # cross-protocol signal.
           #
           # cursor is included on every platform — the Windows
-          # installer (separate pwsh step above) aliases
-          # cursor-agent.cmd → agent.cmd and emits
-          # ::add-path:: so Git Bash can resolve it via
-          # PATHEXT. The bridge's exec.LookPath("agent")
-          # therefore works identically on linux / macos /
-          # windows.
+          # PowerShell installer (separate pwsh step above)
+          # extracts the Windows zip to
+          # %LOCALAPPDATA%\cursor-agent and emits the install
+          # dir to GITHUB_PATH so Git Bash's PATH/--help/
+          # bridge-spawn gates can resolve cursor-agent.cmd
+          # via PATHEXT. The bridge's
+          # exec.LookPath("cursor-agent") therefore works
+          # identically on linux / macos / windows.
           workspace=$(mktemp -d)
           for agent in claude codex opencode pi dsh cursor; do
             echo "--- bridge spawn: $agent ---"
@@ -886,16 +900,17 @@ jobs:
             # Observation window of 15s (was 8s): the dsh
             # bridge's own webURLParseTimeout is 10s
             # (internal/bridge/dsh/host/lifecycle.go:53) and
-            # cursor's first `agent acp` invocation on macOS
-            # can take 8-12s as it loads ~/.cursor/ state
+            # cursor's first `cursor-agent acp` invocation on
+            # macOS can take 8-12s as it loads ~/.cursor/ state
             # before the ACP initialize handshake completes.
-            # 8s windows gave dsh ≈6.4s and cursor ≈12s+ on
+            # The 8s window gave dsh ≈6.4s and cursor ≈12s+ on
             # a slow macos-latest runner, hitting the deadline
-            # in the order they happened to run. 15s gives
-            # all agents comfortable headroom (claude ≈0.7s,
-            # codex ≈1.3s, opencode ≈5s, pi ≈2s, dsh ≈6.4s,
-            # cursor ≈8-12s) while still catching a hung
-            # agent within ~2× its expected cold-start cost.
+            # in whichever order they happened to run. 15s
+            # gives all agents comfortable headroom (claude
+            # ≈0.7s, codex ≈1.3s, opencode ≈5s, pi ≈2s, dsh
+            # ≈6.4s, cursor ≈8-12s) while still catching a
+            # hung agent within ~2× its expected cold-start
+            # cost.
             set +e
             printf 'PONG\n' | "$bin" test \
                 --agent "$agent" \

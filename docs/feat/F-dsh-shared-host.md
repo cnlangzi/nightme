@@ -29,7 +29,7 @@
 
 - subagent.* / workspace.* / agentPreset.* 等 dsh 协议已暴露但 nightme 暂未使用的 RPC(留 F 后续)
 - per-chat 独立 permission policy(目前全局 `DSH_PERMISSION_MODE=danger-full-access`,符合 [[agent-no-config-tampering]])
-- dsh session 持久归档清理(`workspace.delete` 替代 — 见 [dsh.md §15](../bridge/dsh.md) commit `02da551`)
+- dsh session 持久归档清理(`workspace.archiveSession` — 见 [dsh.md §15](../bridge/dsh.md) commit `e9aa23d` repo-scoped workspace 策略)
 - 多 nightme daemon 共享同一 dsh(每 daemon 独立起自己的)
 
 ---

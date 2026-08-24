@@ -479,7 +479,7 @@ cs.Close() / DropAgentSession(as-a)
 - **session.list 无分页**: 启动时一次 list 836 session 耗时 30–50s。启动期可以接受,但 chat 创建时不能调 list — 严格走 host/session-added 流维护本地 cache
 - **DSH_PERMISSION_MODE 全局**: 当前所有 session 共享一个 permission mode。未来需要 per-chat policy 时,dsh 协议层面是否支持?待 probe
 - **多 chat 高并发**: 实机只验证了 8 个 attached session 并发。需做 50+ chat 压测,看 mux 帧速率和 approval 队列
-- **resource leak**: ~~session.create 不再调用,chat 退出只 Unsubscribe。dsh 内部 session log 永远保留 — 需要定期 `session.archiveSession` 清理~~ **已修**(2026-08-24):`driver.Close` 现在对 driver-owned workspace 调 `workspace.delete`(见 [dsh.md §15](./dsh.md)),attachSession 路径跳过。同 cwd 多次 chat 仍会累积 workspace(未做 cwd dedupe — 见 §15.7 后续 PR 路线),但单次会话退出不再泄漏
+- **resource leak**: ~~session.create 不再调用,chat 退出只 Unsubscribe。dsh 内部 session log 永远保留 — 需要定期 `session.archiveSession` 清理~~ **已修**(2026-08-24 + `e9aa23d` 二次重做):`driver.Close` 现在对 sessionId 调 `workspace.archiveSession`(见 [dsh.md §15](./dsh.md))。Workspace 改用 git repo 粒度(`detectRepoRoot`),跨 driver / 跨 /new 共享,所以不存在"同 cwd 累积 workspace"的问题 — 同一个 git repo 永远只有一个 workspace。同 cwd 但不同 git repo 是不同 workspace(罕见,合理)
 
 ---
 

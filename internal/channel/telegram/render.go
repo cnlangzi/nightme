@@ -204,6 +204,45 @@ func escapeHTML(value string) string {
 	return html.EscapeString(value)
 }
 
+// RenderForWire is the SINGLE wire-facing entry point for turning
+// raw text (LLM markdown, agent output) into Telegram parse_mode=HTML
+// bytes. Outbound code paths that ship plain markdown straight to
+// sendMessage / sendTelegramMessage must call this first; the wire
+// already sets parse_mode=HTML (see topic.go), but the *content* still
+// has to be rendered — otherwise markdown chars leak through as
+// literals (e.g. `**bold**` shows as five characters instead of
+// rendered bold).
+//
+// Why a dedicated helper (not a direct RenderMarkdown call):
+//   - One place to attach future feishu §13.17 / §13.19-style
+//     sanitize pipeline (image strip, heading demotion, fence
+//     newline normalization) without grep'ing the adapter for
+//     every send site.
+//   - Empty-input short-circuit + err fallback (escapeHTML) keep
+//     call sites one-liners.
+//   - chunkBody.Compose() does NOT route through this — its entries
+//     flow is per-line with isHTML awareness, and error fallback
+//     is inline (escapeHTML on miss). A second layer of DRY here
+//     would force chunk_body.go to thread isHTML/isMarkdown flags
+//     through a stringly helper and break the per-entry invariant
+//     in the public Compose() spec. Keep RenderForWire scoped to
+//     "raw markdown block → safe HTML block".
+//
+// RenderMarkdown itself is the parser; RenderForWire is the
+// "I'm about to call sendMessage / editMessageText, give me the
+// safe-HTML version" wrapper. sendOutResultMessage uses it;
+// chunkBody.Compose() keeps calling RenderMarkdown directly.
+func RenderForWire(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	out, err := RenderMarkdown(raw)
+	if err != nil {
+		return escapeHTML(raw)
+	}
+	return out
+}
+
 func splitTelegramText(rendered string, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, errors.New("telegram: invalid message limit")

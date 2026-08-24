@@ -314,6 +314,66 @@ func TestAdapter_Send_DM_OutResult_StandaloneMessageWithStatusBar(t *testing.T) 
 	}
 }
 
+func TestAdapter_Send_DM_OutResult_RendersMarkdownToHTML(t *testing.T) {
+	// v9 P2.2: OutResult's standalone message goes through
+	// RenderForWire so that markdown chars render as HTML
+	// instead of leaking through Telegram's parser as literals.
+	// This locks in the contract: **bold** / ```fence``` /
+	// [link](https) all render the same way they would in a
+	// chain chunk (chunkBody.Compose routes entries through the
+	// same RenderMarkdown). Body and trailer each take one
+	// rendering path; both must stay in safe-HTML form.
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
+
+	body := "**bold** and `inline`\n\n```go\nfunc f(){}\n```\n\n[link](https://example.com)"
+	if err := a.Send(context.Background(), richOut(messages.OutResult, body)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	calls := api.snapshotCalls()
+	text := sendMessageText(calls)
+
+	// Markdown renders to HTML — every shape must be present.
+	for _, want := range []string{
+		"<b>bold</b>",
+		"<code>inline</code>",
+		"<pre>", "</pre>",
+		`func f(){}`,
+		`<a href="https://example.com">link</a>`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("rendered OutResult missing %q; got %q", want, text)
+		}
+	}
+	// And the literal markdown chars must NOT leak into the wire
+	// payload (Telegram would render them as text).
+	for _, leak := range []string{"**", "`inline`\n", "```go", "```\nfunc"} {
+		if strings.Contains(text, leak) {
+			t.Errorf("rendered OutResult leaked literal markdown %q; got %q", leak, text)
+		}
+	}
+	// Trailer still rides along unchanged.
+	if !strings.Contains(text, "🤖: claude") {
+		t.Errorf("trailer missing; got %q", text)
+	}
+	// parse_mode pinned to HTML — the wire-format contract for
+	// every sendMessage / editMessageText call.
+	if !assertSendMessageParseMode(calls, "HTML") {
+		t.Errorf("parse_mode != HTML; calls=%v", calls)
+	}
+}
+
+func assertSendMessageParseMode(calls []fakeCall, want string) bool {
+	for _, c := range calls {
+		if c.Method != "sendMessage" {
+			continue
+		}
+		got, ok := c.Params["parse_mode"].(string)
+		return ok && got == want
+	}
+	return false
+}
+
 func TestAdapter_Send_DM_OutThinking_AppendsStatusBar(t *testing.T) {
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})

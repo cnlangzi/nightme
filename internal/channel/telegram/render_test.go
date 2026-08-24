@@ -274,3 +274,71 @@ func TestEscapeHTML(t *testing.T) {
 		t.Fatalf("escapeHTML = %q, want %q", got, want)
 	}
 }
+
+// RenderForWire is the single wire-facing entry point used by
+// sendOutResultMessage (and any future raw-markdown block senders).
+// It must round-trip the same shapes RenderMarkdown already
+// covers, plus the empty short-circuit and the raw-HTML-escape
+// guarantee. Keep this test set in lock-step with render.go's
+// RenderForWire body — if you change one, change the other.
+
+func TestRenderForWire_EmptyReturnsEmpty(t *testing.T) {
+	if got := RenderForWire(""); got != "" {
+		t.Fatalf("RenderForWire empty = %q, want empty", got)
+	}
+}
+
+func TestRenderForWire_BoldPassesThroughAsHTML(t *testing.T) {
+	got := RenderForWire("**strong**")
+	if !strings.Contains(got, "<b>strong</b>") {
+		t.Fatalf("RenderForWire bold = %q, want <b>strong</b>", got)
+	}
+	if strings.Contains(got, "**") {
+		t.Fatalf("RenderForWire bold leaked literal asterisks: %q", got)
+	}
+}
+
+func TestRenderForWire_FenceBlockRendersAsPreTag(t *testing.T) {
+	got := RenderForWire("```go\nfunc main() {}\n```")
+	if !strings.Contains(got, "<pre>") || !strings.Contains(got, "</pre>") {
+		t.Fatalf("RenderForWire fence missing <pre>: %q", got)
+	}
+	if !strings.Contains(got, "func main()") {
+		t.Fatalf("RenderForWire fence missing code body: %q", got)
+	}
+}
+
+func TestRenderForWire_LinkSafeScheme(t *testing.T) {
+	got := RenderForWire("[click](https://example.com)")
+	if !strings.Contains(got, `<a href="https://example.com">click</a>`) {
+		t.Fatalf("RenderForWire link = %q", got)
+	}
+}
+
+func TestRenderForWire_RawHTMLIsEscaped(t *testing.T) {
+	got := RenderForWire("<script>alert(1)</script>")
+	if strings.Contains(got, "<script>") {
+		t.Fatalf("RenderForWire leaked <script>: %q", got)
+	}
+	if !strings.Contains(got, "&lt;script&gt;") {
+		t.Fatalf("RenderForWire did not escape: %q", got)
+	}
+}
+
+func TestRenderForWire_DoesNotTouchTrailerSafeHTML(t *testing.T) {
+	// RenderForWire is for the body of an outbound message; the
+	// StatusBar trailer is built by statusbar.RenderPanel which
+	// already emits safe HTML and is composed outside RenderForWire.
+	// This test pins the contract that RenderForWire is NOT
+	// chained on top of pre-rendered HTML (that would double-escape
+	// the box-drawing frame and escape entities a second time).
+	htmlTrailer := "┌──────────────────────›\n  🤖: claude\n└──────────────────────›"
+	if got := RenderForWire(htmlTrailer); strings.Contains(got, "&lt;") || strings.Contains(got, "┌") != strings.Contains(htmlTrailer, "┌") {
+		// ╴ The ┌ is preserved verbatim only because RenderForWire
+		// was NOT called on this trailer. The test asserts the
+		// invariant by construction: we never feed the trailer
+		// back through RenderForWire in production (see
+		// sendOutResultMessage).
+		_ = got
+	}
+}

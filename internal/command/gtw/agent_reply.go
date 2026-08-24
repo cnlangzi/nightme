@@ -144,9 +144,10 @@ func runAgentFor(
 	//     here; /gtw commit/pr are short enough that blocking
 	//     simplifies the dispatcher's success/failure shape.
 	//   - Tests covering the sink flow live in
-	//     internal/command/gtw/agent_reply_test.go — three cases
-	//     (SinkInstalled / HeartbeatObserved / Filtering). Touching
-	//     the wiring above is a regression risk for those tests.
+	//     internal/command/gtw/agent_reply_test.go — four cases
+	//     (SinkInstalled / HeartbeatObserved / Filtering /
+	//     SinkNilEmitter). Touching the wiring above is a
+	//     regression risk for those tests.
 	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName)
 
 	res, err := a.RunOnce(ctx,

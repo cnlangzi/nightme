@@ -703,7 +703,17 @@ jobs:
               cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
             esac
-            path=$(command -v "$bin" 2>/dev/null || true)
+            # Git Bash's `command -v` is a pure POSIX lookup —
+            # it does NOT apply Windows PATHEXT, so on
+            # windows-latest the bare `cursor-agent` won't
+            # resolve to `cursor-agent.cmd`. Try the .cmd
+            # variant as a fallback. (The Go bridge's
+            # exec.LookPath on Windows DOES apply PATHEXT, so
+            # production spawns `cursor-agent` directly; this
+            # is purely a CI-gate quirk.)
+            path=$(command -v "$bin" 2>/dev/null \
+                   || command -v "$bin.cmd" 2>/dev/null \
+                   || true)
             if [ -z "$path" ]; then
               echo "::error::$agent (binary '$bin') not on PATH after install"
               echo "----- PATH diagnostic -----"
@@ -754,7 +764,17 @@ jobs:
               cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
             esac
-            output=$("$bin" --help 2>&1) || true
+            # Same PATHEXT quirk as the PATH step: Git Bash
+            # can't `exec` a bare `cursor-agent` because it's
+            # actually a .cmd shim. Run the .cmd variant
+            # directly — its body calls PowerShell →
+            # cursor-agent.ps1 → node index.js, which prints
+            # `agent <subcommand> ...` usage either way.
+            if [ "${{ matrix.os }}" = "windows-latest" ] && [ "$bin" = "cursor-agent" ]; then
+              output=$("cursor-agent.cmd" --help 2>&1) || true
+            else
+              output=$("$bin" --help 2>&1) || true
+            fi
             if [ -z "$output" ]; then
               echo "::error::$agent (binary '$bin') --help produced no output"
               exit 1

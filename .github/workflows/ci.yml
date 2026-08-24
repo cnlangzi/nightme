@@ -636,6 +636,12 @@ jobs:
           # directly (cmd/nightme/agents.go), matching what every
           # user gets from the official installer.
           irm 'https://cursor.com/install?win32=true' | iex
+          $agentPath = "$env:LOCALAPPDATA\cursor-agent"
+          if (-not (Test-Path "$agentPath\cursor-agent.cmd")) {
+            Write-Host "::error::cursor install did not produce $agentPath\cursor-agent.cmd"
+            exit 1
+          }
+          Write-Host "OK: cursor installed → $agentPath\cursor-agent.cmd"
           # Expose the install dir to the bash PATH/--help/
           # bridge-spawn gates below. ::add-path:: was deprecated
           # in 2020 (https://github.blog/changelog/2020-10-01-
@@ -645,8 +651,13 @@ jobs:
           # the $GITHUB_PATH env file, which GitHub Actions reads
           # after the step and prepends to PATH for all subsequent
           # steps in the job. Git Bash then resolves cursor-agent
-          # via PATHEXT (cursor-agent.cmd).
-          Add-Content -Path $env:GITHUB_PATH -Value "$env:LOCALAPPDATA\cursor-agent"
+          # via PATHEXT (cursor-agent.cmd). Out-File -Append is
+          # used instead of Add-Content because pwsh's pipeline-
+          # based form avoids any encoding / BOM edge cases that
+          # have been observed to truncate a single line at the
+          # 32k mark.
+          "$agentPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
       - name: Verify each agent binary is on PATH
         shell: bash

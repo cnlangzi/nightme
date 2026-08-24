@@ -439,12 +439,19 @@ func (d *driver) attachSession(ctx context.Context, sessionID, cwd string) error
 }
 
 // createFreshSession allocates a new dsh session in a workspace
-// keyed by cwd. Does not mutate d.sessionID — callers assign on
-// success so Reset can create the replacement before dropping the
-// old subscription.
+// keyed by cwd. workspace.create is idempotent by path: an
+// already-owned path returns the existing workspace with
+// `created == false` (dsh-api.md §2.4.2). We stamp d.workspaceID
+// ONLY when we actually allocated the workspace — on a dedup
+// hit we leave d.workspaceID untouched so Close's
+// `workspace.delete` does not rip the workspace out from under
+// other drivers / dashboard sessions living in the same cwd.
+//
+// Does not mutate d.sessionID — callers assign on success so Reset
+// can create the replacement before dropping the old subscription.
 func (d *driver) createFreshSession(ctx context.Context, workspace string) (string, error) {
 	wsCtx, wsCancel := context.WithTimeout(ctx, handshakeTimeout)
-	ws, err := d.cli.RPC.WorkspaceCreate(wsCtx, workspace)
+	ws, created, err := d.cli.RPC.WorkspaceCreate(wsCtx, workspace)
 	wsCancel()
 	if err != nil {
 		return "", fmt.Errorf("dsh: workspace.create: %w", err)
@@ -473,19 +480,20 @@ func (d *driver) createFreshSession(ctx context.Context, workspace string) (stri
 	slogDefault().Info("dsh: session created",
 		"session_id", scVal.SessionID,
 		"workspace_id", ws.WorkspaceID,
-		"cwd", workspace)
-	// Track the workspace so Close can delete it. attachSession
-	// path does NOT allocate a workspace (it attaches to an
-	// existing sessionId), so d.workspaceID stays "" there — Close
-	// checks the field before issuing the delete RPC.
-	d.workspaceID = ws.WorkspaceID
+		"cwd", workspace,
+		"workspace_created", created)
+	// Track the workspace for Close cleanup ONLY when we
+	// actually created it. attachSession path skips
+	// createFreshSession entirely (d.workspaceID stays ""),
+	// and on a create-by-path dedup hit (created == false)
+	// the workspace is shared with other drivers / dashboard
+	// sessions — tearing it down on Close would rip the
+	// shared workspace out from under them.
+	if created {
+		d.workspaceID = ws.WorkspaceID
+	}
 	return scVal.SessionID, nil
 }
-
-// (workspace.create lives in handshakeSession; the driver never
-// deletes the workspace — the dsh host's archive policy owns
-// cleanup, matching the dashboard's behavior. If we ever need
-// explicit teardown, call cli.RPC.WorkspaceDelete directly.)
 
 // resumeUnhealthyError is returned by handshakeSession when the
 // caller asked for resume (cfg.SessionID != "") and session.create
@@ -861,6 +869,15 @@ func (d *driver) Reset(ctx context.Context) error {
 	}
 
 	oldID := d.sessionID
+	// Capture the old workspace ID BEFORE createFreshSession
+	// potentially overwrites d.workspaceID. createFreshSession
+	// only stamps d.workspaceID on `created == true` (see its
+	// doc); a dedup hit would keep d.workspaceID pointing at a
+	// workspace we did NOT own, so the cleanup below must gate
+	// on `d.workspaceID != ""` and skip it on dedup. We do the
+	// tear-down AFTER createFreshSession succeeds so a failed
+	// fresh-create leaves the old workspace intact.
+	oldWorkspaceID := d.workspaceID
 	newID, err := d.createFreshSession(ctx, d.workspace)
 	if err != nil {
 		return err
@@ -871,6 +888,23 @@ func (d *driver) Reset(ctx context.Context) error {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = d.cli.RPC.SessionCancel(cancelCtx, oldID)
 		cancel()
+		// Tear down the workspace we previously created (Skip when
+		// d.workspaceID was empty — attachSession / dedup-hit paths
+		// never owned a workspace, so deleting would damage other
+		// drivers in the same cwd). Best-effort: a stale workspace
+		// leak is less harmful than blocking Reset on cleanup.
+		if oldWorkspaceID != "" && oldWorkspaceID != d.workspaceID {
+			teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := d.cli.RPC.WorkspaceDelete(teardownCtx, oldWorkspaceID); err != nil {
+				dLog("dsh: workspace.delete on reset: %v",
+					"workspace_id", oldWorkspaceID, "err", errStr(err))
+			} else {
+				slogDefault().Info("dsh: workspace deleted (reset)",
+					"workspace_id", oldWorkspaceID,
+					"old_session_id", oldID)
+			}
+			teardownCancel()
+		}
 	}
 
 	d.sessionID = newID
@@ -982,16 +1016,21 @@ func (d *driver) Close() error {
 		// on a sessionId nobody can answer anymore.
 		d.cli.Router.Unsubscribe(d.sessionID)
 		if d.sessionID != "" {
-			rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			if err := d.cli.RPC.SessionCancel(rpcCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
+			// session.cancel and workspace.delete each get their own
+			// context so a slow cancel can't eat the budget that
+			// delete would have used (one shared ctx would mean
+			// cancel stalls → delete never fires → workspace leaks).
+			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := d.cli.RPC.SessionCancel(cancelCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
 				dLog("dsh: session.cancel on close: %v", err)
 			}
+			cancelCancel()
 			// Tear down the workspace we created in createFreshSession
-			// (skipped on attachSession path — see workspaceID doc).
-			// Each driver owns its own workspace, so deleting ours
-			// can't affect other live sessions in the same cwd.
+			// (skipped on attachSession path AND on dedup-hit where
+			// created was false — see workspaceID field doc).
 			if d.workspaceID != "" {
-				if err := d.cli.RPC.WorkspaceDelete(rpcCtx, d.workspaceID); err != nil && !isBenignCancelErr(err) {
+				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				if err := d.cli.RPC.WorkspaceDelete(deleteCtx, d.workspaceID); err != nil && !isBenignCancelErr(err) {
 					dLog("dsh: workspace.delete on close: %v",
 						"workspace_id", d.workspaceID, "err", errStr(err))
 				} else {
@@ -999,8 +1038,8 @@ func (d *driver) Close() error {
 						"workspace_id", d.workspaceID,
 						"session_id", d.sessionID)
 				}
+				deleteCancel()
 			}
-			rpcCancel()
 		}
 		// Close events AFTER unsubscribe so the runtime drains any
 		// frames already routed to handleMuxFrame (and thus into

@@ -367,24 +367,35 @@ type WorkspaceSummary struct {
 // dsh server itself dedupes by path (workspaceRegistry.resolveByPath +
 // create) so a single call from the bridge is enough; we just call
 // workspace.create and trust the server's response.
-func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, error) {
+// WorkspaceCreate resolves or creates one workspace for `path`. The
+// response carries a `created` boolean: true when this call allocated
+// a new workspace (and the caller owns the cleanup contract), false
+// when an existing workspace was returned for an already-owned path
+// (and the caller MUST NOT tear it down on Close — other drivers or
+// dashboard sessions may live in it). See docs/bridge/dsh-api.md
+// §2.4.2 / workspace.schema.ts::workspaceCreateValueSchema.
+//
+// Callers driving ephemeral sessions (Starter.RunOnce / Review /
+// Starter.Start fresh path) gate ownership cleanup on `created`.
+func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, bool, error) {
 	resp, err := c.Post(ctx, "workspace.create", map[string]any{"path": path})
 	if err != nil {
-		return WorkspaceSummary{}, err
+		return WorkspaceSummary{}, false, err
 	}
 	if !resp.Result.OK {
-		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create: %s", resp.Result.ErrorMessage())
+		return WorkspaceSummary{}, false, fmt.Errorf("dsh.host: workspace.create: %s", resp.Result.ErrorMessage())
 	}
 	var value struct {
 		Workspace WorkspaceSummary `json:"workspace"`
+		Created   bool             `json:"created"`
 	}
 	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
-		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create decode: %w", err)
+		return WorkspaceSummary{}, false, fmt.Errorf("dsh.host: workspace.create decode: %w", err)
 	}
 	if value.Workspace.WorkspaceID == "" {
-		return WorkspaceSummary{}, fmt.Errorf("dsh.host: workspace.create: empty workspaceId in response")
+		return WorkspaceSummary{}, false, fmt.Errorf("dsh.host: workspace.create: empty workspaceId in response")
 	}
-	return value.Workspace, nil
+	return value.Workspace, value.Created, nil
 }
 
 // WorkspaceArchiveSession is the dashboard session-row context menu

@@ -252,6 +252,81 @@ func TestRunOnce_DeleteOnClose(t *testing.T) {
 	}
 }
 
+// TestRunOnce_DedupWorkspace_SkipsDelete locks the critical bug
+// fix from /review on this branch: workspace.create is idempotent
+// by path (dsh-api.md §2.4.2), so two drivers in the same cwd
+// get the SAME workspaceID. createFreshSession must only stamp
+// d.workspaceID when the response says created=true; on a dedup
+// hit (created=false) the workspace is shared with other drivers
+// or dashboard sessions, and Close must NOT tear it down.
+//
+// Locks /review finding "WorkspaceID is set even when the
+// workspace already existed (dedup path) — silent multi-session
+// breakage".
+func TestRunOnce_DedupWorkspace_SkipsDelete(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.dedupWorkspace.Store(true) // workspace.create returns created:false
+	mock.installGlobal(t)
+
+	s := NewStarter("dsh")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		_, _ = s.RunOnce(ctx, agent.StartConfig{Workspace: "/tmp/shared"},
+			[]agent.ContentBlock{{Type: agent.ContentText, Text: "ping"}})
+	}()
+	<-ctx.Done()
+	<-doneCh
+
+	// WorkspaceDelete MUST NOT fire — the workspace was not ours
+	// to delete. Wait for the cancel-timeout path to settle so
+	// any spurious delete would have a chance to fire.
+	time.Sleep(100 * time.Millisecond)
+	if got := mock.deleteCount.Load(); got != 0 {
+		t.Fatalf("workspace.delete fired %d times on dedup-hit path; want 0 (shared workspace must not be torn down)", got)
+	}
+	// session.cancel still fires (we own the sessionId).
+	if mock.cancelCount.Load() < 1 {
+		t.Fatal("session.cancel did not fire on dedup-hit close")
+	}
+}
+
+// TestClose_AttachedSession_SkipsWorkspaceDelete locks the
+// attachSession path: d.workspaceID stays "" when the driver
+// attaches to an existing sessionId (no workspace allocation),
+// so Close must skip workspace.delete (would damage the
+// pre-existing workspace that hosts the session).
+func TestClose_AttachedSession_SkipsWorkspaceDelete(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		SessionID: "session-pre-existing",
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver (attach path): %v", err)
+	}
+	if d.workspaceID != "" {
+		t.Fatalf("attached driver has workspaceID=%q; want \"\" (attach path doesn't allocate)", d.workspaceID)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := mock.deleteCount.Load(); got != 0 {
+		t.Fatalf("workspace.delete fired %d times on attach-session close; want 0", got)
+	}
+	if mock.cancelCount.Load() < 1 {
+		t.Fatal("session.cancel did not fire on attach-session close")
+	}
+}
+
 // ─── helpers ────────────────────────────────────────────────────────
 
 // drainOneReady consumes one AgentEventReady from a.Events() within

@@ -280,18 +280,38 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 		result, err := starter.Review(revCtx, rc, agent.WithEventSink(sink))
 		if err != nil {
-			slog.Default().Warn("/review failed",
-				"agent", runnerName,
-				"err", err,
-			)
 			if emitter == nil {
 				return
 			}
 			var text string
 			switch {
+			case errors.Is(err, agent.ErrNoDiff):
+				// Pre-compute found zero reviewable + zero
+				// untracked files in the workspace — clean
+				// working tree, no committed/staged/untracked
+				// changes vs the default branch. The agent was
+				// NOT spawned (short-circuit inside
+				// ReviewWithPrompt / ReviewWithOcr), so we don't
+				// slog.Warn — this is the expected graceful path,
+				// not a failure. Use ℹ️ instead of ❌ so the user
+				// sees "nothing to do", not "something broke".
+				text = fmt.Sprintf(
+					"ℹ️ no diff to review in %s (working tree clean, no staged/committed/untracked files in scope)",
+					workspace)
+				slog.Default().Info("/review: empty diff, no agent spawn",
+					"agent", runnerName,
+					"workspace", workspace)
 			case errors.Is(err, agent.ErrReviewNotSupported):
+				slog.Default().Warn("/review failed",
+					"agent", runnerName,
+					"err", err,
+				)
 				text = fmt.Sprintf("❌ agent %q does not support /review", runnerName)
 			default:
+				slog.Default().Warn("/review failed",
+					"agent", runnerName,
+					"err", err,
+				)
 				msg := err.Error()
 				if len(msg) > 800 {
 					msg = msg[:800] + "…(truncated)"

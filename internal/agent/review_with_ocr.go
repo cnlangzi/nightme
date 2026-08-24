@@ -68,6 +68,12 @@ const maxDiffLines = 2000
 // actually available, that's a caller bug, not this function's problem.
 func ReviewWithOcr(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithOcr(ctx, cfg.Workspace)
+	// Short-circuit on empty diff — see ReviewWithPrompt for the
+	// rationale. Both runners must agree on the contract: zero
+	// reviewable + zero untracked → ErrNoDiff, no agent spawn.
+	if len(pre.reviewable) == 0 && len(pre.untracked) == 0 {
+		return RunResult{}, ErrNoDiff
+	}
 	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
 	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }

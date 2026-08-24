@@ -1327,6 +1327,17 @@ var (
 	// ErrResumeUnhealthy is only relevant for /close,
 	// daemon-restart, and the SIGINT-fallback edge case.
 	ErrResumeUnhealthy = errors.New("agent: resume session unhealthy")
+
+	// ErrNoDiff is returned by ReviewWithPrompt / ReviewWithOcr when
+	// the workspace's precomputed reviewable + untracked file lists
+	// are both empty (clean working tree, no staged/committed/untracked
+	// files in scope, or no default branch detected). The /review
+	// dispatcher detects this via errors.Is and short-circuits with a
+	// user-friendly "nothing to review" message — without spawning the
+	// agent subprocess for a zero-context review. Sentinel lives here
+	// (not in command/review) so the agent package owns the contract
+	// for "the review cannot produce findings".
+	ErrNoDiff = errors.New("agent: no diff to review")
 )
 
 // sentinelErr is a small helper so tests can match errors with

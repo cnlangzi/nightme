@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // fakeStarter is a minimal agent.Starter for testing Review.
@@ -239,5 +241,93 @@ func TestReview_PropagatesRunOnceError(t *testing.T) {
 	}
 	if result.Text != "" {
 		t.Errorf("RunResult.Text on failure = %q, want empty", result.Text)
+	}
+}
+
+// TestReview_EmptyDiff_ReturnsErrNoDiff pins the short-circuit
+// contract: when the workspace's precomputed reviewable + untracked
+// file lists are both empty (clean tree, no default branch detected,
+// or no workspace), ReviewWithPrompt / ReviewWithOcr must return
+// ErrNoDiff WITHOUT spawning the agent. This is the
+// fix-review-a-dsh follow-up — without it, fan-out collapses to
+// [simplifyGroup(nil)] and burns a dsh session for a zero-context
+// review.
+//
+// fakeStarter would record the call if Review tried to spawn —
+// the test asserts zero invocations by leaving runOnce uncalled
+// and reading nothing out of it.
+func TestReview_EmptyDiff_ReturnsErrNoDiff(t *testing.T) {
+	t.Run("empty workspace", func(t *testing.T) {
+		fs := &fakeStarter{name: "fake", mode: ModeJSONIO}
+		// runOnce left nil — if Review calls it, the test panics.
+		_, err := ReviewWithPrompt(context.Background(), fs, StartConfig{Workspace: ""})
+		if !errors.Is(err, ErrNoDiff) {
+			t.Fatalf("ReviewWithPrompt(empty workspace) err = %v, want ErrNoDiff", err)
+		}
+	})
+
+	t.Run("clean tree via prompt path", func(t *testing.T) {
+		// Workspace points at a temp dir with NO staged/unstaged/
+		// untracked changes — precompute produces zero reviewable +
+		// zero untracked. We use a sub-test temp dir so the real
+		// precompute path (not a stub) runs end-to-end.
+		dir := t.TempDir()
+
+		// Init a git repo so detectDefaultBranch / fillDiffs have
+		// something to call (their results are "" but no panic).
+		gitInit(t, dir)
+		gitCommitEmpty(t, dir)
+
+		fs := &fakeStarter{name: "fake", mode: ModeJSONIO}
+		// runOnce nil — pre-fix this would crash via nil runOnce;
+		// post-fix ReviewWithPrompt short-circuits before calling it.
+		_, err := ReviewWithPrompt(context.Background(), fs, StartConfig{Workspace: dir})
+		if !errors.Is(err, ErrNoDiff) {
+			t.Fatalf("ReviewWithPrompt(clean tree) err = %v, want ErrNoDiff", err)
+		}
+	})
+
+	t.Run("clean tree via ocr path", func(t *testing.T) {
+		// Same setup but via ReviewWithOcr. Without ocr on PATH
+		// (CI default), precomputeReviewWithOcr degenerates to the
+		// builtin fallback shape — and the short-circuit still
+		// fires when reviewable+untracked are empty.
+		dir := t.TempDir()
+		gitInit(t, dir)
+		gitCommitEmpty(t, dir)
+
+		fs := &fakeStarter{name: "fake", mode: ModeJSONIO}
+		_, err := ReviewWithOcr(context.Background(), fs, StartConfig{Workspace: dir})
+		if !errors.Is(err, ErrNoDiff) {
+			t.Fatalf("ReviewWithOcr(clean tree) err = %v, want ErrNoDiff", err)
+		}
+	})
+}
+
+// gitInit creates an empty git repo at dir (no commits yet) so
+// precomputeReview's `git -C <dir>` calls don't bail with "not a
+// git repository". Mirrors the inline commands test envs use; no
+// external shell scripts involved.
+func gitInit(t *testing.T, dir string) {
+	t.Helper()
+	run := func(args ...string) {
+		t.Helper()
+		c := proc.New(t.Context(), "git", append([]string{"-C", dir}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "test@test.local")
+	run("config", "user.name", "test")
+}
+
+// gitCommitEmpty makes an empty initial commit so `git diff HEAD`
+// has a valid HEAD to compare against.
+func gitCommitEmpty(t *testing.T, dir string) {
+	t.Helper()
+	c := proc.New(t.Context(), "git", "-C", dir, "commit", "--allow-empty", "-q", "-m", "init")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git commit --allow-empty: %v\n%s", err, out)
 	}
 }

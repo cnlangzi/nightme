@@ -1097,8 +1097,8 @@ type placeholderChain struct {
 
 // chunkBody — one Telegram message. Business code mutates fields
 // through methods (setHeader / setHeaderFromHeartbeat /
-// appendEntry / appendError / setTaskList / setFooter / markFull);
-// Compose() is the sole render path.
+// appendEntry / appendError / setFooter / markFull); Compose() is
+// the sole render path.
 type chunkBody struct {
     messageID    int64
     isFull       bool
@@ -1107,10 +1107,6 @@ type chunkBody struct {
                                         // patched this chunk's header. Compose uses it
                                         // to decide whether to render header at all.
     entries      []chunkEntry            // ordered log lines
-    taskList     []agent.AgentTaskItem   // v9 P2 (§11.12.6.1): latest task snapshot;
-                                        // Compose renders <b>📋 Tasks</b> headline +
-                                        // task rows between entries and footer.
-                                        // Empty / nil → section omitted (no orphan title).
     footer       string                  // statusbar panel
     flushedLen   int                     // overflow tracking (P0 #2 fix)
 }
@@ -1126,15 +1122,11 @@ type chunkEntry struct {
 //   appendEntry(text)             → plain-text segment
 //   appendEntryHTML(text)         → pre-rendered HTML segment (SPLIT path, §11.12.7.2 trigger 1)
 //   appendError(text, stderr)     → wraps stderr in ```fences``` (Layer 3)
-//   setTaskList(items)            → replace task snapshot (§11.12.6.1); nil clears
-//   inheritLatestTaskList(src)    → copy src's taskList (§11.12.7.4-style inheritance)
-//   taskListText()                → current task snapshot (read-only probe)
 //   setFooter(f)                  → statusbar panel
 //   markFull()                    → lock chunk
 //   freezeAfterOverflow(n)        → clear entries, set flushedLen
 //   markFlushedLen(n)             → record overflow emit bytes
-//   Compose()                     → safe-HTML wire format (header-skip rule per §11.12.5.1;
-//                                   task section rendered between entries and footer)
+//   Compose()                     → safe-HTML wire format (header-skip rule per §11.12.5.1)
 
 // chainLRU is the Adapter-scoped index with cap-bounded LRU eviction.
 type chainLRU struct {
@@ -1146,15 +1138,15 @@ type chainLRU struct {
 ```
 
 **OOP 分层**：
-- **Layer 1 (data + view)**: chunkBody + chunkEntry + Compose() — 单条 Telegram 消息的数据 + 渲染（taskList 是 header / entries / footer 之外的独立 section）
+- **Layer 1 (data + view)**: chunkBody + chunkEntry + Compose() — 单条 Telegram 消息的数据 + 渲染
 - **Layer 2 (business API)**: chain 的 append / overflow / flush / purge 等业务方法
-- **Layer 3 (format decisions)**: chunkBody.appendError 把 ```fences``` 决策封装在数据层；taskList 的 headline (`📋 Tasks`) + 行形态 (`- [ ]` / `- [x]`) 也归这里
+- **Layer 3 (format decisions)**: chunkBody.appendError 把 ```fences``` 决策封装在数据层
 - **Layer 4 (UI text escape)**: escapeInline helper 收拢 InlineKeyboard 文本转义
 - **Layer 5 (network)**: sendTelegramMessage / editTelegramMessage
 
 **不持久化**：
 - `TopicState.PlaceholderChunkIDs` 不写
-- chain 内的 `entries` / `header` / `taskList` / `footer` / `lastFooter` 全部是纯内存字段
+- chain 内的 `entries` / `header` / `footer` / `lastFooter` 全部是纯内存字段
 - daemon 重启 = chain 失；下次事件来时 `cursor=-1` → 走"建第一张 chunk"路径（旧 frozen chunks 留在 chat 里作为历史证据，没人再去 editMessageText）
 
 `TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。
@@ -1180,20 +1172,92 @@ type chainLRU struct {
 | Kind | 路径 | segment 格式 |
 |---|---|---|
 | `OutReply` | `appendSegment` | `<text>\n`（流延续，无 icon） |
-| `OutResult` | `appendSegment` | `📝 <text>\n` |
+| `OutResult` | **独立 `sendMessage` (reply to user msg)** | `<text>` + StatusBar trailer；v9 P2 起不再进 chain。详见 §11.12.4.1 |
 | `OutThinking` | `appendSegment` | `💭 <text>\n` |
 | `OutToolStart` | `appendSegment` | `● <name>(<args truncated>)\n` ← `formatToolStartCall` |
 | `OutToolEnd` | `appendSegment` | `⎿  <one-line summary>\n` ← `summarizeToolResult` |
 | `OutError` | `appendErrorSegment` (via `chunkBody.appendError` ```fences```) | `❌ <text>\n````<stderr>\n```` |
-| `OutTaskCreate` | `chunkBody.setTaskList` + `scheduleFlushDebounced`（§11.12.6.1）| 不进 entries；渲染为 `<b>📋 Tasks</b>` + task 行 section |
-| `OutTaskUpdate` | `chunkBody.setTaskList` + `scheduleFlushDebounced`（§11.12.6.1）| 同上；快照替换，整 section 重渲 |
+| `OutTaskCreate` | `appendSegment` | `📋 🆕 <subject>\n` |
+| `OutTaskUpdate` | `appendSegment` | `📋 <status emoji> <subject>\n` |
 | `OutHeartbeat` | `patchActiveHeader` | （无 segment，刷新 active chunk headerLine） |
 | `OutChoice` / `OutChoicePatch` | 独立 `sendMessage` + InlineKeyboard | （不进 chain） |
 | `OutCommandReply` | `appendSegment` (折进 chain,带 StatusBar trailer) | `<text>\n` |
 | `OutMessageState` / `OutMessageStateRemoved` | reaction 路径（`setMessageReactions`） | （不动） |
 | `OutInit` | silent drop | — |
 
-**Out* payload 超长处理**：上面 6 个走 `appendSegment` / `appendErrorSegment` 的 kind 中（`OutReply` / `OutResult` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCommandReply`），若单条 payload 自身 raw > 3500 chars（接近 4096 Telegram 硬限），§11.12.7.2 trigger 1 在 append 阶段直接 SPLIT 成多张 Telegram message，不再走普通 ROTATE。用户视觉上看到的是同时间戳的多片连续消息（视觉连续 vs ROTATE 的页面跳转）。`OutTaskCreate` / `OutTaskUpdate` 走 taskList section（§11.12.6.1），不进 entries；超长由 task 行截断（feishu `checklistBudgetRunes` 同形）兜底。
+**Out* payload 超长处理**：上面 8 个走 `appendSegment` / `appendErrorSegment` 的 kind 中，若单条 payload 自身 raw > 3500 chars（接近 4096 Telegram 硬限），§11.12.7.2 trigger 1 在 append 阶段直接 SPLIT 成多张 Telegram message，不再走普通 ROTATE。用户视觉上看到的是同时间戳的多片连续消息（视觉连续 vs ROTATE 的页面跳转）。
+
+#### 11.12.4.1 OutResult 独立消息（v9 P2, 2026-08-24）
+
+v9 P2 之前，OutResult 跟其他文本 kind 一样走 `appendSegment` 进 active chunk buffer，没有视觉差异 —— 同一个 chunk 里 `💭 thinking → ● Bash → ⎿ done → 📝 <result>` 挤在一起，`📝` 前缀其实从没真正渲染过（v9 Send 没加，`docs §3 表格里的"📝 <text>"是 v3 时代留下的描述，跟当前实现不一致`）。OnPromptEnded 的 🎉 贴 active chunk 的 messageID —— 如果 OutResult 之后又来了 OutReply / OutToolEnd，🎉 就飞到非 result 的 chunk 上了，**语义错位**。
+
+P2 把 OutResult 改独立 `sendMessage`：
+
+```text
+Devin: 帮我写一个 go http server                  userMsgID = 42
+nightme: 🤖 Working...                            ← chunk #0 placeholder / active
+         💭 thinking...
+         ● Bash(go mod init)
+         ⎿  📂 1 file
+         💭 thinking...
+         ● Write(...)
+         ⎿  📝 Write → 42 bytes                   ← chunk #1 (ROTATE)
+[独立新消息] reply_to_message_id = 42
+nightme: 这是一个简单的 http server ...            ← result body
+        ┌──────────────›                          ← StatusBar trailer 边框
+        │  🤖: claude · opus-4-5 · sess-1
+        │  💰:「$0.05」
+        │  📁: code/nightme
+        └───────────────›                          (无中间 ──────── 分隔;
+        [🎉 reaction]                               trailer 自带 frame 边界)
+```
+
+**核心契约**：
+
+1. **OutResult 不进 chain**。`Send()` 把 OutResult 从 default 分支挑出走 `sendOutResultMessage` helper —— 直接调 `sendTelegramMessage(chat_id, topic_id, reply_to_message_id=userMsgID, text=result+trailer)`，每条 OutResult 都是独立的 Telegram message。
+2. **StatusBar trailer 一致，无中间分隔**。所有 text-emitting kind 都带 §18 trailer，OutResult 也不例外 —— body 末尾追加 `\n` + `statusbar.RenderPanel(sb)` 三行（`🤖 / 💰 / 📁`，box-drawing frame `┌──› / └──›` 提供视觉边界）。**OutResult standalone 不画 `────────` 横线**（2026-08-24 user feedback：trailer 自带 frame，分隔线反而让 result message 显得"断裂"）。**Chain chunk 仍然画 `────────────────` 分隔线**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行），因为 chain 上 entries 是一长串 activity log，footer 是状态 summary，两者之间需要强分隔。
+3. **长 result 自动 split**。`len(result+trailer) > 3900` → `splitTelegramText` 切成多片，每片单独 sendMessage（都带 `reply_to_message_id=userMsgID`，视觉上是 user msg 下的一组 reply 簇）。只有**最后一片**的 messageID 记录到 `chain.resultMessageID`（参见 §11.12.4.1.1）。
+4. **OnPromptEnded 🎉 锚点切换**。优先选 `chain.resultMessageID`；零值（turn 没收到任何 OutResult —— 纯 error / 纯 tool / 纯 slash command）回退到 active chunk 的 messageID，保住 v9 P1 行为。详见 §11.12.9。
+5. **chain 仍然承载中间产物**。OutReply / OutThinking / OutToolStart / OutToolEnd / OutError / OutTaskCreate / OutTaskUpdate / OutCommandReply 全部继续走 `appendSegment` —— 这套不动。
+
+##### 11.12.4.1.1 `chain.resultMessageID` 字段
+
+```go
+type placeholderChain struct {
+    // ... 既有字段 ...
+
+    // resultMessageID is the Telegram message_id of the most recent
+    // OutResult sent as a standalone reply in this turn. OnPromptEnded
+    // prefers this anchor for its terminal 🎉 reaction over the active
+    // chunk's messageID. Zero means no OutResult landed this turn
+    // (e.g. error-only / tool-only / slash-only turns) — fall back to
+    // the active chunk to preserve v9 P1 behavior. Scoped per-chain
+    // (key contains userMessageID) so LRU eviction of an unrelated
+    // turn's chain drops it along with everything else. Pure in-memory,
+    // not persisted to telegram_state.json.
+    resultMessageID int64
+}
+```
+
+**为什么需要这个字段**：OnPromptEnded 必须能精确定位"turn 的成品输出"是哪条 Telegram message。OutResult 之前进 chain 的时候不存在这个问题 —— 它就是 active chunk 的最后一条 entry；现在 OutResult 走独立消息，OnPromptEnded 需要一个 in-memory anchor。
+
+**生命周期**：
+
+- 在 `Send(OutResult)` 的 helper 里赋值（多次 OutResult 取最后一次的 messageID）
+- 在 `chain.purge` / `chain.reset` 跟随 chain 一起清零（next turn 干净启动）
+- 不进 telegram_state.json（跟 chain 的其余 in-memory 字段一致 —— §11.12.10 重启 = chain 失，重启后第一次 OutResult 重新 fill）
+
+##### 11.12.4.1.2 跟飞书 receipt 的对位变化
+
+| 维度 | Feishu receipt（v9 P1） | Telegram v9 P1 | Telegram v9 P2 |
+|---|---|---|---|
+| Surface | 单一 receipt Card 2.0，PATCH 复用 | chain of N chunks，editMessageText 复用 active | chain of N chunks（中间产物）+ 1 张独立 result 消息 |
+| OutThinking / Tool / Reply / Error / Task / CommandReply | append 进 card body | append segment 进 active chunk | append segment 进 active chunk（不变） |
+| OutResult | 独立 reply (F-39 后) | append segment 进 active chunk（跟其他文本混在一起） | **独立 sendMessage + reply_to_message_id=userMsgID** |
+| StatusBar trailer | card `<hr>` + 灰色 markdown | chunk 末尾 renderPanel(lastFooter) | result 消息末尾 renderPanel(lastFooter) |
+| 🎉 终态 | ✅ reaction + card header ✅ | user msg 👌 不动；active chunk 贴 🎉 | user msg 👌 不动；**result message 贴 🎉**（无 result 时回退 active chunk） |
+
+跟飞书 F-39 决策完全对齐：result 是 turn 的成品输出，**独立消息**而非 inline 进 receipt。
 
 ### 11.12.5 核心 API
 
@@ -1231,36 +1295,6 @@ func appendErrorSegment(
     statusBarLines []string,
     sendFn sendChunkFn,
     _ editChunkFn,
-) error
-
-// setTaskList (v9 P2, §11.12.6.1) 是 OutTaskCreate / OutTaskUpdate
-// 的入口。整 section 替换：active chunk 的 taskList 字段被覆盖，
-// chain.lastTaskList 同步刷新，scheduleFlushDebounced 触发 Compose
-// 路径把 taskList 渲到 entries 和 footer 之间。
-//
-// 跟 appendSegment 的核心区别：
-//   - 不进 entries（taskList 是独立 section，不被正文行序污染）
-//   - 没有 3500 raw 阈值 → 不走 SPLIT；超长由 task 行渲染侧的
-//     checklistBudget（参考 feishu `buildTaskChecklistChunks`）兜底
-//   - statusBarLines（footer）参数保留 —— taskList 与 footer 仍然
-//     同事件落地的语义对称
-//
-// 冷启动（cursor<0）路径：先 materialise 一个空 entries 的 chunk，
-// setTaskList + setFooter 后 sendFn 发出第一条 Telegram message，
-// header / entries / task / footer 一次成型。空 items → 「clear
-// checklist」语义(active chunk.taskList 清零 + chain.lastTaskList
-// 置 nil);nil msg.TaskList → silent drop(adapter 入口守卫)
-// （跟当前 `formatTaskList` 的空返回对称）。
-func setTaskList(
-    ctx context.Context,
-    chain *placeholderChain,
-    chatID string,
-    topicID int,
-    userMessageID int,
-    items []agent.AgentTaskItem,
-    statusBarLines []string,
-    sendFn sendChunkFn,
-    editFn editChunkFn,
 ) error
 
 // flushChainNow 全量同步写回 active chunk. debounce timer fires /
@@ -1375,8 +1409,9 @@ if renderHeader {
 - Kind 不参与 policy 决定 —— runtime 在哪个 kind 上 stamp status 字段是 runtime 的决定，chain 代码照单全收
 
 **runtime 当前 stamping 约定**（非强制，只是文档当前观察到的行为）：
-- 通常 stamp：`OutReply` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate`（4 个 main-chat kind）
+- 通常 stamp：`OutReply` / `OutTaskCreate` / `OutTaskUpdate`（3 个进 chain 的 main-chat kind）
 - 通常不 stamp：`OutThinking` / `OutToolStart` / `OutToolEnd` / `OutError` / `OutCommandReply` / `OutHeartbeat` / `OutInit`
+- **v9 P2 修订**：`OutResult` 不再走 chain，但其 trailer 仍由 `sendOutResultMessage` 自身拼接（不依赖 `chain.lastFooter`）。runtime 是否 stamp OutResult 上的 statusbar 字段决定 result 消息是否带 footer 三行；语义跟 v9 P1 一致（footer-bearing = 非 nil statusbar）。
 
 **Render 总是发生**：Telegram 不支持 append，每次 `editMessageText` 是 body 全量替换。所以即便 `lastFooter` 没变，新 `entries` 累积也要触发 Render。代码契约：
 - `chain.dirty = true` 在每个 `appendSegment` 路径（cold-create / append-in-place / rotate）都置位
@@ -1388,89 +1423,6 @@ if renderHeader {
 - lastFooter 不刷新 → `chain.lastFooter` 不动，但 Render 仍然发生（entries 累积 + footer 仍渲染上一份）
 - 新 chunk 创建时如果 `chain.lastFooter != nil` → **沿用**上一 chunk 的 footer（防止 footer 突然消失）
 - 重启后第一次携带 status 数据的事件之前 → 链上无 footer section（内存不持久化）
-
-#### 11.12.6.1 Task 内存语义（v9 P2, 2026-08-23）
-
-每 chunk **最多一个 task section**（`taskList []agent.AgentTaskItem`），与 `footer` 平级 —— 都属于 chunk 的「附属 section」，都不进 `entries` 行序。空切片 → section 完全不渲染（headline 也不出，避免「📋 Tasks」孤儿标题）。
-
-**数据形状**：
-
-```go
-type chunkBody struct {
-    ...
-    taskList []agent.AgentTaskItem   // 独立 section；nil/len==0 → 不渲染
-    footer   string                  // statusbar panel（同样附属 section）
-    ...
-}
-```
-
-**Compose 顺序**：
-
-```
-header → "────" → entries → (空 taskList 跳过) → "<b>📋 Tasks</b>\n" + taskLines → "\n" → footer
-```
-
-headline 是 pre-baked HTML（`"<b>📋 Tasks</b>"`，与 feishu `**📋 Tasks**` Markdown header 视觉对位），task 行走 RenderMarkdown（`renderInline` 兜底转义用户输入的 subject）。
-
-**taskList 行形态**（与 feishu `renderTaskLine` 对位）：
-
-| 状态 | 行形态 |
-|---|---|
-| `TaskPending` | `- [ ] <Subject>` |
-| `TaskInProgress` | `- [ ] <Subject> (<ActiveForm>)` ← 软后缀 |
-| `TaskCompleted` | `- [x] <Subject>` |
-| `TaskDeleted` | **过滤掉**（bridge transient 信号） |
-| `TaskCancelled` | **过滤掉**（cursor-only，feishu 同形过滤） |
-
-**rune budget**（与 feishu `checklistBudgetRunes` 对位）：
-
-- `taskSectionBudgetRunes = 3000`：headline + task rows 渲染后的总 rune 上限
-- 超 budget → 丢尾部行（整行 drop，不切 mid-row）；末行追加 `…` 后缀
-- 第一行就超 budget → emit `taskSectionOverflowPlaceholder`（`- [ ] …`），section 仍可见但只有占位行
-- budget 包含 headline（`<b>📋 Tasks</b>` 约 14 runes），所以纯 task 行的实际预算 ~2986 runes
-- 与 feishu 同步：bridge 发 100 长 task 时，渲染保留前 ~30 个完整行，后续 silent drop（用户看到 `…` 后缀）
-
-**lastTaskList 刷新 = 数据驱动**（与 lastFooter 同语义）：
-
-- `OutTaskCreate` / `OutTaskUpdate` 事件到达 → `setTaskList(msg.TaskList.Items)` → 覆盖 active chunk 的 `taskList` 字段 + `chain.lastTaskList` 同步
-- 空 items → 「clear checklist」语义:active chunk.taskList = nil + chain.lastTaskList = nil,下次 Compose 跳过 task section
-- nil msg.TaskList → silent drop(adapter 入口守卫):bridge 没附 task data,不进 chain,不发 Telegram message
-- 冷启动(cursor<0)+ 空 items → silent drop(双重防御):chain 上没东西可清,创建空 chunk 是浪费
-- `chain.dirty = true` 无条件置位；`scheduleFlushDebounced` 无条件调用
-- Render 总是发生 —— 即使 taskList 没变，新 entries 累积也要触发整 section 重渲
-
-**inheritLatestTaskList（继承语义，与 inheritLatestHeader 对位）**：
-
-- ROTATE / SPLIT 时新 chunk 通过 `inheritLatestTaskList(cur)` 拷贝 cur 的 `taskList` → frozen chunk 出生时持有当时的 task 快照
-- 后续 OutTaskUpdate 只刷新 active chunk 的 taskList —— frozen chunks 停留在历史快照，**符合 §11.12.7.4 的「inherit-from-active 而非 fresh-timestamp-per-chunk」语义**
-- 与 inheritLatestHeader 的本质区别：header 是「banner heartbeat 计数」，过时刻立即过期；task 是「已完成 / 待办 / 进行中」的状态列表，需要冻结以反映该 chunk 出生那一刻的计划 —— inherit 是必须的，否则 ROTATE 会把过去的 task 抹掉
-
-**为什么不进 entries**：task 是结构化数据（subject / status / activeForm 三元组），不是「流文本」。混进 entries 会导致：
-
-1. `💭 thinking` / `⎿ result` 行散落夹杂 `- [ ]` 行，扫描体验差
-2. 同一 task 在 status 变化（pending → in_progress → completed）时需要**整 section 替换**而不是「行序号增改」；entries 路径只能 append / replaceEntry，行级 in-place 状态切换语义不对位
-3. feishu 把 task 当独立 card section 渲染（见 feishu `SetTaskListWithFooter`），telegram 的 chain 既然要视觉对位，task 必须是独立 section 而非 entries 内联
-
-**与 footer 的对位**：
-
-| 字段 | 类型 | 来源 | Compose 位置 |
-|---|---|---|---|
-| `header` | `string` (pre-baked HTML) | heartbeat / cold-create banner | 顶部 |
-| `entries` | `[]chunkEntry` | appendSegment / appendError | header 之后 |
-| `taskList` | `[]AgentTaskItem` | setTaskList (OutTaskCreate/Update) | entries 之后、footer 之前 |
-| `footer` | `string` (pre-rendered panel) | statusbar.RenderPanel(lastFooter) | 底部 |
-
-**与 feishu `SetTaskListWithFooter` 对位**：
-
-| feishu | telegram |
-|---|---|
-| `MessageReceipt.tasks []AgentTaskItem` | `chunkBody.taskList []AgentTaskItem` |
-| `MessageReceipt.footerLines []string` | `chunkBody.footer string` |
-| `SetTaskListWithFooter(ctx, list, footerLines)` | `setTaskList(ctx, chain, ..., items, statusBarLines, sendFn, editFn)` |
-| card element: `<markdown>📋 Tasks</markdown> + tasks` | chunkBody section: `<b>📋 Tasks</b>` headline + task lines |
-| footer element: `<hr> + <markdown>grey footer</markdown>` | chunkBody trailing: `\n + footer` |
-| renderLocked (card rebuild) | Compose (chunk rebuild) |
-| active chunk only updated, frozen 保持历史 | active chunk only updated, frozen 保持历史 |
 
 ### 11.12.7 编辑频率控制（debounce + 1-Hz 自然上限）
 
@@ -1640,11 +1592,19 @@ scheduleFlushDebounced(chain, ...)
 ### 11.12.9 OnPromptEnded 路径
 
 ```go
-// adapter.go:1159
+// adapter.go:OnPromptEnded
 func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
     ...
     parsedUserMsgID := atoiUserMsgID(userMsgID)
     chain := a.chains.getOrCreate(rawChatID, topicID, parsedUserMsgID)
+
+    // P1 #2 fix (2026-08-23): take chain.mu for the full
+    // flush → stamp → purge sequence so an in-flight
+    // scheduleFlushDebounced from a concurrent Send can't arm a
+    // timer that fires AFTER we purge the chain (orphan timer
+    // editing the previous turn). We also cancel any currently-
+    // pending timer under the same lock so its stop/release
+    // ordering is unambiguous.
     chain.mu.Lock()
     if chain.cursor < 0 {
         stopDebounceTimer(chain)
@@ -1654,21 +1614,41 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
     }
     stopDebounceTimer(chain)
     chain.mu.Unlock()
+
     // Best-effort flush before stamping the terminal reaction.
     if err := flushChainNow(ctx, chain, rawChatID, topicID, parsedUserMsgID,
         a.chainEditFn(), a.chainSendFn()); err != nil { /* log warn */ }
+
     chain.mu.Lock()
-    cur := chain.chunks[chain.cursor]
-    var curMessageID int64
-    if cur != nil { curMessageID = cur.messageID }
+    // v9 P2: 🎉 anchor prefers the standalone result message (if any
+    // OutResult landed this turn) over the active chunk. resultMessageID
+    // is zero for error-only / tool-only / slash-only turns → fall
+    // back to the active chunk to preserve v9 P1 behavior. Picking
+    // the result message ties the "completed" visual directly to the
+    // user-facing output instead of the last activity segment.
+    var (
+        targetID    int64
+        cur         *chunkBody
+    )
+    if chain.cursor >= 0 {
+        cur = chain.chunks[chain.cursor]
+    }
+    targetID = chain.resultMessageID
+    if targetID == 0 && cur != nil {
+        targetID = cur.messageID
+    }
     chain.mu.Unlock()
-    if curMessageID != 0 {
-        // 🎉 on the active chunk. v6.3 single-reaction budget on
-        // USER MSG slot is preserved; this stamp lands on the
-        // placeholder, not the user's original message.
-        _ = a.setMessageReactions(ctx, rawChatID, int(curMessageID),
+
+    if targetID != 0 {
+        // 🎉 reaction. v6.3 single-reaction budget on the USER MSG
+        // slot is preserved (this lands on result message or active
+        // chunk, not the user's original message). emoji is in the
+        // official ReactionTypeEmoji whitelist (✅ U+2705 was rejected
+        // by Telegram API).
+        _ = a.setMessageReactions(ctx, rawChatID, int(targetID),
             []map[string]any{{"type": "emoji", "emoji": "\U0001F389"}})
     }
+
     // Turn-end cleanup: forget the in-memory chain. Frozen chunks
     // remain in chat as historical evidence (no edit touches them
     // again). Next user message re-materialises a fresh chain via
@@ -1680,6 +1660,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 **关键 invariant**:
 - `stopDebounceTimer` 在 flush 前调用 (P1 #2 fix)，否则 orphan timer 会在 purge 后触发，ghost-edit 上一 turn 的 chunk messageID (违反 §11.12.9)。
 - 锁覆盖范围 `stopDebounceTimer → flushChainNow → 🎉 stamp` 整段，使 in-flight `scheduleFlushDebounced` from concurrent Send 不能 arm 一个在 purge 之后 fire 的 timer。
+- **v9 P2 🎉 anchor 选择**：先看 `chain.resultMessageID`（`Send(OutResult)` 在 `sendOutResultMessage` 里赋值），零值回退 active chunk。多次 OutResult 取最后一个 messageID（"last wins" 语义跟 v9 P1 的 active chunk 语义对齐）。
 - 🎉 emoji 用 `\U0001F389` (U+1F389 PARTY POPPER)，不在 Telegram API 黑名单里 (U+2705 ✅ 之前被 REACTIONS_TOO_MANY 拒过)。
 - 终态: `a.chains.purge` —— chain 对象从 LRU 移除 (key 含 userMessageID 所以只 purge 这一 turn 的 chain，不影响其他 chain)。
 
@@ -1701,31 +1682,35 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 | chunk `reply_to_message_id` | `userMessageID` | `userMessageID` |
 | frozen chunk 处理 | 保持 frozen，不动 | 同 |
 | turn-end 清 cursor + chunks + lastFooter | ✅ | ✅ |
-| `OnPromptEnded` 🎉 on active chunk | ✅ | ✅ |
+| `OnPromptEnded` 🎉 on result message (fallback to active chunk) | ✅ | ✅ |
 
 ### 11.12.12 跟飞书 receipt 语义对位（v9）
 
-| 维度 | Feishu receipt | Telegram v9 |
-|---|---|---|
-| Surface | 单一 receipt Card 2.0，PATCH 复用 | chain of N chunks，editMessageText 复用 active |
-| 状态 ticker | header PATCH（card body） | active chunk headerLine PATCH |
-| OutThinking | append div 进 card body | append segment 进 active chunk buffer |
-| OutToolStart/End | 合并 thread reply（Start+End merge，F-38） | 同 chunk buffer 内两 segment |
-| OutReply | 独立 reply（F-44 后） | append segment 进 active chunk buffer |
-| OutResult | 独立 reply（F-39 后） | append segment（📝 prefix）进 active chunk |
-| user message 状态 | AddReaction（append-only 多 emoji 堆叠） | setMessageReaction（单 emoji 槽） |
-| placeholder / 终态 | ✅ header SetPromptState | 🎉 setMessageReactions on active chunk |
-| 终态 | ✅ reaction + card header ✅ | user msg 留 👌 不动；active chunk 贴 🎉 |
-| Footer | card `<hr>` + 灰色 markdown（3 行） | chunk 末尾 renderPanel(lastFooter)（仅 active chunk） |
-| Persist | receipt state 进 MemoryStore | **chain 不持久化**（重启失） |
-| 4096 / 30KB 限制 | 30KB body + 50 elements | 4096 chars ×N chunks（debounce 内合并） |
-| OutToolStart dump | summarize_tool.go（call + result 双行） | 复刻 feishu 同款（emoji 风格统一） |
+| 维度 | Feishu receipt | Telegram v9 P1 | Telegram v9 P2 |
+|---|---|---|---|
+| Surface | 单一 receipt Card 2.0，PATCH 复用 | chain of N chunks，editMessageText 复用 active | chain of N chunks（中间产物）+ 1 张独立 result 消息 |
+| 状态 ticker | header PATCH（card body） | active chunk headerLine PATCH | active chunk headerLine PATCH（不变） |
+| OutThinking | append div 进 card body | append segment 进 active chunk buffer | append segment 进 active chunk buffer（不变） |
+| OutToolStart/End | 合并 thread reply（Start+End merge，F-38） | 同 chunk buffer 内两 segment | 同 chunk buffer 内两 segment（不变） |
+| OutReply | 独立 reply（F-44 后） | append segment 进 active chunk buffer | append segment 进 active chunk buffer（不变） |
+| OutResult | 独立 reply（F-39 后） | append segment（📝 prefix）进 active chunk | **独立 sendMessage + reply_to_message_id=userMsgID** |
+| user message 状态 | AddReaction（append-only 多 emoji 堆叠） | setMessageReaction（单 emoji 槽） | setMessageReaction（单 emoji 槽，不变） |
+| placeholder / 终态 | ✅ header SetPromptState | 🎉 setMessageReactions on active chunk | 🎉 setMessageReactions on **result message** (fallback to active chunk) |
+| 终态 | ✅ reaction + card header ✅ | user msg 留 👌 不动；active chunk 贴 🎉 | user msg 留 👌 不动；result message 贴 🎉（无 result 时回退 active chunk） |
+| Footer | card `<hr>` + 灰色 markdown（3 行） | chunk 末尾 renderPanel(lastFooter)（仅 active chunk） | chunk 末尾 renderPanel(lastFooter) + **result 消息末尾 renderPanel(lastFooter)** |
+| Persist | receipt state 进 MemoryStore | **chain 不持久化**（重启失） | **chain 不持久化**（重启失；resultMessageID 跟随 chain 失忆） |
+| 4096 / 30KB 限制 | 30KB body + 50 elements | 4096 chars ×N chunks（debounce 内合并） | 4096 chars ×N chunks + **4096 chars ×M result messages**（split 切分） |
+| OutToolStart dump | summarize_tool.go（call + result 双行） | 复刻 feishu 同款（emoji 风格统一） | 复刻 feishu 同款（emoji 风格统一，不变） |
+
+v9 P2 把 OutResult 对齐到飞书 F-39 决策 —— **独立 reply 投递**而非 inline 进 receipt。Telegram 之前用 chain fold 是因为 Telegram 没有飞书式 dedup bug 可以避免，**但**牺牲了"result 跟中间产物视觉差异"这一 UX 信号。P2 修复这个 UX：result 独立 + 🎉 锚定。
 
 ### 11.12.13 长文本与 Markdown 渲染
 
-#### OutResult 进 chain 而非独立 reply
+#### OutResult 独立 reply（v9 P2 修订）
 
-飞书 F-39 决策：OutResult 独立 reply 投递到 userMsgID（避免 dedup bug）。Telegram 没 dedup 问题（chain 的 buf 累积即同一 surface），进 chain 是合理选择。要求 OutResult text ≤ 3500 一次；超出 → §11.12.7.2 split。
+**v9 P2 起**：OutResult 改独立 `sendMessage(reply_to_message_id=userMsgID)`，对齐飞书 F-39 决策（独立 reply 投递，避免跟中间产物视觉同质）。
+
+长 result 处理：单条 OutResult body + StatusBar trailer 长度 > 3900 chars → `splitTelegramText` 切成多片，每片单独 `sendMessage`，都带 `reply_to_message_id=userMsgID`（视觉上是 user msg 下的 reply 簇）。只有最后一片的 messageID 进 `chain.resultMessageID`（OnPromptEnded 🎉 锚点）。
 
 #### Markdown 渲染
 
@@ -1878,7 +1863,7 @@ func summarizeToolResult(name, output string, err error) string {
 | `TestAdapter_Send_OutReply_FoldsIntoChain` | OutReply 不发独立 bubble，进 active chunk |
 | `TestAdapter_Send_MultipleBurst_CoalesceIntoOneEdit` | burst 合并成 1 editMessageText |
 | `TestAdapter_OutHeartbeat_PATCHesActiveChunkHeader` | heartbeat → chunk.headerLine 更新 + debounce flush |
-| `TestAdapter_OnPromptEnded_DM_RendersOnActiveChunkThenPurges` | 🎉 贴在 active chunk + chain purge |
+| `TestAdapter_OnPromptEnded_DM_RendersOnActiveChunkThenPurges` | 🎉 贴在 active chunk + chain purge（v9 P1 行为,无 OutResult 时回退路径） |
 | `TestAdapter_Send_OutError_FoldsIntoChainWithMarkdownFragment` | OutError 进 chain，stderr ```fences``` 渲染 |
 | `TestChainAppendOnly_AfterStopFreshChain` | daemon restart → next event → 新 chain |
 | `TestChain_HeartbeatBoldHeaderPreservedThroughFlush` | `<b>` 不被二次转义 |
@@ -1906,21 +1891,15 @@ func summarizeToolResult(name, output string, err error) string {
 - `TestChain_FlushChainNow_TailInheritsLatestHeader` —— Trigger 3 tail piece: inherit
 - `TestChain_RotateChunk_InheritsLatestHeader` —— (替换 `TestChain_RotateChunk_HeaderIsFreshNotInherited`) case 3 ROTATE: 翻转单测契约
 
-**v9 P2 task section 测试**(§11.12.6.1):
-- `TestRenderActiveChunkBody_TaskOnly` —— entries 空 + taskList 非空 → `<b>📋 Tasks</b>` headline + task lines + footer；无 orphan separator
-- `TestRenderActiveChunkBody_TaskAboveFooter` —— entries + taskList + footer → 渲染顺序严格为 entries → task section → footer
-- `TestRenderActiveChunkBody_NoTaskWhenEmpty` —— taskList 为 nil / len==0 → headline 不出,后续 footer 紧贴 entries
-- `TestRenderActiveChunkBody_TaskHeadlinePreservedThroughRender` —— `<b>` pre-baked HTML 不被 escapeHTML 二次转义
-- `TestChunkBody_SetTaskList_NilClears` —— primitive: nil → taskList 字段重置为 nil
-- `TestChunkBody_InheritLatestTaskList_CopiesAndFlag` —— primitive: 拷贝 src.taskList + nil src no-op
-- `TestChain_TaskListUpdate_RefreshesActiveChunkOnly` —— 多次 OutTaskUpdate → frozen chunk 不变,active chunk 更新(对位 §11.12.7.4 inheritLatestHeader 语义)
-- `TestChain_Rotate_InheritsLatestTaskList` —— ROTATE 时新 chunk 沿用 cur 的 taskList(防止 task 在 chunk 切换时丢失)
-- `TestChain_Split_InheritsLatestTaskList` —— SPLIT path 所有 pieces 都 inherit taskList
-- `TestChain_NewChunk_InheritsLastTaskList_OnColdCreate` —— cold-create 时若 chain.lastTaskList 非空 → materialise 第一张 chunk 时 setTaskList(避免 task 在冷启动时丢失)
-- `TestAdapter_OutTaskCreate_EmptyList_NoBubble` —— OutTaskCreate with nil items → silent drop,不发 Telegram message
-- `TestAdapter_OutTaskUpdate_ReplacesEntireSnapshot` —— OutTaskUpdate 全量替换 taskList(非 append / patch),与 feishu `SetTaskList` 对位
-- `TestAdapter_OutTaskCreate_RendersSectionAboveFooter` —— OutTaskCreate + statusbar 同时落地 → Compose 顺序为 entries → task → footer
-- `TestRenderActiveChunkBody_TaskInProgress_ShowsActiveFormSuffix` —— in_progress task 行带 `(ActiveForm)` 软后缀(feishu `renderTaskLine` 对位)
+**v9 P2 OutResult 独立消息测试**(§11.12.4.1 + §11.12.9):
+- `TestAdapter_Send_OutResult_SendsStandaloneReply` —— OutResult 走独立 `sendMessage`，`reply_to_message_id=userMsgID`，body 含 result text + StatusBar 分隔线 + 三行 footer；**chain.chunks buffer entries count 不增加**
+- `TestAdapter_Send_OutResult_DoesNotChangeActiveChunkText` —— OutResult 前后两次读 lastChunkText 完全一致（chain 文本不污染）
+- `TestAdapter_Send_OutResult_LongText_SplitsAcrossMultipleMessages` —— body + trailer > 3900 → N 次 sendMessage，每片都带 reply_to_message_id=userMsgID；只有**最后一片**的 messageID 进 `chain.resultMessageID`
+- `TestAdapter_Send_OutResult_MultipleInOneTurn_LastWins` —— 两条 OutResult → `chain.resultMessageID` = 第二条 messageID
+- `TestAdapter_OnPromptEnded_DM_StampsOnResultMessage` —— OutResult + OnPromptEnded → `setMessageReaction` 命中 resultMessageID，**不**命中 active chunk messageID（v6.3 single-reaction 预算仍守：user msg 不动）
+- `TestAdapter_OnPromptEnded_NoOutResult_FallsBackToActiveChunk` —— 无 OutResult → 回退到 active chunk 兜底（保住 error-only / tool-only / slash-only turn 行为）
+- `TestAdapter_Send_OutResult_EmptyText_SilentDrop` —— 已有 `TestAdapter_Send_OutResultEmptyText`（adapter_test.go）继续守 empty-text silent drop 路径
+- `TestAdapter_Send_DM_OutResult_StandaloneMessageWithStatusBar` —— 翻写 `TestAdapter_Send_DM_OutResult_AppendsStatusBar`（adapter_statusbar_test.go）：从读 lastChunkText 改成直接读 sendMessage params["text"]，断言 result body + trailer 三行
 
 ### 11.12.17 已知限制
 
@@ -1962,19 +1941,9 @@ func summarizeToolResult(name, output string, err error) string {
 
 - **2026-08-23** - **Spec 进一步对齐**（本次 commit）：§11.12.2 chunkBody API 加 `appendEntryHTML` / §11.12.4 OutError 路径改为 `appendErrorSegment` / §11.12.5 核心 API 重写（package-level + chainLRU 实际签名）/ §11.12.7.2 trigger 1 partial-failure + trigger 3 step 5 header 来源 / §11.12.8 / §11.12.9 例代码改实际 / §11.12.15 commit 清单改 git log 引用 / §11.12.16 矩阵用实际 test 名 / §11.12.17 limits 表补 SPLIT + chain-key / §11.12.18 变更日志追加本批。
 
-- **2026-08-23（v9 P2 task section 抽象，本次 commit）**：
-  - **数据模型**：`chunkBody` 加 `taskList []agent.AgentTaskItem` 字段（与 header / entries / footer 平级的第 4 section）；`placeholderChain` 加 `lastTaskList []agent.AgentTaskItem` 镜像字段。
-  - **新方法**：`chunkBody.setTaskList(items)` / `inheritLatestTaskList(src)` / `taskListText()`；与 `setFooter` / `inheritLatestHeader` 形态完全对称。
-  - **业务路径**：新增 package-level `setTaskList(ctx, chain, ...)`；删除 `Adapter.formatTaskList` + `OutTaskCreate/OutTaskUpdate` 的 `appendSegmentForKind` 路径 → 改为 `chain.setTaskList(...)` + `scheduleFlushDebounced`。
-  - **Compose 顺序**：header → `────` → entries → (空 taskList 跳过) → `<b>📋 Tasks</b>` + task 行 → `\n` → footer。headline pre-baked HTML；task 行走 RenderMarkdown。
-  - **与 feishu `SetTaskListWithFooter` 对位**：taskList / footer 同事件落地；ROTATE / SPLIT 时 taskList 与 header 一起 inherit（frozen chunks 持有历史 task 快照）。
-  - **测试矩阵**：§11.12.16 增补 13 条 Compose primitive / Chain / Adapter 单元测试。
-  - **回归保护**：`formatTaskList` 删除；旧形态 `OutTaskCreate/Update` adapter 测试改写为新字段断言（taskList 字段存在性 / len / Compose 输出顺序）。
-  - **不持久化**：`taskList` / `lastTaskList` 纯内存字段；daemon 重启 = chain 重建，跟 entries / header / footer 同源。
-  - **silent drop 守卫（nil msg.TaskList）**：`Send()` 入口加 `if msg.TaskList == nil { return nil }` → silent drop，不进 chain、不发 Telegram message。Bridge 没附 task data 时走这条。
-  - **clear semantic（empty Items）**：`Send()` 不 silent drop；msg.TaskList 非 nil 但 Items 为空 → 调 setTaskList 让 active chunk.taskList 清零 + chain.lastTaskList = nil，下次 Compose 跳过 task section。与 feishu `SetTaskList([])` 对齐（feishu 也是 clear 而不是 silent drop）。
-  - **cold-create 防御**：setTaskList 在 cursor<0 且 len(items)==0 时 silent drop，避免创建空 chunk。
-  - **文档同步**：§11.12.2 chunkBody struct + API 加 `taskList` / `setTaskList` / `inheritLatestTaskList`；§11.12.4 事件映射 OutTask* 改写；§11.12.5 核心 API 加 `setTaskList`；§11.12.6.1 新增 task 内存语义段；§11.12.16 矩阵增 13 条；§11.12.18 变更日志追加本批。
+- **2026-08-24** - **v9 P2 OutResult 独立消息**：对齐飞书 F-39 决策。`Send(OutResult)` 从 default 分支挑出走 `sendOutResultMessage` helper，直接 `sendTelegramMessage(reply_to_message_id=userMsgID, text=result+StatusBar trailer)`。新增 `placeholderChain.resultMessageID` 字段记录最后一片 result messageID；长 result > 3900 chars 走 `splitTelegramText` 切多片。`OnPromptEnded` 🎉 锚点改为 `chain.resultMessageID` 优先、零值回退 active chunk（保住 error-only / tool-only / slash-only turn 行为）。改动：`adapter.go` Send / OnPromptEnded + `placeholder_chain.go` struct；新增 helper `sendOutResultMessage` / `sendResultChunk`。**对齐项**：§11.12.4 表格 OutResult 行 + §11.12.4.1 新增（独立消息契约 + resultMessageID 字段语义）+ §11.12.9 代码示例 + §11.12.11 table 行 + §11.12.12 三栏飞书对位 + §11.12.13 长文本段 + §11.12.16 测试矩阵。**commit 拆解**：`chain: add resultMessageID anchor field` → `Send: split OutResult → standalone sendOutResultMessage` → `OnPromptEnded: prefer resultMessageID over active chunk` → `tests: OutResult standalone message + 🎉 anchor switch` → `docs: §11.12 v9 P2 OutResult 独立消息`。
+
+- **2026-08-24** - **v9 P2.1 OutResult standalone 移除中间分隔线**（user feedback on first dotest）。`sendOutResultMessage` 不再在 result body 和 trailer 之间插入 `\n────────\n` —— trailer 自带 `┌──› / └──›` box-drawing 边框提供视觉边界，额外横线让 standalone reply-anchored message 看起来"断裂"。`adapter.go` sendOutResultMessage helper 改为 `trailer = "\n" + statusbar.RenderPanel(sb)`。**chain chunk 仍保留 `────────────────` 分隔**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行）—— chain 上的 entries 是 activity log 序列，footer 是状态 summary，两者之间需要强分隔。**测试更新**：`TestAdapter_Send_OutResult_SendsStandaloneReply` 移除 `────────` 断言（其他 trailer 三行断言保留）。**doc 更新**：§11.12.4.1 视觉示例 + §11.12.4.1 契约第 2 条 + §11.12.18 变更日志（本条）。
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 

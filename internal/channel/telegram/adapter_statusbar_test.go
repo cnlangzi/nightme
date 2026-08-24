@@ -293,14 +293,20 @@ func TestAdapter_Send_DM_OutError_NoDiagnostic_AppendsStatusBar(t *testing.T) {
 	}
 }
 
-func TestAdapter_Send_DM_OutResult_AppendsStatusBar(t *testing.T) {
+func TestAdapter_Send_DM_OutResult_StandaloneMessageWithStatusBar(t *testing.T) {
+	// v9 P2: OutResult is no longer folded into the active chain
+	// chunk (the §18 StatusBar trailer contract still applies but
+	// the trailer rides on the standalone sendMessage that carries
+	// the result). Read the sendMessage call's text directly
+	// instead of lastChunkText — the chain has nothing to render
+	// for an OutResult-only turn.
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 700, UserMessageID: "10"})
 
 	if err := a.Send(context.Background(), richOut(messages.OutResult, "result body")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	text := lastChunkText(t, a, api.snapshotCalls())
+	text := sendMessageText(api.snapshotCalls())
 	for _, want := range []string{"result body", "🤖: claude", "💰:「", "📁: " + pathutil.FromSlash("code/nightme")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered text missing %q; got %q", want, text)

@@ -177,7 +177,15 @@ func (f *AgentSessionFile) writeLocked() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("agent_sessions: close temp: %w", err)
 	}
-	if err := os.Rename(tmpName, f.path); err != nil {
+	// os.Rename is POSIX-atomic but on Windows the underlying
+	// MoveFileEx call fails with ERROR_ACCESS_DENIED when the
+	// target file exists and is held open by a concurrent reader
+	// (e.g. an antivirus scanner, a parallel test process, or
+	// the test's own deferred os.Remove firing mid-rename). Wrap
+	// the rename with replaceFile so the production path stays
+	// simple while the error path retries via a Windows-native
+	// call that explicitly requests replace-existing.
+	if err := replaceFile(tmpName, f.path); err != nil {
 		return fmt.Errorf("agent_sessions: rename: %w", err)
 	}
 	if err := os.Chmod(f.path, 0o600); err != nil {

@@ -55,9 +55,11 @@ type placeholderChain struct {
 	cursor int
 
 	// lastFooter is the most recent StatusBar the chain saw. Refreshed
-	// by footer-bearing events (OutReply/OutResult/OutTask*); held stable
-	// across non-footer events. nil = no footer-bearing event happened
-	// yet → render emits no footer panel.
+	// by footer-bearing events (OutReply/OutTask*); held stable across
+	// non-footer events. nil = no footer-bearing event happened yet →
+	// render emits no footer panel. v9 P2: OutResult no longer goes
+	// through this field — its trailer is rendered directly in
+	// sendOutResultMessage on the standalone reply message.
 	lastFooter []string
 
 	// lastTaskList (v9 P2, §11.12.6.1) is the most recent agent
@@ -94,6 +96,20 @@ type placeholderChain struct {
 	// the result line (start, if it landed in a still-live chunk,
 	// stays as a lone `●` — visible but not silently lost).
 	toolPending []toolPendingEntry
+
+	// resultMessageID is the Telegram message_id of the most recent
+	// OutResult sent as a standalone reply in this turn. sendOutResultMessage
+	// writes it after a successful sendMessage (multi-piece splits record
+	// only the LAST piece's messageID — "last wins" semantics). OnPromptEnded
+	// prefers this anchor for its terminal 🎉 reaction over the active
+	// chunk's messageID. Zero means no OutResult landed this turn
+	// (error-only / tool-only / slash-only turns) — fall back to the
+	// active chunk to preserve v9 P1 behavior. Scoped per-chain (key
+	// contains userMessageID) so LRU eviction of an unrelated turn's
+	// chain drops it along with everything else. Pure in-memory; not
+	// persisted to telegram_state.json. See docs/channel/telegram.md
+	// §11.12.4.1 for the full contract.
+	resultMessageID int64
 }
 
 // toolPendingEntry is one in-flight OutToolStart. The matching

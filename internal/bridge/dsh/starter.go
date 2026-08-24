@@ -13,8 +13,9 @@
 //	s.Start(ctx, cfg) + SendBlocks + drain → RunResult + defer a.Close()
 //
 // where Close() invokes the existing driver.Close path which already
-// does Router.Unsubscribe + session.cancel + workspace.archiveSession
-// (session.go:916-955). RunOnce never spawns its own subprocess and
+// does Router.Unsubscribe + session.cancel + workspace.delete for
+// the driver-owned workspace (session.go::Close). RunOnce never
+// spawns its own subprocess and
 // never uses cfg.SessionID — every RunOnce is a fresh sessionId on
 // the shared host.
 //
@@ -115,7 +116,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // (R2 — explicit isolation from the chat session's context, no
 // implicit reliance on dsh CLI's "did it read ~/.dsh shared state"
 // behaviour the way the old `--profile headless` path did) and
-// archives that session via workspace.archiveSession as part of
+// tears down the driver-owned workspace via workspace.delete as part of
 // Close (R4 — dsh web's in-memory store doesn't pile up).
 //
 // cfg.SessionID is always ignored on RunOnce: every RunOnce is a
@@ -140,10 +141,21 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	// R4: defer Close drives Router.Unsubscribe + session.cancel +
-	// workspace.archiveSession (session.go:916-955). No new code
-	// needed — the chat-session lifecycle path is reused.
+	// workspace.delete (session.go::Close). No new code needed —
+	// the chat-session lifecycle path is reused.
 	defer a.Close()
-	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent)
+	// dsh's ensureFullAccess posts a `/permission danger-full-access`
+	// priming slash on every fresh session, which empirically fires a
+	// real model turn (host does NOT intercept leading `/`). Tell
+	// drainForRunResult to swallow that priming turn's (Result, Done)
+	// pair so it reads the SECOND Result as our actual prompt output.
+	// Skip is 2 (Result + Done of the priming turn); 0 when priming
+	// failed (no priming events to skip, first terminal is the real one).
+	skipPriming := 0
+	if d, ok := a.Driver().(*driver); ok && d.permissionPrimed {
+		skipPriming = 2
+	}
+	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent, skipPriming)
 }
 
 // Review implements the `/review` slash command for dsh. It
@@ -168,6 +180,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 
+
 // drainForRunResult is the shared RunOnce / Review drain logic.
 // Mirrors acp/starter.go::collectResult in shape — both dsh and acp
 // are "live *Agent" bridges where RunOnce is a Start + drain +
@@ -182,7 +195,21 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 // EventAgentResult is an error path (claudecode stream-json's
 // `result` event never fired) — we surface that rather than silently
 // returning an empty RunResult.
-func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent)) (agent.RunResult, error) {
+//
+// Priming-turn skip (dsh-r--fix): ensureFullAccess posts
+// `/permission danger-full-access` via session.prompt right after
+// session.create, which empirically fires a full model turn on dsh
+// 0.1.x (the doc said "host intercepts leading `/`" but the host
+// actually passes it to the model). That priming turn completes
+// BEFORE our actual prompt's turn, so without a skip drain would
+// return the priming turn's "Understood... danger-full-access..." text
+// as the review output. RunOnce passes skipPriming=2 to swallow the
+// priming turn's trailing (Result, Done) pair and read the SECOND
+// Result as the real output. Mock tests pass 0 (no priming turn in
+// the mock — ensureFullAccess's slash post returns OK without
+// synthesizing a response, so the priming events never arrive and
+// a non-zero skip would deadlock).
+func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent), skipPriming int) (agent.RunResult, error) {
 	name := a.Info.Name
 
 	// Seed from the *driver. By the time RunOnce calls drain, the
@@ -230,6 +257,10 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					model = ev.Model
 				}
 			case agent.EventAgentResult:
+				if skipPriming > 0 {
+					skipPriming--
+					continue
+				}
 				if ev.Result == nil {
 					return agent.RunResult{}, fmt.Errorf(
 						"agent %s: result event with nil payload%s",
@@ -244,10 +275,10 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					Subtype:    ev.Result.Subtype,
 				}, nil
 			case agent.EventAgentDone:
-				// Terminal without a result event: the turn settled
-				// without an assistant reply (likely an interrupted
-				// or empty turn). Surface as an error with the
-				// captured session/model so the caller can audit.
+				if skipPriming > 0 {
+					skipPriming--
+					continue
+				}
 				return agent.RunResult{}, fmt.Errorf(
 					"agent %s: turn ended without result event%s",
 					name, auditFields(sessionID, model))
@@ -259,14 +290,6 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					"agent %s: error event with nil payload%s",
 					name, auditFields(sessionID, model))
 			}
-			// EventAgentText / EventAgentToolStart/End / Permission /
-			// TaskCreate/Update: forwarded to sink (if set). Drain
-			// continues to wait for the terminal EventAgentResult /
-			// EventAgentDone / EventAgentError. One-shot calls run
-			// with full-access permission mode, so Permission events
-			// shouldn't normally fire — if they do, the sink sees
-			// them but no ResponseCh routing is performed (the user
-			// cannot approve from outside the one-shot flow).
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.Canceled) {
 				return agent.RunResult{}, fmt.Errorf("agent %s: canceled: %w", name, ctx.Err())

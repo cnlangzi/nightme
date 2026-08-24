@@ -2,17 +2,17 @@
 
 > **Status**: ✅ **统一架构 2026-08-22** — `Start` 与 `RunOnce` / `Review` **都走 `--profile web` shared host**;`dsh --profile headless` 路径已废弃
 > **Wire 协议参考**: [./dsh-api.md](./dsh-api.md) — 权威 wire contract(TS source + 实机)
-> **共享 host 设计 + 实现**: [./dsh-shared-host.md](./dsh-shared-host.md) — 1:N multiplexing、全局 watchdog + restart recovery、`workspace.archiveSession` 行为
+> **共享 host 设计 + 实现**: [./dsh-shared-host.md](./dsh-shared-host.md) — 1:N multiplexing、全局 watchdog + restart recovery、`workspace.archiveSession` 行为(repo-scoped workspace 跨 session 持久)
 > **Scope**: `internal/bridge/dsh/` — nightme 侧的 DeepSeek Harness (`@deepseek-ai/dsh`) bridge
 > **形态**:**一桥一端** — 全部走 shared-host web
 >   - **`Starter.Start`(chat session,long-lived)**:持有 `*Agent` 多轮
->   - **`Starter.RunOnce` / `Starter.Review`(一次性)**:与 `Start` 同一形态,但跑完 `defer a.Close()` 走 `workspace.archiveSession` 归档
+>   - **`Starter.RunOnce` / `Starter.Review`(一次性)**:与 `Start` 同一形态,但跑完 `defer a.Close()` 走 `workspace.archiveSession` 隐藏 session row(repo-scoped workspace 跨 session 持久)
 >
 > **本版与 2026-08-16 版的关键差异**:
 > - `dsh/print.go` + `dsh/print_real_unix_test.go` **删除**(旧 headless 路径不再使用)
 > - `dsh.RunOnce` 不再 `proc.New` 任何子进程;改为 `s.Start + drain + defer Close`,与 `acp.RunOnce` 同构
 > - **R2 上下文隔离自动满足** —— 每次 RunOnce 在 dsh web 里 `session.create` 一个独立 sessionId,显式隔离;不再依赖 dsh CLI 的"是否读 ~/.dsh 共享状态"行为
-> - **R4 归档复用现有 `driver.Close`** —— 已有 `workspace.archiveSession` 调用,`defer a.Close()` 自动触发,**无新代码**
+> - **R4 隐藏 session row 复用现有 `driver.Close`** —— 已有 `workspace.archiveSession` 调用,`defer a.Close()` 自动触发,**无新代码**
 > **核心原则(用户 2026-08-14 锁定)**: 接入底层 AI agent,**不修改 agent 本地默认配置**;nightme 只管 transport + permissions(权限默认全开)。详见 [agent-no-config-tampering memory](../../.claude/projects/-Users-geax-code-geax-github-com-cnlangzi-nightme/memory/agent-no-config-tampering.md)
 > **姊妹文档**:
 > - [docs/bridge/dsh-shared-host.md](./dsh-shared-host.md) — **新架构:全局单实例 dsh,1:N 多路复用**
@@ -196,7 +196,7 @@ POST /api/respond
 | 跨进程 resume | ✅ --resume | ✅ thread/resume | ✅ --session-id | ✅ sessionId | ✅ `session.fork`(`dsh-api.md` §2)|
 | 二进制自包含 | ❌ npm | ❌ npm | ❌ npm | ❌ npm | ✅ npm |
 | RunOnce 隔离 | `claude -p` 新进程 | `codex exec` 新进程 | `pi -p` 新进程 | `opencode run` 新进程 | **`session.create` 新 sessionId,共用 dsh web 进程** |
-| RunOnce 收尾归档 | N/A(进程退即清) | N/A | N/A | N/A | **`defer a.Close()` → `workspace.archiveSession`** |
+| RunOnce 收尾隐藏 session | N/A(进程退即清) | N/A | N/A | N/A | **`defer a.Close()` → `workspace.archiveSession`** |
 
 ---
 
@@ -239,7 +239,7 @@ POST /api/respond
 4. ~~**print-mode 走 `dsh --profile headless` CLI** — 零新依赖,实机验证 PONG/ALPHA/BETA/YES/OK~~ — **2026-08-22 废弃**:headless 无显式 sessionId 隔离,可能从共享状态读到主 chat 上下文;RunOnce 改走 web,`dsh/print.go` 已删除
 5. **Start 报错清晰化**:`Starter.Start` 真实连 shared host(非返 "not implemented");`RunOnce` 复用 `Start` 形态
 6. **abort lifecycle 复用 codex 模式**:closeOnce.Do 守护 SIGINT/SIGTERM 兜底,channel 只在 lifecycle goroutine 关闭
-7. **RunOnce/Review 收尾归档**:`defer a.Close()` 自动驱动 `driver.Close` → `Router.Unsubscribe` + `session.cancel` + `workspace.archiveSession`(`dsh/session.go:916-955`),**无新代码**
+7. **RunOnce/Review 收尾隐藏 session row**:`defer a.Close()` 自动驱动 `driver.Close` → `Router.Unsubscribe` + `session.cancel` + `workspace.archiveSession(sessionID)`(`dsh/session.go::Close`),**无新代码**
 8. **RunOnce = `Start` + drain + `Close`** — 与 `acp.RunOnce` 同构;不引入新的子进程管理代码
 
 ### 2.2 已排除
@@ -265,7 +265,6 @@ internal/bridge/dsh/
   ├──
   ├── detect.go              # exec.LookPath("dsh") + `dsh web` smoke probe
   ├── session.go             # host.EnsureSharedHost + parse URL + handshake + lifecycle + closeOnce
-  │                          # ★ driver.Close 包含 workspace.archiveSession(RunOnce 收尾)
   │                          # ★ driver.Close 包含 workspace.archiveSession(RunOnce 收尾)
   ├── http.go                # HTTP RPC client(POST /api/{method})
   ├── ws.go                  # WebSocket client(mux + host,下行 only)
@@ -1266,14 +1265,17 @@ RunOnce := s.Start(ctx, cfg) + SendBlocks + drain → RunResult + defer a.Close(
 
 `Review` 直接调 `RunOnce`,prompt 改成 `agent.StandardPrompt()`。
 
-`defer a.Close()` 即 R4 归档 —— 现有 `driver.Close()`(`dsh/session.go:916-955`)已经按顺序做:
+`defer a.Close()` 即 R4 隐藏 session row —— 现有 `driver.Close()`(`dsh/session.go::Close`)已经按顺序做:
 
 1. `Router.Unsubscribe(sessionId)` —— 共享 host mux 停止路由该 sessionId 的帧
 2. `session.cancel` —— best-effort,benign if idle
-3. `workspace.archiveSession` —— 把该 session 从 dsh web 的"left list"分组移除,**但保留 session log 和 workspace accounting slot**
+3. **`workspace.archiveSession(sessionID)` —— 把 session row 从 dsh 的 left list 移除,但保留 repo-scoped workspace**(由 `detectRepoRoot` 在 `createFreshSession` 里解析出来的 git repo 根作为 workspace path)。多个 driver / session 共享同一 workspace — 用 `delete` 拆掉会牵连其它 live session 的 left-list 分组(commit 5a6bee0 / 02da551 走过这条路,然后被 commit `e9aa23d` 改回 archiveSession)。
 4. close events chan
 
-**关键推论**:本次改动**无新增归档代码**,`Close` 已经做完了。
+**关键推论**:本次改动**无新增清理代码**,`Close` 已经做完了。**为什么不用 `workspace.delete`**:
+- workspace 是 repo-scoped(commit `e9aa23d` 起改用 `git rev-parse --show-toplevel` 作为 workspace path),跨 driver 共享 — 同一个 git repo 的 chat session 和 /review run 共用一个 workspace;删掉会牵连
+- workspace.create 路径幂等(同 path 返回已有 workspace,带 `created:false`),无 dedup 焦虑
+- 之前 `workspace.delete` 路线在 commit 5a6bee0 加了"created 才 stamp workspaceID" 防御来补 idempotency 漏洞,本质是给错误策略打补丁 — 现在 archiveSession 把补丁也省了
 
 ### 15.3 实现要点
 
@@ -1285,7 +1287,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig,
     if err != nil {
         return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
     }
-    defer a.Close() // ★ R4:driver.Close 已完成 workspace.archiveSession
+    defer a.Close() // ★ R4:driver.Close 已完成 workspace.archiveSession(session row 隐藏,workspace 保留)
     return drainForRunResult(ctx, a, blocks)
 }
 ```
@@ -1317,7 +1319,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig) (agent.RunR
 
 **测试覆盖分两层**:
 
-- **Mock 层**(`starter_test.go`,无需真 dsh):覆盖 `Starter.Info` 契约、`drainForRunResult` 三个终态分支(`EventAgentResult` / `EventAgentDone` / `EventAgentError`)、`cfg.SessionID` 在 RunOnce 上被 strip、`defer a.Close()` 触发 `workspace.archiveSession`。
+- **Mock 层**(`starter_test.go`,无需真 dsh):覆盖 `Starter.Info` 契约、`drainForRunResult` 三个终态分支(`EventAgentResult` / `EventAgentDone` / `EventAgentError`)、`cfg.SessionID` 在 RunOnce 上被 strip、`defer a.Close()` 触发 `workspace.archiveSession`(`TestRunOnce_ArchiveOnClose` + `TestRunOnce_DoesNotDeleteWorkspace` 锁定 archive-not-delete 契约)。
 - **真机 e2e 层**(`runonce_real_unix_test.go`,需 `NIGHTME_REAL_DSH=1` + 本机装 dsh):覆盖端到端流程 —— 真 dsh web lazy spawn + 握手 + session.prompt + minimax-cn 模型响应 + session 归档。
 
 `TestRunOnce_IsolatedSessions` 和 `TestReview_UsesStandardPrompt` 没在 mock 里:连续 `RunOnce` 调用在 mock 上有 state-pollution race(`session.create` 跟第一次 Close 之间的窗口),但真 dsh 进程独立 sessionId 互不干扰,所以 e2e 层覆盖了这两个语义。
@@ -1369,7 +1371,7 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption
 - [ ] `TestDrainForRunResult_DoneWithoutResult`:`EventAgentDone` 无前导 Result → error with audit fields
 - [ ] `TestDrainForRunResult_ErrorEvent`:`EventAgentError` 触发 drain 错误返回
 - [ ] `TestRunOnce_StripsSessionID`:`cfg.SessionID` 在 RunOnce 路径被 strip,永远 fresh session
-- [ ] `TestRunOnce_ArchiveOnClose`:`defer a.Close()` 触发 `workspace.archiveSession`(R4)
+- [ ] `TestRunOnce_ArchiveOnClose`:`defer a.Close()` 触发 `workspace.archiveSession`(R4 — session row 隐藏,workspace 保留)
 - [ ] `TestDrainForRunResult_SinkReceivesEvents`:sink 收到 Text / ToolStart / ToolEnd / Result(每种 kind 一次)
 - [ ] `TestDrainForRunResult_NilSinkSafe`:nil sink 不 panic
 
@@ -1381,7 +1383,7 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption
 
 #### 真机手动验证(可选,需要真实 feishu/telegram channel)
 
-- [ ] `/gtw commit` 跑通:feishu chat **实时**看到 thinking / tool call / result(中间过程,不是只有最终 card),日志 `dsh: session archived`
+- [ ] `/gtw commit` 跑通:feishu chat **实时**看到 thinking / tool call / result(中间过程,不是只有最终 card),日志 `dsh: session archived session_id=…`
 - [ ] `/gtw pr` 跑通,同上
 - [ ] `/review` 跑通,中间过程实时可见,review text 完整,日志同上
 - [ ] 打开 dsh web dashboard,确认 left list **没有** RunOnce 跑完后的残留 session
@@ -1393,9 +1395,9 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption
 | 启动开销 | 每次 1-3s cold start | lazy 一次 + 后续 50-200ms/次 |
 | 上下文隔离 | **不可控**(可能从共享状态读到主 chat 上下文) | **显式隔离**(`session.create` 新 sessionId) |
 | 跨 session 串扰 | 风险:headless 偷看主 chat 上下文 | 隔离保证 |
-| 归档 | 不需要(进程即清) | `workspace.archiveSession` |
+| 隐藏 session row | 不需要(进程退即清) | `workspace.archiveSession` |
 | 多 session 并发 | N/A(进程独立) | ✅ 共享 dsh web,native 支持 n 个 session |
-| 日志 | 进程级 stdout | 增加 `dsh: session archived` 行 |
+| 日志 | 进程级 stdout | 增加 `dsh: session archived session_id=…` 行 |
 | 测试模式 | `print_real_unix_test.go` 跑 mock script | `session_real_unix_test.go` 跑 mock dsh web |
 | **用户自启 dsh web** | 不复用(headless 跑自己的) | **nightme 自动 attach**(`EnsureSharedHost` 的 reuse-or-spawn 命中 `DiscoverExisting`);用户原本开的 dashboard 与 nightme session 共享 mux 通道 — 可观测但不影响 nightme 行为 |
 
@@ -1405,5 +1407,8 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption
 |----|------|------|
 | **本 PR(2026-08-22)** | dsh RunOnce 路径切换 + R3 sink | 删 `print.go` + 改 `starter.go` + 加 `RunOnceOption` + sink 接线 + 测试 |
 | (无) | — | R3 sink 已在本次 PR 完成,无需后续 |
+| **`02da551`(2026-08-24)** | `driver.Close` 改用 `workspace.delete`(拆 driver-owned workspace),不再 `archiveSession`(空 workspace 残留) | `driver.workspaceID` 字段 + `createFreshSession` 写它 + `Close` 用它 + mock 测试 `TestRunOnce_DeleteOnClose` + `/new` 断言改成 `deleteCount==0` |
+| **`5a6bee0`(2026-08-24)** | `createFreshSession` 只在 `created==true` 时 stamp `workspaceID`(同 cwd 两个 driver 拿到同一 workspace 不会互相删) | `WorkspaceCreate` RPC 返回 `(Summary, bool, error)`;`/new` 测试加 `deleteCount==1` |
+| **`e9aa23d`(2026-08-24)** | workspace 改用 git repo 粒度(`detectRepoRoot`)+ 回到 `workspace.archiveSession`(跨 driver 共享) | `detectRepoRoot` helper + `createFreshSession` 用 repo root + `driver.workspaceID` 字段删除 + `Close` 改回 `archiveSession` + mock 测试 `TestRunOnce_DeleteOnClose` → `TestRunOnce_ArchiveOnClose` |
 
 每个 PR 独立可 ship、独立可回滚。**架构先行,事件流化随后**。

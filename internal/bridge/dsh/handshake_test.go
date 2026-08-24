@@ -27,7 +27,7 @@ type handshakeMock struct {
 	workspaceCount atomic.Int64
 	historyCount   atomic.Int64
 	cancelCount    atomic.Int64
-	archiveCount   atomic.Int64
+	archiveCount   atomic.Int64 // Close calls workspace.archiveSession (repo-scoped workspace survives)
 	promptCount    atomic.Int64
 	promptFailNext atomic.Bool
 
@@ -123,15 +123,30 @@ func writeErr(w http.ResponseWriter, rpcID, code, msg string) {
 	})
 }
 
+// handleWorkspaceCreate mirrors the dsh wire contract:
+// `{workspace, created: bool}` (dsh-api.md §2.4.2). The mock
+// returns created=true by default; tests that need to exercise
+// the dedup-hit path (createFreshSession found an existing
+// workspace for the same path) flip m.dedupWorkspace to true.
+// handleWorkspaceCreate mirrors the dsh wire contract:
+// `{workspace, created: bool}` (dsh-api.md §2.4.2). The `created`
+// boolean is logged but otherwise ignored — workspace ownership
+// no longer tracked at the bridge level (commit 5a6bee0 reverted
+// to repo-scoped workspaces that survive across drivers).
+// Each call returns a fresh workspaceId ("ws-mock-1", ...) so
+// Reset / multi-RunOnce tests can distinguish workspaces.
 func (m *handshakeMock) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 	m.workspaceCount.Add(1)
 	env := decodeEnvelope(r)
+	idx := m.workspaceCount.Load() - 1
+	wsID := fmt.Sprintf("ws-mock-%d", idx+1)
 	writeOK(w, env.RPCID, map[string]any{
 		"workspace": map[string]any{
-			"workspaceId": "ws-mock-1",
+			"workspaceId": wsID,
 			"path":        "/tmp/ws",
 			"title":       "ws",
 		},
+		"created": true,
 	})
 }
 
@@ -206,6 +221,8 @@ func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *
 		"archivedSessionIds": []string{payload.SessionID},
 	})
 }
+
+
 
 // dispatchAssistantMessage emits a synthetic assistant/message
 // mux frame so the driver's readPump pushes EventAgentText into
@@ -470,7 +487,7 @@ func TestReset_InPlaceSingleCreate(t *testing.T) {
 		t.Fatalf("session.cancel calls = %d, want >= 1 for the old session", mock.cancelCount.Load())
 	}
 	if mock.archiveCount.Load() != 0 {
-		t.Fatalf("workspace.archiveSession calls = %d, want 0 (/new is not Archive Session)", mock.archiveCount.Load())
+		t.Fatalf("workspace.archiveSession calls = %d, want 0 (Reset does NOT touch the workspace — repo-scoped workspace survives across /new resets in the same repo)", mock.archiveCount.Load())
 	}
 
 	select {
@@ -538,7 +555,7 @@ func TestClose_ArchivesSession(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	if mock.archiveCount.Load() < 1 {
-		t.Fatal("Close did not POST /api/workspace.archiveSession (dashboard Archive Session)")
+		t.Fatal("Close did not POST /api/workspace.archiveSession (workspace survives, session row hidden)")
 	}
 	if mock.cancelCount.Load() < 1 {
 		t.Fatal("Close did not POST /api/session.cancel before archive")

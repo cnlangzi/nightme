@@ -169,6 +169,18 @@ type driver struct {
 	// goroutine doesn't outlive the events channel drain.
 	backfillCancel context.CancelFunc
 
+	// permissionPrimed is true when ensureFullAccess successfully
+	// posted the `/permission danger-full-access` priming slash
+	// command. The host does NOT actually intercept leading `/` —
+	// empirically the model processes it as a real user turn. The
+	// priming turn fires BEFORE the RunOnce / Review caller's prompt
+	// turn, so drainForRunResult consults this flag to skip the
+	// priming turn's EventAgentResult and read the SECOND one
+	// (which carries the actual review / commit output). Set false
+	// when the priming slash post fails so the drain doesn't
+	// discard a legitimate first terminal.
+	permissionPrimed bool
+
 	// Lifecycle guards. The events chan is closed by Close() itself
 	// (no separate lifecycle goroutine — the host owns the dsh
 	// subprocess now, so there's nothing for lifecycle to wait on).
@@ -416,12 +428,22 @@ func (d *driver) attachSession(ctx context.Context, sessionID, cwd string) error
 }
 
 // createFreshSession allocates a new dsh session in a workspace
-// keyed by cwd. Does not mutate d.sessionID — callers assign on
-// success so Reset can create the replacement before dropping the
-// old subscription.
+// keyed by the GIT REPO root (not cwd — see detectRepoRoot).
+// Workspace is repo-scoped, so a chat session and a /review run
+// in different subdirs of the same repo share the workspace,
+// and the workspace survives across sessions (Close uses
+// workspace.archiveSession, never delete). workspace.create
+// is idempotent by path: an already-owned repo returns the
+// existing workspace with `created == false` (dsh-api.md
+// §2.4.2); the driver doesn't care who created it.
+//
+// Does not mutate d.sessionID — callers assign on success so
+// Reset can create the replacement before dropping the old
+// subscription.
 func (d *driver) createFreshSession(ctx context.Context, workspace string) (string, error) {
+	repoRoot := detectRepoRoot(workspace)
 	wsCtx, wsCancel := context.WithTimeout(ctx, handshakeTimeout)
-	ws, err := d.cli.RPC.WorkspaceCreate(wsCtx, workspace)
+	ws, err := d.cli.RPC.WorkspaceCreate(wsCtx, repoRoot)
 	wsCancel()
 	if err != nil {
 		return "", fmt.Errorf("dsh: workspace.create: %w", err)
@@ -450,14 +472,14 @@ func (d *driver) createFreshSession(ctx context.Context, workspace string) (stri
 	slogDefault().Info("dsh: session created",
 		"session_id", scVal.SessionID,
 		"workspace_id", ws.WorkspaceID,
-		"cwd", workspace)
+		"cwd", workspace,
+		"repo_root", repoRoot)
+	// Workspace is repo-scoped and shared across drivers.
+	 // archiveSession on Close takes sessionId (hides our row)
+	 // and leaves the workspace alive for sibling / future
+	 // drivers in the same repo.
 	return scVal.SessionID, nil
 }
-
-// (workspace.create lives in handshakeSession; the driver never
-// deletes the workspace — the dsh host's archive policy owns
-// cleanup, matching the dashboard's behavior. If we ever need
-// explicit teardown, call cli.RPC.WorkspaceDelete directly.)
 
 // resumeUnhealthyError is returned by handshakeSession when the
 // caller asked for resume (cfg.SessionID != "") and session.create
@@ -799,6 +821,15 @@ func (d *driver) ensureFullAccess(ctx context.Context) {
 		dLog("dsh: /permission danger-full-access failed", "err", errStr(err))
 		return
 	}
+	// Mark that the priming slash queued successfully. drainForRunResult
+	// reads this to skip the priming turn's terminal — the host does
+	// NOT actually intercept leading `/`; empirically the model runs a
+	// full turn on the slash, and that terminal arrives before the
+	// RunOnce / Review caller's actual prompt turn. Only set when the
+	// post succeeded (ack returned without transport error), so a
+	// failed priming does not silently discard a legitimate first
+	// terminal in the drain.
+	d.permissionPrimed = true
 	slogDefault().Info("dsh: session permission preset",
 		"session_id", d.sessionID,
 		"preset", fullAccessPreset)
@@ -824,6 +855,9 @@ func (d *driver) Reset(ctx context.Context) error {
 	}
 
 	oldID := d.sessionID
+	// Workspace is repo-scoped and shared — Reset does NOT tear
+	// down the old workspace. The /new semantics are "fresh
+	// session in the same repo", not "fresh repo".
 	newID, err := d.createFreshSession(ctx, d.workspace)
 	if err != nil {
 		return err
@@ -913,15 +947,19 @@ func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
 //  2. session.cancel so any in-flight turn settles (same RPC as
 //     the InputBar stop button; benign if already idle).
 //  3. workspace.archiveSession — drops the row from every grouping
-//     surface (left list) while keeping the session log. There is
-//     no session.delete on the wire (dsh-api.md §2: sessions.* has
-//     no delete; archive lives under workspace.*).
+//     surface (left list) while keeping the workspace alive. The
+//     workspace is keyed by the git repo (see createFreshSession),
+//     so multiple sessions across the same repo share one
+//     workspace — we MUST NOT delete it on close, or the next
+//     /review run in this repo would lose its sibling chat
+//     session's left-list grouping. There is no session.delete
+//     on the wire (dsh-api.md §2: sessions.* has no delete; archive
+//     lives under workspace.*).
 //  4. Close events chan — the runtime's readpump drains then exits.
 //
 // We DO NOT kill the dsh subprocess — that's the daemon's
 // responsibility (host.Client.Close), and it lives for the full
-// daemon lifetime now. We also do not workspace.delete: archive
-// keeps the cwd workspace so other sessions in it stay grouped.
+// daemon lifetime.
 func (d *driver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.closed)
@@ -938,21 +976,24 @@ func (d *driver) Close() error {
 		// on a sessionId nobody can answer anymore.
 		d.cli.Router.Unsubscribe(d.sessionID)
 		if d.sessionID != "" {
-			rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			if err := d.cli.RPC.SessionCancel(rpcCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
+			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := d.cli.RPC.SessionCancel(cancelCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
 				dLog("dsh: session.cancel on close: %v", err)
 			}
-			if err := d.cli.RPC.WorkspaceArchiveSession(rpcCtx, d.sessionID); err != nil {
-				if isBenignCancelErr(err) {
-					dLog("dsh: workspace.archiveSession already archived",
-						"session_id", d.sessionID, "err", errStr(err))
-				} else {
-					dLog("dsh: workspace.archiveSession on close: %v", err)
-				}
+			cancelCancel()
+			// archiveSession: drops the session row from dsh's left
+			// list (and the workspace's sessionIds), keeps the
+			// repo-scoped workspace alive for sibling / future
+			// drivers. Reverting from workspace.delete (02da551 /
+			// 5a6bee0) was wrong: delete tore down the shared
+			// workspace, wiping every other driver's session.
+			archiveCtx, archiveCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := d.cli.RPC.WorkspaceArchiveSession(archiveCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
+				dLog("dsh: workspace.archiveSession on close: %v", err)
 			} else {
 				slogDefault().Info("dsh: session archived", "session_id", d.sessionID)
 			}
-			rpcCancel()
+			archiveCancel()
 		}
 		// Close events AFTER unsubscribe so the runtime drains any
 		// frames already routed to handleMuxFrame (and thus into
@@ -1151,6 +1192,30 @@ func detectBranch(workspace string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// detectRepoRoot shells out to `git -C <workspace> rev-parse
+// --show-toplevel` and returns the absolute path of the git
+// repo's working root. Used by createFreshSession to key the
+// dsh workspace by REPO, not cwd — so a chat session and a
+// /review run in different subdirs of the same repo share the
+// same workspace, and the workspace survives across sessions
+// (archive on close, never delete). Returns dir unchanged when
+// cwd is not inside a git repo (claudecode does the same; lets
+// /review etc. still work outside any repo, with cwd-keyed
+// workspaces that never tear each other down either).
+func detectRepoRoot(workspace string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := proc.New(ctx, "git", "-C", workspace, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return workspace
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return workspace
+	}
+	return root
 }
 
 // slogDefault is a thin indirection so tests can override the

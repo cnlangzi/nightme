@@ -367,6 +367,24 @@ type WorkspaceSummary struct {
 // dsh server itself dedupes by path (workspaceRegistry.resolveByPath +
 // create) so a single call from the bridge is enough; we just call
 // workspace.create and trust the server's response.
+// WorkspaceCreate resolves or creates one workspace for `path`. The
+// response carries a `created` boolean: true when this call allocated
+// a new workspace (and the caller owns the cleanup contract), false
+// when an existing workspace was returned for an already-owned path
+// (and the caller MUST NOT tear it down on Close — other drivers or
+// dashboard sessions may live in it). See docs/bridge/dsh-api.md
+// §2.4.2 / workspace.schema.ts::workspaceCreateValueSchema.
+//
+// Callers driving ephemeral sessions (Starter.RunOnce / Review /
+// Starter.Start fresh path) gate ownership cleanup on `created`.
+// WorkspaceCreate resolves or creates one workspace for `path`.
+// The dsh wire is idempotent by path: an already-owned path returns
+// the existing workspace (dsh-api.md §2.4.2). Callers driving
+// ephemeral sessions in repo-scoped workspaces (Starter.RunOnce /
+// Review / Starter.Start) use this as a "get-or-create" — no
+// ownership tracking, no per-driver cleanup on Close (the
+// workspace survives across sessions, see driver.Close which
+// uses workspace.archiveSession instead of workspace.delete).
 func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, error) {
 	resp, err := c.Post(ctx, "workspace.create", map[string]any{"path": path})
 	if err != nil {

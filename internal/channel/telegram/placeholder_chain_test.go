@@ -1789,3 +1789,405 @@ func TestRenderActiveChunkBody_TaskInProgress_ShowsActiveFormSuffix(t *testing.T
 		t.Fatalf("non-in_progress rows must not carry ActiveForm suffix; got %q", body)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// v9 P3 — chunkBody.hasVisibleEntries / materializeChunk / blank-chunk bug fix
+// ---------------------------------------------------------------------------
+
+// TestChunkBody_HasVisibleEntries_Empty verifies a freshly-constructed
+// chunkBody (no entries, no taskList) returns false — there's nothing
+// to render.
+func TestChunkBody_HasVisibleEntries_Empty(t *testing.T) {
+	b := newChunkBody(0, "<b>🤖 Working...</b>")
+	if b.hasVisibleEntries() {
+		t.Fatalf("empty chunk must report hasVisibleEntries=false")
+	}
+}
+
+// TestChunkBody_HasVisibleEntries_WhitespaceOnly is the central
+// regression test for the blank-chunk bug (§11.12.19.2): ROTATE /
+// SPLIT paths were minting chunks whose entries were pure
+// whitespace. hasVisibleEntries must return false so materializeChunk
+// drops them.
+func TestChunkBody_HasVisibleEntries_WhitespaceOnly(t *testing.T) {
+	b := newChunkBody(0, "<b>🤖 Working...</b>")
+	b.appendEntry(" ")
+	b.appendEntry("\n")
+	b.appendEntry("\t\n")
+	if b.hasVisibleEntries() {
+		t.Fatalf("whitespace-only entries must report hasVisibleEntries=false")
+	}
+}
+
+// TestChunkBody_HasVisibleEntries_MixedHasReal verifies the predicate
+// is OR-over entries: any single non-whitespace entry makes it true.
+func TestChunkBody_HasVisibleEntries_MixedHasReal(t *testing.T) {
+	b := newChunkBody(0, "")
+	b.appendEntry("")
+	b.appendEntry("\n")
+	b.appendEntry("real content")
+	if !b.hasVisibleEntries() {
+		t.Fatalf("mixed entries with at least one non-whitespace must report true")
+	}
+}
+
+// TestChunkBody_HasVisibleEntries_FooterDoesNotCount is the
+// §11.12.19.2 root-cause regression test. The whole point of
+// hasVisibleEntries (vs strings.TrimSpace(Compose())) is that the
+// footer's box-drawing chars must NOT count as content. A chunk
+// with whitespace entries + a StatusBar footer must still report
+// false — that's the bug P3 fixes.
+func TestChunkBody_HasVisibleEntries_FooterDoesNotCount(t *testing.T) {
+	b := newChunkBody(0, "<b>💭 1 · 🔧 0</b>")
+	b.appendEntry("\n")
+	b.setFooter("┌──────────────›\n│ 🤖: claude · ...\n│ 💰: $0.05\n│ 📁: code/x\n└───────────────›")
+	if b.hasVisibleEntries() {
+		t.Fatalf("footer chrome must not flip hasVisibleEntries to true; the bug is exactly that it would")
+	}
+}
+
+// TestChunkBody_HasVisibleEntries_TaskListCounts covers the
+// setTaskList cold-create path: a chunk with NO entries but a
+// non-empty taskList must still report true — the `<b>📋 Tasks</b>`
+// + task rows are visible content. Regression for the bug where
+// setTaskList cold-create would be silently dropped by
+// materializeChunk.
+func TestChunkBody_HasVisibleEntries_TaskListCounts(t *testing.T) {
+	b := newChunkBody(0, "<b>🤖 Working...</b>")
+	b.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "only task", Status: agent.TaskPending},
+	})
+	if !b.hasVisibleEntries() {
+		t.Fatalf("chunk with only taskList must report hasVisibleEntries=true")
+	}
+}
+
+// TestMaterializeChunk_DropsBlank verifies that materializeChunk
+// returns (false, nil) for a blank chunk and does NOT invoke
+// sendFn — the core blank-chunk bug fix.
+func TestMaterializeChunk_DropsBlank(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	b := newChunkBody(0, "<b>🤖 Working...</b>")
+	b.appendEntry("\n")
+	b.setFooter("┌──›\n│ 🤖: ...\n└───›")
+
+	sendFn := noSendFn // any send call would fail this test
+	materialized, err := materializeChunk(context.Background(), chain, b,
+		"100", 0, 1, sendFn)
+	if err != nil {
+		t.Fatalf("materializeChunk on blank chunk must return nil err; got %v", err)
+	}
+	if materialized {
+		t.Fatalf("blank chunk must report materialized=false")
+	}
+	if len(chain.chunks) != 0 {
+		t.Fatalf("blank chunk must NOT be appended to chain.chunks; got %d", len(chain.chunks))
+	}
+	if b.messageID != 0 {
+		t.Fatalf("blank chunk must NOT have messageID set; got %d", b.messageID)
+	}
+}
+
+// TestMaterializeChunk_SendsVisible covers the happy path: a chunk
+// with real entries + footer gets sent, messageID is written back,
+// and the chunk is appended to chain.chunks.
+func TestMaterializeChunk_SendsVisible(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	b := newChunkBody(0, "<b>💭 1</b>")
+	b.appendEntry("real content")
+
+	materialized, err := materializeChunk(context.Background(), chain, b,
+		"100", 0, 1, recordingSend())
+	if err != nil {
+		t.Fatalf("materializeChunk: %v", err)
+	}
+	if !materialized {
+		t.Fatalf("visible chunk must report materialized=true")
+	}
+	if len(chain.chunks) != 1 {
+		t.Fatalf("visible chunk must be appended; got %d chunks", len(chain.chunks))
+	}
+	if b.messageID == 0 {
+		t.Fatalf("visible chunk must have messageID set")
+	}
+	if !chain.dirty {
+		t.Fatalf("chain.dirty must be true after materializeChunk")
+	}
+}
+
+// TestMaterializeChunk_PartialFooter_StillBlank: even with footer
+// chrome (which strings.TrimSpace(Compose()) can't detect as blank),
+// the predicate still drops it because footer doesn't count.
+func TestMaterializeChunk_PartialFooter_StillBlank(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	b := newChunkBody(0, "<b>💭 1</b>")
+	b.appendEntry("\n")
+	chain.lastFooter = []string{"fake-line"}
+
+	materialized, err := materializeChunk(context.Background(), chain, b,
+		"100", 0, 1, noSendFn)
+	if err != nil {
+		t.Fatalf("materializeChunk: %v", err)
+	}
+	if materialized {
+		t.Fatalf("whitespace entries + footer must still report blank; that's the bug")
+	}
+}
+
+// TestMaterializeChunk_SendFnErrorPropagates: sendFn failure must
+// propagate and the chain.chunks / chain.dirty must NOT be mutated.
+func TestMaterializeChunk_SendFnErrorPropagates(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	b := newChunkBody(0, "")
+	b.appendEntry("real")
+
+	failingSend := func(_ context.Context, _ string, _ int, _ int, _ string) (int64, error) {
+		return 0, errors.New("simulated Telegram API failure")
+	}
+	materialized, err := materializeChunk(context.Background(), chain, b,
+		"100", 0, 1, failingSend)
+	if err == nil {
+		t.Fatalf("sendFn error must propagate")
+	}
+	if materialized {
+		t.Fatalf("materialized must be false on sendFn error")
+	}
+	if len(chain.chunks) != 0 {
+		t.Fatalf("failed chunk must NOT be appended; got %d", len(chain.chunks))
+	}
+	if chain.dirty {
+		t.Fatalf("chain.dirty must remain false on sendFn error")
+	}
+}
+
+// TestAppendSegment_WhitespaceSegment_NoNewChunk — the regression
+// test for the user-visible blank-chunk bug (§11.12.19.1). An
+// appendSegment with a whitespace-only segment must NOT mint a
+// new Telegram message; chain.chunks stays at 0 (no cold-create)
+// when starting from an empty chain.
+func TestAppendSegment_WhitespaceSegment_NoNewChunk(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	sendFn := noSendFn // any send call would fail this test
+	err := appendSegment(context.Background(), chain, "100", 0, 1,
+		"\n  \n\t", nil, sendFn, noEditFn())
+	if err != nil {
+		t.Fatalf("appendSegment with whitespace segment must return nil err; got %v", err)
+	}
+	if len(chain.chunks) != 0 {
+		t.Fatalf("whitespace cold-create must NOT mint a chunk; got %d", len(chain.chunks))
+	}
+	if chain.cursor != -1 {
+		t.Fatalf("chain.cursor must remain -1; got %d", chain.cursor)
+	}
+}
+
+// TestAppendSegment_WhitespaceSegment_NoRotateIntoNewChunk — the
+// ROTATE-side of the same bug. A real segment first, then a
+// whitespace ROTATE trigger must NOT mint a second chunk.
+func TestAppendSegment_WhitespaceSegment_NoRotateIntoNewChunk(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	if err := appendSegment(context.Background(), chain, "100", 0, 1,
+		"first real content", nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("first appendSegment: %v", err)
+	}
+	if len(chain.chunks) != 1 {
+		t.Fatalf("first chunk should materialize; got %d", len(chain.chunks))
+	}
+	// Force a ROTATE by stuffing entries past the 3500 threshold.
+	if err := appendSegment(context.Background(), chain, "100", 0, 1,
+		strings.Repeat("x", chainChunkThresholdChars+10),
+		nil, recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("long appendSegment: %v", err)
+	}
+	if len(chain.chunks) != 2 {
+		t.Fatalf("ROTATE should have created chunk 2; got %d", len(chain.chunks))
+	}
+	preCount := len(chain.chunks)
+	// Now a whitespace segment that happens to trigger ROTATE must
+	// NOT mint chunk 3.
+	err := appendSegment(context.Background(), chain, "100", 0, 1,
+		"\n\n", nil, noSendFn, noEditFn())
+	if err != nil {
+		t.Fatalf("whitespace ROTATE appendSegment: %v", err)
+	}
+	if len(chain.chunks) != preCount {
+		t.Fatalf("whitespace ROTATE must NOT mint a new chunk; pre=%d post=%d", preCount, len(chain.chunks))
+	}
+}
+
+// TestAppendSegmentLocked_WhitespaceSegment_NoNewChunk — same
+// regression but on the OutToolStart path (which calls
+// appendSegmentLocked directly, bypassing the adapter-level guard).
+func TestAppendSegmentLocked_WhitespaceSegment_NoNewChunk(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	chunkIdx, entryIdx := appendSegmentLocked(context.Background(), chain,
+		"100", 0, 1, "\n", nil, noSendFn)
+	if chunkIdx != -1 || entryIdx != -1 {
+		t.Fatalf("whitespace appendSegmentLocked must return (-1, -1); got (%d, %d)", chunkIdx, entryIdx)
+	}
+	if len(chain.chunks) != 0 {
+		t.Fatalf("whitespace appendSegmentLocked must NOT mint a chunk; got %d", len(chain.chunks))
+	}
+}
+
+// TestAppendErrorSegment_WhitespaceError_NoNewChunk — the OutError
+// path also must drop blank (text="", stderr="") cold-create calls.
+func TestAppendErrorSegment_WhitespaceError_NoNewChunk(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+	err := appendErrorSegment(context.Background(), chain, "100", 0, 1,
+		"", "", nil, noSendFn, noEditFn())
+	if err != nil {
+		t.Fatalf("appendErrorSegment with empty text+stderr: %v", err)
+	}
+	if len(chain.chunks) != 0 {
+		t.Fatalf("empty error must NOT mint a chunk; got %d", len(chain.chunks))
+	}
+}
+
+// TestSplitOversizedSegment_BlankPiece_NoSendMessage — SPLIT path
+// must not send a Telegram message for a piece that's pure
+// whitespace (rare, but the predicate still gates it). Locks in
+// the v9 P3 "no double-append" regression: each materialized
+// piece must produce exactly one chunk in chain.chunks AND exactly
+// one sendMessage call (pre-fix code appended twice, once inside
+// materializeChunk and once in the SPLIT loop after the loop).
+func TestSplitOversizedSegment_BlankPiece_NoSendMessage(t *testing.T) {
+	chain := &placeholderChain{cursor: -1}
+
+	var (
+		mu       sync.Mutex
+		sendHits int
+	)
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		// Reject empty / whitespace-only bodies — this would catch
+		// a regression where a blank piece slips through
+		// hasVisibleEntries.
+		if strings.TrimSpace(text) == "" {
+			t.Errorf("sendFn must NOT be called with whitespace-only body; got %q", text)
+		}
+		sendHits++
+		return int64(1000 + sendHits), nil
+	}
+
+	// Construct a segment whose split would produce at least one
+	// piece. splitTelegramText splits on \n boundaries; an oversize
+	// segment full of content forces SPLIT trigger 1.
+	oversize := strings.Repeat("x", chainChunkThresholdChars+200)
+	err := appendSegment(context.Background(), chain, "100", 0, 1,
+		oversize, nil, sendFn, noEditFn())
+	if err != nil {
+		t.Fatalf("appendSegment: %v", err)
+	}
+
+	mu.Lock()
+	hits := sendHits
+	mu.Unlock()
+
+	// The v9 P3 fix: materializeChunk appends to chain.chunks
+	// atomically. The SPLIT loop only counts via materializedCount
+	// (no slice append). So sendFn count must equal chain.chunks
+	// count after SPLIT — no double-append, no phantom chunks.
+	if hits == 0 {
+		t.Fatalf("SPLIT must invoke sendFn at least once")
+	}
+	if hits != len(chain.chunks) {
+		t.Fatalf("sendFn count (%d) must match chain.chunks count (%d); mismatch indicates double-append or phantom chunk", hits, len(chain.chunks))
+	}
+	for i, ch := range chain.chunks {
+		if ch.messageID == 0 {
+			t.Fatalf("chunk[%d] must have a non-zero messageID after SPLIT", i)
+		}
+	}
+	if chain.cursor < 0 || chain.cursor >= len(chain.chunks) {
+		t.Fatalf("cursor %d out of range after SPLIT", chain.cursor)
+	}
+	if chain.chunks[chain.cursor].messageID == 0 {
+		t.Fatalf("active cursor chunk must have a non-zero messageID")
+	}
+}
+
+// TestFlushChainNow_OverflowWithBlankTail_DirtyInvariant — locks in
+// the v9 P3 F1 fix. Scenario: splitTelegramText yields ≥3 pieces,
+// intermediates materialize, tail drops (blank). Without F1, the
+// tail block only cleared chain.dirty when the tail materialized;
+// with intermediates setting chain.dirty=true via materializeChunk,
+// dirty stayed true while cursor pointed at the frozen cur. Next
+// flushChainNow would Compose cur (entries=nil after
+// freezeAfterOverflow + footer) and editFn would clobber the user's
+// existing pieces[0] message with header-only content.
+//
+// Repro path: seed cur with enough content that Compose > 3900
+// (forces overflow); chain.dirty must be false after flushChainNow
+// completes regardless of whether the tail piece was blank.
+func TestFlushChainNow_OverflowWithBlankTail_DirtyInvariant(t *testing.T) {
+	chain := &placeholderChain{cursor: 0, chunks: []*chunkBody{{
+		messageID: 100,
+		header:    "<b>💭 1</b>",
+	}}}
+
+	// Stuff entries to push Compose well past 3900 so splitTelegramText
+	// produces multiple pieces. The tail-piece boundary is
+	// determined by splitTelegramText; we don't control which piece
+	// is "last" directly — but the F1 invariant holds regardless:
+	// chain.dirty must be false after flushChainNow returns.
+	bigEntry := strings.Repeat("x", maxTelegramTextLength-100) // forces multi-piece split
+	chain.chunks[0].appendEntry(bigEntry)
+	chain.dirty = true
+
+	var (
+		mu       sync.Mutex
+		sendHits int
+	)
+	sendFn := func(_ context.Context, _ string, _ int, _ int, text string) (int64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		// Reject empty bodies — would catch a regression where
+		// the blank-tail predicate fails to drop.
+		if strings.TrimSpace(text) == "" {
+			t.Errorf("sendFn must NOT be called with whitespace body; got %q", text)
+		}
+		sendHits++
+		return int64(2000 + sendHits), nil
+	}
+	editFn := func(_ context.Context, _ string, _ int64, _ string) error { return nil }
+
+	if err := flushChainNow(context.Background(), chain,
+		"100", 0, 1, editFn, sendFn); err != nil {
+		t.Fatalf("flushChainNow: %v", err)
+	}
+
+	// The F1 invariant: chain.dirty must be false after the
+	// overflow completes. Pre-fix bug left dirty=true with cursor
+	// at frozen cur; a follow-up flushChainNow would then Compose
+	// cur (entries=nil after freezeAfterOverflow) and editFn
+	// clobber pieces[0]'s messageID with empty render.
+	if chain.dirty {
+		t.Fatalf("chain.dirty must be false after flushChainNow completes; F1 invariant violated")
+	}
+	if chain.cursor < 0 {
+		t.Fatalf("cursor must point at a valid chunk after flushChainNow; got %d", chain.cursor)
+	}
+	// And cursor must NOT point at the original frozen cur (which
+	// has entries=nil + flushedLen set from the overflow). It must
+	// point at the last materialized chunk.
+	if chain.cursor == 0 && len(chain.chunks) > 1 {
+		t.Fatalf("cursor stuck at frozen cur[0]; should advance to last materialized chunk")
+	}
+	// A follow-up flushChainNow must be a no-op (dirty=false gate),
+	// confirming the F1 invariant end-to-end: no clobbering
+	// editFn call on the original cur.messageID.
+	editFnCalls := 0
+	guardedEditFn := func(_ context.Context, _ string, _ int64, _ string) error {
+		editFnCalls++
+		return nil
+	}
+	if err := flushChainNow(context.Background(), chain,
+		"100", 0, 1, guardedEditFn, sendFn); err != nil {
+		t.Fatalf("follow-up flushChainNow: %v", err)
+	}
+	if editFnCalls != 0 {
+		t.Fatalf("follow-up flushChainNow must no-op (dirty=false); editFn called %d times — F1 invariant broken", editFnCalls)
+	}
+}

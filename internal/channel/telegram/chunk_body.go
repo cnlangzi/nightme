@@ -455,14 +455,14 @@ func (b *chunkBody) renderTaskSection() string {
 		// += " " + checklistMore` semantics.
 		joined += " " + taskSectionMore
 	}
-	renderedMarkdown, err := RenderMarkdown(joined)
-	if err != nil {
-		// Fallback: escapeHTML the whole joined text. Should be
-		// unreachable — renderTaskLine produces plain ASCII and
-		// RenderMarkdown handles arbitrary input — but kept
-		// symmetric with the entries RenderMarkdown path.
-		renderedMarkdown = escapeHTML(joined)
-	}
+	renderedMarkdown := renderMarkdownSafe(joined)
+	// renderMarkdownSafe returns "" for empty input and falls back
+	// to escapeHTML on RenderMarkdown error internally — the
+	// unreachable-shouldn't-happen-but-defensive path used to be
+	// explicit here; renderMarkdownSafe makes that contract the
+	// only path. (renderTaskLine produces plain ASCII so the
+	// fallback is theoretical, but the safe-HTML contract is
+	// the same as the entries RenderMarkdown path.)
 	return taskHeadline + "\n" + renderedMarkdown
 }
 
@@ -541,11 +541,13 @@ func (b *chunkBody) Compose() string {
 			e := b.entries[i]
 			text := e.text
 			if !e.isHTML {
-				rendered, err := RenderMarkdown(text)
-				if err != nil {
-					rendered = escapeHTML(text)
-				}
-				text = rendered
+				// v9 P3 §11.12.19.3 Layer 3: route through
+				// renderMarkdownSafe so the empty-input
+				// short-circuit + escapeHTML fallback live in
+				// one place. The four fallback sites that
+				// historically each had their own try-render-or-
+				// escape pattern now share this single primitive.
+				text = renderMarkdownSafe(text)
 			}
 			out.WriteString(text)
 			// Trailing newline guard: ensure every entry ends
@@ -612,6 +614,57 @@ func (b *chunkBody) skipFlushedPrefix() int {
 
 func (b *chunkBody) messageIDValue() int64 { return b.messageID }
 func (b *chunkBody) isChunkFull() bool     { return b.isFull }
+
+// hasVisibleEntries answers "does this chunk carry real content
+// that the user will see in Telegram?".
+// Sole authority on whether a freshly-born chunk is worth sending.
+// Header is a status banner (rendered or skipped by the banner-skip
+// rule §11.12.5.1), footer is the StatusBar chrome (box-drawing +
+// emoji + path lines) — neither counts as content.
+//
+// Content sections counted:
+//   - entries: one or more non-whitespace text rows (the main
+//     activity log)
+//   - taskList: non-empty agent task snapshot (renders as the
+//     `<b>📋 Tasks</b>` headline + at least one task row in Compose)
+//
+// Why NOT strings.TrimSpace(b.Compose()) != "":
+//   - The footer box-drawing chars (┌──› / └──›) and emoji are
+//     non-whitespace, so TrimSpace(Compose()) is fooled by them
+//     into returning true for a chunk whose entries are pure
+//     whitespace. This is the exact bug P3 fixes (§11.12.19.2):
+//     ROTATE / SPLIT mints a chunk that Compose() renders as
+//     "[banner]\n────\n\n\n────\n[StatusBar panel]" — looks
+//     almost blank in chat, but Compose() string is non-empty.
+//
+// Why NOT len(b.entries) == 0:
+//   - ROTATE-triggered blank chunks have entries=["\n"] — non-zero
+//     length but pure whitespace content. The actual content of
+//     each entry must be inspected.
+//   - Pure-taskList chunks (setTaskList cold-create, no entries
+//     yet) have len(entries)==0 but ARE worth sending — the
+//     `<b>📋 Tasks</b>` + task rows are visible content.
+//
+// Caller contract: must populate entries via appendEntry /
+// appendEntryHTML / appendError AND/OR taskList via setTaskList
+// before asking. A freshly newChunkBody()-constructed chunk with
+// zero entries AND nil taskList returns false — consistent with
+// "don't mint an orphan placeholder".
+//
+// Used by materializeChunk (placeholder_chain_flush.go) as the
+// single drop-blank-chunk gate. Do not duplicate the check at
+// call sites; that's the DRY boundary §11.12.19.3 establishes.
+func (b *chunkBody) hasVisibleEntries() bool {
+	for _, e := range b.entries {
+		if strings.TrimSpace(e.text) != "" {
+			return true
+		}
+	}
+	if len(b.taskList) > 0 {
+		return true
+	}
+	return false
+}
 
 // entriesJoined returns the raw entries concatenated with \n
 // separators — equivalent to the legacy `cur.buf.String()`.

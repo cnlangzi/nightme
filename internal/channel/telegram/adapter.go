@@ -1336,14 +1336,18 @@ func (a *Adapter) sendOutResultMessage(
 	// backtick-fences / `[..](..)` — same path chunkBody.Compose()
 	// applies to chain entries, so the standalone message renders
 	// consistently with the intermediate activity log. Trailer
-	// below is already safe-HTML (statusbar.RenderPanel) and
-	// bypasses RenderMarkdown so the box-drawing `┌──› / └──›`
-	// frame isn't run through escapeHTML.
+	// below is built via appendTrailerToBody (v9 P3 §11.12.19.3
+	// Layer-3 primitive) so the "body + \n\n + StatusBar frame"
+	// pattern lives in one place. The frame is already safe-HTML
+	// (statusbar.RenderPanel box-drawing), so appendTrailerToBody
+	// bypasses RenderMarkdown / escapeHTML — otherwise the `┌──› /
+	// └──›` frame would be run through escapeHTML and mangled.
 	//
 	// StatusBar trailer — every text-emitting kind carries §18
 	// trailer, OutResult included. StatusBarLines returns nil when
-	// msg has no status-bearing fields, in which case we skip the
-	// trailer cleanly (matches chain appendSegmentForKind's policy).
+	// msg has no status-bearing fields, in which case
+	// appendTrailerToBody returns body unchanged (matches chain
+	// appendSegmentForKind's policy).
 	//
 	// No horizontal-rule separator between result body and trailer
 	// here — the trailer's box-drawing frame (┌──› / └──›) provides
@@ -1354,11 +1358,7 @@ func (a *Adapter) sendOutResultMessage(
 	// between entries and footer) because there the rule separates
 	// a long activity log from its summary footer.
 	body := RenderForWire(msg.Text)
-	var trailer string
-	if sb := statusbar.StatusBarLines(&msg); sb != nil {
-		trailer = "\n" + statusbar.RenderPanel(sb)
-	}
-	full := body + trailer
+	full := appendTrailerToBody(body, statusbar.StatusBarLines(&msg))
 
 	var messageIDs []int64
 	if len(full) <= maxTelegramTextLength {

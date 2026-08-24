@@ -1715,9 +1715,12 @@ v9 P2 把 OutResult 对齐到飞书 F-39 决策 —— **独立 reply 投递**�
 #### Markdown 渲染
 
 - `parse_mode=HTML` 走现有 `RenderMarkdown`，不切 MarkdownV2（escape 脆弱，参考 feishu.md §13.19）
-- **Wire-facing 入口**:所有 raw markdown → safe HTML 的转换集中在 `RenderForWire` (`internal/channel/telegram/render.go`)，是 markdown block 出口唯一的 helper。`sendOutResultMessage` 走它把 `msg.Text` 转成 HTML 再串 trailer；trailer 本身 (`statusbar.RenderPanel` 输出 `┌──› / └──›` 边框) 是手工构造的 safe HTML，**不再二次渲染**(否则 box-drawing 字符会被 escape)。
-- Chain 内的 entry 仍然走 `chunkBody.Compose` 路径 —— 因为 per-entry 路由要按 `isHTML` flag 拆分渲染过的 / 原始的 (`appendEntryHTML` 走 verbatim),`RenderForWire` 是 block 级别的包装,不适合塞进 Compose 的 per-entry loop,所以保持 Compose 直接调 `RenderMarkdown`。两个点都覆盖,DRY 不重复:RederForWire 是 block 入口,Compose 是 chunk 入口。
-- Feishu §13.17 / §13.19 同款 sanitize pipeline(非 HTTP URL → plain、fence newline、image strip、heading demotion)**只注入 `RenderForWire` 一次** —— 这就是它单独抽出来的最大动机:未来加 sanitize 只改一个函数,grep 不用扫整个 adapter。
+- **三层渲染原语（v9 P3 落地，§11.12.19）**：
+  - `renderMarkdownSafe(s string) string`（`render.go`，unexported）—— **唯一** 一处跑 `RenderMarkdown` + `escapeHTML` fallback + 空串 short-circuit。所有"raw markdown → safe HTML"的入口都走它，不在每个 call site 重复 try-render-or-escape 模式。
+  - `RenderForWire(raw string) string`（`render.go`，exported）—— wire-facing block 入口。`sendOutResultMessage` 走它把 `msg.Text` 转成 HTML 再串 trailer；trailer 本身 (`statusbar.RenderPanel` 输出 `┌──› / └──›` 边框) 是手工构造的 safe HTML，**不再二次渲染**(否则 box-drawing 字符会被 escape)。
+  - `chunkBody.Compose()` —— chain 消息入口，per-entry loop + `isHTML` flag 路由（`appendEntryHTML` 走 verbatim，跳过 `RenderMarkdown` 避免二次转义）。Compose 不套 `RenderForWire`，因为 `RenderForWire` 是 block-level 包装，会跟 per-entry `isHTML` 路由冲突。
+- **两个 markdown block 入口覆盖两条路径，不算重复**：`renderMarkdownSafe` 是原语（被 `RenderForWire` 和 `Compose` 共享），`RenderForWire` 是 standalone block 入口，`Compose` 是 chain chunk 入口。三层各管一摊：原语 / block 包装 / chunk 组合。
+- Feishu §13.17 / §13.19 同款 sanitize pipeline(非 HTTP URL → plain、fence newline、image strip、heading demotion)**只注入 `renderMarkdownSafe` 一次** —— 这就是它单独抽出来的最大动机：未来加 sanitize 只改原语一处，`RenderForWire` 和 `Compose` 自动继承，grep 不用扫整个 adapter。
 
 ### 11.12.14 summarize_tool 复用（同款）
 
@@ -1903,6 +1906,49 @@ func summarizeToolResult(name, output string, err error) string {
 - `TestAdapter_Send_OutResult_EmptyText_SilentDrop` —— 已有 `TestAdapter_Send_OutResultEmptyText`（adapter_test.go）继续守 empty-text silent drop 路径
 - `TestAdapter_Send_DM_OutResult_StandaloneMessageWithStatusBar` —— 翻写 `TestAdapter_Send_DM_OutResult_AppendsStatusBar`（adapter_statusbar_test.go）：从读 lastChunkText 改成直接读 sendMessage params["text"]，断言 result body + trailer 三行
 
+**v9 P3 渲染 DRY + blank-chunk 测试**(§11.12.19):
+
+数据类单元测试（`chunk_body_test.go` 或 `placeholder_chain_test.go`）：
+| 测试 | 验证 |
+|---|---|
+| `TestChunkBody_HasVisibleEntries_Empty` | entries=nil → false |
+| `TestChunkBody_HasVisibleEntries_WhitespaceOnly` | entries=`[" "`, `"\n"`, `"\t\n"]` → false |
+| `TestChunkBody_HasVisibleEntries_MixedHasReal` | entries=`[""`, `"real"]` → true（任一非空白即 true） |
+| `TestChunkBody_HasVisibleEntries_FooterDoesNotCount` | entries=`[""]` + footer=StatusBar + header=banner → false（**这就是 bug fix 的回归点**） |
+
+协调器单元测试（`placeholder_chain_test.go`）：
+| 测试 | 验证 |
+|---|---|
+| `TestMaterializeChunk_DropsBlankChunk` | chunk 全空白 → `(false, nil)`，`sendFn` 未调用，`chain.chunks` 未变 |
+| `TestMaterializeChunk_SendsVisibleChunk` | chunk 有 entries + footer → `(true, nil)`，`messageID` 写回，`chain.chunks` 增 1 |
+| `TestMaterializeChunk_PartialFooter_StillBlank` | entries=`["\n"]` + footer=panel → `(false, nil)`（footer 不救活空白） |
+| `TestMaterializeChunk_SendFnErrorPropagates` | sendFn 返 error → `(false, err)`，`chain.chunks` 未变 |
+
+端到端回归（`placeholder_chain_test.go` + `chain_integration_test.go`）：
+| 测试 | 验证 |
+|---|---|
+| `TestAppendSegment_WhitespaceSegment_NoNewChunk` | chain 已有 1 chunk，append 空白 segment → 不进 ROTATE mint 新 chunk；chain.chunks 长度不变 |
+| `TestAppendSegmentLocked_WhitespaceSegment_NoNewChunk` | OutToolStart ROTATE 路径同样不 mint |
+| `TestAppendErrorSegment_WhitespaceError_NoNewChunk` | OutError 全空白路径同样不 mint |
+| `TestSplitOversizedSegment_BlankPiece_NoSendMessage` | SPLIT 产出的 piece 全空白 → 该 piece 不 sendFn |
+| `TestFlushChainNow_OverflowPieces_DropsBlank` | trigger 3 safety net splitTelegramText 产出空白 piece → 不 sendFn |
+
+`renderMarkdownSafe` 共享原语测试（`render_test.go`）：
+| 测试 | 验证 |
+|---|---|
+| `TestRenderMarkdownSafe_EmptyReturnsEmpty` | `""` → `""`（short-circuit） |
+| `TestRenderMarkdownSafe_BoldPassesThrough` | `"**bold**"` → `"<b>bold</b>"`（走 RenderMarkdown） |
+| `TestRenderMarkdownSafe_FenceRendersAsPre` | ` ```\ncode\n``` ` → `<pre>code\n</pre>` |
+| `TestRenderMarkdownSafe_RawHTMLEscapes` | `"<script>"` → `"&lt;script&gt;"` |
+| `TestRenderMarkdownSafe_PreservesFallbackContract` | RenderMarkdown 返 error 时退到 `escapeHTML`（mock 验证） |
+
+`appendTrailerToBody` 测试（`render_test.go`）：
+| 测试 | 验证 |
+|---|---|
+| `TestAppendTrailerToBody_NoFooter` | `footerLines=nil` → body 原样返回 |
+| `TestAppendTrailerToBody_WithFooter` | body + footerLines → body + `\n\n` + RenderPanel(footerLines) |
+| `TestAppendTrailerToBody_PanelBoxDrawingPreserved` | panel 里的 `┌──›` / `└──›` 不被二次 escape |
+
 ### 11.12.17 已知限制
 
 | Limit | 描述 | 缓解 / 后续 |
@@ -1948,6 +1994,281 @@ func summarizeToolResult(name, output string, err error) string {
 - **2026-08-24** - **v9 P2.1 OutResult standalone 移除中间分隔线**（user feedback on first dotest）。`sendOutResultMessage` 不再在 result body 和 trailer 之间插入 `\n────────\n` —— trailer 自带 `┌──› / └──›` box-drawing 边框提供视觉边界，额外横线让 standalone reply-anchored message 看起来"断裂"。`adapter.go` sendOutResultMessage helper 改为 `trailer = "\n" + statusbar.RenderPanel(sb)`。**chain chunk 仍保留 `────────────────` 分隔**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行）—— chain 上的 entries 是 activity log 序列，footer 是状态 summary，两者之间需要强分隔。**测试更新**：`TestAdapter_Send_OutResult_SendsStandaloneReply` 移除 `────────` 断言（其他 trailer 三行断言保留）。**doc 更新**：§11.12.4.1 视觉示例 + §11.12.4.1 契约第 2 条 + §11.12.18 变更日志（本条）。
 
 - **2026-08-24** - **DRY: 收口 wire-facing markdown 渲染，新增 `RenderForWire`**。v9 P2 把 OutResult 改成独立 `sendMessage` 时漏掉了 markdown→HTML 渲染步骤（用户写 `**bold**` / ```fences``` / `[link](url)` 全渲染成字面字符）。本次修复：(1) `internal/channel/telegram/render.go` 新增 `RenderForWire(raw string) string` —— 单一 wire-facing 入口，包一层 `RenderMarkdown` + 空串 short-circuit + err fallback（escapeHTML）。`sendOutResultMessage` 调它一次，trailer (`statusbar.RenderPanel`) 仍直通不再二次渲染避免 box-drawing 被 escape。(2) DRY 清扫：`topic.go` 删除三个 dead method —— `sendText` / `sendRenderedText`(v8 per-bubble path 残留，v9 chain 接管后零调用) + `createTopic` / `editTelegramKeyboard`(从 topic-mode 评审期留下，代码默认论坛用现成 `message_thread_id`，从未有生产 caller)；`adapter.go:1638` 替换过时的 `sendRenderedText which v9 no longer routes` 历史注释。(3) **chunkBody.Compose 继续走 `RenderMarkdown` 不是 `RenderForWire`** —— Compose 是 per-entry loop + `isHTML` 路由，不能套 block-level 包装；两个入口覆盖两条路径不算重复，是 render.go 注释里固定的契约。(4) 测试：`render_test.go` 新增 5 个 `TestRenderForWire_*`（empty / bold / fence / link safe / raw HTML escape）+ `adapter_statusbar_test.go` 新增 `TestAdapter_Send_DM_OutResult_RendersMarkdownToHTML`（端到端断言 `<b>` / `<code>` / `<pre>` / `<a>` 都进 wire + literal `**` ``` ``` ``` `[..](..)` **不**进 wire + `parse_mode=HTML` 仍存在 + trailer 仍三行）。**doc 更新**：§11.12.13 重写 Markdown 渲染段，明确 `RenderForWire` 是 wire 入口 + Compose 是 chunk 入口 + 未来 sanitize pipeline 只注入 `RenderForWire` 一处；§11.12.18 变更日志（本条）。
+
+- **2026-08-24** - **v9 P3: 渲染 DRY 收口 + blank-chunk 修复**。详见 §11.12.19。本次修复分两条独立但同 PR 的线：(1) **blank-chunk bug fix**：ROTATE / SPLIT 路径在边界条件下（segment 是空白 / entries 全是 `"\n"`）mint 出"只有 footer 的假空白 chunk"，用户视角像没说话又发一条。根因是 11 个 sendFn 站点缺守卫 + `strings.TrimSpace(Compose())` 被 footer box-drawing 字符欺骗。修法：`chunkBody.hasVisibleEntries()` —— 唯一一处"是空白"定义，看 entries + taskList 两个 section；`materializeChunk` 协调器封装 `stampFooter → hasVisibleEntries 检查 → sendFn → messageID 写回 → chain.chunks append` 五步，11 个 sendFn 站点（`appendSegment` cold-create / ROTATE / `appendSegmentLocked` cold-create / ROTATE / `appendErrorSegment` cold-create / ROTATE / `splitOversizedSegmentLocked` 循环 / `splitOversizedErrorSegmentLocked` 循环 / `flushChainNow` overflow intermediate + tail / `setTaskList` cold-create）全部收敛。 (2) **渲染 DRY**：5 处 `RenderMarkdown + escapeHTML fallback` 模式（`chunkBody.Compose` per-entry / `chunkBody.renderTaskSection` / `splitOversizedSegmentLocked` / `splitOversizedErrorSegmentLocked` / `RenderForWire`）+ 1 处 `body + "\n\n" + RenderPanel(footerLines)` trailer 拼接模式（`sendOutResultMessage`）—— 收口到两个共享原语：`renderMarkdownSafe(s)` 和 `appendTrailerToBody(body, footerLines)`。三层结构（数据类 → 协调器 → 共享原语）跟现有 v9 P1.1（`inheritLatestHeader` 收口）+ v9 P2（`RenderForWire` 收口）的演化路径一致。改动文件：`render.go`（新增两个原语 + `RenderForWire` 改薄壳）/ `chunk_body.go`（新增 `hasVisibleEntries` + 2 处 fallback 收敛）/ `placeholder_chain_flush.go`（新增 `materializeChunk` + 11 站点收敛 + 2 处 fallback 收敛）/ `adapter.go`（`sendOutResultMessage` 用 `appendTrailerToBody`）。**Compose 和 RenderForWire 保持分离**（结构性差异：chain 消息 vs standalone 消息），只是共享 `renderMarkdownSafe` 原语。**doc 更新**：§11.12.13（Markdown 渲染三层原语结构）/ §11.12.16（追加 P3 测试矩阵 22 个新 test case）/ §11.12.18（本条）/ 新增 §11.12.19（完整 P3 spec）。**commit 拆解**（建议）：`render: add renderMarkdownSafe + appendTrailerToBody primitives` → `chunkBody: hasVisibleEntries predicate` → `placeholder_chain_flush: materializeChunk coordinator` → `appendSegment / appendSegmentLocked / appendErrorSegment: route through materializeChunk` → `splitOversized*Locked / flushChainNow overflow: route through materializeChunk` → `chunkBody.Compose / renderTaskSection / split*: use renderMarkdownSafe` → `sendOutResultMessage: use appendTrailerToBody` → `tests: 22 new test cases for §11.12.16` → `docs: §11.12.19 P3 spec`。
+
+### 11.12.19 渲染 DRY + blank-chunk 修复（2026-08-24）
+
+本节是 v9 P3 —— 收口渲染原语 + 修复 ROTATE/SPLIT 路径在边界条件下 mint 出的"只有 footer 的假空白 chunk"。**两条线独立但同 PR**：渲染原语收口（DRY）是 clean-code 改进，blank-chunk 修复是 user-visible bug fix。
+
+#### 11.12.19.1 现象：blank-chunk
+
+dotest 截图里，agent turn 末尾偶尔出现一条**新 Telegram 消息**，正文区域几乎全空，只剩 header + 分隔线 + StatusBar 三行 footer。从用户视角看像"什么都没说但又发了一条"。多次复现条件：ROTATE 触发的瞬间，新 segment 本身是空白（trim 后空），或 entries 里堆了一堆 `"\n"`（来自流式 flush 之间的空白分隔 + ACP bridge `flushBuffer` 残留）。
+
+#### 11.12.19.2 根因：两层叠加
+
+**根因 1：ROTATE / SPLIT 路径缺空白守卫**
+
+5 个真正调 `sendFn` mint 新 Telegram 消息的站点：
+
+| # | 站点 | 文件:行 | 守卫？ |
+|---|---|---|---|
+| 1 | `appendSegment` case 1 (cold-create) | `placeholder_chain_flush.go:123-158` | 无 |
+| 2 | `appendSegment` case 3 (ROTATE) | `placeholder_chain_flush.go:168-198` | 无 |
+| 3 | `appendSegmentLocked` case 1/3 (OutToolStart) | `placeholder_chain_flush.go:220-298` | 无 |
+| 4 | `splitOversizedSegmentLocked` (SPLIT trigger 1) | `placeholder_chain_flush.go:415-479` | 无 |
+| 5 | `splitOversizedErrorSegmentLocked` (OutError SPLIT) | `placeholder_chain_flush.go:912-` | 无 |
+| 6 | `flushChainNow` overflow (trigger 3 safety net) | `placeholder_chain_flush.go:551-614` | 无 |
+
+唯一一道防线在 `appendSegmentForKind`（`adapter.go:1262-1264`），但它只覆盖 OutReply / OutThinking / OutCommandReply / OutTask* 等 text-emitting kind；`appendSegmentLocked`（OutToolStart）绕过它直调 `appendSegmentLocked`，SPLIT 和 overflow 也不经过它。
+
+**根因 2：第一直觉的 `strings.TrimSpace(Compose()) != ""` 不灵**
+
+footer 是 box-drawing + emoji + 路径（`┌──› ... 🤖 ... 💰 ... 📁 ... └───›`），全是非空白字符。ROTATE 触发的空白 chunk 在 Telegram 端渲染后：
+
+```
+[banner header]
+────────────────
+\n\n
+────────────────
+┌──────────────›
+│ 🤖: claude · opus-4-5 · ...
+│ 💰: 「$0.05」
+│ 📁: code/nightme
+└───────────────›
+```
+
+`strings.TrimSpace` 只剥首尾空白，对中间的 footer 一行没辙。所以 `hasVisibleBody()` 永远返回 true，等于没守卫。**footer 是 chrome，不是内容** —— 真正的"内容"是 entries。
+
+#### 11.12.19.3 修复方案：三层（数据类 → 协调器 → 共享原语）
+
+```
+Layer 1 (data+view, chunk_body.go):
+    chunkBody.hasVisibleEntries() bool           ← 唯一的"是空白"定义
+    ── 只看 entries，footer/header/banner 都跳过
+
+Layer 2 (协调器, placeholder_chain_flush.go):
+    materializeChunk(ctx, chain, chunk, ...) (materialized bool, err error)
+    ── 唯一一处做 stampFooter+Compose+blank-check+sendFn+messageID 写回
+    ── 11 个 sendFn 站点都收敛到这里
+
+Layer 3 (共享原语, render.go):
+    renderMarkdownSafe(s) string                 ← 唯一一处 RenderMarkdown + escapeHTML fallback
+    appendTrailerToBody(body, footerLines) string ← 唯一一处 body + RenderPanel trailer 拼接
+    ── 5 处 RenderMarkdown fallback + 1 处 trailer 拼接都收敛到这里
+```
+
+##### Layer 1：`chunkBody.hasVisibleEntries()`
+
+```go
+// hasVisibleEntries answers "does this chunk carry real content
+// that the user will see in Telegram?".
+// Header is a status banner (rendered or skipped by banner-skip
+// rule), footer is the StatusBar chrome — neither counts as
+// content.
+//
+// Content sections counted:
+//   - entries: one or more non-whitespace text rows (the main
+//     activity log)
+//   - taskList: non-empty agent task snapshot (renders as the
+//     `<b>📋 Tasks</b>` headline + at least one task row in Compose)
+//
+// The blank-chunk bug fires when ROTATE / SPLIT mints a chunk
+// whose entries are pure whitespace: the chunk would visually
+// show as header-divider-footer with no body, but
+// strings.TrimSpace(Compose()) is fooled by the footer's
+// box-drawing chars and emoji and returns false-blank.
+//
+// Caller must populate entries via appendEntry / appendEntryHTML
+// / appendError AND/OR taskList via setTaskList before asking.
+// A freshly newChunkBody() chunk with zero entries AND nil
+// taskList returns false — consistent with "don't mint an orphan
+// placeholder".
+func (b *chunkBody) hasVisibleEntries() bool {
+    for _, e := range b.entries {
+        if strings.TrimSpace(e.text) != "" {
+            return true
+        }
+    }
+    if len(b.taskList) > 0 {
+        return true
+    }
+    return false
+}
+```
+
+**为什么不直接看 `Compose()`**？footer 的 box-drawing 字符让 `TrimSpace(Compose())` 永远 non-empty —— 这正是 bug 漏出来的原因。**为什么不看 `len(b.entries) == 0`**？ROTATE 触发的空白 chunk entries 不空（`["\n"]`），但内容是空白 —— 必须看 entries 的实际内容。
+
+##### Layer 2：`materializeChunk` 协调器
+
+```go
+// materializeChunk is the SOLE place that calls sendFn for a
+// freshly-born chunk. Encapsulates:
+//   1. stamp lastFooter onto chunk (if present)
+//   2. compose + hasVisibleEntries() check → drop if blank
+//   3. send via sendFn
+//   4. assign messageID back onto chunk
+//   5. append chunk to chain.chunks
+//   6. mark chain.dirty = true
+//
+// Callers decide what to do with `materialized`:
+//   - cold-create / ROTATE / SPLIT-tail: advance cursor
+//   - SPLIT intermediate: leave cursor alone (it's frozen)
+//
+// Returns (false, nil) for a dropped blank chunk — not an error,
+// just a no-op the caller should NOT advance cursor for.
+func materializeChunk(
+    ctx context.Context,
+    chain *placeholderChain,
+    chunk *chunkBody,
+    chatID string,
+    topicID, userMessageID int,
+    sendFn sendChunkFn,
+) (materialized bool, err error) {
+    if chain.lastFooter != nil {
+        chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+    }
+    if !chunk.hasVisibleEntries() {
+        return false, nil
+    }
+    body := chunk.Compose()
+    mid, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+    if err != nil {
+        return false, err
+    }
+    chunk.messageID = mid
+    chain.chunks = append(chain.chunks, chunk)
+    chain.dirty = true
+    return true, nil
+}
+```
+
+5 个站点收敛前：
+
+```go
+// (a) appendSegment case 1 cold-create
+if chain.cursor < 0 {
+    headerLine := heartbeatText(nil)
+    chunk := newChunkBody(0, headerLine)
+    chunk.appendEntry(segment)
+    if chain.lastFooter != nil {
+        chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+    }
+    body := chunk.Compose()
+    messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+    if err != nil { return err }
+    chunk.messageID = messageID
+    chain.chunks = []*chunkBody{chunk}
+    chain.cursor = 0
+    chain.dirty = true
+    return nil
+}
+```
+
+收敛后：
+
+```go
+if chain.cursor < 0 {
+    chunk := newChunkBody(0, heartbeatText(nil))
+    chunk.appendEntry(segment)
+    materialized, err := materializeChunk(ctx, chain, chunk,
+        chatID, topicID, userMessageID, sendFn)
+    if err != nil { return err }
+    if materialized {
+        chain.cursor = 0
+        chain.dirty = true
+    }
+    return nil
+}
+```
+
+ROTATE / SPLIT / flushChainNow overflow / setTaskList cold-create 等 11 个 sendFn 站点同样收敛。`dirty=true` 由协调器保证，调用方不再各自写。
+
+##### Layer 3：`renderMarkdownSafe` + `appendTrailerToBody`
+
+**`renderMarkdownSafe`** —— 5 处 fallback 收口：
+
+```go
+// renderMarkdownSafe is the SOLE place that runs RenderMarkdown +
+// escapeHTML fallback. Callers that need "markdown → safe HTML
+// for Telegram wire" should use this rather than duplicating the
+// try-render-or-escape pattern. RenderMarkdown and escapeHTML
+// remain exported for the rare caller (tests, low-level chunk
+// Compose per-entry loop) that wants raw escape or raw render.
+func renderMarkdownSafe(s string) string {
+    if s == "" {
+        return ""
+    }
+    out, err := RenderMarkdown(s)
+    if err != nil {
+        return escapeHTML(s)
+    }
+    return out
+}
+```
+
+调用方收敛：
+
+| 位置 | 之前 | 之后 |
+|---|---|---|
+| `chunkBody.Compose` per-entry | `RenderMarkdown + err→escapeHTML` | `text = renderMarkdownSafe(text)` |
+| `chunkBody.renderTaskSection` | 同上 | `renderedMarkdown := renderMarkdownSafe(joined)` |
+| `splitOversizedSegmentLocked` | 同上 | `rendered := renderMarkdownSafe(segment)` |
+| `splitOversizedErrorSegmentLocked` | 同上 | `rendered := renderMarkdownSafe(body)` |
+| `RenderForWire` | `RenderMarkdown + err→escapeHTML` | `return renderMarkdownSafe(raw)` |
+
+**`appendTrailerToBody`** —— 1 处 trailer 拼接收口：
+
+```go
+// appendTrailerToBody appends the StatusBar panel to body if
+// footerLines is non-nil. Returns body unchanged when footer is
+// absent. Used by sendOutResultMessage and any future single-
+// shot message render path.
+func appendTrailerToBody(body string, footerLines []string) string {
+    if len(footerLines) == 0 {
+        return body
+    }
+    return body + "\n\n" + statusbar.RenderPanel(footerLines)
+}
+```
+
+调用方收敛：
+
+| 位置 | 之前 | 之后 |
+|---|---|---|
+| `sendOutResultMessage` (adapter.go) | `body + "\n\n" + statusbar.RenderPanel(sb)` | `appendTrailerToBody(body, sb)` |
+
+#### 11.12.19.4 边界覆盖
+
+`hasVisibleEntries()` 矩阵（每个 case 都对应实际生产场景）：
+
+| 场景 | entries | hasVisibleEntries | 行为 |
+|---|---|---|---|
+| Cold-create + 真实 segment（`appendSegmentForKind` 已保 non-blank） | `["● Bash(go build)"]` | true | send ✓ |
+| Cold-create + 空白 segment（理论上被外层 guard 拦住，belt-and-suspenders） | `["\n"]` | false | skip ✓ |
+| ROTATE + 真实 segment | `["real content"]` | true | send ✓ |
+| **ROTATE + 空白 segment** | `["\n"]` | **false** | **skip ✓ ← 这就是 bug fix** |
+| SPLIT 单 piece 全空白 | `[""]` | false | skip ✓ |
+| SPLIT 多 piece，前几 piece 空白 | `[""]` | false | skip ✓ |
+| flushChainNow overflow piece 全空白 | `[""]` | false | skip ✓ |
+| SPLIT 后续 replaceEntry 把 entry 改空白（理论上不发生，guard 守住） | `["\n"]` | false | skip ✓ |
+
+#### 11.12.19.5 三层之间的边界
+
+- **Layer 1 ↔ Layer 2**：`chunkBody.hasVisibleEntries()` 由 `materializeChunk` 调用；其他 call site 不直接调它（保持单一权威点）。
+- **Layer 2 ↔ Layer 3**：`materializeChunk` 调 `chunkBody.Compose()`；`Compose()` per-entry 调 `renderMarkdownSafe`；`materializeChunk` 本身**不**直接调 `renderMarkdownSafe`（chunk 是已组装好的数据，不是 raw markdown）。
+- **Layer 3 之间**：`renderMarkdownSafe` 是 markdown → HTML 原语；`appendTrailerToBody` 是 body + panel 拼接原语。两者无依赖。
+
+#### 11.12.19.6 不做的事
+
+- **不**把 `Compose()` 和 `RenderForWire` 合并成一个 —— 结构性差异：chain 消息有 header/entries 多 section；standalone 是一段文本。强行合并要给零 entries / 单 entry 加分支判断。
+- **不**让 SPLIT 路径也走 lazy-render（per-piece Compose）—— 性能+正确性问题：单 entry > 3500 时 Compose 输出会超 4096 硬限，且每片都跑一遍 RenderMarkdown 是浪费。
+- **不**让 `hasVisibleEntries()` 直接看 `len(entries) == 0` 或 `Compose()` 整体 —— ROTATE 触发的空白 chunk entries 是 `["\n"]`（非空但内容空白），Compose 整体被 footer 干扰。只有逐条看 entry text 才能正确判定。
+- **不**wrap `chainSendFn()` 让 blank 返 0 —— sendFn 的纯 send 契约会被破坏，且每个站点还得处理"返 0 怎么办"，退化成 DRY 散落。
+
+#### 11.12.19.7 跟 §11.12.13 的关系
+
+§11.12.13（Markdown 渲染段）描述**结构**：三层原语 `renderMarkdownSafe` / `RenderForWire` / `chunkBody.Compose` 各管一摊。本节描述**演化**：v9 P3 把 4 处 `RenderMarkdown + escapeHTML` fallback 收口到 `renderMarkdownSafe`，把 5 处 sendFn + Compose 模板收口到 `materializeChunk`。两条线的语义不变（standalone 仍是 `RenderForWire`，chain 仍是 `Compose`），只是把"重复的样板代码"集中到原语层。
 
 ## 12. Telegram 交互输入：Type your answer + ForceReply
 

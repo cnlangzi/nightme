@@ -146,63 +146,84 @@ func TestRealPi_CommitPromptV2(t *testing.T) {
 
 	// ---- Assertions on the live output. ------------------------
 	//
-	// The LLM is responsible for the commit SUBJECT and BODY
-	// (text shape), not for actually executing git. So we
-	// validate the text shape:
+	// The slim-allowlist prompt tells the LLM its final text
+	// reply is just a brief confirmation ("<hash> <subject>"),
+	// not the commit body itself — the body lives in the commit
+	// (which the wrapper renders into the success card from
+	// `git log headBefore..HEAD`). So we split the assertions:
 	//
-	//   1. Subject matches Conventional Commits.
-	//   2. Body is substantive (>= 200 bytes for fix:/feat: —
-	//      guards the PR #135 regression).
-	//   3. No commit-time actions in the BODY (no `git push`,
-	//      no `git add -A`, no `git stash`). The check is
-	//      scoped to body so that the LLM echoing back the
-	//      prompt's hard rules ("I will not run `git push`")
-	//      doesn't trigger a false positive.
-	//   4. Issue trailer present in the body when c.Issue > 0.
+	//   - SUBJECT shape is checked from the LLM's text reply
+	//     (splitCCSubject handles the "abc1234 feat: …" prefix
+	//     the LLM emits as the brief confirmation).
+	//   - BODY shape (length, banned commands, Issue trailer)
+	//     is checked against the actual commit via `git log -1`.
+	//     This is what users see in `git log` and the IM
+	//     success card, so it is the deliverable we care about.
 
-	subject, body, ok := splitCCSubject(rawText)
+	subject, _, ok := splitCCSubject(rawText)
 	if !ok {
 		t.Fatalf("could not extract Conventional Commits subject from agent output:\n%s", rawText)
 	}
-	t.Logf("=== SUBJECT ===\n%s", subject)
-	if body != "" {
-		t.Logf("=== BODY (%d bytes) ===\n%s", len(body), body)
-	} else {
-		t.Logf("=== BODY === (empty)")
-	}
+	t.Logf("=== SUBJECT (from agent text) ===\n%s", subject)
 
 	// 1. Subject must be a valid CC type+scope+subject.
 	if !conventionalCommitsTitle(subject) {
 		t.Errorf("subject %q does not start with a Conventional Commits type", subject)
 	}
 
+	// Read the actual commit body via `git log -1 --format=%B`.
+	// The LLM ran `git commit` itself; the body we want to
+	// validate is whatever landed in the commit object, not
+	// whatever the LLM happened to write into its brief final
+	// text reply. (The streamed text during the run is the
+	// process visibility channel and is not what we test —
+	// we test the deliverable, which is the commit.)
+	logCmd := exec.Command("git", "log", "-1", "--format=%B")
+	logCmd.Dir = repoRoot
+	commitBodyBytes, err := logCmd.Output()
+	if err != nil {
+		t.Fatalf("git log -1: %v", err)
+	}
+	commitBody := strings.TrimSpace(string(commitBodyBytes))
+	if commitBody != "" {
+		t.Logf("=== COMMIT BODY (%d bytes) ===\n%s", len(commitBody), commitBody)
+	} else {
+		t.Logf("=== COMMIT BODY === (empty)")
+	}
+
 	// 2. Body substantive check (PR #135 regression guard).
 	// A non-trivial `fix:` or `feat:` must have a body. The
 	// 200-byte threshold catches both subject-only commits
 	// (~30-80 bytes) and pseudo-bodies like a single
-	// "Issue: #N" trailer (~12 bytes).
+	// "Issue: #N" trailer (~12 bytes). The check runs against
+	// the commit body (via git log), not the agent's text —
+	// the deliverable is the commit, and the slim prompt's
+	// final-reply contract is intentionally brief so the
+	// commit carries the body.
 	subjectType := ccType(subject)
-	if (subjectType == "fix" || subjectType == "feat") && len(body) < 200 {
+	if (subjectType == "fix" || subjectType == "feat") && len(commitBody) < 200 {
 		t.Errorf("commit body is %d bytes; %s: commits must have a substantive body (PR #135 regression guard)",
-			len(body), subjectType)
+			len(commitBody), subjectType)
 	}
 
-	// 3. No commit-time actions in the BODY (not the full raw
-	// text — see comment at the top of this block). The check
-	// matches the bare command name ("git push"), which also
-	// catches the backticked form ("`git push`") as a substring.
-	// The release-engineer prompt forbids these commands
-	// entirely, so any mention in the body is a violation —
+	// 3. No commit-time actions in the commit BODY (matches the
+	// bare command name "git push", which also catches the
+	// backticked form "`git push`" as a substring). The
+	// release-engineer prompt forbids these commands entirely,
+	// so any mention in the commit body is a violation —
 	// whether the LLM proposes to run them, claims it didn't
 	// run them, or summarises what it avoided.
 	for _, banned := range []string{"git push", "git add -A", "git stash", "git restore", "git checkout --"} {
-		if strings.Contains(body, banned) {
+		if strings.Contains(commitBody, banned) {
 			t.Errorf("commit body contains %q — the agent should never propose these commands", banned)
 		}
 	}
 
-	// 4. Issue trailer present in the body when c.Issue > 0.
-	if !strings.Contains(body, "Issue: #1") {
+	// 4. Issue trailer present in the commit body when
+	// c.Issue > 0. Checked against the commit, not the agent
+	// text — the trailer is metadata that must land in the
+	// commit object (which is what readers of `git log` see).
+	if !strings.Contains(commitBody, "Issue: #1") {
 		t.Errorf("commit body missing `Issue: #1` trailer; c.Issue=1 should propagate into the body")
 	}
 

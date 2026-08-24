@@ -143,7 +143,18 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	// workspace.archiveSession (session.go:916-955). No new code
 	// needed — the chat-session lifecycle path is reused.
 	defer a.Close()
-	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent)
+	// dsh's ensureFullAccess posts a `/permission danger-full-access`
+	// priming slash on every fresh session, which empirically fires a
+	// real model turn (host does NOT intercept leading `/`). Tell
+	// drainForRunResult to swallow that priming turn's (Result, Done)
+	// pair so it reads the SECOND Result as our actual prompt output.
+	// Skip is 2 (Result + Done of the priming turn); 0 when priming
+	// failed (no priming events to skip, first terminal is the real one).
+	skipPriming := 0
+	if d, ok := a.Driver().(*driver); ok && d.permissionPrimed {
+		skipPriming = 2
+	}
+	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent, skipPriming)
 }
 
 // Review implements the `/review` slash command for dsh. It
@@ -182,7 +193,60 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 // EventAgentResult is an error path (claudecode stream-json's
 // `result` event never fired) — we surface that rather than silently
 // returning an empty RunResult.
-func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent)) (agent.RunResult, error) {
+// drainForRunResult is the shared RunOnce / Review drain logic.
+// Mirrors acp/starter.go::collectResult in shape — both dsh and acp
+// are "live *Agent" bridges where RunOnce is a Start + drain +
+// Close variant.
+//
+// We seed session id + model from the underlying *driver (set during
+// handshake) and also accept updates from a subsequent
+// EventAgentReady (the first one wins; subsequent Ready events after
+// a resume / re-handshake would belong to a different turn's audit
+// trail). The final text + per-turn metadata come from
+// EventAgentResult. EventAgentDone without a preceding
+// EventAgentResult is an error path (claudecode stream-json's
+// `result` event never fired) — we surface that rather than silently
+// returning an empty RunResult.
+//
+// Priming-turn skip (dsh-r--fix): ensureFullAccess posts
+// `/permission danger-full-access` via session.prompt right after
+// session.create, which empirically fires a full model turn on dsh
+// 0.1.x (the doc said "host intercepts leading `/`" but the host
+// actually passes it to the model). That priming turn completes
+// BEFORE our actual prompt's turn, so without a skip drain would
+// return the priming turn's "Understood... danger-full-access..." text
+// as the review output. We track that the priming turn happened via
+// d.permissionPrimed (set by ensureFullAccess when the slash post
+// succeeds) and skip its terminal — second terminal is the real one.
+// drainForRunResult is the shared RunOnce / Review drain logic.
+// Mirrors acp/starter.go::collectResult in shape — both dsh and acp
+// are "live *Agent" bridges where RunOnce is a Start + drain +
+// Close variant.
+//
+// We seed session id + model from the underlying *driver (set during
+// handshake) and also accept updates from a subsequent
+// EventAgentReady (the first one wins; subsequent Ready events after
+// a resume / re-handshake would belong to a different turn's audit
+// trail). The final text + per-turn metadata come from
+// EventAgentResult. EventAgentDone without a preceding
+// EventAgentResult is an error path (claudecode stream-json's
+// `result` event never fired) — we surface that rather than silently
+// returning an empty RunResult.
+//
+// Priming-turn skip (dsh-r--fix): ensureFullAccess posts
+// `/permission danger-full-access` via session.prompt right after
+// session.create, which empirically fires a full model turn on dsh
+// 0.1.x (the doc said "host intercepts leading `/`" but the host
+// actually passes it to the model). That priming turn completes
+// BEFORE our actual prompt's turn, so without a skip drain would
+// return the priming turn's "Understood... danger-full-access..." text
+// as the review output. RunOnce passes skipPriming=2 to swallow the
+// priming turn's trailing (Result, Done) pair and read the SECOND
+// Result as the real output. Mock tests pass 0 (no priming turn in
+// the mock — ensureFullAccess's slash post returns OK without
+// synthesizing a response, so the priming events never arrive and
+// a non-zero skip would deadlock).
+func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent), skipPriming int) (agent.RunResult, error) {
 	name := a.Info.Name
 
 	// Seed from the *driver. By the time RunOnce calls drain, the
@@ -230,6 +294,16 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					model = ev.Model
 				}
 			case agent.EventAgentResult:
+				if skipPriming > 0 {
+					// Drop the priming turn's terminal — it carries
+					// the `/permission` acknowledgment, not our
+					// actual review/commit output. The priming turn
+					// is "throwaway" from the drain's perspective;
+					// the sink already saw its text + done so the
+					// chat timeline reflects what dsh actually did.
+					skipPriming--
+					continue
+				}
 				if ev.Result == nil {
 					return agent.RunResult{}, fmt.Errorf(
 						"agent %s: result event with nil payload%s",
@@ -246,8 +320,14 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 			case agent.EventAgentDone:
 				// Terminal without a result event: the turn settled
 				// without an assistant reply (likely an interrupted
-				// or empty turn). Surface as an error with the
-				// captured session/model so the caller can audit.
+				// or empty turn). If we're still consuming the
+				// priming turn's pair of terminals, swallow this one
+				// too — priming fires Result + Done in order, and
+				// we already skipped the Result above.
+				if skipPriming > 0 {
+					skipPriming--
+					continue
+				}
 				return agent.RunResult{}, fmt.Errorf(
 					"agent %s: turn ended without result event%s",
 					name, auditFields(sessionID, model))

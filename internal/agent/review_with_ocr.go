@@ -1056,5 +1056,36 @@ func mergeRunResults(agentName string, groups []reviewGroup, results []RunResult
 			g.Pattern, strings.Join(g.Files, ", "), results[i].Text)
 	}
 
-	return RunResult{Text: strings.TrimSpace(b.String())}, nil
+	// Audit metadata: propagate the FIRST successful job's session /
+	// model / duration / subtype so callers can tell which sessionId
+	// produced the merged review. Usage stays nil by design (v12 —
+	// consumer doesn't read it; per-job usage is in each RunResult).
+	// Each per-job RunOnce is an independent fresh session on the
+	// shared host, so the "first non-empty" is the most stable
+	// primary reference (subsequent jobs may have different
+	// sessionIds, and `Reviewed N groups.` already tells the caller
+	// there were multiple).
+	merged := RunResult{Text: strings.TrimSpace(b.String())}
+	for i, err := range errs {
+		if err != nil {
+			continue
+		}
+		r := results[i]
+		if merged.SessionID == "" && r.SessionID != "" {
+			merged.SessionID = r.SessionID
+		}
+		if merged.Model == "" && r.Model != "" {
+			merged.Model = r.Model
+		}
+		if merged.DurationMs == 0 && r.DurationMs > 0 {
+			merged.DurationMs = r.DurationMs
+		}
+		if merged.Subtype == "" && r.Subtype != "" {
+			merged.Subtype = r.Subtype
+		}
+		if merged.SessionID != "" && merged.Model != "" && merged.DurationMs > 0 && merged.Subtype != "" {
+			break
+		}
+	}
+	return merged, nil
 }

@@ -67,7 +67,7 @@ func TestDrainForRunResult_EventAgentResult(t *testing.T) {
 	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}}, nil)
+	}}, nil, 0) // skipPriming=0: mock doesn't synthesize a priming turn
 	if err != nil {
 		t.Fatalf("drainForRunResult: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestDrainForRunResult_DoneWithoutResult(t *testing.T) {
 	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}}, nil)
+	}}, nil, 0) // skipPriming=0: mock doesn't synthesize a priming turn
 	if err == nil {
 		t.Fatal("want error when EventAgentDone fires without Result")
 	}
@@ -142,7 +142,7 @@ func TestDrainForRunResult_ErrorEvent(t *testing.T) {
 	_, err = drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}}, nil)
+	}}, nil, 0) // skipPriming=0: mock doesn't synthesize a priming turn
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want wrap of %v", err, wantErr)
 	}
@@ -335,7 +335,7 @@ func TestDrainForRunResult_SinkReceivesEvents(t *testing.T) {
 	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}}, sink)
+	}}, sink, 0) // skipPriming=0: mock doesn't synthesize a priming turn
 	if err != nil {
 		t.Fatalf("drainForRunResult: %v", err)
 	}
@@ -397,11 +397,99 @@ func TestDrainForRunResult_NilSinkSafe(t *testing.T) {
 	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: "hi",
-	}}, nil)
+	}}, nil, 0) // skipPriming=0: mock doesn't synthesize a priming turn
 	if err != nil {
 		t.Fatalf("drainForRunResult with nil sink: %v", err)
 	}
 	if res.Text != "ok" {
 		t.Errorf("RunResult.Text = %q, want %q", res.Text, "ok")
+	}
+}
+
+// TestDrainForRunResult_SkipsPrimingTurn: when skipPriming=2 is
+// passed (the RunOnce path), drain swallows the first terminal pair
+// (Result + Done) and reads the SECOND Result as the actual prompt
+// output. Locks the dsh-r--fix contract in mock-land so a future
+// refactor doesn't regress to "priming turn's text leaks into
+// RunResult.Text".
+func TestDrainForRunResult_SkipsPrimingTurn(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+	s := NewStarter("dsh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if !drainOneReady(t, a, 2*time.Second) {
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+	d, _ := a.Driver().(*driver)
+
+	// Synthesize a priming turn: text + result + done.
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentText,
+		Text: "priming acknowledgment — should be skipped",
+	})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{
+			Text:    "priming result — should be skipped",
+			Subtype: "completed",
+		},
+	})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentDone,
+		Done:   &agent.AgentDoneEvent{Reason: "settled"},
+	})
+
+	// Then the real turn: text + result + done.
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentText,
+		Text: "real review text — should appear in RunResult.Text",
+	})
+	d.deliver(agent.AgentEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{
+			Text:    "real result — the actual output",
+			Subtype: "completed",
+		},
+	})
+
+	var seen []string
+	var mu sync.Mutex
+	sink := func(ev agent.AgentEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ev.Kind == agent.EventAgentResult {
+			seen = append(seen, ev.Result.Text)
+		}
+	}
+
+	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "review prompt",
+	}}, sink, 2)
+	if err != nil {
+		t.Fatalf("drainForRunResult: %v", err)
+	}
+	if res.Text != "real result — the actual output" {
+		t.Errorf("RunResult.Text = %q; want priming-skipped real output", res.Text)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("sink saw %d Result events, want 2 (priming + real): %v", len(seen), seen)
+	}
+	if seen[0] != "priming result — should be skipped" {
+		t.Errorf("sink Result[0] = %q; want priming text", seen[0])
+	}
+	if seen[1] != "real result — the actual output" {
+		t.Errorf("sink Result[1] = %q; want real text", seen[1])
 	}
 }

@@ -157,3 +157,67 @@ func TestMergeRunResults_NoSortNoDedupNoCoverage(t *testing.T) {
 		t.Errorf("expected input-order (group-1 BEFORE group-2), NOT severity-sort; merged: %s", merged.Text)
 	}
 }
+
+// TestMergeRunResults_PropagatesAuditMetadata: the merged RunResult
+// carries forward the FIRST successful job's SessionID / Model /
+// DurationMs / Subtype so callers (e.g. /review audit logging) can
+// tell which sessionId produced the merged review. Usage stays nil
+// (v12 — see TestMergeRunResults_UsageNotAggregated). Failures
+// before the first successful job are skipped.
+func TestMergeRunResults_PropagatesAuditMetadata(t *testing.T) {
+	groups := []reviewGroup{
+		{Pattern: "p1", Files: []string{"a"}},
+		{Pattern: "p2", Files: []string{"b"}},
+		{Pattern: "p3", Files: []string{"c"}},
+	}
+	results := []RunResult{
+		{Text: ""}, // failed job — skipped
+		{Text: "y", SessionID: "session-2", Model: "minimax", DurationMs: 1234, Subtype: "completed"},
+		{Text: "z", SessionID: "session-3", Model: "minimax", DurationMs: 9999, Subtype: "completed"},
+	}
+	errs := []error{
+		errors.New("first job crashed"),
+		nil,
+	 nil,
+	}
+
+	merged, err := mergeRunResults("agent-x", groups, results, errs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.SessionID != "session-2" {
+		t.Errorf("merged.SessionID = %q; want first successful %q", merged.SessionID, "session-2")
+	}
+	if merged.Model != "minimax" {
+		t.Errorf("merged.Model = %q; want first successful %q", merged.Model, "minimax")
+	}
+	if merged.DurationMs != 1234 {
+		t.Errorf("merged.DurationMs = %d; want first successful 1234", merged.DurationMs)
+	}
+	if merged.Subtype != "completed" {
+		t.Errorf("merged.Subtype = %q; want first successful %q", merged.Subtype, "completed")
+	}
+	if merged.Usage != nil {
+		t.Errorf("merged.Usage must remain nil (v12); got %+v", merged.Usage)
+	}
+}
+
+// TestMergeRunResults_AuditMetadataLeftEmptyWhenAllFailed: when all
+// jobs failed, mergeRunResults returns an error — no audit metadata
+// propagation is exercised on that path.
+func TestMergeRunResults_AuditMetadataLeftEmptyWhenAllFailed(t *testing.T) {
+	groups := []reviewGroup{
+		{Pattern: "p1", Files: []string{"a"}},
+		{Pattern: "p2", Files: []string{"b"}},
+	}
+	results := []RunResult{
+		{Text: "", SessionID: "session-1"},
+		{Text: "", SessionID: "session-2"},
+	}
+	errs := []error{errors.New("first"), errors.New("second")}
+
+	_, err := mergeRunResults("agent-x", groups, results, errs)
+	if err == nil {
+		t.Fatal("expected error when all jobs failed")
+	}
+}

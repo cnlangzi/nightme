@@ -169,6 +169,18 @@ type driver struct {
 	// goroutine doesn't outlive the events channel drain.
 	backfillCancel context.CancelFunc
 
+	// permissionPrimed is true when ensureFullAccess successfully
+	// posted the `/permission danger-full-access` priming slash
+	// command. The host does NOT actually intercept leading `/` —
+	// empirically the model processes it as a real user turn. The
+	// priming turn fires BEFORE the RunOnce / Review caller's prompt
+	// turn, so drainForRunResult consults this flag to skip the
+	// priming turn's EventAgentResult and read the SECOND one
+	// (which carries the actual review / commit output). Set false
+	// when the priming slash post fails so the drain doesn't
+	// discard a legitimate first terminal.
+	permissionPrimed bool
+
 	// Lifecycle guards. The events chan is closed by Close() itself
 	// (no separate lifecycle goroutine — the host owns the dsh
 	// subprocess now, so there's nothing for lifecycle to wait on).
@@ -799,6 +811,15 @@ func (d *driver) ensureFullAccess(ctx context.Context) {
 		dLog("dsh: /permission danger-full-access failed", "err", errStr(err))
 		return
 	}
+	// Mark that the priming slash queued successfully. drainForRunResult
+	// reads this to skip the priming turn's terminal — the host does
+	// NOT actually intercept leading `/`; empirically the model runs a
+	// full turn on the slash, and that terminal arrives before the
+	// RunOnce / Review caller's actual prompt turn. Only set when the
+	// post succeeded (ack returned without transport error), so a
+	// failed priming does not silently discard a legitimate first
+	// terminal in the drain.
+	d.permissionPrimed = true
 	slogDefault().Info("dsh: session permission preset",
 		"session_id", d.sessionID,
 		"preset", fullAccessPreset)

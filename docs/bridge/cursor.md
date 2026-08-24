@@ -365,7 +365,7 @@ func init() {
     //
     // Note: The binary name is `agent`, not `cursor`. Users must
     // ensure `agent` is on PATH after installing Cursor CLI.
-    agent.Builtins.Register(cursor.NewStarter("cursor", "agent", []string{"acp"}))
+    agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
 }
 ```
 
@@ -519,7 +519,7 @@ opencode 的翻译器处理 5 种特定 sessionUpdate 变体（agent_message_chu
 // internal/bridge/cursor/starter_test.go
 
 func TestStarter_Info(t *testing.T) {
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     info := s.Info()
     if info.Name != "cursor" {
         t.Errorf("expected name cursor, got %s", info.Name)
@@ -530,10 +530,10 @@ func TestStarter_Info(t *testing.T) {
 }
 
 func TestStarter_Detect(t *testing.T) {
-    if _, err := exec.LookPath("agent"); err != nil {
+    if _, err := exec.LookPath("cursor-agent"); err != nil {
         t.Skip("agent not on PATH")
     }
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     if err := s.Detect(); err != nil {
         t.Errorf("Detect failed: %v", err)
     }
@@ -554,7 +554,7 @@ func TestStarter_Detect_NotFound(t *testing.T) {
 
 func requireRealCursor(t *testing.T) {
     t.Helper()
-    if _, err := exec.LookPath("agent"); err != nil {
+    if _, err := exec.LookPath("cursor-agent"); err != nil {
         t.Skipf("agent binary not on PATH: %v", err)
     }
 }
@@ -562,7 +562,7 @@ func requireRealCursor(t *testing.T) {
 func TestE2E_FreshSession(t *testing.T) {
     requireRealCursor(t)
 
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     ctx := context.Background()
     cfg := agent.StartConfig{
         Workspace: t.TempDir(),
@@ -588,7 +588,7 @@ func TestE2E_FreshSession(t *testing.T) {
 func TestE2E_PrintMode(t *testing.T) {
     requireRealCursor(t)
 
-    s := NewStarter("cursor", "agent", []string{"acp"})
+    s := NewStarter("cursor", "cursor-agent", []string{"acp"})
     ctx := context.Background()
     cfg := agent.StartConfig{
         Workspace: t.TempDir(),
@@ -667,7 +667,7 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 
 在 `cmd/nightme/agents.go` 的 `init()` 中添加：
 ```go
-agent.Builtins.Register(cursor.NewStarter("cursor", "agent", []string{"acp"}))
+agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
 ```
 
 ### Step 5: 编写测试

@@ -623,17 +623,19 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Official PowerShell installer per
+          # https://cursor.com/docs/cli/installation. The
+          # ?win32=true query hint switches the installer to its
+          # pure-PowerShell branch (the bash branch at the same
+          # URL has no Windows code path and bails on Git Bash's
+          # `uname -s` output of MINGW64_NT-...). This branch
+          # downloads the Windows zip, extracts to
+          # %LOCALAPPDATA%\cursor-agent\versions\{ver}\, and
+          # drops `cursor-agent.cmd` on PATH. We do not add any
+          # aliasing logic of our own — bridge spawns `cursor-agent`
+          # directly (cmd/nightme/agents.go), matching what every
+          # user gets from the official installer.
           irm 'https://cursor.com/install?win32=true' | iex
-          $agentPath = "$env:LOCALAPPDATA\cursor-agent"
-          # Sanity check: the installer's alias-creation block
-          # copies cursor-agent.cmd → agent.cmd; fail loud if
-          # that's missing so we don't silently gate-fail later
-          # with a confusing "agent not on PATH".
-          if (-not (Test-Path "$agentPath\agent.cmd")) {
-            Write-Host "::error::cursor install did not produce $agentPath\agent.cmd"
-            exit 1
-          }
-          Write-Host "OK: cursor installed → $agentPath\agent.cmd"
           # Expose the install dir to the bash PATH/--help/
           # bridge-spawn gates below. ::add-path:: was deprecated
           # in 2020 (https://github.blog/changelog/2020-10-01-
@@ -642,9 +644,9 @@ jobs:
           # the official replacement is to append the directory to
           # the $GITHUB_PATH env file, which GitHub Actions reads
           # after the step and prepends to PATH for all subsequent
-          # steps in the job. Git Bash then resolves agent.cmd via
-          # PATHEXT.
-          Add-Content -Path $env:GITHUB_PATH -Value "$agentPath"
+          # steps in the job. Git Bash then resolves cursor-agent
+          # via PATHEXT (cursor-agent.cmd).
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:LOCALAPPDATA\cursor-agent"
 
       - name: Verify each agent binary is on PATH
         shell: bash
@@ -658,21 +660,28 @@ jobs:
           # extension names. macOS uses the standard POSIX
           # execvp lookup; Linux ditto.
           #
-          # cursor's binary is named `agent` on disk (per
-          # cmd/nightme/agents.go:113 — `cursor.NewStarter(
-          # "cursor", "agent", []string{"acp"})`). The
-          # bridge's Detect() does `exec.LookPath("agent")`,
-          # so this gate must resolve the same string.
-          # On Windows the official PowerShell installer
-          # aliases cursor-agent.cmd → agent.cmd in
-          # %LOCALAPPDATA%\cursor-agent, which is on PATH
-          # via the ::add-path:: directive emitted by the
-          # Install cursor CLI step above.
+          # cursor's binary is named `cursor-agent` on disk
+          # (per cmd/nightme/agents.go — `cursor.NewStarter(
+          # "cursor", "cursor-agent", []string{"acp"})`).
+          # The bridge's Detect() does `exec.LookPath(
+          # "cursor-agent")`, so this gate must resolve the
+          # same string. The official installer drops this
+          # on PATH on every platform:
+          #   unix    → bash installer creates
+          #             ~/.local/bin/cursor-agent (legacy
+          #             symlink alongside the primary agent)
+          #   windows → PowerShell installer (the
+          #             ?win32=true step above) creates
+          #             %LOCALAPPDATA%\cursor-agent\
+          #             cursor-agent.cmd; GITHUB_PATH
+          #             exposes the dir to subsequent
+          #             bash steps so Git Bash resolves
+          #             it via PATHEXT.
           # agent_to_binary maps agent name → exec.LookPath
           # target so the loop stays uniform across all 6.
           for agent in claude codex opencode pi dsh cursor; do
             case "$agent" in
-              cursor) bin=agent ;;
+              cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
             esac
             path=$(command -v "$bin" 2>/dev/null || true)
@@ -702,15 +711,17 @@ jobs:
           # means the CLI crashed before printing.
           #
           # Same agent→binary mapping as the PATH step: cursor's
-          # binary on disk is `agent` on every platform (the
-          # Windows installer's alias-creation block copies
-          # cursor-agent.cmd → agent.cmd), so we invoke
-          # `agent --help` to match what the bridge does at
-          # spawn time. PATHEXT on windows-latest lets Git
-          # Bash's `$bin --help` resolve to agent.cmd.
+          # binary is `cursor-agent` on every platform (no
+          # alias indirection — the Windows installer's
+          # alias-creation block was an installer courtesy
+          # we deliberately do not rely on), so we invoke
+          # `cursor-agent --help` to match what the bridge
+          # does at spawn time. PATHEXT on windows-latest
+          # lets Git Bash's `$bin --help` resolve to
+          # cursor-agent.cmd.
           for agent in claude codex opencode pi dsh cursor; do
             case "$agent" in
-              cursor) bin=agent ;;
+              cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
             esac
             output=$("$bin" --help 2>&1) || true

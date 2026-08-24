@@ -307,7 +307,17 @@ func TestAdapter_Send_DM_OutResult_StandaloneMessageWithStatusBar(t *testing.T) 
 		t.Fatalf("send: %v", err)
 	}
 	text := sendMessageText(api.snapshotCalls())
-	for _, want := range []string{"result body", "🤖: claude", "💰:「", "📁: " + pathutil.FromSlash("code/nightme")} {
+	for _, want := range []string{
+		"result body", "🤖: claude", "💰:「",
+		"📁: " + pathutil.FromSlash("code/nightme"),
+		// Trailer's box-drawing frame must survive verbatim —
+		// proves the trailer is composed outside RenderForWire
+		// (which would escape the ┌ / └ into &lt; / &gt;). This
+		// is the wire-level companion to render_test.go's
+		// TestRenderForWire_NotForAlreadyRenderedHTML, which
+		// nails down RenderForWire's "wrong use" behaviour.
+		"┌", "└", "›",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered text missing %q; got %q", want, text)
 		}

@@ -325,20 +325,34 @@ func TestRenderForWire_RawHTMLIsEscaped(t *testing.T) {
 	}
 }
 
-func TestRenderForWire_DoesNotTouchTrailerSafeHTML(t *testing.T) {
-	// RenderForWire is for the body of an outbound message; the
-	// StatusBar trailer is built by statusbar.RenderPanel which
-	// already emits safe HTML and is composed outside RenderForWire.
-	// This test pins the contract that RenderForWire is NOT
-	// chained on top of pre-rendered HTML (that would double-escape
-	// the box-drawing frame and escape entities a second time).
-	htmlTrailer := "┌──────────────────────›\n  🤖: claude\n└──────────────────────›"
-	if got := RenderForWire(htmlTrailer); strings.Contains(got, "&lt;") || strings.Contains(got, "┌") != strings.Contains(htmlTrailer, "┌") {
-		// ╴ The ┌ is preserved verbatim only because RenderForWire
-		// was NOT called on this trailer. The test asserts the
-		// invariant by construction: we never feed the trailer
-		// back through RenderForWire in production (see
-		// sendOutResultMessage).
-		_ = got
+func TestRenderForWire_NotForAlreadyRenderedHTML(t *testing.T) {
+	// Contract pin: RenderForWire is the raw-markdown → safe-HTML
+	// wire-facing entry. It is NOT safe to call on already-rendered
+	// HTML — entities get escaped a second time ("&amp;" →
+	// "&amp;amp;") and pre-baked tag literals ("<b>") turn into
+	// "&lt;b&gt;".
+	//
+	// sendOutResultMessage relies on this contract: the StatusBar
+	// trailer (statusbar.RenderPanel output) is pre-baked safe HTML
+	// and is composed OUTSIDE RenderForWire so the box-drawing frame
+	// + already-escaped entities survive intact. This test
+	// documents the "wrong use" (double-escape mode) so a future
+	// refactor that accidentally routes the trailer through
+	// RenderForWire — which would silently corrupt the StatusBar
+	// panel — is caught by the test suite as a visible regression
+	// (the assertions below start failing once the "wrong use"
+	// becomes the "correct use").
+	//
+	// pi review finding 2026-08-24: prior version of this test was
+	// vacuous (input had no < / > / &, so the condition was always
+	// false and the body never executed). The new input carries all
+	// three characters so each escape path fires.
+	in := "&amp; <b>safe</b>"
+	got := RenderForWire(in)
+	if !strings.Contains(got, "&amp;amp;") {
+		t.Errorf("RenderForWire must double-escape &amp; on already-rendered HTML; in=%q got=%q", in, got)
+	}
+	if !strings.Contains(got, "&lt;b&gt;") {
+		t.Errorf("RenderForWire must escape literal <b> tags; in=%q got=%q", in, got)
 	}
 }

@@ -264,9 +264,10 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 // receives for /gtw commit.
 //
 // Design goal (post-fix-gtw-commit): the LLM's only job is to
-// stage the worktree's dirty state into one or more well-formed
-// local commits and stop. It must NOT modify files, run tests,
-// run builds, verify its own work, push, rebase, or otherwise
+// stage the current local branch's uncommitted changes into one
+// or more local commits following Conventional Commits and stop.
+// It must NOT modify files, run tests, run builds, verify its
+// own work, push, rebase, or otherwise overstep.
 // overstep. nightme does readiness + post-commit verification
 // (verifyAgentCommitted); the LLM only writes commits.
 //
@@ -274,12 +275,19 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 // which taught the LLM to do patch / hunk surgery and self-
 // verification — see PR-feedback discussion 2026-08-24):
 //
-//   - Strict allowlist over denylist: name the four commands the
-//     LLM may run (status / diff-family / log / add / commit)
-//     and forbid everything else. A denylist ("don't run tests")
-//     leaves the LLM room to invent creative workarounds; an
-//     allowlist forces the LLM to justify any extra tool call
-//     against the list and (in practice) skip it.
+//   - Allowlist + denylist (defense in depth). The allowlist
+//     names the four commands the LLM may run (status /
+//     diff-family / log / add / commit). The denylist (the
+//     `You MUST NOT` block) names the actions that are known
+//     regression sources — file edits, `git apply` hunk
+//     surgery, test/build runs, self-verification, push,
+//     history mutation, branch hopping, revert/restore/stash,
+//     `git add -A`. Both layers matter: the allowlist alone
+//     leaves gaps (e.g. "don't run tests" via the Bash tool
+//     — the LLM could still try), and the denylist alone
+//     leaves the LLM room to invent creative workarounds for
+//     actions that aren't explicitly named. Together they
+//     cover both directions.
 //
 //   - Whole-file staging only: explicit "NOT `git add -A`, NOT
 //     hunk-level staging" rule + the `git apply` prohibition.
@@ -338,6 +346,17 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 //     is a task-focus problem, not a token-cost problem —
 //     detailed logs are wanted; the issue is the LLM
 //     forgetting to commit while it inspects.)
+//
+//     Tradeoff acknowledged: the old tool floor had a
+//     dedicated `git diff --staged` bullet ("if anything is
+//     already staged — don't lose work"). The new Workflow
+//     step 1 keeps that nudge inline ("If anything is already
+//     staged, also run `git diff --staged` — don't lose
+//     pre-staged work"), but demotes it from "mandatory
+//     inspection" to "conditional extra step". `git status`
+//     porcelain still surfaces staged files, so a careful
+//     agent can act on it; the explicit nudge survives as
+//     a workflow anchor, not a tool floor.
 //   - 5-row split rubric. Replaced with a one-line "ONE
 //     coherent commit beats two forced splits" anchor — the
 //     LLM already knows what an "intent" is.
@@ -358,7 +377,7 @@ func buildAgentPrompt(c Context) string {
 	var sb strings.Builder
 
 	// --- Role + scope -------------------------------------------
-	sb.WriteString("You are a release engineer. Stage the worktree's uncommitted changes into one or more well-formed local commits on the current branch. Push and PR creation are handled by separate steps; you ONLY commit.\n\n")
+	sb.WriteString("You are a release engineer. Stage the current local branch's uncommitted changes into one or more local commits following Conventional Commits on that branch. Push and PR creation are handled by separate steps; you ONLY commit.\n\n")
 
 	fmt.Fprintf(&sb, "Branch: %s\nWorktree: %s\n", c.Branch, c.Worktree)
 	if c.Issue > 0 {
@@ -386,7 +405,7 @@ func buildAgentPrompt(c Context) string {
 
 	// --- Workflow ------------------------------------------------
 	sb.WriteString("## Workflow\n")
-	sb.WriteString("1. Run `git status` + `git diff` ONCE to see what's dirty.\n")
+	sb.WriteString("1. Run `git status` + `git diff` ONCE to see what's dirty. If anything is already staged, also run `git diff --staged` — don't lose pre-staged work.\n")
 	sb.WriteString("2. Decide commit boundaries — one per logical intent. Use your judgment: ONE coherent commit beats two forced splits.\n")
 	sb.WriteString("3. For each commit: `git add <files>` then `git commit -m ...`. Stop.\n\n")
 

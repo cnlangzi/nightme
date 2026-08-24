@@ -566,34 +566,79 @@ jobs:
           #   dsh     → @deepseek-ai/dsh
           #             (per internal/bridge/dsh/starter.go:82
           #              Detect() error message + F-dsh-bridge.md)
-          #   cursor  → curl -fsSL https://cursor.com/install | bash
-          #             (per docs/bridge/cursor.md §2.1 — npm
-          #              package does not exist; binary lands as
-          #              `agent` on PATH)
+          #   cursor  → see "Install cursor CLI" step below.
+          #             The official installer is the SAME URL
+          #             on every platform (https://cursor.com/
+          #             install), but the user-agent / query
+          #             hint routes it to a different branch:
+          #               * unix    → curl ... | bash    (this step)
+          #               * windows → irm '...?win32=true' | iex
+          #                           (separate pwsh step)
+          #             Both branches install `agent` on PATH
+          #             (the binary name the bridge spawns via
+          #             exec.LookPath per cmd/nightme/agents.go:
+          #             113). npm install @cursor/cli does not
+          #             exist — the official installers are the
+          #             only supported channel.
           npm install -g @anthropic-ai/claude-code
           npm install -g @openai/codex
           npm install -g opencode-ai
           npm install -g @earendil-works/pi-coding-agent
           npm install -g @deepseek-ai/dsh
-          # Cursor CLI: officially supported via curl-pipe only.
-          # The installer puts `agent` on PATH under the
-          # runner user's $HOME; nothing to add to PATH here.
-          #
-          # Windows note: the official installer hard-rejects
-          # the MSYS / Git Bash environment that GitHub's
-          # windows-latest runner uses (its uname -s reports
-          # `MINGW64_NT-10.0-26100`, which the installer
-          # classifies as unsupported and exits 1). Cursor
-          # does not publish an npm package and offers no
-          # alternate install channel, so the Windows leg of
-          # this gate is reduced to "agent is registered in
-          # Builtins" — covered by the unconditional cursor
-          # row in the `nightme agents` step. The PATH,
-          # --help, and bridge-spawn gates below also skip
-          # cursor on Windows.
+          # Cursor CLI on unix: official curl-pipe bash installer.
+          # Drops `agent` into $HOME/.local/bin/agent — already on
+          # PATH for the hosted runner user. The Windows leg uses
+          # the separate pwsh step below; running the bash installer
+          # from Git Bash would fail with "Unsupported operating
+          # system: MINGW64_NT-..." because the bash branch has no
+          # Windows code path (case "${OS}" in Linux*|Darwin*)).
           if [ "${{ matrix.os }}" != "windows-latest" ]; then
             curl -fsSL https://cursor.com/install | bash
           fi
+
+      # Cursor CLI on windows-latest: official PowerShell
+      # installer per https://cursor.com/docs/cli/installation.
+      # The query hint `?win32=true` switches the installer
+      # script to its pure-PowerShell branch (the bash branch
+      # has no Windows code path — it bails on `uname -s`
+      # output of MINGW64_NT-... that Git Bash produces).
+      # The PowerShell branch downloads the Windows zip from
+      # https://downloads.cursor.com/lab/{ver}/windows/x64/
+      # agent-cli-package.zip, extracts to
+      # %LOCALAPPDATA%\cursor-agent\versions\{ver}\ (with
+      # dist-package renamed to the version), copies
+      # cursor-agent.cmd / .exe / .ps1 up one level, and
+      # aliases them as agent.cmd / agent.exe / agent.ps1 so
+      # `agent` resolves on PATH to the same binary the
+      # bridge spawns via exec.LookPath("agent") on every
+      # platform.
+      #
+      # The script also writes %LOCALAPPDATA%\cursor-agent to
+      # the user PATH. GitHub Actions' ::add-path:: directive
+      # propagates that to subsequent bash / pwsh steps in
+      # this job — without it the Git Bash PATH/--help/spawn
+      # gates below would not see agent.cmd via PATHEXT.
+      - name: Install cursor CLI (Windows — official PowerShell installer)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          irm 'https://cursor.com/install?win32=true' | iex
+          $agentPath = "$env:LOCALAPPDATA\cursor-agent"
+          # Sanity check: the installer's alias-creation block
+          # copies cursor-agent.cmd → agent.cmd; fail loud if
+          # that's missing so we don't silently gate-fail later
+          # with a confusing "agent not on PATH".
+          if (-not (Test-Path "$agentPath\agent.cmd")) {
+            Write-Host "::error::cursor install did not produce $agentPath\agent.cmd"
+            exit 1
+          }
+          Write-Host "OK: cursor installed → $agentPath\agent.cmd"
+          # Expose the install dir to the bash PATH/--help/
+          # bridge-spawn gates below. ::add-path:: prepends to
+          # PATH for all subsequent steps in the job; Git
+          # Bash's command -v resolves agent.cmd via PATHEXT.
+          Write-Host "::add-path::$agentPath"
 
       - name: Verify each agent binary is on PATH
         shell: bash
@@ -612,19 +657,14 @@ jobs:
           # "cursor", "agent", []string{"acp"})`). The
           # bridge's Detect() does `exec.LookPath("agent")`,
           # so this gate must resolve the same string.
+          # On Windows the official PowerShell installer
+          # aliases cursor-agent.cmd → agent.cmd in
+          # %LOCALAPPDATA%\cursor-agent, which is on PATH
+          # via the ::add-path:: directive emitted by the
+          # Install cursor CLI step above.
           # agent_to_binary maps agent name → exec.LookPath
           # target so the loop stays uniform across all 6.
-          #
-          # cursor is excluded from this loop on windows-
-          # latest because the official curl-pipe installer
-          # rejects the MSYS environment — see the Install
-          # step comment. On Linux/macOS the install above
-          # placed `agent` on PATH.
-          bin_agents="claude codex opencode pi dsh"
-          if [ "${{ matrix.os }}" != "windows-latest" ]; then
-            bin_agents="$bin_agents cursor"
-          fi
-          for agent in $bin_agents; do
+          for agent in claude codex opencode pi dsh cursor; do
             case "$agent" in
               cursor) bin=agent ;;
               *)      bin="$agent" ;;
@@ -656,15 +696,13 @@ jobs:
           # means the CLI crashed before printing.
           #
           # Same agent→binary mapping as the PATH step: cursor's
-          # binary on disk is `agent`, so we invoke `agent --help`
-          # to match what the bridge does at spawn time. Same
-          # Windows skip applies — cursor's installer rejects
-          # MSYS so the binary is not on PATH on windows-latest.
-          bin_agents="claude codex opencode pi dsh"
-          if [ "${{ matrix.os }}" != "windows-latest" ]; then
-            bin_agents="$bin_agents cursor"
-          fi
-          for agent in $bin_agents; do
+          # binary on disk is `agent` on every platform (the
+          # Windows installer's alias-creation block copies
+          # cursor-agent.cmd → agent.cmd), so we invoke
+          # `agent --help` to match what the bridge does at
+          # spawn time. PATHEXT on windows-latest lets Git
+          # Bash's `$bin --help` resolve to agent.cmd.
+          for agent in claude codex opencode pi dsh cursor; do
             case "$agent" in
               cursor) bin=agent ;;
               *)      bin="$agent" ;;
@@ -739,22 +777,15 @@ jobs:
           # protocol. Byte threshold + observation window is the
           # cross-protocol signal.
           #
-          # cursor is excluded from the spawn loop on windows-
-          # latest for the same reason it's excluded from PATH
-          # / --help: the official curl-pipe installer rejects
-          # the MSYS environment, so `agent` is not on PATH
-          # under windows-latest and the bridge's Detect()
-          # would error before the spawn even starts. The
-          # unconditional `nightme agents lists cursor` step
-          # is the windows-side equivalent — it asserts the
-          # builtin registration is intact without trying to
-          # actually launch the binary.
+          # cursor is included on every platform — the Windows
+          # installer (separate pwsh step above) aliases
+          # cursor-agent.cmd → agent.cmd and emits
+          # ::add-path:: so Git Bash can resolve it via
+          # PATHEXT. The bridge's exec.LookPath("agent")
+          # therefore works identically on linux / macos /
+          # windows.
           workspace=$(mktemp -d)
-          bin_agents="claude codex opencode pi dsh"
-          if [ "${{ matrix.os }}" != "windows-latest" ]; then
-            bin_agents="$bin_agents cursor"
-          fi
-          for agent in $bin_agents; do
+          for agent in claude codex opencode pi dsh cursor; do
             echo "--- bridge spawn: $agent ---"
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it

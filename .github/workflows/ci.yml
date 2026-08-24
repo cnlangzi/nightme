@@ -578,7 +578,22 @@ jobs:
           # Cursor CLI: officially supported via curl-pipe only.
           # The installer puts `agent` on PATH under the
           # runner user's $HOME; nothing to add to PATH here.
-          curl -fsSL https://cursor.com/install | bash
+          #
+          # Windows note: the official installer hard-rejects
+          # the MSYS / Git Bash environment that GitHub's
+          # windows-latest runner uses (its uname -s reports
+          # `MINGW64_NT-10.0-26100`, which the installer
+          # classifies as unsupported and exits 1). Cursor
+          # does not publish an npm package and offers no
+          # alternate install channel, so the Windows leg of
+          # this gate is reduced to "agent is registered in
+          # Builtins" — covered by the unconditional cursor
+          # row in the `nightme agents` step. The PATH,
+          # --help, and bridge-spawn gates below also skip
+          # cursor on Windows.
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            curl -fsSL https://cursor.com/install | bash
+          fi
 
       - name: Verify each agent binary is on PATH
         shell: bash
@@ -599,7 +614,17 @@ jobs:
           # so this gate must resolve the same string.
           # agent_to_binary maps agent name → exec.LookPath
           # target so the loop stays uniform across all 6.
-          for agent in claude codex opencode pi dsh cursor; do
+          #
+          # cursor is excluded from this loop on windows-
+          # latest because the official curl-pipe installer
+          # rejects the MSYS environment — see the Install
+          # step comment. On Linux/macOS the install above
+          # placed `agent` on PATH.
+          bin_agents="claude codex opencode pi dsh"
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            bin_agents="$bin_agents cursor"
+          fi
+          for agent in $bin_agents; do
             case "$agent" in
               cursor) bin=agent ;;
               *)      bin="$agent" ;;
@@ -632,8 +657,14 @@ jobs:
           #
           # Same agent→binary mapping as the PATH step: cursor's
           # binary on disk is `agent`, so we invoke `agent --help`
-          # to match what the bridge does at spawn time.
-          for agent in claude codex opencode pi dsh cursor; do
+          # to match what the bridge does at spawn time. Same
+          # Windows skip applies — cursor's installer rejects
+          # MSYS so the binary is not on PATH on windows-latest.
+          bin_agents="claude codex opencode pi dsh"
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            bin_agents="$bin_agents cursor"
+          fi
+          for agent in $bin_agents; do
             case "$agent" in
               cursor) bin=agent ;;
               *)      bin="$agent" ;;
@@ -707,8 +738,23 @@ jobs:
           # check would couple this gate to a single bridge's
           # protocol. Byte threshold + observation window is the
           # cross-protocol signal.
+          #
+          # cursor is excluded from the spawn loop on windows-
+          # latest for the same reason it's excluded from PATH
+          # / --help: the official curl-pipe installer rejects
+          # the MSYS environment, so `agent` is not on PATH
+          # under windows-latest and the bridge's Detect()
+          # would error before the spawn even starts. The
+          # unconditional `nightme agents lists cursor` step
+          # is the windows-side equivalent — it asserts the
+          # builtin registration is intact without trying to
+          # actually launch the binary.
           workspace=$(mktemp -d)
-          for agent in claude codex opencode pi dsh cursor; do
+          bin_agents="claude codex opencode pi dsh"
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            bin_agents="$bin_agents cursor"
+          fi
+          for agent in $bin_agents; do
             echo "--- bridge spawn: $agent ---"
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it

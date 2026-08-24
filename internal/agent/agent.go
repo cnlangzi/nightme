@@ -1329,14 +1329,19 @@ var (
 	ErrResumeUnhealthy = errors.New("agent: resume session unhealthy")
 
 	// ErrNoDiff is returned by ReviewWithPrompt / ReviewWithOcr when
-	// the workspace's precomputed reviewable + untracked file lists
-	// are both empty (clean working tree, no staged/committed/untracked
-	// files in scope, or no default branch detected). The /review
-	// dispatcher detects this via errors.Is and short-circuits with a
-	// user-friendly "nothing to review" message — without spawning the
-	// agent subprocess for a zero-context review. Sentinel lives here
-	// (not in command/review) so the agent package owns the contract
-	// for "the review cannot produce findings".
+	// the workspace has zero reviewable + zero untracked files in the
+	// precomputed reviewContext. This collapses to: clean working
+	// tree, with no staged/unstaged/untracked changes — and (only when
+	// the workspace is itself empty) nothing to review at all. Note
+	// that `detectDefaultBranch` failing does NOT trigger ErrNoDiff by
+	// itself: the staged/unstaged/untracked git sources run
+	// unconditionally and can populate reviewContext even without a
+	// detected base. The /review dispatcher detects this sentinel via
+	// errors.Is and short-circuits with a user-friendly "nothing to
+	// review" inline message — without spawning the agent subprocess
+	// for a zero-context review. Sentinel lives here (not in
+	// command/review) so the agent package owns the contract for
+	// "the review cannot produce findings".
 	ErrNoDiff = errors.New("agent: no diff to review")
 )
 

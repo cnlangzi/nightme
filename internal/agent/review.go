@@ -282,7 +282,7 @@ func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...R
 	// the agent, which can only answer "0 covered, 0 findings".
 	// Returning ErrNoDiff lets the /review dispatcher surface a
 	// clean inline message instead of burning a dsh session spawn.
-	if len(pre.reviewable) == 0 && len(pre.untracked) == 0 {
+	if pre.isEmptyDiff() {
 		return RunResult{}, ErrNoDiff
 	}
 	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))

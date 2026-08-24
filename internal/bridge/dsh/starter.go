@@ -144,18 +144,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	// workspace.delete (session.go::Close). No new code needed —
 	// the chat-session lifecycle path is reused.
 	defer a.Close()
-	// dsh's ensureFullAccess posts a `/permission danger-full-access`
-	// priming slash on every fresh session, which empirically fires a
-	// real model turn (host does NOT intercept leading `/`). Tell
-	// drainForRunResult to swallow that priming turn's (Result, Done)
-	// pair so it reads the SECOND Result as our actual prompt output.
-	// Skip is 2 (Result + Done of the priming turn); 0 when priming
-	// failed (no priming events to skip, first terminal is the real one).
-	skipPriming := 0
-	if d, ok := a.Driver().(*driver); ok && d.permissionPrimed {
-		skipPriming = 2
-	}
-	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent, skipPriming)
+	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent)
 }
 
 // Review implements the `/review` slash command for dsh. It
@@ -195,21 +184,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 // EventAgentResult is an error path (claudecode stream-json's
 // `result` event never fired) — we surface that rather than silently
 // returning an empty RunResult.
-//
-// Priming-turn skip (dsh-r--fix): ensureFullAccess posts
-// `/permission danger-full-access` via session.prompt right after
-// session.create, which empirically fires a full model turn on dsh
-// 0.1.x (the doc said "host intercepts leading `/`" but the host
-// actually passes it to the model). That priming turn completes
-// BEFORE our actual prompt's turn, so without a skip drain would
-// return the priming turn's "Understood... danger-full-access..." text
-// as the review output. RunOnce passes skipPriming=2 to swallow the
-// priming turn's trailing (Result, Done) pair and read the SECOND
-// Result as the real output. Mock tests pass 0 (no priming turn in
-// the mock — ensureFullAccess's slash post returns OK without
-// synthesizing a response, so the priming events never arrive and
-// a non-zero skip would deadlock).
-func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent), skipPriming int) (agent.RunResult, error) {
+func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.ContentBlock, sink func(agent.AgentEvent)) (agent.RunResult, error) {
 	name := a.Info.Name
 
 	// Seed from the *driver. By the time RunOnce calls drain, the
@@ -257,10 +232,6 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					model = ev.Model
 				}
 			case agent.EventAgentResult:
-				if skipPriming > 0 {
-					skipPriming--
-					continue
-				}
 				if ev.Result == nil {
 					return agent.RunResult{}, fmt.Errorf(
 						"agent %s: result event with nil payload%s",
@@ -275,10 +246,6 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					Subtype:    ev.Result.Subtype,
 				}, nil
 			case agent.EventAgentDone:
-				if skipPriming > 0 {
-					skipPriming--
-					continue
-				}
 				return agent.RunResult{}, fmt.Errorf(
 					"agent %s: turn ended without result event%s",
 					name, auditFields(sessionID, model))

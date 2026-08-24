@@ -176,6 +176,7 @@ type reviewContext struct {
 	stagedDiff    string // git diff --staged
 	unstagedDiff  string // git diff
 	reviewable    []string
+	untracked     []string // new files never committed/staged; can't be diffed (no baseline)
 	excluded      []string // "path (reason)" entries; Tier 2 only
 	// Tier 2 only (populated when ocr is available + produced rules):
 	ocrRules  string        // formatted rule groups from `ocr delegate rule` (markdown, single-job path)
@@ -206,14 +207,6 @@ const (
 	patternBuiltin  = "_nightme_builtin"
 	patternSimplify = "_nightme_simplify"
 )
-
-// builtinGroup builds a reviewGroup carrying the nightme-owned builtin
-// review prompt (review.go::BuiltinPrompt). Used by ReviewWithPrompt as
-// the primary group, and by ReviewWithOcr as the fallback when ocr is
-// absent or returns no rule groups.
-func builtinGroup(files []string) reviewGroup {
-	return reviewGroup{Pattern: patternBuiltin, Files: files, Rule: BuiltinPrompt}
-}
 
 // simplifyGroup builds a reviewGroup carrying the nightme-owned simplify
 // lens (review.go::simplifyPrompt). Always appended to the fan-out group
@@ -266,15 +259,36 @@ func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContex
 }
 
 // precomputeReviewWithBuiltin populates the reviewContext without ocr,
-// using Go-side git commands (collectReviewableFiles + isReviewablePath)
-// to replicate what ocr's preview would have produced. Used by
-// ReviewWithPrompt on delegate-tier bridges when ocr isn't installed.
+// using Go-side git commands to replicate what ocr's preview would
+// have produced. Used by ReviewWithPrompt on delegate-tier bridges
+// when ocr isn't installed.
 //
 // The output has the same shape as precomputeReviewWithOcr — but
 // `ocrGroups` is synthesized as a single builtin group (Pattern =
 // patternBuiltin, Rule = BuiltinPrompt) instead of N per-pattern ocr
 // groups. `excluded` is nil (Go heuristic doesn't track exclusion
 // reasons). File-list precision is lower than ocr's FileFilter.
+//
+// File enumeration (inlined — this is the only caller, no need for
+// a separate helper):
+//   - reviewable: files with at least one diff (committed/staged/
+//     unstaged). Safe to render with `git diff -- <file>`.
+//   - untracked:   new files never committed/staged — they have no
+//     baseline to diff against, so they CANNOT appear in any diff.
+//     Listed separately so the LLM prompt can call them out as
+//     "new file additions" instead of pretending a diff exists.
+//
+// `git diff <base>...HEAD -- <untracked>` returns empty (file not in
+// any commit yet). `git diff -- <untracked>` also returns empty. So
+// merging untracked into reviewable would silently violate the
+// coverage mandate (file listed but no content for the LLM to
+// review). Keeping them separate is the only honest shape.
+//
+// 4 git sources, dedup'd:
+//   1. git diff --name-only <base>...HEAD    (committed on branch)
+//   2. git diff --staged --name-only        (staged, not committed)
+//   3. git diff --name-only                 (unstaged working tree)
+//   4. git ls-files --others --exclude-standard  (untracked, .gitignore)
 func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewContext {
 	rc := reviewContext{workspace: workspace}
 	if workspace == "" {
@@ -287,8 +301,51 @@ func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewCo
 		rc.mergeBase = runGit(ctx, workspace, "merge-base", base, "HEAD")
 	}
 
-	rc.reviewable = collectReviewableFiles(ctx, workspace, base)
-	if len(rc.reviewable) > 0 {
+	// Collect reviewable + untracked from 4 git sources.
+	seen := map[string]bool{}
+	var changed []string
+	addChanged := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" && !seen[s] {
+			seen[s] = true
+			changed = append(changed, s)
+		}
+	}
+	if base != "" {
+		for _, f := range strings.Split(runGit(ctx, workspace,
+			"diff", "--name-only", base+"...HEAD"), "\n") {
+			addChanged(f)
+		}
+	}
+	for _, f := range strings.Split(runGit(ctx, workspace,
+		"diff", "--staged", "--name-only"), "\n") {
+		addChanged(f)
+	}
+	for _, f := range strings.Split(runGit(ctx, workspace,
+		"diff", "--name-only"), "\n") {
+		addChanged(f)
+	}
+	for _, f := range strings.Split(runGit(ctx, workspace,
+		"ls-files", "--others", "--exclude-standard"), "\n") {
+		s := strings.TrimSpace(f)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		if isReviewablePath(s) {
+			rc.untracked = append(rc.untracked, s)
+		}
+	}
+	for _, f := range changed {
+		if isReviewablePath(f) {
+			rc.reviewable = append(rc.reviewable, f)
+		}
+	}
+
+	if len(rc.reviewable) > 0 || len(rc.untracked) > 0 {
+		// Files = reviewable only — untracked have no diff to slice on.
+		// untracked is rendered separately by assembleGroupPrompt as a
+		// "new file additions" section.
 		rc.ocrGroups = []reviewGroup{{
 			Pattern: patternBuiltin,
 			Files:   rc.reviewable,
@@ -387,47 +444,29 @@ func stripRefsRemotes(s string) string {
 // required because `git diff --name-only` omits newly-added files that
 // have never been staged — ocr's preview includes them, and so must we
 // to honour the coverage mandate on the full PR diff.
-func collectReviewableFiles(ctx context.Context, workspace, base string) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(s string) {
-		s = strings.TrimSpace(s)
-		if s != "" && !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	if base != "" {
-		for _, f := range strings.Split(runGit(ctx, workspace,
-			"diff", "--name-only", base+"...HEAD"), "\n") {
-			add(f)
-		}
-	}
-	for _, f := range strings.Split(runGit(ctx, workspace,
-		"diff", "--staged", "--name-only"), "\n") {
-		add(f)
-	}
-	for _, f := range strings.Split(runGit(ctx, workspace,
-		"diff", "--name-only"), "\n") {
-		add(f)
-	}
-	// Untracked new files (never staged). `--others` lists files Git
-	// doesn't track; `--exclude-standard` honours .gitignore so we
-	// don't pull in build output. Mirrors ocr's workspace-mode
-	// untracked handling (SKILL Step 3).
-	for _, f := range strings.Split(runGit(ctx, workspace,
-		"ls-files", "--others", "--exclude-standard"), "\n") {
-		add(f)
-	}
-	filtered := make([]string, 0, len(out))
-	for _, f := range out {
-		if isReviewablePath(f) {
-			filtered = append(filtered, f)
-		}
-	}
-	return filtered
-}
-
+// collectWorkspaceFiles enumerates the workspace's changed files for review.
+// Returns two disjoint slices:
+//
+//   - reviewable: files with at least one diff (committed/staged/unstaged).
+//     Safe to render with `git diff -- <file>` and put in
+//     reviewGroup.Files.
+//   - untracked:   new files never committed/staged — they have no
+//     baseline to diff against, so they CANNOT appear in any diff.
+//     Listed separately so the LLM prompt can call them out as
+//     "new file additions" instead of pretending a diff exists.
+//
+// `git diff <base>...HEAD -- <untracked>` returns empty (file not in any
+// commit yet). `git diff -- <untracked>` also returns empty. So merging
+// untracked into reviewable would silently violate the coverage mandate
+// (file listed but no content for the LLM to review). Keeping them
+// separate is the only honest shape.
+//
+// 4 git sources, dedup'd:
+//   1. git diff --name-only <base>...HEAD    (committed on branch)
+//   2. git diff --staged --name-only        (staged, not committed)
+//   3. git diff --name-only                 (unstaged working tree)
+//   4. git ls-files --others --exclude-standard  (untracked, respects .gitignore)
+//
 // isReviewablePath drops well-known noise directories. Conservative:
 // only paths whose normalised form contains a known noise segment are
 // excluded; everything else is left to the LLM to judge. Tier 2 uses
@@ -683,6 +722,15 @@ func assembleReviewPrompt(rc reviewContext) string {
 		}
 	}
 
+	// --- Untracked files (new additions, no baseline) ---
+	if len(rc.untracked) > 0 {
+		fmt.Fprintln(&b, "\n# New file additions (no baseline — added in this changeset)")
+		fmt.Fprintln(&b, "These files are untracked (never committed/staged); no diff exists. Review by reading the file contents directly if available, or skip with reason.")
+		for _, f := range rc.untracked {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+	}
+
 	// --- Diffs (precomputed) ---
 	hasDiff := rc.committedDiff != "" || rc.stagedDiff != "" || rc.unstagedDiff != ""
 	if hasDiff {
@@ -828,6 +876,20 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 	fmt.Fprintln(&b, "Coverage is MANDATORY: every file below must end as `reviewed` or `skipped` with a concrete reason.")
 	for _, f := range g.Files {
 		fmt.Fprintf(&b, "- %s\n", f)
+	}
+
+	// --- Untracked files (new additions, no baseline to diff against) ---
+	// Rendered only on the first group of the fan-out to avoid repetition
+	// across N goroutines. These files appear in the changeset but
+	// `git diff -- <file>` returns empty for them — the LLM must
+	// treat them as "new file additions" rather than expecting
+	// existing diff content.
+	if len(rc.untracked) > 0 && g.Pattern == patternBuiltin {
+		fmt.Fprintln(&b, "\n# New file additions (no baseline — added in this changeset)")
+		fmt.Fprintln(&b, "These files are untracked (never committed/staged), so no diff exists. Review by reading the file contents directly if available, or skip with reason.")
+		for _, f := range rc.untracked {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
 	}
 
 	// --- Diffs (group-filtered via `git diff -- <files...>`) ---

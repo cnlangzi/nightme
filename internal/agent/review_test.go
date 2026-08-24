@@ -67,7 +67,7 @@ func TestBuiltinPrompt_Structure(t *testing.T) {
 	}
 
 	// Required severity tags on findings.
-	for _, sev := range []string{"blocker", "major", "minor", "nit"} {
+	for _, sev := range []string{"critical", "high", "medium", "low"} {
 		if !strings.Contains(p, "**"+sev+"**") {
 			t.Errorf("BuiltinPrompt missing severity tag %q", sev)
 		}

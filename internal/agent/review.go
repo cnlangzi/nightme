@@ -132,16 +132,16 @@ Write your review in this exact structure. Do not add sections, do not reorder t
 
 One line per finding, ordered by severity. If there are no findings, write "No blockers; nothing material to flag." and stop.
 
-- **blocker**: <file>:<line> — <one-line issue>. <optional: how to verify it>
-- **major**:   <file>:<line> — <one-line issue>
-- **minor**:   <file>:<line> — <one-line issue>
-- **nit**:     <file>:<line> — <one-line issue>
+- **critical**: <file>:<line> — <one-line issue>. <optional: how to verify it>
+- **high**:     <file>:<line> — <one-line issue>
+- **medium**:   <file>:<line> — <one-line issue>
+- **low**:      <file>:<line> — <one-line issue>
 
-Severity rubric:
-- **blocker**: would break in production or lose data. Must fix before merge.
-- **major**:   real bug or footgun, would cause user-visible pain. Should fix before merge.
-- **minor**:   code-quality or maintainability issue, not user-visible. Nice to fix.
-- **nit**:     subjective preference, pedantic, or stylistic. Take it or leave it.
+Severity rubric (must match the output schema in the Output format section below):
+- **critical**: would break in production or lose data. Must fix before merge.
+- **high**:     real bug or footgun, would cause user-visible pain. Should fix before merge.
+- **medium**:   code-quality or maintainability issue, not user-visible. Nice to fix.
+- **low**:      subjective preference, pedantic, or stylistic. Take it or leave it.
 
 Do not pad with generic "consider adding tests" or "consider adding documentation" — only call those out if a specific behaviour is untested and that test would have caught a real failure.
 
@@ -250,7 +250,7 @@ Findings must conform to the nightme review output schema (see host agent prompt
 // payload to split across goroutines).
 // ReviewWithPrompt runs review without ocr (Go-replicated path). It
 // calls precomputeReviewWithBuiltin, which populates reviewContext
-// using Go-side git commands (collectReviewableFiles + a synthesized
+// using Go-side git commands (collectWorkspaceFiles + a synthesized
 // builtin group) instead of delegating to ocr. The output shape
 // matches precomputeReviewWithOcr's — so the fan-out machinery is
 // identical regardless of path.
@@ -259,6 +259,16 @@ Findings must conform to the nightme review output schema (see host agent prompt
 //   - delegate-tier bridges (dsh/pi/opencode/cursor/acp) when ocr
 //     isn't on $PATH. The bridge's Starter.Review dispatches:
 //     `if agent.OcrAvailable() { ReviewWithOcr } else { ReviewWithPrompt }`.
+//
+// Edge case — empty workspace: precomputeReviewWithBuiltin returns an
+// empty reviewContext (no reviewable, no ocrGroups). The function still
+// calls delegateReviewMultiJob with `groups = append(pre.ocrGroups,
+// simplifyGroup(nil))` = `[simplifyGroup(nil)]` — a one-element slice.
+// delegateReviewMultiJob does not check len(groups) >= 2; it spawns one
+// goroutine, calls assembleGroupPrompt (returns "" because rc.workspace
+// is ""), and the goroutine falls back to BuiltinPrompt text via the
+// `prompt == "" → builtinPrompt` guard. Net effect: one RunOnce with
+// BuiltinPrompt — no fan-out payload to split, no findings possible.
 //
 // simplify always runs alongside as a parallel dimension (Pattern =
 // patternSimplify), appended after pre.ocrGroups — see

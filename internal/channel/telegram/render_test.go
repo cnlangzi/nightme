@@ -274,3 +274,85 @@ func TestEscapeHTML(t *testing.T) {
 		t.Fatalf("escapeHTML = %q, want %q", got, want)
 	}
 }
+
+// RenderForWire is the single wire-facing entry point used by
+// sendOutResultMessage (and any future raw-markdown block senders).
+// It must round-trip the same shapes RenderMarkdown already
+// covers, plus the empty short-circuit and the raw-HTML-escape
+// guarantee. Keep this test set in lock-step with render.go's
+// RenderForWire body — if you change one, change the other.
+
+func TestRenderForWire_EmptyReturnsEmpty(t *testing.T) {
+	if got := RenderForWire(""); got != "" {
+		t.Fatalf("RenderForWire empty = %q, want empty", got)
+	}
+}
+
+func TestRenderForWire_BoldPassesThroughAsHTML(t *testing.T) {
+	got := RenderForWire("**strong**")
+	if !strings.Contains(got, "<b>strong</b>") {
+		t.Fatalf("RenderForWire bold = %q, want <b>strong</b>", got)
+	}
+	if strings.Contains(got, "**") {
+		t.Fatalf("RenderForWire bold leaked literal asterisks: %q", got)
+	}
+}
+
+func TestRenderForWire_FenceBlockRendersAsPreTag(t *testing.T) {
+	got := RenderForWire("```go\nfunc main() {}\n```")
+	if !strings.Contains(got, "<pre>") || !strings.Contains(got, "</pre>") {
+		t.Fatalf("RenderForWire fence missing <pre>: %q", got)
+	}
+	if !strings.Contains(got, "func main()") {
+		t.Fatalf("RenderForWire fence missing code body: %q", got)
+	}
+}
+
+func TestRenderForWire_LinkSafeScheme(t *testing.T) {
+	got := RenderForWire("[click](https://example.com)")
+	if !strings.Contains(got, `<a href="https://example.com">click</a>`) {
+		t.Fatalf("RenderForWire link = %q", got)
+	}
+}
+
+func TestRenderForWire_RawHTMLIsEscaped(t *testing.T) {
+	got := RenderForWire("<script>alert(1)</script>")
+	if strings.Contains(got, "<script>") {
+		t.Fatalf("RenderForWire leaked <script>: %q", got)
+	}
+	if !strings.Contains(got, "&lt;script&gt;") {
+		t.Fatalf("RenderForWire did not escape: %q", got)
+	}
+}
+
+func TestRenderForWire_NotForAlreadyRenderedHTML(t *testing.T) {
+	// Contract pin: RenderForWire is the raw-markdown → safe-HTML
+	// wire-facing entry. It is NOT safe to call on already-rendered
+	// HTML — entities get escaped a second time ("&amp;" →
+	// "&amp;amp;") and pre-baked tag literals ("<b>") turn into
+	// "&lt;b&gt;".
+	//
+	// sendOutResultMessage relies on this contract: the StatusBar
+	// trailer (statusbar.RenderPanel output) is pre-baked safe HTML
+	// and is composed OUTSIDE RenderForWire so the box-drawing frame
+	// + already-escaped entities survive intact. This test
+	// documents the "wrong use" (double-escape mode) so a future
+	// refactor that accidentally routes the trailer through
+	// RenderForWire — which would silently corrupt the StatusBar
+	// panel — is caught by the test suite as a visible regression
+	// (the assertions below start failing once the "wrong use"
+	// becomes the "correct use").
+	//
+	// pi review finding 2026-08-24: prior version of this test was
+	// vacuous (input had no < / > / &, so the condition was always
+	// false and the body never executed). The new input carries all
+	// three characters so each escape path fires.
+	in := "&amp; <b>safe</b>"
+	got := RenderForWire(in)
+	if !strings.Contains(got, "&amp;amp;") {
+		t.Errorf("RenderForWire must double-escape &amp; on already-rendered HTML; in=%q got=%q", in, got)
+	}
+	if !strings.Contains(got, "&lt;b&gt;") {
+		t.Errorf("RenderForWire must escape literal <b> tags; in=%q got=%q", in, got)
+	}
+}

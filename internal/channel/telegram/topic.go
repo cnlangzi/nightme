@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"strings"
 
@@ -10,21 +9,6 @@ import (
 )
 
 const maxTelegramTextLength = 3900
-
-func (a *Adapter) createTopic(ctx context.Context, chatID, name string) (int, error) {
-	var result ForumTopic
-	if err := a.apiCall(ctx, "createForumTopic", map[string]any{
-		"chat_id":    chatID,
-		"name":       strings.TrimSpace(name),
-		"icon_color": 0x6FB9F0,
-	}, &result); err != nil {
-		return 0, err
-	}
-	if result.MessageThreadID == 0 {
-		return 0, errors.New("telegram: createForumTopic returned empty message_thread_id")
-	}
-	return result.MessageThreadID, nil
-}
 
 // sendTelegramMessage is the single Telegram sendMessage egress.
 //
@@ -78,14 +62,6 @@ func (a *Adapter) editTelegramMessage(ctx context.Context, chatID string, messag
 	return a.apiCall(ctx, "editMessageText", params, nil)
 }
 
-func (a *Adapter) editTelegramKeyboard(ctx context.Context, chatID string, messageID int, keyboard map[string]any) error {
-	return a.apiCall(ctx, "editMessageReplyMarkup", map[string]any{
-		"chat_id":      chatID,
-		"message_id":   messageID,
-		"reply_markup": keyboard,
-	}, nil)
-}
-
 // setMessageReactions replaces the reaction list on a message
 // with the supplied list. Telegram's setMessageReaction is a SET
 // semantic (each call REPLACES the entire list).
@@ -126,30 +102,6 @@ func (a *Adapter) downloadTelegramFile(ctx context.Context, fileID string) (stri
 	}
 	return result.FilePath, nil
 }
-
-// sendText sends already-rendered text, splitting at the 4096-char
-// Telegram ceiling. replyToMessageID is threaded through every
-// chunk so DM reply chains stay intact even when the rendered
-// output overflows one message (see docs/channel/telegram.md
-// §11.11).
-func (a *Adapter) sendText(ctx context.Context, chatID string, topicID int, replyToMessageID int, text string) error {
-	parts, err := splitTelegramText(text, maxTelegramTextLength)
-	if err != nil {
-		return err
-	}
-	for _, part := range parts {
-		if _, err := a.sendTelegramMessage(ctx, chatID, topicID, replyToMessageID, part, nil); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// sendRenderedText was the v8 per-bubble path: take raw text,
-// run RenderMarkdown, split at 3900 chars, send each piece.
-// v9 chain rolled all text-emitting Kinds into the chain
-// segment appendSegmentForKind path; no callers remain in
-// production code. Removed 2026-08-23 (codex review).
 
 // chatIDPrefix is the Telegram channel namespace tag attached to
 // every InboundMessage.ChatID by the adapter. It exists so that

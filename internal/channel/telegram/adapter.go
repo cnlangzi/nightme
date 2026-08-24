@@ -1331,6 +1331,15 @@ func (a *Adapter) sendOutResultMessage(
 		return nil
 	}
 
+	// Result body: raw msg.Text goes through RenderForWire so
+	// markdown chars render as HTML rather than literal `**…**` /
+	// backtick-fences / `[..](..)` — same path chunkBody.Compose()
+	// applies to chain entries, so the standalone message renders
+	// consistently with the intermediate activity log. Trailer
+	// below is already safe-HTML (statusbar.RenderPanel) and
+	// bypasses RenderMarkdown so the box-drawing `┌──› / └──›`
+	// frame isn't run through escapeHTML.
+	//
 	// StatusBar trailer — every text-emitting kind carries §18
 	// trailer, OutResult included. StatusBarLines returns nil when
 	// msg has no status-bearing fields, in which case we skip the
@@ -1344,11 +1353,12 @@ func (a *Adapter) sendOutResultMessage(
 	// separator (chunk_body.Compose still emits "────────────────\n"
 	// between entries and footer) because there the rule separates
 	// a long activity log from its summary footer.
+	body := RenderForWire(msg.Text)
 	var trailer string
 	if sb := statusbar.StatusBarLines(&msg); sb != nil {
 		trailer = "\n" + statusbar.RenderPanel(sb)
 	}
-	full := msg.Text + trailer
+	full := body + trailer
 
 	var messageIDs []int64
 	if len(full) <= maxTelegramTextLength {
@@ -1625,16 +1635,16 @@ func atoiUserMsgID(s string) int {
 	return n
 }
 
-// renderBodyWithStatusBar was the v8 trailing-StatusBar helper.
-// v9 chain removed the per-bubble StatusBar trailer; it now lives
-// in chain.lastFooter (§11.12.6) and is rendered by the active
-// chunk's body assembly. The helper is removed; callers in v8 used
-// it through sendRenderedText which v9 no longer routes.
-//
-// No replacement: callers that still want body+StatusBar-flat-text
-// rendering should compose statusbar.StatusBarLines(msg) +
-// statusbar.RenderPanel(snap) themselves (callers are app-internal
-// — currently none).
+// v8 had a renderBodyWithStatusBar helper that paired markdown
+// rendering with a StatusBar trailer for the per-bubble path. v9
+// split this responsibility: chain entries render via
+// chunkBody.Compose() (§11.12) with the trailer stitched in from
+// chain.lastFooter, while OutResult standalone replies go through
+// sendOutResultMessage below — which today calls
+// RenderForWire(msg.Text) for the body and statusbar.RenderPanel
+// for the trailer (both helpers are exposed in render.go /
+// internal/statusbar respectively so future send sites reuse them
+// rather than re-encoding the body+trailer contract).
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()

@@ -117,6 +117,36 @@ func runAgentFor(
 	// events (thinking, tool calls, tool results, …) streaming
 	// into the chat while /gtw commit / /gtw pr runs. The drain
 	// goroutine lives on ctx; cancellation tears it down.
+	//
+	// F-CODEX-RUNONCE-REVIEW-EVENT: this is the same sink helper
+	// /review's dispatcher installs (internal/command/review/cmd.go
+	// Handle goroutine). Both call sites share the single source
+	// of truth in outbound.StreamRunOnceToEmitter / dispatchSinkEvent,
+	// which in turn drives:
+	//   1. Translate (AgentEvent → OutboundMessage)
+	//   2. cs.Heartbeat().Observe(replyTo, out.Kind) — ThinkCount /
+	//      ToolCount increment BEFORE the policy gate (so /think
+	//      off / /tools off still surface real activity)
+	//   3. Auto-emit OutHeartbeat when counters change
+	//   4. DefaultPolicies (think gate / tools gate)
+	//   5. em.Send(out) — actually deliver to the channel
+	//
+	// Implications for the gtw code:
+	//   - /gtw commit and /gtw pr are SINGLE-job per invocation,
+	//     so they do NOT need the eventAggregator (multi-job phase
+	//     machine used by /review when ocrGroups >= 2). Touching
+	//     this sink does NOT affect /review's multi-job fan-out —
+	//     that's owned by agent.eventAggregator.
+	//   - runAgentFor is sync (blocks until RunOnce returns). The
+	//     /review dispatcher returns immediately and runs the sink
+	//     in a goroutine — that's a /review-only optimisation
+	//     (long 30-min review budget) we deliberately don't mirror
+	//     here; /gtw commit/pr are short enough that blocking
+	//     simplifies the dispatcher's success/failure shape.
+	//   - Tests covering the sink flow live in
+	//     internal/command/gtw/agent_reply_test.go — three cases
+	//     (SinkInstalled / HeartbeatObserved / Filtering). Touching
+	//     the wiring above is a regression risk for those tests.
 	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName)
 
 	res, err := a.RunOnce(ctx,

@@ -83,13 +83,13 @@ func (s *Starter) Detect() error {
 // alive for the daemon's lifetime, with watchdog respawn).
 //
 // Start does:
-//   1. Run the resume-or-create handshake via the shared host.RPCClient.
-//      cfg.SessionID is honored: when non-empty, Start dials
-//      `session.fork` (strict resume; failures bubble as
-//      agent.ErrResumeUnhealthy). When empty, Start creates a
-//      fresh session.
-//   2. Subscribe to this sessionId's mux frames via host.Router.
-//   3. Emit EventAgentReady with the resolved sessionId + model.
+//  1. Run the resume-or-create handshake via the shared host.RPCClient.
+//     cfg.SessionID is honored: when non-empty, Start dials
+//     `session.fork` (strict resume; failures bubble as
+//     agent.ErrResumeUnhealthy). When empty, Start creates a
+//     fresh session.
+//  2. Subscribe to this sessionId's mux frames via host.Router.
+//  3. Emit EventAgentReady with the resolved sessionId + model.
 //
 // The returned *agent.Agent streams events on its Events channel for
 // as long as the host keeps the session attached. cfg.Workspace is
@@ -146,22 +146,23 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return drainForRunResult(ctx, a, blocks, cfg2.OnEvent)
 }
 
-// Review implements the `/review` slash command for dsh. It reuses
-// RunOnce with agent.StandardPrompt() as the single text block; the
-// /review dispatcher in internal/command/review/cmd.go wraps the
+// Review implements the `/review` slash command for dsh. It
+// delegates to agent.DelegateReview — the shared three-tier dispatch
+// (docs/REVIEW.md §2): Go-side precompute of diff/file-list/coverage
+// is common to all delegate bridges; `ocr delegate` rule matching kicks
+// in when ocr is on $PATH (LLM-free), else the built-in rubric.
+// DelegateReview drives s.RunOnce with the assembled prompt, so the
+// host agent's LLM runs the review in an isolated fresh session.
+//
+// The /review dispatcher (internal/command/review/cmd.go) wraps the
 // returned text in agent.FormatReviewMessage and routes it both to
 // the AS (so the main agent can act on "fix the blockers" follow-ups)
 // and to the channel emitter (so the user sees findings immediately).
-//
 // Because every RunOnce is a fresh sessionId on the shared host
 // (and Close archives the session on return), Review cannot leak
-// review reasoning back into the main chat session's context, and
-// the session does not pile up in dsh web's in-memory store.
+// review reasoning back into the main chat session's context.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return s.RunOnce(ctx, cfg, []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: agent.StandardPrompt(),
-	}}, opts...)
+	return agent.DelegateReview(ctx, s, cfg, opts...)
 }
 
 // drainForRunResult is the shared RunOnce / Review drain logic.

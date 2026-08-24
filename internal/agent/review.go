@@ -70,26 +70,31 @@ func FormatReviewMessage(workspace, agentName, review string) string {
 		workspace, agentName, review)
 }
 
-// StandardPrompt is the canonical review prompt used by all
-// bridges for /review. The prompt asks the chat agent to:
+// StandardPrompt is the fallback review prompt — used by
+// DelegateReview only when Go-side precompute fails entirely (no
+// workspace, or git unusable). The delegate-tier bridges
+// (dsh/pi/acp/opencode/cursor) normally drive their review through
+// DelegateReview's assembled prompt (docs/REVIEW.md §2 Tier 2/3);
+// this verbatim prompt is the last-resort path. The prompt asks the
+// chat agent to:
 //
 //  1. Detect the default branch (main / master / trunk) via
 //     `git symbolic-ref refs/remotes/origin/HEAD` or
 //     `git remote show origin`.
 //  2. Run the three diff commands that together form "the diff a
 //     PR would have":
-//       - `git fetch origin` (best-effort, ignore failures)
-//       - `git diff <default-branch>...HEAD` (committed on branch)
-//       - `git diff --staged` (staged but not committed)
-//       - `git diff` (unstaged working-tree changes)
+//     - `git fetch origin` (best-effort, ignore failures)
+//     - `git diff <default-branch>...HEAD` (committed on branch)
+//     - `git diff --staged` (staged but not committed)
+//     - `git diff` (unstaged working-tree changes)
 //  3. Output structured `## Summary` / `## Findings` /
 //     `## Suggestions` sections, with severity tags on findings.
 //
 // The prompt is ~70 lines — long enough to enforce structure
 // (sections, severity rubric, "how to review" guardrails) but
-// short enough that chat agents don't lose focus. It's the only
-// prompt every bridge shares — bridges that want custom review
-// behavior override Starter.Review.
+// short enough that chat agents don't lose focus. Native bridges
+// (codex/claudecode) override Starter.Review with their built-in
+// review command and never touch this prompt.
 //
 // Prompt content draws from three mature review-prompt shapes:
 //

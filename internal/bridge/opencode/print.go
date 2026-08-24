@@ -367,10 +367,12 @@ func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) []string
 //   - waitErr != nil  → model / CLI failure; surface stderr
 //   - errMsg set      → captured from `error` wire event
 //   - empty finalText → model produced nothing; surface stderr
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("opencode: workspace is required")
 	}
+
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
 
 	startTime := time.Now()
 	args := buildPrintArgs(cfg, blocks)
@@ -413,6 +415,18 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		"prompt_bytes", promptBytes,
 		"flag_count", len(args)-1, // excludes the trailing positional prompt
 		"pid", pid)
+
+	// Up-front Ready so the per-call sink observer sees the
+	// lifecycle start. SessionID/Model are filled in by
+	// runNDJSON below as the wire frames arrive; the
+	// up-front Ready uses the static metadata only (workspace).
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind:      agent.EventAgentReady,
+			AgentName: s.Info().Name,
+			Workspace: cfg.Workspace,
+		})
+	}
 
 	// Drain stderr in the background (mirrors codex / cc / pi).
 	// Honors ctx cancellation between reads so a cancelled
@@ -495,21 +509,36 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// error. Order matters — prefer waitErr first because
 	// jsonReadErr is usually just "broken pipe on closed
 	// child" noise.
+	//
+	// Finding 2 from /review: every failure branch MUST emit
+	// EventAgentError to the sink before returning, otherwise
+	// the multi-job aggregator's doneCount never reaches
+	// expected and the chat lifecycle hangs at "review running…"
+	// until the 30-min revCtx timeout. The error message
+	// follows the same shape as the success path's preamble:
+	// "(stderr: ...)" / "(last answer: ...)" so the caller can
+	// inspect both the error and any partial work.
 	if waitErr != nil {
 		stderr := strings.TrimSpace(stderrBuf.String())
-		if state.text.Len() > 0 {
-			// Process died after writing the final answer
-			// (rare but possible). Surface both the answer and
-			// the failure so the caller can inspect.
-			if stderr != "" {
-				return agent.RunResult{}, fmt.Errorf("opencode: exit: %w (last answer: %q; stderr: %s)", waitErr, state.text.String(), stderr)
-			}
-			return agent.RunResult{}, fmt.Errorf("opencode: exit: %w (last answer: %q)", waitErr, state.text.String())
+		var wrapped error
+		switch {
+		case state.text.Len() > 0 && stderr != "":
+			wrapped = fmt.Errorf("opencode: exit: %w (last answer: %q; stderr: %s)", waitErr, state.text.String(), stderr)
+		case state.text.Len() > 0:
+			wrapped = fmt.Errorf("opencode: exit: %w (last answer: %q)", waitErr, state.text.String())
+		case stderr != "":
+			wrapped = fmt.Errorf("opencode: exit: %w (stderr: %s)", waitErr, stderr)
+		default:
+			wrapped = fmt.Errorf("opencode: exit: %w", waitErr)
 		}
-		if stderr != "" {
-			return agent.RunResult{}, fmt.Errorf("opencode: exit: %w (stderr: %s)", waitErr, stderr)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: opencodeDiagnostic(agent.ClassifyExit(waitErr, false), stderr),
+			})
 		}
-		return agent.RunResult{}, fmt.Errorf("opencode: exit: %w", waitErr)
+		return agent.RunResult{}, wrapped
 	}
 	if state.errMsg != "" {
 		// Captured from the `error` wire event before the
@@ -521,23 +550,42 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		// error reason AND whatever the model managed to write
 		// before erroring.
 		stderr := strings.TrimSpace(stderrBuf.String())
-		if state.text.Len() > 0 {
-			if stderr != "" {
-				return agent.RunResult{}, fmt.Errorf("opencode: error event: %s (last answer: %q; stderr: %s)", state.errMsg, state.text.String(), stderr)
-			}
-			return agent.RunResult{}, fmt.Errorf("opencode: error event: %s (last answer: %q)", state.errMsg, state.text.String())
+		var wrapped error
+		switch {
+		case state.text.Len() > 0 && stderr != "":
+			wrapped = fmt.Errorf("opencode: error event: %s (last answer: %q; stderr: %s)", state.errMsg, state.text.String(), stderr)
+		case state.text.Len() > 0:
+			wrapped = fmt.Errorf("opencode: error event: %s (last answer: %q)", state.errMsg, state.text.String())
+		case stderr != "":
+			wrapped = fmt.Errorf("opencode: error event: %s (stderr: %s)", state.errMsg, stderr)
+		default:
+			wrapped = fmt.Errorf("opencode: error event: %s", state.errMsg)
 		}
-		if stderr != "" {
-			return agent.RunResult{}, fmt.Errorf("opencode: error event: %s (stderr: %s)", state.errMsg, stderr)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: opencodeDiagnostic(agent.BridgeExitNonZeroExit, stderr),
+			})
 		}
-		return agent.RunResult{}, fmt.Errorf("opencode: error event: %s", state.errMsg)
+		return agent.RunResult{}, wrapped
 	}
 	if jsonReadErr != nil && !errors.Is(jsonReadErr, io.EOF) {
 		stderr := strings.TrimSpace(stderrBuf.String())
+		var wrapped error
 		if stderr != "" {
-			return agent.RunResult{}, fmt.Errorf("opencode: stdout: %w (stderr: %s)", jsonReadErr, stderr)
+			wrapped = fmt.Errorf("opencode: stdout: %w (stderr: %s)", jsonReadErr, stderr)
+		} else {
+			wrapped = fmt.Errorf("opencode: stdout: %w", jsonReadErr)
 		}
-		return agent.RunResult{}, fmt.Errorf("opencode: stdout: %w", jsonReadErr)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: opencodeDiagnostic(agent.BridgeExitUnknown, stderr),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	if !state.hadContent {
 		// Process exited 0 but produced nothing visible to
@@ -560,12 +608,60 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		// is dropped (RunOnce doesn't surface it) but its
 		// presence is enough to confirm the model engaged.
 		stderr := strings.TrimSpace(stderrBuf.String())
+		var wrapped error
 		if stderr != "" {
-			return agent.RunResult{}, fmt.Errorf("opencode: empty answer (stderr: %s)", stderr)
+			wrapped = fmt.Errorf("opencode: empty answer (stderr: %s)", stderr)
+		} else {
+			wrapped = fmt.Errorf("opencode: empty answer")
 		}
-		return agent.RunResult{}, fmt.Errorf("opencode: empty answer")
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: opencodeDiagnostic(agent.BridgeExitCleanExit, stderr),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
+
+	// Success path: emit terminal Result + Done to the sink so
+	// the chat channel's outer lifecycle closes (Finding 4 from
+	// /review). Result carries the final text; Done is a paired
+	// turn-end marker mirroring the long-lived bridge drain's
+	// contract. opencode's print-mode wire doesn't carry usage /
+	// model so those fields stay zero — matching the existing
+	// RunResult population above.
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentResult,
+			Result: &agent.AgentResultEvent{
+				Text:       result.Text,
+				DurationMs: result.DurationMs,
+				Subtype:    result.Subtype,
+			},
+		})
+		sink(agent.AgentEvent{
+			Kind: agent.EventAgentDone,
+			Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
+		})
+	}
+
 	return result, nil
+}
+
+// opencodeDiagnostic is the BridgeDiagnostic payload attached to
+// EventAgentError events emitted from the opencode print-mode
+// failure paths. Mirrors codex/codexDiagnostic + pi/piDiagnostic
+// + cursor/cursorDiagnostic (same shape, AgentName="opencode").
+// Required so the upstream translate → chat renderer pair
+// doesn't silently drop Err-only events.
+func opencodeDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.BridgeDiagnostic {
+	return &agent.BridgeDiagnostic{
+		ExitKind:   exitKind,
+		StderrTail: stderr,
+		AgentName:  "opencode",
+		KilledAt:   time.Now(),
+	}
 }
 
 // errStr renders an error's string form, returning "<nil>" for

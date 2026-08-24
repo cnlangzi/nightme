@@ -100,26 +100,20 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	defer a.Close()
-	return s.collectResult(ctx, a, blocks)
+	return s.collectResult(ctx, a, blocks, opts...)
 }
 
-// Review implements /review for the acp bridge: delegate to shared
-// StandardPrompt. The acp-driven chat agent (used by opencode)
-// reads git diff and outputs the structured review.
+// Review implements /review for the acp bridge: delegate to the
+// shared agent.DelegateReview (three-tier dispatch, docs/REVIEW.md
+// §2). The acp-driven chat agent (used by opencode) reads the
+// precomputed diff and outputs the structured review; ocr delegate
+// rules fold in when ocr is on $PATH.
 //
 // acp is the generic ACP-protocol bridge; opencode is the only
 // built-in that uses it. Review here serves both acp as a Starter
 // and any future acp-backed agent that registers itself.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: agent.StandardPrompt(),
-	}})
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
-			s.Info().Name, err)
-	}
-	return result, nil
+	return agent.DelegateReview(ctx, s, cfg, opts...)
 }
 
 // collectResult sends blocks to a live *agent.Agent and drains
@@ -144,6 +138,7 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 //   - events channel closed without result: error.
 func (s *Starter) collectResult(ctx context.Context, live *agent.Agent, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	name := live.Info.Name
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
 
 	// Track per-session identity (model + session id) from
 	// EventAgentReady so the returned RunResult carries both.
@@ -162,6 +157,15 @@ func (s *Starter) collectResult(ctx context.Context, live *agent.Agent, blocks [
 		case ev, ok := <-live.Events():
 			if !ok {
 				return agent.RunResult{}, fmt.Errorf("agent %s: event stream closed without result%s", name, appendAuditFields(sessionID, model))
+			}
+			// Forward every event to the per-call sink so the
+			// chat channel sees the same Ready / Text / Tool /
+			// Result / Done lifecycle the long-lived bridge
+			// already streams to internal subscribers. Finding 4
+			// from /review: pre-fix opts were dropped here,
+			// leaving the sink permanently open.
+			if sink != nil {
+				sink(ev)
 			}
 			switch ev.Kind {
 			case agent.EventAgentReady:

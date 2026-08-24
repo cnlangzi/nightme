@@ -155,12 +155,26 @@ func peekPrintMeta(line []byte, result *agent.RunResult) {
 // is absent (no stdin writes), and the translator never needs
 // to see one because the event stream is what produces
 // AgentEvents.
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+//
+// opts (when set via WithEventSink) wires a per-call observer
+// that receives the same AgentEvent stream the dsh / codex
+// bridges emit — Ready up front, then per-event Text /
+// ToolStart / ToolEnd / TaskCreate / TaskUpdate as they're
+// translated, then Result / Done at turn end. Without this
+// the per-call sink observer was invisible to the print-mode
+// path (historical bug fixed in this revision: opts were
+// accepted by RunOnce but silently dropped before reaching
+// runPrintMode). The aggregator (e.g. /review multi-job) and
+// /gtw callers both depend on the sink observing the full
+// lifecycle so the chat channel can flip its receipt header
+// from "running" to "done".
+func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("pi: workspace is required")
 	}
 
 	startTime := time.Now()
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
 
 	// Build argv from blocks. -p takes the prompt as a single
 	// argv entry; quoting is handled by exec, not by us. --mode
@@ -188,16 +202,44 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		return agent.RunResult{}, fmt.Errorf("pi: stderr pipe: %w", err)
 	}
 
+	// Pre-spawn failure: any error path here must emit a
+	// terminal EventAgentError to the sink so the caller sees
+	// a balanced lifecycle (Ready ↔ terminal). The up-front
+	// Ready fires only after we've actually spawned the
+	// process (so pid is known); on pre-spawn failure we
+	// skip the Ready and emit Error directly.
 	if err := child.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return agent.RunResult{}, fmt.Errorf("pi: start: %w", err)
+		wrapped := fmt.Errorf("pi: start: %w", err)
+		if sink != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        wrapped,
+				Diagnostic: piDiagnostic(agent.BridgeExitUnknown, ""),
+			})
+		}
+		return agent.RunResult{}, wrapped
 	}
 	pid := child.Process.Pid
 
 	piLog("PrintMode Start",
 		"command", s.command, "workspace", cfg.Workspace,
 		"prompt_bytes", len(prompt), "pid", pid)
+
+	// Up-front Ready so the sink sees the lifecycle start.
+	// SessionID/Model are filled in later by peekPrintMeta as
+	// the wire frames arrive; the up-front Ready uses what
+	// we know statically (workspace + branch).
+	if sink != nil {
+		branch := detectBranch(cfg.Workspace)
+		sink(agent.AgentEvent{
+			Kind:      agent.EventAgentReady,
+			AgentName: s.Info().Name,
+			Workspace: cfg.Workspace,
+			Branch:    branch,
+		})
+	}
 
 	// Drain stderr in the background. Print-mode stderr is
 	// mostly empty for a clean run; any non-empty output
@@ -235,8 +277,10 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// Read stdout events, translate via the shared translator,
 	// and capture the final text + per-turn metadata. A reader
 	// error here means the pipe broke mid-run (rare; would
-	// normally be EOF from a clean exit).
-	result, translateErr := parsePrintStream(ctx, stdout, cfg.Workspace)
+	// normally be EOF from a clean exit). Per-event AgentEvents
+	// (Text / ToolStart / ToolEnd / Task* / Result / Done) are
+	// forwarded to the sink if one is installed.
+	result, translateErr := parsePrintStream(ctx, stdout, cfg.Workspace, sink)
 
 	// Always wait for the process to exit so we can capture
 	// both the exit code AND stderr. If parsePrintStream
@@ -255,6 +299,41 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		"stderr_bytes", stderrBuf.Len(),
 		"stderr_truncated", stderrTruncated,
 	)
+
+	// Build the terminal event for the sink regardless of
+	// outcome. If parsePrintStream already emitted a Result
+	// (success path), we DON'T emit a duplicate — the
+	// aggregator would count two terminals. We just emit
+	// Done to close the lifecycle. On the failure path we
+	// emit Error so the sink flips to an error state.
+	if sink != nil {
+		switch {
+		case translateErr == nil && waitErr == nil:
+			// Success — parsePrintStream already emitted
+			// Result (text + usage) AND Done via the
+			// translator's agent_settled handler. Nothing
+			// more to emit.
+		case translateErr != nil:
+			stderr := strings.TrimSpace(stderrBuf.String())
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        translateErr,
+				Diagnostic: piDiagnostic(agent.BridgeExitUnknown, stderr),
+			})
+		default:
+			// waitErr != nil, translateErr == nil: pi
+			// produced output but exited non-zero (rare —
+			// usually an auth/model error captured in
+			// stderr). Surface as error so the sink
+			// flips.
+			stderr := strings.TrimSpace(stderrBuf.String())
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        waitErr,
+				Diagnostic: piDiagnostic(agent.ClassifyExit(waitErr, false), stderr),
+			})
+		}
+	}
 
 	if translateErr != nil {
 		// Stream reader hit a non-EOF error, OR the JSON
@@ -289,11 +368,21 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 // text) or a stream error. Returns RunResult on clean
 // completion.
 //
+// sink (when non-nil) receives every AgentEvent the translator
+// emits (Text / ToolStart / ToolEnd / TaskCreate / TaskUpdate /
+// Result / Done) so per-call observers (e.g. /review's
+// aggregator, /gtw's status emitter) see the same lifecycle
+// the dsh / codex bridges emit. The sink is invoked
+// synchronously from the read loop — bridges are responsible
+// for ensuring it is non-blocking (see WithEventSink contract
+// in agent.go). nil sink is fully supported (no-op on every
+// emit), matching StreamRunOnceToEmitter's no-op contract.
+//
 // This is the print-mode analogue of the chat-session
 // readPump + lifecycle pair, minus the RPC plumbing. The
 // translator is reused as-is because the event format is
 // shared between print and RPC modes.
-func parsePrintStream(ctx context.Context, stdout io.Reader, workspace string) (agent.RunResult, error) {
+func parsePrintStream(ctx context.Context, stdout io.Reader, workspace string, sink func(agent.AgentEvent)) (agent.RunResult, error) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxFrameSize)
 
@@ -358,8 +447,23 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, workspace string) (
 					result.DurationMs = ev.Result.DurationMs
 					result.Subtype = ev.Result.Subtype
 				}
+				if sink != nil {
+					sink(ev)
+				}
 			case agent.EventAgentDone:
 				sawSettled = true
+				if sink != nil {
+					sink(ev)
+				}
+			default:
+				// Text / ToolStart / ToolEnd / TaskCreate /
+				// TaskUpdate / Permission / etc. — forward
+				// verbatim so the sink observer sees the
+				// full per-turn lifecycle. No Result
+				// capture here (handled above).
+				if sink != nil {
+					sink(ev)
+				}
 			}
 		}
 	}
@@ -406,6 +510,23 @@ func truncateForErr(line []byte) string {
 		return string(line)
 	}
 	return string(line[:cap]) + "..."
+}
+
+// piDiagnostic is the BridgeDiagnostic payload attached to
+// EventAgentError events emitted from the print-mode failure
+// paths. Stderr tail gives the renderer the model/auth error
+// message pi would otherwise leave in /dev/null — translate.go
+// silently drops Err-only events without a Diagnostic, so the
+// feishu error card would render with an empty body without
+// this field. Mirrors codex/codexDiagnostic (same shape, just
+// tags AgentName="pi" so cross-bridge log greps stay readable).
+func piDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.BridgeDiagnostic {
+	return &agent.BridgeDiagnostic{
+		ExitKind:   exitKind,
+		StderrTail: stderr,
+		AgentName:  "pi",
+		KilledAt:   time.Now(),
+	}
 }
 
 // appendAuditFields returns the audit-suffix string (empty when

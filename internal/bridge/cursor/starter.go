@@ -128,20 +128,14 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // print-mode pattern: bypass the long-lived ACP bridge driver,
 // spawn a fresh process, capture stdout, reap on exit.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runPrintMode(ctx, s, cfg, blocks)
+	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
-// Review implements /review for the cursor bridge: delegate to shared
-// StandardPrompt. Cursor CLI has no native review subcommand, so we
-// run the standard prompt via print-mode one-shot.
+// Review implements /review for the cursor bridge: delegate to the
+// shared agent.DelegateReview (three-tier dispatch, docs/REVIEW.md
+// §2). Cursor CLI has no native review subcommand, so it runs the
+// Go-precompute-enhanced prompt via print-mode one-shot — ocr
+// delegate rules fold in when ocr is on $PATH.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	result, err := s.RunOnce(ctx, cfg, []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: agent.StandardPrompt(),
-	}})
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
-			s.Info().Name, err)
-	}
-	return result, nil
+	return agent.DelegateReview(ctx, s, cfg, opts...)
 }

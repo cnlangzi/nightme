@@ -26,7 +26,7 @@ nightme 的文档按**内容性质**分 4 层，每层职责单一、不重叠�
 ## 2. 各层职责
 
 | 层 | 文件 | 内容 | 不应包含 |
-|----|------|------|----------|
+| ---- | ------ | ------ | ---------- |
 | **PRD** | `PRD.md` | 产品定位、目标用户、使用场景、核心哲学、功能范围、范围外、成功标准 | 技术栈、架构、代码、文件路径 |
 | **SPEC** | `SPEC.md` | 架构总览、组件、数据流、Session 生命周期、并发模型、技术栈、NFR、安全、技术决策 | Go 代码、JSON schema、YAML 配置、具体函数签名 |
 | **FEATURES** | `FEATURES.md` | F-XX 功能列表（含设计文档链接） | 详细设计、代码、edge cases |
@@ -65,6 +65,7 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 ```
 
 **特例**：
+
 - **CLI 命令的使用方法 / 安装步骤**：放仓库根 `README.md`，不放 docs/
 - **某个 feature 的命名 / 编号变更**：改 `FEATURES.md` 即可，不动 SPEC/PRD
 - **已合并到 feat/ 的代码示例被 SPEC 引用**：SPEC 里只描述概念 + 链接到 feat/，不重复代码
@@ -82,12 +83,14 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 ### 4.2 Feature 文档
 
 **单一 F-XX 文档**：
+
 - `feat/F-XX-kebab-case-name.md`
 - `F-XX`：两位数字编号（01-99），保证字典序 = 逻辑序
 - `kebab-case-name`：短横线连接的英文短语，描述 feature
 - **不要**用中文文件名（保持 Git 工具链兼容）
 
 **合并文档**（多个 F-XX 内容相关时合并到一个文件）：
+
 - `feat/F-<theme>.md`（无编号，纯主题名）
 - 例：`F-runtime.md` / `F-chat-session.md` / `F-message-flow.md` / `F-gateway.md` / `F-gtw.md`
 - 例：`bridge/cli-transport.md` / `bridge/claude.md` / `channel/feishu-rendering.md`
@@ -109,11 +112,11 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 ### 5.1 引用语法
 
 | 引用类型 | 语法 | 示例 |
-|----------|------|------|
+| ---------- | ------ | ------ |
 | 同目录文件 | `[NAME.md](./NAME.md)` | `[FEATURES.md](./FEATURES.md)` |
 | 子目录文件 | `[NAME.md](./feat/NAME.md)` | `[F-01](./feat/F-runtime.md)` |
 | 同目录文件 + 节 | `[NAME.md](./NAME.md) §X` | `[SPEC.md](./SPEC.md) §2.1` |
-| 父目录 | `[NAME.md](../NAME.md)` | （docs/ 子目录引用仓库根时）|
+| 父目录 | `[NAME.md](../NAME.md)` | （docs/ 子目录引用仓库根时） |
 
 ### 5.2 引用方向（避免循环）
 
@@ -128,9 +131,9 @@ PRD.md  ──► SPEC.md
 ```
 
 **禁止**：
+
 - PRD.md 引用 feat/（PRD 不应该知道实现细节）
 - SPEC.md 引用 feat/ 的代码（SPEC 应该描述概念，链接到 feat/ 看细节）
-
 
 ---
 
@@ -139,7 +142,7 @@ PRD.md  ──► SPEC.md
 ### 6.1 改动触发
 
 | 触发 | 改哪些文档 |
-|------|------------|
+| ------ | ------------ |
 | 产品定位变化 / 新增用户群 / 范围调整 | PRD.md |
 | 架构变更 / 换技术栈 / 新增组件 | SPEC.md |
 | 新增 feature | FEATURES.md + 新 feat/F-XX |
@@ -178,7 +181,6 @@ docs: <简短描述>
 ❌ **feat/F-XX.md 里讨论产品哲学**
 → 哲学在 PRD.md，feat/ 只谈实现
 
-
 ❌ **每个 feature 一个独立的架构章节**
 → 架构在 SPEC.md 集中描述，feat/ 引用即可
 
@@ -193,6 +195,7 @@ docs/
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
 ├── CHANNEL.md             ← 多 channel 架构定稿（per-channel Manager + Emitter + 懒加载 restore）
+├── REVIEW.md              ← /review 设计定稿（三层分流：native / ocr delegate / StandardPrompt）
 ├── feat/                  ← Layer 4: 每个 feature 的实现
 ├── bridge/                ← 各 agent bridge 协议（claude / dsh / …）
 └── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑** / Telegram Topic）
@@ -220,4 +223,6 @@ docs/
 
 - 初始：建立 4 层文档结构 + 命名约定 + 决策树
 - 2026-08-17：补 `docs/channel/` / `docs/bridge/` 在目录示意里的位置；飞书交互卡踩坑进 `channel/feishu-cards.md`
-- 2026-08-18：新增顶层 `docs/CHANNEL.md`（多 channel 架构设计定稿）；FEATURES.md §9 / SPEC.md §1.1+§1.3+§11.1 同步；`channel/telegram.md` 在 FEATURES.md §4.2 加索引。架构变更：per-channel `chatsession.Manager`、per-channel `outbound.Emitter`、懒加载 restore、`channel.Registry` 接入点、OCP 干净（接入新 channel = 1 个 adapter + 1 个 init）
+- 2026-08-18:新增顶层 `docs/CHANNEL.md`(多 channel 架构设计定稿);FEATURES.md §9 / SPEC.md §1.1+§1.3+§11.1 同步;`channel/telegram.md` 在 FEATURES.md §4.2 加索引。架构变更:per-channel `chatsession.Manager`、per-channel `outbound.Emitter`、懒加载 restore、`channel.Registry` 接入点、OCP 干净(接入新 channel = 1 个 adapter + 1 个 init)
+- 2026-08-23:新增顶层 `docs/REVIEW.md`(/review 设计定稿,含 ocr 委托模式三层分流:native / delegate-ocr / delegate-prompt);`feat/F-review-ocr-fusion.md` 同步落地可行性论证。设计收敛:delegate 档按 ocr 可用性分流,ocr 作外部工具(类 git)不进 agent 注册表
+- 2026-08-23:`docs/REVIEW.md` 升 v11:加多 job 并发机制(§2.5)——大 changeset 按 ocr `delegate rule` 的 groups 拆多组 prompt,多组自动并发多 RunOnce(每 job 独立 context,sem 上限) + merge,单组单 RunOnce;ocr 不在用增强 prompt 单一发送。新增不变量 #9/#10(独立 context 分 bundle / 自动并发)。明确分组依据是 `ocr delegate rule` 的 groups(非 preview 的扁平清单),Tier 3 用增强 prompt(非原 StandardPrompt)。

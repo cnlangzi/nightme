@@ -75,7 +75,7 @@ func init() {
     agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))          // line 46  ← 优先级 2
     agent.Builtins.Register(dsh.NewStarter("dsh"))                            // line 65  ← 优先级 3
     agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", ...)) // line 85  ← 优先级 4
-    agent.Builtins.Register(cursor.NewStarter("cursor", "agent", ...))        // line 97  ← 优先级 5
+    agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", ...))  // line 97  ← 优先级 5
     agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))                    // line 105 ← 优先级 6
 }
 ```
@@ -88,9 +88,9 @@ func init() {
 - 现有的顺序是 hand-curated —— `claude` / `codex` 是 v0.1 MVP 已有的,后续加入的(`opencode` / `cursor` / `pi`)按"实验性 → 主流"自然下沉。
 - 改探测优先级等同于改产品决策,不该是 side effect。
 
-### 3.2 `cursor` 那行的 binary 不是 `cursor`
+### 3.2 `cursor` 那行的 binary 是 `cursor-agent`,不是 `cursor`
 
-`cursor.NewStarter("cursor", "agent", []string{"acp"})` 的第二个参数是 command(`exec.LookPath` 用的 binary 名),不是 name。Cursor CLI 安装后挂在 PATH 上的是 `agent` binary,这是 `cmd/nightme/agents.go:87-96` 注释里写明的:`curl https://cursor.com/install`。所以这条 `Detect()` 检查的是 `agent` 是否在 PATH 上。
+`cursor.NewStarter("cursor", "cursor-agent", []string{"acp"})` 的第二个参数是 command(`exec.LookPath` 用的 binary 名),不是 name。Cursor CLI 安装后挂在 PATH 上的是 `cursor-agent` binary:bash installer (`curl https://cursor.com/install`) 在 `$HOME/.local/bin/cursor-agent` 创建 legacy symlink(主名 `agent`),PowerShell installer (`https://cursor.com/install?win32=true`) 在 `%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd` 创建真实入口(并额外拷贝一份 `agent.cmd` 作为 alias)。Bridge 选 `cursor-agent` 是因为它是两个 installer 都创建的"真名字"",不依赖 installer 的 alias 创建逻辑。
 
 ---
 

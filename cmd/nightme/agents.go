@@ -100,17 +100,24 @@ func init() {
 	// internal/bridge/opencode/update.go).
 	agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", []string{"acp"}))
 
-	// cursor — the `agent acp` Agent Client Protocol bridge.
-	// Cursor CLI natively supports ACP via `agent acp` command.
+	// cursor — the `cursor-agent acp` Agent Client Protocol bridge.
+	// Cursor CLI natively supports ACP via `cursor-agent acp`.
 	// Reuses the generic ACP bridge for protocol handling;
 	// unlike opencode, no sessionUpdate translator is needed
 	// (Cursor's events are handled by the generic acp fallback).
 	//
-	// One-shot invocations use `agent -p` print-mode (plain text
-	// output, not NDJSON). The binary name is `agent`, not
-	// `cursor` — users must ensure `agent` is on PATH after
-	// installing Cursor CLI (`curl https://cursor.com/install`).
-	agent.Builtins.Register(cursor.NewStarter("cursor", "agent", []string{"acp"}))
+	// One-shot invocations use `cursor-agent -p` print-mode (plain
+	// text output, not NDJSON). The binary name is `cursor-agent`
+	// because that is the entry-point the official installer drops
+	// onto PATH: bash installer creates it as a legacy symlink
+	// alongside the primary `agent` alias, PowerShell installer
+	// (https://cursor.com/install?win32=true) creates
+	// cursor-agent.cmd as the real entry and copies it to agent.cmd
+	// as a courtesy alias. Bridge picks the canonical real name
+	// (the installer's actual binary, not its alias) so detection
+	// works on every platform the official installer supports
+	// without us having to mirror its aliasing logic in CI.
+	agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see

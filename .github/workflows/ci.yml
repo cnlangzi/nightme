@@ -263,14 +263,14 @@ jobs:
   #   4. `nightme test --agent X`  — the bridge actually launches
   #                                  the agent through its native
   #                                  protocol layer (PTY for claude,
-  #                                  stdio JSON-RPC for codex/opencode/pi,
-  #                                  shared-host for dsh). Process
-  #                                  must produce response output
-  #                                  beyond nightme's own banner —
-  #                                  not just stay running. Anything
-  #                                  beyond the banner (auth error,
-  #                                  prompt echo, model reply) is a
-  #                                  pass. Banner-only is a fail
+  #                                  stdio JSON-RPC for codex/opencode/
+  #                                  pi/cursor, shared-host for dsh).
+  #                                  Process must produce response
+  #                                  output beyond nightme's own
+  #                                  banner — not just stay running.
+  #                                  Anything beyond the banner (auth
+  #                                  error, prompt echo, model reply)
+  #                                  is a pass. Banner-only is a fail
   #                                  (hung / no acknowledgement).
   #
   # Why matrix but not fail-fast: a Linux-only npm registry hiccup
@@ -280,8 +280,9 @@ jobs:
   # Why this job sits at the END of the dependency chain (needs the
   # single preceding job, `test`): starter detection is the
   # most expensive gate in the file (npm install × 5 agents × 3 OSes
-  # + 5 spawn attempts × 8s observation each), so we want it to run
-  # only after the cheaper gate has gone green. The full chain is:
+  # + 1 curl-pipe install × 3 OSes + 6 spawn attempts × 8s
+  # observation each), so we want it to run only after the cheaper
+  # gate has gone green. The full chain is:
   #
   #     test  (3-OS build + vet + tests; race + coverage on ubuntu)
   #       └── agent-smoke  (this job — npm install + spawn smoke
@@ -517,16 +518,30 @@ jobs:
         shell: bash
         run: |
           set -e
-          # Every agent here ships its CLI as an npm package
+          # 5 of the 6 agents ship their CLI as npm packages
           # published by the project itself — `npm install -g
           # <name>` IS the officially-supported install method
-          # for all 5, on every platform. Some agents also offer
-          # curl-pipe installers for users who don't want npm on
-          # PATH; those are noted below but not used here
-          # because (a) `npm install -g` already covers them and
-          # (b) curl scripts are flaky in CI (cert pinning,
-          # geo-restrictions, release-channel pin) where npm
-          # resolves deterministically via the registry.
+          # for those, on every platform. opencode also offers
+          # a curl installer as a second official channel;
+          # we still use the npm one here because npm resolves
+          # deterministically via the registry where curl
+          # scripts are flaky in CI (cert pinning,
+          # geo-restrictions, release-channel pin).
+          #
+          # cursor is the exception: Cursor CLI does NOT
+          # publish to npm. Its only officially-supported
+          # install method is the curl-pipe script at
+          # https://cursor.com/install (per docs/bridge/
+          # cursor.md §2.1 + cmd/nightme/agents.go:108-113).
+          # The script drops the binary as `agent` (not
+          # `cursor`) into $HOME/.local/bin/agent on
+          # Linux/macOS and the equivalent user-writable
+          # location on Windows. Both `~/.local/bin` (linux/
+          # macos) and Git Bash's $HOME/bin (Windows) are
+          # already on PATH for the hosted runner user.
+          # We accept the curl-pipe flakiness surface for
+          # cursor alone because there is no alternative —
+          # npm install @cursor/cli does not exist.
           #
           # bash is also a builtin (PTY fallback) but it's a
           # platform-provided binary — apt bash on Linux/macOS,
@@ -551,11 +566,19 @@ jobs:
           #   dsh     → @deepseek-ai/dsh
           #             (per internal/bridge/dsh/starter.go:82
           #              Detect() error message + F-dsh-bridge.md)
+          #   cursor  → curl -fsSL https://cursor.com/install | bash
+          #             (per docs/bridge/cursor.md §2.1 — npm
+          #              package does not exist; binary lands as
+          #              `agent` on PATH)
           npm install -g @anthropic-ai/claude-code
           npm install -g @openai/codex
           npm install -g opencode-ai
           npm install -g @earendil-works/pi-coding-agent
           npm install -g @deepseek-ai/dsh
+          # Cursor CLI: officially supported via curl-pipe only.
+          # The installer puts `agent` on PATH under the
+          # runner user's $HOME; nothing to add to PATH here.
+          curl -fsSL https://cursor.com/install | bash
 
       - name: Verify each agent binary is on PATH
         shell: bash
@@ -568,10 +591,22 @@ jobs:
           # ordering on Windows so .cmd shims win over no-
           # extension names. macOS uses the standard POSIX
           # execvp lookup; Linux ditto.
-          for agent in claude codex opencode pi dsh; do
-            path=$(command -v "$agent" 2>/dev/null || true)
+          #
+          # cursor's binary is named `agent` on disk (per
+          # cmd/nightme/agents.go:113 — `cursor.NewStarter(
+          # "cursor", "agent", []string{"acp"})`). The
+          # bridge's Detect() does `exec.LookPath("agent")`,
+          # so this gate must resolve the same string.
+          # agent_to_binary maps agent name → exec.LookPath
+          # target so the loop stays uniform across all 6.
+          for agent in claude codex opencode pi dsh cursor; do
+            case "$agent" in
+              cursor) bin=agent ;;
+              *)      bin="$agent" ;;
+            esac
+            path=$(command -v "$bin" 2>/dev/null || true)
             if [ -z "$path" ]; then
-              echo "::error::$agent not on PATH after npm install -g"
+              echo "::error::$agent (binary '$bin') not on PATH after install"
               exit 1
             fi
             echo "OK: $agent → $path"
@@ -591,12 +626,21 @@ jobs:
           # We accept any non-empty output — wording varies
           # ("Usage: claude [...]" / "codex-cli 0.145.0 ... USAGE"
           # / opencode's TUI help / pi's interactive help / dsh's
-          # one-shot usage). Absence of output means the CLI
-          # crashed before printing.
-          for agent in claude codex opencode pi dsh; do
-            output=$("$agent" --help 2>&1) || true
+          # one-shot usage / cursor's `agent --help` printing
+          # `agent <subcommand> ...` usage). Absence of output
+          # means the CLI crashed before printing.
+          #
+          # Same agent→binary mapping as the PATH step: cursor's
+          # binary on disk is `agent`, so we invoke `agent --help`
+          # to match what the bridge does at spawn time.
+          for agent in claude codex opencode pi dsh cursor; do
+            case "$agent" in
+              cursor) bin=agent ;;
+              *)      bin="$agent" ;;
+            esac
+            output=$("$bin" --help 2>&1) || true
             if [ -z "$output" ]; then
-              echo "::error::$agent --help produced no output"
+              echo "::error::$agent (binary '$bin') --help produced no output"
               exit 1
             fi
             echo "OK: $agent --help responded ($(echo "$output" | wc -l) lines)"
@@ -624,7 +668,7 @@ jobs:
           # Windows fix: a future refactor that re-gates dsh
           # behind runtime.GOOS would land here as a missing
           # row on the windows-latest runner.
-          for agent in claude codex opencode pi dsh; do
+          for agent in claude codex opencode pi dsh cursor; do
             if ! echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)"; then
               echo "::error::nightme agents did not list $agent"
               exit 1
@@ -658,13 +702,13 @@ jobs:
           #
           # Why we don't grep for a specific protocol response:
           # each agent uses a different wire (PTY echo for claude,
-          # stdio JSON-RPC initialize for codex/opencode/pi,
+          # stdio JSON-RPC initialize for codex/opencode/pi/cursor,
           # shared-host 3080-port web for dsh), so a content-based
           # check would couple this gate to a single bridge's
           # protocol. Byte threshold + observation window is the
           # cross-protocol signal.
           workspace=$(mktemp -d)
-          for agent in claude codex opencode pi dsh; do
+          for agent in claude codex opencode pi dsh cursor; do
             echo "--- bridge spawn: $agent ---"
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it
@@ -674,9 +718,11 @@ jobs:
             # shape:
             #   - PTY agents (claude) echo the line, then sit
             #     at the user prompt waiting for more input.
-            #   - stdio JSON-RPC agents (codex / opencode / pi)
+            #   - stdio JSON-RPC agents (codex / opencode / pi / cursor)
             #     parse the line, fail with a framing/protocol
-            #     error, log it to stderr.
+            #     error, log it to stderr. (cursor goes through
+            #     the generic acp bridge — same JSON-RPC 2.0
+            #     wire as opencode.)
             #   - dsh shared-host binds 127.0.0.1:3080 and prints
             #     the URL on stdout.
             #

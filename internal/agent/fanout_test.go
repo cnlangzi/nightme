@@ -81,7 +81,7 @@ func TestAssembleGroupPrompt_Structure(t *testing.T) {
 }
 
 // TestAssembleGroupPrompt_EmptyWorkspace: "" workspace or nil group
-// → "" (DelegateReview's signal to fall back to StandardPrompt).
+// → "" (DelegateReview's signal to fall back to BuiltinPrompt).
 func TestAssembleGroupPrompt_EmptyWorkspace(t *testing.T) {
 	g := &reviewGroup{Pattern: "**/*.go", Files: []string{"a.go"}, Rule: "r"}
 	if got := assembleGroupPrompt(context.Background(), reviewContext{}, g); got != "" {
@@ -134,7 +134,7 @@ func TestDelegateReviewMultiJob_ConcurrentMerge(t *testing.T) {
 		},
 	}
 
-	merged, err := delegateReviewMultiJob(context.Background(), fs, StartConfig{Workspace: pre.workspace}, pre)
+	merged, err := delegateReviewMultiJob(context.Background(), fs, StartConfig{Workspace: pre.workspace}, pre, pre.ocrGroups)
 	if err != nil {
 		t.Fatalf("delegateReviewMultiJob: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestDelegateReviewMultiJob_PartialFailure(t *testing.T) {
 		},
 	}
 
-	merged, err := delegateReviewMultiJob(context.Background(), fs, StartConfig{Workspace: pre.workspace}, pre)
+	merged, err := delegateReviewMultiJob(context.Background(), fs, StartConfig{Workspace: pre.workspace}, pre, pre.ocrGroups)
 	if err != nil {
 		t.Fatalf("partial failure should NOT error (survivors); got: %v", err)
 	}

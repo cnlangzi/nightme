@@ -28,7 +28,7 @@ func (f *fakeStarter) RunOnce(ctx context.Context, cfg StartConfig, blocks []Con
 func (f *fakeStarter) Review(ctx context.Context, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	result, err := f.RunOnce(ctx, cfg, []ContentBlock{{
 		Type: ContentText,
-		Text: StandardPrompt(),
+		Text: BuiltinPrompt,
 	}})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
@@ -37,7 +37,7 @@ func (f *fakeStarter) Review(ctx context.Context, cfg StartConfig, opts ...RunOn
 	return result, nil
 }
 
-// TestStandardPrompt_Structure verifies the prompt contains the
+// TestBuiltinPrompt_Structure verifies the prompt contains the
 // sections / severity rubric the chat agent is supposed to follow.
 // The agent is free to add words around these, but it MUST emit
 // the canonical structure or downstream IM rendering (and our
@@ -47,8 +47,8 @@ func (f *fakeStarter) Review(ctx context.Context, cfg StartConfig, opts ...RunOn
 // behavior is verified by /tmp/review-smoke e2e (see F-review.md
 // §3.5). The point of these checks is to catch accidental edits
 // that drop a required section from the prompt template.
-func TestStandardPrompt_Structure(t *testing.T) {
-	p := StandardPrompt()
+func TestBuiltinPrompt_Structure(t *testing.T) {
+	p := BuiltinPrompt
 
 	// Required sections the agent must follow.
 	wantSections := []string{
@@ -62,14 +62,14 @@ func TestStandardPrompt_Structure(t *testing.T) {
 	}
 	for _, s := range wantSections {
 		if !strings.Contains(p, s) {
-			t.Errorf("StandardPrompt() missing required section %q", s)
+			t.Errorf("BuiltinPrompt missing required section %q", s)
 		}
 	}
 
 	// Required severity tags on findings.
-	for _, sev := range []string{"blocker", "major", "minor", "nit"} {
+	for _, sev := range []string{"critical", "high", "medium", "low"} {
 		if !strings.Contains(p, "**"+sev+"**") {
-			t.Errorf("StandardPrompt() missing severity tag %q", sev)
+			t.Errorf("BuiltinPrompt missing severity tag %q", sev)
 		}
 	}
 
@@ -87,15 +87,16 @@ func TestStandardPrompt_Structure(t *testing.T) {
 	}
 	for _, r := range wantRules {
 		if !strings.Contains(p, r) {
-			t.Errorf("StandardPrompt() missing rule %q", r)
+			t.Errorf("BuiltinPrompt missing rule %q", r)
 		}
 	}
 
 	// Required "What to look for" categories — must include
-	// Efficiency (added to align with claude /code-review's
-	// "efficiency cleanups" pillar) and Simplification (which
-	// also covers claude's "reuse" pillar — prefer existing
-	// helpers over new code).
+	// Efficiency (aligns with claude /code-review's "efficiency
+	// cleanups" pillar). Simplification no longer appears here —
+	// it runs as a parallel reviewGroup (see simplifyPrompt const
+	// and the simplify-group fan-out), so BuiltinPrompt doesn't
+	// carry that axis anymore.
 	wantCategories := []string{
 		"Correctness",
 		"Resource lifetime",
@@ -106,20 +107,19 @@ func TestStandardPrompt_Structure(t *testing.T) {
 		"Migration risk",
 		"Efficiency",
 		"Test gaps",
-		"Simplification",
 	}
 	for _, c := range wantCategories {
 		if !strings.Contains(p, "**"+c+"**") {
-			t.Errorf("StandardPrompt() missing category %q", c)
+			t.Errorf("BuiltinPrompt missing category %q", c)
 		}
 	}
 }
 
-// TestStandardPrompt_IncludesGitCommands verifies the prompt
+// TestBuiltinPrompt_IncludesGitCommands verifies the prompt
 // references the three git diff commands the chat agent must run.
 // Each is essential to capturing the full "diff a PR would have".
-func TestStandardPrompt_IncludesGitCommands(t *testing.T) {
-	p := StandardPrompt()
+func TestBuiltinPrompt_IncludesGitCommands(t *testing.T) {
+	p := BuiltinPrompt
 	cmds := []string{
 		"git fetch origin",
 		"git diff <default-branch>...HEAD",
@@ -128,7 +128,7 @@ func TestStandardPrompt_IncludesGitCommands(t *testing.T) {
 	}
 	for _, c := range cmds {
 		if !strings.Contains(p, c) {
-			t.Errorf("StandardPrompt() missing git command %q", c)
+			t.Errorf("BuiltinPrompt missing git command %q", c)
 		}
 	}
 }
@@ -159,7 +159,7 @@ func TestReview_RejectsNilInject(t *testing.T) {
 }
 
 // TestReview_ReturnsRunResult verifies the happy path: Review
-// calls s.RunOnce with StandardPrompt, captures the returned
+// calls s.RunOnce with BuiltinPrompt, captures the returned
 // RunResult, and returns it (RAW — no FormatReviewMessage wrap,
 // no Inject). The /review dispatcher is responsible for wrapping
 // and routing to AS + channel.
@@ -189,7 +189,7 @@ func TestReview_ReturnsRunResult(t *testing.T) {
 		t.Fatalf("Review returned error: %v", err)
 	}
 
-	// Verify RunOnce was called with rc.Workspace and StandardPrompt.
+	// Verify RunOnce was called with rc.Workspace and BuiltinPrompt.
 	if capturedRunOnceWorkspace != "/ws" {
 		t.Errorf("RunOnce called with workspace %q, want %q",
 			capturedRunOnceWorkspace, "/ws")
@@ -201,8 +201,8 @@ func TestReview_ReturnsRunResult(t *testing.T) {
 		t.Errorf("RunOnce block type %q, want %q",
 			capturedRunOnceBlocks[0].Type, ContentText)
 	}
-	if capturedRunOnceBlocks[0].Text != StandardPrompt() {
-		t.Errorf("RunOnce block text != StandardPrompt() — bridge should send the shared prompt")
+	if capturedRunOnceBlocks[0].Text != BuiltinPrompt {
+		t.Errorf("RunOnce block text != BuiltinPrompt — bridge should send the shared prompt")
 	}
 
 	// Verify the returned RunResult.Text is the RAW review body,

@@ -907,7 +907,7 @@ func codexDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.Bridge
 // runCodexReview runs `codex review --base <default>` against the
 // workspace. F-review.md §13 "codex/claude use native review" rule:
 // we invoke codex's built-in `review` subcommand instead of running
-// our generic StandardPrompt via `codex exec`.
+// our generic builtinPrompt via `codex exec`.
 //
 // --base <default> gives PR-mode review (current branch vs default
 // branch). If the default branch can't be detected (no origin remote),
@@ -943,7 +943,7 @@ func codexDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.Bridge
 //                                          but `--` is harmless
 //
 // F-review.md §13 "codex/claude use native review" rule: invoking
-// the native subcommand instead of our generic StandardPrompt.
+// the native subcommand instead of our generic builtinPrompt.
 //
 // opts is forwarded verbatim to runCodexReviewPlain so the sink
 // (typically installed via WithEventSink by the /review dispatcher)

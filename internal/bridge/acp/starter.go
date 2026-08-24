@@ -104,7 +104,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 }
 
 // Review implements /review for the acp bridge: delegate to the
-// shared agent.DelegateReview (three-tier dispatch, docs/REVIEW.md
+// shared agent.ReviewWithOcr (three-tier dispatch, docs/REVIEW.md
 // §2). The acp-driven chat agent (used by opencode) reads the
 // precomputed diff and outputs the structured review; ocr delegate
 // rules fold in when ocr is on $PATH.
@@ -113,7 +113,10 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // built-in that uses it. Review here serves both acp as a Starter
 // and any future acp-backed agent that registers itself.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return agent.DelegateReview(ctx, s, cfg, opts...)
+	if agent.OcrAvailable() {
+		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
+	}
+	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 
 // collectResult sends blocks to a live *agent.Agent and drains

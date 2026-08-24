@@ -450,7 +450,7 @@ func appendAuditFields(result agent.RunResult) string {
 // the workspace. This is the bridge's native review path
 // (F-review.md §13 "codex/claude use native review" rule): we
 // invoke Claude Code's built-in slash command instead of running
-// our generic StandardPrompt via `claude -p "<prompt>"`. The chat
+// our generic builtinPrompt via `claude -p "<prompt>"`. The chat
 // agent already has a multi-agent review pipeline tuned for this
 // task; reusing it is strictly better than reverse-engineering
 // the same prompt into a generic prompt-mode call.

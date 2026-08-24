@@ -5,8 +5,8 @@ package agent_test
 // F-review.md §13 "codex/claude use native review" rule:
 // bridges that have a native review subcommand (claudecode,
 // codex) invoke it directly instead of running our generic
-// StandardPrompt; bridges that don't (dsh, opencode, pi, acp)
-// delegate to agent.Review which uses StandardPrompt.
+// BuiltinPrompt; bridges that don't (dsh, opencode, pi, acp)
+// delegate to agent.Review which uses BuiltinPrompt.
 //
 // Per-bridge contract:
 //   1. claudecode: rev path = `runCodeReviewPrintMode`; the
@@ -16,7 +16,7 @@ package agent_test
 //   2. codex: rev path = `runCodexReview` (uses codex's native
 //      `codex review` subcommand, not `codex exec <prompt>`);
 //      same wrapping pattern.
-//   3. dsh/opencode/pi/acp: agent.Review → StandardPrompt +
+//   3. dsh/opencode/pi/acp: agent.Review → BuiltinPrompt +
 //      FormatReviewMessage.
 //   4. pty: returns ErrReviewNotSupported (bash isn't a coding
 //      agent).
@@ -51,7 +51,7 @@ import (
 
 // TestReview_UsesSharedPrompt is the canonical contract test for
 // the agent.Review fallback path (used by dsh / opencode / pi /
-// acp). It verifies that this path runs the shared StandardPrompt
+// acp). It verifies that this path runs the shared BuiltinPrompt
 // and wraps the result with the canonical preamble.
 //
 // claudecode / codex have their own Review paths that don't go
@@ -91,9 +91,9 @@ func TestReview_UsesSharedPrompt(t *testing.T) {
 	}
 
 	// 2. The prompt sent to the fresh subprocess is the shared
-	// StandardPrompt() — not a per-bridge variant.
-	if gotPrompt != agent.StandardPrompt() {
-		t.Errorf("RunOnce prompt != StandardPrompt() — bridge should send the shared prompt")
+	// agent.BuiltinPrompt — not a per-bridge variant.
+	if gotPrompt != agent.BuiltinPrompt {
+		t.Errorf("RunOnce prompt != agent.BuiltinPrompt — bridge should send the shared prompt")
 	}
 
 	// 3. v9: Review returns the RAW RunResult (no FormatReviewMessage
@@ -169,7 +169,7 @@ func (t *testStarter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks
 func (t *testStarter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	result, err := t.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
-		Text: agent.StandardPrompt(),
+		Text: agent.BuiltinPrompt,
 	}})
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",

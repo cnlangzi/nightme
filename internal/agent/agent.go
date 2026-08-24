@@ -1171,7 +1171,7 @@ type Starter interface {
 	// ===== F-review.md §13 "codex/claude use native review" rule =====
 	//
 	// Bridges that have a native review subcommand MUST invoke it
-	// directly instead of running our generic StandardPrompt:
+	// directly instead of running our generic BuiltinPrompt:
 	//   - claudecode: `claude -p code-review` (built-in slash command;
 	//     note: NO leading slash in `[command]` slot — verified
 	//     2.1.220 that `claude -p /code-review` runs 0 turns and
@@ -1185,7 +1185,7 @@ type Starter interface {
 	//     print.go, NOT runPrintMode)
 	//
 	// Bridges that have NO native review subcommand call
-	// s.RunOnce(ctx, cfg, [StandardPrompt()]) inline — the
+	// s.RunOnce(ctx, cfg, [BuiltinPrompt()]) inline — the
 	// canonical review path is "spawn a fresh subprocess with the
 	// shared prompt" and inlining keeps the contract symmetric
 	// with RunOnce:

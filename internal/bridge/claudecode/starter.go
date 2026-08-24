@@ -166,7 +166,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 //
 // F-review.md §13 "codex/claude use native review" rule: when the
 // underlying CLI has a built-in review pathway, we invoke it
-// directly instead of running our generic StandardPrompt. Claude
+// directly instead of running our generic builtinPrompt. Claude
 // Code has `code-review` built in (a multi-agent review pipeline
 // tuned for the task); invoking it via `claude -p code-review`
 // (NO leading slash — verified 2.1.220) is strictly better than
@@ -183,7 +183,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // distribution.
 //
 // Other bridges (dsh / opencode / pi / acp) don't have native
-// review; they delegate to agent.Review which uses StandardPrompt.
+// review; they delegate to agent.Review which uses builtinPrompt.
 // pty returns ErrReviewNotSupported.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	return runCodeReviewPrintMode(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})

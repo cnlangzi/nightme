@@ -1,32 +1,25 @@
-// delegate_review.go — shared Review body for delegate-tier bridges.
+// review_with_ocr.go — ReviewWithOcr runner + multi-job fan-out
+// machinery for the ocr delegation flow (docs/REVIEW.md §2.2).
 //
-// Implements the three-tier dispatch from docs/REVIEW.md §2, aligned
-// with ocr's official Delegation Mode SKILL (skills/open-code-review-
-// delegate/SKILL.md):
+// Three review runners exist in package agent (and bridge packages):
+//   - ReviewWithNative: per-bridge in bridge packages (claudecode/codex
+//     invoke their built-in /codereview / codex review commands).
+//   - ReviewWithOcr: this file; ocr delegation flow with multi-job
+//     fan-out via delegateReviewMultiJob.
+//   - ReviewWithPrompt: in review.go; pure-prompt path used when ocr
+//     isn't installed or workspace precompute fails.
 //
-//   Tier 1 (native)   — codex/claudecode override Starter.Review; this
-//                       helper is NOT called for them.
-//   Tier 2 (ocr)     — delegate bridges (dsh/pi/acp/opencode/cursor)
-//                       when `ocr` is on $PATH: follow the SKILL's
-//                       Step 1-6 verbatim — `ocr delegate preview` for
-//                       the authoritative file list + merge-base +
-//                       exclusion reasons, `ocr delegate rule` (batched,
-//                       per SKILL "fetch rules per-batch") for per-file
-//                       rules; diff via the preview's merge-base (a
-//                       commit hash, always resolvable).
-//   Tier 3 (prompt)   — same delegate bridges when `ocr` is absent:
-//                       Go-side best-effort reprise of ocr's engineering
-//                       (default-branch detect as a resolvable ref,
-//                       merge-base, the three diffs incl. untracked, a
-//                       noise-filtered file list, the built-in rubric).
+// simplify runs as a parallel reviewGroup inside both ReviewWithOcr and
+// ReviewWithPrompt (see patternSimplify / simplifyGroup below) — never
+// in ReviewWithNative (per-bridge native review handles its own prompt).
 //
-// `ocr` is an external tool (like git) — NEVER a bridge/agent. ocr's
-// delegation mode is LLM-free: it emits only deterministic engineering
-// (file list + rules) as JSON; the host agent (this bridge's agent)
-// supplies the LLM via RunOnce. No second LLM config.
+// ocr is an external CLI (like git), not a bridge/agent. Its delegation
+// mode is LLM-free: it emits only deterministic engineering (file list
+// + rules) as JSON; the host agent (this bridge's agent) supplies the
+// LLM via RunOnce. No second LLM config.
 //
-// Every step degrades gracefully: ocr missing/failed → Tier 3 Go
-// reprise; precompute totally failed (no workspace) → StandardPrompt
+// Every step degrades gracefully: ocr missing/failed → ReviewWithPrompt
+// fallback; precompute totally failed (no workspace) → BuiltinPrompt
 // verbatim. /review never hard-fails on precompute.
 
 package agent
@@ -53,54 +46,30 @@ import (
 // group batching across multiple RunOnce calls is left to Phase C).
 const maxDiffLines = 2000
 
-// DelegateReview is the shared Review entry point for delegate-tier
-// bridges (dsh / pi / acp / opencode / cursor). It runs the three-tier
-// dispatch described in docs/REVIEW.md §2 and returns the RunResult
-// from the bridge's own RunOnce — the host agent's LLM drives the
-// review. Native bridges (codex / claudecode) bypass this entirely;
-// their Starter.Review override invokes the native review command.
+// ReviewWithOcr runs review using the ocr delegation flow (docs/REVIEW.md
+// §2.2 / §2.5). ocr provides deterministic engineering (file selection +
+// rule matching, LLM-free); the host agent does the actual review
+// reasoning with its own LLM.
 //
-// opts are forwarded to RunOnce unchanged (event sinks, etc.). The
-// error is wrapped with the agent name, matching the previous
-// per-bridge Review bodies so the /review dispatcher's error surfacing
-// is unchanged.
-func DelegateReview(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
-	pre := precomputeReview(ctx, cfg.Workspace)
-
-	// Multi-job fast path (docs/REVIEW.md §2.5): when Tier 2 returned
-	// ≥2 rule groups, fan out to N parallel RunOnce jobs — one per
-	// group, each with independent context + the aggregator sink that
-	// collapses N event streams into one outer lifecycle.
-	//
-	// Concurrency cap (maxConcurrentReviewJobs = 4) protects against
-	// token / API-rate blow-up on huge changesets. ctx cancel
-	// (parent is /review's revCtx) propagates to all in-flight jobs
-	// simultaneously — same /close / timeout guarantees as single-job.
-	if len(pre.ocrGroups) >= 2 {
-		return delegateReviewMultiJob(ctx, s, cfg, pre, opts...)
-	}
-
-	// Single-job path: Tier 2 with 0 or 1 group, Tier 3, or total
-	// precompute failure. assembleReviewPrompt handles all three via
-	// the same ocrRules-vs-built-in-rubric decision documented in
-	// assembleReviewPrompt's doc.
-	prompt := assembleReviewPrompt(pre)
-	if prompt == "" {
-		// Total precompute failure (no workspace): fall back to the
-		// legacy static prompt so /review still works, just without
-		// the Go-side precompute enhancements.
-		prompt = StandardPrompt()
-	}
-
-	result, err := s.RunOnce(ctx, cfg, []ContentBlock{{
-		Type: ContentText,
-		Text: prompt,
-	}}, opts...)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("agent %s: review one-shot failed: %w",
-			s.Info().Name, err)
-	}
-	return result, nil
+// Pre-conditions:
+//   - The caller (bridge Starter.Review) has already checked OcrAvailable
+//     and routed here. ReviewWithOcr does NOT re-check — single
+//     responsibility: "given ocr, do the ocr flow".
+//
+// Flow:
+//  1. precomputeReview fills reviewable / ocrGroups / diffs.
+//  2. Fan out via delegateReviewMultiJob with [ocrGroups..., simplifyGroup].
+//     simplify always runs as a parallel dimension (its own RunOnce) alongside
+//     the ocr-sourced groups.
+//
+// If precomputeReview returns empty (no workspace, no ocr groups), the
+// fan-out degrades gracefully to [simplifyGroup(nil)] — one goroutine,
+// one RunOnce. No internal fallback to ReviewWithPrompt; if ocr isn't
+// actually available, that's a caller bug, not this function's problem.
+func ReviewWithOcr(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
+	pre := precomputeReviewWithOcr(ctx, cfg.Workspace)
+	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
+	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }
 
 // delegateReviewMultiJob runs one RunOnce per ocr rule group, in
@@ -119,10 +88,9 @@ func delegateReviewMultiJob(
 	s Starter,
 	cfg StartConfig,
 	pre reviewContext,
+	groups []reviewGroup,
 	opts ...RunOnceOption,
 ) (RunResult, error) {
-	groups := pre.ocrGroups
-
 	// Extract the outer sink (if any) and rebuild per-job opts with
 	// the aggregator's per-job sink replacing it. ParseRunOnceOptions
 	// is the single source of truth for option resolution; today the
@@ -161,7 +129,7 @@ func delegateReviewMultiJob(
 
 			prompt := assembleGroupPrompt(ctx, pre, &groups[i])
 			if prompt == "" {
-				prompt = StandardPrompt()
+				prompt = BuiltinPrompt
 			}
 
 			var runOpts []RunOnceOption
@@ -199,7 +167,7 @@ func delegateReviewMultiJob(
 // Tier 2 and Tier 3. Every field is best-effort: empty/zero means
 // "could not compute; assembleReviewPrompt omits that section".
 // assembleReviewPrompt returns "" only when workspace is empty — the
-// signal that DelegateReview should fall back to StandardPrompt.
+// signal that DelegateReview should fall back to BuiltinPrompt.
 type reviewContext struct {
 	workspace     string
 	defaultBranch string // resolvable ref "origin/main"; "" = could not detect
@@ -208,6 +176,7 @@ type reviewContext struct {
 	stagedDiff    string // git diff --staged
 	unstagedDiff  string // git diff
 	reviewable    []string
+	untracked     []string // new files never committed/staged; can't be diffed (no baseline)
 	excluded      []string // "path (reason)" entries; Tier 2 only
 	// Tier 2 only (populated when ocr is available + produced rules):
 	ocrRules  string        // formatted rule groups from `ocr delegate rule` (markdown, single-job path)
@@ -229,70 +198,171 @@ type reviewGroup struct {
 	Rule    string
 }
 
-func precomputeReview(ctx context.Context, workspace string) reviewContext {
+// Sentinel Patterns for non-ocr review groups. Used by assembleGroupPrompt
+// to pick the right header text (ocr groups use "Review rules (matched per
+// file by `ocr delegate`...)"; builtin/simplify use their own headers).
+// Real ocr groups come with their own glob (e.g. "**/*.go"); sentinels
+// use the underscore prefix to avoid any future glob collision.
+const (
+	patternBuiltin  = "_nightme_builtin"
+	patternSimplify = "_nightme_simplify"
+)
+
+// simplifyGroup builds a reviewGroup carrying the nightme-owned simplify
+// lens (review.go::simplifyPrompt). Always appended to the fan-out group
+// list of ReviewWithOcr and ReviewWithPrompt; runs as a parallel
+// RunOnce concurrent with the main dimension(s).
+func simplifyGroup(files []string) reviewGroup {
+	return reviewGroup{Pattern: patternSimplify, Files: files, Rule: simplifyPrompt}
+}
+
+// precomputeReviewWithOcr populates the reviewContext using the ocr CLI
+// delegation flow (ocr delegate preview + ocr delegate rule). The
+// caller (ReviewWithOcr) is responsible for verifying OcrAvailable()
+// before calling this — this function assumes ocr is on $PATH and
+// won't fall back to git-based collection if ocr subprocess fails.
+//
+// Returns a reviewContext with ocr-populated fields on success
+// (reviewable via ocr's FileFilter, ocrGroups per-pattern rule
+// grouping, excluded + reasons, ocr-validated mergeBase). On ocr
+// subprocess failure, returns a workspace-only reviewContext (no
+// fallback) — callers must detect the empty ocrGroups and decide
+// how to proceed (currently: degrade gracefully to simplifyGroup-only
+// fan-out).
+func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContext {
 	rc := reviewContext{workspace: workspace}
 	if workspace == "" {
 		return rc
 	}
 
-	// Default branch — common to Tier 2 & 3. Returns a resolvable ref
-	// ("origin/main"), NOT a bare name ("main"), so the diff/merge-base
-	// commands below don't fail on a checkout that only has the remote
-	// tracking branch (the common case on a feature branch).
 	base := detectDefaultBranch(ctx, workspace)
 	rc.defaultBranch = base
 	if base != "" {
-		// merge-base via the resolvable ref; "" on failure (non-fatal).
 		rc.mergeBase = runGit(ctx, workspace, "merge-base", base, "HEAD")
 	}
 
-	// Tier 2: ocr delegation (LLM-free). Per ocr's SKILL Step 1, the
-	// preview is the authoritative source for the reviewable file
-	// list + merge-base + exclusion reasons. We hand it the same
-	// resolvable base ref so ocr's FileFilter (more precise than our
-	// Go isReviewablePath heuristic) + untracked handling apply.
-	// Failure is non-fatal: we fall through to the Tier 3 Go reprise.
-	if base != "" && ocrAvailable() {
+	if base != "" {
 		if preview, ok := runOcrDelegatePreview(ctx, workspace, base, "HEAD"); ok {
 			rc.reviewable = preview.reviewable
 			rc.excluded = preview.excluded
 			if preview.mergeBase != "" {
-				// ocr's merge-base wins: it ran the same resolution
-				// but with its own ref-validation, so it's strictly
-				// more authoritative than our runGit above.
 				rc.mergeBase = preview.mergeBase
 			}
-			// SKILL Step 2: rules per-batch. ocr groups rules by
-			// content; we fetch in ≤50-path batches to stay well
-			// under ARG_MAX on large changesets (SKILL: "fetch rules
-			// per-batch as you review"). Single-batch failure is
-			// non-fatal — other batches still contribute rules.
-			//
-			// Two parallel forms are kept: ocrRules (markdown string,
-			// consumed by the single-job path's assembleReviewPrompt)
-			// and ocrGroups (structured, consumed by the multi-job
-			// path in DelegateReview). Both are populated from the
-			// same batched runOcrDelegateRulesBatched call so we
-			// don't double-spawn ocr.
 			rulesMarkdown, groups := runOcrDelegateRulesBatched(ctx, workspace, rc.reviewable)
 			rc.ocrRules = rulesMarkdown
 			rc.ocrGroups = groups
 		}
 	}
 
-	// Tier 3 Go reprise: ocr absent, or preview failed. Collect the
-	// file list ourselves (incl. untracked — `git diff --name-only`
-	// alone misses newly-added files, which SKILL Step 3 workspace
-	// mode explicitly reads directly).
-	if rc.reviewable == nil {
-		rc.reviewable = collectReviewableFiles(ctx, workspace, base)
+	fillDiffs(ctx, &rc, workspace, base)
+	return rc
+}
+
+// precomputeReviewWithBuiltin populates the reviewContext without ocr,
+// using Go-side git commands to replicate what ocr's preview would
+// have produced. Used by ReviewWithPrompt on delegate-tier bridges
+// when ocr isn't installed.
+//
+// The output has the same shape as precomputeReviewWithOcr — but
+// `ocrGroups` is synthesized as a single builtin group (Pattern =
+// patternBuiltin, Rule = BuiltinPrompt) instead of N per-pattern ocr
+// groups. `excluded` is nil (Go heuristic doesn't track exclusion
+// reasons). File-list precision is lower than ocr's FileFilter.
+//
+// File enumeration (inlined — this is the only caller, no need for
+// a separate helper):
+//   - reviewable: files with at least one diff (committed/staged/
+//     unstaged). Safe to render with `git diff -- <file>`.
+//   - untracked:   new files never committed/staged — they have no
+//     baseline to diff against, so they CANNOT appear in any diff.
+//     Listed separately so the LLM prompt can call them out as
+//     "new file additions" instead of pretending a diff exists.
+//
+// `git diff <base>...HEAD -- <untracked>` returns empty (file not in
+// any commit yet). `git diff -- <untracked>` also returns empty. So
+// merging untracked into reviewable would silently violate the
+// coverage mandate (file listed but no content for the LLM to
+// review). Keeping them separate is the only honest shape.
+//
+// 4 git sources, dedup'd:
+//   1. git diff --name-only <base>...HEAD    (committed on branch)
+//   2. git diff --staged --name-only        (staged, not committed)
+//   3. git diff --name-only                 (unstaged working tree)
+//   4. git ls-files --others --exclude-standard  (untracked, .gitignore)
+func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewContext {
+	rc := reviewContext{workspace: workspace}
+	if workspace == "" {
+		return rc
 	}
 
-	// The three diffs whose union = "the diff a PR would have".
-	// Prefer the merge-base commit hash (two-dot, always resolvable)
-	// over the symbolic base ref — this is the fix for the bare-name
-	// resolution failure that previously emptied committedDiff on a
-	// feature branch with no local `main`.
+	base := detectDefaultBranch(ctx, workspace)
+	rc.defaultBranch = base
+	if base != "" {
+		rc.mergeBase = runGit(ctx, workspace, "merge-base", base, "HEAD")
+	}
+
+	// Collect reviewable + untracked from 4 git sources.
+	seen := map[string]bool{}
+	var changed []string
+	addChanged := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" && !seen[s] {
+			seen[s] = true
+			changed = append(changed, s)
+		}
+	}
+	if base != "" {
+		for _, f := range strings.Split(runGit(ctx, workspace,
+			"diff", "--name-only", base+"...HEAD"), "\n") {
+			addChanged(f)
+		}
+	}
+	for _, f := range strings.Split(runGit(ctx, workspace,
+		"diff", "--staged", "--name-only"), "\n") {
+		addChanged(f)
+	}
+	for _, f := range strings.Split(runGit(ctx, workspace,
+		"diff", "--name-only"), "\n") {
+		addChanged(f)
+	}
+	for _, f := range strings.Split(runGit(ctx, workspace,
+		"ls-files", "--others", "--exclude-standard"), "\n") {
+		s := strings.TrimSpace(f)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		if isReviewablePath(s) {
+			rc.untracked = append(rc.untracked, s)
+		}
+	}
+	for _, f := range changed {
+		if isReviewablePath(f) {
+			rc.reviewable = append(rc.reviewable, f)
+		}
+	}
+
+	if len(rc.reviewable) > 0 || len(rc.untracked) > 0 {
+		// Files = reviewable only — untracked have no diff to slice on.
+		// untracked is rendered separately by assembleGroupPrompt as a
+		// "new file additions" section.
+		rc.ocrGroups = []reviewGroup{{
+			Pattern: patternBuiltin,
+			Files:   rc.reviewable,
+			Rule:    BuiltinPrompt,
+		}}
+	}
+
+	fillDiffs(ctx, &rc, workspace, base)
+	return rc
+}
+
+// fillDiffs computes the three git diffs (committed/staged/unstaged)
+// that union into "the diff a PR would have". Shared helper used by
+// both precomputeReviewWithOcr and precomputeReviewWithBuiltin — the
+// diff content is path-agnostic (pure git), so the same logic works
+// regardless of how reviewable was obtained.
+func fillDiffs(ctx context.Context, rc *reviewContext, workspace, base string) {
 	switch {
 	case rc.mergeBase != "":
 		rc.committedDiff = truncateDiff(runGit(ctx, workspace, "diff", rc.mergeBase+"..HEAD"))
@@ -301,8 +371,6 @@ func precomputeReview(ctx context.Context, workspace string) reviewContext {
 	}
 	rc.stagedDiff = truncateDiff(runGit(ctx, workspace, "diff", "--staged"))
 	rc.unstagedDiff = truncateDiff(runGit(ctx, workspace, "diff"))
-
-	return rc
 }
 
 // runGit runs a git command in workspace and returns trimmed stdout.
@@ -376,47 +444,29 @@ func stripRefsRemotes(s string) string {
 // required because `git diff --name-only` omits newly-added files that
 // have never been staged — ocr's preview includes them, and so must we
 // to honour the coverage mandate on the full PR diff.
-func collectReviewableFiles(ctx context.Context, workspace, base string) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(s string) {
-		s = strings.TrimSpace(s)
-		if s != "" && !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	if base != "" {
-		for _, f := range strings.Split(runGit(ctx, workspace,
-			"diff", "--name-only", base+"...HEAD"), "\n") {
-			add(f)
-		}
-	}
-	for _, f := range strings.Split(runGit(ctx, workspace,
-		"diff", "--staged", "--name-only"), "\n") {
-		add(f)
-	}
-	for _, f := range strings.Split(runGit(ctx, workspace,
-		"diff", "--name-only"), "\n") {
-		add(f)
-	}
-	// Untracked new files (never staged). `--others` lists files Git
-	// doesn't track; `--exclude-standard` honours .gitignore so we
-	// don't pull in build output. Mirrors ocr's workspace-mode
-	// untracked handling (SKILL Step 3).
-	for _, f := range strings.Split(runGit(ctx, workspace,
-		"ls-files", "--others", "--exclude-standard"), "\n") {
-		add(f)
-	}
-	filtered := make([]string, 0, len(out))
-	for _, f := range out {
-		if isReviewablePath(f) {
-			filtered = append(filtered, f)
-		}
-	}
-	return filtered
-}
-
+// collectWorkspaceFiles enumerates the workspace's changed files for review.
+// Returns two disjoint slices:
+//
+//   - reviewable: files with at least one diff (committed/staged/unstaged).
+//     Safe to render with `git diff -- <file>` and put in
+//     reviewGroup.Files.
+//   - untracked:   new files never committed/staged — they have no
+//     baseline to diff against, so they CANNOT appear in any diff.
+//     Listed separately so the LLM prompt can call them out as
+//     "new file additions" instead of pretending a diff exists.
+//
+// `git diff <base>...HEAD -- <untracked>` returns empty (file not in any
+// commit yet). `git diff -- <untracked>` also returns empty. So merging
+// untracked into reviewable would silently violate the coverage mandate
+// (file listed but no content for the LLM to review). Keeping them
+// separate is the only honest shape.
+//
+// 4 git sources, dedup'd:
+//   1. git diff --name-only <base>...HEAD    (committed on branch)
+//   2. git diff --staged --name-only        (staged, not committed)
+//   3. git diff --name-only                 (unstaged working tree)
+//   4. git ls-files --others --exclude-standard  (untracked, respects .gitignore)
+//
 // isReviewablePath drops well-known noise directories. Conservative:
 // only paths whose normalised form contains a known noise segment are
 // excluded; everything else is left to the LLM to judge. Tier 2 uses
@@ -498,11 +548,16 @@ func runOcrDelegatePreview(ctx context.Context, workspace, from, to string) (ocr
 	return p, true
 }
 
-// ocrAvailable reports whether the `ocr` CLI is on $PATH. Uses
+// OcrAvailable reports whether the `ocr` CLI is on $PATH. Uses
 // exec.LookPath (not proc.New) because this is a pure existence check
 // — no spawn, no cross-platform spawn recipe needed. LookPath honours
 // PATHEXT on Windows, so "ocr" resolves to ocr.cmd / ocr.exe.
-func ocrAvailable() bool {
+//
+// Exported so delegate-tier bridges can dispatch their Starter.Review
+// impl to either ReviewWithOcr (when this returns true) or
+// ReviewWithPrompt (when false). Keeping the detection here avoids
+// duplicating the LookPath call across 5 bridge packages.
+func OcrAvailable() bool {
 	_, err := exec.LookPath("ocr")
 	return err == nil
 }
@@ -630,7 +685,7 @@ func truncateDiff(s string) string {
 // Tier 3 built-in).
 //
 // Returns "" only when workspace is empty — DelegateReview then falls
-// back to StandardPrompt verbatim.
+// back to BuiltinPrompt verbatim.
 func assembleReviewPrompt(rc reviewContext) string {
 	if rc.workspace == "" {
 		return ""
@@ -663,6 +718,15 @@ func assembleReviewPrompt(rc reviewContext) string {
 	if len(rc.excluded) > 0 {
 		fmt.Fprintln(&b, "\n# Excluded (do not review)")
 		for _, f := range rc.excluded {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+	}
+
+	// --- Untracked files (new additions, no baseline) ---
+	if len(rc.untracked) > 0 {
+		fmt.Fprintln(&b, "\n# New file additions (no baseline — added in this changeset)")
+		fmt.Fprintln(&b, "These files are untracked (never committed/staged); no diff exists. Review by reading the file contents directly if available, or skip with reason.")
+		for _, f := range rc.untracked {
 			fmt.Fprintf(&b, "- %s\n", f)
 		}
 	}
@@ -786,7 +850,7 @@ func reviewWhatToLook() string {
 //
 // Returns "" only when workspace is empty — same fallback
 // signal as assembleReviewPrompt, so the caller's "fall back to
-// StandardPrompt" branch fires uniformly.
+// BuiltinPrompt" branch fires uniformly.
 func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) string {
 	if rc.workspace == "" || g == nil {
 		return ""
@@ -812,6 +876,20 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 	fmt.Fprintln(&b, "Coverage is MANDATORY: every file below must end as `reviewed` or `skipped` with a concrete reason.")
 	for _, f := range g.Files {
 		fmt.Fprintf(&b, "- %s\n", f)
+	}
+
+	// --- Untracked files (new additions, no baseline to diff against) ---
+	// Rendered only on the first group of the fan-out to avoid repetition
+	// across N goroutines. These files appear in the changeset but
+	// `git diff -- <file>` returns empty for them — the LLM must
+	// treat them as "new file additions" rather than expecting
+	// existing diff content.
+	if len(rc.untracked) > 0 && g.Pattern == patternBuiltin {
+		fmt.Fprintln(&b, "\n# New file additions (no baseline — added in this changeset)")
+		fmt.Fprintln(&b, "These files are untracked (never committed/staged), so no diff exists. Review by reading the file contents directly if available, or skip with reason.")
+		for _, f := range rc.untracked {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
 	}
 
 	// --- Diffs (group-filtered via `git diff -- <files...>`) ---
@@ -855,9 +933,19 @@ func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) 
 		}
 	}
 
-	// --- Rules + how-to (single group: ocr's rule + language-agnostic methodology) ---
-	fmt.Fprintln(&b, "\n# Review rules (matched per file by `ocr delegate` — LLM-free engineering)")
-	fmt.Fprintf(&b, "### Rule (pattern %s)\n%s\n", g.Pattern, g.Rule)
+	// --- Rules + how-to (header depends on group source) ---
+	switch g.Pattern {
+	case patternSimplify:
+		fmt.Fprintln(&b, "\n# Simplify review lens (nightme-owned, complementary)")
+		fmt.Fprintln(&b, g.Rule)
+	case patternBuiltin:
+		fmt.Fprintln(&b, "\n# Built-in review rubric (nightme-owned)")
+		fmt.Fprintln(&b, g.Rule)
+	default:
+		// ocr-sourced rule group (Pattern = real glob like "**/*.go")
+		fmt.Fprintln(&b, "\n# Review rules (matched per file by `ocr delegate` — LLM-free engineering)")
+		fmt.Fprintf(&b, "### Rule (pattern %s)\n%s\n", g.Pattern, g.Rule)
+	}
 	fmt.Fprintln(&b, "\n# How to review")
 	fmt.Fprint(&b, reviewHowTo())
 

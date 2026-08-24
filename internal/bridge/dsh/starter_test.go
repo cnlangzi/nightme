@@ -204,7 +204,7 @@ func TestRunOnce_StripsSessionID(t *testing.T) {
 	}
 }
 
-// NOTE: TestRunOnce_IsolatedSessions and TestReview_UsesStandardPrompt
+// NOTE: TestRunOnce_IsolatedSessions and TestReview_UsesbuiltinPrompt
 // were dropped because the mock's session.create handler doesn't
 // reset state cleanly between consecutive RunOnce calls (the
 // first RunOnce's Close races with the second's session.create).

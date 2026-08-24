@@ -148,7 +148,7 @@ func TestAssembleReviewPrompt_Tier2Rubric(t *testing.T) {
 // TestAssembleReviewPrompt_EmptyWorkspace verifies the fallback
 // contract: assembleReviewPrompt returns "" ONLY when workspace is
 // empty, which is DelegateReview's signal to fall back to
-// StandardPrompt verbatim.
+// BuiltinPrompt verbatim.
 func TestAssembleReviewPrompt_EmptyWorkspace(t *testing.T) {
 	if got := assembleReviewPrompt(reviewContext{}); got != "" {
 		t.Errorf("assembleReviewPrompt(empty workspace) = %q, want \"\" (fallback signal)", got)

@@ -147,11 +147,11 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 }
 
 // Review implements the `/review` slash command for dsh. It
-// delegates to agent.DelegateReview — the shared three-tier dispatch
+// delegates to agent.ReviewWithOcr — the shared three-tier dispatch
 // (docs/REVIEW.md §2): Go-side precompute of diff/file-list/coverage
 // is common to all delegate bridges; `ocr delegate` rule matching kicks
 // in when ocr is on $PATH (LLM-free), else the built-in rubric.
-// DelegateReview drives s.RunOnce with the assembled prompt, so the
+// ReviewWithOcr drives s.RunOnce with the assembled prompt, so the
 // host agent's LLM runs the review in an isolated fresh session.
 //
 // The /review dispatcher (internal/command/review/cmd.go) wraps the
@@ -162,7 +162,10 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // (and Close archives the session on return), Review cannot leak
 // review reasoning back into the main chat session's context.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return agent.DelegateReview(ctx, s, cfg, opts...)
+	if agent.OcrAvailable() {
+		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
+	}
+	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 
 // drainForRunResult is the shared RunOnce / Review drain logic.

@@ -84,7 +84,7 @@ func TestE2E_RunOnce_RealDSH(t *testing.T) {
 }
 
 // TestE2E_Review_RealDSH verifies that Starter.Review (which
-// delegates to RunOnce with agent.StandardPrompt()) also works
+// delegates to RunOnce with agent.builtinPrompt()) also works
 // against a real dsh web.
 func TestE2E_Review_RealDSH(t *testing.T) {
 	if os.Getenv("NIGHTME_REAL_DSH") == "" {
@@ -121,7 +121,7 @@ func TestE2E_Review_RealDSH(t *testing.T) {
 		t.Errorf("RunResult.SessionID empty")
 	}
 	// Review text should contain at least the summary or findings
-	// sections per agent.StandardPrompt()'s contract. If the
+	// sections per agent.builtinPrompt()'s contract. If the
 	// model didn't follow the format exactly, log a warning but
 	// still consider the test successful — what matters is the
 	// pipeline delivered a non-empty review.

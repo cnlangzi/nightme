@@ -1,38 +1,30 @@
-// review.go — /review slash command support.
+// review.go — /review slash command support: prompt templates and
+// the pure-prompt Review runner.
 //
-// /review runs a code review in a one-shot subprocess (the
-// bridge's existing RunOnce path) and injects the captured
-// findings back into the main chat session as a user message.
+// /review runs a code review and injects findings back into the
+// main chat session. Three review strategies exist (docs/REVIEW.md §2):
 //
-// Architecture (F-review.md v6):
-//   - RunOnce is the isolation mechanism. The review runs in a
-//     fresh subprocess with its own context window — main chat
-//     context is NOT polluted by review reasoning (which can
-//     otherwise burn tens of thousands of tokens).
-//   - The fresh process runs StandardPrompt, reads git diff,
-//     and produces a structured review as plain text. We capture
-//     that text via RunResult.Text.
-//   - We inject the captured text back into the main chat
-//     session via rc.Inject, wrapped in a small preamble. The
-//     main agent sees the review as a user message — fix
-//     follow-up ("fix the blockers") works naturally with full
-//     review context visible to the main agent.
-//   - pty/bash returns ErrReviewNotSupported (bash isn't a
-//     coding agent, can't do review).
-//   - The dispatcher wraps the call in timeouts.Review (30 min,
-//     same budget as /gtw commit's Agent timeout). RunOnce makes
-//     this safe: the deadline only kills the review subprocess.
-//   - Zero qualifiers: /review takes no args. Matches /cwd /
-//     /think / /use style.
+//   - ReviewWithNative: per-bridge in bridge packages (claudecode/codex
+//     invoke their built-in /codereview / codex review commands).
+//   - ReviewWithOcr: in review_with_ocr.go; ocr delegation flow.
+//   - ReviewWithPrompt: in this file; pure-prompt path used when ocr
+//     isn't installed or workspace precompute fails.
 //
-// Fix is conversational: after the review appears in chat, the
-// user types "fix the blockers" and the main chat agent uses
-// its native Edit tools to apply changes. /review does NOT
-// auto-apply anything.
+// All three fans out via the same multi-job machinery in
+// review_with_ocr.go::delegateReviewMultiJob when ≥2 review dimensions
+// are involved. simplify is one such dimension.
+//
+// Architecture invariants:
+//   - RunOnce is the isolation mechanism (fresh subprocess, own context).
+//   - FormatReviewMessage wraps findings before injection into AS + channel.
+//   - pty/bash returns ErrReviewNotSupported.
+//   - timeouts.Review (30 min) bounds the whole review.
+//   - /review takes no args besides --agent.
 
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -70,45 +62,16 @@ func FormatReviewMessage(workspace, agentName, review string) string {
 		workspace, agentName, review)
 }
 
-// StandardPrompt is the fallback review prompt — used by
-// DelegateReview only when Go-side precompute fails entirely (no
-// workspace, or git unusable). The delegate-tier bridges
-// (dsh/pi/acp/opencode/cursor) normally drive their review through
-// DelegateReview's assembled prompt (docs/REVIEW.md §2 Tier 2/3);
-// this verbatim prompt is the last-resort path. The prompt asks the
-// chat agent to:
+// BuiltinPrompt is the nightme-owned canonical review prompt. Used by:
+//   - ReviewWithPrompt's primary group (as the group's Rule text)
+//   - ReviewWithOcr's fallback path when ocr produces no rule groups
+//   - ReviewWithPrompt's single-RunOnce fallback when workspace is empty
 //
-//  1. Detect the default branch (main / master / trunk) via
-//     `git symbolic-ref refs/remotes/origin/HEAD` or
-//     `git remote show origin`.
-//  2. Run the three diff commands that together form "the diff a
-//     PR would have":
-//     - `git fetch origin` (best-effort, ignore failures)
-//     - `git diff <default-branch>...HEAD` (committed on branch)
-//     - `git diff --staged` (staged but not committed)
-//     - `git diff` (unstaged working-tree changes)
-//  3. Output structured `## Summary` / `## Findings` /
-//     `## Suggestions` sections, with severity tags on findings.
-//
-// The prompt is ~70 lines — long enough to enforce structure
-// (sections, severity rubric, "how to review" guardrails) but
-// short enough that chat agents don't lose focus. Native bridges
-// (codex/claudecode) override Starter.Review with their built-in
-// review command and never touch this prompt.
-//
-// Prompt content draws from three mature review-prompt shapes:
-//
-//   - Claude Code /code-review plugin (anthropics/claude-plugins-official):
-//     confidence-based scoring, finding-first structure.
-//   - Codex `codex review` subcommand (codex 0.145+): severity-grouped
-//     findings with actionable suggestions.
-//   - Community "senior engineer reviewing PR" prompts: section-based
-//     output (Summary / Findings / Suggestions).
-//
-// We borrow the structure and severity labels, not the multi-agent
-// machinery or proprietary confidence scoring.
-func StandardPrompt() string {
-	return `You are a senior engineer reviewing code changes for an upcoming pull request. Your job is to find real problems, not to lecture about style. Be specific, concrete, and actionable.
+// ~70 lines of markdown, structured as Summary / Findings / Suggestions
+// with severity tags. Drawn from Claude Code /code-review plugin shape
+// (confidence-based scoring, finding-first), Codex review subcommand
+// (severity-grouped findings), and community "senior engineer" prompts.
+const BuiltinPrompt = `You are a senior engineer reviewing code changes for an upcoming pull request. Your job is to find real problems, not to lecture about style. Be specific, concrete, and actionable.
 
 # What to review
 
@@ -153,7 +116,7 @@ Run all three and treat their union as the full diff to review. If you're on the
 - **Migration risk**: schema changes with no rollback path, config changes that break old clients, deploy ordering hazards
 - **Efficiency**: algorithmic slowness (O(n²) when O(n) is one map away), unnecessary repeated work (recompute on every loop iteration, N+1 queries, redundant IO), missed batching opportunities, hot-path allocations (fmt.Sprintf in inner loops, slice growth without preallocation). Distinct from Resource lifetime — Efficiency is "this works but is slow", Lifetime is "this leaks when it shouldn't".
 - **Test gaps**: new code path with no test, behavioural change to existing function with no test update
-- **Simplification** (covers claude /code-review's "reuse" + "simplification" pillars): redundant code (DRY violations, dead code, unused parameters/imports), **prefer existing helpers/APIs over new code** (the reviewer's first question should be "is there a util for this already?"), over-abstraction (interfaces/types with one impl, factories that always return the same concrete), functions doing too much (SRP — flag if a function has multiple unrelated responsibilities), naming clarity (ambiguous names, names that lie about what they do), unnecessary indirection. **This is the Suggestions section's main fuel** — without it, "## Suggestions" tends to be empty. Code that "works" can still be 2x shorter.
+
 
 # Output format
 
@@ -191,4 +154,121 @@ Concrete next steps, ordered by impact. One bullet per suggestion. Don't restate
 
 ` + "```" + `
 `
+
+// simplifyPrompt is the nightme-owned simplify review lens — a focused,
+// structured set of axes (reuse / simplification / efficiency / altitude)
+// complementary to ocr's per-language rules and the builtin rubric.
+// Sourced from Claude Code's /simplify skill axes; refined for review
+// (not refactor) — produces findings, does not auto-apply.
+//
+// Wired into both ReviewWithOcr and ReviewWithPrompt as a parallel
+// reviewGroup (Pattern = patternSimplify), so it runs as a separate
+// RunOnce concurrently with the main dimension(s). Not in
+// ReviewWithNative (per-bridge native review handles its own prompt).
+const simplifyPrompt = `# Simplify review lens (nightme-owned, complementary)
+
+This lens reviews the diff for **simplification opportunities** that are orthogonal to correctness/performance/security findings: code that works but can be made simpler, smaller, or more idiomatic without changing behavior.
+
+#### Reporting discipline
+
+- Report a finding only when the diff shows the issue directly. Do not speculate about "could be simpler if" without showing the concrete code.
+- Prefer one concrete suggestion per finding, not a list of alternatives.
+- Cite ` + "`path:start_line-end_line`" + ` for every finding. If the suggestion spans multiple files, list each affected location in a single finding.
+- Skip findings that a formatter / linter already catches (gofmt, prettier, ruff --fix, etc.). Simplify is for **structural** cleanups, not whitespace.
+- Findings here use category ` + "`maintainability`" + ` (or ` + "`style`" + ` for subjective ones); severity defaults to ` + "`low`" + ` unless the diff introduces the issue at production-critical paths.
+
+## Axis 1 — Reuse (DRY without dogma)
+
+- **Duplicate logic** in the diff that already exists elsewhere in the same package or sibling package. When duplication is local (one file), prefer extracting a private helper. When it spans packages, propose a single canonical location and reference existing call sites.
+- **Reinvented helper**: code that re-implements something already exported from an imported package or a sibling internal package. Reference the existing function with ` + "`Use <pkg>.<Func>`" + ` instead of writing a new one.
+- **Inline copies of a small constant / message / error string** that exists in one authoritative place nearby. Suggest referencing the source instead of duplicating.
+- **Two near-identical branches in an if/else** that differ only in a single parameter or receiver. Suggest a small loop, table, or generic dispatch.
+- **Do NOT flag** minor duplication that exists for clarity, for boundary separation between layers, or where deduplication would create a more coupled abstraction than the duplication itself.
+
+## Axis 2 — Simplification (less code, less indirection)
+
+- **Dead code introduced in the diff**: unused variables, unreachable branches, functions exported but never called outside the file, helpers added "just in case" with no caller. Cite the unused symbol and its scope.
+- **Over-engineered abstraction**: interfaces with one implementation, generic wrappers around a single concrete type, configurable factories with exactly one option, builder patterns that build a single struct literally. Suggest using the concrete thing directly.
+- **Layering leaks**: business logic in transport code, transport concerns in domain logic, SQL strings in HTTP handlers, etc. Suggest the layer that should own the logic.
+- **Premature parameterization**: functions that take parameters no caller uses, options structs with optional fields that are never set, pluggable strategies with one strategy. Suggest removing until a second use appears.
+- **Manual work that a stdlib or imported helper does**: re-implementing ` + "`strings.HasPrefix`" + ` with manual slicing, custom ` + "`slices.Contains`" + ` loops, hand-rolled ` + "`sync.Once`" + ` patterns when ` + "`defer`" + `-able helpers exist, etc.
+- **Boilerplate from a missing language feature**: a 10-line switch that could be a map literal, a verbose if/else that could be a ternary expression in languages that support it, manual null checks where the type system already enforces non-null.
+- **Layered error wrapping that adds no information**: wrapping a single error with ` + "`%w`" + ` (or ` + "`%v`" + `) and no extra context. Suggest removing the wrap or moving context into the message itself.
+- **Do NOT flag** intentional abstractions that are aligned with project conventions, even if a more concrete version would be shorter.
+
+## Axis 3 — Efficiency (real wins, not micro-opts)
+
+Focus on changes that have **observable** impact in the diff's hot path or that obviously scale poorly. Skip theoretical micro-optimizations.
+
+- **Accidental O(n²) where O(n) is trivial**: nested loops over the same slice, repeated linear lookups in a map that should be built once, repeated ` + "`strings.Contains`" + ` over a long string that could be a precomputed set, etc.
+- **Unnecessary allocation in a tight loop**: building a fresh slice/map on every iteration when it could be hoisted, repeated ` + "`[]byte(s)`" + ` conversions inside a loop, repeated ` + "`json.Marshal`" + ` of the same struct per request.
+- **Re-reading a stable value**: file I/O, network call, or heavy compute inside a loop where the result is loop-invariant. Suggest hoisting.
+- **Defer in a tight loop**: ` + "`defer`" + ` inside a hot loop defers cleanup to function exit and can balloon memory in long loops. Suggest hoisting the resource into a scoped block.
+- **Synchronization that is no longer needed**: mutex protecting a value that is now immutable after construction, atomic counter wrapped around a field that is only touched by a single goroutine post-init.
+- **Redundant work across requests**: per-request recomputation of values that depend only on config or startup state; reload of a file that is never modified at runtime.
+- **Do NOT flag** micro-opts that would clutter the code for < 1% gain, or hot-path changes that the change author cannot validate without profiling.
+
+## Axis 4 — Altitude (structure and pattern)
+
+Higher-altitude observations: when a small change exposes that the surrounding structure is the actual problem.
+
+- **Wrong layering for the change**: a single-line bug fix that requires editing five files because the responsibility is in the wrong layer. Suggest the structural move, even if it is out of scope for this diff.
+- **Leaky abstraction**: a new public field, method, or error variant that exposes an internal detail (storage format, transport type, vendor SDK shape) the caller should not see. Suggest a domain-shaped wrapper.
+- **Inconsistent style with the surrounding file**: the diff introduces a new error-handling style, logging pattern, or naming convention that differs from the file's neighbors. Suggest matching local convention before the inconsistency calcifies.
+- **Mixed abstraction levels**: a function that switches between high-level business steps and low-level byte manipulation within ten lines. Suggest splitting.
+- **Tests that test the implementation rather than the behavior**: assertions on internal call counts, on the exact structure of an error message, on private helper invocations. Suggest testing observable behavior.
+- **Configuration that should be code or vice versa**: a feature flag for behavior that never changes, or hardcoded constants that vary per environment and should be in config.
+- **Do NOT flag** altitude observations for trivial diffs. Altitude findings are valuable when the diff is part of a recurring pattern; they are noise on a one-line typo fix.
+
+## Severity guidance
+
+| Severity | When to use |
+| --- | --- |
+| ` + "`blocking`" + ` | The current code is actively wrong (bug, race, leak, security) and the only clean fix is the refactor you are proposing. Rare. |
+| ` + "`warning`" + `  | Real maintainability / efficiency cost that will compound as the code is touched again. The default for non-trivial findings. |
+| ` + "`style`" + `    | Subjective cleanup. Phrase as a question ("could ` + "`X`" + ` be replaced with ` + "`Y`" + `?") rather than a directive. |
+| ` + "`suggestion`" + ` | Optional improvement. Mention only if you have high confidence it is genuinely better. |
+
+## Output schema reminder
+
+Findings must conform to the nightme review output schema (see host agent prompt). One finding per ` + "`path:start_line-end_line`" + ` location; cite the concrete code in ` + "`content`" + `; pick exactly one ` + "`category`" + ` (` + "`reuse`" + `, ` + "`simplification`" + `, ` + "`efficiency`" + `, or ` + "`altitude`" + `).
+`
+
+// ReviewWithPrompt runs review using only the builtin prompt, no ocr,
+// no precompute-from-delegate-review. Used by:
+//
+//   - ReviewWithOcr's fallback path when ocr isn't installed or returns
+//     no rule groups.
+//   - Direct callers who want a "no ocr" baseline review.
+//
+// Always fans out into ≥2 reviewGroups (builtin + simplify) via
+// delegateReviewMultiJob, so the per-group prompts render the full
+// workspace diff under each lens.
+//
+// When workspace is empty (no git repo / not a directory), falls back
+// to a single RunOnce with BuiltinPrompt alone (no files = no fan-out
+// payload to split across goroutines).
+// ReviewWithPrompt runs review without ocr (Go-replicated path). It
+// calls precomputeReviewWithBuiltin, which populates reviewContext
+// using Go-side git commands (collectReviewableFiles + a synthesized
+// builtin group) instead of delegating to ocr. The output shape
+// matches precomputeReviewWithOcr's — so the fan-out machinery is
+// identical regardless of path.
+//
+// Used by:
+//   - delegate-tier bridges (dsh/pi/opencode/cursor/acp) when ocr
+//     isn't on $PATH. The bridge's Starter.Review dispatches:
+//     `if agent.OcrAvailable() { ReviewWithOcr } else { ReviewWithPrompt }`.
+//
+// simplify always runs alongside as a parallel dimension (Pattern =
+// patternSimplify), appended after pre.ocrGroups — see
+// patternSimplify / simplifyGroup in review_with_ocr.go.
+func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
+	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
+	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
+	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }
+
+// (listWorkspaceFiles deleted — precomputeReview already populates
+// reviewable via collectReviewableFiles in the no-ocr branch; see
+// review_with_ocr.go.)

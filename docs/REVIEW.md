@@ -40,37 +40,74 @@
 
 ---
 
-## 2. 整体架构:三层分流
+## 2. 整体架构:三种 Review 方法
 
-review 的执行不是一条路,而是按 **bridge 类型 + ocr 可用性**分流。基础是 F-review.md §13 的三 pattern:native override / delegate StandardPrompt / 不支持。在 delegate 档里再按 ocr 是否安装分两层,且 ocr 在时**按 rule group 拆多 job 并发**。
+review 有三种 runner 实现。Agent.Review 接口(Starter.Review)由各 bridge 实现;bridge 决定调哪个 agent 包 runner。基础是 F-review.md §13 的三 pattern + v11 加的 simplify 并行 group。
 
 ```text
 /review [--agent <name>]
    │  解析 --agent,选定 runner;runner ≠ 当前 AS 时,findings 仍回当前 AS
    ▼
-bridge 自报能力分流
+Starter.Review(bridge 各自的实现)
    │
-   ├─ 有内置 review?(codex / claude)
-   │     → Tier 1: 调内置 review 命令
-   │        〔各家自己的最强形态,含定位 / 多 agent,不画蛇添足〕
+   ├─ Native bridge(claudecode / codex)
+   │     → 桥自己调内置命令(`claude -p code-review` / `codex review --base`)
+   │        〔各家最优形态,不画蛇添足;不走 agent 包 runner〕
    │
-   ├─ delegate 档?(dsh / pi / acp / opencode / cursor)
-   │     → 统一分流入口(DelegateReview)
-   │        ┌─ Go 通用预算(默认分支 / merge_base / diff / 文件清单 / 覆盖率 / schema)
-   │        │   〔StandardPrompt 的 ocr 化优化,Tier 2 与 Tier 3 都做〕
-   │        ├─ ocr 已安装?
-   │        │    YES → Tier 2: ocr delegate preview(文件+merge_base+排除)
-   │        │                 + ocr delegate rule → groups(按 rule content 分组)
-   │        │                 → 按 groups 拆 jobs(每组: files + per-file diff + 该组 rule)
-   │        │    NO  → Tier 3: 单 job(增强 prompt,Go 预算 + 内置 rubric,不分组)
-   │        │
-   │        ├─ 单 job?  → 单 RunOnce(单 prompt)
-   │        └─ 多 job?  → 并发多 RunOnce(sem 上限,各自独立 context)
-   │                     → merge: findings 合并 + severity 排序 + 跨组覆盖率汇总
+   ├─ Delegate bridge(dsh / pi / acp / opencode / cursor)
+   │     → 桥检测 OcrAvailable()(SRP:路由选择放桥层,不放 agent 包内)
+   │        ├─ YES → agent.ReviewWithOcr
+   │        │           ├─ precomputeReview(ocr delegate preview + rule groups)
+   │        │           ├─ groups = ocrGroups + simplifyGroup(reviewable)
+   │        │           └─ delegateReviewMultiJob(sem cap 4,eventAggregator,mergeRunResults)
+   │        └─ NO  → agent.ReviewWithPrompt
+   │                    ├─ precomputeReview(Tier 3 fallback:collectReviewableFiles)
+   │                    ├─ groups = builtinGroup(reviewable) + simplifyGroup(reviewable)
+   │                    └─ delegateReviewMultiJob(同上)
    │
-   └─ 不支持?(pty / bash)
-         → ErrReviewNotSupported → 友好提示("不是 coding agent")
+   └─ pty / bash → ErrReviewNotSupported → 友好提示("不是 coding agent")
 ```
+
+simplify 作为并行 group 出现在 Tier 2 / Tier 3 两条路径上(`ReviewWithOcr` / `ReviewWithPrompt`),跟 ocr-sourced groups 或 builtinGroup 一起跑多 job fan-out。详见 §2.6。
+
+### 两个 precompute 函数,产物 shape 一致
+
+`precomputeReviewWithOcr` 和 `precomputeReviewWithBuiltin` 两条路径共用一个 `reviewContext` shape,fan-out machinery 不知道也不关心是哪条路径产出的:
+
+```text
+ReviewWithOcr                          ReviewWithPrompt
+    ↓                                       ↓
+precomputeReviewWithOcr                precomputeReviewWithBuiltin
+    ├─ git: detectDefaultBranch           ├─ git: detectDefaultBranch
+    ├─ git: merge-base                    ├─ git: merge-base
+    ├─ ocr delegate preview               ├─ collectReviewableFiles (Go 端 git)
+    │   → reviewable (ocr FileFilter)     │   → reviewable (Go isReviewablePath)
+    │   → excluded (with reasons)         ├─ synthesize 1 个 builtin group
+    ├─ ocr delegate rule                  │   → ocrGroups = [{patternBuiltin, BuiltinPrompt}]
+    │   → ocrGroups (N groups, per-pattern)
+    │   → ocrRules (markdown)
+    └─ git: 3 diffs                        └─ git: 3 diffs
+    ↓                                       ↓
+    reviewContext (same shape)              reviewContext (same shape)
+    ↓                                       ↓
+    groups = pre.ocrGroups + simplifyGroup(pre.reviewable)
+    ↓
+    delegateReviewMultiJob → fan-out
+```
+
+**字段对照**:
+
+| 字段 | ocr 路径 | Go 路径 |
+|---|---|---|
+| `reviewable` | ocr FileFilter(精度高) | `collectReviewableFiles` + `isReviewablePath`(启发式)|
+| `excluded` | ocr 提供的排除原因列表 | nil(Go 端不跟踪 excluded)|
+| `ocrGroups` | N 个(每 pattern 一组,Rule 是 ocr rule doc)| 1 个 builtin group(Pattern=patternBuiltin, Rule=BuiltinPrompt)|
+| `ocrRules` | N 个 group 的 markdown 拼好 | ""(只有一个 group)|
+| merge-base / 3 diffs | 都有(同)| 都有(同)|
+
+`ReviewWithOcr` 调 `precomputeReviewWithOcr`,`ReviewWithPrompt` 调 `precomputeReviewWithBuiltin`。两个 Runner 函数返回值都是 `RunResult`,行为形状一致。Bridge dispatcher 仍按 `OcrAvailable()` 选择调用哪个 Runner —— 这是路由决策点(不属于任何 Runner 的内部职责)。
+
+
 
 ### 2.1 Tier 1 — native review(codex / claude)
 
@@ -90,6 +127,30 @@ ocr 两个子命令职责分明(**分组依据来自 rule,不是 preview**):
 **收益**:ocr 的精确文件选择 + 规则降噪 + 覆盖率约束,治"漏文件 / 偷懒 / 规则噪声";LLM 走现有 agent;ocr 不配 LLM、无双配置。
 
 **边界**:委托模式下定位 / 反思由 host agent 自己做,**拿不到** ocr 的行级定位 / 反思精度(那是端到端 `ocr review` 的领域,不在 v1 默认路径)。
+
+#### 2.2.1 ocr 上游源 / 本地镜像 / 规则集确认
+
+ocr = alibaba 的 [open-code-review](https://github.com/alibaba/open-code-review)(Apache-2.0,NPM 包 `@alibaba-group/open-code-review`,委托模式 SKILL = `skills/open-code-review-delegate/SKILL.md`)。**外部 CLI**(类 `git`),不进 agent 注册表,不绑 LLM。
+
+为了 (a) 离线审 SKILL / 看实现 / diff 版本,(b) 给 reviewer agent 提供可读的"我在跟哪个上游交互"锚点,本地维护一个浅 clone 镜像:
+
+| 项 | 值 |
+| --- | --- |
+| 本地路径 | `~/code/geax/github.com/cnlangzi/open-code-review/`(与 `nightme.nightme/`、`seowatson/` 等外部 dep 镜像同款位置) |
+| clone 方式 | `git clone --depth=1 https://github.com/alibaba/open-code-review.git`(浅 clone,只保留 HEAD,够查 SKILL / 命令实现 / 当前 tag) |
+| 当前 pinned | `v1.9.10` / `66120291271b2e605e420e9f11fbd6448f06163f`(2026-08-24 确认;升级前先看 `cmd/opencodereview/delegate_cmd.go` 与 `skills/open-code-review-delegate/SKILL.md` 是否改 schema) |
+| 委托入口(对应 nightme 引用) | `cmd/opencodereview/delegate_cmd.go`(nightme 的 `internal/agent/delegate_review.go` 注释路径直接对得上) |
+
+**`ocr` 子命令全清单**(以本地镜像当前 HEAD 为准,完整列表见 README):
+
+- `ocr config provider` / `ocr config model` —— 配 LLM(委托模式不需要)
+- `ocr review [--from/--to/--commit/--resume]` —— 端到端 review(含 LLM,nightme 不走)
+- `ocr scan [--path/--resume]` —— 全文件扫描(无 git 历史,nightme 不走)
+- **`ocr delegate preview`** —— Tier 2 第一步:扁平文件清单 + merge_base + 排除原因
+- **`ocr delegate rule <files...>`** —— Tier 2 第二步:按 rule content 分组的 rules(触发多 job 拆分的依据)
+- `ocr session list` —— 会话管理(端到端路径用)
+
+**规则集确认(2026-08-24)**:官方内置多语言规则集以 **NPE / 线程安全 / XSS / SQL 注入** 四类为锚点,**未提供 `simplify` / `simpily` 类规则**。`internal/config/rules/rule_docs/*.md` 全量 grep `simplify` 仅命中 `kotlin.md` 一处,且为英文单词用法(`Use = to simplify single-expression functions`,Kotlin 语法建议),非规则类别。结论:**如果 nightme 想要 simplify 行为,需要 host agent 自己出 prompt,不来自 ocr** —— 这是 v1 默认路径,符合 §2.2 "边界"。
 
 ### 2.3 Tier 3 — 优化版 StandardPrompt(delegate + ocr 未装)
 
@@ -232,6 +293,71 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 - **#11 单 outer lifecycle**:eventAggregator 的三相状态机在 readyCount/doneCount all-wait 时各合成一次 outer Ready / outer Result,per-job lifecycle 不外泄。
 - **#12 per-job ToolStart/End 配对**:eventAggregator 的 `perJob.pendingToolStarts` 按 ID 缓冲 ToolStart,等配对 ToolEnd 时按 Start→End 顺序连续转发。
 - **#13 Task 跨 job 去重**:eventAggregator 的 `tasks map[string]AgentTaskItem`,latest-wins 写入,forward 合并 snapshot。
+
+---
+
+## 2.6 Simplify lens(nightme-owned,并行 group)
+
+`ReviewWithOcr` 和 `ReviewWithPrompt` 都会追加一个 nightme-owned 的 **simplify** review group,作为独立的并行维度(独立 RunOnce)跟主 review(ocr groups 或 builtin rubric)一起跑。simplify 不是 prompt 末尾追加,而是一个完整的 reviewGroup,有自己的 Pattern sentinel (`_nightme_simplify`),所以它走跟 ocr/builtin groups 完全一样的 fan-out 路径。
+
+### 来源
+
+简化规则的 4 axes 借鉴自 Claude Code 的 `/simplify` skill(reuse / simplification / efficiency / altitude),但形态调整为 **review findings** 而非 **refactor apply** —— 它产出发现,不自动改代码。
+
+### 实现
+
+```go
+// review_with_ocr.go
+const (
+    patternBuiltin  = "_nightme_builtin"   // ReviewWithPrompt 主 group
+    patternSimplify = "_nightme_simplify"  // 永远追加
+)
+
+func simplifyGroup(files []string) reviewGroup {
+    return reviewGroup{Pattern: patternSimplify, Files: files, Rule: SimplifyPrompt}
+}
+
+// ReviewWithOcr:precomputeReview + 追加 simplifyGroup → 风扇
+groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
+
+// ReviewWithPrompt:builtinGroup + simplifyGroup → 风扇
+groups := []reviewGroup{builtinGroup(pre.reviewable), simplifyGroup(pre.reviewable)}
+```
+
+simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern` 命中 `patternSimplify` 分支,header 是 `# Simplify review lens (nightme-owned, complementary)`,rule 文本是 `SimplifyPrompt` const。
+
+### Scope
+
+| Runner | simplify group 出现? |
+|---|---|
+| `ReviewWithNative`(claudecode / codex) | ❌ 不出现(桥自己处理 prompt) |
+| `ReviewWithOcr`(ocr 已装) | ✅ 始终追加 |
+| `ReviewWithPrompt`(ocr 未装 / fallback) | ✅ 始终追加 |
+
+### ocr 检测的位置(SRP)
+
+`OcrAvailable()` 是 agent 包导出的函数。delegate-tier 桥的 `Starter.Review` 自己做 ocr 检测,然后决定调哪个 runner:
+
+```go
+// 5 个 delegate 桥的 Starter.Review(统一形态)
+func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
+    if agent.OcrAvailable() {
+        return agent.ReviewWithOcr(ctx, s, cfg, opts...)
+    }
+    return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+}
+```
+
+`ReviewWithOcr` 内部不再做 `OcrAvailable` 检查或 fallback —— 单一职责:假设 ocr 可用,跑 ocr 委托模式。如果调用方在 ocr 不可用时调它,那是调用方 bug,不该偷偷 fallback。
+
+### 为什么不用 `WithSimplifyPrompt` option
+
+早期 v3-v7 讨论过用 functional option `WithSimplifyPrompt()` 控制 simplify 启用。否决原因:
+- simplify 是 simplify-as-group(独立 RunOnce),不是 prompt 末尾追加的 section —— 没法用 option 控制 prompt 字段
+- 始终启用 simplify 比 opt-in/opt-out 简单,且 simplify 的 findings 是低风险补充(默认 severity = `low` / `style`)
+- 未来若要 disable,只需把 simplifyGroup 从 group 列表里删,改 1 个 helper 函数
+
+
 
 ---
 

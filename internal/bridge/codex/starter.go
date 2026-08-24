@@ -89,7 +89,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Review implements /review for codex. F-review.md §13
 // "codex/claude use native review" rule: codex has a native
 // `codex review` subcommand, so we invoke it directly instead of
-// running our generic StandardPrompt via `codex exec <prompt>`.
+// running our generic builtinPrompt via `codex exec <prompt>`.
 // The native subcommand is structured for the review task —
 // reusing it is strictly better than reverse-engineering the same
 // review into a generic prompt-mode call.

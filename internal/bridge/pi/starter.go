@@ -113,11 +113,14 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 }
 
 // Review implements /review for pi: delegate to the shared
-// agent.DelegateReview (three-tier dispatch, docs/REVIEW.md §2).
+// agent.ReviewWithOcr (three-tier dispatch, docs/REVIEW.md §2).
 // pi has no native review subcommand, so it runs the Go-precompute-
 // enhanced prompt via RunOnce — ocr delegate rules are folded in
-// when ocr is on $PATH. DelegateReview forwards opts (event sink)
+// when ocr is on $PATH. ReviewWithOcr forwards opts (event sink)
 // and wraps errors with the agent name.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return agent.DelegateReview(ctx, s, cfg, opts...)
+	if agent.OcrAvailable() {
+		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
+	}
+	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
 }

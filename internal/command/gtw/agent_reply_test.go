@@ -6,7 +6,7 @@
 // (emitter_sink.go or agent_reply.go) can't silently break the
 // gtw path's live-stream + heartbeat counters.
 //
-// Three cases, each small and deterministic:
+// Four cases, each small and deterministic:
 //   - TestRunAgentFor_SinkInstalled: sink callback is wired into
 //     RunOnce; the bridge fires it for every AgentEvent.
 //   - TestRunAgentFor_HeartbeatObserved: HeartbeatTracker
@@ -14,6 +14,14 @@
 //   - TestRunAgentFor_Filtering: the Translate contract (text →
 //     OutReply, thinking → OutThinking, tool → OutToolStart,
 //     result → OutResult) is preserved on the gtw path.
+//   - TestRunAgentFor_SinkNilEmitter: StreamRunOnceToEmitter's
+//     em==nil short-circuit returns a no-op sink so the bridge
+//     drain never blocks on a missing channel.
+//
+// Tests use t.Context() (Go 1.24+) instead of context.Background()
+// so the StreamRunOnceToEmitter drain goroutine exits at the end
+// of each test — otherwise each test leaks one goroutine waiting
+// on a ctx that never gets cancelled.
 //
 // Why a separate eventEmitterStarter instead of reusing
 // hooks_test.go's testStarter: that one returns nil sink; we
@@ -27,7 +35,6 @@ package gtw
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -86,9 +93,10 @@ func (s *eventEmitterStarter) Review(_ context.Context, _ agent.StartConfig, _ .
 }
 
 // recSinkCalls returns the number of times the bridge sink was
-// invoked during the last RunOnce. Read-only — no lock copy
-// needed for the test's monotonic-counter assertion (each test
-// drives one RunOnce then reads once).
+// invoked during the last RunOnce. The lock is required for a
+// race-free read of sinkCalls (the bridge-drain loop bumps it
+// under the same lock). Each test drives exactly one RunOnce
+// before reading, so this is the only safe reader.
 func (s *eventEmitterStarter) recSinkCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,8 +222,10 @@ func TestRunAgentFor_SinkInstalled(t *testing.T) {
 	}
 	cs, _ := newSinkTestRig(t, starter)
 
+	// t.Context() cancels on test cleanup so the
+	// StreamRunOnceToEmitter drain goroutine exits cleanly.
 	res, agentName, err := runAgentFor(
-		context.Background(), cs, t.TempDir(),
+		t.Context(), cs, t.TempDir(),
 		"prompt", "chat-test", "msg-test",
 		"", "", // cliAgent, ymlAgent — let ResolveAgent pick from SelectedAgent
 	)
@@ -262,7 +272,7 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 	cs, ch := newSinkTestRig(t, starter)
 
 	_, _, err := runAgentFor(
-		context.Background(), cs, t.TempDir(),
+		t.Context(), cs, t.TempDir(),
 		"prompt", "chat-test", "msg-test", "", "",
 	)
 	if err != nil {
@@ -293,25 +303,32 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 		t.Errorf("LastBeatAt must be refreshed even on non-counter events")
 	}
 
-	// At least one OutHeartbeat was emitted to the channel
-	// (the counter changes mean dispatchSinkEvent fires the
-	// follow-up). 3 changes (ToolStart, Thinking, ToolStart) →
-	// up to 3 OutHeartbeat messages; we don't pin the exact
-	// count because Observe's "changed" return trips per-event
-	// and the policy gate doesn't drop heartbeat emits.
+	// Exactly 3 counter changes (ToolStart, OutThinking, ToolStart)
+	// → Observe returns true 3 times → dispatchSinkEvent fires
+	// OutHeartbeat exactly 3 times. Pin the exact count so a
+	// future regression that drops the follow-up emit (or
+	// double-counts) is caught immediately.
 	hbs := ch.heartbeatMsgs()
-	if len(hbs) == 0 {
-		t.Fatalf("expected at least one OutHeartbeat, got 0; sent=%+v",
-			ch.snapshot())
+	if len(hbs) != 3 {
+		t.Fatalf("OutHeartbeat count = %d, want 3 (one per counter change); sent=%+v",
+			len(hbs), ch.snapshot())
 	}
-	for _, hb := range hbs {
+	for i, hb := range hbs {
 		if hb.Heartbeat == nil {
-			t.Errorf("OutHeartbeat missing Heartbeat snapshot: %+v", hb)
+			t.Errorf("hbs[%d] missing Heartbeat snapshot: %+v", i, hb)
 			continue
 		}
 		if hb.Heartbeat.Empty() {
-			t.Errorf("OutHeartbeat snapshot is Empty — that should never reach the channel")
+			t.Errorf("hbs[%d] snapshot is Empty — that should never reach the channel", i)
 		}
+	}
+	// Final snapshot must reflect the cumulative state — the
+	// third OutHeartbeat (after the second ToolStart) carries
+	// ThinkCount=1, ToolCount=2.
+	last := hbs[len(hbs)-1].Heartbeat
+	if last.ThinkCount != 1 || last.ToolCount != 2 {
+		t.Errorf("final Heartbeat snapshot = {Think: %d, Tool: %d}, want {1, 2}",
+			last.ThinkCount, last.ToolCount)
 	}
 }
 
@@ -336,7 +353,7 @@ func TestRunAgentFor_Filtering(t *testing.T) {
 	cs, ch := newSinkTestRig(t, starter)
 
 	_, _, err := runAgentFor(
-		context.Background(), cs, t.TempDir(),
+		t.Context(), cs, t.TempDir(),
 		"prompt", "chat-test", "msg-test", "", "",
 	)
 	if err != nil {
@@ -421,13 +438,12 @@ func TestRunAgentFor_SinkNilEmitter(t *testing.T) {
 	}
 	_ = cs.SetSelectedAgent(starter.name)
 	// Deliberately do NOT bind an emitter — cs.Emitter() == nil.
-
-	// slog.Default() inside StreamRunOnceToEmitter must not
-	// panic on the nil-cs + nil-emitter combination.
-	_ = slog.Default()
+	// StreamRunOnceToEmitter's em==nil short-circuit returns a
+	// no-op sink, so the bridge drain never panics on the
+	// nil-cs + nil-emitter combination.
 
 	res, agentName, err := runAgentFor(
-		context.Background(), cs, t.TempDir(),
+		t.Context(), cs, t.TempDir(),
 		"prompt", "chat-nil-emit", "msg-nil-emit", "", "",
 	)
 	if err != nil {

@@ -28,6 +28,7 @@ type handshakeMock struct {
 	historyCount   atomic.Int64
 	cancelCount    atomic.Int64
 	archiveCount   atomic.Int64
+	deleteCount    atomic.Int64 // Close calls workspace.delete (driver-owned workspace cleanup)
 	promptCount    atomic.Int64
 	promptFailNext atomic.Bool
 
@@ -53,6 +54,7 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/session.history", m.handleSessionHistory)
 	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace.archiveSession", m.handleWorkspaceArchiveSession)
+	mux.HandleFunc("/api/workspace.delete", m.handleWorkspaceDelete)
 	mux.HandleFunc("/api/session.prompt", m.handleSessionPrompt)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
@@ -204,6 +206,22 @@ func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *
 	_ = json.Unmarshal(env.Payload, &payload)
 	writeOK(w, env.RPCID, map[string]any{
 		"archivedSessionIds": []string{payload.SessionID},
+	})
+}
+
+// handleWorkspaceDelete mirrors the dsh wire contract: POST
+// /api/workspace.delete {workspaceId}. Counter increments so tests
+// can assert that Close tore down its own workspace (close-tied
+// cleanup — each driver owns its workspace, see driver.Close).
+func (m *handshakeMock) handleWorkspaceDelete(w http.ResponseWriter, r *http.Request) {
+	m.deleteCount.Add(1)
+	env := decodeEnvelope(r)
+	var payload struct {
+		WorkspaceID string `json:"workspaceId"`
+	}
+	_ = json.Unmarshal(env.Payload, &payload)
+	writeOK(w, env.RPCID, map[string]any{
+		"deletedWorkspaceIds": []string{payload.WorkspaceID},
 	})
 }
 
@@ -469,8 +487,8 @@ func TestReset_InPlaceSingleCreate(t *testing.T) {
 	if mock.cancelCount.Load() < 1 {
 		t.Fatalf("session.cancel calls = %d, want >= 1 for the old session", mock.cancelCount.Load())
 	}
-	if mock.archiveCount.Load() != 0 {
-		t.Fatalf("workspace.archiveSession calls = %d, want 0 (/new is not Archive Session)", mock.archiveCount.Load())
+	if mock.deleteCount.Load() != 0 {
+		t.Fatalf("workspace.delete calls = %d, want 0 (/new does NOT close the old workspace — only Reset to a NEW sessionId, old dies when defer Close runs at test end)", mock.deleteCount.Load())
 	}
 
 	select {
@@ -537,8 +555,8 @@ func TestClose_ArchivesSession(t *testing.T) {
 	if err := d.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if mock.archiveCount.Load() < 1 {
-		t.Fatal("Close did not POST /api/workspace.archiveSession (dashboard Archive Session)")
+	if mock.deleteCount.Load() < 1 {
+		t.Fatal("Close did not POST /api/workspace.delete (driver-owned workspace cleanup)")
 	}
 	if mock.cancelCount.Load() < 1 {
 		t.Fatal("Close did not POST /api/session.cancel before archive")

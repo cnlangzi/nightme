@@ -100,6 +100,17 @@ type driver struct {
 	workspace string
 	agentName string
 
+	// workspaceID is the dsh workspace we created in
+	// createFreshSession (lazy — empty when attachSession was used
+	// for a resume, since attaching to an existing sessionId does
+	// not allocate a new workspace). Tracked so Close can issue a
+	// workspace.delete RPC for the workspace WE created, instead
+	// of letting stale workspaces pile up in dsh's in-memory store
+	// (each RunOnce / Review previously created a fresh workspace
+	// but only archived its session on close, leaving the empty
+	// workspace behind). See Close() for the cleanup RPC choice.
+	workspaceID string
+
 	// model is the model's authoritative selection captured at
 	// session-create time via /api/session.models. Bridge stamps
 	// it onto EventAgentReady.Model so the runtime's receipt
@@ -463,6 +474,11 @@ func (d *driver) createFreshSession(ctx context.Context, workspace string) (stri
 		"session_id", scVal.SessionID,
 		"workspace_id", ws.WorkspaceID,
 		"cwd", workspace)
+	// Track the workspace so Close can delete it. attachSession
+	// path does NOT allocate a workspace (it attaches to an
+	// existing sessionId), so d.workspaceID stays "" there — Close
+	// checks the field before issuing the delete RPC.
+	d.workspaceID = ws.WorkspaceID
 	return scVal.SessionID, nil
 }
 
@@ -928,21 +944,28 @@ func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
 
 // Close shuts the bridge session down. Idempotent.
 //
-// This is the dashboard session-row context menu "Archive Session":
+// This is the bridge session end-of-life. Each driver owns its own
+// workspace (created in createFreshSession — see the workspaceID
+// field doc), so cleanup can fully tear it down without affecting
+// other sessions in the same cwd:
 //  1. Unsubscribe from the shared host's Router — the global mux
 //     pump stops routing frames for this sessionId.
 //  2. session.cancel so any in-flight turn settles (same RPC as
 //     the InputBar stop button; benign if already idle).
-//  3. workspace.archiveSession — drops the row from every grouping
-//     surface (left list) while keeping the session log. There is
-//     no session.delete on the wire (dsh-api.md §2: sessions.* has
-//     no delete; archive lives under workspace.*).
+//  3. workspace.delete for the workspace WE created — drops the
+//     session row AND the workspace container from dsh's
+//     in-memory store. Skipped when attachSession was used (the
+//     workspace pre-existed and may still host other live
+//     sessions — see workspaceID field doc for the lazy-set rule).
+//     We previously called workspace.archiveSession instead,
+//     which left empty workspaces behind (each RunOnce / Review
+//     created a fresh workspace via createFreshSession; archiving
+//     only hid the session, not the container).
 //  4. Close events chan — the runtime's readpump drains then exits.
 //
 // We DO NOT kill the dsh subprocess — that's the daemon's
 // responsibility (host.Client.Close), and it lives for the full
-// daemon lifetime now. We also do not workspace.delete: archive
-// keeps the cwd workspace so other sessions in it stay grouped.
+// daemon lifetime.
 func (d *driver) Close() error {
 	d.closeOnce.Do(func() {
 		close(d.closed)
@@ -963,15 +986,19 @@ func (d *driver) Close() error {
 			if err := d.cli.RPC.SessionCancel(rpcCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
 				dLog("dsh: session.cancel on close: %v", err)
 			}
-			if err := d.cli.RPC.WorkspaceArchiveSession(rpcCtx, d.sessionID); err != nil {
-				if isBenignCancelErr(err) {
-					dLog("dsh: workspace.archiveSession already archived",
-						"session_id", d.sessionID, "err", errStr(err))
+			// Tear down the workspace we created in createFreshSession
+			// (skipped on attachSession path — see workspaceID doc).
+			// Each driver owns its own workspace, so deleting ours
+			// can't affect other live sessions in the same cwd.
+			if d.workspaceID != "" {
+				if err := d.cli.RPC.WorkspaceDelete(rpcCtx, d.workspaceID); err != nil && !isBenignCancelErr(err) {
+					dLog("dsh: workspace.delete on close: %v",
+						"workspace_id", d.workspaceID, "err", errStr(err))
 				} else {
-					dLog("dsh: workspace.archiveSession on close: %v", err)
+					slogDefault().Info("dsh: workspace deleted",
+						"workspace_id", d.workspaceID,
+						"session_id", d.sessionID)
 				}
-			} else {
-				slogDefault().Info("dsh: session archived", "session_id", d.sessionID)
 			}
 			rpcCancel()
 		}

@@ -13,8 +13,9 @@
 //	s.Start(ctx, cfg) + SendBlocks + drain → RunResult + defer a.Close()
 //
 // where Close() invokes the existing driver.Close path which already
-// does Router.Unsubscribe + session.cancel + workspace.archiveSession
-// (session.go:916-955). RunOnce never spawns its own subprocess and
+// does Router.Unsubscribe + session.cancel + workspace.delete for
+// the driver-owned workspace (session.go::Close). RunOnce never
+// spawns its own subprocess and
 // never uses cfg.SessionID — every RunOnce is a fresh sessionId on
 // the shared host.
 //
@@ -115,7 +116,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // (R2 — explicit isolation from the chat session's context, no
 // implicit reliance on dsh CLI's "did it read ~/.dsh shared state"
 // behaviour the way the old `--profile headless` path did) and
-// archives that session via workspace.archiveSession as part of
+// tears down the driver-owned workspace via workspace.delete as part of
 // Close (R4 — dsh web's in-memory store doesn't pile up).
 //
 // cfg.SessionID is always ignored on RunOnce: every RunOnce is a
@@ -140,8 +141,8 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	// R4: defer Close drives Router.Unsubscribe + session.cancel +
-	// workspace.archiveSession (session.go:916-955). No new code
-	// needed — the chat-session lifecycle path is reused.
+	// workspace.delete (session.go::Close). No new code needed —
+	// the chat-session lifecycle path is reused.
 	defer a.Close()
 	// dsh's ensureFullAccess posts a `/permission danger-full-access`
 	// priming slash on every fresh session, which empirically fires a

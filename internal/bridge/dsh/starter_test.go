@@ -212,23 +212,26 @@ func TestRunOnce_StripsSessionID(t *testing.T) {
 // daemon in runonce_real_unix_test.go (TestE2E_RunOnce_RealDSH
 // and TestE2E_Review_RealDSH).
 
-// ─── TestRunOnce_ArchiveOnClose ───────────────────────────────────
-// The defer a.Close() must drive workspace.archiveSession
-// (R4 — keep dsh web's in-memory store clean).
-func TestRunOnce_ArchiveOnClose(t *testing.T) {
+// ─── TestRunOnce_DeleteOnClose ─────────────────────────────────────
+// The defer a.Close() must drive workspace.delete (R4 — keep dsh
+// web's in-memory store clean). Each RunOnce / Review owns its own
+// workspace (created in createFreshSession); archiveSession left
+// empty workspaces behind. Close now fully tears down the
+// driver-owned workspace.
+func TestRunOnce_DeleteOnClose(t *testing.T) {
 	mock := newHandshakeMock(t)
 	mock.installGlobal(t)
 
 	s := NewStarter("dsh")
-	// 200ms ctx is enough for the handshake + SendBlocks + archive
+	// 200ms ctx is enough for the handshake + SendBlocks + delete
 	// path; drain blocks on events (no terminal delivered in this
 	// test) so we exit via deadline. The 5s default is wasted.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	// Use a goroutine to break out of RunOnce after the archive
+	// Use a goroutine to break out of RunOnce after the delete
 	// fires. RunOnce's drain will block on events; we use a
-	// short ctx so it exits via deadline, and the archive still
+	// short ctx so it exits via deadline, and the delete still
 	// happens in defer Close.
 	doneCh := make(chan struct{})
 	go func() {
@@ -239,13 +242,13 @@ func TestRunOnce_ArchiveOnClose(t *testing.T) {
 	<-ctx.Done()
 	<-doneCh
 
-	// Poll for archive completion (cheap, max ~500ms).
+	// Poll for delete completion (cheap, max ~500ms).
 	deadline := time.Now().Add(500 * time.Millisecond)
-	for mock.archiveCount.Load() == 0 && time.Now().Before(deadline) {
+	for mock.deleteCount.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := mock.archiveCount.Load(); got == 0 {
-		t.Fatalf("workspace.archiveSession never fired; defer Close did not run archive")
+	if got := mock.deleteCount.Load(); got == 0 {
+		t.Fatalf("workspace.delete never fired; defer Close did not tear down driver-owned workspace")
 	}
 }
 

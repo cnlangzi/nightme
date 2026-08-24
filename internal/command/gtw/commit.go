@@ -261,75 +261,123 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 }
 
 // buildAgentPrompt renders the single text block the agent
-// receives for /gtw commit. Per F-56 §3, the prompt is the only
-// lever between the agent's writing instinct and the commit log:
-// nightme derives everything downstream (push status, IM card,
-// PR body synthesis) from git state, so what the agent writes
-// here IS what users see in `git log`.
+// receives for /gtw commit.
 //
-// Design rationale (v2, prompt-engineering lens — mirrors the
-// v2 buildPRPrompt rewrite in pr.go):
+// Design goal (post-fix-gtw-commit): the LLM's only job is to
+// stage the current local branch's uncommitted changes into one
+// or more local commits following Conventional Commits and stop.
+// It must NOT modify files, run tests, run builds, verify its
+// own work, push, rebase, or otherwise overstep.
+// overstep. nightme does readiness + post-commit verification
+// (verifyAgentCommitted); the LLM only writes commits.
 //
-//   - Tool floor: v1 said "group by relevance" but never told the
-//     agent to RUN `git status` + `git diff` first. The agent
-//     would scan file names, guess relevance, and commit without
-//     looking at the actual changes — same failure mode as the
-//     v1 PR prompt (regression pattern: skip tools → write from
-//     memory → modal pattern wins). v2 makes the inspection
-//     mandatory and lists the four commands whose output the
-//     LLM must read before staging.
+// Prompt rationale (replaces the earlier ~92-line v2 prompt,
+// which taught the LLM to do patch / hunk surgery and self-
+// verification — see PR-feedback discussion 2026-08-24):
 //
-//   - Split anchors: "different concerns go in different commits"
-//     is an empty anchor; v1 produced mostly single-commit output
-//     because the LLM had no rubric for what counts as separate
-//     concerns. v2 names five concrete patterns (code+test,
-//     impl+refactor, code+doc, style+logic, chore+real change)
-//     so the LLM has a decision rubric, not an adjective. The
-//     "one coherent commit beats two forced splits" counter-
-//     anchor prevents the opposite regression.
+//   - Allowlist + denylist (defense in depth). The allowlist
+//     names the four commands the LLM may run (status /
+//     diff-family / log / add / commit). The denylist (the
+//     `You MUST NOT` block) names the actions that are known
+//     regression sources — file edits, `git apply` hunk
+//     surgery, test/build runs, self-verification, push,
+//     history mutation, branch hopping, revert/restore/stash,
+//     `git add -A`. Both layers matter: the allowlist alone
+//     leaves gaps (e.g. "don't run tests" via the Bash tool
+//     — the LLM could still try), and the denylist alone
+//     leaves the LLM room to invent creative workarounds for
+//     actions that aren't explicitly named. Together they
+//     cover both directions.
 //
-//   - Two-tier body rule: PR body and commit body have different
-//     optima. PR body is review-time context (long, structured,
-//     covers all four dimensions). Commit body is per-change
-//     intent for `git log` readers months later (1-3 short
-//     paragraphs, focused on WHY this specific commit exists).
-//     v2 distinguishes them explicitly so the LLM doesn't pad
-//     commit bodies to PR length or strip them to nothing.
+//   - Whole-file staging only: explicit "NOT `git add -A`, NOT
+//     hunk-level staging" rule + the `git apply` prohibition.
+//     This is the regression that motivated the fix — the
+//     earlier prompt never forbade `git apply --cached`, so the
+//     LLM extracted individual hunks into hand-crafted patches
+//     when one file mixed concerns. Whole-file staging may put
+//     extra files into a "wrong" commit, but that's a cleanup
+//     the user does later — never the LLM's call to make.
 //
-//   - Type-by-body rule: chore: (typos, dep bumps, comment
-//     cleanup) gets an OPTIONAL body; fix: and feat: get a
-//     REQUIRED body. Without this anchor the LLM either pads
-//     every chore commit with motivation prose or strips every
-//     fix commit to a one-liner.
+//   - Wrapper verifies; you commit: explicit "Do not verify
+//     your own work" rule. verifyAgentCommitted already does
+//     branch / clean / HEAD-advance checks; having the LLM
+//     redo them is a task-drift problem — the LLM loses focus
+//     on the commit task while it re-runs checks the wrapper
+//     owns. The user's request was unambiguous:
+//     "不需要它执行验证".
 //
-//   - Issue trailer enforcement: when c.Issue > 0 the LLM must
-//     add `Issue: #N` as the last line. v1's prose hint
-//     ("[<Issue: #N>] if applicable") was easy to miss; v2
-//     raises it into a Do NOT bullet.
+//   - No file modifications: "MUST NOT edit, create, or delete
+//     any file" closes the door on the LLM deciding to "fix a
+//     typo first" or "update CHANGELOG.md before committing".
+//     The user wants the LLM to commit the work AS-IS.
 //
-//   - Anti-modal-pattern: the modal training-data commit is one
-//     subject-only commit, no body. PR #135's
-//     `fix(gtw): restore missing space in the commit-agent prompt`
-//     is literal empirical evidence that v1 produced this
-//     regression in production. v2 disallows it with an explicit
-//     Do NOT and a self-check anchored to commit-appropriate
-//     depth (different from the PR prompt's `body vs git log`
-//     rule — commit body should be SHORTER than the diff, not
-//     longer than it).
+//   - History immutability: amend / rebase / reset / checkout
+//     -all change existing commits or move HEAD off-branch.
+//     The LLM must not touch history; if a commit is wrong the
+//     user fixes it manually.
 //
-//   - Preserved invariants: the 3 hard rules (don't push, don't
-//     revert/restore/stash, no `git add -A`) work as-is. Do NOT
-//     touch them in v2 — PR #135 also touched one and that was
-//     the same regression we're fixing, not a separate issue.
+//   - Terse final reply: success card is rendered from
+//     `git log headBefore..HEAD`; the LLM's text reply is just
+//     a brief confirmation. Telling the LLM "do not narrate
+//     your work" is a task-focus rule — the LLM should commit,
+//     not write prose about what it did. (The streamed tool
+//     events during the run stay untouched — they're the
+//     process visibility channel by design, and not in scope
+//     for this fix.)
 //
-// F-56 §3.3 enumerated the original 3 rules. v2 keeps them
-// verbatim under a "Hard rules (non-negotiable)" header and
-// adds the new content guidance above.
+// What survives from the v2 prompt:
+//
+//   - Conventional Commits subject shape.
+//   - Subject length / mood / no-period rules.
+//   - fix:/feat: REQUIRED body, chore: OPTIONAL.
+//   - Anti-modal-pattern guard (PR #135 regression).
+//   - Issue trailer enforcement when c.Issue > 0.
+//   - "One coherent commit beats two forced splits" counter-
+//     anchor on splitting.
+//
+// What is dropped:
+//
+//   - Tool floor (4 commands "you MUST run"). Replaced with
+//     a single "run `git status` + `git diff` ONCE" — the
+//     4-command mandatory list caused the LLM to re-run
+//     inspection commands repeatedly across multi-commit
+//     runs, drifting away from the commit task into a
+//     self-verification loop. ("Repeated inspection" here
+//     is a task-focus problem, not a token-cost problem —
+//     detailed logs are wanted; the issue is the LLM
+//     forgetting to commit while it inspects.)
+//
+//     Tradeoff acknowledged: the old tool floor had a
+//     dedicated `git diff --staged` bullet ("if anything is
+//     already staged — don't lose work"). The new Workflow
+//     step 1 keeps that nudge inline ("If anything is already
+//     staged, also run `git diff --staged` — don't lose
+//     pre-staged work"), but demotes it from "mandatory
+//     inspection" to "conditional extra step". `git status`
+//     porcelain still surfaces staged files, so a careful
+//     agent can act on it; the explicit nudge survives as
+//     a workflow anchor, not a tool floor.
+//   - 5-row split rubric. Replaced with a one-line "ONE
+//     coherent commit beats two forced splits" anchor — the
+//     LLM already knows what an "intent" is.
+//   - Two-tier body rule (commit vs PR body differentiation).
+//     The LLM was not confusing the two; the rule was defensive
+//     against a regression that did not occur.
+//   - Type-by-body rule (chore OPTIONAL, fix+feat REQUIRED).
+//     Folded into the new compact body-rules section.
+//   - Gold example (the SignalProcessGroup depth target).
+//     Replaced by the explicit anti-modal guard; the example
+//     was pattern-matching context that the body rules +
+//     anti-modal line already encode, and it had drifted the
+//     LLM into reproducing the example's depth and shape even
+//     for commits that did not need it (a task-focus problem:
+//     the LLM was matching the example rather than writing
+//     for the actual change).
 func buildAgentPrompt(c Context) string {
 	var sb strings.Builder
 
 	// --- Role + scope -------------------------------------------
-	sb.WriteString("You are a release engineer. Your job: turn uncommitted work into one or more well-formed local commits. Push and PR creation are handled by separate steps; you ONLY commit.\n\n")
+	sb.WriteString("You are a release engineer. Stage the current local branch's uncommitted changes into one or more local commits following Conventional Commits on that branch. Push and PR creation are handled by separate steps; you ONLY commit.\n\n")
 
 	fmt.Fprintf(&sb, "Branch: %s\nWorktree: %s\n", c.Branch, c.Worktree)
 	if c.Issue > 0 {
@@ -337,85 +385,53 @@ func buildAgentPrompt(c Context) string {
 	}
 	sb.WriteString("\n")
 
-	// --- Tool floor (mandatory git inspection) -------------------
-	sb.WriteString("## Before staging — tool floor\n")
-	sb.WriteString("You MUST run and read the output of these commands BEFORE staging anything:\n")
-	sb.WriteString("- `git status` — see what's dirty.\n")
-	sb.WriteString("- `git diff` (no args) — the unstaged changes you're about to stage.\n")
-	sb.WriteString("- `git diff --staged` if anything is already staged — don't lose work.\n")
-	sb.WriteString("- `git log --oneline -5` — recent commit subjects for style continuity.\n\n")
-	sb.WriteString("Do NOT stage files without reading their diff. The decision of \"what goes in which commit\" requires seeing the actual change, not just file names.\n\n")
+	// --- Allowed operations (strict allowlist) ------------------
+	sb.WriteString("## Allowed operations (strict allowlist)\n")
+	sb.WriteString("You may only run these git commands — nothing else:\n")
+	sb.WriteString("- `git status` — read porcelain.\n")
+	sb.WriteString("- `git diff` / `git diff --staged` / `git log` — read content.\n")
+	sb.WriteString("- `git add <specific files>` — stage WHOLE FILES (NOT `git add -A`, NOT hunk-level staging).\n")
+	sb.WriteString("- `git commit -m \"<subject>\" [-m \"<body>\"]` — create a commit.\n\n")
+	sb.WriteString("You MUST NOT:\n")
+	sb.WriteString("- Edit, create, or delete any file in the worktree.\n")
+	sb.WriteString("- Run `git apply`, `git apply --cached`, or any patch / hunk surgery. Stage whole files only.\n")
+	sb.WriteString("- Run tests, builds, linters, formatters, or any other tool.\n")
+	sb.WriteString("- Verify your own work. The wrapper runs HEAD-advance / clean / branch checks after you exit.\n")
+	sb.WriteString("- Push. Never run `git push`.\n")
+	sb.WriteString("- Amend, rebase, reset, or otherwise modify existing commits or history.\n")
+	sb.WriteString("- Checkout a different branch. Stay on the current branch.\n")
+	sb.WriteString("- Revert, restore, or stash the user's work.\n")
+	sb.WriteString("- `git add -A` or `git add .`.\n\n")
 
-	// --- Split anchors (concrete patterns) ----------------------
-	sb.WriteString("## Splitting into multiple commits — when and how\n")
-	sb.WriteString("ONE commit is correct when all the changes serve the same intent. MULTIPLE commits are correct when the changes serve different intents. Look for these patterns:\n\n")
-	sb.WriteString("- **Code change + its test** → usually ONE commit (the test is part of the change). Split only if the test alone is reusable infrastructure.\n")
-	sb.WriteString("- **Implementation + refactor** → SPLIT. The refactor is a separate concern even if the implementation depends on it. Order: refactor first, implementation second.\n")
-	sb.WriteString("- **Code change + doc/comment update that explains the change** → ONE commit. The doc is part of the change.\n")
-	sb.WriteString("- **Style/formatting churn mixed with logic change** → SPLIT. The style churn should be its own `style:` commit so `git blame` on logic lines stays clean.\n")
-	sb.WriteString("- **Unrelated chore (typo / dep bump / comment-only edit) mixed with a real change** → SPLIT. Don't bury a real fix in a chore sweep.\n\n")
-	sb.WriteString("When in doubt, ONE commit with a clear subject is better than a forced split. Multi-commit is for genuinely separate intents, not for showing off.\n\n")
+	// --- Workflow ------------------------------------------------
+	sb.WriteString("## Workflow\n")
+	sb.WriteString("1. Run `git status` + `git diff` ONCE to see what's dirty. If anything is already staged, also run `git diff --staged` — don't lose pre-staged work.\n")
+	sb.WriteString("2. Decide commit boundaries — one per logical intent. Use your judgment: ONE coherent commit beats two forced splits.\n")
+	sb.WriteString("3. For each commit: `git add <files>` then `git commit -m ...`. Stop.\n\n")
 
-	// --- Conventional Commits rules -----------------------------
-	sb.WriteString("## Conventional Commits\n")
-	sb.WriteString("- Format: <type>(<optional-scope>): <subject>\n")
-	sb.WriteString("- Types: feat, fix, chore, refactor, docs, test, build, ci, perf, style, revert\n")
+	// --- Commit message rules -----------------------------------
+	sb.WriteString("## Commit message rules\n")
+	sb.WriteString("- Conventional Commits: <type>(<optional-scope>): <subject>\n")
 	sb.WriteString("- Subject ≤72 chars, imperative mood, no trailing period.\n")
-	sb.WriteString("- Scope names the layer (e.g. cmd, command, gtw, feishu, login), not the file path.\n")
-	sb.WriteString("- Breaking change: `!` after type/scope + `BREAKING CHANGE:` footer.\n\n")
-
-	// --- Body rules (different from PR body) --------------------
-	sb.WriteString("## Body rules — different from PR body\n")
-	sb.WriteString("A commit body is NOT a PR body. PR bodies are review-time context for the whole branch. Commit bodies are per-change intent for `git log` readers months later. Different audience, different optimum.\n\n")
-	sb.WriteString("- 1-3 short paragraphs (5-15 lines total). Longer than that is a sign the commit is doing too much.\n")
-	sb.WriteString("- Lead with the immediate WHY: what bug, what use case, what previous behavior this replaces.\n")
-	sb.WriteString("- Mention blast radius only if it's not obvious from the diff (e.g. \"this changes the wire format\" warrants a callout; \"rename a local var\" doesn't).\n")
-	sb.WriteString("- For `chore:` (typos, dep bumps, comment cleanup) a body is OPTIONAL. Skip it unless an Issue ref is required.\n")
-	sb.WriteString("- For `fix:` and `feat:` a body is REQUIRED. The `Issue: #N` trailer, if applicable, goes on the last line.\n\n")
-	sb.WriteString("Self-check: if your commit body is longer than the `git diff` output for that commit, you've written too much. If it's empty for a `fix:` / `feat:`, you've written too little.\n\n")
-
-	// --- Anti-pattern block -------------------------------------
-	sb.WriteString("## Do NOT\n")
-	sb.WriteString("- Do NOT produce a single subject-only commit for non-trivial work. `fix(agent): SignalProcessGroup helper` with no body is exactly the modal training-data pattern and tells future-you nothing.\n")
-	sb.WriteString("- Do NOT pad commit bodies with prose that paraphrases the diff. The diff already shows what changed; the body explains why.\n")
-	sb.WriteString("- Do NOT invent split points. One coherent commit beats two commits stitched together with a forced split.\n")
+	sb.WriteString("- For `fix:` / `feat:` a 1-3 paragraph body explaining WHY this commit exists is REQUIRED.\n")
+	sb.WriteString("- For `chore:` a body is OPTIONAL.\n")
+	sb.WriteString("- No subject-only commit for non-trivial work.\n")
 	if c.Issue > 0 {
-		fmt.Fprintf(&sb, "- Do NOT skip the `Issue: #%d` trailer — without it, the commit cannot be linked back to the bug tracker later.\n", c.Issue)
+		fmt.Fprintf(&sb, "- End the body with `Issue: #%d` on its own line.\n", c.Issue)
 	}
 	sb.WriteString("\n")
 
-	// --- Example -------------------------------------------------
-	// Anchors the LLM onto a real depth target. The example is a
-	// lightly rewritten version of PR #139's first commit — the
-	// gold-standard series where every commit had a multi-paragraph
-	// WHY body. The business content (SignalProcessGroup) is kept
-	// so the LLM can see the shape on real prose, not abstract
-	// scaffolding. A future reviewer might want to swap this for
-	// a synthetic example if the F-54 specifics leak into other
-	// commits.
-	sb.WriteString("## Example — the depth target\n\n")
-	sb.WriteString("```\n")
-	sb.WriteString("fix(agent): SignalProcessGroup helper for /stop PG-broadcast\n\n")
-	sb.WriteString("/stop sent SIGINT to the cli's single pid, leaving any spawned `Bash`\n")
-	sb.WriteString("tool subprocess running. Fix: a new agent.SignalProcessGroup helper\n")
-	sb.WriteString("that delivers the signal to the entire OS process group via\n")
-	sb.WriteString("`kill(-pid, SIGINT)`, with an `ESRCH` fallback to single-pid signaling.\n")
-	sb.WriteString("The post-Setsid cli is the pg leader, so the broadcast reaches every\n")
-	sb.WriteString("descendant — the same way Ctrl-C in a TTY hits the foreground\n")
-	sb.WriteString("process group.\n\n")
-	sb.WriteString("Wired into claudecode.Stop / Close, codex.Stop, opencode.Close,\n")
-	sb.WriteString("pi.Close. pi.Stop is unchanged because it uses the rpc `abort` endpoint\n")
-	sb.WriteString("rather than Process.Signal.\n\n")
-	if c.Issue > 0 {
-		fmt.Fprintf(&sb, "Issue: #%d\n", c.Issue)
-	}
-	sb.WriteString("```\n\n")
-
-	// --- Hard rules (DO NOT TOUCH — work as-is) -----------------
-	sb.WriteString("## Hard rules (non-negotiable)\n")
-	sb.WriteString("- Do not push. Push is the user's decision, not yours; never run `git push`.\n")
-	sb.WriteString("- Do not revert, restore, or stash the user's work.\n")
-	sb.WriteString("- `git add <specific files>`, not `git add -A`.\n")
+	// --- Final reply contract -----------------------------------
+	// The LLM's text reply at the end of the run is overlaid on
+	// the success card (built from `git log headBefore..HEAD`).
+	// The reply contract keeps it brief — one line per commit
+	// — so the chat stays focused on the commit list. ("Do not
+	// narrate your work" is a task-focus rule: the LLM should
+	// commit, not write prose about what it did. The streamed
+	// tool events during the run are the process visibility
+	// channel and are NOT touched here — they're by design.)
+	sb.WriteString("## Final reply\n")
+	sb.WriteString("The wrapper renders the success card from `git log`; your text reply is seen as a brief confirmation only. Reply with one line per commit: `<hash> <subject>`. If you produced no commits, reply `(no commits)`. Do not narrate your work.\n")
 
 	return sb.String()
 }

@@ -3,6 +3,8 @@ package telegram
 import (
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 func TestRenderMarkdown_Empty(t *testing.T) {
@@ -354,5 +356,115 @@ func TestRenderForWire_NotForAlreadyRenderedHTML(t *testing.T) {
 	}
 	if !strings.Contains(got, "&lt;b&gt;") {
 		t.Errorf("RenderForWire must escape literal <b> tags; in=%q got=%q", in, got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// v9 P3 — renderMarkdownSafe primitive + appendTrailerToBody primitive.
+// ---------------------------------------------------------------------------
+
+// TestRenderMarkdownSafe_EmptyReturnsEmpty: empty input must short-
+// circuit (matches RenderForWire behaviour, matches the chain's
+// per-entry short-circuit when entries are pure whitespace).
+func TestRenderMarkdownSafe_EmptyReturnsEmpty(t *testing.T) {
+	if got := renderMarkdownSafe(""); got != "" {
+		t.Fatalf("renderMarkdownSafe(\"\") = %q; want empty", got)
+	}
+}
+
+// TestRenderMarkdownSafe_BoldPassesThrough: a markdown bold expression
+// must render as `<b>...</b>` HTML (the same path RenderForWire walks,
+// since RenderForWire now delegates to renderMarkdownSafe).
+func TestRenderMarkdownSafe_BoldPassesThrough(t *testing.T) {
+	got := renderMarkdownSafe("**bold**")
+	if !strings.Contains(got, "<b>bold</b>") {
+		t.Fatalf("renderMarkdownSafe bold pass-through; got %q", got)
+	}
+}
+
+// TestRenderMarkdownSafe_FenceRendersAsPre: triple-backtick fences
+// must render as `<pre>...</pre>` HTML (preserves the OutError
+// ```fences``` content path's contract).
+func TestRenderMarkdownSafe_FenceRendersAsPre(t *testing.T) {
+	got := renderMarkdownSafe("```\ncode\n```")
+	if !strings.Contains(got, "<pre>code\n</pre>") {
+		t.Fatalf("renderMarkdownSafe fence render; got %q", got)
+	}
+}
+
+// TestRenderMarkdownSafe_RawHTMLEscapes: literal HTML angle brackets
+// must be escaped to entities (defense against LLM-supplied markup).
+func TestRenderMarkdownSafe_RawHTMLEscapes(t *testing.T) {
+	got := renderMarkdownSafe("<script>")
+	if !strings.Contains(got, "&lt;script&gt;") {
+		t.Fatalf("renderMarkdownSafe raw-HTML escape; got %q", got)
+	}
+}
+
+// TestRenderMarkdownSafe_DelegatesToRenderForWire confirms the v9 P3
+// DRY contract: RenderForWire is a thin wrapper around
+// renderMarkdownSafe. Both must produce byte-identical output for any
+// given input (so a future caller picking one over the other for
+// behaviour parity is safe).
+func TestRenderMarkdownSafe_DelegatesToRenderForWire(t *testing.T) {
+	cases := []string{
+		"",
+		"plain text",
+		"**bold**",
+		"`code`",
+		"```\nblock\n```",
+		"<tag>",
+	}
+	for _, in := range cases {
+		safe := renderMarkdownSafe(in)
+		wire := RenderForWire(in)
+		if safe != wire {
+			t.Errorf("renderMarkdownSafe(%q) != RenderForWire(%q); safe=%q wire=%q", in, in, safe, wire)
+		}
+	}
+}
+
+// TestAppendTrailerToBody_NoFooter: nil/empty footerLines must return
+// body unchanged (matches the chain appendSegmentForKind policy of
+// "skip trailer when msg has no status-bearing fields").
+func TestAppendTrailerToBody_NoFooter(t *testing.T) {
+	cases := [][]string{nil, {}}
+	for _, lines := range cases {
+		got := appendTrailerToBody("body text", lines)
+		if got != "body text" {
+			t.Errorf("appendTrailerToBody with empty footer must return body unchanged; got %q", got)
+		}
+	}
+}
+
+// TestAppendTrailerToBody_WithFooter: a non-empty footer must be
+// appended with a `\n\n` gap (NOT `\n────────\n` — see §11.12.4.1
+// v9 P2.1 trailer-only boundary rationale).
+func TestAppendTrailerToBody_WithFooter(t *testing.T) {
+	body := "result body"
+	footer := []string{"line1", "line2", "line3"}
+	got := appendTrailerToBody(body, footer)
+	panel := statusbar.RenderPanel(footer)
+	want := body + "\n\n" + panel
+	if got != want {
+		t.Fatalf("appendTrailerToBody concat mismatch; got=%q want=%q", got, want)
+	}
+}
+
+// TestAppendTrailerToBody_PanelBoxDrawingPreserved: the box-drawing
+// chars (`┌──›`, `└──›`) inside RenderPanel output must NOT be
+// run through any HTML escape — that's exactly why the trailer
+// bypasses RenderMarkdown / renderMarkdownSafe. This test pins the
+// contract: a future refactor that routes the trailer through
+// RenderForWire will visibly regress this.
+func TestAppendTrailerToBody_PanelBoxDrawingPreserved(t *testing.T) {
+	body := "result"
+	footer := []string{"line"}
+	got := appendTrailerToBody(body, footer)
+	if !strings.Contains(got, "┌") {
+		t.Fatalf("appendTrailerToBody must preserve ┌ box-drawing; got %q", got)
+	}
+	if !strings.Contains(got, "└") {
+		t.Fatalf("appendTrailerToBody must preserve └ box-drawing; got %q", got)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 var (
@@ -204,6 +206,39 @@ func escapeHTML(value string) string {
 	return html.EscapeString(value)
 }
 
+// renderMarkdownSafe is the SOLE place that runs RenderMarkdown +
+// escapeHTML fallback. Callers that need "raw markdown → safe HTML
+// for Telegram wire" must use this rather than duplicating the
+// try-render-or-escape pattern at each call site.
+//
+// Layers above this primitive (each with its own concern):
+//   - RenderForWire: block-level wire entry, used by standalone
+//     messages (sendOutResultMessage)
+//   - chunkBody.Compose: per-entry loop with isHTML flag routing,
+//     used by chain chunks
+//   - splitOversizedSegmentLocked / splitOversizedErrorSegmentLocked:
+//     pre-render the whole oversized segment once before splitting
+//
+// RenderMarkdown and escapeHTML remain exported for the rare caller
+// (tests, low-level Compose per-entry loop, internal parser fall-
+// through) that wants raw escape or raw render.
+//
+// Future feishu §13.17 / §13.19-style sanitize pipeline (image
+// strip, heading demotion, fence newline normalization, non-HTTP
+// URL → plain) should be injected here — one site, every consumer
+// (RenderForWire, chunkBody.Compose, SPLIT pre-render) inherits
+// automatically. See docs/channel/telegram.md §11.12.13 / §11.12.19.
+func renderMarkdownSafe(s string) string {
+	if s == "" {
+		return ""
+	}
+	out, err := RenderMarkdown(s)
+	if err != nil {
+		return escapeHTML(s)
+	}
+	return out
+}
+
 // RenderForWire is the SINGLE wire-facing entry point for turning
 // raw text (LLM markdown, agent output) into Telegram parse_mode=HTML
 // bytes. Outbound code paths that ship plain markdown straight to
@@ -213,34 +248,39 @@ func escapeHTML(value string) string {
 // literals (e.g. `**bold**` shows as five characters instead of
 // rendered bold).
 //
-// Why a dedicated helper (not a direct RenderMarkdown call):
-//   - One place to attach future feishu §13.17 / §13.19-style
-//     sanitize pipeline (image strip, heading demotion, fence
-//     newline normalization) without grep'ing the adapter for
-//     every send site.
-//   - Empty-input short-circuit + err fallback (escapeHTML) keep
-//     call sites one-liners.
-//   - chunkBody.Compose() does NOT route through this — its entries
-//     flow is per-line with isHTML awareness, and error fallback
-//     is inline (escapeHTML on miss). A second layer of DRY here
-//     would force chunk_body.go to thread isHTML/isMarkdown flags
-//     through a stringly helper and break the per-entry invariant
-//     in the public Compose() spec. Keep RenderForWire scoped to
-//     "raw markdown block → safe HTML block".
+// Delegates to renderMarkdownSafe for the actual markdown→HTML pass
+// + fallback. This wrapper exists to give callers (sendOutResultMessage
+// and any future single-shot message render path) a named "block
+// entry" with empty-input short-circuit and a stable signature.
 //
-// RenderMarkdown itself is the parser; RenderForWire is the
-// "I'm about to call sendMessage / editMessageText, give me the
-// safe-HTML version" wrapper. sendOutResultMessage uses it;
-// chunkBody.Compose() keeps calling RenderMarkdown directly.
+// chunkBody.Compose() does NOT route through this — its entries
+// flow is per-line with isHTML awareness, and error fallback is
+// inline (escapeHTML on miss). It calls renderMarkdownSafe directly
+// per entry. A block-level wrapper here would force chunk_body.go
+// to thread isHTML/isMarkdown flags through a stringly helper and
+// break the per-entry invariant in the public Compose() spec. Keep
+// RenderForWire scoped to "raw markdown block → safe HTML block".
 func RenderForWire(raw string) string {
-	if raw == "" {
-		return ""
+	return renderMarkdownSafe(raw)
+}
+
+// appendTrailerToBody appends the StatusBar panel to body if
+// footerLines is non-empty. Returns body unchanged when footer is
+// absent. Sole place where the "body + \n\n + StatusBar frame"
+// trailer pattern lives; previously inlined in sendOutResultMessage
+// and a candidate for duplication in any future standalone-message
+// render path.
+//
+// The "\n\n" gap (not "\n────\n" — see §11.12.4.1 v9 P2.1) gives the
+// StatusBar panel its own visual block below the result body. The
+// panel itself uses box-drawing chars (┌──› / └──›) that are
+// already safe-HTML — no further RenderMarkdown / escapeHTML call
+// here, since either would mangle the frame.
+func appendTrailerToBody(body string, footerLines []string) string {
+	if len(footerLines) == 0 {
+		return body
 	}
-	out, err := RenderMarkdown(raw)
-	if err != nil {
-		return escapeHTML(raw)
-	}
-	return out
+	return body + "\n\n" + statusbar.RenderPanel(footerLines)
 }
 
 func splitTelegramText(rendered string, limit int) ([]string, error) {

@@ -81,6 +81,68 @@ func (b *chunkBody) bufTextSize() int {
 	return n
 }
 
+// materializeChunk is the SOLE place that calls sendFn for a freshly
+// born chunk. Encapsulates the v9 P3 §11.12.19.3 Layer-2 coordinator
+// responsibilities:
+//
+//	1. stamp chain.lastFooter onto chunk (if non-nil) via
+//	   statusbar.RenderPanel
+//	2. gate on chunk.hasVisibleEntries() — drop blank chunks
+//	   before any wire call
+//	3. render via chunk.Compose() (Telegram-safe HTML)
+//	4. send via sendFn
+//	5. write messageID back onto chunk
+//	6. append chunk to chain.chunks
+//	7. set chain.dirty = true
+//
+// Callers (5+ sendFn sites: appendSegment cases 1/3,
+// appendSegmentLocked cases 1/3, appendErrorSegment cases 1/3,
+// splitOversizedSegmentLocked, splitOversizedErrorSegmentLocked,
+// setTaskList cold-create, flushChainNow overflow pieces) decide
+// what to do with `materialized`:
+//   - cold-create: chain.cursor = 0; mark chain.dirty = true if not
+//     already (coordinator guarantees dirty=true on the chain state)
+//   - ROTATE / SPLIT tail: chain.cursor = len-1
+//   - SPLIT intermediate: leave cursor alone (frozen)
+//   - flushChainNow overflow intermediate: leave cursor alone
+//
+// Returns (false, nil) for a dropped blank chunk — NOT an error.
+// The caller MUST NOT advance cursor / write chain state when
+// materialized=false; that's the protocol.
+//
+// On sendFn error: returns (false, err); chunk is NOT appended
+// and chain.dirty / chain.chunks stay at their pre-call state.
+// Callers that already mutably advanced state (e.g. markFull on
+// the previous active chunk before ROTATE) accept that — the
+// previous active chunk is now frozen but the new chunk was never
+// born, so subsequent appendSegment falls through to case 3
+// ROTATE on the frozen chunk and mints yet another chunk.
+func materializeChunk(
+	ctx context.Context,
+	chain *placeholderChain,
+	chunk *chunkBody,
+	chatID string,
+	topicID int,
+	userMessageID int,
+	sendFn sendChunkFn,
+) (materialized bool, err error) {
+	if chain.lastFooter != nil {
+		chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
+	}
+	if !chunk.hasVisibleEntries() {
+		return false, nil
+	}
+	body := chunk.Compose()
+	mid, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+	if err != nil {
+		return false, err
+	}
+	chunk.messageID = mid
+	chain.chunks = append(chain.chunks, chunk)
+	chain.dirty = true
+	return true, nil
+}
+
 func appendSegment(
 	ctx context.Context,
 	chain *placeholderChain,
@@ -121,6 +183,9 @@ func appendSegment(
 	}
 
 	// 1. Empty chain → materialise the first chunk via send.
+	// v9 P3 §11.12.19.3: route through materializeChunk so the
+	// blank-chunk guard (hasVisibleEntries) and the footer stamp
+	// are applied uniformly with the ROTATE / SPLIT paths.
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
 		chunk := newChunkBody(0, headerLine)
@@ -132,28 +197,14 @@ func appendSegment(
 		// Cold-create on appendSegment means no task snapshot has
 		// been set yet (setTaskList hasn't run on this turn); we
 		// don't synthesise one here.
-		// Set the footer before computing the body so the cold-
-		// create render matches what subsequent flushes produce.
-		// P0 #1 fix: seed entries so the inlined segment is
-		// re-rendered on every subsequent flush. Without this,
-		// Compose() at the next flush would only render the
-		// cold-create header (and a footer if set) — overwriting
-		// the original message content with no body. The banner-
-		// hide rule (§11.12.5) means the rendered cold-create
-		// body is just the segment (header skipped because
-		// entries>0 && !hasHeartbeat), which is what the user sees.
-		if chain.lastFooter != nil {
-			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
-		}
-		body := chunk.Compose()
-		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		materialized, err := materializeChunk(ctx, chain, chunk,
+			chatID, topicID, userMessageID, sendFn)
 		if err != nil {
 			return err
 		}
-		chunk.messageID = messageID
-		chain.chunks = []*chunkBody{chunk}
-		chain.cursor = 0
-		chain.dirty = true
+		if materialized {
+			chain.cursor = 0
+		}
 		return nil
 	}
 
@@ -178,23 +229,24 @@ func appendSegment(
 	// the inverse of "fresh timestamp per message" semantics, by
 	// design (see §11.12.7.2 for the historical "creation time"
 	// rationale, superseded by inherit-from-active as of 2026-08-23).
+	//
+	// v9 P3 §11.12.19.3: route through materializeChunk so the
+	// blank-chunk guard (hasVisibleEntries) drops a whitespace-only
+	// segment instead of minting a Telegram message that's just
+	// header + divider + StatusBar panel.
 	cur.markFull()
 	newChunk := newChunkBody(0, "")
 	newChunk.inheritLatestHeader(cur)
 	newChunk.inheritLatestTaskList(cur)
 	newChunk.appendEntry(segment)
-	if chain.lastFooter != nil {
-		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
-	}
-	body := newChunk.Compose()
-	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+	materialized, err := materializeChunk(ctx, chain, newChunk,
+		chatID, topicID, userMessageID, sendFn)
 	if err != nil {
 		return err
 	}
-	newChunk.messageID = messageID
-	chain.chunks = append(chain.chunks, newChunk)
-	chain.cursor = len(chain.chunks) - 1
-	chain.dirty = true
+	if materialized {
+		chain.cursor = len(chain.chunks) - 1
+	}
 	return nil
 }
 
@@ -250,22 +302,26 @@ func appendSegmentLocked(
 	}
 
 	// 1. Empty chain → materialise the first chunk via send.
+	// v9 P3 §11.12.19.3: route through materializeChunk so the
+	// blank-chunk guard and the footer stamp match appendSegment
+	// (this path is the lock-held variant for OutToolStart's
+	// "append + push toolPending FIFO" atomic need).
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
 		chunk := newChunkBody(0, headerLine)
 		chunk.appendEntry(segment)
-		if chain.lastFooter != nil {
-			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
-		}
-		body := chunk.Compose()
-		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		materialized, err := materializeChunk(ctx, chain, chunk,
+			chatID, topicID, userMessageID, sendFn)
 		if err != nil {
 			return -1, -1
 		}
-		chunk.messageID = messageID
-		chain.chunks = []*chunkBody{chunk}
+		if !materialized {
+			// Blank chunk dropped — caller (OutToolStart push path)
+			// records no (chunkIdx, entryIdx); the matching OutToolEnd
+			// falls back to fresh appendSegment for the result line.
+			return -1, -1
+		}
 		chain.cursor = 0
-		chain.dirty = true
 		return 0, len(chunk.entries) - 1
 	}
 
@@ -278,22 +334,21 @@ func appendSegmentLocked(
 	}
 
 	// 3. Overflow → lock current chunk and materialise a fresh one.
+	// v9 P3 §11.12.19.3: route through materializeChunk.
 	cur.markFull()
 	newChunk := newChunkBody(0, "")
 	newChunk.inheritLatestHeader(cur)
 	newChunk.appendEntry(segment)
-	if chain.lastFooter != nil {
-		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
-	}
-	body := newChunk.Compose()
-	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+	materialized, err := materializeChunk(ctx, chain, newChunk,
+		chatID, topicID, userMessageID, sendFn)
 	if err != nil {
 		return -1, -1
 	}
-	newChunk.messageID = messageID
-	chain.chunks = append(chain.chunks, newChunk)
+	if !materialized {
+		// Blank chunk dropped — caller falls back to fresh append.
+		return -1, -1
+	}
 	chain.cursor = len(chain.chunks) - 1
-	chain.dirty = true
 	return chain.cursor, len(newChunk.entries) - 1
 }
 
@@ -421,10 +476,11 @@ func splitOversizedSegmentLocked(
 	segment string,
 	sendFn sendChunkFn,
 ) error {
-	rendered, err := RenderMarkdown(segment)
-	if err != nil {
-		rendered = escapeHTML(segment)
-	}
+	// v9 P3 §11.12.19.3 Layer 3: route through renderMarkdownSafe
+	// so the empty-input short-circuit + escapeHTML fallback live
+	// in one place (shared with chunkBody.Compose per-entry and
+	// renderTaskSection).
+	rendered := renderMarkdownSafe(segment)
 
 	pieces, err := splitTelegramText(rendered, maxTelegramTextLength)
 	if err != nil {
@@ -442,9 +498,7 @@ func splitOversizedSegmentLocked(
 		inheritFrom.markFull()
 	}
 
-	footerSnapshot := chain.lastFooter
-
-	newChunks := make([]*chunkBody, 0, len(pieces))
+	materializedCount := 0
 	for i, p := range pieces {
 		// Cold-construct with empty header so adopt doesn't
 		// overwrite a non-empty header with an empty source.
@@ -452,29 +506,53 @@ func splitOversizedSegmentLocked(
 		ch.inheritLatestHeader(inheritFrom)
 		ch.inheritLatestTaskList(inheritFrom)
 		ch.appendEntryHTML(p)
-		if footerSnapshot != nil {
-			ch.setFooter(statusbar.RenderPanel(footerSnapshot))
-		}
-		body := ch.Compose()
-		mid, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		// v9 P3 §11.12.19.3: route through materializeChunk so the
+		// blank-chunk guard drops a piece that's pure whitespace
+		// (rare but possible when splitTelegramText splits on
+		// \n\n boundaries and the rendered text has long gap runs).
+		// The footer stamp + hasVisibleEntries check + sendFn +
+		// messageID write + chain.chunks append all live there.
+		materialized, err := materializeChunk(ctx, chain, ch,
+			chatID, topicID, userMessageID, sendFn)
 		if err != nil {
-			// Partial failure: don't touch chain.chunks / cursor /
-			// dirty. The markFull on the prior active chunk above
-			// already happened; that doesn't affect subsequent
-			// chain writes (case 3 ROTATE just creates a fresh
-			// chunk regardless).
+			// Partial failure: materializeChunk has already appended
+			// any pieces that succeeded earlier in this loop. We
+			// don't try to roll those back — they're already in
+			// Telegram chat as orphan history (matching the pre-fix
+			// behaviour where the first k-1 pieces reached Telegram).
+			// The markFull on the prior active chunk above already
+			// happened; subsequent appendSegment will ROTATE again.
 			return err
 		}
-		ch.messageID = mid
+		if !materialized {
+			// Blank piece dropped. We keep iterating; subsequent
+			// non-blank pieces land normally. cursor advance below
+			// only triggers when at least one piece materialized.
+			continue
+		}
 		// pieces 1..N-1 are frozen; piece N stays active.
+		// "Last piece" is determined by INDEX not by materialized
+		// count — a blank piece skipped in the middle still doesn't
+		// freeze the next one (next still gets markFull'd below
+		// because i < len(pieces)-1 fires by index).
 		if i < len(pieces)-1 {
 			ch.markFull()
 		}
-		newChunks = append(newChunks, ch)
+		materializedCount++
 	}
 
-	chain.chunks = append(chain.chunks, newChunks...)
-	chain.cursor = len(chain.chunks) - 1
+	// chain.cursor advance: if at least one piece materialized, the
+	// last materialized piece becomes the new active. If all pieces
+	// were blank (extremely rare), leave chain.cursor at its
+	// pre-call value (which was markFull'd above — subsequent
+	// appendSegment will ROTATE again from the frozen chunk).
+	// Note: materializeChunk already appended each materialized
+	// chunk to chain.chunks atomically; we only advance cursor.
+	// materializedCount tracks the number of appended chunks;
+	// the slice that previously held them is no longer needed.
+	if materializedCount > 0 {
+		chain.cursor = len(chain.chunks) - 1
+	}
 	chain.dirty = true
 	return nil
 }
@@ -571,15 +649,42 @@ func flushChainNow(
 	chain.dirty = false
 
 	// pieces[1..N-1] → each becomes a fresh locked chain chunk.
+	// v9 P3 §11.12.19.3: the pre-rendered HTML piece is what
+	// splitTelegramText already produced; we route through
+	// materializeChunk so the blank-piece guard fires uniformly
+	// with SPLIT / ROTATE / cold-create. Note these overflow
+	// intermediates are intentionally MINIMAL — they only carry
+	// the rendered piece as a single entry (no header / footer
+	// chrome), so hasVisibleEntries will only drop them when the
+	// rendered piece is purely whitespace (which only happens if
+	// the rendered body was somehow structurally blank — vanishingly
+	// rare given the source was a non-empty chain chunk).
+	//
+	// Snapshot chain.chunks length before the intermediates loop so
+	// the post-loop block can detect "did anything materialize?".
+	// Without this, when intermediates materialize (chain.dirty=true
+	// from materializeChunk) but the tail drops (materialized=false,
+	// no cursor advance), chain.dirty stays true while cursor
+	// points at the frozen cur — a follow-up flushChainNow would
+	// Compose cur (entries=nil after freezeAfterOverflow) and
+	// editFn clobber the user's existing pieces[0] message. This
+	// is the v9 P3 flushChainNow tail invariant: chain.dirty must
+	// be false after the overflow path completes iff chain.chunks
+	// grew during the overflow.
+	preOverflowLen := len(chain.chunks)
 	for _, p := range pieces[1 : len(pieces)-1] {
-		mid, err := sendFn(ctx, chatID, topicID, userMessageID, p)
+		ch := newChunkBody(0, "")
+		ch.appendEntryHTML(p) // pre-rendered, skip RenderMarkdown on Compose
+		materialized, err := materializeChunk(ctx, chain, ch,
+			chatID, topicID, userMessageID, sendFn)
 		if err != nil {
 			return err
 		}
-		next := newChunkBody(int64(mid), "")
-		next.markFull()
-		next.markFlushedLen(len(p))
-		chain.chunks = append(chain.chunks, next)
+		if !materialized {
+			continue
+		}
+		ch.markFull()
+		ch.markFlushedLen(len(p))
 	}
 
 	// pieces[len(pieces)-1] → if there are ≥ 2 pieces, this
@@ -590,25 +695,39 @@ func flushChainNow(
 	// patch would render "<header>\n<footer>" and editMessageText
 	// would erase the pieces[N-1] content from Telegram. Locked
 	// in by TestChain_OverflowTailRetainsContent regression.
+	//
+	// v9 P3 §11.12.19.3: tail also routes through materializeChunk.
+	// Tail piece is pre-rendered (just like SPLIT intermediates)
+	// and gets the same hasVisibleEntries guard.
 	if len(pieces) > 1 {
 		lastPiece := pieces[len(pieces)-1]
-		mid, err := sendFn(ctx, chatID, topicID, userMessageID, lastPiece)
-		if err != nil {
-			return err
-		}
+		tail := newChunkBody(0, "")
 		// The tail chunk inherits cur's (header, hasHeartbeat)
 		// snapshot so it doesn't restart at the cold "🤖
 		// Working..." banner when a real heartbeat has already
 		// landed. cur was frozen above; its (header, hasHeartbeat)
 		// are still readable for the adopt.
-		tail := newChunkBody(int64(mid), "")
 		tail.inheritLatestHeader(cur)
 		// Seed entries with the lastPiece content as a plain-text
 		// entry. flushedLen=0 because the entire content is in
 		// entries — Compose will render it. Future appends land
 		// alongside via appendSegment path #2.
-		tail.appendEntry(lastPiece)
-		chain.chunks = append(chain.chunks, tail)
+		tail.appendEntryHTML(lastPiece)
+		_, err := materializeChunk(ctx, chain, tail,
+			chatID, topicID, userMessageID, sendFn)
+		if err != nil {
+			return err
+		}
+	}
+
+	// v9 P3 invariant: if any chunk was materialized during the
+	// overflow (chain.chunks grew past preOverflowLen), the overflow
+	// path is complete. Clear dirty and advance cursor to the last
+	// materialized chunk — the next appendSegment / OutHeartbeat
+	// must land on the new active chunk (or ROTATE from a frozen
+	// intermediate if intermediates exist and tail dropped), never
+	// re-render the frozen cur with empty entries.
+	if len(chain.chunks) > preOverflowLen {
 		chain.cursor = len(chain.chunks) - 1
 		chain.dirty = false
 	}
@@ -714,22 +833,19 @@ func appendErrorSegment(
 	}
 
 	// Cold-create.
+	// v9 P3 §11.12.19.3: route through materializeChunk.
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
 		chunk := newChunkBody(0, headerLine)
 		chunk.appendError(text, stderr)
-		if chain.lastFooter != nil {
-			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
-		}
-		body := chunk.Compose()
-		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		materialized, err := materializeChunk(ctx, chain, chunk,
+			chatID, topicID, userMessageID, sendFn)
 		if err != nil {
 			return err
 		}
-		chunk.messageID = messageID
-		chain.chunks = []*chunkBody{chunk}
-		chain.cursor = 0
-		chain.dirty = true
+		if materialized {
+			chain.cursor = 0
+		}
 		return nil
 	}
 
@@ -746,23 +862,21 @@ func appendErrorSegment(
 	// reads as a chronological snapshot of the chain's active state
 	// at the moment the error overflowed — same semantics as the
 	// plain appendSegment case 3 ROTATE.
+	//
+	// v9 P3 §11.12.19.3: route through materializeChunk.
 	cur.markFull()
 	newChunk := newChunkBody(0, "")
 	newChunk.inheritLatestHeader(cur)
 	newChunk.inheritLatestTaskList(cur)
 	newChunk.appendError(text, stderr)
-	if chain.lastFooter != nil {
-		newChunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
-	}
-	body := newChunk.Compose()
-	messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+	materialized, err := materializeChunk(ctx, chain, newChunk,
+		chatID, topicID, userMessageID, sendFn)
 	if err != nil {
 		return err
 	}
-	newChunk.messageID = messageID
-	chain.chunks = append(chain.chunks, newChunk)
-	chain.cursor = len(chain.chunks) - 1
-	chain.dirty = true
+	if materialized {
+		chain.cursor = len(chain.chunks) - 1
+	}
 	return nil
 }
 
@@ -849,6 +963,13 @@ func setTaskList(
 	// entries-empty + (possibly empty) task section + footer one
 	// go. We do NOT call appendEntry on this path because the
 	// taskList is the section, not an entries row.
+	//
+	// v9 P3 §11.12.19.3: route through materializeChunk so the
+	// blank-chunk guard fires uniformly. hasVisibleEntries returns
+	// true here because the task section counts as visible content
+	// (Compose renders the <b>📋 Tasks</b> headline + at least one
+	// task row), so this path is informational — the guard doesn't
+	// block the cold-create task-list case.
 	if chain.cursor < 0 {
 		headerLine := heartbeatText(nil)
 		chunk := newChunkBody(0, headerLine)
@@ -856,18 +977,14 @@ func setTaskList(
 		// both paths are equivalent here since the chunk has no
 		// other content yet.
 		chunk.setTaskList(items)
-		if chain.lastFooter != nil {
-			chunk.setFooter(statusbar.RenderPanel(chain.lastFooter))
-		}
-		body := chunk.Compose()
-		messageID, err := sendFn(ctx, chatID, topicID, userMessageID, body)
+		materialized, err := materializeChunk(ctx, chain, chunk,
+			chatID, topicID, userMessageID, sendFn)
 		if err != nil {
 			return err
 		}
-		chunk.messageID = messageID
-		chain.chunks = []*chunkBody{chunk}
-		chain.cursor = 0
-		chain.dirty = true
+		if materialized {
+			chain.cursor = 0
+		}
 		return nil
 	}
 
@@ -919,15 +1036,13 @@ func splitOversizedErrorSegmentLocked(
 	sendFn sendChunkFn,
 ) error {
 	// Build the body the same way chunkBody.appendError would:
-	// text + fence + stderr + fence, then run RenderMarkdown once.
+	// text + fence + stderr + fence, then render once via
+	// renderMarkdownSafe (v9 P3 §11.12.19.3 Layer 3 DRY).
 	body := text
 	if stderr != "" {
 		body += "\n\n```\n" + stderr + "\n```"
 	}
-	rendered, err := RenderMarkdown(body)
-	if err != nil {
-		rendered = escapeHTML(body)
-	}
+	rendered := renderMarkdownSafe(body)
 
 	pieces, err := splitTelegramText(rendered, maxTelegramTextLength)
 	if err != nil {
@@ -942,31 +1057,34 @@ func splitOversizedErrorSegmentLocked(
 		inheritFrom.markFull()
 	}
 
-	footerSnapshot := chain.lastFooter
-
-	newChunks := make([]*chunkBody, 0, len(pieces))
+	materializedCount := 0
 	for i, p := range pieces {
 		ch := newChunkBody(0, "")
 		ch.inheritLatestHeader(inheritFrom)
 		ch.inheritLatestTaskList(inheritFrom)
 		ch.appendEntryHTML(p)
-		if footerSnapshot != nil {
-			ch.setFooter(statusbar.RenderPanel(footerSnapshot))
-		}
-		chunkBody := ch.Compose()
-		mid, err := sendFn(ctx, chatID, topicID, userMessageID, chunkBody)
+		// v9 P3 §11.12.19.3: route through materializeChunk.
+		materialized, err := materializeChunk(ctx, chain, ch,
+			chatID, topicID, userMessageID, sendFn)
 		if err != nil {
 			return err
 		}
-		ch.messageID = mid
+		if !materialized {
+			continue
+		}
 		if i < len(pieces)-1 {
 			ch.markFull()
 		}
-		newChunks = append(newChunks, ch)
+		materializedCount++
 	}
 
-	chain.chunks = append(chain.chunks, newChunks...)
-	chain.cursor = len(chain.chunks) - 1
+	// materializeChunk already appended each materialized chunk
+	// to chain.chunks atomically; we only advance cursor.
+	// materializedCount tracks appended chunks; the slice that
+	// previously held them is no longer needed.
+	if materializedCount > 0 {
+		chain.cursor = len(chain.chunks) - 1
+	}
 	chain.dirty = true
 	return nil
 }

@@ -619,6 +619,65 @@ func TestRenderMarkdown_FenceLangInjectionSafe(t *testing.T) {
 	}
 }
 
+// --- Commit C: RenderForWire whole-body expandable fold ---
+
+// TestRenderForWire_LongBodyFolded: a long rendered body
+// (> expandableFullThresholdChars = 2000 chars but < ~4056 chars so
+// wrap overhead stays within Telegram's 4096 limit) is wrapped in
+// `<blockquote expandable>` so the message collapses to a "▼ Expand"
+// affordance by default on Telegram.
+func TestRenderForWire_LongBodyFolded(t *testing.T) {
+	body := strings.Repeat("This is some content. ", 130) // ~3120 chars
+	got := RenderForWire(body)
+	if !strings.HasPrefix(got, "<blockquote expandable>") {
+		t.Errorf("RenderForWire long body missing expandable open; got prefix %q", got[:min(60, len(got))])
+	}
+	if !strings.HasSuffix(got, "</blockquote>") {
+		t.Errorf("RenderForWire long body missing expandable close; got suffix %q", got[len(got)-min(60, len(got)):])
+	}
+}
+
+// TestRenderForWire_ShortBodyNotFolded: a short body stays
+// unwrapped — no point in forcing a user to expand a one-paragraph
+// result.
+func TestRenderForWire_ShortBodyNotFolded(t *testing.T) {
+	body := "short result"
+	got := RenderForWire(body)
+	if strings.Contains(got, "<blockquote") {
+		t.Errorf("RenderForWire short body should not wrap; got %q", got)
+	}
+}
+
+// TestRenderForWire_NoNestedFold: when RenderMarkdown already
+// emitted a `<blockquote expandable>` (via a long `>` quote inside
+// the body), RenderForWire must NOT wrap again — Telegram's HTML
+// parser rejects nested `<blockquote>`.
+func TestRenderForWire_NoNestedFold(t *testing.T) {
+	// Force the inner quote to be expandable: a `>` block longer
+	// than 800 chars after render.
+	longQuote := strings.Repeat("quoted ", 200) // 1600 chars
+	body := "> " + longQuote
+	got := RenderForWire(body)
+	count := strings.Count(got, "<blockquote")
+	if count > 1 {
+		t.Errorf("RenderForWire nested <blockquote>: count=%d; got %q", count, got)
+	}
+}
+
+// TestRenderForWire_Over4096Fallback: a body whose wrapped form
+// would exceed Telegram's 4096-char hard limit must NOT be wrapped.
+// The caller (sendOutResultMessage) handles the long content via
+// splitTelegramText — multiple message chunks, no expandable wrap.
+// Wrap overhead = 40 chars (open + close). 4096 - 40 = 4056 chars
+// max renderable before we fall back.
+func TestRenderForWire_Over4096Fallback(t *testing.T) {
+	body := strings.Repeat("x", 4090) // > expandableFullThresholdChars but wrap would exceed 4096
+	got := RenderForWire(body)
+	if strings.Contains(got, "<blockquote") {
+		t.Errorf("RenderForWire over-4096 must NOT wrap; got prefix %q", got[:min(60, len(got))])
+	}
+}
+
 func TestIsTableSeparator(t *testing.T) {
 	cases := []struct {
 		line string

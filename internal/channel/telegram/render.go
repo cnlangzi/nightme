@@ -344,6 +344,17 @@ func renderMarkdownSafe(s string) string {
 	return out
 }
 
+// expandableFullThresholdChars is the cutoff at which RenderForWire
+// wraps the entire rendered block in `<blockquote expandable>` so
+// a single OutResult that looks "long" (already within the 4096
+// hard limit but visually heavy on Telegram) collapses to a one-
+// line "▼ Expand" affordance by default. The wrap is intentional
+// only at the BLOCK level — `>` quote sub-blocks already collapse
+// individually via expandableBlockquoteThresholdChars inside
+// RenderMarkdown, so a long message with many small quotes doesn't
+// get double-folded.
+const expandableFullThresholdChars = 2000
+
 // RenderForWire is the SINGLE wire-facing entry point for turning
 // raw text (LLM markdown, agent output) into Telegram parse_mode=HTML
 // bytes. Outbound code paths that ship plain markdown straight to
@@ -354,9 +365,12 @@ func renderMarkdownSafe(s string) string {
 // rendered bold).
 //
 // Delegates to renderMarkdownSafe for the actual markdown→HTML pass
-// + fallback. This wrapper exists to give callers (sendOutResultMessage
-// and any future single-shot message render path) a named "block
-// entry" with empty-input short-circuit and a stable signature.
+// + fallback. Then wraps the result in `<blockquote expandable>`
+// when the rendered body is longer than expandableFullThresholdChars
+// so a long result message collapses to "▼ Expand" by default —
+// callers that ship a long OutResult no longer have to choose
+// between sending a 10-message chain and forcing the user to scroll
+// a single wall of text.
 //
 // chunkBody.Compose() does NOT route through this — its entries
 // flow is per-line with isHTML awareness, and error fallback is
@@ -366,7 +380,39 @@ func renderMarkdownSafe(s string) string {
 // break the per-entry invariant in the public Compose() spec. Keep
 // RenderForWire scoped to "raw markdown block → safe HTML block".
 func RenderForWire(raw string) string {
-	return renderMarkdownSafe(raw)
+	rendered := renderMarkdownSafe(raw)
+	return maybeWrapFullExpandable(rendered)
+}
+
+// maybeWrapFullExpandable wraps `rendered` in `<blockquote expandable>`
+// when it crosses the full-message fold threshold. The wrap is
+// skipped (and the original returned) when:
+//   - The output already contains a `<blockquote expandable>` tag
+//     (any sub-quote already opted in via expandableBlockquoteThresholdChars;
+//     nesting is illegal and Telegram's parser rejects it).
+//   - The rendered length is ≤ expandableFullThresholdChars — short
+//     bodies stay inline because expanding a small message is more
+//     annoying than reading it.
+//   - Wrapping would push the total over Telegram's 4096-char hard
+//     limit. We fall back to non-wrapped and let splitTelegramText
+//     cut the message into multiple chunks instead.
+func maybeWrapFullExpandable(rendered string) string {
+	if strings.Contains(rendered, "<blockquote expandable>") {
+		return rendered
+	}
+	if len(rendered) <= expandableFullThresholdChars {
+		return rendered
+	}
+	const openTag = "<blockquote expandable>"
+	const closeTag = "</blockquote>"
+	wrapped := openTag + rendered + closeTag
+	if len(wrapped) > 4096 {
+		// Wrap would push over Telegram's hard limit. Fall back
+		// to unwrapped; splitTelegramText will chop into multiple
+		// messages at the call site (sendOutResultMessage).
+		return rendered
+	}
+	return wrapped
 }
 
 // appendTrailerToBody appends the StatusBar panel to body if

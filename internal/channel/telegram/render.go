@@ -283,6 +283,30 @@ func appendTrailerToBody(body string, footerLines []string) string {
 	return body + "\n\n" + statusbar.RenderPanel(footerLines)
 }
 
+// splitTelegramText splits rendered HTML text into chunks of ≤ limit bytes.
+//
+// Cuts are guaranteed to land at positions that are:
+//   - NOT inside an HTML tag (between '<' and the matching '>') —
+//     so no chunk starts mid-tag like `<b` / `</b` / `<blockqu`
+//   - NOT inside a <pre>...</pre> atomic block — pre blocks are kept
+//     whole when possible so the formatting wrapper is preserved
+//
+// When the natural newline-or-space cut would land inside a tag or
+// pre block, the cut walks back to the largest safe position ≤ limit.
+// Tiebreaker order: \n > ' ' > first safe position. When no safe
+// position exists in the window (rare; only when the entire window
+// is one giant tag or one giant pre block), the function falls back
+// to byte-cut at limit and accepts unbalanced tags in the resulting
+// chunks — Telegram's HTML parser tolerates stray open/close tags.
+//
+// pre-block-spanning-limits is a known limitation: if a single
+// <pre>...</pre> block exceeds `limit`, the hard-cut splits the
+// block in two and Telegram will render the two halves differently
+// (first half as preformatted, second half as plain text because
+// the stray `</pre>` at the end of chunk N and missing `<pre>` at
+// the start of chunk N+1 are interpreted literally). Future work
+// could insert balanced `</pre>` / `<pre>` pairs around the cut to
+// preserve rendering — out of scope for commit A.
 func splitTelegramText(rendered string, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, errors.New("telegram: invalid message limit")
@@ -290,33 +314,152 @@ func splitTelegramText(rendered string, limit int) ([]string, error) {
 	if len(rendered) <= limit {
 		return []string{rendered}, nil
 	}
-	parts := strings.Split(rendered, "\n")
+
+	unsafe := computeUnsafePositions(rendered)
+
 	var chunks []string
-	current := ""
-	for _, part := range parts {
-		candidate := part
-		if current != "" {
-			candidate = current + "\n" + part
+	start := 0
+	n := len(rendered)
+	for start < n {
+		end := start + limit
+		if end >= n {
+			chunks = append(chunks, rendered[start:])
+			return chunks, nil
 		}
-		if len(candidate) <= limit {
-			current = candidate
-			continue
+		cut := findSafeCut(rendered, unsafe, start, end)
+		if cut <= start {
+			// No safe cut within (start, end]; fall back to byte
+			// cut at end. May land inside a tag / pre block —
+			// documented known limitation.
+			cut = end
 		}
-		if current != "" {
-			chunks = append(chunks, current)
-		}
-		if len(part) > limit {
-			for len(part) > limit {
-				chunks = append(chunks, part[:limit])
-				part = part[limit:]
-			}
-			current = part
-		} else {
-			current = part
-		}
-	}
-	if current != "" {
-		chunks = append(chunks, current)
+		chunks = append(chunks, rendered[start:cut])
+		start = cut
 	}
 	return chunks, nil
+}
+
+// computeUnsafePositions walks rendered once and returns a bitmap
+// of length n marking every byte position that is unsafe as a cut
+// point. A position is unsafe when it falls inside any HTML tag
+// (`<...>`) or inside a `<pre>...</pre>` atomic block.
+//
+// The bitmap is indexable by byte offset; unsafe[i] = true means
+// "do not cut immediately before s[i]". Positions just after a
+// `>` (end of tag) or just before a `<` (start of next tag) are
+// safe, which is the natural cut point.
+//
+// On malformed input (e.g., '<' with no matching '>') the byte is
+// treated as plain text and the scan continues.
+func computeUnsafePositions(rendered string) []bool {
+	n := len(rendered)
+	unsafe := make([]bool, n)
+
+	i := 0
+	for i < n {
+		if rendered[i] != '<' {
+			i++
+			continue
+		}
+		end := strings.IndexByte(rendered[i:], '>')
+		if end < 0 {
+			// Malformed: lone '<' with no closing '>'. Treat
+			// as plain text and advance one byte.
+			i++
+			continue
+		}
+		tagStart := i
+		tagEnd := i + end + 1
+		tagContent := rendered[tagStart+1 : tagEnd-1]
+
+		// Mark every byte inside the tag as unsafe.
+		for j := tagStart; j < tagEnd && j < n; j++ {
+			unsafe[j] = true
+		}
+
+		if isStartTag(tagContent, "pre") {
+			// Find matching </pre> to scope the atomic block.
+			closeIdx := strings.Index(rendered[tagEnd:], "</pre>")
+			if closeIdx >= 0 {
+				preEnd := tagEnd + closeIdx + len("</pre>")
+				// Mark content between <pre> and </pre> as unsafe.
+				for j := tagEnd; j < preEnd && j < n; j++ {
+					unsafe[j] = true
+				}
+				i = preEnd
+				continue
+			}
+			// Unmatched <pre> — every byte from here to EOF is
+			// inside an open pre block. Mark them all unsafe.
+			for j := tagEnd; j < n; j++ {
+				unsafe[j] = true
+			}
+			return unsafe
+		}
+
+		i = tagEnd
+	}
+	return unsafe
+}
+
+// findSafeCut returns the largest position p in (lo, hi] where p is
+// safe (not in `unsafe`) and s[p-1] is a preferred break char.
+// Tiebreaker order: '\n' first, then ' ', then any safe position.
+// Returns 0 when no safe position exists in the window.
+func findSafeCut(s string, unsafe []bool, lo, hi int) int {
+	n := len(s)
+	if hi > n {
+		hi = n
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	if lo >= hi {
+		return 0
+	}
+
+	// Pass 1: cut right after a '\n'.
+	for i := hi; i > lo; i-- {
+		if i >= n || unsafe[i] {
+			continue
+		}
+		if i > 0 && s[i-1] == '\n' {
+			return i
+		}
+	}
+	// Pass 2: cut right after a ' '.
+	for i := hi; i > lo; i-- {
+		if i >= n || unsafe[i] {
+			continue
+		}
+		if i > 0 && s[i-1] == ' ' {
+			return i
+		}
+	}
+	// Pass 3: any safe position regardless of preceding char.
+	for i := hi; i > lo; i-- {
+		if i < n && !unsafe[i] {
+			return i
+		}
+	}
+	return 0
+}
+
+// isStartTag reports whether tagContent is an opening tag for the
+// given HTML element name. Whitespace after the name is allowed; the
+// name must not be a prefix of a different name (so `isStartTag(t,
+// "pre")` matches `<pre>` and `<pre lang>` but NOT `<pretty>`).
+func isStartTag(tagContent, name string) bool {
+	if !strings.HasPrefix(tagContent, name) {
+		return false
+	}
+	rest := tagContent[len(name):]
+	if rest == "" {
+		return true
+	}
+	switch rest[0] {
+	case ' ', '\t', '\n', '\r', '/', '>':
+		return true
+	}
+	return false
 }

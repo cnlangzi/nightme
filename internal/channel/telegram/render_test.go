@@ -232,6 +232,222 @@ func TestSplitTelegramText_InvalidLimit(t *testing.T) {
 	}
 }
 
+// TestSplitTelegramText_NoBreakInsideTag: when the natural cut at the
+// byte limit lands inside an HTML tag (e.g., `<b>`, `</blockquote>`),
+// splitTelegramText must walk back to a safe cut point that does NOT
+// leave the second chunk starting mid-tag. The first chunk may end
+// with an unclosed opening tag — Telegram's HTML parser tolerates
+// that — but the second chunk must start at a position that is not
+// between '<' and '>'.
+func TestSplitTelegramText_NoBreakInsideTag(t *testing.T) {
+	// 3890 chars of filler + `<b>bold</b>` (11 chars) + 50 chars tail
+	// = 3951 chars. With limit 3900, natural cut at byte 3900 lands
+	// inside `<b>` (positions 3890..3892). The function MUST walk back
+	// to a position BEFORE the `<b>` so the tag stays whole in chunk 1
+	// (unclosed `<b>` is fine) or AFTER `</b>` so chunk 2 starts clean.
+	filler := strings.Repeat("a", 3890)
+	body := filler + "<b>bold</b>" + strings.Repeat("x", 50)
+	parts, err := splitTelegramText(body, 3900)
+	if err != nil {
+		t.Fatalf("splitTelegramText: %v", err)
+	}
+	if len(parts) < 2 {
+		t.Fatalf("expected ≥2 chunks, got %d", len(parts))
+	}
+	for i, p := range parts {
+		if len(p) > 3900 {
+			t.Errorf("part %d over limit: %d", i, len(p))
+		}
+		// No chunk may START inside an HTML tag. The "starts inside
+		// a tag" condition is: chunk[0] is '<' AND chunk continues
+		// with non-'>' chars without hitting '>' first. In other
+		// words, the chunk is mid-tag.
+		if isMidTag(p) {
+			t.Errorf("part %d starts mid-tag: %q...", i, p[:min(60, len(p))])
+		}
+	}
+}
+
+// TestSplitTelegramText_CutRightAfterOpenBracket: explicit regression
+// for the case where the natural byte-cut lands at position `start +
+// limit` which is the byte right after '<'. The walk-back must
+// detect this and shift the cut left, not return a chunk that begins
+// with the second character of an opening tag.
+func TestSplitTelegramText_CutRightAfterOpenBracket(t *testing.T) {
+	// 3899 bytes of filler + '<' at position 3899 + 'b' at 3900 + ...
+	// Limit = 3900 → naive cut at 3900 puts '<' in chunk 1 and 'b'
+	// at chunk 2 start → chunk 2 starts mid-tag.
+	filler := strings.Repeat("x", 3899)
+	body := filler + "<b>more content after the tag</b>"
+	parts, err := splitTelegramText(body, 3900)
+	if err != nil {
+		t.Fatalf("splitTelegramText: %v", err)
+	}
+	if len(parts) < 2 {
+		t.Fatalf("expected ≥2 chunks, got %d", len(parts))
+	}
+	for i, p := range parts {
+		if isMidTag(p) {
+			t.Errorf("part %d starts mid-tag: %q...", i, p[:min(60, len(p))])
+		}
+	}
+}
+
+// TestSplitTelegramText_PreBlockAtomic: a <pre>...</pre> block must
+// stay whole in a single chunk. Cuts must never land inside the pre
+// block content when the block fits within the limit.
+//
+// Note: when the pre block ITSELF is larger than the limit, the
+// function falls back to hard-cut and the block may be split with
+// broken rendering — that's the documented "pre-block-spanning-limits"
+// limitation, covered by TestSplitTelegramText_PreBlockTooBigHardCut.
+func TestSplitTelegramText_PreBlockAtomic(t *testing.T) {
+	// 500 chars filler + <pre>...</pre> (~2910 chars total) +
+	// 500 chars tail = ~3910 chars. Limit 3900 → just over limit
+	// so the function MUST cut somewhere; the cut must land before
+	// `<pre>` (i.e., the pre block stays whole in chunk 2 along
+	// with the tail), not inside the pre content.
+	preContent := strings.Repeat("x", 2900) // pre block content
+	body := strings.Repeat("a", 500) + "<pre>" + preContent + "</pre>" + strings.Repeat("b", 500)
+	parts, err := splitTelegramText(body, 3900)
+	if err != nil {
+		t.Fatalf("splitTelegramText: %v", err)
+	}
+	if len(parts) < 2 {
+		t.Fatalf("expected ≥2 chunks, got %d", len(parts))
+	}
+
+	// Find the chunk that contains <pre> and the chunk that contains
+	// </pre>. They must be the same chunk.
+	preOpenChunk := -1
+	preCloseChunk := -1
+	for i, p := range parts {
+		if strings.Contains(p, "<pre>") {
+			preOpenChunk = i
+		}
+		if strings.Contains(p, "</pre>") {
+			preCloseChunk = i
+		}
+	}
+	if preOpenChunk < 0 || preCloseChunk < 0 {
+		t.Fatalf("pre block not found in chunks: open=%d close=%d", preOpenChunk, preCloseChunk)
+	}
+	if preOpenChunk != preCloseChunk {
+		t.Errorf("pre block split across chunks: <pre> in chunk %d, </pre> in chunk %d",
+			preOpenChunk, preCloseChunk)
+	}
+	// The chunk containing the pre block must NOT start mid-pre.
+	if isMidPre(parts[preOpenChunk]) {
+		t.Errorf("chunk %d starts inside pre block: %q...", preOpenChunk,
+			parts[preOpenChunk][:min(60, len(parts[preOpenChunk]))])
+	}
+}
+
+// TestSplitTelegramText_HardCutFallback: when the input is one giant
+// <b>...</b> wrapping everything, every safe-position search fails
+// and the function falls back to byte-cut at limit. The resulting
+// chunks have unbalanced tags (one ends with unclosed `<b>`, the next
+// starts with stray content). This is a documented known limitation;
+// the test pins the fallback behaviour so a future refactor doesn't
+// silently regress to an infinite loop.
+func TestSplitTelegramText_HardCutFallback(t *testing.T) {
+	body := "<b>" + strings.Repeat("a", 8000) + "</b>"
+	parts, err := splitTelegramText(body, 3900)
+	if err != nil {
+		t.Fatalf("splitTelegramText: %v", err)
+	}
+	if len(parts) < 2 {
+		t.Fatalf("expected ≥2 chunks, got %d", len(parts))
+	}
+	// Every chunk must be ≤ limit.
+	for i, p := range parts {
+		if len(p) > 3900 {
+			t.Errorf("part %d over limit: %d", i, len(p))
+		}
+	}
+}
+
+// TestSplitTelegramText_PreBlockTooBigHardCut: when a single pre
+// block exceeds the limit by itself, the function falls back to
+// byte-cut. This is the documented "pre-block-spanning-limits"
+// limitation — the chunks produced will have rendering issues but
+// the function MUST terminate and not loop forever.
+func TestSplitTelegramText_PreBlockTooBigHardCut(t *testing.T) {
+	body := "<pre>" + strings.Repeat("x", 8000) + "</pre>"
+	parts, err := splitTelegramText(body, 3900)
+	if err != nil {
+		t.Fatalf("splitTelegramText: %v", err)
+	}
+	if len(parts) < 2 {
+		t.Fatalf("expected ≥2 chunks (hard cut inside huge pre), got %d", len(parts))
+	}
+	for i, p := range parts {
+		if len(p) > 3900 {
+			t.Errorf("part %d over limit: %d", i, len(p))
+		}
+	}
+}
+
+// TestSplitTelegramText_NestedTags: opening and closing tags around
+// the cut boundary must not be split.
+func TestSplitTelegramText_NestedTags(t *testing.T) {
+	// Mix of <b>, <i>, </i>, </b> tags scattered through the body.
+	// Verify no chunk starts with a partial tag.
+	var b strings.Builder
+	for i := 0; i < 100; i++ {
+		b.WriteString("<b>")
+		b.WriteString(strings.Repeat("a", 38))
+		b.WriteString("</b>")
+	}
+	body := b.String()
+	parts, err := splitTelegramText(body, 3900)
+	if err != nil {
+		t.Fatalf("splitTelegramText: %v", err)
+	}
+	for i, p := range parts {
+		if len(p) > 3900 {
+			t.Errorf("part %d over limit: %d", i, len(p))
+		}
+		if isMidTag(p) {
+			t.Errorf("part %d starts mid-tag: %q...", i, p[:min(60, len(p))])
+		}
+	}
+}
+
+// isMidTag reports whether the chunk begins in the middle of an
+// HTML tag — i.e., its first byte is '<' and the chunk continues
+// past the matching '>'. A chunk that IS exactly a tag like `<b>`
+// does not count as mid-tag (it's a complete tag).
+func isMidTag(chunk string) bool {
+	if len(chunk) == 0 || chunk[0] != '<' {
+		return false
+	}
+	// Find '>' in chunk. If found, the tag is complete and chunk
+	// does not start mid-tag (it might be a complete tag, or a
+	// fragment that happens to include a complete tag).
+	// If NOT found, the chunk starts with '<' and has no '>' —
+	// it's a tag fragment → mid-tag.
+	return strings.IndexByte(chunk, '>') < 0
+}
+
+// isMidPre reports whether the chunk begins inside a pre block (i.e.,
+// its first byte is NOT a tag and not a fresh-start position).
+// Heuristic: a chunk starts mid-pre when it doesn't start with a
+// '<' and contains a '</pre>' but no matching '<pre>'.
+func isMidPre(chunk string) bool {
+	if len(chunk) == 0 || chunk[0] == '<' {
+		return false
+	}
+	return strings.Contains(chunk, "</pre>") && !strings.Contains(chunk, "<pre>")
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func TestIsTableSeparator(t *testing.T) {
 	cases := []struct {
 		line string

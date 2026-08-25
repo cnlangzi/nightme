@@ -275,6 +275,16 @@ Findings must conform to the nightme review output schema (see host agent prompt
 // patternSimplify / simplifyGroup in review_with_ocr.go.
 func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
+	// Short-circuit on empty diff: zero reviewable + zero untracked
+	// means precompute produced no files for any goroutine to slice.
+	// Without this guard, fan-out collapses to [simplifyGroup(nil)]
+	// — one RunOnce that ships a prompt with empty file context to
+	// the agent, which can only answer "0 covered, 0 findings".
+	// Returning ErrNoDiff lets the /review dispatcher surface a
+	// clean inline message instead of burning a dsh session spawn.
+	if pre.isEmptyDiff() {
+		return RunResult{}, ErrNoDiff
+	}
 	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
 	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }

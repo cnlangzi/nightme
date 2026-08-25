@@ -169,18 +169,6 @@ type driver struct {
 	// goroutine doesn't outlive the events channel drain.
 	backfillCancel context.CancelFunc
 
-	// permissionPrimed is true when ensureFullAccess successfully
-	// posted the `/permission danger-full-access` priming slash
-	// command. The host does NOT actually intercept leading `/` —
-	// empirically the model processes it as a real user turn. The
-	// priming turn fires BEFORE the RunOnce / Review caller's prompt
-	// turn, so drainForRunResult consults this flag to skip the
-	// priming turn's EventAgentResult and read the SECOND one
-	// (which carries the actual review / commit output). Set false
-	// when the priming slash post fails so the drain doesn't
-	// discard a legitimate first terminal.
-	permissionPrimed bool
-
 	// Lifecycle guards. The events chan is closed by Close() itself
 	// (no separate lifecycle goroutine — the host owns the dsh
 	// subprocess now, so there's nothing for lifecycle to wait on).
@@ -295,8 +283,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			"routable", sm.Routable)
 	}
 	modelCancel()
-
-	d.ensureFullAccess(ctx)
 
 	// Emit EventAgentReady so the runtime can capture SessionID +
 	// Workspace + Branch + Model.
@@ -792,49 +778,6 @@ func canonicalApprovalOutcome(resp string) string {
 	}
 }
 
-// fullAccessPreset is the dsh permission-presets table key that
-// bundles sandbox danger-full-access + approval never. Dashboard
-// shows it as "Full access". New sessions otherwise pin
-// workspace-write (ask) via pinInitialPermission, which is why
-// git writes outside the workspace root keep prompting.
-const fullAccessPreset = "danger-full-access"
-
-// ensureFullAccess switches the attached session to Full access
-// the same way the dashboard chip does: slash command
-// `/permission danger-full-access` via session.prompt. Host
-// intercepts leading `/` without starting a model turn. apply()
-// is a no-op when the session is already on that preset.
-//
-// We do not persist settings.defaultPreset (that would rewrite
-// ~/.dsh); per-session switch is the allowed permissions injection.
-func (d *driver) ensureFullAccess(ctx context.Context) {
-	if d == nil || d.cli == nil || d.sessionID == "" {
-		return
-	}
-	promptCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-	defer cancel()
-	err := d.cli.RPC.SessionPrompt(promptCtx, d.sessionID, "queue", []host.PromptPart{{
-		Type: "text",
-		Text: "/permission " + fullAccessPreset,
-	}})
-	if err != nil {
-		dLog("dsh: /permission danger-full-access failed", "err", errStr(err))
-		return
-	}
-	// Mark that the priming slash queued successfully. drainForRunResult
-	// reads this to skip the priming turn's terminal — the host does
-	// NOT actually intercept leading `/`; empirically the model runs a
-	// full turn on the slash, and that terminal arrives before the
-	// RunOnce / Review caller's actual prompt turn. Only set when the
-	// post succeeded (ack returned without transport error), so a
-	// failed priming does not silently discard a legitimate first
-	// terminal in the drain.
-	d.permissionPrimed = true
-	slogDefault().Info("dsh: session permission preset",
-		"session_id", d.sessionID,
-		"preset", fullAccessPreset)
-}
-
 // Reset starts a fresh dsh conversation on this same driver (dashboard
 // "new session"), without returning ErrRestartRequired.
 //
@@ -892,8 +835,6 @@ func (d *driver) Reset(ctx context.Context) error {
 		d.model = sm.Current.Model
 	}
 	modelCancel()
-
-	d.ensureFullAccess(ctx)
 
 	d.seedLastSeq(ctx)
 

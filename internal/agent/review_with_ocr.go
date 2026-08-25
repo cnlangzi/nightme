@@ -68,6 +68,12 @@ const maxDiffLines = 2000
 // actually available, that's a caller bug, not this function's problem.
 func ReviewWithOcr(ctx context.Context, s Starter, cfg StartConfig, opts ...RunOnceOption) (RunResult, error) {
 	pre := precomputeReviewWithOcr(ctx, cfg.Workspace)
+	// Short-circuit on empty diff — see ReviewWithPrompt for the
+	// rationale. Both runners must agree on the contract: zero
+	// reviewable + zero untracked → ErrNoDiff, no agent spawn.
+	if pre.isEmptyDiff() {
+		return RunResult{}, ErrNoDiff
+	}
 	groups := append(pre.ocrGroups, simplifyGroup(pre.reviewable))
 	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }
@@ -196,6 +202,19 @@ type reviewGroup struct {
 	Pattern string
 	Files   []string
 	Rule    string
+}
+
+// isEmptyDiff reports whether the precomputed context has no files
+// for any goroutine to slice. Single source of truth for the
+// "ErrNoDiff short-circuit" — ReviewWithPrompt and ReviewWithOcr both
+// call this so the contract lives next to the field definitions. A
+// nil receiver counts as empty (defensive: tests occasionally pass
+// zero-value reviewContext{}).
+func (rc *reviewContext) isEmptyDiff() bool {
+	if rc == nil {
+		return true
+	}
+	return len(rc.reviewable) == 0 && len(rc.untracked) == 0
 }
 
 // Sentinel Patterns for non-ocr review groups. Used by assembleGroupPrompt

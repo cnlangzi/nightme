@@ -22,20 +22,34 @@ func TestRenderMarkdown_Heading(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderMarkdown heading: %v", err)
 	}
-	if !strings.Contains(out, "<b>Hello</b>") {
+	// H1 now gets a 📌 pin emoji + blank line for visual emphasis.
+	if !strings.Contains(out, "<b>📌 Hello</b>") {
 		t.Fatalf("RenderMarkdown heading = %q", out)
 	}
 }
 
 func TestRenderMarkdown_HeadingLevels(t *testing.T) {
-	for _, level := range []string{"#", "##", "###", "####"} {
-		input := level + " Title"
+	cases := []struct {
+		level    string
+		wantSubs []string
+	}{
+		// H1: pin emoji + bold.
+		{"#", []string{"<b>📌 Title</b>"}},
+		// H2-H6: bold + Unicode underline bar.
+		{"##", []string{"<b>Title</b>", "────────"}},
+		{"###", []string{"<b>Title</b>", "────────"}},
+		{"####", []string{"<b>Title</b>", "────────"}},
+	}
+	for _, tc := range cases {
+		input := tc.level + " Title"
 		out, err := RenderMarkdown(input)
 		if err != nil {
-			t.Fatalf("RenderMarkdown %s: %v", level, err)
+			t.Fatalf("RenderMarkdown %s: %v", tc.level, err)
 		}
-		if !strings.Contains(out, "<b>Title</b>") {
-			t.Fatalf("RenderMarkdown %s = %q", level, out)
+		for _, want := range tc.wantSubs {
+			if !strings.Contains(out, want) {
+				t.Fatalf("RenderMarkdown %s missing %q; got %q", tc.level, want, out)
+			}
 		}
 	}
 }
@@ -71,14 +85,14 @@ func TestRenderMarkdown_CodeBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderMarkdown code: %v", err)
 	}
-	if !strings.Contains(out, "<pre>") {
-		t.Fatalf("RenderMarkdown code missing pre: %q", out)
+	if !strings.Contains(out, `<pre><code class="language-go">`) {
+		t.Fatalf("RenderMarkdown code missing language-tagged pre/code: %q", out)
 	}
 	if !strings.Contains(out, "func main()") {
 		t.Fatalf("RenderMarkdown code missing code: %q", out)
 	}
-	if !strings.Contains(out, "</pre>") {
-		t.Fatalf("RenderMarkdown code missing /pre: %q", out)
+	if !strings.Contains(out, "</code></pre>") {
+		t.Fatalf("RenderMarkdown code missing /code/pre: %q", out)
 	}
 }
 
@@ -448,6 +462,163 @@ func min(a, b int) int {
 	return b
 }
 
+// --- Commit B regression tests (P-8 placeholder leak fix + new
+//     formatting features). ---
+
+// TestRenderInline_NoPlaceholderLeak is the regression test for the
+// 2026-08-25 incident where Telegram chat displayed `**PROTECTED0**`
+// — the renderInline NUL-byte sentinel was getting stripped by
+// some intermediate layer, leaving the literal "PROTECTED<n>"
+// visible to the user. The new sentinel uses a single Unicode
+// Private Use Area rune (U+E000+idx), which has no NUL bytes and
+// cannot be confused with user text.
+//
+// The test pins the contract: rendered output NEVER contains the
+// string "PROTECTED" (case-sensitive) and the PUA sentinel runes
+// are always substituted back to their HTML.
+func TestRenderInline_NoPlaceholderLeak(t *testing.T) {
+	cases := []string{
+		"plain text",
+		"**bold**",
+		"*italic*",
+		"`code`",
+		"~~strike~~",
+		"[link](https://example.com)",
+		"||spoiler||",
+		"mixed **bold** and *italic* and `code`",
+		"nested **bold with *italic* inside**",
+		"# heading\n> quote\n- bullet\n```\ncode\n```",
+		strings.Repeat("a", 500),
+	}
+	for _, in := range cases {
+		out, err := RenderMarkdown(in)
+		if err != nil {
+			t.Fatalf("RenderMarkdown(%q): %v", in, err)
+		}
+		if strings.Contains(out, "PROTECTED") {
+			t.Errorf("renderInline leaked placeholder for input %q; got %q", in, out)
+		}
+		// No PUA chars in output (they should all be substituted
+		// back to their HTML strings).
+		for _, r := range out {
+			if r >= 0xE000 && r < 0xF000 {
+				t.Errorf("renderInline left PUA rune %U in output for input %q; got %q", r, in, out)
+				break
+			}
+		}
+	}
+}
+
+// TestRenderMarkdown_Strikethrough: `~~text~~` renders as
+// `<s>text</s>` (Telegram's strikethrough tag). Markdown doesn't
+// have a native underline syntax, so `<u>` is intentionally NOT
+// implemented — LLM outputs commonly produce `~~` but rarely
+// anything else for emphasis deletion.
+func TestRenderMarkdown_Strikethrough(t *testing.T) {
+	out, err := RenderMarkdown("this is ~~deleted~~ text")
+	if err != nil {
+		t.Fatalf("RenderMarkdown strikethrough: %v", err)
+	}
+	if !strings.Contains(out, "<s>deleted</s>") {
+		t.Fatalf("RenderMarkdown strikethrough = %q", out)
+	}
+	if strings.Contains(out, "~~") {
+		t.Errorf("RenderMarkdown leaked literal ~~: %q", out)
+	}
+}
+
+// TestRenderMarkdown_QuoteExpandable: a `>` quote block longer
+// than expandableBlockquoteThresholdChars (800) renders with the
+// `<blockquote expandable>` tag (Bot API 7.0+, 2024-03) — the
+// client collapses it by default with a "▼ Expand" affordance.
+// Short quotes stay as `<blockquote>` because expanding a one-
+// line quote is more annoying than seeing it inline.
+func TestRenderMarkdown_QuoteExpandable(t *testing.T) {
+	// Long quote — well over 800 chars after rendering.
+	long := strings.Repeat("blah blah ", 100) // 1000 chars
+	out, err := RenderMarkdown("> " + long)
+	if err != nil {
+		t.Fatalf("RenderMarkdown long quote: %v", err)
+	}
+	if !strings.Contains(out, "<blockquote expandable>") {
+		t.Fatalf("RenderMarkdown long quote missing expandable: %q", out)
+	}
+	if strings.Contains(out, "<blockquote>blah") {
+		t.Errorf("RenderMarkdown long quote used non-expandable form: %q", out)
+	}
+}
+
+// TestRenderMarkdown_QuoteShortStaysInline: a short quote stays
+// as the legacy `<blockquote>` (no `expandable`). The threshold
+// uses the post-render length to keep the visual rule consistent.
+func TestRenderMarkdown_QuoteShortStaysInline(t *testing.T) {
+	out, err := RenderMarkdown("> short quote")
+	if err != nil {
+		t.Fatalf("RenderMarkdown short quote: %v", err)
+	}
+	if !strings.Contains(out, "<blockquote>short quote</blockquote>") {
+		t.Fatalf("RenderMarkdown short quote = %q", out)
+	}
+	if strings.Contains(out, "expandable") {
+		t.Errorf("RenderMarkdown short quote should NOT use expandable: %q", out)
+	}
+}
+
+// TestRenderMarkdown_FenceLanguageVariants: the fence opener
+// ` ```X ` (where X is a Telegram-recognized language token) emits
+// `<pre><code class="language-X">` so official clients do
+// client-side syntax highlighting. Tests several common languages
+// + the no-language fallback.
+func TestRenderMarkdown_FenceLanguageVariants(t *testing.T) {
+	cases := []struct {
+		lang    string
+		openTag string
+	}{
+		{"go", `<pre><code class="language-go">`},
+		{"python", `<pre><code class="language-python">`},
+		{"rust", `<pre><code class="language-rust">`},
+		{"diff", `<pre><code class="language-diff">`},
+		{"yaml", `<pre><code class="language-yaml">`},
+		{"json", `<pre><code class="language-json">`},
+		{"", "<pre><code>"}, // no language token → no class
+	}
+	for _, tc := range cases {
+		input := "```" + tc.lang + "\nx\n```"
+		out, err := RenderMarkdown(input)
+		if err != nil {
+			t.Fatalf("RenderMarkdown fence %q: %v", tc.lang, err)
+		}
+		if !strings.Contains(out, tc.openTag) {
+			t.Errorf("RenderMarkdown fence %q missing openTag %q; got %q", tc.lang, tc.openTag, out)
+		}
+		if !strings.Contains(out, "</code></pre>") {
+			t.Errorf("RenderMarkdown fence %q missing closing: %q", tc.lang, out)
+		}
+	}
+}
+
+// TestRenderMarkdown_FenceLangInjectionSafe: a hostile language
+// token with quote / angle bracket / class attrs must not break
+// out of the `class="..."` attribute. The fenceLangPattern only
+// accepts `[A-Za-z0-9_+-]{1,32}` so anything else falls through to
+// the no-language fallback (`<pre><code>`).
+func TestRenderMarkdown_FenceLangInjectionSafe(t *testing.T) {
+	hostile := "go\" evil=\"><script>alert(1)</script>"
+	input := "```" + hostile + "\nx\n```"
+	out, err := RenderMarkdown(input)
+	if err != nil {
+		t.Fatalf("RenderMarkdown hostile fence: %v", err)
+	}
+	// No literal injection — the hostile content must be either
+	// rejected (fallback to no-class) or HTML-escaped.
+	if strings.Contains(out, `<script>alert(1)</script>`) {
+		t.Errorf("RenderMarkdown leaked hostile script: %q", out)
+	}
+	if strings.Contains(out, `class="go" evil=`) {
+		t.Errorf("RenderMarkdown leaked attribute injection: %q", out)
+	}
+}
+
 func TestIsTableSeparator(t *testing.T) {
 	cases := []struct {
 		line string
@@ -518,8 +689,11 @@ func TestRenderForWire_BoldPassesThroughAsHTML(t *testing.T) {
 
 func TestRenderForWire_FenceBlockRendersAsPreTag(t *testing.T) {
 	got := RenderForWire("```go\nfunc main() {}\n```")
-	if !strings.Contains(got, "<pre>") || !strings.Contains(got, "</pre>") {
-		t.Fatalf("RenderForWire fence missing <pre>: %q", got)
+	if !strings.Contains(got, `<pre><code class="language-go">`) {
+		t.Fatalf("RenderForWire fence missing language-tagged pre/code: %q", got)
+	}
+	if !strings.Contains(got, "</code></pre>") {
+		t.Fatalf("RenderForWire fence missing closing: %q", got)
 	}
 	if !strings.Contains(got, "func main()") {
 		t.Fatalf("RenderForWire fence missing code body: %q", got)
@@ -599,11 +773,13 @@ func TestRenderMarkdownSafe_BoldPassesThrough(t *testing.T) {
 }
 
 // TestRenderMarkdownSafe_FenceRendersAsPre: triple-backtick fences
-// must render as `<pre>...</pre>` HTML (preserves the OutError
-// ```fences``` content path's contract).
+// must render as `<pre><code>...</code></pre>` HTML (preserves the
+// OutError ```fences``` content path's contract). Telegram's
+// official clients render `<pre><code>` as a monospace block; the
+// language class is optional and absent for plain ``` fences.
 func TestRenderMarkdownSafe_FenceRendersAsPre(t *testing.T) {
 	got := renderMarkdownSafe("```\ncode\n```")
-	if !strings.Contains(got, "<pre>code\n</pre>") {
+	if !strings.Contains(got, "<pre><code>code\n</code></pre>") {
 		t.Fatalf("renderMarkdownSafe fence render; got %q", got)
 	}
 }

@@ -4,23 +4,44 @@ import (
 	"errors"
 	"html"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 var (
-	codeSpanPattern = regexp.MustCompile("`([^`\\n]+)`")
-	linkPattern     = regexp.MustCompile("\\[([^\\]]+)\\]\\(([^)]+)\\)")
-	boldPattern     = regexp.MustCompile("\\*\\*([^*\\n]+)\\*\\*|__([^_\\n]+)__")
-	italicPattern   = regexp.MustCompile("(^|[^*])\\*([^*\\n]+)\\*|(^|[^_])_([^_\\n]+)_")
-	spoilerPattern  = regexp.MustCompile("\\|\\|([^|\\n]+)\\|\\|")
-	headingPattern  = regexp.MustCompile("^#{1,6}\\s+(.+)$")
-	bulletPattern   = regexp.MustCompile("^[-*]\\s+(.+)$")
-	orderedPattern  = regexp.MustCompile("^([0-9]+)\\.\\s+(.+)$")
-	quotePattern    = regexp.MustCompile("^>\\s*(.*)$")
+	codeSpanPattern  = regexp.MustCompile("`([^`\\n]+)`")
+	linkPattern      = regexp.MustCompile("\\[([^\\]]+)\\]\\(([^)]+)\\)")
+	boldPattern      = regexp.MustCompile("\\*\\*([^*\\n]+)\\*\\*|__([^_\\n]+)__")
+	italicPattern    = regexp.MustCompile("(^|[^*])\\*([^*\\n]+)\\*|(^|[^_])_([^_\\n]+)_")
+	spoilerPattern   = regexp.MustCompile("\\|\\|([^|\\n]+)\\|\\|")
+	strikePattern    = regexp.MustCompile("~~([^~\\n]+)~~")
+	headingPattern   = regexp.MustCompile("^#{1,6}\\s+(.+)$")
+	bulletPattern    = regexp.MustCompile("^[-*]\\s+(.+)$")
+	orderedPattern   = regexp.MustCompile("^([0-9]+)\\.\\s+(.+)$")
+	quotePattern     = regexp.MustCompile("^>\\s*(.*)$")
+	fenceLangPattern = regexp.MustCompile("^```([A-Za-z0-9_+\\-]{1,32})$")
 )
+
+// placeholderBase is the start of the Unicode Private Use Area
+// (U+E000..U+F8FF). renderInline uses a single PUA rune per
+// placeholder — PUA chars are reserved for internal use and
+// cannot collide with real user text. The previous sentinel
+// (`\x00PROTECTED<n>\x00`) was NUL-byte-bounded, which leaked when
+// any intermediate layer stripped the NUL bytes (the 2026-08-25
+// bug where users saw `**PROTECTED0**` in their Telegram chat).
+// PUA chars survive any chain that doesn't actively strip them,
+// and the per-rune substitute loop below is more robust than
+// strings.ReplaceAll on a multi-character sentinel.
+const placeholderBase = 0xE000
+
+// expandableBlockquoteThresholdChars is the cutoff at which `>`
+// quote blocks render as `<blockquote expandable>` (collapsible)
+// vs. the legacy `<blockquote>` (always visible). Bot API 7.0+
+// (2024-03) added the expandable variant; quotes shorter than this
+// stay non-expandable because expanding a one-line quote is more
+// annoying than seeing it inline.
+const expandableBlockquoteThresholdChars = 800
 
 func RenderMarkdown(input string) (string, error) {
 	if input == "" {
@@ -29,14 +50,32 @@ func RenderMarkdown(input string) (string, error) {
 	lines := strings.Split(strings.ReplaceAll(input, "\r\n", "\n"), "\n")
 	var output strings.Builder
 	inCodeBlock := false
+	codeLang := ""
 	for index := 0; index < len(lines); index++ {
 		line := lines[index]
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			if inCodeBlock {
-				output.WriteString("</pre>")
+				output.WriteString("</code></pre>")
+				codeLang = ""
 			} else {
-				output.WriteString("<pre>")
+				// Extract language token from ```go, ```python,
+				// ```diff, etc. Telegram's official clients do
+				// client-side syntax highlighting when the class
+				// is set (Bot API 6.0+, 2023-04). lang is
+				// validated to a safe alphanumeric+dash subset
+				// so a hostile markdown can't break out of the
+				// `class="..."` attribute.
+				lang := strings.TrimPrefix(trimmed, "```")
+				lang = strings.TrimSpace(lang)
+				if langMatches := fenceLangPattern.FindStringSubmatch(trimmed); langMatches != nil {
+					codeLang = langMatches[1]
+					output.WriteString(`<pre><code class="language-`)
+					output.WriteString(codeLang)
+					output.WriteString(`">`)
+				} else {
+					output.WriteString("<pre><code>")
+				}
 			}
 			inCodeBlock = !inCodeBlock
 			continue
@@ -53,18 +92,53 @@ func RenderMarkdown(input string) (string, error) {
 			continue
 		}
 		if matches := headingPattern.FindStringSubmatch(trimmed); matches != nil {
-			output.WriteString("<b>")
-			output.WriteString(renderInline(matches[1]))
-			output.WriteString("</b>")
+			// Visual hierarchy: H1 gets a 📌 pin emoji + a blank
+			// line of breathing room; H2-H6 get a Unicode underline
+			// bar after the bold title. Telegram doesn't render
+			// native heading sizes, so this is the cheapest way to
+			// distinguish levels without breaking the existing
+			// `<b>` rendering.
+			level := 0
+			for _, r := range matches[0] {
+				if r == '#' {
+					level++
+				} else {
+					break
+				}
+			}
+			if level == 1 {
+				output.WriteString("<b>📌 ")
+				output.WriteString(renderInline(matches[1]))
+				output.WriteString("</b>")
+			} else {
+				output.WriteString("<b>")
+				output.WriteString(renderInline(matches[1]))
+				output.WriteString("</b>\n")
+				output.WriteString(strings.Repeat("─", 8))
+			}
 		} else if matches := bulletPattern.FindStringSubmatch(trimmed); matches != nil {
 			output.WriteString("• ")
 			output.WriteString(renderInline(matches[1]))
 		} else if matches := orderedPattern.FindStringSubmatch(trimmed); matches != nil {
 			output.WriteString(matches[1] + ". " + renderInline(matches[2]))
 		} else if matches := quotePattern.FindStringSubmatch(trimmed); matches != nil {
-			output.WriteString("<blockquote>")
-			output.WriteString(renderInline(matches[1]))
-			output.WriteString("</blockquote>")
+			// Long `>` blocks collapse to `<blockquote expandable>`
+			// (Bot API 7.0+, 2024-03). Default-collapsed; user taps
+			// "▼ Expand" to reveal. Short quotes stay inline
+			// because expanding a one-line quote is more annoying
+			// than seeing it inline. The threshold uses the
+			// rendered text length (post-renderInline) so HTML
+			// overhead doesn't push a small quote over the line.
+			quoteText := renderInline(matches[1])
+			if len(quoteText) > expandableBlockquoteThresholdChars {
+				output.WriteString("<blockquote expandable>")
+				output.WriteString(quoteText)
+				output.WriteString("</blockquote>")
+			} else {
+				output.WriteString("<blockquote>")
+				output.WriteString(quoteText)
+				output.WriteString("</blockquote>")
+			}
 		} else if trimmed == "---" || trimmed == "***" {
 			output.WriteString("────────")
 		} else if strings.Count(trimmed, "|") >= 2 && index+1 < len(lines) && isTableSeparator(strings.TrimSpace(lines[index+1])) {
@@ -78,7 +152,9 @@ func RenderMarkdown(input string) (string, error) {
 		}
 	}
 	if inCodeBlock {
-		output.WriteString("</pre>")
+		// Unmatched opening fence — close it to keep the HTML
+		// well-formed (mirrors the closing-fence branch above).
+		output.WriteString("</code></pre>")
 	}
 	result := output.String()
 	if result == "" {
@@ -90,9 +166,22 @@ func RenderMarkdown(input string) (string, error) {
 func renderInline(input string) string {
 	placeholders := make([]string, 0)
 	protect := func(value string) string {
-		placeholder := "\x00PROTECTED" + strconv.Itoa(len(placeholders)) + "\x00"
+		idx := len(placeholders)
+		if idx >= 0x1000 {
+			// PUA has only 6400 code points; reserve some for
+			// nested recursion depth. If we hit the cap, fall
+			// back to raw value (renders as plain text but
+			// doesn't corrupt the output).
+			return value
+		}
 		placeholders = append(placeholders, value)
-		return placeholder
+		// Sentinel is a single Unicode Private Use Area rune
+		// (U+E000 + idx). PUA chars are reserved for internal
+		// use, so they cannot collide with real user text. This
+		// replaces the legacy `\x00PROTECTED<n>\x00` NUL-byte
+		// sentinel, which leaked when any intermediate layer
+		// stripped the NUL bytes (see 2026-08-25 incident).
+		return string(rune(placeholderBase + idx))
 	}
 	value := input
 	value = codeSpanPattern.ReplaceAllStringFunc(value, func(match string) string {
@@ -102,6 +191,10 @@ func renderInline(input string) string {
 	value = spoilerPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := spoilerPattern.FindStringSubmatch(match)
 		return protect("<span class=\"tg-spoiler\">" + renderInline(parts[1]) + "</span>")
+	})
+	value = strikePattern.ReplaceAllStringFunc(value, func(match string) string {
+		parts := strikePattern.FindStringSubmatch(match)
+		return protect("<s>" + renderInline(parts[1]) + "</s>")
 	})
 	value = linkPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := linkPattern.FindStringSubmatch(match)
@@ -131,10 +224,22 @@ func renderInline(input string) string {
 		return protect(prefix + "<i>" + renderInline(text) + "</i>")
 	})
 	value = escapeHTML(value)
-	for index, placeholderValue := range placeholders {
-		value = strings.ReplaceAll(value, "\x00PROTECTED"+strconv.Itoa(index)+"\x00", placeholderValue)
+	// Walk the escaped value rune-by-rune and substitute PUA-char
+	// placeholders back with their raw HTML strings. PUA chars in
+	// user input (vanishingly rare — reserved range) that don't
+	// correspond to a placeholder pass through unchanged.
+	var sb strings.Builder
+	for _, r := range value {
+		if r >= placeholderBase && r < placeholderBase+0x1000 {
+			idx := int(r - placeholderBase)
+			if idx < len(placeholders) {
+				sb.WriteString(placeholders[idx])
+				continue
+			}
+		}
+		sb.WriteRune(r)
 	}
-	return value
+	return sb.String()
 }
 
 func isTableSeparator(line string) bool {

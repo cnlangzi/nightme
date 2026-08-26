@@ -90,7 +90,7 @@ func init() {
 
 ### 3.2 `cursor` 那行的 binary 是 `cursor-agent`,不是 `cursor`
 
-`cursor.NewStarter("cursor", "cursor-agent", []string{"acp"})` 的第二个参数是 command(`exec.LookPath` 用的 binary 名),不是 name。Cursor CLI 安装后挂在 PATH 上的是 `cursor-agent` binary:bash installer (`curl https://cursor.com/install`) 在 `$HOME/.local/bin/cursor-agent` 创建 legacy symlink(主名 `agent`),PowerShell installer (`https://cursor.com/install?win32=true`) 在 `%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd` 创建真实入口(并额外拷贝一份 `agent.cmd` 作为 alias)。Bridge 选 `cursor-agent` 是因为它是两个 installer 都创建的"真名字"",不依赖 installer 的 alias 创建逻辑。
+`cursor.NewStarter("cursor", "cursor-agent", cursor.DefaultACPArgs)` 的第二个参数是 command(`exec.LookPath` 用的 binary 名),不是 name。Cursor CLI 安装后挂在 PATH 上的是 `cursor-agent` binary:bash installer (`curl https://cursor.com/install`) 在 `$HOME/.local/bin/cursor-agent` 创建 legacy symlink(主名 `agent`),PowerShell installer (`https://cursor.com/install?win32=true`) 在 `%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd` 创建真实入口(并额外拷贝一份 `agent.cmd` 作为 alias)。Bridge 选 `cursor-agent` 是因为它是两个 installer 都创建的"真名字"",不依赖 installer 的 alias 创建逻辑。Builtin argv 是 `DefaultACPArgs`（`--force --trust --sandbox disabled --approve-mcps acp`）：parent 权限开关必须写在 `acp` 前面，`cursor-agent acp --force` 会被 acp 子命令忽略。
 
 ---
 

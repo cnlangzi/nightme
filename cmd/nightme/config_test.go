@@ -59,6 +59,32 @@ func TestMergeAgents_UserConfigAddsNew(t *testing.T) {
 	}
 }
 
+// TestMergeAgents_CursorFullAccess locks the cursor builtin argv:
+// parent full-access flags then `acp`. Flags after `acp` are a
+// silent no-op on cursor-agent 2026.08.11.
+func TestMergeAgents_CursorFullAccess(t *testing.T) {
+	got := MergeAgents(&config.Config{})
+	for _, a := range got {
+		if a.Name != "cursor" {
+			continue
+		}
+		if !strings.Contains(a.Command, "--force") {
+			t.Errorf("cursor Command = %q, want --force", a.Command)
+		}
+		if !strings.Contains(a.Command, "--sandbox disabled") {
+			t.Errorf("cursor Command = %q, want --sandbox disabled", a.Command)
+		}
+		if !strings.HasSuffix(a.Command, " acp") {
+			t.Errorf("cursor Command = %q, want acp last", a.Command)
+		}
+		if strings.Contains(a.Command, "acp --force") {
+			t.Errorf("cursor Command puts --force after acp (ignored): %q", a.Command)
+		}
+		return
+	}
+	t.Fatal("cursor builtin missing from MergeAgents")
+}
+
 // TestMergeAgents_UserConfigOverridesBuiltin verifies that a name
 // collision with a built-in is won by cfg.Agents (Source="config",
 // Command from cfg, Bridge from cfg).

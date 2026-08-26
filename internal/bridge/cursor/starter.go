@@ -1,19 +1,20 @@
 // starter.go — the spawn recipe for the cursor ACP bridge.
 //
-// Cursor CLI natively supports ACP via `agent acp` command.
+// Cursor CLI natively supports ACP via `cursor-agent acp`.
 // This package wraps the generic acp bridge, similar to opencode.
 //
 // Two spawn paths:
 //
-//   - Start (long-lived chat session) → `agent acp` under PTY.
-//     Reuses the generic ACP bridge for protocol handling.
+//   - Start (long-lived chat session) → `cursor-agent` +
+//     DefaultACPArgs under PTY (parent full-access flags then
+//     `acp`). Reuses the generic ACP bridge for protocol handling.
 //     No sessionUpdate translator needed (unlike opencode) —
 //     Cursor's sessionUpdate events are handled by the generic
 //     acp bridge's fallback path.
 //
 //   - RunOnce (one-shot: /gtw commit, buildAgentPrompt) →
-//     `agent -p "prompt" --output-format text`. The process
-//     exits after the turn.
+//     `cursor-agent` + FullAccessArgs + `-p "prompt"
+//     --output-format text`. The process exits after the turn.
 //
 // The two paths share the same Starter; only RunOnce and the
 // print-mode spawn in print.go differ from Start and the
@@ -48,8 +49,10 @@ type Starter struct {
 // from init()).
 //
 // args are the protocol flags. The bridge passes them as-is to
-// the cursor binary; the canonical value is `[]string{"acp"}`
-// (matches Cursor's documented integration mode).
+// the cursor binary; the canonical value is DefaultACPArgs
+// (parent full-access flags then `acp` — see cursor.go).
+// Flags MUST precede `acp`: the parent CLI owns --force /
+// --sandbox / --trust / --approve-mcps.
 //
 // The defensive copy means later mutation of the caller's slice
 // does not affect us.
@@ -76,9 +79,9 @@ func (s *Starter) Detect() error {
 	return err
 }
 
-// Start spawns `agent acp` under a PTY (via the generic acp
-// bridge), runs the initialize + session/new handshake, and
-// returns a live *agent.Agent.
+// Start spawns `cursor-agent` + s.args under a PTY (via the
+// generic acp bridge), runs the initialize + session/new
+// handshake, and returns a live *agent.Agent.
 //
 // The runtime state (transport / rpc / events / driver) lives
 // inside the generic acp bridge — this package only contributes:
@@ -118,11 +121,11 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 }
 
 // RunOnce is the one-shot counterpart to Start. Spawns
-// `agent -p "prompt" --output-format text` directly and returns
-// the agent's final text. No chat session, no events channel —
-// the process exits after the turn.
+// `cursor-agent` + FullAccessArgs + `-p "prompt" --output-format
+// text` and returns the agent's final text. No chat session, no
+// events channel — the process exits after the turn.
 //
-// Cursor's print-mode uses `agent -p` (not ACP), which is
+// Cursor's print-mode uses `cursor-agent -p` (not ACP), which is
 // simpler and faster for one-shot invocations (/gtw commit,
 // buildAgentPrompt). Mirrors the codex/claudecode/pi/opencode
 // print-mode pattern: bypass the long-lived ACP bridge driver,

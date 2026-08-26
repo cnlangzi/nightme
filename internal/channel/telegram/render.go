@@ -164,9 +164,30 @@ func RenderMarkdown(input string) (string, error) {
 }
 
 func renderInline(input string) string {
-	placeholders := make([]string, 0)
+	return renderInlineWithPH(input, nil)
+}
+
+// renderInlineWithPH is the recursive core of renderInline. The
+// `ph` argument is the placeholder table — append to it on every
+// match and read from it during the final PUA-char walk.
+//
+// Top-level callers pass `nil`; renderInlineWithPH allocates a
+// fresh slice. Recursive callers (inside the bold / italic /
+// strike / link / spoiler regex callbacks below) pass the SAME
+// slice down so child renders can resolve PUA runes that the
+// parent scope's codeSpan pass already protected.
+//
+// Sharing `ph` across recursion is the bug fix for the inline-
+// code-inside-bold drop (PUA slice was per-frame, so children
+// couldn't see parents' runes and fell through WriteRune as raw
+// Unicode — leaving stray Private Use Area chars in the output).
+func renderInlineWithPH(input string, ph *[]string) string {
+	if ph == nil {
+		s := make([]string, 0, 8)
+		ph = &s
+	}
 	protect := func(value string) string {
-		idx := len(placeholders)
+		idx := len(*ph)
 		if idx >= 0x1000 {
 			// PUA has only 6400 code points; reserve some for
 			// nested recursion depth. If we hit the cap, fall
@@ -174,7 +195,7 @@ func renderInline(input string) string {
 			// doesn't corrupt the output).
 			return value
 		}
-		placeholders = append(placeholders, value)
+		*ph = append(*ph, value)
 		// Sentinel is a single Unicode Private Use Area rune
 		// (U+E000 + idx). PUA chars are reserved for internal
 		// use, so they cannot collide with real user text. This
@@ -190,18 +211,18 @@ func renderInline(input string) string {
 	})
 	value = spoilerPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := spoilerPattern.FindStringSubmatch(match)
-		return protect("<span class=\"tg-spoiler\">" + renderInline(parts[1]) + "</span>")
+		return protect("<span class=\"tg-spoiler\">" + renderInlineWithPH(parts[1], ph) + "</span>")
 	})
 	value = strikePattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := strikePattern.FindStringSubmatch(match)
-		return protect("<s>" + renderInline(parts[1]) + "</s>")
+		return protect("<s>" + renderInlineWithPH(parts[1], ph) + "</s>")
 	})
 	value = linkPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := linkPattern.FindStringSubmatch(match)
 		if !safeLink(parts[2]) {
 			return match
 		}
-		return protect("<a href=\"" + html.EscapeString(parts[2]) + "\">" + renderInline(parts[1]) + "</a>")
+		return protect("<a href=\"" + html.EscapeString(parts[2]) + "\">" + renderInlineWithPH(parts[1], ph) + "</a>")
 	})
 	value = boldPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := boldPattern.FindStringSubmatch(match)
@@ -209,7 +230,7 @@ func renderInline(input string) string {
 		if text == "" {
 			text = parts[2]
 		}
-		return protect("<b>" + renderInline(text) + "</b>")
+		return protect("<b>" + renderInlineWithPH(text, ph) + "</b>")
 	})
 	value = italicPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := italicPattern.FindStringSubmatch(match)
@@ -221,7 +242,7 @@ func renderInline(input string) string {
 		if prefix == "" {
 			prefix = parts[3]
 		}
-		return protect(prefix + "<i>" + renderInline(text) + "</i>")
+		return protect(prefix + "<i>" + renderInlineWithPH(text, ph) + "</i>")
 	})
 	value = escapeHTML(value)
 	// Walk the escaped value rune-by-rune and substitute PUA-char
@@ -232,8 +253,8 @@ func renderInline(input string) string {
 	for _, r := range value {
 		if r >= placeholderBase && r < placeholderBase+0x1000 {
 			idx := int(r - placeholderBase)
-			if idx < len(placeholders) {
-				sb.WriteString(placeholders[idx])
+			if idx < len(*ph) {
+				sb.WriteString((*ph)[idx])
 				continue
 			}
 		}

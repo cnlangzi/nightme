@@ -465,6 +465,102 @@ func min(a, b int) int {
 // --- Commit B regression tests (P-8 placeholder leak fix + new
 //     formatting features). ---
 
+// TestRenderMarkdown_BoldWithInlineCode is the regression test for
+// the PUA-placeholder slice being local to each renderInline frame.
+//
+// Before this fix, renderInline declared `placeholders := make([]string, 0)`
+// inside its own body, and every recursive call (bold/italic/strike/
+// link/spoiler nested via `renderInline(text)`) got its own FRESH
+// slice. The outer scope's codeSpan pass had already replaced any
+// backticks inside `text` with PUA runes (e.g. \xE000 representing
+// `<code>foo</code>`); the recursive call's own placeholder table was
+// empty, so its final PUA-char walk fell through and emitted the
+// raw PUA rune as a Unicode character. Net effect: every inline-
+// code span that lived inside any other markdown construct was
+// silently dropped — Telegram rendered a stray Private Use Area
+// glyph (or a blank space depending on font) instead of `<code>…</code>`.
+//
+// The 2026-08-26 Telegram bug report was triggered by a long reply
+// that mixed `**bold**` and ``` `code` ``` heavily (e.g. `**`Dir`
+// 现在 = `filepath.Dir`**`); the inline-code spans inside `**…**`
+// vanished and the user saw spaces / tofu where bold text should
+// have been monospace. This test pins the contract that inline-code
+// inside bold (and the other recursive constructs) survives intact.
+//
+// The fix: renderInline now threads a shared `*[]string` placeholder
+// table down through recursion. Children resolve outer-scope PUA
+// runes via the same slice the parent used.
+//
+// See splitInlineWithPH for the recursive core.
+func TestRenderMarkdown_BoldWithInlineCode(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"single_code_in_bold",
+			"**`Dir`**",
+			"<b><code>Dir</code></b>",
+		},
+		{
+			"code_between_text_in_bold",
+			"**a `b` c**",
+			"<b>a <code>b</code> c</b>",
+		},
+		{
+			"two_codes_in_bold",
+			"**a `b` c `d` e**",
+			"<b>a <code>b</code> c <code>d</code> e</b>",
+		},
+		{
+			"code_at_outer_then_bold",
+			"`a` and `b` inside **bold**",
+			"<code>a</code> and <code>b</code> inside <b>bold</b>",
+		},
+		{
+			"code_in_italic",
+			"*`x`*",
+			"<i><code>x</code></i>",
+		},
+		{
+			"code_in_strike",
+			"~~`x`~~",
+			"<s><code>x</code></s>",
+		},
+		{
+			"code_in_link_label",
+			"[`code`](https://example.com)",
+			`<a href="https://example.com"><code>code</code></a>`,
+		},
+		{
+			"bold_inside_italic_with_code",
+			"*em `code` more*",
+			"<i>em <code>code</code> more</i>",
+		},
+	}
+	for _, tc := range cases {
+		got, err := RenderMarkdown(tc.in)
+		if err != nil {
+			t.Errorf("%s: RenderMarkdown error: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: input=%q\n  got:  %s\n  want: %s", tc.name, tc.in, got, tc.want)
+		}
+		// Belt-and-suspenders: no PUA chars / no PROTECTED leak.
+		for _, r := range got {
+			if r >= 0xE000 && r < 0xF000 {
+				t.Errorf("%s: stray PUA rune %U in output %q", tc.name, r, got)
+				break
+			}
+		}
+		if strings.Contains(got, "PROTECTED") {
+			t.Errorf("%s: leaked PROTECTED sentinel in output %q", tc.name, got)
+		}
+	}
+}
+
 // TestRenderInline_NoPlaceholderLeak is the regression test for the
 // 2026-08-25 incident where Telegram chat displayed `**PROTECTED0**`
 // — the renderInline NUL-byte sentinel was getting stripped by

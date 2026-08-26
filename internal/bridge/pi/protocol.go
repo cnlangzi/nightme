@@ -84,10 +84,14 @@ type promptParams struct {
 	Images  []imageAttachment `json:"images,omitempty"`
 }
 
-// imageAttachment is the per-image record inside promptParams. Only
-// data (raw base64) and mimeType are populated; pi infers the
-// image-content discriminator from the surrounding images[] array.
+// imageAttachment is the per-image record inside promptParams. The
+// Type field is always set to "image" — pi 0.84.x accepts the entry
+// with or without the type tag (it can infer from images[] array
+// membership), but the explicit tag matches the canonical docs/rpc.md
+// shape and protects against future pi versions tightening the
+// schema.
 type imageAttachment struct {
+	Type     string `json:"type,omitempty"`
 	Data     string `json:"data"`
 	MimeType string `json:"mimeType"`
 }

@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,19 +112,21 @@ func TestStripDataURLPrefix_CommaInMime(t *testing.T) {
 }
 
 // TestEncodeImage_RoundTrip locks encodeImage's contract (read file,
-// data-URL-wrap) so stripDataURLPrefix's partner function doesn't
-// silently drift.
+// validate mime + magic bytes, data-URL-wrap) so stripDataURLPrefix's
+// partner function doesn't silently drift. The fixture starts with
+// the JPEG SOI + APP0 marker so matchesMagicBytes accepts it.
 func TestEncodeImage_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.jpg")
-	if err := os.WriteFile(path, []byte{1, 2, 3, 4, 5}, 0o600); err != nil {
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10}
+	if err := os.WriteFile(path, jpeg, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := encodeImage(path, "image/jpeg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte{1, 2, 3, 4, 5})
+	want := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg)
 	if got != want {
 		t.Errorf("encodeImage = %q, want %q", got, want)
 	}
@@ -373,5 +376,286 @@ func TestTranslateMessageEnd_NoErrorMessage_HappyPath(t *testing.T) {
 	}
 	if result.Result.Subtype != "end_turn" {
 		t.Errorf("Subtype = %q, want \"end_turn\"", result.Result.Subtype)
+	}
+}
+
+// ─── Round 2: encodeImage validation + auto-recovery hook ─────────────
+
+// TestEncodeImage_RejectsUnsupportedMime locks the mime whitelist
+// at the bridge boundary. Telegram hard-codes "image/jpeg" for
+// every Photo (telegram/adapter.go:677) and would otherwise ship a
+// declared "image/jpeg" / actual PNG payload to pi — which the
+// provider then rejects with an ambiguous error. The bridge rejects
+// it pre-send with a precise error.
+func TestEncodeImage_RejectsUnsupportedMime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.tiff")
+	if err := os.WriteFile(path, []byte{0x49, 0x49, 0x2A, 0x00}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := encodeImage(path, "image/tiff")
+	if !errors.Is(err, ErrInvalidImageMime) {
+		t.Errorf("err = %v, want ErrInvalidImageMime", err)
+	}
+}
+
+// TestEncodeImage_RejectsEmptyMime documents that an empty
+// ContentImage.MediaType (which the channel layer might emit for an
+// attachment with no detected mime) is refused with a clear error
+// instead of the previous silent "data:;base64,<payload>" data
+// URL — which pi accepted on the wire but the upstream provider
+// then rejected.
+func TestEncodeImage_RejectsEmptyMime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.bin")
+	if err := os.WriteFile(path, []byte{0x00, 0x01, 0x02, 0x03}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := encodeImage(path, "")
+	if !errors.Is(err, ErrInvalidImageMime) {
+		t.Errorf("err = %v, want ErrInvalidImageMime", err)
+	}
+}
+
+// TestEncodeImage_RejectsMismatchedMagicBytes covers the case where
+// the channel layer hands the bridge a ContentBlock claiming
+// "image/jpeg" but the actual file on disk is something else
+// (e.g. Telegram says image/jpeg for every Photo regardless of
+// content). The bridge must reject pre-send rather than let the
+// upstream provider reject with an ambiguous error.
+func TestEncodeImage_RejectsMismatchedMagicBytes(t *testing.T) {
+	dir := t.TempDir()
+	// PNG magic bytes declared as image/jpeg.
+	path := filepath.Join(dir, "lie.jpg")
+	pngHeader := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	if err := os.WriteFile(path, pngHeader, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := encodeImage(path, "image/jpeg")
+	if !errors.Is(err, ErrInvalidImageMime) {
+		t.Errorf("err = %v, want ErrInvalidImageMime (mime declared as jpeg but file is PNG)", err)
+	}
+	if !strings.Contains(err.Error(), "image/jpeg") {
+		t.Errorf("err = %q, want it to mention the rejected mime", err.Error())
+	}
+}
+
+// TestEncodeImage_ErrImageTooLarge_HasContext locks the size-context
+// requirement on ErrImageTooLarge — codex already does this; pi
+// shipped just "pi: image too large" which gave the user no idea
+// how much over the cap they were. Now it reads e.g.
+// "pi: image too large: 12582912 > 10485760 bytes".
+func TestEncodeImage_ErrImageTooLarge_HasContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.jpg")
+	jpeg := make([]byte, maxImageBytes+1)
+	jpeg[0], jpeg[1], jpeg[2] = 0xFF, 0xD8, 0xFF // valid JPEG magic
+	if err := os.WriteFile(path, jpeg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := encodeImage(path, "image/jpeg")
+	if !errors.Is(err, ErrImageTooLarge) {
+		t.Fatalf("err = %v, want ErrImageTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), "10485760") {
+		t.Errorf("err = %q, want it to include the cap (10485760) so the user sees how much over", err.Error())
+	}
+}
+
+// TestEncodeImage_AcceptsAllSupportedMimes is the happy-path smoke
+// for the whitelist + magic-byte validation: each supported mime
+// round-trips cleanly with a matching header.
+func TestEncodeImage_AcceptsAllSupportedMimes(t *testing.T) {
+	cases := []struct {
+		mime    string
+		header  []byte
+	}{
+		{"image/jpeg", []byte{0xFF, 0xD8, 0xFF, 0xE0}},
+		{"image/png", []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}},
+		{"image/gif", []byte{0x47, 0x49, 0x46, 0x38, 0x39, 0x61}}, // GIF89a
+		{"image/webp", append([]byte{0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00}, []byte{0x57, 0x45, 0x42, 0x50}...)},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		ext := map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}[tc.mime]
+		path := filepath.Join(dir, "img"+ext)
+		if err := os.WriteFile(path, tc.header, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := encodeImage(path, tc.mime)
+		if err != nil {
+			t.Errorf("encodeImage(%s) err = %v, want nil", tc.mime, err)
+			continue
+		}
+		if !strings.HasPrefix(out, "data:"+tc.mime+";base64,") {
+			t.Errorf("encodeImage(%s) = %q, want %q prefix", tc.mime, out, "data:"+tc.mime+";base64,")
+		}
+	}
+}
+
+// TestMatchesMagicBytes is the direct unit test for the magic-byte
+// table — each accepted and rejected pair is asserted explicitly so
+// future contributors don't subtly weaken the validation.
+func TestMatchesMagicBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		mime string
+		data []byte
+		want bool
+	}{
+		{"jpeg-ok", "image/jpeg", []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00}, true},
+		{"jpeg-bad", "image/jpeg", []byte{0x89, 0x50, 0x4E, 0x47}, false},
+		{"jpeg-truncated", "image/jpeg", []byte{0xFF, 0xD8}, false},
+		{"png-ok", "image/png", []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, true},
+		{"png-truncated", "image/png", []byte{0x89, 0x50, 0x4E, 0x47, 0x0D}, false},
+		{"gif87-ok", "image/gif", []byte{0x47, 0x49, 0x46, 0x38, 0x37, 0x61}, true},
+		{"gif89-ok", "image/gif", []byte{0x47, 0x49, 0x46, 0x38, 0x39, 0x61}, true},
+		{"gif-bad", "image/gif", []byte{0x47, 0x49, 0x46, 0x38, 0x36, 0x61}, false}, // GIF86a, not supported
+		{"webp-ok", "image/webp", append([]byte{0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00}, []byte{0x57, 0x45, 0x42, 0x50}...), true},
+		{"webp-truncated", "image/webp", []byte{0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00}, false},
+		{"unknown-mime", "image/heic", []byte{0x00, 0x00, 0x00, 0x18}, false},
+	}
+	for _, tc := range cases {
+		got := matchesMagicBytes(tc.data, tc.mime)
+		if got != tc.want {
+			t.Errorf("%s: matchesMagicBytes(%x, %q) = %v, want %v", tc.name, tc.data, tc.mime, got, tc.want)
+		}
+	}
+}
+
+// TestSendBlocksImage_WireShape_HasTypeTag locks the
+// docs/bridge/pi.md §6 contract that each prompt.images[] entry
+// carries {"type":"image", ...}. pi 0.84.x accepts without it
+// (inferred from images[] membership) but the explicit tag is the
+// canonical shape and protects against future schema tightening.
+func TestSendBlocksImage_WireShape_HasTypeTag(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tiny.jpg")
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xE0}
+	if err := os.WriteFile(path, jpeg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cw := &captureWire{}
+	d := newFakeDriver(t, cw)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- d.SendBlocks(context.Background(), []agent.ContentBlock{
+			{Type: agent.ContentImage, Path: path, MediaType: "image/jpeg"},
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(cw.Lines()) >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	lines := cw.Lines()
+	if len(lines) < 1 {
+		t.Fatal("no wire line written")
+	}
+	raw := lines[len(lines)-1]
+	var frame struct {
+		ID     string `json:"id"`
+		Images []struct {
+			Type     string `json:"type"`
+			Data     string `json:"data"`
+			MimeType string `json:"mimeType"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(frame.Images) != 1 {
+		t.Fatalf("images len = %d, want 1", len(frame.Images))
+	}
+	if frame.Images[0].Type != "image" {
+		t.Errorf("images[0].type = %q, want \"image\"", frame.Images[0].Type)
+	}
+
+	driveResponse(d, frame.ID, true, "")
+	<-done
+}
+
+// TestTranslate_PoisonTriggersOnPoisonedCallback is the auto-recovery
+// hook regression: when finishTurnLocked sees stopReason="error" +
+// errorMessage, it MUST invoke the onPoisoned callback exactly once.
+// The driver wires this to d.New() so the session is rotated; without
+// the callback, the "session broken forever" symptom of #290 stays.
+func TestTranslate_PoisonTriggersOnPoisonedCallback(t *testing.T) {
+	tr := newTestTranslator()
+	var fired int
+	tr.SetOnSessionPoisoned(func() { fired++ })
+
+	mustTranslate(t, tr, `{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}`)
+	mustTranslate(t, tr, `{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0}}`)
+	mustTranslate(t, tr, `{"type":"message_end","message":{"role":"assistant",`+
+		`"content":[],"stopReason":"error",`+
+		`"errorMessage":"400: invalid image base64 content"}}`)
+	mustTranslate(t, tr, `{"type":"agent_settled"}`)
+
+	if fired != 1 {
+		t.Errorf("onPoisoned fired %d times, want exactly 1", fired)
+	}
+}
+
+// TestTranslate_PoisonNotFiredOnHappyPath asserts the symmetric
+// guard: a settled turn with no errorMessage does NOT invoke the
+// auto-recovery hook. Without this, every successful turn would
+// trigger a new_session handshake, which would be catastrophic.
+func TestTranslate_PoisonNotFiredOnHappyPath(t *testing.T) {
+	tr := newTestTranslator()
+	var fired int
+	tr.SetOnSessionPoisoned(func() { fired++ })
+
+	for _, l := range []string{
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}`,
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hi"}}`,
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0}}`,
+		`{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"stopReason":"end_turn"}}`,
+		`{"type":"agent_settled"}`,
+	} {
+		mustTranslate(t, tr, l)
+	}
+	if fired != 0 {
+		t.Errorf("onPoisoned fired %d times on happy path, want 0", fired)
+	}
+}
+
+// TestTranslate_PoisonErrIsErrSessionPoisoned locks the sentinel
+// contract: errors.Is on the surfaced EventAgentResult.Err matches
+// the exported ErrSessionPoisoned, so callers (chatsession, channel
+// adapters, /gtw) can branch on it without string-matching.
+func TestTranslate_PoisonErrIsErrSessionPoisoned(t *testing.T) {
+	tr := newTestTranslator()
+	tr.SetOnSessionPoisoned(func() {})
+
+	mustTranslate(t, tr, `{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}`)
+	mustTranslate(t, tr, `{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0}}`)
+	mustTranslate(t, tr, `{"type":"message_end","message":{"role":"assistant",`+
+		`"content":[],"stopReason":"error",`+
+		`"errorMessage":"400: {\"message\":\"invalid image base64 content\"}"}}`)
+	events := mustTranslate(t, tr, `{"type":"agent_settled"}`)
+
+	var result *agent.AgentEvent
+	for i := range events {
+		if events[i].Kind == agent.EventAgentResult {
+			ev := events[i]
+			result = &ev
+			break
+		}
+	}
+	if result == nil || result.Err == nil {
+		t.Fatal("expected EventAgentResult with non-nil Err")
+	}
+	if !errors.Is(result.Err, ErrSessionPoisoned) {
+		t.Errorf("Err = %v, want errors.Is(_, ErrSessionPoisoned) == true", result.Err)
+	}
+	// And the original provider text must still be reachable so
+	// the user can read the rejection reason.
+	if !strings.Contains(result.Err.Error(), "invalid image base64 content") {
+		t.Errorf("Err = %q, want it to contain the provider's rejection text", result.Err.Error())
 	}
 }

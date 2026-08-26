@@ -160,10 +160,32 @@ const maxImageBytes = 10 * 1024 * 1024
 const eventsBufferSize = 40960
 
 // ErrImageTooLarge is returned by SendBlocks when a single
-// ContentImage exceeds maxImageBytes after base64 encoding. The
-// caller should drop the offending block (or surface a clearer
-// user-facing error); the bridge does not retry.
+// ContentImage exceeds maxImageBytes after base64 encoding. Wrapped
+// with size context (e.g. "image too large: 12582912 > 10485760") so
+// the user sees how much over the cap they were. The caller should
+// drop the offending block (or surface a clearer user-facing error);
+// the bridge does not retry.
 var ErrImageTooLarge = errors.New("pi: image too large")
+
+// ErrInvalidImageMime is returned by SendBlocks when the
+// ContentBlock.MediaType is not in the whitelist the bridge
+// validates against (png/jpeg/gif/webp), is empty, or doesn't match
+// the actual file magic bytes. Bridges that trust the channel
+// layer's mime blindly tend to ship wrong / unsupported formats to
+// the upstream provider, which rejects with opaque error text —
+// catching it here surfaces a precise error to the user.
+var ErrInvalidImageMime = errors.New("pi: unsupported or invalid image mime type")
+
+// ErrSessionPoisoned is surfaced (wrapped on EventAgentResult.Err)
+// when pi's session file is left in a state where subsequent turns
+// will fail. The typical trigger is the upstream provider rejecting
+// a turn with stopReason="error" + a non-empty errorMessage — pi
+// persists the bad message to its session file, and any next
+// prompt re-sends it, hitting the same rejection. The bridge
+// auto-recovers by scheduling a new_session + get_state handshake
+// so the next user message lands on a fresh context. External
+// callers can `errors.Is(err, ErrSessionPoisoned)` to react.
+var ErrSessionPoisoned = errors.New("pi: session poisoned by upstream error")
 
 // ErrTurnClosed is returned by SendBlocks when the previous prompt
 // was rejected by Pi (success:false on the response envelope).
@@ -333,6 +355,27 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		closed:     make(chan struct{}),
 		exitDone:   make(chan struct{}),
 	}
+	// Auto-recovery hook: when the translator sees a turn end with
+	// stopReason="error" + a non-empty errorMessage, schedule a
+	// new_session + get_state handshake in the background so the
+	// next user prompt lands on a fresh pi context. Without this,
+	// pi's session file holds the bad message and re-sends it on
+	// every subsequent turn (the "session broken forever" symptom
+	// of issue #290). The closure captures `live` directly — there
+	// is no driver-method indirection here because New() may be
+	// called from any goroutine and we don't want to dereference
+	// a partially-initialised handle. See ErrSessionPoisoned for
+	// the sentinel callers can match on the surface error.
+	live.translator.SetOnSessionPoisoned(func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout*2)
+			defer cancel()
+			if err := live.New(ctx); err != nil {
+				piLog("auto-recover after poison failed; user must /new manually",
+					"err", err.Error())
+			}
+		}()
+	})
 
 	// Read pump and stderr drainer start in parallel with the
 	// handshake so a slow get_state does not stall read-back
@@ -533,6 +576,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 				return err
 			}
 			images = append(images, imageAttachment{
+				Type:     "image",
 				Data:     stripDataURLPrefix(dataURL),
 				MimeType: b.MediaType,
 			})
@@ -1185,19 +1229,92 @@ func detectBranch(workspace string) string {
 	return s
 }
 
-// encodeImage reads an image file and returns a "data:<mime>;base64,
-// <payload>" URL. The bridge strips the prefix and emits only the
-// payload in the prompt.images[] array.
+// encodeImage reads an image file, validates that the declared
+// mime type is one pi's upstream provider accepts AND matches the
+// actual file magic bytes, then returns a "data:<mime>;base64,
+// <payload>" URL. SendBlocks strips the prefix before writing it on
+// the wire.
+//
+// Validation order is strict so each failure mode carries a distinct
+// error to the caller:
+//
+//  1. empty mime → ErrInvalidImageMime (no chance of a useful prompt)
+//  2. mime not in {png, jpeg, gif, webp} → ErrInvalidImageMime with
+//     the rejected mime (tells the user / channel what to fix)
+//  3. file read failure → wrapped error
+//  4. file size > maxImageBytes → ErrImageTooLarge wrapped with the
+//     actual vs cap (10 MiB pre-encode, ≈13.3 MiB post-encode)
+//  5. mime vs file magic mismatch → ErrInvalidImageMime with the
+//     mismatch (catches the Telegram adapter's hard-coded
+//     "image/jpeg" assumption when a user sends PNG / WEBP)
+//
+// Without this validation, a wrong mime / unsupported format
+// propagates to pi's provider as a malformed prompt.images[] entry
+// and gets an opaque "invalid image base64 content" rejection (issue
+// #290 repro path).
 func encodeImage(path, mimeType string) (string, error) {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if mimeType == "" {
+		return "", fmt.Errorf("%w: empty mime type", ErrInvalidImageMime)
+	}
+	switch mimeType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+	default:
+		return "", fmt.Errorf("%w: %q (only image/png, image/jpeg, image/gif, image/webp are supported)",
+			ErrInvalidImageMime, mimeType)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	if len(data) > maxImageBytes {
-		return "", ErrImageTooLarge
+		return "", fmt.Errorf("%w: %d > %d bytes", ErrImageTooLarge, len(data), maxImageBytes)
+	}
+	if !matchesMagicBytes(data, mimeType) {
+		return "", fmt.Errorf("%w: declared %q but file magic does not match", ErrInvalidImageMime, mimeType)
 	}
 	encoded := base64.StdEncoding.EncodeToString(data)
 	return "data:" + mimeType + ";base64," + encoded, nil
+}
+
+// matchesMagicBytes reports whether the first few bytes of data
+// match the magic-number prefix of the given mime type. False
+// positives are unlikely (magic prefixes are tightly defined), but
+// the function is conservative — it returns false on truncated
+// payloads rather than guessing. Each mime has its own minimum
+// byte length (JPEG needs 3, PNG/GIF 8, WEBP 12); we don't enforce
+// a uniform floor so tiny test fixtures still pass.
+func matchesMagicBytes(data []byte, mime string) bool {
+	switch mime {
+	case "image/jpeg":
+		if len(data) < 3 {
+			return false
+		}
+		return data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF
+	case "image/png":
+		if len(data) < 8 {
+			return false
+		}
+		// 89 50 4E 47 0D 0A 1A 0A
+		return data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 &&
+			data[4] == 0x0D && data[5] == 0x0A && data[6] == 0x1A && data[7] == 0x0A
+	case "image/gif":
+		if len(data) < 6 {
+			return false
+		}
+		// "GIF87a" or "GIF89a"
+		return data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 &&
+			data[3] == 0x38 && (data[4] == 0x37 || data[4] == 0x39) && data[5] == 0x61
+	case "image/webp":
+		if len(data) < 12 {
+			return false
+		}
+		// "RIFF....WEBP" — RIFF header + 4-byte size + WEBP magic.
+		return data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46 &&
+			data[8] == 0x57 && data[9] == 0x45 && data[10] == 0x42 && data[11] == 0x50
+	}
+	return false
 }
 
 // stripDataURLPrefix removes the "data:<mime>;base64," prefix from a

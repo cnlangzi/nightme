@@ -32,7 +32,7 @@ package pi
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -275,7 +275,21 @@ type translator struct {
 	// malformed-frame errors are handled in readPump before
 	// translate() is reached — none of them are affected.
 	suppressing bool
+
+	// onPoisoned fires when finishTurnLocked detects an upstream
+	// stopReason="error" turn (see ErrSessionPoisoned doc). The
+	// driver wires this to a goroutine that calls New(), so the
+	// session file is rotated and the next user message lands on a
+	// fresh pi context — without this, pi keeps re-sending the bad
+	// message and the user sees "broken forever" (issue #290).
+	// nil disables the auto-recovery (tests, print-mode).
+	onPoisoned func()
 }
+
+// SetOnSessionPoisoned wires the auto-recovery callback. Called once
+// at construction by the driver; tests leave it nil so the
+// translator doesn't try to call back into test scaffolding.
+func (t *translator) SetOnSessionPoisoned(fn func()) { t.onPoisoned = fn }
 
 func newTranslator(agentName, workspace, branch string) *translator {
 	return &translator{
@@ -960,7 +974,17 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 	// `invalid image base64 content`; the user had no way to see the
 	// reason.
 	if t.turn.lastError != "" {
-		ev.Err = errors.New(t.turn.lastError)
+		ev.Err = fmt.Errorf("%w: %s", ErrSessionPoisoned, t.turn.lastError)
+		// Fire the auto-recovery hook (if wired). We invoke it here
+		// in finishTurnLocked, NOT in readPump, because we want the
+		// recovery to happen after the user-visible EventAgentResult
+		// is enqueued — that way the error reaches the channel
+		// before the new-session EventAgentReady, preserving the
+		// causal ordering. The driver is responsible for spawning
+		// the goroutine; we just signal.
+		if t.onPoisoned != nil {
+			t.onPoisoned()
+		}
 	}
 	return []agent.AgentEvent{ev}
 }

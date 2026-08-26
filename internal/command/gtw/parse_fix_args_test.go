@@ -174,3 +174,74 @@ func TestParseFixArgs_MissingArgument(t *testing.T) {
 		})
 	}
 }
+
+// TestParseFixArgs_NameValueFlagShaped pins git CLI
+// behaviour: a value-taking option consumes the next token
+// as its value even if that token starts with "-". This is
+// what makes `--name -foo` (a branch literally named "-foo")
+// work, and what makes `--name foo bar` (multi-token value)
+// NOT silently work — only the immediately-following token is
+// the value, and the next token starts a new arg.
+func TestParseFixArgs_NameValueFlagShaped(t *testing.T) {
+	// `--name -foo` → local mode, branch literally named "-foo"
+	got, err := parseFixArgs([]string{"--name", "-foo"})
+	if err != nil {
+		t.Fatalf("parseFixArgs unexpected error: %v", err)
+	}
+	if got.Mode != ModeLocal || got.RawArg != "-foo" {
+		t.Errorf("--name -foo = %+v, want ModeLocal RawArg=-foo", got)
+	}
+}
+
+// TestParseFixArgs_NameMissingValue pins the
+// required-value-missing error: `--name` with no following
+// token (or with the following token already consumed as a
+// flag's value) is a hard error.
+func TestParseFixArgs_NameMissingValue(t *testing.T) {
+	cases := [][]string{
+		{"--name"},               // no value at all
+		{"-n"},                   // no value at all (short form)
+		{"-y", "--name"},         // -y consumed, --name has no value
+	}
+	for _, in := range cases {
+		t.Run(strings.Join(in, " "), func(t *testing.T) {
+			_, err := parseFixArgs(in)
+			if err == nil {
+				t.Fatalf("parseFixArgs(%v) returned no error; want 'requires a value'", in)
+			}
+			if !strings.Contains(err.Error(), "requires a value") {
+				t.Errorf("error message lacks 'requires a value'; got %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestParseFixArgs_PositionalOrdering covers the
+// CLI-style ordering where flags can be interleaved with
+// positional args: `42 -y`, `-y 42`, `42 -y --name foo`,
+// `-y --name foo 42`. The flag-only / positional-only split
+// doesn't depend on order.
+func TestParseFixArgs_PositionalOrdering(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want fixArgs
+	}{
+		{"yes-id", []string{"-y", "42"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
+		{"id-yes", []string{"42", "-y"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
+		{"yes-id-yes", []string{"-y", "42", "-y"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
+		{"yes-name-foo", []string{"-y", "--name", "foo"}, fixArgs{Mode: ModeLocal, RawArg: "foo", Yes: true}},
+		{"name-foo-yes", []string{"--name", "foo", "-y"}, fixArgs{Mode: ModeLocal, RawArg: "foo", Yes: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseFixArgs(c.in)
+			if err != nil {
+				t.Fatalf("parseFixArgs(%v) error: %v", c.in, err)
+			}
+			if got != c.want {
+				t.Errorf("parseFixArgs(%v) = %+v, want %+v", c.in, got, c.want)
+			}
+		})
+	}
+}

@@ -425,33 +425,6 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 }
 
 // parseFixMode kept for callers that pre-stripped boolean
-// flags (kept for backward compat with existing tests in
-// commands_test.go). New code should call parseFixArgs
-// directly — parseFixMode doesn't enforce CLI semantics
-// (unknown flags, arity) the way parseFixArgs does.
-func parseFixMode(argv []string) (Mode, string, error) {
-	if len(argv) < 1 {
-		return "", "", fmt.Errorf("missing argument")
-	}
-	switch argv[0] {
-	case "--name", "-n":
-		if len(argv) < 2 || strings.TrimSpace(argv[1]) == "" {
-			return "", "", fmt.Errorf("--name requires a branch name argument")
-		}
-		if len(argv) > 2 {
-			return "", "", fmt.Errorf("--name takes exactly one argument; got %d: %v",
-				len(argv)-1, argv[1:])
-		}
-		return ModeLocal, strings.TrimSpace(argv[1]), nil
-	default:
-		if len(argv) > 1 {
-			return "", "", fmt.Errorf("issue-id mode takes exactly one argument; got %d: %v",
-				len(argv), argv)
-		}
-		return ModeRemote, strings.TrimSpace(argv[0]), nil
-	}
-}
-
 // fixArgs bundles the parsed argv tail of `/gtw fix <...>`.
 // Splitting it into a struct (rather than separate return
 // values) keeps the parser functions readable as we add more
@@ -480,35 +453,6 @@ type fixArgs struct {
 //
 //	--force / -f   removed in F-XX
 //
-// Each entry's ValueMode tells the lexer whether the next
-// token (if any) belongs to this flag's value (consumed) or
-// is the start of positional arguments.
-type fixFlagSpec struct {
-	ValueMode flagValueMode
-}
-
-type flagValueMode int
-
-const (
-	// Boolean: flag stands alone; the next token (if it
-	// doesn't start with "-" / "--") is a positional arg,
-	// not the flag's value.
-	flagValueNone flagValueMode = iota
-	// Required-value: the next token is consumed as the
-	// flag's value, regardless of whether it starts with "-".
-	flagValueRequired
-)
-
-var fixFlagSpecs = map[string]fixFlagSpec{
-	"--yes":  {ValueMode: flagValueNone},
-	"-y":     {ValueMode: flagValueNone},
-	"--name": {ValueMode: flagValueRequired},
-	"-n":     {ValueMode: flagValueRequired},
-	// --force / -f intentionally NOT here. They were removed
-	// in F-XX; the lexer routes them through the unknown-flag
-	// branch with a removal-specific message.
-}
-
 // parseFixArgs implements the standard CLI lexer for /gtw fix:
 //
 //	cmd -options args
@@ -516,7 +460,7 @@ var fixFlagSpecs = map[string]fixFlagSpec{
 // Tokens are split into two disjoint slices:
 //
 //   - options: every "-xxx" or "--xxx" flag (boolean or
-//     value-taking) recognised by fixFlagSpecs. Unknown
+//     value-taking) recognised by the inline switch below. Unknown
 //     flags → error.
 //   - args: positional tokens (no "-" prefix). One per
 //     value-taking option (consumed as the option's value)
@@ -544,7 +488,19 @@ var fixFlagSpecs = map[string]fixFlagSpec{
 // All other shapes (zero args, too many args, mixed mode
 // markers, unknown options) are hard-rejected.
 func parseFixArgs(argv []string) (fixArgs, error) {
-	options := make(map[string]bool)
+	// Recognised flags. Inline because /gtw fix has exactly
+	// four flags today; a map + struct + enum was premature
+	// parameterisation for that surface area.
+	const (
+		boolYes     = "--yes"
+		shortYes    = "-y"
+		boolName    = "--name"
+		shortName   = "-n"
+		removedForce = "--force"
+		removedForceShort = "-f"
+	)
+
+	yes, usedName := false, false
 	args := make([]string, 0, len(argv))
 
 	i := 0
@@ -564,36 +520,12 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 		}
 
 		// Look up the flag.
-		spec, known := fixFlagSpecs[tok]
-		if !known {
-			// Unknown flag-shaped token. Could be:
-			//   a) a real typo (--dry-run, --foo, etc.)
-			//   b) a known-but-removed flag (--force / -f).
-			// For (b), we surface a removal-specific message
-			// pointing at the migration path; for (a), a
-			// generic "unknown flag" listing the recognised
-			// set. Both are errors — no silent no-op.
-			if tok == "--force" || tok == "-f" {
-				return fixArgs{}, fmt.Errorf(
-					"unknown flag %q (the /gtw fix --force / -f flag was removed in F-XX; "+
-						"see docs/feat/F-gtw-fix.md). For a stale worktree path, "+
-						"run `git worktree remove --force <path>` or `/gtw close` manually",
-					tok)
-			}
-			return fixArgs{}, fmt.Errorf(
-				"unknown flag %q (recognised flags: --yes/-y; mode: --name/-n <branch>; "+
-					"see docs/feat/F-gtw-fix.md)",
-				tok)
-		}
-
-		// Recognised flag — record + (if value-taking) consume
-		// the next token.
-		options[tok] = true
-		switch spec.ValueMode {
-		case flagValueNone:
+		switch tok {
+		case boolYes, shortYes:
+			yes = true
 			i++
-			continue
-		case flagValueRequired:
+		case boolName, shortName:
+			usedName = true
 			i++
 			if i >= len(argv) {
 				return fixArgs{}, fmt.Errorf(
@@ -605,13 +537,28 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 			// re-classify it as a flag.
 			args = append(args, argv[i])
 			i++
-			continue
+		case removedForce, removedForceShort:
+			// F-XX: --force / -f are explicitly rejected
+			// rather than silently dropped. Without this
+			// gate, "/gtw fix 42 --force" would parse as a
+			// legitimate ModeRemote fix with --force treated
+			// as a no-op, leaving users who relied on the
+			// old flag in an inconsistent state.
+			return fixArgs{}, fmt.Errorf(
+				"unknown flag %q (the /gtw fix --force / -f flag was removed in F-XX; "+
+					"see docs/feat/F-gtw-fix.md). For a stale worktree path, "+
+					"run `git worktree remove --force <path>` or `/gtw close` manually",
+				tok)
+		default:
+			// Unknown flag-shaped token. Could be a real typo
+			// (--dry-run, --foo, etc.); surface a generic
+			// "unknown flag" listing the recognised set.
+			return fixArgs{}, fmt.Errorf(
+				"unknown flag %q (recognised flags: --yes/-y; mode: --name/-n <branch>; "+
+					"see docs/feat/F-gtw-fix.md)",
+				tok)
 		}
 	}
-
-	// Translate recognised options into fixArgs.
-	yes := options["--yes"] || options["-y"]
-	usedName := options["--name"] || options["-n"]
 
 	// Decide Mode + RawArg from the arg list. Exactly two
 	// valid shapes (see doc comment above).
@@ -878,8 +825,7 @@ type pushArgs struct {
 // always operates on the current chat's worktree, like
 // /gtw close.
 // parsePushArgs implements the CLI lexer for /gtw push.
-// Recognised flags (registered in fixFlagSpecs-like local
-// schema below):
+// Recognised flags:
 //
 //	-a / --agent <name>   override one-shot agent (legacy;
 //	                      F-XX /gtw push no longer auto-commits
@@ -891,28 +837,11 @@ type pushArgs struct {
 // positional arg, so extra positional tokens are also
 // rejected.
 func parsePushArgs(argv []string) (pushArgs, error) {
-	out := pushArgs{}
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
-		switch a {
-		case "-a", "--agent":
-			if i+1 >= len(argv) {
-				return out, fmt.Errorf("missing value for %s", a)
-			}
-			out.Agent = argv[i+1]
-			i++
-		default:
-			if strings.HasPrefix(a, "-") && a != "-" {
-				return out, fmt.Errorf(
-					"unknown flag %q (recognised flags: -a/--agent)",
-					a)
-			}
-			// Positional token — /gtw push takes none.
-			return out, fmt.Errorf(
-				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
-		}
+	agent, err := parseAgentOnlyFlag(argv)
+	if err != nil {
+		return pushArgs{}, err
 	}
-	return out, nil
+	return pushArgs{Agent: agent}, nil
 }
 
 // commitArgs bundles the parsed argv tail of `/gtw commit
@@ -923,36 +852,52 @@ type commitArgs struct {
 	Agent string
 }
 
-// parseCommitArgs implements the CLI lexer for /gtw commit.
-// Recognised flags:
+// parseAgentOnlyFlag implements the shared CLI lexer for
+// /gtw commit / /gtw push / /gtw pr — three subcommands that
+// accept exactly one flag (`-a <name>` / `--agent <name>`)
+// and no positional arg.
 //
-//	-a / --agent <name>   override one-shot agent
+// Extracted as a helper because all three parsers were
+// byte-identical except for the surrounding struct type
+// (pushArgs / commitArgs / prArgs). Sharing the lexer keeps
+// the "unknown flag" / "too many positional" error wording
+// consistent across the surface (Issue #291 contract).
 //
-// Unknown tokens are hard-rejected with "unknown flag";
-// positional args are rejected too (/gtw commit takes none).
-// See parseFixArgs / parsePushArgs for the rationale.
-func parseCommitArgs(argv []string) (commitArgs, error) {
-	out := commitArgs{}
+// Returns the agent string (empty if `-a` not provided).
+func parseAgentOnlyFlag(argv []string) (string, error) {
+	agent := ""
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		switch a {
 		case "-a", "--agent":
 			if i+1 >= len(argv) {
-				return out, fmt.Errorf("missing value for %s", a)
+				return "", fmt.Errorf("missing value for %s", a)
 			}
-			out.Agent = argv[i+1]
-			i++
+			agent = argv[i+1]
+			i++ // consume value
 		default:
 			if strings.HasPrefix(a, "-") && a != "-" {
-				return out, fmt.Errorf(
+				return "", fmt.Errorf(
 					"unknown flag %q (recognised flags: -a/--agent)",
 					a)
 			}
-			return out, fmt.Errorf(
+			return "", fmt.Errorf(
 				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
 		}
 	}
-	return out, nil
+	return agent, nil
+}
+
+// parseCommitArgs implements the CLI lexer for /gtw commit.
+// See parseAgentOnlyFlag for the shared lexer core; this
+// wrapper just packs the agent string into the commitArgs
+// struct.
+func parseCommitArgs(argv []string) (commitArgs, error) {
+	agent, err := parseAgentOnlyFlag(argv)
+	if err != nil {
+		return commitArgs{}, err
+	}
+	return commitArgs{Agent: agent}, nil
 }
 
 // runPR handles `/gtw pr`. Reads the yml at the current CWD
@@ -1007,27 +952,11 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 // positional args are rejected too (/gtw pr takes none).
 // See parseFixArgs / parsePushArgs for the rationale.
 func parsePRArgs(argv []string) (prArgs, error) {
-	out := prArgs{}
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
-		switch a {
-		case "-a", "--agent":
-			if i+1 >= len(argv) {
-				return out, fmt.Errorf("missing value for %s", a)
-			}
-			out.Agent = argv[i+1]
-			i++
-		default:
-			if strings.HasPrefix(a, "-") && a != "-" {
-				return out, fmt.Errorf(
-					"unknown flag %q (recognised flags: -a/--agent)",
-					a)
-			}
-			return out, fmt.Errorf(
-				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
-		}
+	agent, err := parseAgentOnlyFlag(argv)
+	if err != nil {
+		return prArgs{}, err
 	}
-	return out, nil
+	return prArgs{Agent: agent}, nil
 }
 
 // --- shim adapters that let legacy RunFix see Manager state ---

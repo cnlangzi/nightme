@@ -57,9 +57,6 @@ func HandleDraftReaction(
 	switch draft.Kind {
 	case DraftFixWorktreeFail:
 		return executeWorktreeFailAction(ctx, m, deps, cs, ev, draft), nil
-	case DraftFixLabelTaken:
-		// Reserved for §5.3.2; not emitted by v1.
-		return false, nil
 	}
 	slog.Default().Warn("F-46 debug: HandleDraftReaction draft kind not matched",
 		"draft_kind", string(draft.Kind))

@@ -445,7 +445,7 @@ func runFixRemote(
 
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode, false /* reentry */)
+		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode)
 }
 
 // runFixLocal implements the F-XX local-mode flow:
@@ -500,7 +500,7 @@ func runFixLocal(
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("â git show-ref failed: %v", err)), nil
+			fmt.Sprintf("❌ git show-ref failed: %v", err)), nil
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
@@ -535,7 +535,7 @@ func runFixLocal(
 	// dispatches and renders its own success card); pass
 	// DispatchPlan as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan, false /* reentry */)
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan)
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
@@ -554,12 +554,6 @@ func runFixLocal(
 // ("github" / "gitlab"); empty for ModeLocal. repoRoot must be
 // absolute — callers in runFixRemote / runFixLocal get it from
 // RepoRoot(ctx, ...) which always returns an absolute path.
-//
-// reentry is true for the (currently-disabled) daemon-recovery
-// re-entry path; today runFixRemote / runFixLocal always pass
-// false. The parameter is kept so renderFixSuccessCard can
-// render a mode-neutral hint if a future flow reintroduces
-// re-entry semantics — see fix.go:223.
 func completeFixAndDispatch(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -571,7 +565,6 @@ func completeFixAndDispatch(
 	issue *Issue,
 	baseSHA string,
 	dispMode IssueDispatchMode,
-	reentry bool,
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetSelectedCwd(worktreePath); err != nil {
@@ -632,9 +625,10 @@ func completeFixAndDispatch(
 	// --- write on-disk snapshot (§14.4 step 6) -------------------
 	// Persist the immutable fix snapshot so /gtw close can rebuild
 	// state even after a daemon restart. State/UpdatedAt stay
-	// in-memory only. ErrGtwYmlExists is the daemon-recovery path
-	// (we just re-entered completeFixAndDispatch for a worktree
-	// that already has a yml) — silently skip. Any other error
+	// in-memory only. ErrGtwYmlExists is silently skipped
+	// (the on-disk snapshot already exists; re-running /gtw fix
+	// on the same worktree would re-write it, but we keep the
+	// old one to avoid clobbering any user edits). Any other error
 	// is warn-only: the worktree is the durable side effect and
 	// the user can manually finish or recover via /gtw close.
 	now := deps.Now()
@@ -680,7 +674,7 @@ func completeFixAndDispatch(
 	} else {
 		// ID mode. Callers (runFixRemote) guarantee issue is
 		// non-nil; a nil here would be a programming error.
-		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA, dispMode, reentry)
+		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA, dispMode)
 	}
 	result := reply(ctx, cs.Emitter(), chatID, messageID, card)
 

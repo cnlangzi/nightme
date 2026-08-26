@@ -22,26 +22,12 @@ type ReactionKind string
 const (
 	// ReactionConfirm: ✅ — accept the current draft, advance the flow.
 	ReactionConfirm ReactionKind = "✅"
-	// ReactionEdit: ✏️ — "let me change something". Reserved for
-	// future use; no current ActionLookup mapping.
+	// ReactionEdit: ✏️ — reserved; no current ActionLookup mapping.
+	// Reintroduce when a card that emits an "edit" reaction lands.
 	ReactionEdit ReactionKind = "✏️"
 	// ReactionCancel: ❌ — abort the current gtw step; rollback side
 	// effects where possible. (WorktreeFailChoice cancel button.)
 	ReactionCancel ReactionKind = "❌"
-	// ReactionNewV2 / ReactionJoin: previously the 🆕 / 🔗
-	// reactions for the §5.3.1 branch-exists decision card
-	// (create -v2 variant / join existing worktree). F-XX §3.1
-	// removed that card; branch collision is now a hard-fail
-	// reply and the user runs /gtw close to clean up. The
-	// ReactionKind values remain as generic emoji semantics
-	// (no ActionLookup mapping today; safe to keep for future
-	// re-use, e.g. a different "branch conflict" surface).
-	ReactionNewV2 ReactionKind = "🇛"
-	ReactionJoin  ReactionKind = "🔗"
-	// ReactionForce: 🤝 — reserved (was "force-take label" for
-	// the §5.3.2 label-taken card; F-XX did not implement that
-	// card either). No current ActionLookup mapping.
-	ReactionForce ReactionKind = "🤝"
 	// ReactionRetry: 🔄 — last step failed; re-run.
 	// (WorktreeFailChoice retry button.)
 	ReactionRetry ReactionKind = "🔄"
@@ -61,9 +47,10 @@ const (
 //	act:/gtw/cancel         → ReactionCancel  (WorktreeFailChoice)
 //	act:/gtw/worktree-retry → ReactionRetry   (WorktreeFailChoice)
 //
-// (F-XX §3.1 removed the BranchExistsChoice card and its
-// 🆕 / 🔗 buttons; branch-newv2 and branch-join are no longer
-// recognised — see feishu-rendering.md action map.)
+// (F-XX §3.1 removed the BranchExistsChoice card; the previous
+// 🆕 / 🔗 reactions and the branch-newv2 / branch-join action
+// tags are no longer recognised. See feishu-rendering.md
+// action map.)
 //
 // reaction_test.go pins this contract by walking every Choice in
 // rendered cards and asserting ActionLookup recognises it.

@@ -5340,14 +5340,14 @@ func (a *Adapter) handleActCardAction(
 }
 ```
 
-`gtwActionMap` 在 `internal/gtw/action_routing.go`：
+`gtwActionMap` 在 `internal/gtw/action_routing.go`（F-XX §3.1 之前的历史方案；F-gtw-fix 后只剩 worktree-retry / cancel）：
 
 ```go
 var gtwActionPrefixes = map[string]ReactionKind{
-    "act:/gtw/branch-newv2":   ReactionNewV2,
-    "act:/gtw/branch-join":    ReactionJoin,
     "act:/gtw/worktree-retry": ReactionRetry,
     "act:/gtw/cancel":         ReactionCancel, // any decision card
+    // act:/gtw/branch-newv2 / branch-join — removed in F-XX
+    // §3.1; the BranchExistsChoice card is gone.
 }
 
 func ActionLookup(action string) (ReactionKind, bool) {

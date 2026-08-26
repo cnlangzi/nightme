@@ -105,7 +105,7 @@ func TestManager_ListDraftsAndCount(t *testing.T) {
 	m := newTestManager()
 	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixWorktreeFail})
 	m.StoreDraft("c1", "m2", &Draft{Kind: DraftFixWorktreeFail})
-	m.StoreDraft("c2", "m1", &Draft{Kind: DraftFixLabelTaken})
+	m.StoreDraft("c2", "m1", &Draft{Kind: DraftFixWorktreeFail})
 
 	if got := m.DraftCount("c1"); got != 2 {
 		t.Errorf("c1 count = %d, want 2", got)

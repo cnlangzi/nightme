@@ -43,29 +43,19 @@ func buildSyncReply(ctx context.Context, repoRoot string, deps HandlerDeps) (str
 //
 // baseSHA is the HEAD sha of the upstream default branch
 // RefreshDefaultBranch pulled before WorktreeAdd. When empty
-// (e.g. daemon-recovery re-entry where we skipped the refresh)
 // the "based on" line is omitted.
 //
-// F-XX: the trailing "â³ ..." hint line differs by IssueDispatchMode:
+// F-XX: the trailing "↳ ..." hint line differs by IssueDispatchMode:
 //   - DispatchPlan     → "agent is analyzing — review the plan in
 //     chat, then tell the agent when to proceed"
 //   - DispatchExecute  → "agent is fixing now — follow progress in
 //     chat · `/gtw commit` + `/gtw push` when done"
 //
-// reentry=true (daemon-recovery re-entry where the worktree
-// already exists and we're NOT pushing a new prompt to the
-// agent) overrides the Plan/Execute hint with a mode-neutral
-// phrasing. The agent isn't being re-prompted, so we can't
-// honestly claim "agent is analyzing/fixing"; the user
-// resumes whatever the previous /gtw fix dispatch did.
-//
 // The header line adds "(direct execute)" suffix in Execute
-// mode (reentry keeps the plain header regardless of mode —
-// we don't know what the previous dispatch did). See
-// F-gtw-fix.md §5.
-func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, mode IssueDispatchMode, reentry bool) string {
+// mode. See F-gtw-fix.md §5.
+func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, mode IssueDispatchMode) string {
 	var b strings.Builder
-	if mode == DispatchExecute && !reentry {
+	if mode == DispatchExecute {
 		fmt.Fprintf(&b, "✅ Fix #%d ready (direct execute)\n", issue.ID)
 	} else {
 		fmt.Fprintf(&b, "✅ Fix #%d ready\n", issue.ID)
@@ -76,17 +66,10 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, 
 	if baseSHA != "" {
 		fmt.Fprintf(&b, "→ base:     %s\n", shortSHA(baseSHA))
 	}
-	switch {
-	case reentry:
-		// Mode-neutral: don't claim the agent is actively
-		// working. The user is recovering from a daemon
-		// restart (or otherwise re-entering on an existing
-		// worktree); the agent state is whatever the
-		// previous /gtw fix set up.
-		b.WriteString("↳ worktree resumed — continue in chat; `/gtw commit` + `/gtw push` when done; `/gtw close` to drop\n")
-	case mode == DispatchExecute:
+	switch mode {
+	case DispatchExecute:
 		b.WriteString("↳ agent is fixing now — follow progress in chat · `/gtw commit` + `/gtw push` when done\n")
-	case mode == DispatchPlan:
+	case DispatchPlan:
 		b.WriteString("↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed\n")
 	default:
 		// Defensive: any future IssueDispatchMode without an

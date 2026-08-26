@@ -192,7 +192,6 @@ type Context struct {
 type DraftKind string
 
 const (
-	DraftFixLabelTaken   DraftKind = "fix.label-taken"   // §5.3.2; reserved for v1.x, never emitted
 	DraftFixWorktreeFail DraftKind = "fix.worktree-fail" // §5.3.3
 )
 

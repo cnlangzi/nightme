@@ -180,5 +180,3 @@ func WorktreePath(repoRoot, slug string) string {
 	repoName := pathutil.Base(repoRoot)
 	return pathutil.Join(parent, repoName+"."+LabelPrefix, slug)
 }
-
-

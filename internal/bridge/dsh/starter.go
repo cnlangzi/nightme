@@ -231,6 +231,22 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 					sessionID = ev.SessionID
 					model = ev.Model
 				}
+			case agent.EventAgentPermission:
+				// RunOnce / Review have no interactive user on the
+				// chat channel. After #282 we dropped the
+				// `/permission danger-full-access` priming slash
+				// (host forwards leading-/ to the model instead of
+				// intercepting it), so a fresh session can still
+				// sit at workspace-write+ask and fire approvals
+				// mid-turn (git worktree locks, bash, …). Nobody
+				// reads Permission.ResponseCh on this path — the
+				// sink is observational only — so without an
+				// auto-allow here the turn wedges until the 5min
+				// decline watchdog. Prefer Options[0] ("Allow once"
+				// for approvals; first label for questions).
+				if err := autoAllowRunOncePermission(a, ev); err != nil {
+					dLog("dsh: RunOnce auto-allow permission: %v", err)
+				}
 			case agent.EventAgentResult:
 				if ev.Result == nil {
 					return agent.RunResult{}, fmt.Errorf(
@@ -264,6 +280,22 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 			return agent.RunResult{}, fmt.Errorf("agent %s: %w", name, ctx.Err())
 		}
 	}
+}
+
+// autoAllowRunOncePermission answers an EventAgentPermission on the
+// RunOnce / Review drain path. Options[0] is the bridge's default
+// safe choice (approvalAllowOnce for approvals; first question
+// label for AskUserQuestion). Empty Options falls back to
+// approvalAllowOnce so a malformed frame still unblocks the turn.
+func autoAllowRunOncePermission(a *agent.Agent, ev agent.AgentEvent) error {
+	if ev.Permission == nil {
+		return nil
+	}
+	resp := approvalAllowOnce
+	if len(ev.Permission.Options) > 0 {
+		resp = ev.Permission.Options[0]
+	}
+	return a.SendPermission(resp)
 }
 
 // auditFields returns the "[session_id=…] [model=…]" suffix used on

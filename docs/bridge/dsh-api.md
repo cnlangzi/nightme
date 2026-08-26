@@ -1317,7 +1317,7 @@ cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
 | `--port 0` | OS picks a free port | avoids collisions on shared hosts |
 | `cmd.Dir` = workspace | dsh's session cwd | runtime context (no other model/provider injection) |
 | `DSH_PERMISSION_MODE=danger-full-access` | process env for sandbox-policy plugin default | per `[[agent-no-config-tampering]]` — only inject transport + permissions |
-| `/permission danger-full-access` after `session.create` / attach / `/new` | per-session preset: sandbox `danger-full-access` + approval `never` (dashboard "Full access") | web profile `pinInitialPermission` otherwise starts sessions at `workspace-write`+`ask`, which is why git writes to `.git/worktrees` keep prompting. Slash command is intercepted by host; no model turn. Does **not** persist `settings.defaultPreset`. |
+| ~~`/permission danger-full-access` after `session.create`~~ | ~~per-session Full access slash~~ | **Dropped (#282)**: host forwards leading-`/` to the model (no intercept). Chat sessions answer via Feishu cards; RunOnce / Review auto-`Allow once` in `drainForRunResult` when `approval/requested` fires. |
 
 ### 7.2 URL parse
 

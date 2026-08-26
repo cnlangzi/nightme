@@ -194,28 +194,78 @@ Section 顺序稳定（与 v1 一致，便于 agent / 测试依赖）：
 
 ```markdown
 ## Task
-Analyze the issue above. Do NOT modify, create, or delete any files.
+Analyse the request above. The worktree's current source is the baseline —
+every claim in your plan must be grounded in code, not in the request's
+narrative.
 
-Deliver a structured execution plan:
-1. Root cause hypothesis (with evidence from the description)
-2. Files/modules likely affected
-3. Proposed fix approach (step-by-step)
-4. Test / verification strategy
-5. Risks or open questions
+Required workflow:
+1. Classify: is this a bug report (current behaviour diverges from expected)
+   or a feature request (new capability)? State which, with one-sentence
+   justification citing the code that supports the call.
+2. If bug: form a root-cause hypothesis, then VERIFY it against the code.
+   Read the relevant files. Trace the actual call path. Cite file:line
+   for every step. If your hypothesis doesn't match the code, revise it —
+   do NOT stretch the narrative to fit.
+3. If feature: locate the closest existing implementation (file:line) that
+   this should integrate with. Name the seams (where the new code would
+   touch existing code) with file:line.
+4. Files / modules likely affected, with file:line for each entry. List
+   ONLY files you actually opened and read. Do NOT speculate about files
+   you haven't looked at.
+5. Proposed fix approach: the minimal change that addresses the root
+   cause / fits the seam. If you find that fixing the symptom without
+   the root cause is cheaper, call that out — don't pretend it's the
+   root-cause fix.
+6. Test / verification strategy: which existing tests cover the
+   affected code path, and what new test (if any) would catch a regression.
+7. Risks / open questions: anything you couldn't verify from the code
+   alone (e.g. behaviour that depends on external state, undocumented
+   contracts).
 
-You may read and explore the codebase in the prepared worktree.
-Present the plan and STOP — wait for the user to reply in this chat
-before making any code changes.
+Output format:
+- Each claim cites file:line (or runtime trace).
+- If a claim can't be grounded in code, say so explicitly and explain
+  why — don't invent a citation.
+- Keep the plan tight. The user reviews it in chat and decides whether
+  to authorise implementation with -y.
+
+Do NOT modify, create, or delete any files. Present the plan and STOP
+— wait for the user to reply in this chat before making any code
+changes.
 ```
+
+**Methodology pin (docs/REVIEWER_INSTRUCTIONS.md)**：plan 阶段禁止
+"凭空推理"——任何 claim 必须有 file:line 或 runtime trace 支撑。Bug vs
+feature 分类以代码现状为基线（不依赖 issue 文本叙述）。
 
 ### 4.2 Execute Prompt（`-y` / `--yes`）
 
 ```markdown
 ## Task
-Proceed to fix the issue above on the branch noted.
-The worktree is prepared — investigate, implement the fix,
-run relevant tests, and summarize what you changed.
+Implement the change above on the branch noted. The worktree is prepared.
+
+Required workflow:
+1. Re-read the files you intend to change. Confirm the diff addresses
+   the root cause you identified in the plan (or the seam if it was a
+   feature).
+2. Make the minimal change. Avoid drive-by edits — every modified line
+   should be justified by the request above.
+3. Run the project's test command (infer from go.mod / Makefile / CI
+   config). Report exit code and which tests ran.
+4. If a test fails, do NOT silently suppress or skip it. Diagnose the
+   failure against the code, fix the root cause, re-run. Report the full
+   test output in your summary.
+5. Summarise: files changed (with file:line ranges), tests run (with
+   exit code), and a one-sentence statement of why this change is correct
+   against the baseline code.
+
+Do not invent functionality the request didn't ask for. Do not
+refactor unrelated code. Do not skip failing tests.
 ```
+
+**Methodology pin**：Execute 阶段保持代码锚定——每个改动 cite file:line，
+每次测试跑记 exit code，禁止 suppress / skip 失败测试。Summary 必须解释
+"为什么这个改动对 baseline 是正确的"（不是"我觉得对"）。
 
 用户通过 **flag** 表达「我已决定直接开工」，而非 gtw 二次投递。
 

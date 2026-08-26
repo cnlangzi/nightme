@@ -825,23 +825,40 @@ func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatc
 	b.WriteString("## Task\n")
 	switch mode {
 	case DispatchPlan:
-		// F-gtw-fix.md §4.1: read-only analysis; user reviews
-		// the plan in chat before authorising edits.
-		b.WriteString("Analyze the issue above. Do NOT modify, create, or delete any files.\n\n")
-		b.WriteString("Deliver a structured execution plan:\n")
-		b.WriteString("1. Root cause hypothesis (with evidence from the description)\n")
-		b.WriteString("2. Files/modules likely affected\n")
-		b.WriteString("3. Proposed fix approach (step-by-step)\n")
-		b.WriteString("4. Test / verification strategy\n")
-		b.WriteString("5. Risks or open questions\n\n")
-		b.WriteString("You may read and explore the codebase in the prepared worktree.\n")
-		b.WriteString("Present the plan and STOP — wait for the user to reply in this chat\n")
-		b.WriteString("before making any code changes.\n")
+		// F-gtw-fix.md §4.1 + strict-grounding methodology
+		// (wip/REVIEWER_INSTRUCTIONS.md / docs/REVIEWER_INSTRUCTIONS.md):
+		// the plan is a CODE-GROUNDED diagnosis, not a from-text
+		// speculation. The agent MUST use the worktree's source
+		// as the baseline — every claim cites a file:line or a
+		// runtime trace. Bug vs feature is determined by what the
+		// code actually does today, not what the issue text says.
+		b.WriteString("Analyse the request above. The worktree's current source is the baseline — every claim in your plan must be grounded in code, not in the request's narrative.\n\n")
+		b.WriteString("Required workflow:\n")
+		b.WriteString("1. Classify: is this a bug report (current behaviour diverges from expected) or a feature request (new capability)? State which, with one-sentence justification citing the code that supports the call.\n")
+		b.WriteString("2. If bug: form a root-cause hypothesis, then VERIFY it against the code. Read the relevant files. Trace the actual call path. Cite file:line for every step. If your hypothesis doesn't match the code, revise it — do NOT stretch the narrative to fit.\n")
+		b.WriteString("3. If feature: locate the closest existing implementation (file:line) that this should integrate with. Name the seams (where the new code would touch existing code) with file:line.\n")
+		b.WriteString("4. Files / modules likely affected, with file:line for each entry. List ONLY files you actually opened and read. Do NOT speculate about files you haven't looked at.\n")
+		b.WriteString("5. Proposed fix approach: the minimal change that addresses the root cause / fits the seam. If you find that fixing the symptom without the root cause is cheaper, call that out — don't pretend it's the root-cause fix.\n")
+		b.WriteString("6. Test / verification strategy: which existing tests cover the affected code path, and what new test (if any) would catch a regression.\n")
+		b.WriteString("7. Risks / open questions: anything you couldn't verify from the code alone (e.g. behaviour that depends on external state, undocumented contracts).\n\n")
+		b.WriteString("Output format:\n")
+		b.WriteString("- Each claim cites file:line (or runtime trace).\n")
+		b.WriteString("- If a claim can't be grounded in code, say so explicitly and explain why — don't invent a citation.\n")
+		b.WriteString("- Keep the plan tight. The user reviews it in chat and decides whether to authorise implementation with -y.\n\n")
+		b.WriteString("Do NOT modify, create, or delete any files. Present the plan and STOP — wait for the user to reply in this chat before making any code changes.\n")
 	case DispatchExecute:
-		// F-gtw-fix.md §4.2: user already chose -y, go ahead.
-		b.WriteString("Proceed to fix the issue above on the branch noted.\n")
-		b.WriteString("The worktree is prepared — investigate, implement the fix,\n")
-		b.WriteString("run relevant tests, and summarize what you changed.\n")
+		// F-gtw-fix.md §4.2: user already authorised -y, go ahead.
+		// The same code-grounding discipline applies — every
+		// code change cites file:line, every test run is
+		// recorded with its exit code.
+		b.WriteString("Implement the change above on the branch noted. The worktree is prepared.\n\n")
+		b.WriteString("Required workflow:\n")
+		b.WriteString("1. Re-read the files you intend to change. Confirm the diff addresses the root cause you identified in the plan (or the seam if it was a feature).\n")
+		b.WriteString("2. Make the minimal change. Avoid drive-by edits — every modified line should be justified by the request above.\n")
+		b.WriteString("3. Run the project's test command (infer from go.mod / Makefile / CI config). Report exit code and which tests ran.\n")
+		b.WriteString("4. If a test fails, do NOT silently suppress or skip it. Diagnose the failure against the code, fix the root cause, re-run. Report the full test output in your summary.\n")
+		b.WriteString("5. Summarise: files changed (with file:line ranges), tests run (with exit code), and a one-sentence statement of why this change is correct against the baseline code.\n\n")
+		b.WriteString("Do not invent functionality the request didn't ask for. Do not refactor unrelated code. Do not skip failing tests.\n")
 	}
 	return b.String()
 }

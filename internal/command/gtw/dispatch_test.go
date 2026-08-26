@@ -42,8 +42,20 @@ func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 	if !strings.Contains(out, "## Task") {
 		t.Errorf("missing Task section; got:\n%s", out)
 	}
+	// Plan-mode grounding discipline: the agent must use the
+	// worktree's source as baseline (not speculate from the
+	// issue text). These four pins lock the methodology in:
 	if !strings.Contains(out, "Do NOT modify, create, or delete any files.") {
-		t.Errorf("missing Plan-mode instruction; got:\n%s", out)
+		t.Errorf("missing Plan-mode read-only instruction; got:\n%s", out)
+	}
+	if !strings.Contains(out, "baseline") {
+		t.Errorf("Plan prompt must anchor analysis to the code baseline; got:\n%s", out)
+	}
+	if !strings.Contains(out, "file:line") {
+		t.Errorf("Plan prompt must demand file:line citations; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Present the plan and STOP") {
+		t.Errorf("missing Plan-mode STOP signal; got:\n%s", out)
 	}
 }
 
@@ -78,8 +90,8 @@ func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 		}
 	}
 	// Execute-mode-specific wording
-	if !strings.Contains(out, "Proceed to fix the issue above on the branch noted.") {
-		t.Errorf("Execute prompt missing 'Proceed to fix' instruction; got:\n%s", out)
+	if !strings.Contains(out, "Implement the change above on the branch noted.") {
+		t.Errorf("Execute prompt missing 'Implement the change' instruction; got:\n%s", out)
 	}
 	// Plan-mode-specific wording must NOT leak
 	if strings.Contains(out, "Do NOT modify") || strings.Contains(out, "Present the plan and STOP") {
@@ -88,45 +100,48 @@ func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 }
 
 // TestBuildIssueDispatchText_Plan_StopsBeforeEdits pins the
-// F-XX Plan-mode prompt: read-only analysis, explicit "STOP"
-// signal, no "Proceed to fix" leakage.
+// F-XX Plan-mode prompt: read-only analysis grounded in the
+// worktree's source (every claim must cite file:line or a
+// runtime trace), explicit "STOP" signal, no "Implement"
+// leakage.
 func TestBuildIssueDispatchText_Plan_StopsBeforeEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan)
 	for _, want := range []string{
-		"Do NOT modify, create, or delete any files.",
-		"structured execution plan",
-		"Present the plan and STOP",
-		"wait for the user to reply",
+		"Do NOT modify, create, or delete any files.", // read-only invariant
+		"baseline",                                   // methodology anchor
+		"file:line",                                  // grounding discipline
+		"Present the plan and STOP",                  // wait-for-user gate
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Plan prompt missing %q; got:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "Proceed to fix") {
-		t.Errorf("Plan prompt must not contain 'Proceed to fix' (that's Execute)")
+	if strings.Contains(out, "Implement the change") {
+		t.Errorf("Plan prompt must not contain 'Implement' (that's Execute)")
 	}
 }
 
 // TestBuildIssueDispatchText_Execute_AuthorisesEdits pins
 // the F-XX Execute-mode prompt: user already chose -y, agent
-// is told to go ahead.
+// is told to implement the change with the same code-grounded
+// discipline (cite file:line, run tests, no suppressed
+// failures).
 func TestBuildIssueDispatchText_Execute_AuthorisesEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchExecute)
 	for _, want := range []string{
-		"Proceed to fix",
-		"investigate, implement the fix",
-		"run relevant tests",
+		"Implement the change",            // user has authorised
+		"Run the project's test command",  // code-grounded verification
+		"do NOT silently suppress",         // discipline: don't hide failures
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Execute prompt missing %q; got:\n%s", want, out)
 		}
 	}
 	for _, forbid := range []string{
-		"Do NOT modify",
-		"Present the plan and STOP",
-		"wait for the user",
+		"Do NOT modify",               // Plan-only invariant
+		"Present the plan and STOP",   // Plan-only gate
 	} {
 		if strings.Contains(out, forbid) {
 			t.Errorf("Execute prompt must not contain %q (that's Plan)", forbid)

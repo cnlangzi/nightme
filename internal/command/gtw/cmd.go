@@ -433,19 +433,20 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// parseFixMode inspects the argv tail after "fix" and decides
-// whether the call is the issue-id (ModeRemote) or
-// --name/-n (ModeLocal) flow. Returns the mode plus the raw
-// value (issue id or branch name).
-//
-// Format:
+// parseFixMode inspects the argv tail AFTER parseFixArgs has
+// stripped all boolean flags (e.g. --yes / -y / --force /
+// -f). parseFixArgs has already rejected any unknown flag;
+// at this point argv contains only:
 //
 //	[issue-id]                    → ModeRemote, raw = issue-id
 //	--name <branch>               → ModeLocal,  raw = branch
 //	-n <branch>                   → ModeLocal,  raw = branch
 //
+// (ModeLocal's branch is its argv[1]; anything past it is
+// rejected below.)
+//
 // Errors on missing value after the flag, or on
-// unrecognised leading tokens.
+// unrecognised tokens.
 func parseFixMode(argv []string) (Mode, string, error) {
 	if len(argv) < 1 {
 		return "", "", fmt.Errorf("missing argument")
@@ -455,10 +456,18 @@ func parseFixMode(argv []string) (Mode, string, error) {
 		if len(argv) < 2 || strings.TrimSpace(argv[1]) == "" {
 			return "", "", fmt.Errorf("--name requires a branch name argument")
 		}
+		if len(argv) > 2 {
+			return "", "", fmt.Errorf("--name takes exactly one argument; got %d: %v",
+				len(argv)-1, argv[1:])
+		}
 		return ModeLocal, strings.TrimSpace(argv[1]), nil
 	default:
 		// Bare argument → treat as issue id. Validation lives
 		// in parseIssueID at the caller.
+		if len(argv) > 1 {
+			return "", "", fmt.Errorf("issue-id mode takes exactly one argument; got %d: %v",
+				len(argv), argv)
+		}
 		return ModeRemote, strings.TrimSpace(argv[0]), nil
 	}
 }
@@ -475,55 +484,80 @@ type fixArgs struct {
 	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Plan
 }
 
-// parseFixArgs is the argv tail → fixArgs entry point. It
-// strips --yes / -y tokens from anywhere in the tail (so
-// both `/gtw fix --yes 42` and `/gtw fix 42 --yes` parse),
-// then dispatches the remaining tokens to parseFixMode.
+// parseFixArgs is the argv tail → fixArgs entry point.
 //
-// --yes is intentionally permissive — it doesn't take an
-// argument and silently accepts duplicates. The semantic is
-// "any --yes wins"; this matches git's own CLI conventions
-// for boolean flags.
+// Recognised flags (boolean — can appear anywhere in argv):
 //
-// F-XX removed the previous --force / -f flag: the new
-// branch-exists hard-fail makes --force's "auto-cleanup a
-// leftover worktree path" path destructive without
-// justification (see F-gtw-fix.md §3.1 + wip/gtw-fix-execution.md
-// §1 item 2). Users with stale paths run `git worktree
-// remove --force <path>` or `/gtw close` manually.
+//	--yes / -y    set Yes=true (dispatch Execute Prompt)
+//	--force / -f  REJECTED — removed in F-XX (was: auto-cleanup
+//	              leftover worktree path). The branch-exists
+//	              hard-fail makes this destructive auto-
+//	              recovery; users with stale paths now run
+//	              `git worktree remove --force <path>` or
+//	              `/gtw close` manually.
 //
-// --force / -f are now hard-rejected here so users can't
-// silently rely on a no-op: e.g. `/gtw fix 42 --force`
-// would otherwise pass through parseFixMode (which treats
-// any non-flag token as an issue id) and successfully
-// dispatch as if --force meant nothing.
+// Recognised mode markers (consumed by parseFixMode):
+//
+//	<issue-id>         → ModeRemote
+//	--name <branch>    → ModeLocal
+//	-n <branch>        → ModeLocal
+//
+// Any token starting with "-" or "--" that is NOT in the
+// recognised list above is rejected with "unknown flag" —
+// the user's input is treated as a typo, not silently
+// dropped. This matches git's own CLI conventions: boolean
+// flags are positional-independent, anything else is a hard
+// error.
+//
+// The order of flags is free: `/gtw fix 42 -y`,
+// `/gtw fix -y 42`, `/gtw fix --yes --name foo`, etc., all
+// parse correctly as long as each token is recognised.
+//
+// F-XX removed the previous --force / -f flag. --force / -f
+// are now hard-rejected here so users can't silently rely on
+// a no-op: e.g. `/gtw fix 42 --force` would otherwise
+// parseFixMode's default branch as a legitimate ModeRemote
+// fix with --force treated as a no-op, leaving users who
+// relied on the old flag in an inconsistent state.
 func parseFixArgs(argv []string) (fixArgs, error) {
 	yes := false
-	filtered := make([]string, 0, len(argv))
+	content := make([]string, 0, len(argv))
 	for _, a := range argv {
 		switch a {
 		case "--yes", "-y":
+			// Boolean flag — position-independent, takes no
+			// argument. "Any --yes wins" matches git's own
+			// CLI conventions for boolean flags.
 			yes = true
 		case "--force", "-f":
-			// F-XX: --force / -f are explicitly rejected
-			// rather than silently dropped. Without this
-			// gate, "/gtw fix 42 --force" would parse as a
-			// legitimate ModeRemote fix with --force treated
-			// as a no-op, leaving users who relied on the
-			// old flag in an inconsistent state.
 			return fixArgs{}, fmt.Errorf(
 				"unknown flag %q (the /gtw fix --force / -f flag was removed in F-XX; "+
 					"see docs/feat/F-gtw-fix.md). For a stale worktree path, "+
 					"run `git worktree remove --force <path>` or `/gtw close` manually",
 				a)
+		case "--name", "-n":
+			// Mode flag — consumed together with its branch
+			// argument by parseFixMode. Push both tokens into
+			// content so parseFixMode sees them adjacent.
+			content = append(content, a)
 		default:
-			filtered = append(filtered, a)
+			// Any token starting with "-" or "--" is a
+			// flag-shaped token. If we didn't recognise it
+			// above, reject it. This is the CLI-consistent
+			// behaviour: typos don't silently no-op.
+			if strings.HasPrefix(a, "-") && a != "-" {
+				return fixArgs{}, fmt.Errorf(
+					"unknown flag %q (recognised flags: --yes/-y; mode: --name/-n <branch>; "+
+						"see docs/feat/F-gtw-fix.md)",
+					a)
+			}
+			content = append(content, a)
 		}
 	}
-	if len(filtered) == 0 {
-		return fixArgs{}, fmt.Errorf("missing argument")
+	if len(content) == 0 {
+		return fixArgs{}, fmt.Errorf("missing argument (need <issue-id> or --name <branch>)")
 	}
-	mode, rawArg, err := parseFixMode(filtered)
+	mode, rawArg, err := parseFixMode(content)
 	if err != nil {
 		return fixArgs{}, err
 	}

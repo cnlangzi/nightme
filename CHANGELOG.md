@@ -34,11 +34,16 @@ via the flag at the first dispatch — there is no
 Plan mode says "agent is analyzing — review the plan in
 chat", Execute mode says "agent is fixing now".
 
-Note: local mode (`/gtw fix --name <branch>`) does not
-dispatch a prompt to the agent, so `-y` / `--yes` has no
-effect there. The flag is silently dropped by `Factory.runFix`
-when `args.Mode == ModeLocal`. See `docs/feat/F-gtw-fix.md`
-for the full design.
+`-y` / `--yes` is a positional-independent boolean flag
+(takes no value, can appear anywhere in argv, repeated
+occurrences are idempotent — matches git CLI conventions).
+Local mode (`/gtw fix --name <branch>`) does not dispatch
+a prompt to the agent, so `-y` / `--yes` has no effect
+there. The flag is silently dropped by `Factory.runFix`
+when `args.Mode == ModeLocal`. Any unknown flag (typos,
+random `--xxx` / `-x` tokens) is hard-rejected with
+"unknown flag" — the CLI does not silently no-op. See
+`docs/feat/F-gtw-fix.md` for the full design.
 
 ### Telegram: polling-only mode + channel layer cleanup
 

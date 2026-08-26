@@ -52,27 +52,38 @@ v1.x Remote 模式在 worktree 就绪后立刻 dispatch 一条混合语义的 pr
 /gtw fix <issue-id>              # plan-first（默认）
 /gtw fix <issue-id> -y           # 跳过 plan，直接 execute prompt
 /gtw fix <issue-id> --yes        # 同 -y
+/gtw fix -y <issue-id>           # -y 任意位置都行（boolean flag，无值）
 
 /gtw fix --name <branch>         # local 模式（无 issue、无 agent dispatch，行为不变）
 /gtw fix -n <branch>             # 同 --name
+/gtw fix --name <branch> -y      # local mode 下 -y 被忽略
 ```
 
-`parseFixArgs`（`cmd.go`）从 argv 任意位置剥离 `-y` / `--yes`，再交给 `parseFixMode`。
+`parseFixArgs`（`cmd.go`）按 CLI 惯例处理：`-y` / `--yes` 是 boolean flag，
+**位置无关**（前置/后置都行）、**无需值**、可重复（"any --yes wins"），
+跟 `git commit -m msg --no-verify` 同款风格。任何以 `-` / `--` 开头的未知
+token 报"unknown flag"——CLI 一致（git、kubectl 都不接受未注册 flag）。
 
 ### 2.2 Flag 语义
 
-| Flag | 字段 | 语义 | 作用层 |
-|---|---|---|---|
-| （无） | — | 默认 plan-first | Agent prompt |
-| `-y` / `--yes` | `fixArgs.Yes` | dispatch **Execute Prompt** | 工作流 |
+| Flag | 字段 | 语义 | 作用层 | 模式 |
+|---|---|---|---|---|
+| （无） | — | 默认 plan-first | Agent prompt | Remote |
+| `-y` / `--yes` | `fixArgs.Yes` | dispatch **Execute Prompt** | 工作流 | Remote |
+| `--name` / `-n` | `fixArgs.Mode` | local 模式 | Mode | Local |
 
-**关于 `--force` / `-f`**：F-XX 删除了原有的 `--force` flag。
-它在新设计下只剩"路径残留强制清理"一种语义（即
-`forceCleanWorktreePath`），与 branch-exists 硬失败结合后
+**`-y` 在 Local 模式下**：被 `Factory.runFix` 静默清零（`args.Yes = false`）。
+Local mode 不 dispatch agent prompt，Plan / Execute 无意义；不报错但无效。
+
+**未知 flag 报错**：除 `--yes/-y/--name/-n` 外，任何 `--xxx` / `-x` 形式
+的 token（包括已删除的 `--force/-f`）都被 `parseFixArgs` 显式拒绝。
+跟 git CLI 一致：typos 不静默 no-op。
+
+**已删除的 `--force` / `-f`**：F-XX 删除。它原本只剩"路径残留强制清理"
+一种语义（即 `forceCleanWorktreePath`），与 branch-exists 硬失败结合后
 变成纯破坏性 auto-recovery——违反了"出错让用户显式处理"
-的原则。残留路径让用户自己用
-`git worktree remove --force <path>` 或 `/gtw close` 处理。
-详见 `wip/gtw-fix-execution.md` §1 item 2 + §10 决策记录。
+的原则。残留路径让用户自己用 `git worktree remove --force <path>`
+或 `/gtw close` 处理。详见 `wip/gtw-fix-execution.md` §1 item 2 + §10 决策记录。
 
 **为何用 `-y`**：
 
@@ -284,10 +295,14 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 1. **branch 已存在** → `❌ Branch ... already exists`；无 worktree、无 dispatch
 2. **默认 fix** → dispatch 含 `Do NOT modify`；不含 `Proceed to fix`
 3. **`-y` fix** → dispatch 含 `Proceed to fix`；不含 `STOP`
-4. **`-y` + worktree 已存在（同路径 re-entry）** → success card 用 Plan 措辞（不是 Execute），skipDispatch=true
-5. **附件** → 两种 mode 均带 ContentFile
-6. **worktree add 失败** → 仍走 `WorktreeFailChoice`（与 branch 无关）
-7. **`--force` / `-f`** → 显式报错"unknown flag... removed in F-XX"（不静默 no-op）
+4. **`-y` 任意位置** → `-y 42` / `42 -y` / `--yes 42` 都正确识别 Yes=true（boolean flag 位置无关）
+5. **`-y` + worktree 已存在（同路径 re-entry）** → success card 用 Plan 措辞（不是 Execute），skipDispatch=true
+6. **附件** → 两种 mode 均带 ContentFile
+7. **worktree add 失败** → 仍走 `WorktreeFailChoice`（与 branch 无关）
+8. **`--force` / `-f`** → 显式报错"unknown flag... removed in F-XX"（不静默 no-op）
+9. **未知 flag（`--dry-run` / `--foo` / `-d` 等）** → 显式报错"unknown flag"（CLI 惯例）
+10. **arity 过多** → `--name foo extra` / `42 extra` 报错"exactly one argument"
+11. **空 argv / 只传 flag** → `parseFixArgs` 报错"missing argument"
 
 ---
 
@@ -303,9 +318,11 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 | 决策 | 理由 |
 |---|---|
 | 不用 `/gtw proceed` | gtw 只投递一次 prompt；确认走普通 agent 对话 |
-| 用 `-y` / `--yes` 表示直接 execute | 与 `nightme update --yes` 项目内一致；flag 语义清晰 |
+| 用 `-y` / `--yes` 表示直接 execute | 与 `nightme update --yes` 项目内一致；flag 语义清晰；boolean flag 无值，位置无关（前置/后置都行），跟 git CLI 风格一致 |
 | **删除 `--force` / `-f` 整个 flag** | branch-exists 硬失败后，`-f` 仅剩的"路径残留强制清理"语义变成纯破坏性 auto-recovery；让用户显式 `git worktree remove --force <path>` 或跑 `/gtw close` 更安全；flag 集合收窄到 `{ -y }` 一个 |
 | **`--force` 显式报错而非 silent no-op** | trailing `--force` 会跟 issue id 并列存在，被 `parseFixMode` 默认分支当成合法 issue id——用户以为加了 flag 实际静默通过；显式报错"unknown flag... removed in F-XX"避免混淆 |
+| **所有未知 flag 显式 reject** | CLI 惯例（git / kubectl / docker 都不接受未注册 flag）；typos 静默 no-op 是 anti-pattern；任何 `--xxx` / `-x` 形式的 token（除已知 `-y/-n`）报"unknown flag" |
+| **`--name` / issue-id 严格 arity 检查** | `/gtw fix --name foo bar` 与 `/gtw fix 42 extra` 报错而不是 silently 丢弃多余 token；跟 git CLI 一致 |
 | branch 冲突硬失败 | 简化状态机；强制用户显式 `/gtw close` |
 | 废除 daemon recovery re-entry | 与「branch 不跳过」同一原则；避免隐式 `skipDispatch` |
 | re-entry 路径 success card 用 Plan 措辞 | skipDispatch=true 时不再发 prompt；用 Plan 措辞避免误导用户以为 agent 收到新 Execute Prompt |

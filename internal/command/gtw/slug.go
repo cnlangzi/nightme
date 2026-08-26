@@ -181,12 +181,4 @@ func WorktreePath(repoRoot, slug string) string {
 	return pathutil.Join(parent, repoName+"."+LabelPrefix, slug)
 }
 
-// BranchVariant returns a `-v2`/`-v3`/... variant of the branch
-// name. Used to handle the "branch already exists" decision card
-// (§5.3.1) without overwriting the user's existing work.
-func BranchVariant(branch string, n int) string {
-	if n < 2 {
-		return branch
-	}
-	return fmt.Sprintf("%s-v%d", branch, n)
-}
+

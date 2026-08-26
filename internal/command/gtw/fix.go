@@ -183,17 +183,16 @@ func RunFix(
 //
 // Steps:
 //
-//  1. RebuildContext (daemon-recovery; §5.7).
-//  2. RepoRoot → RemoteOriginURL → Detect → GetIssue.
-//  3. Branch name = DeriveBranchFromTitle(issue.Title, id).
-//  4. PreflightWorktreeCreate → catches path / branch / parent
+//  1. RepoRoot → RemoteOriginURL → Detect → GetIssue.
+//  2. Branch name = DeriveBranchFromTitle(issue.Title, id).
+//  3. PreflightWorktreeCreate → catches path / branch / parent
 //     errors before WorktreeAdd.
-//  5. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  6. AddIssueLabel(LabelWIP); on WorktreeAdd failure RemoveIssueLabel
+//  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
+//  5. AddIssueLabel(LabelWIP); on WorktreeAdd failure RemoveIssueLabel
 //     and emit DraftFixWorktreeFail card.
-//  7. SetSelectedCwd → slot.Store(ModeRemote).
-//  8. Render success card.
-//  9. Dispatch issue body to ChatSession.QueueUserMessage so
+//  6. SetSelectedCwd → slot.Store(ModeRemote).
+//  7. Render success card.
+//  8. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
 //     the worktree — the user can re-trigger manually.
 func runFixRemote(
@@ -220,15 +219,14 @@ func runFixRemote(
 		dispMode = DispatchExecute
 	}
 
-	// F-XX: daemon-recovery via the worktree's git branch was
-	// removed — the F-45 RebuildContext path relied on a
-	// `fix/<id>-*` branch prefix which the new naming
-	// convention no longer uses. Recovery now flows through the
-	// BranchExists → existingPath == worktreePath check below:
-	// when the user re-runs /gtw fix after a daemon restart
-	// while the worktree + branch still exist, we hit the same-
-	// path branch and skip creation. No separate RebuildContext
-	// step is needed.
+	// F-XX §3.1: daemon-recovery via the worktree's git
+	// branch is removed. The previous re-entry path (branch
+	// exists at exactly the target worktree path → skip
+	// creation, re-dispatch) was deleted; branch collision
+	// is now an unconditional hard-fail. Users recovering
+	// from a daemon crash must run `/gtw close` first
+	// (clears the worktree + branch + label) before
+	// retrying /gtw fix.
 
 	prober := deps.Prober
 	if prober == nil {
@@ -447,7 +445,7 @@ func runFixRemote(
 
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, false, baseSHA, dispMode, false /* reentry */)
+		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode, false /* reentry */)
 }
 
 // runFixLocal implements the F-XX local-mode flow:
@@ -537,7 +535,7 @@ func runFixLocal(
 	// dispatches and renders its own success card); pass
 	// DispatchPlan as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, false, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan, false /* reentry */)
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan, false /* reentry */)
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
@@ -548,10 +546,7 @@ func runFixLocal(
 // the mode-specific bits stay in runFixRemote / runFixLocal.
 //
 // issue is non-nil only in ID mode; local mode passes nil (the
-// dispatcher check at the bottom skips it). skipDispatch is true
-// when the caller already decided we shouldn't dispatch (e.g.
-// the branch was already attached at the target path — a re-entry
-// after daemon recovery).
+// dispatcher check at the bottom skips it).
 //
 // repoRoot is the main repo path (needed for /gtw close to run
 // `git worktree remove` from there later) and is also written
@@ -559,6 +554,12 @@ func runFixLocal(
 // ("github" / "gitlab"); empty for ModeLocal. repoRoot must be
 // absolute — callers in runFixRemote / runFixLocal get it from
 // RepoRoot(ctx, ...) which always returns an absolute path.
+//
+// reentry is true for the (currently-disabled) daemon-recovery
+// re-entry path; today runFixRemote / runFixLocal always pass
+// false. The parameter is kept so renderFixSuccessCard can
+// render a mode-neutral hint if a future flow reintroduces
+// re-entry semantics — see fix.go:223.
 func completeFixAndDispatch(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -568,7 +569,6 @@ func completeFixAndDispatch(
 	mode Mode,
 	issueID int,
 	issue *Issue,
-	skipDispatch bool,
 	baseSHA string,
 	dispMode IssueDispatchMode,
 	reentry bool,
@@ -691,7 +691,7 @@ func completeFixAndDispatch(
 	// effect; a failed dispatch can be retried by the user
 	// re-running /gtw fix or by manually sending the issue
 	// reference to the agent.
-	if mode == ModeRemote && !skipDispatch && issue != nil {
+	if mode == ModeRemote && issue != nil {
 		// Download attachments (best-effort) and assemble the
 		// dispatch blocks. Download failures log a warning
 		// and continue with text-only — the agent still gets

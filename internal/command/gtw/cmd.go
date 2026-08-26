@@ -369,15 +369,6 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		}
 	}
 
-	// F-XX: -y / --yes is a no-op for local mode (`/gtw fix
-	// --name <branch>`). Local mode never dispatches a prompt
-	// to the agent, so the Plan / Execute split has no
-	// meaning. Silently drop args.Yes so callers downstream
-	// (RunFix, runFixLocal) don't see the flag.
-	if args.Mode == ModeLocal && args.Yes {
-		args.Yes = false
-	}
-
 	// cs is supplied by the dispatcher — the same ChatSession
 	// that /cwd, /use, /close and other slash commands see in
 	// the same chat. No second lookup, no cache that could go
@@ -397,7 +388,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	drafts := &managerDraftsMap{mgr: f.mgr, chatID: input.ChatID}
 
 	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
-	// chatID, messageID, args, force). Reply is sent inline via
+	// chatID, messageID, args, yes). Reply is sent inline via
 	// cs.Emitter(); *Result only carries Consumed / Dropped for
 	// the runtime. The withHooks wrapper fires before/after
 	// hooks around the call and ships the hook output as a
@@ -886,6 +877,19 @@ type pushArgs struct {
 // the push argv tail. No positional arg today — /gtw push
 // always operates on the current chat's worktree, like
 // /gtw close.
+// parsePushArgs implements the CLI lexer for /gtw push.
+// Recognised flags (registered in fixFlagSpecs-like local
+// schema below):
+//
+//	-a / --agent <name>   override one-shot agent (legacy;
+//	                      F-XX /gtw push no longer auto-commits
+//	                      but the flag is preserved for
+//	                      back-compat with muscle memory)
+//
+// Unknown tokens are hard-rejected with "unknown flag" —
+// matches the F-XX /gtw fix contract. /gtw push takes no
+// positional arg, so extra positional tokens are also
+// rejected.
 func parsePushArgs(argv []string) (pushArgs, error) {
 	out := pushArgs{}
 	for i := 0; i < len(argv); i++ {
@@ -898,9 +902,14 @@ func parsePushArgs(argv []string) (pushArgs, error) {
 			out.Agent = argv[i+1]
 			i++
 		default:
-			// Unknown token. Silent accept — future flag
-			// additions (e.g. positional branch arg) won't
-			// break callers passing them by mistake.
+			if strings.HasPrefix(a, "-") && a != "-" {
+				return out, fmt.Errorf(
+					"unknown flag %q (recognised flags: -a/--agent)",
+					a)
+			}
+			// Positional token — /gtw push takes none.
+			return out, fmt.Errorf(
+				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
 		}
 	}
 	return out, nil
@@ -914,11 +923,14 @@ type commitArgs struct {
 	Agent string
 }
 
-// parseCommitArgs strips `-a <name>` / `--agent <name>` from
-// the commit argv tail. Same shape as parsePushArgs — v1 has
-// no positional arg; /gtw commit always operates on the
-// current chat's worktree. Unknown flags tolerated (future
-// flags like `--amend` can land without breaking callers).
+// parseCommitArgs implements the CLI lexer for /gtw commit.
+// Recognised flags:
+//
+//	-a / --agent <name>   override one-shot agent
+//
+// Unknown tokens are hard-rejected with "unknown flag";
+// positional args are rejected too (/gtw commit takes none).
+// See parseFixArgs / parsePushArgs for the rationale.
 func parseCommitArgs(argv []string) (commitArgs, error) {
 	out := commitArgs{}
 	for i := 0; i < len(argv); i++ {
@@ -931,7 +943,13 @@ func parseCommitArgs(argv []string) (commitArgs, error) {
 			out.Agent = argv[i+1]
 			i++
 		default:
-			// Unknown token. Silent accept.
+			if strings.HasPrefix(a, "-") && a != "-" {
+				return out, fmt.Errorf(
+					"unknown flag %q (recognised flags: -a/--agent)",
+					a)
+			}
+			return out, fmt.Errorf(
+				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
 		}
 	}
 	return out, nil
@@ -980,11 +998,14 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// parsePRArgs strips `-a <name>` / `--agent <name>` from the
-// pr argv tail. Mirrors parsePushArgs — v1 has no positional
-// arg; /gtw pr always operates on the current chat's worktree,
-// like /gtw push. Unknown flags are tolerated (future flags
-// like --draft / --base can land without breaking callers).
+// parsePRArgs implements the CLI lexer for /gtw pr.
+// Recognised flags:
+//
+//	-a / --agent <name>   override one-shot agent
+//
+// Unknown tokens are hard-rejected with "unknown flag";
+// positional args are rejected too (/gtw pr takes none).
+// See parseFixArgs / parsePushArgs for the rationale.
 func parsePRArgs(argv []string) (prArgs, error) {
 	out := prArgs{}
 	for i := 0; i < len(argv); i++ {
@@ -997,7 +1018,13 @@ func parsePRArgs(argv []string) (prArgs, error) {
 			out.Agent = argv[i+1]
 			i++
 		default:
-			// Unknown token. Silent accept.
+			if strings.HasPrefix(a, "-") && a != "-" {
+				return out, fmt.Errorf(
+					"unknown flag %q (recognised flags: -a/--agent)",
+					a)
+			}
+			return out, fmt.Errorf(
+				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
 		}
 	}
 	return out, nil

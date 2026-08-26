@@ -22,19 +22,28 @@ type ReactionKind string
 const (
 	// ReactionConfirm: ✅ — accept the current draft, advance the flow.
 	ReactionConfirm ReactionKind = "✅"
-	// ReactionEdit: ✏️ — "let me change something" (v1: no-op; reserved).
+	// ReactionEdit: ✏️ — "let me change something". Reserved for
+	// future use; no current ActionLookup mapping.
 	ReactionEdit ReactionKind = "✏️"
 	// ReactionCancel: ❌ — abort the current gtw step; rollback side
-	// effects where possible.
+	// effects where possible. (WorktreeFailChoice cancel button.)
 	ReactionCancel ReactionKind = "❌"
-	// ReactionNewV2: 🆕 — branch already exists; create a -v2 variant.
-	ReactionNewV2 ReactionKind = "🆕"
-	// ReactionJoin: 🔗 — branch already exists; reuse the existing one
-	// without creating a new worktree.
-	ReactionJoin ReactionKind = "🔗"
-	// ReactionForce: 🤝 — somebody else holds the label; force-take it.
+	// ReactionNewV2 / ReactionJoin: previously the 🆕 / 🔗
+	// reactions for the §5.3.1 branch-exists decision card
+	// (create -v2 variant / join existing worktree). F-XX §3.1
+	// removed that card; branch collision is now a hard-fail
+	// reply and the user runs /gtw close to clean up. The
+	// ReactionKind values remain as generic emoji semantics
+	// (no ActionLookup mapping today; safe to keep for future
+	// re-use, e.g. a different "branch conflict" surface).
+	ReactionNewV2 ReactionKind = "🇛"
+	ReactionJoin  ReactionKind = "🔗"
+	// ReactionForce: 🤝 — reserved (was "force-take label" for
+	// the §5.3.2 label-taken card; F-XX did not implement that
+	// card either). No current ActionLookup mapping.
 	ReactionForce ReactionKind = "🤝"
 	// ReactionRetry: 🔄 — last step failed; re-run.
+	// (WorktreeFailChoice retry button.)
 	ReactionRetry ReactionKind = "🔄"
 )
 

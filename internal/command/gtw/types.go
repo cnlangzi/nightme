@@ -221,9 +221,6 @@ type FixDraftPayload struct {
 	// GitError is the last 10 lines of stderr from the failed
 	// `git worktree add` (only for DraftFixWorktreeFail).
 	GitError string
-	// AlreadyClaimedBy is the user ID holding nightme/wip on
-	// the issue (only for DraftFixLabelTaken; v1 never emits).
-	AlreadyClaimedBy string
 	// LabelAdded is true iff nightme/wip was applied before the
 	// draft was emitted. Rollback uses this to decide whether to
 	// remove the label.

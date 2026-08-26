@@ -22,8 +22,6 @@
 |---|---|---|
 | `/gtw fix <id>`（默认） | **Plan Prompt** — 只分析、出方案，**禁止改文件** | 在 chat 里回复 agent（「可以 / 按第 2 步做」等） |
 | `/gtw fix <id> -y` | **Execute Prompt** — 直接实现修复 | 跟进 agent 进度 |
-| `/gtw fix <id> -f` | Plan Prompt + 路径占用时强制清理 | 同默认 |
-| `/gtw fix <id> -f -y` | Execute Prompt + 路径强制清理 | 同 `-y` |
 
 **Branch 已存在 → 硬失败**，不再提供 🆕 -v2 / 🔗 加入 / daemon recovery re-entry。
 
@@ -76,10 +74,11 @@ v1.x Remote 模式在 worktree 就绪后立刻 dispatch 一条混合语义的 pr
 `git worktree remove --force <path>` 或 `/gtw close` 处理。
 详见 `wip/gtw-fix-execution.md` §1 item 2 + §10 决策记录。
 
-**为何用 `-y` 而非复用 `-f` 表示直接执行**：
+**为何用 `-y`**：
 
 - `nightme update --yes` 已有「跳过交互确认」语义，项目内一致。
-- `-f` 在 gtw 生态已绑定 worktree 强制清理（`git worktree remove --force` 同款心智），与「用户确认跳过 plan」是不同维度。
+- `-y` 的语义（"yes, go ahead"）清晰，不需要发明新 flag。
+- 历史上还有 `-f` / `--force` flag（path 残留强制清理），已在 F-XX 删除。
 
 ---
 
@@ -253,15 +252,24 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 
 ## 7. 实现清单
 
-| 文件 | 改动 |
-|---|---|
-| `cmd.go` | `fixArgs.Yes`；`parseFixArgs` 解析 `-y/--yes`；Usage |
-| `fix.go` | branch exists → error；`IssueDispatchMode`；两套 prompt；删 recovery / branch-exists draft |
-| `render.go` | success card hint；删 `BranchExistsChoice` |
-| `action.go` | 删 `executeBranchExistsAction` |
-| `types.go` | 删 `DraftFixBranchExists` |
-| `dispatch_test.go` | Plan / Execute prompt 单测 |
-| `fix_remote_integration_test.go` | branch 冲突、`-y` 路径 |
+| 文件 | 改动 | PR |
+|---|---|---|
+| `cmd.go` | `fixArgs.Yes`；`parseFixArgs` 解析 `-y/--yes` 且显式 reject `--force/-f`；Usage；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` | A |
+| `fix.go` | `IssueDispatchMode`；两套 prompt；删 `forceCleanWorktreePath` + `if force` 分支；re-entry 路径用 `DispatchPlan`；`runFixLocal` 删 `yes bool` 形参；branch exists → hard-fail；删 recovery / branch-exists draft | A + B |
+| `types.go` | 加 `IssueDispatchMode` | A |
+| `types.go` | 删 `DraftFixBranchExists` | B |
+| `render.go` | success card hint（Plan / Execute）；删 `BranchExistsChoice` | A + B |
+| `action.go` | 删 `executeBranchExistsAction` + `case DraftFixBranchExists` 分支 | B |
+| `dispatch_test.go` | Plan / Execute prompt 单测；5 个原测试改形参 | A |
+| `parse_fix_args_test.go` | 新增：`TestParseFixArgs_YesFlag` + `TestParseFixArgs_ForceFlagRejected` | A |
+| `render_fix_success_test.go` | 新增：Plan / Execute success card 测试 + empty-baseSHA | A |
+| `attachments_test.go` | 改形参加 `DispatchPlan` | A |
+| `close_integration_test.go` | `args.Force` → `args.Yes` | A |
+| `fix_remote_integration_test.go` | `drive()` 注释更新；新增 `TestFixRemote_BranchExists_HardFails_NoSideEffects` | A + B |
+| `preflight_test.go` | 注释更新 | A |
+| `action_test.go` | 删 `BranchExistsChoice` 相关测试 | B |
+| `force_test.go` | 整个文件删（`forceCleanWorktreePath` 死代码） | A |
+| feishu channel adapter | `gtwActionMap` 删 `branch-newv2` / `branch-join` 两个 key | B |
 
 **明确不做**：
 
@@ -276,10 +284,10 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 1. **branch 已存在** → `❌ Branch ... already exists`；无 worktree、无 dispatch
 2. **默认 fix** → dispatch 含 `Do NOT modify`；不含 `Proceed to fix`
 3. **`-y` fix** → dispatch 含 `Proceed to fix`；不含 `STOP`
-4. **`-f` alone** → 清路径 + Plan prompt
-5. **`-f -y`** → 清路径 + Execute prompt
-6. **附件** → 两种 mode 均带 ContentFile
-7. **worktree add 失败** → 仍走 `WorktreeFailChoice`（与 branch 无关）
+4. **`-y` + worktree 已存在（同路径 re-entry）** → success card 用 Plan 措辞（不是 Execute），skipDispatch=true
+5. **附件** → 两种 mode 均带 ContentFile
+6. **worktree add 失败** → 仍走 `WorktreeFailChoice`（与 branch 无关）
+7. **`--force` / `-f`** → 显式报错"unknown flag... removed in F-XX"（不静默 no-op）
 
 ---
 
@@ -295,10 +303,13 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 | 决策 | 理由 |
 |---|---|
 | 不用 `/gtw proceed` | gtw 只投递一次 prompt；确认走普通 agent 对话 |
-| `-y` 而非 `-f` 表示直接 execute | 与 `nightme update --yes` 一致；`-f` 保留路径清理语义 |
+| 用 `-y` / `--yes` 表示直接 execute | 与 `nightme update --yes` 项目内一致；flag 语义清晰 |
 | **删除 `--force` / `-f` 整个 flag** | branch-exists 硬失败后，`-f` 仅剩的"路径残留强制清理"语义变成纯破坏性 auto-recovery；让用户显式 `git worktree remove --force <path>` 或跑 `/gtw close` 更安全；flag 集合收窄到 `{ -y }` 一个 |
+| **`--force` 显式报错而非 silent no-op** | trailing `--force` 会跟 issue id 并列存在，被 `parseFixMode` 默认分支当成合法 issue id——用户以为加了 flag 实际静默通过；显式报错"unknown flag... removed in F-XX"避免混淆 |
 | branch 冲突硬失败 | 简化状态机；强制用户显式 `/gtw close` |
 | 废除 daemon recovery re-entry | 与「branch 不跳过」同一原则；避免隐式 `skipDispatch` |
+| re-entry 路径 success card 用 Plan 措辞 | skipDispatch=true 时不再发 prompt；用 Plan 措辞避免误导用户以为 agent 收到新 Execute Prompt |
+| local mode 忽略 `-y` | `/gtw fix --name` 不 dispatch，Plan/Execute 无意义；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` |
 
 ---
 

@@ -170,7 +170,9 @@ func RunFix(
 
 	switch mode {
 	case ModeLocal:
-		return runFixLocal(ctx, cs, slot, drafts, deps, chatID, messageID, args[0], yes)
+		// F-XX: local mode has no yes parameter; Factory.runFix
+		// drops args.Yes when args.Mode == ModeLocal.
+		return runFixLocal(ctx, cs, slot, drafts, deps, chatID, messageID, args[0])
 	default:
 		return runFixRemote(ctx, cs, slot, drafts, deps, chatID, messageID, args[0], yes)
 	}
@@ -325,8 +327,17 @@ func runFixRemote(
 		// canonical-path logic for the parallel concern on the
 		// preflight side.
 		if existingPath != "" && pathutil.Equal(existingPath, worktreePath) {
+			// F-XX re-entry path: skipDispatch=true means we do
+			// NOT push a new prompt to the agent. The user is
+			// recovering from a daemon restart while the
+			// worktree + branch already exist. Always render
+			// the success card with Plan-mode wording — even
+			// if the user passed -y, the agent isn't being
+			// re-prompted with a fresh Execute Prompt; the
+			// original (Plan or Execute) prompt from the
+			// previous /gtw fix invocation still applies.
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, dispMode)
+				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan)
 		}
 		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
@@ -490,6 +501,11 @@ func runFixRemote(
 // Local mode does NOT call provider.GetIssue / AddIssueLabel /
 // QueueUserMessage — the user is opting into a no-remote flow
 // that should work even in repos without an `origin`.
+//
+// F-XX: local mode has no yes/dispMode parameter — the
+// Plan / Execute split has no meaning without an agent
+// dispatch. Factory.runFix already drops args.Yes when
+// args.Mode == ModeLocal before calling RunFix.
 func runFixLocal(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -498,7 +514,6 @@ func runFixLocal(
 	deps HandlerDeps,
 	chatID, messageID string,
 	rawName string,
-	yes bool,
 ) (*Result, error) {
 	branch, err := DeriveBranchFromName(rawName)
 	if err != nil {
@@ -528,6 +543,10 @@ func runFixLocal(
 		// matches regardless of which form git's porcelain output
 		// emitted.
 		if existingPath != "" && pathutil.Equal(existingPath, worktreePath) {
+			// F-XX re-entry path. dispMode is unused for
+			// ModeLocal (local never dispatches and renders
+			// its own success card); pass DispatchPlan as a
+			// zero-equivalent placeholder.
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan)
 		}
@@ -561,6 +580,9 @@ func runFixLocal(
 		})
 	}
 
+	// F-XX: dispMode is unused for ModeLocal (local never
+	// dispatches and renders its own success card); pass
+	// DispatchPlan as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, false, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan)
 }

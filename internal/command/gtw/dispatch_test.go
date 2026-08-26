@@ -47,6 +47,46 @@ func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 	}
 }
 
+// TestBuildIssueDispatchText_BareIssue_ExecuteMode mirrors
+// TestBuildIssueDispatchText_BareIssue for the F-XX Execute
+// prompt variant: same canonical shape (header / metadata /
+// description / task), but the §Task block uses the
+// user-authorised "implement the fix" wording instead of
+// the read-only Plan prompt.
+func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
+	issue := &Issue{
+		ID:     42,
+		Title:  "Login state expiration",
+		Body:   "When the user is logged in for 7 days, the session should expire.",
+		State:  "open",
+		Labels: []string{"nightme/wip", "priority/high"},
+		URL:    "https://github.com/cnlangzi/nightme/issues/42",
+	}
+	out := buildIssueDispatchText(issue, "login-state-expiration", "cnlangzi/nightme", DispatchExecute)
+
+	// Header / metadata / description / task — same as Plan mode
+	for _, want := range []string{
+		"📥 GitHub issue #42 — Login state expiration",
+		"- repo: cnlangzi/nightme",
+		"- branch: login-state-expiration",
+		"- url: https://github.com/cnlangzi/nightme/issues/42",
+		"When the user is logged in for 7 days, the session should expire.",
+		"## Task",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Execute prompt missing shared-shape %q; got:\n%s", want, out)
+		}
+	}
+	// Execute-mode-specific wording
+	if !strings.Contains(out, "Proceed to fix the issue above on the branch noted.") {
+		t.Errorf("Execute prompt missing 'Proceed to fix' instruction; got:\n%s", out)
+	}
+	// Plan-mode-specific wording must NOT leak
+	if strings.Contains(out, "Do NOT modify") || strings.Contains(out, "Present the plan and STOP") {
+		t.Errorf("Execute prompt must NOT contain Plan-mode wording; got:\n%s", out)
+	}
+}
+
 // TestBuildIssueDispatchText_Plan_StopsBeforeEdits pins the
 // F-XX Plan-mode prompt: read-only analysis, explicit "STOP"
 // signal, no "Proceed to fix" leakage.

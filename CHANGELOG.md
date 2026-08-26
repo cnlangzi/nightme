@@ -32,8 +32,13 @@ to fix the issue") instead. User confirmation is expressed
 via the flag at the first dispatch — there is no
 `/gtw proceed` command. The success card hint also differs:
 Plan mode says "agent is analyzing — review the plan in
-chat", Execute mode says "agent is fixing now". See
-`docs/feat/F-gtw-fix.md` for the full design.
+chat", Execute mode says "agent is fixing now".
+
+Note: local mode (`/gtw fix --name <branch>`) does not
+dispatch a prompt to the agent, so `-y` / `--yes` has no
+effect there. The flag is silently dropped by `Factory.runFix`
+when `args.Mode == ModeLocal`. See `docs/feat/F-gtw-fix.md`
+for the full design.
 
 ### Telegram: polling-only mode + channel layer cleanup
 

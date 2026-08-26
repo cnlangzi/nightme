@@ -19,7 +19,6 @@ func TestParseFixArgs_YesFlag(t *testing.T) {
 		{"yes long form", []string{"42", "--yes"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
 		{"default plan", []string{"42"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: false}},
 		{"yes with local", []string{"-n", "my-branch", "--yes"}, fixArgs{Mode: ModeLocal, RawArg: "my-branch", Yes: true}},
-		{"yes with name and id both — yes wins", []string{"42", "-y"}, fixArgs{Mode: ModeRemote, RawArg: "42", Yes: true}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -40,30 +39,33 @@ func TestParseFixArgs_YesFlag(t *testing.T) {
 	}
 }
 
-// TestParseFixArgs_ForceFlagNotSilentlyAccepted pins the F-XX
-// removal of --force / -f: those tokens no longer set any
-// field. parseFixArgs itself doesn't error on them (they
-// fall through parseFixMode unchanged), but the contract is
-// "force must not silently set Yes=true". The higher-level
-// reject path (Factory.runFix → parseIssueID) is covered by
-// /gtw fix error cases elsewhere; here we only verify that
-// the parser-level side effect is exactly zero.
-func TestParseFixArgs_ForceFlagNotSilentlyAccepted(t *testing.T) {
+// TestParseFixArgs_ForceFlagRejected pins the F-XX removal of
+// --force / -f: those tokens now produce an explicit error
+// rather than being silently accepted (which was the prior
+// regression — `/gtw fix 42 --force` would parse successfully
+// and dispatch as if --force was a no-op, leaving users who
+// relied on the old flag in an inconsistent state).
+func TestParseFixArgs_ForceFlagRejected(t *testing.T) {
 	cases := [][]string{
 		{"42", "--force"},
 		{"--force", "42"},
 		{"42", "-f"},
 		{"-f", "42"},
+		{"--force"},
+		{"-f"},
 	}
 	for _, in := range cases {
 		t.Run(strings.Join(in, " "), func(t *testing.T) {
 			got, err := parseFixArgs(in)
-			// parseFixArgs may or may not error (depends on
-			// whether parseFixMode accepts the leading
-			// non-digit). What MUST be true is that Yes is
-			// never set.
-			if err == nil && got.Yes {
-				t.Errorf("parseFixArgs(%v) returned Yes=true; --force/-f must not be silently accepted", in)
+			if err == nil {
+				t.Fatalf("parseFixArgs(%v) returned no error; want --force/-f rejected. got=%+v", in, got)
+			}
+			// Error message must mention the removed flag name
+			// so the user understands why their input failed
+			// instead of just "missing argument" or similar.
+			msg := err.Error()
+			if !strings.Contains(msg, "removed in F-XX") && !strings.Contains(msg, "unknown flag") {
+				t.Errorf("error message lacks F-XX context; got %q", msg)
 			}
 		})
 	}

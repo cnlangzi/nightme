@@ -369,6 +369,15 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		}
 	}
 
+	// F-XX: -y / --yes is a no-op for local mode (`/gtw fix
+	// --name <branch>`). Local mode never dispatches a prompt
+	// to the agent, so the Plan / Execute split has no
+	// meaning. Silently drop args.Yes so callers downstream
+	// (RunFix, runFixLocal) don't see the flag.
+	if args.Mode == ModeLocal && args.Yes {
+		args.Yes = false
+	}
+
 	// cs is supplied by the dispatcher — the same ChatSession
 	// that /cwd, /use, /close and other slash commands see in
 	// the same chat. No second lookup, no cache that could go
@@ -482,15 +491,34 @@ type fixArgs struct {
 // justification (see F-gtw-fix.md §3.1 + wip/gtw-fix-execution.md
 // §1 item 2). Users with stale paths run `git worktree
 // remove --force <path>` or `/gtw close` manually.
+//
+// --force / -f are now hard-rejected here so users can't
+// silently rely on a no-op: e.g. `/gtw fix 42 --force`
+// would otherwise pass through parseFixMode (which treats
+// any non-flag token as an issue id) and successfully
+// dispatch as if --force meant nothing.
 func parseFixArgs(argv []string) (fixArgs, error) {
 	yes := false
 	filtered := make([]string, 0, len(argv))
 	for _, a := range argv {
-		if a == "--yes" || a == "-y" {
+		switch a {
+		case "--yes", "-y":
 			yes = true
-			continue
+		case "--force", "-f":
+			// F-XX: --force / -f are explicitly rejected
+			// rather than silently dropped. Without this
+			// gate, "/gtw fix 42 --force" would parse as a
+			// legitimate ModeRemote fix with --force treated
+			// as a no-op, leaving users who relied on the
+			// old flag in an inconsistent state.
+			return fixArgs{}, fmt.Errorf(
+				"unknown flag %q (the /gtw fix --force / -f flag was removed in F-XX; "+
+					"see docs/feat/F-gtw-fix.md). For a stale worktree path, "+
+					"run `git worktree remove --force <path>` or `/gtw close` manually",
+				a)
+		default:
+			filtered = append(filtered, a)
 		}
-		filtered = append(filtered, a)
 	}
 	if len(filtered) == 0 {
 		return fixArgs{}, fmt.Errorf("missing argument")

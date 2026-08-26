@@ -67,3 +67,21 @@ func TestRenderFixSuccessCard_PlanMode_EmptyBaseSHA(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderFixSuccessCard_ExecuteMode_EmptyBaseSHA pins the
+// empty-baseSHA branch for the Execute-mode card variant.
+// (Today both modes share the same baseSHA-handling code, but
+// a future refactor could split them; this test guards the
+// invariant until then.)
+func TestRenderFixSuccessCard_ExecuteMode_EmptyBaseSHA(t *testing.T) {
+	issue := &Issue{ID: 1, Title: "t"}
+	card := renderFixSuccessCard(issue, "br", "/wt", "o/r", "" /* no base */, DispatchExecute)
+	if strings.Contains(card, "→ base:") {
+		t.Errorf("Execute-mode success card with empty baseSHA must omit '→ base:' line; got:\n%s", card)
+	}
+	for _, want := range []string{"✅ Fix #1 ready (direct execute)", "→ branch:   `br`", "↳ agent is fixing now"} {
+		if !strings.Contains(card, want) {
+			t.Errorf("Execute-mode card missing %q; got:\n%s", want, card)
+		}
+	}
+}

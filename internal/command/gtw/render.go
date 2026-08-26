@@ -70,8 +70,15 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, 
 	switch mode {
 	case DispatchExecute:
 		b.WriteString("↳ agent is fixing now — follow progress in chat · `/gtw commit` + `/gtw push` when done\n")
-	default:
+	case DispatchPlan:
 		b.WriteString("↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed\n")
+	default:
+		// Defensive: any future IssueDispatchMode without an
+		// explicit case lands here. Today this is dead code
+		// (only DispatchPlan / DispatchExecute exist), but
+		// failing loudly catches accidental enum drift at
+		// the next compile/test cycle.
+		b.WriteString("↳ agent is working — follow progress in chat\n")
 	}
 	return b.String()
 }

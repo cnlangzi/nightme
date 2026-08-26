@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -699,8 +700,33 @@ func flushChainNow(
 	// v9 P3 §11.12.19.3: tail also routes through materializeChunk.
 	// Tail piece is pre-rendered (just like SPLIT intermediates)
 	// and gets the same hasVisibleEntries guard.
+	//
+	// Footer carry-over (2026-08-26 dsh review): lastPiece is the
+	// trailing slice of cur.Compose's rendered output, which
+	// embedded cur.footer at its end (Compose puts footer last).
+	// materializing the tail via materializeChunk also stamps a
+	// fresh footer from chain.lastFooter. Without this strip the
+	// tail would render the footer TWICE — once inside the entry
+	// (from lastPiece), once via the fresh stamp — and Telegram
+	// would show two stacked StatusBar panels on the tail
+	// message. HasSuffix check covers the common case where
+	// splitTelegramText's cut landed inside the body content
+	// (footer text is plain, not enclosed in HTML/pre, so the
+	// cut walks back freely and lands well before footer starts
+	// for any reasonable chunk buf size). If the natural cut
+	// somehow landed inside cur.footer (rare; buf ≤ 3500 chars,
+	// footer ~50 chars), HasSuffix is false and the strip is a
+	// no-op — tail then shows a partial embedded panel followed
+	// by the fresh one, which is degraded but not a hot loop.
 	if len(pieces) > 1 {
 		lastPiece := pieces[len(pieces)-1]
+		if cur.footer != "" && strings.HasSuffix(lastPiece, cur.footer) {
+			lastPiece = strings.TrimSuffix(lastPiece, cur.footer)
+			// Drop the trailing '\n' Compose wrote between the
+			// last entry and the footer so the entry doesn't
+			// carry a dangling blank line before the fresh stamp.
+			lastPiece = strings.TrimRight(lastPiece, "\n")
+		}
 		tail := newChunkBody(0, "")
 		// The tail chunk inherits cur's (header, hasHeartbeat)
 		// snapshot so it doesn't restart at the cold "🤖

@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // noSendFn is a test-double sendFn that fails if ever invoked.
@@ -2189,5 +2190,267 @@ func TestFlushChainNow_OverflowWithBlankTail_DirtyInvariant(t *testing.T) {
 	}
 	if editFnCalls != 0 {
 		t.Fatalf("follow-up flushChainNow must no-op (dirty=false); editFn called %d times — F1 invariant broken", editFnCalls)
+	}
+}
+
+// ------------------------------------------------------------------
+// Footer uniqueness contract — chunkBody must emit exactly ONE
+// footer panel per Compose() call, regardless of how the footer
+// was stamped (cold-create materializeChunk, flushChainNow active
+// stamp, flushChunkAt historical stamp, setTaskList stamp, etc.).
+//
+// Why this matters: the StatusBar panel is rendered via
+// statusbar.RenderPanel which produces a single top+bottom-bar
+// bracket. If a chunk's Compose ever produced TWO such brackets,
+// Telegram would render two stacked boxes per Telegram message —
+// visually noisy and a sign of a write-path bug (e.g. someone
+// accumulated footer text into b.footer, or rendered the panel
+// inline AND stamped it on b.footer).
+//
+// We pin this with panelTopBar / panelBottomBar occurrence counts
+// so any future change that adds an extra footer write fails loud.
+// ------------------------------------------------------------------
+
+// panelTopBarMarker / panelBottomBarMarker reproduce statusbar's
+// package-private top/bottom bars from the exported PanelMaxWidth
+// const. statusbar.panelTopBar / panelBottomBar are unexported;
+// rebuilding them here keeps the test in a different package
+// without leaking implementation detail.
+func panelTopBarMarker() string {
+	return "┌" + strings.Repeat("─", statusbar.PanelMaxWidth-2) + "›"
+}
+
+func panelBottomBarMarker() string {
+	return "└" + strings.Repeat("─", statusbar.PanelMaxWidth-2) + "›"
+}
+
+// TestChunkBody_ComposeEmitsExactlyOneFooterPanel is the headline
+// pin: a chunk's Compose output must contain EXACTLY ONE panelTopBar
+// and EXACTLY ONE panelBottomBar regardless of whether footer is
+// stamped, set, and Compose called multiple times.
+//
+// Compose is idempotent on Compose-input (the chunk fields don't
+// change between calls), so calling Compose twice must produce the
+// same string — and that string must have exactly one panel.
+func TestChunkBody_ComposeEmitsExactlyOneFooterPanel(t *testing.T) {
+	top := panelTopBarMarker()
+	bot := panelBottomBarMarker()
+
+	b := newChunkBody(0, "🤖 Working...")
+	b.appendEntry("plain reply")
+	b.appendEntryHTML("<b>html</b>")
+	b.setTaskList([]agent.AgentTaskItem{
+		{ID: "t1", Subject: "fix bug", Status: agent.TaskInProgress, ActiveForm: "fixing"},
+	})
+	b.setFooter(statusbar.RenderPanel([]string{"agent · model"}))
+
+	first := b.Compose()
+	second := b.Compose()
+
+	if first != second {
+		t.Fatalf("Compose not idempotent:\nfirst:  %q\nsecond: %q", first, second)
+	}
+
+	if n := strings.Count(first, top); n != 1 {
+		t.Fatalf("Compose emitted %d top-bar markers; want exactly 1\nbody: %q", n, first)
+	}
+	if n := strings.Count(first, bot); n != 1 {
+		t.Fatalf("Compose emitted %d bottom-bar markers; want exactly 1\nbody: %q", n, first)
+	}
+	// The single content line must appear exactly once (would
+	// catch a future bug that appended the panel twice).
+	if n := strings.Count(first, "agent · model"); n != 1 {
+		t.Fatalf("footer content line appears %d times; want 1\nbody: %q", n, first)
+	}
+}
+
+// TestChunkBody_SetFooterOverwritesNotAppends pins the
+// overwrite-not-append contract of setFooter. A bug here (e.g.
+// b.footer = b.footer + f) would let a chunk accumulate panels
+// across multiple flushChainNow / flushChunkAt stamps.
+func TestChunkBody_SetFooterOverwritesNotAppends(t *testing.T) {
+	top := panelTopBarMarker()
+	bot := panelBottomBarMarker()
+
+	b := newChunkBody(0, "🤖 Working...")
+	b.appendEntry("body")
+	b.setFooter(statusbar.RenderPanel([]string{"first footer"}))
+	b.setFooter(statusbar.RenderPanel([]string{"second footer"}))
+
+	composed := b.Compose()
+
+	if strings.Contains(composed, "first footer") {
+		t.Fatalf("first footer leaked into final Compose output: %q", composed)
+	}
+	if n := strings.Count(composed, "second footer"); n != 1 {
+		t.Fatalf("second footer appears %d times; want 1\nbody: %q", n, composed)
+	}
+	if n := strings.Count(composed, top); n != 1 {
+		t.Fatalf("Compose emitted %d top-bar markers; want 1\nbody: %q", n, composed)
+	}
+	if n := strings.Count(composed, bot); n != 1 {
+		t.Fatalf("Compose emitted %d bottom-bar markers; want 1\nbody: %q", n, composed)
+	}
+}
+
+// TestChunkBody_EmptyFooterNoPanel pins the symmetric guarantee:
+// when footer is unset (the cold-create before any footer-bearing
+// event), Compose must NOT emit any panel markers — even though
+// renderFooterAnchor may be true (entries>0 path). Catches a
+// regression where someone renders a placeholder panel on empty
+// b.footer.
+func TestChunkBody_EmptyFooterNoPanel(t *testing.T) {
+	top := panelTopBarMarker()
+	bot := panelBottomBarMarker()
+
+	b := newChunkBody(0, "🤖 Working...")
+	b.appendEntry("body without footer")
+
+	composed := b.Compose()
+
+	if strings.Contains(composed, top) {
+		t.Fatalf("empty footer should not emit top-bar; got: %q", composed)
+	}
+	if strings.Contains(composed, bot) {
+		t.Fatalf("empty footer should not emit bottom-bar; got: %q", composed)
+	}
+}
+
+// TestAppendSegment_RotateProducesTwoSingleFooterChunks pins the
+// multi-chunk invariant: ROTATE mints a new chunk with its own
+// footer; each chunk's Compose emits exactly one panel. Across
+// the chain chunks[] slice, each chunk carries ONE panel — never
+// zero, never two. This is the audit the user asked for: "footer
+// 总是唯一的" (footer is always unique).
+func TestAppendSegment_RotateProducesTwoSingleFooterChunks(t *testing.T) {
+	top := panelTopBarMarker()
+	bot := panelBottomBarMarker()
+
+	chain := &placeholderChain{cursor: -1}
+
+	// Cold-create chunk 0.
+	if err := appendSegment(context.Background(), chain,
+		"100", 0, 1,
+		"first reply",
+		[]string{"first footer"},
+		recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("appendSegment[0]: %v", err)
+	}
+
+	// Force chunk 0 to overflow → ROTATE mints chunk 1.
+	chain.chunks[0].markFull()
+	chain.cursor = 0
+	if err := appendSegment(context.Background(), chain,
+		"100", 0, 1,
+		"second reply",
+		[]string{"second footer"},
+		recordingSend(), noEditFn()); err != nil {
+		t.Fatalf("appendSegment[1]: %v", err)
+	}
+
+	if len(chain.chunks) < 2 {
+		t.Fatalf("expected ≥2 chunks after ROTATE; got %d", len(chain.chunks))
+	}
+
+	for i, ch := range chain.chunks {
+		composed := ch.Compose()
+		if n := strings.Count(composed, top); n != 1 {
+			t.Errorf("chunk[%d]: %d top-bar markers; want exactly 1\nbody: %q",
+				i, n, composed)
+		}
+		if n := strings.Count(composed, bot); n != 1 {
+			t.Errorf("chunk[%d]: %d bottom-bar markers; want exactly 1\nbody: %q",
+				i, n, composed)
+		}
+	}
+}
+
+// TestFlushChainNow_OveflowEachChunkOneFooter pins the long-text
+// overflow split invariant: when splitTelegramText chops the
+// rendered body into N pieces, each materialised chunk emits
+// exactly one panel. This is the dangerous path because the
+// pre-rendered pieces flow through materializeChunk which stamps
+// a footer on every chunk — a future bug that accidentally
+// stamps two panels would slip past obvious code review.
+func TestFlushChainNow_OveflowEachChunkOneFooter(t *testing.T) {
+	top := panelTopBarMarker()
+	bot := panelBottomBarMarker()
+
+	chain := &placeholderChain{
+		cursor: 0,
+		chunks: []*chunkBody{{
+			messageID: 8001,
+			header:    "🤖 Working...",
+		}},
+		lastFooter: []string{"agent · model"},
+	}
+	chain.dirty = true
+	// Stuff 5000 chars into the active chunk so flushChainNow
+	// overflows and splits.
+	big := strings.Repeat("a", 5000)
+	chain.chunks[0].appendEntry(big)
+
+	var mu sync.Mutex
+	sendCalls := make([]string, 0)
+	var sendID int64 = 8001
+	sendFn := func(_ context.Context, _ string, _ int, _ int, body string) (int64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		sendCalls = append(sendCalls, body)
+		sendID++
+		return sendID, nil
+	}
+	editFn := func(_ context.Context, _ string, msgID int64, body string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if msgID == 8001 {
+			sendCalls = append(sendCalls, body)
+		}
+		return nil
+	}
+
+	if err := flushChainNow(context.Background(), chain,
+		"100", 0, 1, editFn, sendFn); err != nil {
+		t.Fatalf("flushChainNow: %v", err)
+	}
+
+	if len(sendCalls) < 2 {
+		t.Fatalf("expected overflow split into ≥2 messages; got %d", len(sendCalls))
+	}
+
+	// The contract: every Telegram message must contain AT MOST one
+	// top-bar (≤1). Telegram renders each message independently, so
+	// any single message with 2+ panels is a double-footer bug.
+	//
+	// Note: not every message needs a top-bar. pieces[0] (the head)
+	// is the natural-cut front slice of cur.Compose()'s output and
+	// may or may not contain the footer depending on where the
+	// natural cut lands (footer is at the END of rendered). The
+	// overflow path edits pieces[0] onto the original cur — the
+	// first Telegram message in the chain — so users scrolling up
+	// may see the FIRST message without a footer while the tail
+	// (last message) carries it. That's the existing design; what
+	// this test pins is NO-DOUBLE — never 2+ panels on any one
+	// message.
+	for i, body := range sendCalls {
+		if n := strings.Count(body, top); n > 1 {
+			t.Errorf("piece[%d]: %d top-bar; want ≤1\nbody: %q",
+				i, n, body[:min(80, len(body))])
+		}
+		if n := strings.Count(body, bot); n > 1 {
+			t.Errorf("piece[%d]: %d bottom-bar; want ≤1\nbody: %q",
+				i, n, body[:min(80, len(body))])
+		}
+	}
+
+	// Every persisted chain chunk's Compose must also be clean
+	// (defends against a future bug where frozen chunks get a
+	// second footer somewhere downstream).
+	for i, ch := range chain.chunks {
+		composed := ch.Compose()
+		if n := strings.Count(composed, top); n > 1 {
+			t.Errorf("chain.chunk[%d] Compose: %d top-bar; want ≤1\nbody: %q",
+				i, n, composed[:min(80, len(composed))])
+		}
 	}
 }

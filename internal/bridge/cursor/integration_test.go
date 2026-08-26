@@ -34,9 +34,9 @@ type rpcErr struct {
 // dispatches RPC responses to pending callers and server
 // notifications to the events channel.
 type pipeSession struct {
-	cmd  *exec.Cmd
-	mu   sync.Mutex
-	next int
+	cmd   *exec.Cmd
+	mu    sync.Mutex
+	next  int
 	stdin *bufio.Writer
 
 	// RPC response dispatch: keyed by request ID string.
@@ -55,7 +55,7 @@ type pipeSession struct {
 func startPipeSession(t *testing.T, workspace string) *pipeSession {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	cmd := exec.CommandContext(ctx, "cursor-agent", "acp")
+	cmd := exec.CommandContext(ctx, "cursor-agent", DefaultACPArgs...)
 	cmd.Dir = workspace
 	stdinW, _ := cmd.StdinPipe()
 	stdoutR, _ := cmd.StdoutPipe()
@@ -477,7 +477,7 @@ func (rc *rawCapture) dump(t *testing.T) {
 func startRawSession(t *testing.T, workspace string) (*pipeSession, *rawCapture) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	cmd := exec.CommandContext(ctx, "cursor-agent", "acp")
+	cmd := exec.CommandContext(ctx, "cursor-agent", DefaultACPArgs...)
 	cmd.Dir = workspace
 	stdinW, _ := cmd.StdinPipe()
 	stdoutR, _ := cmd.StdoutPipe()

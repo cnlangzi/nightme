@@ -12,9 +12,10 @@ import (
 )
 
 // TestStarter_Info verifies the Starter's Info() exposes the
-// correct ModeACP + the canonical "acp" arg.
+// correct ModeACP + the canonical DefaultACPArgs (full-access
+// parent flags then "acp").
 func TestStarter_Info(t *testing.T) {
-	s := NewStarter("cursor", "cursor-agent", []string{"acp"})
+	s := NewStarter("cursor", "cursor-agent", DefaultACPArgs)
 	info := s.Info()
 	if info.Name != "cursor" {
 		t.Errorf("Info().Name = %q, want cursor", info.Name)
@@ -25,9 +26,58 @@ func TestStarter_Info(t *testing.T) {
 	if info.Command != "cursor-agent" {
 		t.Errorf("Info().Command = %q, want cursor-agent", info.Command)
 	}
-	if len(info.Args) != 1 || info.Args[0] != "acp" {
-		t.Errorf("Info().Args = %v, want [acp]", info.Args)
+	if !equalStrings(info.Args, DefaultACPArgs) {
+		t.Errorf("Info().Args = %v, want %v", info.Args, DefaultACPArgs)
 	}
+}
+
+// TestDefaultACPArgs_ForceBeforeACP locks the argv order that
+// cursor-agent actually parses: parent flags MUST precede the
+// `acp` subcommand. `cursor-agent acp --force` is a silent
+// no-op (acp has no --force flag and starts the server anyway).
+func TestDefaultACPArgs_ForceBeforeACP(t *testing.T) {
+	if len(DefaultACPArgs) < 2 {
+		t.Fatalf("DefaultACPArgs too short: %v", DefaultACPArgs)
+	}
+	if DefaultACPArgs[len(DefaultACPArgs)-1] != "acp" {
+		t.Errorf("DefaultACPArgs last = %q, want acp (subcommand last)", DefaultACPArgs[len(DefaultACPArgs)-1])
+	}
+	if DefaultACPArgs[0] == "acp" {
+		t.Errorf("DefaultACPArgs starts with acp; full-access flags would be ignored")
+	}
+	want := []string{"--force", "--trust", "--sandbox", "disabled", "--approve-mcps", "acp"}
+	if !equalStrings(DefaultACPArgs, want) {
+		t.Errorf("DefaultACPArgs = %v, want %v", DefaultACPArgs, want)
+	}
+	if !equalStrings(FullAccessArgs, want[:len(want)-1]) {
+		t.Errorf("FullAccessArgs = %v, want %v", FullAccessArgs, want[:len(want)-1])
+	}
+}
+
+// TestPrintModeArgs_PrependsFullAccess verifies print-mode
+// uses the same parent flags, still before `-p`.
+func TestPrintModeArgs_PrependsFullAccess(t *testing.T) {
+	got := printModeArgs("hello", nil)
+	want := withFullAccess("-p", "hello", "--output-format", "text")
+	if !equalStrings(got, want) {
+		t.Errorf("printModeArgs = %v, want %v", got, want)
+	}
+	extra := printModeArgs("hello", []string{"--model", "auto"})
+	if extra[len(extra)-2] != "--model" || extra[len(extra)-1] != "auto" {
+		t.Errorf("printModeArgs extra not appended: %v", extra)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestStarter_Info_DefensiveCopy verifies mutating the caller's

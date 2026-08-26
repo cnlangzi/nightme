@@ -106,18 +106,28 @@ func init() {
 	// unlike opencode, no sessionUpdate translator is needed
 	// (Cursor's events are handled by the generic acp fallback).
 	//
+	// Per the agent-no-config-tampering principle, the bridge does
+	// not rewrite `~/.cursor/`. It injects spawn-time full-access
+	// flags (`--force --trust --sandbox disabled --approve-mcps`)
+	// ahead of the `acp` subcommand — same role as Claude's
+	// --permission-mode bypassPermissions and Codex's
+	// approval_policy=never + sandbox_mode=danger-full-access.
+	// Parent flags MUST precede `acp` (the acp subcommand does
+	// not parse --force; putting it after `acp` is a silent no-op).
+	//
 	// One-shot invocations use `cursor-agent -p` print-mode (plain
-	// text output, not NDJSON). The binary name is `cursor-agent`
-	// because that is the entry-point the official installer drops
-	// onto PATH: bash installer creates it as a legacy symlink
-	// alongside the primary `agent` alias, PowerShell installer
+	// text output, not NDJSON) with the same full-access flags.
+	// The binary name is `cursor-agent` because that is the
+	// entry-point the official installer drops onto PATH: bash
+	// installer creates it as a legacy symlink alongside the
+	// primary `agent` alias, PowerShell installer
 	// (https://cursor.com/install?win32=true) creates
 	// cursor-agent.cmd as the real entry and copies it to agent.cmd
 	// as a courtesy alias. Bridge picks the canonical real name
 	// (the installer's actual binary, not its alias) so detection
 	// works on every platform the official installer supports
 	// without us having to mirror its aliasing logic in CI.
-	agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
+	agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", cursor.DefaultACPArgs))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see
@@ -127,4 +137,3 @@ func init() {
 	// not for the PTY fallback in agentregistry.Build.
 	agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))
 }
-

@@ -15,7 +15,7 @@
 ### 1.1 传输选型
 
 ```text
-nightme ──PTY JSON-RPC 2.0──> cursor-agent acp [--sandbox disabled]
+nightme ──PTY JSON-RPC 2.0──> cursor-agent --force --trust --sandbox disabled --approve-mcps acp
 ```
 
 Cursor CLI 原生支持 **ACP (Agent Client Protocol)**，与 opencode 使用相同的协议。我们可以**完全复用现有的 `internal/bridge/acp` 包**，只需创建一个薄包装层。
@@ -95,7 +95,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 | agentCapabilities | loadSession, mcpCapabilities, promptCapabilities, sessionCapabilities | ✅ |
 | authMethods | cursor_login（需先 `cursor-agent login`） | ⚠️ 需要用户登录 |
 | 命令名 | `cursor-agent`（不是 `cursor`） | ✅ 可配置 |
-| ACP 启动参数 | `cursor-agent acp` | ✅ 可配置 |
+| ACP 启动参数 | `cursor-agent --force --trust --sandbox disabled --approve-mcps acp` | ✅ 可配置（parent flags 必须在 `acp` 前） |
 
 ---
 
@@ -200,7 +200,7 @@ type Starter struct {
 // at registration time (cmd/nightme/agents.go calls it from init()).
 //
 // args are the protocol flags. The canonical value is
-// `[]string{"acp"}` — matches Cursor's documented integration mode.
+// DefaultACPArgs (parent full-access flags then `acp`).
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
 		name:    name,
@@ -381,7 +381,7 @@ func init() {
     // Bridge picks the canonical name (not the alias) so
     // detection works on every platform without mirroring
     // the installer's alias logic.
-    agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
+    agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", cursor.DefaultACPArgs))
 }
 ```
 
@@ -393,18 +393,21 @@ agents:
   - name: cursor
     bridge: cursor
     command: cursor-agent  # Cursor CLI binary name
-    # Bridge spawns `cursor-agent acp` under PTY
+    # Bridge spawns `cursor-agent --force --trust --sandbox disabled --approve-mcps acp` under PTY
     # User's local Cursor CLI configuration and auth state are reused
+    # (nightme does not rewrite ~/.cursor/; full access is spawn-time flags only)
 ```
 
 ### 4.3 用户配置覆盖
+
+Builtin 已经带 full-access 参数。用户配置覆盖 `args` 时是**整表替换**（不是追加），所以自定义 argv 必须自己带上权限开关，并且 **parent flags 必须写在 `acp` 前面** — `cursor-agent acp --sandbox disabled` 会被 acp 子命令忽略。
 
 ```yaml
 agents:
   - name: cursor
     bridge: cursor
     command: /custom/path/to/cursor-agent
-    args: ["acp", "--sandbox", "disabled"]  # 可选：禁用 sandbox
+    args: ["--force", "--trust", "--sandbox", "disabled", "--approve-mcps", "acp"]
 ```
 
 ---
@@ -447,24 +450,34 @@ cursor-agent -p "hello" --output-format text
 
 nightme 启动时只做一件事：调用 `cursor-agent` 命令（官方 installer 在 PATH 上创建的"真名字"binary）。如果本机 CLI 能跑，nightme 就能跑。
 
-### 5.3 Sandbox 模式（可选）
+### 5.3 权限默认全开（spawn-time flags）
 
-Cursor CLI 支持 sandbox 控制，但这由用户在本机配置，nightme 不覆盖：
+nightme **不改** `~/.cursor/`。和其他 bridge 一样，只在 spawn 时注入权限开关，让 IM 会话能直接执行工具、写文件、跑命令，而不是卡在本机审批弹窗上：
 
-| 模式 | 行为 |
+| Bridge | 权限默认 |
+|--------|----------|
+| claude | `--permission-mode bypassPermissions` |
+| codex | `-c approval_policy="never" -c sandbox_mode="danger-full-access"` |
+| dsh | `DSH_PERMISSION_MODE=danger-full-access` |
+| cursor | `--force --trust --sandbox disabled --approve-mcps`（写在 `acp` / `-p` **前面**） |
+
+Cursor CLI 对应关系（`cursor-agent --help`，2026.08.11-e8db854）：
+
+| Flag | 行为 |
 |------|------|
-| `enabled` | 限制文件系统和网络访问 |
-| `disabled` | 完全访问 |
+| `--force` (`--yolo` 别名) | Force allow commands unless explicitly denied |
+| `--trust` | Trust workspace without prompting |
+| `--sandbox disabled` | 关闭 FS / 网络 sandbox（`enabled` 才是限制模式） |
+| `--approve-mcps` | Auto-approve MCP servers |
 
-如果用户需要 nightme 绕过 sandbox，可以在配置中指定：
+这些是 **parent CLI flags**，必须写在子命令前面：
 
-```yaml
-agents:
-  - name: cursor
-    bridge: cursor
-    command: cursor-agent
-    args: ["acp", "--sandbox", "disabled"]
+```text
+cursor-agent --force --trust --sandbox disabled --approve-mcps acp
+cursor-agent --force --trust --sandbox disabled --approve-mcps -p "hello" --output-format text
 ```
+
+`cursor-agent acp --force` 会被 acp 子命令当成未知参数丢掉，进程照样起来，权限仍是默认收紧。
 
 ---
 
@@ -501,9 +514,9 @@ session/prompt ──> session/update* ──> session/idle ──> EventAgentRe
 | 维度 | opencode | cursor |
 |------|----------|--------|
 | 二进制名 | `opencode` | `cursor-agent` |
-| ACP 启动参数 | `opencode acp` | `cursor-agent acp` |
+| ACP 启动参数 | `opencode acp` | `cursor-agent --force --trust --sandbox disabled --approve-mcps acp` |
 | sessionUpdate 翻译器 | 需要（opencode 特定事件：user_message_chunk, agent_message_chunk, agent_thought_chunk, tool_call, tool_call_update） | **不需要**（通用 ACP fallback 即可） |
-| print-mode | `opencode run --format json` | `cursor-agent -p` (直接文本输出) |
+| print-mode | `opencode run --format json` | `cursor-agent --force --trust --sandbox disabled --approve-mcps -p` |
 | 本地配置 | `~/.opencode/` | `~/.cursor/` |
 | 代码量 | ~800 行（starter + update + print + opencode.go） | ~150 行（starter + print + cursor.go） |
 
@@ -648,7 +661,7 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 | `cursor: cursor-agent not found` | cursor-agent 不在 PATH | 安装 Cursor CLI |
 | `cursor: workspace is required` | cfg.Workspace 为空 | 检查配置 |
 | ACP 握手失败 | CLI 未登录或配置问题 | 用户在本机验证 `cursor-agent acp` 是否正常 |
-| 权限请求无响应 | ACP permission 机制问题 | 检查 ACP bridge 的 permissions.go |
+| 权限请求卡住 / 工具被拒 | 旧 binary 仍是 `cursor-agent acp`（无 `--force`），或自定义 `args` 把 flags 写在 `acp` 后面 | 确认 `nightme agents` 列出的 argv 以 `--force … acp` 结尾；`make restart` 后重生 |
 | session 卡死 | events channel 消费者问题 | 检查 AS readpump |
 | print-mode 超时 | cursor-agent -p 执行时间过长 | 检查 Cursor CLI 本地环境（模型、proxy） |
 | print-mode 空输出 | prompt 为空或 CLI 异常 | 检查 blocks 内容 + stderr |
@@ -683,7 +696,7 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 
 在 `cmd/nightme/agents.go` 的 `init()` 中添加：
 ```go
-agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", []string{"acp"}))
+agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", cursor.DefaultACPArgs))
 ```
 
 ### Step 5: 编写测试

@@ -1,8 +1,10 @@
-// print.go — one-shot print mode for cursor using `agent -p`.
+// print.go — one-shot print mode for cursor using `cursor-agent -p`.
 //
-// Cursor CLI has a built-in print-mode: `agent -p "prompt"
+// Cursor CLI has a built-in print-mode: `cursor-agent -p "prompt"
 // --output-format text`. The process outputs plain text to stdout
 // and exits — no JSON events, no multi-turn, no events channel.
+// FullAccessArgs are prepended so print-mode matches the ACP
+// session's "act without prompting" default.
 //
 // This is simpler than opencode's print-mode (which emits NDJSON
 // events). The wire is just raw text, so we capture stdout
@@ -24,8 +26,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
-// runPrintMode spawns `agent -p "prompt" --output-format text`
-// for one-shot invocations (/gtw commit, buildAgentPrompt).
+// runPrintMode spawns `cursor-agent` + FullAccessArgs +
+// `-p "prompt" --output-format text` for one-shot invocations
+// (/gtw commit, buildAgentPrompt).
 // The process outputs plain text to stdout and exits — no JSON
 // events, no structured protocol.
 //
@@ -55,8 +58,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 
 	startTime := time.Now()
 
-	args := []string{"-p", prompt, "--output-format", "text"}
-	args = append(args, cfg.Args...)
+	args := printModeArgs(prompt, cfg.Args)
 
 	cmd := proc.New(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
@@ -152,6 +154,14 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	}
 
 	return result, nil
+}
+
+// printModeArgs is the argv for `cursor-agent -p`. Full-access
+// parent flags precede `-p` for the same reason they precede
+// `acp` on the chat-session path.
+func printModeArgs(prompt string, extra []string) []string {
+	args := withFullAccess("-p", prompt, "--output-format", "text")
+	return append(args, extra...)
 }
 
 // cursorDiagnostic is the BridgeDiagnostic payload attached to

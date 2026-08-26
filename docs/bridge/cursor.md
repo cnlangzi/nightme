@@ -647,7 +647,7 @@ go test ./internal/bridge/cursor/ -count=1 -timeout 120s -run 'TestE2E'
 |------|------|------|
 | `cursor: cursor-agent not found` | cursor-agent 不在 PATH | 安装 Cursor CLI |
 | `cursor: workspace is required` | cfg.Workspace 为空 | 检查配置 |
-| ACP 握手失败 | CLI 未登录或配置问题 | 用户在本机验证 `cursor-agent acp` 是否正常 |
+| ACP 握手失败 | CLI 未登录、配置问题，或 `initialize` 超时 | 用户在本机验证 `cursor-agent acp` 是否正常；`initialize` 预算 10s（低配冷启动不够再查 CLI 本身） |
 | 权限请求无响应 | ACP permission 机制问题 | 检查 ACP bridge 的 permissions.go |
 | session 卡死 | events channel 消费者问题 | 检查 AS readpump |
 | print-mode 超时 | cursor-agent -p 执行时间过长 | 检查 Cursor CLI 本地环境（模型、proxy） |

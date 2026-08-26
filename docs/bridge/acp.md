@@ -44,6 +44,17 @@ internal/bridge/
 
 claudecode / codex / dsh / pi 是**独立的 transport 实现**，不走 acp bridge；opencode / cursor / 未来 ACP server 走 acp bridge 并在其包内提供 spawn recipe。
 
+### 1.4 Handshake timeout
+
+`handshake()` 按阶段各自计时（`internal/bridge/acp/agent.go`），父 ctx 仍可提前取消：
+
+| 阶段 | 预算 | 覆盖什么 |
+|---|---|---|
+| `initialize` | 10s (`initializeTimeout`) | spawn + server boot + protocolVersion 握手。与 pi/codex `handshakeTimeout` 对齐；3s 对 cursor-agent 冷启动和低配机器不够。 |
+| `session/new` | 45s (`newSessionTimeout`) | ACP server 真正干活（opencode 内部 HTTP backend + loadDirectorySnapshot 等）。 |
+
+超时错误带阶段名和预算，例如 `bridge/acp: initialize (timeout=10s): context deadline exceeded`。
+
 ---
 
 ## 2. 协议支持矩阵

@@ -662,9 +662,10 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // No flags — close is intentionally all-or-nothing. If the
 // worktree is dirty the user must commit / stash / discard
 // before re-running; we don't expose a force-escape hatch.
-// /gtw fix keeps its own --force (different concern: nuking a
-// leftover worktree at the target path) so the close symmetry
-// doesn't extend there.
+// Neither /gtw close nor /gtw fix exposes a --force: stale
+// worktree paths are cleaned manually via
+// `git worktree remove --force <path>` or by re-running
+// `/gtw close` after the user has unblocked the worktree.
 //
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and

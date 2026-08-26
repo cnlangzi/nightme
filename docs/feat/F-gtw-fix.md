@@ -325,7 +325,7 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 | **`--name` / issue-id 严格 arity 检查** | `/gtw fix --name foo bar` 与 `/gtw fix 42 extra` 报错而不是 silently 丢弃多余 token；跟 git CLI 一致 |
 | branch 冲突硬失败 | 简化状态机；强制用户显式 `/gtw close` |
 | 废除 daemon recovery re-entry | 与「branch 不跳过」同一原则；避免隐式 `skipDispatch` |
-| re-entry 路径 success card 用 Plan 措辞 | skipDispatch=true 时不再发 prompt；用 Plan 措辞避免误导用户以为 agent 收到新 Execute Prompt |
+| re-entry 路径 success card 用 mode-neutral 措辞 | skipDispatch=true 时不再发 prompt；reentry=true 渲染"worktree resumed"中性 hint 而不是声称"agent is analyzing/fixing"——我们不知道上次 dispatch 是 Plan 还是 Execute，也不重新发 prompt，渲染任何一种 active 语气都不诚实；header 也不加 "(direct execute)" 后缀 |
 | local mode 忽略 `-y` | `/gtw fix --name` 不 dispatch，Plan/Execute 无意义；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` |
 
 ---

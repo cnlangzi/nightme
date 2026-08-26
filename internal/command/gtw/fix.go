@@ -330,14 +330,15 @@ func runFixRemote(
 			// F-XX re-entry path: skipDispatch=true means we do
 			// NOT push a new prompt to the agent. The user is
 			// recovering from a daemon restart while the
-			// worktree + branch already exist. Always render
-			// the success card with Plan-mode wording — even
-			// if the user passed -y, the agent isn't being
-			// re-prompted with a fresh Execute Prompt; the
-			// original (Plan or Execute) prompt from the
-			// previous /gtw fix invocation still applies.
+			// worktree + branch already exist. We pass
+			// reentry=true so renderFixSuccessCard prints a
+			// mode-neutral hint ("worktree resumed") instead
+			// of claiming the agent is actively working —
+			// we don't know whether the previous dispatch
+			// was Plan or Execute, and shouldn't assert
+			// either way.
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan)
+				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan, true /* reentry */)
 		}
 		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
@@ -478,7 +479,7 @@ func runFixRemote(
 
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, false, baseSHA, dispMode)
+		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, false, baseSHA, dispMode, false /* reentry */)
 }
 
 // runFixLocal implements the F-XX local-mode flow:
@@ -548,7 +549,7 @@ func runFixLocal(
 			// its own success card); pass DispatchPlan as a
 			// zero-equivalent placeholder.
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan)
+				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan, true /* reentry */)
 		}
 		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  -1,
@@ -584,7 +585,7 @@ func runFixLocal(
 	// dispatches and renders its own success card); pass
 	// DispatchPlan as a zero-equivalent placeholder.
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, false, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan)
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, false, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan, false /* reentry */)
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
@@ -618,6 +619,7 @@ func completeFixAndDispatch(
 	skipDispatch bool,
 	baseSHA string,
 	dispMode IssueDispatchMode,
+	reentry bool,
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetSelectedCwd(worktreePath); err != nil {
@@ -726,7 +728,7 @@ func completeFixAndDispatch(
 	} else {
 		// ID mode. Callers (runFixRemote) guarantee issue is
 		// non-nil; a nil here would be a programming error.
-		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA, dispMode)
+		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA, dispMode, reentry)
 	}
 	result := reply(ctx, cs.Emitter(), chatID, messageID, card)
 

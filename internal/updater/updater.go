@@ -228,10 +228,17 @@ func MatchAsset(release *Release, version string) *Asset {
 
 // DownloadResult is what Download returns on success. The caller
 // (CLI / install command) reads StagingPath to swap the binary
-// in place.
+// in place. StagingDir is the directory StagingPath lives in,
+// carried explicitly so callers can pass it to ExtractArchive
+// without re-deriving it from StagingPath (a hand-rolled
+// "scan-for-slash" dir helper breaks on Windows backslash
+// paths and falls back to "." — that's how the REPL extraction
+// landed on cwd/nightme.exe and collided with the running
+// binary, see TestExtractArchive_WritesToStagingDir).
 type DownloadResult struct {
 	Asset       Asset
-	StagingPath string // absolute path under stagingDir
+	StagingDir  string // directory StagingPath lives in (== filepath.Dir(StagingPath))
+	StagingPath string // absolute path under StagingDir
 	SHA256Hex   string // hex-encoded hash of the downloaded bytes
 	Bytes       int64  // total bytes written (== Asset.Size on success)
 	Cached      bool   // true when a local archive already matched SHA256SUMS
@@ -327,6 +334,7 @@ func Download(
 
 	return &DownloadResult{
 		Asset:       *asset,
+		StagingDir:  stagingDir,
 		StagingPath: stagingPath,
 		SHA256Hex:   gotSum,
 		Bytes:       asset.Size,
@@ -353,6 +361,7 @@ func verifyLocalArchive(path, wantSum string, asset *Asset) *DownloadResult {
 	}
 	return &DownloadResult{
 		Asset:       *asset,
+		StagingDir:  filepath.Dir(path),
 		StagingPath: path,
 		SHA256Hex:   gotSum,
 		Bytes:       info.Size(),
@@ -574,10 +583,7 @@ func NewASCIIProgressBar(out io.Writer, total int64) ProgressFunc {
 				pct = 1
 			}
 		}
-		filled := int(pct * float64(width))
-		if filled > width {
-			filled = width
-		}
+		filled := min(int(pct*float64(width)), width)
 		bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
 		var speed, eta string
 		elapsedSec := elapsed.Seconds()

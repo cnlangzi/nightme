@@ -322,7 +322,7 @@ func runInstallStage(
 ) error {
 	out := deps.Out
 
-	binary, err := updater.ExtractArchive(dl.StagingPath, filepathDir(dl.StagingPath))
+	binary, err := updater.ExtractArchive(dl.StagingPath, dl.StagingDir)
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
@@ -391,18 +391,14 @@ func askYesNo(out io.Writer, reader func() (string, error), prompt string, defau
 	return answer == "y" || answer == "yes"
 }
 
-// filepathDir is a tiny shim that lets the install stage
-// pass the archive's parent dir to ExtractArchive without
-// importing path/filepath at the top level (avoids pulling
-// in os.Stat twice in the same file).
-func filepathDir(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == '/' {
-			return p[:i]
-		}
-	}
-	return "."
-}
+// (filepathDir used to live here as a hand-rolled "/"-only
+// scanner. On Windows archive paths use "\\" as the separator,
+// so the helper fell through to "." and ExtractArchive wrote to
+// cwd/nightme.exe — colliding with the running exe. The real
+// fix is for the caller to carry stagingDir through, so we now
+// read dl.StagingDir (populated by updater.Download). Keeping
+// the dead code would just wait for the next person to wire it
+// back up.)
 
 // resolveDataDir returns cfg.Paths.DataDir or "" if config
 // can't be loaded. Used by the live-check fallback in the

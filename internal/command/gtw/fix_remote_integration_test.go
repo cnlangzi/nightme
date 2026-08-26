@@ -161,7 +161,7 @@ func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 		r.cs.ChatID,
 		"msg-fix-remote",
 		[]string{rawID},
-		false, /* force */
+		false, /* yes — plan-first default for the rig */
 	)
 }
 

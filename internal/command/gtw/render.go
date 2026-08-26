@@ -45,16 +45,34 @@ func buildSyncReply(ctx context.Context, repoRoot string, deps HandlerDeps) (str
 // RefreshDefaultBranch pulled before WorktreeAdd. When empty
 // (e.g. daemon-recovery re-entry where we skipped the refresh)
 // the "based on" line is omitted.
-func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string) string {
+//
+// F-XX: the trailing "↳ ..." hint line differs by IssueDispatchMode:
+//   - DispatchPlan     → "agent is analyzing — review the plan in
+//     chat, then tell the agent when to proceed"
+//   - DispatchExecute  → "agent is fixing now — follow progress in
+//     chat · `/gtw commit` + `/gtw push` when done"
+//
+// The header line also adds "(direct execute)" suffix in Execute
+// mode. See F-gtw-fix.md §5.
+func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string, mode IssueDispatchMode) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "✅ Fix #%d ready\n", issue.ID)
+	if mode == DispatchExecute {
+		fmt.Fprintf(&b, "✅ Fix #%d ready (direct execute)\n", issue.ID)
+	} else {
+		fmt.Fprintf(&b, "✅ Fix #%d ready\n", issue.ID)
+	}
 	fmt.Fprintf(&b, "→ branch:   `%s`\n", branch)
 	fmt.Fprintf(&b, "→ worktree: %s\n", worktree)
 	fmt.Fprintf(&b, "→ issue:    %s#%d [%s]\n", repo, issue.ID, LabelWIP)
 	if baseSHA != "" {
 		fmt.Fprintf(&b, "→ base:     %s\n", shortSHA(baseSHA))
 	}
-	b.WriteString("↳ `/gtw commit` + `/gtw push` to ship · `/gtw close` to drop the worktree · or keep developing\n")
+	switch mode {
+	case DispatchExecute:
+		b.WriteString("↳ agent is fixing now — follow progress in chat · `/gtw commit` + `/gtw push` when done\n")
+	default:
+		b.WriteString("↳ agent is analyzing — review the plan in chat, then tell the agent when to proceed\n")
+	}
 	return b.String()
 }
 

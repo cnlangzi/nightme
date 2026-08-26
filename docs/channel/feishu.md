@@ -2040,7 +2040,7 @@ case gateway.OutReply, gateway.OutResult,
 
 ### 13.23 F-46 决策(2026-08-06):决策卡交互 button + 原地 PATCH
 
-**背景**:SPEC §2.5 之前只定义了 reaction-based lifecycle。gtw 决策卡（branch-exists / worktree-fail 场景，见 [feishu-rendering.md](./feishu-rendering.md) A11 §3.3）一直是纯文本 markdown——用户必须打 emoji 才能继续。F-46 把决策卡升级成可点 button + 原地 PATCH。
+**背景**:SPEC §2.5 之前只定义了 reaction-based lifecycle。gtw 决策卡（**worktree-fail** 场景，见 [feishu-rendering.md](./feishu-rendering.md) A11 §3.3）一直是纯文本 markdown——用户必须打 emoji 才能继续。branch-exists 决策卡已废除（[`feat/F-gtw-fix.md`](../feat/F-gtw-fix.md)）。F-46 把决策卡升级成可点 button + 原地 PATCH。
 
 **Feishu 端**做了 3 件事:
 

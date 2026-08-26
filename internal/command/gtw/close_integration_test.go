@@ -20,8 +20,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-
-
 // TestIntegration_FixCloseRoundTrip is the most important
 // integration test: it drives the full /gtw fix → /gtw close
 // happy path against a real git repo. Steps:
@@ -415,7 +413,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	// uses in production).
 	res, err := RunFix(
 		context.Background(), args.Mode, cs, slot, drafts, deps,
-		cs.ChatID, "msg-int-shortN", []string{args.RawArg}, args.Force,
+		cs.ChatID, "msg-int-shortN", []string{args.RawArg}, args.Yes,
 	)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)
@@ -471,5 +469,3 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Errorf("worktree still on disk after close: %v", err)
 	}
 }
-
-

@@ -5,8 +5,8 @@
 > **Depends on**: F-45 (`/gtw fix` 状态机)、F-50 (GitHub/GitLab
 > Provider)、F-51 (gtw 包迁到 `internal/command/gtw/`)
 
-> **Related**: [`本文件 §/gtw fix 主流程`](./F-gtw.md)（label 之前在
-> §5.2 的 AddIssueLabel 步骤）、[`internal/command/gtw/types.go`](../../internal/command/gtw/types.go)
+> **Related**: [`F-gtw-fix.md`](./F-gtw-fix.md)（`/gtw fix` 主流程与 agent dispatch）、
+> [`F-gtw.md`](./F-gtw.md)（gtw 命令索引）、[`internal/command/gtw/types.go`](../../internal/command/gtw/types.go)
 > （`AllLabels` / `LabelMeta` / `LabelMetaFor`）、[`internal/command/gtw/provider.go`](../../internal/command/gtw/provider.go)
 > （`GitHubProvider.CreateLabel` / `GitLabProvider.CreateLabel`）、[`internal/command/gtw/fix.go`](../../internal/command/gtw/fix.go)
 > （`runFixRemote` §5.2 新增的 `ensureGtwLabels` 步骤 + `rollbackLabelStep`
@@ -245,8 +245,12 @@ AddIssueLabel(LabelWIP)                   ← 步骤 6（failure → rollbackLab
 WriteGTWYml                          ← 步骤 7
 slot.Store(StateFixing)              ← 步骤 8
 reply(success card)                  ← 步骤 9
-dispatch issue to agent              ← 步骤 10
+dispatch issue to agent              ← 步骤 10（F-XX：Plan 或 Execute prompt，见 F-gtw-fix.md）
 ```
+
+> **F-XX 注**：步骤 10 的 dispatch 语义见 [`F-gtw-fix.md`](./F-gtw-fix.md) — 默认 Plan
+> Prompt（只读分析），`-y` 时 Execute Prompt；gtw 只投递一次，后续确认走用户 ↔ agent
+> 普通对话。Branch 冲突改为硬失败，不再经过 §5.3.1 决策卡。
 
 `ensureGtwLabels` 在 WorktreeAdd **之后**、AddIssueLabel **之前**串行
 跑 6 次 `CreateLabel`。理由：
@@ -577,8 +581,8 @@ F-59 自身不带 feature flag —— 加 flag 不值得（一次回滚够便宜
 
 ## 11. References
 
-- [`本文件 §/gtw fix 主流程`](./F-gtw.md) — fix 步骤 §5.2 是
-  ensureGtwLabels 的插入位置
+- [`F-gtw-fix.md`](./F-gtw-fix.md) — `/gtw fix` 主流程、Plan/Execute dispatch、branch 硬失败
+- [`F-gtw.md`](./F-gtw.md) — gtw 命令索引；fix §5.2 是 ensureGtwLabels 的插入位置
 - [`docs/feat/F-45-gtw-fix-state-machine` 段`] — F-45 把 label
   设为 gtw 状态机的载体，本次 F-59 让 label 自举
 - [`docs/feat/F-50-git-provider.md`](./F-50-git-provider.md) —

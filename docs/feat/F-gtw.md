@@ -1,4 +1,6 @@
-# /gtw 命令 (push / pr)
+# /gtw 命令 (fix / push / pr)
+
+> **子命令设计索引**：[`F-gtw-fix.md`](./F-gtw-fix.md)（`/gtw fix`）、下文 A1/A2（push/readiness）、A4（`/gtw pr`）
 
 ## A1. F-56: `/gtw push` 三分支流 + Agent 最小化 Prompt
 
@@ -497,7 +499,8 @@ func TestBuildAgentPrompt_NoNightmeDetails(t *testing.T) {
 
 ## 9. 不在范围内(Out of Scope)
 
-- **`/gtw fix` / `pr` / `close` / `sync` 的重构**:本次只动 `push`。`fix` 的 worktree 创建、`pr` 的 one-shot agent、`close` 的 worktree 销毁、`sync` 的 pull,各自有不同职责,不在本次改造范围
+- **`/gtw fix` 的 Plan-first dispatch + branch 硬失败**:见 [`F-gtw-fix.md`](./F-gtw-fix.md)（设计已定，待实现）
+- **`/gtw fix` / `pr` / `close` / `sync` 的其他重构**:本次 F-56 只动 `push`。`fix` 的 worktree 创建、`pr` 的 one-shot agent、`close` 的 worktree 销毁、`sync` 的 pull,各自有不同职责;fix dispatch 改造见 F-gtw-fix
 - **agent prompt 的"是否要在 commit 失败时输出 FAILED"**:本次设计选择**完全不让 agent 汇报**。如果将来调试需要,可以在 agent 跟 nightme 之间加一个 transcript 日志,但**不**让 FAILED 进 prompt
 - **夜间 batch commit / scheduled push**:完全无关
 - **跨 worktree 聚合 push**:每个 `/gtw push` 只管一个 worktree
@@ -1196,6 +1199,27 @@ func TestDispatchPush_NoCountUnpushedAtEntry(t *testing.T) {
 
 详细设计、错误处理矩阵、决策记录、不在范围内的 followups
 见 [`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)。
+
+---
+
+## A3b. F-XX: `/gtw fix` Plan-first dispatch + 分支硬失败
+
+> **Source**: [`F-gtw-fix.md`](./F-gtw-fix.md)
+>
+> **改动摘要**：
+>
+> - **默认** `/gtw fix <id>` dispatch **Plan Prompt**（只分析、出方案，禁止改文件）；用户
+>   在 chat 里与 agent 确认后再让 agent 动手 —— gtw **不提供** `/gtw proceed`，也不做
+>   第二次 dispatch。
+> - **`-y` / `--yes`** dispatch **Execute Prompt**（直接实现修复）。
+> - **删除 `--force` / `-f` 整个 flag**：branch-exists 硬失败之后，`-f` 仅剩的"路径
+>   残留强制清理"用途变成纯破坏性 auto-recovery。残留路径让用户自己
+>   `git worktree remove --force <path>` 或跑 `/gtw close` 即可。
+> - **Branch 已存在** → 硬失败（废除 §5.3.1 branch-exists 决策卡、-v2 变体、daemon
+>   recovery re-entry）。
+
+完整流程、两套 prompt 正文、success card、测试要点与决策记录见
+[`F-gtw-fix.md`](./F-gtw-fix.md)。
 
 ---
 

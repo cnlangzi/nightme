@@ -243,10 +243,11 @@ func (f *Factory) Spec() command.Spec {
 		Name:    "gtw",
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
-		Usage: "/gtw fix <issue-id>              claim, label, and create a worktree\n" +
+		Usage: "/gtw fix <issue-id>              claim, label, and create a worktree (plan-first)\n" +
+			"/gtw fix <issue-id> -y           direct execute (skip plan-first)\n" +
+			"/gtw fix <issue-id> --yes        long form of -y\n" +
 			"/gtw fix --name <branch>         create a local worktree (no issue)\n" +
 			"/gtw fix -n <branch>             short form of --name\n" +
-			"/gtw fix <id> --force            nuke any leftover at the target path, then re-create\n" +
 			"/gtw close                       tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw commit [-a <agent>]         commit uncommitted work via the configured agent (no push)\n" +
 			"/gtw push                        push the worktree branch (clean only — refuses dirty)\n" +
@@ -316,6 +317,10 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 // runFix handles `/gtw fix <issue-id>` and `/gtw fix --name <branch>`.
 // F-XX splits the entry into two modes at the factory boundary
 // so RunFix sees a single Mode constant.
+//
+// F-XX adds `-y` / `--yes` to bypass plan-first dispatch and
+// go straight to the Execute prompt. F-XX also removes the
+// previous `--force` / `-f` flag.
 //
 // F-51: command.Commander prefixes Args with the command name
 // ("gtw"), then the subcommand ("fix"), then the subcommand's
@@ -402,7 +407,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		func() error {
 			_, e := RunFix(ctx, args.Mode, cs, slot, drafts, f.deps,
 				input.ChatID, input.MessageID,
-				[]string{args.RawArg}, args.Force)
+				[]string{args.RawArg}, args.Yes)
 			if e == nil {
 				// Re-derive so post-hook sees the worktree
 				// that RunFix just created + yml-wrote.
@@ -452,30 +457,37 @@ func parseFixMode(argv []string) (Mode, string, error) {
 // fixArgs bundles the parsed argv tail of `/gtw fix <...>`.
 // Splitting it into a struct (rather than separate return
 // values) keeps the parser functions readable as we add more
-// flags — `--force` / `-f` is the first, future flags
+// flags — `--yes` / `-y` is the first, future flags
 // (`--no-dispatch`, `--base <ref>`) can land here without
 // breaking signatures again.
 type fixArgs struct {
 	Mode   Mode
 	RawArg string // issue id (ModeRemote) or branch name (ModeLocal)
-	Force  bool   // --force / -f: skip path-occupied preflight + nuke any leftover at the target path
+	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Plan
 }
 
 // parseFixArgs is the argv tail → fixArgs entry point. It
-// strips --force / -f tokens from anywhere in the tail (so
-// both `/gtw fix --force 42` and `/gtw fix 42 --force`
-// parse), then dispatches the remaining tokens to parseFixMode.
+// strips --yes / -y tokens from anywhere in the tail (so
+// both `/gtw fix --yes 42` and `/gtw fix 42 --yes` parse),
+// then dispatches the remaining tokens to parseFixMode.
 //
-// --force is intentionally permissive — it doesn't take an
+// --yes is intentionally permissive — it doesn't take an
 // argument and silently accepts duplicates. The semantic is
-// "any --force wins"; this matches git's own CLI conventions
+// "any --yes wins"; this matches git's own CLI conventions
 // for boolean flags.
+//
+// F-XX removed the previous --force / -f flag: the new
+// branch-exists hard-fail makes --force's "auto-cleanup a
+// leftover worktree path" path destructive without
+// justification (see F-gtw-fix.md §3.1 + wip/gtw-fix-execution.md
+// §1 item 2). Users with stale paths run `git worktree
+// remove --force <path>` or `/gtw close` manually.
 func parseFixArgs(argv []string) (fixArgs, error) {
-	force := false
+	yes := false
 	filtered := make([]string, 0, len(argv))
 	for _, a := range argv {
-		if a == "--force" || a == "-f" {
-			force = true
+		if a == "--yes" || a == "-y" {
+			yes = true
 			continue
 		}
 		filtered = append(filtered, a)
@@ -487,7 +499,7 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 	if err != nil {
 		return fixArgs{}, err
 	}
-	return fixArgs{Mode: mode, RawArg: rawArg, Force: force}, nil
+	return fixArgs{Mode: mode, RawArg: rawArg, Yes: yes}, nil
 }
 
 // runClose handles `/gtw close`. Tears down the worktree

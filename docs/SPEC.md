@@ -637,7 +637,9 @@ OutboundMessage{
 
 ### 2.6 Interactive Choices
 
-**核心问题**：gtw 决策卡的 branch-exists / worktree-fail 场景（[`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3.3）此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
+**核心问题**：gtw 决策卡的 worktree-fail 场景（[`channel/feishu-rendering.md`](./channel/feishu-rendering.md) §3.3）此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
+
+> **F-XX 注**：`/gtw fix` 的 **branch-exists** 决策卡已废除（branch 冲突改为硬失败），见 [`feat/F-gtw-fix.md`](./feat/F-gtw-fix.md)。Interactive Choices 在 gtw 侧仅剩 **worktree-fail**。
 
 **F-46**：决策面改为**交互选择**（`OutChoice`）；用户选择后**原地更新**同一张 UI（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。Channel 可把它渲染成原生 card。
 
@@ -720,7 +722,7 @@ command.ReactionRouter 内部：
   ▼
 gtw.Manager.HandleReaction(ev)
   ├ 查自己的 states / drafts map(不再走 chatsession.gtwContext)
-  ├ dispatch 到 executeBranchExistsAction / executeWorktreeFailAction
+  ├ dispatch 到 executeWorktreeFailAction（branch-exists 路径已废除，见 F-gtw-fix.md）
   ├ 执行动作 + 发 OutChoicePatch / OutReply
   └ 返 true / false 给 router
 ```

@@ -11,6 +11,30 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Breaking: `/gtw fix` removes `--force` / `-f` flag
+
+F-XX (`docs/feat/F-gtw-fix.md`): the `/gtw fix --force`
+flag and its `--force` cleanup path are removed. The flag's
+only purpose under the new design (auto-cleanup of a
+leftover worktree path) becomes destructive auto-recovery.
+Users with a stale worktree path now run
+`git worktree remove --force <path>` or `/gtw close`
+manually. Passing `--force` or `-f` is no longer recognised
+and the token falls through to a parse error.
+
+### Feature: `/gtw fix` plan-first dispatch + `-y` direct execute
+
+F-XX: `/gtw fix <id>` now defaults to a **Plan Prompt**
+("analyze the issue, do NOT modify files; deliver a
+structured execution plan; wait for the user"). Add
+`-y` / `--yes` to dispatch an **Execute Prompt** ("proceed
+to fix the issue") instead. User confirmation is expressed
+via the flag at the first dispatch — there is no
+`/gtw proceed` command. The success card hint also differs:
+Plan mode says "agent is analyzing — review the plan in
+chat", Execute mode says "agent is fixing now". See
+`docs/feat/F-gtw-fix.md` for the full design.
+
 ### Telegram: polling-only mode + channel layer cleanup
 
 `internal/config.TelegramConfig` is now `{bot_token, polling_timeout}` only. `webhook_url`, `webhook_secret`, `mode`, `group_require_mention` are gone — long polling is the only supported receive path, and the group mention gate lives in `chatsession.WatchMode` (`/watch all|mention|off`), not in config. Old config keys are silently ignored.

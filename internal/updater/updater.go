@@ -228,10 +228,15 @@ func MatchAsset(release *Release, version string) *Asset {
 
 // DownloadResult is what Download returns on success. The caller
 // (CLI / install command) reads StagingPath to swap the binary
-// in place.
+// in place. The parent dir is reachable as filepath.Dir(StagingPath)
+// — we deliberately do NOT carry it as a separate field here, since
+// every caller already has the original stagingDir in scope and
+// round-tripping a redundant string through the struct is pure
+// over-engineering (see the older "StagingDir:" iteration in git
+// history; dsh review 2026-08-26 caught the redundancy).
 type DownloadResult struct {
 	Asset       Asset
-	StagingPath string // absolute path under stagingDir
+	StagingPath string // absolute path under the stagingDir passed to Download
 	SHA256Hex   string // hex-encoded hash of the downloaded bytes
 	Bytes       int64  // total bytes written (== Asset.Size on success)
 	Cached      bool   // true when a local archive already matched SHA256SUMS
@@ -574,10 +579,7 @@ func NewASCIIProgressBar(out io.Writer, total int64) ProgressFunc {
 				pct = 1
 			}
 		}
-		filled := int(pct * float64(width))
-		if filled > width {
-			filled = width
-		}
+		filled := min(int(pct*float64(width)), width)
 		bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
 		var speed, eta string
 		elapsedSec := elapsed.Seconds()

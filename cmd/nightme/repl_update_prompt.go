@@ -51,6 +51,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -322,7 +323,7 @@ func runInstallStage(
 ) error {
 	out := deps.Out
 
-	binary, err := updater.ExtractArchive(dl.StagingPath, filepathDir(dl.StagingPath))
+	binary, err := updater.ExtractArchive(dl.StagingPath, filepath.Dir(dl.StagingPath))
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
@@ -391,18 +392,10 @@ func askYesNo(out io.Writer, reader func() (string, error), prompt string, defau
 	return answer == "y" || answer == "yes"
 }
 
-// filepathDir is a tiny shim that lets the install stage
-// pass the archive's parent dir to ExtractArchive without
-// importing path/filepath at the top level (avoids pulling
-// in os.Stat twice in the same file).
-func filepathDir(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == '/' {
-			return p[:i]
-		}
-	}
-	return "."
-}
+// filepathDir was removed: its hand-rolled "/"-only scan broke on
+// Windows backslash paths and tripped the Win32 ERROR_SHARING_VIOLATION
+// when REPL extraction wrote to cwd/nightme.exe. The fix is to derive
+// stagingDir via filepath.Dir(dl.StagingPath) at the use site.
 
 // resolveDataDir returns cfg.Paths.DataDir or "" if config
 // can't be loaded. Used by the live-check fallback in the

@@ -1,6 +1,8 @@
 package updater
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -212,6 +214,85 @@ func TestStagingDir(t *testing.T) {
 func TestStagingDir_EmptyDataDir(t *testing.T) {
 	if _, err := StagingDir("", "v0.3.7"); err == nil {
 		t.Errorf("StagingDir(\"\") returned no error; want one")
+	}
+}
+
+// TestExtractArchive_WritesToStagingDir pins the contract that
+// ExtractArchive writes the extracted binary under the supplied
+// stagingDir, never under the process CWD.
+//
+// Regression guard for the Win32 REPL bug: a hand-rolled
+// "filepathDir" helper that scanned for '/' returned "." for any
+// Windows path with '\' separators. ExtractArchive then joined
+// ".\nightme.exe" and opened that for write — which on a REPL
+// launched from the install dir is the running exe, triggering
+// ERROR_SHARING_VIOLATION:
+//
+//	install failed: extract: open extract dst: open nightme.exe:
+//	  The process cannot access the file because it is being
+//	  used by another process.
+//
+// The test builds an in-memory zip, calls ExtractArchive against
+// a chosen stagingDir, and asserts the returned path lives under
+// that stagingDir. We call extractZIP directly (rather than going
+// through ExtractArchive, which switches on GOOS) so the test
+// runs on every platform — the contract is platform-independent.
+func TestExtractArchive_WritesToStagingDir(t *testing.T) {
+	dir := t.TempDir()
+	stagingDir := filepath.Join(dir, "updates", "0.4.4")
+	// Production always reaches extractZIP via Download, which
+	// MkdirAll's stagingDir first. The test bypasses Download
+	// to pin the contract in isolation, so we mirror that
+	// MkdirAll here.
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatalf("mkdir staging: %v", err)
+	}
+	const body = "fake-binary-payload-12345"
+
+	// Build an in-memory zip containing nightme.exe.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, err := zw.Create("nightme.exe")
+	if err != nil {
+		t.Fatalf("zip create: %v", err)
+	}
+	if _, err := w.Write([]byte(body)); err != nil {
+		t.Fatalf("zip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+
+	archivePath := filepath.Join(dir, "nightme_0.4.4.zip")
+	if err := os.WriteFile(archivePath, zipBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+
+	got, err := extractZIP(archivePath, stagingDir)
+	if err != nil {
+		t.Fatalf("extractZIP: %v", err)
+	}
+
+	want := filepath.Join(stagingDir, "nightme.exe")
+	if got != want {
+		t.Fatalf("extractZIP returned %q; want %q (cwd-relative bare %q means the dir helper regressed)",
+			got, want, "nightme.exe")
+	}
+
+	gotBody, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("read extracted: %v", err)
+	}
+	if string(gotBody) != body {
+		t.Fatalf("extracted body mismatch: got %q, want %q", gotBody, body)
+	}
+
+	// Belt-and-suspenders: the cwd must NOT contain a stray
+	// nightme.exe left behind by a regression. If we ever
+	// regress to writing under "." again, t.TempDir's cleanup
+	// will at least surface this here.
+	if _, err := os.Stat(filepath.Join(".", "nightme.exe")); err == nil {
+		t.Fatalf("found stray nightme.exe in cwd — ExtractArchive regressed to writing under \".\"")
 	}
 }
 

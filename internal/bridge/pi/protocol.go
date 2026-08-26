@@ -67,25 +67,31 @@ type eventEnvelope struct {
 	Raw json.RawMessage `json:"-"`
 }
 
-// promptParams encodes the body of a `prompt` command. The wire shape
-// (per docs/rpc.md):
+// promptParams encodes the body of a `prompt` command. Wire shape:
 //
 //	{"type":"prompt", "message":"...", "images":[ImageContent]?}
 //
-// where ImageContent is {"type":"image", "data":<base64>, "mimeType":<MIME>}.
-//
-// We capture images with the "data" name in the bridge to match Pi's
-// spec, and rename to "data" here for the same reason. The bridge
-// passes these through unchanged to the encoder.
+// where ImageContent is {"data":<base64>, "mimeType":<MIME>}. The pi
+// RPC docs (docs/rpc.md) describe the canonical shape as also
+// carrying {"type":"image"}, but pi 0.84.x accepts the array entry
+// without the discriminator and infers the content kind from the
+// images[] membership. The bridge relies on that and does NOT emit
+// a type tag — see issue #290 for the previous breakage caused by a
+// leaky stripDataURLPrefix that ended up shipping the full
+// data:<mime>;base64, payload as the data field.
 type promptParams struct {
 	Message string            `json:"message"`
 	Images  []imageAttachment `json:"images,omitempty"`
 }
 
-// imageAttachment matches Pi's ImageContent shape: type=image,
-// data=base64, mimeType=MIME. The "type" tag is fixed to "image" by
-// Pi and not exposed as a Go field.
+// imageAttachment is the per-image record inside promptParams. The
+// Type field is always set to "image" — pi 0.84.x accepts the entry
+// with or without the type tag (it can infer from images[] array
+// membership), but the explicit tag matches the canonical docs/rpc.md
+// shape and protects against future pi versions tightening the
+// schema.
 type imageAttachment struct {
+	Type     string `json:"type,omitempty"`
 	Data     string `json:"data"`
 	MimeType string `json:"mimeType"`
 }
@@ -184,10 +190,16 @@ type assistantMessage struct {
 	Role       string         `json:"role"`
 	Content    []contentBlock `json:"content"`
 	StopReason string         `json:"stopReason"`
-	Usage      *messageUsage  `json:"usage"`
-	Model      string         `json:"model"`
-	Provider   string         `json:"provider"`
-	Timestamp  int64          `json:"timestamp"`
+	// ErrorMessage is populated by Pi when stopReason == "error" and
+	// carries the upstream provider's failure text (e.g.
+	// `400: {"message":"invalid image base64 content",...}`). The
+	// bridge surfaces this on EventAgentResult.Err so the user sees
+	// the actual rejection reason instead of an opaque empty card.
+	ErrorMessage string        `json:"errorMessage,omitempty"`
+	Usage        *messageUsage `json:"usage"`
+	Model        string        `json:"model"`
+	Provider     string        `json:"provider"`
+	Timestamp    int64         `json:"timestamp"`
 }
 
 // contentBlock is one element of assistantMessage.Content. Pi's

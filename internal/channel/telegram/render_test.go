@@ -619,7 +619,98 @@ func TestRenderMarkdown_FenceLangInjectionSafe(t *testing.T) {
 	}
 }
 
-// --- Commit C: RenderForWire whole-body expandable fold ---
+// --- Commit D: footer markdown links → HTML for parse_mode=HTML ---
+
+// TestAppendTrailerToBody_PRLinkConvertedToHTML: the footer line
+// emitted by statusbar.formatPRSegment uses markdown link syntax
+// `[#N](url)` for both Feishu and Telegram. Feishu's lark_md
+// renderer interprets it natively; Telegram's HTML parser does
+// NOT, so the literal text leaks through. appendTrailerToBody
+// must convert the syntax into `<a href="...">text</a>` so the
+// PR link becomes a real clickable link on Telegram.
+func TestAppendTrailerToBody_PRLinkConvertedToHTML(t *testing.T) {
+	body := "result body"
+	footer := []string{
+		"📂: code/nightme · ⎇ main · [#284](https://github.com/cnlangzi/nightme/pull/284)",
+	}
+	full := appendTrailerToBody(body, footer)
+	if !strings.Contains(full, `<a href="https://github.com/cnlangzi/nightme/pull/284">#284</a>`) {
+		t.Fatalf("appendTrailerToBody did not convert markdown PR link to HTML; got:\n%s", full)
+	}
+	if strings.Contains(full, "[#284](https://") {
+		t.Errorf("appendTrailerToBody left literal markdown link in output; got:\n%s", full)
+	}
+}
+
+// TestAppendTrailerToBody_NoLinksPassthrough: footer lines without
+// any `[...](...)` pattern are returned unchanged.
+func TestAppendTrailerToBody_NoLinksPassthrough(t *testing.T) {
+	body := "body"
+	footer := []string{
+		"🤖: claude MiniMax-M3[1m] abcdef-...",
+		"💰:「 12.3k / 8.2k / 1.5k · 10.5% (200k) · $0.087 」",
+		"📁: code/nightme · ⎇ main · + 2 · − 1 · ? 4 · ⇡ 5",
+	}
+	full := appendTrailerToBody(body, footer)
+	if !strings.Contains(full, "🤖: claude MiniMax-M3[1m] abcdef-...") {
+		t.Errorf("identity line not preserved; got:\n%s", full)
+	}
+	if !strings.Contains(full, "💰:「") {
+		t.Errorf("usage line not preserved; got:\n%s", full)
+	}
+	if !strings.Contains(full, "📁: code/nightme") {
+		t.Errorf("git tracking line not preserved; got:\n%s", full)
+	}
+}
+
+// TestAppendTrailerToBody_UnsafeSchemeNotConverted: a footer line
+// containing a markdown link with an unsafe URL scheme (file://,
+// javascript:, etc.) must NOT be promoted into an HTML tag. The
+// line passes through unchanged so the literal text remains
+// (Telegram will render it as plain text — bad UX but no security
+// hazard).
+func TestAppendTrailerToBody_UnsafeSchemeNotConverted(t *testing.T) {
+	body := "body"
+	footer := []string{
+		`📁: evil · [click](javascript:alert(1))`,
+		`📁: more evil · [open](file:///etc/passwd)`,
+	}
+	full := appendTrailerToBody(body, footer)
+	if strings.Contains(full, `<a href="javascript:`) {
+		t.Errorf("appendTrailerToBody leaked javascript: scheme; got:\n%s", full)
+	}
+	if strings.Contains(full, `<a href="file:`) {
+		t.Errorf("appendTrailerToBody leaked file: scheme; got:\n%s", full)
+	}
+}
+
+// TestAppendTrailerToBody_EmptyFooterNoop: a nil / empty footer
+// leaves the body unchanged (mirrors the existing chain
+// appendSegmentForKind policy for status-bearing fields).
+func TestAppendTrailerToBody_EmptyFooterNoop(t *testing.T) {
+	cases := [][]string{nil, {}}
+	for _, footer := range cases {
+		got := appendTrailerToBody("body text", footer)
+		if got != "body text" {
+			t.Errorf("appendTrailerToBody with empty footer must return body unchanged; got %q", got)
+		}
+	}
+}
+
+// TestAppendTrailerToBody_PanelFramePreserved: the box-drawing
+// frame around the panel (`┌...─›` / `└...─›`) must NOT be
+// mangled by the markdown-to-HTML conversion — those chars are
+// not in the linkPattern's character set so they're safely
+// preserved.
+func TestAppendTrailerToBody_PanelFramePreserved(t *testing.T) {
+	full := appendTrailerToBody("body", []string{"📁: foo"})
+	if !strings.Contains(full, "┌──────────────›") {
+		t.Errorf("appendTrailerToBody lost panel top frame; got:\n%s", full)
+	}
+	if !strings.Contains(full, "└──────────────›") {
+		t.Errorf("appendTrailerToBody lost panel bottom frame; got:\n%s", full)
+	}
+}
 
 // TestRenderForWire_LongBodyFolded: a long rendered body
 // (> expandableFullThresholdChars = 2000 chars but < ~4056 chars so

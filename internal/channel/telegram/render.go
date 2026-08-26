@@ -427,11 +427,50 @@ func maybeWrapFullExpandable(rendered string) string {
 // panel itself uses box-drawing chars (┌──› / └──›) that are
 // already safe-HTML — no further RenderMarkdown / escapeHTML call
 // here, since either would mangle the frame.
+//
+// Markdown link conversion (§20.7 commit D): footerLines may contain
+// markdown link syntax like `[#284](https://github.com/.../pull/284)`
+// from statusbar.formatPRSegment. The statusbar package emits this
+// for both Feishu (lark_md renders it natively) and Telegram (which
+// would too if we ran it through RenderMarkdown) — but the panel
+// path bypasses RenderMarkdown to preserve the box-drawing frame,
+// so Telegram receives the literal `[#N](url)` text. The user
+// observes `[#284](https://...)` as plain text instead of a clickable
+// link. Convert via the wire-format link rule (escape URL + text,
+// only allow http/https/tg schemes) so Telegram renders it as a
+// proper link while Feishu's statusbar consumer (which still passes
+// the raw textlines through its own lark_md) sees no change.
 func appendTrailerToBody(body string, footerLines []string) string {
 	if len(footerLines) == 0 {
 		return body
 	}
-	return body + "\n\n" + statusbar.RenderPanel(footerLines)
+	converted := make([]string, len(footerLines))
+	for i, line := range footerLines {
+		converted[i] = wireFormatFooterLine(line)
+	}
+	return body + "\n\n" + statusbar.RenderPanel(converted)
+}
+
+// wireFormatFooterLine rewrites markdown link syntax in a single
+// footer line into Telegram-safe HTML. Lines without `[...](...)`
+// pass through unchanged. Lines with unsafe schemes (file://,
+// javascript:, etc.) keep the literal markdown text — the link
+// is suppressed, not coerced into a malicious URL.
+//
+// This is the same rule renderInline applies for inline links;
+// duplicating it here keeps the footer path self-contained (no
+// need to thread an isHTML flag through statusbar to keep the
+// shared statusbar package render-mode-agnostic).
+func wireFormatFooterLine(line string) string {
+	return linkPattern.ReplaceAllStringFunc(line, func(match string) string {
+		parts := linkPattern.FindStringSubmatch(match)
+		text := parts[1]
+		url := parts[2]
+		if !safeLink(url) {
+			return match
+		}
+		return "<a href=\"" + html.EscapeString(url) + "\">" + html.EscapeString(text) + "</a>"
+	})
 }
 
 // splitTelegramText splits rendered HTML text into chunks of ≤ limit bytes.

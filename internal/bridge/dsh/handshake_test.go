@@ -30,6 +30,7 @@ type handshakeMock struct {
 	archiveCount   atomic.Int64 // Close calls workspace.archiveSession (repo-scoped workspace survives)
 	promptCount    atomic.Int64
 	promptFailNext atomic.Bool
+	respondCount   atomic.Int64 // /api/respond — RunOnce auto-allow posts here
 
 	mu               sync.Mutex
 	lastCreate       map[string]any
@@ -39,6 +40,7 @@ type handshakeMock struct {
 	historyEvents    []map[string]any
 	nextFreshCounter atomic.Int64
 	lastPrompt       atomic.Value // map[string]any
+	lastRespond      atomic.Value // []byte of last /api/respond body
 
 	respondText atomic.Value // string — when set, prompt handler synthesises a complete turn
 }
@@ -54,6 +56,7 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace.archiveSession", m.handleWorkspaceArchiveSession)
 	mux.HandleFunc("/api/session.prompt", m.handleSessionPrompt)
+	mux.HandleFunc("/api/respond", m.handleRespond)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
 	return m
@@ -275,6 +278,18 @@ func (m *handshakeMock) handleSessionPrompt(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeOK(w, env.RPCID, map[string]any{"accepted": true})
+}
+
+// handleRespond accepts /api/respond (client-response envelope).
+// Shape differs from the other /api/* handlers — see host.RPCClient.Respond.
+// Needed so drainForRunResult's auto-allow can POST without a 404.
+func (m *handshakeMock) handleRespond(w http.ResponseWriter, r *http.Request) {
+	m.respondCount.Add(1)
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	_ = r.Body.Close()
+	m.lastRespond.Store(append([]byte(nil), body...))
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"accepted":true}`))
 }
 
 func (m *handshakeMock) lastCreateCopy() map[string]any {

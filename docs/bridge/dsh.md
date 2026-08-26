@@ -590,7 +590,7 @@ func (d *driver) SendPermission(resp string) error {
 - 5 min timeout(`permissionTimeout` 包级 var),过期 → decline,test 压 200ms
 - **AskUserQuestion 批答**:host `matchesQuestions` 要求 `answers.length == questions.length` 且 `answer.id === question.id` 按序。飞书单题卡点选项即 `SendPermission(label)`;**Type your answer** Submit / **Skip this question** 走 `nm-q:`(`custom` 或空 `selected`)。多题卡在卡内翻页(`Step`/`Picks`),中间 click PATCH 并且在 `card.action.trigger` 回调里带回下一张卡(`card.type=raw`),最后一步才 inbound `nm-q:` JSON 批答。飞书交互卡设计与踩坑见 [feishu-cards.md](../channel/feishu-cards.md)。
 - **Approval ≠ Question**:mux `approval/requested` 用 `ApprovalResponse{outcome:allowed-once|rejected}`(飞书 **Waiting for approval** / Allow once / Reject);`question/requested` 用 `QuestionResponse`。两种卡分类型。dashboard 点 Allow once 后 host 发 `approval/resolved`,bridge **继续收 mux 事件**(不卡在 Feishu Action Needed),并 PATCH 掉飞书按钮。
-- 新 session / attach / `/new` 后发 `/permission danger-full-access`(host 拦截 slash,不开模型 turn),避免 workspace-write 下 git worktree lock 反复授权。
+- ~~新 session / attach / `/new` 后发 `/permission danger-full-access`~~ **已废弃(#282)**:host **不**拦截 leading-`/`,slash 会进模型 turn。host 级 `DSH_PERMISSION_MODE=danger-full-access` 仍注入;chat 路径靠飞书卡 + `SendPermission`,RunOnce/Review 路径由 `drainForRunResult` 对 `EventAgentPermission` 自动 `Allow once`(见 §15.5)。
 
 ### 4.6 lifecycle (`session.go`)
 
@@ -1348,11 +1348,12 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption
 
 任何一步的 drop / observe 都和 long-lived path 走**同一份代码**（共享 `internal/gateway/outbound/policy.go::DefaultPolicies` 和 `chatsession.HeartbeatTracker`），所以 `/think off` 隐藏的 thinking **仍然被观测**，但不被渲染 —— F-63 "抗丢" 不变量在两条路径都成立。
 
-**Permission 语义**:one-shot / review 用 full-access 权限模式,**Permission.ResponseCh 不经 sink 路由** —— sink 是 observability,decision 走 runtime 已有路径。如果未来 Permission 真的在 one-shot 里 fire 了,sink 会看到但 bridge 不会卡住等响应。
+**Permission 语义**:one-shot / review **没有**交互用户在 ResponseCh 上作答。`#282` 已去掉 `/permission danger-full-access` priming slash(host 会把 leading-`/` 转给模型,并不拦截),因此新 session 仍可能停在 workspace-write+ask,中途弹出 `approval/requested`。`drainForRunResult` 在见到 `EventAgentPermission` 时本地 `SendPermission(Options[0])`(`Allow once`)自动放行 —— sink 仍能观察到该 event(observability),但 **decision 不经 sink / ResponseCh**。若 auto-allow 失败,5min watchdog 才会 decline。
 
 **测试覆盖**:
 - `TestDrainForRunResult_SinkReceivesEvents` (mock):sink 收齐 Text / ToolStart / ToolEnd / Result
 - `TestDrainForRunResult_NilSinkSafe` (mock):nil sink 不 panic
+- `TestDrainForRunResult_AutoAllowsPermission` (mock):mid-turn `approval/requested` → auto `Allow once` + Result 正常返回
 - `TestE2E_RunOnce_Sink_RealDSH` (真机):真 dsh 上 sink 收到 Ready + Result
 - gtw/review 调用点接 sink 由 compile-time 检查保证(类型签名强制)
 

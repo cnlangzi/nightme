@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -443,6 +444,81 @@ func TestDrainForRunResult_NilSinkSafe(t *testing.T) {
 	}
 	if res.Text != "ok" {
 		t.Errorf("RunResult.Text = %q, want %q", res.Text, "ok")
+	}
+}
+
+// ─── TestDrainForRunResult_AutoAllowsPermission ─────────────────
+// RunOnce / Review have no interactive Feishu card reader. When the
+// host fires approval/requested mid-turn, drainForRunResult must
+// SendPermission("Allow once") so the turn is not wedged until the
+// 5min decline watchdog. The sink still observes the permission
+// event (observability); the decision is local to the drain.
+func TestDrainForRunResult_AutoAllowsPermission(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	s := NewStarter("dsh")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := s.Start(ctx, agent.StartConfig{Workspace: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if !drainOneReady(t, a, 2*time.Second) {
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+	d, ok := a.Driver().(*driver)
+	if !ok {
+		t.Fatalf("a.Driver() = %T, want *driver", a.Driver())
+	}
+
+	var sawPermission atomic.Bool
+	go func() {
+		// Let drainForRunResult block on Events after SendBlocks.
+		time.Sleep(50 * time.Millisecond)
+		d.handleApprovalRequested("rpc-runonce-1", muxApprovalRequested{
+			SessionID:  d.sessionID,
+			ApprovalID: "appr-runonce-1",
+			ToolName:   "Bash",
+			Reason:     "git status",
+		})
+		// Give auto-allow a beat to POST /api/respond before Result.
+		time.Sleep(50 * time.Millisecond)
+		d.deliver(agent.AgentEvent{
+			Kind: agent.EventAgentResult,
+			Result: &agent.AgentResultEvent{
+				Text:    "review done",
+				Subtype: "success",
+			},
+		})
+	}()
+
+	res, err := drainForRunResult(ctx, a, []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: "review pls",
+	}}, func(ev agent.AgentEvent) {
+		if ev.Kind == agent.EventAgentPermission {
+			sawPermission.Store(true)
+		}
+	})
+	if err != nil {
+		t.Fatalf("drainForRunResult: %v", err)
+	}
+	if res.Text != "review done" {
+		t.Errorf("RunResult.Text = %q, want %q", res.Text, "review done")
+	}
+	if !sawPermission.Load() {
+		t.Fatal("sink never saw EventAgentPermission (observability regression)")
+	}
+	if mock.respondCount.Load() != 1 {
+		t.Fatalf("respond calls = %d, want 1 (auto-allow)", mock.respondCount.Load())
+	}
+	body, _ := mock.lastRespond.Load().([]byte)
+	if !strings.Contains(string(body), "allowed-once") {
+		t.Errorf("respond body = %s, want outcome allowed-once", body)
 	}
 }
 

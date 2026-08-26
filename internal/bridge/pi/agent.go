@@ -1201,24 +1201,24 @@ func encodeImage(path, mimeType string) (string, error) {
 }
 
 // stripDataURLPrefix removes the "data:<mime>;base64," prefix from a
-// data URL, returning only the base64 payload.
+// data URL, returning only the base64 payload. Returns the input
+// unchanged when no ";base64," separator is present (already-stripped
+// payload, or non-data-URL string) so callers can pipe-through safely.
+//
+// Issue #290: the previous implementation matched `HasSuffix(..., "base64,")`
+// against `dataURL[:comma]`, which silently never matched the well-formed
+// `data:<mime>;base64,<payload>` shape — `dataURL[:comma]` ends at the
+// `<mime>` boundary, not at the `;base64,` token. Result: pi was being
+// handed the full data URL as the `data` field of a prompt image
+// attachment, which the upstream provider then rejected with
+// `invalid image base64 content`. See F-32 / F-52 test infra for the
+// repro that pinned this down.
 func stripDataURLPrefix(dataURL string) string {
-	const prefix = "base64,"
-	if i := indexByte(dataURL, ','); i > 0 && strings.HasSuffix(dataURL[:i], prefix) {
-		return dataURL[i+1:]
+	const sep = ";base64,"
+	if _, after, ok := strings.Cut(dataURL, sep); ok {
+		return after
 	}
 	return dataURL
-}
-
-// indexByte is a tiny helper to avoid importing strings for one
-// call. Returns the index of c in s, or -1 if absent.
-func indexByte(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // Compile-time guarantee that *driver satisfies the package-private

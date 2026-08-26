@@ -32,6 +32,7 @@ package pi
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -147,6 +148,16 @@ type turnState struct {
 	// stopReason. Surfaced as AgentResultEvent.Subtype; "error" also
 	// sets .
 	stopReason string
+
+	// lastError is the upstream provider's failure text carried by
+	// assistant message_end when stopReason == "error" (e.g.
+	// "400: {"message":"invalid image base64 content",...}"). When
+	// non-empty, finishTurnLocked attaches it to
+	// EventAgentResult.Err so the user sees the actual rejection
+	// reason instead of an opaque empty 📝 card — see AgentResultEvent
+	// doc on internal/agent/agent.go for the "errors go on ev.Err,
+	// Subtype is categorisation only" contract.
+	lastError string
 
 	// lastUsage is the usage block of the most recent assistant
 	// message_end.
@@ -804,6 +815,12 @@ func (t *translator) recordAssistantMessageLocked(msg assistantMessage) []agent.
 	// has already been flushed at the tool boundary that followed it.
 	t.turn.lastMessageText = text
 	t.turn.stopReason = msg.StopReason
+	// Capture upstream-provider error text so finishTurnLocked can
+	// surface it as EventAgentResult.Err when stopReason == "error".
+	// Pi populates errorMessage on message_end only on the rejection
+	// path; on the happy path it stays empty (omitempty on the wire
+	// struct).
+	t.turn.lastError = msg.ErrorMessage
 	// An assistant message_end arrived — the turn has an assistant
 	// message worth reporting, even if the content[] carried no
 	// text blocks (e.g. toolCall-only or empty on stopReason=error).
@@ -925,14 +942,27 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 	}
 	t.turn.pendingText = ""
 
-	return []agent.AgentEvent{{
+	ev := agent.AgentEvent{
 		Kind: agent.EventAgentResult,
 		Result: &agent.AgentResultEvent{
 			Text:    text,
 			Subtype: t.turn.stopReason,
 			Usage:   t.turn.lastUsage,
 		},
-	}}
+	}
+	// Surface the upstream provider's failure text on the result
+	// event when this turn ended on an error. AgentResultEvent's
+	// contract says errors go on ev.Err (Subtype is categorisation
+	// only); without this the channel sees an empty Text + Subtype:
+	// "error" and renders an opaque card. See issue #290 — pi was
+	// forwarding a malformed image payload (full data URL instead of
+	// pure base64) which the provider rejected with
+	// `invalid image base64 content`; the user had no way to see the
+	// reason.
+	if t.turn.lastError != "" {
+		ev.Err = errors.New(t.turn.lastError)
+	}
+	return []agent.AgentEvent{ev}
 }
 
 // decodeMessageUsage converts Pi's per-message usage block into the

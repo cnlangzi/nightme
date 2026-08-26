@@ -184,10 +184,16 @@ type assistantMessage struct {
 	Role       string         `json:"role"`
 	Content    []contentBlock `json:"content"`
 	StopReason string         `json:"stopReason"`
-	Usage      *messageUsage  `json:"usage"`
-	Model      string         `json:"model"`
-	Provider   string         `json:"provider"`
-	Timestamp  int64          `json:"timestamp"`
+	// ErrorMessage is populated by Pi when stopReason == "error" and
+	// carries the upstream provider's failure text (e.g.
+	// `400: {"message":"invalid image base64 content",...}`). The
+	// bridge surfaces this on EventAgentResult.Err so the user sees
+	// the actual rejection reason instead of an opaque empty card.
+	ErrorMessage string        `json:"errorMessage,omitempty"`
+	Usage        *messageUsage `json:"usage"`
+	Model        string        `json:"model"`
+	Provider     string        `json:"provider"`
+	Timestamp    int64         `json:"timestamp"`
 }
 
 // contentBlock is one element of assistantMessage.Content. Pi's

@@ -228,17 +228,15 @@ func MatchAsset(release *Release, version string) *Asset {
 
 // DownloadResult is what Download returns on success. The caller
 // (CLI / install command) reads StagingPath to swap the binary
-// in place. StagingDir is the directory StagingPath lives in,
-// carried explicitly so callers can pass it to ExtractArchive
-// without re-deriving it from StagingPath (a hand-rolled
-// "scan-for-slash" dir helper breaks on Windows backslash
-// paths and falls back to "." — that's how the REPL extraction
-// landed on cwd/nightme.exe and collided with the running
-// binary, see TestExtractArchive_WritesToStagingDir).
+// in place. The parent dir is reachable as filepath.Dir(StagingPath)
+// — we deliberately do NOT carry it as a separate field here, since
+// every caller already has the original stagingDir in scope and
+// round-tripping a redundant string through the struct is pure
+// over-engineering (see the older "StagingDir:" iteration in git
+// history; dsh review 2026-08-26 caught the redundancy).
 type DownloadResult struct {
 	Asset       Asset
-	StagingDir  string // directory StagingPath lives in (== filepath.Dir(StagingPath))
-	StagingPath string // absolute path under StagingDir
+	StagingPath string // absolute path under the stagingDir passed to Download
 	SHA256Hex   string // hex-encoded hash of the downloaded bytes
 	Bytes       int64  // total bytes written (== Asset.Size on success)
 	Cached      bool   // true when a local archive already matched SHA256SUMS
@@ -334,7 +332,6 @@ func Download(
 
 	return &DownloadResult{
 		Asset:       *asset,
-		StagingDir:  stagingDir,
 		StagingPath: stagingPath,
 		SHA256Hex:   gotSum,
 		Bytes:       asset.Size,
@@ -361,7 +358,6 @@ func verifyLocalArchive(path, wantSum string, asset *Asset) *DownloadResult {
 	}
 	return &DownloadResult{
 		Asset:       *asset,
-		StagingDir:  filepath.Dir(path),
 		StagingPath: path,
 		SHA256Hex:   gotSum,
 		Bytes:       info.Size(),

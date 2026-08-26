@@ -51,6 +51,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -322,7 +323,7 @@ func runInstallStage(
 ) error {
 	out := deps.Out
 
-	binary, err := updater.ExtractArchive(dl.StagingPath, dl.StagingDir)
+	binary, err := updater.ExtractArchive(dl.StagingPath, filepath.Dir(dl.StagingPath))
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
@@ -391,14 +392,10 @@ func askYesNo(out io.Writer, reader func() (string, error), prompt string, defau
 	return answer == "y" || answer == "yes"
 }
 
-// (filepathDir used to live here as a hand-rolled "/"-only
-// scanner. On Windows archive paths use "\\" as the separator,
-// so the helper fell through to "." and ExtractArchive wrote to
-// cwd/nightme.exe — colliding with the running exe. The real
-// fix is for the caller to carry stagingDir through, so we now
-// read dl.StagingDir (populated by updater.Download). Keeping
-// the dead code would just wait for the next person to wire it
-// back up.)
+// filepathDir was removed: its hand-rolled "/"-only scan broke on
+// Windows backslash paths and tripped the Win32 ERROR_SHARING_VIOLATION
+// when REPL extraction wrote to cwd/nightme.exe. The fix is to derive
+// stagingDir via filepath.Dir(dl.StagingPath) at the use site.
 
 // resolveDataDir returns cfg.Paths.DataDir or "" if config
 // can't be loaded. Used by the live-check fallback in the

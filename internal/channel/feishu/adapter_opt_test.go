@@ -596,10 +596,14 @@ func TestBuildInteractiveCard_ApprovalHasNoCustomInput(t *testing.T) {
 }
 
 func gtwDecisionOptions() []messages.ChoiceOption {
+	// Generic 3-option decision card used by buildInteractiveCard
+	// tests. Was previously branch-newv2 / branch-join / cancel
+	// (F-XX §3.1 removed the branch-exists card; the IDs are
+	// now arbitrary as long as they're unique and tag-shaped).
 	return []messages.ChoiceOption{
-		{ID: "act:/gtw/branch-newv2", Emoji: "🆕", Label: "用 -v2 新分支"},
-		{ID: "act:/gtw/branch-join", Emoji: "🔗", Label: "加入现有协作"},
-		{ID: "act:/gtw/cancel", Emoji: "❌", Label: "取消"},
+		{ID: "act:/test/option-a", Emoji: "🆕", Label: "option a"},
+		{ID: "act:/test/option-b", Emoji: "🔗", Label: "option b"},
+		{ID: "act:/test/cancel", Emoji: "❌", Label: "cancel"},
 	}
 }
 
@@ -612,7 +616,7 @@ func TestBuildInteractiveCard_DecisionSettledHighlightsSelectedID(t *testing.T) 
 		Kind:       messages.ChoiceKindDecision,
 		Options:    opts,
 		Settled:    true,
-		SelectedID: "act:/gtw/branch-newv2",
+		SelectedID: "act:/test/option-a",
 	})
 	if err != nil {
 		t.Fatalf("buildInteractiveCard: %v", err)
@@ -632,13 +636,13 @@ func TestBuildInteractiveCard_DecisionSettledHighlightsSelectedID(t *testing.T) 
 	if !strings.Contains(raw, `"type":"success"`) {
 		t.Error("selected option must use success type")
 	}
-	if !strings.Contains(raw, "✓ 🆕 用 -v2 新分支") {
+	if !strings.Contains(raw, "✓ 🆕 option a") {
 		t.Error("selected option must match by ID (act:/gtw/...), not emoji")
 	}
 	if strings.Contains(raw, "✓ 🔗") || strings.Contains(raw, "✓ ❌") {
 		t.Error("unselected options must not get the ✓ prefix")
 	}
-	if !strings.Contains(raw, `"action":"act:/gtw/branch-newv2"`) {
+	if !strings.Contains(raw, `"action":"act:/test/option-a"`) {
 		t.Error("button value must keep the act: ID")
 	}
 	if strings.Count(raw, `"disabled":true`) < 3 {
@@ -681,7 +685,7 @@ func TestSend_OutChoicePatch_DecisionKeepsButtonsAndHighlights(t *testing.T) {
 			Kind:       messages.ChoiceKindDecision,
 			Options:    opts,
 			Settled:    true,
-			SelectedID: "act:/gtw/branch-newv2",
+			SelectedID: "act:/test/option-a",
 		},
 	}); err != nil {
 		t.Fatalf("Send OutChoicePatch: %v", err)
@@ -691,7 +695,7 @@ func TestSend_OutChoicePatch_DecisionKeepsButtonsAndHighlights(t *testing.T) {
 	if !strings.Contains(patched, `"tag":"button"`) {
 		t.Errorf("gtw PATCH must keep buttons; got %s", patched)
 	}
-	if !strings.Contains(patched, "✓ 🆕 用 -v2 新分支") {
+	if !strings.Contains(patched, "✓ 🆕 option a") {
 		t.Errorf("gtw PATCH must highlight SelectedID; got %s", patched)
 	}
 	if strings.Contains(patched, "👉") {

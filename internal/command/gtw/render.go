@@ -180,39 +180,8 @@ func renderFixLocalSuccessCard(branch, worktree string) string {
 	return b.String()
 }
 
-// BranchExistsChoice builds the §5.3.1 interactive decision card.
-// This is the single source of truth for the production `/gtw fix`
-// (emitBranchExistsDraft) — callers must not re-hardcode Choices.
-//
-// F-XX: handles both ID-mode (IssueID > 0) and local-mode
-// (IssueID == -1) drafts. Local-mode drafts have no issue
-// title / repo to display; the body shows the branch slug
-// directly.
-func BranchExistsChoice(p FixDraftPayload, existingPath string) Choice {
-	var body string
-	if p.IssueID == -1 {
-		// Local-mode draft (no remote issue).
-		body = fmt.Sprintf("branch: `%s` (local)\n", p.Branch)
-	} else {
-		body = fmt.Sprintf("issue: #%d  %s\n", p.IssueID, p.Title)
-	}
-	if existingPath != "" {
-		body += fmt.Sprintf("已有 worktree: %s\n", existingPath)
-	}
-	body += "\n选择操作(反应对应 emoji):"
-	return Choice{
-		Title: fmt.Sprintf("⚠️ 分支 `%s` 已存在", p.Branch),
-		Body:  body,
-		Options: []ChoiceOption{
-			{ID: "act:/gtw/branch-newv2", Emoji: "🆕", Label: "用 -v2 新分支"},
-			{ID: "act:/gtw/branch-join", Emoji: "🔗", Label: "加入现有协作"},
-			{ID: "act:/gtw/cancel", Emoji: "❌", Label: "取消"},
-		},
-	}
-}
-
 // WorktreeFailChoice builds the §5.3.3 interactive decision card.
-// Same ownership rule as BranchExistsChoice: business layer owns the
+// Same ownership rule: business layer owns the
 // shape; debug UAT reuses it.
 //
 // F-XX: local-mode drafts (IssueID == -1) have no remote issue

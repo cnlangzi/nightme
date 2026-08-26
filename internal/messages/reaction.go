@@ -49,19 +49,17 @@ const (
 // wants to translate clicks — both sides MUST agree on the exact
 // spelling. The renderer currently emits:
 //
-//	act:/gtw/branch-newv2   → ReactionNewV2   (BranchExistsChoice)
-//	act:/gtw/branch-join    → ReactionJoin    (BranchExistsChoice)
-//	act:/gtw/cancel         → ReactionCancel  (BranchExistsChoice + WorktreeFailChoice)
+//	act:/gtw/cancel         → ReactionCancel  (WorktreeFailChoice)
 //	act:/gtw/worktree-retry → ReactionRetry   (WorktreeFailChoice)
 //
+// (F-XX §3.1 removed the BranchExistsChoice card and its
+// 🆕 / 🔗 buttons; branch-newv2 and branch-join are no longer
+// recognised — see feishu-rendering.md action map.)
+//
 // reaction_test.go pins this contract by walking every Choice in
-// both rendered cards and asserting ActionLookup recognises it.
+// rendered cards and asserting ActionLookup recognises it.
 func ActionLookup(tag string) (ReactionKind, bool) {
 	switch tag {
-	case "act:/gtw/branch-newv2":
-		return ReactionNewV2, true
-	case "act:/gtw/branch-join":
-		return ReactionJoin, true
 	case "act:/gtw/cancel":
 		return ReactionCancel, true
 	case "act:/gtw/worktree-retry":

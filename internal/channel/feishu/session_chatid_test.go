@@ -307,7 +307,7 @@ func TestHandleCardAction_DispatchesChatID(t *testing.T) {
 			Operator: &larkcallback.Operator{OpenID: "ou_user"},
 			Action: &larkcallback.CallBackAction{
 				Value: map[string]any{
-					"action":     "act:/gtw/branch-newv2",
+					"action":     "act:/gtw/cancel",
 					"request_id": "req-card-test",
 				},
 			},
@@ -402,4 +402,3 @@ func TestHandleCardAction_SkipsLogOnEmptyChatID(t *testing.T) {
 		t.Errorf("unexpected log output on empty chatID: %s", string(out))
 	}
 }
-

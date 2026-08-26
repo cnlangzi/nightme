@@ -55,8 +55,6 @@ func HandleDraftReaction(
 		"draft_kind", string(draft.Kind),
 		"choice_posted", draft.ChoicePosted)
 	switch draft.Kind {
-	case DraftFixBranchExists:
-		return executeBranchExistsAction(ctx, m, deps, cs, ev, draft), nil
 	case DraftFixWorktreeFail:
 		return executeWorktreeFailAction(ctx, m, deps, cs, ev, draft), nil
 	case DraftFixLabelTaken:
@@ -66,123 +64,6 @@ func HandleDraftReaction(
 	slog.Default().Warn("F-46 debug: HandleDraftReaction draft kind not matched",
 		"draft_kind", string(draft.Kind))
 	return false, nil
-}
-
-// executeBranchExistsAction handles 🆕 / 🔗 / ❌ on the §5.3.1
-// card. Returns true when the emoji was recognised and the action
-// ran (and the draft was taken); false when the emoji was unknown
-// and the draft is left in place for the user to re-react.
-func executeBranchExistsAction(
-	ctx context.Context,
-	m *Manager,
-	deps HandlerDeps,
-	cs *chatsession.ChatSession,
-	ev services.ReactionEvent,
-	draft *Draft,
-) bool {
-	p := draft.Payload
-	// Defensive check: only ID-mode drafts (IssueID > 0) carry
-	// a Repo / Provider — local-mode drafts (IssueID == -1)
-	// legitimately have empty Repo. If an ID-mode draft shows
-	// up with no Repo, it's broken; surface that explicitly.
-	if p.IssueID != -1 && p.Repo == "" {
-		m.TakeDraft(ev.ChatID, ev.RequestID)
-		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), "❌ Internal error: draft missing repo.")
-		return true
-	}
-
-	switch messages.ReactionKind(ev.Emoji) {
-	case messages.ReactionCancel:
-		m.TakeDraft(ev.ChatID, ev.RequestID)
-		resultText := cancelResultText(p)
-		// Label rollback only applies to ID-mode drafts (local
-		// mode never added a label). resultText is set to a
-		// "manual cleanup" hint when the provider is unreachable
-		// so the user knows the label was NOT removed.
-		if p.LabelAdded && p.Repo != "" {
-			owner, repo, _ := splitOwnerRepo(p.Repo)
-			provider, providerErr := NewProvider(ProviderKind(p.Provider), "", p.Worktree)
-			switch {
-			case providerErr != nil || provider == nil:
-				resultText = fmt.Sprintf(
-					"⚠️ Cancelled fix #%d locally, but could not reach the provider to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
-					p.IssueID, providerErr, p.IssueID, p.IssueID)
-			default:
-				_ = provider.RemoveIssueLabel(ctx, owner, repo, p.IssueID, LabelWIP)
-			}
-		}
-		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
-		return true
-
-	case messages.ReactionNewV2:
-		m.TakeDraft(ev.ChatID, ev.RequestID)
-		repoRoot := repoRootFromChatSession(cs)
-		resultText := ""
-		for n := range 9 {
-			n += 2 // 2..10 inclusive
-			variant := BranchVariant(p.Branch, n)
-			exists, err := BranchExists(ctx, repoRoot, variant, deps.Git)
-			if err != nil {
-				resultText = fmt.Sprintf("❌ git show-ref failed: %v", err)
-				break
-			}
-			if exists {
-				continue
-			}
-			worktree := WorktreePath(repoRoot, BranchVariant(p.Slug, n))
-			if err := WorktreeAdd(ctx, repoRoot, variant, worktree, "HEAD", deps.Git); err != nil {
-				resultText = fmt.Sprintf("❌ git worktree add: %v", err)
-				break
-			}
-			if err := cs.SetSelectedCwd(worktree); err != nil {
-				resultText = fmt.Sprintf("❌ SetSelectedCwd: %v", err)
-				break
-			}
-			m.SetContext(ev.ChatID, Context{
-				Mode:      ModeFromDraftPayload(p),
-				Issue:     p.IssueID,
-				Branch:    variant,
-				Worktree:  worktree,
-				State:     StateFixing,
-				UpdatedAt: deps.Now(),
-			})
-			resultText = variantReadyResultText(p, variant)
-			break
-		}
-		if resultText == "" {
-			resultText = "❌ Too many branch variants; please clean up locally."
-		}
-		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
-		return true
-
-	case messages.ReactionJoin:
-		m.TakeDraft(ev.ChatID, ev.RequestID)
-		repoRoot := repoRootFromChatSession(cs)
-		existingPath, err := WorktreeListPath(ctx, repoRoot, p.Branch, deps.Git)
-		resultText := ""
-		if err != nil {
-			resultText = fmt.Sprintf("❌ git worktree list: %v", err)
-		} else if existingPath == "" {
-			resultText = fmt.Sprintf("❌ Branch %s exists but no worktree holds it; run `git worktree add` manually.", p.Branch)
-		} else if err := cs.SetSelectedCwd(existingPath); err != nil {
-			resultText = fmt.Sprintf("❌ SetSelectedCwd: %v", err)
-		} else {
-			m.SetContext(ev.ChatID, Context{
-				Mode:      ModeFromDraftPayload(p),
-				Issue:     p.IssueID,
-				Branch:    p.Branch,
-				Worktree:  existingPath,
-				State:     StateFixing,
-				UpdatedAt: deps.Now(),
-			})
-			resultText = fmt.Sprintf("✅ Joined existing worktree at %s.", existingPath)
-		}
-		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
-		return true
-	}
-	// Unrecognised emoji on a known draft: leave the draft in
-	// place for the user to react correctly.
-	return false
 }
 
 // executeWorktreeFailAction handles 🔄 / ❌ on the §5.3.3 card.

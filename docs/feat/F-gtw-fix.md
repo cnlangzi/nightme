@@ -1,6 +1,6 @@
 # F-XX: `/gtw fix` — Plan-first dispatch + 分支硬失败
 
-> **Status**: 设计已定，待实现
+> **Status**: 实现已落地（PR-A + PR-B 合并到 `fix-gtw-fix` 分支）
 >
 > **Related**: [`F-gtw.md`](./F-gtw.md)、[`F-59-gtw-label-bootstrap.md`](./F-59-gtw-label-bootstrap.md)、[`internal/command/gtw/README.md`](../../internal/command/gtw/README.md)（IM 排版规约）
 >
@@ -263,24 +263,28 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 
 ## 7. 实现清单
 
-| 文件 | 改动 | PR |
-|---|---|---|
-| `cmd.go` | `fixArgs.Yes`；`parseFixArgs` 解析 `-y/--yes` 且显式 reject `--force/-f`；Usage；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` | A |
-| `fix.go` | `IssueDispatchMode`；两套 prompt；删 `forceCleanWorktreePath` + `if force` 分支；re-entry 路径用 `DispatchPlan`；`runFixLocal` 删 `yes bool` 形参；branch exists → hard-fail；删 recovery / branch-exists draft | A + B |
-| `types.go` | 加 `IssueDispatchMode` | A |
-| `types.go` | 删 `DraftFixBranchExists` | B |
-| `render.go` | success card hint（Plan / Execute）；删 `BranchExistsChoice` | A + B |
-| `action.go` | 删 `executeBranchExistsAction` + `case DraftFixBranchExists` 分支 | B |
-| `dispatch_test.go` | Plan / Execute prompt 单测；5 个原测试改形参 | A |
-| `parse_fix_args_test.go` | 新增：`TestParseFixArgs_YesFlag` + `TestParseFixArgs_ForceFlagRejected` | A |
-| `render_fix_success_test.go` | 新增：Plan / Execute success card 测试 + empty-baseSHA | A |
-| `attachments_test.go` | 改形参加 `DispatchPlan` | A |
-| `close_integration_test.go` | `args.Force` → `args.Yes` | A |
-| `fix_remote_integration_test.go` | `drive()` 注释更新；新增 `TestFixRemote_BranchExists_HardFails_NoSideEffects` | A + B |
-| `preflight_test.go` | 注释更新 | A |
-| `action_test.go` | 删 `BranchExistsChoice` 相关测试 | B |
-| `force_test.go` | 整个文件删（`forceCleanWorktreePath` 死代码） | A |
-| feishu channel adapter | `gtwActionMap` 删 `branch-newv2` / `branch-join` 两个 key | B |
+| 文件 | 改动 | PR | 状态 |
+|---|---|---|---|
+| `cmd.go` | `fixArgs.Yes` 字段；`parseFixArgs` 解析 `-y/--yes` 且显式 reject `--force/-f`；Usage 文本；Factory.runFix 在 ModeLocal 时强制清零 `args.Yes` | A | ✅ |
+| `fix.go` | 加 `IssueDispatchMode` 线程（dispMode 形参贯穿 runFixRemote → completeFixAndDispatch）；两套 prompt（`buildIssueDispatchText` switch on mode）；删 `forceCleanWorktreePath` + 两个 `if force` 分支；`runFixLocal` 删 `yes bool` 形参；BranchExists 全部走 hard-fail reply（删除 re-entry 同路径恢复分支 + 删除 emitBranchExistsDraft）；renderFixSuccessCard / completeFixAndDispatch 加 `reentry bool` 形参（re-entry mode-neutral hint） | A + B | ✅ |
+| `types.go` | 加 `IssueDispatchMode`（DispatchPlan / DispatchExecute）；删 `DraftFixBranchExists` 常量 | A + B | ✅ |
+| `render.go` | success card hint 按 mode 分文案（Plan / Execute / reentry）；删 `BranchExistsChoice` 函数 | A + B | ✅ |
+| `action.go` | `HandleDraftReaction` switch 删 `case DraftFixBranchExists`；删 `executeBranchExistsAction` 整个函数 | B | ✅ |
+| `messages/reaction.go` | `ActionLookup` 删 `branch-newv2` / `branch-join` case | B | ✅ |
+| `dispatch_test.go` | 5 个原 `TestBuildIssueDispatchText_*` 改形参 + 新增 Plan_StopsBeforeEdits / Execute_AuthorisesEdits | A | ✅ |
+| `parse_fix_args_test.go` | 新增：`TestParseFixArgs_YesFlag` + `TestParseFixArgs_ForceFlagRejected` + `NameValueFlagShaped` + `NameMissingValue` + `PositionalOrdering` + `LocalModeTooManyArgs` + `RemoteModeTooManyArgs` + `MissingArgument` + `UnknownFlagRejected` | A | ✅ |
+| `render_fix_success_test.go` | 新增：Plan / Execute success card 测试 + reentry 测试 + empty-baseSHA | A | ✅ |
+| `attachments_test.go` | `buildIssueDispatchBlocks` 形参加 `DispatchPlan` | A | ✅ |
+| `close_integration_test.go` | `args.Force` → `args.Yes` | A | ✅ |
+| `fix_remote_integration_test.go` | `drive()` 注释更新；新增 `TestFixRemote_BranchExists_HardFails_NoSideEffects` | A + B | ✅ |
+| `preflight_test.go` | 注释更新 | A | ✅ |
+| `action_test.go` | 删 `TestBranchExistsChoice_LocalMode` / `_RemoteMode` | B | ✅ |
+| `manager_test.go` | `DraftFixBranchExists` → `DraftFixWorktreeFail`（保留 manager 测试覆盖面） | B | ✅ |
+| `render_lookup_contract_test.go` | 删 `BranchExistsChoice` test case（保留 `WorktreeFailChoice` case） | B | ✅ |
+| `force_test.go` | 整个文件删（`forceCleanWorktreePath` 死代码） | A | ✅ |
+| `cmd.go::runClose` doc + `close.go::assertWorktreeClean` comment | 改写 stale `--force` 引用 | A（fixup） | ✅ |
+| feishu channel adapter | `gtwActionMap` 删 `branch-newv2` / `branch-join` 两个 key（待 PR-B 完成） | B | ✅ |
+| feishu `adapter_opt_test.go` + `session_chatid_test.go` | 把 `branch-newv2` 测试 ID 改成 generic / `act:/gtw/cancel`（保留 buildInteractiveCard / handleCardAction 测试覆盖面） | B | ✅ |
 
 **明确不做**：
 

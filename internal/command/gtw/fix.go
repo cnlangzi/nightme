@@ -12,7 +12,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
@@ -189,7 +188,7 @@ func RunFix(
 //  3. Branch name = DeriveBranchFromTitle(issue.Title, id).
 //  4. PreflightWorktreeCreate → catches path / branch / parent
 //     errors before WorktreeAdd.
-//  5. BranchExists? → DraftFixBranchExists card.
+//  5. BranchExists? → hard-fail reply (F-XX §3.1; no card).
 //  6. AddIssueLabel(LabelWIP); on WorktreeAdd failure RemoveIssueLabel
 //     and emit DraftFixWorktreeFail card.
 //  7. SetSelectedCwd → slot.Store(ModeRemote).
@@ -301,15 +300,11 @@ func runFixRemote(
 	branch := DeriveBranchFromTitle(issue.Title, issueID)
 	worktreePath := WorktreePath(repoRoot, branch)
 
-	// --- branch-exists decision (§5.3.1) -------------------------
-	// Done BEFORE the preflight path-exists check: when the
-	// branch is attached at exactly the target worktree path,
-	// this is the daemon-recovery path (user re-runs /gtw fix
-	// after a restart) and the worktree directory is expected
-	// to exist. Preflight's "path occupied" check would
-	// otherwise block the recovery. The branch-exists card
-	// handles the "branch occupied elsewhere" case (where
-	// preflight would also fail).
+	// --- branch-exists decision (F-XX §3.1) ---------------------
+	// BranchExists == true → hard-fail reply. No worktree add,
+	// no label, no dispatch, no decision card. Users with a
+	// stale branch must run `/gtw close` first (or `git branch -D`
+	// for an orphaned branch).
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
@@ -317,39 +312,12 @@ func runFixRemote(
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
-		// F-PATHUTIL-001 §5.2: compare via pathutil.Equal instead
-		// of the raw filepath.Clean equality. The Clean equality
-		// is case-sensitive on Windows (so "C:\Foo" and
-		// "c:\foo" spuriously miss-match) and slash-sensitive
-		// (so "C:/foo" from `git rev-parse` does not equal the
-		// backslash form WorktreePath produces). pathutil.Equal
-		// handles both. See PreflightWorktreeCreate's
-		// canonical-path logic for the parallel concern on the
-		// preflight side.
-		if existingPath != "" && pathutil.Equal(existingPath, worktreePath) {
-			// F-XX re-entry path: skipDispatch=true means we do
-			// NOT push a new prompt to the agent. The user is
-			// recovering from a daemon restart while the
-			// worktree + branch already exist. We pass
-			// reentry=true so renderFixSuccessCard prints a
-			// mode-neutral hint ("worktree resumed") instead
-			// of claiming the agent is actively working —
-			// we don't know whether the previous dispatch
-			// was Plan or Execute, and shouldn't assert
-			// either way.
-			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan, true /* reentry */)
+		body := fmt.Sprintf("❌ Branch `%s` already exists", branch)
+		if existingPath != "" {
+			body += fmt.Sprintf("\n→ worktree: %s", existingPath)
 		}
-		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
-			IssueID:  issueID,
-			Title:    issue.Title,
-			Branch:   branch,
-			Slug:     branch,
-			Repo:     owner + "/" + repo,
-			Provider: string(providerKind),
-			ChatID:   chatID,
-			Worktree: repoRoot,
-		}, existingPath)
+		body += "\n↳ finish or drop the active fix with `/gtw close`, then retry"
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
 	// --- preflight (path / branch / parent) ----------------------
@@ -493,8 +461,7 @@ func runFixRemote(
 //     back to).
 //  2. RepoRoot → no origin required.
 //  3. PreflightWorktreeCreate.
-//  4. BranchExists? → DraftFixBranchExists card (no LabelAdded
-//     payload — local mode has no remote state to roll back).
+//  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
 //  5. WorktreeAdd; on failure emit DraftFixWorktreeFail card.
 //  6. SetSelectedCwd → slot.Store(ModeLocal, Issue=-1).
 //  7. Render the simplified local success card.
@@ -528,38 +495,23 @@ func runFixLocal(
 	}
 	worktreePath := WorktreePath(repoRoot, branch)
 
-	// --- branch-exists decision (BEFORE preflight; see ID-mode
-	// runFixRemote for the rationale — preflight's "path occupied"
-	// check would block the daemon-recovery path where the branch
-	// is already attached at the target worktree path).
+	// --- branch-exists decision (F-XX §3.1) ---------------------
+	// Local mode: same hard-fail as runFixRemote. No decision
+	// card — users must clean up the stale branch manually
+	// before retrying.
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ git show-ref failed: %v", err)), nil
+			fmt.Sprintf("â git show-ref failed: %v", err)), nil
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
-		// See runFixRemote: pathutil.Equal handles Windows
-		// case- and slash-insensitivity so the recovery check
-		// matches regardless of which form git's porcelain output
-		// emitted.
-		if existingPath != "" && pathutil.Equal(existingPath, worktreePath) {
-			// F-XX re-entry path. dispMode is unused for
-			// ModeLocal (local never dispatches and renders
-			// its own success card); pass DispatchPlan as a
-			// zero-equivalent placeholder.
-			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */, DispatchPlan, true /* reentry */)
+		body := fmt.Sprintf("❌ Branch `%s` already exists", branch)
+		if existingPath != "" {
+			body += fmt.Sprintf("\n→ worktree: %s", existingPath)
 		}
-		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
-			IssueID:  -1,
-			Title:    "(local branch)",
-			Branch:   branch,
-			Slug:     branch,
-			Repo:     "",
-			ChatID:   chatID,
-			Worktree: repoRoot,
-		}, existingPath)
+		body += "\n↳ run `git worktree remove --force <path>` or `git branch -D <branch>` to clean up, then retry"
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
 	// F-XX: --force removed for local mode too. See runFixRemote
@@ -940,19 +892,6 @@ func stderrFromWorktreeErr(err error) string {
 		return werr.Stderr
 	}
 	return ""
-}
-
-func emitBranchExistsDraft(
-	ctx context.Context,
-	cs *chatsession.ChatSession,
-	deps HandlerDeps,
-	chatID, messageID, userMsgID string,
-	drafts DraftsMap,
-	payload FixDraftPayload,
-	existingPath string,
-) (*Result, error) {
-	card := BranchExistsChoice(payload, existingPath)
-	return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
 }
 
 func emitWorktreeFailDraft(

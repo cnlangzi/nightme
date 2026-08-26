@@ -45,6 +45,25 @@ random `--xxx` / `-x` tokens) is hard-rejected with
 "unknown flag" — the CLI does not silently no-op. See
 `docs/feat/F-gtw-fix.md` for the full design.
 
+### Breaking: `/gtw fix` hard-fails on branch collision (decision card removed)
+
+F-XX §3.1 (`docs/feat/F-gtw-fix.md`): when the derived
+branch already exists locally, `/gtw fix <id>` and
+`/gtw fix --name <branch>` now return a hard-fail reply
+and no longer emit the §5.3.1 â / 🔗 / ❌ decision card:
+
+    ❌ Branch `<name>` already exists
+    → worktree: <path>            # WorktreeListPath 已知时
+    ↳ finish or drop the active fix with `/gtw close`, then retry
+
+The previous `--force` auto-cleanup path is also gone
+(see the `--force` removal entry above). The same-path
+daemon-recovery re-entry path is removed too: every
+branch collision is now a hard error. The Feishu
+`gtwActionMap` no longer routes `branch-newv2` /
+`branch-join` action tags (the card is gone, the tags
+return "unknown action" toasts).
+
 ### Telegram: polling-only mode + channel layer cleanup
 
 `internal/config.TelegramConfig` is now `{bot_token, polling_timeout}` only. `webhook_url`, `webhook_secret`, `mode`, `group_require_mention` are gone — long polling is the only supported receive path, and the group mention gate lives in `chatsession.WatchMode` (`/watch all|mention|off`), not in config. Old config keys are silently ignored.

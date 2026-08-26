@@ -388,6 +388,79 @@ func TestFixRemote_IssueNotFound(t *testing.T) {
 	}
 }
 
+// TestFixRemote_BranchExists_HardFails_NoSideEffects pins the
+// F-XX §3.1 contract: when the derived branch already exists
+// locally, /gtw fix returns a hard-fail reply and does
+// NOT touch the worktree, label, agent prompt, or slot.
+// The user must run /gtw close (or `git branch -D`) before
+// retrying.
+func TestFixRemote_BranchExists_HardFails_NoSideEffects(t *testing.T) {
+	rig := newFixRemoteRig(t)
+	issueID := 42
+	rig.prov.SetIssue(issueID, &Issue{
+		ID:    issueID,
+		Title: "Login state expiration",
+		State: "open",
+		URL:   "https://github.com/cnlangzi/nightme/issues/42",
+	})
+
+	// Pre-create the branch so /gtw fix hits BranchExists == true.
+	branch := DeriveBranchFromTitle("Login state expiration", issueID)
+	mustGit(t, rig.repoRoot, "branch", branch)
+
+	res, err := rig.drive(t, fmt.Sprint(issueID))
+	if err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// Reply must carry the hard-fail signal.
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "❌ Branch") {
+		t.Errorf("reply missing '❌ Branch' hard-fail marker:\n%s", last)
+	}
+	if !strings.Contains(last, "`"+branch+"`") {
+		t.Errorf("reply missing branch name:\n%s", last)
+	}
+	if !strings.Contains(last, "already exists") {
+		t.Errorf("reply missing 'already exists' message:\n%s", last)
+	}
+	if !strings.Contains(last, "/gtw close") {
+		t.Errorf("reply missing '/gtw close' hint:\n%s", last)
+	}
+	// No decision card (F-XX removed the 🆕/🔗 choice).
+	all := strings.Join(rig.rec.serialized(), "\n---\n")
+	if strings.Contains(all, "branch-newv2") || strings.Contains(all, "branch-join") {
+		t.Errorf("decision card still emitted despite F-XX removal:\n%s", all)
+	}
+
+	// AddIssueLabel must NOT be called.
+	if addCalls := rig.prov.CallsByMethod("AddIssueLabel"); len(addCalls) != 0 {
+		t.Errorf("AddIssueLabel unexpectedly called: %+v", addCalls)
+	}
+	// ensureGtwLabels bootstrap must NOT be called (CreateLabel
+	// calls). Both bootstrap and label add sit AFTER BranchExists
+	// in the new flow.
+	if createCalls := rig.prov.CallsByMethod("CreateLabel"); len(createCalls) != 0 {
+		t.Errorf("CreateLabel unexpectedly called: %+v", createCalls)
+	}
+	// No new worktree created.
+	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
+	if c := strings.Count(wtOut, "worktree "); c != 1 {
+		t.Errorf("worktree count = %d, want 1 (no new worktree):\n%s", c, wtOut)
+	}
+	// No QueueUserMessage dispatch.
+	if got := rig.cs.QueueLen(); got != 0 {
+		t.Errorf("cs.QueueLen = %d, want 0 (no dispatch on hard-fail)", got)
+	}
+	// In-memory slot must NOT be populated.
+	if got := rig.slot.Load(); got != (Context{}) {
+		t.Errorf("slot = %+v, want zero", got)
+	}
+}
+
 // TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch
 // verifies the v1.x atomic semantics: when AddIssueLabel fails, the
 // worktree and branch created earlier in the flow must be

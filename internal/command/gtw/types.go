@@ -192,8 +192,7 @@ type Context struct {
 type DraftKind string
 
 const (
-	DraftFixBranchExists DraftKind = "fix.branch-exists" // §5.3.1
-	DraftFixLabelTaken   DraftKind = "fix.label-taken"   // §5.3.2
+	DraftFixLabelTaken   DraftKind = "fix.label-taken"   // §5.3.2; reserved for v1.x, never emitted
 	DraftFixWorktreeFail DraftKind = "fix.worktree-fail" // §5.3.3
 )
 

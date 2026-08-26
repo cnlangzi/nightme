@@ -91,30 +91,6 @@ func TestRepoEmptyGuardAllowsLocalMode(t *testing.T) {
 	}
 }
 
-// TestBranchExistsChoice_LocalMode pins the local-mode render
-// of the §5.3.1 decision card: the body must NOT show
-// "issue: #-1" (which would look broken); instead it shows
-// "branch: `<name>` (local)".
-func TestBranchExistsChoice_LocalMode(t *testing.T) {
-	p := FixDraftPayload{IssueID: -1, Title: "(local branch)", Branch: "login-fix", Slug: "login-fix", Repo: ""}
-	card := BranchExistsChoice(p, "/worktrees/login-fix")
-	if strings.Contains(card.Body, "issue: #") {
-		t.Errorf("local-mode card should not show 'issue: #', got body:\n%s", card.Body)
-	}
-	if !strings.Contains(card.Body, "branch: `login-fix` (local)") {
-		t.Errorf("local-mode card should mention '(local)' marker, got body:\n%s", card.Body)
-	}
-}
-
-// TestBranchExistsChoice_RemoteMode pins the ID-mode render.
-func TestBranchExistsChoice_RemoteMode(t *testing.T) {
-	p := FixDraftPayload{IssueID: 42, Title: "Login state expires", Branch: "login-state", Repo: "owner/repo", Provider: "github"}
-	card := BranchExistsChoice(p, "")
-	if !strings.Contains(card.Body, "issue: #42") {
-		t.Errorf("remote-mode card should show 'issue: #42', got body:\n%s", card.Body)
-	}
-}
-
 // TestWorktreeFailChoice_LocalMode pins the local-mode render
 // of the §5.3.3 decision card: title must NOT include
 // "(-1)"; cancel label must NOT mention the nightme/wip

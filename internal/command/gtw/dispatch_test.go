@@ -42,17 +42,30 @@ func TestBuildIssueDispatchText_BareIssue(t *testing.T) {
 	if !strings.Contains(out, "## Task") {
 		t.Errorf("missing Task section; got:\n%s", out)
 	}
-	// Plan-mode grounding discipline: the agent must use the
-	// worktree's source as baseline (not speculate from the
-	// issue text). These four pins lock the methodology in:
+	// Plan-mode due-diligence framing: Plan is a question +
+	// decision pass, NOT an implementation pass. These pins
+	// lock the methodology in:
+	if !strings.Contains(out, "due-diligence pass") {
+		t.Errorf("Plan prompt must frame as due-diligence (not implementation); got:\n%s", out)
+	}
 	if !strings.Contains(out, "Do NOT modify, create, or delete any files.") {
 		t.Errorf("missing Plan-mode read-only instruction; got:\n%s", out)
 	}
-	if !strings.Contains(out, "baseline") {
+	if !strings.Contains(out, "Baseline") {
 		t.Errorf("Plan prompt must anchor analysis to the code baseline; got:\n%s", out)
 	}
-	if !strings.Contains(out, "file:line") {
-		t.Errorf("Plan prompt must demand file:line citations; got:\n%s", out)
+	// Step 1 + Step 2 wording — the two-step decompose-then-verify
+	// discipline is the core.
+	if !strings.Contains(out, "Decompose the request") {
+		t.Errorf("Plan prompt must require request decomposition (Step 1); got:\n%s", out)
+	}
+	if !strings.Contains(out, "Verify every claim against the code") {
+		t.Errorf("Plan prompt must require code verification (Step 2); got:\n%s", out)
+	}
+	// Step 6 — the questions-for-the-user section is now an
+	// explicit deliverable (not buried in "Risks").
+	if !strings.Contains(out, "Questions for the user") {
+		t.Errorf("Plan prompt must require 'Questions for the user' section (Step 6 deliverable); got:\n%s", out)
 	}
 	if !strings.Contains(out, "Present the plan and STOP") {
 		t.Errorf("missing Plan-mode STOP signal; got:\n%s", out)
@@ -89,9 +102,11 @@ func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 			t.Errorf("Execute prompt missing shared-shape %q; got:\n%s", want, out)
 		}
 	}
-	// Execute-mode-specific wording
-	if !strings.Contains(out, "Implement the change above on the branch noted.") {
-		t.Errorf("Execute prompt missing 'Implement the change' instruction; got:\n%s", out)
+	// Execute-mode-specific wording (GOBL mode replaces the old
+	// "Implement the change" instruction; see fix.go §4.2 for
+	// the full design).
+	if !strings.Contains(out, "GOBL mode") {
+		t.Errorf("Execute prompt missing 'GOBL mode' marker; got:\n%s", out)
 	}
 	// Plan-mode-specific wording must NOT leak
 	if strings.Contains(out, "Do NOT modify") || strings.Contains(out, "Present the plan and STOP") {
@@ -100,48 +115,60 @@ func TestBuildIssueDispatchText_BareIssue_ExecuteMode(t *testing.T) {
 }
 
 // TestBuildIssueDispatchText_Plan_StopsBeforeEdits pins the
-// F-XX Plan-mode prompt: read-only analysis grounded in the
-// worktree's source (every claim must cite file:line or a
-// runtime trace), explicit "STOP" signal, no "Implement"
-// leakage.
+// F-XX Plan-mode prompt: due-diligence pass (not
+// implementation) grounded in the worktree's source via a
+// two-step discipline (decompose claims, then verify each
+// against the code), explicit "Questions for the user"
+// deliverable (Step 6), explicit "STOP" signal, no
+// "Implement" leakage.
 func TestBuildIssueDispatchText_Plan_StopsBeforeEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan)
 	for _, want := range []string{
+		"due-diligence pass",                         // framing
+		"Baseline",                                   // methodology anchor
+		"Decompose the request",                      // Step 1 discipline
+		"Verify every claim against the code",        // Step 2 discipline
+		"Questions for the user",                     // Step 6 deliverable
 		"Do NOT modify, create, or delete any files.", // read-only invariant
-		"baseline",                                   // methodology anchor
-		"file:line",                                  // grounding discipline
 		"Present the plan and STOP",                  // wait-for-user gate
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Plan prompt missing %q; got:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "Implement the change") {
+	if strings.Contains(out, "Implement the change committed") {
 		t.Errorf("Plan prompt must not contain 'Implement' (that's Execute)")
 	}
 }
 
 // TestBuildIssueDispatchText_Execute_AuthorisesEdits pins
-// the F-XX Execute-mode prompt: user already chose -y, agent
-// is told to implement the change with the same code-grounded
-// discipline (cite file:line, run tests, no suppressed
-// failures).
+// the F-XX Execute-mode prompt: GOBL mode (Goal/Obstacles/
+// Boundaries/Learn) — agent is autonomous on the path
+// (which files to open, which tests to run, sequencing)
+// but every decision must be code-grounded, every test
+// must pass before completion, and any deviation from the
+// plan must be announced in chat BEFORE acting.
 func TestBuildIssueDispatchText_Execute_AuthorisesEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchExecute)
 	for _, want := range []string{
-		"Implement the change",            // user has authorised
-		"Run the project's test command",  // code-grounded verification
-		"do NOT silently suppress",         // discipline: don't hide failures
+		"GOBL",                                          // methodology pin
+		"Do not invent functionality",                    // boundary
+		"Do not skip, suppress, or mark-expected",         // boundary
+		"do NOT silently suppress",                        // boundary (test failure)
+		"Do not report 'complete'",                        // boundary
+		"declare the revision in chat FIRST",             // deviation discipline
+		"Pre-existing failures",                          // diagnose-vs-introduced
+		"file:line",                                      // grounding
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Execute prompt missing %q; got:\n%s", want, out)
 		}
 	}
 	for _, forbid := range []string{
-		"Do NOT modify",               // Plan-only invariant
-		"Present the plan and STOP",   // Plan-only gate
+		"Do NOT modify, create, or delete", // Plan-only invariant
+		"Present the plan and STOP",        // Plan-only gate
 	} {
 		if strings.Contains(out, forbid) {
 			t.Errorf("Execute prompt must not contain %q (that's Plan)", forbid)

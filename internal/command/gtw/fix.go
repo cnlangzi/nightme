@@ -825,40 +825,83 @@ func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatc
 	b.WriteString("## Task\n")
 	switch mode {
 	case DispatchPlan:
-		// F-gtw-fix.md §4.1 + strict-grounding methodology
-		// (wip/REVIEWER_INSTRUCTIONS.md / docs/REVIEWER_INSTRUCTIONS.md):
-		// the plan is a CODE-GROUNDED diagnosis, not a from-text
-		// speculation. The agent MUST use the worktree's source
-		// as the baseline — every claim cites a file:line or a
-		// runtime trace. Bug vs feature is determined by what the
-		// code actually does today, not what the issue text says.
-		b.WriteString("Analyse the request above. The worktree's current source is the baseline — every claim in your plan must be grounded in code, not in the request's narrative.\n\n")
-		b.WriteString("Required workflow:\n")
-		b.WriteString("1. Classify: is this a bug report (current behaviour diverges from expected) or a feature request (new capability)? State which, with one-sentence justification citing the code that supports the call.\n")
-		b.WriteString("2. If bug: form a root-cause hypothesis, then VERIFY it against the code. Read the relevant files. Trace the actual call path. Cite file:line for every step. If your hypothesis doesn't match the code, revise it — do NOT stretch the narrative to fit.\n")
-		b.WriteString("3. If feature: locate the closest existing implementation (file:line) that this should integrate with. Name the seams (where the new code would touch existing code) with file:line.\n")
-		b.WriteString("4. Files / modules likely affected, with file:line for each entry. List ONLY files you actually opened and read. Do NOT speculate about files you haven't looked at.\n")
-		b.WriteString("5. Proposed fix approach: the minimal change that addresses the root cause / fits the seam. If you find that fixing the symptom without the root cause is cheaper, call that out — don't pretend it's the root-cause fix.\n")
-		b.WriteString("6. Test / verification strategy: which existing tests cover the affected code path, and what new test (if any) would catch a regression.\n")
-		b.WriteString("7. Risks / open questions: anything you couldn't verify from the code alone (e.g. behaviour that depends on external state, undocumented contracts).\n\n")
-		b.WriteString("Output format:\n")
-		b.WriteString("- Each claim cites file:line (or runtime trace).\n")
-		b.WriteString("- If a claim can't be grounded in code, say so explicitly and explain why — don't invent a citation.\n")
-		b.WriteString("- Keep the plan tight. The user reviews it in chat and decides whether to authorise implementation with -y.\n\n")
+		// F-gtw-fix.md §4.1 — Plan is a *due-diligence* pass,
+		// not an implementation pass. Its output is a list of
+		// questions and decisions for the user to review, NOT a
+		// set of code edits. Execute (§4.2) is the pass that
+		// acts on the plan — this prompt must NOT act.
+		//
+		// Methodology (also in docs/REVIEWER_INSTRUCTIONS.md):
+		// every claim grounded in code; the request text is a
+		// *problem statement to verify*, not a *spec to
+		// implement*. Agents are explicitly forbidden from
+		// speculation that "should work because the issue says
+		// so" — they must read the code, trace the call path,
+		// and cite file:line (or a grep / runtime trace) for
+		// every claim. If a claim cannot be grounded, the agent
+		// must say so explicitly rather than invent a citation.
+		b.WriteString("This is a due-diligence pass, not an implementation pass. Your deliverable is a *plan*: a list of questions about the request and the decisions that answer them, grounded in the worktree's current source. You will NOT modify, create, or delete any files. The implementation pass (Execute, §4.2) is a separate prompt — it acts on whatever plan you produce here.\n\n")
+		b.WriteString("Baseline rule: the worktree's current source is ground truth. The request text is a problem statement to *verify* against the code, not a spec to *implement*. If the code contradicts the request, say so — the user needs to know the request is wrong, not a confirmation that pretends otherwise.\n\n")
+		b.WriteString("Step 1 — Decompose the request into verifiable claims. List each concrete statement the request makes (e.g. 'sessions expire after 7 days', 'the label is set via gh issue edit', 'the bug reproduces on Linux only'). Number them. You will verify each one in step 2.\n\n")
+		b.WriteString("Step 2 — Verify every claim against the code. For each numbered claim from step 1, run the search / read that would confirm or refute it. Cite either:\n")
+		b.WriteString("  • file:line + the relevant code snippet, OR\n")
+		b.WriteString("  • a grep / test command and its output, OR\n")
+		b.WriteString("  • 'unverifiable — the code does not address this claim' (this is a legitimate answer; surface it as an open question, don't paper over it)\n")
+		b.WriteString("If the code does not match what the request claims, say so explicitly. Do NOT stretch the narrative to fit.\n\n")
+		b.WriteString("Step 3 — Classify each claim as one of:\n")
+		b.WriteString("  • Confirmed bug: code does X, request says it should do Y, the gap is the bug\n")
+		b.WriteString("  • Misunderstanding: code already does what the request asks; the request is based on a wrong read of the code\n")
+		b.WriteString("  • Feature gap: code doesn't address this area at all; new capability required\n")
+		b.WriteString("  • Unverifiable: cannot tell from the code alone (state what evidence would resolve it)\n\n")
+		b.WriteString("Step 4 — Root cause + fix shape (only for confirmed bugs and feature gaps). For confirmed bugs: trace the actual call path that produces the wrong behaviour, name the file:line where the gap lives, and propose a fix that addresses the root cause (not a symptom patch). For feature gaps: locate the closest existing implementation (file:line) that the new code should integrate with, and name the seams (file:line) where the new code would touch existing code.\n\n")
+		b.WriteString("Step 5 — Test / verification strategy. Which existing tests cover the affected code path? What new test would catch a regression? If no test exists and adding one is non-trivial, say so.\n\n")
+		b.WriteString("Step 6 — Questions for the user (this is the most important section). Any claim that came back as 'Misunderstanding', 'Feature gap', or 'Unverifiable' is a question you cannot answer from the code alone — it requires the user. List these questions explicitly so the user knows what to confirm before authorising implementation with -y. Examples:\n")
+		b.WriteString("  • 'The request says X but the code does Y. Did you mean Y, or does the code have a bug?'\n")
+		b.WriteString("  • 'Step 4 assumes the bug lives at file:line X. If it's actually at file:line Y, the fix shape changes. Confirm.'\n")
+		b.WriteString("  • 'The bug reproduces on Linux only' — there's no Linux-only branch in the code. Where is this assumption coming from? (external state?)\n")
+		b.WriteString("Each question should be one sentence the user can answer yes/no or with a short clarification. Don't bundle multiple decisions into one question.\n\n")
+		b.WriteString("Output format (the user reviews this in chat to decide whether to authorise implementation with -y):\n")
+		b.WriteString("  ## Plan for: <request title>\n")
+		b.WriteString("  ### Request decomposition\n  1. <claim 1>  2. <claim 2>  ...\n")
+		b.WriteString("  ### Verification\n  1. <file:line + code snippet, OR grep output, OR 'unverifiable'>\n     2. <same>\n     ...\n")
+		b.WriteString("  ### Classification\n  1. <Confirmed bug | Misunderstanding | Feature gap | Unverifiable>\n     2. <same>\n     ...\n")
+		b.WriteString("  ### Root cause / fix shape\n  (only for confirmed bugs + feature gaps; cite file:line)\n")
+		b.WriteString("  ### Test strategy\n  (which existing tests cover this; what new test if any)\n")
+		b.WriteString("  ### Questions for the user\n  1. <one sentence the user can answer yes/no or with short clarification>\n     2. ...\n")
+		b.WriteString("\n")
+		b.WriteString("If there are NO questions (every claim verified cleanly), state so explicitly: 'No questions for the user; the plan is complete and the user can authorise -y without further input.'\n\n")
 		b.WriteString("Do NOT modify, create, or delete any files. Present the plan and STOP — wait for the user to reply in this chat before making any code changes.\n")
 	case DispatchExecute:
-		// F-gtw-fix.md §4.2: user already authorised -y, go ahead.
-		// The same code-grounding discipline applies — every
-		// code change cites file:line, every test run is
-		// recorded with its exit code.
-		b.WriteString("Implement the change above on the branch noted. The worktree is prepared.\n\n")
-		b.WriteString("Required workflow:\n")
-		b.WriteString("1. Re-read the files you intend to change. Confirm the diff addresses the root cause you identified in the plan (or the seam if it was a feature).\n")
-		b.WriteString("2. Make the minimal change. Avoid drive-by edits — every modified line should be justified by the request above.\n")
-		b.WriteString("3. Run the project's test command (infer from go.mod / Makefile / CI config). Report exit code and which tests ran.\n")
-		b.WriteString("4. If a test fails, do NOT silently suppress or skip it. Diagnose the failure against the code, fix the root cause, re-run. Report the full test output in your summary.\n")
-		b.WriteString("5. Summarise: files changed (with file:line ranges), tests run (with exit code), and a one-sentence statement of why this change is correct against the baseline code.\n\n")
-		b.WriteString("Do not invent functionality the request didn't ask for. Do not refactor unrelated code. Do not skip failing tests.\n")
+		// F-gtw-fix.md §4.2 — Execute is the *fulfilment* of the
+		// plan above, run in GOBL mode (Goals / Obstacles /
+		// Boundaries / Learn): the agent is autonomous on the
+		// path (which files to open, which tests to run, how to
+		// sequence the work), but every *decision* still needs
+		// to be code-grounded. The plan is a starting contract;
+		// deviations are allowed but must be announced in chat
+		// before being acted on, so the user has a chance to
+		// interrupt.
+		b.WriteString("Execute the plan above against the worktree, in GOBL mode (Goals / Obstacles / Boundaries / Learn):\n\n")
+		b.WriteString("Goal: the verified-change summary the user can review.\n")
+		b.WriteString("Boundaries:\n")
+		b.WriteString("- Do not invent functionality the request didn't ask for.\n")
+		b.WriteString("- Do not refactor unrelated code.\n")
+		b.WriteString("- Do not skip, suppress, or mark-expected failing tests.\n")
+		b.WriteString("- Do not report 'complete' if any test is failing. **All tests must pass before completion.** A failing test is not a deliverable.\n\n")
+		b.WriteString("Operating principles:\n")
+		b.WriteString("- Treat the plan as a starting contract, not a straitjacket. If during execution you discover the plan is incomplete or wrong (root cause is different, an additional file needs changing, a fix in a file the plan didn't list), you may revise — but declare the revision in chat FIRST with file:line evidence, then act. The user has one round-trip to interrupt before you proceed with the deviation.\n")
+		b.WriteString("- Decisions must be code-grounded: every file you touch or test you run cites the file:line or the test command + exit code that justified it. If you find yourself about to do something the request text suggests but the code contradicts, surface the contradiction — don't silently follow the text.\n")
+		b.WriteString("- When tests fail, diagnose against the baseline (was this failure pre-existing? Did your change introduce it?). Pre-existing failures are not yours to silently fix; report and let the user decide. Failures you introduced must be fixed before completion.\n\n")
+		b.WriteString("Workflow:\n")
+		b.WriteString("1. Re-read the files you intend to change. Confirm each planned change still applies to today's baseline (the worktree may have drifted between Plan and Execute).\n")
+		b.WriteString("2. Apply the minimal change that satisfies the plan. If a deviation is needed, announce it before acting.\n")
+		b.WriteString("3. Run the project's test command (infer from go.mod / Makefile / CI config). Report the full command, the exit code, and which tests ran.\n")
+		b.WriteString("4. If a test fails: do NOT silently suppress, skip, or mark expected. Diagnose (pre-existing vs introduced), fix introduced failures against the baseline code, re-run until green. Pre-existing failures — report and ask the user.\n")
+		b.WriteString("5. Summarise:\n")
+		b.WriteString("  - Files changed, with file:line ranges and one-line justification per range (which plan step does it fulfil, or which in-flight deviation)\n")
+		b.WriteString("  - Decisions made: any deviations from the plan, with file:line evidence and the user-facing question (if any) you asked along the way\n")
+		b.WriteString("  - Test command(s) run, with exit code\n")
+		b.WriteString("  - One sentence: 'this change is correct against the baseline because <file:line evidence>'\n")
 	}
 	return b.String()
 }

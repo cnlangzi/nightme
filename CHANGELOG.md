@@ -40,6 +40,40 @@ actual rejection text on the user-facing card; the
 separate issue (pi keeps re-sending the bad image in its context;
 follow-up work — see "Open" below) and is not addressed here.
 
+### Pi bridge: image mime validation + auto-recover poisoned sessions (issue #290 follow-on)
+
+Three more changes, all in `internal/bridge/pi`, addressing the
+review findings on the prior commit:
+
+- `encodeImage` now (a) rejects empty / non-whitelisted mime
+  (`ErrInvalidImageMime`; only `image/{png,jpeg,gif,webp}` are
+  accepted), (b) wraps `ErrImageTooLarge` with the actual-vs-cap
+  byte counts so the user sees how much over they were, and (c)
+  matches the declared mime against the file's magic bytes so a
+  wrong / unsupported format is rejected pre-send rather than
+  surfaced by the upstream provider as an opaque error. This
+  catches the Telegram adapter's hard-coded `image/jpeg` for
+  every Photo when a user actually sends a PNG / WEBP.
+- `imageAttachment` gains a `Type` field and `SendBlocks` now
+  writes `{"type":"image", ...}` on each `prompt.images[]`
+  entry. Pi 0.84.x accepts without the tag (inferred from
+  array membership) but the explicit tag is the canonical
+  `docs/rpc.md` shape and protects against future schema
+  tightening.
+- Auto-recovery on poisoned sessions: when the translator sees
+  `stopReason="error"` + a non-empty `errorMessage`, it wraps the
+  surface error with the new exported sentinel
+  `ErrSessionPoisoned` (callers can `errors.Is` on it) and
+  invokes an `onPoisoned` callback that the driver wires to a
+  goroutine running `driver.New()` — i.e. the in-place
+  `new_session + get_state` handshake the `/new` slash command
+  already uses. The next user message lands on a fresh pi
+  context; no more "session broken forever" requiring manual
+  `/new`. Per the nightme-bot-failure-handling-priority memory
+  note: silent recovery before notifying — the error is still
+  surfaced to the user so they know what went wrong, but the
+  session rotates underneath.
+
 ### Telegram: polling-only mode + channel layer cleanup
 
 `internal/config.TelegramConfig` is now `{bot_token, polling_timeout}` only. `webhook_url`, `webhook_secret`, `mode`, `group_require_mention` are gone — long polling is the only supported receive path, and the group mention gate lives in `chatsession.WatchMode` (`/watch all|mention|off`), not in config. Old config keys are silently ignored.

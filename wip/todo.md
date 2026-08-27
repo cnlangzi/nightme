@@ -1,278 +1,219 @@
-# Handover: fix-telegram-rolling-log branch
+# Handover: fix-gtw-fix branch — mimeFromExt wiring + runtime self-containment
 
-This document is the handover package for the next agent continuing
-work on `fix-telegram-rolling-log`. The branch implements v9 chain
-rolling log for the Telegram adapter — the OOP refactor + 15 v8
-test migrations that landed across commits `b7b686d` … `8bb5dac`
-+ the most recent codex review fixes in commits `e926dee` …
-`6dae417`.
+This document hands off the **`fix-gtw-fix`** branch to the next agent.
+It supersedes the previous `wip/todo.md` (which described an unrelated
+`fix-telegram-rolling-log` branch — ignore that content if you saw it).
+
+## TL;DR for the next agent
+
+- The big feature (download all issue attachments, route by MIME type) **landed
+  in commit `6e48754` and is fully tested** — do not touch that contract.
+- There are **2 uncommitted files** in the working tree (see §State). Both
+  compile and pass `go test ./internal/command/gtw/`.
+- One change introduces a function **`mimeFromExt` that is defined but never
+  called** — it will trip a `staticcheck` `unusedfunc`/`U1000` rule on strict
+  CI. **Your primary job is to wire it in** (see §Task 1).
+- The other change documents a "runtime self-containment" invariant that is
+  **already pinned by a passing test** — just commit it, or extend it per
+  §Task 2.
 
 ## Goal of the branch
 
-Replace v8's per-bubble sendMessage path with a per-turn **chain**
-of chain chunks. Each turn creates a chunk on the first user
-event, accumulates subsequent Out* segments in chunk.buf, and
-debounce-flushes (250ms) by sending editMessageText to the
-Telegram API. StatusBar / OutHeartbeat / OutError render
-into the chunk's HTML body via chunkBody.Compose().
+`/gtw fix <issue>` turns a GitHub issue into a self-contained agent prompt
+that runs on the user's own worktree. The recent work (commits
+`1ee615d` → `6e48754`) made the dispatch prompt:
+
+1. **Plan-first** — `DispatchPlan` (default) produces a due-diligence prompt;
+   `DispatchExecute` (the `-y` flag) produces a GOBL-mode edit prompt. Both
+   come from one `buildIssueDispatchText` with a `mode` switch.
+2. **Attachment-aware** — every `![](url)` / `[](url)` link in the issue body
+   is downloaded, routed by MIME type to `ContentImage` (vision) or
+   `ContentFile` (path annotation), and counted in the dispatch text so the
+   agent knows attachments exist.
 
 Reference docs:
-- `docs/channel/telegram.md §11.12` (v9 spec) — full design
-- `internal/channel/telegram/chunk_body.go` (Layer 1 view)
-- `internal/channel/telegram/placeholder_chain*.go` (Layer 2 model)
+- `docs/feat/F-gtw-fix.md` — the feature design (the §4.1/§4.2 prompts live here)
+- `internal/command/gtw/fix.go:855` — `buildIssueDispatchText` (the template)
+- `internal/command/gtw/dispatch_test.go` — the pinned invariants
+- `internal/command/gtw/attachments.go` — the downloader + MIME router
+- `internal/command/gtw/provider.go:972` — `extractGitHubAttachments`
 
-## Architecture: 5-layer OOP
+## State
 
-| Layer | File | Purpose |
-|---|---|---|
-| 1 (data + view) | `chunk_body.go` | chunkBody, chunkEntry, Compose(), business methods (setHeader, appendEntry, appendError, setFooter, etc.) |
-| 2 (business API) | `placeholder_chain_flush.go` | chain methods, appendSegment, flushChainNow, appendErrorSegment, scheduleFlushDebounced, stopDebounceTimer |
-| 3 (format decisions) | `chunk_body.go::appendError` | ```fences``` wrapping decision for OutError stderr |
-| 4 (UI text escape) | `render.go::escapeInline` | InlineKeyboard labels, choice titles, prompt text; inline HTML escapes |
-| 5 (network) | `topic.go::sendTelegramMessage` / `editTelegramMessage` | HTTP egress with parse_mode=HTML, retry, rate-limit |
+```
+Branch:    fix-gtw-fix
+HEAD:      6e48754 fix(gtw): download all issue attachments, route by MIME type
+Working:   2 files modified, nothing staged
+Build:     go build ./internal/command/gtw/   → ok (exit 0)
+Tests:     go test ./internal/command/gtw/    → ok (16.3s, all pass)
+```
 
-Adapter (`adapter.go`) does **no HTML decisions** — it routes
-OutboundKind to chain methods.
+### Uncommitted diff (the handoff payload)
 
-## Remaining tasks (handoff items)
+**`internal/command/gtw/attachments.go`** — renamed `looksLikeImageName(name)
+bool` → `mimeFromExt(name) string` and expanded the table from 7 image
+extensions to ~17 MIME types:
 
-### 1. Migrate 9 v8 legacy tests to chain-aware assertions
+| extension(s) | returned MIME |
+|---|---|
+| `.png .jpg .jpeg .gif .webp .bmp .svg` | `image/*` (→ ContentImage) |
+| `.pdf` | `application/pdf` |
+| `.json` | `application/json` |
+| `.txt .log` | `text/plain` |
+| `.xml` | `application/xml` |
+| `.csv` | `text/csv` |
+| `.md` | `text/markdown` |
+| `.html .htm` | `text/html` |
+| `.zip` | `application/zip` |
+| `.gz .tgz` | `application/gzip` |
+| `.tar` | `application/x-tar` |
+| *(default)* | `application/octet-stream` (→ ContentFile) |
 
-7 tests in `adapter_statusbar_test.go` still need migration
-(currently `t.Skip` with "v9 chain: rewrite pending"):
+**`docs/feat/F-gtw-fix.md`** — added a blockquote "运行时自包含原则"
+(Runtime self-containment principle) above the §4.1 Plan Prompt. It states
+that `buildIssueDispatchText`'s §Task body runs in a standalone agent on the
+user's worktree that **cannot see this repo's docs**, so the runtime text must
+not leak internal section numbers (`§4`), doc filenames (`F-gtw-fix`,
+`REVIEWER_INSTRUCTIONS`), or cross-mode references (`the plan above`,
+`Execute (§`). The invariant is guarded by
+`TestBuildIssueDispatchText_RuntimeSelfContained` (dispatch_test.go:192),
+**which already exists and passes**.
 
-- `TestAdapter_Send_DM_OutToolStart_AppendsStatusBar` (line ~172)
-- `TestAdapter_Send_DM_OutToolEnd_AppendsStatusBar` (line ~194)
-- `TestAdapter_Send_DM_OutTaskCreate_AppendsStatusBar` (line ~217)
-- `TestAdapter_Send_DM_OutError_NoDiagnostic_AppendsStatusBar` (line ~240)
-- `TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholderWithStatusBar` (line ~297)
-- `TestAdapter_Send_DM_OutChoice_NoStatusBar` (line ~417)
-- `TestAdapter_Send_DM_OutReply_AppendsStatusBar` (line ~139)
+## Tasks for the next agent
 
-Pattern: each test uses `lastChunkText(t, a, nil)` (which calls
-`flushActiveChunkSync` to force-flush the chain, then reads the
-most recent editMessageText body). Verify the rendered chunk
-text contains the expected segments + footer per OutboundKind.
+### Task 1 (BLOCKING) — wire `mimeFromExt` into the extractors
 
-6 tests in `adapter_test.go` were just skipped via Python script
-(today): `TestAdapter_Send_OutHeartbeat_AppendsTimestamp`,
-`TestAdapter_Send_DropsLongText`, `TestAdapter_Send_DM_RepliesToUserMessage`,
-`TestAdapter_Send_DM_OutHeartbeat_PATCHesPlaceholder`,
-`TestAdapter_Send_Topic_ReplyToUserMessageToo`,
-`TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder`. These
-tests assert v8 multi-send-message / per-call reaction patterns
-that v9 chain consolidates. Either rewrite to chain-aware
-assertions (read `chain.chunks[cursor].messageID` instead of
-`findCall(api.snapshotCalls(), "sendMessage")`) or leave them
-skipped.
+**This is the primary handoff item.** `mimeFromExt` is currently **dead
+code**: defined at `attachments.go:173` with a doc comment claiming "the
+attachment extractors use it", but no extractor calls it. A strict
+`staticcheck` run (`unusedfunc` / U1000) will fail CI on this function.
 
-### 2. Pre-existing diagnostics (out of v9 chain scope)
+The old `looksLikeImageName` was *also* dead at the time of the rename (it
+was introduced in commit `6e48754`'s attachments rewrite but never invoked),
+so this gap predates the WIP — the rename just made it more capable and more
+obviously orphaned.
 
-- `render.go:13-20` raw-string regex warnings (S1007)
-- `callback.go:406` `errTelegramCallback` unusedvar
-- `topic.go:14 createTopic` unusedfunc
-- `topic.go:81 editTelegramKeyboard` unusedfunc
-- `topic.go:135 sendText` unusedfunc
-- `summarize_tool.go:23 toolOutputPreviewBytes` unusedconst
-- `testhelpers_test.go:186 joinParam` unusedfunc
-- `testhelpers_test.go:208 paramsString` unusedfunc
-- `chain_integration_test.go:40` unused param `a`
-- `adapter.go:1357` tagged switch could be used (QF1003)
-- `adapter.go:276` errors.As could be AsType (errorsastype)
-- `adapter_test.go:922` context.WithCancel could be t.Context
+**Where to wire it:** `internal/command/gtw/provider.go:972`
+`extractGitHubAttachments`. Today it:
 
-### 3. Code hygiene
+- only matches `![alt](url)` (image syntax, the `!` prefix) — see the
+  `body[i] != '!' || body[i+1] != '['` guard at provider.go:982;
+- hardcodes `MIMEType: "image/png"` for every match (provider.go:1024),
+  with a comment "best guess; downloadAttachments refines from HTTP
+  response".
 
-- `lastChunkTextForTest` in `adapter_test.go:627` is unused; the
-  canonical helper is `lastChunkText` in
-  `adapter_statusbar_test.go:55`. Either delete
-  `lastChunkTextForTest` or move it + `flushActiveChunkSync` +
-  `editMessageTextOrSendMessage` to `testhelpers_test.go` for
-  sharing across both test files.
+The intended behaviour (per `mimeFromExt`'s doc comment) is:
 
-### 4. Adapter-layer OOP gaps (separate PR territory)
+1. Replace the hardcoded `"image/png"` with `mimeFromExt(fn)` so the
+   pre-classification is accurate **before** the HTTP response refines it.
+   The `downloadAttachments` MIME-refinement priority (attachments.go:123:
+   HTTP `Content-Type` wins over `att.MIMEType` hint) still holds —
+   `mimeFromExt` only seeds the hint.
+2. *(Optional, larger scope)* Extend the extractor to also match plain
+   `[](url)` links (no `!` prefix) so a log/dump/PDF referenced as a plain
+   link becomes an attachment too. Today only `![](url)` images are picked
+   up; a `[](crash.log)` link is invisible to the dispatch. If you do this,
+   the `!` guard becomes a "is-image-link" heuristic and `mimeFromExt`
+   decides the block type.
 
-- `telegramSender` interface + `telegramSenderImpl` were
-  prototyped in commit `d4349c1` but reverted in commit
-  `39579b8` because loose fns are adequate. Future PR can
-  re-introduce them when chain primitives are typed cleanly.
-  Today `appendSegment` and `flushChainNow` accept loose
-  `sendChunkFn` / `editChunkFn` (function types in
-  `placeholder_chain_flush.go`). To migrate: change the
-  signature to `telegramSender` interface and wrap loose fns via
-  `telegramSenderImpl{send: ..., edit: ...}` at the call sites.
+**Symmetry check:** there appears to be only one extractor
+(`extractGitHubAttachments`). GitLab uploads (`/uploads/...`) are inlined as
+`![](url)` per provider.go:48 comment and likely reuse the same extractor —
+confirm by grepping `func extract.*ttachment` before assuming a second
+extractor exists.
 
-- `TopicState.PlaceholderMessageID` state field is now redundant
-  with `chain.chunks[chain.cursor].messageID`. The field is read
-  by `ensurePlaceholderForHeartbeat` (legacy patch target lookup)
-  and `OnPromptEnded` (🎉 reaction target). Could be replaced
-  with `chain.cursor.messageID` lookup but semantics differ
-  (state captures the cold-create messageID; chain may have
-  rotated). Defer until §11.12.9 cleanup sweep.
+**Test expectations:** `attachments_test.go` (line 41) feeds a fixture with
+`MIMEType: "image/png"` directly, so it won't break from the wiring change.
+But `dispatch_test.go::TestBuildIssueDispatchText_AttachmentsSection` (line
+301) asserts the attachment-count text — verify it still passes after
+wiring (it should: the count is taken from `imageCount`/`fileCount` params,
+not from `len(issue.Attachments)`, per commit `6e48754`).
 
-### 5. Doc updates
+**Definition of done:** `mimeFromExt` has ≥1 non-test caller, `staticcheck
+./internal/command/gtw/` is clean, and `go test ./internal/command/gtw/`
+still passes.
 
-- `docs/channel/telegram.md §11.12.16` still lists v8 rewrite
-  backlog items; many are now marked `t.Skip`. Update the doc to
-  reference the 6 skipped tests with their skip message verbatim.
-- `docs/channel/telegram.md §11.12.7.2` references the
-  `splitTelegramText` overflow path. After commit `7bf20ca`
-  (P0 #2 fix), the split path is no longer used. Either delete
-  the subsection or note `splitTelegramText` is dead code.
+### Task 2 (non-blocking) — commit the runtime self-containment invariant
 
-### 6. P0 / P1 / P2 fixes already landed (DO NOT regress)
+The `F-gtw-fix.md` blockquote + the `TestBuildIssueDispatchText_RuntimeSelfContained`
+test are a matched pair that already passes. You can commit them as-is in a
+single `docs(gtw): pin runtime self-containment invariant` commit.
 
-These are reference points for the architecture:
+Optional hardening: the test's leak-list (`§4`, `F-gtw-fix`,
+`REVIEWER_INSTRUCTIONS`, `Execute (§`, `the plan above`) is a denylist. If
+you want belt-and-suspenders, also assert that the prompt contains NO
+backtick-quoted doc filename at all (regex-scan for `` `[^`]+\.md` `` and
+fail if any matches a file in `docs/` or the repo root). This is optional —
+the denylist already covers the known leak vectors.
 
-- **P0 #1**: cold-create seeds `cur.buf` with the segment so
-  subsequent flushes don't drop the first event. `chunk.appendEntry(segment)`
-  in appendSegment path #1 + path #4.
+### Task 3 (housekeeping) — decide the WIP commit shape
 
-- **P0 #2**: long-text overflow rotates the chain instead of
-  splitting a single tail. `flushChainNow` edits `pieces[0]` on
-  cur, creates new chunks for `pieces[1..N-1]`, advances
-  cursor to last new chunk. Critical: tail MUST seed
-  `entries = [chunkEntry{text: lastPiece}]` so subsequent
-  flushes re-render pieces[N-1] content. Pre-fix (without
-  this seeding), the tail had empty entries → next heartbeat
-  rendered `<header>\n<footer>` and erased pieces[N-1] content
-  from Telegram. **Locked in by `TestChainOverflow_TailHasNonEmptyEntries`.**
+Two reasonable shapes; pick one:
 
-- **P0 #3**: `appendSegment` case-3 (force-hydrate pre-locked
-  chunks) was recursive-with-mutex; now inlined as a
-  fast-forward loop. sync.Mutex is not reentrant.
+- **One commit** — `refactor(gtw): mimeFromExt pre-classifies attachments by
+  extension` covering both files (the `attachments.go` rename + the doc
+  principle). They're conceptually related (both make the dispatch prompt
+  more self-contained / accurate before download). Then do Task 1's wiring
+  in a follow-up commit on top.
+- **Two commits** — `docs(gtw): runtime self-containment invariant` (just
+  the .md) then `refactor(gtw): mimeFromExt replaces looksLikeImageName`
+  (just attachments.go). Cleaner history; the .md is already
+  self-consistent (its test exists and passes), so it can land first.
 
-- **P1**: Compose entry separator + dead-code removal; inter-entry
-  separator is always `\n`; `byteOffset` placeholder removed.
+Either way, **do not commit `mimeFromExt` without either wiring it in or
+adding a caller** — a green local `go test` hides the dead-code problem
+because tests don't run `staticcheck`.
 
-- **P2**: `renderActiveChunkBody(cur)` is render-only; the chunk's
-  footer is set by the caller (`flushChainNow` / etc.) BEFORE
-  calling render. Render must NOT mutate the model.
+## Lessons learned (don't repeat these)
 
-## Experience (lessons learned)
+1. **`staticcheck` is not part of `go test`.** A function can compile, have
+   a thorough doc comment, and pass all tests while being completely
+   uncalled. The WIP's `mimeFromExt` is exactly this case — it *looks*
+   wired-in (the comment says "the extractors use it") but isn't. Always
+   cross-check with `grep -rn <fn> --include=*.go` for non-test callers
+   before considering a refactor done.
 
-### Code that bit us
+2. **Aspirational doc comments are a trap.** The `mimeFromExt` comment
+   describes the *intended* contract, not the current state. When you read
+   "the extractors use it", verify the call site exists — if it doesn't,
+   that's the work item, not a finished description.
 
-1. **`t.Skip` left tests broken under refactor.** v8 tests were
-   skipped preemptively ("will fix later"). When we tried to
-   un-skip them, assertions no longer matched v9 semantics
-   (multi-send → single-send + editMessageText, paragraph
-   `<pre>` → fenced code). Either rewrite the assertions or
-   delete the tests outright. Don't leave `t.Skip` with "rewrite
-   pending" indefinitely.
+3. **The `looksLikeImageName` → `mimeFromExt` rename was the right call.**
+   The old bool function could only answer "is this an image?"; the dispatch
+   text needs the actual MIME type to split image vs file counts
+   accurately *before* download (when only the filename is known). A
+   `string`-returning function is the correct shape — just finish wiring it.
 
-2. **Editable param `<-` const 8 raw `─` chars grew to 16.** The
-   user picked option A "plain 16-char horizontal line" via the
-   `wip/heartbeat_separator_choice` decision; we updated
-   `chunkBody.Compose` to use `strings.Repeat("─", 16)` then
-   hardcoded `"────────────────"`. Keep the comment explaining
-   WHY 16 (matches `statusbar.PanelMaxWidth = 16` so the
-   divider aligns with the footer brackets).
-
-3. **`statusbar.StatusBarLines` only set in 4 OutKinds.** Pre-fix,
-   only OutReply / OutResult / OutTaskCreate / OutTaskUpdate
-   carried footer. The v8 contract is footer on EVERY text-emitting
-   OutKind. Fix: introduced `isTextEmittingKind(k)` helper and
-   dropped the switch. **Lock this in by an explicit test** —
-   the `TestAdapter_Send_DM_OutCommandReply_AppendsStatusBar`
-   family asserts the footer is present on OutCommandReply.
-
-4. **Debounce timer snapshot timing.** `lastChunkText` originally
-   snapshotted `api.snapshotCalls()` BEFORE `flushActiveChunkSync`.
-   After flush, `calls` was a stale snapshot missing the new
-   `editMessageText`. Fix: snapshot AFTER flush via
-   `snapshotFromAdapter(t, a)` helper.
-
-5. **Reentrant mutex in case-3.** The original `appendSegment`
-   case-3 (advance cursor + recurse) was on the path "pre-existing
-   next chunk slot" — dead today but a deadlock trip-wire waiting
-   for any future force-hydrate code. Fix: inline as
-   `for chain.cursor...{ chain.cursor++ }` loop at top of
-   function; no recursion, no double-lock.
-
-6. **`<b>` double-escape in Compose.** `RenderMarkdown` calls
-   `escapeHTML` which converts `<` to `&lt;`. Pre-fix, both
-   `flushChainNow` AND `renderActiveChunkBody` were calling
-   `RenderMarkdown(body)` on the full body, escaping the
-   `<b>` from the heartbeat header into literal `&lt;b&gt;` text.
-   Fix: route header verbatim through Compose (raw HTML); only
-   entries + footer go through RenderMarkdown. `editFn` no
-   longer wraps the rendered body in another RenderMarkdown pass.
-
-7. **OutError test expected `<pre>...</pre>` (escaped).** Pre-fix
-   the adapter hand-wrapped stderr in `<pre>` tags and then
-   `RenderMarkdown` re-escaped to `&lt;pre&gt;`. After fix:
-   OutError uses ```fences``` wrapping; `RenderMarkdown` converts
-   to proper `<pre>...</pre>`. Test assertions need to check
-   for `<pre>` (not `&lt;pre&gt;`).
-
-8. **debounce scheduled by heartbeat patchChainHeader must actually
-   fire.** Initial implementation forgot to schedule debounce
-   in OutError case after calling appendErrorSegment, so the
-   second OutError test failed (no editMessageText generated).
-   Fix: adapter explicitly calls `scheduleFlushDebounced` after
-   `appendErrorSegment` returns.
-
-9. **don't pollute the original branch when grep-replacing.** Use
-   bounded sed/Python scripts with specific patterns; never
-   blanket s/...//g. Several cleanup cycles were needed because
-   blanket sed replaced `api.X` with `X` even where `api` was
-   actually used. Lesson: prefer narrow per-test edits over
-   global rewrites when test surfaces vary widely.
-
-### Patterns that worked
-
-1. **OOP layers enforced by method signature.** `chunkBody` is
-   self-contained: `Compose()` is the only render path.
-   `renderActiveChunkBody(cur)` is a thin wrapper. The Adapter
-   does no HTML decisions — every status / format decision lives
-   inside the data layer (chunkBody) or the format-decision
-   layer (appendError's fence wrapping).
-
-2. **Snapshot AFTER flush in tests.** Whenever a test flushes
-   a chain synchronously, re-snapshot the API calls log AFTER
-   the flush — not before. Otherwise tests assert against the
-   pre-flush state and pass for the wrong reason (or fail for
-   confusing reasons).
-
-3. **`heartbeatText` owns its timestamp source.** Don't have
-   `patchChainHeader` call `time.Now()` for the timestamp —
-   pass the snapshot's `LastBeatAt` through `heartbeatText`.
-   This separates the data source (when the activity happened)
-   from the rendering concern (how to format it).
-
-4. **`isTextEmittingKind(k)` helper** in front of the switch.
-   Centralizes the "which kinds carry StatusBar" policy. Future
-   addition (e.g. a new OutImage kind) just needs a one-line
-   entry, no risk of duplicating switch logic across files.
-
-5. **defer cleanup in handlers.** `appendSegmentForKind` and
-   `patchChainHeader` always defer `chain.mu.Unlock()`. Network
-   calls (sendFn, editFn, setMessageReactions) happen INSIDE
-   the locked section for atomicity. Don't refactor to release
-   the lock before the network call.
-
-## Branch state
-
-- 13 commits since the branch base (84511ca).
-- `go test ./internal/channel/telegram/` → all PASS (with 7
-  adapter_statusbar_test + 6 adapter_test tests skipped via
-  t.Skip).
-- All user-visible UI decisions (heartbeat header format,
-  footer separator width 16, etc.) match the v9 chain OOP design.
-- No active warnings from the v9 chain refactor codebase; the
-  pre-existing diagnostics listed above are out of scope.
+4. **The runtime self-containment principle is load-bearing.** The dispatch
+   prompt runs on the user's worktree, not in this repo. Any internal
+   reference (§4.1, F-gtw-fix.md, "the plan above") is a broken pointer for
+   the runtime agent. The `TestBuildIssueDispatchText_RuntimeSelfContained`
+   denylist is the guardrail — keep it green and extend it when you add new
+   cross-references to the prompts.
 
 ## Key files to know
 
 | File | Lines | Purpose |
 |---|---|---|
-| `internal/channel/telegram/chunk_body.go` | ~250 | chunkBody struct + Compose() |
-| `internal/channel/telegram/placeholder_chain.go` | ~170 | placeholderChain + chainLRU |
-| `internal/channel/telegram/placeholder_chain_flush.go` | ~430 | appendSegment, flushChainNow, scheduleFlushDebounced, renderChunkBody |
-| `internal/channel/telegram/summarize_tool.go` | ~190 | formatToolStartCall / summarizeToolResult (from feishu) |
-| `internal/channel/telegram/render.go` | ~190 | RenderMarkdown, escapeInline |
-| `internal/channel/telegram/adapter.go` | ~1380 | OutboundKind dispatch — NO HTML decisions |
-| `internal/channel/telegram/topic.go` | ~290 | sendTelegramMessage, editTelegramMessage, network layer |
-| `internal/channel/telegram/chain_integration_test.go` | ~620 | Chain integration tests (incl. P0 regression guards) |
-| `docs/channel/telegram.md §11.12` | ~400 | v9 spec |
+| `internal/command/gtw/fix.go` | ~855+ | `buildIssueDispatchText` — the prompt template (NO HTML, just markdown) |
+| `internal/command/gtw/attachments.go` | ~295 | `downloadAttachments`, `isImageMIME`, **`mimeFromExt` (dead, needs wiring)** |
+| `internal/command/gtw/provider.go` | ~972+ | `extractGitHubAttachments` — the `![](url)` parser (hardcodes `image/png`) |
+| `internal/command/gtw/dispatch_test.go` | ~340 | pinned invariants incl. `RuntimeSelfContained`, `AttachmentsSection` |
+| `internal/command/gtw/attachments_test.go` | ~41+ | download/routing fixtures |
+| `docs/feat/F-gtw-fix.md` | §4.1/§4.2 | the Plan/Execute prompt specs + runtime self-containment principle |
+
+## DO NOT regress (locked in by `6e48754` + tests)
+
+- **Every attachment downloads.** No skip-on-type. A 302-to-HTML-login still
+  becomes a `ContentFile` so the agent sees what arrived. Pinned by
+  `attachments_test.go`.
+- **10MB size guard** (`maxAttachmentBytes`) skips pathological non-images
+  *without writing to disk*; the dispatch text still surfaces the URL.
+- **Index-prefixed filenames** (`<i>-<name>`) so same-named attachments don't
+  clobber. Pinned by the download fixtures.
+- **Dispatch counts come from `imageCount`/`fileCount` params**, not
+  `len(issue.Attachments)`. Pinned by
+  `TestBuildIssueDispatchText_AttachmentsSection`.
+- **HTTP `Content-Type` wins over the provider's `MIMEType` hint**
+  (attachments.go:123). `mimeFromExt` only seeds the hint; it must NOT
+  override the response.

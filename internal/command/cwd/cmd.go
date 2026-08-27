@@ -40,8 +40,8 @@ func NewFactory() *Factory {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:    "cwd",
-		Summary: "Set workspace for this chat: /cwd <absolute-path>",
-		Usage:   "/cwd <absolute-path>",
+		Summary: "Set workspace for this chat: /cwd <path>  (absolute, ~/..., or $HOME-relative)",
+		Usage:   "/cwd <path>",
 	}
 }
 
@@ -55,6 +55,12 @@ func (f *Factory) Spec() command.Spec {
 // containing spaces — better to surface the mistake than
 // silently use only the first token.
 //
+// The path itself can be absolute, ~-prefixed, or bare
+// relative (resolved against $HOME — see Handle's step 2). The
+// Usage string deliberately says "<path>" rather than
+// "<absolute-path>": an earlier "<absolute-path>" wording was
+// wrong (the handler accepts all three forms).
+//
 // The option/arg split matters even with zero flags today: a
 // path that legitimately starts with "-" is reachable via the
 // conventional terminator (`/cwd -- -weird-dir`), and if /cwd
@@ -62,7 +68,7 @@ func (f *Factory) Spec() command.Spec {
 // re-introducing the "silently swallowed token" bug class.
 var cwdSpec = command.CmdSpec{
 	Name:    "/cwd",
-	Usage:   "/cwd <absolute-path>",
+	Usage:   "/cwd <path>",
 	MinArgs: 1,
 	MaxArgs: 1,
 }

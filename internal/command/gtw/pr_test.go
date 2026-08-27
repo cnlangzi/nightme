@@ -542,14 +542,27 @@ func TestParsePRArgs_MissingValue(t *testing.T) {
 	}
 }
 
-func TestParsePRArgs_UnknownSilentlyAccepted(t *testing.T) {
-	// Future flags (--draft, --base) shouldn't break callers.
+func TestParsePRArgs_UnknownFlagRejected(t *testing.T) {
+	// F-XX §10 "all unknown flags reject": typos like --draft
+	// must surface as "unknown flag" rather than silently no-op.
 	out, err := parsePRArgs([]string{"--draft", "-a", "claude"})
-	if err != nil {
-		t.Fatalf("err: %v", err)
+	if err == nil {
+		t.Fatalf("parsePRArgs returned no error; want --draft rejected. got=%+v", out)
 	}
-	if out.Agent != "claude" {
-		t.Fatalf("Agent: %q", out.Agent)
+	if !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("error message lacks 'unknown flag'; got %q", err.Error())
+	}
+}
+
+func TestParsePRArgs_PositionalRejected(t *testing.T) {
+	// /gtw pr takes no positional args; bare tokens are rejected
+	// with "too many positional arguments".
+	out, err := parsePRArgs([]string{"extra-arg"})
+	if err == nil {
+		t.Fatalf("parsePRArgs returned no error; want positional rejected. got=%+v", out)
+	}
+	if !strings.Contains(err.Error(), "positional") {
+		t.Errorf("error message lacks 'positional'; got %q", err.Error())
 	}
 }
 

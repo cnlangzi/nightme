@@ -8,9 +8,10 @@ import (
 )
 
 // TestRenderActionLookupContract locks the contract between
-// BranchExistsChoice / WorktreeFailChoice (the gtw card renderer) and
-// messages.ActionLookup (the channel-side translator that turns
-// Feishu card.action.trigger events into ReactionKind values).
+// WorktreeFailChoice (the gtw card renderer — branch-exists
+// card was removed in F-XX §3.1) and messages.ActionLookup
+// (the channel-side translator that turns Feishu
+// card.action.trigger events into ReactionKind values).
 //
 // Each card emits one or more (Emoji, Action) pairs; every emitted
 // Action must round-trip through ActionLookup to the ReactionKind
@@ -29,14 +30,6 @@ func TestRenderActionLookupContract(t *testing.T) {
 		name string
 		card gtw.Choice
 	}{
-		{
-			name: "BranchExistsChoice",
-			card: gtw.BranchExistsChoice(gtw.FixDraftPayload{
-				Branch:  "feat/foo",
-				IssueID: 42,
-				Title:   "example issue",
-			}, ""),
-		},
 		{
 			name: "WorktreeFailChoice",
 			card: gtw.WorktreeFailChoice(gtw.FixDraftPayload{

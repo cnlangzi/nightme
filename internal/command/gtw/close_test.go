@@ -17,12 +17,11 @@ import (
 // here rather than in a shared test helper because no other test
 // file needs this exact setup.
 type closeTestRig struct {
-	cs        *chatsession.ChatSession
-	slot      *memSlot
-	deps      HandlerDeps
-	sentTexts []string
-	git       *programmableGit
-	rec       *closeTestRecCh
+	cs     *chatsession.ChatSession
+	slot   *memSlot
+	deps   HandlerDeps
+	git    *programmableGit
+	rec    *closeTestRecCh
 }
 
 // memSlot is an in-memory ContextSlot for tests. Real production

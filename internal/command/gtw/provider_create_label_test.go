@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -68,7 +69,7 @@ func TestGitHubCreateLabel_CLIArgs(t *testing.T) {
 		"--description", "Work in progress",
 	}
 	for _, want := range wantSubstrings {
-		if !contains(cli.argv, want) {
+		if !slices.Contains(cli.argv, want) {
 			t.Errorf("argv missing %q: %v", want, cli.argv)
 		}
 	}
@@ -77,7 +78,7 @@ func TestGitHubCreateLabel_CLIArgs(t *testing.T) {
 	// reviewer is forced to re-read the F-59 contract.
 	forbiddenFlags := []string{"--force"}
 	for _, bad := range forbiddenFlags {
-		if contains(cli.argv, bad) {
+		if slices.Contains(cli.argv, bad) {
 			t.Errorf("argv contains forbidden flag %q (violates CreateLabel no-op-on-existing contract): %v",
 				bad, cli.argv)
 		}
@@ -85,7 +86,7 @@ func TestGitHubCreateLabel_CLIArgs(t *testing.T) {
 	// gh uses positional <name>, glab uses --name. CreateLabel
 	// calls ONLY one platform at a time, so --name must NOT be
 	// present in the gh argv (and vice versa in the glab test).
-	if contains(cli.argv, "--name") {
+	if slices.Contains(cli.argv, "--name") {
 		t.Errorf("gh argv should not contain --name (gh uses positional <name>): %v", cli.argv)
 	}
 }
@@ -184,7 +185,7 @@ func TestGitLabCreateLabel_CLIArgs(t *testing.T) {
 		"--description", "Work in progress",
 	}
 	for _, want := range wantSubstrings {
-		if !contains(cli.argv, want) {
+		if !slices.Contains(cli.argv, want) {
 			t.Errorf("argv missing %q: %v", want, cli.argv)
 		}
 	}
@@ -193,7 +194,7 @@ func TestGitLabCreateLabel_CLIArgs(t *testing.T) {
 	// GitProvider.CreateLabel contract). This assertion catches
 	// that regression.
 	for _, bad := range []string{"--force"} {
-		if contains(cli.argv, bad) {
+		if slices.Contains(cli.argv, bad) {
 			t.Errorf("glab argv contains forbidden flag %q: %v", bad, cli.argv)
 		}
 	}

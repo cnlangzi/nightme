@@ -5124,7 +5124,7 @@ nightme 现在有两套并行通路驱动 gtw 决策卡：
 | emoji reaction | 用户在 bot 消息上点 `🔄` 等 | `OnP2MessageReactionCreatedV1` → `handleReactionCreated` → 推进 inbound → `WithActionHandler` → `gtw.HandleAction` | ✅ 已通 |
 | interactive card button | 用户点 bot 卡片上的 `🆕` 按钮 | `OnP2CardActionTrigger` → `handleCardAction` (stub) | ❌ stub：log + 弹 toast |
 
-`/gtw fix` 跑出来的决策卡（branch-exists / worktree-fail 场景，见 §3.3）是纯文本 markdown（见 `internal/gtw/render.go`），用户必须打 emoji 才能继续。React Native / web 客户端上的表情输入体验不好（选 emoji 面板要找），所以要给决策卡加 button + `select_static` 让用户点一下。
+`/gtw fix` 跑出来的决策卡（**worktree-fail** 场景，见 §3.3；branch-exists 已废除，见 [`feat/F-gtw-fix.md`](../feat/F-gtw-fix.md)）是纯文本 markdown（见 `internal/command/gtw/render.go`），用户必须打 emoji 才能继续。React Native / web 客户端上的表情输入体验不好（选 emoji 面板要找），所以要给决策卡加 button + `select_static` 让用户点一下。
 
 ### 1.2 邻近实现
 
@@ -5199,8 +5199,12 @@ const (
 
 ### 3.3 Decision card 渲染（branch-exists / worktree-fail）
 
+> **F-XX 注（2026-08）**：**branch-exists** 场景已废除 — `/gtw fix` 在 branch
+> 冲突时直接返回错误，不再 emit 决策卡。见 [`feat/F-gtw-fix.md`](../feat/F-gtw-fix.md)。
+> 本节 branch-exists 示例为 F-46 历史设计；**worktree-fail** 仍有效。
+
 ```go
-// branch-exists scenario (gtw fix flow decision)
+// branch-exists scenario (gtw fix flow decision) — DEPRECATED, see F-gtw-fix.md
 &Card{
     Kind:    ChoiceKindDecision,
     Title:   fmt.Sprintf("⚠️ 分支 `%s` 已存在", payload.Branch),
@@ -5297,8 +5301,8 @@ func (a *Adapter) handleActCardAction(
     userID := ""
     if event.Event.Operator != nil { userID = event.Event.Operator.OpenID }
 
-    // 1. actionStr → (ReactionKind, draftKind)。"act:/gtw/branch-newv2"
-    //    映射成 (ReactionNewV2, DraftFixBranchExists)。
+    // 1. actionStr → (ReactionKind, draftKind)。
+    //    branch-newv2 / branch-join 已废除（F-gtw-fix）；当前仅 worktree-retry / cancel。
     kind, targetEmoji, ok := gtwActionMap(actionStr)
     if !ok {
         return &larkcallback.CardActionTriggerResponse{
@@ -5336,14 +5340,14 @@ func (a *Adapter) handleActCardAction(
 }
 ```
 
-`gtwActionMap` 在 `internal/gtw/action_routing.go`：
+`gtwActionMap` 在 `internal/gtw/action_routing.go`（F-XX §3.1 之前的历史方案；F-gtw-fix 后只剩 worktree-retry / cancel）：
 
 ```go
 var gtwActionPrefixes = map[string]ReactionKind{
-    "act:/gtw/branch-newv2":   ReactionNewV2,
-    "act:/gtw/branch-join":    ReactionJoin,
     "act:/gtw/worktree-retry": ReactionRetry,
     "act:/gtw/cancel":         ReactionCancel, // any decision card
+    // act:/gtw/branch-newv2 / branch-join — removed in F-XX
+    // §3.1; the BranchExistsChoice card is gone.
 }
 
 func ActionLookup(action string) (ReactionKind, bool) {
@@ -5387,7 +5391,7 @@ action := map[string]any{
 
 ### 3.8 派发后 follow-up
 
-`gtw.HandleAction` 在 `executeBranchExistsAction` / `executeWorktreeFailAction` 完成后调 `deps.Send` 发 follow-up text（"❌ Cancelled fix #N." 等）。F-46 把这些 text 改成 `OutChoicePatch`：
+`gtw.HandleAction` 在 `executeWorktreeFailAction` 完成后调 `deps.Send` 发 follow-up text（"❌ Cancelled fix #N." 等；branch-exists 路径已废除，见 F-gtw-fix.md）。F-46 把这些 text 改成 `OutChoicePatch`：
 
 ```go
 // 之前
@@ -5494,10 +5498,10 @@ func emitBranchExistsDraft(...) (*Result, error) {
 
 ### 5.3 手动验证
 
-- 飞书客户端（iOS/Android）：点 branch-exists 卡片按钮 → toast "✅ 已选择 🆕" → 原卡变成 "已选择 🆕" 状态
+- 飞书客户端（iOS/Android）：**worktree-fail** 卡片 — 点 🔄 / ❌ → toast + 原卡 PATCH
 - 飞书桌面：同上
 - 飞书 Web：部分版本不渲染 button，确认走 emoji 降级路径
-- daemon 重启后跑 `/gtw fix 42`，决策卡渲染形状与点按钮的反馈
+- branch-exists 决策卡已废除（[`feat/F-gtw-fix.md`](../feat/F-gtw-fix.md)）；`/gtw fix` 在 branch 冲突时直接返回错误 reply
 
 ## 6. 风险与回退
 
@@ -5614,8 +5618,8 @@ Feishu SDK 的 `event.Action.Option` 字段是 `select_static` 组件的选项�
 
 | 前缀 | 语义 | F-46 落地 |
 | --- | --- | --- |
-| `act:/gtw/branch-newv2` | branch-exists 🆕 | ✅ 已实现 |
-| `act:/gtw/branch-join` | branch-exists 🔗 | ✅ 已实现 |
+| `act:/gtw/branch-newv2` | branch-exists 🆕 | ❌ 已废除（F-gtw-fix；branch 冲突硬失败） |
+| `act:/gtw/branch-join` | branch-exists 🔗 | ❌ 已废除（F-gtw-fix） |
 | `act:/gtw/worktree-retry` | §5.3.3 🔄 | ✅ 已实现 |
 | `act:/gtw/cancel` | 任意决策卡 ❌ | ✅ 已实现 |
 | `nav:/xxx` / `cmd:/xxx` / `act:/gtw/label-force` | 导航 / 命令 / §5.3.2 强制接管 | ❌ 未进 map（F-47/48/49） |

@@ -43,19 +43,6 @@ func (r *recordingCh) lastText() string {
 	return r.sends[len(r.sends)-1].Text
 }
 
-// serialized returns the captured messages' Text fields, joined
-// in send order. Useful when a single dispatch emits both a
-// warning (e.g. label-fail) and a success card.
-func (r *recordingCh) serialized() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]string, len(r.sends))
-	for i, s := range r.sends {
-		out[i] = s.Text
-	}
-	return out
-}
-
 // pathsEqual compares two filesystem paths. On macOS, t.TempDir()
 // returns the realpath (e.g. /var/folders/...) but os.Getwd() and
 // chat session SetActiveCwd record the symlink form

@@ -69,7 +69,7 @@ func TestManager_HasContext(t *testing.T) {
 
 func TestManager_StoreTakeDraft(t *testing.T) {
 	m := newTestManager()
-	d := &Draft{Kind: DraftFixBranchExists, Payload: FixDraftPayload{IssueID: 42, ChatID: "c1"}}
+	d := &Draft{Kind: DraftFixWorktreeFail, Payload: FixDraftPayload{IssueID: 42, ChatID: "c1"}}
 	m.StoreDraft("c1", "msg-1", d)
 
 	got := m.GetDraft("c1", "msg-1")
@@ -92,7 +92,7 @@ func TestManager_StoreTakeDraft(t *testing.T) {
 
 func TestManager_StoreDraftEmptyIDIgnored(t *testing.T) {
 	m := newTestManager()
-	d := &Draft{Kind: DraftFixBranchExists}
+	d := &Draft{Kind: DraftFixWorktreeFail}
 	m.StoreDraft("", "msg-1", d)
 	m.StoreDraft("c1", "", d)
 	m.StoreDraft("c1", "msg-1", nil)
@@ -103,9 +103,9 @@ func TestManager_StoreDraftEmptyIDIgnored(t *testing.T) {
 
 func TestManager_ListDraftsAndCount(t *testing.T) {
 	m := newTestManager()
-	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixBranchExists})
+	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixWorktreeFail})
 	m.StoreDraft("c1", "m2", &Draft{Kind: DraftFixWorktreeFail})
-	m.StoreDraft("c2", "m1", &Draft{Kind: DraftFixLabelTaken})
+	m.StoreDraft("c2", "m1", &Draft{Kind: DraftFixWorktreeFail})
 
 	if got := m.DraftCount("c1"); got != 2 {
 		t.Errorf("c1 count = %d, want 2", got)
@@ -125,7 +125,7 @@ func TestManager_ListDraftsAndCount(t *testing.T) {
 
 func TestManager_ClearDrafts(t *testing.T) {
 	m := newTestManager()
-	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixBranchExists})
+	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixWorktreeFail})
 	m.StoreDraft("c1", "m2", &Draft{Kind: DraftFixWorktreeFail})
 	m.SetContext("c1", Context{Mode: ModeRemote, State: StateFixing})
 
@@ -141,7 +141,7 @@ func TestManager_ClearDrafts(t *testing.T) {
 func TestManager_Reset(t *testing.T) {
 	m := newTestManager()
 	m.SetContext("c1", Context{Mode: ModeRemote, State: StateFixing})
-	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixBranchExists})
+	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixWorktreeFail})
 
 	m.Reset("c1")
 	if m.HasContext("c1") {
@@ -188,7 +188,7 @@ func TestManager_HandleReaction_NilCS(t *testing.T) {
 
 func TestManager_TakeDraftRemovesEmptyMap(t *testing.T) {
 	m := newTestManager()
-	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixBranchExists})
+	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixWorktreeFail})
 	m.TakeDraft("c1", "m1")
 	if got := m.ListDrafts("c1"); len(got) != 0 {
 		t.Errorf("expected empty drafts after take, got %d", len(got))

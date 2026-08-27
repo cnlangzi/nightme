@@ -11,6 +11,59 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Breaking: `/gtw fix` removes `--force` / `-f` flag
+
+F-XX (`docs/feat/F-gtw-fix.md`): the `/gtw fix --force`
+flag and its `--force` cleanup path are removed. The flag's
+only purpose under the new design (auto-cleanup of a
+leftover worktree path) becomes destructive auto-recovery.
+Users with a stale worktree path now run
+`git worktree remove --force <path>` or `/gtw close`
+manually. Passing `--force` or `-f` is no longer recognised
+and the token falls through to a parse error.
+
+### Feature: `/gtw fix` plan-first dispatch + `-y` direct execute
+
+F-XX: `/gtw fix <id>` now defaults to a **Plan Prompt**
+("analyze the issue, do NOT modify files; deliver a
+structured execution plan; wait for the user"). Add
+`-y` / `--yes` to dispatch an **Execute Prompt** ("proceed
+to fix the issue") instead. User confirmation is expressed
+via the flag at the first dispatch — there is no
+`/gtw proceed` command. The success card hint also differs:
+Plan mode says "agent is analyzing — review the plan in
+chat", Execute mode says "agent is fixing now".
+
+`-y` / `--yes` is a positional-independent boolean flag
+(takes no value, can appear anywhere in argv, repeated
+occurrences are idempotent — matches git CLI conventions).
+Local mode (`/gtw fix --name <branch>`) does not dispatch
+a prompt to the agent, so `-y` / `--yes` has no effect
+there. The flag is silently dropped by `Factory.runFix`
+when `args.Mode == ModeLocal`. Any unknown flag (typos,
+random `--xxx` / `-x` tokens) is hard-rejected with
+"unknown flag" — the CLI does not silently no-op. See
+`docs/feat/F-gtw-fix.md` for the full design.
+
+### Breaking: `/gtw fix` hard-fails on branch collision (decision card removed)
+
+F-XX §3.1 (`docs/feat/F-gtw-fix.md`): when the derived
+branch already exists locally, `/gtw fix <id>` and
+`/gtw fix --name <branch>` now return a hard-fail reply
+and no longer emit the §5.3.1 â / 🔗 / ❌ decision card:
+
+    ❌ Branch `<name>` already exists
+    → worktree: <path>            # WorktreeListPath 已知时
+    ↳ finish or drop the active fix with `/gtw close`, then retry
+
+The previous `--force` auto-cleanup path is also gone
+(see the `--force` removal entry above). The same-path
+daemon-recovery re-entry path is removed too: every
+branch collision is now a hard error. The Feishu
+`gtwActionMap` no longer routes `branch-newv2` /
+`branch-join` action tags (the card is gone, the tags
+return "unknown action" toasts).
+
 ### Pi bridge: image attachments + provider-error transparency (issue #290)
 
 `internal/bridge/pi` had two conflated bugs that made every image

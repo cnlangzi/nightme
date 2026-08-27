@@ -70,7 +70,7 @@ const maxDirtyFilesReported = 10
 //     starts cold. matched==0 means no AS survives in repoRoot
 //     — the common case after step 2.5 — and no extra card is
 //     sent.
-// 10. Run `git pull --rebase origin <default>` on repoRoot and
+//  10. Run `git pull --rebase origin <default>` on repoRoot and
 //     emit the same sync card /gtw sync uses. Sync runs LAST
 //     so the user sees the full sequence: close → /new → sync.
 //     If sync errors (dirty main, rebase conflict), its own
@@ -128,7 +128,7 @@ func RunClose(
 	// down.
 	if selectedCwd == "" {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ " + command.NoActiveCwdReply), nil
+			"❌ "+command.NoActiveCwdReply), nil
 	}
 	// Stat failure handling: split the permanent case from the
 	// transient case. IsNotExist means another /gtw close (or an
@@ -246,10 +246,11 @@ func RunClose(
 
 	// --- step 3: dirty check --------------------------------------
 	// Close is intentionally all-or-nothing — the user must
-	// commit / stash / discard before re-running. /gtw fix keeps
-	// its --force for a different concern (nuking a leftover
-	// worktree at the target path); close has no equivalent
-	// because the yml snapshot is the recovery source of truth.
+	// commit / stash / discard before re-running. Neither
+	// /gtw close nor /gtw fix exposes a --force; the yml
+	// snapshot is the recovery source of truth for close,
+	// and stale worktree paths are cleaned manually via
+	// `git worktree remove --force <path>`.
 	if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
 	}

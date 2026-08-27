@@ -345,6 +345,40 @@ func TestParsePushArgs_Multiple(t *testing.T) {
 	}
 }
 
+// TestParsePushArgs_UnknownFlagRejected pins the F-XX §10
+// "all unknown flags reject" contract: a typo like --dry-run
+// must surface as "unknown flag" rather than silently no-op.
+func TestParsePushArgs_UnknownFlagRejected(t *testing.T) {
+	cases := [][]string{
+		{"--dry-run"},
+		{"-a", "opencode", "--unknown"},
+		{"--draft"},
+	}
+	for _, in := range cases {
+		_, err := parsePushArgs(in)
+		if err == nil {
+			t.Errorf("parsePushArgs(%v) returned no error; want 'unknown flag'", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("parsePushArgs(%v) error lacks 'unknown flag'; got %q", in, err.Error())
+		}
+	}
+}
+
+// TestParsePushArgs_PositionalRejected pins /gtw push takes
+// no positional args (operates on the chat's current worktree,
+// like /gtw close).
+func TestParsePushArgs_PositionalRejected(t *testing.T) {
+	out, err := parsePushArgs([]string{"extra-arg"})
+	if err == nil {
+		t.Fatalf("parsePushArgs returned no error; want positional rejected. got=%+v", out)
+	}
+	if !strings.Contains(err.Error(), "positional") {
+		t.Errorf("error message lacks 'positional'; got %q", err.Error())
+	}
+}
+
 // -----------------------------------------------------------------------------
 // dispatchPush tests (F-56 + F-57 + F-XX split)
 //

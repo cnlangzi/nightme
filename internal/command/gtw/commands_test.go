@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func TestFactory_Spec(t *testing.T) {
 	if s.Name != "gtw" {
 		t.Errorf("expected Name=gtw, got %q", s.Name)
 	}
-	if !contains(s.Aliases, "team") {
+	if !slices.Contains(s.Aliases, "team") {
 		t.Errorf("expected alias 'team' in %v", s.Aliases)
 	}
 	if s.Summary == "" {
@@ -122,81 +123,14 @@ func TestFactory_Handle_UnknownSubcommand(t *testing.T) {
 	}
 }
 
-// contains is a tiny helper (Go 1.21+ has slices.Contains,
-// but we want to be explicit and avoid the import).
-func contains(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
-
-// --- F-XX tests for parseFixMode ---
-
-// TestParseFixMode_BareID covers the legacy default path:
-// bare numeric argv → ModeRemote + the numeric value.
-func TestParseFixMode_BareID(t *testing.T) {
-	mode, raw, err := parseFixMode([]string{"42"})
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if mode != ModeRemote {
-		t.Errorf("mode = %q, want %q", mode, ModeRemote)
-	}
-	if raw != "42" {
-		t.Errorf("raw = %q, want %q", raw, "42")
-	}
-}
-
-// TestParseFixMode_NameLong covers `--name <branch>`.
-func TestParseFixMode_NameLong(t *testing.T) {
-	mode, raw, err := parseFixMode([]string{"--name", "login-fix"})
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if mode != ModeLocal {
-		t.Errorf("mode = %q, want %q", mode, ModeLocal)
-	}
-	if raw != "login-fix" {
-		t.Errorf("raw = %q, want %q", raw, "login-fix")
-	}
-}
-
-// TestParseFixMode_NameShort covers `-n <branch>`.
-func TestParseFixMode_NameShort(t *testing.T) {
-	mode, raw, err := parseFixMode([]string{"-n", "x"})
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if mode != ModeLocal {
-		t.Errorf("mode = %q, want %q", mode, ModeLocal)
-	}
-	if raw != "x" {
-		t.Errorf("raw = %q, want %q", raw, "x")
-	}
-}
-
-// TestParseFixMode_NameMissingValue covers the
-// `--name` (or `-n`) flag with no value following it.
-func TestParseFixMode_NameMissingValue(t *testing.T) {
-	for _, argv := range [][]string{{"--name"}, {"-n"}, {"--name", ""}, {"-n", "   "}} {
-		if _, _, err := parseFixMode(argv); err == nil {
-			t.Errorf("expected err for argv=%v, got nil", argv)
-		}
-	}
-}
-
-// TestParseFixMode_EmptyArgv covers the "no args at all" path.
-func TestParseFixMode_EmptyArgv(t *testing.T) {
-	if _, _, err := parseFixMode(nil); err == nil {
-		t.Errorf("expected err for empty argv")
-	}
-	if _, _, err := parseFixMode([]string{}); err == nil {
-		t.Errorf("expected err for empty argv")
-	}
-}
+// (parseFixMode was the pre-F-XX helper that parsed mode + rawArg
+// (parseFixMode was the pre-F-XX helper that parsed mode + rawArg
+// from a boolean-flag-stripped argv. F-XX rewrote parseFixArgs
+// as a proper CLI lexer and deleted parseFixMode. The bare-id,
+// --name/-n, missing-value, and empty-argv cases are all
+// covered by the stricter TestParseFixArgs_* tests in
+// parse_fix_args_test.go — see TestParseFixArgs_YesFlag's
+// "default plan" / "yes with local" sub-cases, etc.)
 
 // --- F-XX run-lock integration tests ---
 //
@@ -381,14 +315,15 @@ func TestFactory_Handle_UnknownSubcommandReleasesLock(t *testing.T) {
 	}()
 
 	// Must complete quickly — no external lock held, no I/O.
+	// (If the prior worker's defer Unlock fired correctly, `done`
+	// closes well under 200ms. If it didn't, this select times
+	// out and the test fails with a clear "lock leaked" message.
+	// That's the only signal we need — no second sanity Lock/Unlock
+	// pair, which would just deadlock on a leak instead of failing
+	// fast with a useful message.)
 	select {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Handle did not complete within 200ms; lock likely leaked on the default case")
 	}
-
-	// Sanity: the lock is now unheld. A second worker calling
-	// Handle must proceed without blocking.
-	mu.Lock() // confirms prior Unlock happened
-	mu.Unlock()
 }

@@ -163,7 +163,7 @@ func TestPreflightOrphanYml_RunFixIntegration_AllowsParallel(t *testing.T) {
 	res, err := RunFix(
 		context.Background(), ModeLocal, cs, slot, newMemDrafts(), deps,
 		cs.ChatID, "msg", []string{"--name", "fix/cwd"},
-		false, /* force */
+		false, /* yes — plan-first default */
 	)
 	if err != nil {
 		t.Fatalf("RunFix: %v", err)

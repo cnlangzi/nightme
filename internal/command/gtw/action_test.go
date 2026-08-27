@@ -53,65 +53,41 @@ func TestVariantReadyResultText(t *testing.T) {
 	}
 }
 
-// TestRepoEmptyGuardAllowsLocalMode pins the fix for the
-// defensive `p.Repo == ""` check inside
-// executeBranchExistsAction: it must NOT fire for local-mode
-// drafts (which legitimately carry Repo = "" because local
-// mode has no remote issue).
+// TestRepoEmptyGuardAllowsLocalMode pins the round-trip
+// between FixDraftPayload and ModeFromDraftPayload:
+// ModeFromDraftPayload must classify local-mode drafts
+// (IssueID == -1) as ModeLocal regardless of whether Repo
+// is set, and remote-mode drafts (IssueID > 0) as ModeRemote.
 //
-// We can't easily call the executor without a full ChatSession
-// stub, so we test the predicate it uses: IssueID == -1 → local
-// → Repo is allowed to be empty. If a future refactor
-// re-tightens the predicate, this test catches it.
+// The "Repo == ” for local" shape matters because local
+// /gtw fix --name <branch> never populates Repo (no remote
+// issue). The defensive check `IssueID != -1 && Repo == ""`
+// used to fire inside executeBranchExistsAction (removed by
+// F-XX §3.1); the test is kept as a ModeFromDraftPayload
+// sanity check.
 func TestRepoEmptyGuardAllowsLocalMode(t *testing.T) {
-	p := FixDraftPayload{IssueID: -1, Repo: "", Branch: "b"}
-	if ModeFromDraftPayload(p) != ModeLocal {
-		t.Fatalf("expected local-mode payload")
-	}
-	// The guard condition in executeBranchExistsAction is
-	// `p.IssueID != -1 && p.Repo == ""`. Validate the truth
-	// table:
 	cases := []struct {
 		name       string
 		p          FixDraftPayload
-		shouldTrip bool
+		wantMode   Mode
+		shouldTrip bool // legacy predicate: remote + empty Repo
 	}{
-		{"local w/ empty repo (allowed)", FixDraftPayload{IssueID: -1, Repo: ""}, false},
-		{"local w/ non-empty repo (still local)", FixDraftPayload{IssueID: -1, Repo: "o/r"}, false},
-		{"remote w/ empty repo (TRIPS)", FixDraftPayload{IssueID: 42, Repo: ""}, true},
-		{"remote w/ repo (allowed)", FixDraftPayload{IssueID: 42, Repo: "o/r"}, false},
+		{"local w/ empty repo (allowed)", FixDraftPayload{IssueID: -1, Repo: ""}, ModeLocal, false},
+		{"local w/ non-empty repo (still local)", FixDraftPayload{IssueID: -1, Repo: "o/r"}, ModeLocal, false},
+		{"remote w/ empty repo (TRIPS)", FixDraftPayload{IssueID: 42, Repo: ""}, ModeRemote, true},
+		{"remote w/ repo (allowed)", FixDraftPayload{IssueID: 42, Repo: "o/r"}, ModeRemote, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			got := ModeFromDraftPayload(tc.p)
+			if got != tc.wantMode {
+				t.Errorf("ModeFromDraftPayload = %v, want %v", got, tc.wantMode)
+			}
 			trip := tc.p.IssueID != -1 && tc.p.Repo == ""
 			if trip != tc.shouldTrip {
 				t.Errorf("guard trip=%v, want %v", trip, tc.shouldTrip)
 			}
 		})
-	}
-}
-
-// TestBranchExistsChoice_LocalMode pins the local-mode render
-// of the §5.3.1 decision card: the body must NOT show
-// "issue: #-1" (which would look broken); instead it shows
-// "branch: `<name>` (local)".
-func TestBranchExistsChoice_LocalMode(t *testing.T) {
-	p := FixDraftPayload{IssueID: -1, Title: "(local branch)", Branch: "login-fix", Slug: "login-fix", Repo: ""}
-	card := BranchExistsChoice(p, "/worktrees/login-fix")
-	if strings.Contains(card.Body, "issue: #") {
-		t.Errorf("local-mode card should not show 'issue: #', got body:\n%s", card.Body)
-	}
-	if !strings.Contains(card.Body, "branch: `login-fix` (local)") {
-		t.Errorf("local-mode card should mention '(local)' marker, got body:\n%s", card.Body)
-	}
-}
-
-// TestBranchExistsChoice_RemoteMode pins the ID-mode render.
-func TestBranchExistsChoice_RemoteMode(t *testing.T) {
-	p := FixDraftPayload{IssueID: 42, Title: "Login state expires", Branch: "login-state", Repo: "owner/repo", Provider: "github"}
-	card := BranchExistsChoice(p, "")
-	if !strings.Contains(card.Body, "issue: #42") {
-		t.Errorf("remote-mode card should show 'issue: #42', got body:\n%s", card.Body)
 	}
 }
 

@@ -22,19 +22,14 @@ type ReactionKind string
 const (
 	// ReactionConfirm: ✅ — accept the current draft, advance the flow.
 	ReactionConfirm ReactionKind = "✅"
-	// ReactionEdit: ✏️ — "let me change something" (v1: no-op; reserved).
+	// ReactionEdit: ✏️ — reserved; no current ActionLookup mapping.
+	// Reintroduce when a card that emits an "edit" reaction lands.
 	ReactionEdit ReactionKind = "✏️"
 	// ReactionCancel: ❌ — abort the current gtw step; rollback side
-	// effects where possible.
+	// effects where possible. (WorktreeFailChoice cancel button.)
 	ReactionCancel ReactionKind = "❌"
-	// ReactionNewV2: 🆕 — branch already exists; create a -v2 variant.
-	ReactionNewV2 ReactionKind = "🆕"
-	// ReactionJoin: 🔗 — branch already exists; reuse the existing one
-	// without creating a new worktree.
-	ReactionJoin ReactionKind = "🔗"
-	// ReactionForce: 🤝 — somebody else holds the label; force-take it.
-	ReactionForce ReactionKind = "🤝"
 	// ReactionRetry: 🔄 — last step failed; re-run.
+	// (WorktreeFailChoice retry button.)
 	ReactionRetry ReactionKind = "🔄"
 )
 
@@ -49,19 +44,18 @@ const (
 // wants to translate clicks — both sides MUST agree on the exact
 // spelling. The renderer currently emits:
 //
-//	act:/gtw/branch-newv2   → ReactionNewV2   (BranchExistsChoice)
-//	act:/gtw/branch-join    → ReactionJoin    (BranchExistsChoice)
-//	act:/gtw/cancel         → ReactionCancel  (BranchExistsChoice + WorktreeFailChoice)
+//	act:/gtw/cancel         → ReactionCancel  (WorktreeFailChoice)
 //	act:/gtw/worktree-retry → ReactionRetry   (WorktreeFailChoice)
 //
+// (F-XX §3.1 removed the BranchExistsChoice card; the previous
+// 🆕 / 🔗 reactions and the branch-newv2 / branch-join action
+// tags are no longer recognised. See feishu-rendering.md
+// action map.)
+//
 // reaction_test.go pins this contract by walking every Choice in
-// both rendered cards and asserting ActionLookup recognises it.
+// rendered cards and asserting ActionLookup recognises it.
 func ActionLookup(tag string) (ReactionKind, bool) {
 	switch tag {
-	case "act:/gtw/branch-newv2":
-		return ReactionNewV2, true
-	case "act:/gtw/branch-join":
-		return ReactionJoin, true
 	case "act:/gtw/cancel":
 		return ReactionCancel, true
 	case "act:/gtw/worktree-retry":

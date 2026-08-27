@@ -136,6 +136,19 @@ const (
 	ModeLocal  Mode = "local"
 )
 
+// IssueDispatchMode decides which prompt variant gtw hands to
+// the agent. Plan = "analyze and present a plan, do not modify
+// files". Execute = "implement the fix". gtw always dispatches
+// exactly one prompt per /gtw fix; subsequent agent↔user
+// confirmation flows through the chat, never back through gtw.
+// See F-gtw-fix.md §4 for the rationale.
+type IssueDispatchMode int
+
+const (
+	DispatchPlan IssueDispatchMode = iota
+	DispatchExecute
+)
+
 // Context is the per-chat snapshot of the in-flight /gtw fix.
 // The zero value (with State == "") signals "no active fix".
 //
@@ -179,8 +192,6 @@ type Context struct {
 type DraftKind string
 
 const (
-	DraftFixBranchExists DraftKind = "fix.branch-exists" // §5.3.1
-	DraftFixLabelTaken   DraftKind = "fix.label-taken"   // §5.3.2
 	DraftFixWorktreeFail DraftKind = "fix.worktree-fail" // §5.3.3
 )
 
@@ -209,9 +220,6 @@ type FixDraftPayload struct {
 	// GitError is the last 10 lines of stderr from the failed
 	// `git worktree add` (only for DraftFixWorktreeFail).
 	GitError string
-	// AlreadyClaimedBy is the user ID holding nightme/wip on
-	// the issue (only for DraftFixLabelTaken; v1 never emits).
-	AlreadyClaimedBy string
 	// LabelAdded is true iff nightme/wip was applied before the
 	// draft was emitted. Rollback uses this to decide whether to
 	// remove the label.

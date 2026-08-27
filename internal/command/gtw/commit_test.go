@@ -346,6 +346,37 @@ func TestParseCommitArgs_Multiple(t *testing.T) {
 	}
 }
 
+// TestParseCommitArgs_UnknownFlagRejected pins the F-XX §10
+// "all unknown flags reject" contract.
+func TestParseCommitArgs_UnknownFlagRejected(t *testing.T) {
+	cases := [][]string{
+		{"--amend"},
+		{"-a", "opencode", "--unknown"},
+	}
+	for _, in := range cases {
+		_, err := parseCommitArgs(in)
+		if err == nil {
+			t.Errorf("parseCommitArgs(%v) returned no error; want 'unknown flag'", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("parseCommitArgs(%v) error lacks 'unknown flag'; got %q", in, err.Error())
+		}
+	}
+}
+
+// TestParseCommitArgs_PositionalRejected pins /gtw commit
+// takes no positional args.
+func TestParseCommitArgs_PositionalRejected(t *testing.T) {
+	out, err := parseCommitArgs([]string{"extra-arg"})
+	if err == nil {
+		t.Fatalf("parseCommitArgs returned no error; want positional rejected. got=%+v", out)
+	}
+	if !strings.Contains(err.Error(), "positional") {
+		t.Errorf("error message lacks 'positional'; got %q", err.Error())
+	}
+}
+
 // -----------------------------------------------------------------------------
 // dispatchCommit tests (F-56 Branch 2 ownership, F-57 readiness
 // gate, F-XX commit/push split).

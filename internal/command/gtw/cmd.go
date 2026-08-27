@@ -243,10 +243,11 @@ func (f *Factory) Spec() command.Spec {
 		Name:    "gtw",
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
-		Usage: "/gtw fix <issue-id>              claim, label, and create a worktree\n" +
+		Usage: "/gtw fix <issue-id>              claim, label, and create a worktree (plan-first)\n" +
+			"/gtw fix <issue-id> -y           direct execute (skip plan-first)\n" +
+			"/gtw fix <issue-id> --yes        long form of -y\n" +
 			"/gtw fix --name <branch>         create a local worktree (no issue)\n" +
 			"/gtw fix -n <branch>             short form of --name\n" +
-			"/gtw fix <id> --force            nuke any leftover at the target path, then re-create\n" +
 			"/gtw close                       tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw commit [-a <agent>]         commit uncommitted work via the configured agent (no push)\n" +
 			"/gtw push                        push the worktree branch (clean only — refuses dirty)\n" +
@@ -317,6 +318,10 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 // F-XX splits the entry into two modes at the factory boundary
 // so RunFix sees a single Mode constant.
 //
+// F-XX adds `-y` / `--yes` to bypass plan-first dispatch and
+// go straight to the Execute prompt. F-XX also removes the
+// previous `--force` / `-f` flag.
+//
 // F-51: command.Commander prefixes Args with the command name
 // ("gtw"), then the subcommand ("fix"), then the subcommand's
 // args. So Args[2] is the first user-supplied token.
@@ -383,7 +388,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	drafts := &managerDraftsMap{mgr: f.mgr, chatID: input.ChatID}
 
 	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
-	// chatID, messageID, args, force). Reply is sent inline via
+	// chatID, messageID, args, yes). Reply is sent inline via
 	// cs.Emitter(); *Result only carries Consumed / Dropped for
 	// the runtime. The withHooks wrapper fires before/after
 	// hooks around the call and ships the hook output as a
@@ -402,7 +407,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 		func() error {
 			_, e := RunFix(ctx, args.Mode, cs, slot, drafts, f.deps,
 				input.ChatID, input.MessageID,
-				[]string{args.RawArg}, args.Force)
+				[]string{args.RawArg}, args.Yes)
 			if e == nil {
 				// Re-derive so post-hook sees the worktree
 				// that RunFix just created + yml-wrote.
@@ -419,75 +424,169 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// parseFixMode inspects the argv tail after "fix" and decides
-// whether the call is the issue-id (ModeRemote) or
-// --name/-n (ModeLocal) flow. Returns the mode plus the raw
-// value (issue id or branch name).
-//
-// Format:
-//
-//	[issue-id]                    → ModeRemote, raw = issue-id
-//	--name <branch>               → ModeLocal,  raw = branch
-//	-n <branch>                   → ModeLocal,  raw = branch
-//
-// Errors on missing value after the flag, or on
-// unrecognised leading tokens.
-func parseFixMode(argv []string) (Mode, string, error) {
-	if len(argv) < 1 {
-		return "", "", fmt.Errorf("missing argument")
-	}
-	switch argv[0] {
-	case "--name", "-n":
-		if len(argv) < 2 || strings.TrimSpace(argv[1]) == "" {
-			return "", "", fmt.Errorf("--name requires a branch name argument")
-		}
-		return ModeLocal, strings.TrimSpace(argv[1]), nil
-	default:
-		// Bare argument → treat as issue id. Validation lives
-		// in parseIssueID at the caller.
-		return ModeRemote, strings.TrimSpace(argv[0]), nil
-	}
-}
-
+// parseFixMode kept for callers that pre-stripped boolean
 // fixArgs bundles the parsed argv tail of `/gtw fix <...>`.
 // Splitting it into a struct (rather than separate return
 // values) keeps the parser functions readable as we add more
-// flags — `--force` / `-f` is the first, future flags
+// flags — `--yes` / `-y` is the first, future flags
 // (`--no-dispatch`, `--base <ref>`) can land here without
 // breaking signatures again.
 type fixArgs struct {
 	Mode   Mode
 	RawArg string // issue id (ModeRemote) or branch name (ModeLocal)
-	Force  bool   // --force / -f: skip path-occupied preflight + nuke any leftover at the target path
+	Yes    bool   // --yes / -y: dispatch Execute Prompt instead of Plan
 }
 
-// parseFixArgs is the argv tail → fixArgs entry point. It
-// strips --force / -f tokens from anywhere in the tail (so
-// both `/gtw fix --force 42` and `/gtw fix 42 --force`
-// parse), then dispatches the remaining tokens to parseFixMode.
+// Recognised flags for /gtw fix. The schema is intentionally
+// narrow — only flags that exist in F-XX today. Anything else
+// is an "unknown flag" error.
 //
-// --force is intentionally permissive — it doesn't take an
-// argument and silently accepts duplicates. The semantic is
-// "any --force wins"; this matches git's own CLI conventions
-// for boolean flags.
+// Boolean flags (no value, position-independent):
+//
+//	--yes / -y     dispatch Execute Prompt (Remote mode only)
+//
+// Value-taking flags (one positional argument follows):
+//
+//	--name / -n    local mode branch name
+//
+// Explicitly rejected:
+//
+//	--force / -f   removed in F-XX
+//
+// parseFixArgs implements the standard CLI lexer for /gtw fix:
+//
+//	cmd -options args
+//
+// Tokens are split into two disjoint slices:
+//
+//   - options: every "-xxx" or "--xxx" flag (boolean or
+//     value-taking) recognised by the inline switch below. Unknown
+//     flags → error.
+//   - args: positional tokens (no "-" prefix). One per
+//     value-taking option (consumed as the option's value)
+//     or additional free-standing tokens.
+//
+// Lexical rules (matching git / kubectl / docker conventions):
+//
+//  1. Every token starting with "-" is an option. Unknown
+//     option → "unknown flag" error.
+//  2. Boolean options take no value; the next token is
+//     either another option or a positional arg.
+//  3. Value-taking options consume the immediately following
+//     token as their value, regardless of whether it starts
+//     with "-" (matching git's `--name -foo` behaviour).
+//     If the flag has no following token, it's a
+//     missing-value error.
+//  4. Positional tokens after options are collected as args.
+//
+// `/gtw fix` accepts exactly two positional patterns:
+//
+//	<issue-id>              Remote mode (1 arg)
+//	--name <branch>          Local mode (option + 1 arg)
+//	-n <branch>              Local mode (short form)
+//
+// All other shapes (zero args, too many args, mixed mode
+// markers, unknown options) are hard-rejected.
 func parseFixArgs(argv []string) (fixArgs, error) {
-	force := false
-	filtered := make([]string, 0, len(argv))
-	for _, a := range argv {
-		if a == "--force" || a == "-f" {
-			force = true
+	// Recognised flags. Inline because /gtw fix has exactly
+	// four flags today; a map + struct + enum was premature
+	// parameterisation for that surface area.
+	const (
+		boolYes     = "--yes"
+		shortYes    = "-y"
+		boolName    = "--name"
+		shortName   = "-n"
+		removedForce = "--force"
+		removedForceShort = "-f"
+	)
+
+	yes, usedName := false, false
+	args := make([]string, 0, len(argv))
+
+	i := 0
+	for i < len(argv) {
+		tok := argv[i]
+
+		// First classify: is this a flag-shaped token (starts
+		// with "-" or "--") or a positional argument? Tokens
+		// like "42" are positional, never flags — even if
+		// they happen to look like short forms.
+		isFlag := strings.HasPrefix(tok, "-") && tok != "-"
+		if !isFlag {
+			// Positional argument — collect as-is.
+			args = append(args, tok)
+			i++
 			continue
 		}
-		filtered = append(filtered, a)
+
+		// Look up the flag.
+		switch tok {
+		case boolYes, shortYes:
+			yes = true
+			i++
+		case boolName, shortName:
+			usedName = true
+			i++
+			if i >= len(argv) {
+				return fixArgs{}, fmt.Errorf(
+					"flag %q requires a value", tok)
+			}
+			// The next token is the flag's value (consumed),
+			// even if it starts with "-" — matching git's
+			// `--name -foo` semantics. We do NOT recursively
+			// re-classify it as a flag.
+			args = append(args, argv[i])
+			i++
+		case removedForce, removedForceShort:
+			// F-XX: --force / -f are explicitly rejected
+			// rather than silently dropped. Without this
+			// gate, "/gtw fix 42 --force" would parse as a
+			// legitimate ModeRemote fix with --force treated
+			// as a no-op, leaving users who relied on the
+			// old flag in an inconsistent state.
+			return fixArgs{}, fmt.Errorf(
+				"unknown flag %q (the /gtw fix --force / -f flag was removed in F-XX; "+
+					"see docs/feat/F-gtw-fix.md). For a stale worktree path, "+
+					"run `git worktree remove --force <path>` or `/gtw close` manually",
+				tok)
+		default:
+			// Unknown flag-shaped token. Could be a real typo
+			// (--dry-run, --foo, etc.); surface a generic
+			// "unknown flag" listing the recognised set.
+			return fixArgs{}, fmt.Errorf(
+				"unknown flag %q (recognised flags: --yes/-y; mode: --name/-n <branch>; "+
+					"see docs/feat/F-gtw-fix.md)",
+				tok)
+		}
 	}
-	if len(filtered) == 0 {
-		return fixArgs{}, fmt.Errorf("missing argument")
+
+	// Decide Mode + RawArg from the arg list. Exactly two
+	// valid shapes (see doc comment above).
+	switch {
+	case !usedName && len(args) == 1:
+		// Remote mode: bare issue id.
+		return fixArgs{
+			Mode:   ModeRemote,
+			RawArg: strings.TrimSpace(args[0]),
+			Yes:    yes,
+		}, nil
+	case usedName && len(args) == 1:
+		// Local mode: --name/-n consumed its branch.
+		return fixArgs{
+			Mode:   ModeLocal,
+			RawArg: strings.TrimSpace(args[0]),
+			Yes:    yes,
+		}, nil
+	case !usedName && len(args) == 0:
+		return fixArgs{}, fmt.Errorf(
+			"missing argument (need <issue-id> or --name <branch>)")
+	default:
+		// Everything else: too many args, or mixed-mode
+		// marker with multiple bare positional args, etc.
+		return fixArgs{}, fmt.Errorf(
+			"expected exactly one argument (<issue-id> or --name/-n <branch>); got %d: %v",
+			len(args), args)
 	}
-	mode, rawArg, err := parseFixMode(filtered)
-	if err != nil {
-		return fixArgs{}, err
-	}
-	return fixArgs{Mode: mode, RawArg: rawArg, Force: force}, nil
 }
 
 // runClose handles `/gtw close`. Tears down the worktree
@@ -501,9 +600,10 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // No flags — close is intentionally all-or-nothing. If the
 // worktree is dirty the user must commit / stash / discard
 // before re-running; we don't expose a force-escape hatch.
-// /gtw fix keeps its own --force (different concern: nuking a
-// leftover worktree at the target path) so the close symmetry
-// doesn't extend there.
+// Neither /gtw close nor /gtw fix exposes a --force: stale
+// worktree paths are cleaned manually via
+// `git worktree remove --force <path>` or by re-running
+// `/gtw close` after the user has unblocked the worktree.
 //
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and
@@ -724,24 +824,24 @@ type pushArgs struct {
 // the push argv tail. No positional arg today — /gtw push
 // always operates on the current chat's worktree, like
 // /gtw close.
+// parsePushArgs implements the CLI lexer for /gtw push.
+// Recognised flags:
+//
+//	-a / --agent <name>   override one-shot agent (legacy;
+//	                      F-XX /gtw push no longer auto-commits
+//	                      but the flag is preserved for
+//	                      back-compat with muscle memory)
+//
+// Unknown tokens are hard-rejected with "unknown flag" —
+// matches the F-XX /gtw fix contract. /gtw push takes no
+// positional arg, so extra positional tokens are also
+// rejected.
 func parsePushArgs(argv []string) (pushArgs, error) {
-	out := pushArgs{}
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
-		switch a {
-		case "-a", "--agent":
-			if i+1 >= len(argv) {
-				return out, fmt.Errorf("missing value for %s", a)
-			}
-			out.Agent = argv[i+1]
-			i++
-		default:
-			// Unknown token. Silent accept — future flag
-			// additions (e.g. positional branch arg) won't
-			// break callers passing them by mistake.
-		}
+	agent, err := parseAgentOnlyFlag(argv)
+	if err != nil {
+		return pushArgs{}, err
 	}
-	return out, nil
+	return pushArgs{Agent: agent}, nil
 }
 
 // commitArgs bundles the parsed argv tail of `/gtw commit
@@ -752,27 +852,52 @@ type commitArgs struct {
 	Agent string
 }
 
-// parseCommitArgs strips `-a <name>` / `--agent <name>` from
-// the commit argv tail. Same shape as parsePushArgs — v1 has
-// no positional arg; /gtw commit always operates on the
-// current chat's worktree. Unknown flags tolerated (future
-// flags like `--amend` can land without breaking callers).
-func parseCommitArgs(argv []string) (commitArgs, error) {
-	out := commitArgs{}
+// parseAgentOnlyFlag implements the shared CLI lexer for
+// /gtw commit / /gtw push / /gtw pr — three subcommands that
+// accept exactly one flag (`-a <name>` / `--agent <name>`)
+// and no positional arg.
+//
+// Extracted as a helper because all three parsers were
+// byte-identical except for the surrounding struct type
+// (pushArgs / commitArgs / prArgs). Sharing the lexer keeps
+// the "unknown flag" / "too many positional" error wording
+// consistent across the surface (Issue #291 contract).
+//
+// Returns the agent string (empty if `-a` not provided).
+func parseAgentOnlyFlag(argv []string) (string, error) {
+	agent := ""
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		switch a {
 		case "-a", "--agent":
 			if i+1 >= len(argv) {
-				return out, fmt.Errorf("missing value for %s", a)
+				return "", fmt.Errorf("missing value for %s", a)
 			}
-			out.Agent = argv[i+1]
-			i++
+			agent = argv[i+1]
+			i++ // consume value
 		default:
-			// Unknown token. Silent accept.
+			if strings.HasPrefix(a, "-") && a != "-" {
+				return "", fmt.Errorf(
+					"unknown flag %q (recognised flags: -a/--agent)",
+					a)
+			}
+			return "", fmt.Errorf(
+				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
 		}
 	}
-	return out, nil
+	return agent, nil
+}
+
+// parseCommitArgs implements the CLI lexer for /gtw commit.
+// See parseAgentOnlyFlag for the shared lexer core; this
+// wrapper just packs the agent string into the commitArgs
+// struct.
+func parseCommitArgs(argv []string) (commitArgs, error) {
+	agent, err := parseAgentOnlyFlag(argv)
+	if err != nil {
+		return commitArgs{}, err
+	}
+	return commitArgs{Agent: agent}, nil
 }
 
 // runPR handles `/gtw pr`. Reads the yml at the current CWD
@@ -818,27 +943,20 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// parsePRArgs strips `-a <name>` / `--agent <name>` from the
-// pr argv tail. Mirrors parsePushArgs — v1 has no positional
-// arg; /gtw pr always operates on the current chat's worktree,
-// like /gtw push. Unknown flags are tolerated (future flags
-// like --draft / --base can land without breaking callers).
+// parsePRArgs implements the CLI lexer for /gtw pr.
+// Recognised flags:
+//
+//	-a / --agent <name>   override one-shot agent
+//
+// Unknown tokens are hard-rejected with "unknown flag";
+// positional args are rejected too (/gtw pr takes none).
+// See parseFixArgs / parsePushArgs for the rationale.
 func parsePRArgs(argv []string) (prArgs, error) {
-	out := prArgs{}
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
-		switch a {
-		case "-a", "--agent":
-			if i+1 >= len(argv) {
-				return out, fmt.Errorf("missing value for %s", a)
-			}
-			out.Agent = argv[i+1]
-			i++
-		default:
-			// Unknown token. Silent accept.
-		}
+	agent, err := parseAgentOnlyFlag(argv)
+	if err != nil {
+		return prArgs{}, err
 	}
-	return out, nil
+	return prArgs{Agent: agent}, nil
 }
 
 // --- shim adapters that let legacy RunFix see Manager state ---

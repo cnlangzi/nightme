@@ -92,6 +92,7 @@
 | 功能 | 设计文档 |
 |------|----------|
 | `/gtw` 子命令集：`fix` / `close` / `commit` / `push` / `pr` / `sync` | [feat/F-gtw.md](./feat/F-gtw.md) |
+| `/gtw fix` Plan-first dispatch + `-y` 直接执行 | [feat/F-gtw-fix.md](./feat/F-gtw-fix.md) |
 | `/gtw push` 三分支流 | [feat/F-gtw.md](./feat/F-gtw.md) |
 | `/gtw push` + `/gtw pr` 联动 Readiness Gate | [feat/F-gtw.md](./feat/F-gtw.md) |
 | GitProvider 抽象 + 两阶段 Provider 探测 | [feat/F-50-git-provider.md](./feat/F-50-git-provider.md) |

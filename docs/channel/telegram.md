@@ -3573,9 +3573,11 @@ StatusBar 三行由 `internal/statusbar.StatusBarLines(&msg)` 生成，从 `Outb
 Line 1: 🤖: AgentName · Model · SessionID       (Identity)
 Line 2: 💰:「 new / cache / out · X% (window) · $cost 」   (Usage)
 Line 3: 📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N · [#PR](url)   (GitStatus)
+       非 git workspace（cwd 不在 repo / git 不可用 / CollectGit 超时）:
+         📁: ws
 ```
 
-每行 zero-omit（F-45 §1.6）。整行字段全空 → 该行不渲染。StatusBar 完全为空 → 不发 panel，只发 body。
+每行 zero-omit（F-45 §1.6）。整行字段全空 → 该行不渲染。Line 3 是唯一例外：Workspace 已设但 git 没产出 snapshot 时仍渲染 `📁: <ws>`（仅 workspace，无 git 段），确保用户始终能看到 agent 的工作目录。StatusBar 完全为空 → 不发 panel，只发 body。
 
 Telegram adapter 用 `statusbar.RenderPanel(lines)` 把三行包成 **chevron-tail ASCII frame marker**（左 `┌` / `└`，右 `›`，无 `│` 侧栏）：
 

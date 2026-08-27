@@ -2123,8 +2123,8 @@ type GitStatusSnapshot struct {
 
 | 段 | 来源 | Omit 规则 |
 |---|---|---|
-| 📁 `<workspace>` | `Workspace` = `s.Cwd` | `Workspace=="" \|\| GitStatus==nil` 整段省略(review fix: non-git workspace 不显示误导性的 `⎇ ?`) |
-| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示(行渲染时);`Branch==""` → 写 `?`(detached HEAD inside a real git repo) |
+| 📁 `<workspace>` | `Workspace` = `s.Cwd` | `Workspace=="" \|\| GitStatus==nil` 整段省略。`Workspace!=""` 且 `Snapshot==nil`(cwd 不在 git repo / git 不可用 / CollectGit 超时)→ 渲染 `📁: <ws>`(仅 workspace,无 git 段),让用户始终能看到 agent 当前的工作目录 |
+| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示(行渲染时);`Branch==""` → 写 `?`(detached HEAD inside a real git repo)。非 git workspace 下整段不渲染 |
 | ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
 | ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
 | ⇡ `<n>` | `GitStatus.AheadOfRemote` | `HasUpstream==false \|\| n==0` 省略 |

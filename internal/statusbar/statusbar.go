@@ -9,14 +9,20 @@
 //	Line 1: 🤖: Agent · Model · SessionID       (Identity)
 //	Line 2: 💰:「 new / cache / out · X% (window) · $cost 」   (Usage)
 //	Line 3: 📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N · [#PR](url)   (GitStatus)
+//	  Non-git workspace (cwd not in a repo / git unavailable):
+//	    📁: ws
 //
 // Each segment is omitted when its value is zero / empty /
 // unknown. Order is fixed within each line; lines themselves
-// are omitted entirely when empty (so a non-git workspace still
-// gets lines 1-2, and a brand-new session with no Model yet
-// gets no line 2 — but line 1 always surfaces when Agent is
-// known). Returns nil when there is nothing meaningful to show
-// so callers can skip footer emission cheaply.
+// are omitted entirely when empty (so a chat with no Workspace
+// set still gets lines 1-2, and a brand-new session with no
+// Model yet gets no line 2 — but line 1 always surfaces when
+// Agent is known). Line 3 is special: it surfaces as
+// `📁: <ws>` (workspace only, no git segments) whenever
+// Workspace is set but git produced no usable snapshot, so
+// the user can always see where the agent is running even
+// outside a repo. Returns nil when there is nothing meaningful
+// to show so callers can skip footer emission cheaply.
 //
 // Stable across re-renders — same input always produces the
 // same slice, so receipt PATCH / Telegram editMessageText diffs
@@ -365,7 +371,7 @@ func formatWorkspacePath(absPath string) string {
 // formatGitLine renders footer line 3 — the per-stamp git status
 // snapshot, with the PR / MR reference folded in as the LAST
 // segment — and returns "" when there is nothing meaningful to
-// show (no Workspace, no GitStatus, no git segment).
+// show (no Workspace, no GitStatus).
 //
 // Output (when non-empty, PR present):
 //
@@ -379,13 +385,29 @@ func formatWorkspacePath(absPath string) string {
 //
 //	📁: code/nightme · ⎇ main
 //
+// Output (cwd is not a git repo / git unavailable — Workspace
+// is set but Snapshot is nil):
+//
+//	📁: code/nightme
+//
 // Omit rules (each segment is dropped independently; the line
 // itself is dropped when ALL segments would be empty):
 //
-//   - Workspace == ""           → entire line omitted (PR segment
-//     drops with it: PR without a git workspace is a stale
-//     cache state we don't surface on its own row)
-//   - ⎇ <branch|?>              → always present when line is shown
+//   - gs == nil OR Workspace == "" → entire line omitted (PR
+//     segment drops with it: PR without a git workspace is a
+//     stale cache state we don't surface on its own row).
+//     Non-git cwd is NOT in this set — see Snapshot == nil
+//     below.
+//   - Snapshot == nil              → render `📁: <ws>` and
+//     stop. No marker is appended — the user explicitly
+//     asked for "just the workspace, no git info". PullRequest
+//     is intentionally NOT appended in this branch — the PR
+//     cache is keyed by AgentSession.ID and is not cwd-scoped,
+//     so a cached PR at this point may belong to a *previous*
+//     workspace (e.g. user did `/cwd /tmp` from a git repo).
+//     Showing that PR next to a non-git workspace would be
+//     misleading.
+//   - ⎇ <branch|?>              → always present when Snapshot != nil
 //   - + N (added, staged A)     → omitted when Added == 0
 //   - − N (deleted, X/Y = D)    → omitted when Deleted == 0
 //   - ± N (modified, M/R/C) → omitted when Modified == 0
@@ -407,9 +429,9 @@ func formatWorkspacePath(absPath string) string {
 // → ! → ⇡ → PR. Added → deleted → modified → untracked →
 // conflict → unpushed → PR.
 //
-// Returns "" when gs == nil or gs.Workspace == "" or
-// gs.Snapshot == nil. Detached HEAD renders the branch segment
-// as "?" — see parsePorcelainBranchStatus.
+// Returns "" when gs == nil or gs.Workspace == "". Detached
+// HEAD renders the branch segment as "?" — see
+// parsePorcelainBranchStatus.
 func formatGitLine(gs *messages.GitStatus) string {
 	if gs == nil {
 		return ""
@@ -417,12 +439,23 @@ func formatGitLine(gs *messages.GitStatus) string {
 	if gs.Workspace == "" {
 		return ""
 	}
-	if gs.Snapshot == nil {
-		return ""
-	}
 	ws := formatWorkspacePath(gs.Workspace)
 	if ws == "" {
 		return ""
+	}
+	// Non-git workspace: cwd is set but git produced no usable
+	// snapshot (cwd not in a repo, git unavailable, or the 3s
+	// CollectGit cap fired). Render just the workspace so the
+	// user can always see where the agent is running even
+	// outside a repo. No "(no git)" marker — the user
+	// explicitly asked for the bare workspace. PullRequest is
+	// intentionally NOT consulted here — the PR cache is keyed
+	// by AgentSession.ID only, not by cwd, so a cached PR at
+	// this point likely belongs to a previous workspace and
+	// would mislead next to a non-git cwd. See the omit-rules
+	// comment above for the full rationale.
+	if gs.Snapshot == nil {
+		return "📁: " + ws
 	}
 
 	parts := []string{"📁: " + ws}

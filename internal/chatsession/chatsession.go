@@ -726,9 +726,13 @@ func (cs *ChatSession) SelectedCwd() string {
 // the snapshot.
 //
 // Returns nil when there is no workspace (cwd == ""), the
-// AgentSession is unset, the deps are not wired, or git
-// produces nothing usable. formatGitLine drops the footer line
-// on nil — same contract as before the refactor.
+// AgentSession is unset, or the deps are not wired. Otherwise
+// it returns a populated struct even when CollectGit returned
+// nil — the footer renderer treats Snapshot==nil as a non-git
+// cwd and renders `📁: <ws> · (no git)` so the user can always
+// see where the agent is running even outside a repo. The
+// only "GitStatus struct but with empty Workspace" case is
+// when cwd == "", which is excluded at the top of GitStatusAt.
 func (cs *ChatSession) GitStatus(ctx context.Context) *messages.GitStatus {
 	return cs.GitStatusAt(ctx, cs.SelectedCwd(), cs.SelectedAgentSession())
 }

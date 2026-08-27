@@ -4352,8 +4352,8 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 
 | 段 | 来源 | Omit 规则 |
 |---|---|---|
-| 📁 `<workspace>` | `StatusBar.Workspace` = `s.Cwd` | 整段在 Workspace=="" 或 `GitStatus==nil` 时省略（review fix：non-git workspace 不显示误导性的 "⎇ ?"） |
-| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示（当行渲染时）；`Branch==""`（detached HEAD 在 git repo 内）→ 写 `?` |
+| 📁 `<workspace>` | `StatusBar.Workspace` = `s.Cwd` | 整段在 `Workspace==""` 或 `GitStatus==nil` 时省略。`Workspace!=""` 且 `Snapshot==nil`（cwd 不在 git repo / git 不可用 / CollectGit 超时）→ 渲染 `📁: <ws>`（仅 workspace，无 git 段），让用户始终能看到 agent 当前的工作目录 |
+| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示（当行渲染时）；`Branch==""`（detached HEAD 在 git repo 内）→ 写 `?`。非 git workspace 下整段不渲染 |
 | ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
 | ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
 | ⇡ `<n>` | `GitStatus.AheadOfRemote` | `HasUpstream==false \|\| n==0` 省略 |

@@ -298,3 +298,34 @@ func TestHandler_Stopped(t *testing.T) {
 		t.Errorf("bridge.Stop called %d times, want 1", stub.stopped)
 	}
 }
+
+// TestHandler_UnknownFlagRejected pins the issue #291 refinement
+// on /stop: routing argv through command.ParseCmdArgs
+// distinguishes a flag-shaped typo from a stray positional word,
+// where the pre-#291 `len(input.Args) > 1` check collapsed both
+// into one opaque "Usage: /stop".
+func TestHandler_UnknownFlagRejected(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := stoppkg.NewFactory()
+
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	cs.WithPersistence(nil, nil) //nolint:revive // test setup
+	if err := cs.SetSelectedCwd("/tmp"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
+		command.SlashInput{ChatID: "c1", Args: []string{"stop", "--now"}})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !out.Consumed {
+		t.Fatal("want Consumed=true")
+	}
+	if !strings.Contains(out.Reply, "unknown flag") {
+		t.Errorf("want 'unknown flag' reply, got %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "Usage: /stop") {
+		t.Errorf("want usage hint, got %q", out.Reply)
+	}
+}

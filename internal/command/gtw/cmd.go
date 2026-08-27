@@ -610,6 +610,19 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // the reply path is RunClose's own cs.Emitter() (no extra wiring).
 // Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	// Issue #291: /gtw close takes no flags and no positional
+	// args, so anything in the tail is a user mistake — most
+	// importantly `/gtw close --force`, which the F-XX removal
+	// note explicitly tells users not to expect. Before this
+	// gate the token was silently swallowed and the close ran
+	// anyway, so the user got no signal that --force did nothing.
+	if err := parseNoArgs("/gtw close", input.Args[2:]); err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
 	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
 
 	cfg, loadNotes := Load()
@@ -752,6 +765,16 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 //
 // Wrapped in withHooks so sync.before / sync.after fire.
 func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	// Issue #291: no flags, no positional args — reject the tail
+	// instead of silently ignoring it (`/gtw sync --rebase` used
+	// to look like it selected a strategy).
+	if err := parseNoArgs("/gtw sync", input.Args[2:]); err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
 	cwd, failOut := command.RequireActiveCwd(cs)
 	if failOut != nil {
 		return failOut, nil
@@ -837,7 +860,7 @@ type pushArgs struct {
 // positional arg, so extra positional tokens are also
 // rejected.
 func parsePushArgs(argv []string) (pushArgs, error) {
-	agent, err := parseAgentOnlyFlag(argv)
+	agent, err := parseAgentOnlyFlag("/gtw push", argv)
 	if err != nil {
 		return pushArgs{}, err
 	}
@@ -852,40 +875,60 @@ type commitArgs struct {
 	Agent string
 }
 
-// parseAgentOnlyFlag implements the shared CLI lexer for
+// parseNoArgs is the argv check for the /gtw subcommands that
+// take neither flags nor positional args (/gtw close, /gtw
+// sync). Routing them through the shared lexer (issue #291)
+// means a stray token is reported as "unknown flag" or
+// "unexpected positional argument" rather than being silently
+// swallowed — which is what `/gtw close --force` did before,
+// giving users of the removed F-XX flag no signal at all.
+//
+// name is the user-facing subcommand ("/gtw close") echoed in
+// error messages.
+func parseNoArgs(name string, argv []string) error {
+	_, err := command.ParseCmdArgs(argv, command.CmdSpec{
+		Name:    name,
+		Usage:   name,
+		MinArgs: 0,
+		MaxArgs: 0,
+	})
+	return err
+}
+
+// parseAgentOnlyFlag implements the CLI lexer for
 // /gtw commit / /gtw push / /gtw pr — three subcommands that
 // accept exactly one flag (`-a <name>` / `--agent <name>`)
 // and no positional arg.
 //
 // Extracted as a helper because all three parsers were
 // byte-identical except for the surrounding struct type
-// (pushArgs / commitArgs / prArgs). Sharing the lexer keeps
-// the "unknown flag" / "too many positional" error wording
-// consistent across the surface (Issue #291 contract).
+// (pushArgs / commitArgs / prArgs). Issue #291 then moved the
+// lexer core itself into command.ParseCmdArgs so the whole
+// /<cmd> surface shares one implementation of the contract
+// (docs/feat/F-gtw-fix.md §1.2 + §10) — this function is now
+// just the spec declaration plus the "no positional args"
+// arity, and the "unknown flag" / "positional" / "missing
+// value" wording comes from the shared lexer.
+//
+// name is the user-facing subcommand ("/gtw push") echoed in
+// error messages.
 //
 // Returns the agent string (empty if `-a` not provided).
-func parseAgentOnlyFlag(argv []string) (string, error) {
-	agent := ""
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
-		switch a {
-		case "-a", "--agent":
-			if i+1 >= len(argv) {
-				return "", fmt.Errorf("missing value for %s", a)
-			}
-			agent = argv[i+1]
-			i++ // consume value
-		default:
-			if strings.HasPrefix(a, "-") && a != "-" {
-				return "", fmt.Errorf(
-					"unknown flag %q (recognised flags: -a/--agent)",
-					a)
-			}
-			return "", fmt.Errorf(
-				"too many positional arguments (recognised flags: -a/--agent; got %q)", a)
-		}
+func parseAgentOnlyFlag(name string, argv []string) (string, error) {
+	parsed, err := command.ParseCmdArgs(argv, command.CmdSpec{
+		Name:  name,
+		Usage: name + " [-a <agent>]",
+		Flags: map[string]command.FlagSpec{
+			"-a":      {Name: "agent", TakesValue: true},
+			"--agent": {Name: "agent", TakesValue: true},
+		},
+		MinArgs: 0,
+		MaxArgs: 0,
+	})
+	if err != nil {
+		return "", err
 	}
-	return agent, nil
+	return parsed.Value("agent"), nil
 }
 
 // parseCommitArgs implements the CLI lexer for /gtw commit.
@@ -893,7 +936,7 @@ func parseAgentOnlyFlag(argv []string) (string, error) {
 // wrapper just packs the agent string into the commitArgs
 // struct.
 func parseCommitArgs(argv []string) (commitArgs, error) {
-	agent, err := parseAgentOnlyFlag(argv)
+	agent, err := parseAgentOnlyFlag("/gtw commit", argv)
 	if err != nil {
 		return commitArgs{}, err
 	}
@@ -952,7 +995,7 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 // positional args are rejected too (/gtw pr takes none).
 // See parseFixArgs / parsePushArgs for the rationale.
 func parsePRArgs(argv []string) (prArgs, error) {
-	agent, err := parseAgentOnlyFlag(argv)
+	agent, err := parseAgentOnlyFlag("/gtw pr", argv)
 	if err != nil {
 		return prArgs{}, err
 	}

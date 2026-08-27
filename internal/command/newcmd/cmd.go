@@ -56,6 +56,19 @@ func (f *Factory) Spec() command.Spec {
 	}
 }
 
+// newSpec declares /new's argv grammar for the shared lexer
+// (issue #291): no flags, at most one optional positional agent
+// name. Bare `/new` resets every session in the workspace, so
+// MinArgs stays 0; a second positional token used to be
+// silently dropped (`/new claude codex` reset only claude) and
+// is now a hard error.
+var newSpec = command.CmdSpec{
+	Name:    "/new",
+	Usage:   "/new [<agent>]",
+	MinArgs: 0,
+	MaxArgs: 1,
+}
+
 // Handle implements command.SlashCommandFactory.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
@@ -65,10 +78,16 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
 		return failOut, nil
 	}
-agentName := ""
-	if len(input.Args) > 1 {
-		agentName = strings.TrimSpace(input.Args[1])
+	args, err := command.ParseCmdArgs(input.Args[1:], newSpec)
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+	agentName := ""
+	if args.NArgs() > 0 {
+		agentName = strings.TrimSpace(args.Arg(0))
 		if agentName == "" {
+			// Whitespace-only token: don't silently widen the
+			// reset to "all agents in this workspace".
 			return command.Reply(ctx, rt, "Usage: /new [<agent>]"), nil
 		}
 	}

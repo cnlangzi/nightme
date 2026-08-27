@@ -56,12 +56,30 @@ func (f *Factory) Spec() command.Spec {
 	}
 }
 
+// stopSpec declares /stop's argv grammar for the shared lexer
+// (issue #291): no flags, no positional args. Routing through
+// ParseCmdArgs (rather than a bare `len(input.Args) > 1` check)
+// buys the flag/positional distinction for free — `/stop --typo`
+// now says "unknown flag" while `/stop extra-word` says
+// "unexpected positional argument", instead of both collapsing
+// into one opaque usage line.
+//
+// If /stop ever grows a flag, declare it in Flags here; nothing
+// else in this handler needs to change.
+var stopSpec = command.CmdSpec{
+	Name:    "/stop",
+	Usage:   "/stop",
+	MinArgs: 0,
+	MaxArgs: 0,
+}
+
 // Handle implements command.SlashCommandFactory.
 //
 // Flow:
 //  1. Look up the ChatSession for this chat. Reject if absent.
 //  2. RequireActiveCwd preflight (every cmd preflights its own).
-//  3. Reject trailing args (the surface is /stop with no args).
+//  3. Reject trailing args / any flag (the surface is /stop with
+//     no args) via the shared CLI lexer.
 //  4. Resolve the selectedAgentSession via chatsession and call
 //     StopSelectedAgent. Wrap the per-call Result with
 //     FormatStopResult and reply.
@@ -76,11 +94,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return failOut, nil
 	}
 
-	if len(input.Args) > 1 {
-		// Trailing args are rejected: /stop is single-action with
-		// no subcommands. Treating a typo'd arg as "still stop"
-		// would mask user error.
-		return command.Reply(ctx, rt, "Usage: /stop"), nil
+	// Trailing args are rejected: /stop is single-action with no
+	// subcommands. Treating a typo'd arg as "still stop" would
+	// mask user error.
+	if _, err := command.ParseCmdArgs(input.Args[1:], stopSpec); err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
 	cmd := &Cmd{CS: cs, Ctx: ctx}

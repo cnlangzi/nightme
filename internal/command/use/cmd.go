@@ -1,4 +1,4 @@
-// Package use implements the `/use <agent> [args...]` slash
+// Package use implements the `/use <agent>` slash
 // command.
 //
 // /use sets the chat's selectedAgent and triggers a lazy
@@ -43,8 +43,26 @@ func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:    "use",
 		Summary: "Switch active agent: /use <agent-name> (lazy spawn; reuse pool if present)",
-		Usage:   "/use <agent> [args...]",
+		Usage:   "/use <agent>",
 	}
+}
+
+// useSpec declares /use's argv grammar for the shared lexer
+// (issue #291): no flags, exactly one positional agent name.
+//
+// The pre-#291 Usage string advertised `/use <agent> [args...]`
+// and the doc comment claimed the tail was forwarded to the
+// spawner — it never was. SetSelectedAgent takes a name and
+// nothing else, so `Args[2:]` was silently dropped, which meant
+// `/use codex --auto-approve` looked like it had applied a spawn
+// flag when it hadn't. Arity 1 makes that a hard error instead
+// of a lie. If per-spawn args are ever really wanted, declare
+// them as explicit flags here.
+var useSpec = command.CmdSpec{
+	Name:    "/use",
+	Usage:   "/use <agent>",
+	MinArgs: 1,
+	MaxArgs: 1,
 }
 
 // Handle implements command.SlashCommandFactory.
@@ -52,20 +70,24 @@ func (f *Factory) Spec() command.Spec {
 // Semantics:
 //
 //	/use claude                    → set selectedAgent, reuse/spawn (claude, cwd)
-//	/use codex --auto-approve      → set selectedAgent, pass args to spawn
-//	/use                           → reply "Usage: /use <agent> [args...]"
+//	/use                           → reply "Usage: /use <agent>"
+//	/use claude extra              → reply "too many arguments"
+//	/use --auto-approve            → reply "unknown flag"
 //	/use (no selectedCwd yet)        → reply "send /cwd <path> first"
 //	/use unknown-agent             → reply "unknown agent"
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	if len(input.Args) < 2 {
-		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil
+	args, err := command.ParseCmdArgs(input.Args[1:], useSpec)
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
-	agentName := strings.TrimSpace(input.Args[1])
+	agentName := strings.TrimSpace(args.Arg(0))
 	if agentName == "" {
-		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil
+		// Whitespace-only token: arity is satisfied but the name
+		// is not. Same usage reply as the no-arg case.
+		return command.Reply(ctx, rt, "Usage: /use <agent>"), nil
 	}
 
 	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {

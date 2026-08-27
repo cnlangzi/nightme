@@ -144,6 +144,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// half-width "/" and full-width "／" prefixes are handled
 	// upstream, and the whitespace split is the same one the
 	// dispatcher used to populate Args.
+	//
+	// Issue #291 exemption: same reasoning as /steer — the
+	// payload is free-form prose for the agent, so a leading
+	// "-" is data rather than a flag, and "non-empty" is the
+	// only meaningful arity rule. See steer/cmd.go for the full
+	// note and the migration path if /queue ever grows a flag.
 	body := strings.TrimSpace(strings.Join(input.Args[1:], " "))
 	if body == "" {
 		return command.Reply(ctx, rt, "Usage: /queue <message>"), nil

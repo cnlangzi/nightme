@@ -43,21 +43,41 @@ func (f *Factory) Spec() command.Spec {
 	}
 }
 
+// thinkSpec declares /think's argv grammar for the shared
+// lexer (issue #291): no flags, at most one positional mode
+// token. Bare `/think` reports the current mode, so MinArgs
+// stays 0.
+//
+// If /think ever grows a flag, declare it here — the lexer
+// already rejects every undeclared flag, so a typo can never
+// silently fall through to ParseThinkMode.
+var thinkSpec = command.CmdSpec{
+	Name:    "/think",
+	Usage:   "/think on | /think off",
+	MinArgs: 0,
+	MaxArgs: 1,
+}
+
 // Handle implements command.SlashCommandFactory.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-if len(input.Args) < 2 {
+	args, err := command.ParseCmdArgs(input.Args[1:], thinkSpec)
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+
+	if args.NArgs() == 0 {
 		return command.Reply(ctx, rt, fmt.Sprintf(
 			"Current think mode: %s\nUsage: /think on | /think off",
 			cs.ThinkMode(),
 		)), nil
 	}
 
-	mode, ok := chatsession.ParseThinkMode(strings.TrimSpace(input.Args[1]))
+	mode, ok := chatsession.ParseThinkMode(strings.TrimSpace(args.Arg(0)))
 	if !ok {
 		return command.Reply(ctx, rt, fmt.Sprintf(
 			"Unknown think mode %q. Usage: /think on | /think off",
-			input.Args[1],
+			args.Arg(0),
 		)), nil
 	}
 

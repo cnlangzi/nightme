@@ -99,6 +99,16 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// half-width "/" and full-width "／" prefixes are handled
 	// upstream, and the whitespace split is the same one the
 	// dispatcher used to populate Args.
+	//
+	// Issue #291 exemption: /steer deliberately does NOT go
+	// through command.ParseCmdArgs. Its payload is free-form
+	// prose destined for the agent, so a leading "-" is data,
+	// not a flag ("/steer --wait for CI to go green" must reach
+	// the agent verbatim). The only arity rule that makes sense
+	// here is "non-empty", which is the check below. If /steer
+	// ever needs a real flag, adopt ParseCmdArgs with
+	// MaxArgs: command.UnboundedArgs and require the `--`
+	// terminator before the prose.
 	body := strings.TrimSpace(strings.Join(input.Args[1:], " "))
 	if body == "" {
 		return command.Reply(ctx, rt, "Usage: /steer <message>"), nil

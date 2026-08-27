@@ -327,3 +327,81 @@ func TestFactory_Handle_UnknownSubcommandReleasesLock(t *testing.T) {
 		t.Fatal("Handle did not complete within 200ms; lock likely leaked on the default case")
 	}
 }
+
+// TestParseNoArgs covers the zero-arity subcommands (/gtw close,
+// /gtw sync) hardened under issue #291. Before the gate they
+// silently swallowed anything after the subcommand — most
+// notably `/gtw close --force`, a flag the F-XX notes tell users
+// was removed, which then closed anyway with no signal.
+func TestParseNoArgs(t *testing.T) {
+	if err := parseNoArgs("/gtw close", nil); err != nil {
+		t.Fatalf("parseNoArgs(nil): %v", err)
+	}
+	if err := parseNoArgs("/gtw close", []string{}); err != nil {
+		t.Fatalf("parseNoArgs(empty): %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		argv     []string
+		wantText string
+	}{
+		{"removed force flag", []string{"--force"}, "unknown flag"},
+		{"short flag", []string{"-f"}, "unknown flag"},
+		{"positional", []string{"extra"}, "positional"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := parseNoArgs("/gtw close", c.argv)
+			if err == nil {
+				t.Fatalf("parseNoArgs(%q) = nil, want error", c.argv)
+			}
+			if !strings.Contains(err.Error(), c.wantText) {
+				t.Errorf("error lacks %q: %q", c.wantText, err)
+			}
+			if !strings.Contains(err.Error(), "Usage: /gtw close") {
+				t.Errorf("error lacks usage tail: %q", err)
+			}
+		})
+	}
+}
+
+// TestFactory_Handle_CloseRejectsTail wires the same check
+// through the real dispatch path: the reply is the parse error
+// and RunClose is never reached (a nil-deps Factory would panic
+// or emit a teardown card if it were).
+func TestFactory_Handle_CloseRejectsTail(t *testing.T) {
+	cs := &chatsession.ChatSession{}
+	f := NewFactory(NewManager())
+	got, err := f.Handle(context.Background(),
+		command.RuntimeServices{},
+		nil, cs,
+		command.SlashInput{Text: "/gtw close --force", Args: []string{"gtw", "close", "--force"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Consumed {
+		t.Errorf("expected Consumed=true, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "unknown flag") {
+		t.Errorf("expected 'unknown flag' reply, got %q", got.Reply)
+	}
+}
+
+// TestFactory_Handle_SyncRejectsTail is the /gtw sync twin of
+// the above. The parse gate fires before RequireActiveCwd, so
+// the reply pins the flag error rather than the workspace hint.
+func TestFactory_Handle_SyncRejectsTail(t *testing.T) {
+	cs := &chatsession.ChatSession{}
+	f := NewFactory(NewManager())
+	got, err := f.Handle(context.Background(),
+		command.RuntimeServices{},
+		nil, cs,
+		command.SlashInput{Text: "/gtw sync --rebase", Args: []string{"gtw", "sync", "--rebase"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got.Reply, "unknown flag") {
+		t.Errorf("expected 'unknown flag' reply, got %q", got.Reply)
+	}
+}

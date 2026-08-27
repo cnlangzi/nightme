@@ -84,14 +84,29 @@ func (f *Factory) Spec() command.Spec {
 	}
 }
 
+// closeSpec declares /close's argv grammar for the shared lexer
+// (issue #291): no flags, at most one optional positional agent
+// name. Bare `/close` closes every session in the workspace, so
+// MinArgs stays 0. A second positional token used to be
+// silently dropped — dangerous here, because `/close claude
+// codex` looked like it closed both and only closed claude.
+var closeSpec = command.CmdSpec{
+	Name:    "/close",
+	Usage:   "/close [<agent>]",
+	MinArgs: 0,
+	MaxArgs: 1,
+}
+
 // Handle implements command.SlashCommandFactory.
 //
 // Flow:
 //  1. Look up the ChatSession for this chat. Reject if absent.
 //  2. RequireActiveCwd preflight (every cmd preflights its own).
-//  3. Resolve which close to run: /close <agent> → CloseAgent;
+//  3. Parse argv through the shared CLI lexer (unknown flags and
+//     extra positionals are hard errors).
+//  4. Resolve which close to run: /close <agent> → CloseAgent;
 //     /close (no args) → CloseAllAgents.
-//  4. Wrap the per-entry Result slice with FormatResults and reply.
+//  5. Wrap the per-entry Result slice with FormatResults and reply.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
@@ -103,6 +118,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return failOut, nil
 	}
 
+	args, err := command.ParseCmdArgs(input.Args[1:], closeSpec)
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+
 	cmd := &Cmd{CS: cs, Ctx: ctx}
 
 	var (
@@ -110,9 +130,9 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		results []Result
 	)
 
-	if len(input.Args) > 1 {
+	if args.NArgs() > 0 {
 		// /close <agent>
-		candidate := strings.TrimSpace(input.Args[1])
+		candidate := strings.TrimSpace(args.Arg(0))
 		if candidate == "" {
 			// Treat empty trailing arg as a usage error rather
 			// than silently falling back to "close all in cwd" —

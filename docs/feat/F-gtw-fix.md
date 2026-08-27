@@ -192,6 +192,15 @@ Section 顺序稳定（与 v1 一致，便于 agent / 测试依赖）：
 
 ### 4.1 Plan Prompt（默认，`-y` 未传）
 
+> **运行时自包含原则**：`buildIssueDispatchText` 生成的 §Task 正文
+> 运行在用户独立 worktree 上的 standalone agent 里，**看不到本 repo 的
+> 任何文档**（F-gtw-fix.md、REVIEWER_INSTRUCTIONS.md），也不需要知道
+> 「另一个 dispatch mode」的存在。所以运行时文本**禁止**引用：节号
+> （§4.1/§4.2）、文档文件名、「Execute pass / Execute (§4.2)」、
+> 「the plan above」（Execute 假设有前置 Plan round，但 `-y` 可直接跳过 Plan）。
+> 每条 prompt 必须自含全部所需指令。
+> `TestBuildIssueDispatchText_RuntimeSelfContained` 守住这个不变量。
+
 ```markdown
 ## Task
 Analyse the request above. The worktree's current source is the baseline —

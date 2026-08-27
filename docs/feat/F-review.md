@@ -1,6 +1,6 @@
 # F-review — 统一的 `/review` 命令,对接各底层 agent 的差异化 review 入口
 
-> **Status**: 📐 designing(第九轮 — 走标准 slash command 流程,不写独立 parse 函数)
+> **Status**: 🟢 landed(v15 — 2026-08-27 加 `/code-review` plugin 的 AskUserQuestion 恢复层,见 §13.6;之前 v9 走 native review 三层分流,见 §13)
 > **Scope (v1)**: 给现有 `Starter` 接口加一个 `Review(ctx, rc) error` 方法(每个 bridge 加 3 行,delegate 到 `agent.DefaultReview`)。新建 `internal/agent/review.go`(ReviewContext / DefaultReview / StandardPrompt)和 `internal/command/review/cmd.go`(一个文件,直接 inline 检查 `input.Args`)。
 > **v9 关键收敛**: `/review` 跟其他 slash command(`/cwd` / `/think` / `/use` 等)一样,**直接用 Commander 解析好的 `input.Args`,inline `len(input.Args)` 检查**。不写独立的 `parseReviewArgs` 函数,也不写 `parse.go` 文件。
 > **Behavior**: `/review` 零限定符 — 不带 flag / 不带 arg。永远是 "当前分支(含未 commit)vs 默认主分支" = PR 模式。
@@ -1226,7 +1226,30 @@ canonical format 不是"必须 parse agent 输出成结构化" — 它是**两�
 
 **v10 评估**:如果用户反馈"格式不一致",加 `NormalizeFindings(rawText, agentName)` helper 做 active parse + re-format。
 
-### 13.6 测试覆盖
+### 13.6 已知边界:`/code-review` plugin 的 AskUserQuestion 在 `-p` 模式下吞掉 review(2026-08-27)
+
+`code-review` slash command 插件(`allowed-tools=gh-only`)的 step 8 是 `gh pr comment` 把 review post 回 PR。在 `-p` 模式下:
+
+- 有 PR:`gh pr comment` 成功,plugin 直接输出 review + 短 confirmation,terminal `result` event 装的是 review(或 confirmation + review 一起在 assistant message 里)
+- 没 PR:`gh pr comment` 失败,plugin 降级到 AskUserQuestion —— `-p` 模式下没 stdin 接 answer,**plugin 把 question 当作 terminal result 文本输出,review 跑到前一个 `assistant` 事件里被丢掉**
+
+nightme 的修法有两层(`internal/bridge/claudecode/print.go::parsePrintStream` + `runCodeReviewPrintMode`):
+
+1. **pos 传 `<base>...HEAD` 给 plugin,让它有明确 target,跳过 "which target?" 询问**。`detectDefaultBranch` 走 3 层(`git symbolic-ref refs/remotes/origin/HEAD` → `git remote show origin` → 返回 "" 走原 fallback),跟 codex 那边的同名 helper 平行。检测失败时退化为裸 `code-review`,与 pre-fix v1 一致。
+
+2. **assistant text 兜底抓 review**:parsePrintStream 在扫 stream-json 时累积每个 `assistant.message.content[type=text]` 块,取最大那块作为 `result.AssistantText`。扫到 terminal result 时:
+
+   ```go
+   if isFollowupQuestion(result.Text) && len(result.AssistantText) > len(result.Text)*2 {
+       result.Text = result.AssistantText  // swap
+   }
+   ```
+
+   `isFollowupQuestion` 的判断:文本 < 600 chars 且没有 `## ` 标题(真 review 必有 `## Summary` / `## Findings` / `## Recommendations`)。10 个具体短语(`want me to` / `should i` / `would you like` / `anything else` / `posted review` / `comment added` / ...)做第三道兜底。review 进入 `FormatReviewMessage` 之前由 dispatcher 看到的是 review 本体,不是 "Want me to apply...?" 之类的 follow-up 问题。
+
+3. **不强制 post 到 PR 评论**:plugin 自己 step 8 调 `gh pr comment`,nightme 不拦 —— 即使用户 branch 有 PR,review 也会被自动 post 上去(remote 副作用由 plugin 自己负责,不在 nightme 范围内)。`AssistantText` 字段同时保留 review 副本,即便 plugin 成功 post 了 comment,nightme 也能从 assistant 流里捞到 review。
+
+### 13.7 测试覆盖
 
 - `TestReview_UsesSharedPrompt` — 验证 `agent.Review` 路径(dsh/opencode/pi/acp 走 StandardPrompt)
 - `TestReview_PropagatesRunOnceError` — RunOnce 失败时不应 inject
@@ -1238,14 +1261,24 @@ canonical format 不是"必须 parse agent 输出成结构化" — 它是**两�
 
 `claudecode`/`codex` 的 native review 路径在它们各自的 `runCodeReviewPrintMode`/`runCodexReview` 里(e2e 测试需要 binary on PATH,CI 跳过)。
 
-### 13.7 改动文件
+#### 13.7.1 `claudecode` AskUserQuestion 恢复层单测(`internal/bridge/claudecode/print_review_internal_unix_test.go`,2026-08-27 加)
 
-- `internal/agent/agent.go` — `StartConfig` 新增 `Subcommand` + `ExtraFlags` 字段;`Starter` interface Review doc 全面更新为 §13 规则
+- `TestIsFollowupQuestion` — 11 个 subcase:5 种 plugin 收尾文本(`want me to apply` / `should i` / `would you like` / `anything else` / `posted review` / `comment added`) + 2 个 review 形态(长 + 有 `## `) + 4 个非 follow-up 形态(短非问句 / 空 / 全空白 / "all good")
+- `TestLongestText` — empty / single / tie / middle 4 个 case
+- `TestParsePrintStream_PrefersResultTextWhenLong` — happy path,terminal result 长且有 `## ` → 不 swap,Text 直接用 result event
+- `TestParsePrintStream_RecoversReviewFromAssistantWhenFollowup` — bug 复现 + 修复验证:review 在 assistant message,terminal result 是 follow-up → Text 被 swap 成 AssistantText
+- `TestParsePrintStream_NoSwapWhenAssistantShorter` — 防御:assistant 比 result 短时不 swap(2x ratio gate)
+- `TestDetectDefaultBranch_NoRepo` — fallback:无 repo / 无 origin → 返回 ""
+
+### 13.8 改动文件
+
+- `internal/agent/agent.go` — `StartConfig` 新增 `Subcommand` + `ExtraFlags` 字段;`Starter` interface Review doc 全面更新为 §13 规则;`RunResult` 新增 `AssistantText string` 字段(claudecode 用于 §13.6 恢复层,其他 bridge 留空)
 - `internal/agent/review.go` — `FormatReviewMessage` 由 unexported 改为 exported (bridges override 时调用)
 - `internal/bridge/codex/print.go` — `runCodexReview` + `detectDefaultBranch`,`buildPrintArgs` 支持 `Subcommand` + `ExtraFlags`
 - `internal/bridge/codex/starter.go` — `Review` 改用 `runCodexReview`
-- `internal/bridge/claudecode/print.go` — `runCodeReviewPrintMode` (v8 已加)
+- `internal/bridge/claudecode/print.go` — `runCodeReviewPrintMode` (v8 已加);**v15(2026-08-27)加 §13.6 修复**:`runCodeReviewPrintMode` 追加 positional `<defaultBranch>...HEAD`,新增 `detectDefaultBranch` helper;`parsePrintStream` 累积 largest assistant text 写到 `result.AssistantText` 并按 `isFollowupQuestion` + 长度比 swap;新增 `isFollowupQuestion` + `longestText` helper
 - `internal/bridge/claudecode/starter.go` — `Review` 改用 `runCodeReviewPrintMode` (v8 已加)
+- `internal/bridge/claudecode/print_review_internal_unix_test.go` — **新文件**:`TestIsFollowupQuestion` / `TestLongestText` / `TestParsePrintStream_*` / `TestDetectDefaultBranch_NoRepo`
 - `internal/agent/review_per_bridge_test.go` — doc 注释更新为 §13 规则
 
 ---

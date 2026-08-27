@@ -311,10 +311,19 @@ func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, e
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	var (
-		result    agent.RunResult
-		isError   bool
-		sawInit   bool
-		sawResult bool
+		result     agent.RunResult
+		isError    bool
+		sawInit    bool
+		sawResult  bool
+		// largestAssistant accumulates the longest text block
+		// across all assistant messages observed this turn.
+		// /code-review's plugin prints the multi-agent review
+		// findings in one large assistant message, then closes
+		// the turn with a follow-up "Want me to apply…?" — in
+		// `-p` mode that question becomes the terminal result
+		// event's Text, hiding the actual review. Tracking the
+		// largest block here lets us recover the review below.
+		largestAssistant string
 	)
 
 	for scanner.Scan() {
@@ -353,6 +362,19 @@ func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, e
 				result.SessionID = ev.SessionID
 				result.Model = ev.Model
 			}
+		case "assistant":
+			// Track the largest text block across all assistant
+			// messages. The plugin's review content typically
+			// lives in one large block (the multi-agent pipeline's
+			// final composed review); smaller blocks are usually
+			// progress pings like "Reviewer 3 finished".
+			if ev.Message != nil {
+				for _, block := range ev.Message.Content {
+					if block.Type == "text" && len(block.Text) > len(largestAssistant) {
+						largestAssistant = block.Text
+					}
+				}
+			}
 		case "result":
 			sawResult = true
 			result.Text = ev.Result
@@ -374,6 +396,27 @@ func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, e
 					"subtype", result.Subtype)
 			}
 		}
+	}
+
+	// Publish the largest assistant text alongside Text so the
+	// dispatcher (and any future caller / log inspector) can
+	// see both pieces independently. Trimmed for symmetry with
+	// the trailing TrimSpace applied to Text below.
+	result.AssistantText = strings.TrimSpace(largestAssistant)
+
+	// /code-review plugin's follow-up question ("Want me to
+	// apply the suggested patch?", "Anything to change?", …)
+	// shows up as the terminal result event's Text in `-p`
+	// mode, with the actual review sitting in AssistantText.
+	// Swap Text → AssistantText when result.Text looks like a
+	// follow-up AND we have a meaningful assistant review to
+	// fall back to. Other bridges leave AssistantText empty
+	// and the swap is a no-op.
+	if isFollowupQuestion(result.Text) && len(result.AssistantText) > len(result.Text)*2 {
+		result.Text = result.AssistantText
+		claudeLog("PrintMode: recovered review from assistant stream",
+			"result_chars", len(result.Text),
+			"followup_chars", len(result.AssistantText))
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -446,6 +489,99 @@ func appendAuditFields(result agent.RunResult) string {
 	return agent.FormatSessionID(result.SessionID) + agent.FormatUsage(result.Usage)
 }
 
+// longestText returns the longest string in the slice, with ties
+// broken by first occurrence. Empty when the slice is empty.
+// Used by the /code-review recovery path to pick the largest
+// assistant text block (review) over the trailing follow-up.
+func longestText(texts []string) string {
+	var best string
+	for _, t := range texts {
+		if len(t) > len(best) {
+			best = t
+		}
+	}
+	return best
+}
+
+// isFollowupQuestion reports whether `text` looks like a
+// plugin-generated closing remark rather than a substantive
+// review.
+//
+// The /code-review plugin (allowed-tools=gh-only) tries step 8
+// `gh pr comment` first; in `-p` mode that path produces one
+// of three short closing texts depending on outcome:
+//
+//   1. gh succeeded: "Posted review to PR #42." / "Comment
+//      added to PR #42."
+//   2. gh failed, plugin asks the user: "Want me to apply
+//      the suggested patch?" / "Should I proceed?" /
+//      "Anything else?"
+//   3. gh failed, plugin signals nothing further: a short
+//      status line.
+//
+// In every case the review content lives in an earlier
+// `assistant` text block, NOT the terminal result event, so we
+// want to swap Text → AssistantText. A real review, by
+// contrast, always contains `## ` markdown headings
+// (`## Summary`, `## Findings`, `## Recommendations`) — the
+///// structural marker we use to distinguish the two.
+//
+// The short-text gate (`reviewLikeLength`) is the primary
+// filter: real reviews are typically >1 KiB. The heading gate
+// (`## `) is the secondary filter for the rare edge case of a
+// short text that's NOT a closing remark (e.g. an actually-
+// brief review of a one-line fix). The phrase gate is a
+/// tertiary check that catches closing remarks the heading gate
+// would miss because they happen to contain `## ` somewhere
+// (extremely rare but observed in plugin updates).
+func isFollowupQuestion(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	// reviewLikeLength: anything longer than ~600 chars is very
+	// unlikely to be a plugin follow-up (those are <200 chars
+	// in every observed case). Combined with the structural
+	// gates below, this filters out genuine questions that
+	// happen to appear inside a long review.
+	const reviewLikeLength = 600
+	if len(t) > reviewLikeLength {
+		return false
+	}
+	// Real reviews from /code-review always contain `## `
+	// markdown headings. Closing remarks never do. Negative-
+	// structured: absence-of-heading is a strong follow-up
+	// signal.
+	if !strings.Contains(t, "## ") {
+		return true
+	}
+	// Belt-and-braces: even when the text contains `## `, catch
+	// plugin-specific phrases that the heading check would
+	// otherwise miss. New phrases added by future Claude Code
+	// /code-review plugin versions should be appended here AND
+	// logged via the recovery branch in parsePrintStream so the
+	// heuristic stays current.
+	lower := strings.ToLower(t)
+	phrases := []string{
+		"want me to",
+		"should i ",
+		"would you like",
+		"anything else",
+		"anything to change",
+		"apply the",
+		"posted review",
+		"posted a comment",
+		"comment added",
+		"comment posted",
+	}
+	for _, p := range phrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // runCodeReviewPrintMode runs `claude -p "/code-review"` against
 // the workspace. This is the bridge's native review path
 // (F-review.md §13 "codex/claude use native review" rule): we
@@ -480,19 +616,79 @@ func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConf
 	}
 
 	// /code-review takes an optional positional [target] argument
-	// (file path / PR # / branch / ref range). v1 has no user-facing
-	// target flag; future v2 can pass rc.Comment or a parsed target.
-	// Default is the canonical "review current branch vs default"
-	// behaviour, which matches our /review dispatch.
+	// (file path / PR # / branch / ref range). The plugin's step-1
+	// "is this a PR?" check is hard-coded to use `gh pr view`; in
+	// `-p` mode with no real PR on the branch, that path falls back
+	// to AskUserQuestion ("Which one do you want to review?") — which
+	// becomes the terminal result event's Text and hides the actual
+	// review (see parsePrintStream's isFollowupQuestion recovery).
+	//
+	// Passing `<defaultBranch>...HEAD` as the positional gives the
+	// plugin an explicit ref-range target so it skips the
+	// "which target?" step entirely. This is the ref-range syntax
+	// documented in `claude code-review --help`'s source-of-truth
+	// and confirmed empirically on claude-code 2.1.220.
+	//
+	// When `detectDefaultBranch` fails (no origin remote, shallow
+	// clone, etc.) we fall back to bare `code-review` with no target
+	// — same as pre-fix v1. The print-stream parser's follow-up
+	// recovery handles the no-PR AskUserQuestion gracefully either
+	// way; this positional is a *quality* improvement, not a hard
+	// requirement.
 	//
 	// Pass the command WITHOUT the leading slash — see doc above.
+	defaultBase := detectDefaultBranch(ctx, cfg.Workspace)
 	args := []string{
 		"-p", "code-review",
+	}
+	if defaultBase != "" {
+		args = append(args, defaultBase+"...HEAD")
+	}
+	args = append(args,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "bypassPermissions",
-	}
+	)
 
 	startTime := time.Now()
 	return runPrintModeWithPrompt(ctx, s, cfg, args, "code-review", startTime)
+}
+
+// detectDefaultBranch finds the repo's default branch name
+// (main / master / trunk). Returns "" if it can't be detected —
+// caller falls back to `code-review` with no positional target.
+//
+// Mirrors internal/bridge/codex/print.go::detectDefaultBranch
+// (kept duplicated rather than promoted to a shared package so
+// each bridge can evolve its detection independently — the
+// codex copy is wired for `codex review --base` while this
+// one feeds `code-review <base>...HEAD`). Three-tier fallback:
+//
+//  1. `git symbolic-ref refs/remotes/origin/HEAD` (most reliable
+//     on cloned repos).
+//  2. `git remote show origin` (shallow-clone fallback).
+//  3. Return "" so the caller skips the positional.
+func detectDefaultBranch(ctx context.Context, workspace string) string {
+	c, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := proc.New(c, "git",
+		"-C", workspace, "symbolic-ref", "refs/remotes/origin/HEAD").Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(out))
+		if strings.HasPrefix(ref, "refs/remotes/origin/") {
+			return strings.TrimPrefix(ref, "refs/remotes/origin/")
+		}
+	}
+	c2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel2()
+	out, err = proc.New(c2, "git",
+		"-C", workspace, "remote", "show", "origin").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "HEAD branch: ") {
+				return strings.TrimPrefix(line, "HEAD branch: ")
+			}
+		}
+	}
+	return ""
 }

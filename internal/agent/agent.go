@@ -1069,6 +1069,24 @@ type RunResult struct {
 	// wire format carries `usage` / `modelUsage`.
 	Usage *UsageInfo
 
+	// AssistantText is the largest text block observed across
+	// the turn's assistant messages. Empty when the bridge
+	// only emits terminal events (no per-message text) or when
+	// the terminal Text already covers everything.
+	//
+	// claudecode's /code-review slash command plugin
+	// (allowed-tools=gh-only) prints the multi-agent review
+	// findings in an `assistant` text block, then finishes
+	// the turn with a follow-up like "Want me to apply the
+	// suggested patch?" — in `-p` (non-interactive) mode that
+	// question becomes the terminal `result` event's text and
+	// the actual review disappears from Text. AssistantText
+	// lets the dispatcher recover the review from the assistant
+	// stream when Text looks like a follow-up rather than a
+	// review. Only claudecode populates this today; other
+	// bridges leave it empty.
+	AssistantText string
+
 	// Model is the model name that actually produced Text.
 	// Important when RunOnce uses a different model than the
 	// chat session's selectedAgent (e.g. /gtw commit might

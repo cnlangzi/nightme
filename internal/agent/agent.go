@@ -1069,23 +1069,25 @@ type RunResult struct {
 	// wire format carries `usage` / `modelUsage`.
 	Usage *UsageInfo
 
-	// AssistantText is the largest text block observed across
-	// the turn's assistant messages. Empty when the bridge
-	// only emits terminal events (no per-message text) or when
-	// the terminal Text already covers everything.
+	// RecoveredText holds a secondary body of text that the
+	// bridge observed during the turn but did NOT propagate
+	// into Text. Empty unless the bridge detected a recoverable
+	// case (today: claudecode's /code-review plugin in `-p`
+	// mode, where the plugin finishes with an AskUserQuestion
+	// and the actual review sits in an earlier `assistant`
+	// event — the recovery layer promotes it into Text and
+	// keeps a copy here for audit).
 	//
-	// claudecode's /code-review slash command plugin
-	// (allowed-tools=gh-only) prints the multi-agent review
-	// findings in an `assistant` text block, then finishes
-	// the turn with a follow-up like "Want me to apply the
-	// suggested patch?" — in `-p` (non-interactive) mode that
-	// question becomes the terminal `result` event's text and
-	// the actual review disappears from Text. AssistantText
-	// lets the dispatcher recover the review from the assistant
-	// stream when Text looks like a follow-up rather than a
-	// review. Only claudecode populates this today; other
-	// bridges leave it empty.
-	AssistantText string
+	// Renamed from AssistantText in v15b: "assistant" is
+	// claudecode's specific wire-event name; the field's role
+	// is semantic (a recoverable body of text), not source-
+	// specific. Future bridges that hit similar terminal-vs-
+	// stream skew can populate this without renaming again.
+	//
+	// Always empty for non-claudecode bridges and for
+	// claudecode non-review print-mode runs (see
+	// parsePrintStream's isReview gate in print.go).
+	RecoveredText string
 
 	// Model is the model name that actually produced Text.
 	// Important when RunOnce uses a different model than the

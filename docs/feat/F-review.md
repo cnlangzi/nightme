@@ -1247,7 +1247,17 @@ nightme 的修法有两层(`internal/bridge/claudecode/print.go::parsePrintStrea
 
    `isFollowupQuestion` 的判断:文本 < 600 chars 且没有 `## ` 标题(真 review 必有 `## Summary` / `## Findings` / `## Recommendations`)。10 个具体短语(`want me to` / `should i` / `would you like` / `anything else` / `posted review` / `comment added` / ...)做第三道兜底。review 进入 `FormatReviewMessage` 之前由 dispatcher 看到的是 review 本体,不是 "Want me to apply...?" 之类的 follow-up 问题。
 
-3. **不强制 post 到 PR 评论**:plugin 自己 step 8 调 `gh pr comment`,nightme 不拦 —— 即使用户 branch 有 PR,review 也会被自动 post 上去(remote 副作用由 plugin 自己负责,不在 nightme 范围内)。`AssistantText` 字段同时保留 review 副本,即便 plugin 成功 post 了 comment,nightme 也能从 assistant 流里捞到 review。
+3. **不强制 post 到 PR 评论**:plugin 自己 step 8 调 `gh pr comment`,nightme 不拦 —— 即使用户 branch 有 PR,review 也会被自动 post 上去(remote 副作用由 plugin 自己负责,不在 nightme 范围内)。`RecoveredText` 字段同时保留 review 副本,即便 plugin 成功 post 了 comment,nightme 也能从 assistant 流里捞到 review。
+
+#### 13.6.1 v15b 收口(2026-08-27,基于第一轮 code review 的反馈)
+
+四个收口,改动全部在 `internal/bridge/claudecode/print.go` + `internal/agent/{agent.go,detect_default_branch.go,review_with_ocr.go}`:
+
+1. **`AssistantText` → `RecoveredText`**(字段名泄漏 Claude Code wire event 名;改为 purpose-oriented)
+2. **`parsePrintStream` 加 `isReview bool` 参数**:assistant text 追踪 + swap 只在 review 调用路径开启。其他 claudecode print-mode 调用(`/gtw commit` / `buildAgentPrompt` 等)的 `RunResult.RecoveredText` 永远为空 —— 不污染共享类型上的 raw model output 字段
+3. **`isFollowupQuestion` 改纯正面匹配**:删掉 "short + 没 `## `" 短路(那个会让 "✅ Looks clean." 之类的真实短 result 被误判)。只有匹配已知 plugin 收尾短语("want me to" / "posted review" / "comment added" / ...)才返回 true。`len(t) > 600` 长度门 + phrase list 双层防御
+4. **promote `DetectDefaultBranch` 到 `internal/agent`**:之前三份近乎重复的实现(`codex/print.go` / `claudecode/print.go` / `review_with_ocr.go`,后者还返回 "origin/" 前缀)收敛到一个公开 helper。ocr 的 callers 用本地 `resolvableDefaultBranch` 私有 wrapper 加 "origin/" 前缀,因为它们需要 resolvable ref 给 git merge-base / git diff 用
+5. **删 `longestText` 死代码**(`parsePrintStream` 内联同样的逻辑)、swap 移到 `isError` 之后(防止 review 误盖到 error message 上)、log 字段从 `followup_chars` 改成 `recovered_chars`、修文档里的 `/////` 和 `/// ` 笔误
 
 ### 13.7 测试覆盖
 
@@ -1272,14 +1282,16 @@ nightme 的修法有两层(`internal/bridge/claudecode/print.go::parsePrintStrea
 
 ### 13.8 改动文件
 
-- `internal/agent/agent.go` — `StartConfig` 新增 `Subcommand` + `ExtraFlags` 字段;`Starter` interface Review doc 全面更新为 §13 规则;`RunResult` 新增 `AssistantText string` 字段(claudecode 用于 §13.6 恢复层,其他 bridge 留空)
+- `internal/agent/agent.go` — `StartConfig` 新增 `Subcommand` + `ExtraFlags` 字段;`Starter` interface Review doc 全面更新为 §13 规则;`RunResult` 新增 `RecoveredText string` 字段(claudecode 用于 §13.6 恢复层,`isReview=true` 时才填,其他 bridge 永远留空)
+- `internal/agent/detect_default_branch.go` — **v15b 新文件**:`DetectDefaultBranch(ctx, workspace) string` 公开 helper,统一 §13.6.1 第 4 点提到的三份近乎重复的实现
 - `internal/agent/review.go` — `FormatReviewMessage` 由 unexported 改为 exported (bridges override 时调用)
-- `internal/bridge/codex/print.go` — `runCodexReview` + `detectDefaultBranch`,`buildPrintArgs` 支持 `Subcommand` + `ExtraFlags`
+- `internal/bridge/codex/print.go` — `runCodexReview` + `buildPrintArgs` 支持 `Subcommand` + `ExtraFlags`;v15b 删除本地 `detectDefaultBranch`,改用 §13.6.1 第 4 点提升的 `agent.DetectDefaultBranch`
 - `internal/bridge/codex/starter.go` — `Review` 改用 `runCodexReview`
-- `internal/bridge/claudecode/print.go` — `runCodeReviewPrintMode` (v8 已加);**v15(2026-08-27)加 §13.6 修复**:`runCodeReviewPrintMode` 追加 positional `<defaultBranch>...HEAD`,新增 `detectDefaultBranch` helper;`parsePrintStream` 累积 largest assistant text 写到 `result.AssistantText` 并按 `isFollowupQuestion` + 长度比 swap;新增 `isFollowupQuestion` + `longestText` helper
+- `internal/bridge/claudecode/print.go` — `runCodeReviewPrintMode` (v8 已加);**v15(2026-08-27)加 §13.6 修复**:`runCodeReviewPrintMode` 追加 positional `<defaultBranch>...HEAD`,用 §13.6.1 第 4 点提升的 `agent.DetectDefaultBranch`;`parsePrintStream` 加 `isReview bool` 参数,review 路径下累积 largest assistant text 写到 `result.RecoveredText` 并按 `isFollowupQuestion` + 长度比 swap;新增 `isFollowupQuestion` helper。v15b 收口见 §13.6.1:`runPrintModeWithPrompt` 透传 `isReview`;删 `longestText` 死代码;`isFollowupQuestion` 改纯正面匹配,防 `"✅ Looks clean."` 之类的 false-positive;swap 移到 `isError` 之后,防 review 误盖 error message
 - `internal/bridge/claudecode/starter.go` — `Review` 改用 `runCodeReviewPrintMode` (v8 已加)
 - `internal/bridge/claudecode/print_review_internal_unix_test.go` — **新文件**:`TestIsFollowupQuestion` / `TestLongestText` / `TestParsePrintStream_*` / `TestDetectDefaultBranch_NoRepo`
 - `internal/agent/review_per_bridge_test.go` — doc 注释更新为 §13 规则
+- `internal/agent/review_with_ocr.go` — v15b 删除本地 `detectDefaultBranch` + `stripRefsRemotes`,改用 §13.6.1 第 4 点提升的 `agent.DetectDefaultBranch`,ocr 的 callers 走本地私有 wrapper `resolvableDefaultBranch` 加 "origin/" 前缀(resolvable ref 是 `git merge-base` / `git diff` 在 feature-branch checkout 上唯一能 resolve 的形式)
 
 ---
 

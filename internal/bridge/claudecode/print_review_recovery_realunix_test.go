@@ -38,7 +38,7 @@ func TestParsePrintStream_RealRecovery_AskUserQuestion(t *testing.T) {
 	if err != nil {
 		t.Skipf("fixture %s not present: %v", fixture, err)
 	}
-	got, err := parsePrintStream(context.Background(), strings.NewReader(string(data)))
+	got, err := parsePrintStream(context.Background(), strings.NewReader(string(data)), true)
 	if err != nil {
 		t.Fatalf("parsePrintStream: %v", err)
 	}
@@ -56,5 +56,5 @@ func TestParsePrintStream_RealRecovery_AskUserQuestion(t *testing.T) {
 		t.Errorf("recovery failed: result too short (%d chars), review not recovered", len(got.Text))
 	}
 	t.Logf("recovered %d chars of review from assistant stream (assistant_text %d chars)",
-		len(got.Text), len(got.AssistantText))
+		len(got.Text), len(got.RecoveredText))
 }

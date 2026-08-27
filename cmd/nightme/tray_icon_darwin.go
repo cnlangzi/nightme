@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && !notray
 
 // macOS-specific icon wiring. SetTemplateIcon takes a single
 // template (alpha-only mask; Cocoa auto-inverts for dark menu

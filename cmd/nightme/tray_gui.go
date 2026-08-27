@@ -1,21 +1,31 @@
-//go:build (darwin && !notray) || (windows && !notray) || (linux && gui)
+//go:build (darwin && !notray) || windows || (linux && gui)
 
 // Package main — system-tray icon for the nightme daemon (the
 // systray-backed implementation).
 //
-// Build tag: this file is compiled on macOS and Windows when the
-// binary is built natively (no `notray` tag), and on Linux only
-// when `-tags gui` is passed. The `notray` tag opts the macOS /
-// Windows default binary out of the systray implementation, which
-// is what we need when cross-compiling to a target whose C
-// toolchain isn't reachable from the runner — Go silently
-// disables CGo on cross-compile, and getlantern/systray has no
-// non-CGo fallback, so importing it on a CGo-disabled build
-// produces
+// Build tag: this file is compiled on Windows unconditionally,
+// on macOS only when the `notray` tag is NOT set, and on Linux
+// only when `-tags gui` is passed.
+//
+// The `notray` tag is a darwin-only opt-out: it exists because
+// macos-latest (Apple Silicon) cannot cross-compile CGo to
+// darwin/amd64 — Go silently disables CGo on cross-compile, and
+// getlantern/systray has no non-CGo fallback, so importing it on
+// a CGo-disabled build produces
 //
 //	systray.go:78:2: undefined: nativeLoop
 //	systray.go:106:2: undefined: registerSystray
 //	...
+//
+// Setting `-tags notray` on Windows or Linux is a no-op: the
+// tray stays compiled in. On Linux, the tray is already gated by
+// the `gui` tag (see tray_stub.go); on Windows the cross-compile
+// problem is solved by running the build on the dedicated
+// windows-11-arm native runner (see release.yml), so a `notray`
+// escape hatch is unnecessary. Restricting `notray` to darwin
+// keeps the build-tag matrix small and prevents a future user
+// from accidentally building a tray-less Windows binary that has
+// no runTrayOwning stub.
 // See tray.go for why Linux defaults to the no-op stub in
 // tray_stub.go instead.
 //

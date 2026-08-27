@@ -116,11 +116,23 @@ jobs:
           # windows/arm64 runs on the dedicated windows-11-arm
           # runner (GA Nov 2025, free for public repos). Building
           # it on the amd64 windows-latest runner would cross-
-          # compile to arm64, which — like the darwin case above
-          # — breaks CGo (Win32 systray, go-winres-generated
-          # .syso, etc.). windows-11-arm is the only native
-          # option; falls back gracefully if a future change
-          # makes the matrix image unavailable.
+          # compile to arm64, which — like the darwin/amd64 case
+          # above — breaks CGo (Win32 systray, go-winres-generated
+          # .syso, etc.).
+          #
+          # NOTE: there is intentionally NO fallback path. The
+          # alternatives — (a) cross-compile on windows-latest
+          # with `-tags notray CGO_ENABLED=0`, which would silently
+          # ship a tray-less windows/arm64 binary indistinguishable
+          # to the user from the real one, or (b) a `if: failure()`
+          # second job that uploads the same artifact name and
+          # collides on `actions/upload-artifact`'s per-run
+          # uniqueness rule — are both worse than just failing the
+          # release. If `windows-11-arm` is unavailable, the
+          # release blocks until the runner image is back, and the
+          # failure shows up as a clear `Build (windows/arm64)`
+          # job error in the run summary rather than a silent
+          # quality regression in the published artifact.
           - goos: windows
             goarch: arm64
             os: windows-11-arm

@@ -11,9 +11,13 @@ package gtw
 // focus on the ID-mode business logic.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -685,4 +689,146 @@ func parseSecondWorktree(porcelain string, underPrefix string) string {
 		}
 	}
 	return ""
+}
+
+// TestFixRemote_WithAttachments_EndToEnd exercises the full
+// dispatcher chain after the cnlangzi/nightme#294 refactor:
+// Issue.Attachments (set by the provider via
+// attachmentsFromBody) → completeFixAndDispatch →
+// downloadAttachmentsBestEffort → on-disk files under
+// <worktree>/.nightme/attachments/issue-<id>/.
+//
+// The fake provider's GetIssue returns the pre-seeded Issue
+// verbatim — that's the contract the real provider satisfies
+// after GetIssue internally calls attachmentsFromBody. This
+// test proves the consumer side (dispatcher → downloader) works
+// against the contract. The provider side
+// ((*GitHubProvider).attachmentsFromBody + the body parser) is
+// covered by TestAttachmentsFromBody_GitHub.
+//
+// httptest serves two attachment URLs: one PNG (image content),
+// one log file (text content). downloadAttachments classifies
+// each by response Content-Type (refined from the provider's
+// hint) and writes to <worktree>/.nightme/attachments/issue-<id>/.
+// We assert:
+//
+//   - Exactly N files land under .nightme/attachments/issue-<id>
+//     (one per seeded attachment).
+//   - Filenames are prefixed with the index
+//     (<i>-<filename>) so two attachments sharing a filename
+//     don't clobber each other.
+//   - On-disk bytes match what the test server returned —
+//     proves the download path actually fetched, not just that
+//     it iterated.
+//   - The dispatch queue still gets the issue message (the
+//     attachment download is best-effort and must NOT block
+//     the dispatch).
+//
+// Without this test, the integration of "provider populates
+// Attachments → dispatcher reads it → downloader fetches" was
+// uncovered — TestFixRemote_HappyPath uses Attachments: nil,
+// and SetIssueAttachments in fake_provider_test.go:133 had no
+// callers. This test closes that gap.
+func TestFixRemote_WithAttachments_EndToEnd(t *testing.T) {
+	// Local HTTP server for attachment downloads. Real GitHub
+	// user-images URLs go over public CDN; here we point at a
+	// httptest server so the test is hermetic.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/shot.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = io.WriteString(w, "PNG-BYTES")
+	})
+	mux.HandleFunc("/crash.log", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "crash log content")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	rig := newFixRemoteRig(t)
+	issueID := 100
+	// Seed the issue WITH attachments — this is what
+	// (*GitHubProvider).GetIssue would return after the body
+	// parser populated Attachments. The fake's GetIssue returns
+	// the pre-seeded Issue verbatim (defensive copy at
+	// fake_provider_test.go:308-311).
+	rig.prov.SetIssue(issueID, &Issue{
+		ID:    issueID,
+		Title: "Crash on login — see attached",
+		Body:  "Adding screenshot and log dump",
+		State: "open",
+		URL:   "https://github.com/cnlangzi/nightme/issues/100",
+		Attachments: []IssueAttachment{
+			{URL: srv.URL + "/shot.png", Filename: "shot.png", MIMEType: "image/png"},
+			{URL: srv.URL + "/crash.log", Filename: "crash.log", MIMEType: "text/plain"},
+		},
+	})
+
+	res, err := rig.drive(t, "100")
+	if err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// Resolve the freshly-created worktree path.
+	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
+	realWt := parseSecondWorktree(wtOut, filepath.Dir(rig.repoRoot))
+	if realWt == "" {
+		t.Fatalf("could not parse created worktree from:\n%s", wtOut)
+	}
+
+	// Attachments must land at
+	// <worktree>/.nightme/attachments/issue-<id>/.
+	attDir := filepath.Join(realWt, ".nightme", "attachments",
+		fmt.Sprintf("issue-%d", issueID))
+	entries, err := os.ReadDir(attDir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v (attachments did not download)", attDir, err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("attachment count = %d, want 2: %+v", len(entries), entries)
+	}
+
+	// downloadAttachments prefixes filenames with the index
+	// ("<i>-<name>") so two attachments sharing a filename don't
+	// clobber each other. We assert both expected files exist
+	// with the index prefix and contain the bytes the test
+	// server returned.
+	wantFiles := []struct {
+		name string
+		body []byte
+	}{
+		{"0-shot.png", []byte("PNG-BYTES")},
+		{"1-crash.log", []byte("crash log content")},
+	}
+	for _, want := range wantFiles {
+		path := filepath.Join(attDir, want.name)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("ReadFile %s: %v", path, err)
+			continue
+		}
+		if !bytes.Equal(got, want.body) {
+			t.Errorf("%s content = %q, want %q", want.name, got, want.body)
+		}
+	}
+
+	// The dispatch queue must still have grown by exactly one
+	// message — the attachment download is best-effort and
+	// must NOT block the dispatch from reaching the agent.
+	if got := rig.cs.QueueLen(); got != 1 {
+		t.Errorf("cs.QueueLen = %d, want 1 (attachment download must not block dispatch)", got)
+	}
+
+	// The success reply must mention the issue. (The dispatcher
+	// renders the "N image(s), M file(s)" Attachments section
+	// inside the dispatched-to-agent text, not the user-facing
+	// success card — the user-facing card is verified by
+	// TestFixRemote_HappyPath.)
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "Fix #100") {
+		t.Errorf("success reply missing issue header:\n%s", last)
+	}
 }

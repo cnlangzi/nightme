@@ -150,10 +150,20 @@ func TestDownloadAttachments_EmptyInput(t *testing.T) {
 	}
 }
 
-// TestExtractGitHubAttachments verifies the markdown-image
-// parser finds images in `![alt](url)` syntax, ignores
-// non-http URLs, and handles multi-line bodies.
-func TestExtractGitHubAttachments(t *testing.T) {
+// TestAttachmentsFromBody_GitHub verifies the GitHub provider's
+// per-body attachment extraction: finds `![alt](url)` image syntax
+// AND `[label](url)` plain-link syntax, ignores non-http URLs and
+// data: URIs, strips query strings from filenames, and seeds
+// MIMEType from the filename extension via mimeFromExt.
+//
+// The plain-link case (`[](shot.png)` without the `!` prefix) is
+// the v1 fix from cnlangzi/nightme#294 — prior to that, the
+// package-level parser's `body[i] != '!'` guard dropped every
+// plain link, so a `[](crash.log)` reference to a log file was
+// silently invisible to the dispatched agent. The new behaviour
+// routes such links through mimeFromExt so `[](shot.png)` lands
+// on ContentImage and `[](crash.log)` on ContentFile.
+func TestAttachmentsFromBody_GitHub(t *testing.T) {
 	body := "" +
 		"Some text.\n" +
 		"\n" +
@@ -168,9 +178,10 @@ func TestExtractGitHubAttachments(t *testing.T) {
 		"data: ![bad](data:image/png;base64,xxx)\n" +
 		"\n"
 
-	got := extractGitHubAttachments(body)
-	if len(got) != 2 {
-		t.Fatalf("got %d attachments, want 2: %+v", len(got), got)
+	prov := &GitHubProvider{}
+	got := prov.attachmentsFromBody(body)
+	if len(got) != 3 {
+		t.Fatalf("got %d attachments, want 3 (image-form, image-form-with-query, plain-link-form): %+v", len(got), got)
 	}
 	if got[0].URL != "https://user-images.githubusercontent.com/abc.png" {
 		t.Errorf("[0] URL = %q", got[0].URL)
@@ -178,12 +189,156 @@ func TestExtractGitHubAttachments(t *testing.T) {
 	if got[0].Filename != "abc.png" {
 		t.Errorf("[0] Filename = %q, want abc.png", got[0].Filename)
 	}
+	if got[0].MIMEType != "image/png" {
+		t.Errorf("[0] MIMEType = %q, want image/png (seeded from .png ext)", got[0].MIMEType)
+	}
 	if got[1].URL != "https://example.com/path/image.jpg?token=xyz" {
 		t.Errorf("[1] URL = %q", got[1].URL)
 	}
 	// Filename should have query string stripped.
 	if got[1].Filename != "image.jpg" {
 		t.Errorf("[1] Filename = %q, want image.jpg (query stripped)", got[1].Filename)
+	}
+	if got[1].MIMEType != "image/jpeg" {
+		t.Errorf("[1] MIMEType = %q, want image/jpeg", got[1].MIMEType)
+	}
+	// [link](https://example.com) — plain link, no `!` prefix.
+	// Pre-#294 this was silently dropped; post-fix it's picked up
+	// with filename = "example.com" and mimeFromExt falling back
+	// to application/octet-stream. downloadAttachments will route
+	// that to ContentFile (the agent can still read it as text).
+	if got[2].URL != "https://example.com" {
+		t.Errorf("[2] URL = %q, want https://example.com (plain link picked up)", got[2].URL)
+	}
+	if got[2].Filename != "example.com" {
+		t.Errorf("[2] Filename = %q, want example.com (URL last segment)", got[2].Filename)
+	}
+	if got[2].MIMEType != "application/octet-stream" {
+		t.Errorf("[2] MIMEType = %q, want application/octet-stream (unknown ext fallback)", got[2].MIMEType)
+	}
+}
+
+// TestAttachmentsFromBody_GitHub_PlainLinkToImage pins the v1
+// fix from #294 explicitly: a `[](shot.png)` reference (no `!`
+// prefix) to an image file must be picked up, NOT silently dropped
+// the way the pre-#294 `!`-guarded parser used to. The MIME hint
+// from mimeFromExt routes it to ContentImage at dispatch time.
+func TestAttachmentsFromBody_GitHub_PlainLinkToImage(t *testing.T) {
+	body := "see [screenshot](https://example.com/uploads/shot.png)"
+
+	prov := &GitHubProvider{}
+	got := prov.attachmentsFromBody(body)
+	if len(got) != 1 {
+		t.Fatalf("got %d attachments, want 1: %+v", len(got), got)
+	}
+	if got[0].URL != "https://example.com/uploads/shot.png" {
+		t.Errorf("URL = %q", got[0].URL)
+	}
+	if got[0].Filename != "shot.png" {
+		t.Errorf("Filename = %q, want shot.png", got[0].Filename)
+	}
+	if got[0].MIMEType != "image/png" {
+		t.Errorf("MIMEType = %q, want image/png (plain link to image → routed as image)", got[0].MIMEType)
+	}
+}
+
+// TestAttachmentsFromBody_GitHub_EmptyAltLink pins the parser's
+// empty-alt handling. With the `!` guard removed (#294), the
+// closeBracket loop must start at j = i+1 so `[](url)` (empty
+// alt) is matched. Pre-fix regression: the loop started at i+2
+// (safe only because the old `!` guard pinned body[i+1] as `[`),
+// which silently dropped every `[](url)` reference. This test
+// would have failed against that bug.
+func TestAttachmentsFromBody_GitHub_EmptyAltLink(t *testing.T) {
+	body := "log dump: [](https://example.com/crash.log)"
+
+	prov := &GitHubProvider{}
+	got := prov.attachmentsFromBody(body)
+	if len(got) != 1 {
+		t.Fatalf("got %d attachments, want 1 (empty-alt [] must match): %+v", len(got), got)
+	}
+	if got[0].URL != "https://example.com/crash.log" {
+		t.Errorf("URL = %q", got[0].URL)
+	}
+	if got[0].Filename != "crash.log" {
+		t.Errorf("Filename = %q, want crash.log", got[0].Filename)
+	}
+	if got[0].MIMEType != "text/plain" {
+		t.Errorf("MIMEType = %q, want text/plain (.log extension)", got[0].MIMEType)
+	}
+}
+
+// TestAttachmentsFromBody_GitHub_EmptyAndNoMatches covers the
+// no-op cases: empty body → nil, body without any http(s) link
+// → nil. downloadAttachments treats nil as "no work to do".
+func TestAttachmentsFromBody_GitHub_EmptyAndNoMatches(t *testing.T) {
+	prov := &GitHubProvider{}
+
+	if got := prov.attachmentsFromBody(""); got != nil {
+		t.Errorf("empty body: got %+v, want nil", got)
+	}
+	if got := prov.attachmentsFromBody("just text, no links here"); got != nil {
+		t.Errorf("no links: got %+v, want nil", got)
+	}
+	// data: / file: / mailto: URIs are skipped — the parser
+	// rejects anything that isn't http(s).
+	if got := prov.attachmentsFromBody(
+		"see [data](data:image/png;base64,xxx) or [local](file:///etc/passwd)",
+	); got != nil {
+		t.Errorf("non-http URIs: got %+v, want nil", got)
+	}
+}
+
+// TestAttachmentsFromBody_GitLab verifies the GitLab provider's
+// attachment extraction. v1 (cnlangzi/nightme#294) reuses the
+// same body parser as GitHub — body markdown is the same
+// convention, and GitLab users previously got ZERO attachments
+// dispatched because GitLabProvider.GetIssue returned
+// Attachments: nil. After this refactor GitLab users get the
+// same body-derived dispatch as GitHub.
+//
+// The future native `glab api … attachment_links` migration is
+// tracked as a TODO inside (*GitLabProvider).attachmentsFromBody;
+// when that lands the assertions here will tighten (host
+// allowlist for `/uploads/...`, richer metadata).
+func TestAttachmentsFromBody_GitLab(t *testing.T) {
+	body := "" +
+		"![screenshot](https://gitlab.com/uploads/screenshot.png)\n" +
+		"\n" +
+		"log dump: [crash.log](https://gitlab.example.com/path/crash.log)\n" +
+		"\n" +
+		"unrelated [docs](https://docs.example.com)\n" +
+		"\n"
+
+	prov := &GitLabProvider{}
+	got := prov.attachmentsFromBody(body)
+	if len(got) != 3 {
+		t.Fatalf("got %d attachments, want 3: %+v", len(got), got)
+	}
+	if got[0].URL != "https://gitlab.com/uploads/screenshot.png" {
+		t.Errorf("[0] URL = %q", got[0].URL)
+	}
+	if got[0].MIMEType != "image/png" {
+		t.Errorf("[0] MIMEType = %q, want image/png", got[0].MIMEType)
+	}
+	if got[1].URL != "https://gitlab.example.com/path/crash.log" {
+		t.Errorf("[1] URL = %q", got[1].URL)
+	}
+	if got[1].MIMEType != "text/plain" {
+		t.Errorf("[1] MIMEType = %q, want text/plain (.log extension)", got[1].MIMEType)
+	}
+	if got[2].URL != "https://docs.example.com" {
+		t.Errorf("[2] URL = %q", got[2].URL)
+	}
+}
+
+// TestAttachmentsFromBody_GitLab_Empty covers the no-op case for
+// the GitLab path: empty body → nil. The download pipeline treats
+// nil as "no work to do" and falls through to text-only dispatch.
+func TestAttachmentsFromBody_GitLab_Empty(t *testing.T) {
+	prov := &GitLabProvider{}
+	if got := prov.attachmentsFromBody(""); got != nil {
+		t.Errorf("empty body: got %+v, want nil", got)
 	}
 }
 

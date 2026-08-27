@@ -80,11 +80,28 @@ jobs:
             os: ubuntu-24.04-arm
             archive: tar.gz
             binary: nightme
+          # darwin/amd64 is a CROSS-COMPILE on macos-latest
+          # (which is Apple Silicon — `darwin-arm64` Go +
+          # `GOHOSTARCH=arm64`). Go on arm64 cannot cross-compile
+          # CGo to amd64: clang on Apple Silicon does not accept
+          # `-arch x86_64` via Go's auto-detection path, so Go
+          # silently disables CGo on cross-compile, and
+          # getlantern/systray has no non-CGo fallback. We work
+          # around it by building the default darwin/amd64 binary
+          # as `-tags notray` (tray stubbed out, daemon still
+          # fully controllable over the daemoncontrol socket).
+          # macos-13 (the only Intel hosted runner) was
+          # deprecated, so there is no native x86_64 macOS
+          # alternative. Users on Intel Macs who want the tray
+          # icon can build locally with `GOOS=darwin GOARCH=amd64
+          # make build` on an Intel Mac.
           - goos: darwin
             goarch: amd64
             os: macos-latest
             archive: tar.gz
             binary: nightme
+            go_tags: notray
+            cgo_enabled: "0"
           - goos: darwin
             goarch: arm64
             os: macos-latest
@@ -96,9 +113,17 @@ jobs:
             os: windows-latest
             archive: zip
             binary: nightme.exe
+          # windows/arm64 runs on the dedicated windows-11-arm
+          # runner (GA Nov 2025, free for public repos). Building
+          # it on the amd64 windows-latest runner would cross-
+          # compile to arm64, which — like the darwin case above
+          # — breaks CGo (Win32 systray, go-winres-generated
+          # .syso, etc.). windows-11-arm is the only native
+          # option; falls back gracefully if a future change
+          # makes the matrix image unavailable.
           - goos: windows
             goarch: arm64
-            os: windows-latest
+            os: windows-11-arm
             archive: zip
             binary: nightme.exe
     steps:
@@ -125,6 +150,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
 
+      # Pre-install go-winres on Windows BEFORE build.bat runs.
+      # build.bat's own install path (download deps, set NM_GOPATH,
+      # refresh PATH, then `where go-winres`) is fragile: it shells
+      # out to a nested `for /f` on the result of `go env GOPATH`,
+      # and on a cold windows-11-arm runner that lookup has been
+      # observed to return empty (so `where go-winres` keeps
+      # failing even though `go install` wrote the binary to
+      # %GOPATH%\bin). Doing the install in the workflow itself —
+      # where we control PATH directly via `$GITHUB_PATH` — sidesteps
+      # the cmd's PATH-refresh dance entirely.
+      - name: Install go-winres (Windows)
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       # Delegate to the canonical build entry points so the release
       # binary is byte-for-byte what `make build` / `build.bat`
       # produces locally:
@@ -144,11 +186,18 @@ jobs:
       # GOOS/GOARCH are exported so the Makefile's host-tracking
       # defaults cannot silently produce a wrong-arch binary if the
       # matrix's runner label ever drifts away from the target arch.
+      #
+      # GO_TAGS / CGO_ENABLED honor the matrix entries: darwin/amd64
+      # sets `notray` and `CGO_ENABLED=0` to build the tray-less
+      # cross-compiled default binary (see the matrix entry comment
+      # for why cross-compile cannot engage CGo on macos-latest).
       - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GO_TAGS: ${{ matrix.go_tags }}
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
         run: |
           set -euo pipefail
           if [ "${{ matrix.goos }}" = "windows" ]; then

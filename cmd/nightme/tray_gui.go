@@ -1,10 +1,21 @@
-//go:build darwin || windows || (linux && gui)
+//go:build (darwin && !notray) || (windows && !notray) || (linux && gui)
 
 // Package main — system-tray icon for the nightme daemon (the
 // systray-backed implementation).
 //
-// Build tag: this file is compiled on macOS and Windows
-// unconditionally, and on Linux only when `-tags gui` is passed.
+// Build tag: this file is compiled on macOS and Windows when the
+// binary is built natively (no `notray` tag), and on Linux only
+// when `-tags gui` is passed. The `notray` tag opts the macOS /
+// Windows default binary out of the systray implementation, which
+// is what we need when cross-compiling to a target whose C
+// toolchain isn't reachable from the runner — Go silently
+// disables CGo on cross-compile, and getlantern/systray has no
+// non-CGo fallback, so importing it on a CGo-disabled build
+// produces
+//
+//	systray.go:78:2: undefined: nativeLoop
+//	systray.go:106:2: undefined: registerSystray
+//	...
 // See tray.go for why Linux defaults to the no-op stub in
 // tray_stub.go instead.
 //

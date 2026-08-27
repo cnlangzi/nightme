@@ -1,4 +1,4 @@
-//go:build windows
+//go:build windows && !notray
 
 // Windows-specific icon wiring. SetIcon takes an .ico (or PNG,
 // but the existing logo-32.ico we embed is the natural fit and

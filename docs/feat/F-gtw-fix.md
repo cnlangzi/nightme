@@ -342,6 +342,29 @@ F-59 的 `rollbackLabelStep`、label bootstrap 顺序 **不变**；仅 dispatch 
 | `render_lookup_contract_test.go` | 删 `BranchExistsChoice` test case（保留 `WorktreeFailChoice` case） | B | ✅ |
 | `force_test.go` | 整个文件删（`forceCleanWorktreePath` 死代码） | A | ✅ |
 | `cmd.go::runClose` doc + `close.go::assertWorktreeClean` comment | 改写 stale `--force` 引用 | A（fixup） | ✅ |
+| `attachments.go` | 抽出 `parseMarkdownAttachmentLinks`（共享 markdown 链接解析，**去掉 `!` 守卫**——`[](shot.png)` 与 `![](shot.png)` 同等对待）+ `attachmentsFromHints`（URL → IssueAttachment 共用部分：filename 末段去 query，MIME hint 由 `mimeFromExt` seed） | C | ✅ |
+| `provider.go` | 删包级 `extractGitHubAttachments`；加 `(*GitHubProvider).attachmentsFromBody` + `(*GitLabProvider).attachmentsFromBody`（provider 上的私有方法，把 strategy 收回 provider 类型而不是 free function）；`Issue.Attachments` doc 重写（之前谎称 GitLab 有 native attachment_links） | C | ✅ |
+| `attachments_test.go` | `TestExtractGitHubAttachments` → `TestAttachmentsFromBody_GitHub`（断言翻面：`[link](https://example.com)` 现在应该 picked up）；新增 `_GitHub_PlainLinkToImage`（守住 v1 修掉的 `[](shot.png)` 被丢弃的 bug）+ `_EmptyAndNoMatches`；新增 `TestAttachmentsFromBody_GitLab` + `_Empty`（GitLab 用户以前 Attachments: nil，现在复用同 parser） | C | ✅ |
+
+### 7.1 Attachment 提取的 per-provider seam（`attachmentsFromBody`）
+
+每个 provider 在 `GetIssue` 内调自己的 `attachmentsFromBody(body)` 方法填充 `Issue.Attachments`。这是 per-provider strategy 的唯一 seam — 未来新增 provider（Gitea / Bitbucket）只要实现自己的 `attachmentsFromBody`，接口 / dispatcher / fake 都不动。
+
+| Provider | Strategy | 文件 |
+|---|---|---|
+| GitHub | `parseMarkdownAttachmentLinks`（无 `!` 守卫）→ `attachmentsFromHints`（filename + MIME hint） | `provider.go` `(*GitHubProvider).attachmentsFromBody` |
+| GitLab v1 | 同 GitHub；TODO 注释指向未来 `glab api … attachment_links` 切换 | `provider.go` `(*GitLabProvider).attachmentsFromBody` |
+
+共享解析器 `parseMarkdownAttachmentLinks` + 共享解析器输出到 `IssueAttachment` 的 helper `attachmentsFromHints` 都落在 `attachments.go`（与 `mimeFromExt` 同侧，util 一侧），跟 per-provider method 形成「util 共用 / strategy per-provider」的二分。
+
+`Issue.Attachments` 文档（`provider.go:43-53`）同步重写：之前声称 GitLab 有 native `attachment_links` API，但代码里没有任何这条路径；现在文档与代码一致——v1 GitLab 跟 GitHub 共享 body 解析，未来 native API 路径在 `(*GitLabProvider).attachmentsFromBody` 的 TODO 里追。
+
+为什么**不**用「`ListIssueAttachments` 独立接口方法」方案（issue #294 提议）：
+
+1. 抽象泄漏的根因是「`extractGitHubAttachments` 是 free function」——把它收到 provider 私有方法就解决了；不一定需要接口方法。
+2. `ListIssueAttachments` 在 GitHub / GitLab 实现里需要再调一次 `gh issue view` / `glab issue view` 拿 body（或者共享可变 body 缓存）。前者是性能回退（`gh issue view` 实际项目里常见 2-3s），后者是测试难点。
+3. Parser 是纯函数，不会以「应该让 `/gtw fix` 失败」的方式失败——下游 `downloadAttachmentsBestEffort` 已经把附件下载失败处理成 best-effort；额外失败隔离的边际收益 ≈ 0。
+4. Go interface 提倡「小而必要」（YAGNI）。未来如果某 provider 真需要异步 / 缓存 / native API 路径，「接口是 additive 的」——`ListIssueAttachments` 可以后加，不预先付代价。
 | feishu channel adapter | `gtwActionMap` 删 `branch-newv2` / `branch-join` 两个 key（待 PR-B 完成） | B | ✅ |
 | feishu `adapter_opt_test.go` + `session_chatid_test.go` | 把 `branch-newv2` 测试 ID 改成 generic / `act:/gtw/cancel`（保留 buildInteractiveCard / handleCardAction 测试覆盖面） | B | ✅ |
 

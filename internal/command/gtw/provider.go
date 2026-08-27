@@ -41,15 +41,22 @@ type Issue struct {
 	URL    string
 
 	// Attachments are downloadable artifacts attached to the
-	// issue. The provider fills this in as best it can:
-	//   - GitLab: native attachment_links from the issue API
-	//   - GitHub: image URLs parsed from the body markdown
-	//     (GitHub issues don't have a first-class "attachments"
-	//     API; user-uploaded images inline as `![](url)`).
+	// issue. Each provider populates this from its private
+	// attachmentsFromBody method inside GetIssue — per-provider
+	// strategy lives on the provider type, not as a free
+	// function next to it:
+	//   - GitHub: image (`![](url)`) and plain link (`[](url)`)
+	//     URLs parsed from the body. GitHub has no first-class
+	//     "attachments" API; user uploads inline in the body.
+	//   - GitLab: same body parser v1. Future migration to
+	//     native `glab api … attachment_links` is a TODO in
+	//     (*GitLabProvider).attachmentsFromBody.
+	//
 	// /gtw fix downloads each attachment into the worktree
 	// before dispatching the issue to the agent — the agent
 	// then sees them as ContentFile blocks alongside the text
-	// dispatch.
+	// dispatch. Empty slice / nil means "no attachment URLs
+	// found in the body".
 	Attachments []IssueAttachment
 }
 
@@ -955,83 +962,31 @@ func (c *GitHubProvider) GetIssue(ctx context.Context, owner, repo string, id in
 		State:       strings.ToLower(raw.State),
 		Labels:      labels,
 		URL:         raw.URL,
-		Attachments: extractGitHubAttachments(raw.Body),
+		Attachments: c.attachmentsFromBody(raw.Body),
 	}, nil
 }
 
-// extractGitHubAttachments pulls image URLs out of the issue
-// body markdown. GitHub doesn't have a first-class "issue
-// attachments" API — images are inline `![](url)` in the
-// body. We only handle github-user-images URLs (the canonical
-// upload host) for v1; other hosts work but may include
-// broken redirects that the download helper has to handle.
+// attachmentsFromBody extracts download candidates from the
+// GitHub issue body. GitHub doesn't have a first-class issue
+// attachments API — user uploads (screenshots, logs, dumps)
+// inline as `![](url)` or `[](url)` in the body markdown.
+// parseMarkdownAttachmentLinks pulls every link candidate;
+// attachmentsFromHints resolves each to an IssueAttachment
+// (filename + MIME hint). Both helpers are shared with the
+// GitLab provider — the body convention is identical, so the
+// per-provider method is a thin seam rather than a parallel
+// parser.
 //
-// Returns nil when no image URLs are found. Order matches the
-// order they appear in the body (top-down), which is what the
-// user expects when reviewing the issue.
-func extractGitHubAttachments(body string) []IssueAttachment {
-	if body == "" {
-		return nil
-	}
-	var out []IssueAttachment
-	for i := 0; i < len(body)-4; i++ {
-		if i+1 >= len(body) || body[i] != '!' || body[i+1] != '[' {
-			continue
-		}
-		// Find matching ](
-		closeBracket := -1
-		for j := i + 2; j < len(body); j++ {
-			if body[j] == ']' {
-				closeBracket = j
-				break
-			}
-		}
-		if closeBracket < 0 || closeBracket+1 >= len(body) || body[closeBracket+1] != '(' {
-			continue
-		}
-		// Find matching )
-		closeParen := -1
-		for j := closeBracket + 2; j < len(body); j++ {
-			if body[j] == ')' {
-				closeParen = j
-				break
-			}
-			if body[j] == '\n' {
-				// URL doesn't span newlines
-				break
-			}
-		}
-		if closeParen < 0 {
-			continue
-		}
-		url := body[closeBracket+2 : closeParen]
-		// Skip non-http / data: URIs.
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-			continue
-		}
-		// Filename from URL's last path segment.
-		fn := url[strings.LastIndex(url, "/")+1:]
-		// Strip query string.
-		if q := strings.Index(fn, "?"); q >= 0 {
-			fn = fn[:q]
-		}
-		if fn == "" {
-			fn = "image"
-		}
-		// MIMEType is seeded from the filename extension via
-		// mimeFromExt so the dispatch text's image/file split is
-		// accurate BEFORE download. The HTTP response's
-		// Content-Type refines it in downloadAttachments (which
-		// already prefers response over hint).
-		out = append(out, IssueAttachment{
-			URL:      url,
-			Filename: fn,
-			MIMEType: mimeFromExt(fn),
-		})
-		// Skip past this image to avoid overlapping matches.
-		i = closeParen
-	}
-	return out
+// v1 accepts any http(s) URL regardless of host; non-upload
+// hosts may include redirects that downloadAttachments has to
+// handle. Returns nil when the body has no link candidates.
+//
+// Method is named on the provider (not a free function) so the
+// strategy is discoverable from the GitHubProvider type —
+// future Gitea / Bitbucket providers each get their own
+// attachmentsFromBody with their own parser rules.
+func (c *GitHubProvider) attachmentsFromBody(body string) []IssueAttachment {
+	return attachmentsFromMarkdownBody(body)
 }
 
 // AddIssueLabel runs `gh issue edit <id> --add-label <label> --repo ...`.
@@ -1401,13 +1356,36 @@ func (c *GitLabProvider) GetIssue(ctx context.Context, owner, repo string, id in
 		return nil, fmt.Errorf("glab issue view: decode json: %w", err)
 	}
 	return &Issue{
-		ID:     raw.IID,
-		Title:  raw.Title,
-		Body:   raw.Body,
-		State:  strings.ToLower(raw.State),
-		Labels: raw.Labels,
-		URL:    raw.WebURL,
+		ID:          raw.IID,
+		Title:       raw.Title,
+		Body:        raw.Body,
+		State:       strings.ToLower(raw.State),
+		Labels:      raw.Labels,
+		URL:         raw.WebURL,
+		Attachments: c.attachmentsFromBody(raw.Body),
 	}, nil
+}
+
+// attachmentsFromBody extracts download candidates from the
+// GitLab issue body.
+//
+// TODO: switch to native `glab api /projects/:id/issues/:iid`
+// attachment_links once the API response shape is confirmed. The
+// native path would return richer metadata (uploaded-at, uploader,
+// byte size, content-type from GitLab's own MIME sniffing) that
+// body parsing can't reconstruct; the body-parsing v1 is here so
+// GitLab users get attachment support immediately without waiting
+// for the API probe + response-shape work.
+//
+// v1 reuses the same attachmentsFromMarkdownBody helper as the
+// GitHub provider — body markdown is the same convention. Per-
+// provider divergence (URL allowlist for `/uploads/...` host,
+// filename sanitization rules) lives here when it lands; until
+// then this is a thin seam.
+//
+// Returns nil when the body has no link candidates.
+func (c *GitLabProvider) attachmentsFromBody(body string) []IssueAttachment {
+	return attachmentsFromMarkdownBody(body)
 }
 
 // AddIssueLabel runs `glab issue update <id> --label <label> --repo ...`.

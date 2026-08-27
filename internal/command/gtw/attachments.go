@@ -61,13 +61,14 @@ const maxAttachmentBytes = 10 * 1024 * 1024 // 10 MB
 // by MIME and route to the right block type.
 //
 // Classification source priority: the HTTP response's
-// Content-Type wins over the provider's MIMEType hint (which is
-// often a placeholder "image/png" from extractGitHubAttachments
-// or empty from GitLab). When the response says "image/*" →
-// ContentImage; otherwise → ContentFile. We never discard a
-// successfully-downloaded file: a URL that 302'd to an HTML login
-// page still becomes a ContentFile so the agent can see what
-// actually came back (better than silently dropping it).
+// Content-Type wins over the provider's MIMEType hint (seeded by
+// attachmentsFromHints via mimeFromExt — image/* for known image
+// extensions, application/octet-stream for unknown). When the
+// response says "image/*" → ContentImage; otherwise → ContentFile.
+// We never discard a successfully-downloaded file: a URL that
+// 302'd to an HTML login page still becomes a ContentFile so the
+// agent can see what actually came back (better than silently
+// dropping it).
 //
 // On any per-attachment download failure the function aborts
 // and returns the partial slice it has built so far plus the
@@ -158,6 +159,102 @@ func downloadAttachments(ctx context.Context, atts []IssueAttachment, destDir st
 // ContentImage (vision channel) vs ContentFile (file path).
 func isImageMIME(mime string) bool {
 	return strings.HasPrefix(mime, "image/")
+}
+
+// attachmentsFromMarkdownBody extracts every `[…](url)` markdown
+// link from `body` and resolves each to an IssueAttachment.
+// Both the image form (`![](url)`) and the plain-link form
+// (`[](url)`) qualify — the dispatcher's image-vs-file routing
+// runs on MIME type, so the `!` prefix is irrelevant to attachment
+// discovery. A `[](shot.png)` reference is just as attachment-
+// worthy as `![](shot.png)`, and the same goes for a
+// `[](crash.log)` reference to a log file.
+//
+// Per-match resolution: filename is the URL's last path segment
+// with the query string stripped (falls back to "image" when the
+// URL ends with `/`); MIMEType is seeded by mimeFromExt so the
+// dispatch text's image/file split is accurate before download.
+// The HTTP response's Content-Type refines the hint in
+// downloadAttachments (which prefers response over hint), so this
+// seed is advisory.
+//
+// Order matches body order (top-down). URL-spanning-newlines is
+// rejected (the inner `)` search breaks on `\n`). Non-http(s)
+// URIs (data:, file:, mailto:, relative paths) are skipped so
+// the dispatch never fires a download for an unhandled scheme.
+//
+// Returns nil when the body is empty or no link matches.
+//
+// Shared by (*GitHubProvider).attachmentsFromBody and
+// (*GitLabProvider).attachmentsFromBody — both providers
+// currently use the same body convention. Per-provider quirks
+// (URL allowlist for GitLab `/uploads/...` host, filename
+// sanitization) layer on top inside the calling per-provider
+// method when those divergences land.
+func attachmentsFromMarkdownBody(body string) []IssueAttachment {
+	if body == "" {
+		return nil
+	}
+	var out []IssueAttachment
+	// Loop bound `-4` (= i+4 < len) is the minimum match size for
+	// a markdown link: `[`, at least one alt char, `]`, `(`, `)` = 5
+	// chars. The smallest input that should match is `[x](y` (len 5),
+	// and `len(body)-4 == 1` admits exactly that single iteration
+	// at i=0. Going below `-4` would re-enter the loop with body
+	// too short to contain even the smallest valid link.
+	for i := 0; i < len(body)-4; i++ {
+		if body[i] != '[' {
+			continue
+		}
+		// Find matching ] — start at i+1 (the char right after
+		// the opening bracket) so empty alt `[](url)` is matched.
+		// Pre-#294 the parser started at i+2 because the `!` guard
+		// pinned body[i+1] as `[`; without the guard, j must start
+		// at i+1 or empty-alt links are silently dropped.
+		closeBracket := -1
+		for j := i + 1; j < len(body); j++ {
+			if body[j] == ']' {
+				closeBracket = j
+				break
+			}
+		}
+		if closeBracket < 0 || closeBracket+1 >= len(body) || body[closeBracket+1] != '(' {
+			continue
+		}
+		// Find matching ). URL doesn't span newlines.
+		closeParen := -1
+		for j := closeBracket + 2; j < len(body); j++ {
+			if body[j] == ')' {
+				closeParen = j
+				break
+			}
+			if body[j] == '\n' {
+				break
+			}
+		}
+		if closeParen < 0 {
+			continue
+		}
+		url := body[closeBracket+2 : closeParen]
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			continue
+		}
+		fn := url[strings.LastIndex(url, "/")+1:]
+		if q := strings.Index(fn, "?"); q >= 0 {
+			fn = fn[:q]
+		}
+		if fn == "" {
+			fn = "image"
+		}
+		out = append(out, IssueAttachment{
+			URL:      url,
+			Filename: fn,
+			MIMEType: mimeFromExt(fn),
+		})
+		// Skip past this link to avoid overlapping matches.
+		i = closeParen
+	}
+	return out
 }
 
 // mimeFromExt maps a filename's extension to its best-guess

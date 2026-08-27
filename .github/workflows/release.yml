@@ -383,7 +383,16 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
+          # NOTE: intentionally NOT setting `generate_release_notes:
+          # true`. GitHub's auto-generated notes are APPENDED, not
+          # replaced — when the release body already contains a
+          # manually-written section (e.g. a PR-style "What's
+          # Changed" block composed during release prep), the API
+          # call here would tack on a second copy and the published
+          # release ends up with two identical sections. The body is
+          # authored by the release manager (in the GitHub UI draft,
+          # or already on the release before this step runs); this
+          # step only uploads the binary assets + checksums.
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz

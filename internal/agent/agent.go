@@ -1069,6 +1069,26 @@ type RunResult struct {
 	// wire format carries `usage` / `modelUsage`.
 	Usage *UsageInfo
 
+	// RecoveredText holds a secondary body of text that the
+	// bridge observed during the turn but did NOT propagate
+	// into Text. Empty unless the bridge detected a recoverable
+	// case (today: claudecode's /code-review plugin in `-p`
+	// mode, where the plugin finishes with an AskUserQuestion
+	// and the actual review sits in an earlier `assistant`
+	// event — the recovery layer promotes it into Text and
+	// keeps a copy here for audit).
+	//
+	// Renamed from AssistantText in v15b: "assistant" is
+	// claudecode's specific wire-event name; the field's role
+	// is semantic (a recoverable body of text), not source-
+	// specific. Future bridges that hit similar terminal-vs-
+	// stream skew can populate this without renaming again.
+	//
+	// Always empty for non-claudecode bridges and for
+	// claudecode non-review print-mode runs (see
+	// parsePrintStream's isReview gate in print.go).
+	RecoveredText string
+
 	// Model is the model name that actually produced Text.
 	// Important when RunOnce uses a different model than the
 	// chat session's selectedAgent (e.g. /gtw commit might

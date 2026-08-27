@@ -254,7 +254,7 @@ func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContex
 		return rc
 	}
 
-	base := detectDefaultBranch(ctx, workspace)
+	base := resolvableDefaultBranch(ctx, workspace)
 	rc.defaultBranch = base
 	if base != "" {
 		rc.mergeBase = runGit(ctx, workspace, "merge-base", base, "HEAD")
@@ -314,7 +314,7 @@ func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewCo
 		return rc
 	}
 
-	base := detectDefaultBranch(ctx, workspace)
+	base := resolvableDefaultBranch(ctx, workspace)
 	rc.defaultBranch = base
 	if base != "" {
 		rc.mergeBase = runGit(ctx, workspace, "merge-base", base, "HEAD")
@@ -392,6 +392,22 @@ func fillDiffs(ctx context.Context, rc *reviewContext, workspace, base string) {
 	rc.unstagedDiff = truncateDiff(runGit(ctx, workspace, "diff"))
 }
 
+// resolvableDefaultBranch returns origin/<defaultBranch> (e.g.
+// "origin/main"), the resolvable ref form that git merge-base /
+// git diff need when the local checkout only has the remote
+// tracking branch. Wraps DetectDefaultBranch which returns
+// the bare name; ocr's call sites pass the result to git and
+// need a resolvable ref on a feature-branch checkout. Returns
+// "" when no default branch can be detected (caller drops to
+// workspace-only mode).
+func resolvableDefaultBranch(ctx context.Context, workspace string) string {
+	base := DetectDefaultBranch(ctx, workspace)
+	if base == "" || strings.HasPrefix(base, "origin/") {
+		return base
+	}
+	return "origin/" + base
+}
+
 // runGit runs a git command in workspace and returns trimmed stdout.
 // "" on any error — callers treat empty as "skip that section". Uses
 // proc.New for cross-platform spawn: Windows .cmd shim handling +
@@ -408,53 +424,7 @@ func runGit(ctx context.Context, workspace string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// detectDefaultBranch resolves origin's default branch as a RESOLVABLE
-// ref ("origin/main"), not a bare name. This is critical: `git diff
-// main...HEAD` fails on a checkout that only has the remote tracking
-// branch (the common case on a feature branch), while
-// `git diff origin/main...HEAD` resolves. Prefers
-// `git symbolic-ref refs/remotes/origin/HEAD` (cheap, local, returns
-// "refs/remotes/origin/main"), falls back to `git remote show origin`'s
-// "HEAD branch:" line (network round-trip; only on symbolic-ref
-// failure). Returns "" if neither works — caller drops to workspace
-// mode.
-func detectDefaultBranch(ctx context.Context, workspace string) string {
-	out := runGit(ctx, workspace, "symbolic-ref", "refs/remotes/origin/HEAD")
-	// out: "refs/remotes/origin/main" (symbolic-ref prints the ref
-	// name directly; the "ref: " prefix is the .git/HEAD FILE format,
-	// not this command's output, but TrimPrefix is a harmless no-op
-	// if the prefix is absent).
-	out = strings.TrimSpace(strings.TrimPrefix(out, "ref:"))
-	if out != "" {
-		if ref := stripRefsRemotes(out); ref != "" && ref != "HEAD" {
-			return ref
-		}
-	}
-	// Fallback: parse `git remote show origin`.
-	out = runGit(ctx, workspace, "remote", "show", "origin")
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "HEAD branch:") {
-			branch := strings.TrimSpace(strings.TrimPrefix(line, "HEAD branch:"))
-			if branch != "" && branch != "(unknown)" {
-				return "origin/" + branch
-			}
-		}
-	}
-	return ""
-}
 
-// stripRefsRemotes turns "refs/remotes/origin/main" into "origin/main"
-// — a ref that resolves on a checkout with only the remote tracking
-// branch. Returns s unchanged if it doesn't match the refs/remotes/
-// prefix (caller then treats it as already-short).
-func stripRefsRemotes(s string) string {
-	const prefix = "refs/remotes/"
-	if strings.HasPrefix(s, prefix) {
-		return strings.TrimPrefix(s, prefix)
-	}
-	return s
-}
 
 // collectReviewableFiles is the Tier 3 Go reprise of ocr's preview
 // file selection. Returns the deduped, noise-filtered list of changed

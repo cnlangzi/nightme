@@ -5,27 +5,6 @@ import (
 	"testing"
 )
 
-// TestStripRefsRemotes pins the #1 fix: detectDefaultBranch must return
-// a RESOLVABLE ref ("origin/main"), not a bare name ("main"). The bare
-// name made `git diff main...HEAD` fail on a feature branch with no
-// local `main`, silently emptying committedDiff and dropping the
-// review's main scenario. stripRefsRemotes turns the symbolic-ref
-// output ("refs/remotes/origin/main") into the resolvable form.
-func TestStripRefsRemotes(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"refs/remotes/origin/main", "origin/main"},
-		{"refs/remotes/origin/master", "origin/master"},
-		{"refs/remotes/origin/trunk", "origin/trunk"},
-		{"origin/main", "origin/main"},         // already short: unchanged
-		{"refs/heads/main", "refs/heads/main"}, // wrong prefix: unchanged
-		{"", ""},
-	}
-	for _, c := range cases {
-		if got := stripRefsRemotes(c.in); got != c.want {
-			t.Errorf("stripRefsRemotes(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
 
 // TestIsReviewablePath verifies the Tier 3 noise filter drops
 // well-known non-source directories but leaves real source paths.

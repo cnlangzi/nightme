@@ -953,7 +953,7 @@ func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig, opts
 	// Build the review-specific extra flags. --base <default> is
 	// the important one; we detect <default> via git commands.
 	var extra []string
-	if defaultBase := detectDefaultBranch(ctx, cfg.Workspace); defaultBase != "" {
+	if defaultBase := agent.DetectDefaultBranch(ctx, cfg.Workspace); defaultBase != "" {
 		extra = []string{"--base", defaultBase}
 	} else {
 		cLog("codex review: no default branch detected, falling back to --uncommitted",
@@ -1520,36 +1520,3 @@ func translateItemCompleted(sink func(agent.AgentEvent), item *codexExecItem) {
 	}
 }
 
-// detectDefaultBranch finds the repo's default branch name
-// (main / master / trunk). Returns "" if it can't be detected —
-// the caller should fall back to --uncommitted.
-func detectDefaultBranch(ctx context.Context, workspace string) string {
-	// git symbolic-ref refs/remotes/origin/HEAD — most reliable on
-	// cloned repos.
-	child := proc.New(ctx, "git",
-		"-C", workspace, "symbolic-ref", "refs/remotes/origin/HEAD")
-	out, err := child.Output()
-	if err == nil {
-		ref := strings.TrimSpace(string(out))
-		if strings.HasPrefix(ref, "refs/remotes/origin/") {
-			return strings.TrimPrefix(ref, "refs/remotes/origin/")
-		}
-	}
-	// git remote show origin — fallback for shallow clones.
-	child = proc.New(ctx, "git", "-C", workspace, "remote", "show", "origin")
-	out, err = child.Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(line, "HEAD branch: ") {
-				return strings.TrimPrefix(line, "HEAD branch: ")
-			}
-		}
-	}
-	// Final fallback: return "" so the caller falls back to
-	// --uncommitted per the documented contract (F-review.md §13).
-	// Returning a hard-coded "main" here would shadow the caller's
-	// else-branch: codex review would then try --base main on
-	// master-only / no-remote repos and fail instead of gracefully
-	// scanning the working tree.
-	return ""
-}

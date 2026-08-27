@@ -148,8 +148,12 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// --bare is intentionally NOT passed: RunOnce must mirror the
 	// chat session's environment (CLAUDE.md / hooks / MCP /
 	// OAuth). See the package doc above.
+	//
+	// isReview=false: buildAgentPrompt / /gtw commit / any
+	// non-/code-review caller must not get the assistant-text
+	// recovery layer (see parsePrintStream for why).
 	args, prompt := buildPrintArgs(blocks)
-	return runPrintModeWithPrompt(ctx, s, cfg, args, prompt, startTime)
+	return runPrintModeWithPrompt(ctx, s, cfg, args, prompt, startTime, false)
 }
 
 // runPrintModeWithPrompt is the shared implementation: buildPrintArgs
@@ -165,6 +169,7 @@ func runPrintModeWithPrompt(
 	args []string,
 	prompt string,
 	startTime time.Time,
+	isReview bool,
 ) (agent.RunResult, error) {
 	child := proc.New(ctx, s.command, args...)
 	child.Dir = cfg.Workspace
@@ -235,7 +240,7 @@ func runPrintModeWithPrompt(
 	// and capture the final text + per-turn metadata. A reader
 	// error here means the pipe broke mid-run (rare; would
 	// normally be EOF from a clean exit).
-	result, translateErr := parsePrintStream(ctx, stdout)
+	result, translateErr := parsePrintStream(ctx, stdout, isReview)
 
 	// Always wait for the process to exit so we can capture
 	// both the exit code AND stderr. If parsePrintStream
@@ -305,16 +310,20 @@ func runPrintModeWithPrompt(
 // Usage info is captured onto RunResult.Usage when present;
 // the structured log line below carries the same payload for
 // operators chasing per-turn costs.
-func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, error) {
+func parsePrintStream(ctx context.Context, stdout io.Reader, isReview bool) (agent.RunResult, error) {
 	scanner := bufio.NewScanner(stdout)
 	// Allow long lines (Claude Code may emit large content blocks).
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	var (
-		result    agent.RunResult
-		isError   bool
-		sawInit   bool
-		sawResult bool
+		result     agent.RunResult
+		isError    bool
+		sawInit    bool
+		sawResult  bool
+		// largestAssistant is only populated when isReview=true;
+		// the off-mode path skips both tracking and swap, so
+		// result.RecoveredText stays empty for non-review runs.
+		largestAssistant string
 	)
 
 	for scanner.Scan() {
@@ -352,6 +361,20 @@ func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, e
 				sawInit = true
 				result.SessionID = ev.SessionID
 				result.Model = ev.Model
+			}
+		case "assistant":
+			// Track the largest text block across all assistant
+			// messages ONLY when this is a review-mode spawn.
+			// The plugin's review content typically lives in
+			// one large block (the multi-agent pipeline's final
+			// composed review); smaller blocks are usually
+			// progress pings like "Reviewer 3 finished".
+			if isReview && ev.Message != nil {
+				for _, block := range ev.Message.Content {
+					if block.Type == "text" && len(block.Text) > len(largestAssistant) {
+						largestAssistant = block.Text
+					}
+				}
 			}
 		case "result":
 			sawResult = true
@@ -414,6 +437,30 @@ func parsePrintStream(ctx context.Context, stdout io.Reader) (agent.RunResult, e
 	}
 
 	result.Text = strings.TrimSpace(result.Text)
+
+	// Review-mode recovery layer. Runs AFTER the isError branch
+	// above so error paths never have their Text overwritten
+	// by an assistant block — and only when isReview was set,
+	// keeping RecoveredText off the wire for every other
+	// claudecode print-mode call.
+	if isReview && largestAssistant != "" {
+		result.RecoveredText = strings.TrimSpace(largestAssistant)
+		// /code-review plugin's follow-up question ("Want me
+		// to apply the suggested patch?", "Anything to
+		// change?", ...) shows up as the terminal result
+		// event's Text in `-p` mode, with the actual review
+		// sitting in the assistant stream. Swap Text to
+		// RecoveredText when result.Text looks like a plugin
+		// closing remark AND we have a meaningfully larger
+		// assistant block to fall back to.
+		if isFollowupQuestion(result.Text) && len(result.RecoveredText) > len(result.Text)*2 {
+			claudeLog("PrintMode: recovered review from assistant stream",
+				"result_chars", len(result.Text),
+				"recovered_chars", len(result.RecoveredText))
+			result.Text = result.RecoveredText
+		}
+	}
+
 	return result, nil
 }
 
@@ -444,6 +491,76 @@ func errStr(err error) string {
 // grepping daemon logs can correlate.
 func appendAuditFields(result agent.RunResult) string {
 	return agent.FormatSessionID(result.SessionID) + agent.FormatUsage(result.Usage)
+}
+
+// isFollowupQuestion reports whether `text` looks like a
+// /code-review plugin closing remark rather than a substantive
+// review. Positive-match only — returns true ONLY when text
+// matches one of the known plugin output shapes. A short
+// non-review result that doesn't match any phrase (e.g.
+// "✅ Looks clean.", "No issues found.", "All good.")
+// returns false, so the recovery layer doesn't accidentally
+// overwrite a clean outcome with a progress ping from the
+// assistant stream.
+//
+// The /code-review plugin (allowed-tools=gh-only) produces
+// three short closing texts in `-p` mode:
+//
+//  1. gh succeeded: "Posted review to PR #42." / "Comment
+//     added to PR #42." — captured by phrase list.
+//  2. gh failed, plugin asks the user: "Want me to apply
+//     the suggested patch?" / "Should I proceed?" /
+//     "Anything else?" — captured by phrase list.
+//  3. gh failed, plugin signals nothing further: a short
+//     status line. These are not matches today; if the
+//     plugin adds new ones, append to the phrase list AND
+//     log via the recovery branch in parsePrintStream.
+//
+// In cases (1) and (2) the review content lives in an
+// earlier `assistant` text block, NOT the terminal result
+// event, so the dispatcher would otherwise see the closing
+// remark instead of the review. parsePrintStream uses this
+// heuristic (gated by RecoveredText being substantially
+// larger) to promote the review from the assistant stream.
+//
+// The short-text gate (`reviewLikeLength`) is the primary
+// filter: real reviews are typically >1 KiB. A genuine
+// question that happens to appear inside a long review is
+// filtered out by the length check before the phrase scan
+// even runs.
+func isFollowupQuestion(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	// reviewLikeLength: anything longer than ~600 chars is very
+	// unlikely to be a plugin closing remark (those are <200
+	// chars in every observed case). The length gate also
+	// protects against an inline question inside a long review
+	// accidentally matching a phrase below.
+	const reviewLikeLength = 600
+	if len(t) > reviewLikeLength {
+		return false
+	}
+	lower := strings.ToLower(t)
+	phrases := []string{
+		"want me to",
+		"should i ",
+		"would you like",
+		"anything else",
+		"anything to change",
+		"apply the",
+		"posted review",
+		"posted a comment",
+		"comment added",
+		"comment posted",
+	}
+	for _, p := range phrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // runCodeReviewPrintMode runs `claude -p "/code-review"` against
@@ -480,19 +597,41 @@ func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConf
 	}
 
 	// /code-review takes an optional positional [target] argument
-	// (file path / PR # / branch / ref range). v1 has no user-facing
-	// target flag; future v2 can pass rc.Comment or a parsed target.
-	// Default is the canonical "review current branch vs default"
-	// behaviour, which matches our /review dispatch.
+	// (file path / PR # / branch / ref range). The plugin's step-1
+	// "is this a PR?" check is hard-coded to use `gh pr view`; in
+	// `-p` mode with no real PR on the branch, that path falls back
+	// to AskUserQuestion ("Which one do you want to review?") — which
+	// becomes the terminal result event's Text and hides the actual
+	// review (see parsePrintStream's isFollowupQuestion recovery).
+	//
+	// Passing `<defaultBranch>...HEAD` as the positional gives the
+	// plugin an explicit ref-range target so it skips the
+	// "which target?" step entirely. This is the ref-range syntax
+	// documented in `claude code-review --help`'s source-of-truth
+	// and confirmed empirically on claude-code 2.1.220.
+	//
+	// When `detectDefaultBranch` fails (no origin remote, shallow
+	// clone, etc.) we fall back to bare `code-review` with no target
+	// — same as pre-fix v1. The print-stream parser's follow-up
+	// recovery handles the no-PR AskUserQuestion gracefully either
+	// way; this positional is a *quality* improvement, not a hard
+	// requirement.
 	//
 	// Pass the command WITHOUT the leading slash — see doc above.
+	defaultBase := agent.DetectDefaultBranch(ctx, cfg.Workspace)
 	args := []string{
 		"-p", "code-review",
+	}
+	if defaultBase != "" {
+		args = append(args, defaultBase+"...HEAD")
+	}
+	args = append(args,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", "bypassPermissions",
-	}
+	)
 
 	startTime := time.Now()
-	return runPrintModeWithPrompt(ctx, s, cfg, args, "code-review", startTime)
+	return runPrintModeWithPrompt(ctx, s, cfg, args, "code-review", startTime, true)
 }
+

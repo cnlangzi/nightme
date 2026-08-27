@@ -1018,10 +1018,15 @@ func extractGitHubAttachments(body string) []IssueAttachment {
 		if fn == "" {
 			fn = "image"
 		}
+		// MIMEType is seeded from the filename extension via
+		// mimeFromExt so the dispatch text's image/file split is
+		// accurate BEFORE download. The HTTP response's
+		// Content-Type refines it in downloadAttachments (which
+		// already prefers response over hint).
 		out = append(out, IssueAttachment{
 			URL:      url,
 			Filename: fn,
-			MIMEType: "image/png", // best guess; downloadAttachments refines from HTTP response
+			MIMEType: mimeFromExt(fn),
 		})
 		// Skip past this image to avoid overlapping matches.
 		i = closeParen

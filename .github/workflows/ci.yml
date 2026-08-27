@@ -53,12 +53,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Linux needs GTK3 + AppIndicator dev headers for the
-      # systray CGo dependency. macOS / Windows runners ship
-      # Cocoa / Win32 by default; no extra step needed. The
-      # system-tray icon (cmd/nightme/tray.go) is the only
-      # piece of nightme that pulls CGo, so this install is
-      # the single new CI dependency for the tray rollout.
+      # GTK3 + AppIndicator dev headers. NOT needed for the default
+      # Linux build any more — the tray lives behind `-tags gui`
+      # (cmd/nightme/tray_gui.go) and the default build has no CGo
+      # dependency at all. They are installed here solely so the
+      # "Verify Linux tray split" step below can compile the -gui
+      # variant, which is the only thing in the tree that links
+      # -lgtk-3 / -layatana-appindicator3.
       - name: Install systray build deps (Linux)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -73,6 +74,56 @@ jobs:
       - name: Vet
         shell: bash
         run: go vet ./...
+
+      # Regression gate for #295. The bug was that cmd/nightme/tray.go
+      # imported getlantern/systray unconditionally, so every Linux
+      # binary recorded libayatana-appindicator3.so.1 as a DT_NEEDED
+      # entry and refused to exec on any host without the GTK3
+      # runtime:
+      #
+      #   error while loading shared libraries:
+      #   libayatana-appindicator3.so.1: cannot open shared object file
+      #
+      # No Go test can catch this — ld.so fails before main() runs, so
+      # the guard has to inspect the linked binary itself.
+      #
+      # Four assertions, because a naive "does not link GTK" check
+      # passes vacuously if the tray silently stops building at all:
+      #   1. default build links no GTK/AppIndicator
+      #   2. CGO_ENABLED=0 default build is fully static
+      #   3. -tags gui still COMPILES (it is otherwise only built on
+      #      tag push, so it would rot unnoticed until release day)
+      #   4. -tags gui actually DOES link AppIndicator, proving the
+      #      tag is still wired to the tray and (1) means something
+      - name: Verify Linux tray split (#295 regression gate)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          go build -o /tmp/nightme-default ./cmd/nightme
+          if ldd /tmp/nightme-default 2>&1 | grep -qiE 'ayatana|gtk-3'; then
+            echo "::error file=cmd/nightme/tray.go::default Linux build links GTK/AppIndicator — regression of #295"
+            ldd /tmp/nightme-default | grep -iE 'ayatana|gtk-3'
+            exit 1
+          fi
+          echo "ok: default build links no GTK/AppIndicator"
+
+          CGO_ENABLED=0 go build -o /tmp/nightme-static ./cmd/nightme
+          if ! file /tmp/nightme-static | grep -q 'statically linked'; then
+            echo "::error::CGO_ENABLED=0 build is not static; something re-introduced a CGo dependency"
+            file /tmp/nightme-static
+            exit 1
+          fi
+          echo "ok: CGO_ENABLED=0 build is fully static (this is the shipped artifact)"
+
+          go vet -tags gui ./cmd/...
+          go build -tags gui -o /tmp/nightme-gui ./cmd/nightme
+          if ! ldd /tmp/nightme-gui 2>&1 | grep -qiE 'ayatana'; then
+            echo "::error file=cmd/nightme/tray_gui.go::-tags gui build does NOT link AppIndicator; the gui tag no longer enables the tray"
+            exit 1
+          fi
+          echo "ok: -tags gui compiles and links AppIndicator"
 
       - name: Test (race + coverage)
         if: matrix.os == 'ubuntu-latest'
@@ -344,21 +395,14 @@ jobs:
         with:
           node-version: '22'
 
-      # Linux needs GTK3 + AppIndicator dev headers for the
-      # systray CGo dependency (the 'go build' step below
-      # links against -lgtk-3 / -layatana-appindicator3).
-      # Mirrors the same step in the 'test' job — both jobs
-      # run on ubuntu-latest and both build the nightme binary
-      # (which links the systray CGo dependency). macOS / Windows
-      # runners ship Cocoa / Win32 by default and need no
-      # extra install.
-      - name: Install systray build deps (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
-
+      # No GTK/AppIndicator install here, deliberately. This job only
+      # runs `make build`, which since #295 produces the tray-less
+      # default binary with no CGo dependency — so the dev headers
+      # would be pure runner-minute waste. Keeping the step would
+      # also re-assert the very misconception that caused #295
+      # ("building nightme on Linux needs GTK"), which is now false.
+      # The -gui variant is compiled and link-checked in the `test`
+      # job's "Verify Linux tray split" step, which does install them.
       - name: Build nightme
         shell: bash
         run: |

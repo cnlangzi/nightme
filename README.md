@@ -67,7 +67,10 @@ live simultaneously.
 
 ## Prerequisites
 
-- **macOS, Linux, or Windows** — NightMe ships as a single static Go binary; no runtime dependencies.
+- **macOS, Linux, or Windows** — NightMe ships as a single Go binary. The
+  default Linux build is fully static with no runtime dependencies; see
+  [Linux: tray-less by default](#linux-tray-less-by-default) if you want the
+  system-tray icon.
 - **A Feishu account** — currently the only supported IM. `nightme login feishu` registers your bot via QR scan.
 - **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, or DSH (DeepSeek Harness). Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
 
@@ -88,7 +91,8 @@ Three ways to get `nightme` on your machine:
    ```
 
    Drops the latest release into a stable location on your `$PATH`
-   and runs `nightme version` to verify.
+   and runs `nightme version` to verify. On Linux this installs the
+   tray-less build — see [below](#linux-tray-less-by-default).
 
 2. **Prebuilt binary** (manual):
 
@@ -105,6 +109,8 @@ Three ways to get `nightme` on your machine:
      chmod +x /usr/local/bin/nightme
      ```
      On Windows, unzip and place `nightme.exe` somewhere on your `PATH`.
+   - Linux also publishes a `-gui` archive per architecture — see
+     [below](#linux-tray-less-by-default).
 
 3. **From source** (for development or to pin a commit):
 
@@ -137,6 +143,49 @@ Three ways to get `nightme` on your machine:
    Quit) gracefully exits the daemon.
 
    config — no separate build step needed.
+
+### Linux: tray-less by default
+
+Linux publishes **two archives per architecture**:
+
+| Archive | Tray icon | Runtime dependencies |
+| --- | --- | --- |
+| `nightme_<version>_linux_<arch>.tar.gz` | no | none — fully static |
+| `nightme_<version>_linux_<arch>-gui.tar.gz` | yes | `libgtk-3-0`, `libayatana-appindicator3-1` |
+
+The default archive is the one `install.sh` fetches, and it is what you want on
+a server. It is a fully static binary that links nothing, so it runs on any
+Linux host regardless of distro, glibc version, or installed packages.
+
+The system-tray icon needs GTK3 and AppIndicator, which are libraries a
+headless server has no reason to carry. Shipping them as a hard requirement
+meant the binary could not start *at all* on a bare server — not even
+`nightme version` — because the dynamic loader refuses the process before any
+code runs:
+
+```
+nightme: error while loading shared libraries: libayatana-appindicator3.so.1:
+cannot open shared object file: No such file or directory
+```
+
+So the tray is opt-in on Linux. If you run NightMe on a desktop and want the
+icon, install the `-gui` archive over your existing one — the binary inside is
+also named `nightme`, so nothing else changes:
+
+```bash
+sudo apt install libgtk-3-0 libayatana-appindicator3-1   # Debian / Ubuntu
+tar -xzf nightme_<version>_linux_amd64-gui.tar.gz
+sudo mv nightme /usr/local/bin/nightme
+```
+
+Building from source follows the same split — `make build` gives you the
+tray-less binary, `make build-gui` gives you `bin/nightme-gui` (needs
+`libgtk-3-dev` and `libayatana-appindicator3-dev`).
+
+Nothing is lost by running tray-less: the daemon is controlled over its Unix
+socket, so `start` / `stop` / `restart` / `status` / `logs` and the REPL all
+behave identically. macOS and Windows are unaffected — their tray backings ship
+with the OS, so the tray is always built in.
 
 ---
 

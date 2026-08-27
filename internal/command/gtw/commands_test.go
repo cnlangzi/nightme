@@ -328,17 +328,27 @@ func TestFactory_Handle_UnknownSubcommandReleasesLock(t *testing.T) {
 	}
 }
 
-// TestParseNoArgs covers the zero-arity subcommands (/gtw close,
-// /gtw sync) hardened under issue #291. Before the gate they
-// silently swallowed anything after the subcommand — most
-// notably `/gtw close --force`, a flag the F-XX notes tell users
-// was removed, which then closed anyway with no signal.
-func TestParseNoArgs(t *testing.T) {
-	if err := parseNoArgs("/gtw close", nil); err != nil {
-		t.Fatalf("parseNoArgs(nil): %v", err)
+// TestGtwSubcommandNoArgs covers the zero-arity subcommands
+// (/gtw close, /gtw sync) hardened under issue #291. Before
+// the gate they silently swallowed anything after the
+// subcommand — most notably `/gtw close --force`, a flag the
+// F-XX notes tell users was removed, which then closed anyway
+// with no signal. The dispatch sites construct a CmdSpec
+// directly (no gtw-side helper), so the lexer contract is
+// pinned here using the same literal form.
+func TestGtwSubcommandNoArgs(t *testing.T) {
+	spec := command.CmdSpec{
+		Name:    "/gtw close",
+		Usage:   "/gtw close",
+		MinArgs: 0,
+		MaxArgs: 0,
 	}
-	if err := parseNoArgs("/gtw close", []string{}); err != nil {
-		t.Fatalf("parseNoArgs(empty): %v", err)
+
+	if _, err := command.ParseCmdArgs(nil, spec); err != nil {
+		t.Fatalf("ParseCmdArgs(nil): %v", err)
+	}
+	if _, err := command.ParseCmdArgs([]string{}, spec); err != nil {
+		t.Fatalf("ParseCmdArgs(empty): %v", err)
 	}
 
 	cases := []struct {
@@ -352,9 +362,9 @@ func TestParseNoArgs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := parseNoArgs("/gtw close", c.argv)
+			_, err := command.ParseCmdArgs(c.argv, spec)
 			if err == nil {
-				t.Fatalf("parseNoArgs(%q) = nil, want error", c.argv)
+				t.Fatalf("ParseCmdArgs(%q) = nil, want error", c.argv)
 			}
 			if !strings.Contains(err.Error(), c.wantText) {
 				t.Errorf("error lacks %q: %q", c.wantText, err)

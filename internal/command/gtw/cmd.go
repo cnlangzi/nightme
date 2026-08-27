@@ -616,7 +616,12 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 	// note explicitly tells users not to expect. Before this
 	// gate the token was silently swallowed and the close ran
 	// anyway, so the user got no signal that --force did nothing.
-	if err := parseNoArgs("/gtw close", input.Args[2:]); err != nil {
+	if _, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
+		Name:    "/gtw close",
+		Usage:   "/gtw close",
+		MinArgs: 0,
+		MaxArgs: 0,
+	}); err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -768,7 +773,12 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, cs *ch
 	// Issue #291: no flags, no positional args — reject the tail
 	// instead of silently ignoring it (`/gtw sync --rebase` used
 	// to look like it selected a strategy).
-	if err := parseNoArgs("/gtw sync", input.Args[2:]); err != nil {
+	if _, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
+		Name:    "/gtw sync",
+		Usage:   "/gtw sync",
+		MinArgs: 0,
+		MaxArgs: 0,
+	}); err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -873,26 +883,6 @@ func parsePushArgs(argv []string) (pushArgs, error) {
 // `cs.SelectedAgent()` / `yml.Commit.Agent` apply.
 type commitArgs struct {
 	Agent string
-}
-
-// parseNoArgs is the argv check for the /gtw subcommands that
-// take neither flags nor positional args (/gtw close, /gtw
-// sync). Routing them through the shared lexer (issue #291)
-// means a stray token is reported as "unknown flag" or
-// "unexpected positional argument" rather than being silently
-// swallowed — which is what `/gtw close --force` did before,
-// giving users of the removed F-XX flag no signal at all.
-//
-// name is the user-facing subcommand ("/gtw close") echoed in
-// error messages.
-func parseNoArgs(name string, argv []string) error {
-	_, err := command.ParseCmdArgs(argv, command.CmdSpec{
-		Name:    name,
-		Usage:   name,
-		MinArgs: 0,
-		MaxArgs: 0,
-	})
-	return err
 }
 
 // parseAgentOnlyFlag implements the CLI lexer for

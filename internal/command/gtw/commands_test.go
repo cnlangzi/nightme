@@ -323,14 +323,15 @@ func TestFactory_Handle_UnknownSubcommandReleasesLock(t *testing.T) {
 	}()
 
 	// Must complete quickly — no external lock held, no I/O.
+	// (If the prior worker's defer Unlock fired correctly, `done`
+	// closes well under 200ms. If it didn't, this select times
+	// out and the test fails with a clear "lock leaked" message.
+	// That's the only signal we need — no second sanity Lock/Unlock
+	// pair, which would just deadlock on a leak instead of failing
+	// fast with a useful message.)
 	select {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Handle did not complete within 200ms; lock likely leaked on the default case")
 	}
-
-	// Sanity: the lock is now unheld. A second worker calling
-	// Handle must proceed without blocking.
-	mu.Lock() // confirms prior Unlock happened
-	mu.Unlock()
 }

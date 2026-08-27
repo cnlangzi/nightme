@@ -298,7 +298,7 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	commonDir := pathutil.Clean(pathutil.Join(repoRoot, strings.TrimSpace(commonDirRaw)))
 	if gitDir != commonDir {
 		return "", "", fmt.Errorf(
-			"❌ %s is a linked worktree; default-branch refresh must run from the primary checkout. /cwd into the main repo first.",
+			"❌ %s is a linked worktree; default-branch refresh must run from the primary checkout. /cwd into the main repo first",
 			repoRoot)
 	}
 

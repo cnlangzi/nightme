@@ -29,7 +29,6 @@ import (
 // fake provider, and the HandlerDeps that wires them together.
 type fixRemoteRig struct {
 	repoRoot  string
-	wt        string
 	cs        *chatsession.ChatSession
 	slot      *memSlot
 	drafts    *memDrafts

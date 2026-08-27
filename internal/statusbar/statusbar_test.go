@@ -265,15 +265,81 @@ func TestStatusBarLines_GitStatusLine_OmitAll(t *testing.T) {
 	}
 }
 
-func TestStatusBarLines_GitStatusLine_NoSnapshot(t *testing.T) {
-	// gs.Workspace set but Snapshot nil → no Line 3 (non-git
-	// workspace, matching the legacy "GitStatus == nil → entire
-	// line omitted" contract).
+func TestStatusBarLines_GitStatusLine_NonGitWorkspace(t *testing.T) {
+	// Workspace is set but Snapshot is nil (cwd not in a git
+	// repo, git unavailable, or CollectGit hit the 3s cap).
+	// The footer must STILL render Line 3 — just the bare
+	// workspace, no marker — so the user can always see where
+	// the agent is running even outside a repo.
 	gs := &messages.GitStatus{Workspace: "code/nightme", Snapshot: nil}
+	got := StatusBarLines(outWith("claude", "opus-4-5", "", nil, gs))
+	want := []string{
+		"🤖: claude · opus-4-5",
+		"📁: " + filepath.FromSlash("code/nightme"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("StatusBarLines() = %v, want %v", got, want)
+	}
+}
+
+func TestStatusBarLines_GitStatusLine_NonGitWorkspace_WithPR(t *testing.T) {
+	// Even when PullRequest is populated (caller pre-cached it
+	// from a previous workspace), a non-git Snapshot means we
+	// must NOT fold in the PR tail — PR without a real git
+	// workspace is a stale cache state we don't surface on its
+	// own row. The bare workspace stands alone.
+	gs := &messages.GitStatus{
+		Workspace:   "code/nightme",
+		Snapshot:    nil,
+		PullRequest: &messages.PR{Number: 42, URL: "https://x"},
+	}
+	got := StatusBarLines(outWith("claude", "opus-4-5", "", nil, gs))
+	want := []string{
+		"🤖: claude · opus-4-5",
+		"📁: " + filepath.FromSlash("code/nightme"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("StatusBarLines() = %v, want %v", got, want)
+	}
+}
+
+func TestStatusBarLines_GitStatusLine_EmptyWorkspace(t *testing.T) {
+	// Workspace == "" with a populated Snapshot still drops
+	// Line 3 — there's nothing meaningful to render, and a PR
+	// without a workspace is stale cache we don't surface.
+	gs := &messages.GitStatus{
+		Workspace: "",
+		Snapshot:  &messages.GitStatusSnapshot{Branch: "main"},
+	}
 	got := StatusBarLines(outWith("claude", "opus-4-5", "", nil, gs))
 	for _, line := range got {
 		if strings.HasPrefix(line, "📁:") {
-			t.Errorf("unexpected Line 3 with no Snapshot: %q", line)
+			t.Errorf("unexpected Line 3 with empty Workspace: %q", line)
+		}
+	}
+}
+
+func TestStatusBarLines_GitStatusLine_DotWorkspace(t *testing.T) {
+	// Workspace == "." — formatWorkspacePath returns "" for "."
+	// (the literal current dir), so Line 3 must drop even when
+	// Snapshot is nil (no "📁: . · (no git)" line would be useful).
+	gs := &messages.GitStatus{Workspace: ".", Snapshot: nil}
+	got := StatusBarLines(outWith("claude", "opus-4-5", "", nil, gs))
+	for _, line := range got {
+		if strings.HasPrefix(line, "📁:") {
+			t.Errorf("unexpected Line 3 with dot Workspace: %q", line)
+		}
+	}
+}
+
+func TestStatusBarLines_GitStatusLine_RootPathWorkspace(t *testing.T) {
+	// Workspace == "/" (no components to display after Clean)
+	// — Line 3 must drop. Same defensive rule as ".".
+	gs := &messages.GitStatus{Workspace: "/", Snapshot: nil}
+	got := StatusBarLines(outWith("claude", "opus-4-5", "", nil, gs))
+	for _, line := range got {
+		if strings.HasPrefix(line, "📁:") {
+			t.Errorf("unexpected Line 3 with root Workspace: %q", line)
 		}
 	}
 }

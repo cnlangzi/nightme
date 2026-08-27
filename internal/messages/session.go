@@ -20,9 +20,14 @@ import (
 // deps.LookupPR against prcache.Cache (the only persistent
 // layer; PR caching stays in prcache because gh/glab API
 // round-trips are expensive). The runtime doesn't recompute;
-// the chatsession is the single owner. nil / empty when the
-// chat has no workspace or no AgentSession yet — Channel
-// adapters treat nil as "no workspace line".
+// the chatsession is the single owner.
+//
+// Channel adapter rendering (statusbar.StatusBarLines):
+//
+//	gs == nil                          → Line 3 dropped entirely
+//	gs.Workspace == ""                 → Line 3 dropped entirely
+//	gs.Snapshot == nil (non-git cwd)   → "📁: <ws>"
+//	gs.Snapshot != nil                 → full git line per formatGitLine
 type GitStatus struct {
 	Workspace   string
 	Snapshot    *GitStatusSnapshot

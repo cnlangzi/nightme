@@ -102,6 +102,17 @@ type Spec struct {
 // the dispatcher-level rejection pattern (don't be lenient
 // with user input — better to error and have the user retry).
 //
+// Issue #291: /review was the early adopter of the strict
+// pattern that command.ParseCmdArgs now implements for the whole
+// /<cmd> surface, and it already satisfies the contract. It
+// keeps its own two-line lexer rather than delegating, for one
+// reason: its "unknown arg %q" wording is deliberately
+// token-echoing and covers non-ASCII lookalikes too (an em-dash
+// "—agent" is not flag-shaped, so a generic lexer would report
+// it as a positional). Behaviour is equivalent; only the
+// phrasing differs. Any NEW flag on /review should prompt a
+// switch to ParseCmdArgs.
+//
 // Side-effect-free; takes only argv (slice of strings after
 // the command name itself).
 func parseReviewArgs(argv []string) (Spec, error) {

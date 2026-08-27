@@ -140,8 +140,9 @@ func TestFactory_Handle_FullWidthPath_Normalised(t *testing.T) {
 
 // TestFactory_Handle_TooManyArgs_Rejected covers the
 // multi-argument rejection. "/cwd foo bar" should fail
-// with a clear "Too many arguments" message instead of
-// silently using only "foo".
+// with a clear "too many arguments" message instead of
+// silently using only "foo". Wording comes from the shared
+// command.ParseCmdArgs lexer (issue #291).
 func TestFactory_Handle_TooManyArgs_Rejected(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory()
@@ -152,8 +153,11 @@ func TestFactory_Handle_TooManyArgs_Rejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if !strings.Contains(out.Reply, "Too many arguments") {
-		t.Fatalf("expected 'Too many arguments' in reply, got: %q", out.Reply)
+	if !strings.Contains(out.Reply, "too many arguments") {
+		t.Fatalf("expected 'too many arguments' in reply, got: %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "Usage: /cwd") {
+		t.Fatalf("expected usage hint in reply, got: %q", out.Reply)
 	}
 }
 
@@ -208,5 +212,55 @@ func TestExpandTilde(t *testing.T) {
 				t.Fatalf("expandTilde(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		}
+	}
+}
+
+// TestFactory_Handle_UnknownFlag_Rejected pins the option/arg
+// split issue #291 asked for on /cwd. /cwd declares no flags, so
+// a flag-shaped token is reported as an unknown flag rather than
+// being resolved as a relative path under $HOME (pre-#291
+// `/cwd --typo` produced a confusing "Path does not exist:
+// $HOME/--typo").
+func TestFactory_Handle_UnknownFlag_Rejected(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := NewFactory()
+	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "--force"}}
+
+	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(out.Reply, "unknown flag") {
+		t.Fatalf("expected 'unknown flag' in reply, got: %q", out.Reply)
+	}
+	if cs.SelectedCwd() != "" {
+		t.Fatalf("SelectedCwd = %q, want unchanged after a parse error", cs.SelectedCwd())
+	}
+}
+
+// TestFactory_Handle_DashPathViaTerminator covers the payoff of
+// the option/arg split: a directory whose name starts with "-"
+// is reachable through the conventional `--` end-of-flags
+// marker.
+func TestFactory_Handle_DashPathViaTerminator(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := NewFactory()
+	dir := filepath.Join(t.TempDir(), "-dashdir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "--", dir}}
+	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, mgr, cs, input)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(out.Reply, "Workspace set to") {
+		t.Fatalf("expected workspace set, got: %q", out.Reply)
+	}
+	if cs.SelectedCwd() != dir {
+		t.Fatalf("SelectedCwd = %q, want %q", cs.SelectedCwd(), dir)
 	}
 }

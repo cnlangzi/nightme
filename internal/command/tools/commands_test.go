@@ -74,3 +74,45 @@ func TestFactory_Handle_UnknownMode_RepliesUsage(t *testing.T) {
 		t.Fatalf("Reply missing usage hint: %q", out.Reply)
 	}
 }
+// TestFactory_Handle_UnknownFlag_Rejected pins the issue #291
+// CLI contract on /tools: an undeclared flag is a hard error,
+// not a silent no-op that toggles the mode anyway.
+func TestFactory_Handle_UnknownFlag_Rejected(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "test")
+	before := cs.ToolsMode()
+
+	input := command.SlashInput{ChatID: "c1", Args: []string{"tools", "-v", "on"}}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, input)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(out.Reply, "unknown flag") {
+		t.Fatalf("Reply missing 'unknown flag': %q", out.Reply)
+	}
+	if cs.ToolsMode() != before {
+		t.Fatalf("tools mode changed to %v despite parse error", cs.ToolsMode())
+	}
+}
+
+// TestFactory_Handle_ExtraArgs_Rejected pins the arity check:
+// `/tools on off` used to silently drop "off" and apply "on".
+func TestFactory_Handle_ExtraArgs_Rejected(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "test")
+	before := cs.ToolsMode()
+
+	input := command.SlashInput{ChatID: "c1", Args: []string{"tools", "on", "off"}}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, input)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(out.Reply, "too many arguments") {
+		t.Fatalf("Reply missing 'too many arguments': %q", out.Reply)
+	}
+	if cs.ToolsMode() != before {
+		t.Fatalf("tools mode changed to %v despite parse error", cs.ToolsMode())
+	}
+}

@@ -48,21 +48,40 @@ func (f *Factory) Spec() command.Spec {
 	}
 }
 
+// toolsSpec declares /tools' argv grammar for the shared lexer
+// (issue #291): no flags, at most one positional mode token.
+// Bare `/tools` reports the current mode, so MinArgs stays 0.
+//
+// If /tools ever grows a flag, declare it here — the lexer
+// already rejects every undeclared flag, so a typo can never
+// silently fall through to ParseToolsMode.
+var toolsSpec = command.CmdSpec{
+	Name:    "/tools",
+	Usage:   "/tools on | /tools off",
+	MinArgs: 0,
+	MaxArgs: 1,
+}
+
 // Handle implements command.SlashCommandFactory.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-if len(input.Args) < 2 {
+	args, err := command.ParseCmdArgs(input.Args[1:], toolsSpec)
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
+	}
+
+	if args.NArgs() == 0 {
 		return command.Reply(ctx, rt, fmt.Sprintf(
 			"Current tools mode: %s\nUsage: /tools on | /tools off",
 			cs.ToolsMode(),
 		)), nil
 	}
 
-	mode, ok := chatsession.ParseToolsMode(strings.TrimSpace(input.Args[1]))
+	mode, ok := chatsession.ParseToolsMode(strings.TrimSpace(args.Arg(0)))
 	if !ok {
 		return command.Reply(ctx, rt, fmt.Sprintf(
 			"Unknown tools mode %q. Usage: /tools on | /tools off",
-			input.Args[1],
+			args.Arg(0),
 		)), nil
 	}
 

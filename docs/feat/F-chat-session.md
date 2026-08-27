@@ -514,20 +514,30 @@ user simply opens a fresh chat.
 ## 2. Command syntax
 
 ```
-/use <agent_name> [args...]
+/use <agent_name>
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `agent_name` | yes | One of: `claude`, `codex`, `opencode`, or any registered custom agent |
-| `args...` | no | Forwarded to AgentSession on first spawn (e.g., `--model opus`) |
 
 **Examples**:
 ```
 /use claude                  # Switch to claude at selectedCwd (reuse or spawn)
-/use codex --auto-approve    # Switch to codex with custom args (spawn only)
 /use claude                  # Switch back; if (claude, /code/bailing) exists, reuse
 ```
+
+> **Historical note (issue #291)**. Earlier revisions of this spec
+> advertised `/use <agent> [args...]` with the tail "forwarded to
+> AgentSession on first spawn (e.g., `--model opus`)". That path
+> was never wired up — `SetSelectedAgent` takes only the name,
+> and `Args[2:]` was silently dropped by the original handler.
+> The current handler enforces arity 1 via
+> `command.ParseCmdArgs` (issue #291, `internal/command/args.go`),
+> so `/use codex --auto-approve` now errors as `unknown flag
+> "--auto-approve"`. If per-spawn flags are ever really wanted,
+> declare them in the `useSpec` map — do NOT re-introduce the
+> "anything goes after the agent name" behaviour.
 
 ---
 
@@ -536,73 +546,49 @@ user simply opens a fresh chat.
 ### 3.1 Pseudocode
 
 ```go
-// internal/gateway/handlers/use.go
+// internal/command/use/cmd.go
 
-func (g *Gateway) handleUse(ctx context.Context, msg InboundMessage, args []string) error {
-    if len(args) < 1 {
-        return g.channel.Send(ctx, OutboundMessage{
-            ChatID: msg.ChatID,
-            Text:   "Usage: /use <agent> [args...]",
-        })
+func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
+    mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+
+    // Issue #291: shared CLI lexer — arity 1, no flags. Any extra
+    // positional is "too many arguments"; any flag-shaped token is
+    // "unknown flag" (no silent no-op).
+    args, err := command.ParseCmdArgs(input.Args[1:], useSpec)
+    if err != nil {
+        return command.Reply(ctx, rt, "❌ "+err.Error()), nil
     }
 
-    cs, ok := g.bindings[msg.ChatID]
-    if !ok {
-        return g.channel.Send(ctx, OutboundMessage{
-            ChatID: msg.ChatID,
-            Text:   "No chat session yet. Send /cwd <path> first to bind this chat to a workspace.",
-        })
+    agentName := strings.TrimSpace(args.Arg(0))
+    if agentName == "" {
+        return command.Reply(ctx, rt, "Usage: /use <agent>"), nil
     }
 
-    agentName := args[0]
-    extraArgs := args[1:]
-
-    // Validate agent is registered
-    if g.agents.Get(agentName) == nil {
-        return g.channel.Send(ctx, OutboundMessage{
-            ChatID: msg.ChatID,
-            Text:   fmt.Sprintf("Unknown agent: %s. Run /agents to see available agents.", agentName),
-        })
+    if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+        return failOut, nil
     }
 
-    // Check ChatSession has selectedCwd (required for /use)
-    if cs.SelectedCwd == "" {
-        return g.channel.Send(ctx, OutboundMessage{
-            ChatID: msg.ChatID,
-            Text:   "No active workspace. Send /cwd <path> first.",
-        })
-    }
-
-    // Pre-update selectedAgent (pure state mutation, no spawn)
     if err := cs.SetSelectedAgent(agentName); err != nil {
-        return err
+        return command.Reply(ctx, rt, fmt.Sprintf("SetSelectedAgent failed: %v", err)), nil
     }
 
-    // Lazy lookup (may spawn or reuse)
     as, err := cs.LookupSelectedAgentSession()
     if err != nil {
-        return g.channel.Send(ctx, OutboundMessage{
-            ChatID: msg.ChatID,
-            Text:   fmt.Sprintf("Failed to activate agent: %v", err),
-        })
+        return command.Reply(ctx, rt, fmt.Sprintf("Failed to activate agent: %v", err)), nil
     }
-
-    // Apply extraArgs on first spawn only (idempotent for existing sessions)
-    if as.IsFirstSpawn() && len(extraArgs) > 0 {
-        as.SetArgs(extraArgs)
-    }
-
-    // Persist
-    g.registry.UpsertChatSession(cs.Entry())
-    g.registry.UpsertAgentSessions(cs.PoolEntries()...)
 
     // Reply with state confirmation
-    return g.channel.Send(ctx, OutboundMessage{
-        ChatID: msg.ChatID,
-        Text:   fmt.Sprintf("Now using %s, pid=%d, cwd=%s", as.Agent(), as.Pid(), as.Cwd()),
-    })
+    return &command.SlashOutput{ /* …, AgentName/Model/SessionID for StatusBar … */ }
 }
 ```
+
+> **What was removed vs the historical spec**. The old handler
+> kept `extraArgs := args[1:]` and applied them on first spawn
+> via `as.SetArgs(extraArgs)`. That path never reached production
+> (no command path called `SetArgs`); `AgentSession.args` is still
+> the empty slice in `internal/agent/agent_session.go`. Per-spawn
+> flags must be added through `useSpec.Flags` so they show up in
+> the strict parser — see issue #291.
 
 ### 3.2 LookupSelectedAgentSession (delegated to ChatSession)
 
@@ -773,15 +759,14 @@ T4: Both reach ChatSession; serialized via poolMu
 
 ## 8. CLI subcommand equivalent
 
-For consistency with `nightme list`, add `nightme use <chatId> <agent>` admin command:
-
-```bash
-# Force /use for a specific chat (admin/debug)
-nightme use oc_xxx claude
-nightme use oc_xxx codex --auto-approve
-```
-
-This is a thin wrapper around `Gateway.handleUse` with explicit `chatId` instead of inbound message routing.
+> **Not implemented.** This section proposed `nightme use
+> <chatId> <agent>` for parity with `nightme list` (which exists
+> at `cmd/nightme/list.go`), but the command never shipped — the
+> example below also relied on the `args...` forwarding that
+> issue #291 documented as never wired up. If an admin override
+> is ever wanted, add it via `cmd/nightme/` next to `list.go`
+> and have it route through the same `command.ParseCmdArgs`
+> contract; do NOT carry the `extraArgs` framing forward.
 
 ---
 
@@ -790,14 +775,14 @@ This is a thin wrapper around `Gateway.handleUse` with explicit `chatId` instead
 - **Auto-switch** (detect language of message → switch agent) — explicit only
 - **Multi-agent per message** (route one message to multiple agents) — 
 - **Agent capability negotiation** (only allow /use codex if codex supports cwd) — not needed, agents handle own validity
-- **/use with prompt override** — extraArgs passed to spawn only, not applied to existing sessions
+- **/use with prompt override** — removed; /use enforces arity 1 (issue #291) so per-spawn flags would have to be declared in `useSpec.Flags`, not passed as a free tail.
 
 ---
 
 ## 10. Open questions (draft)
 
 - **Q-F**: Should `/use` without selectedCwd auto-default to a workspace (e.g., `~/.openclaw/workspace`)? (Lean: no, require explicit `/cwd`)
-- **Q-G**: When extraArgs provided but AgentSession already exists, silently drop or warn? (Lean: warn in reply "args ignored, agent already running")
+- **Q-G**: Removed — issue #291 hardens `/use` to arity 1, so the "extra args, existing session" case no longer reaches the handler.
 - **Q-H**: /use reply format — single line vs multi-line status (pid, cwd, agent, uptime)? (Lean: multi-line for diagnostic clarity)
 - **Q-I**: Should `/use` support a keyword to reset selectedAgent to primaryAgent? (Lean: no — Q-A simplified to global Primary only; per-chat Primary not exposed via command)
 
@@ -1229,7 +1214,7 @@ oc_bbb        /code/nightme        *         claude       22222  running
 ## 11. Open questions (draft)
 
 - **Q-J**: When pool has (claude, /A) status=Exited, and user sends /use claude without /cwd — does lookup reuse the exited entry (respawn) or treat as new? (Lean: respawn; same identity)
-- **Q-K**: When user sends /use claude with cwd-change-via-extraArgs (e.g., `--cd /other`), should that affect pool key? (Lean: no, extraArgs are spawn args only; cwd is ChatSession.SelectedCwd)
+- **Q-K**: Removed — issue #291 made `/use claude --cd /other` a hard error (`unknown flag`); cwd-change via `/use` is unreachable. Use `/cwd` to change workspace.
 - **Q-L**: Should /list show pool or only active? (Lean: show pool, with `*` marker for active)
 - **Q-M**: When two ChatSessions (different chats) both have (claude, /A), are PIDs guaranteed different? (Lean: yes, each ChatSession manages its own pool, spawn is per-pool)
 

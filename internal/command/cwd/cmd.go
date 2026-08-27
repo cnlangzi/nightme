@@ -40,9 +40,37 @@ func NewFactory() *Factory {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:    "cwd",
-		Summary: "Set workspace for this chat: /cwd <absolute-path>",
-		Usage:   "/cwd <absolute-path>",
+		Summary: "Set workspace for this chat: /cwd <path>  (absolute, ~/..., or $HOME-relative)",
+		Usage:   "/cwd <path>",
 	}
+}
+
+// cwdSpec declares /cwd's argv grammar for the shared lexer
+// (issue #291): no flags, exactly one positional path.
+//
+// Commander.extractCommand splits the message body on
+// whitespace via strings.Fields, so "/cwd /foo bar" arrives as
+// three Args. /cwd takes exactly one path, so anything beyond
+// Args[1] is either a typo or the user forgot to quote a path
+// containing spaces — better to surface the mistake than
+// silently use only the first token.
+//
+// The path itself can be absolute, ~-prefixed, or bare
+// relative (resolved against $HOME — see Handle's step 2). The
+// Usage string deliberately says "<path>" rather than
+// "<absolute-path>": an earlier "<absolute-path>" wording was
+// wrong (the handler accepts all three forms).
+//
+// The option/arg split matters even with zero flags today: a
+// path that legitimately starts with "-" is reachable via the
+// conventional terminator (`/cwd -- -weird-dir`), and if /cwd
+// ever grows a real flag it goes in Flags here rather than
+// re-introducing the "silently swallowed token" bug class.
+var cwdSpec = command.CmdSpec{
+	Name:    "/cwd",
+	Usage:   "/cwd <path>",
+	MinArgs: 1,
+	MaxArgs: 1,
 }
 
 // Handle implements command.SlashCommandFactory.
@@ -50,6 +78,8 @@ func (f *Factory) Spec() command.Spec {
 // Semantics:
 //
 //	/cwd (no arg)         → reply "Usage: /cwd <path>"
+//	/cwd /a /b            → reply "too many arguments"
+//	/cwd --typo           → reply "unknown flag"
 //	/cwd /nonexistent     → reply "Path does not exist: ..."
 //	/cwd ~                → $HOME (absolute)
 //	/cwd ~/foo            → $HOME/foo
@@ -69,23 +99,12 @@ func (f *Factory) Spec() command.Spec {
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	if len(input.Args) < 2 {
-		return command.Reply(ctx, rt, "Usage: /cwd <path>"), nil
-	}
-	// Reject multi-argument input. Commander.extractCommand
-	// splits the message body on whitespace via strings.Fields,
-	// so "/cwd /foo bar" arrives as three Args. /cwd takes
-	// exactly one path, so anything beyond Args[1] is either
-	// a typo or the user forgot to quote a path containing
-	// spaces. Better to surface the mistake than silently use
-	// only the first token.
-	if len(input.Args) > 2 {
-		return command.Reply(ctx, rt, fmt.Sprintf(
-			"Too many arguments: /cwd takes a single path (got %d)",
-			len(input.Args)-1)), nil
+	parsed, err := command.ParseCmdArgs(input.Args[1:], cwdSpec)
+	if err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
-	raw := strings.TrimSpace(input.Args[1])
+	raw := strings.TrimSpace(parsed.Arg(0))
 	if raw == "" {
 		return command.Reply(ctx, rt, "Usage: /cwd <path>"), nil
 	}

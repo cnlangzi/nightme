@@ -74,3 +74,48 @@ func TestFactory_Handle_UnknownMode_RepliesUsage(t *testing.T) {
 		t.Fatalf("Reply missing usage hint: %q", out.Reply)
 	}
 }
+// TestFactory_Handle_UnknownFlag_Rejected pins the issue #291
+// CLI contract on /think: an undeclared flag is a hard error,
+// not a silent no-op that toggles the mode anyway.
+func TestFactory_Handle_UnknownFlag_Rejected(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "test")
+	before := cs.ThinkMode()
+
+	input := command.SlashInput{ChatID: "c1", Args: []string{"think", "--quiet", "on"}}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, input)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(out.Reply, "unknown flag") {
+		t.Fatalf("Reply missing 'unknown flag': %q", out.Reply)
+	}
+	if cs.ThinkMode() != before {
+		t.Fatalf("think mode changed to %v despite parse error", cs.ThinkMode())
+	}
+}
+
+// TestFactory_Handle_ExtraArgs_Rejected pins the arity check:
+// `/think on off` used to silently drop "off" and apply "on".
+func TestFactory_Handle_ExtraArgs_Rejected(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "test")
+	before := cs.ThinkMode()
+
+	input := command.SlashInput{ChatID: "c1", Args: []string{"think", "on", "off"}}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, input)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(out.Reply, "too many arguments") {
+		t.Fatalf("Reply missing 'too many arguments': %q", out.Reply)
+	}
+	if !strings.Contains(out.Reply, "Usage: /think") {
+		t.Fatalf("Reply missing usage hint: %q", out.Reply)
+	}
+	if cs.ThinkMode() != before {
+		t.Fatalf("think mode changed to %v despite parse error", cs.ThinkMode())
+	}
+}

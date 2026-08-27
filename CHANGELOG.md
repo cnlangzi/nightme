@@ -11,6 +11,67 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Breaking: strict CLI argument parsing on every `/<cmd>` (issue #291)
+
+The two-phase argv lexer F-XX introduced for `/gtw fix`
+(`parseFixArgs`) is now the contract for the whole slash-command
+surface, implemented once in `command.ParseCmdArgs`
+(`internal/command/args.go`) and shared by every command:
+
+1. A token is a flag when it starts with `-` and is not the
+   literal `-`; everything else is positional.
+2. Recognised flags are declared explicitly per command. Any
+   other flag is rejected with `unknown flag "..."` plus the
+   recognised set — **no silent no-op**.
+3. Value-taking flags consume the next token as their value
+   (even a flag-shaped one); a missing value is a hard error.
+4. Boolean flags are positional-independent and idempotent.
+5. Positional arity is enforced; extra args are rejected, not
+   silently dropped. The conventional `--` terminator makes
+   values that start with `-` reachable.
+
+Commands that previously swallowed unknown flags or extra
+positional args now reject them:
+
+| Command | Was | Now |
+|---|---|---|
+| `/use <agent>` | `Args[2:]` dropped | `too many arguments` / `unknown flag` |
+| `/new [<agent>]` | `Args[2:]` dropped | `too many arguments` |
+| `/close [<agent>]` | `Args[2:]` dropped | `too many arguments` |
+| `/tools on\|off` | `Args[2:]` dropped | `too many arguments` |
+| `/think on\|off` | `Args[2:]` dropped | `too many arguments` |
+| `/watch on\|off` | `Args[2:]` dropped | `too many arguments` |
+| `/stop` | any tail → `Usage: /stop` | flag vs positional distinguished |
+| `/cwd <path>` | arity only | arity + option/arg split |
+| `/gtw close`, `/gtw sync` | tail ignored | tail rejected |
+
+Concretely: `/gtw close --force` (a flag removed in F-XX) and
+`/gtw sync --rebase` no longer run silently — they report the
+unknown flag. `/use codex --auto-approve` used to look like it
+forwarded a spawn flag; nothing ever forwarded it, so `/use`
+now takes exactly one argument and its Usage string drops the
+never-implemented `[args...]`.
+
+`/gtw commit` / `push` / `pr` already rejected unknown tokens
+via `parseAgentOnlyFlag`; that helper now delegates to the
+shared lexer so the wording is identical everywhere.
+
+Heads-up for group chats: only *leading* @-mentions are
+stripped before dispatch (`feishu/mention.go`
+`stripMentionPrefix`), so a trailing mention —
+`/use claude @bot` — now lands as an extra positional arg and
+is rejected instead of ignored. The reply names the offending
+token, so the fix is to drop the trailing mention (or put it
+first, which is stripped as before).
+
+Deliberate exemptions, documented at each site: `/steer` and
+`/queue` take a free-form prose body (a leading `-` is data,
+not a flag), `/review` keeps its own equivalent strict parser
+(token-echoing wording that also catches non-ASCII lookalikes),
+and `parseFixArgs` stays the reference implementation — issue
+#291 explicitly leaves it out of scope because its Plan/Execute
+dispatch is `/gtw fix`-specific.
+
 ### Breaking: `/gtw fix` removes `--force` / `-f` flag
 
 F-XX (`docs/feat/F-gtw-fix.md`): the `/gtw fix --force`

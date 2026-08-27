@@ -66,7 +66,9 @@
 
 ## Prerequisites
 
-- **macOS、Linux 或 Windows** — NightMe 是单文件静态 Go 二进制；无运行时依赖。
+- **macOS、Linux 或 Windows** — NightMe 是单文件 Go 二进制。Linux 默认版本是
+  完全静态、无运行时依赖的；如果需要系统栏图标见
+  [Linux：默认不带系统栏图标](#linux默认不带系统栏图标)。
 - **一个 Feishu 账号** — 目前唯一支持的 IM。`nightme login feishu` 通过扫码完成 bot 注册。
 - **至少一个本地 AI Coding Agent** — Claude Code、Pi、OpenCode、Codex、DeepSeek Harness (DSH) 任一。装好 CLI 放到 `$PATH` 上，NightMe 会作为子进程拉起。
 
@@ -87,7 +89,8 @@
    ```
 
    会把最新版 release 装到 `$PATH` 上的稳定路径，并跑 `nightme version`
-   验证。
+   验证。Linux 上装的是不带系统栏图标的版本，见
+   [下文](#linux默认不带系统栏图标)。
 
 2. **预编译二进制**（手动）：
 
@@ -103,6 +106,8 @@
      chmod +x /usr/local/bin/nightme
      ```
      Windows 上解压后把 `nightme.exe` 放到 `PATH` 上的某个目录即可。
+   - Linux 每个架构还额外发一个 `-gui` 包，见
+     [下文](#linux默认不带系统栏图标)。
 
 3. **从源码**（开发或钉死一个 commit）：
 
@@ -113,6 +118,43 @@
    ```
 
    `make dev` 直接从源码跑 nightme，配置文件用 example config，无需单独构建。
+
+### Linux：默认不带系统栏图标
+
+Linux 每个架构发**两个包**：
+
+| 压缩包 | 系统栏图标 | 运行时依赖 |
+| --- | --- | --- |
+| `nightme_<version>_linux_<arch>.tar.gz` | 无 | 无 —— 完全静态 |
+| `nightme_<version>_linux_<arch>-gui.tar.gz` | 有 | `libgtk-3-0`、`libayatana-appindicator3-1` |
+
+默认包就是 `install.sh` 下载的那个，也是服务器上你想要的那个：完全静态、不链接
+任何动态库，任何发行版、任何 glibc 版本、不装任何包都能跑。
+
+系统栏图标需要 GTK3 和 AppIndicator，而这是无头服务器没有理由安装的库。把它们
+作为硬依赖的后果是：在纯服务器上二进制**根本起不来** —— 连 `nightme version`
+都不行，因为动态链接器在任何代码执行之前就拒绝了这个进程：
+
+```
+nightme: error while loading shared libraries: libayatana-appindicator3.so.1:
+cannot open shared object file: No such file or directory
+```
+
+所以 Linux 上系统栏图标改成可选。如果你在桌面环境跑 NightMe 并且想要图标，直接
+用 `-gui` 包覆盖现有的即可 —— 包里的二进制同样叫 `nightme`，其他什么都不用改：
+
+```bash
+sudo apt install libgtk-3-0 libayatana-appindicator3-1   # Debian / Ubuntu
+tar -xzf nightme_<version>_linux_amd64-gui.tar.gz
+sudo mv nightme /usr/local/bin/nightme
+```
+
+从源码构建也是同样的区分：`make build` 出不带图标的版本，`make build-gui` 出
+`bin/nightme-gui`（需要 `libgtk-3-dev` 和 `libayatana-appindicator3-dev`）。
+
+不带图标不会少任何功能：daemon 是通过 Unix socket 控制的，所以 `start` /
+`stop` / `restart` / `status` / `logs` 和 REPL 行为完全一致。macOS 和 Windows
+不受影响 —— 它们的系统栏后端随 OS 自带，图标一直是编进去的。
 
 ---
 

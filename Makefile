@@ -49,11 +49,15 @@ APP_PLIST  := scripts/$(APP_NAME)/Info.plist
 APP_ICON   := cmd/nightme/assets/trayTemplate.icns
 
 # Cross-compile knobs. Defaults track the host so `make build`
-# on a developer laptop produces a native binary. nightme does
-# NOT support cross-compile in CI: each hosted runner builds +
-# vets on its own native OS (see .github/workflows/{ci,release}.yml).
-# The systray dependency is CGo (Cocoa / GTK3+AppIndicator /
-# Win32) and the cross-compile toolchain is not configured here.
+# on a developer laptop produces a native binary.
+#
+# The DEFAULT Linux build has no CGo dependency at all (the tray
+# is behind -tags gui; see GO_TAGS below), so
+# `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 make build` cross-compiles
+# cleanly. Every OTHER configuration is CGo — macOS (Cocoa),
+# Windows (Win32) and `-tags gui` Linux (GTK3+AppIndicator) — and
+# no cross toolchain is configured here, so CI builds those on
+# their own native runner (see .github/workflows/{ci,release}.yml).
 GOOS          ?= $(shell go env GOOS)
 GOARCH        ?= $(shell go env GOARCH)
 # EXT is .exe on Windows, empty elsewhere. Applied uniformly to
@@ -66,6 +70,23 @@ BIN_DIR       ?= dist
 BIN_NAME      ?= nightme
 BINARY        ?= bin/$(BIN_NAME)$(EXT)
 RELEASE_BIN   := $(BIN_DIR)/$(BIN_NAME)-$(GOOS)-$(GOARCH)$(EXT)
+
+# Go build tags. Currently only `gui` is meaningful: it opts the
+# Linux build in to the system-tray implementation (cmd/nightme/
+# tray_gui.go). Leaving it empty on Linux selects the no-op stub
+# in cmd/nightme/tray_stub.go, which is what we want by default —
+# see the header comment in cmd/nightme/tray.go for the full
+# reasoning, but in short:
+#
+#   getlantern/systray links libayatana-appindicator3.so.1 +
+#   libgtk-3.so.0, and a Linux host without the GTK3 runtime
+#   cannot exec the binary at all (ld.so refuses before main()).
+#   Linux boxes are mostly servers, so tray-off is the safe
+#   default and `make build-gui` is the opt-in.
+#
+# macOS and Windows ignore this knob — their tray backings (Cocoa /
+# Win32) ship with the OS, so tray_gui.go is unconditional there.
+GO_TAGS       ?=
 
 .PHONY: help
 help: ## Show this help.
@@ -132,12 +153,34 @@ endif
 .PHONY: build
 build: winres ## Compile binary to bin/nightme[.exe] with version metadata.
 	@mkdir -p bin
-	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/nightme
+	$(GO) build -tags '$(GO_TAGS)' -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/nightme
+
+# build-gui produces the Linux tray-enabled variant alongside the
+# default tray-less one. Requires libgtk-3-dev +
+# libayatana-appindicator3-dev at build time and libgtk-3-0 +
+# libayatana-appindicator3-1 at run time.
+#
+# BIN_NAME is overridden rather than BINARY so $(EXT) still
+# applies; the release pipeline packages this as
+# nightme_<v>_linux_<arch>-gui.tar.gz with the binary renamed back
+# to plain `nightme` so users can drop it straight over the
+# default install.
+#
+# No-op off Linux: macOS and Windows already build the tray into
+# the default binary, so a separate GUI variant would be identical
+# to `make build`.
+.PHONY: build-gui
+build-gui: ## Compile the Linux tray-enabled binary to bin/nightme-gui (Linux only).
+ifneq ($(GOOS),linux)
+	@echo "[build-gui] GOOS=$(GOOS): tray is already in the default binary; skipping"
+else
+	@$(MAKE) build GO_TAGS=gui BIN_NAME=$(BIN_NAME)-gui
+endif
 
 .PHONY: release
 release: winres ## Build a versioned binary into dist/nightme-<GOOS>-<GOARCH>[.exe] (host-only).
 	@mkdir -p $(BIN_DIR)
-	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -ldflags '$(LDFLAGS)' -o $(RELEASE_BIN) ./cmd/nightme
+	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -tags '$(GO_TAGS)' -ldflags '$(LDFLAGS)' -o $(RELEASE_BIN) ./cmd/nightme
 
 # tray-assets is intentionally NOT in the build/release dependency
 # chain. The tray-icon byte payload that //go:embed resolves in

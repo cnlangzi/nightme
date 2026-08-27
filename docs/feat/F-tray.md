@@ -10,7 +10,14 @@
 
 When the user runs `nightme start`, the forked `_daemon` process
 installs a system-tray (notification-area / menu-bar) icon on the
-user's desktop. The icon carries a menu that mirrors the cobra
+user's desktop.
+
+> **Platform availability.** The tray is always built in on macOS
+> and Windows. On **Linux it is opt-in** via `-tags gui` and absent
+> from the default build — see §7 for why. Everything below
+> describes the tray-enabled build.
+
+The icon carries a menu that mirrors the cobra
 subcommand tree and the REPL `Common:` list, with three primary
 items that are most useful as click actions:
 
@@ -178,9 +185,93 @@ caller; the menu tooltip is the user-visible contract.
 
 ---
 
-## 7. CI
+## 7. Linux: the `gui` build tag
 
-`ci.yml` adds a Linux-only step to the `test` job:
+The tray is **opt-in on Linux** and always-on elsewhere. This is
+the fix for [#295](https://github.com/cnlangzi/nightme/issues/295).
+
+`getlantern/systray` on Linux resolves to
+`systray_linux_ayatana.go`, which carries
+
+```go
+#cgo linux pkg-config: ayatana-appindicator3-0.1
+```
+
+so *importing the package at all* makes the linker record
+`libayatana-appindicator3.so.1`, `libgtk-3.so.0` and ~70 other
+`DT_NEEDED` entries. When `cmd/nightme/tray.go` did that
+unconditionally, every Linux binary — including `nightme --version`
+on a headless server — died before `main()`:
+
+```
+error while loading shared libraries: libayatana-appindicator3.so.1:
+cannot open shared object file: No such file or directory
+```
+
+Two properties of that failure drove the design:
+
+1. **`isHeadless()` cannot help.** It is a runtime check
+   (`tray_headless_linux.go`); ld.so fails first, so no Go code
+   ever runs. The headless guard solves a different problem — GTK
+   "cannot open display" once the libraries *are* present.
+2. **`CGO_ENABLED=0` alone cannot help.** systray has no non-CGo
+   Linux fallback; the package itself fails to compile
+   (`undefined: nativeLoop`, `registerSystray`, …). The import has
+   to be excluded at the source level.
+
+### File layout
+
+| File | Build tag | Role |
+| --- | --- | --- |
+| `tray.go` | *(none)* | `trayDebounce`, `clickTracker`, `trayOptions`, `logClickErr` — nothing that touches systray |
+| `tray_gui.go` | `darwin \|\| windows \|\| (linux && gui)` | the real implementation: `runTrayOwning`, `trayOnReady`, click helpers |
+| `tray_stub.go` | `linux && !gui` | `runTrayOwning` → straight to `runRunWith` |
+| `tray_icon_linux.go` | `linux && gui` | `applyIcon` (imports systray, so it must match `tray_gui.go`) |
+
+`runTrayOwning` is the only cross-file seam, so
+`daemon_lifecycle_{unix,windows}.go` need no build-tag awareness.
+`trayOptions` lives in the untagged file because both
+implementations share the signature.
+
+Resulting defaults:
+
+| Command | Linux | macOS / Windows |
+| --- | --- | --- |
+| `go build` / `make build` | no tray, no CGo | tray |
+| `go build -tags gui` / `make build-gui` | tray | *(n/a — already on)* |
+
+Linux defaults to off because Linux hosts are overwhelmingly
+servers. A useful side effect: `go install
+github.com/cnlangzi/nightme/cmd/nightme` now produces a working
+binary on a bare Linux box, which it previously did not.
+
+### Release artifacts
+
+`release.yml` builds both variants on the Linux runners:
+
+```
+nightme_<v>_linux_<arch>.tar.gz       CGO_ENABLED=0 make build → static, no tray
+nightme_<v>_linux_<arch>-gui.tar.gz   make build-gui           → tray, needs GTK3
+```
+
+The default archive keeps its pre-#295 name so `install.sh` needs
+no change and existing users are unaffected. The `-gui` archive's
+inner binary is also named `nightme` so it can be dropped straight
+over an existing install.
+
+`linux/arm64` builds on the native `ubuntu-24.04-arm` runner rather
+than cross-compiling: the `-gui` variant is CGo and would otherwise
+need an aarch64 sysroot with arm64 GTK3 dev packages. This also
+fixed a latent bug where the arm64 build step ran on an amd64
+runner with no `GOOS`/`GOARCH` set, publishing an amd64 binary
+under the `linux_arm64` name.
+
+---
+
+## 8. CI
+
+`ci.yml`'s `test` job installs the dev headers (Linux only) so it
+can compile the `-gui` variant:
 
 ```yaml
 - name: Install systray build deps (Linux)
@@ -191,11 +282,31 @@ caller; the menu tooltip is the user-visible contract.
     sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
 ```
 
-`release.yml` already runs each target on its native
-runner; the same `apt-get` install is added to the
-ubuntu-latest `build` job in a follow-up if/when the
-release matrix pulls from a base image that lacks the dev
-headers (most current `ubuntu-latest` images do not).
+The `startup` job deliberately does **not** install them — it only
+runs `make build`, which no longer needs GTK at all.
+
+`release.yml` installs the same packages on both Linux runners,
+conditioned on `matrix.goos == 'linux'` rather than
+`matrix.os == 'ubuntu-latest'` — the latter would silently skip
+`ubuntu-24.04-arm` and break the arm64 `-gui` link step.
+
+### The #295 regression gate
+
+A Go test cannot catch this class of bug (the failure is in ld.so,
+before `main()`), so the gate inspects the linked binary. Four
+assertions, because a bare "does not link GTK" check passes
+vacuously if the tray silently stops building:
+
+1. default build links no GTK/AppIndicator
+2. `CGO_ENABLED=0` default build is fully static
+3. `-tags gui` still *compiles* — it is otherwise only built on tag
+   push, so it would rot unnoticed until release day
+4. `-tags gui` actually *does* link AppIndicator, proving the tag
+   is still wired to the tray and that (1) is meaningful
+
+The release workflow repeats assertions 1 and 2 on the real
+artifact before packaging, so a bad binary fails the release rather
+than shipping.
 
 macOS and Windows runners ship Cocoa and Win32 by
 default; the systray CGo build for those platforms
@@ -203,7 +314,7 @@ requires no extra install.
 
 ---
 
-## 8. macOS .app bundle (optional)
+## 9. macOS .app bundle (optional)
 
 A bare `nightme` binary on macOS works, but the menu-bar
 icon falls back to the generic executable glyph. For the
@@ -234,9 +345,17 @@ locally.
 
 ---
 
-## 9. Known limitations / future work
+## 10. Known limitations / future work
 
 - **Restart**: v1 merges with Stop. See §6.
+- **Linux default has no tray**: the shipped Linux binary is built
+  without `-tags gui`, so desktop Linux users only get the icon if
+  they install the `-gui` release archive. Making the tray a
+  runtime-optional feature instead (dlopen the AppIndicator
+  library, fall back silently when absent) would give one universal
+  Linux binary, but needs either a CGo `dlopen` shim or a pure-Go
+  StatusNotifierItem D-Bus client in place of
+  `getlantern/systray`. Out of scope for the #295 fix.
 - **macOS main thread**: `systray.Run` works correctly
   only when invoked on the main thread on macOS. The
   current threading-model flip puts the daemon's `_daemon`

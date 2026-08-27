@@ -18,13 +18,43 @@ jobs:
   #     Xcode CLT); systray uses Cocoa CGo
   #   - Windows: rsrc_windows_*.syso needs go-winres (Windows-only
   #     resource compiler); systray uses Win32 CGo
-  #   - Linux: systray needs libgtk-3-dev + libayatana-appindicator3-dev
-  #     (apt-only); CGo cross from non-Linux to Linux is fragile
+  #   - Linux: the -gui variant needs libgtk-3-dev +
+  #     libayatana-appindicator3-dev (apt-only); CGo cross from
+  #     non-Linux to Linux is fragile
+  #
+  # linux/arm64 runs on the native ubuntu-24.04-arm runner (free
+  # and unlimited on public repos) rather than cross-compiling from
+  # ubuntu-latest. Two reasons:
+  #
+  #   1. The -gui variant is CGo and needs arm64 GTK3 dev packages;
+  #      cross-linking those from an amd64 host would need a full
+  #      aarch64 sysroot.
+  #   2. It fixes a latent mislabelling bug — this step used to run
+  #      `make build` on an amd64 runner with no GOOS/GOARCH set,
+  #      so the artifact published as linux_arm64 was in fact an
+  #      amd64 binary. A native runner makes the arch correct by
+  #      construction; the explicit GOOS/GOARCH below is a belt-and-
+  #      braces guard against the matrix drifting back.
   #
   # Cost: 6 native runner-minutes per release instead of 1 ubuntu
   # runner doing 6 cross-compile. Acceptable because release runs
   # only on tag push (low frequency) and a broken release is more
   # expensive than the runner budget.
+  #
+  # Linux ships TWO archives per arch (see the Build step):
+  #
+  #   nightme_<v>_linux_<arch>.tar.gz       default — CGO_ENABLED=0,
+  #                                         no tray, fully static,
+  #                                         runs on any glibc/musl box
+  #   nightme_<v>_linux_<arch>-gui.tar.gz   -tags gui — tray icon,
+  #                                         needs libgtk-3-0 +
+  #                                         libayatana-appindicator3-1
+  #
+  # The default archive keeps its existing name so install.sh needs
+  # no change and existing users are unaffected. This split is the
+  # fix for #295: the old single Linux binary always linked
+  # libayatana-appindicator3.so.1, so it would not exec at all on a
+  # server without the GTK3 runtime.
   #
   # macOS .app bundle: not shipped in the release. Users running
   # macOS as a daemon host build it locally via
@@ -47,7 +77,7 @@ jobs:
             binary: nightme
           - goos: linux
             goarch: arm64
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             archive: tar.gz
             binary: nightme
           - goos: darwin
@@ -79,11 +109,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Linux needs GTK3 + AppIndicator dev headers for systray's
-      # CGo dependency. macOS / Windows runners ship Cocoa / Win32
-      # by default; no extra step needed.
+      # GTK3 + AppIndicator dev headers for the -gui variant's CGo
+      # dependency. The DEFAULT Linux binary does not need these
+      # (it is built CGO_ENABLED=0 with the tray compiled out), but
+      # the same runner builds both, so we install unconditionally
+      # for linux.
+      #
+      # Condition is on matrix.goos, NOT matrix.os: linux/arm64
+      # runs on ubuntu-24.04-arm, so an `== 'ubuntu-latest'` test
+      # would silently skip the install there and fail the -gui
+      # link step.
       - name: Install systray build deps (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.goos == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
@@ -103,9 +140,17 @@ jobs:
       # no version metadata — three independent regressions in one
       # missing line. shell: bash so the same script works on all
       # three runners (Git Bash is preinstalled on windows-latest).
+      #
+      # GOOS/GOARCH are exported so the Makefile's host-tracking
+      # defaults cannot silently produce a wrong-arch binary if the
+      # matrix's runner label ever drifts away from the target arch.
       - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
         shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
+          set -euo pipefail
           if [ "${{ matrix.goos }}" = "windows" ]; then
             ./build.bat
           elif [ "${{ matrix.goos }}" = "darwin" ]; then
@@ -116,7 +161,39 @@ jobs:
             make build
             make app-bundle
           else
-            make build
+            # Linux builds TWO binaries (see the matrix comment):
+            #
+            #   bin/nightme     default. CGO_ENABLED=0 forces a
+            #                   fully static executable — with the
+            #                   tray compiled out, systray is the
+            #                   only CGo dependency in the tree, so
+            #                   this links no shared objects at all
+            #                   and runs on any Linux host.
+            #   bin/nightme-gui -tags gui. Dynamically links GTK3 +
+            #                   AppIndicator for the tray icon.
+            #
+            # Order matters: build the static one FIRST. `make
+            # build-gui` recurses into `make build` with an
+            # overridden BIN_NAME, so running it second cannot
+            # clobber bin/nightme.
+            CGO_ENABLED=0 make build
+            make build-gui
+
+            # Fail the release rather than ship the #295 regression
+            # again: the default artifact must not carry a GTK or
+            # AppIndicator DT_NEEDED entry. `file` is used instead
+            # of ldd for the static assertion because ldd exits
+            # non-zero on a static binary.
+            if ! file bin/nightme | grep -q "statically linked"; then
+              echo "::error::bin/nightme is not statically linked — CGO_ENABLED=0 did not take effect"
+              file bin/nightme
+              exit 1
+            fi
+            if ldd bin/nightme 2>&1 | grep -qiE "ayatana|gtk-3"; then
+              echo "::error::default Linux binary links GTK/AppIndicator (regression of #295)"
+              ldd bin/nightme
+              exit 1
+            fi
           fi
 
       - name: Stage archive
@@ -140,6 +217,22 @@ jobs:
               echo "::error::dist/NightMe.app missing after 'make app-bundle' (build step did not run app-bundle?)"
               exit 1
             fi
+          fi
+          # Linux: stage the tray-enabled variant into its own
+          # directory. The binary is renamed back to plain
+          # `nightme` so a user who wants the tray can extract the
+          # -gui archive straight over an existing install without
+          # renaming anything or fixing up their PATH.
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            if [ ! -f "bin/nightme-gui" ]; then
+              echo "::error::bin/nightme-gui missing after 'make build-gui'"
+              exit 1
+            fi
+            GUI_STAGE="dist/stage/${{ matrix.goos }}-${{ matrix.goarch }}-gui"
+            mkdir -p "$GUI_STAGE"
+            cp bin/nightme-gui "$GUI_STAGE/nightme"
+            cp LICENSE   "$GUI_STAGE/LICENSE"
+            cp README.md "$GUI_STAGE/README.md"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -165,6 +258,17 @@ jobs:
                 tar -C "$STAGE" -czf \
                   "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
                   ${{ matrix.binary }} LICENSE README.md
+              fi
+              # Linux-only: the tray-enabled companion archive.
+              # Same layout and same inner binary name as the
+              # default archive; only the tarball name differs, so
+              # install.sh keeps resolving the default (tray-less)
+              # asset with no change and users opt in to the tray
+              # by downloading the -gui archive explicitly.
+              if [ "${GOOS}" = "linux" ]; then
+                tar -C "dist/stage/${GOOS}-${GOARCH}-gui" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}-gui.tar.gz" \
+                  nightme LICENSE README.md
               fi
               # macOS-only: a separate .app-only zip for
               # Finder-native install. macOS users typically

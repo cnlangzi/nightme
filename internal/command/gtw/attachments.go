@@ -160,22 +160,54 @@ func isImageMIME(mime string) bool {
 	return strings.HasPrefix(mime, "image/")
 }
 
-// looksLikeImageName is the filename fallback when MIMEType
-// is empty: checks the extension against common image
-// formats so extractGitHubAttachments' "image/png" default
-// isn't the only signal. URLs without a recognisable image
-// extension and no MIME hint fall through to non-image
-// (ContentFile). Used by the GitHub attachment extractor to
-// pre-classify inline `![](url)` images before the HTTP
-// response refines the type.
-func looksLikeImageName(name string) bool {
+// mimeFromExt maps a filename's extension to its best-guess
+// MIME type. The attachment extractors use it to pre-classify
+// a markdown `[](url)` / `![](url)` link before the HTTP
+// response's Content-Type refines the type at download time.
+// Image extensions map to image/* (so a `[](shot.png)` link
+// without the `!` prefix still routes to ContentImage);
+// non-image extensions map to their canonical type so the
+// dispatch text's per-type count is accurate before download.
+// Unknown extensions fall back to application/octet-stream,
+// which downloadAttachments treats as a non-image → ContentFile.
+func mimeFromExt(name string) string {
 	n := strings.ToLower(name)
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"} {
-		if strings.HasSuffix(n, ext) {
-			return true
-		}
+	switch {
+	case strings.HasSuffix(n, ".png"):
+		return "image/png"
+	case strings.HasSuffix(n, ".jpg"), strings.HasSuffix(n, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(n, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(n, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(n, ".bmp"):
+		return "image/bmp"
+	case strings.HasSuffix(n, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(n, ".pdf"):
+		return "application/pdf"
+	case strings.HasSuffix(n, ".json"):
+		return "application/json"
+	case strings.HasSuffix(n, ".txt"), strings.HasSuffix(n, ".log"):
+		return "text/plain"
+	case strings.HasSuffix(n, ".xml"):
+		return "application/xml"
+	case strings.HasSuffix(n, ".csv"):
+		return "text/csv"
+	case strings.HasSuffix(n, ".md"):
+		return "text/markdown"
+	case strings.HasSuffix(n, ".html"), strings.HasSuffix(n, ".htm"):
+		return "text/html"
+	case strings.HasSuffix(n, ".zip"):
+		return "application/zip"
+	case strings.HasSuffix(n, ".gz"), strings.HasSuffix(n, ".tgz"):
+		return "application/gzip"
+	case strings.HasSuffix(n, ".tar"):
+		return "application/x-tar"
+	default:
+		return "application/octet-stream"
 	}
-	return false
 }
 
 // fetchAttachment does one HTTP GET and returns the body's

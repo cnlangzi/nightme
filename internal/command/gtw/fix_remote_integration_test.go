@@ -667,7 +667,7 @@ func parseSecondWorktree(porcelain string, underPrefix string) string {
 	// under our temp dir.
 	targetBase := strings.ToLower(filepath.Base(strings.TrimRight(underPrefix, "/")))
 	count := 0
-	for _, line := range strings.Split(porcelain, "\n") {
+	for line := range strings.SplitSeq(porcelain, "\n") {
 		if !strings.HasPrefix(line, "worktree ") {
 			continue
 		}

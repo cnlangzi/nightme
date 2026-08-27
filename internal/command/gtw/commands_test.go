@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func TestFactory_Spec(t *testing.T) {
 	if s.Name != "gtw" {
 		t.Errorf("expected Name=gtw, got %q", s.Name)
 	}
-	if !contains(s.Aliases, "team") {
+	if !slices.Contains(s.Aliases, "team") {
 		t.Errorf("expected alias 'team' in %v", s.Aliases)
 	}
 	if s.Summary == "" {
@@ -122,16 +123,7 @@ func TestFactory_Handle_UnknownSubcommand(t *testing.T) {
 	}
 }
 
-// contains is a tiny helper (Go 1.21+ has slices.Contains,
-// but we want to be explicit and avoid the import).
-func contains(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
+// (parseFixMode was the pre-F-XX helper that parsed mode + rawArg
 // (parseFixMode was the pre-F-XX helper that parsed mode + rawArg
 // from a boolean-flag-stripped argv. F-XX rewrote parseFixArgs
 // as a proper CLI lexer and deleted parseFixMode. The bare-id,

@@ -49,10 +49,17 @@ func TestDownloadAttachments_FetchesAllFiles(t *testing.T) {
 		t.Fatalf("got %d blocks, want 2", len(blocks))
 	}
 
-	// File on disk + MIME refinement.
-	for i, want := range []struct{ name, body, mime string }{
-		{"shot.png", "PNG-BYTES", "image/png"},
-		{"notes.txt", "hello world", "text/plain"}, // charset suffix stripped
+	// File on disk + MIME refinement + block-type routing.
+	// Images → ContentImage (bridge inlines pixels); non-images
+	// → ContentFile (bridge emits a path annotation). Filenames
+	// are prefixed with the index so same-named attachments
+	// don't clobber each other.
+	for i, want := range []struct {
+		name, body, mime string
+		wantType        agent.ContentBlockType
+	}{
+		{"0-shot.png", "PNG-BYTES", "image/png", agent.ContentImage},
+		{"1-notes.txt", "hello world", "text/plain", agent.ContentFile}, // charset suffix stripped
 	} {
 		path := filepath.Join(destDir, want.name)
 		got, err := os.ReadFile(path)
@@ -63,8 +70,8 @@ func TestDownloadAttachments_FetchesAllFiles(t *testing.T) {
 		if string(got) != want.body {
 			t.Errorf("[%d] body = %q, want %q", i, string(got), want.body)
 		}
-		if blocks[i].Type != agent.ContentFile {
-			t.Errorf("[%d] block type = %v, want ContentFile", i, blocks[i].Type)
+		if blocks[i].Type != want.wantType {
+			t.Errorf("[%d] block type = %v, want %v", i, blocks[i].Type, want.wantType)
 		}
 		if blocks[i].Path != path {
 			t.Errorf("[%d] block path = %q, want %q", i, blocks[i].Path, path)
@@ -117,8 +124,11 @@ func TestDownloadAttachments_NumberedFallback(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("blocks = %d, want 2", len(blocks))
 	}
+	// Filenames are index-prefixed ("<i>-<name>") to avoid
+	// same-name clobbering; empty Filename falls back to
+	// "attachment-<i>", so the on-disk name is "<i>-attachment-<i>".
 	for i, b := range blocks {
-		want := filepath.Join(destDir, fmt.Sprintf("attachment-%d", i))
+		want := filepath.Join(destDir, fmt.Sprintf("%d-attachment-%d", i, i))
 		if b.Path != want {
 			t.Errorf("[%d] path = %q, want %q", i, b.Path, want)
 		}

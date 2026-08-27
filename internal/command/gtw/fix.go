@@ -780,14 +780,42 @@ func dispatchIssueToChatSession(
 // buildIssueDispatchBlocks assembles the full
 // []agent.ContentBlock slice for the dispatch: a single text
 // block (the issue template) followed by attachmentBlocks
-// (zero or more ContentFile). The caller downloads
-// attachments before passing them in.
+// (zero or more ContentImage / ContentFile). The caller
+// downloads attachments before passing them in.
+//
+// The text block is built LAST, after the attachment blocks are
+// known, so the Attachments section can report accurate counts
+// ("N images, M files") drawn from what actually downloaded —
+// not from issue.Attachments, which may include attachments that
+// failed to download (network / 4xx / oversize) and would
+// otherwise be advertised to the agent but missing from the
+// blocks slice.
 func buildIssueDispatchBlocks(issue *Issue, attachmentBlocks []agent.ContentBlock, branch, repo string, mode IssueDispatchMode) []agent.ContentBlock {
-	text := buildIssueDispatchText(issue, branch, repo, mode)
+	imageCount, fileCount := countAttachmentBlocks(attachmentBlocks)
+	text := buildIssueDispatchText(issue, branch, repo, mode, imageCount, fileCount)
 	blocks := make([]agent.ContentBlock, 0, 1+len(attachmentBlocks))
 	blocks = append(blocks, agent.ContentBlock{Type: agent.ContentText, Text: text})
 	blocks = append(blocks, attachmentBlocks...)
 	return blocks
+}
+
+// countAttachmentBlocks splits a slice of downloaded attachment
+// blocks into (imageCount, fileCount) by Type. Used by
+// buildIssueDispatchBlocks so the dispatch text's Attachments
+// section reports what the agent will actually see rather than
+// what the issue nominally carried. Non-image/non-file blocks
+// (e.g. a stray ContentText) are ignored — only image + file
+// blocks count toward the attachment tally.
+func countAttachmentBlocks(blocks []agent.ContentBlock) (images, files int) {
+	for _, b := range blocks {
+		switch b.Type {
+		case agent.ContentImage:
+			images++
+		case agent.ContentFile:
+			files++
+		}
+	}
+	return images, files
 }
 
 // buildIssueDispatchText formats the issue as a fixed-template
@@ -802,11 +830,29 @@ func buildIssueDispatchBlocks(issue *Issue, attachmentBlocks []agent.ContentBloc
 // modify"; Execute = "implement the fix"). Metadata /
 // description / attachments sections are shared verbatim.
 //
+// imageCount / fileCount are the counts actually downloaded
+// (from countAttachmentBlocks over the real attachmentBlocks),
+// NOT len(issue.Attachments): an attachment that failed to
+// download (network / 4xx / oversize) must NOT be advertised
+// to the agent — it would tell the model "see the screenshot"
+// for a screenshot that isn't in the blocks slice. Zero of
+// both suppresses the whole Attachments section.
+//
+// The Attachments section speaks the agent's language, not ours:
+// it says "images shown inline" / "files downloaded, read on
+// demand" — never "ContentImage" / "ContentFile", which are our
+// internal block-type names the runtime agent has no concept of.
+// The bridges translate the blocks themselves (claudecode inlines
+// image pixels as base64, codex passes image paths via -i, file
+// blocks become "File: <path>" annotations); the prompt text only
+// needs to prime the agent that attachments exist and how they'll
+// arrive, so it knows to look for pixels / read files.
+//
 // See F-gtw-fix.md §4 for the rationale and the full prompt
 // templates. gtw always dispatches exactly one prompt per
 // /gtw fix; subsequent agent↔user confirmation flows through
 // the chat, never back through gtw.
-func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatchMode) string {
+func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatchMode, imageCount, fileCount int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "📥 GitHub issue #%d — %s\n\n", issue.ID, issue.Title)
 	fmt.Fprintf(&b, "## Metadata\n")
@@ -818,9 +864,15 @@ func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatc
 		b.WriteString(issue.Body)
 		b.WriteString("\n\n")
 	}
-	if len(issue.Attachments) > 0 {
-		fmt.Fprintf(&b, "## Attachments\n%d file(s) attached as ContentFile blocks — paths are absolute on this machine.\n\n",
-			len(issue.Attachments))
+	if imageCount > 0 || fileCount > 0 {
+		b.WriteString("## Attachments\n")
+		if imageCount > 0 {
+			fmt.Fprintf(&b, "- %d image(s): shown inline in this message (you can see them directly)\n", imageCount)
+		}
+		if fileCount > 0 {
+			fmt.Fprintf(&b, "- %d file(s): downloaded to the worktree; read on demand with your file tools\n", fileCount)
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("## Task\n")
 	switch mode {
@@ -828,19 +880,25 @@ func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatc
 		// F-gtw-fix.md §4.1 — Plan is a *due-diligence* pass,
 		// not an implementation pass. Its output is a list of
 		// questions and decisions for the user to review, NOT a
-		// set of code edits. Execute (§4.2) is the pass that
-		// acts on the plan — this prompt must NOT act.
+		// set of code edits. This prompt must NOT act on code.
 		//
-		// Methodology (also in docs/REVIEWER_INSTRUCTIONS.md):
-		// every claim grounded in code; the request text is a
-		// *problem statement to verify*, not a *spec to
-		// implement*. Agents are explicitly forbidden from
-		// speculation that "should work because the issue says
-		// so" — they must read the code, trace the call path,
-		// and cite file:line (or a grep / runtime trace) for
-		// every claim. If a claim cannot be grounded, the agent
-		// must say so explicitly rather than invent a citation.
-		b.WriteString("This is a due-diligence pass, not an implementation pass. Your deliverable is a *plan*: a list of questions about the request and the decisions that answer them, grounded in the worktree's current source. You will NOT modify, create, or delete any files. The implementation pass (Execute, §4.2) is a separate prompt — it acts on whatever plan you produce here.\n\n")
+		// Runtime self-containment: this string runs in a
+		// standalone agent on the user's own worktree — it
+		// cannot see this repo's docs (F-gtw-fix.md,
+		// REVIEWER_INSTRUCTIONS.md) and does not need to know
+		// that Execute is a separate dispatch mode. So the
+		// runtime text must NOT reference section numbers, doc
+		// filenames, or "the Execute pass" — every instruction
+		// the agent needs must be self-contained below.
+		//
+		// Methodology: every claim grounded in code; the request
+		// text is a *problem statement to verify*, not a *spec to
+		// implement*. Agents must read the code, trace the call
+		// path, and cite file:line (or a grep / runtime trace)
+		// for every claim. If a claim cannot be grounded, the
+		// agent must say so explicitly rather than invent a
+		// citation.
+		b.WriteString("This is a due-diligence pass, not an implementation pass. Your deliverable is a *plan*: a list of questions about the request and the decisions that answer them, grounded in the worktree's current source. You will NOT modify, create, or delete any files — produce the plan and stop; the user decides what happens next.\n\n")
 		b.WriteString("Baseline rule: the worktree's current source is ground truth. The request text is a problem statement to *verify* against the code, not a spec to *implement*. If the code contradicts the request, say so — the user needs to know the request is wrong, not a confirmation that pretends otherwise.\n\n")
 		b.WriteString("Step 1 — Decompose the request into verifiable claims. List each concrete statement the request makes (e.g. 'sessions expire after 7 days', 'the label is set via gh issue edit', 'the bug reproduces on Linux only'). Number them. You will verify each one in step 2.\n\n")
 		b.WriteString("Step 2 — Verify every claim against the code. For each numbered claim from step 1, run the search / read that would confirm or refute it. Cite either:\n")
@@ -872,16 +930,25 @@ func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatc
 		b.WriteString("If there are NO questions (every claim verified cleanly), state so explicitly: 'No questions for the user; the plan is complete and the user can authorise -y without further input.'\n\n")
 		b.WriteString("Do NOT modify, create, or delete any files. Present the plan and STOP — wait for the user to reply in this chat before making any code changes.\n")
 	case DispatchExecute:
-		// F-gtw-fix.md §4.2 — Execute is the *fulfilment* of the
-		// plan above, run in GOBL mode (Goals / Obstacles /
-		// Boundaries / Learn): the agent is autonomous on the
-		// path (which files to open, which tests to run, how to
-		// sequence the work), but every *decision* still needs
-		// to be code-grounded. The plan is a starting contract;
+		// F-gtw-fix.md §4.2 — Execute is the *fulfilment* of a
+		// plan, run in GOBL mode (Goals / Obstacles / Boundaries
+		// / Learn): the agent is autonomous on the path (which
+		// files to open, which tests to run, how to sequence
+		// the work), but every *decision* still needs to be
+		// code-grounded. The plan is a starting contract;
 		// deviations are allowed but must be announced in chat
 		// before being acted on, so the user has a chance to
 		// interrupt.
-		b.WriteString("Execute the plan above against the worktree, in GOBL mode (Goals / Obstacles / Boundaries / Learn):\n\n")
+		//
+		// Runtime self-containment (same caveat as Plan above):
+		// this string runs in a standalone agent on the user's
+		// worktree and cannot see this repo's docs. It also
+		// cannot assume a prior Plan turn exists in the chat —
+		// `-y` dispatches Execute directly with no Plan round.
+		// So the runtime text must NOT say "the plan above"
+		// (there may be none) and must NOT cite §4.2; it takes
+		// the request + worktree as given and acts.
+		b.WriteString("Implement the fix for the request above against the worktree, in GOBL mode (Goals / Obstacles / Boundaries / Learn). The worktree is prepared; a plan may or may not have been produced in an earlier turn — if one was, treat it as a starting contract; if not, derive the plan yourself from the code first, then act.\n\n")
 		b.WriteString("Goal: the verified-change summary the user can review.\n")
 		b.WriteString("Boundaries:\n")
 		b.WriteString("- Do not invent functionality the request didn't ask for.\n")
@@ -889,17 +956,17 @@ func buildIssueDispatchText(issue *Issue, branch, repo string, mode IssueDispatc
 		b.WriteString("- Do not skip, suppress, or mark-expected failing tests.\n")
 		b.WriteString("- Do not report 'complete' if any test is failing. **All tests must pass before completion.** A failing test is not a deliverable.\n\n")
 		b.WriteString("Operating principles:\n")
-		b.WriteString("- Treat the plan as a starting contract, not a straitjacket. If during execution you discover the plan is incomplete or wrong (root cause is different, an additional file needs changing, a fix in a file the plan didn't list), you may revise — but declare the revision in chat FIRST with file:line evidence, then act. The user has one round-trip to interrupt before you proceed with the deviation.\n")
+		b.WriteString("- Treat any prior plan as a starting contract, not a straitjacket. If during execution you discover a plan is incomplete or wrong (root cause is different, an additional file needs changing, a fix in a file the plan didn't list), you may revise — but declare the revision in chat FIRST with file:line evidence, then act. The user has one round-trip to interrupt before you proceed with the deviation. If there was no prior plan, every non-trivial decision counts as a deviation you should announce before acting.\n")
 		b.WriteString("- Decisions must be code-grounded: every file you touch or test you run cites the file:line or the test command + exit code that justified it. If you find yourself about to do something the request text suggests but the code contradicts, surface the contradiction — don't silently follow the text.\n")
 		b.WriteString("- When tests fail, diagnose against the baseline (was this failure pre-existing? Did your change introduce it?). Pre-existing failures are not yours to silently fix; report and let the user decide. Failures you introduced must be fixed before completion.\n\n")
 		b.WriteString("Workflow:\n")
-		b.WriteString("1. Re-read the files you intend to change. Confirm each planned change still applies to today's baseline (the worktree may have drifted between Plan and Execute).\n")
-		b.WriteString("2. Apply the minimal change that satisfies the plan. If a deviation is needed, announce it before acting.\n")
+		b.WriteString("1. Re-read the files you intend to change. Confirm each planned change still applies to today's baseline (the worktree may have drifted since any prior plan turn).\n")
+		b.WriteString("2. Apply the minimal change that satisfies the request (and the plan, if one exists). If a deviation is needed, announce it before acting.\n")
 		b.WriteString("3. Run the project's test command (infer from go.mod / Makefile / CI config). Report the full command, the exit code, and which tests ran.\n")
 		b.WriteString("4. If a test fails: do NOT silently suppress, skip, or mark expected. Diagnose (pre-existing vs introduced), fix introduced failures against the baseline code, re-run until green. Pre-existing failures — report and ask the user.\n")
 		b.WriteString("5. Summarise:\n")
-		b.WriteString("  - Files changed, with file:line ranges and one-line justification per range (which plan step does it fulfil, or which in-flight deviation)\n")
-		b.WriteString("  - Decisions made: any deviations from the plan, with file:line evidence and the user-facing question (if any) you asked along the way\n")
+		b.WriteString("  - Files changed, with file:line ranges and one-line justification per range (which planned step does it fulfil, or which in-flight deviation)\n")
+		b.WriteString("  - Decisions made: any deviations from the plan (or from the request, if no plan existed), with file:line evidence and the user-facing question (if any) you asked along the way\n")
 		b.WriteString("  - Test command(s) run, with exit code\n")
 		b.WriteString("  - One sentence: 'this change is correct against the baseline because <file:line evidence>'\n")
 	}

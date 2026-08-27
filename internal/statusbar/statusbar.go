@@ -136,11 +136,26 @@ func RenderPanel(lines []string) string {
 //
 //	💰:「 12.3k / 8.2k / 1.5k · 10.5% (200k) · $0.087 」
 //
-// Line 3: git tracking — 📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N · [#PR](url)
+// Line 3: git tracking — three-state contract (see formatGitLine
+// for the per-segment omit rules). Line 3 is special among the
+// three footer lines: it does NOT always drop when its primary
+// source field (GitStatus) is missing — non-git cwd is a normal
+// state the user needs to see surfaced, not silently swallowed.
+//
+//	gs == nil                          → Line 3 dropped (no signal at all)
+//	gs.Workspace == ""                 → Line 3 dropped (nothing to label)
+//	gs.Snapshot == nil (non-git cwd)   → "📁: <ws>" (bare workspace)
+//	gs.Snapshot != nil                 → "📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N · [#PR](url)"
+//
+// Example full render:
 //
 //	📁: code/nightme · ⎇ main · + 2 · ± 3 · − 1 · ? 4 · ⇡ 5 · [#42](url)
 //
-// See formatGitLine for the per-segment omit rules.
+// Adapter authors: do NOT add a `gs.Snapshot == nil → drop Line 3`
+// shortcut here. Pre-fix-git-status-bar callers used to do that and
+// lost the only signal of where the agent was running when cwd
+// wasn't a repo. The bare-workspace render is the intended
+// contract.
 //
 // Token count formatting (F-45 §1.6):
 //   - < 1000:   raw number ("234")

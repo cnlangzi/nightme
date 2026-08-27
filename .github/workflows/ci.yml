@@ -135,6 +135,20 @@ jobs:
         shell: bash
         run: go test -count=1 ./...
 
+      # macOS-only race-stress sweep on the codex bridge.
+      # The stderr-drain / cmd.Wait pipe race (fixed in
+      # commit 7cc5a02-pre-fix codex/print.go ordering) has a
+      # wider timing window on macOS than Linux — the race
+      # surfaces 100% on macOS without `-race` but only ~1-8%
+      # on Linux even with `-race`. Running -race -count=3
+      # here turns that into a deterministic CI gate for the
+      # codex package specifically, without slowing down the
+      # rest of the suite on other OSes.
+      - name: Test (race + stress, codex bridge)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: go test -race -count=3 ./internal/bridge/codex/...
+
       - name: Upload coverage
         if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v6

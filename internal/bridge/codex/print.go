@@ -348,8 +348,16 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		}
 	})
 
-	waitErr := child.Wait()
+	// Drain stderr BEFORE cmd.Wait: Go stdlib's exec.Cmd.Wait
+	// reaps the process and then calls closeDescriptors on the
+	// parent ends of StdoutPipe / StderrPipe, which closes our
+	// stderr read end. If the drain goroutine hasn't already
+	// pulled "boom\n" out of the kernel pipe buffer at that point,
+	// the close discards the buffered bytes and Diagnostic.StderrTail
+	// lands empty. Race window was ~milliseconds; visible 100% on
+	// macOS and intermittently on Linux under `-race`.
 	stderrDrain.wait()
+	waitErr := child.Wait()
 
 	elapsedMs := time.Since(startTime).Milliseconds()
 
@@ -1255,8 +1263,13 @@ func runCodexReviewPlain(ctx context.Context, s *Starter, cfg agent.StartConfig,
 		}
 	})
 
-	waitErr := child.Wait()
+	// Drain stderr BEFORE cmd.Wait — see runPrintMode's identical
+	// comment. Reaping the process via cmd.Wait triggers
+	// closeDescriptors(c.parentIOPipes) which closes our stderr
+	// read end; if the drain goroutine hasn't yet pulled data out
+	// of the kernel pipe buffer, the close discards it.
 	stderrDrain.wait()
+	waitErr := child.Wait()
 
 	elapsedMs := time.Since(startTime).Milliseconds()
 

@@ -204,6 +204,12 @@ func dispatchPR(
 		//   - ErrStaleUpstream: race window — branch existed at
 		//     gate 1 but was deleted before CreatePR. Same
 		//     friendly hint as gate 1's "no upstream" miss.
+		//   - ErrNoCommitsBetween: base and head point at the
+		//     same commit. Different from ErrStaleUpstream:
+		//     the branch is fine, there is just no diff to PR.
+		//     "Push again" is the wrong next step — the user
+		//     needs new commits on the head branch or a
+		//     different base.
 		//   - ErrPRExists: race window — no PR at gate 2 but
 		//     one was opened before CreatePR. Point at the
 		//     repo list (we don't have a reliable URL from
@@ -217,6 +223,11 @@ func dispatchPR(
 				fmt.Sprintf(
 					"❌ origin/%s no longer exists — /gtw push first to republish",
 					c.Branch)), nil
+		case errors.Is(err, ErrNoCommitsBetween):
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf(
+					"❌ no commits between %s and %s — push new commits first, or rebase onto a newer base.",
+					baseBranch, c.Branch)), nil
 		case errors.Is(err, ErrPRExists):
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf(
@@ -231,7 +242,8 @@ func dispatchPR(
 		}
 	}
 
-	card := renderPROpenedCard(c, baseBranch, url)
+	riskLevel, riskReason := extractRiskLevel(body)
+	card := renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason)
 
 	// Write the new PR directly into the cache for every
 	// AgentSession in this chat. We already know the number
@@ -264,40 +276,65 @@ func dispatchPR(
 
 // buildPRPrompt renders the text block the agent receives.
 //
-// Design rationale (v2, prompt-engineering lens):
+// Format (v3, NightMe-branded + Sourcery-style summary):
 //
-//   - Output Format is a hard constraint the LLM can violate and
-//     break parsing. It comes first and is fenced-example driven.
-//   - Tool floor: the previous prompt's "Run git log" was an
-//     optional suggestion; the agent would skip it for small
-//     diffs and write the body from memory, producing the 4-bullet
-//     regression observed in #140-#144. v2 makes git log + diff
-//     mandatory and adds a length comparison ("body should not be
-//     shorter than git log output") that the LLM can check
-//     objectively against its own tool output.
-//   - Four dimensions instead of four sections. Specifying header
-//     names (## Summary / ## Why / ## Changes / ## Tests) forced a
-//     rigid template that suppresses the LLM's own organisation
-//     instinct. Specifying the four dimensions (what / why / diff /
-//     test evidence) lets the LLM pick any markdown shape —
-//     sections, prose, bullets, tables — while still being held
-//     accountable for covering all four.
-//   - "Do NOT default to a 4-bullet list" directly attacks the
-//     modal training-data pattern. Without this line the LLM
-//     falls back to the median PR shape regardless of how good
-//     the rest of the prompt is.
-//   - Do NOT block lists short rules. Transformer attention to
-//     negative imperatives ("do NOT", "never") is higher than to
-//     positive rules of equal length, so a short blacklist of
-//     failure modes is more effective than a long whitelist.
+//	## Summary by NightMe
+//	<1-2 sentences, imperative, WHAT not WHY>
 //
-// We deliberately do NOT pre-fetch git log / git diff here: the
-// agent has its own workspace and Bash tool, and we want the body
-// to be grounded in real diff output the LLM itself inspected.
+//	New Features:        ← derived from this PR's commit types
+//	Bug Fixes:
+//	Enhancements:
+//	Tests:
+//	Documentation:
+//	Chore / Build / CI:
+//
+//	Risk: <level> — <reason>  ← OPTIONAL, recommended for non-trivial
+//	Closes #N                  ← OPTIONAL, gated on c.Issue > 0
+//
+// Differences from v2:
+//
+//   - Body shape is category-prefixed bullets, not four rigid
+//     dimensions. Reviewers scan by category, not by Why/What/
+//     Diff/Test sections — the v2 four-dimension prompt made
+//     reviewers read hundreds of words to extract the same
+//     ~150 words of decision-relevant info (verified against
+//     PR #303: gtw-generated body was 4× longer than the
+//     equivalent Sourcery summary with identical coverage).
+//   - Diff overview dropped entirely. GitHub's PR review UI
+//     shows file changes; body duplication is noise.
+//   - "Lead with Why" dropped. Sourcery leads with WHAT —
+//     reviewers decide merge-worthiness from the category
+//     prefix (Bug Fixes = behavior risk; New Features = new
+//     contract; Enhancements = non-breaking).
+//   - Risk line added (optional). Feeds the IM-card `→ risk:`
+//     row in renderPROpenedCard.
+//   - ## Context (repo / branch / base / worktree) dropped.
+//     GitHub PR header shows all of this; body duplication
+//     is noise.
+//
+// Hard constraint: only ONE `## ` markdown heading in the body
+// (`## Summary by NightMe`). Categories are inline labels
+// followed by a colon (`New Features:`), NOT `## New Features`.
+// GitHub renders each `## ` heading with a horizontal rule, and a
+// body with several such headings looks fragmented instead of
+// scannable. See the `Do NOT` section for the explicit rules.
+//
+// Tool floor unchanged from v2 — mandatory git log + diff
+// inspection before writing. The v2 self-check ("body shorter
+// than git log = too little") is dropped: category-prefix mode
+// is self-bounding on bullet count and doesn't need it.
+//
+// We deliberately do NOT pre-fetch git log / git diff here:
+// the agent has its own workspace and Bash tool, and we want the
+// body to be grounded in real diff output the LLM itself
+// inspected.
 func buildPRPrompt(c Context, base string) string {
 	var sb strings.Builder
 
 	// --- Output Format (parseability — hard constraint) -----------
+	// Unchanged from v2. parsePRReply is unchanged; the new body
+	// shape has no nested fences and no leading-heading issues,
+	// so the existing permissive parser handles it.
 	sb.WriteString("## Output Format\n")
 	sb.WriteString("Reply with ONE fenced markdown code block (``` ... ```) and nothing else.\n")
 	sb.WriteString("First line inside the fence is the PR title (Conventional Commits 1.0.0).\n")
@@ -307,76 +344,86 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("Minimal parseability example (your body should be richer than this):\n")
 	sb.WriteString("```\n")
 	sb.WriteString("feat(scope): short imperative subject\n\n")
-	sb.WriteString("- bullet describing the change\n")
-	sb.WriteString("- another bullet\n")
+	sb.WriteString("## Summary by NightMe\n")
+	sb.WriteString("One sentence: what this PR does at the user/maintainer-visible level.\n\n")
+	sb.WriteString("Bug Fixes:\n")
+	sb.WriteString("- file:pkg/something.go: short consequence\n")
 	sb.WriteString("```\n\n")
 
-	// --- Tool floor (mandatory git inspection) --------------------
-	// Frame as MUST + an objective length check the LLM can apply
-	// to its own tool output. "If your final body is shorter than
-	// the raw git log output" is a rule the model can verify
-	// against the bytes it just received from Bash.
+	// --- Before you write (tool floor) -----------------------------
+	// Drop the v2 "shorter than git log" self-check — it was a
+	// guard against the 4-bullet modal regression; category-prefix
+	// mode is self-bounding on bullet count and doesn't need it.
 	sb.WriteString("## Before you write — tool floor\n")
 	sb.WriteString("You MUST run and read the output of these commands BEFORE composing the body:\n")
 	sb.WriteString("- `git log --oneline " + base + "..HEAD` — full commit list on this branch.\n")
 	sb.WriteString("- `git diff " + base + "...HEAD --stat` — per-file change footprint.\n")
 	sb.WriteString("- `git diff " + base + "...HEAD -- <path>` for at least one file you intend to mention by name.\n\n")
-	sb.WriteString("Do NOT write the body from commit messages alone — the body must add context (why, alternatives, tradeoffs, blast radius) that no commit subject captures.\n\n")
-	sb.WriteString("Self-check: if your final body is shorter than the raw `git log` output above, you've written too little. Go back, read more of the diff, and add the missing dimension.\n\n")
+	sb.WriteString("Do NOT write the bullets from commit messages alone — each bullet names a file and ends with the consequence, which the commit subject does not capture.\n\n")
 
-	// --- Four dimensions (goal-driven coverage) -------------------
-	// Prescribe WHAT must be covered, not the exact header names.
-	// LLMs naturally use ## Summary / ## Why / ## Changes / ## Tests
-	// or a hybrid; either is fine as long as all four dimensions
-	// are present and non-trivial.
-	sb.WriteString("## Four dimensions — the body must cover all of these\n")
-	sb.WriteString("A good PR body for this repo answers four questions, in roughly this order. You may use any markdown structure (sections, bullets, prose, tables) as long as all four are present and substantive.\n\n")
-	sb.WriteString("1. **What changed** — the user-visible or maintainer-visible effect, 1-3 sentences. State the change, not the diff.\n")
-	sb.WriteString("2. **Why it changed** — the problem this solves or the use case it unlocks. Reviewers decide merge-worthiness from this dimension more than any other. If you cannot write a real Why, ask whether this PR should exist.\n")
-	sb.WriteString("3. **Diff overview** — a file-grouped summary of the change. Each item names the file and ends with the consequence. Reviewers scan by file, not by verb; bullets without a path are unreviewable.\n")
-	sb.WriteString("4. **Test evidence** — what you ran, what's new, what was verified. If the change is docs-only or a one-line chore, say so explicitly (`Tests: n/a — pure doc change`).\n\n")
-	sb.WriteString("Do NOT default to a 4-bullet list. That is the modal pattern in training data and reviewers cannot act on it — the bullets become a paraphrase of the diff instead of context the diff does not already contain.\n\n")
+	// --- Body shape (replaces v2 Four dimensions) ------------------
+	// Category labels derive from this PR's commit types — reuse
+	// the title's CC type to pick the right category, so the
+	// agent does not invent new groupings.
+	sb.WriteString("## Body shape — category-prefixed bullets\n")
+	sb.WriteString("After the one-sentence Summary, list the changes as bullets grouped under these category labels:\n\n")
+	sb.WriteString("- `New Features:` — from `feat(...)` commits. New user-visible or maintainer-visible capability.\n")
+	sb.WriteString("- `Bug Fixes:` — from `fix(...)` commits. Behaviour that previously misbehaved and now does not.\n")
+	sb.WriteString("- `Enhancements:` — from `refactor(...)` / `perf(...)` commits. Internal cleanup or perf that does not fix a bug. State explicitly if behaviour is unchanged.\n")
+	sb.WriteString("- `Tests:` — from `test(...)` commits. New or rewritten test coverage. Pin regressions by name.\n")
+	sb.WriteString("- `Documentation:` — from `docs(...)` commits. README, doc-comments, runbooks.\n")
+	sb.WriteString("- `Chore / Build / CI:` — from `chore(...)` / `build(...)` / `ci(...)` commits. Tooling, deps, release.\n\n")
+	sb.WriteString("Skip any category that has no commits of its type (do not write an empty header). Order categories by commit order on the branch, not alphabetically.\n\n")
+	sb.WriteString("Each bullet:\n")
+	sb.WriteString("- Names the file (`path/to/file.go`, optional `:line`).\n")
+	sb.WriteString("- Ends with the consequence, not the diff. `lookupSHA256 now sends User-Agent` not `added User-Agent header`.\n")
+	sb.WriteString("- Stays one line. Do NOT write a paragraph per bullet — reviewers scan bullets, they don't read paragraphs.\n\n")
+	sb.WriteString("If a commit spans multiple categories (e.g. a `refactor` that fixed a `fix` and added a `feat`), split its content into the matching categories and drop a one-line cross-reference in the others (`see Bug Fixes below`).\n\n")
 
-	// --- Conventional Commits title rules ------------------------
+	// --- Risk line (optional, v3 addition) -------------------------
+	sb.WriteString("## Risk line (recommended, optional)\n")
+	sb.WriteString("End the body with a single `Risk:` line if the change is non-trivial:\n")
+	sb.WriteString("`Risk: <low|medium|high> — <one sentence explaining why>`\n\n")
+	sb.WriteString("Omit the Risk line for one-line fixes, typo-only commits, or pure doc changes — reviewers know those are low risk by inspection. Do NOT omit Risk on any change that touches request paths, persisted state, auth, or shared infrastructure.\n\n")
+
+	// --- Conventional Commits — title rules (unchanged) -----------
 	sb.WriteString("## Conventional Commits — title rules (strict)\n")
 	sb.WriteString("- Format: <type>(<optional-scope>): <subject>\n")
 	sb.WriteString("- Types: feat, fix, chore, refactor, docs, test, build, ci, perf, style, revert\n")
 	sb.WriteString("- Subject ≤72 chars, imperative mood, no trailing period.\n")
 	sb.WriteString("- Scope names the layer (e.g. cmd, command, gtw, feishu, login), not the file path.\n")
-	sb.WriteString("- Breaking change: `!` after type/scope + `BREAKING CHANGE:` footer.\n\n")
+	sb.WriteString("- Breaking change: `!` after type/scope + `BREAKING CHANGE:` footer describing migration.\n\n")
 
-	// --- Anti-patterns (negative-weight list) ---------------------
+	// --- Do NOT (rewritten for category-prefix mode) ---------------
 	sb.WriteString("## Do NOT\n")
-	sb.WriteString("- Do NOT skip **Why**. A body without Why is a diff in disguise.\n")
-	sb.WriteString("- Do NOT paraphrase the diff in bullets (\"updated X\", \"refactored Y\"). Name the file, name the consequence.\n")
-	sb.WriteString("- Do NOT omit **Test evidence**. If you did not run tests, say so — that is itself evidence.\n")
-	sb.WriteString("- Do NOT include prose outside the fence. The daemon's parser stops at the first closing ```.\n\n")
+	sb.WriteString("- Do NOT use `## ` markdown headings inside the body. The ONLY heading is `## Summary by NightMe` at the top. Categories are inline labels followed by colon (`New Features:`), NOT headings — GitHub renders each `## ` heading with a horizontal rule, and a body with several such headings looks fragmented instead of scannable.\n")
+	sb.WriteString("- Do NOT use `###` / `####` sub-headings inside the body.\n")
+	sb.WriteString("- Do NOT use `---` horizontal rules to separate categories. Blank lines are enough.\n")
+	sb.WriteString("- Do NOT write v2-style multi-heading sections (Why / What / file list / Test evidence). Category-prefix bullets replace them.\n")
+	sb.WriteString("- Do NOT write a paragraph under any category label. Bullets only — one line each.\n")
+	sb.WriteString("- Do NOT enumerate files in the body. GitHub's review UI shows file changes; duplicating them is noise.\n")
+	sb.WriteString("- Do NOT include prose outside the fence. The daemon's parser stops at the first closing ```.\n")
+	sb.WriteString("- Do NOT invent category labels outside the six above. Reuse the title's CC type to pick the right category.\n\n")
 
-	// --- Task -----------------------------------------------------
+	// --- Task ------------------------------------------------------
 	sb.WriteString("## Task\n")
 	sb.WriteString("1. Run the three commands in **Before you write** and read every line of their output.\n")
-	sb.WriteString("2. Compose the title from the dominant commit subject — or invent one if this branch is a squash candidate.\n")
-	sb.WriteString("3. Write the body covering all four dimensions above. Lead with Why, then What, then Diff overview, then Test evidence.\n")
+	sb.WriteString("2. Compose the title from the dominant commit subject, or invent one if this branch is a squash candidate.\n")
+	sb.WriteString("3. Write the Summary (1-2 sentences, WHAT not WHY) and the category-prefixed bullets. Skip empty categories.\n")
+	sb.WriteString("4. Add a Risk line if the change is non-trivial (see Risk line above).\n")
 	if c.Issue > 0 {
-		fmt.Fprintf(&sb, "4. Add `Closes #%d` (or `Refs #%d`) as the last line of the body so GitHub auto-closes the issue.\n", c.Issue, c.Issue)
+		fmt.Fprintf(&sb, "5. Add `Closes #%d` (or `Refs #%d`) as the LAST line of the body so GitHub auto-closes the issue.\n", c.Issue, c.Issue)
 	}
-	sb.WriteString("\nDO NOT run `git commit`, `git push`, `gh pr create`, or `glab mr create`. Only generate the title + body.\n\n")
+	sb.WriteString("\nDO NOT run `git commit`, `git push`, `gh pr create`, or `glab mr create`. Only generate the title + body.\n")
 
-	// --- Context --------------------------------------------------
-	sb.WriteString("## Context\n")
-	if c.Repo != "" {
-		fmt.Fprintf(&sb, "Repository: %s\n", c.Repo)
-	} else {
-		// Detect-fallback path (and the non-worktree path
-		// added in PR #105): we don't yet know the owner/repo.
-		// The agent will derive it from `git remote get-url
-		// origin` if needed for the body; the daemon still calls
-		// provider.CreatePR with the right values.
-		sb.WriteString("Repository: (resolve from `git remote get-url origin`)\n")
-	}
-	fmt.Fprintf(&sb, "Branch (head): %s\n", c.Branch)
-	fmt.Fprintf(&sb, "Base branch: %s\n", base)
-	fmt.Fprintf(&sb, "Working dir: %s\n", c.Worktree)
+	// ## Context (repo / branch / base / worktree) — REMOVED in v3.
+	// GitHub's PR header shows branch + base; the daemon's IM
+	// card (renderPROpenedCard) shows worktree + branch + base +
+	// url. Duplicating this in the body is noise. If a future
+	// product decision needs to inject a context block (e.g. for
+	// non-GitHub targets that lack a comparable header), restore
+	// it here behind a provider check.
+
 	return sb.String()
 }
 
@@ -442,6 +489,25 @@ var prTitleJSONValueRegex = regexp.MustCompile(
 	`"[^"\\]*(?:\\.[^"\\]*)*"\s*:\s*"((?:feat|fix|chore|refactor|docs|test|build|ci|perf|style|revert)(?:\([^)]+\))?!?: \S[^"\n]*)"`,
 )
 
+// riskLineRegex extracts the optional `Risk: <level> — <reason>`
+// line that buildPRPrompt v3 tells the agent to include for
+// non-trivial PRs. The separator is intentionally tolerant —
+// em-dash, hyphen, or colon all work, since LLMs are
+// inconsistent. The level match is case-insensitive so
+// `Risk: HIGH — ...` and `Risk: high — ...` both match — the
+// caller lowercases the captured value for canonical output.
+// Multiline (?m) so a Risk line anywhere in the body is
+// recognised, not just at the very end.
+//
+// Examples that match:
+//
+//	Risk: low — typo fix
+//	Risk: medium - touches version fallback
+//	Risk: HIGH: auth change
+var riskLineRegex = regexp.MustCompile(
+	`(?im)^Risk:\s*(low|medium|high)\s*[—\-:]\s*(.+?)\s*$`,
+)
+
 // prLineNoiseRegex matches the per-line noise patterns we strip
 // from candidate title lines: Markdown heading marks (#, ##, …),
 // bullet markers (- /*/1.), and label prefixes (Title: /
@@ -471,6 +537,24 @@ func prNumberFromURL(rawURL string) int {
 		return 0
 	}
 	return n
+}
+
+// extractRiskLevel pulls the optional `Risk: <level> — <reason>`
+// line out of a parsed PR body. Returns ("", "") when the line
+// is absent — the caller treats absence as "no risk field in
+// the IM card" rather than as an error. The level is
+// lowercased before returning so `Risk: HIGH — ...` and
+// `Risk: high — ...` produce the same result.
+//
+// Body is passed in raw (already trimmed of leading/trailing
+// whitespace by parsePRReply); the regex runs multi-line so a
+// Risk line anywhere in the body is recognised.
+func extractRiskLevel(body string) (level, reason string) {
+	m := riskLineRegex.FindStringSubmatch(body)
+	if len(m) < 3 {
+		return "", ""
+	}
+	return strings.ToLower(m[1]), strings.TrimSpace(m[2])
 }
 
 // parsePRReply extracts title and body from an LLM-generated PR
@@ -729,22 +813,25 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 	return prov, owner, repo, nil
 }
 
-
-	
-
 // renderPROpenedCard renders the IM-friendly success card.
 // Format 1 (gtw/README.md §2.1): ✅ title + `→ field: value`
 // rows. The previous `━━━━━━━━━━━━━━ \n 🌿/🔗/📁` form was a
 // legacy mix that didn't fit any rule; the section divider is
 // gone, and `🌿/🔗/📁` merge into the `→` family alongside the
 // existing `→ base:` row.
-func renderPROpenedCard(c Context, base, url string) string {
-	return fmt.Sprintf(
-		"✅ PR opened\n"+
-			"→ branch:   %s\n"+
-			"→ base:     %s\n"+
-			"→ url:      %s\n"+
-			"→ worktree: %s\n",
-		c.Branch, base, url, c.Worktree,
-	)
+//
+// v3 addition: optional `→ risk:` row. Sourced via
+// extractRiskLevel(body) — when the agent omitted the Risk line
+// (trivial PRs), riskLevel is "" and the row is skipped.
+func renderPROpenedCard(c Context, base, url, riskLevel, riskReason string) string {
+	var sb strings.Builder
+	sb.WriteString("✅ PR opened\n")
+	fmt.Fprintf(&sb, "→ branch:   %s\n", c.Branch)
+	fmt.Fprintf(&sb, "→ base:     %s\n", base)
+	fmt.Fprintf(&sb, "→ url:      %s\n", url)
+	fmt.Fprintf(&sb, "→ worktree: %s\n", c.Worktree)
+	if riskLevel != "" {
+		fmt.Fprintf(&sb, "→ risk:     %s — %s\n", riskLevel, riskReason)
+	}
+	return sb.String()
 }

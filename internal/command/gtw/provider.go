@@ -238,10 +238,34 @@ var ErrCLINotInstalled = errors.New("gtw: provider CLI not installed")
 // succeeded, but the branch may have been deleted (or the cached
 // SHA replaced) between probe and CreatePR.
 //
-// Detection lives in isStaleUpstreamGH / isStaleUpstreamGL
-// (below). Both match known stderr substrings; unknown stderr
-// is propagated verbatim, NOT translated into ErrStaleUpstream.
+// Detection lives in each provider's classifyCreatePRError
+// method (see GitHubProvider / GitLabProvider below). Unknown
+// stderr is propagated verbatim, NOT translated into
+// ErrStaleUpstream.
 var ErrStaleUpstream = errors.New("gtw: head branch missing on origin")
+
+// ErrNoCommitsBetween is returned by GitHub when CreatePR
+// fails after the head ref was found to exist on origin, because
+// the platform refuses when base and head resolve to the same
+// commit, so there is no diff to PR. This is DIFFERENT from
+// ErrStaleUpstream: the branch is fine, the user just has
+// nothing to PR.
+//
+// GitHub's GraphQL validator surfaces it as "No commits
+// between <base> and <head>". Previously this was lumped into
+// ghStaleUpstreamSubstrings and surfaced to the user as
+// "origin/<head> no longer exists — /gtw push first to
+// republish", which is misleading (push did nothing wrong; the
+// branch is just empty relative to base). The fix routes it
+// through this dedicated sentinel so the user gets the right
+// next-step hint.
+//
+// GitLab coverage: glab generally accepts empty diffs and
+// surfaces the problem pre-merge, so the GitLab provider does
+// not classify this case today. If GitLab ever surfaces an
+// analogous error, add the substring to the GitLab provider's
+// classifyCreatePRError — not here.
+var ErrNoCommitsBetween = errors.New("gtw: no commits between base and head")
 
 // isExecutableNotFound reports whether err originates from
 // os/exec failing to find the binary on PATH (the common case
@@ -269,71 +293,30 @@ func isExecutableNotFound(err error) bool {
 	return false
 }
 
-// ghStaleUpstreamSubstrings are the four GraphQL field names
-// createPullRequest surfaces for "head ref is bad / branch
-// missing on origin". These are the literals GitHub's GraphQL
-// validator returns; see F-237 for the original bug.
+// wrapCreatePRError is the SHARED, provider-agnostic fallback
+// for CreatePR error mapping. Provider-specific detection
+// (gh's "No commits between" / GraphQL validator messages,
+// glab's "Source branch does not exist" / 404, etc.) lives in
+// the provider's own classifyCreatePRError method and runs
+// BEFORE this helper — by the time an error reaches here it
+// is either "no provider-specific pattern matched" or it has
+// already been wrapped with a typed sentinel.
 //
-// Pattern match is by substring on stderr — the GitHub provider
-// wraps stderr verbatim into the error (see
-// GitHubProvider.CreatePR). Any gh-emitted phrase survives the
-// wrap; non-matching stderr falls through to the generic
-// error path.
-var ghStaleUpstreamSubstrings = []string{
-	"Head ref must be a branch",
-	"No commits between",
-	"Head sha can't be blank",
-	"Base sha can't be blank",
-}
-
-// glStaleUpstreamSubstrings are the glab-side equivalents for
-// "source branch missing on origin". glab's HTTP layer surfaces
-// these directly in stderr / error message; substring match on
-// stderr is the same stable channel used by the GitHub side.
+// What stays at this layer:
 //
-// "Branch not found" matches glab's API 404 message; "Source
-// branch does not exist" matches the validation error;
-// "404 Not Found" matches the raw HTTP layer. The list is
-// deliberately narrow — unknown stderr is propagated verbatim,
-// NOT translated into ErrStaleUpstream.
-var glStaleUpstreamSubstrings = []string{
-	"Source branch does not exist",
-	"Branch not found",
-	"404 Not Found",
-}
-
-// isStaleUpstreamGH reports whether stderr matches any of the
-// known gh "head ref is bad" GraphQL validator messages.
-func isStaleUpstreamGH(stderr string) bool {
-	for _, s := range ghStaleUpstreamSubstrings {
-		if strings.Contains(stderr, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// isStaleUpstreamGL reports whether stderr matches any of the
-// known glab "source branch missing" messages.
-func isStaleUpstreamGL(stderr string) bool {
-	for _, s := range glStaleUpstreamSubstrings {
-		if strings.Contains(stderr, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// wrapCreatePRError is the shared CreatePR error-mapping helper
-// for GitHub/GitLab. Known failure modes (CLI not installed /
-// stale upstream / PR exists) are translated into sentinel
-// errors; unknown stderr is wrapped verbatim so dispatchPR can
-// surface it to the user without distortion.
+//   - ErrCLINotInstalled: about the binary being missing from
+//     PATH (provider-agnostic — *exec.Error / fs.PathError).
+//     The providerName argument drives the install hint.
+//   - ErrPRExists via generic "already exists" substring: a
+//     reasonable cross-platform fallback. If a platform's
+//     wording changes, the provider's classifyCreatePRError
+//     should match the new wording and return ErrPRExists
+//     directly with the original stderr preserved.
+//   - Generic wrap with stderr preserved verbatim.
 //
-// Returns the new error (always non-nil when called with a
-// non-nil input). err is the original; stderr is the trimmed
-// subprocess stderr (may be empty); providerName is "gh" or
-// "glab" — used only in the ErrCLINotInstalled hint.
+// What moved out (lives in the provider now): the gh/glab
+// substring tables that used to live here. The shared helper
+// no longer knows what gh or glab's stderr looks like.
 func wrapCreatePRError(err error, stderr, providerName string) error {
 	if err == nil {
 		return nil
@@ -344,16 +327,11 @@ func wrapCreatePRError(err error, stderr, providerName string) error {
 			providerCLIInstallURL(providerName), err)
 	}
 	trimmed := strings.TrimSpace(stderr)
-	switch providerName {
-	case "gh":
-		if isStaleUpstreamGH(trimmed) {
-			return fmt.Errorf("%w: %s", ErrStaleUpstream, trimmed)
-		}
-	case "glab":
-		if isStaleUpstreamGL(trimmed) {
-			return fmt.Errorf("%w: %s", ErrStaleUpstream, trimmed)
-		}
-	}
+	// Generic cross-platform "already exists" fallback. Both gh
+	// ("a pull request for branch ... into ... already exists")
+	// and glab ("Another open merge request already exists")
+	// surface this phrase; if a future platform does not, the
+	// provider's classifyCreatePRError should handle it.
 	if strings.Contains(trimmed, "already exists") {
 		return fmt.Errorf("%w: %s", ErrPRExists, trimmed)
 	}
@@ -1083,9 +1061,51 @@ func (c *GitHubProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 	}
 	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
 	if err != nil {
+		if classified := c.classifyCreatePRError(stderr); classified != nil {
+			return "", classified
+		}
 		return "", wrapCreatePRError(err, stderr, "gh")
 	}
 	return strings.TrimSpace(stdout), nil
+}
+
+// ghStaleUpstreamSubstrings are the GitHub GraphQL validator
+// messages createPullRequest surfaces for "head ref is bad /
+// branch missing on origin". These are the literals GitHub's
+// GraphQL validator returns; see F-237 for the original bug.
+//
+// Lives next to GitHubProvider (not in the shared layer) so
+// adding a third provider (Gitea, Bitbucket) does not require
+// editing this file's substring table — each provider owns its
+// own detection.
+var ghStaleUpstreamSubstrings = []string{
+	"Head ref must be a branch",
+	"Head sha can't be blank",
+	"Base sha can't be blank",
+}
+
+// classifyCreatePRError translates known gh CreatePR stderr
+// fragments into typed sentinel errors. Returns nil for stderr
+// that does not match any known pattern — the caller falls
+// back to wrapCreatePRError (the provider-agnostic helper).
+//
+// Detection order matters: ErrNoCommitsBetween is checked
+// before ErrStaleUpstream because the two classes are distinct
+// (branch-exists-but-empty vs branch-missing-on-origin) but
+// can superficially look similar in failure logs. The dispatch
+// layer surfaces each with a different user-facing hint, so
+// getting the classification wrong directly misleads the user.
+func (c *GitHubProvider) classifyCreatePRError(stderr string) error {
+	trimmed := strings.TrimSpace(stderr)
+	if strings.Contains(trimmed, "No commits between") {
+		return fmt.Errorf("%w: %s", ErrNoCommitsBetween, trimmed)
+	}
+	for _, s := range ghStaleUpstreamSubstrings {
+		if strings.Contains(trimmed, s) {
+			return fmt.Errorf("%w: %s", ErrStaleUpstream, trimmed)
+		}
+	}
+	return nil
 }
 
 // FindOpenPRForBranch runs `gh pr list --head <head> --state
@@ -1470,8 +1490,51 @@ func (c *GitLabProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 	}
 	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
 	if err != nil {
+		if classified := c.classifyCreatePRError(stderr); classified != nil {
+			return "", classified
+		}
 		return "", wrapCreatePRError(err, stderr, "glab")
 	}
 	return strings.TrimSpace(stdout), nil
+}
+
+// glStaleUpstreamSubstrings are the glab-side fragments that
+// mean "source branch missing on origin". glab's HTTP layer
+// surfaces these directly in stderr / error message; substring
+// match on stderr is the same stable channel used by the
+// GitHub side.
+//
+// "Branch not found" matches glab's API 404 message; "Source
+// branch does not exist" matches the validation error;
+// "404 Not Found" matches the raw HTTP layer. The list is
+// deliberately narrow — unknown stderr is propagated verbatim,
+// NOT translated into ErrStaleUpstream.
+//
+// Lives next to GitLabProvider (not in the shared layer) so
+// adding a third provider does not require editing this table.
+var glStaleUpstreamSubstrings = []string{
+	"Source branch does not exist",
+	"Branch not found",
+	"404 Not Found",
+}
+
+// classifyCreatePRError translates known glab CreatePR stderr
+// fragments into typed sentinel errors. Returns nil for stderr
+// that does not match any known pattern — the caller falls
+// back to wrapCreatePRError.
+//
+// GitLab does not currently surface a "base == head" error
+// (glab generally accepts empty diffs and lets the user fix
+// it pre-merge). The ErrNoCommitsBetween path is GitHub-only;
+// add a glNoCommitsBetweenSubstrings slice here if GitLab ever
+// surfaces an analogous message.
+func (c *GitLabProvider) classifyCreatePRError(stderr string) error {
+	trimmed := strings.TrimSpace(stderr)
+	for _, s := range glStaleUpstreamSubstrings {
+		if strings.Contains(trimmed, s) {
+			return fmt.Errorf("%w: %s", ErrStaleUpstream, trimmed)
+		}
+	}
+	return nil
 }
 

@@ -243,6 +243,23 @@ var ErrCLINotInstalled = errors.New("gtw: provider CLI not installed")
 // is propagated verbatim, NOT translated into ErrStaleUpstream.
 var ErrStaleUpstream = errors.New("gtw: head branch missing on origin")
 
+// ErrNoCommitsBetween is returned by GitHub (and glab, when
+// applicable) when CreatePR succeeds technically — the head
+// ref exists on origin — but the platform refuses because base
+// and head resolve to the same commit, so there is no diff to
+// PR. This is DIFFERENT from ErrStaleUpstream: the branch is
+// fine, the user just has nothing to PR.
+//
+// GitHub's GraphQL validator surfaces it as "No commits
+// between <base> and <head>". Previously this was lumped into
+// ghStaleUpstreamSubstrings and surfaced to the user as
+// "origin/<head> no longer exists — /gtw push first to
+// republish", which is misleading (push did nothing wrong; the
+// branch is just empty relative to base). The fix routes it
+// through this dedicated sentinel so the user gets the right
+// next-step hint.
+var ErrNoCommitsBetween = errors.New("gtw: no commits between base and head")
+
 // isExecutableNotFound reports whether err originates from
 // os/exec failing to find the binary on PATH (the common case
 // when `gh` / `glab` isn't installed). Covers both the modern
@@ -269,7 +286,7 @@ func isExecutableNotFound(err error) bool {
 	return false
 }
 
-// ghStaleUpstreamSubstrings are the four GraphQL field names
+// ghStaleUpstreamSubstrings are the GraphQL validator messages
 // createPullRequest surfaces for "head ref is bad / branch
 // missing on origin". These are the literals GitHub's GraphQL
 // validator returns; see F-237 for the original bug.
@@ -279,11 +296,29 @@ func isExecutableNotFound(err error) bool {
 // GitHubProvider.CreatePR). Any gh-emitted phrase survives the
 // wrap; non-matching stderr falls through to the generic
 // error path.
+//
+// Note: "No commits between" used to live here but was moved to
+// ghNoCommitsBetweenSubstrings (see below) because it is a
+// different error class — the branch exists, it just has no
+// commits ahead of base. The dispatch layer surfaces it via
+// ErrNoCommitsBetween with a "nothing to PR" hint rather than
+// the misleading "branch no longer exists".
 var ghStaleUpstreamSubstrings = []string{
 	"Head ref must be a branch",
-	"No commits between",
 	"Head sha can't be blank",
 	"Base sha can't be blank",
+}
+
+// ghNoCommitsBetweenSubstrings is the GitHub GraphQL validator
+// phrase createPullRequest surfaces when base and head resolve
+// to the same commit. The head ref is fine; there is just no
+// diff to PR. Maps to ErrNoCommitsBetween, NOT ErrStaleUpstream.
+//
+// Kept as a single-entry slice (not a constant string) so the
+// matching machinery mirrors isStaleUpstreamGH — easier to add
+// glab equivalents later when GitLab surfaces a similar error.
+var ghNoCommitsBetweenSubstrings = []string{
+	"No commits between",
 }
 
 // glStaleUpstreamSubstrings are the glab-side equivalents for
@@ -306,6 +341,21 @@ var glStaleUpstreamSubstrings = []string{
 // known gh "head ref is bad" GraphQL validator messages.
 func isStaleUpstreamGH(stderr string) bool {
 	for _, s := range ghStaleUpstreamSubstrings {
+		if strings.Contains(stderr, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// isNoCommitsBetweenGH reports whether stderr matches the gh
+// GraphQL validator message for "base and head resolve to the
+// same commit". Distinct from isStaleUpstreamGH because the
+// fix is different — push again does not help; the user needs
+// to land new commits on the head branch (or rebase onto a
+// newer base).
+func isNoCommitsBetweenGH(stderr string) bool {
+	for _, s := range ghNoCommitsBetweenSubstrings {
 		if strings.Contains(stderr, s) {
 			return true
 		}
@@ -346,6 +396,15 @@ func wrapCreatePRError(err error, stderr, providerName string) error {
 	trimmed := strings.TrimSpace(stderr)
 	switch providerName {
 	case "gh":
+		// Order matters: check ErrNoCommitsBetween BEFORE
+		// ErrStaleUpstream. They are distinct error classes
+		// that previously shared a substring list; if both
+		// checks existed, the no-commits case would be
+		// misclassified as stale-upstream and the user would
+		// see the misleading "branch no longer exists" hint.
+		if isNoCommitsBetweenGH(trimmed) {
+			return fmt.Errorf("%w: %s", ErrNoCommitsBetween, trimmed)
+		}
 		if isStaleUpstreamGH(trimmed) {
 			return fmt.Errorf("%w: %s", ErrStaleUpstream, trimmed)
 		}

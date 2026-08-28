@@ -303,7 +303,15 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// buildPRPrompt (plan §P3.1)
+// buildPRPrompt (plan §P3.1) — v3 invariants
+//
+// These tests lock in the structural / behavioural anchors introduced
+// in the v3 prompt rewrite (see buildPRPrompt doc comment). The v3
+// format is NightMe-branded + Sourcery-style summary: ONE `## `
+// heading (`## Summary by NightMe`), inline category labels
+// (`New Features:`), optional `Risk:` line, optional `Closes #N`.
+// The v2 four-dimension structure (Why / What / Diff overview /
+// Test evidence) and the `## Context` block are removed.
 // -----------------------------------------------------------------------------
 
 func TestBuildPRPrompt_Remote(t *testing.T) {
@@ -318,19 +326,34 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 
 	mustContain(t, p, "## Output Format")
 	mustContain(t, p, "## Task")
-	mustContain(t, p, "## Context")
+	// v3 anchors: brand heading + category structure + optional
+	// Risk line + GitHub issue-closing keyword.
+	mustContain(t, p, "## Summary by NightMe")
+	mustContain(t, p, "New Features:")
+	mustContain(t, p, "Bug Fixes:")
+	mustContain(t, p, "Enhancements:")
+	mustContain(t, p, "Tests:")
+	mustContain(t, p, "Documentation:")
+	mustContain(t, p, "Chore / Build / CI:")
+	mustContain(t, p, "Risk:")
 	mustContain(t, p, "Conventional Commits")
-	mustContain(t, p, "Repository: octocat/hello")
-	mustContain(t, p, "Branch (head): fix-42-foo")
-	mustContain(t, p, "Base branch: main")
-	mustContain(t, p, "Working dir: /w")
-	// v2 anchor: GitHub issue closing keyword, not the old prose hint.
+	// v2 anchor kept: GitHub issue closing keyword.
 	mustContain(t, p, "Closes #42")
 	mustContain(t, p, "Refs #42")
 
-	// Negative: push-only instructions must NOT leak into pr's prompt.
-	// The prompt DOES mention "git push" inside the "DO NOT run ..."
-	// guard, so we look for the literal commit-push snippet instead.
+	// Negative: v3 removed sections must NOT leak back into the
+	// prompt. Each of these was a `## ` heading in v2; their
+	// presence in v3 means a future edit accidentally undid the
+	// rewrite.
+	mustNotContain(t, p, "## Context")
+	mustNotContain(t, p, "## Four dimensions")
+	mustNotContain(t, p, "## Diff overview")
+	mustNotContain(t, p, "## What changed")
+	mustNotContain(t, p, "## Why")
+	mustNotContain(t, p, "Repository:")
+	mustNotContain(t, p, "Branch (head):")
+	mustNotContain(t, p, "Working dir:")
+	// Negative: agent-side safety rail for not running side effects.
 	mustNotContain(t, p, "git push -u origin")
 	mustNotContain(t, p, "git commit -m")
 }
@@ -346,13 +369,19 @@ func TestBuildPRPrompt_LocalNoIssue(t *testing.T) {
 	if strings.Contains(p, "Reference issue") {
 		t.Fatalf("ModeLocal / no-issue prompt should not include issue ref:\n%s", p)
 	}
+	// v3: no Closes / Refs footer when Issue is not set.
+	if strings.Contains(p, "Closes #") || strings.Contains(p, "Refs #") {
+		t.Fatalf("no-issue prompt should not include issue keyword:\n%s", p)
+	}
 }
 
-// TestBuildPRPrompt_NonWorktreeRepo covers the c.Repo == "" case
-// (Detect-fallback path / non-worktree mode): the prompt must
-// not print a literal "Repository: " line with nothing after the
-// colon (bug D from the review). The agent is told to resolve from
-// `git remote get-url origin` itself.
+// TestBuildPRPrompt_NonWorktreeRepo in v3 no longer has the
+// Repository-detect hint (## Context block is removed in v3).
+// The agent still gets c.Branch / base in the GitHub PR header
+// at PR-creation time, which is enough to look up owner/repo
+// if it needs to. We keep the test as a regression guard so a
+// future edit doesn't reintroduce a `Repository:` line with an
+// empty value (the v2 bug D it originally guarded against).
 func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 	c := Context{
 		Worktree: "/w",
@@ -361,29 +390,116 @@ func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 		// Repo deliberately empty (non-worktree mode path)
 	}
 	p := buildPRPrompt(c, "main")
-	if strings.Contains(p, "Repository: \n") {
-		t.Fatalf("prompt has 'Repository:' with empty value:\n%s", p)
+	if strings.Contains(p, "Repository: \n") || strings.Contains(p, "Repository: octocat") {
+		t.Fatalf("v3 prompt should not contain a Repository: line:\n%s", p)
 	}
-	mustContain(t, p, "Repository: (resolve from `git remote get-url origin`)")
 }
 
-// -----------------------------------------------------------------------------
-// buildPRPrompt v2 invariants
-//
-// These tests lock in the structural / behavioural anchors introduced
-// in the v2 prompt rewrite (see buildPRPrompt doc comment). Each
-// invariant maps to one of the LLM-failure modes observed in
-// recent PRs (#140-#144: 4-bullet regression after the LLM falls
-// back to its training-data modal pattern). They are not exhaustive
-// style tests — they fail if a future edit silently drops the
-// guard that prevents the regression from coming back.
-// -----------------------------------------------------------------------------
+// TestBuildPRPromptV3_BrandHeading pins the exact brand casing
+// for the body heading. nightme is lowercase in code/CLI/paths
+// and PascalCase `NightMe` in prose. A regression to `nightme`
+// (lowercase) or `Nightme` (sentence case) here is a brand
+// violation. See also the dedicated brand-casing memory.
+func TestBuildPRPromptV3_BrandHeading(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
 
-// TestBuildPRPromptV2_ToolFloorMandatory checks that the prompt
-// tells the agent to RUN git log / diff before writing, not merely
-// to consult them. The tool floor is what prevents the "write the
-// body from commit messages alone" failure mode.
-func TestBuildPRPromptV2_ToolFloorMandatory(t *testing.T) {
+	mustContain(t, p, "## Summary by NightMe")
+	mustNotContain(t, p, "## Summary by nightme")
+	mustNotContain(t, p, "## Summary by Nightme")
+}
+
+// TestBuildPRPromptV3_CategoriesPresent locks the six category
+// labels and their CC-type mapping. If a future edit drops a
+// label or rewires the derivation, the LLM loses a stable slot
+// to fill and the modal-pattern regression returns.
+func TestBuildPRPromptV3_CategoriesPresent(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "`New Features:` — from `feat(...)` commits")
+	mustContain(t, p, "`Bug Fixes:` — from `fix(...)` commits")
+	mustContain(t, p, "`Enhancements:` — from `refactor(...)` / `perf(...)` commits")
+	mustContain(t, p, "`Tests:` — from `test(...)` commits")
+	mustContain(t, p, "`Documentation:` — from `docs(...)` commits")
+	mustContain(t, p, "`Chore / Build / CI:` — from `chore(...)` / `build(...)` / `ci(...)` commits")
+}
+
+// TestBuildPRPromptV3_CategoriesAreInlineLabels is the v3 anchor
+// for the heading-vs-inline-label rule. The minimal parseability
+// example uses `Bug Fixes:` (inline label), not `## Bug Fixes`
+// (heading). If a future edit flips the example to a heading,
+// the LLM follows suit in the output.
+func TestBuildPRPromptV3_CategoriesAreInlineLabels(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	// Example body contains `Bug Fixes:` as inline text.
+	mustContain(t, p, "Bug Fixes:\n- file:pkg/something.go: short consequence")
+	// Example must NOT contain a `## Bug Fixes` heading.
+	mustNotContain(t, p, "## Bug Fixes")
+	mustNotContain(t, p, "## New Features")
+}
+
+// TestBuildPRPromptV3_NoH2InsideBody is the explicit Do-NOT
+// guard against the regression that produced PR #303's
+// fragmented body: each `## ` heading in the body adds a
+// horizontal rule in GitHub's rendering and a body with 4-5
+// such rules looks fragmented instead of scannable. This test
+// fails if a future edit drops the explicit rule.
+func TestBuildPRPromptV3_NoH2InsideBody(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "Do NOT use `## ` markdown headings inside the body")
+	mustContain(t, p, "The ONLY heading is `## Summary by NightMe`")
+	// Sub-rules: no `###` / `####`, no `---`.
+	mustContain(t, p, "Do NOT use `###` / `####` sub-headings")
+	mustContain(t, p, "Do NOT use `---` horizontal rules")
+}
+
+// TestBuildPRPromptV3_NoDiffOverview guards the v2 sections
+// that v3 explicitly dropped. PR #303 demonstrated the cost:
+// the body was 4× the size of an equivalent SourRY summary,
+// with identical coverage, because reviewers had to scan
+// through `## Diff overview` prose instead of category bullets.
+func TestBuildPRPromptV3_NoDiffOverview(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustNotContain(t, p, "## Diff overview")
+	mustNotContain(t, p, "Diff overview")
+	mustNotContain(t, p, "file-grouped summary")
+	// No "Lead with Why" — the v3 heading structure does not
+	// include Why at all.
+	mustNotContain(t, p, "Lead with Why")
+	// v2 four-dimension section header must be gone.
+	mustNotContain(t, p, "## Four dimensions")
+}
+
+// TestBuildPRPromptV3_RiskLineOptional pins the optional-but-
+// recommended status of the Risk row. v3 does NOT force Risk on
+// every PR — trivial PRs may omit — but the section must exist
+// and clearly say it is optional (LLMs that read "Risk" without
+// "optional" will fabricate a Risk row on every PR, which is
+// noise on one-line typos).
+func TestBuildPRPromptV3_RiskLineOptional(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "## Risk line")
+	mustContain(t, p, "recommended, optional")
+	mustContain(t, p, "Risk: <low|medium|high>")
+	mustContain(t, p, "Omit the Risk line for one-line fixes")
+}
+
+// TestBuildPRPromptV3_ToolFloorMandatory: tool floor is
+// unchanged from v2. The agent MUST run git log / git diff
+// before writing; the LLM-checkable "write from commit
+// messages alone" prohibition is what suppresses the
+// "git log + commit subjects only, no diff inspection"
+// failure mode.
+func TestBuildPRPromptV3_ToolFloorMandatory(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
 	p := buildPRPrompt(c, "main")
 
@@ -391,79 +507,37 @@ func TestBuildPRPromptV2_ToolFloorMandatory(t *testing.T) {
 	mustContain(t, p, "You MUST run")
 	mustContain(t, p, "git log --oneline main..HEAD")
 	mustContain(t, p, "git diff main...HEAD --stat")
-	mustContain(t, p, "Do NOT write the body from commit messages alone")
+	mustContain(t, p, "Do NOT write the bullets from commit messages alone")
 }
 
-// TestBuildPRPromptV2_BodyLengthSelfCheck checks the objective
-// rule "body should not be shorter than raw git log output".
-// The rule is LLM-checkable against its own tool output, which is
-// what makes it effective — the model can compare two strings it
-// actually has in context, not just aim at an abstract "be longer".
-func TestBuildPRPromptV2_BodyLengthSelfCheck(t *testing.T) {
-	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
-
-	mustContain(t, p, "shorter than the raw `git log` output")
-	mustContain(t, p, "you've written too little")
-}
-
-// TestBuildPRPromptV2_FourDimensions checks that the four
-// dimensions (what / why / diff overview / test evidence) are all
-// named as required coverage. This is the v2 replacement for the
-// v1 "structured body summarising the change" empty anchor — the
-// LLM is now held to specific dimensions, not to a vague adjective.
-func TestBuildPRPromptV2_FourDimensions(t *testing.T) {
-	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
-
-	mustContain(t, p, "## Four dimensions")
-	mustContain(t, p, "**What changed**")
-	mustContain(t, p, "**Why it changed**")
-	mustContain(t, p, "**Diff overview**")
-	mustContain(t, p, "**Test evidence**")
-	// Order matters: Why leads, Test evidence closes. If the
-	// ordering drifts, reviewers lose the "is this merge-worthy"
-	// signal that Why-first provides.
-	mustContain(t, p, "Lead with Why, then What, then Diff overview, then Test evidence")
-}
-
-// TestBuildPRPromptV2_AntiModalPattern is the single most
-// important regression guard: the line that tells the LLM NOT to
-// default to a 4-bullet list. Without it, every other improvement
-// is overridden by the modal training-data pattern. If a future
-// edit drops this line, the regression observed in #140-#144
-// returns within a few PRs.
-func TestBuildPRPromptV2_AntiModalPattern(t *testing.T) {
-	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
-	p := buildPRPrompt(c, "main")
-
-	mustContain(t, p, "Do NOT default to a 4-bullet list")
-	mustContain(t, p, "modal pattern in training data")
-}
-
-// TestBuildPRPromptV2_DoNotSection checks that the anti-pattern
-// block exists and lists the four key failure modes (skip Why,
-// paraphrase the diff, omit Tests, prose outside the fence).
-// Transformer attention to negative imperatives ("Do NOT") is
-// higher than to positive rules of equal length, so this short
-// blacklist is the most reliable way to suppress the failure modes.
-func TestBuildPRPromptV2_DoNotSection(t *testing.T) {
+// TestBuildPRPromptV3_DoNotSection checks the rewritten Do-NOT
+// block. v2 had four rules around Why / paraphrase / Test /
+// prose; v3 replaces them with v3-specific rules (no `## `
+// inside body, no paragraph per category, no Diff overview,
+// no invented categories). If a future edit silently drops
+// the new rules, the failure modes they guard re-emerge.
+func TestBuildPRPromptV3_DoNotSection(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
 	p := buildPRPrompt(c, "main")
 
 	mustContain(t, p, "## Do NOT")
-	mustContain(t, p, "Do NOT skip **Why**")
-	mustContain(t, p, "Do NOT paraphrase the diff")
-	mustContain(t, p, "Do NOT omit **Test evidence**")
+	mustContain(t, p, "Do NOT use `## ` markdown headings inside the body")
+	mustContain(t, p, "Do NOT write a paragraph under any category label")
+	mustContain(t, p, "Do NOT enumerate files in the body")
 	mustContain(t, p, "Do NOT include prose outside the fence")
+	mustContain(t, p, "Do NOT invent category labels outside the six above")
+	// v2-only rules that v3 removed.
+	mustNotContain(t, p, "Do NOT skip **Why**")
+	mustNotContain(t, p, "Do NOT paraphrase the diff in bullets")
+	mustNotContain(t, p, "Do NOT default to a 4-bullet list")
 }
 
-// TestBuildPRPromptV2_PreserveParseability guards the v1
-// invariants that made the existing parser happy. v2 adds content
-// guidance but MUST NOT regress parseability — a future edit that
-// drops these strings silently breaks every existing
+// TestBuildPRPromptV3_PreserveParseability guards the v1/v2
+// parseability invariants that parsePRReply depends on. v3 adds
+// content guidance but MUST NOT regress parseability — a future
+// edit that drops these strings silently breaks every existing
 // parsePRReply test in this file.
-func TestBuildPRPromptV2_PreserveParseability(t *testing.T) {
+func TestBuildPRPromptV3_PreserveParseability(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
 	p := buildPRPrompt(c, "main")
 
@@ -471,18 +545,16 @@ func TestBuildPRPromptV2_PreserveParseability(t *testing.T) {
 	mustContain(t, p, "First line inside the fence is the PR title")
 	mustContain(t, p, "Do NOT nest additional ``` fences")
 	mustContain(t, p, "Indent code samples with 4 spaces")
-	// "DO NOT run git commit / git push / gh / glab" guard is the
-	// agent-side safety rail that keeps pr() from triggering
-	// side effects. Do not let v2 edits drop it.
+	// "DO NOT run git commit / git push / gh / glab" guard is
+	// the agent-side safety rail that keeps pr() from triggering
+	// side effects. Do not let v3 edits drop it.
 	mustContain(t, p, "DO NOT run `git commit`")
 	mustContain(t, p, "`gh pr create`")
 }
 
-// TestBuildPRPromptV2_IssueKeywordOnlyOnIssue checks that the
-// GitHub issue-closing keyword is gated on c.Issue > 0 (same
-// invariant as v1's "Reference issue" — just renamed to the
-// GitHub-recognised Closes/Refs form).
-func TestBuildPRPromptV2_IssueKeywordOnlyOnIssue(t *testing.T) {
+// TestBuildPRPromptV3_IssueKeywordOnlyOnIssue checks that the
+// GitHub issue-closing keyword is gated on c.Issue > 0.
+func TestBuildPRPromptV3_IssueKeywordOnlyOnIssue(t *testing.T) {
 	withIssue := buildPRPrompt(Context{Worktree: "/w", Branch: "x", RepoRoot: "/r", Repo: "o/r", Issue: 7}, "main")
 	mustContain(t, withIssue, "Closes #7")
 	mustContain(t, withIssue, "Refs #7")
@@ -493,16 +565,102 @@ func TestBuildPRPromptV2_IssueKeywordOnlyOnIssue(t *testing.T) {
 	}
 }
 
-// TestBuildPRPromptV2_BranchInCommands checks that the actual
-// base branch name appears in the tool-floor git commands. The
-// LLM has to copy-paste or mentally substitute the branch, and a
-// literal placeholder like `<base>` in the executed command
-// breaks the floor. This is a small but real regression risk.
-func TestBuildPRPromptV2_BranchInCommands(t *testing.T) {
+// TestBuildPRPromptV3_BranchInCommands checks that the actual
+// base branch name appears in the tool-floor git commands.
+func TestBuildPRPromptV3_BranchInCommands(t *testing.T) {
 	p := buildPRPrompt(Context{Worktree: "/w", Branch: "feat/y", RepoRoot: "/r", Repo: "o/r"}, "develop")
 
 	mustContain(t, p, "git log --oneline develop..HEAD")
 	mustContain(t, p, "git diff develop...HEAD --stat")
+}
+
+// -----------------------------------------------------------------------------
+// extractRiskLevel (v3 addition)
+//
+// Pulls the optional `Risk: <level> — <reason>` line out of a
+// parsed PR body. Returns ("", "") when the line is absent.
+// The level is lowercased so `Risk: HIGH — ...` and
+// `Risk: high — ...` produce the same result.
+// -----------------------------------------------------------------------------
+
+func TestExtractRiskLevel_LowEmDash(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo.\n\nRisk: low — typo fix\n"
+	l, r := extractRiskLevel(body)
+	if l != "low" || r != "typo fix" {
+		t.Fatalf("got (%q, %q)", l, r)
+	}
+}
+
+func TestExtractRiskLevel_MediumHyphen(t *testing.T) {
+	body := "Risk: medium - touches version fallback path"
+	l, r := extractRiskLevel(body)
+	if l != "medium" || r != "touches version fallback path" {
+		t.Fatalf("got (%q, %q)", l, r)
+	}
+}
+
+func TestExtractRiskLevel_HighColon(t *testing.T) {
+	body := "Risk: high: auth change requires token rotation"
+	l, r := extractRiskLevel(body)
+	if l != "high" || r != "auth change requires token rotation" {
+		t.Fatalf("got (%q, %q)", l, r)
+	}
+}
+
+// TestExtractRiskLevel_HighUppercase verifies that the level is
+// normalised to lowercase. `Risk: HIGH — ...` and `Risk: high —
+// ...` produce the same result.
+func TestExtractRiskLevel_HighUppercase(t *testing.T) {
+	body := "Risk: HIGH — auth change"
+	l, r := extractRiskLevel(body)
+	if l != "high" || r != "auth change" {
+		t.Fatalf("got (%q, %q); want (high, auth change)", l, r)
+	}
+}
+
+// TestExtractRiskLevel_Absent verifies the no-Risk case. Risk
+// is OPTIONAL — absence must not be treated as an error.
+func TestExtractRiskLevel_Absent(t *testing.T) {
+	body := "## Summary by NightMe\n\nJust a typo fix.\n"
+	l, r := extractRiskLevel(body)
+	if l != "" || r != "" {
+		t.Fatalf("got (%q, %q); want both empty", l, r)
+	}
+}
+
+// TestExtractRiskLevel_MidBody verifies the multiline (?m)
+// behaviour: a Risk line in the middle of the body (not just at
+// the end) is recognised. The agent might place Risk before
+// Closes #N, or between categories.
+func TestExtractRiskLevel_MidBody(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo.\n\nRisk: low — easy\n\nCloses #42\n"
+	l, r := extractRiskLevel(body)
+	if l != "low" || r != "easy" {
+		t.Fatalf("got (%q, %q); want (low, easy)", l, r)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// renderPROpenedCard (v3 addition: optional → risk: row)
+// -----------------------------------------------------------------------------
+
+func TestRenderPROpenedCard_WithRisk(t *testing.T) {
+	c := Context{Branch: "fix-x", Worktree: "/w"}
+	out := renderPROpenedCard(c, "main", "https://gh/x/pull/1", "medium", "touches upgrade path")
+	mustContain(t, out, "✅ PR opened")
+	mustContain(t, out, "→ branch:   fix-x")
+	mustContain(t, out, "→ base:     main")
+	mustContain(t, out, "→ url:      https://gh/x/pull/1")
+	mustContain(t, out, "→ worktree: /w")
+	mustContain(t, out, "→ risk:     medium — touches upgrade path")
+}
+
+func TestRenderPROpenedCard_NoRisk(t *testing.T) {
+	c := Context{Branch: "fix-x", Worktree: "/w"}
+	out := renderPROpenedCard(c, "main", "https://gh/x/pull/1", "", "")
+	mustContain(t, out, "✅ PR opened")
+	mustContain(t, out, "→ branch:   fix-x")
+	mustNotContain(t, out, "→ risk:")
 }
 
 // -----------------------------------------------------------------------------
@@ -1499,6 +1657,39 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 	}
 }
 
+// TestDispatchPR_NoCommitsBetween — exercises the full
+// dispatch path when gh reports "No commits between <base> and
+// <head>". The mock provider returns ErrNoCommitsBetween; the
+// reply must contain the v3 hint that points at the actual fix
+// (commit something new) rather than the misleading
+// "origin/X no longer exists — /gtw push first" hint that v2
+// produced (because ErrStaleUpstream was the only sentinel).
+func TestDispatchPR_NoCommitsBetween(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt",
+	})
+	setupPRGit(rig, "wt", 0)
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRErr(fmt.Errorf("%w: GraphQL: No commits between main and wt (createPullRequest)", ErrNoCommitsBetween))
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "no commits between main and wt") {
+		t.Fatalf("expected 'no commits between' hint, got:\n%s", r)
+	}
+	// Must NOT contain the v2 stale-upstream hint that misdirected
+	// users to push again when nothing-to-PR was the real problem.
+	if strings.Contains(r, "no longer exists") || strings.Contains(r, "/gtw push first to republish") {
+		t.Fatalf("reply must not use stale-upstream wording for ErrNoCommitsBetween; got:\n%s", r)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Provider error mapping — wrapCreatePRError / wrapListPRError
 // -----------------------------------------------------------------------------
@@ -1536,10 +1727,14 @@ func TestWrapCreatePRError_CLINotInstalled_GitLab(t *testing.T) {
 // messages get translated to ErrStaleUpstream. Each known
 // substring in the table maps to the sentinel; the rest of the
 // stderr is preserved verbatim.
+//
+// Note: "No commits between" used to live in this table but was
+// moved to ghNoCommitsBetweenSubstrings — it is a different
+// error class (branch exists, no diff to PR). See
+// TestWrapCreatePRError_NoCommitsBetween below.
 func TestWrapCreatePRError_StaleUpstreamGH(t *testing.T) {
 	cases := []string{
 		"gh pr create: Head ref must be a branch",
-		"gh pr create: No commits between main and feat",
 		"gh pr create: Head sha can't be blank",
 		"gh pr create: Base sha can't be blank",
 	}
@@ -1551,6 +1746,52 @@ func TestWrapCreatePRError_StaleUpstreamGH(t *testing.T) {
 		if !strings.Contains(err.Error(), stderr) {
 			t.Fatalf("expected raw stderr preserved; got %v", err)
 		}
+	}
+}
+
+// TestWrapCreatePRError_NoCommitsBetween — gh's "No commits
+// between" message maps to ErrNoCommitsBetween, NOT
+// ErrStaleUpstream. This was a real bug: the two errors have
+// different user-facing next-step hints (push again vs commit
+// new changes), and lumping them together misled the user.
+//
+// The test asserts both directions:
+//   - "No commits between …" → ErrNoCommitsBetween
+//   - other stale-upstream substrings → still ErrStaleUpstream
+func TestWrapCreatePRError_NoCommitsBetween(t *testing.T) {
+	cases := []string{
+		"pull request create failed: GraphQL: No commits between main and fix-x (createPullRequest)",
+		"gh pr create: No commits between main and feat",
+		"No commits between develop and my-branch",
+	}
+	for _, stderr := range cases {
+		err := wrapCreatePRError(errors.New("exit 1"), stderr, "gh")
+		if !errors.Is(err, ErrNoCommitsBetween) {
+			t.Fatalf("expected ErrNoCommitsBetween for %q, got %v", stderr, err)
+		}
+		// Must NOT also classify as ErrStaleUpstream — that was
+		// the bug.
+		if errors.Is(err, ErrStaleUpstream) {
+			t.Fatalf("ErrNoCommitsBetween case must not also match ErrStaleUpstream; got %v", err)
+		}
+		// Raw stderr preserved verbatim for debug.
+		if !strings.Contains(err.Error(), stderr) {
+			t.Fatalf("expected raw stderr preserved; got %v", err)
+		}
+	}
+}
+
+// TestWrapCreatePRError_StaleUpstreamExcludesNoCommits — even
+// though "No commits between" used to be in the stale-upstream
+// list, it must NOT match isStaleUpstreamGH anymore. Future
+// edits that re-add it to ghStaleUpstreamSubstrings would
+// silently reintroduce the bug.
+func TestWrapCreatePRError_StaleUpstreamExcludesNoCommits(t *testing.T) {
+	if isStaleUpstreamGH("gh pr create: No commits between main and feat") {
+		t.Fatalf("isStaleUpstreamGH must NOT match 'No commits between'; that path is reserved for ErrNoCommitsBetween")
+	}
+	if !isNoCommitsBetweenGH("gh pr create: No commits between main and feat") {
+		t.Fatalf("isNoCommitsBetweenGH must match 'No commits between'")
 	}
 }
 
@@ -2008,12 +2249,22 @@ func TestIsExecutableNotFound(t *testing.T) {
 func TestIsStaleUpstreamGH(t *testing.T) {
 	for _, ok := range []string{
 		"Head ref must be a branch",
-		"No commits between main and feature/x",
 		"Head sha can't be blank",
 		"Base sha can't be blank",
 	} {
 		if !isStaleUpstreamGH(ok) {
 			t.Fatalf("expected match for %q", ok)
+		}
+	}
+	// "No commits between" was removed from this list when the
+	// dedicated ErrNoCommitsBetween path was added. It must
+	// NOT match here — see TestWrapCreatePRError_StaleUpstreamExcludesNoCommits.
+	for _, no := range []string{
+		"No commits between main and feature/x",
+		"gh pr create: No commits between foo and bar",
+	} {
+		if isStaleUpstreamGH(no) {
+			t.Fatalf("isStaleUpstreamGH must not match %q; that substring routes via ErrNoCommitsBetween", no)
 		}
 	}
 	// Negatives — must NOT match.

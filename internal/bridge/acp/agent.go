@@ -1008,10 +1008,8 @@ func (d *driver) Close() error {
 		// operation. A JSON-RPC notification could block on an
 		// uncooperative PTY peer, so cleanup never waits for an
 		// optional server acknowledgement.
+		d.flushTextBuffers() // drain idle-buffered text before ctx cancel
 		d.cancel()
-		d.textMu.Lock()
-		d.stopFlushTimerLocked()
-		d.textMu.Unlock()
 		if d.transport != nil {
 			err = d.transport.Close()
 		}
@@ -1384,7 +1382,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			d.appendAndMaybeFlush(d.textBuf, content.Text, true)
+			d.appendAndMaybeFlush(d.textBuf, content.Text)
 		}
 	case "agent_thought_chunk":
 		var content struct {
@@ -1392,7 +1390,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			d.appendAndMaybeFlush(d.thoughtBuf, content.Text, false)
+			d.appendAndMaybeFlush(d.thoughtBuf, content.Text)
 		}
 	case "tool_call":
 		// Tool boundary: flush both buffers so the user sees
@@ -1407,7 +1405,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			d.appendAndMaybeFlush(d.textBuf, content.Text, true)
+			d.appendAndMaybeFlush(d.textBuf, content.Text)
 		}
 	case "usage_update":
 		// Per-turn token usage from the server's usage sessionUpdate.
@@ -1793,11 +1791,10 @@ var flushDebounce = 800 * time.Millisecond
 
 // appendAndMaybeFlush writes chunk onto buf and (re)starts the
 // sliding idle timer from this token. Flush happens later in
-// flushOnIdle only if the buffer still ends on a true sentence /
-// paragraph boundary after the quiet window — so "session." during
-// a slow stream never cuts an identifier, and rapid short sentences
-// coalesce while tokens keep arriving. reply selects flush order.
-func (d *driver) appendAndMaybeFlush(buf *strings.Builder, chunk string, reply bool) {
+// flushOnIdle, which re-checks BOTH textBuf and thoughtBuf so a
+// ready reply is never blocked by an incomplete thought stream
+// (shared timer). reply/thought order at fire: thought first.
+func (d *driver) appendAndMaybeFlush(buf *strings.Builder, chunk string) {
 	if buf == nil || chunk == "" {
 		return
 	}
@@ -1807,42 +1804,37 @@ func (d *driver) appendAndMaybeFlush(buf *strings.Builder, chunk string, reply b
 	if strings.TrimSpace(buf.String()) != "" {
 		d.flushGen++
 		gen := d.flushGen
-		wantReplyFirst := reply
 		d.flushTimer = time.AfterFunc(flushDebounce, func() {
-			d.flushOnIdle(gen, wantReplyFirst)
+			d.flushOnIdle(gen)
 		})
 	}
 	d.textMu.Unlock()
 }
 
 // flushOnIdle runs after flushDebounce with no new tokens. gen must
-// match flushGen (else the timer was reset). Re-checks the true
-// sentence gate at fire time — a pause after "session." is a no-op.
-func (d *driver) flushOnIdle(gen uint64, reply bool) {
+// match flushGen (else the timer was reset). Each buffer is gated
+// independently — a pause after "session." is a no-op for that
+// buffer, while a ready sibling still flushes.
+func (d *driver) flushOnIdle(gen uint64) {
 	d.textMu.Lock()
 	if gen != d.flushGen {
 		d.textMu.Unlock()
 		return
 	}
 	d.flushTimer = nil
-	var ready bool
-	if reply {
-		ready = shouldFlushBufferedText(d.textBuf.String())
-	} else {
-		ready = shouldFlushBufferedText(d.thoughtBuf.String())
-	}
-	if !ready {
+	thoughtReady := shouldFlushBufferedText(d.thoughtBuf.String())
+	textReady := shouldFlushBufferedText(d.textBuf.String())
+	if !thoughtReady && !textReady {
 		d.textMu.Unlock()
 		return
 	}
 	d.flushGen++ // invalidate any twin firing
 	d.textMu.Unlock()
-	if reply {
+	if thoughtReady {
 		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+	}
+	if textReady {
 		d.flushBuffer(d.textBuf, "")
-	} else {
-		d.flushBuffer(d.textBuf, "")
-		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
 	}
 }
 
@@ -1996,11 +1988,48 @@ func endsWithTrueSentenceBoundary(s string) bool {
 		// ASCII: require whitespace after the mark so "session."
 		// (next token still in flight) is not treated as a sentence.
 		// When the next token is " idle" / "\n", sawSpace becomes
-		// true and we flush.
-		return sawSpace
+		// true and we flush — unless the mark closes a common
+		// abbreviation ("e.g. ", "Mr. ").
+		if !sawSpace {
+			return false
+		}
+		if r == '.' && endsWithCommonAbbreviation(s[:i]) {
+			return false
+		}
+		return true
 	default:
 		return false
 	}
+}
+
+// commonAbbreviations are lowercase suffixes (including the final
+// period) that look like sentence ends when followed by whitespace
+// but are not. Matched with a letter/digit boundary before the
+// suffix so "eg." inside a longer token is ignored.
+var commonAbbreviations = []string{
+	"e.g.", "i.e.", "mr.", "mrs.", "ms.", "dr.", "prof.",
+	"vs.", "etc.", "u.s.", "u.k.", "approx.", "fig.", "vol.",
+	"jr.", "sr.", "inc.", "ltd.",
+}
+
+// endsWithCommonAbbreviation reports whether s (no trailing space;
+// should end with '.') is a known abbreviation like "e.g." / "Mr.".
+func endsWithCommonAbbreviation(s string) bool {
+	lower := strings.ToLower(s)
+	for _, abbr := range commonAbbreviations {
+		if !strings.HasSuffix(lower, abbr) {
+			continue
+		}
+		rest := len(lower) - len(abbr)
+		if rest == 0 {
+			return true
+		}
+		r, _ := utf8.DecodeLastRuneInString(lower[:rest])
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // Compile-time guarantee that *driver satisfies the package-private

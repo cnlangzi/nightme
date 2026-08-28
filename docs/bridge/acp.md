@@ -63,7 +63,7 @@ claudecode / codex / dsh / pi 是**独立的 transport 实现**，不走 acp bri
 
 | `sessionUpdate` | Wire 字段 | 处理 | 出处 |
 |---|---|---|---|
-| `agent_message_chunk` | `content.text` | 缓冲到 textBuf；**滑动空闲** `flushDebounce`(800ms)：每个 token 重置计时，从「最后一次收到 token」起算。静默满窗口后仅当 `shouldFlushBufferedText`（≥160 rune + 真断句/段落）才 flush。ASCII `.?!` 必须后跟空白；`session.idle_timeout` / 裸 `session.` 不断；中文 `。！？` 可断；列表 `"4."` 不断。tool / turn-end **立即** flush | ACP spec |
+| `agent_message_chunk` | `content.text` | 缓冲到 textBuf；**滑动空闲** `flushDebounce`(800ms)：每个 token 重置计时。静默后分别检查 text/thought，ready 的一侧独立 flush（互不阻塞）。真断句：≥160 rune + 中文 `。！？` / ASCII `.?!`+空白（排除 `e.g.`/`Mr.` 等缩写与 `session.idle_timeout`）；列表 `"4."` 不断。tool / turn-end / Close **立即** drain | ACP spec |
 | `agent_thought_chunk` | `content.text` | 同 textBuf 规则，flush 时带 `[思考]` 前缀 | ACP spec |
 | `tool_call` | `toolCallId / title / rawInput` | EventAgentToolStart | ACP spec |
 | `tool_call_update` | `toolCallId / status / rawOutput` | EventAgentToolEnd | ACP spec |

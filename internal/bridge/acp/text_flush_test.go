@@ -125,7 +125,7 @@ func TestAppendAndMaybeFlush_SlidingIdleCoalescesWhileTokensArrive(t *testing.T)
 	defer func() { flushDebounce = prev }()
 
 	d := newFlushTestDriver(t)
-	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("第一句。"), true)
+	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("第一句。"))
 
 	// Still inside the idle window — nothing emitted yet.
 	select {
@@ -135,7 +135,7 @@ func TestAppendAndMaybeFlush_SlidingIdleCoalescesWhileTokensArrive(t *testing.T)
 	}
 
 	// Another token resets the sliding idle clock.
-	d.appendAndMaybeFlush(d.textBuf, "第二句也够长了。", true)
+	d.appendAndMaybeFlush(d.textBuf, "第二句也够长了。")
 
 	select {
 	case ev := <-d.events:
@@ -157,14 +157,45 @@ func TestAppendAndMaybeFlush_SlidingIdleCoalescesWhileTokensArrive(t *testing.T)
 	}
 }
 
+func TestAppendAndMaybeFlush_ThoughtTokensDoNotBlockReadyReply(t *testing.T) {
+	prev := flushDebounce
+	flushDebounce = 40 * time.Millisecond
+	defer func() { flushDebounce = prev }()
+
+	d := newFlushTestDriver(t)
+	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("回复已经断句。"))
+	// Incomplete thought resets the shared idle timer but must not
+	// prevent the ready reply from flushing on the next quiet window.
+	d.appendAndMaybeFlush(d.thoughtBuf, "还在想")
+
+	var got agent.AgentEvent
+	select {
+	case got = <-d.events:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ready reply blocked by incomplete thought")
+	}
+	if strings.HasPrefix(got.Text, "[思考]") {
+		t.Fatalf("expected reply flush, got thought: %q", got.Text)
+	}
+	if !strings.Contains(got.Text, "回复已经断句") {
+		t.Fatalf("reply text = %q", got.Text)
+	}
+	// Thought stays buffered (not ready).
+	d.textMu.Lock()
+	left := d.thoughtBuf.String()
+	d.textMu.Unlock()
+	if left != "还在想" {
+		t.Fatalf("thoughtBuf = %q, want incomplete thought retained", left)
+	}
+}
+
 func TestAppendAndMaybeFlush_IdleAfterDottedIdDoesNotFlush(t *testing.T) {
 	prev := flushDebounce
 	flushDebounce = 30 * time.Millisecond
 	defer func() { flushDebounce = prev }()
 
 	d := newFlushTestDriver(t)
-	// Timer is armed (sliding idle), but fire must no-op: not a true sentence.
-	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("session.idle_timeout"), true)
+	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("session.idle_timeout"))
 
 	select {
 	case ev := <-d.events:
@@ -179,13 +210,45 @@ func TestAppendAndMaybeFlush_IdleAfterBareASCIIPeriodDoesNotFlush(t *testing.T) 
 	defer func() { flushDebounce = prev }()
 
 	d := newFlushTestDriver(t)
-	// Per-token pause after "session." — next token may be "idle".
-	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("session."), true)
+	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("session."))
 
 	select {
 	case ev := <-d.events:
 		t.Fatalf("bare trailing ASCII period must not flush on idle, got %q", ev.Text)
 	case <-time.After(80 * time.Millisecond):
+	}
+}
+
+func TestAppendAndMaybeFlush_AbbreviationNotSentence(t *testing.T) {
+	prev := flushDebounce
+	flushDebounce = 30 * time.Millisecond
+	defer func() { flushDebounce = prev }()
+
+	d := newFlushTestDriver(t)
+	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("see e.g. "))
+
+	select {
+	case ev := <-d.events:
+		t.Fatalf("abbreviation e.g. must not flush on idle, got %q", ev.Text)
+	case <-time.After(80 * time.Millisecond):
+	}
+}
+
+func TestEndsWithTrueSentenceBoundary_Abbreviations(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"see e.g. ", false},
+		{"ask Mr. ", false},
+		{"done etc. ", false},
+		{"real end. ", true},
+		{"hello? ", true},
+	}
+	for _, tc := range cases {
+		if got := endsWithTrueSentenceBoundary(tc.in); got != tc.want {
+			t.Errorf("endsWithTrueSentenceBoundary(%q) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -195,8 +258,8 @@ func TestFlushTextBuffers_CancelsIdleTimer(t *testing.T) {
 	defer func() { flushDebounce = prev }()
 
 	d := newFlushTestDriver(t)
-	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("即将被 tool 打断。"), true)
-	d.flushTextBuffers() // tool / turn-end path
+	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("即将被 tool 打断。"))
+	d.flushTextBuffers()
 
 	select {
 	case got := <-d.events:
@@ -211,6 +274,27 @@ func TestFlushTextBuffers_CancelsIdleTimer(t *testing.T) {
 	case ev := <-d.events:
 		t.Fatalf("unexpected post-cancel flush: %q", ev.Text)
 	case <-time.After(80 * time.Millisecond):
+	}
+}
+
+func TestClose_DrainsPendingBuffers(t *testing.T) {
+	prev := flushDebounce
+	flushDebounce = 500 * time.Millisecond
+	defer func() { flushDebounce = prev }()
+
+	d := newFlushTestDriver(t)
+	d.appendAndMaybeFlush(d.textBuf, padToMinFlush("Close 前要保住。"))
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case got := <-d.events:
+		if !strings.Contains(got.Text, "Close 前要保住") {
+			t.Fatalf("Close drain text = %q", got.Text)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Close should drain pending text before cancel")
 	}
 }
 

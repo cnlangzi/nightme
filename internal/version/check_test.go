@@ -3,6 +3,7 @@ package version
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -129,12 +130,15 @@ func TestChecker_FetchLatest(t *testing.T) {
 	}
 }
 
-// TestChecker_FetchLatest_FallbackOnCurrentOnly pins the
-// decoder's field-priority logic: when only `current` is
-// present (no latest_cli), we still read it — but if both are
-// present we prefer latest_cli even when current looks like a
-// real version string.
-func TestChecker_FetchLatest_FallbackOnCurrentOnly(t *testing.T) {
+// TestChecker_FetchLatest_PrefersLatestCliOverCurrent pins half of
+// the field-priority logic: when both are present we take
+// latest_cli even though current also looks like a real version.
+//
+// (Renamed from ...FallbackOnCurrentOnly, which promised to cover
+// the current-only case but only ever sent both fields. The real
+// current-only case was broken and untested — see
+// TestChecker_FetchLatest_CurrentOnlyBesideUnrelatedKeys.)
+func TestChecker_FetchLatest_PrefersLatestCliOverCurrent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"current":    "0.5.0",
@@ -436,5 +440,66 @@ func TestChecker_FetchLatest_SendsNightmeUserAgent(t *testing.T) {
 	}
 	if !strings.Contains(seen, runtime.GOOS) || !strings.Contains(seen, runtime.GOARCH) {
 		t.Errorf("User-Agent = %q, want it to carry GOOS and GOARCH", seen)
+	}
+}
+
+// TestChecker_FetchLatest_CurrentOnlyBesideUnrelatedKeys is the
+// case the old len(raw) > 1 guard broke: `current` is the only
+// field carrying a version, but the payload also has unrelated
+// keys. nightme.dev always sends updated_at, so this is the shape
+// a real response takes the moment latest_cli is absent — and the
+// old code returned "no usable version field" for it.
+func TestChecker_FetchLatest_CurrentOnlyBesideUnrelatedKeys(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"current":    "0.9.9",
+			"updated_at": "2026-01-01T00:00:00Z",
+			"notice":     "scheduled maintenance",
+		})
+	}))
+	defer srv.Close()
+
+	c := &Checker{VersionURL: srv.URL, HTTPClient: srv.Client()}
+	got, err := c.fetchLatest(context.Background())
+	if err != nil {
+		t.Fatalf("fetchLatest: %v", err)
+	}
+	if got != "0.9.9" {
+		t.Errorf("fetchLatest = %q, want current %q", got, "0.9.9")
+	}
+}
+
+// TestChecker_FetchLatest_UnusableHigherPriorityKey covers the
+// other half: a higher-priority key that is present but carries
+// null / a non-string / blank space must not shadow a lower-
+// priority key that does carry a version.
+func TestChecker_FetchLatest_UnusableHigherPriorityKey(t *testing.T) {
+	for name, body := range map[string]string{
+		"null":       `{"latest_cli":null,"current":"0.9.9"}`,
+		"non-string": `{"latest_cli":42,"current":"0.9.9"}`,
+		"blank":      `{"latest_cli":"   ","current":"0.9.9"}`,
+		"tag_name":   `{"latest_cli":null,"tag_name":"v0.9.9","current":"0.1.0"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+
+			c := &Checker{VersionURL: srv.URL, HTTPClient: srv.Client()}
+			got, err := c.fetchLatest(context.Background())
+			if err != nil {
+				t.Fatalf("fetchLatest: %v", err)
+			}
+			// tag_name outranks current, so that case resolves to
+			// the tag; every other case falls through to current.
+			want := "0.9.9"
+			if name == "tag_name" {
+				want = "v0.9.9"
+			}
+			if got != want {
+				t.Errorf("fetchLatest = %q, want %q", got, want)
+			}
+		})
 	}
 }

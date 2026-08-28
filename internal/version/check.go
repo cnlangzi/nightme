@@ -287,7 +287,36 @@ func (c *Checker) fetchLatest(ctx context.Context) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return "", fmt.Errorf("version api: decode: %w", err)
 	}
-	for _, key := range []string{"latest_cli", "current", "tag_name", "tag", "version"} {
+	// Two passes, not one loop with a skip. `current` is
+	// deliberately last-resort: many servers (including
+	// nightme.dev today) put a literal "dev" there, so preferring
+	// it would conclude the user is already on the latest. It is
+	// consulted only when no other field yields a usable string.
+	//
+	// This used to be a single loop that skipped `current` when
+	// `len(raw) > 1`, meaning to express "unless it is the only
+	// usable field". But len(raw) counts every key in the payload,
+	// including unrelated ones like updated_at — which nightme.dev
+	// always sends. So `current` was skipped on every real
+	// response, and a payload without latest_cli failed outright
+	// with "no usable version field" while `current` sat right
+	// there. Silently, too: the error only reaches logf.
+	if s, ok := firstUsableString(raw, "latest_cli", "tag_name", "tag", "version"); ok {
+		return s, nil
+	}
+	if s, ok := firstUsableString(raw, "current"); ok {
+		return s, nil
+	}
+	return "", errors.New("version api: no usable version field in response")
+}
+
+// firstUsableString returns the value of the first key that is
+// present in raw AND decodes to a non-empty string. A key holding
+// null, a number, or blank space is treated as absent — servers
+// emit those for "not known yet", which must not shadow a later
+// key that does carry a version.
+func firstUsableString(raw map[string]json.RawMessage, keys ...string) (string, bool) {
+	for _, key := range keys {
 		rawValue, ok := raw[key]
 		if !ok {
 			continue
@@ -296,21 +325,11 @@ func (c *Checker) fetchLatest(ctx context.Context) (string, error) {
 		if err := json.Unmarshal(rawValue, &s); err != nil {
 			continue
 		}
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
+		if s = strings.TrimSpace(s); s != "" {
+			return s, true
 		}
-		// `current` is intentionally a fallback: many servers
-		// (including nightme.dev today) put a literal "dev"
-		// there. If we'd hit it first we'd conclude the user
-		// is on the latest. Skip it unless it's the only
-		// field with a usable string.
-		if key == "current" && len(raw) > 1 {
-			continue
-		}
-		return s, nil
 	}
-	return "", errors.New("version api: no usable version field in response")
+	return "", false
 }
 
 // cacheEntry is what we persist. Field tags match the on-disk

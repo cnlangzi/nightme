@@ -42,6 +42,20 @@ type fixture struct {
 	// separate from ua so a test can assert on both without one
 	// request clobbering the other's record.
 	assetUA atomic.Value // string
+
+	// sumsUA is the same, for the SHA256SUMS endpoint.
+	sumsUA atomic.Value // string
+}
+
+// lastSumsUserAgent returns the User-Agent the fixture saw on the
+// most recent SHA256SUMS request, failing the test if none was made.
+func (f *fixture) lastSumsUserAgent(t *testing.T) string {
+	t.Helper()
+	ua, ok := f.sumsUA.Load().(string)
+	if !ok {
+		t.Fatal("no SHA256SUMS request reached the fixture")
+	}
+	return ua
 }
 
 // lastAssetUserAgent returns the User-Agent the fixture saw on the
@@ -115,7 +129,8 @@ func newFixture(t *testing.T, tag, version, assetBody string) *fixture {
 			]
 		}`, tag, f.srvURL(), repo, len(f.sums), assetName, f.srvURL(), repo, len(assetBody))
 	})
-	mux.HandleFunc("/repos/"+repo+"/asset/sums", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/"+repo+"/asset/sums", func(w http.ResponseWriter, r *http.Request) {
+		f.sumsUA.Store(r.Header.Get("User-Agent"))
 		_, _ = io.WriteString(w, f.sums)
 	})
 	mux.HandleFunc("/repos/"+repo+"/asset/binary", func(w http.ResponseWriter, r *http.Request) {
@@ -542,13 +557,11 @@ func TestDownload_EndToEnd(t *testing.T) {
 	body := strings.Repeat("nightme-binary-payload-", 4096) // ~110 KiB
 	f := newFixture(t, "v9.9.9", "9.9.9", body)
 
-	// Override the Lookup URL builder by routing through
-	// an env-style indirection is awkward; we instead
-	// re-implement the relevant slice of Lookup inline
-	// using a client pointed at the fixture. This pins the
-	// contract for what Download consumes (a *Release +
-	// asset) without depending on Lookup's hard-coded
-	// api.github.com URL.
+	// Download consumes a *Release + asset, not a URL, so this
+	// builds them directly rather than going through Lookup. (Tests
+	// that DO need Lookup routed at the fixture swap LookupURL —
+	// see TestLookup.) Building them here pins the contract for
+	// what Download actually reads out of a release payload.
 	rel := &Release{
 		TagName: "v9.9.9",
 		Assets: []Asset{
@@ -598,13 +611,17 @@ func TestDownload_EndToEnd(t *testing.T) {
 		t.Errorf("progress never fired; expected at least one event")
 	}
 
-	// The asset download identifies itself the same way the
-	// version checks do. This request is the one most likely to
+	// Both download-path requests identify themselves the same way
+	// the version checks do. These are the ones most likely to
 	// cross a corporate proxy (GitHub redirects asset URLs to a
 	// CDN host), so an anonymous "Go-http-client/1.1" here is the
 	// hardest failure to diagnose.
-	if got, want := f.lastAssetUserAgent(t), version.UserAgent(); got != want {
-		t.Errorf("asset download User-Agent = %q, want %q", got, want)
+	wantUA := version.UserAgent()
+	if got := f.lastSumsUserAgent(t); got != wantUA {
+		t.Errorf("SHA256SUMS User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := f.lastAssetUserAgent(t); got != wantUA {
+		t.Errorf("asset download User-Agent = %q, want %q", got, wantUA)
 	}
 }
 

@@ -13,7 +13,10 @@ import (
 // here is a change to a published contract.
 func TestUserAgent_Shape(t *testing.T) {
 	got := UserAgent()
-	want := "nightme/0.1.0+local (" +
+	// Version is read rather than hardcoded: its default gets bumped
+	// with releases, and that is data, not part of the format this
+	// test exists to pin.
+	want := "nightme/" + Normalize(Version) + "+local (" +
 		runtime.GOOS + "; " + runtime.GOARCH + "; " + runtime.Version() + ")"
 	if got != want {
 		t.Errorf("UserAgent() = %q, want %q", got, want)
@@ -38,15 +41,16 @@ func TestUserAgent_IncludesInjectedCommit(t *testing.T) {
 // TestUserAgent_LocalBuildMarkedLocal is the no-ldflags path.
 // Version defaults to a real release string, so without a marker
 // such a build would be indistinguishable on the wire from that
-// release. The assertion on GitCommit itself is the point: the
-// default in version.go and the fallback in UserAgent must stay
-// the same string, or the --version banner and the wire identity
-// would start disagreeing about the same build.
+// release.
+//
+// This deliberately does NOT assert GitCommit's default value:
+// TestUserAgent_Shape already pins the whole string including
+// "+local", so it fails if version.go's default and UserAgent's
+// fallback ever drift apart. Asserting the global here as well
+// would only add a dependency on no sibling test having leaked a
+// mutation, with a failure message pointing at the wrong file.
 func TestUserAgent_LocalBuildMarkedLocal(t *testing.T) {
-	if GitCommit != localCommit {
-		t.Fatalf("GitCommit default = %q, want %q", GitCommit, localCommit)
-	}
-	if got := UserAgent(); !strings.HasPrefix(got, "nightme/0.1.0+local (") {
+	if got := UserAgent(); !strings.HasPrefix(got, "nightme/"+Normalize(Version)+"+local (") {
 		t.Errorf("UserAgent() = %q, want a +local commit suffix", got)
 	}
 }
@@ -89,7 +93,7 @@ func TestUserAgent_StripsLeadingV(t *testing.T) {
 func TestUserAgent_SurvivesHostileLdflags(t *testing.T) {
 	origVersion, origCommit := Version, GitCommit
 	Version = "0.3.7\r\nX-Injected: 1"
-	GitCommit = "abc(1234)"
+	GitCommit = "abc(1234);darwin"
 	t.Cleanup(func() {
 		Version = origVersion
 		GitCommit = origCommit
@@ -99,9 +103,17 @@ func TestUserAgent_SurvivesHostileLdflags(t *testing.T) {
 	if strings.ContainsAny(got, "\r\n") {
 		t.Fatalf("UserAgent() = %q, want no CR/LF", got)
 	}
-	// Exactly one comment: the platform one we emit ourselves.
+	// Exactly one comment: the platform one we emit ourselves. And
+	// no injected ";" — that is the platform comment's own field
+	// separator, so a leaked one would let a value forge a field.
 	if strings.Count(got, "(") != 1 || strings.Count(got, ")") != 1 {
 		t.Errorf("UserAgent() = %q, want a single parenthesised comment", got)
+	}
+	if strings.Count(got, ";") != 2 {
+		t.Errorf("UserAgent() = %q, want exactly the 2 platform separators", got)
+	}
+	if strings.Count(got, "+") != 1 {
+		t.Errorf("UserAgent() = %q, want a single commit delimiter", got)
 	}
 
 	// The real proof: net/http will actually put it on the wire.

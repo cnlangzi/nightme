@@ -1,6 +1,7 @@
 package version
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 )
@@ -45,44 +46,54 @@ func UserAgent() string {
 		commit = localCommit
 	}
 
-	var b strings.Builder
-	b.WriteString(uaProduct)
-	b.WriteByte('/')
-	b.WriteString(v)
-	b.WriteByte('+')
-	b.WriteString(commit)
-
 	// GOOS / GOARCH are compile-time constants from the toolchain,
-	// so they need no sanitising; runtime.Version() does not either
-	// in practice, but it costs nothing to run it through uaToken.
-	b.WriteString(" (")
-	b.WriteString(runtime.GOOS)
-	b.WriteString("; ")
-	b.WriteString(runtime.GOARCH)
-	b.WriteString("; ")
-	b.WriteString(uaToken(runtime.Version()))
-	b.WriteByte(')')
-
-	return b.String()
+	// so they need no sanitising; runtime.Version() goes through
+	// uaToken only for consistency with the injected fields.
+	return fmt.Sprintf("%s/%s+%s (%s; %s; %s)",
+		uaProduct, v, commit,
+		runtime.GOOS, runtime.GOARCH, uaToken(runtime.Version()))
 }
 
-// uaToken strips everything that could break the header line or
-// escape the parenthesised comment.
+// uaToken strips everything that is not an RFC 9110 §5.6.2 tchar,
+// which is what a product token and a product-version are allowed
+// to contain.
 //
 // Version and GitCommit arrive via -ldflags, which makes them
-// effectively untrusted: a stray newline in either would make
-// net/http reject the request outright ("invalid header field
-// value") and take the whole version check down with it. Dropping
-// the offending bytes keeps the check working with a slightly
-// mangled identity, which is the right trade for a best-effort
-// background call.
+// effectively untrusted. Two things must not happen. A stray
+// newline would make net/http reject the request outright
+// ("invalid header field value") and take the whole version check
+// down with it — note that http.Request.Write does NOT catch this,
+// it silently rewrites CR/LF to spaces, so the failure only
+// surfaces inside the transport. And a "(", ")" or ";" would let
+// an injected value forge or escape the platform comment, whose
+// own separator is ";". Restricting to tchar covers both classes
+// plus the rest of the grammar, rather than blocklisting the
+// characters we happened to think of.
+//
+// Dropping the offending bytes keeps the check working with a
+// slightly mangled identity, which is the right trade for a
+// best-effort background call.
 func uaToken(s string) string {
 	return strings.Map(func(r rune) rune {
-		// Anything outside printable ASCII, plus the two
-		// characters that delimit a comment.
-		if r <= ' ' || r > '~' || r == '(' || r == ')' {
-			return -1
+		if isTchar(r) {
+			return r
 		}
-		return r
+		return -1
 	}, s)
+}
+
+// isTchar reports whether r is an RFC 9110 §5.6.2 tchar. Every
+// value we actually emit — a semver tag, a `git describe` string,
+// a hex SHA, a Go toolchain version — is already tchar-clean, so
+// this only ever fires on injected garbage.
+func isTchar(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	switch r {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
 }

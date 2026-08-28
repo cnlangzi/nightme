@@ -398,6 +398,14 @@ func lookupSHA256(ctx context.Context, release *Release, assetName string) (stri
 	if err != nil {
 		return "", fmt.Errorf("build checksums request: %w", err)
 	}
+	// Download always comes through here — including on the
+	// cache-hit path, which re-verifies against the published
+	// sums. So this is the first request of every upgrade attempt,
+	// and it lands on the same release-CDN host as the asset
+	// fetch. An anonymous Go-http-client/1.1 here fails as
+	// "download checksums: HTTP 4xx", which reads like a missing
+	// file rather than a rejected client.
+	req.Header.Set("User-Agent", version.UserAgent())
 	client := httpclient.Default()
 	resp, err := client.Do(req)
 	if err != nil {

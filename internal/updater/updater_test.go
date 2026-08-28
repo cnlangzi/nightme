@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/version"
 )
 
 // fixture serves a synthetic GitHub release payload + the
@@ -30,6 +32,53 @@ type fixture struct {
 	assetName string
 	sums      string
 	srv       *httptest.Server
+
+	// ua records the User-Agent of the most recent request to a
+	// release-lookup endpoint. atomic.Value because the handler
+	// runs on the server's goroutine.
+	ua atomic.Value // string
+
+	// assetUA is the same, for the asset-download endpoint. Kept
+	// separate from ua so a test can assert on both without one
+	// request clobbering the other's record.
+	assetUA atomic.Value // string
+
+	// sumsUA is the same, for the SHA256SUMS endpoint.
+	sumsUA atomic.Value // string
+}
+
+// lastSumsUserAgent returns the User-Agent the fixture saw on the
+// most recent SHA256SUMS request, failing the test if none was made.
+func (f *fixture) lastSumsUserAgent(t *testing.T) string {
+	t.Helper()
+	ua, ok := f.sumsUA.Load().(string)
+	if !ok {
+		t.Fatal("no SHA256SUMS request reached the fixture")
+	}
+	return ua
+}
+
+// lastAssetUserAgent returns the User-Agent the fixture saw on the
+// most recent asset download, failing the test if none was made.
+func (f *fixture) lastAssetUserAgent(t *testing.T) string {
+	t.Helper()
+	ua, ok := f.assetUA.Load().(string)
+	if !ok {
+		t.Fatal("no asset-download request reached the fixture")
+	}
+	return ua
+}
+
+// lastUserAgent returns the User-Agent the fixture saw on the most
+// recent release-lookup request, failing the test if no such
+// request has been made.
+func (f *fixture) lastUserAgent(t *testing.T) string {
+	t.Helper()
+	ua, ok := f.ua.Load().(string)
+	if !ok {
+		t.Fatal("no release-lookup request reached the fixture")
+	}
+	return ua
 }
 
 func newFixture(t *testing.T, tag, version, assetBody string) *fixture {
@@ -57,7 +106,8 @@ func newFixture(t *testing.T, tag, version, assetBody string) *fixture {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/"+repo+"/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/"+repo+"/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		f.ua.Store(r.Header.Get("User-Agent"))
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{
 			"tag_name": %q,
@@ -67,7 +117,8 @@ func newFixture(t *testing.T, tag, version, assetBody string) *fixture {
 			]
 		}`, tag, f.srvURL(), repo, len(f.sums), assetName, f.srvURL(), repo, len(assetBody))
 	})
-	mux.HandleFunc("/repos/"+repo+"/releases/tags/"+tag, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/"+repo+"/releases/tags/"+tag, func(w http.ResponseWriter, r *http.Request) {
+		f.ua.Store(r.Header.Get("User-Agent"))
 		// Same body as /releases/latest for our tests.
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{
@@ -78,10 +129,12 @@ func newFixture(t *testing.T, tag, version, assetBody string) *fixture {
 			]
 		}`, tag, f.srvURL(), repo, len(f.sums), assetName, f.srvURL(), repo, len(assetBody))
 	})
-	mux.HandleFunc("/repos/"+repo+"/asset/sums", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/"+repo+"/asset/sums", func(w http.ResponseWriter, r *http.Request) {
+		f.sumsUA.Store(r.Header.Get("User-Agent"))
 		_, _ = io.WriteString(w, f.sums)
 	})
-	mux.HandleFunc("/repos/"+repo+"/asset/binary", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/"+repo+"/asset/binary", func(w http.ResponseWriter, r *http.Request) {
+		f.assetUA.Store(r.Header.Get("User-Agent"))
 		_, _ = w.Write(f.assetBody)
 	})
 
@@ -96,17 +149,39 @@ func (f *fixture) srvURL() string { return f.srv.URL }
 // payload (only the fields we care about) and surfaces the tag.
 func TestLookup(t *testing.T) {
 	f := newFixture(t, "v9.9.9", "9.9.9", "fake-binary-body")
-	// Override the repo so the Lookup URL builder hits our
-	// httptest server. We do this by monkey-patching the URL
-	// through a small helper: easiest is to point Lookup at
-	// the fixture via an env-style indirection. To keep the
-	// production API minimal, we just check that a real
-	// network call to the fixture's URL parses by running
-	// Lookup against the real GitHub URL with a tag known to
-	// exist — this is a smoke test for the parser, not the
-	// router. Production hits api.github.com and the test
-	// covers MatchAsset + Download via the dedicated tests.
-	_ = f
+
+	// LookupURL exists as a var precisely so tests can point the
+	// release API at an httptest server; use it rather than
+	// reaching out to api.github.com.
+	origURL := LookupURL
+	LookupURL = f.srvURL()
+	t.Cleanup(func() { LookupURL = origURL })
+
+	release, err := Lookup(context.Background(), f.repo, "")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if release.TagName != "v9.9.9" {
+		t.Errorf("TagName = %q, want %q", release.TagName, "v9.9.9")
+	}
+	if len(release.Assets) != 2 {
+		t.Fatalf("got %d assets, want 2", len(release.Assets))
+	}
+
+	// The release lookup is a version check, so it must identify
+	// itself as nightme — GitHub rate-limits anonymous clients by
+	// IP, and a shared "Go-http-client/1.1" is indistinguishable
+	// from any other Go program behind the same NAT.
+	ua := f.lastUserAgent(t)
+	if want := version.UserAgent(); ua != want {
+		t.Errorf("User-Agent = %q, want %q", ua, want)
+	}
+	if !strings.HasPrefix(ua, "nightme/") {
+		t.Errorf("User-Agent = %q, want a nightme/ product token", ua)
+	}
+	if !strings.Contains(ua, runtime.GOOS) || !strings.Contains(ua, runtime.GOARCH) {
+		t.Errorf("User-Agent = %q, want it to carry GOOS and GOARCH", ua)
+	}
 }
 
 // TestMatchAsset_PicksOurOSArch is the core asset-selection
@@ -482,13 +557,11 @@ func TestDownload_EndToEnd(t *testing.T) {
 	body := strings.Repeat("nightme-binary-payload-", 4096) // ~110 KiB
 	f := newFixture(t, "v9.9.9", "9.9.9", body)
 
-	// Override the Lookup URL builder by routing through
-	// an env-style indirection is awkward; we instead
-	// re-implement the relevant slice of Lookup inline
-	// using a client pointed at the fixture. This pins the
-	// contract for what Download consumes (a *Release +
-	// asset) without depending on Lookup's hard-coded
-	// api.github.com URL.
+	// Download consumes a *Release + asset, not a URL, so this
+	// builds them directly rather than going through Lookup. (Tests
+	// that DO need Lookup routed at the fixture swap LookupURL —
+	// see TestLookup.) Building them here pins the contract for
+	// what Download actually reads out of a release payload.
 	rel := &Release{
 		TagName: "v9.9.9",
 		Assets: []Asset{
@@ -536,6 +609,19 @@ func TestDownload_EndToEnd(t *testing.T) {
 	}
 	if atomic.LoadInt32(&progressCalls) == 0 {
 		t.Errorf("progress never fired; expected at least one event")
+	}
+
+	// Both download-path requests identify themselves the same way
+	// the version checks do. These are the ones most likely to
+	// cross a corporate proxy (GitHub redirects asset URLs to a
+	// CDN host), so an anonymous "Go-http-client/1.1" here is the
+	// hardest failure to diagnose.
+	wantUA := version.UserAgent()
+	if got := f.lastSumsUserAgent(t); got != wantUA {
+		t.Errorf("SHA256SUMS User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := f.lastAssetUserAgent(t); got != wantUA {
+		t.Errorf("asset download User-Agent = %q, want %q", got, wantUA)
 	}
 }
 

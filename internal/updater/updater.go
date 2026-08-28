@@ -167,7 +167,7 @@ func Lookup(ctx context.Context, repo, tag string) (*Release, error) {
 		return nil, fmt.Errorf("build lookup request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "nightme-updater/1.0")
+	req.Header.Set("User-Agent", version.UserAgent())
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
 	client := httpclient.Default()
@@ -398,6 +398,14 @@ func lookupSHA256(ctx context.Context, release *Release, assetName string) (stri
 	if err != nil {
 		return "", fmt.Errorf("build checksums request: %w", err)
 	}
+	// Download always comes through here — including on the
+	// cache-hit path, which re-verifies against the published
+	// sums. So this is the first request of every upgrade attempt,
+	// and it lands on the same release-CDN host as the asset
+	// fetch. An anonymous Go-http-client/1.1 here fails as
+	// "download checksums: HTTP 4xx", which reads like a missing
+	// file rather than a rejected client.
+	req.Header.Set("User-Agent", version.UserAgent())
 	client := httpclient.Default()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -446,7 +454,7 @@ func fetchWithProgress(
 	if err != nil {
 		return nil, fmt.Errorf("build asset request: %w", err)
 	}
-	req.Header.Set("User-Agent", "nightme-updater/1.0")
+	req.Header.Set("User-Agent", version.UserAgent())
 	req.Header.Set("Accept", "application/octet-stream")
 
 	client := httpclient.Default()

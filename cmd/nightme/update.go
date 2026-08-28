@@ -261,7 +261,7 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		running, _ := daemonIsRunning(cfg)
 		if running {
 			fmt.Fprintf(out, "  %s  restarting daemon…\n", paintDim(out, "→"))
-			if err := runRestartInline(out); err != nil {
+			if err := runRestartInline(out, targetPath); err != nil {
 				fmt.Fprintf(errOut, "  %s  daemon restart failed: %v\n", paintYellow(out, "!"), err)
 				fmt.Fprintln(errOut, "     run `nightme restart` manually.")
 			} else {
@@ -342,15 +342,16 @@ func daemonIsRunning(cfg *config.Config) (bool, error) {
 }
 
 // runRestartInline invokes `nightme restart` against the
-// freshly-installed binary. We shell out via os.Executable()
-// (which is now the new binary) so the restart is performed
-// by the version we just installed.
-func runRestartInline(out io.Writer) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	cmd := proc.New(context.Background(), exe, "restart")
+// freshly-installed binary. We spawn the path that was
+// captured BEFORE Install (targetPath), not os.Executable()
+// — re-reading os.Executable() here would follow the running
+// process's inode to targetPath + ".old" (Install renames
+// the running binary aside before writing the new one) and
+// the spawned restart would be the OLD binary restarting
+// the daemon with the OLD binary. See runUpdate above for
+// the Install call site.
+func runRestartInline(out io.Writer, targetPath string) error {
+	cmd := proc.New(context.Background(), targetPath, "restart")
 	cmd.Stdout = out
 	cmd.Stderr = out
 	return cmd.Run()

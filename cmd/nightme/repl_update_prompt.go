@@ -241,7 +241,8 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		return nil
 	}
 
-	if err := runInstallStage(ctx, deps, cfg, dl); err != nil {
+	target, err := runInstallStage(ctx, deps, cfg, dl)
+	if err != nil {
 		fmt.Fprintf(out, "  %s  install failed: %v\n", paintRed(out, "✗"), err)
 		return nil
 	}
@@ -249,12 +250,6 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	if deps.ReExecAfterInstall {
 		fmt.Fprintf(out, "  %s  Installed %s — restarting into the new binary.\n",
 			paintGreen(out, "✓"), displayVer(latest))
-		target, err := os.Executable()
-		if err != nil {
-			fmt.Fprintf(out, "  %s  could not locate new binary: %v\n", paintRed(out, "✗"), err)
-			fmt.Fprintln(out, "     exit and re-enter `nightme` to load it.")
-			return nil
-		}
 		_ = execAndExit(out, target, []string{target})
 		return nil
 	}
@@ -315,39 +310,46 @@ func runDownloadStage(
 // runInstallStage extracts the staged archive and swaps the
 // running binary. It also restarts the daemon (best-effort)
 // so a fresh REPL / shell picks up the new daemon.
+//
+// Returns the path of the binary that Install wrote — i.e.
+// the path the REPL was launched from BEFORE Install renamed
+// the running inode aside. Callers need this string (NOT a
+// fresh os.Executable() — which after Install follows the
+// old inode to the .old sidecar) when they want to exec the
+// new binary or hand it to a child process.
 func runInstallStage(
 	_ context.Context,
 	deps *PromptDeps,
 	cfg *config.Config,
 	dl *updater.DownloadResult,
-) error {
+) (string, error) {
 	out := deps.Out
 
 	binary, err := updater.ExtractArchive(dl.StagingPath, filepath.Dir(dl.StagingPath))
 	if err != nil {
-		return fmt.Errorf("extract: %w", err)
+		return "", fmt.Errorf("extract: %w", err)
 	}
 	target, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locate current binary: %w", err)
+		return "", fmt.Errorf("locate current binary: %w", err)
 	}
 	_, err = updater.Install(binary, target)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fmt.Fprintf(out, "  %s  installed %s\n", paintGreen(out, "✓"), target)
 
 	running, _ := daemonIsRunning(cfg)
 	if running {
 		fmt.Fprintf(out, "  %s  restarting daemon…\n", paintDim(out, "→"))
-		if err := runRestartInline(out); err != nil {
+		if err := runRestartInline(out, target); err != nil {
 			fmt.Fprintf(out, "  %s  daemon restart failed: %v\n", paintYellow(out, "!"), err)
 			fmt.Fprintln(out, "     run `nightme restart` manually.")
 		} else {
 			fmt.Fprintf(out, "  %s  daemon restarted\n", paintGreen(out, "✓"))
 		}
 	}
-	return nil
+	return target, nil
 }
 
 // askYesNo writes prompt + reads one line. Returns true on

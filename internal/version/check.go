@@ -257,7 +257,7 @@ func (c *Checker) fetchLatest(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "nightme/"+Version)
+	req.Header.Set("User-Agent", UserAgent())
 
 	resp, err := c.httpDo(req)
 	if err != nil {

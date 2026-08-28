@@ -21,7 +21,7 @@ func TestVersion_DefaultNonEmpty(t *testing.T) {
 // rely on the format.
 func TestString(t *testing.T) {
 	got := String()
-	want := "nightme version 0.1.0 (commit: unknown, built: unknown)"
+	want := "nightme version 0.1.0 (commit: local, built: unknown)"
 	if got != want {
 		t.Errorf("String() = %q, want %q", got, want)
 	}

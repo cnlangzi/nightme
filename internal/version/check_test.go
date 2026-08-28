@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -406,5 +407,34 @@ func TestDefaultChecker_EmptyDataDir(t *testing.T) {
 	}
 	if c.CachePath != "" {
 		t.Errorf("CachePath = %q, want empty", c.CachePath)
+	}
+}
+
+// TestChecker_FetchLatest_SendsNightmeUserAgent pins the identity
+// the version check presents to nightme.dev. The endpoint uses it
+// to break down "who is still running which release on what
+// platform", so the GOOS / GOARCH in the platform comment are load
+// bearing, not decoration.
+func TestChecker_FetchLatest_SendsNightmeUserAgent(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("User-Agent")
+		_ = json.NewEncoder(w).Encode(map[string]any{"latest_cli": "0.2.0"})
+	}))
+	defer srv.Close()
+
+	c := &Checker{VersionURL: srv.URL, HTTPClient: srv.Client()}
+	if _, err := c.fetchLatest(context.Background()); err != nil {
+		t.Fatalf("fetchLatest: %v", err)
+	}
+
+	if want := UserAgent(); seen != want {
+		t.Errorf("User-Agent = %q, want %q", seen, want)
+	}
+	if !strings.HasPrefix(seen, "nightme/") {
+		t.Errorf("User-Agent = %q, want a nightme/ product token", seen)
+	}
+	if !strings.Contains(seen, runtime.GOOS) || !strings.Contains(seen, runtime.GOARCH) {
+		t.Errorf("User-Agent = %q, want it to carry GOOS and GOARCH", seen)
 	}
 }

@@ -167,7 +167,7 @@ func Lookup(ctx context.Context, repo, tag string) (*Release, error) {
 		return nil, fmt.Errorf("build lookup request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "nightme-updater/1.0")
+	req.Header.Set("User-Agent", version.UserAgent())
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
 	client := httpclient.Default()
@@ -446,7 +446,7 @@ func fetchWithProgress(
 	if err != nil {
 		return nil, fmt.Errorf("build asset request: %w", err)
 	}
-	req.Header.Set("User-Agent", "nightme-updater/1.0")
+	req.Header.Set("User-Agent", version.UserAgent())
 	req.Header.Set("Accept", "application/octet-stream")
 
 	client := httpclient.Default()

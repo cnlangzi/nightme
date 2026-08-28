@@ -1723,23 +1723,35 @@ func TestWrapCreatePRError_CLINotInstalled_GitLab(t *testing.T) {
 	}
 }
 
-// TestWrapCreatePRError_StaleUpstreamGH — gh GraphQL validator
-// messages get translated to ErrStaleUpstream. Each known
-// substring in the table maps to the sentinel; the rest of the
-// stderr is preserved verbatim.
+// TestWrapCreatePRError_StaleUpstreamGH — exercises the GitHub
+// provider's classifyCreatePRError method end-to-end via the
+// shared wrapCreatePRError helper. Each known gh stderr fragment
+// in the table maps to ErrStaleUpstream; the raw stderr is
+// preserved verbatim.
 //
-// Note: "No commits between" used to live in this table but was
-// moved to ghNoCommitsBetweenSubstrings — it is a different
-// error class (branch exists, no diff to PR). See
-// TestWrapCreatePRError_NoCommitsBetween below.
-func TestWrapCreatePRError_StaleUpstreamGH(t *testing.T) {
+// As of the v3 refactor, provider-specific substring tables
+// live next to the provider (ghStaleUpstreamSubstrings for
+// GitHub, glStaleUpstreamSubstrings for GitLab). The shared
+// wrapCreatePRError no longer knows about them — it only
+// handles CLI-not-installed and generic already-exists. This
+// test calls GitHubProvider.classifyCreatePRError directly so
+// the substring table is exercised in its real home.
+//
+// "No commits between" is intentionally NOT in this table — it
+// is a distinct error class that maps to ErrNoCommitsBetween,
+// tested separately below.
+func TestGitHubProvider_ClassifyCreatePRError_StaleUpstream(t *testing.T) {
+	c := &GitHubProvider{}
 	cases := []string{
 		"gh pr create: Head ref must be a branch",
 		"gh pr create: Head sha can't be blank",
 		"gh pr create: Base sha can't be blank",
 	}
 	for _, stderr := range cases {
-		err := wrapCreatePRError(errors.New("exit 1"), stderr, "gh")
+		err := c.classifyCreatePRError(stderr)
+		if err == nil {
+			t.Fatalf("expected match for %q, got nil", stderr)
+		}
 		if !errors.Is(err, ErrStaleUpstream) {
 			t.Fatalf("expected ErrStaleUpstream for %q, got %v", stderr, err)
 		}
@@ -1749,28 +1761,33 @@ func TestWrapCreatePRError_StaleUpstreamGH(t *testing.T) {
 	}
 }
 
-// TestWrapCreatePRError_NoCommitsBetween — gh's "No commits
-// between" message maps to ErrNoCommitsBetween, NOT
-// ErrStaleUpstream. This was a real bug: the two errors have
-// different user-facing next-step hints (push again vs commit
-// new changes), and lumping them together misled the user.
+// TestGitHubProvider_ClassifyCreatePRError_NoCommitsBetween —
+// gh's "No commits between" message maps to ErrNoCommitsBetween,
+// NOT ErrStaleUpstream. This was a real bug: the two errors
+// have different user-facing next-step hints (push again vs
+// commit new changes), and lumping them together misled the
+// user.
 //
 // The test asserts both directions:
 //   - "No commits between …" → ErrNoCommitsBetween
-//   - other stale-upstream substrings → still ErrStaleUpstream
-func TestWrapCreatePRError_NoCommitsBetween(t *testing.T) {
+//   - ErrNoCommitsBetween case must NOT also match ErrStaleUpstream
+func TestGitHubProvider_ClassifyCreatePRError_NoCommitsBetween(t *testing.T) {
+	c := &GitHubProvider{}
 	cases := []string{
 		"pull request create failed: GraphQL: No commits between main and fix-x (createPullRequest)",
 		"gh pr create: No commits between main and feat",
 		"No commits between develop and my-branch",
 	}
 	for _, stderr := range cases {
-		err := wrapCreatePRError(errors.New("exit 1"), stderr, "gh")
+		err := c.classifyCreatePRError(stderr)
+		if err == nil {
+			t.Fatalf("expected match for %q, got nil", stderr)
+		}
 		if !errors.Is(err, ErrNoCommitsBetween) {
 			t.Fatalf("expected ErrNoCommitsBetween for %q, got %v", stderr, err)
 		}
-		// Must NOT also classify as ErrStaleUpstream — that was
-		// the bug.
+		// Must NOT also classify as ErrStaleUpstream — that
+		// was the bug.
 		if errors.Is(err, ErrStaleUpstream) {
 			t.Fatalf("ErrNoCommitsBetween case must not also match ErrStaleUpstream; got %v", err)
 		}
@@ -1781,31 +1798,55 @@ func TestWrapCreatePRError_NoCommitsBetween(t *testing.T) {
 	}
 }
 
-// TestWrapCreatePRError_StaleUpstreamExcludesNoCommits — even
-// though "No commits between" used to be in the stale-upstream
-// list, it must NOT match isStaleUpstreamGH anymore. Future
-// edits that re-add it to ghStaleUpstreamSubstrings would
-// silently reintroduce the bug.
-func TestWrapCreatePRError_StaleUpstreamExcludesNoCommits(t *testing.T) {
-	if isStaleUpstreamGH("gh pr create: No commits between main and feat") {
-		t.Fatalf("isStaleUpstreamGH must NOT match 'No commits between'; that path is reserved for ErrNoCommitsBetween")
-	}
-	if !isNoCommitsBetweenGH("gh pr create: No commits between main and feat") {
-		t.Fatalf("isNoCommitsBetweenGH must match 'No commits between'")
+// TestGitHubProvider_ClassifyCreatePRError_Negative — stderr
+// that doesn't match any known gh pattern returns nil so the
+// caller falls back to wrapCreatePRError's generic wrap.
+func TestGitHubProvider_ClassifyCreatePRError_Negative(t *testing.T) {
+	c := &GitHubProvider{}
+	for _, stderr := range []string{
+		"",
+		"401 Unauthorized",
+		"403 Forbidden: API rate limit exceeded",
+		"Branch not found",
+		"Source branch does not exist",
+	} {
+		if err := c.classifyCreatePRError(stderr); err != nil {
+			t.Fatalf("expected no-match for %q, got %v", stderr, err)
+		}
 	}
 }
 
-// TestWrapCreatePRError_StaleUpstreamGL — glab equivalents.
-func TestWrapCreatePRError_StaleUpstreamGL(t *testing.T) {
+// TestGitLabProvider_ClassifyCreatePRError_StaleUpstream — glab
+// equivalents of the GitHub stale-upstream test.
+func TestGitLabProvider_ClassifyCreatePRError_StaleUpstream(t *testing.T) {
+	c := &GitLabProvider{}
 	cases := []string{
 		"glab mr create: Source branch does not exist",
 		"glab mr create: Branch not found",
 		"glab mr create: 404 Not Found",
 	}
 	for _, stderr := range cases {
-		err := wrapCreatePRError(errors.New("exit 1"), stderr, "glab")
+		err := c.classifyCreatePRError(stderr)
+		if err == nil {
+			t.Fatalf("expected match for %q, got nil", stderr)
+		}
 		if !errors.Is(err, ErrStaleUpstream) {
 			t.Fatalf("expected ErrStaleUpstream for %q, got %v", stderr, err)
+		}
+	}
+}
+
+// TestGitLabProvider_ClassifyCreatePRError_Negative — non-matches
+// fall through to the generic wrapper.
+func TestGitLabProvider_ClassifyCreatePRError_Negative(t *testing.T) {
+	c := &GitLabProvider{}
+	for _, stderr := range []string{
+		"",
+		"401 Unauthorized",
+		"Head ref must be a branch",
+	} {
+		if err := c.classifyCreatePRError(stderr); err != nil {
+			t.Fatalf("expected no-match for %q, got %v", stderr, err)
 		}
 	}
 }
@@ -2244,63 +2285,11 @@ func TestIsExecutableNotFound(t *testing.T) {
 	}
 }
 
-// TestIsStaleUpstreamGH / TestIsStaleUpstreamGL — substring
-// matchers used by wrapCreatePRError.
-func TestIsStaleUpstreamGH(t *testing.T) {
-	for _, ok := range []string{
-		"Head ref must be a branch",
-		"Head sha can't be blank",
-		"Base sha can't be blank",
-	} {
-		if !isStaleUpstreamGH(ok) {
-			t.Fatalf("expected match for %q", ok)
-		}
-	}
-	// "No commits between" was removed from this list when the
-	// dedicated ErrNoCommitsBetween path was added. It must
-	// NOT match here — see TestWrapCreatePRError_StaleUpstreamExcludesNoCommits.
-	for _, no := range []string{
-		"No commits between main and feature/x",
-		"gh pr create: No commits between foo and bar",
-	} {
-		if isStaleUpstreamGH(no) {
-			t.Fatalf("isStaleUpstreamGH must not match %q; that substring routes via ErrNoCommitsBetween", no)
-		}
-	}
-	// Negatives — must NOT match.
-	for _, no := range []string{
-		"",
-		"401 Unauthorized",
-		"403 Forbidden: API rate limit exceeded",
-		"Branch not found",
-	} {
-		if isStaleUpstreamGH(no) {
-			t.Fatalf("expected no-match for %q", no)
-		}
-	}
-}
-
-func TestIsStaleUpstreamGL(t *testing.T) {
-	for _, ok := range []string{
-		"Source branch does not exist",
-		"Branch not found",
-		"404 Not Found",
-	} {
-		if !isStaleUpstreamGL(ok) {
-			t.Fatalf("expected match for %q", ok)
-		}
-	}
-	for _, no := range []string{
-		"",
-		"401 Unauthorized",
-		"Head ref must be a branch",
-	} {
-		if isStaleUpstreamGL(no) {
-			t.Fatalf("expected no-match for %q", no)
-		}
-	}
-}
-
+// TestResolveProvider_FromYml_SplitOwnerRepo covers the
+// Provider+Repo path: when both fields are populated in
+// Context (set by /gtw fix's worktree creation), resolveProvider
+// uses them directly without re-detecting. owner/repo split
+// comes from the cheap first-slash helper, no HTTP probe.
 func TestResolveProvider_FromYml_SplitOwnerRepo(t *testing.T) {
 	rig := newPRTestRig(t)
 	rig.deps = HandlerDeps{Git: rig.git}

@@ -19,23 +19,19 @@ package version
 //
 // The default below is NOT kept in sync with the latest release and
 // should not be read as one — it exists only so `--version` prints
-// something stable on a build with no -ldflags. GitCommit carries
-// localCommit on exactly those builds, so both the banner and the
+// something stable on a build with no -ldflags. GitCommit reads
+// "local" on exactly those builds, so both the banner and the
 // User-Agent already say "working tree" without this value having
 // to be accurate.
 var Version = "0.1.0"
 
-// localCommit is GitCommit's value when nothing was injected. It
-// says "built from a working tree" rather than "we have no idea",
-// which is the truthful reading: a build without -ldflags is not a
-// commit we failed to identify, it is a commit that does not exist
-// yet. UserAgent falls back to the same string, so the wire
-// identity and the --version banner never disagree.
-const localCommit = "local"
-
-// GitCommit is the short SHA at build time. localCommit means it
-// was built without the -ldflags injection.
-var GitCommit = localCommit
+// GitCommit is the short SHA at build time. "local" means it was
+// built without the -ldflags injection — which says "built from a
+// working tree" rather than "we have no idea", the truthful reading:
+// such a build is not a commit we failed to identify, it is a commit
+// that does not exist yet. UserAgent emits the same string, so the
+// wire identity and the --version banner never disagree.
+var GitCommit = "local"
 
 // BuildDate is the ISO-8601 UTC timestamp of the build. "unknown"
 // means the binary was built without -ldflags.

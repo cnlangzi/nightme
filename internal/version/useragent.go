@@ -28,22 +28,22 @@ const uaProduct = "nightme"
 //
 // The commit suffix is always present. Builds that injected
 // GitCommit via -ldflags carry the short SHA; builds that did not
-// carry localCommit ("local"). Marking them rather than omitting
-// the suffix matters because Version defaults to a hardcoded
-// release string with no ldflags, so an unmarked development build
-// would be indistinguishable on the wire from that actual release.
+// carry "local". Marking them rather than omitting the suffix
+// matters because Version defaults to a hardcoded release string
+// with no ldflags, so an unmarked development build would be
+// indistinguishable on the wire from that actual release.
 func UserAgent() string {
 	v := uaToken(Normalize(Version))
 	if v == "" {
 		v = "unknown"
 	}
 
-	// GitCommit already defaults to localCommit, so this guard is
-	// only for a build that injects an explicitly empty string —
-	// without it the suffix would degenerate to a dangling "+".
+	// GitCommit already defaults to "local", so this guard is only
+	// for a build that injects an explicitly empty string — without
+	// it the suffix would degenerate to a dangling "+".
 	commit := uaToken(GitCommit)
 	if commit == "" {
-		commit = localCommit
+		commit = "local"
 	}
 
 	// GOOS / GOARCH are compile-time constants from the toolchain,

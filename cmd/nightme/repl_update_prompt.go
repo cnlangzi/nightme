@@ -333,11 +333,12 @@ func runInstallStage(
 	if err != nil {
 		return "", fmt.Errorf("locate current binary: %w", err)
 	}
-	_, err = updater.Install(binary, target)
+	installRes, err := updater.Install(binary, target)
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintf(out, "  %s  installed %s\n", paintGreen(out, "✓"), target)
+	fmt.Fprintf(out, "  %s  installed %s\n", paintGreen(out, "✓"), installRes.NewBinaryPath)
+	fmt.Fprintf(out, "     %s %s\n", paintDim(out, "backup"), paintDim(out, installRes.OldBinaryPath))
 
 	running, _ := daemonIsRunning(cfg)
 	if running {

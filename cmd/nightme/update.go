@@ -348,8 +348,8 @@ func daemonIsRunning(cfg *config.Config) (bool, error) {
 // process's inode to targetPath + ".old" (Install renames
 // the running binary aside before writing the new one) and
 // the spawned restart would be the OLD binary restarting
-// the daemon with the OLD binary. See update.go runUpdate
-// for the Install call site.
+// the daemon with the OLD binary. See runUpdate above for
+// the Install call site.
 func runRestartInline(out io.Writer, targetPath string) error {
 	cmd := proc.New(context.Background(), targetPath, "restart")
 	cmd.Stdout = out

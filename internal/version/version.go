@@ -15,9 +15,14 @@
 package version
 
 // Version is the human-friendly release tag. Typically injected
-// from the git tag (e.g. "v0.2.0") at release-build time. The
-// default is the most recent released version and is used when
-// the binary is built without -ldflags.
+// from the git tag (e.g. "v0.2.0") at release-build time.
+//
+// The default below is NOT kept in sync with the latest release and
+// should not be read as one — it exists only so `--version` prints
+// something stable on a build with no -ldflags. GitCommit carries
+// localCommit on exactly those builds, so both the banner and the
+// User-Agent already say "working tree" without this value having
+// to be accurate.
 var Version = "0.1.0"
 
 // localCommit is GitCommit's value when nothing was injected. It

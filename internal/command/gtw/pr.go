@@ -226,7 +226,7 @@ func dispatchPR(
 		case errors.Is(err, ErrNoCommitsBetween):
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf(
-					"❌ no commits between %s and %s — they point at the same commit. Push new commits first, or rebase onto a newer base.",
+					"❌ no commits between %s and %s — push new commits first, or rebase onto a newer base.",
 					baseBranch, c.Branch)), nil
 		case errors.Is(err, ErrPRExists):
 			return reply(ctx, cs.Emitter(), chatID, messageID,

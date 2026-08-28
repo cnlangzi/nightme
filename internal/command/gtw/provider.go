@@ -243,12 +243,12 @@ var ErrCLINotInstalled = errors.New("gtw: provider CLI not installed")
 // is propagated verbatim, NOT translated into ErrStaleUpstream.
 var ErrStaleUpstream = errors.New("gtw: head branch missing on origin")
 
-// ErrNoCommitsBetween is returned by GitHub (and glab, when
-// applicable) when CreatePR succeeds technically — the head
-// ref exists on origin — but the platform refuses because base
-// and head resolve to the same commit, so there is no diff to
-// PR. This is DIFFERENT from ErrStaleUpstream: the branch is
-// fine, the user just has nothing to PR.
+// ErrNoCommitsBetween is returned by GitHub when CreatePR
+// succeeds technically — the head ref exists on origin — but
+// the platform refuses because base and head resolve to the
+// same commit, so there is no diff to PR. This is DIFFERENT
+// from ErrStaleUpstream: the branch is fine, the user just
+// has nothing to PR.
 //
 // GitHub's GraphQL validator surfaces it as "No commits
 // between <base> and <head>". Previously this was lumped into
@@ -258,6 +258,13 @@ var ErrStaleUpstream = errors.New("gtw: head branch missing on origin")
 // branch is just empty relative to base). The fix routes it
 // through this dedicated sentinel so the user gets the right
 // next-step hint.
+//
+// GitLab coverage: glab's CreatePR surfaces different errors
+// for the same situation (it generally accepts an empty diff
+// and lets the user fix it pre-merge). The glab branch of
+// wrapCreatePRError does not yet check for this case; add a
+// glNoCommitsBetweenSubstrings slice + matching helper if
+// GitLab starts surfacing an analogous GraphQL / HTTP message.
 var ErrNoCommitsBetween = errors.New("gtw: no commits between base and head")
 
 // isExecutableNotFound reports whether err originates from

@@ -278,18 +278,18 @@ func dispatchPR(
 //
 // Format (v3, NightMe-branded + Sourcery-style summary):
 //
-//   ## Summary by NightMe
-//   <1-2 sentences, imperative, WHAT not WHY>
+//	## Summary by NightMe
+//	<1-2 sentences, imperative, WHAT not WHY>
 //
-//   New Features:        ← derived from this PR's commit types
-//   Bug Fixes:
-//   Enhancements:
-//   Tests:
-//   Documentation:
-//   Chore / Build / CI:
+//	New Features:        ← derived from this PR's commit types
+//	Bug Fixes:
+//	Enhancements:
+//	Tests:
+//	Documentation:
+//	Chore / Build / CI:
 //
-//   Risk: <level> — <reason>  ← OPTIONAL, recommended for non-trivial
-//   Closes #N                  ← OPTIONAL, gated on c.Issue > 0
+//	Risk: <level> — <reason>  ← OPTIONAL, recommended for non-trivial
+//	Closes #N                  ← OPTIONAL, gated on c.Issue > 0
 //
 // Differences from v2:
 //
@@ -341,7 +341,7 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("Remaining lines are the PR body (markdown).\n")
 	sb.WriteString("Do NOT nest additional ``` fences — the daemon's parser stops at the first closing fence.\n")
 	sb.WriteString("Indent code samples with 4 spaces instead.\n")
-	sb.WriteString("Minimal parseability example:\n")
+	sb.WriteString("Minimal parseability example (your body should be richer than this):\n")
 	sb.WriteString("```\n")
 	sb.WriteString("feat(scope): short imperative subject\n\n")
 	sb.WriteString("## Summary by NightMe\n")
@@ -812,9 +812,6 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 	}
 	return prov, owner, repo, nil
 }
-
-
-	
 
 // renderPROpenedCard renders the IM-friendly success card.
 // Format 1 (gtw/README.md §2.1): ✅ title + `→ field: value`

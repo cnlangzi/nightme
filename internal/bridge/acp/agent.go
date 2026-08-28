@@ -158,15 +158,23 @@ type driver struct {
 	// ─── built-in text buffering ─────────────────────────────────
 	// textBuf accumulates agent_message_chunk payloads (reply text).
 	// thoughtBuf accumulates agent_thought_chunk payloads (reasoning).
-	// Both are flushed on sentence-terminating punctuation (".?!。！？"),
-	// on tool_call boundaries, and at turn-end via flushTextBuffers.
 	//
-	// This replaces the per-bridge buffering that opencode/cursor
-	// previously implemented in their UpdateHandler — all ACP
-	// bridges now get automatic sentence-level batching.
+	// Sliding idle debounce (from last token): every chunk resets
+	// flushTimer; after flushDebounce with no new tokens we flush
+	// only if shouldFlushBufferedText (min size + true sentence /
+	// paragraph — not "session.idle_timeout" or list "4."). Continuous
+	// tokens never flush mid-turn; short sentences coalesce while the
+	// stream is hot. Tool_call / turn-end bypass via flushTextBuffers.
 	textBuf    *strings.Builder
 	thoughtBuf *strings.Builder
 	textMu     sync.Mutex
+
+	// flushTimer + flushGen implement the sliding idle window.
+	// flushGen invalidates in-flight AfterFunc callbacks when the
+	// timer is stopped or rescheduled (Stop alone races with fire).
+	// Protected by textMu.
+	flushTimer *time.Timer
+	flushGen   uint64
 
 	// thinkingPrefix marks reasoning text so the gateway can route
 	// it to the thinking surface (OutThinking) rather than the reply
@@ -1001,6 +1009,9 @@ func (d *driver) Close() error {
 		// uncooperative PTY peer, so cleanup never waits for an
 		// optional server acknowledgement.
 		d.cancel()
+		d.textMu.Lock()
+		d.stopFlushTimerLocked()
+		d.textMu.Unlock()
 		if d.transport != nil {
 			err = d.transport.Close()
 		}
@@ -1361,10 +1372,11 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 	}
 
 	// ─── built-in text buffering ─────────────────────────────
-	// Text chunks are buffered and flushed on sentence-terminating
-	// punctuation (".?!。！？"), on tool boundaries, and at turn-end.
-	// This gives all ACP bridges automatic sentence-level batching
-	// without per-bridge UpdateHandler boilerplate.
+	// Text chunks are buffered. Mid-turn flush is gated by
+	// shouldFlushBufferedText so per-token streams (cursor-agent)
+	// do not shatter dotted identifiers / short headings into one
+	// Feishu card per token. Tool boundaries and turn-end always
+	// flush (F-52).
 	switch kind {
 	case "agent_message_chunk":
 		var content struct {
@@ -1372,15 +1384,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			d.textMu.Lock()
-			d.textBuf.WriteString(content.Text)
-			if endsWithSentencePunctuation(d.textBuf.String()) {
-				d.textMu.Unlock()
-				d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
-				d.flushBuffer(d.textBuf, "")
-			} else {
-				d.textMu.Unlock()
-			}
+			d.appendAndMaybeFlush(d.textBuf, content.Text, true)
 		}
 	case "agent_thought_chunk":
 		var content struct {
@@ -1388,21 +1392,12 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			d.textMu.Lock()
-			d.thoughtBuf.WriteString(content.Text)
-			if endsWithSentencePunctuation(d.thoughtBuf.String()) {
-				d.textMu.Unlock()
-				d.flushBuffer(d.textBuf, "")
-				d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
-			} else {
-				d.textMu.Unlock()
-			}
+			d.appendAndMaybeFlush(d.thoughtBuf, content.Text, false)
 		}
 	case "tool_call":
 		// Tool boundary: flush both buffers so the user sees
 		// in-progress content before the tool receipt appears.
-		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
-		d.flushBuffer(d.textBuf, "")
+		d.flushTextBuffers()
 		d.handleToolStart(params.Update)
 	case "tool_call_update":
 		d.handleToolEnd(params.Update)
@@ -1412,15 +1407,7 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			d.textMu.Lock()
-			d.textBuf.WriteString(content.Text)
-			if endsWithSentencePunctuation(d.textBuf.String()) {
-				d.textMu.Unlock()
-				d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
-				d.flushBuffer(d.textBuf, "")
-			} else {
-				d.textMu.Unlock()
-			}
+			d.appendAndMaybeFlush(d.textBuf, content.Text, true)
 		}
 	case "usage_update":
 		// Per-turn token usage from the server's usage sessionUpdate.
@@ -1449,10 +1436,10 @@ func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 		// command forwarding to the chat header).
 		d.handleSessionInfoUpdate(params.Update)
 	default:
-		// Unknown kind: flush both buffers so trailing text is
-		// not lost before the next recognized event.
-		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
-		d.flushBuffer(d.textBuf, "")
+		// Unknown kind: leave buffers alone. Flushing here used to
+		// shatter mid-sentence text whenever a vendor extension
+		// (plan / available_commands_update / …) arrived between
+		// tokens. Tool boundaries and turn-end still drain.
 	}
 }
 
@@ -1790,6 +1777,86 @@ func (d *driver) emit(ev agent.AgentEvent) {
 
 // ─── built-in text buffering helpers ──────────────────────────────
 
+// minFlushRunes is the smallest buffer we'll emit mid-turn. Below
+// this, keep accumulating until a tool boundary or turn-end. Stops
+// numbered lists ("4.") and short markdown headings from each
+// becoming their own Feishu rolling-log entry.
+const minFlushRunes = 160
+
+// flushDebounce is the sliding idle window after the last token.
+// Every new chunk resets the timer; we only consider flushing once
+// no tokens arrive for this duration. Matches the spirit of
+// cc-connect streamPreview.IntervalMs (default 1500ms there); we use
+// a slightly tighter window because Feishu rolling-log entries are
+// discrete cards, not in-place PATCHes. Tests may override.
+var flushDebounce = 800 * time.Millisecond
+
+// appendAndMaybeFlush writes chunk onto buf and (re)starts the
+// sliding idle timer from this token. Flush happens later in
+// flushOnIdle only if the buffer still ends on a true sentence /
+// paragraph boundary after the quiet window — so "session." during
+// a slow stream never cuts an identifier, and rapid short sentences
+// coalesce while tokens keep arriving. reply selects flush order.
+func (d *driver) appendAndMaybeFlush(buf *strings.Builder, chunk string, reply bool) {
+	if buf == nil || chunk == "" {
+		return
+	}
+	d.textMu.Lock()
+	buf.WriteString(chunk)
+	d.stopFlushTimerLocked()
+	if strings.TrimSpace(buf.String()) != "" {
+		d.flushGen++
+		gen := d.flushGen
+		wantReplyFirst := reply
+		d.flushTimer = time.AfterFunc(flushDebounce, func() {
+			d.flushOnIdle(gen, wantReplyFirst)
+		})
+	}
+	d.textMu.Unlock()
+}
+
+// flushOnIdle runs after flushDebounce with no new tokens. gen must
+// match flushGen (else the timer was reset). Re-checks the true
+// sentence gate at fire time — a pause after "session." is a no-op.
+func (d *driver) flushOnIdle(gen uint64, reply bool) {
+	d.textMu.Lock()
+	if gen != d.flushGen {
+		d.textMu.Unlock()
+		return
+	}
+	d.flushTimer = nil
+	var ready bool
+	if reply {
+		ready = shouldFlushBufferedText(d.textBuf.String())
+	} else {
+		ready = shouldFlushBufferedText(d.thoughtBuf.String())
+	}
+	if !ready {
+		d.textMu.Unlock()
+		return
+	}
+	d.flushGen++ // invalidate any twin firing
+	d.textMu.Unlock()
+	if reply {
+		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+		d.flushBuffer(d.textBuf, "")
+	} else {
+		d.flushBuffer(d.textBuf, "")
+		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+	}
+}
+
+// stopFlushTimerLocked cancels a pending idle timer and bumps
+// flushGen so an in-flight AfterFunc becomes a no-op. Caller must
+// hold d.textMu.
+func (d *driver) stopFlushTimerLocked() {
+	d.flushGen++
+	if d.flushTimer != nil {
+		d.flushTimer.Stop()
+		d.flushTimer = nil
+	}
+}
+
 // flushBuffer drains `buf` into a single EventAgentText and clears
 // it. No-op when the buffer is empty or all-whitespace. When `prefix`
 // is non-empty (e.g. thinkingPrefix) it is prepended to the content
@@ -1821,34 +1888,119 @@ func (d *driver) flushBuffer(buf *strings.Builder, prefix string) {
 
 // flushTextBuffers drains both the reply buffer (textBuf) and the
 // reasoning buffer (thoughtBuf). Called at turn-end and on tool
-// boundaries so no trailing text is silently dropped.
+// boundaries so no trailing text is silently dropped. Cancels any
+// pending idle timer so forced flushes are immediate.
 func (d *driver) flushTextBuffers() {
+	d.textMu.Lock()
+	d.stopFlushTimerLocked()
+	d.textMu.Unlock()
 	d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
 	d.flushBuffer(d.textBuf, "")
 }
 
-// endsWithSentencePunctuation reports whether s ends with a sentence-
-// terminating punctuation mark — ASCII ".!?" or full-width
-// "。！？" — after trimming trailing whitespace.
-func endsWithSentencePunctuation(s string) bool {
+// shouldFlushBufferedText reports whether a mid-turn buffer is
+// ready to emit as one EventAgentText. Empty / tiny buffers wait.
+//
+// True sentence boundaries only:
+//   - paragraph break ("\n\n")
+//   - full-width Chinese "。！？" at end (not used inside identifiers)
+//   - ASCII ".?!" only when followed by whitespace (". " / ".\n") —
+//     a bare trailing "." is ambiguous under per-token streams
+//     ("session." may continue as "idle_timeout") and must wait
+//
+// List ordinals ("4.", "12.") are never sentence ends. Forced
+// flushes (tool / turn-end) bypass this gate via flushTextBuffers.
+func shouldFlushBufferedText(s string) bool {
+	if strings.TrimSpace(s) == "" {
+		return false
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(s)) < minFlushRunes {
+		return false
+	}
+	// Paragraph: trim only spaces/tabs/CR so a trailing "\n\n" survives.
+	paraTrimmed := strings.TrimRightFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\r'
+	})
+	if strings.HasSuffix(paraTrimmed, "\n\n") {
+		return true
+	}
+	if endsWithListOrdinal(strings.TrimRightFunc(s, unicode.IsSpace)) {
+		return false
+	}
+	return endsWithTrueSentenceBoundary(s)
+}
+
+// endsWithListOrdinal reports whether s (already trailing-space
+// trimmed) ends with a markdown/plain numbered-list marker such
+// as "4." or "\n12.". Those periods are not sentence terminators.
+func endsWithListOrdinal(s string) bool {
+	if !strings.HasSuffix(s, ".") {
+		return false
+	}
+	dot := len(s) - 1
+	i := dot
+	for i > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:i])
+		if r < '0' || r > '9' {
+			break
+		}
+		i -= size
+	}
+	if i == dot {
+		return false // no digits before the period
+	}
+	if i == 0 {
+		return true // whole string is "4."
+	}
+	r, _ := utf8.DecodeLastRuneInString(s[:i])
+	return r == '\n' || unicode.IsSpace(r)
+}
+
+// endsWithTrueSentenceBoundary reports a completed sentence at the
+// end of s. Unlike a naive "ends with punctuation" check, ASCII
+// ".?!" only count when whitespace follows the mark — so a
+// per-token pause after "session." does not flush, while
+// "…timeout. Next" (period + space landed) does. Full-width
+// Chinese "。！？" at end always count: they do not appear inside
+// dotted identifiers.
+func endsWithTrueSentenceBoundary(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := len(s) - 1; i >= 0; i-- {
-		r, size := utf8.DecodeLastRuneInString(s[:i+1])
-		if size == 0 {
+	// Walk trailing whitespace; remember whether we crossed any.
+	i := len(s)
+	sawSpace := false
+	for i > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:i])
+		if size <= 0 {
 			return false
 		}
 		if !unicode.IsSpace(r) {
-			switch r {
-			case '.', '?', '!', '。', '！', '？':
-				return true
-			default:
-				return false
-			}
+			break
 		}
+		sawSpace = true
+		i -= size
 	}
-	return false
+	if i == 0 {
+		return false
+	}
+	r, size := utf8.DecodeLastRuneInString(s[:i])
+	if size <= 0 {
+		return false
+	}
+	switch r {
+	case '。', '！', '？':
+		// Chinese sentence end — valid even with no trailing space.
+		return true
+	case '.', '?', '!':
+		// ASCII: require whitespace after the mark so "session."
+		// (next token still in flight) is not treated as a sentence.
+		// When the next token is " idle" / "\n", sawSpace becomes
+		// true and we flush.
+		return sawSpace
+	default:
+		return false
+	}
 }
 
 // Compile-time guarantee that *driver satisfies the package-private

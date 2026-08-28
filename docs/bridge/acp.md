@@ -63,15 +63,15 @@ claudecode / codex / dsh / pi 是**独立的 transport 实现**，不走 acp bri
 
 | `sessionUpdate` | Wire 字段 | 处理 | 出处 |
 |---|---|---|---|
-| `agent_message_chunk` | `content.text` | 缓冲到 textBuf，句子边界 flush | ACP spec |
-| `agent_thought_chunk` | `content.text` | 缓冲到 thoughtBuf，带 `[思考]` 前缀 flush | ACP spec |
+| `agent_message_chunk` | `content.text` | 缓冲到 textBuf；**滑动空闲** `flushDebounce`(800ms)：每个 token 重置计时，从「最后一次收到 token」起算。静默满窗口后仅当 `shouldFlushBufferedText`（≥160 rune + 真断句/段落）才 flush。ASCII `.?!` 必须后跟空白；`session.idle_timeout` / 裸 `session.` 不断；中文 `。！？` 可断；列表 `"4."` 不断。tool / turn-end **立即** flush | ACP spec |
+| `agent_thought_chunk` | `content.text` | 同 textBuf 规则，flush 时带 `[思考]` 前缀 | ACP spec |
 | `tool_call` | `toolCallId / title / rawInput` | EventAgentToolStart | ACP spec |
 | `tool_call_update` | `toolCallId / status / rawOutput` | EventAgentToolEnd | ACP spec |
-| `message_chunk` | `content.text` | legacy，缓冲到 textBuf（兼容老 claudecode-style 流）| legacy |
+| `message_chunk` | `content.text` | legacy，同 textBuf 规则 | legacy |
 | `usage_update` | 见下表（两种 shape 都认）| stash 到 `d.lastUsage`；`model` 字段写 `d.model` | ACP spec + opencode vendor |
 | `session.status` | `{status: "idle"}` | turn-end：flush buffer + EventAgentDone{Usage: lastUsage} | opencode turn-end signal |
 | `session_info_update` | `model` 等 vendor 字段 | 写 `d.model` | vendor 扩展 |
-| **default** | — | flush 缓冲 + 丢 | 兜底 |
+| **default** | — | 忽略（不 flush 缓冲，避免 vendor 扩展插在 token 之间时打散回复） | 兜底 |
 
 #### `usage_update` 的两种 wire shape
 

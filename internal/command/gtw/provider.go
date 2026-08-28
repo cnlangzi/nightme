@@ -244,11 +244,11 @@ var ErrCLINotInstalled = errors.New("gtw: provider CLI not installed")
 var ErrStaleUpstream = errors.New("gtw: head branch missing on origin")
 
 // ErrNoCommitsBetween is returned by GitHub when CreatePR
-// succeeds technically — the head ref exists on origin — but
-// the platform refuses because base and head resolve to the
-// same commit, so there is no diff to PR. This is DIFFERENT
-// from ErrStaleUpstream: the branch is fine, the user just
-// has nothing to PR.
+// fails after the head ref was found to exist on origin, because
+// the platform refuses when base and head resolve to the same
+// commit, so there is no diff to PR. This is DIFFERENT from
+// ErrStaleUpstream: the branch is fine, the user just has
+// nothing to PR.
 //
 // GitHub's GraphQL validator surfaces it as "No commits
 // between <base> and <head>". Previously this was lumped into

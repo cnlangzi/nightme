@@ -21,7 +21,7 @@
 
 ## What is NightMe
 
-**NightMe** drives your local AI Coding Agents — Claude Code, Codex, DSH (DeepSeek Harness), Pi, OpenCode, etc. — from chat. Send a message in any connected chat platform; NightMe routes it to the right agent process and returns the reply as a structured card.
+**NightMe** drives your local AI Coding Agents — Claude Code, Codex, DSH (DeepSeek Harness), GitHub Copilot CLI, Pi, OpenCode, etc. — from chat. Send a message in any connected chat platform; NightMe routes it to the right agent process and returns the reply as a structured card.
 
 Multiple chats run in parallel — one per project. Multiple agents work in parallel, each on its own task — switching between them is instant, no cold restart. `git` worktree work is hardened into `Git Team Workflow` (`/gtw`): fix / push / pr / close / sync — each step is one IM reply card, integrated with GitHub, GitLab, and similar platforms. NightMe doesn't replace your agent subscriptions or memory; it sits in front of them and keeps them warm.
 
@@ -45,6 +45,7 @@ You work across multiple projects at once. Each chat in a connected chat channel
     │   Pi          │  │   Pi          │  │   Pi          │
     │   OpenCode    │  │   OpenCode    │  │   OpenCode    │
     │   DSH         │  │   DSH         │  │   DSH         │
+    │   Copilot     │  │   Copilot     │  │   Copilot     │
     └───────────────┘  └───────────────┘  └───────────────┘
 
    ▲ CWD = project; agents run inside that CWD; all parallel from one NightMe instance ▲
@@ -81,6 +82,7 @@ the way.
 | **DSH** (DeepSeek Harness) | Available |
 | **Cursor** | Available |
 | **OpenCode** | Available |
+| **GitHub Copilot CLI** | Available |
 
 ### Chat Channels
 
@@ -97,7 +99,7 @@ the way.
   [Linux: tray-less by default](#linux-tray-less-by-default) if you want the
   system-tray icon.
 - **A chat channel** — see [Chat Channels](#chat-channels) for what's supported today. `nightme login feishu` registers via QR scan; `nightme login telegram` walks through the BotFather token setup.
-- **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, or DSH (DeepSeek Harness). Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
+- **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, DSH (DeepSeek Harness), or GitHub Copilot CLI. Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
 
 ## Install
 
@@ -407,7 +409,7 @@ here.
 | Command | What it does |
 |---|---|
 | `/cwd <path>` | Bind this chat to a workspace. Validates the path; lazy-spawns on the next message. |
-| `/use <agent>` | Switch the active agent (`claude` / `codex` / `dsh` / `opencode` / `pi`). The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
+| `/use <agent>` | Switch the active agent (`claude` / `codex` / `dsh` / `opencode` / `copilot` / `pi`). The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
 | `/stop` | Halt the in-flight turn on the selected agent. Session stays; queued messages still flow. |
 | `/steer <msg>` | Stop the in-flight turn and prepend `<msg>` to the queue. The steered message becomes the first thing the agent sees on the next turn. |
 | `/close [agent]` | Terminate the bridge process(es) for AgentSession(s) in the current workspace. The AgentSession entry is preserved; next user message triggers a respawn that replays `--resume <sessionID>` to continue the conversation. |
@@ -451,7 +453,7 @@ and runs its own built-in slash commands (e.g. Claude Code's
 - **Gateway** routes inbound. The `inbound` subpackage owns the slash-command dispatch chain; everything else is forwarded to the ChatSession's active AgentSession.
 - **ChatSession** is the per-chat context. Owns the AgentSession pool and the InputBuffer FSM. Persists across daemon restarts.
 - **AgentSession** is the per-CLI-process handle. One per `(agent, cwd)` pair, kept alive across `/use` and `/cwd` switches.
-- **Bridge** is the per-agent transport — one of `acp`, `claudecode`, `codex`, `dsh`, `opencode`, `pi`, or `pty` (under `internal/bridge/`), picked by what the CLI supports.
+- **Bridge** is the per-agent transport — one of `acp`, `claudecode`, `codex`, `copilot`, `dsh`, `opencode`, `pi`, or `pty` (under `internal/bridge/`), picked by what the CLI supports.
 
 See [`docs/SPEC.md`](./docs/SPEC.md) §1 for the full responsibility table and [`docs/SPEC.md`](./docs/SPEC.md) §0.1 for the v1.3 "Channel is a dumb renderer" rewrite.
 
@@ -478,6 +480,9 @@ agents:                                  # each entry = name / bridge / command
   - name: dsh
     bridge: dsh
     command: dsh
+  - name: copilot
+    bridge: copilot
+    command: copilot       # uses `--allow-all-tools --acp --stdio` per the bridge
 
 feishu:
   app_id: "cli_xxxxxxxxxxxxxxxx"
@@ -514,7 +519,7 @@ Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute keys contai
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table. |
 | [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + engine runtime architecture — triggers, steps, bot↔wfe boundary. |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs. |
-| [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi. |
+| [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi, copilot. |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | Feishu adapter reference (rendering rules, card semantics, thread routing). |
 | [`docs/flow/`](./docs/flow/) | Cross-cutting flow docs (e.g. the 3-layer doc model). |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting. |
@@ -548,7 +553,7 @@ internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
-    acp/  claudecode/  codex/  dsh/  opencode/  pi/  pty/
+    acp/  claudecode/  codex/  copilot/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
     bot/  echo/  feishu/  telegram/   # adapters (feishu + telegram are production)
   chatsession/                     # ChatSession + pool manager + persistence
@@ -598,7 +603,7 @@ for the design workflow.
 
 Thanks for building with NightMe — we want more **channels**
 (Slack, Web TUI, anything) and more **AI Coding Agents**
-(Claude Code, Codex, DSH (DeepSeek Harness), Pi, Cursor, OpenCode, anything else) to plug in.
+(Claude Code, Codex, DSH (DeepSeek Harness), Pi, Cursor, OpenCode, GitHub Copilot CLI, anything else) to plug in.
 Drop a `Channel` / `Bridge` and the architecture handles the rest.
 
 Contact the maintainer:

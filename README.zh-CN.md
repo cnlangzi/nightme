@@ -64,12 +64,35 @@
 | **CWD = 项目** | 每个 ChatSession 绑定一个当前工作目录——目录 *就是* 项目。用 `/cwd <path>` 设置；随时切换。 |
 | **同 Chat 多 agent** | `/use <agent>` 切换当前 agent。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
 
+## 支持的接入
+
+NightMe 直接接住你已经在用的 AI 编程 agent 和日常聊天的 IM。下面是目前支持的，以及正在路上的。
+
+### AI Coding Agent
+
+| Agent | 状态 |
+|---|---|
+| **Claude Code** | 可用 |
+| **Codex** | 可用 |
+| **Pi** | 可用 |
+| **DSH**（DeepSeek Harness） | 可用 |
+| **Cursor** | 可用 |
+| **OpenCode** | 可用 |
+
+### 聊天 Channel
+
+| Channel | 状态 |
+|---|---|
+| **飞书 Feishu**（国内）/ **Lark**（国际） | 可用 — `nightme login feishu` |
+| **Telegram** | 公测 — `nightme login telegram` |
+| **Slack** | 即将支持 |
+
 ## Prerequisites
 
 - **macOS、Linux 或 Windows** — NightMe 是单文件 Go 二进制。Linux 默认版本是
   完全静态、无运行时依赖的；如果需要系统栏图标见
   [Linux：默认不带系统栏图标](#linux默认不带系统栏图标)。
-- **一个 Feishu 账号** — 目前唯一支持的 IM。`nightme login feishu` 通过扫码完成 bot 注册。
+- **一个聊天平台** — 飞书 / Lark（国内或国际）或 Telegram。`nightme login feishu` 通过扫码完成飞书 / Lark 的 bot 注册；`nightme login telegram` 走 BotFather 流程。
 - **至少一个本地 AI Coding Agent** — Claude Code、Pi、OpenCode、Codex、DeepSeek Harness (DSH) 任一。装好 CLI 放到 `$PATH` 上，NightMe 会作为子进程拉起。
 
 ## Install
@@ -466,7 +489,7 @@ internal/
   bridge/                          # Bridge abstraction, one sub-package per agent
     acp/  claudecode/  codex/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    echo/  feishu/                 # adapters (Feishu is the production one)
+    bot/  echo/  feishu/  telegram/   # adapters (feishu + telegram are production)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
@@ -479,7 +502,7 @@ internal/
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
-  login/                           # Feishu app registration / QR login
+  login/                           # IM bot 注册——feishu/ 处理飞书 / Lark 扫码登录
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)
@@ -512,7 +535,7 @@ PRs 和 issues 都欢迎。大改动的话先开 issue 聊聊，再写代码。
 
 详细指南在 [`/docs`](./docs/) — 设计流程参考 [3-layer doc model](./docs/README.md)。
 
-感谢使用 NightMe——我们欢迎更多 **channels**（Feishu、Web TUI、其他）和更多 **AI Coding Agents**（Claude Code、Codex、DeepSeek Harness (DSH)、Pi、OpenCode、任何新的）接入。Drop 一个 `Channel` / `Bridge`，架构处理剩下的事。
+感谢使用 NightMe——我们欢迎更多 **channels**（Slack、Web TUI、其他）和更多 **AI Coding Agents**（Claude Code、Codex、DeepSeek Harness (DSH)、Pi、Cursor、OpenCode、任何新的）接入。Drop 一个 `Channel` / `Bridge`，架构处理剩下的事。
 
 联系维护者：
 

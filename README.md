@@ -65,13 +65,38 @@ live simultaneously.
 | **CWD = project** | Each ChatSession is bound to one current working directory — that directory *is* the project. Set it with `/cwd <path>`; switch anytime. |
 | **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
 
+## Supported integrations
+
+NightMe works with the AI coding agents you already use and the chat
+apps you already live in. Here's what's available today — and what's on
+the way.
+
+### AI Coding Agents
+
+| Agent | Status |
+|---|---|
+| **Claude Code** | Available |
+| **Codex** | Available |
+| **Pi** | Available |
+| **DSH** (DeepSeek Harness) | Available |
+| **Cursor** | Available |
+| **OpenCode** | Available |
+
+### Chat Channels
+
+| Channel | Status |
+|---|---|
+| **Feishu** (China) / **Lark** (International) | Available — `nightme login feishu` |
+| **Telegram** | Beta — `nightme login telegram` |
+| **Slack** | Coming soon |
+
 ## Prerequisites
 
 - **macOS, Linux, or Windows** — NightMe ships as a single Go binary. The
   default Linux build is fully static with no runtime dependencies; see
   [Linux: tray-less by default](#linux-tray-less-by-default) if you want the
   system-tray icon.
-- **A Feishu account** — currently the only supported IM. `nightme login feishu` registers your bot via QR scan.
+- **A chat platform** — Feishu / Lark (China or International) or Telegram. `nightme login feishu` registers via QR scan; `nightme login telegram` walks through the BotFather token setup.
 - **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, or DSH (DeepSeek Harness). Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
 
 ## Install
@@ -525,7 +550,7 @@ internal/
   bridge/                          # Bridge abstraction, one sub-package per agent
     acp/  claudecode/  codex/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    echo/  feishu/                 # adapters (Feishu is the production one)
+    bot/  echo/  feishu/  telegram/   # adapters (feishu + telegram are production)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
@@ -538,7 +563,7 @@ internal/
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
-  login/                           # Feishu app registration / QR login
+  login/                           # IM bot registration — feishu/ handles QR login for Feishu / Lark
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)
@@ -572,8 +597,8 @@ PRs and issues are welcome. The full guide lives in
 for the design workflow.
 
 Thanks for building with NightMe — we want more **channels**
-(Feishu, Web TUI, anything) and more **AI Coding Agents**
-(Claude Code, Codex, DSH (DeepSeek Harness), Pi, OpenCode, anything else) to plug in.
+(Slack, Web TUI, anything) and more **AI Coding Agents**
+(Claude Code, Codex, DSH (DeepSeek Harness), Pi, Cursor, OpenCode, anything else) to plug in.
 Drop a `Channel` / `Bridge` and the architecture handles the rest.
 
 Contact the maintainer:

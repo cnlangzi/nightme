@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 )
@@ -243,7 +242,3 @@ func readJSONRPC(r io.Reader, timeout time.Duration) (*jsonRPCResponse, error) {
 		return nil, fmt.Errorf("timeout after %s", timeout)
 	}
 }
-
-// _ = strings.Contains keeps the import in case future
-// assertions need it (test compiles regardless).
-var _ = strings.Contains

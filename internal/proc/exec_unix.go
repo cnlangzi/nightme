@@ -56,9 +56,18 @@ func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 // inherited). With Setsid, the child becomes the leader of its
 // own session AND process group, so callers can later broadcast
 // SIGINT to the whole subtree via SignalProcessGroup.
+//
+// fix-git-lock-file 2026-08-29: registers cmd → ctx in a small
+// package-level map so WithGrace can later install a
+// SIGTERM-then-SIGKILL watcher against the same ctx. Skipping
+// this registration only matters when the caller will not call
+// WithGrace — a deliberate opt-in.
 func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	gracedMu.Lock()
+	graced[cmd] = ctx
+	gracedMu.Unlock()
 	return cmd
 }
 

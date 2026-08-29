@@ -128,8 +128,33 @@ func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error
 //     dispatchers that want to override); respect it.
 //   - msg.ChatID empty: non-routed message (e.g. internal log);
 //     nothing to look up.
+//
+// Kind guard (fix-git-lock-file, 2026-08-29):
+//   - OutToolStart / OutToolEnd — a Bash tool may be mid-flight
+//     holding .git/index.lock; another `git status` here races
+//     with that lock holder and is exactly how the stale-lock
+//     issue manifested.
+//   - OutThinking — reasoning metadata the user doesn't see;
+//     stamping a fresh `git status` for it is pure overhead.
+//   - OutHeartbeat — per-turn progress tick (ThinkCount /
+//     ToolCount / LastBeatAt) for the receipt's top header.
+//     Pure internal state propagation; the user sees a counter
+//     refresh, not a new event boundary. A long turn with N
+//     heartbeats would otherwise trigger N `git status` calls.
+//
+// Every other kind (OutReply, OutResult, OutError, OutChoice,
+// OutInit, OutCommandReply, OutTaskCreate/Update, …) still
+// stamps so the footer stays fresh at every user-visible state
+// boundary.
 func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMessage) {
 	if e.gitStatusLookup == nil || msg.GitStatus != nil || msg.ChatID == "" {
+		return
+	}
+	switch msg.Kind {
+	case messages.OutToolStart,
+		messages.OutToolEnd,
+		messages.OutThinking,
+		messages.OutHeartbeat:
 		return
 	}
 	msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)

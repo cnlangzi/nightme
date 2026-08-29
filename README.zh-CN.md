@@ -84,7 +84,7 @@ NightMe 直接接住你已经在用的 AI 编程 agent 和日常聊天的 IM。�
 | Channel | 状态 |
 |---|---|
 | **飞书 Feishu**（国内）/ **Lark**（国际） | 可用 — `nightme login feishu` |
-| **Telegram** | 公测 |
+| **Telegram** | 公测 — `nightme login telegram` |
 | **Slack** | 即将支持 |
 
 ## Prerequisites
@@ -92,7 +92,7 @@ NightMe 直接接住你已经在用的 AI 编程 agent 和日常聊天的 IM。�
 - **macOS、Linux 或 Windows** — NightMe 是单文件 Go 二进制。Linux 默认版本是
   完全静态、无运行时依赖的；如果需要系统栏图标见
   [Linux：默认不带系统栏图标](#linux默认不带系统栏图标)。
-- **一个聊天平台** — 飞书 / Lark（国内或国际）或 Telegram。`nightme login feishu` 通过扫码完成飞书 / Lark 的 bot 注册；Telegram 需要 BotFather token（见 [Configuration](#configuration)）。
+- **一个聊天平台** — 飞书 / Lark（国内或国际）或 Telegram。`nightme login feishu` 通过扫码完成飞书 / Lark 的 bot 注册；`nightme login telegram` 走 BotFather 流程。
 - **至少一个本地 AI Coding Agent** — Claude Code、Pi、OpenCode、Codex、DeepSeek Harness (DSH) 任一。装好 CLI 放到 `$PATH` 上，NightMe 会作为子进程拉起。
 
 ## Install

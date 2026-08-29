@@ -87,7 +87,7 @@ the way.
 | Channel | Status |
 |---|---|
 | **Feishu** (China) / **Lark** (International) | Available — `nightme login feishu` |
-| **Telegram** | Beta |
+| **Telegram** | Beta — `nightme login telegram` |
 | **Slack** | Coming soon |
 
 ## Prerequisites
@@ -96,7 +96,7 @@ the way.
   default Linux build is fully static with no runtime dependencies; see
   [Linux: tray-less by default](#linux-tray-less-by-default) if you want the
   system-tray icon.
-- **A chat platform** — Feishu / Lark (China or International) or Telegram. `nightme login feishu` registers via QR scan; Telegram needs a BotFather token (see [Configuration](#configuration)).
+- **A chat platform** — Feishu / Lark (China or International) or Telegram. `nightme login feishu` registers via QR scan; `nightme login telegram` walks through the BotFather token setup.
 - **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, or DSH (DeepSeek Harness). Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
 
 ## Install

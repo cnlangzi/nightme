@@ -97,25 +97,23 @@ func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.
 //     stdlib's Start preflight handles the ctx error separately.
 //   - Once Start has set cmd.Process, Cancel sends SIGTERM to
 //     the entire process group (Setsid armed in NewWith
-//     ensures pid == pgid). pgid-kill is the only delivery
-//     mechanism — single-pid fallback is intentionally omitted
-//     because (a) if pgid SIGTERM fails with non-ESRCH
-//     (EPERM/EACCES), the single-pid attempt usually fails for
-//     the same reason, (b) SIGKILL after grace terminates
-//     regardless, and (c) the single-pid path's failure was
-//     previously discarded with `_ =`, masking permission
-//     errors from diagnosis.
+//     ensures pid == pgid). On pgid-kill non-ESRCH (EPERM on
+//     a foreign pgid), we silently fall through: the
+//     single-pid attempt would fail for the same reason, and
+//     the SIGKILL AfterFunc below is the real upper bound.
+//     Surfacing the error would replace the child's real exit
+//     status in Run()'s return value, which is worse than the
+//     diagnostic loss.
 //   - After SIGTERMGrace, an AfterFunc fires SIGKILL on the
-//     same pgid. The closure's first check is `cmd.ProcessState
-//     != nil` — when the child has already been reaped via
-//     SIGTERM (or natural exit), Wait() has populated
-//     ProcessState, and the closure short-circuits without any
-//     syscall. The AfterFunc captures `cmd` by reference for
-//     the full ~1 s grace window — Go's time.Timer can't be
-//     stopped from outside the closure, so the retention is
-//     accepted as a bounded cost. The previous design (ESRCH
-//     check on a syscall) wasted a syscall per clean exit; this
-//     version is a pure no-op.
+//     same pgid. The closure captures cmd by reference for
+//     the full grace window — this is a bounded retention cost
+//     (timer-heap slot + ~1 KB cmd struct), not a leak.
+//     Timer.Stop exists but doesn't help: the closure's own
+//     capture keeps cmd alive regardless. The common case
+//     (child reaped within grace) gets ESRCH from the kill
+//     syscall and returns immediately. We deliberately do NOT
+//     read cmd.ProcessState here (race against Wait's write,
+//     flagged by `go test -race` on CI).
 //
 // armGraceCancel is idempotent: it just assigns cmd.Cancel. Two
 // proc.NewWith calls on the same *exec.Cmd are not possible
@@ -127,32 +125,30 @@ func armGraceCancel(cmd *exec.Cmd) {
 			return os.ErrProcessDone
 		}
 		pid := proc.Pid
-		// SIGTERM the whole process group; Setsid enabled
-		// pid == pgid. We do not fall back to single-pid
-		// signal on non-ESRCH (EPERM/EACCES) — see contract
-		// above.
 		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			// Non-ESRCH pgid-kill failure (e.g. foreign pg,
-			// EPERM). Best-effort SIGKILL after grace will
-			// still terminate; the pgid SIGTERM just didn't
-			// land. No error to surface — Cancel returning
-			// anything other than ErrProcessDone would
-			// replace the child's real exit status in
-			// Run()'s result.
+			// pgid-kill non-ESRCH — see contract above.
 			_ = err
 		}
-		// Grace timer. The returned *time.Timer is discarded
-		// because Go's runtime has no API to cancel it from
-		// outside the closure; the closure's first action is
-		// the ProcessState check that short-circuits the
-		// common (clean-exit) path.
+		// Grace timer. Returns *time.Timer but we discard it:
+		// even though Timer.Stop exists, the closure's `cmd`
+		// reference keeps cmd alive in the timer heap for the
+		// full grace window regardless. We accept this bounded
+		// retention (timer-heap slot + ~1 KB cmd struct) in
+		// exchange for not needing a Wait()-side stop hook —
+		// stdlib's exec.Cmd doesn't expose one, and adding a
+		// parallel finalizer / runtime.SetFinalizer would be
+		// more code than the cost it saves.
 		time.AfterFunc(SIGTERMGrace, func() {
-			// Common case: child already reaped. Wait()
-			// sets ProcessState non-nil before this fires;
-			// we do nothing, no syscall, no ESRCH check.
-			if cmd.ProcessState != nil {
-				return
-			}
+			// Race fix: do NOT read cmd.ProcessState here.
+			// stdlib's cmd.Wait() writes it concurrently from
+			// the main test goroutine, which Go's race
+			// detector flags (verified in CI on Ubuntu, the
+			// fix-git-lock-file branch). The previous design
+			// tried to short-circuit on ProcessState != nil
+			// but that's a data race; we instead always run
+			// the syscall path and rely on ESRCH for the
+			// common "child reaped within grace" case. Cost:
+			// one extra syscall per clean exit (negligible).
 			p := cmd.Process
 			if p == nil {
 				return
@@ -161,6 +157,14 @@ func armGraceCancel(cmd *exec.Cmd) {
 				if errors.Is(err, syscall.ESRCH) {
 					return
 				}
+				// Non-ESRCH pgid-kill failure (e.g. EPERM
+				// on a foreign pgid). Best-effort single-pid
+				// fallback; if that also fails the child
+				// survives until the wait goroutine reaps it.
+				// The error is discarded: surfacing it would
+				// replace the child's real exit status in
+				// Run()'s return value. Documented as
+				// "best-effort" in the contract above.
 				_ = p.Kill()
 			}
 		})

@@ -1008,8 +1008,8 @@ func (d *driver) Close() error {
 		// operation. A JSON-RPC notification could block on an
 		// uncooperative PTY peer, so cleanup never waits for an
 		// optional server acknowledgement.
-		d.flushTextBuffers() // drain idle-buffered text before ctx cancel
-		d.cancel()
+		d.cancel()                       // unblock deliver()'s ctx arm first
+		d.flushTextBuffers()              // drain idle-buffered text after ctx cancel
 		if d.transport != nil {
 			err = d.transport.Close()
 		}
@@ -1756,6 +1756,17 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 				"panic", r)
 		}
 	}()
+	// Best-effort non-blocking send first so the shutdown drain
+	// (Close cancels ctx, then flushTextBuffers runs) still wins
+	// when the events channel has room. The blocking fallback
+	// below remains for live-stream backpressure: a full channel
+	// with an alive consumer blocks until either the consumer
+	// drains or ctx fires.
+	select {
+	case d.events <- ev:
+		return ev
+	default:
+	}
 	select {
 	case d.events <- ev:
 	case <-d.ctx.Done():
@@ -1783,11 +1794,14 @@ const minFlushRunes = 160
 
 // flushDebounce is the sliding idle window after the last token.
 // Every new chunk resets the timer; we only consider flushing once
-// no tokens arrive for this duration. Matches the spirit of
-// cc-connect streamPreview.IntervalMs (default 1500ms there); we use
-// a slightly tighter window because Feishu rolling-log entries are
-// discrete cards, not in-place PATCHes. Tests may override.
-var flushDebounce = 800 * time.Millisecond
+// no tokens arrive for this duration. Matches cc-connect
+// streamPreview.IntervalMs (default 1500ms) so two adjacent
+// implementations converge on the same debounce. A shorter window
+// turned out to be too aggressive: it cut trailing-token replies
+// into a 1-3 line message followed by a tiny edit, which renders
+// as two disjoint rolling-log cards in Feishu rather than one.
+// Tests may override.
+var flushDebounce = 1500 * time.Millisecond
 
 // appendAndMaybeFlush writes chunk onto buf and (re)starts the
 // sliding idle timer from this token. Flush happens later in

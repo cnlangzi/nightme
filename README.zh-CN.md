@@ -64,6 +64,30 @@
 | **CWD = 项目** | 每个 ChatSession 绑定一个当前工作目录——目录 *就是* 项目。用 `/cwd <path>` 设置；随时切换。 |
 | **同 Chat 多 agent** | `/use <agent>` 切换当前 agent。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
 
+## 支持的接入
+
+NightMe 坐在你的本地 agent 和聊天平台之间。下面是代码里现成的清单——丢一个新的 `Bridge` 或 `Channel` 进来，架构自然接住。
+
+### AI Coding Agent
+
+| Agent | Bridge |
+|---|---|
+| **Claude Code** | `claudecode` |
+| **Codex** | `codex` |
+| **Pi** | `pi` |
+| **DSH**（DeepSeek Harness） | `dsh` |
+| **Cursor** | `cursor` |
+| **OpenCode** | `opencode` |
+
+### 聊天 Channel
+
+| Channel | 区域 | 状态 |
+|---|---|---|
+| **飞书 Feishu** | 国内 | ✅ 生产可用 |
+| **Lark** | 国际 | ✅ 生产可用 |
+| **Telegram** | — | ✅ 生产可用 |
+| **Slack** | — | 🚧 接入中 |
+
 ## Prerequisites
 
 - **macOS、Linux 或 Windows** — NightMe 是单文件 Go 二进制。Linux 默认版本是

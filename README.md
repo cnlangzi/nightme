@@ -65,6 +65,32 @@ live simultaneously.
 | **CWD = project** | Each ChatSession is bound to one current working directory — that directory *is* the project. Set it with `/cwd <path>`; switch anytime. |
 | **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
 
+## Supported integrations
+
+NightMe sits between your local agents and your chat platform. The
+inventory below is what the codebase ships today — drop a new `Bridge`
+or `Channel` and the architecture handles the rest.
+
+### AI Coding Agents
+
+| Agent | Bridge |
+|---|---|
+| **Claude Code** | `claudecode` |
+| **Codex** | `codex` |
+| **Pi** | `pi` |
+| **DSH** (DeepSeek Harness) | `dsh` |
+| **Cursor** | `cursor` |
+| **OpenCode** | `opencode` |
+
+### Chat Channels
+
+| Channel | Region | Status |
+|---|---|---|
+| **Feishu** | China | ✅ Production |
+| **Lark** | International | ✅ Production |
+| **Telegram** | — | ✅ Production |
+| **Slack** | — | 🚧 Incoming |
+
 ## Prerequisites
 
 - **macOS, Linux, or Windows** — NightMe ships as a single Go binary. The

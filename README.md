@@ -29,10 +29,10 @@ Multiple chats run in parallel — one per project. Multiple agents work in para
 
 ### One chat, one CWD, one project
 
-You work across multiple projects at once. Each Feishu chat (group or DM) is a **ChatSession**, and each ChatSession has a **CWD** — its current working directory. The CWD *is* the project: set it with `/cwd <path>`, change it anytime. Multiple chats run in parallel, each bound to its own directory.
+You work across multiple projects at once. Each chat in a connected chat channel — group or DM — is a **ChatSession**, and each ChatSession has a **CWD** — its current working directory. The CWD *is* the project: set it with `/cwd <path>`, change it anytime. Multiple chats run in parallel, each bound to its own directory. See [Chat Channels](#chat-channels) for the channels available today.
 
 ```
-                            You (Feishu)
+                       You (any chat channel)
                                   │
                                   ▼
 
@@ -50,7 +50,7 @@ You work across multiple projects at once. Each Feishu chat (group or DM) is a *
    ▲ CWD = project; agents run inside that CWD; all parallel from one NightMe instance ▲
 ```
 
-![Feishu chats list — multiple parallel ChatSessions across DMs and groups, each pinned to its own project](docs/images/feishu-multi-chats.png)
+![Feishu (example chat channel) — multiple parallel ChatSessions across DMs and groups, each pinned to its own project](docs/images/feishu-multi-chats.png)
 
 **Project isolation is by directory.** Each ChatSession's CWD is independent — re-running `/cwd` changes which directory a session operates on, without affecting the others. Multiple projects stay
 live simultaneously.
@@ -96,7 +96,7 @@ the way.
   default Linux build is fully static with no runtime dependencies; see
   [Linux: tray-less by default](#linux-tray-less-by-default) if you want the
   system-tray icon.
-- **A chat platform** — Feishu / Lark (China or International) or Telegram. `nightme login feishu` registers via QR scan; `nightme login telegram` walks through the BotFather token setup.
+- **A chat channel** — see [Chat Channels](#chat-channels) for what's supported today. `nightme login feishu` registers via QR scan; `nightme login telegram` walks through the BotFather token setup.
 - **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, or DSH (DeepSeek Harness). Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
 
 ## Install

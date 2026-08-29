@@ -90,6 +90,14 @@ type Credentials struct {
 	// Feishu.
 	BotToken string `json:"bot_token,omitempty"`
 
+	// AppToken is Slack's app-level token (xapp-…, scope
+	// connections:write) used to open the Socket Mode WebSocket.
+	// Slack is the only channel needing a second credential: the
+	// bot token authenticates Web API calls, this one authenticates
+	// the connection itself. Never log this value. Empty for
+	// Feishu / Telegram.
+	AppToken string `json:"app_token,omitempty"`
+
 	// AppName is the human-readable application name chosen on the
 	// channel's consent page (Feishu) or via /setname in BotFather
 	// (Telegram).
@@ -249,6 +257,11 @@ func LoginWith(ctx context.Context, provider Provider, out, errOut io.Writer) er
 		// pair). Providers that don't populate BotToken leave it
 		// empty, so the assignment is always safe.
 		cfg.Telegram.BotToken = creds.BotToken
+	case "slack":
+		// Slack needs two: the bot token for the Web API and the
+		// app-level token for the Socket Mode connection.
+		cfg.Slack.BotToken = creds.BotToken
+		cfg.Slack.AppToken = creds.AppToken
 	default:
 		return fmt.Errorf("login: unknown provider %q", provider.Name())
 	}
@@ -269,6 +282,9 @@ func LoginWith(ctx context.Context, provider Provider, out, errOut io.Writer) er
 			fmt.Fprintf(errOut, "  app_secret: %s\n", creds.AppSecret)
 		case "telegram":
 			fmt.Fprintf(errOut, "  bot_token:  %s\n", creds.BotToken)
+		case "slack":
+			fmt.Fprintf(errOut, "  bot_token:  %s\n", creds.BotToken)
+			fmt.Fprintf(errOut, "  app_token:  %s\n", creds.AppToken)
 		}
 		if creds.AppName != "" {
 			fmt.Fprintf(errOut, "  app_name:   %s\n", creds.AppName)
@@ -292,6 +308,8 @@ func LoginWith(ctx context.Context, provider Provider, out, errOut io.Writer) er
 			fmt.Fprintf(out, "  App Name:  %s\n", creds.AppName)
 		}
 	case "telegram":
+		fmt.Fprintf(out, "  Bot:       %s\n", creds.AppName)
+	case "slack":
 		fmt.Fprintf(out, "  Bot:       %s\n", creds.AppName)
 	}
 	fmt.Fprintf(out, "  Saved to:  %s\n", config.DefaultPath())

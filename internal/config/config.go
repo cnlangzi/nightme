@@ -68,6 +68,7 @@ type Config struct {
 	Name     string         `yaml:"name,omitempty"`
 	Feishu   FeishuConfig   `yaml:"feishu"`
 	Telegram TelegramConfig `yaml:"telegram"`
+	Slack    SlackConfig    `yaml:"slack"`
 	Primary  string         `yaml:"primary"`
 	Agents   []AgentEntry   `yaml:"agents"`
 	Session  SessionConfig  `yaml:"session"`
@@ -124,6 +125,39 @@ type FeishuRateLimitConfig struct {
 type TelegramConfig struct {
 	BotToken       string `yaml:"bot_token"`
 	PollingTimeout int    `yaml:"polling_timeout"`
+}
+
+// SlackConfig holds credentials for the Slack channel.
+//
+// Both tokens are sensitive. BotToken (xoxb-) authenticates Web API
+// calls; AppToken (xapp-, scope connections:write) opens the Socket
+// Mode WebSocket. nightme only supports Socket Mode — there is no
+// Events API / public-URL path, so no signing secret is needed.
+//
+// StreamThrottleMs is the per-turn minimum interval between
+// chat.appendStream calls (docs/channel/slack.md §2.3). The default
+// is deliberately conservative: Slack's Tier 4 would allow ~600ms,
+// but a chat placeholder does not need that refresh rate and
+// leaving headroom avoids 429-driven backoff that looks worse than
+// a slower tick.
+type SlackConfig struct {
+	BotToken         string `yaml:"bot_token"`
+	AppToken         string `yaml:"app_token"`
+	StreamThrottleMs int    `yaml:"stream_throttle_ms"`
+
+	// RateLimit controls the slack package's global token bucket.
+	// Empty = StrictDefault. See docs/channel/slack.md §2.6 — the
+	// bucket is global (not per-chat) because nightme runs many
+	// chats in parallel and they share one Slack app quota.
+	RateLimit *SlackRateLimitConfig `yaml:"rate_limit,omitempty"`
+}
+
+// SlackRateLimitConfig is the slack package's global token bucket
+// configuration. RatePerSec refills per second; Burst is the bucket
+// capacity (1 = no burst).
+type SlackRateLimitConfig struct {
+	RatePerSec float64 `yaml:"rate_per_sec"`
+	Burst      int     `yaml:"burst"`
 }
 
 // AgentsConfig is REMOVED in v1.2 (post interactive-config refactor).
@@ -383,6 +417,9 @@ func applyDefaults(c *Config) {
 	if c.Telegram.PollingTimeout == 0 {
 		c.Telegram.PollingTimeout = 30
 	}
+	if c.Slack.StreamThrottleMs == 0 {
+		c.Slack.StreamThrottleMs = 3000
+	}
 }
 
 // applyEnvOverrides looks at every NIGHTME_<SECTION>_<KEY> variable
@@ -407,6 +444,17 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("NIGHTME_TELEGRAM_POLLING_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Telegram.PollingTimeout = n
+		}
+	}
+	if v := os.Getenv("NIGHTME_SLACK_BOT_TOKEN"); v != "" {
+		c.Slack.BotToken = v
+	}
+	if v := os.Getenv("NIGHTME_SLACK_APP_TOKEN"); v != "" {
+		c.Slack.AppToken = v
+	}
+	if v := os.Getenv("NIGHTME_SLACK_STREAM_THROTTLE_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Slack.StreamThrottleMs = n
 		}
 	}
 	if v := os.Getenv("NIGHTME_PRIMARY"); v != "" {

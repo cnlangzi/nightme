@@ -35,6 +35,7 @@ import (
 	// CLI binary starts; new channels are added by appending to
 	// this list (or via a build-tag-gated package).
 	_ "github.com/cnlangzi/nightme/internal/login/feishu"
+	_ "github.com/cnlangzi/nightme/internal/login/slack"
 	_ "github.com/cnlangzi/nightme/internal/login/telegram"
 )
 

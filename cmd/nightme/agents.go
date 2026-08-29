@@ -32,6 +32,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
+	"github.com/cnlangzi/nightme/internal/bridge/copilot"
 	"github.com/cnlangzi/nightme/internal/bridge/cursor"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh"
 	"github.com/cnlangzi/nightme/internal/bridge/opencode"
@@ -136,4 +137,35 @@ func init() {
 	// the structured bridge only works for builtin registration,
 	// not for the PTY fallback in agentregistry.Build.
 	agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))
+
+	// copilot — the `copilot --acp --stdio` Agent Client
+	// Protocol bridge. GitHub Copilot CLI natively supports ACP
+	// as of v1.0.x (docs.github.com/en/copilot/reference/acp-
+	// server) — same wire surface (NDJSON / JSON-RPC 2.0 over
+	// stdio) as opencode / cursor. Requires Copilot CLI >= 1.0.x;
+	// older preview builds (e.g. 0.0.361) ship the `copilot`
+	// binary but reject `--acp` with "unknown option". Upgrade
+	// via `npm install -g @github/copilot@latest`.
+	//
+	// No per-bridge UpdateHandler / MethodHandler is installed:
+	// Copilot's wire is ACP-spec conformant and the generic
+	// acp bridge's fallback covers all common surface (text /
+	// tool / usage_update / session.status). If a future Copilot
+	// release adds PRIVATE protocol extensions (copilot/* methods),
+	// a thin per-bridge MethodHandler can be added following the
+	// cursor/handler.go pattern.
+	//
+	// Permission default: --allow-all-tools (parent-level flag),
+	// same role as cursor's --force --trust --sandbox disabled
+	// and Claude's --permission-mode bypassPermissions. nightme
+	// does NOT rewrite ~/.copilot/ — per the agent-no-config-
+	// tampering principle, model / provider / MCP servers flow
+	// from the user's own settings.
+	//
+	// One-shot invocations use `copilot --allow-all-tools -p
+	// "..."` print-mode (mirrors cursor/print.go). Copilot's
+	// `-p` mode is plain-text stdout, no NDJSON, process exits
+	// after the turn.
+	agent.Builtins.Register(
+		copilot.NewStarter("copilot", "copilot", copilot.DefaultACPArgs))
 }

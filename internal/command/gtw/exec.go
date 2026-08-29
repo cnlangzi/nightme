@@ -69,12 +69,12 @@ func runCmd(ctx context.Context, dir, name string, args ...string) (stdout, stde
 	// Unix/macOS the helper is a no-op (we just inherit
 	// os.Environ()), so cmd.Env stays platform-agnostic.
 	cmd.Env = applyMSYSEnvNoPathConv(os.Environ())
-	// fix-git-lock-file 2026-08-29: install SIGTERM → grace →
-	// SIGKILL on this child so a cancelled `git` (typical
-	// 3s-timeout path) drops .git/index.lock cleanly instead of
-	// leaving a stale lock the next LLM Bash tool would
-	// collide with. No-op on Windows (see grace_windows.go).
-	proc.WithGrace(cmd, proc.KillGrace)
+	// fix-git-lock-file 2026-08-29: proc.New already wires
+	// SIGTERM → grace → SIGKILL via cmd.Cancel (see
+	// internal/proc.NewWith), so a cancelled `git`
+	// (typical 3s-timeout path) drops .git/index.lock cleanly
+	// instead of leaving a stale lock the next LLM Bash tool
+	// would collide with. No per-call wiring needed here.
 	var so, se bytes.Buffer
 	cmd.Stdout = &so
 	cmd.Stderr = &se

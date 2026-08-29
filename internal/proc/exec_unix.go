@@ -4,12 +4,14 @@ package proc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -57,18 +59,128 @@ func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 // own session AND process group, so callers can later broadcast
 // SIGINT to the whole subtree via SignalProcessGroup.
 //
-// fix-git-lock-file 2026-08-29: registers cmd → ctx in a small
-// package-level map so WithGrace can later install a
-// SIGTERM-then-SIGKILL watcher against the same ctx. Skipping
-// this registration only matters when the caller will not call
-// WithGrace — a deliberate opt-in.
+// SIGTERMGrace is how long a child gets to flush in response to
+// SIGTERM before SIGKILL. Applied to every *exec.Cmd spawned via
+// proc.New (and proc.NewWith). Tuned for `git`'s
+// `.git/index.lock` release path: 1 s is comfortably longer than
+// `git`'s signal-induced cleanup while still feeling instant on
+// a 3 s ctx-timeout path.
+//
+// Trade-off: if the child ignores SIGTERM (interactive prompt,
+// masked signals, deep syscall), the AfterFunc SIGKILL fires and
+// `.git/index.lock` is NOT reaped — SIGKILL skips git's cleanup
+// path. This is no worse than the pre-fix behaviour (SIGKILL on
+// every cancel), and the much-better common case (SIGTERM
+// handled) is what makes the difference in practice. A v3
+// follow-up can add a best-effort `os.Remove(<dir>/.git/index.lock)
+// when its mtime > 5s` if real-world stuck-SIGTERM paths
+// materialise.
+//
+// Distinct from cmd/nightme/kill_unix.go:killGrace (30 s), which
+// serves agent-CLI "flush --resume id" semantics. Don't unify.
+const SIGTERMGrace = 1 * time.Second
+
+// fix-git-lock-file 2026-08-29: every child spawned via
+// proc.NewWith now leaves a clean `.git/index.lock` when
+// cancelled, by overriding cmd.Cancel to a SIGTERM-then-SIGKILL
+// path that stdlib's existing watchCtx goroutine invokes on
+// ctx-fire. Replaces the earlier WithGrace + graced-map design
+// (which leaked one goroutine + map entry per successful
+// proc.New whose ctx never fired — see /review finding #1).
 func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	gracedMu.Lock()
-	graced[cmd] = ctx
-	gracedMu.Unlock()
+	armGraceCancel(cmd)
 	return cmd
+}
+
+// armGraceCancel rewrites cmd.Cancel from exec.CommandContext's
+// default `func() error { return c.Process.Kill() }` (raw
+// SIGKILL) to SIGTERM → SIGTERMGrace → SIGKILL, and returns
+// os.ErrProcessDone so stdlib's watchCtx doesn't wrap Run()'s
+// result with ctx.Err().
+//
+// Mechanics:
+//
+//   - cmd.Cancel is invoked by stdlib's watchCtx goroutine —
+//     one already started by exec.CommandContext because Cancel
+//     != nil at cmd.Start time. We reuse that goroutine; no new
+//     goroutine, no map, no mutex.
+//   - cmd.Cancel may be called BEFORE cmd.Start (ctx fires
+//     before we ever spawned the child). In that case
+//     cmd.Process is nil; we return os.ErrProcessDone and
+//     stdlib's Start preflight handles the ctx error separately.
+//   - Once Start has set cmd.Process, Cancel sends SIGTERM to
+//     the entire process group (Setsid armed in NewWith
+//     ensures pid == pgid). pgid-kill is the only delivery
+//     mechanism — single-pid fallback is intentionally omitted
+//     because (a) if pgid SIGTERM fails with non-ESRCH
+//     (EPERM/EACCES), the single-pid attempt usually fails for
+//     the same reason, (b) SIGKILL after grace terminates
+//     regardless, and (c) the single-pid path's failure was
+//     previously discarded with `_ =`, masking permission
+//     errors from diagnosis.
+//   - After SIGTERMGrace, an AfterFunc fires SIGKILL on the
+//     same pgid. The closure's first check is `cmd.ProcessState
+//     != nil` — when the child has already been reaped via
+//     SIGTERM (or natural exit), Wait() has populated
+//     ProcessState, and the closure short-circuits without any
+//     syscall. The AfterFunc captures `cmd` by reference for
+//     the full ~1 s grace window — Go's time.Timer can't be
+//     stopped from outside the closure, so the retention is
+//     accepted as a bounded cost. The previous design (ESRCH
+//     check on a syscall) wasted a syscall per clean exit; this
+//     version is a pure no-op.
+//
+// armGraceCancel is idempotent: it just assigns cmd.Cancel. Two
+// proc.NewWith calls on the same *exec.Cmd are not possible
+// (each New returns a fresh cmd).
+func armGraceCancel(cmd *exec.Cmd) {
+	cmd.Cancel = func() error {
+		proc := cmd.Process
+		if proc == nil {
+			return os.ErrProcessDone
+		}
+		pid := proc.Pid
+		// SIGTERM the whole process group; Setsid enabled
+		// pid == pgid. We do not fall back to single-pid
+		// signal on non-ESRCH (EPERM/EACCES) — see contract
+		// above.
+		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			// Non-ESRCH pgid-kill failure (e.g. foreign pg,
+			// EPERM). Best-effort SIGKILL after grace will
+			// still terminate; the pgid SIGTERM just didn't
+			// land. No error to surface — Cancel returning
+			// anything other than ErrProcessDone would
+			// replace the child's real exit status in
+			// Run()'s result.
+			_ = err
+		}
+		// Grace timer. The returned *time.Timer is discarded
+		// because Go's runtime has no API to cancel it from
+		// outside the closure; the closure's first action is
+		// the ProcessState check that short-circuits the
+		// common (clean-exit) path.
+		time.AfterFunc(SIGTERMGrace, func() {
+			// Common case: child already reaped. Wait()
+			// sets ProcessState non-nil before this fires;
+			// we do nothing, no syscall, no ESRCH check.
+			if cmd.ProcessState != nil {
+				return
+			}
+			p := cmd.Process
+			if p == nil {
+				return
+			}
+			if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
+				if errors.Is(err, syscall.ESRCH) {
+					return
+				}
+				_ = p.Kill()
+			}
+		})
+		return os.ErrProcessDone
+	}
 }
 
 // SetCloseOnExec arms FD_CLOEXEC on f's descriptor so it is NOT

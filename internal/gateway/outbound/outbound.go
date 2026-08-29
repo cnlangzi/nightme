@@ -142,10 +142,16 @@ func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error
 //     refresh, not a new event boundary. A long turn with N
 //     heartbeats would otherwise trigger N `git status` calls.
 //
-// Every other kind (OutReply, OutResult, OutError, OutChoice,
+// Every other kind (OutReply, OutResult, OutMessageState,
+// OutMessageStateRemoved, OutError, OutChoice, OutChoicePatch,
 // OutInit, OutCommandReply, OutTaskCreate/Update, …) still
 // stamps so the footer stays fresh at every user-visible state
 // boundary.
+//
+// Future OutboundKind additions: pick explicitly. If the new
+// kind is "tool-state-like" (Bash in flight, reasoning, internal
+// progress tick — see the skip list above), add it to the case
+// statement. Otherwise let it fall through to stamp.
 func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMessage) {
 	if e.gitStatusLookup == nil || msg.GitStatus != nil || msg.ChatID == "" {
 		return

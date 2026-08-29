@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
@@ -37,8 +38,12 @@ func botBuilder(cfg *config.Config) (channel.Channel, error) {
 		return nil, fmt.Errorf("no workflows found in %s", dir)
 	}
 	// Build the workspace→repo map (used by future git event
-	// dispatch; cheap even when not used in v0).
-	wsMap, err := buildWorkspaceRepoMap(workflows)
+	// dispatch; cheap even when not used in v0). botBuilder
+	// is invoked once during daemon startup; the caller
+	// doesn't yet have a parent ctx, so context.Background()
+	// is the right scope — gitOrigin inside caps its own
+	// short timeout via timeouts.CLI.
+	wsMap, err := buildWorkspaceRepoMap(context.Background(), workflows)
 	if err != nil {
 		return nil, err
 	}

@@ -134,7 +134,7 @@ type workspaceRepoMap struct {
 	byPath map[string]string
 }
 
-func buildWorkspaceRepoMap(wfs []*wfe.Workflow) (*workspaceRepoMap, error) {
+func buildWorkspaceRepoMap(ctx context.Context, wfs []*wfe.Workflow) (*workspaceRepoMap, error) {
 	m := &workspaceRepoMap{
 		byRepo: map[string]string{},
 		byPath: map[string]string{},
@@ -146,7 +146,7 @@ func buildWorkspaceRepoMap(wfs []*wfe.Workflow) (*workspaceRepoMap, error) {
 				continue
 			}
 			seen[ws] = true
-			repo := gitOrigin(ws)
+			repo := gitOrigin(ctx, ws)
 			if repo == "" {
 				return nil, &workspaceError{Workspace: ws, Reason: "no git remote origin"}
 			}

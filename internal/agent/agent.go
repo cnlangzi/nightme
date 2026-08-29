@@ -90,10 +90,11 @@ const (
 	//   - claudecode — yes, one per assistant content block.
 	//   - pi         — yes since F-52; buffers text_delta and emits at
 	//                  text_end / the tool boundary.
-	//   - acp        — NOT YET; still forwards agent_message_chunk
-	//                  deltas verbatim (internal/bridge/acp/session.go).
-	//                  Deliberately out of F-52's scope; its block
-	//                  boundary is stopReason, not text_end.
+	//   - acp        — yes: chunks accumulate in textBuf; sliding idle
+	//                  flushDebounce from last token, then flush only
+	//                  on true sentence/paragraph (min size), or
+	//                  immediately on tool / turn-end. Dotted ids
+	//                  ("session.idle_timeout") are not sentence ends.
 	//   - pty        — exempt; raw byte stream with no block structure.
 	EventAgentText EventKind = iota
 

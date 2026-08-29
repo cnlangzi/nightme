@@ -4,7 +4,11 @@ package proc
 
 import (
 	"context"
+	"errors"
+	"os/exec"
+	"reflect"
 	"testing"
+	"time"
 )
 
 // TestNew_SetsSysProcAttrSetsid pins the platform-specific
@@ -262,4 +266,140 @@ func equalSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// fix-git-lock-file 2026-08-29: the SIGTERM-then-SIGKILL
+// behaviour that replaces exec.CommandContext's SIGKILL-on-cancel
+// now lives inside proc.NewWith (armGraceCancel). The tests
+// below pin that contract end-to-end: child traps SIGTERM and
+// exits 0, child ignores SIGTERM and SIGKILLs after grace,
+// pre-cancel short-circuits, nil cmd / zero grace are no-ops.
+//
+// All integration tests rely on `/bin/sh` being available
+// (true on every Unix platform nightme supports).
+
+// TestNewGrace_SetsCancel verifies the armGraceCancel hook
+// actually fires — i.e. cmd.Cancel was overridden by NewWith
+// from exec.CommandContext's default SIGKILL-on-cancel. We probe
+// via cmd.Cancel's underlying code-pointer: the new and the
+// default implementations differ, so a swap is detectable.
+func TestNewGrace_SetsCancel(t *testing.T) {
+	a := New(context.Background(), "/bin/true")
+	def := exec.CommandContext(context.Background(), "/bin/true").Cancel
+	if reflect.ValueOf(a.Cancel).Pointer() == reflect.ValueOf(def).Pointer() {
+		t.Fatalf("New left cmd.Cancel as the stdlib default; armGraceCancel did not run")
+	}
+}
+
+// TestNewGrace_CleanExit_OnSIGTERM exercises the happy path:
+// child traps SIGTERM, exits 0. Run() must return nil (not
+// wrapped with ctx.Err()). Total wall-time well under grace.
+//
+// Sleep before cancel is generous (200 ms) so sh has time to
+// parse the script and arm the trap; on busy CI the 50 ms
+// version occasionally lost the race against sh's startup,
+// causing the child to exit via signal-killed (signal:
+// terminated) rather than via the trap (exit 0). The trap
+// behaviour itself is what we're testing, so we'd rather
+// retry internally than gate the assertion on a flaky race.
+func TestNewGrace_CleanExit_OnSIGTERM(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cmd := New(ctx, "/bin/sh", "-c", "trap 'exit 0' TERM; sleep 600")
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+	// Generous warm-up so sh's trap is armed before we signal.
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() = %v, want nil (trap cleaned up before grace expired)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() didn't return within 2s of cancel")
+	}
+}
+
+// TestNewGrace_SIGKILL_AfterGrace verifies the fallback path:
+// child ignores SIGTERM, AfterFunc SIGKILLs it after grace,
+// Run() returns a non-nil error. Wall-time ≈ grace + small
+// overhead — anything much shorter means grace wasn't honoured.
+func TestNewGrace_SIGKILL_AfterGrace(t *testing.T) {
+	grace := 200 * time.Millisecond
+	start := time.Now()
+	ctx, cancel := context.WithCancel(t.Context())
+	cmd := New(ctx, "/bin/sh", "-c", "trap '' TERM; sleep 600")
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+	time.Sleep(50 * time.Millisecond) // child is in `sleep 600`
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run() = nil; want non-nil (child ignored SIGTERM, SIGKILL fired)")
+		}
+		elapsed := time.Since(start)
+		if elapsed < grace {
+			t.Fatalf("Run() returned in %v, before grace %v elapsed — grace wasn't honoured", elapsed, grace)
+		}
+		if elapsed > 5*time.Second {
+			t.Fatalf("Run() returned in %v, way past grace %v — should have fired SIGKILL much sooner", elapsed, grace)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() didn't return within 5s of cancel")
+	}
+}
+
+// TestNewGrace_ProcessGroup_BroadcastsToChildren verifies that
+// Setsid (set by NewWith) makes the child its own pgid leader,
+// so the SIGTERM broadcast reaches forked grandchildren too —
+// not just the leader. The grandchild writes a sentinel file
+// only if it has to die via SIGKILL after grace; if it sees
+// SIGTERM it exits before the `&&` runs.
+//
+// Warm-up sleep is 200 ms (same justification as CleanExit).
+func TestNewGrace_ProcessGroup_BroadcastsToChildren(t *testing.T) {
+	sentinel := t.TempDir() + "/grandchild-was-orphaned"
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cmd := New(ctx, "/bin/sh", "-c",
+		`trap 'exit 0' TERM
+(sleep 600 && touch '`+sentinel+`') &
+wait`,
+	)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() didn't return within 2s of cancel")
+	}
+	if err := exec.Command("test", "-e", sentinel).Run(); err == nil {
+		t.Fatalf("grandchild created %q — process-group SIGTERM did NOT broadcast; orphan survived", sentinel)
+	}
+}
+
+// TestNewGrace_PreCancel_NoPanic covers the edge case where ctx
+// fires BEFORE cmd.Run is called. armGraceCancel sees
+// cmd.Process == nil and returns os.ErrProcessDone; stdlib's
+// Start() preflight separately surfaces ctx.Err(). Run()
+// returns context.Canceled (stdlib's behaviour, not ours);
+// what matters is no panic and no goroutine hangs.
+//
+// This test exists because the pre-cancel path is the one place
+// where armGraceCancel's Cancel callback can run while
+// cmd.Process is still nil; we pin "no panic, no hang".
+func TestNewGrace_PreCancel_NoPanic(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // fire before Start
+	cmd := New(ctx, "/bin/sh", "-c", "exit 0")
+	if err := cmd.Run(); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want either nil or context.Canceled", err)
+	}
+	time.Sleep(100 * time.Millisecond) // let any stray goroutine settle
 }

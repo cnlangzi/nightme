@@ -4,12 +4,14 @@ package proc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -56,10 +58,118 @@ func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 // inherited). With Setsid, the child becomes the leader of its
 // own session AND process group, so callers can later broadcast
 // SIGINT to the whole subtree via SignalProcessGroup.
+//
+// SIGTERMGrace is declared in exec_common.go (cross-platform).
+// On Unix it's a SIGTERM-flush window before SIGKILL; on
+// Windows it's a WaitDelay (natural-exit window before hard
+// kill — see exec_windows.go for why we can't fix the
+// .git/index.lock issue the same way there).
+
+// fix-git-lock-file 2026-08-29: every child spawned via
+// proc.NewWith now leaves a clean `.git/index.lock` when
+// cancelled, by overriding cmd.Cancel to a SIGTERM-then-SIGKILL
+// path that stdlib's existing watchCtx goroutine invokes on
+// ctx-fire. Replaces the earlier WithGrace + graced-map design
+// (which leaked one goroutine + map entry per successful
+// proc.New whose ctx never fired — see /review finding #1).
 func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	armGraceCancel(cmd)
 	return cmd
+}
+
+// armGraceCancel rewrites cmd.Cancel from exec.CommandContext's
+// default `func() error { return c.Process.Kill() }` (raw
+// SIGKILL) to SIGTERM → SIGTERMGrace → SIGKILL, and returns
+// os.ErrProcessDone so stdlib's watchCtx doesn't wrap Run()'s
+// result with ctx.Err().
+//
+// Mechanics:
+//
+//   - cmd.Cancel is invoked by stdlib's watchCtx goroutine —
+//     one already started by exec.CommandContext because Cancel
+//     != nil at cmd.Start time. We reuse that goroutine; no new
+//     goroutine, no map, no mutex.
+//   - cmd.Cancel may be called BEFORE cmd.Start (ctx fires
+//     before we ever spawned the child). In that case
+//     cmd.Process is nil; we return os.ErrProcessDone and
+//     stdlib's Start preflight handles the ctx error separately.
+//   - Once Start has set cmd.Process, Cancel sends SIGTERM to
+//     the entire process group (Setsid armed in NewWith
+//     ensures pid == pgid). On pgid-kill non-ESRCH (EPERM on
+//     a foreign pgid), we silently fall through: the
+//     single-pid attempt would fail for the same reason, and
+//     the SIGKILL AfterFunc below is the real upper bound.
+//     Surfacing the error would replace the child's real exit
+//     status in Run()'s return value, which is worse than the
+//     diagnostic loss.
+//   - After SIGTERMGrace, an AfterFunc fires SIGKILL on the
+//     same pgid. The closure captures cmd by reference for
+//     the full grace window — this is a bounded retention cost
+//     (timer-heap slot + ~1 KB cmd struct), not a leak.
+//     Timer.Stop exists but doesn't help: the closure's own
+//     capture keeps cmd alive regardless. The common case
+//     (child reaped within grace) gets ESRCH from the kill
+//     syscall and returns immediately. We deliberately do NOT
+//     read cmd.ProcessState here (race against Wait's write,
+//     flagged by `go test -race` on CI).
+//
+// armGraceCancel is idempotent: it just assigns cmd.Cancel. Two
+// proc.NewWith calls on the same *exec.Cmd are not possible
+// (each New returns a fresh cmd).
+func armGraceCancel(cmd *exec.Cmd) {
+	cmd.Cancel = func() error {
+		proc := cmd.Process
+		if proc == nil {
+			return os.ErrProcessDone
+		}
+		pid := proc.Pid
+		if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			// pgid-kill non-ESRCH — see contract above.
+			_ = err
+		}
+		// Grace timer. Returns *time.Timer but we discard it:
+		// even though Timer.Stop exists, the closure's `cmd`
+		// reference keeps cmd alive in the timer heap for the
+		// full grace window regardless. We accept this bounded
+		// retention (timer-heap slot + ~1 KB cmd struct) in
+		// exchange for not needing a Wait()-side stop hook —
+		// stdlib's exec.Cmd doesn't expose one, and adding a
+		// parallel finalizer / runtime.SetFinalizer would be
+		// more code than the cost it saves.
+		time.AfterFunc(SIGTERMGrace, func() {
+			// Race fix: do NOT read cmd.ProcessState here.
+			// stdlib's cmd.Wait() writes it concurrently from
+			// the main test goroutine, which Go's race
+			// detector flags (verified in CI on Ubuntu, the
+			// fix-git-lock-file branch). The previous design
+			// tried to short-circuit on ProcessState != nil
+			// but that's a data race; we instead always run
+			// the syscall path and rely on ESRCH for the
+			// common "child reaped within grace" case. Cost:
+			// one extra syscall per clean exit (negligible).
+			p := cmd.Process
+			if p == nil {
+				return
+			}
+			if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
+				if errors.Is(err, syscall.ESRCH) {
+					return
+				}
+				// Non-ESRCH pgid-kill failure (e.g. EPERM
+				// on a foreign pgid). Best-effort single-pid
+				// fallback; if that also fails the child
+				// survives until the wait goroutine reaps it.
+				// The error is discarded: surfacing it would
+				// replace the child's real exit status in
+				// Run()'s return value. Documented as
+				// "best-effort" in the contract above.
+				_ = p.Kill()
+			}
+		})
+		return os.ErrProcessDone
+	}
 }
 
 // SetCloseOnExec arms FD_CLOEXEC on f's descriptor so it is NOT

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -27,6 +26,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/proc"
+	"github.com/cnlangzi/nightme/internal/timeouts"
 	"github.com/cnlangzi/nightme/internal/wfe"
 )
 
@@ -107,7 +108,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	b.logger.Info("bot: loaded workflows", "count", len(wfs))
 
 	// 2. build workspace→repo map (for trigger filtering)
-	wsMap, err := buildWorkspaceRepoMap(wfs)
+	wsMap, err := buildWorkspaceRepoMap(ctx, wfs)
 	if err != nil {
 		return fmt.Errorf("bot: build workspace map: %w", err)
 	}
@@ -237,8 +238,17 @@ func stateDirOrDefault(cfgDir string) (string, error) {
 
 // gitOrigin returns the canonical owner/repo for a workspace's
 // git origin, or empty string if it can't be determined.
-func gitOrigin(workspace string) string {
-	cmd := exec.Command("git", "-C", workspace, "remote", "get-url", "origin")
+//
+// fix-git-lock-file 2026-09-01: route through proc.New instead
+// of raw exec.Command. The command is read-only (no .git/index.lock
+// interaction) so this isn't strictly required for the lock fix,
+// but it keeps the platform-spanning cmd.Cancel/WaitDelay shape
+// consistent across the daemon and gives us a context-bound
+// timeout for free.
+func gitOrigin(ctx context.Context, workspace string) string {
+	runCtx, cancel := context.WithTimeout(ctx, timeouts.CLI)
+	defer cancel()
+	cmd := proc.New(runCtx, "git", "-C", workspace, "remote", "get-url", "origin")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

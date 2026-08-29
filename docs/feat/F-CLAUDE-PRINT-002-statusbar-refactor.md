@@ -516,3 +516,156 @@ lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
 - `internal/channel/telegram/adapter.go`(v8: Send switch 的所有 text 出口 + OutHeartbeat 占位 PATCH,通过 `renderBodyWithStatusBar` helper 拼 trailer;`OutError` raw 拼接分支也直接调 `statusbar.RenderPanel`. v9 chain rewrite 2026-08-22 删除了 `renderBodyWithStatusBar`,footer 语义迁到 `chain.lastFooter` + `placeholder_chain_flush.go::renderActiveChunkBody`,8 个 Out* kind 改成走 `appendSegmentForKind` 路径. 见 docs/channel/telegram.md §11.12.6 + §11.12.7)
 
 测试矩阵:`internal/statusbar/statusbar_test.go` 15 个 `Test*` 函数(从 feishu `usage_footer_test.go` 全量迁移)+ 1 个 8 行 table-driven `TestStatusBarLines_OmitsZeroSegments` 子用例。
+
+---
+
+## 后续:2026-08-29 减少 git status 撞 `.git/index.lock`(fix-git-lock-file)
+
+**触发**:LLM(`claude` / `codex` / `pi`)在 worktree 里跑 `git add` / `git commit` 时反复撞到 `fatal: Unable to create '.git/index.lock': File exists`。LLM 看到 stderr 后**自行归纳**为"codegraph MCP 的子 git 进程在占着" — 这个归因是 hallucination:`pgrep -lf git` 当前查不到任何 git 进程,`codegraph` 的依赖里也没有任何 git 工具(`tree-sitter-wasms` / `web-tree-sitter` / `commander` / `sqlite` 等),其 watchdog 子进程(`PID 21396` 那条 `node -e <...>`)只 stat `.codegraph/*.db*`,**根本不接触 `.git/`**。
+
+**真凶(本仓库内已确认 call path)**:`ChatSession.GitStatus(ctx)` 每条 outbound stamp 都跑一次 `git status --porcelain --branch --untracked-files=normal`,30-event turn 触发 30 次 git 子进程。`chatsession.go:754` 给 stamp 加了 `runCtx, _ := context.WithTimeout(ctx, 3*time.Second)`,git 未在 3s 内返回时 `exec.CommandContext` 直接 SIGKILL,**`.git/index.lock` 残留**。LLM 紧接着跑 `git add` 撞锁。
+
+本文档前述"性能权衡"已记 `--untracked-files=no` 与 inflight fan-in 两个 follow-up。本次补刀两件事,**只这两件**:
+
+1. **过滤**:Emitter 在 stamp git status 前按 `OutboundKind` 跳过 4 类(`OutToolStart` / `OutToolEnd` / `OutThinking` / `OutHeartbeat`)
+2. **grace**:把 `gtw.runCmd` 出去的 git 子进程从 SIGKILL-on-cancel 改为 SIGTERM → 1s grace → SIGKILL,让 git 正常释放 `index.lock`
+
+`OutHeartbeat` 也加入跳过清单(F-63 设计的每回合心跳事件,长 turn 会有 N 个心跳 = N 次额外 `git status`,纯内部状态传播,不展示给用户,跳过最划算)。
+
+### 改动 1 — Emitter 守卫(`internal/gateway/outbound/outbound.go:131`)
+
+```go
+func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMessage) {
+    if e.gitStatusLookup == nil ||
+        msg.GitStatus != nil ||
+        msg.ChatID == "" {
+        return
+    }
+    // F-fix-git-lock: 跳过非 user-visible kind:
+    //   - OutToolStart/End — Bash 可能正持有 .git/index.lock
+    //   - OutThinking     — 用户看不到的 reasoning metadata
+    //   - OutHeartbeat    — 每回合心跳的 progress tick(N/turn)
+    switch msg.Kind {
+    case messages.OutToolStart,
+        messages.OutToolEnd,
+        messages.OutThinking,
+        messages.OutHeartbeat:
+        return
+    }
+    msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)
+}
+```
+
+用 `OutboundKind` 而不是 `EventKind`,是因为 **`EventAgentThink` 不存在**(见 `internal/agent/agent.go:99-164` 枚举),thinking 数据是从 `EventAgentText` 下游切走的(见 `internal/agent/agent.go:82-83`)。`OutboundMessage.Kind` 是现成字段,Emitter 自己看到。
+
+**不动**:`EventKind` enum、`OutboundMessage` 字段、AgentEventBus 路由。`EventAgentText → OutReply` 这条 user-visible 路径保留 stamp(用户实际看到的回复,必须带新鲜 footer)。
+
+### 改动 2 — 把 grace 折进 `proc.NewWith`(`internal/proc/exec_unix.go`)
+
+> **2026-08-29 修订版**:第一版写成单独的 `proc.WithGrace(cmd, grace)` + package-level `graced` map + watcher goroutine。dsh `/review` 指出此设计每跑一个 `proc.New` 都 leak 一份 entry + 一份 goroutine(只有 ctx fire 才回收),且只在 `gtw/runCmd` 调 `WithGrace`,其他 10+ 个 `proc.New(ctx, "git", ...)` 调点(claudecode / dsh / pi / codex / agent)仍漏。
+>
+> 修订版:**直接 hook `cmd.Cancel`** — 利用 stdlib 已经为 `exec.CommandContext` 启的 `watchCtx` goroutine,无新 goroutine、无 map、无 mutex、无 race window。SIGTERM → grace → SIGKILL 路径和 stdlib `cmd.Cancel` 接口契约自然结合。
+
+```go
+// exec_unix.go 关键片段
+const SIGTERMGrace = 1 * time.Second
+
+func NewWith(ctx context.Context, _ Options, name string, args ...string) *exec.Cmd {
+    cmd := exec.CommandContext(ctx, name, args...)
+    cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+    armGraceCancel(cmd)
+    return cmd
+}
+
+func armGraceCancel(cmd *exec.Cmd) {
+    cmd.Cancel = func() error {
+        proc := cmd.Process
+        if proc == nil { return os.ErrProcessDone }   // pre-Start: 不会到这里
+        pid := proc.Pid
+        // SIGTERM 整个 process group (Setsid 让 pid == pgid)
+        if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+            if errors.Is(err, syscall.ESRCH) { return os.ErrProcessDone }
+            _ = proc.Signal(syscall.SIGTERM)
+        }
+        // grace 到点 SIGKILL(同样的 pgid)
+        time.AfterFunc(SIGTERMGrace, func() {
+            p := cmd.Process
+            if p == nil { return }
+            if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
+                if errors.Is(err, syscall.ESRCH) { return }
+                _ = p.Kill()
+            }
+        })
+        return os.ErrProcessDone    // 让 stdlib 不 wrap ctx.Err()
+    }
+}
+```
+
+**优势 vs 第一版**:
+
+| 维度 | 第一版(`WithGrace` + map + goroutine) | 修订版(`armGraceCancel` 在 `NewWith`) |
+|---|---|---|
+| 状态 | graced map + gracedMu + watcher goroutine(每次 `proc.New` 一份) | 0 状态 |
+| Leak | 每 `proc.New` 都 leak 直到 ctx fire 或 process 死 | 0(无 map、无 goroutine) |
+| Race | `cmd.Cancel` 赋值在 `gracedMu` 解锁后,watchCtx 可在窗口内看到默认 Cancel | 同步赋值,在 `NewWith` 返回前完成,无窗口 |
+| 调用面 | 只有 `gtw/runCmd` 一个 call site 调 `WithGrace`,其他 `proc.New(ctx, "git", ...)` 调点漏 | default-on,所有 `proc.New` 调用方自动获益(claudecode/dsh/pi/codex/agent 的 git 调用也安全) |
+| 失败 silent 路径 | foreign cmd(`exec.Command` 不经 `proc.New`)静默 no-op | 不存在此问题 — 所有非 nightme-side cmd 不进 `proc.New` 路径,继续走 stdlib 默认行为 |
+
+**调用方**:不需要改一行。`gtw/runCmd` 不再调 `WithGrace`(已删),`ExecGitRunner.Run` / `ExecCLIRunner.Run` / `/gtw commit` / `/gtw push` / `/gtw pr` / `prcache.Cache.refresh` / `agent.Agent.Review` 等所有 nightme-side git 调用经 `proc.New` 自动获 grace,以及 claudecode/dsh/pi/codex 桥里的 `git symbolic-ref` / `git rev-parse --abbrev-ref HEAD` / `git rev-parse --show-toplevel` 也都自动获益。
+
+**Trade-off(SIGKILL fallback 也会留 lock)**:`git` 收到 SIGTERM 走信号处理路径会清理 `.git/index.lock`;SIGKILL 不给 cleanup 机会。所以:子进程响应 SIGTERM(绝大多数情况)→ 锁清理;子进程忽略 SIGTERM(mask 信号、stuck syscall,极少见)→ SIGKILL 拍死 → **lock 残留**。这种情况没比改前更差(改前就是 SIGKILL-on-cancel,必然残留)。**v3 兜底**:在 `gtw.runCmd` 顶部加 `os.Stat(<dir>/.git/index.lock)`,mtime > 5s 视为 stale,`os.Remove`(本 PR 不做)。
+
+### 不在本 PR 范围
+
+| 候选 | 为何不做 |
+|---|---|
+| cwd-scoped git 单飞(`internal/command/gtw/gate.go`) | 留 v3。当前放过 `prcache` 后台刷新 + stamp 之间的并发。grace 生效后压力应显著下降 |
+| stale-lock 兜底自愈(`gtw.runCmd` 顶部 `os.Stat + os.Remove`) | 留 v3 作为最后防线。仅在 SIGKILL fallback 路径才需要,本 PR 的 grace 不依赖它 |
+| `--untracked-files=no`(`git_status.go:114`) | 已记在本文档"性能权衡"段,非本次主题 |
+| 加 `EventAgentThink` | 它当前不存在;下游 routing 已通过 `OutboundKind.OutThinking` 解决 |
+
+### 验证步骤
+
+1. `go build ./...` — 无报错
+2. `go test ./internal/gateway/outbound/...` — 8 个新 stamp-guard case 全过
+3. `go test ./internal/proc/...` — 5 个新 grace case(`TestNewGrace_*`)全过
+4. `go test ./internal/command/gtw/...` — 既有 case 全过(`runCmd` 不再调 `WithGrace`,调用者签名 / 行为不变)
+5. 真实启动 daemon,跑一段"较长回合",观察 daemon log:
+   - `git status` 调用频次明显下降(OutThinking + 工具期间 + heartbeat 全跳过)
+   - 不再出现 `fatal: Unable to create '.git/index.lock'`(grace 命中的常见路径)
+6. 极端测:对 sleep 大于 grace 的 git 子进程发 SIGTERM,观察 SIGKILL fallback 路径正确(`Run()` 返回非 nil、wall-time ≈ grace + 小余量)
+
+### Reference
+
+- 出处 commit:无(本 fix 还没合)
+- 关联文件:
+  - `internal/gateway/outbound/outbound.go:131`(改动 1 — Emitter stamp guard)
+  - `internal/proc/exec_unix.go:59-78` `NewWith` + `:80-141` `armGraceCancel` + `SIGTERMGrace` 常量(改动 2 — grace folded in)
+  - `internal/proc/exec_windows.go:120-` `NewWith` + `:armGraceCancel` stub(改动 2 副产物 — Windows 端最小兼容实现)
+  - `internal/command/gtw/exec.go:54-81 runCmd`(已删 `proc.WithGrace(cmd, proc.KillGrace)` 接线,grace 现在 default-on)
+  - `internal/channel/bot/bot.go:241 gitOrigin`(改动 3 — `exec.Command` 改 `proc.New`,纳入统一路径)
+  - `internal/messages/outbound.go:13-`OutboundKind 枚举(本次涉及 OutToolStart/OutToolEnd/OutThinking/OutHeartbeat)
+  - `internal/agent/agent.go:99-164` EventKind 枚举(本次**不**改,确认 EventAgentThink 不存在)
+  - 删除文件:`internal/proc/grace_unix.go`、`internal/proc/grace_windows.go`(逻辑折进 `NewWith` 后不再需要;后者的 stub 形式由 `exec_windows.go:armGraceCancel` 接替)
+  - `cmd/nightme/kill_unix.go:28-56`(参考 pattern,SIGTERM → 轮询 → SIGKILL)
+
+### Windows caveat(fix-git-lock-file 2026-08-29 + 2026-09-01)
+
+`armGraceCancel` 在 Unix 上完整工作(SIGTERM-grace-SIGKILL,process-group 广播)。**Windows 上的同款 fix 不存在**:
+
+| 维度 | Unix | Windows |
+|---|---|---|
+| 礼貌通知子进程 | SIGTERM(child 可 trap,跑 cleanup) | ❌ 无等价机制。console-less 子进程收不到任何 polite signal |
+| Git on Windows 清理 `.git/index.lock` | ✅ SIGTERM → trap → unlink | ❌ TerminateProcess(`Process.Kill` 等价)→ 没有 trap 钩子,lock 残留 |
+| 子进程自然退出窗口 | `cmd.Cancel` 返回 → 子进程 trap → exit 0 | `cmd.WaitDelay` 给子进程 1s 自行退出窗口,若几乎完成就 OK;否则 1s 后硬杀 |
+
+Windows 上 `armGraceCancel` 实际做了什么:设 `cmd.WaitDelay = SIGTERMGrace` + 覆盖 `cmd.Cancel` 返回 `os.ErrProcessDone`。**对正在 `git status` 几乎完成的子进程**有边际改善(给 1s 自然退出窗口);**对正在 `git add`/`git commit` 的子进程**无帮助,因为 git on Windows 在 console-less 模式下没有 trap 钩子,TerminateProcess 一律不清理 lock。
+
+完整 Windows grace 需要:
+- Job Object(`CreateJobObject` + `AssignProcessToJobObject`)
+- 给子进程分配 console(`CREATE_NEW_CONSOLE` 或 `CREATE_NEW_PROCESS_GROUP` + `CREATE_OWN_PROCESS`)
+- `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` 发给 Job
+
+这条路径比 Unix 复杂得多,而且 Git for Windows 在 console-less spawn 下是否可靠响应 CTRL_BREAK_EVENT 还需要实测。**留 v4 单独设计**,本 PR 不实现。
+
+实际意义:Windows 用户跑 daemon 时,`.git/index.lock` stale-lock 的问题**仍然存在**(等同改前行为)。Unix / macOS 用户不受影响。

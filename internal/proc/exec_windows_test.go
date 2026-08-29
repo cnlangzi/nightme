@@ -313,3 +313,31 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// fix-git-lock-file 2026-09-01: NewWith must call
+// armGraceCancel so that on Windows the cmd.Cancel + cmd.WaitDelay
+// shape matches Unix. armGraceCancel is a no-op-for-cleanup on
+// Windows (no SIGTERM-equivalent for console-less children) but
+// is wired in to keep the platform surface symmetric — see
+// exec_windows.go:armGraceCancel doc for the full rationale.
+//
+// We can't integration-test "grace yields .git/index.lock
+// cleanup" on Windows because git has no signal handler for
+// console-less spawn (the actual signal that would do the
+// unlink). What we CAN pin is the surface:
+//
+//  1. cmd.Cancel is non-nil after NewWith (so callers don't
+//     see stdlib's default Process.Kill behaviour, which
+//     hard-kills without grace).
+//  2. cmd.WaitDelay equals SIGTERMGrace (1 s) so a child
+//     that's almost-done has a 1 s window to exit naturally
+//     before stdlib hard-kills.
+func TestNew_AppliesGraceCancel_Windows(t *testing.T) {
+	cmd := New(context.Background(), "cmd.exe", "/c", "exit", "0")
+	if cmd.Cancel == nil {
+		t.Fatal("cmd.Cancel is nil; armGraceCancel did not run (or exec.CommandContext's default was reset)")
+	}
+	if cmd.WaitDelay != SIGTERMGrace {
+		t.Fatalf("cmd.WaitDelay = %v, want %v (SIGTERMGrace)", cmd.WaitDelay, SIGTERMGrace)
+	}
+}

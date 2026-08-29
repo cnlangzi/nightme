@@ -527,8 +527,10 @@ lines := statusbar.StatusBarLines(&msg) // 三行 footer,zero-omit
 
 本文档前述"性能权衡"已记 `--untracked-files=no` 与 inflight fan-in 两个 follow-up。本次补刀两件事,**只这两件**:
 
-1. **过滤**:Emitter 在 stamp git status 前按 `OutboundKind` 跳过 3 类
+1. **过滤**:Emitter 在 stamp git status 前按 `OutboundKind` 跳过 4 类(`OutToolStart` / `OutToolEnd` / `OutThinking` / `OutHeartbeat`)
 2. **grace**:把 `gtw.runCmd` 出去的 git 子进程从 SIGKILL-on-cancel 改为 SIGTERM → 1s grace → SIGKILL,让 git 正常释放 `index.lock`
+
+`OutHeartbeat` 也加入跳过清单(F-63 设计的每回合心跳事件,长 turn 会有 N 个心跳 = N 次额外 `git status`,纯内部状态传播,不展示给用户,跳过最划算)。
 
 ### 改动 1 — Emitter 守卫(`internal/gateway/outbound/outbound.go:131`)
 
@@ -542,10 +544,12 @@ func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMes
     // F-fix-git-lock: 跳过非 user-visible kind:
     //   - OutToolStart/End — Bash 可能正持有 .git/index.lock
     //   - OutThinking     — 用户看不到的 reasoning metadata
+    //   - OutHeartbeat    — 每回合心跳的 progress tick(N/turn)
     switch msg.Kind {
     case messages.OutToolStart,
         messages.OutToolEnd,
-        messages.OutThinking:
+        messages.OutThinking,
+        messages.OutHeartbeat:
         return
     }
     msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)

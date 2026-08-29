@@ -59,26 +59,11 @@ func New(ctx context.Context, name string, args ...string) *exec.Cmd {
 // own session AND process group, so callers can later broadcast
 // SIGINT to the whole subtree via SignalProcessGroup.
 //
-// SIGTERMGrace is how long a child gets to flush in response to
-// SIGTERM before SIGKILL. Applied to every *exec.Cmd spawned via
-// proc.New (and proc.NewWith). Tuned for `git`'s
-// `.git/index.lock` release path: 1 s is comfortably longer than
-// `git`'s signal-induced cleanup while still feeling instant on
-// a 3 s ctx-timeout path.
-//
-// Trade-off: if the child ignores SIGTERM (interactive prompt,
-// masked signals, deep syscall), the AfterFunc SIGKILL fires and
-// `.git/index.lock` is NOT reaped — SIGKILL skips git's cleanup
-// path. This is no worse than the pre-fix behaviour (SIGKILL on
-// every cancel), and the much-better common case (SIGTERM
-// handled) is what makes the difference in practice. A v3
-// follow-up can add a best-effort `os.Remove(<dir>/.git/index.lock)
-// when its mtime > 5s` if real-world stuck-SIGTERM paths
-// materialise.
-//
-// Distinct from cmd/nightme/kill_unix.go:killGrace (30 s), which
-// serves agent-CLI "flush --resume id" semantics. Don't unify.
-const SIGTERMGrace = 1 * time.Second
+// SIGTERMGrace is declared in exec_common.go (cross-platform).
+// On Unix it's a SIGTERM-flush window before SIGKILL; on
+// Windows it's a WaitDelay (natural-exit window before hard
+// kill — see exec_windows.go for why we can't fix the
+// .git/index.lock issue the same way there).
 
 // fix-git-lock-file 2026-08-29: every child spawned via
 // proc.NewWith now leaves a clean `.git/index.lock` when

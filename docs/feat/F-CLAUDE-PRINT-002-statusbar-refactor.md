@@ -641,8 +641,31 @@ func armGraceCancel(cmd *exec.Cmd) {
 - 关联文件:
   - `internal/gateway/outbound/outbound.go:131`(改动 1 — Emitter stamp guard)
   - `internal/proc/exec_unix.go:59-78` `NewWith` + `:80-141` `armGraceCancel` + `SIGTERMGrace` 常量(改动 2 — grace folded in)
+  - `internal/proc/exec_windows.go:120-` `NewWith` + `:armGraceCancel` stub(改动 2 副产物 — Windows 端最小兼容实现)
   - `internal/command/gtw/exec.go:54-81 runCmd`(已删 `proc.WithGrace(cmd, proc.KillGrace)` 接线,grace 现在 default-on)
+  - `internal/channel/bot/bot.go:241 gitOrigin`(改动 3 — `exec.Command` 改 `proc.New`,纳入统一路径)
   - `internal/messages/outbound.go:13-`OutboundKind 枚举(本次涉及 OutToolStart/OutToolEnd/OutThinking/OutHeartbeat)
   - `internal/agent/agent.go:99-164` EventKind 枚举(本次**不**改,确认 EventAgentThink 不存在)
-  - 删除文件:`internal/proc/grace_unix.go`、`internal/proc/grace_windows.go`、`internal/proc/grace_unix_test.go`(逻辑折进 `NewWith` 后不再需要)
+  - 删除文件:`internal/proc/grace_unix.go`、`internal/proc/grace_windows.go`(逻辑折进 `NewWith` 后不再需要;后者的 stub 形式由 `exec_windows.go:armGraceCancel` 接替)
   - `cmd/nightme/kill_unix.go:28-56`(参考 pattern,SIGTERM → 轮询 → SIGKILL)
+
+### Windows caveat(fix-git-lock-file 2026-08-29 + 2026-09-01)
+
+`armGraceCancel` 在 Unix 上完整工作(SIGTERM-grace-SIGKILL,process-group 广播)。**Windows 上的同款 fix 不存在**:
+
+| 维度 | Unix | Windows |
+|---|---|---|
+| 礼貌通知子进程 | SIGTERM(child 可 trap,跑 cleanup) | ❌ 无等价机制。console-less 子进程收不到任何 polite signal |
+| Git on Windows 清理 `.git/index.lock` | ✅ SIGTERM → trap → unlink | ❌ TerminateProcess(`Process.Kill` 等价)→ 没有 trap 钩子,lock 残留 |
+| 子进程自然退出窗口 | `cmd.Cancel` 返回 → 子进程 trap → exit 0 | `cmd.WaitDelay` 给子进程 1s 自行退出窗口,若几乎完成就 OK;否则 1s 后硬杀 |
+
+Windows 上 `armGraceCancel` 实际做了什么:设 `cmd.WaitDelay = SIGTERMGrace` + 覆盖 `cmd.Cancel` 返回 `os.ErrProcessDone`。**对正在 `git status` 几乎完成的子进程**有边际改善(给 1s 自然退出窗口);**对正在 `git add`/`git commit` 的子进程**无帮助,因为 git on Windows 在 console-less 模式下没有 trap 钩子,TerminateProcess 一律不清理 lock。
+
+完整 Windows grace 需要:
+- Job Object(`CreateJobObject` + `AssignProcessToJobObject`)
+- 给子进程分配 console(`CREATE_NEW_CONSOLE` 或 `CREATE_NEW_PROCESS_GROUP` + `CREATE_OWN_PROCESS`)
+- `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` 发给 Job
+
+这条路径比 Unix 复杂得多,而且 Git for Windows 在 console-less spawn 下是否可靠响应 CTRL_BREAK_EVENT 还需要实测。**留 v4 单独设计**,本 PR 不实现。
+
+实际意义:Windows 用户跑 daemon 时,`.git/index.lock` stale-lock 的问题**仍然存在**(等同改前行为)。Unix / macOS 用户不受影响。

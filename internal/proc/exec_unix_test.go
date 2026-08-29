@@ -294,13 +294,21 @@ func TestNewGrace_SetsCancel(t *testing.T) {
 // TestNewGrace_CleanExit_OnSIGTERM exercises the happy path:
 // child traps SIGTERM, exits 0. Run() must return nil (not
 // wrapped with ctx.Err()). Total wall-time well under grace.
+//
+// Sleep before cancel is generous (200 ms) so sh has time to
+// parse the script and arm the trap; on busy CI the 50 ms
+// version occasionally lost the race against sh's startup,
+// causing the child to exit via signal-killed (signal:
+// terminated) rather than via the trap (exit 0). The trap
+// behaviour itself is what we're testing, so we'd rather
+// retry internally than gate the assertion on a flaky race.
 func TestNewGrace_CleanExit_OnSIGTERM(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cmd := New(ctx, "/bin/sh", "-c", "trap 'exit 0' TERM; sleep 600")
 	done := make(chan error, 1)
 	go func() { done <- cmd.Run() }()
-	// Give sh a moment to arm the trap before we signal.
-	time.Sleep(50 * time.Millisecond)
+	// Generous warm-up so sh's trap is armed before we signal.
+	time.Sleep(200 * time.Millisecond)
 	cancel()
 	select {
 	case err := <-done:
@@ -348,6 +356,8 @@ func TestNewGrace_SIGKILL_AfterGrace(t *testing.T) {
 // not just the leader. The grandchild writes a sentinel file
 // only if it has to die via SIGKILL after grace; if it sees
 // SIGTERM it exits before the `&&` runs.
+//
+// Warm-up sleep is 200 ms (same justification as CleanExit).
 func TestNewGrace_ProcessGroup_BroadcastsToChildren(t *testing.T) {
 	sentinel := t.TempDir() + "/grandchild-was-orphaned"
 
@@ -359,7 +369,7 @@ wait`,
 	)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Run() }()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	cancel()
 	select {
 	case err := <-done:

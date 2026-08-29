@@ -11,7 +11,19 @@ package proc
 import (
 	"fmt"
 	"os"
+	"time"
 )
+
+// SIGTERMGrace is the grace window armGraceCancel arms on both
+// Unix and Windows. Semantics differ by platform — see
+// exec_unix.go vs exec_windows.go for the per-platform
+// behaviour — but the constant is the same value (1 s) so
+// callers and tests have a single knob to reason about.
+//
+// Why 1 s: comfortably longer than `git`'s signal-induced
+// cleanup of `.git/index.lock` on Unix, while still feeling
+// instant on a 3 s ctx-timeout path.
+const SIGTERMGrace = 1 * time.Second
 
 // currentExePath returns the absolute path of the running
 // nightme binary. Centralised so the three OpenTerminal

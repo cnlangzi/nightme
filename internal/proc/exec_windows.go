@@ -122,7 +122,53 @@ func NewWith(ctx context.Context, opts Options, name string, args ...string) *ex
 	if lp, err := exec.LookPath(name); err == nil {
 		resolved = lp
 	}
-	return launchOnWindowsWith(ctx, opts, resolved, args...)
+	cmd := launchOnWindowsWith(ctx, opts, resolved, args...)
+	armGraceCancel(cmd)
+	return cmd
+}
+
+// armGraceCancel is the Windows counterpart to
+// exec_unix.go:armGraceCancel. It exists so that cmd.Cancel
+// has the same shape on every platform — callers (and tests)
+// can rely on it being non-nil after proc.NewWith — but the
+// implementation is fundamentally different.
+//
+// Why we can't fix the .git/index.lock stale-lock issue the
+// way Unix does:
+//
+//	Unix    — child receives SIGTERM, runs its signal handler,
+//	          unlinks `.git/index.lock`, exits 0.
+//	Windows — there is no polite-signal mechanism for console-
+//	          less children. The only kill primitives are
+//	          TerminateProcess (no cleanup) and Job Object
+//	          + GenerateConsoleCtrlEvent (requires a console
+//	          attached to the child, which nightme's
+//	          CREATE_NO_WINDOW children don't have).
+//
+// What armGraceCancel can still do on Windows — a marginal
+// improvement for git children that are *almost done* when
+// cancel fires:
+//
+//   - Set cmd.WaitDelay = SIGTERMGrace. After ctx-fire, stdlib
+//     waits up to SIGTERMGrace (1 s) for the child to exit
+//     naturally before hard-killing it. A git child that's
+//     finishing its `git status` at the moment of cancel can
+//     complete + drop .git/index.lock in that window.
+//   - Override cmd.Cancel to return os.ErrProcessDone so
+//     stdlib doesn't replace Run()'s real exit status with
+//     ctx.Err().
+//
+// For a git child that's actively mid-`git add`/`git commit`
+// when cancel fires, this does NOT help — git on Windows in
+// console-less mode has no signal handler, so TerminateProcess
+// still leaves `.git/index.lock` behind. Real Windows grace
+// needs Job Object + CREATE_NEW_CONSOLE +
+// GenerateConsoleCtrlEvent — substantially more code; see
+// docs/feat/F-CLAUDE-PRINT-002 §Windows caveat for the full
+// design and the v4 follow-up plan.
+func armGraceCancel(cmd *exec.Cmd) {
+	cmd.WaitDelay = SIGTERMGrace
+	cmd.Cancel = func() error { return os.ErrProcessDone }
 }
 
 // launchOnWindows is the backward-compatible wrapper around

@@ -67,29 +67,28 @@ live simultaneously.
 
 ## Supported integrations
 
-NightMe sits between your local agents and your chat platform. The
-inventory below is what the codebase ships today — drop a new `Bridge`
-or `Channel` and the architecture handles the rest.
+NightMe works with the AI coding agents you already use and the chat
+apps you already live in. Here's what's available today — and what's on
+the way.
 
 ### AI Coding Agents
 
-| Agent | Bridge |
+| Agent | Status |
 |---|---|
-| **Claude Code** | `claudecode` |
-| **Codex** | `codex` |
-| **Pi** | `pi` |
-| **DSH** (DeepSeek Harness) | `dsh` |
-| **Cursor** | `cursor` |
-| **OpenCode** | `opencode` |
+| **Claude Code** | Available |
+| **Codex** | Available |
+| **Pi** | Available |
+| **DSH** (DeepSeek Harness) | Available |
+| **Cursor** | Available |
+| **OpenCode** | Available |
 
 ### Chat Channels
 
-| Channel | Region | Status |
-|---|---|---|
-| **Feishu** | China | ✅ Production |
-| **Lark** | International | ✅ Production |
-| **Telegram** | — | ✅ Production |
-| **Slack** | — | 🚧 Incoming |
+| Channel | Status |
+|---|---|
+| **Feishu** (China) / **Lark** (International) | Available — `nightme login feishu` |
+| **Telegram** | Beta |
+| **Slack** | Coming soon |
 
 ## Prerequisites
 
@@ -97,7 +96,7 @@ or `Channel` and the architecture handles the rest.
   default Linux build is fully static with no runtime dependencies; see
   [Linux: tray-less by default](#linux-tray-less-by-default) if you want the
   system-tray icon.
-- **A Feishu account** — currently the only supported IM. `nightme login feishu` registers your bot via QR scan.
+- **A chat platform** — Feishu / Lark (China or International) or Telegram. `nightme login feishu` registers via QR scan; Telegram needs a BotFather token (see [Configuration](#configuration)).
 - **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, or DSH (DeepSeek Harness). Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
 
 ## Install
@@ -551,7 +550,7 @@ internal/
   bridge/                          # Bridge abstraction, one sub-package per agent
     acp/  claudecode/  codex/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    echo/  feishu/                 # adapters (Feishu is the production one)
+    bot/  echo/  feishu/  telegram/   # adapters (feishu + telegram are production)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
@@ -564,7 +563,7 @@ internal/
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
-  login/                           # Feishu app registration / QR login
+  login/                           # IM bot registration — feishu/ handles QR login for Feishu / Lark
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)
@@ -598,8 +597,8 @@ PRs and issues are welcome. The full guide lives in
 for the design workflow.
 
 Thanks for building with NightMe — we want more **channels**
-(Feishu, Web TUI, anything) and more **AI Coding Agents**
-(Claude Code, Codex, DSH (DeepSeek Harness), Pi, OpenCode, anything else) to plug in.
+(Slack, Web TUI, anything) and more **AI Coding Agents**
+(Claude Code, Codex, DSH (DeepSeek Harness), Pi, Cursor, OpenCode, anything else) to plug in.
 Drop a `Channel` / `Bridge` and the architecture handles the rest.
 
 Contact the maintainer:

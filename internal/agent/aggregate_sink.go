@@ -429,6 +429,19 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 			startEv, ok := state.pendingToolStarts[ev.ToolEnd.ID]
 			if ok {
 				delete(state.pendingToolStarts, ev.ToolEnd.ID)
+				// Pop the just-appended End from initBuffer so
+				// the Phase 1→2 transition's replay doesn't re-emit
+				// the same pair (the default case appended End
+				// before this case ran; we just emitted it; pop it
+				// back off so replay skips it). Done under a.mu so
+				// the mutation has a happens-before with the
+				// transition's snapshot at handleBuffering line 485
+				// — without this the race detector flags a read
+				// of state.initBuffer concurrent with this write
+				// (Ubuntu CI, fix-git-lock-file).
+				if n := len(state.initBuffer); n > 0 && state.initBuffer[n-1].Kind == EventAgentToolEnd {
+					state.initBuffer = state.initBuffer[:n-1]
+				}
 			}
 			a.mu.Unlock()
 			if ok {
@@ -436,14 +449,6 @@ func (a *eventAggregator) handleBuffering(ev AgentEvent, state *perJobState) {
 				a.outer(startEv)
 				a.outer(ev)
 				a.emitMu.Unlock()
-				// Pop the just-appended End from initBuffer so
-				// the Phase 1→2 transition's replay doesn't re-emit
-				// the same pair (the default case appended End
-				// before this case ran; we just emitted it; pop it
-				// back off so replay skips it).
-				if n := len(state.initBuffer); n > 0 && state.initBuffer[n-1].Kind == EventAgentToolEnd {
-					state.initBuffer = state.initBuffer[:n-1]
-				}
 			} else {
 				a.emitMu.Lock()
 				a.outer(ev)

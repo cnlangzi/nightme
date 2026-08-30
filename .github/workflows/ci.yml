@@ -628,6 +628,16 @@ jobs:
           #   dsh     → @deepseek-ai/dsh
           #             (per internal/bridge/dsh/starter.go:82
           #              Detect() error message + F-dsh-bridge.md)
+          #   copilot → @github/copilot
+          #             GitHub Copilot CLI; the bridge spawns it
+          #             via `copilot --allow-all-tools --acp
+          #             --stdio` (long-lived chat sessions) or
+          #             `copilot --allow-all-tools -p "..." -s`
+          #             (one-shot print-mode). Requires CLI
+          #             >= 1.0.x — older preview builds
+          #             (e.g. 0.0.361) reject `--acp` with
+          #             "unknown option". Per
+          #             internal/bridge/copilot/copilot.go:7.
           #   cursor  → see "Install cursor CLI" step below.
           #             The official installer is the SAME URL
           #             on every platform (https://cursor.com/
@@ -653,6 +663,7 @@ jobs:
           npm install -g opencode-ai
           npm install -g @earendil-works/pi-coding-agent
           npm install -g @deepseek-ai/dsh
+          npm install -g @github/copilot
           # Cursor CLI on unix: official curl-pipe bash installer.
           # Drops `agent` into ~/.local/bin/agent (primary) plus
           # `cursor-agent` legacy symlink alongside — both on
@@ -759,7 +770,7 @@ jobs:
           #             bash steps so Git Bash resolves
           #             it via PATHEXT.
           # agent_to_binary maps agent name → exec.LookPath
-          # target so the loop stays uniform across all 6.
+          # target so the loop stays uniform across all 7.
           #
           # Diagnostic on failure: Git Bash on windows-latest
           # should pick up %LOCALAPPDATA%\cursor-agent from the
@@ -768,7 +779,7 @@ jobs:
           # OK line in the install step, print the resolved PATH
           # and ls the candidate dirs so the post-mortem shows
           # whether the dir was actually added.
-          for agent in claude codex opencode pi dsh cursor; do
+          for agent in claude codex opencode pi dsh copilot cursor; do
             case "$agent" in
               cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
@@ -829,7 +840,13 @@ jobs:
           # does at spawn time. PATHEXT on windows-latest
           # lets Git Bash's `$bin --help` resolve to
           # cursor-agent.cmd.
-          for agent in claude codex opencode pi dsh cursor; do
+          #
+          # copilot: the npm wrapper drops a `copilot` shim on
+          # PATH (on Windows the installer creates `copilot.cmd`
+          # which PATHEXT resolves from Git Bash's bare `copilot`
+          # invocation). The bridge spawns `copilot` directly
+          # via exec.LookPath, so the bare name is correct here.
+          for agent in claude codex opencode pi dsh copilot cursor; do
             case "$agent" in
               cursor) bin=cursor-agent ;;
               *)      bin="$agent" ;;
@@ -873,8 +890,11 @@ jobs:
           # This step is the regression catch for the dsh-on-
           # Windows fix: a future refactor that re-gates dsh
           # behind runtime.GOOS would land here as a missing
-          # row on the windows-latest runner.
-          for agent in claude codex opencode pi dsh cursor; do
+          # row on the windows-latest runner. Same applies to
+          # copilot: a future refactor that drops the
+          # `agent.Builtins.Register(copilot.NewStarter(...))`
+          # line in cmd/nightme/agents.go would land here.
+          for agent in claude codex opencode pi dsh copilot cursor; do
             if ! echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)"; then
               echo "::error::nightme agents did not list $agent"
               exit 1
@@ -924,7 +944,7 @@ jobs:
           # exec.LookPath("cursor-agent") therefore works
           # identically on linux / macos / windows.
           workspace=$(mktemp -d)
-          for agent in claude codex opencode pi dsh cursor; do
+          for agent in claude codex opencode pi dsh copilot cursor; do
             echo "--- bridge spawn: $agent ---"
             out_file=$(mktemp)
             # Spawn `nightme test` in the background. We feed it

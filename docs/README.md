@@ -200,7 +200,8 @@ docs/
 ├── bridge/                ← 各 agent bridge 协议（claude / dsh / …）
 └── channel/               ← 渠道 playbook（飞书渲染 / 可靠性 / **交互卡踩坑** / Telegram Topic）
     ├── feishu-cards.md    ← 改按钮 / form / AskUserQuestion 先读这份
-    └── telegram.md        ← Telegram Forum Supergroup Topic 方案
+    ├── telegram.md        ← Telegram Forum Supergroup Topic 方案
+    └── slack.md           ← Slack 接入方案（原生流式协议，设计中）
 ```
 
 ---

@@ -1,219 +1,127 @@
-# Handover: fix-gtw-fix branch — mimeFromExt wiring + runtime self-containment
+# Handover: Slack greeting — direct-send to owner (auto-discovered)
 
-This document hands off the **`fix-gtw-fix`** branch to the next agent.
-It supersedes the previous `wip/todo.md` (which described an unrelated
-`fix-telegram-rolling-log` branch — ignore that content if you saw it).
+本文件交接 **Slack greeting 修复** 这条线。只覆盖本次会话的工作,不涉
+及其他分支/模块。
 
-## TL;DR for the next agent
+## 任务背景
 
-- The big feature (download all issue attachments, route by MIME type) **landed
-  in commit `6e48754` and is fully tested** — do not touch that contract.
-- There are **2 uncommitted files** in the working tree (see §State). Both
-  compile and pass `go test ./internal/command/gtw/`.
-- One change introduces a function **`mimeFromExt` that is defined but never
-  called** — it will trip a `staticcheck` `unusedfunc`/`U1000` rule on strict
-  CI. **Your primary job is to wire it in** (see §Task 1).
-- The other change documents a "runtime self-containment" invariant that is
-  **already pinned by a passing test** — just commit it, or extend it per
-  §Task 2.
+- **原始需求**:修复 `slack.Greet`(原本是 no-op),只发英文、忽略中文。
+- **用户纠正方向**:setup 完成后**直接 DM 给 owner**,不等用户先 hi bot。
+  参考 feishu/telegram 的实现。
+- **最终定形**:Login 阶段用 `users.list` → `is_primary_owner` 自动发现
+  owner,直接 `chat.postMessage(channel=<ownerUserID>)` 发送,**仅英文**。
+  无 prompt、无 polling、无等待。
 
-## Goal of the branch
+## ✅ 已完成
 
-`/gtw fix <issue>` turns a GitHub issue into a self-contained agent prompt
-that runs on the user's own worktree. The recent work (commits
-`1ee615d` → `6e48754`) made the dispatch prompt:
+### 1. telegram 文档修正(已编译通过)
+`internal/login/telegram/provider.go` — 2 处误导注释:
+"daemon 会补发 greeting / pick up chat_id" → 改为"纯 CLI 直发,无
+daemon fallback,daemon 永不重放 login greeting"。代码逻辑本身没动。
 
-1. **Plan-first** — `DispatchPlan` (default) produces a due-diligence prompt;
-   `DispatchExecute` (the `-y` flag) produces a GOBL-mode edit prompt. Both
-   come from one `buildIssueDispatchText` with a `mode` switch.
-2. **Attachment-aware** — every `![](url)` / `[](url)` link in the issue body
-   is downloaded, routed by MIME type to `ContentImage` (vision) or
-   `ContentFile` (path annotation), and counted in the dispatch text so the
-   agent knows attachments exist.
+### 2. slack provider.go 重构为 direct-send(**编译通过**)
+`internal/login/slack/provider.go`:
+- `Options.Owner` — 可选 override(默认自动发现)
+- `Provider` 字段:`ownerUserID` / `listUsers`(接缝)/ `postDM`(接缝)
+- `wireGreet(ctx)` — 构建 slackgo client,接 `listUsers` 接缝,调
+  `discoverOwner`,接 `postDM`(owner 烘焙进闭包)
+- `discoverOwner(ctx)` — `users.list` → 第一个
+  `IsPrimaryOwner && !IsBot && !Deleted`;`opts.Owner` 优先
+- `Greet` — 直接发送,guard:`botToken==""` / `SkipGreet` / `postDM==nil`
+- `sendGreeting` — `body.English` only,`body.Chinese` 跳过
+- **已删除** polling 全套:`greetWaitTimeout` / `pollInterval` / `dmChannel`
+  / `listDMsFunc` / `waitForFirstDM` / `snapshotDMs` / `parseSlackTS`
 
-Reference docs:
-- `docs/feat/F-gtw-fix.md` — the feature design (the §4.1/§4.2 prompts live here)
-- `internal/command/gtw/fix.go:855` — `buildIssueDispatchText` (the template)
-- `internal/command/gtw/dispatch_test.go` — the pinned invariants
-- `internal/command/gtw/attachments.go` — the downloader + MIME router
-- `internal/command/gtw/provider.go:972` — `extractGitHubAttachments`
+### 3. manifest 修正
+`internal/login/slack/manifest.go` — 加 `features.app_home.messages_tab_enabled: true`
+(修用户的 "sending messages to this app has been turned off" 报错)。
+YAML 已校验通过。
 
-## State
-
-```
-Branch:    fix-gtw-fix
-HEAD:      6e48754 fix(gtw): download all issue attachments, route by MIME type
-Working:   2 files modified, nothing staged
-Build:     go build ./internal/command/gtw/   → ok (exit 0)
-Tests:     go test ./internal/command/gtw/    → ok (16.3s, all pass)
-```
-
-### Uncommitted diff (the handoff payload)
-
-**`internal/command/gtw/attachments.go`** — renamed `looksLikeImageName(name)
-bool` → `mimeFromExt(name) string` and expanded the table from 7 image
-extensions to ~17 MIME types:
-
-| extension(s) | returned MIME |
+### 4. 实测(独立程序 `/tmp/slack_greet_live_test/`,不依赖本包)
+| 项 | 结果 |
 |---|---|
-| `.png .jpg .jpeg .gif .webp .bmp .svg` | `image/*` (→ ContentImage) |
-| `.pdf` | `application/pdf` |
-| `.json` | `application/json` |
-| `.txt .log` | `text/plain` |
-| `.xml` | `application/xml` |
-| `.csv` | `text/csv` |
-| `.md` | `text/markdown` |
-| `.html .htm` | `text/html` |
-| `.zip` | `application/zip` |
-| `.gz .tgz` | `application/gzip` |
-| `.tar` | `application/x-tar` |
-| *(default)* | `application/octet-stream` (→ ContentFile) |
+| `auth.test` | ✅ bot=`nightme`(U0BTPL0JFPY), workspace=`nightmeworkspace` |
+| `users.list` → `is_primary_owner` | ✅ owner = `U0BTR4JTD26`("Lz") |
+| `chat.postMessage(channel=ownerUserID)` | ✅ 2 条英文 greeting 全部 ok+ts |
+| 端到端(自动发现 → 投递) | ✅ 已投递到 owner DM |
 
-**`docs/feat/F-gtw-fix.md`** — added a blockquote "运行时自包含原则"
-(Runtime self-containment principle) above the §4.1 Plan Prompt. It states
-that `buildIssueDispatchText`'s §Task body runs in a standalone agent on the
-user's worktree that **cannot see this repo's docs**, so the runtime text must
-not leak internal section numbers (`§4`), doc filenames (`F-gtw-fix`,
-`REVIEWER_INSTRUCTIONS`), or cross-mode references (`the plan above`,
-`Execute (§`). The invariant is guarded by
-`TestBuildIssueDispatchText_RuntimeSelfContained` (dispatch_test.go:192),
-**which already exists and passes**.
+**排除掉的方案(实测证明)**:
+- bot token 认不出 installer(`auth.test` 只返回 bot 自己)
+- `conversations.list(types=im)` 第一个是 **Slackbot**(`USLACK`)→ 会发错
+- `conversations.list` 的 `latest` 字段**全空** → polling 必然超时
+- **Messages tab 默认 off** → 用户不能 DM bot,`message.im` 永不触发
+- `apps.permissions.*`:`unknown_method`(granular-only,不适用)
+- `team.info`:`missing_scope`
 
-## Tasks for the next agent
+## ⚠️ 未完成(当前 build 状态)
 
-### Task 1 (BLOCKING) — wire `mimeFromExt` into the extractors
+- `go build ./...` ✅ **通过**(provider.go 没问题)
+- `go vet` / `go test ./internal/login/slack/` ❌ **失败** — 原因如下
 
-**This is the primary handoff item.** `mimeFromExt` is currently **dead
-code**: defined at `attachments.go:173` with a doc comment claiming "the
-attachment extractors use it", but no extractor calls it. A strict
-`staticcheck` run (`unusedfunc` / U1000) will fail CI on this function.
+### 1. provider_test.go 旧 Greet 测试未重写(编译失败主因)
+5 个测试仍引用已删除的 `dmChannel` / `listDMs` / 3 参 `postDM`:
+- L213 `TestGreet_SkipsWhenNoBotToken`
+- L235 `TestGreet_SkipsWhenSkipGreet`
+- L253 `TestGreet_SendsEnglishOnlyAndIgnoresChinese`
+- L300 `TestGreet_TimesOutSoftlyAndPostsNothing`(polling 语义,该删)
+- L327 `TestGreet_IgnoresStaleMessagesInKnownDM`(polling 语义,该删)
 
-The old `looksLikeImageName` was *also* dead at the time of the rename (it
-was introduced in commit `6e48754`'s attachments rewrite but never invoked),
-so this gap predates the WIP — the rename just made it more capable and more
-obviously orphaned.
+`containsCJK` 辅助函数已在文件末尾保留(英文-only 断言仍用)。
 
-**Where to wire it:** `internal/command/gtw/provider.go:972`
-`extractGitHubAttachments`. Today it:
+### 2. register.go help 文案过期
+`internal/login/slack/register.go`:
+- Long help 仍写 "waits up to 2 minutes for the owner to DM the bot"
+- `--no-greet` 描述 "skip the post-login greeting (and its 2-minute DM wait)"
+- 需改为"自动发现 owner 直接发送,无等待"
 
-- only matches `![alt](url)` (image syntax, the `!` prefix) — see the
-  `body[i] != '!' || body[i+1] != '['` guard at provider.go:982;
-- hardcodes `MIMEType: "image/png"` for every match (provider.go:1024),
-  with a comment "best guess; downloadAttachments refines from HTTP
-  response".
+### 3. register.go 未接 `--owner` flag
+`Options.Owner` 存在,但 `loginSlackCmdFlags` 无对应字段/flag,CLI 无法设置
+override。需加 `--owner` flag(可选,默认自动发现)。
 
-The intended behaviour (per `mimeFromExt`'s doc comment) is:
+### 4. manifest 测试未加断言
+`manifestView` 需加 `Features.AppHome.MessagesTabEnabled bool` 字段,
+`TestAppManifest_CarriesRequiredScopesAndEvents` 加断言,防止
+`messages_tab_enabled` 回归。
 
-1. Replace the hardcoded `"image/png"` with `mimeFromExt(fn)` so the
-   pre-classification is accurate **before** the HTTP response refines it.
-   The `downloadAttachments` MIME-refinement priority (attachments.go:123:
-   HTTP `Content-Type` wins over `att.MIMEType` hint) still holds —
-   `mimeFromExt` only seeds the hint.
-2. *(Optional, larger scope)* Extend the extractor to also match plain
-   `[](url)` links (no `!` prefix) so a log/dump/PDF referenced as a plain
-   link becomes an attachment too. Today only `![](url)` images are picked
-   up; a `[](crash.log)` link is invisible to the dispatch. If you do this,
-   the `!` guard becomes a "is-image-link" heuristic and `mimeFromExt`
-   decides the block type.
+## 📋 计划
 
-**Symmetry check:** there appears to be only one extractor
-(`extractGitHubAttachments`). GitLab uploads (`/uploads/...`) are inlined as
-`![](url)` per provider.go:48 comment and likely reuse the same extractor —
-confirm by grepping `func extract.*ttachment` before assuming a second
-extractor exists.
+1. **重写 provider_test.go 的 Greet 测试**为 auto-discover + direct-send 形态:
+   - `TestGreet_SkipsWhenNoBotToken` — `botToken==""` → nil,不碰接缝
+   - `TestGreet_SkipsWhenSkipGreet` — `SkipGreet` → nil
+   - `TestGreet_SkipsWhenNoOwnerDiscovered` — `postDM==nil` → 打印 skip
+     提示,返回 nil(替代 TimesOut / Stale 两个 polling 测试)
+   - `TestGreet_SendsEnglishOnlyToOwner` — 设 `ownerUserID`+`postDM`(记录)
+     → 恰好 2 条英文,无 CJK(`containsCJK`)
+   - `TestDiscoverOwner_PicksPrimaryOwner` — `listUsers` 返回多个 userView
+     → 选 `is_primary_owner` 那个
+   - `TestDiscoverOwner_OwnerFlagOverrides` — `opts.Owner` 设 → 直接返回,
+     不查 `listUsers`
+   - `TestDiscoverOwner_SkipsBotsAndDeleted` — `is_primary_owner+is_bot=true`
+     跳过;`deleted` 跳过
+2. **register.go** — Long help + `--no-greet` 描述更新;加 `--owner` flag
+   接入 `Options.Owner`
+3. **manifest 测试** — `manifestView` 加字段 + 加断言
+4. `gofmt` + `go build` + `go test ./internal/login/slack/` 全绿
+5. (可选)清理 `/tmp/slack_greet_live_test/`(独立实测程序,已完成使命)
 
-**Test expectations:** `attachments_test.go` (line 41) feeds a fixture with
-`MIMEType: "image/png"` directly, so it won't break from the wiring change.
-But `dispatch_test.go::TestBuildIssueDispatchText_AttachmentsSection` (line
-301) asserts the attachment-count text — verify it still passes after
-wiring (it should: the count is taken from `imageCount`/`fileCount` params,
-not from `len(issue.Attachments)`, per commit `6e48754`).
+## 设计决策记录
 
-**Definition of done:** `mimeFromExt` has ≥1 non-test caller, `staticcheck
-./internal/command/gtw/` is clean, and `go test ./internal/command/gtw/`
-still passes.
+- **Slack 与 telegram 不同**:telegram 无 owner 概念,只能 polling;Slack 有
+  `is_primary_owner`,可自动发现 → direct-send,无需 prompt
+- **比 feishu 更优**:feishu 依赖 consent flow 拿 open_id;Slack 靠
+  `users.list` 一个标志位,**零用户输入**
+- **英文-only**:Slack 无 Feishu 式双语 post 块,发两条只会加倍噪音(同
+  `telegram.sendGreeting` 决策)
+- **messages_tab_enabled 必须 true**:否则用户不能 DM bot,`message.im` 永不
+  触发,**daemon 收不到任何 DM**——这是独立 bug,已修 manifest,但**用户需要
+  reinstall app 或手动开 App Home → Messages Tab 开关才生效**
 
-### Task 2 (non-blocking) — commit the runtime self-containment invariant
+## 文件改动清单(git status)
 
-The `F-gtw-fix.md` blockquote + the `TestBuildIssueDispatchText_RuntimeSelfContained`
-test are a matched pair that already passes. You can commit them as-is in a
-single `docs(gtw): pin runtime self-containment invariant` commit.
-
-Optional hardening: the test's leak-list (`§4`, `F-gtw-fix`,
-`REVIEWER_INSTRUCTIONS`, `Execute (§`, `the plan above`) is a denylist. If
-you want belt-and-suspenders, also assert that the prompt contains NO
-backtick-quoted doc filename at all (regex-scan for `` `[^`]+\.md` `` and
-fail if any matches a file in `docs/` or the repo root). This is optional —
-the denylist already covers the known leak vectors.
-
-### Task 3 (housekeeping) — decide the WIP commit shape
-
-Two reasonable shapes; pick one:
-
-- **One commit** — `refactor(gtw): mimeFromExt pre-classifies attachments by
-  extension` covering both files (the `attachments.go` rename + the doc
-  principle). They're conceptually related (both make the dispatch prompt
-  more self-contained / accurate before download). Then do Task 1's wiring
-  in a follow-up commit on top.
-- **Two commits** — `docs(gtw): runtime self-containment invariant` (just
-  the .md) then `refactor(gtw): mimeFromExt replaces looksLikeImageName`
-  (just attachments.go). Cleaner history; the .md is already
-  self-consistent (its test exists and passes), so it can land first.
-
-Either way, **do not commit `mimeFromExt` without either wiring it in or
-adding a caller** — a green local `go test` hides the dead-code problem
-because tests don't run `staticcheck`.
-
-## Lessons learned (don't repeat these)
-
-1. **`staticcheck` is not part of `go test`.** A function can compile, have
-   a thorough doc comment, and pass all tests while being completely
-   uncalled. The WIP's `mimeFromExt` is exactly this case — it *looks*
-   wired-in (the comment says "the extractors use it") but isn't. Always
-   cross-check with `grep -rn <fn> --include=*.go` for non-test callers
-   before considering a refactor done.
-
-2. **Aspirational doc comments are a trap.** The `mimeFromExt` comment
-   describes the *intended* contract, not the current state. When you read
-   "the extractors use it", verify the call site exists — if it doesn't,
-   that's the work item, not a finished description.
-
-3. **The `looksLikeImageName` → `mimeFromExt` rename was the right call.**
-   The old bool function could only answer "is this an image?"; the dispatch
-   text needs the actual MIME type to split image vs file counts
-   accurately *before* download (when only the filename is known). A
-   `string`-returning function is the correct shape — just finish wiring it.
-
-4. **The runtime self-containment principle is load-bearing.** The dispatch
-   prompt runs on the user's worktree, not in this repo. Any internal
-   reference (§4.1, F-gtw-fix.md, "the plan above") is a broken pointer for
-   the runtime agent. The `TestBuildIssueDispatchText_RuntimeSelfContained`
-   denylist is the guardrail — keep it green and extend it when you add new
-   cross-references to the prompts.
-
-## Key files to know
-
-| File | Lines | Purpose |
-|---|---|---|
-| `internal/command/gtw/fix.go` | ~855+ | `buildIssueDispatchText` — the prompt template (NO HTML, just markdown) |
-| `internal/command/gtw/attachments.go` | ~295 | `downloadAttachments`, `isImageMIME`, **`mimeFromExt` (dead, needs wiring)** |
-| `internal/command/gtw/provider.go` | ~972+ | `extractGitHubAttachments` — the `![](url)` parser (hardcodes `image/png`) |
-| `internal/command/gtw/dispatch_test.go` | ~340 | pinned invariants incl. `RuntimeSelfContained`, `AttachmentsSection` |
-| `internal/command/gtw/attachments_test.go` | ~41+ | download/routing fixtures |
-| `docs/feat/F-gtw-fix.md` | §4.1/§4.2 | the Plan/Execute prompt specs + runtime self-containment principle |
-
-## DO NOT regress (locked in by `6e48754` + tests)
-
-- **Every attachment downloads.** No skip-on-type. A 302-to-HTML-login still
-  becomes a `ContentFile` so the agent sees what arrived. Pinned by
-  `attachments_test.go`.
-- **10MB size guard** (`maxAttachmentBytes`) skips pathological non-images
-  *without writing to disk*; the dispatch text still surfaces the URL.
-- **Index-prefixed filenames** (`<i>-<name>`) so same-named attachments don't
-  clobber. Pinned by the download fixtures.
-- **Dispatch counts come from `imageCount`/`fileCount` params**, not
-  `len(issue.Attachments)`. Pinned by
-  `TestBuildIssueDispatchText_AttachmentsSection`.
-- **HTTP `Content-Type` wins over the provider's `MIMEType` hint**
-  (attachments.go:123). `mimeFromExt` only seeds the hint; it must NOT
-  override the response.
+```
+ M internal/login/slack/manifest.go       (+8 行, messages_tab_enabled)
+ M internal/login/slack/provider.go       (+246/-, direct-send 重构)
+ M internal/login/slack/provider_test.go  (+170 行, 旧测试未重写)
+ M internal/login/slack/register.go       (+14 行, 旧 help 未更新)
+ M internal/login/telegram/provider.go    (+13 行, 文档修正,已完成)
+```

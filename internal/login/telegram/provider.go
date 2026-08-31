@@ -21,8 +21,9 @@
 //      private-chat message from any non-bot user.
 //   3. Send the canonical bilingual greeting bodies to that
 //      chat_id via sendMessage.
-//   4. On timeout: log and exit (the daemon will greet the user
-//      when they eventually message the bot).
+//   4. On timeout: log and exit — the greeting is simply
+//      skipped. The daemon only answers runtime messages; it
+//      never replays the login greeting.
 //
 // Greet's context is the parent ctx set by the CLI (10-minute
 // login timeout). The greeting wait caps itself at 2 minutes so
@@ -238,10 +239,10 @@ func (p *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 // and send the greeting bodies.
 //
 // If the user doesn't message the bot within greetWaitTimeout, we
-// log a friendly note and return nil. The daemon will pick up
-// the same chat_id when the user eventually messages the bot at
-// runtime — the greeting is just an early-bird nicety, not a
-// prerequisite for the registration to work.
+// log a friendly note and return nil — the greeting is simply
+// skipped. There is no daemon-side fallback: the daemon only
+// answers runtime messages and never sends (or replays) the
+// login greeting. Registration still succeeds without it.
 func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) error {
 	if p.botToken == "" || p.SkipGreet {
 		// Login was bypassed in tests, OR the caller opted

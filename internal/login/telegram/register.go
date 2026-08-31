@@ -14,9 +14,8 @@ import (
 // start, exposing `nightme login telegram`.
 //
 // The builder mirrors the original newLoginTelegramCmd shape:
-// shared flag bag, --token / --no-greet for non-interactive
-// ERPL / shell-wrapped invocations, RunE that calls
-// login.LoginWith after wiring the Provider's SkipGreet flag.
+// shared flag bag, --token for non-interactive ERPL / shell-wrapped
+// invocations, RunE that calls login.LoginWith.
 func init() {
 	login.RegisterProvider("telegram", func(flags *login.ProviderFlags) *cobra.Command {
 		var tf loginTelegramCmdFlags
@@ -35,9 +34,7 @@ func init() {
 				"Non-interactive:\n" +
 				"  --token <token>  skip the stdin prompt, useful for\n" +
 				"                  scripts and ERPL / shell-wrapped invocations\n" +
-				"                  where stdin is closed.\n" +
-				"  --no-greet       skip the post-login greeting (skip the\n" +
-				"                  2-minute wait for the owner message).\n\n" +
+				"                  where stdin is closed.\n\n" +
 				"Re-running this command rebinds the channel — any\n" +
 				"existing telegram.bot_token in config.yaml is overwritten.\n\n" +
 				"After login, add the bot to a Forum Supergroup and run\n" +
@@ -45,9 +42,6 @@ func init() {
 			RunE: func(cmd *cobra.Command, _ []string) error {
 				opts := Options{Token: tf.token}
 				provider := New(opts)
-				if tf.noGreet {
-					provider.SkipGreet = true
-				}
 				ctx := loginContext(cmd, flags)
 				return login.LoginWith(ctx, provider,
 					cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -55,17 +49,14 @@ func init() {
 		}
 		cmd.Flags().DurationVar(&flags.Timeout, "timeout", 10*time.Minute, "abort the flow after this duration")
 		cmd.Flags().StringVar(&tf.token, "token", "", "pass the bot token via flag instead of stdin (for non-interactive use)")
-		cmd.Flags().BoolVar(&tf.noGreet, "no-greet", false, "skip the post-login greeting (and its 2-minute owner wait)")
 		return cmd
 	})
 }
 
 // loginTelegramCmdFlags holds the telegram-specific flags that
-// don't belong on the shared ProviderFlags (--token / --no-greet
-// are telegram-only).
+// don't belong on the shared ProviderFlags (--token is telegram-only).
 type loginTelegramCmdFlags struct {
-	token   string
-	noGreet bool
+	token string
 }
 
 // loginContext derives the timeout context for the provider's

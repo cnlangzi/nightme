@@ -104,11 +104,6 @@ type Provider struct {
 	// botInfo is the getMe result captured during Login. Greet
 	// reads Username to print "open @<bot> and send /start".
 	botInfo *userInfo
-
-	// SkipGreet, when true, makes Greet a no-op. Used by the CLI
-	//  flag to skip the 2-minute owner wait in
-	// non-interactive environments.
-	SkipGreet bool
 }
 
 // New constructs a Provider. opts fields fall back to defaults.
@@ -244,9 +239,9 @@ func (p *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 // answers runtime messages and never sends (or replays) the
 // login greeting. Registration still succeeds without it.
 func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) error {
-	if p.botToken == "" || p.SkipGreet {
-		// Login was bypassed in tests, OR the caller opted
-		// out of the post-login greeting (e.g. --no-greet).
+	if p.botToken == "" {
+		// Login was bypassed in tests. Silent no-op rather than
+		// pretending to greet.
 		return nil
 	}
 

@@ -272,7 +272,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			multi = probe.Questions[0].MultiSelect
 		}
 
-		_, armedEvents, done := live.armPendingAsk(block.ID, multi, false)
+		armedEvents, done := live.armPendingAsk(block.ID, multi, false)
 		defaultAskHandler(block, armedEvents, logger)
 		close(armedEvents)
 		<-done
@@ -320,17 +320,12 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			// will see live.closed.
 		}
 	}
-	// armPendingAskFn is the stream-pump's bridge back into the driver
-	// for the (b) text-fallback path. armPendingAsk is a *driver
-	// method; stream.go's pumpStream is package-level and can't call
-	// it directly, so we hand it a closure. The closure is invoked
-	// synchronously from pumpStream's translate() goroutine so the
-	// returned done channel can be waited on before translate returns.
-	armPendingAskFn := func(blockID string, multi bool, textFallback bool) (
-		chan string, chan<- agent.AgentEvent, <-chan struct{},
-	) {
-		return live.armPendingAsk(blockID, multi, textFallback)
-	}
+	// armPendingAskFn is the stream-pump's bridge back into the
+	// driver for the (b) text-fallback path. armPendingAsk is a
+	// *driver method; stream.go's pumpStream is package-level and
+	// can't call it directly, so we hand it a method value bound to
+	// the named armPendingAskFn type. See ask.go::armPendingAskFn.
+	var armPendingAskFn armPendingAskFn = live.armPendingAsk
 
 	agent.SafeGo("claudecode:stream-pump", func() {
 		defer live.pumpWG.Done()
@@ -889,20 +884,33 @@ func (d *driver) writeLine(data []byte) error {
 // EventAgentPermission emitted through `armedEvents` so its
 // Permission.ResponseCh points at the channel we just stored.
 //
-// The caller MUST feed `armedEvents` into the AskUserQuestion
-// emitter (defaultAskHandler for (a) tool_use, emitAskFromText for
-// (b) text-fallback) and then close it after the emitter returns.
+// Caller pattern (both (a) tool_use and (b) text-fallback paths):
+//
+//	armedEvents, done := d.armPendingAsk(blockID, multi, textFallback)
+//	defer func() {
+//	    close(armedEvents)
+//	    <-done
+//	}()
+//	// emit one or more EventAgentPermissions into armedEvents.
+//
 // The done channel signals when the interceptor goroutine has drained
-// and exited — callers wait on it before returning so no event leaks.
+// and exited — callers MUST wait on it before returning so no event
+// is dropped between the emitter and d.events.
+//
+// The interceptor's d.events send is wrapped in a select that
+// guards d.closed — if the bridge dies mid-pump and lifecycle has
+// already closed d.events, the goroutine drops the event instead
+// of panicking on send-to-closed-channel. Mirrors the panicDeliver
+// pattern at lines 311-322.
 //
 // textFallback distinguishes the two interception paths (see
 // pendingAsk doc). The wire shape of the eventual reply is decided
 // in SendPermission based on this flag — this helper only deals with
 // the channel wiring, which is identical for both paths.
 func (d *driver) armPendingAsk(blockID string, multi bool, textFallback bool) (
-	respCh chan string, armedEvents chan<- agent.AgentEvent, done <-chan struct{},
+	armedEvents chan<- agent.AgentEvent, done <-chan struct{},
 ) {
-	respCh = make(chan string, 1)
+	respCh := make(chan string, 1)
 	intercept := make(chan agent.AgentEvent, 4)
 	doneCh := make(chan struct{})
 
@@ -921,11 +929,19 @@ func (d *driver) armPendingAsk(blockID string, multi bool, textFallback bool) (
 			if ev.Kind == agent.EventAgentPermission && ev.Permission != nil {
 				ev.Permission.ResponseCh = respCh
 			}
-			d.events <- ev
+			// Drop-on-closed, drop-on-full — matches
+			// panicDeliver's non-blocking contract. The
+			// interceptor must not stall pumpStream if d.events
+			// fills up.
+			select {
+			case d.events <- ev:
+			case <-d.closed:
+			default:
+			}
 		}
 	}()
 
-	return respCh, intercept, doneCh
+	return intercept, doneCh
 }
 
 // writeUserText writes the user's selection as a plain user-role text

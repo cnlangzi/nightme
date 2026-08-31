@@ -21,6 +21,25 @@ import (
 // surfaced (e.g. certain non-Anthropic model providers).
 type askHandlerFunc func(block contentBlock, events chan<- agent.AgentEvent, logger *slog.Logger)
 
+// armPendingAskFn is the bridge between pumpStream (which only sees
+// package-level functions) and driver.armPendingAsk (which lives on
+// the *driver instance). pumpStream holds one of these and invokes
+// it synchronously when the text-fallback path fires.
+//
+// Extracting the type here means pumpStream's parameter, the
+// newDriver wiring, and the test helpers share one declaration
+// instead of repeating the inline return shape at four sites. A
+// future refactor that adds a parameter changes one line.
+//
+// To bind live.armPendingAsk to this type at the call site, use an
+// explicit conversion:
+//
+//	var f armPendingAskFn = live.armPendingAsk
+//
+// (A bare method value would infer a func type and not satisfy the
+// named alias.)
+type armPendingAskFn func(blockID string, multi bool, textFallback bool) (armedEvents chan<- agent.AgentEvent, done <-chan struct{})
+
 // Question is the structured AskUserQuestion payload. We model only
 // the fields nightme needs to render a Feishu card and reconstruct
 // the user's answer in the right wire format.

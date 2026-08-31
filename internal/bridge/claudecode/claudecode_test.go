@@ -199,7 +199,8 @@ func streamFromFixture(t *testing.T, name string, askHandler askHandlerFunc) []a
 		// drives (a) tool_use (which uses askHandler, not
 		// armPendingAskFn). The text-fallback path requires a
 		// non-nil armPendingAskFn, and is exercised separately
-		// by TestPumpStream_AskUserQuestion_TextFallback.
+		// by TestPumpStream_TextFallback_DetectsAndArms in
+		// ask_permission_test.go.
 		pumpStream(strings.NewReader(string(data)), events, askHandler, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()

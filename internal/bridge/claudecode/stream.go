@@ -214,7 +214,7 @@ func pumpStream(
 	r io.Reader,
 	events chan<- agent.AgentEvent,
 	askHandler askHandlerFunc,
-	armPendingAskFn func(blockID string, multi bool, textFallback bool) (chan string, chan<- agent.AgentEvent, <-chan struct{}),
+	armPendingAskFn armPendingAskFn,
 	agentName, workspace, branch string,
 	logger *slog.Logger,
 ) {
@@ -275,7 +275,7 @@ func pumpStream(
 // agentName + workspace are stamped onto the EventAgentReady payload so
 // channel-layer receipts can render the "Agent · name | cwd · path"
 // foot note. Both are immutable for the session's lifetime.
-func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent, askHandler askHandlerFunc, armPendingAskFn func(blockID string, multi bool, textFallback bool) (chan string, chan<- agent.AgentEvent, <-chan struct{}), agentName, workspace, branch string, logger *slog.Logger) {
+func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent, askHandler askHandlerFunc, armPendingAskFn armPendingAskFn, agentName, workspace, branch string, logger *slog.Logger) {
 	switch ev.Type {
 	case "system":
 		// system/init is informational; we surface it via EventAgentReady
@@ -343,7 +343,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				// tool_result — there is no tool_use_id to bind to
 				// on this path.
 				if q := detectAskInText(block.Text); q != nil && armPendingAskFn != nil {
-					_, armedEvents, done := armPendingAskFn("", q.MultiSelect, true)
+					armedEvents, done := armPendingAskFn("", q.MultiSelect, true)
 					emitAskFromText(*q, armedEvents, logger)
 					close(armedEvents)
 					<-done

@@ -111,21 +111,35 @@ func readStdinLine(t *testing.T, r io.Reader) string {
 // passes through armedEvents, so the channel layer writes to the
 // channel we stored in pendingAsk — never to whatever default
 // ResponseCh the emitter originally allocated.
+//
+// We don't have direct access to the response channel armPendingAsk
+// stored (it's an implementation detail now — callers don't need it).
+// Instead we verify two invariants: (1) the emitted event's
+// ResponseCh is NOT the channel the emitter allocated (proving
+// rewrite happened) and (2) the emitted ResponseCh IS the same
+// channel that pendingAsk holds (proving it points at our channel,
+// not some third one).
 func TestArmPendingAsk_RewritesResponseCh(t *testing.T) {
 	d := &driver{
 		closed: make(chan struct{}),
 		events: make(chan agent.AgentEvent, 4),
 	}
 
-	respCh, armedEvents, done := d.armPendingAsk("toolu_test", false, false)
-	if respCh == nil {
-		t.Fatal("respCh is nil")
-	}
+	armedEvents, done := d.armPendingAsk("toolu_test", false, false)
 	if armedEvents == nil {
 		t.Fatal("armedEvents is nil")
 	}
 	if done == nil {
 		t.Fatal("done is nil")
+	}
+
+	// armPendingAsk stored its channel in pendingAsk; capture
+	// it for the post-rewrite assertion.
+	d.pendingMu.Lock()
+	wantCh := d.pendingAsk.ResponseCh
+	d.pendingMu.Unlock()
+	if wantCh == nil {
+		t.Fatal("pendingAsk.ResponseCh is nil — armPendingAsk didn't store it")
 	}
 
 	// Emit a fake EventAgentPermission whose ResponseCh is a
@@ -146,7 +160,7 @@ func TestArmPendingAsk_RewritesResponseCh(t *testing.T) {
 	<-done
 
 	// The event should have landed on d.events with ResponseCh
-	// rewritten to respCh (not otherCh).
+	// rewritten to the channel we stored in pendingAsk.
 	var ev agent.AgentEvent
 	select {
 	case ev = <-d.events:
@@ -156,12 +170,12 @@ func TestArmPendingAsk_RewritesResponseCh(t *testing.T) {
 	if ev.Kind != agent.EventAgentPermission {
 		t.Fatalf("event kind = %v, want EventAgentPermission", ev.Kind)
 	}
-	if ev.Permission.ResponseCh != respCh {
-		t.Errorf("ResponseCh not rewritten: got %p, want respCh %p",
-			ev.Permission.ResponseCh, respCh)
-	}
 	if ev.Permission.ResponseCh == otherCh {
-		t.Errorf("ResponseCh still points at the orphan channel")
+		t.Errorf("ResponseCh still points at the orphan channel (rewrite did not fire)")
+	}
+	if ev.Permission.ResponseCh != wantCh {
+		t.Errorf("ResponseCh not rewritten to pendingAsk.ResponseCh: got %p, want %p",
+			ev.Permission.ResponseCh, wantCh)
 	}
 }
 
@@ -175,7 +189,7 @@ func TestArmPendingAsk_PassesThroughNonPermissionEvents(t *testing.T) {
 		events: make(chan agent.AgentEvent, 4),
 	}
 
-	_, armedEvents, done := d.armPendingAsk("", false, true)
+	armedEvents, done := d.armPendingAsk("", false, true)
 
 	armedEvents <- agent.AgentEvent{
 		Kind: agent.EventAgentText,
@@ -361,11 +375,7 @@ func TestPumpStream_TextFallback_DetectsAndArms(t *testing.T) {
 		events: events,
 	}
 
-	armFn := func(blockID string, multi bool, textFallback bool) (
-		chan string, chan<- agent.AgentEvent, <-chan struct{},
-	) {
-		return d.armPendingAsk(blockID, multi, textFallback)
-	}
+	var armFn armPendingAskFn = d.armPendingAsk
 
 	// askHandler is intentionally nil: the text-fallback path
 	// uses armPendingAskFn, not askHandler. (The tool_use path

@@ -11,7 +11,7 @@ import (
 )
 
 func init() {
-	channel.Register("slack", func(cfg *config.Config) (channel.Channel, error) {
+	channel.Register("slack", chatIDPrefix, func(cfg *config.Config) (channel.Channel, error) {
 		return NewAdapter(cfg)
 	})
 }

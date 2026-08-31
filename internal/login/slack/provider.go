@@ -210,14 +210,26 @@ func printWalkthrough(out io.Writer) {
 Slack app setup (Socket Mode — no public URL required)
 
   1. Open https://api.slack.com/apps → "Create New App" → "From an app manifest"
-  2. Pick your workspace, then paste the nightme manifest.
-     Print it with:  nightme login slack --manifest
-  3. Left sidebar → "Socket Mode" → enable it, then generate an
-     App-Level Token with the connections:write scope.
+  2. Pick your workspace, then on the "Create from manifest" screen
+     select the YAML tab and paste the manifest shown below this box.
+`)
+	// Embed the manifest inline so a user on a network where Slack's
+	// new_app=1 deep link is blocked (corporate proxy, sandboxed
+	// phone browser, …) does not have to run a second command.
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "----- paste this YAML into Slack -----")
+	fmt.Fprintln(out)
+	fmt.Fprint(out, AppManifest)
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "----- end of manifest -----")
+	fmt.Fprintln(out)
+	fmt.Fprint(out, `  3. After "Your app has been created", left sidebar → "Socket Mode" → enable it.
+  4. Click "Generate Token and Enter Socket Mode", enter a name,
+     add the connections:write scope, then Generate.
      Copy the xapp-… token now — Slack shows it only once.
-  4. Left sidebar → "Install App" → "Install to Workspace" → Allow.
+  5. Left sidebar → "Install App" → "Install to Workspace" → Allow.
      Copy the xoxb-… Bot User OAuth Token.
-  5. Paste both tokens below.
+  6. Paste both tokens below.
 
   After login: invite the bot to a channel with /invite @nightme,
   or just open a DM with it and say hello.

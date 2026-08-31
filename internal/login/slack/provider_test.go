@@ -2,7 +2,6 @@ package slack
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/url"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/login"
+	"gopkg.in/yaml.v3"
 )
 
 func stubAuth(team, bot string, err error) func(context.Context, string, string) (string, string, error) {
@@ -180,9 +180,12 @@ func TestLogin_PrintsWalkthroughWhenInteractive(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"api.slack.com/apps",
-		"--manifest",
-		"connections:write",
+		"socket_mode_enabled",
 		"Install to Workspace",
+		// The walkthrough now carries the manifest itself so users
+		// on networks that block Slack's deep link do not have to
+		// run a second command to fetch it.
+		AppManifest,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("walkthrough is missing %q:\n%s", want, text)
@@ -214,10 +217,34 @@ func TestGreet_IsANoOp(t *testing.T) {
 	}
 }
 
-func TestAppManifest_IsValidJSON(t *testing.T) {
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(AppManifest), &parsed); err != nil {
-		t.Fatalf("the manifest users paste into Slack must be valid JSON: %v", err)
+// manifestView is the subset of AppManifest that tests actually
+// assert on. yaml.v3 maps field names case-insensitively so a single
+// struct covers both the YAML body and the URL-encoded copy.
+type manifestView struct {
+	OAuthConfig struct {
+		Scopes struct {
+			Bot []string `yaml:"bot"`
+		} `yaml:"scopes"`
+	} `yaml:"oauth_config"`
+	Settings struct {
+		SocketModeEnabled  bool `yaml:"socket_mode_enabled"`
+		EventSubscriptions struct {
+			BotEvents []string `yaml:"bot_events"`
+		} `yaml:"event_subscriptions"`
+	} `yaml:"settings"`
+}
+
+func parseManifest(raw string) (*manifestView, error) {
+	var v manifestView
+	if err := yaml.Unmarshal([]byte(raw), &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func TestAppManifest_IsValidYAML(t *testing.T) {
+	if _, err := parseManifest(AppManifest); err != nil {
+		t.Fatalf("the manifest users paste into Slack must be valid YAML: %v", err)
 	}
 }
 
@@ -225,21 +252,9 @@ func TestAppManifest_IsValidJSON(t *testing.T) {
 // at runtime. These assertions pin the decisions in
 // docs/channel/slack.md §6.
 func TestAppManifest_CarriesRequiredScopesAndEvents(t *testing.T) {
-	var parsed struct {
-		OAuthConfig struct {
-			Scopes struct {
-				Bot []string `json:"bot"`
-			} `json:"scopes"`
-		} `json:"oauth_config"`
-		Settings struct {
-			SocketModeEnabled  bool `json:"socket_mode_enabled"`
-			EventSubscriptions struct {
-				BotEvents []string `json:"bot_events"`
-			} `json:"event_subscriptions"`
-		} `json:"settings"`
-	}
-	if err := json.Unmarshal([]byte(AppManifest), &parsed); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	parsed, err := parseManifest(AppManifest)
+	if err != nil {
+		t.Fatalf("yaml unmarshal: %v", err)
 	}
 
 	if !parsed.Settings.SocketModeEnabled {
@@ -296,13 +311,23 @@ func TestManifestURL_IsAWellFormedDeepLink(t *testing.T) {
 	if q.Get("new_app") != "1" {
 		t.Fatal("new_app=1 is what opens the creation flow")
 	}
-	// The manifest must survive URL-encoding intact, or Slack shows
-	// an empty form and the whole point is lost.
-	var round map[string]any
-	if err := json.Unmarshal([]byte(q.Get("manifest_json")), &round); err != nil {
-		t.Fatalf("embedded manifest is not valid JSON after encoding: %v", err)
+	// Slack's deep link accepts the manifest as YAML (manifest_yaml=…)
+	// today, and as JSON (manifest_json=…) is kept as a fallback in
+	// case the YAML form ever fails. The manifest must survive
+	// URL-encoding intact either way or Slack shows an empty form
+	// and the whole point is lost.
+	encoded := q.Get("manifest_yaml")
+	if encoded == "" {
+		encoded = q.Get("manifest_json")
 	}
-	if round["display_information"] == nil {
+	if encoded == "" {
+		t.Fatal("neither manifest_yaml nor manifest_json is present")
+	}
+	parsed, err := parseManifest(encoded)
+	if err != nil {
+		t.Fatalf("embedded manifest is not valid after encoding: %v", err)
+	}
+	if !parsed.Settings.SocketModeEnabled {
 		t.Fatal("embedded manifest lost its contents")
 	}
 }

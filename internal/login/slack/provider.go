@@ -81,15 +81,22 @@ type Provider struct {
 
 	// listUsers is the testable seam for owner discovery: returns
 	// the workspace users so discoverOwner can pick is_primary_owner.
-	// Wired by wireGreet() at the end of a successful Login; nil before
-	// Login. Mirrors feishu.sendDMFunc (kept off the slack-go wire types
-	// so tests don't import the SDK).
+	// Wired by wireGreetClient() at the end of a successful Login;
+	// nil before Login. Mirrors feishu.sendDMFunc (kept off the
+	// slack-go wire types so tests don't import the SDK).
 	listUsers listUsersFunc
 
+	// client is the slackgo client captured by wireGreetClient so
+	// discoverOwnerAndPostDM can later bake the owner into a postDM
+	// closure without rebuilding the client. nil when Login was
+	// bypassed (tests).
+	client *slackgo.Client
+
 	// postDM is the testable seam for Greet's per-message send,
-	// wired by wireGreet() at the end of a successful Login; nil
-	// means Greet is a no-op (Login bypassed or no owner captured).
-	// Mirrors feishu.sendDM (owner baked into the closure).
+	// wired by discoverOwnerAndPostDM on first Greet; nil means
+	// Greet is a no-op (Login bypassed, --no-greet, no owner
+	// discovered, or users.list failed). Mirrors feishu.sendDM
+	// (owner baked into the closure).
 	postDM postDMFunc
 }
 
@@ -150,15 +157,20 @@ func (p *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 		appName = botName + " @ " + teamName
 	}
 
-	// Capture the validated token + bot name and auto-discover the
-	// owner (for the post-login greeting), then wire the Greet seam.
-	// Mirrors feishu wiring sendDM at the end of Login — feishu gets
-	// ownerOpenID from its consent flow; Slack has none, so we read
-	// the owner from users.list (is_primary_owner). No stdin prompt:
-	// the owner is identifiable from the bot token + users:read scope.
+	// Capture the validated token + bot name and wire the slack-go
+	// client for Greet. Mirrors feishu wiring sendDM at the end of
+	// Login — feishu gets ownerOpenID from its consent flow; Slack
+	// has none, so we will read the owner from users.list on the
+	// first Greet call (see wireGreetClient / discoverOwnerAndPostDM).
+	//
+	// Important: do NOT call users.list here. Login must return
+	// promptly so the orchestrator can SaveDefault the credentials;
+	// a flaky Slack API would otherwise block the entire login flow
+	// and the user would never get their config saved. Discovery is
+	// deferred to Greet under a short, independent timeout.
 	p.botToken = botToken
 	p.botName = botName
-	p.wireGreet(ctx)
+	p.wireGreetClient()
 
 	return &login.Credentials{
 		BotToken:  botToken,
@@ -198,15 +210,22 @@ type postDMFunc func(ctx context.Context, text string) error
 // the consenting owner" shape, NOT telegram.Greet's "wait for the
 // user to message first" poll.
 //
-// The owner's Slack user ID is auto-discovered during Login (see
-// discoverOwner): the one user in users.list with is_primary_owner ==
-// true. Slack's bot token cannot identify the installer (auth.test
-// returns only the bot's own identity; Slack fires no install event),
-// so unlike Feishu — whose consent flow hands back the owner open_id —
-// Slack reads the owner from the workspace roster. This needs the
-// users:read scope the manifest already requests. chat.postMessage
-// (channel=<ownerUserID>) opens the DM and posts in one call; the
-// owner never has to message the bot first.
+// The owner's Slack user ID is auto-discovered on the FIRST call to
+// Greet (not in Login — see Login's comment), via users.list: the one
+// user with is_primary_owner == true. Slack's bot token cannot
+// identify the installer (auth.test returns only the bot's own
+// identity; Slack fires no install event), so unlike Feishu — whose
+// consent flow hands back the owner open_id — Slack reads the owner
+// from the workspace roster. This needs the users:read scope the
+// manifest already requests. chat.postMessage (channel=<ownerUserID>)
+// opens the DM and posts in one call; the owner never has to message
+// the bot first.
+//
+// Discovery runs under an independent, short timeout (10 s) so a
+// flaky Slack API cannot stall login — by the time Greet runs,
+// credentials are already saved. If discovery fails, the greeting is
+// silently skipped; the daemon still answers the owner's first
+// runtime message and never replays the login greeting.
 //
 // Slack only sends the English copy of each body. GreetingTexts
 // still exposes a Chinese field for Feishu's post envelope (which
@@ -232,17 +251,23 @@ func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) e
 		// guard: silent no-op rather than pretending to greet.
 		return nil
 	}
-	if p.postDM == nil {
-		// Login ran but discovered no owner (users.list failed or no
-		// primary owner), OR Login was bypassed in tests. Don't
-		// pretend to greet — surface and exit.
-		fmt.Fprintln(p.out, "greeting skip: no owner discovered (Login bypassed or users.list failed)")
-		return nil
-	}
 
 	fmt.Fprintln(p.out)
 	fmt.Fprintln(p.out, "📨 Sending greeting DM")
 	fmt.Fprintln(p.out, "---------------------")
+
+	// Lazy discovery: runs on first Greet, not in Login, so a flaky
+	// Slack API cannot block credential persistence. Independent
+	// timeout caps the wait so a misbehaving Slack gives up fast.
+	if p.postDM == nil {
+		discCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoverTimeout)
+		p.discoverOwnerAndPostDM(discCtx)
+		cancel()
+		if p.postDM == nil {
+			fmt.Fprintln(p.out, "greeting skip: no owner discovered (users.list failed or no primary owner)")
+			return nil
+		}
+	}
 
 	if err := p.sendGreeting(ctx, messages); err != nil {
 		return fmt.Errorf("slack: send greeting: %w", err)
@@ -298,41 +323,22 @@ func (p *Provider) sendGreeting(ctx context.Context, messages login.GreetingMess
 //     and return the first user with IsPrimaryOwner && !IsBot &&
 //     !Deleted. Every workspace has exactly one primary owner.
 //
-// Returns "" (→ Greet no-op) when the override is blank, listUsers
-// is unwired (Login bypassed in tests), the call fails, or no primary
-// owner is found. Errors are soft (warning + skip) so a flapping
-// users.list never fails the login.
-func (p *Provider) discoverOwner(ctx context.Context) string {
-	if owner := strings.TrimSpace(p.opts.Owner); owner != "" {
-		return owner
-	}
-	if p.listUsers == nil {
-		return ""
-	}
-	users, err := p.listUsers(ctx)
-	if err != nil {
-		fmt.Fprintf(p.out, "warning: users.list failed: %v; greeting skipped\n", err)
-		return ""
-	}
-	for _, u := range users {
-		if u.IsPrimaryOwner && !u.IsBot && !u.Deleted {
-			return u.ID
-		}
-	}
-	return ""
-}
+// discoverTimeout caps the users.list call inside Greet. A flaky
+// Slack API must not be able to stall a login that has already
+// saved its credentials — if discovery does not finish in this
+// window the greeting is dropped (the daemon will still answer the
+// owner's first runtime message and never replays login greeting).
+const discoverTimeout = 10 * time.Second
 
-// wireGreet builds the live listUsers / postDM seams from the
-// validated bot token, auto-discovers the owner, and — if one was
-// found — wires postDM with the owner baked in. Called at the end of
-// a successful Login so Greet is ready when the orchestrator invokes
-// it. Tests that bypass Login assign the seams directly.
+// wireGreetClient builds the live listUsers / postDM client from
+// the validated bot token, WITHOUT calling users.list. Called at
+// the end of a successful Login so Greet can pick up the seams.
+// Discovery is deferred to discoverOwnerAndPostDM, which runs on
+// the first Greet under a short, independent timeout (see Greet).
 //
-// No owner → postDM stays nil → Greet is a no-op. This mirrors
-// feishu: feishu wires sendDM only when an owner open_id was
-// captured; without one, Greet is a no-op and a client would be
-// wasted.
-func (p *Provider) wireGreet(ctx context.Context) {
+// Tests that bypass Login assign the seams directly (listUsers +
+// postDM). Production wires only the client here.
+func (p *Provider) wireGreetClient() {
 	client := slackgo.New(p.botToken)
 	p.listUsers = func(ctx context.Context) ([]userView, error) {
 		users, err := client.GetUsersContext(ctx)
@@ -350,15 +356,61 @@ func (p *Provider) wireGreet(ctx context.Context) {
 		}
 		return out, nil
 	}
-	if owner := p.discoverOwner(ctx); owner != "" {
-		p.ownerUserID = owner
-		p.postDM = func(ctx context.Context, text string) error {
-			// channel=<user ID> opens the DM implicitly; no
-			// conversations.open needed (verified against
-			// docs.slack.dev/reference/methods/chat.postMessage).
-			_, _, err := client.PostMessageContext(ctx, owner, slackgo.MsgOptionText(text, false))
-			return err
+	p.client = client
+}
+
+// discoverOwnerAndPostDM resolves the owner via the listUsers seam
+// and, if one was found, sets p.ownerUserID + wires postDM. Called
+// from Greet on first invocation, never from Login — keeping
+// discovery off the credential-save critical path.
+//
+// On any failure (ctx cancelled, listUsers error, no primary owner)
+// postDM stays nil and Greet prints a skip hint and returns nil.
+// Errors are soft (warning + skip) so a flapping users.list never
+// fails the login that has already saved the credentials.
+func (p *Provider) discoverOwnerAndPostDM(ctx context.Context) {
+	if p.listUsers == nil {
+		// Login was bypassed in tests; nothing to wire.
+		return
+	}
+	var owner string
+	if v := strings.TrimSpace(p.opts.Owner); v != "" {
+		owner = v
+	} else {
+		users, err := p.listUsers(ctx)
+		if err != nil {
+			fmt.Fprintf(p.out, "warning: users.list failed: %v; greeting skipped\n", err)
+			return
 		}
+		for _, u := range users {
+			if u.IsPrimaryOwner && !u.IsBot && !u.Deleted {
+				owner = u.ID
+				break
+			}
+		}
+	}
+	if owner == "" {
+		return
+	}
+	p.ownerUserID = owner
+	p.postDM = p.makePostDM(owner)
+}
+
+// makePostDM bakes the owner into a postDM closure over the live
+// slackgo client. Returns nil when no client is wired (Login
+// bypassed in tests) — tests that want a live postDM should set the
+// Provider.client field directly.
+func (p *Provider) makePostDM(owner string) postDMFunc {
+	if p.client == nil {
+		return nil
+	}
+	client := p.client
+	return func(ctx context.Context, text string) error {
+		// channel=<user ID> opens the DM implicitly; no
+		// conversations.open needed (verified against
+		// docs.slack.dev/reference/methods/chat.postMessage).
+		_, _, err := client.PostMessageContext(ctx, owner, slackgo.MsgOptionText(text, false))
+		return err
 	}
 }
 

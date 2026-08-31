@@ -230,19 +230,20 @@ func TestGreet_SkipsWhenNoBotToken(t *testing.T) {
 }
 
 func TestGreet_SkipsWhenNoOwnerDiscovered(t *testing.T) {
-	// Login ran (botToken set) but discoverOwner returned empty
-	// (users.list failed or no primary owner). postDM stays nil —
-	// Greet must print the skip hint and return nil. Replaces the
-	// old polling "TimesOut / Stale" tests; there is no poll anymore.
+	// Login ran (botToken set) and the slackgo client was wired,
+	// but the listUsers seam returned an error → discovery fails →
+	// postDM stays nil → Greet must print the skip hint and return
+	// nil. Replaces the old polling "TimesOut / Stale" tests; there
+	// is no poll anymore.
 	out := &bytes.Buffer{}
 	p := &Provider{
 		botToken: "xoxb-x",
 		out:      out,
 		listUsers: func(context.Context) ([]userView, error) {
-			t.Fatal("listUsers must not be called from Greet (discovery runs in wireGreet)")
-			return nil, nil
+			return nil, errors.New("transient slack outage")
 		},
-		// postDM deliberately left nil: no owner was discovered.
+		// postDM deliberately left nil: discovery is now lazy and
+		// will fail because listUsers errors above.
 	}
 
 	if err := p.Greet(context.Background(), login.GreetingTexts()); err != nil {
@@ -250,6 +251,98 @@ func TestGreet_SkipsWhenNoOwnerDiscovered(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "no owner discovered") {
 		t.Fatalf("output missing skip hint: %q", out.String())
+	}
+}
+
+// Login bypassed in tests means botToken == "" (the canonical
+// short-circuit). Greet must not even consult the listUsers seam.
+func TestGreet_LoginBypassed_NoClient(t *testing.T) {
+	p := &Provider{
+		out: io.Discard,
+		listUsers: func(context.Context) ([]userView, error) {
+			t.Fatal("listUsers must not be called when botToken is empty")
+			return nil, nil
+		},
+	}
+	if err := p.Greet(context.Background(), login.GreetingTexts()); err != nil {
+		t.Fatalf("Greet: %v", err)
+	}
+}
+
+// discoverOwnerAndPostDM honors opts.Owner without calling users.list.
+func TestDiscoverOwner_OwnerFlagOverrides(t *testing.T) {
+	p := &Provider{
+		opts: Options{Owner: "U_OVERRIDE"},
+		out:  io.Discard,
+		listUsers: func(context.Context) ([]userView, error) {
+			t.Fatal("listUsers must not be called when opts.Owner is set")
+			return nil, nil
+		},
+	}
+
+	p.discoverOwnerAndPostDM(context.Background())
+	if p.ownerUserID != "U_OVERRIDE" {
+		t.Fatalf("owner = %q, want %q", p.ownerUserID, "U_OVERRIDE")
+	}
+}
+
+// discoverOwnerAndPostDM calls listUsers and picks is_primary_owner.
+func TestDiscoverOwner_PicksPrimaryOwner(t *testing.T) {
+	p := &Provider{
+		out: io.Discard,
+		listUsers: func(context.Context) ([]userView, error) {
+			return []userView{
+				{ID: "U_BOT", IsPrimaryOwner: false, IsBot: true},
+				{ID: "U_HUMAN1", IsPrimaryOwner: false, IsBot: false},
+				{ID: "U_OWNER", IsPrimaryOwner: true, IsBot: false},
+				{ID: "U_HUMAN2", IsPrimaryOwner: false, IsBot: false},
+			}, nil
+		},
+	}
+
+	p.discoverOwnerAndPostDM(context.Background())
+	if p.ownerUserID != "U_OWNER" {
+		t.Fatalf("owner = %q, want %q", p.ownerUserID, "U_OWNER")
+	}
+}
+
+// discoverOwnerAndPostDM skips bots and deleted accounts even when
+// they carry is_primary_owner.
+func TestDiscoverOwner_SkipsBotsAndDeleted(t *testing.T) {
+	p := &Provider{
+		out: io.Discard,
+		listUsers: func(context.Context) ([]userView, error) {
+			return []userView{
+				{ID: "U_BOT_OWNER", IsPrimaryOwner: true, IsBot: true},
+				{ID: "U_GHOST", IsPrimaryOwner: true, IsBot: false, Deleted: true},
+				{ID: "U_OWNER", IsPrimaryOwner: true, IsBot: false},
+			}, nil
+		},
+	}
+
+	p.discoverOwnerAndPostDM(context.Background())
+	if p.ownerUserID != "U_OWNER" {
+		t.Fatalf("owner = %q, want %q (skipped bot + deleted)", p.ownerUserID, "U_OWNER")
+	}
+}
+
+// discoverOwnerAndPostDM leaves ownerUserID empty when listUsers errors
+// so Greet can skip without failing.
+func TestDiscoverOwner_ListUsersErrorLeavesOwnerEmpty(t *testing.T) {
+	out := &bytes.Buffer{}
+	p := &Provider{
+		out: out,
+		listUsers: func(context.Context) ([]userView, error) {
+			return nil, errors.New("transient slack outage")
+		},
+	}
+
+	p.discoverOwnerAndPostDM(context.Background())
+	if p.ownerUserID != "" {
+		t.Fatalf("ownerUserID = %q, want empty", p.ownerUserID)
+	}
+	if !strings.Contains(out.String(), "users.list failed") {
+		t.Fatalf("warning should mention users.list, got %q", out.String())
 	}
 }
 
@@ -302,86 +395,6 @@ func TestGreet_SendsEnglishOnlyToOwner(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "U_OWNER") {
 		t.Fatalf("Greet should print the recipient owner ID, got %q", out.String())
-	}
-}
-
-// discoverOwner picks the single user with is_primary_owner == true
-// from the workspace roster (filtered to non-bot, non-deleted).
-func TestDiscoverOwner_PicksPrimaryOwner(t *testing.T) {
-	p := &Provider{
-		out: io.Discard,
-		listUsers: func(context.Context) ([]userView, error) {
-			return []userView{
-				{ID: "U_BOT", IsPrimaryOwner: false, IsBot: true},
-				{ID: "U_HUMAN1", IsPrimaryOwner: false, IsBot: false},
-				{ID: "U_OWNER", IsPrimaryOwner: true, IsBot: false},
-				{ID: "U_HUMAN2", IsPrimaryOwner: false, IsBot: false},
-			}, nil
-		},
-	}
-
-	if got := p.discoverOwner(context.Background()); got != "U_OWNER" {
-		t.Fatalf("discoverOwner = %q, want %q", got, "U_OWNER")
-	}
-}
-
-// opts.Owner is an explicit override: it must short-circuit discovery
-// so listUsers is never touched (and a flapping workspace roster can't
-// surprise us).
-func TestDiscoverOwner_OwnerFlagOverrides(t *testing.T) {
-	p := &Provider{
-		opts: Options{Owner: "U_OVERRIDE"},
-		out:  io.Discard,
-		listUsers: func(context.Context) ([]userView, error) {
-			t.Fatal("listUsers must not be called when opts.Owner is set")
-			return nil, nil
-		},
-	}
-
-	if got := p.discoverOwner(context.Background()); got != "U_OVERRIDE" {
-		t.Fatalf("discoverOwner = %q, want %q", got, "U_OVERRIDE")
-	}
-}
-
-// discoverOwner must filter out bot users and deleted accounts even if
-// their record carries is_primary_owner (rare but possible if Slack
-// reshuffles the primary owner role).
-func TestDiscoverOwner_SkipsBotsAndDeleted(t *testing.T) {
-	p := &Provider{
-		out: io.Discard,
-		listUsers: func(context.Context) ([]userView, error) {
-			return []userView{
-				// bot flagged as primary owner — should be skipped
-				{ID: "U_BOT_OWNER", IsPrimaryOwner: true, IsBot: true},
-				// deleted user flagged as primary owner — should be skipped
-				{ID: "U_GHOST", IsPrimaryOwner: true, IsBot: false, Deleted: true},
-				// the real primary owner
-				{ID: "U_OWNER", IsPrimaryOwner: true, IsBot: false},
-			}, nil
-		},
-	}
-
-	if got := p.discoverOwner(context.Background()); got != "U_OWNER" {
-		t.Fatalf("discoverOwner = %q, want %q (skipped bot + deleted)", got, "U_OWNER")
-	}
-}
-
-// discoverOwner returns "" when listUsers errors so Greet stays a
-// no-op instead of failing login on a flapping users.list.
-func TestDiscoverOwner_ListUsersErrorReturnsEmpty(t *testing.T) {
-	out := &bytes.Buffer{}
-	p := &Provider{
-		out: out,
-		listUsers: func(context.Context) ([]userView, error) {
-			return nil, errors.New("transient slack outage")
-		},
-	}
-
-	if got := p.discoverOwner(context.Background()); got != "" {
-		t.Fatalf("discoverOwner = %q, want empty", got)
-	}
-	if !strings.Contains(out.String(), "users.list failed") {
-		t.Fatalf("warning should mention users.list, got %q", out.String())
 	}
 }
 

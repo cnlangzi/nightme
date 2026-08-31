@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -364,7 +365,10 @@ func TestInteractive_BlockActionBecomesActionPayload(t *testing.T) {
 func TestStart_ClosesOrphanStreamsFromPreviousRun(t *testing.T) {
 	api := newFakeAPI()
 	dir := t.TempDir()
-	a := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), dir)
+	a, err := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), dir)
+	if err != nil {
+		t.Fatalf("NewAdapterWithDeps: %v", err)
+	}
 	a.state.putStream(&OpenStream{
 		ChatID: "sl_T1:C1", ChannelID: "C1", TS: "old-1",
 		StartedAt: time.Now().UTC(),
@@ -392,7 +396,10 @@ func TestStart_ClosesOrphanStreamsFromPreviousRun(t *testing.T) {
 // A record too old to be meaningful is dropped rather than acted on.
 func TestStart_SkipsExpiredOrphanRecords(t *testing.T) {
 	api := newFakeAPI()
-	a := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), t.TempDir())
+	a, err := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), t.TempDir())
+	if err != nil {
+		t.Fatalf("NewAdapterWithDeps: %v", err)
+	}
 	a.state.putStream(&OpenStream{
 		ChatID: "sl_T1:C1", ChannelID: "C1", TS: "ancient",
 		StartedAt: time.Now().UTC().Add(-openStreamTTL - time.Hour),
@@ -407,6 +414,83 @@ func TestStart_SkipsExpiredOrphanRecords(t *testing.T) {
 		if c.Method == "StopStream" {
 			t.Fatal("an expired record should be dropped, not acted on")
 		}
+	}
+}
+
+// A persistent orphan close failure must keep the local record so
+// the next start retries — evicting on failure used to leak the
+// Slack stream forever whenever the close transiently failed.
+func TestStart_OrphanCloseFailureKeepsRecord(t *testing.T) {
+	api := newFakeAPI()
+	api.failAlways("StopStream", errBoom)
+	a, err := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), t.TempDir())
+	if err != nil {
+		t.Fatalf("NewAdapterWithDeps: %v", err)
+	}
+	a.state.putStream(&OpenStream{
+		ChatID: "sl_T1:C1", ChannelID: "C1", TS: "stuck",
+		StartedAt: time.Now().UTC(),
+	})
+
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer a.Stop(context.Background())
+
+	if n := len(a.state.orphanStreams(time.Now().UTC())); n != 1 {
+		t.Fatalf("record should be kept on close failure, got %d", n)
+	}
+}
+
+// handleInteractive must fall back to cb.Team.ID when a.teamID has
+// not yet been populated (early startup race or auth-not-yet-done).
+func TestInteractive_FallsBackToCallbackTeamID(t *testing.T) {
+	api := newFakeAPI()
+	a := newTestAdapter(t, api, newFakeSocket())
+	// Zero out teamID; the fallback must kick in.
+	a.teamID = ""
+
+	cb := slackgo.InteractionCallback{Type: slackgo.InteractionTypeBlockActions}
+	cb.User.ID = "U1"
+	cb.Team.ID = "TFALLBACK"
+	cb.Channel.ID = "C1"
+	cb.Message.Timestamp = "1000.5"
+	cb.ActionCallback.BlockActions = []*slackgo.BlockAction{
+		{ActionID: "nightme_choice_allow", Value: encodeActionValue("req-1", "allow")},
+	}
+
+	a.handleSocketEvent(context.Background(), socketmode.Event{
+		Type:    socketmode.EventTypeInteractive,
+		Request: &socketmode.Request{},
+		Data:    cb,
+	})
+
+	msg, ok := drainOne(t, a)
+	if !ok {
+		t.Fatal("no inbound message — fallback to cb.Team.ID should have produced a chatID")
+	}
+	if msg.ChatID == "" {
+		t.Fatalf("chatID must be non-empty when fallback team id is present")
+	}
+}
+
+// AuthTest failing with context.Canceled must surface a "startup
+// cancelled" error, not the misleading "auth test" one — otherwise
+// graceful shutdown looks like a token rejection in the logs.
+func TestStart_AuthTestCancelledReportsStartupCancelled(t *testing.T) {
+	api := newFakeAPI()
+	api.authErr = context.Canceled
+	a, err := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), t.TempDir())
+	if err != nil {
+		t.Fatalf("NewAdapterWithDeps: %v", err)
+	}
+
+	err = a.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start should propagate cancellation")
+	}
+	if !strings.Contains(err.Error(), "startup cancelled") {
+		t.Fatalf("expected 'startup cancelled' in error, got %q", err)
 	}
 }
 
@@ -429,9 +513,12 @@ func TestStop_ClosesLiveStreams(t *testing.T) {
 func TestStart_FailsWhenAuthRejected(t *testing.T) {
 	api := newFakeAPI()
 	api.authErr = errBoom
-	a := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), t.TempDir())
+	a, err := NewAdapterWithDeps(defaultTestConfig(), api, newFakeSocket(), t.TempDir())
+	if err != nil {
+		t.Fatalf("NewAdapterWithDeps: %v", err)
+	}
 
-	if err := a.Start(context.Background()); err == nil {
+	if startErr := a.Start(context.Background()); startErr == nil {
 		t.Fatal("Start should fail when the token is rejected")
 	}
 }

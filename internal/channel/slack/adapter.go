@@ -58,6 +58,11 @@ type Adapter struct {
 	botUserID string
 	teamID    string
 
+	// publishWG tracks in-flight publishInbound calls so Stop can
+	// wait for them before closing a.incoming. Without this, a
+	// publish mid-select could panic with "send on closed channel".
+	publishWG sync.WaitGroup
+
 	// messageStates dedups repeated OutMessageState emissions and
 	// remembers which emoji is currently on a user message, so the
 	// next transition can remove it. Slack is the only one of the
@@ -100,18 +105,21 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 // NewAdapterWithDeps builds an Adapter around injected transports.
 // Exported for the package's own tests; production code uses
 // NewAdapter.
-func NewAdapterWithDeps(cfg config.SlackConfig, api apiClient, socket socketRunner, dataDir string) *Adapter {
+//
+// Unlike NewAdapter (which returns an error on state-store failure
+// and aborts startup), this constructor surfaces the error to the
+// caller. Silently substituting an empty in-memory state store would
+// disable orphan-stream recovery on the next start — a real footgun
+// the original implementation buried.
+func NewAdapterWithDeps(cfg config.SlackConfig, api apiClient, socket socketRunner, dataDir string) (*Adapter, error) {
 	if dataDir == "" {
 		dataDir = os.TempDir()
 	}
 	state, err := newStateStore(filepath.Join(dataDir, "slack_state.json"))
 	if err != nil {
-		state = &stateStore{
-			streams: make(map[string]*OpenStream),
-			choices: make(map[string]*ChoiceState),
-		}
+		return nil, fmt.Errorf("slack: load state: %w", err)
 	}
-	return newAdapter(cfg, api, socket, state, dataDir)
+	return newAdapter(cfg, api, socket, state, dataDir), nil
 }
 
 func newAdapter(cfg config.SlackConfig, api apiClient, socket socketRunner, state *stateStore, dataDir string) *Adapter {
@@ -234,6 +242,11 @@ func (a *Adapter) Start(ctx context.Context) error {
 		a.mu.Lock()
 		a.started = false
 		a.mu.Unlock()
+		// Graceful shutdown looks like an auth failure without this
+		// branch — surface the real cause.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("slack: startup cancelled: %w", err)
+		}
 		return fmt.Errorf("slack: auth test: %w", err)
 	}
 	a.mu.Lock()
@@ -282,12 +295,21 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		cancel()
 	}
 	a.health.record(HealthDisconnected, "adapter stopped")
+	// Wait for in-flight publishInbound calls to finish before
+	// closing a.incoming — otherwise a goroutine blocked on the
+	// select's send case would panic.
+	a.publishWG.Wait()
 	close(a.incoming)
 	return nil
 }
 
 // recoverOrphanStreams closes streams a previous process started but
 // never stopped (docs/channel/slack.md §3.5).
+//
+// A persistent close failure must NOT evict the local record — the
+// Slack stream itself is still open and the next start should retry.
+// Eviction on failure used to leak Slack streams forever whenever the
+// close transiently failed (network blip, Slack rate limit, etc.).
 func (a *Adapter) recoverOrphanStreams(ctx context.Context) {
 	orphans := a.state.orphanStreams(time.Now().UTC())
 	if len(orphans) == 0 {
@@ -302,10 +324,9 @@ func (a *Adapter) recoverOrphanStreams(ctx context.Context) {
 			return a.api.StopStream(ctx, rec.ChannelID, rec.TS, nil)
 		})
 		if err != nil {
-			// Slack may have already reaped it; either way there is
-			// nothing more we can do, so stop tracking it.
-			a.log().Warn("slack: orphan stream close failed",
+			a.log().Warn("slack: orphan stream close failed; will retry next start",
 				"channel", rec.ChannelID, "ts", rec.TS, "err", err)
+			continue
 		}
 		a.state.dropStream(rec.ChannelID, rec.TS)
 	}
@@ -500,11 +521,25 @@ type inboundSource struct {
 }
 
 // publishInbound converts a Slack event into an InboundMessage.
+//
+// The publishWG.Add/Done pair lets Stop wait for in-flight publishes
+// to finish before closing a.incoming — otherwise a select blocked on
+// `a.incoming <- msg` could panic with "send on closed channel".
 func (a *Adapter) publishInbound(ctx context.Context, src inboundSource) {
+	// Refuse to start a publish after Stop has flipped the flag; the
+	// event is dropped on the floor. publishWG.Add is paired with the
+	// matching Done below.
 	a.mu.Lock()
+	if a.stopped {
+		a.mu.Unlock()
+		return
+	}
+	a.publishWG.Add(1)
+	a.mu.Unlock()
+	defer a.publishWG.Done()
+
 	botUserID := a.botUserID
 	teamID := a.teamID
-	a.mu.Unlock()
 
 	chatID := sessionChatID(teamID, src.channelID, src.threadTS)
 	if chatID == "" {
@@ -658,6 +693,13 @@ func (a *Adapter) handleInteractive(cb slackgo.InteractionCallback) {
 	a.mu.Lock()
 	teamID := a.teamID
 	a.mu.Unlock()
+	// Mirror handleSlashCommand: when AuthTest has not yet populated
+	// a.teamID (race during early startup, or a token that never
+	// authenticated), fall back to the team id on the callback
+	// itself so the message is not silently dropped.
+	if teamID == "" {
+		teamID = cb.Team.ID
+	}
 	chatID := sessionChatID(teamID, cb.Channel.ID, cb.Message.ThreadTimestamp)
 	if chatID == "" {
 		return

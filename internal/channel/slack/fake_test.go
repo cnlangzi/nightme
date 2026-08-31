@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"testing"
 	"time"
 
 	slackgo "github.com/slack-go/slack"
@@ -246,12 +247,16 @@ func (s *fakeSocket) ackCount() int {
 // disabled by default so tests observe every append individually.
 // Tests that care about coalescing set a window explicitly via
 // withThrottle.
-func newTestAdapter(t interface{ TempDir() string }, api *fakeAPI, sock socketRunner) *Adapter {
+func newTestAdapter(t *testing.T, api *fakeAPI, sock socketRunner) *Adapter {
+	t.Helper()
 	cfg := config.SlackConfig{
 		BotToken: "xoxb-test",
 		AppToken: "xapp-test",
 	}
-	a := NewAdapterWithDeps(cfg, api, sock, t.TempDir())
+	a, err := NewAdapterWithDeps(cfg, api, sock, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewAdapterWithDeps: %v", err)
+	}
 	a.throttle = 0
 	a.botUserID = api.botUserID
 	a.teamID = api.teamID

@@ -117,24 +117,37 @@ func (s *stateStore) dropStream(channelID, ts string) {
 }
 
 // orphanStreams returns the open streams that are still worth
-// closing, and forgets the ones past openStreamTTL.
+// closing, and forgets the ones past openStreamTTL. TTL-expired
+// records are evicted from memory AND persisted — without the save
+// they would resurrect on the next load (slack_state.json keeps
+// accumulating dead entries until some other write happens).
 func (s *stateStore) orphanStreams(now time.Time) []OpenStream {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var out []OpenStream
-	for key, rec := range s.streams {
-		if rec == nil {
-			delete(s.streams, key)
-			continue
-		}
-		if now.Sub(rec.StartedAt) > openStreamTTL {
-			delete(s.streams, key)
-			continue
-		}
-		out = append(out, *rec)
+	type result struct {
+		active  []OpenStream
+		changed bool
 	}
-	return out
+	var res result
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for key, rec := range s.streams {
+			if rec == nil {
+				delete(s.streams, key)
+				res.changed = true
+				continue
+			}
+			if now.Sub(rec.StartedAt) > openStreamTTL {
+				delete(s.streams, key)
+				res.changed = true
+				continue
+			}
+			res.active = append(res.active, *rec)
+		}
+	}()
+	if res.changed {
+		_ = s.save()
+	}
+	return res.active
 }
 
 func (s *stateStore) putChoice(state *ChoiceState) {

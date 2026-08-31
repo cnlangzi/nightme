@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,11 +39,17 @@ import (
 //
 // Constructed once at startup via New; shared across all callers
 // that read or mutate chat session state. Safe for concurrent use.
+//
+// entries holds known-prefix chatIDs the loader could map onto a
+// registered channel; dropped holds unknown-prefix entries kept as
+// raw JSON bytes so save() can preserve them verbatim. The two
+// maps together equal the on-disk chatSessions object.
 type Store struct {
 	path string
 
 	mu      sync.Mutex
 	entries map[string]*registry.ChatSessionEntry
+	dropped map[string]json.RawMessage
 }
 
 // New loads (or initializes) the chat_sessions.json store. A missing
@@ -52,64 +58,120 @@ type Store struct {
 //
 // Every entry's map key MUST equal its ChatID field. The ChatID
 // MUST start with a channel-namespaced prefix registered by the
-// channel that produced it (Telegram: "tg_", Feishu: "oc_",
-// Slack: "sl_", …). See docs/CHANNEL.md §5.5 and
+// channel that produced it (telegram "tg_", feishu "oc_", slack
+// "sl_", bot workflows "bt_", …). See docs/CHANNEL.md §5.5 and
 // docs/channel/telegram.md §5.1 for the channel-namespacing rule.
 //
 // The set of accepted prefixes comes from channel.ChatIDPrefixes()
 // — every channel adapter registers its prefix at init() time via
-// channel.Register. New channels (future Slack bridge, …) plug in
-// automatically: declare the prefix in their init() and chatstore
-// validation picks it up. No edits to this file are required when
-// a new channel is added.
+// channel.Register. New channels plug in automatically: declare
+// the prefix in their init() and chatstore validation picks it up.
+// No edits to this file are required when a new channel is added.
 //
-// On unknown prefixes the loader is lenient: it logs a warning
-// identifying the offending entry and the recognised prefix set,
-// then skips the entry and continues with the next one. This
-// matches chatstore's general philosophy of never blocking daemon
-// startup on a stale / hand-edited file — a single odd entry
-// should not keep every other chat unreachable. Operators see the
-// warning in stderr and can fix the file by hand. A key that
-// disagrees with its entry's ChatID field is still rejected
-// outright, since that is a structural corruption the loader
-// cannot reason about.
+// On unknown prefixes the loader is lenient: it stashes the entry
+// in Store.dropped as raw JSON, logs a warning identifying the
+// offending key(s), and continues. Dropped entries are preserved
+// verbatim on every subsequent save() — the daemon never silently
+// overwrites user data, and the operator can fix the file by hand
+// (re-key by ChatID, add the channel adapter to the build, etc.).
+// A key that disagrees with its entry's ChatID field is still
+// rejected outright, since that is a structural corruption the
+// loader cannot reason about.
 //
-// The loader never silently rewrites the on-disk file.
+// If no channels are registered at all AND the file has entries,
+// New returns an error: every entry would be dropped and the
+// operator would see no useful feedback, which is the data-loss
+// scenario this package refuses to enter silently. Build the
+// daemon with at least one channel adapter to load.
 func New(path string) (*Store, error) {
 	s := &Store{
 		path:    path,
 		entries: make(map[string]*registry.ChatSessionEntry),
+		dropped: make(map[string]json.RawMessage),
 	}
 
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		// First unmarshal pass — pull each chatSessions entry as
+		// raw JSON so we can keep unknown-prefix bytes in
+		// Store.dropped verbatim without re-marshalling them.
 		var container struct {
-			Version      int                                   `json:"version"`
-			ChatSessions map[string]*registry.ChatSessionEntry `json:"chatSessions"`
+			Version      int                        `json:"version"`
+			ChatSessions map[string]json.RawMessage `json:"chatSessions"`
 		}
 		if err := json.Unmarshal(data, &container); err != nil {
 			if backupErr := registry.BackupCorrupt(path, data); backupErr != nil {
 				return nil, fmt.Errorf("chat_sessions: corrupt %s and backup failed: %w", path, backupErr)
 			}
 			s.entries = make(map[string]*registry.ChatSessionEntry)
-		} else if container.ChatSessions != nil {
+			s.dropped = make(map[string]json.RawMessage)
+		} else if len(container.ChatSessions) > 0 {
 			prefixes := channel.ChatIDPrefixes()
-			for k, e := range container.ChatSessions {
-				if e == nil {
+			if len(prefixes) == 0 {
+				// Build misconfiguration: no channels registered
+				// means every entry would be dropped with no
+				// meaningful feedback. Fail loudly so the
+				// operator can fix the build, not the data.
+				return nil, fmt.Errorf(
+					"chat_sessions: %s has %d entries but no channels are registered; chatstore cannot accept any prefix. Build with at least one channel adapter (channel/feishu, channel/telegram, channel/bot, …)",
+					path, len(container.ChatSessions),
+				)
+			}
+			prefixSet := make(map[string]bool, len(prefixes))
+			for _, p := range prefixes {
+				prefixSet[p] = true
+			}
+			const maxLogged = 5
+			dropped := 0
+			for k, raw := range container.ChatSessions {
+				if len(raw) == 0 {
 					continue
 				}
-				if e.ChatID != k {
-					return nil, fmt.Errorf("chat_sessions: %s has key %q but entry.ChatID %q — every entry must be keyed by ChatID", path, k, e.ChatID)
-				}
-				if !hasRegisteredPrefix(k, prefixes) {
-					log.Printf(
-						"chatstore: %s entry %q has unknown chat-id prefix (registered: %s); skipping",
-						path, k, formatPrefixList(prefixes),
+				// Structural check first: key must equal
+				// entry.ChatID. This is a hard error — a
+				// mismatch is corruption the loader cannot
+				// reason about, so we cannot preserve it
+				// verbatim (we don't know which field the
+				// operator wanted to keep).
+				var probe registry.ChatSessionEntry
+				if err := json.Unmarshal(raw, &probe); err != nil {
+					return nil, fmt.Errorf(
+						"chat_sessions: %s entry %q failed to decode: %w",
+						path, k, err,
 					)
+				}
+				if probe.ChatID != k {
+					return nil, fmt.Errorf(
+						"chat_sessions: %s has key %q but entry.ChatID %q — every entry must be keyed by ChatID",
+						path, k, probe.ChatID,
+					)
+				}
+				if !hasRegisteredPrefix(k, prefixSet) {
+					// Stash raw bytes — save() will rewrite them
+					// to disk verbatim so the on-disk file is
+					// never silently modified by the loader.
+					s.dropped[k] = append(json.RawMessage(nil), raw...)
+					dropped++
+					if dropped <= maxLogged {
+						slog.Warn(
+							"chatstore: chat_sessions.json entry has unknown chat-id prefix; preserving verbatim in on-disk file",
+							"path", path,
+							"key", k,
+							"registered_prefixes", prefixes,
+						)
+					}
 					continue
 				}
-				s.entries[k] = e
+				s.entries[k] = &probe
+			}
+			if dropped > maxLogged {
+				slog.Warn(
+					"chatstore: chat_sessions.json has additional entries with unknown chat-id prefixes; all are preserved verbatim",
+					"path", path,
+					"first_logged", maxLogged,
+					"total_dropped", dropped,
+				)
 			}
 		}
 	case errors.Is(err, os.ErrNotExist):
@@ -122,10 +184,10 @@ func New(path string) (*Store, error) {
 }
 
 // hasRegisteredPrefix reports whether key starts with any of the
-// prefixes registered by a channel adapter (channel.ChatIDPrefixes).
-// Extracted so the per-entry loop in New stays readable.
-func hasRegisteredPrefix(key string, prefixes []string) bool {
-	for _, p := range prefixes {
+// registered prefixes. Extracted so the per-entry loop in New
+// stays readable; takes a precomputed set for O(1) lookup.
+func hasRegisteredPrefix(key string, prefixSet map[string]bool) bool {
+	for p := range prefixSet {
 		if strings.HasPrefix(key, p) {
 			return true
 		}
@@ -133,33 +195,49 @@ func hasRegisteredPrefix(key string, prefixes []string) bool {
 	return false
 }
 
-// formatPrefixList renders the registered prefix set as a
-// human-readable, comma-joined list — quoted, so an operator
-// scanning stderr sees exactly which prefixes their build
-// recognises.
-func formatPrefixList(prefixes []string) string {
-	if len(prefixes) == 0 {
-		return "(none registered)"
+// Dropped returns the chat-id keys that were preserved verbatim
+// during load (unknown prefix) and the count. Tests / diagnostics
+// can use this to confirm the loader preserved on-disk data
+// without inspecting the raw file.
+func (s *Store) Dropped() (keys []string, count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys = make([]string, 0, len(s.dropped))
+	for k := range s.dropped {
+		keys = append(keys, k)
 	}
-	quoted := make([]string, len(prefixes))
-	for i, p := range prefixes {
-		quoted[i] = `"` + p + `...`
-	}
-	return strings.Join(quoted, ", ")
+	return keys, len(s.dropped)
 }
 
 // Path returns the file path the store was opened with.
 func (s *Store) Path() string { return s.path }
 
-// save serializes the current entries map to disk. Caller must hold
-// s.mu. Atomic write (temp + fsync + rename + chmod 0600).
+// save serializes the current entries + dropped map to disk.
+// Caller must hold s.mu. Atomic write (temp + fsync + rename +
+// chmod 0600).
+//
+// Known entries are marshaled through their typed structs;
+// dropped entries are written verbatim as raw JSON. The merged
+// object is what the next load sees, so the on-disk file round-
+// trips through this loader without modification.
 func (s *Store) save() error {
+	sessions := make(map[string]json.RawMessage, len(s.entries)+len(s.dropped))
+	for k, e := range s.entries {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return fmt.Errorf("chat_sessions: marshal entry %q: %w", k, err)
+		}
+		sessions[k] = b
+	}
+	for k, raw := range s.dropped {
+		sessions[k] = raw
+	}
 	container := struct {
-		Version      int                                   `json:"version"`
-		ChatSessions map[string]*registry.ChatSessionEntry `json:"chatSessions"`
+		Version      int                        `json:"version"`
+		ChatSessions map[string]json.RawMessage `json:"chatSessions"`
 	}{
 		Version:      registry.ChatSessionFileVersion,
-		ChatSessions: s.entries,
+		ChatSessions: sessions,
 	}
 	data, err := json.MarshalIndent(container, "", "  ")
 	if err != nil {

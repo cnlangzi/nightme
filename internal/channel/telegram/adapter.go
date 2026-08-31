@@ -1892,11 +1892,4 @@ func (a *Adapter) rememberMessageState(userMsgID string, state agent.MessageStat
 	a.messageStates[userMsgID] = state
 }
 
-// ChatIDPrefix implements channel.Channel. Telegram chat ids are
-// raw integers; the adapter prepends chatIDPrefix ("tg_") on
-// ingest so they cannot collide with ids from other channels.
-// Mirror the value declared at channel.Register("telegram", "tg_",
-// …) time.
-func (a *Adapter) ChatIDPrefix() string { return chatIDPrefix }
-
 var _ channel.Channel = (*Adapter)(nil)

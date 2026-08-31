@@ -25,12 +25,10 @@ import (
 // introduce an import cycle: real adapters import this package
 // to register, so we can't import them here).
 type stubChannel struct {
-	name   string
-	prefix string
+	name string
 }
 
-func (s *stubChannel) Name() string         { return s.name }
-func (s *stubChannel) ChatIDPrefix() string { return s.prefix }
+func (s *stubChannel) Name() string { return s.name }
 func (s *stubChannel) Start(_ context.Context) error { return nil }
 func (s *stubChannel) Stop(_ context.Context) error  { return nil }
 func (s *stubChannel) Incoming() <-chan messages.InboundMessage {
@@ -218,15 +216,14 @@ func TestChatIDPrefix_Lookup(t *testing.T) {
 }
 
 // TestRegister_RejectsReservedCharsInPrefix verifies the prefix
-// guard. ':' is reserved because telegram encodes topic ids as
-// "<prefix><chat>:<thread>" — a prefix containing ':' would
-// collide. '/' is reserved because channel names use '/' in the
-// user-facing config / login flows.
+// guard. '/' is reserved because the user-facing login / config
+// flows treat it as a path separator. ':' is permitted — see
+// the package doc — so this test does NOT exercise a ':' prefix.
 func TestRegister_RejectsReservedCharsInPrefix(t *testing.T) {
 	original := snapshot()
 	defer restore(original)
 
-	for _, bad := range []string{"o:c", "o/c"} {
+	for _, bad := range []string{"o/c", "foo/bar"} {
 		bad := bad
 		t.Run(bad, func(t *testing.T) {
 			defer func() {
@@ -236,5 +233,24 @@ func TestRegister_RejectsReservedCharsInPrefix(t *testing.T) {
 			}()
 			Register("test", bad, makeStubBuilder("test", nil))
 		})
+	}
+}
+
+// TestRegister_AcceptsColonPrefix pins the policy that ':' is a
+// legal prefix character. Bot relies on it ("bot:") and so does
+// telegram's "<prefix><chat>:<thread>" shape, although the colon
+// there is between chatid and thread (not inside the prefix).
+func TestRegister_AcceptsColonPrefix(t *testing.T) {
+	original := snapshot()
+	defer restore(original)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Register with ':' prefix should not panic, got %v", r)
+		}
+	}()
+	Register("test-colon", "bot:", makeStubBuilder("test-colon", nil))
+	if got := ChatIDPrefix("test-colon"); got != "bot:" {
+		t.Errorf("ChatIDPrefix(test-colon) = %q, want %q", got, "bot:")
 	}
 }

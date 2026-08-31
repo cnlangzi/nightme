@@ -325,6 +325,4 @@ func (c *capturingChannel) BuildBlocks(text string, _ []messages.Attachment) []a
 // channel.Channel contract compliance — compiler-checked at
 // build time. (The interface is satisfied implicitly; this
 // declaration is documentation.)
-func (c *capturingChannel) ChatIDPrefix() string { return "" }
-
 var _ channel.Channel = (*capturingChannel)(nil)

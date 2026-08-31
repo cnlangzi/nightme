@@ -1,6 +1,7 @@
 package chatstore
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -538,28 +539,27 @@ func TestNew_TelegramFormat_LoadsCleanly(t *testing.T) {
 	}
 }
 
-// TestNew_AcceptsFuturePrefixesViaRegistry is the regression
-// guard for the fix-chatsession-fails refactor. Before the fix,
+// TestNew_AcceptsRegistryAddedPrefix is the regression guard for
+// the fix-chatsession-fails refactor. Before the fix,
 // chat_sessions.json validation hard-coded two prefixes ("tg_"
 // and "oc_"), so any on-disk entry from a third channel
-// (Slack "sl_", future web "wb_", …) caused the daemon to
-// refuse to start with
+// (Slack "sl_", bot "bt_", …) caused the daemon to refuse to
+// start with
 //
 //	chat_sessions: … entry "sl_…" is not channel-prefixed
 //
 // The fix routes validation through channel.ChatIDPrefixes(),
 // which returns whatever prefixes each channel adapter
-// registered via channel.Register. To prove the fix:
+// registered via channel.Register. This test registers a
+// prefix into the registry at runtime and verifies that the
+// chatstore recognises the matching chat_sessions.json entry
+// without any edits to chatstore.
 //
-//   - Inject a synthetic "slack" channel with prefix "sl_"
-//     into the registry for the duration of this test.
-//   - Restore the registry via t.Cleanup so subsequent tests
-//     see the same prefix set they always saw.
-//   - Verify a chat_sessions.json containing "sl_*" entries
-//     loads without errors and the entry round-trips.
-//
-// This proves new channels can plug in without editing chatstore.
-func TestNew_AcceptsFuturePrefixesViaRegistry(t *testing.T) {
+// (Slack's own adapter is part of the user's build but is not
+// checked into this worktree's tree, so the test registers it
+// synthetically. The mechanism under test is identical to the
+// real Slack init() flow.)
+func TestNew_AcceptsRegistryAddedPrefix(t *testing.T) {
 	// Snapshot the registry state so we can restore it after
 	// the test. channel.Reset() is too aggressive — it would
 	// also wipe the prefixes the other tests in this file rely
@@ -618,4 +618,84 @@ func snapshotPrefixesForTest() map[string]string {
 		out[name] = channel.ChatIDPrefix(name)
 	}
 	return out
+}
+
+// TestNew_DroppedEntriesSurviveSave is the data-loss regression
+// guard. Before this fix, an unknown-prefix entry was logged
+// and silently skipped from the in-memory map; the next
+// legitimate save() (triggered by any setter on a known-prefix
+// entry) would rewrite chat_sessions.json without the skipped
+// entries, permanently destroying the on-disk data. This test
+// loads a file with a stray "sl_*" entry, mutates a "tg_*"
+// entry, and verifies the "sl_*" entry survives the round-trip
+// with all its fields intact.
+func TestNew_DroppedEntriesSurviveSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat_sessions.json")
+	const droppedJSON = `{"id":"cs_sl_42","chatId":"sl_42","primaryAgent":"claude","selectedCwd":"/legacy","watchMode":1,"thinkMode":0,"toolsMode":1,"watcherHintEmitted":true}`
+	initial := `{"version":1,"chatSessions":{"sl_42":` + droppedJSON + `,"tg_keep":{"id":"cs_tg_keep","chatId":"tg_keep","primaryAgent":"claude","selectedCwd":"/old"}}}`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Verify the dropped entry is reported.
+	keys, count := s.Dropped()
+	if count != 1 {
+		t.Fatalf("Dropped count = %d, want 1 (keys: %v)", count, keys)
+	}
+	if len(keys) != 1 || keys[0] != "sl_42" {
+		t.Errorf("Dropped keys = %v, want [sl_42]", keys)
+	}
+
+	// Mutate the known entry through a setter. This must trigger
+	// a save() that rewrites the file — and that rewrite MUST
+	// preserve the dropped "sl_42" entry's fields.
+	if err := s.SetSelectedCwd("tg_keep", "/new"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+
+	// Parse the rewritten file and verify sl_42 still has its
+	// fields. (We compare field-by-field rather than byte-for-byte
+	// because MarshalIndent re-indents the raw bytes for
+	// readability — the data is preserved, the formatting is
+	// just refreshed.)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	var reloaded struct {
+		ChatSessions map[string]json.RawMessage `json:"chatSessions"`
+	}
+	if err := json.Unmarshal(data, &reloaded); err != nil {
+		t.Fatalf("unmarshal rewritten file: %v", err)
+	}
+	raw, ok := reloaded.ChatSessions["sl_42"]
+	if !ok {
+		t.Fatalf("dropped entry overwritten by save() — data loss!\nfile contents:\n%s", string(data))
+	}
+	var entry registry.ChatSessionEntry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		t.Fatalf("unmarshal dropped entry: %v", err)
+	}
+	if entry.SelectedCwd != "/legacy" || entry.PrimaryAgent != "claude" {
+		t.Errorf("dropped entry fields mutated: %+v", entry)
+	}
+
+	// Reload from disk to confirm the dropped entry is still
+	// preserved across a fresh loader invocation.
+	s2, err := New(path)
+	if err != nil {
+		t.Fatalf("reload New: %v", err)
+	}
+	if _, count := s2.Dropped(); count != 1 {
+		t.Errorf("after reload: Dropped count = %d, want 1", count)
+	}
+	if _, ok := s2.Get("tg_keep"); !ok {
+		t.Error("after reload: tg_keep entry missing")
+	}
 }

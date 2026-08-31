@@ -1,7 +1,7 @@
 // Package channel — channel registry for OCP-friendly multi-channel
 // auto-start.
 //
-// Each channel adapter (feishu, telegram, future slack, …) calls
+// Each channel adapter (feishu, telegram, slack, bot, …) calls
 // `Register(name, prefix, NewAdapter)` from its `init()`. The
 // runtime calls `BuildAll(cfg)` to construct every registered
 // channel that has valid credentials in cfg; channels missing
@@ -9,19 +9,32 @@
 // error).
 //
 // prefix is the chat-id namespace tag every ChatID the adapter
-// produces carries (e.g. "tg_", "oc_", "sl_", "bt_"). It is read
-// by chatstore.New at file-load time to recognise chat_sessions.json
-// keys WITHOUT having to construct the adapter — chatstore loads
-// BEFORE BuildAll, and an adapter's Builder may legitimately fail
-// (missing credentials) at startup even when valid entries
-// already exist on disk. The prefix is the same string the
-// Channel.ChatIDPrefix() method returns at runtime; the registry
-// mirrors it at init() time so the consumer (chatstore) does not
-// depend on adapter construction.
+// produces carries (e.g. telegram "tg_", feishu "oc_", slack "sl_",
+// bot "bt_"). It is read by chatstore.New at file-load time to
+// recognise chat_sessions.json keys WITHOUT having to construct
+// the adapter — chatstore loads BEFORE BuildAll, and an adapter's
+// Builder may legitimately fail (missing credentials) at startup
+// even when valid entries already exist on disk. The prefix is
+// the single source of truth — there is no Channel.ChatIDPrefix()
+// interface method, so the registry cannot drift out of sync with
+// any adapter implementation.
 //
-// Pass prefix="" for channels whose chat IDs legitimately have no
-// namespace tag. ChatIDPrefixes skips empty prefixes so they do
-// not falsely accept arbitrary keys.
+// The prefix is just the cross-channel namespace tag; any
+// separator or sub-namespace the adapter tacks on after the
+// prefix lives outside the prefix. e.g. telegram emits
+// "tg_<chatid>:<thread>" — "<chatid>" and "<thread>" are
+// telegram's internal routing, not part of the prefix; bot
+// emits "bot:wf:<runID>" — ":wf:" and "<runID>" are bot's
+// internal routing. So prefixes never contain ':' for any
+// current channel, and ':' is permitted only to leave the door
+// open for adapters that may want it.
+//
+// "/" is rejected because the channel name and login flows
+// treat "/" as a path separator.
+//
+// Pass prefix="" for channels whose chat IDs legitimately have
+// no namespace tag. ChatIDPrefixes skips empty prefixes so they
+// do not falsely accept arbitrary keys.
 //
 // echo is intentionally NOT in the registry — it's a smoke-test
 // channel wired through Deps.NewChannels for tests; production
@@ -59,16 +72,16 @@ var (
 
 // Register adds a channel Builder under name, declaring the
 // chat-id namespace prefix the channel attaches to every chat id
-// (e.g. "tg_", "oc_", "sl_"). See package doc for the rationale.
+// (e.g. telegram "tg_", feishu "oc_", slack "sl_", bot "bt_").
+// See package doc for the rationale.
 //
 // Panics on duplicate registration (a programming error, not a
-// runtime condition). prefix must not contain ':' or '/' —
-// those characters would break the on-disk key format used by
-// chat_sessions.json (telegram encodes thread ids with ':' as a
-// suffix separator).
+// runtime condition). '/' is rejected in prefix — see package
+// doc for why. ':' is allowed (no current channel uses it, but
+// the door is left open for future adapters).
 func Register(name, prefix string, b Builder) {
-	if strings.ContainsAny(prefix, ":/") {
-		panic(fmt.Sprintf("channel: prefix %q for %q contains reserved character (':' or '/')", prefix, name))
+	if strings.Contains(prefix, "/") {
+		panic(fmt.Sprintf("channel: prefix %q for %q contains reserved character '/'", prefix, name))
 	}
 	mu.Lock()
 	defer mu.Unlock()

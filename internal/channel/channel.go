@@ -27,14 +27,6 @@ import (
 // Lifecycle:
 //
 //   - Name:        diagnostic / logging identifier
-//   - ChatIDPrefix: the namespace tag every ChatID this channel
-//     produces carries (Telegram: "tg_", Feishu: "oc_",
-//     Slack: "sl_", …). Empty when the channel does not
-//     produce per-chat sessions (e.g. the bot workflows
-//     engine). Mirrors the prefix declared at
-//     channel.Register time so chatstore validation has
-//     one source of truth — see internal/chatstore and
-//     docs/CHANNEL.md §5.5.
 //   - Start:       opens the adapter's long-lived receive loop and
 //     begins publishing on Incoming. Adapter-specific
 //     (Feishu: WS connect; echo: no-op).
@@ -54,6 +46,14 @@ import (
 // "Abstract stays abstract, concrete stays concrete": the Gateway
 // knows only this surface. Receipt shape and card handles are
 // each Channel's private affair.
+//
+// The chat-id namespace prefix (e.g. telegram "tg_", feishu
+// "oc_", slack "sl_", bot "bt_") lives in the registry, not
+// on this interface — see channel.Register /
+// channel.ChatIDPrefix(name). It is a static property of the
+// channel family, not per-instance state, so consumers
+// (chatstore validation, routing) read it from the registry
+// rather than calling a method on every constructed Channel.
 //
 // Channel-specific extensions:
 //
@@ -80,7 +80,6 @@ import (
 //     method delegates to it.
 type Channel interface {
 	Name() string
-	ChatIDPrefix() string
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 	Incoming() <-chan messages.InboundMessage

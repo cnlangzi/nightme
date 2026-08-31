@@ -13,11 +13,10 @@ import (
 // init registers the bot channel with the channel registry so
 // channel.BuildAll picks it up automatically (v1.3+ multi-channel).
 //
-// bot drives workflow runs keyed on workspace paths and does not
-// surface per-chat sessions in chat_sessions.json; the prefix is
-// still declared (as "bt_") so the chatstore validation knows it
-// belongs to the bot family and skips bot chatIDs without warning
-// if they happen to appear on disk.
+// bot produces chatIDs of the form "bot:wf:<runID>" — see
+// workflow.go onTrigger. The cross-channel prefix is "bt_";
+// the trailing ":wf:<runID>" is bot's own runtime routing
+// (workflow namespace + run id) and lives outside the prefix.
 //
 // bot is enabled when the workflows dir exists (or can be created)
 // under the user's nightme data dir. If not, the builder returns

@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -59,6 +60,12 @@ type turnStream struct {
 	lastFlush time.Time
 	timer     *time.Timer
 	closed    bool
+	// startMu serializes startStream across flushes. flushLocked
+	// releases s.mu before doing the network call (so a slow Slack
+	// response does not block other events); without startMu a
+	// concurrent urgent enqueue could read ts="" and issue a second
+	// startStream, minting two parallel streams on Slack.
+	startMu sync.Mutex
 	// footer is the StatusBar snapshot, replaced wholesale on each
 	// stamp and rendered once at stopStream.
 	footer []string
@@ -254,6 +261,13 @@ func (s *turnStream) timerFlush() {
 // s.mu held and RELEASES it before returning — network work must not
 // happen under the lock, or a slow Slack response would block every
 // other event for this turn.
+//
+// For the first flush (ts == ""), startMu additionally serializes
+// startStream across racing flushes so two concurrent enqueues cannot
+// both observe ts="" and each issue their own startStream — that
+// would mint two parallel streams on Slack. The racing goroutine
+// re-checks ts under startMu and falls through to appendStream once
+// the winner has published the stream id.
 func (s *turnStream) flushLocked(ctx context.Context) error {
 	if len(s.pending) == 0 {
 		s.mu.Unlock()
@@ -268,6 +282,24 @@ func (s *turnStream) flushLocked(ctx context.Context) error {
 	s.mu.Unlock()
 
 	if ts == "" {
+		s.startMu.Lock()
+		defer s.startMu.Unlock()
+
+		// Re-check under startMu — the racing goroutine may have
+		// completed startStream while we waited for the lock.
+		s.mu.Lock()
+		ts = s.ts
+		s.mu.Unlock()
+		if ts != "" {
+			// Fall through to the append path: the winner already
+			// opened the stream.
+			if err := s.appendStream(ctx, channelID, ts, batch); err != nil {
+				s.requeue(batch)
+				return err
+			}
+			return nil
+		}
+
 		newTS, err := s.startStream(ctx, channelID, threadTS, batch)
 		if err != nil {
 			s.requeue(batch)
@@ -305,6 +337,22 @@ func (s *turnStream) requeue(batch []slackgo.StreamChunk) {
 		return
 	}
 	s.pending = append(batch, s.pending...)
+}
+
+// chunkPreview extracts a short, log-safe preview of a chunk batch.
+// Used by finish() when startStream fails and the agent's reply is
+// lost — the operator needs enough context to know what dropped.
+func chunkPreview(chunks []slackgo.StreamChunk) string {
+	const max = 200
+	for _, c := range chunks {
+		if md, ok := c.(slackgo.MarkdownTextChunk); ok {
+			if len(md.Text) > max {
+				return md.Text[:max] + "…"
+			}
+			return md.Text
+		}
+	}
+	return fmt.Sprintf("%d chunks", len(chunks))
 }
 
 func (s *turnStream) startStream(ctx context.Context, channelID, threadTS string, chunks []slackgo.StreamChunk) (string, error) {
@@ -364,6 +412,15 @@ func (s *turnStream) finish(ctx context.Context) error {
 	if ts == "" {
 		newTS, err := s.startStream(ctx, channelID, s.threadTS, batch)
 		if err != nil {
+			// The agent's reply is gone — no Slack stream exists to
+			// put the batch back into, and the orchestrator will not
+			// retry. Log loud so the operator sees the drop; do not
+			// silently return.
+			s.log.Error("slack: final startStream failed; agent reply lost",
+				"chat_id", s.chatID,
+				"batch_size", len(batch),
+				"preview", chunkPreview(batch),
+				"err", err)
 			return err
 		}
 		ts = newTS

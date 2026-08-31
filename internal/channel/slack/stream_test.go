@@ -1,8 +1,11 @@
 package slack
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -346,5 +349,71 @@ func TestStream_LongTextSplitsIntoMultipleChunks(t *testing.T) {
 		if n := len([]rune(txt)); n > maxMarkdownChunkRunes {
 			t.Fatalf("chunk %d has %d runes, over the ceiling", i, n)
 		}
+	}
+}
+
+// Two concurrent first-flushes must NOT mint two parallel streams on
+// Slack. startMu serializes startStream so whichever goroutine wins
+// the race opens the stream; the other falls through to appendStream.
+func TestStream_ConcurrentFirstFlushOpensOneStream(t *testing.T) {
+	api := newFakeAPI()
+	s := testStream(t, api, time.Hour) // never coalesce via timer
+	ctx := context.Background()
+
+	// Stage two flushes by hand so they race for the start path.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_ = s.appendMarkdown(ctx, "first", true)
+	}()
+	go func() {
+		defer wg.Done()
+		_ = s.appendMarkdown(ctx, "second", true)
+	}()
+	wg.Wait()
+
+	if n := api.countOf("StartStream"); n != 1 {
+		t.Fatalf("StartStream count = %d, want 1 (startMu should serialize)", n)
+	}
+	if n := api.countOf("AppendStream"); n < 1 {
+		t.Fatalf("AppendStream count = %d, want at least 1 (racing goroutine should fall through)", n)
+	}
+}
+
+// finish() must surface a startStream failure with enough context
+// that the operator can see what was lost — silent drops used to
+// make this look like "nothing happened".
+func TestStream_FinishLogsLostContentWhenStartFails(t *testing.T) {
+	api := newFakeAPI()
+	api.failAlways("StartStream", errBoom)
+
+	var logbuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logbuf, nil))
+
+	state, _ := newStateStore("")
+	s := newTurnStream("sl_T1:C1", "C1", "1000.1", "1000.1", streamDeps{
+		api:      api,
+		limiter:  NewLimiter(&LimiterConfig{RatePerSec: 1000, Burst: 1000}, nil),
+		retry:    RetryConfig{MaxAttempts: 1},
+		logger:   logger,
+		state:    state,
+		throttle: 0,
+	})
+
+	// The append itself surfaces the start failure (the batch is
+	// requeued so finish can still try). The point of the test is
+	// what finish does with the failed start.
+	if err := s.appendMarkdown(context.Background(), "this would have been the reply", false); err == nil {
+		t.Fatal("append should surface the startStream failure while StartStream is broken")
+	}
+	if err := s.finish(context.Background()); err == nil {
+		t.Fatal("finish should propagate startStream failure")
+	}
+	if !strings.Contains(logbuf.String(), "agent reply lost") {
+		t.Fatalf("finish should log the lost content; log was: %q", logbuf.String())
+	}
+	if !strings.Contains(logbuf.String(), "this would have been the reply") {
+		t.Fatalf("log should include the lost text preview, got: %q", logbuf.String())
 	}
 }

@@ -21,6 +21,25 @@ import (
 // surfaced (e.g. certain non-Anthropic model providers).
 type askHandlerFunc func(block contentBlock, events chan<- agent.AgentEvent, logger *slog.Logger)
 
+// armPendingAskFn is the bridge between pumpStream (which only sees
+// package-level functions) and driver.armPendingAsk (which lives on
+// the *driver instance). pumpStream holds one of these and invokes
+// it synchronously when the text-fallback path fires.
+//
+// Extracting the type here means pumpStream's parameter, the
+// newDriver wiring, and the test helpers share one declaration
+// instead of repeating the inline return shape at four sites. A
+// future refactor that adds a parameter changes one line.
+//
+// To bind live.armPendingAsk to this type at the call site, use an
+// explicit conversion:
+//
+//	var f armPendingAskFn = live.armPendingAsk
+//
+// (A bare method value would infer a func type and not satisfy the
+// named alias.)
+type armPendingAskFn func(blockID string, multi bool, textFallback bool) (armedEvents chan<- agent.AgentEvent, done <-chan struct{})
+
 // Question is the structured AskUserQuestion payload. We model only
 // the fields nightme needs to render a Feishu card and reconstruct
 // the user's answer in the right wire format.
@@ -121,13 +140,18 @@ func defaultAskHandler(block contentBlock, events chan<- agent.AgentEvent, logge
 // detectAskInText). The struct shape matches the tool_use path so
 // downstream consumers don't need a separate branch.
 //
-// The text fallback cannot recover a tool_use_id (no tool was
-// actually invoked), so we synthesize a stable ID derived from the
-// question header + text hash. The session.SendPermission answer
-// will still be sent as a user-role message, but it will not be
-// tied to any real tool_use. Claude Code will treat it as the
-// next user turn after seeing the question text, which is the
-// closest approximation we can produce without the tool surface.
+// The caller MUST arm the response channel by feeding the returned
+// EventAgentPermission through driver.armPendingAsk(...,
+// textFallback=true)'s interceptor (see claudecode.go::armPendingAsk
+// and the (b) path in stream.go:detectAskInText). This function does
+// NOT allocate its own ResponseCh — pre-fix, the orphan channel
+// caused SendPermission to fail silently with "no pending
+// AskUserQuestion" for every user click on the text-fallback card.
+//
+// Claude Code will treat the eventual reply (written via
+// driver.writeUserText) as the next user turn, which is the
+// closest approximation we can produce without the AskUserQuestion
+// tool surface available.
 func emitAskFromText(q Question, events chan<- agent.AgentEvent, logger *slog.Logger) {
 	opts := make([]string, 0, len(q.Options)+1)
 	for _, o := range q.Options {
@@ -135,24 +159,20 @@ func emitAskFromText(q Question, events chan<- agent.AgentEvent, logger *slog.Lo
 	}
 	opts = append(opts, "Other")
 
-	synthID := "text-fallback-" + strings.ReplaceAll(strings.ToLower(q.Header), " ", "-")
-	if len(synthID) > 64 {
-		synthID = synthID[:64]
-	}
-
 	events <- agent.AgentEvent{
 		Kind: agent.EventAgentPermission,
 		Permission: &agent.AgentPermissionRequest{
-			Tool:       "AskUserQuestion",
-			Action:     formatQuestionAction(q),
-			Options:    opts,
-			ResponseCh: make(chan string, 1),
+			Tool:    "AskUserQuestion",
+			Action:  formatQuestionAction(q),
+			Options: opts,
+			// ResponseCh is injected by the caller's
+			// armPendingAsk interceptor — see
+			// claudecode.go::armPendingAsk.
 		},
 	}
 	if logger != nil {
 		logger.Info("claudecode: text-fallback AskUserQuestion emitted",
 			"header", q.Header,
-			"synth_id", synthID,
 			"options", len(q.Options))
 	}
 }

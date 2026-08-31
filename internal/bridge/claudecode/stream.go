@@ -198,11 +198,26 @@ type contentBlock struct {
 // options. See ask.go for the dual-path (tool_use + text fallback)
 // detection logic.
 //
+// armPendingAskFn is the (b) text-fallback path's bridge back to the
+// driver: it allocates the response channel, records the in-flight
+// pendingAsk with TextFallback=true, and starts an interceptor that
+// rewrites the emitted EventAgentPermission's ResponseCh. The (a)
+// tool_use path uses askHandler for the same wiring with
+// TextFallback=false. See claudecode.go::armPendingAsk and
+// docs/bridge/claude.md §5.5.
+//
 // agentName + workspace are stamped onto the EventAgentReady payload by
 // translate (so channel-layer receipts can render the "Agent ·
 // name | cwd · path" foot note). They are immutable for the
 // session's lifetime and don't need a mutex.
-func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
+func pumpStream(
+	r io.Reader,
+	events chan<- agent.AgentEvent,
+	askHandler askHandlerFunc,
+	armPendingAskFn armPendingAskFn,
+	agentName, workspace, branch string,
+	logger *slog.Logger,
+) {
 	scanner := bufio.NewScanner(r)
 	// Allow long lines (Claude Code may emit large content blocks).
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -239,7 +254,7 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 			continue
 		}
 
-		translate(ev, state, events, askHandler, agentName, workspace, branch, logger)
+		translate(ev, state, events, askHandler, armPendingAskFn, agentName, workspace, branch, logger)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -260,7 +275,7 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 // agentName + workspace are stamped onto the EventAgentReady payload so
 // channel-layer receipts can render the "Agent · name | cwd · path"
 // foot note. Both are immutable for the session's lifetime.
-func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
+func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent, askHandler askHandlerFunc, armPendingAskFn armPendingAskFn, agentName, workspace, branch string, logger *slog.Logger) {
 	switch ev.Type {
 	case "system":
 		// system/init is informational; we surface it via EventAgentReady
@@ -313,14 +328,25 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				if isSyntheticNoContent(ev.Message.Model, block.Text) {
 					continue
 				}
-				// TEXT-FALLBACK (F-24 §5.3): when AskUserQuestion
-				// isn't exposed as a tool_use, Claude Code falls back
-				// to rendering a markdown question with "please pick
-				// one". Detect that pattern and emit EventAgentPermission
-				// instead of EventAgentText so the channel renders a
-				// proper interactive card.
-				if q := detectAskInText(block.Text); q != nil && askHandler != nil {
-					emitAskFromText(*q, events, logger)
+				// TEXT-FALLBACK (F-24 §5.3 / docs §5.5): when
+				// AskUserQuestion isn't exposed as a tool_use,
+				// Claude Code falls back to rendering a markdown
+				// question with "please pick one". Detect that
+				// pattern and emit EventAgentPermission instead of
+				// EventAgentText so the channel renders a proper
+				// interactive card.
+				//
+				// armPendingAskFn arms pendingAsk with
+				// TextFallback=true so the eventual SendPermission
+				// reply is written as a user-role text message
+				// (claudecode.go::writeUserText) rather than a
+				// tool_result — there is no tool_use_id to bind to
+				// on this path.
+				if q := detectAskInText(block.Text); q != nil && armPendingAskFn != nil {
+					armedEvents, done := armPendingAskFn("", q.MultiSelect, true)
+					emitAskFromText(*q, armedEvents, logger)
+					close(armedEvents)
+					<-done
 				} else {
 					events <- agent.AgentEvent{
 						Kind: agent.EventAgentText,

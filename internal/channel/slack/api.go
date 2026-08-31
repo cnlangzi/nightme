@@ -196,8 +196,14 @@ func (a *liveAPI) Download(ctx context.Context, urlPrivate string) ([]byte, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("slack: download %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// Read up to 1 KiB for the error message, then drain the rest
+		// so the http.Client transport can return the connection to the
+		// pool (or close it cleanly). Without the drain, the unread
+		// bytes would prevent connection reuse and, on persistent
+		// errors, leak file descriptors.
+		peek, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("slack: download %d: %s", resp.StatusCode, strings.TrimSpace(string(peek)))
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

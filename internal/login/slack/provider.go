@@ -91,9 +91,6 @@ type Provider struct {
 	// means Greet is a no-op (Login bypassed or no owner captured).
 	// Mirrors feishu.sendDM (owner baked into the closure).
 	postDM postDMFunc
-
-	// SkipGreet suppresses the post-login greeting.
-	SkipGreet bool
 }
 
 // New builds a Slack login provider.
@@ -214,27 +211,32 @@ type postDMFunc func(ctx context.Context, text string) error
 // Slack only sends the English copy of each body. GreetingTexts
 // still exposes a Chinese field for Feishu's post envelope (which
 // renders both locales natively), but Slack has no equivalent
-// bilingual block — two consecutive messages would just double the
-// noise for an English-only workspace. Same decision
-// telegram.sendGreeting made; the policy is enforced line-by-line in
-// sendGreeting below.
+// bilingual block — emitting both languages would double the noise
+// for an English-only workspace. Same decision telegram.sendGreeting
+// made; the policy is enforced in sendGreeting below.
+//
+// All English bodies are combined into ONE chat.postMessage joined
+// with "\n\n" (Slack's mrkdwn paragraph break). Slack's message
+// grouping silently collapses consecutive bot messages, so two
+// separate chat.postMessage calls would only ever surface the second one
+// — the first body would be hidden inside the collapsed group.
+// One call → one message → both halves visible. See sendGreeting.
 //
 // Best-effort throughout: a failed send never rolls back the
 // credential save (the orchestrator calls Greet AFTER SaveDefault).
 // No owner captured → silent skip (the daemon will still answer the
 // owner's first runtime message; it never replays the login greeting).
 func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) error {
-	if p.botToken == "" || p.SkipGreet {
-		// Login was bypassed in tests, OR the caller opted out of
-		// the post-login greeting (e.g. --no-greet).
+	if p.botToken == "" {
+		// Login was bypassed in tests. Mirror feishu's nil-sendDM
+		// guard: silent no-op rather than pretending to greet.
 		return nil
 	}
 	if p.postDM == nil {
 		// Login ran but discovered no owner (users.list failed or no
 		// primary owner), OR Login was bypassed in tests. Don't
-		// pretend to greet — surface and exit, mirroring feishu's
-		// nil-sendDM guard rather than sending to nobody.
-		fmt.Fprintln(p.out, "greeting skip: no owner discovered (Login bypassed, --no-greet, or users.list failed)")
+		// pretend to greet — surface and exit.
+		fmt.Fprintln(p.out, "greeting skip: no owner discovered (Login bypassed or users.list failed)")
 		return nil
 	}
 
@@ -250,22 +252,39 @@ func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) e
 	return nil
 }
 
-// sendGreeting fires each English greeting body to the owner's DM as
-// a Slack chat.postMessage (the owner user ID is baked into postDM at
-// wireGreet time). A failure on body N aborts the rest (mirrors
-// feishu's per-post abort).
+// sendGreeting fires ALL English greeting bodies to the owner's DM as
+// a SINGLE Slack chat.postMessage (the owner user ID is baked into
+// postDM at wireGreet time). Bodies are joined with "\n\n", which
+// Slack's mrkdwn renderer treats as a paragraph break — so two
+// greetings land as two paragraphs in one message.
 //
-// This is where the "ignore Chinese" policy is enforced line-by-line:
-// only body.English is posted, body.Chinese is skipped. See Greet's
-// doc for the rationale (Slack has no Feishu-style bilingual block).
+// Why one chat.postMessage instead of one-per-body: Slack's message
+// grouping feature silently collapses consecutive bot messages sent
+// to the same channel within a short window into a single expandable
+// entry, with only the last body shown by default. Users see "Set it
+// running…" but never realise a first body ("Hi, this is NightMe…")
+// was sent at all. Combining into one API call guarantees both halves
+// render as visible paragraphs in one message.
+//
+// This is also where the "ignore Chinese" policy is enforced: only
+// body.English is included; body.Chinese is dropped because Slack has
+// no Feishu-style bilingual post block. See Greet's doc for the
+// rationale (Slack has no Feishu-style bilingual block).
 func (p *Provider) sendGreeting(ctx context.Context, messages login.GreetingMessages) error {
+	var parts []string
 	for index, body := range messages {
 		if body.English == "" {
 			continue
 		}
-		if err := p.postDM(ctx, body.English); err != nil {
-			return fmt.Errorf("body %d english: %w", index, err)
-		}
+		parts = append(parts, body.English)
+		_ = index // reserved for future per-body error reporting
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	text := strings.Join(parts, "\n\n")
+	if err := p.postDM(ctx, text); err != nil {
+		return fmt.Errorf("slack: post greeting: %w", err)
 	}
 	return nil
 }

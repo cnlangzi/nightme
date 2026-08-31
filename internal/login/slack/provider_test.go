@@ -229,24 +229,6 @@ func TestGreet_SkipsWhenNoBotToken(t *testing.T) {
 	}
 }
 
-func TestGreet_SkipsWhenSkipGreet(t *testing.T) {
-	p := &Provider{
-		botToken:  "xoxb-x",
-		SkipGreet: true,
-		listUsers: func(context.Context) ([]userView, error) {
-			t.Fatal("listUsers must not be called when SkipGreet is set")
-			return nil, nil
-		},
-		postDM: func(context.Context, string) error {
-			t.Fatal("postDM must not be called when SkipGreet is set")
-			return nil
-		},
-	}
-	if err := p.Greet(context.Background(), login.GreetingTexts()); err != nil {
-		t.Fatalf("Greet: %v", err)
-	}
-}
-
 func TestGreet_SkipsWhenNoOwnerDiscovered(t *testing.T) {
 	// Login ran (botToken set) but discoverOwner returned empty
 	// (users.list failed or no primary owner). postDM stays nil —
@@ -273,11 +255,11 @@ func TestGreet_SkipsWhenNoOwnerDiscovered(t *testing.T) {
 
 func TestGreet_SendsEnglishOnlyToOwner(t *testing.T) {
 	// Happy path: ownerUserID + postDM are wired. GreetingTexts()
-	// ships 2 bodies, each with both Chinese and English. Only the
-	// English halves are posted; the Chinese halves are dropped on
-	// purpose — Slack has no Feishu-style bilingual post block, so
-	// the CN copies would just double the noise for an English-only
-	// workspace.
+	// ships 2 bodies, each with both Chinese and English. They are
+	// combined into a SINGLE postDM call (Slack would otherwise
+	// group consecutive bot messages and hide the first body) joined
+	// by "\n\n" — Slack's mrkdwn paragraph break. Chinese halves
+	// are dropped (Slack has no Feishu-style bilingual block).
 	out := &bytes.Buffer{}
 	p := &Provider{
 		botToken:    "xoxb-x",
@@ -295,17 +277,28 @@ func TestGreet_SendsEnglishOnlyToOwner(t *testing.T) {
 		t.Fatalf("Greet: %v", err)
 	}
 
-	if len(posted) != 2 {
-		t.Fatalf("expected 2 English posts, got %d (%q)", len(posted), posted)
+	// Exactly one postDM call — the two English bodies are joined
+	// into one message so Slack's consecutive-message grouping can't
+	// hide the first half.
+	if len(posted) != 1 {
+		t.Fatalf("expected 1 combined post, got %d (%q)", len(posted), posted)
 	}
-	for _, text := range posted {
-		if containsCJK(text) {
-			t.Fatalf("Chinese body leaked into Slack greeting: %q", text)
+	body := posted[0]
+	if containsCJK(body) {
+		t.Fatalf("Chinese body leaked into Slack greeting: %q", body)
+	}
+	want := login.GreetingMessageEnglish1 + "\n\n" + login.GreetingMessageEnglish2
+	if body != want {
+		t.Fatalf("posted body mismatch\n got: %q\nwant: %q", body, want)
+	}
+	// Both halves must be visible as separate paragraphs in the
+	// joined text (defends the "\n\n" separator choice — a single
+	// "\n" would render as a soft line break in Slack, which a
+	// regression could quietly change without breaking len==1).
+	for _, want := range []string{login.GreetingMessageEnglish1, login.GreetingMessageEnglish2} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("combined body missing %q: %q", want, body)
 		}
-	}
-	if posted[0] != login.GreetingMessageEnglish1 ||
-		posted[1] != login.GreetingMessageEnglish2 {
-		t.Fatalf("posted bodies = %q, want the canonical English pair", posted)
 	}
 	if !strings.Contains(out.String(), "U_OWNER") {
 		t.Fatalf("Greet should print the recipient owner ID, got %q", out.String())

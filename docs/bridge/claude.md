@@ -499,12 +499,80 @@ func (s *ClaudeSession) detectAskInText(text string) *PermissionRequest {
 }
 ```
 
-### 5.4 优先级
+### 5.4 优先级与共存
 
-1. **tool_use 拦截**（优先）：识别 `name=="AskUserQuestion"`
-2. **text fallback**（fallback）：解析 markdown 表格
+1. **tool_use 拦截**（结构化，携带 `tool_use_id`）：识别 `name=="AskUserQuestion"`
+2. **text fallback**（cc 自己 fallback,无 `tool_use_id`）：解析 markdown 表格
 
-如果两条路径都触发，**tool_use 优先**（更结构化）。
+如果两条路径都触发,**bridge 同时拦截**(都 emit `EventAgentPermission`),**应答分发按 origin 决定 wire 形状**(见 §5.5)。Channel 层不区分路径,渲染同一张 "Waiting for approval" 卡片。
+
+### 5.5 Bridge 侧应答分发(2026-08 fix-claude-ask-your-question)
+
+**问题**:2026-08 实测发现,某些 provider / 模型环境下,cc 自己 emit 文本 fallback("AskUserQuestion 不可用..."),同时也可能伴随真 `tool_use` 块。我们的两条拦截路径同时触发,但旧实现只在 tool_use 路径上把用户答案接回 `pendingAsk.ResponseCh`,text-fallback 路径上的 respCh 是孤儿 → 用户点按钮 → `driver.SendPermission` 返 `no pending AskUserQuestion` 错误 → 答案丢失。
+
+**修复核心**:把"应答写入 stdin 的 JSON 形状"绑定到 `pendingAsk.TextFallback` 标志位上,而不是绑定到卡片 UI 上。
+
+```
+                    ┌──────────── (a) tool_use 路径 ────────────┐
+                    │  armPendingAsk(block.ID, multi, false)    │
+                    │  pendingAsk = {TF:false, ToolUseID:id,    │
+                    │                 ResponseCh: respCh_a}     │
+                    │  defaultAskHandler → EventAgentPermission │
+                    └──────────────────────────────────────────┘
+                                       │
+                                       ▼  (用户点按钮 → respCh_a)
+                                       ▼
+                              driver.SendPermission(resp)
+                                       │
+                                ┌──────┴──────┐
+                                │             │
+                  TextFallback=false   TextFallback=true
+                                │             │
+                                ▼             ▼
+                  encodeUserAnswer     writeUserText
+                  (tool_result 形态)   (user-role text 形态)
+                                │             │
+                                ▼             ▼
+                    writeLine(tool_result JSON)  writeLine(user text JSON)
+                                │             │
+                                └──────┬──────┘
+                                       ▼
+                                claude stdin
+
+                    ┌─────── (b) text-fallback 路径 ───────────┐
+                    │  armPendingAsk("", multi, true)           │
+                    │  pendingAsk = {TF:true, ToolUseID:"",     │
+                    │                 ResponseCh: respCh_b}     │
+                    │  emitAskFromText → EventAgentPermission   │
+                    └──────────────────────────────────────────┘
+```
+
+**两条路径的 wire 形状差异**:
+
+| 路径 | 标志位 | stdin payload (`message.content[0]`) | cc 端行为 |
+|------|--------|--------------------------------------|-----------|
+| (a) tool_use | `TextFallback=false` | `{type:"tool_result", tool_use_id:"<id>", content:<resp>}` | 关联回对应 tool_use,模型按结构化答案处理 |
+| (b) text-fallback | `TextFallback=true` | `{type:"text", text:<resp>}` | cc 当成下一轮 user 输入,模型继续推进 turn |
+
+**`armPendingAsk` helper**(`internal/bridge/claudecode/claudecode.go`):
+
+```go
+// armPendingAsk 给 caller 提供 respCh 并把它挂进 pendingAsk。
+// 返回的 armedEvents 必须喂给 emitAskFromText / defaultAskHandler:
+// 流出的 EventAgentPermission.Permission.ResponseCh 会被拦截器
+// 替换成我们持有的 respCh,保证 channel 层一定写到我们的 channel。
+func (d *driver) armPendingAsk(blockID string, multi bool, textFallback bool) (
+    respCh chan string, armedEvents chan<- agent.AgentEvent, done <-chan struct{},
+)
+```
+
+**故意不做的**:
+
+- 不做 pending 时把 typed text 路由到 SendPermission(留给用户决定)
+- 不做 (a)→(b) 顺序触发时的 stale sentinel(让 last-write-wins,被覆盖的旧卡片按钮失效)
+- 不清洗 label 里的 `(Recommended)` / `(保留 :8081)` 括号注释(模型自己接受括号字面)
+
+详见 `claudecode.go::SendPermission`(`TextFallback` 分支)和 `ask.go::writeUserText`。
 
 ## 6. User Answer 格式
 
@@ -579,11 +647,69 @@ func (s *ClaudeSession) answerAsk(questions []Question, answers map[string]strin
 }
 ```
 
-### 6.5 ⚠️ 未实测部分
+### 6.5 text-fallback 路径的应答 wire 格式
+
+(b) 路径没有对应 `tool_use_id`,所以不能写 `tool_result`。改为写一条 user-role 文本消息:
+
+```json
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "<resp>"}
+    ]
+  }
+}
+```
+
+实现(`claudecode.go::writeUserText`):
+
+```go
+func (d *driver) writeUserText(text string) error {
+    payload := map[string]any{
+        "type": "user",
+        "message": map[string]any{
+            "role": "user",
+            "content": []map[string]any{
+                {"type": "text", "text": text},
+            },
+        },
+    }
+    b, err := json.Marshal(payload)
+    if err != nil {
+        return err
+    }
+    return d.writeLine(b)
+}
+```
+
+`SendPermission` 根据 `pendingAsk.TextFallback` 决定走 §6.1(tool_result)还是 §6.5(user text):
+
+```go
+func (d *driver) SendPermission(resp string) error {
+    d.pendingMu.Lock()
+    ask := d.pendingAsk
+    d.pendingAsk = nil
+    d.pendingMu.Unlock()
+
+    if ask == nil {
+        return fmt.Errorf("claudecode: no pending AskUserQuestion")
+    }
+
+    if ask.TextFallback {
+        return d.writeUserText(resp)  // §6.5
+    }
+    // ... encodeUserAnswer + writeLine  // §6.1
+}
+```
+
+### 6.6 ⚠️ 未实测部分
 
 - **实际 wire format** 需要真 Claude 验证（本地测试环境强制 routing 到 MiniMax）
 - **multiSelect array 行为** 在 2.1.220 是否完全稳定需要测
 - **"Other" 路径**的具体格式（CHANGELOG 提到 multi-select "Other" 曾被 silently drop） release note 必须标"待真 Claude 验证"。
+- **text-fallback 应答写 user-role text**（2026-08 fix）当前未在真 Claude 上跑过，wire 形状基于 cc 文档对 `stream-json` 的描述推断；建议在真机测试时打日志验证 cc 端能否正确把这条 user-role 消息解析为"对 fallback 问题的答案"
 
 ## 7. 飞书卡片渲染
 
@@ -1015,6 +1141,9 @@ agents:
 | 飞书卡片渲染 AskUserQuestion 失败 | 降级为文本："Q: ... Options: A, B, C（回复 'A' 选择）" |
 | 多选答案 user 输入 free-form 文字 | nightme 当成单一选项处理，warn user "已识别为单选" |
 | PreToolUse hook 拦截 + tool_use 拦截都触发 | tool_use 优先，hook 忽略（避免双重回答） |
+| **(a) tool_use + (b) text fallback 同时触发**（实测常见，2026-08 fix） | bridge 同时 emit 两张 `EventAgentPermission`；`pendingAsk` 是单槽，**last-write-wins**；被覆盖的旧卡片按钮 → 孤儿 respCh，点击无效；用户需要点**最新的**那张卡片才能让答案回到 cc。被覆盖的 respCh 没人消费，无 stale 信号（**已知简化**，不做） |
+| **(b) → (a) 顺序触发** | (a) 升级覆盖 (b)，旧 (b) 卡片 respCh 变孤儿；用户点 (a) 卡片即可，走 `tool_result` 路径 |
+| **用户在 pending 时手打文本** | 不做劫持：typed text 走普通 `HandleInbound → SendBlocks` 路径，写 user-role text 到 stdin。cc 收到后按"下一轮 user 输入"处理——实测在 (b) 路径下用户手打"按'完全同步对齐'..."被模型正确解析为 option B |
 
 ## 13. Open questions
 
@@ -1029,6 +1158,13 @@ agents:
   - per-agent bridge 架构（`internal/bridge/claudecode/`）
   - 4 个触发条件 from Piebald-AI/claude-code-system-prompts
   - 用户答案格式兼容（string + array）
+  - **2026-08 fix-claude-ask-your-question**:修复 text-fallback 路径的 `ResponseCh` 孤儿 bug。
+    - `pendingAsk` 加 `TextFallback bool` 字段
+    - 新增 `armPendingAsk` helper（共用给两条路径）
+    - `SendPermission` 按 `TextFallback` 分支：(a) 走 `encodeUserAnswer` 写 `tool_result`；(b) 新增 `writeUserText` 写 user-role text message
+    - `emitAskFromText` 不再自造 `ResponseCh`，由 `armPendingAsk` 注入
+    - `pumpStream` 签名加 `armPendingAskFn` 参数
+    - 故意不做：pending 时 typed text 劫持、(a)→(b) stale sentinel、label 括号清洗
 
 ---
 
@@ -1337,11 +1473,15 @@ go test ./internal/bridge/claudecode/ -count=1 -timeout 240s \
 | Start + resume probe + `ErrResumeUnhealthy` | `internal/bridge/claudecode/claudecode.go` |
 | session / pumpStream / stderr | `internal/bridge/claudecode/session.go` |
 | 事件解码 | `internal/bridge/claudecode/stream.go` |
+| AskUserQuestion 拦截 + `pendingAsk` + `armPendingAsk` + `SendPermission` 分支 | `internal/bridge/claudecode/claudecode.go`、`ask.go` |
+| `writeUserText`（text-fallback 应答回写） | `internal/bridge/claudecode/claudecode.go` |
+| `emitAskFromText` + `detectAskInText` | `internal/bridge/claudecode/ask.go` |
 | 运行时唯一构造器 | `internal/chatsession/agentsession.go` → `newAgentSessionRuntime` |
 | restore | `FromAgentSessionEntry`（同上） |
 | Exited 接线 | `internal/chatsession/pump_events.go` |
 | 真机 skip helper | `testhelpers_realclaude_test.go` |
 | restore 回归 | `restore_respawn_test.go` → `TestFromAgentSessionEntry_InitializesEventQueue` |
+| AskUserQuestion 双路径回归 | `internal/bridge/claudecode/claudecode_test.go` → `TestPumpStream_AskUserQuestion` + `TestSendPermission_TextFallback_WritesUserText`（待补）|
 
 ---
 

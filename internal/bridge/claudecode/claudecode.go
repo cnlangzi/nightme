@@ -85,10 +85,30 @@ const eventsBufferSize = 40960
 // (rather than only on the EventAgentPermission) so Session.SendPermission
 // can serialize the user's answer back to stdin even if the channel
 // dropped its copy of the response channel.
+//
+// TextFallback distinguishes the two interception paths:
+//
+//   - false: (a) tool_use path. ToolUseID carries the cc-assigned
+//     tool_use_id; SendPermission writes a `tool_result` content block
+//     referencing it. cc closes the tool_use and the model resumes.
+//
+//   - true: (b) text-fallback path. cc itself emits a markdown table
+//     fallback ("AskUserQuestion 不可用...") because the AskUserQuestion
+//     tool isn't available in its environment; there is no tool_use_id.
+//     SendPermission writes a plain user-role text message — equivalent
+//     to the user typing the answer in the cli prompt, which is what
+//     cc's text-fallback was designed to consume. Model treats it as
+//     the next user turn.
+//
+// See docs/bridge/claude.md §5.5 for the full design rationale.
 type pendingAsk struct {
 	ToolUseID  string
 	Multi      bool
 	ResponseCh chan string
+
+	// TextFallback=true → writeUserText (user-role text message);
+	// TextFallback=false → encodeUserAnswer (tool_result).
+	TextFallback bool
 }
 
 // ─── driver struct (runtime + protocol) ───
@@ -233,6 +253,11 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// handler emits EventAgentPermission with our own ResponseCh so
 	// SendPermission routes the user's answer back through the
 	// same channel the bridge consumed from.
+	//
+	// The (a) tool_use path uses armPendingAsk(block.ID, multi, false).
+	// The (b) text-fallback path lives in pumpStream (stream.go:322)
+	// and uses armPendingAsk("", q.MultiSelect, true); same helper,
+	// different origin flag. See docs/bridge/claude.md §5.5.
 	handler := func(block contentBlock, events chan<- agent.AgentEvent, logger *slog.Logger) {
 		var probe struct {
 			Questions []struct {
@@ -246,35 +271,10 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		if len(probe.Questions) > 0 {
 			multi = probe.Questions[0].MultiSelect
 		}
-		respCh := make(chan string, 1)
-		live.pendingMu.Lock()
-		live.pendingAsk = &pendingAsk{
-			ToolUseID:  block.ID,
-			Multi:      multi,
-			ResponseCh: respCh,
-		}
-		live.pendingMu.Unlock()
 
-		// Translate the tool_use block. We need the resulting
-		// EventAgentPermission to expose the SAME ResponseCh we just
-		// stored in pendingAsk, otherwise the channel layer will
-		// write to a stale channel and SendPermission will block
-		// forever. To do that without re-parsing, we override
-		// the ResponseCh on the most recent emitted event by
-		// intercepting the channel output.
-		interceptEvents := make(chan agent.AgentEvent, 4)
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			for ev := range interceptEvents {
-				if ev.Kind == agent.EventAgentPermission && ev.Permission != nil {
-					ev.Permission.ResponseCh = respCh
-				}
-				events <- ev
-			}
-		}()
-		defaultAskHandler(block, interceptEvents, logger)
-		close(interceptEvents)
+		_, armedEvents, done := live.armPendingAsk(block.ID, multi, false)
+		defaultAskHandler(block, armedEvents, logger)
+		close(armedEvents)
 		<-done
 	}
 
@@ -320,12 +320,24 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 			// will see live.closed.
 		}
 	}
+	// armPendingAskFn is the stream-pump's bridge back into the driver
+	// for the (b) text-fallback path. armPendingAsk is a *driver
+	// method; stream.go's pumpStream is package-level and can't call
+	// it directly, so we hand it a closure. The closure is invoked
+	// synchronously from pumpStream's translate() goroutine so the
+	// returned done channel can be waited on before translate returns.
+	armPendingAskFn := func(blockID string, multi bool, textFallback bool) (
+		chan string, chan<- agent.AgentEvent, <-chan struct{},
+	) {
+		return live.armPendingAsk(blockID, multi, textFallback)
+	}
+
 	agent.SafeGo("claudecode:stream-pump", func() {
 		defer live.pumpWG.Done()
 		defer agent.PanicEventHandler(
 			"claudecode:stream-pump", panicDeliver,
 			"", live.agentName, live.workspace, live.branch)
-		pumpStream(stdout, live.events, handler, live.agentName, live.workspace, live.branch, logger)
+		pumpStream(stdout, live.events, handler, armPendingAskFn, live.agentName, live.workspace, live.branch, logger)
 	})
 
 	// stderr drainer — Claude Code logs to stderr; we both log
@@ -599,8 +611,22 @@ func readFileAsBase64(path string) (string, error) {
 }
 
 // SendPermission writes the user's answer to the most recent
-// AskUserQuestion prompt as a tool_result user message. resp is the
-// option label the user selected.
+// AskUserQuestion prompt. resp is the option label the user selected
+// (or the typed text for "Other").
+//
+// Two wire shapes, picked by pendingAsk.TextFallback:
+//
+//   - false (a tool_use path): writes a tool_result content block
+//     referencing the original tool_use_id. claude closes the
+//     pending tool_use and the model resumes with the structured
+//     answer.
+//
+//   - true (b text-fallback path): writes a plain user-role text
+//     message. claude's text-fallback ("AskUserQuestion 不可用...")
+//     was designed to be answered by the user's next turn input —
+//     a user-role text block is exactly what would arrive there if
+//     the user typed the answer in the cli prompt. The model
+//     resumes as if the user had replied in chat.
 //
 // Blocks until the pending question is resolved.
 func (d *driver) SendPermission(resp string) error {
@@ -611,6 +637,10 @@ func (d *driver) SendPermission(resp string) error {
 
 	if ask == nil {
 		return fmt.Errorf("claudecode: no pending AskUserQuestion")
+	}
+
+	if ask.TextFallback {
+		return d.writeUserText(resp)
 	}
 
 	var selected []string
@@ -851,6 +881,74 @@ func (d *driver) writeLine(data []byte) error {
 		return fmt.Errorf("claudecode: flush stdin: %w", err)
 	}
 	return nil
+}
+
+// armPendingAsk allocates the response channel for an upcoming
+// AskUserQuestion card, records the in-flight state in pendingAsk,
+// and starts an interceptor goroutine that rewrites every
+// EventAgentPermission emitted through `armedEvents` so its
+// Permission.ResponseCh points at the channel we just stored.
+//
+// The caller MUST feed `armedEvents` into the AskUserQuestion
+// emitter (defaultAskHandler for (a) tool_use, emitAskFromText for
+// (b) text-fallback) and then close it after the emitter returns.
+// The done channel signals when the interceptor goroutine has drained
+// and exited — callers wait on it before returning so no event leaks.
+//
+// textFallback distinguishes the two interception paths (see
+// pendingAsk doc). The wire shape of the eventual reply is decided
+// in SendPermission based on this flag — this helper only deals with
+// the channel wiring, which is identical for both paths.
+func (d *driver) armPendingAsk(blockID string, multi bool, textFallback bool) (
+	respCh chan string, armedEvents chan<- agent.AgentEvent, done <-chan struct{},
+) {
+	respCh = make(chan string, 1)
+	intercept := make(chan agent.AgentEvent, 4)
+	doneCh := make(chan struct{})
+
+	d.pendingMu.Lock()
+	d.pendingAsk = &pendingAsk{
+		ToolUseID:    blockID,
+		Multi:        multi,
+		ResponseCh:   respCh,
+		TextFallback: textFallback,
+	}
+	d.pendingMu.Unlock()
+
+	go func() {
+		defer close(doneCh)
+		for ev := range intercept {
+			if ev.Kind == agent.EventAgentPermission && ev.Permission != nil {
+				ev.Permission.ResponseCh = respCh
+			}
+			d.events <- ev
+		}
+	}()
+
+	return respCh, intercept, doneCh
+}
+
+// writeUserText writes the user's selection as a plain user-role text
+// message to claude's stdin. Used by the text-fallback path
+// (pendingAsk.TextFallback=true) where there is no tool_use_id to
+// reply to — claude's text-fallback was designed to consume the
+// user's next turn input as the answer, so a user-role text block is
+// the correct shape. See docs/bridge/claude.md §6.5.
+func (d *driver) writeUserText(text string) error {
+	payload := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role": "user",
+			"content": []map[string]any{
+				{"type": "text", "text": text},
+			},
+		},
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("claudecode: marshal user-text reply: %w", err)
+	}
+	return d.writeLine(b)
 }
 
 // ─── resume probe + helpers (package-level) ───

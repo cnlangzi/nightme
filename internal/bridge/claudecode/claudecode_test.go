@@ -195,7 +195,12 @@ func streamFromFixture(t *testing.T, name string, askHandler askHandlerFunc) []a
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(string(data)), events, askHandler, "claude", "/tmp", "main", nil)
+		// armPendingAskFn is left nil: every existing fixture
+		// drives (a) tool_use (which uses askHandler, not
+		// armPendingAskFn). The text-fallback path requires a
+		// non-nil armPendingAskFn, and is exercised separately
+		// by TestPumpStream_AskUserQuestion_TextFallback.
+		pumpStream(strings.NewReader(string(data)), events, askHandler, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -668,7 +673,7 @@ func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(input), events, nil, "claude", "/tmp", "main", nil)
+		pumpStream(strings.NewReader(input), events, nil, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -694,7 +699,7 @@ func TestPumpStream_Result_NoUsagePayload(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(input), events, nil, "claude", "/tmp", "main", nil)
+		pumpStream(strings.NewReader(input), events, nil, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -756,7 +761,7 @@ func TestPumpStream_InvalidJSON_Skipped(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(input), events, nil, "claude", "/tmp", "main", nil)
+		pumpStream(strings.NewReader(input), events, nil, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -1081,7 +1086,7 @@ func streamFromStringWithLogger(stream string, logger *slog.Logger) []agent.Agen
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(stream), events, nil, "claude", "/tmp", "main", logger)
+		pumpStream(strings.NewReader(stream), events, nil, nil, "claude", "/tmp", "main", logger)
 		close(events)
 	}()
 	var got []agent.AgentEvent

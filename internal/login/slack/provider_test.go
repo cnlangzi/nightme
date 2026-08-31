@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -209,11 +210,185 @@ func TestLogin_SkipsWalkthroughWhenTokensSupplied(t *testing.T) {
 	}
 }
 
-func TestGreet_IsANoOp(t *testing.T) {
-	// Slack's install flow yields tokens and no recipient, so there
-	// is nobody to greet. Documented, not forgotten.
-	if err := New(Options{}).Greet(context.Background(), login.GreetingTexts()); err != nil {
-		t.Fatalf("Greet should be a silent no-op, got %v", err)
+func TestGreet_SkipsWhenNoBotToken(t *testing.T) {
+	// Login was bypassed (no bot token), so Greet must be a silent
+	// no-op — it must not even touch the seams. Mirrors feishu's
+	// nil-sendDM guard.
+	p := &Provider{
+		listUsers: func(context.Context) ([]userView, error) {
+			t.Fatal("listUsers must not be called when botToken is empty")
+			return nil, nil
+		},
+		postDM: func(context.Context, string) error {
+			t.Fatal("postDM must not be called when botToken is empty")
+			return nil
+		},
+	}
+	if err := p.Greet(context.Background(), login.GreetingTexts()); err != nil {
+		t.Fatalf("Greet: %v", err)
+	}
+}
+
+func TestGreet_SkipsWhenSkipGreet(t *testing.T) {
+	p := &Provider{
+		botToken:  "xoxb-x",
+		SkipGreet: true,
+		listUsers: func(context.Context) ([]userView, error) {
+			t.Fatal("listUsers must not be called when SkipGreet is set")
+			return nil, nil
+		},
+		postDM: func(context.Context, string) error {
+			t.Fatal("postDM must not be called when SkipGreet is set")
+			return nil
+		},
+	}
+	if err := p.Greet(context.Background(), login.GreetingTexts()); err != nil {
+		t.Fatalf("Greet: %v", err)
+	}
+}
+
+func TestGreet_SkipsWhenNoOwnerDiscovered(t *testing.T) {
+	// Login ran (botToken set) but discoverOwner returned empty
+	// (users.list failed or no primary owner). postDM stays nil —
+	// Greet must print the skip hint and return nil. Replaces the
+	// old polling "TimesOut / Stale" tests; there is no poll anymore.
+	out := &bytes.Buffer{}
+	p := &Provider{
+		botToken: "xoxb-x",
+		out:      out,
+		listUsers: func(context.Context) ([]userView, error) {
+			t.Fatal("listUsers must not be called from Greet (discovery runs in wireGreet)")
+			return nil, nil
+		},
+		// postDM deliberately left nil: no owner was discovered.
+	}
+
+	if err := p.Greet(context.Background(), login.GreetingTexts()); err != nil {
+		t.Fatalf("Greet with nil postDM should be a no-op, got %v", err)
+	}
+	if !strings.Contains(out.String(), "no owner discovered") {
+		t.Fatalf("output missing skip hint: %q", out.String())
+	}
+}
+
+func TestGreet_SendsEnglishOnlyToOwner(t *testing.T) {
+	// Happy path: ownerUserID + postDM are wired. GreetingTexts()
+	// ships 2 bodies, each with both Chinese and English. Only the
+	// English halves are posted; the Chinese halves are dropped on
+	// purpose — Slack has no Feishu-style bilingual post block, so
+	// the CN copies would just double the noise for an English-only
+	// workspace.
+	out := &bytes.Buffer{}
+	p := &Provider{
+		botToken:    "xoxb-x",
+		botName:     "nightme",
+		ownerUserID: "U_OWNER",
+		out:         out,
+	}
+	var posted []string
+	p.postDM = func(_ context.Context, text string) error {
+		posted = append(posted, text)
+		return nil
+	}
+
+	if err := p.Greet(context.Background(), login.GreetingTexts()); err != nil {
+		t.Fatalf("Greet: %v", err)
+	}
+
+	if len(posted) != 2 {
+		t.Fatalf("expected 2 English posts, got %d (%q)", len(posted), posted)
+	}
+	for _, text := range posted {
+		if containsCJK(text) {
+			t.Fatalf("Chinese body leaked into Slack greeting: %q", text)
+		}
+	}
+	if posted[0] != login.GreetingMessageEnglish1 ||
+		posted[1] != login.GreetingMessageEnglish2 {
+		t.Fatalf("posted bodies = %q, want the canonical English pair", posted)
+	}
+	if !strings.Contains(out.String(), "U_OWNER") {
+		t.Fatalf("Greet should print the recipient owner ID, got %q", out.String())
+	}
+}
+
+// discoverOwner picks the single user with is_primary_owner == true
+// from the workspace roster (filtered to non-bot, non-deleted).
+func TestDiscoverOwner_PicksPrimaryOwner(t *testing.T) {
+	p := &Provider{
+		out: io.Discard,
+		listUsers: func(context.Context) ([]userView, error) {
+			return []userView{
+				{ID: "U_BOT", IsPrimaryOwner: false, IsBot: true},
+				{ID: "U_HUMAN1", IsPrimaryOwner: false, IsBot: false},
+				{ID: "U_OWNER", IsPrimaryOwner: true, IsBot: false},
+				{ID: "U_HUMAN2", IsPrimaryOwner: false, IsBot: false},
+			}, nil
+		},
+	}
+
+	if got := p.discoverOwner(context.Background()); got != "U_OWNER" {
+		t.Fatalf("discoverOwner = %q, want %q", got, "U_OWNER")
+	}
+}
+
+// opts.Owner is an explicit override: it must short-circuit discovery
+// so listUsers is never touched (and a flapping workspace roster can't
+// surprise us).
+func TestDiscoverOwner_OwnerFlagOverrides(t *testing.T) {
+	p := &Provider{
+		opts: Options{Owner: "U_OVERRIDE"},
+		out:  io.Discard,
+		listUsers: func(context.Context) ([]userView, error) {
+			t.Fatal("listUsers must not be called when opts.Owner is set")
+			return nil, nil
+		},
+	}
+
+	if got := p.discoverOwner(context.Background()); got != "U_OVERRIDE" {
+		t.Fatalf("discoverOwner = %q, want %q", got, "U_OVERRIDE")
+	}
+}
+
+// discoverOwner must filter out bot users and deleted accounts even if
+// their record carries is_primary_owner (rare but possible if Slack
+// reshuffles the primary owner role).
+func TestDiscoverOwner_SkipsBotsAndDeleted(t *testing.T) {
+	p := &Provider{
+		out: io.Discard,
+		listUsers: func(context.Context) ([]userView, error) {
+			return []userView{
+				// bot flagged as primary owner — should be skipped
+				{ID: "U_BOT_OWNER", IsPrimaryOwner: true, IsBot: true},
+				// deleted user flagged as primary owner — should be skipped
+				{ID: "U_GHOST", IsPrimaryOwner: true, IsBot: false, Deleted: true},
+				// the real primary owner
+				{ID: "U_OWNER", IsPrimaryOwner: true, IsBot: false},
+			}, nil
+		},
+	}
+
+	if got := p.discoverOwner(context.Background()); got != "U_OWNER" {
+		t.Fatalf("discoverOwner = %q, want %q (skipped bot + deleted)", got, "U_OWNER")
+	}
+}
+
+// discoverOwner returns "" when listUsers errors so Greet stays a
+// no-op instead of failing login on a flapping users.list.
+func TestDiscoverOwner_ListUsersErrorReturnsEmpty(t *testing.T) {
+	out := &bytes.Buffer{}
+	p := &Provider{
+		out: out,
+		listUsers: func(context.Context) ([]userView, error) {
+			return nil, errors.New("transient slack outage")
+		},
+	}
+
+	if got := p.discoverOwner(context.Background()); got != "" {
+		t.Fatalf("discoverOwner = %q, want empty", got)
+	}
+	if !strings.Contains(out.String(), "users.list failed") {
+		t.Fatalf("warning should mention users.list, got %q", out.String())
 	}
 }
 
@@ -221,6 +396,12 @@ func TestGreet_IsANoOp(t *testing.T) {
 // assert on. yaml.v3 maps field names case-insensitively so a single
 // struct covers both the YAML body and the URL-encoded copy.
 type manifestView struct {
+	Features struct {
+		AppHome struct {
+			MessagesTabEnabled         bool `yaml:"messages_tab_enabled"`
+			MessagesTabReadOnlyEnabled bool `yaml:"messages_tab_read_only_enabled"`
+		} `yaml:"app_home"`
+	} `yaml:"features"`
 	OAuthConfig struct {
 		Scopes struct {
 			Bot []string `yaml:"bot"`
@@ -259,6 +440,25 @@ func TestAppManifest_CarriesRequiredScopesAndEvents(t *testing.T) {
 
 	if !parsed.Settings.SocketModeEnabled {
 		t.Fatal("Socket Mode must be enabled — it is the only transport the adapter implements")
+	}
+
+	// messages_tab_enabled MUST be true: without it Slack shows the
+	// app's DM as "sending messages to this app has been turned
+	// off", users can't DM the bot, and the message.im event the
+	// adapter subscribes to never fires (docs.slack.dev/surfaces/
+	// app-home#messages-tab). It defaults to false when omitted,
+	// so we set it explicitly and pin the assertion here.
+	if !parsed.Features.AppHome.MessagesTabEnabled {
+		t.Fatal("features.app_home.messages_tab_enabled must be true — see manifest.go comment for why")
+	}
+
+	// messages_tab_read_only_enabled is the inverse-named "users can
+	// send messages" toggle: false means "not read-only" → users
+	// CAN DM the bot and message.im events fire. The Slack default
+	// when omitted is true (read-only), which silently breaks the
+	// entire adapter. Pin it to false here.
+	if parsed.Features.AppHome.MessagesTabReadOnlyEnabled {
+		t.Fatal("features.app_home.messages_tab_read_only_enabled must be false — Slack's name is the inverse of its effect; true means read-only")
 	}
 
 	scopes := make(map[string]bool)
@@ -330,4 +530,18 @@ func TestManifestURL_IsAWellFormedDeepLink(t *testing.T) {
 	if !parsed.Settings.SocketModeEnabled {
 		t.Fatal("embedded manifest lost its contents")
 	}
+}
+
+// containsCJK reports whether s carries any CJK Unified Ideograph
+// (U+4E00–U+9FFF). The canonical English greetings contain emoji
+// (👋 / 🚀) — non-ASCII but NOT CJK — so a plain ASCII check would
+// false-positive on them. CJK ideographs only appear in the Chinese
+// halves, which is exactly what we must detect here.
+func containsCJK(s string) bool {
+	for _, r := range s {
+		if r >= 0x4E00 && r <= 0x9FFF {
+			return true
+		}
+	}
+	return false
 }

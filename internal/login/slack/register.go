@@ -34,9 +34,17 @@ func init() {
 				"scope and event subscription, then paste the two tokens here.\n\n" +
 				"Socket Mode means no public URL, domain, TLS certificate or\n" +
 				"reverse proxy is required.\n\n" +
+				"Interactive (default): prints the walkthrough, reads the two\n" +
+				"tokens, validates them against auth.test, then auto-discovers\n" +
+				"the workspace primary owner (users.list, is_primary_owner) and\n" +
+				"DM's the canonical English greeting straight to them — no\n" +
+				"prompt and no waiting for the owner to message first.\n\n" +
 				"Non-interactive:\n" +
 				"  --bot-token <xoxb-…>  skip the stdin prompt\n" +
-				"  --app-token <xapp-…>  skip the stdin prompt\n\n" +
+				"  --app-token <xapp-…>  skip the stdin prompt\n" +
+				"  --owner <U…>         override the greeting recipient (skip\n" +
+				"                       users.list discovery)\n" +
+				"  --no-greet           skip the post-login greeting\n\n" +
 				"Re-running this command rebinds the channel — any existing\n" +
 				"slack tokens in config.yaml are overwritten.",
 			RunE: func(cmd *cobra.Command, _ []string) error {
@@ -51,9 +59,13 @@ func init() {
 				provider := New(Options{
 					BotToken: sf.botToken,
 					AppToken: sf.appToken,
+					Owner:    sf.owner,
 					In:       cmd.InOrStdin(),
 					Out:      cmd.OutOrStdout(),
 				})
+				if sf.noGreet {
+					provider.SkipGreet = true
+				}
 				ctx := loginContext(cmd, flags)
 				return login.LoginWith(ctx, provider,
 					cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -62,6 +74,8 @@ func init() {
 		cmd.Flags().DurationVar(&flags.Timeout, "timeout", 10*time.Minute, "abort the flow after this duration")
 		cmd.Flags().StringVar(&sf.botToken, "bot-token", "", "pass the xoxb- bot token via flag instead of stdin")
 		cmd.Flags().StringVar(&sf.appToken, "app-token", "", "pass the xapp- app-level token via flag instead of stdin")
+		cmd.Flags().StringVar(&sf.owner, "owner", "", "override the greeting recipient's Slack user ID (skip auto-discovery via users.list)")
+		cmd.Flags().BoolVar(&sf.noGreet, "no-greet", false, "skip the post-login greeting")
 		cmd.Flags().BoolVar(&sf.manifest, "manifest", false, "print the Slack app manifest and exit")
 		cmd.Flags().BoolVar(&sf.manifestURL, "manifest-url", false, "print a one-click 'create app from manifest' URL and exit")
 		return cmd
@@ -73,6 +87,8 @@ func init() {
 type loginSlackCmdFlags struct {
 	botToken    string
 	appToken    string
+	owner       string
+	noGreet     bool
 	manifest    bool
 	manifestURL bool
 }

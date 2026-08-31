@@ -9,6 +9,7 @@
 > - [F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) Channel 接口契约
 > - [channel/feishu.md](./channel/feishu.md) 飞书实现细节
 > - [channel/telegram.md](./channel/telegram.md) Telegram 实现细节
+> - [channel/slack.md](./channel/slack.md) Slack 接入方案（设计中）
 
 ---
 

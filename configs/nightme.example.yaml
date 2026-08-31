@@ -62,6 +62,17 @@ telegram:
   # Group mention gate is controlled per-chat via /watch all|mention|off,
   # not by config. Default is mention-only on first contact.
 
+slack:
+  # Bot User OAuth Token from "Install App" (xoxb-...).
+  bot_token: ""
+  # App-Level Token with the connections:write scope, generated in the
+  # Socket Mode settings page (xapp-...). Socket Mode only — the Events
+  # API / public-URL path is not supported, so no signing secret.
+  app_token: ""
+  # Minimum interval between chat.appendStream calls for one turn.
+  # Slack's Tier 4 would allow ~600ms; 3s is deliberate headroom.
+  stream_throttle_ms: 3000
+
 session:
   # Initial PTY size for new sessions.
   default_pty_cols: 80

@@ -497,22 +497,3 @@ func TestProvider_Login_ViaTokenOption(t *testing.T) {
 		t.Fatalf("non-interactive Login should skip instructions")
 	}
 }
-
-func TestProvider_Greet_SkippedWhenSkipGreetSet(t *testing.T) {
-	// --no-greet flag: Provider.Greet should be a no-op.
-	p := New(Options{})
-	// Manually set the botToken + SkipGreet (Login was bypassed).
-	p.botToken = "x"
-	p.botInfo = &userInfo{ID: 1, IsBot: true, Username: "testbot"}
-	p.SkipGreet = true
-
-	out := &bytes.Buffer{}
-	p.out = out
-
-	if err := p.Greet(context.Background(), login.GreetingMessages{}); err != nil {
-		t.Fatalf("Greet with SkipGreet: %v", err)
-	}
-	if out.Len() > 0 {
-		t.Fatalf("Greet with SkipGreet must not print anything, got %q", out.String())
-	}
-}

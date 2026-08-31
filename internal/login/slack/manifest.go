@@ -50,6 +50,30 @@ features:
   bot_user:
     display_name: NightMe
     always_online: true
+  # Two related toggles in App Home — both must be set explicitly,
+  # because Slack defaults both to false / read-only when omitted,
+  # and the resulting UX is "sending messages to this app has been
+  # turned off" with no message.im events ever firing.
+  #
+  #   messages_tab_enabled: true
+  #     Show the Messages tab at all (Display Chat Tab toggle in the
+  #     UI). Defaults to false when omitted.
+  #
+  #   messages_tab_read_only_enabled: false
+  #     Let users send messages TO the bot (the "Allow users to send
+  #     Slash commands and messages from the chat tab" checkbox in
+  #     the UI). The name is the inverse of its effect: false means
+  #     "not read-only" → users CAN send. Defaults to true (read-
+  #     only) when omitted. Without this set, the Messages tab is
+  #     visible but users cannot type into it.
+  #
+  # Both default to the broken state, so both must be pinned in the
+  # manifest — otherwise any reinstall silently breaks inbound DMs
+  # and the adapter never sees a message.im. See
+  # docs.slack.dev/surfaces/app-home#messages-tab.
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   assistant_view:
     assistant_description: Drive your local coding agents from Slack.
     suggested_prompts: []

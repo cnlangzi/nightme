@@ -8,6 +8,21 @@ import (
 	"testing"
 	"time"
 
+	// Side-effect import: telegram's init() registers the
+	// channel with channel.Register("telegram", "tg_", …),
+	// which populates the registry the chatstore reads via
+	// channel.ChatIDPrefixes() at load time. Without this,
+	// New() would refuse every entry as "no channels are
+	// registered" because the chatstore test package does not
+	// import the runtime.
+	//
+	// feishu is NOT imported here: feishu transitively depends
+	// on chatsession, which depends on chatstore — pulling it
+	// in would create an import cycle (chatstore_test → feishu
+	// → chatsession → chatstore). The tests use "tg_*" chat
+	// ids so telegram is sufficient.
+	"github.com/cnlangzi/nightme/internal/channel"
+	_ "github.com/cnlangzi/nightme/internal/channel/telegram"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -453,19 +468,39 @@ func TestNew_RejectsLegacyIDKeyedFormat(t *testing.T) {
 	}
 }
 
-// TestNew_RejectsBareDigitKey verifies that bare-digit chatIDs
-// (the pre-stable-chatID-era on-disk format) are rejected. The
-// daemon does not silently rewrite them.
-func TestNew_RejectsBareDigitKey(t *testing.T) {
+// TestNew_SkipsUnknownPrefix is the lenient-loader regression
+// test for the fix-chatsession-fails refactor. Before the fix,
+// an unknown chat-id prefix caused the daemon to refuse to start
+// (a single stale entry from an old / hand-edited file would
+// hide every other chat). Now New() logs a warning identifying
+// the offending entry and continues — only a key/ChatID mismatch
+// (a structural corruption) is still a hard error.
+//
+// This file mixes one bare-digit key ("42", pre-stable-chatID
+// legacy format) with two properly prefixed ones; the loader
+// must skip the bare digit and keep the others.
+func TestNew_SkipsUnknownPrefix(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chat_sessions.json")
-	bare := `{"version":1,"chatSessions":{"42":{"id":"cs_42","chatId":"42","primaryAgent":"codex"}}}`
-	if err := os.WriteFile(path, []byte(bare), 0o600); err != nil {
+	// Mix: bare digit (no known prefix), plus two valid tg_ entries.
+	mixed := `{"version":1,"chatSessions":{"42":{"id":"cs_42","chatId":"42","primaryAgent":"codex"},"tg_keep_a":{"id":"cs_keep_a","chatId":"tg_keep_a","primaryAgent":"claude"},"tg_keep_b":{"id":"cs_keep_b","chatId":"tg_keep_b","primaryAgent":"codex"}}}`
+	if err := os.WriteFile(path, []byte(mixed), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	if _, err := New(path); err == nil {
-		t.Fatal("expected New to reject bare-digit chatID, got no error")
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New should succeed despite the unknown-prefix entry; got %v", err)
+	}
+
+	if _, ok := s.Get("42"); ok {
+		t.Error("bare-digit entry was loaded instead of being skipped")
+	}
+	if _, ok := s.Get("tg_keep_a"); !ok {
+		t.Error("tg_keep_a should have been loaded alongside the skipped entry")
+	}
+	if _, ok := s.Get("tg_keep_b"); !ok {
+		t.Error("tg_keep_b should have been loaded alongside the skipped entry")
 	}
 }
 
@@ -501,4 +536,86 @@ func TestNew_TelegramFormat_LoadsCleanly(t *testing.T) {
 	if len(s.entries) != 2 {
 		t.Errorf("entries len = %d, want 2", len(s.entries))
 	}
+}
+
+// TestNew_AcceptsFuturePrefixesViaRegistry is the regression
+// guard for the fix-chatsession-fails refactor. Before the fix,
+// chat_sessions.json validation hard-coded two prefixes ("tg_"
+// and "oc_"), so any on-disk entry from a third channel
+// (Slack "sl_", future web "wb_", …) caused the daemon to
+// refuse to start with
+//
+//	chat_sessions: … entry "sl_…" is not channel-prefixed
+//
+// The fix routes validation through channel.ChatIDPrefixes(),
+// which returns whatever prefixes each channel adapter
+// registered via channel.Register. To prove the fix:
+//
+//   - Inject a synthetic "slack" channel with prefix "sl_"
+//     into the registry for the duration of this test.
+//   - Restore the registry via t.Cleanup so subsequent tests
+//     see the same prefix set they always saw.
+//   - Verify a chat_sessions.json containing "sl_*" entries
+//     loads without errors and the entry round-trips.
+//
+// This proves new channels can plug in without editing chatstore.
+func TestNew_AcceptsFuturePrefixesViaRegistry(t *testing.T) {
+	// Snapshot the registry state so we can restore it after
+	// the test. channel.Reset() is too aggressive — it would
+	// also wipe the prefixes the other tests in this file rely
+	// on.
+	original := snapshotPrefixesForTest()
+	channel.Reset()
+	// Restore the "tg_" prefix that channel/telegram's init()
+	// registered — chatstore_test imports it as a side effect.
+	channel.Register("telegram", "tg_", nil)
+	// Now add the Slack prefix that drives this test.
+	channel.Register("slack-test", "sl_", nil)
+	t.Cleanup(func() {
+		channel.Reset()
+		for name, prefix := range original {
+			channel.Register(name, prefix, nil)
+		}
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat_sessions.json")
+	// A Slack chat ID of the same shape as the user's failing
+	// daemon: "sl_<workspace>:<channel>:<ts>".
+	slackEntry := `{"version":1,"chatSessions":{"sl_T0BTP773FAS:D0BTPL0K3UN:1788174480.038419":{"id":"cs_T0BTP773FAS:D0BTPL0K3UN:1788174480.038419","chatId":"sl_T0BTP773FAS:D0BTPL0K3UN:1788174480.038419","primaryAgent":"claude","selectedCwd":"/home/yaitoo/work/repo"}}}`
+	if err := os.WriteFile(path, []byte(slackEntry), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	got, ok := s.Get("sl_T0BTP773FAS:D0BTPL0K3UN:1788174480.038419")
+	if !ok {
+		t.Fatal("sl_ entry not loaded — registry prefix not consulted?")
+	}
+	if got.PrimaryAgent != "claude" {
+		t.Errorf("PrimaryAgent = %q, want claude", got.PrimaryAgent)
+	}
+	if got.SelectedCwd != "/home/yaitoo/work/repo" {
+		t.Errorf("SelectedCwd = %q", got.SelectedCwd)
+	}
+}
+
+// snapshotPrefixesForTest returns the currently-registered
+// (name, prefix) pairs so a test can restore them after
+// channel.Reset(). Builders are not preserved — chatstore
+// tests never call BuildAll, so a nil Builder is harmless for
+// the duration of the test.
+func snapshotPrefixesForTest() map[string]string {
+	// channel.ChatIDPrefixes() returns only the prefix set,
+	// not the names. We need names too, so walk Available()
+	// and look up each name's prefix via ChatIDPrefix.
+	out := map[string]string{}
+	for _, name := range channel.Available() {
+		out[name] = channel.ChatIDPrefix(name)
+	}
+	return out
 }

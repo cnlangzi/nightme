@@ -85,6 +85,7 @@ func (c *recordingChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "mock", json.RawMessage("{}"), nil
 }
 func (c *recordingChannel) SetLogger(_ *slog.Logger) {}
+func (c *recordingChannel) ChatIDPrefix() string         { return "" }
 func (c *recordingChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
 	if text == "" {
 		return nil

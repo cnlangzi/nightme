@@ -11,7 +11,7 @@ import (
 )
 
 func init() {
-	channel.Register("telegram", func(cfg *config.Config) (channel.Channel, error) {
+	channel.Register("telegram", "tg_", func(cfg *config.Config) (channel.Channel, error) {
 		return NewAdapter(cfg)
 	})
 }

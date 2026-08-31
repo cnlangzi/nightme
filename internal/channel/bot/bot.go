@@ -95,6 +95,14 @@ var _ channel.Channel = (*Bot)(nil)
 // Name implements channel.Channel.
 func (b *Bot) Name() string { return "bot" }
 
+// ChatIDPrefix implements channel.Channel. Returns "bt_"
+// (mirrors channel.Register("bot", "bt_", …)). The bot drives
+// workflow runs keyed on workspace paths and does not surface
+// per-chat sessions in chat_sessions.json, but the prefix is
+// declared so chatstore validation can recognise any stray bot
+// chat ids on disk without logging a "unknown prefix" warning.
+func (b *Bot) ChatIDPrefix() string { return "bt_" }
+
 // Start implements channel.Channel. Loads workflows, builds the
 // workspace→repo map, registers action channels, starts the
 // trigger manager.

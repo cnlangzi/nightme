@@ -96,6 +96,14 @@ func (c *Channel) Inject(msg channel.Message) bool {
 	}
 }
 
+// ChatIDPrefix implements channel.Channel. Echo is a smoke-test
+// adapter and is not registered in the channel registry
+// (production runtime must never start it), so it does not need
+// to declare a prefix. Returns "" to be explicit; chatstore
+// never reaches this path because echo does not write chat
+// sessions.
+func (c *Channel) ChatIDPrefix() string { return "" }
+
 // var _ block ensures echo.Channel satisfies channel.Channel at
 // compile time.
 var _ channel.Channel = (*Channel)(nil)

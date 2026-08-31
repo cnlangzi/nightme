@@ -13,11 +13,17 @@ import (
 // init registers the bot channel with the channel registry so
 // channel.BuildAll picks it up automatically (v1.3+ multi-channel).
 //
+// bot drives workflow runs keyed on workspace paths and does not
+// surface per-chat sessions in chat_sessions.json; the prefix is
+// still declared (as "bt_") so the chatstore validation knows it
+// belongs to the bot family and skips bot chatIDs without warning
+// if they happen to appear on disk.
+//
 // bot is enabled when the workflows dir exists (or can be created)
 // under the user's nightme data dir. If not, the builder returns
 // an error and BuildAll silently skips bot — no user-facing error.
 func init() {
-	channel.Register("bot", botBuilder)
+	channel.Register("bot", "bt_", botBuilder)
 }
 
 // botBuilder constructs a bot channel. The cfg-derived workflows

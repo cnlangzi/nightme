@@ -47,6 +47,7 @@ func (f *fakeChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return f.name, json.RawMessage("{}"), nil
 }
 func (f *fakeChannel) SetLogger(_ *slog.Logger) {}
+func (f *fakeChannel) ChatIDPrefix() string         { return "" }
 func (f *fakeChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
 	if text == "" {
 		return nil

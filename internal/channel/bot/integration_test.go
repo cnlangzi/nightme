@@ -41,6 +41,7 @@ func (s *spyChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "spy", nil, nil
 }
 func (s *spyChannel) SetLogger(_ *slog.Logger) {}
+func (s *spyChannel) ChatIDPrefix() string         { return "" }
 func (s *spyChannel) BuildBlocks(_ string, _ []messages.Attachment) []agent.ContentBlock {
 	return nil
 }

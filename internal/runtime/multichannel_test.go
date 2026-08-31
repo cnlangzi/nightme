@@ -35,9 +35,10 @@ import (
 // the routing path; the Incoming chan is buffered so tests can
 // Inject messages synchronously.
 type stubChannel struct {
-	name  string
-	in    chan messages.InboundMessage
-	sends *capturedSends
+	name   string
+	prefix string
+	in     chan messages.InboundMessage
+	sends  *capturedSends
 }
 
 func newStubChannel(name string, sends *capturedSends) *stubChannel {
@@ -65,6 +66,7 @@ func (s *stubChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return s.name, json.RawMessage("{}"), nil
 }
 func (s *stubChannel) SetLogger(_ *slog.Logger) {}
+func (s *stubChannel) ChatIDPrefix() string         { return s.prefix }
 func (s *stubChannel) BuildBlocks(_ string, _ []messages.Attachment) []agent.ContentBlock {
 	return nil
 }

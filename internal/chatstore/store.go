@@ -24,12 +24,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -44,20 +46,35 @@ type Store struct {
 	entries map[string]*registry.ChatSessionEntry
 }
 
-// New loads (or initializes) the chat session file at path. A missing
+// New loads (or initializes) the chat_sessions.json store. A missing
 // file yields an empty store; a corrupt file is backed up to
 // <path>.bak and the store is reset to empty.
-// New loads (or initializes) the chat_sessions.json store.
 //
-// Every entry's map key MUST equal its ChatID field, and every
-// ChatID MUST start with a channel-namespaced prefix (Telegram:
-// "tg_", Feishu: "oc_", etc.). See docs/CHANNEL.md §5.5 and
+// Every entry's map key MUST equal its ChatID field. The ChatID
+// MUST start with a channel-namespaced prefix registered by the
+// channel that produced it (Telegram: "tg_", Feishu: "oc_",
+// Slack: "sl_", …). See docs/CHANNEL.md §5.5 and
 // docs/channel/telegram.md §5.1 for the channel-namespacing rule.
 //
-// Loading does no migration or rewriting: any entry whose map key
-// disagrees with e.ChatID, or whose ChatID is missing a channel
-// prefix, is rejected with an error so the operator can fix the
-// file by hand. The daemon will NOT silently rewrite on-disk data.
+// The set of accepted prefixes comes from channel.ChatIDPrefixes()
+// — every channel adapter registers its prefix at init() time via
+// channel.Register. New channels (future Slack bridge, …) plug in
+// automatically: declare the prefix in their init() and chatstore
+// validation picks it up. No edits to this file are required when
+// a new channel is added.
+//
+// On unknown prefixes the loader is lenient: it logs a warning
+// identifying the offending entry and the recognised prefix set,
+// then skips the entry and continues with the next one. This
+// matches chatstore's general philosophy of never blocking daemon
+// startup on a stale / hand-edited file — a single odd entry
+// should not keep every other chat unreachable. Operators see the
+// warning in stderr and can fix the file by hand. A key that
+// disagrees with its entry's ChatID field is still rejected
+// outright, since that is a structural corruption the loader
+// cannot reason about.
+//
+// The loader never silently rewrites the on-disk file.
 func New(path string) (*Store, error) {
 	s := &Store{
 		path:    path,
@@ -77,6 +94,7 @@ func New(path string) (*Store, error) {
 			}
 			s.entries = make(map[string]*registry.ChatSessionEntry)
 		} else if container.ChatSessions != nil {
+			prefixes := channel.ChatIDPrefixes()
 			for k, e := range container.ChatSessions {
 				if e == nil {
 					continue
@@ -84,8 +102,12 @@ func New(path string) (*Store, error) {
 				if e.ChatID != k {
 					return nil, fmt.Errorf("chat_sessions: %s has key %q but entry.ChatID %q — every entry must be keyed by ChatID", path, k, e.ChatID)
 				}
-				if !strings.HasPrefix(k, "tg_") && !strings.HasPrefix(k, "oc_") {
-					return nil, fmt.Errorf("chat_sessions: %s entry %q is not channel-prefixed (must be \"tg_...\" or \"oc_...\")", path, k)
+				if !hasRegisteredPrefix(k, prefixes) {
+					log.Printf(
+						"chatstore: %s entry %q has unknown chat-id prefix (registered: %s); skipping",
+						path, k, formatPrefixList(prefixes),
+					)
+					continue
 				}
 				s.entries[k] = e
 			}
@@ -97,6 +119,33 @@ func New(path string) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// hasRegisteredPrefix reports whether key starts with any of the
+// prefixes registered by a channel adapter (channel.ChatIDPrefixes).
+// Extracted so the per-entry loop in New stays readable.
+func hasRegisteredPrefix(key string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatPrefixList renders the registered prefix set as a
+// human-readable, comma-joined list — quoted, so an operator
+// scanning stderr sees exactly which prefixes their build
+// recognises.
+func formatPrefixList(prefixes []string) string {
+	if len(prefixes) == 0 {
+		return "(none registered)"
+	}
+	quoted := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		quoted[i] = `"` + p + `...`
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // Path returns the file path the store was opened with.

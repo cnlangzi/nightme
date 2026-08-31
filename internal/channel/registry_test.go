@@ -24,9 +24,13 @@ import (
 // interface without depending on any real adapter (which would
 // introduce an import cycle: real adapters import this package
 // to register, so we can't import them here).
-type stubChannel struct{ name string }
+type stubChannel struct {
+	name   string
+	prefix string
+}
 
-func (s *stubChannel) Name() string  { return s.name }
+func (s *stubChannel) Name() string         { return s.name }
+func (s *stubChannel) ChatIDPrefix() string { return s.prefix }
 func (s *stubChannel) Start(_ context.Context) error { return nil }
 func (s *stubChannel) Stop(_ context.Context) error  { return nil }
 func (s *stubChannel) Incoming() <-chan messages.InboundMessage {
@@ -58,20 +62,22 @@ func makeStubBuilder(name string, wantErr error) Builder {
 // snapshot/restore is used to give the test a clean registry.
 // Other tests in the repo (e.g. feishu/init_test.go) may have
 // already registered their own builders; we wipe + restore.
-func snapshot() map[string]Builder {
-	original := map[string]Builder{}
-	for _, n := range Available() {
-		original[n] = GetBuilder(n)
+func snapshot() map[string]entry {
+	original := map[string]entry{}
+	mu.RLock()
+	for n, e := range reg {
+		original[n] = e
 	}
+	mu.RUnlock()
 	return original
 }
 
-func restore(s map[string]Builder) {
+func restore(s map[string]entry) {
 	mu.Lock()
 	defer mu.Unlock()
-	reg = map[string]Builder{}
-	for n, b := range s {
-		reg[n] = b
+	reg = map[string]entry{}
+	for n, e := range s {
+		reg[n] = e
 	}
 }
 
@@ -83,12 +89,12 @@ func TestBuildAll_IteratesInAlphabeticalOrder(t *testing.T) {
 	defer restore(original)
 
 	mu.Lock()
-	reg = map[string]Builder{}
+	reg = map[string]entry{}
 	mu.Unlock()
 
-	Register("alpha", makeStubBuilder("alpha", nil))
-	Register("beta", makeStubBuilder("beta", nil))
-	Register("gamma", makeStubBuilder("gamma", errors.New("no creds")))
+	Register("alpha", "a_", makeStubBuilder("alpha", nil))
+	Register("beta", "b_", makeStubBuilder("beta", nil))
+	Register("gamma", "g_", makeStubBuilder("gamma", errors.New("no creds")))
 
 	// Available is alphabetical.
 	got := Available()
@@ -121,10 +127,10 @@ func TestBuildAll_AllBuildersErrorReturnsAggregate(t *testing.T) {
 	defer restore(original)
 
 	mu.Lock()
-	reg = map[string]Builder{}
+	reg = map[string]entry{}
 	mu.Unlock()
 
-	Register("only-failing", makeStubBuilder("only-failing", errors.New("no creds")))
+	Register("only-failing", "o_", makeStubBuilder("only-failing", errors.New("no creds")))
 
 	_, err := BuildAll(&config.Config{})
 	if err == nil {
@@ -140,22 +146,95 @@ func TestAvailable_Alphabetical(t *testing.T) {
 	defer restore(original)
 
 	mu.Lock()
-	reg = map[string]Builder{}
+	reg = map[string]entry{}
 	mu.Unlock()
 
 	// Register out of alphabetical order; Available must sort.
-	Register("zulu", makeStubBuilder("zulu", nil))
-	Register("alpha", makeStubBuilder("alpha", nil))
-	Register("mike", makeStubBuilder("mike", nil))
+	Register("zulu", "z_", makeStubBuilder("zulu", nil))
+	Register("alpha", "a_", makeStubBuilder("alpha", nil))
+	Register("mike", "m_", makeStubBuilder("mike", nil))
 
 	got := Available()
 	want := []string{"alpha", "mike", "zulu"}
-	if len(got) != 3 {
+	if len(got) != len(want) {
 		t.Fatalf("Available: got %v, want %v", got, want)
 	}
 	for i := range got {
 		if got[i] != want[i] {
 			t.Errorf("Available[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// TestChatIDPrefixes_SkipsEmpty verifies that channels declaring
+// no prefix (e.g. the bot workflows engine) do NOT contribute an
+// "" to ChatIDPrefixes — an empty prefix would falsely accept
+// every key. Pins the safety contract chatstore.New relies on.
+func TestChatIDPrefixes_SkipsEmpty(t *testing.T) {
+	original := snapshot()
+	defer restore(original)
+
+	mu.Lock()
+	reg = map[string]entry{}
+	mu.Unlock()
+
+	Register("feishu", "oc_", makeStubBuilder("feishu", nil))
+	Register("telegram", "tg_", makeStubBuilder("telegram", nil))
+	Register("bot", "", makeStubBuilder("bot", nil))
+
+	got := ChatIDPrefixes()
+	want := []string{"oc_", "tg_"}
+	if len(got) != len(want) {
+		t.Fatalf("ChatIDPrefixes: got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("ChatIDPrefixes[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestChatIDPrefix_Lookup verifies the single-channel prefix
+// accessor used by tests / diagnostics.
+func TestChatIDPrefix_Lookup(t *testing.T) {
+	original := snapshot()
+	defer restore(original)
+
+	mu.Lock()
+	reg = map[string]entry{}
+	mu.Unlock()
+
+	Register("slack", "sl_", makeStubBuilder("slack", nil))
+
+	if got := ChatIDPrefix("slack"); got != "sl_" {
+		t.Errorf("ChatIDPrefix(slack) = %q, want %q", got, "sl_")
+	}
+	if got := ChatIDPrefix("unknown"); got != "" {
+		t.Errorf("ChatIDPrefix(unknown) = %q, want \"\"", got)
+	}
+	if got := ChatIDPrefix("bot"); got != "" {
+		t.Errorf("ChatIDPrefix(bot) = %q, want \"\" (bot has no prefix)", got)
+	}
+}
+
+// TestRegister_RejectsReservedCharsInPrefix verifies the prefix
+// guard. ':' is reserved because telegram encodes topic ids as
+// "<prefix><chat>:<thread>" — a prefix containing ':' would
+// collide. '/' is reserved because channel names use '/' in the
+// user-facing config / login flows.
+func TestRegister_RejectsReservedCharsInPrefix(t *testing.T) {
+	original := snapshot()
+	defer restore(original)
+
+	for _, bad := range []string{"o:c", "o/c"} {
+		bad := bad
+		t.Run(bad, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("Register with prefix %q should panic", bad)
+				}
+			}()
+			Register("test", bad, makeStubBuilder("test", nil))
+		})
 	}
 }

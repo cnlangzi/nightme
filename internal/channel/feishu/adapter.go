@@ -5020,4 +5020,10 @@ func splitLongMessage(text string, maxBytes int) []string {
 	return parts
 }
 
+// ChatIDPrefix implements channel.Channel. Feishu returns
+// oc_<hex> from every chat-id populator (see SessionChatID
+// above), so the namespace tag is "oc_". Mirror the value
+// declared at channel.Register("feishu", "oc_", …) time.
+func (a *Adapter) ChatIDPrefix() string { return "oc_" }
+
 var _ channel.Channel = (*Adapter)(nil)

@@ -181,7 +181,7 @@ func TestLogin_PrintsWalkthroughWhenInteractive(t *testing.T) {
 	for _, want := range []string{
 		"api.slack.com/apps",
 		"socket_mode_enabled",
-		"Install to Workspace",
+		"Install to <your workspace>",
 		// The walkthrough now carries the manifest itself so users
 		// on networks that block Slack's deep link do not have to
 		// run a second command to fetch it.

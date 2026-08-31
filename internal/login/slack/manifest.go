@@ -43,12 +43,12 @@ func ManifestURL() string {
 // assistant_view enables the AI-app surface that chat.startStream
 // and assistant.threads.setStatus depend on.
 const AppManifest = `display_information:
-  name: nightme
+  name: NightMe
   description: Your pair programmer. Set it running, stay in the loop.
   background_color: "#1a1a2e"
 features:
   bot_user:
-    display_name: nightme
+    display_name: NightMe
     always_online: true
   assistant_view:
     assistant_description: Drive your local coding agents from Slack.

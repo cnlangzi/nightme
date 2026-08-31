@@ -223,15 +223,22 @@ Slack app setup (Socket Mode — no public URL required)
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "----- end of manifest -----")
 	fmt.Fprintln(out)
-	fmt.Fprint(out, `  3. After "Your app has been created", left sidebar → "Socket Mode" → enable it.
-  4. Click "Generate Token and Enter Socket Mode", enter a name,
+	fmt.Fprint(out, `  3. After "Your app has been created", left sidebar → "Install App" →
+     click "Install to <your workspace>", then Allow.
+     Copy the xoxb-… Bot User OAuth Token.
+
+     The manifest already enabled it; you do NOT need to enable
+     Socket Mode from the sidebar. It is on by default because
+     socket_mode_enabled: true was in the YAML.
+
+  4. Left sidebar → "Basic Information" → "App-Level Tokens" →
+     "Generate Token and Enter Socket Mode", enter a name,
      add the connections:write scope, then Generate.
      Copy the xapp-… token now — Slack shows it only once.
-  5. Left sidebar → "Install App" → "Install to Workspace" → Allow.
-     Copy the xoxb-… Bot User OAuth Token.
-  6. Paste both tokens below.
 
-  After login: invite the bot to a channel with /invite @nightme,
+  5. Paste both tokens below.
+
+  After login: invite the bot to a channel with /invite @NightMe,
   or just open a DM with it and say hello.
 
   Note: changing scopes or events later requires reinstalling the

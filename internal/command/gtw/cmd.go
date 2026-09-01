@@ -957,7 +957,7 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.PR.Hooks.Before, cfg.PR.Hooks.After,
 		func() error {
-			_, e := dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+			_, e := dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.PR.Agent)
 			// dispatchPR loads the dispatch context internally
 			// (worktree/branch from yml). Re-derive so any
 			// future change that mutates cwd during PR

@@ -77,7 +77,7 @@ func (s *StateStore) Load(runID string) (*wfe.RunState, error) {
 //  5. on completion, removes the run from runsByChatID
 func (b *Bot) onTrigger(ctx context.Context, wf *wfe.Workflow, ev wfe.Event, workspace string) {
 	runID := fmt.Sprintf("%s-%s-%d", wf.Name, sanitize(workspace), time.Now().UnixNano())
-	chatID := "bot:wf:" + runID
+	chatID := "bt_" + runID
 
 	r := &botRun{
 		runID:     runID,

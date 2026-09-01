@@ -118,10 +118,6 @@ func New(path string) (*Store, error) {
 					path, len(container.ChatSessions),
 				)
 			}
-			prefixSet := make(map[string]bool, len(prefixes))
-			for _, p := range prefixes {
-				prefixSet[p] = true
-			}
 			const maxLogged = 5
 			dropped := 0
 			for k, raw := range container.ChatSessions {
@@ -147,7 +143,14 @@ func New(path string) (*Store, error) {
 						path, k, probe.ChatID,
 					)
 				}
-				if !hasRegisteredPrefix(k, prefixSet) {
+				known := false
+				for _, p := range prefixes {
+					if strings.HasPrefix(k, p) {
+						known = true
+						break
+					}
+				}
+				if !known {
 					// Stash raw bytes — save() will rewrite them
 					// to disk verbatim so the on-disk file is
 					// never silently modified by the loader.
@@ -158,19 +161,19 @@ func New(path string) (*Store, error) {
 							"chatstore: chat_sessions.json entry has unknown chat-id prefix; preserving verbatim in on-disk file",
 							"path", path,
 							"key", k,
-							"registered_prefixes", prefixes,
 						)
 					}
 					continue
 				}
 				s.entries[k] = &probe
 			}
-			if dropped > maxLogged {
+			if dropped > 0 {
 				slog.Warn(
-					"chatstore: chat_sessions.json has additional entries with unknown chat-id prefixes; all are preserved verbatim",
+					"chatstore: chat_sessions.json has entries with unknown chat-id prefixes; all are preserved verbatim in the on-disk file",
 					"path", path,
-					"first_logged", maxLogged,
+					"first_logged", min(dropped, maxLogged),
 					"total_dropped", dropped,
+					"registered_prefixes", prefixes,
 				)
 			}
 		}
@@ -181,18 +184,6 @@ func New(path string) (*Store, error) {
 	}
 
 	return s, nil
-}
-
-// hasRegisteredPrefix reports whether key starts with any of the
-// registered prefixes. Extracted so the per-entry loop in New
-// stays readable; takes a precomputed set for O(1) lookup.
-func hasRegisteredPrefix(key string, prefixSet map[string]bool) bool {
-	for p := range prefixSet {
-		if strings.HasPrefix(key, p) {
-			return true
-		}
-	}
-	return false
 }
 
 // Dropped returns the chat-id keys that were preserved verbatim

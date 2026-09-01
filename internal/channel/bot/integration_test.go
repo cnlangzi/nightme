@@ -114,7 +114,7 @@ func TestBotMessageFlowsThroughGateway(t *testing.T) {
 	// Pre-register a botRun so bot.Send has somewhere to route.
 	// (In production this is created by fireWorkflow; here we
 	// simulate that.)
-	chatID := "bot:wf:integration-test:42"
+	chatID := "bt_integration-test:42"
 	run := &botRun{
 		runID:  "integration-test-42",
 		chatID: chatID,

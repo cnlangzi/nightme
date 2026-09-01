@@ -23,11 +23,10 @@
 // separator or sub-namespace the adapter tacks on after the
 // prefix lives outside the prefix. e.g. telegram emits
 // "tg_<chatid>:<thread>" — "<chatid>" and "<thread>" are
-// telegram's internal routing, not part of the prefix; bot
-// emits "bot:wf:<runID>" — ":wf:" and "<runID>" are bot's
-// internal routing. So prefixes never contain ':' for any
-// current channel, and ':' is permitted only to leave the door
-// open for adapters that may want it.
+// telegram's internal routing, not part of the prefix. So
+// prefixes never contain ':' for any current channel, and ':'
+// is permitted only to leave the door open for adapters that
+// may want it.
 //
 // "/" is rejected because the channel name and login flows
 // treat "/" as a path separator.

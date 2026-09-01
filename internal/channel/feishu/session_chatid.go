@@ -13,9 +13,8 @@ import (
 // cross-channel chatIDs stay unambiguous in chat_sessions.json.
 //
 // The constant is the single source of truth for the namespace
-// tag: channel.Register("feishu", chatIDPrefix, …) in init.go
-// and (*Adapter).ChatIDPrefix() in adapter.go both reference it,
-// so a future rename stays in one place.
+// tag — channel.Register("feishu", chatIDPrefix, …) in init.go
+// references it, so a future rename stays in one place.
 const chatIDPrefix = "oc_"
 
 // stringValue dereferences a *string, returning "" when nil. Used

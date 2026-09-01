@@ -13,10 +13,9 @@ import (
 // init registers the bot channel with the channel registry so
 // channel.BuildAll picks it up automatically (v1.3+ multi-channel).
 //
-// bot produces chatIDs of the form "bot:wf:<runID>" — see
-// workflow.go onTrigger. The cross-channel prefix is "bt_";
-// the trailing ":wf:<runID>" is bot's own runtime routing
-// (workflow namespace + run id) and lives outside the prefix.
+// bot produces chatIDs of the form "bt_<runID>" — see
+// workflow.go onTrigger. The "bt_" prefix matches the
+// "tg_" / "oc_" / "sl_" convention used by the IM channels.
 //
 // bot is enabled when the workflows dir exists (or can be created)
 // under the user's nightme data dir. If not, the builder returns

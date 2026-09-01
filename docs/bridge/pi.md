@@ -117,14 +117,34 @@ bridge 只用：`sessionId`、`model.id`、`model.name`（→ `EventAgentConnect
 ### 3.1 Spawn
 
 ```
-exec.CommandContext(ctx, "pi", "--mode", "rpc")
+exec.CommandContext(ctx, "pi",
+  "--mode", "rpc",
+  "--approve",
+  "--no-themes",
+  "--offline",
+)
 cmd.Dir = cfg.Workspace
-cmd.Env = os.Environ() + cfg.Env + append(self.command)   // defensive
+cmd.Env = append(append(os.Environ(), cfg.Env...), "PI_TELEMETRY=0") // defensive
 cmd.Stdin  = pipe
 cmd.Stdout = pipe
 cmd.Stderr = pipe
 cmd.Start() → PID
 ```
+
+### 3.1.1 Headless 启动契约
+
+NightMe 是 Pi 唯一的交互方：没有人可以操作 Pi 的终端或 TUI，用户在 NightMe 启动前已经完成 Pi 配置，session 运行期间也不依赖 Pi 动态安装或重新加载 package。因此 RPC 进程默认使用一组 headless 参数：
+
+| 参数 | 作用 |
+|---|---|
+| `--approve` | 本次运行直接信任项目目录，加载项目本地 `.pi` 配置、extension、skill、prompt、theme 和 `SYSTEM.md` / `APPEND_SYSTEM.md`；不写入用户 trust store |
+| `--no-themes` | 禁用未被 RPC 使用的 TUI theme discovery/loading |
+| `--offline` | 禁止启动时版本检查、model catalog 刷新和未安装 npm/git package 的自动安装；已安装的本地资源继续工作 |
+| `PI_TELEMETRY=0` | 禁止安装/更新 telemetry 与 provider attribution header |
+
+这些参数**不能**等价替换为 `--no-extensions`、`--no-context-files`、`--no-skills`、`--no-prompt-templates` 或 `--no-session`。后者会改变 NightMe 依赖的项目 context、工具能力和 session resume 语义。
+
+`--offline` 依赖前置配置不变量：用户在 NightMe 调用 Pi 前已经安装好需要使用的 extension/package。离线模式只跳过网络安装，不应把缺失 package 静默当作已加载资源。
 
 **严禁 PTY**。参照 `internal/bridge/claudecode/session.go:71-130` 的真实 pipe 模式，但去掉 `--print --input-format stream-json --output-format stream-json --permission-mode ...` 那一组 flag。
 
@@ -273,7 +293,7 @@ npm install -g @earendil-works/pi-coding-agent
 pnpm add -g @earendil-works/pi-coding-agent
 ```
 
-`nightme agents` 表格显示 `pi / pi / --mode rpc`；`nightme config` → Agents 可选为 primary；飞书会话中 `/use pi` 走现有 `agentsession.Spawner`，经 `Detect()` (`exec.LookPath("pi")`) → `Start()`（`exec.Command("pi", "--mode", "rpc")` + 真实 pipes）→ `newSession(...)`。
+`nightme agents` 表格显示 `pi / pi / --mode rpc --approve --no-themes --offline`；`nightme config` → Agents 可选为 primary；飞书会话中 `/use pi` 走现有 `agentsession.Spawner`，经 `Detect()` (`exec.LookPath("pi")`) → `Start()`（`exec.Command("pi", "--mode", "rpc", "--approve", "--no-themes", "--offline")` + 真实 pipes）→ `newSession(...)`。一次性任务使用 `pi --mode json --approve --no-themes --offline -p <prompt>`。两者都继承 `PI_TELEMETRY=0`。
 
 ## 8. 已知限制（首期明确）
 
@@ -339,7 +359,7 @@ pnpm add -g @earendil-works/pi-coding-agent
 - `go test -race ./internal/bridge/pi ./internal/chatsession`
 - `go test ./...`
 - 安装官方 pi 后手工 smoke：
-  - `nightme agents` 列出 `pi / pi / --mode rpc`。
+  - `nightme agents` 列出 `pi / pi / --mode rpc --approve --no-themes --offline`。
   - daemon 启动，`/use pi`；多轮文本 + 一次图片 + 一次 tool call 完整。
   - footer 显示 session id / model / tokens。
   - `/close` 回收子进程。

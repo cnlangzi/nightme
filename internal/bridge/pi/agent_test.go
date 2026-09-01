@@ -16,7 +16,12 @@ import (
 // receives when no extra args / resume id are configured.
 func TestBuildArgs_Defaults(t *testing.T) {
 	got := buildArgs(nil, agent.StartConfig{})
-	want := []string{"--mode", "rpc"}
+	want := []string{
+		"--mode", "rpc",
+		"--approve",
+		"--no-themes",
+		"--offline",
+	}
 	if !equalSlice(got, want) {
 		t.Errorf("buildArgs(nil, {}) = %v, want %v", got, want)
 	}
@@ -33,6 +38,9 @@ func TestBuildArgs_PassesExtraArgsThroughInOrder(t *testing.T) {
 	)
 	want := []string{
 		"--mode", "rpc",
+		"--approve",
+		"--no-themes",
+		"--offline",
 		"--no-builtin-tools",
 		"--model", "anthropic/claude-sonnet",
 	}
@@ -59,7 +67,13 @@ func TestBuildArgs_OmitsSessionIDWhenResumeIDEmpty(t *testing.T) {
 // verbatim — Pi's own validator decides whether the id is legal.
 func TestBuildArgs_AppendsSessionIDWhenResumeIDSet(t *testing.T) {
 	got := buildArgs(nil, agent.StartConfig{SessionID: "sess-abc-123"})
-	want := []string{"--mode", "rpc", "--session-id", "sess-abc-123"}
+	want := []string{
+		"--mode", "rpc",
+		"--approve",
+		"--no-themes",
+		"--offline",
+		"--session-id", "sess-abc-123",
+	}
 	if !equalSlice(got, want) {
 		t.Errorf("buildArgs with SessionID = %v, want %v", got, want)
 	}
@@ -79,6 +93,9 @@ func TestBuildArgs_ResumeFlagGoesLastAfterUserArgs(t *testing.T) {
 	)
 	want := []string{
 		"--mode", "rpc",
+		"--approve",
+		"--no-themes",
+		"--offline",
 		"--model", "google/gemini",
 		"--session-id", "sess-xyz",
 	}
@@ -180,7 +197,14 @@ func TestBuildArgs_ResumeIDStripsConflictingArg(t *testing.T) {
 			SessionID: "resume-id",
 		},
 	)
-	want := []string{"--mode", "rpc", "--model", "x", "--session-id", "resume-id"}
+	want := []string{
+		"--mode", "rpc",
+		"--approve",
+		"--no-themes",
+		"--offline",
+		"--model", "x",
+		"--session-id", "resume-id",
+	}
 	if !equalSlice(got, want) {
 		t.Errorf("buildArgs = %v, want %v", got, want)
 	}
@@ -208,7 +232,13 @@ func TestBuildArgs_NoResume_PassesSessionIDThrough(t *testing.T) {
 			SessionID: "",
 		},
 	)
-	want := []string{"--mode", "rpc", "--session-id", "user-fresh"}
+	want := []string{
+		"--mode", "rpc",
+		"--approve",
+		"--no-themes",
+		"--offline",
+		"--session-id", "user-fresh",
+	}
 	if !equalSlice(got, want) {
 		t.Errorf("buildArgs = %v, want %v", got, want)
 	}

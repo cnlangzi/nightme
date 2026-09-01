@@ -1,6 +1,6 @@
 # /review 设计
 
-> **Status**: 设计定稿(v14,含三种 Runner 架构 + ocr 路径按 rule group 拆多 job 并发 + simplify 作为并行 group);**§2.5 多 job 并发机制已实现**(`internal/agent/aggregate_sink.go` + `review_with_ocr.go::delegateReviewMultiJob`,详见 §2.5.7 实现索引)
+> **Status**: 设计定稿(v14,含三种 Runner 架构 + ocr 路径按 rule group 拆多 job 并发 + simplify 作为并行 group);**v15 +** cursor 移到 Tier 1 通过 `ReviewWithMixed`(native `/review-bugbot` slash + simplify 并行 fan-out);**§2.5 多 job 并发机制已实现**(`internal/agent/aggregate_sink.go` + `review_with_ocr.go::delegateReviewMultiJob`,详见 §2.5.7 实现索引)
 > **Scope**: `/review` slash 命令的架构、分流、数据流、生命周期与边界
 > **读者**: 参与 command / agent / bridge / chatsession 任一层,或想理解 review 设计意图的工程师
 > **Related docs**:
@@ -54,7 +54,17 @@ Starter.Review(bridge 各自的实现)
    │     → 桥自己调内置命令(`claude -p code-review` / `codex review --base`)
    │        〔各家最优形态,不画蛇添足;不走 agent 包 runner〕
    │
-   ├─ Delegate bridge(dsh / pi / acp / opencode / cursor)
+   ├─ Mixed bridge(cursor)
+   │     → agent.ReviewWithMixed(slashCommands=["/review-bugbot"])
+   │        ┌─ pre := precomputeReviewWithBuiltin(workspace)
+   │        ├─ groups := [nativeReviewGroup("/review-bugbot"), simplifyGroup(reviewable)]
+   │        └─ delegateReviewMultiJob → 两个 goroutine 并行
+   │           (cursor.RunOnce spawn cursor-agent -p "/review-bugbot" 走 Bugbot;
+   │            cursor.RunOnce spawn cursor-agent -p "<simplifyPrompt>" 走 simplify lens)
+   │           → eventAggregator 3-phase + mergeRunResults 合并
+   │        〔Bugbot 不含 simplify 4 axes,nightme 补;详见 §2.1.1〕
+   │
+   ├─ Delegate bridge(dsh / pi / acp / opencode)
    │     → 桥检测 OcrAvailable()(SRP:路由选择放桥层,不放 agent 包内)
    │        ├─ YES → agent.ReviewWithOcr
    │        │           ├─ pre := precomputeReviewWithOcr(workspace)
@@ -116,9 +126,71 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
 
 
 
-### 2.1 Tier 1 — native review(codex / claude)
+### 2.1 Tier 1 — native review(codex / claude / cursor)
 
-有内置 review 子命令的 bridge **直接调内置命令**(codex 跑 `codex review --base <ref>`、claude 跑 `claude -p code-review`)。理由:这两家的内置 review 是各自**最优形态**(codex 的 severity 分组、claude 的多 agent + confidence 评分),通用 prompt 抢不过。符合 F-review.md §13"有原生就用原生"原则。**零改动**。
+有内置 review 子命令的 bridge **直接调内置命令**(codex 跑 `codex review --base <ref>`、claude 跑 `claude -p code-review`、cursor 跑 `cursor-agent -p "/review-bugbot"`)。理由:这三家的内置 review 是各自**最优形态**(codex 的 severity 分组、claude 的多 agent + confidence 评分、cursor Bugbot 的规则匹配 + 深度控制),通用 prompt 抢不过。符合 F-review.md §13"有原生就用原生"原则。**零改动**。
+
+#### 2.1.1 cursor 的 native review 入口(cursor-agent + slash command)
+
+cursor 跟 codex / claude 不一样:它**没有** `cursor-agent review` CLI subcommand,但 `cursor-agent` 在 `-p` print 模式下**会** dispatch 内置 slash command(类似 `claude -p code-review`)。cursor 把 review 能力放在 **skill 系统**里,而不是 CLI subcommand 里。
+
+**cursor review skill 三件套**(均在 `~/.cursor/skills-cursor/`,cursor-agent **自动加载**,无需 `--plugin-dir`):
+
+| Skill | 用途 | 可在 `-p` 模式 dispatch? |
+|---|---|---|
+| `review` | AskQuestion 菜单,让用户选 bugbot / security(`disable-model-invocation: true`,纯菜单) | ❌ 跑出来只是 menu,不可用 |
+| `review-bugbot` | Bugbot subagent——通用代码变更 review | ✅ 实证 |
+| `review-security` | Security Review subagent——安全专项 review | ✅ 实证 |
+
+**实证**(2026-09-01,本机 cursor-agent 2026.08.11):
+
+```bash
+$ cursor-agent -p "/review-bugbot" --output-format text --trust --yolo
+Bugbot could not complete the review: it could not compute a branch-changes
+diff in `/private/tmp` (this workspace is not a git repo).
+# dispatch 成功,只是 /tmp 不是 git repo
+
+$ cursor-agent -p "/review" --output-format text --trust --yolo
+Which review should I run?
+1. **Bugbot** (`/review-bugbot`) — code-change review
+2. **Security Review** (`/review-security`) — security-focused review
+# menu skill 也 dispatch 了,只是 menu 不可用
+
+$ cursor-agent -p "/review-bugbot" --output-format text --trust --yolo
+There was no diff to review on this branch.
+# 在真实 git repo 里跑出正常响应
+```
+
+**为什么 cursor 之前归 Tier 2/3,现在移到"mixed"档**:早期调研(2026-09-01 之前)漏了 `-p` 模式 dispatch 的实证,误以为 cursor CLI 没有 native review,放在 Tier 2/3 走 `ReviewWithOcr` / `ReviewWithPrompt` 多 job fan-out。2026-09-01 在 `fix-review-on-cursor` 分支上实证 cursor-agent `-p "/review-bugbot"` 真能 dispatch Bugbot,把 cursor 移到 Tier 1。
+
+**但 cursor 比 codex / claudecode 多一个 simplify goroutine**,所以叫 "mixed"(native + simplify),不是纯 native 单调用。原因:**Bugbot 不覆盖** reuse / simplification / efficiency / altitude 这 4 个 simplify axes——nightme 用自己的 `simplifyPrompt`(比 Cursor IDE 的 `/simplify` prompt 更详细)补这块,跟 Bugbot 并行跑,merge 后产出完整 review。详见 §2.1.1 后面"为什么 cursor 多一个 simplify goroutine"。
+
+**实现入口**: `agent.ReviewWithMixed`(`internal/agent/review.go`)——通用 helper,接受一个 slash command 列表,内部拼出 `groups = [nativeReviewGroup(slash1), simplifyGroup(reviewable)]`,走 `delegateReviewMultiJob` + `eventAggregator` + `mergeRunResults` 现有 machinery。cursor bridge 的 `Review()`` 是一行 wiring:`return agent.ReviewWithMixed(ctx, s, cfg, []string{"/review-bugbot"}, opts...)`。
+
+**为什么不桥接 cursor IDE 的 `/simplify`**:
+
+实证: `/simplify`、`/simplify-bugbot`、`/review-simplify` 三个变体在 `cursor-agent -p` 模式下**全部空输出,不 dispatch**。`~/.cursor/skills-cursor/`(23 个内置 skill)和 `~/.cursor/skills/`(9 个用户装 skill)**无 simplify 相关**。Cursor.app 安装包 + 二进制 + user extensions + plugins/local + statsig-cache.json 全 grep `simplify`:**只在 telemetry key 和无关扩展里出现,没有任何 slash command 定义**。
+
+真相:`/simplify` 在 Cursor IDE chat 菜单里能看到,但 cursor IDE 包内 + 二进制 + 用户扩展**全部零结果**——它实际是 Cursor **云端**"model slash command"(`cli-config.json` 里有 `"modelSlashCommands": true` 标志),只下发到 IDE chat UI,**cursor-agent CLI 完全不可达**。
+
+nightme-owned `simplifyPrompt`(internal/agent/review.go)比 Cursor 云端的 `/simplify` prompt 更结构化、更详细(4 axes + reporting discipline + severity rubric),所以 nightme 不需要桥接。
+
+**groups 形态**:
+
+```go
+{Pattern: patternNativeReview, Rule: "/review-bugbot"}  // cursor.RunOnce spawn --p "/review-bugbot",Bugbot dispatch
+{Pattern: patternSimplify,    Rule: simplifyPrompt}    // cursor.RunOnce spawn --p "<simplify prompt text>",模型做 simplify lens
+```
+
+`assembleGroupPrompt` 对 `patternNativeReview` 返回 `g.Rule` 原文(不包 diff/rule),让 cursor.RunOnce 拿 `/review-bugbot` 直接 dispatch。simplify goroutine 走正常的 diff / file 包装。
+
+**Review depth(Quick / Deep)**:这是 Cursor IDE 设置里的选项(Settings → Agents → Agent Review),**不暴露**给 cursor-agent CLI(`--help` 里没有 `--review-depth` flag)。bridge 跑出来的是 IDE 设置的默认深度——用户调 IDE 设置即可,bridge 层不动。
+
+**前置条件**:
+
+- cursor-agent 二进制装好(`Detect()` 已 check)
+- workspace 必须是 git repo(Bugbot 自己算 diff,workspace 模式 `--base` 不存在,不像 codex 有 `--uncommitted` 兜底)
+- cursor-agent ≥ 2026.08(`review-bugbot` skill 在此之前可能没内置)
 
 ### 2.2 Tier 2 — ocr 委托模式(delegate + ocr 已装)
 
@@ -285,21 +357,23 @@ partial failure 路径:**不**升级为 merge 整体错误,失败组以 inline m
 - **未配对 ToolStart**:job 在 ToolStart 后异常结束(无对应 ToolEnd),该 Start 进 buffer 后永远不被 forward——这是合理行为,chat 不会看到半截 call;该 job 的 done 仍会按 Result/Error 触发。
 - **orphan ToolEnd**:配对 ToolStart 已先被 replay 转发过的罕见情况——orphan End 也 forward,chat 看到一条无 Start 的 End,可忽略。
 
-### 2.5.7 实现索引(v14)
+### 2.5.7 实现索引(v14, + v15 ReviewWithMixed)
 
 | 概念 | 实现位置 |
 | --- | --- |
-| 三个 Runner 入口(`ReviewWithOcr` / `ReviewWithPrompt` / per-bridge `Review`) | `internal/agent/review_with_ocr.go`、`internal/agent/review.go` |
+| 四个 Runner 入口(`ReviewWithOcr` / `ReviewWithPrompt` / `ReviewWithMixed` / per-bridge `Review`) | `internal/agent/review_with_ocr.go`、`internal/agent/review.go` |
 | ocr 路径 precompute(ocr delegate preview + rule + diffs) | `internal/agent/review_with_ocr.go::precomputeReviewWithOcr` |
 | Go 路径 precompute(detectDefaultBranch + merge-base + 4 git 来源 file enumeration(inlined) + builtin group 合成 + 3 diffs) | `internal/agent/review_with_ocr.go::precomputeReviewWithBuiltin` |
 | `OcrAvailable` 导出函数(bridge dispatcher 用) | `internal/agent/review_with_ocr.go::OcrAvailable` |
+| **Native review group**(bridge 提供 slash command,prompt 原样 return,不包 diff/rule) | `internal/agent/review_with_ocr.go::nativeReviewGroup` + `assembleGroupPrompt` 的 `case patternNativeReview` |
+| **ReviewWithMixed**(native slash + simplify 并行,通用 helper,不是 cursor 专属) | `internal/agent/review.go::ReviewWithMixed` |
 | 多 job 并发编排(sem cap 4,N 个 goroutine,各自独立 ctx) | `internal/agent/review_with_ocr.go::delegateReviewMultiJob` |
-| per-group 提示词(context / file list / diff / rule / how-to / schema),按 `g.Pattern` 分 header(ocr / builtin / simplify) | `internal/agent/review_with_ocr.go::assembleGroupPrompt` |
+| per-group 提示词(context / file list / diff / rule / how-to / schema),按 `g.Pattern` 分 header(ocr / builtin / simplify / native) | `internal/agent/review_with_ocr.go::assembleGroupPrompt` |
 | 按文件过滤 diff(`git diff -- <files...>`) | `internal/agent/review_with_ocr.go::groupFilteredDiff` |
 | `BuiltinPrompt` / `SimplifyPrompt` 静态 prompt 模板 | `internal/agent/review.go` |
 | **三相状态机 + per-job 配对缓冲**(Phase 1 buffering → Phase 2 streaming → Phase 3 closed;pendingToolStarts map per-job;Task 跨 job ID 去重;异序到达容错) | `internal/agent/aggregate_sink.go::eventAggregator` |
 | **多 job 结果合并**(纯自然语言拼接 + 部分失败 inline marker,无解析/排序/去重/coverage 聚合) | `internal/agent/review_with_ocr.go::mergeRunResults` |
-| 单元测试(聚合器 / 合并 / 并发 / 配对) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go` |
+| 单元测试(聚合器 / 合并 / 并发 / 配对 / native group / mixed fan-out) | `internal/agent/aggregate_sink_test.go`、`internal/agent/merge_results_test.go`、`internal/agent/fanout_test.go`、`internal/agent/review_mixed_test.go` |
 
 **不变量与实现的对应**:
 
@@ -352,6 +426,7 @@ simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern`
 | Runner | simplify group 出现? |
 |---|---|
 | `ReviewWithNative`(claudecode / codex) | ❌ 不出现(桥自己处理 prompt) |
+| `ReviewWithMixed`(cursor) | ✅ 始终追加(Bugbot 不含 simplify axes,nightme 补) |
 | `ReviewWithOcr`(ocr 已装) | ✅ 始终追加 |
 | `ReviewWithPrompt`(ocr 未装 / fallback) | ✅ 始终追加 |
 
@@ -360,7 +435,7 @@ simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern`
 `OcrAvailable()` 是 agent 包导出的函数。delegate-tier 桥的 `Starter.Review` 自己做 ocr 检测,然后决定调哪个 runner:
 
 ```go
-// 5 个 delegate 桥的 Starter.Review(统一形态)
+// 4 个 delegate 桥的 Starter.Review(统一形态)
 func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
     if agent.OcrAvailable() {
         return agent.ReviewWithOcr(ctx, s, cfg, opts...)
@@ -368,6 +443,8 @@ func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
     return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 ```
+
+> **历史变更**:cursor 在 2026-09-01 之前属于这 4 个 delegate 桥之一(`fix-review-on-cursor` 分支实证 cursor CLI 走 `-p "/review-bugbot"` dispatch 走通后,移到 §2.1 Tier 1)。详见 §2.1.1。
 
 `ReviewWithOcr` 内部不再做 `OcrAvailable` 检查或 fallback —— 单一职责:假设 ocr 可用,跑 ocr 委托模式。如果调用方在 ocr 不可用时调它,那是调用方 bug,不该偷偷 fallback。
 
@@ -392,6 +469,7 @@ func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
    1. 接 sink,把 review 的中间事件(思考 / 工具调用)**流式**进 chat(观察用)。
    2. `Starter.Review` → **三种 Runner**:
       - Native bridge(claudecode / codex):桥自己调内置命令(`claude -p code-review` / `codex review --base`)。
+      - Mixed bridge(cursor):走 `ReviewWithMixed`——native `/review-bugbot` goroutine + nightme-owned simplify 并行 goroutine,经 `delegateReviewMultiJob` 合并。
       - Delegate + ocr 在:桥 dispatch 到 `ReviewWithOcr` → `precomputeReviewWithOcr` → ocr groups + simplifyGroup → 多 job 风扇。
       - Delegate + ocr 不在:桥 dispatch 到 `ReviewWithPrompt` → `precomputeReviewWithBuiltin` → 1 builtinGroup + simplifyGroup → 多 job 风扇。
    3. `FormatReviewMessage` 包前缀(workspace + runner 标注,让主 agent 知道"这是谁跑的 review")。
@@ -426,7 +504,8 @@ func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
 ## 6. 不做的事(边界)
 
 - ❌ 把 ocr 当 bridge / 进 agent 注册表 —— 它是被调用的外部工具。
-- ❌ 动 native review(codex / claude 内置)—— 有内置就调内置。
+- ❌ 动 native review(codex / claude / cursor 内置)—— 有内置就调内置。
+  - 例外: cursor 多跑一个 simplify 并行 goroutine,因为 Bugbot 不含 simplify 4 axes(详见 §2.1.1)
 - ❌ 把 ocr 端到端(`ocr review`)设为默认 —— 需配 ocr LLM、双配置,留 opt-in(`--engine ocr`)。
 - ❌ 引入 ocr 端到端的**重 multi-agent 机器**(ocr 自己的定位 / 反思 / 多 bundle 子 agent)作默认 —— 那是 ocr 端到端跑、依赖 ocr 自己的 multi-agent;我们的 code-driven 拆 job **不是**这个(用 ocr 的 rule groups 只取分组边界,RunOnce 各自独立 context,定位 / 反思仍由 host agent 自己做)。两者本质不同,不冲突。
 - ❌ 同进程多轮 + `/new` reset 池化(跨调用复用)—— 破坏 RunOnce 强隔离不变量(#2),`/new` 是弱隔离(依赖 agent reset 彻底),且 review 非高频收益不抵。省 spawn 只在单次 /review 内(瞬态多轮),不跨调用池化。

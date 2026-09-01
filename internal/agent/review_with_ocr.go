@@ -219,12 +219,13 @@ func (rc *reviewContext) isEmptyDiff() bool {
 
 // Sentinel Patterns for non-ocr review groups. Used by assembleGroupPrompt
 // to pick the right header text (ocr groups use "Review rules (matched per
-// file by `ocr delegate`...)"; builtin/simplify use their own headers).
+// file by `ocr delegate`...)"; builtin/simplify/native use their own headers).
 // Real ocr groups come with their own glob (e.g. "**/*.go"); sentinels
 // use the underscore prefix to avoid any future glob collision.
 const (
-	patternBuiltin  = "_nightme_builtin"
-	patternSimplify = "_nightme_simplify"
+	patternBuiltin      = "_nightme_builtin"
+	patternSimplify     = "_nightme_simplify"
+	patternNativeReview = "_nightme_native_review"
 )
 
 // simplifyGroup builds a reviewGroup carrying the nightme-owned simplify
@@ -233,6 +234,26 @@ const (
 // RunOnce concurrent with the main dimension(s).
 func simplifyGroup(files []string) reviewGroup {
 	return reviewGroup{Pattern: patternSimplify, Files: files, Rule: simplifyPrompt}
+}
+
+// nativeReviewGroup builds a reviewGroup carrying a bridge's native review
+// slash command (e.g. cursor's "/review-bugbot"). The bridge's RunOnce
+// spawns its binary with the slash command as the prompt; the binary's
+// print mode dispatches the slash command directly (verified empirically
+// 2026-09-01 for cursor-agent -p "/review-bugbot" → Bugbot subagent).
+//
+// assembleGroupPrompt short-circuits for patternNativeReview and returns
+// g.Rule verbatim — no diff / file / rule wrapping — so the spawned
+// binary receives ONLY the slash command, not a wrapped review prompt.
+// That's how the binary can dispatch it as a slash command instead of
+// treating it as a literal model query.
+//
+// Rule text is the slash command itself (with leading slash). The
+// bridge decides what slash to pass (e.g. "/review-bugbot",
+// "/review-security"); nightme-owned simplify is always added as a
+// separate parallel group via ReviewWithMixed.
+func nativeReviewGroup(slashCommand string) reviewGroup {
+	return reviewGroup{Pattern: patternNativeReview, Rule: slashCommand}
 }
 
 // precomputeReviewWithOcr populates the reviewContext using the ocr CLI
@@ -834,14 +855,31 @@ func reviewWhatToLook() string {
 //   - uses ONLY this group's rule (Tier 2 single-group case
 //     in multi-job context)
 //
+// For patternNativeReview (bridge-native slash command), short-circuits
+// and returns g.Rule verbatim — no diff / file / rule wrapping —
+// so the spawned binary receives ONLY the slash command. This is how
+// the binary's print mode can dispatch the slash command instead of
+// treating it as a literal prompt query.
+//
 // ctx is the per-job goroutine's review ctx so groupFilteredDiff's
 // git subprocesses inherit /close + 30-min timeout (Finding 1).
 //
-// Returns "" only when workspace is empty — same fallback
-// signal as assembleReviewPrompt, so the caller's "fall back to
-// BuiltinPrompt" branch fires uniformly.
+// Returns "" only when workspace is empty (and not native — native
+// groups ignore workspace emptiness since the slash command doesn't
+// depend on it) — same fallback signal as assembleReviewPrompt, so
+// the caller's "fall back to BuiltinPrompt" branch fires uniformly.
 func assembleGroupPrompt(ctx context.Context, rc reviewContext, g *reviewGroup) string {
-	if rc.workspace == "" || g == nil {
+	if g == nil {
+		return ""
+	}
+	// Native slash command: return verbatim. No workspace / diff
+	// gating (the slash command runs regardless — its target is
+	// the binary's own sub-agent system, not our precomputed
+	// reviewContext).
+	if g.Pattern == patternNativeReview {
+		return g.Rule
+	}
+	if rc.workspace == "" {
 		return ""
 	}
 	var b strings.Builder

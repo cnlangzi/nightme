@@ -134,14 +134,40 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
-// Review implements /review for the cursor bridge: delegate to the
-// shared agent.ReviewWithOcr (three-tier dispatch, docs/REVIEW.md
-// §2). Cursor CLI has no native review subcommand, so it runs the
-// Go-precompute-enhanced prompt via print-mode one-shot — ocr
-// delegate rules fold in when ocr is on $PATH.
+// Review implements /review for the cursor bridge via the existing
+// delegateReviewMultiJob fan-out machinery (docs/REVIEW.md §2.5).
+//
+// Groups:
+//   1. nativeReviewGroup("/review-bugbot") — cursor-agent's built-in
+//      Bugbot subagent. Verified empirically 2026-09-01 against
+//      cursor-agent 2026.08.11: cursor-agent auto-loads
+//      ~/.cursor/skills-cursor/review-bugbot/SKILL.md and dispatches
+//      the bugbot subagent when "/review-bugbot" appears as the
+//      positional -p prompt. The bridge's RunOnce spawns cursor-agent
+//      with -p "/review-bugbot" --output-format text and Bugbot runs.
+//   2. simplifyGroup(pre.reviewable) — nightme-owned simplify lens
+//      (reuse / simplification / efficiency / altitude axes).
+//      Bugbot does NOT cover these axes (verified by reading the
+//      SKILL.md and confirming cursor-agent CLI has no /simplify
+//      skill — see docs/REVIEW.md §2.1.1). We run them in parallel
+//      to fill the gap and merge the results.
+//
+// Why the mixed pattern (vs codex/claudecode single-call native):
+// those bridges' native review already covers the full review
+// surface (severity grouping / multi-agent pipeline), so a
+// single native call is enough. Bugbot is missing the simplify
+// axes, hence the second goroutine.
+//
+// Why we go through ReviewWithMixed (vs writing our own fan-out):
+// delegateReviewMultiJob already handles parallel goroutines,
+// eventAggregator (3-phase state machine), per-job ToolStart/End
+// pairing, cross-job Task dedup, and mergeRunResults. Reusing it
+// keeps the cursor path symmetric with codex/claudecode's
+// ReviewWithNative path AND with Tier 2/3's ReviewWithPrompt path.
+//
+// See agent.ReviewWithMixed (internal/agent/review.go) for the
+// generic helper; this method is a one-liner wiring the cursor
+// bridge's slash command into it.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	if agent.OcrAvailable() {
-		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
-	}
-	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+	return agent.ReviewWithMixed(ctx, s, cfg, []string{"/review-bugbot"}, opts...)
 }

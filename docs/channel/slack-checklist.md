@@ -2,22 +2,25 @@
 
 > 用途：覆盖 Slack channel 实现的所有功能，按 doc 章节 + 用户可见行为分组。状态标记：
 >
-> - ✅ **已通过** — 2026-08-31 实测通过（daemon running on /tmp/nightme-v3 + 截图存 `/tmp/slack-shots/`）
+> - ✅ **已通过** — 2026-08-31 / 2026-09-01 实测通过（daemon running on /tmp/nightme-v3 + 截图存 `/tmp/slack-shots/`）
 > - 🟡 **未测试** — 当前测试未覆盖，需要时补
 > - ❌ **设计层面不支持 / 平台限制** — 已记录原因
 > - ⏸ **暂缓** — 需要专门环境或前置条件
+>
+> **2026-09-01 重大变更**：所有命令改用 `$` 前缀消息匹配（详见 `slack.md` §6.2.1）。manifest 不再含 `slash_commands` 段；加新命令 = 0 Slack 改动。
 
 ## 1. Manifest 与 App 安装（doc §6）
 
 | # | 检查项 | 状态 | 备注 |
 |---|---|---|---|
-| 1.1 | manifest 含 12 个 slash_commands（`/cwd /use /watch /stop /steer /queue /new /kclose /think /tools /review /gtw`） | ✅ | `internal/login/slack/manifest.go`，Slack Dashboard 验证 |
-| 1.2 | `/close` 改为 `/kclose`（Slack 保留 `/close`） | ✅ | manifest + adapter 翻译 |
-| 1.3 | OAuth scope 全齐（`chat:write` + `assistant:write` + 19 项） | ✅ | auth.test 错码中实测 |
-| 1.4 | `assistant_view` manifest feature 开启 | ✅ | manifest |
-| 1.5 | Slack app install / Reinstall to Workspace | ✅ | bsk 操作完成 |
-| 1.6 | `internal/login/slack/manifest_verify_test.go` 防止回归 | ✅ | `TestManifestHasSlashCommands` |
-| 1.7 | `TestManifestHasSlashCommands` 检查 `/kclose` 不含 `/close` | ✅ | 加测试 |
+| 1.1 | manifest **不包含** `slash_commands` 段（2026-09-01 改用 `$` 前缀）| ✅ | `internal/login/slack/manifest.go` 已删 |
+| 1.2 | OAuth scope 全齐（`chat:write` + 19 项）| ✅ | auth.test 错码中实测 |
+| 1.3 | `assistant_view` manifest feature 开启 | ✅ | manifest |
+| 1.4 | Slack app install | ✅ | bsk 操作完成 |
+| 1.5 | `internal/login/slack/manifest_verify_test.go` 防止回归 | ✅ | `TestManifestHasNoSlashCommands`（反向断言）|
+| 1.6 | manifest 注册一次后，**0 reinstall 加新命令** | ✅ | `$cwd` / `$use` / `$gtw` 等都是 dispatcher 识别 |
+| 1.7 | ~~`/close` 改为 `/kclose`~~ | ✅ **已消除** | `$close` 直接就是 `close`，Slack 不再拦截 |
+| 1.8 | ~~`TestManifestHasSlashCommands`~~ | ✅ **已废** | 改为 `TestManifestHasNoSlashCommands` |
 
 ## 2. ChatSession / ChatStore（doc §3.1 + 之前 Issue A）
 
@@ -27,15 +30,15 @@
 | 2.2 | chatstore 保留未知前缀 key（向后兼容） | ✅ | PR #316 含 |
 | 2.3 | daemon 重启不丢 `sl_` session | ✅ | 之前重启炸，现在 OK |
 | 2.4 | `sl_<team>:<channel>` chatID 生成（普通 channel） | ✅ | `#all-nightme` 测试 |
-| 2.5 | `sl_<team>:<channel>:<thread_ts>` chatID 生成（DM） | ⏸ | 暂未测 DM（DM 中 slash command 被 Slack 拦截，DM 普通文本需要测） |
-| 2.6 | `cs.selectedCwd` 在 `/cwd` 后正确写入 | ✅ | `chat_sessions.json` 验证 |
+| 2.5 | `sl_<team>:<channel>:<thread_ts>` chatID 生成（DM） | ⏸ | 暂未测 DM（DM 中 `$cwd` 正常工作（不走 slash command 机制），DM 普通文本需要测） |
+| 2.6 | `cs.selectedCwd` 在 `$cwd` 后正确写入 | ✅ | `chat_sessions.json` 验证 |
 
 ## 3. Slack 流式 API（doc §3 / §5.2 — 核心）
 
 | # | 检查项 | 状态 | 备注 |
 |---|---|---|---|
 | 3.1 | `chat.postMessage` 顶层调用 | ✅ | 多次实测 |
-| 3.2 | `chat.postMessage` 挂 `thread_ts` | ✅ | `/cwd` reply 挂在 parent thread 下 |
+| 3.2 | `chat.postMessage` 挂 `thread_ts` | ✅ | `$cwd` reply 挂在 parent thread 下 |
 | 3.3 | `chat.update` 改 text | ⏸ | 当前实现未用 chat.update（流式 API），未来可能用 |
 | 3.4 | `chat.update` 改 blocks | ✅ | test 1-15 时实测 |
 | 3.5 | `chat.startStream` 在普通 channel 成功 | ✅ | 6 个 curl 测试 + 真实部署测试 |
@@ -65,7 +68,7 @@
 | 4.13 | `OutMessageState` reactions（⏳ / 🔄 / ✅）添加 | ✅ | 实测：watch + echo 有 👀✅ |
 | 4.14 | `OutMessageState` 反应替换（前一个 emoji 被 Remove） | 🟡 | 单元测试覆盖，e2e 未明确验证 |
 | 4.15 | `OutMessageStateRemoved` 显式删除 reaction | 🟡 | 单元测试覆盖 |
-| 4.16 | `OutCommandReply` slash command 短回复（`chat.postMessage`） | ✅ | `/cwd` + `/watch` 实测 |
+| 4.16 | `OutCommandReply` slash command 短回复（`chat.postMessage`） | ✅ | `$cwd` + `$watch` 实测 |
 | 4.17 | `OutError` 走 `chat.postMessage`（可挂 thread_ts） | 🟡 | 没实测错误路径 |
 | 4.18 | `OutInit` 折进 StatusBar | 🟡 | 单元测试覆盖 |
 
@@ -74,48 +77,48 @@
 | # | 检查项 | 状态 | 备注 |
 |---|---|---|---|
 | 5.1 | 普通文本消息进 dispatcher | ✅ | echo test 跑通 |
-| 5.2 | DM 普通文本消息 | ⏸ | DM 中 slash command 被 Slack 拦截（设计 §5.2），DM 普通文本需测 |
-| 5.3 | DM 中 `/cwd` 被 Slack 拦截（"not supported in threads"） | ✅ | Slackbot 错误信息确认 |
+| 5.2 | DM 普通文本消息 | ⏸ | DM 中 `$cwd` 正常工作（不走 slash command 机制）（设计 §5.2），DM 普通文本需测 |
+| 5.3 | DM 中 `$cwd` 正常工作（不走 slash command 机制） | ✅ | Slackbot 错误信息确认 |
 | 5.4 | `app_mention` 在 channel 中触发（含 `<@UBOT>`） | 🟡 | 没在 #all-nightme 测 @mention |
 | 5.5 | `message.im`（DM） | ⏸ | DM 测试未做 |
 | 5.6 | `message.channels` 群聊订阅 | ✅ | #all-nightme 实测 |
 | 5.7 | `assistant_thread_started` 事件处理 | 🟡 | Slack Code 频道专属，未测 |
 | 5.8 | 消息去重（同 `(channel, ts)` 从 app_mention 和 message.channels 各来一次） | 🟡 | 单元测试覆盖，e2e 未明确测 |
-| 5.9 | mention 前缀剥离（`<@UBOT> /cwd /tmp` → `/cwd /tmp`） | 🟡 | 单元测试覆盖 |
+| 5.9 | mention 前缀剥离（`<@UBOT> $cwd /tmp` → `$cwd /tmp`） | 🟡 | 单元测试覆盖 |
 | 5.10 | Assistant Chat tab routing（`assistantOrThreadTS`） | 🟡 | 未开 Assistant 模式，未测 |
 | 5.11 | Reply-in-thread 不破坏 command parser（保留 `/` 前缀） | 🟡 | 见 5.9 |
 | 5.12 | 文件附件下载（Bearer + HTML 响应检测） | 🟡 | 单元测试覆盖，e2e 未测 |
 
-## 6. Slash Command 注册与翻译（doc §6.2.1）
+## 6. `$` 前缀命令调用（doc §6.2.1）
 
 | # | 检查项 | 状态 | 备注 |
 |---|---|---|---|
 | 6.1 | `nightme login slack --manifest` 输出 manifest | ✅ | 测试输出 |
-| 6.2 | manifest 安装后 Slack UI 显示 12 个 slash command | ✅ | Slack Commands 页验证 |
-| 6.3 | `/cwd /home/...` 在 channel 中 | ✅ | 实测，回复"Workspace set to ..." |
-| 6.4 | `/cwd /nonexistent` 错误路径 | 🟡 | 没测 |
-| 6.5 | `/cwd` 缺参数（Usage 提示） | 🟡 | 没测 |
-| 6.6 | `/use claude` agent 切换 | 🟡 | 没测 |
-| 6.7 | `/watch on` / `/watch off` / `/watch all` | 🟡 | 只测了 on |
-| 6.8 | `/stop` 中断 in-flight turn | 🟡 | 没测 |
-| 6.9 | `/steer` 抢断并入队 | 🟡 | 没测 |
-| 6.10 | `/queue` 追加独立 prompt | 🟡 | 没测 |
-| 6.11 | `/new` 新 session | 🟡 | 没测 |
-| 6.12 | `/kclose claude` → `/close claude` 翻译 + 关闭 session | 🟡 | 翻译逻辑有单元测试，但没真实跑 |
-| 6.13 | `/think on` / `/think off` 切换 thinking 显示 | 🟡 | 没测 |
-| 6.14 | `/tools on` / `/tools off` 切换 tool-call 显示 | 🟡 | 没测 |
-| 6.15 | `/review` PR review 模式 | 🟡 | 没测 |
-| 6.16 | `/gtw fix <issue-id>` Git Team Workflow | ⏸ | 需要 git worktree 环境 |
-| 6.17 | DM 中 `/cwd` 被 Slack 拦截 | ✅ | Slackbot 错误信息确认 |
+| 6.2 | manifest **不**注册 slash command（`$` 前缀消息匹配） | ✅ | Slack Commands 页验证 |
+| 6.3 | `$cwd /home/...` 在 channel 中 | ✅ | 实测，回复"Workspace set to ..." |
+| 6.4 | `$cwd /nonexistent` 错误路径 | 🟡 | 没测 |
+| 6.5 | `$cwd` 缺参数（Usage 提示） | 🟡 | 没测 |
+| 6.6 | `$use claude` agent 切换 | 🟡 | 没测 |
+| 6.7 | `$watch on` / `$watch off` / `$watch all` | 🟡 | 只测了 on |
+| 6.8 | `$stop` 中断 in-flight turn | 🟡 | 没测 |
+| 6.9 | `$steer` 抢断并入队 | 🟡 | 没测 |
+| 6.10 | `$queue` 追加独立 prompt | 🟡 | 没测 |
+| 6.11 | `$new` 新 session | 🟡 | 没测 |
+| 6.12 | `$close claude` 关闭 session | 🟡 | 翻译逻辑有单元测试，但没真实跑 |
+| 6.13 | `$think on` / `$think off` 切换 thinking 显示 | 🟡 | 没测 |
+| 6.14 | `$tools on` / `$tools off` 切换 tool-call 显示 | 🟡 | 没测 |
+| 6.15 | `$review` PR review 模式 | 🟡 | 没测 |
+| 6.16 | `$gtw fix <issue-id>` Git Team Workflow | ⏸ | 需要 git worktree 环境 |
+| 6.17 | DM 中 `$cwd` 正常工作（不走 slash command 机制） | ✅ | Slackbot 错误信息确认 |
 
 ## 7. 状态栏 / StatusBar（doc §3.3）
 
 | # | 检查项 | 状态 | 备注 |
 |---|---|---|---|
-| 7.1 | StatusBar 三行渲染（cwd + branch + git status） | ✅ | `/cwd` reply 实测 |
+| 7.1 | StatusBar 三行渲染（cwd + branch + git status） | ✅ | `$cwd` reply 实测 |
 | 7.2 | git status 显示 `± N · ? M` | ✅ | `± 12 · ? 1` 实测 |
 | 7.3 | StatusBar 出现在流末尾（finalization blocks） | ✅ | echo test 实测 |
-| 7.4 | StatusBar 出现在 `OutCommandReply`（chat.postMessage 路径） | ✅ | `/cwd` + `/watch` reply |
+| 7.4 | StatusBar 出现在 `OutCommandReply`（chat.postMessage 路径） | ✅ | `$cwd` + `$watch` reply |
 | 7.5 | `OutHeartbeat` 改 title（plan_update chunk） | ⏸ | 未实测 |
 
 ## 8. 限流与重试（doc §2.6）
@@ -229,7 +232,7 @@
 1. **OutChoice 权限卡（#12 系列）** — 用户最容易遇到的核心交互路径
 2. **同 id task_update 是否合并（#11.1）** — 影响 §3.4 隐性风险
 3. **DM 普通文本 + DM 流式（#5.2 / #14.2）** — DM 是用户最常用入口
-4. **/use / /stop / /steer / /gtw 等命令（#6.6-6.16）** — 覆盖面
+4. **`$use` / `$stop` / `$steer` / `$gtw` 等命令（#6.6-6.16）** — 覆盖面
 5. **同一 channel 多 stream 并存（#11.2）** — 多项目并行核心卖点
 6. **OutError 路径（#13.4）+ 错误展示（#4.17）** — 错误恢复 UX
 

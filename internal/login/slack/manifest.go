@@ -77,63 +77,13 @@ features:
   assistant_view:
     assistant_description: Drive your local coding agents from Slack.
     suggested_prompts: []
-  # Slash commands registered with Slack so users can type them
-  # directly in the composer. Without this, Slack's client-side
-  # composer.js intercepts any message starting with slash and routes
-  # it to "Only visible to you" + Slackbot's "not a valid command"
-  # error before the bot ever sees it — nightme's command parser
-  # then never fires (see docs/channel/slack.md §9 known-issue A).
+  # 2026-09-01 改用 dollar-sign 前缀消息匹配（docs/channel/slack.md §6.2.1）。
+  # 不再在 manifest 注册任何 slash command——dollar-sign 不在 Slack 任何保留
+  # 字列表，0 reinstall 摩擦。加新命令 = 0 Slack 改动（只改
+  # internal/command/<name>/cmd.go，dispatcher 自动识别）。
   #
-  # Each entry below corresponds to one IM command under
-  # internal/command/<name>/cmd.go. should_escape is false so the
-  # Slack client does not strip < > & from the text — the engine's
-  # command parser needs those characters verbatim.
-  slash_commands:
-    - command: /cwd
-      description: Set workspace for this chat
-      usage_hint: "path"
-      should_escape: false
-    - command: /use
-      description: Switch active agent (lazy spawn)
-      usage_hint: "agent"
-      should_escape: false
-    - command: /watch
-      description: Toggle message-watch mode for this chat
-      usage_hint: "on | off | all"
-      should_escape: false
-    - command: /stop
-      description: Stop the in-flight turn
-      should_escape: false
-    - command: /steer
-      description: Stop the in-flight turn and prepend a message
-      usage_hint: "message"
-      should_escape: false
-    - command: /queue
-      description: Append a standalone prompt to the queue
-      usage_hint: "message"
-      should_escape: false
-    - command: /new
-      description: Start a new session
-      should_escape: false
-    - command: /kclose
-      description: Close every session in this workspace, or one agent
-      usage_hint: "[agent]"
-      should_escape: false
-    - command: /think
-      description: Toggle thinking visibility
-      usage_hint: "on | off"
-      should_escape: false
-    - command: /tools
-      description: Toggle tool-call visibility
-      usage_hint: "on | off"
-      should_escape: false
-    - command: /review
-      description: Review current branch vs default branch (PR mode)
-      should_escape: false
-    - command: /gtw
-      description: Git-driven team workflow (claim, label, worktree)
-      usage_hint: "fix issue-id"
-      should_escape: false
+  # 旧设计（保留在 git history）曾是 12 个 slash_commands + slash-kclose
+  # 翻译绕开 Slack 的 slash-close 保留字。新设计 dollar-close 直接就是 close。
 oauth_config:
   scopes:
     bot:

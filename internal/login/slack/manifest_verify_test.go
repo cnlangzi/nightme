@@ -5,58 +5,25 @@ import (
 	"testing"
 )
 
-// TestManifestHasSlashCommands verifies the AppManifest registers
-// every IM command under internal/command/*/cmd.go so Slack's
-// client-side composer does not intercept them as "not a valid
-// command". See docs/channel/slack.md §9 known-issue A.
-func TestManifestHasSlashCommands(t *testing.T) {
+// TestManifestHasNoSlashCommands verifies the AppManifest does NOT
+// register any `slash_commands` segment, since 2026-09-01 nightme
+// uses `$`-prefix plain-text message matching for command invocation
+// (docs/channel/slack.md §6.2.1). This is an inverted regression
+// test: a future engineer who re-adds a `slash_commands` block (to
+// re-enable Slack's built-in command autocomplete) will be reminded
+// that the design moved away from that mechanism — see the inline
+// comment in manifest.go for the rationale.
+func TestManifestHasNoSlashCommands(t *testing.T) {
 	m := AppManifest
-	required := []string{
-		"slash_commands:",
-		"- command: /cwd",
-		"- command: /use",
-		"- command: /watch",
-		"- command: /stop",
-		"- command: /steer",
-		"- command: /queue",
-		"- command: /new",
-		// /close is reserved by Slack (built-in channel close). The
-		// manifest registers /kclose instead; handleSlashCommand in
-		// internal/channel/slack/adapter.go translates it back to
-		// /close for the engine's command parser.
-		"- command: /kclose",
-		"- command: /think",
-		"- command: /tools",
-		"- command: /review",
-		"- command: /gtw",
+	if strings.Contains(m, "slash_commands:") {
+		t.Errorf("manifest must not contain a 'slash_commands:' segment (use $-prefix plain text matching instead); see docs/channel/slack.md §6.2.1")
 	}
-	for _, want := range required {
-		if !strings.Contains(m, want) {
-			t.Errorf("manifest missing %q", want)
+	// Also block the individual `- command: /X` entries that would
+	// only appear inside a slash_commands block.
+	for _, cmd := range []string{"/cwd", "/use", "/watch", "/stop", "/steer", "/queue", "/new", "/kclose", "/think", "/tools", "/review", "/gtw"} {
+		needle := "- command: " + cmd
+		if strings.Contains(m, needle) {
+			t.Errorf("manifest must not register %q as a Slack slash command", cmd)
 		}
-	}
-	if strings.Contains(m, "- command: /close") {
-		t.Errorf("manifest still has /close (reserved by Slack; use /kclose)")
-	}
-	lines := strings.Split(m, "\n")
-	inSlash := false
-	count := 0
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "slash_commands:") {
-			inSlash = true
-			continue
-		}
-		if !inSlash {
-			continue
-		}
-		if strings.HasPrefix(strings.TrimSpace(line), "oauth_config:") {
-			break
-		}
-		if strings.HasPrefix(strings.TrimSpace(line), "- command: /") {
-			count++
-		}
-	}
-	if count != 12 {
-		t.Errorf("expected 12 slash command entries, got %d", count)
 	}
 }

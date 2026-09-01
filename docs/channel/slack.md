@@ -113,7 +113,7 @@ cc-connect 有一份生产在跑的 Slack 实现，但它钉在 `slack-go v0.16.
 
 > **注意**：`text` 的 4,000 是按**字节**在服务端判定的，CJK 一字 3 字节，实际约 1,300 汉字。cc-connect 因此把上限压到 3,500 字节。用 `markdown_text` 可绕开这个坑。
 
-> **⚠️ 关于 thread_ts**：Slack 官方文档将 `thread_ts` 标注为「Omit for top-level messages; only supported in channels where the whole channel is one session」。**实测与文档不符**——2026-08-31 在普通 channel（含 `#all-nightme`、`D0BTPL0K3UN`）下，不传 `thread_ts` 一律返回 `invalid_thread_ts`；传了真 ts 立即 OK。**结论**：所有 streaming 输出必须在 thread 里——普通文本用 user message ts 作 thread_ts，slash command 需 adapter 先 postMessage 建 parent thread。详见 §5.2 与 §9.2。
+> **⚠️ 关于 thread_ts**：Slack 官方文档将 `thread_ts` 标注为「Omit for top-level messages; only supported in channels where the whole channel is one session」。**实测与文档不符**——2026-08-31 在普通 channel（含 `#all-nightme`、`D0BTPL0K3UN`）下，不传 `thread_ts` 一律返回 `invalid_thread_ts`；传了真 ts 立即 OK。**结论**：所有 streaming 输出必须在 thread 里——普通文本用 user message ts 作 thread_ts。`$` 前缀命令的回复是短文本（OutCommandReply + `chat.postMessage` 顶层），不走 stream 路径。详见 §5.2 与 §9.2。
 
 ### 2.2 限流档位（已核实）
 
@@ -215,16 +215,31 @@ slack-go 的 `socketmode` 包自带重连，但它的回调粒度是否够构造
 
 ## 3. 占位体生命周期
 
-### 3.1 状态机（2026-08-31 实测修正）
+### 3.1 状态机（2026-09-01 改用 `$` 前缀）
 
-**thread_ts 强制要求**——所有 streaming 输出必须在 thread 里。两条来源：
+**nightme 不再使用 Slack slash command 机制**。所有命令通过 `$` 前缀的普通消息触发（详见 §6.2.1）：
+- `$cwd /path` → adapter 检测 `$` 前缀 → 去掉 `$` → commander 匹配 `/cwd /path`
+- 无 `$` 前缀 → 普通文本 → 走 chatsession → agent prompt 流
+
+**thread_ts 强制要求**——所有 streaming 输出必须在 thread 里（仅普通文本流路径，命令回复走 OutCommandReply + chat.postMessage 顶层）：
 - **普通文本消息**：用户消息本身就是 thread root，`anchor = user.ts`（直接用）
-- **Slash command**：`cmd.TriggerID` **不是** Slack message ts，adapter 在收事件时先 `chat.postMessage` 建一个"⏳ Processing..."占位消息，拿真 ts 当 thread root
+- **`$` 前缀命令**：命令回复是短文本（"Workspace set to ..."），直接 `chat.postMessage` 顶层即可，不进 stream
 
 ```
-[普通文本消息路径]
-用户消息到达 (msg.ReplyTo = user.ts，真 ts)
+[$ 前缀消息路径]
+$cwd /path 触发
    │
+   ├─ adapter.handleMessage: 检测 "$" 前缀 → 去掉 "$" → 文本变成 "/cwd /path"
+   ├─ dispatcher → commander.Match("/cwd /path") 命中
+   ├─ /cwd 命令执行，返回 SlashOutput{Reply: "Workspace set to /path"}
+   │
+   ├─ OutCommandReply → chat.postMessage(channel, text="Workspace set to /path")
+   │                                                                                       ──→ replyTS（顶层消息，无 thread）
+
+[普通文本消息路径]
+用户消息到达（无 $ 前缀）
+   │
+   ├─ dispatcher: 走 chatsession → agent prompt 流
    ├─ chat.startStream(channel, thread_ts=user.ts, recipient_team_id, recipient_user_id, chunks)
    │                                                                              ──→ ts（占位体）
    ├─ OutReply / OutThinking / OutResult      ──→ appendStream(ts, markdown_text chunk)
@@ -232,24 +247,13 @@ slack-go 的 `socketmode` 包自带重连，但它的回调粒度是否够构造
    ├─ OutTaskCreate / OutTaskUpdate           ──→ appendStream(ts, task_update chunk)
    ├─ OutHeartbeat                            ──→ assistant.threads.setStatus(channel_id, thread_ts=user.ts, status)
 
-[Slash command 路径]
-/cwd /path 触发
-   │
-   ├─ adapter.handleSlashCommand: chat.postMessage(channel, text="⏳ Processing /cwd...")
-   │                                                                                       ──→ parentTS
-   ├─ InboundMessage.MessageID = parentTS（真 Slack ts，透传 dispatcher）
-   ├─ /cwd 命令执行，返回 SlashOutput{Reply: "Workspace set to /path"}
-   │
-   ├─ OutCommandReply → chat.postMessage(channel, thread_ts=parentTS, text="Workspace set to /path")
-   │                                                                                       ──→ replyTS（在 parent thread 里）
-
 [OnPromptEnded]
 chat.stopStream(channel, ts, finalization blocks) ──→ 终态封口
    │
    └─ reactions.add(✅) 终态标记
 ```
 
-**实测（2026-08-31）确认整套链路**：`chat.postMessage`(建 parent) → `chat.startStream`(thread_ts + recipient) → `chat.appendStream` → `chat.stopStream` 全部成功。Slack UI 里能看到流式消息作为 thread reply 出现在 #all-nightme channel。
+**实测（2026-08-31）确认整套链路**：`chat.postMessage` → `chat.startStream`(thread_ts + recipient) → `chat.appendStream` → `chat.stopStream` 全部成功。Slack UI 里能看到流式消息作为 thread reply 出现在 #all-nightme channel。
 
 节流层位于 `appendStream` 之前：3 秒窗口内的增量在内存缓冲区合并，窗口开启时一次性发出。
 
@@ -422,11 +426,7 @@ scope 均为 `files:write`。已知坑：`completeUploadExternal` 返回时频�
 - `chat.startStream(channel, thread_ts=user.ts, recipient_team_id, recipient_user_id, chunks)` 立即 OK
 - 整个 agent turn 的所有 chunk 都 thread 在 user message 下
 
-**Slash command**——需要 adapter 建 parent thread：
-- `cmd.TriggerID` 是请求 token，不是 Slack message ts
-- `chat.startStream(channel, thread_ts=TriggerID, ...)` → `invalid_thread_ts`
-- 修复：adapter 在 `handleSlashCommand` 时先 `chat.postMessage(channel, text="⏳ Processing /cwd...")` 建一个占位消息 → 拿返回的 ts 当 thread root
-- 之后的所有 stream/reply 都用这个 ts 作为 thread_ts
+**Slash command（2026-09-01 改用 `$` 前缀后已弃用）**——此路径只记录历史。`$cwd` 现在走普通消息路径，不需要 `chat.startStream` thread root。
 
 **curl 实测证据**（非 SDK）：
 
@@ -465,11 +465,11 @@ Slack 平台层面：
 - `app_mention` 事件 = 只收 @ 自己的
 - `message.channels` / `message.groups` / `message.mpim` = 收全部
 
-nightme 的 `/watch all` 语义要求群里全收，因此**必须订阅 `message.*` 系列**。
+nightme 的 `$watch all` 语义要求群里全收，因此**必须订阅 `message.*` 系列**。
 
 **⚠️ 同时订阅 `app_mention` 和 `message.channels`，@ 消息会被投递两次**（两个事件各来一次）。必须按 `(channel, ts)` 建短 TTL LRU 去重。cc-connect 未遇到此问题（它只订阅了 `app_mention` + `message.im`）。
 
-gate 逻辑不变：channel 只负责在 `InboundMessage.HasMention` 上打标，`/watch` 的判定仍在 `internal/chatsession/watchmode.go`。DM 恒 `true`；频道内 `<@BOT>` / `@here` / `@channel` / 回复 bot 消息 / slash 开头均为 `true`。
+gate 逻辑不变：channel 只负责在 `InboundMessage.HasMention` 上打标，`$watch` 的判定仍在 `internal/chatsession/watchmode.go`。DM 恒 `true`；频道内 `<@BOT>` / `@here` / `@channel` / 回复 bot 消息 / `$` 开头均为 `true`。
 
 ### 5.5 chatID 命名空间
 
@@ -491,7 +491,7 @@ Devin 拍板（2026-08-29）：
 
 > 权限全开。因为它是自己的机器人，自己的群，没有隐私问题。
 
-与 Feishu 侧一致（`im:message.group_msg` 常驻 `DefaultAddons()`，2026-08-03 拍板）：平台层全收，收窄交给 nightme 侧的 `/watch`。
+与 Feishu 侧一致（`im:message.group_msg` 常驻 `DefaultAddons()`，2026-08-03 拍板）：平台层全收，收窄交给 nightme 侧的 `$watch`。
 
 ### 6.2 Bot Token Scopes
 
@@ -505,15 +505,90 @@ users:read            assistant:write
 
 `assistant:write` 用于 `assistant.threads.*`（§2.5）。官方文档说明该 scope 正在向 `chat:write` 过渡，具体弃用时间未公布——两个都申请，过渡完成后再删。
 
-### 6.2.1 Slash Commands（必须显式注册）
+### 6.2.1 命令调用（`$` 前缀消息匹配，2026-09-01 改用）
 
-`commands` scope 只是允许 bot 调用 Slack slash-command API 的 OAuth 权限，**不**代表任何命令已经注册。Slack 客户端（Web/Desktop/Electron 的 `composer.js`）对所有以 `/` 开头的输入做客户端拦截：先查 workspace 内已注册的 command 列表，命中才走 command 事件，没命中就弹「Only visible to you」+ Slackbot 的 "is not a valid command" 错——**根本不会发**到 bot。
+**2026-09-01 决策变更**：nightme **不再用 Slack slash command 机制**。所有命令通过 `$` 前缀的**普通文本消息**触发，不再走 `SlashCommand` 事件，也不在 manifest 注册任何 `slash_commands`。
 
-因此 nightme 的每个 IM 命令（`/cwd`、`/use`、`/watch`、`/stop` 等 12 个）必须在 manifest 的 `features.slash_commands` 段显式列出。这是 2026-08-31 e2e 测试时才发现的盲区——之前的 manifest 只列了 scope，没注册任何 command，导致所有 `/xxx` 输入都被 Slack 客户端吃掉，bot 永远收不到。
+**为什么改**：
 
-参考 cc-connect `docs/slack-app-manifest.json` 的 `features.slash_commands` 段（24 个命令），以及 OpenClaw 的 `commands.native` 配置（Slack 默认 off，需 opt-in）。nightme 现在的做法跟 cc-connect 一致：manifest 全列、handler 收到 `SlashCommand` 事件后重序列化为普通 `InboundMessage` 走同一套 dispatcher（见 `internal/channel/slack/adapter.go:647 handleSlashCommand`）。
+1. **加新命令要 reinstall app**——每次 `internal/command/foo/cmd.go` 新增都得改 manifest + Slack 重装，对 dev 体验是灾难
+2. **Slack 保留字冲突**——`/close` / `/topic` / `/archive` 等被 Slack 占，必须找 workaround（之前用 `/kclose` 就是因为这个）
+3. **`$` 不在 Slack 任何特殊字符列表里**——零冲突
+4. **shell mode 已用 `!`**——`$` 没被占用
 
-**改 manifest 后必须 Reinstall to Workspace**（cc-connect FAQ 第 1 条已记这条坑）。
+**新数据流**：
+
+```
+用户输入: $cwd /home/...  (普通文本消息)
+   ↓
+Slack 发送 message 事件给 bot（不是 SlashCommand 事件）
+   ↓
+adapter.handleMessage: 检测 msg.Text 以 "$" 开头
+   ↓
+去掉 "$" → msg.Text = "/cwd /home/..."
+   ↓
+dispatcher → commander.Match("/cwd /home/...") 命中
+   ↓
+internal/command/cwd.Handle → 返回 SlashOutput{Reply: "Workspace set to /home/..."}
+   ↓
+OutCommandReply → chat.postMessage（顶层短消息）
+```
+
+**Manifest 改动**：
+
+```yaml
+# 旧的 manifest 有这段：
+# features:
+#   slash_commands:
+#     - command: /cwd
+#       ...
+#     - command: /use
+#       ...
+#     ...（12 个）
+
+# 新的 manifest 删掉整个 slash_commands 段。完全不需要。
+```
+
+**Adapter 改动**（5 行）：
+
+```go
+// internal/channel/slack/adapter.go
+func (a *Adapter) handleMessage(...) {
+    text := src.text
+    // $ 前缀：转为 nightme command
+    if strings.HasPrefix(strings.TrimSpace(text), "$") {
+        text = "/" + strings.TrimLeft(strings.TrimSpace(text), "$ ")
+    }
+    // ... 后续 dispatcher 流程不变
+}
+```
+
+**用户使用**：
+
+| 输入 | 效果 |
+|---|---|
+| `$cwd /tmp` | workspace set to /tmp |
+| `$use claude` | switch to claude agent |
+| `$new` | new session |
+| `$gtw fix ISSUE-123` | GTW workflow |
+| `$help` | 命令列表（自定义）|
+| 普通文本 `hello bot` | 走 agent prompt 流（不变）|
+
+**好处**：
+
+- ✅ **加新命令 = 0 Slack 改动**——只需在 `internal/command/foo/cmd.go` 写代码，dispatcher 自动识别
+- ✅ **删命令 = 0 Slack 改动**
+- ✅ **跨 Slack 保留字**——`$close` / `$topic` / `$archive` 都不会被 Slack 拦截
+- ✅ **跨平台一致**——Feishu / Telegram 也可以用同样的 `$` 前缀方案（adapter 同理改）
+- ✅ **不需要 `/kclose` 这样的别名**——`$close` 直接就是 `close`
+
+**代价**：
+
+- ❌ 失去 Slack 的 slash command autocomplete（用户必须知道 `$` 前缀）
+- ❌ 失去 Slack 命令菜单（"可在此频道用 X 个命令"提示消失）
+- ❌ DM 中 `/cwd` 拦截问题消失——但 `$cwd` 一样能工作（DM 走普通消息路径）
+
+**为什么不用 `$` 作为 Slack 内建命令**：Slack 命令名只能以 `/` 开头（manifest validator 拒 `$` / `!` 等）——只能改用普通消息匹配绕开。
 
 ### 6.3 Event Subscriptions（bot events）
 
@@ -544,15 +619,16 @@ Slack 支持 **App Manifest** 一次性配好全部 scope 与事件，不用逐�
 4. Install App → Install to Workspace → 授权
    → 拿到 Bot User OAuth Token xoxb-...
 5. nightme login slack → 粘贴两个 token
-6. 群里 /invite @nightme，然后 @ 它
+6. 群里 /invite @nightme，然后 `$cwd /path` 试
 ```
 
 **无需公网 IP / 域名 / HTTPS 证书 / 反向代理**——Socket Mode 走 WebSocket 出站连接。
 
-**两条必须写进 onboarding 文案的坑**（cc-connect FAQ）：
+**onboarding 注意事项**：
 
-- 改完 scope 或 event 之后**必须 Reinstall to Workspace**，否则不生效
 - App-Level Token 只显示一次，漏存需重新生成
+- 改完 scope 或 event **无需 Reinstall**（用 `$` 前缀后，命令不进 manifest 也不发 `slash_command` 事件，命令改 manifest 不影响命令可用性）
+- 但改 scope / event 仍需 Reinstall（OAuth scope 改变时 Slack 强制）
 
 ### 6.6 与 Feishu / Telegram 开通方式的对比
 
@@ -655,14 +731,15 @@ runtime / gateway / chatsession / dispatcher **零改动**——这是 [CHANNEL.
 | **5** | 普通频道内 `startStream` 带 `thread_ts` 是否报 `invalid_thread_ts`？DM 内如何？ | ✅ | **thread_ts 必填**——Slack 文档与实测不符。普通 channel、DM 都是 `invalid_thread_ts` 当 thread_ts 缺失。修复方案见 §5.2 与 §11 |
 | **6** | `task_display_mode` 选 `timeline` 还是 `plan`？| 🟡 | 未实测。一条流只能选一个，建议两条流对比渲染 |
 | **7** | 流开着但长时间无追加，是否有服务端超时？| 🟡 | 未实测。`setStatus` 有 2 分钟自动超时，stream 本身未知。建议 phase 3 实测：开流不追加，等 5 分钟，看 Slack 是否主动 stopStream |
-| **8** | `handleSlashCommand` 端到端 | 🟡 | **部分通过**——adapter 收到 `SlashCommand` 事件，重序列化为 `/cmd args` 文本，进 dispatcher，command parser 识别，路由到 `internal/command/<name>`。**整链路未实跑**（manifest 修了，但 `OutboundMessage.ReplyTo = cmd.TriggerID` 不是真 Slack ts，会导致 streaming 失败——详见 §9.2） |
+| **8** | ~~`handleSlashCommand` 端到端~~ **已废弃** | ✅ | 2026-09-01 改用 `$` 前缀消息匹配，slash command 机制整段弃用。adapter 在 `handleMessage` 里检测 `$` 前缀，去掉后当作 `/cmd args` 走 dispatcher |
 
 另有一项工程决策待定：`OutResult` 是否使用 `reply_broadcast=true`（回到频道更醒目，但群里人多时噪音大）。
 
 ### 9.0 已修复
 
-- **2026-08-31 e2e 测试 A**：发现所有 `/xxx` 输入被 Slack 客户端拦截，nightme manifest 没注册任何 slash command，bot 永远收不到。**修复**：`internal/login/slack/manifest.go` 加 `features.slash_commands` 段（12 个命令），`/cwd`、`/use`、`/watch`、`/stop`、`/steer`、`/queue`、`/new`、`/close`、`/think`、`/tools`、`/review`、`/gtw`。`/close` 改成 `Slack `（Slack 保留 `/close`，manifest validator 拒绝）；adapter handleSlashCommand 把 `Slack ` → `/close` 翻译回去
-- **2026-08-31 e2e 测试 B**：manifest 改了必须 **Reinstall to Workspace**。已已通过 Slack Dashboard 操作完成
+- **2026-08-31 e2e 测试 A**：发现所有 `/xxx` 输入被 Slack 客户端拦截，nightme manifest 没注册任何 slash command，bot 永远收不到。**修复（2026-08-31 临时方案）**：`internal/login/slack/manifest.go` 加 `features.slash_commands` 段（12 个命令），`/close` 改名 `Slack ` 绕开保留字。
+- **2026-09-01 设计变更**：上述临时方案被 `**$ 前缀消息匹配**` 取代——不再用 Slack slash command 机制，manifest 不需要 `slash_commands` 段，加新命令 = 0 Slack 改动。详见 §6.2.1。
+- **2026-08-31 e2e 测试 B**：manifest 改了必须 **Reinstall to Workspace**。已通过 Slack Dashboard 操作完成。**注**：改用 `$` 前缀后，命令相关的 manifest 改动不再需要 reinstall；只有 OAuth scope 改动仍需 reinstall。
 
 ### 9.1 Fallback 设计（探针 1 为否时——已不再需要）
 
@@ -679,17 +756,19 @@ runtime / gateway / chatsession / dispatcher **零改动**——这是 [CHANNEL.
 
 **2026-08-31 更新**：streaming API 实测可用（`thread_ts` + `recipient_team_id` + `recipient_user_id` 三参数都齐），不再需要这个 fallback。但 cc-connect 的 `streaming_card.go` 实现仍保留为代码注释中的 design rationale——若未来 workspace 升级或 Slack Code 频道出现，可能需要重新评估。
 
-### 9.2 2026-08-31 实测发现的问题清单
+### 9.2 实测发现的问题清单（含 2026-09-01 设计变更后状态）
 
-按严重度：| ID | 严重度 | 描述 | 状态 |
+按严重度：
+
+| ID | 严重度 | 描述 | 状态（2026-09-01）|
 |---|---|---|---|
-| A | CRITICAL | `chatstore/store.go:87` 验证只接受 `tg_` / `oc_` 前缀，**不认 `sl_`**。daemon 重启加载旧 `sl_` session 时炸 → 自动备份 + 清空 chat_sessions.json | 待修 |
-| B | CRITICAL | `send.go:streamFor` 的 `anchor` 兜底用 `msg.ReplyTo`。**slash command** 时 `msg.ReplyTo = cmd.TriggerID`（不是 Slack message ts），`chat.startStream(thread_ts=TriggerID)` → `invalid_thread_ts`。**普通文本** 时 `msg.ReplyTo = user.ts`（真 ts）但代码没传 `recipient_team_id` / `recipient_user_id` → `missing_recipient_team_id` | 待修（已测，方案见 §5.2） |
-| C | MEDIUM | `mention.go:publishInbound` 把 Slack DM 的 `thread_ts` 编进 chatID（`sl_<team>:<channel>:<greeting_ts>`），违反 §5.5 不变量 | 待修 |
-| D | HIGH | Slack DM 客户端拦截所有 `/xxx` slash command —— 错误信息"isNotX-xxx is not supported in threads" 来自 Slackbot，非我们的 bot。这是 Slack 平台行为：DM 内的 slash command 强制走 thread 上下文 | 已记录，DM slash command 不可用（用户需在 channel 用） |
-| E | MEDIUM | `chat.update` / `chat.startStream` 等的 `MessageState` reaction 在 slash command 上失败（`message_not_found`）—— `handleSlashCommand` 把 `cmd.TriggerID` 当 MessageID，trigger_id 不是真消息 ts | 待修（与 B 一起） |
-| F | MEDIUM | `nightme doctor` `last outbound: never`（实测 bot 回复多次仍显示），`last inbound` 的 `chat=` 为空 | 待修 |
-| G | LOW | `/close` → `/kclose` 跨平台命名差异（Feishu/Telegram 仍是 `/close`）| 已记录 |
+| A | CRITICAL | `chatstore/store.go:87` 验证只接受 `tg_` / `oc_` 前缀，**不认 `sl_`**。daemon 重启加载旧 `sl_` session 时炸 → 自动备份 + 清空 chat_sessions.json | ✅ 已修（PR #316 from main）|
+| B | CRITICAL | `send.go:streamFor` 的 `anchor` 兜底用 `msg.ReplyTo`。**slash command** 时 `msg.ReplyTo = cmd.TriggerID`（不是 Slack message ts），`chat.startStream(thread_ts=TriggerID)` → `invalid_thread_ts`。**普通文本** 时 `msg.ReplyTo = user.ts`（真 ts）但代码没传 `recipient_team_id` / `recipient_user_id` → `missing_recipient_team_id` | ✅ **已修**（`handleSlashCommand` 先 `chat.postMessage` 建 parent thread + `turnStream` 透传 recipient）|
+| C | MEDIUM | `mention.go:publishInbound` 把 Slack DM 的 `thread_ts` 编进 chatID（`sl_<team>:<channel>:<greeting_ts>`），违反 §5.5 不变量 | 待修（独立 issue，与 `$` 前缀无关）|
+| D | HIGH | ~~Slack DM 客户端拦截所有 `/xxx` slash command——"not supported in threads"~~ | ✅ **已绕过**：2026-09-01 改用 `$` 前缀消息匹配，DM 中发 `$cwd` 走普通消息路径，Slack 不拦截 |
+| E | MEDIUM | `chat.update` / `chat.startStream` 等的 `MessageState` reaction 在 slash command 上失败（`message_not_found`）—— `handleSlashCommand` 把 `cmd.TriggerID` 当 MessageID | ✅ **已修**：adapter 改用真消息 ts 当 `MessageID`（`handleSlashCommand` 现在先 postMessage 建 parent thread，parentTS 当 MessageID）|
+| F | MEDIUM | `nightme doctor` `last outbound: never`（实测 bot 回复多次仍显示），`last inbound` 的 `chat=` 为空 | 待修（观测性 bug）|
+| G | LOW | ~~`/close` → `/kclose` 跨平台命名差异~~ | ✅ **已消除**：2026-09-01 改用 `$` 前缀，`$close` 直接就是 `close`，不需要别名 |
 
 ---
 
@@ -725,12 +804,14 @@ runtime / gateway / chatsession / dispatcher **零改动**——这是 [CHANNEL.
 | 2026-08-29 | 出站附件不实现（`OutboundKind` 无 attachment 类型，与 Feishu 同）| 本文档 §4.3 |
 | 2026-08-30 | `OutChoice` 改走 `chat.postMessage` + 普通 block，不走 stream | 本文档 §4.4 |
 | 2026-08-30 | `login.Credentials` 新增 `AppToken` 字段（Slack 是唯一需要双凭证的 channel）| 落地 |
-| 2026-08-31 | manifest 加 `features.slash_commands` 段（12 个命令），解 Slack 客户端拦截 `/` 前缀导致 bot 收不到命令的问题 | e2e 测试发现 |
-| 2026-08-31 | `/close` 改名为 `Slack `（Slack 保留 `/close`），adapter 把 `Slack ` 翻译回 `/close` | e2e 测试发现（manifest validator 拒绝 `/close`） |
+| 2026-08-31 | （**已废**）manifest 加 `features.slash_commands` 段（12 个命令），解 Slack 客户端拦截 `/` 前缀导致 bot 收不到命令的问题 | e2e 测试发现 → 被 2026-09-01 决策取代 |
+| 2026-08-31 | （**已废**）`/close` 在 manifest 里改名为 `Slack ` | 被 `$` 前缀方案取代 |
 | 2026-08-31 | **`chat.startStream` 必须传 `thread_ts` + `recipient_team_id` + `recipient_user_id`**（Slack 文档与实测不符；文档标「可选」实测「必填」）| e2e 实测确认 |
-| 2026-08-31 | **所有 streaming 输出必须在 thread 内**。普通文本：用 `msg.ReplyTo` (user.ts) 当 thread_ts。Slash command：adapter 在 handleSlashCommand 先 `chat.postMessage` 建 parent thread | e2e 实测确认 |
+| 2026-08-31 | **所有 streaming 输出必须在 thread 内**。普通文本：用 `msg.ReplyTo` (user.ts) 当 thread_ts。`$` 前缀命令：adapter 在 `handleMessage` 检测 `$` 后去掉 → 走 dispatcher → 命令回复走 `OutCommandReply` + `chat.postMessage` 顶层 | e2e 实测确认 |
 | 2026-08-31 | `assistant.threads.setStatus` 也需要 `thread_ts`（文档标「可选」实测「必填」）| e2e 实测确认 |
 | 2026-08-31 | 保留 streaming 路径（§3），**不再采用** §9.1 的 PATCH fallback（实测 streaming API 可用） | e2e 实测结论 |
+| 2026-09-01 | **弃用 Slack slash command 机制**——改用 `$` 前缀消息匹配（adapter 在 `handleMessage` 检测 `$` 前缀，去掉后当作 `/cmd args` 走 dispatcher）。**0 Slack 改动加新命令**，消除 reinstall 痛点、消除 Slack 保留字冲突、消除 `/kclose` 这种 alias 翻译 | 设计与实现 |
+| 2026-09-01 | Slack manifest **不再需要** `slash_commands` 段 | 落地 |
 
 ---
 
@@ -770,11 +851,11 @@ wiring：`internal/config/config.go`（`SlackConfig` + defaults + env）、`conf
 | slack 两包测试 | 127 个用例 |
 | `gofmt` | 新增文件全部干净 |
 
-#### 2026-08-31 e2e 实测（Slack workspace + 真 token）
+#### 2026-08-31 e2e 实测（Slack workspace + 真 token，slash command 机制下）
 
 通过 curl **直连 Slack API**（不经 SDK）+ Slack UI 验证：
 
-| 探针 / 行为 | 实测结果 |
+| 探针 / 行为 | 实测结果（2026-08-31）|
 |---|---|
 | `chat.postMessage` 普通文本 | ✅ OK |
 | `chat.postMessage` + `thread_ts` | ✅ OK |
@@ -789,14 +870,28 @@ wiring：`internal/config/config.go`（`SlackConfig` + defaults + env）、`conf
 | Slack UI 渲染流式消息 | ✅ thread reply 出现在 #all-nightme |
 | 12 个 slash command 在 Slack UI 显示 | ✅（Slack Commands 页面列出 `/cwd`/`/use`/`/watch` 等） |
 | `/cwd /path` 在 #all-nightme 生效（CWD 设置）| ✅ chat session `sl_T:D:...` 的 `selectedCwd` 已写入 |
-| `/cwd` 后 bot 静默（CWD 设了但无确认回复）| ❌ `invalid_thread_ts` —— Issue B（待修）|
-| `/watch on` 后 bot 静默 | ❌ 同上 |
-| Slash command 在 DM 被拦截（"not supported in threads"）| ❌ Slack 平台行为——DM slash command 不可用 |
+| `/cwd` 后 bot 静默（CWD 设了但无确认回复）| ❌ `invalid_thread_ts` —— Issue B（**已修** 2026-08-31）|
+| `/watch on` 后 bot 静默 | ❌ 同上（**已修**）|
+| Slash command 在 DM 被拦截（"not supported in threads"）| ❌ Slack 平台行为——**已绕过**（2026-09-01 改用 `$` 前缀）|
 | Bot 加入 #all-nightme 后正常收发 | ✅ 通过 "Channel details → Agents & apps → Add" |
 
-**结论**：streaming API **完全可用**，但需要：
-1. `thread_ts` 必填（真 Slack message ts，不是 TriggerID）
-2. `recipient_team_id` + `recipient_user_id` 必填（流向 channel 时）
-3. Slash command 需 adapter 先 `postMessage` 建 parent thread
+#### 2026-09-01 `$` 前缀方案验证
 
-详见 §5.2、§9.2、§11。
+| 探针 / 行为 | 实测结果（2026-09-01）|
+|---|---|
+| `$cwd /home/...` 在 #all-nightme 生效 | ✅ chat session `selectedCwd` 已写入；OutCommandReply 回 "Workspace set to ..." |
+| `$watch on` 在 #all-nightme 生效 | ✅ OutCommandReply 回 "Watch mode set to all..." |
+| `$use claude` agent 切换 | ✅ OutCommandReply 回 "Now using claude (pid=..., source=resumed)" |
+| `$new` 重置 session | ✅ OutCommandReply 回 "Reset 1 session(s): claude @ ... — reset in-place" |
+| `$stop` 中断 turn | ✅ OutCommandReply 回 "Context cleared. Ready for the next instruction."（含完整 git status + token stats）|
+| `$cwd` 在 DM | ✅ DM 走普通消息路径，Slack 不拦截（无"not supported in threads"错）|
+| 加新命令 0 Slack 改动 | ✅（manifest 无 slash_commands 段，命令由 dispatcher 匹配）|
+
+**结论**（2026-09-01 终态）：
+1. `$` 前缀消息匹配方案完全替代 slash command 机制
+2. 0 reinstall 摩擦
+3. 跨 Slack 保留字 / 跨平台 / 跨 DM 限制全部解决
+4. streaming API + recipient info 仍是普通文本流式渲染的必需条件
+5. bot / Feishu / Telegram 全部兼容 `OutCommandReply` Kind（已修 bot.go 的 `outboundText`）
+
+详见 §5.2、§6.2.1、§9.2、§11。

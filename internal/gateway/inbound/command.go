@@ -171,6 +171,13 @@ func (r *Router) resolveEmitter(cs *chatsession.ChatSession) messages.Emitter {
 // directly are the common fallback user). Anchored to the
 // original user message so the channel renders it as a thread
 // reply (Feishu) / in-place edit (Slack) / DOM append (Web).
+//
+// For slash-command replies (the static SlashOutput.Reply from
+// internal/command/<name>/cmd.go via runCommand), the Kind is
+// OutCommandReply so the channel knows to bypass the streaming
+// placeholder entirely — those replies are short, do not need
+// throttling, and must be visible regardless of whether an agent
+// turn is in flight (docs/channel/slack.md §4 / OutboundKind enum).
 func (r *Router) emitReply(ctx context.Context, cs *chatsession.ChatSession, msg *messages.InboundMessage, text string) {
 	em := r.resolveEmitter(cs)
 	if text == "" || em == nil {
@@ -178,7 +185,7 @@ func (r *Router) emitReply(ctx context.Context, cs *chatsession.ChatSession, msg
 	}
 	if sendErr := em.Send(ctx, messages.OutboundMessage{
 		ChatID:  msg.ChatID,
-		Kind:    messages.OutReply,
+		Kind:    messages.OutCommandReply,
 		Text:    text,
 		ReplyTo: msg.MessageID,
 	}); sendErr != nil {

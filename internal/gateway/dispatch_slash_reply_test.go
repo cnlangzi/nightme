@@ -158,8 +158,8 @@ func TestDispatchLoop_ForwardsSlashReply(t *testing.T) {
 				if m.ReplyTo != "om_test_1" {
 					t.Errorf("ReplyTo = %q, want om_test_1", m.ReplyTo)
 				}
-				if m.Kind != messages.OutReply {
-					t.Errorf("Kind = %s, want OutReply", m.Kind)
+				if m.Kind != messages.OutCommandReply {
+					t.Errorf("Kind = %s, want OutCommandReply", m.Kind)
 				}
 				cancel()
 				wg.Wait()

@@ -134,14 +134,23 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
-// Review implements /review for the cursor bridge: delegate to the
-// shared agent.ReviewWithOcr (three-tier dispatch, docs/REVIEW.md
-// §2). Cursor CLI has no native review subcommand, so it runs the
-// Go-precompute-enhanced prompt via print-mode one-shot — ocr
-// delegate rules fold in when ocr is on $PATH.
+// Review implements /review for the cursor bridge: invoke the
+// native /review-bugbot slash command (Tier 1 — docs/REVIEW.md §2.1).
+//
+// Verified empirically against cursor-agent 2026.08.11 (2026-09-01):
+// cursor-agent auto-loads ~/.cursor/skills-cursor/review-bugbot/SKILL.md
+// and dispatches the bugbot subagent when "/review-bugbot" appears as
+// the positional -p prompt. Plain-text stdout → RunResult.Text.
+//
+// Per docs/REVIEW.md §2.1 "codex/claude use native review" rule,
+// cursor now qualifies — we invoke its native review directly
+// instead of running the Tier 2/3 path (ReviewWithOcr /
+// ReviewWithPrompt). Symmetric with codex's `codex exec review` and
+// claudecode's `claude -p code-review`.
+//
+// Per docs/REVIEW.md §2.6, native reviewers don't get simplifyGroup
+// (it's a nightme-owned parallel lens added only to Tier 2/3).
+// Bugbot computes the diff itself; we don't precompute or pass --base.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	if agent.OcrAvailable() {
-		return agent.ReviewWithOcr(ctx, s, cfg, opts...)
-	}
-	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
+	return runCursorReview(ctx, s, cfg, opts...)
 }

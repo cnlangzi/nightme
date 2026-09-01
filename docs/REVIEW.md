@@ -50,11 +50,12 @@ review 有三种 runner 实现。Agent.Review 接口(Starter.Review)由各 bridg
    ▼
 Starter.Review(bridge 各自的实现)
    │
-   ├─ Native bridge(claudecode / codex)
-   │     → 桥自己调内置命令(`claude -p code-review` / `codex review --base`)
+   ├─ Native bridge(claudecode / codex / cursor)
+   │     → 桥自己调内置命令(`claude -p code-review` / `codex review --base` /
+   │        `cursor-agent -p "/review-bugbot"`)
    │        〔各家最优形态,不画蛇添足;不走 agent 包 runner〕
    │
-   ├─ Delegate bridge(dsh / pi / acp / opencode / cursor)
+   ├─ Delegate bridge(dsh / pi / acp / opencode)
    │     → 桥检测 OcrAvailable()(SRP:路由选择放桥层,不放 agent 包内)
    │        ├─ YES → agent.ReviewWithOcr
    │        │           ├─ pre := precomputeReviewWithOcr(workspace)
@@ -116,9 +117,57 @@ precomputeReviewWithOcr                precomputeReviewWithBuiltin
 
 
 
-### 2.1 Tier 1 — native review(codex / claude)
+### 2.1 Tier 1 — native review(codex / claude / cursor)
 
-有内置 review 子命令的 bridge **直接调内置命令**(codex 跑 `codex review --base <ref>`、claude 跑 `claude -p code-review`)。理由:这两家的内置 review 是各自**最优形态**(codex 的 severity 分组、claude 的多 agent + confidence 评分),通用 prompt 抢不过。符合 F-review.md §13"有原生就用原生"原则。**零改动**。
+有内置 review 子命令的 bridge **直接调内置命令**(codex 跑 `codex review --base <ref>`、claude 跑 `claude -p code-review`、cursor 跑 `cursor-agent -p "/review-bugbot"`)。理由:这三家的内置 review 是各自**最优形态**(codex 的 severity 分组、claude 的多 agent + confidence 评分、cursor Bugbot 的规则匹配 + 深度控制),通用 prompt 抢不过。符合 F-review.md §13"有原生就用原生"原则。**零改动**。
+
+#### 2.1.1 cursor 的 native review 入口(cursor-agent + slash command)
+
+cursor 跟 codex / claude 不一样:它**没有** `cursor-agent review` CLI subcommand,但 `cursor-agent` 在 `-p` print 模式下**会** dispatch 内置 slash command(类似 `claude -p code-review`)。cursor 把 review 能力放在 **skill 系统**里,而不是 CLI subcommand 里。
+
+**cursor review skill 三件套**(均在 `~/.cursor/skills-cursor/`,cursor-agent **自动加载**,无需 `--plugin-dir`):
+
+| Skill | 用途 | 可在 `-p` 模式 dispatch? |
+|---|---|---|
+| `review` | AskQuestion 菜单,让用户选 bugbot / security(`disable-model-invocation: true`,纯菜单) | ❌ 跑出来只是 menu,不可用 |
+| `review-bugbot` | Bugbot subagent——通用代码变更 review | ✅ 实证 |
+| `review-security` | Security Review subagent——安全专项 review | ✅ 实证 |
+
+**实证**(2026-09-01,本机 cursor-agent 2026.08.11):
+
+```bash
+$ cursor-agent -p "/review-bugbot" --output-format text --trust --yolo
+Bugbot could not complete the review: it could not compute a branch-changes
+diff in `/private/tmp` (this workspace is not a git repo).
+# dispatch 成功,只是 /tmp 不是 git repo
+
+$ cursor-agent -p "/review" --output-format text --trust --yolo
+Which review should I run?
+1. **Bugbot** (`/review-bugbot`) — code-change review
+2. **Security Review** (`/review-security`) — security-focused review
+# menu skill 也 dispatch 了,只是 menu 不可用
+
+$ cursor-agent -p "/review-bugbot" --output-format text --trust --yolo
+There was no diff to review on this branch.
+# 在真实 git repo 里跑出正常响应
+```
+
+**为什么 cursor 之前归 Tier 2/3**:早期调研(c-2025 之前)漏了 `-p` 模式 dispatch 的实证,误以为 cursor CLI 没有 native review,放在 Tier 2/3 走 `ReviewWithOcr` / `ReviewWithPrompt` 多 job fan-out。2026-09-01 在 `fix-review-on-cursor` 分支上把 cursor 移到 Tier 1,bridge `Starter.Review` 直接调 `runCursorReview`(新增 `internal/bridge/cursor/review.go`),跟 codex / claudecode 对称。
+
+**实现要点**(`internal/bridge/cursor/review.go`):
+
+- argv 拼装:`FullAccessArgs`(--force --trust --sandbox disabled --approve-mcps)+ `-p "/review-bugbot"` + `--output-format text`。**不传** `--workspace`:Bugbot 的 diff 算的是 cwd 里的 git 状态,`--workspace` 反而会让 Bugbot 的 diff math 失效(已实证)
+- sink 事件:跟 `runPrintMode` / `runCodexReview` 同形状——`EventAgentReady` up-front + `EventAgentResult`/`EventAgentDone` terminal,失败时 `EventAgentError` 带 `BridgeDiagnostic`
+- 错误处理:`stderr` 透传(像 "could not compute a branch-changes diff" 这种 Bugbot 原生错),empty stdout 当 "cursor review: empty answer"
+- **不带 simplifyGroup**:按 §2.6,native tier 不带 simplify(它是 nightme-owned 的 Tier 2/3 增强)
+
+**Review depth(Quick / Deep)**:这是 Cursor IDE 设置里的选项(Settings → Agents → Agent Review),**不暴露**给 cursor-agent CLI(`--help` 里没有 `--review-depth` flag)。bridge 跑出来的是 IDE 设置的默认深度——用户调 IDE 设置即可,bridge 层不动。
+
+**前置条件**:
+
+- cursor-agent 二进制装好(`Detect()` 已 check)
+- workspace 必须是 git repo(Bugbot 自己算 diff,workspace 模式 `--base` 不存在,不像 codex 有 `--uncommitted` 兜底)
+- cursor-agent ≥ 2026.08(`review-bugbot` skill 在此之前可能没内置)
 
 ### 2.2 Tier 2 — ocr 委托模式(delegate + ocr 已装)
 
@@ -351,7 +400,7 @@ simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern`
 
 | Runner | simplify group 出现? |
 |---|---|
-| `ReviewWithNative`(claudecode / codex) | ❌ 不出现(桥自己处理 prompt) |
+| `ReviewWithNative`(claudecode / codex / cursor) | ❌ 不出现(桥自己处理 prompt) |
 | `ReviewWithOcr`(ocr 已装) | ✅ 始终追加 |
 | `ReviewWithPrompt`(ocr 未装 / fallback) | ✅ 始终追加 |
 
@@ -360,7 +409,7 @@ simplify group 的 prompt 通过 `assembleGroupPrompt` 渲染:`switch g.Pattern`
 `OcrAvailable()` 是 agent 包导出的函数。delegate-tier 桥的 `Starter.Review` 自己做 ocr 检测,然后决定调哪个 runner:
 
 ```go
-// 5 个 delegate 桥的 Starter.Review(统一形态)
+// 4 个 delegate 桥的 Starter.Review(统一形态)
 func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
     if agent.OcrAvailable() {
         return agent.ReviewWithOcr(ctx, s, cfg, opts...)
@@ -368,6 +417,8 @@ func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
     return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 ```
+
+> **历史变更**:cursor 在 2026-09-01 之前属于这 4 个 delegate 桥之一(`fix-review-on-cursor` 分支实证 cursor CLI 走 `-p "/review-bugbot"` dispatch 走通后,移到 §2.1 Tier 1)。详见 §2.1.1。
 
 `ReviewWithOcr` 内部不再做 `OcrAvailable` 检查或 fallback —— 单一职责:假设 ocr 可用,跑 ocr 委托模式。如果调用方在 ocr 不可用时调它,那是调用方 bug,不该偷偷 fallback。
 
@@ -391,7 +442,7 @@ func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
 5. 启动 goroutine(chat session ctx 派生 + 30min 超时):
    1. 接 sink,把 review 的中间事件(思考 / 工具调用)**流式**进 chat(观察用)。
    2. `Starter.Review` → **三种 Runner**:
-      - Native bridge(claudecode / codex):桥自己调内置命令(`claude -p code-review` / `codex review --base`)。
+      - Native bridge(claudecode / codex / cursor):桥自己调内置命令(`claude -p code-review` / `codex review --base` / `cursor-agent -p "/review-bugbot"`)。
       - Delegate + ocr 在:桥 dispatch 到 `ReviewWithOcr` → `precomputeReviewWithOcr` → ocr groups + simplifyGroup → 多 job 风扇。
       - Delegate + ocr 不在:桥 dispatch 到 `ReviewWithPrompt` → `precomputeReviewWithBuiltin` → 1 builtinGroup + simplifyGroup → 多 job 风扇。
    3. `FormatReviewMessage` 包前缀(workspace + runner 标注,让主 agent 知道"这是谁跑的 review")。
@@ -426,7 +477,7 @@ func (s *Starter) Review(ctx, cfg, opts...) (RunResult, error) {
 ## 6. 不做的事(边界)
 
 - ❌ 把 ocr 当 bridge / 进 agent 注册表 —— 它是被调用的外部工具。
-- ❌ 动 native review(codex / claude 内置)—— 有内置就调内置。
+- ❌ 动 native review(codex / claude / cursor 内置)—— 有内置就调内置。
 - ❌ 把 ocr 端到端(`ocr review`)设为默认 —— 需配 ocr LLM、双配置,留 opt-in(`--engine ocr`)。
 - ❌ 引入 ocr 端到端的**重 multi-agent 机器**(ocr 自己的定位 / 反思 / 多 bundle 子 agent)作默认 —— 那是 ocr 端到端跑、依赖 ocr 自己的 multi-agent;我们的 code-driven 拆 job **不是**这个(用 ocr 的 rule groups 只取分组边界,RunOnce 各自独立 context,定位 / 反思仍由 host agent 自己做)。两者本质不同,不冲突。
 - ❌ 同进程多轮 + `/new` reset 池化(跨调用复用)—— 破坏 RunOnce 强隔离不变量(#2),`/new` 是弱隔离(依赖 agent reset 彻底),且 review 非高频收益不抵。省 spawn 只在单次 /review 内(瞬态多轮),不跨调用池化。

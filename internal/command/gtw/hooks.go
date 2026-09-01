@@ -40,18 +40,18 @@ type Config struct {
 	Commit CmdConfig `yaml:"commit"`
 	Close  CmdConfig `yaml:"close"`
 	Sync   CmdConfig `yaml:"sync"`
-	// PR owns the /gtw pr subcommand's before/after hooks.
-	// Agent selection for the PR-generation step is per-call
-	// (-a / --agent), not stored in the yml — there's no
-	// PR-default agent to remember, since the agent is the
-	// user's choice at the moment they decide to open a PR.
+	// PR owns the /gtw pr subcommand's defaults: the optional
+	// default agent (used when no -a / --agent is passed) and
+	// before/after hooks. Agent resolution follows the same
+	// three-tier precedence as /gtw commit: CLI -a > yml
+	// cfg.PR.Agent > cs.SelectedAgent() (see ResolveAgent).
 	PR CmdConfig `yaml:"pr"`
 }
 
 // CmdConfig is the per-command subsection of Config. Agent is the
-// default agent name for flows that need one (only Commit in
-// v1 — Push no longer touches an agent). Hooks is the before/
-// after hook list.
+// default agent name for flows that need one (Commit + PR
+// today — Push, Close, and Sync don't invoke an agent). Hooks
+// is the before/after hook list.
 type CmdConfig struct {
 	Agent string `yaml:"agent"`
 	Hooks Hooks  `yaml:"hooks"`

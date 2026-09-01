@@ -28,8 +28,11 @@ import (
 // must bypass the stream (docs/channel/slack.md §4.2).
 type apiClient interface {
 	// StartStream opens a streaming message and returns its ts.
-	// threadTS may be empty for a top-level message.
-	StartStream(ctx context.Context, channelID, threadTS string, chunks []slackgo.StreamChunk) (string, error)
+	// threadTS, teamID and userID are ALL REQUIRED when streaming to
+	// a channel — the API rejects the call with invalid_thread_ts or
+	// missing_recipient_team_id otherwise (2026-08-31 curl evidence,
+	// docs/channel/slack.md §5.2).
+	StartStream(ctx context.Context, channelID, threadTS, teamID, userID string, chunks []slackgo.StreamChunk) (string, error)
 	// AppendStream appends chunks to an open stream.
 	AppendStream(ctx context.Context, channelID, ts string, chunks []slackgo.StreamChunk) error
 	// StopStream finalizes a stream. blocks render below the streamed
@@ -46,8 +49,9 @@ type apiClient interface {
 	RemoveReaction(ctx context.Context, channelID, ts, name string) error
 
 	// SetAssistantStatus drives the "is thinking…" indicator. An
-	// empty status clears it. Requires the app to have AI features
-	// enabled (docs/channel/slack.md §2.5).
+	// empty status clears it. threadTS is REQUIRED per Slack docs
+	// (实测 2026-08-31: 不传返回 missing required field: thread_ts);
+	// docs/channel/slack.md §2.5.
 	SetAssistantStatus(ctx context.Context, channelID, threadTS, status string) error
 
 	// Download fetches a file behind url_private using the bot token.
@@ -91,10 +95,16 @@ func newLiveAPI(botToken, appToken string) *liveAPI {
 	}
 }
 
-func (a *liveAPI) StartStream(ctx context.Context, channelID, threadTS string, chunks []slackgo.StreamChunk) (string, error) {
+func (a *liveAPI) StartStream(ctx context.Context, channelID, threadTS, teamID, userID string, chunks []slackgo.StreamChunk) (string, error) {
 	opts := []slackgo.MsgOption{slackgo.MsgOptionChunks(chunks...)}
 	if threadTS != "" {
 		opts = append(opts, slackgo.MsgOptionTS(threadTS))
+	}
+	if teamID != "" {
+		opts = append(opts, slackgo.MsgOptionRecipientTeamID(teamID))
+	}
+	if userID != "" {
+		opts = append(opts, slackgo.MsgOptionRecipientUserID(userID))
 	}
 	_, ts, err := a.client.StartStreamContext(ctx, channelID, opts...)
 	if err != nil {

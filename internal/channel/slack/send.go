@@ -87,6 +87,16 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 
 // streamFor resolves (and lazily opens) the placeholder for a turn.
 // A message with no ReplyTo has no turn to attach to.
+//
+// msg.ReplyTo is ALWAYS a real Slack message ts:
+//   - regular text: the user's message ts
+//   - slash command: the parent message ts created by
+//     handleSlashCommand (which postsMessage first because Slack
+////     rejects streaming under cmd.TriggerID — see
+////     docs/channel/slack.md §5.2)
+//
+// chatID's embedded thread_ts (only set for DMs) takes precedence
+// over ReplyTo so the stream stays scoped to the DM thread.
 func (a *Adapter) streamFor(msg messages.OutboundMessage) (*turnStream, bool) {
 	if msg.ReplyTo == "" {
 		return nil, false
@@ -95,12 +105,14 @@ func (a *Adapter) streamFor(msg messages.OutboundMessage) (*turnStream, bool) {
 	if !ok {
 		return nil, false
 	}
-	// The turn's placeholder threads under the user's message when
-	// the conversation is not already inside a thread.
 	anchor := threadTS
 	if anchor == "" {
 		anchor = msg.ReplyTo
 	}
+	a.mu.Lock()
+	teamID := a.teamID
+	botUserID := a.botUserID
+	a.mu.Unlock()
 	deps := streamDeps{
 		api:      a.api,
 		limiter:  a.limiter,
@@ -110,7 +122,7 @@ func (a *Adapter) streamFor(msg messages.OutboundMessage) (*turnStream, bool) {
 		throttle: a.throttle,
 	}
 	stream, _ := a.streams.getOrCreate(msg.ChatID, msg.ReplyTo, func() *turnStream {
-		return newTurnStream(msg.ChatID, channelID, anchor, msg.ReplyTo, deps)
+		return newTurnStream(msg.ChatID, channelID, anchor, msg.ReplyTo, teamID, botUserID, deps)
 	})
 	return stream, true
 }

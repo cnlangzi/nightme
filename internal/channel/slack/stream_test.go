@@ -18,7 +18,7 @@ func testStream(t *testing.T, api *fakeAPI, throttle time.Duration) *turnStream 
 	if err != nil {
 		t.Fatalf("newStateStore: %v", err)
 	}
-	return newTurnStream("sl_T1:C1", "C1", "1000.1", "1000.1", streamDeps{
+	return newTurnStream("sl_T1:C1", "C1", "1000.1", "1000.1", "T_TEST", "U_TEST", streamDeps{
 		api:      api,
 		limiter:  NewLimiter(&LimiterConfig{RatePerSec: 1000, Burst: 1000}, nil),
 		retry:    RetryConfig{MaxAttempts: 1},
@@ -303,7 +303,7 @@ func TestStream_RecordsOpenStreamForRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newStateStore: %v", err)
 	}
-	s := newTurnStream("sl_T1:C1", "C1", "1000.1", "1000.1", streamDeps{
+	s := newTurnStream("sl_T1:C1", "C1", "1000.1", "1000.1", "T_TEST", "U_TEST", streamDeps{
 		api:      api,
 		limiter:  NewLimiter(&LimiterConfig{RatePerSec: 1000, Burst: 1000}, nil),
 		retry:    RetryConfig{MaxAttempts: 1},
@@ -392,7 +392,7 @@ func TestStream_FinishLogsLostContentWhenStartFails(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logbuf, nil))
 
 	state, _ := newStateStore("")
-	s := newTurnStream("sl_T1:C1", "C1", "1000.1", "1000.1", streamDeps{
+	s := newTurnStream("sl_T1:C1", "C1", "1000.1", "1000.1", "T_TEST", "U_TEST", streamDeps{
 		api:      api,
 		limiter:  NewLimiter(&LimiterConfig{RatePerSec: 1000, Burst: 1000}, nil),
 		retry:    RetryConfig{MaxAttempts: 1},
@@ -415,5 +415,29 @@ func TestStream_FinishLogsLostContentWhenStartFails(t *testing.T) {
 	}
 	if !strings.Contains(logbuf.String(), "this would have been the reply") {
 		t.Fatalf("log should include the lost text preview, got: %q", logbuf.String())
+	}
+}
+
+// chat.startStream requires recipient_team_id + recipient_user_id
+// when streaming to channels, otherwise Slack returns
+// missing_recipient_team_id (docs/channel/slack.md §5.2). The
+// turnStream must forward the adapter-stashed team/user ids.
+func TestStream_StartStreamCarriesRecipientInfo(t *testing.T) {
+	api := newFakeAPI()
+	s := testStream(t, api, 0)
+	ctx := context.Background()
+
+	if err := s.appendMarkdown(ctx, "hello", false); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	calls := api.snapshot()
+	if len(calls) == 0 || calls[0].Method != "StartStream" {
+		t.Fatalf("expected StartStream call first; got %v", calls)
+	}
+	if calls[0].TeamID != "T_TEST" {
+		t.Errorf("StartStream teamID = %q, want T_TEST (must propagate so Slack accepts the call)", calls[0].TeamID)
+	}
+	if calls[0].UserID != "U_TEST" {
+		t.Errorf("StartStream userID = %q, want U_TEST (must propagate so Slack accepts the call)", calls[0].UserID)
 	}
 }

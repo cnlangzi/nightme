@@ -788,7 +788,7 @@ func TestDispatchPR_NoWorkspace(t *testing.T) {
 	cs := rig.cs
 	s := captureCh(t, cs)
 
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -815,7 +815,7 @@ func TestDispatchPR_MalformedYml(t *testing.T) {
 	cs := rig.cs
 	s := captureCh(t, cs)
 
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -834,7 +834,7 @@ func TestDispatchPR_DefaultBranchFails(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -915,7 +915,7 @@ func TestDispatchPR_NoOriginBranch(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -953,7 +953,7 @@ func TestDispatchPR_LSRemoteAuthError(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -986,7 +986,7 @@ func TestDispatchPR_LSRemoteNetworkError(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1017,7 +1017,7 @@ func TestDispatchPR_LSRemoteUnknownErrorPassThrough(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1058,7 +1058,7 @@ func TestDispatchPR_LSRemoteNotARepository(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1122,7 +1122,7 @@ func TestDispatchPR_ExistingPR(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1158,7 +1158,7 @@ func TestDispatchPR_FindOpenPRErrCLINotInstalled(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1186,7 +1186,7 @@ func TestDispatchPR_FindOpenPRUnknownErrorPassThrough(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1223,7 +1223,7 @@ func TestDispatchPR_CreateStaleUpstreamRace(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1257,7 +1257,7 @@ func TestDispatchPR_AlreadyExistsRace(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1292,7 +1292,7 @@ func TestDispatchPR_CreateStaleUpstreamRace_GitLab(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1322,7 +1322,7 @@ func TestDispatchPR_CreatePR_CLINotInstalled(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1349,7 +1349,7 @@ func TestDispatchPR_CreatePR_UnknownErrorPassThrough(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1398,7 +1398,7 @@ func TestDispatchPR_DirtyNoLongerGate(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1443,7 +1443,7 @@ func TestDispatchPR_NoAgentSelected(t *testing.T) {
 	cs := &chatsession.ChatSession{} // no SetSelectedAgent → empty selection
 	_ = cs.SetSelectedCwd(tmp)
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1463,7 +1463,7 @@ func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1489,7 +1489,7 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1524,7 +1524,7 @@ func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1605,7 +1605,7 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1626,7 +1626,7 @@ func TestDispatchPR_CreatePRExists(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1647,7 +1647,7 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -1675,7 +1675,7 @@ func TestDispatchPR_NoCommitsBetween(t *testing.T) {
 
 	cs := rig.cs
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -2362,7 +2362,7 @@ func TestDispatchPR_AgentFlagOverride(t *testing.T) {
 
 	s := captureCh(t, cs)
 	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg",
-		prArgs{Agent: "opencode"})
+		prArgs{Agent: "opencode"}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -2511,7 +2511,7 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 	deps := HandlerDeps{Git: git, Detect: fakeDetect(prov)}
 
 	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{}, "")
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}

@@ -24,8 +24,8 @@ package gtw
 //  5. Gate 2: provider.FindOpenPRForBranch returns the single open
 //     PR for this head, or nil if none exists. nil = proceed;
 //     non-nil = "already open", surface the URL.
-//  6. Pick an agent (-a override → SelectedAgent), one-shot RunOnce
-//     to generate the PR text.
+//  6. Pick an agent (CLI -a > yml cfg.PR.Agent > SelectedAgent),
+//     one-shot RunOnce to generate the PR text.
 //  7. parsePRReply extracts (title, body) from the fenced block.
 //  8. provider.CreatePR → URL.
 //  9. Reply with ✅ PR opened + branch / base / url / worktree card.
@@ -103,6 +103,7 @@ func dispatchPR(
 	deps HandlerDeps,
 	chatID, messageID string,
 	args prArgs,
+	ymlAgent string,
 ) (*Result, error) {
 	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
 	if res != nil {
@@ -181,7 +182,7 @@ func dispatchPR(
 	prCtx, prCancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer prCancel()
 	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
-		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, "")
+		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, ymlAgent)
 	if err != nil {
 		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
 			err.Error(), agentName, runRes), nil

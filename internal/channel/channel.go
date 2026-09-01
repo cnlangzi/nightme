@@ -47,6 +47,14 @@ import (
 // knows only this surface. Receipt shape and card handles are
 // each Channel's private affair.
 //
+// The chat-id namespace prefix (e.g. telegram "tg_", feishu
+// "oc_", slack "sl_", bot "bt_") lives in the registry, not
+// on this interface — see channel.Register /
+// channel.ChatIDPrefix(name). It is a static property of the
+// channel family, not per-instance state, so consumers
+// (chatstore validation, routing) read it from the registry
+// rather than calling a method on every constructed Channel.
+//
 // Channel-specific extensions:
 //
 //   - OnPromptEnded: the runtime fires this when a chat's

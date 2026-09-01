@@ -7,11 +7,35 @@
 package chatsession
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
+	"os"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
+
+// TestMain registers the chat-id namespace prefixes the chatsession
+// tests rely on (e.g. "oc_" for feishu) so chatstore.New can
+// validate loaded chat_sessions.json entries.
+//
+// Production code wires these prefixes via each adapter's init()
+// (channel/feishu, channel/telegram, …). The chatsession test
+// package CANNOT side-effect-import channel/feishu because
+// channel/feishu imports chatsession — that would be an import
+// cycle (chatsession_test → feishu → chatsession). Registering
+// the prefix directly bypasses the cycle: chatstore only reads
+// the registry for the prefix string, not the builder, and the
+// tests never call BuildAll, so a nil builder is harmless.
+func TestMain(m *testing.M) {
+	channel.Reset()
+	// nil Builder is safe here: Register only stores it, and
+	// chatsession tests never call BuildAll.
+	channel.Register("feishu", "oc_", nil)
+	channel.Register("telegram", "tg_", nil)
+	channel.Register("bot", "bt_", nil)
+	os.Exit(m.Run())
+}
 
 // newTestStores returns a ChatSessionFile + AgentSessionFile pair
 // rooted in t.TempDir() — auto-cleaned at test exit.

@@ -13,11 +13,15 @@ import (
 // init registers the bot channel with the channel registry so
 // channel.BuildAll picks it up automatically (v1.3+ multi-channel).
 //
+// bot produces chatIDs of the form "bt_<runID>" — see
+// workflow.go onTrigger. The "bt_" prefix matches the
+// "tg_" / "oc_" / "sl_" convention used by the IM channels.
+//
 // bot is enabled when the workflows dir exists (or can be created)
 // under the user's nightme data dir. If not, the builder returns
 // an error and BuildAll silently skips bot — no user-facing error.
 func init() {
-	channel.Register("bot", botBuilder)
+	channel.Register("bot", "bt_", botBuilder)
 }
 
 // botBuilder constructs a bot channel. The cfg-derived workflows

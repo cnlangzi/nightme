@@ -11,7 +11,7 @@ import (
 )
 
 func init() {
-	channel.Register("feishu", func(cfg *config.Config) (channel.Channel, error) {
+	channel.Register("feishu", chatIDPrefix, func(cfg *config.Config) (channel.Channel, error) {
 		return NewAdapter(cfg)
 	})
 }

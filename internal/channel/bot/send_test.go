@@ -23,7 +23,7 @@ import (
 func TestBotSendRoutesReplyToRun(t *testing.T) {
 	b := New(Config{})
 
-	const chatID = "bot:wf:test-reply:42"
+	const chatID = "bt_test-reply:42"
 	run := &botRun{
 		runID:    "test-reply-42",
 		chatID:   chatID,
@@ -66,7 +66,7 @@ func TestBotSendNoOpForUnknownChatID(t *testing.T) {
 	b := New(Config{})
 
 	err := b.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "bot:wf:unknown:99",
+		ChatID: "bt_unknown:99",
 		Kind:   messages.OutReply,
 		Text:   "stale",
 	})
@@ -82,7 +82,7 @@ func TestBotSendNoOpForUnknownChatID(t *testing.T) {
 func TestBotSendFullReplyChannelDrops(t *testing.T) {
 	b := New(Config{})
 
-	chatID := "bot:wf:full:1"
+	chatID := "bt_full:1"
 	run := &botRun{
 		runID:  "full-1",
 		chatID: chatID,

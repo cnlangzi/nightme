@@ -51,7 +51,7 @@ func TestBot_Send_NoRun(t *testing.T) {
 
 func TestBot_Send_DeliversToRun(t *testing.T) {
 	b := New(Config{})
-	chatID := "bot:wf:test:1"
+	chatID := "bt_test:1"
 	r := &botRun{chatID: chatID, reply: make(chan string, 1)}
 	b.muRuns.Lock()
 	b.runsByChatID[chatID] = r

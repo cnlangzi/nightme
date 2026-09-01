@@ -5,6 +5,18 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
+// chatIDPrefix is the Feishu channel namespace tag attached to
+// every InboundMessage.ChatID by the adapter. Feishu already
+// returns "oc_<hex>" from every chat-field populator (see
+// SessionChatID below), so the prefix is "oc_" — no rewriting
+// required at ingest, just the namespace stamp that lets
+// cross-channel chatIDs stay unambiguous in chat_sessions.json.
+//
+// The constant is the single source of truth for the namespace
+// tag — channel.Register("feishu", chatIDPrefix, …) in init.go
+// references it, so a future rename stays in one place.
+const chatIDPrefix = "oc_"
+
 // stringValue dereferences a *string, returning "" when nil. Used
 // by the source adapters to read Message.ChatId and similar
 // optional SDK fields. Lived in adapter.go before the

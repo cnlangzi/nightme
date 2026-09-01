@@ -39,7 +39,10 @@ func NewStarter(name, command string, args []string) *Starter {
 // at any time; used by `nightme agents` and any other spec-only
 // consumer.
 func (s *Starter) Info() agent.Info {
-	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
+	args := make([]string, 0, len(DefaultArgs)+len(s.args))
+	args = append(args, DefaultArgs...)
+	args = append(args, s.args...)
+	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, args, headlessEnv)
 }
 
 // Detect verifies the `pi` binary resolves on PATH. Called by
@@ -56,8 +59,8 @@ func (s *Starter) Detect() error {
 //
 // cfg.Workspace is the child process's cwd. cfg.Args are appended
 // after the agent's defaults. cfg.Env is appended to os.Environ()
-// for the child. cfg.SessionID is not used by pi (no resume
-// semantics).
+// for the child. cfg.SessionID is forwarded as --session-id so a
+// restarted NightMe process can resume the existing Pi session.
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("pi: workspace is required")

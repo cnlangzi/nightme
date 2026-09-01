@@ -81,7 +81,13 @@ const stderrCapBytes = 64 * 1024
 // signatures so all four print-mode bridges expose the same surface.
 func buildPrintArgs(blocks []agent.ContentBlock) (args []string, prompt string) {
 	prompt = agent.BlocksToPrompt(blocks)
-	args = []string{"--mode", "json", "-p", prompt}
+	args = []string{
+		"--mode", "json",
+		"--approve",
+		"--no-themes",
+		"--offline",
+		"-p", prompt,
+	}
 	return args, prompt
 }
 
@@ -185,12 +191,13 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	child := proc.New(ctx, s.command, args...)
 	child.Dir = cfg.Workspace
 	// Forward cfg.Env the same way Start does (append to
-	// os.Environ, cfg wins on conflict). Without this,
-	// /gtw commit-time env overrides (custom API keys, MCP
-	// credentials) are silently dropped on the print-mode path.
-	if len(cfg.Env) > 0 {
-		child.Env = append(os.Environ(), cfg.Env...)
-	}
+	// os.Environ, cfg wins on conflict). The headless env is appended
+	// last so the bridge's telemetry default is not silently lost.
+	// Without this, /gtw commit-time env overrides (custom API keys,
+	// MCP credentials) are silently dropped on the print-mode path.
+	env := append([]string(nil), cfg.Env...)
+	env = append(env, headlessEnv...)
+	child.Env = append(os.Environ(), env...)
 
 	stdout, err := child.StdoutPipe()
 	if err != nil {

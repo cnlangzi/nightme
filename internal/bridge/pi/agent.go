@@ -53,14 +53,28 @@ import (
 // ─── constants & exported errors ───
 
 // DefaultArgs is the canonical argv used when spawning `pi` in RPC
-// mode. The flag set is intentionally minimal: --mode rpc is the
-// only behavioral switch. We deliberately do not pass --model or
-// --thinking; selection is the user's choice via Pi's own config
-// or future /use flags. We do not pass --permission-mode either;
-// Pi has no equivalent of Claude Code's bypassPermissions, and the
-// F-32 MVP does not support /abort or extension UI forwarding.
+// mode. NightMe is the only Pi client, so the headless process is
+// intentionally started with project trust and without interactive
+// startup work: --approve trusts project-local resources, --no-themes
+// disables the unused TUI theme layer, and --offline disables version
+// checks, catalog refreshes, and startup package installation.
+// We deliberately do not pass --model or --thinking; selection is
+// the user's choice via Pi's own config or future /use flags. We
+// do not pass --permission-mode either; Pi has no equivalent of
+// Claude Code's bypassPermissions.
 var DefaultArgs = []string{
 	"--mode", "rpc",
+	"--approve",
+	"--no-themes",
+	"--offline",
+}
+
+// headlessEnv contains runtime-only switches that are not argv
+// flags. The child inherits the daemon environment, then receives
+// these values after cfg.Env so the bridge's default remains opt-in
+// for future changes without requiring another process restart.
+var headlessEnv = []string{
+	"PI_TELEMETRY=0",
 }
 
 // handshakeTimeout bounds the initial get_state round-trip. Pi
@@ -289,6 +303,7 @@ type driver struct {
 // for the child.
 //
 // cfg.PermissionMode is ignored (Pi has no equivalent CLI flag).
+// NightMe enables Pi's project-trust path with --approve in DefaultArgs.
 //
 // cfg.SessionID, when non-empty, is forwarded as `--session-id <id>`
 // at spawn time so the spawned process resumes the named session.
@@ -300,6 +315,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	startTime := time.Now()
 	args := buildArgs(s.args, cfg)
 	env := append([]string(nil), cfg.Env...)
+	env = append(env, headlessEnv...)
 
 	piLog("Start enter", "agent", s.name, "command", s.command, "workspace", cfg.Workspace, "args", args)
 
@@ -775,6 +791,7 @@ func (d *driver) New(ctx context.Context) error {
 //     to Stop once SendBlocks has installed promptCancel under
 //     turnMu; both writes happen in the same critical section,
 //     so either both are visible or neither is).
+//
 // SendBlocks's select in rpc.request wakes on either signal and
 // returns — the defer then clears turnActive and Submit rolls
 // back IsReady=true.

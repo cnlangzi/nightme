@@ -209,7 +209,16 @@ func (b *Bot) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentB
 // Different Kinds carry the text in different fields.
 func outboundText(msg messages.OutboundMessage) string {
 	switch msg.Kind {
-	case messages.OutReply, messages.OutThinking, messages.OutResult:
+	case messages.OutReply, messages.OutThinking, messages.OutResult, messages.OutCommandReply:
+		// OutCommandReply was added to the same group after the
+		// gateway started emitting short static replies (slash
+		// command confirmations, runtime errors) as OutCommandReply
+		// instead of OutReply. Channels that stream intermediate
+		// text use OutReply; channels that post one-shot status
+		// text use OutCommandReply. For bot, both kinds carry the
+		// payload in the same `Text` field, so they fold onto the
+		// same branch (see docs/channel/feishu.md §5 for the
+		// rationale on why these two kinds exist separately).
 		if msg.Text != "" {
 			return msg.Text
 		}

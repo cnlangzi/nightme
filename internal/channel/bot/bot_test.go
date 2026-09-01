@@ -112,7 +112,9 @@ func TestOutboundText(t *testing.T) {
 		want string
 	}{
 		{"plain text", messages.OutboundMessage{Kind: messages.OutReply, Text: "hello"}, "hello"},
+		{"plain text OutCommandReply (slash command reply)", messages.OutboundMessage{Kind: messages.OutCommandReply, Text: "Workspace set to /tmp"}, "Workspace set to /tmp"},
 		{"empty text returns empty", messages.OutboundMessage{Kind: messages.OutReply}, ""},
+		{"empty text OutCommandReply returns empty", messages.OutboundMessage{Kind: messages.OutCommandReply}, ""},
 		{"tool kind returns empty (v0 ignores)", messages.OutboundMessage{Kind: messages.OutToolStart, Text: "noise"}, ""},
 	}
 	for _, tt := range tests {

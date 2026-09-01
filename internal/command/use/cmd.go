@@ -118,8 +118,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// the channel's StatusBar AgentBar (Line 1: 🤖: Agent ·
 	// Model · SessionID) updates synchronously with the /use
 	// confirmation. The plain `command.Reply` path goes through
-	// Router.emitReply, which constructs the OutboundMessage with
-	// ONLY ChatID/Kind/Text/ReplyTo — AgentName/Model/SessionID
+	// Router.emitCommandReply, which constructs the OutboundMessage
+	// with ONLY ChatID/Kind/Text/ReplyTo — AgentName/Model/SessionID
 	// stay empty, so statusbar.StatusBarLines drops the entire AgentBar
 	// line and the placeholder card keeps showing the previous
 	// agent's identity until the next bridge EventAgentReady arrives

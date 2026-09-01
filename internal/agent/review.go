@@ -289,6 +289,57 @@ func ReviewWithPrompt(ctx context.Context, s Starter, cfg StartConfig, opts ...R
 	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
 }
 
+// ReviewWithMixed runs the bridge's native review slash command(s)
+// alongside the nightme-owned simplify lens, in parallel via the
+// existing delegateReviewMultiJob + eventAggregator + mergeRunResults
+// machinery. Used by bridges whose native review subcommand does NOT
+// include the simplify axes (reuse / simplification / efficiency /
+// altitude) — currently only cursor.
+//
+// Why this exists (vs ReviewWithNative single-call pattern that
+// codex / claudecode use): those bridges' native review output is
+// already the full review surface (severity grouping, confidence
+// scoring, multi-agent pipeline). Cursor's Bugbot is NOT — its
+// review covers correctness / security / etc. but NOT reuse /
+// simplification / efficiency / altitude. Verified by reading
+// ~/.cursor/skills-cursor/review-bugbot/SKILL.md (it launches a
+// `bugbot` subagent with no simplify axes; cursor-agent CLI has no
+// /simplify skill — see docs/REVIEW.md §2.1.1 for the empirical
+// verification). So we run Bugbot AND our simplifyPrompt in
+// parallel and merge via the same fan-out machinery as Tier 2/3.
+//
+// Why we don't reuse ReviewWithPrompt: ReviewWithPrompt always uses
+// BuiltinPrompt as the primary review group, which would bypass the
+// native slash command (cursor-agent would receive the BuiltinPrompt
+// text instead of "/review-bugbot", and Bugbot wouldn't run). The
+// caller wants the bridge-native review, not the builtin rubric.
+//
+// Each slashCommand becomes a nativeReviewGroup (patternNativeReview)
+// whose Rule is the slash command itself; the bridge's RunOnce spawns
+// its binary with the slash as the prompt, and the binary dispatches
+// it. simplifyGroup(reviewable) is always appended as the second
+// goroutine — same pattern as ReviewWithPrompt's append-simplify.
+//
+// Returns ErrNoDiff on empty diff (same contract as ReviewWithPrompt).
+func ReviewWithMixed(
+	ctx context.Context,
+	s Starter,
+	cfg StartConfig,
+	slashCommands []string,
+	opts ...RunOnceOption,
+) (RunResult, error) {
+	pre := precomputeReviewWithBuiltin(ctx, cfg.Workspace)
+	if pre.isEmptyDiff() {
+		return RunResult{}, ErrNoDiff
+	}
+	groups := make([]reviewGroup, 0, len(slashCommands)+1)
+	for _, sc := range slashCommands {
+		groups = append(groups, nativeReviewGroup(sc))
+	}
+	groups = append(groups, simplifyGroup(pre.reviewable))
+	return delegateReviewMultiJob(ctx, s, cfg, pre, groups, opts...)
+}
+
 // (listWorkspaceFiles deleted — precomputeReview already populates
 // reviewable via collectReviewableFiles in the no-ocr branch; see
 // review_with_ocr.go.)

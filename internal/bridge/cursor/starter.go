@@ -134,23 +134,40 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 	return runPrintMode(ctx, s, cfg, blocks, opts...)
 }
 
-// Review implements /review for the cursor bridge: invoke the
-// native /review-bugbot slash command (Tier 1 — docs/REVIEW.md §2.1).
+// Review implements /review for the cursor bridge via the existing
+// delegateReviewMultiJob fan-out machinery (docs/REVIEW.md §2.5).
 //
-// Verified empirically against cursor-agent 2026.08.11 (2026-09-01):
-// cursor-agent auto-loads ~/.cursor/skills-cursor/review-bugbot/SKILL.md
-// and dispatches the bugbot subagent when "/review-bugbot" appears as
-// the positional -p prompt. Plain-text stdout → RunResult.Text.
+// Groups:
+//   1. nativeReviewGroup("/review-bugbot") — cursor-agent's built-in
+//      Bugbot subagent. Verified empirically 2026-09-01 against
+//      cursor-agent 2026.08.11: cursor-agent auto-loads
+//      ~/.cursor/skills-cursor/review-bugbot/SKILL.md and dispatches
+//      the bugbot subagent when "/review-bugbot" appears as the
+//      positional -p prompt. The bridge's RunOnce spawns cursor-agent
+//      with -p "/review-bugbot" --output-format text and Bugbot runs.
+//   2. simplifyGroup(pre.reviewable) — nightme-owned simplify lens
+//      (reuse / simplification / efficiency / altitude axes).
+//      Bugbot does NOT cover these axes (verified by reading the
+//      SKILL.md and confirming cursor-agent CLI has no /simplify
+//      skill — see docs/REVIEW.md §2.1.1). We run them in parallel
+//      to fill the gap and merge the results.
 //
-// Per docs/REVIEW.md §2.1 "codex/claude use native review" rule,
-// cursor now qualifies — we invoke its native review directly
-// instead of running the Tier 2/3 path (ReviewWithOcr /
-// ReviewWithPrompt). Symmetric with codex's `codex exec review` and
-// claudecode's `claude -p code-review`.
+// Why the mixed pattern (vs codex/claudecode single-call native):
+// those bridges' native review already covers the full review
+// surface (severity grouping / multi-agent pipeline), so a
+// single native call is enough. Bugbot is missing the simplify
+// axes, hence the second goroutine.
 //
-// Per docs/REVIEW.md §2.6, native reviewers don't get simplifyGroup
-// (it's a nightme-owned parallel lens added only to Tier 2/3).
-// Bugbot computes the diff itself; we don't precompute or pass --base.
+// Why we go through ReviewWithMixed (vs writing our own fan-out):
+// delegateReviewMultiJob already handles parallel goroutines,
+// eventAggregator (3-phase state machine), per-job ToolStart/End
+// pairing, cross-job Task dedup, and mergeRunResults. Reusing it
+// keeps the cursor path symmetric with codex/claudecode's
+// ReviewWithNative path AND with Tier 2/3's ReviewWithPrompt path.
+//
+// See agent.ReviewWithMixed (internal/agent/review.go) for the
+// generic helper; this method is a one-liner wiring the cursor
+// bridge's slash command into it.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runCursorReview(ctx, s, cfg, opts...)
+	return agent.ReviewWithMixed(ctx, s, cfg, []string{"/review-bugbot"}, opts...)
 }

@@ -266,7 +266,7 @@ func TestStreamIndex_EvictsAndPurges(t *testing.T) {
 	api := newFakeAPI()
 	build := func() *turnStream {
 		state, _ := newStateStore("")
-		return newTurnStream("sl_T1:C1", "C1", "", "u", streamDeps{
+		return newTurnStream("sl_T1:C1", "C1", "", "u", "T_TEST", "U_TEST", streamDeps{
 			api: api, limiter: NewLimiter(nil, nil), state: state,
 		})
 	}

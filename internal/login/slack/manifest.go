@@ -77,6 +77,13 @@ features:
   assistant_view:
     assistant_description: Drive your local coding agents from Slack.
     suggested_prompts: []
+  # 2026-09-01 改用 dollar-sign 前缀消息匹配（docs/channel/slack.md §6.2.1）。
+  # 不再在 manifest 注册任何 slash command——dollar-sign 不在 Slack 任何保留
+  # 字列表，0 reinstall 摩擦。加新命令 = 0 Slack 改动（只改
+  # internal/command/<name>/cmd.go，dispatcher 自动识别）。
+  #
+  # 旧设计（保留在 git history）曾是 12 个 slash_commands + slash-kclose
+  # 翻译绕开 Slack 的 slash-close 保留字。新设计 dollar-close 直接就是 close。
 oauth_config:
   scopes:
     bot:

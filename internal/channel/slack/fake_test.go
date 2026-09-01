@@ -27,6 +27,10 @@ type apiCall struct {
 	Broadcast bool
 	Reaction  string
 	Status    string
+	// TeamID / UserID are captured only by StartStream so we can
+	// assert the recipient info is propagated (docs/channel/slack.md §5.2).
+	TeamID string
+	UserID string
 }
 
 // fakeAPI is the scriptable apiClient used across the package tests.
@@ -116,16 +120,16 @@ func (f *fakeAPI) countOf(method string) int {
 	return n
 }
 
-func (f *fakeAPI) StartStream(_ context.Context, channelID, threadTS string, chunks []slackgo.StreamChunk) (string, error) {
+func (f *fakeAPI) StartStream(_ context.Context, channelID, threadTS, teamID, userID string, chunks []slackgo.StreamChunk) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.take("StartStream"); err != nil {
-		f.record(apiCall{Method: "StartStream", ChannelID: channelID, ThreadTS: threadTS, Chunks: chunks})
+		f.record(apiCall{Method: "StartStream", ChannelID: channelID, ThreadTS: threadTS, Chunks: chunks, TeamID: teamID, UserID: userID})
 		return "", err
 	}
 	f.tsSeq++
 	ts := "ts-" + itoa(f.tsSeq)
-	f.record(apiCall{Method: "StartStream", ChannelID: channelID, ThreadTS: threadTS, TS: ts, Chunks: chunks})
+	f.record(apiCall{Method: "StartStream", ChannelID: channelID, ThreadTS: threadTS, TS: ts, Chunks: chunks, TeamID: teamID, UserID: userID})
 	return ts, nil
 }
 

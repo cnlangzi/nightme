@@ -330,6 +330,60 @@ func TestSlashCommand_BecomesInboundText(t *testing.T) {
 	if !msg.HasMention {
 		t.Fatal("an explicit command is unambiguously for the bot")
 	}
+	// handleSlashCommand now posts a "⏳ Processing" parent message
+	// first so the reply (and any streaming agent output) has a real
+	// Slack thread_ts to thread under (docs/channel/slack.md §5.2).
+	// MessageID must be that parent ts, NOT the raw TriggerID —
+	// Slack's streaming API rejects thread_ts=TriggerID with
+	// invalid_thread_ts.
+	calls := api.snapshot()
+	var posted bool
+	for _, c := range calls {
+		if c.Method == "PostMessage" && c.ChannelID == "C1" && c.ThreadTS == "" {
+			posted = true
+			if !strings.Contains(c.Text, "Processing") {
+				t.Fatalf("parent postMessage text = %q, want it to mention Processing", c.Text)
+			}
+			if c.TS == "" {
+				t.Fatal("parent postMessage did not return a ts")
+			}
+			if msg.MessageID != c.TS {
+				t.Fatalf("InboundMessage.MessageID = %q, want parent ts %q (not TriggerID)",
+					msg.MessageID, c.TS)
+			}
+			break
+		}
+	}
+	if !posted {
+		t.Fatal("expected PostMessage for parent placeholder before pushing inbound")
+	}
+}
+
+// TestSlashCommand_TranslatesKcloseToClose verifies that the manifest
+// registers /kclose (because Slack reserves /close) but the engine
+// still routes through internal/command/close via the SlashCommand
+// translation in handleSlashCommand (docs/channel/slack.md §6.2.1).
+func TestSlashCommand_TranslatesKcloseToClose(t *testing.T) {
+	api := newFakeAPI()
+	sock := newFakeSocket()
+	a := newTestAdapter(t, api, sock)
+
+	a.handleSocketEvent(context.Background(), socketmode.Event{
+		Type:    socketmode.EventTypeSlashCommand,
+		Request: &socketmode.Request{},
+		Data: slackgo.SlashCommand{
+			Command: "/kclose", Text: "claude", ChannelID: "C1",
+			UserID: "U1", TeamID: "T1", TriggerID: "trig-2",
+		},
+	})
+
+	msg, ok := drainOne(t, a)
+	if !ok {
+		t.Fatal("no inbound message")
+	}
+	if msg.Text != "/close claude" {
+		t.Fatalf("text = %q, want %q", msg.Text, "/close claude")
+	}
 }
 
 func TestInteractive_BlockActionBecomesActionPayload(t *testing.T) {

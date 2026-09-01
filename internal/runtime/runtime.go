@@ -406,7 +406,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// v1.3+ multi-channel: each pump's mgr closure is the
 	// "current" mgr for that channel; the dispatcher takes
 	// mgr per call. The Emitter argument is the per-call
-	// fallback used by emitReply for command error paths —
+	// fallback used by emitCommandReply for command error paths —
 	// the real outbound goes through cs.Emitter() inside
 	// cmd.Handle. Pass a no-op Emitter; the error path
 	// logs the failure and returns a SlashOutput to the
@@ -667,7 +667,7 @@ func unregisterMgrFromAllMgrs(m *chatsession.Manager) {
 // the dispatcher takes mgr per call via the per-pump pump
 // closure; the constructor-level csMgr field is only used for
 // legacy tryMessageDispatch paths and the inbound.Router's
-// own emitReply path (which itself routes through cs.Emitter).
+// own emitCommandReply path (which itself routes through cs.Emitter).
 // Since the production code path always passes a real mgr via
 // Dispatch(ctx, mgr, msg), this stub is never actually invoked
 // against real data — it's only there to satisfy the inbound.New

@@ -45,6 +45,12 @@ type turnStream struct {
 	threadTS  string
 	userMsgID string
 
+	// Recipient info for chat.startStream (Slack requires recipient_team_id
+	// + recipient_user_id when streaming to channels, otherwise the call
+	// returns missing_recipient_team_id; docs/channel/slack.md §5.2).
+	teamID string
+	userID string
+
 	api   apiClient
 	limit *Limiter
 	retry RetryConfig
@@ -83,12 +89,14 @@ type pendingTool struct {
 	title string
 }
 
-func newTurnStream(chatID, channelID, threadTS, userMsgID string, deps streamDeps) *turnStream {
+func newTurnStream(chatID, channelID, threadTS, userMsgID, teamID, userID string, deps streamDeps) *turnStream {
 	return &turnStream{
 		chatID:    chatID,
 		channelID: channelID,
 		threadTS:  threadTS,
 		userMsgID: userMsgID,
+		teamID:    teamID,
+		userID:    userID,
 		api:       deps.api,
 		limit:     deps.limiter,
 		retry:     deps.retry,
@@ -362,7 +370,7 @@ func (s *turnStream) startStream(ctx context.Context, channelID, threadTS string
 			return err
 		}
 		var innerErr error
-		ts, innerErr = s.api.StartStream(ctx, channelID, threadTS, chunks)
+		ts, innerErr = s.api.StartStream(ctx, channelID, threadTS, s.teamID, s.userID, chunks)
 		return innerErr
 	})
 	return ts, err

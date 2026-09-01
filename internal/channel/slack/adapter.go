@@ -646,6 +646,24 @@ func attachmentType(mime string) string {
 
 // handleSlashCommand turns a Slack slash command into a normal
 // inbound text message so the existing command pipeline handles it.
+//
+// Two extra steps before pushing to the dispatcher:
+//
+//  1. Post a "⏳ Processing /<cmd> …" placeholder message and use
+//     its ts as the InboundMessage.MessageID. Slack's
+//     chat.startStream/chat.appendStream APIs reject streaming when
+//     thread_ts is cmd.TriggerID (which is a transient request
+//     token, not a message ts), and SlashOutput replies
+//     (chat.postMessage with thread_ts) need a real parent ts to
+//     render in the user's view. The placeholder message is the
+//     thread root for every downstream API call.
+//  2. Map /kclose → /close (manifest can't register /close because
+//     Slack reserves it; see docs/channel/slack.md §6.2.1).
+//
+// The placeholder post is best-effort: if it fails (channel not
+// joined, rate limit), we fall back to cmd.TriggerID so the command
+// still runs, even though subsequent streaming will fail until the
+// daemon is restarted with the binary that fixes Issue B.
 func (a *Adapter) handleSlashCommand(cmd slackgo.SlashCommand) {
 	a.mu.Lock()
 	teamID := a.teamID
@@ -653,20 +671,42 @@ func (a *Adapter) handleSlashCommand(cmd slackgo.SlashCommand) {
 	if teamID == "" {
 		teamID = cmd.TeamID
 	}
+
 	chatID := sessionChatID(teamID, cmd.ChannelID, "")
 	if chatID == "" {
 		return
 	}
-	text := cmd.Command
+	command := cmd.Command
+	// /close is reserved by Slack (built-in channel close). Manifest
+	// registers it as /kclose so the validator accepts it; we
+	// translate back to /close so the existing command parser still
+	// routes to internal/command/close.
+	if command == "/kclose" {
+		command = "/close"
+	}
+	text := command
 	if strings.TrimSpace(cmd.Text) != "" {
 		text += " " + cmd.Text
 	}
+
+	// Post the thread-root placeholder. Use the slackgo client
+	// directly so we keep the existing liveAPI.retry / .limiter
+	// wrapping on the hot path (post() uses them).
+	parentCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	parentTS, err := a.post(parentCtx, cmd.ChannelID, "", "⏳ Processing "+command+" …", nil, false)
+	if err != nil || parentTS == "" {
+		a.log().Warn("slack: slash command parent post failed; falling back to TriggerID",
+			"cmd", command, "err", err)
+		parentTS = cmd.TriggerID
+	}
+
 	a.health.recordInbound()
 	msg := messages.InboundMessage{
 		ChatID:     chatID,
 		UserID:     cmd.UserID,
 		Text:       text,
-		MessageID:  cmd.TriggerID,
+		MessageID:  parentTS, // real Slack ts from the placeholder post
 		Time:       time.Now(),
 		HasMention: true, // an explicit command is always for us
 		Raw:        cmd,

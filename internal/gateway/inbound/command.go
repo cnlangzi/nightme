@@ -99,7 +99,7 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 		if rec := recover(); rec != nil {
 			slog.Default().Error("inbound: runCommand panicked",
 				"chat_id", msg.ChatID, "panic", rec)
-			r.emitReply(ctx, nil, msg, "❌ internal error (see daemon log)")
+			r.emitCommandReply(ctx, nil, msg, "❌ internal error (see daemon log)")
 		}
 	}()
 
@@ -129,7 +129,7 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 		HasMention: msg.HasMention,
 	})
 	if err != nil {
-		r.emitReply(ctx, cs, msg, "❌ "+err.Error())
+		r.emitCommandReply(ctx, cs, msg, "❌ "+err.Error())
 		return
 	}
 	if out == nil {
@@ -144,7 +144,7 @@ func (r *Router) runCommand(ctx context.Context, mgr *chatsession.Manager, comma
 	// so production behaviour matches the documented contract.
 	r.routeOutbound(ctx, cs, out.Outbound)
 	if out.Reply != "" {
-		r.emitReply(ctx, cs, msg, out.Reply)
+		r.emitCommandReply(ctx, cs, msg, out.Reply)
 	}
 }
 
@@ -163,22 +163,39 @@ func (r *Router) resolveEmitter(cs *chatsession.ChatSession) messages.Emitter {
 	return r.emitter
 }
 
-// emitReply writes a single outbound reply through the per-channel
-// Emitter (cs.Emitter()) so replies land on the originating
-// channel. Falls back to r.emitter when cs is nil or has no
-// Emitter bound (which is rare in production — every runX takes
-// a ChatSession path; tests that drive the dispatch chain
-// directly are the common fallback user). Anchored to the
-// original user message so the channel renders it as a thread
-// reply (Feishu) / in-place edit (Slack) / DOM append (Web).
-func (r *Router) emitReply(ctx context.Context, cs *chatsession.ChatSession, msg *messages.InboundMessage, text string) {
+// emitCommandReply writes a single one-shot command reply through
+// the per-channel Emitter (cs.Emitter()) so the message lands on
+// the originating channel. Falls back to r.emitter when cs is nil
+// or has no Emitter bound (which is rare in production — every
+// runX takes a ChatSession path; tests that drive the dispatch
+// chain directly are the common fallback user).
+//
+// The Kind is OutCommandReply (not OutReply) because every call
+// site is a short, static, one-shot text — slash command
+// confirmations from internal/command/<name>/cmd.go, runtime
+// errors surfaced to the user, and the panic-recovery breadcrumb.
+// OutReply is reserved for the agent's streaming reply pipeline
+// (chatsession.EventHandler → translate.OutReply → receipt card);
+// command replies must NOT enter that pipeline because they are
+// not part of the agent turn (they arrive before/after the turn,
+// or in error paths where no turn exists at all).
+//
+// Channel-side routing for OutCommandReply is documented per
+// channel: Feishu renders it as a top-level Create (ReplyInChat,
+// `TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed`),
+// Telegram appends to the active chain segment, bot folds the
+// payload into its run-reply channel, and Slack uses it for the
+// `chat.postMessage` parent-thread path of `/cwd` / `/use` / `/new`
+// / `/stop`. See docs/channel/slack.md §4 and
+// internal/messages/outbound.go OutCommandReply doc.
+func (r *Router) emitCommandReply(ctx context.Context, cs *chatsession.ChatSession, msg *messages.InboundMessage, text string) {
 	em := r.resolveEmitter(cs)
 	if text == "" || em == nil {
 		return
 	}
 	if sendErr := em.Send(ctx, messages.OutboundMessage{
 		ChatID:  msg.ChatID,
-		Kind:    messages.OutReply,
+		Kind:    messages.OutCommandReply,
 		Text:    text,
 		ReplyTo: msg.MessageID,
 	}); sendErr != nil {

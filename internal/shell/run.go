@@ -2,9 +2,19 @@
 // callers (gtw hooks, debug commands, scripts).
 //
 // Run is the package's second public entry point (the first being
-// Dispatcher.Handle, which is async + reply-card). Run is sync:
-// it executes the platform shell, captures stdout/stderr, and
-// returns. No Sender involvement, no goroutine, no Reply card.
+// Dispatcher.Handle, which is async + streaming reply card).
+// Run is sync: it executes the platform shell, captures
+// stdout/stderr, and returns. No Sender involvement, no
+// goroutine, no Reply card.
+//
+// Run is implemented on top of the streaming executeShell core
+// by passing onChunk=nil — coalesceLines writes every line to
+// sink regardless, and without an onChunk callback the
+// coalescer never flushes mid-stream. From the caller's
+// perspective the API is identical to the pre-streaming
+// buffer-based implementation; internally the bytes flow
+// through io.Pipe + drainer goroutines on platforms that need
+// them.
 //
 // Platform dispatch lives in dispatch_unix.go / dispatch_windows.go
 // (same files as executeShell). This file is platform-agnostic.
@@ -51,7 +61,13 @@ func (e *ExitError) Error() string {
 // page-decoded by the platform dispatcher). The same string is
 // also embedded in *ExitError.Stderr for caller convenience.
 func Run(ctx context.Context, cwd, cmd string, extraEnv []string) (stdout, stderr string, exitCode int, err error) {
-	r := executeShell(ctx, cwd, cmd, extraEnv)
+	// onChunk=nil: coalesceLines writes every line to its sink
+	// buffer (stdoutBuf / stderrBuf in executeShell) without
+	// emitting any chunks. Run reads the populated r.Stdout /
+	// r.Stderr after executeShell returns. Behavior is
+	// observationally identical to the pre-streaming buffer-
+	// based implementation.
+	r := executeShell(ctx, cwd, cmd, extraEnv, nil)
 	out := strings.TrimRight(r.Stdout, "\n")
 	eerr := strings.TrimRight(r.Stderr, "\n")
 	if r.ExitCode != 0 {

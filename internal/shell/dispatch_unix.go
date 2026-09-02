@@ -1,73 +1,108 @@
 //go:build !windows
 
-// Unix shell execution — sh -c. POSIX guarantees /bin/sh
-// exists on every Unix-like system, so we don't fall back to
-// bash / dash / etc. explicitly.
-//
-// Env is inherited from os.Environ() (clean parent env, NOT
-// whatever the agent process has mutated) so the user gets a
-// shell they recognise. cwd comes from cs.SelectedCwd — no
-// tilde / env-var resolution.
+// Unix shell execution — sh -c.
 package shell
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
-func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string) *result {
+// executeShell runs cmdline in cwd via "sh -c", draining stdout
+// and stderr through coalesceLines. onChunk is invoked per chunk;
+// pass nil to collect full output without streaming (Run / gtw hooks).
+//
+// Failure modes collapse into ExitCode=-1 + Stderr so the dispatcher
+// footer renders ❌:
+//   - non-zero exit (exec.ExitError carries the code)
+//   - ctx cancelled (CommandContext killed child)
+//   - drainer panic (recovered via panicCh)
+func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, onChunk func(string) error) (ret *result) {
 	start := time.Now()
-	// Route through proc.New so the platform-specific
-	// SysProcAttr lives in one place: Setsid on Unix (so the
-	// shell child becomes the leader of its own session and
-	// process group; same reasoning as the agent bridges —
-	// /dev/tty inheritance can't wedge the shell event loop),
-	// CREATE_NO_WINDOW on Windows (handled by dispatch_windows.go).
 	c := proc.New(ctx, "sh", "-c", cmdline)
 	c.Dir = cwd
-	// Parent env first, then caller-supplied vars on top. A
-	// duplicate key in extraEnv intentionally overrides the
-	// parent's value (e.g. PATH injection by the caller wins).
 	c.Env = append(os.Environ(), extraEnv...)
 
-	var stdout, stderr bytes.Buffer
-	c.Stdout = &stdout
-	c.Stderr = &stderr
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	c.Stdout, c.Stderr = outW, errW
 
-	runErr := c.Run()
-	dur := time.Since(start)
-
-	r := &result{
-		Consumed: true,
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		Cmd:      cmdline,
-		Cwd:      cwd,
-		Duration: dur,
-	}
-
-	if runErr != nil {
-		// exec.ExitError carries the child's exit code;
-		// anything else (e.g. ctx cancellation) reports -1.
-		var ee *exec.ExitError
-		if errors.As(runErr, &ee) {
-			r.ExitCode = ee.ExitCode()
-		} else {
-			r.ExitCode = -1
-			// Surface the error in stderr so the user sees it.
-			if r.Stderr != "" {
-				r.Stderr += "\n"
+	var (
+		stdoutBuf, stderrBuf bytes.Buffer
+		panicCh              = make(chan any, 2)
+		wg                   sync.WaitGroup
+		runErr               error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
 			}
-			r.Stderr += runErr.Error()
-		}
-	}
+		}()
+		_ = coalesceLines(outR, &stdoutBuf, onChunk, false)
+	}()
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		_ = coalesceLines(errR, &stderrBuf, onChunk, true)
+	}()
 
-	r.Reply = renderSummary(r)
-	return r
+	// Defer closes pipes + joins drainers BEFORE we read stdoutBuf
+	// / stderrBuf (reading concurrently with WriteString is a data
+	// race). Runs on normal return AND on c.Run / coalesceLines panic.
+	defer func() {
+		_ = outW.Close()
+		_ = errW.Close()
+		wg.Wait()
+
+		ret = &result{
+			Stdout:   stdoutBuf.String(),
+			Stderr:   stderrBuf.String(),
+			Cwd:      cwd,
+			Duration: time.Since(start),
+		}
+		if runErr != nil {
+			var ee *exec.ExitError
+			if errors.As(runErr, &ee) {
+				ret.ExitCode = ee.ExitCode()
+			} else {
+				ret.ExitCode = -1
+				if ret.Stderr != "" {
+					ret.Stderr += "\n"
+				}
+				ret.Stderr += runErr.Error()
+			}
+		}
+
+		var panicVal any
+		select {
+		case panicVal = <-panicCh:
+		default:
+		}
+		if panicVal != nil && ret.ExitCode == 0 {
+			ret.ExitCode = -1
+			if ret.Stderr != "" {
+				ret.Stderr += "\n"
+			}
+			ret.Stderr += fmt.Sprintf("shell: drainer panic: %v", panicVal)
+		}
+	}()
+
+	runErr = c.Run()
+	return
 }

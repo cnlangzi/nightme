@@ -1,101 +1,128 @@
 //go:build windows
 
 // Windows shell executor — runs the user command via `cmd /c`.
-// `cmd.exe` is on every Windows install since NT 4.0
-// (C:\Windows\System32\cmd.exe, PATH-default), so no shell
+// `cmd.exe` is on every Windows install since NT 4.0 so no shell
 // detection chain is needed.
 //
-// The Windows-specific gotcha is encoding: cmd.exe writes
-// stdout/stderr in the system's active ANSI/OEM code page
-// (CP_ACP). On a Simplified Chinese Windows this is CP936
-// (GBK), and Go's os/exec returns raw bytes — so a user
-// running `!ipconfig /all` on a Chinese-locale box would see
-// garbled text. We decode via golang.org/x/text/encoding
-// using GB18030 (a GBK superset) when GetACP() returns the
-// Chinese code page; otherwise we fall through to UTF-8
-// (which works for cmd /u /c invocations and modern PowerShell
-// pipes — though we don't invoke those here, leaving the door
-// open for future variants).
+// Encoding gotcha: cmd.exe writes stdout/stderr in CP_ACP. On a
+// zh-CN Windows (CP936 = GBK) we decode via GB18030; otherwise
+// passthrough. On decode error the rest of the stream passes
+// through raw (once-decoded-forever-raw).
 package shell
 
 import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/cnlangzi/nightme/internal/proc"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/proc"
 	"golang.org/x/sys/windows"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )
 
-// cpACPChinese is the Windows ANSI code page for Simplified
-// Chinese. GetACP() returns 936 on zh-CN systems; Big5 (950)
-// and Shift-JIS (932) are out of scope for this MVP — they
-// would need their own decoder branches.
 const cpACPChinese = 936
 
-// executeShell runs cmd via `cmd /c` in cwd with a clean env.
-// stdout/stderr are captured as raw bytes and decoded based
-// on the system's active code page (see file header).
-//
-// The cmd /c quoting rules differ from POSIX (no single-quote
-// blocks; `^` is the escape char). For MVP we pass cmd as a
-// single argument and let cmd.exe handle its own parsing —
-// this matches how Windows users actually type commands in
-// cmd.exe interactively.
-func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string) *result {
+// executeShell runs cmdline in cwd via "cmd /c". Failure modes
+// (non-zero exit / ctx cancel / drainer panic) collapse into
+// ExitCode=-1 + Stderr so the dispatcher footer renders ❌.
+// See dispatch_unix.go for the full table.
+func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, onChunk func(string) error) (ret *result) {
 	start := time.Now()
-
 	c := proc.New(ctx, "cmd", "/c", cmdline)
 	c.Dir = cwd
-	// Parent env first, then caller-supplied vars on top.
 	c.Env = append(os.Environ(), extraEnv...)
 
-	var stdoutRaw, stderrRaw bytes.Buffer
-	c.Stdout = &stdoutRaw
-	c.Stderr = &stderrRaw
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	c.Stdout, c.Stderr = outW, errW
 
-	// On Windows, child handles can be inherited — when we kill
-	// the parent context, the child should die too. Default
-	// behaviour for CommandContext is fine here.
-	runErr := c.Run()
-	dur := time.Since(start)
+	outDec := decoderFor(windows.GetACP())
+	errDec := decoderFor(windows.GetACP())
+	outDecodedOK := outDec != nil
+	errDecodedOK := errDec != nil
+	outRdr := wrapDecoder(outR, outDec)
+	errRdr := wrapDecoder(errR, errDec)
 
-	exitCode := 0
-	if runErr != nil {
-		var ee *exec.ExitError
-		if errors.As(runErr, &ee) {
-			exitCode = ee.ExitCode()
-		} else {
-			exitCode = -1
+	var (
+		stdoutBuf, stderrBuf bytes.Buffer
+		panicCh              = make(chan any, 2)
+		wg                   sync.WaitGroup
+		runErr               error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		_ = drainWithFallback(&outDecodedOK, outRdr, func() io.Reader { return outR },
+			&stdoutBuf, onChunk, false)
+	}()
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		_ = drainWithFallback(&errDecodedOK, errRdr, func() io.Reader { return errR },
+			&stderrBuf, onChunk, true)
+	}()
+
+	defer func() {
+		_ = outW.Close()
+		_ = errW.Close()
+		wg.Wait()
+
+		ret = &result{
+			Stdout:   stdoutBuf.String(),
+			Stderr:   stderrBuf.String(),
+			Cwd:      cwd,
+			Duration: time.Since(start),
 		}
-	}
+		if runErr != nil {
+			var ee *exec.ExitError
+			if errors.As(runErr, &ee) {
+				ret.ExitCode = ee.ExitCode()
+			} else {
+				ret.ExitCode = -1
+				if ret.Stderr != "" {
+					ret.Stderr += "\n"
+				}
+				ret.Stderr += runErr.Error()
+			}
+		}
 
-	dec := decoderFor(windows.GetACP())
+		var panicVal any
+		select {
+		case panicVal = <-panicCh:
+		default:
+		}
+		if panicVal != nil && ret.ExitCode == 0 {
+			ret.ExitCode = -1
+			if ret.Stderr != "" {
+				ret.Stderr += "\n"
+			}
+			ret.Stderr += fmt.Sprintf("shell: drainer panic: %v", panicVal)
+		}
+	}()
 
-	r := &result{
-		Consumed: true,
-		Stdout:   decode(stdoutRaw.Bytes(), dec),
-		Stderr:   decode(stderrRaw.Bytes(), dec),
-		ExitCode: exitCode,
-		Duration: dur,
-		Cmd:      cmdline,
-		Cwd:      cwd,
-	}
-	r.Reply = renderSummary(r)
-	return r
+	runErr = c.Run()
+	return
 }
 
-// decoderFor picks the right decoder for the given ANSI code
-// page. Unknown code pages fall back to identity (raw bytes)
-// so we never silently corrupt output — a user on a non-
-// Chinese system will see whatever cmd.exe wrote, which is
-// what they'd see if they ran the command manually in cmd.
+// decoderFor returns a GB18030 decoder for CP936 (Simplified
+// Chinese) or nil (identity — raw bytes) for everything else.
 func decoderFor(acp uint32) *encoding.Decoder {
 	if acp == cpACPChinese {
 		return simplifiedchinese.GB18030.NewDecoder()
@@ -103,27 +130,26 @@ func decoderFor(acp uint32) *encoding.Decoder {
 	return nil
 }
 
-// decode runs the raw child bytes through the given decoder.
-// Uses x/text/transform with a small buffer; output that fits
-// in a single chunk is returned as a string, otherwise we
-// drain until done.
-func decode(raw []byte, dec *encoding.Decoder) string {
-	if len(raw) == 0 {
-		return ""
-	}
+func wrapDecoder(r io.Reader, dec *encoding.Decoder) io.Reader {
 	if dec == nil {
-		return string(raw)
+		return r
 	}
-	r := transform.NewReader(bytes.NewReader(raw), dec)
-	out := &bytes.Buffer{}
-	if _, err := out.ReadFrom(r); err != nil {
-		// Decoder errors are rare (invalid byte sequences); we
-		// fall back to the raw bytes so the user sees something
-		// rather than an empty string. Note: on a Chinese-locale
-		// system this means the user will see GBK bytes rendered
-		// as Latin-1 (mojibake) — visually noisy but better than
-		// the alternative of silent truncation.
-		return string(raw)
+	return transform.NewReader(r, dec)
+}
+
+// drainWithFallback: coalesceLines reads from curRdr; on first
+// decode error, flip *decodedOK to false and continue with raw.
+// Some bytes buffered in the transform reader are lost at the
+// boundary — acceptable trade-off for avoiding a stream-wide mix
+// of decoded text and mojibake.
+func drainWithFallback(
+	decodedOK *bool, curRdr io.Reader, fallback func() io.Reader,
+	sink *bytes.Buffer, onChunk func(string) error, isStderr bool,
+) error {
+	err := coalesceLines(curRdr, sink, onChunk, isStderr)
+	if err != nil && *decodedOK {
+		*decodedOK = false
+		return coalesceLines(fallback(), sink, onChunk, isStderr)
 	}
-	return out.String()
+	return err
 }

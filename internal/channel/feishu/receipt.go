@@ -175,12 +175,6 @@ type MessageReceipt struct {
 	// SendCard is the only card in chat. The flag is cleared under
 	// r.mu immediately after the SendCard return value is stored.
 	// F-42 review finding #4/#5.
-	//
-	// NOTE: shell-side debouncing (coalesce.go flushInterval) is
-	// what actually keeps fast streams from flooding the channel
-	// during cold-start. The short-circuit here is left in place
-	// as the F-42 orphan-card guard, but in practice it should
-	// rarely trigger because the shell debounces its sends.
 	initializing bool
 
 	// Feishu limits message updates to roughly five per second.

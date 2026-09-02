@@ -64,7 +64,7 @@ const cpACPChinese = 936
 // passes through as raw bytes. Mixing partially-decoded
 // text with raw bytes in the same chat bubble is worse
 // than uniformly-raw (visually noisy but predictable).
-func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, onChunk func(string) error) (result *result) {
+func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, onChunk func(string) error) (ret *result) {
 	start := time.Now()
 
 	c := proc.New(ctx, "cmd", "/c", cmdline)
@@ -122,54 +122,54 @@ func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, o
 	}()
 
 	// Cleanup defer (mirrors dispatch_unix.go): closes the pipe
-	// writers and joins the drainer goroutines on every exit
-	// path (normal, panic in c.Run, panic in coalesceLines).
-	// Without this, a c.Run() panic would leave drainers
-	// blocked forever on never-closed pipes.
+	// writers and joins the drainer goroutines BEFORE reading
+	// the buffers (avoids data race with WriteString). Then
+	// assembles the result, handles runErr + late panic, and
+	// assigns ret. The named return value lets the defer
+	// assemble the full result without needing an explicit
+	// return value.
 	defer func() {
 		_ = outW.Close()
 		_ = errW.Close()
 		wg.Wait()
 
-		if result == nil {
-			// c.Run() panicked before result was assigned.
-			// The runShell panic recover will log it.
-			return
+		ret = &result{
+			Stdout:   stdoutBuf.String(),
+			Stderr:   stderrBuf.String(),
+			Cwd:      cwd,
+			Duration: time.Since(start),
 		}
+		if runErr != nil {
+			var ee *exec.ExitError
+			if errors.As(runErr, &ee) {
+				ret.ExitCode = ee.ExitCode()
+			} else {
+				ret.ExitCode = -1
+				if ret.Stderr != "" {
+					ret.Stderr += "\n"
+				}
+				ret.Stderr += runErr.Error()
+			}
+		}
+
+		// Panic drain. panicCh is buffered(2); at most one
+		// entry per drainer. Non-blocking select so a missing
+		// panic doesn't delay exit.
 		var panicVal any
 		select {
 		case panicVal = <-panicCh:
 		default:
 		}
-		if panicVal != nil && result.ExitCode == 0 {
-			result.ExitCode = -1
-			if result.Stderr != "" {
-				result.Stderr += "\n"
+		if panicVal != nil && ret.ExitCode == 0 {
+			ret.ExitCode = -1
+			if ret.Stderr != "" {
+				ret.Stderr += "\n"
 			}
-			result.Stderr += fmt.Sprintf("shell: drainer panic: %v", panicVal)
+			ret.Stderr += fmt.Sprintf("shell: drainer panic: %v", panicVal)
 		}
 	}()
 
 	runErr = c.Run()
-
-	result = &result{
-		Stdout:   stdoutBuf.String(),
-		Stderr:   stderrBuf.String(),
-		Cwd:      cwd,
-		Duration: time.Since(start),
-	}
-	if runErr != nil {
-		var ee *exec.ExitError
-		if errors.As(runErr, &ee) {
-			result.ExitCode = ee.ExitCode()
-		} else {
-			result.ExitCode = -1
-			if result.Stderr != "" {
-				result.Stderr += "\n"
-			}
-			result.Stderr += runErr.Error()
-		}
-	}
 	return
 }
 

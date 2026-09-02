@@ -56,7 +56,7 @@ import (
 // this, a c.Run() panic would leave drainers blocked forever
 // on never-closed pipes — a goroutine leak that the daemon
 // would have to be restarted to clear.
-func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, onChunk func(string) error) (result *result) {
+func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, onChunk func(string) error) (ret *result) {
 	start := time.Now()
 	// Route through proc.New so the platform-specific
 	// SysProcAttr lives in one place: Setsid on Unix (so the
@@ -108,53 +108,53 @@ func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, o
 	// Cleanup defer. Runs on normal return AND on any panic
 	// (c.Run panic, coalesceLines panic propagated through the
 	// recover above, etc). Closes pipe writers to unblock the
-	// drainers; wg.Wait joins them; panicCh drain surfaces any
-	// late panic into result. The named return value lets the
-	// defer mutate result after the explicit return.
+	// drainers; wg.Wait joins them BEFORE we read stdoutBuf /
+	// stderrBuf — reading those buffers concurrently with
+	// WriteString would be a data race. Then assembles the
+	// result, handles runErr + late panic, and assigns ret.
+	// The named return value lets the defer assemble the full
+	// result without needing an explicit return value.
 	defer func() {
 		_ = outW.Close()
 		_ = errW.Close()
 		wg.Wait()
 
-		if result == nil {
-			// c.Run() panicked before result was assigned.
-			// Nothing to mutate; the runShell panic recover
-			// will log it. Drainers exit on pipe close above.
-			return
+		ret = &result{
+			Stdout:   stdoutBuf.String(),
+			Stderr:   stderrBuf.String(),
+			Cwd:      cwd,
+			Duration: time.Since(start),
 		}
+		if runErr != nil {
+			var ee *exec.ExitError
+			if errors.As(runErr, &ee) {
+				ret.ExitCode = ee.ExitCode()
+			} else {
+				ret.ExitCode = -1
+				if ret.Stderr != "" {
+					ret.Stderr += "\n"
+				}
+				ret.Stderr += runErr.Error()
+			}
+		}
+
+		// Panic drain. panicCh is buffered(2); at most one
+		// entry per drainer. Non-blocking select so a missing
+		// panic doesn't delay exit.
 		var panicVal any
 		select {
 		case panicVal = <-panicCh:
 		default:
 		}
-		if panicVal != nil && result.ExitCode == 0 {
-			result.ExitCode = -1
-			if result.Stderr != "" {
-				result.Stderr += "\n"
+		if panicVal != nil && ret.ExitCode == 0 {
+			ret.ExitCode = -1
+			if ret.Stderr != "" {
+				ret.Stderr += "\n"
 			}
-			result.Stderr += fmt.Sprintf("shell: drainer panic: %v", panicVal)
+			ret.Stderr += fmt.Sprintf("shell: drainer panic: %v", panicVal)
 		}
 	}()
 
 	runErr = c.Run()
-
-	result = &result{
-		Stdout:   stdoutBuf.String(),
-		Stderr:   stderrBuf.String(),
-		Cwd:      cwd,
-		Duration: time.Since(start),
-	}
-	if runErr != nil {
-		var ee *exec.ExitError
-		if errors.As(runErr, &ee) {
-			result.ExitCode = ee.ExitCode()
-		} else {
-			result.ExitCode = -1
-			if result.Stderr != "" {
-				result.Stderr += "\n"
-			}
-			result.Stderr += runErr.Error()
-		}
-	}
 	return
 }

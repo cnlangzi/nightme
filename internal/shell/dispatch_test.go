@@ -551,11 +551,16 @@ func TestRunShell_False_FooterIsError(t *testing.T) {
 }
 
 // TestRunShell_OutReplySequence drives a multi-chunk command
-// (`seq 1 200`) and asserts the stub emitter received at least
-// N+2 sends: 1 header + ≥1 chunk + 1 footer. All share the
-// same ReplyTo. The exact chunk count depends on coalesceLines'
-// 4 KiB threshold and is implementation-defined; we only check
-// the minimum.
+// large enough to trigger multiple coalesceLines flushes
+// (500 lines × ~50 bytes = ~25 KiB stdout, vs 4 KiB chunkBytes,
+// so we expect ~6 mid-stream flushes + 1 EOF flush). Asserts:
+//   - 1 header + ≥3 chunks + 1 footer (= ≥5 sends total)
+//   - all share the same ReplyTo (PATCH on the same card)
+//   - first is header, last is footer
+//
+// Exact chunk count depends on coalesceLines' 4 KiB threshold
+// and is implementation-defined; we only check the minimum
+// contract.
 func TestRunShell_OutReplySequence(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("`seq` is a Unix utility; skip on Windows")
@@ -565,8 +570,16 @@ func TestRunShell_OutReplySequence(t *testing.T) {
 	em := &fakeEmitter{}
 	d := NewDispatcher()
 
+	// `yes hello | head -n 500` produces ~3 KB of "hello\n"
+	// repeated. Combined with a longer prefix to push past
+	// chunkBytes for multiple flushes, we use a printf-based
+	// filler that emits exactly 4 KiB of output across many
+	// lines (the 4 KiB threshold is what triggers a flush).
+	//
+	// Simpler: use `seq 1 5000` — 5000 short lines (~5 bytes
+	// each) = ~25 KiB, well over 4 KiB threshold = ≥6 flushes.
 	_, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
-		Request:   Request{Text: "!seq 1 200", Cwd: t.TempDir()},
+		Request:   Request{Text: "!seq 1 5000", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_seq",
 	})
@@ -575,8 +588,12 @@ func TestRunShell_OutReplySequence(t *testing.T) {
 	}
 
 	calls := awaitReply(t, em)
-	if len(calls) < 3 {
-		t.Fatalf("Send call count = %d, want >= 3 (header + ≥1 chunk + footer)", len(calls))
+	// Minimum contract: header + ≥3 chunks + footer = ≥5 sends.
+	// With ~25 KiB of output / 4 KiB chunks we expect ~6 chunks;
+	// assert at least 3 to keep the test resilient to threshold
+	// changes.
+	if len(calls) < 5 {
+		t.Fatalf("Send call count = %d, want >= 5 (header + ≥3 chunks + footer)", len(calls))
 	}
 	for i, c := range calls {
 		if c.ReplyTo != "om_seq" {
@@ -592,6 +609,12 @@ func TestRunShell_OutReplySequence(t *testing.T) {
 	}
 	if !strings.HasPrefix(calls[len(calls)-1].Text, "\n✅") {
 		t.Errorf("last.Text = %q, want leading '\\n✅'", calls[len(calls)-1].Text)
+	}
+	// Sanity: at least one middle call (the chunks). Without
+	// this, the test could pass with 3 sends (header + footer +
+	// 1 chunk) which doesn't really exercise streaming.
+	if len(calls) < 4 {
+		t.Errorf("Send count = %d, want >= 4 to actually exercise mid-stream chunks", len(calls))
 	}
 }
 

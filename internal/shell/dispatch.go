@@ -1,9 +1,9 @@
 // Package shell dispatches `!cmd` user input to a real shell
 // (sh -c on Unix, cmd /c on Windows). All shell-related logic
-// — prefix detection, async execution, reply posting — lives
-// here. The gateway sees only a thin Handle(ir) → Consumed-bool
-// contract; no shell-specific knowledge leaks into the gateway
-// or the runtime shim.
+// — prefix detection, async execution, streaming reply via
+// OutReply — lives here. The gateway sees only a thin
+// Handle(ir) → Consumed-bool contract; no shell-specific
+// knowledge leaks into the gateway or the runtime shim.
 //
 // Routes:
 //
@@ -20,14 +20,19 @@
 // Platform-specific execution lives in dispatch_unix.go /
 // dispatch_windows.go (build-tag isolated). This file is
 // platform-agnostic.
+//
+// Streaming reply (F-shell-stream): runShell posts three OutReply
+// messages per command — header, chunks, footer — all sharing
+// the same ReplyTo so the Feishu / Slack adapter PATCHes a
+// single placeholder card in place. See runShell doc.
 package shell
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -37,20 +42,12 @@ import (
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
-// MaxStdoutLines caps the number of stdout lines inlined into
-// the summary card. Anything beyond is summarised as
-// "… N more lines truncated" so a runaway command can't blow
-// up the Feishu message size limit.
-const MaxStdoutLines = 50
-
-// replyTimeout has moved to internal/timeouts (timeouts.Reply).
-
 // Request is the input to Dispatch (and to Dispatcher.Handle
 // via InboundRequest).
 //
 // Text is the raw inbound message (including the leading "!").
 // Cwd is the chat's SelectedCwd — where to run the command.
-// An empty Cwd is treated as a user-facing error (the summary
+// An empty Cwd is treated as a user-facing error (the reply
 // card reports it; nothing executes).
 type Request struct {
 	Text string
@@ -64,34 +61,32 @@ type Request struct {
 //
 // ChatID is the routing target for replies. MessageID is the
 // user-side message id; used as the ReplyTo anchor for the
-// outbound summary card AND as the userMsgID for the framework
-// ⏳→✅ MessageStateBus emissions.
+// outbound streaming reply AND as the userMsgID for the
+// framework ⏳→✅ MessageStateBus emissions.
 type InboundRequest struct {
 	Request
 	ChatID    string
 	MessageID string
 }
 
-// result is the outcome of dispatch (low-level, synchronous
-// runner). Consumed mirrors gateway semantics: false means
-// "not a shell command, gateway falls through". true means
-// shell owned it; Reply is the rendered summary card (caller
-// decides whether to post it).
+// result is the outcome of executeShell (low-level streaming
+// runner). Stdout / Stderr hold the full captured output
+// (always populated, even when chunks were streamed via
+// onChunk); ExitCode / Duration / Cwd describe the run.
+//
+// Consumed, Reply, and Cmd were removed in F-shell-stream:
+// Consumed was only used by the deleted dispatch() wrapper,
+// Reply was the pre-rendered summary card (now split across
+// header/chunk/footer OutReply messages), and Cmd was only
+// read by the deleted renderSummary helper.
 //
 // Unexported: this struct is internal to the shell package.
-// Tests in the same package access it directly; the runtime
-// uses only Dispatcher.Handle (which exposes Consumed via
-// ShellOutput — see below).
+// Tests in the same package access it directly.
 type result struct {
-	Consumed bool
-
-	Reply string // C-style summary card (already rendered)
-
-	Stdout   string        // decoded stdout
-	Stderr   string        // decoded stderr
-	ExitCode int           // 0 = success; non-zero from exec.ExitError; -1 = signal/abort
+	Stdout   string        // decoded stdout (full, even when streamed)
+	Stderr   string        // decoded stderr (full, even when streamed)
+	ExitCode int           // 0 = success; non-zero from exec.ExitError; -1 = signal/abort / drainer panic
 	Duration time.Duration // wall-clock time spent in the child
-	Cmd      string        // the command after parseShell stripping
 	Cwd      string        // the Cwd from Request
 }
 
@@ -112,9 +107,9 @@ type ShellOutput struct {
 }
 
 // Dispatcher handles shell commands end-to-end: prefix check,
-// framework ⏳→✅ MessageStateBus emission, async execution,
-// reply delivery. All shell-related logic lives here, not in
-// the gateway or the runtime shim.
+// framework ⏳→✅ MessageStateBus emission, async streaming
+// execution, reply delivery. All shell-related logic lives here,
+// not in the gateway or the runtime shim.
 //
 // Dispatcher is stateless and safe for concurrent use.
 type Dispatcher struct{}
@@ -125,7 +120,7 @@ type Dispatcher struct{}
 // Emitter bound to the channel that produced the inbound.
 //
 // Tests can pass nil mgr to assert the Consumed contract without
-// mocking an emitter; the result reply is silently dropped.
+// mocking an emitter; the streaming replies are silently dropped.
 func NewDispatcher() *Dispatcher {
 	return &Dispatcher{}
 }
@@ -137,8 +132,8 @@ func NewDispatcher() *Dispatcher {
 //  2. Not matched → return (nil, false) — gateway falls through
 //     to tryMessageDispatch (the original "agent prompt" route)
 //  3. Matched → emit framework ⏳ on the user message, spawn a
-//     goroutine that runs dispatch and posts the C-style
-//     summary card via the wired emitter, then return
+//     goroutine that streams the command via OutReply messages
+//     (header / chunks / footer), then return
 //     (&ShellOutput{Consumed: true}, true). The goroutine is
 //     intentionally NOT tracked by the gateway's wg, so
 //     dispatchLoop isn't blocked and the daemon can shut down
@@ -183,12 +178,28 @@ func (d *Dispatcher) Handle(mgr *chatsession.Manager, cs *chatsession.ChatSessio
 }
 
 // runShell is the body of the async goroutine spawned by Handle.
-// It executes the shell command and posts the summary card via
-// the wired emitter. Exits in one of three modes:
+// It executes the shell command and streams the output to the
+// channel via three OutReply messages:
 //
-//   - normal completion → reply sent via emitter, ✅ emitted
-//   - command failed (exit non-zero, dispatch error) → reply
-//     sent (if any), ✅ still emitted
+//  1. **Header** — "⌨️ $ <cmd>\n". Cold-starts the receipt via
+//     Feishu's ensureReceiptForReplyWithFooter (or Slack's
+//     streamFor) so subsequent chunks PATCH the same card.
+//  2. **Chunks** — coalesced output. Each one lands on
+//     AppendEntryWithFooter → PatchMessage(replyMsgID, ...).
+//     On emitter failure, runShell cancels shellCtx so
+//     CommandContext kills the child; otherwise the drainers
+//     would stall on a wedged pipe for the rest of
+//     timeouts.Shell.
+//  3. **Footer** — "\n✅/❌ exit <code> · <ms>ms · <cwd>".
+//     Final AppendEntryWithFooter. The receipt then
+//     transitions to ✅ via OnPromptEnded (wired by the
+//     MessageDone defer below).
+//
+// runShell exits in one of three modes:
+//
+//   - normal completion → 3 OutReply messages sent, ✅ emitted
+//   - empty CWD or drainErr → only header (with error text) or
+//     partial chunks sent, ✅ still emitted
 //   - panic → recovered, logged, ✅ still emitted (so the
 //     user sees the completion reaction even when the
 //     dispatcher itself crashed)
@@ -214,66 +225,100 @@ func (d *Dispatcher) runShell(mgr *chatsession.Manager, cs *chatsession.ChatSess
 		}
 	}()
 
-	shellCtx, cancel := context.WithTimeout(context.Background(), timeouts.Shell)
-	defer cancel()
-
-	out := dispatch(shellCtx, ir.Request)
-	if !out.Consumed || out.Reply == "" || mgr == nil {
-		return
-	}
-
-	replyCtx, cancel := context.WithTimeout(context.Background(), timeouts.Reply)
-	defer cancel()
 	emitter := mgr.Emitter()
 	if emitter == nil {
 		return
 	}
-	if err := emitter.Send(replyCtx, messages.OutboundMessage{
-		ChatID:  ir.ChatID,
-		Kind:    messages.OutCommandReply,
-		Text:    out.Reply,
-		ReplyTo: ir.MessageID,
-	}); err != nil {
-		// Reply delivery is best-effort (the user may still
-		// see the result via the new daemon after a restart),
-		// but a Send failure is worth a diagnostic line — a
-		// silent drop makes "my `!cmd` produced nothing"
-		// debugging painful.
-		slog.Default().Warn("shell: reply send failed",
+
+	shellCtx, cancel := context.WithTimeout(context.Background(), timeouts.Shell)
+	defer cancel()
+
+	cmd, matched := parseShell(ir.Text)
+	if !matched {
+		return
+	}
+	if strings.TrimSpace(ir.Request.Cwd) == "" {
+		// Empty CWD: post a single OutReply with the friendly
+		// error and return. The defer will still fire MessageDone
+		// (→ receipt ✅ via OnPromptEnded).
+		_ = emitter.Send(shellCtx, messages.OutboundMessage{
+			ChatID:  ir.ChatID,
+			Kind:    messages.OutReply,
+			Text:    "❌ shell: no CWD configured for this chat\nTry `/use <path>` first.",
+			ReplyTo: ir.MessageID,
+		})
+		return
+	}
+
+	send := func(text string) error {
+		return emitter.Send(shellCtx, messages.OutboundMessage{
+			ChatID:  ir.ChatID,
+			Kind:    messages.OutReply,
+			Text:    text,
+			ReplyTo: ir.MessageID,
+		})
+	}
+
+	// ① header — cold-starts the receipt. If this Send fails,
+	// subsequent chunks take the orphan / cold-start path
+	// (Feishu's postOrphanReplyCard / ensureReceiptForReplyWithFooter)
+	// instead of PATCHing a missing receipt — the user still sees
+	// output, just on separate cards instead of one rolling card.
+	if err := send(fmt.Sprintf("⌨️ $ %s\n", cmd)); err != nil {
+		slog.Default().Warn("shell: header send failed",
 			"err", err,
 			"chat_id", ir.ChatID,
 			"message_id", ir.MessageID)
 	}
-}
 
-// dispatch is the synchronous, low-level shell command runner.
-// It does NOT post replies — it just runs the command and
-// returns the result. Used by Dispatcher.runShell (which wraps
-// it with reply delivery) and by tests that want to inspect
-// stdout/stderr/exit-code directly.
-//
-// Unexported: callers must go through Dispatcher.Handle.
-//
-// dispatch never returns an error: execution failures are
-// surfaced as result.ExitCode (non-zero) plus a populated
-// Stderr so the summary card reports them. The signature
-// drops the error return so callers don't need a dead
-// `if err != nil` branch.
-func dispatch(ctx context.Context, req Request) *result {
-	cmd, matched := parseShell(req.Text)
-	if !matched {
-		return &result{Consumed: false}
-	}
-	if strings.TrimSpace(req.Cwd) == "" {
-		return &result{
-			Consumed: true,
-			Reply:    "❌ shell: no CWD configured for this chat\nTry `/use <path>` first.",
-			Cmd:      cmd,
+	// ② chunks — coalesceLines drives send via onChunk. On
+	// emitter failure we cancel shellCtx so CommandContext kills
+	// the child; otherwise the drainers stall on a wedged pipe
+	// and the child keeps running for the rest of timeouts.Shell.
+	//
+	// drainErr is written from BOTH drainer goroutines (stdout +
+	// stderr may both fail to deliver their respective chunks).
+	// drainErrMu serialises the writes; we only need the value
+	// stable by the time executeShell returns (wg.Wait inside
+	// executeShell is the barrier), but -race flags the
+	// unprotected writes so we lock explicitly. cancel() and
+	// context.CancelFunc are themselves safe for concurrent use;
+	// only the variable read/write needs the mutex.
+	var (
+		drainErrMu sync.Mutex
+		drainErr   error
+	)
+	onChunk := func(text string) error {
+		if err := send(text); err != nil {
+			drainErrMu.Lock()
+			drainErr = err
+			drainErrMu.Unlock()
+			cancel()
+			return err
 		}
+		return nil
 	}
-	// dispatch.go is the "!cmd" interactive-shell path. No
-	// GTW_* vars here — those only apply to gtw hooks.
-	return executeShell(ctx, req.Cwd, cmd, nil)
+	r := executeShell(shellCtx, ir.Request.Cwd, cmd, nil, onChunk)
+	drainErrMu.Lock()
+	gotDrainErr := drainErr
+	drainErrMu.Unlock()
+
+	// ③ footer — exit code + duration + cwd. Even if executeShell
+	// panicked (recovered, ExitCode=-1) or was cancelled
+	// (ExitCode=-1), the footer fires so the user sees a clean
+	// ❌ instead of a stuck ⌨️ card.
+	icon := "✅"
+	if r.ExitCode != 0 {
+		icon = "❌"
+	}
+	footer := fmt.Sprintf("\n%s exit %d · %dms · %s",
+		icon, r.ExitCode, r.Duration.Milliseconds(), r.Cwd)
+	if err := send(footer); err != nil && gotDrainErr == nil {
+		slog.Default().Warn("shell: footer send failed",
+			"err", err,
+			"chat_id", ir.ChatID,
+			"message_id", ir.MessageID)
+	}
 }
 
 // parseShell is the canonical "!" prefix detector for this
@@ -308,99 +353,4 @@ func parseShell(text string) (body string, matched bool) {
 		return "", false
 	}
 	return rest, true
-}
-
-// renderSummary produces the C-style summary card:
-//
-//	✅ $ <cmd>
-//	exit <code> · <ms>ms · <cwd>
-//	stdout:                  (optional, shown FIRST)
-//	  line1
-//	  line2
-//	  … N more lines truncated   (when stdout exceeds MaxStdoutLines)
-//	stderr:                  (optional, shown AFTER stdout)
-//	  line1
-//
-// Failure variants flip ✅ → ❌. Exit code -1 from
-// exec.ExitError indicates a signal (e.g. SIGKILL) — we
-// surface it as-is.
-//
-// stdout is rendered before stderr to match conventional
-// shell UX: the user wanted stdout, stderr is footnote noise.
-func renderSummary(r *result) string {
-	var b strings.Builder
-	if r.ExitCode == 0 {
-		b.WriteString("✅ $ ")
-	} else {
-		b.WriteString("❌ $ ")
-	}
-	b.WriteString(r.Cmd)
-	b.WriteByte('\n')
-	b.WriteString("exit ")
-	b.WriteString(strconv.Itoa(r.ExitCode))
-	b.WriteString(" · ")
-	b.WriteString(strconv.FormatInt(r.Duration.Milliseconds(), 10))
-	b.WriteString("ms · ")
-	b.WriteString(r.Cwd)
-
-	if r.Stdout != "" {
-		lines := splitLines(r.Stdout)
-		if len(lines) <= MaxStdoutLines {
-			b.WriteString("\nstdout:\n")
-			b.WriteString(indent(r.Stdout))
-		} else {
-			b.WriteString("\nstdout (first ")
-			b.WriteString(strconv.Itoa(MaxStdoutLines))
-			b.WriteString(" of ")
-			b.WriteString(strconv.Itoa(len(lines)))
-			b.WriteString(" lines):\n")
-			b.WriteString(indent(strings.Join(lines[:MaxStdoutLines], "\n")))
-			b.WriteString("\n… ")
-			b.WriteString(strconv.Itoa(len(lines) - MaxStdoutLines))
-			b.WriteString(" more lines truncated")
-		}
-	}
-
-	if r.Stderr != "" {
-		b.WriteString("\nstderr:\n")
-		b.WriteString(indent(r.Stderr))
-	}
-
-	return b.String()
-}
-
-// splitLines splits on '\n' and drops trailing empty elements
-// (so "a\nb\n" and "a\nb\n\n\n" both yield ["a", "b"]).
-// Returns nil for empty input. Used to canonicalize stdout
-// before truncation so the line count matches the rendered
-// output and the trailing empty-element case ("a\nb\n" →
-// ["a", "b"] not ["a", "b", ""]) doesn't inflate the count.
-func splitLines(s string) []string {
-	if s == "" {
-		return nil
-	}
-	lines := strings.Split(s, "\n")
-	// Drop ALL trailing empty elements (handles "a\n\n\n" too).
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
-}
-
-// indent prefixes every line with two spaces so the stdout
-// block reads as a code block in the Feishu card. A trailing
-// newline is trimmed before indenting so the output doesn't
-// end with a whitespace-only line that renders as a blank
-// in the Feishu card. renderSummary's caller adds the section
-// separator.
-func indent(s string) string {
-	if s == "" {
-		return s
-	}
-	trimmed := strings.TrimSuffix(s, "\n")
-	lines := strings.Split(trimmed, "\n")
-	for i, line := range lines {
-		lines[i] = "  " + line
-	}
-	return strings.Join(lines, "\n")
 }

@@ -8,20 +8,55 @@
 // whatever the agent process has mutated) so the user gets a
 // shell they recognise. cwd comes from cs.SelectedCwd — no
 // tilde / env-var resolution.
+//
+// Streaming (F-shell-stream): stdout / stderr are drained via
+// io.Pipe + coalesceLines so each chunk can be PATCHed onto the
+// Feishu / Slack placeholder card in real time. The drainers run
+// in goroutines; their panics are recovered onto panicCh and
+// surfaced as ExitCode=-1 + a Stderr message so the dispatcher
+// renders ❌ on the footer instead of crashing the daemon.
 package shell
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
-func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string) *result {
+// executeShell runs cmdline in cwd via "sh -c", draining stdout
+// and stderr through coalesceLines. onChunk is invoked with each
+// coalesced chunk as it accumulates; pass nil to collect the
+// full output without streaming (used by Run / gtw hooks).
+//
+// Three failure modes collapse into ExitCode=-1 + a Stderr
+// message so the dispatcher footer renders ❌ and the user sees
+// why:
+//   1. child exited non-zero (exec.ExitError carries the code)
+//   2. ctx cancelled (CommandContext killed child — drainers
+//      see EOF, coalesceLines returns nil; runErr surfaces the
+//      cancellation reason in runErr.Error())
+//   3. one of the drainers panicked (recovered via panicCh)
+//
+// The cancellable ctx is supplied by runShell; on drainErr
+// (onChunk returned an error), runShell cancels its ctx so the
+// child is killed via CommandContext rather than left running
+// against a wedged pipe.
+//
+// Cleanup contract: the deferred cleanup closes the pipe
+// writers and joins the drainer goroutines on EVERY exit path
+// (normal, panic in c.Run, panic in coalesceLines). Without
+// this, a c.Run() panic would leave drainers blocked forever
+// on never-closed pipes — a goroutine leak that the daemon
+// would have to be restarted to clear.
+func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string, onChunk func(string) error) (result *result) {
 	start := time.Now()
 	// Route through proc.New so the platform-specific
 	// SysProcAttr lives in one place: Setsid on Unix (so the
@@ -36,38 +71,90 @@ func executeShell(ctx context.Context, cwd, cmdline string, extraEnv []string) *
 	// parent's value (e.g. PATH injection by the caller wins).
 	c.Env = append(os.Environ(), extraEnv...)
 
-	var stdout, stderr bytes.Buffer
-	c.Stdout = &stdout
-	c.Stderr = &stderr
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	c.Stdout, c.Stderr = outW, errW
 
-	runErr := c.Run()
-	dur := time.Since(start)
+	var (
+		stdoutBuf, stderrBuf bytes.Buffer
+		// panicCh buffers up to 2 panics (one per drainer). After
+		// wg.Wait() the senders are gone; non-blocking drain reads
+		// at most one entry (in practice one or both drainers
+		// panicked; we report the first).
+		panicCh = make(chan any, 2)
+		wg      sync.WaitGroup
+		runErr  error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		_ = coalesceLines(outR, &stdoutBuf, onChunk, false)
+	}()
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		_ = coalesceLines(errR, &stderrBuf, onChunk, true)
+	}()
 
-	r := &result{
-		Consumed: true,
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		Cmd:      cmdline,
+	// Cleanup defer. Runs on normal return AND on any panic
+	// (c.Run panic, coalesceLines panic propagated through the
+	// recover above, etc). Closes pipe writers to unblock the
+	// drainers; wg.Wait joins them; panicCh drain surfaces any
+	// late panic into result. The named return value lets the
+	// defer mutate result after the explicit return.
+	defer func() {
+		_ = outW.Close()
+		_ = errW.Close()
+		wg.Wait()
+
+		if result == nil {
+			// c.Run() panicked before result was assigned.
+			// Nothing to mutate; the runShell panic recover
+			// will log it. Drainers exit on pipe close above.
+			return
+		}
+		var panicVal any
+		select {
+		case panicVal = <-panicCh:
+		default:
+		}
+		if panicVal != nil && result.ExitCode == 0 {
+			result.ExitCode = -1
+			if result.Stderr != "" {
+				result.Stderr += "\n"
+			}
+			result.Stderr += fmt.Sprintf("shell: drainer panic: %v", panicVal)
+		}
+	}()
+
+	runErr = c.Run()
+
+	result = &result{
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
 		Cwd:      cwd,
-		Duration: dur,
+		Duration: time.Since(start),
 	}
-
 	if runErr != nil {
-		// exec.ExitError carries the child's exit code;
-		// anything else (e.g. ctx cancellation) reports -1.
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
-			r.ExitCode = ee.ExitCode()
+			result.ExitCode = ee.ExitCode()
 		} else {
-			r.ExitCode = -1
-			// Surface the error in stderr so the user sees it.
-			if r.Stderr != "" {
-				r.Stderr += "\n"
+			result.ExitCode = -1
+			if result.Stderr != "" {
+				result.Stderr += "\n"
 			}
-			r.Stderr += runErr.Error()
+			result.Stderr += runErr.Error()
 		}
 	}
-
-	r.Reply = renderSummary(r)
-	return r
+	return
 }

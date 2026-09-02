@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -46,7 +47,7 @@ func TestParseShell_Matrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gotBody, gotOK := parseShell(tc.input)
 			if gotBody != tc.wantBody {
-				t.Errorf("parseShell(%q) body = %q, want %q", tc.input, gotBody, tc.wantBody)
+				t.Errorf("parseShell(%q) body = %q, want %q", tc.input, gotBody, gotBody)
 			}
 			if gotOK != tc.wantOK {
 				t.Errorf("parseShell(%q) ok = %v, want %v", tc.input, gotOK, tc.wantOK)
@@ -55,265 +56,549 @@ func TestParseShell_Matrix(t *testing.T) {
 	}
 }
 
-func TestDispatch_NonBangText_FallsThrough(t *testing.T) {
-	// Plain text, slash command, full-width slash — none of these
-	// are shell dispatches. Consumed must be false so the gateway
-	// falls through to message dispatch.
-	cases := []string{
-		"hello",
-		"/cmd",
-		"／cmd",
-		"   hello",
-		"echo !hi", // bang not at start
-	}
-	for _, text := range cases {
-		t.Run(text, func(t *testing.T) {
-			r := dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
+// ---------------------------------------------------------------------------
+// executeShell direct tests — exercise the streaming core without
+// going through the dispatcher. These are the "what does the
+// shell actually produce" tests: stdout / stderr capture, exit
+// codes, duration, panic recovery, ctx cancellation. The
+// dispatcher's behavior (OutReply framing, framework ⏳→✅)
+// lives in TestRunShell_* and TestDispatcherHandle_* below.
+// ---------------------------------------------------------------------------
 
-			if r.Consumed {
-				t.Errorf("dispatch(%q): expected Consumed=false, got true (reply=%q)", text, r.Reply)
-			}
-			if r.Reply != "" {
-				t.Errorf("dispatch(%q): expected empty Reply for fall-through, got %q", text, r.Reply)
-			}
-		})
-	}
-}
-
-func TestDispatch_LoneBang_FallsThrough(t *testing.T) {
-	// 防呆: ! alone or ! followed only by whitespace should not
-	// dispatch. Returns Consumed=false so gateway can fall through.
-	for _, text := range []string{"!", "!   ", "！", "！  "} {
-		t.Run(text, func(t *testing.T) {
-			r := dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
-
-			if r.Consumed {
-				t.Errorf("dispatch(%q): lone bang should NOT consume (防呆), got reply=%q", text, r.Reply)
-			}
-		})
-	}
-}
-
-func TestDispatch_EmptyCwd_FriendlyError(t *testing.T) {
-	r := dispatch(context.Background(), Request{Text: "!ls", Cwd: ""})
-
-	if !r.Consumed {
-		t.Fatal("empty CWD should still be consumed (with friendly error)")
-	}
-	if !strings.Contains(r.Reply, "no CWD") {
-		t.Errorf("expected friendly no-CWD message, got %q", r.Reply)
-	}
-}
-
-func TestDispatch_EchoHello_StdoutAndSummary(t *testing.T) {
+// TestExecuteShell_EchoHello covers the happy path: a command
+// that prints to stdout and exits 0. With onChunk=nil the
+// streaming core accumulates everything in sink and we read
+// the full text from r.Stdout — identical to the pre-streaming
+// Run contract.
+func TestExecuteShell_EchoHello(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// sh is not available on Windows; the cmd /c path is
-		// exercised by dispatch_windows_test.go separately.
-		t.Skip("echo path uses sh -c; skip on Windows (covered by dispatch_windows_test.go)")
+		t.Skip("echo path uses sh -c; skip on Windows")
 	}
-	r := dispatch(context.Background(), Request{Text: "!echo hello", Cwd: t.TempDir()})
-
-	if !r.Consumed {
-		t.Fatal("expected Consumed=true")
-	}
+	r := executeShell(context.Background(), t.TempDir(), "echo hello", nil, nil)
 	if r.ExitCode != 0 {
-		t.Errorf("expected exit 0, got %d", r.ExitCode)
+		t.Errorf("ExitCode = %d, want 0 (stderr=%q)", r.ExitCode, r.Stderr)
 	}
 	if !strings.Contains(r.Stdout, "hello") {
-		t.Errorf("expected stdout to contain 'hello', got %q", r.Stdout)
+		t.Errorf("Stdout = %q, want contains 'hello'", r.Stdout)
 	}
-	if !strings.Contains(r.Reply, "✅") {
-		t.Errorf("expected summary to have ✅, got %q", r.Reply)
-	}
-	if !strings.Contains(r.Reply, "echo hello") {
-		t.Errorf("expected summary to include command, got %q", r.Reply)
+	if r.Duration <= 0 {
+		t.Errorf("Duration = %v, want > 0", r.Duration)
 	}
 }
 
-func TestDispatch_False_ExitCodeOne_AndCrossMark(t *testing.T) {
+// TestExecuteShell_False_ExitCodeOne covers the non-zero exit
+// path. The streaming core preserves the exit code in r.ExitCode
+// and the footer renders ❌ in the dispatcher.
+func TestExecuteShell_False_ExitCodeOne(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("`false` is a Unix builtin; skip on Windows")
 	}
-	r := dispatch(context.Background(), Request{Text: "!false", Cwd: t.TempDir()})
-
+	r := executeShell(context.Background(), t.TempDir(), "false", nil, nil)
 	if r.ExitCode != 1 {
-		t.Errorf("expected exit 1, got %d", r.ExitCode)
-	}
-	if !strings.Contains(r.Reply, "❌") {
-		t.Errorf("expected summary to have ❌ on non-zero exit, got %q", r.Reply)
-	}
-	if strings.Contains(r.Reply, "✅") {
-		t.Errorf("non-zero exit should NOT have ✅, got %q", r.Reply)
+		t.Errorf("ExitCode = %d, want 1", r.ExitCode)
 	}
 }
 
-func TestDispatch_NotFoundCommand_Exit127(t *testing.T) {
+// TestExecuteShell_NotFoundCommand_Exit127 covers the missing-
+// command case. POSIX shells exit 127 when the command is not
+// found; we surface that in r.ExitCode so the dispatcher footer
+// can render `❌ exit 127`.
+func TestExecuteShell_NotFoundCommand_Exit127(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX exit-127 semantic; skip on Windows")
 	}
-	r := dispatch(context.Background(), Request{Text: "!definitely-not-a-real-command-xyzzy", Cwd: t.TempDir()})
-
+	r := executeShell(context.Background(), t.TempDir(), "definitely-not-a-real-command-xyzzy", nil, nil)
 	if r.ExitCode != 127 {
-		t.Errorf("expected exit 127 for missing command, got %d", r.ExitCode)
+		t.Errorf("ExitCode = %d, want 127 for missing command", r.ExitCode)
 	}
 }
 
-func TestDispatch_Pwd_MatchesCwd(t *testing.T) {
+// TestExecuteShell_Pwd_MatchesCwd covers the cwd propagation.
+// On macOS /var is a symlink to /private/var — EvalSymlinks on
+// both sides normalises the path so the test works on Linux
+// and macOS.
+func TestExecuteShell_Pwd_MatchesCwd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("`pwd` is a Unix builtin; skip on Windows")
 	}
 	dir := t.TempDir()
-	r := dispatch(context.Background(), Request{Text: "!pwd", Cwd: dir})
-
+	r := executeShell(context.Background(), dir, "pwd", nil, nil)
 	if r.ExitCode != 0 {
 		t.Fatalf("pwd failed: exit %d, stderr=%q", r.ExitCode, r.Stderr)
 	}
-	// On macOS /var is a symlink to /private/var — pwd may resolve
-	// the real path. Compare EvalSymlinks on both sides so the test
-	// works on both Linux and macOS.
 	if !pathsEquivalent(r.Stdout, dir) {
 		t.Errorf("pwd stdout %q does not match CWD %q", strings.TrimSpace(r.Stdout), dir)
 	}
+	if r.Cwd != dir {
+		t.Errorf("Cwd = %q, want %q", r.Cwd, dir)
+	}
 }
 
-func TestDispatch_LongOutput_Truncated(t *testing.T) {
+// TestExecuteShell_LongOutput_AllDelivered replaces the old
+// TestDispatch_LongOutput_Truncated. The pre-streaming
+// implementation truncated at MaxStdoutLines=50 with a
+// "... N more lines truncated" notice; the streaming
+// implementation delivers the full output and lets the
+// channel layer (Feishu's RolloverTo) handle overflow.
+// This test asserts all 200 lines arrive in r.Stdout.
+func TestExecuteShell_LongOutput_AllDelivered(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("`seq` is a Unix utility; skip on Windows")
 	}
 	dir := t.TempDir()
-	// seq 1 200 emits 200 lines, well over MaxStdoutLines=50.
-	r := dispatch(context.Background(), Request{Text: "!seq 1 200", Cwd: dir})
-
-	if !strings.Contains(r.Reply, "truncated") {
-		t.Errorf("expected summary to mention truncation, got %q", r.Reply)
+	r := executeShell(context.Background(), dir, "seq 1 200", nil, nil)
+	if r.ExitCode != 0 {
+		t.Fatalf("seq failed: exit %d, stderr=%q", r.ExitCode, r.Stderr)
 	}
-	// Verify the head IS preserved (first line "1" should be in the card).
-	if !strings.Contains(r.Reply, "\n  1\n") {
-		t.Errorf("expected first line of truncated output to appear, got %q", r.Reply)
+	// All 200 lines should appear in Stdout. We count newlines
+	// as a cheap "did all lines arrive" proxy; the trailing
+	// newline from `seq` produces 200 lines worth.
+	lineCount := strings.Count(strings.TrimRight(r.Stdout, "\n"), "\n") + 1
+	if lineCount < 200 {
+		t.Errorf("Stdout line count = %d, want >= 200 (truncation should be gone)", lineCount)
 	}
 }
 
-func TestDispatch_ContextCancel_SignalExit(t *testing.T) {
-	// When the parent context is cancelled mid-execution,
-	// CommandContext kills the child. On Unix this is SIGKILL;
-	// exec.Run returns *exec.ExitError with ExitCode() == -1
-	// (Go's signal-exit sentinel). The summary card should
-	// surface that as ❌ with exit -1.
+// TestExecuteShell_ContextCancel_SignalExit covers ctx-driven
+// kill. CommandContext sends SIGKILL on Unix (exit code -1 in
+// Go's signal-exit sentinel); the streaming core sets
+// r.ExitCode=-1 via the runErr branch so the dispatcher footer
+// renders `❌ exit -1`.
+func TestExecuteShell_ContextCancel_SignalExit(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("signal-exit semantics differ on Windows; covered by dispatch_windows_test.go")
+		t.Skip("signal-exit semantics differ on Windows")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel BEFORE the child starts → instant SIGKILL
 
-	r := dispatch(ctx, Request{Text: "!sleep 30", Cwd: t.TempDir()})
-	if !r.Consumed {
-		t.Fatal("expected Consumed=true")
-	}
+	r := executeShell(ctx, t.TempDir(), "sleep 30", nil, nil)
 	if r.ExitCode != -1 {
-		t.Errorf("expected ExitCode=-1 after ctx cancel, got %d", r.ExitCode)
-	}
-	if !strings.Contains(r.Reply, "❌") {
-		t.Errorf("expected ❌ on signal-exit, got %q", r.Reply)
-	}
-	if strings.Contains(r.Reply, "✅") {
-		t.Errorf("signal-exit must not have ✅, got %q", r.Reply)
+		t.Errorf("ExitCode = %d, want -1 after ctx cancel", r.ExitCode)
 	}
 }
 
-func TestRenderSummary_SuccessShape(t *testing.T) {
-	r := &result{
-		Consumed: true,
-		Cmd:      "ls -la",
-		Cwd:      "/tmp",
-		ExitCode: 0,
-		Duration: 23 * time.Millisecond,
-		Stdout:   "file1\nfile2\n",
-	}
-	got := renderSummary(r)
-	want := []string{"✅", "$ ls -la", "exit 0", "23ms", "/tmp", "stdout:", "  file1", "  file2"}
-	for _, w := range want {
-		if !strings.Contains(got, w) {
-			t.Errorf("renderSummary missing %q in:\n%s", w, got)
-		}
-	}
-	if strings.Contains(got, "stderr:") {
-		t.Errorf("renderSummary should not include stderr section when stderr empty:\n%s", got)
-	}
+// TestCoalesceLines_PanicPropagates verifies that coalesceLines
+// does NOT swallow panics from the underlying reader — they
+// propagate to the caller, which is exactly what executeShell's
+// drainer goroutines rely on:
+//
+//	go func() {
+//	    defer wg.Done()
+//	    defer func() {
+//	        if r := recover(); r != nil { panicCh <- r }
+//	    }()
+//	    _ = coalesceLines(outR, &stdoutBuf, onChunk, false)
+//	}()
+//
+// executeShell's recover defer catches the panic and forwards
+// it via panicCh; the parent executeShell then surfaces
+// r.ExitCode=-1 + r.Stderr="drainer panic: …" so the
+// dispatcher footer renders ❌.
+//
+// Why this test exists at the coalesceLines level (not at the
+// executeShell level): executeShell's pipe comes from a real
+// cmd.Stdout, so we can't inject a panickingReader through the
+// child execution path without major refactoring. The panic-
+// recovery contract that executeShell DEPENDS ON is "coalesceLines
+// must not swallow panics from r.Read". This test pins that
+// contract; the recover/panicCh path in executeShell is then a
+// trivial wrapping that code review can verify.
+type panickingReader struct{}
+
+func (panickingReader) Read(_ []byte) (int, error) {
+	panic("panickingReader: simulating child-side stream panic")
 }
 
-func TestRenderSummary_FailureShape(t *testing.T) {
-	r := &result{
-		Consumed: true,
-		Cmd:      "false",
-		Cwd:      "/tmp",
-		ExitCode: 1,
-		Duration: 5 * time.Millisecond,
-		Stderr:   "boom\n",
+func TestCoalesceLines_PanicPropagates(t *testing.T) {
+	var sink bytes.Buffer
+	var recovered any
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		_ = coalesceLines(panickingReader{}, &sink, nil, false)
+	}()
+	if recovered == nil {
+		t.Fatal("expected coalesceLines to propagate panickingReader's panic")
 	}
-	got := renderSummary(r)
-	for _, w := range []string{"❌", "$ false", "exit 1", "5ms", "stderr:", "  boom"} {
-		if !strings.Contains(got, w) {
-			t.Errorf("renderSummary missing %q in:\n%s", w, got)
-		}
+	if msg, ok := recovered.(string); !ok || !strings.Contains(msg, "panickingReader") {
+		t.Errorf("recovered value = %v, want string containing 'panickingReader'", recovered)
 	}
-	if strings.Contains(got, "✅") {
-		t.Errorf("non-zero exit must not have ✅:\n%s", got)
-	}
-}
-
-func TestRenderSummary_TruncationNotice(t *testing.T) {
-	var b strings.Builder
-	for i := 1; i <= MaxStdoutLines+10; i++ {
-		if i > 1 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(strings.Repeat("x", 5))
-	}
-	r := &result{
-		Consumed: true,
-		Cmd:      "seq 1 60",
-		Cwd:      "/tmp",
-		ExitCode: 0,
-		Stdout:   b.String(),
-	}
-	got := renderSummary(r)
-	if !strings.Contains(got, "truncated") {
-		t.Errorf("expected truncation notice, got:\n%s", got)
-	}
-	if !strings.Contains(got, "first") {
-		t.Errorf("expected 'first N of M lines' framing, got:\n%s", got)
-	}
-}
-
-// pathsEquivalent compares two filesystem paths, resolving any
-// symlinks first (relevant on macOS where t.TempDir() returns a
-// /var/... path that pwd resolves to /private/var/...).
-func pathsEquivalent(a, b string) bool {
-	return evalLinks(a) == evalLinks(b)
-}
-
-func evalLinks(p string) string {
-	if resolved, err := filepath.EvalSymlinks(strings.TrimSpace(p)); err == nil {
-		return resolved
-	}
-	return strings.TrimSpace(p)
 }
 
 // ---------------------------------------------------------------------------
-// Dispatcher.Handle + framework ⏳→✅ contract
+// coalesceLines unit tests
+// ---------------------------------------------------------------------------
+
+// TestCoalesceLines_HighVolume_MultipleFlushes feeds 64 KiB of
+// input through coalesceLines with chunkBytes=4 KiB and asserts
+// onChunk is called multiple times before EOF, AND sink contains
+// the full input.
+func TestCoalesceLines_HighVolume_MultipleFlushes(t *testing.T) {
+	// 64 KiB / 4 KiB = at least 16 mid-stream flushes, well over
+	// the >= 4 threshold the plan specifies.
+	const totalBytes = 64 * 1024
+	input := strings.Repeat("x\n", totalBytes/2) // each "x\n" is 2 bytes
+
+	var (
+		mu        sync.Mutex
+		flushes   int
+		chunkSeen strings.Builder
+	)
+	r := strings.NewReader(input)
+	err := coalesceLines(r, &bytes.Buffer{}, func(chunk string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		flushes++
+		chunkSeen.WriteString(chunk)
+		return nil
+	}, false)
+	if err != nil {
+		t.Fatalf("coalesceLines: %v", err)
+	}
+
+	mu.Lock()
+	gotFlushes := flushes
+	gotChunkSeen := chunkSeen.String()
+	mu.Unlock()
+
+	if gotFlushes < 4 {
+		t.Errorf("flushes = %d, want >= 4 mid-stream flushes for %d bytes", gotFlushes, totalBytes)
+	}
+	if gotChunkSeen != input {
+		t.Errorf("chunkSeen length = %d, want %d (chunks must equal input)", len(gotChunkSeen), len(input))
+	}
+}
+
+// TestCoalesceLines_OnChunkError_StopsReading covers the
+// abort-on-error path. onChunk returns an error on the 3rd
+// call; coalesceLines must propagate that error and stop
+// reading. sink still has whatever lines were processed before
+// the error (every line is unconditionally sink.WriteString'd).
 //
-// F-XX (Sender→Emitter refactor) introduced a new Handle signature
-// (cs + InboundRequest + *ShellOutput + bool) and wired framework
-// ⏳→✅ MessageState emissions. The tests below cover:
-//
-//   - Handle's fall-through path (non-!cmd)
-//   - Handle's consumption path (matched !cmd posts summary card)
-//   - Framework ⏳ is emitted BEFORE the goroutine spawns
-//   - Framework ✅ is emitted AFTER the goroutine completes
-//     (success, failure, panic — all paths covered by runShell's
-//     LIFO defer order)
-//   - nil / empty guards on cs and MessageID don't crash and
-//     don't emit
+// Input is large enough (~12 KiB across 3 long lines) to force
+// ≥3 mid-stream flushes. With chunkBytes=4 KiB, three 4 KiB-ish
+// lines produce exactly 3 flushes; the 3rd flush's onChunk
+// returns the error and the loop terminates.
+func TestCoalesceLines_OnChunkError_StopsReading(t *testing.T) {
+	// 3 lines × ~4 KiB each = ~12 KiB, well over 2 chunkBytes
+	// so we get 3 mid-stream flushes (one per line boundary
+	// crossing 4 KiB).
+	line := strings.Repeat("x", 4096) + "\n"
+	input := line + line + line + line + line // 5 lines, expect 3+ flushes
+	wantErr := errors.New("emitter down")
+
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	r := strings.NewReader(input)
+	var sink bytes.Buffer
+	err := coalesceLines(r, &sink, func(chunk string) error {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		if attempts == 3 {
+			return wantErr
+		}
+		return nil
+	}, false)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+
+	mu.Lock()
+	gotAttempts := attempts
+	mu.Unlock()
+	// The 3rd onChunk call returns error; coalesceLines returns
+	// without trying a 4th (the trailing flush is skipped
+	// because err != nil).
+	if gotAttempts != 3 {
+		t.Errorf("attempts = %d, want exactly 3 (4th blocked by error)", gotAttempts)
+	}
+	// sink still has every line processed before the error
+	// (every line is unconditionally sink.WriteString'd), but
+	// NOT the trailing line whose chunk would have triggered
+	// the 4th flush. With our 5-line input, lines 1-3 hit the
+	// sink before the 3rd flush errored; line 4 is buffered
+	// in `b` with the 3rd flush; line 5 is unread.
+	sinkLen := sink.Len()
+	if sinkLen < 3*len(line) {
+		t.Errorf("sink length = %d, want >= %d (lines 1-3 must be in sink)", sinkLen, 3*len(line))
+	}
+}
+
+// TestCoalesceLines_StderrPrefix verifies the isStderr=true
+// path prefixes each line with "stderr: " for visual separation
+// in the rendered card.
+func TestCoalesceLines_StderrPrefix(t *testing.T) {
+	input := "boom\nkaboom\n"
+	var got strings.Builder
+	r := strings.NewReader(input)
+	err := coalesceLines(r, &bytes.Buffer{}, func(chunk string) error {
+		got.WriteString(chunk)
+		return nil
+	}, true)
+	if err != nil {
+		t.Fatalf("coalesceLines: %v", err)
+	}
+	if !strings.HasPrefix(got.String(), "stderr: boom\n") {
+		t.Errorf("chunk = %q, want leading 'stderr: ' prefix", got.String())
+	}
+	if !strings.Contains(got.String(), "stderr: kaboom") {
+		t.Errorf("chunk = %q, want 'stderr: kaboom'", got.String())
+	}
+}
+
+// TestCoalesceLines_NilOnChunk_CollectsToSink verifies that
+// when onChunk is nil (the Run / gtw-hooks path), coalesceLines
+// still writes every line to sink and returns nil at EOF.
+func TestCoalesceLines_NilOnChunk_CollectsToSink(t *testing.T) {
+	input := "alpha\nbeta\ngamma\n"
+	var sink bytes.Buffer
+	err := coalesceLines(strings.NewReader(input), &sink, nil, false)
+	if err != nil {
+		t.Fatalf("coalesceLines: %v", err)
+	}
+	if sink.String() != input {
+		t.Errorf("sink = %q, want %q", sink.String(), input)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Run / streaming-backed Run test
+// ---------------------------------------------------------------------------
+
+// TestRun_StreamingBacked confirms that Run (the sync API used
+// by gtw/hooks.go) still produces the pre-streaming contract:
+// "hello\nworld" from `echo hello; echo world`. Internally Run
+// calls executeShell with onChunk=nil; coalesceLines writes
+// every line to sink so the user-visible behavior is identical
+// to the buffer-based implementation.
+func TestRun_StreamingBacked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh -c; Windows cmd /c tested separately")
+	}
+	stdout, stderr, exitCode, err := Run(context.Background(), t.TempDir(), "echo hello; echo world", nil)
+	if err != nil {
+		t.Fatalf("Run: %v (stderr=%q)", err, stderr)
+	}
+	if exitCode != 0 {
+		t.Errorf("exitCode = %d, want 0", exitCode)
+	}
+	if stdout != "hello\nworld" {
+		t.Errorf("stdout = %q, want %q", stdout, "hello\nworld")
+	}
+}
+
+// TestRun_WindowsCmd verifies the cmd /c path on Windows.
+// Skipped on Unix (sh -c is the Unix path; covered above).
+func TestRun_WindowsCmd(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("cmd /c is Windows-only")
+	}
+	stdout, _, exitCode, err := Run(context.Background(), t.TempDir(), "echo hello & echo world", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("exitCode = %d, want 0", exitCode)
+	}
+	// cmd.exe may add trailing whitespace; compare after trim.
+	if !strings.Contains(strings.TrimSpace(stdout), "hello") {
+		t.Errorf("stdout = %q, want contains 'hello'", stdout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher integration tests — the OutReply protocol.
+// ---------------------------------------------------------------------------
+
+// TestRunShell_EmptyCwd_OutReply drives the empty-CWD branch
+// through Handle and asserts the stub emitter received exactly
+// one OutReply whose text contains the friendly error. The
+// defer still fires MessageDone so the receipt flips to ✅.
+func TestRunShell_EmptyCwd_OutReply(t *testing.T) {
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher()
+
+	out, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
+		Request:   Request{Text: "!ls", Cwd: ""},
+		ChatID:    "oc_test",
+		MessageID: "om_empty_cwd",
+	})
+	if !handled || out == nil || !out.Consumed {
+		t.Fatalf("expected consumed, got handled=%v out=%+v", handled, out)
+	}
+
+	calls := awaitReply(t, em)
+	if len(calls) != 1 {
+		t.Fatalf("Send call count = %d, want 1 (header-only on empty CWD)", len(calls))
+	}
+	c := calls[0]
+	if c.Kind != messages.OutReply {
+		t.Errorf("Kind = %v, want OutReply", c.Kind)
+	}
+	if c.ReplyTo != "om_empty_cwd" {
+		t.Errorf("ReplyTo = %q, want om_empty_cwd", c.ReplyTo)
+	}
+	if !strings.Contains(c.Text, "no CWD") {
+		t.Errorf("Text = %q, want contains 'no CWD'", c.Text)
+	}
+
+	states := cap.snapshot()
+	if len(states) != 2 || states[1].state != agent.MessageDone {
+		t.Errorf("expected Queued + Done states; got %+v", states)
+	}
+}
+
+// TestRunShell_HeaderChunkFooter drives a happy-path shell
+// command and asserts the streaming OutReply protocol: first
+// Send is the header (starts with "⌨️ $"), at least one chunk
+// Send follows, last Send is the footer (starts with "\n✅
+// exit 0"), all share the same ReplyTo.
+func TestRunShell_HeaderChunkFooter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh -c; Windows cmd /c tested separately")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher()
+
+	out, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
+		Request:   Request{Text: "!echo hello-shell", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_hcf",
+	})
+	if !handled || out == nil || !out.Consumed {
+		t.Fatalf("expected consumed, got handled=%v out=%+v", handled, out)
+	}
+
+	calls := awaitReply(t, em)
+	if len(calls) < 2 {
+		t.Fatalf("Send call count = %d, want >= 2 (header + footer)", len(calls))
+	}
+	// First call: header
+	if !strings.HasPrefix(calls[0].Text, "⌨️ $") {
+		t.Errorf("calls[0].Text = %q, want leading '⌨️ $'", calls[0].Text)
+	}
+	if !strings.Contains(calls[0].Text, "echo hello-shell") {
+		t.Errorf("calls[0].Text = %q, want contains command", calls[0].Text)
+	}
+	if calls[0].Kind != messages.OutReply {
+		t.Errorf("calls[0].Kind = %v, want OutReply", calls[0].Kind)
+	}
+	// Last call: footer
+	last := calls[len(calls)-1]
+	if !strings.HasPrefix(last.Text, "\n✅") {
+		t.Errorf("last.Text = %q, want leading '\\n✅'", last.Text)
+	}
+	if !strings.Contains(last.Text, "exit 0") {
+		t.Errorf("last.Text = %q, want contains 'exit 0'", last.Text)
+	}
+	if last.Kind != messages.OutReply {
+		t.Errorf("last.Kind = %v, want OutReply", last.Kind)
+	}
+	// All calls share the same ReplyTo (PATCH on same card).
+	for i, c := range calls {
+		if c.ReplyTo != "om_hcf" {
+			t.Errorf("calls[%d].ReplyTo = %q, want om_hcf", i, c.ReplyTo)
+		}
+	}
+}
+
+// TestRunShell_False_FooterIsError covers the non-zero exit
+// path. The footer must use ❌ and must NOT contain ✅
+// anywhere in any Send call.
+func TestRunShell_False_FooterIsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("`false` is a Unix builtin; skip on Windows")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher()
+
+	_, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
+		Request:   Request{Text: "!false", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_false",
+	})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	calls := awaitReply(t, em)
+	if len(calls) < 2 {
+		t.Fatalf("Send call count = %d, want >= 2", len(calls))
+	}
+	// Footer is the last call.
+	last := calls[len(calls)-1]
+	if !strings.HasPrefix(last.Text, "\n❌") {
+		t.Errorf("last.Text = %q, want leading '\\n❌'", last.Text)
+	}
+	if !strings.Contains(last.Text, "exit 1") {
+		t.Errorf("last.Text = %q, want contains 'exit 1'", last.Text)
+	}
+	for i, c := range calls {
+		if strings.Contains(c.Text, "✅") {
+			t.Errorf("calls[%d].Text = %q, must NOT contain ✅", i, c.Text)
+		}
+	}
+}
+
+// TestRunShell_OutReplySequence drives a multi-chunk command
+// (`seq 1 200`) and asserts the stub emitter received at least
+// N+2 sends: 1 header + ≥1 chunk + 1 footer. All share the
+// same ReplyTo. The exact chunk count depends on coalesceLines'
+// 4 KiB threshold and is implementation-defined; we only check
+// the minimum.
+func TestRunShell_OutReplySequence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("`seq` is a Unix utility; skip on Windows")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher()
+
+	_, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
+		Request:   Request{Text: "!seq 1 200", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_seq",
+	})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	calls := awaitReply(t, em)
+	if len(calls) < 3 {
+		t.Fatalf("Send call count = %d, want >= 3 (header + ≥1 chunk + footer)", len(calls))
+	}
+	for i, c := range calls {
+		if c.ReplyTo != "om_seq" {
+			t.Errorf("calls[%d].ReplyTo = %q, want om_seq", i, c.ReplyTo)
+		}
+		if c.Kind != messages.OutReply {
+			t.Errorf("calls[%d].Kind = %v, want OutReply", i, c.Kind)
+		}
+	}
+	// First is header, last is footer.
+	if !strings.HasPrefix(calls[0].Text, "⌨️ $") {
+		t.Errorf("calls[0].Text = %q, want leading '⌨️ $'", calls[0].Text)
+	}
+	if !strings.HasPrefix(calls[len(calls)-1].Text, "\n✅") {
+		t.Errorf("last.Text = %q, want leading '\\n✅'", calls[len(calls)-1].Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher.Handle + framework ⏳→✅ contract — same as the
+// pre-streaming version, but Send now produces OutReply (header
+// / chunks / footer) instead of a single OutCommandReply.
 // ---------------------------------------------------------------------------
 
 // fakeEmitter records each Send call. Implements messages.Emitter
@@ -454,8 +739,9 @@ func TestDispatcherHandle_NonShellText(t *testing.T) {
 
 // TestDispatcherHandle_ShellCommand covers the consumption path.
 // For a `!cmd` text, Handle returns (&ShellOutput{Consumed: true},
-// true) and (eventually) calls Emitter with the rendered summary
-// card as a messages.OutboundMessage{Kind: OutCommandReply}.
+// true) and (eventually) calls Emitter with the streaming reply
+// (header OutReply + chunks + footer OutReply), all sharing
+// ReplyTo = userMsgID.
 func TestDispatcherHandle_ShellCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("echo path uses sh -c; skip on Windows")
@@ -476,20 +762,21 @@ func TestDispatcherHandle_ShellCommand(t *testing.T) {
 
 	calls := awaitReply(t, em)
 	if len(calls) == 0 {
-		t.Fatal("expected Emitter to be called with the result card")
+		t.Fatal("expected Emitter to be called with streaming reply")
 	}
+	// First call must be the header with OutReply kind.
 	c := calls[0]
-	if c.Kind != messages.OutCommandReply {
-		t.Errorf("Kind = %v, want OutCommandReply", c.Kind)
+	if c.Kind != messages.OutReply {
+		t.Errorf("calls[0].Kind = %v, want OutReply", c.Kind)
 	}
 	if c.ChatID != "oc_test" {
-		t.Errorf("ChatID = %q, want oc_test", c.ChatID)
+		t.Errorf("calls[0].ChatID = %q, want oc_test", c.ChatID)
 	}
 	if c.ReplyTo != "om_test" {
-		t.Errorf("ReplyTo = %q, want om_test", c.ReplyTo)
+		t.Errorf("calls[0].ReplyTo = %q, want om_test", c.ReplyTo)
 	}
-	if !strings.Contains(c.Text, "✅") || !strings.Contains(c.Text, "echo hello-shell") {
-		t.Errorf("expected summary card with ✅ and command, got %q", c.Text)
+	if !strings.Contains(c.Text, "⌨️ $ echo hello-shell") {
+		t.Errorf("calls[0].Text = %q, want header '⌨️ $ echo hello-shell'", c.Text)
 	}
 }
 
@@ -509,16 +796,12 @@ func TestDispatcherHandle_NilEmitter(t *testing.T) {
 	if !handled || out == nil || !out.Consumed {
 		t.Fatalf("expected consumed=true even with nil emitter, got handled=%v out=%+v", handled, out)
 	}
-	// The goroutine's `d.emitter == nil` short-circuit returns
+	// The goroutine's `mgr.Emitter() == nil` short-circuit returns
 	// before any Send call. No panic occurs, no reply is
 	// dispatched. The point of this test is to confirm
 	// NewDispatcher() doesn't panic and Handle still returns
 	// the consumed=true contract.
 }
-
-// ---------------------------------------------------------------------------
-// Framework ⏳→✅ reactions
-// ---------------------------------------------------------------------------
 
 // TestDispatcherHandle_EmitsQueuedThenDone verifies the framework
 // ⏳→✅ sequence. MessageQueued fires synchronously BEFORE the
@@ -700,12 +983,18 @@ func TestDispatcherHandle_ReplySendFailed(t *testing.T) {
 		t.Fatal("expected handled=true")
 	}
 	// Wait for the goroutine to attempt Send (it will fail).
+	// At minimum the header Send fires before the first chunk,
+	// so we expect at least 1 call. The error from the header
+	// causes runShell to cancel ctx (no chunks), then the footer
+	// also fails — total call count depends on whether the
+	// header Send happens to error before coalesceLines drives
+	// any chunks. We only assert >= 1 call + OutReply kind.
 	calls := awaitReply(t, em)
-	if len(calls) != 1 {
-		t.Fatalf("expected exactly one Send call, got %d", len(calls))
+	if len(calls) == 0 {
+		t.Fatalf("expected at least one Send call, got 0")
 	}
-	if calls[0].Kind != messages.OutCommandReply {
-		t.Errorf("Send Kind = %v, want OutCommandReply", calls[0].Kind)
+	if calls[0].Kind != messages.OutReply {
+		t.Errorf("calls[0].Kind = %v, want OutReply", calls[0].Kind)
 	}
 
 	// The framework must still emit MessageDone even though
@@ -781,9 +1070,9 @@ func TestDispatcherHandle_PanicStillEmitsDone(t *testing.T) {
 }
 
 // TestDispatcherHandle_ShellCommandFails covers the non-zero-exit
-// path. !false exits 1, the summary card flips to ❌, and the
-// reply still routes through emitter.Send with OutCommandReply
-// kind. Verifies the framework ⏳→✅ contract holds on the error
+// path. !false exits 1; the streaming reply still uses OutReply
+// for all three sends (header + footer), with the footer
+// flipping to ❌. The framework ⏳→✅ contract holds on the error
 // path (Done must fire even when the command fails).
 func TestDispatcherHandle_ShellCommandFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -807,29 +1096,91 @@ func TestDispatcherHandle_ShellCommandFails(t *testing.T) {
 	if len(calls) == 0 {
 		t.Fatal("expected Emitter.Send to be called even on command failure")
 	}
-	c := calls[0]
-	if c.Kind != messages.OutCommandReply {
-		t.Errorf("Kind = %v, want OutCommandReply", c.Kind)
+	// All sends are OutReply (no more OutCommandReply for shell).
+	for i, c := range calls {
+		if c.Kind != messages.OutReply {
+			t.Errorf("calls[%d].Kind = %v, want OutReply", i, c.Kind)
+		}
+		if c.ReplyTo != "om_fail" {
+			t.Errorf("calls[%d].ReplyTo = %q, want om_fail", i, c.ReplyTo)
+		}
 	}
-	if c.ReplyTo != "om_fail" {
-		t.Errorf("ReplyTo = %q, want om_fail", c.ReplyTo)
+	// Footer (last call) carries the ❌ marker.
+	last := calls[len(calls)-1]
+	if !strings.HasPrefix(last.Text, "\n❌") {
+		t.Errorf("last.Text = %q, want leading '\\n❌'", last.Text)
 	}
-	if !strings.Contains(c.Text, "❌") {
-		t.Errorf("failure reply should contain ❌, got %q", c.Text)
+	if !strings.Contains(last.Text, "exit 1") {
+		t.Errorf("last.Text = %q, want contains 'exit 1'", last.Text)
 	}
-	if strings.Contains(c.Text, "✅") {
-		t.Errorf("failure reply must NOT contain ✅, got %q", c.Text)
+	for i, c := range calls {
+		if strings.Contains(c.Text, "✅") {
+			t.Errorf("calls[%d].Text = %q, must NOT contain ✅", i, c.Text)
+		}
 	}
 
 	// Framework ⏳→✅ on the failure path — Done must fire even
 	// when the command exits non-zero, otherwise the user sees
-	// ⏳ "stuck" until the next inbound.
+	// ⌨️ "stuck" until the next inbound.
 	states := cap.snapshot()
 	if len(states) != 2 {
 		t.Fatalf("captured %d state events; want 2 (Queued + Done on failure)", len(states))
 	}
 	if states[1].state != agent.MessageDone {
 		t.Errorf("states[1] = %v, want MessageDone (failure path must still emit Done)", states[1].state)
+	}
+}
+
+// TestDispatcherHandle_ConcurrentDrainerFailure exercises the
+// race the drainErr mutex was added for. With both stdout and
+// stderr drainers producing output that fails to send, both
+// drainer goroutines concurrently write to drainErr. Without
+// the mutex this test triggers a -race failure; with the
+// mutex, drainErr is stable by the time executeShell returns
+// and the test passes cleanly.
+//
+// The shell command below writes to BOTH streams
+// (stdout + stderr interleaved) so both drainers produce
+// onChunk calls. sendErr on the fake emitter forces every
+// send to fail, so both drainers race to set drainErr.
+func TestDispatcherHandle_ConcurrentDrainerFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh -c; Windows cmd /c tested separately")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{sendErr: errors.New("concurrent failure")}
+	d := NewDispatcher()
+
+	// Each "echo X; echo Y >&2" pair produces one stdout line
+	// and one stderr line. Repeating 20 times gives both
+	// drainers plenty of work to race on.
+	const repeat = 20
+	cmd := strings.Repeat("echo line; echo err >&2; ", repeat)
+	cmd = strings.TrimRight(cmd, "; ")
+
+	_, handled := d.Handle(testMgrWithEmitter(t, em), cs, InboundRequest{
+		Request:   Request{Text: "!" + cmd, Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_concurrent",
+	})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	// Wait for the goroutine to finish. With sendErr set, every
+	// send fails; the first one cancels shellCtx, CommandContext
+	// kills the child, and the footer also fails. We assert at
+	// least 2 calls (header + ≥1 drainer fail + footer).
+	calls := awaitReply(t, em)
+	if len(calls) < 2 {
+		t.Errorf("Send call count = %d, want >= 2 (header + drainer + footer)", len(calls))
+	}
+
+	// Framework still emits Done even when everything fails.
+	states := cap.snapshot()
+	if len(states) != 2 || states[1].state != agent.MessageDone {
+		t.Errorf("expected Queued + Done despite concurrent failures; got %+v", states)
 	}
 }
 
@@ -851,4 +1202,18 @@ func testMgr(t *testing.T) *chatsession.Manager {
 func testMgrWithEmitter(t *testing.T, em messages.Emitter) *chatsession.Manager {
 	t.Helper()
 	return chatsession.NewManager().WithEmitter(em)
+}
+
+// pathsEquivalent compares two filesystem paths, resolving any
+// symlinks first (relevant on macOS where t.TempDir() returns a
+// /var/... path that pwd resolves to /private/var/...).
+func pathsEquivalent(a, b string) bool {
+	return evalLinks(a) == evalLinks(b)
+}
+
+func evalLinks(p string) string {
+	if resolved, err := filepath.EvalSymlinks(strings.TrimSpace(p)); err == nil {
+		return resolved
+	}
+	return strings.TrimSpace(p)
 }

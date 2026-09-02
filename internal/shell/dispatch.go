@@ -42,6 +42,114 @@ import (
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
+// shellFlushInterval is the debouncer cadence for chunk sends.
+// coalesceLines produces size-based chunks (4 KiB); this layer
+// adds time-based coalescing on top so the channel sees at most
+// ~1/interval sends/sec regardless of how fast the child writes.
+//
+// 1.5s chosen to: (1) push well below the human "is this stuck?"
+// threshold (perceived as ~2s) so the user sees updates during
+// long-running commands without flooding the channel; (2) batch
+// bursty output (`make test` printing per-line progress) into
+// one PATCH per ~1.5s window; (3) leave channel-side throttling
+// (~300ms Feishu PATCH rate) as the final gate, not the
+// primary one.
+//
+// Why shell-side (not channel-side): no channel can keep up
+// with raw shell output (multi-MB/s bursts), and pushing rate-
+// limiting into every channel adapter couples shell-streaming
+// concerns into Feishu/Slack/etc. The shell debounces so
+// channels stay simple (their existing PATCH throttle handles
+// what little remains).
+const shellFlushInterval = 1500 * time.Millisecond
+
+// chunkDebouncer accumulates onChunk payloads (typically
+// coalesceLines's size-based 4 KiB chunks) and flushes them
+// to flush every interval, capping the send rate at
+// ~1/interval. Use:
+//
+//	db := newChunkDebouncer(send, 250*time.Millisecond)
+//	coalesceLines(r, sink, db.Add, false)
+//	defer db.Stop() // final flush
+//
+// Add is goroutine-safe (called from drainer goroutines).
+// Stop must be called once to release the timer goroutine and
+// flush any remaining content; usually via defer at the
+// caller's scope.
+type chunkDebouncer struct {
+	flush    func(string) error
+	interval time.Duration
+	mu       sync.Mutex
+	buf      strings.Builder
+	stop     chan struct{}
+	done     chan struct{}
+}
+
+func newChunkDebouncer(flush func(string) error, interval time.Duration) *chunkDebouncer {
+	d := &chunkDebouncer{
+		flush:    flush,
+		interval: interval,
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	go d.loop()
+	return d
+}
+
+// loop runs the periodic flush ticker until Stop is called.
+// On each tick (or on Stop), flushes whatever is buffered.
+// Uses sync.Mutex to serialise against Add from drainer
+// goroutines.
+func (d *chunkDebouncer) loop() {
+	defer close(d.done)
+	t := time.NewTicker(d.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			d.fire()
+		case <-d.stop:
+			d.fire()
+			return
+		}
+	}
+}
+
+// fire drains the buffer under lock and invokes flush once.
+// Empty buffers are a no-op.
+func (d *chunkDebouncer) fire() {
+	d.mu.Lock()
+	if d.buf.Len() == 0 {
+		d.mu.Unlock()
+		return
+	}
+	text := d.buf.String()
+	d.buf.Reset()
+	d.mu.Unlock()
+	_ = d.flush(text)
+}
+
+// Add appends text to the pending buffer. Goroutine-safe;
+// called from drainer goroutines that don't otherwise
+// coordinate.
+func (d *chunkDebouncer) Add(text string) {
+	d.mu.Lock()
+	d.buf.WriteString(text)
+	d.mu.Unlock()
+}
+
+// Stop signals the loop to exit and blocks until the final
+// flush has completed. Idempotent: a second call is a no-op.
+func (d *chunkDebouncer) Stop() {
+	select {
+	case <-d.stop:
+		// already stopped
+	default:
+		close(d.stop)
+	}
+	<-d.done
+}
+
 // Request is the input to Dispatch (and to Dispatcher.Handle
 // via InboundRequest).
 //
@@ -271,10 +379,18 @@ func (d *Dispatcher) runShell(mgr *chatsession.Manager, cs *chatsession.ChatSess
 			"message_id", ir.MessageID)
 	}
 
-	// ② chunks — coalesceLines drives send via onChunk. On
-	// emitter failure we cancel shellCtx so CommandContext kills
-	// the child; otherwise the drainers stall on a wedged pipe
-	// and the child keeps running for the rest of timeouts.Shell.
+	// ② chunks — coalesceLines (size-based, 4 KiB chunks) drives
+	// a shell-side debouncer that flushes every shellFlushInterval
+	// (250 ms). The debouncer caps the send rate at ~4/s regardless
+	// of how fast the child writes — no channel can keep up with
+	// raw shell output, and pushing rate-limiting into the
+	// channel adapter would couple shell-streaming concerns into
+	// every adapter (Feishu, Slack, …).
+	//
+	// On emitter failure the debouncer records drainErr and
+	// cancels shellCtx so CommandContext kills the child;
+	// otherwise the drainers stall on a wedged pipe and the
+	// child keeps running for the rest of timeouts.Shell.
 	//
 	// drainErr is written from BOTH drainer goroutines (stdout +
 	// stderr may both fail to deliver their respective chunks).
@@ -288,7 +404,7 @@ func (d *Dispatcher) runShell(mgr *chatsession.Manager, cs *chatsession.ChatSess
 		drainErrMu sync.Mutex
 		drainErr   error
 	)
-	onChunk := func(text string) error {
+	db := newChunkDebouncer(func(text string) error {
 		if err := send(text); err != nil {
 			drainErrMu.Lock()
 			drainErr = err
@@ -297,11 +413,27 @@ func (d *Dispatcher) runShell(mgr *chatsession.Manager, cs *chatsession.ChatSess
 			return err
 		}
 		return nil
-	}
-	r := executeShell(shellCtx, ir.Request.Cwd, cmd, nil, onChunk)
+	}, shellFlushInterval)
+	defer db.Stop() // safety net: flush if anything panics before the explicit Stop below
+	// db.Add matches the onChunk signature except for the
+	// error return. coalesceLines's flush helper ignores the
+	// return value (it captures it via the captured `err`
+	// variable), so we bridge with a thin wrapper. The
+	// debouncer's own send-error handling runs in the flush
+	// callback above (drainErr path).
+	r := executeShell(shellCtx, ir.Request.Cwd, cmd, nil, func(text string) error {
+		db.Add(text)
+		return nil
+	})
 	drainErrMu.Lock()
 	gotDrainErr := drainErr
 	drainErrMu.Unlock()
+
+	// Flush any buffered chunks BEFORE the footer so the user
+	// sees the final chunk before the exit-code summary.
+	// db.Stop is idempotent — the defer above is a safety net
+	// for panic paths only.
+	db.Stop()
 
 	// ③ footer — exit code + duration + cwd. Even if executeShell
 	// panicked (recovered, ExitCode=-1) or was cancelled

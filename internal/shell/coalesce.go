@@ -10,17 +10,36 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"time"
 )
 
 const (
 	// chunkBytes is the soft cap on a single coalesced chunk
-	// before coalesceLines flushes it via onChunk. The Feishu
-	// adapter's renderLocked throttles PATCH at 300ms
-	// (feishu/receipt.go:330) so time-based coalescing is handled
-	// at the channel layer; we only coalesce on size here. 4 KiB
-	// matches roughly one Markdown div in the Feishu card, which
-	// keeps each PATCH visually coherent.
+	// before coalesceLines flushes it via onChunk. 4 KiB matches
+	// roughly one Markdown div in the Feishu card, which keeps
+	// each PATCH visually coherent.
 	chunkBytes = 4 * 1024
+
+	// flushInterval caps the send rate to ~1/250ms = 4 chunks/sec
+	// regardless of how fast the child writes. Without it, fast
+	// commands (`seq 1 1000` in 100ms) flood the channel with
+	// 6+ PATCHes in a tiny window — most get throttled by the
+	// channel anyway, and the user sees only the final state.
+	//
+	// F-shell-stream design: shell-side debouncing rather than
+	// channel-side throttling. No channel can keep up with raw
+	// shell output (multi-MB/s bursts); capping the rate at the
+	// producer lets channels stay simple (no per-stream rate
+	// limits in the adapter).
+	//
+	// The ticker check between scanner reads is best-effort: when
+	// the scanner is blocked on Read (child is slow), the ticker
+	// can't fire mid-read, but it will fire on the next iteration.
+	// For continuous output the size threshold dominates (we hit
+	// chunkBytes long before 250ms elapses); for slow / line-
+	// by-line output the time threshold batches lines into 250ms
+	// windows.
+	flushInterval = 250 * time.Millisecond
 
 	// maxLineBytes caps a single line that bufio.Scanner will
 	// accept. Lines longer than this surface as bufio.ErrTooLong,
@@ -62,9 +81,10 @@ func coalesceLines(
 	sc.Buffer(make([]byte, 64*1024), maxLineBytes)
 
 	var (
-		b   strings.Builder
-		n   int
-		err error
+		b          strings.Builder
+		n          int
+		err        error
+		lastFlush  = time.Now()
 	)
 
 	flush := func() bool {
@@ -79,6 +99,7 @@ func coalesceLines(
 		}
 		b.Reset()
 		n = 0
+		lastFlush = time.Now()
 		return true
 	}
 	appendLine := func(line string) {
@@ -94,7 +115,22 @@ func coalesceLines(
 		}
 	}
 
+	// Time-based debouncing: the loop checks time.Since(lastFlush)
+// on every iteration. We don't use a ticker because the scanner
+// is the source of truth for "ready to process" — between line
+// reads, we ask "has flushInterval elapsed?" and flush if so.
+// This catches up regardless of how many ticks would have fired
+// during a slow sc.Scan, and avoids the channel-buffer races
+// that come with ticker.C select inside a tight loop.
+
 	for sc.Scan() {
+		// Time-based flush: if the interval has elapsed since the
+		// last flush AND there's pending content, flush now.
+		if time.Since(lastFlush) >= flushInterval && b.Len() > 0 {
+			if !flush() {
+				break
+			}
+		}
 		appendLine(sc.Text())
 		if err != nil {
 			break

@@ -154,32 +154,45 @@ func TestRunBack_NoYml(t *testing.T) {
 	}
 }
 
-// TestRunBack_PreservesInMemoryContext: RunBack must NOT call
-// slot.Store(Context{}) the way RunClose does. The slot is the
-// reaction-routing key for the active fix; clearing it would
+// TestRunBack_PreservesYmlState: RunBack must NOT touch the
+// on-disk yml the way RunClose does (RunClose removes the
+// worktree, which removes the yml). The yml is the cwd-scoped
+// source of truth for the active fix; clearing it would
 // silently break reactions if the user /cwd's back into the
-// worktree (the yml is still there, but the in-memory
-// hot-path cache would be empty until the next read).
-func TestRunBack_PreservesInMemoryContext(t *testing.T) {
+// worktree.
+//
+// v1.5: the in-memory `slot` cache is retired (commit
+// 0e1d120). The "active fix state" is now `<cwd>/.nightme/
+// gtw.yml`; "RunBack preserves it" = yml content is byte-
+// identical before vs after. (TestRunBack_HappyPath covers
+// "yml is still on disk after back"; this one pins "and its
+// fields haven't been mutated".)
+func TestRunBack_PreservesYmlState(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
 	rig := newCloseRig(t)
 	seedFix(t, rig, wt, repoRoot)
 
-	// Snapshot the pre-back slot state.
-	preSlot := rig.slot.Load()
-	if preSlot.State == "" {
-		t.Fatalf("seedFix failed to populate slot")
+	// Snapshot the pre-back yml.
+	pre, err := ReadGTWYml(wt)
+	if err != nil {
+		t.Fatalf("seedFix failed to write yml: %v", err)
+	}
+	if pre.State == "" {
+		t.Fatalf("seedFix wrote yml with empty State: %+v", pre)
 	}
 
 	if _, err := RunBack(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1"); err != nil {
 		t.Fatalf("RunBack: %v", err)
 	}
 
-	postSlot := rig.slot.Load()
-	if postSlot != preSlot {
-		t.Errorf("slot mutated by back:\n  pre=%+v\n  post=%+v", preSlot, postSlot)
+	post, err := ReadGTWYml(wt)
+	if err != nil {
+		t.Fatalf("yml gone after back: %v", err)
+	}
+	if post != pre {
+		t.Errorf("yml mutated by back:\n  pre=%+v\n  post=%+v", pre, post)
 	}
 }
 
@@ -247,9 +260,15 @@ func TestRunBack_SyncFails(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd after back = %q, want %q", got, repoRoot)
 	}
-	// Slot still populated (back succeeded).
-	if rig.slot.Load().State == "" {
-		t.Errorf("slot cleared despite back success")
+	// Yml still populated (back succeeded). The sync error
+	// is downstream — back's own step (cwd swap + yml still
+	// intact) must hold regardless.
+	post, err := ReadGTWYml(wt)
+	if err != nil {
+		t.Fatalf("yml gone despite back success: %v", err)
+	}
+	if post.State == "" {
+		t.Errorf("yml State cleared despite back success: %+v", post)
 	}
 
 	rig.rec.mu.Lock()

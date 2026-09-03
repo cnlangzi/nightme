@@ -281,6 +281,20 @@ legacy case"兜底。
 → cwd → /Users/.../nightme
 ```
 
+### 4.1b Format 1(back)
+
+```
+✅ back to `/Users/.../nightme`
+→ worktree: /Users/.../fix-gtw-hooks (preserved)
+→ branch: fix-gtw-hooks (preserved)
+→ .nightme/gtw.yml (preserved — `/cwd /Users/.../fix-gtw-hooks` to resume)
+```
+
+`back` 的卡片结构和 close 平行(`✅` headline + `→` rows),但全部用
+"preserved" 而非 "removed/deleted",让用户在 IM 上一眼区分两个命令。Worktree
+目录、branch、`.nightme/gtw.yml` 都保留——切回 worktree 用 `/cwd <path>`,真
+不要了再 `/gtw close`。
+
 ### 4.2 Format 2(sync)
 
 ```

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -279,9 +280,18 @@ func TestFactory_Handle_Back_NoYml(t *testing.T) {
 	// true}, with the user-visible text going through the
 	// per-chat channel). Wire up a recording Emitter so the test
 	// can assert what actually got sent.
+	//
+	// Set a real (empty) cwd via t.TempDir so the handler-level
+	// RequireActiveCwd preflight passes — this test exercises
+	// the yml-missing branch of RunBack, not the empty-cwd
+	// branch (see TestFactory_Handle_Back_NoCwd for that).
+	wt := t.TempDir()
 	rec := &closeTestRecCh{}
-	cs := &chatsession.ChatSession{}
+	cs, _ := chatsession.New("chat-back-noyml-"+t.Name(), "test-agent")
 	cs.WithEmitter(rec)
+	if err := cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
 	f := NewFactory(NewManager())
 	got, err := f.Handle(context.Background(), command.RuntimeServices{},
 		nil, cs,
@@ -318,6 +328,97 @@ func TestFactory_Handle_Back_RejectsExtraArgs(t *testing.T) {
 	}
 	if !strings.Contains(got.Reply, "❌") {
 		t.Errorf("expected ❌ error for /gtw back --force, got %q", got.Reply)
+	}
+}
+
+// TestFactory_Handle_Back_NoCwd covers the handler-level
+// preflight (review finding #10): when cs.SelectedCwd() is
+// empty, /gtw back must short-circuit with the canonical
+// "No active workspace" reply before RunBack is even called.
+// Mirrors runSync's pattern (cmd.go:858).
+//
+// Without this gate, RunBack would receive an empty cwd, hit
+// ReadGTWYml("") → gtwYmlPath("") → "./.nightme/gtw.yml" under
+// the daemon's CWD, and either silently find a stale yml or
+// surface the misleading "no active fix to back out of"
+// message. Either way the user gets confused about which
+// command they should run next.
+func TestFactory_Handle_Back_NoCwd(t *testing.T) {
+	// Rec with empty cwd path.
+	rec := &closeTestRecCh{}
+	cs, _ := chatsession.New("chat-back-nocwd-"+t.Name(), "test-agent")
+	cs.WithEmitter(rec)
+	// Deliberately do NOT call SetSelectedCwd — SelectedCwd()
+	// returns "".
+	f := NewFactory(NewManager())
+	got, err := f.Handle(context.Background(), command.RuntimeServices{},
+		nil, cs,
+		command.SlashInput{Text: "/gtw back", Args: []string{"gtw", "back"}})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !got.Consumed {
+		t.Errorf("expected Consumed, got %+v", got)
+	}
+	// Standard wording from command.NoActiveCwdReply.
+	if !strings.Contains(got.Reply, "No active workspace") {
+		t.Errorf("reply = %q, want canonical 'No active workspace'", got.Reply)
+	}
+	// And the Emitter should NOT have received anything — the
+	// preflight returns from the handler before RunBack writes
+	// its reply.
+	if text := rec.lastText(); text != "" {
+		t.Errorf("emitter received %q, want empty (preflight should not reach RunBack)", text)
+	}
+}
+
+// TestRunBack_BranchEmpty_NoBranchRow covers the review finding
+// #9: when c.Worktree is set but c.Branch is empty (a partial
+// yml written by a /gtw fix that crashed before §5.2.④), the
+// success card must NOT print "→ branch:  (preserved)" with a
+// blank slot. The branch row is dropped silently; the worktree
+// row and the yml-resume hint still land.
+func TestRunBack_BranchEmpty_NoBranchRow(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	// Seed with Worktree set, Branch empty — the malformed
+	// half-window scenario.
+	if err := os.MkdirAll(filepath.Join(wt, nightmeDirName), 0o755); err != nil {
+		t.Fatalf("mkdir .nightme: %v", err)
+	}
+	if err := WriteGTWYml(wt, Context{
+		Mode:     ModeLocal,
+		Issue:    -1,
+		Branch:   "", // empty on purpose
+		Worktree: wt,
+		RepoRoot: repoRoot,
+		State:    StateFixing,
+	}, rig.deps.Now); err != nil {
+		t.Fatalf("seed WriteGTWYml: %v", err)
+	}
+	if err := rig.cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+
+	if _, err := RunBack(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1"); err != nil {
+		t.Fatalf("RunBack: %v", err)
+	}
+
+	got := rig.rec.lastText()
+	if !strings.Contains(got, "→ worktree:") {
+		t.Errorf("back reply missing worktree row:\n%s", got)
+	}
+	// Branch row must be absent entirely — not present with a
+	// blank slot.
+	if strings.Contains(got, "→ branch:") {
+		t.Errorf("back reply still has branch row (should be dropped when empty):\n%s", got)
+	}
+	// The yml-resume row must still land so the user knows how
+	// to come back.
+	if !strings.Contains(got, "/cwd") {
+		t.Errorf("back reply missing /cwd resume hint:\n%s", got)
 	}
 }
 

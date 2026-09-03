@@ -709,6 +709,17 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 		}, nil
 	}
 
+	// Preflight: back operates on the current workspace
+	// (cs.SelectedCwd is the only handle we have on which
+	// worktree to step out of). Mirror runSync's pattern
+	// (cmd.go:858) — the handler rejects empty-cwd before
+	// RunBack is ever called, so RunBack can trust its input.
+	// RunBack also has a defensive guard for direct callers
+	// (tests, future call sites) — belt and suspenders.
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		return failOut, nil
+	}
+
 	cfg, loadNotes := Load()
 
 	hc := f.deriveHookContext(ctx, cs, "back")

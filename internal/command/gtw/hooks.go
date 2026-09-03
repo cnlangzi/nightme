@@ -207,7 +207,7 @@ type HookContext struct {
 	Worktree      string // worktree absolute path (empty if command has no worktree)
 	Branch        string // current branch in Worktree (empty if detached)
 	DefaultBranch string // upstream default branch name (empty if not discoverable)
-	Command       string // fix / push / close / sync / commit
+	Command       string // gtw subcommand name (fix / push / close / sync / commit / pr / back)
 }
 
 // ToEnv renders the 4 GTW_* env vars. Empty fields are skipped.

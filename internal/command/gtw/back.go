@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 )
 
 // RunBack is the entry point for `/gtw back`. The non-destructive
@@ -65,6 +67,24 @@ func RunBack(
 ) (*Result, error) {
 	selectedCwd := cs.SelectedCwd()
 
+	// --- step 0: defensive empty-cwd guard ----------------------
+	// runBack's handler-level preflight (cmd.go runBack) is the
+	// primary gate and produces the standard "no active
+	// workspace" reply via RequireActiveCwd. This guard is the
+	// belt-and-suspenders second line for direct callers of
+	// RunBack (tests, future call sites) — without it,
+	// ReadGTWYml("") resolves gtwYmlPath("") to
+	// pathutil.Join("", ".nightme", "gtw.yml") which either
+	// silently finds a stale yml under the daemon's CWD or
+	// surfaces the misleading "no active fix to back out of"
+	// when the yml genuinely doesn't exist. Same wording as
+	// RequireActiveCwd so users see one consistent reply no
+	// matter which path catches the empty-cwd case.
+	if selectedCwd == "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ "+command.NoActiveCwdReply), nil
+	}
+
 	// --- step 1+2: locate the snapshot ---------------------------
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
@@ -110,21 +130,30 @@ func RunBack(
 	// "closed X". Listing c.Worktree as "preserved" makes the
 	// non-destructive intent obvious — the user shouldn't have
 	// to wonder whether `back` is a synonym for `close`.
-	var body string
+	//
+	// Rows are built conditionally so a partially-written yml
+	// (Worktree set but Branch empty — the "fix didn't reach
+	// §5.2.④" half-window where Worktree was captured but the
+	// branch name hadn't been assigned yet) doesn't render as
+	// "→ branch:  (preserved)" with a blank slot.
+	var rows []string
 	if c.Worktree != "" {
-		body = fmt.Sprintf(
-			"✅ back to `%s`\n"+
-				"→ worktree: %s (preserved)\n"+
-				"→ branch: %s (preserved)\n"+
-				"→ .nightme/gtw.yml (preserved — `/cwd %s` to resume)",
-			c.RepoRoot, c.Worktree, c.Branch, c.Worktree)
+		rows = append(rows, fmt.Sprintf("→ worktree: %s (preserved)", c.Worktree))
+		if c.Branch != "" {
+			rows = append(rows, fmt.Sprintf("→ branch: %s (preserved)", c.Branch))
+		}
+		rows = append(rows,
+			fmt.Sprintf("→ .nightme/gtw.yml (preserved — `/cwd %s` to resume)", c.Worktree))
 	} else {
-		body = fmt.Sprintf(
-			"✅ back to `%s`\n"+
-				"→ worktree: (not yet recorded — fix didn't reach §5.2.④)\n"+
-				"→ .nightme/gtw.yml (preserved)",
-			c.RepoRoot)
+		// No worktree recorded yet — fix didn't reach §5.2.④.
+		// Don't reference c.Branch at all here; it could be
+		// empty for the same reason Worktree is, or populated
+		// from an even-earlier step that means nothing to the
+		// user. Just surface the state we know about.
+		rows = append(rows, "→ worktree: (not yet recorded — fix didn't reach §5.2.④)")
+		rows = append(rows, "→ .nightme/gtw.yml (preserved)")
 	}
+	body := "✅ back to `" + c.RepoRoot + "`\n" + strings.Join(rows, "\n")
 	// Mid-flow by design — the sync card that follows in
 	// step 5 is a separate reply, matching the close-path
 	// two-card shape (close + sync, back + sync).

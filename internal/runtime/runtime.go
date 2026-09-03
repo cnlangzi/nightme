@@ -343,9 +343,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// findChatSession to resolve per-chat sessions; they do not
 	// hold a reference to any single mgr.
 
-	gtwMgr := gtw.NewManager()
-	gtwMgr.SetHandlerDeps(gtwDeps)
-
 	// Phase 2.3: command/* packages self-register via init()
 	// — see internal/command/runtime.go. The orchestrator just
 	// calls SetDeps once with the manager + primary + gtw
@@ -358,23 +355,19 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// findChatSession to resolve per-chat sessions; they do not
 	// hold a reference to any single mgr.
 
-	// Reaction router (services) — gtw's ReactionRouter
-	// dispatches msg.Reaction / msg.Action events.
-	//
-	// gtw.Manager.HandleReaction is intentionally cs-blind (the
-	// gtw package owns NO chat-session read logic — see
-	// internal/command/gtw/manager.go doc). We resolve cs here
-	// via findChatSession so the reaction path sees the same
-	// per-channel session a slash command would see, and pass
-	// the result through.
+	// Reaction router (services). gtw no longer registers a
+	// reaction handler here — the §5.3.3 worktree-fail retry
+	// card was retired in v1.5. The router stays around because
+	// other packages (channels) may register handlers of their
+	// own. Empty router → all reactions fall through, which is
+	// the v1.5 correct behaviour for gtw.
 	router := commandServices.NewReactionRouter()
-	router.Register("*", func(ctx context.Context, ev commandServices.ReactionEvent) bool {
-		cs := findChatSession(ev.ChatID, cfg.Primary)
-		if cs == nil {
-			return false
-		}
-		return gtwMgr.HandleReaction(ctx, ev, cs)
-	})
+
+	// gtwMgr is constructed (and returned to the runtime via the
+	// `command.Deps.GTWExt` payload) by gtw's init() builder
+	// below. The /gtw slash-command path uses it for per-chat
+	// run-lock serialisation; v1.5 stripped the rest of the
+	// surface (no draft registry, no reaction handler).
 
 	// Slash command registry + commander. After SetDeps
 	// every command/* package's init() has produced a factory;

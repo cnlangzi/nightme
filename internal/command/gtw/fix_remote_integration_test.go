@@ -39,29 +39,11 @@ import (
 type fixRemoteRig struct {
 	repoRoot  string
 	cs        *chatsession.ChatSession
-	drafts    *memDrafts
 	deps      HandlerDeps
 	prov      *fakeGitProvider
 	sentTexts []string
 	rec       *fixRemoteRecCh
 }
-
-// memDrafts is a tiny DraftsMap for tests that don't need
-// reaction-card semantics. The branch-exists-draft path in
-// runFixRemote only uses Store; other methods are no-ops.
-type memDrafts struct {
-	stored map[string]*Draft
-}
-
-func newMemDrafts() *memDrafts { return &memDrafts{stored: map[string]*Draft{}} }
-
-func (m *memDrafts) Store(userMsgID string, d *Draft) { m.stored[userMsgID] = d }
-func (m *memDrafts) Take(userMsgID string) *Draft {
-	d := m.stored[userMsgID]
-	delete(m.stored, userMsgID)
-	return d
-}
-func (m *memDrafts) Lookup(userMsgID string) *Draft { return m.stored[userMsgID] }
 
 // newFixRemoteRig sets up a fresh git repo with an `origin`
 // remote pointing at a github.com-style URL, a ChatSession
@@ -94,7 +76,6 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 	rig := &fixRemoteRig{
 		repoRoot: repoRoot,
 		cs:       cs,
-		drafts:   newMemDrafts(),
 		prov:     prov,
 		rec:      rec,
 	}
@@ -161,7 +142,6 @@ func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 		context.Background(),
 		ModeRemote,
 		r.cs,
-		r.drafts,
 		r.deps,
 		r.cs.ChatID,
 		"msg-fix-remote",

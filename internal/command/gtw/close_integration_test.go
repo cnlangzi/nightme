@@ -376,7 +376,6 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	if err := cs.SetSelectedCwd(repoRoot); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	drafts := newMemDrafts()
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
@@ -402,7 +401,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	// Drive RunFix end-to-end (the same path the factory
 	// uses in production).
 	res, err := RunFix(
-		context.Background(), args.Mode, cs, drafts, deps,
+		context.Background(), args.Mode, cs, deps,
 		cs.ChatID, "msg-int-shortN", []string{args.RawArg}, args.Yes,
 	)
 	if err != nil {

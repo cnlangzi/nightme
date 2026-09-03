@@ -17,15 +17,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
-// DraftsMap is the gtw-package view of one ChatSession's
-// gtwDrafts map. Production: gtwDraftsMap from
-// internal/gateway. Tests: a map[string]*Draft with closures.
-type DraftsMap interface {
-	Store(requestID string, d *Draft)
-	Take(requestID string) *Draft
-	Lookup(requestID string) *Draft
-}
-
 // /gtw {pr, close} success paths apply a known PR result to
 // every AgentSession in the chat's pool by calling
 // `deps.PRCache.WritePR(as.ID, pr)` inline:
@@ -114,7 +105,6 @@ func RunFix(
 	ctx context.Context,
 	mode Mode,
 	cs *chatsession.ChatSession,
-	drafts DraftsMap,
 	deps HandlerDeps,
 	chatID, messageID string,
 	args []string,
@@ -157,9 +147,9 @@ func RunFix(
 	case ModeLocal:
 		// F-XX: local mode has no yes parameter; Factory.runFix
 		// drops args.Yes when args.Mode == ModeLocal.
-		return runFixLocal(ctx, cs, drafts, deps, chatID, messageID, args[0])
+		return runFixLocal(ctx, cs, deps, chatID, messageID, args[0])
 	default:
-		return runFixRemote(ctx, cs, drafts, deps, chatID, messageID, args[0], yes)
+		return runFixRemote(ctx, cs, deps, chatID, messageID, args[0], yes)
 	}
 }
 
@@ -185,7 +175,6 @@ func RunFix(
 func runFixRemote(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
-	drafts DraftsMap,
 	deps HandlerDeps,
 	chatID, messageID string,
 	rawID string,
@@ -350,24 +339,16 @@ func runFixRemote(
 	// later, the worktree is already real and the user has a
 	// usable setup, label or not.
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		return emitWorktreeFailDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
-			IssueID:  issueID,
-			Title:    issue.Title,
-			Branch:   branch,
-			Slug:     branch,
-			Repo:     owner + "/" + repo,
-			Provider: string(providerKind),
-			Worktree: repoRoot,
-			GitError: tailLines(stderrFromWorktreeErr(err), 10),
-			// LabelAdded is intentionally false here — the
-			// label is applied AFTER WorktreeAdd (post-fix),
-			// never before, so a WorktreeAdd failure means
-			// the label was never touched. The reaction card
-			// for this failure mode therefore never needs
-			// to clean up a label.
-			LabelAdded: false,
-			ChatID:     chatID,
-		})
+		// /gtw fix failure paths reply with the error text and
+		// stop. v1.5 retired the §5.3.3 retry card — users get a
+		// single, immediate reply, no draft to click. No cleanup
+		// is needed: WorktreeAdd failed before any worktree or
+		// label was created, and the chat's SelectedCwd is
+		// unchanged (we haven't moved into a worktree yet).
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ /gtw fix: git worktree add failed: %v\n"+
+				"[git stderr tail]\n%s",
+				err, tailLines(stderrFromWorktreeErr(err), 10))), nil
 	}
 
 	// --- label the issue (post-WorktreeAdd; atomic with worktree) ---
@@ -466,7 +447,6 @@ func runFixRemote(
 func runFixLocal(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
-	drafts DraftsMap,
 	deps HandlerDeps,
 	chatID, messageID string,
 	rawName string,
@@ -509,16 +489,15 @@ func runFixLocal(
 	}
 
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		return emitWorktreeFailDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
-			IssueID:  -1,
-			Title:    "(local branch)",
-			Branch:   branch,
-			Slug:     branch,
-			Repo:     "",
-			Worktree: repoRoot,
-			GitError: tailLines(stderrFromWorktreeErr(err), 10),
-			ChatID:   chatID,
-		})
+		// /gtw fix failure paths reply with the error text and
+		// stop. v1.5 retired the §5.3.3 retry card — users get a
+		// single, immediate reply, no draft to click. No cleanup
+		// is needed: WorktreeAdd failed before any worktree was
+		// created, and the chat's SelectedCwd is unchanged.
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ /gtw fix: git worktree add failed: %v\n"+
+				"[git stderr tail]\n%s",
+				err, tailLines(stderrFromWorktreeErr(err), 10))), nil
 	}
 
 	// F-XX: dispMode is unused for ModeLocal (local never
@@ -992,113 +971,17 @@ func stderrFromWorktreeErr(err error) string {
 	return ""
 }
 
-func emitWorktreeFailDraft(
-	ctx context.Context,
-	cs *chatsession.ChatSession,
-	deps HandlerDeps,
-	chatID, messageID, userMsgID string,
-	drafts DraftsMap,
-	payload FixDraftPayload,
-) (*Result, error) {
-	card := WorktreeFailChoice(payload)
-	return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
-}
-
-func sendDraft(
-	ctx context.Context,
-	cs *chatsession.ChatSession,
-	deps HandlerDeps,
-	chatID, messageID, userMsgID string,
-	card Choice,
-	drafts DraftsMap,
-	kind DraftKind,
-	payload FixDraftPayload,
-) (*Result, error) {
-	requestID := "gtw-fix-" + userMsgID
-	if userMsgID == "" {
-		requestID = "gtw-fix-" + payload.Branch
-	}
-	card.RequestID = requestID
-
-	em := cs.Emitter()
-	cardPosted := false
-	if em != nil {
-		if err := em.Send(ctx, messages.OutboundMessage{
-			ChatID: chatID,
-			Kind:   messages.OutChoice,
-			Choice: gtwChoiceToGateway(card),
-		}); err == nil {
-			cardPosted = true
-		} else {
-			// Card path failed: fall through to markdown so the
-			// user still sees the decision content. Follow-up
-			// after click will be plain text (ChoicePosted=false).
-			_ = replyAgent(ctx, em, chatID, messageID,
-				renderChoiceMarkdown(card), "", agent.RunResult{})
-		}
-	}
-
-	drafts.Store(requestID, &Draft{
-		Kind:            kind,
-		Payload:         payload,
-		CreatedAt:       deps.Now(),
-		ChoicePosted:    cardPosted,
-		ChoiceTitle:     card.Title,
-		ChoiceBody:      card.Body,
-		ChoiceOptions:   card.Options,
-		ChoiceRequestID: requestID,
-	})
-	return &Result{Consumed: true}, nil
-}
-
 // toChatsessionChoiceOptions was removed in F-51: the gtw package
 // now owns ChoiceOption directly (no chatsession alias needed).
 // The renderer stores card.Options verbatim on the draft.
 
-// renderChoiceMarkdown flattens a Choice back to plain markdown for
-// legacy channels that don't support interactive choice prompts (Feishu
-// Web in some configs, Slack, etc.). The shape mirrors the F-45
-// plain-text decision cards so the user's view is unchanged.
-func renderChoiceMarkdown(c Choice) string {
-	var b strings.Builder
-	if c.Title != "" {
-		b.WriteString(c.Title)
-		b.WriteString("\n")
-	}
-	if c.Body != "" {
-		b.WriteString(c.Body)
-		b.WriteString("\n")
-	}
-	if len(c.Options) > 0 {
-		b.WriteString("\n选择操作(反应对应 emoji):\n")
-		for _, ch := range c.Options {
-			label := ch.Label
-			if ch.Emoji != "" {
-				label = ch.Emoji + " " + label
-			}
-			b.WriteString("  ")
-			b.WriteString(label)
-			b.WriteString("\n")
-		}
-	}
-	return b.String()
-}
-
-// gtwChoiceToGateway translates gtw.Choice (business view) to the
-// wire-level messages.Choice. Kind is always ChoiceKindDecision.
-func gtwChoiceToGateway(in Choice) *messages.Choice {
-	opts := in.Options
-	if opts != nil {
-		opts = append([]messages.ChoiceOption(nil), opts...)
-	}
-	return &messages.Choice{
-		Kind:      messages.ChoiceKindDecision,
-		Title:     in.Title,
-		Body:      in.Body,
-		Options:   opts,
-		RequestID: in.RequestID,
-	}
-}
+// renderChoiceMarkdown + gtwChoiceToGateway + the gtw.Choice /
+// gtw.ChoiceOption types were all removed in v1.5 along with
+// the §5.3.3 worktree-fail retry card (WorktreeFailChoice +
+// emitWorktreeFailDraft + the DraftFixWorktreeFail kind). The
+// gtw package no longer emits interactive cards of its own;
+// the messages-level Choice / ChoiceOption types are still in
+// use by the channels package (feishu/slack/telegram).
 
 // ensureGtwLabels bootstraps the full AllLabels set on the
 // remote repo via provider.CreateLabel. The order matches

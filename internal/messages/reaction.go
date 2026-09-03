@@ -26,10 +26,13 @@ const (
 	// Reintroduce when a card that emits an "edit" reaction lands.
 	ReactionEdit ReactionKind = "✏️"
 	// ReactionCancel: ❌ — abort the current gtw step; rollback side
-	// effects where possible. (WorktreeFailChoice cancel button.)
+	// effects where possible. v1.5: gtw no longer emits a card
+	// with this emoji (WorktreeFailChoice retired); the constant
+	// stays for channels / future flows that wire it up.
 	ReactionCancel ReactionKind = "❌"
-	// ReactionRetry: 🔄 — last step failed; re-run.
-	// (WorktreeFailChoice retry button.)
+	// ReactionRetry: 🔄 — last step failed; re-run. v1.5: same
+	// as ReactionCancel — gtw no longer emits this emoji
+	// (WorktreeFailChoice retired); constant kept for future use.
 	ReactionRetry ReactionKind = "🔄"
 )
 
@@ -42,10 +45,11 @@ const (
 // The tag strings are the contract between gtw's card renderer
 // (internal/command/gtw/render.go) and any channel adapter that
 // wants to translate clicks — both sides MUST agree on the exact
-// spelling. The renderer currently emits:
+// spelling. v1.5 retired WorktreeFailChoice; gtw no longer emits
+// any of these tags:
 //
-//	act:/gtw/cancel         → ReactionCancel  (WorktreeFailChoice)
-//	act:/gtw/worktree-retry → ReactionRetry   (WorktreeFailChoice)
+//	act:/gtw/cancel         → ReactionCancel  (WorktreeFailChoice, retired)
+//	act:/gtw/worktree-retry → ReactionRetry   (WorktreeFailChoice, retired)
 //
 // (F-XX §3.1 removed the BranchExistsChoice card; the previous
 // 🆕 / 🔗 reactions and the branch-newv2 / branch-join action

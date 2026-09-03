@@ -11,9 +11,10 @@ package claudecode
 
 import (
 	"context"
-	"github.com/cnlangzi/nightme/internal/agent"
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // jsonEscape escapes s for safe inclusion inside a JSON string
@@ -148,7 +149,7 @@ func TestParsePrintStream_PrefersResultTextWhenLong(t *testing.T) {
 		`{"type":"result","subtype":"success","session_id":"s1","duration_ms":12345,"result":"` + jsonEscape(review) + `"}`,
 		"",
 	}, "\n")
-	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), true)
+	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), true, nil)
 	if err != nil {
 		t.Fatalf("parsePrintStream: %v", err)
 	}
@@ -183,7 +184,7 @@ func TestParsePrintStream_RecoversReviewFromAssistantWhenFollowup(t *testing.T) 
 		`{"type":"result","subtype":"success","session_id":"s1","duration_ms":12345,"result":"` + jsonEscape(followup) + `"}`,
 		"",
 	}, "\n")
-	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), true)
+	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), true, nil)
 	if err != nil {
 		t.Fatalf("parsePrintStream: %v", err)
 	}
@@ -208,7 +209,7 @@ func TestParsePrintStream_NoSwapWhenAssistantShorter(t *testing.T) {
 		`{"type":"result","subtype":"success","session_id":"s1","duration_ms":100,"result":"` + followup + `"}`,
 		"",
 	}, "\n")
-	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), true)
+	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), true, nil)
 	if err != nil {
 		t.Fatalf("parsePrintStream: %v", err)
 	}
@@ -232,7 +233,7 @@ func TestParsePrintStream_NoRecoveryWhenNotReview(t *testing.T) {
 		`{"type":"result","subtype":"success","session_id":"s1","duration_ms":100,"result":"` + jsonEscape(review) + `"}`,
 		"",
 	}, "\n")
-	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), false)
+	got, err := parsePrintStream(context.Background(), strings.NewReader(stream), false, nil)
 	if err != nil {
 		t.Fatalf("parsePrintStream: %v", err)
 	}
@@ -246,7 +247,7 @@ func TestParsePrintStream_NoRecoveryWhenNotReview(t *testing.T) {
 		`{"type":"result","subtype":"success","session_id":"s1","duration_ms":100,"result":"Want me to apply?"}`,
 		"",
 	}, "\n")
-	got2, err := parsePrintStream(context.Background(), strings.NewReader(stream2), false)
+	got2, err := parsePrintStream(context.Background(), strings.NewReader(stream2), false, nil)
 	if err != nil {
 		t.Fatalf("parsePrintStream (no-swap): %v", err)
 	}
@@ -268,6 +269,14 @@ func TestDetectDefaultBranch_NoRepo(t *testing.T) {
 		t.Errorf("non-existent path: got %q, want \"\"", got)
 	}
 }
+
+// CurrentBranch coverage lives in
+// internal/agent/detect_current_branch_test.go (same package as
+// the function). It was hoisted out of claudecode/ in the fix
+// that switched runCodeReviewPrintMode's positional from
+// `<defaultBase>...HEAD` to the local branch name — the helper
+// now sits next to agent.DetectDefaultBranch so future callers
+// don't duplicate the git invocation.
 
 // TestRunResult_RecoveredTextZeroValue pins the contract that
 // non-claudecode bridges leave RecoveredText empty. Currently

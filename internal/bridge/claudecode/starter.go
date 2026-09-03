@@ -185,6 +185,16 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // Other bridges (dsh / opencode / pi / acp) don't have native
 // review; they delegate to agent.Review which uses builtinPrompt.
 // pty returns ErrReviewNotSupported.
+//
+// v10: cfg + opts are forwarded verbatim to runCodeReviewPrintMode.
+// Pre-v10 stripped cfg to {Workspace: cfg.Workspace} and
+// dropped opts entirely, which silently disabled the chat
+// channel's WithEventSink — the sink never saw Ready/Result
+// events, so the StatusBar sat on "Working…" for the full
+// review duration and then jumped straight to the review text
+// landing in chat (no progress, no footer tokens). The pre-fix
+// shape matched codex's `runCodexReview(ctx, s, cfg, opts...)`
+// forwarding shape, so the parity is intentional.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
-	return runCodeReviewPrintMode(ctx, s, agent.StartConfig{Workspace: cfg.Workspace})
+	return runCodeReviewPrintMode(ctx, s, cfg, opts...)
 }

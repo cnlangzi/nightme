@@ -38,7 +38,7 @@ func TestParsePrintStream_RealRecovery_AskUserQuestion(t *testing.T) {
 	if err != nil {
 		t.Skipf("fixture %s not present: %v", fixture, err)
 	}
-	got, err := parsePrintStream(context.Background(), strings.NewReader(string(data)), true)
+	got, err := parsePrintStream(context.Background(), strings.NewReader(string(data)), true, nil)
 	if err != nil {
 		t.Fatalf("parsePrintStream: %v", err)
 	}

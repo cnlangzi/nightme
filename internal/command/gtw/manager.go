@@ -82,9 +82,9 @@ func (m *Manager) runLockFor(chatID string) *sync.Mutex {
 	if chatID == "" {
 		return nil
 	}
-	if v, ok := m.runs.Load(chatID); ok {
-		return v.(*sync.Mutex)
-	}
+	// sync.Map.LoadOrStore returns the existing value atomically
+	// when present, so a single LoadOrStore is sufficient — no
+	// separate Load needed.
 	mu := &sync.Mutex{}
 	actual, _ := m.runs.LoadOrStore(chatID, mu)
 	return actual.(*sync.Mutex)

@@ -164,12 +164,15 @@ func RunFix(
 //  3. PreflightWorktreeCreate → catches path / branch / parent
 //     errors before WorktreeAdd.
 //  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  5. AddIssueLabel(LabelWIP); on WorktreeAdd failure RemoveIssueLabel
-//     and emit DraftFixWorktreeFail card.
-//  6. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
+//  5. WorktreeAdd (creates the durable worktree first; failure
+//     here surfaces the git error and bails without touching
+//     the label).
+//  6. AddIssueLabel(LabelWIP). Failure rolls back the worktree
+//     and branch via rollbackLabelStep.
+//  7. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
 //     source of truth for hooks, /gtw close, and recovery).
-//  7. Render success card.
-//  8. Dispatch issue body to ChatSession.QueueUserMessage so
+//  8. Render success card.
+//  9. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
 //     the worktree — the user can re-trigger manually.
 func runFixRemote(
@@ -415,11 +418,6 @@ func runFixRemote(
 		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode)
 }
 
-//  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  5. WorktreeAdd; on failure emit DraftFixWorktreeFail card.
-//  6. SetSelectedCwd → WriteGTWYml (cwd-scoped source of truth).
-//  7. Render success card.
-//
 // runFixLocal implements the F-XX local-mode flow:
 //
 //	/gtw fix --name <branch>
@@ -432,7 +430,8 @@ func runFixRemote(
 //  2. RepoRoot → no origin required.
 //  3. PreflightWorktreeCreate.
 //  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
-//  5. WorktreeAdd; on failure emit DraftFixWorktreeFail card.
+//  5. WorktreeAdd; on failure → plain-text reply (v1.5 retired
+//     the §5.3.3 retry card; failure stops the flow).
 //  6. SetSelectedCwd → WriteGTWYml (cwd-scoped source of truth).
 //  7. Render the simplified local success card.
 //

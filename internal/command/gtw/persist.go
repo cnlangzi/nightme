@@ -305,8 +305,8 @@ func ReadGTWYml(worktreePath string) (Context, error) {
 		return Context{}, fmt.Errorf("gtw.yml: repoRoot %q is not an absolute path", doc.RepoRoot)
 	}
 	// Normalize at the yml boundary so every downstream caller
-	// (RunClose, deriveHookContext, preflightOrphanYml, …) can
-	// treat Worktree / RepoRoot as already-canonical. Errors
+	// (RunClose, deriveHookContext, …) can treat Worktree /
+	// RepoRoot as already-canonical. Errors
 	// from NormalizeForOS are non-fatal here: a malformed path
 	// is already a "yml is malformed" case, and the previous
 	// behaviour was to pass it through; we preserve that

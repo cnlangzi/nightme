@@ -58,13 +58,12 @@ const maxDirtyFilesReported = 10
 //     published; the -d (lowercase) safe-delete would refuse
 //     on unmerged, which is hostile here).
 //  6. SetSelectedCwd back to repoRoot so the next agent message
-//     spawns in the main repo.
-//  7. (reserved; the in-memory Context/slot layer is gone in
-//     v1.5 — RunClose has no in-memory state to clear, the yml
-//     disappears with the worktree at step 4 and the new cwd is
-//     repoRoot at step 6.)
-//  8. Emit close's own success card.
-//  9. Invoke /new on the new cwd (c.RepoRoot) to drop any AS
+//     spawns in the main repo. v1.5 removed the in-memory slot
+//     clear that lived in this slot in older versions; nothing
+//     to do beyond SetSelectedCwd (the yml disappears with the
+//     worktree at step 4).
+//  7. Emit close's own success card.
+//  8. Invoke /new on the new cwd (c.RepoRoot) to drop any AS
 //     left there of its accumulated conversation context. This
 //     mirrors the user's manual workflow ("close the fix, then
 //     clear the chat") — context reset BEFORE upstream refresh
@@ -72,7 +71,7 @@ const maxDirtyFilesReported = 10
 //     starts cold. matched==0 means no AS survives in repoRoot
 //     — the common case after step 2.5 — and no extra card is
 //     sent.
-//  10. Run `git pull --rebase origin <default>` on repoRoot and
+//  9. Run `git pull --rebase origin <default>` on repoRoot and
 //     emit the same sync card /gtw sync uses. Sync runs LAST
 //     so the user sees the full sequence: close → /new → sync.
 //     If sync errors (dirty main, rebase conflict), its own
@@ -82,9 +81,9 @@ const maxDirtyFilesReported = 10
 // On any error before step 6 (yml missing / dirty / worktree-
 // remove / branch-delete fail) we leave the chat's active cwd
 // untouched, so the user can retry once they fix the underlying
-// problem. Steps 9 (/new) and 10 (sync) run unconditionally after
-// step 8 — neither error undoes the local-fix tear-down, and
-// neither skips the other. Step 9's matched==0 path silently
+// problem. Steps 8 (/new) and 9 (sync) run unconditionally after
+// step 7 — neither error undoes the local-fix tear-down, and
+// neither skips the other. Step 8's matched==0 path silently
 // skips its card so the empty-pool case stays a two-card story
 // (close + sync).
 func RunClose(
@@ -96,7 +95,7 @@ func RunClose(
 	selectedCwd := cs.SelectedCwd()
 
 	// --- step 0.5: dangling-cwd safety net -------------------------
-	// Two failure modes the step 1+2 IsNotExist branch would
+	// Three failure modes the step 1+2 IsNotExist branch would
 	// otherwise misreport as "no active fix to close":
 	//
 	//   (a) Another chat's /gtw close ran `git worktree remove`
@@ -110,18 +109,15 @@ func RunClose(
 	//       on a sibling /gtw fix). selectedCwd is dangling;
 	//       the user never ran /gtw fix here.
 	//
-	//   (c) selectedCwd is empty (cmd.go:364-389 does not
-	//       preflight this). Without this guard, ReadGTWYml("")
-	//       would resolve to "./.nightme/gtw.yml" relative to
-	//       wherever the daemon happens to be running — not
-	//       what the user expects. Same reply text as
-	//       command.RequireActiveCwd (internal/command/preflight.go:30)
-	//       for consistency.
+	//   (c) selectedCwd is empty — short-circuited separately
+	//       at lines 129-132 (just below) with
+	//       command.NoActiveCwdReply; never reaches the
+	//       dangling-dir cleanup below.
 	//
-	// All three are resolved by closing+dropping the ASes in
-	// the cwd (when there is one), clearing the dangling state,
-	// and telling the user to /cwd again. The successful close
-	// path (step 2.5 below) does the same AS cleanup so the
+	// Cases (a) and (b) are resolved by closing+dropping the
+	// ASes in the cwd, clearing the dangling state, and telling
+	// the user to /cwd again. The successful close path
+	// (step 2.5 below) does the same AS cleanup so the
 	// principle generalises: a /gtw close that tears down a
 	// worktree must kill the agent processes pinned to it,
 	// otherwise they accumulate as orphans and drag the daemon

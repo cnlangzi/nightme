@@ -20,18 +20,22 @@ import (
 // Wire-up example:
 //
 //	mgr := gtw.NewManager()
-//	mgr.SetHandlerDeps(deps)
-//	factory := gtw.NewFactory(mgr)
+//	factory := gtw.NewFactoryWithDeps(mgr, deps)
 //	reg := command.NewRegistry()
 //	reg.Register(factory)
+//
+// v1.5: Manager.SetHandlerDeps was removed. The slash-command
+// path takes deps via the Factory (NewFactoryWithDeps /
+// Factory.SetHandlerDeps); Manager itself only owns the per-chat
+// run lock.
 type Factory struct {
 	mgr  *Manager
 	deps HandlerDeps
 }
 
-// NewFactory constructs a Factory backed by mgr. SetHandlerDeps
-// on the Manager separately (or pass deps to NewFactoryWithDeps
-// if you prefer — both work).
+// NewFactory constructs a Factory backed by mgr. Use
+// Factory.SetHandlerDeps afterwards (or NewFactoryWithDeps)
+// to wire the runtime's HandlerDeps.
 func NewFactory(mgr *Manager) *Factory {
 	return &Factory{mgr: mgr}
 }
@@ -597,12 +601,10 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // `git worktree remove --force <path>` or by re-running
 // `/gtw close` after the user has unblocked the worktree.
 //
-// Construction mirrors runFix: the drafts shim routes to the
-// per-chat Manager.drafts, deps are forwarded verbatim, and
-// the reply path is RunClose's own cs.Emitter() (no extra wiring).
-// (v1.5: the slot shim was removed; RunClose reads its state
-// from the cwd-scoped yml directly.) Wrapped in withHooks so
-// close.before / close.after fire.
+// No shim is needed; RunClose reads its state from the
+// cwd-scoped yml directly. Deps are forwarded verbatim; the
+// reply path is RunClose's own cs.Emitter() (no extra wiring).
+// Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	// Issue #291: /gtw close takes no flags and no positional
 	// args, so anything in the tail is a user mistake — most

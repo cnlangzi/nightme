@@ -338,7 +338,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	}
 
 	// Per-channel mgr construction happens in buildStack
-	// (Phase 3). The shared singletons below (gtwMgr, reactionRouter,
+	// (Phase 3). The shared singletons below (reactionRouter,
 	// commander, shellDispatcher, inbound.Router) use
 	// findChatSession to resolve per-chat sessions; they do not
 	// hold a reference to any single mgr.
@@ -347,13 +347,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// — see internal/command/runtime.go. The orchestrator just
 	// calls SetDeps once with the manager + primary + gtw
 	// extension deps, then fetches the populated registry.
-
-	// Wire gtw's per-process state. gtw's init() builder does
-	// Per-channel mgr construction happens in buildStack
-	// (Phase 3). The shared singletons below (gtwMgr, reactionRouter,
-	// commander, shellDispatcher, inbound.Router) use
-	// findChatSession to resolve per-chat sessions; they do not
-	// hold a reference to any single mgr.
 
 	// Reaction router (services). gtw no longer registers a
 	// reaction handler here — the §5.3.3 worktree-fail retry
@@ -375,16 +368,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	//
 	// command/* factories do not take a *chatsession.Manager.
 	// ChatSession references are supplied passively: slash
-	// commands receive cs from the dispatcher parameter;
-	// reactions receive cs from the runtime-layer wrapper that
-	// resolves cs before calling gtwMgr.HandleReaction.
+	// commands receive cs from the dispatcher parameter.
 	command.SetDeps(command.Deps{
 		Primary: cfg.Primary,
-		// GTWExt carries gtw's HandlerDeps. Chat-session lookup
-		// for the gtw reaction path is wired inline at the
-		// ReactionRouter.Register call below (see the wrapper
-		// closure that resolves cs via findChatSession before
-		// calling gtwMgr.HandleReaction).
+		// GTWExt carries gtw's HandlerDeps for the /gtw
+		// slash-command path. v1.5 retired gtw's reaction path
+		// entirely (see internal/command/gtw/manager.go doc)
+		// so there's no reaction router wiring for it here.
 		GTWExt: gtwDeps,
 	})
 	reg := command.Default()

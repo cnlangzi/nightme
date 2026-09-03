@@ -4,8 +4,12 @@
 // F-51 relocated gtw from `internal/gtw/` to
 // `internal/command/gtw/`. The package is now part of the slash
 // command layer; the chatsession package no longer knows about
-// gtw's types or state. State lives in `gtw.Manager` (manager.go),
-// keyed by chatID.
+// gtw's types or state.
+//
+// v1.5: per-chat state no longer lives on `gtw.Manager`. The
+// cwd-scoped yml at <worktree>/.nightme/gtw.yml is the source
+// of truth for everything /gtw does. Manager now only owns the
+// per-chat run lock used to serialise /gtw subcommand execution.
 //
 // Scope (v1):
 //
@@ -14,13 +18,12 @@
 //
 // Design constraints (carried from F-45):
 //
-//   - Zero new per-repo / per-user files: state lives in gtw.Manager
-//     memory (states / drafts) and on the provider (GitHub / GitLab labels).
+//   - State lives at <worktree>/.nightme/gtw.yml (cwd-scoped
+//     on-disk snapshot, removed with the worktree on close) and
+//     on the provider (GitHub / GitLab labels). v1.5 retired
+//     the in-memory Manager.states / Manager.drafts caches.
 //   - Zero new OutboundKind: all output is plain text (the caller wraps
 //     it into whatever OutboundKind the channel wants).
-//   - The reaction-routing entry point is `Manager.HandleReaction`,
-//     invoked from `services.ReactionRouter` — NOT from
-//     ChatSession.HandleAction (the F-51 refactor removed that path).
 //   - Credentials are borrowed from `gh auth token` / `glab auth status`.
 //     nightme never persists its own tokens.
 //
@@ -32,9 +35,8 @@
 // interface indirection that the previous F-51 design used.
 //
 // gtw never reads or stores *ChatSession on its own: slash
-// commands receive cs from the dispatcher parameter; reactions
-// receive cs from the runtime-layer wrapper. See manager.go for
-// the wiring contract.
+// commands receive cs from the dispatcher parameter. See
+// manager.go for the wiring contract.
 package gtw
 
 import (
@@ -200,10 +202,6 @@ type Context struct {
 // flows.
 type ReactionEvent = services.ReactionEvent
 
-// F-XX removed `gtw.Sender` interface; the gtw package now
-// imports chatsession directly and uses *chatsession.ChatSession
-// for SelectedCwd / SetSelectedCwd / QueueUserMessage.
-//
 // v1.5 removed the gtw.Choice / gtw.ChoiceOption / gtw.Draft /
 // gtw.DraftKind / gtw.FixDraftPayload types along with the
 // worktree-fail retry card. The gtw package no longer emits

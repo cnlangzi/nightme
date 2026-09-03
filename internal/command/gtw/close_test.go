@@ -213,15 +213,22 @@ func seedFix(t *testing.T, rig *closeTestRig, wt, repoRoot string) {
 
 // seedFixRemote writes a ModeRemote yml at <wt>/.nightme/gtw.yml
 // so the new step 2.5 (nightme/wip label removal) has a real
-// issue + repo + provider to act on. Wires the fake provider
-// into rig.deps.Detect so removeWIPLabel's `detect(...)` call
-// returns the test's recording stub. The git fake must also be
-// configured with remoteURLResp matching the provider's
-// (owner, repo) so ParseRepoOwner and the success-card assertion
-// see consistent values.
+// issue to act on. Wires the fake provider into rig.deps.Detect
+// so resolveProvider's Detect-fallback returns the test's
+// recording stub.
 //
-// Defaults to issue #42 / cnlangzi/nightme — match the existing
-// fix-side test fixtures so the test names stay grep-able.
+// Repo / Provider are intentionally left empty in the yml:
+// resolveProvider's yml-cached shortcut (pr.go:774) bypasses
+// deps.Detect and constructs a real provider via NewProvider —
+// impossible to fake in a unit test. Leaving the yml empty
+// forces the Detect-fallback path, which honours deps.Detect.
+// The shortcut path itself is covered by pr_test.go:2297; what
+// these tests assert (RemoveIssueLabel called with the right
+// args, gate semantics on failure) is invariant across the two
+// routes because both converge on the same provider method call.
+//
+// Defaults to issue #42 — match the existing fix-side test
+// fixtures so the test names stay grep-able.
 func seedFixRemote(t *testing.T, rig *closeTestRig, prov *fakeGitProvider, wt, repoRoot string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(wt, nightmeDirName), 0o755); err != nil {
@@ -233,12 +240,6 @@ func seedFixRemote(t *testing.T, rig *closeTestRig, prov *fakeGitProvider, wt, r
 		Branch:   "fix/42-test",
 		Worktree: wt,
 		RepoRoot: repoRoot,
-		// Repo / Provider populated here even though the label
-		// helper re-detects from the live remote URL — they're
-		// part of the persisted snapshot and a future helper
-		// (or a debug dump) may consume them.
-		Repo:     "cnlangzi/nightme",
-		Provider: "github",
 		State:    StateFixing,
 	}, rig.deps.Now); err != nil {
 		t.Fatalf("seed WriteGTWYml: %v", err)
@@ -246,10 +247,10 @@ func seedFixRemote(t *testing.T, rig *closeTestRig, prov *fakeGitProvider, wt, r
 	if err := rig.cs.SetSelectedCwd(wt); err != nil {
 		t.Fatalf("seed SetSelectedCwd: %v", err)
 	}
-	// Wire the fake provider so removeWIPLabel's detect(...)
-	// returns it. Without this, Detect falls through to the
-	// package-level Detect, which probes the live internet
-	// (and would fail in tests anyway).
+	// Wire the fake provider so resolveProvider's Detect
+	// fallback returns it. Without this, Detect falls through
+	// to the package-level Detect, which probes the live
+	// internet (and would fail in tests anyway).
 	rig.deps.Detect = fakeDetect(prov)
 	// Stage the git fake's `remote get-url origin` response to
 	// match the fake provider's host. cnlangzi/nightme on

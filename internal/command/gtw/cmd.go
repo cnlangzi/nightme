@@ -245,6 +245,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix --name <branch>         create a local worktree (no issue)\n" +
 			"/gtw fix -n <branch>             short form of --name\n" +
 			"/gtw close                       tear down the worktree, delete the branch, and sync main\n" +
+			"/gtw back                        exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
 			"/gtw commit [-a <agent>]         commit uncommitted work via the configured agent (no push)\n" +
 			"/gtw push                        push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr                          generate PR title+body, then open the PR\n" +
@@ -299,6 +300,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 		return f.runFix(ctx, rt, cs, input)
 	case "close":
 		return f.runClose(ctx, rt, cs, input)
+	case "back":
+		return f.runBack(ctx, rt, cs, input)
 	case "commit":
 		return f.runCommit(ctx, rt, cs, input)
 	case "push":
@@ -656,6 +659,84 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw close failed: %v", err),
+			Consumed: true,
+		}, nil
+	}
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// runBack handles `/gtw back`. Non-destructive counterpart to
+// runClose: switches the chat's SelectedCwd back to the main
+// repo without removing the worktree, the branch, or the .nightme/
+// gtw.yml, then runs the upstream sync so the next /gtw fix
+// starts on a clean baseline.
+//
+// The worktree stays alive so the user can `/cwd` back into it
+// to resume — back is a "pause and step out" gesture, not a
+// teardown. See RunBack (back.go) for the implementation.
+//
+// No flags — back is intentionally minimal. Unlike close, back
+// does NOT refuse on a dirty worktree (the uncommitted work is
+// exactly the point of being able to come back to it). Like
+// close, back takes no positional args; the same ParseCmdArgs
+// gate rejects typo-flags like `/gtw back --force` instead of
+// silently ignoring them (issue #291).
+//
+// Construction mirrors runClose: same withHooks wrap so
+// back.before / back.after fire, same hc re-derive after main()
+// so the post-hook env reflects the post-back state. Back does
+// NOT touch the Manager slot (the fix is still in flight per
+// the yml; clearing would silently break reactions if the user
+// /cwd's back), does NOT evict agent sessions (they're pinned
+// to a still-alive worktree), and does NOT call /new (back is
+// reversible — the user might resume in minutes).
+func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	if _, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
+		Name:    "/gtw back",
+		Usage:   "/gtw back",
+		MinArgs: 0,
+		MaxArgs: 0,
+	}); err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
+	// Preflight: back operates on the current workspace
+	// (cs.SelectedCwd is the only handle we have on which
+	// worktree to step out of). Mirror runSync's pattern
+	// (cmd.go:858) — the handler rejects empty-cwd before
+	// RunBack is ever called, so RunBack can trust its input.
+	// RunBack also has a defensive guard for direct callers
+	// (tests, future call sites) — belt and suspenders.
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		return failOut, nil
+	}
+
+	cfg, loadNotes := Load()
+
+	hc := f.deriveHookContext(ctx, cs, "back")
+	hcFn := func() HookContext { return hc }
+	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, hcFn, cfg.Back.Hooks.Before, cfg.Back.Hooks.After,
+		func() error {
+			res, e := RunBack(ctx, cs, f.deps, input.ChatID, input.MessageID)
+			_ = res // RunBack already sent the reply via cs.Emitter()
+			// RunBack moves cs.SelectedCwd back to repoRoot but
+			// leaves the worktree on disk, so the yml is still
+			// readable — deriveHookContext will keep populating
+			// Worktree / Branch from the yml rather than the
+			// git fallback. Re-derive so post-hook env reflects
+			// the post-back state, matching runClose's pattern.
+			if e == nil {
+				hc = f.deriveHookContext(ctx, cs, "back")
+			}
+			return e
+		})
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ /gtw back failed: %v", err),
 			Consumed: true,
 		}, nil
 	}

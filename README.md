@@ -357,7 +357,15 @@ Three subcommands chain into a complete **local multi-branch development workflo
 
 3. (You work. Agent on demand. Or just edit files yourself.)
 
-4. **`/gtw close`** — when the task is done (or you decide not
+4. **`/gtw back`** *(optional)* — when you want to step out of
+   the fix worktree temporarily without tearing it down
+   (e.g. to start a different `/gtw fix` from main). `back`
+   moves the chat's `cwd` back to the repo root, syncs main
+   (`git pull --rebase`), and leaves the worktree, branch, and
+   uncommitted work **intact** on disk. `/cwd <worktree>` to
+   resume; `/gtw close` to discard.
+
+5. **`/gtw close`** — when the task is done (or you decide not
    to), `/gtw close` tears down the worktree, returns you to
    main, and the branch is ready to ship (or discard).
 
@@ -560,7 +568,7 @@ internal/
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
-    gtw/                           # /gtw fix / hooks / sync / close (worktree workflow)
+    gtw/                           # /gtw fix / hooks / sync / close / back (worktree workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode

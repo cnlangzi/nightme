@@ -40,6 +40,12 @@ type Config struct {
 	Commit CmdConfig `yaml:"commit"`
 	Close  CmdConfig `yaml:"close"`
 	Sync   CmdConfig `yaml:"sync"`
+	// Back owns the /gtw back subcommand's hooks (F-XX:
+	// non-destructive cwd swap). Back never invokes an agent —
+	// Agent stays empty in practice — but the field is here so
+	// /gtw back accepts `back.before` / `back.after` for
+	// consistency with the other gtw subcommands.
+	Back CmdConfig `yaml:"back"`
 	// PR owns the /gtw pr subcommand's defaults: the optional
 	// default agent (used when no -a / --agent is passed) and
 	// before/after hooks. Agent resolution follows the same
@@ -201,7 +207,7 @@ type HookContext struct {
 	Worktree      string // worktree absolute path (empty if command has no worktree)
 	Branch        string // current branch in Worktree (empty if detached)
 	DefaultBranch string // upstream default branch name (empty if not discoverable)
-	Command       string // fix / push / close / sync / commit
+	Command       string // gtw subcommand name (fix / push / close / sync / commit / pr / back)
 }
 
 // ToEnv renders the 4 GTW_* env vars. Empty fields are skipped.

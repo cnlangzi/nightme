@@ -333,7 +333,9 @@ GitHub / GitLab issues 是任务流——每次 `/gtw fix` 钉到一个 issue，
 
 3. （你干活。需要时让 agent 出手，或者直接自己改文件。）
 
-4. **`/gtw close`** — 任务做完了（或者决定不做了），`/gtw close` 拆 worktree、回到 main，分支 ready to ship（或者 discard）。
+4. **`/gtw back`** *(可选)* — 想临时离开这个 fix worktree、但又不想拆掉它时用（比如想从 main 开另一个 `/gtw fix`）。`back` 把 chat 的 `cwd` 切回 repo 根、sync main（`git pull --rebase`），worktree、branch、未提交的修改都**留在原地**。要继续就 `/cwd <worktree>`，要丢弃就跑 `/gtw close`。
+
+5. **`/gtw close`** — 任务做完了（或者决定不做了），`/gtw close` 拆 worktree、回到 main，分支 ready to ship（或者 discard）。
 
 ### Hooks——把开发环境一起带过去
 
@@ -499,7 +501,7 @@ internal/
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
-    gtw/                           # /gtw fix / hooks / close (worktree workflow)
+    gtw/                           # /gtw fix / hooks / sync / close / back (worktree workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode

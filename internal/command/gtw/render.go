@@ -163,40 +163,10 @@ func renderFixLocalSuccessCard(branch, worktree string) string {
 	return b.String()
 }
 
-// WorktreeFailChoice builds the §5.3.3 interactive decision card.
-// Same ownership rule: business layer owns the
-// shape; debug UAT reuses it.
-//
-// F-XX: local-mode drafts (IssueID == -1) have no remote issue
-// to label; the title omits the issue-id and the cancel
-// option does NOT mention the nightme/wip label rollback
-// (local-mode never added a label).
-func WorktreeFailChoice(p FixDraftPayload) Choice {
-	body := fmt.Sprintf("branch: %s\n", p.Branch)
-	if p.GitError != "" {
-		body += "[git stderr tail]\n" + p.GitError + "\n"
-	}
-	body += "\n选择操作(反应对应 emoji):"
-	cancelLabel := "取消"
-	// LabelAdded is true iff ID-mode added nightme/wip before
-	// the worktree failed. Local-mode never adds a label, so
-	// this only fires for ID-mode drafts (IssueID > 0).
-	if p.LabelAdded && p.IssueID != -1 {
-		cancelLabel += " (已撤销 nightme/wip label)"
-	}
-	title := "❌ 创建 worktree 失败"
-	if p.IssueID != -1 {
-		title = fmt.Sprintf("❌ 创建 worktree 失败(#%d)", p.IssueID)
-	}
-	return Choice{
-		Title: title,
-		Body:  body,
-		Options: []ChoiceOption{
-			{ID: "act:/gtw/worktree-retry", Emoji: "🔄", Label: "重试"},
-			{ID: "act:/gtw/cancel", Emoji: "❌", Label: cancelLabel},
-		},
-	}
-}
+// WorktreeFailChoice + gtw.Choice / gtw.ChoiceOption were all
+// removed in v1.5 along with the §5.3.3 worktree-fail retry
+// card. The gtw package no longer emits interactive cards of
+// its own.
 
 // replyCommitSuccessCard builds the post-/gtw commit success IM
 // card from git state — never from agent prose. Per F-56 §5, the

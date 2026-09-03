@@ -16,21 +16,19 @@ import (
 // closeTestRig bundles the dependencies RunClose needs. Lives
 // here rather than in a shared test helper because no other test
 // file needs this exact setup.
+//
+// v1.5: the `slot` field is gone. /gtw close is now driven
+// entirely by the cwd-scoped yml at <SelectedCwd>/.nightme/gtw.yml;
+// seedFix below writes it, and the success-path assertion is
+// "git worktree remove ran" (which removes the yml with the
+// worktree in production). Failure-path assertions check that
+// no destructive git command ran.
 type closeTestRig struct {
-	cs     *chatsession.ChatSession
-	slot   *memSlot
-	deps   HandlerDeps
-	git    *programmableGit
-	rec    *closeTestRecCh
+	cs   *chatsession.ChatSession
+	deps HandlerDeps
+	git  *programmableGit
+	rec  *closeTestRecCh
 }
-
-// memSlot is an in-memory ContextSlot for tests. Real production
-// uses Manager.states[chatID] via managerContextSlot; tests just
-// need Load/Store round-trips.
-type memSlot struct{ c Context }
-
-func (m *memSlot) Load() Context   { return m.c }
-func (m *memSlot) Store(c Context) { m.c = c }
 
 // programmableGit is a fakeGit whose response per (subcommand)
 // the test pre-records. Lets us simulate "worktree remove" /
@@ -115,8 +113,7 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	t.Helper()
 
 	rig := &closeTestRig{
-		slot: &memSlot{},
-		git:  &programmableGit{},
+		git: &programmableGit{},
 	}
 	// Use a per-test ChatSession via the existing helper. Each
 	// test gets its own chatID so they don't bleed state. The
@@ -197,11 +194,9 @@ func seedFix(t *testing.T, rig *closeTestRig, wt, repoRoot string) {
 	if err := rig.cs.SetSelectedCwd(wt); err != nil {
 		t.Fatalf("seed SetSelectedCwd: %v", err)
 	}
-	rig.slot.Store(Context{
-		Mode: ModeLocal, Issue: -1, Branch: "fix/42-test",
-		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
-		UpdatedAt: rig.deps.Now(),
-	})
+	// v1.5: no in-memory slot to seed — the yml is the cwd-scoped
+	// source of truth, and the chat's SelectedCwd + yml together
+	// are the full "active fix" state.
 }
 
 // --- tests ---
@@ -221,7 +216,7 @@ func TestRunClose_CleanWorktree_Success(t *testing.T) {
 	rig := newCloseRig(t)
 	seedFix(t, rig, wt, repoRoot)
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -233,10 +228,11 @@ func TestRunClose_CleanWorktree_Success(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd after close = %q, want %q", got, repoRoot)
 	}
-	// In-memory context must be cleared.
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot.Load() after close = %+v, want zero Context", got)
-	}
+	// v1.5: no in-memory slot to clear. The yml goes away with
+	// the worktree at step 4 in production; in this test the
+	// fake git doesn't actually remove the directory, but the
+	// success-card assertions below prove the happy path
+	// completed end-to-end.
 	// git worktree remove must have been called from inside
 	// repoRoot, with the worktree path as argument.
 	sawRemove := false
@@ -296,7 +292,7 @@ func TestRunClose_DirtyWorktree_Rejected(t *testing.T) {
 
 	rig.git.statusResp = " M foo.txt\n?? untracked.go\n"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -308,11 +304,9 @@ func TestRunClose_DirtyWorktree_Rejected(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != wt {
 		t.Errorf("SelectedCwd after dirty close = %q, want %q (unchanged)", got, wt)
 	}
-	// In-memory context must be unchanged.
-	gotCtx := rig.slot.Load()
-	if gotCtx.Branch != "fix/42-test" || gotCtx.Worktree != wt {
-		t.Errorf("slot.Load() after dirty close = %+v, want fix/42-test / %q", gotCtx, wt)
-	}
+	// v1.5: SelectedCwd unchanged above is the canonical
+	// "state preserved on failure" check; no in-memory slot
+	// to verify.
 	// git worktree remove must NOT have been called.
 	for _, args := range rig.git.calls {
 		if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
@@ -343,7 +337,7 @@ func TestRunClose_NoYml(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -376,7 +370,7 @@ func TestRunClose_GitRemoveFails(t *testing.T) {
 	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
 	rig.git.worktreeRemoveStderr = "fatal: could not remove worktree"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -388,9 +382,9 @@ func TestRunClose_GitRemoveFails(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != wt {
 		t.Errorf("SelectedCwd after git failure = %q, want %q (unchanged)", got, wt)
 	}
-	if got := rig.slot.Load(); got.Branch != "fix/42-test" {
-		t.Errorf("slot cleared despite git failure: %+v", got)
-	}
+	// v1.5: SelectedCwd unchanged above is the canonical
+	// "state preserved on failure" check; no in-memory slot
+	// to verify.
 	// Reply must surface the git stderr tail.
 	reply := rig.rec.lastText()
 	if !strings.Contains(reply, "git worktree remove failed") {
@@ -421,7 +415,7 @@ func TestRunClose_BranchDeleteFails(t *testing.T) {
 	rig.git.branchDeleteErr = &fakeExitError{code: 1, msg: "branch delete failed"}
 	rig.git.branchDeleteStderr = "error: branch 'fix/42-test' not found"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -453,14 +447,13 @@ func TestRunClose_BranchDeleteFails(t *testing.T) {
 		// short-circuit as designed.
 		t.Errorf("git commands ran after branch -D failure: %v", rig.git.calls[branchDelIdx+1:])
 	}
-	// State must be untouched (still on worktree, slot still
-	// holds the original Context).
+	// State must be untouched (still on worktree).
 	if got := rig.cs.SelectedCwd(); got != wt {
 		t.Errorf("SelectedCwd after branch-delete fail = %q, want %q (unchanged)", got, wt)
 	}
-	if got := rig.slot.Load(); got.Branch != "fix/42-test" {
-		t.Errorf("slot cleared despite branch-delete failure: %+v", got)
-	}
+	// v1.5: SelectedCwd unchanged above is the canonical
+	// "state preserved on failure" check; no in-memory slot
+	// to verify.
 	// Reply must surface the manual cleanup hint.
 	got := rig.rec.lastText()
 	if !strings.Contains(got, "git branch -D") {
@@ -500,7 +493,7 @@ func TestRunClose_CleanWorktree_Syncs(t *testing.T) {
 	rig.git.syncOriginRef = "origin/main"
 	rig.git.syncPullOut = "Already up to date.\n"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -527,9 +520,7 @@ func TestRunClose_CleanWorktree_Syncs(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd after close = %q, want %q", got, repoRoot)
 	}
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot.Load() after close = %+v, want zero Context", got)
-	}
+	// v1.5: no in-memory slot to verify.
 }
 
 // TestRunClose_SyncFails verifies that when step 9 (sync) errors,
@@ -556,7 +547,7 @@ func TestRunClose_SyncFails(t *testing.T) {
 	// error, RunClose emits the sync-failure card.
 	rig.git.symbolicRefErr = &fakeExitError{code: 128, msg: "no upstream"}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -586,9 +577,7 @@ func TestRunClose_SyncFails(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd after close = %q, want %q", got, repoRoot)
 	}
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot.Load() after close = %+v, want zero Context", got)
-	}
+	// v1.5: no in-memory slot to verify.
 }
 
 // fakeExitError stands in for exec.ExitError without dragging in
@@ -644,15 +633,21 @@ func seedAgentSession(t *testing.T, rig *closeTestRig, agentName, cwd string) {
 	rig.cs.AttachAgentSessionForTest(as)
 }
 
-// TestRunClose_DanglingSelectedCwd_FixActive exercises the
-// subcase where SelectedCwd is dangling AND the in-memory slot
-// carries a matching Worktree (case (a) in step 0.5). The
-// yml+dir are gone (we RemoveAll'd wt before invoking), one
-// AgentSession pinned to wt sits in the pool; RunClose must
-// short-circuit before git worktree remove, emit the slot-aware
-// "worktree directory is gone" reply, clear SelectedCwd and
-// the slot, and tidy up the pool.
-func TestRunClose_DanglingSelectedCwd_FixActive(t *testing.T) {
+// TestRunClose_DanglingSelectedCwd exercises the safety net for
+// SelectedCwd pointing at a path that no longer exists (case
+// (a)/(b) in step 0.5). The yml+dir are gone (we RemoveAll'd wt
+// before invoking), one AgentSession pinned to wt sits in the
+// pool; RunClose must short-circuit before git worktree remove,
+// emit the unified "directory is unreachable" reply, clear
+// SelectedCwd, and tidy up the pool.
+//
+// v1.5: the slotMatched branch (which used to distinguish
+// "this chat's fix worktree was torn down" from "unrelated
+// dangling dir") was removed along with the in-memory slot.
+// The unified message covers both root causes via its
+// parenthetical. See TestRunClose_TransientStatErrorPreservesState
+// for the matching stat-stub coverage.
+func TestRunClose_DanglingSelectedCwd(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()
 
@@ -661,14 +656,13 @@ func TestRunClose_DanglingSelectedCwd_FixActive(t *testing.T) {
 	seedAgentSession(t, rig, "test-agent", wt)
 
 	// Simulate "another chat's /gtw close tore down our worktree"
-	// by removing the entire worktree directory. The yml goes
-	// with it; the in-memory slot still references wt (carried
-	// over from seedFix).
+	// (or an external `rm -rf`) by removing the entire worktree
+	// directory. The yml goes with it.
 	if err := os.RemoveAll(wt); err != nil {
 		t.Fatalf("RemoveAll wt: %v", err)
 	}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -678,9 +672,7 @@ func TestRunClose_DanglingSelectedCwd_FixActive(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != "" {
 		t.Errorf("SelectedCwd after dangling close = %q, want \"\"", got)
 	}
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot.Load() after dangling close = %+v, want zero", got)
-	}
+	// v1.5: no in-memory slot to verify.
 	// No git calls — the safety net must short-circuit before
 	// step 4 (WorktreeRemove).
 	for _, args := range rig.git.calls {
@@ -699,63 +691,7 @@ func TestRunClose_DanglingSelectedCwd_FixActive(t *testing.T) {
 	// it was still pinned to the now-gone worktree — the
 	// pool entry was still removed by the safety net, so
 	// the "closed N orphaned agent(s)" line MUST appear
-	// with N=1. The previous "0 reported" behaviour
-	// undercounted the actual cleanup.
-	if !strings.Contains(reply, "dropped 1 orphaned agent session(s)") {
-		t.Errorf("reply missing 'dropped 1 orphaned agent session(s)' line:\n%s", reply)
-	}
-	if !strings.Contains(reply, "worktree directory is unreachable") {
-		t.Errorf("reply missing 'worktree directory is unreachable' prefix:\n%s", reply)
-	}
-	if !strings.Contains(reply, "in-flight fix") {
-		t.Errorf("reply missing 'in-flight fix' line:\n%s", reply)
-	}
-	if !strings.Contains(reply, "/cwd") {
-		t.Errorf("reply missing /cwd hint:\n%s", reply)
-	}
-}
-
-// TestRunClose_DanglingSelectedCwd_SlotEmpty exercises the
-// subcase where SelectedCwd is dangling but the chat never
-// started its own /gtw fix (case (b) in step 0.5). The
-// message must NOT mention an "in-flight fix" being cleared,
-// because there wasn't one.
-func TestRunClose_DanglingSelectedCwd_SlotEmpty(t *testing.T) {
-	wt := t.TempDir()
-
-	rig := newCloseRig(t)
-	// User just /cwd'd into wt; never ran /gtw fix here. Slot
-	// stays at its zero value (the rig's memSlot default).
-	if err := rig.cs.SetSelectedCwd(wt); err != nil {
-		t.Fatalf("seed SetSelectedCwd: %v", err)
-	}
-	seedAgentSession(t, rig, "test-agent", wt)
-
-	if err := os.RemoveAll(wt); err != nil {
-		t.Fatalf("RemoveAll wt: %v", err)
-	}
-
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
-	if err != nil {
-		t.Fatalf("RunClose: %v", err)
-	}
-	if res == nil || !res.Consumed {
-		t.Fatalf("Result = %+v, want Consumed=true", res)
-	}
-	if got := rig.cs.SelectedCwd(); got != "" {
-		t.Errorf("SelectedCwd = %q, want \"\"", got)
-	}
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot.Load() = %+v, want zero", got)
-	}
-	if n := len(rig.cs.Pool()); n != 0 {
-		t.Errorf("pool after dangling close = %d entries, want 0", n)
-	}
-	reply := rig.rec.lastText()
-	// The seeded AS was StatusExited (no live bridge), but
-	// it was still pinned to the now-gone cwd — the pool
-	// entry was still removed by the safety net, so the
-	// "closed N orphaned agent(s)" line MUST appear with N=1.
+	// with N=1.
 	if !strings.Contains(reply, "dropped 1 orphaned agent session(s)") {
 		t.Errorf("reply missing 'dropped 1 orphaned agent session(s)' line:\n%s", reply)
 	}
@@ -765,8 +701,8 @@ func TestRunClose_DanglingSelectedCwd_SlotEmpty(t *testing.T) {
 	if !strings.Contains(reply, "another /gtw close") {
 		t.Errorf("reply missing root-cause line:\n%s", reply)
 	}
-	if strings.Contains(reply, "in-flight fix") {
-		t.Errorf("reply incorrectly mentions in-flight fix (slot was empty):\n%s", reply)
+	if !strings.Contains(reply, "/cwd") {
+		t.Errorf("reply missing /cwd hint:\n%s", reply)
 	}
 }
 
@@ -782,7 +718,7 @@ func TestRunClose_EmptySelectedCwd(t *testing.T) {
 	// new public API to exercise the empty-cwd branch.
 	rig.cs.ClearSelectedCwd()
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -823,7 +759,7 @@ func TestRunClose_Success_NoAgents_NoExtraLine(t *testing.T) {
 	// below verify both effects indirectly via CWD + slot
 	// state.
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -866,7 +802,7 @@ func TestRunClose_Success_ClosesOrphanedAgents(t *testing.T) {
 	// below verify both effects indirectly via CWD + slot
 	// state.
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -879,9 +815,7 @@ func TestRunClose_Success_ClosesOrphanedAgents(t *testing.T) {
 	if got := rig.cs.SelectedCwd(); got != repoRoot {
 		t.Errorf("SelectedCwd after success close = %q, want %q", got, repoRoot)
 	}
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot.Load() = %+v, want zero", got)
-	}
+	// v1.5: no in-memory slot to verify.
 	reply := rig.rec.lastText()
 	// Both seeded ASes are StatusExited but are still pinned
 	// to the worktree about to be removed — the safety net
@@ -938,7 +872,7 @@ func TestRunClose_Success_ResetsRepoRootAgentContext(t *testing.T) {
 		t.Fatalf("setup: SessionID = %q, want pre-populated", got)
 	}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1029,7 +963,6 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 
 	// Snapshot pre-state so we can prove nothing was cleared.
 	selectedCwdBefore := rig.cs.SelectedCwd()
-	slotBefore := rig.slot.Load()
 	poolLenBefore := len(rig.cs.Pool())
 	gitCallsBefore := len(rig.git.calls)
 
@@ -1041,7 +974,7 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 		return nil, os.ErrPermission
 	})
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -1049,12 +982,10 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 		t.Fatalf("Result = %+v, want Consumed=true", res)
 	}
 
-	// State preserved: slot, selectedCwd, AS pool, no git calls.
+	// State preserved: selectedCwd, AS pool, no git calls.
+	// (v1.5: no in-memory slot to verify.)
 	if got := rig.cs.SelectedCwd(); got != selectedCwdBefore {
 		t.Errorf("SelectedCwd = %q after transient stat error, want %q (preserved)", got, selectedCwdBefore)
-	}
-	if got := rig.slot.Load(); got != slotBefore {
-		t.Errorf("slot.Load() changed after transient stat error:\n got  %+v\n want %+v", got, slotBefore)
 	}
 	if n := len(rig.cs.Pool()); n != poolLenBefore {
 		t.Errorf("pool after transient stat error = %d entries, want %d (preserved)", n, poolLenBefore)

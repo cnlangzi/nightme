@@ -4,8 +4,12 @@
 // F-51 relocated gtw from `internal/gtw/` to
 // `internal/command/gtw/`. The package is now part of the slash
 // command layer; the chatsession package no longer knows about
-// gtw's types or state. State lives in `gtw.Manager` (manager.go),
-// keyed by chatID.
+// gtw's types or state.
+//
+// v1.5: per-chat state no longer lives on `gtw.Manager`. The
+// cwd-scoped yml at <worktree>/.nightme/gtw.yml is the source
+// of truth for everything /gtw does. Manager now only owns the
+// per-chat run lock used to serialise /gtw subcommand execution.
 //
 // Scope (v1):
 //
@@ -14,13 +18,12 @@
 //
 // Design constraints (carried from F-45):
 //
-//   - Zero new per-repo / per-user files: state lives in gtw.Manager
-//     memory (states / drafts) and on the provider (GitHub / GitLab labels).
+//   - State lives at <worktree>/.nightme/gtw.yml (cwd-scoped
+//     on-disk snapshot, removed with the worktree on close) and
+//     on the provider (GitHub / GitLab labels). v1.5 retired
+//     the in-memory Manager.states / Manager.drafts caches.
 //   - Zero new OutboundKind: all output is plain text (the caller wraps
 //     it into whatever OutboundKind the channel wants).
-//   - The reaction-routing entry point is `Manager.HandleReaction`,
-//     invoked from `services.ReactionRouter` — NOT from
-//     ChatSession.HandleAction (the F-51 refactor removed that path).
 //   - Credentials are borrowed from `gh auth token` / `glab auth status`.
 //     nightme never persists its own tokens.
 //
@@ -32,16 +35,14 @@
 // interface indirection that the previous F-51 design used.
 //
 // gtw never reads or stores *ChatSession on its own: slash
-// commands receive cs from the dispatcher parameter; reactions
-// receive cs from the runtime-layer wrapper. See manager.go for
-// the wiring contract.
+// commands receive cs from the dispatcher parameter. See
+// manager.go for the wiring contract.
 package gtw
 
 import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/command/services"
-	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Label* constants are the platform-side state-machine labels that
@@ -187,104 +188,22 @@ type Context struct {
 	UpdatedAt time.Time
 }
 
-// DraftKind tags a pending user-confirmation choice. The set is
-// closed; future flows (commit / pr) extend it.
-type DraftKind string
-
-const (
-	DraftFixWorktreeFail DraftKind = "fix.worktree-fail" // §5.3.3
-)
-
-// FixDraftPayload is the typed payload for a DraftFix* entry.
-// F-45 §3.4 / §5.3 + F-50 rename. The fields are the rollback-
-// relevant subset of the original /gtw fix context.
-type FixDraftPayload struct {
-	IssueID int
-	Title   string
-	Branch  string
-	Slug    string
-	Repo    string // "owner/repo" (single-slash form)
-	// Provider is the provider identity (ProviderGitHub /
-	// ProviderGitLab). Used by the rollback path in action.go
-	// to construct a fresh GitProvider for label removal.
-	Provider string
-	// Worktree is the directory gh/glab label-rollback calls
-	// should spawn from. Set to the main repo root (always a
-	// valid git dir) when the draft is emitted — the reaction
-	// handler passes it through to NewProvider so `gh issue edit`
-	// forks git from a directory that exists, even if the
-	// daemon's own CWD has been stale'd since startup. See
-	// internal/command/gtw/exec.go for the CWD contract this
-	// defends against.
-	Worktree string
-	// GitError is the last 10 lines of stderr from the failed
-	// `git worktree add` (only for DraftFixWorktreeFail).
-	GitError string
-	// LabelAdded is true iff nightme/wip was applied before the
-	// draft was emitted. Rollback uses this to decide whether to
-	// remove the label.
-	LabelAdded bool
-	// ChatID is the chat the /gtw fix was sent to. Required for
-	// rendering follow-up replies. The handleFix path stores it
-	// explicitly so reaction handlers don't have to look it up.
-	ChatID string
-}
-
-// ChoiceOption is one button on a decision prompt. F-46 → action
-// handler includes the original Options on the PATCH so the
-// rebuilt prompt keeps the same layout (settled, selected id).
-//
-// F-51: defined natively in this package (was chatsession.ChoiceOption
-// pre-F-51). Wire shape is messages.ChoiceOption.
-type ChoiceOption = messages.ChoiceOption
-
-// Draft is one pending user-confirmation choice indexed by
-// Choice.RequestID. Channel inbound copies that RequestID onto
-// ReactionEvent; Manager.HandleReaction looks up by it.
-//
-// F-51: defined natively in this package (was chatsession.GTWDraft
-// pre-F-51). Stored in gtw.Manager.drafts[chatID][requestID].
-type Draft struct {
-	Kind    DraftKind
-	Payload FixDraftPayload
-	// CreatedAt is currently unused by the routing logic but is
-	// useful for diagnostics (e.g. "draft sat for 30s without
-	// reaction → expunge").
-	CreatedAt time.Time
-
-	// ChoicePosted is true when Send(OutChoice) succeeded. The
-	// action handler PATCHes via Choice.RequestID when true, and
-	// falls back to a plain-text follow-up when false (channel
-	// choice path unavailable).
-	ChoicePosted bool
-	// Original choice render data so the action handler can
-	// rebuild the prompt as Settled with a SelectedID
-	// without going back to the dispatcher.
-	ChoiceTitle     string
-	ChoiceBody      string
-	ChoiceOptions   []ChoiceOption
-	ChoiceRequestID string
-}
-
 // ReactionEvent is the inbound reaction payload. Type alias to
 // services.ReactionEvent (the canonical location). Old
 // `chatsession.ReactionEvent` and the prior `gtw.ReactionEvent`
 // struct both had identical fields (TargetMsgID / Emoji /
 // UserID / ChatID), so callers compiled against either form
 // can be migrated to this alias.
+//
+// v1.5: gtw no longer consumes reaction events (the §5.3.3
+// worktree-fail retry card was retired). The alias stays
+// because the type still threads through `commandServices`
+// infrastructure that nightme uses for non-gtw reaction
+// flows.
 type ReactionEvent = services.ReactionEvent
 
-// Choice represents the original decision prompt stored on a draft.
-// Carries enough information for the action handler to rebuild
-// it as Settled with a SelectedID (see executeXxxAction →
-// deps.Send → Kind=OutChoicePatch path).
-type Choice struct {
-	Title     string
-	Body      string
-	Options   []ChoiceOption
-	RequestID string
-}
-
-// F-XX removed `gtw.Sender` interface; the gtw package now
-// imports chatsession directly and uses *chatsession.ChatSession
-// for SelectedCwd / SetSelectedCwd / QueueUserMessage.
+// v1.5 removed the gtw.Choice / gtw.ChoiceOption / gtw.Draft /
+// gtw.DraftKind / gtw.FixDraftPayload types along with the
+// worktree-fail retry card. The gtw package no longer emits
+// interactive cards of its own; messages.Choice / messages.
+// ChoiceOption (used by the channels package) are unrelated.

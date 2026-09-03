@@ -60,12 +60,10 @@ func TestFactory_Handle_NoArgs(t *testing.T) {
 	}
 }
 
-// TestFactory_Handle_List covers the /gtw list subcommand
-// with no drafts. Should reply with "(none in this chat)".
-// (list / reset subcommands removed — see wip/gtw.md step 37.
-// Manager.ListDrafts / Manager.Reset / Manager.DraftCount are
-// still used by cmd/nightme/debug.go for the CLI debug
-// interface.)
+// (TestFactory_Handle_List removed in v1.5: the /gtw list
+// subcommand it would have covered was retired along with the
+// in-memory draft registry. Manager.ListDrafts / Manager.
+// DraftCount no longer exist; nothing to debug.)
 
 // TestFactory_Handle_Fix_NoArgs covers /gtw fix without an
 // issue id. Should reply with a usage hint.

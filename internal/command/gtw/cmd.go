@@ -20,18 +20,22 @@ import (
 // Wire-up example:
 //
 //	mgr := gtw.NewManager()
-//	mgr.SetHandlerDeps(deps)
-//	factory := gtw.NewFactory(mgr)
+//	factory := gtw.NewFactoryWithDeps(mgr, deps)
 //	reg := command.NewRegistry()
 //	reg.Register(factory)
+//
+// v1.5: Manager.SetHandlerDeps was removed. The slash-command
+// path takes deps via the Factory (NewFactoryWithDeps /
+// Factory.SetHandlerDeps); Manager itself only owns the per-chat
+// run lock.
 type Factory struct {
 	mgr  *Manager
 	deps HandlerDeps
 }
 
-// NewFactory constructs a Factory backed by mgr. SetHandlerDeps
-// on the Manager separately (or pass deps to NewFactoryWithDeps
-// if you prefer — both work).
+// NewFactory constructs a Factory backed by mgr. Use
+// Factory.SetHandlerDeps afterwards (or NewFactoryWithDeps)
+// to wire the runtime's HandlerDeps.
 func NewFactory(mgr *Manager) *Factory {
 	return &Factory{mgr: mgr}
 }
@@ -39,7 +43,6 @@ func NewFactory(mgr *Manager) *Factory {
 // NewFactoryWithDeps constructs a Factory and primes it with
 // the runtime's HandlerDeps.
 func NewFactoryWithDeps(mgr *Manager, deps HandlerDeps) *Factory {
-	mgr.SetHandlerDeps(deps)
 	return &Factory{mgr: mgr, deps: deps}
 }
 
@@ -52,28 +55,21 @@ func NewFactoryWithDeps(mgr *Manager, deps HandlerDeps) *Factory {
 //
 // gtw reads only d.GTWExt. Every *chatsession.ChatSession
 // reference is supplied passively: slash commands receive cs
-// from the dispatcher parameter; reactions receive cs from
-// the runtime-layer wrapper that resolves cs before calling
-// HandleReaction. No cs lookup, cache, or chat-session store
-// lives in this package — by construction there is no path
-// for stale-cache / cross-channel-cwd-loss bugs.
+// from the dispatcher parameter. No cs lookup, cache, or
+// chat-session store lives in this package — by construction
+// there is no path for stale-cache / cross-channel-cwd-loss
+// bugs.
 func init() {
 	command.RegisterBuilder(func(d command.Deps) command.SlashCommandFactory {
 		handlerDeps, _ := d.GTWExt.(HandlerDeps)
 		mgr := NewManager()
-		mgr.SetHandlerDeps(handlerDeps)
 		return NewFactoryWithDeps(mgr, handlerDeps)
 	})
 }
 
-// SetHandlerDeps primes the factory with runtime deps. Also
-// pushes the same deps into the Manager so reaction handlers
-// see them.
+// SetHandlerDeps primes the factory with runtime deps.
 func (f *Factory) SetHandlerDeps(deps HandlerDeps) {
 	f.deps = deps
-	if f.mgr != nil {
-		f.mgr.SetHandlerDeps(deps)
-	}
 }
 
 // deriveHookContext best-effort populates a HookContext from
@@ -279,8 +275,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, mgr *c
 	// complete before the next one starts. F-59 made every
 	// slash command async (a fresh goroutine per inbound), so
 	// without serialisation two /gtw calls landing back-to-back
-	// would race on Manager.states / Manager.drafts / the
-	// worktree directory / cs.SelectedCwd / the agent session.
+	// would race on Manager.drafts / the worktree directory /
+	// cs.SelectedCwd / the agent session.
+	//
+	// (v1.5 removed the Manager.states layer; the run lock is
+	// still required because the worktree, AS pool, and chat
+	// cwd are per-chat and concurrently written by /gtw fix.)
 	//
 	// chatID == "" → runLockFor returns nil and we no-op (tests
 	// drive Handle directly with empty ChatID; production always
@@ -383,12 +383,8 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	// load-time warnings ride along in the consolidated reply.
 	cfg, loadNotes := Load()
 
-	// Build slot / drafts shims that route to the Manager.
-	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
-	drafts := &managerDraftsMap{mgr: f.mgr, chatID: input.ChatID}
-
-	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
-	// chatID, messageID, args, yes). Reply is sent inline via
+	// RunFix signature: (ctx, mode, cs, deps, chatID,
+	// messageID, args, yes). Reply is sent inline via
 	// cs.Emitter(); *Result only carries Consumed / Dropped for
 	// the runtime. The withHooks wrapper fires before/after
 	// hooks around the call and ships the hook output as a
@@ -405,7 +401,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, cs *cha
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Fix.Hooks.Before, cfg.Fix.Hooks.After,
 		func() error {
-			_, e := RunFix(ctx, args.Mode, cs, slot, drafts, f.deps,
+			_, e := RunFix(ctx, args.Mode, cs, f.deps,
 				input.ChatID, input.MessageID,
 				[]string{args.RawArg}, args.Yes)
 			if e == nil {
@@ -605,9 +601,9 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // `git worktree remove --force <path>` or by re-running
 // `/gtw close` after the user has unblocked the worktree.
 //
-// Construction mirrors runFix: the slot / drafts shims route to
-// the per-chat Manager state, deps are forwarded verbatim, and
-// the reply path is RunClose's own cs.Emitter() (no extra wiring).
+// No shim is needed; RunClose reads its state from the
+// cwd-scoped yml directly. Deps are forwarded verbatim; the
+// reply path is RunClose's own cs.Emitter() (no extra wiring).
 // Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	// Issue #291: /gtw close takes no flags and no positional
@@ -628,8 +624,6 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 		}, nil
 	}
 
-	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
-
 	cfg, loadNotes := Load()
 
 	hc := f.deriveHookContext(ctx, cs, "close")
@@ -637,7 +631,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Close.Hooks.Before, cfg.Close.Hooks.After,
 		func() error {
-			res, e := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID)
+			res, e := RunClose(ctx, cs, f.deps, input.ChatID, input.MessageID)
 			_ = res // RunClose already sent the reply via cs.Emitter()
 			// RunClose tears down the worktree + branch +
 			// .nightme/gtw.yml and resets cs.SelectedCwd
@@ -679,10 +673,10 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 // it for schema compatibility but the dispatcher no longer
 // reads it).
 //
-// No slot/draft shim needed — push doesn't touch gtw state
-// or reaction cards. Just the same HandlerDeps as everywhere
-// else. Wrapped in withHooks so push.before / push.after from
-// ~/.nightme/gtw.yml fire.
+// No draft shim needed — push doesn't touch reaction cards.
+// Just the same HandlerDeps as everywhere else. Wrapped in
+// withHooks so push.before / push.after from ~/.nightme/gtw.yml
+// fire.
 func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
@@ -727,7 +721,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 //
 // Mirror of runPush with the Agent plumbed through to the
 // dispatcher. Doesn't touch gtw state or reaction cards, so no
-// slot/draft shim is needed.
+// draft shim is needed.
 func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parseCommitArgs(input.Args[2:])
 	if err != nil {
@@ -991,43 +985,3 @@ func parsePRArgs(argv []string) (prArgs, error) {
 	}
 	return prArgs{Agent: agent}, nil
 }
-
-// --- shim adapters that let legacy RunFix see Manager state ---
-
-// managerContextSlot adapts Manager to the legacy ContextSlot
-// interface (Load / Store) used by RunFix / HandleAction. The
-// Manager owns the per-chat context; this shim is the only
-// bridge between the legacy code and the new state.
-type managerContextSlot struct {
-	mgr    *Manager
-	chatID string
-}
-
-func (s *managerContextSlot) Load() Context { return s.mgr.GetContext(s.chatID) }
-func (s *managerContextSlot) Store(c Context) {
-	if (c == Context{}) {
-		s.mgr.ClearContext(s.chatID)
-		return
-	}
-	s.mgr.SetContext(s.chatID, c)
-}
-
-// managerDraftsMap adapts Manager to the DraftsMap
-// interface (Store / Take / Lookup / Count) used by RunFix /
-// HandleAction. Drafts are keyed by (chatID, requestID) on the
-// Manager; the shim pins chatID.
-type managerDraftsMap struct {
-	mgr    *Manager
-	chatID string
-}
-
-func (d *managerDraftsMap) Store(requestID string, draft *Draft) {
-	d.mgr.StoreDraft(d.chatID, requestID, draft)
-}
-func (d *managerDraftsMap) Take(requestID string) *Draft {
-	return d.mgr.TakeDraft(d.chatID, requestID)
-}
-func (d *managerDraftsMap) Lookup(requestID string) *Draft {
-	return d.mgr.GetDraft(d.chatID, requestID)
-}
-func (d *managerDraftsMap) Count() int { return d.mgr.DraftCount(d.chatID) }

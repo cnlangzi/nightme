@@ -33,7 +33,7 @@ import (
 //     `git worktree remove`) and verify:
 //     - worktree directory is gone
 //     - SelectedCwd is back at repoRoot
-//     - slot is cleared
+//     - yml (which lived in the worktree) is gone too
 //     - reply text mentions branch + repoRoot
 func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	repoRoot := initTempRepo(t)
@@ -91,11 +91,6 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	if err := cs.SetSelectedCwd(wt); err != nil {
 		t.Fatalf("SetSelectedCwd wt: %v", err)
 	}
-	slot := &memSlot{Context{
-		Mode: ModeLocal, Issue: -1, Branch: branch,
-		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
-		UpdatedAt: now,
-	}}
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return now },
@@ -106,7 +101,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		SkipRefreshDefaultBranch: true,
 	}
 
-	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-int-1")
+	res, err := RunClose(context.Background(), cs, deps, cs.ChatID, "msg-int-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -126,10 +121,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	if got := cs.SelectedCwd(); !pathsEqual(got, repoRoot) {
 		t.Errorf("SelectedCwd = %q, want %q", got, repoRoot)
 	}
-	// In-memory slot must be cleared.
-	if slot.Load() != (Context{}) {
-		t.Errorf("slot.Load() = %+v, want zero", slot.Load())
-	}
+	// v1.5: no in-memory slot to verify.
 	// Reply must mention both branch and the new cwd.
 	last := ch.lastText()
 	if !strings.Contains(last, branch) {
@@ -170,13 +162,12 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 	cs, _ := chatsession.New("chat-int-2", "test-agent")
 	cs.WithEmitter(ch)
 	_ = cs.SetSelectedCwd(wt)
-	slot := &memSlot{Context{Mode: ModeLocal, Branch: branch, Worktree: wt, RepoRoot: repoRoot, State: StateFixing}}
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: time.Now,
 	}
 
-	if _, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg"); err != nil {
+	if _, err := RunClose(context.Background(), cs, deps, cs.ChatID, "msg"); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -385,8 +376,6 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	if err := cs.SetSelectedCwd(repoRoot); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	slot := &memSlot{}
-	drafts := newMemDrafts()
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
@@ -412,7 +401,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	// Drive RunFix end-to-end (the same path the factory
 	// uses in production).
 	res, err := RunFix(
-		context.Background(), args.Mode, cs, slot, drafts, deps,
+		context.Background(), args.Mode, cs, deps,
 		cs.ChatID, "msg-int-shortN", []string{args.RawArg}, args.Yes,
 	)
 	if err != nil {
@@ -442,11 +431,8 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	if parsed.Mode != ModeLocal || parsed.Branch != wantBranch || !pathsEqual(parsed.RepoRoot, repoRoot) {
 		t.Errorf("yml = %+v, want mode=local branch=%s repoRoot=%s", parsed, wantBranch, repoRoot)
 	}
-	// In-memory slot must mirror yml.
-	got := slot.Load()
-	if got.Mode != ModeLocal || got.Branch != wantBranch {
-		t.Errorf("slot = %+v, want mode=local branch=%s", got, wantBranch)
-	}
+	// v1.5: no in-memory slot to verify against — the yml above
+	// is the cwd-scoped source of truth.
 	// No dispatch in local mode → queue must be empty.
 	if n := cs.QueueLen(); n != 0 {
 		t.Errorf("queue len = %d, want 0 (local mode no dispatch)", n)
@@ -458,7 +444,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	}
 
 	// Now /gtw close should cleanly tear down.
-	closeRes, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-close")
+	closeRes, err := RunClose(context.Background(), cs, deps, cs.ChatID, "msg-close")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}

@@ -31,33 +31,19 @@ import (
 // fixRemoteRig bundles everything an ID-mode /gtw fix test
 // needs: a real git repo, a ChatSession pre-pointed at it, the
 // fake provider, and the HandlerDeps that wires them together.
+//
+// v1.5: the `slot` field is gone. /gtw fix is now driven
+// entirely by the cwd-scoped yml at <SelectedCwd>/.nightme/gtw.yml;
+// production does not parallel-write an in-memory Context. Tests
+// verify the yml directly via ReadGTWYml instead.
 type fixRemoteRig struct {
 	repoRoot  string
 	cs        *chatsession.ChatSession
-	slot      *memSlot
-	drafts    *memDrafts
 	deps      HandlerDeps
 	prov      *fakeGitProvider
 	sentTexts []string
 	rec       *fixRemoteRecCh
 }
-
-// memDrafts is a tiny DraftsMap for tests that don't need
-// reaction-card semantics. The branch-exists-draft path in
-// runFixRemote only uses Store; other methods are no-ops.
-type memDrafts struct {
-	stored map[string]*Draft
-}
-
-func newMemDrafts() *memDrafts { return &memDrafts{stored: map[string]*Draft{}} }
-
-func (m *memDrafts) Store(userMsgID string, d *Draft) { m.stored[userMsgID] = d }
-func (m *memDrafts) Take(userMsgID string) *Draft {
-	d := m.stored[userMsgID]
-	delete(m.stored, userMsgID)
-	return d
-}
-func (m *memDrafts) Lookup(userMsgID string) *Draft { return m.stored[userMsgID] }
 
 // newFixRemoteRig sets up a fresh git repo with an `origin`
 // remote pointing at a github.com-style URL, a ChatSession
@@ -90,8 +76,6 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 	rig := &fixRemoteRig{
 		repoRoot: repoRoot,
 		cs:       cs,
-		slot:     &memSlot{},
-		drafts:   newMemDrafts(),
 		prov:     prov,
 		rec:      rec,
 	}
@@ -158,8 +142,6 @@ func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 		context.Background(),
 		ModeRemote,
 		r.cs,
-		r.slot,
-		r.drafts,
 		r.deps,
 		r.cs.ChatID,
 		"msg-fix-remote",
@@ -322,11 +304,8 @@ func TestFixRemote_HappyPath(t *testing.T) {
 		t.Errorf("yml repoRoot = %q, want %q", parsed.RepoRoot, rig.repoRoot)
 	}
 
-	// In-memory slot must mirror the yml snapshot.
-	ctx := rig.slot.Load()
-	if ctx.Mode != ModeRemote || ctx.Issue != issueID {
-		t.Errorf("slot = %+v, want mode=remote issue=%d", ctx, issueID)
-	}
+	// v1.5: no in-memory slot to verify against — the yml above
+	// is the cwd-scoped source of truth.
 
 	// --- dispatch side effects ---------------------------------
 	// The issue body should land in the chat session's message
@@ -377,10 +356,9 @@ func TestFixRemote_IssueNotFound(t *testing.T) {
 		// was created.
 		t.Errorf("worktree count = %d, want 1 (no new worktree):\n%s", c, wtOut)
 	}
-	// In-memory slot must NOT be populated.
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot = %+v, want zero", got)
-	}
+	// v1.5: no in-memory slot to verify. The "no new worktree"
+	// assertion above + the no-yml side effect prove the preflight
+	// failed cleanly.
 	// Reply must mention the issue id + "not found".
 	last := rig.rec.lastText()
 	if !strings.Contains(last, "Issue #42") {
@@ -458,10 +436,7 @@ func TestFixRemote_BranchExists_HardFails_NoSideEffects(t *testing.T) {
 	if got := rig.cs.QueueLen(); got != 0 {
 		t.Errorf("cs.QueueLen = %d, want 0 (no dispatch on hard-fail)", got)
 	}
-	// In-memory slot must NOT be populated.
-	if got := rig.slot.Load(); got != (Context{}) {
-		t.Errorf("slot = %+v, want zero", got)
-	}
+	// v1.5: no in-memory slot to verify.
 }
 
 // TestFixRemote_AddIssueLabelFailure_RollsBackWorktreeAndBranch

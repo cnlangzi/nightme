@@ -13,10 +13,14 @@ import (
 )
 
 // gtwYmlDoc is the on-disk shape of `.nightme/gtw.yml`. Lives in
-// the worktree created by `/gtw fix`. Immutable snapshot of the
-// fix — `State` / `UpdatedAt` (the live state-machine fields on
-// Context) are deliberately NOT serialized; they continue to
-// live in gtw.Manager.states[chatID] in memory only.
+// the worktree created by `/gtw fix` (or written by the /gtw fix
+// retry path after a successful WorktreeAdd). It is the
+// cwd-scoped source of truth for everything /gtw does — there is
+// no parallel in-memory state. /gtw close reads it back via
+// toContext, which synthesises State=StateFixing / UpdatedAt=
+// CreatedAt because those live-state-machine fields are not
+// relevant once a fix has been written to disk (close tears down
+// the worktree, ending the fix regardless of sub-state).
 //
 // Schema mirrors §14.3 of wip/gtw.md. Title/Slug are intentionally
 // omitted from the on-disk shape — they live on FixDraftPayload
@@ -301,8 +305,8 @@ func ReadGTWYml(worktreePath string) (Context, error) {
 		return Context{}, fmt.Errorf("gtw.yml: repoRoot %q is not an absolute path", doc.RepoRoot)
 	}
 	// Normalize at the yml boundary so every downstream caller
-	// (RunClose, deriveHookContext, preflightOrphanYml, …) can
-	// treat Worktree / RepoRoot as already-canonical. Errors
+	// (RunClose, deriveHookContext, …) can treat Worktree /
+	// RepoRoot as already-canonical. Errors
 	// from NormalizeForOS are non-fatal here: a malformed path
 	// is already a "yml is malformed" case, and the previous
 	// behaviour was to pass it through; we preserve that

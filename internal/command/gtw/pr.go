@@ -776,11 +776,16 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 		if err != nil {
 			return nil, "", "", fmt.Errorf("provider %q from gtw.yml unsupported: %w", c.Provider, err)
 		}
-		owner, repo, err := splitOwnerRepo(c.Repo)
-		if err != nil {
-			return nil, "", "", err
+		// Split the yml's "owner/repo" form. The gtw yml stores
+		// Repo in the canonical single-slash form (see runFixRemote
+		// §5.2.③); ParseRepoOwner is URL-aware and not appropriate
+		// here. Validation must reject empty halves so a malformed
+		// entry doesn't silently produce an empty owner / repo.
+		idx := strings.Index(c.Repo, "/")
+		if idx <= 0 || idx == len(c.Repo)-1 {
+			return nil, "", "", fmt.Errorf("gtw: invalid owner/repo %q", c.Repo)
 		}
-		return prov, owner, repo, nil
+		return prov, c.Repo[:idx], c.Repo[idx+1:], nil
 	}
 	remoteURL, err := RemoteOriginURL(ctx, c.RepoRoot, deps.Git)
 	if err != nil || remoteURL == "" {

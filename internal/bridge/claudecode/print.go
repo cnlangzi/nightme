@@ -94,6 +94,28 @@ func claudeLog(msg string, args ...any) {
 	slog.Default().Info(msg, all...)
 }
 
+// claudeDiagnostic builds the BridgeDiagnostic payload that the
+// chat renderer needs to render an EventAgentError event with
+// a non-empty title (translate.go silently drops events whose
+// Diagnostic is nil — see codex/print.go:880-886 for the
+// documented contract). Mirrors codex/print.go's codexDiagnostic
+// helper; the difference is only the AgentName stamp.
+//
+// We use BridgeExitUnknown here because the review path's only
+// failure modes are upstream of cmd.Wait (workspace empty, ctx
+// cancelled, RunResult-carrying error from parsePrintStream).
+// ClassifyExit is reserved for child-process exit classification
+// (codex does that branch in runCodexReviewPlain's waitErr path).
+func claudeDiagnostic(err error) *agent.BridgeDiagnostic {
+	return &agent.BridgeDiagnostic{
+		ExitKind:   agent.BridgeExitUnknown,
+		WaitErr:    err,
+		StderrTail: "",
+		AgentName:  "claudecode",
+		KilledAt:   time.Now(),
+	}
+}
+
 // runPrintMode spawns claude in `-p` print mode for one-shot
 // invocations. It owns the process from spawn to exit, streams
 // events through the standard translator, and returns a
@@ -135,7 +157,7 @@ func buildPrintArgs(blocks []agent.ContentBlock) (args []string, prompt string) 
 	return args, prompt
 }
 
-func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("claudecode: workspace is required")
 	}
@@ -153,7 +175,16 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// non-/code-review caller must not get the assistant-text
 	// recovery layer (see parsePrintStream for why).
 	args, prompt := buildPrintArgs(blocks)
-	return runPrintModeWithPrompt(ctx, s, cfg, args, prompt, startTime, false)
+
+	// Forward the per-call event sink so /gtw commit, /gtw pr,
+	// and any other RunOnce caller sees intermediate progress
+	// in the chat channel. Without this, a long-running
+	// RunOnce (e.g. a slow Bash tool_use) would render as
+	// silent "Working…" until the terminal result lands.
+	// See runCodeReviewPrintMode for the matching pattern
+	// on the /review path.
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
+	return runPrintModeWithPrompt(ctx, s, cfg, args, prompt, startTime, false, sink)
 }
 
 // runPrintModeWithPrompt is the shared implementation: buildPrintArgs
@@ -161,7 +192,10 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 // function handles the subprocess plumbing (start, drain stderr,
 // translate stdout events, capture result). The `startTime`
 // parameter is passed in so both callers get a consistent timer
-// baseline.
+// baseline. The `sink` parameter, when non-nil, receives
+// intermediate assistant / tool events for chat-channel progress
+// (see parsePrintStream for the exact event mapping); pass nil
+// from unit tests that only care about the RunResult.
 func runPrintModeWithPrompt(
 	ctx context.Context,
 	s *Starter,
@@ -170,6 +204,7 @@ func runPrintModeWithPrompt(
 	prompt string,
 	startTime time.Time,
 	isReview bool,
+	sink func(agent.AgentEvent),
 ) (agent.RunResult, error) {
 	child := proc.New(ctx, s.command, args...)
 	child.Dir = cfg.Workspace
@@ -239,8 +274,12 @@ func runPrintModeWithPrompt(
 	// Read stdout events, translate via the shared translator,
 	// and capture the final text + per-turn metadata. A reader
 	// error here means the pipe broke mid-run (rare; would
-	// normally be EOF from a clean exit).
-	result, translateErr := parsePrintStream(ctx, stdout, isReview)
+	// normally be EOF from a clean exit). The sink parameter
+	// (when non-nil) receives every intermediate assistant text
+	// and tool_use/tool_result event so the chat channel's
+	// StatusBar / receipt shows the plugin's progress instead
+	// of sitting on "Working…" for the full run.
+	result, translateErr := parsePrintStream(ctx, stdout, isReview, sink)
 
 	// Always wait for the process to exit so we can capture
 	// both the exit code AND stderr. If parsePrintStream
@@ -294,13 +333,19 @@ func runPrintModeWithPrompt(
 // carries the model). Returns RunResult on clean completion.
 //
 // This is the print-mode analogue of the chat-session
-// readPump + pumpStream pair, minus the stdin plumbing. We
-// intentionally bypass stream.go::translate here because
-// print-mode RunOnce only needs the terminal result event —
-// system/init, assistant text, and tool events are not
-// rendered by RunOnce callers. Skipping translate avoids
-// carrying events through a channel + drain goroutine just
-// to discard them.
+// readPump + pumpStream pair, minus the stdin plumbing. The
+// sink parameter, when non-nil, receives intermediate
+// AgentEvents (Text / ToolStart / ToolEnd) for every
+// assistant / user-role wire event. The chat channel's
+// StatusBar / receipt renders those via gateway.Translate
+// and the policy gate, so the user sees the plugin's
+// progress during long print-mode runs (the v10 fix; pre-v10
+// dropped opts at the dispatcher boundary and the chat sat
+// on "Working…" for the full review duration).
+//
+// Sink MUST be non-blocking on the bridge's side; pass nil
+// when no sink is wired (e.g. unit tests that just want the
+// RunResult).
 //
 // Error surfacing contract:
 //   - result.is_error=true → wrap as error with subtype + text
@@ -310,7 +355,7 @@ func runPrintModeWithPrompt(
 // Usage info is captured onto RunResult.Usage when present;
 // the structured log line below carries the same payload for
 // operators chasing per-turn costs.
-func parsePrintStream(ctx context.Context, stdout io.Reader, isReview bool) (agent.RunResult, error) {
+func parsePrintStream(ctx context.Context, stdout io.Reader, isReview bool, sink func(agent.AgentEvent)) (agent.RunResult, error) {
 	scanner := bufio.NewScanner(stdout)
 	// Allow long lines (Claude Code may emit large content blocks).
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -324,6 +369,14 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, isReview bool) (age
 		// the off-mode path skips both tracking and swap, so
 		// result.RecoveredText stays empty for non-review runs.
 		largestAssistant string
+		// toolUseArgs correlates assistant `tool_use` blocks with
+		// their matching user-role `tool_result` blocks so the
+		// emitted ToolEnd.Args can carry the same input the
+		// ToolStart advertised. stream.go's chat-session path
+		// does the same via state.toolUseArgs (line 387); print
+		// mode is one-shot so we keep the map local to this
+		// function instead of plumbing a state struct through.
+		toolUseArgs = map[string]string{}
 	)
 
 	for scanner.Scan() {
@@ -352,6 +405,11 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, isReview bool) (age
 			continue
 		}
 
+		// Single hoist of ev.Message != nil: the assistant and
+		// user branches both gate on it, and re-checking per
+		// branch would mask that "message present" is a
+		// wire-level invariant for those event types (v12.1
+		// cleanup; pre-v12.1 had two redundant checks).
 		switch ev.Type {
 		case "system":
 			// system/init carries the session id + model.
@@ -363,18 +421,93 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, isReview bool) (age
 				result.Model = ev.Model
 			}
 		case "assistant":
-			// Track the largest text block across all assistant
-			// messages ONLY when this is a review-mode spawn.
-			// The plugin's review content typically lives in
-			// one large block (the multi-agent pipeline's final
-			// composed review); smaller blocks are usually
-			// progress pings like "Reviewer 3 finished".
-			if isReview && ev.Message != nil {
-				for _, block := range ev.Message.Content {
-					if block.Type == "text" && len(block.Text) > len(largestAssistant) {
-						largestAssistant = block.Text
-					}
+			if ev.Message == nil {
+				continue
+			}
+			for _, block := range ev.Message.Content {
+				// Track the largest text block across all assistant
+				// messages ONLY when this is a review-mode spawn.
+				// The plugin's review content typically lives in
+				// one large block (the multi-agent pipeline's final
+				// composed review); smaller blocks are usually
+				// progress pings like "Reviewer 3 finished".
+				if isReview && block.Type == "text" && len(block.Text) > len(largestAssistant) {
+					largestAssistant = block.Text
 				}
+				// Forward intermediate progress to the sink so the
+				// chat channel's StatusBar / receipt shows the
+				// plugin's activity. Both text blocks (model's
+				// streamed reasoning) and tool_use blocks (Skill,
+				// Read, Bash, …) are emitted; the downstream
+				// policy gate decides what's visible. Reviews'
+				// multi-agent pipeline emits many such events
+				// across an 8-minute run — without this the chat
+				// sat on "Working…" with no feedback (F-print-
+				// forward fix).
+				if sink == nil {
+					continue
+				}
+				switch block.Type {
+				case "text":
+					if block.Text != "" {
+						sink(agent.AgentEvent{
+							Kind:      agent.EventAgentText,
+							Text:      block.Text,
+							SessionID: result.SessionID,
+							Model:     result.Model,
+						})
+					}
+				case "tool_use":
+					toolUseArgs[block.ID] = string(block.Input)
+					sink(agent.AgentEvent{
+						Kind: agent.EventAgentToolStart,
+						ToolStart: &agent.AgentToolStartEvent{
+							ID:   block.ID,
+							Name: block.Name,
+							Args: string(block.Input),
+						},
+						SessionID: result.SessionID,
+						Model:     result.Model,
+					})
+				}
+			}
+		case "user":
+			if ev.Message == nil {
+				continue
+			}
+			for _, block := range ev.Message.Content {
+				if block.Type != "tool_result" {
+					continue
+				}
+				if sink == nil {
+					continue
+				}
+				// tool_result blocks ride in user-role messages.
+				// Pair them with the matching tool_use ID so the
+				// sink can drive ToolStart / ToolEnd pairing in
+				// the chat renderer's rolling log. Args comes from
+				// the toolUseArgs map keyed by the result's
+				// tool_use_id; output goes through stringifyToolResult
+				// so the chat renderer sees "review finished"
+				// instead of the raw 16-char JSON string
+				// `"review finished"` with literal quotes.
+				sink(agent.AgentEvent{
+					Kind: agent.EventAgentToolEnd,
+					ToolEnd: &agent.AgentToolEndEvent{
+						ID:     block.ToolUseID,
+						Name:   "", // filled below if we correlated
+						Args:   toolUseArgs[block.ToolUseID],
+						Output: stringifyToolResult(block.Content),
+					},
+					Err: func() error {
+						if block.IsError {
+							return fmt.Errorf("tool reported error")
+						}
+						return nil
+					}(),
+					SessionID: result.SessionID,
+					Model:     result.Model,
+				})
 			}
 		case "result":
 			sawResult = true
@@ -563,9 +696,14 @@ func isFollowupQuestion(text string) bool {
 	return false
 }
 
-// runCodeReviewPrintMode runs `claude -p "/code-review"` against
-// the workspace. This is the bridge's native review path
-// (F-review.md §13 "codex/claude use native review" rule): we
+// runCodeReviewPrintMode runs `claude -p code-review [<branch>]`
+// against the workspace and forwards the per-call event sink (if
+// any) to the chat channel's StatusBar / receipt. The full
+// rationale for why this passes the local branch name (and not
+// a ref-range like `<defaultBase>...HEAD`) is in the function
+// body below.
+//
+// F-review.md §13 "codex/claude use native review" rule: we
 // invoke Claude Code's built-in slash command instead of running
 // our generic builtinPrompt via `claude -p "<prompt>"`. The chat
 // agent already has a multi-agent review pipeline tuned for this
@@ -591,39 +729,65 @@ func isFollowupQuestion(text string) bool {
 // Output: the standard claude stream-json transcript. The shared
 // print-stream parser extracts the final text into RunResult.Text
 // (same path as runPrintMode, so output handling is identical).
-func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig) (agent.RunResult, error) {
+func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("claudecode: workspace is required")
 	}
 
-	// /code-review takes an optional positional [target] argument
-	// (file path / PR # / branch / ref range). The plugin's step-1
-	// "is this a PR?" check is hard-coded to use `gh pr view`; in
-	// `-p` mode with no real PR on the branch, that path falls back
-	// to AskUserQuestion ("Which one do you want to review?") — which
-	// becomes the terminal result event's Text and hides the actual
-	// review (see parsePrintStream's isFollowupQuestion recovery).
+	// Per-call sink (opts.OnEvent): when present, the chat
+	// channel's StatusBar / receipt header flips from "agent X"
+	// placeholder to "agent X · …" within the first few seconds
+	// of the long review run. Without this forward, /review on
+	// claude renders 30s of silence and then dumps the final
+	// text — see codex/print.go's runCodexReviewPlain for the
+	// matching pattern (same Ready/Result/Error envelope).
+	sink := agent.ParseRunOnceOptions(opts).OnEvent
+
+	// /code-review takes an optional positional [target] argument.
+	// Per nightme's /review policy we pass the LOCAL branch name
+	// (e.g. "fix-review-on-claude"), NOT a ref-range like
+	// `<defaultBase>...HEAD` and NOT a PR number — those two
+	// forms are what made the v1 implementation fall into
+	// `gh pr list` → AskUserQuestion → "Which PR would you like
+	// to review?" instead of reviewing the local diff.
 	//
-	// Passing `<defaultBranch>...HEAD` as the positional gives the
-	// plugin an explicit ref-range target so it skips the
-	// "which target?" step entirely. This is the ref-range syntax
-	// documented in `claude code-review --help`'s source-of-truth
-	// and confirmed empirically on claude-code 2.1.220.
+	// PR association is deliberately ignored: the user's common
+	// case is "I have local commits not pushed yet, review
+	// them against the default branch". The branch name is what
+	// anchors the plugin to the right working tree; the
+	// default-branch comparison happens internally.
 	//
-	// When `detectDefaultBranch` fails (no origin remote, shallow
-	// clone, etc.) we fall back to bare `code-review` with no target
-	// — same as pre-fix v1. The print-stream parser's follow-up
-	// recovery handles the no-PR AskUserQuestion gracefully either
-	// way; this positional is a *quality* improvement, not a hard
-	// requirement.
+	// On detached HEAD / non-git dirs / git error, CurrentBranch
+	// returns "" and we fall through to bare `code-review` with
+	// no positional — same shape as the no-default-branch path.
 	//
 	// Pass the command WITHOUT the leading slash — see doc above.
-	defaultBase := agent.DetectDefaultBranch(ctx, cfg.Workspace)
+	branch := agent.CurrentBranch(ctx, cfg.Workspace)
+
+	// Up-front Ready so the chat channel's StatusBar / receipt
+	// header can flip from "agent X" placeholder to "agent X · …"
+	// before the long review run starts. SessionID/Model are
+	// empty here; the stream-json parser RE-emits Result with
+	// them once known, so a consumer that snapshots on first
+	// Ready and ignores later ones still sees this one. Matches
+	// codex/print.go::runPrintMode's Ready pattern. Branch is
+	// stamped here so the StatusBar's "⎇ <branch>" footer
+	// segment renders (v12.1 fix; pre-v12 the field was empty
+	// because we computed branch only for the argv positional).
+	if sink != nil {
+		sink(agent.AgentEvent{
+			Kind:      agent.EventAgentReady,
+			AgentName: s.Info().Name,
+			Workspace: cfg.Workspace,
+			Branch:    branch,
+		})
+	}
+
 	args := []string{
 		"-p", "code-review",
 	}
-	if defaultBase != "" {
-		args = append(args, defaultBase+"...HEAD")
+	if branch != "" {
+		args = append(args, branch)
 	}
 	args = append(args,
 		"--output-format", "stream-json",
@@ -632,6 +796,42 @@ func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConf
 	)
 
 	startTime := time.Now()
-	return runPrintModeWithPrompt(ctx, s, cfg, args, "code-review", startTime, true)
+	result, err := runPrintModeWithPrompt(ctx, s, cfg, args, "code-review", startTime, true, sink)
+
+	// Terminal event: pair the up-front Ready with a Result or
+	// Error so the sink observes a complete lifecycle (same
+	// contract as codex's runCodexReviewPlain success / error
+	// branches). Without this, the StatusBar sits on "Working…"
+	// forever even after the review text has landed in the
+	// channel via the dispatcher's emitter path.
+	//
+	// Error events MUST carry a populated Diagnostic; outbound.
+	// translate.go:200 silently drops EventAgentError events
+	// whose Diagnostic is nil, so the chat receipt card would
+	// stay at 🔄 on /review failure (v12.1 fix; pre-v12 the
+	// silent drop was harmless because no sink was wired).
+	if sink != nil {
+		if err != nil {
+			sink(agent.AgentEvent{
+				Kind:       agent.EventAgentError,
+				Err:        err,
+				AgentName:  s.Info().Name,
+				Workspace:  cfg.Workspace,
+				Branch:     branch,
+				Diagnostic: claudeDiagnostic(err),
+			})
+		} else {
+			sink(agent.AgentEvent{
+				Kind:      agent.EventAgentResult,
+				Result:    &agent.AgentResultEvent{Text: result.Text, DurationMs: result.DurationMs, Subtype: result.Subtype, Usage: result.Usage},
+				SessionID: result.SessionID,
+				Model:     result.Model,
+				AgentName: s.Info().Name,
+				Workspace: cfg.Workspace,
+				Branch:    branch,
+			})
+		}
+	}
+	return result, err
 }
 

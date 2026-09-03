@@ -51,6 +51,15 @@ const maxDirtyFilesReported = 10
 //     user can retry /gtw close once the upstream call works.
 //     ModeLocal has c.Issue == -1 and is skipped — there is no
 //     remote label to clean up.
+//
+//     Symmetric compensation: if a SUBSEQUENT local step (3
+//     dirty / 4 worktree remove / 5 branch -D) fails after this
+//     one succeeded, the platform "in flight" marker is re-
+//     added so a retry converges on the same starting state.
+//     Without this compensation the platform would show "out of
+//     WIP" while local still has the worktree / branch / yml,
+//     and a retry would face the divergence instead of the same
+//     pre-close state.
 //  3. Refuse if the worktree has uncommitted changes (`git
 //     status --porcelain` non-empty). Close is intentionally
 //     all-or-nothing: commit, stash, or discard before
@@ -225,7 +234,7 @@ func RunClose(
 	// alone is the right gate. c.RepoRoot != "" is the defensive
 	// guard for the RepoRoot-missing malformed-yml case (caught
 	// by the explicit check above, but cheap to repeat).
-	labelRemoved, labelOwner, labelRepo, labelAborted := removeWIPLabel(ctx, c, deps, cs, chatID, messageID)
+	labelRemoved, labelProvider, labelOwner, labelRepo, labelAborted := removeWIPLabel(ctx, c, deps, cs, chatID, messageID)
 	if labelAborted {
 		// Helper already sent a user-facing error reply. Bail
 		// before any local cleanup so the yml-driven state
@@ -262,7 +271,14 @@ func RunClose(
 	// and stale worktree paths are cleaned manually via
 	// `git worktree remove --force <path>`.
 	if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+		body := err.Error()
+		if labelRemoved {
+			// Local state untouched — restore the platform
+			// "in flight" marker so a retry converges on the
+			// same starting state.
+			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
+		}
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
 	// --- step 4: git worktree remove ------------------------------
@@ -277,6 +293,11 @@ func RunClose(
 		body := fmt.Sprintf("❌ git worktree remove failed: %v", err)
 		if stderr != "" {
 			body += "\n[git stderr tail]\n" + stderr
+		}
+		if labelRemoved {
+			// Local state untouched — restore the platform
+			// "in flight" marker so a retry converges.
+			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
 		}
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
@@ -295,6 +316,14 @@ func RunClose(
 				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`.",
 			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch,
 		)
+		if labelRemoved {
+			// Worktree is gone but the branch ref still
+			// exists, so the fix is half-torn-down. Restore
+			// the platform "in flight" marker so a retry
+			// sees a consistent state (and so the issue
+			// doesn't drift while the user investigates).
+			body += "\n" + compensateWIPLabel(ctx, labelProvider, c, labelOwner, labelRepo)
+		}
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
@@ -430,18 +459,18 @@ func RunClose(
 //
 // Returns:
 //
-//   - (true, owner, repo, false): LabelWIP was successfully removed.
-//     The owner/repo strings come from resolveProvider — either
-//     the yml-cached c.Repo (split on '/') or the live remote
-//     URL — they reflect what the provider actually saw, which is
-//     what the success card needs to display.
-//   - (false, "", "", false): No work was needed (ModeLocal
-//     always writes Issue == -1, so c.Issue <= 0 catches it;
-//     c.RepoRoot == "" catches malformed snapshots). RunClose
-//     continues to local cleanup unchanged.
-//   - (false, "", "", true): A user-facing error reply was sent;
-//     RunClose must abort BEFORE any local cleanup so the yml
-//     remains the recovery source of truth.
+//   - (true, provider, owner, repo, false): LabelWIP was removed.
+//     provider / owner / repo are threaded back to RunClose so a
+//     later step can compensate (re-add the label) if a local
+//     cleanup step fails — without paying for a second Detect
+//     round-trip. owner/repo come from resolveProvider (yml-
+//     cached c.Repo split on '/', or live remote URL).
+//   - (false, nil, "", "", false): No work was needed (ModeLocal
+//     always writes Issue == -1; c.RepoRoot == "" catches
+//     malformed snapshots). RunClose continues to local cleanup.
+//   - (false, nil, "", "", true): A user-facing error reply was
+//     sent; RunClose must abort BEFORE any local cleanup so the
+//     yml remains the recovery source of truth.
 //
 // The helper sends its own error replies (with ❌ prefixes that
 // match RunClose's existing style) so RunClose's main flow stays
@@ -453,7 +482,7 @@ func removeWIPLabel(
 	deps HandlerDeps,
 	cs *chatsession.ChatSession,
 	chatID, messageID string,
-) (removed bool, owner, repo string, aborted bool) {
+) (removed bool, provider GitProvider, owner, repo string, aborted bool) {
 	// ModeLocal always writes Issue == -1 (types.go:164), and
 	// legacy yml snapshots that predate the Mode field still
 	// have a positive Issue number per the empty-Mode-treats-
@@ -462,7 +491,7 @@ func removeWIPLabel(
 	// catches malformed snapshots (already filtered above but
 	// repeated here as a defence-in-depth).
 	if c.Issue <= 0 || c.RepoRoot == "" {
-		return false, "", "", false
+		return false, nil, "", "", false
 	}
 
 	// Reuse the same detection pipeline as /gtw pr. resolveProvider
@@ -470,24 +499,58 @@ func removeWIPLabel(
 	// present (no git / network round-trip) and falls back to
 	// RemoteOriginURL + Detect + ParseRepoOwner otherwise — both
 	// /gtw pr and /gtw close now share that policy.
-	provider, owner, repo, resolveErr := resolveProvider(ctx, c, deps)
-	if resolveErr != nil || provider == nil {
+	prov, owner, repo, resolveErr := resolveProvider(ctx, c, deps)
+	if resolveErr != nil || prov == nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot reach GitHub/GitLab to remove the nightme/wip label: "+
 				resolveErr.Error())
-		return false, "", "", true
+		return false, nil, "", "", true
 	}
 
-	if rmErr := provider.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); rmErr != nil {
+	if rmErr := prov.RemoveIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); rmErr != nil {
 		reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ could not remove label %q from issue #%d: %v\n"+
 				"worktree and branch are left intact — retry /gtw close once "+
 				"the platform call succeeds (auth / network / repo moved).",
 				LabelWIP, c.Issue, rmErr))
-		return false, "", "", true
+		return false, nil, "", "", true
 	}
 
-	return true, owner, repo, false
+	return true, prov, owner, repo, false
+}
+
+// compensateWIPLabel is the symmetric rollback to removeWIPLabel.
+// Called from RunClose when a local cleanup step (dirty check,
+// worktree remove, branch -D) fails AFTER the label was already
+// removed — the platform would otherwise show "out of WIP" while
+// local state still has the worktree / branch / yml, breaking
+// the next retry. Re-adding the label restores the platform
+// "in flight" state so a retry converges on the same starting
+// point.
+//
+// Best-effort: returns a status line the caller appends to the
+// error reply. A re-add failure is communicated but does NOT
+// escalate to a second top-level error — the user already has
+// the original local error to act on.
+//
+// NOT called for steps 6 (SetSelectedCwd), 9 (/new), or 10
+// (sync): by those points the local close is functionally
+// complete and the label correctly reflects "out of WIP".
+func compensateWIPLabel(
+	ctx context.Context,
+	provider GitProvider,
+	c Context,
+	owner, repo string,
+) string {
+	if err := provider.AddIssueLabel(ctx, owner, repo, c.Issue, LabelWIP); err != nil {
+		return fmt.Sprintf(
+			"(could not restore %s to %s/%s#%d: %v — issue may now be in an inconsistent state; "+
+				"manually re-add the label if a retry is needed)",
+			LabelWIP, owner, repo, c.Issue, err)
+	}
+	return fmt.Sprintf(
+		"(%s restored to %s/%s#%d — fix the local state above and retry /gtw close)",
+		LabelWIP, owner, repo, c.Issue)
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

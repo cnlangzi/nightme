@@ -1293,3 +1293,239 @@ func TestRunClose_ModeLocal_SkipsLabelCleanup(t *testing.T) {
 		t.Errorf("ModeLocal success card must not mention label removal:\n%s", gotText)
 	}
 }
+
+// --- compensation: re-add nightme/wip when local cleanup fails ---
+//
+// Each of the three tests below verifies the symmetric rollback
+// path: the label was successfully removed in step 2.5, then a
+// local step (dirty / worktree remove / branch -D) failed, and
+// RunClose must have re-added the label before returning so the
+// platform "in flight" marker is restored for retry.
+//
+// These are the tests that would have caught the divergence the
+// /review flagged: without compensation the platform would show
+// "out of WIP" while the local fix is half-torn-down, and the
+// user would face a confused retry. With compensation the retry
+// converges on the same starting state.
+
+// TestRunClose_ModeRemote_DirtyReaddsLabel: label removed
+// successfully → dirty check fails → label re-added, no local
+// cleanup, reply surfaces both facts.
+func TestRunClose_ModeRemote_DirtyReaddsLabel(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	rig.git.statusResp = " M foo.txt\n" // dirty
+
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// RemoveIssueLabel called once (step 2.5) and AddIssueLabel
+	// called once (compensation). Together they form a round-trip:
+	// the label is back where it started.
+	if n := len(prov.CallsByMethod("RemoveIssueLabel")); n != 1 {
+		t.Errorf("RemoveIssueLabel calls = %d, want 1", n)
+	}
+	if n := len(prov.CallsByMethod("AddIssueLabel")); n != 1 {
+		t.Errorf("AddIssueLabel (compensation) calls = %d, want 1", n)
+	}
+	// Compensation targets the same issue + label as the removal.
+	addCalls := prov.CallsByMethod("AddIssueLabel")
+	if len(addCalls) > 0 {
+		c := addCalls[0]
+		if c.ID != 42 || c.Label != LabelWIP {
+			t.Errorf("compensation AddIssueLabel ID/label = %d/%q, want 42/%q",
+				c.ID, c.Label, LabelWIP)
+		}
+	}
+
+	// No local cleanup must have run.
+	for _, args := range rig.git.calls {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
+			t.Errorf("git worktree remove called despite dirty failure: %v", args)
+		}
+		if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+			t.Errorf("git branch -D called despite dirty failure: %v", args)
+		}
+	}
+
+	// CWD unchanged so the user can retry after fixing dirty state.
+	if got := rig.cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd = %q, want %q (unchanged for retry)", got, wt)
+	}
+
+	got := rig.rec.lastText()
+	if !strings.Contains(got, "nightme/wip restored") {
+		t.Errorf("reply must surface compensation status:\n%s", got)
+	}
+	if !strings.Contains(got, "retry /gtw close") {
+		t.Errorf("reply must mention retry:\n%s", got)
+	}
+}
+
+// TestRunClose_ModeRemote_WorktreeRemoveFailsReaddsLabel: label
+// removed → `git worktree remove` errors → label re-added, no
+// branch -D, CWD unchanged, reply shows both the git error and
+// the compensation status.
+func TestRunClose_ModeRemote_WorktreeRemoveFailsReaddsLabel(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
+	rig.git.worktreeRemoveStderr = "fatal: could not remove worktree"
+
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	if n := len(prov.CallsByMethod("AddIssueLabel")); n != 1 {
+		t.Errorf("AddIssueLabel (compensation) calls = %d, want 1", n)
+	}
+	// branch -D must NOT have run — worktree remove failed first.
+	sawBranchDel := false
+	for _, args := range rig.git.calls {
+		if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+			sawBranchDel = true
+		}
+	}
+	if sawBranchDel {
+		t.Errorf("git branch -D called despite worktree-remove failure")
+	}
+	if got := rig.cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd = %q, want %q (unchanged for retry)", got, wt)
+	}
+
+	got := rig.rec.lastText()
+	if !strings.Contains(got, "git worktree remove failed") {
+		t.Errorf("reply missing git error:\n%s", got)
+	}
+	if !strings.Contains(got, "nightme/wip restored") {
+		t.Errorf("reply must surface compensation status:\n%s", got)
+	}
+}
+
+// TestRunClose_ModeRemote_BranchDeleteFailsReaddsLabel: label
+// removed → worktree removed → branch -D fails. Half-torn-down
+// state (worktree gone, branch + yml gone, label still off).
+// Compensation re-adds the label so the issue reflects
+// "in flight" while the user investigates the branch delete.
+func TestRunClose_ModeRemote_BranchDeleteFailsReaddsLabel(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	rig.git.branchDeleteErr = &fakeExitError{code: 1, msg: "branch delete failed"}
+	rig.git.branchDeleteStderr = "error: branch 'fix/42-test' not found"
+
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	if n := len(prov.CallsByMethod("AddIssueLabel")); n != 1 {
+		t.Errorf("AddIssueLabel (compensation) calls = %d, want 1", n)
+	}
+	// worktree remove ran (it's step 4, before step 5).
+	sawRemove := false
+	for _, args := range rig.git.calls {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" {
+			sawRemove = true
+		}
+	}
+	if !sawRemove {
+		t.Errorf("git worktree remove not called; calls=%v", rig.git.calls)
+	}
+	// Branch delete failed, so compensation targets the SAME
+	// issue / owner / repo the original removal did.
+	addCalls := prov.CallsByMethod("AddIssueLabel")
+	if len(addCalls) > 0 {
+		c := addCalls[0]
+		if c.Owner != "cnlangzi" || c.Repo != "nightme" {
+			t.Errorf("compensation owner/repo = %s/%s, want cnlangzi/nightme",
+				c.Owner, c.Repo)
+		}
+		if c.ID != 42 || c.Label != LabelWIP {
+			t.Errorf("compensation ID/label = %d/%q, want 42/%q",
+				c.ID, c.Label, LabelWIP)
+		}
+	}
+
+	got := rig.rec.lastText()
+	if !strings.Contains(got, "git branch -D") {
+		t.Errorf("reply missing branch-delete error:\n%s", got)
+	}
+	if !strings.Contains(got, "nightme/wip restored") {
+		t.Errorf("reply must surface compensation status:\n%s", got)
+	}
+}
+
+// TestRunClose_ModeRemote_CompensationFailureSurfacesInReply:
+// verify the "best-effort" half of the compensation contract:
+// if AddIssueLabel itself errors (e.g. transient network failure
+// during the rollback call), the reply must STILL mention the
+// re-add failure so the user knows the platform is now in an
+// inconsistent state and can intervene manually.
+func TestRunClose_ModeRemote_CompensationFailureSurfacesInReply(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	// Allow the initial RemoveIssueLabel to succeed (default) but
+	// fail the compensation call. Distinct error messages let us
+	// grep for the right one in the reply.
+	prov.SetRemoveIssueLabelErr(nil)
+	prov.SetAddIssueLabelErr(fmt.Errorf("503 Service Unavailable during rollback"))
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+	rig.git.statusResp = " M foo.txt\n" // dirty → triggers compensation
+
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// Both calls happened; AddIssueLabel is the one that failed.
+	if n := len(prov.CallsByMethod("RemoveIssueLabel")); n != 1 {
+		t.Errorf("RemoveIssueLabel calls = %d, want 1", n)
+	}
+	if n := len(prov.CallsByMethod("AddIssueLabel")); n != 1 {
+		t.Errorf("AddIssueLabel calls = %d, want 1", n)
+	}
+
+	got := rig.rec.lastText()
+	// Must mention the dirty error (primary) AND the
+	// compensation failure (so the user knows to intervene).
+	if !strings.Contains(got, "503 Service Unavailable") {
+		t.Errorf("reply must surface compensation failure:\n%s", got)
+	}
+	if !strings.Contains(got, "inconsistent state") {
+		t.Errorf("reply must warn about inconsistency:\n%s", got)
+	}
+	// Must NOT claim the compensation succeeded.
+	if strings.Contains(got, "nightme/wip restored") {
+		t.Errorf("reply must not claim success when compensation failed:\n%s", got)
+	}
+}

@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // HandleDraftReaction is the per-draft action router. It is called
@@ -105,7 +105,15 @@ func executeWorktreeFailAction(
 	case messages.ReactionRetry:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionRetry")
 		m.TakeDraft(ev.ChatID, ev.RequestID)
-		repoRoot := repoRootFromChatSession(cs)
+		// p.Worktree is the main repo root that emitWorktreeFailDraft
+		// stored at draft-emission time — the cancel branch already
+		// trusts it for `gh issue edit` cwd, so it's authoritative
+		// here too. Deriving from cs.SelectedCwd() via
+		// repoRootFromChatSession is wrong when the user is in the
+		// main repo (the typical fix-failure case): the helper
+		// assumes cwd is inside a <repo>.nightme/<slug> worktree
+		// and returns the parent dir otherwise — not the repo root.
+		repoRoot := p.Worktree
 		worktree := WorktreePath(repoRoot, p.Slug)
 		err := WorktreeAdd(ctx, repoRoot, p.Branch, worktree, "HEAD", deps.Git)
 		resultText := ""
@@ -114,15 +122,60 @@ func executeWorktreeFailAction(
 		} else if err := cs.SetSelectedCwd(worktree); err != nil {
 			resultText = fmt.Sprintf("❌ SetSelectedCwd: %v", err)
 		} else {
-			m.SetContext(ev.ChatID, Context{
-				Mode:      ModeFromDraftPayload(p),
-				Issue:     p.IssueID,
-				Branch:    p.Branch,
-				Worktree:  worktree,
-				State:     StateFixing,
-				UpdatedAt: deps.Now(),
-			})
-			resultText = variantReadyResultText(p, p.Branch)
+			// The retry succeeded — worktree exists and cwd is
+			// pointing at it. The retry path bypasses
+			// completeFixAndDispatch (no issue dispatch here), so
+			// we have to run the standard post-WorktreeAdd cleanup
+			// ourselves: ensure .gitignore lists .nightme/, commit
+			// it if dirty (so /gtw close's dirty check passes),
+			// then write the yml snapshot. Without the yml, /gtw
+			// close would say "no active fix to close"; without
+			// the gitignore commit, it would say "dirty worktree"
+			// and the user would be stuck needing --force.
+			//
+			// v1.5: the yml is the cwd-scoped source of truth;
+			// the in-memory slot layer that used to be set here
+			// is gone.
+			ymlCtx := Context{
+				Mode:     ModeFromDraftPayload(p),
+				Issue:    p.IssueID,
+				Branch:   p.Branch,
+				Worktree: worktree,
+				RepoRoot: repoRoot,
+				Repo:     p.Repo,
+				Provider: p.Provider,
+			}
+			if err := EnsureGitignore(worktree); err != nil {
+				slog.Default().Warn("gtw retry: EnsureGitignore failed",
+					"worktree", worktree, "err", err)
+				resultText = variantReadyResultText(p, p.Branch)
+			} else if err := CommitGitignoreIfDirty(ctx, worktree, deps.Git); err != nil {
+				slog.Default().Warn("gtw retry: CommitGitignore failed",
+					"worktree", worktree, "err", err)
+				// Roll back: worktree is unusable without the
+				// commit (close will reject as dirty). force=true
+				// because the untracked .gitignore is in git's way.
+				if rmErr := WorktreeRemove(ctx, repoRoot, worktree, true /* force */, deps.Git); rmErr != nil {
+					resultText = fmt.Sprintf(
+						"❌ Retry: CommitGitignore failed (%v); rollback also failed (%v).\n"+
+							"the worktree at %s is in a stuck state — please `git worktree remove --force %s` manually.",
+						err, rmErr, worktree, worktree)
+				} else {
+					resultText = fmt.Sprintf(
+						"❌ Retry: CommitGitignore failed (%v).\n"+
+							"rolled back worktree at %s; retry after fixing (e.g. set `git config user.email`).",
+						err, worktree)
+				}
+			} else if err := WriteGTWYml(worktree, ymlCtx, deps.Now); err != nil && !errors.Is(err, ErrGtwYmlExists) {
+				slog.Default().Warn("gtw retry: WriteGTWYml failed",
+					"worktree", worktree, "err", err)
+				// Worktree is usable; just warn that close may not
+				// recognise it. User can finish manually.
+				resultText = variantReadyResultText(p, p.Branch) +
+					fmt.Sprintf("\n⚠️ could not write .nightme/gtw.yml: %v", err)
+			} else {
+				resultText = variantReadyResultText(p, p.Branch)
+			}
 		}
 		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
@@ -191,35 +244,13 @@ func splitOwnerRepo(s string) (string, string, error) {
 	return s[:idx], s[idx+1:], nil
 }
 
-// repoRootFromChatSession returns the repo root given the active
-// cwd on the ChatSession.
-//
-// gtw's worktree layout is sibling/<repo>.nightme/<slug>/, so the
-// active cwd (a specific worktree) is 2 levels below the worktree
-// parent + 1 level above the repo. The repo is the worktree
-// parent with the `.nightme` suffix stripped.
-//
-// F-XX: replaces repoRootFromSender; takes
-// *chatsession.ChatSession directly.
-func repoRootFromChatSession(cs *chatsession.ChatSession) string {
-	if cs == nil {
-		return ""
-	}
-	cwd := cs.SelectedCwd()
-	if cwd == "" {
-		return ""
-	}
-	// F-PATHUTIL-001 §13.3.1: pathutil.Dir / pathutil.Base for
-	// sibling-worktree detection. cwd comes from SelectedCwd
-	// (already-normalized) so the result is equivalent to
-	// filepath.*; using pathutil keeps the rule "no caller
-	// inlines filepath" honest.
-	worktreeParent := pathutil.Dir(cwd)
-	if strings.HasSuffix(pathutil.Base(worktreeParent), ".nightme") {
-		return strings.TrimSuffix(worktreeParent, ".nightme")
-	}
-	return worktreeParent
-}
+// repoRootFromChatSession is removed in v1.5. The retry path
+// used to call this helper but the implementation only worked
+// when cs.SelectedCwd was inside a <repo>.nightme/<slug>
+// worktree; for the more common case of cwd == main repo root
+// it returned the parent directory, which is not the repo
+// root. The retry now uses p.Worktree directly — the value
+// emitWorktreeFailDraft stored at draft-emission time.
 
 // ModeFromDraftPayload infers the Mode for the new Context
 // being written by an action handler. Local-mode drafts (the

@@ -18,12 +18,11 @@ import (
 // unreachable cwd. Exposed as a package-level var so tests can
 // swap in a stub that returns non-IsNotExist errors (EACCES,
 // EIO, ESTALE, etc.) without chmod'ing the worktree directory —
-// a transient stat failure must NOT clear slot / selectedCwd /
-// the AS pool, and that's easier to lock in via a stub than by
-// chmod races (chmod 000 is silently bypassed for root on
-// Linux, and the test would race with later reads anyway).
-// Production uses os.Stat directly; tests restore via
-// withStatStub in close_test.go.
+// a transient stat failure must NOT clear selectedCwd / the AS
+// pool, and that's easier to lock in via a stub than by chmod
+// races (chmod 000 is silently bypassed for root on Linux, and
+// the test would race with later reads anyway). Production uses
+// os.Stat directly; tests restore via withStatStub in close_test.go.
 var statPath = os.Stat
 
 // maxDirtyFilesReported caps how many uncommitted paths we
@@ -35,7 +34,7 @@ var statPath = os.Stat
 const maxDirtyFilesReported = 10
 
 // RunClose is the entry point for `/gtw close`. Mirrors RunFix
-// in shape (ctx, cs, slot, deps, chatID, messageID; returns
+// in shape (ctx, cs, deps, chatID, messageID; returns
 // *Result, error) so the factory can wire it through the same
 // dispatcher pipeline.
 //
@@ -60,7 +59,10 @@ const maxDirtyFilesReported = 10
 //     on unmerged, which is hostile here).
 //  6. SetSelectedCwd back to repoRoot so the next agent message
 //     spawns in the main repo.
-//  7. Clear the in-memory Context.
+//  7. (reserved; the in-memory Context/slot layer is gone in
+//     v1.5 — RunClose has no in-memory state to clear, the yml
+//     disappears with the worktree at step 4 and the new cwd is
+//     repoRoot at step 6.)
 //  8. Emit close's own success card.
 //  9. Invoke /new on the new cwd (c.RepoRoot) to drop any AS
 //     left there of its accumulated conversation context. This
@@ -77,38 +79,36 @@ const maxDirtyFilesReported = 10
 //     error card surfaces the cause — close's card above is not
 //     retracted because the local fix session genuinely ended.
 //
-// On any error before step 7 (yml missing / dirty / worktree-
+// On any error before step 6 (yml missing / dirty / worktree-
 // remove / branch-delete fail) we leave the chat's active cwd
-// and the in-memory Context untouched, so the user can retry
-// once they fix the underlying problem. Steps 9 (/new) and 10
-// (sync) run unconditionally after step 8 — neither error
-// undoes the local-fix tear-down, and neither skips the
-// other. Step 9's matched==0 path silently skips its card so
-// the empty-pool case stays a two-card story (close + sync).
+// untouched, so the user can retry once they fix the underlying
+// problem. Steps 9 (/new) and 10 (sync) run unconditionally after
+// step 8 — neither error undoes the local-fix tear-down, and
+// neither skips the other. Step 9's matched==0 path silently
+// skips its card so the empty-pool case stays a two-card story
+// (close + sync).
 func RunClose(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
-	slot ContextSlot,
 	deps HandlerDeps,
 	chatID, messageID string,
 ) (*Result, error) {
 	selectedCwd := cs.SelectedCwd()
 
 	// --- step 0.5: dangling-cwd safety net -------------------------
-	// Three failure modes the step 1+2 IsNotExist branch would
+	// Two failure modes the step 1+2 IsNotExist branch would
 	// otherwise misreport as "no active fix to close":
 	//
 	//   (a) Another chat's /gtw close ran `git worktree remove`
 	//       against THIS chat's fix worktree (or some external
 	//       `rm -rf` ate the directory). selectedCwd now points
-	//       at a path that does not exist; the in-memory slot
-	//       carries the matching Worktree; the yml is gone with
+	//       at a path that does not exist; the yml is gone with
 	//       the worktree.
 	//
 	//   (b) The chat just /cwd'd into a directory that someone
 	//       else later removed (e.g. another chat's /gtw close
 	//       on a sibling /gtw fix). selectedCwd is dangling;
-	//       slot is empty; the user never ran /gtw fix here.
+	//       the user never ran /gtw fix here.
 	//
 	//   (c) selectedCwd is empty (cmd.go:364-389 does not
 	//       preflight this). Without this guard, ReadGTWYml("")
@@ -121,7 +121,7 @@ func RunClose(
 	// All three are resolved by closing+dropping the ASes in
 	// the cwd (when there is one), clearing the dangling state,
 	// and telling the user to /cwd again. The successful close
-	// path (step 5.5 below) does the same AS cleanup so the
+	// path (step 2.5 below) does the same AS cleanup so the
 	// principle generalises: a /gtw close that tears down a
 	// worktree must kill the agent processes pinned to it,
 	// otherwise they accumulate as orphans and drag the daemon
@@ -159,45 +159,21 @@ func RunClose(
 					"retry /gtw close once the path is reachable again — the in-flight fix and "+
 					"agent sessions are left intact.", selectedCwd, statErr)), nil
 		}
-		cur := slot.Load()
-		// F-PATHUTIL-001 §5.2: same-case/same-slash comparison
-		// bug as the fix.go call sites — the slot was written
-		// with backslash form (WorktreePath → pathutil) but
-		// selectedCwd may carry forward slashes (auto-restored
-		// or pre-migration yml). pathutil.Equal collapses both
-		// axes so the "is this the chat's active worktree?"
-		// decision stays correct on Windows.
-		slotMatched := cur.Worktree != "" &&
-			pathutil.Equal(cur.Worktree, selectedCwd)
 		// Always tear down ASes pinned to the unreachable path —
-		// they are orphaned regardless of slot state.
+		// they are orphaned regardless of why the cwd vanished.
 		droppedN, _ := cs.EvictAgentSessionsInCwd(selectedCwd)
-		if slotMatched {
-			slot.Store(Context{}) // Manager.ClearContext via cmd.go:655-661 shim
-		}
 		cs.ClearSelectedCwd()
 		agentsLine := ""
 		if n := droppedN; n > 0 {
 			agentsLine = fmt.Sprintf("dropped %d orphaned agent session(s); ", n)
 		}
-		var body string
-		if slotMatched {
-			body = fmt.Sprintf(
-				"⚠️ worktree directory is unreachable: %s\n"+
-					"another /gtw close (or an external `git worktree remove`) "+
-					"tore down this chat's fix worktree.\n"+
-					"%scleared the in-flight fix and the dangling cwd.\n"+
-					"hint: run /cwd <path> to point this chat at a directory again.",
-				selectedCwd, agentsLine)
-		} else {
-			body = fmt.Sprintf(
-				"⚠️ directory is unreachable: %s\n"+
-					"it was deleted out from under this chat (e.g. by another "+
-					"/gtw close running `git worktree remove`).\n"+
-					"%scleared the dangling cwd.\n"+
-					"hint: run /cwd <path> to point this chat at a directory again.",
-				selectedCwd, agentsLine)
-		}
+		body := fmt.Sprintf(
+			"⚠️ directory is unreachable: %s\n"+
+				"it was deleted out from under this chat (e.g. by another "+
+				"/gtw close running `git worktree remove`, or an external `rm -rf`).\n"+
+				"%scleared the dangling cwd.\n"+
+				"hint: run /cwd <path> to point this chat at a directory again.",
+			selectedCwd, agentsLine)
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
@@ -316,9 +292,6 @@ func RunClose(
 			deps.PRCache.WritePR(as.ID, nil)
 		}
 	}
-
-	// --- step 7: clear in-memory state ----------------------------
-	slot.Store(Context{})
 
 	// --- step 8: close's own success card -------------------------
 	// IM-friendly layout that mirrors the fix success card:

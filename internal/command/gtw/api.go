@@ -7,8 +7,14 @@
 //
 // Design constraints:
 //
-//   - Zero new per-repo / per-user files: state lives in ChatSession memory
-//     (gtwContext / gtwDrafts) and on the provider (GitHub / GitLab labels).
+//   - State lives in two places: (a) Manager.drafts (per-chat
+//     reaction-card registry, in-memory only), and (b)
+//     <worktree>/.nightme/gtw.yml (cwd-scoped on-disk snapshot,
+//     removed with the worktree on close). There is no parallel
+//     in-memory "active fix" copy — the yml is the source of
+//     truth for everything /gtw does. Provider-side labels
+//     (GitHub / GitLab `nightme/wip`) are an additional state
+//     surface for cross-process visibility.
 //   - Zero new OutboundKind: all output is plain text (the caller wraps
 //     it into whatever OutboundKind the channel wants).
 //   - The reaction-routing entry point is one extra branch in
@@ -29,9 +35,10 @@
 //     Probed via HTTPProber (mirrors CLIRunner / GitRunner injection
 //     pattern); nil → ExecHTTPProber{} with 3s default timeout.
 //
-// All public surfaces are safe to use from a single goroutine. The
-// ChatSession-owned fields (gtwContext / gtwDrafts) are guarded by
-// ChatSession.mu; the gtw package itself is stateless.
+// All public surfaces are safe to use from a single goroutine.
+// Manager.drafts is guarded by Manager.mu; the gtw package itself
+// is otherwise stateless — no global maps beyond the single
+// Manager instance the runtime instantiates at startup.
 //
 // The gtw package is gateway-agnostic on purpose: it does not import
 // internal/gateway. The runtime wraps the IM channel into a messages.Emitter

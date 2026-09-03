@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -12,21 +13,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/prcache"
 )
-
-// ContextSlot is the gtw-package view of one Manager's per-chat
-// context slot. Production: gtw.Manager.GetContext / SetContext.
-// Tests can pass a small adapter that wraps those methods.
-//
-// The slot is value-typed: Load returns a copy, Store accepts a
-// copy. The gtw package never holds a live pointer to the stored
-// value, which keeps the reader/writer race surface to zero.
-// Pass the zero Context{} to Store to clear.
-type ContextSlot interface {
-	Load() Context
-	Store(c Context)
-}
 
 // DraftsMap is the gtw-package view of one ChatSession's
 // gtwDrafts map. Production: gtwDraftsMap from
@@ -125,7 +114,6 @@ func RunFix(
 	ctx context.Context,
 	mode Mode,
 	cs *chatsession.ChatSession,
-	slot ContextSlot,
 	drafts DraftsMap,
 	deps HandlerDeps,
 	chatID, messageID string,
@@ -145,35 +133,33 @@ func RunFix(
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ "+command.NoActiveCwdReply), nil
 	}
-	if cur := slot.Load(); cur != (Context{}) {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
-	}
-	// preflightOrphanYml catches the one case the in-memory
-	// slot check above cannot: the user is sitting inside a
-	// worktree that already holds .nightme/gtw.yml (e.g.
-	// /cwd'd into a previous fix's worktree and forgot to
-	// /gtw close). v1.x does NOT scan sibling worktrees for
-	// ymls — parallel /gtw fix across separate worktrees is
-	// supported. See preflightOrphanYml's doc for the full
-	// rationale and the history of the removed sibling scan.
+	// --- preflight: this directory must not already be a fix worktree ---
+	// gtw is per-directory: every directory is its own island.
+	// A yml at <cwd>/.nightme/gtw.yml means this directory IS
+	// already the worktree of an in-flight fix (started in a
+	// previous session or by the user forgetting /gtw close).
+	// v1.x deliberately does NOT scan sibling worktrees for ymls
+	// — parallel /gtw fix across separate worktrees is the
+	// explicit design (the chat's reaction cards are cwd-scoped,
+	// each worktree's yml is its own recovery point).
 	//
 	// F-XX: starting a new fix on top of an active one is
 	// always a logic error regardless of intent. The previous
 	// --force bypass path is gone (see F-gtw-fix.md §1.2);
 	// users with stale worktree paths run `git worktree
 	// remove --force <path>` or `/gtw close` manually.
-	if err := preflightOrphanYml(cs.SelectedCwd()); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+	if _, err := os.Stat(pathutil.Join(cs.SelectedCwd(), nightmeDirName, gtwYmlName)); err == nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}
 
 	switch mode {
 	case ModeLocal:
 		// F-XX: local mode has no yes parameter; Factory.runFix
 		// drops args.Yes when args.Mode == ModeLocal.
-		return runFixLocal(ctx, cs, slot, drafts, deps, chatID, messageID, args[0])
+		return runFixLocal(ctx, cs, drafts, deps, chatID, messageID, args[0])
 	default:
-		return runFixRemote(ctx, cs, slot, drafts, deps, chatID, messageID, args[0], yes)
+		return runFixRemote(ctx, cs, drafts, deps, chatID, messageID, args[0], yes)
 	}
 }
 
@@ -190,7 +176,8 @@ func RunFix(
 //  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
 //  5. AddIssueLabel(LabelWIP); on WorktreeAdd failure RemoveIssueLabel
 //     and emit DraftFixWorktreeFail card.
-//  6. SetSelectedCwd → slot.Store(ModeRemote).
+//  6. SetSelectedCwd → WriteGTWYml (the yml is the cwd-scoped
+//     source of truth for hooks, /gtw close, and recovery).
 //  7. Render success card.
 //  8. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
@@ -198,7 +185,6 @@ func RunFix(
 func runFixRemote(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
-	slot ContextSlot,
 	drafts DraftsMap,
 	deps HandlerDeps,
 	chatID, messageID string,
@@ -444,10 +430,15 @@ func runFixRemote(
 	}
 
 	// --- switch cwd + write context + render + dispatch ----------
-	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
+	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
 		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, baseSHA, dispMode)
 }
 
+//  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
+//  5. WorktreeAdd; on failure emit DraftFixWorktreeFail card.
+//  6. SetSelectedCwd → WriteGTWYml (cwd-scoped source of truth).
+//  7. Render success card.
+//
 // runFixLocal implements the F-XX local-mode flow:
 //
 //	/gtw fix --name <branch>
@@ -461,7 +452,7 @@ func runFixRemote(
 //  3. PreflightWorktreeCreate.
 //  4. BranchExists? → hard-fail reply (F-XX §3.1; no card).
 //  5. WorktreeAdd; on failure emit DraftFixWorktreeFail card.
-//  6. SetSelectedCwd → slot.Store(ModeLocal, Issue=-1).
+//  6. SetSelectedCwd → WriteGTWYml (cwd-scoped source of truth).
 //  7. Render the simplified local success card.
 //
 // Local mode does NOT call provider.GetIssue / AddIssueLabel /
@@ -475,7 +466,6 @@ func runFixRemote(
 func runFixLocal(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
-	slot ContextSlot,
 	drafts DraftsMap,
 	deps HandlerDeps,
 	chatID, messageID string,
@@ -534,7 +524,7 @@ func runFixLocal(
 	// F-XX: dispMode is unused for ModeLocal (local never
 	// dispatches and renders its own success card); pass
 	// DispatchPlan as a zero-equivalent placeholder.
-	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
+	return completeFixAndDispatch(ctx, cs, deps, chatID, messageID,
 		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, "" /* baseSHA: local mode doesn't refresh */, DispatchPlan)
 }
 
@@ -557,7 +547,6 @@ func runFixLocal(
 func completeFixAndDispatch(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
-	slot ContextSlot,
 	deps HandlerDeps,
 	chatID, messageID, branch, worktreePath, repo, repoRoot, provider string,
 	mode Mode,
@@ -624,14 +613,15 @@ func completeFixAndDispatch(
 
 	// --- write on-disk snapshot (§14.4 step 6) -------------------
 	// Persist the immutable fix snapshot so /gtw close can rebuild
-	// state even after a daemon restart. State/UpdatedAt stay
-	// in-memory only. ErrGtwYmlExists is silently skipped
-	// (the on-disk snapshot already exists; re-running /gtw fix
-	// on the same worktree would re-write it, but we keep the
-	// old one to avoid clobbering any user edits). Any other error
-	// is warn-only: the worktree is the durable side effect and
-	// the user can manually finish or recover via /gtw close.
-	now := deps.Now()
+	// state even after a daemon restart. The yml is the cwd-scoped
+	// source of truth for hooks, /gtw close, and reaction handlers;
+	// there is no parallel in-memory copy (the slot is gone).
+	// ErrGtwYmlExists is silently skipped (the on-disk snapshot
+	// already exists; re-running /gtw fix on the same worktree
+	// would re-write it, but we keep the old one to avoid clobbering
+	// any user edits). Any other error is warn-only: the worktree
+	// is the durable side effect and the user can manually finish
+	// or recover via /gtw close.
 	if err := WriteGTWYml(worktreePath, Context{
 		Mode:     mode,
 		Issue:    issueID,
@@ -645,19 +635,6 @@ func completeFixAndDispatch(
 			"worktree", worktreePath,
 			"err", err)
 	}
-
-	// --- write gtwContext (§5.2.⑤) -------------------------------
-	slot.Store(Context{
-		Mode:      mode,
-		Issue:     issueID,
-		Branch:    branch,
-		Worktree:  worktreePath,
-		RepoRoot:  repoRoot,
-		Repo:      repo,
-		Provider:  provider,
-		State:     StateFixing,
-		UpdatedAt: now,
-	})
 
 	// /gtw fix doesn't touch the PR cache: the new worktree's
 	// AS has no cache yet (fresh allocation on the next

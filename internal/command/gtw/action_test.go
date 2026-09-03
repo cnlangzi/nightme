@@ -2,10 +2,13 @@ package gtw
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -177,6 +180,118 @@ func TestEmitFollowUp_SelectedIDIsOptionIDNotEmoji(t *testing.T) {
 	}
 	if got.Choice.Kind != messages.ChoiceKindDecision {
 		t.Errorf("Kind = %v, want Decision", got.Choice.Kind)
+	}
+}
+
+// TestExecuteWorktreeFailRetry_WritesYml pins the v1.5 fix
+// for a pre-existing latent bug: the retry path bypasses
+// completeFixAndDispatch, so without an explicit WriteGTWYml
+// here, /gtw close on the retry'd worktree would say "no active
+// fix to close in this chat" because the yml never existed.
+//
+// Test setup: a real temp git repo, a ChatSession pointing at
+// it, a DraftFixWorktreeFail payload stored in the Manager.
+// After HandleDraftReaction with the 🔄 emoji, the worktree
+// must exist, the yml must exist at <worktree>/.nightme/gtw.yml,
+// and ReadGTWYml must return the correct Context fields.
+func TestExecuteWorktreeFailRetry_WritesYml(t *testing.T) {
+	repoRoot := initTempRepo(t)
+
+	cs, _ := chatsession.New("chat-retry-yml", "test-agent")
+	rec := &recordingCh{}
+	cs.WithEmitter(rec)
+
+	m := newTestManager()
+	deps := HandlerDeps{
+		Git: ExecGitRunner{},
+		Now: func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) },
+	}
+
+	// Mimic what emitWorktreeFailDraft would have stored: a
+	// local-mode draft where /gtw fix --name failed at the
+	// WorktreeAdd step.
+	const slug = "login-bug"
+	p := FixDraftPayload{
+		IssueID:  -1,
+		Title:    "(local branch)",
+		Branch:   slug,
+		Slug:     slug,
+		Repo:     "",
+		Worktree: repoRoot, // matches emitWorktreeFailDraft's local-mode field
+		ChatID:   cs.ChatID,
+	}
+	m.StoreDraft(cs.ChatID, "msg-retry-1", &Draft{
+		Kind:    DraftFixWorktreeFail,
+		Payload: p,
+	})
+
+	// Set the chat's SelectedCwd to repoRoot so the retry path's
+	// WorktreeAdd runs from inside the repo (the safety helper
+	// does not derive repoRoot from cwd — it uses p.Worktree
+	// directly, which we set above to repoRoot). This mirrors
+	// the typical user state when a fix fails: they're sitting
+	// in the main repo, never having reached a worktree.
+	if err := cs.SetSelectedCwd(repoRoot); err != nil {
+		t.Fatalf("SetSelectedCwd repoRoot: %v", err)
+	}
+
+	ev := services.ReactionEvent{
+		ChatID:    cs.ChatID,
+		RequestID: "msg-retry-1",
+		Emoji:     "🔄",
+	}
+
+	consumed, err := HandleDraftReaction(context.Background(), m, deps, cs, ev)
+	if err != nil {
+		t.Fatalf("HandleDraftReaction: %v", err)
+	}
+	if !consumed {
+		t.Fatal("HandleDraftReaction consumed=false; want true (retry should consume the draft)")
+	}
+
+	// 1. Worktree must exist on disk.
+	wt := WorktreePath(repoRoot, slug)
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("worktree not created at %s: %v\nreply:\n%s", wt, err, rec.lastText())
+	}
+	// 2. SelectedCwd must point at the new worktree.
+	if got := cs.SelectedCwd(); !pathsEqual(got, wt) {
+		t.Errorf("SelectedCwd = %q, want %q", got, wt)
+	}
+	// 3. The yml must exist and round-trip with the right
+	//    fields. This is the core assertion of the v1.5 fix:
+	//    without WriteGTWYml in the retry path, this ReadGTWYml
+	//    would error out and /gtw close would say "no active
+	//    fix".
+	parsed, err := ReadGTWYml(wt)
+	if err != nil {
+		t.Fatalf("ReadGTWYml: %v (regression: retry path didn't write yml)", err)
+	}
+	if parsed.Mode != ModeLocal {
+		t.Errorf("yml.Mode = %q, want %q", parsed.Mode, ModeLocal)
+	}
+	if parsed.Issue != -1 {
+		t.Errorf("yml.Issue = %d, want -1", parsed.Issue)
+	}
+	if parsed.Branch != slug {
+		t.Errorf("yml.Branch = %q, want %q", parsed.Branch, slug)
+	}
+	if !pathsEqual(parsed.Worktree, wt) {
+		t.Errorf("yml.Worktree = %q, want %q", parsed.Worktree, wt)
+	}
+	if !pathsEqual(parsed.RepoRoot, repoRoot) {
+		t.Errorf("yml.RepoRoot = %q, want %q", parsed.RepoRoot, repoRoot)
+	}
+	// 4. The draft was consumed (Take'd) — without this, the
+	//    user could re-trigger the same retry emoji and confuse
+	//    the handler.
+	if m.GetDraft(cs.ChatID, "msg-retry-1") != nil {
+		t.Error("draft not consumed after successful retry")
+	}
+	// 5. The reply card should mention the variant is ready.
+	reply := rec.lastText()
+	if !strings.Contains(reply, "ready") {
+		t.Errorf("reply missing 'ready' marker:\n%s", reply)
 	}
 }
 

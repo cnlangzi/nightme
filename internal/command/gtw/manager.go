@@ -16,9 +16,17 @@ import (
 // F-51, Manager is the only place that knows what gtw state
 // looks like; chatsession is unaware.
 //
+// v1.5: the per-chat "active fix" Context map (Manager.states)
+// was removed. /gtw fix / close now key off the cwd-scoped yml
+// at <worktree>/.nightme/gtw.yml; there is no parallel in-memory
+// copy. Manager keeps the per-chat draft registry because
+// reaction handlers (HandleDraftReaction) look drafts up by
+// (chatID, RequestID) — the yml doesn't carry the request-id
+// mapping the draft card carries.
+//
 // The runtime instantiates one Manager per process and shares
-// it across all chats. Per-chat substate (states / drafts) is
-// keyed by chatID and protected by a single sync.RWMutex.
+// it across all chats. Per-chat substate (drafts) is keyed by
+// chatID and protected by a single sync.RWMutex.
 //
 // ChatSession references are NOT stored or looked up here.
 // Slash command paths receive cs from the dispatcher parameter;
@@ -29,7 +37,6 @@ import (
 // just-updated cwd).
 type Manager struct {
 	mu     sync.RWMutex
-	states map[string]Context           // chatID -> active /gtw fix snapshot
 	drafts map[string]map[string]*Draft // chatID -> requestID -> pending draft
 
 	// runs is the per-chat run lock that serialises /gtw
@@ -39,11 +46,11 @@ type Manager struct {
 	// Rationale: F-59 made every slash command async (a fresh
 	// goroutine per inbound), which means two /gtw fix / push /
 	// pr calls landing in quick succession now race against
-	// each other on Manager.states, Manager.drafts, the worktree
-	// directory, cs.SelectedCwd, and the agent session. The
-	// chatID is the natural serialisation boundary — two chats
-	// must remain independent — so we lazy-allocate one mutex
-	// per chatID and never free it. Never-freeing matches the
+	// each other on Manager.drafts, the worktree directory,
+	// cs.SelectedCwd, and the agent session. The chatID is the
+	// natural serialisation boundary — two chats must remain
+	// independent — so we lazy-allocate one mutex per chatID
+	// and never free it. Never-freeing matches the
 	// chatsession.Manager.hintLocks policy: freeing a *sync.Mutex
 	// while another goroutine is blocked on it would race.
 	//
@@ -68,7 +75,6 @@ type Manager struct {
 // and are never cached here.
 func NewManager() *Manager {
 	return &Manager{
-		states: make(map[string]Context),
 		drafts: make(map[string]map[string]*Draft),
 		now:    time.Now,
 	}
@@ -106,43 +112,6 @@ func (m *Manager) runLockFor(chatID string) *sync.Mutex {
 	mu := &sync.Mutex{}
 	actual, _ := m.runs.LoadOrStore(chatID, mu)
 	return actual.(*sync.Mutex)
-}
-
-// --- context (per-chat fix snapshot) ---
-
-// GetContext returns the active /gtw fix snapshot for chatID, or
-// the zero value (State == "") when no fix is active. Returns
-// by value to avoid races on the stored struct.
-func (m *Manager) GetContext(chatID string) Context {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.states[chatID]
-}
-
-// SetContext replaces the in-flight /gtw fix snapshot. Pass the
-// zero value (Context{}) to clear.
-func (m *Manager) SetContext(chatID string, ctx Context) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if (ctx == Context{}) {
-		delete(m.states, chatID)
-		return
-	}
-	if ctx.UpdatedAt.IsZero() {
-		ctx.UpdatedAt = m.now()
-	}
-	m.states[chatID] = ctx
-}
-
-// HasContext reports whether a /gtw fix is currently in flight
-// for chatID.
-func (m *Manager) HasContext(chatID string) bool {
-	return m.GetContext(chatID).State != ""
-}
-
-// ClearContext is a sugar wrapper for SetContext(chatID, Context{}).
-func (m *Manager) ClearContext(chatID string) {
-	m.SetContext(chatID, Context{})
 }
 
 // --- drafts (per-chat, per-RequestID) ---
@@ -218,20 +187,8 @@ func (m *Manager) DraftCount(chatID string) int {
 
 // ClearDrafts drops every pending draft for chatID. Used by
 // any future "abort all cards" path.
-// Does not touch the context state — call ClearContext
-// separately when both must go.
 func (m *Manager) ClearDrafts(chatID string) {
 	m.mu.Lock()
-	delete(m.drafts, chatID)
-	m.mu.Unlock()
-}
-
-// Reset clears all state for chatID (context + drafts).
-// Used by `nightme gtw reset` debug command. ChatSession
-// references are not cached here, so nothing else to clear.
-func (m *Manager) Reset(chatID string) {
-	m.mu.Lock()
-	delete(m.states, chatID)
 	delete(m.drafts, chatID)
 	m.mu.Unlock()
 }

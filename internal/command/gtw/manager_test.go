@@ -30,43 +30,6 @@ func newTestManager() *Manager {
 	return m
 }
 
-func TestManager_SetGetContext(t *testing.T) {
-	m := newTestManager()
-	if got := m.GetContext("c1"); got.State != "" {
-		t.Errorf("expected empty context initially, got %+v", got)
-	}
-
-	want := Context{Mode: ModeRemote, Issue: 42, Branch: "login-state-expiration", Worktree: "/code/A", State: StateFixing}
-	m.SetContext("c1", want)
-	got := m.GetContext("c1")
-	if got.Mode != want.Mode || got.Issue != want.Issue || got.Branch != want.Branch || got.State != want.State {
-		t.Errorf("got %+v, want %+v", got, want)
-	}
-	if got.UpdatedAt.IsZero() {
-		t.Errorf("expected UpdatedAt to be set by Manager.now, got zero")
-	}
-}
-
-func TestManager_ClearContext(t *testing.T) {
-	m := newTestManager()
-	m.SetContext("c1", Context{Mode: ModeRemote, Issue: 1, State: StateFixing})
-	m.ClearContext("c1")
-	if m.HasContext("c1") {
-		t.Errorf("expected HasContext false after clear")
-	}
-}
-
-func TestManager_HasContext(t *testing.T) {
-	m := newTestManager()
-	if m.HasContext("c1") {
-		t.Errorf("empty context should be HasContext=false")
-	}
-	m.SetContext("c1", Context{Mode: ModeRemote, State: StateFixing})
-	if !m.HasContext("c1") {
-		t.Errorf("set context should be HasContext=true")
-	}
-}
-
 func TestManager_StoreTakeDraft(t *testing.T) {
 	m := newTestManager()
 	d := &Draft{Kind: DraftFixWorktreeFail, Payload: FixDraftPayload{IssueID: 42, ChatID: "c1"}}
@@ -127,28 +90,10 @@ func TestManager_ClearDrafts(t *testing.T) {
 	m := newTestManager()
 	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixWorktreeFail})
 	m.StoreDraft("c1", "m2", &Draft{Kind: DraftFixWorktreeFail})
-	m.SetContext("c1", Context{Mode: ModeRemote, State: StateFixing})
 
 	m.ClearDrafts("c1")
 	if m.DraftCount("c1") != 0 {
 		t.Errorf("expected drafts cleared, got count %d", m.DraftCount("c1"))
-	}
-	if !m.HasContext("c1") {
-		t.Errorf("ClearDrafts should NOT touch context state")
-	}
-}
-
-func TestManager_Reset(t *testing.T) {
-	m := newTestManager()
-	m.SetContext("c1", Context{Mode: ModeRemote, State: StateFixing})
-	m.StoreDraft("c1", "m1", &Draft{Kind: DraftFixWorktreeFail})
-
-	m.Reset("c1")
-	if m.HasContext("c1") {
-		t.Errorf("Reset should clear context")
-	}
-	if m.DraftCount("c1") != 0 {
-		t.Errorf("Reset should clear drafts")
 	}
 }
 
@@ -195,46 +140,11 @@ func TestManager_TakeDraftRemovesEmptyMap(t *testing.T) {
 	}
 }
 
-// --- new tests for F-XX mode split ---
-
-// TestManager_ModeRoundtrip pins the Mode field on Context:
-// GetContext returns the mode that was set; legacy zero-mode
-// contexts (no Mode field set) are still readable.
-func TestManager_ModeRoundtrip(t *testing.T) {
-	m := newTestManager()
-	m.SetContext("c1", Context{Mode: ModeLocal, Issue: -1, Branch: "b", State: StateFixing})
-	got := m.GetContext("c1")
-	if got.Mode != ModeLocal {
-		t.Errorf("got Mode=%q, want %q", got.Mode, ModeLocal)
-	}
-	if got.Issue != -1 {
-		t.Errorf("got Issue=%d, want -1", got.Issue)
-	}
-}
-
-// TestManager_LegacyZeroModeDefaultsRemote covers back-compat:
-// persisted contexts from before F-XX have Mode == "". Read
-// path returns the zero-mode context unchanged. Callers that
-// care about mode should treat empty as ModeRemote (the
-// pre-F-XX default) — RunFix.runFixRemote handles this.
-func TestManager_LegacyZeroModeDefaultsRemote(t *testing.T) {
-	m := newTestManager()
-	// Simulate a legacy persisted entry by setting zero-value Mode.
-	m.SetContext("c1", Context{Issue: 42, Branch: "b", State: StateFixing})
-	got := m.GetContext("c1")
-	if got.Mode != "" {
-		t.Errorf("expected empty Mode for legacy entry, got %q", got.Mode)
-	}
-	// ModeFromDraftPayload should classify as Remote for any
-	// non-(-1) issue.
-	if got := ModeFromDraftPayload(FixDraftPayload{IssueID: 42}); got != ModeRemote {
-		t.Errorf("legacy payload classified as %q, want %q", got, ModeRemote)
-	}
-}
+// --- mode helper tests ---
 
 // TestManager_ModeFromPayload exercises the helper that infers
-// Mode from a draft payload (action handler writes a new
-// Context after the user clicks 🆕 / 🔗 / 🔄 / ❌).
+// Mode from a draft payload (used by reaction handlers when
+// reconstructing fix metadata from a clicked card).
 func TestManager_ModeFromPayload(t *testing.T) {
 	if got := ModeFromDraftPayload(FixDraftPayload{IssueID: -1}); got != ModeLocal {
 		t.Errorf("IssueID=-1 → %q, want %q", got, ModeLocal)

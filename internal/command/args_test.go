@@ -377,6 +377,71 @@ func TestParsedArgs_Accessors(t *testing.T) {
 	}
 }
 
+// TestParsedArgs_Has distinguishes "absent" from "supplied
+// with empty value" — Value() returns "" in both cases, so
+// callers that need flag presence (e.g. mutual-exclusion
+// between a value-taking flag and a bare positional) must use
+// Has() instead.
+//
+// The empty-string case is the critical regression guard:
+// `ParseCmdArgs(["--name", ""], spec)` stores name → "" in
+// values, and a Value()-based presence check would falsely
+// report "not supplied". Has() must still report true.
+func TestParsedArgs_Has(t *testing.T) {
+	valueSpec := CmdSpec{
+		Name: "/cmd",
+		Flags: map[string]FlagSpec{
+			"-n":     {Name: "name", TakesValue: true},
+			"--name": {Name: "name", TakesValue: true},
+		},
+		MinArgs: 0,
+		MaxArgs: 0,
+	}
+	boolSpec := CmdSpec{
+		Name: "/cmd",
+		Flags: map[string]FlagSpec{
+			"-y":    {Name: "yes"},
+			"--yes": {Name: "yes"},
+		},
+		MinArgs: 0,
+		MaxArgs: 0,
+	}
+
+	cases := []struct {
+		name   string
+		spec   CmdSpec
+		argv   []string
+		flag   string
+		expect bool
+	}{
+		// Value-taking: present with value
+		{"value-set", valueSpec, []string{"--name", "foo"}, "name", true},
+		// Value-taking: present with empty value (the critical case)
+		{"value-empty", valueSpec, []string{"--name", ""}, "name", true},
+		{"value-empty-short", valueSpec, []string{"-n", ""}, "name", true},
+		// Value-taking: absent
+		{"value-absent", valueSpec, []string{}, "name", false},
+		// Boolean: present
+		{"bool-set", boolSpec, []string{"-y"}, "yes", true},
+		{"bool-set-long", boolSpec, []string{"--yes"}, "yes", true},
+		// Boolean: absent
+		{"bool-absent", boolSpec, []string{}, "yes", false},
+		// Unknown flag name always false
+		{"unknown-flag", valueSpec, []string{}, "nope", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			parsed, err := ParseCmdArgs(c.argv, c.spec)
+			if err != nil {
+				t.Fatalf("ParseCmdArgs(%v) unexpected error: %v", c.argv, err)
+			}
+			if got := parsed.Has(c.flag); got != c.expect {
+				t.Errorf("Has(%q) = %v, want %v", c.flag, got, c.expect)
+			}
+		})
+	}
+}
+
 // TestParseCmdArgs_NamelessSpec covers the fallback labels used
 // when a caller leaves CmdSpec.Name / Usage empty — the error
 // must still be a complete sentence.

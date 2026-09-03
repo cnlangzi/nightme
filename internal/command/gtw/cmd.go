@@ -478,8 +478,11 @@ type fixArgs struct {
 // a command accepts).
 var fixCmdSpec = command.CmdSpec{
 	Name: "/gtw fix",
-	Usage: "/gtw fix <issue-id> [-y|--yes]\n" +
-		"                /gtw fix --name <branch> | -n <branch>",
+	// Single-line Usage keeps the ". Usage: …" suffix readable
+	// when appended to parse-error messages — multi-line
+	// Usage would land the second half mid-sentence in
+	// every error reply.
+	Usage: "/gtw fix <issue-id> [-y|--yes] | /gtw fix --name <branch> | -n <branch>",
 	Flags: map[string]command.FlagSpec{
 		"-y":     {Name: "yes"},
 		"--yes":  {Name: "yes"},
@@ -499,28 +502,50 @@ var fixCmdSpec = command.CmdSpec{
 // is asking for. Returns *fixArgs{Mode, RawArg, Yes}; any
 // failure comes straight from command.ParseCmdArgs and already
 // carries the Usage tail (issue #291 contract).
+//
+// Two /gtw fix-specific concerns live outside the shared
+// lexer:
+//
+//  1. Mutual exclusion between --name <branch> and a bare
+//     positional. The shared lexer can't express it because it
+//     doesn't know which positional pattern a command accepts.
+//     We use parsed.Has("name") for flag presence (so an empty
+//     --name value still counts as "the flag was used") rather
+//     than parsed.Value("name") != "" which would conflate
+//     absent with empty.
+//  2. Empty / whitespace-only --name value. The shared lexer
+//     happily consumes the next token verbatim (even an empty
+//     one); we surface this as a user-facing error rather than
+//     handing an empty branch name to DeriveBranchFromName.
 func parseFixArgs(argv []string) (fixArgs, error) {
 	parsed, err := command.ParseCmdArgs(argv, fixCmdSpec)
 	if err != nil {
 		return fixArgs{}, err
 	}
 
-	name := strings.TrimSpace(parsed.Value("name"))
-	positional := strings.TrimSpace(parsed.Arg(0))
+	hasName := parsed.Has("name")
+	hasPositional := parsed.NArgs() > 0
 
-	// Mutual exclusion: --name <branch> and a bare positional
-	// cannot be combined. /gtw fix-specific; lives outside
-	// the shared lexer.
-	if name != "" && positional != "" {
+	// Mutual exclusion: --name flag presence and a bare
+	// positional cannot be combined.
+	if hasName && hasPositional {
 		return fixArgs{}, fmt.Errorf(
 			"%s takes either <issue-id> or --name <branch>, not both%s",
 			fixCmdSpec.Name, fixCmdSpec.UsageTail())
 	}
 
+	name := strings.TrimSpace(parsed.Value("name"))
+	positional := strings.TrimSpace(parsed.Arg(0))
+
 	switch {
-	case name != "":
+	case hasName:
+		if name == "" {
+			return fixArgs{}, fmt.Errorf(
+				"%s: --name requires a non-empty branch name%s",
+				fixCmdSpec.Name, fixCmdSpec.UsageTail())
+		}
 		return fixArgs{Mode: ModeLocal, RawArg: name, Yes: parsed.Bool("yes")}, nil
-	case positional != "":
+	case hasPositional:
 		return fixArgs{Mode: ModeRemote, RawArg: positional, Yes: parsed.Bool("yes")}, nil
 	default:
 		return fixArgs{}, fmt.Errorf(

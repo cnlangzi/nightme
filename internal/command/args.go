@@ -33,11 +33,13 @@ import (
 //  5. Arity is enforced: positional args below MinArgs or above
 //     MaxArgs are hard-rejected, not silently dropped.
 //
-// parseFixArgs itself deliberately does NOT use this helper: its
-// Plan/Execute mode dispatch is specific to `/gtw fix` and
-// folding it in would conflate two concerns (issue #291
-// "Out of scope"). It stays the reference implementation; new
-// commands adopt ParseCmdArgs.
+// parseFixArgs itself now uses this helper. Its Plan/Execute
+// mode dispatch (Mode + Yes) and the mutual-exclusion between
+// `--name` and a bare positional live in a thin wrapper around
+// ParseCmdArgs — see internal/command/gtw/cmd.go. Adding a
+// new flag means adding one entry to fixCmdSpec.Flags; the
+// shared lexer keeps enforcing the "unknown flag" / arity /
+// "missing value" contract uniformly across /<cmd> surfaces.
 
 // UnboundedArgs is the CmdSpec.MaxArgs value meaning "any number
 // of positional args" — used by commands whose payload is a
@@ -115,8 +117,21 @@ type ParsedArgs struct {
 }
 
 // Value returns the value of a value-taking flag, or "" when it
-// was not supplied.
+// was not supplied. Cannot distinguish "not supplied" from
+// "supplied with empty value" — use Has for that.
 func (p ParsedArgs) Value(name string) string { return p.values[name] }
+
+// Has reports whether a flag (boolean OR value-taking) was
+// supplied in argv. Useful for post-parse checks that need to
+// distinguish "absent" from "supplied with empty value" — e.g.
+// mutual exclusion between a value-taking flag and a bare
+// positional, where an empty --name value still counts as
+// "--name was used".
+func (p ParsedArgs) Has(name string) bool {
+	_, valueOK := p.values[name]
+	_, boolOK := p.bools[name]
+	return valueOK || boolOK
+}
 
 // Bool reports whether a boolean flag was supplied at least
 // once.

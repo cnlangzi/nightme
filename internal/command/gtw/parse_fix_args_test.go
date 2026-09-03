@@ -3,6 +3,8 @@ package gtw
 import (
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/command"
 )
 
 // assertParseErr fails the test unless err is non-nil and its
@@ -131,12 +133,20 @@ func TestParseFixArgs_UnknownFlagRejected(t *testing.T) {
 }
 
 // TestParseFixArgs_LocalModeTooManyArgs pins the strict-arity
-// check: `--name <branch> <extra>` is rejected (rather than
-// silently dropping <extra>). Matches git CLI conventions.
+// check on the local-mode path: two bare positionals with no
+// --name flag should be rejected (rather than silently
+// dropping one). Matches git CLI conventions.
+//
+// Cases that mix `--name <branch>` with a bare positional now
+// route to TestParseFixArgs_NameAndPositionalMutuallyExclusive
+// instead — the shared lexer consumes the --name value and
+// leaves only one positional, so MaxArgs is satisfied and the
+// error comes from parseFixArgs' post-parse mutual-exclusion
+// check, not from arity enforcement.
 func TestParseFixArgs_LocalModeTooManyArgs(t *testing.T) {
 	cases := [][]string{
-		{"--name", "my-branch", "extra"},
-		{"-n", "my-branch", "extra", "-y"},
+		{"my-branch", "extra"},
+		{"my-branch", "extra", "-y"},
 	}
 	for _, in := range cases {
 		t.Run(strings.Join(in, " "), func(t *testing.T) {
@@ -195,19 +205,58 @@ func TestParseFixArgs_MissingArgument(t *testing.T) {
 // <branch> cannot both be supplied. /gtw fix-specific; the
 // shared lexer can't enforce it because it doesn't know
 // which positional pattern a command accepts.
+//
+// The empty-value cases (`--name ""` paired with a positional)
+// are the critical ones: the mutual-exclusion check must use
+// flag presence, not value non-emptiness, otherwise the empty
+// value would slip past and the input would be misclassified
+// as ModeRemote. parsed.Has("name") (added on ParsedArgs) is
+// what makes these cases reject correctly.
 func TestParseFixArgs_NameAndPositionalMutuallyExclusive(t *testing.T) {
-	cases := [][]string{
-		{"--name", "my-branch", "42"},   // --name + extra positional
-		{"42", "--name", "my-branch"},   // positional first, --name second
-		{"-n", "my-branch", "42", "-y"}, // -n + extra + yes
+	cases := []struct {
+		name string
+		in   []string
+	}{
+		{"name-then-positional", []string{"--name", "my-branch", "42"}},
+		{"positional-then-name", []string{"42", "--name", "my-branch"}},
+		{"short-name-then-extra-yes", []string{"-n", "my-branch", "42", "-y"}},
+		// Empty value still counts as "--name was used"; with a
+		// bare positional also present, must reject as mixed.
+		{"empty-name-then-positional", []string{"--name", "", "42"}},
+		{"positional-then-empty-name", []string{"42", "--name", ""}},
 	}
-	for _, in := range cases {
-		t.Run(strings.Join(in, " "), func(t *testing.T) {
-			_, err := parseFixArgs(in)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseFixArgs(c.in)
 			if err == nil {
-				t.Fatalf("parseFixArgs(%v) returned no error; want mutual-exclusion error", in)
+				t.Fatalf("parseFixArgs(%v) returned no error; want mutual-exclusion error", c.in)
 			}
 			assertParseErr(t, err, "not both")
+		})
+	}
+}
+
+// TestParseFixArgs_EmptyNameRejected pins the empty-value
+// path: `--name ""` (with no bare positional) must error out
+// rather than silently producing an empty RawArg that
+// DeriveBranchFromName would later choke on. The earlier
+// mutual-exclusion check (using parsed.Has) catches "name was
+// used but value is empty" before any downstream branching.
+func TestParseFixArgs_EmptyNameRejected(t *testing.T) {
+	cases := [][]string{
+		{"--name", ""},
+		{"-n", ""},
+		{"--name", "   "}, // whitespace-only is empty after TrimSpace
+		{"-n", "\t"},
+		{"--name", "", "-y"}, // yes flag shouldn't paper over an empty name
+	}
+	for _, in := range cases {
+		t.Run(strings.Join(in, "_"), func(t *testing.T) {
+			_, err := parseFixArgs(in)
+			if err == nil {
+				t.Fatalf("parseFixArgs(%v) returned no error; want empty-name error", in)
+			}
+			assertParseErr(t, err, "non-empty branch name")
 		})
 	}
 }
@@ -292,10 +341,15 @@ func TestParseFixArgs_PositionalOrdering(t *testing.T) {
 // intentional: minimal, current-state, no F-XX IDs or
 // process records.
 func TestFixCmdSpec(t *testing.T) {
-	wantUsage := "/gtw fix <issue-id> [-y|--yes]\n" +
-		"                /gtw fix --name <branch> | -n <branch>"
+	wantUsage := "/gtw fix <issue-id> [-y|--yes] | /gtw fix --name <branch> | -n <branch>"
 	if got := fixCmdSpec.Usage; got != wantUsage {
 		t.Errorf("fixCmdSpec.Usage =\n%q\nwant\n%q", got, wantUsage)
+	}
+
+	// Usage is single-line so the ". Usage: …" suffix appended
+	// to parse errors doesn't land mid-sentence.
+	if strings.Contains(fixCmdSpec.Usage, "\n") {
+		t.Errorf("fixCmdSpec.Usage must be single-line; got %q", fixCmdSpec.Usage)
 	}
 
 	// Recognised flags: -y/--yes boolean; -n/--name value-taking.

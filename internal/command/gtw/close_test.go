@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"fmt"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"os"
 	"path/filepath"
@@ -80,6 +81,15 @@ type programmableGit struct {
 	// like "Already up to date." or "Updating abc..def\n...".
 	syncPullOut string
 
+	// remoteURLResp is the value returned for any
+	// `remote get-url origin` call (used by the new
+	// removeWIPLabel step to detect the provider / parse
+	// owner/repo). Empty means "no origin remote" — the label
+	// helper surfaces this as a ❌ reply and aborts the close.
+	// Tests that wire a fake provider for label cleanup
+	// pre-set this to e.g. "https://github.com/cnlangzi/nightme.git".
+	remoteURLResp string
+
 	// calls records every (args) the fake saw, for assertions
 	// about which commands RunClose issued.
 	calls [][]string
@@ -105,6 +115,8 @@ func (p *programmableGit) Run(_ context.Context, dir string, args ...string) (st
 		return p.syncOriginRef + "\n", "", nil
 	case len(args) >= 1 && args[0] == "pull":
 		return p.syncPullOut, "", nil
+	case len(args) >= 3 && args[0] == "remote" && args[1] == "get-url":
+		return p.remoteURLResp, "", nil
 	}
 	return "", "", nil
 }
@@ -197,6 +209,52 @@ func seedFix(t *testing.T, rig *closeTestRig, wt, repoRoot string) {
 	// v1.5: no in-memory slot to seed — the yml is the cwd-scoped
 	// source of truth, and the chat's SelectedCwd + yml together
 	// are the full "active fix" state.
+}
+
+// seedFixRemote writes a ModeRemote yml at <wt>/.nightme/gtw.yml
+// so the new step 2.5 (nightme/wip label removal) has a real
+// issue + repo + provider to act on. Wires the fake provider
+// into rig.deps.Detect so removeWIPLabel's `detect(...)` call
+// returns the test's recording stub. The git fake must also be
+// configured with remoteURLResp matching the provider's
+// (owner, repo) so ParseRepoOwner and the success-card assertion
+// see consistent values.
+//
+// Defaults to issue #42 / cnlangzi/nightme — match the existing
+// fix-side test fixtures so the test names stay grep-able.
+func seedFixRemote(t *testing.T, rig *closeTestRig, prov *fakeGitProvider, wt, repoRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(wt, nightmeDirName), 0o755); err != nil {
+		t.Fatalf("mkdir .nightme: %v", err)
+	}
+	if err := WriteGTWYml(wt, Context{
+		Mode:     ModeRemote,
+		Issue:    42,
+		Branch:   "fix/42-test",
+		Worktree: wt,
+		RepoRoot: repoRoot,
+		// Repo / Provider populated here even though the label
+		// helper re-detects from the live remote URL — they're
+		// part of the persisted snapshot and a future helper
+		// (or a debug dump) may consume them.
+		Repo:     "cnlangzi/nightme",
+		Provider: "github",
+		State:    StateFixing,
+	}, rig.deps.Now); err != nil {
+		t.Fatalf("seed WriteGTWYml: %v", err)
+	}
+	if err := rig.cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("seed SetSelectedCwd: %v", err)
+	}
+	// Wire the fake provider so removeWIPLabel's detect(...)
+	// returns it. Without this, Detect falls through to the
+	// package-level Detect, which probes the live internet
+	// (and would fail in tests anyway).
+	rig.deps.Detect = fakeDetect(prov)
+	// Stage the git fake's `remote get-url origin` response to
+	// match the fake provider's host. cnlangzi/nightme on
+	// github.com is the canonical test fixture.
+	rig.git.remoteURLResp = "https://github.com/cnlangzi/nightme.git"
 }
 
 // --- tests ---
@@ -1024,5 +1082,213 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 		if strings.Contains(reply, forbidden) {
 			t.Errorf("reply unexpectedly contains %q (transient path should not say this):\n%s", forbidden, reply)
 		}
+	}
+}
+
+// --- step 2.5: nightme/wip label removal (ModeRemote) --------
+
+// TestRunClose_ModeRemote_RemovesWIPLabel verifies the happy
+// path of the new label-cleanup gate: ModeRemote yml, fake
+// provider returns nil from RemoveIssueLabel, RunClose should
+//
+//   (a) call provider.RemoveIssueLabel with the right
+//       (owner, repo, issueID, label) — i.e. nightme/wip on
+//       cnlangzi/nightme#42,
+//   (b) THEN proceed to the local cleanup (worktree remove,
+//       branch -D) — i.e. the gate succeeded and execution
+//       continued, and
+//   (c) surface the label removal on the success card so the
+//       user sees both halves of the close.
+func TestRunClose_ModeRemote_RemovesWIPLabel(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// (a) the helper must have called RemoveIssueLabel exactly
+	// once, with the right args. CallsByMethod filters by method
+	// name so unrelated future calls don't pollute the slice.
+	rmCalls := prov.CallsByMethod("RemoveIssueLabel")
+	if len(rmCalls) != 1 {
+		t.Fatalf("RemoveIssueLabel calls = %d, want 1; all calls=%v", len(rmCalls), prov.Calls())
+	}
+	got := rmCalls[0]
+	if got.Owner != "cnlangzi" || got.Repo != "nightme" {
+		t.Errorf("RemoveIssueLabel owner/repo = %s/%s, want cnlangzi/nightme", got.Owner, got.Repo)
+	}
+	if got.ID != 42 {
+		t.Errorf("RemoveIssueLabel ID = %d, want 42", got.ID)
+	}
+	if got.Label != LabelWIP {
+		t.Errorf("RemoveIssueLabel label = %q, want %q", got.Label, LabelWIP)
+	}
+
+	// (b) local cleanup must have happened AFTER label removal.
+	// Order matters: RemoveIssueLabel is the gate. We assert it
+	// came before worktree remove + branch -D by index in
+	// (prov.calls ∪ git.calls) — but since those slices are on
+	// different goroutines (mock provider vs fake git), the
+	// only robust ordering check is "both local-cleanup
+	// commands fired AND the provider call fired". The unit
+	// test for ordering under failure (next test) covers the
+	// "local cleanup did NOT fire on label failure" half.
+	sawRemove, sawBranchDel := false, false
+	for _, args := range rig.git.calls {
+		if len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" {
+			sawRemove = true
+		}
+		if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+			sawBranchDel = true
+		}
+	}
+	if !sawRemove {
+		t.Errorf("git worktree remove not called after label success; calls=%v", rig.git.calls)
+	}
+	if !sawBranchDel {
+		t.Errorf("git branch -D not called after label success; calls=%v", rig.git.calls)
+	}
+
+	// (c) success card must surface the label removal so the
+	// user sees the platform-side half of the close. We assert
+	// on the full text — "nightme/wip removed" is the literal
+	// phrasing of the new card line — and on owner/repo/issue
+	// appearing in canonical form.
+	gotText := rig.rec.lastText()
+	if !strings.Contains(gotText, "nightme/wip removed") {
+		t.Errorf("success card missing 'nightme/wip removed':\n%s", gotText)
+	}
+	if !strings.Contains(gotText, "cnlangzi/nightme#42") {
+		t.Errorf("success card missing canonical issue ref:\n%s", gotText)
+	}
+}
+
+// TestRunClose_ModeRemote_LabelRemovalFails_AbortsBeforeLocalCleanup
+// verifies the gate semantics: when RemoveIssueLabel returns an
+// error, RunClose must NOT proceed to worktree remove or branch
+// -D, must NOT switch CWD, and must surface the platform error
+// in the reply. This is the core invariant of "label cleanup
+// first; local cleanup only on success" — without this test the
+// gate could regress to "label cleanup happens somewhere in the
+// flow, but failures are ignored".
+func TestRunClose_ModeRemote_LabelRemovalFails_AbortsBeforeLocalCleanup(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	// Configure the fake to return an error from
+	// RemoveIssueLabel — simulates auth expired / network down
+	// / repo moved. The error message is intentionally
+	// distinctive so we can grep for it in the reply.
+	prov.SetRemoveIssueLabelErr(fmt.Errorf("403 Forbidden: token expired"))
+	seedFixRemote(t, rig, prov, wt, repoRoot)
+
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// RemoveIssueLabel was called (the helper tried); we don't
+	// need to assert args here since the previous test covers
+	// that, but we do verify it WAS attempted and that the
+	// attempt's error caused the gate to trigger.
+	if calls := prov.CallsByMethod("RemoveIssueLabel"); len(calls) != 1 {
+		t.Fatalf("RemoveIssueLabel calls = %d, want 1 (gate must try)", len(calls))
+	}
+
+	// THE CORE INVARIANT: no local cleanup must have happened.
+	for _, args := range rig.git.calls {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
+			t.Errorf("git worktree remove called despite label-removal failure: %v", args)
+		}
+		if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
+			t.Errorf("git branch -D called despite label-removal failure: %v", args)
+		}
+	}
+
+	// CWD unchanged: user is still pointed at the worktree so
+	// they can retry /gtw close after fixing auth / network.
+	if got := rig.cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd after label-removal failure = %q, want %q (unchanged)", got, wt)
+	}
+
+	// Reply must surface the underlying error so the user can
+	// act on it (re-auth, retry, etc.) and must NOT claim the
+	// close succeeded.
+	gotReply := rig.rec.lastText()
+	if !strings.Contains(gotReply, "403 Forbidden") {
+		t.Errorf("reply missing underlying platform error:\n%s", gotReply)
+	}
+	if !strings.Contains(gotReply, "nightme/wip") {
+		t.Errorf("reply missing label name:\n%s", gotReply)
+	}
+	if !strings.Contains(gotReply, "left intact") {
+		t.Errorf("reply must explain state is left intact for retry:\n%s", gotReply)
+	}
+	if strings.Contains(gotReply, "✅ closed") {
+		t.Errorf("reply must not claim close succeeded on label failure:\n%s", gotReply)
+	}
+}
+
+// TestRunClose_ModeLocal_SkipsLabelCleanup verifies the ModeLocal
+// branch: c.Issue == -1, no LabelWIP was ever added, so the
+// helper must short-circuit before touching git remote or the
+// provider. This protects the existing ModeLocal happy path
+// (TestRunClose_CleanWorktree_Success) from regressing into
+// requiring a configured origin remote / provider — local
+// worktrees don't have a remote issue.
+//
+// We use a "detect panic" check: deps.Detect is set to a
+// function that panics if called. If the helper tries to call
+// detect, the test fails loudly. If the helper short-circuits
+// (correct behaviour), detect is never called.
+func TestRunClose_ModeLocal_SkipsLabelCleanup(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	seedFix(t, rig, wt, repoRoot)
+	// Defensive: prove the helper does NOT touch git remote or
+	// the provider in ModeLocal. If anything in the label path
+	// fires, this trips before the normal close path runs.
+	rig.deps.Detect = func(context.Context, string, HTTPProber, string) (GitProvider, error) {
+		t.Fatalf("deps.Detect called in ModeLocal — removeWIPLabel should have short-circuited")
+		return nil, nil
+	}
+
+	res, err := RunClose(context.Background(), rig.cs, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// Local cleanup must still run normally — the gate is
+	// label-only, so a skipped label means the rest of the
+	// flow is unchanged.
+	if got := rig.cs.SelectedCwd(); got != repoRoot {
+		t.Errorf("SelectedCwd after close = %q, want %q", got, repoRoot)
+	}
+
+	// Success card must NOT mention label removal — there was
+	// no label, and the helper returned (false, "", ""), so
+	// the card stays on its existing 4-line shape.
+	gotText := rig.rec.lastText()
+	if strings.Contains(gotText, "nightme/wip removed") {
+		t.Errorf("ModeLocal success card must not mention label removal:\n%s", gotText)
 	}
 }

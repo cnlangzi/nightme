@@ -275,6 +275,14 @@ func (s CmdSpec) usageTail() string {
 	return ". Usage: " + s.Usage
 }
 
+// UsageTail is the exported form of usageTail. Use it from
+// post-parse error sites (e.g. cross-flag validation the
+// shared lexer can't express) so user-facing errors carry the
+// same Usage suffix as the lexer's own errors.
+func (s CmdSpec) UsageTail() string {
+	return s.usageTail()
+}
+
 // flagHint renders the recognised-flag list for error messages,
 // grouping aliases of the same canonical flag: "-a/--agent".
 // Groups are ordered deterministically (by canonical name) so

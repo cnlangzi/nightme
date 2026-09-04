@@ -309,9 +309,14 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 // in the v3 prompt rewrite (see buildPRPrompt doc comment). The v3
 // format is NightMe-branded + Sourcery-style summary: ONE `## `
 // heading (`## Summary by NightMe`), inline category labels
-// (`New Features:`), optional `Risk:` line, optional `Closes #N`.
-// The v2 four-dimension structure (Why / What / Diff overview /
-// Test evidence) and the `## Context` block are removed.
+// (`New Features:`), optional `Risk:` line. The v2 four-dimension
+// structure (Why / What / Diff overview / Test evidence) and the
+// `## Context` block are removed.
+//
+// Note: the GitHub `Closes #N` keyword is NOT in the prompt —
+// dispatchPR appends it in Go via appendClosesFooter, so the LLM
+// can't drop / misformat it. See TestAppendClosesFooter_* for the
+// footer-injection contract.
 // -----------------------------------------------------------------------------
 
 func TestBuildPRPrompt_Remote(t *testing.T) {
@@ -327,7 +332,7 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	mustContain(t, p, "## Output Format")
 	mustContain(t, p, "## Task")
 	// v3 anchors: brand heading + category structure + optional
-	// Risk line + GitHub issue-closing keyword.
+	// Risk line.
 	mustContain(t, p, "## Summary by NightMe")
 	mustContain(t, p, "New Features:")
 	mustContain(t, p, "Bug Fixes:")
@@ -337,9 +342,11 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	mustContain(t, p, "Chore / Build / CI:")
 	mustContain(t, p, "Risk:")
 	mustContain(t, p, "Conventional Commits")
-	// v2 anchor kept: GitHub issue closing keyword.
-	mustContain(t, p, "Closes #42")
-	mustContain(t, p, "Refs #42")
+	// Negative: the prompt must NOT mention Closes / Refs.
+	// The footer is appended in Go (appendClosesFooter) — keeping
+	// it out of the prompt avoids a soft LLM guarantee.
+	mustNotContain(t, p, "Closes #")
+	mustNotContain(t, p, "Refs #")
 
 	// Negative: v3 removed sections must NOT leak back into the
 	// prompt. Each of these was a `## ` heading in v2; their
@@ -369,9 +376,12 @@ func TestBuildPRPrompt_LocalNoIssue(t *testing.T) {
 	if strings.Contains(p, "Reference issue") {
 		t.Fatalf("ModeLocal / no-issue prompt should not include issue ref:\n%s", p)
 	}
-	// v3: no Closes / Refs footer when Issue is not set.
+	// The prompt never mentions Closes / Refs — that footer is
+	// appended in Go (appendClosesFooter) and only when Issue > 0.
+	// Keeping the negative guard here so a future prompt edit
+	// can't quietly re-introduce the keyword.
 	if strings.Contains(p, "Closes #") || strings.Contains(p, "Refs #") {
-		t.Fatalf("no-issue prompt should not include issue keyword:\n%s", p)
+		t.Fatalf("prompt should not include issue keyword (footer is appended in Go):\n%s", p)
 	}
 }
 
@@ -552,19 +562,6 @@ func TestBuildPRPromptV3_PreserveParseability(t *testing.T) {
 	mustContain(t, p, "`gh pr create`")
 }
 
-// TestBuildPRPromptV3_IssueKeywordOnlyOnIssue checks that the
-// GitHub issue-closing keyword is gated on c.Issue > 0.
-func TestBuildPRPromptV3_IssueKeywordOnlyOnIssue(t *testing.T) {
-	withIssue := buildPRPrompt(Context{Worktree: "/w", Branch: "x", RepoRoot: "/r", Repo: "o/r", Issue: 7}, "main")
-	mustContain(t, withIssue, "Closes #7")
-	mustContain(t, withIssue, "Refs #7")
-
-	noIssue := buildPRPrompt(Context{Worktree: "/w", Branch: "x", RepoRoot: "/r", Repo: "o/r"}, "main")
-	if strings.Contains(noIssue, "Closes #") || strings.Contains(noIssue, "Refs #") {
-		t.Fatalf("no-issue prompt should not include issue keyword:\n%s", noIssue)
-	}
-}
-
 // TestBuildPRPromptV3_BranchInCommands checks that the actual
 // base branch name appears in the tool-floor git commands.
 func TestBuildPRPromptV3_BranchInCommands(t *testing.T) {
@@ -572,6 +569,85 @@ func TestBuildPRPromptV3_BranchInCommands(t *testing.T) {
 
 	mustContain(t, p, "git log --oneline develop..HEAD")
 	mustContain(t, p, "git diff develop...HEAD --stat")
+}
+
+// -----------------------------------------------------------------------------
+// appendClosesFooter
+//
+// dispatchPR's deterministic post-parse step that stamps the
+// GitHub auto-close keyword on the last line of the body. Replaces
+// the v2/v3 prompt instruction that asked the agent to write the
+// line itself — the LLM is no longer trusted to remember it.
+//
+// Contract:
+//   - issue <= 0 (ModeLocal worktrees, default Context): body is
+//     returned untouched.
+//   - issue > 0 and body lacks the exact `Closes #N` line: append
+//     `Closes #N` as the last line, with a blank-line separator.
+//   - issue > 0 and body already has `Closes #N`: return body
+//     unchanged (idempotency; protects against double-appends
+//     during prompt-rollout windows).
+// -----------------------------------------------------------------------------
+
+func TestAppendClosesFooter_IssueZeroIsNoop(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo.\n"
+	if got := appendClosesFooter(body, 0); got != body {
+		t.Fatalf("issue=0 must not mutate body:\nwant: %q\ngot:  %q", body, got)
+	}
+}
+
+func TestAppendClosesFooter_IssueNegativeIsNoop(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo.\n"
+	if got := appendClosesFooter(body, -1); got != body {
+		t.Fatalf("issue<0 must not mutate body:\nwant: %q\ngot:  %q", body, got)
+	}
+}
+
+func TestAppendClosesFooter_AppendsOnLastLine(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo bar baz."
+	want := "## Summary by NightMe\n\nFoo bar baz.\n\nCloses #42\n"
+	if got := appendClosesFooter(body, 42); got != want {
+		t.Fatalf("appendClosesFooter mismatch:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestAppendClosesFooter_TrimsTrailingWhitespaceBeforeAppend(t *testing.T) {
+	// Bodies frequently end with extra newlines / spaces from
+	// the agent. We trim to keep the footer on its own line
+	// instead of glued onto a half-blank previous line.
+	body := "## Summary by NightMe\n\nFoo.\n\n\n   \t\n"
+	want := "## Summary by NightMe\n\nFoo.\n\nCloses #7\n"
+	if got := appendClosesFooter(body, 7); got != want {
+		t.Fatalf("appendClosesFooter did not trim trailing whitespace:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestAppendClosesFooter_IdempotentWhenAlreadyPresent(t *testing.T) {
+	body := "## Summary by NightMe\n\nFoo.\n\nCloses #42\n"
+	if got := appendClosesFooter(body, 42); got != body {
+		t.Fatalf("appendClosesFooter must not duplicate an existing Closes line:\nwant: %q\ngot:  %q", body, got)
+	}
+}
+
+func TestAppendClosesFooter_IdempotentWhenAlreadyPresentMidBody(t *testing.T) {
+	// GitHub's auto-close rule fires for any matching line, not
+	// just the last. The idempotency check is a substring match,
+	// so a Closes #N line anywhere in the body is enough.
+	body := "Refactor notes: see Closes #42 above for context.\n\n## Summary by NightMe\n\nFoo.\n"
+	if got := appendClosesFooter(body, 42); got != body {
+		t.Fatalf("appendClosesFooter must not duplicate when Closes line is mid-body:\nwant: %q\ngot:  %q", body, got)
+	}
+}
+
+func TestAppendClosesFooter_DoesNotMatchDifferentIssue(t *testing.T) {
+	// A `Closes #99` line for a different issue must NOT
+	// suppress the append for our `Closes #42` — those are
+	// semantically distinct references.
+	body := "## Summary by NightMe\n\nFoo.\n\nCloses #99\n"
+	want := "## Summary by NightMe\n\nFoo.\n\nCloses #99\n\nCloses #42\n"
+	if got := appendClosesFooter(body, 42); got != want {
+		t.Fatalf("appendClosesFooter must append when existing Closes is for a different issue:\nwant: %q\ngot:  %q", want, got)
+	}
 }
 
 // -----------------------------------------------------------------------------

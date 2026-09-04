@@ -199,6 +199,14 @@ func dispatchPR(
 				perr, indentLines(text, "  "))), nil
 	}
 
+	// Stamp `Closes #N` on the body in Go. GitHub's auto-close
+	// keyword only fires when the issue id is on its own line in
+	// the PR description; we do this here (not via the agent
+	// prompt) because the originating issue is already known
+	// from c.Issue — deterministic, not worth an LLM round-trip.
+	// For ModeLocal / unset Issue the helper is a no-op.
+	body = appendClosesFooter(body, c.Issue)
+
 	url, err := provider.CreatePR(ctx, owner, repo, baseBranch, c.Branch, title, body)
 	if err != nil {
 		// Known error contract:
@@ -290,7 +298,13 @@ func dispatchPR(
 //	Chore / Build / CI:
 //
 //	Risk: <level> — <reason>  ← OPTIONAL, recommended for non-trivial
-//	Closes #N                  ← OPTIONAL, gated on c.Issue > 0
+//
+// The `Closes #N` line is NOT part of the agent's output. dispatchPR
+// appends it in Go via appendClosesFooter(c.Issue) — keeping it out
+// of the prompt avoids a soft LLM guarantee that breaks on every
+// model regression (lowercase / wrong issue / dropped / mid-
+// paragraph). For ModeLocal worktrees (c.Issue == -1) the helper
+// is a no-op.
 //
 // Differences from v2:
 //
@@ -330,6 +344,12 @@ func dispatchPR(
 // body to be grounded in real diff output the LLM itself
 // inspected.
 func buildPRPrompt(c Context, base string) string {
+	// `c` is currently unused: the issue-closing footer that used
+	// to live here now ships via appendClosesFooter (deterministic,
+	// not LLM-driven). Keep the parameter so future prompt fields
+	// (e.g. provider-specific templates) can re-introduce c.Issue /
+	// c.Repo without churning every test call site.
+	_ = c
 	var sb strings.Builder
 
 	// --- Output Format (parseability — hard constraint) -----------
@@ -412,9 +432,10 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("2. Compose the title from the dominant commit subject, or invent one if this branch is a squash candidate.\n")
 	sb.WriteString("3. Write the Summary (1-2 sentences, WHAT not WHY) and the category-prefixed bullets. Skip empty categories.\n")
 	sb.WriteString("4. Add a Risk line if the change is non-trivial (see Risk line above).\n")
-	if c.Issue > 0 {
-		fmt.Fprintf(&sb, "5. Add `Closes #%d` (or `Refs #%d`) as the LAST line of the body so GitHub auto-closes the issue.\n", c.Issue, c.Issue)
-	}
+	// Issue-closing footer is no longer the agent's responsibility.
+	// dispatchPR appends `Closes #N` to the body in Go (see
+	// appendClosesFooter) — keeping it out of the prompt avoids
+	// the soft guarantee that breaks on every model regression.
 	sb.WriteString("\nDO NOT run `git commit`, `git push`, `gh pr create`, or `glab mr create`. Only generate the title + body.\n")
 
 	// ## Context (repo / branch / base / worktree) — REMOVED in v3.
@@ -538,6 +559,41 @@ func prNumberFromURL(rawURL string) int {
 		return 0
 	}
 	return n
+}
+
+// appendClosesFooter stamps the GitHub auto-close keyword on the
+// last line of the PR body. Returns body unchanged when issue <= 0
+// (ModeLocal worktrees, which never had a remote issue).
+//
+// Why this lives in Go instead of the agent prompt: the originating
+// issue id is already known from c.Issue, and GitHub's auto-close
+// rule is mechanical — a `Closes #N` line anywhere in the body
+// closes the issue on merge. Letting the LLM produce it is a soft
+// guarantee that breaks on every model regression (lowercase, wrong
+// issue, dropped, mid-paragraph). Doing it in code is deterministic
+// and zero-cost.
+//
+// Idempotency: if the agent's body already contains the exact
+// `Closes #N` line (e.g. an older prompt still in flight during a
+// rollout), we leave the body alone — appending a duplicate
+// wouldn't hurt GitHub but would clutter the body. Case-sensitive
+// match is intentional: lowercase `closes #N` still satisfies
+// GitHub, so the append stays harmless.
+func appendClosesFooter(body string, issue int) string {
+	if issue <= 0 {
+		return body
+	}
+	footer := fmt.Sprintf("Closes #%d", issue)
+	if strings.Contains(body, footer) {
+		return body
+	}
+	// Trim trailing whitespace, then append with a blank-line
+	// separator so the body reads naturally. We always end with
+	// a single trailing newline so downstream tooling that
+	// concatenates PR descriptions doesn't glue the footer to
+	// the last bullet.
+	body = strings.TrimRight(body, " \t\r\n")
+	return body + "\n\n" + footer + "\n"
 }
 
 // extractRiskLevel pulls the optional `Risk: <level> — <reason>`

@@ -45,7 +45,7 @@ Read every sentence as a first-time reader. If removing the timestamp or context
 - Lint:   `make lint`            # `go vet ./...` — matches CI
 - Fmt:    `make fmt`             # `go fmt ./...`
 - Dev:    `make dev`             # `go run ./cmd/nightme` with example config
-- Linux GUI variant (`make build-gui`) needs libgtk-3 + libayatana-appindicator3; default build is tray-less.
+- Linux GUI variant (`make build-gui`) needs build-time packages libgtk-3-dev + libayatana-appindicator3-dev and runtime packages libgtk-3 + libayatana-appindicator3; default build is tray-less.
 - CI runs linux + windows + darwin. Respect existing `//go:build !windows` / `//go:build !unix` tags; don't break cross-platform splits.
 
 ## 5. Code Style & Runtime Rules

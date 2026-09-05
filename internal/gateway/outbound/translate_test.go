@@ -90,7 +90,9 @@ func TestTranslate_EventResult_EmptyDropped(t *testing.T) {
 
 func TestTranslate_EventResult_ErrorKept(t *testing.T) {
 	// Empty text + IsError=true → kept so channels can flip header
-	// to error state.
+	// to error state. Err also propagates onto the OutboundMessage
+	// so adapters can render the error indicator (claudecode /
+	// pi / codex all follow this contract; see agent.go:586-591).
 	in := agent.AgentEvent{
 		Kind:   agent.EventAgentResult,
 		Err:    errors.New("error"),
@@ -99,6 +101,60 @@ func TestTranslate_EventResult_ErrorKept(t *testing.T) {
 	msg, ok := Translate("chat1", in)
 	if !ok || msg.Kind != messages.OutResult {
 		t.Errorf("IsError=true should keep the event; got kind=%v ok=%v", msg.Kind, ok)
+	}
+	if msg.Err == nil || msg.Err.Error() != "error" {
+		t.Errorf("msg.Err = %v, want \"error\" (Err must propagate for channel error rendering)", msg.Err)
+	}
+}
+
+// TestTranslate_EventResult_EmptyWithUsagePassesThrough guards
+// the dedup contract: bridges that stream text as EventAgentText
+// send EventAgentResult with Text=="" + Usage populated. The
+// translator must NOT drop these — channels use them to PATCH
+// the receipt footer instead of opening a duplicate result card.
+func TestTranslate_EventResult_EmptyWithUsagePassesThrough(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{
+			Text:    "",
+			Subtype: "success",
+			Usage: &agent.UsageInfo{
+				InputTokens:  100,
+				OutputTokens: 50,
+			},
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("expected translate to emit (empty Text + Usage must pass through for footer PATCH)")
+	}
+	if msg.Kind != messages.OutResult {
+		t.Errorf("Kind = %v, want OutResult", msg.Kind)
+	}
+	if msg.Text != "" {
+		t.Errorf("Text = %q, want empty (success-path body already streamed as OutReply)", msg.Text)
+	}
+	if msg.Usage == nil || msg.Usage.InputTokens != 100 {
+		t.Errorf("Usage = %+v, want InputTokens=100 (footer PATCH needs Usage)", msg.Usage)
+	}
+}
+
+// TestTranslate_EventResult_EmptyWithErrOnlyPassesThrough covers the
+// bare-error turn: Err set, Text=="", no Usage. Previously dropped
+// by the success-only guard; now passes through (Err short-circuits
+// the drop predicate) so channels can render the error indicator.
+func TestTranslate_EventResult_EmptyWithErrOnlyPassesThrough(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind:   agent.EventAgentResult,
+		Err:    errors.New("bare error"),
+		Result: &agent.AgentResultEvent{Text: "", Subtype: "error"},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("expected translate to emit (Err-only turns must pass through even with empty Text + no Usage)")
+	}
+	if msg.Err == nil || msg.Err.Error() != "bare error" {
+		t.Errorf("msg.Err = %v, want \"bare error\"", msg.Err)
 	}
 }
 

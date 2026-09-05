@@ -65,14 +65,6 @@ const thinkingPrefix = "[思考] "
 //
 // It is NOT cosmetic. gateway.Translate drops an EventAgentResult
 // whose Text is empty and IsError is false (internal/gateway/translate.go),
-// and the runtime reads Usage off the *translated* OutboundMessage
-// (cmd/nightme/run.go), so an empty-text result silently takes the
-// turn's token counts down with it. Guaranteeing a non-empty Text
-// in the bridge keeps usage flowing without touching the shared
-// gateway layer. cc-connect (MsgEmptyResponse) and openclaw-lark
-// (EMPTY_REPLY_FALLBACK_TEXT = 'Done.') both do the same thing.
-const emptyReplyFallback = "Done."
-
 // pendingTool records a tool_call that has emitted tool_execution_start
 // but not yet the matching tool_execution_end. The bridge uses it to
 // re-attach Name + raw Args on the end event — Pi's wire does not echo
@@ -923,17 +915,18 @@ func (t *translator) flushPendingTextLocked() []agent.AgentEvent {
 // non-empty value wins):
 //
 //  1. pendingText — what we accumulated since the last flush. This is
-//     the normal path and is exactly the segment the user has NOT
-//     seen yet. Channels render it as the 📝 result card body.
+//     the normal streaming path: the segment the user has NOT seen
+//     yet, normally the closing paragraph of the turn.
 //  2. lastMessageText — Pi's own composition from message_end.content[],
-//     but ONLY when no reply text has been delivered yet this turn.
-//     See turnState.textDelivered for why the guard is load-bearing.
-//  3. emptyReplyFallback ("Done.") — fires when both (1) and (2) are
-//     empty: streaming had flushed narration (textDelivered=true) AND
-//     the final assistant message had no text block. In the rolling
-//     log the user already saw the streamed narration; this rung only
-//     ensures the OutResult stays alive so the StatusBar token footer
-//     gets its Usage.
+//     but ONLY when no reply text has been delivered yet this turn
+//     (the text-only / first-message path). See
+//     turnState.textDelivered for why the guard is load-bearing.
+//
+// When both rungs are empty (tool-only turn where every segment was
+// flushed at the tool boundary), Result.Text stays empty. The
+// gateway/outbound/translate.go pass-through forwards empty Text +
+// Usage so channels PATCH the receipt footer instead of rendering a
+// standalone "Done." card.
 //
 // Caller must hold turnMu.
 func (t *translator) finishTurnLocked() []agent.AgentEvent {
@@ -942,7 +935,7 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 	// An untouched turn means agent_settled fired without an
 	// accompanying run (Pi settles out-of-band paths such as a
 	// fire-and-forget compaction the same way). Emitting a result
-	// there would put a spurious "Done." card in the user's chat.
+	// there would put a spurious card in the user's chat.
 	if !t.turn.active {
 		return nil
 	}
@@ -950,9 +943,6 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 	text := strings.TrimSpace(t.turn.pendingText)
 	if text == "" && !t.turn.textDelivered {
 		text = strings.TrimSpace(t.turn.lastMessageText)
-	}
-	if text == "" {
-		text = emptyReplyFallback
 	}
 	t.turn.pendingText = ""
 

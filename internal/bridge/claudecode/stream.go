@@ -514,10 +514,18 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// bridges it marks turn end.
 		usage := decodeUsage(ev.Usage, ev.ModelUsage)
 		if ev.Result != "" || ev.IsError {
+			// Text dup fix: assistant text blocks already streamed
+			// the reply as EventAgentText; result.result would be
+			// a verbatim duplicate. Clear Text on the success path
+			// and keep it on the error path — error turns carry a
+			// result.result that never went through an assistant
+			// block (e.g. error_max_turns description).
 			result := &agent.AgentResultEvent{
-				Text:       ev.Result,
 				DurationMs: ev.DurationMs,
 				Subtype:    ev.Subtype,
+			}
+			if ev.IsError {
+				result.Text = ev.Result
 			}
 			// Attach usage from the same wire event. The previous
 			// design emitted a separate EventUsage here; runtime
@@ -526,10 +534,20 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			// path entirely (calc-then-reply invariant now holds by
 			// construction — usage IS on the result event).
 			result.Usage = usage
-			events <- agent.AgentEvent{
+			evResult := agent.AgentEvent{
 				Kind:   agent.EventAgentResult,
 				Result: result,
 			}
+			// agent.go:586-591 documents that EventAgentResult.Err is
+			// populated on error turns so channels can render the
+			// error indicator without parsing Subtype. pi/codex
+			// follow the same contract — without this the feishu
+			// adapter's `if msg.Err != nil` branch never fires on
+			// claudecode error results.
+			if ev.IsError {
+				evResult.Err = fmt.Errorf("claudecode: %s: %s", ev.Subtype, ev.Result)
+			}
+			events <- evResult
 		}
 		events <- agent.AgentEvent{
 			Kind: agent.EventAgentDone,

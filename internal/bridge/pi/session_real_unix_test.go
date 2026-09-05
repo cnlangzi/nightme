@@ -227,12 +227,14 @@ func driveTurn(t *testing.T, sess *agent.Agent, prompt string, deadline time.Dur
 		t.Errorf("%s: no EventAgentText / EventAgentResult in turn; events=%v", turnLabel, turn.Kinds)
 	}
 
-	// Aggregate reply text and assert non-empty + marker presence.
+	// Aggregate reply text for the marker check. Empty is now
+	// legitimate: pi may end a turn with no agentMessage (tool-only
+	// replies), and the bridge's text-dedup contract leaves
+	// Result.Text empty for streaming turns that already
+	// flushed all segments. The presence-of-kind check above is
+	// structural; the marker check below is the semantic check
+	// when applicable.
 	reply := aggregateReplyText(turn.Events)
-	if reply == "" {
-		t.Errorf("%s: no text reply at all; events=%v (prompt=%q)", turnLabel, turn.Kinds, prompt)
-		return nil
-	}
 
 	// Extract the MIBLRE-CANARY-* marker from the prompt and
 	// require it in the reply. This is the input-receipt proof:

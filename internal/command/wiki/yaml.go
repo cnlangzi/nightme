@@ -8,41 +8,38 @@ import (
 )
 
 // wikiYml is the in-memory representation of <cwd>/wiki.yml.
+//
 // v0 schema:
 //
 //	version:    int
-//	last_commit: string | null   (sha of last /wiki run that produced content)
-//	agent:      string | null     (default agent recorded on first successful run)
+//	last_commit:   string | null   (sha of the wiki's last overall apply)
+//	agent:      string | null     (LLM agent used on last apply)
 //	include:    []string          (force-include paths, see ignore.go)
 //	modules:    []moduleYml       (per-module bookkeeping)
+//	pending:    []pendingEntry    (incremental plan produced by Plan phase)
 //
 // Pointer fields distinguish "absent" from "explicitly null"
-// via yaml.v3's unmarshalling behaviour — important because
-// we round-trip the file and want to preserve the user's
-// existing field set on rewrite.
+// on round-trip.
 type wikiYml struct {
-	Version    int         `yaml:"version"`
-	LastCommit *string     `yaml:"last_commit"`
-	Agent      *string     `yaml:"agent"`
-	Include    []string    `yaml:"include"`
-	Modules    []moduleYml `yaml:"modules"`
+	Version    int            `yaml:"version"`
+	LastCommit *string        `yaml:"last_commit"`
+	Agent      *string        `yaml:"agent"`
+	Include    []string       `yaml:"include"`
+	Modules    []moduleYml    `yaml:"modules"`
+	Pending    []pendingEntry `yaml:"pending,omitempty"`
 }
 
 // moduleYml is one entry in wikiYml.Modules.
 //
-// LastSHA stays null until the LLM-driven path (future) sets
-// it on commit; /wiki treats null LastSHA as "stub-eligible"
-// (overwrite with moduleDocStub) and non-null as "preserve
-// what the LLM wrote" (don't touch the wiki file).
+// LastSHA is the git HEAD SHA at the time the module's wiki
+// file was last written by Apply (either stub or LLM). Plan
+// uses this to compute the diff vs current HEAD and decide
+// whether the module needs updating.
 //
-// Removed is set by reconcile when a previously-listed path
-// no longer exists in source. The wiki file is preserved on
-// disk; user can `git rm` if they want it gone for good.
-// Removed modules are NOT listed in llms.txt.
-//
-// Language is reserved for the future provider refactor;
-// init does not write it (we don't classify by language —
-// see ignore.go's "language is the LLM's job").
+// Removed marks a path that no longer exists in source.
+// Removed modules' wiki files are deleted by Apply; the yml
+// entry stays as an audit record (allows future re-introduction
+// without surprises).
 type moduleYml struct {
 	Path     string  `yaml:"path"`
 	File     string  `yaml:"file"`
@@ -51,9 +48,42 @@ type moduleYml struct {
 	Removed  bool    `yaml:"removed,omitempty"`
 }
 
+// pendingEntry is one item in the incremental plan produced
+// by Plan and consumed by Apply. Status semantics:
+//
+//   - pending   — Apply has not touched this yet
+//   - in_progress — Apply started but did not finish (process crash / context cancel)
+//   - done      — Apply finished (stub or LLM wrote content + module.LastSHA updated)
+//   - failed    — Apply tried but errored (error field populated, retained for retry)
+//
+// Apply resumes from non-done entries on subsequent runs, so
+// `failed` items get retried automatically without losing
+// the rest of the plan.
+type pendingEntry struct {
+	Path         string   `yaml:"path"`
+	Action       string   `yaml:"action"` // regenerate | new | delete
+	Reason       string   `yaml:"reason"`
+	FilesChanged []string `yaml:"files_changed,omitempty"`
+	Status       string   `yaml:"status"`
+	Error        string   `yaml:"error,omitempty"`
+}
+
+// Pending status constants — string literals stay in YAML so
+// humans can read the file; we keep the constants here so
+// writers don't typo.
+const (
+	pendingStatusPending     = "pending"
+	pendingStatusInProgress = "in_progress"
+	pendingStatusDone        = "done"
+	pendingStatusFailed      = "failed"
+
+	pendingActionRegenerate = "regenerate"
+	pendingActionNew        = "new"
+	pendingActionDelete     = "delete"
+)
+
 // parseWikiYml decodes wiki.yml data into the structured
-// representation. yaml.v3 errors are surfaced verbatim —
-// callers wrap with file context.
+// representation. yaml.v3 errors are surfaced verbatim.
 func parseWikiYml(data []byte) (*wikiYml, error) {
 	var y wikiYml
 	if err := yaml.Unmarshal(data, &y); err != nil {
@@ -63,13 +93,7 @@ func parseWikiYml(data []byte) (*wikiYml, error) {
 }
 
 // encodeWikiYml renders y as canonical YAML. Output is
-// deterministic and stable for diffs: yaml.v3 emits the
-// struct fields in declaration order, and we use a single
-// literal style for scalars to avoid surprises.
-//
-// v0 callers (only /wiki's reconcile path) pass a fully-
-// populated struct; this helper is here so the write side
-// is symmetric with parseWikiYml.
+// deterministic for stable diffs.
 func encodeWikiYml(y *wikiYml) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)

@@ -66,7 +66,10 @@ func llmsTxtSkeletonWithModules(projectName string, modules []moduleEntry) strin
 	b.WriteString("## Modules\n")
 	if len(modules) > 0 {
 		for _, m := range modules {
-			label := strings.TrimSuffix(m.File, ".md")
+			// Label is the package basename, not the full path.
+			// Full path is conveyed by the link target; the
+			// label stays short so the index is scannable.
+			label := filepath.Base(strings.TrimSuffix(m.File, ".md"))
 			fmt.Fprintf(&b, "- [%s](./%s)\n", label, m.WikiRelPath)
 		}
 	}

@@ -160,10 +160,18 @@ func refuseIfPresent(wikiDir, wikiYml string) error {
 // files and 0o600 for wiki.yml (matches the metadata-file
 // convention used by ~/.nightme/gtw.yml).
 //
+// Parent directories are created on demand so callers can
+// pass nested paths (e.g. wiki/modules/internal/command/
+// gtw.md) without pre-creating the full chain. MkdirAll is
+// idempotent.
+//
 // On any failure before the rename, the temp file is
 // removed so cwd does not accumulate .new debris.
 func atomicWrite(path, content string) error {
 	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create parent dir %s: %w", dir, err)
+	}
 	tmp, err := os.CreateTemp(dir, ".wiki-init-*.tmp")
 	if err != nil {
 		return err

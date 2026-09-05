@@ -9,15 +9,23 @@ import (
 	"strings"
 )
 
-// moduleEntry is one Go package detected during /wiki init.
-// Path is the package's directory relative to cwd; File is
-// the wiki page name (basename + ".md"); WikiRelPath is the
-// path relative to <cwd>/wiki/ — used when rendering
-// wiki.yml.modules[].filePaths and llms.txt module links.
+// moduleEntry is one source package detected during /wiki.
+//
+// Path is the package's directory relative to cwd, slash-
+// separated (e.g. "internal/command/gtw"). File is the wiki
+// file path RELATIVE TO <cwd>/wiki/ — by convention a
+// mirror of Path with ".md" appended (nested directory
+// layout: wiki/modules/internal/command/gtw.md). The mirror
+// means an LLM reading a wiki page can locate the
+// corresponding source without cross-referencing wiki.yml.
+//
+// WikiRelPath is the File prefixed with "modules/" — used
+// for llms.txt module links and any caller that needs the
+// full path relative to the wiki root.
 type moduleEntry struct {
 	Path        string // e.g. "internal/command/gtw"
-	File        string // e.g. "gtw.md"
-	WikiRelPath string // e.g. "modules/gtw.md"
+	File        string // e.g. "internal/command/gtw.md" (nested, mirror of Path)
+	WikiRelPath string // e.g. "modules/internal/command/gtw.md"
 }
 
 // discoverModules walks cwd and returns every directory that
@@ -65,22 +73,18 @@ func discoverModules(cwd string) ([]moduleEntry, error) {
 			return err
 		}
 
-		// Two-phase: first check whether this directory is a
-		// leaf module (has at least one module-relevant file),
-		// then decide whether to recurse. Reading the directory
-		// once and using it for both phases avoids a redundant
-		// ReadDir syscall per directory.
+		// Module detection: any non-hidden regular file makes
+		// this directory a module. Test files (_test.go) count
+		// — they go into git, so the directory is a real unit
+		// of work and deserves its own page. Language agnostic:
+		// no extension allowlist; gitignore already filtered
+		// out anything that shouldn't be tracked.
 		//
-		// "Module-relevant" = a regular file that is not a Go
-		// test file (*_test.go). The Go convention is the only
-		// test-file pattern recognised in v0 — non-Go languages
-		// use different conventions (*.test.ts, *_test.py,
-		// *_spec.rb, ...) and will extend this rule when their
-		// providers land. Today the rule still does its job for
-		// Go-heavy repos like nightme itself: a directory with
-		// only *_test.go is a test-only concern that the LLM
-		// surfaces inside the corresponding production module's
-		// doc (cross-cutting pattern), not as its own page.
+		// Hidden files (.*) do NOT count — they are tooling /
+		// OS junk that would otherwise mark e.g. .vscode/ as
+		// a module. The dot-prefix rule on directories handles
+		// the directory case; this handles the file-inside-
+		// visible-dir case (rare, but e.g. ".envrc" in src/).
 		hasModuleFile := false
 		var subDirs []os.DirEntry
 		for _, c := range children {
@@ -88,25 +92,32 @@ func discoverModules(cwd string) ([]moduleEntry, error) {
 				subDirs = append(subDirs, c)
 				continue
 			}
-			if strings.HasSuffix(c.Name(), "_test.go") {
+			if strings.HasPrefix(c.Name(), ".") {
 				continue
 			}
 			hasModuleFile = true
 		}
 
 		if rel != "" && hasModuleFile {
-			slug := filepath.Base(rel)
-			entries = append(entries, moduleEntry{
-				Path:        filepath.ToSlash(rel),
-				File:        slug + ".md",
-				WikiRelPath: filepath.ToSlash(filepath.Join("modules", slug+".md")),
-			})
-			// Leaf — do not recurse into sub-packages.
-			return nil
+			// Emit module. Then CONTINUE recursing — no leaf
+	 // rule. Every non-empty dir gets its own wiki page;
+	 // sub-packages stay as their own modules, not
+	 // folded into the parent.
+	 //
+	 // Wiki file path mirrors source path one-to-one:
+	 // internal/command/gtw → wiki/modules/internal/
+	 // command/gtw.md. The mirror is what kills basename
+	 // collisions (internal/command/gtw vs
+	 // internal/cli/gtw otherwise want the same file).
+	 entries = append(entries, moduleEntry{
+		 Path:        filepath.ToSlash(rel),
+		 File:        filepath.ToSlash(rel) + ".md",
+		 WikiRelPath: filepath.ToSlash(filepath.Join("modules", rel)) + ".md",
+	 })
 		}
 
-		// Container (no regular files): recurse into children
-		// that survive the filter.
+		// Always recurse into sub-directories that survive
+		// the filter — the walk goes all the way down.
 		for _, c := range subDirs {
 			name := c.Name()
 			childRel := name

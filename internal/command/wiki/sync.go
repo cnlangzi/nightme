@@ -13,63 +13,97 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 )
 
-// Sync is the single entry point for `/wiki`. It is idempotent:
-// handles both first-time scaffold AND reconcile-on-existing.
+// Sync is the single entry point for `/wiki`. It runs in two
+// phases every invocation:
+//
+//	Phase 1 — Plan:  scan source, compute pending list, write
+//	          wiki.yml.pending. Pure mechanical (git diff).
+//	          Free.
+//	Phase 2 — Apply: consume wiki.yml.pending in bottom-up
+//	          order, write content. Stub mode writes the
+//	          placeholder template; LLM mode (with
+//	          `-a <agent>`) dispatches the agent — stub for
+//	          now, real wiring when the agent call lands.
+//
+// Both phases run on every invocation; the cost differs. The
+// plan is persistent (wiki.yml.pending survives) so resuming
+// after a crash picks up where the previous run stopped.
 //
 // State machine:
 //
-//	wiki.yml absent, wiki/ absent   → fresh scaffold (calls Scaffold)
-//	wiki.yml present, wiki/ present → reconcile against source tree
-//	wiki.yml XOR wiki/              → refuse with ErrWikiHalfState
-//	                                  (user must delete the stale half
-//	                                  before retrying — silent recovery
-//	                                  risks losing either the metadata
-//	                                  or the content)
+//	wiki.yml absent, wiki/ absent   → fresh scaffold (calls Scaffold), then Plan + Apply
+//	wiki.yml present, wiki/ present → Plan + Apply on the existing state
+//	wiki.yml present, wiki/ absent   → recover — trust yml, recreate wiki/
+//	wiki.yml absent, wiki/ present   → recover — reconstruct yml from wiki/
 //
-// Reconcile algorithm (see reconcileModules for details):
+// Git requirement: /wiki reads committed history (SHAs and
+// file diffs). Local uncommitted changes are invisible by
+// design — Sync refuses with a clear error if the working
+// tree is dirty. Users commit first, then run /wiki.
 //
-//   - path in yml AND in source  → keep entry, un-mark removed
-//   - path in yml, NOT in source  → mark removed:true (file preserved)
-//   - path NOT in yml, in source  → append new entry
-//
-// Content regeneration:
-//
-//   - last_sha is null (no LLM has written here) → write stub
-//   - last_sha is non-null (LLM wrote content)   → preserve as-is
-//
-// The last_sha check is forward-compatible: today stub mode
-// leaves last_sha null, so every sync overwrites every stub.
-// When the LLM path lands and sets last_sha on commit, sync
-// will naturally stop overwriting content the LLM produced.
-//
-// agent is plumbed through for the future LLM-driven path.
-// Empty means "stub mode" (current behaviour).
+// agent is plumbed for the future LLM-driven path. v0 always
+// uses the stub dispatcher; -a is accepted but ignored.
 func Sync(cwd, agent string) (SyncResult, error) {
+	return SyncWith(cwd, agent, ExecGitRunner{}, stubDispatcher{})
+}
+
+// SyncWith is the dependency-injected form of Sync. Tests use
+// it to wire mock git / dispatcher implementations.
+func SyncWith(cwd, agent string, git GitRunner, llm LLMDispatcher) (SyncResult, error) {
+	_ = agent // reserved for LLM dispatcher selection; v0 ignores
+
+	// Git pre-flight: the whole incremental mechanism depends
+	// on committed SHAs and git diff. Refuse early with a
+	// clear message when either precondition fails.
+	head, err := git.Head(cwd)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("not a git repo (or git unavailable): %w", err)
+	}
+	clean, err := git.IsClean(cwd)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("git status failed: %w", err)
+	}
+	if !clean {
+		return SyncResult{}, errors.New("working tree has uncommitted changes; commit first (wiki reads committed history, not working tree)")
+	}
+	_ = head // captured by Plan via subsequent git calls
+
 	ymlPath := filepath.Join(cwd, "wiki.yml")
 	wikiDir := filepath.Join(cwd, "wiki")
 
 	ymlExists := fileExists(ymlPath)
 	wikiExists := dirExists(wikiDir)
 
-	if ymlExists != wikiExists {
-		return SyncResult{}, fmt.Errorf(
-			"%w: wiki.yml exists=%v, wiki/ exists=%v (delete one before retrying)",
-			ErrWikiHalfState, ymlExists, wikiExists)
-	}
-
 	var result SyncResult
 
-	if !ymlExists {
-		// Fresh scaffold: write core files + per-module
-		// skeletons + a fresh wiki.yml with the discovered
-		// modules pre-populated.
+	switch {
+	case !ymlExists && !wikiExists:
 		if _, err := Scaffold(cwd); err != nil {
 			return result, fmt.Errorf("scaffold: %w", err)
 		}
 		result.Fresh = true
+
+	case ymlExists && !wikiExists:
+		if err := os.MkdirAll(filepath.Join(wikiDir, "modules"), 0o755); err != nil {
+			return result, fmt.Errorf("recreate wiki/: %w", err)
+		}
+		result.Recovered = "wiki dir missing — recreated from wiki.yml"
+
+	case !ymlExists && wikiExists:
+		yml, err := reconstructYmlFromWiki(wikiDir)
+		if err != nil {
+			return result, fmt.Errorf("reconstruct wiki.yml: %w", err)
+		}
+		encoded, err := encodeWikiYml(yml)
+		if err != nil {
+			return result, err
+		}
+		if err := atomicWrite(ymlPath, string(encoded)); err != nil {
+			return result, fmt.Errorf("write reconstructed wiki.yml: %w", err)
+		}
+		result.Recovered = "yml missing — reconstructed from wiki/ contents (last_sha unknown; modules may regenerate as stubs on next run)"
 	}
 
-	// Read yml (now guaranteed to exist).
 	ymlData, err := os.ReadFile(ymlPath)
 	if err != nil {
 		return result, fmt.Errorf("read wiki.yml: %w", err)
@@ -79,103 +113,155 @@ func Sync(cwd, agent string) (SyncResult, error) {
 		return result, fmt.Errorf("parse wiki.yml: %w", err)
 	}
 
-	// Discover current source-tree modules.
+	// Snapshot the module roster BEFORE reconcile so we can
+	// compute Added / Removed from the diff. (Plan operates
+	// on pending[]; it doesn't tell us "this path was newly
+// in source this run" cleanly.)
+	beforeLive := make(map[string]bool)
+	beforeRemoved := make(map[string]bool)
+	for _, m := range yml.Modules {
+		if m.Removed {
+			beforeRemoved[m.Path] = true
+		} else {
+			beforeLive[m.Path] = true
+		}
+	}
+
+	// Phase 1: Plan. Refresh modules[] from current source
+	// (reconcile new / removed), then compute pending.
 	currentModules, err := discoverModules(cwd)
 	if err != nil {
 		return result, fmt.Errorf("discover: %w", err)
 	}
-
-	// Track each path's prior state (live vs removed vs absent)
-	// so the reply can name only the genuinely-changed entries.
-	// Modules that were live AND are still live are not
-	// reported — that would spam chat on every re-run.
-	wasLive := make(map[string]bool)
-	wasRemoved := make(map[string]bool)
-	for _, m := range yml.Modules {
-		if m.Removed {
-			wasRemoved[m.Path] = true
-		} else {
-			wasLive[m.Path] = true
-		}
-	}
-
 	yml.Modules = reconcileModules(yml.Modules, currentModules)
 
+	if err := Plan(cwd, yml, git); err != nil {
+		return result, err
+	}
+
+	// Compute Added / Removed from the before/after diff.
+	// Also track Preserved: any live module with LastSHA set
+	// that was NOT added to pending this run (Plan skipped
+	// it because git diff was empty) had its wiki file left
+	// untouched.
+	pendingPaths := make(map[string]bool)
+	for _, p := range yml.Pending {
+		pendingPaths[p.Path] = true
+	}
 	for _, m := range yml.Modules {
 		switch {
-		case m.Removed && !wasRemoved[m.Path]:
-			// Newly removed (was live before, or wasn't in yml).
-			result.Removed = append(result.Removed, m.Path)
-		case !m.Removed && !wasLive[m.Path]:
-			// Newly added (was removed before, or wasn't in yml).
+		case !m.Removed && !beforeLive[m.Path]:
 			result.Added = append(result.Added, m.Path)
+		case m.Removed && !beforeRemoved[m.Path]:
+			result.Removed = append(result.Removed, m.Path)
+		case !m.Removed && !pendingPaths[m.Path] && m.LastSHA != nil:
+			// Live module, no pending entry, has LastSHA
+			// recorded → Plan decided nothing to do → preserved.
+			result.Preserved = append(result.Preserved, m.File)
 		}
 	}
 
-	// Rewrite wiki.yml.
-	encoded, err := encodeWikiYml(yml)
+	// Phase 2: Apply.
+	applyRes, err := Apply(cwd, yml, llm, git)
 	if err != nil {
 		return result, err
 	}
-	if err := atomicWrite(ymlPath, string(encoded)); err != nil {
-		return result, fmt.Errorf("write wiki.yml: %w", err)
+	// Merge Apply results with the Plan-skip Preserved entries
+	// computed above (dedup — same module can appear in both).
+	seen := make(map[string]bool)
+	for _, p := range result.Preserved {
+		seen[p] = true
+	}
+	for _, p := range applyRes.Skipped {
+		if !seen[p] {
+			result.Preserved = append(result.Preserved, p)
+			seen[p] = true
+		}
+	}
+	result.Written = applyRes.Done
+	for _, p := range applyRes.Failed {
+		result.Failed = append(result.Failed, p)
 	}
 
-	// Rewrite llms.txt with the live module list. Removed
-	// modules are intentionally omitted — they no longer
-	// exist in source so external readers shouldn't see them
-	// as live links.
-	llmsContent := llmsTxtSkeletonWithModules(projectName(cwd), currentModules)
-	if err := atomicWrite(filepath.Join(wikiDir, "llms.txt"), llmsContent); err != nil {
-		return result, fmt.Errorf("write llms.txt: %w", err)
+	// Always persist the post-reconcile yml even when Apply
+	// had nothing to do — reconcile may have changed Removed
+	// flags (e.g., re-introduced modules must have removed:true
+	// cleared). Apply only writes when it processes entries;
+	// a Plan-skipped-everything run would otherwise leave the
+	// file stale.
+	if len(yml.Pending) == 0 {
+		if err := writeWikiYmlFile(cwd, yml); err != nil {
+			return result, err
+		}
 	}
 
-	// Regenerate content per module.
-	for _, m := range yml.Modules {
-		if m.Removed {
-			continue // wiki file preserved as-is, marked removed in yml
+	// After Plan + Apply, the final wiki.yml reflects the
+	// post-apply state. Reload it so the in-memory copy
+	// callers see is the persisted one.
+	ymlData, _ = os.ReadFile(ymlPath)
+	if ymlData != nil {
+		if final, err := parseWikiYml(ymlData); err == nil {
+			*yml = *final
 		}
-		if m.LastSHA != nil {
-			// LLM already wrote content here; preserve.
-			result.Preserved = append(result.Preserved, m.File)
-			continue
-		}
-		sources, rerr := readSourceFiles(cwd, m.Path)
-		if rerr != nil {
-			continue
-		}
-		content := moduleDocStub(m.Path, sources)
-		out := filepath.Join(wikiDir, "modules", m.File)
-		if werr := atomicWrite(out, content); werr != nil {
-			continue
-		}
-		result.Written = append(result.Written,
-			filepath.ToSlash(filepath.Join("wiki", "modules", m.File)))
 	}
 
 	return result, nil
 }
 
 // SyncResult is the structured outcome of a /wiki run.
-// Reply formatter reads these slices; nothing else should.
+// Reply formatter reads these slices.
 type SyncResult struct {
 	Fresh     bool     // true when /wiki created the wiki from scratch
-	Added     []string // paths newly added to yml.modules[]
-	Removed   []string // paths marked removed:true (file preserved)
+	Recovered string   // non-empty when /wiki recovered from a half-state
+	Added     []string // paths newly added to wiki.yml.modules[]
+	Removed   []string // paths marked removed:true
 	Written   []string // wiki files written this run (stub mode)
-	Preserved []string // wiki files kept untouched (had LLM content)
+	Preserved []string // wiki files skipped (already done from a prior run)
+	Failed    []string // pending entries that errored (kept for retry)
 }
 
-// ErrWikiHalfState signals that wiki.yml AND wiki/ disagree
-// on existence — see Sync for the policy.
-var ErrWikiHalfState = errors.New("wiki half-state")
+// reconstructYmlFromWiki walks wiki/modules/ and produces a
+// wikiYml from the file paths. Every <pkg-path>.md becomes a
+// moduleYml with last_sha=nil (we have no record of git SHAs
+// from filenames alone).
+func reconstructYmlFromWiki(wikiDir string) (*wikiYml, error) {
+	modulesDir := filepath.Join(wikiDir, "modules")
+	var modules []moduleYml
+	err := filepath.WalkDir(modulesDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(modulesDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		pkgPath := strings.TrimSuffix(rel, ".md")
+		modules = append(modules, moduleYml{
+			Path: pkgPath,
+			File: rel,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortModulesByPath(modules)
+	return &wikiYml{
+		Version: 1,
+		Modules: modules,
+	}, nil
+}
 
 // reconcileModules produces the new modules[] from existing
-// + currently-discovered. See Sync's docstring for the rules.
-//
-// Output is sorted: live (non-removed) modules first in path
-// order, then removed modules in path order. Stable layout
-// keeps wiki.yml diffs minimal across runs.
+// + currently-discovered. The order is stable: live modules
+// first (path asc), then removed modules (path asc).
 func reconcileModules(existing []moduleYml, current []moduleEntry) []moduleYml {
 	existingByPath := make(map[string]moduleYml, len(existing))
 	for _, e := range existing {
@@ -186,19 +272,16 @@ func reconcileModules(existing []moduleYml, current []moduleEntry) []moduleYml {
 		currentByPath[c.Path] = c
 	}
 
-	sortedCurrent := make([]moduleEntry, len(current))
-	copy(sortedCurrent, current)
+	sortedCurrent := append([]moduleEntry(nil), current...)
 	sort.Slice(sortedCurrent, func(i, j int) bool {
 		return sortedCurrent[i].Path < sortedCurrent[j].Path
 	})
 
 	var out []moduleYml
-
-	// Live modules first.
 	for _, c := range sortedCurrent {
 		if e, ok := existingByPath[c.Path]; ok {
-			e.Removed = false // un-mark if previously removed
-			e.File = c.File   // refresh filename in case it changed
+			e.Removed = false
+			e.File = c.File
 			out = append(out, e)
 		} else {
 			out = append(out, moduleYml{
@@ -208,31 +291,52 @@ func reconcileModules(existing []moduleYml, current []moduleEntry) []moduleYml {
 		}
 	}
 
-	// Then removed (in yml, not in source).
 	var removedPaths []string
 	for path := range existingByPath {
 		if _, ok := currentByPath[path]; !ok {
 			removedPaths = append(removedPaths, path)
 		}
 	}
-	sort.Strings(removedPaths)
+	sortStrings(removedPaths)
 	for _, p := range removedPaths {
 		e := existingByPath[p]
 		e.Removed = true
 		out = append(out, e)
 	}
-
 	return out
 }
 
-// fileExists reports whether path is an existing regular
-// file. Symlinks are followed (os.Stat's default).
+func sortModulesByPath(modules []moduleYml) {
+	sortModuleEntries(nil, modules) // indirection to avoid duplication
+}
+
+// sortModuleEntries sorts module entries by Path. The module
+// slice is sorted in place via index mapping; the entries
+// slice is a copy that gets reordered.
+func sortModuleEntries(entries []moduleEntry, modules []moduleYml) {
+	// Sort modules by path using a simple insertion sort
+	// (n is typically < 100, so this is fine).
+	for i := 1; i < len(modules); i++ {
+		for j := i; j > 0 && modules[j].Path < modules[j-1].Path; j-- {
+			modules[j], modules[j-1] = modules[j-1], modules[j]
+		}
+	}
+	_ = entries
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
 
-// dirExists reports whether path is an existing directory.
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
@@ -240,32 +344,12 @@ func dirExists(path string) bool {
 
 // --- source file scanning (used by regenerate step) ---
 
-// sourceFile is one source file inside a module, scanned for
-// the stub generator's File Layout table and the <!-- sources -->
-// footer. Path is relative to cwd; Name is just the basename.
 type sourceFile struct {
 	Name    string
 	RelPath string
 	Lines   int
 }
 
-// readSourceFiles enumerates a module's directory and returns
-// metadata for each non-hidden, non-test source file. We skip
-// the file CONTENT itself in stub mode — only name + line
-// count feed the stub template. The future LLM-driven path
-// will read each file's full content into the agent prompt.
-//
-// Skip rules mirror discover.go's module-detection rules so
-// the stub's sources footer matches the init-time module
-// roster:
-//   - directories (recursion is the walker's job, not ours)
-//   - names starting with "." (hidden / OS junk)
-//   - files ending with "_test.go"
-//   - files larger than maxSourceBytes (defends against
-//     accidentally-vendored blobs)
-//   - files we cannot stat or read (silently skipped)
-//
-// Returned slice is sorted by Name for stable diffs.
 const maxSourceBytes = 100 * 1024 // 100 KiB
 
 func readSourceFiles(cwd, modulePath string) ([]sourceFile, error) {
@@ -309,9 +393,6 @@ func readSourceFiles(cwd, modulePath string) ([]sourceFile, error) {
 	return sources, nil
 }
 
-// bytesCountLines counts '\n' bytes — a good-enough "lines of
-// code" metric for the stub table. Files without a trailing
-// newline report one fewer than wc -l; acceptable.
 func bytesCountLines(data []byte) int {
 	n := 0
 	for _, b := range data {
@@ -338,14 +419,8 @@ func (f *Factory) runWiki(ctx context.Context, cs *chatsession.ChatSession, inpu
 		}, nil
 	}
 
-	result, err := Sync(cwd, args.Agent)
+	result, err := SyncWith(cwd, args.Agent, f.git, stubDispatcher{})
 	if err != nil {
-		if errors.Is(err, ErrWikiHalfState) {
-			return &command.SlashOutput{
-				Reply:    "❌ " + err.Error(),
-				Consumed: true,
-			}, nil
-		}
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /wiki failed: %v", err),
 			Consumed: true,
@@ -358,18 +433,23 @@ func (f *Factory) runWiki(ctx context.Context, cs *chatsession.ChatSession, inpu
 	}, nil
 }
 
-// formatSyncReply renders the success card.
-//
-// Per project convention, keep the post-summary lean — group
-// counts, then up to N (e.g. 20) bullets. A repo with 100
-// modules shouldn't dump 100 lines into chat; it should say
-// "Wrote 100 stubs." and let the user git diff to see details.
+// formatSyncReply renders the success card. Lean — counts and
+// short bullets, per AGENTS.md §1 / project reply convention.
 func formatSyncReply(r SyncResult) string {
 	var b strings.Builder
-	if r.Fresh {
+	switch {
+	case r.Fresh:
 		b.WriteString("✅ /wiki (fresh)\n\n")
-	} else {
+	case r.Recovered != "":
+		b.WriteString("✅ /wiki (recovered)\n\n")
+	default:
 		b.WriteString("✅ /wiki\n\n")
+	}
+
+	if r.Recovered != "" {
+		b.WriteString("Recovery: ")
+		b.WriteString(r.Recovered)
+		b.WriteString("\n\n")
 	}
 
 	if len(r.Added) > 0 {
@@ -383,7 +463,7 @@ func formatSyncReply(r SyncResult) string {
 	}
 
 	if len(r.Removed) > 0 {
-		fmt.Fprintf(&b, "Marked %d removed (wiki files preserved):\n", len(r.Removed))
+		fmt.Fprintf(&b, "Marked %d removed (wiki files deleted):\n", len(r.Removed))
 		for _, p := range r.Removed {
 			b.WriteString("• ")
 			b.WriteString(p)
@@ -396,15 +476,23 @@ func formatSyncReply(r SyncResult) string {
 		fmt.Fprintf(&b, "Wrote %d stub(s).\n", len(r.Written))
 	}
 
-	if len(r.Preserved) > 0 {
-		fmt.Fprintf(&b, "Preserved %d module file(s) (LLM content kept).\n", len(r.Preserved))
+	if len(r.Failed) > 0 {
+		fmt.Fprintf(&b, "Failed %d (will retry on next /wiki):\n", len(r.Failed))
+		for _, p := range r.Failed {
+			b.WriteString("• ")
+			b.WriteString(p)
+			b.WriteByte('\n')
+		}
 	}
 
 	if r.Fresh {
 		b.WriteString("\nCreated wiki/ + wiki.yml from scratch.")
-	} else if len(r.Added) == 0 && len(r.Removed) == 0 && len(r.Written) == 0 && len(r.Preserved) == 0 {
+	} else if len(r.Added) == 0 && len(r.Removed) == 0 && len(r.Written) == 0 && len(r.Preserved) == 0 && len(r.Failed) == 0 && r.Recovered == "" {
 		b.WriteString("\nNo changes — wiki already in sync with source tree.")
 	}
 
 	return b.String()
 }
+
+// silenced unused import in stubDispatcher code path
+var _ = fmt.Sprintf

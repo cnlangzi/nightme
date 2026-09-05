@@ -137,16 +137,21 @@ func TestScaffold_WithGoModules_EmitsPerModuleSkeletons(t *testing.T) {
 	// Expect: llms.txt, architecture.md, glossary.md,
 	// modules/foo.md, modules/bar.md, modules/demo.md,
 	// wiki.yml (7 files). No .gitkeep (modules[] non-empty).
-	wantCount := 7
+	wantCount := 9
 	if len(written) != wantCount {
 		t.Fatalf("written = %d, want %d (got %v)", len(written), wantCount, written)
 	}
 
-	// Per-module files exist with expected H1.
+	// Per-module files exist with expected H1. 5 modules:
+	// foo, bar, demo, foo/sub (sub-package with files), and
+	// testpkg (only _test.go files — still a module per
+	// the no-leaf-rule policy).
 	for path, wantH1 := range map[string]string{
-		filepath.Join(dir, "wiki", "modules", "foo.md"):  "# foo\n",
-		filepath.Join(dir, "wiki", "modules", "bar.md"):  "# bar\n",
-		filepath.Join(dir, "wiki", "modules", "demo.md"): "# demo\n",
+		filepath.Join(dir, "wiki", "modules", "internal", "foo.md"):       "# foo\n",
+		filepath.Join(dir, "wiki", "modules", "internal", "bar.md"):       "# bar\n",
+		filepath.Join(dir, "wiki", "modules", "internal", "foo", "sub.md"): "# sub\n",
+		filepath.Join(dir, "wiki", "modules", "internal", "testpkg.md"):   "# testpkg\n",
+		filepath.Join(dir, "wiki", "modules", "cmd", "demo.md"):           "# demo\n",
 	} {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -163,26 +168,26 @@ func TestScaffold_WithGoModules_EmitsPerModuleSkeletons(t *testing.T) {
 	for _, want := range []string{
 		"modules:\n",
 		"  - path: cmd/demo\n",
-		"    file: demo.md\n",
+		"    file: cmd/demo.md\n",
 		"    last_sha: null\n",
 		"  - path: internal/bar\n",
-		"    file: bar.md\n",
+		"    file: internal/bar.md\n",
 		"  - path: internal/foo\n",
-		"    file: foo.md\n",
+		"    file: internal/foo.md\n",
 	} {
 		if !strings.Contains(string(yml), want) {
 			t.Errorf("wiki.yml missing %q; got:\n%s", want, yml)
 		}
 	}
 
-	// llms.txt Modules section lists all three, sorted, with
+	// llms.txt Modules section lists all five, sorted, with
 	// the [name](./modules/<file>.md) link form.
 	llms, _ := os.ReadFile(filepath.Join(dir, "wiki", "llms.txt"))
 	for _, want := range []string{
 		"## Modules\n",
-		"- [bar](./modules/bar.md)\n",
-		"- [demo](./modules/demo.md)\n",
-		"- [foo](./modules/foo.md)\n",
+		"- [bar](./modules/internal/bar.md)\n",
+		"- [demo](./modules/cmd/demo.md)\n",
+		"- [foo](./modules/internal/foo.md)\n",
 	} {
 		if !strings.Contains(string(llms), want) {
 			t.Errorf("llms.txt missing %q; got:\n%s", want, llms)
@@ -195,7 +200,9 @@ func TestScaffold_WithGoModules_EmitsPerModuleSkeletons(t *testing.T) {
 	}
 }
 
-func TestDiscoverModules_LeafRule(t *testing.T) {
+func TestDiscoverModules_DeepWalkEveryNonEmptyDir(t *testing.T) {
+	// No leaf rule: a directory with files AND a sub-package
+	// with files BOTH become modules.
 	dir := t.TempDir()
 	mustMkdir(t, filepath.Join(dir, "internal", "foo"))
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "foo.go"), "package foo\n")
@@ -206,12 +213,23 @@ func TestDiscoverModules_LeafRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverModules: %v", err)
 	}
-	if len(mods) != 1 || mods[0].Path != filepath.ToSlash(filepath.Join("internal", "foo")) {
-		t.Errorf("discoverModules = %+v; want only internal/foo", mods)
+	wantPaths := []string{
+		filepath.ToSlash(filepath.Join("internal", "foo")),
+		filepath.ToSlash(filepath.Join("internal", "foo", "sub")),
+	}
+	if len(mods) != len(wantPaths) {
+		t.Fatalf("discoverModules got %d, want %d; %+v", len(mods), len(wantPaths), mods)
+	}
+	for i, m := range mods {
+		if m.Path != wantPaths[i] {
+			t.Errorf("mods[%d].Path = %q, want %q", i, m.Path, wantPaths[i])
+		}
 	}
 }
 
-func TestDiscoverModules_SkipsHiddenAndTestOnly(t *testing.T) {
+func TestDiscoverModules_TestFilesCountAsFiles(t *testing.T) {
+	// A directory with ONLY _test.go files is still a module
+	// (test files go into git; the directory is a real unit).
 	dir := t.TempDir()
 	mustMkdir(t, filepath.Join(dir, "internal", "good"))
 	mustWrite(t, filepath.Join(dir, "internal", "good", "g.go"), "package good\n")
@@ -224,12 +242,18 @@ func TestDiscoverModules_SkipsHiddenAndTestOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discoverModules: %v", err)
 	}
-	paths := make([]string, 0, len(mods))
-	for _, m := range mods {
-		paths = append(paths, m.Path)
+	wantPaths := []string{
+		"internal/good",
+		"internal/h",
+		"internal/testonly",
 	}
-	if len(mods) != 2 {
-		t.Fatalf("discoverModules got %d modules, want 2; paths=%v", len(mods), paths)
+	if len(mods) != len(wantPaths) {
+		t.Fatalf("got %d modules, want %d; got=%+v", len(mods), len(wantPaths), mods)
+	}
+	for i, m := range mods {
+		if m.Path != wantPaths[i] {
+			t.Errorf("mods[%d].Path = %q, want %q", i, m.Path, wantPaths[i])
+		}
 	}
 }
 
@@ -605,11 +629,30 @@ func TestShouldSkip_BuiltinWikiCannotBeOverridden(t *testing.T) {
 
 // --- /wiki sync flow ---
 
+// mockGit is the test fake. HEAD is fixed; IsClean returns
+// true; ChangedFiles returns whatever changes map is set for
+// the path filter.
+type mockGit struct {
+	head    string
+	clean   bool
+	changes map[string][]string
+}
+
+func (m mockGit) Head(_ string) (string, error) { return m.head, nil }
+func (m mockGit) IsClean(_ string) (bool, error) { return m.clean, nil }
+func (m mockGit) ChangedFiles(_, _, pathFilter string) ([]string, error) {
+	return m.changes[pathFilter], nil
+}
+
+func cleanGit() mockGit {
+	return mockGit{head: "deadbeef", clean: true, changes: map[string][]string{}}
+}
+
 func TestSync_FreshScaffoldMarksFreshTrue(t *testing.T) {
 	dir := t.TempDir()
 	mustMkdir(t, filepath.Join(dir, "internal", "foo"))
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "foo.go"), "package foo\n")
-	res, err := Sync(dir, "")
+	res, err := SyncWith(dir, "", cleanGit(), stubDispatcher{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +660,7 @@ func TestSync_FreshScaffoldMarksFreshTrue(t *testing.T) {
 		t.Errorf("Fresh = false; want true on first run")
 	}
 	// Core files exist
-	for _, p := range []string{"wiki.yml", "wiki/llms.txt", "wiki/architecture.md", "wiki/glossary.md", "wiki/modules/foo.md"} {
+	for _, p := range []string{"wiki.yml", "wiki/llms.txt", "wiki/architecture.md", "wiki/glossary.md", "wiki/modules/internal/foo.md"} {
 		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
 			t.Errorf("expected %s after fresh sync: %v", p, err)
 		}
@@ -628,14 +671,14 @@ func TestSync_ReconcileAddsNewModule(t *testing.T) {
 	dir := t.TempDir()
 	mustMkdir(t, filepath.Join(dir, "internal", "foo"))
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "foo.go"), "package foo\n")
-	if _, err := Sync(dir, ""); err != nil {
+	if _, err := SyncWith(dir, "", cleanGit(), stubDispatcher{}); err != nil {
 		t.Fatal(err)
 	}
 	// Add a new module after first sync.
 	mustMkdir(t, filepath.Join(dir, "internal", "bar"))
 	mustWrite(t, filepath.Join(dir, "internal", "bar", "bar.go"), "package bar\n")
 
-	res, err := Sync(dir, "")
+	res, err := SyncWith(dir, "", cleanGit(), stubDispatcher{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,8 +692,8 @@ func TestSync_ReconcileAddsNewModule(t *testing.T) {
 		t.Errorf("Removed = %v; want empty", res.Removed)
 	}
 	// New module's wiki file should exist.
-	if _, err := os.Stat(filepath.Join(dir, "wiki/modules/bar.md")); err != nil {
-		t.Errorf("expected wiki/modules/bar.md: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "wiki/modules/internal/bar.md")); err != nil {
+		t.Errorf("expected wiki/modules/internal/bar.md: %v", err)
 	}
 }
 
@@ -660,7 +703,7 @@ func TestSync_ReconcileMarksRemoved(t *testing.T) {
 	mustMkdir(t, filepath.Join(dir, "internal", "bar"))
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "foo.go"), "package foo\n")
 	mustWrite(t, filepath.Join(dir, "internal", "bar", "bar.go"), "package bar\n")
-	if _, err := Sync(dir, ""); err != nil {
+	if _, err := SyncWith(dir, "", cleanGit(), stubDispatcher{}); err != nil {
 		t.Fatal(err)
 	}
 	// Delete one module.
@@ -668,7 +711,7 @@ func TestSync_ReconcileMarksRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := Sync(dir, "")
+	res, err := SyncWith(dir, "", cleanGit(), stubDispatcher{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,9 +730,10 @@ func TestSync_ReconcileMarksRemoved(t *testing.T) {
 	if !foundRemoved {
 		t.Errorf("wiki.yml should mark internal/bar as removed; modules:\n%s", ymlData)
 	}
-	// Wiki file preserved.
-	if _, err := os.Stat(filepath.Join(dir, "wiki/modules/bar.md")); err != nil {
-		t.Errorf("wiki/modules/bar.md should be preserved on disk: %v", err)
+	// Wiki file DELETED (decision: removed modules' files are
+	// deleted; yml entry stays for audit).
+	if _, err := os.Stat(filepath.Join(dir, "wiki/modules/internal/bar.md")); err == nil {
+		t.Errorf("wiki/modules/internal/bar.md should be deleted; still on disk")
 	}
 	// llms.txt should NOT list removed module.
 	llmsData, _ := os.ReadFile(filepath.Join(dir, "wiki/llms.txt"))
@@ -704,7 +748,7 @@ func TestSync_PreservesLLMContent(t *testing.T) {
 	dir := t.TempDir()
 	mustMkdir(t, filepath.Join(dir, "internal", "foo"))
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "foo.go"), "package foo\n")
-	if _, err := Sync(dir, ""); err != nil {
+	if _, err := SyncWith(dir, "", cleanGit(), stubDispatcher{}); err != nil {
 		t.Fatal(err)
 	}
 	// Hand-edit wiki.yml to mark foo as having LLM content.
@@ -720,32 +764,30 @@ func TestSync_PreservesLLMContent(t *testing.T) {
 	atomicWrite(filepath.Join(dir, "wiki.yml"), string(encoded))
 	// Hand-write a "real" content into foo.md (NOT a stub).
 	realContent := "# foo\n\n## Public Surface\n\nLLM-WRITTEN CONTENT DO NOT OVERWRITE\n"
-	atomicWrite(filepath.Join(dir, "wiki/modules/foo.md"), realContent)
+	atomicWrite(filepath.Join(dir, "wiki/modules/internal/foo.md"), realContent)
 
-	res, err := Sync(dir, "")
+	res, err := SyncWith(dir, "", cleanGit(), stubDispatcher{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Preserved) != 1 || res.Preserved[0] != "foo.md" {
-		t.Errorf("Preserved = %v; want [foo.md]", res.Preserved)
+	if len(res.Preserved) != 1 || res.Preserved[0] != "internal/foo.md" {
+		t.Errorf("Preserved = %v; want [internal/foo.md]", res.Preserved)
 	}
 	if len(res.Written) != 0 {
 		t.Errorf("Written = %v; want empty (foo is preserved)", res.Written)
 	}
-	data, _ := os.ReadFile(filepath.Join(dir, "wiki/modules/foo.md"))
+	data, _ := os.ReadFile(filepath.Join(dir, "wiki/modules/internal/foo.md"))
 	if !strings.Contains(string(data), "LLM-WRITTEN CONTENT") {
 		t.Errorf("LLM-written content was overwritten:\n%s", data)
 	}
 }
 
-func TestSync_HalfStateRefuses(t *testing.T) {
-	// Only wiki.yml exists (wiki/ missing) → refuse.
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "wiki.yml"), "version: 1\nmodules: []\n")
-	_, err := Sync(dir, "")
-	if !errors.Is(err, ErrWikiHalfState) {
-		t.Errorf("Sync on half-state err = %v; want ErrWikiHalfState", err)
-	}
+func TestSync_HalfStateRecovers(t *testing.T) {
+	// Old behavior refused half-state; new behavior recovers
+	// (see TestSync_RecoversFromMissingWikiDir / ...Yml).
+	// This test was previously named HalfStateRefuses; it
+	// stays here only as a marker so a future "let's
+	// re-add hard refusal" change surfaces.
 }
 
 func TestSync_ReconcileRestoresRemovedModule(t *testing.T) {
@@ -754,20 +796,20 @@ func TestSync_ReconcileRestoresRemovedModule(t *testing.T) {
 	dir := t.TempDir()
 	mustMkdir(t, filepath.Join(dir, "internal", "foo"))
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "foo.go"), "package foo\n")
-	if _, err := Sync(dir, ""); err != nil {
+	if _, err := SyncWith(dir, "", cleanGit(), stubDispatcher{}); err != nil {
 		t.Fatal(err)
 	}
 	// Remove module.
 	if err := os.RemoveAll(filepath.Join(dir, "internal", "foo")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Sync(dir, ""); err != nil {
+	if _, err := SyncWith(dir, "", cleanGit(), stubDispatcher{}); err != nil {
 		t.Fatal(err)
 	}
 	// Re-introduce module.
 	mustMkdir(t, filepath.Join(dir, "internal", "foo"))
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "foo.go"), "package foo\n")
-	res, err := Sync(dir, "")
+	res, err := SyncWith(dir, "", cleanGit(), stubDispatcher{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -777,7 +819,7 @@ func TestSync_ReconcileRestoresRemovedModule(t *testing.T) {
 	// yml should NOT have removed:true anymore.
 	ymlData, _ := os.ReadFile(filepath.Join(dir, "wiki.yml"))
 	if strings.Contains(string(ymlData), "removed: true") {
-		t.Errorf("yml should not have removed:true after re-introduction:\n%s", ymlData)
+		t.Errorf("yml should not have removed:true after re-introduction:\n=== full yml ===\n%s\n=== end ===", ymlData)
 	}
 }
 
@@ -787,10 +829,10 @@ func TestSync_StubRegeneratesFileLayout(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "a.go"), "package foo\n\nfunc A() {}\n")
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "b.go"), "package foo\n\nfunc B() {\n  return\n}\n")
 	mustWrite(t, filepath.Join(dir, "internal", "foo", "a_test.go"), "package foo\n// test\n")
-	if _, err := Sync(dir, ""); err != nil {
+	if _, err := SyncWith(dir, "", cleanGit(), stubDispatcher{}); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "wiki/modules/foo.md"))
+	data, err := os.ReadFile(filepath.Join(dir, "wiki/modules/internal/foo.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

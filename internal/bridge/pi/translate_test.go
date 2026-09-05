@@ -1315,14 +1315,61 @@ func TestTranslate_EmptyTurnStillCarriesUsage(t *testing.T) {
 	events := drive(t, tr, string(raw), `{"type":"agent_settled"}`)
 
 	result := findResult(t, events)
-	if result.Text == "" {
-		t.Fatal("Text is empty; gateway.Translate would drop this result and lose the usage")
-	}
-	if result.Text != emptyReplyFallback {
-		t.Errorf("Text = %q, want the fallback %q", result.Text, emptyReplyFallback)
+	// Text-dedup contract: tool-only turn (no agentMessage) → Result.Text
+	// stays empty. translate.go forwards empty Text + Usage so channels
+	// PATCH the receipt footer instead of opening a standalone
+	// "Done." card. Pre-fix this asserted `emptyReplyFallback`.
+	if result.Text != "" {
+		t.Errorf("Text = %q, want empty (no agentMessage this turn)", result.Text)
 	}
 	if result.Usage == nil || result.Usage.InputTokens != 77 {
 		t.Errorf("Usage = %+v, want InputTokens 77", result.Usage)
+	}
+}
+
+// TestTranslate_NoMoreDonePlaceholder locks the post-fix contract:
+// across all the streaming-only / no-final-text scenarios (the ones
+// that pre-fix fell back to `emptyReplyFallback` "Done."), Result.Text
+// is empty and translate.go forwards the empty-Text + Usage pair so
+// channels PATCH the receipt footer. This is the regression guard
+// against resurrecting the "Done." placeholder.
+func TestTranslate_NoMoreDonePlaceholder(t *testing.T) {
+	cases := []struct {
+		name string
+		seq  []string
+	}{
+		{
+			name: "tool-only turn with usage",
+			seq: []string{
+				`{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"toolCall","id":"c-1","name":"bash"}],"usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15}}}`,
+				`{"type":"agent_settled"}`,
+			},
+		},
+		{
+			name: "streamed narration + tool + empty assistant message",
+			seq: []string{
+				`{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}`,
+				`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Let me check."}}`,
+				`{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0}}`,
+				`{"type":"tool_execution_start","toolCallId":"c-1","toolName":"bash","args":{"command":"ls"}}`,
+				`{"type":"tool_execution_end","toolCallId":"c-1","toolName":"bash","result":"ok","isError":false}`,
+				`{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[],"usage":{"input":90,"output":10,"cacheRead":0,"cacheWrite":0,"totalTokens":100}}}`,
+				`{"type":"agent_settled"}`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newTestTranslator()
+			events := drive(t, tr, tc.seq...)
+			result := findResult(t, events)
+			if result.Text != "" {
+				t.Errorf("Text = %q, want empty (no Done. placeholder)", result.Text)
+			}
+			if result.Usage == nil {
+				t.Errorf("Usage = nil; footer PATCH contract requires Usage to flow even with empty Text")
+			}
+		})
 	}
 }
 
@@ -1541,11 +1588,15 @@ func TestTranslate_ToolEndingTurn_NoDuplicate(t *testing.T) {
 			t.Fatalf("EventAgentResult.Text = %q duplicates an EventAgentText already delivered", result.Text)
 		}
 	}
-	if result.Text != emptyReplyFallback {
-		t.Errorf("Text = %q, want the fallback %q", result.Text, emptyReplyFallback)
+	// Text-dedup contract: tool ran AFTER the streamed narration
+	// (the "Let me check." was flushed at tool_execution_start) and
+	// the final assistant message had no text block. Result.Text
+	// stays empty; translate.go forwards empty Text + Usage so
+	// channels PATCH the receipt footer. Pre-fix this asserted
+	// `emptyReplyFallback` ("Done.") as a placeholder.
+	if result.Text != "" {
+		t.Errorf("Text = %q, want empty (no body to render after streamed segments)", result.Text)
 	}
-	// Usage must still ride out even though the text is a placeholder —
-	// that is the whole reason the placeholder exists.
 	if result.Usage == nil || result.Usage.InputTokens != 90 {
 		t.Errorf("Usage = %+v, want InputTokens 90", result.Usage)
 	}

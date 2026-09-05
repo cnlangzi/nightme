@@ -141,8 +141,15 @@ func TestTranslate_TurnCompletedFlushesRemainingText(t *testing.T) {
 	if ev2.Kind != agent.EventAgentResult {
 		t.Fatalf("second event kind = %v, want EventAgentResult", ev2.Kind)
 	}
-	if ev2.Result == nil || ev2.Result.Text != "final reply" {
-		t.Errorf("Result.Text = %q, want 'final reply'", ev2.Result.Text)
+	if ev2.Result == nil {
+		t.Fatal("Result is nil")
+	}
+	// Text-dedup contract: the closing flush just emitted
+	// 'final reply' as EventAgentText; Result.Text is empty so
+	// channels PATCH the receipt footer instead of re-shipping
+	// the same content as a standalone card.
+	if ev2.Result.Text != "" {
+		t.Errorf("Result.Text = %q, want empty (already streamed as EventAgentText)", ev2.Result.Text)
 	}
 	if ev2.Result.Usage == nil {
 		t.Fatal("Result.Usage is nil")
@@ -278,7 +285,73 @@ func TestTranslate_EmptyTurnProducesNoResultOrDone(t *testing.T) {
 	}
 }
 
-func TestTranslate_ResultTextFallsBackToDonePlaceholder(t *testing.T) {
+func TestTranslate_MultiSegmentTurnEmitsTextAtBoundariesAndEmptyResultText(t *testing.T) {
+	// Multi-segment reply: text₁ → tool → text₂ → tool → text₃ (final,
+	// no tool after). F-52 contract: each tool start flushes the
+	// preceding text as one EventAgentText; turn-end flushes the
+	// final segment as EventAgentText. Result.Text must be empty
+	// so channels PATCH the receipt footer instead of opening a
+	// duplicate standalone card.
+	tr, cap := captureTranslator()
+
+	tr.notify("turn/started", json.RawMessage(`{}`))
+
+	// segment 1
+	tr.handleItemCompleted(json.RawMessage(`{
+		"threadId":"thr-1","turnId":"trn-1",
+		"item":{"id":"it-1","type":"agentMessage","text":"first "}
+	}`))
+	// tool boundary — flushes segment 1
+	tr.handleItemStarted(json.RawMessage(`{
+		"threadId":"thr-1","turnId":"trn-1",
+		"item":{"id":"t-1","type":"commandExecution","command":"ls"}
+	}`))
+
+	ev := cap.one(t, 1*time.Second)
+	if ev.Kind != agent.EventAgentText || ev.Text != "first " {
+		t.Fatalf("first flushed event = %+v, want EventAgentText 'first '", ev)
+	}
+	cap.drain(t, 1, 500*time.Millisecond) // EventAgentToolStart
+
+	tr.handleItemCompleted(json.RawMessage(`{
+		"threadId":"thr-1","turnId":"trn-1",
+		"item":{"id":"t-1","type":"commandExecution","exitCode":0,"status":"completed"}
+	}`))
+	cap.drain(t, 1, 500*time.Millisecond) // EventAgentToolEnd
+
+	// segment 2 (final, no tool after)
+	tr.handleItemCompleted(json.RawMessage(`{
+		"threadId":"thr-1","turnId":"trn-1",
+		"item":{"id":"it-2","type":"agentMessage","text":"final"}
+	}`))
+
+	tr.notify("turn/completed", json.RawMessage(`{
+		"turnId":"trn-1","status":"completed",
+		"usage":{"inputTokens":42,"outputTokens":7,"cachedInputTokens":0}
+	}`))
+
+	// Expected: EventAgentText("final"), EventAgentResult{Text:"", Usage}, EventAgentDone.
+	evText := cap.one(t, 1*time.Second)
+	if evText.Kind != agent.EventAgentText || evText.Text != "final" {
+		t.Fatalf("turn-end flush = %+v, want EventAgentText 'final'", evText)
+	}
+	res := cap.one(t, 1*time.Second)
+	if res.Kind != agent.EventAgentResult {
+		t.Fatalf("Result kind = %v, want EventAgentResult", res.Kind)
+	}
+	if res.Result.Text != "" {
+		t.Errorf("Result.Text = %q, want empty (segments already streamed as EventAgentText)", res.Result.Text)
+	}
+	if res.Result.Usage == nil || res.Result.Usage.InputTokens != 42 {
+		t.Errorf("Result.Usage = %+v, want InputTokens=42 (footer must still flow)", res.Result.Usage)
+	}
+	done := cap.one(t, 1*time.Second)
+	if done.Kind != agent.EventAgentDone {
+		t.Errorf("final kind = %v, want EventAgentDone", done.Kind)
+	}
+}
+
+func TestTranslate_ResultTextEmptyWithUsagePassesThrough(t *testing.T) {
 	tr, cap := captureTranslator()
 
 	tr.notify("turn/started", json.RawMessage(`{}`))
@@ -296,17 +369,26 @@ func TestTranslate_ResultTextFallsBackToDonePlaceholder(t *testing.T) {
 	cap.drain(t, 1, 500*time.Millisecond) // EventAgentToolEnd
 
 	tr.notify("turn/completed", json.RawMessage(`{
-		"turnId":"trn-1","status":"completed"
+		"turnId":"trn-1","status":"completed",
+		"usage":{"inputTokens":100,"outputTokens":50,"cachedInputTokens":0}
 	}`))
 
-	// Should emit: Result{Text: emptyReplyFallback}, Done.
+	// Should emit: Result{Text: "", Usage: populated}, Done.
+	// Text-dedup contract: closing flush already emitted the last
+	// agentMessage segment as EventAgentText; Result carries
+	// metadata only so channels PATCH the receipt footer.
 	res := cap.one(t, 1*time.Second)
 	if res.Kind != agent.EventAgentResult {
 		t.Fatalf("kind = %v, want EventAgentResult", res.Kind)
 	}
-	if res.Result == nil || res.Result.Text != emptyReplyFallback {
-		t.Errorf("Result.Text = %q, want fallback %q",
-			deref(res.Result).Text, emptyReplyFallback)
+	if res.Result == nil {
+		t.Fatal("Result is nil")
+	}
+	if res.Result.Text != "" {
+		t.Errorf("Result.Text = %q, want empty (already streamed as EventAgentText)", res.Result.Text)
+	}
+	if res.Result.Usage == nil || res.Result.Usage.InputTokens != 100 {
+		t.Errorf("Result.Usage = %+v, want InputTokens=100 (footer must still flow)", res.Result.Usage)
 	}
 }
 
@@ -400,15 +482,6 @@ func TestTranslate_TurnFailedSurfacesErr(t *testing.T) {
 	if res.Err.Error() != "rate limited" {
 		t.Errorf("Err = %q, want 'rate limited'", res.Err.Error())
 	}
-}
-
-// ─── helpers ───
-
-func deref(r *agent.AgentResultEvent) agent.AgentResultEvent {
-	if r == nil {
-		return agent.AgentResultEvent{}
-	}
-	return *r
 }
 
 // ─── marshalling round-trip ───

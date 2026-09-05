@@ -534,7 +534,7 @@ echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"c
 #      graceful==true, and no EventAgentError is emitted.
 while read -t 30 _PROMPT; do
   echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
-  echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
+  echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false,"usage":{"input_tokens":42,"output_tokens":7,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}'
 done
 `
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
@@ -658,10 +658,21 @@ done
 	} else if outReply.Text != "hello back" {
 		t.Errorf("OutReply.Text = %q, want %q", outReply.Text, "hello back")
 	}
+	// OutResult: claudecode bridge clears Result.Text on the
+	// success path (the assistant block already streamed the
+	// reply as EventAgentText). translate.go forwards the
+	// empty-Text Result with metadata so the channel can PATCH
+	// the receipt footer instead of opening a duplicate card.
+	// The recording channel here captures the outbound; the
+	// production feishu adapter takes the empty-Text branch
+	// and PATCHes the receipt. We assert the forwarded shape
+	// (empty Text, Usage populated) rather than absence.
 	if outResult == nil {
 		t.Errorf("no OutResult in captured messages (kinds: %v)", summarizeKinds(rec))
-	} else if outResult.Text != "final answer" {
-		t.Errorf("OutResult.Text = %q, want %q", outResult.Text, "final answer")
+	} else if outResult.Text != "" {
+		t.Errorf("OutResult.Text = %q, want empty (success-path body was already streamed as OutReply)", outResult.Text)
+	} else if outResult.Usage == nil {
+		t.Errorf("OutResult.Usage is nil; footer-only OutResult should carry Usage so channel can PATCH receipt footer")
 	}
 }
 

@@ -425,12 +425,19 @@ func TestPumpStream_Result(t *testing.T) {
 	if len(evs) != 2 {
 		t.Fatalf("got %d events, want 2 (Result with co-located Usage + Done)", len(evs))
 	}
-	// EventAgentResult — carries Text, DurationMs, Subtype, AND Usage.
+	// EventAgentResult — Text dup fix: on the success path the
+	// assistant text blocks have already streamed the reply as
+	// EventAgentText, so Result.Text is intentionally empty to
+	// avoid double-rendering. DurationMs, Subtype, and Usage
+	// stay populated for the footer.
 	if evs[0].Kind != agent.EventAgentResult {
 		t.Errorf("evs[0].Kind = %v, want EventAgentResult", evs[0].Kind)
 	}
-	if evs[0].Result == nil || evs[0].Result.Text != "完成" {
-		t.Errorf("evs[0].Result = %+v, want Text '完成'", evs[0].Result)
+	if evs[0].Result == nil {
+		t.Fatal("Result is nil")
+	}
+	if evs[0].Result.Text != "" {
+		t.Errorf("Result.Text = %q, want empty (success path clears text to avoid OutReply/OutResult duplication)", evs[0].Result.Text)
 	}
 	if evs[0].Result.DurationMs != 12345 {
 		t.Errorf("DurationMs = %d, want 12345", evs[0].Result.DurationMs)
@@ -715,6 +722,46 @@ func TestPumpStream_Result_NoUsagePayload(t *testing.T) {
 	}
 	if got[0].Result.Usage != nil {
 		t.Errorf("AgentResultEvent.Usage = %+v, want nil (no usage on the wire)", got[0].Result.Usage)
+	}
+	if got[1].Kind != agent.EventAgentDone {
+		t.Errorf("got[1].Kind = %v, want EventAgentDone", got[1].Kind)
+	}
+}
+
+// TestPumpStream_Result_ErrorPreservesText guards the
+// text-dedup cut: when is_error=true the result.result carries
+// error-specific text that never went through an assistant
+// block (e.g. error_max_turns description). Clearing it would
+// drop the only signal the user has for what went wrong, so
+// the error path keeps Result.Text verbatim.
+func TestPumpStream_Result_ErrorPreservesText(t *testing.T) {
+	input := `{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":9999,"result":"hit the per-turn tool cap; bailing out"}` + "\n"
+	events := make(chan agent.AgentEvent, 4)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pumpStream(strings.NewReader(input), events, nil, nil, "claude", "/tmp", "main", nil)
+		close(events)
+	}()
+	var got []agent.AgentEvent
+	for ev := range events {
+		got = append(got, ev)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2 (Result + Done)", len(got))
+	}
+	if got[0].Kind != agent.EventAgentResult {
+		t.Fatalf("got[0].Kind = %v, want EventAgentResult", got[0].Kind)
+	}
+	if got[0].Result.Text != "hit the per-turn tool cap; bailing out" {
+		t.Errorf("Result.Text = %q, want error description preserved on is_error=true", got[0].Result.Text)
+	}
+	if got[0].Result.Subtype != "error_max_turns" {
+		t.Errorf("Result.Subtype = %q, want error_max_turns", got[0].Result.Subtype)
+	}
+	if got[0].Result.DurationMs != 9999 {
+		t.Errorf("Result.DurationMs = %d, want 9999", got[0].Result.DurationMs)
 	}
 	if got[1].Kind != agent.EventAgentDone {
 		t.Errorf("got[1].Kind = %v, want EventAgentDone", got[1].Kind)

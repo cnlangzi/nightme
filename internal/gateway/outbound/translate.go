@@ -260,11 +260,16 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 			return messages.OutboundMessage{}, false
 		}
 		// Drop only when there is truly nothing to convey: no body
-		// text, no error, no footer-bearing metadata. Bridges that
+		// text, no error, no footer-bearing usage. Bridges that
 		// stream text as EventAgentText send Result with Text=="" but
-		// Usage/DurationMs populated — those pass through so channels
-		// can PATCH the receipt footer instead of opening a new card.
-		if ev.Result.Text == "" && ev.Err == nil && ev.Result.Usage == nil && ev.Result.DurationMs == 0 {
+		// Usage populated — those pass through so channels can
+		// PATCH the receipt footer instead of opening a new card.
+		// Err-only turns short-circuit the drop so channels can still
+		// surface the error indicator even when the bridge did not
+		// populate Result.Text or Usage (agent.go documents Result.Text
+		// may be empty on error turns and the header flip is the
+		// primary signal — see OnPromptEnded).
+		if ev.Result.Text == "" && ev.Err == nil && ev.Result.Usage == nil {
 			return messages.OutboundMessage{}, false
 		}
 		out := messages.OutboundMessage{
@@ -272,6 +277,12 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 			Kind:   messages.OutResult,
 			Text:   ev.Result.Text,
 			Result: ev.Result,
+			// Propagate Err so channels can distinguish error turns
+			// from success-empty-text turns (the latter carry Usage
+			// for footer PATCH; the former rely on the error icon
+			// path). Bridges populate ev.Err on IsError=true per
+			// agent.go's Result-event contract.
+			Err: ev.Err,
 		}
 		// Bridges populate ev.Result.Usage from the same wire event
 		// they took Text from (Claude Code result.usage +

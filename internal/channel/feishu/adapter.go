@@ -1735,25 +1735,18 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			return errors.New("feishu: OutResult missing Result payload")
 		}
 		text := strings.TrimSpace(msg.Result.Text)
-		footerLines := statusbar.StatusBarLines(&msg)
 
 		// Empty-body path: bridges stream text as OutReply and
 		// send Result with Text=="" + metadata (claudecode post
-		// text-dedup; acp / pty by wire shape). Don't open a
-		// duplicate standalone card — PATCH the existing
-		// receipt's footer in place via StampFooterLines.
-		// Err-only paths (text=="" + msg.Err!=nil) also land
-		// here: statusbar.StatusBarLines surfaces the error
-		// state on the footer line.
+		// text-dedup; acp / pty by wire shape). PATCH the existing
+		// receipt's footer in place via StampFooterLines — no
+		// duplicate standalone card.
 		if text == "" {
-			if msg.ReplyTo == "" {
-				return nil
-			}
 			r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
 			if r == nil {
 				return nil
 			}
-			return r.StampFooterLines(ctx, footerLines)
+			return r.StampFooterLines(ctx, statusbar.StatusBarLines(&msg))
 		}
 
 		// Body present: standalone result card with body+footer.
@@ -1784,7 +1777,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		//
 		// Wire: POST /im/v1/messages (top-level Create) — no
 		// reply_in_thread field, no parent/thread relationship.
-		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, footerLines)
+		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, statusbar.StatusBarLines(&msg))
 
 	// F-49: case gateway.OutCompaction: deleted. The runtime handler
 	// no longer produces an OutboundMessage for EventAgentCompaction;

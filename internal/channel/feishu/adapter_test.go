@@ -1629,6 +1629,39 @@ func TestSend_OutResult_EmptyPatchesReceiptFooter(t *testing.T) {
 	}
 }
 
+// TestSend_OutResult_EmptyWithErrPatchesReceipt — bare-error
+// turn: Text=="" + Err!=nil + no Usage. The translator must
+// forward this (Err short-circuits the drop predicate) and the
+// adapter must route it through the PATCH-footer branch instead
+// of opening a duplicate card or silently dropping. Asserts the
+// negative (no new card) — the PATCH itself errors in this env
+// without a mock, matching the empty+Usage case above.
+func TestSend_OutResult_EmptyWithErrPatchesReceipt(t *testing.T) {
+	a := testAdapter(t)
+	preExisting := NewMessageReceiptForReply("oc_test", "om_err", "oc_card_err", a)
+	a.receiptsByUserMsgID["om_err"] = preExisting
+
+	var sends int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		return "ok", nil
+	}
+	err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
+		ChatID:  "oc_test",
+		ReplyTo: "om_err",
+		Text:    "",
+		Result:  &agent.AgentResultEvent{Text: "", Subtype: "error"},
+		Err:     errors.New("bare error"),
+	})
+	if err != nil {
+		t.Logf("send returned err (expected in this test env, PATCH path not mocked): %v", err)
+	}
+	if sends != 0 {
+		t.Errorf("empty OutResult with Err should PATCH (no new card), got %d sends", sends)
+	}
+}
+
 // TestSend_OutResult_IsErrorPrefixedWithIcon — error results get ❌ prefix.
 func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 	a := testAdapter(t)

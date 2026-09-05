@@ -29,12 +29,6 @@ import (
 // needs no per-bridge branching.
 const thinkingPrefix = "[思考] "
 
-// emptyReplyFallback is the EventAgentResult text used when a turn
-// settles without any un-flushed assistant text. NOT cosmetic — see
-// pi/translate.go for the rationale (gateway drops empty Text and
-// would take the turn's Usage with it).
-const emptyReplyFallback = "Done."
-
 // pendingTool tracks a tool invocation that has emitted item/started
 // but not yet the matching item/completed. Re-attached on the end
 // event for renderer context (id-stable correlation).
@@ -64,11 +58,6 @@ type turnState struct {
 	// started but not yet completed. Drained on item/completed.
 	pendingTools map[string]*pendingTool
 
-	// textDelivered records that at least one EventAgentText for a
-	// reply block has gone out this turn. Used to suppress an
-	// EventAgentResult.Text that would re-deliver already-shown text.
-	textDelivered bool
-
 	// active records the turn observed something worth reporting
 	// (any text / tool / usage). A turn with active==false produces
 	// NO EventAgentResult / EventAgentDone.
@@ -96,7 +85,6 @@ func (t *turnState) reset() {
 	for k := range t.pendingTools {
 		delete(t.pendingTools, k)
 	}
-	t.textDelivered = false
 	t.active = false
 	t.lastUsage = nil
 	t.doneEmitted = false
@@ -489,13 +477,17 @@ func (t *translator) completeTurn(params json.RawMessage, status string) {
 	}
 
 	// Flush any remaining assistant text as EventAgentText first, so
-	// the user sees the closing paragraphs.
-	text := t.flushPendingMsgsReturnLocked()
+	// the user sees the closing paragraphs. Result.Text is left
+	// empty: this flush just emitted the text as a streaming
+	// EventAgentText, and Result now carries metadata only —
+	// gateway/outbound/translate.go forwards empty-Text Result +
+	// Usage so channels PATCH the receipt footer instead of
+	// opening a duplicate standalone card.
+	t.flushPendingMsgsLocked()
 
 	result := agent.AgentEvent{
 		Kind: agent.EventAgentResult,
 		Result: &agent.AgentResultEvent{
-			Text:  text,
 			Usage: usage,
 		},
 	}
@@ -569,19 +561,11 @@ func (t *translator) handleThreadStatusChanged(params json.RawMessage) {
 // ─── helpers ───
 
 // flushPendingMsgsLocked emits any buffered agentMessage text as one
-// or more EventAgentText events and clears the buffer. Caller must
-// hold t.mu.
-func (t *translator) flushPendingMsgsLocked() string {
-	return t.flushPendingMsgsReturnLocked()
-}
-
-// flushPendingMsgsReturnLocked is the return-the-text variant used
-// by completeTurn (so it can populate Result.Text without re-walking
-// the buffer).
-func (t *translator) flushPendingMsgsReturnLocked() string {
+// EventAgentText and clears the buffer. No-op when the buffer is
+// empty. Caller must hold t.mu.
+func (t *translator) flushPendingMsgsLocked() {
 	if len(t.turn.pendingMsgs) == 0 {
-		t.turn.textDelivered = true
-		return emptyReplyFallback
+		return
 	}
 	text := strings.Join(t.turn.pendingMsgs, "\n")
 	t.turn.pendingMsgs = t.turn.pendingMsgs[:0]
@@ -590,9 +574,7 @@ func (t *translator) flushPendingMsgsReturnLocked() string {
 			Kind: agent.EventAgentText,
 			Text: text,
 		})
-		t.turn.textDelivered = true
 	}
-	return text
 }
 
 // decodeToolItem extracts the human-friendly tool name + args string

@@ -259,7 +259,12 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		if ev.Result == nil {
 			return messages.OutboundMessage{}, false
 		}
-		if ev.Result.Text == "" && ev.Err == nil {
+		// Drop only when there is truly nothing to convey: no body
+		// text, no error, no footer-bearing metadata. Bridges that
+		// stream text as EventAgentText send Result with Text=="" but
+		// Usage/DurationMs populated — those pass through so channels
+		// can PATCH the receipt footer instead of opening a new card.
+		if ev.Result.Text == "" && ev.Err == nil && ev.Result.Usage == nil && ev.Result.DurationMs == 0 {
 			return messages.OutboundMessage{}, false
 		}
 		out := messages.OutboundMessage{

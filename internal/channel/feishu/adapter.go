@@ -1735,12 +1735,31 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			return errors.New("feishu: OutResult missing Result payload")
 		}
 		text := strings.TrimSpace(msg.Result.Text)
-		if text == "" && msg.Err == nil {
-			return nil
+		footerLines := statusbar.StatusBarLines(&msg)
+
+		// Empty-body path: bridges stream text as OutReply and
+		// send Result with Text=="" + metadata (claudecode post
+		// text-dedup; acp / pty by wire shape). Don't open a
+		// duplicate standalone card — PATCH the existing
+		// receipt's footer in place via StampFooterLines.
+		// Err-only paths (text=="" + msg.Err!=nil) also land
+		// here: statusbar.StatusBarLines surfaces the error
+		// state on the footer line.
+		if text == "" {
+			if msg.ReplyTo == "" {
+				return nil
+			}
+			r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
+			if r == nil {
+				return nil
+			}
+			return r.StampFooterLines(ctx, footerLines)
 		}
+
+		// Body present: standalone result card with body+footer.
 		// Icon prefix only when there's actual error text — without it
 		// the user would see a meaningless bare-emoji standalone message.
-		if msg.Err != nil && text != "" {
+		if msg.Err != nil {
 			text = "❌ " + text
 		}
 		// F-45 §2.8 / F-46: footer renders as card elements
@@ -1751,7 +1770,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// uses the same shared cardFooterElements helper, so
 		// OutResult and OutReply cards now render identical
 		// footers.
-		footerLines := statusbar.StatusBarLines(&msg)
+		//
 		// F-39 + F-44 follow-up: deliver the full result as a
 		// top-level Create (PR #47's ReplyInChat surface) — see
 		// OutReply case above for the parent-thread rationale that

@@ -514,10 +514,18 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// bridges it marks turn end.
 		usage := decodeUsage(ev.Usage, ev.ModelUsage)
 		if ev.Result != "" || ev.IsError {
+			// Text dup fix: assistant text blocks already streamed
+			// the reply as EventAgentText; result.result would be
+			// a verbatim duplicate. Clear Text on the success path
+			// and keep it on the error path — error turns carry a
+			// result.result that never went through an assistant
+			// block (e.g. error_max_turns description).
 			result := &agent.AgentResultEvent{
-				Text:       ev.Result,
 				DurationMs: ev.DurationMs,
 				Subtype:    ev.Subtype,
+			}
+			if ev.IsError {
+				result.Text = ev.Result
 			}
 			// Attach usage from the same wire event. The previous
 			// design emitted a separate EventUsage here; runtime

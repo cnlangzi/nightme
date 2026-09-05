@@ -1,0 +1,131 @@
+version: 1
+last_commit: null
+agent: null
+include: []
+modules:
+  - path: cmd/nightme
+    file: nightme.md
+    last_sha: null
+  - path: configs
+    file: configs.md
+    last_sha: null
+  - path: docs
+    file: docs.md
+    last_sha: null
+  - path: internal/agent
+    file: agent.md
+    last_sha: null
+  - path: internal/agentregistry
+    file: agentregistry.md
+    last_sha: null
+  - path: internal/agentsession
+    file: agentsession.md
+    last_sha: null
+  - path: internal/bridge/acp
+    file: acp.md
+    last_sha: null
+  - path: internal/bridge/claudecode
+    file: claudecode.md
+    last_sha: null
+  - path: internal/bridge/codex
+    file: codex.md
+    last_sha: null
+  - path: internal/bridge/copilot
+    file: copilot.md
+    last_sha: null
+  - path: internal/bridge/cursor
+    file: cursor.md
+    last_sha: null
+  - path: internal/bridge/dsh
+    file: dsh.md
+    last_sha: null
+  - path: internal/bridge/opencode
+    file: opencode.md
+    last_sha: null
+  - path: internal/bridge/pi
+    file: pi.md
+    last_sha: null
+  - path: internal/bridge/pty
+    file: pty.md
+    last_sha: null
+  - path: internal/channel
+    file: channel.md
+    last_sha: null
+  - path: internal/chatsession
+    file: chatsession.md
+    last_sha: null
+  - path: internal/chatstore
+    file: chatstore.md
+    last_sha: null
+  - path: internal/cli
+    file: cli.md
+    last_sha: null
+  - path: internal/command
+    file: command.md
+    last_sha: null
+  - path: internal/config
+    file: config.md
+    last_sha: null
+  - path: internal/daemoncontrol
+    file: daemoncontrol.md
+    last_sha: null
+  - path: internal/errors
+    file: errors.md
+    last_sha: null
+  - path: internal/gateway
+    file: gateway.md
+    last_sha: null
+  - path: internal/gatewaytest
+    file: gatewaytest.md
+    last_sha: null
+  - path: internal/httpclient
+    file: httpclient.md
+    last_sha: null
+  - path: internal/logging
+    file: logging.md
+    last_sha: null
+  - path: internal/login
+    file: login.md
+    last_sha: null
+  - path: internal/messages
+    file: messages.md
+    last_sha: null
+  - path: internal/pathutil
+    file: pathutil.md
+    last_sha: null
+  - path: internal/prcache
+    file: prcache.md
+    last_sha: null
+  - path: internal/proc
+    file: proc.md
+    last_sha: null
+  - path: internal/registry
+    file: registry.md
+    last_sha: null
+  - path: internal/runtime
+    file: runtime.md
+    last_sha: null
+  - path: internal/shell
+    file: shell.md
+    last_sha: null
+  - path: internal/statusbar
+    file: statusbar.md
+    last_sha: null
+  - path: internal/testdata
+    file: testdata.md
+    last_sha: null
+  - path: internal/timeouts
+    file: timeouts.md
+    last_sha: null
+  - path: internal/updater
+    file: updater.md
+    last_sha: null
+  - path: internal/version
+    file: version.md
+    last_sha: null
+  - path: internal/wfe
+    file: wfe.md
+    last_sha: null
+  - path: scripts
+    file: scripts.md
+    last_sha: null

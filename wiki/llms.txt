@@ -1,0 +1,53 @@
+# feat-wiki
+
+## Architecture
+
+- [Architecture Overview](./architecture.md)
+
+## Modules
+- [nightme](./modules/nightme.md)
+- [configs](./modules/configs.md)
+- [docs](./modules/docs.md)
+- [agent](./modules/agent.md)
+- [agentregistry](./modules/agentregistry.md)
+- [agentsession](./modules/agentsession.md)
+- [acp](./modules/acp.md)
+- [claudecode](./modules/claudecode.md)
+- [codex](./modules/codex.md)
+- [copilot](./modules/copilot.md)
+- [cursor](./modules/cursor.md)
+- [dsh](./modules/dsh.md)
+- [opencode](./modules/opencode.md)
+- [pi](./modules/pi.md)
+- [pty](./modules/pty.md)
+- [channel](./modules/channel.md)
+- [chatsession](./modules/chatsession.md)
+- [chatstore](./modules/chatstore.md)
+- [cli](./modules/cli.md)
+- [command](./modules/command.md)
+- [config](./modules/config.md)
+- [daemoncontrol](./modules/daemoncontrol.md)
+- [errors](./modules/errors.md)
+- [gateway](./modules/gateway.md)
+- [gatewaytest](./modules/gatewaytest.md)
+- [httpclient](./modules/httpclient.md)
+- [logging](./modules/logging.md)
+- [login](./modules/login.md)
+- [messages](./modules/messages.md)
+- [pathutil](./modules/pathutil.md)
+- [prcache](./modules/prcache.md)
+- [proc](./modules/proc.md)
+- [registry](./modules/registry.md)
+- [runtime](./modules/runtime.md)
+- [shell](./modules/shell.md)
+- [statusbar](./modules/statusbar.md)
+- [testdata](./modules/testdata.md)
+- [timeouts](./modules/timeouts.md)
+- [updater](./modules/updater.md)
+- [version](./modules/version.md)
+- [wfe](./modules/wfe.md)
+- [scripts](./modules/scripts.md)
+
+## Reference
+
+- [Glossary](./glossary.md)

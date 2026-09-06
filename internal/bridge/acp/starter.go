@@ -21,12 +21,13 @@ import (
 // Starter is the acp spawn recipe. Held in agent.Builtins as a
 // singleton per agent name.
 type Starter struct {
-	name    string
-	command string
-	args    []string
-	env     []string
-	cols    int
-	rows    int
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
+	env            []string
+	cols           int
+	rows           int
 }
 
 // NewStarter constructs the acp spawn recipe. Entry point used at
@@ -38,12 +39,13 @@ type Starter struct {
 // <= 0 are normalized to 80x24 inside newDriver.
 func NewStarter(name, command string, args, env []string, cols, rows int) *Starter {
 	return &Starter{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
-		env:     append([]string(nil), env...),
-		cols:    cols,
-		rows:    rows,
+		name:           name,
+		command:        command,
+		defaultCommand: command,
+		args:           append([]string(nil), args...),
+		env:            append([]string(nil), env...),
+		cols:           cols,
+		rows:           rows,
 	}
 }
 
@@ -67,6 +69,10 @@ func (s *Starter) Detect() error {
 // held in agent.Builtins; tests that exercise cfg.Agents
 // overrides should snapshot and restore via Command().
 func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
 	s.command = command
 }
 

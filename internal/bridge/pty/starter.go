@@ -20,12 +20,13 @@ import (
 // singleton per agent name (the "bash" / "sh" / etc. fallback
 // for unknown user CLIs).
 type Starter struct {
-	name    string
-	command string
-	args    []string
-	env     []string
-	cols    int
-	rows    int
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
+	env            []string
+	cols           int
+	rows           int
 }
 
 // Info returns the fixed metadata for this starter. Observable
@@ -44,10 +45,18 @@ func (s *Starter) Detect() error {
 
 // Init overrides the executable path used by Detect and
 // Info. cfg.Agents path overrides flow through
-// agentregistry.Build. The mutation hits the singleton
-// held in agent.Builtins; tests that exercise cfg.Agents
-// overrides should snapshot and restore via Command().
+// agentregistry.Build. Passing "" resets to the default
+// baked in by NewStarter — used by Build to drop stale
+// overrides when cfg.Agents no longer names this agent.
+//
+// The mutation hits the singleton held in agent.Builtins;
+// tests that exercise cfg.Agents overrides should snapshot
+// and restore via Command().
 func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
 	s.command = command
 }
 

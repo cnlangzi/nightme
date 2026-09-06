@@ -28,9 +28,10 @@ import (
 //	Spawn-time:    Builtins.Get → Starter.Info/Detect/Start → *driver → *agent.Agent
 //	Teardown:      starter itself is never mutated or freed
 type Starter struct {
-	name    string
-	command string
-	args    []string
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
 }
 
 // NewStarter constructs the claudecode spawn recipe. This is the
@@ -39,9 +40,10 @@ type Starter struct {
 // agent.Builtins as the singleton for `name`.
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
+		name:           name,
+		command:        command,
+		defaultCommand: command,
+		args:           append([]string(nil), args...),
 	}
 }
 
@@ -61,10 +63,18 @@ func (s *Starter) Detect() error {
 
 // Init overrides the executable path used by Detect and
 // Info. cfg.Agents path overrides flow through
-// agentregistry.Build. The mutation hits the singleton
-// held in agent.Builtins; tests that exercise cfg.Agents
-// overrides should snapshot and restore via Command().
+// agentregistry.Build. Passing "" resets to the default
+// baked in by NewStarter — used by Build to drop stale
+// overrides when cfg.Agents no longer names this agent.
+//
+// The mutation hits the singleton held in agent.Builtins;
+// tests that exercise cfg.Agents overrides should snapshot
+// and restore via Command().
 func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
 	s.command = command
 }
 

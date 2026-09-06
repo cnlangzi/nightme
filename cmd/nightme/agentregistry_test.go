@@ -192,6 +192,65 @@ func TestBuild_BarePathTypoNotRegistered(t *testing.T) {
 	}
 }
 
+// TestBuild_RemoveOverrideRevertsToDefault locks the invariant
+// that dropping an entry from cfg.Agents reverts the singleton
+// to its baked-in default command, not the previously-mutated
+// override path. Without this, `nightme config` option 3
+// ("Remove path override") would leave a stale path on the
+// singleton even after cfg.Agents no longer names the agent.
+func TestBuild_RemoveOverrideRevertsToDefault(t *testing.T) {
+	snapshotBuiltinCommands(t)
+	tmp := t.TempDir()
+	bin := fakeBinary(t, tmp, "claude-override")
+
+	// First build: cfg.Agents overrides claude's command.
+	reg1 := agentregistry.Build(&config.Config{
+		Agents: []config.AgentEntry{{Name: "claude", Command: bin}},
+	}, "")
+	claude1, err := reg1.Get("claude")
+	if err != nil {
+		t.Fatalf("reg1.Get(claude): %v", err)
+	}
+	if got := claude1.Info().Command; got != bin {
+		t.Fatalf("after override: Info.Command = %q, want %q", got, bin)
+	}
+
+	// Second build: cfg.Agents no longer names claude. The
+	// singleton must revert to the original "claude" command
+	// baked in by NewStarter.
+	claude, err := agent.Builtins.Get("claude")
+	if err != nil {
+		t.Fatalf("Builtins.Get(claude): %v", err)
+	}
+	if h, ok := claude.(commandHolder); ok {
+		if got := reg1.List()[0].Info().Command; got != bin {
+			t.Errorf("after override: Info.Command = %q, want %q", got, bin)
+		}
+		_ = h
+	}
+	// Reach into the singleton's Command getter to capture the
+	// current value (which is the override), then run a second
+	// Build with no cfg.Agents — the registry's view of the
+	// command must be back to the baked-in default "claude",
+	// not the override path.
+	h, ok := claude.(commandHolder)
+	if !ok {
+		t.Fatal("claude starter does not implement Command/Init (test setup wrong)")
+	}
+	override := h.Command()
+	reg2 := agentregistry.Build(&config.Config{}, "")
+	got2, err := reg2.Get("claude")
+	if err != nil {
+		t.Fatalf("reg2.Get(claude): %v", err)
+	}
+	if got2.Info().Command == override {
+		t.Errorf("after remove: Info.Command still %q (override), expected revert to default", override)
+	}
+	if got2.Info().Command != "claude" {
+		t.Errorf("after remove: Info.Command = %q, want baked-in default \"claude\"", got2.Info().Command)
+	}
+}
+
 // silence unused-import warning when this file is built without
 // any test referencing agent directly.
 var _ = agent.New

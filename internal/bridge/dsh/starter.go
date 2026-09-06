@@ -43,9 +43,10 @@ import (
 // surface nil (rather than `["--profile", "web"]`) so Info().Args
 // does not mislead callers into thinking Starter is the spawner.
 type Starter struct {
-	name    string
-	command string
-	args    []string
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
 }
 
 // NewStarter constructs the dsh spawn recipe. Entry point used at
@@ -56,9 +57,10 @@ type Starter struct {
 // lives in the host package. Info().Args mirrors that.
 func NewStarter(name string) *Starter {
 	return &Starter{
-		name:    name,
-		command: name,
-		args:    nil,
+		name:           name,
+		command:        name,
+		defaultCommand: name,
+		args:           nil,
 	}
 }
 
@@ -82,6 +84,10 @@ func (s *Starter) Detect() error {
 // held in agent.Builtins; tests that exercise cfg.Agents
 // overrides should snapshot and restore via Command().
 func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
 	s.command = command
 }
 

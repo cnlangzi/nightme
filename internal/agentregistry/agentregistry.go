@@ -54,6 +54,10 @@ import (
 func Build(cfg *config.Config, requested string) *agent.Registry {
 	reg := agent.New()
 	for _, a := range agent.Builtins.List() {
+		// Always reset to the starter's baked-in default first so
+		// a previous cfg.Agents entry that has since been removed
+		// does not leave stale state on the singleton.
+		a.Init("")
 		if cfg != nil {
 			if path := cfgAgentPath(cfg.Agents, a.Info().Name); path != "" {
 				a.Init(path)

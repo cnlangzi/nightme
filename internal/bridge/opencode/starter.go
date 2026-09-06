@@ -37,9 +37,10 @@ import (
 // right per-mode behavior (timeout settings, event queue
 // routing, /stop propagation).
 type Starter struct {
-	name    string
-	command string
-	args    []string
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
 }
 
 // NewStarter constructs the opencode spawn recipe. Entry point
@@ -56,7 +57,8 @@ type Starter struct {
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
 		name:    name,
-		command: command,
+		command:        command,
+		defaultCommand: command,
 		args:    append([]string(nil), args...),
 	}
 }
@@ -81,6 +83,10 @@ func (s *Starter) Detect() error {
 // held in agent.Builtins; tests that exercise cfg.Agents
 // overrides should snapshot and restore via Command().
 func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
 	s.command = command
 }
 

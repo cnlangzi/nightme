@@ -14,7 +14,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/command/wiki"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
@@ -63,12 +62,6 @@ func ShutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 		prReg.CloseAll()
 	}
 
-	// Wiki Job registry: cancel every in-flight /wiki orchestrator.
-	// Done before persistChatStates so any pending wiki.yml write
-	// in the Job's final state path doesn't race with the rest of
-	// shutdown.
-	wiki.Shutdown()
-
 	persistChatStates(mgr, csFile)
 
 	return firstErr
@@ -108,10 +101,6 @@ func ShutdownRunMulti(
 	if prReg != nil {
 		prReg.CloseAll()
 	}
-
-	// Wiki Job registry: cancel every in-flight /wiki orchestrator.
-	// Idempotent with per-ChatSession ctx cancellation cascades.
-	wiki.Shutdown()
 
 	// Persist final state from every per-channel mgr.
 	allMgrsMu.RLock()

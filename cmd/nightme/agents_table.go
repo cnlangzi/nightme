@@ -1,0 +1,120 @@
+// Package main — shared agent-table renderer for `nightme config`.
+//
+// The table opens the Agents submenu in `nightme config` so
+// operators can scan detection status + resolved path + args
+// before picking a row to manage. The number column maps 1:1 to
+// the index the prompt accepts.
+//
+// Text format:
+//
+//	     #          NAME      BRIDGE   COMMAND                        ARGS
+//	✓    1     claude    json-io  /home/devin/.local/bin/claude
+//	✓    2     codex     json-io  /opt/homebrew/bin/codex
+//	     3     cursor    acp      cursor-agent                  --force --trust --sandbox disabled … acp
+//
+// The leading "✓" / blank shows whether Detect passes (PATH or
+// cfg.Agents override resolved). The current primary is named in
+// the "(default: …)" line after the table, not marked on the row.
+package main
+
+import (
+	"fmt"
+	"io"
+	"os/exec"
+	"path/filepath"
+	"text/tabwriter"
+
+	"github.com/cnlangzi/nightme/internal/agentregistry"
+	"github.com/cnlangzi/nightme/internal/config"
+)
+
+// renderAgentsTable prints the agent table to w. The first
+// column is the row number (1-based, matching the picker's
+// expected input); the second is ✓ when Detect passes, blank
+// otherwise.
+func renderAgentsTable(w io.Writer, cfg *config.Config) {
+	reg := agentregistry.Build(cfg, "")
+	specs := reg.List()
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "\t#\tNAME\tBRIDGE\tCOMMAND\tARGS")
+	for i, s := range specs {
+		if s == nil {
+			continue
+		}
+		info := s.Info()
+		detectErr := s.Detect()
+		mark := ""
+		if detectErr == nil {
+			mark = "✓"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
+			mark,
+			i+1,
+			info.Name,
+			info.Mode.String(),
+			resolveAgentCommand(info.Command, cfg, info.Name, detectErr),
+			quoteArgs(info.Args),
+		)
+	}
+	tw.Flush()
+}
+
+// resolveAgentCommand renders the COMMAND cell for one row. cfg
+// overrides win when present; otherwise absolute configured paths
+// render verbatim and relative names go through LookPath so the
+// user sees exactly what Detect would use.
+func resolveAgentCommand(configured string, cfg *config.Config, name string, detectErr error) string {
+	for _, e := range cfg.Agents {
+		if e.Name != name || e.Command == "" {
+			continue
+		}
+		fields := splitFields(e.Command)
+		if len(fields) > 0 {
+			return fields[0]
+		}
+	}
+	if filepath.IsAbs(configured) {
+		return configured
+	}
+	if resolved, err := exec.LookPath(configured); err == nil {
+		return resolved
+	}
+	return configured
+}
+
+// splitFields is the inlined strings.Fields — kept local so this
+// file doesn't pull in agentregistry just for one helper.
+func splitFields(s string) []string {
+	var out []string
+	start := -1
+	for i, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if start >= 0 {
+				out = append(out, s[start:i])
+				start = -1
+			}
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	if start >= 0 {
+		out = append(out, s[start:])
+	}
+	return out
+}
+
+// quoteArgs joins an arg slice into a single space-separated
+// string for table display.
+func quoteArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	out := args[0]
+	for _, a := range args[1:] {
+		out += " " + a
+	}
+	return out
+}

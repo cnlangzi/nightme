@@ -86,30 +86,20 @@ func configInteractive(cfg *config.Config, path string, in *bufio.Reader, out io
 	}
 }
 
-// configAgentsMenu lists every built-in agent with its current
-// detection status and lets the user pick one to manage (set as
-// primary, configure path, or clear an existing override). Only
-// the seven built-ins are listed — cfg.Agents no longer accepts
-// non-whitelist names (see internal/agentregistry).
+// configAgentsMenu opens the Agents submenu. Renders the same
+// table the now-removed `nightme agents` subcommand produced, so
+// operators see per-built-in detection status + resolved path +
+// args at a glance, then picks a row to manage (set as primary,
+// configure path, or clear an existing override).
 //
-// Detection is re-run on each menu render so the status column
-// stays in sync with disk as the user edits paths.
+// Detection is re-run on each menu render so the table stays in
+// sync with disk as the user edits paths in the sub-menu.
 func configAgentsMenu(cfg *config.Config, in *bufio.Reader, out io.Writer) error {
 	builtins := agent.Builtins.List()
 
 	for {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Agents:")
-		cfgPath := cfgPathMap(cfg)
-		reg := agentregistry.Build(cfg, "")
-		for i, s := range builtins {
-			name := s.Info().Name
-			marker := "  "
-			if name == cfg.Primary {
-				marker = "* "
-			}
-			fmt.Fprintf(out, "  %s[%d] %-9s %s\n", marker, i+1, name, agentStatus(name, cfgPath, reg))
-		}
+		renderAgentsTable(out, cfg)
 		fmt.Fprintf(out, "\nCurrent primary: %s\n", cfg.Primary)
 		fmt.Fprintln(out, "Enter number to manage, q to cancel:")
 		fmt.Fprint(out, "> ")
@@ -148,11 +138,11 @@ func cfgPathMap(cfg *config.Config) map[string]string {
 	return out
 }
 
-// agentStatus renders the status column for the menu. The
-// underlying registry has already been built with cfg.Agents
-// applied, so Detect reflects the configured path when one
-// exists.
-func agentStatus(name string, cfgPath map[string]string, reg *agent.Registry) string {
+// agentStatus is removed — the table at the top of the Agents
+// submenu replaces it. Kept as a private alias inside manageAgent
+// so the sub-menu's per-agent header still spells out the cfg vs
+// PATH distinction (the table uses ✓/blank for brevity).
+func manageStatus(name string, cfgPath map[string]string, reg *agent.Registry) string {
 	s, err := reg.Get(name)
 	if err != nil {
 		return "?"
@@ -182,7 +172,7 @@ func manageAgent(cfg *config.Config, name string, in *bufio.Reader, out io.Write
 		}
 
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "%s — %s\n", name, agentStatus(name, cfgPath, reg))
+		fmt.Fprintf(out, "%s — %s\n", name, manageStatus(name, cfgPath, reg))
 		var opts []string
 		if detected {
 			opts = append(opts, "  [1] Set as primary")

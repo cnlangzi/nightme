@@ -29,6 +29,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -88,7 +89,20 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 	// without changing the test's public surface.
 
 	if err := EnsureAgentAvailable(cfg, bufio.NewReader(os.Stdin), cmd.OutOrStdout()); err != nil {
-		return err
+		// Bare-path smoke test (`nightme test --agent /bin/echo`):
+		// if f.agentName is an absolute path that exists on disk,
+		// the user is doing a one-shot spawn — they don't need a
+		// built-in primary or the firstrun prompt. Skip the
+		// EnsureAgentAvailable preflight in that case (the agent
+		// itself doesn't need to "be available" — it just needs
+		// to be invokable, which Build's bare-path auto-register
+		// handles).
+		if !(filepath.IsAbs(f.agentName)) {
+			return err
+		}
+		if _, statErr := os.Stat(f.agentName); statErr != nil {
+			return err
+		}
 	}
 
 	agentReg := agentregistry.Build(cfg, f.agentName)

@@ -2,9 +2,10 @@
 //
 // The init command runs a single Agent prompt that asks the
 // Agent to read the repository, design a module structure,
-// and write one Markdown file per module. Init is a one-shot
-// command: there is no Job registry, no Apply phase, no
-// batched prompts. The wiki is established or it is not.
+// and write one Markdown file per module under
+// <REPO_ROOT>/wiki/modules/. Init is a one-shot command:
+// there is no Job registry, no Apply phase, no batched
+// prompts. The wiki is established or it is not.
 //
 // docs/Wiki.md is authoritative for the contract.
 package wiki
@@ -24,9 +25,9 @@ import (
 
 // initPrompt is the Agent's task for /wiki init. The runtime
 // substitutes <REPO_ROOT> with the resolved repository root
-// before submitting. The Agent is told to write per-module
-// files directly; the runtime does not parse a framed
-// result.
+// before submitting. The Agent writes plain Markdown files
+// directly — no frontmatter, no central index, no
+// `wiki.yml`. Each file's identity is its filename.
 //
 // docs/Wiki.md §5.
 const initPrompt = `# /wiki init — establish the wiki module structure
@@ -55,32 +56,25 @@ next month.
 
 ### 3. Write per-module files
 
-For each module, write <REPO_ROOT>/wiki/modules/<name>.md.
+For each module, write one file at:
 
-Required file structure:
+  <REPO_ROOT>/wiki/modules/<name>.md
 
-  ---
-  name: <kebab-case-name>
-  last_sha: null
-  prompt_version: 1
-  covers:
-    - <path>
-    ...
-  ---
+The filename <name> is the module's identity. Use kebab-case
+(lowercase letters, digits, and hyphens; 1-5 words). Do not
+include any extension other than .md.
+
+Each file MUST be plain Markdown with exactly this shape:
 
   # <Display Name>
 
-  > <One-line purpose>
+  > <One-line purpose — what this concept IS responsible for>
 
-  <body>
+  <body — your call>
 
-  Required:
-    - name: kebab-case, 1-5 words, unique
-    - covers: real repo paths; every source file in the repo
-      appears in exactly one module's covers
-
-  The frontmatter fields, H1, and the one-line blockquote are
-  required. The body is yours.
+That's it. No frontmatter. No covers list. No metadata block.
+The runtime only reads three things: the filename, the H1,
+and the blockquote. Everything else is yours.
 
 ## When done
 
@@ -135,10 +129,10 @@ func RunInit(ctx context.Context, cs *chatsession.ChatSession, input chatsession
 	stopCollector(collector)
 
 	// Validate the file system.
-	passed, failed, covers, _ := ValidateAll(wikiRoot)
+	passed, failed := ValidateAll(wikiRoot)
 
 	if len(failed) > 0 {
-		return formatFailureReply(collector.text(), failed, covers), fmt.Errorf("validation failed")
+		return formatFailureReply(collector.text(), failed), fmt.Errorf("validation failed")
 	}
 	if len(passed) == 0 {
 		return "❌ /wiki init: no module files found under wiki/modules/", fmt.Errorf("no modules")
@@ -165,7 +159,7 @@ func formatSuccessReply(summary string, passed []ModuleResult) string {
 // plus a list of failed modules. Modules that the Agent
 // named in its summary but did not write to disk are
 // surfaced here so the user can ask the Agent to retry.
-func formatFailureReply(summary string, failed []ModuleResult, covers map[string]bool) string {
+func formatFailureReply(summary string, failed []ModuleResult) string {
 	var b strings.Builder
 	if summary != "" {
 		b.WriteString(strings.TrimRight(summary, "\n"))
@@ -179,9 +173,6 @@ func formatFailureReply(summary string, failed []ModuleResult, covers map[string
 		} else {
 			fmt.Fprintf(&b, "- %s: %s\n", f.File, f.Reason)
 		}
-	}
-	if len(covers) == 0 {
-		b.WriteString("\nNo covers were recorded by any module.\n")
 	}
 	return b.String()
 }

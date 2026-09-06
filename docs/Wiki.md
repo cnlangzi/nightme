@@ -1,16 +1,15 @@
 # Wiki
 
-`/wiki init` establishes a wiki module structure for the repository at `<cwd>`. The wiki is a set of per-module Markdown files under `<cwd>/wiki/modules/`. The structure is the durable documentation asset the project uses to onboard new contributors and to ground future Agent sessions.
+`/wiki init` establishes a wiki for the repository at `<cwd>`. The wiki is a set of plain Markdown files under `<cwd>/wiki/modules/`, one per concept. The structure is the durable documentation asset the project uses to onboard new contributors and to ground future Agent sessions.
 
-The source code is authoritative. The wiki is generated from the source tree by the Agent, then maintained incrementally as the source evolves.
+The source code is authoritative. The wiki is generated from the source tree by the Agent.
 
 ## 1. Goals
 
 The wiki answers these questions for a contributor or Agent that has just arrived at the repository:
 
 - What are the major conceptual areas of this project?
-- For each concept, what source files are involved and where does one start reading?
-- How do concepts connect to one another?
+- For each concept, what is it responsible for and where does one start reading?
 
 ## 2. Scope
 
@@ -18,13 +17,13 @@ The wiki answers these questions for a contributor or Agent that has just arrive
 
 - A zero-argument slash command.
 - A single Agent invocation per `/wiki init` call.
-- Per-module Markdown files under `<cwd>/wiki/modules/<name>.md`.
-- A YAML frontmatter on each module file that records the module's name, last-regenerated source HEAD, prompt version, and the source paths the module covers.
+- Per-module Markdown files under `<cwd>/wiki/modules/`.
+- A module's identity is its filename.
 
 `/wiki init` does not cover:
 
-- A central index file (no `wiki.yml`, no `llms.txt` for now). The wiki is fully de-centralized: the file system is the index.
-- A re-extraction or refresh command. The wiki is established once per project; later edits to source files are handled by separate mechanisms not defined here.
+- A central index file. No `wiki.yml`, no `llms.txt`. The file system is the index: a directory listing of `wiki/modules/` is the table of contents.
+- A re-extraction or refresh command.
 - Aggregate pages such as `architecture.md` or `quickstart.md`.
 - A bounded-prompt orchestration. Init runs as one Agent invocation; per-module file production is part of that single invocation.
 - Module identity naming rules beyond kebab-case uniqueness. The Agent chooses the concept boundaries and the names.
@@ -81,40 +80,27 @@ Init runs as a one-shot command. There is no Job registry, no pending queue, and
 
 ## 4. Module file format
 
-Every module file at `<cwd>/wiki/modules/<name>.md` has this structure:
+Every module file is a plain Markdown file. The module's identity is its filename: `<cwd>/wiki/modules/<name>.md` where `<name>` is the kebab-case ID the Agent chose.
+
+The file content is exactly:
 
 ```markdown
----
-name: <kebab-case-name>
-last_sha: null
-prompt_version: 1
-covers:
-  - <repo-relative-path-1>
-  - <repo-relative-path-2>
-  - ...
----
-
 # <Display Name>
 
-> <One-line purpose>
+> <One-line purpose — what this concept IS responsible for>
 
 <body>
 ```
 
-### 4.1 Frontmatter
+Three rules:
 
-The frontmatter is the file's metadata. Four fields:
+- The file's basename (without `.md`) is kebab-case: lowercase letters, digits, and hyphens; 1-5 hyphen-separated words; must start and end with a letter or digit.
+- The first non-empty line is the H1 heading (`# <something>`). The H1 text need not match the filename; the filename is the identity.
+- The next non-empty line is a one-line blockquote (`> <something>`) stating the module's purpose in one sentence.
 
-- `name`: kebab-case identifier, 1-5 words, unique across all modules. Used as the module's stable ID in cross-module references.
-- `last_sha`: source HEAD at the time the page was last regenerated. `null` when init first writes the file.
-- `prompt_version`: prompt contract version applied to the page. Set to `1` for init.
-- `covers`: list of repo-relative paths the module covers. Test files belong to the module whose non-test code is alongside them. Every source file in the repo must appear in exactly one module's `covers:`.
+There is no frontmatter. There is no metadata block. The runtime only parses three things — filename, H1, blockquote — and otherwise trusts the body.
 
-The frontmatter is owned by the runtime, not by the Agent. The Agent writes the initial values; later regeneration steps (not defined here) update `last_sha` and may update `covers` when the Agent discovers a new file the module depends on.
-
-### 4.2 Body
-
-The H1 (`# <Display Name>`) and the one-line blockquote (`> <purpose>`) are required. The blockquote should state what the module is responsible for, in one sentence.
+### 4.1 Body
 
 Everything below the blockquote is the Agent's call. The Agent decides whether the module warrants:
 
@@ -124,11 +110,11 @@ Everything below the blockquote is the Agent's call. The Agent decides whether t
 - A list of related modules with links.
 - Free-form paragraphs.
 
-The body is the documentation; the frontmatter is the contract.
+The body is the documentation; the filename plus the H1 plus the blockquote are the contract.
 
-### 4.3 Cross-module references
+### 4.2 Cross-module references
 
-When one module's body refers to another module, the link uses the other module's `name` as written in its frontmatter:
+When one module's body refers to another module, the link uses the other module's filename as written:
 
 ```markdown
 See [other-name](other-name.md) for the prompt submission path.
@@ -167,32 +153,25 @@ next month.
 
 ### 3. Write per-module files
 
-For each module, write `<REPO_ROOT>/wiki/modules/<name>.md`.
+For each module, write one file at:
 
-Required file structure:
+  <REPO_ROOT>/wiki/modules/<name>.md
 
-  ---
-  name: <kebab-case-name>
-  last_sha: null
-  prompt_version: 1
-  covers:
-    - <path>
-    ...
-  ---
+The filename <name> is the module's identity. Use kebab-case
+(lowercase letters, digits, and hyphens; 1-5 words). Do not
+include any extension other than .md.
+
+Each file MUST be plain Markdown with exactly this shape:
 
   # <Display Name>
 
-  > <One-line purpose>
+  > <One-line purpose — what this concept IS responsible for>
 
-  <body>
+  <body — your call>
 
-  Required:
-    - name: kebab-case, 1-5 words, unique
-    - covers: real repo paths; every source file in the repo
-      appears in exactly one module's covers
-
-  The frontmatter fields, H1, and the one-line blockquote are
-  required. The body is yours.
+That's it. No frontmatter. No covers list. No metadata block.
+The runtime only reads three things: the filename, the H1,
+and the blockquote. Everything else is yours.
 
 ## When done
 
@@ -206,10 +185,10 @@ The runtime does not require a framed result for init. The Agent's chat reply is
 The runtime validates the Agent's output by inspecting the file system after the Agent's response:
 
 - The directory `<cwd>/wiki/modules/` exists and contains at least one `.md` file.
-- Every `.md` file in `wiki/modules/` has parseable YAML frontmatter with the four required fields.
-- The `name` field of each file is kebab-case and unique across the set.
-- Every path listed in any `covers:` array exists in the repository.
-- The union of all `covers:` arrays covers every tracked source file in the repository. (Files excluded by `.gitignore` or by the Agent's own filtering — such as build artifacts or vendored dependencies — are not counted as uncovered.)
+- Every `.md` file's basename matches the kebab-case pattern.
+- Every `.md` file has a unique basename across `wiki/modules/`.
+- Every `.md` file begins with an H1 line.
+- Every `.md` file has a one-line blockquote immediately after the H1.
 
 If any check fails, the runtime returns the failure to the user. The Agent's chat summary may name modules that the runtime failed to find on disk; those modules are reported in the failure reply so the user can ask the Agent to write them.
 
@@ -240,13 +219,13 @@ The Agent's own chat reply is preserved as the leading content of the runtime's 
 
 ```text
 internal/command/wiki/
-├── cmd.go          slash command registration, zero-argument validation, ChatSession handoff
-├── init.go         the init prompt, Agent submission, post-write validation
-├── frontmatter.go  read and write the YAML frontmatter block
-└── validate.go     frontmatter schema, file existence, coverage check
+├── cmd.go        slash command registration, zero-argument validation, ChatSession handoff
+├── init.go       the init prompt, Agent submission, post-write validation
+├── validate.go   filename identity, H1 + blockquote check
+└── git.go        git preflight (RepoRoot + IsClean)
 ```
 
-The package does not contain an Agent provider abstraction, a one-shot runner, a Job registry, a pending queue, a batched Apply loop, or stubs.
+The package does not contain an Agent provider abstraction, a one-shot runner, a Job registry, a pending queue, a batched Apply loop, stubs, or frontmatter parsing.
 
 ## 9. Verification contract
 
@@ -259,10 +238,9 @@ Tests cover:
 - Source-clean rejects non-Wiki changes and permits resumable generated changes.
 - Dirty and non-Git repositories are rejected.
 - An existing `wiki/modules/` directory causes init to refuse.
-- Frontmatter is parseable; missing fields are reported.
-- `name` kebab-case and uniqueness are enforced.
-- `covers:` paths are validated against the filesystem.
-- Coverage is computed against `git ls-files`, not against the working tree.
+- Filenames are validated as kebab-case and unique.
+- Files beginning with an H1 line and a one-line blockquote are accepted.
+- Files missing the H1 or blockquote are reported with the specific reason.
 - No `wiki.yml` or `llms.txt` is written by init.
 
 Repository verification follows `AGENTS.md`: formatting, tests, lint, and build must pass.
@@ -270,5 +248,4 @@ Repository verification follows `AGENTS.md`: formatting, tests, lint, and build 
 ## 10. References
 
 - [AGENTS.md](https://agents.md) — repository instructions for coding Agents.
-- [YAML 1.2 frontmatter convention](https://jekyllrb.com/docs/front-matter/) — precedent for the per-file metadata block.
 - [Aider Repository Map](https://aider.chat/docs/repomap.html) — token-budgeted source-derived repository maps.

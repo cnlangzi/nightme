@@ -1,476 +1,811 @@
 # Wiki
 
-LLM-driven repository wiki. Output is `<cwd>/wiki/` (content) + `<cwd>/wiki.yml` (metadata). Index format follows the [llms.txt v1.0](https://llmstxt.org) spec; per-module pages follow the [DeepWiki](https://deepwiki.com) component-page convention.
+`/wiki` builds an LLM-oriented repository map under `<cwd>/wiki/` and stores incremental state in `<cwd>/wiki.yml`.
 
-A single `/wiki` slash command runs inside the existing chat session. It keeps the wiki structure in sync with the source tree via a two-phase flow — Plan (pure git diff) then Apply (write content) — and requires the working tree to be committed and clean.
+The source code is authoritative. Wiki pages are generated navigation artifacts that provide a global view, summarize module responsibilities, and direct an Agent to relevant source files and symbols. Agents use the Wiki to decide what code to inspect, not as a substitute for inspecting code.
 
-## 1. Motivation
+`/wiki` runs as a normal task on the ChatSession's selected long-running AgentSession. Agent selection, process spawning, resume, permissions, event delivery, cancellation, and failure recovery use the same path as ordinary chat messages.
 
-LLM coding agents working on a large repository need a pre-distilled map of the codebase before editing. Reading raw source to extract intent burns token budget and risks missing cross-cutting conventions spread across files.
+## 1. Goals
 
-`wiki/` answers the questions an agent asks first when assigned a task:
+The Wiki lets a contributor or coding Agent answer these questions with a small context budget:
 
-- What is this package? (`## Public Surface`, `## Key Flows`)
-- How does it fit with the rest? (`wiki/architecture.md`, cross-module links in `llms.txt`)
-- What conventions must I follow? (`## Cross-cutting Patterns`)
-- What design choices should I not undo? (`## Non-obvious Choices`)
+- What are the repository's main areas and entry points?
+- Which module is relevant to this task?
+- Which source symbols and tests should be inspected first?
+- How does this module connect to adjacent modules?
+- Which cross-module flow should be followed when the task spans boundaries?
 
-This complements `tokensave` and `codegraph`, which answer structural queries ("who calls X?"). The wiki answers narrative queries ("what is X and why does it exist").
+The generated content follows these principles:
+
+- Code is the source of truth for behavior and structure.
+- `AGENTS.md` and equivalent repository rule files are the source of truth for coding and workflow instructions.
+- Every summary leads back to source paths or symbols.
+- Pages are disposable and can be regenerated from the repository.
+- Content is loaded progressively; an Agent does not need the complete Wiki in context.
+- Generated prose describes observable structure. It does not invent design intent or normative rules.
 
 ## 2. Scope
 
 ### In scope
 
-- `/wiki` slash command — single command, no subcommands, runs inside the chat session's runtime
-- `<cwd>/wiki/` directory + `<cwd>/wiki.yml` at repository root (sibling, not under `.nightme/`)
-- llms.txt v1.0-compliant index with project name, Architecture, Modules, Reference sections
-- DeepWiki per-module pages with 5 fixed sections
-- Two-phase flow: Plan (git-driven, free) + Apply (write content)
-- Per-module `last_sha` for incremental tracking via `git diff`
-- Persistent `wiki.yml.pending[]` for resumable work
-- Exclusion driven by `<cwd>/.gitignore` + dot-prefix default + `wiki.yml.include` opt-in
+- A zero-argument `/wiki` slash command.
+- `<cwd>/wiki/` generated content and `<cwd>/wiki.yml` incremental metadata.
+- Hierarchical `llms.txt` indexes for progressive disclosure.
+- A repository Quickstart for coding tasks.
+- A generated architecture overview.
+- One generated module page per non-empty source directory.
+- Git-driven incremental planning.
+- Resumable pending state.
+- LLM generation through the ChatSession's selected long-running AgentSession.
+- Deterministic validation and index rendering.
 
 ### Out of scope
 
-- **LLM content generation** (current `Apply` is a stub; the LLM path uses `chatSession.SelectedAgentSession().Submit()` — not `agent.Builtins.Get(...).RunOnce(...)` — to dispatch per-module prompts through the chat session's existing AS)
-- Git operations (`/wiki` does not commit; user commits manually before running)
-- `wiki.yml.modules[].file` divergence from `<path>.md` mirror (v0 enforces the mirror; field is reserved for future hand-rename)
-- Per-language provider abstraction (the wiki treats all languages uniformly; language recognition is the LLM's job)
+- Agent selection flags or temporary Agent switching.
+- One-shot execution through `agent.Builtins`.
+- A Wiki-specific Agent, AgentSession, bridge, provider, model, or credential path.
+- A replacement for source inspection, CodeGraph, language servers, or search.
+- Human-authored design decisions, ADRs, coding rules, or changelogs.
+- Persistent task playbooks for every possible change type.
+- Complete API references or complete call graphs.
+- Git commit, stash, or push operations.
 
-## 3. File layout
+## 3. Command contract
 
+```text
+/wiki
 ```
+
+`/wiki` accepts no flags and no positional arguments. In particular, `-a` and `--agent` are invalid. The selected Agent is controlled exclusively by `/use <agent>`.
+
+### 3.1 Preconditions
+
+The command requires:
+
+1. A selected CWD on the ChatSession.
+2. A selected Agent configured through `/use`.
+3. A live or resumable AgentSession returned by `cs.LookupSelectedAgentSession()`.
+4. A Git repository containing the selected CWD.
+5. A source-clean working tree.
+
+Failure messages identify the corrective action:
+
+- No CWD: `no workspace set; run /cwd <path> first`
+- No Agent: `no active agent; run /use <agent> first`
+- Invalid arguments: `usage: /wiki`
+- Not a Git repository: `not a git repo (or git unavailable): ...`
+- Dirty source tree: `working tree has source changes; commit first`
+
+The selected AgentSession is resolved before Wiki state is written. A failure to activate the Agent does not leave a scaffold or pending plan behind.
+
+The command resolves the project root with:
+
+```text
+git -C <selected-cwd> rev-parse --show-toplevel
+```
+
+Discovery, Git operations, `wiki/`, and `wiki.yml` use this repository root. A ChatSession CWD inside a repository does not create a partial Wiki in that subdirectory.
+
+Source-clean means:
+
+- Without resumable pending state, the complete working tree is clean.
+- With pending state, modifications to `wiki.yml`, deterministic indexes, and generated pages named by metadata or pending entries are allowed.
+- An unrecognized path under `wiki/` is an output-boundary violation rather than an implicitly trusted generated file.
+- Tracked or untracked changes outside those generated paths are rejected.
+
+This distinction allows interrupted Wiki generation to resume without permitting uncommitted source to enter generated summaries.
+
+### 3.2 Agent path
+
+The command uses this path:
+
+```text
+/wiki
+  -> command.Handle
+  -> ChatSession.LookupSelectedAgentSession
+  -> ChatSession.QueueUserMessage
+  -> AgentSession.Submit
+  -> bridge.SendBlocks
+  -> Agent CLI
+  -> AgentSession readpump
+  -> ChatSession AgentEventBus / PromptEndBus
+```
+
+The Wiki prompt is a `MessageKindQueue` message so it forms a standalone Prompt and does not merge with ordinary user messages.
+
+The Wiki message follows the normal ChatSession queue semantics. If it is still queued, `/use` may change which selected AgentSession consumes it. Once `AgentSession.Submit` accepts the Prompt, its AgentSession ID is fixed; a later `/use` does not cancel or retarget the in-flight Prompt.
+
+The queued `Message.ID` is the channel-native ID of the user's `/wiki` message, so ordinary Agent output can attach to a real message. A separate internal Job ID identifies the Wiki run. Events are correlated by Job ID, AgentSession ID, Prompt ID, and channel message ID; an internal identifier is never used as a Channel reply anchor.
+
+The Agent uses its existing tools and permissions to inspect source files and write generated Wiki pages. `/wiki` does not add tools or capabilities to the Agent.
+
+### 3.3 Job ownership
+
+Apply runs under a command-layer Wiki Job coordinator. This coordinator changes no Agent interface and owns only orchestration around the normal ChatSession path.
+
+The process-wide Job key is the canonical repository root. The Job record stores its owning ChatSession ID. Only one active Job may update a repository, including calls from different chats bound to the same CWD. A concurrent `/wiki` for the same repository returns:
+
+```text
+wiki job already running
+```
+
+The Job context derives from `cs.Context()`, not from the slash-command handler context. It therefore survives after `Handle` returns its acknowledgement and is cancelled when the ChatSession shuts down.
+
+The coordinator owns:
+
+- EventBus subscriptions and unsubscription.
+- Prompt and Job correlation.
+- Output allowlist snapshots.
+- Page validation and metadata finalization.
+- Final status delivery through the ChatSession emitter.
+
+Daemon termination clears the in-memory Job registry. Persistent pending state remains the recovery source for the next invocation.
+
+## 4. Progressive disclosure
+
+The Wiki exposes five levels of context:
+
+```text
+AGENTS.md
+  -> wiki/llms.txt
+    -> wiki/modules/<area>/llms.txt
+      -> wiki/modules/<source-path>/index.md
+        -> source files, symbols, and tests
+```
+
+Each level contains only enough information to choose the next level.
+
+### Level 0: repository rules
+
+`AGENTS.md` remains the always-loaded instruction layer. A repository may add this pointer:
+
+```markdown
+For unfamiliar tasks, read `wiki/llms.txt`; load only relevant linked pages.
+```
+
+`/wiki` may report that the pointer is absent, but it does not edit `AGENTS.md`.
+
+### Level 1: root index
+
+`wiki/llms.txt` is the discovery entry point. It contains:
+
+- Project name and one-sentence description.
+- A link to Quickstart.
+- A link to Architecture, marked for cross-module tasks.
+- Links to top-level source areas.
+- Common executable or service entry points.
+- Links to repository rule files.
+
+It does not enumerate every module in a large repository.
+
+### Level 2: directory indexes
+
+Each source area has a local `llms.txt` that lists only its direct child modules and child areas. Each link includes a one-sentence description that lets the Agent decide whether to open it.
+
+An index that exceeds its budget delegates entries to deeper indexes. It does not truncate modules.
+
+### Level 3: module pages
+
+A module page gives the shortest useful map from a responsibility to source code. Related modules are linked, not embedded.
+
+### Level 4: architecture overview
+
+`architecture.md` is optional for local changes. It is read when:
+
+- A task crosses module boundaries.
+- The data or event flow is unclear.
+- An extension point must be identified.
+- Several module pages appear relevant.
+
+### Level 5: source
+
+The final step is always source inspection. The Agent verifies Wiki claims against source, callers, tests, generated code, build tags, and configuration before editing.
+
+### 4.1 Context budgets
+
+- Root `llms.txt`: 300–500 tokens.
+- Directory `llms.txt`: 200–500 tokens.
+- Module page: 300–600 tokens.
+- Quickstart: 500–800 tokens.
+- Architecture: 800–1,200 tokens.
+
+Budgets are soft limits. Content is compressed by field priority:
+
+1. Purpose
+2. Entry Points
+3. Main Flows
+4. Source Anchors
+5. Where to Change
+6. Related Modules
+
+Required fields are not truncated mid-section.
+
+## 5. File layout
+
+```text
 <cwd>/
 ├── wiki.yml
 └── wiki/
     ├── llms.txt
+    ├── quickstart.md
     ├── architecture.md
-    ├── glossary.md
     └── modules/
-        ├── internal/
-        │   ├── command/
-        │   │   ├── gtw.md
-        │   │   └── review.md
-        │   ├── agent/
-        │   │   └── agent.md
-        │   └── bridge/
-        │       └── claudecode.md
-        └── cmd/
-            └── nightme.md
+        ├── llms.txt
+        ├── cmd/
+        │   ├── llms.txt
+        │   └── nightme/
+        │       └── index.md
+        └── internal/
+            ├── llms.txt
+            ├── chatsession/
+            │   └── index.md
+            ├── gateway/
+            │   ├── index.md
+            │   └── llms.txt
+            └── bridge/
+                ├── index.md
+                ├── llms.txt
+                └── claudecode/
+                    └── index.md
 ```
 
-Wiki file path mirrors source package path: `internal/command/gtw/` → `wiki/modules/internal/command/gtw.md`. The directory structure inside `wiki/modules/` is a direct map of the source tree's module layout. Path equality between wiki file and source package means an LLM agent reading a wiki page can locate the corresponding source without cross-referencing `wiki.yml`.
+A source directory maps to a Wiki directory:
 
-### 3.1 `wiki/llms.txt`
+```text
+internal/bridge/claudecode/
+  -> wiki/modules/internal/bridge/claudecode/index.md
+```
 
-Format: [llms.txt v1.0](https://llmstxt.org). One H1 (project name) followed by H2 sections of markdown links.
+This mapping gives every module a stable identity without asking the LLM to design page names or semantic clusters.
+
+A module directory receives `llms.txt` when it has child module directories. `wiki/modules/llms.txt` indexes the top-level source areas.
+
+## 6. Page formats
+
+### 6.1 Root `llms.txt`
+
+The root index follows the `llms.txt` link format:
 
 ```markdown
-# <project-name>
+# NightMe
 
-## Architecture
+> Remote-pair agent runtime connecting chat platforms to coding agents.
 
-- [Architecture Overview](./architecture.md)
+## Start
 
-## Modules
+- [Quickstart](./quickstart.md): Locate code and run repository verification.
+- [Architecture](./architecture.md): Cross-module components and main flows.
 
-- [gtw](./modules/internal/command/gtw.md)
-- [review](./modules/internal/command/review.md)
-- ...
+## Rules
 
-## Reference
+- [Agent Instructions](../AGENTS.md): Build, test, style, and runtime constraints.
 
-- [Glossary](./glossary.md)
+## Areas
+
+- [Commands](./modules/internal/command/llms.txt): Slash-command implementations.
+- [Bridges](./modules/internal/bridge/llms.txt): Agent CLI transports.
+- [Channels](./modules/internal/channel/llms.txt): Chat-platform adapters.
+- [Runtime](./modules/internal/llms.txt): Sessions, routing, persistence, and workflows.
 ```
 
-Removed modules are not listed. Module descriptions are omitted until the LLM content path populates them.
+Links use descriptions, not bare basenames. Lower-priority references may appear under `## Optional`.
 
-### 3.2 `wiki/modules/<pkg-path>.md`
-
-Format: DeepWiki `page_type=component`. Five fixed sections in order: Public Surface, File Layout, Key Flows, Cross-cutting Patterns, Non-obvious Choices.
-
-Stub template (current):
+### 6.2 Directory `llms.txt`
 
 ```markdown
-# <pkg-name>
+# internal/bridge
 
-> Stub generated by `/wiki` (no LLM). Replace with LLM content on the next agent-driven run.
+> Agent transport implementations and shared bridge primitives.
 
-## Public Surface
+## This module
 
-[TBD — exported types and functions from this package]
+- [Overview](./index.md): Shared bridge contracts and registration points.
 
-## File Layout
+## Children
 
-| File | Lines |
-|---|---|
-| `a.go` | 42 |
-| `b.go` | 17 |
-
-## Key Flows
-
-[TBD — main user-facing flows in this package]
-
-## Cross-cutting Patterns
-
-[TBD — patterns observed across this package's source]
-
-## Non-obvious Choices
-
-[TBD — design decisions not obvious from reading the code]
-
-<!-- sources -->
-- internal/foo/a.go
-- internal/foo/b.go
+- [Claude Code](./claudecode/index.md): Claude CLI transport and event parsing.
+- [Codex](./codex/index.md): Codex process and protocol transport.
+- [ACP](./acp/index.md): Shared Agent Client Protocol transport.
 ```
 
-The `## File Layout` table and `<!-- sources -->` footer carry real data the LLM can build on; the other sections are `[TBD]` markers.
+The `This module` section is omitted when the corresponding source directory contains no direct source files.
 
-### 3.3 `wiki/architecture.md`
+### 6.3 Module page
+
+Every module page uses these sections in order:
+
+```markdown
+# internal/bridge/claudecode
+
+> Claude Code CLI transport and event translation.
+
+## Purpose
+
+## Entry Points
+
+## Main Flows
+
+## Related Modules
+
+## Where to Change
+
+## Source Anchors
+```
+
+Section rules:
+
+- `Purpose`: one short paragraph describing observable responsibility.
+- `Entry Points`: the smallest set of types, functions, commands, registries, or factories worth reading first.
+- `Main Flows`: no more than three concise paths from entry to output.
+- `Related Modules`: direct relationships with links to module pages.
+- `Where to Change`: common change targets and their source or test areas.
+- `Source Anchors`: repository-relative file paths and symbol names.
+
+Module pages do not contain:
+
+- A complete exported API list.
+- A complete file list or line-count table.
+- Long code excerpts.
+- Unsupported design motivations.
+- Normative statements inferred from implementation.
+- Changelogs, generation logs, or task history.
+- Duplicate coding rules from `AGENTS.md`.
+
+### 6.4 Architecture
+
+`wiki/architecture.md` uses:
 
 ```markdown
 # Architecture
 
 ## Components
 
+## Entry Points
+
 ## Main Flows
 
-## Module Dependency Graph
+## Dependency Direction
 
-## Key Invariants
+## Extension Points
+
+## Cross-cutting Concerns
+
+## Source Anchors
 ```
 
-Empty sections filled in by the future LLM path.
+It is a generated overview of observable code structure:
 
-### 3.4 `wiki/glossary.md`
+- Components groups major responsibilities without redefining module identity.
+- Entry Points identifies binaries, servers, workers, commands, and plugin registries.
+- Main Flows contains a small number of end-to-end paths.
+- Dependency Direction describes major dependencies present in code.
+- Extension Points identifies interfaces, registration functions, factories, and adapters.
+- Cross-cutting Concerns points to error handling, persistence, concurrency, platform splits, and configuration hotspots.
+
+Architecture does not claim why a design exists unless a repository source such as an ADR explicitly states it.
+
+### 6.5 Quickstart
+
+`wiki/quickstart.md` is a coding-task Quickstart:
 
 ```markdown
-# Glossary
+# Quickstart
 
-| Term | Definition | Source |
-|---|---|---|
+## Repository Rules
+
+## Development Setup
+
+## Find the Relevant Code
+
+## Make a Focused Change
+
+## Verify
 ```
 
-Empty 3-column table.
+It derives setup and verification commands from repository files such as `AGENTS.md`, `Makefile`, package manifests, CI configuration, and development scripts. Product installation and end-user tutorials remain in the project's normal README or documentation.
 
-### 3.5 `wiki.yml` schema
+## 7. Module discovery
+
+`discoverModules(cwd)` walks the source tree. A directory is a module when:
+
+- It survives the ignore filter.
+- It contains at least one non-hidden regular file.
+
+The walk continues into child directories after emitting a parent module. Test-only directories are modules.
+
+The ignore order is:
+
+1. Built-in exclusion of `wiki/` and `wiki.yml`.
+2. Repository `.gitignore`.
+3. Dot-prefixed path components.
+4. Exact `wiki.yml.include` opt-ins for paths intentionally restored from exclusions.
+
+An include is exact, not recursive. Nested hidden directories require their own include entry.
+
+The generated directory hierarchy follows source paths deterministically. The LLM does not rename, merge, split, or relocate modules.
+
+## 8. Metadata
+
+`wiki.yml` stores generation state, not repository knowledge:
 
 ```yaml
-version: 1                    # schema version; bump on backwards-incompatible shape change
-last_commit: null             # sha of last /wiki run that wrote content (future)
-agent: null                   # default LLM agent recorded on first successful run (future)
-include: []                   # force-include paths (see §5.3)
+version: 1
+last_commit: null
+plan_sha: abc123
+include: []
+aggregates:
+  architecture:
+    file: architecture.md
+    last_sha: abc123
+    prompt_version: 1
+    dirty: false
+    status: done
+    # before_hash: "sha256:..."
+    # error: "<message>"
+  quickstart:
+    file: quickstart.md
+    last_sha: abc123
+    prompt_version: 1
+    dirty: false
+    status: done
+    # before_hash: "sha256:..."
+    # error: "<message>"
 modules:
-  - path: internal/command/gtw
-    file: internal/command/gtw.md       # mirrors source path; one-to-one
-    last_sha: abc123            # git HEAD sha at time of last write; null = stub-eligible
-    # removed: true             # present when path is no longer in source
-pending:                       # populated by Plan; consumed by Apply
-  - path: internal/foo
-    action: regenerate            # regenerate | new | delete
+  - path: internal/bridge/claudecode
+    file: internal/bridge/claudecode/index.md
+    purpose: "Claude Code CLI transport and event translation."
+    last_sha: abc123
+    prompt_version: 1
+    # removed: true
+pending:
+  - path: internal/bridge/claudecode
+    action: regenerate
     reason: "source changed since abc123"
     files_changed:
-      - internal/foo/a.go
-    status: pending               # pending | in_progress | done | failed
-    # error: "<message>"           # present when status=failed
+      - internal/bridge/claudecode/session.go
+    status: pending
+    # before_hash: "sha256:..."
+    # error: "<message>"
 ```
 
-`file` is the wiki file's path relative to `wiki/` — by convention a direct mirror of `path` with `.md` appended.
+Fields:
 
-`last_sha` is the git HEAD SHA captured when Apply wrote this module's wiki file. Plan uses it as the base of `git diff <last_sha>..HEAD -- <path>` to decide whether the module needs updating.
+- `version`: metadata schema version.
+- `last_commit`: source HEAD of the last state where pending is empty and every aggregate is clean.
+- `plan_sha`: source HEAD used to construct the pending plan.
+- `include`: exact path opt-ins for discovery.
+- `aggregates`: independent state for Architecture and Quickstart.
+- `aggregates.*.last_sha`: source HEAD associated with the validated aggregate.
+- `aggregates.*.prompt_version`: prompt contract applied to the aggregate.
+- `aggregates.*.dirty`: the aggregate requires generation after module finalization.
+- `aggregates.*.status`: `pending`, `in_progress`, `done`, or `failed`.
+- `aggregates.*.before_hash`: aggregate content hash captured when Apply starts.
+- `aggregates.*.error`: the last generation or validation failure.
+- `modules[].path`: source module directory.
+- `modules[].file`: module page relative to `wiki/modules/`.
+- `modules[].purpose`: short generated description used by parent indexes.
+- `modules[].last_sha`: source HEAD associated with the validated module page.
+- `modules[].prompt_version`: prompt contract applied to the module page.
+- `modules[].removed`: source directory is absent.
+- `pending`: persistent Plan output consumed by Apply.
+- `pending[].before_hash`: target content hash captured when Apply starts; absent means the target did not exist.
 
-`pending[]` is the per-run plan output. Apply consumes it top-to-bottom (depth desc, deletes last); failed entries stay in pending for retry; done entries are cleared at the end.
+There is no Agent field. Agent selection is ChatSession state owned by `/use`.
 
-`removed: true` is set by Plan when a yml entry's path no longer exists in source. Apply deletes the corresponding wiki file. The entry stays in yml.modules for audit (allows re-introduction without surprises).
+Pending actions:
 
-## 4. The `/wiki` command
+- `new`: generate a page for a discovered module without metadata.
+- `regenerate`: refresh a page whose source or prompt contract changed.
+- `delete`: delete generated content for a removed module.
 
-A single command with no subcommands. Idempotent — running it on a fresh repo scaffolds; running it on an existing wiki reconciles.
+Pending statuses:
 
-### 4.1 Flag
+- `pending`: not processed.
+- `in_progress`: generation started without a validated completion.
+- `done`: output passed validation.
+- `failed`: generation or validation failed.
 
-```
-/wiki [-a <agent>]   scan source tree, plan updates, apply (stub or agent)
-```
+Done entries are removed from `pending`. Failed and interrupted entries remain retryable.
 
-`-a` / `--agent` selects the LLM agent for the future content path. v0 always uses the stub dispatcher; the flag is accepted but ignored until the LLM path is wired.
+Prompt versions are applied per page. A partially completed run never stamps the new version onto failed pages. The implementation's prompt constants are compared with each page's stored version during Plan.
 
-### 4.2 Pre-flight: git + clean working tree
+## 9. State reconciliation
 
-`/wiki` reads committed history (SHAs and file diffs). Local uncommitted changes are invisible by design — `/wiki` refuses to run when the working tree is dirty. Untracked files in directories that gitignore excludes do not affect this check.
+`/wiki` supports these repository states:
 
-Pre-flight failure modes:
-
-| Failure | Refusal |
-|---|---|
-| `cwd` is not in a git repo | `not a git repo (or git unavailable): ...` |
-| `git status --porcelain` is non-empty | `working tree has uncommitted changes; commit first` |
-
-Both are hard errors — `/wiki` does not auto-commit, auto-stash, or fall back to a non-git "best effort" mode.
-
-### 4.3 State machine
-
-| `wiki.yml` | `wiki/` | Action |
+| `wiki.yml` | `wiki/` | Behavior |
 |---|---|---|
-| absent | absent | Fresh scaffold (`Scaffold`), then Plan + Apply |
-| present | present | Plan + Apply on the existing state |
-| present | absent | Recover — trust yml, recreate `wiki/`, then Plan + Apply |
-| absent | present | Recover — reconstruct yml from `wiki/`, then Plan + Apply |
+| absent | absent | Create metadata and generated directory structure |
+| present | present | Reconcile and update |
+| present | absent | Recreate generated content from metadata and source |
+| absent | present | Reconstruct metadata from generated paths and source |
 
-Half-state is rare (user manually deleted one half) and recovered silently rather than refused.
+Generated content never overrides repository rules or source files.
 
-### 4.4 Two-phase flow
+## 10. Plan
 
-Every invocation runs both phases.
+Plan is deterministic and performs no LLM work:
 
-**Phase 1 — Plan** (pure mechanical, free):
+1. Resolve the repository root and Git HEAD.
+2. Load metadata and verify source-clean state.
+3. Pre-validate files left by an interrupted run. An `in_progress` module or aggregate whose content differs from `before_hash` and passes validation may be finalized without regeneration.
+4. Discover modules and their directly owned files.
+5. Reconcile discovered modules with `wiki.yml.modules`.
+6. Add `new` for discovered modules without metadata.
+7. Add `regenerate` when:
+   - `last_sha` is absent.
+   - A directly owned file changed between `last_sha` and HEAD.
+   - The stored page `prompt_version` differs from the implementation's module prompt version.
+   - The generated module page is absent or structurally invalid.
+8. Add `delete` for metadata modules absent from source.
+9. Merge matching `failed` and `in_progress` entries into the plan instead of discarding their status and error context.
+10. Mark Architecture dirty when any module action exists.
+11. Mark Quickstart dirty when its tracked source set or prompt version changes.
+12. Set `plan_sha` to HEAD and persist `pending` and aggregate state.
 
-1. `discoverModules(cwd)` walks the source tree, applies the ignore filter (see §5.3), emits one module per non-empty directory.
-2. `reconcileModules(yml.Modules, discovered)` updates the module roster:
-   - new in source → appended to `yml.Modules` (file = mirror path)
-   - in source and yml → kept, `removed` flag cleared
-   - in yml, not in source → `removed: true`
-3. For each discovered module, compute git diff against `last_sha`:
-   - `last_sha == null` → pending entry, action `new` or `regenerate`
-   - `git diff <last_sha>..HEAD -- <path>` returns files → pending entry with `files_changed`
-   - empty diff → skip (nothing to do)
-4. For each removed yml entry → pending entry, action `delete`.
-5. Write `wiki.yml.pending[]` to disk.
+### 10.1 Direct-file ownership
 
-**Phase 2 — Apply** (writes content, LLM-cost if `-a` set):
+A module owns regular files directly inside its source directory. It does not own descendant module files.
 
-1. Sort pending by depth descending (deepest source path first, deletes last).
-2. For each entry, transition `pending → in_progress → done | failed`.
-3. Dispatch (stub or LLM) → write wiki file (or delete for `action: delete`).
-4. Update `module.LastSHA = HEAD` on success; mark `removed: true` on delete.
-5. On failure, set `pending.status = failed`, `pending.error = ...`; continue with next entry.
-6. After all entries processed, clear `done` items from pending. Rewrite `llms.txt` from the live module list.
+Changed files are assigned to their containing source directory:
 
-`failed` entries remain in pending and retry on the next `/wiki`. Done entries are cleared so `wiki.yml` doesn't grow unbounded across runs.
+```text
+internal/bridge/session.go
+  -> internal/bridge
 
-### 4.5 Reply format
-
+internal/bridge/claudecode/session.go
+  -> internal/bridge/claudecode
 ```
+
+Plan may compute one or more Git diffs and then filter by exact containing directory. It must not use a recursive path filter as the final module-change decision:
+
+```text
+git diff <sha>..HEAD -- internal/bridge
+```
+
+The recursive form includes descendants and would regenerate every ancestor page after a leaf change.
+
+When a direct file is deleted and its directory no longer qualifies as a module, reconciliation emits `delete`. Child module changes rebuild ancestor indexes deterministically but do not regenerate unchanged ancestor module pages.
+
+### 10.2 Replanning
+
+When `plan_sha` differs from HEAD, Plan recomputes changed files against each page's `last_sha` and merges the resulting actions with retryable pending entries. Generated pages associated only with the older plan are not accepted without validation against the new HEAD.
+
+An unreachable stored SHA causes full regeneration of the affected page. It is not treated as “no change.”
+
+Pending merge is keyed by `(path, action)`. A recomputed action replaces stale `reason` and `files_changed`; existing failure information remains available until Apply retries the entry. A conflicting action for the same path is discarded, such as `regenerate` becoming `delete`.
+
+## 11. Apply
+
+Apply uses the selected long-running AgentSession.
+
+### 11.1 Processing order
+
+1. Retryable `in_progress` and `failed` live modules.
+2. Other live modules, deepest source path first.
+3. Parent modules.
+4. Removed modules, processed mechanically.
+5. Architecture and Quickstart after no live module entry remains pending.
+6. Deterministic hierarchical indexes after every successful batch.
+
+Child pages therefore exist before parent indexes and aggregate pages are rendered.
+
+### 11.2 Bounded batch
+
+One `/wiki` invocation submits at most one Agent Prompt. Its generation batch contains at most eight target pages or 64 directly owned source files across those targets, whichever limit is reached first. A single module is never split across batches, even when that module alone exceeds the source-file limit.
+
+Delete actions do not consume Agent batch capacity. Apply removes their generated paths mechanically and records filesystem failures.
+
+When no live module entry remains pending, Apply completes delete actions before selecting aggregate targets. Architecture therefore observes the module set after successful deletion. A failed deletion remains pending and prevents Architecture from being marked clean.
+
+When pending work exceeds the batch limit, finalization reports the remaining count. A subsequent `/wiki` uses the long-running AgentSession selected through `/use` at that invocation; `/wiki` creates no Agent or conversation.
+
+Architecture and Quickstart enter a batch only after all live module pages they depend on validate. Root and directory indexes include only validated pages that exist, so a partially generated Wiki remains navigable.
+
+This bounded model provides a checkpoint at every invocation and avoids an unbounded Prompt whose partial progress cannot be correlated reliably.
+
+### 11.3 Agent task
+
+The Wiki task is submitted through `cs.QueueUserMessage` as one standalone `MessageKindQueue` Prompt. The prompt contains:
+
+- The resolved repository root.
+- The page contracts and context budgets.
+- The path to `wiki.yml.pending`.
+- The exact ordered target-page allowlist for this batch.
+- The instruction to treat code as authoritative.
+- The instruction to use existing source-reading and file-editing tools.
+- The instruction not to edit `wiki.yml` or generated `llms.txt` indexes.
+- The required framed final result.
+
+Before queueing, Apply stores each target's `before_hash`, changes its status to `in_progress`, and atomically writes `wiki.yml`. If queueing fails, those targets return to `pending` with the queue error and the Job key is released.
+
+The Agent writes target Markdown files directly. Its ordinary tool and permission events continue through the ChatSession event pipeline. The final response stays concise and does not reproduce generated pages in chat.
+
+The final response uses:
+
+```text
+WIKI_RESULT_BEGIN
+{"job_id":"wiki-...","completed":["wiki/modules/internal/gateway/index.md"],"failed":[]}
+WIKI_RESULT_END
+```
+
+Only allowlisted paths are accepted. A failure item has `path` and `error` string fields. The JSON object contains no generated page content.
+
+The command observes `AgentEventBus` and `PromptEndBus` using the Job, Prompt, AgentSession, and channel message identifiers. While the message is queued, the coordinator matches the channel message ID. The first event for its submitted Prompt binds the owning AgentSession ID and Prompt ID; subsequent events must match both. This preserves normal `/use` queue semantics without mixing another AgentSession's output.
+
+The collector accumulates both `EventAgentText` and `EventAgentResult`, because not every bridge emits a result event. `PromptEndBus` terminates collection but does not by itself indicate successful generation.
+
+This observation coordinates completion; it does not create a separate Agent execution path or suppress normal ChatSession events.
+
+### 11.4 Finalization
+
+After Prompt completion, `/wiki`:
+
+1. Extracts the last complete framed result matching the Job ID.
+2. Rejects result paths outside the batch allowlist.
+3. Validates every target reported completed.
+4. Sets `last_sha = plan_sha`, stores the applied prompt version, and refreshes `purpose` for validated pages.
+5. Marks reported failures, missing files, and invalid targets failed.
+6. Generates directory `llms.txt` files from source paths and validated module purposes.
+7. Generates root `llms.txt`.
+8. Updates aggregate state and `last_commit` when aggregate pages validate.
+9. Removes done pending entries and persists failures.
+
+If framing is absent or malformed, files whose content changed during the batch and passes validation may be accepted. An unchanged pre-existing file is not accepted without a matching completed result. Remaining targets stay failed or pending for retry.
+
+If the Agent process exits, the Prompt is stopped, or the daemon terminates before finalization, `in_progress` entries remain. The next `/wiki` retries them.
+
+### 11.5 Output boundary
+
+Before submitting the Prompt, the coordinator records:
+
+- Git status.
+- Content hashes for allowlisted target pages in `pending[].before_hash`.
+- Existing generated paths.
+
+After Prompt completion, only these Agent-written paths are permitted:
+
+- The exact target-page allowlist.
+
+The command itself may write `wiki.yml` and generated `llms.txt` indexes.
+
+Generated files and their parent directories must not be symbolic links. Containment checks use cleaned, resolved paths under the repository's physical `wiki/` directory rather than lexical prefix checks alone.
+
+Any other tracked or untracked change is an output-boundary violation. Apply:
+
+- Does not delete or revert the unexpected change.
+- Does not finalize the affected batch.
+- Lists the unexpected repository-relative paths in the final error.
+- Leaves pending state retryable.
+
+An Agent modification to `wiki.yml` or an `llms.txt` file is also a boundary violation; these files are command-owned.
+
+## 12. Validation
+
+Validation is mechanical:
+
+- Required headings are present and ordered.
+- Page size is within a bounded tolerance.
+- Source paths are repository-relative and exist.
+- Source anchors name a file and, when supplied, a symbol.
+- Module and index links resolve.
+- Every index link has a description.
+- A module has Purpose, Entry Points, and Source Anchors.
+- No `[TBD]` placeholders remain in a completed page.
+- Generated files stay under `wiki/`.
+- Generated files and parent directories are not symbolic links.
+- `wiki.yml` follows the supported schema.
+- Framed results contain the active Job ID and allowlisted paths only.
+- Agent-written paths stay inside the batch output allowlist.
+
+File existence, path containment, Markdown shape, result framing, and link resolution are hard validation failures. Symbol validation is best-effort and language-aware when a parser is available; an unsupported language does not fail solely because a symbol cannot be mechanically resolved. The file anchor remains mandatory.
+
+Semantic correctness is not inferred from successful validation. Agents still verify summaries against code before editing.
+
+## 13. Incremental aggregation
+
+Module pages regenerate only from changes under their source directory or a page-contract change.
+
+Architecture regenerates whenever a module page is added, regenerated, or deleted. This deterministic fan-out avoids asking the planner to infer whether a local code change has architectural impact.
+
+Quickstart regenerates when it is absent, its prompt contract changes, or its source files change. Its source set includes repository rules, build files, package manifests, CI configuration, development scripts, and executable entry points.
+
+All generated pages regenerate when the page contract or generation prompt changes. Removing a module's `last_sha` requests regeneration of that module and the architecture aggregate.
+
+Directory indexes are rendered from direct child metadata. A parent index does not copy descendant page content.
+
+Architecture remains dirty until every live module pending entry completes and the aggregate itself validates. Quickstart tracks its own source set and prompt version independently. A successful module batch cannot accidentally mark either aggregate fresh.
+
+Deterministic root and directory indexes rebuild on every `/wiki` finalization, including no-op finalization. They require no LLM call or freshness metadata.
+
+## 14. Reply behavior
+
+The slash command returns an immediate acknowledgement after the Wiki Prompt is queued:
+
+```text
+✅ /wiki queued
+
+12 module page(s) to generate
+2 module page(s) to delete
+Queued in the ChatSession for /workspace/nightme
+```
+
+A no-op or purely mechanical cleanup invocation does not queue an Agent Prompt and returns the final result directly. Module deletion marks Architecture dirty, so a deletion may still require an aggregate-generation Prompt after the file is removed. If `QueueUserMessage` rejects the Wiki message, the Job releases its key and leaves the planned entries pending.
+
+The long-running Agent uses the normal chat event stream for progress and permissions.
+
+Finalization sends a compact result:
+
+```text
 ✅ /wiki
 
-Added 2 module(s):
-• internal/cli
-• internal/configs
-
-Marked 1 removed (wiki files deleted):
-• internal/deprecated
-
-Wrote 3 stub(s).
-Preserved 5 module file(s) (LLM content kept).
+Generated 12 module page(s).
+Deleted 2 removed module page(s).
+Rebuilt 8 index file(s).
+Failed 1 module page(s); it remains pending.
+9 module page(s) remain; run /wiki again to continue.
 ```
 
-Counts and short bullet lists. Per project convention, the post-summary keeps decision info, not raw file lists (per `AGENTS.md` §1 — user-facing replies stay lean).
+Raw generated page content and full source file lists are not included in command replies.
 
-`Preserved` lists modules Plan skipped because `git diff` returned empty (their `last_sha` already matches HEAD). Their wiki files were not touched.
+## 15. Package responsibilities
 
-`Failed` (when present) lists modules where Apply errored; they remain in `wiki.yml.pending` for the next run to retry.
-
-### 4.6 Resume capability
-
-If `/wiki` is interrupted mid-Apply (process crash, context cancel), `wiki.yml.pending` retains entries with `status: in_progress` (Apply started but didn't finish). On the next run:
-
-- Plan reads existing yml, including the in_progress entry
-- The in_progress entry stays in pending (Apply's pre-flight catches status != pending and skips it as already-done)
-
-In practice this means a 100-module /wiki that crashes at module 50 picks up at module 51 on retry. The crash window is the atomic-write of a single module file plus the yml persist — bounded.
-
-## 5. Architecture
-
-### 5.1 Package layout
-
-```
+```text
 internal/command/wiki/
-├── args.go       parseWikiArgs (-a/--agent)
-├── cmd.go        Factory / Spec / Handle / ExecGitRunner + IsClean
-├── sync.go       Sync() orchestrator (Plan + Apply + recover + git pre-flight)
-├── plan.go       Plan() + GitRunner interface + pendingOrder (depth-first + delete last)
-├── apply.go      Apply() + stub dispatcher + per-entry retry
-├── discover.go   discoverModules(cwd) — deep walk, no leaf rule
-├── ignore.go     ignoreFilter + .gitignore parser + wiki.yml.include reader
-├── skeleton.go   architectureSkeleton / glossarySkeleton / llmsTxt + moduleDocStub
-├── storage.go    Scaffold() (fresh path) + atomicWrite (auto MkdirAll)
-├── yaml.go       wikiYml struct + pendingEntry + parseWikiYml / encodeWikiYml
-└── cmd_test.go
+├── cmd.go        command registration, zero-argument validation, ChatSession handoff
+├── sync.go       preflight and Plan/Apply orchestration
+├── plan.go       Git-driven reconciliation and pending ordering
+├── apply.go      bounded Prompt coordination, Job ownership, and finalization
+├── prompt.go     Wiki task prompt construction
+├── validate.go   page, framed result, and output-boundary validation
+├── discover.go   deterministic source module discovery
+├── ignore.go     ignore and include rules
+├── skeleton.go   empty recovery scaffolds and deterministic index rendering
+├── storage.go    atomic metadata and generated-file writes
+└── yaml.go       metadata schema and canonical encoding
 ```
 
-The slash command is registered via `command.RegisterBuilder` in `cmd.go`'s `init()` and picked up by the runtime orchestrator.
-
-### 5.2 Module discovery
-
-`discoverModules(cwd)` walks the directory tree all the way down — no leaf rule. A directory becomes a module when:
-
-- It survives the ignore filter (see §5.3)
-- It contains at least one non-hidden regular file (any extension, any language — including `_test.go` and other test-file conventions)
-
-Every qualifying directory, including sub-packages, gets its own wiki page. `internal/command` and `internal/command/gtw` are two separate modules with two separate wiki files (`wiki/modules/internal/command.md` and `wiki/modules/internal/command/gtw.md`). Test-only directories (`internal/<x>` containing only `_test.go` files) are also modules.
-
-The walker does not stop at leaf modules: after emitting a module entry for a directory, it continues into sub-directories that survive the filter. Empty directories are skipped (no files = no module).
-
-### 5.3 Ignore system
-
-Three-layer filter, applied in order:
-
-1. **Built-in**: `wiki/` only (self-recursion guard; cannot be overridden)
-2. **User `.gitignore`**: any path matched by the user's `<cwd>/.gitignore` is skipped
-3. **Dot-prefix**: any path component starting with `.` is skipped
-4. **`wiki.yml.include` opt-in**: an exact match in `wiki.yml.include` exempts the leading dot-component, allowing the walker to descend one level. Nested hidden directories (`.github/.private`) require their own include entry.
-
-The gitignore parser supports literals, glob (`*` `?` `[abc]`), anchored patterns (`/foo`), dir-only patterns (`foo/`), and negation (`!foo`). Nested `.gitignore` files in subdirectories are out of scope for v0.
-
-`wiki.yml.include` semantics are exact-match, not recursive. `include: [.github]` exempts `.github/` and the walker then re-evaluates each child (`.github/workflows` is normal, `.github/.private` is still hidden).
-
-### 5.4 Module naming
-
-Wiki file path mirrors the source path one-to-one: `internal/command/gtw` → `wiki/modules/internal/command/gtw.md`. The directory structure inside `wiki/modules/` is a direct map of the source tree's module layout.
-
-The mirror serves two purposes:
-
-- **Zero ambiguity**: every module has a unique file path by construction. No basename collision logic; no dedup suffix.
-- **Zero lookup overhead for LLM agents**: reading `wiki/modules/internal/command/gtw.md` immediately conveys the package's location. The wiki file path carries the same semantics as the source path; an agent does not need to cross-reference `wiki.yml` to map "this page" to "this package".
-
-`cmd/<binary>` packages follow the map the same way: `cmd/nightme` → `wiki/modules/cmd/nightme.md`. Non-Go modules with arbitrary path layouts (e.g. `configs/`, `scripts/`) map the same way.
-
-`wiki.yml.modules[].file` always equals `<path>.md`. The field exists for forward compatibility (e.g. future rename via wiki.yml edit) but in v0 it is a pure mirror of `path`.
-
-### 5.5 Git interface
-
-```go
-type GitRunner interface {
-    Head(cwd string) (string, error)        // git rev-parse HEAD
-    ChangedFiles(cwd, from, pathFilter string) ([]string, error)  // git diff --name-only <from>..HEAD -- <pathFilter>
-    IsClean(cwd string) (bool, error)       // git status --porcelain
-}
-```
-
-Production wiring uses `ExecGitRunner` (shells out to the `git` binary; no dependency on `internal/command/gtw`). Tests use a mock.
-
-`from` in `ChangedFiles` is a per-module SHA from `wiki.yml.modules[].last_sha`. Empty `from` returns no files (treats the module as never-written).
-
-### 5.6 Apply order
-
-Pending entries are processed in depth-descending order (deepest source path first, then parents, then deletes). Reasoning: when Apply writes a parent module's wiki page, all child modules' pages should already exist so cross-references are accurate.
-
-`pendingOrder` in `plan.go`:
-
-```
-Source modules (deepest first)
-  ↳ internal/agent/procutil          (3 segments, deepest)
-  ↳ internal/bridge/claudecode       (3)
-  ↳ internal/command                  (2)
-  ↳ internal/agent                    (1)
-Delete entries
-  ↳ internal/deprecated
-```
-
-Aggregate pages (`architecture.md`, `glossary.md`) are not in `pending`; they are synthesised by the future LLM path from the per-module pages.
-
-### 5.7 v0 stub mode (current)
-
-`Apply` writes `moduleDocStub` for each live module whose `last_sha == nil`. The stub fills `## File Layout` (real data from `readSourceFiles`) and `<!-- sources -->` (real paths) with placeholders for the rest. v0 does not call any agent, any chat session queue, or any external service. It is pure file I/O.
-
-### 5.8 v1 LLM mode (future)
-
-The LLM path runs inside the chat session's existing runtime. Wiki does not call `agent.Builtins.Get(...).RunOnce(...)` directly and does not introduce a new task-dispatch path. It uses the chat session's selected AgentSession:
-
-```go
-// Inside Apply, for a regenerate entry:
-as := cs.SelectedAgentSession()
-if as == nil { /* fail: user has not /use'd an agent yet */ }
-
-prompt := buildWikiModulePrompt(cwd, pkgPath, filesChanged)
-blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: prompt}}
-
-err := as.Submit(&agentsession.Prompt{
-    Workspace: cwd,
-    Blocks:    blocks,
-})
-if err != nil { /* mark pending entry failed, continue */ }
-// Continue with next entry; collect module content via event subscription
-```
-
-The chat session's existing event dispatch streams the agent's response to `cs.Emitter()`. Wiki subscribes (or filters the emitter stream) for responses tagged with its task identifier, captures the markdown content, and writes it to the wiki file. The selected AS is long-lived — multiple wiki modules share it via successive `Submit` calls.
-
-The exact mechanism for capturing per-module results (sync wait, event subscription, or a chat-session-supplied task-completion interface) is not in v0 scope. v0 ships the stub; v1 wires the chat session's existing primitives to it.
-
-## 6. Decisions
-
-### Wiki lives at `<cwd>/wiki/`, not `<cwd>/.nightme/wiki/`
-
-`<cwd>/.nightme/` is for runtime-emitted, repo-local config (mirrors `~/.nightme/gtw.yml`) — optionally committed, freely regenerated. `<cwd>/wiki/` is a first-class repo artifact, like `README.md` or `go.mod`: tracked, evolved, reviewed in PRs.
-
-### `wiki.yml` is a sibling of `wiki/`, not inside it
-
-`<cwd>/wiki.yml` is the operator-facing state file (machine-readable). Keeping it outside `<cwd>/wiki/` makes "delete the wiki" a single `rm -rf wiki/` without losing the module roster.
-
-### `.gitignore` drives exclusion
-
-The user's `.gitignore` already encodes "what should be preserved as part of the project." That semantic matches the wiki's "what should be documented." Reusing it eliminates a parallel `.wikiignore` file and the divergence risk that comes with two ignore lists.
-
-### One `/wiki` command, no subcommands
-
-`init` and `update` collapsed into one command because the distinction blurred once `init` became idempotent — running `init` to reconcile was already "init + regenerate stubs." Splitting into two commands added a half-state the user had to remember to avoid. The merged shape matches how users think: "I changed code → I run `/wiki`".
-
-### Two-phase Plan + Apply
-
-Incremental updates need an explicit "what changed" detection step (Plan) separate from "write content" (Apply). Plan is free and deterministic; Apply is the LLM-cost step. The pending list bridges them — Plan produces it, Apply consumes it, failed entries stay for retry. Without this split, every `/wiki` invocation does redundant work, and there is no clean way to inspect "what's about to change" before paying the LLM cost.
-
-### Git-driven, no self-computed hashes
-
-`/wiki` reads committed history (SHAs and file diffs). Working tree state is git's responsibility, and `/wiki` only reads committed history — uncommitted changes are invisible to the diff and produce wrong "no changes" verdicts. Local uncommitted changes must be committed before `/wiki`. We never compute hashes ourselves: no mtime, no file hash, no "approximate" indicator. Git says what changed; we trust it.
-
-`/wiki` refuses to run on a dirty working tree or outside a git repo. There is no fallback mode. "进 git 的都是需要的" — what goes into git is what gets documented.
-
-### Per-module `last_sha`
-
-`last_sha` is per-module, not per-wiki. Different modules change at different rates — `internal/foo` might be stable for months while `internal/bar` changed yesterday. Per-module SHAs let Plan compute "what changed for THIS module" via `git diff <last_sha>..HEAD -- <path>`. A wiki-wide `last_commit` field would force a full regenerate whenever any module changed.
-
-`last_sha` also gates content overwrite: a module with non-null `last_sha` (Apply wrote it) is not regenerated unless `git diff` finds new changes. Stub mode keeps `last_sha = HEAD` after each run, so the next run sees "no diff" and skips — preserving whatever the stub wrote.
-
-### Removed modules' wiki files are deleted
-
-When a module disappears from source, `wiki.yml` marks it `removed: true` and Apply deletes the corresponding wiki file. The yml entry stays for audit and re-introduction: if the directory comes back, Reconcile clears `removed` and the next `/wiki` regenerates the file from scratch.
-
-The original concern ("external references to wiki files break") doesn't hold: `llms.txt` does not list removed modules (so external LLM readers see no broken links), PR descriptions are ephemeral, and git history preserves deleted files for `git show <sha>`.
-
-### Stub mode does not call an LLM (v0)
-
-`moduleDocStub` fills `## File Layout` (real data) and `<!-- sources -->` (real paths) with placeholders for the rest. v0 is pure file I/O — no agent calls, no chat session queue, no event subscription. The Plan + Apply pipeline is fully exercised by the stub; replacing the stub with a real LLM dispatch is the only change needed to enable v1.
-
-### Wiki uses the chat session's selected AS (v1)
-
-When v1 is wired, wiki dispatches per-module LLM tasks through the chat session's existing `cs.SelectedAgentSession().Submit(prompt)` — **not** through `agent.Builtins.Get(...).RunOnce(...)` (which is the oneshot pattern `gtw` uses). Reasons:
-
-- Wiki is long-running (N modules, may resume); `gtw` is oneshot (one call, one result). Different shapes need different dispatch.
-- `/wiki` runs inside an existing chat session that already has a selected AS for the user's chosen agent. Reusing it is free; spinning up a new AS is wasted work.
-- The chat session's `Submit` + event-stream is the canonical long-running path. Wiki inherits progress streaming, error handling, and AS lifecycle for free.
-- There is no separate "wiki agent dispatch" — only the chat session's main flow.
-
-The chat session's event stream (`cs.Emitter()`) is filtered by wiki for its own task tags to capture per-module results as they arrive. The exact "submit + collect" coordination is an implementation detail of the LLM path; the architectural principle — wiki rides the chat session's main flow — does not change.
-
-### Two-phase ordering is depth-descending
-
-Process deepest source paths first so sub-packages complete before their parents. When Apply writes a parent module's wiki page, all child pages already exist and the parent can reference them. Aggregate pages (`architecture.md`, `glossary.md`) are synthesised last by the future LLM path.
-
-## 7. Open items
-
-- **LLM content path (v1)**: per-module prompt construction, task tag for result correlation, and event-stream filter for capturing each module's markdown. Wires `cs.SelectedAgentSession().Submit(...)` to `atomicWrite`. Stub mode (v0) is the placeholder; this entry is the wiring.
-- **Aggregate pages**: `architecture.md` and `glossary.md` synthesis from per-module pages. Currently both ship as the empty DeepWiki skeleton; the LLM path fills them after per-module pages are done.
-- **Nested `.gitignore`**: the parser reads only `<cwd>/.gitignore`. Sub-directory `.gitignore` files are ignored.
-- **`wiki.yml.modules[].file` divergence**: in v0 enforced as a mirror of `path`. Future tooling may allow hand-rename via wiki.yml edit (e.g. for shortened slugs or moved directories).
-- **Git operations**: optional `git add` + `git commit` after `/wiki` completes. User commits manually today.
-- **Cross-language prompt templates**: v0 sends a language-agnostic prompt. Future providers can specialise per language (Go prompts emphasise types/interfaces; Python emphasises protocols; etc.).
-- **Removed-module retention option**: today Apply deletes the wiki file immediately. A future flag (e.g. `--keep-removed` in the wiki.yml schema, or an env var) could keep the file on disk for archival.
-
-## 8. References
-
-- [llms.txt v1.0](https://llmstxt.org) — index format
-- [DeepWiki](https://deepwiki.com) — per-page format (`<!-- sources -->` footer, `[file:line]` source citations, H1 = package name)
-- `AGENTS.md` §1 — content rules (no preamble, no temporal words, rewrite sections wholesale)
-- `tokensave` / `codegraph` — structural-query tools; complementary to this wiki, not replaced by it
-- `internal/channel/bot` — synthetic Channel implementation; uses its own `Incoming()` to push workflow setup messages (the only existing precedent for "system-originated messages" in the codebase)
-- `internal/chatsession.ChatSession.SelectedAgentSession` / `internal/agentsession.AgentSession.Submit` — the primitives the v1 LLM path rides
+The package does not contain an Agent provider abstraction or one-shot runner.
+
+## 16. Verification contract
+
+Tests cover:
+
+- `/wiki` rejects every argument, including `-a` and `--agent`.
+- Missing CWD and missing selected Agent fail before filesystem writes.
+- `LookupSelectedAgentSession` is used so detached sessions resume.
+- A nested ChatSession CWD resolves to the Git worktree root.
+- Source-clean rejects non-Wiki changes and permits resumable generated changes.
+- Concurrent Jobs for the same repository are rejected across ChatSessions.
+- The Job survives the slash-command handler context and stops with `cs.Context()`.
+- The Wiki Prompt is a standalone `MessageKindQueue`.
+- The channel-native slash message ID is the output anchor; Job ID remains internal.
+- Prompt completion is correlated to the Job, AgentSession, Prompt, and channel message.
+- A queued Wiki message follows `/use`, while an already-submitted Wiki Prompt remains on its owning AgentSession.
+- Each invocation respects the page and changed-file batch limits.
+- Remaining pending entries survive for the next invocation.
+- Dirty and non-Git repositories are rejected.
+- Discovery and ignore behavior are deterministic.
+- A leaf change does not regenerate ancestor module pages.
+- Unreachable SHAs trigger regeneration.
+- A changed `plan_sha` causes replanning against the new HEAD.
+- Interrupted and failed work remains pending.
+- Module paths map to `wiki/modules/<source-path>/index.md`.
+- Hierarchical indexes list direct children only.
+- Page validation rejects missing headings, invalid anchors, broken links, and placeholders.
+- Text-only and Result-producing bridges both support framed result collection.
+- Malformed or out-of-allowlist result paths are rejected.
+- Unexpected Agent writes outside the target allowlist fail without destructive rollback.
+- Prompt versions are tracked independently per module and aggregate.
+- No Agent name is persisted in `wiki.yml`.
+- No one-shot Agent path is invoked.
+
+Repository verification follows `AGENTS.md`: formatting, tests, lint, and build must pass.
+
+## 17. References
+
+- [llms.txt](https://llmstxt.org) — LLM-oriented documentation indexes.
+- [AGENTS.md](https://agents.md) — repository instructions for coding Agents.
+- [Agent Skills](https://agentskills.io/specification) — progressive disclosure through metadata, activation, and on-demand references.
+- [Aider Repository Map](https://aider.chat/docs/repomap.html) — token-budgeted source-derived repository maps.

@@ -7,94 +7,127 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// wikiYml is the in-memory representation of <cwd>/wiki.yml.
+// wikiYml is the in-memory representation of <repoRoot>/wiki.yml.
 //
-// v0 schema:
+// Schema v1 (Wiki.md §8). Every field has an explicit purpose; do
+// not extend the schema without bumping Version and updating
+// parseWikiYml / encodeWikiYml accordingly.
 //
-//	version:    int
-//	last_commit:   string | null   (sha of the wiki's last overall apply)
-//	agent:      string | null     (LLM agent used on last apply)
-//	include:    []string          (force-include paths, see ignore.go)
-//	modules:    []moduleYml       (per-module bookkeeping)
-//	pending:    []pendingEntry    (incremental plan produced by Plan phase)
-//
-// Pointer fields distinguish "absent" from "explicitly null"
-// on round-trip.
+//	version:        schema version (1)
+//	last_commit:    source HEAD when pending is empty AND every
+//	                aggregate is clean
+//	plan_sha:       source HEAD used to build the current pending
+//	include:        exact path opt-ins for discovery
+//	aggregates:     per-aggregate (architecture | quickstart) state
+//	modules:        per-module bookkeeping
+//	pending:        live Plan output consumed by Apply
 type wikiYml struct {
-	Version    int            `yaml:"version"`
-	LastCommit *string        `yaml:"last_commit"`
-	Agent      *string        `yaml:"agent"`
-	Include    []string       `yaml:"include"`
-	Modules    []moduleYml    `yaml:"modules"`
-	Pending    []pendingEntry `yaml:"pending,omitempty"`
+	Version    int                      `yaml:"version"`
+	LastCommit *string                  `yaml:"last_commit,omitempty"`
+	PlanSha    string                   `yaml:"plan_sha,omitempty"`
+	Include    []string                 `yaml:"include"`
+	Aggregates map[string]*aggregateYml `yaml:"aggregates"`
+	Modules    []moduleYml              `yaml:"modules"`
+	Pending    []pendingEntry           `yaml:"pending,omitempty"`
 }
 
-// moduleYml is one entry in wikiYml.Modules.
+// aggregateYml tracks one of the two aggregate pages (architecture
+// or quickstart). Keyed by lower-case name in wikiYml.Aggregates.
+type aggregateYml struct {
+	File       string  `yaml:"file"`
+	LastSHA    *string `yaml:"last_sha,omitempty"`
+	PromptVer  int     `yaml:"prompt_version"`
+	Dirty      bool    `yaml:"dirty"`
+	Status     string  `yaml:"status"` // pending | in_progress | done | failed
+	BeforeHash *string `yaml:"before_hash,omitempty"`
+	Error      string  `yaml:"error,omitempty"`
+}
+
+// moduleYml is one entry in wikiYml.Modules. Path is the source
+// directory relative to repoRoot; File is the wiki page path
+// relative to wiki/ (mirror rule — Path + ".md"). Purpose is the
+// short description rendered into parent indexes.
 //
-// LastSHA is the git HEAD SHA at the time the module's wiki
-// file was last written by Apply (either stub or LLM). Plan
-// uses this to compute the diff vs current HEAD and decide
-// whether the module needs updating.
-//
-// Removed marks a path that no longer exists in source.
-// Removed modules' wiki files are deleted by Apply; the yml
-// entry stays as an audit record (allows future re-introduction
-// without surprises).
+// LastSHA is the source HEAD at the time the page was last
+// validated by Apply. PromptVer tracks the module prompt version
+// at validation time — a mismatch triggers regeneration on the
+// next Plan.
 type moduleYml struct {
-	Path     string  `yaml:"path"`
-	File     string  `yaml:"file"`
-	Language string  `yaml:"language,omitempty"`
-	LastSHA  *string `yaml:"last_sha"`
-	Removed  bool    `yaml:"removed,omitempty"`
+	Path      string  `yaml:"path"`
+	File      string  `yaml:"file"`
+	Purpose   string  `yaml:"purpose,omitempty"`
+	LastSHA   *string `yaml:"last_sha,omitempty"`
+	PromptVer int     `yaml:"prompt_version"`
+	Removed   bool    `yaml:"removed,omitempty"`
 }
 
-// pendingEntry is one item in the incremental plan produced
-// by Plan and consumed by Apply. Status semantics:
+// pendingEntry is one item in the incremental plan produced by
+// Plan and consumed by Apply. Path is the source module path or
+// one of the aggregate names ("architecture" | "quickstart").
 //
-//   - pending   — Apply has not touched this yet
-//   - in_progress — Apply started but did not finish (process crash / context cancel)
-//   - done      — Apply finished (stub or LLM wrote content + module.LastSHA updated)
-//   - failed    — Apply tried but errored (error field populated, retained for retry)
+// Status transitions:
 //
-// Apply resumes from non-done entries on subsequent runs, so
-// `failed` items get retried automatically without losing
-// the rest of the plan.
+//	pending → in_progress → done | failed
+//
+// failed and in_progress remain on disk for the next invocation
+// to retry. done entries are removed by Finalize.
 type pendingEntry struct {
 	Path         string   `yaml:"path"`
-	Action       string   `yaml:"action"` // regenerate | new | delete
+	Action       string   `yaml:"action"` // new | regenerate | delete
 	Reason       string   `yaml:"reason"`
 	FilesChanged []string `yaml:"files_changed,omitempty"`
 	Status       string   `yaml:"status"`
+	BeforeHash   *string  `yaml:"before_hash,omitempty"`
 	Error        string   `yaml:"error,omitempty"`
 }
 
-// Pending status constants — string literals stay in YAML so
-// humans can read the file; we keep the constants here so
-// writers don't typo.
 const (
-	pendingStatusPending     = "pending"
-	pendingStatusInProgress = "in_progress"
-	pendingStatusDone        = "done"
-	pendingStatusFailed      = "failed"
+	// Schema version. Bump on any backward-incompatible change
+	// to wikiYml's wire shape.
+	SchemaVersion = 1
 
-	pendingActionRegenerate = "regenerate"
+	// Aggregate names — keys into wikiYml.Aggregates.
+	ArchitectureKey = "architecture"
+	QuickstartKey   = "quickstart"
+
+	// Page prompt versions. Plan compares these against the
+	// stored PromptVer and requests regeneration on mismatch.
+	ModulePromptVersion     = 1
+	ArchitecturePromptVer   = 1
+	QuickstartPromptVersion = 1
+
+	// Pending status constants.
+	pendingStatusPending    = "pending"
+	pendingStatusInProgress = "in_progress"
+	pendingStatusDone       = "done"
+	pendingStatusFailed     = "failed"
+
+	// Pending action constants.
 	pendingActionNew        = "new"
+	pendingActionRegenerate = "regenerate"
 	pendingActionDelete     = "delete"
 )
 
-// parseWikiYml decodes wiki.yml data into the structured
-// representation. yaml.v3 errors are surfaced verbatim.
+// parseWikiYml decodes wiki.yml data. A missing or malformed
+// file is reported as an error — the caller is responsible for
+// recovery (see loadOrReconcileYml in cmd.go).
 func parseWikiYml(data []byte) (*wikiYml, error) {
 	var y wikiYml
 	if err := yaml.Unmarshal(data, &y); err != nil {
 		return nil, fmt.Errorf("parse wiki.yml: %w", err)
 	}
+	if y.Aggregates == nil {
+		y.Aggregates = map[string]*aggregateYml{}
+	}
 	return &y, nil
 }
 
-// encodeWikiYml renders y as canonical YAML. Output is
-// deterministic for stable diffs.
+// encodeWikiYml renders y as deterministic YAML. Output uses
+// 2-space indent and is stable across processes.
 func encodeWikiYml(y *wikiYml) ([]byte, error) {
+	if y.Aggregates == nil {
+		y.Aggregates = map[string]*aggregateYml{}
+	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -105,4 +138,36 @@ func encodeWikiYml(y *wikiYml) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// ensureAggregate returns the named aggregate, creating an empty
+// record if absent. The File field is populated when the entry
+// is created so downstream writers can rely on it.
+func ensureAggregate(y *wikiYml, name string) *aggregateYml {
+	if y.Aggregates == nil {
+		y.Aggregates = map[string]*aggregateYml{}
+	}
+	if a, ok := y.Aggregates[name]; ok && a != nil {
+		return a
+	}
+	a := &aggregateYml{
+		File:      name + ".md",
+		Status:    pendingStatusPending,
+		PromptVer: currentPromptVerFor(name),
+	}
+	y.Aggregates[name] = a
+	return a
+}
+
+// currentPromptVerFor returns the canonical prompt version for
+// the given aggregate name.
+func currentPromptVerFor(name string) int {
+	switch name {
+	case ArchitectureKey:
+		return ArchitecturePromptVer
+	case QuickstartKey:
+		return QuickstartPromptVersion
+	default:
+		return 0
+	}
 }

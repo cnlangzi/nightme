@@ -11,21 +11,25 @@ import (
 
 // moduleEntry is one source package detected during /wiki.
 //
-// Path is the package's directory relative to cwd, slash-
-// separated (e.g. "internal/command/gtw"). File is the wiki
-// file path RELATIVE TO <cwd>/wiki/ — by convention a
-// mirror of Path with ".md" appended (nested directory
-// layout: wiki/modules/internal/command/gtw.md). The mirror
-// means an LLM reading a wiki page can locate the
-// corresponding source without cross-referencing wiki.yml.
+// Path is the package's directory relative to repoRoot,
+// slash-separated (e.g. "internal/command/gtw"). File is the
+// wiki page path RELATIVE TO <repoRoot>/wiki/ — by convention
+// the nested mirror described in Wiki.md §5:
 //
-// WikiRelPath is the File prefixed with "modules/" — used
-// for llms.txt module links and any caller that needs the
-// full path relative to the wiki root.
+//	internal/bridge/claudecode/
+//	  -> wiki/modules/internal/bridge/claudecode/index.md
+//
+// i.e. File = "modules/<source-path>/index.md". The mirror
+// eliminates basename collisions (internal/command/gtw vs
+// internal/cli/gtw would otherwise want the same flat file).
+//
+// WikiRelPath is provided for callers that need a non-nested
+// link target (used by some llms.txt renderers); it equals
+// File for this layout.
 type moduleEntry struct {
 	Path        string // e.g. "internal/command/gtw"
-	File        string // e.g. "internal/command/gtw.md" (nested, mirror of Path)
-	WikiRelPath string // e.g. "modules/internal/command/gtw.md"
+	File        string // e.g. "modules/internal/command/gtw/index.md"
+	WikiRelPath string // same as File under the nested layout
 }
 
 // discoverModules walks cwd and returns every directory that
@@ -100,20 +104,25 @@ func discoverModules(cwd string) ([]moduleEntry, error) {
 
 		if rel != "" && hasModuleFile {
 			// Emit module. Then CONTINUE recursing — no leaf
-	 // rule. Every non-empty dir gets its own wiki page;
-	 // sub-packages stay as their own modules, not
-	 // folded into the parent.
-	 //
-	 // Wiki file path mirrors source path one-to-one:
-	 // internal/command/gtw → wiki/modules/internal/
-	 // command/gtw.md. The mirror is what kills basename
-	 // collisions (internal/command/gtw vs
-	 // internal/cli/gtw otherwise want the same file).
-	 entries = append(entries, moduleEntry{
-		 Path:        filepath.ToSlash(rel),
-		 File:        filepath.ToSlash(rel) + ".md",
-		 WikiRelPath: filepath.ToSlash(filepath.Join("modules", rel)) + ".md",
-	 })
+			// rule. Every non-empty dir gets its own wiki page;
+			// sub-packages stay as their own modules, not
+			// folded into the parent.
+			//
+			// Wiki file path mirrors source path NESTED
+			// (Wiki.md §5):
+			//   internal/command/gtw → wiki/modules/
+			//     internal/command/gtw/index.md
+			// The nested layout is what kills basename
+			// collisions (internal/command/gtw vs
+			// internal/cli/gtw would otherwise want the same
+			// flat file).
+			srcRel := filepath.ToSlash(rel)
+			file := "modules/" + srcRel + "/index.md"
+			entries = append(entries, moduleEntry{
+				Path:        srcRel,
+				File:        file,
+				WikiRelPath: file,
+			})
 		}
 
 		// Always recurse into sub-directories that survive

@@ -2,221 +2,416 @@ package wiki
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
-// Skeleton templates for /wiki init. Pure content — no
-// filesystem IO. Lives in skeleton.go so /wiki update logic
-// can call the same template functions with per-module
-// context and render without re-implementing the structure.
+// Page contracts — Wiki.md §6.
 //
-// Skeletons are intentionally empty-bodied: section headings
-// exist so the user can see what /wiki update will fill, and
-// so humans editing the file manually know what's expected.
-// Empty sections are honest signals that the content has not
-// been generated yet — better than placeholder prose that
-// would have to be deleted on the first update pass.
+// Each contract is the canonical Markdown shape the Agent must
+// emit for that page kind. ModulePrompt / ArchitecturePrompt /
+// QuickstartPrompt render the same contract into the Wiki
+// Prompt (§11.3) so the Agent has a single source of truth for
+// what a valid page looks like.
 
-// architectureSkeleton returns the top-level architecture
-// page. Section list mirrors DeepWiki's page_type=architecture
-// convention (Components / Main Flows / Dependency Graph /
-// Key Invariants) so /wiki update can rely on those H2s as
-// stable anchors.
-func architectureSkeleton() string {
-	return `# Architecture
+const moduleContract = `## Module page contract
 
-## Components
+Required headings (in order):
+
+# <basename of source path>
+
+> One short paragraph stating the observable responsibility.
+
+## Purpose
+One short paragraph describing the module's responsibility.
+
+## Entry Points
+The smallest set of types, functions, registries, or factories
+worth reading first. Use Source Anchor syntax (see below).
 
 ## Main Flows
+No more than three concise paths from entry to output. Each
+flow: "<start symbol> → <end symbol> via <intermediates>".
 
-## Module Dependency Graph
+## Related Modules
+Direct relationships, each as a markdown link to the
+neighbour's module page (use the relative path).
 
-## Key Invariants
+## Where to Change
+Common change targets and the source or test area each lives in.
+
+## Source Anchors
+Repository-relative paths and symbol names. Each line is either:
+
+    - <relative/path/to/file.go>
+    - <relative/path/to/file.go>::<FuncName>
+    - <relative/path/to/file.go>::<TypeName>.<MethodName>
+
+Symbol names are best-effort; a missing symbol is a warning,
+not a failure (Wiki.md §12 "best-effort and language-aware").
+File paths are mandatory.
+
+Forbidden content:
+  - Complete exported API lists
+  - File-by-file line-count tables
+  - Long code excerpts
+  - Design intent not stated in code
+  - Coding rules duplicated from AGENTS.md
+  - [TBD] placeholders
 `
-}
 
-// glossarySkeleton returns the term reference page. Empty
-// table — populated by /wiki update as module docs surface
-// cross-package concepts. The 3-column header (Term /
-// Definition / Source) matches DeepWiki reference pages.
-func glossarySkeleton() string {
-	return `# Glossary
+const architectureContract = `## Architecture page contract
 
-| Term | Definition | Source |
-|---|---|---|
+Required headings (in order):
+
+# Architecture
+
+## Components
+Groups of major responsibilities, each linking to one or more
+module pages. Components do NOT redefine module identity — they
+cluster modules by role.
+
+## Entry Points
+Binaries, servers, workers, slash commands, plugin registries,
+and the source paths that anchor them.
+
+## Main Flows
+A small number of end-to-end paths (typically 2–5). Each flow
+names the start symbol, the end symbol, and the intermediates.
+
+## Dependency Direction
+Major dependencies present in code, stated as "A depends on B
+because <observable call sites / types>". Do not infer design
+intent.
+
+## Extension Points
+Interfaces, registration functions, factories, and adapters
+where new behaviour can be plugged in without modifying
+existing call sites.
+
+## Cross-cutting Concerns
+Error handling, persistence, concurrency, platform splits, and
+configuration hotspots — point at the module pages that own
+each.
+
+## Source Anchors
+Repository-relative paths and symbol names, same syntax as
+module pages.
+
+Forbidden content:
+  - ADRs or design rationale not in the code
+  - Speculation about why the design exists
+  - [TBD] placeholders
 `
-}
 
-// llmsTxtSkeletonWithModules returns the llms.txt v1.0 index
-// with the detected modules listed under "## Modules". Per
-// llmstxt.org spec, each entry is a markdown link; the
-// trailing ": description" is optional and omitted here
-// because /wiki init has no LLM-generated prose yet.
-//
-// Architecture and Reference sections stay populated from
-// day one so the file is a valid llms.txt the moment init
-// completes. /wiki update can later add a blockquote summary
-// and per-module descriptions once content exists.
-func llmsTxtSkeletonWithModules(projectName string, modules []moduleEntry) string {
+const quickstartContract = `## Quickstart page contract
+
+Required headings (in order):
+
+# Quickstart
+
+## Repository Rules
+Where the project's coding and workflow rules live (e.g.
+AGENTS.md). One short paragraph.
+
+## Development Setup
+The exact commands to get a working build (e.g. make build,
+make test). Derive from Makefile, package manifests, CI config,
+and development scripts. Do NOT invent commands.
+
+## Find the Relevant Code
+How to locate code for a coding task: directory conventions,
+discovery commands, common entry points. Reference the wiki
+itself (llms.txt is the discovery entry point).
+
+## Make a Focused Change
+How to scope a change to the right module pages (mention
+wiki.yml.pending and the /wiki regeneration cadence).
+
+## Verify
+The exact commands from the project's verify contract
+(formatting, test, lint, build). Do NOT repeat the README's
+end-user tutorial — that stays in README.
+
+Forbidden content:
+  - Product installation / end-user tutorials (those live in
+    README)
+  - Speculative workflow advice
+  - [TBD] placeholders
+`
+
+// rootIndex renders wiki/llms.txt (§6.1). project is the
+// display name; children is the slice of top-level source
+// areas to link under "## Areas". quickstart/architecture
+// are always linked from "## Start" when their pages exist.
+func rootIndex(project string, children []areaLink, quickstartPath, archPath string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n\n", projectName)
-	b.WriteString("## Architecture\n\n")
-	b.WriteString("- [Architecture Overview](./architecture.md)\n\n")
-	b.WriteString("## Modules\n")
-	if len(modules) > 0 {
-		for _, m := range modules {
-			// Label is the package basename, not the full path.
-			// Full path is conveyed by the link target; the
-			// label stays short so the index is scannable.
-			label := filepath.Base(strings.TrimSuffix(m.File, ".md"))
-			fmt.Fprintf(&b, "- [%s](./%s)\n", label, m.WikiRelPath)
+	fmt.Fprintf(&b, "# %s\n\n", project)
+
+	b.WriteString("> Generated by /wiki. Code is authoritative; verify against source before editing.\n\n")
+
+	b.WriteString("## Start\n\n")
+	b.WriteString("- [Quickstart](")
+	b.WriteString(quickstartPath)
+	b.WriteString("): Locate code and run repository verification.\n")
+	b.WriteString("- [Architecture](")
+	b.WriteString(archPath)
+	b.WriteString("): Cross-module components and main flows.\n\n")
+
+	b.WriteString("## Rules\n\n")
+	b.WriteString("- [Agent Instructions](../AGENTS.md): Build, test, style, and runtime constraints.\n\n")
+
+	if len(children) > 0 {
+		b.WriteString("## Areas\n\n")
+		for _, c := range children {
+			fmt.Fprintf(&b, "- [%s](%s): %s\n", c.Name, c.RelPath, c.Description)
 		}
 	}
-	b.WriteString("\n## Reference\n\n")
-	b.WriteString("- [Glossary](./glossary.md)\n")
 	return b.String()
 }
 
-// wikiYmlSkeletonWithModules renders the metadata file with
-// the detected module list pre-populated. Each entry holds
-// its source path, wiki file, and last_sha (null until the
-// first /wiki update commits generated content).
-//
-// agent is written as YAML null at init time — no flag
-// affects it. /wiki update records the agent it ran with
-// into wiki.yml on commit, which then becomes the default
-// for subsequent updates.
-//
-// include is always written (empty list by default) so
-// users know the field exists and can hand-edit wiki.yml
-// after init to force-include paths that .gitignore would
-// otherwise exclude. /wiki update reads this list at run
-// time; /wiki init itself does not consume it (init refuses
-// to re-run when wiki.yml already exists).
-//
-// Schema version 1: the first shipped schema. Bump on any
-// backwards-incompatible change to the modules[] shape.
-//
-// Location contract: this file lives at <cwd>/wiki.yml,
-// SIBLING to <cwd>/wiki/. NOT inside <cwd>/.nightme/.
-//
-// Reason: <cwd>/.nightme/ is for runtime-emitted, repo-local
-// config (mirrors ~/.nightme/gtw.yml). Those files are
-// optionally committed per team preference and are
-// regenerated freely. wiki.yml is different — it is a
-// FIRST-CLASS repo artifact, like README.md or go.mod: it
-// tracks the wiki's state (last_commit SHA, module roster,
-// schema version) and is meant to be committed and evolve
-// with the repo's history.
-//
-// Moving wiki.yml into <cwd>/.nightme/ would conflate the
-// two roles and cause /wiki update to silently re-run on
-// machines where .nightme/ was gitignored.
-func wikiYmlSkeletonWithModules(modules []moduleEntry) string {
+// areaLink is a child area entry in rootIndex or a directory
+// index. Description is rendered as the link's trailing text.
+type areaLink struct {
+	Name        string
+	RelPath     string
+	Description string
+}
+
+// dirIndex renders a directory llms.txt (§6.2). The "This
+// module" section is omitted when selfHasPage is false (the
+// directory contains no direct source files and only links to
+// children).
+func dirIndex(name, description string, selfHasPage bool, selfRelPath string, children []areaLink) string {
 	var b strings.Builder
-	b.WriteString("version: 1\n")
-	b.WriteString("last_commit: null\n")
-	b.WriteString("agent: null\n")
-	b.WriteString("include: []\n")
-	if len(modules) == 0 {
-		b.WriteString("modules: []\n")
-		return b.String()
+	fmt.Fprintf(&b, "# %s\n\n", name)
+	if description != "" {
+		fmt.Fprintf(&b, "> %s\n\n", description)
 	}
-	b.WriteString("modules:\n")
+
+	if selfHasPage {
+		b.WriteString("## This module\n\n")
+		fmt.Fprintf(&b, "- [Overview](%s): Direct contents of this directory.\n\n", selfRelPath)
+	}
+
+	if len(children) > 0 {
+		b.WriteString("## Children\n\n")
+		for _, c := range children {
+			fmt.Fprintf(&b, "- [%s](%s): %s\n", c.Name, c.RelPath, c.Description)
+		}
+	}
+	return b.String()
+}
+
+// emptyModulePage renders an empty-but-valid module page —
+// the §11.4 fallback when a prior agent run was interrupted
+// and the on-disk page already matches the contract shape but
+// contains no real content. Plan can finalize it without
+// re-dispatching when validation passes.
+func emptyModulePage(pkgPath string) string {
+	title := filepath.Base(pkgPath)
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n\n", title)
+	b.WriteString("> Stub module page. Purpose / Entry Points / Source Anchors pending.\n\n")
+	b.WriteString("## Purpose\n\n\n")
+	b.WriteString("## Entry Points\n\n\n")
+	b.WriteString("## Main Flows\n\n\n")
+	b.WriteString("## Related Modules\n\n\n")
+	b.WriteString("## Where to Change\n\n\n")
+	b.WriteString("## Source Anchors\n\n")
+	return b.String()
+}
+
+// buildHierarchicalIndexes walks the live module list and
+// produces deterministic llms.txt files at every directory
+// that owns or contains modules. Returns the list of paths
+// written (relative to repoRoot), for the final reply.
+//
+// §13 "Deterministic root and directory indexes rebuild on
+// every /wiki finalization, including no-op finalization." This
+// is the single rendering entry point.
+func buildHierarchicalIndexes(repoRoot string, yml *wikiYml) ([]string, error) {
+	written := make([]string, 0, 16)
+
+	live := liveModules(yml)
+	tree := buildAreaTree(live)
+
+	// Directory indexes: every directory that contains at
+	// least one module, plus the modules/ root if there are
+	// any live modules.
+	for dir, kids := range tree.byDir {
+		// Build child links for this directory.
+		var children []areaLink
+		for _, k := range kids {
+			children = append(children, areaLink{
+				Name:        filepath.Base(k),
+				RelPath:     indexRel(k),
+				Description: purposeFor(yml, k),
+			})
+		}
+		sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
+
+		selfHasPage := hasOwnPage(dir, live)
+		selfRel := indexRel(dir) + "/index.md"
+		body := dirIndex(
+			humanDirLabel(dir),
+			areaDescription(dir),
+			selfHasPage,
+			selfRel,
+			children,
+		)
+		out := filepath.Join(repoRoot, "wiki", "modules", indexRel(dir), "llms.txt")
+		if err := atomicWrite(out, body); err != nil {
+			return written, err
+		}
+		written = append(written, filepath.ToSlash(filepath.Join("wiki", "modules", indexRel(dir), "llms.txt")))
+	}
+
+	// Root llms.txt.
+	var rootKids []areaLink
+	for _, k := range tree.roots {
+		rootKids = append(rootKids, areaLink{
+			Name:        filepath.Base(k),
+			RelPath:     "modules/" + indexRel(k) + "/llms.txt",
+			Description: purposeFor(yml, k),
+		})
+	}
+	sort.Slice(rootKids, func(i, j int) bool { return rootKids[i].Name < rootKids[j].Name })
+
+	project := filepath.Base(repoRoot)
+	body := rootIndex(project, rootKids, "quickstart.md", "architecture.md")
+	rootOut := filepath.Join(repoRoot, "wiki", "llms.txt")
+	if err := atomicWrite(rootOut, body); err != nil {
+		return written, err
+	}
+	written = append(written, "wiki/llms.txt")
+
+	return written, nil
+}
+
+// areaTree is the result of grouping live modules by their
+// top-most source directory.
+type areaTree struct {
+	roots []string            // top-level area paths (depth-1 relative to repoRoot)
+	byDir map[string][]string // dir path → direct module paths
+}
+
+func buildAreaTree(modules []string) areaTree {
+	t := areaTree{byDir: map[string][]string{}}
 	for _, m := range modules {
-		fmt.Fprintf(&b, "  - path: %s\n", m.Path)
-		fmt.Fprintf(&b, "    file: %s\n", m.File)
-		b.WriteString("    last_sha: null\n")
-	}
-	return b.String()
-}
-
-// moduleDocSkeleton returns the per-package template page.
-// Section list mirrors DeepWiki's page_type=component convention.
-// H1 is the package basename — same as the wiki file's stem —
-// so the rendered filename `<stem>.md` opens with `# <stem>`.
-//
-// Empty bodies are honest signals. /wiki update replaces each
-// section wholesale rather than appending (AGENTS.md §1:
-// "rewrite, don't keep two versions side by side").
-func moduleDocSkeleton(pkgPath string) string {
-	title := "# " + filepath.Base(pkgPath) + "\n\n"
-
-	sections := []string{
-		"## Public Surface",
-		"## File Layout",
-		"## Key Flows",
-		"## Cross-cutting Patterns",
-		"## Non-obvious Choices",
-	}
-	var b strings.Builder
-	b.WriteString(title)
-	for _, s := range sections {
-		b.WriteString(s)
-		b.WriteString("\n\n")
-	}
-	return b.String()
-}
-
-// moduleDocStub returns the per-package page that /wiki
-// update writes when no LLM is available (or when the LLM
-// path is intentionally bypassed for testing). It reuses
-// moduleDocSkeleton's 5-section shape so the LLM path can
-// later fill the placeholders without restructuring the
-// file.
-//
-// What's filled in (real data from the source tree):
-//   - File Layout table — file name + line count
-//   - <!-- sources --> footer — every source file's relative
-//     path, mirroring DeepWiki's "minimum 5 source files per
-//     page" convention
-//
-// What's still placeholder:
-//   - Public Surface, Key Flows, Cross-cutting Patterns,
-//     Non-obvious Choices — each gets a single "[TBD — ...]"
-//     line so the LLM prompt template can grep for "TBD"
-//     and know what to expand. The bracketed hint reminds
-//     humans editing by hand what's expected.
-func moduleDocStub(pkgPath string, sources []sourceFile) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n\n", filepath.Base(pkgPath))
-	b.WriteString("> Stub generated by `/wiki update` (no LLM). Replace with LLM content on the next agent-driven update.\n\n")
-
-	b.WriteString("## Public Surface\n\n")
-	b.WriteString("[TBD — exported types and functions from this package]\n\n")
-
-	b.WriteString("## File Layout\n\n")
-	if len(sources) == 0 {
-		b.WriteString("[no source files detected]\n\n")
-	} else {
-		b.WriteString("| File | Lines |\n")
-		b.WriteString("|---|---|\n")
-		for _, s := range sources {
-			fmt.Fprintf(&b, "| `%s` | %d |\n", s.Name, s.Lines)
+		// Module belongs to its parent dir; the parent dir
+		// belongs to ITS parent, etc. We seed every directory
+		// along the path so dir indexes render even when the
+		// leaf has no own source files.
+		dir := filepath.Dir(m)
+		for dir != "." && dir != "/" {
+			t.byDir[dir] = append(t.byDir[dir], m)
+			dir = filepath.Dir(dir)
 		}
-		b.WriteString("\n")
 	}
-
-	b.WriteString("## Key Flows\n\n")
-	b.WriteString("[TBD — main user-facing flows in this package]\n\n")
-
-	b.WriteString("## Cross-cutting Patterns\n\n")
-	b.WriteString("[TBD — patterns observed across this package's source]\n\n")
-
-	b.WriteString("## Non-obvious Choices\n\n")
-	b.WriteString("[TBD — design decisions not obvious from reading the code]\n\n")
-
-	b.WriteString("<!-- sources -->\n")
-	for _, s := range sources {
-		fmt.Fprintf(&b, "- %s\n", s.RelPath)
+	for _, v := range t.byDir {
+		sort.Strings(v)
 	}
-	return b.String()
+	// Roots = directories with no parent in the tree.
+	hasParent := map[string]bool{}
+	for d := range t.byDir {
+		p := filepath.Dir(d)
+		if p != "." && p != "/" {
+			hasParent[d] = true
+		}
+	}
+	for d := range t.byDir {
+		if !hasParent[d] {
+			t.roots = append(t.roots, d)
+		}
+	}
+	sort.Strings(t.roots)
+	return t
 }
 
-// gitkeepContent is the placeholder that keeps
-// <cwd>/wiki/modules/ tracked by git when no module files
-// are generated (a non-Go repo with /wiki init would land
-// here). Empty content is conventional — git tracks the
-// file's existence, not its bytes.
-const gitkeepContent = ""
+func liveModules(yml *wikiYml) []string {
+	var out []string
+	for _, m := range yml.Modules {
+		if m.Removed {
+			continue
+		}
+		if m.Path == "" {
+			continue
+		}
+		out = append(out, m.Path)
+	}
+	return out
+}
+
+func purposeFor(yml *wikiYml, path string) string {
+	for _, m := range yml.Modules {
+		if m.Path == path {
+			if m.Purpose != "" {
+				return m.Purpose
+			}
+			return filepath.Base(path)
+		}
+	}
+	return filepath.Base(path)
+}
+
+func hasOwnPage(dir string, liveModules []string) bool {
+	for _, m := range liveModules {
+		if filepath.Dir(m) == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// indexRel turns a source-area path into the wiki-relative
+// path used by llms.txt links. Module paths map 1:1 to
+// `modules/<source-path>/index.md`.
+func indexRel(p string) string {
+	return filepath.ToSlash(p)
+}
+
+// humanDirLabel is the display name for a directory index. Falls
+// back to the basename; uses the full relative path when the
+// directory IS the root.
+func humanDirLabel(dir string) string {
+	if dir == "" || dir == "." {
+		return "/"
+	}
+	return dir
+}
+
+func areaDescription(dir string) string {
+	// Minimal descriptor; richer descriptions arrive from the
+	// architecture page once it's generated. Keeping this
+	// short avoids asking the LLM to author prose here.
+	return filepath.Base(dir) + " source area."
+}
+
+// scaffoldEmptyRecovery creates an empty wiki/ tree on disk
+// when the metadata says the wiki exists but wiki/ has gone
+// missing (§9 state-reconciliation row 2). The wiki.yml is
+// written by the caller after this returns.
+func scaffoldEmptyRecovery(repoRoot string, yml *wikiYml) error {
+	dirs := []string{
+		filepath.Join(repoRoot, "wiki"),
+		filepath.Join(repoRoot, "wiki", "modules"),
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	for _, m := range yml.Modules {
+		if m.Removed || m.Path == "" {
+			continue
+		}
+		out := filepath.Join(repoRoot, "wiki", "modules", m.File)
+		if err := atomicWrite(out, emptyModulePage(m.Path)); err != nil {
+			return err
+		}
+	}
+	return nil
+}

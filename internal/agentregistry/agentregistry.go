@@ -11,23 +11,26 @@
 // import runtime, but runtime is the daemon — moving it across
 // the CLI/daemon boundary is wrong).
 //
-// Selection rules (preserved from the original cmd/nightme/test.go
-// doc):
+// Selection rules:
 //
-//  1. Built-in starters (claudecode / codex / opencode / pi /
-//     acp / pty) are always registered first.
-//  2. cfg.Agents entries override builtins with the same name
-//     (the user's config wins). Each entry's Command is split
-//     with strings.Fields; the first token is the binary,
-//     the rest are args. The agent is registered as a PTY
-//     starter so the long-running daemon still has a TTY for
-//     its child CLIs (Claude Code / Codex / OpenCode all
-//     require one).
+//  1. Built-in starters (claudecode / codex / opencode / cursor /
+//     pi / copilot / dsh) are always registered first, in their
+//     Builtins order. They are the whitelist — no other names can
+//     become a primary agent.
+//
+//  2. cfg.Agents is consulted as a side lookup: for each
+//     registered built-in, look up `cfg.Agents[name]` and apply
+//     the override if present. Iteration is built-in-driven
+//     rather than config-driven so names outside the whitelist
+//     are never read — no warn-log, no silent PTY fallback. The
+//     user only configures the executable path; bridge / args /
+//     mode stay fixed by nightme.
+//
 //  3. If `requested` is non-empty AND not already in the
 //     registry, auto-register a bare-path agent when the file
-//     exists — so a typo surfaces as "agent not found" instead
-//     of a confusing exec error. (The CLI's `--agent /some/bin`
-//     path uses this.)
+//     exists — so a one-shot `nightme test --agent /some/bin`
+//     still works without polluting the production daemon's
+//     registry with user-defined agents.
 package agentregistry
 
 import (
@@ -40,38 +43,33 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 )
 
-// Build returns a Registry populated with the built-in
-// starters, every cfg.Agents entry, and an optional bare-path
-// agent named by `requested`. Pass requested="" to skip the
-// auto-register step (the long-running daemon's default —
-// `cfg.Primary` selects from the registered set rather than
+// Build returns a Registry populated with the built-in starters,
+// every applicable cfg.Agents path override, and an optional
+// bare-path agent named by `requested`. Pass requested="" to
+// skip the auto-register step (the long-running daemon's default
+// — `cfg.Primary` selects from the registered set rather than
 // auto-registering a bare path).
 func Build(cfg *config.Config, requested string) *agent.Registry {
 	reg := agent.New()
 	for _, a := range agent.Builtins.List() {
 		reg.Register(a)
 	}
+
 	if cfg != nil && len(cfg.Agents) > 0 {
-		for _, entry := range cfg.Agents {
-			if entry.Name == "" || entry.Command == "" {
-				continue
+		// Built-in driven: iterate over the registered starters,
+		// not over cfg.Agents. Names outside the whitelist are
+		// never even inspected — they simply have no matching
+		// built-in to apply to.
+		overrides := cfgPathMap(cfg.Agents)
+		for _, s := range reg.List() {
+			name := s.Info().Name
+			if path, ok := overrides[name]; ok {
+				agent.SetBuiltinCommand(reg, name, path)
 			}
-			// v1.2 schema: Command is the full command line
-			// (binary + args), e.g. "claude --dangerously-skip-permissions".
-			// Split with strings.Fields; first token is the binary.
-			fields := strings.Fields(entry.Command)
-			if len(fields) == 0 {
-				continue
-			}
-			a := pty.NewStarter(entry.Name, fields[0], fields[1:], nil, cfg.Session.DefaultPtyCols, cfg.Session.DefaultPtyRows)
-			reg.Register(a)
 		}
 	}
+
 	if _, err := reg.Get(requested); err != nil {
-		// Auto-register a bare-path agent when the caller passed
-		// a name that wasn't already in the registry. Only do
-		// this if the file exists so a typo surfaces as
-		// "agent not found" instead of a confusing exec error.
 		if requested != "" {
 			if _, statErr := os.Stat(requested); statErr == nil {
 				reg.Register(pty.NewStarter(requested, filepath.Base(requested), nil, nil, 0, 0))
@@ -79,4 +77,24 @@ func Build(cfg *config.Config, requested string) *agent.Registry {
 		}
 	}
 	return reg
+}
+
+// cfgPathMap flattens cfg.Agents into a name → path lookup. The
+// first whitespace-separated token of Command is the path;
+// trailing args are dropped (cfg.Agents is a path override, not
+// a recipe). Later entries with the same name overwrite earlier
+// ones.
+func cfgPathMap(entries []config.AgentEntry) map[string]string {
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.Name == "" || e.Command == "" {
+			continue
+		}
+		fields := strings.Fields(e.Command)
+		if len(fields) == 0 {
+			continue
+		}
+		out[e.Name] = fields[0]
+	}
+	return out
 }

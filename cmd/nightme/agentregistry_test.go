@@ -1,0 +1,145 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentregistry"
+	"github.com/cnlangzi/nightme/internal/config"
+)
+
+// fakeBinary writes a minimal shell script and returns its
+// absolute path.
+func fakeBinary(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write %s: %v", p, err)
+	}
+	return p
+}
+
+// TestBuild_BuiltinDrivenIgnoresUnknownNames is the core
+// "names outside the whitelist are silently discarded"
+// invariant. The loop is built-in driven: we iterate over the
+// registered starters and consult cfg.Agents as a side lookup,
+// so an entry whose name is not a built-in is never even
+// inspected — no warn, no PTY fallback, no alias.
+//
+// Lives in cmd/nightme because that's where the seven built-ins
+// register themselves via init() — agentregistry tests cannot
+// run standalone and still see Builtins populated.
+func TestBuild_BuiltinDrivenIgnoresUnknownNames(t *testing.T) {
+	tmp := t.TempDir()
+	bin := fakeBinary(t, tmp, "claude-override")
+	cfg := &config.Config{
+		Agents: []config.AgentEntry{
+			{Name: "claude", Command: bin},
+			{Name: "not-a-builtin", Command: "/some/path"},
+			{Name: "another-unknown", Command: "/another/path"},
+		},
+	}
+	reg := agentregistry.Build(cfg, "")
+
+	// Good entry: registered with override.
+	s, err := reg.Get("claude")
+	if err != nil {
+		t.Fatalf("Get(claude): %v", err)
+	}
+	if got := s.Info().Command; got != bin {
+		t.Errorf("Info.Command = %q, want %q", got, bin)
+	}
+
+	// Unknown entries: never read, never registered.
+	for _, name := range []string{"not-a-builtin", "another-unknown"} {
+		if _, err := reg.Get(name); err == nil {
+			t.Errorf("%q leaked into registry", name)
+		}
+	}
+
+	// Every other built-in is still there with its default
+	// (un-overridden) command.
+	seen := map[string]bool{}
+	for _, s := range reg.List() {
+		seen[s.Info().Name] = true
+	}
+	for _, want := range []string{"codex", "dsh", "opencode", "cursor", "pi", "copilot"} {
+		if !seen[want] {
+			t.Errorf("built-in %q missing from registry", want)
+		}
+	}
+}
+
+// TestBuild_CfgOverrideBuiltinPath overrides a built-in starter's
+// command path and verifies Detect resolves the new path.
+func TestBuild_CfgOverrideBuiltinPath(t *testing.T) {
+	tmp := t.TempDir()
+	bin := fakeBinary(t, tmp, "claude-override")
+	cfg := &config.Config{
+		Agents: []config.AgentEntry{
+			{Name: "claude", Command: bin},
+		},
+	}
+	reg := agentregistry.Build(cfg, "")
+	s, err := reg.Get("claude")
+	if err != nil {
+		t.Fatalf("Get(claude): %v", err)
+	}
+	if got := s.Info().Command; got != bin {
+		t.Errorf("Info.Command = %q, want %q", got, bin)
+	}
+}
+
+// TestBuild_CfgStripsTrailingArgs accepts the legacy schema's
+// full-command-line format ("binary --flag --flag") by taking
+// only the first whitespace-separated token.
+func TestBuild_CfgStripsTrailingArgs(t *testing.T) {
+	tmp := t.TempDir()
+	bin := fakeBinary(t, tmp, "codex-override")
+	cfg := &config.Config{
+		Agents: []config.AgentEntry{
+			{Name: "codex", Command: bin + " --some-flag --another"},
+		},
+	}
+	reg := agentregistry.Build(cfg, "")
+	s, err := reg.Get("codex")
+	if err != nil {
+		t.Fatalf("Get(codex): %v", err)
+	}
+	if got := s.Info().Command; got != bin {
+		t.Errorf("Info.Command = %q, want %q", got, bin)
+	}
+}
+
+// TestBuild_BarePathAutoRegister verifies that --agent /path/to/bin
+// still works: a non-builtin name that exists on disk auto-
+// registers as a PTY starter.
+func TestBuild_BarePathAutoRegister(t *testing.T) {
+	tmp := t.TempDir()
+	bin := fakeBinary(t, tmp, "echoish")
+	reg := agentregistry.Build(&config.Config{}, bin)
+	s, err := reg.Get(bin)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bin, err)
+	}
+	if got := s.Info().Command; !strings.Contains(got, filepath.Base(bin)) {
+		t.Errorf("Info.Command = %q, want contains %q", got, filepath.Base(bin))
+	}
+}
+
+// TestBuild_BarePathTypoNotRegistered verifies that an unknown
+// name without an on-disk counterpart is NOT registered, so
+// `nightme test --agent /typo` surfaces as "agent not found".
+func TestBuild_BarePathTypoNotRegistered(t *testing.T) {
+	reg := agentregistry.Build(&config.Config{}, "/nonexistent/typo")
+	if _, err := reg.Get("/nonexistent/typo"); err == nil {
+		t.Errorf("typo without on-disk counterpart was registered")
+	}
+}
+
+// silence unused-import warning when this file is built without
+// any test referencing agent directly.
+var _ = agent.New

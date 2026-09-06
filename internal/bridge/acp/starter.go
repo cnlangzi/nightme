@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -55,12 +54,18 @@ func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, s.env)
 }
 
-// Detect verifies the binary resolves on PATH. Called by Spawner
-// before Start; an error aborts session creation with a clear
-// "<binary> not found" message.
+// Detect verifies the configured command resolves to an invokable
+// binary (absolute path or PATH-relative name). Called by Spawner
+// before Start; an error aborts session creation.
 func (s *Starter) Detect() error {
-	_, err := exec.LookPath(s.command)
-	return err
+	return agent.ResolveCommand(s.command)
+}
+
+// SetCommand overrides the executable path used by Detect and
+// Info. cfg.Agents path overrides flow through
+// agent.SetBuiltinCommand.
+func (s *Starter) SetCommand(command string) {
+	s.command = command
 }
 
 // Start spawns the CLI under a PTY, runs the ACP initialize +

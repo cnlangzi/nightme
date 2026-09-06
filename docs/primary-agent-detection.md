@@ -1,8 +1,7 @@
-# Primary-Agent Auto-Detection
+# Primary-Agent Resolution, Built-in Whitelist, and First-Run Prompt
 
 > **Status**: implemented
-> **Scope**: `cfg.Primary` resolution chain, `internal/agent/registry.go` insertion order, `internal/bridge/pty` exclusion from `agent.Builtins`
-> **读者**: 参与 runtime / gateway / chatsession / agentregistry / config 的工程师;新增 builtin 的 bridge 维护者
+> **Scope**: `cfg.Primary` resolution chain, `internal/agent/registry.go` insertion order, `internal/bridge/pty` exclusion from `agent.Builtins`, `cfg.Agents` path-override semantics, `cmd/nightme/firstrun.go` interactive prompt
 > **Related docs**:
 > - [`SPEC.md`](./SPEC.md) §1.1 Primary Agent、§1.3 不变式
 > - [`feat/F-09-agent-abstraction.md`](./feat/F-09-agent-abstraction.md) 三层抽象(AgentSpec / Starter / Agent)
@@ -11,150 +10,176 @@
 
 ---
 
-## 1. TL;DR
+## 1. Resolution chain (`cfg.Primary`)
 
-启动期 `cfg.Primary` 不再硬编码 `"claude"`,而是在 **user config > `NIGHTME_PRIMARY` env > 注册顺序探测 > 空** 的解析链上自动决定。每个新 chat 仍把探测到的结果固化到磁盘 —— 下次启动不会重复探测,直到用户手动改 `primary:` 或删掉那一行。
+`LoadDefault` (`internal/config/config.go`) layers four sources, later wins:
 
-> 这一改动的根因是:用户机器上**可能根本没装 Claude**。继续写死 `"claude"` 会让 `chatstore.Bootstrap` 在第一次 inbound 时报 `need primaryAgent to create`,而 daemon 自己却没法帮用户修。探测 + 固化把"用户没装 Claude"和"用户装了一堆别的 CLI"两种情况都覆盖了。
+| # | Source | Mechanism |
+|---|--------|-----------|
+| 1 | `cfg.Primary` persisted in YAML | `Load(path)` → `yaml.Unmarshal` |
+| 2 | `NIGHTME_PRIMARY` env | `applyEnvOverrides` |
+| 3 | First built-in whose `Detect()` passes | `detectPrimaryFromBuiltins` |
+| 4 | Interactive first-run prompt | `cmd/nightme/firstrun.go::EnsureAgentAvailable` (when none of the above yields a working agent) |
 
----
-
-## 2. Resolution chain(`cfg.Primary` 怎么落地)
-
-`LoadDefault`(`internal/config/config.go:212`)按以下顺序解析,后者胜:
-
-| # | 来源 | 实现 | 备注 |
-|---|------|------|------|
-| 1 | **YAML 配置文件** `primary:` 行 | `Load(path)` 走 `yaml.Unmarshal` | 用户显式声明;空字符串也算"显式声明空" |
-| 2 | **`NIGHTME_PRIMARY` 环境变量** | `applyEnvOverrides`(`config.go:340`) | CI / 容器场景常用;空字符串**不覆盖**(实现见 `config.go:322` 的 `if v := ...; v != ""` 守卫) |
-| 3 | **`agent.Builtins.List()` 顺序探测** | `detectPrimaryFromBuiltins`(`config.go:262`) | 首个 `Detect()` 返回 `nil` 的 starter 胜出;命中即 `SaveDefault` 落盘 |
-| 4 | **空** `""` | 不写盘,直接 return | 由下游 `chatstore.Bootstrap` 兜底报错 |
+Steps 1–3 run inside `LoadDefault`. Step 4 runs at the entry point of `nightme run` and `nightme test` after the config has been loaded; it never re-reads disk on its own.
 
 ```text
-$ NIGHTME_PRIMARY=codex nightme start
-    ├─ yaml 缺 primary:        跳过 (1)
-    ├─ env PRIMARY=codex:      cfg.Primary = "codex"  ✓ 不探测
-    └─ SaveDefault?            否 (Primary 已经非空)
+$ NIGHTME_PRIMARY=codex nightme run
+    ├─ yaml primary: codex     ← step 1, no prompt
+    └─ Env overrides same value
 ```
 
 ```text
-$ # 全新安装,只装了 opencode
-$ nightme start
-    ├─ yaml 缺 primary:        跳过 (1)
-    ├─ env 未设:               跳过 (2)
-    ├─ Builtins.List() 探测:
-    │     claude    → Detect() error  ✗
-    │     codex     → Detect() error  ✗
-    │     dsh       → Detect() error  ✗
-    │     opencode  → Detect() nil     ✓ → cfg.Primary = "opencode"
-    └─ SaveDefault:            写 ~/.nightme/config.yaml(仅 primary: opencode)
+$ nightme run            # fresh install, only opencode on PATH
+    ├─ yaml: empty
+    ├─ env: unset
+    ├─ Builtins.List() probe:
+    │     claude   → error  ✗
+    │     codex    → error  ✗
+    │     dsh      → error  ✗
+    │     opencode → nil    ✓
+    ├─ cfg.Primary = "opencode"
+    └─ SaveDefault:         ~/.nightme/config.yaml (primary: opencode)
+```
+
+```text
+$ nightme run            # nothing on PATH, TTY attached
+    ├─ yaml: empty
+    ├─ env: unset
+    ├─ Builtins.List() probe: all fail
+    ├─ First-run prompt:
+    │     nightme: no AI coding agent found in PATH or cfg.Agents.
+    │     Supported built-ins:
+    │       [1] claude       not found
+    │       [2] codex        not found
+    │       ...
+    │     Enter a number to configure that agent's path, or q to abort:
+    │     > 1
+    │     Absolute path to claude binary (q to abort):
+    │     > /Users/me/.local/bin/claude
+    │     ✓ wrote primary=claude, cfg.Agents[claude]=/Users/me/.local/bin/claude
+    └─ cfg.Agents and cfg.Primary persisted
 ```
 
 ---
 
-## 3. Registration order = priority chain
+## 2. `cfg.Agents` is a path-override table, not an agent list
 
-`agent.Registry`(`internal/agent/registry.go:33-37`)用 map + `order []string` 双结构:
+Each entry is `{name, command}` where `name` MUST be a built-in (`claude / codex / dsh / opencode / cursor / pi / copilot`) and `command` is an absolute path to that binary. The bridge, mode, args, env, and protocol wiring stay fixed by nightme; the user only gets to point the binary at a non-PATH location.
+
+`agentregistry.Build` (`internal/agentregistry/agentregistry.go`) applies the overrides built-in-driven rather than config-driven:
 
 ```go
-type Registry struct {
-    mu      sync.RWMutex
-    entries map[string]Starter
-    order   []string  // 首次插入顺序,append-only
+overrides := cfgPathMap(cfg.Agents)
+for _, s := range reg.List() {           // every registered built-in
+    name := s.Info().Name
+    if path, ok := overrides[name]; ok { // consult config as a side lookup
+        agent.SetBuiltinCommand(reg, name, path)
+    }
 }
 ```
 
-`Register`(`registry.go:60-71`)在 entry 首次出现时 `append` 到 `order`;re-registration **不移动位置** —— 这是契约:`TestList_PreservesInsertionOrder` (`registry_test.go:111-160`) 是这条契约的回归锁。
+Iteration is over the registered built-ins, not over cfg.Agents. Names outside the whitelist are never read — no warn log, no PTY fallback, no silently aliased shell agent. The bridge surface (AskUserQuestion, tool events, ACP handshake) is too valuable to lose; users who want a shell wrapper go through `nightme test --agent /path/to/bin` (bare-path auto-register), which is explicitly a one-shot escape hatch rather than a primary.
 
-`List()`(`registry.go:84-95`)按 `order` 顺序遍历 `entries`。这意味着 **`cmd/nightme/agents.go` 的 `init()` 顺序就是探测优先级**:
+Legacy config that wrote a full command line (`command: claude --dangerously-skip-permissions`) keeps working: `strings.Fields` takes the first token as the path.
 
-```go
-// cmd/nightme/agents.go:35-105
-func init() {
-    agent.Builtins.Register(claudecode.NewStarter("claude", "claude", nil))    // line 39  ← 优先级 1
-    agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))          // line 46  ← 优先级 2
-    agent.Builtins.Register(dsh.NewStarter("dsh"))                            // line 65  ← 优先级 3
-    agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", ...)) // line 85  ← 优先级 4
-    agent.Builtins.Register(cursor.NewStarter("cursor", "cursor-agent", ...))  // line 97  ← 优先级 5
-    agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))                    // line 105 ← 优先级 6
-}
+---
+
+## 3. Built-in whitelist & registration order
+
+`cmd/nightme/agents.go::init` registers the seven built-ins in a fixed order. The order is the auto-detection priority chain when more than one resolves; new built-ins append to the end.
+
+```
+claude / codex / dsh / opencode / cursor / pi / copilot
 ```
 
-### 3.1 新增 builtin 的规则
+Append-only: `cmd/nightme/agents.go:7-11` doc explains why inserting a new entry earlier permanently shifts every existing user's auto-detection outcome.
 
-`cmd/nightme/agents.go:7-11` 的 doc 注释明确:**append to the END**。理由:
-
-- 把新 starter 插到中间会**永久**改变所有现有用户的探测优先级(如果他们两个都装了)。
-- 现有的顺序是 hand-curated —— `claude` / `codex` 是 v0.1 MVP 已有的,后续加入的(`opencode` / `cursor` / `pi`)按"实验性 → 主流"自然下沉。
-- 改探测优先级等同于改产品决策,不该是 side effect。
-
-### 3.2 `cursor` 那行的 binary 是 `cursor-agent`,不是 `cursor`
-
-`cursor.NewStarter("cursor", "cursor-agent", cursor.DefaultACPArgs)` 的第二个参数是 command(`exec.LookPath` 用的 binary 名),不是 name。Cursor CLI 安装后挂在 PATH 上的是 `cursor-agent` binary:bash installer (`curl https://cursor.com/install`) 在 `$HOME/.local/bin/cursor-agent` 创建 legacy symlink(主名 `agent`),PowerShell installer (`https://cursor.com/install?win32=true`) 在 `%LOCALAPPDATA%\cursor-agent\cursor-agent.cmd` 创建真实入口(并额外拷贝一份 `agent.cmd` 作为 alias)。Bridge 选 `cursor-agent` 是因为它是两个 installer 都创建的"真名字"",不依赖 installer 的 alias 创建逻辑。Builtin argv 是 `DefaultACPArgs`（`--force --trust --sandbox disabled --approve-mcps acp`）：parent 权限开关必须写在 `acp` 前面，`cursor-agent acp --force` 会被 acp 子命令忽略。
+`cursor` uses binary name `cursor-agent`, not `cursor`, because the official installers (bash and PowerShell variants) both create `cursor-agent` as the real entry-point and only optionally alias it.
 
 ---
 
-## 4. Why PTY is not in Builtins
+## 4. `Detect()` now resolves absolute paths too
 
-`internal/bridge/pty` 是 **shared infrastructure**,不是 user-facing agent。早期版本(`cmd/nightme/agents.go:107-116`,已删除)把它作为 `"bash"` 注册到 `agent.Builtins`,但用户心智模型里 "primary agent" 指的是 AI coding CLI,不是 shell fallback。
+Every built-in starter's `Detect()` was rewritten as:
 
-`internal/bridge/pty` 现在的角色:
+```go
+return agent.ResolveCommand(s.command)
+```
 
-1. **claudecode 的 PTY 兜底**:`agentregistry.Build`(`internal/agentregistry/agentregistry.go:64`)在为 `cfg.Agents` 条目构造 PTY starter 时直接 `pty.NewStarter(...)`,不经过 `agent.Builtins`。
-2. **claudecode / opencode 等 bridge 内部**:各自的 driver 需要 PTY transport 时 `import "internal/bridge/pty"` 直接用,不通过 registry 间接。
-3. **用户显式声明**:`cfg.Agents` 里写 `- name: bash / command: bash` 仍可用(走 agentregistry 那条 PTY 路径)。
+`ResolveCommand` (`internal/agent/commandpath.go`) prefers `os.Stat` for absolute paths and falls back to `exec.LookPath` for relative names. This is what makes the cfg.Agents override actually work: a non-PATH absolute path is stat-checked, not searched.
 
-把 pty 从 `agent.Builtins` 移走**不影响**以上任何一条 —— 它们本来就不依赖 `Builtins` 看到 `bash`。删掉之后:
-
-- `nightme agents` 不再列 `bash`(符合预期)。
-- 自动探测不会因为 `/bin/bash` 几乎总存在而错误地把 bash 当成 primary。
-- `/use bash` 不再是合法命令(用户报错信息更明确:unknown agent)。
+`SetBuiltinCommand` (`internal/agent/commandpath.go`) is the seam cfg.Agents overrides flow through. It mutates the registered `*Starter` (a singleton held in `agent.Builtins`), so subsequent `Detect()` and `Info()` reflect the new path.
 
 ---
 
-## 5. Detection failure semantics
+## 5. First-run prompt (`cmd/nightme/firstrun.go`)
 
-`detectPrimaryFromBuiltins`(`internal/config/config.go:262-271`)全失败 → 返回 `""`,`LoadDefault` **不写盘**,`cfg.Primary == ""`。
+`EnsureAgentAvailable(cfg, in, out)` runs at the top of `nightme run` and `nightme test`. Decision tree:
 
-后续路径:
+```
+load cfg
+    │
+    ▼
+probe every built-in (cfg.Agents overrides applied)
+    │
+    ├─ cfg.Primary resolves ─────────► return nil
+    │
+    ├─ at least one built-in resolves ► auto-pick first, save, return nil
+    │
+    ├─ no TTY / NIGHTME_NO_PROMPT=1 ──► return errNoAgentConfigured
+    │
+    └─ otherwise ─────────────────────► firstrunPrompt(in, out):
+                                           list built-ins with status
+                                           read agent choice
+                                           promptAgentPath loop:
+                                               absolute, file exists, ResolveCommand OK
+                                           applyAgentOverride + SaveDefault
+                                           cfg.Primary = picked
+```
 
-1. **Daemon 启动**(`internal/runtime/runtime.go:429`):`buildStackOpts.primaryAgent = cfg.Primary` 是空字符串。
-2. **第一次 inbound 进来**:`Manager.GetOrCreate`(`internal/chatsession/manager.go:225`)→ `constructChatSession` → `chatstore.Bootstrap(chatID, "")`。
-3. `chatstore.Bootstrap`(`internal/chatstore/store.go:217-244`)在 entry 不存在且 `primaryAgent == ""` 时显式报错:
+`firstrunPrompt` validates the user-supplied path before saving: `os.Stat` (must be a regular file) plus `agent.ResolveCommand` (must resolve to an invokable binary). On success it writes a single `cfg.Agents` entry and sets `cfg.Primary` in one `SaveDefault`.
 
-   ```
-   chatstore: chatID not on disk; need primaryAgent to create
-   ```
-
-4. inbound dispatcher 把错误转发给 channel,用户看到一条提示。
-
-我们**故意**不写空 `primary: ""` 到磁盘 —— 让用户能继续手工编辑文件 / 安装新 agent,下次启动再试一次。如果写了空串,反而需要新增"清空 Primary"的反向操作。
-
----
-
-## 6. Code map(改动文件 + 行号)
-
-| 文件 | 关键位置 | 改动 |
-|------|---------|------|
-| `internal/agent/registry.go` | `Registry` struct (33-37);`Register` (60-71);`List` (84-95) | 新增 `order []string`,`List` 按 order 返回 |
-| `internal/config/config.go` | `LoadDefault` (212-241);`detectPrimaryFromBuiltins` (262-271);`applyDefaults` (289-...) | 删 `c.Primary = "claude"` 写死,改 LoadDefault 末尾探测 |
-| `cmd/nightme/agents.go` | init (35-105);doc 注释 (1-32) | 删 `pty.NewStarter("bash", ...)` + `runtime` import;doc 注释加 "PTY 不是 builtin" 说明 |
-| `cmd/nightme/agents_cmd.go` | `runAgents` (77-95);`printAgentsTable` (130-150);doc 注释 (1-29) | 删 `if defaultName == "" { defaultName = "claude" }` 兜底;footer 直接透传 `cfg.Primary` |
-| `internal/agent/registry_test.go` | `TestList_PreservesInsertionOrder` (新增) | 锁住插入顺序契约 |
-| `internal/config/config_test.go` | `TestDefaults` / `TestMissingFile` (改 expect);`TestLoadDefault_AutoDetectsPersistsAndIsIdempotent` (新增) | 验空 + 验持久化幂等 |
+`canPrompt` returns false when stdin is not a TTY OR `NIGHTME_NO_PROMPT=1` is set. CI / container invocations that hit the all-fail branch surface `errNoAgentConfigured` verbatim rather than hanging on a read.
 
 ---
 
-## 7. Cross-cutting impact check
+## 6. Why PTY is not in Builtins
 
-`cfg.Primary` 的旧 default 行为变更影响到的所有代码路径:
+`internal/bridge/pty` is shared infrastructure for the bridges that need a PTY transport, and for the one-shot bare-path agent case (`nightme test --agent /path/to/bin`). It is NOT a user-facing agent. Putting `"bash"` into `agent.Builtins` would auto-resolve on every Unix box and silently claim the `bash` primary slot, which is wrong on every level:
 
-| 调用方 | 影响 | 状态 |
-|--------|------|------|
-| `cmd/nightme/agents_cmd.go::runAgents` | footer 直接透传 `cfg.Primary`,空时省略 | 改 |
-| `internal/runtime/runtime.go:429,581` | 透传给 `WithPrimaryAgent`;空时 `chatstore.Bootstrap` 报错 | 不改(行为已正确) |
-| `internal/chatsession/manager.go::GetOrCreate` | `constructChatSession` 的 `primaryAgent` 参数空时 `Bootstrap` 报错 | 不改 |
-| `internal/chatsession/chatsession.go::New` | `selectedAgent` / `primaryAgent` 都从构造参数取 | 不改 |
-| `chatstore.Bootstrap` | 空 primary 报错 | 不改(就是兜底) |
+- The primary agent should be an AI coding CLI, not a shell.
+- `nightme agents` would list `bash` as a usable agent.
+- Auto-detection would never get past the first probe.
 
-所有路径都已被新行为覆盖,没有需要补的 failure mode。
+The whitelist keeps pty out. Bare-path auto-register still works for one-off testing.
+
+---
+
+## 7. Non-interactive bail-out contract
+
+`errNoAgentConfigured` is the canonical "no agent available" error. Its message embeds the remediation hint:
+
+```
+no AI coding agent available; install one of the built-ins
+(claude / codex / dsh / opencode / cursor / pi / copilot) or set
+cfg.Agents to override its path, then retry
+```
+
+`nightme run` and `nightme test` propagate this verbatim to stderr and exit non-zero. CI smoke tests assert on the string and the exit code.
+
+---
+
+## 8. Code map
+
+| File | Role |
+|------|------|
+| `internal/agent/commandpath.go` | `ResolveCommand` (absolute vs PATH), `CommandSetter` interface, `SetBuiltinCommand` |
+| `internal/agent/registry.go` | `Builtins` package var, registration helpers |
+| `internal/agentregistry/agentregistry.go` | `Build(cfg, requested)` — whitelist enforcement + path overrides + bare-path escape hatch |
+| `internal/config/config.go` | `LoadDefault` (steps 1–3), `detectPrimaryFromBuiltins` |
+| `cmd/nightme/firstrun.go` | `EnsureAgentAvailable`, `firstrunPrompt`, `promptAgentPath`, `applyAgentOverride`, `removeAgentOverride` |
+| `cmd/nightme/run.go` | Pre-flight `EnsureAgentAvailable` before `runtime.Runner.Run` |
+| `cmd/nightme/test.go` | Same pre-flight before `agentregistry.Build` |
+| `cmd/nightme/config.go` | `[2] Agents` interactive menu — built-in list with status, sub-menu for set-primary / change-path / remove-override |
+| `cmd/nightme/agents.go` | Built-in registration (`init`) |

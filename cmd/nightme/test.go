@@ -87,6 +87,10 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 	// persistence wiring (csFile / asFile) can be added here
 	// without changing the test's public surface.
 
+	if err := EnsureAgentAvailable(cfg, bufio.NewReader(os.Stdin), cmd.OutOrStdout()); err != nil {
+		return err
+	}
+
 	agentReg := agentregistry.Build(cfg, f.agentName)
 
 	spawner := chatsession.NewRegistrySpawner(agentReg)

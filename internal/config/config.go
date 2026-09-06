@@ -169,27 +169,31 @@ type SlackRateLimitConfig struct {
 // Kept as a comment placeholder so PR reviewers see the explicit
 // removal. Delete on next doc pass.
 
-// AgentEntry is the spawn recipe for one CLI.
+// AgentEntry is a path override for one built-in agent.
 //
-// v1.2: minimal schema — only name, bridge, command. The `command`
-// field is the full command line (binary + args) as a single string,
-// e.g. "claude --dangerously-skip-permissions". Args / Env from the
-// previous schema were removed; users put extras in the command
-// string or rely on the inherited shell environment.
+// v1.2 schema: name / bridge / command. The whitelist rule is
+// enforced at agentregistry.Build time — `name` MUST be a built-in
+// (claude / codex / dsh / opencode / cursor / pi / copilot); any
+// other value is logged and dropped, never silently aliased to a
+// PTY shell.
+//
+// `bridge` is set automatically from `name` by nightme and is
+// preserved only for schema round-trip stability; users do not
+// configure it.
+//
+// `command` is the absolute path to the agent binary. Legacy
+// configs that wrote a full command line (`"claude --foo"`) keep
+// working — strings.Fields takes the first token as the path and
+// discards the rest. Args, env, mode, and protocol flags all stay
+// fixed by nightme.
 type AgentEntry struct {
-	// Name is the agent identifier used at spawn time and in
-	// `nightme agents` listings.
+	// Name is the agent identifier (must match a built-in).
 	Name string `yaml:"name"`
 
-	// Bridge selects the Bridge backend (claude / codex / opencode).
-	// Names match the registered Starter's Info().Name values.
-	// trigger errors at session-create time.
+	// Bridge is set by nightme from name; user input is ignored.
 	Bridge string `yaml:"bridge"`
 
-	// Command is the full command line (executable + args). Parsed
-	// with shell-style splitting at spawn time, e.g.
-	// `"claude --dangerously-skip-permissions"` becomes
-	// []string{"claude", "--dangerously-skip-permissions"}.
+	// Command is the absolute path to the agent binary.
 	Command string `yaml:"command"`
 }
 

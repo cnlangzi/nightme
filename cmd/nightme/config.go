@@ -18,13 +18,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/config"
-	"github.com/cnlangzi/nightme/internal/pathutil"
+	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 )
 
 func newConfigCmd() *cobra.Command {
@@ -120,20 +121,20 @@ func configAgentsMenu(cfg *config.Config, in *bufio.Reader, out io.Writer) error
 	}
 }
 
-// cfgPathMap flattens cfg.Agents into a name → path map. Strips
-// any trailing args from the command string so the path column
-// always shows the executable only.
+// cfgPathMap flattens cfg.Agents into a name → path map. The
+// Command string is taken verbatim after TrimSpace — the
+// schema is "absolute path to one binary", not "command line".
+// Splitting on whitespace would mangle Windows paths with
+// spaces (`C:\Program Files\claude\claude.exe` → `C:\Program`).
 func cfgPathMap(cfg *config.Config) map[string]string {
 	out := make(map[string]string, len(cfg.Agents))
 	for _, e := range cfg.Agents {
 		if e.Name == "" || e.Command == "" {
 			continue
 		}
-		fields := strings.Fields(e.Command)
-		if len(fields) == 0 {
-			continue
+		if path := strings.TrimSpace(e.Command); path != "" {
+			out[e.Name] = path
 		}
-		out[e.Name] = fields[0]
 	}
 	return out
 }
@@ -226,6 +227,13 @@ func saveOrError(cfg *config.Config, out io.Writer) error {
 		return fmt.Errorf("save: %w", err)
 	}
 	fmt.Fprintf(out, "✓ saved to %s\n", config.DefaultPath())
+	// If a daemon is running, its in-memory cfg.Primary and
+	// Builtins singletons (cfg.Agents overrides) are now stale.
+	// The user must restart it for these changes to apply.
+	paths, _ := daemoncontrol.ResolvePaths(cfg.Paths.DataDir)
+	if running, _ := daemoncontrol.Ping(paths.Socket, 2*time.Second); running {
+		fmt.Fprintln(out, "⚠ daemon is running — restart it for these changes to take effect")
+	}
 	return nil
 }
 
@@ -288,11 +296,4 @@ func readLine(br *bufio.Reader) string {
 		return ""
 	}
 	return strings.TrimRight(line, "\r\n")
-}
-
-// ensureParentDir is a small helper for code paths that write files
-// outside the standard config.Save path. Exported for test use.
-func ensureParentDir(path string) error {
-	dir := pathutil.Dir(path)
-	return os.MkdirAll(dir, 0o700)
 }

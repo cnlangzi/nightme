@@ -85,6 +85,9 @@ func TestEnsureAgentAvailable_FirstrunPromptSucceeds(t *testing.T) {
 	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
 	t.Setenv("NIGHTME_CONFIG", cfgPath)
 	t.Setenv("PATH", t.TempDir())
+	// Test runner's stdin is a pipe (non-TTY); NIGHTME_PROMPT
+	// forces the firstrun prompt so the test can drive it.
+	t.Setenv("NIGHTME_PROMPT", "1")
 
 	bin := filepath.Join(tmp, "my-claude")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {

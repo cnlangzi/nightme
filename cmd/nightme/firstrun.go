@@ -79,7 +79,7 @@ func EnsureAgentAvailable(cfg *config.Config, in *bufio.Reader, out io.Writer) e
 		return nil
 	}
 
-	if !canPrompt(in) {
+	if !canPrompt() {
 		return errNoAgentConfigured
 	}
 	return firstrunPrompt(cfg, probe, in, out)
@@ -103,45 +103,28 @@ func probeBuiltins(cfg *config.Config) (map[string]error, []string) {
 	return probe, detected
 }
 
-// canPrompt reports whether the underlying stdin is a TTY and the
-// user has not set NIGHTME_NO_PROMPT to force non-interactive
-// behaviour. Tests wrap a bytes.Buffer or *strings.Reader with
-// bufio.NewReader; those are treated as interactive so the prompt
-// runs (the test drives the input).
-func canPrompt(in *bufio.Reader) bool {
+// canPrompt reports whether stdin is a TTY and the user has not
+// set NIGHTME_NO_PROMPT to force non-interactive behaviour.
+//
+// The TTY check reads os.Stdin directly — wrapping it in
+// bufio.Reader hides the underlying file and a previous
+// "bufio.Reader.Unwrap" approach silently returned true for
+// every caller, hanging the firstrun prompt on non-TTY
+// sessions (CI / docker / supervisor). Tests that drive the
+// prompt over a synthetic reader set NIGHTME_PROMPT=1 to
+// bypass the TTY check.
+func canPrompt() bool {
 	if os.Getenv("NIGHTME_NO_PROMPT") != "" {
 		return false
 	}
-	if in == nil {
+	if os.Getenv("NIGHTME_PROMPT") != "" {
+		return true
+	}
+	info, err := os.Stdin.Stat()
+	if err != nil {
 		return false
 	}
-	// bufio.NewReader hides the underlying source; for the
-	// non-TTY bail-out we only check os.Stdin directly. Tests
-	// typically want the prompt, so non-Stdin readers default to
-	// interactive.
-	if f, ok := unwrapFile(in); ok {
-		info, err := f.Stat()
-		if err != nil {
-			return false
-		}
-		return (info.Mode() & os.ModeCharDevice) != 0
-	}
-	return true
-}
-
-// unwrapFile peels off the bufio.Reader wrapper to recover the
-// underlying *os.File, if any. Other sources (bytes.Buffer,
-// strings.Reader) are treated as non-TTY and get the default
-// "interactive" path.
-func unwrapFile(br *bufio.Reader) (*os.File, bool) {
-	type unwrapper interface{ Unwrap() *os.File }
-	// bufio.Reader does not implement Unwrap, so this branch
-	// always fails — the helper exists so future wrappers (e.g.
-	// a custom linereader) can opt in.
-	if u, ok := any(br).(unwrapper); ok {
-		return u.Unwrap(), true
-	}
-	return nil, false
+	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
 func firstrunPrompt(cfg *config.Config, probe map[string]error, in *bufio.Reader, out io.Writer) error {
@@ -237,10 +220,6 @@ func promptAgentPath(name string, in *bufio.Reader, out io.Writer) (string, erro
 			fmt.Fprintf(out, "Path must be absolute: %s\n", pathLine)
 			continue
 		}
-		if err := validateAbsolutePath(pathLine); err != nil {
-			fmt.Fprintln(out, err.Error())
-			continue
-		}
 		if err := agent.ResolveCommand(pathLine); err != nil {
 			fmt.Fprintf(out, "Detect failed: %v\n", err)
 			continue
@@ -249,16 +228,7 @@ func promptAgentPath(name string, in *bufio.Reader, out io.Writer) (string, erro
 	}
 }
 
-// validateAbsolutePath confirms path points at a regular file.
-func validateAbsolutePath(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return fmt.Errorf("%s is a directory, not a binary", path)
-	}
-	return nil
-}
+// validateAbsolutePath was removed — agent.ResolveCommand
+// does the same Stat + IsDir check in one call.
 
 var errPromptAborted = errors.New("aborted by user")

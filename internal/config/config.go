@@ -181,11 +181,11 @@ type SlackRateLimitConfig struct {
 // preserved only for schema round-trip stability; users do not
 // configure it.
 //
-// `command` is the absolute path to the agent binary. Legacy
-// configs that wrote a full command line (`"claude --foo"`) keep
-// working — strings.Fields takes the first token as the path and
-// discards the rest. Args, env, mode, and protocol flags all stay
-// fixed by nightme.
+// `command` is the absolute path to the agent binary, taken
+// verbatim (no whitespace splitting). Bridge args / env / mode /
+// protocol flags stay fixed by nightme. Paths with spaces
+// (Windows: `C:\Program Files\claude\claude.exe`) work because
+// the string is not tokenised.
 type AgentEntry struct {
 	// Name is the agent identifier (must match a built-in).
 	Name string `yaml:"name"`

@@ -93,24 +93,33 @@ func TestBuild_CfgOverrideBuiltinPath(t *testing.T) {
 	}
 }
 
-// TestBuild_CfgStripsTrailingArgs accepts the legacy schema's
-// full-command-line format ("binary --flag --flag") by taking
-// only the first whitespace-separated token.
-func TestBuild_CfgStripsTrailingArgs(t *testing.T) {
+// TestBuild_CfgPreservesSpacesInPath locks the Windows-path-with-
+// spaces invariant: cfg.Agents.Command is taken verbatim (after
+// trim), not whitespace-split. Splitting would turn
+// `C:\Program Files\claude\claude.exe` into `C:\Program` and
+// silently fail to Detect.
+func TestBuild_CfgPreservesSpacesInPath(t *testing.T) {
 	tmp := t.TempDir()
-	bin := fakeBinary(t, tmp, "codex-override")
+	parent := tmp + "/Program Files"
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bin := parent + "/claude-fake"
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
 	cfg := &config.Config{
 		Agents: []config.AgentEntry{
-			{Name: "codex", Command: bin + " --some-flag --another"},
+			{Name: "claude", Command: bin},
 		},
 	}
 	reg := agentregistry.Build(cfg, "")
-	s, err := reg.Get("codex")
+	s, err := reg.Get("claude")
 	if err != nil {
-		t.Fatalf("Get(codex): %v", err)
+		t.Fatalf("Get(claude): %v", err)
 	}
 	if got := s.Info().Command; got != bin {
-		t.Errorf("Info.Command = %q, want %q", got, bin)
+		t.Errorf("Info.Command = %q, want %q (path with space was mangled)", got, bin)
 	}
 }
 

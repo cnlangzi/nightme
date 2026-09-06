@@ -22,6 +22,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/cnlangzi/nightme/internal/agentregistry"
@@ -61,17 +62,16 @@ func renderAgentsTable(w io.Writer, cfg *config.Config) {
 }
 
 // resolveAgentCommand renders the COMMAND cell for one row. cfg
-// overrides win when present; otherwise absolute configured paths
-// render verbatim and relative names go through LookPath so the
-// user sees exactly what Detect would use.
+// overrides win when present (verbatim, after trim); otherwise
+// absolute configured paths render verbatim and relative names go
+// through LookPath so the user sees exactly what Detect would use.
 func resolveAgentCommand(configured string, cfg *config.Config, name string, detectErr error) string {
 	for _, e := range cfg.Agents {
 		if e.Name != name || e.Command == "" {
 			continue
 		}
-		fields := splitFields(e.Command)
-		if len(fields) > 0 {
-			return fields[0]
+		if path := strings.TrimSpace(e.Command); path != "" {
+			return path
 		}
 	}
 	if filepath.IsAbs(configured) {
@@ -81,29 +81,6 @@ func resolveAgentCommand(configured string, cfg *config.Config, name string, det
 		return resolved
 	}
 	return configured
-}
-
-// splitFields is the inlined strings.Fields — kept local so this
-// file doesn't pull in agentregistry just for one helper.
-func splitFields(s string) []string {
-	var out []string
-	start := -1
-	for i, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			if start >= 0 {
-				out = append(out, s[start:i])
-				start = -1
-			}
-			continue
-		}
-		if start < 0 {
-			start = i
-		}
-	}
-	if start >= 0 {
-		out = append(out, s[start:])
-	}
-	return out
 }
 
 // quoteArgs joins an arg slice into a single space-separated

@@ -81,7 +81,7 @@ for _, s := range reg.List() {           // every registered built-in
 
 Iteration is over the registered built-ins, not over cfg.Agents. Names outside the whitelist are never read — no warn log, no PTY fallback, no silently aliased shell agent. The bridge surface (AskUserQuestion, tool events, ACP handshake) is too valuable to lose; users who want a shell wrapper go through `nightme test --agent /path/to/bin` (bare-path auto-register), which is explicitly a one-shot escape hatch rather than a primary.
 
-Legacy config that wrote a full command line (`command: claude --dangerously-skip-permissions`) keeps working: `strings.Fields` takes the first token as the path.
+`cfgPathMap` stores the path verbatim (trimmed, not whitespace-split) so Windows paths with spaces (`C:\Program Files\claude\claude.exe`) round-trip unchanged. Args / env / mode / protocol flags are not user-configurable here — they're fixed by the bridge.
 
 ---
 

@@ -79,22 +79,23 @@ func Build(cfg *config.Config, requested string) *agent.Registry {
 	return reg
 }
 
-// cfgPathMap flattens cfg.Agents into a name → path lookup. The
-// first whitespace-separated token of Command is the path;
-// trailing args are dropped (cfg.Agents is a path override, not
-// a recipe). Later entries with the same name overwrite earlier
-// ones.
+// cfgPathMap flattens cfg.Agents into a name → path lookup.
+// Command is treated verbatim (after trimming) — the schema is
+// "absolute path to one binary", not "command line". This
+// matters on Windows where paths routinely contain spaces
+// (`C:\Program Files\claude\claude.exe`); whitespace-splitting
+// would truncate the path at the first space.
 func cfgPathMap(entries []config.AgentEntry) map[string]string {
 	out := make(map[string]string, len(entries))
 	for _, e := range entries {
 		if e.Name == "" || e.Command == "" {
 			continue
 		}
-		fields := strings.Fields(e.Command)
-		if len(fields) == 0 {
+		path := strings.TrimSpace(e.Command)
+		if path == "" {
 			continue
 		}
-		out[e.Name] = fields[0]
+		out[e.Name] = path
 	}
 	return out
 }

@@ -76,12 +76,19 @@ func (s *Starter) Detect() error {
 	return agent.ResolveCommand(s.command)
 }
 
-// SetCommand overrides the executable path used by Detect and
+// Init overrides the executable path used by Detect and
 // Info. cfg.Agents path overrides flow through
-// agent.SetBuiltinCommand.
-func (s *Starter) SetCommand(command string) {
+// agentregistry.Build. The mutation hits the singleton
+// held in agent.Builtins; tests that exercise cfg.Agents
+// overrides should snapshot and restore via Command().
+func (s *Starter) Init(command string) {
 	s.command = command
 }
+
+// Command returns the current executable path. Used by tests
+// to snapshot Builtins state before mutations from
+// agentregistry.Build.
+func (s *Starter) Command() string { return s.command }
 
 // Start acquires a session on the shared dsh host. It does NOT spawn
 // a new dsh subprocess — that's cmd/nightme/main.go's responsibility,

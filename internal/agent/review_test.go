@@ -21,6 +21,8 @@ type fakeStarter struct {
 
 func (f *fakeStarter) Info() Info { return NewInfo(f.name, f.mode, "fake-cmd", nil, nil) }
 func (f *fakeStarter) Detect() error { return nil }
+func (f *fakeStarter) Init(string) {}
+func (f *fakeStarter) Clone() Starter { return &fakeStarter{name: f.name, mode: f.mode, runOnce: f.runOnce} }
 func (f *fakeStarter) Start(context.Context, StartConfig) (*Agent, error) {
 	return nil, errors.New("fakeStarter: Start not implemented")
 }

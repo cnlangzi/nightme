@@ -1,32 +1,27 @@
 // Package agentregistry — build an agent.Registry from a
 // config.Config.
 //
-// This package exists as a neutral home for the
-// Builtins + cfg.Agents + bare-path-auto-register logic that
-// both the CLI's `nightme test` subcommand and the long-running
-// daemon (internal/runtime) need. It cannot live in
-// internal/agent (the package imports bridge/pty, but
-// bridge/pty already imports internal/agent — cycle) and it
-// cannot live in internal/runtime (cmd/nightme would have to
-// import runtime, but runtime is the daemon — moving it across
-// the CLI/daemon boundary is wrong).
+// This package exists as a neutral home for the Builtins +
+// bare-path-auto-register logic that both the CLI's `nightme
+// test` subcommand and the long-running daemon
+// (internal/runtime) need. It cannot live in internal/agent
+// (the package imports bridge/pty, but bridge/pty already
+// imports internal/agent — cycle) and it cannot live in
+// internal/runtime (cmd/nightme would have to import runtime,
+// but runtime is the daemon — moving it across the CLI/daemon
+// boundary is wrong).
 //
 // Selection rules:
 //
-//  1. Built-in starters (claudecode / codex / opencode / cursor /
-//     pi / copilot / dsh) are always registered first, in their
-//     Builtins order. They are the whitelist — no other names can
-//     become a primary agent.
+//  1. For each registered built-in starter (claudecode / codex /
+//     dsh / opencode / cursor / pi / copilot), look up
+//     cfg.Agents[name]. If present, apply the override to the
+//     singleton (Init) before Register. Names outside the
+//     whitelist are never read — they have no matching
+//     built-in to apply to, so the merge is implicitly
+//     restricted to the seven shipped bridges.
 //
-//  2. cfg.Agents is consulted as a side lookup: for each
-//     registered built-in, look up `cfg.Agents[name]` and apply
-//     the override if present. Iteration is built-in-driven
-//     rather than config-driven so names outside the whitelist
-//     are never read — no warn-log, no silent PTY fallback. The
-//     user only configures the executable path; bridge / args /
-//     mode stay fixed by nightme.
-//
-//  3. If `requested` is non-empty AND not already in the
+//  2. If `requested` is non-empty AND not already in the
 //     registry, auto-register a bare-path agent when the file
 //     exists — so a one-shot `nightme test --agent /some/bin`
 //     still works without polluting the production daemon's
@@ -43,30 +38,28 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 )
 
-// Build returns a Registry populated with the built-in starters,
-// every applicable cfg.Agents path override, and an optional
-// bare-path agent named by `requested`. Pass requested="" to
-// skip the auto-register step (the long-running daemon's default
-// — `cfg.Primary` selects from the registered set rather than
-// auto-registering a bare path).
+// Build returns a Registry populated with the built-in starters
+// (cfg.Agents path overrides applied inline before Register)
+// and an optional bare-path agent named by `requested`. Pass
+// requested="" to skip the auto-register step (the long-running
+// daemon's default — `cfg.Primary` selects from the registered
+// set rather than auto-registering a bare path).
+//
+// Single-pass loop: for each built-in, resolve the cfg.Agents
+// override, apply Init to the singleton, then Register.
+// The mutation hits agent.Builtins in place — production calls
+// Build once at startup so the in-place mutation is fine;
+// tests that exercise cfg.Agents overrides should snapshot
+// and restore via each Starter's Command() / Init.
 func Build(cfg *config.Config, requested string) *agent.Registry {
 	reg := agent.New()
 	for _, a := range agent.Builtins.List() {
-		reg.Register(a)
-	}
-
-	if cfg != nil && len(cfg.Agents) > 0 {
-		// Built-in driven: iterate over the registered starters,
-		// not over cfg.Agents. Names outside the whitelist are
-		// never even inspected — they simply have no matching
-		// built-in to apply to.
-		overrides := cfgPathMap(cfg.Agents)
-		for _, s := range reg.List() {
-			name := s.Info().Name
-			if path, ok := overrides[name]; ok {
-				agent.SetBuiltinCommand(reg, name, path)
+		if cfg != nil {
+			if path := cfgAgentPath(cfg.Agents, a.Info().Name); path != "" {
+				a.Init(path)
 			}
 		}
+		reg.Register(a)
 	}
 
 	if _, err := reg.Get(requested); err != nil {
@@ -79,23 +72,20 @@ func Build(cfg *config.Config, requested string) *agent.Registry {
 	return reg
 }
 
-// cfgPathMap flattens cfg.Agents into a name → path lookup.
-// Command is treated verbatim (after trimming) — the schema is
-// "absolute path to one binary", not "command line". This
-// matters on Windows where paths routinely contain spaces
-// (`C:\Program Files\claude\claude.exe`); whitespace-splitting
-// would truncate the path at the first space.
-func cfgPathMap(entries []config.AgentEntry) map[string]string {
-	out := make(map[string]string, len(entries))
+// cfgAgentPath returns the override path for `name` in entries,
+// or "" if no override is set. The Command string is taken
+// verbatim after trim — the schema is "absolute path to one
+// binary", not "command line" (Windows paths with spaces
+// (`C:\Program Files\claude\claude.exe`) would be truncated by
+// whitespace splitting).
+func cfgAgentPath(entries []config.AgentEntry, name string) string {
 	for _, e := range entries {
-		if e.Name == "" || e.Command == "" {
+		if e.Name != name || e.Command == "" {
 			continue
 		}
-		path := strings.TrimSpace(e.Command)
-		if path == "" {
-			continue
+		if path := strings.TrimSpace(e.Command); path != "" {
+			return path
 		}
-		out[e.Name] = path
 	}
-	return out
+	return ""
 }

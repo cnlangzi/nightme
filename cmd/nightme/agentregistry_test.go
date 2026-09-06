@@ -11,6 +11,46 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 )
 
+// commandHolder is the subset of the bridge *Starter API tests
+// use to snapshot and restore Builtins state. Each bridge's
+// *Starter implements Command / Init; test fakes don't
+// (they never participate in cfg.Agents overrides).
+type commandHolder interface {
+	Command() string
+	Init(string)
+}
+
+// snapshotBuiltinCommands saves the current command field on
+// every registered built-in and registers a t.Cleanup that
+// restores them. Use it at the top of any test that exercises
+// cfg.Agents → agentregistry.Build → Init, since Build
+// mutates the Builtins singletons in place.
+//
+// Skips starters that don't implement Command/Init
+// (test fakes and any non-bridge starters); for the seven
+// built-ins this is always a no-op skip.
+func snapshotBuiltinCommands(t *testing.T) {
+	t.Helper()
+	saved := map[string]string{}
+	for _, s := range agent.Builtins.List() {
+		name := s.Info().Name
+		if c, ok := s.(commandHolder); ok {
+			saved[name] = c.Command()
+		}
+	}
+	t.Cleanup(func() {
+		for _, s := range agent.Builtins.List() {
+			c, ok := s.(commandHolder)
+			if !ok {
+				continue
+			}
+			if orig, present := saved[s.Info().Name]; present {
+				c.Init(orig)
+			}
+		}
+	})
+}
+
 // fakeBinary writes a minimal shell script and returns its
 // absolute path.
 func fakeBinary(t *testing.T, dir, name string) string {
@@ -33,6 +73,7 @@ func fakeBinary(t *testing.T, dir, name string) string {
 // register themselves via init() — agentregistry tests cannot
 // run standalone and still see Builtins populated.
 func TestBuild_BuiltinDrivenIgnoresUnknownNames(t *testing.T) {
+	snapshotBuiltinCommands(t)
 	tmp := t.TempDir()
 	bin := fakeBinary(t, tmp, "claude-override")
 	cfg := &config.Config{
@@ -76,6 +117,7 @@ func TestBuild_BuiltinDrivenIgnoresUnknownNames(t *testing.T) {
 // TestBuild_CfgOverrideBuiltinPath overrides a built-in starter's
 // command path and verifies Detect resolves the new path.
 func TestBuild_CfgOverrideBuiltinPath(t *testing.T) {
+	snapshotBuiltinCommands(t)
 	tmp := t.TempDir()
 	bin := fakeBinary(t, tmp, "claude-override")
 	cfg := &config.Config{
@@ -99,6 +141,7 @@ func TestBuild_CfgOverrideBuiltinPath(t *testing.T) {
 // `C:\Program Files\claude\claude.exe` into `C:\Program` and
 // silently fail to Detect.
 func TestBuild_CfgPreservesSpacesInPath(t *testing.T) {
+	snapshotBuiltinCommands(t)
 	tmp := t.TempDir()
 	parent := tmp + "/Program Files"
 	if err := os.MkdirAll(parent, 0o755); err != nil {

@@ -118,7 +118,14 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 	if fail != nil {
 		return fail, nil
 	}
-	if _, err := cs.LookupSelectedAgentSession(); err != nil {
+	// Preflight: confirm the user has selected an agent via /use.
+	// We intentionally do NOT call cs.LookupSelectedAgentSession
+	// here — that function requires the AS to be in StatusRunning
+	// with a non-nil Handle, which is false for a freshly resumed
+	// session that hasn't been Started yet. The runtime starts the
+	// AS on the first QueueUserMessage dispatch; checking here
+	// would reject a session the runtime would otherwise accept.
+	if cs.SelectedAgent() == "" {
 		return command.Reply(ctx, rt, "❌ no active agent; run /use <agent> first"), nil
 	}
 

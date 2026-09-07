@@ -2100,6 +2100,19 @@ func (a *Adapter) sendResultAsReply(
 		// Defensive: caller already filters empty non-error results.
 		return nil
 	}
+	a.logger.Info("feishu OutResult: sendResultAsReply input",
+		"chat_id", chatID,
+		"user_msg_id", userMsgID,
+		"text_len", len(text),
+		"text_first_40", func() string {
+			if len(text) > 40 {
+				return text[:40] + "..."
+			}
+			return text
+		}(),
+		"footer_lines", footerLines,
+		"footer_len", len(footerLines),
+	)
 
 	// Orphan result (no userMsgID) — top-level Card 2.0. F-46
 	// unification: matches postOrphanReplyCard's "main-chat

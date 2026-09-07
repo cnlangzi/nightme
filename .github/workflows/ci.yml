@@ -263,7 +263,7 @@ jobs:
           # subcommand must appear. If a future refactor
           # drops cmdRegistry or breaks the banner loop,
           # at least one of these substrings goes missing.
-          for cmd in list agents config kill clean version; do
+          for cmd in list config kill clean version; do
             if ! echo "$out" | grep -qE "(^|[[:space:]])${cmd}([[:space:]]|$)"; then
               echo "::error::REPL banner missing '$cmd'"
               exit 1

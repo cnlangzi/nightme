@@ -139,10 +139,11 @@ func cfgPathMap(cfg *config.Config) map[string]string {
 	return out
 }
 
-// agentStatus is removed — the table at the top of the Agents
-// submenu replaces it. Kept as a private alias inside manageAgent
-// so the sub-menu's per-agent header still spells out the cfg vs
-// PATH distinction (the table uses ✓/blank for brevity).
+// manageStatus renders the one-line header inside the manageAgent
+// sub-menu. The table at the top of the Agents submenu uses
+// ✓/blank for brevity; the sub-menu header spells out the cfg
+// vs PATH distinction so the user sees which source the agent
+// is currently coming from.
 func manageStatus(name string, cfgPath map[string]string, reg *agent.Registry) string {
 	s, err := reg.Get(name)
 	if err != nil {

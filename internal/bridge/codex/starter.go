@@ -126,8 +126,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // runCodexReviewPlain so the chat channel's StatusBar / receipt
 // shows the same Ready → Text → Result lifecycle the live-*Agent
 // bridges (dsh/acp/…) emit. Without this forward, /review on codex
-// renders 30s of silence and then dumps the final text — see the
-// pre-fix regression this commit fixes.
+// renders 30s of silence and then dumps the final text.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	// Forward the full cfg, not just Workspace — Review callers
 	// (/review dispatcher) build cfg from the chat session's

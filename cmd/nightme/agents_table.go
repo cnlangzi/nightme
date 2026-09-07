@@ -1,20 +1,11 @@
 // Package main — shared agent-table renderer for `nightme config`.
 //
-// The table opens the Agents submenu in `nightme config` so
-// operators can scan detection status + resolved path + args
-// before picking a row to manage. The number column maps 1:1 to
-// the index the prompt accepts.
-//
-// Text format:
-//
-//	     #          NAME      BRIDGE   COMMAND                        ARGS
-//	✓    1     claude    json-io  /home/devin/.local/bin/claude
-//	✓    2     codex     json-io  /opt/homebrew/bin/codex
-//	     3     cursor    acp      cursor-agent                  --force --trust --sandbox disabled … acp
-//
-// The leading "✓" / blank shows whether Detect passes (PATH or
-// cfg.Agents override resolved). The current primary is named in
-// the "(default: …)" line after the table, not marked on the row.
+// renderAgentsTable prints a tab-aligned table of the seven
+// built-in agents. The leading "✓" shows whether Detect passes
+// (PATH lookup or cfg.Agents override resolved); the trailing
+// row count lets the configAgentsMenu prompt accept the
+// displayed index 1:1. The current primary is named in the
+// "(default: …)" line below the table, not marked on a row.
 package main
 
 import (

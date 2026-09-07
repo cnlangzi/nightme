@@ -1,28 +1,22 @@
-// Package main — first-run prompt for the AI agent binary.
+// Package main — first-run gate for the AI agent binary.
 //
-// The previous build auto-detected a primary by probing built-ins
-// in registration order, silently picking the first one whose
-// PATH lookup succeeded. That silently degraded whenever none of
-// the seven built-ins were on PATH: cfg.Primary was left empty,
-// the daemon would later crash with "need primaryAgent to create"
-// and the user had no in-band hint about what to do.
+// EnsureAgentAvailable is called at the top of `nightme run` and
+// `nightme test` to guarantee cfg.Primary resolves to a working
+// built-in agent before the daemon boots / a session spawns.
+// Decision tree:
 //
-// This file replaces that with a deterministic flow:
+//  1. cfg.Primary already resolves — accept, no prompt.
+//  2. At least one built-in resolves — auto-pick the first as
+//     cfg.Primary, save, no prompt.
+//  3. No built-in resolves — prompt the user for an absolute
+//     path to whichever binary they have installed, write
+//     cfg.Agents + cfg.Primary, re-detect.
+//  4. Non-interactive callers (no TTY, or NIGHTME_NO_PROMPT=1)
+//     get errNoAgentConfigured instead of a hung read.
 //
-//  1. Build the registry from cfg (cfg.Agents overrides applied).
-//  2. Run Detect on every built-in.
-//  3. If cfg.Primary resolves to a working agent, accept it and
-//     return — no prompt.
-//  4. Else if at least one built-in resolves, auto-pick the first
-//     working one as cfg.Primary, save, return — no prompt.
-//  5. Else prompt the user: pick a built-in, give it a path,
-//     write cfg.Agents + cfg.Primary, re-detect. Loop until the
-//     path resolves or the user aborts.
-//
-// Non-interactive callers (CI, container init) get a clean error
-// instead of a hung read; set NIGHTME_NO_PROMPT=1 to force the
-// non-interactive path even from a TTY (e.g. for batch smoke
-// tests that want the error, not the prompt).
+// NIGHTME_PROMPT=1 forces the interactive path even on a
+// non-TTY stdin — used by tests that drive the prompt over a
+// synthetic reader.
 package main
 
 import (

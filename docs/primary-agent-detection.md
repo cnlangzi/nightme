@@ -70,18 +70,20 @@ Each entry is `{name, command}` where `name` MUST be a built-in (`claude / codex
 `agentregistry.Build` (`internal/agentregistry/agentregistry.go`) applies the overrides built-in-driven rather than config-driven:
 
 ```go
-overrides := cfgPathMap(cfg.Agents)
-for _, s := range reg.List() {           // every registered built-in
-    name := s.Info().Name
-    if path, ok := overrides[name]; ok { // consult config as a side lookup
-        agent.SetBuiltinCommand(reg, name, path)
+for _, a := range agent.Builtins.List() {  // every registered built-in
+    a.Init("")                             // reset to baked-in default
+    if cfg != nil {
+        if path := cfgAgentPath(cfg.Agents, a.Info().Name); path != "" {
+            a.Init(path)                    // consult cfg.Agents as a side lookup
+        }
     }
+    reg.Register(a)
 }
 ```
 
-Iteration is over the registered built-ins, not over cfg.Agents. Names outside the whitelist are never read — no warn log, no PTY fallback, no silently aliased shell agent. The bridge surface (AskUserQuestion, tool events, ACP handshake) is too valuable to lose; users who want a shell wrapper go through `nightme test --agent /path/to/bin` (bare-path auto-register), which is explicitly a one-shot escape hatch rather than a primary.
+Iteration is over the registered built-ins, not over cfg.Agents. Names outside the whitelist are never read — no PTY fallback, no silently aliased shell agent. The bridge surface (AskUserQuestion, tool events, ACP handshake) is too valuable to lose; users who want a shell wrapper go through `nightme test --agent /path/to/bin` (bare-path auto-register), which is explicitly a one-shot escape hatch rather than a primary.
 
-`cfgPathMap` stores the path verbatim (trimmed, not whitespace-split) so Windows paths with spaces (`C:\Program Files\claude\claude.exe`) round-trip unchanged. Args / env / mode / protocol flags are not user-configurable here — they're fixed by the bridge.
+`cfgAgentPath` stores the path verbatim (trimmed, not whitespace-split) so Windows paths with spaces (`C:\Program Files\claude\claude.exe`) round-trip unchanged. Args / env / mode / protocol flags are not user-configurable here — they're fixed by the bridge.
 
 ---
 
@@ -109,7 +111,7 @@ return agent.ResolveCommand(s.command)
 
 `ResolveCommand` (`internal/agent/commandpath.go`) prefers `os.Stat` for absolute paths and falls back to `exec.LookPath` for relative names. This is what makes the cfg.Agents override actually work: a non-PATH absolute path is stat-checked, not searched.
 
-`SetBuiltinCommand` (`internal/agent/commandpath.go`) is the seam cfg.Agents overrides flow through. It mutates the registered `*Starter` (a singleton held in `agent.Builtins`), so subsequent `Detect()` and `Info()` reflect the new path.
+Each built-in starter implements `Starter.Init(string)` to receive the override path. Calling `Init("")` resets the command to the starter's baked-in default (the value passed to `NewStarter` at registration time), so a subsequent `Build` with the entry removed from `cfg.Agents` reverts the singleton rather than leaving it pinned to the previous override.
 
 ---
 
@@ -174,7 +176,7 @@ cfg.Agents to override its path, then retry
 
 | File | Role |
 |------|------|
-| `internal/agent/commandpath.go` | `ResolveCommand` (absolute vs PATH), `CommandSetter` interface, `SetBuiltinCommand` |
+| `internal/agent/commandpath.go` | `ResolveCommand` (absolute vs PATH) |
 | `internal/agent/registry.go` | `Builtins` package var, registration helpers |
 | `internal/agentregistry/agentregistry.go` | `Build(cfg, requested)` — whitelist enforcement + path overrides + bare-path escape hatch |
 | `internal/config/config.go` | `LoadDefault` (steps 1–3), `detectPrimaryFromBuiltins` |

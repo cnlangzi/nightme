@@ -1,16 +1,11 @@
 // Command-path resolution shared by every built-in starter.
 //
-// All built-in starters (claudecode / codex / opencode / cursor /
-// pi / copilot / dsh / acp / pty) implement Detect() as
-//
-//	ResolveCommand(s.command)
-//
-// so cfg.Agents overrides can point an agent at a non-PATH
-// location. Absolute paths go through os.Stat; relative names
-// resolve via PATH. cfg.Agents writes absolute paths in
-// practice (the firstrun prompt asks for one), but a relative
-// name remains valid as long as the parent shell has it on
-// PATH.
+// Each built-in Starter implements Detect() as
+// ResolveCommand(s.command) so cfg.Agents overrides can point
+// an agent at a non-PATH location. Absolute paths go through
+// os.Stat; relative names resolve via PATH. Path strings are
+// stored verbatim (no whitespace splitting) so Windows paths
+// with spaces (`C:\Program Files\claude\claude.exe`) survive.
 package agent
 
 import (

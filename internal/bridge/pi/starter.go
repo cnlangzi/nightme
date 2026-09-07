@@ -121,9 +121,8 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // are forwarded to runPrintMode so per-call observers see the
 // Ready → Text → ToolStart/End → Result lifecycle — the same
 // shape the dsh / codex bridges emit. Without this forward,
-// callers had no visibility into the print-mode run (the bug
-// fixed in this revision: prior code accepted opts but silently
-// dropped them, leaving the chat sink permanently open).
+// callers would have no visibility into the print-mode run
+// (print-mode would emit events the sink never receives).
 //
 // Start (above) is unchanged: it still opens an RPC session
 // for the chat session's long-lived use case where multiple

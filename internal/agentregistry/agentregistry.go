@@ -1,31 +1,17 @@
 // Package agentregistry — build an agent.Registry from a
 // config.Config.
 //
-// This package exists as a neutral home for the Builtins +
-// bare-path-auto-register logic that both the CLI's `nightme
-// test` subcommand and the long-running daemon
-// (internal/runtime) need. It cannot live in internal/agent
-// (the package imports bridge/pty, but bridge/pty already
-// imports internal/agent — cycle) and it cannot live in
-// internal/runtime (cmd/nightme would have to import runtime,
-// but runtime is the daemon — moving it across the CLI/daemon
-// boundary is wrong).
+// Lives outside internal/agent (which already imports bridge/pty)
+// and outside internal/runtime (which would force cmd/nightme to
+// import the daemon). Holds the Builtins + cfg.Agents + bare-path
+// logic shared by `nightme test` and the daemon runtime.
 //
-// Selection rules:
-//
-//  1. For each registered built-in starter (claudecode / codex /
-//     dsh / opencode / cursor / pi / copilot), look up
-//     cfg.Agents[name]. If present, apply the override to the
-//     singleton (Init) before Register. Names outside the
-//     whitelist are never read — they have no matching
-//     built-in to apply to, so the merge is implicitly
-//     restricted to the seven shipped bridges.
-//
-//  2. If `requested` is non-empty AND not already in the
-//     registry, auto-register a bare-path agent when the file
-//     exists — so a one-shot `nightme test --agent /some/bin`
-//     still works without polluting the production daemon's
-//     registry with user-defined agents.
+// Build applies cfg.Agents path overrides to the seven built-in
+// singletons via Starter.Init. cfg.Agents entries whose name is
+// not a built-in are silently ignored — no PTY fallback, no
+// alias. When `requested` is non-empty and not already in the
+// registry, Build auto-registers a bare-path PTY starter when the
+// file exists on disk (one-shot `nightme test --agent /some/bin`).
 package agentregistry
 
 import (

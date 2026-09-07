@@ -22,36 +22,61 @@ The wiki answers these questions for a contributor or Agent that has just arrive
 
 `/wiki init` does not cover:
 
-- A central index file. No `wiki.yml`, no `llms.txt`. The file system is the index: a directory listing of `wiki/modules/` is the table of contents.
 - A re-extraction or refresh command.
 - Aggregate pages such as `architecture.md` or `quickstart.md`.
 - A bounded-prompt orchestration. Init runs as one Agent invocation; per-module file production is part of that single invocation.
 - Module identity naming rules beyond kebab-case uniqueness. The Agent chooses the concept boundaries and the names.
 
+`/wiki init` does build `wiki/llms.txt` deterministically (no Agent call) as the last step of the flow. The discovery index lists every module file under `wiki/modules/` with its H1 + blockquote. `--llmstxt` reruns just that step.
+
 ## 3. Command contract
 
 ```text
-/wiki init
+/wiki init [--modules] [--llmstxt] [--arch]
 ```
 
-`/wiki init` takes no flags and no arguments. The Agent is selected exclusively by `/use <agent>`; init does not accept `-a` or `--agent`.
+`/wiki init` has three independent boolean flags. Each flag toggles one step of the pipeline:
+
+- `--modules` — submit the modules Agent prompt. Writes `<cwd>/wiki/modules/<name>.md` for each concept. **Refuses** if `wiki/modules/` already exists.
+- `--llmstxt` — deterministically rebuild `<cwd>/wiki/llms.txt` from the existing `wiki/modules/`. No Agent prompt submitted.
+- `--arch` — submit the architecture Agent prompt. Writes `<cwd>/wiki/architecture.md` (the cross-cutting view that spans the modules). The arch step is auto-skipped when no module files exist.
+
+When no flag is supplied, all three steps run. When at least one flag is supplied, only the flagged steps run (combined freely).
+
+The full flag matrix:
+
+| Command | modules | llms.txt | arch |
+|---|---|---|---|
+| `/wiki init` (no flag) | ✓ | ✓ | ✓ |
+| `/wiki init --modules` | ✓ | – | – |
+| `/wiki init --llmstxt` | – | ✓ | – |
+| `/wiki init --arch` | – | – | ✓ |
+| `/wiki init --modules --llmstxt` | ✓ | ✓ | – |
+| `/wiki init --modules --arch` | ✓ | – | ✓ |
+| `/wiki init --llmstxt --arch` | – | ✓ | ✓ (when modules exist) |
+| `/wiki init --modules --llmstxt --arch` | ✓ | ✓ | ✓ |
+
+The Agent is selected exclusively by `/use <agent>`; init does not accept `-a` or `--agent`.
 
 ### 3.1 Preconditions
 
-The command requires:
+Any step that submits an Agent prompt (`--modules`, `--arch`) requires:
 
 1. A selected CWD on the ChatSession.
 2. A selected Agent configured through `/use`.
-3. A live or resumable AgentSession returned by `cs.LookupSelectedAgentSession()`.
+3. A live or resumable AgentSession (the runtime starts it on first dispatch).
 4. A Git repository containing the selected CWD.
 5. A source-clean working tree.
-6. The path `<cwd>/wiki/modules/` does not already exist. Init refuses to overwrite an existing wiki.
+6. When `--modules` is set, `<cwd>/wiki/modules/` must not already exist.
+
+Steps that do not submit an Agent prompt (`--llmstxt` alone) require only the CWD, a Git repository, and an existing `wiki/modules/` directory.
 
 Failure messages identify the corrective action:
 
 - No CWD: `no workspace set; run /cwd <path> first`
 - No Agent: `no active agent; run /use <agent> first`
-- Invalid arguments: `usage: /wiki init`
+- Invalid arguments: `usage: /wiki init [--modules] [--llmstxt] [--arch]`
+- Unknown flag: `unknown flag --foo; usage: /wiki init [--modules] [--llmstxt] [--arch]`
 - Not a Git repository: `not a git repo (or git unavailable): ...`
 - Dirty source tree: `working tree has source changes; commit first`
 - Wiki already exists: `wiki/modules/ already exists; refusing to overwrite`

@@ -8,7 +8,6 @@ package wiki
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -49,7 +48,7 @@ func (f *Factory) Spec() command.Spec {
 			{
 				Name:    "init",
 				Summary: "Read the codebase, design modules, write per-module files.",
-				Usage:   "/wiki init",
+				Usage:   "/wiki init [--modules] [--llmstxt] [--arch]",
 			},
 		},
 	}
@@ -60,57 +59,90 @@ func (f *Factory) Spec() command.Spec {
 // Flow (docs/Wiki.md §3.1, §3.2):
 //  1. Parse the subcommand. Only "init" is accepted; any
 //     other arg is a usage error.
-//  2. ChatSession + active CWD + selected Agent.
-//  3. Git preflight — resolve repoRoot, refuse dirty tree.
-//  4. Refuse when wiki/modules/ already exists.
-//  5. Queue the init prompt, return an immediate ack.
-//  6. Run Init in a goroutine; the final reply is sent
+//  2. Parse init flags. `--llmstxt` runs the deterministic
+//     llms.txt build only (no Agent prompt); without it,
+//     run the full init flow.
+//  3. ChatSession + active CWD + selected Agent (only when
+//     the Agent prompt is needed).
+//  4. Git preflight — resolve repoRoot, refuse dirty tree.
+//  5. Refuse when wiki/modules/ already exists.
+//  6. Queue the init prompt, return an immediate ack.
+//  7. Run Init in a goroutine; the final reply is sent
 //     through the Emitter when validation completes.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	sub, err := parseSubcommand(input.Args)
+	sub, opts, err := parseSubcommand(input.Args)
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
-	switch sub {
-	case "init":
-		return f.runInit(ctx, rt, cs, input)
-	default:
-		// parseSubcommand rejects unknown subcommands; this
-		// branch is unreachable but kept for defensiveness.
+	if sub != "init" {
 		return command.Reply(ctx, rt, "❌ /wiki: unknown subcommand"), nil
 	}
+
+	// Shortcut: if no modules step and no arch step are
+	// requested, the deterministic llms.txt build alone is
+	// enough — no Agent prompt needed.
+	if !opts.Modules && !opts.Arch {
+		return f.runLlmsTxt(ctx, cs, input)
+	}
+	return f.runInit(ctx, rt, cs, input, opts)
 }
 
-// parseSubcommand extracts the subcommand from argv. argv[0]
-// is the command name; argv[1] (if present) is the
-// subcommand. Anything else is rejected.
+// parseSubcommand extracts the subcommand and the init flags
+// from argv. argv[0] is the command name. Returns
+// (subcommand, opts, error).
 //
-// "/wiki"        → ("", usage error)
-// "/wiki init"   → ("init", nil)
-// "/wiki -a"     → usage error (no subcommand)
-// "/wiki init x" → usage error (extra positional)
-func parseSubcommand(argv []string) (string, error) {
-	if len(argv) == 1 {
-		return "", errors.New("usage: /wiki init")
+// "/wiki"                       → ("",     {},     usage error)
+// "/wiki init"                  → ("init", {all three = true},  nil)
+// "/wiki init --modules"        → ("init", {Modules: true,  ...},  nil)
+// "/wiki init --llmstxt"        → ("init", {Llmstxt: true,  ...},  nil)
+// "/wiki init --arch"           → ("init", {Arch: true,    ...},  nil)
+// "/wiki init --llmstxt --arch" → ("init", {Llmstxt, Arch = true},  nil)
+// "/wiki -a"                    → ("",     {},     usage error)
+// "/wiki init x"                → ("",     {},     extra positional)
+// "/wiki init --weird"          → ("",     {},     unknown flag)
+//
+// Each flag is an independent toggle. When no flag is set,
+// all three steps run by default.
+func parseSubcommand(argv []string) (string, InitOptions, error) {
+	parsed, err := command.ParseCmdArgs(argv, command.CmdSpec{
+		Name:  "/wiki",
+		Usage: "/wiki init [--modules] [--llmstxt] [--arch]",
+		Flags: map[string]command.FlagSpec{
+			"--modules": {Name: "modules"},
+			"--llmstxt": {Name: "llmstxt"},
+			"--arch":    {Name: "arch"},
+		},
+		MinArgs: 0,
+		MaxArgs: 0,
+	})
+	if err != nil {
+		return "", InitOptions{}, err
 	}
-	if len(argv) > 2 {
-		return "", errors.New("usage: /wiki init")
+	sub := ""
+	if parsed.NArgs() > 0 {
+		sub = parsed.Arg(0)
 	}
-	switch argv[1] {
-	case "init":
-		return "init", nil
-	default:
-		return "", fmt.Errorf("unknown subcommand %q; usage: /wiki init", argv[1])
+	if sub != "init" {
+		return sub, InitOptions{}, fmt.Errorf("unknown subcommand %q; usage: /wiki init [--modules] [--llmstxt] [--arch]", sub)
 	}
+
+	// Default: all three steps. If any flag was supplied,
+	// use only the explicitly-set ones.
+	anySet := parsed.Has("modules") || parsed.Has("llmstxt") || parsed.Has("arch")
+	return "init", InitOptions{
+		Modules: !anySet || parsed.Bool("modules"),
+		Llmstxt: !anySet || parsed.Bool("llmstxt"),
+		Arch:    !anySet || parsed.Bool("arch"),
+	}, nil
 }
 
 // runInit runs the /wiki init flow. The Ack reply is sent
 // immediately; the Agent prompt runs in a goroutine and the
 // final reply is sent through the Emitter.
-func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput, opts InitOptions) (*command.SlashOutput, error) {
 	if cs == nil {
 		return command.Reply(ctx, rt, "No active chat session."), nil
 	}
@@ -151,7 +183,7 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 	}
 
 	go func() {
-		final, _ := RunInit(ctx, cs, msg, repoRoot)
+		final, _ := RunInit(ctx, cs, msg, repoRoot, opts)
 		em := cs.Emitter()
 		if em == nil {
 			return
@@ -165,6 +197,39 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 	}()
 
 	return command.Reply(ctx, rt, "⏳ /wiki init queued; Agent is reading the codebase."), nil
+}
+
+// runLlmsTxt runs `/wiki init --llmstxt`: deterministic
+// rebuild of wiki/llms.txt from the existing wiki/modules/.
+// No Agent prompt is submitted, so no /use selection or
+// AgentSession is required — only the CWD matters.
+func (f *Factory) runLlmsTxt(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	if cs == nil {
+		return &command.SlashOutput{Reply: "No active chat session.", Consumed: true}, nil
+	}
+	cwd, fail := command.RequireActiveCwd(cs)
+	if fail != nil {
+		return fail, nil
+	}
+	repoRoot, err := f.git.RepoRoot(cwd)
+	if err != nil {
+		return &command.SlashOutput{Reply: "❌ " + err.Error(), Consumed: true}, nil
+	}
+
+	final, _ := RunLlmsTxtOnly(repoRoot)
+
+	// Reply directly (no Agent session involved, so no Emitter
+	// detour). Reply to the original slash message via Emitter
+	// so the IM client renders it on the right card.
+	if em := cs.Emitter(); em != nil {
+		_ = em.Send(context.Background(), messages.OutboundMessage{
+			ChatID:  input.ChatID,
+			ReplyTo: input.MessageID,
+			Kind:    messages.OutReply,
+			Text:    final,
+		})
+	}
+	return &command.SlashOutput{Reply: "⏳ /wiki init --llmstxt", Consumed: true}, nil
 }
 
 // Compile-time check: Factory satisfies SlashCommandFactory.

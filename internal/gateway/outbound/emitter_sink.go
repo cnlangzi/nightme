@@ -188,6 +188,14 @@ func dispatchSinkEvent(
 		// cache is a forward-declaration of what the runtime
 		// subscriber captures.)
 		if id := cs.GetTurnIdentity(replyTo); id != nil {
+			slog.Default().Info("sink: turnIdentity cache hit",
+				"kind", out.Kind.String(),
+				"reply_to", replyTo,
+				"agent", agentName,
+				"id_model", id.Model,
+				"id_session_id", id.SessionID,
+				"id_workspace", id.Workspace,
+			)
 			if out.AgentName == "" {
 				out.AgentName = agentName
 			}

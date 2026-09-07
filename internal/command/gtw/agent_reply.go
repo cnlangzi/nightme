@@ -164,6 +164,16 @@ func runAgentFor(
 			SessionID: as.SessionID(),
 			Workspace: as.Cwd,
 		})
+		slog.Default().Info("gtw: runAgentFor seed",
+			"message_id", messageID,
+			"agent", as.Agent,
+			"model", as.Model(),
+			"session_id", as.SessionID(),
+		)
+	} else {
+		slog.Default().Info("gtw: runAgentFor no SelectedAgentSession, skipping seed",
+			"message_id", messageID,
+		)
 	}
 
 	res, err := a.RunOnce(ctx,
@@ -187,6 +197,12 @@ func runAgentFor(
 		SessionID: res.SessionID,
 		Workspace: workspace,
 	})
+	slog.Default().Info("gtw: runAgentFor override",
+		"message_id", messageID,
+		"res_model", res.Model,
+		"res_session_id", res.SessionID,
+		"res_text_len", len(res.Text),
+	)
 
 	return res, agentName, nil
 }

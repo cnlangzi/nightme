@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,6 +18,14 @@ import (
 // not asserted: earlier tests in the suite may have mutated
 // Builtins via SetBuiltinCommand, and the test only verifies the
 // "no prompt" + "Primary is non-empty" contract.
+//
+// CI runners have none of the seven built-ins on PATH, so the
+// test installs its own fake "claude" binary in a temp binDir
+// and sets PATH to it exclusively. Earlier versions of this test
+// prepended binDir to the inherited PATH, which silently picked
+// up whatever the developer machine happened to have installed
+// (e.g. a real `claude` from `$HOME/.local/bin`) — passing on
+// developer machines, failing on CI.
 func TestEnsureAgentAvailable_AutoPickPrimary(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -24,11 +33,20 @@ func TestEnsureAgentAvailable_AutoPickPrimary(t *testing.T) {
 	t.Setenv("NIGHTME_CONFIG", cfgPath)
 
 	binDir := t.TempDir()
-	bin := filepath.Join(binDir, "fake-agent-for-detect")
+	// On Windows exec.LookPath only resolves names with a
+	// recognised extension (.exe / .bat / .cmd / .com), so a
+	// file named `claude` is invisible. Match the platform.
+	binName := "claude"
+	if runtime.GOOS == "windows" {
+		binName = "claude.exe"
+	}
+	bin := filepath.Join(binDir, binName)
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Replace PATH entirely — do not inherit the parent
+	// process's PATH.
+	t.Setenv("PATH", binDir)
 
 	cfg := &config.Config{}
 	var buf bytes.Buffer

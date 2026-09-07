@@ -160,6 +160,29 @@ func dispatchSinkEvent(
 	if out.AgentName == "" {
 		out.AgentName = agentName
 	}
+	slog.Default().Debug("sink: post-Translate out fields",
+		"kind", out.Kind.String(),
+		"ev_AgentName", ev.AgentName,
+		"ev_Model", ev.Model,
+		"ev_SessionID", ev.SessionID,
+		"ev_Workspace", ev.Workspace,
+		"ev_Branch", ev.Branch,
+		"out_AgentName", out.AgentName,
+		"out_Model", out.Model,
+		"out_SessionID", out.SessionID,
+		"out_Workspace", out.Workspace,
+		"out_Branch", out.Branch,
+		"out_ChatID", out.ChatID,
+		"out_ReplyTo", out.ReplyTo,
+		"out_HasResult", out.Result != nil,
+		"out_ResultText_len", func() int {
+			if out.Result == nil {
+				return 0
+			}
+			return len(out.Result.Text)
+		}(),
+		"out_HasUsage", out.Usage != nil,
+	)
 
 	// F-CODEX-RUNONCE-REVIEW-EVENT: apply the same think / tools
 	// gate the long-lived runtime.NewEventHandler applies

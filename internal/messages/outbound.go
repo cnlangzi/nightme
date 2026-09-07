@@ -57,22 +57,22 @@ const (
 	// from the agent's system/init event. Channels use it to render
 	// "session <id> · model <name>" in the receipt header.
 	OutInit
-	// OutCommandReply is a one-shot plain-text message sent in
-	// response to a system-level slash command (e.g. /cwd, /run,
-	// /help, /kill, /agents), a shell `!cmd` dispatch (see
-	// internal/shell/dispatch.go runShell — shell replies use this
-	// Kind because shell has no receipt card), or to a runtime
-	// error that needs to surface to the user without the
-	// rolling-log card path.
+	// OutCommandReply is a one-shot reply sent in response to a
+	// system-level slash command (e.g. /cwd, /run, /help, /kill,
+	// /agents), a shell `!cmd` dispatch, or a runtime error that
+	// surfaces to the user.
 	//
 	// Distinct from OutReply: OutReply is the agent's stream of
-	// intermediate / final replies and goes through the receipt
-	// (F-25 rolling-log card → PATCH in place). OutCommandReply
-	// bypasses the receipt entirely so the user sees a standalone
-	// text message, not a new card. The Feishu adapter implements
-	// this with a plain SendMessageText call (no ReplyTo threading,
-	// no in-place update). See docs/channel/feishu.md §5 for the
-	// full rationale.
+	// intermediate / final replies. Both kinds land on the same
+	// per-turn rolling-log receipt card — Feishu folds
+	// OutCommandReply into the placeholder card that
+	// ensureReceiptForTyping pre-creates at MessageQueued time via
+	// AppendEntryWithFooter, so the user sees a single continuous
+	// card across the turn instead of a placeholder + an
+	// independent bubble. Slack and Telegram still render
+	// OutCommandReply as a standalone surface (no receipt card
+	// concept on those channels). See docs/channel/feishu.md §5
+	// for the per-channel rendering rationale.
 	OutCommandReply
 
 	// OutTaskCreate carries the first confirmable task operation

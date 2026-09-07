@@ -45,6 +45,7 @@ package outbound
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -164,4 +165,15 @@ func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMes
 		return
 	}
 	msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)
+	slog.Default().Debug("emitImpl: stamped GitStatus",
+		"kind", msg.Kind.String(),
+		"chat_id", msg.ChatID,
+		"git_status_nil", msg.GitStatus == nil,
+		"workspace", func() string {
+			if msg.GitStatus == nil {
+				return ""
+			}
+			return msg.GitStatus.Workspace
+		}(),
+	)
 }

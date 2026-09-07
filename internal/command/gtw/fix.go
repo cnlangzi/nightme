@@ -659,9 +659,17 @@ func completeFixAndDispatch(
 			// Append a single-line warning so the user knows
 			// the agent didn't receive the dispatch. We do not
 			// roll back the worktree — see comment above.
+			// No MessageQueued was emitted on this messageID
+			// (dispatchIssueToChatSession's fix-placehold-card
+			// path deliberately skips the emit on
+			// LookupSelectedAgentSession failure), so there is no
+			// placeholder receipt to fold into. The Feishu adapter
+			// falls back to postOrphanReplyCard (top-level card);
+			// Slack / Telegram / bot handle the orphan path on
+			// their own.
 			_ = cs.Emitter().Send(ctx, messages.OutboundMessage{
 				ChatID:  chatID,
-				Kind:    messages.OutCommandReply, // one-shot plain text, not a rolling-log receipt card
+				Kind:    messages.OutCommandReply,
 				ReplyTo: messageID,
 				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
 			})

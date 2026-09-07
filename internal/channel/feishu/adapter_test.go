@@ -810,22 +810,24 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 //
 //   - receipt cold-start card (the pinned answer card)
 //   - OutChoice (permission card — discoverability > chat cleanliness)
-//   - OutCommandReply (slash command — user is waiting at the cursor)
 //
 // Without this guarantee, a future refactor that decides
 // "reply_in_thread=true everywhere" would silently hide the
 // receipt card behind a thread indicator, breaking the core UX.
 func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 	// F-44: ReceiptLazyCreate subtest removed — ensureReceiptForReply
-	// F-44 follow-up: OutChoice / OutCommandReply moved off
-	// ReplyInBoth to ReplyInChat (top-level Create). They no
-	// longer have a thread / anchor concept, so this test
-	// (which asserts reply_in_thread=false + anchored to
+	// F-44 follow-up: OutChoice moved off ReplyInBoth to ReplyInChat
+	// (top-level Create). It no longer has a thread / anchor concept,
+	// so this test (which asserts reply_in_thread=false + anchored to
 	// userMsgID) doesn't apply. The dispatch is locked in by
 	// TestSendViaLark_TopLevelCreate_Dispatch and the dedicated
-	// per-kind emoji-prefix tests
-	// (TestSend_OutChoice_TopLevelCreate_EmojiPrefixed /
-	// TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed).
+	// per-kind emoji-prefix test
+	// (TestSend_OutChoice_TopLevelCreate_EmojiPrefixed).
+	//
+	// OutCommandReply removed: it now PATCHes the placeholder receipt
+	// card via AppendEntryWithFooter, so the reply_in_thread concept
+	// doesn't apply either. Locked by
+	// TestSend_OutCommandReply_PatchesPlaceholderReceipt.
 
 	// F-49: "OutCompaction" subtest deleted — the OutCompaction kind
 	// no longer exists (see docs/feat/F-49-compaction-counter.md
@@ -994,53 +996,190 @@ func TestSend_OutError_TruncatesLongBody(t *testing.T) {
 	}
 }
 
-// TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed — F-44
-// follow-up: OutCommandReply is a top-level Create (ReplyInChat,
-// rootID="") with the ❯ emoji prepended to the text body. Same
-// rationale as OutChoice — slash-command replies are short status
-// messages, anchoring them to the user message is unnecessary, and
-// a thread-on-parent would pull them into the drawer. The ❯ emoji
-// mirrors the 💭 prefix OutThinking uses (visual channel
-// decoration for "this is a thinking / command response" — easy
-// to scan in main chat).
-func TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed(t *testing.T) {
+// TestSend_OutCommandReply_PatchesPlaceholderReceipt — OutCommandReply
+// folds into the placeholder receipt card that ensureReceiptForTyping
+// pre-created at MessageQueued time, instead of going out as a
+// standalone top-level Create (the pre-placeholder F-44 follow-up
+// behaviour). The ❯ emoji prefix is gone; the reply text is appended
+// as a rolling-log entry via AppendEntryWithFooter so the user sees
+// a single card that started as "🤖 Working" and grew to include the
+// command reply.
+//
+// Three guards: no second send (only PATCH), entry text matches
+// msg.Text verbatim (no ❯ prefix), the receipt's entries list grew
+// by one. Anchored path — the orphan-path test lives next to
+// postOrphanReplyCard's existing tests.
+func TestSend_OutCommandReply_PatchesPlaceholderReceipt(t *testing.T) {
 	a := testAdapter(t)
 
-	var captured struct {
-		ChatID string
-		Text   string
-		RootID string
+	var sends int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		return "om_placeholder", nil
 	}
-	a.sendFunc = func(_ context.Context, chatID, _, content, rootID string, _ bool) (string, error) {
-		captured.ChatID = chatID
-		// content is JSON-encoded text payload; extract for assertion
-		var payload struct {
-			Text string `json:"text"`
-		}
-		_ = json.Unmarshal([]byte(content), &payload)
-		captured.Text = payload.Text
-		captured.RootID = rootID
-		return "om_text_test", nil
+	var patches int
+	var patchedBody string
+	a.updateFunc = func(_ context.Context, _, body string) error {
+		patches++
+		patchedBody = body
+		return nil
+	}
+
+	// Step 1: simulate the MessageQueued path that pre-creates the
+	// placeholder receipt. Same shape as the runtime subscriber —
+	// adapter populates receiptsByUserMsgID[userMsgID] with a
+	// transient that has cardMsgID = "om_placeholder".
+	_, _, err := a.ensureReceiptForTyping(t.Context(), "oc_test", "om_cmd_1", nil)
+	if err != nil {
+		t.Fatalf("ensureReceiptForTyping: %v", err)
+	}
+	// Snapshot: 1 send so far (the placeholder Create).
+	if sends != 1 {
+		t.Fatalf("placeholder send count = %d, want 1 (ensureReceiptForTyping posts a fresh card)", sends)
 	}
 
 	if err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutCommandReply,
 		ChatID:  "oc_test",
-		ReplyTo: "om_cmd_1", // F-44 follow-up: ReplyTo is ignored
+		ReplyTo: "om_cmd_1",
 		Text:    "available agents: main, codegraph",
 	}); err != nil {
 		t.Fatalf("Send(OutCommandReply): %v", err)
 	}
 
-	// F-44 follow-up: top-level Create, no parent/thread anchor.
-	if captured.RootID != "" {
-		t.Errorf("sendFunc.RootID = %q, want %q (F-44 follow-up: OutCommandReply is top-level Create, no anchor)",
-			captured.RootID, "")
+	// OutCommandReply PATCHes the placeholder — no second send.
+	if sends != 1 {
+		t.Errorf("sendFunc calls = %d, want 1 (OutCommandReply must PATCH, not Create)", sends)
 	}
-	// Text must be ❯-prefixed.
-	if captured.Text != "❯ available agents: main, codegraph" {
-		t.Errorf("sendFunc.Text = %q, want %q (F-44 follow-up: ❯ emoji prefix)",
-			captured.Text, "❯ available agents: main, codegraph")
+	// Exactly one PATCH (AppendEntryWithFooter → renderLocked).
+	if patches != 1 {
+		t.Errorf("updateFunc calls = %d, want 1 (AppendEntryWithFooter PATCHes the placeholder)", patches)
+	}
+	// Text is rendered verbatim, no ❯ prefix.
+	if !strings.Contains(patchedBody, "available agents: main, codegraph") {
+		t.Errorf("patched body missing reply text, got %q", patchedBody)
+	}
+	if strings.Contains(patchedBody, "❯") {
+		t.Errorf("patched body unexpectedly includes ❯ emoji prefix, got %q", patchedBody)
+	}
+	// Receipt grew by exactly one entry.
+	rcpt := a.receiptFor(t.Context(), "oc_test", "om_cmd_1")
+	if rcpt == nil {
+		t.Fatal("receipt missing after OutCommandReply")
+	}
+	if len(rcpt.entries) != 1 {
+		t.Errorf("receipt entries = %d, want 1", len(rcpt.entries))
+	}
+	if rcpt.entries[0].Text != "available agents: main, codegraph" {
+		t.Errorf("entry text = %q, want %q", rcpt.entries[0].Text, "available agents: main, codegraph")
+	}
+}
+
+// TestSend_OutCommandReply_OrphanFallsBackToTopLevel — when
+// msg.ReplyTo is empty (no parent user message to anchor to),
+// OutCommandReply still posts a fresh top-level card via
+// postOrphanReplyCard so the reply isn't dropped.
+func TestSend_OutCommandReply_OrphanFallsBackToTopLevel(t *testing.T) {
+	a := testAdapter(t)
+
+	var sentMsgType string
+	a.sendFunc = func(_ context.Context, _, msgType, _, _ string, _ bool) (string, error) {
+		sentMsgType = msgType
+		return "om_orphan", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutCommandReply,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan — no parent
+		Text:    "available agents: main, codegraph",
+	}); err != nil {
+		t.Fatalf("Send(OutCommandReply orphan): %v", err)
+	}
+	if sentMsgType != "interactive" {
+		t.Errorf("msgType = %q, want %q (postOrphanReplyCard is Card 2.0)", sentMsgType, "interactive")
+	}
+}
+
+// TestSend_OutCommandReply_EmptyTextRejected — OutCommandReply with
+// empty text is a programming error (caller should suppress
+// trivially-empty replies upstream). Adapter must surface it
+// rather than silently posting a blank card.
+func TestSend_OutCommandReply_EmptyTextRejected(t *testing.T) {
+	a := testAdapter(t)
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutCommandReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_cmd_1",
+		Text:    "",
+	})
+	if err == nil {
+		t.Fatal("Send(OutCommandReply empty text): expected error, got nil")
+	}
+}
+
+// TestSend_OutCommandReply_OverflowRollsToNewPlaceholder — locks the
+// ErrReceiptOverflow rollover path for OutCommandReply. A reply
+// whose body alone exceeds resultCardEnvelopeBudget (28 KB) must NOT
+// surface the overflow error to the user; the adapter must build a
+// fresh placeholder card carrying the entry, send it via
+// SendCardForReceipt, then RolloverTo so subsequent chunks PATCH
+// the new card. Mirrors the fix-reply-placehold-card shape used by
+// OutReply.
+func TestSend_OutCommandReply_OverflowRollsToNewPlaceholder(t *testing.T) {
+	a := testAdapter(t)
+
+	// sendFunc returns a fresh msgID each call so we can distinguish
+	// the placeholder Create (om_placeholder) from the overflow
+	// rollover Create (om_placeholder_overflow).
+	var sendCount int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sendCount++
+		if sendCount == 1 {
+			return "om_placeholder", nil
+		}
+		return "om_placeholder_overflow", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	// Pre-create the placeholder receipt.
+	_, _, err := a.ensureReceiptForTyping(t.Context(), "oc_test", "om_cmd_overflow", nil)
+	if err != nil {
+		t.Fatalf("ensureReceiptForTyping: %v", err)
+	}
+	if sendCount != 1 {
+		t.Fatalf("placeholder send count = %d, want 1", sendCount)
+	}
+
+	// Single chunk over the 28 KB envelope → would overflow.
+	oversizedText := strings.Repeat("x", 40*1024)
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutCommandReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_cmd_overflow",
+		Text:    oversizedText,
+	}); err != nil {
+		t.Fatalf("Send(OutCommandReply overflow): %v", err)
+	}
+
+	// Rollover path: second SendCard (the overflow placeholder),
+	// no PATCH attempted.
+	if sendCount != 2 {
+		t.Errorf("sendFunc calls = %d, want 2 (placeholder + overflow rollover)", sendCount)
+	}
+
+	// Receipt now points at the overflow card so subsequent chunks
+	// would PATCH it instead of producing yet another placeholder.
+	rcpt := a.receiptFor(t.Context(), "oc_test", "om_cmd_overflow")
+	if rcpt == nil {
+		t.Fatal("receipt missing after overflow")
+	}
+	if rcpt.cardMsgID != "om_placeholder_overflow" {
+		t.Errorf("receipt cardMsgID = %q, want %q (RolloverTo migrated to overflow card)",
+			rcpt.cardMsgID, "om_placeholder_overflow")
 	}
 }
 
@@ -1433,17 +1572,11 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 			wantRootID:        "", // top-level Create, no anchor
 			wantReplyInThread: false,
 		},
-		{
-			name: "OutCommandReply",
-			msg: messages.OutboundMessage{
-				Kind:    messages.OutCommandReply,
-				ChatID:  "oc_test",
-				ReplyTo: "om_user_4", // F-44 follow-up: ReplyTo is ignored (top-level Create)
-				Text:    "/help result",
-			},
-			wantRootID:        "", // top-level Create, no anchor
-			wantReplyInThread: false,
-		},
+		// OutCommandReply removed from the ReplyInBoth / ReplyInChat
+		// dispatch matrix — it now folds into the placeholder receipt
+		// card via AppendEntryWithFooter (PATCH), so neither
+		// ReplyInBoth nor ReplyInChat applies. Locked separately by
+		// TestSend_OutCommandReply_PatchesPlaceholderReceipt above.
 	}
 
 	for _, tc := range cases {

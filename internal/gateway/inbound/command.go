@@ -181,13 +181,12 @@ func (r *Router) resolveEmitter(cs *chatsession.ChatSession) messages.Emitter {
 // or in error paths where no turn exists at all).
 //
 // Channel-side routing for OutCommandReply is documented per
-// channel: Feishu renders it as a top-level Create (ReplyInChat,
-// `TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed`),
-// Telegram appends to the active chain segment, bot folds the
-// payload into its run-reply channel, and Slack uses it for the
-// `chat.postMessage` parent-thread path of `/cwd` / `/use` / `/new`
-// / `/stop`. See docs/channel/slack.md §4 and
-// internal/messages/outbound.go OutCommandReply doc.
+// channel: Feishu folds it into the placeholder receipt card via
+// AppendEntryWithFooter, Telegram appends to the active chain
+// segment, bot folds the payload into its run-reply channel, and
+// Slack uses it for the `chat.postMessage` parent-thread path of
+// `/cwd` / `/use` / `/new` / `/stop`. See docs/channel/slack.md §4
+// and internal/messages/outbound.go OutCommandReply doc.
 func (r *Router) emitCommandReply(ctx context.Context, cs *chatsession.ChatSession, msg *messages.InboundMessage, text string) {
 	em := r.resolveEmitter(cs)
 	if text == "" || em == nil {

@@ -160,7 +160,7 @@ func dispatchSinkEvent(
 	if out.AgentName == "" {
 		out.AgentName = agentName
 	}
-	slog.Default().Debug("sink: post-Translate out fields",
+	slog.Default().Info("sink: post-Translate out fields",
 		"kind", out.Kind.String(),
 		"ev_AgentName", ev.AgentName,
 		"ev_Model", ev.Model,

@@ -1755,7 +1755,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		text := strings.TrimSpace(msg.Result.Text)
 
-		a.logger.Debug("feishu OutResult: incoming msg",
+		a.logger.Info("feishu OutResult: incoming msg",
 			"text_len", len(text),
 			"ReplyTo", msg.ReplyTo,
 			"AgentName", msg.AgentName,
@@ -1815,7 +1815,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// Wire: POST /im/v1/messages (top-level Create) — no
 		// reply_in_thread field, no parent/thread relationship.
 		footerLines := statusbar.StatusBarLines(&msg)
-		a.logger.Debug("feishu OutResult: StatusBarLines",
+		a.logger.Info("feishu OutResult: StatusBarLines",
 			"lines", footerLines,
 			"len", len(footerLines),
 		)

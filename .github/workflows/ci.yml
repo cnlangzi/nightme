@@ -869,7 +869,7 @@ jobs:
             echo "OK: $agent --help responded ($(echo "$output" | wc -l) lines)"
           done
 
-      - name: Verify nightme agents lists every builtin
+      - name: Verify nightme config lists every builtin
         shell: bash
         run: |
           set -e
@@ -878,28 +878,26 @@ jobs:
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             bin="./bin/nightme.exe"
           fi
-          out=$("$bin" agents)
+          # The `nightme agents` standalone command was merged
+          # into `nightme config` → Agents submenu. Drive the
+          # REPL: enter Agents (main menu picks [2]) then back
+          # out (q), then quit the top-level menu (q).
+          out=$(printf '2\nq\nq\n' | "$bin" config 2>&1)
           echo "$out"
-          # Match by word boundary (column-leading NAME in the
-          # table format "NAME\tCOMMAND\tARGS"). We do NOT
-          # require an exact match against the agent set — user-
-          # configured extras in $NIGHTME_CONFIG are additive and
-          # shouldn't fail this gate, so we check subset rather
-          # than equality.
-          #
-          # This step is the regression catch for the dsh-on-
-          # Windows fix: a future refactor that re-gates dsh
-          # behind runtime.GOOS would land here as a missing
-          # row on the windows-latest runner. Same applies to
+          # Match by word boundary — table column is
+          # "STATUS\t#\tNAME\tBRIDGE\tCOMMAND\tARGS". dsh-on-
+          # Windows regression catch: a future refactor that
+          # re-gates dsh behind runtime.GOOS would land here as
+          # a missing row on the windows-latest runner.
           # copilot: a future refactor that drops the
           # `agent.Builtins.Register(copilot.NewStarter(...))`
-          # line in cmd/nightme/agents.go would land here.
+          # line in cmd/nightme/agents.go would land here too.
           for agent in claude codex opencode pi dsh copilot cursor; do
             if ! echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)"; then
-              echo "::error::nightme agents did not list $agent"
+              echo "::error::nightme config Agents menu did not list $agent"
               exit 1
             fi
-            echo "OK: nightme agents lists $agent"
+            echo "OK: nightme config Agents menu lists $agent"
           done
 
       - name: Verify nightme bridge spawns each agent (response required)

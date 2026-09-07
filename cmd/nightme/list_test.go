@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -81,11 +82,16 @@ func TestList_KeepExitedFlagSkipsGC(t *testing.T) {
 }
 
 // TestList_ShowsResumeID asserts the resume column is populated for
-// agents that captured a session id.
+// agents that captured a session id. Uses --all + --keep-exited
+// because the fixture's running Claude entry has a dead PID
+// (12345) and is reconciled to StatusExited by loadListRows before
+// the default view would see it; this test is about the column
+// plumbing, not the alive/dead split (see
+// TestList_ReconcilesDeadPID for that).
 func TestList_ShowsResumeID(t *testing.T) {
 	csFile, asFile, asRun, _ := listFixture(t)
 
-	rows, _, err := loadListRows(csFile, asFile, false, false)
+	rows, _, err := loadListRows(csFile, asFile, true /* all */, true /* keep-exited */)
 	if err != nil {
 		t.Fatalf("loadListRows: %v", err)
 	}
@@ -100,15 +106,16 @@ func TestList_ShowsResumeID(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("running session row missing from list")
+		t.Errorf("reconciled session row missing from list")
 	}
 }
 
 // TestList_ResumeIDColumn verifies the column header and the "-" placeholder
-// for empty resume ids.
+// for empty resume ids. Uses --all + --keep-exited so the fixture's
+// reconciled Claude row is still visible.
 func TestList_ResumeIDColumn(t *testing.T) {
 	csFile, asFile, _, _ := listFixture(t)
-	rows, _, err := loadListRows(csFile, asFile, false, false)
+	rows, _, err := loadListRows(csFile, asFile, true /* all */, true /* keep-exited */)
 	if err != nil {
 		t.Fatalf("loadListRows: %v", err)
 	}
@@ -127,7 +134,10 @@ func TestList_ResumeIDColumn(t *testing.T) {
 
 // TestList_JoinMissingChatSession asserts that an AgentSession whose
 // owning ChatSession has been deleted (orphan) still appears in the
-// list with ChatID="(orphan)".
+// list with ChatID="(orphan)". Uses --all + --keep-exited so the
+// orphan row survives the live reconcile (PID 99999 is dead on the
+// test machine and would otherwise be flipped to exited before
+// the default view builds).
 func TestList_JoinMissingChatSession(t *testing.T) {
 	csFile, asFile, _, _ := listFixture(t)
 	// Add an AgentSession whose ChatSessionID we never register.
@@ -145,7 +155,7 @@ func TestList_JoinMissingChatSession(t *testing.T) {
 		t.Fatalf("Upsert orphan: %v", err)
 	}
 
-	rows, _, err := loadListRows(csFile, asFile, false, false)
+	rows, _, err := loadListRows(csFile, asFile, true /* all */, true /* keep-exited */)
 	if err != nil {
 		t.Fatalf("loadListRows: %v", err)
 	}
@@ -165,12 +175,36 @@ func TestList_JoinMissingChatSession(t *testing.T) {
 }
 
 // TestList_SortedByLastRunAt asserts the rows are sorted by LastRunAt
-// descending (most recent first).
+// descending (most recent first). The live reconcile pass now flips
+// the fixture's running Claude entry (PID 12345, almost certainly
+// dead on the test host) to StatusExited, so a bare default-view
+// call would only see the single detached row and the sort loop
+// would never iterate. We seed a second running entry backed by
+// os.Getpid() (always alive on the test host) so two rows survive
+// and the sort is actually exercised.
 func TestList_SortedByLastRunAt(t *testing.T) {
 	csFile, asFile, _, _ := listFixture(t)
+
+	now := time.Now()
+	if err := asFile.Upsert(&registry.AgentSessionEntry{
+		ID:            "as_run_live",
+		ChatSessionID: "cs_oc_run",
+		Agent:         "claude",
+		Cwd:           "/code/sorted",
+		PID:           os.Getpid(), // live on the test host — survives reconcile
+		Status:        registry.StatusRunning,
+		CreatedAt:     now.Add(-time.Minute),
+		LastRunAt:     now.Add(-30 * time.Second), // newer than the fixture
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
 	rows, _, err := loadListRows(csFile, asFile, false, false)
 	if err != nil {
 		t.Fatalf("loadListRows: %v", err)
+	}
+	if len(rows) < 2 {
+		t.Skipf("reconcile did not leave ≥2 rows (rows=%d); rerun", len(rows))
 	}
 	for i := 1; i < len(rows); i++ {
 		if rows[i].LastRunAt.After(rows[i-1].LastRunAt) {
@@ -226,5 +260,80 @@ func TestList_PreservesExitedWithResumeID(t *testing.T) {
 		if r.AgentSessionID == "as_exited_resume" {
 			t.Errorf("exited row leaked into default list output: %+v", r)
 		}
+	}
+}
+
+// TestList_ReconcilesDeadPID pins the live-reconcile contract: a
+// StatusRunning entry whose PID is no longer alive at probe time is
+// flipped to StatusExited on disk and rendered as "exited" in the
+// returned rows — even though --all is not set, the row is filtered
+// from the default display like any other exited entry.
+//
+// The fixture's running row has PID 12345, which is almost certainly
+// dead on the test machine; that is the realistic shape of a stale
+// entry left behind by a crashed daemon.
+func TestList_ReconcilesDeadPID(t *testing.T) {
+	csFile, asFile, asRun, _ := listFixture(t)
+
+	rows, _, err := loadListRows(csFile, asFile, false, false)
+	if err != nil {
+		t.Fatalf("loadListRows: %v", err)
+	}
+
+	// Default view: no running rows left, because every recorded
+	// PID was either truly dead (reconciled to exited) or never had
+	// one (the detached fixture row).
+	for _, r := range rows {
+		if r.AgentSessionID == asRun.ID && r.Status == registry.StatusRunning {
+			t.Errorf("dead PID %d still rendered as %q", asRun.PID, r.Status)
+		}
+	}
+
+	// On disk: the running row is now StatusExited, PID cleared,
+	// ExitCode is the reconcile sentinel (-3). The SessionID is
+	// preserved (resume id must survive a daemon crash).
+	e, ok := asFile.Get(asRun.ID)
+	if !ok {
+		t.Fatalf("entry %s missing after reconcile", asRun.ID)
+	}
+	if e.Status != registry.StatusExited {
+		t.Errorf("Status = %q, want %q", e.Status, registry.StatusExited)
+	}
+	if e.PID != 0 {
+		t.Errorf("PID = %d, want 0 after reconcile", e.PID)
+	}
+	if e.ExitCode == nil || *e.ExitCode != -3 {
+		var got *int = e.ExitCode
+		t.Errorf("ExitCode = %v, want pointer to -3", got)
+	}
+	if e.SessionID != asRun.SessionID {
+		t.Errorf("SessionID = %q, want %q (resume id must survive reconcile)", e.SessionID, asRun.SessionID)
+	}
+}
+
+// TestList_AllFlagShowsReconciledRow asserts --all surfaces the
+// reconciled row (so an operator can see the exit code).
+func TestList_AllFlagShowsReconciledRow(t *testing.T) {
+	csFile, asFile, asRun, _ := listFixture(t)
+
+	rows, _, err := loadListRows(csFile, asFile, true, false)
+	if err != nil {
+		t.Fatalf("loadListRows: %v", err)
+	}
+
+	var found bool
+	for _, r := range rows {
+		if r.AgentSessionID == asRun.ID {
+			found = true
+			if r.Status != registry.StatusExited {
+				t.Errorf("Status = %q, want %q", r.Status, registry.StatusExited)
+			}
+			if r.PID != 0 {
+				t.Errorf("PID = %d, want 0", r.PID)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("reconciled row missing from --all output")
 	}
 }

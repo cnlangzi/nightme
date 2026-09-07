@@ -183,6 +183,24 @@ func openV12Stores(cfg *config.Config, warn io.Writer) (*chatstore.Store, *regis
 // joined rows (sorted by LastRunAt desc) and the number of exited
 // entries deleted. The GC is performed in a single batched
 // DeleteMany call so N exited entries cost one file rewrite, not N.
+//
+// Side effects on agent_sessions.json (the file is rewritten, not
+// just read):
+//
+//  1. Live reconcile: every StatusRunning / StatusDetached entry
+//     with a PID is probed against the OS. A dead entry is flipped
+//     to StatusExited (ExitCode = runtime.ReconciledExitCode(),
+//     PID cleared) on disk so subsequent calls don't have to
+//     re-probe it. Without this pass, a crashed daemon's ghost
+//     rows show up as "running" forever — see
+//     internal/runtime/probe_pid.go for the probe policy.
+//  2. GC: StatusExited entries without a SessionID are deleted in
+//     one batched write, unless keepExited is true.
+//
+// Without these side effects, list is a pure read. With them it is
+// idempotent — the second call rewrites the same content. Callers
+// that need a strict read-only enumeration (none today) must do
+// their own join.
 func loadListRows(
 	csFile *chatstore.Store,
 	asFile *registry.AgentSessionFile,
@@ -197,10 +215,35 @@ func loadListRows(
 		}
 	}
 
-	// First pass: collect the rows to display + the ids to GC.
+	// First pass: live-reconcile dead PIDs in place. We mutate the
+	// in-memory copy and persist via Upsert so the next list call
+	// sees the corrected status without re-probing.
+	allAS := asFile.List()
+	for _, as := range allAS {
+		if as == nil {
+			continue
+		}
+		if as.PID <= 0 {
+			continue
+		}
+		if as.Status != registry.StatusRunning && as.Status != registry.StatusDetached {
+			continue
+		}
+		if runtime.PidAlive(as.PID) {
+			continue
+		}
+		code := runtime.ReconciledExitCode()
+		as.Status = registry.StatusExited
+		as.PID = 0
+		as.ExitCode = &code
+		if err := asFile.Upsert(as); err != nil {
+			return nil, 0, fmt.Errorf("reconcile %s: %w", as.ID, err)
+		}
+	}
+
+	// Second pass: collect the rows to display + the ids to GC.
 	// Capacity hint: we may emit at most one row per persisted
 	// agent session.
-	allAS := asFile.List()
 	rows := make([]listRow, 0, len(allAS))
 	var toGC []string
 	for _, as := range allAS {
@@ -247,7 +290,7 @@ func loadListRows(
 		})
 	}
 
-	// Second pass: single batched GC write.
+	// Third pass: single batched GC write.
 	if len(toGC) > 0 {
 		if err := asFile.DeleteMany(toGC); err != nil {
 			return nil, 0, fmt.Errorf("gc batch (%d): %w", len(toGC), err)

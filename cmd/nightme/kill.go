@@ -123,6 +123,16 @@ func runKill(cmd *cobra.Command, f killCmdFlags) error {
 	// all=false keeps exited sessions out of the sweep;
 	// keepExited=true suppresses list's auto-GC — kill must not
 	// silently delete entries as a side effect of enumerating them.
+	//
+	// loadListRows also runs the live-reconcile pass internally:
+	// any StatusRunning / StatusDetached entry whose PID is no
+	// longer alive is flipped to StatusExited (ExitCode=-3) before
+	// kill enumerates. Those entries are then filtered out by
+	// all=false, so they no longer appear in the kill report.
+	// This is the desired outcome — they were never alive to
+	// signal — but means the report table shows one row per
+	// truly-alive session, not one per persisted entry. See
+	// internal/runtime/probe_pid.go for the probe policy.
 	rows, _, err := loadListRows(csFile, asFile, false, true)
 	if err != nil {
 		return fmt.Errorf("kill: %w", err)

@@ -120,12 +120,16 @@ func addExitedToFixture(t *testing.T, asFile *registry.AgentSessionFile, id, cha
 }
 
 // TestListTextFormat exercises the default table renderer against a
-// populated v1.2 store. Verifies the header is present, every alive
-// row appears, and the resume column shows the captured id.
+// populated v1.2 store. The fixture's running Claude entry has PID
+// 12345, which is almost certainly dead on the test machine; the
+// live reconcile in loadListRows flips it to StatusExited before the
+// row is built. We use --all + --keep-exited so the reconciled row
+// is still visible (and exercise that path here), and rely on
+// TestList_ReconcilesDeadPID for the default-view behaviour.
 func TestListTextFormat(t *testing.T) {
 	csFile, asFile, asRun, asDet := listFixture(t)
 
-	rows, _, err := loadListRows(csFile, asFile, false, false)
+	rows, _, err := loadListRows(csFile, asFile, true /* all */, true /* keep-exited */)
 	if err != nil {
 		t.Fatalf("loadListRows: %v", err)
 	}
@@ -148,12 +152,6 @@ func TestListTextFormat(t *testing.T) {
 	if !strings.Contains(out, "claude") {
 		t.Errorf("table missing running agent\n%s", out)
 	}
-	if !strings.Contains(out, "12345") {
-		t.Errorf("table missing running PID\n%s", out)
-	}
-	if !strings.Contains(out, "running") {
-		t.Errorf("table missing running status\n%s", out)
-	}
 	if !strings.Contains(out, asRun.SessionID) {
 		t.Errorf("table missing resume id for Claude session\n%s", out)
 	}
@@ -162,6 +160,10 @@ func TestListTextFormat(t *testing.T) {
 	}
 	if !strings.Contains(out, "detached") {
 		t.Errorf("table missing detached status\n%s", out)
+	}
+	// After reconcile the formerly-running row is now exited(-3).
+	if !strings.Contains(out, "exited(-3)") {
+		t.Errorf("table missing reconciled 'exited(-3)' status\n%s", out)
 	}
 	// Detached row has no resume id → "-" placeholder.
 	if !strings.Contains(out, "-") {
@@ -186,11 +188,15 @@ func TestListEmptyAlwaysPrintsHeader(t *testing.T) {
 }
 
 // TestListJSONFormat verifies the --json output is a valid JSON
-// array of joined rows and contains the resume id payload.
+// array of joined rows and contains the resume id payload. Uses
+// --all + --keep-exited because the fixture's running Claude entry
+// has a dead PID and is reconciled to StatusExited before the
+// default view would see it (the JSON path is a serialization
+// contract; liveness is covered by TestList_ReconcilesDeadPID).
 func TestListJSONFormat(t *testing.T) {
 	csFile, asFile, asRun, _ := listFixture(t)
 
-	rows, _, err := loadListRows(csFile, asFile, false, false)
+	rows, _, err := loadListRows(csFile, asFile, true /* all */, true /* keep-exited */)
 	if err != nil {
 		t.Fatalf("loadListRows: %v", err)
 	}

@@ -726,7 +726,9 @@ func (cs *ChatSession) SelectedCwd() string {
 // `git status --porcelain --branch --untracked-files=normal`
 // synchronously against SelectedCwd with a hard 3s cap so a hung
 // git cannot wedge an outbound stamp (see the body for the cap),
-// and LookupPR reads the PR from prcache.Cache.PR synchronously.
+// and LookupPR reads the PR from prcache.Cache.PR synchronously,
+// keyed by cwd (one PR entry per workspace, shared across every
+// AgentSession and chat session that touches it).
 // PR caching stays where it belongs — in the dedicated prcache.Cache
 // with its own 60s TTL, failure-backoff, and background refresh
 // — because the PR lookup costs a `gh/glab` API round-trip.
@@ -784,8 +786,8 @@ func (cs *ChatSession) GitStatusAt(ctx context.Context, cwd string, as *AgentSes
 		cancel()
 	}
 	var pr *messages.PR
-	if deps.LookupPR != nil && as != nil {
-		pr = deps.LookupPR(as.ID, cwd)
+	if deps.LookupPR != nil {
+		pr = deps.LookupPR(cwd)
 	}
 	return &messages.GitStatus{
 		Workspace:   cwd,

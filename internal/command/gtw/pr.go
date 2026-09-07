@@ -267,12 +267,12 @@ func dispatchPR(
 			URL:    url,
 			State:  "open",
 		}
-		for _, as := range cs.Pool() {
-			if as == nil {
-				continue
-			}
-			deps.PRCache.WritePR(as.ID, newPR)
-		}
+		// prcache is keyed by cwd (per-workspace), not by
+		// AgentSession.ID. Every AS touching this same workspace
+		// shares one PR entry — so /gtw pr -a codex in a
+		// chat whose primary is claude makes the link visible
+		// to claude's next StatusBar stamp.
+		deps.PRCache.WritePR(c.Worktree, newPR)
 	}
 
 	// Success path: forward runRes so the footer (agentbar +

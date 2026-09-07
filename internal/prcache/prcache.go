@@ -1,15 +1,15 @@
-// Package prcache — per-AgentSession cache for the GitHub /
+// Package prcache — per-workspace cache for the GitHub /
 // GitLab PR (or MR) associated with the current head branch,
 // refreshed asynchronously on a 60s TTL.
 //
-// Scope: ONE Cache per AgentSession, owned externally (the
-// runtime in cmd/nightme keeps a Registry keyed by
-// AgentSession.ID). The PR lookup closure the runtime builds
-// at startup — internal/runtime/runtime.go's LookupPR, which
-// the Emitter's GitStatusLookup reaches through
-// ChatSession.GitStatus on every outbound stamp — calls
-// cache.MaybeRefresh(cwd, resolver) and then cache.PR() to
-// populate StatusBar.PullRequest. PR() is strict-synchronous
+// Scope: ONE Cache per cwd. The runtime keeps a Registry keyed
+// by cwd (not by AgentSession or chatID). PR is a property of
+// (repo, branch) — the workspace — so the same cwd always sees
+// the same PR regardless of which AgentSession or chat
+// session is asking. /gtw {pr, close} writes via
+// Registry.WritePR(cwd, pr); the runtime's LookupPR closure
+// (passed into the Emitter's GitStatusLookup) reads via
+// GetOrCreate(cwd).MaybeRefresh + PR(). PR() is strict-synchronous
 // and never blocks on network I/O; the worst-case stamp cost
 // is the duration of an unlocked mutex acquire + a struct
 // field read. MaybeRefresh is sync no-I/O itself, only
@@ -39,23 +39,26 @@
 //	  → runtime builds a Resolver closure (gtw.CurrentBranch
 //	    + gtw.CollectPR composed), injected into MaybeRefresh
 //	    via the per-stamp LookupPR closure
-//	Per AgentSession
-//	  → Registry.GetOrCreate(as.ID) returns the same *Cache on
-//	    repeat calls (multi-stamp + multi-event hot path)
+//	Per cwd
+//	  → Registry.GetOrCreate(cwd) returns the same *Cache on
+//	    repeat calls (multi-stamp + multi-event hot path).
+//	    The same cwd across different chat sessions, ASes, or
+//	    chat-primary / GTW-run-once agent pairs always sees
+//	    one PR value — the git state is per-repo, not per-agent.
 //	Per stamp (every outbound message → cs.GitStatus(ctx) →
-//	            deps.LookupPR(as.ID, cwd))
+//	            deps.LookupPR(cwd))
 //	  → cache.MaybeRefresh(cwd, resolver) (sync, no I/O)
 //	  → cache.PR()                          (sync, no I/O)
 //	/gtw pr success
-//	  → Registry.WritePR(as.ID, newPR) per AS in the chat pool
-//	    (we already know the number from `gh pr create`; no
-//	    refresh needed; the next stamp will lazy-refresh and
-//	    correct any branch mismatch within 60 s)
+//	  → Registry.WritePR(cwd, newPR) (we already know the
+//	    number from `gh pr create`; no refresh needed; the next
+//	    stamp will lazy-refresh and correct any branch
+//	    mismatch within 60 s)
 //	/gtw close success
-//	  → Registry.WritePR(as.ID, nil) per AS in the chat pool
-//	    (the branch is being deleted; no refresh needed; the
-//	    next stamp will lazy-refresh from scratch)
-//	Per AgentSession teardown
+//	  → Registry.WritePR(cwd, nil) (the branch is being
+//	    deleted; no refresh needed; the next stamp will
+//	    lazy-refresh from scratch)
+//	Per cache teardown
 //	  → Cache.Cancel is defined but NOT currently wired into
 //	    chatsession / agentsession teardown — the in-flight
 //	    refresh goroutine, if any, is allowed to complete on
@@ -361,25 +364,24 @@ func (c *Cache) Cancel() {
 	}
 }
 
-// Registry is a per-process lookup table from
-// AgentSession.ID to *Cache. Use GetOrCreate from the stamp
-// path to fetch (or lazily allocate) the cache for an AS.
-// Use WritePR from /gtw dispatchers to apply a known PR
-// (or nil, to clear) to every AS in a chat's pool.
+// Registry is a per-process lookup table from cwd to *Cache.
+// Use GetOrCreate from the stamp path to fetch (or lazily
+// allocate) the cache for a workspace. Use WritePR from
+// /gtw dispatchers to apply a known PR (or nil, to clear) to
+// the workspace's cache entry.
 //
 // Locking: the underlying map is guarded by a single
 // sync.RWMutex on Registry. Stamp-path reads (the common
 // case) take the read lock; GetOrCreate-on-first-stamp takes
 // the write lock once and then never again — allocations
-// happen at most once per AgentSession lifetime.
+// happen at most once per cwd lifetime.
 //
-// The Registry holds NO strong references to AgentSessions:
-// the AgentSession owns its own lifecycle, and the cache
-// outlives the AS at most by one StampStatusBarInto call
-// (after which no further reads happen because the next stamp
-// will GetOrCreate under a new AS.ID). Operators don't have
-// to call a "drop AS" hook — the OS reclaims the cache when
-// the daemon exits, and within a session the population
+// The Registry holds NO strong references to AgentSessions or
+// ChatSessions — the workspace is the only key, and the cache
+// outlives any single session as long as some other session
+// asks for the same cwd. Operators don't have to call a
+// "drop cwd" hook — the OS reclaims the cache when the daemon
+// exits, and within a session the population
 // stabilises at the chat's working-set size.
 type Registry struct {
 	mu     sync.RWMutex

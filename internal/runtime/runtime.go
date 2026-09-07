@@ -314,7 +314,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
 			return gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
 		},
-		LookupPR: func(asID, cwd string) *messages.PR {
+		LookupPR: func(cwd string) *messages.PR {
 			// Per-read update attempt: every stamp's PR query
 			// pessimistically nudges the cache. MaybeRefresh is
 			// sync, no I/O, conditional: it only spawns a
@@ -329,7 +329,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 			// deps.PRCache.WritePR when they already know the
 			// answer (the new PR number, or "branch deleted,
 			// clear").
-			if prCache := prCacheReg.GetOrCreate(asID); prCache != nil {
+			if prCache := prCacheReg.GetOrCreate(cwd); prCache != nil {
 				prCache.MaybeRefresh(cwd, prResolver)
 				return prCache.PR()
 			}

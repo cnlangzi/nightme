@@ -348,12 +348,11 @@ func RunClose(
 	// the old branch" entry get cleared too — the next stamp's
 	// lazy MaybeRefresh will fetch fresh from scratch.
 	if deps.PRCache != nil {
-		for _, as := range cs.Pool() {
-			if as == nil {
-				continue
-			}
-			deps.PRCache.WritePR(as.ID, nil)
-		}
+		// prcache is keyed by cwd (per-workspace), not by
+		// AgentSession.ID. Clearing the workspace's PR entry
+		// applies to every AS that has ever stamped on this
+		// path.
+		deps.PRCache.WritePR(c.Worktree, nil)
 	}
 
 	// --- step 8: close's own success card -------------------------

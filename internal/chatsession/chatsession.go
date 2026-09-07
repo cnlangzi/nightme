@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatstore"
@@ -90,6 +92,12 @@ const (
 	PromptRunning = agentsession.PromptRunning
 	PromptDone    = agentsession.PromptDone
 )
+
+// turnIdentityLRUSize bounds the per-chat identity cache. A
+// chat session typically has 1-3 active turns at any moment;
+// 64 is generous headroom for fast-fire /gtw chains. Bounded so
+// a missed PromptEndBus cannot grow the map without limit.
+const turnIdentityLRUSize = 64
 
 // agentCwdKey is the ChatSession pool map key. Moved back from
 // agentsession package — it's a CS-level concept (the pool key
@@ -316,6 +324,21 @@ type ChatSession struct {
 	// from Manager, which holds the single daemon-wide Emitter);
 	// test paths may pass a fake. Immutable post-binding; no
 	// lock needed. nil means "no emitter bound yet" — commands
+
+	// turnIdentity caches the per-userMsgID identity snapshot
+	// captured at MessageQueued time, so channels can fall back
+	// to it when delivering later events (OutResult from the
+	// sink path, etc.) that don't carry the bridge's per-event
+	// identity stamp. The runtime eventbus subscriber writes
+	// this when it stamps identity onto the OutMessageState;
+	// dispatchSinkEvent reads it. Cleared by OnPromptEnded so a
+	// stale turn doesn't leak into the next turn.
+	//
+	// Bounded by turnIdentityLRUSize so a missed PromptEndBus
+	// (e.g., daemon killed mid-turn, panic before defer) cannot
+	// grow the map without limit. 64 is generous: a chat
+	// session typically has 1-3 active turns at any moment.
+	turnIdentity *lru.Cache[string, *TurnIdentity]
 	// must nil-check via Emitter() before calling Send.
 	emitter messages.Emitter
 
@@ -374,6 +397,11 @@ func New(chatID, primaryAgent string) (*ChatSession, error) {
 		// channel so the receipt card can show the live "agent is
 		// working" header.
 		heartbeat: NewHeartbeatTracker(DefaultHeartbeatCap),
+	}
+	var err error
+	cs.turnIdentity, err = lru.New[string, *TurnIdentity](turnIdentityLRUSize)
+	if err != nil {
+		return nil, fmt.Errorf("chatsession: init turnIdentity LRU: %w", err)
 	}
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 	// F-54: one Bus per event kind. Constructed eagerly so the
@@ -994,6 +1022,80 @@ func (cs *ChatSession) SelectedAgentSession() *AgentSession {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.selectedAS
+}
+
+// TurnIdentity is the per-userMsgID identity snapshot captured at
+// MessageQueued time. The Feishu adapter's runtime eventbus
+// subscriber fills it from cs.SelectedAgentSession() (Agent /
+// Model / SessionID) and from cs.GitStatus() (Workspace /
+// Branch / PullRequest) so the channel sink can fall back to
+// these on later events that the bridge didn't stamp.
+type TurnIdentity struct {
+	Model     string
+	SessionID string
+	Workspace string
+	Branch    string
+	// PR is the PR link captured at MessageQueued time. The
+	// sink path reuses this on its OutResult footer so the
+	// standalone card carries the same #N link as the
+	// placeholder.
+	PR *messages.PR
+}
+
+// SetTurnIdentity stores identity for userMsgID. Called by the
+// runtime eventbus subscriber after stamping identity on the
+// OutMessageState for the MessageQueued event. Concurrent calls
+// are safe (lru.Cache is goroutine-safe); a later write overwrites
+// earlier. Bounded by turnIdentityLRUSize — a missed
+// PromptEndBus cannot grow the map without limit.
+//
+// Nil-safe: tests that build a bare &ChatSession{} (without
+// going through New) leave turnIdentity nil. The cache is an
+// optional fast-path, not a correctness boundary — the sink
+// already has its own fallback chain (SelectedAgentSession
+// directly, then identity left empty). Skipping when uninitialised
+// keeps those tests from panicking.
+func (cs *ChatSession) SetTurnIdentity(userMsgID string, id *TurnIdentity) {
+	if userMsgID == "" || id == nil {
+		return
+	}
+	if cs.turnIdentity == nil {
+		return
+	}
+	cs.turnIdentity.Add(userMsgID, id)
+}
+
+// GetTurnIdentity returns the cached identity for userMsgID, or
+// nil if none (or if LRU eviction has dropped it, or if the cache
+// was never initialised). The sink falls back to this when
+// stamping Model / SessionID / Workspace / Branch / PR on later
+// events.
+func (cs *ChatSession) GetTurnIdentity(userMsgID string) *TurnIdentity {
+	if userMsgID == "" {
+		return nil
+	}
+	if cs.turnIdentity == nil {
+		return nil
+	}
+	v, ok := cs.turnIdentity.Get(userMsgID)
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+// ClearTurnIdentity removes the cached identity for userMsgID.
+// Called by replyAgent on the gtw success path so a stale turn
+// doesn't bleed into the next turn. Nil-safe (see SetTurnIdentity
+// for the rationale).
+func (cs *ChatSession) ClearTurnIdentity(userMsgID string) {
+	if userMsgID == "" {
+		return
+	}
+	if cs.turnIdentity == nil {
+		return
+	}
+	cs.turnIdentity.Remove(userMsgID)
 }
 
 // --- InputBuffer FSM (F-53) ---------------------------------------

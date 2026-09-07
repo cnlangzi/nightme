@@ -114,7 +114,7 @@ func dispatchPR(
 	if err != nil {
 		// Reuse the same message format /gtw sync uses — it
 		// already explains the "no origin remote" case.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
@@ -127,11 +127,11 @@ func dispatchPR(
 	// mislead them into running the wrong next step.
 	headExists, err := RemoteBranchExists(ctx, c.Worktree, c.Branch, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 	if !headExists {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf(
 				"❌ origin/%s does not exist — /gtw push first to publish the branch to origin",
 				c.Branch)), nil
@@ -143,7 +143,7 @@ func dispatchPR(
 		// resolveProvider already produces friendly messages
 		// (no `origin` remote / invalid URL / unsupported
 		// platform). Echo verbatim.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
@@ -159,14 +159,14 @@ func dispatchPR(
 		// would mislead the user about the actual problem, so
 		// surface the install hint without a gate-2 prefix.
 		if errors.Is(err, ErrCLINotInstalled) {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf("❌ %v", err)), nil
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ check existing PR: %v", err)), nil
 	}
 	if existing != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf(
 				"❌ branch %s already has an open PR (#%d): %s",
 				c.Branch, existing.Number, existing.URL)), nil
@@ -184,7 +184,7 @@ func dispatchPR(
 	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
 		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, ymlAgent)
 	if err != nil {
-		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+		return replyAgent(ctx, cs.Emitter(), cs, chatID, messageID,
 			err.Error(), agentName, runRes), nil
 	}
 	text := runRes.Text
@@ -193,7 +193,7 @@ func dispatchPR(
 	if perr != nil {
 		// Agent output wasn't usable. Echo the raw text so
 		// the user can copy/paste into gh/glab themselves.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf(
 				"❌ %v — agent output was:\n%s",
 				perr, indentLines(text, "  "))), nil
@@ -228,25 +228,25 @@ func dispatchPR(
 		//     translation, NO masking.
 		switch {
 		case errors.Is(err, ErrStaleUpstream):
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf(
 					"❌ origin/%s no longer exists — /gtw push first to republish",
 					c.Branch)), nil
 		case errors.Is(err, ErrNoCommitsBetween):
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf(
 					"❌ no commits between %s and %s — push new commits first, or rebase onto a newer base.",
 					baseBranch, c.Branch)), nil
 		case errors.Is(err, ErrPRExists):
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf(
 					"❌ a PR for %s already exists — check your repo's PR list.",
 					c.Branch)), nil
 		case errors.Is(err, ErrCLINotInstalled):
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf("❌ %v", err)), nil
 		default:
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf("❌ create PR failed: %v", err)), nil
 		}
 	}
@@ -279,7 +279,7 @@ func dispatchPR(
 	// usagebar) renders. Failure paths above (parsePRReply,
 	// resolveProvider, CreatePR, ErrPRExists) stay on the
 	// no-stamp reply — they're not the agent-result surface.
-	return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+	return replyAgent(ctx, cs.Emitter(), cs, chatID, messageID,
 		card, agentName, runRes), nil
 }
 

@@ -1700,7 +1700,7 @@ func TestSend_OutResult_EmptySkipped(t *testing.T) {
 	if err := a.Send(t.Context(), messages.OutboundMessage{
 		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
-		ReplyTo: "om_x",
+		ReplyTo: "om_x_no_receipt",
 		Text:    "",
 		Result:  &agent.AgentResultEvent{Text: ""},
 	}); err != nil {
@@ -1827,18 +1827,17 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 	}
 }
 
-// TestSend_OutResult_OrphanTopLevel verifies F-46 unification: an
-// OutResult with no parent userMsgID posts as a Card 2.0 (interactive)
-// — NOT plain text — matching OutReply's postOrphanReplyCard
-// invariant. Pre-F-46 the orphan path fell through to
-// sendResultAsReply → sendRawOutText (MsgTypeText), so the bubble
-// had no <hr> / no grey footer even when the anchored path rendered
-// one. F-46 routes both through buildResultCardJSON (which shares
-// cardFooterElements with buildReceiptCard) so the footer renders
-// identically in every case.
+// TestSend_OutResult_OrphanTopLevel verifies that an OutResult
+// with no parent userMsgID (or with a ReplyTo that has no receipt
+// bound) still posts as a Card 2.0 via sendOrphanResultCard — NOT
+// plain text — matching OutReply's postOrphanReplyCard invariant.
+// Pre-fix the orphan path fell through to sendResultAsReply →
+// sendRawOutText (MsgTypeText), so the bubble had no <hr> / no
+// grey footer even when the anchored path rendered one.
+//
+// (Body was F-CLAUDE-PRINT-002-skipped; re-enable when a focused
+// orphan-test fixture is reintroduced.)
 func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
-	// F-CLAUDE-PRINT-002: body removed pending rewrite;
-	// pre-refactor code had refs to removed types (StatusBar wrapper).
 	t.Skip("F-CLAUDE-PRINT-002: stub")
 }
 

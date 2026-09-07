@@ -59,11 +59,11 @@ func dispatchCommit(
 	// gates reading the same truth.
 	snap, err := CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
 	}
 	if snap == nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 	}
@@ -72,14 +72,14 @@ func dispatchCommit(
 	// unmerged state means the worktree isn't coherent; the user
 	// should resolve (or `git rebase --abort`) first.
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, reason), nil
 	}
 
 	// 1b. Refuse detached HEAD. Mirrors dispatchPush's
 	// "snap.Branch == \"\"" early-return — keep the two
 	// gates' policy symmetrical.
 	if snap.Branch == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ detached HEAD — checkout a named branch first"), nil
 	}
 
@@ -87,7 +87,7 @@ func dispatchCommit(
 	// "nothing to push" so the user sees which axis they're
 	// short on.
 	if snap.WorkingTreeIsClean() {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"ℹ️ nothing to commit\n"+
 				"  no uncommitted changes on "+snap.Branch), nil
 	}
@@ -98,7 +98,7 @@ func dispatchCommit(
 	// didn't commit" class. Surface the read error.
 	headBefore, err := headSHA(ctx, c.Worktree, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ read HEAD: %v", err)), nil
 	}
 
@@ -113,7 +113,7 @@ func dispatchCommit(
 	runRes, agentName, err := runAgentFor(ctx, cs, c.Worktree,
 		buildAgentPrompt(c), chatID, messageID, args.Agent, ymlAgent)
 	if err != nil {
-		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+		return replyAgent(ctx, cs.Emitter(), cs, chatID, messageID,
 			err.Error(), agentName, runRes), nil
 	}
 
@@ -125,7 +125,7 @@ func dispatchCommit(
 	// 5. Verify the agent actually committed (HEAD advance +
 	// worktree clean + branch still on c.Branch).
 	if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, msg), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, msg), nil
 	}
 
 	// 6. Re-snapshot. Rare but documented: an agent can produce
@@ -135,16 +135,16 @@ func dispatchCommit(
 	// added a conflict entry. We cannot trust the original snap.
 	snap, err = CollectReadinessForDispatch(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ re-read worktree status after agent: %v", err)), nil
 	}
 	if snap == nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 	}
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, reason), nil
 	}
 
 	// 7. Build the success card from git log — NOT from agent
@@ -156,14 +156,14 @@ func dispatchCommit(
 	card, err := replyCommitSuccessCard(ctx, c, agentName,
 		headBefore+"..HEAD", deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ commit landed but couldn't render card: %v", err)), nil
 	}
 	// Success path: forward runRes so the footer (agentbar +
 	// usagebar) renders. Failure paths above stay on the no-stamp
 	// reply — the user just got an error message, not an agent
 	// result, so footer metadata isn't applicable.
-	return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+	return replyAgent(ctx, cs.Emitter(), cs, chatID, messageID,
 		card, agentName, runRes), nil
 }
 

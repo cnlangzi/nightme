@@ -1098,8 +1098,36 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 // it bypassed the receipt entirely; now that both kinds share the
 // receipt path, the rollover semantics align.
 func (a *Adapter) appendReplyToReceipt(ctx context.Context, msg messages.OutboundMessage, text string, r *MessageReceipt) error {
+	return a.appendEntryToReceipt(ctx, msg, text, newOutReplyEntry(text), r)
+}
+
+// appendEntryToReceipt is the body shared by appendReplyToReceipt
+// (and the OutCommandReply case in Send) — the only difference
+// between reply kinds on the receipt path is the entry icon.
+// Centralising the AppendEntryWithFooter + overflow-rollover logic
+// keeps the reply kinds in lock-step.
+// and OutResult on the receipt path is the entry icon. Centralising
+// the AppendEntryWithFooter + overflow-rollover logic keeps the
+// three reply kinds in lock-step (appendReplyToReceipt /
+// appendResultToReceipt / OutCommandReply case in Send).
+//
+// On ErrReceiptOverflow the helper mints a fresh placeholder card
+// carrying the overflowing entry, sends it via SendCardForReceipt,
+// and migrates the receipt to it via RolloverTo. Subsequent chunks
+// PATCH the new card instead of producing N standalone bubbles. This
+// is the same shape fix-reply-placehold-card established for
+// OutReply — pre-fix OutCommandReply had no rollover path because
+// it bypassed the receipt entirely; now that all three kinds share
+// the receipt path, the rollover semantics align.
+func (a *Adapter) appendEntryToReceipt(
+	ctx context.Context,
+	msg messages.OutboundMessage,
+	text string,
+	entry LogEntry,
+	r *MessageReceipt,
+) error {
+	_ = text // entry already carries the text
 	footerLines := statusbar.StatusBarLines(&msg)
-	entry := newOutReplyEntry(text)
 	if err := r.AppendEntryWithFooter(ctx, entry, footerLines); err != nil {
 		if !errors.Is(err, ErrReceiptOverflow) {
 			return err
@@ -1125,22 +1153,6 @@ func (a *Adapter) appendReplyToReceipt(ctx context.Context, msg messages.Outboun
 		// pre-fix postOrphanReplyCard surface so the user sees the
 		// same single bubble.
 		msgID, sendErr := a.SendCardForReceipt(ctx, msg.ChatID, body, "", false)
-		// sendErr != nil OR msgID == "" is a failure:
-		//
-		//   - sendErr != nil: the SDK call itself failed (network /
-		//     rate-limit / auth / API rejection).
-		//
-		//   - msgID == "" with sendErr == nil: Feishu accepted the
-		//     send (resp.Success() == true) but resp.Data is nil OR
-		//     resp.Data.MessageId is nil (reply.go:294-297's
-		//     ReplyInChat fall-through). The placeholder card IS
-		//     already in chat but we have no id to PATCH —
-		//     accepting it would silently leak the card and leave
-		//     the receipt on the OLD cardMsgID, so the next
-		//     overflow chunk creates yet another placeholder (N
-		//     bubbles, defeating the rollover). Treat as a failure
-		//     so the next chunk re-tries the overflow path on a
-		//     healthy Feishu response.
 		if sendErr != nil || msgID == "" {
 			if sendErr == nil {
 				a.logger.Warn("feishu: SendCardForReceipt returned empty msgID on reply overflow; treating as failure",
@@ -1755,24 +1767,6 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		}
 		text := strings.TrimSpace(msg.Result.Text)
 
-		a.logger.Info("feishu OutResult: incoming msg",
-			"text_len", len(text),
-			"ReplyTo", msg.ReplyTo,
-			"AgentName", msg.AgentName,
-			"Model", msg.Model,
-			"SessionID", msg.SessionID,
-			"Workspace", msg.Workspace,
-			"Branch", msg.Branch,
-			"GitStatus_nil", msg.GitStatus == nil,
-			"GitStatus_Workspace", func() string {
-				if msg.GitStatus == nil {
-					return ""
-				}
-				return msg.GitStatus.Workspace
-			}(),
-			"HasUsage", msg.Usage != nil,
-		)
-
 		// Empty-body path: bridges stream text as OutReply and
 		// send Result with Text=="" + metadata (claudecode post
 		// text-dedup; acp / pty by wire shape). PATCH the existing
@@ -1814,12 +1808,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		//
 		// Wire: POST /im/v1/messages (top-level Create) — no
 		// reply_in_thread field, no parent/thread relationship.
-		footerLines := statusbar.StatusBarLines(&msg)
-		a.logger.Info("feishu OutResult: StatusBarLines",
-			"lines", footerLines,
-			"len", len(footerLines),
-		)
-		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, footerLines)
+		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, statusbar.StatusBarLines(&msg))
 
 	// F-49: case gateway.OutCompaction: deleted. The runtime handler
 	// no longer produces an OutboundMessage for EventAgentCompaction;
@@ -2139,6 +2128,12 @@ func (a *Adapter) sendResultAsReply(
 	if err != nil {
 		return err
 	}
+	a.logger.Debug("feishu OutResult: rendered body",
+		"msg_type", msgType,
+		"body_bytes", len(body),
+		"body_contains_hr", strings.Contains(body, `"hr"`),
+		"body_contains_font_grey", strings.Contains(body, `color='grey'`),
+	)
 
 	// Envelope defensive cap. Adversarial input that survives the byte
 	// budget above (e.g., very wide ASCII tables or emojis) might still

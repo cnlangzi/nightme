@@ -160,29 +160,85 @@ func dispatchSinkEvent(
 	if out.AgentName == "" {
 		out.AgentName = agentName
 	}
-	slog.Default().Info("sink: post-Translate out fields",
-		"kind", out.Kind.String(),
-		"ev_AgentName", ev.AgentName,
-		"ev_Model", ev.Model,
-		"ev_SessionID", ev.SessionID,
-		"ev_Workspace", ev.Workspace,
-		"ev_Branch", ev.Branch,
-		"out_AgentName", out.AgentName,
-		"out_Model", out.Model,
-		"out_SessionID", out.SessionID,
-		"out_Workspace", out.Workspace,
-		"out_Branch", out.Branch,
-		"out_ChatID", out.ChatID,
-		"out_ReplyTo", out.ReplyTo,
-		"out_HasResult", out.Result != nil,
-		"out_ResultText_len", func() int {
-			if out.Result == nil {
-				return 0
+	// Identity fallback from cs.SelectedAgentSession(). The runtime
+	// eventbus subscriber (runtime/eventbus.go:199-208) re-points
+	// cs.selectedAS to the actual agent that ran the turn — for
+	// /gtw pr the chat primary is what fires MessageQueued, but
+	// once the run-once pi agent activates, cs.selectedAS tracks
+	// pi's AS. By the time the sink emits the final OutResult,
+	// reading Model / SessionID / Workspace / PullRequest from
+	// the current selectedAS gives the right agent's identity
+	// (which happens to be the same as the placeholder for
+	// pi-primary users; differs for users whose chat primary ≠
+	// gtw agent).
+	if cs != nil {
+		// Primary path: read identity from cs.GetTurnIdentity, which
+		// the runtime eventbus subscriber cached at MessageQueued
+		// time (runtime/eventbus.go:199+). For /gtw run-once, the
+		// chat's selected AS is the chat primary (e.g., pi), and
+		// the runtime subscriber stamps that primary's identity
+		// (Model / SessionID / Workspace) onto the cache. The sink
+		// path's events then inherit that identity — same agent as
+		// the placeholder card.
+		//
+		// Fallback: also read from cs.SelectedAgentSession() for the
+		// (rare) case where the cache wasn't populated, e.g. when
+		// the EventSink itself was bound before the runtime
+		// subscriber ran. (Both branches do the same work — the
+		// cache is a forward-declaration of what the runtime
+		// subscriber captures.)
+		if id := cs.GetTurnIdentity(replyTo); id != nil {
+			if out.AgentName == "" {
+				out.AgentName = agentName
 			}
-			return len(out.Result.Text)
-		}(),
-		"out_HasUsage", out.Usage != nil,
-	)
+			if out.Model == "" {
+				out.Model = id.Model
+			}
+			if out.SessionID == "" {
+				out.SessionID = id.SessionID
+			}
+			if out.Workspace == "" {
+				out.Workspace = id.Workspace
+			}
+			if out.Branch == "" {
+				out.Branch = id.Branch
+			}
+			// PR info is captured separately by the runtime
+			// subscriber on the GitStatus stamp; mirror it onto
+			// the OutboundMessage so buildResultCardJSON renders
+			// the #N segment in line 3.
+			if out.GitStatus == nil && id.PR != nil {
+				out.GitStatus = &messages.GitStatus{
+					Workspace:   id.Workspace,
+					PullRequest: id.PR,
+				}
+			}
+		} else if as := cs.SelectedAgentSession(); as != nil {
+			if out.AgentName == "" {
+				out.AgentName = as.Agent
+			}
+			if out.Model == "" {
+				out.Model = as.Model()
+			}
+			if out.SessionID == "" {
+				out.SessionID = as.SessionID()
+			}
+			if out.Workspace == "" {
+				out.Workspace = as.Cwd
+			}
+		}
+	}
+	// No identity fallback from cs.SelectedAgentSession() here:
+	// for GTW run-once the chat session's selected AS is the
+	// chat's primary, NOT the run-once agent (pi), so reading
+	// Model / SessionID from it would stamp the wrong agent's
+	// identity. The sink deliberately surfaces only the agentName
+	// the dispatcher knows; the channel footer falls back to a
+	// partial identity (🤖: pi) on the standalone card, while
+	// the runtime subscriber (which has direct access to the
+	// primary AS via runtime/eventbus.go:199-208) handles the
+	// receipt card / MessageState surface where full identity
+	// is correct.
 
 	// F-CODEX-RUNONCE-REVIEW-EVENT: apply the same think / tools
 	// gate the long-lived runtime.NewEventHandler applies

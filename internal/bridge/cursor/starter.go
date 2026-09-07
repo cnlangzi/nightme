@@ -25,7 +25,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/acp"
@@ -39,9 +38,10 @@ import (
 // right per-mode behavior (timeout settings, event queue
 // routing, /stop propagation).
 type Starter struct {
-	name    string
-	command string
-	args    []string
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
 }
 
 // NewStarter constructs the cursor spawn recipe. Entry point
@@ -59,7 +59,8 @@ type Starter struct {
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
 		name:    name,
-		command: command,
+		command:        command,
+		defaultCommand: command,
 		args:    append([]string(nil), args...),
 	}
 }
@@ -71,13 +72,30 @@ func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, nil)
 }
 
-// Detect verifies the cursor binary resolves on PATH. Called
-// by Spawner before Start; an error aborts session creation with
-// a clear "cursor not installed" message.
+// Detect verifies the configured command resolves to an invokable
+// binary (absolute path or PATH-relative name). Called by Spawner
+// before Start; an error aborts session creation.
 func (s *Starter) Detect() error {
-	_, err := exec.LookPath(s.command)
-	return err
+	return agent.ResolveCommand(s.command)
 }
+
+// Init overrides the executable path used by Detect and
+// Info. cfg.Agents path overrides flow through
+// agentregistry.Build. The mutation hits the singleton
+// held in agent.Builtins; tests that exercise cfg.Agents
+// overrides should snapshot and restore via Command().
+func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
+	s.command = command
+}
+
+// Command returns the current executable path. Used by tests
+// to snapshot Builtins state before mutations from
+// agentregistry.Build.
+func (s *Starter) Command() string { return s.command }
 
 // Start spawns `cursor-agent` + s.args under a PTY (via the
 // generic acp bridge), runs the initialize + session/new

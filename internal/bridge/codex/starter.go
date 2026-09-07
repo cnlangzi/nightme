@@ -13,7 +13,6 @@ package codex
 import (
 	"context"
 	"fmt"
-	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -21,18 +20,20 @@ import (
 // Starter is the codex spawn recipe. Held in agent.Builtins as a
 // singleton per agent name.
 type Starter struct {
-	name    string
-	command string
-	args    []string
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
 }
 
 // NewStarter constructs the codex spawn recipe. Entry point used
 // at registration time (cmd/nightme/agents.go calls it from init()).
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
+		name:           name,
+		command:        command,
+		defaultCommand: command,
+		args:           append([]string(nil), args...),
 	}
 }
 
@@ -43,13 +44,34 @@ func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
 }
 
-// Detect verifies the `codex` binary resolves on PATH. Called by
-// Spawner before Start; an error aborts session creation with a
-// clear "codex not installed" message.
+// Detect verifies the configured command resolves to an invokable
+// binary (absolute path or PATH-relative name). Called by Spawner
+// before Start; an error aborts session creation.
 func (s *Starter) Detect() error {
-	_, err := exec.LookPath(s.command)
-	return err
+	return agent.ResolveCommand(s.command)
 }
+
+// Init overrides the executable path used by Detect and
+// Info. cfg.Agents path overrides flow through
+// agentregistry.Build. Passing "" resets to the default
+// baked in by NewStarter — used by Build to drop stale
+// overrides when cfg.Agents no longer names this agent.
+//
+// The mutation hits the singleton held in agent.Builtins;
+// tests that exercise cfg.Agents overrides should snapshot
+// and restore via Command().
+func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
+	s.command = command
+}
+
+// Command returns the current executable path. Used by tests
+// to snapshot Builtins state before mutations from
+// agentregistry.Build.
+func (s *Starter) Command() string { return s.command }
 
 // Start spawns codex app-server and returns a live *agent.Agent
 // that streams events on its Events channel. The Starter is
@@ -104,8 +126,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // runCodexReviewPlain so the chat channel's StatusBar / receipt
 // shows the same Ready → Text → Result lifecycle the live-*Agent
 // bridges (dsh/acp/…) emit. Without this forward, /review on codex
-// renders 30s of silence and then dumps the final text — see the
-// pre-fix regression this commit fixes.
+// renders 30s of silence and then dumps the final text.
 func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...agent.RunOnceOption) (agent.RunResult, error) {
 	// Forward the full cfg, not just Workspace — Review callers
 	// (/review dispatcher) build cfg from the chat session's

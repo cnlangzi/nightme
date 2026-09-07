@@ -101,6 +101,8 @@ the way.
 - **A chat channel** — see [Chat Channels](#chat-channels) for what's supported today. `nightme login feishu` registers via QR scan; `nightme login telegram` walks through the BotFather token setup.
 - **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, Codex, DSH (DeepSeek Harness), or GitHub Copilot CLI. Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
 
+  If none is on `$PATH`, NightMe's first run detects the gap and prompts you to enter the absolute path to whichever binary you have installed (e.g. `/Users/me/.local/bin/claude`). The path is saved in `~/.nightme/config.yaml` and applied on every subsequent run — no shell re-login required. In a non-interactive session (CI, supervisor, container) NightMe exits non-zero instead of prompting; configure the path before launching, or run `nightme config` interactively.
+
 ## Install
 
 Three ways to get `nightme` on your machine:

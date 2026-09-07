@@ -320,6 +320,8 @@ func (b *fakeAgentBuilder) Info() agent.Info {
 	return agent.NewInfo(b.name, agent.ModePTY, "fake-"+b.name, nil, nil)
 }
 func (b *fakeAgentBuilder) Detect() error { return nil }
+func (b *fakeAgentBuilder) Init(string) {}
+func (b *fakeAgentBuilder) Clone() agent.Starter { return &fakeAgentBuilder{name: b.name, events: b.events} }
 func (b *fakeAgentBuilder) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
 	return agent.NewAgent(b.Info(), 99999, b.events, &fakeBuilderDriver{inner: b}), nil
 }

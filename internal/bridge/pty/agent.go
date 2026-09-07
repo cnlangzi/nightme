@@ -63,12 +63,13 @@ type driver struct {
 // defensively copied.
 func NewStarter(name, command string, args, env []string, cols, rows int) *Starter {
 	return &Starter{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
-		env:     append([]string(nil), env...),
-		cols:    cols,
-		rows:    rows,
+		name:           name,
+		command:        command,
+		defaultCommand: command,
+		args:           append([]string(nil), args...),
+		env:            append([]string(nil), env...),
+		cols:           cols,
+		rows:           rows,
 	}
 }
 

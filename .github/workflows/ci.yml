@@ -263,7 +263,7 @@ jobs:
           # subcommand must appear. If a future refactor
           # drops cmdRegistry or breaks the banner loop,
           # at least one of these substrings goes missing.
-          for cmd in list agents config kill clean version; do
+          for cmd in list config kill clean version; do
             if ! echo "$out" | grep -qE "(^|[[:space:]])${cmd}([[:space:]]|$)"; then
               echo "::error::REPL banner missing '$cmd'"
               exit 1
@@ -469,109 +469,6 @@ jobs:
       # build — with creds present the feishu builder accepts the
       # channel (the WS connection then fails+reconnects in a
       # goroutine, non-fatal) and the daemon reaches "ready".
-      - name: Verify daemon lifecycle (start/stop/restart/status)
-        shell: bash
-        env:
-          NIGHTME_FEISHU_APP_ID: ci
-          NIGHTME_FEISHU_APP_SECRET: ci
-          NIGHTME_FEISHU_VERIFICATION_TOKEN: ci
-        run: |
-          # build.bat → bin/nightme.exe, make build → bin/nightme
-          # (see the `Build nightme` step above). Both bake
-          # version metadata in via -ldflags, which `nightme
-          # status` reports — a regression in the LDFLAGS list
-          # surfaces here as a "version unknown" row.
-          bin="./bin/nightme"
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            bin="./bin/nightme.exe"
-          fi
-          # Isolate all daemon state (config, lock, pipe, log,
-          # crash capture) under one deterministic temp dir per
-          # job. $RUNNER_TEMP is a clean, native-path temp GitHub
-          # Actions provisions per job (D:\a\_temp on Windows,
-          # /home/runner/work/_temp on Linux, similar on macOS) —
-          # using it (rather than `mktemp -d`) avoids MSYS-path
-          # resolution quirks where a `/tmp/...` value handed to
-          # the Windows binary can resolve to a different native
-          # path than the shell sees, which on some runners left
-          # the daemon polling a pipe the child never bound.
-          root="${RUNNER_TEMP:-$(mktemp -d)}/nightme-daemon-test"
-          rm -rf "$root"
-          mkdir -p "$root"
-          export NIGHTME_CONFIG="$root/config.yaml"   # non-existent → defaults
-          export NIGHTME_PATHS_DATA_DIR="$root/data"  # lock + pipe + stderr
-          export NIGHTME_LOGGING_FILE="$root/nightme.log"
-          stderr="$root/data/daemon-stderr.log"
-          # Always tear down a stray daemon so a mid-script
-          # failure does not leave the process running on the
-          # runner (the runner is ephemeral, but a leaked daemon
-          # would hold the lock and cascade-fail later steps).
-          trap '[ -n "$bin" ] && "$bin" stop >/dev/null 2>&1 || true' EXIT
-
-          fail=0
-          # check <desc> <actual> <expected-regex>
-          check() {
-            if printf '%s' "$2" | grep -qE -- "$3"; then
-              echo "OK: $1"
-            else
-              echo "::error::$1 — expected /$3/, got:"
-              printf '%s\n' "$2" | sed 's/^/    /'
-              fail=1
-            fi
-          }
-
-          echo '--- status on cold start (expect: not running) ---'
-          out=$("$bin" status 2>&1 || true)
-          echo "$out"
-          check "cold status reports not running" "$out" 'not running|not currently running|is not running'
-
-          echo '--- start ---'
-          out=$("$bin" start 2>&1 || true)
-          echo "$out"
-          check "start reports started" "$out" 'daemon started \(pid='
-          # `start` already waits for Ping=ready before returning,
-          # but give slow CI runners a grace window.
-          sleep 2
-
-          echo '--- status (expect: ready) ---'
-          out=$("$bin" status 2>&1 || true)
-          echo "$out"
-          check "status reports ready" "$out" 'ready'
-          if [ "$fail" = "1" ] && [ -f "$stderr" ]; then
-            echo '----- daemon stderr -----'; cat "$stderr"; echo '----- end stderr -----'
-          fi
-
-          echo '--- start while running (expect: already running) ---'
-          out=$("$bin" start 2>&1 || true)
-          echo "$out"
-          check "second start reports already running" "$out" 'already running'
-
-          echo '--- restart ---'
-          out=$("$bin" restart 2>&1 || true)
-          echo "$out"
-          check "restart reports started" "$out" 'daemon started \(pid='
-          sleep 2
-          out=$("$bin" status 2>&1 || true)
-          echo "$out"
-          check "status reports ready after restart" "$out" 'ready'
-
-          echo '--- stop ---'
-          out=$("$bin" stop 2>&1 || true)
-          echo "$out"
-          check "stop reports stopped" "$out" 'daemon stopped'
-
-          echo '--- status after stop (expect: not running) ---'
-          out=$("$bin" status 2>&1 || true)
-          echo "$out"
-          check "status after stop reports not running" "$out" 'not running|not currently running|is not running'
-
-          if [ "$fail" != "0" ]; then
-            echo "::error::daemon lifecycle gate failed on ${{ matrix.os }}"
-            [ -f "$stderr" ] && { echo '----- daemon stderr -----'; cat "$stderr"; }
-            exit 1
-          fi
-          echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
-
       - name: Install agents (officially-supported methods per agent)
         shell: bash
         run: |
@@ -740,6 +637,109 @@ jobs:
           "$agentPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
+      - name: Verify daemon lifecycle (start/stop/restart/status)
+        shell: bash
+        env:
+          NIGHTME_FEISHU_APP_ID: ci
+          NIGHTME_FEISHU_APP_SECRET: ci
+          NIGHTME_FEISHU_VERIFICATION_TOKEN: ci
+        run: |
+          # build.bat → bin/nightme.exe, make build → bin/nightme
+          # (see the `Build nightme` step above). Both bake
+          # version metadata in via -ldflags, which `nightme
+          # status` reports — a regression in the LDFLAGS list
+          # surfaces here as a "version unknown" row.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
+          # Isolate all daemon state (config, lock, pipe, log,
+          # crash capture) under one deterministic temp dir per
+          # job. $RUNNER_TEMP is a clean, native-path temp GitHub
+          # Actions provisions per job (D:\a\_temp on Windows,
+          # /home/runner/work/_temp on Linux, similar on macOS) —
+          # using it (rather than `mktemp -d`) avoids MSYS-path
+          # resolution quirks where a `/tmp/...` value handed to
+          # the Windows binary can resolve to a different native
+          # path than the shell sees, which on some runners left
+          # the daemon polling a pipe the child never bound.
+          root="${RUNNER_TEMP:-$(mktemp -d)}/nightme-daemon-test"
+          rm -rf "$root"
+          mkdir -p "$root"
+          export NIGHTME_CONFIG="$root/config.yaml"   # non-existent → defaults
+          export NIGHTME_PATHS_DATA_DIR="$root/data"  # lock + pipe + stderr
+          export NIGHTME_LOGGING_FILE="$root/nightme.log"
+          stderr="$root/data/daemon-stderr.log"
+          # Always tear down a stray daemon so a mid-script
+          # failure does not leave the process running on the
+          # runner (the runner is ephemeral, but a leaked daemon
+          # would hold the lock and cascade-fail later steps).
+          trap '[ -n "$bin" ] && "$bin" stop >/dev/null 2>&1 || true' EXIT
+
+          fail=0
+          # check <desc> <actual> <expected-regex>
+          check() {
+            if printf '%s' "$2" | grep -qE -- "$3"; then
+              echo "OK: $1"
+            else
+              echo "::error::$1 — expected /$3/, got:"
+              printf '%s\n' "$2" | sed 's/^/    /'
+              fail=1
+            fi
+          }
+
+          echo '--- status on cold start (expect: not running) ---'
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "cold status reports not running" "$out" 'not running|not currently running|is not running'
+
+          echo '--- start ---'
+          out=$("$bin" start 2>&1 || true)
+          echo "$out"
+          check "start reports started" "$out" 'daemon started \(pid='
+          # `start` already waits for Ping=ready before returning,
+          # but give slow CI runners a grace window.
+          sleep 2
+
+          echo '--- status (expect: ready) ---'
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "status reports ready" "$out" 'ready'
+          if [ "$fail" = "1" ] && [ -f "$stderr" ]; then
+            echo '----- daemon stderr -----'; cat "$stderr"; echo '----- end stderr -----'
+          fi
+
+          echo '--- start while running (expect: already running) ---'
+          out=$("$bin" start 2>&1 || true)
+          echo "$out"
+          check "second start reports already running" "$out" 'already running'
+
+          echo '--- restart ---'
+          out=$("$bin" restart 2>&1 || true)
+          echo "$out"
+          check "restart reports started" "$out" 'daemon started \(pid='
+          sleep 2
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "status reports ready after restart" "$out" 'ready'
+
+          echo '--- stop ---'
+          out=$("$bin" stop 2>&1 || true)
+          echo "$out"
+          check "stop reports stopped" "$out" 'daemon stopped'
+
+          echo '--- status after stop (expect: not running) ---'
+          out=$("$bin" status 2>&1 || true)
+          echo "$out"
+          check "status after stop reports not running" "$out" 'not running|not currently running|is not running'
+
+          if [ "$fail" != "0" ]; then
+            echo "::error::daemon lifecycle gate failed on ${{ matrix.os }}"
+            [ -f "$stderr" ] && { echo '----- daemon stderr -----'; cat "$stderr"; }
+            exit 1
+          fi
+          echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
+
       - name: Verify each agent binary is on PATH
         shell: bash
         run: |
@@ -869,7 +869,7 @@ jobs:
             echo "OK: $agent --help responded ($(echo "$output" | wc -l) lines)"
           done
 
-      - name: Verify nightme agents lists every builtin
+      - name: Verify nightme config lists every builtin
         shell: bash
         run: |
           set -e
@@ -878,28 +878,26 @@ jobs:
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             bin="./bin/nightme.exe"
           fi
-          out=$("$bin" agents)
+          # The `nightme agents` standalone command was merged
+          # into `nightme config` → Agents submenu. Drive the
+          # REPL: enter Agents (main menu picks [2]) then back
+          # out (q), then quit the top-level menu (q).
+          out=$(printf '2\nq\nq\n' | "$bin" config 2>&1)
           echo "$out"
-          # Match by word boundary (column-leading NAME in the
-          # table format "NAME\tCOMMAND\tARGS"). We do NOT
-          # require an exact match against the agent set — user-
-          # configured extras in $NIGHTME_CONFIG are additive and
-          # shouldn't fail this gate, so we check subset rather
-          # than equality.
-          #
-          # This step is the regression catch for the dsh-on-
-          # Windows fix: a future refactor that re-gates dsh
-          # behind runtime.GOOS would land here as a missing
-          # row on the windows-latest runner. Same applies to
+          # Match by word boundary — table column is
+          # "STATUS\t#\tNAME\tBRIDGE\tCOMMAND\tARGS". dsh-on-
+          # Windows regression catch: a future refactor that
+          # re-gates dsh behind runtime.GOOS would land here as
+          # a missing row on the windows-latest runner.
           # copilot: a future refactor that drops the
           # `agent.Builtins.Register(copilot.NewStarter(...))`
-          # line in cmd/nightme/agents.go would land here.
+          # line in cmd/nightme/agents.go would land here too.
           for agent in claude codex opencode pi dsh copilot cursor; do
             if ! echo "$out" | grep -qE "(^|[[:space:]])${agent}([[:space:]]|$)"; then
-              echo "::error::nightme agents did not list $agent"
+              echo "::error::nightme config Agents menu did not list $agent"
               exit 1
             fi
-            echo "OK: nightme agents lists $agent"
+            echo "OK: nightme config Agents menu lists $agent"
           done
 
       - name: Verify nightme bridge spawns each agent (response required)

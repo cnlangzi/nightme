@@ -1148,6 +1148,15 @@ type RunResult struct {
 type Starter interface {
 	Info() Info
 	Detect() error
+
+	// Init overrides the executable path used by Detect and
+	// Info. cfg.Agents path overrides route through here via
+	// agentregistry.Build. The mutation hits the singleton held
+	// in agent.Builtins — production calls Build once so the
+	// in-place mutation is fine; tests should snapshot/restore
+	// via Command().
+	Init(string)
+
 	Start(ctx context.Context, cfg StartConfig) (*Agent, error)
 
 	// RunOnce runs a single synchronous turn: the implementation

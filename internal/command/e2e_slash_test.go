@@ -79,6 +79,8 @@ func (a *echoAgent) Info() agent.Info {
 	return agent.NewInfo("echo", agent.ModePTY, "echo", nil, nil)
 }
 func (a *echoAgent) Detect() error { return nil }
+func (a *echoAgent) Init(string) {}
+func (a *echoAgent) Clone() agent.Starter { return &echoAgent{pid: a.pid, events: a.events} }
 func (a *echoAgent) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
 	return agent.NewAgent(a.Info(), a.pid, a.events, &echoDriver{inner: a}), nil
 }

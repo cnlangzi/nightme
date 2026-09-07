@@ -88,6 +88,49 @@ func TestParseCmdArgs_Positional(t *testing.T) {
 	}
 }
 
+func TestParseCmdArgs_Subcommand(t *testing.T) {
+	spec := CmdSpec{
+		Name:       "/wiki",
+		Usage:      "/wiki init [--modules] [--llmstxt] [--arch]",
+		Subcommand: "init",
+		Flags:      map[string]FlagSpec{"--modules": {Name: "modules"}},
+		MinArgs:    0,
+		MaxArgs:    0,
+	}
+
+	got, err := ParseCmdArgs([]string{"init", "--modules"}, spec)
+	if err != nil {
+		t.Fatalf("ParseCmdArgs() error = %v", err)
+	}
+	if got.Subcommand != "init" {
+		t.Fatalf("Subcommand = %q, want %q", got.Subcommand, "init")
+	}
+	if !got.Bool("modules") {
+		t.Fatal("modules flag = false, want true")
+	}
+	if got.NArgs() != 0 {
+		t.Fatalf("NArgs = %d, want 0", got.NArgs())
+	}
+}
+
+func TestParseCmdArgs_SubcommandErrors(t *testing.T) {
+	spec := CmdSpec{
+		Name:       "/wiki",
+		Usage:      "/wiki init [--modules]",
+		Subcommand: "init",
+		MinArgs:    0,
+		MaxArgs:    0,
+	}
+
+	for _, argv := range [][]string{nil, {"init", "extra"}, {"other"}} {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			if _, err := ParseCmdArgs(argv, spec); err == nil {
+				t.Fatal("ParseCmdArgs() error = nil, want an error")
+			}
+		})
+	}
+}
+
 // TestParseCmdArgs_ValueFlag pins contract rule 3: a
 // value-taking flag consumes the next token, both aliases land
 // in the same canonical slot, and the last occurrence wins.

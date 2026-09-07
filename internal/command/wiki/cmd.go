@@ -8,7 +8,6 @@ package wiki
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -72,7 +71,7 @@ func (f *Factory) Spec() command.Spec {
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	sub, opts, err := parseSubcommand(input.Args)
+	sub, opts, err := parseSubcommand(input.Args[1:])
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
@@ -90,26 +89,25 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	return f.runInit(ctx, rt, cs, input, opts)
 }
 
-// parseSubcommand extracts the subcommand and the init flags
-// from argv. argv[0] is the command name. Returns
-// (subcommand, opts, error).
+// parseSubcommand extracts the init subcommand and its flags
+// from argv. The command name has already been removed by
+// Factory.Handle. Returns (subcommand, opts, error).
 //
-// "/wiki"                       → ("",     {},     usage error)
-// "/wiki init"                  → ("init", {all three = true},  nil)
-// "/wiki init --modules"        → ("init", {Modules: true,  ...},  nil)
-// "/wiki init --llmstxt"        → ("init", {Llmstxt: true,  ...},  nil)
-// "/wiki init --arch"           → ("init", {Arch: true,    ...},  nil)
+// "init"                       → ("init", {all three = true},  nil)
+// "init --modules"             → ("init", {Modules: true,  ...},  nil)
+// "init --llmstxt"             → ("init", {Llmstxt: true,  ...},  nil)
+// "init --arch"                → ("init", {Arch: true,    ...},  nil)
 // "/wiki init --llmstxt --arch" → ("init", {Llmstxt, Arch = true},  nil)
-// "/wiki -a"                    → ("",     {},     usage error)
-// "/wiki init x"                → ("",     {},     extra positional)
-// "/wiki init --weird"          → ("",     {},     unknown flag)
+// "init x"                      → ("",     {},     extra positional)
+// "init --weird"                → ("",     {},     unknown flag)
 //
 // Each flag is an independent toggle. When no flag is set,
 // all three steps run by default.
 func parseSubcommand(argv []string) (string, InitOptions, error) {
 	parsed, err := command.ParseCmdArgs(argv, command.CmdSpec{
-		Name:  "/wiki",
-		Usage: "/wiki init [--modules] [--llmstxt] [--arch]",
+		Name:       "/wiki",
+		Usage:      "/wiki init [--modules] [--llmstxt] [--arch]",
+		Subcommand: "init",
 		Flags: map[string]command.FlagSpec{
 			"--modules": {Name: "modules"},
 			"--llmstxt": {Name: "llmstxt"},
@@ -121,18 +119,10 @@ func parseSubcommand(argv []string) (string, InitOptions, error) {
 	if err != nil {
 		return "", InitOptions{}, err
 	}
-	sub := ""
-	if parsed.NArgs() > 0 {
-		sub = parsed.Arg(0)
-	}
-	if sub != "init" {
-		return sub, InitOptions{}, fmt.Errorf("unknown subcommand %q; usage: /wiki init [--modules] [--llmstxt] [--arch]", sub)
-	}
-
 	// Default: all three steps. If any flag was supplied,
 	// use only the explicitly-set ones.
 	anySet := parsed.Has("modules") || parsed.Has("llmstxt") || parsed.Has("arch")
-	return "init", InitOptions{
+	return parsed.Subcommand, InitOptions{
 		Modules: !anySet || parsed.Bool("modules"),
 		Llmstxt: !anySet || parsed.Bool("llmstxt"),
 		Arch:    !anySet || parsed.Bool("arch"),

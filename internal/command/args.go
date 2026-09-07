@@ -79,6 +79,12 @@ type CmdSpec struct {
 	// messages, with a leading slash: "/use", "/gtw push".
 	Name string
 
+	// Subcommand is the required leading positional token
+	// when the command has one. It is consumed before flags
+	// and ordinary positional args, so it is not included in
+	// Args or counted by MinArgs/MaxArgs.
+	Subcommand string
+
 	// Usage is the one-line usage string echoed after every
 	// parse error, e.g. "/use <agent>". Optional, but every
 	// caller in this repo sets it — the "Usage: ..." tail is
@@ -105,6 +111,10 @@ type CmdSpec struct {
 // ParsedArgs is the result of ParseCmdArgs: the positional args
 // in order, plus the flag values keyed by canonical name.
 type ParsedArgs struct {
+	// Subcommand holds the consumed leading token when
+	// CmdSpec.Subcommand is set.
+	Subcommand string
+
 	// Args holds the positional args verbatim, in argv order.
 	// Tokens are NOT trimmed — callers that care about
 	// whitespace-only input keep their own strings.TrimSpace
@@ -171,6 +181,19 @@ func ParseCmdArgs(argv []string, spec CmdSpec) (ParsedArgs, error) {
 	out := ParsedArgs{
 		values: make(map[string]string),
 		bools:  make(map[string]bool),
+	}
+
+	if spec.Subcommand != "" {
+		if len(argv) == 0 {
+			return ParsedArgs{}, fmt.Errorf("missing subcommand %q%s",
+				spec.Subcommand, spec.usageTail())
+		}
+		if !strings.EqualFold(argv[0], spec.Subcommand) {
+			return ParsedArgs{}, fmt.Errorf("unexpected subcommand %q; expected %q%s",
+				argv[0], spec.Subcommand, spec.usageTail())
+		}
+		out.Subcommand = argv[0]
+		argv = argv[1:]
 	}
 
 	// Phase 1: lex. Classify each token, consume values for

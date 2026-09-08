@@ -1795,7 +1795,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// text-dedup; acp / pty by wire shape). PATCH the existing
 		// receipt's footer in place via StampFooterLines — no
 		// duplicate standalone card.
-//
+		//
 		// Error turns also arrive on this path: codex `failed` /
 		// `interrupted` and pi poisoned turns produce Text==""
 		// with Err populated. The user must still see a body-level
@@ -2034,7 +2034,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		//     sets it, but adapter never asserts on the field).
 		//   - msg.Heartbeat.Empty() — snapshot zero-valued (e.g.
 		//     tracker entry was LRU-evicted between Observe and
-		//     the adapter seeing this OutHeartbeat).
+		//     the adapter seeing this OutHeartbeat). Done-only
+		//     snapshots are NOT empty (terminal state is a
+		//     meaningful signal in its own right) — see
+		//     HeartbeatSnapshot.Empty.
 		if msg.Heartbeat == nil || msg.Heartbeat.Empty() {
 			return nil
 		}
@@ -2057,6 +2060,16 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				}
 				if prev.LastBeatAt.After(snap.LastBeatAt) {
 					snap.LastBeatAt = prev.LastBeatAt
+				}
+				// Done is monotonic (false→true never reverses),
+				// like the counters — preserve the prev flag when
+				// the new snapshot's Done field is false. Without
+				// this guard, a terminal event arriving BEFORE
+				// the receipt is created would lose its ✅
+				// prefix as soon as a later activity counter
+				// overwrote the pending entry.
+				if prev.Done {
+					snap.Done = true
 				}
 			}
 			a.pendingHeartbeats[msg.ReplyTo] = snap
@@ -2916,13 +2929,18 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// Section 0 (placeholder header): F-63 — heartbeat-driven
 	// header. Two states, mutually exclusive (二选一):
 	//
-	//   Back part: hb != nil && (ThinkCount > 0 || ToolCount > 0)
+	//   Back part: hb != nil && (ThinkCount > 0 || ToolCount > 0 || Done)
 	//     → render "💭 N · 🔧 M · ⏱ HH:MM:SS" (no "🤖 Working"
 	//     prefix). This is the post-F-63 hot path: the receipt
 	//     shows progress as long as the agent has produced any
-	//     think/tool activity in the turn. renderHeartbeatHeader
-	//     is the single source of truth for this line shape and
-	//     NEVER emits the "🤖 Working" prefix — see its doc.
+	//     think/tool activity in the turn, OR the turn has reached
+	//     terminal state (Done). The Done arm lets a /think off +
+	//     /tools off turn paint "✅" alone — without it, such a
+	//     turn's Done flip would never reach the card and the
+	//     header would stay "🤖 Working" past the actual finish.
+	//     renderHeartbeatHeader is the single source of truth for
+	//     this line shape and NEVER emits the "🤖 Working" prefix
+	//     — see its doc.
 	//
 	//   Front part: hb == nil OR no counters, AND no entries/tasks
 	//     → render the bare "🤖 Working" placeholder (no dots, no
@@ -2950,17 +2968,28 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// all zero" state, and the next render would then read it via
 	// &r.heartbeat.
 	//
+	// Done is added to the gate because Done=true is a meaningful
+	// state on its own (the turn has finished); without it, a
+	// Done-only snapshot would fall through to the front-part
+	// "🤖 Working" placeholder and the user's terminal signal
+	// would never paint on the card.
+	//
 	// The reason production never produces such a snapshot is
 	// upstream: Adapter.Send's OutHeartbeat branch (adapter.go)
 	// and applyPendingHeartbeat both gate on `!m.Heartbeat.Empty()`
-	// before calling ApplyHeartbeat, so an Empty() snapshot never
-	// reaches the receipt in the production call path. Routing
-	// the "no counts" case to the front part here is therefore a
-	// safe fallback for both production (upstream-filtered) and
-	// direct-test paths (where the snapshot is what the test set
-	// it to) — render output never shows a "💭 0 · ⏱ ..." line.
+	// before calling ApplyHeartbeat, so a fully-empty snapshot
+	// never reaches the receipt in the production call path.
+	// Done-only snapshots ARE non-empty (terminal state is a
+	// meaningful signal in its own right — see
+	// HeartbeatSnapshot.Empty) and DO reach the receipt; the
+	// Done arm above routes them to renderHeartbeatHeader which
+	// paints "✅ " alone. Routing the "no counts AND no Done"
+	// case to the front part here is therefore a safe fallback
+	// for both production (upstream-filtered) and direct-test
+	// paths (where the snapshot is what the test set it to) —
+	// render output never shows a "💭 0 · ⏱ ..." line.
 	switch {
-	case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0):
+	case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0 || hb.Done):
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": renderHeartbeatHeader(hb),
@@ -3060,9 +3089,16 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 // Counter chips are omitted when zero (think=0 produces no 💭
 // chip). LastBeatAt is omitted when zero.
 //
+// Terminal-state prefix (Done=true): prepends "✅ " to the line so
+// users can tell at a glance the turn finished. Applies regardless
+// of whether counters are populated — a /think off + /tools off
+// turn that produces just OutReply and OutResult still gets the ✅
+// (the caller's gate at buildReceiptCard allows Done-only snapshots
+// through, so the line ends up as just "✅" with no chip suffix).
+//
 // Mutual exclusion is the caller's responsibility. buildReceiptCard
 // is the single in-tree caller and only invokes this when
-// ThinkCount > 0 || ToolCount > 0. Any future direct caller (a new
+// ThinkCount > 0 || ToolCount > 0 || Done. Any future direct caller (a new
 // renderer, an admin/debug tool, a test) MUST gate on the same
 // condition before calling — otherwise the front-part "🤖 Working"
 // placeholder that buildReceiptCard renders in the "no activity"
@@ -3085,7 +3121,11 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 	if !hb.LastBeatAt.IsZero() {
 		parts = append(parts, "⏱ "+hb.LastBeatAt.Format("15:04:05"))
 	}
-	return strings.Join(parts, " · ")
+	body := strings.Join(parts, " · ")
+	if hb.Done {
+		return "✅ " + body
+	}
+	return body
 }
 
 // buildColdStartCard was the minimal "⏳ 等待中" receipt posted by

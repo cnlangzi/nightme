@@ -60,7 +60,7 @@ const DefaultHeartbeatCap = 1024
 type HeartbeatTracker struct {
 	mu    sync.Mutex
 	cap   int
-	order []string                          // LRU order: head = most recent
+	order []string // LRU order: head = most recent
 	snaps map[string]messages.HeartbeatSnapshot
 }
 
@@ -103,6 +103,8 @@ func NewHeartbeatTracker(cap int) *HeartbeatTracker {
 // userMsgID == "" is a no-op (returns false) — protects against
 // orphan events (EventAgentReady, etc.) that don't have a
 // receipt anchor.
+//
+// See MarkDone for the lifecycle counterpart.
 func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind) bool {
 	if t == nil || userMsgID == "" {
 		return false
@@ -122,9 +124,8 @@ func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind)
 		snap.ToolCount++
 		changed = true
 	default:
-		// No counter change. We still write back the refreshed
-		// snapshot + touch the LRU so this userMsgID stays
-		// "recent" (it IS recent activity).
+		// Touch LRU so this userMsgID stays recent —
+		// refresh-only activity is "recent" too.
 		t.snaps[userMsgID] = snap
 		t.touchLocked(userMsgID)
 		return false
@@ -138,6 +139,44 @@ func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind)
 // userMsgID. Zero-value (no entry) is a valid response — callers
 // should pass the result to the channel adapter which uses
 // HeartbeatSnapshot.Empty() to decide whether to render anything.
+//
+// MarkDone flips the snapshot's Done flag for userMsgID,
+// returning true on the false→true transition and false
+// otherwise (no-op when Done is already true, userMsgID is
+// empty, or t is nil). Idempotent — racing calls converge on
+// a single flip.
+//
+// LRU: the false→true path touches the LRU; the idempotent
+// return does NOT. Both Observe and MarkDone use the LRU as a
+// "most recently active" signal; for a terminal entry there is
+// no further activity to track, so a racing second MarkDone
+// can safely skip the touch. The entry will still be evicted
+// under normal LRU pressure once its age dominates other
+// entries — and by that point the terminal ✅ has already
+// PATCHed to the receipt via the first MarkDone's OutHeartbeat
+// follow-up.
+//
+// MarkDone deliberately does NOT touch ThinkCount / ToolCount /
+// LastBeatAt — the renderer paints those independently from
+// Done, so re-writing them here would either race the last
+// Observe or duplicate the ⏱ chip.
+func (t *HeartbeatTracker) MarkDone(userMsgID string) bool {
+	if t == nil || userMsgID == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	snap := t.snaps[userMsgID]
+	if snap.Done {
+		return false
+	}
+	snap.Done = true
+	t.snaps[userMsgID] = snap
+	t.touchLocked(userMsgID)
+	return true
+}
+
 func (t *HeartbeatTracker) Snapshot(userMsgID string) messages.HeartbeatSnapshot {
 	if t == nil {
 		return messages.HeartbeatSnapshot{}

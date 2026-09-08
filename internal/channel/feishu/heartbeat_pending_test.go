@@ -196,3 +196,58 @@ func TestPendingHeartbeat_ApplyNoOpWhenMissing(t *testing.T) {
 			before, after)
 	}
 }
+
+// TestPendingHeartbeat_DonePreservedOnMerge pins the terminal-
+// state edge of the monotonic merge: a Done-only snapshot
+// stashed FIRST (e.g. the readpump-driven ChatSession.endPrompt
+// firing BEFORE the receipt is created) must NOT be overwritten
+// by a later counters-only OutHeartbeat. Without prev.Done being
+// OR-ed into snap.Done, the user's terminal "✅" prefix would
+// be lost on receipt creation — the receipt would render with
+// the latest counters but no Done flag, falling through to the
+// "🤖 Working" placeholder for that back-part arm.
+//
+// Repro of the bug this test pins: the merge only took the max
+// of ThinkCount/ToolCount/LastBeatAt and dropped snap.Done on
+// the floor. Done is monotonic like the counters (it only ever
+// flips false→true, never reverses) so the merge must OR
+// prev.Done into snap.Done.
+func TestPendingHeartbeat_DonePreservedOnMerge(t *testing.T) {
+	adapter := newAdapterWithBot(&mockReceiptBot{})
+
+	// First stash: terminal event (endPrompt fired before
+	// receipt creation). Done=true, no counters.
+	t0 := time.Now()
+	if err := adapter.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "oc_done_merge",
+		Kind:      messages.OutHeartbeat,
+		ReplyTo:   "om_done_merge_user",
+		Heartbeat: &messages.HeartbeatSnapshot{Done: true, LastBeatAt: t0},
+	}); err != nil {
+		t.Fatalf("Send 1 (terminal): %v", err)
+	}
+
+	// Second stash: counters-only event (handler-side Observe
+	// firing later). No Done flag set on this snapshot.
+	t1 := t0.Add(time.Millisecond)
+	if err := adapter.Send(context.Background(), messages.OutboundMessage{
+		ChatID:    "oc_done_merge",
+		Kind:      messages.OutHeartbeat,
+		ReplyTo:   "om_done_merge_user",
+		Heartbeat: &messages.HeartbeatSnapshot{ThinkCount: 2, ToolCount: 1, LastBeatAt: t1},
+	}); err != nil {
+		t.Fatalf("Send 2 (counters): %v", err)
+	}
+
+	adapter.mu.Lock()
+	merged := adapter.pendingHeartbeats["om_done_merge_user"]
+	adapter.mu.Unlock()
+
+	if !merged.Done {
+		t.Fatalf("merged Done = false, want true (terminal flag must survive later counters-only OutHeartbeat)")
+	}
+	if merged.ThinkCount != 2 || merged.ToolCount != 1 {
+		t.Fatalf("merged counters regressed: got {Think: %d, Tool: %d}, want {2, 1}",
+			merged.ThinkCount, merged.ToolCount)
+	}
+}

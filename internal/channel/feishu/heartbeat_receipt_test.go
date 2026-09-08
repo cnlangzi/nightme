@@ -674,3 +674,167 @@ func TestBuildReceiptCard_RendersReceiptHeartbeatAfterApply(t *testing.T) {
 	// package boundary stays intentional).
 	_ = agent.EventAgentToolStart
 }
+
+// TestRenderHeartbeatHeader_DonePrependsCheck pins the terminal-
+// state prefix: when the snapshot's Done flag is true, the
+// rendered line starts with "✅ ". Applies regardless of whether
+// the snapshot also carries counters / LastBeatAt.
+func TestRenderHeartbeatHeader_DonePrependsCheck(t *testing.T) {
+	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
+	hb := &messages.HeartbeatSnapshot{
+		ThinkCount: 2, ToolCount: 5, LastBeatAt: now, Done: true,
+	}
+	got := renderHeartbeatHeader(hb)
+	want := "✅ 💭 2 · 🔧 5 · ⏱ 14:35:22"
+	if got != want {
+		t.Fatalf("renderHeartbeatHeader = %q, want %q (Done must prepend ✅)", got, want)
+	}
+	if !strings.HasPrefix(got, "✅ ") {
+		t.Fatalf("Done prefix missing: %q", got)
+	}
+}
+
+// TestRenderHeartbeatHeader_DoneOnlyNoCounters covers the
+// /think off + /tools off terminal case: a Done-only snapshot
+// (no ThinkCount / ToolCount / LastBeatAt) renders as just
+// "✅ " — the prefix is the entire line. Without the Done arm
+// in buildReceiptCard's gate, this case would fall through to
+// the "🤖 Working" placeholder and the user's terminal signal
+// would never paint.
+func TestRenderHeartbeatHeader_DoneOnlyNoCounters(t *testing.T) {
+	hb := &messages.HeartbeatSnapshot{Done: true}
+	got := renderHeartbeatHeader(hb)
+	if got != "✅ " {
+		t.Fatalf("renderHeartbeatHeader = %q, want %q (Done-only snapshot renders bare prefix)", got, "✅ ")
+	}
+	// And the prefix must NOT include any counter chip — the
+	// " · " separator would only appear between chips.
+	if strings.Contains(got, "·") {
+		t.Fatalf("Done-only line must not contain separator; got %q", got)
+	}
+}
+
+// TestBuildReceiptCard_HeartbeatHeader_DoneOnlyRendersCheck pins
+// the back-part gate extension: buildReceiptCard's section-0
+// switch now accepts Done=true as a third back-part condition
+// (alongside ThinkCount > 0 and ToolCount > 0). A Done-only
+// snapshot with no entries / tasks renders the bare "✅ "
+// line — NOT the "🤖 Working" front-part placeholder.
+func TestBuildReceiptCard_HeartbeatHeader_DoneOnlyRendersCheck(t *testing.T) {
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{Done: true})
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	if !strings.Contains(body, `"content":"✅ "`) {
+		t.Fatalf("Done-only snapshot must render the ✅ back-part line; body=%s", body)
+	}
+	// The "🤖 Working" front-part placeholder must NOT also be
+	// rendered — that would break the F-63 §3.6 mutual-exclusion
+	// contract (both halves on the same card).
+	if strings.Contains(body, "🤖 Working") {
+		t.Fatalf("Done-only back-part must NOT coexist with 🤖 Working front-part; body=%s", body)
+	}
+}
+
+// TestBuildReceiptCard_HeartbeatHeader_DoneWithCounters checks
+// the common case: a turn that produced both activity AND
+// reached terminal state. The header carries "✅" + counter chips.
+func TestBuildReceiptCard_HeartbeatHeader_DoneWithCounters(t *testing.T) {
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
+		ThinkCount: 3, ToolCount: 2, LastBeatAt: time.Now(), Done: true,
+	})
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	if !strings.Contains(body, "✅") {
+		t.Fatalf("Done=true must surface ✅ in the header; body=%s", body)
+	}
+	if !strings.Contains(body, "💭 3") {
+		t.Fatalf("ThinkCount chip missing; body=%s", body)
+	}
+	if !strings.Contains(body, "🔧 2") {
+		t.Fatalf("ToolCount chip missing; body=%s", body)
+	}
+	if strings.Contains(body, "🤖 Working") {
+		t.Fatalf("back-part + front-part co-rendered; body=%s", body)
+	}
+}
+
+// TestApplyHeartbeat_DoneFlipTriggersPatch — the changed
+// detection must observe the Done transition (false→true) so
+// the receipt PATCH paints the ✅ prefix promptly.
+func TestApplyHeartbeat_DoneFlipTriggersPatch(t *testing.T) {
+	r, bot := newTestReceipt(t)
+	r.heartbeatMinInterval = 0
+
+	// Pre-condition: think activity primed, no PATCH yet.
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		ThinkCount: 1, LastBeatAt: time.Now(),
+	})
+	if got := len(bot.patches); got != 1 {
+		t.Fatalf("priming PATCHes = %d, want 1", got)
+	}
+
+	// Same counts, no LastBeatAt change, but Done flips false→true.
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		ThinkCount: 1, LastBeatAt: time.Now(), Done: true,
+	})
+	if got := len(bot.patches); got != 2 {
+		t.Fatalf("Done-flip PATCHes = %d, want 2 (Done transition must count as changed)", got)
+	}
+	last := bot.patches[len(bot.patches)-1]
+	if !strings.Contains(last.Body, "✅") {
+		t.Fatalf("Done-flip PATCH missing ✅ in body: %s", last.Body)
+	}
+}
+
+// TestApplyHeartbeat_DoneIdempotent — true→true is NOT a changed
+// event (matches MarkDone's transition semantics). Applies to
+// the racing OutResult + PromptEndBus double MarkDone case.
+func TestApplyHeartbeat_DoneIdempotent(t *testing.T) {
+	r, bot := newTestReceipt(t)
+	r.heartbeatMinInterval = 0
+
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		Done: true, LastBeatAt: time.Now(),
+	})
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		Done: true, LastBeatAt: time.Now(),
+	})
+
+	if got := len(bot.patches); got != 1 {
+		t.Fatalf("Done-true→true applied twice produced %d PATCHes; want 1 (idempotent)", got)
+	}
+}
+
+// TestApplyHeartbeat_DoneBypassesThinkingThrottle — the
+// "✅" terminal prefix must paint promptly even inside a dense
+// thinking-stream window. Without the !doneChanged bypass in
+// the throttle gate, the Done flip would be coalesced into the
+// next thinking burst and the user wouldn't see "✅" until the
+// stream paused.
+func TestApplyHeartbeat_DoneBypassesThinkingThrottle(t *testing.T) {
+	r, bot := newTestReceipt(t)
+	r.heartbeatMinInterval = 2 * time.Second
+
+	// Prime with a thinking increment to set lastBodyPatch.
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		ThinkCount: 1, LastBeatAt: time.Now(),
+	})
+	if got := len(bot.patches); got != 1 {
+		t.Fatalf("priming PATCHes = %d, want 1", got)
+	}
+
+	// Within the throttle window (no LastBeatAt / count change).
+	// Done flips — must PATCH through.
+	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
+		ThinkCount: 1, LastBeatAt: time.Now(), Done: true,
+	})
+	if got := len(bot.patches); got != 2 {
+		t.Fatalf("throttle-window Done-flip PATCHes = %d, want 2 (Done must bypass thinking throttle)", got)
+	}
+	last := bot.patches[len(bot.patches)-1]
+	if !strings.Contains(last.Body, "✅") {
+		t.Fatalf("throttle-bypass PATCH missing ✅: %s", last.Body)
+	}
+}

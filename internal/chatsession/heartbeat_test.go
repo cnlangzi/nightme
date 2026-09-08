@@ -420,3 +420,85 @@ func userMsgIDForIndex(i int) string {
 	}
 	return "u" + string(digits[i/10:i/10+1]) + string(digits[i%10:i%10+1])
 }
+
+// TestMarkDone_FlipsFlag pins the basic terminal-state contract:
+// the first MarkDone call returns true and the snapshot's Done
+// becomes true; counters and LastBeatAt are untouched.
+func TestMarkDone_FlipsFlag(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	tr.Observe("u1", messages.OutThinking) // ThinkCount=1, LastBeatAt set
+	before := tr.Snapshot("u1")
+	if before.Done {
+		t.Fatal("pre-condition: Done must start false")
+	}
+
+	changed := tr.MarkDone("u1")
+	if !changed {
+		t.Fatal("first MarkDone must return changed=true")
+	}
+	after := tr.Snapshot("u1")
+	if !after.Done {
+		t.Fatal("Done must be true after MarkDone")
+	}
+	// MarkDone must NOT touch counters / LastBeatAt — those
+	// already carry the in-turn state the renderer needs.
+	if after.ThinkCount != before.ThinkCount {
+		t.Fatalf("MarkDone clobbered ThinkCount: before=%d after=%d", before.ThinkCount, after.ThinkCount)
+	}
+	if after.LastBeatAt != before.LastBeatAt {
+		t.Fatalf("MarkDone clobbered LastBeatAt: before=%v after=%v", before.LastBeatAt, after.LastBeatAt)
+	}
+}
+
+// TestMarkDone_Idempotent pins the transition check: the second
+// call returns false so the runtime handler emits at most one
+// follow-up OutHeartbeat per userMsgID per turn, even when
+// both the OutResult branch and the PromptEndBus subscriber
+// race to MarkDone.
+func TestMarkDone_Idempotent(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	if !tr.MarkDone("u1") {
+		t.Fatal("first MarkDone must return true")
+	}
+	if tr.MarkDone("u1") {
+		t.Fatal("second MarkDone must return false (idempotent transition)")
+	}
+	if tr.MarkDone("u1") {
+		t.Fatal("third MarkDone must also return false")
+	}
+}
+
+// TestMarkDone_EmptyUserMsgIDNoOp — empty userMsgID is a no-op
+// (matches Observe's contract). Defends against orphan lifecycle
+// events without a receipt anchor.
+func TestMarkDone_EmptyUserMsgIDNoOp(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	if tr.MarkDone("") {
+		t.Fatal("MarkDone(\"\") must return false")
+	}
+}
+
+// TestMarkDone_NilTrackerSafe — defensive nil check (mirrors
+// Observe's nil-safe call path).
+func TestMarkDone_NilTrackerSafe(t *testing.T) {
+	var tr *HeartbeatTracker
+	if tr.MarkDone("u1") {
+		t.Fatal("nil tracker MarkDone must return false without panic")
+	}
+}
+
+// TestSnapshot_DoneVisible pins that Snapshot returns the Done
+// flag — the runtime handler reads the snapshot after MarkDone
+// to send the OutHeartbeat follow-up, so the flag must round-
+// trip through the read path.
+func TestSnapshot_DoneVisible(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	tr.MarkDone("u1")
+	snap := tr.Snapshot("u1")
+	if !snap.Done {
+		t.Fatalf("Snapshot after MarkDone must carry Done=true, got %+v", snap)
+	}
+	if snap.Empty() {
+		t.Fatal("Done=true snapshot must not be Empty() (the follow-up OutHeartbeat would be dropped)")
+	}
+}

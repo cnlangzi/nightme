@@ -2056,9 +2056,9 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // in Claude Code's stream-json output survive the round-trip.
 //
 // Dispatch (mirrors cc-connect `platform/feishu/feishu.go::buildReplyContent`):
-//   - no markdown indicators  → MsgTypeText (plain text bubble)
-//   - tables > resultCardTableLimit → MsgTypePost + tag:"md"
-//   - default                 → MsgTypeInteractive (Card 2.0)
+//   - tables > resultCardTableLimit → MsgTypePost + tag:"md" (footer dropped —
+//     text-only tags don't render <hr>)
+//   - default                 → MsgTypeInteractive (Card 2.0) with footer
 //
 // envelopeDefense (defensive ceiling below the 30 KB Card body envelope):
 // if the rendered body still exceeds resultCardEnvelopeBudget after the

@@ -1634,6 +1634,12 @@ func TestSend_OutResult_LongMarkdownUsesInteractiveCard(t *testing.T) {
 }
 
 // TestSend_OutResult_NoMarkdownUsesText — F-39 dispatch path 1.
+//
+// Pre-fix this asserted plain text routed to MsgTypeText. OutResult is
+// designed to open a new card by surface design, and the statusbar footer
+// (hr + grey plain_text) only renders on Card 2.0; Feishu's text bubbles
+// drop <hr> and <font color='grey'>. So plain text now routes to the
+// interactive card surface too.
 func TestSend_OutResult_NoMarkdownUsesText(t *testing.T) {
 	a := testAdapter(t)
 	var gotType, gotContent string
@@ -1651,8 +1657,8 @@ func TestSend_OutResult_NoMarkdownUsesText(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if gotType != "text" {
-		t.Errorf("plain text should dispatch to text, got %q", gotType)
+	if gotType != "interactive" {
+		t.Errorf("plain text OutResult should dispatch to interactive (Card 2.0) for footer support, got %q", gotType)
 	}
 	if !strings.Contains(gotContent, "plain reply without any markdown markers") {
 		t.Errorf("text body should carry the reply, got %q", gotContent)
@@ -1815,15 +1821,34 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	// Body is JSON-encoded for MsgTypeText; decode to extract the text field.
+	// Body is a Card 2.0 envelope (error prefix lands on the first
+	// markdown element). Pre-fix the no-markdown → MsgTypeText branch
+	// wrapped the body in {text:...}; that branch is gone so we now
+	// decode {schema, body:{elements:[{tag, content}]}}.
 	var envelope struct {
-		Text string `json:"text"`
+		Schema string `json:"schema"`
+		Body   struct {
+			Elements []struct {
+				Tag     string `json:"tag"`
+				Content string `json:"content"`
+			} `json:"elements"`
+		} `json:"body"`
 	}
 	if err := json.Unmarshal([]byte(gotContent), &envelope); err != nil {
 		t.Fatalf("decode body: %v\nraw: %q", err, gotContent)
 	}
-	if !strings.HasPrefix(envelope.Text, "❌ ") {
-		t.Errorf("error result text should be prefixed with ❌, got %q", envelope.Text)
+	if envelope.Schema != "2.0" {
+		t.Errorf("expected Card 2.0 schema, got %q", envelope.Schema)
+	}
+	if len(envelope.Body.Elements) == 0 {
+		t.Fatalf("expected at least one Card 2.0 element, got %q", gotContent)
+	}
+	first := envelope.Body.Elements[0]
+	if first.Tag != "markdown" {
+		t.Errorf("expected first element tag=markdown, got %q", first.Tag)
+	}
+	if !strings.HasPrefix(first.Content, "❌ ") {
+		t.Errorf("error result text should be prefixed with ❌, got %q", first.Content)
 	}
 }
 

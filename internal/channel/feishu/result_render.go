@@ -8,18 +8,23 @@
 //
 // Dispatch (after SanitizeCardMarkdown):
 //
-//	┌─ no markdown indicators ───────────── MsgTypeText (plain text bubble)
-//	│
-//	├─ tables > resultCardTableLimit ───── MsgTypePost + tag:"md"
-//	│                                      (GFM rendering, no Card 2.0 table cap)
-//	│
+//	┌─ tables > resultCardTableLimit ───── MsgTypePost + tag:"md"
+//	│                                      (GFM rendering, no Card 2.0 table cap;
+//	│                                       footer dropped — text-only tags
+//	│                                       don't render <hr> / text_color)
+//
 //	└─ default ──────────────────────────── MsgTypeInteractive (Card 2.0)
 //	                                        elements split via
-//	                                        splitMarkdownForDivs @ ≤ divTextCharLimit
+//	                                        splitMarkdownForDivs @ ≤ divTextCharLimit;
+//	                                        cardFooterElements attaches the
+//	                                        statusbar footer when present.
 //
-// MsgTypeText is rare in practice (Claude Code almost always emits markdown).
-// MsgTypePost catches the "many tables" edge case where Card 2.0's 5-table
-// hard limit would otherwise return error 11310.
+// OutResult is ALWAYS a card: even plain-text bodies (e.g. `/gtw commit`'s
+// "d77ab51 ..." reply) must render the statusbar footer (agent / usage /
+// workspace / branch / PR), and Feishu's plain-text bubbles don't support
+// <hr> or <font color='grey'>. The dispatch above only diverges to
+// MsgTypePost for the >5-tables edge case where Card 2.0's 5-table hard
+// cap would otherwise return error 11310.
 //
 // envelopeBudget is a defensive ceiling just below the Feishu 30 KB card body
 // envelope (larkim NewPatchMessageReqBody etc. SDK resource.go:1381). OutResult
@@ -71,25 +76,6 @@ const (
 	// the future if one surface adopts a stricter cap.
 	perReplyMaxBytes = 6 * 1024
 )
-
-// containsMarkdown reports whether s contains any of the standard markdown
-// indicators used by openclaw-lark / cc-connect. Order does not matter; we
-// only care whether markdown rendering would survive the round trip.
-//
-// If false, sendResultAsReply falls back to MsgTypeText (no markdown, no
-// rendering benefit from Card 2.0).
-//
-// Mirrors cc-connect `feishu.go:3033-3044` markdownIndicators / containsMarkdown.
-func containsMarkdown(s string) bool {
-	for _, ind := range []string{
-		"```", "**", "~~", "`", "\n- ", "\n* ", "\n1. ", "\n# ", "---",
-	} {
-		if strings.Contains(s, ind) {
-			return true
-		}
-	}
-	return false
-}
 
 // countMarkdownTables counts distinct pipe-delimited tables in s. A table is
 // a run of consecutive lines where each line (trimmed) starts and ends with
@@ -265,18 +251,10 @@ func cardFooterElements(footerLines []string) []map[string]any {
 // F-46: footerLines is plumbed through to buildResultCardJSON so
 // markdown-content OutResults render the footer as styled card
 // elements (hr + grey plain_text) instead of as inline text inside
-// the markdown body. No footer for text/post surfaces — those
-// message types don't support <hr> / text_color natively.
+// the markdown body. The MsgTypePost fallback (above-table-cap
+// edge case) drops the footer by surface design — Post renders
+// only tag:"md" content without <hr> / text_color support.
 func buildResultPayload(sanitized string, footerLines []string) (msgType string, body string, err error) {
-	if !containsMarkdown(sanitized) {
-		// No markdown → plain text bubble. Feishu still renders inline
-		// <at> mentions and 4-style runs.
-		b, jerr := json.Marshal(map[string]string{"text": sanitized})
-		if jerr != nil {
-			return "", "", fmt.Errorf("feishu: encode text: %w", jerr)
-		}
-		return larkim.MsgTypeText, string(b), nil
-	}
 	if countMarkdownTables(sanitized) > resultCardTableLimit {
 		body, err := buildPostMdJSON(sanitized)
 		if err != nil {

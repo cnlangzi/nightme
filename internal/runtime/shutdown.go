@@ -20,8 +20,6 @@ import (
 
 // ShutdownRun stops the channel and persists final state.
 //
-// # Agent processes are INTENTIONALLY NOT killed here — they are
-//
 // Agent processes are INTENTIONALLY NOT killed here — they are
 // long-running CLI sessions independent of nightme's lifetime.
 // AgentSessions that were Running remain in the registry as

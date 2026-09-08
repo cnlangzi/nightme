@@ -8,6 +8,7 @@ package wiki
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -71,20 +72,16 @@ func (f *Factory) Spec() command.Spec {
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	sub, opts, err := parseSubcommand(input.Args[1:])
+	_, opts, err := parseSubcommand(input.Args[1:])
 	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
-	}
-
-	if sub != "init" {
-		return command.Reply(ctx, rt, "❌ /wiki: unknown subcommand"), nil
 	}
 
 	// Shortcut: if no modules step and no arch step are
 	// requested, the deterministic llms.txt build alone is
 	// enough — no Agent prompt needed.
 	if !opts.Modules && !opts.Arch {
-		return f.runLlmsTxt(ctx, cs, input)
+		return f.runLlmsTxt(ctx, rt, cs, input)
 	}
 	return f.runInit(ctx, rt, cs, input, opts)
 }
@@ -141,14 +138,20 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 		return fail, nil
 	}
 	// Preflight: confirm the user has selected an agent via /use.
-	// We intentionally do NOT call cs.LookupSelectedAgentSession
-	// here — that function requires the AS to be in StatusRunning
-	// with a non-nil Handle, which is false for a freshly resumed
-	// session that hasn't been Started yet. The runtime starts the
-	// AS on the first QueueUserMessage dispatch; checking here
-	// would reject a session the runtime would otherwise accept.
 	if cs.SelectedAgent() == "" {
 		return command.Reply(ctx, rt, "❌ no active agent; run /use <agent> first"), nil
+	}
+
+	// Resolve (or spawn) the active AgentSession before queueing.
+	// QueueUserMessage → TryFlush only rewind on a missing
+	// selectedAS — it never calls LookupSelectedAgentSession
+	// itself — so without this call the wiki prompt would sit
+	// in the queue forever in any state where selectedAS is nil
+	// (post-/close, freshly restored session, prober-detached).
+	// Manager.HandleInbound does the same lookup for the
+	// default-branch dispatcher; mirror it here.
+	if _, err := cs.LookupSelectedAgentSession(); err != nil {
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
 	repoRoot, err := f.git.RepoRoot(cwd)
@@ -172,18 +175,30 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 		Kind:   chatsession.MessageKindQueue,
 	}
 
+	// The wiki work is independent of the slash-request
+	// lifetime. The slash handler returns immediately after
+	// firing this goroutine, so ctx cancellation there is the
+	// rule, not the exception — capture a background ctx so
+	// waitForPromptEnd does not abort partway and leave
+	// partial modules on disk.
+	workCtx, cancel := context.WithCancel(context.Background())
 	go func() {
-		final, _ := RunInit(ctx, cs, msg, repoRoot, opts)
+		defer cancel()
+		final, runErr := RunInit(workCtx, cs, msg, repoRoot, opts)
 		em := cs.Emitter()
 		if em == nil {
 			return
 		}
-		_ = em.Send(context.Background(), messages.OutboundMessage{
+		if err := em.Send(context.Background(), messages.OutboundMessage{
 			ChatID:  input.ChatID,
 			ReplyTo: input.MessageID,
 			Kind:    messages.OutReply,
 			Text:    final,
-		})
+		}); err != nil {
+			slog.Warn("wiki: final reply send failed",
+				"chat_id", input.ChatID, "message_id", input.MessageID,
+				"err", err, "run_err", runErr)
+		}
 	}()
 
 	return command.Reply(ctx, rt, "⏳ /wiki init queued; Agent is reading the codebase."), nil
@@ -193,9 +208,14 @@ func (f *Factory) runInit(ctx context.Context, rt command.RuntimeServices, cs *c
 // rebuild of wiki/llms.txt from the existing wiki/modules/.
 // No Agent prompt is submitted, so no /use selection or
 // AgentSession is required — only the CWD matters.
-func (f *Factory) runLlmsTxt(ctx context.Context, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+//
+// Synchronous: the build is local, so the reply is the final
+// reply (no goroutine, no Emitter detour). Mirrors how
+// runInit returns a SlashOutput ack — the user sees one
+// message, not two.
+func (f *Factory) runLlmsTxt(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if cs == nil {
-		return &command.SlashOutput{Reply: "No active chat session.", Consumed: true}, nil
+		return command.Reply(ctx, rt, "No active chat session."), nil
 	}
 	cwd, fail := command.RequireActiveCwd(cs)
 	if fail != nil {
@@ -203,23 +223,10 @@ func (f *Factory) runLlmsTxt(ctx context.Context, cs *chatsession.ChatSession, i
 	}
 	repoRoot, err := f.git.RepoRoot(cwd)
 	if err != nil {
-		return &command.SlashOutput{Reply: "❌ " + err.Error(), Consumed: true}, nil
+		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
-
 	final, _ := RunLlmsTxtOnly(repoRoot)
-
-	// Reply directly (no Agent session involved, so no Emitter
-	// detour). Reply to the original slash message via Emitter
-	// so the IM client renders it on the right card.
-	if em := cs.Emitter(); em != nil {
-		_ = em.Send(context.Background(), messages.OutboundMessage{
-			ChatID:  input.ChatID,
-			ReplyTo: input.MessageID,
-			Kind:    messages.OutReply,
-			Text:    final,
-		})
-	}
-	return &command.SlashOutput{Reply: "⏳ /wiki init --llmstxt", Consumed: true}, nil
+	return command.Reply(ctx, rt, final), nil
 }
 
 // Compile-time check: Factory satisfies SlashCommandFactory.

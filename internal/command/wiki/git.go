@@ -46,9 +46,17 @@ func (ExecGitRunner) IsClean(repoRoot string) (bool, error) {
 
 func runGit(cwd string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", cwd}, args...)...)
-	out, err := cmd.Output()
+	// CombinedOutput so a non-zero exit (e.g. "not a git repo")
+	// still surfaces git's diagnostic — cmd.Output() drops
+	// stderr on error and leaves RepoRoot callers with an
+	// opaque "exit status 128". Symmetric with
+	// runGitAllowFailure below.
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", err
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", &gitError{Stderr: strings.TrimSpace(string(append(ee.Stderr, out...)))}
+		}
+		return "", &gitError{Stderr: strings.TrimSpace(string(out))}
 	}
 	return strings.TrimSpace(string(out)), nil
 }

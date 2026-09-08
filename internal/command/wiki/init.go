@@ -183,13 +183,24 @@ func RunInit(ctx context.Context, cs *chatsession.ChatSession, input chatsession
 		modulesSummary = reply
 	}
 
-	// Validate the module set on disk. Skipped when no
-	// module-related step was requested, since validation
-	// is part of the post-modules flow.
-	if opts.Modules || opts.Arch || opts.Llmstxt {
-		_, failed := ValidateAll(wikiRoot)
+	// Validate the module set on disk. The validation only
+	// makes sense against modules we (or a prior run) wrote
+	// this turn; --llmstxt / --arch on a fresh repo would
+	// otherwise report "rejected" for files that were never
+	// in scope. Validate when modules were just written, OR
+	// when downstream steps need a clean on-disk wiki.
+	var passed []ModuleResult
+	if opts.Modules {
+		var failed []ModuleResult
+		passed, failed = ValidateAll(wikiRoot)
 		if len(failed) > 0 {
 			return formatFailureReply(modulesSummary, failed), fmt.Errorf("validation failed")
+		}
+	} else if opts.Arch || opts.Llmstxt {
+		var failed []ModuleResult
+		passed, failed = ValidateAll(wikiRoot)
+		if len(failed) > 0 {
+			return formatPreconditionReply(wikiRoot, failed), fmt.Errorf("existing wiki validation failed")
 		}
 	}
 
@@ -212,16 +223,22 @@ func RunInit(ctx context.Context, cs *chatsession.ChatSession, input chatsession
 		archNote = runArchIfPossible(ctx, cs, input, repoRoot)
 	}
 
-	return formatReply(opts, modulesSummary, llmsNote, archNote), nil
+	return formatReply(opts, modulesSummary, llmsNote, archNote, passed), nil
 }
 
 // formatReply composes the user-visible reply for a /wiki init
 // completion. The exact shape depends on which steps ran.
-func formatReply(opts InitOptions, modulesSummary, llmsNote, archNote string) string {
+//
+// passed is the validated-module count from RunInit; it is
+// non-nil only when --modules was set this turn, so the
+// success line correctly distinguishes "N modules written"
+// from "0 modules written" (--llmstxt / --arch only).
+func formatReply(opts InitOptions, modulesSummary, llmsNote, archNote string, passed []ModuleResult) string {
+	ranArch := opts.Arch && archNote != ""
 	switch {
 	case opts.Modules && opts.Llmstxt && opts.Arch:
 		// Full three-step path.
-		return formatSuccessReply(modulesSummary, nil) + llmsNote + archNote
+		return formatSuccessReply(modulesSummary, passed) + llmsNote + archNote
 	case opts.Modules && !opts.Llmstxt && !opts.Arch:
 		// --modules only.
 		return "✅ /wiki init --modules\n\nwiki/modules/ rebuilt.\n" + modulesSummary
@@ -229,12 +246,23 @@ func formatReply(opts InitOptions, modulesSummary, llmsNote, archNote string) st
 		// --llmstxt only.
 		return "✅ /wiki init --llmstxt\n\nwiki/llms.txt rebuilt." + llmsNote
 	case !opts.Modules && !opts.Llmstxt && opts.Arch:
-		// --arch only.
+		// --arch only. The arch prompt needs module files
+		// in context; runArchIfPossible returns an empty
+		// note when none exist, so surface that explicitly
+		// rather than pretending the file was written.
+		if !ranArch {
+			return "⚠ /wiki init --arch\n\nno wiki/modules/ found; architecture step needs existing modules.\nRe-run with `--modules` (or `--modules --arch`) first."
+		}
 		return "✅ /wiki init --arch\n\nwiki/architecture.md rebuilt." + archNote
 	default:
 		// Combinations: modules+llmstxt, modules+arch,
-		// llmstxt+arch. Lead with the first flag the user
-		// specified — close enough for an internal tool.
+		// llmstxt+arch. modules+llmstxt and modules+arch
+		// always run their steps (modules step always
+		// writes); llmstxt+arch mirrors the bare --arch
+		// shape when the arch step was a no-op.
+		if !opts.Modules && opts.Arch && !ranArch {
+			return "⚠ /wiki init --llmstxt --arch\n\nllms.txt rebuilt; architecture step skipped — no wiki/modules/ found.\nRe-run with `--modules` (or `--modules --arch`) first." + llmsNote
+		}
 		return "✅ /wiki init\n\n" + modulesSummary + llmsNote + archNote
 	}
 }
@@ -385,6 +413,25 @@ func formatFailureReply(summary string, failed []ModuleResult) string {
 			fmt.Fprintf(&b, "- %s: %s\n", f.File, f.Reason)
 		}
 	}
+	return b.String()
+}
+
+// formatPreconditionReply surfaces a validation failure
+// for a wiki that already exists on disk — distinct from
+// formatFailureReply so the user does not see "Modules
+// written but rejected" when nothing was written this turn.
+func formatPreconditionReply(wikiRoot string, failed []ModuleResult) string {
+	var b strings.Builder
+	b.WriteString("❌ /wiki init\n\n")
+	fmt.Fprintf(&b, "Existing wiki at %s has invalid module files:\n", filepath.ToSlash(wikiRoot))
+	for _, f := range failed {
+		if f.Name != "" {
+			fmt.Fprintf(&b, "- %s (%s): %s\n", f.Name, f.File, f.Reason)
+		} else {
+			fmt.Fprintf(&b, "- %s: %s\n", f.File, f.Reason)
+		}
+	}
+	b.WriteString("\nFix the named files or remove wiki/modules/ and re-run with `--modules`.")
 	return b.String()
 }
 

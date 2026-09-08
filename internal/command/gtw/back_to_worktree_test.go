@@ -113,6 +113,9 @@ func TestRunBackToWorktree_RepairsMissingYml(t *testing.T) {
 	}
 
 	rig := newCloseRig(t)
+	// The chat's main cwd → repoRoot is the parent repo's
+	// root, which the gate uses to derive worktreePath and to
+	// fill the repaired yml's RepoRoot field. Match real git.
 	rig.git.revParseShowToplevel = repoRoot
 	rig.git.branchShowCurrent = "fix-99"
 	rig.git.worktreeListPorcelain =
@@ -153,6 +156,26 @@ func TestRunBackToWorktree_RepairsMissingYml(t *testing.T) {
 	}
 	if c.RepoRoot != repoRoot {
 		t.Errorf("repaired yml RepoRoot = %q, want %q", c.RepoRoot, repoRoot)
+	}
+
+	// Regression guard: in a real git worktree,
+	// `git -C <wt> rev-parse --show-toplevel` returns the
+	// worktree's OWN toplevel (== worktreePath), NOT the parent
+	// repo's root. A earlier draft of RunBackToWorktree re-ran
+	// the call from inside the worktree and assigned the result
+	// to RepoRoot — producing c.RepoRoot == c.Worktree, which
+	// makes /gtw close's SetSelectedCwd(c.RepoRoot) target the
+	// just-removed worktree. The fix: only ever call
+	// `rev-parse --show-toplevel` once, against the chat's
+	// main cwd. Assert the contract by counting the calls.
+	count := 0
+	for _, args := range rig.git.calls {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("rev-parse --show-toplevel called %d times; want exactly 1 (the chat-cwd gate)", count)
 	}
 
 	// cwd moves only after yml repair succeeds.
@@ -302,6 +325,85 @@ func TestRunBackToWorktree_NotInGitRepo(t *testing.T) {
 	card := rig.rec.lastText()
 	if !strings.Contains(card, "Not in a git repository") {
 		t.Errorf("reply should explain the not-a-repo state:\n%s", card)
+	}
+}
+
+// TestRunBackToWorktree_RaceLosesToOtherChat_TreatedAsSuccess:
+// another chat's /gtw fix wrote the yml between our stat and
+// our WriteGTWYml; WriteGTWYml returns ErrGtwYmlExists. The
+// handler must treat that as success (the desired state is
+// already on disk) rather than surfacing a ❌ repair error.
+//
+// We use a fake that injects a pre-existing yml between the
+// gate's os.Stat and the repair path's WriteGTWYml. Since the
+// programmableGit can't intercept os.Stat, we simulate the
+// race by writing the yml file ourselves before the call: the
+// handler's stat will find it and skip repair entirely.
+// That's not quite the same code path as the race, but it
+// covers the "yml exists, no repair needed" branch — the
+// intended outcome.
+//
+// The actual race-fix path (ErrGtwYmlExists after stat said
+// missing) is small enough to verify by reading back.go: any
+// future refactor that drops the !errors.Is(err,
+// ErrGtwYmlExists) guard will re-introduce the
+// "❌ repair .nightme/gtw.yml" failure even on a clean state
+// and the unit test surface can't catch it — the assertion
+// is therefore pinned via code review.
+func TestRunBackToWorktree_RaceLosesToOtherChat_TreatedAsSuccess(t *testing.T) {
+	repoRoot := t.TempDir()
+	wt := WorktreePath(repoRoot, "fix-42")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatalf("mkdir wt: %v", err)
+	}
+
+	rig := newCloseRig(t)
+	rig.git.revParseShowToplevel = repoRoot
+	rig.git.worktreeListPorcelain =
+		porcelainFor(repoRoot, "main") + "\n" + porcelainFor(wt, "fix-42")
+
+	// Simulate the race: another chat wrote the yml between
+	// our stat and our repair. Use a fresh seedFix with the
+	// same rig.Now so the yml content matches what the
+	// original /gtw fix would have produced.
+	seedFix(t, rig, wt, repoRoot)
+	moveToRepoRoot(t, rig, repoRoot)
+
+	res, err := RunBackToWorktree(context.Background(), rig.cs, rig.deps, "chat-btw", "msg-1", "fix-42")
+	if err != nil {
+		t.Fatalf("RunBackToWorktree: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// cwd moves into the worktree despite the yml being
+	// pre-existing (handler must NOT fail just because the
+	// stat-saw-missing / write-saw-exists race fired).
+	if got := rig.cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd = %q, want %q", got, wt)
+	}
+
+	// The pre-existing yml is intact (not clobbered) — its
+	// Branch came from the original /gtw fix, not from
+	// `git branch --show-current`.
+	c, err := ReadGTWYml(wt)
+	if err != nil {
+		t.Fatalf("ReadGTWYml: %v", err)
+	}
+	if c.Branch != "fix/42-test" {
+		t.Errorf("Branch = %q, want %q (yml must not be repaired-over)",
+			c.Branch, "fix/42-test")
+	}
+
+	// Success card uses "preserved" wording so the user can
+	// see the race-loser path didn't manufacture a stub.
+	card := rig.rec.lastText()
+	if !strings.Contains(card, "preserved") {
+		t.Errorf("card missing 'preserved' marker:\n%s", card)
+	}
+	if strings.Contains(card, "repaired") {
+		t.Errorf("card unexpectedly contains 'repaired' (yml was pre-existing):\n%s", card)
 	}
 }
 

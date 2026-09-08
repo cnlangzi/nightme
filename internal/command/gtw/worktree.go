@@ -390,17 +390,22 @@ func IsKnownWorktree(ctx context.Context, repoRoot, path string, git GitRunner) 
 	if err != nil {
 		return false, err
 	}
+	// pathutil.Equal handles "./" / "//" / trailing-separator
+	// quirks that bite a naive string compare; the porcelain
+	// walker below uses CutPrefix (same as WorktreeListPath)
+	// so we don't accidentally match "/foo" against
+	// "/foo-bar".
 	if n, nerr := pathutil.NormalizeForOS(path); nerr == nil {
 		path = n
 	}
-	needle := "worktree " + path
 	for _, line := range strings.Split(out, "\n") {
-		if line == needle {
+		if rest, ok := strings.CutPrefix(line, "worktree "); ok && rest == path {
 			return true, nil
 		}
 	}
 	return false, nil
 }
+
 // WorktreeAdd creates a fresh worktree at `path` based on `base`
 // (any commit-ish: branch, tag, HEAD, etc.). Equivalent to
 //
@@ -479,7 +484,7 @@ func WorktreeAdd(ctx context.Context, dir, newBranch, path, base string, git Git
 // Empty-path is a hard error: same rationale as WorktreeAdd —
 // the yml field is mandatory (ReadGTWYml validates Worktree !=
 // "") so reaching here with "" is an upstream bug, and we'd
-// rather say so than forward "git worktree remove ''" and get
+// rather say so than forward `git worktree remove ""` and get
 // a cryptic "fatal: " from git.
 //
 // On failure the returned *WorktreeError carries the git stderr

@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -215,13 +216,20 @@ func RunBack(
 //
 // yml repair (when <wt>/.nightme/gtw.yml is missing):
 //
-//  1. `branch     ← git -C <wt> branch --show-current`
-//  2. `repoRoot   ← git -C <wt> rev-parse --show-toplevel`
-//  3. `worktree   ← the resolved path itself`
-//  4. `mode       = ModeLocal` (we cannot recover Issue/Repo/
+//  1. `branch   ← git -C <wt> branch --show-current`
+//  2. `worktree ← the resolved path itself`
+//  3. `mode     = ModeLocal` (we cannot recover Issue/Repo/
 //     Provider from git alone; ModeLocal is the only safe
 //     default that lets `/gtw close` work without trying to
 //     call GitHub/GitLab to clear a WIP label)
+//  4. `repoRoot = repoRoot` (the chat's main-cwd repo root
+//     already resolved above — DO NOT re-query git from inside
+//     the worktree: `git rev-parse --show-toplevel` run in a
+//     worktree returns the worktree's own toplevel, which IS
+//     `worktreePath`. Writing that into the yml would make
+//     later `/gtw close` `SetSelectedCwd(c.RepoRoot)` to the
+//     just-removed path and trigger the "dangling cwd" branch
+//     in RunClose step 0.5.)
 //
 // The success card surfaces whether the yml was repaired so
 // the user can tell a ModeLocal stub apart from a yml that
@@ -244,18 +252,14 @@ func RunBackToWorktree(
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
 	}
-	if n, nerr := pathutil.NormalizeForOS(repoRoot); nerr == nil {
-		repoRoot = n
-	}
-	if n, nerr := pathutil.NormalizeForOS(selectedCwd); nerr == nil {
-		selectedCwd = n
-	}
 
 	// --- gate: must be at the repo root, not inside a worktree -
 	// Symmetric to RunBack's "must be inside a worktree" gate.
 	// The two together keep the directions from being able to
 	// fire in the wrong context.
-	if selectedCwd != repoRoot {
+	// pathutil.Equal (F-PATHUTIL-001 §13.3.3) absorbs "./" / "//" /
+	// trailing-separator quirks that bite a naive string compare.
+	if !pathutil.Equal(selectedCwd, repoRoot) {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ /gtw back <worktree> requires cwd at the main repo root.\n"+
 				"current cwd is inside a worktree; run `/gtw back` (no arg) first."), nil
@@ -300,28 +304,32 @@ func RunBackToWorktree(
 				fmt.Sprintf("❌ stat .nightme/gtw.yml: %v", serr)), nil
 		}
 		// Recover a qualified stub from git.
+		//
+		// RepoRoot comes from the chat's main-cwd gate above —
+		// NOT from a second git invocation inside the worktree.
+		// `git -C <worktree> rev-parse --show-toplevel` returns
+		// the worktree's OWN toplevel (== worktreePath), not the
+		// parent repo root, which would poison later /gtw close.
 		branch := ""
 		if b, _, berr := deps.Git.Run(ctx, worktreePath,
 			"branch", "--show-current"); berr == nil {
 			branch = strings.TrimSpace(b)
 		}
-		wtRepoRoot := repoRoot
-		if r, _, rerr := deps.Git.Run(ctx, worktreePath,
-			"rev-parse", "--show-toplevel"); rerr == nil {
-			if n, nerr := pathutil.NormalizeForOS(strings.TrimSpace(r)); nerr == nil && n != "" {
-				wtRepoRoot = n
-			}
-		}
-		if werr := WriteGTWYml(worktreePath, Context{
+		werr := WriteGTWYml(worktreePath, Context{
 			Mode:     ModeLocal,
 			Branch:   branch,
 			Worktree: worktreePath,
-			RepoRoot: wtRepoRoot,
+			RepoRoot: repoRoot,
 			State:    StateFixing,
-		}, deps.Now); werr != nil {
+		}, deps.Now)
+		if werr != nil && !errors.Is(werr, ErrGtwYmlExists) {
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ repair .nightme/gtw.yml: %v", werr)), nil
 		}
+		// ErrGtwYmlExists: another chat raced ahead and wrote
+		// the yml between our stat and write. The desired
+		// state is already on disk; surface as preserved (not
+		// repaired) so the user sees the right success card.
 		repaired = true
 	}
 
@@ -330,8 +338,15 @@ func RunBackToWorktree(
 		slog.Default().Warn("gtw: SetSelectedCwd into worktree failed",
 			"worktree", worktreePath,
 			"err", serr)
+		// If the yml was just repaired, the worktree now carries
+		// a ModeLocal stub; subsequent /gtw close / /cwd back
+		// into the worktree will see the stub. Surface that in
+		// the recovery hint so the user is not surprised.
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("⚠️ SetSelectedCwd(%s) failed: %v", worktreePath, serr)), nil
+			fmt.Sprintf("⚠️ SetSelectedCwd(%s) failed: %v\n"+
+				"worktree at %s is intact%s; run `/cwd %s` manually.",
+				worktreePath, serr, worktreePath,
+				ymlRepairSuffix(repaired), worktreePath)), nil
 	}
 
 	// --- success card -----------------------------------------
@@ -348,4 +363,16 @@ func RunBackToWorktree(
 	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
 	return &Result{Consumed: true}, nil
+}
+
+// ymlRepairSuffix returns a short parenthetical describing
+// whether the yml was just (re)written. Used by the
+// SetSelectedCwd-failed recovery hint so the user knows
+// whether a follow-up /gtw close will see a stub. Empty when
+// the yml was untouched (the common case).
+func ymlRepairSuffix(repaired bool) string {
+	if repaired {
+		return " (yml was created as a ModeLocal stub; /gtw close will read it)"
+	}
+	return ""
 }

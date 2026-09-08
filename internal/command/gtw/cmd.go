@@ -249,7 +249,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
 			"/gtw close                        tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
-			"/gtw back <worktree>             enter the named fix worktree (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
+			"/gtw back <worktree>                enter the named fix worktree (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]          commit uncommitted work via the configured agent (no push)\n" +
 			"/gtw push                         push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr                           generate PR title+body, then open the PR\n" +
@@ -720,13 +720,11 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 	// (RunBackToWorktree's own gate refuses otherwise). Hooks
 	// reuse cfg.Back.Hooks — the user's "before / after back"
 	// rules apply symmetrically to both directions.
+	// TrimSpace + empty-arg guard live inside RunBackToWorktree;
+	// duplicating them here would drift the wording over time.
+	// The handler's only job is parse + dispatch — the gate is
+	// the function's.
 	name := strings.TrimSpace(parsed.Arg(0))
-	if name == "" {
-		return &command.SlashOutput{
-			Reply:    "❌ /gtw back: worktree name is empty",
-			Consumed: true,
-		}, nil
-	}
 	hc := f.deriveHookContext(ctx, cs, "back")
 	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,

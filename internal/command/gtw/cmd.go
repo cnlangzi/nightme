@@ -249,6 +249,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix --name <branch>          create a local worktree (no issue)\n" +
 			"/gtw close                        tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw back                         exit the fix worktree (cwd → repoRoot) and sync main — worktree preserved\n" +
+			"/gtw back <worktree>             enter the named fix worktree (cwd → worktree); repairs a missing .nightme/gtw.yml\n" +
 			"/gtw commit [-a <agent>]          commit uncommitted work via the configured agent (no push)\n" +
 			"/gtw push                         push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr                           generate PR title+body, then open the PR\n" +
@@ -261,7 +262,7 @@ func (f *Factory) Spec() command.Spec {
 				Usage:   fixCmdSpec.Usage,
 			},
 			{Name: "close", Summary: "tear down the worktree, delete the branch, and sync main"},
-			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main"},
+			{Name: "back", Summary: "exit the fix worktree (cwd → repoRoot) and sync main; `/gtw back <name>` jumps into a named worktree", Usage: "/gtw back [<worktree>]"},
 			{Name: "commit", Summary: "commit uncommitted work via the configured agent", Usage: "/gtw commit [-a <agent>]"},
 			{Name: "push", Summary: "push the worktree branch (clean only — refuses dirty)"},
 			{Name: "pr", Summary: "generate PR title+body, then open the PR", Usage: "/gtw pr [-a <agent>]"},
@@ -657,12 +658,13 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, cs *c
 // to a still-alive worktree), and does NOT call /new (back is
 // reversible — the user might resume in minutes).
 func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	if _, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
+	parsed, err := command.ParseCmdArgs(input.Args[2:], command.CmdSpec{
 		Name:    "/gtw back",
-		Usage:   "/gtw back",
+		Usage:   "/gtw back [<worktree>]",
 		MinArgs: 0,
-		MaxArgs: 0,
-	}); err != nil {
+		MaxArgs: 1,
+	})
+	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
 			Consumed: true,
@@ -682,19 +684,55 @@ func (f *Factory) runBack(ctx context.Context, _ command.RuntimeServices, cs *ch
 
 	cfg, loadNotes := Load()
 
+	// --- /gtw back (no arg): exit the worktree → repoRoot ------
+	// The original non-destructive path; cwd must be inside a
+	// worktree (RunBack's own gate refuses otherwise).
+	if parsed.NArgs() == 0 {
+		hc := f.deriveHookContext(ctx, cs, "back")
+		hcFn := func() HookContext { return hc }
+		err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+			loadNotes, hcFn, cfg.Back.Hooks.Before, cfg.Back.Hooks.After,
+			func() error {
+				res, e := RunBack(ctx, cs, f.deps, input.ChatID, input.MessageID)
+				_ = res // RunBack already sent the reply via cs.Emitter()
+				// RunBack moves cs.SelectedCwd back to repoRoot but
+				// leaves the worktree on disk, so the yml is still
+				// readable — deriveHookContext will keep populating
+				// Worktree / Branch from the yml rather than the
+				// git fallback. Re-derive so post-hook env reflects
+				// the post-back state, matching runClose's pattern.
+				if e == nil {
+					hc = f.deriveHookContext(ctx, cs, "back")
+				}
+				return e
+			})
+		if err != nil {
+			return &command.SlashOutput{
+				Reply:    fmt.Sprintf("❌ /gtw back failed: %v", err),
+				Consumed: true,
+			}, nil
+		}
+		return &command.SlashOutput{Consumed: true}, nil
+	}
+
+	// --- /gtw back <slug>: enter the named worktree ------------
+	// Inverse direction: cwd must BE the repo root
+	// (RunBackToWorktree's own gate refuses otherwise). Hooks
+	// reuse cfg.Back.Hooks — the user's "before / after back"
+	// rules apply symmetrically to both directions.
+	name := strings.TrimSpace(parsed.Arg(0))
+	if name == "" {
+		return &command.SlashOutput{
+			Reply:    "❌ /gtw back: worktree name is empty",
+			Consumed: true,
+		}, nil
+	}
 	hc := f.deriveHookContext(ctx, cs, "back")
 	hcFn := func() HookContext { return hc }
-	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, hcFn, cfg.Back.Hooks.Before, cfg.Back.Hooks.After,
 		func() error {
-			res, e := RunBack(ctx, cs, f.deps, input.ChatID, input.MessageID)
-			_ = res // RunBack already sent the reply via cs.Emitter()
-			// RunBack moves cs.SelectedCwd back to repoRoot but
-			// leaves the worktree on disk, so the yml is still
-			// readable — deriveHookContext will keep populating
-			// Worktree / Branch from the yml rather than the
-			// git fallback. Re-derive so post-hook env reflects
-			// the post-back state, matching runClose's pattern.
+			_, e := RunBackToWorktree(ctx, cs, f.deps, input.ChatID, input.MessageID, name)
 			if e == nil {
 				hc = f.deriveHookContext(ctx, cs, "back")
 			}

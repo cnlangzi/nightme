@@ -377,6 +377,30 @@ func WorktreeListPath(ctx context.Context, dir, branch string, git GitRunner) (s
 	return "", nil
 }
 
+// IsKnownWorktree reports whether `path` is listed in
+// `git worktree list --porcelain` executed from `repoRoot`.
+// Used by `/gtw back <slug>` to reject arbitrary directories
+// that happen to share the worktree layout basename but are
+// not actual git worktrees of this repository.
+//
+// One porcelain pass; O(n) over the number of worktrees.
+// Returns an error only when the git invocation fails.
+func IsKnownWorktree(ctx context.Context, repoRoot, path string, git GitRunner) (bool, error) {
+	out, _, err := git.Run(ctx, repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	if n, nerr := pathutil.NormalizeForOS(path); nerr == nil {
+		path = n
+	}
+	needle := "worktree " + path
+	for _, line := range strings.Split(out, "\n") {
+		if line == needle {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 // WorktreeAdd creates a fresh worktree at `path` based on `base`
 // (any commit-ish: branch, tag, HEAD, etc.). Equivalent to
 //

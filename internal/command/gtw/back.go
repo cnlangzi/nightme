@@ -9,6 +9,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
 // RunBack is the entry point for `/gtw back`. The non-destructive
@@ -183,6 +184,168 @@ func RunBack(
 	}
 	// else: SkipRefreshDefaultBranch set (test-only); no sync
 	// card. The back-success card above still stands.
+
+	return &Result{Consumed: true}, nil
+}
+
+// RunBackToWorktree is the entry point for `/gtw back <slug>`.
+// The mirror of RunBack: jump from the chat's main repo root
+// into the named fix worktree, repairing a missing
+// .nightme/gtw.yml when needed.
+//
+// `slug` is the basename of the worktree directory under
+// `<parent>/<repoName>.nightme/<slug>` (the layout WorktreePath
+// builds). It is NOT a branch name and NOT an absolute path —
+// resolving anything else would let a typo silently land in the
+// wrong directory, while the layout's basename is what every
+// existing /gtw fix call writes.
+//
+// The new path is the strict inverse of the existing RunBack
+// path:
+//
+//   - RunBack requires cwd to be IN a worktree (refuses when
+//     at the repo root — no worktree to step out of).
+//   - RunBackToWorktree requires cwd to BE the repo root
+//     (refuses when inside a worktree — caller must `/gtw back`
+//     first).
+//
+// These two gates make the two directions non-overlapping: a
+// user inside a worktree types `/gtw back` to leave it; only
+// from the main repo does `/gtw back <name>` make sense.
+//
+// yml repair (when <wt>/.nightme/gtw.yml is missing):
+//
+//  1. `branch     ← git -C <wt> branch --show-current`
+//  2. `repoRoot   ← git -C <wt> rev-parse --show-toplevel`
+//  3. `worktree   ← the resolved path itself`
+//  4. `mode       = ModeLocal` (we cannot recover Issue/Repo/
+//     Provider from git alone; ModeLocal is the only safe
+//     default that lets `/gtw close` work without trying to
+//     call GitHub/GitLab to clear a WIP label)
+//
+// The success card surfaces whether the yml was repaired so
+// the user can tell a ModeLocal stub apart from a yml that
+// survived from the original `/gtw fix`.
+func RunBackToWorktree(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	deps HandlerDeps,
+	chatID, messageID, slug string,
+) (*Result, error) {
+	selectedCwd := cs.SelectedCwd()
+	if selectedCwd == "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ "+command.NoActiveCwdReply), nil
+	}
+
+	// --- resolve the main repo root from chat cwd --------------
+	repoRoot, err := RepoRoot(ctx, selectedCwd, deps.Git)
+	if err != nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
+	}
+	if n, nerr := pathutil.NormalizeForOS(repoRoot); nerr == nil {
+		repoRoot = n
+	}
+	if n, nerr := pathutil.NormalizeForOS(selectedCwd); nerr == nil {
+		selectedCwd = n
+	}
+
+	// --- gate: must be at the repo root, not inside a worktree -
+	// Symmetric to RunBack's "must be inside a worktree" gate.
+	// The two together keep the directions from being able to
+	// fire in the wrong context.
+	if selectedCwd != repoRoot {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ /gtw back <worktree> requires cwd at the main repo root.\n"+
+				"current cwd is inside a worktree; run `/gtw back` (no arg) first."), nil
+	}
+
+	// --- resolve slug → worktree path --------------------------
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ /gtw back: worktree name is empty"), nil
+	}
+	worktreePath := WorktreePath(repoRoot, slug)
+
+	// path must exist and be a known worktree of this repo
+	if info, serr := os.Stat(worktreePath); serr != nil {
+		if os.IsNotExist(serr) {
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ worktree %q not found at %s", slug, worktreePath)), nil
+		}
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ stat worktree path: %v", serr)), nil
+	} else if !info.IsDir() {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ %s exists but is not a directory", worktreePath)), nil
+	}
+	known, kerr := IsKnownWorktree(ctx, repoRoot, worktreePath, deps.Git)
+	if kerr != nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ git worktree list: %v", kerr)), nil
+	}
+	if !known {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ %s is not a git worktree of this repository", worktreePath)), nil
+	}
+
+	// --- yml: skip if present, repair from git if missing -----
+	ymlPath := gtwYmlPath(worktreePath)
+	repaired := false
+	if _, serr := os.Stat(ymlPath); serr != nil {
+		if !os.IsNotExist(serr) {
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ stat .nightme/gtw.yml: %v", serr)), nil
+		}
+		// Recover a qualified stub from git.
+		branch := ""
+		if b, _, berr := deps.Git.Run(ctx, worktreePath,
+			"branch", "--show-current"); berr == nil {
+			branch = strings.TrimSpace(b)
+		}
+		wtRepoRoot := repoRoot
+		if r, _, rerr := deps.Git.Run(ctx, worktreePath,
+			"rev-parse", "--show-toplevel"); rerr == nil {
+			if n, nerr := pathutil.NormalizeForOS(strings.TrimSpace(r)); nerr == nil && n != "" {
+				wtRepoRoot = n
+			}
+		}
+		if werr := WriteGTWYml(worktreePath, Context{
+			Mode:     ModeLocal,
+			Branch:   branch,
+			Worktree: worktreePath,
+			RepoRoot: wtRepoRoot,
+			State:    StateFixing,
+		}, deps.Now); werr != nil {
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ repair .nightme/gtw.yml: %v", werr)), nil
+		}
+		repaired = true
+	}
+
+	// --- switch cwd into the worktree --------------------------
+	if serr := cs.SetSelectedCwd(worktreePath); serr != nil {
+		slog.Default().Warn("gtw: SetSelectedCwd into worktree failed",
+			"worktree", worktreePath,
+			"err", serr)
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("⚠️ SetSelectedCwd(%s) failed: %v", worktreePath, serr)), nil
+	}
+
+	// --- success card -----------------------------------------
+	// Mirrors RunBack's row-style card so the two directions
+	// read the same shape at a glance. The `repaired` line is the
+	// only visual hint that distinguishes a ModeLocal stub from
+	// a yml that survived a previous `/gtw fix`.
+	ymlLine := "→ .nightme/gtw.yml (preserved)"
+	if repaired {
+		ymlLine = "→ .nightme/gtw.yml (repaired — ModeLocal stub; re-dispatch any issue manually)"
+	}
+	body := fmt.Sprintf("✅ back into `%s`\n→ worktree: %s\n%s",
+		worktreePath, worktreePath, ymlLine)
+	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
 	return &Result{Consumed: true}, nil
 }

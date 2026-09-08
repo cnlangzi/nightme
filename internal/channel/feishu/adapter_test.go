@@ -1217,6 +1217,94 @@ func TestSendViaLark_RootIdSet(t *testing.T) {
 	}
 }
 
+// TestSend_OutReply_PatchesPlaceholderReceipt_SteerQueueStop — the
+// per-turn continuation path for /steer /queue /stop. The slash
+// command factories emit OutReply (not OutCommandReply) so the
+// channel adapter folds the hint into the same rolling-log card
+// the placeholder pre-created at MessageQueued time, instead of
+// producing a standalone second bubble.
+//
+// Three guards: no second send (only PATCH), the receipt's
+// entries list grew by one, the entry text matches the steering
+// hint verbatim (no emoji prefix). Mirrors the OutCommandReply
+// folding test above, but triggered via OutReply — the difference
+// matters because OutReply's ensureReceiptForReplyWithFooter
+// short-circuits when the placeholder already exists and routes
+// through appendReplyToReceipt.
+func TestSend_OutReply_PatchesPlaceholderReceipt_SteerQueueStop(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"steer", "🛑 Steering: jump to head"},
+		{"queue", "📥 Queued: standalone at tail"},
+		{"stop", "Stop signal sent to claude @ /tmp. Next prompt will take over."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testAdapter(t)
+
+			var sends int
+			a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+				sends++
+				return "om_placeholder", nil
+			}
+			var patches int
+			var patchedBody string
+			a.updateFunc = func(_ context.Context, _, body string) error {
+				patches++
+				patchedBody = body
+				return nil
+			}
+
+			// Step 1: pre-create the placeholder receipt (the same
+			// shape the runtime subscriber builds via
+			// ensureReceiptForTyping on MessageQueued).
+			_, _, err := a.ensureReceiptForTyping(t.Context(), "oc_test", "om_user_msg", nil)
+			if err != nil {
+				t.Fatalf("ensureReceiptForTyping: %v", err)
+			}
+			if sends != 1 {
+				t.Fatalf("placeholder send count = %d, want 1", sends)
+			}
+
+			// Step 2: emit the slash-command continuation as OutReply.
+			if err := a.Send(t.Context(), messages.OutboundMessage{
+				Kind:    messages.OutReply,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_msg",
+				Text:    tc.text,
+			}); err != nil {
+				t.Fatalf("Send(OutReply): %v", err)
+			}
+
+			// No second send — OutReply folds into the placeholder.
+			if sends != 1 {
+				t.Errorf("sendFunc calls = %d, want 1 (OutReply must PATCH, not Create)", sends)
+			}
+			// Exactly one PATCH.
+			if patches != 1 {
+				t.Errorf("updateFunc calls = %d, want 1", patches)
+			}
+			// The patched body contains the slash-command hint verbatim.
+			if !strings.Contains(patchedBody, tc.text) {
+				t.Errorf("patched body missing %q, got %q", tc.text, patchedBody)
+			}
+			// Receipt grew by exactly one entry.
+			rcpt := a.receiptFor(t.Context(), "oc_test", "om_user_msg")
+			if rcpt == nil {
+				t.Fatal("receipt missing after OutReply")
+			}
+			if len(rcpt.entries) != 1 {
+				t.Fatalf("receipt entries = %d, want 1", len(rcpt.entries))
+			}
+			if rcpt.entries[0].Text != tc.text {
+				t.Errorf("entry text = %q, want %q", rcpt.entries[0].Text, tc.text)
+			}
+		})
+	}
+}
+
 // receiptFor2 was removed: OutThinking test now drives a real
 // receipt via the Send dispatcher itself (OutReply warmup primes
 // receiptsByUserMsgID).
@@ -2446,10 +2534,10 @@ func TestSend_OutInit_StampsFooterOnReceipt(t *testing.T) {
 	// pre-existing-receipt branch (matches /review flow: dispatcher
 	// calls SendCardForReceipt, then bridge emits OutInit).
 	if err := a.Send(context.Background(), messages.OutboundMessage{
-		Kind:      messages.OutReply,
-		ChatID:    "oc_test",
-		ReplyTo:   "om_user",
-		Text:      "⌨️ Working...",
+		Kind:    messages.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "⌨️ Working...",
 	}); err != nil {
 		t.Fatalf("Send(OutReply placeholder): %v", err)
 	}

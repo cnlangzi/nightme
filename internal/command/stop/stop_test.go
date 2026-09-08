@@ -214,6 +214,7 @@ func TestFormatStopResult_NotSupported(t *testing.T) {
 
 // TestHandler_NoSession — the /stop handler with an unknown chat
 // ID replies with the canonical "No active chat session." message.
+// Preflight (no cs) — stays on OutCommandReply, no per-turn fold path.
 func TestHandler_NoSession(t *testing.T) {
 	f := stoppkg.NewFactory()
 
@@ -228,10 +229,14 @@ func TestHandler_NoSession(t *testing.T) {
 	if !strings.Contains(out.Reply, "No active chat session") {
 		t.Errorf("want reply mentioning 'No active chat session', got %q", out.Reply)
 	}
+	if len(out.Outbound) != 0 {
+		t.Errorf("preflight should stay on Reply, got %d Outbound", len(out.Outbound))
+	}
 }
 
 // TestHandler_UsageError — the /stop handler with trailing args
-// rejects with "Usage: /stop".
+// rejects with "Usage: /stop". ParseCmdArgs error stays on Reply
+// (usage error, no per-turn fold path).
 func TestHandler_UsageError(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := stoppkg.NewFactory()
@@ -254,45 +259,69 @@ func TestHandler_UsageError(t *testing.T) {
 	if !strings.Contains(out.Reply, "Usage: /stop") {
 		t.Errorf("want reply with usage hint, got %q", out.Reply)
 	}
+	if len(out.Outbound) != 0 {
+		t.Errorf("usage error should stay on Reply, got %d Outbound", len(out.Outbound))
+	}
 }
 
 // TestHandler_NoTurnInFlight — the /stop handler on a selectedAS
-// with no in-flight prompt replies with the canonical "No turn in
-// flight" message.
+// with no in-flight prompt emits OutReply with "No turn in flight"
+// text — the main-work path is always OutReply so the channel
+// adapter folds it into the placeholder card.
 func TestHandler_NoTurnInFlight(t *testing.T) {
 	cs, _, _ := setupSelectedAS(t, "claude", "/tmp", true)
 	f := stoppkg.NewFactory()
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})
+	in := command.SlashInput{ChatID: cs.ChatID, MessageID: "m_stop_noop", Args: []string{"stop"}}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if !out.Consumed {
 		t.Fatal("want Consumed=true")
 	}
-	if !strings.Contains(out.Reply, "No turn in flight") {
-		t.Errorf("want 'No turn in flight' reply, got %q", out.Reply)
+	if len(out.Outbound) != 1 {
+		t.Fatalf("Outbound len = %d, want 1", len(out.Outbound))
+	}
+	ob := out.Outbound[0]
+	if ob.Kind != messages.OutReply {
+		t.Errorf("Outbound[0].Kind = %s, want OutReply", ob.Kind)
+	}
+	if ob.ReplyTo != in.MessageID {
+		t.Errorf("Outbound[0].ReplyTo = %q, want %q", ob.ReplyTo, in.MessageID)
+	}
+	if !strings.Contains(ob.Text, "No turn in flight") {
+		t.Errorf("Outbound[0].Text missing 'No turn in flight': %q", ob.Text)
 	}
 }
 
 // TestHandler_Stopped — the /stop handler on a selectedAS with an
-// in-flight prompt calls bridge.Stop and replies with the
+// in-flight prompt calls bridge.Stop and emits OutReply with the
 // "Next prompt will take over" hint.
 func TestHandler_Stopped(t *testing.T) {
 	cs, _, stub := setupSelectedAS(t, "claude", "/tmp", false)
 	f := stoppkg.NewFactory()
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{ChatID: cs.ChatID, Args: []string{"stop"}})
+	in := command.SlashInput{ChatID: cs.ChatID, MessageID: "m_stop_ok", Args: []string{"stop"}}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if !out.Consumed {
 		t.Fatal("want Consumed=true")
 	}
-	if !strings.Contains(out.Reply, "Next prompt will take over") {
-		t.Errorf("want 'Next prompt will take over' reply, got %q", out.Reply)
+	if len(out.Outbound) != 1 {
+		t.Fatalf("Outbound len = %d, want 1", len(out.Outbound))
+	}
+	ob := out.Outbound[0]
+	if ob.Kind != messages.OutReply {
+		t.Errorf("Outbound[0].Kind = %s, want OutReply", ob.Kind)
+	}
+	if ob.ReplyTo != in.MessageID {
+		t.Errorf("Outbound[0].ReplyTo = %q, want %q", ob.ReplyTo, in.MessageID)
+	}
+	if !strings.Contains(ob.Text, "Next prompt will take over") {
+		t.Errorf("Outbound[0].Text missing 'Next prompt will take over': %q", ob.Text)
 	}
 	if stub.stopped != 1 {
 		t.Errorf("bridge.Stop called %d times, want 1", stub.stopped)
@@ -327,5 +356,8 @@ func TestHandler_UnknownFlagRejected(t *testing.T) {
 	}
 	if !strings.Contains(out.Reply, "Usage: /stop") {
 		t.Errorf("want usage hint, got %q", out.Reply)
+	}
+	if len(out.Outbound) != 0 {
+		t.Errorf("flag-rejection usage error should stay on Reply, got %d Outbound", len(out.Outbound))
 	}
 }

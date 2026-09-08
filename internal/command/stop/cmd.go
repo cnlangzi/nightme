@@ -4,15 +4,15 @@
 // selectedAgent. Distinct from /close:
 //
 //   - /close — cwd-scoped (every AgentSession whose Cwd ==
-//              activeCwd), destructive (terminates processes +
-//              drops AgentSession entries from the pool +
-//              agent_sessions.json). Next message triggers a
-//              fresh spawn via the configured Spawner.
+//     activeCwd), destructive (terminates processes +
+//     drops AgentSession entries from the pool +
+//     agent_sessions.json). Next message triggers a
+//     fresh spawn via the configured Spawner.
 //   - /stop  — singleAgent-scoped (only the selectedAgent),
-//              non-destructive (signals the bridge to stop its
-//              current work; the AgentSession entry stays in
-//              the pool; the chat layer's TryFlush picks up the
-//              next queued prompt once the bridge settles).
+//     non-destructive (signals the bridge to stop its
+//     current work; the AgentSession entry stays in
+//     the pool; the chat layer's TryFlush picks up the
+//     next queued prompt once the bridge settles).
 //
 // Use /stop for "I changed my mind / want to redirect" — keep the
 // session, drop the in-flight generation. Use /close for "this
@@ -31,7 +31,7 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /stop.
-type Factory struct {}
+type Factory struct{}
 
 // NewFactory constructs a Factory. command/* factories do not
 // receive a *chatsession.Manager — cs comes from the dispatcher
@@ -49,9 +49,9 @@ func NewFactory() *Factory {
 // Spec implements command.SlashCommandFactory.
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
-		Name:    "stop",
-		Summary: "Stop the in-flight turn on the selected agent (next prompt takes over).",
-		Usage:   "/stop",
+		Name:     "stop",
+		Summary:  "Stop the in-flight turn on the selected agent (next prompt takes over).",
+		Usage:    "/stop",
 		Category: "session",
 	}
 }
@@ -83,6 +83,14 @@ var stopSpec = command.CmdSpec{
 //  4. Resolve the selectedAgentSession via chatsession and call
 //     StopSelectedAgent. Wrap the per-call Result with
 //     FormatStopResult and reply.
+//
+// Reply kind: OutReply (not OutCommandReply). The /stop outcome
+// is the agent's continuation of the in-flight turn — the stop
+// signal was sent, the next prompt takes over — so it folds into
+// the same rolling-log card the agent is streaming on. Feishu
+// PATCHes the placeholder created at MessageQueued time, Slack
+// streams into the same turnStream. Mirrors /steer and /queue;
+// only /cwd /run /help /kill /agents remain on OutCommandReply.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
@@ -105,10 +113,10 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	result, err := StopSelectedAgent(cmd)
 	if err != nil {
 		if errors.Is(err, chatsession.ErrNoSelectedAgent) {
-			return command.Reply(ctx, rt,
+			return command.OutReply(input,
 				"No active agent to stop. Use /use <agent> first."), nil
 		}
-		return command.Reply(ctx, rt, fmt.Sprintf("Stop failed: %v", err)), nil
+		return command.OutReply(input, fmt.Sprintf("Stop failed: %v", err)), nil
 	}
-	return command.Reply(ctx, rt, FormatStopResult(result)), nil
+	return command.OutReply(input, FormatStopResult(result)), nil
 }

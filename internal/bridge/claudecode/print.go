@@ -361,10 +361,10 @@ func parsePrintStream(ctx context.Context, stdout io.Reader, isReview bool, sink
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	var (
-		result     agent.RunResult
-		isError    bool
-		sawInit    bool
-		sawResult  bool
+		result    agent.RunResult
+		isError   bool
+		sawInit   bool
+		sawResult bool
 		// largestAssistant is only populated when isReview=true;
 		// the off-mode path skips both tracking and swap, so
 		// result.RecoveredText stays empty for non-review runs.
@@ -834,4 +834,3 @@ func runCodeReviewPrintMode(ctx context.Context, s *Starter, cfg agent.StartConf
 	}
 	return result, err
 }
-

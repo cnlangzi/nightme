@@ -312,6 +312,7 @@ func drainOneReady(t *testing.T, a *agent.Agent, timeout time.Duration) bool {
 		}
 	}
 }
+
 // ─── TestDrainForRunResult_SinkReceivesEvents ───────────────────
 // When a sink is supplied, drainForRunResult must invoke it
 // synchronously for every event read off a.Events(). The sink
@@ -431,7 +432,7 @@ func TestDrainForRunResult_NilSinkSafe(t *testing.T) {
 		Text: "no sink, that's fine",
 	})
 	d.deliver(agent.AgentEvent{
-		Kind: agent.EventAgentResult,
+		Kind:   agent.EventAgentResult,
 		Result: &agent.AgentResultEvent{Text: "ok"},
 	})
 

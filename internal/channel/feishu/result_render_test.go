@@ -88,9 +88,9 @@ func TestBuildPostMdJSON_Shape(t *testing.T) {
 // Feishu CardKit lark_md footer rendering pattern (matches
 // openclaw-lark src/card/builder.ts::buildFooter). The footer is
 // rendered as:
-//   1. <hr> divider element
-//   2. one <markdown> element whose content uses inline
-//      <font color='grey'>...</font> tags per line
+//  1. <hr> divider element
+//  2. one <markdown> element whose content uses inline
+//     <font color='grey'>...</font> tags per line
 //
 // Previous attempts (gone through three iterations):
 //   - <div> wrapping <plain_text> with text_color="#999999" —
@@ -247,7 +247,6 @@ func TestBuildResultCardJSON_PreservesCodeBlock(t *testing.T) {
 		t.Errorf("code block must stay intact in any element, got:\n%s", allContent)
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // TestBuildResultCardJSON_BlankLineBeforeFooter: 2026-08-24 user

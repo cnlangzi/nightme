@@ -164,7 +164,7 @@ func newWiredRouter(t *testing.T) (*Router, *fakeChannel) {
 	t.Helper()
 	ch := &fakeChannel{}
 	ir := inbound.New(
-		chatsession.NewManager(),            // mgr — never reached; stub never invokes GetOrCreate
+		chatsession.NewManager(),           // mgr — never reached; stub never invokes GetOrCreate
 		teststubs.AlwaysFallThrough{},      // commander: never claims
 		teststubs.AlwaysFallThroughShell{}, // shell: never claims
 		teststubs.NewReaction(false),       // reaction router: never claims

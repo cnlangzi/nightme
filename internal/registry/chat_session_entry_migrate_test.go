@@ -69,12 +69,12 @@ func TestChatSessionEntry_Unmarshal_CanonicalPrimaryAgent(t *testing.T) {
 // from the on-disk form (one-shot migration).
 func TestChatSessionEntry_RoundTrip_NoLegacyField(t *testing.T) {
 	e := ChatSessionEntry{
-		ID:           "cs_x",
-		ChatID:       "oc_x",
-		SelectedCwd:    "/code/x",
-		SelectedAgent:  "claude",
-		PrimaryAgent: "claude",
-		CreatedAt:    mustTime("2026-08-03T00:00:00Z"),
+		ID:                "cs_x",
+		ChatID:            "oc_x",
+		SelectedCwd:       "/code/x",
+		SelectedAgent:     "claude",
+		PrimaryAgent:      "claude",
+		CreatedAt:         mustTime("2026-08-03T00:00:00Z"),
 		LastInteractionAt: mustTime("2026-08-03T00:00:00Z"),
 	}
 

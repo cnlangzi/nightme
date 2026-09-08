@@ -31,12 +31,12 @@ func newRecordingAgentSession(pid int) *recordingAgentSession {
 }
 
 func (r *recordingAgentSession) Events() <-chan agent.AgentEvent { return r.events }
-func (r *recordingAgentSession) PID() int                      { return r.pid }
-func (r *recordingAgentSession) Name() string                  { return "fake" }
-func (r *recordingAgentSession) Mode() agent.Mode              { return agent.ModePTY }
-func (r *recordingAgentSession) Command() string               { return "fake" }
-func (r *recordingAgentSession) Args() []string                { return nil }
-func (r *recordingAgentSession) Env() []string                 { return nil }
+func (r *recordingAgentSession) PID() int                        { return r.pid }
+func (r *recordingAgentSession) Name() string                    { return "fake" }
+func (r *recordingAgentSession) Mode() agent.Mode                { return agent.ModePTY }
+func (r *recordingAgentSession) Command() string                 { return "fake" }
+func (r *recordingAgentSession) Args() []string                  { return nil }
+func (r *recordingAgentSession) Env() []string                   { return nil }
 func (r *recordingAgentSession) Info() agent.Info {
 	return agent.NewInfo("rec", agent.ModePTY, "rec", nil, nil)
 }
@@ -64,8 +64,8 @@ func (d *recordingDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *recordingDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *recordingDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *recordingDriver) Close() error                   { return d.inner.Close() }
+func (d *recordingDriver) Stop(ctx context.Context) error  { return d.inner.Stop(ctx) }
+func (d *recordingDriver) Close() error                    { return d.inner.Close() }
 func (d *recordingDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
@@ -82,7 +82,7 @@ func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.Con
 }
 func (r *recordingAgentSession) SendPermission(_ string) error { return nil }
 func (r *recordingAgentSession) New(_ context.Context) error   { return nil }
-func (r *recordingAgentSession) Stop(_ context.Context) error { return agent.ErrNotSupported }
+func (r *recordingAgentSession) Stop(_ context.Context) error  { return agent.ErrNotSupported }
 func (r *recordingAgentSession) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -58,10 +58,10 @@ type Starter struct {
 // does not affect us.
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
-		name:    name,
+		name:           name,
 		command:        command,
 		defaultCommand: command,
-		args:    append([]string(nil), args...),
+		args:           append([]string(nil), args...),
 	}
 }
 
@@ -156,19 +156,19 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // delegateReviewMultiJob fan-out machinery (docs/REVIEW.md §2.5).
 //
 // Groups:
-//   1. nativeReviewGroup("/review-bugbot") — cursor-agent's built-in
-//      Bugbot subagent. Verified empirically 2026-09-01 against
-//      cursor-agent 2026.08.11: cursor-agent auto-loads
-//      ~/.cursor/skills-cursor/review-bugbot/SKILL.md and dispatches
-//      the bugbot subagent when "/review-bugbot" appears as the
-//      positional -p prompt. The bridge's RunOnce spawns cursor-agent
-//      with -p "/review-bugbot" --output-format text and Bugbot runs.
-//   2. simplifyGroup(pre.reviewable) — nightme-owned simplify lens
-//      (reuse / simplification / efficiency / altitude axes).
-//      Bugbot does NOT cover these axes (verified by reading the
-//      SKILL.md and confirming cursor-agent CLI has no /simplify
-//      skill — see docs/REVIEW.md §2.1.1). We run them in parallel
-//      to fill the gap and merge the results.
+//  1. nativeReviewGroup("/review-bugbot") — cursor-agent's built-in
+//     Bugbot subagent. Verified empirically 2026-09-01 against
+//     cursor-agent 2026.08.11: cursor-agent auto-loads
+//     ~/.cursor/skills-cursor/review-bugbot/SKILL.md and dispatches
+//     the bugbot subagent when "/review-bugbot" appears as the
+//     positional -p prompt. The bridge's RunOnce spawns cursor-agent
+//     with -p "/review-bugbot" --output-format text and Bugbot runs.
+//  2. simplifyGroup(pre.reviewable) — nightme-owned simplify lens
+//     (reuse / simplification / efficiency / altitude axes).
+//     Bugbot does NOT cover these axes (verified by reading the
+//     SKILL.md and confirming cursor-agent CLI has no /simplify
+//     skill — see docs/REVIEW.md §2.1.1). We run them in parallel
+//     to fill the gap and merge the results.
 //
 // Why the mixed pattern (vs codex/claudecode single-call native):
 // those bridges' native review already covers the full review

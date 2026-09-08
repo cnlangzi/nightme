@@ -73,7 +73,7 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 	sess2, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		SessionID:       capturedID,
+		SessionID:      capturedID,
 	})
 	if err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
@@ -95,7 +95,7 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 				t.Fatalf("phase 2 turn A: events closed before result (gotInit=%v)", gotInit)
 			}
 			t.Logf("[multi-turn] phase 2 turn A EV kind=%v", ev.Kind)
-			if ev.Kind == agent.EventAgentReady  {
+			if ev.Kind == agent.EventAgentReady {
 				if ev.SessionID != capturedID {
 					t.Fatalf("phase 2: init.SessionID = %q, want %q (resume context lost across respawn)",
 						ev.SessionID, capturedID)
@@ -167,7 +167,7 @@ func captureInitSessionID(t *testing.T, sess *agent.Agent, timeout time.Duration
 			if !ok {
 				t.Fatalf("captureInit: events channel closed before init")
 			}
-			if ev.Kind == agent.EventAgentReady  && ev.SessionID != "" {
+			if ev.Kind == agent.EventAgentReady && ev.SessionID != "" {
 				return ev.SessionID
 			}
 		case <-deadline:

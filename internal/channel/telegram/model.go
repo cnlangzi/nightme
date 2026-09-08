@@ -1,13 +1,13 @@
 package telegram
 
 type Update struct {
-	UpdateID         int64              `json:"update_id"`
-	Message          *Message           `json:"message"`
-	EditedMessage    *Message           `json:"edited_message"`
-	CallbackQuery    *CallbackQuery     `json:"callback_query"`
-	MessageReaction  *MessageReactionUpdate `json:"message_reaction"`
-	MyChatMember     *ChatMemberUpdate  `json:"my_chat_member"`
-	ChatMember       *ChatMemberUpdate  `json:"chat_member"`
+	UpdateID        int64                  `json:"update_id"`
+	Message         *Message               `json:"message"`
+	EditedMessage   *Message               `json:"edited_message"`
+	CallbackQuery   *CallbackQuery         `json:"callback_query"`
+	MessageReaction *MessageReactionUpdate `json:"message_reaction"`
+	MyChatMember    *ChatMemberUpdate      `json:"my_chat_member"`
+	ChatMember      *ChatMemberUpdate      `json:"chat_member"`
 }
 
 // MessageReactionUpdate is emitted when a user changes their
@@ -16,12 +16,12 @@ type Update struct {
 // (NewReaction empty, OldReaction non-empty) on the same shape;
 // the handler routes both into the runtime as InboundMessage.Reaction.
 type MessageReactionUpdate struct {
-	Chat        Chat             `json:"chat"`
-	MessageID   int              `json:"message_id"`
-	User        User             `json:"user"`
-	Date        int64            `json:"date"`
-	OldReaction []ReactionType   `json:"old_reaction"`
-	NewReaction []ReactionType   `json:"new_reaction"`
+	Chat        Chat           `json:"chat"`
+	MessageID   int            `json:"message_id"`
+	User        User           `json:"user"`
+	Date        int64          `json:"date"`
+	OldReaction []ReactionType `json:"old_reaction"`
+	NewReaction []ReactionType `json:"new_reaction"`
 }
 
 type ReactionType struct {

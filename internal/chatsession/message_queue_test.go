@@ -73,27 +73,27 @@ func TestMessageQueue_BasicCycle(t *testing.T) {
 
 func TestMessageQueue_PeekSegmentation(t *testing.T) {
 	cases := []struct {
-		name string
-		pushed []MessageKind // kinds to push, IDs auto-generated
-		wantFirst []string  // IDs of first batch
-		wantSecond []string // IDs of second batch (after Commit + Peek)
+		name       string
+		pushed     []MessageKind // kinds to push, IDs auto-generated
+		wantFirst  []string      // IDs of first batch
+		wantSecond []string      // IDs of second batch (after Commit + Peek)
 	}{
 		{
-			name: "all_normal_returns_all",
-			pushed: []MessageKind{MessageKindNormal, MessageKindNormal, MessageKindNormal},
-			wantFirst: []string{"0", "1", "2"},
+			name:       "all_normal_returns_all",
+			pushed:     []MessageKind{MessageKindNormal, MessageKindNormal, MessageKindNormal},
+			wantFirst:  []string{"0", "1", "2"},
 			wantSecond: nil,
 		},
 		{
-			name: "queue_at_head_returns_alone",
-			pushed: []MessageKind{MessageKindQueue, MessageKindNormal, MessageKindNormal},
-			wantFirst: []string{"0"},
+			name:       "queue_at_head_returns_alone",
+			pushed:     []MessageKind{MessageKindQueue, MessageKindNormal, MessageKindNormal},
+			wantFirst:  []string{"0"},
 			wantSecond: []string{"1", "2"},
 		},
 		{
-			name: "queue_after_normals_splits",
-			pushed: []MessageKind{MessageKindNormal, MessageKindNormal, MessageKindQueue, MessageKindNormal, MessageKindNormal},
-			wantFirst: []string{"0", "1"},
+			name:       "queue_after_normals_splits",
+			pushed:     []MessageKind{MessageKindNormal, MessageKindNormal, MessageKindQueue, MessageKindNormal, MessageKindNormal},
+			wantFirst:  []string{"0", "1"},
 			wantSecond: []string{"2"},
 		},
 		{

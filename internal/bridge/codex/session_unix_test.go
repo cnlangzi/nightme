@@ -1,4 +1,5 @@
 //go:build !windows
+
 // NOTE: ringBuffer-specific tests previously here were migrated to
 // internal/agent/bridge_diagnostic_test.go::TestStderrRingBuffer
 // when codex's local ringBuffer was unified onto

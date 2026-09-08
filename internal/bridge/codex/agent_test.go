@@ -1,4 +1,3 @@
-
 package codex
 
 import (
@@ -103,8 +102,8 @@ func TestStageImage_ExtensionFromPath(t *testing.T) {
 	}
 
 	dst, err := a.stageImage(agent.ContentBlock{
-		Type:     agent.ContentImage,
-		Path:     src,
+		Type:      agent.ContentImage,
+		Path:      src,
 		MediaType: "image/png",
 	})
 	if err != nil {
@@ -142,8 +141,8 @@ func TestStageImage_ExtensionFromMimeType(t *testing.T) {
 	}
 
 	dst, err := a.stageImage(agent.ContentBlock{
-		Type:     agent.ContentImage,
-		Path:     src,
+		Type:      agent.ContentImage,
+		Path:      src,
 		MediaType: "image/jpeg",
 	})
 	if err != nil {

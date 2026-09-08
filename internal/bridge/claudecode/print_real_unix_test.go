@@ -9,7 +9,7 @@
 // can't:
 //
 //   - The argv shape (-p + --output-format stream-json + --verbose
-//     + --permission-mode bypassPermissions) actually produces a
+//   - --permission-mode bypassPermissions) actually produces a
 //     stream-json result event from real claude.
 //   - The is_error path triggers on a real "model declined to
 //     answer" outcome.

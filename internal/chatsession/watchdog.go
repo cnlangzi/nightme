@@ -5,12 +5,12 @@
 // any timer. The watchdog covers the residual failure modes that
 // the synchronous path can't:
 //
-//   1. HungPrompt: bridge alive but stdin/RPC stuck — no
-//      KindPromptEnded arrives, no events channel close, no
-//      synchronous respawn trigger.
-//   2. FastAck:    inbound arrived, but no outbound reaction for
-//      T1s. Suggests dispatcher is wedged on a different chat or
-//      the bridge is overloaded.
+//  1. HungPrompt: bridge alive but stdin/RPC stuck — no
+//     KindPromptEnded arrives, no events channel close, no
+//     synchronous respawn trigger.
+//  2. FastAck:    inbound arrived, but no outbound reaction for
+//     T1s. Suggests dispatcher is wedged on a different chat or
+//     the bridge is overloaded.
 //
 // Both timers attach to a single ChatSession. They re-arm on every
 // KindPromptEnded / outbound event. On fire they call into the
@@ -155,11 +155,11 @@ func (w *Watchdog) onHungPrompt() {
 // WatchdogSnapshot is the read-only view used by `nightme doctor`.
 // Mirrors AgentProberSnapshot for consistency.
 type WatchdogSnapshot struct {
-	Active          bool
-	FastAckSeconds  int
-	HungMins        int
-	LastOutbound    time.Time
-	LastPromptEnd   time.Time
+	Active         bool
+	FastAckSeconds int
+	HungMins       int
+	LastOutbound   time.Time
+	LastPromptEnd  time.Time
 }
 
 // Snapshot returns the watchdog state.

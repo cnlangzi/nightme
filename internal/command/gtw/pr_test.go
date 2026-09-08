@@ -180,10 +180,10 @@ func TestParsePRReply_UnclosedFenceNowSucceeds(t *testing.T) {
 // wrapper noise around it.
 func TestParsePRReply_NoiseModes(t *testing.T) {
 	cases := []struct {
-		name      string
-		input     string
-		want      string // expected title
-		wantBody  string // expected body; "" means we don't check
+		name     string
+		input    string
+		want     string // expected title
+		wantBody string // expected body; "" means we don't check
 	}{
 		{
 			// LLM-style JSON wrapper: the entire PR description
@@ -210,9 +210,9 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 			// the first line as title and merging the rest
 			// into body. This is the contract dispatchPR
 			// relies on so gh/glab gets a clean title.
-			name:  "json_wrapper",
-			input: `{"text": "feat(config): add name field\n\nbody goes here"}`,
-			want:  "feat(config): add name field",
+			name:     "json_wrapper",
+			input:    `{"text": "feat(config): add name field\n\nbody goes here"}`,
+			want:     "feat(config): add name field",
 			wantBody: "body goes here",
 		},
 		{
@@ -968,7 +968,6 @@ func setupPRGit(rig *prTestRig, branch string, unpushed int) {
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 }
 
-
 // TestDispatchPR_NoOriginBranch covers the gate-1 "origin/<branch>
 // does not exist" path. The local branch exists, the worktree
 // is clean, but `git ls-remote --heads origin <branch>` returns
@@ -1105,12 +1104,12 @@ func TestDispatchPR_LSRemoteUnknownErrorPassThrough(t *testing.T) {
 	// fragments' hints — that would be the system guessing at
 	// the wrong next step.
 	for _, banned := range []string{
-		"credential",         // auth hint
+		"credential",           // auth hint
 		"network connectivity", // network hint
-		"origin remote",      // auth hint (alt wording)
-		"origin should point", // not-a-repo hint
-		"does not exist",     // gate-1 fail reply
-		"/gtw push first",    // gate-1 fail reply
+		"origin remote",        // auth hint (alt wording)
+		"origin should point",  // not-a-repo hint
+		"does not exist",       // gate-1 fail reply
+		"/gtw push first",      // gate-1 fail reply
 	} {
 		if strings.Contains(r, banned) {
 			t.Fatalf("unknown stderr must NOT be translated; got %q in:\n%s", banned, r)
@@ -1531,8 +1530,7 @@ func TestDispatchPR_NoAgentSelected(t *testing.T) {
 
 func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt",
-	})
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
 	rig.agent.runOnceErr = errors.New("boom")
 	setupPRGit(rig, "wt", 0)
 	rig.installDeps()
@@ -1551,8 +1549,7 @@ func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 
 func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt",
-	})
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
 	// Whitespace-only agent output is the ONLY case the
 	// permissive parser still can't recover from — there's no
 	// non-empty line to take as a title. Everything else
@@ -1672,8 +1669,7 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 	// in tests; production would call Detect(ctx, url, prober)
 	// itself).
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt",
-	})
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
 	setupPRGit(rig, "wt", 0)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
@@ -1693,8 +1689,7 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 
 func TestDispatchPR_CreatePRExists(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt",
-	})
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
 	setupPRGit(rig, "wt", 0)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(fmt.Errorf("%w: a PR for this branch already exists", ErrPRExists))
@@ -1714,8 +1709,7 @@ func TestDispatchPR_CreatePRExists(t *testing.T) {
 
 func TestDispatchPR_CreatePRFails(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt",
-	})
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
 	setupPRGit(rig, "wt", 0)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(errors.New("401 Unauthorized"))
@@ -1742,8 +1736,7 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 // produced (because ErrStaleUpstream was the only sentinel).
 func TestDispatchPR_NoCommitsBetween(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt",
-	})
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
 	setupPRGit(rig, "wt", 0)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(fmt.Errorf("%w: GraphQL: No commits between main and wt (createPullRequest)", ErrNoCommitsBetween))
@@ -2705,7 +2698,8 @@ var _ GitProvider = (*fakeGitProvider)(nil)
 // makes pr visible to the very next GetOrCreate(cwd) read.
 //
 // Mirrors dispatchPR's success path:
-//   deps.PRCache.WritePR(c.Worktree, newPR)
+//
+//	deps.PRCache.WritePR(c.Worktree, newPR)
 //
 // Pre-allocation is unnecessary: Registry.WritePR allocates
 // the cache itself (cwd-keyed; per-workspace, so there is no

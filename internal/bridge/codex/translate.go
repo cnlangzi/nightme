@@ -1,4 +1,3 @@
-
 // Package codex — translator + notification / server-request dispatch.
 //
 // This file owns the F-52-style state machine that turns app-server
@@ -112,12 +111,12 @@ func (t *turnState) reset() {
 // flag the instant turn/start returns (before codex actually
 // processes the turn).
 type translator struct {
-	mu         sync.Mutex
-	turn       *turnState
-	deliver    func(agent.AgentEvent) agent.AgentEvent
-	onTurnEnd  func()
+	mu                           sync.Mutex
+	turn                         *turnState
+	deliver                      func(agent.AgentEvent) agent.AgentEvent
+	onTurnEnd                    func()
 	agentName, workspace, branch string
-	stderrTail *agent.StderrRingBuffer
+	stderrTail                   *agent.StderrRingBuffer
 }
 
 func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent,
@@ -161,7 +160,7 @@ func (t *translator) notify(method string, params json.RawMessage) {
 		t.mu.Lock()
 		t.turn.reset()
 		t.mu.Unlock()
-		case "thread/tokenUsage/updated":
+	case "thread/tokenUsage/updated":
 		t.handleTokenUsageUpdated(params)
 	case "item/started":
 		t.handleItemStarted(params)
@@ -295,7 +294,7 @@ func (t *translator) handleTokenUsageUpdated(params json.RawMessage) {
 	// F-CODEX-FALLBACK regression log: emit at Debug only, but
 	// always record whether `last` was empty enough to escalate
 	// to `total`. If the per-turn pct ever exceeds 100% again,
-// flipping the daemon log level to Debug will reveal whether
+	// flipping the daemon log level to Debug will reveal whether
 	// the fallback path was responsible — that's the cheapest
 	// signal we have without re-adding the raw wire dump.
 	slog.Default().Debug("codex: handleTokenUsageUpdated",
@@ -427,7 +426,7 @@ func (t *translator) handleItemCompleted(params json.RawMessage) {
 		t.mu.Unlock()
 		name, output, failed := decodeToolItemEnd(typ, notif.Item, pt)
 		ev := agent.AgentEvent{
-			Kind:    agent.EventAgentToolEnd,
+			Kind: agent.EventAgentToolEnd,
 			ToolEnd: &agent.AgentToolEndEvent{
 				ID:     id,
 				Name:   name,
@@ -638,8 +637,8 @@ func decodeToolItem(itemType string, raw json.RawMessage) (name, args string) {
 		args = p.Query
 	case itemTypeMCPToolCall:
 		var p struct {
-			Server string `json:"server"`
-			Tool   string `json:"tool"`
+			Server string          `json:"server"`
+			Tool   string          `json:"tool"`
 			Args   json.RawMessage `json:"arguments"`
 		}
 		_ = json.Unmarshal(raw, &p)
@@ -747,8 +746,8 @@ func appServerUsageToUsageInfo(u *appServerUsage) *agent.UsageInfo {
 		return nil
 	}
 	return &agent.UsageInfo{
-		InputTokens:            u.InputTokens,
-		OutputTokens:           u.OutputTokens,
-		CacheReadInputTokens:   u.CachedInputTokens,
+		InputTokens:          u.InputTokens,
+		OutputTokens:         u.OutputTokens,
+		CacheReadInputTokens: u.CachedInputTokens,
 	}
 }

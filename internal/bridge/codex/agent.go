@@ -1,4 +1,3 @@
-
 // Public Agent (template + live) for the codex app-server bridge.
 //
 // Two states share one type:
@@ -448,12 +447,12 @@ func (d *driver) New(ctx context.Context) error {
 //
 //   - session not started                 → ErrNotSupported
 //   - no in-flight turn (busy=false)      → nil (noop; matches
-//                                           stop.go's "nothing
-//                                           to stop" reply)
+//     stop.go's "nothing
+//     to stop" reply)
 //   - in-flight turn, turnId known       → turn/interrupt
 //   - in-flight turn, turnId still empty  → brief wait for
-//                                           turn/start's response,
-//                                           then turn/interrupt
+//     turn/start's response,
+//     then turn/interrupt
 //   - turn/interrupt fails with          → SIGINT (legacy
 //     method-not-found                     fallback for old codex)
 //   - turnId stays empty after wait,      → SIGINT (last-resort
@@ -653,8 +652,8 @@ func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	// gun — codex emitted turn/completed, translator built the Done,
 	// but it never made it onto d.session.events.
 	cLog("deliver push", "kind", ev.Kind.String(),
-		"q_len",  len(d.session.events),
-		"q_cap",  cap(d.session.events))
+		"q_len", len(d.session.events),
+		"q_cap", cap(d.session.events))
 
 	select {
 	case d.session.events <- ev:

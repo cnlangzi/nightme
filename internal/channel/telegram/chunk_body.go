@@ -378,20 +378,20 @@ const taskSectionOverflowPlaceholder = "- [ ] …"
 // anything?" probe.
 //
 // Pipeline:
-//   1. Filter out rows whose status is terminal-but-not-rendered
-//      (TaskDeleted / TaskCancelled). Other statuses always render
-//      — better than silently dropping a row the bridge meant to
-//      surface.
-//   2. Drop trailing rows that would push the rendered rune count
-//      over taskSectionBudgetRunes. The last visible row gets a
-//      "…" suffix so the user sees the truncation.
-//   3. Prepend the pre-baked HTML headline (taskHeadline) — this
-//      is NOT run through RenderMarkdown so the `<b>` tags survive
-//      without double-escape.
-//   4. Pipe the row block through RenderMarkdown so the Subject
-//      escapes cleanly and any inline emphasis / code spans /
-//      links still work. The whole section is one string so the
-//      caller can append it as one block.
+//  1. Filter out rows whose status is terminal-but-not-rendered
+//     (TaskDeleted / TaskCancelled). Other statuses always render
+//     — better than silently dropping a row the bridge meant to
+//     surface.
+//  2. Drop trailing rows that would push the rendered rune count
+//     over taskSectionBudgetRunes. The last visible row gets a
+//     "…" suffix so the user sees the truncation.
+//  3. Prepend the pre-baked HTML headline (taskHeadline) — this
+//     is NOT run through RenderMarkdown so the `<b>` tags survive
+//     without double-escape.
+//  4. Pipe the row block through RenderMarkdown so the Subject
+//     escapes cleanly and any inline emphasis / code spans /
+//     links still work. The whole section is one string so the
+//     caller can append it as one block.
 //
 // taskSectionOverflowPlaceholder fires when EVERY row was dropped
 // — preserves the visual shape of a todo list (one open checkbox)
@@ -473,10 +473,10 @@ func (b *chunkBody) renderTaskSection() string {
 // Pipeline routing (do not change without re-reading §11.12):
 //   - header:    verbatim (already HTML, e.g. "<b>...</b>")
 //   - entries:   RenderMarkdown per entry (escape + light md →
-//                HTML); isHTML entries write verbatim
+//     HTML); isHTML entries write verbatim
 //   - taskList:  pre-baked headline + RenderMarkdown over the
-//                joined task rows (§11.12.6.1); emitted between
-//                entries and footer when non-empty
+//     joined task rows (§11.12.6.1); emitted between
+//     entries and footer when non-empty
 //   - footer:    verbatim (statusbar.RenderPanel output)
 //
 // Inter-entry separator: every entry is followed by '\n'. If the

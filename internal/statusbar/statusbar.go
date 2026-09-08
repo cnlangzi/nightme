@@ -47,8 +47,9 @@ import (
 //   - 15 → wraps
 //   - 8  → no wrap but feels too sparse
 //   - 16 → current (2026-08-22 user feedback "再增加一倍");
-//          still narrow enough for Android chat bubble but
-//          visually substantive as a frame marker.
+//     still narrow enough for Android chat bubble but
+//     visually substantive as a frame marker.
+//
 // Content lines render verbatim and may extend past the bars
 // (acceptable per "宁愿短点也不要折行" — bars short, content
 // can wrap).

@@ -224,6 +224,7 @@ func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 		t.Errorf("pool size after /close codex: want 2 (both preserved), got %d", got)
 	}
 }
+
 // TestFactory_Handle_ArgvContract pins the issue #291 CLI
 // contract on /close. Extra positionals were the dangerous case
 // here: `/close claude codex` silently closed only claude while

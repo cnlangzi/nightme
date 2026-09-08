@@ -360,14 +360,18 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 //     porcelain still surfaces staged files, so a careful
 //     agent can act on it; the explicit nudge survives as
 //     a workflow anchor, not a tool floor.
+//
 //   - 5-row split rubric. Replaced with a one-line "ONE
 //     coherent commit beats two forced splits" anchor — the
 //     LLM already knows what an "intent" is.
+//
 //   - Two-tier body rule (commit vs PR body differentiation).
 //     The LLM was not confusing the two; the rule was defensive
 //     against a regression that did not occur.
+//
 //   - Type-by-body rule (chore OPTIONAL, fix+feat REQUIRED).
 //     Folded into the new compact body-rules section.
+//
 //   - Gold example (the SignalProcessGroup depth target).
 //     Replaced by the explicit anti-modal guard; the example
 //     was pattern-matching context that the body rules +

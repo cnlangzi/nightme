@@ -1,4 +1,3 @@
-
 package codex
 
 import (
@@ -509,7 +508,6 @@ func TestAppServerUsageToUsageInfo_Nil(t *testing.T) {
 		t.Errorf("nil in → nil out, got %+v", got)
 	}
 }
-
 
 // ─── thread/tokenUsage/updated (codex ≥0.125 usage channel) ───
 

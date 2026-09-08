@@ -75,14 +75,14 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	// from a tray click" is: "does this command exit within
 	// seconds without user input and without claiming a TTY?".
 	// If yes, reg.add; if no, reg.addNoTray.
-	reg.addNoTray(newTestCmd(),   "test ...        spawn CLI in PTY (Ctrl-C to end)")
-	reg.add(newListCmd(),         "list            list sessions")
-	reg.add(newKillCmd(),         "kill            terminate agent processes")
-	reg.addNoTray(newLoginCmd(),  "login feishu    QR Feishu registration")
-	reg.addNoTray(newLogsCmd(),   "logs [--lines N] tail daemon log (Ctrl-C to exit)")
-	reg.add(newCleanCmd(),        "clean           truncate logs + remove attachments")
+	reg.addNoTray(newTestCmd(), "test ...        spawn CLI in PTY (Ctrl-C to end)")
+	reg.add(newListCmd(), "list            list sessions")
+	reg.add(newKillCmd(), "kill            terminate agent processes")
+	reg.addNoTray(newLoginCmd(), "login feishu    QR Feishu registration")
+	reg.addNoTray(newLogsCmd(), "logs [--lines N] tail daemon log (Ctrl-C to exit)")
+	reg.add(newCleanCmd(), "clean           truncate logs + remove attachments")
 	reg.add(newConfigCmd(), "config          interactive configuration (name, agents)")
-	reg.add(newVersionCmd(),      "version         version info")
+	reg.add(newVersionCmd(), "version         version info")
 	reg.add(newUpdateCmd(), "update          check for a newer release")
 	reg.addNoTray(newWorkflowCmd(), "workflow ...   list/show/run workflow YAMLs")
 
@@ -110,9 +110,9 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 // race (tray Restart + Commands/restart at the same time). status
 // is also on the tray as a non-clickable info row.
 func addLifecycleCommands(reg *cmdRegistry) {
-	reg.addNoTray(newStartCmd(),   "start           start daemon in the background")
-	reg.addNoTray(newStatusCmd(),  "status          show daemon status")
-	reg.addNoTray(newStopCmd(),    "stop            gracefully stop daemon")
+	reg.addNoTray(newStartCmd(), "start           start daemon in the background")
+	reg.addNoTray(newStatusCmd(), "status          show daemon status")
+	reg.addNoTray(newStopCmd(), "stop            gracefully stop daemon")
 	reg.addNoTray(newRestartCmd(), "restart         gracefully replace daemon")
 	// _daemon is the forked child process entry point — internal,
 	// not user-facing. Registered in the cobra tree so the binary

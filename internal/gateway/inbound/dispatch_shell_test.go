@@ -45,7 +45,7 @@ func TestDispatch_ShellConsumed_BypassesMessageHandler(t *testing.T) {
 	if sh.Calls() == 0 {
 		t.Fatal("shell dispatcher was not invoked; routing should reach it before MessageHandler")
 	}
-		if res == nil || !res.Consumed {
+	if res == nil || !res.Consumed {
 		t.Errorf("expected Consumed=true from shell branch; got %+v", res)
 	}
 	// The shell branch returns Consumed=true with no Reply
@@ -85,7 +85,7 @@ func TestDispatch_ShellNotConsumed_FallsThroughToMessageHandler(t *testing.T) {
 	if res == nil || res.Consumed {
 		t.Errorf("expected Consumed=false (fall-through); got %+v", res)
 	}
-	}
+}
 
 // TestDispatch_ShellPriorityAfterCommander pins the order:
 // command branch runs BEFORE shell branch. A text starting

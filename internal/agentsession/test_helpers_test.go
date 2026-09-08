@@ -27,12 +27,12 @@ func newFakeAgentSession(pid int) *fakeAgentSession {
 }
 
 func (f *fakeAgentSession) Events() <-chan agent.AgentEvent { return f.events }
-func (f *fakeAgentSession) PID() int                      { return f.pid }
+func (f *fakeAgentSession) PID() int                        { return f.pid }
 func (f *fakeAgentSession) Info() agent.Info {
 	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
 func (f *fakeAgentSession) Detect() error { return nil }
-func (f *fakeAgentSession) Init(string) {}
+func (f *fakeAgentSession) Init(string)   {}
 func (f *fakeAgentSession) Clone() agent.Starter {
 	return &fakeAgentSession{pid: f.pid, events: f.events, mu: sync.Mutex{}}
 }
@@ -62,9 +62,9 @@ func (d *fakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) err
 	return d.inner.SendBlocks(ctx, b)
 }
 func (d *fakeDriver) SendPermission(resp string) error { return d.inner.SendPermission(resp) }
-func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ctx) }
-func (d *fakeDriver) Close() error                      { return d.inner.Close() }
-func (d *fakeDriver) Stop(_ context.Context) error       { return nil }
+func (d *fakeDriver) Reset(ctx context.Context) error  { return d.inner.New(ctx) }
+func (d *fakeDriver) Close() error                     { return d.inner.Close() }
+func (d *fakeDriver) Stop(_ context.Context) error     { return nil }
 func (d *fakeDriver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
 	return nil
 }
@@ -151,8 +151,8 @@ func (d *callRecordingASDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *callRecordingASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *callRecordingASDriver) Close() error                   { return d.inner.Close() }
-func (d *callRecordingASDriver) Stop(_ context.Context) error   { return nil }
+func (d *callRecordingASDriver) Close() error                    { return d.inner.Close() }
+func (d *callRecordingASDriver) Stop(_ context.Context) error    { return nil }
 func (d *callRecordingASDriver) Keepalive(_ context.Context, _ func(context.Context) error) error {
 	return nil
 }
@@ -189,8 +189,8 @@ func (d *restartErrASDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *restartErrASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *restartErrASDriver) Close() error                   { return d.inner.Close() }
-func (d *restartErrASDriver) Stop(_ context.Context) error   { return nil }
+func (d *restartErrASDriver) Close() error                    { return d.inner.Close() }
+func (d *restartErrASDriver) Stop(_ context.Context) error    { return nil }
 
 // --- Spawner fakes ---------------------------------------------------
 

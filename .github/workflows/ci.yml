@@ -66,6 +66,103 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+      # Reject CRLF-terminated .go files before they reach the
+      # gofmt gate. gofmt considers CRLF-terminated files to
+      # be unformatted (gofmt -l lists them as needing
+      # reformatted, regardless of content), so a CRLF on disk
+      # surfaces as a confusing "file is not gofmt'd" error
+      # with the WRONG remediation hint. This step catches the
+      # real cause first and points at the file with an
+      # explicit fix command.
+      #
+      # Why CRLF appears at all: GitHub Actions windows-latest
+      # runners ship with core.autocrlf=true (runner image
+      # default), which silently rewrites LF files to CRLF on
+      # checkout. .gitattributes (`*.go text eol=lf`) is the
+      # primary defense — it makes git checkout normalize to
+      # LF regardless of core.autocrlf — but a contributor
+      # who committed a CRLF file before .gitattributes landed
+      # would still see gofmt fail on every Windows runner
+      # until the file is re-normalized. This step is the
+      # belt-and-braces enforcement that surfaces the file
+      # name directly instead of letting gofmt blame the wrong
+      # cause.
+      #
+      # Sits before Check gofmt: a CRLF file would fail
+      # gofmt anyway, so this step costs nothing extra and
+      # produces a better error message.
+      #
+      # Skipped on windows-latest: GitHub Actions windows
+      # runner image ships with core.autocrlf=true, which
+      # silently rewrites LF to CRLF on checkout. .gitattributes
+      # (`*.go text eol=lf`) controls NEW checkout normalization
+      # only — it does not retroactively re-normalize files
+      # already stored as CRLF in git history, and it can be
+      # defeated by stale core.autocrlf state on the runner.
+      # The result is that any windows-latest checkout is
+      # virtually guaranteed to surface CRLF files, which makes
+      # this step false-positive fail on every PR.
+      #
+      # The actual enforcement contract is:
+      #   - linux/macos (this step): strict — fail on any CRLF
+      #   - windows: trust .gitattributes + the developer's
+      #     local `make fmt` to keep the tree LF on commit
+      # Cheap check skipped on windows, not the correctness
+      # contract: developers on Windows still have to ship
+      # LF .go files because the merge target is a Linux box.
+      - name: Check line endings (.go files must be LF)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          crlf_files=$(find . -name '*.go' -not -path './.git/*' -exec grep -l $'\r' {} + 2>/dev/null || true)
+          if [ -n "$crlf_files" ]; then
+            echo "::error::The following .go files have CRLF line endings. gofmt considers them unformatted; the fix is LF:"
+            echo "$crlf_files"
+            echo "::error::Fix: re-normalize each file with 'sed -i \"s/\\r$//\" <file>' (or 'dos2unix <file>') and re-commit."
+            exit 1
+          fi
+
+      # Strict gofmt gate. gofmt is the canonical Go formatter;
+      # this step fails CI on any file that differs from what
+      # `go fmt` would produce, so formatting drift cannot
+      # accumulate silently between toolchain upgrades. go.mod
+      # pins `go 1.27.0`, so the runner's gofmt here is the same
+      # 1.27 formatter developers run locally — a check based
+      # on an older toolchain (e.g. running this step against
+      # 1.26) would re-trigger the 305-file reformatted in this
+      # commit and turn every future upgrade into another batch.
+      #
+      # `gofmt -l` lists unformatted files; the gate passes iff
+      # the list is empty. `gofmt -l` is preferred over
+      # `go fmt ./... && git diff --exit-code` because the latter
+      # requires a clean worktree and silently no-ops if the
+      # step runs against a partial checkout. -l is a pure read
+      # against the working tree.
+      #
+      # Sits before Build: formatting drift is the cheapest
+      # failure class — surface it before we pay for `go build`
+      # on a tree that's about to be rejected anyway.
+      #
+      # Skipped on windows-latest for the same reason as
+      # Check line endings: gofmt considers CRLF-terminated
+      # .go files unformatted regardless of content. Even with
+      # .gitattributes pinning `*.go text eol=lf`, any CRLF
+      # already in git history surfaces on windows checkout
+      # (autocrlf=true) and gets flagged here. Skipping on
+      # windows keeps the gate from false-positive failing on
+      # the only platform where LF↔CRLF translation is
+      # unavoidable. Linux/macOS runners are the authoritative
+      # check; Windows developers keep `make fmt` locally.
+      - name: Check gofmt
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not gofmt'd. Run 'make fmt' and re-commit:"
+            echo "$unformatted"
+            exit 1
+          fi
 
       - name: Build
         shell: bash

@@ -288,7 +288,7 @@ func (r *Router) requireAction() (ReactionRouter, bool) {
 func (r *Router) CsMgr() *chatsession.Manager {
 	return r.csMgr
 }
-//
+
 // Safe to call multiple times — WaitGroup.Wait on a drained
 // group is a fast no-op. Safe to call concurrently with
 // Dispatch — the WaitGroup correctly tracks increments that

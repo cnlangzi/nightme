@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"bytes"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"os"
 	"path/filepath"

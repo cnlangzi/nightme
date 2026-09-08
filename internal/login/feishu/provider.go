@@ -21,8 +21,8 @@ import (
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
-	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
 	"github.com/cnlangzi/nightme/internal/login"
 )
@@ -377,42 +377,42 @@ func DefaultAppPreset() *registration.AppPreset {
 //
 // Scope rationale (covers all v0.2 + near-term v0.3 use cases):
 //
-//	im:message:send_as_bot             send text / interactive / image / file
-//	im:message:update                  update / edit already-sent messages
-//	                                  (UpdateMessage in adapter)
-//	im:message:receive_v1              receive message events
-//	im:message.reactions:write_only    ⏳/🔄/✅ receipts on incoming msgs
-//	im:message.reactions:read          read existing reactions (counterpart)
-//	im:message:readonly                fetch historical messages AND
-//	                                  download inbound attachment resources
-//	                                  via F-14 passthrough
-//	im:message.group_at_msg:readonly   bot triggered by @-mention in groups
-//	                                  (F-watch: kept alongside group_msg;
-//                                   per-chat gate in nightme decides
-//	                                   drop or pass; see SPEC §3.1.1)
-//	im:message.group_msg               F-watch: receive ALL group messages
-//	                                  (not just @-mentions). Default-on at
-//	                                  install time; the runtime messageDispatcher
-//	                                  passes ChatSession.WatchMode + HasMention
-//	                                  to chatsession.Manager.AcceptInbound
-//	                                  to gate processing. NOT :readonly
-//	                                  because bot needs to reply.
-//	im:message.p2p_msg:readonly        bot triggered in 1:1 chats
-//	im:message.pins:read               read pinned-message state
-//	im:message.pins:write_only         pin / unpin messages
-//	im:message:recall                  recall bot-sent messages
-//	im:message:send_multi_users        batch DM for notifications
-//	im:message:send_sys_msg            system notifications
-//	im:resource                        upload images/files for sending
-//	im:chat:read                       read chat metadata
-//	im:chat:update                     modify chat settings (name / topic)
-//	im:chat.members:bot_access         read member list of chats bot is in
-//	contact:contact.base:readonly      look up user basics (name, avatar)
-//	cardkit:card:write                 create / update interactive cards
-//	cardkit:card:read                  read card state (for sync handlers)
-//	application:application:self_manage
-//	                                  self-permission introspection
-//	                                  (diagnostic foundation)
+//		im:message:send_as_bot             send text / interactive / image / file
+//		im:message:update                  update / edit already-sent messages
+//		                                  (UpdateMessage in adapter)
+//		im:message:receive_v1              receive message events
+//		im:message.reactions:write_only    ⏳/🔄/✅ receipts on incoming msgs
+//		im:message.reactions:read          read existing reactions (counterpart)
+//		im:message:readonly                fetch historical messages AND
+//		                                  download inbound attachment resources
+//		                                  via F-14 passthrough
+//		im:message.group_at_msg:readonly   bot triggered by @-mention in groups
+//		                                  (F-watch: kept alongside group_msg;
+//	                                  per-chat gate in nightme decides
+//		                                   drop or pass; see SPEC §3.1.1)
+//		im:message.group_msg               F-watch: receive ALL group messages
+//		                                  (not just @-mentions). Default-on at
+//		                                  install time; the runtime messageDispatcher
+//		                                  passes ChatSession.WatchMode + HasMention
+//		                                  to chatsession.Manager.AcceptInbound
+//		                                  to gate processing. NOT :readonly
+//		                                  because bot needs to reply.
+//		im:message.p2p_msg:readonly        bot triggered in 1:1 chats
+//		im:message.pins:read               read pinned-message state
+//		im:message.pins:write_only         pin / unpin messages
+//		im:message:recall                  recall bot-sent messages
+//		im:message:send_multi_users        batch DM for notifications
+//		im:message:send_sys_msg            system notifications
+//		im:resource                        upload images/files for sending
+//		im:chat:read                       read chat metadata
+//		im:chat:update                     modify chat settings (name / topic)
+//		im:chat.members:bot_access         read member list of chats bot is in
+//		contact:contact.base:readonly      look up user basics (name, avatar)
+//		cardkit:card:write                 create / update interactive cards
+//		cardkit:card:read                  read card state (for sync handlers)
+//		application:application:self_manage
+//		                                  self-permission introspection
+//		                                  (diagnostic foundation)
 //
 // The set intentionally mirrors larksuite/openclaw-lark's
 // REQUIRED_APP_SCOPES (the official Lark/Feishu OpenClaw plugin)

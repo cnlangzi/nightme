@@ -14,10 +14,10 @@ import (
 // ruSpawner is a Spawner whose first Spawn call for a given
 // (cwd,name) returns ErrResumeUnhealthy; subsequent calls
 // succeed. Mirrors the chat-layer retry path:
-//   1. First call: bridge rejects --resume (saved id is stale).
-//   2. respawn clears as.sessionID.
-//   3. LookupSelectedAgentSession catches the error, calls Spawn
-//      a second time without a resume id → bridge starts fresh.
+//  1. First call: bridge rejects --resume (saved id is stale).
+//  2. respawn clears as.sessionID.
+//  3. LookupSelectedAgentSession catches the error, calls Spawn
+//     a second time without a resume id → bridge starts fresh.
 type ruSpawner struct {
 	mu       sync.Mutex
 	calls    int32

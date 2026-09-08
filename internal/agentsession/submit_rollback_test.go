@@ -39,7 +39,7 @@ type failingSendBlocksDriver struct{ inner *failingSendBlocksAS }
 func (d *failingSendBlocksDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
-func (d *failingSendBlocksDriver) SendPermission(string) error  { return nil }
+func (d *failingSendBlocksDriver) SendPermission(string) error { return nil }
 func (d *failingSendBlocksDriver) Reset(context.Context) error { return nil }
 func (d *failingSendBlocksDriver) Close() error                { return nil }
 func (d *failingSendBlocksDriver) Stop(context.Context) error  { return nil }
@@ -63,8 +63,8 @@ func TestSubmit_FailureLeavesCleanState(t *testing.T) {
 	as.isReady.Store(true)
 
 	p := &Prompt{
-		ID:      "as_test-p1",
-		Blocks:  []agent.ContentBlock{{Type: agent.ContentText, Text: "x"}},
+		ID:       "as_test-p1",
+		Blocks:   []agent.ContentBlock{{Type: agent.ContentText, Text: "x"}},
 		Messages: []Message{{ID: "m_1", Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}}},
 	}
 	if err := as.Submit(p); !errors.Is(err, want) {

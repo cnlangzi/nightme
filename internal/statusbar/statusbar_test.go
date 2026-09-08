@@ -190,9 +190,9 @@ func TestStatusBarLines_OmitsZeroSegments(t *testing.T) {
 			name: "X% (window) rendered",
 			out: outWith("claude", "opus-4-5", "",
 				&agent.UsageInfo{
-					InputTokens:        21_100,
-					ContextWindow:      200_000,
-					ContextWindowPct:   10.55,
+					InputTokens:      21_100,
+					ContextWindow:    200_000,
+					ContextWindowPct: 10.55,
 				}, nil),
 			want: []string{"🤖: claude · opus-4-5", "💰:「 21.1k · 10.6% (200k) 」"},
 		},
@@ -213,10 +213,10 @@ func TestStatusBarLines_ContextWindowFmt(t *testing.T) {
 	// misleadingly; the 1-decimal rule was the F-55.1 fix.
 	out := outWith("claude", "opus-4-5", "",
 		&agent.UsageInfo{
-			InputTokens:        20_500,
-			OutputTokens:       1_000,
-			ContextWindow:      200_000,
-			ContextWindowPct:   10.55,
+			InputTokens:      20_500,
+			OutputTokens:     1_000,
+			ContextWindow:    200_000,
+			ContextWindowPct: 10.55,
 		}, nil)
 	got := StatusBarLines(out)
 	if len(got) != 2 {
@@ -347,8 +347,8 @@ func TestStatusBarLines_GitStatusLine_RootPathWorkspace(t *testing.T) {
 func TestStatusBarLines_FullFooter(t *testing.T) {
 	// All three lines render: identity + usage + git.
 	gs := &messages.GitStatus{
-		Workspace: "code/nightme",
-		Snapshot:  &messages.GitStatusSnapshot{Branch: "main", AheadOfRemote: 2},
+		Workspace:   "code/nightme",
+		Snapshot:    &messages.GitStatusSnapshot{Branch: "main", AheadOfRemote: 2},
 		PullRequest: &messages.PR{Number: 42, URL: "https://x"},
 	}
 	out := outWith("claude", "opus-4-5", "sess-1",

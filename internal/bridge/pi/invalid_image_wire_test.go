@@ -467,8 +467,8 @@ func TestEncodeImage_ErrImageTooLarge_HasContext(t *testing.T) {
 // round-trips cleanly with a matching header.
 func TestEncodeImage_AcceptsAllSupportedMimes(t *testing.T) {
 	cases := []struct {
-		mime    string
-		header  []byte
+		mime   string
+		header []byte
 	}{
 		{"image/jpeg", []byte{0xFF, 0xD8, 0xFF, 0xE0}},
 		{"image/png", []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}},

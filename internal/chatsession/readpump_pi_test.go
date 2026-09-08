@@ -39,13 +39,13 @@ func newLongLivedFakeAS() *longLivedFakeAS {
 }
 
 func (a *longLivedFakeAS) Events() <-chan agent.AgentEvent { return a.events }
-func (a *longLivedFakeAS) PID() int                       { return a.pid }
-func (a *longLivedFakeAS) Name() string                   { return "fake" }
-func (a *longLivedFakeAS) Mode() agent.Mode               { return agent.ModePTY }
-func (a *longLivedFakeAS) Command() string                { return "fake" }
-func (a *longLivedFakeAS) Args() []string                 { return nil }
-func (a *longLivedFakeAS) Env() []string                  { return nil }
-func (a *longLivedFakeAS) Detect() error                  { return nil }
+func (a *longLivedFakeAS) PID() int                        { return a.pid }
+func (a *longLivedFakeAS) Name() string                    { return "fake" }
+func (a *longLivedFakeAS) Mode() agent.Mode                { return agent.ModePTY }
+func (a *longLivedFakeAS) Command() string                 { return "fake" }
+func (a *longLivedFakeAS) Args() []string                  { return nil }
+func (a *longLivedFakeAS) Env() []string                   { return nil }
+func (a *longLivedFakeAS) Detect() error                   { return nil }
 func (a *longLivedFakeAS) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return a.buildLive(), nil
 }
@@ -68,8 +68,8 @@ func (d *longLivedFakeASDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *longLivedFakeASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *longLivedFakeASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *longLivedFakeASDriver) Close() error                   { return d.inner.Close() }
+func (d *longLivedFakeASDriver) Stop(ctx context.Context) error  { return d.inner.Stop(ctx) }
+func (d *longLivedFakeASDriver) Close() error                    { return d.inner.Close() }
 func (d *longLivedFakeASDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
@@ -78,7 +78,7 @@ func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) erro
 }
 func (a *longLivedFakeAS) SendPermission(string) error { return nil }
 func (a *longLivedFakeAS) New(context.Context) error   { return nil }
-func (a *longLivedFakeAS) Stop(context.Context) error { return agent.ErrNotSupported }
+func (a *longLivedFakeAS) Stop(context.Context) error  { return agent.ErrNotSupported }
 func (a *longLivedFakeAS) Close() error {
 	a.closeMu.Lock()
 	defer a.closeMu.Unlock()

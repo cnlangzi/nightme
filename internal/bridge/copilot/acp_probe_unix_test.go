@@ -73,7 +73,7 @@ func TestACP_Handshake_RealBinary(t *testing.T) {
 		"id":      1,
 		"method":  "initialize",
 		"params": map[string]any{
-			"protocolVersion": 1,
+			"protocolVersion":    1,
 			"clientCapabilities": map[string]any{},
 			"clientInfo": map[string]any{
 				"name":    "nightme-probe",
@@ -96,7 +96,7 @@ func TestACP_Handshake_RealBinary(t *testing.T) {
 		t.Fatal("initialize: result is nil")
 	}
 	var initResult struct {
-		ProtocolVersion int    `json:"protocolVersion"`
+		ProtocolVersion int `json:"protocolVersion"`
 		AgentInfo       struct {
 			Name    string `json:"name"`
 			Version string `json:"version"`

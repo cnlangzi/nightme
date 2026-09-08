@@ -13,9 +13,9 @@
 package runtime
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"encoding/json"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -48,11 +48,11 @@ func newStubChannel(name string, sends *capturedSends) *stubChannel {
 	}
 }
 
-func (s *stubChannel) Name() string                              { return s.name }
-func (s *stubChannel) Start(_ context.Context) error             { return nil }
-func (s *stubChannel) Stop(_ context.Context) error              { return nil }
+func (s *stubChannel) Name() string                             { return s.name }
+func (s *stubChannel) Start(_ context.Context) error            { return nil }
+func (s *stubChannel) Stop(_ context.Context) error             { return nil }
 func (s *stubChannel) Incoming() <-chan messages.InboundMessage { return s.in }
-func (s *stubChannel) Inject(m messages.InboundMessage)        { s.in <- m }
+func (s *stubChannel) Inject(m messages.InboundMessage)         { s.in <- m }
 func (s *stubChannel) Send(_ context.Context, _ messages.OutboundMessage) error {
 	if s.sends != nil {
 		s.sends.add()
@@ -60,7 +60,7 @@ func (s *stubChannel) Send(_ context.Context, _ messages.OutboundMessage) error 
 	return nil
 }
 func (s *stubChannel) Patch(_ context.Context, _ messages.OutboundMessage) error { return nil }
-func (s *stubChannel) OnPromptEnded(_ context.Context, _, _ string)             {}
+func (s *stubChannel) OnPromptEnded(_ context.Context, _, _ string)              {}
 func (s *stubChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return s.name, json.RawMessage("{}"), nil
 }
@@ -75,9 +75,9 @@ type capturedSends struct {
 	n  int
 }
 
-func (c *capturedSends) add()                   { c.mu.Lock(); c.n++; c.mu.Unlock() }
-func (c *capturedSends) count() int            { c.mu.Lock(); defer c.mu.Unlock(); return c.n }
-func (c *capturedSends) reset()                { c.mu.Lock(); c.n = 0; c.mu.Unlock() }
+func (c *capturedSends) add()       { c.mu.Lock(); c.n++; c.mu.Unlock() }
+func (c *capturedSends) count() int { c.mu.Lock(); defer c.mu.Unlock(); return c.n }
+func (c *capturedSends) reset()     { c.mu.Lock(); c.n = 0; c.mu.Unlock() }
 
 // setupWire builds the minimal shared deps (spawner / csFile /
 // asFile / buildStackOpts) that every multi-channel test needs.

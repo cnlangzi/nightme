@@ -1677,10 +1677,12 @@ func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []
 // feishu parallel from internal/channel/feishu/summarize_tool.go.
 //
 // OutToolStart emits a "call" line:
-//   `● Bash(ls -la)`
+//
+//	`● Bash(ls -la)`
 //
 // OutToolEnd emits a one-line "result" line that hides raw output:
-//   `⎿  📄 Read → 47 lines`
+//
+//	`⎿  📄 Read → 47 lines`
 //
 // PII posture: raw output is NEVER included in the result line —
 // only the byte/lines/file-count heuristic. Custom / unknown tools
@@ -1708,8 +1710,6 @@ func formatTool(msg messages.OutboundMessage) string {
 	}
 	return ""
 }
-
-
 
 // formatInit was the v8 OutInit pre-render helper. v9 silenced
 // OutInit (matches feishu F-44); session identity now travels

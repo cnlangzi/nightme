@@ -9,21 +9,21 @@
 //
 // Login flow:
 //
-//   1. Print BotFather walkthrough (Telegram-specific, no QR).
-//   2. Read token from stdin until non-empty.
-//   3. Call getMe to validate (token is alive, account is bot).
-//   4. Return Credentials{BotToken: ...}.
+//  1. Print BotFather walkthrough (Telegram-specific, no QR).
+//  2. Read token from stdin until non-empty.
+//  3. Call getMe to validate (token is alive, account is bot).
+//  4. Return Credentials{BotToken: ...}.
 //
 // Greet flow (best-effort, fires AFTER CLI saves the config):
 //
-//   1. Tell user to message the bot ("send /start").
-//   2. Poll getUpdates with a 2-minute window for the first
-//      private-chat message from any non-bot user.
-//   3. Send the canonical bilingual greeting bodies to that
-//      chat_id via sendMessage.
-//   4. On timeout: log and exit — the greeting is simply
-//      skipped. The daemon only answers runtime messages; it
-//      never replays the login greeting.
+//  1. Tell user to message the bot ("send /start").
+//  2. Poll getUpdates with a 2-minute window for the first
+//     private-chat message from any non-bot user.
+//  3. Send the canonical bilingual greeting bodies to that
+//     chat_id via sendMessage.
+//  4. On timeout: log and exit — the greeting is simply
+//     skipped. The daemon only answers runtime messages; it
+//     never replays the login greeting.
 //
 // Greet's context is the parent ctx set by the CLI (10-minute
 // login timeout). The greeting wait caps itself at 2 minutes so
@@ -48,8 +48,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/login"
 	"github.com/cnlangzi/nightme/internal/httpclient"
+	"github.com/cnlangzi/nightme/internal/login"
 )
 
 // greetWaitTimeout caps how long Greet waits for the user's first
@@ -501,7 +501,7 @@ func (p *Provider) sendOne(ctx context.Context, chatID int64, text string) error
 type update struct {
 	UpdateID int64 `json:"update_id"`
 	Message  *struct {
-		MessageID int    `json:"message_id"`
+		MessageID int `json:"message_id"`
 		Chat      struct {
 			ID   int64  `json:"id"`
 			Type string `json:"type"`

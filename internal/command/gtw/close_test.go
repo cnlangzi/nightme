@@ -1131,14 +1131,14 @@ func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
 // path of the new label-cleanup gate: ModeRemote yml, fake
 // provider returns nil from RemoveIssueLabel, RunClose should
 //
-//   (a) call provider.RemoveIssueLabel with the right
-//       (owner, repo, issueID, label) — i.e. nightme/wip on
-//       cnlangzi/nightme#42,
-//   (b) THEN proceed to the local cleanup (worktree remove,
-//       branch -D) — i.e. the gate succeeded and execution
-//       continued, and
-//   (c) surface the label removal on the success card so the
-//       user sees both halves of the close.
+//	(a) call provider.RemoveIssueLabel with the right
+//	    (owner, repo, issueID, label) — i.e. nightme/wip on
+//	    cnlangzi/nightme#42,
+//	(b) THEN proceed to the local cleanup (worktree remove,
+//	    branch -D) — i.e. the gate succeeded and execution
+//	    continued, and
+//	(c) surface the label removal on the success card so the
+//	    user sees both halves of the close.
 func TestRunClose_ModeRemote_RemovesWIPLabel(t *testing.T) {
 	wt := t.TempDir()
 	repoRoot := t.TempDir()

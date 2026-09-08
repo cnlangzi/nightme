@@ -41,7 +41,7 @@ func newFakeAgentSession(pid int) *fakeAgentSession {
 }
 
 func (f *fakeAgentSession) Events() <-chan agent.AgentEvent { return f.events }
-func (f *fakeAgentSession) PID() int                      { return f.pid }
+func (f *fakeAgentSession) PID() int                        { return f.pid }
 func (f *fakeAgentSession) Info() agent.Info {
 	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
@@ -66,9 +66,9 @@ func (d *fakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) err
 	return d.inner.SendBlocks(ctx, b)
 }
 func (d *fakeDriver) SendPermission(resp string) error { return d.inner.SendPermission(resp) }
-func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ctx) }
-func (d *fakeDriver) Stop(ctx context.Context) error    { return d.inner.Stop(ctx) }
-func (d *fakeDriver) Close() error                      { return d.inner.Close() }
+func (d *fakeDriver) Reset(ctx context.Context) error  { return d.inner.New(ctx) }
+func (d *fakeDriver) Stop(ctx context.Context) error   { return d.inner.Stop(ctx) }
+func (d *fakeDriver) Close() error                     { return d.inner.Close() }
 func (d *fakeDriver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
 	return nil
 }
@@ -86,7 +86,7 @@ func (f *fakeAgentSession) SendPermission(resp string) error {
 	return nil
 }
 
-func (f *fakeAgentSession) New(_ context.Context) error { return nil }
+func (f *fakeAgentSession) New(_ context.Context) error  { return nil }
 func (f *fakeAgentSession) Stop(_ context.Context) error { return agent.ErrNotSupported }
 
 func (f *fakeAgentSession) Close() error {
@@ -285,8 +285,6 @@ func TestAgentSession_SendBlocksAfterSpawn(t *testing.T) {
 	}
 }
 
-
-
 // TestAgentSession_ResumeIDRoundTrip asserts that SetSessionID is
 // idempotent, accessible via SessionID(), and survives a round-trip
 // through the Entry-derived registry form.
@@ -395,7 +393,7 @@ func TestAgentSession_ResumeIDRestoreFromRegistry(t *testing.T) {
 		Cwd:           "/x",
 		PID:           0,
 		Status:        registry.StatusDetached,
-		SessionID:      "sess-round-trip-xyz",
+		SessionID:     "sess-round-trip-xyz",
 		CreatedAt:     now,
 		LastRunAt:     now,
 	}

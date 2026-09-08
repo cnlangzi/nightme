@@ -23,9 +23,9 @@
 package chatsession
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"strings"
 	"sync"
 	"testing"
@@ -320,8 +320,10 @@ func (b *fakeAgentBuilder) Info() agent.Info {
 	return agent.NewInfo(b.name, agent.ModePTY, "fake-"+b.name, nil, nil)
 }
 func (b *fakeAgentBuilder) Detect() error { return nil }
-func (b *fakeAgentBuilder) Init(string) {}
-func (b *fakeAgentBuilder) Clone() agent.Starter { return &fakeAgentBuilder{name: b.name, events: b.events} }
+func (b *fakeAgentBuilder) Init(string)   {}
+func (b *fakeAgentBuilder) Clone() agent.Starter {
+	return &fakeAgentBuilder{name: b.name, events: b.events}
+}
 func (b *fakeAgentBuilder) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
 	return agent.NewAgent(b.Info(), 99999, b.events, &fakeBuilderDriver{inner: b}), nil
 }
@@ -336,17 +338,17 @@ func (d *fakeBuilderDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *fakeBuilderDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *fakeBuilderDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
-func (d *fakeBuilderDriver) Close() error                   { return d.inner.Close() }
+func (d *fakeBuilderDriver) Stop(ctx context.Context) error  { return d.inner.Stop(ctx) }
+func (d *fakeBuilderDriver) Close() error                    { return d.inner.Close() }
 func (d *fakeBuilderDriver) Keepalive(ctx context.Context, _ func(context.Context) error) error {
 	return nil
 }
-func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                      { return b.events }
-func (b *fakeAgentBuilder) PID() int                                              { return 99999 }
+func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                            { return b.events }
+func (b *fakeAgentBuilder) PID() int                                                   { return 99999 }
 func (b *fakeAgentBuilder) SendBlocks(_ context.Context, _ []agent.ContentBlock) error { return nil }
-func (b *fakeAgentBuilder) SendPermission(_ string) error                         { return nil }
-func (b *fakeAgentBuilder) New(_ context.Context) error                           { return nil }
-func (b *fakeAgentBuilder) Stop(_ context.Context) error                         { return agent.ErrNotSupported }
+func (b *fakeAgentBuilder) SendPermission(_ string) error                              { return nil }
+func (b *fakeAgentBuilder) New(_ context.Context) error                                { return nil }
+func (b *fakeAgentBuilder) Stop(_ context.Context) error                               { return agent.ErrNotSupported }
 func (b *fakeAgentBuilder) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock, _ ...agent.RunOnceOption) (agent.RunResult, error) {
 	return agent.RunResult{}, errors.New("fakeAgentBuilder: RunOnce not implemented")
 }

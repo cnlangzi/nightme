@@ -11,11 +11,11 @@
 //     (MessageIDs, Blocks, ChatSessionID, AgentSessionID,
 //     LastMessageID) BEFORE calling the hook. The hook (default
 //     `defaultPromptHookLocked`) is responsible for either:
-//       * `SendBlocks` returns nil → commit Prompt (assign ID, set
-//         CreatedAt/AckedAt, install on `AgentSession.currentPrompt`,
-//         flip all messages' Stage to Submitted, wire emit).
-//       * `SendBlocks` returns error → discard Prompt, messages
-//         stay Queued for the next flush.
+//   - `SendBlocks` returns nil → commit Prompt (assign ID, set
+//     CreatedAt/AckedAt, install on `AgentSession.currentPrompt`,
+//     flip all messages' Stage to Submitted, wire emit).
+//   - `SendBlocks` returns error → discard Prompt, messages
+//     stay Queued for the next flush.
 //   - Active: `AgentSession.currentPrompt` is the in-flight Prompt
 //     for this AgentSession. `runReadPump` reads
 //     `as.currentPrompt.LastMessageID` for the EventHandler anchor.

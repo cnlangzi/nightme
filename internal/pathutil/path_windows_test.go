@@ -382,7 +382,7 @@ func TestIsWindowsDriveRel(t *testing.T) {
 		{`C:foo`, true},
 		{`C:.`, true},
 		{`C:..`, true},
-		{`c:`, true},    // case-insensitive
+		{`c:`, true}, // case-insensitive
 		{`c:foo`, true},
 		{`Z:foo`, true},
 		// Drive-rooted — NOT drive-relative.
@@ -397,9 +397,9 @@ func TestIsWindowsDriveRel(t *testing.T) {
 		{`/foo`, false},
 		{`\foo`, false},
 		{`foo`, false},
-		{`:foo`, false},    // not a drive letter
-		{`1:foo`, false},   // digit prefix
-		{`\C:foo`, false},  // separator first
+		{`:foo`, false},   // not a drive letter
+		{`1:foo`, false},  // digit prefix
+		{`\C:foo`, false}, // separator first
 		{`\\server\share`, false},
 	}
 	for _, tc := range tests {

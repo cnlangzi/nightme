@@ -54,9 +54,9 @@ func TestInput_NonSelectedASDoesNotReceive(t *testing.T) {
 
 	// Build a fake prompt and try to Submit on each.
 	prompt := &Prompt{
-		ID:      "p_x",
+		ID:             "p_x",
 		AgentSessionID: asA.ID,
-		Blocks:  []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}},
+		Blocks:         []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}},
 	}
 
 	// asA: Submit should accept (since it's "ready" by default).

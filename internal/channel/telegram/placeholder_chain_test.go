@@ -151,8 +151,8 @@ func TestAppendSegment_CreatesFirstChunkWhenEmpty(t *testing.T) {
 func TestAppendSegment_AppendsToActiveChunkWithinThreshold(t *testing.T) {
 	chain := &placeholderChain{
 		chunks: []*chunkBody{{
-			messageID:  500,
-			header: "💭 0 · 🔧 0 · ⏱ 00:00:00",
+			messageID: 500,
+			header:    "💭 0 · 🔧 0 · ⏱ 00:00:00",
 		}},
 		cursor: 0,
 	}
@@ -189,8 +189,8 @@ func TestAppendSegment_AppendsToActiveChunkWithinThreshold(t *testing.T) {
 func TestAppendSegment_OverflowCreatesSecondChunk(t *testing.T) {
 	chain := &placeholderChain{
 		chunks: []*chunkBody{{
-			messageID:  100,
-			header: "💭 0",
+			messageID: 100,
+			header:    "💭 0",
 		}},
 		cursor: 0,
 	}
@@ -286,8 +286,8 @@ func TestFlushChainNow_NoOpWhenClean(t *testing.T) {
 func TestFlushChainNow_RendersHeaderBufFooter(t *testing.T) {
 	chain := &placeholderChain{
 		chunks: []*chunkBody{{
-			messageID:  555,
-			header: "🤖 Working... · ⏱ 12:34:56",
+			messageID: 555,
+			header:    "🤖 Working... · ⏱ 12:34:56",
 		}},
 		cursor: 0,
 	}
@@ -326,10 +326,10 @@ func TestFlushChainNow_RendersHeaderBufFooter(t *testing.T) {
 func TestScheduleFlushDebounced_MergesBurst(t *testing.T) {
 	chain := &placeholderChain{
 		chunks: []*chunkBody{{
-			messageID:  42,
-			header: "💭 0",
+			messageID: 42,
+			header:    "💭 0",
 		}},
-		cursor: 0,
+		cursor:     0,
 		lastFooter: []string{"footer"},
 	}
 	chain.dirty = true
@@ -428,8 +428,6 @@ func TestRenderActiveChunkBody_HeaderOnlyAfterHeartbeat(t *testing.T) {
 		t.Fatalf("hasHeartbeat with empty entries → header still renders; got %q", body)
 	}
 }
-
-
 
 // TestChain_RotateChunk_InheritsLatestHeader locks the §11.12.7.2
 // ROTATE invariant: a freshly rotated chunk inherits the (header,
@@ -1775,7 +1773,7 @@ func TestRenderActiveChunkBody_TaskInProgress_ShowsActiveFormSuffix(t *testing.T
 	body := renderActiveChunkBody(cur)
 	wants := []string{
 		"• [ ] with form (doing it)",
-		"• [ ] no form",        // no trailing parens
+		"• [ ] no form", // no trailing parens
 		"• [x] done",
 		"• [ ] later",
 	}

@@ -103,14 +103,15 @@ func TestCache_WritePR_NonNilSets(t *testing.T) {
 // expired and the next MaybeRefresh finally fetched fresh.
 //
 // Race exercised:
-//   T0: stamp triggers MaybeRefresh → spawns goroutine
-//   T1: goroutine starts the slow resolver
-//   T2: /gtw pr succeeds → WritePR(as.ID, newPR)
-//   T3: resolver returns (stale result for the pre-/gtw-pr
-//        branch state)
-//   T4: WritePR's cancel() must have set ctx.Err() so the
-//        goroutine's post-resolver `if ctx.Err() != nil`
-//        check returns early WITHOUT writing its result.
+//
+//	T0: stamp triggers MaybeRefresh → spawns goroutine
+//	T1: goroutine starts the slow resolver
+//	T2: /gtw pr succeeds → WritePR(as.ID, newPR)
+//	T3: resolver returns (stale result for the pre-/gtw-pr
+//	     branch state)
+//	T4: WritePR's cancel() must have set ctx.Err() so the
+//	     goroutine's post-resolver `if ctx.Err() != nil`
+//	     check returns early WITHOUT writing its result.
 func TestCache_WritePR_CancelsInflightRefresh(t *testing.T) {
 	c := &Cache{}
 

@@ -11,10 +11,10 @@
 //     internally — the entire line stays in one div.
 //
 // Soft split points (in priority order):
-//   1. Paragraph boundary (\n\n)         — handled by splitMarkdownForDivs
-//   2. Line boundary (\n)                — handled by hardSplitRunes
-//   3. Punctuation followed by space     — handled by hardSplitRunes
-//   4. Space                             — handled by hardSplitRunes
+//  1. Paragraph boundary (\n\n)         — handled by splitMarkdownForDivs
+//  2. Line boundary (\n)                — handled by hardSplitRunes
+//  3. Punctuation followed by space     — handled by hardSplitRunes
+//  4. Space                             — handled by hardSplitRunes
 //
 // Fallback: hard split at rune boundary at maxRunes (only applies
 // to non-atomic blocks — paragraphs that exceed the limit on
@@ -187,7 +187,7 @@ func hardSplitRunes(text string, maxRunes int) []string {
 		// Trim a single trailing space/newline from the head
 		// to avoid leaving an empty rune at the start of the
 		// next chunk.
-		if tail := text[cut-1:cut]; tail == " " || tail == "\n" {
+		if tail := text[cut-1 : cut]; tail == " " || tail == "\n" {
 			head = text[:cut-1]
 		}
 		chunks = append(chunks, head)

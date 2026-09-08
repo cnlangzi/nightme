@@ -1,6 +1,6 @@
 module github.com/cnlangzi/nightme
 
-go 1.26.4
+go 1.27.0
 
 require (
 	github.com/aymanbagabas/go-pty v0.2.3

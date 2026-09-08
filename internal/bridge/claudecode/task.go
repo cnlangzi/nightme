@@ -1,4 +1,3 @@
-
 // F-38: provider-native task tool parsing and snapshot management.
 //
 // This file is the ONLY place in the claudecode bridge where the

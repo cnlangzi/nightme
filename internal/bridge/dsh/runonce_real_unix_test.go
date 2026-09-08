@@ -170,6 +170,7 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…(truncated)"
 }
+
 // TestE2E_RunOnce_Sink_RealDSH verifies that WithEventSink delivers
 // intermediate AgentEvents (Ready / Text / Result / Done) during a
 // real dsh web RunOnce. Confirms the end-to-end pipeline:
@@ -193,10 +194,10 @@ func TestE2E_RunOnce_Sink_RealDSH(t *testing.T) {
 	defer cancel()
 
 	var (
-		mu       sync.Mutex
-		events   []agent.AgentEvent
+		mu        sync.Mutex
+		events    []agent.AgentEvent
 		seenReady bool
-		seenRes  bool
+		seenRes   bool
 	)
 	sink := func(ev agent.AgentEvent) {
 		mu.Lock()

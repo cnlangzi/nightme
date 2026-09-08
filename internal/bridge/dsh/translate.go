@@ -13,8 +13,8 @@
 //   - textDelivered : 防止 tool-结尾 turn 把已 flush 段当 result 重放
 //   - active        : 空 turn 不出 "Done." 卡片(避免乱入 result)
 //   - resetWindow   : /new 中断时丢弃半截 event(dsh Reset 在同一
-//                     driver 上 session.create 新会话,本 guard 用于
-//                     turn 边界清空;跨 session 状态在 Reset 里重建)
+//     driver 上 session.create 新会话,本 guard 用于
+//     turn 边界清空;跨 session 状态在 Reset 里重建)
 //
 // ContentImage / ContentFile on tool inputs degrade to bracketed
 // annotations on text args (same fallback as print-mode / pi /
@@ -219,14 +219,12 @@ func usageToAgent(in *usageInfo) *agent.UsageInfo {
 		return nil
 	}
 	return &agent.UsageInfo{
-		InputTokens:               in.InputTokens,
-		OutputTokens:              in.OutputTokens,
-		CacheCreationInputTokens:  in.CacheCreationTokens,
-		CacheReadInputTokens:      in.CacheReadTokens,
-		CostUSD:                   in.CostUSD,
-		ContextWindow:             in.ContextWindow,
-		ContextWindowPct:          in.ContextWindowPct,
+		InputTokens:              in.InputTokens,
+		OutputTokens:             in.OutputTokens,
+		CacheCreationInputTokens: in.CacheCreationTokens,
+		CacheReadInputTokens:     in.CacheReadTokens,
+		CostUSD:                  in.CostUSD,
+		ContextWindow:            in.ContextWindow,
+		ContextWindowPct:         in.ContextWindowPct,
 	}
 }
-
-

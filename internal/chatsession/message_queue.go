@@ -14,14 +14,14 @@
 // `inFlightEnd` cursor that marks the end of the in-flight
 // region (exclusive):
 //
-//	head ─────────── inFlightEnd ──────────── tail
-//	      in-flight           pending
+//		head ─────────── inFlightEnd ──────────── tail
+//		      in-flight           pending
 //
-//   - in-flight: items returned by the most recent `Peek`,
-//     awaiting either `Commit` (consumed successfully) or
-//     `Rewind` (rolled back). Items stay physically in the list —
-//     only the cursor moves.
-//   - pending: items still available to the next `Peek`.
+//	  - in-flight: items returned by the most recent `Peek`,
+//	    awaiting either `Commit` (consumed successfully) or
+//	    `Rewind` (rolled back). Items stay physically in the list —
+//	    only the cursor moves.
+//	  - pending: items still available to the next `Peek`.
 //
 // When `inFlightEnd == head`, the in-flight region is empty (the
 // normal steady state). When `inFlightEnd == nil` and `head !=

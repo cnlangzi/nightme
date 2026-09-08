@@ -39,8 +39,8 @@ import (
 
 // TestFreshLiveness_PassesAnswer is the definitive test.
 // It runs the real claude binary in two flavors:
-//   1. With the user's workspace (loads the heavy .mcp.json)
-//   2. With a clean workspace (no .mcp.json)
+//  1. With the user's workspace (loads the heavy .mcp.json)
+//  2. With a clean workspace (no .mcp.json)
 //
 // Each flavor is allowed 60s to produce EventAgentText after
 // SendBlocks. The test logs the verdict for each flavor so

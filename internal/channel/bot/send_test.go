@@ -86,7 +86,7 @@ func TestBotSendFullReplyChannelDrops(t *testing.T) {
 	run := &botRun{
 		runID:  "full-1",
 		chatID: chatID,
-		reply: make(chan string, 1), // capacity 1
+		reply:  make(chan string, 1), // capacity 1
 	}
 	// Pre-fill the channel.
 	run.reply <- "stale-reply"

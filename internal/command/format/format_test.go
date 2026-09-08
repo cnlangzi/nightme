@@ -81,9 +81,9 @@ func TestFormatTable_HeaderAndRows(t *testing.T) {
 
 func TestFormatTable_SortByBucketThenAgent(t *testing.T) {
 	rows := []fakeResult{
-		{Agent: "alpha"},                                // success
+		{Agent: "alpha"}, // success
 		{Agent: "delta", Action: "x", Error: errFake()}, // failure
-		{Agent: "beta"},                                 // success
+		{Agent: "beta"}, // success
 	}
 	got := format.FormatTable(rows, renderFakeRow, fakeHeader)
 	// Expected order: alpha (success), beta (success), delta (failure)

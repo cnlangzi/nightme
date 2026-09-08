@@ -10,10 +10,10 @@
 //
 // prober lifecycle:
 //
-//   OnDisconnected  ──► prober.Start()  (goroutine spawns 30s ticker)
-//   ticker fires    ──► ch.Stop() → 100ms → ch.Start() → check Connected
-//   OnReconnected / OnReady
-//                   ──► prober.Stop()  (goroutine exits, ticker cancels)
+//	OnDisconnected  ──► prober.Start()  (goroutine spawns 30s ticker)
+//	ticker fires    ──► ch.Stop() → 100ms → ch.Start() → check Connected
+//	OnReconnected / OnReady
+//	                ──► prober.Stop()  (goroutine exits, ticker cancels)
 //
 // The prober NEVER actively gives up — it ticks forever until Connected
 // or daemon shutdown. The 30s cadence is intentional: short enough
@@ -64,8 +64,8 @@ type prober struct {
 	// local variables at entry so its defer closes THIS cycle's
 	// doneCh regardless of what Stop does next.
 	lifeMu sync.Mutex
-	stopCh  chan struct{}
-	doneCh  chan struct{}
+	stopCh chan struct{}
+	doneCh chan struct{}
 
 	// Snapshot state — read via Snapshot(), written by the ticker
 	// goroutine and the SDK callback paths. atomic.Pointer for
@@ -225,12 +225,12 @@ func (p *prober) tick() {
 // goroutine. The booleans + counters come from atomic primitives;
 // the time.Time pointers are loaded atomically.
 type ProberSnapshot struct {
-	Active     bool          // prober is currently running its 30s ticker
-	Interval   time.Duration // ticker period
-	StartedAt  time.Time     // when the current cycle started (zero if inactive)
-	ForceCount int64         // total force-reconnect attempts since daemon start
-	LastForceAt time.Time    // when the most recent attempt ran (zero if none)
-	LastError  string        // error from the most recent attempt ("" if last was clean)
+	Active      bool          // prober is currently running its 30s ticker
+	Interval    time.Duration // ticker period
+	StartedAt   time.Time     // when the current cycle started (zero if inactive)
+	ForceCount  int64         // total force-reconnect attempts since daemon start
+	LastForceAt time.Time     // when the most recent attempt ran (zero if none)
+	LastError   string        // error from the most recent attempt ("" if last was clean)
 }
 
 func (p *prober) Snapshot() ProberSnapshot {

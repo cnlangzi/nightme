@@ -38,12 +38,12 @@ var (
 //   - If GetGlobal() already returns a non-nil client (e.g. a
 //     user-launched dsh on port 3080), it's returned as-is.
 //   - Otherwise calls StartSharedHost(ctx, opts):
-//       * discovers an existing dsh on port 3080 via
-//         DiscoverExisting (attaches, ownsProcess=false, no
-//         watchdog, no Close — daemon never closes a host it
-//         didn't spawn)
-//       * spawns a fresh dsh --profile web (ownsProcess=true,
-//         watchdog runs and respawns on crash)
+//   - discovers an existing dsh on port 3080 via
+//     DiscoverExisting (attaches, ownsProcess=false, no
+//     watchdog, no Close — daemon never closes a host it
+//     didn't spawn)
+//   - spawns a fresh dsh --profile web (ownsProcess=true,
+//     watchdog runs and respawns on crash)
 //   - On error, returns the error verbatim. A missing dsh binary
 //     surfaces here with the underlying exec.LookPath error.
 //

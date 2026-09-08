@@ -1,7 +1,8 @@
 // Package registry — AgentSessionFile (v1.2 agent_sessions.json I/O wrapper).
 //
 // On-disk format:
-//   { "version": 1, "agentSessions": { "<id>": AgentSessionEntry, ... } }
+//
+//	{ "version": 1, "agentSessions": { "<id>": AgentSessionEntry, ... } }
 package registry
 
 import (

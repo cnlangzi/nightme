@@ -1,4 +1,3 @@
-
 // JSON-RPC 2.0 client used by the codex app-server bridge.
 //
 // Design notes (see docs/bridge/codex.md §1 + §3 for full rationale):
@@ -67,16 +66,16 @@ const (
 // pending and nextID are protected by pendingMu. writer is protected
 // by writeMu. The two locks are never held at the same time.
 type rpcClient struct {
-	wr               io.Writer
-	rd               io.Reader
-	writeMu          sync.Mutex
-	pendingMu        sync.Mutex
-	pending          map[string]chan rpcResponse
-	nextID           atomic.Int64
-	closed           atomic.Bool
-	onServerRequest  func(method string, rawID, params json.RawMessage)
-	onNotification   func(method string, params json.RawMessage)
-	maxFrameBytes    int
+	wr              io.Writer
+	rd              io.Reader
+	writeMu         sync.Mutex
+	pendingMu       sync.Mutex
+	pending         map[string]chan rpcResponse
+	nextID          atomic.Int64
+	closed          atomic.Bool
+	onServerRequest func(method string, rawID, params json.RawMessage)
+	onNotification  func(method string, params json.RawMessage)
+	maxFrameBytes   int
 }
 
 // rpcResponse is the value delivered to a pending waiter when the

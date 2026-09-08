@@ -67,8 +67,8 @@ type eventEmitterStarter struct {
 func (s *eventEmitterStarter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModePTY, "fake-"+s.name, nil, nil)
 }
-func (s *eventEmitterStarter) Detect() error { return nil }
-func (s *eventEmitterStarter) Init(string) {}
+func (s *eventEmitterStarter) Detect() error        { return nil }
+func (s *eventEmitterStarter) Init(string)          {}
 func (s *eventEmitterStarter) Clone() agent.Starter { return &eventEmitterStarter{name: s.name} }
 func (s *eventEmitterStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("eventEmitterStarter: Start not implemented")
@@ -111,7 +111,7 @@ func (s *eventEmitterStarter) recSinkCalls() int {
 // minimal surface (Sent + Send) without pulling in any
 // channel-specific behaviour.
 type sinkCapture struct {
-	mu  sync.Mutex
+	mu   sync.Mutex
 	sent []messages.OutboundMessage
 }
 
@@ -511,7 +511,6 @@ func TestRunAgentFor_NoDropPreservesOutResult(t *testing.T) {
 		t.Fatalf("got %+v, want exactly one OutResult", got)
 	}
 }
-
 
 // TestRunAgentFor_SinkNilEmitter verifies the nil-emitter
 // short-circuit. StreamRunOnceToEmitter returns a no-op sink

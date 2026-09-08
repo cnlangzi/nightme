@@ -118,6 +118,7 @@ var ErrLoginTimeout = errors.New("login timeout")
 // marker. Providers should wrap it with whatever concrete code the
 // channel returned (e.g. feishu's *registration.RegisterAppError).
 var ErrLoginFailed = errors.New("login failed")
+
 // ProviderBuilder constructs a *cobra.Command that wraps a
 // channel-specific login provider. Each provider package exposes
 // one via init() + RegisterProvider, and the CLI orchestrator

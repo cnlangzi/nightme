@@ -39,10 +39,10 @@ func TestNewLimiter_StrictDefault(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name              string
-		cfg               *config.FeishuRateLimitConfig
-		wantRatePerSec    float64
-		wantBurst         int
+		name           string
+		cfg            *config.FeishuRateLimitConfig
+		wantRatePerSec float64
+		wantBurst      int
 	}{
 		{"nil cfg", nil, StrictDefault.RatePerSec, StrictDefault.Burst},
 		{"zero cfg", &config.FeishuRateLimitConfig{}, StrictDefault.RatePerSec, StrictDefault.Burst},

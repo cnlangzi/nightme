@@ -129,9 +129,10 @@ func TestTranslator_TextBufGrowAndReuse(t *testing.T) {
 //
 // Wire shape (see translate.go handleSessionEvent + protocol.go
 // muxSessionEvent):
-//   muxSessionEvent.Event = json.RawMessage
-//   unmarshalled into {Type string, Data json.RawMessage}
-//   where Data is assistantChunkData = {Chunk: {Index, Text}}
+//
+//	muxSessionEvent.Event = json.RawMessage
+//	unmarshalled into {Type string, Data json.RawMessage}
+//	where Data is assistantChunkData = {Chunk: {Index, Text}}
 func makeChunkEvent(t *testing.T, contentIndex int, text string) sessionEventEnvelope {
 	t.Helper()
 	// Outer event envelope: {"type":"assistant/chunk",

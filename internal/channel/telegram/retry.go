@@ -35,10 +35,10 @@ import (
 // feishu.DefaultRetryConfig so both channels have comparable retry
 // behaviour for the same daemon profile.
 var DefaultRetryConfig = RetryConfig{
-	MaxAttempts:    3,             // initial + 2 retries
+	MaxAttempts:    3, // initial + 2 retries
 	InitialBackoff: 500 * time.Millisecond,
 	MaxBackoff:     5 * time.Second,
-	JitterPercent:  0.25,          // ±25%
+	JitterPercent:  0.25, // ±25%
 }
 
 // RetryConfig configures WithTransientRetry. Production code uses
@@ -81,7 +81,7 @@ type RetryOpts struct {
 	Attrs []any
 }
 
-func (o RetryOpts) cfg() RetryConfig  { return o.Cfg.normalize() }
+func (o RetryOpts) cfg() RetryConfig { return o.Cfg.normalize() }
 func (o RetryOpts) logger() *slog.Logger {
 	if o.Logger != nil {
 		return o.Logger

@@ -11,6 +11,7 @@
 // lark_md parser renders each row as a checkbox:
 //   - [ ]  → pending / in-progress task (open checkbox)
 //   - [x]  → completed task (checked checkbox)
+//
 // In-progress rows also append the optional `ActiveForm` phrase
 // in a soft-grey suffix (Feishu `lark_md` ignores backticks in
 // the middle of a line, so plain parens are used). The
@@ -184,4 +185,3 @@ func renderTaskLine(it agent.AgentTaskItem) string {
 	}
 	return line
 }
-

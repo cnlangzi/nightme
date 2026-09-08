@@ -36,8 +36,8 @@ import (
 // "not initialized" error to be cheap (a nil-check under RLock is
 // cheaper than an atomic load + nil-check on every bridge Start).
 var (
-	globalMu      sync.RWMutex
-	globalClient  *Client
+	globalMu     sync.RWMutex
+	globalClient *Client
 )
 
 // SetGlobal installs c as the process-wide shared dsh client. Must be

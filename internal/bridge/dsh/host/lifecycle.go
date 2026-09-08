@@ -9,22 +9,22 @@
 //
 // Lifecycle model:
 //
-//   StartSharedHost(ctx, opts)
-//     1. exec `dsh --profile web` (NO --port flag — dsh defaults to
-//        its canonical port 3080; we explicitly refuse anything
-//        other than 3080 to keep sessions from splitting across
-//        instances; see spawnAndWire + the port assertion below)
-//     2. read stdout until "dsh web: http://127.0.0.1:<port>" appears
-//     3. construct *host.Client rooted at that URL
-//     4. Client.Start pumps → mux/host WS connects
-//     5. install client via host.SetGlobal so dsh.newDriver can find it
+//	StartSharedHost(ctx, opts)
+//	  1. exec `dsh --profile web` (NO --port flag — dsh defaults to
+//	     its canonical port 3080; we explicitly refuse anything
+//	     other than 3080 to keep sessions from splitting across
+//	     instances; see spawnAndWire + the port assertion below)
+//	  2. read stdout until "dsh web: http://127.0.0.1:<port>" appears
+//	  3. construct *host.Client rooted at that URL
+//	  4. Client.Start pumps → mux/host WS connects
+//	  5. install client via host.SetGlobal so dsh.newDriver can find it
 //
-//   ShutdownSharedHost(ctx, client)
-//     1. Client.Close (stops mux/host pumps)
-//     2. session.cancel best-effort for any subscribed sessions (none
-//        at daemon shutdown — sessions were already Closed by the
-//        runtime's own shutdown sequence)
-//     3. SIGINT dsh, wait 5s, SIGKILL, wait 5s
+//	ShutdownSharedHost(ctx, client)
+//	  1. Client.Close (stops mux/host pumps)
+//	  2. session.cancel best-effort for any subscribed sessions (none
+//	     at daemon shutdown — sessions were already Closed by the
+//	     runtime's own shutdown sequence)
+//	  3. SIGINT dsh, wait 5s, SIGKILL, wait 5s
 //
 // Phase 1 only implements start + graceful shutdown. Watchdog +
 // auto-restart on crash lands in Phase 2 (F-dsh-shared-host §4.2).
@@ -93,10 +93,10 @@ type SharedHostOptions struct {
 // Two ownership modes:
 //
 //   - ownsProcess=true:  SharedHost spawned the dsh subprocess;
-//                        watchdog respawns on crash.
+//     watchdog respawns on crash.
 //   - ownsProcess=false: SharedHost reused a pre-existing dsh the user
-//                        already had running (e.g. browser dashboard);
-//                        watchdog is a no-op.
+//     already had running (e.g. browser dashboard);
+//     watchdog is a no-op.
 //
 // Watchdog (ownsProcess only): a background goroutine watches cmd.Wait
 // and respawns the dsh subprocess if it exits unexpectedly. After a

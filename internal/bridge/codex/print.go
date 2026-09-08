@@ -655,8 +655,8 @@ func countImageFlags(args []string) int {
 type codexExecEvent struct {
 	Type     string          `json:"type"`
 	ThreadID string          `json:"thread_id,omitempty"` // thread.started
-	Item     *codexExecItem  `json:"item,omitempty"`     // item.completed
-	Usage    *codexExecUsage `json:"usage,omitempty"`    // turn.completed
+	Item     *codexExecItem  `json:"item,omitempty"`      // item.completed
+	Usage    *codexExecUsage `json:"usage,omitempty"`     // turn.completed
 }
 
 // codexExecItem is the `item` payload inside item.* events
@@ -667,29 +667,29 @@ type codexExecEvent struct {
 //
 // Field map (verified against `codex exec --json` 0.145+):
 //   - command_execution : Command, AggregatedOutput, ExitCode,
-//                         Status; emitted on started / completed
+//     Status; emitted on started / completed
 //   - file_change       : Changes[]; emitted only on completed
 //   - reasoning         : Text; emitted only on completed (when
-//                         model_reasoning_summary=detailed)
+//     model_reasoning_summary=detailed)
 //   - agent_message     : Text; emitted only on completed — this
-//                         is the review's final answer and is
-//                         suppressed from the sink (P1 fix — see
-//                         runCodexReviewPlain doc)
+//     is the review's final answer and is
+//     suppressed from the sink (P1 fix — see
+//     runCodexReviewPlain doc)
 //   - mcp_tool_call     : Server, Tool, Arguments; emitted on
-//                         started / completed
+//     started / completed
 //   - error             : Message; emitted only on completed
 type codexExecItem struct {
-	ID              string               `json:"id"`
-	Type            string               `json:"type"`
-	Message         string               `json:"message,omitempty"`         // error
-	Command         string               `json:"command,omitempty"`         // command_execution
-	AggregatedOutput string              `json:"aggregated_output,omitempty"` // command_execution completed
-	ExitCode        *int                 `json:"exit_code,omitempty"`      // command_execution completed (nil while in_progress)
-	Status          string               `json:"status,omitempty"`         // command_execution: in_progress | completed | failed
-	Text            string               `json:"text,omitempty"`           // agent_message / reasoning
-	Changes         []codexExecItemChange `json:"changes,omitempty"`       // file_change
-	Server          string               `json:"server,omitempty"`         // mcp_tool_call
-	Tool            string               `json:"tool,omitempty"`           // mcp_tool_call
+	ID               string                `json:"id"`
+	Type             string                `json:"type"`
+	Message          string                `json:"message,omitempty"`           // error
+	Command          string                `json:"command,omitempty"`           // command_execution
+	AggregatedOutput string                `json:"aggregated_output,omitempty"` // command_execution completed
+	ExitCode         *int                  `json:"exit_code,omitempty"`         // command_execution completed (nil while in_progress)
+	Status           string                `json:"status,omitempty"`            // command_execution: in_progress | completed | failed
+	Text             string                `json:"text,omitempty"`              // agent_message / reasoning
+	Changes          []codexExecItemChange `json:"changes,omitempty"`           // file_change
+	Server           string                `json:"server,omitempty"`            // mcp_tool_call
+	Tool             string                `json:"tool,omitempty"`              // mcp_tool_call
 }
 
 type codexExecItemChange struct {
@@ -820,8 +820,8 @@ func startStderrDrain(ctx context.Context, r io.Reader) *stderrDrain {
 	return d
 }
 
-func (d *stderrDrain) wait()             { <-d.done }
-func (d *stderrDrain) bytes() string     { return d.buf.String() }
+func (d *stderrDrain) wait()               { <-d.done }
+func (d *stderrDrain) bytes() string       { return d.buf.String() }
 func (d *stderrDrain) truncatedFlag() bool { return d.truncated }
 
 // formatCodexExitError returns the canonical "codex: exit: ..." /
@@ -912,6 +912,7 @@ func codexDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.Bridge
 		KilledAt:   time.Now(),
 	}
 }
+
 // runCodexReview runs `codex review --base <default>` against the
 // workspace. F-review.md §13 "codex/claude use native review" rule:
 // we invoke codex's built-in `review` subcommand instead of running
@@ -938,17 +939,18 @@ func codexDiagnostic(exitKind agent.BridgeExitKind, stderr string) *agent.Bridge
 //     with exit 2 (verified on codex-cli 0.145.0).
 //   - `codex review` outputs plain text on stdout (no NDJSON
 //     events, no `-o` tempfile write). The shared stderr-drain
-//     + exit-error formatting is the only thing the two paths
+//   - exit-error formatting is the only thing the two paths
 //     have in common (handled by stderrDrain + formatCodexExitError
 //     in print.go).
 //
 // argv layout (verified on codex-cli 0.145.0):
-//   `codex review
-//      -c approval_policy=never
-//      -c sandbox_mode=danger-full-access
-//      --base <defaultBranch>          ← OR --uncommitted fallback
-//      [-- <prompt>]                   ← review has no positional,
-//                                          but `--` is harmless
+//
+//	`codex review
+//	   -c approval_policy=never
+//	   -c sandbox_mode=danger-full-access
+//	   --base <defaultBranch>          ← OR --uncommitted fallback
+//	   [-- <prompt>]                   ← review has no positional,
+//	                                       but `--` is harmless
 //
 // F-review.md §13 "codex/claude use native review" rule: invoking
 // the native subcommand instead of our generic builtinPrompt.

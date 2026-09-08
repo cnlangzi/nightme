@@ -92,8 +92,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 //   - regular text: the user's message ts
 //   - slash command: the parent message ts created by
 //     handleSlashCommand (which postsMessage first because Slack
-////     rejects streaming under cmd.TriggerID — see
-////     docs/channel/slack.md §5.2)
+//
+// //     rejects streaming under cmd.TriggerID — see
+// //     docs/channel/slack.md §5.2)
 //
 // chatID's embedded thread_ts (only set for DMs) takes precedence
 // over ReplyTo so the stream stays scoped to the DM thread.

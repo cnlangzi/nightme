@@ -5,7 +5,6 @@ import (
 	"testing"
 )
 
-
 // TestIsReviewablePath verifies the Tier 3 noise filter drops
 // well-known non-source directories but leaves real source paths.
 // Tier 2 uses ocr's (richer) FileFilter instead; this is the fallback.

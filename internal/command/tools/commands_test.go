@@ -74,6 +74,7 @@ func TestFactory_Handle_UnknownMode_RepliesUsage(t *testing.T) {
 		t.Fatalf("Reply missing usage hint: %q", out.Reply)
 	}
 }
+
 // TestFactory_Handle_UnknownFlag_Rejected pins the issue #291
 // CLI contract on /tools: an undeclared flag is a hard error,
 // not a silent no-op that toggles the mode anyway.

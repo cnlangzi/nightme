@@ -1,4 +1,3 @@
-
 // Package codex implements a bridge to the Codex CLI via its
 // `codex app-server --listen stdio://` JSON-RPC 2.0 transport.
 //
@@ -61,11 +60,11 @@ type threadRef struct {
 }
 
 type threadResumeParams struct {
-	ThreadID              string `json:"threadId"`
+	ThreadID               string `json:"threadId"`
 	PersistExtendedHistory bool   `json:"persistExtendedHistory"`
-	CWD                   string `json:"cwd,omitempty"`
-	ApprovalPolicy        string `json:"approvalPolicy,omitempty"`
-	Sandbox               string `json:"sandbox,omitempty"`
+	CWD                    string `json:"cwd,omitempty"`
+	ApprovalPolicy         string `json:"approvalPolicy,omitempty"`
+	Sandbox                string `json:"sandbox,omitempty"`
 }
 
 // ─── turn ───
@@ -150,15 +149,15 @@ type appServerTokenUsageNotification struct {
 type itemRaw = json.RawMessage
 
 type itemStartedNotification struct {
-	ThreadID string   `json:"threadId"`
-	TurnID   string   `json:"turnId"`
-	Item     itemRaw  `json:"item"`
+	ThreadID string  `json:"threadId"`
+	TurnID   string  `json:"turnId"`
+	Item     itemRaw `json:"item"`
 }
 
 type itemCompletedNotification struct {
-	ThreadID string   `json:"threadId"`
-	TurnID   string   `json:"turnId"`
-	Item     itemRaw  `json:"item"`
+	ThreadID string  `json:"threadId"`
+	TurnID   string  `json:"turnId"`
+	Item     itemRaw `json:"item"`
 }
 
 // itemSplit extracts the {id,type} discriminator from raw item bytes.

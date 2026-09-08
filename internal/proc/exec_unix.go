@@ -442,7 +442,6 @@ func escapeAppleScriptString(s string) string {
 // runtime uses when it can't find the app, so a match here means
 // AppleScript will succeed.
 
-
 // openTerminalLinux probes a fixed list of terminal emulators in
 // preference order, executing the first one found on $PATH.
 //

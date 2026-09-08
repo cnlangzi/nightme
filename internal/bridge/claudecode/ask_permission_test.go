@@ -1,4 +1,3 @@
-
 // Tests for the AskUserQuestion dual-path interception fix
 // (2026-08 fix-claude-ask-your-question). See docs/bridge/claude.md
 // §5.5 for the full design rationale.
@@ -315,7 +314,7 @@ func TestSendPermission_ToolUse_WritesToolResult(t *testing.T) {
 			Content []struct {
 				Type      string `json:"type"`
 				ToolUseID string `json:"tool_use_id"`
-				Content   any  `json:"content"`
+				Content   any    `json:"content"`
 			} `json:"content"`
 		} `json:"message"`
 	}

@@ -92,8 +92,8 @@ type wireState struct {
 type wireRingBuffer struct {
 	cap   int
 	buf   []wireFrame
-	head  int  // next write position
-	count int  // total frames pushed (capped at cap for modulo math)
+	head  int // next write position
+	count int // total frames pushed (capped at cap for modulo math)
 }
 
 type wireFrame struct {
@@ -338,8 +338,6 @@ func (s *wireState) applyProjectionLocked(proj projectionEnvelope) []agent.Agent
 	}
 }
 
-
-
 // applyTodoProjectionLocked assumes the caller holds s.mu.
 //
 // Decodes a projection value carrying a todo snapshot (same shape
@@ -418,6 +416,7 @@ func (s *wireState) applyTodoProjectionLocked(value json.RawMessage) []agent.Age
 		TaskList: &agent.AgentTaskListEvent{Items: items},
 	}}
 }
+
 // applyView ingests one ToolEventView payload from dsh's host-
 // computed rendering. P3 contract: when a session/event frame
 // carries a View, the View is the AUTHORITATIVE source for tool

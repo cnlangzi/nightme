@@ -1,4 +1,3 @@
-
 package codex
 
 import (
@@ -15,7 +14,7 @@ import (
 // userInputAnswersFrame models the JSON shape on the wire for
 // item/tool/requestUserInput responses:
 //
-//   {"jsonrpc":"2.0","id":"...","result":{"answers":{"q1":{"answers":["A"]}}}}
+//	{"jsonrpc":"2.0","id":"...","result":{"answers":{"q1":{"answers":["A"]}}}}
 type userInputAnswersFrame struct {
 	Result struct {
 		Answers map[string]struct {

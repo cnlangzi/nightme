@@ -22,7 +22,9 @@ import (
 // anchor and a reference to the AgentSession that produced it.
 //
 // Replaces the v1.3.x single-observer callback:
+//
 //	func(chatID string, s *AgentSession, ev agent.AgentEvent, userMsgID string)
+//
 // — which had a flat parameter list, no PromptID, and was
 // single-subscriber.
 //

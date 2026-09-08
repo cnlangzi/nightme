@@ -1,4 +1,3 @@
-
 // Package opencode is the nightme bridge for the opencode CLI.
 //
 // Unlike the other per-CLI bridges (claudecode / codex / pi), this
@@ -16,7 +15,7 @@
 //     `opencode run --format json <prompt>`. Mirrors
 //     codex/claudecode/pi print-mode; one process per call.
 //
-// Why ACP, not HTTP serve
+// # Why ACP, not HTTP serve
 //
 // An earlier version of this package implemented the long-lived
 // path against `opencode serve` (HTTP + SSE + ~3500 lines of
@@ -46,7 +45,7 @@
 // via (*driver).SetUpdateHandler(...) — see docs/bridge/acp.md
 // §2.3 for the "vendor-private only" rule.
 //
-// Historical `opencode serve` artifacts
+// # Historical `opencode serve` artifacts
 //
 // The retired `internal/bridge/opencode/` package was deleted in
 // Phase 2 of the migration (commit 45e7b21). References to

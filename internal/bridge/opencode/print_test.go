@@ -428,7 +428,7 @@ func TestBuildPrintArgs_MultipleFiles(t *testing.T) {
 	// Note: no trailing prompt assertion here because multiple-
 	// file blocks produce a placeholder-rich prompt that
 	// varies; the next test (TestBuildPrintArgs_PromptIsLast)
-// verifies the trailing-positional invariant for the whole
+	// verifies the trailing-positional invariant for the whole
 	// suite in one place.
 	wantPrefix := []string{
 		"run", "--format", "json", "--dir", "/tmp/ws",

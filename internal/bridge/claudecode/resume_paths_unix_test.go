@@ -26,15 +26,16 @@ import (
 // each in one place. Driven by env var gating.
 //
 // Env vars:
-//   NIGHTME_TALIVE_RESUME_REPLAY=1 → fresh spawn → capture
-//     session_id → close → re-spawn with --resume <id>
-//     (happy path: the resume works)
-//   NIGHTME_TALIVE_RESUME_BAD=1 → spawn with a definitely-invalid
-//     UUID (the user's symptom — stored SessionID points at a
-//     session that no longer exists)
-//   NIGHTME_TALIVE_RESUME_USER=1 → use the user's actual
-//     SessionID stored in agent_sessions.json (the actual
-//     production symptom)
+//
+//	NIGHTME_TALIVE_RESUME_REPLAY=1 → fresh spawn → capture
+//	  session_id → close → re-spawn with --resume <id>
+//	  (happy path: the resume works)
+//	NIGHTME_TALIVE_RESUME_BAD=1 → spawn with a definitely-invalid
+//	  UUID (the user's symptom — stored SessionID points at a
+//	  session that no longer exists)
+//	NIGHTME_TALIVE_RESUME_USER=1 → use the user's actual
+//	  SessionID stored in agent_sessions.json (the actual
+//	  production symptom)
 //
 // Output is structured so it can be compared at a glance.
 func TestResumePaths_Table(t *testing.T) {
@@ -106,7 +107,7 @@ initLoop:
 			t.Logf("[replay] phase 1 EV at %s kind=%v initNonNil=%v sessionID=%q",
 				time.Since(phaseStart).Round(time.Millisecond), ev.Kind,
 				true, initSessionID(ev))
-			if ev.Kind == agent.EventAgentReady  && ev.SessionID != "" {
+			if ev.Kind == agent.EventAgentReady && ev.SessionID != "" {
 				capturedID = ev.SessionID
 				initSeen = true
 				t.Logf("[replay] phase 1: captured sessionID=%q", capturedID)
@@ -129,7 +130,7 @@ initLoop:
 	sess2, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		SessionID:       capturedID,
+		SessionID:      capturedID,
 	})
 	if err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
@@ -179,7 +180,7 @@ func resumeInvalidUUID(t *testing.T, deadline time.Duration) {
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		SessionID:       bad,
+		SessionID:      bad,
 	})
 	if sess != nil {
 		t.Cleanup(func() { _ = sess.Close() })
@@ -216,7 +217,7 @@ func resumeUserWorkspaceKnownID(t *testing.T, deadline time.Duration) {
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		SessionID:       id,
+		SessionID:      id,
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -281,6 +282,7 @@ func envOr(name, def string) string {
 //   - NIGHTME_TALIVE_USER_WS env var if set
 //   - the test process's cwd (typically the nightme repo
 //     when running with `go test ./...` from the repo root)
+//
 // which matches what nightme's runtime uses after /cwd.
 func resolveWorkspace(t *testing.T) (string, error) {
 	t.Helper()

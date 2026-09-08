@@ -152,10 +152,10 @@ func TestGTWYml_RoundTrip_AllFields(t *testing.T) {
 	wt := t.TempDir()
 
 	in := Context{
-		Mode:      ModeRemote,
-		Issue:     42,
-		Branch:    "fix/42-foo",
-		Worktree:  wt,
+		Mode:     ModeRemote,
+		Issue:    42,
+		Branch:   "fix/42-foo",
+		Worktree: wt,
 		// RepoRoot must be a path that passes filepath.IsAbs on the
 		// test's host OS. Linux/macOS: any leading-slash path is
 		// absolute. Windows: filepath.Clean("/foo") does NOT

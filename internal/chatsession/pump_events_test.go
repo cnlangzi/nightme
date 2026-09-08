@@ -193,10 +193,10 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	// Observe the terminal prompt-end event. writebackMessageState
 	// fires this on KindPromptEnded.
 	var (
-		mu             sync.Mutex
-		gotEvent       bool
-		gotUserMsgID   string
-		gotReason      PromptEndReason
+		mu           sync.Mutex
+		gotEvent     bool
+		gotUserMsgID string
+		gotReason    PromptEndReason
 	)
 	cs.PromptEndBus.Subscribe(func(e PromptEndedEvent) bool {
 		mu.Lock()

@@ -1,4 +1,3 @@
-
 // starter.go — the spawn recipe for the codex bridge.
 //
 // After the Agent → Info/Starter/Agent/driver refactor
@@ -91,6 +90,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	}
 	return agent.NewAgent(s.Info(), d.session.pid, d.session.events, d), nil
 }
+
 // RunOnce is the one-shot counterpart to Start. Delegates to
 // runPrintMode in print.go, which spawns `codex exec` directly
 // (bypassing the long-lived app-server pipeline) — see the file

@@ -1,4 +1,3 @@
-
 package claudecode
 
 import (
@@ -542,9 +541,9 @@ func TestPumpStream_RealModelSayingNoContent_Kept(t *testing.T) {
 // future "be lenient" drift.
 func TestPumpStream_PlaceholderMatchIsStrict(t *testing.T) {
 	cases := []struct {
-		name  string
-		text  string
-		drop  bool
+		name string
+		text string
+		drop bool
 	}{
 		{name: "literal placeholder", text: "(no content)", drop: true},
 		{name: "leading space", text: " (no content)", drop: false},
@@ -1231,4 +1230,3 @@ func TestPumpStream_MultiMessageBurst(t *testing.T) {
 		t.Errorf("EventAgentDone count = %d, want %d", dones, messages)
 	}
 }
-

@@ -50,7 +50,7 @@ import (
 // Holds *chatsession.Manager directly (mirrors /cwd, /think, /use)
 // so the runtime can construct it via the package init() without
 // pulling in extra runtime deps.
-type Factory struct {}
+type Factory struct{}
 
 // init self-registers the /review command. Each command package's
 // init() calls RegisterBuilder; the runtime orchestrator calls

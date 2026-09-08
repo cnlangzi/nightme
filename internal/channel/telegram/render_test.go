@@ -868,7 +868,7 @@ func TestRenderForWire_Over4096Fallback(t *testing.T) {
 func TestIsTableSeparator(t *testing.T) {
 	cases := []struct {
 		line string
-	want bool
+		want bool
 	}{
 		{"| - | - |", true},
 		{"|:-|:-:|", true},

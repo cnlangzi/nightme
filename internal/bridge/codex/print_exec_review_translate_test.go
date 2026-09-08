@@ -118,8 +118,8 @@ func TestTranslateItemStarted_IgnoresOtherTypes(t *testing.T) {
 // both no-ops, matching runNDJSON's tolerance for malformed
 // lines. Bridges never crash on a single bad event.
 func TestTranslateItemStarted_NilSafe(t *testing.T) {
-	translateItemStarted(nil, nil)                 // both nil
-	translateItemStarted(nil, &codexExecItem{})     // nil sink
+	translateItemStarted(nil, nil)              // both nil
+	translateItemStarted(nil, &codexExecItem{}) // nil sink
 	called := false
 	translateItemStarted(
 		func(agent.AgentEvent) { called = true },

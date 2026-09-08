@@ -1,4 +1,3 @@
-
 // Server-initiated request handling for the codex app-server bridge.
 //
 // App-server pushes 4 kinds of requests that need a response on the

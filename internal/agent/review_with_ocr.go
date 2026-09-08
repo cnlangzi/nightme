@@ -325,10 +325,10 @@ func precomputeReviewWithOcr(ctx context.Context, workspace string) reviewContex
 // review). Keeping them separate is the only honest shape.
 //
 // 4 git sources, dedup'd:
-//   1. git diff --name-only <base>...HEAD    (committed on branch)
-//   2. git diff --staged --name-only        (staged, not committed)
-//   3. git diff --name-only                 (unstaged working tree)
-//   4. git ls-files --others --exclude-standard  (untracked, .gitignore)
+//  1. git diff --name-only <base>...HEAD    (committed on branch)
+//  2. git diff --staged --name-only        (staged, not committed)
+//  3. git diff --name-only                 (unstaged working tree)
+//  4. git ls-files --others --exclude-standard  (untracked, .gitignore)
 func precomputeReviewWithBuiltin(ctx context.Context, workspace string) reviewContext {
 	rc := reviewContext{workspace: workspace}
 	if workspace == "" {
@@ -445,8 +445,6 @@ func runGit(ctx context.Context, workspace string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-
-
 // collectReviewableFiles is the Tier 3 Go reprise of ocr's preview
 // file selection. Returns the deduped, noise-filtered list of changed
 // paths across committed (base...HEAD), staged, unstaged, AND untracked
@@ -472,10 +470,10 @@ func runGit(ctx context.Context, workspace string, args ...string) string {
 // separate is the only honest shape.
 //
 // 4 git sources, dedup'd:
-//   1. git diff --name-only <base>...HEAD    (committed on branch)
-//   2. git diff --staged --name-only        (staged, not committed)
-//   3. git diff --name-only                 (unstaged working tree)
-//   4. git ls-files --others --exclude-standard  (untracked, respects .gitignore)
+//  1. git diff --name-only <base>...HEAD    (committed on branch)
+//  2. git diff --staged --name-only        (staged, not committed)
+//  3. git diff --name-only                 (unstaged working tree)
+//  4. git ls-files --others --exclude-standard  (untracked, respects .gitignore)
 //
 // isReviewablePath drops well-known noise directories. Conservative:
 // only paths whose normalised form contains a known noise segment are

@@ -115,12 +115,12 @@ func logDegradation(logger *slog.Logger, kind degradationKind, opts RetryOpts, a
 //
 // 规则（按 cc-connect 思路 + Go 网络错误模型）：
 //
-//	1. net.Error.Timeout() 为 true → 重试
-//	2. *net.OpError 内嵌 Timeout() → 重试
-//	3. io.EOF / io.ErrUnexpectedEOF → 重试
-//	4. syscall.ECONNRESET / syscall.EPIPE → 重试
-//	5. err.Error() 子串匹配 "connection reset" / "broken pipe" /
-//	   "i/o timeout" / "TLS handshake timeout" / "connection refused" → 重试
+//  1. net.Error.Timeout() 为 true → 重试
+//  2. *net.OpError 内嵌 Timeout() → 重试
+//  3. io.EOF / io.ErrUnexpectedEOF → 重试
+//  4. syscall.ECONNRESET / syscall.EPIPE → 重试
+//  5. err.Error() 子串匹配 "connection reset" / "broken pipe" /
+//     "i/o timeout" / "TLS handshake timeout" / "connection refused" → 重试
 //
 // 不重试 Feishu 业务码：
 //   - 230011 / 231003：message 已撤回/删除（terminal，sendContent 有 fallback）

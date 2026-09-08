@@ -19,7 +19,7 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /think.
-type Factory struct {}
+type Factory struct{}
 
 // NewFactory constructs a Factory. command/* factories do not
 // receive a *chatsession.Manager — cs comes from the dispatcher

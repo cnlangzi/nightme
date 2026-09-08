@@ -39,10 +39,12 @@ func (d *recordingSendBlocksDriver) SendBlocks(_ context.Context, b []agent.Cont
 	d.inner.mu.Unlock()
 	return d.inner.fakeAgentSession.SendBlocks(context.Background(), b)
 }
-func (d *recordingSendBlocksDriver) SendPermission(string) error  { return nil }
-func (d *recordingSendBlocksDriver) Reset(context.Context) error   { return d.inner.New(context.Background()) }
-func (d *recordingSendBlocksDriver) Close() error                  { return d.inner.Close() }
-func (d *recordingSendBlocksDriver) Stop(context.Context) error   { return nil }
+func (d *recordingSendBlocksDriver) SendPermission(string) error { return nil }
+func (d *recordingSendBlocksDriver) Reset(context.Context) error {
+	return d.inner.New(context.Background())
+}
+func (d *recordingSendBlocksDriver) Close() error               { return d.inner.Close() }
+func (d *recordingSendBlocksDriver) Stop(context.Context) error { return nil }
 func (d *recordingSendBlocksDriver) Keepalive(context.Context, func(context.Context) error) error {
 	return nil
 }

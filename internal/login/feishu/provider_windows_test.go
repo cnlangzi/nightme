@@ -14,11 +14,11 @@ import (
 //
 // renderQRPlatform on Windows has three tiers of fallback:
 //
-//   1. Windows Terminal → RenderANSI (24-bit color, inline).
-//   2. Legacy conhost → RenderASCII (half-block Unicode) after
-//      enableConsoleOutputUTF8 sets the console code page to UTF-8.
-//   3. Universal fallback → WritePNGToDesktop + auto-open via the
-//      default photo viewer.
+//  1. Windows Terminal → RenderANSI (24-bit color, inline).
+//  2. Legacy conhost → RenderASCII (half-block Unicode) after
+//     enableConsoleOutputUTF8 sets the console code page to UTF-8.
+//  3. Universal fallback → WritePNGToDesktop + auto-open via the
+//     default photo viewer.
 //
 // In the test environment (we run `go test` from a console, no
 // WT_SESSION set), tier 2 is the active path. We assert on the

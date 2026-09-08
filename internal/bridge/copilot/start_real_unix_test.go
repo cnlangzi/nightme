@@ -5,13 +5,13 @@
 // Exercises the FULL bridge chain against the real copilot
 // binary:
 //
-//   Starter.Start (PTY + ACP handshake: initialize +
-//                  session/new)  →  *agent.Agent
-//   SendBlocks                   →  driver translates
-//                                   to ACP session/prompt
-//   Events() <-chan AgentEvent   ←  driver translates
-//                                   agent_message_chunk /
-//                                   session.status / etc.
+//	Starter.Start (PTY + ACP handshake: initialize +
+//	               session/new)  →  *agent.Agent
+//	SendBlocks                   →  driver translates
+//	                                to ACP session/prompt
+//	Events() <-chan AgentEvent   ←  driver translates
+//	                                agent_message_chunk /
+//	                                session.status / etc.
 //
 // Skipped when no `copilot` binary on PATH. End-to-end takes
 // 30-60s due to the model call.

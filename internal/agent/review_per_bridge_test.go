@@ -159,7 +159,7 @@ type testStarter struct {
 }
 
 func (t *testStarter) Info() agent.Info { return t.info }
-func (t *testStarter) Detect() error     { return nil }
+func (t *testStarter) Detect() error    { return nil }
 func (t *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("testStarter: Start not implemented")
 }

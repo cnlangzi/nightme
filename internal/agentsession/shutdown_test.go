@@ -20,7 +20,7 @@ func TestShutdown_ClosesEventBus(t *testing.T) {
 	})
 
 	// Trigger first event to land so the dispatcher is started.
-	pushEvent(as, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("pre")})
+	pushEvent(as, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("pre")})
 
 	// Wait for first event.
 	deadline := time.Now().Add(2 * time.Second)
@@ -32,7 +32,7 @@ func TestShutdown_ClosesEventBus(t *testing.T) {
 
 	// After Shutdown, EventBus.Publish is a no-op.
 	preHits := hits.Load()
-	as.EventBus.Publish(EnrichedEvent{Kind:KindAgentEvent})
+	as.EventBus.Publish(EnrichedEvent{Kind: KindAgentEvent})
 	time.Sleep(50 * time.Millisecond)
 	if hits.Load() != preHits {
 		t.Errorf("subscriber fired after Shutdown: pre=%d post=%d", preHits, hits.Load())
@@ -54,7 +54,7 @@ func TestShutdown_DispatcherDrainsQueue(t *testing.T) {
 	as.ensureDispatcher()
 	const N = 5
 	for i := 0; i < N; i++ {
-		as.eventQueue <- EnrichedEvent{Kind:KindAgentEvent}
+		as.eventQueue <- EnrichedEvent{Kind: KindAgentEvent}
 	}
 
 	// Wait for all events to drain before shutdown.
@@ -68,7 +68,7 @@ func TestShutdown_DispatcherDrainsQueue(t *testing.T) {
 
 	as.Shutdown()
 	// After Shutdown, no new events fire.
-	as.EventBus.Publish(EnrichedEvent{Kind:KindAgentEvent})
+	as.EventBus.Publish(EnrichedEvent{Kind: KindAgentEvent})
 	time.Sleep(50 * time.Millisecond)
 	if hits.Load() != N {
 		t.Errorf("post-Shutdown hits = %d, want %d", hits.Load(), N)
@@ -121,7 +121,7 @@ func TestShutdown_BridgeExit_DoesNotCloseEventBus(t *testing.T) {
 	}
 
 	// Subsequent pushes still reach the bus.
-	pushEvent(as, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("post-exit")})
+	pushEvent(as, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("post-exit")})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && hits.Load() == 0 {
@@ -163,6 +163,7 @@ func TestShutdown_DoubleShutdownIsIdempotent(t *testing.T) {
 // silence unused import warnings.
 var _ = atomic.Int32{}
 var _ = agent.EventAgentText
+
 // makeTextEvent returns a non-nil AgentEvent so the dispatcher
 // publishes onto EventBus (gated on AgentEvent != nil).
 func makeTextEvent(text string) *agent.AgentEvent {

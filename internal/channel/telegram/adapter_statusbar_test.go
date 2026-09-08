@@ -260,10 +260,10 @@ func TestAdapter_Send_DM_OutTaskCreate_AppendsStatusBar(t *testing.T) {
 	}
 	text := lastChunkText(t, a, api.snapshotCalls())
 	for _, want := range []string{
-		"📋 Tasks",       // §11.12.6.1 headline
-		"Write tests",    // in_progress row → "- [ ] Write tests (writing tests)"
-		"Refactor",       // completed row → "- [x] Refactor"
-		"🤖: claude",     // statusbar trailer still rides along
+		"📋 Tasks",     // §11.12.6.1 headline
+		"Write tests", // in_progress row → "- [ ] Write tests (writing tests)"
+		"Refactor",    // completed row → "- [x] Refactor"
+		"🤖: claude",   // statusbar trailer still rides along
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("OutTaskCreate body missing %q; got %q", want, text)
@@ -403,8 +403,6 @@ func TestAdapter_Send_DM_OutThinking_AppendsStatusBar(t *testing.T) {
 		t.Errorf("StatusBar missing; got %q", text)
 	}
 }
-
-
 
 func TestAdapter_Send_DM_OutCommandReply_AppendsStatusBar(t *testing.T) {
 	a, api := newTestAdapter(t)
@@ -642,6 +640,7 @@ func TestAdapter_Send_DM_OutReply_OutOrderPreservesCache(t *testing.T) {
 		t.Errorf("StatusBar missing from rendered chunk; got %q", text)
 	}
 }
+
 // debug_flush prints the full API calls log — drop in to lastChunkText
 // helper when a test fails to see what's actually being recorded.
 func debug_flush(t *testing.T, a *Adapter, api *fakeAPI) {

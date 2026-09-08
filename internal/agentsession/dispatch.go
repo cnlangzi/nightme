@@ -71,31 +71,32 @@ func (as *AgentSession) eventDispatchLoop(stop chan struct{}) {
 	defer close(as.dispatchDone)
 
 	for {
-			// Snapshot stop under asMu to avoid a Shutdown closing
-			// dispatchStop while we read nil.
-			as.asMu.RLock()
-			stopCh := as.dispatchStop
-			eq := as.eventQueue
-			as.asMu.RUnlock()
+		// Snapshot stop under asMu to avoid a Shutdown closing
+		// dispatchStop while we read nil.
+		as.asMu.RLock()
+		stopCh := as.dispatchStop
+		eq := as.eventQueue
+		as.asMu.RUnlock()
 
-			if eq == nil {
-				return
-			}
-
-			select {
-			case ev, ok := <-eq:
-				if !ok {
-					// eventQueue closed; drain complete.
-					return
-				}
-				if as.EventBus != nil {
-					as.EventBus.Publish(ev)
-				}
-			case <-stopCh:
-				return
-			}
+		if eq == nil {
+			return
 		}
+
+		select {
+		case ev, ok := <-eq:
+			if !ok {
+				// eventQueue closed; drain complete.
+				return
+			}
+			if as.EventBus != nil {
+				as.EventBus.Publish(ev)
+			}
+		case <-stopCh:
+			return
+		}
+	}
 }
+
 // InjectEvent is a test-only helper to push events directly into the
 // per-AS event queue (the same path the readpump uses in production).
 // It ensures the dispatcher is running before pushing so the event

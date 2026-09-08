@@ -142,9 +142,9 @@ jobs:
 		"workflow:   reviewer",
 		"workspace:  /tmp/test",
 		"execution plan",
-		"echo",        // step 1 run
-		"prompt:",     // step 2 prompt
-		"dry-run",     // footer
+		"echo",    // step 1 run
+		"prompt:", // step 2 prompt
+		"dry-run", // footer
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n--- output ---\n%s", want, out)

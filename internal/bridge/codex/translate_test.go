@@ -582,6 +582,54 @@ func TestTranslate_TokenUsageUpdatedFallsBackToTotalWhenLastEmpty(t *testing.T) 
 	}
 }
 
+// TestTranslate_TokenUsageUpdatedKeepsLastForCacheOnlyTurn guards
+// against the F-CODEX-FALLBACK regression: a turn with
+// `last.cachedInputTokens > 0` while `last.in == last.out == 0`
+// is a legitimate per-turn cache hit (e.g. the entire prompt
+// prefix is served from cache and the assistant hasn't started
+// generating output yet). The naive fallback `if in == 0 && out
+// == 0 { u = total }` would silently swap that for
+// session-cumulative cache reads and explode the pct to
+// 100s of percent. Verify last is preserved verbatim in this
+// case.
+func TestTranslate_TokenUsageUpdatedKeepsLastForCacheOnlyTurn(t *testing.T) {
+	deliver := func(ev agent.AgentEvent) agent.AgentEvent { return ev }
+	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil, nil)
+
+	// Pure cache-hit turn: last has only cachedInputTokens; total
+	// is the cumulative that would have caused pct=491% if fed in
+	// by mistake.
+	params := []byte(`{
+		"threadId": "th-1",
+		"turnId": "turn-1",
+		"tokenUsage": {
+			"last":   {"inputTokens": 0,    "outputTokens": 0,    "cachedInputTokens": 250000, "reasoningOutputTokens": 0, "totalTokens": 250000},
+			"total":  {"inputTokens": 5000, "outputTokens": 800,  "cachedInputTokens": 5000000, "reasoningOutputTokens": 0, "totalTokens": 6000000},
+			"modelContextWindow": 1000000
+		}
+	}`)
+	tr.notify("thread/tokenUsage/updated", params)
+
+	if tr.turn.lastUsage == nil {
+		t.Fatalf("lastUsage is nil after thread/tokenUsage/updated")
+	}
+	u := tr.turn.lastUsage
+	if u.InputTokens != 0 {
+		t.Errorf("lastUsage.InputTokens = %d, want 0 (pure cache hit)", u.InputTokens)
+	}
+	if u.OutputTokens != 0 {
+		t.Errorf("lastUsage.OutputTokens = %d, want 0 (no output yet)", u.OutputTokens)
+	}
+	if u.CacheReadInputTokens != 250000 {
+		t.Errorf("lastUsage.CacheReadInputTokens = %d, want 250000 from last (not 5000000 from total)", u.CacheReadInputTokens)
+	}
+	// Formula: (0 + 0 + 0 + 250000) / 1000000 * 100 = 25.0%
+	want := 25.0
+	if u.ContextWindowPct < want-0.1 || u.ContextWindowPct > want+0.1 {
+		t.Errorf("lastUsage.ContextWindowPct = %v, want ~%v (must clamp the 5000000 cumulative)", u.ContextWindowPct, want)
+	}
+}
+
 func TestTranslate_TokenUsageUpdatedIgnoresZeroes(t *testing.T) {
 	deliver := func(ev agent.AgentEvent) agent.AgentEvent { return ev }
 	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil, nil)

@@ -265,8 +265,21 @@ func (t *translator) handleTokenUsageUpdated(params json.RawMessage) {
 		return
 	}
 	u := notif.TokenUsage.Last
-	if u.InputTokens == 0 && u.OutputTokens == 0 {
+	usedTotalFallback := false
+	// F-CODEX-FALLBACK: only fall back to `total` (session-cumulative)
+	// when `last` is fully empty. The previous condition checked
+	// only `InputTokens` and `OutputTokens`, which let a
+	// "pure cache hit" turn (`last.cachedInputTokens > 0` while
+	// `last.in == last.out == 0`) silently escalate to session-
+	// cumulative cache reads — turning a normal turn into a
+	// `cache_read > contextWindow` pct of several hundred percent.
+	// Per OpenAI's codex-rs/protocol/v2/thread.rs (TokenUsage),
+	// `last` and `total` are explicitly distinct: `last` is
+	// per-turn, `total` is session-cumulative. Do not mix them
+	// when `last` is reporting a legitimate cache-only turn.
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CachedInputTokens == 0 {
 		u = notif.TokenUsage.Total
+		usedTotalFallback = true
 	}
 	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CachedInputTokens == 0 {
 		return
@@ -279,6 +292,18 @@ func (t *translator) handleTokenUsageUpdated(params json.RawMessage) {
 			info.ContextWindowPct = float64(used) / float64(info.ContextWindow) * 100
 		}
 	}
+	// F-CODEX-FALLBACK regression log: emit at Debug only, but
+	// always record whether `last` was empty enough to escalate
+	// to `total`. If the per-turn pct ever exceeds 100% again,
+// flipping the daemon log level to Debug will reveal whether
+	// the fallback path was responsible — that's the cheapest
+	// signal we have without re-adding the raw wire dump.
+	slog.Default().Debug("codex: handleTokenUsageUpdated",
+		slog.Bool("used_total_fallback", usedTotalFallback),
+		slog.Int("cache_read_input_tokens", info.CacheReadInputTokens),
+		slog.Int("context_window", info.ContextWindow),
+		slog.Float64("context_window_pct", info.ContextWindowPct),
+	)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.turn.lastUsage = info

@@ -790,6 +790,22 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageInfo {
 	// compute pct, never stored on UsageInfo. Any parse failure
 	// or empty payload leaves CostUSD / contextWindow at 0
 	// ("not reported" — footer omits the X% segment).
+	//
+	// F-CLAUDECODE-MULTIMODEL: when one turn spans multiple models
+	// (e.g. main agent on M3[1m] + a Task-subagent on M2.7),
+	// `modelUsage` is a per-model map. Picking the last-iterated
+	// window via `for _, v := range m { contextWindow = v.X }`
+	// silently overwrites with whatever model happens to come
+	// last in map order — observed: a 200k model (M2.7) clobbered
+	// the 1M main-agent window, producing pct = 4M/200k = 2000%.
+	// Fix: pick the **largest** non-zero window across all models
+	// in the map (i.e. the biggest bucket this turn could have
+	// filled). CostUSD keeps the last-positive-write behaviour —
+	// the wire sums cost across the turn, so for single-model
+	// turns this preserves the existing semantics and for
+	// multi-model turns the cost shows whichever entry happens
+	// to come last in map order (a known rough spot, but cost is
+	// already only displayed as an estimate).
 	contextWindow := 0
 	if len(rawModelUsage) > 0 {
 		var m map[string]struct {
@@ -801,7 +817,7 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageInfo {
 				if v.CostUSD > 0 {
 					out.CostUSD = v.CostUSD
 				}
-				if v.ContextWindow > 0 {
+				if v.ContextWindow > contextWindow {
 					contextWindow = v.ContextWindow
 				}
 			}

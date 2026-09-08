@@ -1480,6 +1480,7 @@ func (d *driver) handleUsageUpdate(raw json.RawMessage) {
 	// claudecode decodeUsage's permissive style).
 	_ = json.Unmarshal(raw, &u)
 
+	opencodeCumulative := false
 	info := &agent.UsageInfo{}
 	// Standard ACP shape wins when populated (more granular
 	// input/output/cache split).
@@ -1491,17 +1492,37 @@ func (d *driver) handleUsageUpdate(raw json.RawMessage) {
 		info.CacheCreationInputTokens = u.CacheCreationInputTokens
 		info.CostUSD = u.CostUSD
 	} else if u.Used > 0 || u.Size > 0 || u.Cost > 0 {
-		// opencode fallback: lump "used" into InputTokens
-		// (opencode reports cumulative context usage, not the
-		// per-turn input/output breakdown).
-		info.InputTokens = int(u.Used)
+		// opencode fallback: per the ACP spec
+		// (agentclientprotocol.com/protocol/v1/prompt-turn,
+		// `usage_update`), `used` is **the current tokens in
+		// context** — a running cumulative — and `size` is the
+		// model context window. The official guidance is:
+		// "Clients can calculate the remaining tokens and
+		// percentage used." So pct = used/size directly. The
+		// previous code folded `used` into `InputTokens` and
+		// ran the per-turn formula `(InputTokens + OutputTokens
+		// + CacheCreation + CacheRead) / contextWindow`, which
+		// treats a cumulative number as a per-turn delta and
+		// silently inflates pct as the session grows.
+		//
+		// Decision: in this branch we intentionally leave the
+		// per-turn fields (InputTokens / OutputTokens / Cache*)
+		// at zero so the footer renders "in/out/cache" as
+		// empty (the wire gives us no per-turn breakdown here).
+		// Only ContextWindow + ContextWindowPct + CostUSD get
+		// filled, which is what the opencode cumulative
+		// semantics actually carries.
+		opencodeCumulative = true
+		info.ContextWindow = int(u.Size)
+		if u.Size > 0 {
+			info.ContextWindowPct = float64(u.Used) / float64(u.Size) * 100
+		}
 		info.CostUSD = u.Cost
 	}
-	// ContextWindow + pct: opencode gives Size directly; for
-	// the standard shape we don't recompute (consistent with
-	// claudecode: pct is bridge-local, only computed when the
-	// wire reports the window).
-	if u.Size > 0 {
+	// ContextWindow + pct: standard ACP path only. The opencode
+	// cumulative branch above already populated pct; the
+	// per-turn formula here would otherwise double-count it.
+	if u.Size > 0 && !opencodeCumulative {
 		info.ContextWindow = int(u.Size)
 		if info.InputTokens+info.OutputTokens+
 			info.CacheCreationInputTokens+info.CacheReadInputTokens > 0 {

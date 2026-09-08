@@ -2100,19 +2100,6 @@ func (a *Adapter) sendResultAsReply(
 		// Defensive: caller already filters empty non-error results.
 		return nil
 	}
-	a.logger.Info("feishu OutResult: sendResultAsReply input",
-		"chat_id", chatID,
-		"user_msg_id", userMsgID,
-		"text_len", len(text),
-		"text_first_40", func() string {
-			if len(text) > 40 {
-				return text[:40] + "..."
-			}
-			return text
-		}(),
-		"footer_lines", footerLines,
-		"footer_len", len(footerLines),
-	)
 
 	// Orphan result (no userMsgID) — top-level Card 2.0. F-46
 	// unification: matches postOrphanReplyCard's "main-chat
@@ -2141,12 +2128,6 @@ func (a *Adapter) sendResultAsReply(
 	if err != nil {
 		return err
 	}
-	a.logger.Debug("feishu OutResult: rendered body",
-		"msg_type", msgType,
-		"body_bytes", len(body),
-		"body_contains_hr", strings.Contains(body, `"hr"`),
-		"body_contains_font_grey", strings.Contains(body, `color='grey'`),
-	)
 
 	// Envelope defensive cap. Adversarial input that survives the byte
 	// budget above (e.g., very wide ASCII tables or emojis) might still

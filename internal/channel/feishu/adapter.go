@@ -1986,7 +1986,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		//     sets it, but adapter never asserts on the field).
 		//   - msg.Heartbeat.Empty() — snapshot zero-valued (e.g.
 		//     tracker entry was LRU-evicted between Observe and
-		//     the adapter seeing this OutHeartbeat).
+		//     the adapter seeing this OutHeartbeat). Done-only
+		//     snapshots are NOT empty (terminal state is a
+		//     meaningful signal in its own right) — see
+		//     HeartbeatSnapshot.Empty.
 		if msg.Heartbeat == nil || msg.Heartbeat.Empty() {
 			return nil
 		}
@@ -2009,6 +2012,16 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				}
 				if prev.LastBeatAt.After(snap.LastBeatAt) {
 					snap.LastBeatAt = prev.LastBeatAt
+				}
+				// Done is monotonic (false→true never reverses),
+				// like the counters — preserve the prev flag when
+				// the new snapshot's Done field is false. Without
+				// this guard, a terminal event arriving BEFORE
+				// the receipt is created would lose its ✅
+				// prefix as soon as a later activity counter
+				// overwrote the pending entry.
+				if prev.Done {
+					snap.Done = true
 				}
 			}
 			a.pendingHeartbeats[msg.ReplyTo] = snap
@@ -2916,12 +2929,17 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// The reason production never produces such a snapshot is
 	// upstream: Adapter.Send's OutHeartbeat branch (adapter.go)
 	// and applyPendingHeartbeat both gate on `!m.Heartbeat.Empty()`
-	// before calling ApplyHeartbeat, so an Empty() snapshot never
-	// reaches the receipt in the production call path. Routing
-	// the "no counts" case to the front part here is therefore a
-	// safe fallback for both production (upstream-filtered) and
-	// direct-test paths (where the snapshot is what the test set
-	// it to) — render output never shows a "💭 0 · ⏱ ..." line.
+	// before calling ApplyHeartbeat, so a fully-empty snapshot
+	// never reaches the receipt in the production call path.
+	// Done-only snapshots ARE non-empty (terminal state is a
+	// meaningful signal in its own right — see
+	// HeartbeatSnapshot.Empty) and DO reach the receipt; the
+	// Done arm above routes them to renderHeartbeatHeader which
+	// paints "✅ " alone. Routing the "no counts AND no Done"
+	// case to the front part here is therefore a safe fallback
+	// for both production (upstream-filtered) and direct-test
+	// paths (where the snapshot is what the test set it to) —
+	// render output never shows a "💭 0 · ⏱ ..." line.
 	switch {
 	case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0 || hb.Done):
 		elements = append(elements, map[string]any{

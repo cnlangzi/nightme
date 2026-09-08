@@ -1,4 +1,3 @@
-
 // Regression test for the claudecode bridge's events-buffer cap.
 //
 // claudecode's emit path is direct `events <- ev` (no select, no

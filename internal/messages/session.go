@@ -181,8 +181,6 @@ func (s *GitStatusSnapshot) PushBlockReason() string {
 	return ""
 }
 
-
-
 // ToolInfo is the typed payload for OutboundMessage.Tool,
 // representing a tool call (start or end). It captures the
 // generic concepts that any tool has — name, args, output, error

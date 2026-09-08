@@ -32,9 +32,9 @@
 package main
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"encoding/json"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"os"
 	"sort"

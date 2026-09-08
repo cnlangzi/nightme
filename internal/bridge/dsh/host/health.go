@@ -33,11 +33,11 @@ package host
 import (
 	"context"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/httpclient"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
-	"github.com/cnlangzi/nightme/internal/httpclient"
 )
 
 // Health probe tuning. Constants rather than options because the
@@ -72,16 +72,16 @@ type HealthProbe struct {
 	logger *slog.Logger
 
 	// Tunable via struct fields, default values from NewHealthProbe.
-	interval    time.Duration
-	timeout     time.Duration
-	strikesMax  int
-	path        string
+	interval   time.Duration
+	timeout    time.Duration
+	strikesMax int
+	path       string
 
-	mu       sync.Mutex
-	strikes  int
-	closed   chan struct{}
-	done     chan struct{}
-	http     *http.Client // dedicated client (no shared RPC client — different timeout policy)
+	mu      sync.Mutex
+	strikes int
+	closed  chan struct{}
+	done    chan struct{}
+	http    *http.Client // dedicated client (no shared RPC client — different timeout policy)
 }
 
 // NewHealthProbe constructs a probe with default tuning. The

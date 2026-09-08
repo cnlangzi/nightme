@@ -74,11 +74,11 @@ func installReceipt(a *Adapter, bot receiptBot, chatID, userMsgID, msgID string)
 // NewEventHandler — only the F-63-relevant slices. Intentionally
 // not exported; only this test uses it. Mirrors the order:
 //
-//	1. Translate
-//	2. Stamp ReplyTo + identity
-//	3. ⭐ Heartbeat observe (BEFORE policies — core invariant)
-//	4. Default policies (think / tools gate)
-//	5. em.Send
+//  1. Translate
+//  2. Stamp ReplyTo + identity
+//  3. ⭐ Heartbeat observe (BEFORE policies — core invariant)
+//  4. Default policies (think / tools gate)
+//  5. em.Send
 func buildHandler(em messages.Emitter, cs *chatsession.ChatSession, thinkMode chatsession.ThinkMode, toolsMode chatsession.ToolsMode) func(chatsession.AgentEventEnvelope) {
 	_ = cs.SetThinkMode(thinkMode)
 	_ = cs.SetToolsMode(toolsMode)

@@ -73,11 +73,11 @@ func (s Step) Kind() StepKind {
 
 // Trigger is the parsed `on:` block. Only one kind is set per workflow.
 type Trigger struct {
-	Schedule    []ScheduleEntry   `yaml:"schedule"`
-	PullRequest *PRTrigger        `yaml:"pull_request"`
-	Branch      *BranchTrigger    `yaml:"branch"`
-	Issue       *EventFilter      `yaml:"issue"`
-	Mention     *MentionTrigger   `yaml:"mention"`
+	Schedule    []ScheduleEntry `yaml:"schedule"`
+	PullRequest *PRTrigger      `yaml:"pull_request"`
+	Branch      *BranchTrigger  `yaml:"branch"`
+	Issue       *EventFilter    `yaml:"issue"`
+	Mention     *MentionTrigger `yaml:"mention"`
 }
 
 // ScheduleEntry is one cron entry.

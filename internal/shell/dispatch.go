@@ -164,9 +164,9 @@ func (d *Dispatcher) Handle(mgr *chatsession.Manager, cs *chatsession.ChatSessio
 }
 
 // runShell streams the command via three OutReply messages:
-//   1. header — "⌨️ $ <cmd>\n", cold-starts the receipt card
-//   2. chunks — coalesced output, debounced at shellFlushInterval
-//   3. footer — "\n✅/❌ exit <code> · <ms>ms · <cwd>"
+//  1. header — "⌨️ $ <cmd>\n", cold-starts the receipt card
+//  2. chunks — coalesced output, debounced at shellFlushInterval
+//  3. footer — "\n✅/❌ exit <code> · <ms>ms · <cwd>"
 //
 // On emitter failure runShell cancels shellCtx so CommandContext
 // kills the child (otherwise drainers stall on a wedged pipe).

@@ -286,7 +286,7 @@ func TestWithTransientRetry_NormalizesZeroConfig(t *testing.T) {
 	err := WithTransientRetry(context.Background(), RetryOpts{
 		Op: "test",
 		Cfg: RetryConfig{
-			MaxAttempts:    0, // bad
+			MaxAttempts:    0,  // bad
 			InitialBackoff: -1, // bad
 			MaxBackoff:     0,  // bad
 			JitterPercent:  -1, // bad
@@ -334,10 +334,10 @@ func TestWithTransientRetry_DegradationLogEmitted(t *testing.T) {
 	logger := slog.New(rec)
 	cfg := fastRetryConfig()
 	err := WithTransientRetry(context.Background(), RetryOpts{
-		Op: "send_test",
-		Cfg: cfg,
+		Op:     "send_test",
+		Cfg:    cfg,
 		Logger: logger,
-		Attrs: []any{"chat_id", "oc_test"},
+		Attrs:  []any{"chat_id", "oc_test"},
 	}, func() error {
 		return transientNetErr{}
 	})

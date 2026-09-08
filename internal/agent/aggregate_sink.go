@@ -5,35 +5,35 @@
 // reads as a single review lifecycle. Three invariants drive the
 // design:
 //
-//   #11 single outer lifecycle — chat sees exactly one Ready and one
-//       Result, no matter how many per-job RunOnce calls run.
-//   #12 per-job ToolStart/End pairing — ToolStart is buffered until
-//       the matching ToolEnd arrives; both events then forward as a
-//       contiguous pair (Start, End). No half-open tool calls leak
-//       to the chat.
-//   #13 cross-job task list dedup — TaskCreate/Update events are
-//       merged by AgentTaskItem.ID (latest-wins) and forwarded as
-//       ONE snapshot. Avoids N duplicate checklist entries.
+//	#11 single outer lifecycle — chat sees exactly one Ready and one
+//	    Result, no matter how many per-job RunOnce calls run.
+//	#12 per-job ToolStart/End pairing — ToolStart is buffered until
+//	    the matching ToolEnd arrives; both events then forward as a
+//	    contiguous pair (Start, End). No half-open tool calls leak
+//	    to the chat.
+//	#13 cross-job task list dedup — TaskCreate/Update events are
+//	    merged by AgentTaskItem.ID (latest-wins) and forwarded as
+//	    ONE snapshot. Avoids N duplicate checklist entries.
 //
 // State machine (three phases):
 //
-//   phaseBuffering — every per-job event lands in perJob.initBuffer;
-//       no outer forwarding. Track readyCount (per-job Ready events
-//       observed) and doneCount (per-job Result/Error events observed,
-//       guarded by perJob.terminalSeen to prevent double-counting
-//       across Phase 1/2). When readyCount == expected, transition.
+//	phaseBuffering — every per-job event lands in perJob.initBuffer;
+//	    no outer forwarding. Track readyCount (per-job Ready events
+//	    observed) and doneCount (per-job Result/Error events observed,
+//	    guarded by perJob.terminalSeen to prevent double-counting
+//	    across Phase 1/2). When readyCount == expected, transition.
 //
-//   phaseStreaming — Phase 1→2 transition fires a synthetic outer
-//       Ready (merged metadata from the first per-job Ready;
-//       Source=""), replays each perJob.initBuffer through
-//       handleStreaming (so pairing/merging apply uniformly to
-//       replayed and live events), then continues processing live
-//       events: ToolStart/End paired contiguously, TaskCreate/Update
-//       merged by ID, Result/Error counted but not forwarded.
-//       When doneCount == expected, transition.
+//	phaseStreaming — Phase 1→2 transition fires a synthetic outer
+//	    Ready (merged metadata from the first per-job Ready;
+//	    Source=""), replays each perJob.initBuffer through
+//	    handleStreaming (so pairing/merging apply uniformly to
+//	    replayed and live events), then continues processing live
+//	    events: ToolStart/End paired contiguously, TaskCreate/Update
+//	    merged by ID, Result/Error counted but not forwarded.
+//	    When doneCount == expected, transition.
 //
-//   phaseClosed — synthetic outer Result fires (Source=""), late
-//       events dropped.
+//	phaseClosed — synthetic outer Result fires (Source=""), late
+//	    events dropped.
 //
 // Concurrency: all shared state guarded by a.mu. Outer forwarding
 // (`outer(ev)`) is invoked OUTSIDE the lock to avoid re-entrant
@@ -116,8 +116,8 @@ type eventAggregator struct {
 	outer    func(AgentEvent)
 	expected int
 
-	mu      sync.Mutex
-	emitMu  sync.Mutex // guards pairs of a.outer() calls (invariant #12)
+	mu     sync.Mutex
+	emitMu sync.Mutex   // guards pairs of a.outer() calls (invariant #12)
 	phase  atomic.Int32 // Finding 3 from /review: atomic load/store (data race per Go mem model)
 	perJob map[string]*perJobState
 

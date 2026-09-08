@@ -172,4 +172,3 @@ func desktopDirForTest() string {
 	}
 	return ""
 }
-

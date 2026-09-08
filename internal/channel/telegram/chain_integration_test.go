@@ -468,6 +468,7 @@ func TestChain_OutErrorStderrTailRendersAsPreBlock(t *testing.T) {
 		t.Fatalf("editMessageText body has HTML-escaped &lt;pre&gt; entity; got %q", lastEdit)
 	}
 }
+
 // When buf + new segment would exceed chainChunkThresholdChars
 // (3500), appendSegment rotates to a brand-new chain chunk
 // rather than overrunning a single Telegram message. Pre-fix,
@@ -962,7 +963,7 @@ func TestAdapter_Send_OutResult_LongText_SplitsAcrossMultipleMessages(t *testing
 	longBody := strings.Repeat("x", 4500)
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "520", Kind: messages.OutResult,
-		Text:   longBody,
+		Text:      longBody,
 		AgentName: "claude",
 		Model:     "opus-4-5",
 		SessionID: "sess-1",
@@ -1018,7 +1019,7 @@ func TestAdapter_Send_OutResult_MultipleInOneTurn_LastWins(t *testing.T) {
 	outMsg := func(text string) messages.OutboundMessage {
 		return messages.OutboundMessage{
 			ChatID: "530", Kind: messages.OutResult,
-			Text:   text, AgentName: "claude",
+			Text: text, AgentName: "claude",
 			Model: "opus-4-5", SessionID: "sess-1",
 			Usage: &agent.UsageInfo{InputTokens: 100, OutputTokens: 50},
 		}
@@ -1212,7 +1213,8 @@ func (c *placeholderChain) snapshotResultMessageIDLocked() int64 {
 // hasEmojiReaction reports whether the given setMessageReaction
 // fakeCall has a single-emoji list containing the target emoji.
 // Mirrors the wire shape produced by setMessageReactions:
-//   reaction = []any{map[string]any{"type":"emoji","emoji":target}}
+//
+//	reaction = []any{map[string]any{"type":"emoji","emoji":target}}
 func hasEmojiReaction(call fakeCall, target string) bool {
 	reactions, ok := call.Params["reaction"].([]any)
 	if !ok || len(reactions) != 1 {

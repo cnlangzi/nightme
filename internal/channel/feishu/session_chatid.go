@@ -117,7 +117,7 @@ type reactionV3Source struct {
 	event *larkim.P2MessageReactionCreatedV1
 }
 
-func (s reactionV3Source) TypedChatID() string        { return "" }
+func (s reactionV3Source) TypedChatID() string       { return "" }
 func (s reactionV3Source) ContextOpenChatID() string { return "" }
 
 func (s reactionV3Source) EnvelopeChatID() string {
@@ -142,7 +142,7 @@ type cardActionSource struct {
 	event *larkcallback.CardActionTriggerEvent
 }
 
-func (s cardActionSource) TypedChatID() string     { return "" }
+func (s cardActionSource) TypedChatID() string    { return "" }
 func (s cardActionSource) EnvelopeChatID() string { return "" }
 
 func (s cardActionSource) ContextOpenChatID() string {

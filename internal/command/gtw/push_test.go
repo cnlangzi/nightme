@@ -172,7 +172,7 @@ func (r *recordingAgent) Info() agent.Info {
 	return agent.NewInfo(r.name, agent.ModePTY, "fake-"+r.name, nil, nil)
 }
 func (r *recordingAgent) Detect() error { return r.detectErr }
-func (r *recordingAgent) Init(string) {}
+func (r *recordingAgent) Init(string)   {}
 func (r *recordingAgent) Clone() agent.Starter {
 	return &recordingAgent{name: r.name, detectErr: r.detectErr, runOnceText: r.runOnceText}
 }

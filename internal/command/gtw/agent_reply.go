@@ -190,7 +190,7 @@ func runAgentFor(
 //     behavior as the runtime path).
 //
 // res is agent.RunResult{} (zero value) for callers that did not
-// invoke an agent — all "if != '' / if != nil" guards below
+// invoke an agent — all "if != ” / if != nil" guards below
 // short-circuit naturally, leaving the OutboundMessage identical
 // to the pre-fix reply(...) output. Same nil-safety as the old
 // reply: em == nil drops the message and returns Consumed=true.

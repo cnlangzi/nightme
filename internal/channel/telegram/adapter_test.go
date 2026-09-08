@@ -461,9 +461,9 @@ func TestAdapter_Send_OutMessageState_UnknownStateDrops(t *testing.T) {
 // call. v6.3 only emits for MessageSubmitted (Queued/Done are
 // silent drops), so this test exercises:
 //
-//   1st Submitted → 1 reaction call
-//   2nd Submitted (same) → dedup'd (0 extra)
-//   3rd Submitted again → dedup'd
+//	1st Submitted → 1 reaction call
+//	2nd Submitted (same) → dedup'd (0 extra)
+//	3rd Submitted again → dedup'd
 //
 // We don't transition to Done here because v6.3 makes Done a
 // silent drop; the LRU dedup path is what we're testing.
@@ -544,11 +544,11 @@ func TestAdapter_Send_OutMessageState_DroppedSilentDrops(t *testing.T) {
 // are silent drops, so this test only exercises Submitted
 // transitions through Removed:
 //
-//   1st Submitted  → 1 setMessageReaction (👌), LRU = {5: Submitted}
-//   Removed        → 1 setMessageReaction ([]), LRU untouched
-//   2nd Submitted  → dedup'd (0 extra) — proves LRU still holds
-//                    Submitted (if Removed had zeroed the LRU, this
-//                    would emit a 3rd call)
+//	1st Submitted  → 1 setMessageReaction (👌), LRU = {5: Submitted}
+//	Removed        → 1 setMessageReaction ([]), LRU untouched
+//	2nd Submitted  → dedup'd (0 extra) — proves LRU still holds
+//	                 Submitted (if Removed had zeroed the LRU, this
+//	                 would emit a 3rd call)
 //
 // If Removed had silently poisoned the LRU, the 2nd Submitted
 // would either dedup against a stale sentinel (Removed-time state)
@@ -2147,10 +2147,10 @@ func TestAdapter_HandleMessageReaction_ForwardsInbound(t *testing.T) {
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
 	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:       Chat{ID: 100, Type: "private"},
-		MessageID:  99,
-		User:       User{ID: 7, Username: "alice"},
-		Date:       time.Now().Unix(),
+		Chat:        Chat{ID: 100, Type: "private"},
+		MessageID:   99,
+		User:        User{ID: 7, Username: "alice"},
+		Date:        time.Now().Unix(),
 		NewReaction: []ReactionType{{Type: "emoji", Emoji: "👍"}},
 	})
 	select {
@@ -2190,9 +2190,9 @@ func TestAdapter_HandleMessageReaction_IgnoresBotReaction(t *testing.T) {
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
 	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:       Chat{ID: 100, Type: "private"},
-		MessageID:  99,
-		User:       User{ID: 999}, // matches fakeAPI's getMe user
+		Chat:        Chat{ID: 100, Type: "private"},
+		MessageID:   99,
+		User:        User{ID: 999}, // matches fakeAPI's getMe user
 		NewReaction: []ReactionType{{Type: "emoji", Emoji: "👍"}},
 	})
 	select {
@@ -2209,9 +2209,9 @@ func TestAdapter_HandleMessageReaction_RemovedEmoji(t *testing.T) {
 	defer func() { _ = a.Stop(context.Background()) }()
 	_ = a.Start(ctx)
 	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:       Chat{ID: 100, Type: "private"},
-		MessageID:  99,
-		User:       User{ID: 7},
+		Chat:        Chat{ID: 100, Type: "private"},
+		MessageID:   99,
+		User:        User{ID: 7},
 		NewReaction: nil, // user removed all reactions
 	})
 	select {

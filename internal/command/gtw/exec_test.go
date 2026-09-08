@@ -243,10 +243,10 @@ func TestExecCLIRunner_DirPropagates(t *testing.T) {
 // TestGitHubProvider_RunnerBindsWorktree is the regression test
 // for the original `gtw pr` ENOENT bug end-to-end:
 //
-//   GitHubProvider.Worktree (set by resolveProvider from
-//   c.Worktree) → provider.runner() returns ExecCLIRunner{Dir:
-//   Worktree} → spawned gh process runs in that directory
-//   instead of inheriting the daemon's possibly-stale CWD.
+//	GitHubProvider.Worktree (set by resolveProvider from
+//	c.Worktree) → provider.runner() returns ExecCLIRunner{Dir:
+//	Worktree} → spawned gh process runs in that directory
+//	instead of inheriting the daemon's possibly-stale CWD.
 //
 // Any future refactor that drops the Worktree → Dir binding
 // re-introduces the bug; this test fails immediately.
@@ -318,6 +318,7 @@ func TestGitLabProvider_RunnerBindsWorktree(t *testing.T) {
 			filepath.Join(real, sentinelName), err)
 	}
 }
+
 // TestRunCmd_RespectsCallerDeadline pins the runCmd safety net's
 // "caller always wins" contract: when the caller passes a ctx
 // with a deadline shorter than timeouts.CLI (5 min), runCmd must

@@ -14,11 +14,11 @@ import (
 // the test wants. Keeps the agent package's driver interface
 // minimal — no production code path uses this driver.
 type testKeepaliveDriver struct {
-	mu          sync.Mutex
-	sent        int
-	keepalivePID int             // PID that Keepalive reports alive for
-	recoverErr  error           // if non-nil, Keepalive's onRecover returns this
-	skipRecover bool            // if true, onRecover is nil (caller forgot to wire)
+	mu           sync.Mutex
+	sent         int
+	keepalivePID int   // PID that Keepalive reports alive for
+	recoverErr   error // if non-nil, Keepalive's onRecover returns this
+	skipRecover  bool  // if true, onRecover is nil (caller forgot to wire)
 }
 
 func (d *testKeepaliveDriver) SendBlocks(_ context.Context, _ []agent.ContentBlock) error {

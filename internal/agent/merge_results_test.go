@@ -178,7 +178,7 @@ func TestMergeRunResults_PropagatesAuditMetadata(t *testing.T) {
 	errs := []error{
 		errors.New("first job crashed"),
 		nil,
-	 nil,
+		nil,
 	}
 
 	merged, err := mergeRunResults("agent-x", groups, results, errs)

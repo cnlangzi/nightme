@@ -52,7 +52,7 @@ func TestDeriveBranchFromTitle_ConventionalCommit(t *testing.T) {
 func TestDeriveBranchFromTitle_BracketedTag(t *testing.T) {
 	cases := []struct {
 		title string
-		want string
+		want  string
 	}{
 		{"[BUG] state expires", "bug-state-expires"},
 		{"[BUG-123] state expires", "bug-123-state-expires"},
@@ -102,9 +102,9 @@ func TestDeriveBranchFromName(t *testing.T) {
 	}{
 		{"login-fix", "login-fix", false},
 		{"Login Fix", "login-fix", false}, // upper → lower, space → dash
-		{"中文", "", true},                 // empty slug → error
-		{"", "", true},                     // empty input → error
-		{"__..__", "", true},               // all non-ASCII-valid → empty slug
+		{"中文", "", true},                  // empty slug → error
+		{"", "", true},                    // empty input → error
+		{"__..__", "", true},              // all non-ASCII-valid → empty slug
 		{"a-b-c-1", "a-b-c-1", false},
 	}
 	for _, tc := range cases {

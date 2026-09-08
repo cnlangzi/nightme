@@ -34,8 +34,8 @@ func (s *spyChannel) Name() string { return "spy" }
 func (s *spyChannel) Incoming() <-chan messages.InboundMessage {
 	return make(chan messages.InboundMessage, 1)
 }
-func (s *spyChannel) Start(context.Context) error { return nil }
-func (s *spyChannel) Stop(context.Context) error  { return nil }
+func (s *spyChannel) Start(context.Context) error                   { return nil }
+func (s *spyChannel) Stop(context.Context) error                    { return nil }
 func (s *spyChannel) OnPromptEnded(context.Context, string, string) {}
 func (s *spyChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "spy", nil, nil
@@ -65,15 +65,15 @@ var _ = slog.Default
 // TestBotMessageFlowsThroughGateway is the end-to-end test of
 // the channel pipeline for bot:
 //
-//   bot.Incoming()
-//     → gateway.pumpOne (read from channel)
-//     → channelCh (central dispatch queue)
-//     → dispatchLoop (read from queue)
-//     → inbound.Dispatch → tryCommandDispatch (for "/cwd ...")
-//     → ChatSession.HandleSlashCommand ("/cwd")
-//     → ChatSession's SelectedCwd is set
-//     → reply flows back through messages.Emitter
-//     → bot.Send (delivered to the registered botRun.reply)
+//	bot.Incoming()
+//	  → gateway.pumpOne (read from channel)
+//	  → channelCh (central dispatch queue)
+//	  → dispatchLoop (read from queue)
+//	  → inbound.Dispatch → tryCommandDispatch (for "/cwd ...")
+//	  → ChatSession.HandleSlashCommand ("/cwd")
+//	  → ChatSession's SelectedCwd is set
+//	  → reply flows back through messages.Emitter
+//	  → bot.Send (delivered to the registered botRun.reply)
 //
 // If this test passes, the bot-as-channel design is verified:
 // bot can push messages into the same dispatch chain that feishu

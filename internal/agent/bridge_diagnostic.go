@@ -47,8 +47,8 @@ package agent
 
 import (
 	"errors"
-	"os/exec"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"

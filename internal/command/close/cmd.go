@@ -22,15 +22,15 @@
 // Compare to sibling commands:
 //
 //   - /stop  — signals the bridge to halt the in-flight turn;
-//              bridge process may or may not exit. Pool entry
-//              preserved.
+//     bridge process may or may not exit. Pool entry
+//     preserved.
 //   - /close — kills the bridge process (graceful: close stdin +
-//              SIGINT + 2s grace + SIGKILL fallback). Pool entry
-//              preserved; sessionID kept; respawn resumes the
-//              conversation.
+//     SIGINT + 2s grace + SIGKILL fallback). Pool entry
+//     preserved; sessionID kept; respawn resumes the
+//     conversation.
 //   - /new   — invokes the bridge's in-place context reset
-//              (claude's `/clear`, pi's `new_session`, etc.).
-//              Process stays; conversation history cleared.
+//     (claude's `/clear`, pi's `new_session`, etc.).
+//     Process stays; conversation history cleared.
 //
 // To fully discard a session (kill process AND forget sessionID),
 // the user can delete the corresponding row in `agent_sessions.json`
@@ -60,7 +60,7 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /close.
-type Factory struct {}
+type Factory struct{}
 
 // NewFactory constructs a Factory. command/* factories do not
 // receive a *chatsession.Manager — cs comes from the dispatcher

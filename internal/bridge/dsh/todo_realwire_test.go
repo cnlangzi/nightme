@@ -47,13 +47,13 @@ func makeMuxCollector(t *testing.T) *muxCollector {
 	tr := newTranslator("dsh-realwire", "/tmp/realwire")
 	st := newWireState()
 	d := &driver{
-		sessionID:    "session-realwire",
-		agentName:    "dsh-realwire",
-		workspace:    "/tmp/realwire",
-		wireState:    st,
-		translate:    tr,
-		events:       make(chan agent.AgentEvent, 64),
-		closed:       make(chan struct{}),
+		sessionID: "session-realwire",
+		agentName: "dsh-realwire",
+		workspace: "/tmp/realwire",
+		wireState: st,
+		translate: tr,
+		events:    make(chan agent.AgentEvent, 64),
+		closed:    make(chan struct{}),
 		// lastSeq = -1 so wire seq=0 dispatches (the field starts at
 		// 0 in Go zero value, which would skip dsh's first event —
 		// turn/start / step/start — that always have seq=0).

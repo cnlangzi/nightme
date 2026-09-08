@@ -32,11 +32,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/httpclient"
 	"io"
 	"net/http"
 	"strings"
 	"time"
-	"github.com/cnlangzi/nightme/internal/httpclient"
 )
 
 // ─── Envelope types (mirrors of dsh/protocol.go) ────────────────────

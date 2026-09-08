@@ -1,4 +1,3 @@
-
 // Regression tests for Agent-level busy-guard handling in
 // SendBlocks. These codify the two early-return paths that the
 // translator's onTurnEnd cannot release (since no turn is ever

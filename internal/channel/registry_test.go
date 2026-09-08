@@ -28,7 +28,7 @@ type stubChannel struct {
 	name string
 }
 
-func (s *stubChannel) Name() string { return s.name }
+func (s *stubChannel) Name() string                  { return s.name }
 func (s *stubChannel) Start(_ context.Context) error { return nil }
 func (s *stubChannel) Stop(_ context.Context) error  { return nil }
 func (s *stubChannel) Incoming() <-chan messages.InboundMessage {

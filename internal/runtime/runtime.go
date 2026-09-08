@@ -42,10 +42,10 @@
 package runtime
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"log/slog"
 	"os"
@@ -55,10 +55,10 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/registry"
 
 	// Phase 2.3: each command package's init() self-registers
 	// via command.RegisterBuilder. The blank imports below
@@ -69,7 +69,6 @@ import (
 	_ "github.com/cnlangzi/nightme/internal/command/cwd"
 	_ "github.com/cnlangzi/nightme/internal/command/gtw"
 	_ "github.com/cnlangzi/nightme/internal/command/newcmd"
-	_ "github.com/cnlangzi/nightme/internal/command/wiki"
 	_ "github.com/cnlangzi/nightme/internal/command/queue"
 	_ "github.com/cnlangzi/nightme/internal/command/review"
 	_ "github.com/cnlangzi/nightme/internal/command/steer"
@@ -78,6 +77,7 @@ import (
 	_ "github.com/cnlangzi/nightme/internal/command/tools"
 	_ "github.com/cnlangzi/nightme/internal/command/use"
 	_ "github.com/cnlangzi/nightme/internal/command/watch"
+	_ "github.com/cnlangzi/nightme/internal/command/wiki"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
@@ -190,16 +190,16 @@ func (d Deps) fillDefaults() Deps {
 // runDaemon is the daemon core. v1.3+ multi-channel 4-phase
 // wire:
 //
-//	1. shared resources  — cfg / csFile / asFile / agents / prCache / gtwDeps
-//	2. shared wiring     — gtwMgr / reactionRouter / commander /
-//	                        shellDispatcher / inbound.Router
-//	                        (all use runtime.findChatSession for the
-//	                        per-chat mgr lookup)
-//	3. buildStack        — for each registered channel with valid
-//	                        credentials: ch.Start + chatsession.Manager
-//	                        + messages.Emitter + WireCallbacks; stash
-//	                        mgr in runtime.allMgrs; build gateway.Pump
-//	4. start              — gateway.AttachPumps + gateway.Start
+//  1. shared resources  — cfg / csFile / asFile / agents / prCache / gtwDeps
+//  2. shared wiring     — gtwMgr / reactionRouter / commander /
+//     shellDispatcher / inbound.Router
+//     (all use runtime.findChatSession for the
+//     per-chat mgr lookup)
+//  3. buildStack        — for each registered channel with valid
+//     credentials: ch.Start + chatsession.Manager
+//     + messages.Emitter + WireCallbacks; stash
+//     mgr in runtime.allMgrs; build gateway.Pump
+//  4. start              — gateway.AttachPumps + gateway.Start
 //
 // Per-chat restore is lazy (Manager.GetOrCreate on first inbound),
 // so the daemon reaches ready without a synchronous chat_sessions
@@ -687,5 +687,5 @@ func newNoOpMgr() *chatsession.Manager {
 // cs from GetOrCreate).
 type noOpEmitter struct{}
 
-func (noOpEmitter) Send(_ context.Context, _ messages.OutboundMessage) error { return nil }
+func (noOpEmitter) Send(_ context.Context, _ messages.OutboundMessage) error  { return nil }
 func (noOpEmitter) Patch(_ context.Context, _ messages.OutboundMessage) error { return nil }

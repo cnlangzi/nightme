@@ -50,7 +50,7 @@ type AgentProber struct {
 	isRunning atomic.Bool
 
 	// Snapshot state. atomic.Pointer for time.Time semantics.
-	startedAt   atomic.Pointer[time.Time]
+	startedAt    atomic.Pointer[time.Time]
 	scannedTotal atomic.Int64
 	probesRun    atomic.Int64
 	respawnsHit  atomic.Int64
@@ -81,7 +81,7 @@ func NewAgentProber(csProvider func() []*ChatSession) *AgentProber {
 // is a no-op. Returns true if the goroutine was actually started.
 func (p *AgentProber) Start() bool {
 	if !p.isRunning.CompareAndSwap(false, true) {
-	 return false
+		return false
 	}
 	now := p.now()
 	p.startedAt.Store(&now)

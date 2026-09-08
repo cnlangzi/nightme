@@ -22,11 +22,11 @@
 // Tests are gated on:
 //  1. testing.Short()     — `go test -short` always skips
 //  2. NIGHTME_REAL_GLAB=1  — explicit opt-in (matches the
-//                            NIGHTME_REAL_PI convention for pi
-//                            e2e tests in pr_realpi_unix_test.go)
+//     NIGHTME_REAL_PI convention for pi
+//     e2e tests in pr_realpi_unix_test.go)
 //  3. `glab` on PATH      — Skip, not Fail, when the binary is
-//                            missing. CI on a clean container
-//                            must not break.
+//     missing. CI on a clean container
+//     must not break.
 //
 // Design choice: branch lifecycle. We use a deliberately
 // non-existent source branch (e.g. "__nonexistent_branch_for_

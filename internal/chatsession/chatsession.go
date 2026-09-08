@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatstore"
@@ -560,8 +559,6 @@ func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 	// against this chat will naturally read the new cwd.
 	return nil
 }
-
-
 
 // SetWatchMode changes the per-chat message-watch mode. Persists to
 // registry on success so it survives daemon restart. No spawn /

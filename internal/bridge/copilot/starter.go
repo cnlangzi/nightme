@@ -63,10 +63,10 @@ type Starter struct {
 // later mutation of the caller's slice does not affect us.
 func NewStarter(name, command string, args []string) *Starter {
 	return &Starter{
-		name:    name,
+		name:           name,
 		command:        command,
 		defaultCommand: command,
-		args:    append([]string(nil), args...),
+		args:           append([]string(nil), args...),
 	}
 }
 

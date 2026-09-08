@@ -56,7 +56,7 @@ func TestDownloadAttachments_FetchesAllFiles(t *testing.T) {
 	// don't clobber each other.
 	for i, want := range []struct {
 		name, body, mime string
-		wantType        agent.ContentBlockType
+		wantType         agent.ContentBlockType
 	}{
 		{"0-shot.png", "PNG-BYTES", "image/png", agent.ContentImage},
 		{"1-notes.txt", "hello world", "text/plain", agent.ContentFile}, // charset suffix stripped

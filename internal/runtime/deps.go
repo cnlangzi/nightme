@@ -24,8 +24,8 @@
 package runtime
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"encoding/json"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"os"
 	"path/filepath"
 

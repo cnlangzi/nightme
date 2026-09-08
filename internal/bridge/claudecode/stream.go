@@ -1,4 +1,3 @@
-
 package claudecode
 
 import (
@@ -262,8 +261,8 @@ func pumpStream(
 			logger.Warn("claudecode: stream read error", "err", err)
 		}
 		events <- agent.AgentEvent{
-			Kind:  agent.EventAgentError,
-			Err: fmt.Errorf("claudecode stream: %w", err),
+			Kind: agent.EventAgentError,
+			Err:  fmt.Errorf("claudecode stream: %w", err),
 		}
 	}
 }

@@ -31,7 +31,7 @@ const pngSizePx = 512
 // maximum contrast scanners expect. Tinting (e.g. light grey) hurts
 // scan reliability and is not worth the cosmetic difference.
 const (
-	darkR, darkG, darkB     = 0, 0, 0
+	darkR, darkG, darkB    = 0, 0, 0
 	lightR, lightG, lightB = 255, 255, 255
 )
 
@@ -199,6 +199,7 @@ func renderANSISingleRow(row []bool) string {
 //     auto-open fails.
 //   - TempDir on Windows (%TEMP%) is a hidden AppData subfolder
 //     that's hard to navigate to from File Explorer.
+//
 // If the Desktop folder can't be located or written (e.g. the user
 // has a domain policy that redirects Desktop to a network share
 // that's offline), we fall back to os.TempDir() — the user's QR is
@@ -330,8 +331,9 @@ func composeWithCaption(qrPNG []byte) ([]byte, error) {
 
 // desktopDir returns the absolute path of the current user's Desktop
 // folder. Order of preference:
-//   1. %USERPROFILE%\Desktop (the canonical Windows location)
-//   2. $HOME/Desktop (defensive fallback for non-standard setups)
+//  1. %USERPROFILE%\Desktop (the canonical Windows location)
+//  2. $HOME/Desktop (defensive fallback for non-standard setups)
+//
 // We do not consult the registry's "User Shell Folders" because the
 // environment variables are set at logon by Explorer itself and
 // reflect any user-initiated Desktop relocation.

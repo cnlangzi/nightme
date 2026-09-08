@@ -83,6 +83,7 @@ and the blockquote. Everything else is yours.
 
 Reply with a one-paragraph summary of the modules you created.
 `
+
 // --arch. Designed for LLM attention: critical action in
 // the first two lines (primacy), file format as a code
 // block (visual prominence), output protocol at the end
@@ -120,6 +121,7 @@ the source code.** The modules are summaries, not authority.
 Reply with a one-paragraph summary of what the page
 covers and which module pages it references.
 `
+
 // initTimeout is how long /wiki init waits for the Agent to
 // respond. The Agent is reading the codebase and writing N
 // files, so the budget is generous. The user can interrupt

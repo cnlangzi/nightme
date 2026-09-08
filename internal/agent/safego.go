@@ -16,11 +16,11 @@
 // context, no error to return — the goroutine simply exits), so
 // its surface is intentionally tiny:
 //
-//   agent.SafeGo("dsh:mux-pump", func() {
-//       defer agent.PanicEventHandler("dsh:mux-pump", d.deliver,
-//           d.sessionID, d.agentName, d.workspace, d.branch)
-//       readMuxPump(...)
-//   })
+//	agent.SafeGo("dsh:mux-pump", func() {
+//	    defer agent.PanicEventHandler("dsh:mux-pump", d.deliver,
+//	        d.sessionID, d.agentName, d.workspace, d.branch)
+//	    readMuxPump(...)
+//	})
 //
 // The name is mandatory: panics in long-running goroutines are
 // otherwise invisible, and the stack trace is the only clue which
@@ -42,11 +42,11 @@
 //     a zombie session: daemon alive, but no events flow and
 //     nothing tells the user why.
 //
-//   SafeGo and PanicEventHandler compose: PanicEventHandler
-//   catches the domain panic first (so the user gets notified),
-//   and if anything in PanicEventHandler's own recovery path
-//   (e.g. deliver itself) panics, SafeGo's outer recover is
-//   the last line of defense.
+//     SafeGo and PanicEventHandler compose: PanicEventHandler
+//     catches the domain panic first (so the user gets notified),
+//     and if anything in PanicEventHandler's own recovery path
+//     (e.g. deliver itself) panics, SafeGo's outer recover is
+//     the last line of defense.
 //
 // Usage rules (mirrors the F-32 / nightme bot 失败处理优先级
 // memory: try silent recovery before notifying — a recovered
@@ -111,13 +111,13 @@ func SafeGo(name string, fn func(), loggers ...*slog.Logger) {
 // recovery used by bridge pump goroutines. Place it as a defer
 // inside the fn passed to SafeGo:
 //
-//   agent.SafeGo("dsh:mux-pump", func() {
-//       defer d.pumpWG.Done()
-//       defer agent.PanicEventHandler(
-//           "dsh:mux-pump", d.deliver,
-//           d.sessionID, d.agentName, d.workspace, d.branch)
-//       readMuxPump(d.muxWS, "mux", d.handleMuxFrame)
-//   })
+//	agent.SafeGo("dsh:mux-pump", func() {
+//	    defer d.pumpWG.Done()
+//	    defer agent.PanicEventHandler(
+//	        "dsh:mux-pump", d.deliver,
+//	        d.sessionID, d.agentName, d.workspace, d.branch)
+//	    readMuxPump(d.muxWS, "mux", d.handleMuxFrame)
+//	})
 //
 // On a panic, PanicEventHandler:
 //  1. recovers the panic value

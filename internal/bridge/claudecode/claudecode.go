@@ -1,4 +1,3 @@
-
 // Package claudecode implements a bridge to the Claude Code CLI
 // using stream-json mode over stdin/stdout. See
 // docs/feat/F-24-claudecode-bridge.md.
@@ -239,8 +238,8 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		cmd:         child,
 		stdin:       bufio.NewWriter(stdin),
 		events:      make(chan agent.AgentEvent, eventsBufferSize),
-		stderrLines:      make(chan string, 64),
-		stderrTail:       agent.NewStderrRingBuffer(agent.StderrTailBytes),
+		stderrLines: make(chan string, 64),
+		stderrTail:  agent.NewStderrRingBuffer(agent.StderrTailBytes),
 		pid:         child.Process.Pid,
 		agentName:   s.name,
 		workspace:   cfg.Workspace,
@@ -740,14 +739,14 @@ func (d *driver) New(ctx context.Context) error {
 // the stdin pipe is broken — i.e. writeLine returned an
 // error (EPIPE, ErrClosed, etc.). This covers two cases:
 //
-//   1. CLI died before /stop arrived (OOM, external
-//      signal, etc.) — the chat layer's prober will see
-//      StatusExited and respawn cleanly via --resume.
+//  1. CLI died before /stop arrived (OOM, external
+//     signal, etc.) — the chat layer's prober will see
+//     StatusExited and respawn cleanly via --resume.
 //
-//   2. A hypothetical older CLI that rejects control_request
-//      at the FD level (returns EPIPE) — extremely unlikely;
-//      today's claude binary either accepts the write and
-//      handles control_request, or stays silent.
+//  2. A hypothetical older CLI that rejects control_request
+//     at the FD level (returns EPIPE) — extremely unlikely;
+//     today's claude binary either accepts the write and
+//     handles control_request, or stays silent.
 //
 // It does NOT cover "old CLI that accepts stdin writes but
 // doesn't recognize control_request" — that case would
@@ -820,6 +819,7 @@ func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) 
 	}
 	return onRecover(ctx)
 }
+
 // and exits cleanly), waits briefly for graceful shutdown, then
 // SIGKILLs if necessary. Idempotent. cmd.Wait() is owned by the
 // lifecycle goroutine — Close() only nudges the process and waits

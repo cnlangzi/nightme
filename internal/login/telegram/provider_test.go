@@ -347,10 +347,10 @@ func TestProvider_Greet_IgnoresGroupMessages(t *testing.T) {
 
 	out := &bytes.Buffer{}
 	p := &Provider{
-		opts: Options{},
-		out:  out,
-		in:   strings.NewReader(""),
-		http: server.server.Client(),
+		opts:        Options{},
+		out:         out,
+		in:          strings.NewReader(""),
+		http:        server.server.Client(),
 		endpointURL: func(token string) string { return server.server.URL + "/bot" + token + "/getMe" },
 	}
 	p.botToken = "x"
@@ -475,7 +475,7 @@ func TestProvider_Login_ViaTokenOption(t *testing.T) {
 			Token: "1234:from-flag",
 			Out:   out,
 		},
-		out: out,
+		out:  out,
 		http: server.Client(),
 		endpointURL: func(token string) string {
 			return server.URL + "/bot" + token + "/getMe"

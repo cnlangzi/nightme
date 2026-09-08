@@ -1,8 +1,8 @@
 package chatsession
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"strings"
 	"sync"
 	"testing"
@@ -157,8 +157,8 @@ func seedPersistedChatSession(t *testing.T, csFile *chatstore.Store, chatID, pri
 	entry := &registry.ChatSessionEntry{
 		ID:                csID,
 		ChatID:            chatID,
-		SelectedCwd:         "/code/bailing",
-		SelectedAgent:       primary,
+		SelectedCwd:       "/code/bailing",
+		SelectedAgent:     primary,
 		PrimaryAgent:      primary,
 		AgentSessionIDs:   nil,
 		CreatedAt:         time.Now(),
@@ -419,7 +419,7 @@ func TestManager_WithGitStatusDeps_ThenWithOnCreate_ChainsHooks(t *testing.T) {
 // chain.
 func TestManager_WithOnCreate_ThenWithGitStatusDeps_ChainsHooks(t *testing.T) {
 	var (
-		mu        sync.Mutex
+		mu          sync.Mutex
 		handlerSeen []string
 	)
 

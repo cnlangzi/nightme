@@ -42,7 +42,7 @@ func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      "/tmp",
 		PermissionMode: "bypassPermissions",
-		SessionID:       sessionID,
+		SessionID:      sessionID,
 	})
 	if sess != nil {
 		t.Cleanup(func() { _ = sess.Close() })
@@ -101,7 +101,7 @@ phase1Loop:
 			if !ok {
 				t.Fatal("phase 1: events closed")
 			}
-			if ev.Kind == agent.EventAgentReady  && ev.SessionID != "" {
+			if ev.Kind == agent.EventAgentReady && ev.SessionID != "" {
 				capturedID = ev.SessionID
 				t.Logf("[test] phase 1: captured sessionID=%q", capturedID)
 				break phase1Loop
@@ -121,7 +121,7 @@ phase1Loop:
 	sess2, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		SessionID:       capturedID,
+		SessionID:      capturedID,
 	})
 	if err != nil {
 		t.Fatalf("phase 2 Start: %v (resume was lost — bridge errored instead of preserving)", err)
@@ -141,7 +141,7 @@ phase1Loop:
 			if !ok {
 				t.Fatalf("phase 2: events closed before init")
 			}
-			if ev.Kind == agent.EventAgentReady  {
+			if ev.Kind == agent.EventAgentReady {
 				if ev.SessionID != capturedID {
 					t.Fatalf("phase 2: init.SessionID = %q, want %q (resume context lost — bridge replaced with fresh session)",
 						ev.SessionID, capturedID)

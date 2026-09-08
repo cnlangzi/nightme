@@ -522,9 +522,6 @@ func TestTranslatePromptResponse_FallsBackToRespUsage(t *testing.T) {
 
 // ─── concurrency regression ─────────────────────────────────────────
 
-
-
-
 // ─── P0 regression: turnSettled must reset between turns ─────────────
 
 // TestSendBlocks_ResetsTurnSettled exercises the exact regression

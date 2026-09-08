@@ -22,4 +22,3 @@ type BindingEntry struct {
 	Workspace string
 	Agent     string
 }
-

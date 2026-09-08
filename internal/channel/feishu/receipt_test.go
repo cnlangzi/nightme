@@ -29,13 +29,13 @@ import (
 // called from production paths. The mock implements them as no-ops
 // to satisfy the interface contract.
 type mockReceiptBot struct {
-	cards        []cardCall
-	patches      []cardCall
-	reactions    []reactionCall
-	messages     []string
-	sendCardErr  error
-	patchErr     error
-	nextCardID   int
+	cards       []cardCall
+	patches     []cardCall
+	reactions   []reactionCall
+	messages    []string
+	sendCardErr error
+	patchErr    error
+	nextCardID  int
 }
 
 type reactionCall struct {
@@ -284,10 +284,10 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 	// StatusBar stamped) — the populated-footer case is covered
 	// by TestSend_OutInit_StampsFooterOnReceipt + TestSend_OutResult.
 	for _, absent := range []string{
-		`⏳`,         // PromptPending header
-		`🔄`,         // heartbeat (retired pre-F-44)
-		`✅ 已完成`,  // PromptSucceeded header
-		`❌`,         // PromptFailed header
+		`⏳`,          // PromptPending header
+		`🔄`,          // heartbeat (retired pre-F-44)
+		`✅ 已完成`,      // PromptSucceeded header
+		`❌`,          // PromptFailed header
 		`Agent:`,     // footer — only present when footerLines set
 		`Workspace:`, // footer — only present when footerLines set
 		`Tokens:`,    // footer — only present when footerLines set
@@ -319,6 +319,7 @@ func TestBuildReceiptCard_NoTasksEmptyBody(t *testing.T) {
 		t.Errorf("body should NOT contain Tasks header for empty receipt: %s", body)
 	}
 }
+
 // TestAppendEntry_FoldsIntoReceipt — F-44 revert: each OutReply
 // chunk is appended to the rolling-log entries, PATCHing the card
 // in place. The mockReceiptBot records each PATCH and the receipt
@@ -729,13 +730,13 @@ func TestTasks_NilReceiptReturnsNil(t *testing.T) {
 // the new OutInit handler's interaction with the receipt FSM.
 //
 // Three sub-cases:
-//   1. Pre-existing receipt → renderLocked's PATCH branch runs
-//      (PatchMessage observed by mockReceiptBot).
-//   2. Empty footerLines preserves a previously-stamped footer
-//      (symmetric with SetTaskListWithFooter's preserve-on-empty
-//      semantics).
-//   3. Nil receiver must not panic (guard matching the rest of
-//      the receipt API).
+//  1. Pre-existing receipt → renderLocked's PATCH branch runs
+//     (PatchMessage observed by mockReceiptBot).
+//  2. Empty footerLines preserves a previously-stamped footer
+//     (symmetric with SetTaskListWithFooter's preserve-on-empty
+//     semantics).
+//  3. Nil receiver must not panic (guard matching the rest of
+//     the receipt API).
 func TestStampFooterLines_FollowupF44(t *testing.T) {
 	t.Run("patches pre-existing receipt", func(t *testing.T) {
 		bot := &mockReceiptBot{}

@@ -82,9 +82,9 @@ func TestEqual_ByteExact(t *testing.T) {
 		want bool
 	}{
 		{"/foo", "/foo", true},
-		{"/foo/", "/foo", true},                 // Clean strips trailing slash
-		{"/foo//bar", "/foo/bar", true},         // Clean collapses //
-		{"/foo/./bar", "/foo/bar", true},        // Clean collapses .
+		{"/foo/", "/foo", true},          // Clean strips trailing slash
+		{"/foo//bar", "/foo/bar", true},  // Clean collapses //
+		{"/foo/./bar", "/foo/bar", true}, // Clean collapses .
 		{"/foo", "/bar", false},
 		{"/foo", "/foobar", false},
 		{"", "", true}, // Clean("") returns "."
@@ -119,8 +119,8 @@ func TestIsUnder_ChildOf(t *testing.T) {
 	}{
 		{"/foo/bar", "/foo", true},
 		{"/foo/bar/baz", "/foo", true},
-		{"/foo", "/foo", true},   // same path
-		{"/foo", "/foo/", true},  // trailing slash on parent
+		{"/foo", "/foo", true},     // same path
+		{"/foo", "/foo/", true},    // trailing slash on parent
 		{"/foobar", "/foo", false}, // naive-prefix trap
 		{"/foo", "/bar", false},
 		{"/foo/bar", "", false}, // empty parent

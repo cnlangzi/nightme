@@ -73,13 +73,13 @@ func TestSplitSessionID_RoundTrip(t *testing.T) {
 // ok=false to skip telegram-specific routing.
 func TestSplitSessionID_RejectsNonTelegram(t *testing.T) {
 	tests := []string{
-		"oc_abcdef1234567890",     // Feishu
-		"slack_T123456",           // hypothetical Slack
-		"8684538097",              // bare digit (pre-tg_ legacy)
-		"",                        // empty
-		"tg_",                     // prefix only
-		"tg_abc:notanumber",       // bad thread id → ok=true but thread parses as 0
-		"tg_abc:42:extra",         // extra colon → only first ":" used
+		"oc_abcdef1234567890", // Feishu
+		"slack_T123456",       // hypothetical Slack
+		"8684538097",          // bare digit (pre-tg_ legacy)
+		"",                    // empty
+		"tg_",                 // prefix only
+		"tg_abc:notanumber",   // bad thread id → ok=true but thread parses as 0
+		"tg_abc:42:extra",     // extra colon → only first ":" used
 	}
 	for _, in := range tests {
 		t.Run(in, func(t *testing.T) {

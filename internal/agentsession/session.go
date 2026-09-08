@@ -25,9 +25,9 @@ import (
 type Status = registry.Status
 
 const (
-	StatusRunning   = registry.StatusRunning
-	StatusDetached  = registry.StatusDetached
-	StatusExited    = registry.StatusExited
+	StatusRunning  = registry.StatusRunning
+	StatusDetached = registry.StatusDetached
+	StatusExited   = registry.StatusExited
 )
 
 // AgentSession represents one CLI process handle inside a
@@ -92,8 +92,8 @@ type AgentSession struct {
 	opCancel context.CancelFunc
 
 	// Lifecycle.
-	pid  int     // OS PID, 0 when not running
-	stat Status  // Running / Detached / Exited
+	pid  int    // OS PID, 0 when not running
+	stat Status // Running / Detached / Exited
 
 	// Spawn-time args; preserved across respawn.
 	args []string
@@ -754,7 +754,6 @@ func (as *AgentSession) Model() string {
 	return as.model
 }
 
-
 // PersistIfDirty is currently a no-op pass-through (every prior
 // caller relied on cumulativeDirty, which is gone with the
 // cross-turn usage aggregation). Kept as the single entry point so
@@ -1386,6 +1385,7 @@ func (as *AgentSession) respawnFromDeadHandle(ctx context.Context) error {
 	// clearing sessionID and retrying without --resume.
 	return as.respawn(ctx, as.spawner, args, resume)
 }
+
 // if Spawn has not been called.
 //
 // The ctx passed to SendBlocks flows to the bridge's SendBlocks, which
@@ -1641,7 +1641,6 @@ func (as *AgentSession) Stop(ctx context.Context) error {
 	}
 	return h.Stop(ctx)
 }
-
 
 // newAgentSessionID returns a unique ID for an AgentSession. v1.2
 // commit 6 uses a simple counter-based scheme for testability;

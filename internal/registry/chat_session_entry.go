@@ -133,10 +133,10 @@ func (e *ChatSessionEntry) UnmarshalJSON(data []byte) error {
 	type alias ChatSessionEntry
 	aux := struct {
 		*alias
-		LegacyDefaultAgent       string  `json:"defaultAgent,omitempty"`
-		LegacyActiveCwd          string  `json:"activeCwd,omitempty"`
-		LegacyActiveAgent        string  `json:"activeAgent,omitempty"`
-		LegacyActiveAgentSessID  *string `json:"activeAgentSessionId,omitempty"`
+		LegacyDefaultAgent      string  `json:"defaultAgent,omitempty"`
+		LegacyActiveCwd         string  `json:"activeCwd,omitempty"`
+		LegacyActiveAgent       string  `json:"activeAgent,omitempty"`
+		LegacyActiveAgentSessID *string `json:"activeAgentSessionId,omitempty"`
 	}{
 		alias: (*alias)(e),
 	}

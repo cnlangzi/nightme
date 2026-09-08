@@ -1,4 +1,3 @@
-
 // Process / I/O lifecycle for the codex app-server bridge.
 //
 // session owns the spawned child process, its stdio pipes, the
@@ -7,13 +6,13 @@
 //
 // Lifetime:
 //
-//   newSession()
-//     ├─ spawn codex app-server --listen stdio://
-//     ├─ wire rpcClient (merged stdio pipe)
-//     ├─ start readPump + stderrLoop goroutines
-//     ├─ start lifecycle goroutine (owns cmd.Wait + events close)
-//     ├─ handshake: initialize → initialized → ensureThread
-//     └─ return; caller emits EventAgentReady separately
+//	newSession()
+//	  ├─ spawn codex app-server --listen stdio://
+//	  ├─ wire rpcClient (merged stdio pipe)
+//	  ├─ start readPump + stderrLoop goroutines
+//	  ├─ start lifecycle goroutine (owns cmd.Wait + events close)
+//	  ├─ handshake: initialize → initialized → ensureThread
+//	  └─ return; caller emits EventAgentReady separately
 //
 // Failure semantics:
 //   - Any spawn / pipe / Start failure returns an error WITHOUT
@@ -130,20 +129,20 @@ func (p *stdioPipe) Close() error                { return nil }
 //   - stderrTail: only stderrLoop writes; emitError reads under no lock
 //     (the tail is advisory and tolerates one torn read).
 type session struct {
-	cmd         *exec.Cmd
-	stdinW      io.WriteCloser // child stdin
-	stdoutR     io.ReadCloser  // child stdout
-	stderrR     io.ReadCloser  // child stderr
-	rpc         *rpcClient
-	events      chan agent.AgentEvent
-	pid         int
-	agentName   string
-	workspace   string
-	branch      string
-	model       string
-	threadID    string
-	stderrTail  *agent.StderrRingBuffer
-	pendingMu   sync.Mutex
+	cmd              *exec.Cmd
+	stdinW           io.WriteCloser // child stdin
+	stdoutR          io.ReadCloser  // child stdout
+	stderrR          io.ReadCloser  // child stderr
+	rpc              *rpcClient
+	events           chan agent.AgentEvent
+	pid              int
+	agentName        string
+	workspace        string
+	branch           string
+	model            string
+	threadID         string
+	stderrTail       *agent.StderrRingBuffer
+	pendingMu        sync.Mutex
 	pendingApprovals map[string]chan string
 	// lastPendingID is the request id of the most-recently spawned
 	// approval. SendPermission routes to that specific channel
@@ -152,11 +151,11 @@ type session struct {
 	// semantically wrong for multi-approval scenarios).
 	lastPendingID string
 
-	closeOnce   sync.Once
-	closed      chan struct{}
-	pumpWG      sync.WaitGroup
-	exitDone    chan struct{}
-	exitErr     error
+	closeOnce sync.Once
+	closed    chan struct{}
+	pumpWG    sync.WaitGroup
+	exitDone  chan struct{}
+	exitErr   error
 
 	// ctx is the session's lifetime context. Cancelled by Close() so
 	// any in-flight goroutines (readPump, approval goroutines) unblock.
@@ -269,22 +268,22 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	parentCtx, cancel := context.WithCancel(ctx)
 	s := &session{
-		cmd:               child,
-		stdinW:            stdin,
-		stdoutR:           stdout,
-		stderrR:           stderr,
-		events:            make(chan agent.AgentEvent, eventBufferSize),
-		pid:               child.Process.Pid,
-		agentName:         cfg.name,
-		workspace:         cfg.workspace,
-		branch:            detectBranch(cfg.workspace),
-		stderrTail:        agent.NewStderrRingBuffer(agent.StderrTailBytes),
-		pendingApprovals:  make(map[string]chan string),
-		lastPendingID:     "",
-		closed:            make(chan struct{}),
-		exitDone:          make(chan struct{}),
-		ctx:               parentCtx,
-		cancel:            cancel,
+		cmd:              child,
+		stdinW:           stdin,
+		stdoutR:          stdout,
+		stderrR:          stderr,
+		events:           make(chan agent.AgentEvent, eventBufferSize),
+		pid:              child.Process.Pid,
+		agentName:        cfg.name,
+		workspace:        cfg.workspace,
+		branch:           detectBranch(cfg.workspace),
+		stderrTail:       agent.NewStderrRingBuffer(agent.StderrTailBytes),
+		pendingApprovals: make(map[string]chan string),
+		lastPendingID:    "",
+		closed:           make(chan struct{}),
+		exitDone:         make(chan struct{}),
+		ctx:              parentCtx,
+		cancel:           cancel,
 	}
 	s.rpc = newRPCClient(
 		newStdioPipe(stdin, stdout),
@@ -431,9 +430,9 @@ func (s *session) initialize(ctx context.Context) error {
 func (s *session) ensureThread(ctx context.Context, resumeID string) error {
 	if resumeID != "" {
 		params := threadResumeParams{
-			ThreadID:              resumeID,
+			ThreadID:               resumeID,
 			PersistExtendedHistory: true,
-			CWD:                   s.workspace,
+			CWD:                    s.workspace,
 		}
 		var resp threadStartResponse
 		if err := s.rpc.request(ctx, "thread/resume", params, &resp); err != nil {

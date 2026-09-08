@@ -174,8 +174,8 @@ type turnState struct {
 
 func newTurnState() *turnState {
 	return &turnState{
-		textBuf:      make(map[int]*strings.Builder),
-		pendingTools: make(map[string]pendingTool),
+		textBuf:       make(map[int]*strings.Builder),
+		pendingTools:  make(map[string]pendingTool),
 		thinkHoldings: make(map[int]string),
 	}
 }

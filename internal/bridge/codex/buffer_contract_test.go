@@ -1,4 +1,3 @@
-
 // Regression tests for the codex bridge's deliver() / events-buffer
 // contract. These lock in the "no timeout drop, no default drop"
 // producer-side behaviour adopted in commit 67b295ec ("unify

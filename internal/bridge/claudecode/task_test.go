@@ -1,4 +1,3 @@
-
 // F-38: TaskCreate / TaskUpdate bridge tests. Each test runs a
 // real pumpStream against a synthetic stream of stream-json
 // envelopes that mirror the shape of Claude Code 2.1.220.

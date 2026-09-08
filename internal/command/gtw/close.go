@@ -42,8 +42,9 @@ const maxDirtyFilesReported = 10
 //
 //  1. Look for `<cs.SelectedCwd()>/.nightme/gtw.yml` (no walk-up
 //     by design — see §14.4 design rationale).
+//
 //  2. Refuse if missing — there's no active fix in this chat.
-//  2.5. Remove the nightme/wip label from the originating issue
+//     2.5. Remove the nightme/wip label from the originating issue
 //     (ModeRemote only). Runs BEFORE any local cleanup so a
 //     platform-API failure (auth expired, network down, repo
 //     moved) leaves the worktree + branch + ASes fully intact
@@ -60,26 +61,32 @@ const maxDirtyFilesReported = 10
 //     WIP" while local still has the worktree / branch / yml,
 //     and a retry would face the divergence instead of the same
 //     pre-close state.
+//
 //  3. Refuse if the worktree has uncommitted changes (`git
 //     status --porcelain` non-empty). Close is intentionally
 //     all-or-nothing: commit, stash, or discard before
 //     re-running. No --force escape hatch (deliberate — see
 //     cmd.go runClose doc).
+//
 //  4. Run `git worktree remove <path>` from inside the main
 //     repo (git refuses to run that command from inside a
 //     worktree itself). The yml file goes away with the
 //     worktree — no explicit unlink needed.
+//
 //  5. `git branch -D <branch>` from repoRoot (always force-
 //     delete — close is a "tear down the experiment" action
 //     and the local branch was created by /gtw fix, never
 //     published; the -d (lowercase) safe-delete would refuse
 //     on unmerged, which is hostile here).
+//
 //  6. SetSelectedCwd back to repoRoot so the next agent message
 //     spawns in the main repo. v1.5 removed the in-memory slot
 //     clear that lived in this slot in older versions; nothing
 //     to do beyond SetSelectedCwd (the yml disappears with the
 //     worktree at step 4).
+//
 //  7. Emit close's own success card.
+//
 //  8. Invoke /new on the new cwd (c.RepoRoot) to drop any AS
 //     left there of its accumulated conversation context. This
 //     mirrors the user's manual workflow ("close the fix, then
@@ -88,6 +95,7 @@ const maxDirtyFilesReported = 10
 //     starts cold. matched==0 means no AS survives in repoRoot
 //     — the common case after step 2.6 — and no extra card is
 //     sent.
+//
 //  9. Run `git pull --rebase origin <default>` on repoRoot and
 //     emit the same sync card /gtw sync uses. Sync runs LAST
 //     so the user sees the full sequence: close → /new → sync.

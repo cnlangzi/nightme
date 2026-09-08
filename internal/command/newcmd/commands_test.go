@@ -66,6 +66,7 @@ func TestFactory_Handle_NoSessions_RepliesNoSession(t *testing.T) {
 		t.Fatalf("Reply missing no-session message: %q", out.Reply)
 	}
 }
+
 // TestFactory_Handle_ArgvContract pins the issue #291 CLI
 // contract on /new: a second positional token used to be
 // silently dropped (`/new claude codex` reset only claude) and

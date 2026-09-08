@@ -94,6 +94,7 @@ type agentDriver interface {
 	Reset(ctx context.Context) error
 	Close() error
 }
+
 // ptyIdleTimeout is how long RunOnce waits with no new output
 // before declaring the turn done. PTY has no structured result
 // event, so the heuristic is "agent went quiet for this long".

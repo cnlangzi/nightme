@@ -33,8 +33,8 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
+	"github.com/cnlangzi/nightme/internal/proc"
 )
 
 // eventBufferSize caps the events channel fed to the runtime's
@@ -461,9 +461,9 @@ func (d *driver) createFreshSession(ctx context.Context, workspace string) (stri
 		"cwd", workspace,
 		"repo_root", repoRoot)
 	// Workspace is repo-scoped and shared across drivers.
-	 // archiveSession on Close takes sessionId (hides our row)
-	 // and leaves the workspace alive for sibling / future
-	 // drivers in the same repo.
+	// archiveSession on Close takes sessionId (hides our row)
+	// and leaves the workspace alive for sibling / future
+	// drivers in the same repo.
 	return scVal.SessionID, nil
 }
 

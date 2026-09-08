@@ -221,4 +221,3 @@ func TestJitter_ZeroPct(t *testing.T) {
 		t.Fatalf("zero-pct jitter should be exact: %v", got)
 	}
 }
-

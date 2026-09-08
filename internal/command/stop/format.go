@@ -10,10 +10,10 @@
 // Output templates (selected by Action):
 //
 //   - stopped         — "Stop signal sent to <agent>. Next prompt
-//                        will take over."
+//     will take over."
 //   - noop            — "No turn in flight on <agent>."
 //   - not-supported   — "<agent> doesn't support /stop; use /close
-//                        instead."
+//     instead."
 //   - failed          — "Stop failed on <agent>: <err>"
 package stop
 

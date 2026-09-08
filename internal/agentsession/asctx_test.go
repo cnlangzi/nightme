@@ -1,18 +1,18 @@
 // Verifies the per-AS ctx contract on AgentSession:
 //
-//   1. OpContext() returns a non-nil ctx out of NewAgentSession
-//      (and after FromAgentSessionEntry), independent of any
-//      ChatSession wiring.
-//   2. Activate(parent) installs a fresh ctx derived from
-//      parent; cancelling parent cascades to OpContext().
-//   3. Background() cancels the current opCtx atomically; a
-//      second Background is a safe no-op (idempotent).
-//   4. Activate-after-Background installs a fresh ctx; the
-//      previous Background's done channel is separate from the
-//      fresh ctx's done channel.
-//   5. Background-then-Activate-then-Background cycles cleanly
-//      — the model is "internal ctx management owned by AS,
-//      parent lifetime owned by caller".
+//  1. OpContext() returns a non-nil ctx out of NewAgentSession
+//     (and after FromAgentSessionEntry), independent of any
+//     ChatSession wiring.
+//  2. Activate(parent) installs a fresh ctx derived from
+//     parent; cancelling parent cascades to OpContext().
+//  3. Background() cancels the current opCtx atomically; a
+//     second Background is a safe no-op (idempotent).
+//  4. Activate-after-Background installs a fresh ctx; the
+//     previous Background's done channel is separate from the
+//     fresh ctx's done channel.
+//  5. Background-then-Activate-then-Background cycles cleanly
+//     — the model is "internal ctx management owned by AS,
+//     parent lifetime owned by caller".
 package agentsession
 
 import (

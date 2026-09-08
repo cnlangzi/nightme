@@ -198,8 +198,8 @@ func TestWireState_ApplyProjection_UpdatesTasks(t *testing.T) {
 func TestWireState_ApplyProjection_UnknownProjection_NoOp(t *testing.T) {
 	st := newWireState()
 	proj := projectionEnvelope{
-		Key: "title",
-		Value:      []byte(`{"title":"My Session"}`),
+		Key:   "title",
+		Value: []byte(`{"title":"My Session"}`),
 	}
 	events := st.applyProjection(proj)
 	if len(events) != 0 {
@@ -368,10 +368,10 @@ func TestWireState_ApplyTodoProjection_FieldNameDrift_SurfacesFailure(t *testing
 // emits EventAgentTaskCreate with Items=[].
 //
 // This test simulates that failure mode and verifies:
-//   1. The items DO get skipped (so the production failure mode
-//      is detectable in tests, not hidden behind a passing test).
-//   2. wireState.unknownCount is bumped, so DumpWireStats surfaces
-//      the failure to ops via the unknownCount column.
+//  1. The items DO get skipped (so the production failure mode
+//     is detectable in tests, not hidden behind a passing test).
+//  2. wireState.unknownCount is bumped, so DumpWireStats surfaces
+//     the failure to ops via the unknownCount column.
 //
 // If dsh's real wire is later probed and the field names are confirmed
 // wrong, the struct tags MUST be updated — keeping this test
@@ -415,9 +415,9 @@ func TestWireState_ApplyTodoWrite_FieldNameDrift_SurfacesFailure(t *testing.T) {
 	// unknownCount column.
 	unknownTotal, _ := st.DumpWireStats()
 	if unknownTotal == 0 {
-		t.Fatal("expected unknownCount > 0 after drifted-wire skip —\n"+
-			"the skip path must surface the failure mode, otherwise\n"+
-			"the only signal is 'user reports empty todo list' with\n"+
+		t.Fatal("expected unknownCount > 0 after drifted-wire skip —\n" +
+			"the skip path must surface the failure mode, otherwise\n" +
+			"the only signal is 'user reports empty todo list' with\n" +
 			"zero ops-side telemetry.")
 	}
 
@@ -470,4 +470,3 @@ func TestWireState_TasksMap_UpdateOverwritesByID(t *testing.T) {
 		t.Errorf("x-1 status = %q", st.tasks["x-1"].Status)
 	}
 }
-

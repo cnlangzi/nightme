@@ -16,7 +16,7 @@ import (
 //   - step failed                → StatusFailed
 //   - ctx cancelled              → StatusCancelled
 //   - no runnable step remains   → StatusSucceeded (caller may treat
-//                                   as no-op if all jobs were skipped)
+//     as no-op if all jobs were skipped)
 func Tick(ctx context.Context, state *RunState, wf *Workflow, rt Runtime) (*RunState, error) {
 	if state == nil {
 		return nil, errors.New("wfe: nil state")

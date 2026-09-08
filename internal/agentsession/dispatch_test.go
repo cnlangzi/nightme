@@ -90,7 +90,7 @@ func TestAgentSession_Dispatch_LazyStart(t *testing.T) {
 
 	// Subscribe (does not start dispatcher) and trigger the lazy start.
 	as.EventBus.Subscribe(func(_ EnrichedEvent) bool { return false })
-	pushEvent(as, EnrichedEvent{Kind:KindLifecycle})
+	pushEvent(as, EnrichedEvent{Kind: KindLifecycle})
 
 	// Wait for ensureDispatcher to flip the flag.
 	deadline := time.Now().Add(2 * time.Second)
@@ -121,7 +121,7 @@ func TestAgentSession_Shutdown_ClosesEventBus(t *testing.T) {
 	})
 
 	// Trigger first event to land.
-	pushEvent(as, EnrichedEvent{Kind:KindAgentEvent})
+	pushEvent(as, EnrichedEvent{Kind: KindAgentEvent})
 
 	// Wait for first event to land.
 	deadline := time.Now().Add(2 * time.Second)
@@ -134,7 +134,7 @@ func TestAgentSession_Shutdown_ClosesEventBus(t *testing.T) {
 	// After Shutdown, EventBus.Publish should be a no-op (subscribers
 	// don't fire on a closed bus).
 	preHits := hits.Load()
-	as.EventBus.Publish(EnrichedEvent{Kind:KindAgentEvent})
+	as.EventBus.Publish(EnrichedEvent{Kind: KindAgentEvent})
 	time.Sleep(50 * time.Millisecond)
 	if hits.Load() != preHits {
 		t.Errorf("subscriber fired after Shutdown: pre=%d post=%d", preHits, hits.Load())
@@ -263,7 +263,7 @@ func TestAgentSession_Respawn_PreservesEventBus(t *testing.T) {
 
 	// Push an event; the same subscriber (registered before respawn)
 	// should still fire.
-	pushEvent(as, EnrichedEvent{Kind:KindAgentEvent})
+	pushEvent(as, EnrichedEvent{Kind: KindAgentEvent})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && hits.Load() == 0 {

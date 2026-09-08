@@ -137,25 +137,25 @@ func TestF61_SpawnClearsClosedByUser(t *testing.T) {
 // TestF61_RestartFromDeathPreservesSessionID is the regression
 // guard for the dsh silent-death incident on 2026-08-15:
 //
-//   When the bridge dies unexpectedly, RestartFromDeath must
-//   pass the PREVIOUS sessionID to respawn so resume-capable
-//   bridges (dsh session.fork, claudecode --resume, codex
-//   thread resume) preserve conversation context across the
-//   death. A previous version of this code deliberately cleared
-//   sessionID here ("we want a fresh conversation") — that
-//   broke upper-layer UX: the user would lose all in-flight
-//   context and have to repeat the task after every bridge
-//   crash.
+//	When the bridge dies unexpectedly, RestartFromDeath must
+//	pass the PREVIOUS sessionID to respawn so resume-capable
+//	bridges (dsh session.fork, claudecode --resume, codex
+//	thread resume) preserve conversation context across the
+//	death. A previous version of this code deliberately cleared
+//	sessionID here ("we want a fresh conversation") — that
+//	broke upper-layer UX: the user would lose all in-flight
+//	context and have to repeat the task after every bridge
+//	crash.
 //
 // What this test asserts:
-//   1. RestartFromDeath passes the existing sessionID to the
-//      spawner verbatim (no clearing).
-//   2. RestartFromDeath does NOT clear as.sessionID after a
-//      successful respawn — the runtime's EventHandler will
-//      overwrite it with the new bridge's EventAgentReady
-//      SessionID once the handshake completes.
-//   3. RestartFromDeath still skips respawn when closedByUser
-//      is set (unchanged behavior).
+//  1. RestartFromDeath passes the existing sessionID to the
+//     spawner verbatim (no clearing).
+//  2. RestartFromDeath does NOT clear as.sessionID after a
+//     successful respawn — the runtime's EventHandler will
+//     overwrite it with the new bridge's EventAgentReady
+//     SessionID once the handshake completes.
+//  3. RestartFromDeath still skips respawn when closedByUser
+//     is set (unchanged behavior).
 func TestF61_RestartFromDeathPreservesSessionID(t *testing.T) {
 	const saved = "session-abc-123"
 

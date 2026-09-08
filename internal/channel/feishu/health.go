@@ -52,13 +52,13 @@ type WSHealth struct {
 
 	// LastError is the most recent error string from OnError /
 	// reconnect failure. Empty when healthy.
-	LastError string
+	LastError   string
 	LastErrorAt time.Time
 
 	// LastInboundAt is when we last successfully dispatched an
 	// inbound event (the message we wanted to handle). Drives
 	// "inbound stuck" alerts.
-	LastInboundAt time.Time
+	LastInboundAt     time.Time
 	LastInboundChatID string
 
 	// LastOutboundAt is when we last successfully posted a message
@@ -81,19 +81,19 @@ type WSHealth struct {
 type HealthEventKind string
 
 const (
-	HealthEventConnect       HealthEventKind = "connect"        // SDK OnReady / OnReconnected
-	HealthEventDisconnect    HealthEventKind = "disconnect"     // SDK OnDisconnected
-	HealthEventReconnecting  HealthEventKind = "reconnecting"   // SDK OnReconnecting
-	HealthEventError         HealthEventKind = "error"           // SDK OnError or send retry exhausted
-	HealthEventInbound       HealthEventKind = "inbound"         // received an event from Feishu
-	HealthEventOutbound      HealthEventKind = "outbound"        // sent a message to Feishu
+	HealthEventConnect      HealthEventKind = "connect"      // SDK OnReady / OnReconnected
+	HealthEventDisconnect   HealthEventKind = "disconnect"   // SDK OnDisconnected
+	HealthEventReconnecting HealthEventKind = "reconnecting" // SDK OnReconnecting
+	HealthEventError        HealthEventKind = "error"        // SDK OnError or send retry exhausted
+	HealthEventInbound      HealthEventKind = "inbound"      // received an event from Feishu
+	HealthEventOutbound     HealthEventKind = "outbound"     // sent a message to Feishu
 )
 
 // HealthEvent is one entry in the WSHealth.EventRing.
 type HealthEvent struct {
-	At      time.Time         `json:"at"`
-	Kind    HealthEventKind   `json:"kind"`
-	Message string            `json:"message,omitempty"`
+	At      time.Time       `json:"at"`
+	Kind    HealthEventKind `json:"kind"`
+	Message string          `json:"message,omitempty"`
 }
 
 // InboundSample is a tiny sample of a successfully-handled inbound
@@ -123,18 +123,18 @@ func (h *WSHealth) Snapshot() WSHealthSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	snap := WSHealthSnapshot{
-		Connected:           h.Connected,
-		LastConnectedAt:     h.LastConnectedAt,
-		LastDisconnectedAt:  h.LastDisconnectedAt,
-		ReconnectCount:      h.ReconnectCount,
-		LastError:           h.LastError,
-		LastErrorAt:         h.LastErrorAt,
-		LastInboundAt:       h.LastInboundAt,
-		LastInboundChatID:   h.LastInboundChatID,
-		LastOutboundAt:      h.LastOutboundAt,
-		EventRing:           append([]HealthEvent(nil), h.EventRing...),
-		InboundRing:         append([]InboundSample(nil), h.InboundRing...),
-		OutboundRing:        append([]OutboundSample(nil), h.OutboundRing...),
+		Connected:          h.Connected,
+		LastConnectedAt:    h.LastConnectedAt,
+		LastDisconnectedAt: h.LastDisconnectedAt,
+		ReconnectCount:     h.ReconnectCount,
+		LastError:          h.LastError,
+		LastErrorAt:        h.LastErrorAt,
+		LastInboundAt:      h.LastInboundAt,
+		LastInboundChatID:  h.LastInboundChatID,
+		LastOutboundAt:     h.LastOutboundAt,
+		EventRing:          append([]HealthEvent(nil), h.EventRing...),
+		InboundRing:        append([]InboundSample(nil), h.InboundRing...),
+		OutboundRing:       append([]OutboundSample(nil), h.OutboundRing...),
 	}
 	return snap
 }
@@ -143,18 +143,18 @@ func (h *WSHealth) Snapshot() WSHealthSnapshot {
 // JSON-marshalable so `nightme health` can read it via the daemon's
 // status file (or via a future daemoncontrol "health" command).
 type WSHealthSnapshot struct {
-	Connected           bool             `json:"connected"`
-	LastConnectedAt     time.Time        `json:"last_connected_at"`
-	LastDisconnectedAt  time.Time        `json:"last_disconnected_at"`
-	ReconnectCount      int              `json:"reconnect_count"`
-	LastError           string           `json:"last_error"`
-	LastErrorAt         time.Time        `json:"last_error_at"`
-	LastInboundAt       time.Time        `json:"last_inbound_at"`
-	LastInboundChatID   string           `json:"last_inbound_chat_id"`
-	LastOutboundAt      time.Time        `json:"last_outbound_at"`
-	EventRing           []HealthEvent    `json:"event_ring"`
-	InboundRing         []InboundSample  `json:"inbound_ring"`
-	OutboundRing        []OutboundSample `json:"outbound_ring"`
+	Connected          bool             `json:"connected"`
+	LastConnectedAt    time.Time        `json:"last_connected_at"`
+	LastDisconnectedAt time.Time        `json:"last_disconnected_at"`
+	ReconnectCount     int              `json:"reconnect_count"`
+	LastError          string           `json:"last_error"`
+	LastErrorAt        time.Time        `json:"last_error_at"`
+	LastInboundAt      time.Time        `json:"last_inbound_at"`
+	LastInboundChatID  string           `json:"last_inbound_chat_id"`
+	LastOutboundAt     time.Time        `json:"last_outbound_at"`
+	EventRing          []HealthEvent    `json:"event_ring"`
+	InboundRing        []InboundSample  `json:"inbound_ring"`
+	OutboundRing       []OutboundSample `json:"outbound_ring"`
 
 	// Prober is the F-41 active-reconnect prober state. When the WS
 	// is down, Active=true and ForceCount is incrementing every 30s

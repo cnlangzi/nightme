@@ -51,8 +51,8 @@ func TestProvider_Interface(t *testing.T) {
 // and cannot be imported here without an import cycle.
 type feishuStub struct{ name string }
 
-func (f *feishuStub) Name() string                                  { return f.name }
-func (f *feishuStub) Login(_ context.Context) (*Credentials, error) { return nil, nil }
+func (f *feishuStub) Name() string                                      { return f.name }
+func (f *feishuStub) Login(_ context.Context) (*Credentials, error)     { return nil, nil }
 func (f *feishuStub) Greet(_ context.Context, _ GreetingMessages) error { return nil }
 
 // TestProvider_Name_And_Login verifies the fake behaves as the
@@ -138,6 +138,7 @@ func contains(haystack []byte, needle string) bool {
 	}
 	return false
 }
+
 // TestLoginWith_DispatchesByProviderName verifies that the
 // v0.x regression where LoginWith wrote all three creds
 // unconditionally is gone. v1.3+ dispatches on
@@ -310,7 +311,7 @@ type registryTestProvider struct {
 	hits  int
 }
 
-func (r *registryTestProvider) Name() string                       { return "registry-test" }
+func (r *registryTestProvider) Name() string                                  { return "registry-test" }
 func (r *registryTestProvider) Login(_ context.Context) (*Credentials, error) { return r.creds, r.err }
 func (r *registryTestProvider) Greet(_ context.Context, _ GreetingMessages) error {
 	r.hits++

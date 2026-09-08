@@ -85,10 +85,10 @@ func TestMultiAS_InterleavedOrderPreserved(t *testing.T) {
 
 	// Push A1, A2 from A and B1, B2 from B. Per-AS order is the
 	// only thing we can assert.
-	pushEvent(asA, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("A1")})
-	pushEvent(asB, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("B1")})
-	pushEvent(asB, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("B2")})
-	pushEvent(asA, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("A2")})
+	pushEvent(asA, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("A1")})
+	pushEvent(asB, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("B1")})
+	pushEvent(asB, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("B2")})
+	pushEvent(asA, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("A2")})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -165,9 +165,9 @@ func TestMultiAS_PromptIDsNotCrossed(t *testing.T) {
 	cs.attachAgentSession(asB)
 
 	var (
-		mu       sync.Mutex
-		fromA    []string
-		fromB    []string
+		mu    sync.Mutex
+		fromA []string
+		fromB []string
 	)
 	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
 		mu.Lock()
@@ -181,10 +181,10 @@ func TestMultiAS_PromptIDsNotCrossed(t *testing.T) {
 		return false
 	})
 
-	pushEvent(asA, EnrichedEvent{Kind:KindAgentEvent, PromptID: "PA-1", AgentEvent: makeTextEvent("a1")})
-	pushEvent(asB, EnrichedEvent{Kind:KindAgentEvent, PromptID: "PB-1", AgentEvent: makeTextEvent("b1")})
-	pushEvent(asB, EnrichedEvent{Kind:KindAgentEvent, PromptID: "PB-2", AgentEvent: makeTextEvent("b2")})
-	pushEvent(asA, EnrichedEvent{Kind:KindAgentEvent, PromptID: "PA-2", AgentEvent: makeTextEvent("a2")})
+	pushEvent(asA, EnrichedEvent{Kind: KindAgentEvent, PromptID: "PA-1", AgentEvent: makeTextEvent("a1")})
+	pushEvent(asB, EnrichedEvent{Kind: KindAgentEvent, PromptID: "PB-1", AgentEvent: makeTextEvent("b1")})
+	pushEvent(asB, EnrichedEvent{Kind: KindAgentEvent, PromptID: "PB-2", AgentEvent: makeTextEvent("b2")})
+	pushEvent(asA, EnrichedEvent{Kind: KindAgentEvent, PromptID: "PA-2", AgentEvent: makeTextEvent("a2")})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -265,7 +265,7 @@ func TestMultiAS_DetachedKeepsReceiving(t *testing.T) {
 		return false
 	})
 
-	pushEvent(as, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("from detached")})
+	pushEvent(as, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("from detached")})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && hits.Load() == 0 {
@@ -550,10 +550,10 @@ func TestMultiAS_SubscriberDropPolicy_DeterministicDrop(t *testing.T) {
 	cs := newChatSessionForTest("cs_subscriber_drop")
 
 	const (
-		nAS        = 5
-		nPer       = 100
-		nSubs      = 3
-		cap        = 1 // delivered channel — must overflow
+		nAS         = 5
+		nPer        = 100
+		nSubs       = 3
+		cap         = 1 // delivered channel — must overflow
 		readerDelay = 2 * time.Millisecond
 	)
 

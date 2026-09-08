@@ -78,7 +78,7 @@ func NewLimiter(cfg *config.FeishuRateLimitConfig, logger *slog.Logger) *Limiter
 		cfg:        c,
 		clock:      realClock{},
 		logger:     logger,
-		tokens:     float64(c.Burst), // 启动后立即可用 Burst 个 token
+		tokens:     float64(c.Burst),  // 启动后立即可用 Burst 个 token
 		lastRefill: realClock{}.Now(), // 生产用 realClock；测试 SetClock 后会重置
 	}
 }

@@ -77,7 +77,7 @@ func TestHealthProbe_FailuresAccumulateThenTrigger(t *testing.T) {
 
 	var (
 		triggered atomic.Int32
-		probe      *HealthProbe
+		probe     *HealthProbe
 	)
 	probe, _ = testProbe(t, ts, func() { triggered.Add(1) })
 

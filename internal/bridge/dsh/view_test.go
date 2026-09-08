@@ -119,8 +119,8 @@ func TestWireState_ApplyView_TaskListMergesIntoTasks(t *testing.T) {
 func TestWireState_ApplyProjection_TitleUpdatesState(t *testing.T) {
 	st := newWireState()
 	proj := projectionEnvelope{
-		Key: "title",
-		Value:      []byte(`{"title":"My Session"}`),
+		Key:   "title",
+		Value: []byte(`{"title":"My Session"}`),
 	}
 	events := st.applyProjection(proj)
 	if events != nil {
@@ -132,6 +132,7 @@ func TestWireState_ApplyProjection_TitleUpdatesState(t *testing.T) {
 		t.Errorf("st.title = %q, want %q", st.title, "My Session")
 	}
 }
+
 // P3 contract: empty View bytes or unknown kind = graceful no-op.
 func TestWireState_ApplyView_EmptyOrUnknownKind_NoOp(t *testing.T) {
 	st := newWireState()
@@ -283,4 +284,5 @@ func TestDispatcher_ViewAttached_PopulatesStateButDoesNotCount(t *testing.T) {
 		t.Errorf("frames[0].EnvelopeType = %q, want tool/call", frames[0].EnvelopeType)
 	}
 }
+
 // TestWireState_ApplyView_EmptyOrUnknownKind_NoOp

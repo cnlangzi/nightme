@@ -19,8 +19,8 @@
 package chatsession
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"context"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"os"
 	"os/exec"
 	"sync"

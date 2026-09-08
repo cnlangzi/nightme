@@ -17,8 +17,8 @@ type fakeAgent struct {
 func (f *fakeAgent) Info() Info {
 	return NewInfo(f.name, f.mode, "", nil, nil)
 }
-func (f *fakeAgent) Detect() error       { return nil }
-func (f *fakeAgent) Init(string)  {}
+func (f *fakeAgent) Detect() error { return nil }
+func (f *fakeAgent) Init(string)   {}
 func (f *fakeAgent) Start(context.Context, StartConfig) (*Agent, error) {
 	return nil, errors.New("fakeAgent: Start not implemented")
 }

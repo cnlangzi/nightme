@@ -37,9 +37,9 @@ type Bot struct {
 	cfg    Config
 	logger *slog.Logger
 
-	workflows []*wfe.Workflow
-	triggers  *TriggerManager
-	actions   *ActionRegistry
+	workflows  []*wfe.Workflow
+	triggers   *TriggerManager
+	actions    *ActionRegistry
 	stateStore *StateStore
 
 	// in is the channel the gateway's pumpInbound reads from.
@@ -51,8 +51,8 @@ type Bot struct {
 	// runsByChatID routes agent replies (delivered via Send) back
 	// to the per-run reply channel. Each entry is alive for the
 	// lifetime of one workflow run.
-	muRuns         sync.RWMutex
-	runsByChatID   map[string]*botRun
+	muRuns       sync.RWMutex
+	runsByChatID map[string]*botRun
 }
 
 type botRun struct {

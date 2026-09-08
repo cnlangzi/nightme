@@ -37,12 +37,12 @@ import (
 // end-to-end. Creates a temp git repo with one dirty file, sends
 // the v2 prompt to pi, captures the agent's text, and asserts:
 //
-//   1. The output starts with a Conventional Commits subject
-//      (parsePRReply-style regex check).
-//   2. The body is substantive — non-trivial commits must NOT be
-//      subject-only (PR #135 regression guard).
-//   3. The body does not contain commit-time actions (push /
-//      add -A / stash) — the agent only commits.
+//  1. The output starts with a Conventional Commits subject
+//     (parsePRReply-style regex check).
+//  2. The body is substantive — non-trivial commits must NOT be
+//     subject-only (PR #135 regression guard).
+//  3. The body does not contain commit-time actions (push /
+//     add -A / stash) — the agent only commits.
 //
 // Writes nightme-v2-commit-output.txt under t.TempDir() with the raw agent
 // text on success so the human who ran the smoke can eyeball
@@ -240,11 +240,11 @@ func TestRealPi_CommitPromptV2(t *testing.T) {
 //   - Fenced:        "```\nsubject\n\nbody...\n```"
 //   - Preamble:      "Done. Committed:\n\n```\nsubject...\n```"
 //   - Hash prefix:   "950abe5 feat: add ComputeSquare..."
-//                    (pi runs `git commit` itself in production
-//                    and reports the result; the commit hash is
-//                    prepended to the subject line)
+//     (pi runs `git commit` itself in production
+//     and reports the result; the commit hash is
+//     prepended to the subject line)
 //   - Markdown table: "| `f471654` | `feat(feature): helper` |"
-//   - Double-backtick code-span: "`` `feat(scope): helper` ``"
+//   - Double-backtick code-span: "“ `feat(scope): helper` “"
 //
 // We don't strip fences up front (different runs use different
 // structures). Instead we iterate every line and for each line,
@@ -308,8 +308,8 @@ func splitLineCells(line string) []string {
 // stripMarkdownDecorations strips matched pairs of leading /
 // trailing backticks and leading / trailing markdown table
 // pipe characters, iterating until the string is stable. Used
-// to lift the CC subject out of cells like `` `feat(x): y` ``,
-// `` ``feat(x): y`` ``, `| `abc1234` | `feat(x): y` |`, etc.
+// to lift the CC subject out of cells like “ `feat(x): y` “,
+// “ “feat(x): y“ “, `| `abc1234` | `feat(x): y` |`, etc.
 //
 // Iteration is necessary because backticks and pipes can
 // interleave: `| `feat(x): y` |` requires stripping the outer
@@ -548,9 +548,9 @@ func TestStripMarkdownDecorations_DoublePairStrips(t *testing.T) {
 		{"`feat(x): y`", "feat(x): y"},
 		{"``feat(x): y``", "feat(x): y"},
 		{"```feat(x): y```", "feat(x): y"},
-		{"feat(x): y", "feat(x): y"}, // no decoration
+		{"feat(x): y", "feat(x): y"},       // no decoration
 		{"  `feat(x): y`  ", "feat(x): y"}, // with whitespace
-		{"`abc1234`", "abc1234"},          // hash cell
+		{"`abc1234`", "abc1234"},           // hash cell
 		{"|", ""},                          // degenerate input
 	}
 	for _, c := range cases {

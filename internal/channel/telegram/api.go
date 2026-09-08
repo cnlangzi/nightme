@@ -19,10 +19,10 @@ type apiClient interface {
 }
 
 type httpClient struct {
-	token        string
-	baseURL      string
-	fileBaseURL  string
-	client       *http.Client
+	token       string
+	baseURL     string
+	fileBaseURL string
+	client      *http.Client
 }
 
 func newHTTPClient(token string) *httpClient {

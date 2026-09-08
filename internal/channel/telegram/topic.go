@@ -132,8 +132,9 @@ func rawChatIDFromSession(chatID string) string {
 // namespaced chatID used by the inbound pipeline.
 //
 // Format:
-//   "tg_" + chat.id                    (private DM / group main window)
-//   "tg_" + chat.id + ":" + thread_id  (user is in a real Telegram topic)
+//
+//	"tg_" + chat.id                    (private DM / group main window)
+//	"tg_" + chat.id + ":" + thread_id  (user is in a real Telegram topic)
 //
 // The result is a pure function of (chat.id, thread_id). It does
 // NOT depend on:

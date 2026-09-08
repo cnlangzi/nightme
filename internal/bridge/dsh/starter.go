@@ -187,7 +187,6 @@ func (s *Starter) Review(ctx context.Context, cfg agent.StartConfig, opts ...age
 	return agent.ReviewWithPrompt(ctx, s, cfg, opts...)
 }
 
-
 // drainForRunResult is the shared RunOnce / Review drain logic.
 // Mirrors acp/starter.go::collectResult in shape — both dsh and acp
 // are "live *Agent" bridges where RunOnce is a Start + drain +

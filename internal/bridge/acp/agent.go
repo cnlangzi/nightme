@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	eventBufferSize   = 40960
+	eventBufferSize = 40960
 	// initializeTimeout bounds the ACP initialize RPC. This covers
 	// process spawn + server boot + the protocol-version handshake.
 	// 10s matches pi/codex handshakeTimeout: heavy ACP servers
@@ -218,7 +218,6 @@ type driver struct {
 	turnSettledMu sync.Mutex
 }
 
-
 // resetTurnState clears the per-turn dedup flag so the next
 // SendBlocks call starts a fresh turn-end emission window. Called
 // at the top of SendBlocks after the busy-guard acquisition; the
@@ -274,7 +273,6 @@ type SessionView struct {
 	FlushPending func()
 }
 
-
 // UpdateHandler is the bridge-supplied callback that receives raw
 // session/update params.update payloads. Returning a non-nil error
 // is logged at debug level but does NOT kill the read pump — wire
@@ -316,7 +314,6 @@ type FlushHandler func(view *SessionView)
 // respond is a no-op that returns true.
 type MethodHandler func(method string, params json.RawMessage, respond func(id json.RawMessage, result any, err error) bool) bool
 
-
 // DriverHandle is the exported alias for the package-private
 // driver. Bridges that need to install an UpdateHandler (opencode,
 // future per-bridge translators) reach the driver through this
@@ -329,7 +326,6 @@ type MethodHandler func(method string, params json.RawMessage, respond func(id j
 // outside the acp package can perform the type assertion without
 // re-exporting the unexported driver struct.
 type DriverHandle = driver
-
 
 // permissionCall tracks an outstanding session/request_permission
 // request so SendPermission can route the answer back to the right
@@ -568,7 +564,7 @@ func (d *driver) PID() int {
 // have not yet landed), so the type-safe Path-based blocks are
 // preserved here for Phase 2.
 //
-// Synchronous semantics
+// # Synchronous semantics
 //
 // Unlike a stream-json bridge (claudecode), this bridge awaits
 // the session/prompt RESPONSE before returning. Rationale:
@@ -918,16 +914,16 @@ func (d *driver) New(ctx context.Context) error {
 //
 //   - transport not started              → ErrNotSupported
 //   - sessionID empty (handshake failed) → noop (matches
-//                                          stop.go's "nothing
-//                                          to stop" branch)
+//     stop.go's "nothing
+//     to stop" branch)
 //   - sessionID set                      → session/cancel
 //   - session/cancel fails -32601        → SIGINT (legacy
 //     (method not found)                  fallback for old
-//                                          agents)
+//     agents)
 //   - session/cancel fails otherwise     → return the wire
-//                                          error so the chat
-//                                          layer can render
-//                                          "stop failed"
+//     error so the chat
+//     layer can render
+//     "stop failed"
 //
 // Stop is fire-and-forget: it does NOT block waiting for the
 // agent to confirm the prompt has settled. The chat layer
@@ -1008,8 +1004,8 @@ func (d *driver) Close() error {
 		// operation. A JSON-RPC notification could block on an
 		// uncooperative PTY peer, so cleanup never waits for an
 		// optional server acknowledgement.
-		d.cancel()                       // unblock deliver()'s ctx arm first
-		d.flushTextBuffers()              // drain idle-buffered text after ctx cancel
+		d.cancel()           // unblock deliver()'s ctx arm first
+		d.flushTextBuffers() // drain idle-buffered text after ctx cancel
 		if d.transport != nil {
 			err = d.transport.Close()
 		}

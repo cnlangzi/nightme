@@ -217,9 +217,9 @@ func writeTinyPNG(t *testing.T) string {
 		[]byte{
 			0x00, 0x00, 0x00, 0x08, // width
 			0x00, 0x00, 0x00, 0x08, // height
-			0x08,                   // bit depth
-			0x02,                   // color type (RGB)
-			0x00, 0x00, 0x00,       // compression / filter / interlace
+			0x08,             // bit depth
+			0x02,             // color type (RGB)
+			0x00, 0x00, 0x00, // compression / filter / interlace
 		})...)
 
 	// IDAT chunk: 8 rows × (1 filter byte + 8×3 RGB bytes).

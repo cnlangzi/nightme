@@ -41,9 +41,9 @@ func TestDropQueue_DropsQueuedMessages(t *testing.T) {
 	cs = cs.WithSpawner(nil)
 	// Observe drop events.
 	var (
-		mu             sync.Mutex
-		droppedIDs     []string
-		haveDropEvent  bool
+		mu            sync.Mutex
+		droppedIDs    []string
+		haveDropEvent bool
 	)
 	cs.MessageStateBus.Subscribe(func(e MessageStateEvent) bool {
 		if e.State != agent.MessageDropped {

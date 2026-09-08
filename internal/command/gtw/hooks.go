@@ -31,8 +31,8 @@ import (
 // honours before/after hooks; Push.Agent, if set in an older
 // yml, is silently ignored (push no longer runs an agent).
 type Config struct {
-	Fix   CmdConfig `yaml:"fix"`
-	Push  CmdConfig `yaml:"push"`
+	Fix  CmdConfig `yaml:"fix"`
+	Push CmdConfig `yaml:"push"`
 	// Commit owns the /gtw commit subcommand's defaults (F-XX
 	// split: commit and push are two distinct commands; Commit
 	// carries the agent that runs the one-shot commit, plus
@@ -76,7 +76,9 @@ type Hooks struct {
 //
 // Plain-string sugar: yaml sequence elements can be either a
 // bare string ("- codegraph init") or a mapping ("- type: shell\n
-//  run: ..."). UnmarshalYAML below normalises the bare-string
+//
+//	run: ..."). UnmarshalYAML below normalises the bare-string
+//
 // form into a Hook with Type="" and Run=<string>. The runner
 // treats Type=="" identically to Type=="shell".
 type Hook struct {
@@ -179,8 +181,8 @@ type HookResult struct {
 	Name     string // user-facing command label: <run>, or "<empty>" / "<type>:<run-truncated>" for error cases
 	Stdout   string
 	Stderr   string
-	ExitCode int    // child exit status (0 = success / not-a-shell failure)
-	Err      error  // non-nil on any execution failure
+	ExitCode int   // child exit status (0 = success / not-a-shell failure)
+	Err      error // non-nil on any execution failure
 }
 
 // Centralised in internal/timeouts (timeouts.Hook) — see that

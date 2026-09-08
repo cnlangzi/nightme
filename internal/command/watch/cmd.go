@@ -18,7 +18,7 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /watch.
-type Factory struct {}
+type Factory struct{}
 
 // NewFactory constructs a Factory. command/* factories do not
 // receive a *chatsession.Manager — cs comes from the dispatcher

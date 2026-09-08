@@ -164,7 +164,7 @@ func (*reuseTestDriver) SendBlocks(_ context.Context, _ []agent.ContentBlock) er
 func (*reuseTestDriver) SendPermission(_ string) error                              { return nil }
 func (*reuseTestDriver) Reset(_ context.Context) error                              { return nil }
 func (*reuseTestDriver) Close() error                                               { return nil }
-func (*reuseTestDriver) Stop(_ context.Context) error                              { return nil }
+func (*reuseTestDriver) Stop(_ context.Context) error                               { return nil }
 func (*reuseTestDriver) Keepalive(_ context.Context, _ func(context.Context) error) error {
 	return nil
 }

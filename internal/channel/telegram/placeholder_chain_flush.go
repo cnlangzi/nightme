@@ -86,15 +86,15 @@ func (b *chunkBody) bufTextSize() int {
 // born chunk. Encapsulates the v9 P3 §11.12.19.3 Layer-2 coordinator
 // responsibilities:
 //
-//	1. stamp chain.lastFooter onto chunk (if non-nil) via
-//	   statusbar.RenderPanel
-//	2. gate on chunk.hasVisibleEntries() — drop blank chunks
-//	   before any wire call
-//	3. render via chunk.Compose() (Telegram-safe HTML)
-//	4. send via sendFn
-//	5. write messageID back onto chunk
-//	6. append chunk to chain.chunks
-//	7. set chain.dirty = true
+//  1. stamp chain.lastFooter onto chunk (if non-nil) via
+//     statusbar.RenderPanel
+//  2. gate on chunk.hasVisibleEntries() — drop blank chunks
+//     before any wire call
+//  3. render via chunk.Compose() (Telegram-safe HTML)
+//  4. send via sendFn
+//  5. write messageID back onto chunk
+//  6. append chunk to chain.chunks
+//  7. set chain.dirty = true
 //
 // Callers (5+ sendFn sites: appendSegment cases 1/3,
 // appendSegmentLocked cases 1/3, appendErrorSegment cases 1/3,

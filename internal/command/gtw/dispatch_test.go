@@ -129,13 +129,13 @@ func TestBuildIssueDispatchText_Plan_StopsBeforeEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchPlan, 0, 0)
 	for _, want := range []string{
-		"due-diligence pass",                         // framing
-		"Baseline",                                   // methodology anchor
-		"Decompose the request",                      // Step 1 discipline
-		"Verify every claim against the code",        // Step 2 discipline
-		"Questions for the user",                     // Step 6 deliverable
+		"due-diligence pass",                          // framing
+		"Baseline",                                    // methodology anchor
+		"Decompose the request",                       // Step 1 discipline
+		"Verify every claim against the code",         // Step 2 discipline
+		"Questions for the user",                      // Step 6 deliverable
 		"Do NOT modify, create, or delete any files.", // read-only invariant
-		"Present the plan and STOP",                  // wait-for-user gate
+		"Present the plan and STOP",                   // wait-for-user gate
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Plan prompt missing %q; got:\n%s", want, out)
@@ -157,14 +157,14 @@ func TestBuildIssueDispatchText_Execute_AuthorisesEdits(t *testing.T) {
 	issue := &Issue{ID: 42, Title: "Login state", Body: "b", URL: "u"}
 	out := buildIssueDispatchText(issue, "br", "o/r", DispatchExecute, 0, 0)
 	for _, want := range []string{
-		"GOBL",                                          // methodology pin
-		"Do not invent functionality",                    // boundary
-		"Do not skip, suppress, or mark-expected",         // boundary
-		"do NOT silently suppress",                        // boundary (test failure)
-		"Do not report 'complete'",                        // boundary
-		"declare the revision in chat FIRST",             // deviation discipline
-		"Pre-existing failures",                          // diagnose-vs-introduced
-		"file:line",                                      // grounding
+		"GOBL",                        // methodology pin
+		"Do not invent functionality", // boundary
+		"Do not skip, suppress, or mark-expected", // boundary
+		"do NOT silently suppress",                // boundary (test failure)
+		"Do not report 'complete'",                // boundary
+		"declare the revision in chat FIRST",      // deviation discipline
+		"Pre-existing failures",                   // diagnose-vs-introduced
+		"file:line",                               // grounding
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Execute prompt missing %q; got:\n%s", want, out)
@@ -194,11 +194,11 @@ func TestBuildIssueDispatchText_RuntimeSelfContained(t *testing.T) {
 	for _, mode := range []IssueDispatchMode{DispatchPlan, DispatchExecute} {
 		out := buildIssueDispatchText(issue, "br", "o/r", mode, 0, 0)
 		for _, leak := range []string{
-			"§4",                 // internal section number
-			"F-gtw-fix",          // internal design doc filename
+			"§4",                    // internal section number
+			"F-gtw-fix",             // internal design doc filename
 			"REVIEWER_INSTRUCTIONS", // internal methodology doc
-			"Execute (§",         // Plan cross-referencing Execute
-			"the plan above",     // Execute assuming a prior Plan turn
+			"Execute (§",            // Plan cross-referencing Execute
+			"the plan above",        // Execute assuming a prior Plan turn
 		} {
 			if strings.Contains(out, leak) {
 				t.Errorf("%v prompt must not leak internal reference %q (runtime agent can't see it):\n%s", mode, leak, out)

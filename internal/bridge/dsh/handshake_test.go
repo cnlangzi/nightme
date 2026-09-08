@@ -225,8 +225,6 @@ func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *
 	})
 }
 
-
-
 // dispatchAssistantMessage emits a synthetic assistant/message
 // mux frame so the driver's readPump pushes EventAgentText into
 // d.events. Tests that exercise drainForRunResult's full turn path

@@ -108,14 +108,14 @@ type fakeProviderCall struct {
 // seed issue maps / errors before driving /gtw fix.
 func newFakeGitProvider(kind ProviderKind, host string) *fakeGitProvider {
 	return &fakeGitProvider{
-		kind:               kind,
-		host:               host,
-		version:            "v0.0.0-test",
-		issueByID:          make(map[int]*Issue),
-		issueErr:           make(map[int]error),
-		prByHead:           make(map[string]*PR),
-		prErr:              make(map[string]error),
-		createLabelErrFor:  make(map[string]error),
+		kind:              kind,
+		host:              host,
+		version:           "v0.0.0-test",
+		issueByID:         make(map[int]*Issue),
+		issueErr:          make(map[int]error),
+		prByHead:          make(map[string]*PR),
+		prErr:             make(map[string]error),
+		createLabelErrFor: make(map[string]error),
 	}
 }
 
@@ -283,9 +283,9 @@ func (f *fakeGitProvider) CallsByMethod(method string) []fakeProviderCall {
 
 // --- GitProvider interface ---
 
-func (f *fakeGitProvider) Kind() ProviderKind    { return f.kind }
-func (f *fakeGitProvider) Host() string         { return f.host }
-func (f *fakeGitProvider) Version() string      { return f.version }
+func (f *fakeGitProvider) Kind() ProviderKind { return f.kind }
+func (f *fakeGitProvider) Host() string       { return f.host }
+func (f *fakeGitProvider) Version() string    { return f.version }
 
 func (f *fakeGitProvider) GetIssue(_ context.Context, owner, repo string, id int) (*Issue, error) {
 	f.mu.Lock()

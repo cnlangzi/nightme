@@ -118,7 +118,6 @@ func (m *mockDSH) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 	writeRPC(w, rpcIDFromRequest(r), true, map[string]any{"accepted": true})
 }
 
-
 // handleRespond validates that the inbound body is a client-response
 // envelope (NOT client-request), records the body for assertions,
 // and writes the {accepted:true} receipt per dsh-api.md §2.12.
@@ -324,8 +323,8 @@ func TestRPCClient_Respond_UsesClientResponseEnvelope(t *testing.T) {
 		Type   string `json:"type"`
 		RPCID  string `json:"rpcId"`
 		Result struct {
-			OK    bool                       `json:"ok"`
-			Value host.ApprovalResponse      `json:"value"`
+			OK    bool                  `json:"ok"`
+			Value host.ApprovalResponse `json:"value"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(body, &env); err != nil {

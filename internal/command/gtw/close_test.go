@@ -90,6 +90,31 @@ type programmableGit struct {
 	// pre-set this to e.g. "https://github.com/cnlangzi/nightme.git".
 	remoteURLResp string
 
+	// revParseShowToplevel is the value returned for any
+	// `rev-parse --show-toplevel` call. Empty means "not a git
+	// repo" — RepoRoot() short-circuits with ErrNotInGitRepo.
+	// Tests that exercise /gtw back <slug> (which calls RepoRoot
+	// against the chat cwd and again from inside the worktree
+	// during yml repair) pre-set this to the rig's repoRoot.
+	revParseShowToplevel string
+
+	// revParseShowToplevelErr overrides revParseShowToplevel
+	// when set; used to simulate a transient git failure.
+	revParseShowToplevelErr error
+
+	// branchShowCurrent is returned for any
+	// `branch --show-current` call. Empty matches detached-HEAD
+	// git behaviour. Used by RunBackToWorktree's yml repair
+	// stub to fill the Branch field.
+	branchShowCurrent string
+
+	// worktreeListPorcelain is returned for any
+	// `worktree list --porcelain` call. Used by IsKnownWorktree
+	// (RunBackToWorktree's "is this actually a worktree" gate)
+	// and WorktreeListPath. Empty means "no worktrees" and any
+	// IsKnownWorktree call returns false.
+	worktreeListPorcelain string
+
 	// calls records every (args) the fake saw, for assertions
 	// about which commands RunClose issued.
 	calls [][]string
@@ -117,6 +142,20 @@ func (p *programmableGit) Run(_ context.Context, dir string, args ...string) (st
 		return p.syncPullOut, "", nil
 	case len(args) >= 3 && args[0] == "remote" && args[1] == "get-url":
 		return p.remoteURLResp, "", nil
+	case len(args) >= 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel":
+		if p.revParseShowToplevelErr != nil {
+			return "", "", p.revParseShowToplevelErr
+		}
+		// Trailing newline matches real git; RepoRoot() trims it.
+		return p.revParseShowToplevel + "\n", "", nil
+	case len(args) >= 2 && args[0] == "branch" && args[1] == "--show-current":
+		return p.branchShowCurrent + "\n", "", nil
+	case len(args) >= 2 && args[0] == "worktree" && args[1] == "list":
+		// `--porcelain` is the only consumer (IsKnownWorktree /
+		// WorktreeListPath); both parse line-oriented output the
+		// same way, so the fake just hands back the configured
+		// block verbatim.
+		return p.worktreeListPorcelain, "", nil
 	}
 	return "", "", nil
 }

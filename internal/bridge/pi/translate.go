@@ -48,27 +48,11 @@ import (
 // channel renderers need no per-bridge branching.
 const thinkingPrefix = "[思考] "
 
-// emptyReplyFallback is the EventAgentResult text used when a turn
-// settles with no useful assistant reply to surface — typically a
-// text+tool turn whose final assistant message_end has content[]
-// without a text block (only thinking/toolCall/empty).
-//
-// User-visible behavior: the channel renders this as the 📝 result
-// card's body. In the rolling-log 💬 the user already saw whatever
-// narration was streamed via EventAgentText (flushed at tool
-// boundaries); this fallback only shows up when the FINAL assistant
-// message had nothing new to say. The exact string "Done." is
-// therefore a deliberate, minimal placeholder — never the agent's
-// actual reply. Different models trigger it with different
-// frequencies: sensenova-flash-lite almost never, Anthropic Claude /
-// GPT for short confirmations more often.
-//
-// It is NOT cosmetic. gateway.Translate drops an EventAgentResult
-// whose Text is empty and IsError is false (internal/gateway/translate.go),
-// pendingTool records a tool_call that has emitted tool_execution_start
-// but not yet the matching tool_execution_end. The bridge uses it to
-// re-attach Name + raw Args on the end event — Pi's wire does not echo
-// args on end, so without start->end correlation the renderer would
+// pendingTool records a tool_call that has emitted
+// tool_execution_start but not yet the matching
+// tool_execution_end. The bridge uses it to re-attach Name +
+// raw Args on the end event — Pi's wire does not echo args on
+// end, so without start->end correlation the renderer would
 // fall back to "🔧 tool" and lose the type-aware summary.
 type pendingTool struct {
 	Name string

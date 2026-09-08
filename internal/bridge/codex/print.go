@@ -1011,7 +1011,7 @@ func runCodexReview(ctx context.Context, s *Starter, cfg agent.StartConfig, opts
 //     render it twice (OutReply from Text + OutResult from
 //     Result). dsh follows the same single-point shape
 //     (internal/bridge/dsh/dispatch.go gates Result.Text on
-//     textDelivered / pendingText).
+//     its own per-turn delivery flag).
 //   - EventAgentError on every failure path with a populated
 //     BridgeDiagnostic so outbound.Translate doesn't silently
 //     drop it (translate.go:188-202).
@@ -1532,4 +1532,3 @@ func translateItemCompleted(sink func(agent.AgentEvent), item *codexExecItem) {
 		// for non-matching shapes, so non-model errors are no-op'd.
 	}
 }
-

@@ -67,6 +67,36 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
 
+      # Strict gofmt gate. gofmt is the canonical Go formatter;
+      # this step fails CI on any file that differs from what
+      # `go fmt` would produce, so formatting drift cannot
+      # accumulate silently between toolchain upgrades. go.mod
+      # pins `go 1.27.0`, so the runner's gofmt here is the same
+      # 1.27 formatter developers run locally — a check based
+      # on an older toolchain (e.g. running this step against
+      # 1.26) would re-trigger the 305-file reformatted in this
+      # commit and turn every future upgrade into another batch.
+      #
+      # `gofmt -l` lists unformatted files; the gate passes iff
+      # the list is empty. `gofmt -l` is preferred over
+      # `go fmt ./... && git diff --exit-code` because the latter
+      # requires a clean worktree and silently no-ops if the
+      # step runs against a partial checkout. -l is a pure read
+      # against the working tree.
+      #
+      # Sits before Build: formatting drift is the cheapest
+      # failure class — surface it before we pay for `go build`
+      # on a tree that's about to be rejected anyway.
+      - name: Check gofmt
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not gofmt'd. Run 'make fmt' and re-commit:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Build
         shell: bash
         run: go build ./...

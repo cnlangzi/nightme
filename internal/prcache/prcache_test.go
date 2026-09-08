@@ -355,30 +355,33 @@ func TestRegistry_GetOrCreate_AllocatesOnce(t *testing.T) {
 	}
 }
 
-// TestRegistry_WritePR_NoOpOnUnknown pins the contract that
-// Registry.WritePR is a no-op for ASes the registry hasn't
-// allocated a Cache for yet. The /gtw dispatchers may
-// legitimately look up an AS that hasn't been stamped enough
-// to trigger GetOrCreate; WritePR on such an AS must not
-// panic and must not allocate a Cache (otherwise /gtw pr
-// success on a chat with zero stamps would allocate caches
-// for every AS).
-func TestRegistry_WritePR_NoOpOnUnknown(t *testing.T) {
+// TestRegistry_WritePR_AllocatesOnUnknown pins the contract
+// that Registry.WritePR allocates the cache if it doesn't
+// exist yet. Cwd keying means there's exactly one cache per
+// workspace; the next outbound stamp on that cwd will read
+// it, and /gtw pr / /gtw close must propagate their known
+// result immediately rather than waiting for the lazy
+// MaybeRefresh to converge on the same answer via a network
+// round-trip. Pre-cwd-keying this was a no-op (per-AS leak
+// guard); that contract is gone — see Registry.WritePR's
+// docstring for the rationale.
+func TestRegistry_WritePR_AllocatesOnUnknown(t *testing.T) {
 	r := &Registry{}
-	r.WritePR("as-never-stamped", &messages.PR{Number: 1, URL: "x", State: "open"})
-	r.WritePR("as-never-stamped-2", nil)
+	r.WritePR("/work/never-stamped", &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"})
+	r.WritePR("/work/never-stamped-2", nil)
 
-	// Registry must remain empty: GetOrCreate was never called.
+	// Both cwd-keyed entries must exist; the second WritePR
+	// must clear the freshly-allocated cache so PR() is nil.
 	r.mu.RLock()
-	if _, ok := r.caches["as-never-stamped"]; ok {
-		r.mu.RUnlock()
-		t.Fatalf("WritePR allocated a Cache for an unregistered AS")
+	defer r.mu.RUnlock()
+	if _, ok := r.caches["/work/never-stamped"]; !ok {
+		t.Fatalf("WritePR did not allocate a Cache for an unknown cwd")
 	}
-	if _, ok := r.caches["as-never-stamped-2"]; ok {
-		r.mu.RUnlock()
-		t.Fatalf("WritePR(nil) allocated a Cache for an unregistered AS")
+	if c, ok := r.caches["/work/never-stamped-2"]; !ok {
+		t.Fatalf("WritePR(nil) did not allocate a Cache for an unknown cwd")
+	} else if c.PR() != nil {
+		t.Errorf("WritePR(nil) populated PR: got %+v, want nil", c.PR())
 	}
-	r.mu.RUnlock()
 }
 
 // TestRegistry_WritePR_RoutesToAllocatedCache covers the

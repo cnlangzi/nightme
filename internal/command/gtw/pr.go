@@ -182,7 +182,9 @@ func dispatchPR(
 	prCtx, prCancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer prCancel()
 	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
-		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, ymlAgent)
+		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, ymlAgent,
+		// Drop OutResult; replyAgent below is the only result card.
+		messages.OutResult)
 	if err != nil {
 		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
 			err.Error(), agentName, runRes), nil
@@ -254,25 +256,25 @@ func dispatchPR(
 	riskLevel, riskReason := extractRiskLevel(body)
 	card := renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason)
 
-	// Write the new PR directly into the cache for every
-	// AgentSession in this chat. We already know the number
-	// / URL from `gh pr create`, so no refresh round-trip is
-	// needed; the next stamp's lazy MaybeRefresh will
-	// correct any branch mismatch within 60 s. Covers the
-	// full chat pool so any AS that re-stamps before TTL
-	// picks up the new PR id immediately.
+	// Stamp the new PR into the workspace's cache before we
+	// reply. Registry.WritePR allocates the cache on first
+	// write (cwd-keyed; per-workspace), so the very next
+	// outbound stamp on this cwd sees the new #N — the
+	// footer doesn't have to wait for the lazy MaybeRefresh
+	// (which would spawn a goroutine, hit `gh pr list`, and
+	// converge on the same answer we already have). Without
+	// this stamp the receipt card would render without the
+	// PR link until the next TTL tick.
 	if deps.PRCache != nil {
 		newPR := &messages.PR{
 			Number: prNumberFromURL(url),
 			URL:    url,
 			State:  "open",
 		}
-		for _, as := range cs.Pool() {
-			if as == nil {
-				continue
-			}
-			deps.PRCache.WritePR(as.ID, newPR)
-		}
+		// prcache is keyed by cwd (per-workspace), so /gtw pr
+		// -a codex in a chat whose primary is claude makes the
+		// link visible to claude's next StatusBar stamp.
+		deps.PRCache.WritePR(c.Worktree, newPR)
 	}
 
 	// Success path: forward runRes so the footer (agentbar +

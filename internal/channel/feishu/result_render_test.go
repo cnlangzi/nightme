@@ -1,6 +1,6 @@
 // Package feishu — F-39 tests for the result-reply dispatch + rendering helpers.
 //
-// Mirrors cc-connect's tests for buildReplyContent / containsMarkdown /
+// Mirrors cc-connect's tests for buildReplyContent /
 // countMarkdownTables / buildPostMdJSON / buildCardJSON.
 package feishu
 
@@ -9,64 +9,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// ---------------------------------------------------------------------------
-// containsMarkdown
-// ---------------------------------------------------------------------------
-
-func TestContainsMarkdown_Fence(t *testing.T) {
-	if !containsMarkdown("hello ``` world") {
-		t.Error("triple-backtick should be detected as markdown")
-	}
-}
-
-func TestContainsMarkdown_Bold(t *testing.T) {
-	if !containsMarkdown("this **is** bold") {
-		t.Error("** should be detected")
-	}
-}
-
-func TestContainsMarkdown_Strike(t *testing.T) {
-	if !containsMarkdown("~~strike~~") {
-		t.Error("~~ should be detected")
-	}
-}
-
-func TestContainsMarkdown_InlineCode(t *testing.T) {
-	if !containsMarkdown("`inline`") {
-		t.Error("` should be detected")
-	}
-}
-
-func TestContainsMarkdown_UnorderedList(t *testing.T) {
-	if !containsMarkdown("intro\n- item one\n- item two") {
-		t.Error("`- ` (newline-prefixed) should be detected")
-	}
-}
-
-func TestContainsMarkdown_OrderedList(t *testing.T) {
-	if !containsMarkdown("intro\n1. first\n2. second") {
-		t.Error("`1. ` (newline-prefixed) should be detected")
-	}
-}
-
-func TestContainsMarkdown_Heading(t *testing.T) {
-	if !containsMarkdown("intro\n# Title") {
-		t.Error("`# ` (newline-prefixed) should be detected")
-	}
-}
-
-func TestContainsMarkdown_HorizontalRule(t *testing.T) {
-	if !containsMarkdown("above\n---\nbelow") {
-		t.Error("`---` should be detected")
-	}
-}
-
-func TestContainsMarkdown_PlainTextFalse(t *testing.T) {
-	if containsMarkdown("just plain text without markers") {
-		t.Error("plain text should not be detected as markdown")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // countMarkdownTables
@@ -374,16 +316,44 @@ func TestBuildResultCardJSON_NoBlankLineWhenFooterEmpty(t *testing.T) {
 // buildResultPayload dispatch
 // ---------------------------------------------------------------------------
 
-func TestBuildResultPayload_NoMarkdown_UsesText(t *testing.T) {
+// TestBuildResultPayload_NoMarkdown_UsesInteractiveCard — even plain-text
+// bodies (e.g. `/gtw commit`'s "d77ab51 ..." reply) must route through
+// Card 2.0, not MsgTypeText, so the statusbar footer (hr + grey plain_text)
+// renders. Feishu text bubbles drop <hr> and <font color='grey'> by
+// surface design — never route a footer-bearing OutResult to MsgTypeText.
+func TestBuildResultPayload_NoMarkdown_UsesInteractiveCard(t *testing.T) {
 	msgType, body, err := buildResultPayload("plain text without markers", nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if msgType != "text" {
-		t.Errorf("expected MsgTypeText, got %q", msgType)
+	if msgType != "interactive" {
+		t.Errorf("expected MsgTypeInteractive (card), got %q", msgType)
 	}
-	if !strings.Contains(body, `"text":"plain text without markers"`) {
-		t.Errorf("expected text body, got %q", body)
+	if !strings.Contains(body, "plain text without markers") {
+		t.Errorf("expected body to contain input text, got %q", body)
+	}
+}
+
+// TestBuildResultPayload_NoMarkdown_RendersFooter — when a footer is
+// supplied on a plain-text body, buildResultPayload must surface it
+// as the styled <hr> + grey markdown block on the Card 2.0 envelope.
+// Without this, the `/gtw commit` reply loses its statusbar.
+func TestBuildResultPayload_NoMarkdown_RendersFooter(t *testing.T) {
+	footer := []string{"🤖: pi", "📁: repo · ⎇ main"}
+	_, body, err := buildResultPayload("d77ab51 refactor(chatsession): ...", footer)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !strings.Contains(body, `"hr"`) {
+		t.Errorf("expected Card 2.0 body to contain hr element, got %q", body)
+	}
+	if !strings.Contains(body, `<font color='grey'>`) {
+		t.Errorf("expected footer to render as grey <font>, got %q", body)
+	}
+	for _, line := range footer {
+		if !strings.Contains(body, line) {
+			t.Errorf("expected footer line %q in body, got %q", line, body)
+		}
 	}
 }
 

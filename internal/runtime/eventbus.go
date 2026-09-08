@@ -200,11 +200,13 @@ func WireRuntimeCallbacksAndRestore(
 				out.AgentName = as.Agent
 				out.Workspace = as.Cwd
 				out.SessionID = as.SessionID()
+				out.Model = as.Model()
 			} else if as := cs.SelectedAgentSession(); as != nil {
 				// Fallback for legacy events without AgentSessionID.
 				out.AgentName = as.Agent
 				out.Workspace = as.Cwd
 				out.SessionID = as.SessionID()
+				out.Model = as.Model()
 			}
 			if err := em.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",

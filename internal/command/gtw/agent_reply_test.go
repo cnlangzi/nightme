@@ -418,6 +418,101 @@ func TestRunAgentFor_Filtering(t *testing.T) {
 	}
 }
 
+// TestRunAgentFor_DropOutResult covers the /gtw pr / commit contract:
+// the dispatcher's success path produces its own result card via
+// replyAgent (an OutReply that lands on the receipt with the
+// latest statusbar — PR link / commit hash + agentbar + usagebar
+// all stamped), so the sink MUST drop the agent's standalone
+// OutResult card to avoid a redundant duplicate on top. Other
+// kinds (OutReply chunks, OutToolStart / End, OutHeartbeat
+// follow-ups) still flow to the emitter unchanged — the drop is
+// scoped to the terminal result kind only.
+func TestRunAgentFor_DropOutResult(t *testing.T) {
+	starter := &eventEmitterStarter{
+		name: "drop-out-result",
+		events: []agent.AgentEvent{
+			{Kind: agent.EventAgentText, Text: "plain chunk"},
+			{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: "t1", Name: "Bash", Args: "ls"}},
+			{Kind: agent.EventAgentToolEnd, ToolEnd: &agent.AgentToolEndEvent{ID: "t1", Name: "Bash"}},
+			{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "final fenced body"}},
+		},
+		runOnceText: "final fenced body",
+	}
+	cs, ch := newSinkTestRig(t, starter)
+
+	_, _, err := runAgentFor(
+		t.Context(), cs, t.TempDir(),
+		"prompt", "chat-test", "msg-test", "", "",
+		messages.OutResult, // <-- the /gtw pr / commit drop flag
+	)
+	if err != nil {
+		t.Fatalf("runAgentFor: %v", err)
+	}
+
+	// Wait for drain. 3 primary events (OutReply, OutToolStart,
+	// OutToolEnd) + 1 OutHeartbeat follow-up (the ToolStart
+	// counter change). OutResult is dropped before em.Send so
+	// it never lands in the capture.
+	if !ch.waitForSent(4, 2*time.Second) {
+		t.Fatalf("emitter never received 4 messages; got %d: %+v",
+			len(ch.snapshot()), ch.snapshot())
+	}
+
+	got := ch.snapshot()
+	for _, m := range got {
+		if m.Kind == messages.OutResult {
+			t.Errorf("OutResult leaked through drop filter: %+v", m)
+		}
+	}
+	// Spot-check the other kinds all landed.
+	have := map[messages.OutboundKind]int{}
+	for _, m := range got {
+		have[m.Kind]++
+	}
+	for _, want := range []messages.OutboundKind{
+		messages.OutReply,
+		messages.OutToolStart,
+		messages.OutToolEnd,
+		messages.OutHeartbeat,
+	} {
+		if have[want] == 0 {
+			t.Errorf("missing kind %v in %+v", want, got)
+		}
+	}
+}
+
+// TestRunAgentFor_NoDropPreservesOutResult is the regression net
+// for the drop feature: omitting dropKinds (the existing /review
+// and one-shot flows) must keep OutResult on the wire. Without
+// this test, an accidental `...OutResult` in the default
+// signature could silently drop result cards from /review etc.
+func TestRunAgentFor_NoDropPreservesOutResult(t *testing.T) {
+	starter := &eventEmitterStarter{
+		name: "preserve-out-result",
+		events: []agent.AgentEvent{
+			{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "ok"}},
+		},
+		runOnceText: "ok",
+	}
+	cs, ch := newSinkTestRig(t, starter)
+
+	_, _, err := runAgentFor(
+		t.Context(), cs, t.TempDir(),
+		"prompt", "chat-test", "msg-test", "", "",
+	)
+	if err != nil {
+		t.Fatalf("runAgentFor: %v", err)
+	}
+	if !ch.waitForSent(1, 2*time.Second) {
+		t.Fatalf("emitter never received 1 message; got %d", len(ch.snapshot()))
+	}
+	got := ch.snapshot()
+	if len(got) != 1 || got[0].Kind != messages.OutResult {
+		t.Fatalf("got %+v, want exactly one OutResult", got)
+	}
+}
+
+
 // TestRunAgentFor_SinkNilEmitter verifies the nil-emitter
 // short-circuit. StreamRunOnceToEmitter returns a no-op sink
 // when em is nil (so the bridge's drain loop never blocks on

@@ -35,10 +35,12 @@ type GitCollector func(ctx context.Context, cwd string) (*messages.GitStatusSnap
 // .PR(). PR caching lives in the dedicated prcache.Cache with
 // its own 60s TTL + failureBackoff + background refresh —
 // the chatsession layer just owns the per-stamp trigger. The
-// `cwd` argument lets the prcache refresh resolve the current
-// head branch from the same workspace the chat is sitting on.
-// nil-safe (returns nil when prCache == nil).
-type PRLookup func(asID, cwd string) *messages.PR
+// `cwd` argument is the cache key: PR is a property of the
+// workspace (git repo + branch), not of the AgentSession, so the
+// prcache is keyed by cwd and shared across every AS that
+// happens to run in the same workspace. nil-safe (returns nil
+// when prCache == nil).
+type PRLookup func(cwd string) *messages.PR
 
 // GitStatusDeps bundles the optional dependencies a ChatSession
 // uses to build its GitStatus on every pull-on-read call
@@ -54,7 +56,7 @@ type GitStatusDeps struct {
 	// GitStatus.Snapshot stays nil — Channel renders "git
 	// status unknown" for the affected line.
 	CollectGit GitCollector
-	// LookupPR reads the cached PR / MR synchronously. nil
-	// means GitStatus.PullRequest is always nil.
+	// LookupPR reads the cached PR / MR synchronously, keyed
+	// by cwd. nil means GitStatus.PullRequest is always nil.
 	LookupPR PRLookup
 }

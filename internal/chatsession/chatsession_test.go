@@ -688,7 +688,7 @@ func TestChatSession_GitStatus_NoCacheBehavior(t *testing.T) {
 		// fixture we have no AgentSession, so PR is nil too;
 		// the assertion that matters here is "no panic, snap=nil".
 		cs.WithGitStatusDeps(GitStatusDeps{
-			LookupPR: func(asID, cwd string) *messages.PR {
+			LookupPR: func(cwd string) *messages.PR {
 				return &messages.PR{Number: 42, URL: "https://example/pr/42"}
 			},
 		})
@@ -718,7 +718,7 @@ func TestChatSession_GitStatus_NoCacheBehavior(t *testing.T) {
 		cs.mu.Unlock()
 		var calls int
 		cs.WithGitStatusDeps(GitStatusDeps{
-			LookupPR: func(asID, cwd string) *messages.PR {
+			LookupPR: func(cwd string) *messages.PR {
 				calls++
 				return nil
 			},

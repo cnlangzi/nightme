@@ -96,66 +96,6 @@ bot 在 20:45:36-37 正常返回 `Closed 1 bridge process(es) (sessions preserve
                                                   ❌ + 原因 + 建议
 ```
 
-### 3.2 In-flight 重投(对接 RestoreFromRegistry)
-
-`Manager.RestoreFromRegistry`(`internal/chatsession/manager.go:540-575`)已有完整重投循环:
-- 遍历每个 AS 的 `InFlightMessages`(持久化在 `agent_sessions.json`)
-- 复制 blocks,推回 `cs.queue`
-- 下次 `TryFlush` 时由新 spawn 的 bridge `--resume <sessionID>` 接住
-
-**当前缺口**:仅 daemon 重启路径触发。`readpump` 检测到 process death 时,`endPrompt(PromptEndProcessDied)`(`internal/agentsession/readpump.go:101`)直接把 `as.inFlightMessages = nil`,没人把这批消息推到 queue。
-
-**修复点**(`internal/agentsession/readpump.go:208-257`):
-
-```go
-func (as *AgentSession) endPrompt(reason PromptEndReason) {
-    as.asMu.Lock()
-    p := as.currentPrompt
-    if p == nil {
-        as.asMu.Unlock()
-        return
-    }
-
-    // F-61: 死亡快照 — 在清空 currentPrompt 之前,把 in-flight
-    // blocks 复制到一个 channel,让 routeEvent 推到 cs.queue。
-    // 与 RestoreFromRegistry (manager.go:540) 走同一条重投路径。
-    snapshot := append([]agent.ContentBlock(nil), p.Messages...)
-    as.currentPrompt = nil
-    as.inFlightMessages = nil
-    as.isReady.Store(true)
-    as.asMu.Unlock()
-
-    if reason == PromptEndProcessDied {
-        as.replayCh <- replayReq{promptID: p.ID, blocks: snapshot}
-    }
-    ...
-}
-```
-
-接收端(`chatsession/pump_events.go`,在现有 `case KindPromptEnded:` 分支里):
-
-```go
-case KindPromptEnded:
-    cs.writebackMessageState(as, ev.Prompt)
-    if ev.Prompt.EndReason == agentsession.PromptEndProcessDied {
-        // F-61: bridge 死亡场景的重投,与 RestoreFromRegistry 一致
-        if err := cs.queue.Push(Message{
-            ID:         ev.Prompt.LastMessageID,
-            ChatID:     cs.S,
-            Blocks:     ev.Prompt.Messages, // 已经防御性 copy
-            ReceivedAt: ev.Prompt.StartedAt,
-        }); err != nil {
-            slog.Warn("chatsession: in-flight replay after bridge death failed",
-                "chat_id", cs.S, "as_id", as.ID, "err", err)
-        }
-    }
-    _ = cs.TryFlush()
-```
-
-注意:
-- 必须在 `SetExited` 之前发生 — 否则 `TryFlush` 会因 `StatusExited` 直接 SKIP(见 `chatsession.go:917-925`)
-- 实际上 `endPrompt` → emit KindPromptEnded → emitLifecycleLocked(Exited) 是顺序的,pump_events.go:117-127 的两个 case 是分开的,但路由由同一 pump 处理,需要确认顺序
-
 ### 3.3 附件下载重试 ladder + AllFailed 降级
 
 `internal/channel/feishu/adapter.go:3165-3192` 当前是 `DownloadAttachments` 一次失败就声明 AllFailed,然后 `return nil`。两层问题:

@@ -155,15 +155,27 @@ func TestGitHubCreateLabel_SuccessNoError(t *testing.T) {
 
 // TestGitLabCreateLabel_CLIArgs pins the exact argv that
 // GitLabProvider.CreateLabel builds. Mirrors the GitHub test
-// above. Pinned shape (1.82):
+// above. Pinned shape (post glab-#-strip fix):
 //
-//	glab label create --repo <owner>/<repo> --name <name>
-//	--color <color> --description <description>
+//	glab api --method POST projects/<urlencoded owner/repo>/labels \
+//	    -f name=<name> -f color=#<hex> -f description=<description>
 //
-// Notable: glab uses --name (not positional like gh) and has
-// no --force flag (1.82). Future glab versions that add --force
-// MUST NOT be picked up silently: the GitLab test here mirrors
-// the GitHub test and would catch a reintroduction of --force.
+// We route through `glab api` (a generic caller) instead of
+// `glab label create` because the latter strips the leading
+// `#` from `--color` before posting, so the payload always
+// lands as `fbca04` and GitLab rejects it with 400 "must be a
+// valid color code". The `#` is prepended in our code and
+// survives the wire (URL-encoded to `%23`); GitLab decodes it
+// back to `#RRGGBB`, matching its validation regex.
+//
+// Regression guards:
+//   - `label`, `create`, `--color`, `--force` MUST NOT appear as
+//     argv elements — any of them means we regressed to
+//     `glab label create --color`, and the `#`-strip bug returns.
+//   - `color=#fbca04` (with the leading `#`) MUST appear — the
+//     `#` is mandatory for GitLab's validation.
+//   - `color=fbca04` (bare hex, no `#`) MUST NOT appear — that's
+//     exactly the broken form.
 func TestGitLabCreateLabel_CLIArgs(t *testing.T) {
 	cli := &stubCLIRunner{}
 	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
@@ -178,35 +190,40 @@ func TestGitLabCreateLabel_CLIArgs(t *testing.T) {
 	}
 	wantSubstrings := []string{
 		"glab",
-		"label", "create",
-		"--repo", "acme/platform",
-		"--name", "nightme/wip",
-		"--color", "fbca04",
-		"--description", "Work in progress",
+		"api",
+		"--method", "POST",
+		"projects/acme%2Fplatform/labels",
+		"-f", "name=nightme/wip",
+		"-f", "color=#fbca04",
+		"-f", "description=Work in progress",
 	}
 	for _, want := range wantSubstrings {
 		if !slices.Contains(cli.argv, want) {
 			t.Errorf("argv missing %q: %v", want, cli.argv)
 		}
 	}
-	// glab 1.82 has no --force. Future glab versions: if you
-	// add --force, do NOT pass it here (would violate the
-	// GitProvider.CreateLabel contract). This assertion catches
-	// that regression.
-	for _, bad := range []string{"--force"} {
+	// Regression guards. `slices.Contains` checks element
+	// equality, so the URL segment "labels" (plural) won't
+	// false-positive on the exact-match token "label".
+	forbidden := []string{"--color", "label", "create", "--force", "color=fbca04"}
+	for _, bad := range forbidden {
 		if slices.Contains(cli.argv, bad) {
-			t.Errorf("glab argv contains forbidden flag %q: %v", bad, cli.argv)
+			t.Errorf("glab argv contains forbidden token %q (would break the # color format): %v",
+				bad, cli.argv)
 		}
 	}
 }
 
-// TestGitLabCreateLabel_AlreadyExistsIsSuccess: glab 1.x
-// prints "label already exists" or "Label already exists" in
-// English; the GitLab implementation sniffs both forms
-// (case-sensitive, per the inline comment). Pin both
-// variants so a glab stderr-wording change forces a review.
+// TestGitLabCreateLabel_AlreadyExistsIsSuccess: `glab api`
+// echoes the GitLab response body to stderr on a 4xx/5xx, so
+// the 422 envelope `{"message":{"name":["has already been
+// taken"]}}` reaches us verbatim. The legacy `glab label
+// create` "already exists" / "Already exists" forms are kept as
+// belt-and-braces fallbacks for older glab. Pin all variants
+// so a stderr-wording change forces a review.
 func TestGitLabCreateLabel_AlreadyExistsIsSuccess(t *testing.T) {
 	cases := []string{
+		`{"message":{"name":["has already been taken"]}}` + "\n",
 		"label already exists\n",
 		"Label already exists\n",
 		`ERROR\nLabel "nightme/wip" already exists.\n`,
@@ -214,22 +231,23 @@ func TestGitLabCreateLabel_AlreadyExistsIsSuccess(t *testing.T) {
 	for i, stderr := range cases {
 		t.Run(fmt.Sprintf("stderr_variant_%d", i), func(t *testing.T) {
 			cli := &stubCLIRunner{
-		stderr: stderr,
-		err:    errors.New("exit status 1"),
+				stderr: stderr,
+				err:    errors.New("exit status 1"),
 			}
 			p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
 			if err := p.CreateLabel(context.Background(),
-	"acme", "platform",
-	"nightme/wip", "fbca04", "Work in progress"); err != nil {
-		t.Errorf("CreateLabel with 'already exists' stderr = %v, want nil", err)
+				"acme", "platform",
+				"nightme/wip", "fbca04", "Work in progress"); err != nil {
+				t.Errorf("CreateLabel with 'already exists' stderr = %v, want nil", err)
 			}
 		})
 	}
 }
 
 // TestGitLabCreateLabel_OtherErrorSurfaces: same shape as the
-// GitHub counterpart. glab exits 1 with non-"already exists"
-// stderr → error returned to caller verbatim.
+// GitHub counterpart. `glab api` exits non-zero with non-matching
+// stderr → error returned to caller verbatim. The wrapped prefix
+// is "glab api create label" (matches the new command path).
 func TestGitLabCreateLabel_OtherErrorSurfaces(t *testing.T) {
 	cli := &stubCLIRunner{
 		stderr: "403 Forbidden - your token does not have permission to create labels\n",
@@ -245,7 +263,7 @@ func TestGitLabCreateLabel_OtherErrorSurfaces(t *testing.T) {
 	if !strings.Contains(err.Error(), "403 Forbidden") {
 		t.Errorf("CreateLabel error must echo 403 stderr verbatim; got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "glab label create") {
+	if !strings.Contains(err.Error(), "glab api create label") {
 		t.Errorf("CreateLabel error must identify the failing command; got: %v", err)
 	}
 }
@@ -260,4 +278,3 @@ func TestGitLabCreateLabel_SuccessNoError(t *testing.T) {
 		t.Errorf("CreateLabel happy path = %v, want nil", err)
 	}
 }
-

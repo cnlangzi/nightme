@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -917,10 +918,10 @@ func (c *GitHubProvider) GetIssue(ctx context.Context, owner, repo string, id in
 		return nil, fmt.Errorf("gh issue view: %v: %s", err, stderr)
 	}
 	var raw struct {
-		Number int      `json:"number"`
-		Title  string   `json:"title"`
-		Body   string   `json:"body"`
-		State  string   `json:"state"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		State  string `json:"state"`
 		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -1001,8 +1002,8 @@ func (c *GitHubProvider) RemoveIssueLabel(ctx context.Context, owner, repo strin
 // gh creates the label if missing. When the label already exists,
 // gh exits 1 with stderr
 //
-// 	label with name "<name>" already exists; use `--force` to update
-// 	its color and description
+//	label with name "<name>" already exists; use `--force` to update
+//	its color and description
 //
 // We deliberately DO NOT pass --force: --force would update the
 // existing label's color / description, which contradicts the
@@ -1436,35 +1437,59 @@ func (c *GitLabProvider) RemoveIssueLabel(ctx context.Context, owner, repo strin
 	return nil
 }
 
-// CreateLabel runs `glab label create --name <name> --color <color>
-// --description <description> --repo <owner>/<repo>`. glab does
-// NOT have a `--force` flag (as of 1.82.x), so we treat the
-// "already exists" stderr as success — equivalent to gh's
-// --force but via stderr sniffing rather than an explicit flag.
+// CreateLabel runs `glab api --method POST projects/<owner/repo>/labels
+// -f name=<name> -f color=#<hex> -f description=<description>`.
+// `color` is sent with a prepended `#` — see the in-function
+// comment for the rationale. A duplicate label (422 from GitLab)
+// is treated as success, equivalent to gh's --force but via
+// stderr sniffing rather than an explicit flag.
 //
-// "already exists" substring covers both 1.x and the older
-// "Label already exists" wording; the match is case-sensitive
-// to avoid false positives on unrelated errors. A truly broken
-// state (e.g. label-create permission denied on a 403) will
-// surface a different stderr and reach the caller unchanged.
+// `glab api` echoes the GitLab response body to stderr on a
+// 4xx/5xx. The `has already been taken` substring covers the
+// `{"message":{"name":["has already been taken"]}}` 422 envelope;
+// the legacy `glab label create` "already exists" / "Already
+// exists" forms are kept as belt-and-braces fallbacks for older
+// glab. The match is case-sensitive to avoid false positives on
+// unrelated errors (e.g. "label name contains invalid characters").
+// A truly broken state (e.g. label-create permission denied on a
+// 403) surfaces a different stderr and reaches the caller unchanged.
 func (c *GitLabProvider) CreateLabel(ctx context.Context, owner, repo, name, color, description string) error {
+	// `glab label create --color <hex>` strips the leading `#`
+	// before posting, so the payload always lands as `fbca04`
+	// and GitLab rejects it with 400
+	// `{message: {color: ["must be a valid color code"]}}`. Route
+	// through `glab api` instead (generic caller, no field-value
+	// normalisation) and prepend `#` ourselves so the colour
+	// survives all the way to GitLab. `glab api` URL-encodes the
+	// value (`#` → `%23`) on the wire; GitLab decodes it back.
+	// The exec path bypasses the shell so `#` is a literal arg
+	// character, not a comment introducer.
+	hex := "#" + strings.TrimPrefix(color, "#")
+	projectPath := url.PathEscape(owner + "/" + repo)
 	args := []string{
-		"label", "create",
-		"--repo", owner + "/" + repo,
-		"--name", name,
-		"--color", color,
-		"--description", description,
+		"api",
+		"--method", "POST",
+		"projects/" + projectPath + "/labels",
+		"-f", "name=" + name,
+		"-f", "color=" + hex,
+		"-f", "description=" + description,
 	}
 	_, stderr, err := c.runner().Run(ctx, "glab", args...)
 	if err == nil {
 		return nil
 	}
-	// glab 1.x prints the message in English; older versions
-	// occasionally capitalised "Label" — match both.
-	if strings.Contains(stderr, "already exists") || strings.Contains(stderr, "Already exists") {
+	// `glab api` echoes the GitLab response body to stderr on
+	// 4xx/5xx. A duplicate label returns 422 with
+	// `{"message":{"name":["has already been taken"]}}`; the
+	// legacy `glab label create` "already exists" /
+	// "Already exists" forms are kept as belt-and-braces
+	// fallbacks for older glab.
+	if strings.Contains(stderr, "has already been taken") ||
+		strings.Contains(stderr, "already exists") ||
+		strings.Contains(stderr, "Already exists") {
 		return nil
 	}
-	return fmt.Errorf("glab label create: %v: %s", err, strings.TrimSpace(stderr))
+	return fmt.Errorf("glab api create label: %v: %s", err, strings.TrimSpace(stderr))
 }
 
 // CreatePR runs `glab mr create --target-branch <base> --source-branch
@@ -1537,4 +1562,3 @@ func (c *GitLabProvider) classifyCreatePRError(stderr string) error {
 	}
 	return nil
 }
-

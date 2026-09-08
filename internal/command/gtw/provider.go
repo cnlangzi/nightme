@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -123,6 +124,8 @@ type GitProvider interface {
 	// call is a no-op — color and description are NOT propagated,
 	// so humans who hand-tuned a label don't get silently
 	// overwritten on every /gtw fix.
+	// Color is 6-char hex WITH a leading '#' (e.g. "#fbca04").
+	// Passed through verbatim to the underlying CLI.
 	//
 	// On failure (network / token scope / API rate-limit), the
 	// raw provider stderr is preserved so callers can surface the
@@ -917,10 +920,10 @@ func (c *GitHubProvider) GetIssue(ctx context.Context, owner, repo string, id in
 		return nil, fmt.Errorf("gh issue view: %v: %s", err, stderr)
 	}
 	var raw struct {
-		Number int      `json:"number"`
-		Title  string   `json:"title"`
-		Body   string   `json:"body"`
-		State  string   `json:"state"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		State  string `json:"state"`
 		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -1001,8 +1004,8 @@ func (c *GitHubProvider) RemoveIssueLabel(ctx context.Context, owner, repo strin
 // gh creates the label if missing. When the label already exists,
 // gh exits 1 with stderr
 //
-// 	label with name "<name>" already exists; use `--force` to update
-// 	its color and description
+//	label with name "<name>" already exists; use `--force` to update
+//	its color and description
 //
 // We deliberately DO NOT pass --force: --force would update the
 // existing label's color / description, which contradicts the
@@ -1436,35 +1439,39 @@ func (c *GitLabProvider) RemoveIssueLabel(ctx context.Context, owner, repo strin
 	return nil
 }
 
-// CreateLabel runs `glab label create --name <name> --color <color>
-// --description <description> --repo <owner>/<repo>`. glab does
-// NOT have a `--force` flag (as of 1.82.x), so we treat the
-// "already exists" stderr as success — equivalent to gh's
-// --force but via stderr sniffing rather than an explicit flag.
+// CreateLabel runs `glab api --method POST projects/<owner/repo>/labels
+// -f name=<name> -f color=<color> -f description=<description>`
+// (color passed through verbatim, including the leading '#').
+// Uses `glab api` rather than `glab label create` because the
+// latter strips the leading '#' from --color before posting;
+// GitLab's REST API rejects the bare hex with 400 "must be a
+// valid color code". `glab api` is a generic caller that
+// preserves the field value verbatim.
 //
-// "already exists" substring covers both 1.x and the older
-// "Label already exists" wording; the match is case-sensitive
-// to avoid false positives on unrelated errors. A truly broken
-// state (e.g. label-create permission denied on a 403) will
-// surface a different stderr and reach the caller unchanged.
+// `glab api` echoes the GitLab response body to stderr on a
+// 4xx/5xx. A duplicate label produces the 409 envelope
+// `{"message":"Label already exists"}`, which contains the
+// substring "already exists" — the call returns nil. Other
+// stderr is wrapped verbatim with a "glab api create label:"
+// prefix.
 func (c *GitLabProvider) CreateLabel(ctx context.Context, owner, repo, name, color, description string) error {
+	projectPath := url.PathEscape(owner + "/" + repo)
 	args := []string{
-		"label", "create",
-		"--repo", owner + "/" + repo,
-		"--name", name,
-		"--color", color,
-		"--description", description,
+		"api",
+		"--method", "POST",
+		"projects/" + projectPath + "/labels",
+		"-f", "name=" + name,
+		"-f", "color=" + color,
+		"-f", "description=" + description,
 	}
 	_, stderr, err := c.runner().Run(ctx, "glab", args...)
 	if err == nil {
 		return nil
 	}
-	// glab 1.x prints the message in English; older versions
-	// occasionally capitalised "Label" — match both.
-	if strings.Contains(stderr, "already exists") || strings.Contains(stderr, "Already exists") {
+	if strings.Contains(stderr, "already exists") {
 		return nil
 	}
-	return fmt.Errorf("glab label create: %v: %s", err, strings.TrimSpace(stderr))
+	return fmt.Errorf("glab api create label: %v: %s", err, strings.TrimSpace(stderr))
 }
 
 // CreatePR runs `glab mr create --target-branch <base> --source-branch
@@ -1537,4 +1544,3 @@ func (c *GitLabProvider) classifyCreatePRError(stderr string) error {
 	}
 	return nil
 }
-

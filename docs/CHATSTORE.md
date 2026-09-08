@@ -7,7 +7,6 @@
 > - [SPEC.md](./SPEC.md) §1.2 三层 FSM、§1.3 不变式
 > - [feat/F-chat-session.md](./feat/F-chat-session.md) ChatSession 模型
 > - [feat/F-CHATSTORE-001-chat-session-persistence.md](./feat/F-CHATSTORE-001-chat-session-persistence.md) lost-update 修复与 Store 抽出（本设计的前提，尚需按本文收完）
-> - [feat/F-62-inflight-cwd-home.md](./feat/F-62-inflight-cwd-home.md) cwd 边界与 in-flight
 > - [CHANNEL.md](./CHANNEL.md) 多 channel + lazy GetOrCreate
 
 ---
@@ -210,7 +209,7 @@ func (p *AgentSessionPool) ListByChatCwd(chatID, cwd string) []*AgentSession
 
 1. 当前 `cs.pool`：只移出 map + `selectedAS = nil`。不 Close、不 asFile.Delete、不 asPool.Delete、**不清 `cs.subs`**、不 Unsubscribe。
 2. **不**批量预挂载新 cwd。
-3. `cs.queue.Clear()` + drop（避免 A 的排队消息打进 B）。旧 selected 的 `ClearInFlight` 可保留（F-62）。
+3. `cs.queue.Clear()` + drop（避免 A 的排队消息打进 B）。
 4. **禁止**按 `as ∉ cs.pool` 丢弃 `routeEvent` 事件。
 
 切回旧 cwd：只改 store 的 `selectedCwd` + 清空当前 `cs.pool`；下一条消息 Lookup → asPool Get → 挂回 → 主动对接恢复。其间若有事件，本就一直在 route。
@@ -313,5 +312,4 @@ PR1 单独合入后：多 cwd 不再在 hydrate 时灌进 `cs.pool`（空池直�
 |------|------|
 | F-CHATSTORE-001 | 抽出 Store、修 lost-update、删死字段——**必要但未完成**；本文要求生产路径真正改走 `SetXxx`，并去掉 CS 双写与 shutdown Save |
 | CHANNEL.md lazy restore | 与「启动不 Restore、GetOrCreate 驱动」对齐；本文补 Bootstrap + 不 hydrate AS |
-| F-62 | cwd 边界 ClearInFlight；本文扩展为拆主动子集 + asPool warm |
 | F-61 | Lifecycle respawn 对 warm 仍走 routeEvent；prober 仍只扫主动池 |

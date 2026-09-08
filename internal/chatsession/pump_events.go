@@ -183,11 +183,13 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 				"as_id", ev.AgentSessionID)
 			// F-61: immediate respawn right after marking Exited.
 			// Synchronous spawn — the new bridge starts with
-			// --resume <sessionID> and re-processes the
-			// in-flight user message from its own JSONL
-			// history. No need to wait for the async watchdog
-			// prober. The user sees a brief delay (1-2s for
-			// fork+exec+handshake) and then a normal reply.
+			// --resume <sessionID> and picks up the prior
+			// conversation history from the bridge's own store.
+			// The specific turn that was running when the old
+			// bridge died is NOT replayed; the user sees the
+			// next message sent after the respawn land
+			// normally. No need to wait for the async watchdog
+			// prober.
 			//
 			// /close path is excluded via as.closedByUser
 			// (set by Close()). Respawn failures fall through
@@ -201,9 +203,7 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 					as.SetSuspect("immediate_respawn_failed")
 				} else {
 					// F-61: drain queue with the freshly-
-					// respawned AS. The in-flight message is
-					// already covered by --resume on the
-					// bridge side; any further queued user
+					// respawned AS. Any further queued user
 					// messages (submitted after this death
 					// was detected but before respawn
 					// finished) need TryFlush to land.

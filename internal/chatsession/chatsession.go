@@ -552,9 +552,6 @@ func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
 
-	if oldAS != nil {
-		oldAS.ClearInFlight()
-	}
 	cs.clearQueueOnCwdBoundary()
 
 	// No cache to invalidate anymore: GitStatus(ctx) now rebuilds
@@ -562,6 +559,8 @@ func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 	// against this chat will naturally read the new cwd.
 	return nil
 }
+
+
 
 // SetWatchMode changes the per-chat message-watch mode. Persists to
 // registry on success so it survives daemon restart. No spawn /
@@ -650,9 +649,7 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	}
 	cs.mu.Lock()
 	changed := cs.selectedAgent != agent
-	var oldAS *AgentSession
 	if changed {
-		oldAS = cs.selectedAS
 		cs.selectedAS = nil
 	}
 	cs.selectedAgent = agent
@@ -677,12 +674,6 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	// AS exits.
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
-
-	// Drop the old AS's in-flight mirror outside cs.mu.
-	// ClearInFlight is idempotent and self-locks on asMu.
-	if oldAS != nil {
-		oldAS.ClearInFlight()
-	}
 	return nil
 }
 
@@ -810,14 +801,10 @@ func (cs *ChatSession) ClearSelectedCwd() {
 		}
 	}
 	cs.mu.Lock()
-	oldAS := cs.selectedAS
 	cs.detachActiveWorkingSetLocked()
 	cs.selectedCwd = ""
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
-	if oldAS != nil {
-		oldAS.ClearInFlight()
-	}
 	cs.clearQueueOnCwdBoundary()
 
 	// No cache to clear anymore — ChatSession.GitStatus checks
@@ -1451,9 +1438,8 @@ func (cs *ChatSession) writebackMessageState(as *AgentSession, p *Prompt) {
 // QueueMaxMsgs is the maximum number of queued messages a
 // ChatSession can hold before QueueUserMessage returns
 // ErrQueueFull. Raised from the v1.3 default of 50 → 4096 so that
-// restart-replay (which pushes every AS's InFlightMessages into
-// the queue) plus normal user input doesn't hit backpressure on
-// chats with many parallel agents or long-running prompts.
+// normal user input across chats with many parallel agents or
+// long-running prompts doesn't hit backpressure.
 const QueueMaxMsgs = 4096
 
 // DropQueue (CS-AS 边界重构 Phase 1) empties the at-least-once
@@ -1625,12 +1611,12 @@ func (cs *ChatSession) attachAgentSessionLocked(as *AgentSession) {
 	if _, exists := cs.pool[key]; exists {
 		return
 	}
-	// Wire the per-AS persist callback so Submit and endPrompt can
-	// flush their own state transitions (specifically
-	// InFlightMessages) without depending on the caller to call
+	// Wire the per-AS persist callback so lifecycle setters
+	// (SetExited / SetSuspect / ClearSuspect) can flush their
+	// state transitions without depending on the caller to call
 	// asFile.Upsert at the right moments. nil asFile (chat
 	// constructed without persistence) leaves persist nil and the
-	// in-memory mirror still works.
+	// in-memory state still works.
 	if cs.asFile != nil {
 		asFile := cs.asFile
 		as.SetPersist(func(e *registry.AgentSessionEntry) error {
@@ -1776,10 +1762,8 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	}()
 
 	as := asPool.Get(cs.ChatID, selectedCwd, selectedAgent)
-	hadPrior := as != nil
 	if as == nil && localPrior != nil {
 		as = asPool.GetOrPut(cs.ChatID, localPrior)
-		hadPrior = true
 	}
 
 	if as == nil && asFile != nil {
@@ -1790,7 +1774,6 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 				entry.Agent == selectedAgent {
 				candidate := FromAgentSessionEntry(entry)
 				as = asPool.GetOrPut(cs.ChatID, candidate)
-				hadPrior = true
 				break
 			}
 		}
@@ -1838,9 +1821,6 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 
 	if as.Status() == StatusRunning && as.Handle() != nil {
 		return as, nil
-	}
-	if hadPrior {
-		as.ClearInFlight()
 	}
 
 	var spawnErr error

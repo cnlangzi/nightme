@@ -102,7 +102,7 @@ func TestFix2_ResumeUnhealthyRetry(t *testing.T) {
 // closeGraceTotal window. The proactive as.SetExited(0) in
 // close.go makes the cache-hit check in
 // LookupSelectedAgentSession skip the dying AS and fall through
-// to hadPrior → respawn.
+// to a fresh respawn.
 func TestFix1_ProactiveSetExitedRace(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	sp := newFakeSpawner()

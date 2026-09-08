@@ -570,7 +570,6 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 - [`F-CLAUDE-PRINT-002-statusbar-refactor`](./F-CLAUDE-PRINT-002-statusbar-refactor.md) — 相邻的"中央观测 + per-channel 渲染"模式(StatusBarStampPolicy + OutboundMessage.StatusBar)
 - [`F-53-message-prompt-lifecycle`](./F-53-message-prompt-lifecycle.md) — `Message`/`Prompt`/`endPrompt` 语义源头,确认 heartbeat 不动这套语义
 - [`F-61-bot-failure-recovery`](./F-61-bot-failure-recovery.md) — watchdog / respawn,与心跳独立但同属"agent 健康度"维度
-- [`F-62-inflight-cwd-home`](./F-62-inflight-cwd-home.md) — 相邻的 chat 级状态机修复,可参考其 commit 拆分风格
 - [`../SPEC.md`](../SPEC.md) §4.3 — 并发约束与 EventCallback 切换
 - [`internal/runtime/policy.go`](../../internal/runtime/policy.go) — `ThinkModeGatePolicy` / `ToolsModeGatePolicy` 源码,验证不变量
 - [`internal/channel/feishu/adapter.go`](../../internal/channel/feishu/adapter.go) — `ensureReceiptForTyping` / `buildReceiptCard` 源码

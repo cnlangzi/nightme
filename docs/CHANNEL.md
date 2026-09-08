@@ -562,7 +562,6 @@ func LoginWith(ctx, provider, out, errOut) error {
 | `watcherHintEmitted` | hint tombstone | 一次性 |
 | `lastInteractionAt` | LRU | 任何 inbound |
 | `createdAt` | — | New() |
-| `inFlightMessages` | AS-level 不在 CS 持久化 | — |
 
 **v9 不加任何字段**。`channelName` 在 v8 提议过，v9 砍掉。
 

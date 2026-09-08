@@ -134,14 +134,6 @@ type AgentSession struct {
 	// EventAgentReady lands.
 	model string
 
-	// inFlightMessages mirrors AgentSessionEntry.InFlightMessages.
-	// Set by Submit on successful SendBlocks, cleared by endPrompt.
-	// Strictly co-lives with currentPrompt: when currentPrompt is
-	// non-nil, inFlightMessages holds refs derived from p.Messages;
-	// when currentPrompt is nil, inFlightMessages is nil. This
-	// invariant is what makes restart-replay unambiguous.
-	inFlightMessages []registry.InFlightMessageRef
-
 	// F-61: watchdog suspect state (mirrors Entry fields).
 	// SetSuspect/ClearSuscept maintain the invariant "SuspectSince
 	// is non-nil iff SuspectReason != ''". Read by the prober to
@@ -373,9 +365,6 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.lastRunAt = e.LastRunAt
 	as.sessionID = e.SessionID
 	as.model = e.Model
-	if len(e.InFlightMessages) > 0 {
-		as.inFlightMessages = append([]registry.InFlightMessageRef(nil), e.InFlightMessages...)
-	}
 	// F-61: restore suspect state verbatim. Cooldown window is
 	// measured from SuspectSince; on restart, the prober picks up
 	// from there so a suspect-then-crashed AS doesn't immediately
@@ -700,9 +689,9 @@ func (as *AgentSession) ExitCode() *int {
 // the agent has no resume semantics or has not yet emitted its
 // init event.
 // SetPersist wires the registry callback used to flush state
-// transitions (notably InFlightMessages after Submit / endPrompt).
-// Wired by the chat layer at attach time; nil (no persistence or
-// pre-attachment) means Submit / endPrompt silently skip the write.
+// transitions. Wired by the chat layer at attach time; nil (no
+// persistence or pre-attachment) means the lifecycle setters below
+// silently skip the write.
 func (as *AgentSession) SetPersist(persist func(*registry.AgentSessionEntry) error) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
@@ -819,8 +808,7 @@ func (as *AgentSession) SetExited(code int) {
 	as.asMu.Unlock()
 
 	// Best-effort persistence. Failures fall through — the next
-	// status transition will retry. Symmetric with endPrompt's
-	// persist hook (readpump.go:231).
+	// status transition will retry.
 	if persist != nil {
 		if err := persist(as.Entry()); err != nil {
 			slog.Warn("agentsession: persist after SetExited failed; JSON may be stale",
@@ -880,39 +868,6 @@ func (as *AgentSession) ClearSuspect() {
 	}
 }
 
-// ClearInFlight (F-62) drops the in-flight message mirror without
-// firing the Prompt end lifecycle. Used at chat-session "new
-// session" boundaries — /cwd switch (SetSelectedCwd) and the
-// hadPrior branch of LookupSelectedAgentSession — to declare the
-// previous (agent, cwd) focus lost. Idempotent (no-op on empty
-// slice). Persists the empty state so the next daemon restart
-// does not re-push the abandoned messages.
-//
-// Differs from endPrompt(reason) in two ways:
-//   - Does not emit KindPromptEnded (no receipt card transition).
-//   - Does not touch currentPrompt / isReady — the AS is
-//     detached here, so the readPump's subscribers are already
-//     gone.
-//
-// See docs/feat/F-62-inflight-cwd-home.md §3.3.4.
-func (as *AgentSession) ClearInFlight() {
-	as.asMu.Lock()
-	if len(as.inFlightMessages) == 0 {
-		as.asMu.Unlock()
-		return
-	}
-	as.inFlightMessages = nil
-	persist := as.persist
-	as.asMu.Unlock()
-
-	if persist != nil {
-		if err := persist(as.Entry()); err != nil {
-			slog.Warn("agentsession: persist after ClearInFlight failed; JSON may be stale",
-				"as_id", as.ID, "err", err)
-		}
-	}
-}
-
 // Suspect (F-61) returns the current suspect reason and since
 // timestamp. Used by the prober to decide whether to probe + respawn.
 // Both are zero-valued when not suspect.
@@ -956,7 +911,6 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	lastRun := as.lastRunAt
 	resume := as.sessionID
 	model := as.model
-	msgs := as.inFlightMessages
 	sr := as.suspectReason
 	ss := as.suspectSince
 	var ec *int
@@ -967,21 +921,20 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	as.asMu.RUnlock()
 
 	return &registry.AgentSessionEntry{
-		ID:               as.ID,
-		ChatSessionID:    as.ChatSessionID,
-		Agent:            as.Agent,
-		Cwd:              as.Cwd,
-		PID:              as.PID(),
-		Status:           stat,
-		Args:             as.Args(),
-		SessionID:        resume,
-		CreatedAt:        as.createdAt,
-		LastRunAt:        lastRun,
-		ExitCode:         ec,
-		Model:            model,
-		InFlightMessages: msgs,
-		SuspectReason:    sr,
-		SuspectSince:     ss,
+		ID:            as.ID,
+		ChatSessionID: as.ChatSessionID,
+		Agent:         as.Agent,
+		Cwd:           as.Cwd,
+		PID:           as.PID(),
+		Status:        stat,
+		Args:          as.Args(),
+		SessionID:     resume,
+		CreatedAt:     as.createdAt,
+		LastRunAt:     lastRun,
+		ExitCode:      ec,
+		Model:         model,
+		SuspectReason: sr,
+		SuspectSince:  ss,
 	}
 }
 
@@ -1273,8 +1226,9 @@ func (as *AgentSession) IsReady() bool {
 // Returns:
 //   - ErrNotRunning if Spawn has not been called (handle is nil).
 //   - The bridge's SendBlocks error (e.g. ctx.Canceled, network
-//     failure). On error, currentPrompt is NOT installed and
-//     isReady stays true — caller can retry on next IsReady=true.
+//     failure). On error the commit is rolled back (currentPrompt
+//     cleared, isReady flipped back to true) so the queue's
+//     Retry/Rewind path on the next TryFlush sees a clean AS.
 //
 // On success: currentPrompt is set, isReady is false, the readpump
 // will start bridging events for this Prompt's lifetime.
@@ -1296,16 +1250,10 @@ func (as *AgentSession) IsReady() bool {
 // test's bash mock, or a CLI that hot-caches its prior turn)
 // could emit the full assistant + result envelope before
 // currentPrompt was committed, in which case the readpump
-// stamps UserMsgID="" on those events. The persisted
-// InFlightMessages mirror is committed in the same atomic
-// step as currentPrompt so Entry() always observes a
-// consistent pair. If SendBlocks fails after the commit, the
-// commit is rolled back (currentPrompt + inFlightMessages
-// cleared, isReady flipped back to true) so the queue's
-// Retry/Rewind path on the next TryFlush sees a clean AS —
-// matching the pre-fix contract that a failed Submit leaves
-// the AS in the same state as before the call (verified by
-// TestSubmit_FailureLeavesInFlightEmpty).
+// stamps UserMsgID="" on those events. If SendBlocks fails after
+// the commit, the commit is rolled back (currentPrompt cleared,
+// isReady flipped back to true) so the queue's Retry/Rewind
+// path on the next TryFlush sees a clean AS.
 func (as *AgentSession) Submit(p *Prompt) error {
 	as.asMu.RLock()
 	h := as.handle
@@ -1355,24 +1303,8 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// Commit: install currentPrompt and flip isReady BEFORE the
 	// bridge call. See the function-level ordering comment for
 	// the rationale (anchor race fix).
-	//
-	// Blocks is defensively copied: Message.Blocks is a slice
-	// header that aliases the queue's storage, and the persisted
-	// InFlightMessageRef may later be re-read by RestoreFromRegistry
-	// and pushed into a fresh queue (see Manager.RestoreFromRegistry).
-	// Copying here keeps the in-memory mirror independent of the
-	// prompt's Messages and safe to round-trip through the registry
-	// without aliasing any other slice.
 	as.asMu.Lock()
 	as.currentPrompt = p
-	as.inFlightMessages = make([]registry.InFlightMessageRef, len(p.Messages))
-	for i, m := range p.Messages {
-		as.inFlightMessages[i] = registry.InFlightMessageRef{
-			ID:         m.ID,
-			Blocks:     append([]agent.ContentBlock(nil), m.Blocks...),
-			ReceivedAt: m.ReceivedAt,
-		}
-	}
 	as.asMu.Unlock()
 	as.isReady.Store(false)
 
@@ -1386,13 +1318,10 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		// Roll back the commit. Without this, a failed Submit
 		// would leave currentPrompt + isReady=false set, and the
 		// next TryFlush would skip (as_not_ready) until something
-		// else (e.g. an endPrompt from a stale event) cleared
-		// them. Compare with the pre-fix contract verified by
-		// TestSubmit_FailureLeavesInFlightEmpty.
+		// else (e.g. an endPrompt from a stale event) cleared them.
 		as.asMu.Lock()
 		if as.currentPrompt == p {
 			as.currentPrompt = nil
-			as.inFlightMessages = nil
 		}
 		as.asMu.Unlock()
 		as.isReady.Store(true)
@@ -1402,25 +1331,6 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		"chat_id", as.ChatSessionID,
 		"as_id", as.ID,
 		"prompt_id", p.ID)
-
-	// Best-effort persistence — failures must NOT roll back the
-	// commit, since SendBlocks already accepted the prompt and the
-	// bridge is now expecting a reply. The next status change
-	// (endPrompt) will retry the write.
-	//
-	// Concurrency note: endPrompt may fire between our Unlock and
-	// the persist call below. as.Entry() takes asMu.RLock so the
-	// snapshot it returns reflects the latest in-memory state —
-	// if endPrompt's clear has run, Entry() sees a nil
-	// InFlightMessages and we persist that. The disk always
-	// converges to the in-memory state; we never observe a stale
-	// non-empty InFlightMessages after the prompt actually ended.
-	if as.persist != nil {
-		if err := as.persist(as.Entry()); err != nil {
-			slog.Warn("chatsession: persist after Submit failed; entry may be stale on restart",
-				"as_id", as.ID, "err", err)
-		}
-	}
 	return nil
 }
 
@@ -1644,7 +1554,7 @@ func (as *AgentSession) Close() error {
 // RestartFromDeath (F-61) is the synchronous recovery path called
 // from chatsession.routeEvent's KindLifecycle handler. It forks a
 // fresh bridge with the SAME sessionID (so --resume picks up the
-// user's in-flight message from the bridge's JSONL history) and
+// user's conversation history from the bridge's JSONL store) and
 // re-arms the readpump.
 //
 // Returns nil on a clean respawn; the AS is then StatusRunning
@@ -1655,6 +1565,13 @@ func (as *AgentSession) Close() error {
 // ClosedByUser skips the respawn entirely — the /close path goes
 // through here when the bridge actually exits AFTER Close was
 // called, and we don't want to undo the user's intent.
+//
+// Note: any prompt that was in flight on the dead bridge is NOT
+// resubmitted. The new bridge resumes the prior session via
+// --resume, so the user sees their conversation history but the
+// specific turn that was running when the bridge died is gone;
+// the chat layer surfaces that as a queue retry on the next
+// user-initiated message.
 func (as *AgentSession) RestartFromDeath(ctx context.Context, launcher Spawner) error {
 	if launcher == nil {
 		return ErrSpawnerNotSet
@@ -1666,17 +1583,6 @@ func (as *AgentSession) RestartFromDeath(ctx context.Context, launcher Spawner) 
 	}
 	resume := as.sessionID
 	args := append([]string(nil), as.args...)
-	// Snapshot the in-flight blocks under lock so we can resubmit
-	// them to the freshly-spawned bridge. The session.fork the
-	// bridge just performed (via respawn's sessionID param) only
-	// copies server-side history — it does NOT replay the turn
-	// that was in flight when the old bridge died. Without this
-	// resubmit, the new bridge sits idle and the user's prompt
-	// effectively vanishes.
-	var inFlightBlocks []agent.ContentBlock
-	for _, ref := range as.inFlightMessages {
-		inFlightBlocks = append(inFlightBlocks, ref.Blocks...)
-	}
 	as.asMu.Unlock()
 
 	if err := as.respawn(ctx, launcher, args, resume); err != nil {
@@ -1693,32 +1599,8 @@ func (as *AgentSession) RestartFromDeath(ctx context.Context, launcher Spawner) 
 		as.asMu.Unlock()
 		return nil
 	}
-	h := as.handle
 	persist := as.persist
 	as.asMu.Unlock()
-
-	// R1.5: after a successful respawn, re-send any blocks that
-	// were in flight when the old bridge died. The new bridge
-	// has the forked session's history but no in-flight prompt —
-	// without this call the new process would just sit idle
-	// until the 5-min watchdog kills it. Mark isReady=false so
-	// TryFlush doesn't race ahead of the resubmit.
-	if len(inFlightBlocks) > 0 && h != nil {
-		as.isReady.Store(false)
-		if err := h.SendBlocks(ctx, inFlightBlocks); err != nil {
-			slog.Warn("agentsession: resubmit in-flight after restart failed; user prompt lost",
-				"as_id", as.ID,
-				"blocks", len(inFlightBlocks),
-				"err", err)
-			// Restore ready so the next TryFlush / user message
-			// can land on this bridge.
-			as.isReady.Store(true)
-		} else {
-			slog.Info("agentsession: resubmitted in-flight blocks after restart; bridge continues previous turn",
-				"as_id", as.ID,
-				"blocks", len(inFlightBlocks))
-		}
-	}
 
 	if persist != nil {
 		if err := persist(as.Entry()); err != nil {

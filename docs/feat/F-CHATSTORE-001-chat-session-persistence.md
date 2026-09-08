@@ -321,17 +321,7 @@ cs.Store().SetToolsMode(cs.ChatID, int(mode))
 | `cs.CreatedAt()` | `cs.Store().Get(cs.ChatID).CreatedAt` |
 | `cs.Entry()` | `cs.Store().Get(cs.ChatID)` |
 
-副作用编排(`oldAS.ClearInFlight()` 等)caller 自己做:
-
-```go
-// /cwd handler
-oldAS, _ := cs.LookupInPool(cs.SelectedAgent(), cs.SelectedCwd())
-if err := cs.Store().SetSelectedCwd(cs.ChatID, args[0]); err != nil {
-    return err
-}
-if oldAS != nil { oldAS.ClearInFlight() }
-return nil
-```
+副作用编排由 caller 编排,Store 层只负责持久化。
 
 ---
 

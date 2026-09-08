@@ -388,32 +388,31 @@ type Registry struct {
 	caches map[string]*Cache
 }
 
-// WritePR writes pr into the cache for asID. nil clears the
-// entry. No-op when no cache has been allocated for asID yet
-// (the chat either hasn't been stamped enough to allocate
-// one, or its ID isn't registered) — we never allocate
-// proactively, because the cost of a stale allocation is
-// nil and the cost of a fresh one is one map write.
+// WritePR stores pr in the cache for cwd. nil clears the
+// entry. Allocates the cache if it doesn't exist yet — the
+// key is a workspace (cwd), and a /gtw pr or /gtw close
+// success path that names a real workspace must propagate
+// its known-good result so the next status stamp sees it
+// immediately rather than waiting for the lazy MaybeRefresh
+// (which would spawn a goroutine, hit the network, and only
+// converge on the same answer we already have).
 //
-// Used by /gtw {pr, close} success paths to apply a known
-// PR result without a network round-trip. Wraps Cache.WritePR
-// for the asID-keyed lookup.
-func (r *Registry) WritePR(asID string, pr *messages.PR) {
-	r.mu.RLock()
-	c, ok := r.caches[asID]
-	r.mu.RUnlock()
-	if !ok {
-		return
-	}
-	c.WritePR(pr)
+// Pre-cwd-keying this was a no-op for unallocated keys; that
+// guarded against an AS-keyed world where /gtw pr would have
+// spawned one cache per AS in the chat pool. With one cache
+// per cwd there is no such surface: the cwd will be read by
+// the very next outbound stamp, so allocating proactively
+// costs one map entry and saves a network round-trip.
+func (r *Registry) WritePR(cwd string, pr *messages.PR) {
+	r.GetOrCreate(cwd).WritePR(pr)
 }
 
-// GetOrCreate returns the Cache for asID, allocating a fresh
-// one on first call. Subsequent calls with the same asID
+// GetOrCreate returns the Cache for cwd, allocating a fresh
+// one on first call. Subsequent calls with the same cwd
 // return the same pointer.
-func (r *Registry) GetOrCreate(asID string) *Cache {
+func (r *Registry) GetOrCreate(cwd string) *Cache {
 	r.mu.RLock()
-	if c, ok := r.caches[asID]; ok {
+	if c, ok := r.caches[cwd]; ok {
 		r.mu.RUnlock()
 		return c
 	}
@@ -422,15 +421,15 @@ func (r *Registry) GetOrCreate(asID string) *Cache {
 	defer r.mu.Unlock()
 	// Re-check under write lock to avoid the classic
 	// double-allocation race. The common path is the RLock
-	// hit above; the write-path is a one-shot per asID.
-	if c, ok := r.caches[asID]; ok {
+	// hit above; the write-path is a one-shot per cwd.
+	if c, ok := r.caches[cwd]; ok {
 		return c
 	}
 	c := &Cache{}
 	if r.caches == nil {
 		r.caches = make(map[string]*Cache)
 	}
-	r.caches[asID] = c
+	r.caches[cwd] = c
 	return c
 }
 

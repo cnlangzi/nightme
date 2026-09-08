@@ -341,17 +341,15 @@ func RunClose(
 				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
 	}
 
-	// --- step 6.5: clear PR cache for the chat's AS pool ---------
-	// The dead branch's ASes must drop their cached PR (the
-	// branch is being deleted; a refresh would be wasted work)
-	// and any repoRoot ASes that still hold a stale "PR for
-	// the old branch" entry get cleared too — the next stamp's
-	// lazy MaybeRefresh will fetch fresh from scratch.
+	// --- step 6.5: clear PR cache for the workspace ----------------
+	// The dead branch's PR is gone — write nil so the next
+	// stamp on this cwd reflects that immediately. The branch
+	// is being deleted, so a MaybeRefresh round-trip would be
+	// wasted; clearing directly skips the network.
 	if deps.PRCache != nil {
-		// prcache is keyed by cwd (per-workspace), not by
-		// AgentSession.ID. Clearing the workspace's PR entry
-		// applies to every AS that has ever stamped on this
-		// path.
+		// prcache is keyed by cwd (per-workspace). Clearing
+		// the workspace's PR entry applies to every AS that
+		// has ever stamped on this path.
 		deps.PRCache.WritePR(c.Worktree, nil)
 	}
 

@@ -254,24 +254,24 @@ func dispatchPR(
 	riskLevel, riskReason := extractRiskLevel(body)
 	card := renderPROpenedCard(c, baseBranch, url, riskLevel, riskReason)
 
-	// Write the new PR directly into the cache for every
-	// AgentSession in this chat. We already know the number
-	// / URL from `gh pr create`, so no refresh round-trip is
-	// needed; the next stamp's lazy MaybeRefresh will
-	// correct any branch mismatch within 60 s. Covers the
-	// full chat pool so any AS that re-stamps before TTL
-	// picks up the new PR id immediately.
+	// Stamp the new PR into the workspace's cache before we
+	// reply. Registry.WritePR allocates the cache on first
+	// write (cwd-keyed; per-workspace), so the very next
+	// outbound stamp on this cwd sees the new #N — the
+	// footer doesn't have to wait for the lazy MaybeRefresh
+	// (which would spawn a goroutine, hit `gh pr list`, and
+	// converge on the same answer we already have). Without
+	// this stamp the receipt card would render without the
+	// PR link until the next TTL tick.
 	if deps.PRCache != nil {
 		newPR := &messages.PR{
 			Number: prNumberFromURL(url),
 			URL:    url,
 			State:  "open",
 		}
-		// prcache is keyed by cwd (per-workspace), not by
-		// AgentSession.ID. Every AS touching this same workspace
-		// shares one PR entry — so /gtw pr -a codex in a
-		// chat whose primary is claude makes the link visible
-		// to claude's next StatusBar stamp.
+		// prcache is keyed by cwd (per-workspace), so /gtw pr
+		// -a codex in a chat whose primary is claude makes the
+		// link visible to claude's next StatusBar stamp.
 		deps.PRCache.WritePR(c.Worktree, newPR)
 	}
 

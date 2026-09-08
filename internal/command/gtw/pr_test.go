@@ -2683,12 +2683,17 @@ var _ GitProvider = (*fakeGitProvider)(nil)
 // -----------------------------------------------------------------------------
 // PRCache wiring
 //
-// /gtw pr and /gtw close success paths walk the chat pool and
-// call deps.PRCache.WritePR(as.ID, pr) inline. These tests
-// lock the contract:
-//   - happy path: every non-nil AS gets WritePR called with
-//     the expected PR exactly once.
-//   - nil PRCache: no panic, no allocations.
+// /gtw pr and /gtw close success paths stamp the new PR /
+// nil into the workspace's cache via
+// deps.PRCache.WritePR(c.Worktree, pr). The cache is keyed by
+// cwd (per-workspace) so a single write is visible to every
+// AS that has ever stamped on that workspace.
+//
+// These tests lock the contract:
+//   - happy path: Registry.WritePR(cwd, pr) puts pr in the
+//     cache for that cwd, visible to subsequent GetOrCreate
+//     reads.
+//   - nil PRCache: no panic.
 //   - empty pool: no panic.
 //
 // Iteration order is NOT asserted because cs.Pool() iterates a
@@ -2696,104 +2701,76 @@ var _ GitProvider = (*fakeGitProvider)(nil)
 // asserting order would make the tests flaky across runs.
 // -----------------------------------------------------------------------------
 
-// TestPRCacheApply_HappyPath: every non-nil AS in the pool
-// gets WritePR called exactly once with the expected PR.
-// Mirrors the inline loop in dispatchPR's success path.
+// TestPRCacheApply_HappyPath: Registry.WritePR(cwd, pr)
+// makes pr visible to the very next GetOrCreate(cwd) read.
 //
-// Production ordering: by the time /gtw pr fires, the chat
-// has already been stamped at least once (otherwise the user
-// has no AS to dispatch on), so the ASes are already
-// registered. We pre-allocate via GetOrCreate to mirror that
-// state — Registry.WritePR is a no-op for unregistered ASes
-// (it does not allocate), and the lazy MaybeRefresh on the
-// next stamp handles that case instead.
+// Mirrors dispatchPR's success path:
+//   deps.PRCache.WritePR(c.Worktree, newPR)
+//
+// Pre-allocation is unnecessary: Registry.WritePR allocates
+// the cache itself (cwd-keyed; per-workspace, so there is no
+// "memory leak surface" from proactive allocation).
 func TestPRCacheApply_HappyPath(t *testing.T) {
 	reg := &prcache.Registry{}
-	cs, err := chatsession.New("chat-1", "claude")
-	if err != nil {
-		t.Fatalf("chatsession.New: %v", err)
-	}
-	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-1", cs.ChatID, "claude", "/w1", nil))
-	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-2", cs.ChatID, "claude", "/w2", nil))
-	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-3", cs.ChatID, "claude", "/w3", nil))
-
-	// Pre-allocate caches (simulates prior stamping).
-	want := []string{"as-1", "as-2", "as-3"}
-	for _, asID := range want {
-		reg.GetOrCreate(asID)
-	}
-
-	deps := HandlerDeps{PRCache: reg}
 	newPR := &messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}
 
-	// Inline the same loop dispatchPR runs on success.
+	deps := HandlerDeps{PRCache: reg}
+	// Mirror dispatchPR's success path: write to c.Worktree.
 	if deps.PRCache != nil {
-		for _, as := range cs.Pool() {
-			if as == nil {
-				continue
+		deps.PRCache.WritePR("/w1", newPR)
+	}
+
+	for _, cwd := range []string{"/w1", "/w2", "/w3"} {
+		c := reg.GetOrCreate(cwd)
+		if cwd == "/w1" {
+			if got := c.PR(); got == nil || got.Number != 42 {
+				t.Errorf("cwd %q: PR = %+v, want {Number:42}", cwd, got)
 			}
-			deps.PRCache.WritePR(as.ID, newPR)
-		}
-	}
-
-	// Every AS in the pool must have a cache with the new PR.
-	for _, asID := range want {
-		c := reg.GetOrCreate(asID)
-		if got := c.PR(); got == nil || got.Number != 42 {
-			t.Errorf("AS %q: PR = %+v, want {Number:42}", asID, got)
+		} else if got := c.PR(); got != nil {
+			t.Errorf("cwd %q: PR = %+v, want nil (no write happened here)", cwd, got)
 		}
 	}
 }
 
-// TestPRCacheApply_WritePRNoOpOnUnknownAS locks the contract
-// that Registry.WritePR does NOT allocate caches — the next
-// stamp's lazy MaybeRefresh handles unregistered ASes. Without
-// this guard, /gtw pr on a chat with zero stamps would
-// allocate caches for every AS in the pool (memory leak
-// surface) and overwrite them on every /gtw pr success.
-func TestPRCacheApply_WritePRNoOpOnUnknownAS(t *testing.T) {
+// TestPRCacheApply_WritePRAllocatesOnUnknownCwd locks the
+// contract that Registry.WritePR allocates the cache if it
+// doesn't exist yet. Cwd keying means there's exactly one
+// cache per workspace, the next outbound stamp on that cwd
+// will read it, and /gtw pr must propagate the new #N
+// without waiting for the lazy MaybeRefresh to converge on
+// the same answer via a `gh pr list` round-trip. Pre-cwd-
+// keying this was a no-op (per-AS leak guard); that contract
+// is gone.
+func TestPRCacheApply_WritePRAllocatesOnUnknownCwd(t *testing.T) {
 	reg := &prcache.Registry{}
-	reg.WritePR("never-stamped", &messages.PR{Number: 1, URL: "x", State: "open"})
+	pr := &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"}
+	reg.WritePR("/work/never-stamped", pr)
 
-	if c := reg.GetOrCreate("never-stamped"); c.PR() != nil {
-		t.Errorf("WritePR on unknown AS populated the freshly-allocated cache")
+	got := reg.GetOrCreate("/work/never-stamped").PR()
+	if got == nil || got.Number != 1 {
+		t.Errorf("WritePR on unknown cwd did not populate the freshly-allocated cache: got %+v, want {Number:1}", got)
 	}
 }
 
-// TestPRCacheApply_ClearOnClose: /gtw close writes nil to
-// every AS — same loop, pr=nil.
+// TestPRCacheApply_ClearOnClose: Registry.WritePR(cwd, nil)
+// clears the cwd's cached PR. /gtw close's success path does
+// exactly this on c.Worktree.
 func TestPRCacheApply_ClearOnClose(t *testing.T) {
 	reg := &prcache.Registry{}
-	cs, err := chatsession.New("chat-1", "claude")
-	if err != nil {
-		t.Fatalf("chatsession.New: %v", err)
+
+	// Pre-populate two cwds so we can confirm the clear actually
+	// clears only the targeted one.
+	reg.GetOrCreate("/w1").WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"})
+	reg.GetOrCreate("/w2").WritePR(&messages.PR{Number: 7, URL: "https://example/pr/7", State: "open"})
+
+	// Mirror dispatchClose: write nil to c.Worktree only.
+	reg.WritePR("/w1", nil)
+
+	if got := reg.GetOrCreate("/w1").PR(); got != nil {
+		t.Errorf("/w1 after clear: PR = %+v, want nil", got)
 	}
-	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-1", cs.ChatID, "claude", "/w1", nil))
-	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-2", cs.ChatID, "claude", "/w2", nil))
-
-	// Pre-populate so we can confirm the clear actually clears.
-	for _, asID := range []string{"as-1", "as-2"} {
-		c := reg.GetOrCreate(asID)
-		c.WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"})
-	}
-
-	deps := HandlerDeps{PRCache: reg}
-
-	// Inline the same loop dispatchClose runs on success.
-	if deps.PRCache != nil {
-		for _, as := range cs.Pool() {
-			if as == nil {
-				continue
-			}
-			deps.PRCache.WritePR(as.ID, nil)
-		}
-	}
-
-	for _, asID := range []string{"as-1", "as-2"} {
-		c := reg.GetOrCreate(asID)
-		if got := c.PR(); got != nil {
-			t.Errorf("AS %q after clear: PR = %+v, want nil", asID, got)
-		}
+	if got := reg.GetOrCreate("/w2").PR(); got == nil || got.Number != 7 {
+		t.Errorf("/w2 untouched: PR = %+v, want {Number:7}", got)
 	}
 }
 
@@ -2815,28 +2792,20 @@ func TestPRCacheApply_NilCache(t *testing.T) {
 	}
 }
 
-// TestPRCacheApply_EmptyPool: no panic on an empty pool.
-// Common state during the first /gtw fix on a chat that hasn't
-// spawned an agent yet.
+// TestPRCacheApply_EmptyPool: no panic when nothing has
+// stamped. /gtw {pr, close} on a brand-new chat must not
+// crash; the cache is empty and stays empty.
 func TestPRCacheApply_EmptyPool(t *testing.T) {
 	reg := &prcache.Registry{}
-	cs, err := chatsession.New("chat-1", "claude")
-	if err != nil {
-		t.Fatalf("chatsession.New: %v", err)
-	}
 
-	deps := HandlerDeps{PRCache: reg}
-	if deps.PRCache != nil {
-		for _, as := range cs.Pool() {
-			if as == nil {
-				continue
-			}
-			deps.PRCache.WritePR(as.ID, nil)
-		}
-	}
+	// Mirror dispatchClose's success path on a fresh chat:
+	// nothing in the pool, no workspace ever stamped. The
+	// WritePR call would have no upstream lookup to clear.
+	reg.WritePR("/w/untouched", nil)
 
-	// Registry must remain empty (no ASes were ever attached).
-	reg.WritePR("phantom", nil) // Registry.WritePR is also no-op on unknown AS.
+	if c := reg.GetOrCreate("/w/untouched"); c.PR() != nil {
+		t.Errorf("clearing an empty cache should leave PR nil; got %+v", c.PR())
+	}
 }
 
 // TestPRNumberFromURL pins the URL → number parser used by

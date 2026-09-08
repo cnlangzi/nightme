@@ -104,16 +104,7 @@ func NewHeartbeatTracker(cap int) *HeartbeatTracker {
 // orphan events (EventAgentReady, etc.) that don't have a
 // receipt anchor.
 //
-// MarkDone (sibling method, defined below) is the lifecycle-side
-// counterpart: it flips the snapshot's Done flag on terminal
-// events (OutResult, ChatSession.endPrompt). Observe and MarkDone
-// are deliberately two separate entry points — Observe tracks
-// incremental activity (counters), MarkDone tracks the terminal
-// transition (lifecycle). Both mutate the same snapshot and both
-// can drive a follow-up OutHeartbeat through the same caller-side
-// code path in the runtime handler / eventbus subscriber. The
-// tracker's mutex serialises them, so a racing Observe +
-// MarkDone on the same userMsgID is well-defined.
+// See MarkDone for the lifecycle counterpart.
 func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind) bool {
 	if t == nil || userMsgID == "" {
 		return false
@@ -133,9 +124,8 @@ func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind)
 		snap.ToolCount++
 		changed = true
 	default:
-		// No counter change. We still write back the refreshed
-		// snapshot + touch the LRU so this userMsgID stays
-		// "recent" (it IS recent activity).
+		// Touch LRU so this userMsgID stays recent —
+		// refresh-only activity is "recent" too.
 		t.snaps[userMsgID] = snap
 		t.touchLocked(userMsgID)
 		return false
@@ -150,29 +140,26 @@ func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind)
 // should pass the result to the channel adapter which uses
 // HeartbeatSnapshot.Empty() to decide whether to render anything.
 //
-// MarkDone flips the snapshot's Done flag for the given userMsgID
-// and returns true only on the false→true transition. Terminal
-// events fire MarkDone from two call sites:
+// MarkDone flips the snapshot's Done flag for userMsgID,
+// returning true on the false→true transition and false
+// otherwise (no-op when Done is already true, userMsgID is
+// empty, or t is nil). Idempotent — racing calls converge on
+// a single flip.
 //
-//   - runtime handler when OutResult arrives (the agent's
-//     final-answer payload — covers the happy path)
-//   - runtime eventbus subscriber when ChatSession.endPrompt
-//     fires (readpump observed EventAgentDone / EventAgentError
-//     — covers turns that exited without an OutResult, e.g.
-//     bridges that crashed mid-turn or shell error paths)
-//
-// Returns false on a no-op (Done already true OR userMsgID empty
-// OR tracker nil). The transition check makes MarkDone idempotent
-// across the racing pair above — at most one follow-up
-// OutHeartbeat per userMsgID per turn, no spam from the double
-// trigger.
+// LRU: the false→true path touches the LRU; the idempotent
+// return does NOT. Both Observe and MarkDone use the LRU as a
+// "most recently active" signal; for a terminal entry there is
+// no further activity to track, so a racing second MarkDone
+// can safely skip the touch. The entry will still be evicted
+// under normal LRU pressure once its age dominates other
+// entries — and by that point the terminal ✅ has already
+// PATCHed to the receipt via the first MarkDone's OutHeartbeat
+// follow-up.
 //
 // MarkDone deliberately does NOT touch ThinkCount / ToolCount /
-// LastBeatAt. Terminal state is orthogonal to "agent is alive":
-// the user already saw the activity count, the ✅ prefix marks
-// the lifecycle transition, and LastBeatAt would just be a
-// duplicate of the most-recent activity timestamp the renderer
-// already paints via the ⏱ chip.
+// LastBeatAt — the renderer paints those independently from
+// Done, so re-writing them here would either race the last
+// Observe or duplicate the ⏱ chip.
 func (t *HeartbeatTracker) MarkDone(userMsgID string) bool {
 	if t == nil || userMsgID == "" {
 		return false

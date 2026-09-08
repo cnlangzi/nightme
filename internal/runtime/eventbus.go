@@ -230,39 +230,25 @@ func WireRuntimeCallbacksAndRestore(
 			// shell error early-out): the runtime handler's
 			// OutResult branch doesn't fire on those, but
 			// endPrompt still does. Idempotent with the
-			// OutResult branch's MarkDone call — the second
-			// invocation finds Done already true and returns
-			// false, so at most one OutHeartbeat follow-up per
-			// userMsgID per turn is emitted (no spam from the
-			// double trigger).
+			// OutResult branch's MarkDone call — whichever of
+			// the two lands second finds Done already true
+			// and returns false. The two triggers run on
+			// different goroutines (bridge drain vs readpump)
+			// so arrival order is NOT guaranteed; the tracker's
+			// mutex serialises them and the transition check
+			// collapses the race to a single flip.
 			//
-			// Order: MarkDone BEFORE ch.OnPromptEnded so the
-			// receipt's heartbeat PATCH (driven by the
-			// OutHeartbeat follow-up) lands before
-			// SetPromptState(PromptDone) flips the receipt to
-			// terminal — the final user-visible card has both
-			// the ✅ prefix on the heartbeat line AND the
-			// ✅ reaction on the card. Reversing the order would
-			// leave a one-frame window where the reaction is
-			// set but the heartbeat line still reads "💭 N · 🔧
-			// M · ⏱ ...".
+			// MarkDone fires first so the snapshot's Done flag
+			// is set before the receipt's next render reads it.
+			// The OutHeartbeat follow-up and OnPromptEnded's
+			// SetPromptState PATCH both run async through the
+			// gateway; whichever render the gateway serialises
+			// first sees Done=true in its snapshot read, so the
+			// terminal ✅ prefix paints in the same PATCH cycle.
 			if hb := cs.Heartbeat(); hb != nil {
 				if hb.MarkDone(e.UserMsgID) {
-					snap := hb.Snapshot(e.UserMsgID)
-					if !snap.Empty() {
-						out := messages.OutboundMessage{
-							ChatID:    e.ChatID,
-							Kind:      messages.OutHeartbeat,
-							ReplyTo:   e.UserMsgID,
-							Heartbeat: &snap,
-						}
-						if err := em.Send(context.Background(), out); err != nil && logger != nil {
-							logger.Warn("runtime: heartbeat follow-up send failed (endPrompt)",
-								"chat_id", e.ChatID,
-								"user_msg_id", e.UserMsgID,
-								"err", err)
-						}
-					}
+					sendHeartbeatFollowUp(em, logger, e.ChatID, e.UserMsgID,
+						"endprompt", hb.Snapshot(e.UserMsgID))
 				}
 			}
 			// The adapter call is fire-and-forget: failures are

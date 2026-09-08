@@ -81,7 +81,7 @@ func RunBack(
 	// RequireActiveCwd so users see one consistent reply no
 	// matter which path catches the empty-cwd case.
 	if selectedCwd == "" {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ "+command.NoActiveCwdReply), nil
 	}
 
@@ -89,17 +89,17 @@ func RunBack(
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+			return reply(ctx, cs.Emitter(), chatID, messageID,
 				"❌ no active fix to back out of in this chat\n"+
 					"hint: /cwd into the /gtw fix worktree first (its "+
 					"`.nightme/gtw.yml` is the back source of truth)."), nil
 		}
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
 	}
 
 	if c.RepoRoot == "" {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: repoRoot is empty"), nil
 	}
 	// Worktree may legitimately be empty for a freshly-started
@@ -118,7 +118,7 @@ func RunBack(
 		slog.Default().Warn("gtw: SetSelectedCwd back to repoRoot failed",
 			"repo_root", c.RepoRoot,
 			"err", err)
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("⚠️ SetSelectedCwd(%s) failed: %v\n"+
 				"worktree at %s is unchanged; run `/cwd %s` manually.",
 				c.RepoRoot, err, c.Worktree, c.RepoRoot)), nil
@@ -157,7 +157,7 @@ func RunBack(
 	// Mid-flow by design — the sync card that follows in
 	// step 5 is a separate reply, matching the close-path
 	// two-card shape (close + sync, back + sync).
-	reply(ctx, cs.Emitter(), cs, chatID, messageID, body)
+	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
 	// --- step 5: sync main (separate card) ----------------------
 	// buildSyncReply is the same helper runSync + runClose use;
@@ -176,10 +176,10 @@ func RunBack(
 		// returns plain fmt.Errorf values whose messages already
 		// include git stderr tails + user-facing hints — the prefix
 		// is the only wrapping RunClose / RunBack do.
-		reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ sync failed: "+syncErr.Error())
 	} else if syncBody != "" {
-		reply(ctx, cs.Emitter(), cs, chatID, messageID, syncBody)
+		reply(ctx, cs.Emitter(), chatID, messageID, syncBody)
 	}
 	// else: SkipRefreshDefaultBranch set (test-only); no sync
 	// card. The back-success card above still stands.

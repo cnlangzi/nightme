@@ -208,14 +208,6 @@ func WireRuntimeCallbacksAndRestore(
 				out.SessionID = as.SessionID()
 				out.Model = as.Model()
 			}
-			// The per-turn identity cache (cs.turnIdentity) is owned
-			// by the gtw package (see command/gtw/agent_reply.go:
-			// runAgentFor seeds it before RunOnce, overrides with
-			// res.Model after, and replyAgent clears it on success).
-			// We deliberately do NOT touch it here — runtime has no
-			// SRP authority over gtw's per-turn cache. The
-			// OutMessageState stamp above is the only identity-side
-			// effect the runtime subscriber performs.
 			if err := em.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",
 					"chat_id", e.ChatID,
@@ -236,11 +228,6 @@ func WireRuntimeCallbacksAndRestore(
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
 			}
-			// Per-turn identity cache cleanup is owned by the gtw
-			// package (see command/gtw/agent_reply.go replyAgent
-			// which calls cs.ClearTurnIdentity). The LRU itself
-			// bounds growth if gtw misses a clear.
-			//
 			// The adapter call is fire-and-forget: failures are
 			// logged inside SetPromptState. We use
 			// context.Background() because the readpump-driven

@@ -160,68 +160,20 @@ func dispatchSinkEvent(
 	if out.AgentName == "" {
 		out.AgentName = agentName
 	}
-	// Identity fallback from cs.SelectedAgentSession(). The runtime
-	// eventbus subscriber (runtime/eventbus.go:199-208) re-points
-	// cs.selectedAS to the actual agent that ran the turn — for
-	// /gtw pr the chat primary is what fires MessageQueued, but
-	// once the run-once pi agent activates, cs.selectedAS tracks
-	// pi's AS. By the time the sink emits the final OutResult,
-	// reading Model / SessionID / Workspace / PullRequest from
-	// the current selectedAS gives the right agent's identity
-	// (which happens to be the same as the placeholder for
-	// pi-primary users; differs for users whose chat primary ≠
-	// gtw agent).
+	// Identity fallback: when the bridge didn't stamp Model /
+	// SessionID / Workspace on the translated event (e.g. the
+	// event arrived before the bridge parsed its wire frames),
+	// fall back to the chat's current selectedAS. For /gtw
+	// run-once this is the chat primary's identity, which
+	// matches the placeholder the runtime subscriber already
+	// rendered — so streaming chunks stay consistent with the
+	// placeholder card. The terminal OutReply for the run
+	// carries the run-once agent's identity stamped directly
+	// by replyAgent (not through the sink), so the final
+	// standalone card has the right identity regardless of
+	// what selectedAS points to.
 	if cs != nil {
-		// Primary path: read identity from cs.GetTurnIdentity, which
-		// the runtime eventbus subscriber cached at MessageQueued
-		// time (runtime/eventbus.go:199+). For /gtw run-once, the
-		// chat's selected AS is the chat primary (e.g., pi), and
-		// the runtime subscriber stamps that primary's identity
-		// (Model / SessionID / Workspace) onto the cache. The sink
-		// path's events then inherit that identity — same agent as
-		// the placeholder card.
-		//
-		// Fallback: also read from cs.SelectedAgentSession() for the
-		// (rare) case where the cache wasn't populated, e.g. when
-		// the EventSink itself was bound before the runtime
-		// subscriber ran. (Both branches do the same work — the
-		// cache is a forward-declaration of what the runtime
-		// subscriber captures.)
-		if id := cs.GetTurnIdentity(replyTo); id != nil {
-			slog.Default().Info("sink: turnIdentity cache hit",
-				"kind", out.Kind.String(),
-				"reply_to", replyTo,
-				"agent", agentName,
-				"id_model", id.Model,
-				"id_session_id", id.SessionID,
-				"id_workspace", id.Workspace,
-			)
-			if out.AgentName == "" {
-				out.AgentName = agentName
-			}
-			if out.Model == "" {
-				out.Model = id.Model
-			}
-			if out.SessionID == "" {
-				out.SessionID = id.SessionID
-			}
-			if out.Workspace == "" {
-				out.Workspace = id.Workspace
-			}
-			if out.Branch == "" {
-				out.Branch = id.Branch
-			}
-			// PR info is captured separately by the runtime
-			// subscriber on the GitStatus stamp; mirror it onto
-			// the OutboundMessage so buildResultCardJSON renders
-			// the #N segment in line 3.
-			if out.GitStatus == nil && id.PR != nil {
-				out.GitStatus = &messages.GitStatus{
-					Workspace:   id.Workspace,
-					PullRequest: id.PR,
-				}
-			}
-		} else if as := cs.SelectedAgentSession(); as != nil {
+		if as := cs.SelectedAgentSession(); as != nil {
 			if out.AgentName == "" {
 				out.AgentName = as.Agent
 			}
@@ -236,17 +188,6 @@ func dispatchSinkEvent(
 			}
 		}
 	}
-	// No identity fallback from cs.SelectedAgentSession() here:
-	// for GTW run-once the chat session's selected AS is the
-	// chat's primary, NOT the run-once agent (pi), so reading
-	// Model / SessionID from it would stamp the wrong agent's
-	// identity. The sink deliberately surfaces only the agentName
-	// the dispatcher knows; the channel footer falls back to a
-	// partial identity (🤖: pi) on the standalone card, while
-	// the runtime subscriber (which has direct access to the
-	// primary AS via runtime/eventbus.go:199-208) handles the
-	// receipt card / MessageState surface where full identity
-	// is correct.
 
 	// F-CODEX-RUNONCE-REVIEW-EVENT: apply the same think / tools
 	// gate the long-lived runtime.NewEventHandler applies

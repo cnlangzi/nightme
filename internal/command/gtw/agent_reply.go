@@ -150,59 +150,14 @@ func runAgentFor(
 	//     regression risk for those tests.
 	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName)
 
-	// Seed the per-turn identity cache so the sink can fall back
-	// to a coherent identity for streaming events. Use the chat's
-	// current primary AS (whatever the user has `/use`'d) as the
-	// best-known guess — the override below patches this with the
-	// actual GTW agent's identity once the run completes. Without
-	// this seed, the cache is empty for events the bridge emits
-	// before the runtime subscriber's MessageQueued stamp lands
-	// (a narrow race window on slow channel adapters).
-	if as := cs.SelectedAgentSession(); as != nil {
-		cs.SetTurnIdentity(messageID, &chatsession.TurnIdentity{
-			Model:     as.Model(),
-			SessionID: as.SessionID(),
-			Workspace: as.Cwd,
-		})
-		slog.Default().Info("gtw: runAgentFor seed",
-			"message_id", messageID,
-			"agent", as.Agent,
-			"model", as.Model(),
-			"session_id", as.SessionID(),
-		)
-	} else {
-		slog.Default().Info("gtw: runAgentFor no SelectedAgentSession, skipping seed",
-			"message_id", messageID,
-		)
-	}
-
 	res, err := a.RunOnce(ctx,
 		agent.StartConfig{Workspace: workspace},
 		blocks,
 		agent.WithEventSink(sink),
 	)
 	if err != nil {
-		cs.ClearTurnIdentity(messageID)
 		return res, agentName, fmt.Errorf("❌ agent %s failed: %v", agentName, err)
 	}
-
-	// Override the seed with the bridge-reported identity. The
-	// bridge parses model + session id from the wire frames and
-	// exposes them on RunResult — for run-once agents this is the
-	// ground truth, vs the chat-primary AS we seeded above which
-	// may be a different agent (e.g., user has /use claude as
-	// primary but invokes /gtw pr with -a codex).
-	cs.SetTurnIdentity(messageID, &chatsession.TurnIdentity{
-		Model:     res.Model,
-		SessionID: res.SessionID,
-		Workspace: workspace,
-	})
-	slog.Default().Info("gtw: runAgentFor override",
-		"message_id", messageID,
-		"res_model", res.Model,
-		"res_session_id", res.SessionID,
-		"res_text_len", len(res.Text),
-	)
 
 	return res, agentName, nil
 }
@@ -236,7 +191,6 @@ func runAgentFor(
 func replyAgent(
 	ctx context.Context,
 	em messages.Emitter,
-	cs *chatsession.ChatSession,
 	chatID, messageID, text, agentName string,
 	res agent.RunResult,
 ) *Result {
@@ -260,19 +214,5 @@ func replyAgent(
 		out.Usage = (*messages.UsageInfo)(res.Usage)
 	}
 	_ = em.Send(ctx, out)
-	// Drop the per-turn identity cache the gtw run-once seeded
-	// in runAgentFor. After replyAgent the top card is in chat
-	// and the sink's drain has flushed all the GTW events (the
-	// sink uses a separate goroutine but blocks on the same ctx,
-	// which the gtw dispatcher owns — see StreamRunOnceToEmitter
-	// semantics in emitter_sink.go). Keeping the cache only
-	// matters while the GTW turn is alive; once it's done, the
-	// next turn's MessageQueued will re-seed it from runtime
-	// subscriber stamps if needed (and gtw will override from
-	// runRes on its own path). The LRU is the safety net for
-	// missed clears.
-	if cs != nil {
-		cs.ClearTurnIdentity(messageID)
-	}
 	return &Result{Consumed: true}
 }

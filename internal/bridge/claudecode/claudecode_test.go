@@ -73,6 +73,21 @@ func TestDecodeUsage_ComputesContextWindowPct(t *testing.T) {
 			modelJSON: ``,
 			wantPct:   0,
 		},
+		{
+			// F-CLAUDECODE-MULTIMODEL: one turn spanned a 1M
+			// main model + a 200k sub-agent model. The raw_usage
+			// cache_read is the SUM across all sub-turns
+			// (4M in this case). Picking the largest window in
+			// modelUsage means we divide by 1M, not 200k — pct
+			// stays physically meaningful instead of exploding
+			// to 2000%+. The previous "last iterated wins"
+			// behaviour silently clobbered with whichever model
+			// happened to be last in map order.
+			name:      "multi-model — pick largest window, NOT last iterated",
+			usageJSON: `{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":4000000}`,
+			modelJSON: `{"MiniMax-M3[1m]":{"contextWindow":1000000,"costUSD":5.0},"MiniMax-M2.7":{"contextWindow":200000,"costUSD":0.02}}`,
+			wantPct:   400.15, // (1000+500+0+4000000)/1000000*100 = 400.15
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

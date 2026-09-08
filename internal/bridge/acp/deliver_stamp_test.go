@@ -134,8 +134,16 @@ func TestDeliverAfterModelUpdate_StampsNewModel(t *testing.T) {
 
 // TestHandleUsageUpdate_StashesOpencodeShape verifies the opencode
 // cumulative `{used, size, cost}` payload lands on lastUsage with
-// the documented field mapping (used → InputTokens, size →
-// ContextWindow + pct).
+// the documented field mapping. Per the ACP spec
+// (agentclientprotocol.com/protocol/v1/prompt-turn), `used` is
+// "tokens currently in context" — a running cumulative — and
+// `size` is the model context window. pct = used/size directly;
+// the per-turn token-breakdown fields (InputTokens /
+// CacheReadInputTokens / etc.) are intentionally left at zero
+// because the wire carries no per-turn breakdown in this shape.
+// The previous code folded `used` into InputTokens and ran the
+// per-turn formula, which treated a cumulative number as a
+// per-turn delta and inflated pct as the session grew.
 func TestHandleUsageUpdate_StashesOpencodeShape(t *testing.T) {
 	d := newTestDriver()
 
@@ -152,8 +160,17 @@ func TestHandleUsageUpdate_StashesOpencodeShape(t *testing.T) {
 	if got == nil {
 		t.Fatal("lastUsage is nil, want populated")
 	}
-	if got.InputTokens != 800 {
-		t.Errorf("InputTokens = %d, want 800", got.InputTokens)
+	// Per-turn fields stay zero — opencode wire carries no
+	// per-turn breakdown in this shape; folding the cumulative
+	// `used` into InputTokens was the bug.
+	if got.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0 (opencode wire has no per-turn input breakdown)", got.InputTokens)
+	}
+	if got.OutputTokens != 0 {
+		t.Errorf("OutputTokens = %d, want 0", got.OutputTokens)
+	}
+	if got.CacheReadInputTokens != 0 {
+		t.Errorf("CacheReadInputTokens = %d, want 0", got.CacheReadInputTokens)
 	}
 	if got.CostUSD != 0.012 {
 		t.Errorf("CostUSD = %v, want 0.012", got.CostUSD)
@@ -163,7 +180,45 @@ func TestHandleUsageUpdate_StashesOpencodeShape(t *testing.T) {
 	}
 	wantPct := float64(800) / float64(1000) * 100
 	if got.ContextWindowPct != wantPct {
-		t.Errorf("ContextWindowPct = %v, want %v", got.ContextWindowPct, wantPct)
+		t.Errorf("ContextWindowPct = %v, want %v (used/size, NOT per-turn formula)", got.ContextWindowPct, wantPct)
+	}
+}
+
+// TestHandleUsageUpdate_OpencodeShapeDoesNotInflatePct guards the
+// regression the F-ACP-OPENCODE fix targeted: when the wire's
+// `used` is a session-cumulative number that's already larger
+// than the model context window, the previous code computed
+// pct = used/size which still worked (cap at 100%), but the
+// older code took the per-turn route `used → InputTokens` plus
+// the four-field sum and would double-count. Verify directly that
+// in the cumulative-shape branch pct = used/size, no
+// double-counting.
+func TestHandleUsageUpdate_OpencodeShapeDoesNotInflatePct(t *testing.T) {
+	d := newTestDriver()
+
+	// Pathological: `used` already exceeds `size` (e.g. cumulative
+	// total reported mid-session by an opencode server that
+	// forgot to reset). pct should be used/size = 105% (caller
+	// can clamp; we don't artificially cap here — preserving
+	// faithful wire data is more honest than a silent 100%).
+	payload := json.RawMessage(`{
+		"used": 1050000,
+		"size": 1000000
+	}`)
+	d.handleUsageUpdate(payload)
+
+	d.lastUsageMu.Lock()
+	got := d.lastUsage
+	d.lastUsageMu.Unlock()
+	if got == nil {
+		t.Fatal("lastUsage is nil")
+	}
+	if got.ContextWindow != 1000000 {
+		t.Errorf("ContextWindow = %d, want 1000000", got.ContextWindow)
+	}
+	wantPct := float64(1050000) / float64(1000000) * 100
+	if got.ContextWindowPct != wantPct {
+		t.Errorf("ContextWindowPct = %v, want %v (raw used/size, no double-counting)", got.ContextWindowPct, wantPct)
 	}
 }
 
@@ -290,8 +345,22 @@ func TestHandleSessionStatus_EmitsDone(t *testing.T) {
 		if ev.Done.Usage == nil {
 			t.Fatal("Done.Usage is nil, want populated from lastUsage")
 		}
-		if ev.Done.Usage.InputTokens != 100 {
-			t.Errorf("Done.Usage.InputTokens = %d, want 100", ev.Done.Usage.InputTokens)
+		// F-ACP-OPENCODE: opencode wire is carry a per-turn
+		// breakdown; only ContextWindow + ContextWindowPct +
+		// CostUSD are populated. InputTokens stays 0 so the
+		// footer doesn't render misleading per-turn token counts.
+		if ev.Done.Usage.InputTokens != 0 {
+			t.Errorf("Done.Usage.InputTokens = %d, want 0 (opencode cumulative shape, no per-turn breakdown)", ev.Done.Usage.InputTokens)
+		}
+		if ev.Done.Usage.ContextWindow != 1000 {
+			t.Errorf("Done.Usage.ContextWindow = %d, want 1000", ev.Done.Usage.ContextWindow)
+		}
+		wantPct := float64(100) / float64(1000) * 100
+		if ev.Done.Usage.ContextWindowPct != wantPct {
+			t.Errorf("Done.Usage.ContextWindowPct = %v, want %v", ev.Done.Usage.ContextWindowPct, wantPct)
+		}
+		if ev.Done.Usage.CostUSD != 0.01 {
+			t.Errorf("Done.Usage.CostUSD = %v, want 0.01", ev.Done.Usage.CostUSD)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for EventAgentDone")

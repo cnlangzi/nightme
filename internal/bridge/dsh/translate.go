@@ -23,6 +23,7 @@
 package dsh
 
 import (
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -214,11 +215,22 @@ func todoStatusToTaskStatus(s string) agent.AgentTaskStatus {
 // Field-name gap intentionally NOT silently aliased (see
 // [[no-type-aliases]]): the bridge boundary is the single place
 // where dsh's vocabulary meets agent's vocabulary.
+//
+// DIAG: dsh is a pure wire passthrough — it does NOT compute pct.
+// Whatever the upstream dsh daemon (or its minimax clone) reports
+// lands in UsageInfo verbatim and the channel footer renders it.
+// We've seen upstream report `cache_read_input_tokens` 4× the
+// model context window, which the footer then renders as "416.0%".
+// That is upstream reporting something other than per-turn
+// cache-hit bytes (cumulative session cache, session-level
+// modelUsage aggregations, double-counted sub-tokens — we don't
+// know without the wire dump). Surface the raw fields so we can
+// see what dsh is handing us and decide whether to clamp.
 func usageToAgent(in *usageInfo) *agent.UsageInfo {
 	if in == nil {
 		return nil
 	}
-	return &agent.UsageInfo{
+	out := &agent.UsageInfo{
 		InputTokens:               in.InputTokens,
 		OutputTokens:              in.OutputTokens,
 		CacheCreationInputTokens:  in.CacheCreationTokens,
@@ -227,6 +239,22 @@ func usageToAgent(in *usageInfo) *agent.UsageInfo {
 		ContextWindow:             in.ContextWindow,
 		ContextWindowPct:          in.ContextWindowPct,
 	}
+	// Matches claudecode/claudecode.go:281 style: logger is
+	// always sourced from slog.Default() because usageToAgent is
+	// a top-level helper (no surrounding struct carries one). The
+	// main binary installs its JSONHandler via slog.SetDefault in
+	// cmd/nightme/main.go:69, so this lands in ~/.nightme/nightme
+	// .log.
+	logger := slog.Default()
+	logger.Info("dsh: usageToAgent",
+		slog.Int("input_tokens", out.InputTokens),
+		slog.Int("output_tokens", out.OutputTokens),
+		slog.Int("cache_creation_input_tokens", out.CacheCreationInputTokens),
+		slog.Int("cache_read_input_tokens", out.CacheReadInputTokens),
+		slog.Int("context_window", out.ContextWindow),
+		slog.Float64("context_window_pct", out.ContextWindowPct),
+	)
+	return out
 }
 
 

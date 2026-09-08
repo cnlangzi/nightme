@@ -260,8 +260,21 @@ func (t *translator) handleTokenUsageUpdated(params json.RawMessage) {
 		return
 	}
 	u := notif.TokenUsage.Last
-	if u.InputTokens == 0 && u.OutputTokens == 0 {
+	usedTotalFallback := false
+	// F-CODEX-FALLBACK: only fall back to `total` (session-cumulative)
+	// when `last` is fully empty. The previous condition checked
+	// only `InputTokens` and `OutputTokens`, which let a
+	// "pure cache hit" turn (`last.cachedInputTokens > 0` while
+	// `last.in == last.out == 0`) silently escalate to session-
+	// cumulative cache reads — turning a normal turn into a
+	// `cache_read > contextWindow` pct of several hundred percent.
+	// Per OpenAI's codex-rs/protocol/v2/thread.rs (TokenUsage),
+	// `last` and `total` are explicitly distinct: `last` is
+	// per-turn, `total` is session-cumulative. Do not mix them
+	// when `last` is reporting a legitimate cache-only turn.
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CachedInputTokens == 0 {
 		u = notif.TokenUsage.Total
+		usedTotalFallback = true
 	}
 	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CachedInputTokens == 0 {
 		return
@@ -274,6 +287,35 @@ func (t *translator) handleTokenUsageUpdated(params json.RawMessage) {
 			info.ContextWindowPct = float64(used) / float64(info.ContextWindow) * 100
 		}
 	}
+	// DIAG: codex is the third bridge we've had to instrument after
+	// claudecode + dsh — same root cause: upstream vendor clone
+	// (minimax / MiniMax-M3[1m]) reports wire usage that doesn't
+	// match a per-turn contract, and the bridge is a passthrough so
+	// the channel footer ends up rendering e.g. `cache_read = 4M`
+	// against a 1M model window as `416.0%`. Surface both the
+	// raw params and the decoded snapshot so we can see whether the
+	// inflated value comes from `last` (per-turn) or `total`
+	// (session-cumulative — known wrong fallback path on line 264).
+	// Matches claudecode/claudecode.go:281 style: logger is sourced
+	// from slog.Default() at call site (no logger on the translator
+	// struct today). Main binary installs its JSONHandler via
+	// slog.SetDefault in cmd/nightme/main.go:69.
+	logger := slog.Default()
+	logger.Info("codex: handleTokenUsageUpdated",
+		slog.String("raw_params", string(params)),
+		slog.Bool("used_total_fallback", usedTotalFallback),
+		slog.Int("last_input_tokens", notif.TokenUsage.Last.InputTokens),
+		slog.Int("last_cached_input_tokens", notif.TokenUsage.Last.CachedInputTokens),
+		slog.Int("last_output_tokens", notif.TokenUsage.Last.OutputTokens),
+		slog.Int("total_input_tokens", notif.TokenUsage.Total.InputTokens),
+		slog.Int("total_cached_input_tokens", notif.TokenUsage.Total.CachedInputTokens),
+		slog.Int("input_tokens", info.InputTokens),
+		slog.Int("output_tokens", info.OutputTokens),
+		slog.Int("cache_creation_input_tokens", info.CacheCreationInputTokens),
+		slog.Int("cache_read_input_tokens", info.CacheReadInputTokens),
+		slog.Int("context_window", info.ContextWindow),
+		slog.Float64("context_window_pct", info.ContextWindowPct),
+	)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.turn.lastUsage = info

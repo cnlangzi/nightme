@@ -23,7 +23,36 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	queuepkg "github.com/cnlangzi/nightme/internal/command/queue"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+// queueReply returns the Outbound[0] payload of out, asserting that
+// exactly one OutReply is emitted and that the basic identity
+// (Kind / ChatID / ReplyTo) is wired correctly. Centralising the
+// boilerplate keeps each test focused on its specific assertion.
+func queueReply(t *testing.T, out *command.SlashOutput, input command.SlashInput) string {
+	t.Helper()
+	if out == nil {
+		t.Fatal("SlashOutput is nil")
+	}
+	if !out.Consumed {
+		t.Error("Consumed = false, want true")
+	}
+	if len(out.Outbound) != 1 {
+		t.Fatalf("Outbound len = %d, want 1 (main-work path)", len(out.Outbound))
+	}
+	ob := out.Outbound[0]
+	if ob.Kind != messages.OutReply {
+		t.Errorf("Outbound[0].Kind = %s, want %s", ob.Kind, messages.OutReply)
+	}
+	if ob.ChatID != input.ChatID {
+		t.Errorf("Outbound[0].ChatID = %q, want %q", ob.ChatID, input.ChatID)
+	}
+	if ob.ReplyTo != input.MessageID {
+		t.Errorf("Outbound[0].ReplyTo = %q, want %q", ob.ReplyTo, input.MessageID)
+	}
+	return ob.Text
+}
 
 func TestFactory_Spec(t *testing.T) {
 	f := queuepkg.NewFactory()
@@ -47,8 +76,13 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 	if !out.Consumed {
 		t.Fatalf("Consumed = false, want true")
 	}
+	// Preflight (no cs): stays on OutCommandReply — no placeholder
+	// exists, no per-turn fold path to target.
 	if !strings.Contains(out.Reply, "No active chat session") {
 		t.Fatalf("Reply missing no-active message: %q", out.Reply)
+	}
+	if len(out.Outbound) != 0 {
+		t.Errorf("preflight reply should not produce Outbound entries, got %d", len(out.Outbound))
 	}
 }
 
@@ -67,8 +101,13 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	if !out.Consumed {
 		t.Fatalf("Consumed = false, want true")
 	}
+	// Preflight (no cwd): stays on OutCommandReply — failOut is
+	// returned verbatim from RequireActiveCwd.
 	if !strings.Contains(out.Reply, "Send /cwd") {
 		t.Fatalf("Reply missing cwd hint: %q", out.Reply)
+	}
+	if len(out.Outbound) != 0 {
+		t.Errorf("preflight reply should not produce Outbound entries, got %d", len(out.Outbound))
 	}
 }
 
@@ -94,6 +133,9 @@ func TestFactory_Handle_EmptyBody_RepliesUsage(t *testing.T) {
 	if !strings.Contains(out.Reply, "Usage: /queue") {
 		t.Fatalf("Reply missing usage: %q", out.Reply)
 	}
+	if len(out.Outbound) != 0 {
+		t.Errorf("empty-body usage should stay on Reply, got %d Outbound", len(out.Outbound))
+	}
 }
 
 // /queue <body> with an active chat: queue grows by 1. The
@@ -113,24 +155,22 @@ func TestFactory_Handle_AppendsMessage(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{
-			ChatID:    "c1",
-			MessageID: "m_queue",
-			Text:      "/queue standalone please",
-			Args:      []string{"queue", "standalone", "please"},
-		})
+	in := command.SlashInput{
+		ChatID:    "c1",
+		MessageID: "m_queue",
+		Text:      "/queue standalone please",
+		Args:      []string{"queue", "standalone", "please"},
+	}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if !out.Consumed {
-		t.Fatalf("Consumed = false, want true")
-	}
-	if !strings.Contains(out.Reply, "Queued") {
-		t.Fatalf("Reply should mention queued: %q", out.Reply)
-	}
 	if got := cs.QueueLen(); got != 1 {
 		t.Errorf("QueueLen after /queue: got %d, want 1", got)
+	}
+	text := queueReply(t, out, in)
+	if !strings.Contains(text, "Queued") {
+		t.Errorf("Outbound[0].Text should mention queued: %q", text)
 	}
 }
 
@@ -144,13 +184,13 @@ func TestFactory_Handle_MultiWordBody(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{
-			ChatID:    "c1",
-			MessageID: "m_queue_2",
-			Text:      "/queue first second third",
-			Args:      []string{"queue", "first", "second", "third"},
-		})
+	in := command.SlashInput{
+		ChatID:    "c1",
+		MessageID: "m_queue_2",
+		Text:      "/queue first second third",
+		Args:      []string{"queue", "first", "second", "third"},
+	}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -158,8 +198,9 @@ func TestFactory_Handle_MultiWordBody(t *testing.T) {
 		t.Errorf("QueueLen after multi-word /queue: got %d, want 1", got)
 	}
 	// Reply should preview the full body.
-	if !strings.Contains(out.Reply, "first second third") {
-		t.Errorf("Reply missing body preview: %q", out.Reply)
+	text := queueReply(t, out, in)
+	if !strings.Contains(text, "first second third") {
+		t.Errorf("Outbound[0].Text missing body preview: %q", text)
 	}
 }
 
@@ -172,21 +213,22 @@ func TestFactory_Handle_FullWidthSlash_ArgsAlreadySet(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{
-			ChatID:    "c1",
-			MessageID: "m_queue_fw",
-			Text:      "／queue full width body",
-			Args:      []string{"queue", "full", "width", "body"},
-		})
+	in := command.SlashInput{
+		ChatID:    "c1",
+		MessageID: "m_queue_fw",
+		Text:      "／queue full width body",
+		Args:      []string{"queue", "full", "width", "body"},
+	}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := cs.QueueLen(); got != 1 {
 		t.Errorf("QueueLen: got %d, want 1", got)
 	}
-	if !strings.Contains(out.Reply, "full width body") {
-		t.Errorf("Reply missing body preview: %q", out.Reply)
+	text := queueReply(t, out, in)
+	if !strings.Contains(text, "full width body") {
+		t.Errorf("Outbound[0].Text missing body preview: %q", text)
 	}
 }
 
@@ -213,31 +255,32 @@ func TestFactory_Handle_LongBody_RuneTruncation(t *testing.T) {
 		args = append(args, string(r))
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{
-			ChatID:    "c1",
-			MessageID: "m_long",
-			Text:      "/queue " + body,
-			Args:      args,
-		})
+	in := command.SlashInput{
+		ChatID:    "c1",
+		MessageID: "m_long",
+		Text:      "/queue " + body,
+		Args:      args,
+	}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
+	text := queueReply(t, out, in)
 
-	// The preview in the reply must end with "..." and must
-	// not contain any U+FFFD (which would indicate a mid-rune
-	// cut from byte-level truncation).
-	if !strings.HasSuffix(out.Reply, "...") {
-		t.Errorf("long body should be truncated with ellipsis: %q", out.Reply)
+	// The preview must end with "..." and must not contain any
+	// U+FFFD (which would indicate a mid-rune cut from byte-level
+	// truncation).
+	if !strings.HasSuffix(text, "...") {
+		t.Errorf("long body should be truncated with ellipsis: %q", text)
 	}
-	if strings.ContainsRune(out.Reply, '�') {
-		t.Errorf("long body preview contains U+FFFD (mid-rune cut): %q", out.Reply)
+	if strings.ContainsRune(text, '�') {
+		t.Errorf("long body preview contains U+FFFD (mid-rune cut): %q", text)
 	}
 	// Counting runes in the preview (excluding the
 	// "📥 Queued: " prefix and the trailing "...")
 	// should be at most 80 runes (matches the production
 	// previewRuneCap).
-	preview := strings.TrimPrefix(out.Reply, "📥 Queued: ")
+	preview := strings.TrimPrefix(text, "📥 Queued: ")
 	preview = strings.TrimSuffix(preview, "...")
 	runeCount := 0
 	for range preview {
@@ -342,13 +385,13 @@ func TestFactory_Handle_QueueGrows(t *testing.T) {
 		t.Fatalf("precondition QueueLen: got %d, want 1", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{
-			ChatID:    "c1",
-			MessageID: "m_queue_ahead",
-			Text:      "/queue standalone at tail",
-			Args:      []string{"queue", "standalone", "at", "tail"},
-		})
+	in := command.SlashInput{
+		ChatID:    "c1",
+		MessageID: "m_queue_ahead",
+		Text:      "/queue standalone at tail",
+		Args:      []string{"queue", "standalone", "at", "tail"},
+	}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -357,6 +400,13 @@ func TestFactory_Handle_QueueGrows(t *testing.T) {
 	}
 	if got := cs.QueueLen(); got != 2 {
 		t.Errorf("QueueLen after /queue: got %d, want 2", got)
+	}
+	// Main-work success path emits exactly one OutReply; no Reply.
+	if len(out.Outbound) != 1 {
+		t.Fatalf("Outbound len = %d, want 1", len(out.Outbound))
+	}
+	if out.Reply != "" {
+		t.Errorf("Reply should be empty on OutReply path, got %q", out.Reply)
 	}
 }
 
@@ -383,8 +433,12 @@ func TestFactory_Handle_EmptyMessageID_RepliesDiagnostic(t *testing.T) {
 	if !out.Consumed {
 		t.Fatalf("Consumed = false, want true")
 	}
+	// Preflight guard: stays on OutCommandReply, no Outbound.
 	if !strings.Contains(out.Reply, "missing message id") {
 		t.Errorf("Reply should mention missing message id: %q", out.Reply)
+	}
+	if len(out.Outbound) != 0 {
+		t.Errorf("preflight guard should stay on Reply, got %d Outbound", len(out.Outbound))
 	}
 	if got := cs.QueueLen(); got != 0 {
 		t.Errorf("QueueLen after empty-MessageID /queue: got %d, want 0", got)

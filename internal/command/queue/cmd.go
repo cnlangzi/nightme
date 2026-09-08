@@ -56,7 +56,7 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /queue.
-type Factory struct {}
+type Factory struct{}
 
 // NewFactory constructs a Factory. command/* factories do not
 // receive a *chatsession.Manager — cs comes from the dispatcher
@@ -116,6 +116,12 @@ func (f *Factory) Spec() command.Spec {
 //  5. Build the Message via BuildMessage (Kind=MessageKindQueue).
 //  6. Call cs.QueueUserMessage (Kind is preserved through Push).
 //  7. Reply with a short preview, emoji-prefixed.
+//
+// Reply kind: OutReply (not OutCommandReply) for the main-work
+// paths (success + QueueUserMessage error). Mirrors /steer and
+// /stop — see steer/cmd.go for the full rationale. Preflight
+// errors (no cs, no cwd, missing MessageID, empty body) stay on
+// Reply — no placeholder exists yet for those paths.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
@@ -167,12 +173,15 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// docs/feat/slash-command-reactions.md for the full design.
 
 	if err := cs.QueueUserMessage(msg); err != nil {
-		return command.Reply(ctx, rt, fmt.Sprintf("Queue failed: %v", err)), nil
+		return command.OutReply(input, fmt.Sprintf("Queue failed: %v", err)), nil
 	}
 
 	// Reply with a short preview of the queued body (truncated
 	// at rune boundary — see command.PreviewForIM for the
-	// multi-byte UTF-8 safety rationale).
-	return command.Reply(ctx, rt,
+	// multi-byte UTF-8 safety rationale). Emitted as OutReply
+	// so the channel adapter folds it into the same rolling-log
+	// card as the agent's stream — see reply.go for the helper
+	// contract.
+	return command.OutReply(input,
 		fmt.Sprintf("📥 Queued: %s", command.PreviewForIM(body))), nil
 }

@@ -47,7 +47,7 @@ import (
 )
 
 // Factory is the command.SlashCommandFactory for /steer.
-type Factory struct {}
+type Factory struct{}
 
 // NewFactory constructs a Factory. command/* factories do not
 // receive a *chatsession.Manager — cs comes from the dispatcher
@@ -84,6 +84,24 @@ func (f *Factory) Spec() command.Spec {
 //  5. Call cs.SteerUserMessage.
 //  6. Reply with a short confirmation that names the steered
 //     message (truncated for IM card legibility).
+//
+// Reply kind: OutReply (not OutCommandReply) for the main-work
+// paths (success + SteerUserMessage error). The steering hint is
+// the agent's continuation of the in-flight turn, so it folds
+// into the same rolling-log card the agent is streaming on —
+// Feishu PATCHes the placeholder created at MessageQueued time
+// instead of sending a second bubble, Slack streams into the
+// same turnStream instead of a "❯ " standalone. The same shape
+// is used by /queue and /stop; only /cwd /run /help /kill /agents
+// remain on OutCommandReply (those are system one-shots, not
+// per-turn continuations).
+//
+// Preflight errors (no cs, no cwd, empty body) stay on Reply —
+// no placeholder exists yet for those paths, so OutReply would
+// fall through to an orphan top-level card and the visual would
+// be indistinguishable but the simpler Reply helper is the right
+// shape (no input.MessageID context for the no-cs branch
+// anyway).
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
@@ -131,12 +149,16 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// Removed for clarity — see docs/feat/slash-command-reactions.md.
 
 	if err := cs.SteerUserMessage(msg); err != nil {
-		return command.Reply(ctx, rt, fmt.Sprintf("Steer failed: %v", err)), nil
+		return command.OutReply(input, fmt.Sprintf("Steer failed: %v", err)), nil
 	}
 
 	// Reply with a short preview of the steered body (truncated
 	// at rune boundary — see command.PreviewForIM for the
-	// multi-byte UTF-8 safety rationale).
-	return command.Reply(ctx, rt,
+	// multi-byte UTF-8 safety rationale). Emitted as OutReply
+	// so the channel adapter folds it into the same rolling-log
+	// card as the agent's stream — see reply.go for the helper
+	// contract and /use's pattern (internal/command/use/cmd.go)
+	// for the precedent.
+	return command.OutReply(input,
 		fmt.Sprintf("🛑 Steering: %s", command.PreviewForIM(body))), nil
 }

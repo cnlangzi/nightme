@@ -7,7 +7,12 @@
 //
 // All exported behavior follows the agent.Agent contract:
 //   - EventAgentDone is per-turn (Reason:"settled") and does NOT close events
-//   - EventAgentResult.Text is always non-empty (fallback to "Done.")
+//   - EventAgentResult.Text MAY be empty: bridges stream assistant
+//     text as EventAgentText (one block per flush) and emit
+//     EventAgentResult with Text="" once the turn settles. The
+//     downstream channel PATCHes the receipt footer in place
+//     via OutResult's empty-text path; the result card does not
+//     duplicate the streamed body.
 //   - Usage is OVERWRITTEN (per-turn snapshot, never summed)
 //   - Unknown events / fields → debug log + drop, never terminate
 package codex

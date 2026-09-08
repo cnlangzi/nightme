@@ -1103,6 +1103,7 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 	if err != nil {
 		return fmt.Errorf("feishu: build orphan reply card: %w", err)
 	}
+
 	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
 	// → main chat visible. Matches the cold-start receipt path so the
 	// orphan bubble is indistinguishable from the first receipt card
@@ -1114,6 +1115,28 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 	// second card.
 	_, err = a.sendCardContent(ctx, chatID, body, "", false)
 	return err
+}
+
+// postOrphanErrorCard posts a standalone error card when an
+// OutResult arrives with Text=="" but err populated and no
+// receipt was registered yet (cold error before any OutReply).
+// The anchored StampFooterLines path silently drops the
+// body-level ❌ signal in that case — only the OnPromptEnded
+// reaction emoji is visible, which is much less prominent.
+// Mirrors postOrphanReplyCard's shape so cold error turns
+// render as cards too.
+func (a *Adapter) postOrphanErrorCard(ctx context.Context, chatID, userMsgID, errMsg string) error {
+	// No footer: an orphan cold-error has no receipt state to
+	// stamp (the agent never produced a session_id / model
+	// snapshot for this turn). The ❌ body is the signal.
+	body, _, err := buildReceiptCard([]LogEntry{newOutReplyEntry("❌ " + errMsg)}, nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("feishu: build orphan error card: %w", err)
+	}
+	if _, err := a.sendCardContent(ctx, chatID, body, "", false); err != nil {
+		return err
+	}
+	return nil
 }
 
 // postOrphanTaskCard sends an OutTask* chunk with no parent
@@ -1741,10 +1764,22 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// text-dedup; acp / pty by wire shape). PATCH the existing
 		// receipt's footer in place via StampFooterLines — no
 		// duplicate standalone card.
+//
+		// Error turns also arrive on this path: codex `failed` /
+		// `interrupted` and pi poisoned turns produce Text==""
+		// with Err populated. The user must still see a body-level
+		// ❌ signal (not just the OnPromptEnded reaction emoji,
+		// which is much less prominent). If a receipt exists,
+		// stamp the footer so the receipt settles into its
+		// terminal state; if not, fall through to a standalone
+		// error card so the error is never silently dropped.
 		if text == "" {
 			r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
 			if r == nil {
-				return nil
+				if msg.Err == nil {
+					return nil
+				}
+				return a.postOrphanErrorCard(ctx, msg.ChatID, msg.ReplyTo, msg.Err.Error())
 			}
 			return r.StampFooterLines(ctx, statusbar.StatusBarLines(&msg))
 		}

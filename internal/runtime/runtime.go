@@ -69,6 +69,7 @@ import (
 	_ "github.com/cnlangzi/nightme/internal/command/cwd"
 	_ "github.com/cnlangzi/nightme/internal/command/gtw"
 	_ "github.com/cnlangzi/nightme/internal/command/newcmd"
+	_ "github.com/cnlangzi/nightme/internal/command/wiki"
 	_ "github.com/cnlangzi/nightme/internal/command/queue"
 	_ "github.com/cnlangzi/nightme/internal/command/review"
 	_ "github.com/cnlangzi/nightme/internal/command/steer"

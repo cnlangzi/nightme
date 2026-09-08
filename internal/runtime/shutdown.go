@@ -7,20 +7,18 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"github.com/cnlangzi/nightme/internal/chatstore"
 	"io"
 	"log/slog"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // ShutdownRun stops the channel and persists final state.
-//
-// # Agent processes are INTENTIONALLY NOT killed here — they are
 //
 // Agent processes are INTENTIONALLY NOT killed here — they are
 // long-running CLI sessions independent of nightme's lifetime.

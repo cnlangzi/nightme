@@ -19,8 +19,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-
-
 // WireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
 // translation; MessageStateBus subscriber for F-31 lifecycle reactions)
@@ -225,6 +223,47 @@ func WireRuntimeCallbacksAndRestore(
 		cs.PromptEndBus.Subscribe(func(e agentsession.PromptEndedEvent) bool {
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
+			}
+			// Flip the heartbeat snapshot's Done flag for this
+			// terminal lifecycle event. Covers turns that EXIT
+			// WITHOUT an OutResult (bridge crash, error path,
+			// shell error early-out): the runtime handler's
+			// OutResult branch doesn't fire on those, but
+			// endPrompt still does. Idempotent with the
+			// OutResult branch's MarkDone call — the second
+			// invocation finds Done already true and returns
+			// false, so at most one OutHeartbeat follow-up per
+			// userMsgID per turn is emitted (no spam from the
+			// double trigger).
+			//
+			// Order: MarkDone BEFORE ch.OnPromptEnded so the
+			// receipt's heartbeat PATCH (driven by the
+			// OutHeartbeat follow-up) lands before
+			// SetPromptState(PromptDone) flips the receipt to
+			// terminal — the final user-visible card has both
+			// the ✅ prefix on the heartbeat line AND the
+			// ✅ reaction on the card. Reversing the order would
+			// leave a one-frame window where the reaction is
+			// set but the heartbeat line still reads "💭 N · 🔧
+			// M · ⏱ ...".
+			if hb := cs.Heartbeat(); hb != nil {
+				if hb.MarkDone(e.UserMsgID) {
+					snap := hb.Snapshot(e.UserMsgID)
+					if !snap.Empty() {
+						out := messages.OutboundMessage{
+							ChatID:    e.ChatID,
+							Kind:      messages.OutHeartbeat,
+							ReplyTo:   e.UserMsgID,
+							Heartbeat: &snap,
+						}
+						if err := em.Send(context.Background(), out); err != nil && logger != nil {
+							logger.Warn("runtime: heartbeat follow-up send failed (endPrompt)",
+								"chat_id", e.ChatID,
+								"user_msg_id", e.UserMsgID,
+								"err", err)
+						}
+					}
+				}
 			}
 			// The adapter call is fire-and-forget: failures are
 			// logged inside SetPromptState. We use

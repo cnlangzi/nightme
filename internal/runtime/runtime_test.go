@@ -369,16 +369,30 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	}, UserMsgID: "om_user_2"})
 
 	got := ch.Record()
-	if len(got) != 2 {
-		t.Fatalf("got %d events, want 2", len(got))
+	// Filter to OutResult only — the runtime also fires an
+	// OutHeartbeat follow-up after each OutResult (via
+	// HeartbeatTracker.MarkDone flipping Done=true for the
+	// terminal "✅" prefix). The per-turn Usage assertion is
+	// about the OutResult payload, not the heartbeat follow-up,
+	// so filtering makes the test orthogonal to the heartbeat
+	// plumbing.
+	var results []*messages.OutboundMessage
+	for _, m := range got {
+		m := m
+		if m.Kind == messages.OutResult {
+			results = append(results, &m)
+		}
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d OutResult events, want 2 (filter excludes MarkDone follow-ups)", len(results))
 	}
 	// First turn: Usage = (10, 5) — turn 1 only.
-	if u := got[0].Usage; u == nil ||
+	if u := results[0].Usage; u == nil ||
 		u.InputTokens != 10 || u.OutputTokens != 5 {
 		t.Errorf("turn-1 Usage = %+v, want (10, 5) — turn 1's snapshot only", u)
 	}
 	// Second turn: Usage = (20, 7) — turn 2 only, NOT (30, 12).
-	if u := got[1].Usage; u == nil ||
+	if u := results[1].Usage; u == nil ||
 		u.InputTokens != 20 || u.OutputTokens != 7 {
 		t.Errorf("turn-2 Usage = %+v, want (20, 7) — turn 2's snapshot only (no carryover)", u)
 	}

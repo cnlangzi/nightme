@@ -259,6 +259,50 @@ func NewEventHandler(
 			}
 		}
 
+		// OutResult is the agent's terminal payload for this turn.
+		// Flip the heartbeat snapshot's Done flag so the receipt
+		// header can prepend "✅" — the same lifecycle transition
+		// that the OnPromptEnded eventbus subscriber also observes
+		// (via cs.PromptEndBus below). OnPromptEnded covers turns
+		// that exit without an OutResult (bridge crash, error path);
+		// this branch covers the happy path. The Done flip is
+		// idempotent across the two trigger sites — the second
+		// MarkDone call returns false and no duplicate OutHeartbeat
+		// is emitted.
+		//
+		// Runs AFTER the Observe block above so the snapshot's
+		// counters are final by the time the Done flag is set;
+		// the renderer reads both dimensions off the same
+		// snapshot, so the order matters for the painted card.
+		// The follow-up OutHeartbeat follows the same send path
+		// as Observe's — share the empty-snapshot drop and the
+		// send-error log.
+		if out.Kind == messages.OutResult && userMsgID != "" && cs != nil && cs.Heartbeat() != nil {
+			if cs.Heartbeat().MarkDone(userMsgID) {
+				snap := cs.Heartbeat().Snapshot(userMsgID)
+				if snap.Empty() {
+					if logger != nil {
+						logger.Debug("heartbeat dropped (tracker entry empty post-markdone)",
+							"chat_id", chatID,
+							"user_msg_id", userMsgID)
+					}
+				} else {
+					hb := messages.OutboundMessage{
+						ChatID:    chatID,
+						Kind:      messages.OutHeartbeat,
+						ReplyTo:   userMsgID,
+						Heartbeat: &snap,
+					}
+					if err := em.Send(context.Background(), hb); err != nil && logger != nil {
+						logger.Warn("heartbeat follow-up send failed (markdone)",
+							"chat_id", chatID,
+							"user_msg_id", userMsgID,
+							"err", err)
+					}
+				}
+			}
+		}
+
 		// Apply outbound.OutboundPolicy chain. Each policy may mutate
 		// out (e.g. StatusBarStampPolicy fills out.StatusBar)
 		// or short-circuit with drop=true (e.g. ThinkMode /

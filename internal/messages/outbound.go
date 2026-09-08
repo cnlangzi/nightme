@@ -319,10 +319,26 @@ type OutboundMessage struct {
 }
 
 // HeartbeatSnapshot (F-63) is the per-turn progress signal carried
-// on OutHeartbeat messages. ThinkCount and ToolCount are monotonic
-// per-turn counters; LastBeatAt is the wall-clock time of the most
-// recent activity (refreshed by any OutboundKind, not just
-// thinking / tool calls — it's the "agent is alive" indicator).
+// on OutHeartbeat messages. It carries BOTH per-turn activity
+// counters AND a terminal-state flag in one snapshot:
+//
+//	ThinkCount / ToolCount — monotonic per-turn counters driven by
+//	  Observe() (incremented on OutThinking / OutToolStart,
+//	  respectively). Reset implicitly by the LRU eviction of the
+//	  userMsgID entry (per-turn scope).
+//
+//	LastBeatAt — wall-clock of the most recent activity (refreshed
+//	  by any OutboundKind, not just thinking / tool calls — it's
+//	  the "agent is alive" indicator).
+//
+//	Done — terminal-state flag. Flipped true by MarkDone() when
+//	  the runtime sees OutResult or ChatSession.endPrompt fires
+//	  (the readpump observed EventAgentDone / EventAgentError).
+//	  Set independently of counters — a done turn may carry
+//	  non-zero counters from prior activity (the common case), or
+//	  zero counters when /think off + /tools off suppressed all
+//	  in-flight activity (rare). Renderer decides how to surface
+//	  Done — feishu prepends "✅ " to the heartbeat line.
 //
 // Field semantics are stable; channels and tests are free to
 // consume them directly without coordinating with the runtime.
@@ -330,6 +346,7 @@ type HeartbeatSnapshot struct {
 	ThinkCount int       `json:"think_count"`
 	ToolCount  int       `json:"tool_count"`
 	LastBeatAt time.Time `json:"last_beat_at"`
+	Done       bool      `json:"done"`
 }
 
 // Empty reports whether the snapshot carries no observable state.
@@ -337,7 +354,18 @@ type HeartbeatSnapshot struct {
 // messages (e.g. after a /think off turn where the original
 // OutThinking was dropped but tracker still fires one OutHeartbeat
 // with ThinkCount unchanged).
+//
+// Done flips the verdict: a snapshot with only Done=true (no
+// counters, no LastBeatAt) is NOT empty — the terminal state is a
+// meaningful signal in its own right (a turn can finish without
+// any visible thinking / tool activity, e.g. a one-shot answer
+// with /think off + /tools off). The follow-up OutHeartbeat must
+// reach the channel so the receipt can flip its Done flag and the
+// renderer can paint "✅".
 func (s HeartbeatSnapshot) Empty() bool {
+	if s.Done {
+		return false
+	}
 	return s.ThinkCount == 0 && s.ToolCount == 0 && s.LastBeatAt.IsZero()
 }
 

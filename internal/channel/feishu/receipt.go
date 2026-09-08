@@ -39,7 +39,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	
+
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -485,11 +485,21 @@ func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error 
 // LastBeatAt (LastBeatAt is updated by the snapshot write but
 // does not gate the render).
 //
+// Terminal Done: the changed check ALSO covers the snapshot's
+// Done flag (false→true). MarkDone on the tracker is the source
+// of the transition — ApplyHeartbeat just observes it. The
+// flip counts as a changed event and the rendered card picks
+// up the "✅" prefix via renderHeartbeatHeader's Done branch.
+// true→true is NOT a changed event (idempotency matches
+// MarkDone's transition semantics).
+//
 // Throttle: heartbeatMinInterval caps thinking-only PATCH rate.
 // ToolCount increases always PATCH immediately — a second Read
 // 1.94s after the first must show 🔧 2, not stay stuck at 🔧 1.
 // Thinking deltas still coalesce against r.lastBodyPatch (the
 // SAME field renderLocked updates on every successful PATCH).
+// Done flips also bypass the thinking throttle — see the gate
+// below for the rationale.
 //
 // Locking: holds r.mu through renderLocked (matching the
 // existing AppendEntryWithFooter pattern). renderLocked's
@@ -513,7 +523,8 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
 	r.heartbeat = snap
 	thinkChanged := snap.ThinkCount != prev.ThinkCount
 	toolChanged := snap.ToolCount != prev.ToolCount
-	if !thinkChanged && !toolChanged {
+	doneChanged := snap.Done != prev.Done
+	if !thinkChanged && !toolChanged && !doneChanged {
 		return
 	}
 	// Thinking streams are dense (10+ deltas/s) — coalesce those
@@ -521,7 +532,15 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
 	// replies; throttling a ToolCount bump is what made a two-Read
 	// turn show 🔧 1 while the thread had two ● read(...) lines
 	// (SPEC.md then SPEC.md offset=626, 1.94s apart).
+	//
+	// Done flips bypass the thinking throttle — the terminal
+	// "✅" prefix must paint promptly even inside a dense
+	// thinking-stream window. The MarkDone transition is
+	// idempotent at the source (HeartbeatTracker.MarkDone
+	// returns false on the second call), so this is at most
+	// one extra PATCH per turn.
 	if !toolChanged && r.heartbeatMinInterval > 0 &&
+		!doneChanged &&
 		!r.lastBodyPatch.IsZero() &&
 		time.Since(r.lastBodyPatch) < r.heartbeatMinInterval {
 		return

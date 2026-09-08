@@ -411,12 +411,114 @@ func TestEventHandler_Heartbeat_OrderInSequence(t *testing.T) {
 
 	recorded := ch.Record()
 	var hbCount int
+	var lastHB *messages.HeartbeatSnapshot
+	for _, m := range recorded {
+		if m.Kind == messages.OutHeartbeat {
+			hbCount++
+			m := m
+			lastHB = m.Heartbeat
+		}
+	}
+	// think + tool_start fire Observe → 2 follow-ups; OutResult
+	// fires MarkDone → +1 follow-up (the terminal "✅" signal).
+	if hbCount != 3 {
+		t.Fatalf("OutHeartbeat count = %d, want 3 (think + tool_start + OutResult MarkDone)", hbCount)
+	}
+	// The MarkDone-triggered follow-up must carry Done=true so the
+	// receipt header can prepend ✅.
+	if lastHB == nil || !lastHB.Done {
+		t.Fatalf("final OutHeartbeat Done = %+v, want Done=true (MarkDone must propagate)", lastHB)
+	}
+}
+
+// TestEventHandler_OutResult_MarkDoneIdempotent pins the
+// transition semantics end-to-end: the second OutResult on the
+// same userMsgID (rare but legal — bridge retry, etc.) must
+// NOT emit a second OutHeartbeat with Done=true. MarkDone's
+// false→true transition check makes the second call a no-op,
+// so the runtime emits at most one terminal follow-up per
+// userMsgID per turn.
+func TestEventHandler_OutResult_MarkDoneIdempotent(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
+	logger := slog.Default()
+
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, chatsession.GitStatusDeps{})
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
+
+	dispatch := func(ev *agent.AgentEvent) {
+		h(chatsession.AgentEventEnvelope{
+			ChatID: "oc_chat", AgentSession: as, Event: ev, UserMsgID: "om_user_1",
+		})
+	}
+
+	// Two OutResults on the same turn — the bridge retried /
+	// re-emitted for whatever reason.
+	dispatch(&agent.AgentEvent{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "first"}})
+	dispatch(&agent.AgentEvent{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "second"}})
+
+	recorded := ch.Record()
+	var hbCount int
 	for _, m := range recorded {
 		if m.Kind == messages.OutHeartbeat {
 			hbCount++
 		}
 	}
-	if hbCount != 2 {
-		t.Fatalf("OutHeartbeat count = %d, want 2 (think + tool_start)", hbCount)
+	if hbCount != 1 {
+		t.Fatalf("OutHeartbeat count = %d, want 1 (second MarkDone must be a no-op)", hbCount)
+	}
+
+	// Tracker state: Done=true (set on first MarkDone).
+	snap := cs.Heartbeat().Snapshot("om_user_1")
+	if !snap.Done {
+		t.Fatalf("Heartbeat.Done = false, want true after first OutResult")
+	}
+}
+
+// TestEventHandler_OutResult_DoneOnlyEmitsCheck pins the
+// /think off + /tools off terminal case: a turn with no
+// counting activity (no OutThinking, no OutToolStart) but with
+// an OutResult still emits an OutHeartbeat carrying
+// Done=true. Without this branch the turn would end with the
+// tracker snapshot showing Done=true but no follow-up
+// OutHeartbeat ever emitted — the receipt would stay in the
+// "🤖 Working" state past the actual finish.
+func TestEventHandler_OutResult_DoneOnlyEmitsCheck(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
+	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
+		t.Fatalf("SetThinkMode: %v", err)
+	}
+	if err := cs.SetToolsMode(chatsession.ToolsModeHide); err != nil {
+		t.Fatalf("SetToolsMode: %v", err)
+	}
+	logger := slog.Default()
+
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, chatsession.GitStatusDeps{})
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
+
+	// Only an OutResult fires — no thinking, no tools (they
+	// would be dropped by the gates anyway).
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+		Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "one-shot answer"},
+	}, UserMsgID: "om_user_1"})
+
+	recorded := ch.Record()
+	var hbCount int
+	var lastHB *messages.HeartbeatSnapshot
+	for _, m := range recorded {
+		if m.Kind == messages.OutHeartbeat {
+			hbCount++
+			m := m
+			lastHB = m.Heartbeat
+		}
+	}
+	if hbCount != 1 {
+		t.Fatalf("OutHeartbeat count = %d, want 1 (MarkDone follow-up must fire even with zero counters)", hbCount)
+	}
+	if lastHB == nil || !lastHB.Done {
+		t.Fatalf("OutHeartbeat snapshot Done = %+v, want Done=true (MarkDone must fire on Done-only path)", lastHB)
 	}
 }

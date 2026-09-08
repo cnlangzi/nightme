@@ -1,0 +1,28 @@
+# Line-ending policy for the nightme repo.
+#
+# *.go text eol=lf
+#   Forces every checkout — including GitHub Actions windows
+#   runners with core.autocrlf=true and any developer with
+#   autocrlf=input/true — to materialize .go files with LF
+#   terminators. gofmt considers CRLF-terminated .go files
+#   to be unformatted (gofmt -l lists them as needing
+#   reformatted, regardless of content), so a CRLF on disk
+#   makes the Check gofmt CI gate fail with the WRONG root
+#   cause ("file is not gofmt'd"). Pinning to LF at the git
+#   layer is the only way to guarantee that what gofmt sees
+#   in CI is the same bytes the author wrote.
+#
+#   A PR that introduces a CRLF .go file (e.g. edited via
+#   Windows Notepad) will fail the Check line endings CI step
+#   that sits immediately before Check gofmt — the error
+#   message points at the offending file with an explicit
+#   fix command, so the contributor does not have to chase a
+#   red herring through gofmt.
+#
+# * text=auto
+#   Leaves non-Go files alone — scripts, docs, .gitignore,
+#   .yml, etc. can still carry platform-native endings. Only
+#   .go is gated, because only .go has the "gofmt rejects
+#   CRLF" problem.
+*.go   text eol=lf
+*      text=auto

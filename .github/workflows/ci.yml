@@ -66,6 +66,41 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+      # Reject CRLF-terminated .go files before they reach the
+      # gofmt gate. gofmt considers CRLF-terminated files to
+      # be unformatted (gofmt -l lists them as needing
+      # reformatted, regardless of content), so a CRLF on disk
+      # surfaces as a confusing "file is not gofmt'd" error
+      # with the WRONG remediation hint. This step catches the
+      # real cause first and points at the file with an
+      # explicit fix command.
+      #
+      # Why CRLF appears at all: GitHub Actions windows-latest
+      # runners ship with core.autocrlf=true (runner image
+      # default), which silently rewrites LF files to CRLF on
+      # checkout. .gitattributes (`*.go text eol=lf`) is the
+      # primary defense — it makes git checkout normalize to
+      # LF regardless of core.autocrlf — but a contributor
+      # who committed a CRLF file before .gitattributes landed
+      # would still see gofmt fail on every Windows runner
+      # until the file is re-normalized. This step is the
+      # belt-and-braces enforcement that surfaces the file
+      # name directly instead of letting gofmt blame the wrong
+      # cause.
+      #
+      # Sits before Check gofmt: a CRLF file would fail
+      # gofmt anyway, so this step costs nothing extra and
+      # produces a better error message.
+      - name: Check line endings (.go files must be LF)
+        shell: bash
+        run: |
+          crlf_files=$(find . -name '*.go' -not -path './.git/*' -exec grep -l $'\r' {} + 2>/dev/null || true)
+          if [ -n "$crlf_files" ]; then
+            echo "::error::The following .go files have CRLF line endings. gofmt considers them unformatted; the fix is LF:"
+            echo "$crlf_files"
+            echo "::error::Fix: re-normalize each file with 'sed -i \"s/\\r$//\" <file>' (or 'dos2unix <file>') and re-commit."
+            exit 1
+          fi
 
       # Strict gofmt gate. gofmt is the canonical Go formatter;
       # this step fails CI on any file that differs from what

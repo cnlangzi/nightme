@@ -715,6 +715,25 @@ func awaitReply(t *testing.T, em *fakeEmitter) []messages.OutboundMessage {
 	return em.callsCopy()
 }
 
+// awaitState polls cap until it records `target` for `userMsgID`, or
+// the deadline fires. Used by tests where the goroutine still has
+// work between the first Send and the deferred MessageDone (e.g.
+// cancel + executeShell + footer send on the Send-failure path) —
+// awaiting only the first Send races the assertion.
+func awaitState(t *testing.T, cap *stateCapture, userMsgID string, target agent.MessageState, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, c := range cap.snapshot() {
+			if c.userMsgID == userMsgID && c.state == target {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for state %v on %s after %v", target, userMsgID, timeout)
+}
+
 // TestDispatcherHandle_NonShellText covers the fall-through path.
 // Plain text / slash commands / non-leading bang — none of these
 // are shell commands. Handle must return (nil, false) so the
@@ -1020,7 +1039,11 @@ func TestDispatcherHandle_ReplySendFailed(t *testing.T) {
 	}
 
 	// The framework must still emit MessageDone even though
-	// Send failed — that's the LIFO defer contract.
+	// Send failed — that's the LIFO defer contract. Wait for the
+	// Done event explicitly: on the failure path the goroutine still
+	// runs cancel + executeShell + footer Send before deferring
+	// MessageDone, so the defer races a Send-only awaitReply.
+	awaitState(t, cap, "om_sendfail", agent.MessageDone, 10*time.Second)
 	states := cap.snapshot()
 	if len(states) != 2 {
 		t.Fatalf("captured %d state events; want 2 (Queued + Done despite Send failure)", len(states))

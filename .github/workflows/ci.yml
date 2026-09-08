@@ -91,7 +91,27 @@ jobs:
       # Sits before Check gofmt: a CRLF file would fail
       # gofmt anyway, so this step costs nothing extra and
       # produces a better error message.
+      #
+      # Skipped on windows-latest: GitHub Actions windows
+      # runner image ships with core.autocrlf=true, which
+      # silently rewrites LF to CRLF on checkout. .gitattributes
+      # (`*.go text eol=lf`) controls NEW checkout normalization
+      # only — it does not retroactively re-normalize files
+      # already stored as CRLF in git history, and it can be
+      # defeated by stale core.autocrlf state on the runner.
+      # The result is that any windows-latest checkout is
+      # virtually guaranteed to surface CRLF files, which makes
+      # this step false-positive fail on every PR.
+      #
+      # The actual enforcement contract is:
+      #   - linux/macos (this step): strict — fail on any CRLF
+      #   - windows: trust .gitattributes + the developer's
+      #     local `make fmt` to keep the tree LF on commit
+      # Cheap check skipped on windows, not the correctness
+      # contract: developers on Windows still have to ship
+      # LF .go files because the merge target is a Linux box.
       - name: Check line endings (.go files must be LF)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           crlf_files=$(find . -name '*.go' -not -path './.git/*' -exec grep -l $'\r' {} + 2>/dev/null || true)
@@ -122,7 +142,19 @@ jobs:
       # Sits before Build: formatting drift is the cheapest
       # failure class — surface it before we pay for `go build`
       # on a tree that's about to be rejected anyway.
+      #
+      # Skipped on windows-latest for the same reason as
+      # Check line endings: gofmt considers CRLF-terminated
+      # .go files unformatted regardless of content. Even with
+      # .gitattributes pinning `*.go text eol=lf`, any CRLF
+      # already in git history surfaces on windows checkout
+      # (autocrlf=true) and gets flagged here. Skipping on
+      # windows keeps the gate from false-positive failing on
+      # the only platform where LF↔CRLF translation is
+      # unavoidable. Linux/macOS runners are the authoritative
+      # check; Windows developers keep `make fmt` locally.
       - name: Check gofmt
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           unformatted=$(gofmt -l .)

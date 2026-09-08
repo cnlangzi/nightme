@@ -839,20 +839,6 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageInfo {
 		// this value — see docs/feat/F-55-footer-show-context-window.md.
 		out.ContextWindow = contextWindow
 	}
-	// DIAG: surface the wire-level usage fields so we can spot
-	// upstream claude-code (or its vendor clone) reporting numbers
-	// that don't add up against contextWindow. The runtime does not
-	// recompute / clamp — what we see here is what the footer shows.
-	slog.Default().Info("claudecode: decodeUsage",
-		slog.String("raw_usage", string(rawUsage)),
-		slog.String("raw_model_usage", string(rawModelUsage)),
-		slog.Int("input_tokens", out.InputTokens),
-		slog.Int("output_tokens", out.OutputTokens),
-		slog.Int("cache_creation_input_tokens", out.CacheCreationInputTokens),
-		slog.Int("cache_read_input_tokens", out.CacheReadInputTokens),
-		slog.Int("context_window", contextWindow),
-		slog.Float64("context_window_pct", out.ContextWindowPct),
-	)
 	return out
 }
 

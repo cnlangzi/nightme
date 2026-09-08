@@ -287,31 +287,14 @@ func (t *translator) handleTokenUsageUpdated(params json.RawMessage) {
 			info.ContextWindowPct = float64(used) / float64(info.ContextWindow) * 100
 		}
 	}
-	// DIAG: codex is the third bridge we've had to instrument after
-	// claudecode + dsh — same root cause: upstream vendor clone
-	// (minimax / MiniMax-M3[1m]) reports wire usage that doesn't
-	// match a per-turn contract, and the bridge is a passthrough so
-	// the channel footer ends up rendering e.g. `cache_read = 4M`
-	// against a 1M model window as `416.0%`. Surface both the
-	// raw params and the decoded snapshot so we can see whether the
-	// inflated value comes from `last` (per-turn) or `total`
-	// (session-cumulative — known wrong fallback path on line 264).
-	// Matches claudecode/claudecode.go:281 style: logger is sourced
-	// from slog.Default() at call site (no logger on the translator
-	// struct today). Main binary installs its JSONHandler via
-	// slog.SetDefault in cmd/nightme/main.go:69.
-	logger := slog.Default()
-	logger.Info("codex: handleTokenUsageUpdated",
-		slog.String("raw_params", string(params)),
+	// F-CODEX-FALLBACK regression log: emit at Debug only, but
+	// always record whether `last` was empty enough to escalate
+	// to `total`. If the per-turn pct ever exceeds 100% again,
+// flipping the daemon log level to Debug will reveal whether
+	// the fallback path was responsible — that's the cheapest
+	// signal we have without re-adding the raw wire dump.
+	slog.Default().Debug("codex: handleTokenUsageUpdated",
 		slog.Bool("used_total_fallback", usedTotalFallback),
-		slog.Int("last_input_tokens", notif.TokenUsage.Last.InputTokens),
-		slog.Int("last_cached_input_tokens", notif.TokenUsage.Last.CachedInputTokens),
-		slog.Int("last_output_tokens", notif.TokenUsage.Last.OutputTokens),
-		slog.Int("total_input_tokens", notif.TokenUsage.Total.InputTokens),
-		slog.Int("total_cached_input_tokens", notif.TokenUsage.Total.CachedInputTokens),
-		slog.Int("input_tokens", info.InputTokens),
-		slog.Int("output_tokens", info.OutputTokens),
-		slog.Int("cache_creation_input_tokens", info.CacheCreationInputTokens),
 		slog.Int("cache_read_input_tokens", info.CacheReadInputTokens),
 		slog.Int("context_window", info.ContextWindow),
 		slog.Float64("context_window_pct", info.ContextWindowPct),

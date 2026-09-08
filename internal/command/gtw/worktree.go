@@ -377,6 +377,35 @@ func WorktreeListPath(ctx context.Context, dir, branch string, git GitRunner) (s
 	return "", nil
 }
 
+// IsKnownWorktree reports whether `path` is listed in
+// `git worktree list --porcelain` executed from `repoRoot`.
+// Used by `/gtw back <slug>` to reject arbitrary directories
+// that happen to share the worktree layout basename but are
+// not actual git worktrees of this repository.
+//
+// One porcelain pass; O(n) over the number of worktrees.
+// Returns an error only when the git invocation fails.
+func IsKnownWorktree(ctx context.Context, repoRoot, path string, git GitRunner) (bool, error) {
+	out, _, err := git.Run(ctx, repoRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	// pathutil.Equal handles "./" / "//" / trailing-separator
+	// quirks that bite a naive string compare; the porcelain
+	// walker below uses CutPrefix (same as WorktreeListPath)
+	// so we don't accidentally match "/foo" against
+	// "/foo-bar".
+	if n, nerr := pathutil.NormalizeForOS(path); nerr == nil {
+		path = n
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(line, "worktree "); ok && rest == path {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // WorktreeAdd creates a fresh worktree at `path` based on `base`
 // (any commit-ish: branch, tag, HEAD, etc.). Equivalent to
 //
@@ -455,7 +484,7 @@ func WorktreeAdd(ctx context.Context, dir, newBranch, path, base string, git Git
 // Empty-path is a hard error: same rationale as WorktreeAdd —
 // the yml field is mandatory (ReadGTWYml validates Worktree !=
 // "") so reaching here with "" is an upstream bug, and we'd
-// rather say so than forward "git worktree remove ''" and get
+// rather say so than forward `git worktree remove ""` and get
 // a cryptic "fatal: " from git.
 //
 // On failure the returned *WorktreeError carries the git stderr

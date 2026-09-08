@@ -19,8 +19,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-
-
 // WireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
 // translation; MessageStateBus subscriber for F-31 lifecycle reactions)
@@ -227,6 +225,33 @@ func WireRuntimeCallbacksAndRestore(
 		cs.PromptEndBus.Subscribe(func(e agentsession.PromptEndedEvent) bool {
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
+			}
+			// Flip the heartbeat snapshot's Done flag for this
+			// terminal lifecycle event. Covers turns that EXIT
+			// WITHOUT an OutResult (bridge crash, error path,
+			// shell error early-out): the runtime handler's
+			// OutResult branch doesn't fire on those, but
+			// endPrompt still does. Idempotent with the
+			// OutResult branch's MarkDone call — whichever of
+			// the two lands second finds Done already true
+			// and returns false. The two triggers run on
+			// different goroutines (bridge drain vs readpump)
+			// so arrival order is NOT guaranteed; the tracker's
+			// mutex serialises them and the transition check
+			// collapses the race to a single flip.
+			//
+			// MarkDone fires first so the snapshot's Done flag
+			// is set before the receipt's next render reads it.
+			// The OutHeartbeat follow-up and OnPromptEnded's
+			// SetPromptState PATCH both run async through the
+			// gateway; whichever render the gateway serialises
+			// first sees Done=true in its snapshot read, so the
+			// terminal ✅ prefix paints in the same PATCH cycle.
+			if hb := cs.Heartbeat(); hb != nil {
+				if hb.MarkDone(e.UserMsgID) {
+					sendHeartbeatFollowUp(em, logger, e.ChatID, e.UserMsgID,
+						"endprompt", hb.Snapshot(e.UserMsgID))
+				}
 			}
 			// The adapter call is fire-and-forget: failures are
 			// logged inside SetPromptState. We use

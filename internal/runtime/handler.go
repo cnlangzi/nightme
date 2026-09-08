@@ -226,36 +226,39 @@ func NewEventHandler(
 		// Observe 路径,所以也不会自递归。
 		if userMsgID != "" && cs != nil && cs.Heartbeat() != nil {
 			if cs.Heartbeat().Observe(userMsgID, out.Kind) {
-				snap := cs.Heartbeat().Snapshot(userMsgID)
-				// F-63 §3.8 #6: if the tracker entry was LRU-evicted
-				// between Observe (which created/incremented the
-				// entry and returned true) and Snapshot (which
-				// returns zero for absent keys), drop the follow-up
-				// here rather than sending an empty OutHeartbeat
-				// that the adapter's Empty() guard would discard
-				// anyway. Saves a cross-channel round-trip and a
-				// log line for a no-op.
-				if snap.Empty() {
-					if logger != nil {
-						logger.Debug("heartbeat dropped (tracker entry empty post-observe)",
-							"chat_id", chatID,
-							"user_msg_id", userMsgID,
-							"kind", out.Kind.String())
-					}
-				} else {
-					hb := messages.OutboundMessage{
-						ChatID:    chatID,
-						Kind:      messages.OutHeartbeat,
-						ReplyTo:   userMsgID,
-						Heartbeat: &snap,
-					}
-					if err := em.Send(context.Background(), hb); err != nil && logger != nil {
-						logger.Warn("heartbeat follow-up send failed",
-							"chat_id", chatID,
-							"user_msg_id", userMsgID,
-							"err", err)
-					}
-				}
+				sendHeartbeatFollowUp(em, logger, chatID, userMsgID,
+					"observe:"+out.Kind.String(), cs.Heartbeat().Snapshot(userMsgID))
+			}
+		}
+
+		// OutResult is the agent's terminal payload for this turn.
+		// Flip the heartbeat snapshot's Done flag so the receipt
+		// header can prepend "✅" — the same lifecycle transition
+		// that the OnPromptEnded eventbus subscriber also fires.
+		// OnPromptEnded covers turns that exit without an
+		// OutResult (bridge crash, error path); this branch
+		// covers the happy path. The Done flip is idempotent
+		// across the two trigger sites — the second MarkDone
+		// call returns false and no duplicate OutHeartbeat is
+		// emitted.
+		//
+		// Runs after the Observe block so any preceding
+		// OutThinking / OutToolStart for this userMsgID has
+		// already incremented the snapshot's counters —
+		// MarkDone then flips Done on the same snapshot. The
+		// renderer reads both dimensions off one snapshot, so
+		// this order matters for the painted card.
+		//
+		// Ordering assumption (latent bug bait): no policy
+		// registered above this block can short-circuit on
+		// OutResult, because the tracker flip is irreversible.
+		// Today ThinkMode / ToolsMode gates do not fire on
+		// OutResult so this holds; future policies that match
+		// OutResult must be installed AFTER this block.
+		if out.Kind == messages.OutResult && userMsgID != "" && cs != nil && cs.Heartbeat() != nil {
+			if cs.Heartbeat().MarkDone(userMsgID) {
+				sendHeartbeatFollowUp(em, logger, chatID, userMsgID,
+					"markdone", cs.Heartbeat().Snapshot(userMsgID))
 			}
 		}
 

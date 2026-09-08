@@ -3,7 +3,6 @@ package gtw
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -155,22 +154,29 @@ func TestGitHubCreateLabel_SuccessNoError(t *testing.T) {
 
 // TestGitLabCreateLabel_CLIArgs pins the exact argv that
 // GitLabProvider.CreateLabel builds. Mirrors the GitHub test
-// above. Pinned shape (1.82):
+// above. Pinned shape:
 //
-//	glab label create --repo <owner>/<repo> --name <name>
-//	--color <color> --description <description>
+//	glab api --method POST projects/<urlencoded owner/repo>/labels \
+//	    -f name=<name> -f color=<color> -f description=<description>
 //
-// Notable: glab uses --name (not positional like gh) and has
-// no --force flag (1.82). Future glab versions that add --force
-// MUST NOT be picked up silently: the GitLab test here mirrors
-// the GitHub test and would catch a reintroduction of --force.
+// `color` is passed through verbatim, including the leading
+// '#'. Routing through `glab api` (a generic caller) instead of
+// `glab label create` is required because the latter strips
+// the leading '#' from --color before posting — and GitLab's
+// REST API rejects the bare hex with 400 "must be a valid
+// color code".
+//
+// Regression guards: `label`, `create`, `--color`, and `--force`
+// MUST NOT appear as argv elements — any of them means we
+// regressed to `glab label create --color`, and the `#`-strip
+// bug returns.
 func TestGitLabCreateLabel_CLIArgs(t *testing.T) {
 	cli := &stubCLIRunner{}
 	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
 
 	if err := p.CreateLabel(context.Background(),
 		"acme", "platform",
-		"nightme/wip", "fbca04", "Work in progress"); err != nil {
+		"nightme/wip", "#fbca04", "Work in progress"); err != nil {
 		t.Fatalf("CreateLabel: %v", err)
 	}
 	if cli.callNum != 1 {
@@ -178,58 +184,53 @@ func TestGitLabCreateLabel_CLIArgs(t *testing.T) {
 	}
 	wantSubstrings := []string{
 		"glab",
-		"label", "create",
-		"--repo", "acme/platform",
-		"--name", "nightme/wip",
-		"--color", "fbca04",
-		"--description", "Work in progress",
+		"api",
+		"--method", "POST",
+		"projects/acme%2Fplatform/labels",
+		"-f", "name=nightme/wip",
+		"-f", "color=#fbca04",
+		"-f", "description=Work in progress",
 	}
 	for _, want := range wantSubstrings {
 		if !slices.Contains(cli.argv, want) {
 			t.Errorf("argv missing %q: %v", want, cli.argv)
 		}
 	}
-	// glab 1.82 has no --force. Future glab versions: if you
-	// add --force, do NOT pass it here (would violate the
-	// GitProvider.CreateLabel contract). This assertion catches
-	// that regression.
-	for _, bad := range []string{"--force"} {
+	// Regression guards. `slices.Contains` checks element
+	// equality, so the URL segment "labels" (plural) won't
+	// false-positive on the exact-match token "label".
+	forbidden := []string{"--color", "label", "create", "--force"}
+	for _, bad := range forbidden {
 		if slices.Contains(cli.argv, bad) {
-			t.Errorf("glab argv contains forbidden flag %q: %v", bad, cli.argv)
+			t.Errorf("glab argv contains forbidden token %q (would regress to glab label create): %v",
+				bad, cli.argv)
 		}
 	}
 }
 
-// TestGitLabCreateLabel_AlreadyExistsIsSuccess: glab 1.x
-// prints "label already exists" or "Label already exists" in
-// English; the GitLab implementation sniffs both forms
-// (case-sensitive, per the inline comment). Pin both
-// variants so a glab stderr-wording change forces a review.
+// TestGitLabCreateLabel_AlreadyExistsIsSuccess: `glab api`
+// echoes the GitLab 409 envelope `{"message":"Label already
+// exists"}` to stderr on a duplicate. The "already exists"
+// substring in the implementation catches it and returns nil.
+// Pinned verbatim from a live run against http://172.16.16.39
+// (f9/f9netcore).
 func TestGitLabCreateLabel_AlreadyExistsIsSuccess(t *testing.T) {
-	cases := []string{
-		"label already exists\n",
-		"Label already exists\n",
-		`ERROR\nLabel "nightme/wip" already exists.\n`,
-	}
-	for i, stderr := range cases {
-		t.Run(fmt.Sprintf("stderr_variant_%d", i), func(t *testing.T) {
-			cli := &stubCLIRunner{
-		stderr: stderr,
+	cli := &stubCLIRunner{
+		stderr: `{"message":"Label already exists"}` + "\n",
 		err:    errors.New("exit status 1"),
-			}
-			p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
-			if err := p.CreateLabel(context.Background(),
-	"acme", "platform",
-	"nightme/wip", "fbca04", "Work in progress"); err != nil {
+	}
+	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
+	if err := p.CreateLabel(context.Background(),
+		"acme", "platform",
+		"nightme/wip", "#fbca04", "Work in progress"); err != nil {
 		t.Errorf("CreateLabel with 'already exists' stderr = %v, want nil", err)
-			}
-		})
 	}
 }
 
 // TestGitLabCreateLabel_OtherErrorSurfaces: same shape as the
-// GitHub counterpart. glab exits 1 with non-"already exists"
-// stderr → error returned to caller verbatim.
+// GitHub counterpart. `glab api` exits non-zero with non-matching
+// stderr → error returned to caller verbatim. The wrapped prefix
+// is "glab api create label" (matches the new command path).
 func TestGitLabCreateLabel_OtherErrorSurfaces(t *testing.T) {
 	cli := &stubCLIRunner{
 		stderr: "403 Forbidden - your token does not have permission to create labels\n",
@@ -238,14 +239,14 @@ func TestGitLabCreateLabel_OtherErrorSurfaces(t *testing.T) {
 	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
 	err := p.CreateLabel(context.Background(),
 		"acme", "platform",
-		"nightme/wip", "fbca04", "Work in progress")
+		"nightme/wip", "#fbca04", "Work in progress")
 	if err == nil {
 		t.Fatalf("CreateLabel with 403 stderr = nil, want non-nil error")
 	}
 	if !strings.Contains(err.Error(), "403 Forbidden") {
 		t.Errorf("CreateLabel error must echo 403 stderr verbatim; got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "glab label create") {
+	if !strings.Contains(err.Error(), "glab api create label") {
 		t.Errorf("CreateLabel error must identify the failing command; got: %v", err)
 	}
 }
@@ -256,8 +257,28 @@ func TestGitLabCreateLabel_SuccessNoError(t *testing.T) {
 	p := &GitLabProvider{Runner: cli, host: "gitlab.com"}
 	if err := p.CreateLabel(context.Background(),
 		"acme", "platform",
-		"nightme/wip", "fbca04", "Work in progress"); err != nil {
+		"nightme/wip", "#fbca04", "Work in progress"); err != nil {
 		t.Errorf("CreateLabel happy path = %v, want nil", err)
 	}
 }
 
+// TestLabelMetaFor_HasHashPrefix pins the LabelMeta.Color contract:
+// every entry in labelMeta (and the fallback for unknown names)
+// starts with '#'. GitLabProvider.CreateLabel and gh label create
+// both rely on the leading '#' to satisfy the platform's
+// #RRGGBB validation.
+func TestLabelMetaFor_HasHashPrefix(t *testing.T) {
+	for _, name := range AllLabels {
+		m := LabelMetaFor(name)
+		if !strings.HasPrefix(m.Color, "#") {
+			t.Errorf("LabelMetaFor(%q).Color = %q, want leading '#'", name, m.Color)
+		}
+		if len(m.Color) != 7 {
+			t.Errorf("LabelMetaFor(%q).Color = %q, want #RRGGBB (7 chars)", name, m.Color)
+		}
+	}
+	m := LabelMetaFor("not-a-gtw-label")
+	if !strings.HasPrefix(m.Color, "#") {
+		t.Errorf("LabelMetaFor fallback Color = %q, want leading '#'", m.Color)
+	}
+}

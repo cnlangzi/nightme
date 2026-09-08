@@ -339,6 +339,10 @@ func (f *integrationFake) Info() agent.Info {
 	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
 func (f *integrationFake) Detect() error { return nil }
+func (f *integrationFake) Init(string) {}
+func (f *integrationFake) Clone() agent.Starter {
+	return &integrationFake{pid: f.pid, events: make(chan agent.AgentEvent, 32)}
+}
 func (f *integrationFake) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return f.buildLive(), nil
 }

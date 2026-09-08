@@ -898,6 +898,8 @@ type testStarter struct{ name string }
 
 func (s *testStarter) Info() agent.Info { return agent.NewInfo(s.name, agent.ModePTY, "", nil, nil) }
 func (s *testStarter) Detect() error    { return nil }
+func (s *testStarter) Init(string) {}
+func (s *testStarter) Clone() agent.Starter { return &testStarter{name: s.name} }
 func (s *testStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("testStarter: Start not implemented")
 }

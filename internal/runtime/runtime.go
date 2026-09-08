@@ -222,6 +222,20 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		return fmt.Errorf("run: open agent_sessions: %w", err)
 	}
 
+	// Startup reconciliation: agent_sessions.json outlives the
+	// daemon, so any pre-existing StatusRunning / StatusDetached
+	// entry whose PID is no longer live must be flipped to
+	// StatusExited before channels boot — otherwise the runtime
+	// pump would try to re-attach to a dead PID, and `nightme list`
+	// would show ghost rows. We treat a probe failure as fatal:
+	// surfacing it is the operator's signal that something on
+	// the host is blocking signal delivery (e.g. PID namespace
+	// mismatch in a container), and silently ignoring it would
+	// re-introduce the very staleness this pass exists to fix.
+	if _, err := ReconcileAgentSessions(asFile, PidAlive, logger, out); err != nil {
+		return fmt.Errorf("run: reconcile agent_sessions: %w", err)
+	}
+
 	// (legacy registry.json cleanup removed — v0.1 file no longer
 	// exists in v1.3+)
 

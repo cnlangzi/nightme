@@ -18,7 +18,9 @@
 package main
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/runtime"
 )
 
@@ -72,6 +75,23 @@ func runRunWith(cmd *cobra.Command, deps runtime.Deps) error {
 	if cmd == nil {
 		return errCmdRequired
 	}
+
+	// Pre-flight: confirm at least one built-in agent resolves
+	// before we boot channels. Loads cfg once, runs firstrun,
+	// then short-circuits runtime.LoadConfig to return the same
+	// struct (avoiding a duplicate disk read).
+	loader := deps.LoadConfig
+	if loader == nil {
+		loader = config.LoadDefault
+	}
+	cfg, err := loader()
+	if err != nil {
+		return fmt.Errorf("run: load config: %w", err)
+	}
+	if err := EnsureAgentAvailable(cfg, bufio.NewReader(os.Stdin), cmd.OutOrStdout()); err != nil {
+		return err
+	}
+	deps.LoadConfig = func() (*config.Config, error) { return cfg, nil }
 
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

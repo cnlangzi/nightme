@@ -32,6 +32,16 @@ func (f *fakeAgentSession) Info() agent.Info {
 	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
 func (f *fakeAgentSession) Detect() error { return nil }
+func (f *fakeAgentSession) Init(string) {}
+func (f *fakeAgentSession) Clone() agent.Starter {
+	return &fakeAgentSession{pid: f.pid, events: f.events, mu: sync.Mutex{}}
+}
+func (f *fakeAgentSession) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock, _ ...agent.RunOnceOption) (agent.RunResult, error) {
+	return agent.RunResult{}, errors.New("fakeAgentSession: RunOnce not implemented")
+}
+func (f *fakeAgentSession) Review(_ context.Context, _ agent.StartConfig, _ ...agent.RunOnceOption) (agent.RunResult, error) {
+	return agent.RunResult{}, agent.ErrReviewNotSupported
+}
 func (f *fakeAgentSession) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
 	return f.buildLive(), nil
 }

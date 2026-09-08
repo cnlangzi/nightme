@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -22,12 +21,13 @@ import (
 // Starter is the acp spawn recipe. Held in agent.Builtins as a
 // singleton per agent name.
 type Starter struct {
-	name    string
-	command string
-	args    []string
-	env     []string
-	cols    int
-	rows    int
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
+	env            []string
+	cols           int
+	rows           int
 }
 
 // NewStarter constructs the acp spawn recipe. Entry point used at
@@ -39,12 +39,13 @@ type Starter struct {
 // <= 0 are normalized to 80x24 inside newDriver.
 func NewStarter(name, command string, args, env []string, cols, rows int) *Starter {
 	return &Starter{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
-		env:     append([]string(nil), env...),
-		cols:    cols,
-		rows:    rows,
+		name:           name,
+		command:        command,
+		defaultCommand: command,
+		args:           append([]string(nil), args...),
+		env:            append([]string(nil), env...),
+		cols:           cols,
+		rows:           rows,
 	}
 }
 
@@ -55,13 +56,30 @@ func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModeACP, s.command, s.args, s.env)
 }
 
-// Detect verifies the binary resolves on PATH. Called by Spawner
-// before Start; an error aborts session creation with a clear
-// "<binary> not found" message.
+// Detect verifies the configured command resolves to an invokable
+// binary (absolute path or PATH-relative name). Called by Spawner
+// before Start; an error aborts session creation.
 func (s *Starter) Detect() error {
-	_, err := exec.LookPath(s.command)
-	return err
+	return agent.ResolveCommand(s.command)
 }
+
+// Init overrides the executable path used by Detect and
+// Info. cfg.Agents path overrides flow through
+// agentregistry.Build. The mutation hits the singleton
+// held in agent.Builtins; tests that exercise cfg.Agents
+// overrides should snapshot and restore via Command().
+func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
+	s.command = command
+}
+
+// Command returns the current executable path. Used by tests
+// to snapshot Builtins state before mutations from
+// agentregistry.Build.
+func (s *Starter) Command() string { return s.command }
 
 // Start spawns the CLI under a PTY, runs the ACP initialize +
 // session/new handshake, and returns a live *agent.Agent. The

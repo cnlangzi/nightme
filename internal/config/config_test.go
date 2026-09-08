@@ -273,6 +273,8 @@ func (s *detectPersistTestStarter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModePTY, "", nil, nil)
 }
 func (s *detectPersistTestStarter) Detect() error { return nil }
+func (s *detectPersistTestStarter) Init(string) {}
+func (s *detectPersistTestStarter) Clone() agent.Starter { return &detectPersistTestStarter{name: s.name} }
 func (s *detectPersistTestStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("detectPersistTestStarter: Start not implemented")
 }

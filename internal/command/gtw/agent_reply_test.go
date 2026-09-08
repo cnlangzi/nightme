@@ -68,6 +68,8 @@ func (s *eventEmitterStarter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModePTY, "fake-"+s.name, nil, nil)
 }
 func (s *eventEmitterStarter) Detect() error { return nil }
+func (s *eventEmitterStarter) Init(string) {}
+func (s *eventEmitterStarter) Clone() agent.Starter { return &eventEmitterStarter{name: s.name} }
 func (s *eventEmitterStarter) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("eventEmitterStarter: Start not implemented")
 }

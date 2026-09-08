@@ -10,7 +10,6 @@ package pty
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -21,12 +20,13 @@ import (
 // singleton per agent name (the "bash" / "sh" / etc. fallback
 // for unknown user CLIs).
 type Starter struct {
-	name    string
-	command string
-	args    []string
-	env     []string
-	cols    int
-	rows    int
+	name           string
+	command        string
+	defaultCommand string
+	args           []string
+	env            []string
+	cols           int
+	rows           int
 }
 
 // Info returns the fixed metadata for this starter. Observable
@@ -36,13 +36,34 @@ func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModePTY, s.command, s.args, s.env)
 }
 
-// Detect verifies the binary resolves on PATH. Called by Spawner
-// before Start; an error aborts session creation with a clear
-// "<binary> not installed" message.
+// Detect verifies the configured command resolves to an invokable
+// binary (absolute path or PATH-relative name). Called by Spawner
+// before Start; an error aborts session creation.
 func (s *Starter) Detect() error {
-	_, err := exec.LookPath(s.command)
-	return err
+	return agent.ResolveCommand(s.command)
 }
+
+// Init overrides the executable path used by Detect and
+// Info. cfg.Agents path overrides flow through
+// agentregistry.Build. Passing "" resets to the default
+// baked in by NewStarter — used by Build to drop stale
+// overrides when cfg.Agents no longer names this agent.
+//
+// The mutation hits the singleton held in agent.Builtins;
+// tests that exercise cfg.Agents overrides should snapshot
+// and restore via Command().
+func (s *Starter) Init(command string) {
+	if command == "" {
+		s.command = s.defaultCommand
+		return
+	}
+	s.command = command
+}
+
+// Command returns the current executable path. Used by tests
+// to snapshot Builtins state before mutations from
+// agentregistry.Build.
+func (s *Starter) Command() string { return s.command }
 
 // Start spawns the CLI under a PTY and returns a live
 // *agent.Agent that streams events on its Events channel. The

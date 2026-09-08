@@ -1764,7 +1764,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// text-dedup; acp / pty by wire shape). PATCH the existing
 		// receipt's footer in place via StampFooterLines — no
 		// duplicate standalone card.
-		//
+//
 		// Error turns also arrive on this path: codex `failed` /
 		// `interrupted` and pi poisoned turns produce Text==""
 		// with Err populated. The user must still see a body-level

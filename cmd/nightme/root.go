@@ -78,7 +78,6 @@ func newRootCmd() (*cobra.Command, *cmdRegistry) {
 	reg.addNoTray(newTestCmd(),   "test ...        spawn CLI in PTY (Ctrl-C to end)")
 	reg.add(newListCmd(),         "list            list sessions")
 	reg.add(newKillCmd(),         "kill            terminate agent processes")
-	reg.add(newAgentsCmd(),       "agents          list registered agents")
 	reg.addNoTray(newLoginCmd(),  "login feishu    QR Feishu registration")
 	reg.addNoTray(newLogsCmd(),   "logs [--lines N] tail daemon log (Ctrl-C to exit)")
 	reg.add(newCleanCmd(),        "clean           truncate logs + remove attachments")

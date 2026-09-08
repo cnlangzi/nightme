@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/timeouts"
 )
 
@@ -111,7 +112,9 @@ func dispatchCommit(
 	ctx, cancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer cancel()
 	runRes, agentName, err := runAgentFor(ctx, cs, c.Worktree,
-		buildAgentPrompt(c), chatID, messageID, args.Agent, ymlAgent)
+		buildAgentPrompt(c), chatID, messageID, args.Agent, ymlAgent,
+		// Drop OutResult; replyAgent below is the only result card.
+		messages.OutResult)
 	if err != nil {
 		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
 			err.Error(), agentName, runRes), nil

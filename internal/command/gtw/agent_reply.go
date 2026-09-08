@@ -83,11 +83,20 @@ import (
 // timeouts.Agent itself. dispatchCommit / dispatchPR both wrap
 // ctx with timeouts.Agent at their call sites (the timeout is
 // per-command-policy, not per-agent-call).
+//
+// dropKinds are OutboundKinds the underlying sink should suppress
+// for this run (Translate + policy + observe still run; only the
+// final em.Send is skipped). /gtw pr and /gtw commit pass
+// {messages.OutResult} here — the dispatcher's success card from
+// replyAgent (an OutReply that lands on the receipt) is the
+// single result surface; the agent's standalone OutResult card
+// would be a redundant duplicate. Other callers pass nothing.
 func runAgentFor(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	workspace, prompt, chatID, messageID string,
 	cliAgent, ymlAgent string,
+	dropKinds ...messages.OutboundKind,
 ) (agent.RunResult, string, error) {
 	agentName, agentNotes := ResolveAgent(cliAgent, ymlAgent, cs)
 	if agentName == "" {
@@ -144,11 +153,11 @@ func runAgentFor(
 	//     here; /gtw commit/pr are short enough that blocking
 	//     simplifies the dispatcher's success/failure shape.
 	//   - Tests covering the sink flow live in
-	//     internal/command/gtw/agent_reply_test.go — four cases
-	//     (SinkInstalled / HeartbeatObserved / Filtering /
-	//     SinkNilEmitter). Touching the wiring above is a
-	//     regression risk for those tests.
-	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName)
+	//     internal/command/gtw/agent_reply_test.go (SinkInstalled
+	//     / HeartbeatObserved / Filtering / DropOutResult /
+	//     NoDropPreservesOutResult / SinkNilEmitter). Touching
+	//     the wiring above is a regression risk for those tests.
+	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName, dropKinds...)
 
 	res, err := a.RunOnce(ctx,
 		agent.StartConfig{Workspace: workspace},

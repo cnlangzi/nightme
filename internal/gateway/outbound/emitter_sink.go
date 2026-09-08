@@ -71,6 +71,23 @@ const sinkBufferSize = 64
 // Returns nil when em is nil — callers may use this to avoid
 // guarding every call site.
 //
+// dropKinds is the set of OutboundKinds the sink should SILENTLY
+// skip after Translate + policy gate + heartbeat observe — the
+// kind's wire event is still observed for the heartbeat tracker
+// (so /think off / /tools off counters stay accurate) and still
+// passes through the think/tools gate (so a suppressed kind
+// doesn't accidentally leak), but the resulting OutboundMessage
+// never reaches em. /gtw pr and /gtw commit pass
+// {OutResult} here: their success path produces its own
+// result card via replyAgent (OutReply to the receipt), so
+// the agent's terminal OutResult card would be a redundant
+// duplicate on top of the dispatcher's success card. The agent's
+// RunResult.Text (carried on the bridge layer's RunResult, not
+// the sink's OutboundMessage) is unaffected, so /gtw pr's
+// parsePRReply / /gtw commit's verifyAgentCommitted still see
+// the parseable text. All other callers omit dropKinds and the
+// existing behavior is preserved.
+//
 // F-CODEX-RUNONCE-REVIEW-EVENT: cs + logger are threaded so
 // dispatchSinkEvent can apply the same DefaultPolicies chain
 // (think gate / tools gate) and HeartbeatTracker.Observe that
@@ -84,6 +101,7 @@ func StreamRunOnceToEmitter(
 	cs *chatsession.ChatSession,
 	logger *slog.Logger,
 	chatID, replyTo, agentName string,
+	dropKinds ...messages.OutboundKind,
 ) func(agent.AgentEvent) {
 	if em == nil {
 		return func(agent.AgentEvent) {}
@@ -104,7 +122,7 @@ func StreamRunOnceToEmitter(
 				if !ok {
 					return
 				}
-				dispatchSinkEvent(ctx, em, cs, logger, chatID, replyTo, agentName, ev)
+				dispatchSinkEvent(ctx, em, cs, logger, chatID, replyTo, agentName, ev, dropKinds)
 			}
 		}
 	}()
@@ -144,6 +162,10 @@ func StreamRunOnceToEmitter(
 // for primary chat sessions. cs may be nil (one-shot without a
 // chat session) — the policy chain short-circuits and the
 // heartbeat observe is skipped, matching pre-Plan-B behavior.
+//
+// dropKinds is the set of OutboundKinds the caller wants dropped
+// AFTER Translate / policy gate / heartbeat observe but BEFORE
+// em.Send. See StreamRunOnceToEmitter's doc for the rationale.
 func dispatchSinkEvent(
 	ctx context.Context,
 	em messages.Emitter,
@@ -151,6 +173,7 @@ func dispatchSinkEvent(
 	logger *slog.Logger,
 	chatID, replyTo, agentName string,
 	ev agent.AgentEvent,
+	dropKinds []messages.OutboundKind,
 ) {
 	out, ok := Translate(chatID, ev)
 	if !ok {
@@ -230,6 +253,15 @@ func dispatchSinkEvent(
 		}
 	}
 
+	if isDroppedKind(out.Kind, dropKinds) {
+		// Caller opted out of this kind (e.g. /gtw pr drops
+		// OutResult so the dispatcher's success card isn't
+		// shadowed by the agent's standalone result card). The
+		// Translate / policy / observe work above still ran, so
+		// downstream observers stay consistent — only the
+		// user-visible surface is suppressed.
+		return
+	}
 	if err := em.Send(ctx, out); err != nil {
 		// Channel-side errors are not the caller's problem — log
 		// and continue. The bridge's RunResult carries the text
@@ -240,4 +272,17 @@ func dispatchSinkEvent(
 			"chat_id", chatID,
 			"err", err.Error())
 	}
+}
+
+// isDroppedKind reports whether kind is in the caller's drop set.
+// Empty drop set = no drops (the common case). Linear scan is fine
+// — drop sets are tiny (typically 0 or 1 element for the /gtw pr /
+// commit use case) and the call site is per-event, not per-message.
+func isDroppedKind(kind messages.OutboundKind, dropKinds []messages.OutboundKind) bool {
+	for _, k := range dropKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
 }

@@ -182,7 +182,9 @@ func dispatchPR(
 	prCtx, prCancel := context.WithTimeout(ctx, timeouts.Agent)
 	defer prCancel()
 	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
-		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, ymlAgent)
+		buildPRPrompt(c, baseBranch), chatID, messageID, args.Agent, ymlAgent,
+		// Drop OutResult; replyAgent below is the only result card.
+		messages.OutResult)
 	if err != nil {
 		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
 			err.Error(), agentName, runRes), nil

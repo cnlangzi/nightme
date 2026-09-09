@@ -644,19 +644,6 @@ type StartConfig struct {
 	// <id>`); bridges that don't (ACP / Pi / PTY) silently ignore it.
 	// Empty means "no --resume; start a fresh session".
 	SessionID string
-
-	// AgentPreset is the dsh-specific agent-preset identifier
-	// (e.g. "standard", "minimal") for the session being started.
-	// When empty, the dsh server applies its own configured default;
-	// an empty value here is also the correct choice for any bridge
-	// whose backend doesn't have the preset concept (claudecode,
-	// codex, pi, …), since they ignore the field entirely.
-	//
-	// Only the dsh bridge reads this today. It's plumbed through
-	// StartConfig (rather than a dedicated dsh.StartConfig) so the
-	// field lives next to other per-session knobs and the runtime
-	// doesn't have to know which bridge owns it.
-	AgentPreset string
 }
 
 // AgentSpec is the static, read-only description of an agent.

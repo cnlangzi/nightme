@@ -162,19 +162,6 @@ func (c *RPCClient) BaseURL() string {
 //
 // Mirrors dsh/http.go Post so concurrent callers see the same wire
 // contract.
-//
-// F-dsh-preset-1 (2026-09-09): dsh web's gateway requires the
-// payload to carry an `args` field — flat or under `.request`
-// per the descriptor. Pre-fix this method shipped the caller's
-// payload as-is (no `args` wrapper), which the gateway rejected
-// with `gateway/internal: Remote payload must contain exactly one
-// plain-object args field` for every call.
-//
-// F-dsh-preset-1 (2026-09-09): dsh web routes `POST /api/{method/with/slashes}`
-// (e.g. `/api/session/create`), not `/api/{method.with.dots}`.
-// Pre-fix this method emitted `/api/session.create` which the
-// gateway returned 404 for, hiding the underlying payload
-// mismatch from every test.
 func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResponse, error) {
 	rpcID := newRPCID()
 
@@ -241,18 +228,6 @@ func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResp
 	}
 
 	return &resp, nil
-}
-
-// PostRaw is like Post but accepts a pre-marshaled RawMessage payload.
-// Used by typed wrappers that build the payload inline (e.g. Respond
-// constructs ApprovalResponsePayload without going through map[string]any).
-//
-// NOTE: PostRaw still wraps in the standard clientRequest envelope —
-// it just lets you pass a pre-marshaled payload instead of a Go value.
-// For envelopes that don't fit clientRequest (e.g. /api/respond's
-// client-response shape), use PostEnvelope instead.
-func (c *RPCClient) PostRaw(ctx context.Context, method string, payload json.RawMessage) (*rpcResponse, error) {
-	return c.Post(ctx, method, payload)
 }
 
 // PostEnvelope POSTs a pre-built raw JSON body without wrapping in
@@ -561,32 +536,26 @@ func (c *RPCClient) SessionCancel(ctx context.Context, sessionID string) error {
 // full slash-command text (e.g. "/permission danger-full-access",
 // "/new", "/exit"). The dashboard fires this same RPC to flip
 // the session to Full access from the Access mode picker
-// (dsh-api.md §3.6) — verified live against dsh 0.1.2-rc.1.
+// (dsh-api.md §3.6).
 //
 // commands/execute is a FLAT-ARG method: the typert descriptor
 // names its fields directly under `args` (agentId, line, images),
 // NOT under `args.request`. Post() is now pass-through, so we
 // hand it the bare fields here and Post adds the outer `args`
 // wrapper.
-//
-// Returns the parsed result value; the dashboard's payload for
-// "/permission danger-full-access" is `{kind:"success",
-// text:"preset danger-full-access"}`. Surfacing the value lets
-// callers log or audit the reply; errors surface when the server
-// rejects the command.
-func (c *RPCClient) CommandsExecute(ctx context.Context, sessionID, line string) (json.RawMessage, error) {
+func (c *RPCClient) CommandsExecute(ctx context.Context, sessionID, line string) error {
 	resp, err := c.Post(ctx, "commands/execute", map[string]any{
 		"agentId": sessionID,
 		"line":    line,
 		"images":  []any{},
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if !resp.Result.OK {
-		return nil, fmt.Errorf("dsh.host: commands/execute: %s", resp.Result.ErrorMessage())
+		return fmt.Errorf("dsh.host: commands/execute: %s", resp.Result.ErrorMessage())
 	}
-	return resp.Result.Value, nil
+	return nil
 }
 
 // ApprovalResponse is the inner body for POST /api/respond when
@@ -676,11 +645,6 @@ func truncate(s string, n int) string {
 // methodDotsToSlashes converts the dot-separated RPC method name
 // callers pass (e.g. "session.create") into the slash-separated
 // path segment dsh web's gateway expects (e.g. "session/create").
-//
-// F-dsh-preset-1 (2026-09-09): dsh web routes `POST /api/{a/b/c}`
-// (slash-separated); the dot form returns 404 from the gateway
-// without ever reaching the typert dispatcher. Verified live against
-// dsh 0.1.2-rc.1 (browser dashboard uses slashes).
 func methodDotsToSlashes(method string) string {
 	return strings.ReplaceAll(method, ".", "/")
 }
@@ -694,14 +658,6 @@ func methodDotsToSlashes(method string) string {
 // The contents of `<args>` are method-specific (see Post's doc).
 // Callers pre-build the right inner shape — wrapArgs only adds
 // the outer envelope.
-//
-// F-dsh-preset-1 (2026-09-09): pre-fix the inner payload went in
-// unwrapped, which the gateway rejected with `gateway/internal:
-// Remote payload must contain exactly one plain-object args field`.
-// An early variant of this layer also forced `args.request` for
-// every call, which broke flat-arg methods like commands/execute
-// (the gateway rejected them with `gateway/arguments-invalid:
-// missing 'agentId'; unexpected 'request'`).
 func wrapArgs(argsBytes json.RawMessage) (json.RawMessage, error) {
 	if len(argsBytes) == 0 {
 		argsBytes = json.RawMessage("{}")

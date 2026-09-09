@@ -52,8 +52,6 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	t.Helper()
 	m := &handshakeMock{}
 	mux := http.NewServeMux()
-	// F-dsh-preset-1 (2026-09-09): dsh web routes slash-separated
-	// method names. The mock mirrors the real wire format.
 	mux.HandleFunc("/api/workspace/create", m.handleWorkspaceCreate)
 	mux.HandleFunc("/api/session/create", m.handleSessionCreate)
 	mux.HandleFunc("/api/session/models", m.handleSessionModels)
@@ -187,10 +185,6 @@ func (m *handshakeMock) handleWorkspaceCreate(w http.ResponseWriter, r *http.Req
 func (m *handshakeMock) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	m.createCount.Add(1)
 	env := decodeEnvelope(r)
-	// F-dsh-preset-1 (2026-09-09): the wire envelope wraps the
-	// typed request under args.request. unwrapRequest pulls it out
-	// so the rest of this handler can stay close to the original
-	// (request-shape) assertions.
 	payload := unwrapRequest(env.Payload)
 
 	m.mu.Lock()
@@ -248,9 +242,9 @@ func (m *handshakeMock) handleSessionCancel(w http.ResponseWriter, r *http.Reque
 }
 
 // handleCommandsExecute mimics dsh's /api/commands/execute reply
-// shape — a value envelope `{commandId, result:{kind, text}}`.
-// Captures the last command payload so tests can assert the
-// /permission priming line.
+// shape — a value envelope `{result:{kind, text}}`. Captures the
+// last command payload so tests can assert the /permission
+// priming line.
 //
 // commands/execute is a FLAT-ARG method (no `args.request` wrapper);
 // the typert descriptor names agentId/line/images directly under
@@ -269,7 +263,6 @@ func (m *handshakeMock) handleCommandsExecute(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeOK(w, env.RPCID, map[string]any{
-		"commandId": fmt.Sprintf("cmd-mock-%d", m.commandsCount.Load()),
 		"result": map[string]any{
 			"kind": "success",
 			"text": "ok",
@@ -280,12 +273,10 @@ func (m *handshakeMock) handleCommandsExecute(w http.ResponseWriter, r *http.Req
 func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *http.Request) {
 	m.archiveCount.Add(1)
 	env := decodeEnvelope(r)
-	var payload struct {
-		SessionID string `json:"sessionId"`
-	}
-	_ = json.Unmarshal(env.Payload, &payload)
+	payload := unwrapRequest(env.Payload)
+	sid, _ := payload["sessionId"].(string)
 	writeOK(w, env.RPCID, map[string]any{
-		"archivedSessionIds": []string{payload.SessionID},
+		"archivedSessionIds": []string{sid},
 	})
 }
 
@@ -317,8 +308,7 @@ func jsonString(s string) string {
 func (m *handshakeMock) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 	m.promptCount.Add(1)
 	env := decodeEnvelope(r)
-	var payload map[string]any
-	_ = json.Unmarshal(env.Payload, &payload)
+	payload := unwrapRequest(env.Payload)
 	m.lastPrompt.Store(payload)
 
 	if m.promptFailNext.Load() {
@@ -677,8 +667,6 @@ func TestIsBenignCancelErr(t *testing.T) {
 		t.Fatal("internal errors must still surface")
 	}
 }
-
-// ─── /permission danger-full-access priming ──────────────────────
 
 // TestNewDriver_PrimesPermissionDangerFullAccess verifies that
 // after a fresh session.create the bridge fires

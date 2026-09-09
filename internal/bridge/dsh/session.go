@@ -100,14 +100,6 @@ type driver struct {
 	workspace string
 	agentName string
 
-	// agentPreset is the dsh session.create preset the handshake
-	// resolved with (cfg.AgentPreset at attach / create time, or
-	// empty for "let dsh pick its default"). Captured on the
-	// driver so Reset can replay the same preset across the
-	// /new boundary — dsh asserts the new session's preset
-	// matches the previous one when set.
-	agentPreset string
-
 	// permissionMode is the dsh permission preset the handshake
 	// resolved with (cfg.PermissionMode, fired as `/permission
 	// <mode>` via /api/commands/execute). Captured on the
@@ -242,10 +234,9 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// handshakeSession + deleteWorkspace for the wire flow.
 
 	d := &driver{
-		cli:         cli,
-		workspace:   cfg.Workspace,
-		agentName:   s.name,
-		agentPreset: cfg.AgentPreset,
+		cli:       cli,
+		workspace: cfg.Workspace,
+		agentName: s.name,
 		// Default to "danger-full-access" — the dsh permission
 		// preset that drops every approval gate. Pre-fix this was
 		// baked into the dsh subprocess via DSH_PERMISSION_MODE
@@ -282,30 +273,23 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	}
 	_ = resumed // surface is EventAgentReady.SessionID, not a log line
 
-	// F-dsh-preset-1 (2026-09-09): per-session permission mode.
-	// The dashboard's "Full access" picker fires
-	// /api/commands/execute with line "/permission <mode>" — same
-	// shape as the user typing a slash command in the input box.
-	// Pre-fix we relied on DSH_PERMISSION_MODE env on the dsh
-	// subprocess (one-shot, applies to every session, can't be
-	// toggled per session), which doesn't survive a session reset
-	// and can't be changed without a dsh restart. Firing the
-	// slash command here makes every nightme session default to
-	// the configured mode regardless of dsh startup env, and the
-	// reset path replays the same command. Empty cfg.PermissionMode
-	// is auto-defaulted to "danger-full-access" above so every
-	// nightme chat session lands in Full access by default.
+	// Per-session permission mode. The dashboard's "Full access"
+	// picker fires /api/commands/execute with line "/permission
+	// <mode>" — same shape as the user typing a slash command in
+	// the input box. Firing the slash command here makes every
+	// nightme session default to the configured mode regardless of
+	// dsh startup env, and the reset path replays the same command.
+	// Empty cfg.PermissionMode is auto-defaulted to "danger-full-access"
+	// above so every nightme chat session lands in Full access by
+	// default.
 	permCtx, permCancel := context.WithTimeout(ctx, handshakeTimeout)
-	_, permErr := d.cli.RPC.CommandsExecute(permCtx, d.sessionID,
+	permErr := d.cli.RPC.CommandsExecute(permCtx, d.sessionID,
 		"/permission "+d.permissionMode)
 	permCancel()
 	if permErr != nil {
-		// Non-fatal: log and continue. The dashboard's own
-		// /permission can be intercepted by the host model
-		// (per starter.go note about leading-/); we treat
-		// every error as advisory and let the runtime's
-		// approval auto-allow (see starter.go::autoAllowRunOncePermission)
-		// pick up the slack on RunOnce / Review paths.
+		// Non-fatal: log and continue. The runtime's approval
+		// auto-allow (see starter.go::autoAllowRunOncePermission)
+		// picks up the slack on RunOnce / Review paths.
 		dLog("dsh: /permission %s failed: %v", d.permissionMode, errStr(permErr))
 	} else {
 		slogDefault().Info("dsh: session permission set",
@@ -430,19 +414,21 @@ func (d *driver) fetchSessionModels(ctx context.Context) (*sessionModelsValue, e
 // child and abandons the parent (F-DSH-NO-FORK).
 //
 // Fresh start (cfg.SessionID == "") creates a workspace keyed by cwd
-// then session.create {workspaceId}. cfg.AgentPreset, when set, is
-// forwarded so dsh doesn't fall back to its server-side default —
-// which on a deployment with no discoverable presets is "standard"
-// and resolves to agent-preset/not-found (dsh-api.md §2.1.3).
+// then session.create {workspaceId}. agentPreset is left empty —
+// dsh's session/create has no preset argument today, so the
+// server applies its configured default (e.g. "standard" on a
+// full install). When dsh grows a way to name the preset from
+// the client, that's a dsh-specific knob and belongs in the
+// dsh bridge, not the shared agent.StartConfig.
 func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (bool, error) {
 	if cfg.SessionID != "" {
-		if err := d.attachSession(ctx, cfg.SessionID, cfg.Workspace, cfg.AgentPreset); err != nil {
+		if err := d.attachSession(ctx, cfg.SessionID, cfg.Workspace); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
 
-	sid, err := d.createFreshSession(ctx, cfg.Workspace, cfg.AgentPreset)
+	sid, err := d.createFreshSession(ctx, cfg.Workspace)
 	if err != nil {
 		return false, err
 	}
@@ -454,18 +440,12 @@ func (d *driver) handshakeSession(ctx context.Context, cfg agent.StartConfig) (b
 // dashboard does: session.create({sessionId, cwd}). Same id+cwd is
 // a no-op create that returns the original sessionId and joins the
 // mux live set (dsh-shared-host.md §2.6).
-//
-// agentPreset, when set, is plumbed through to the server's
-// assertPresetUnchanged check so a resume that names a different
-// preset than the original session refuses cleanly instead of
-// silently composing a different agent.
-func (d *driver) attachSession(ctx context.Context, sessionID, cwd, agentPreset string) error {
+func (d *driver) attachSession(ctx context.Context, sessionID, cwd string) error {
 	createCtx, createCancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer createCancel()
 	got, err := d.cli.RPC.SessionCreate(createCtx, host.SessionCreateOpts{
-		SessionID:   sessionID,
-		CWD:         cwd,
-		AgentPreset: agentPreset,
+		SessionID: sessionID,
+		CWD:       cwd,
 	})
 	if err != nil {
 		return resumeUnhealthyError{reason: err.Error(), session: sessionID}
@@ -493,17 +473,16 @@ func (d *driver) attachSession(ctx context.Context, sessionID, cwd, agentPreset 
 // existing workspace with `created == false` (dsh-api.md
 // §2.4.2); the driver doesn't care who created it.
 //
-// agentPreset, when non-empty, is forwarded to session.create so
-// dsh doesn't fall back to its server-side default. Empty means
-// "let dsh pick" — fine on deployments where the server's default
-// resolves; a deployment with no presets discoverable rejects the
-// request with agent-preset/not-found (the error surfaced by
-// /review in dsh 0.1.2-rc.1, see F-dsh-preset-1).
+// agentPreset is intentionally NOT sent — dsh's server applies its
+// configured default ("standard" on a full install, named presets
+// per the agent-presets plugin's roster). When dsh grows a client-
+// side preset picker, that's a dsh-specific knob and belongs in
+// the dsh bridge's own config, not in shared agent.StartConfig.
 //
 // Does not mutate d.sessionID — callers assign on success so
 // Reset can create the replacement before dropping the old
 // subscription.
-func (d *driver) createFreshSession(ctx context.Context, workspace, agentPreset string) (string, error) {
+func (d *driver) createFreshSession(ctx context.Context, workspace string) (string, error) {
 	repoRoot := detectRepoRoot(workspace)
 	wsCtx, wsCancel := context.WithTimeout(ctx, handshakeTimeout)
 	ws, err := d.cli.RPC.WorkspaceCreate(wsCtx, repoRoot)
@@ -516,7 +495,6 @@ func (d *driver) createFreshSession(ctx context.Context, workspace, agentPreset 
 	createResp, err := d.cli.RPC.Post(createCtx, "session.create", map[string]any{
 		"request": map[string]any{
 			"workspaceId": ws.WorkspaceID,
-			"agentPreset": agentPreset,
 		},
 	})
 	createCancel()
@@ -539,7 +517,7 @@ func (d *driver) createFreshSession(ctx context.Context, workspace, agentPreset 
 		"workspace_id", ws.WorkspaceID,
 		"cwd", workspace,
 		"repo_root", repoRoot,
-		"agent_preset", agentPreset)
+		"agent_preset", scVal.AgentPreset)
 	// Workspace is repo-scoped and shared across drivers.
 	// archiveSession on Close takes sessionId (hides our row)
 	// and leaves the workspace alive for sibling / future
@@ -882,12 +860,10 @@ func (d *driver) Reset(ctx context.Context) error {
 	oldID := d.sessionID
 	// Workspace is repo-scoped and shared — Reset does NOT tear
 	// down the old workspace. The /new semantics are "fresh
-	// session in the same repo", not "fresh repo". agentPreset
-	// is replayed from the captured cfg.AgentPreset so the new
-	// session composes the same agent as the old one — dsh
-	// rejects a /new that names a different preset than the
-	// previous session held.
-	newID, err := d.createFreshSession(ctx, d.workspace, d.agentPreset)
+	// session in the same repo", not "fresh repo". The new
+	// session composes from dsh's configured default preset
+	// (see createFreshSession's agentPreset comment).
+	newID, err := d.createFreshSession(ctx, d.workspace)
 	if err != nil {
 		return err
 	}
@@ -920,7 +896,7 @@ func (d *driver) Reset(ctx context.Context) error {
 	// wedge until the runtime's auto-allow kicks in.
 	if d.permissionMode != "" {
 		permCtx, permCancel := context.WithTimeout(ctx, handshakeTimeout)
-		if _, err := d.cli.RPC.CommandsExecute(permCtx, newID,
+		if err := d.cli.RPC.CommandsExecute(permCtx, newID,
 			"/permission "+d.permissionMode); err != nil {
 			dLog("dsh: /permission %s replay failed after reset: %v",
 				d.permissionMode, errStr(err))

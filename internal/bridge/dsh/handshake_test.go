@@ -30,7 +30,9 @@ type handshakeMock struct {
 	archiveCount   atomic.Int64 // Close calls workspace.archiveSession (repo-scoped workspace survives)
 	promptCount    atomic.Int64
 	promptFailNext atomic.Bool
-	respondCount   atomic.Int64 // /api/respond — RunOnce auto-allow posts here
+	respondCount   atomic.Int64  // /api/respond — RunOnce auto-allow posts here
+	commandsCount  atomic.Int64  // /api/commands/execute — /permission danger-full-access priming
+	commandsFailNext atomic.Bool // force the next commands/execute to fail
 
 	mu               sync.Mutex
 	lastCreate       map[string]any
@@ -41,6 +43,7 @@ type handshakeMock struct {
 	nextFreshCounter atomic.Int64
 	lastPrompt       atomic.Value // map[string]any
 	lastRespond      atomic.Value // []byte of last /api/respond body
+	lastCommand      atomic.Value // map[string]any
 
 	respondText atomic.Value // string — when set, prompt handler synthesises a complete turn
 }
@@ -58,6 +61,7 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace/archiveSession", m.handleWorkspaceArchiveSession)
 	mux.HandleFunc("/api/session/prompt", m.handleSessionPrompt)
+	mux.HandleFunc("/api/commands/execute", m.handleCommandsExecute)
 	mux.HandleFunc("/api/respond", m.handleRespond)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
@@ -241,6 +245,36 @@ func (m *handshakeMock) handleSessionCancel(w http.ResponseWriter, r *http.Reque
 	m.cancelCount.Add(1)
 	env := decodeEnvelope(r)
 	writeOK(w, env.RPCID, map[string]any{"accepted": true})
+}
+
+// handleCommandsExecute mimics dsh's /api/commands/execute reply
+// shape — a value envelope `{commandId, result:{kind, text}}`.
+// Captures the last command payload so tests can assert the
+// /permission priming line.
+//
+// commands/execute is a FLAT-ARG method (no `args.request` wrapper);
+// the typert descriptor names agentId/line/images directly under
+// `args`, so we read `env.Payload.args` instead of going through
+// the typed unwrapRequest helper.
+func (m *handshakeMock) handleCommandsExecute(w http.ResponseWriter, r *http.Request) {
+	m.commandsCount.Add(1)
+	env := decodeEnvelope(r)
+	var envelope struct {
+		Args map[string]any `json:"args"`
+	}
+	_ = json.Unmarshal(env.Payload, &envelope)
+	m.lastCommand.Store(envelope.Args)
+	if m.commandsFailNext.Swap(false) {
+		writeErr(w, env.RPCID, "command-rejected", "permission priming refused by mock")
+		return
+	}
+	writeOK(w, env.RPCID, map[string]any{
+		"commandId": fmt.Sprintf("cmd-mock-%d", m.commandsCount.Load()),
+		"result": map[string]any{
+			"kind": "success",
+			"text": "ok",
+		},
+	})
 }
 
 func (m *handshakeMock) handleWorkspaceArchiveSession(w http.ResponseWriter, r *http.Request) {
@@ -641,5 +675,152 @@ func TestIsBenignCancelErr(t *testing.T) {
 	}
 	if isBenignCancelErr(fmt.Errorf("dsh.host: session.cancel: internal: boom")) {
 		t.Fatal("internal errors must still surface")
+	}
+}
+
+// ─── /permission danger-full-access priming ──────────────────────
+
+// TestNewDriver_PrimesPermissionDangerFullAccess verifies that
+// after a fresh session.create the bridge fires
+// /api/commands/execute with line "/permission danger-full-access"
+// (F-dsh-preset-1). The dashboard's "Full access" picker does the
+// same — verified live against dsh 0.1.2-rc.1.
+func TestNewDriver_PrimesPermissionDangerFullAccess(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver: %v", err)
+	}
+	defer d.Close()
+
+	if mock.commandsCount.Load() != 1 {
+		t.Fatalf("after start: commands/execute = %d, want 1",
+			mock.commandsCount.Load())
+	}
+	cmd, _ := mock.lastCommand.Load().(map[string]any)
+	if cmd == nil {
+		t.Fatal("lastCommand not captured")
+	}
+	if got, _ := cmd["line"].(string); got != "/permission danger-full-access" {
+		t.Errorf("priming line = %q, want %q",
+			got, "/permission danger-full-access")
+	}
+	if got, _ := cmd["agentId"].(string); got != d.sessionID {
+		t.Errorf("priming agentId = %q, want %q", got, d.sessionID)
+	}
+}
+
+// TestNewDriver_HonorsExplicitPermissionMode verifies a non-default
+// cfg.PermissionMode is plumbed through to /permission verbatim.
+func TestNewDriver_HonorsExplicitPermissionMode(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace:      "/tmp/ws",
+		PermissionMode: "workspace-write",
+	})
+	if err != nil {
+		t.Fatalf("newDriver: %v", err)
+	}
+	defer d.Close()
+
+	cmd, _ := mock.lastCommand.Load().(map[string]any)
+	if got, _ := cmd["line"].(string); got != "/permission workspace-write" {
+		t.Errorf("priming line = %q, want %q",
+			got, "/permission workspace-write")
+	}
+}
+
+// TestNewDriver_PermissionPrimingFailureIsNonFatal verifies a
+// failing commands/execute doesn't abort session startup — the
+// runtime's auto-allow on RunOnce paths is the safety net for
+// any leftover approvals.
+func TestNewDriver_PermissionPrimingFailureIsNonFatal(t *testing.T) {
+	mock := newHandshakeMock(t)
+	// Force commands/execute to fail every call.
+	mock.commandsFailNext.Store(true)
+	mock.installGlobal(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver should swallow /permission failure: %v", err)
+	}
+	defer d.Close()
+
+	if mock.createCount.Load() != 1 {
+		t.Errorf("session.create = %d, want 1 (handshake still ran)",
+			mock.createCount.Load())
+	}
+}
+
+// TestReset_ReplaysPermissionMode verifies that Reset (/new)
+// replays the captured permission mode on the new session —
+// without this, every /new would silently drop back to the dsh
+// default and the next approval would wedge.
+func TestReset_ReplaysPermissionMode(t *testing.T) {
+	mock := newHandshakeMock(t)
+	mock.installGlobal(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver: %v", err)
+	}
+	defer d.Close()
+
+	// Drain startup Ready so Reset's Ready is what we observe next.
+	select {
+	case <-d.events:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out draining startup EventAgentReady")
+	}
+
+	before := mock.commandsCount.Load()
+	if err := d.Reset(ctx); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	after := mock.commandsCount.Load()
+	if after-before != 1 {
+		t.Fatalf("Reset should fire /permission once more (before=%d after=%d)",
+			before, after)
+	}
+	cmd, _ := mock.lastCommand.Load().(map[string]any)
+	if got, _ := cmd["agentId"].(string); got != d.sessionID {
+		t.Errorf("reset priming agentId = %q, want new sessionID %q",
+			got, d.sessionID)
+	}
+	if got, _ := cmd["line"].(string); got != "/permission danger-full-access" {
+		t.Errorf("reset priming line = %q, want %q",
+			got, "/permission danger-full-access")
+	}
+}
+
+// TestFirstNonEmpty exercises the bridge helper used to apply the
+// default permission mode when cfg.PermissionMode is empty.
+func TestFirstNonEmpty(t *testing.T) {
+	if got := firstNonEmpty("", "danger-full-access"); got != "danger-full-access" {
+		t.Errorf("firstNonEmpty fallback = %q", got)
+	}
+	if got := firstNonEmpty("workspace-write", "danger-full-access"); got != "workspace-write" {
+		t.Errorf("firstNonEmpty explicit = %q", got)
+	}
+	if got := firstNonEmpty("", ""); got != "" {
+		t.Errorf("firstNonEmpty all-empty = %q", got)
 	}
 }

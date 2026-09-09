@@ -60,18 +60,11 @@ func TestLiveDshWireFormat(t *testing.T) {
 	defer cancel()
 
 	rpc := func(method string, args map[string]any) (map[string]any, error) {
-		var wrapped []byte
-		if args == nil {
-			wrapped, _ = json.Marshal(map[string]any{"args": map[string]any{}})
-		} else {
-			payloadBytes, err := json.Marshal(args)
-			if err != nil {
-				return nil, fmt.Errorf("marshal args: %w", err)
-			}
-			wrapped, _ = json.Marshal(map[string]any{
-				"args": map[string]any{"request": json.RawMessage(payloadBytes)},
-			})
-		}
+		// args is the inner body the gateway's `args` field
+		// wraps. Caller-built shape — see host.RPCClient.Post
+		// doc on the per-method descriptor (typed: `request` /
+		// flat: bare fields / none: empty object).
+		wrapped, _ := json.Marshal(map[string]any{"args": args})
 		body, _ := json.Marshal(map[string]any{
 			"type":    "client-request",
 			"rpcId":   fmt.Sprintf("live-%d", time.Now().UnixNano()),
@@ -117,7 +110,7 @@ func TestLiveDshWireFormat(t *testing.T) {
 
 	// 1) agentPresets/list — confirm we can talk to the server at all
 	t.Run("agentPresets/list", func(t *testing.T) {
-		out, err := rpc("agentPresets/list", nil)
+		out, err := rpc("agentPresets/list", map[string]any{})
 		if err != nil {
 			t.Fatalf("agentPresets/list: %v", err)
 		}
@@ -141,7 +134,9 @@ func TestLiveDshWireFormat(t *testing.T) {
 
 	var wsID string
 	t.Run("workspace/create", func(t *testing.T) {
-		out, err := rpc("workspace/create", map[string]any{"path": wsPath})
+		out, err := rpc("workspace/create", map[string]any{
+		"request": map[string]any{"path": wsPath},
+	})
 		if err != nil {
 			t.Fatalf("workspace/create: %v", err)
 		}
@@ -168,7 +163,9 @@ func TestLiveDshWireFormat(t *testing.T) {
 			if preset != "" {
 				args["agentPreset"] = preset
 			}
-			out, err := rpc("session/create", args)
+			out, err := rpc("session/create", map[string]any{
+				"request": args,
+			})
 			if err != nil {
 				t.Errorf("preset=%q: %v", label, err)
 				continue
@@ -180,9 +177,89 @@ func TestLiveDshWireFormat(t *testing.T) {
 			if sid == "" {
 				t.Errorf("preset=%q: empty sessionId", label)
 			}
-			if _, err := rpc("workspace/archiveSession", map[string]any{"sessionId": sid}); err != nil {
+			if _, err := rpc("workspace/archiveSession", map[string]any{
+				"request": map[string]any{"sessionId": sid},
+			}); err != nil {
 				t.Errorf("archive %s: %v", sid, err)
 			}
 		}
+	})
+
+	// 4) commands/execute — the path the dashboard's "Full access"
+	//    picker uses (verified live 2026-09-09 against dsh 0.1.2-rc.1).
+	t.Run("commands/execute", func(t *testing.T) {
+		// Pick a fresh sid from step 3 via workspace/create +
+		// session/create so we don't rely on leaked state.
+		out, err := rpc("session/create", map[string]any{
+			"request": map[string]any{"workspaceId": wsID},
+		})
+		if err != nil {
+			t.Fatalf("session/create: %v", err)
+		}
+		sid, _ := out["sessionId"].(string)
+		defer func() {
+			if sid != "" {
+				_, _ = rpc("workspace/archiveSession", map[string]any{
+					"request": map[string]any{"sessionId": sid},
+				})
+			}
+		}()
+
+		val, err := rpc("commands/execute", map[string]any{
+			"agentId": sid,
+			"line":    "/permission danger-full-access",
+			"images":  []any{},
+		})
+		if err != nil {
+			t.Fatalf("commands/execute: %v", err)
+		}
+		result, _ := val["result"].(map[string]any)
+		if result == nil {
+			t.Fatalf("commands/execute: missing result: %v", val)
+		}
+		kind, _ := result["kind"].(string)
+		if kind != "success" {
+			t.Errorf("commands/execute kind=%q (full=%v)", kind, result)
+		}
+		t.Logf("commands/execute sessionId=%s kind=%s text=%v",
+			sid, kind, result["text"])
+	})
+
+	// 5) Full stack — session/create then commands/execute with
+	//    /permission danger-full-access (matches what newDriver()
+	//    does after the wire-format fix).
+	t.Run("end-to-end /permission priming", func(t *testing.T) {
+		out, err := rpc("session/create", map[string]any{
+			"request": map[string]any{"workspaceId": wsID},
+		})
+		if err != nil {
+			t.Fatalf("session/create: %v", err)
+		}
+		sid, _ := out["sessionId"].(string)
+		defer func() {
+			if sid != "" {
+				_, _ = rpc("workspace/archiveSession", map[string]any{
+					"request": map[string]any{"sessionId": sid},
+				})
+			}
+		}()
+		val, err := rpc("commands/execute", map[string]any{
+			"agentId": sid,
+			"line":    "/permission danger-full-access",
+			"images":  []any{},
+		})
+		if err != nil {
+			t.Fatalf("commands/execute: %v", err)
+		}
+		result, _ := val["result"].(map[string]any)
+		if result == nil {
+			t.Fatalf("commands/execute: missing result: %v", val)
+		}
+		kind, _ := result["kind"].(string)
+		if kind != "success" {
+			t.Errorf("commands/execute kind=%q", kind)
+		}
+		t.Logf("e2e priming OK sessionId=%s result.kind=%s result.text=%v",
+			sid, kind, result["text"])
 	})
 }

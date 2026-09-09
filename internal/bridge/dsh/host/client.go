@@ -134,11 +134,26 @@ func (c *RPCClient) BaseURL() string {
 	return c.baseURL
 }
 
-// Post issues one RPC. `payload` is JSON-marshaled, wrapped in the
-// typert `{args:{request:...}}` envelope, and POSTed to
+// Post issues one RPC. `args` is JSON-marshaled and wrapped in the
+// standard typert envelope `{args: <args>}`, then POSTed to
 // `/api/{method}` (dots in the method name are converted to slashes
 // to match dsh web's canonical routing). The response is decoded
 // into rpcResponse and returned.
+//
+// IMPORTANT — args shape is method-specific:
+//   - typed single-arg methods (session/create, workspace/create,
+//     session/cancel, …): the dashboard wraps under `.request`, e.g.
+//     `args = {request: {workspaceId: ...}}` — the typert descriptor
+//     names the typed payload "request".
+//   - flat-arg methods (commands/execute, …): the fields live
+//     directly under `args`, e.g. `args = {agentId, line, images}`.
+//   - no-arg methods (agentPresets/list, …): empty object
+//     `args = {}`.
+//
+// Callers build the right shape — Post does NOT auto-wrap, because
+// the per-method descriptor shape can't be guessed from the
+// payload alone (an empty `{}` would silently fit both "request:"
+// and "no-arg" descriptors).
 //
 // Returns:
 //   - (resp, nil) on transport OK + business OK (resp.Result.OK == true)
@@ -146,35 +161,30 @@ func (c *RPCClient) BaseURL() string {
 //   - (nil, err) on transport / decode / id-mismatch failure
 //
 // Mirrors dsh/http.go Post so concurrent callers see the same wire
-// contract. Phase 0 keeps the two implementations separate so
-// existing tests don't break; Phase 3 will collapse.
+// contract.
 //
-// F-dsh-preset-1 (2026-09-09): dsh web's gateway (`packages/api/gateway`)
-// refuses any payload whose `args` field is missing or doesn't carry
-// the typed request under `.request`. Pre-fix this method shipped
-// `{workspaceId:...}` directly, which the gateway rejected with
-// "Remote payload must contain exactly one plain-object args field"
-// (gateway/internal) or — for typed methods — "missing 'request';
-// unexpected 'workspaceId'" (gateway/arguments-invalid). The
-// canonical wire shape, captured live from the dsh dashboard
-// 2026-09-09 against dsh 0.1.2-rc.1, is `{args:{request:{...}}}`.
+// F-dsh-preset-1 (2026-09-09): dsh web's gateway requires the
+// payload to carry an `args` field — flat or under `.request`
+// per the descriptor. Pre-fix this method shipped the caller's
+// payload as-is (no `args` wrapper), which the gateway rejected
+// with `gateway/internal: Remote payload must contain exactly one
+// plain-object args field` for every call.
 //
-// F-dsh-preset-1 (2026-09-09): dsh web's gateway also routes
-// `POST /api/{method-with-slashes}` (e.g. `/api/session/create`),
-// not `/api/{method.with.dots}`. Pre-fix this method emitted
-// `/api/session.create` which the gateway returned 404 for, hiding
-// the underlying payload mismatch from every test.
-func (c *RPCClient) Post(ctx context.Context, method string, payload any) (*rpcResponse, error) {
+// F-dsh-preset-1 (2026-09-09): dsh web routes `POST /api/{method/with/slashes}`
+// (e.g. `/api/session/create`), not `/api/{method.with.dots}`.
+// Pre-fix this method emitted `/api/session.create` which the
+// gateway returned 404 for, hiding the underlying payload
+// mismatch from every test.
+func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResponse, error) {
 	rpcID := newRPCID()
 
-	payloadBytes, err := json.Marshal(payload)
+	argsBytes, err := json.Marshal(args)
 	if err != nil {
-		return nil, fmt.Errorf("dsh.host: marshal payload for %s: %w", method, err)
+		return nil, fmt.Errorf("dsh.host: marshal args for %s: %w", method, err)
 	}
-
-	wrapped, err := wrapRequestPayload(payloadBytes)
+	wrapped, err := wrapArgs(argsBytes)
 	if err != nil {
-		return nil, fmt.Errorf("dsh.host: wrap payload for %s: %w", method, err)
+		return nil, fmt.Errorf("dsh.host: wrap args for %s: %w", method, err)
 	}
 
 	envelope := clientRequest{
@@ -319,7 +329,9 @@ type SessionSummary struct {
 // SessionList queries /api/session.list. Used by Phase 4 restart-
 // recovery: match persisted sessionIds against current server state.
 func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
-	resp, err := c.Post(ctx, "session.list", map[string]any{})
+	resp, err := c.Post(ctx, "session.list", map[string]any{
+		"request": map[string]any{},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +360,9 @@ type SessionCreateOpts struct {
 // to dedupe: rather than blindly create a new workspace, we look
 // up an existing one with the same path and reuse it.
 func (c *RPCClient) WorkspaceList(ctx context.Context) ([]WorkspaceSummary, error) {
-	resp, err := c.Post(ctx, "workspace.list", map[string]any{})
+	resp, err := c.Post(ctx, "workspace.list", map[string]any{
+		"request": map[string]any{},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +426,9 @@ type WorkspaceSummary struct {
 // workspace survives across sessions, see driver.Close which
 // uses workspace.archiveSession instead of workspace.delete).
 func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, error) {
-	resp, err := c.Post(ctx, "workspace.create", map[string]any{"path": path})
+	resp, err := c.Post(ctx, "workspace.create", map[string]any{
+		"request": map[string]any{"path": path},
+	})
 	if err != nil {
 		return WorkspaceSummary{}, err
 	}
@@ -439,7 +455,7 @@ func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (Workspace
 // session-not-found when the id is neither live nor persisted.
 func (c *RPCClient) WorkspaceArchiveSession(ctx context.Context, sessionID string) error {
 	resp, err := c.Post(ctx, "workspace.archiveSession", map[string]any{
-		"sessionId": sessionID,
+		"request": map[string]any{"sessionId": sessionID},
 	})
 	if err != nil {
 		return err
@@ -455,7 +471,9 @@ func (c *RPCClient) WorkspaceArchiveSession(ctx context.Context, sessionID strin
 // Best-effort: callers log the error but don't propagate, since
 // shutdown still proceeds even if dsh is unreachable.
 func (c *RPCClient) WorkspaceDelete(ctx context.Context, workspaceID string) error {
-	resp, err := c.Post(ctx, "workspace.delete", map[string]any{"workspaceId": workspaceID})
+	resp, err := c.Post(ctx, "workspace.delete", map[string]any{
+		"request": map[string]any{"workspaceId": workspaceID},
+	})
 	if err != nil {
 		return err
 	}
@@ -469,7 +487,9 @@ func (c *RPCClient) WorkspaceDelete(ctx context.Context, workspaceID string) err
 // sessionId. Phase 2 will call this from ChatSession.Spawner; Phase 0
 // is just plumbing.
 func (c *RPCClient) SessionCreate(ctx context.Context, opts SessionCreateOpts) (string, error) {
-	resp, err := c.Post(ctx, "session.create", opts)
+	resp, err := c.Post(ctx, "session.create", map[string]any{
+		"request": opts,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -504,9 +524,11 @@ type PromptPart struct {
 // bad-request: invalid input: expected "queue").
 func (c *RPCClient) SessionPrompt(ctx context.Context, sessionID, mode string, parts []PromptPart) error {
 	resp, err := c.Post(ctx, "session.prompt", map[string]any{
-		"sessionId": sessionID,
-		"mode":      mode,
-		"content":   parts,
+		"request": map[string]any{
+			"sessionId": sessionID,
+			"mode":      mode,
+			"content":   parts,
+		},
 	})
 	if err != nil {
 		return err
@@ -523,7 +545,9 @@ func (c *RPCClient) SessionPrompt(ctx context.Context, sessionID, mode string, p
 // error so callers can decide; Phase 2 will codify the lenient
 // semantics the existing bridge uses in session.go:Close.
 func (c *RPCClient) SessionCancel(ctx context.Context, sessionID string) error {
-	resp, err := c.Post(ctx, "session.cancel", map[string]any{"sessionId": sessionID})
+	resp, err := c.Post(ctx, "session.cancel", map[string]any{
+		"request": map[string]any{"sessionId": sessionID},
+	})
 	if err != nil {
 		return err
 	}
@@ -531,6 +555,38 @@ func (c *RPCClient) SessionCancel(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("dsh.host: session.cancel: %s", resp.Result.ErrorMessage())
 	}
 	return nil
+}
+
+// CommandsExecute invokes /api/commands/execute. `line` is the
+// full slash-command text (e.g. "/permission danger-full-access",
+// "/new", "/exit"). The dashboard fires this same RPC to flip
+// the session to Full access from the Access mode picker
+// (dsh-api.md §3.6) — verified live against dsh 0.1.2-rc.1.
+//
+// commands/execute is a FLAT-ARG method: the typert descriptor
+// names its fields directly under `args` (agentId, line, images),
+// NOT under `args.request`. Post() is now pass-through, so we
+// hand it the bare fields here and Post adds the outer `args`
+// wrapper.
+//
+// Returns the parsed result value; the dashboard's payload for
+// "/permission danger-full-access" is `{kind:"success",
+// text:"preset danger-full-access"}`. Surfacing the value lets
+// callers log or audit the reply; errors surface when the server
+// rejects the command.
+func (c *RPCClient) CommandsExecute(ctx context.Context, sessionID, line string) (json.RawMessage, error) {
+	resp, err := c.Post(ctx, "commands/execute", map[string]any{
+		"agentId": sessionID,
+		"line":    line,
+		"images":  []any{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Result.OK {
+		return nil, fmt.Errorf("dsh.host: commands/execute: %s", resp.Result.ErrorMessage())
+	}
+	return resp.Result.Value, nil
 }
 
 // ApprovalResponse is the inner body for POST /api/respond when
@@ -629,34 +685,28 @@ func methodDotsToSlashes(method string) string {
 	return strings.ReplaceAll(method, ".", "/")
 }
 
-// wrapRequestPayload wraps the JSON-marshaled payload into the
-// typert envelope shape dsh web's gateway requires:
+// wrapArgs wraps the JSON-marshaled args under the typert
+// envelope's `args` field. The gateway requires this wrapper
+// regardless of whether the underlying method takes args:
 //
-//	{"args": {"request": <payload>}}    — typed methods (session/create, …)
-//	{"args": {}}                          — no-arg methods (agentPresets/list, …)
+//	{"args": <args>}    — typed, flat-arg, or no-arg all share this shape
 //
-// The gateway refuses anything else ("Remote payload must contain
-// exactly one plain-object args field"). Empty `request` is also
-// rejected by typed methods whose descriptor doesn't name a
-// request field (e.g. agentPresets/list reports
-// `unexpected "request"`), so the wrapper picks the right shape
-// based on whether the caller passed any payload.
+// The contents of `<args>` are method-specific (see Post's doc).
+// Callers pre-build the right inner shape — wrapArgs only adds
+// the outer envelope.
 //
-// F-dsh-preset-1 (2026-09-09): pre-fix this layer passed the payload
-// as-is, which the gateway rejected with `gateway/internal` for
-// missing `args` and `gateway/arguments-invalid` for the typed
-// methods (which expected `args.request`).
-func wrapRequestPayload(payloadBytes json.RawMessage) (json.RawMessage, error) {
-	if len(payloadBytes) == 0 || string(payloadBytes) == "null" {
-		// No-arg call — dashboard sends `{"args": {}}` for
-		// these (e.g. agentPresets/list). Sending
-		// `{"args": {"request": null}}` would fail for methods
-		// whose descriptor doesn't define a request field.
-		return json.Marshal(map[string]any{"args": map[string]any{}})
+// F-dsh-preset-1 (2026-09-09): pre-fix the inner payload went in
+// unwrapped, which the gateway rejected with `gateway/internal:
+// Remote payload must contain exactly one plain-object args field`.
+// An early variant of this layer also forced `args.request` for
+// every call, which broke flat-arg methods like commands/execute
+// (the gateway rejected them with `gateway/arguments-invalid:
+// missing 'agentId'; unexpected 'request'`).
+func wrapArgs(argsBytes json.RawMessage) (json.RawMessage, error) {
+	if len(argsBytes) == 0 {
+		argsBytes = json.RawMessage("{}")
 	}
-	wrapped, err := json.Marshal(map[string]any{
-		"args": map[string]any{"request": json.RawMessage(payloadBytes)},
-	})
+	wrapped, err := json.Marshal(map[string]any{"args": json.RawMessage(argsBytes)})
 	if err != nil {
 		return nil, err
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -727,7 +728,7 @@ func (e *fakeExitError) Error() string { return e.msg }
 func seedAgentSession(t *testing.T, rig *closeTestRig, agentName, cwd string) {
 	t.Helper()
 	as := chatsession.NewAgentSession("as-"+agentName+"-test", rig.cs.ChatID, agentName, cwd, nil)
-	as.SetStatusForTest(chatsession.StatusExited)
+	agentstest.SetStatus(as, chatsession.StatusExited)
 	rig.cs.AttachAgentSessionForTest(as)
 }
 

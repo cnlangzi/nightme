@@ -2,6 +2,8 @@ package chatsession
 
 import (
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 )
 
 // TestEvictAgentSessionsInCwd_EmptyCwd asserts the
@@ -77,7 +79,7 @@ func TestEvictAgentSessionsInCwd_ClosesAndDropsAllRunning(t *testing.T) {
 func TestEvictAgentSessionsInCwd_DropsStaleEntry(t *testing.T) {
 	cs, _ := New("chat-test", "test-agent")
 	as := makeBareAgentSession(t, "stale-agent", "/wt-a")
-	as.SetStatusForTest(StatusExited)
+	agentstest.SetStatus(as, StatusExited)
 	// No handle — matches the production state where a
 	// crashed-grep AS is left in the pool.
 	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
@@ -139,9 +141,9 @@ func seedBareRunningAS(t *testing.T, cs *ChatSession, name, cwd string) (*AgentS
 	t.Helper()
 	as := NewAgentSession(newAgentSessionID(), cs.ID, name, cwd, nil)
 	spy := newFakeAgentSession(42)
-	as.SetHandleForTest(spy.buildLive())
-	as.SetStatusForTest(StatusRunning)
-	as.SetPIDForTest(42)
+	agentstest.SetHandle(as, spy.buildLive())
+	agentstest.SetStatus(as, StatusRunning)
+	agentstest.SetPID(as, 42)
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
 	cs.mu.Unlock()

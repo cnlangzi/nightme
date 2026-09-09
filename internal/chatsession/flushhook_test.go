@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 )
 
 // sentBlock records what the default FlushHook actually sent to
@@ -112,8 +114,14 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	}
 
 	// End the turn — in production the per-AS readpump does this on
-	// EventAgentDone, then routeEvent calls TryFlush.
-	as.EndPromptForTest(PromptEndClean)
+	// EventAgentDone, then routeEvent calls TryFlush. Test path
+	// mirrors that with agentstest.WaitReady so the !IsReady →
+	// TryFlush SKIP race on slow CI runners (Windows VM) doesn't
+	// flake the build (see agentstest.WaitReady).
+	agentstest.EndPrompt(as, PromptEndClean)
+	if !agentstest.WaitReady(as, time.Second) {
+		t.Fatalf("AS not ready after EndPrompt (isReady propagation stalled)")
+	}
 	if err := cs.TryFlush(); err != nil {
 		t.Fatalf("TryFlush: %v", err)
 	}

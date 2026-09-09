@@ -1660,40 +1660,43 @@ func newAgentSessionID() string {
 // use them — use Spawn / SetRunning / SetDetached / SetExited /
 // SetSessionID / SetModel instead.
 //
-// They live in production code (not _test.go) so cross-package tests
-// can call them. The "ForTest" suffix is the convention.
+// Cross-package test callers reach these via the
+// internal/agentsession/agentstest package, which keeps every
+// test-only symbol out of the production binary's call surface.
 
-// SetHandleForTest injects a bridge handle. Caller is responsible
+// SetHandle injects a bridge handle. Caller is responsible
 // for keeping the handle alive for the duration of any usage.
-func (as *AgentSession) SetHandleForTest(h *agent.Agent) {
+func (as *AgentSession) SetHandle(h *agent.Agent) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.handle = h
 }
 
-// SetStatusForTest sets the runtime status directly.
-func (as *AgentSession) SetStatusForTest(s Status) {
+// SetStatus sets the runtime status directly.
+func (as *AgentSession) SetStatus(s Status) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.stat = s
 }
 
-// SetPIDForTest sets the OS PID directly.
-func (as *AgentSession) SetPIDForTest(pid int) {
+// SetPID sets the OS PID directly.
+func (as *AgentSession) SetPID(pid int) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.pid = pid
 }
 
-// SetCurrentPromptForTest installs the in-flight Prompt directly.
-// Used by tests that bypass Submit.
-func (as *AgentSession) SetCurrentPromptForTest(p *Prompt) {
+// SetCurrentPrompt installs the in-flight Prompt directly. Test
+// affordance — production code drives the prompt lifecycle through
+// Submit + EndPrompt.
+func (as *AgentSession) SetCurrentPrompt(p *Prompt) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.currentPrompt = p
 }
 
-// SetIsReadyForTest toggles the isReady atomic flag.
-func (as *AgentSession) SetIsReadyForTest(v bool) {
+// SetIsReady toggles the isReady atomic flag. Test affordance —
+// production flips it through Submit / endPrompt.
+func (as *AgentSession) SetIsReady(v bool) {
 	as.isReady.Store(v)
 }

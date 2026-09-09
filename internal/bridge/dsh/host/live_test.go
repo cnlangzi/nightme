@@ -135,8 +135,8 @@ func TestLiveDshWireFormat(t *testing.T) {
 	var wsID string
 	t.Run("workspace/create", func(t *testing.T) {
 		out, err := rpc("workspace/create", map[string]any{
-		"request": map[string]any{"path": wsPath},
-	})
+			"request": map[string]any{"path": wsPath},
+		})
 		if err != nil {
 			t.Fatalf("workspace/create: %v", err)
 		}

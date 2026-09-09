@@ -23,16 +23,16 @@ import (
 type handshakeMock struct {
 	server *httptest.Server
 
-	createCount    atomic.Int64
-	workspaceCount atomic.Int64
-	historyCount   atomic.Int64
-	cancelCount    atomic.Int64
-	archiveCount   atomic.Int64 // Close calls workspace.archiveSession (repo-scoped workspace survives)
-	promptCount    atomic.Int64
-	promptFailNext atomic.Bool
-	respondCount   atomic.Int64  // /api/respond — RunOnce auto-allow posts here
-	commandsCount  atomic.Int64  // /api/commands/execute — /permission danger-full-access priming
-	commandsFailNext atomic.Bool // force the next commands/execute to fail
+	createCount      atomic.Int64
+	workspaceCount   atomic.Int64
+	historyCount     atomic.Int64
+	cancelCount      atomic.Int64
+	archiveCount     atomic.Int64 // Close calls workspace.archiveSession (repo-scoped workspace survives)
+	promptCount      atomic.Int64
+	promptFailNext   atomic.Bool
+	respondCount     atomic.Int64 // /api/respond — RunOnce auto-allow posts here
+	commandsCount    atomic.Int64 // /api/commands/execute — /permission danger-full-access priming
+	commandsFailNext atomic.Bool  // force the next commands/execute to fail
 
 	mu               sync.Mutex
 	lastCreate       map[string]any

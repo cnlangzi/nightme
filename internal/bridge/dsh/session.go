@@ -242,10 +242,10 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// handshakeSession + deleteWorkspace for the wire flow.
 
 	d := &driver{
-		cli:              cli,
-		workspace:        cfg.Workspace,
-		agentName:        s.name,
-		agentPreset:      cfg.AgentPreset,
+		cli:         cli,
+		workspace:   cfg.Workspace,
+		agentName:   s.name,
+		agentPreset: cfg.AgentPreset,
 		// Default to "danger-full-access" — the dsh permission
 		// preset that drops every approval gate. Pre-fix this was
 		// baked into the dsh subprocess via DSH_PERMISSION_MODE

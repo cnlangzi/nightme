@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 )
 
 // TestSteerUserMessage_NoSelectedAS — when there's no selected
@@ -76,8 +77,8 @@ func TestSteerUserMessage_ExitedAS_StillPushesFront(t *testing.T) {
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: "cc", Cwd: "/tmp"}] = NewAgentSession("as_exited", cs.ID, "cc", "/tmp", nil)
 	as := cs.pool[agentCwdKey{Agent: "cc", Cwd: "/tmp"}]
-	as.SetHandleForTest(newRecordingAgentSession(1).buildLive())
-	as.SetStatusForTest(StatusRunning)
+	agentstest.SetHandle(as, newRecordingAgentSession(1).buildLive())
+	agentstest.SetStatus(as, StatusRunning)
 	as.SetExited(0) // mark process gone
 	cs.selectedAS = as
 	cs.mu.Unlock()
@@ -106,8 +107,8 @@ func TestSteerUserMessage_RunningAS_NoPanic(t *testing.T) {
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: "cc", Cwd: "/tmp"}] = NewAgentSession("as_run", cs.ID, "cc", "/tmp", nil)
 	as := cs.pool[agentCwdKey{Agent: "cc", Cwd: "/tmp"}]
-	as.SetHandleForTest(newRecordingAgentSession(1).buildLive())
-	as.SetStatusForTest(StatusRunning)
+	agentstest.SetHandle(as, newRecordingAgentSession(1).buildLive())
+	agentstest.SetStatus(as, StatusRunning)
 	cs.selectedAS = as
 	cs.mu.Unlock()
 

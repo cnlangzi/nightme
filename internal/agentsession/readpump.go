@@ -295,14 +295,6 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 	}
 }
 
-// EndPromptForTest is the public version of endPrompt for tests
-// that need to simulate prompt-end events. Same semantics as the
-// internal endPrompt — pushes a KindPromptEnded event and clears
-// currentPrompt.
-func (as *AgentSession) EndPromptForTest(reason PromptEndReason) {
-	as.endPrompt(reason)
-}
-
 // EndPrompt (fix-bridge-stuck) is the public, control-class entry
 // point for ending the in-flight Prompt. The /stop and /close
 // command paths drive this synchronously so the local state
@@ -313,15 +305,19 @@ func (as *AgentSession) EndPromptForTest(reason PromptEndReason) {
 // endPrompt — push KindPromptEnded onto eventQueue, interrupt
 // on readpumpStop to avoid deadlock with Shutdown.
 //
+// Also the entry point used by internal/agentsession/agentstest
+// to simulate prompt-end events from cross-package tests.
+//
 // Internal callers should keep using endPrompt directly; this is
 // just the exported surface for cross-package control commands.
 func (as *AgentSession) EndPrompt(reason PromptEndReason) {
 	as.endPrompt(reason)
 }
 
-// StartReadPumpForTest is the public test-only version of
-// startReadPump. Idempotent (gated by readpumpStarted). Production
-// code MUST NOT use this — Spawn / Activate start the readpump.
-func (as *AgentSession) StartReadPumpForTest() {
+// StartReadPump is the public surface for startReadPump. Idempotent
+// (gated by readpumpStarted). Production code drives this from
+// Spawn / Activate — cross-package tests reach it via
+// internal/agentsession/agentstest.StartReadPump.
+func (as *AgentSession) StartReadPump() {
 	as.startReadPump()
 }

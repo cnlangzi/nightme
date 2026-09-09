@@ -78,10 +78,10 @@ func newMockDSH(t *testing.T) *mockDSH {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/session.list", m.handleSessionList)
-	mux.HandleFunc("/api/session.create", m.handleSessionCreate)
-	mux.HandleFunc("/api/session.prompt", m.handleSessionPrompt)
-	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
+	mux.HandleFunc("/api/session/list", m.handleSessionList)
+	mux.HandleFunc("/api/session/create", m.handleSessionCreate)
+	mux.HandleFunc("/api/session/prompt", m.handleSessionPrompt)
+	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/respond", m.handleRespond)
 	mux.HandleFunc("/api/events.mux", m.handleMuxWS)
 	mux.HandleFunc("/api/events.host", m.handleHostWS)

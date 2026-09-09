@@ -43,7 +43,7 @@ Read every sentence as a first-time reader. If removing the timestamp or context
 - Build:  `make build`           # bin/nightme[.exe] with version metadata
 - Test:   `make test`            # `go test -race ./...`
 - Lint:   `make lint`            # `go vet ./...` — matches CI
-- Fmt:    `make fmt`             # `go fmt ./...`
+- Fmt:    `make fmt`             # `go fmt ./...`  — **required**; CI rejects unformatted files
 - Dev:    `make dev`             # `go run ./cmd/nightme` with example config
 - Linux GUI variant (`make build-gui`) needs build-time packages libgtk-3-dev + libayatana-appindicator3-dev and runtime packages libgtk-3 + libayatana-appindicator3; default build is tray-less.
 - CI runs linux + windows + darwin. Respect existing `//go:build !windows` / `//go:build !unix` tags; don't break cross-platform splits.
@@ -53,6 +53,7 @@ Read every sentence as a first-time reader. If removing the timestamp or context
 ### Style
 
 - No `type X = Y` aliases. Use the underlying type directly; don't keep aliases for backward-compat names.
+- Run `make fmt` (alias for `gofmt -w ./...`) after every code change. CI's gofmt gate rejects the build when `gofmt -l .` is non-empty — don't bypass it with a hand-edited file.
 - Test merges: when tests conflict in a rebase, prefer rewriting over mechanical 3-way merge.
 
 ### Runtime

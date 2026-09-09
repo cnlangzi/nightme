@@ -49,13 +49,15 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	t.Helper()
 	m := &handshakeMock{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/workspace.create", m.handleWorkspaceCreate)
-	mux.HandleFunc("/api/session.create", m.handleSessionCreate)
-	mux.HandleFunc("/api/session.models", m.handleSessionModels)
-	mux.HandleFunc("/api/session.history", m.handleSessionHistory)
-	mux.HandleFunc("/api/session.cancel", m.handleSessionCancel)
-	mux.HandleFunc("/api/workspace.archiveSession", m.handleWorkspaceArchiveSession)
-	mux.HandleFunc("/api/session.prompt", m.handleSessionPrompt)
+	// F-dsh-preset-1 (2026-09-09): dsh web routes slash-separated
+	// method names. The mock mirrors the real wire format.
+	mux.HandleFunc("/api/workspace/create", m.handleWorkspaceCreate)
+	mux.HandleFunc("/api/session/create", m.handleSessionCreate)
+	mux.HandleFunc("/api/session/models", m.handleSessionModels)
+	mux.HandleFunc("/api/session/history", m.handleSessionHistory)
+	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
+	mux.HandleFunc("/api/workspace/archiveSession", m.handleWorkspaceArchiveSession)
+	mux.HandleFunc("/api/session/prompt", m.handleSessionPrompt)
 	mux.HandleFunc("/api/respond", m.handleRespond)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
@@ -97,6 +99,31 @@ func decodeEnvelope(r *http.Request) rpcEnvelope {
 	_ = r.Body.Close()
 	_ = json.Unmarshal(body, &env)
 	return env
+}
+
+// unwrapRequest pulls the typed request body out of the typert
+// envelope `{args:{request: ...}}` that dsh web's gateway requires.
+// Returns an empty map when the payload isn't wrapped (legacy
+// shape, preserved so older probes keep working).
+func unwrapRequest(payload json.RawMessage) map[string]any {
+	if len(payload) == 0 {
+		return map[string]any{}
+	}
+	var wrapped struct {
+		Args struct {
+			Request map[string]any `json:"request"`
+		} `json:"args"`
+	}
+	if err := json.Unmarshal(payload, &wrapped); err != nil || wrapped.Args.Request == nil {
+		// Legacy shape: payload is the request body itself.
+		var flat map[string]any
+		_ = json.Unmarshal(payload, &flat)
+		if flat == nil {
+			flat = map[string]any{}
+		}
+		return flat
+	}
+	return wrapped.Args.Request
 }
 
 func writeOK(w http.ResponseWriter, rpcID string, value any) {
@@ -156,8 +183,11 @@ func (m *handshakeMock) handleWorkspaceCreate(w http.ResponseWriter, r *http.Req
 func (m *handshakeMock) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	m.createCount.Add(1)
 	env := decodeEnvelope(r)
-	var payload map[string]any
-	_ = json.Unmarshal(env.Payload, &payload)
+	// F-dsh-preset-1 (2026-09-09): the wire envelope wraps the
+	// typed request under args.request. unwrapRequest pulls it out
+	// so the rest of this handler can stay close to the original
+	// (request-shape) assertions.
+	payload := unwrapRequest(env.Payload)
 
 	m.mu.Lock()
 	m.lastCreate = payload

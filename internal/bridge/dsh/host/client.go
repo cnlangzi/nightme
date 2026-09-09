@@ -134,9 +134,11 @@ func (c *RPCClient) BaseURL() string {
 	return c.baseURL
 }
 
-// Post issues one RPC. `payload` is JSON-marshaled into the
-// clientRequest envelope; the response is decoded into rpcResponse
-// and returned.
+// Post issues one RPC. `payload` is JSON-marshaled, wrapped in the
+// typert `{args:{request:...}}` envelope, and POSTed to
+// `/api/{method}` (dots in the method name are converted to slashes
+// to match dsh web's canonical routing). The response is decoded
+// into rpcResponse and returned.
 //
 // Returns:
 //   - (resp, nil) on transport OK + business OK (resp.Result.OK == true)
@@ -146,6 +148,22 @@ func (c *RPCClient) BaseURL() string {
 // Mirrors dsh/http.go Post so concurrent callers see the same wire
 // contract. Phase 0 keeps the two implementations separate so
 // existing tests don't break; Phase 3 will collapse.
+//
+// F-dsh-preset-1 (2026-09-09): dsh web's gateway (`packages/api/gateway`)
+// refuses any payload whose `args` field is missing or doesn't carry
+// the typed request under `.request`. Pre-fix this method shipped
+// `{workspaceId:...}` directly, which the gateway rejected with
+// "Remote payload must contain exactly one plain-object args field"
+// (gateway/internal) or — for typed methods — "missing 'request';
+// unexpected 'workspaceId'" (gateway/arguments-invalid). The
+// canonical wire shape, captured live from the dsh dashboard
+// 2026-09-09 against dsh 0.1.2-rc.1, is `{args:{request:{...}}}`.
+//
+// F-dsh-preset-1 (2026-09-09): dsh web's gateway also routes
+// `POST /api/{method-with-slashes}` (e.g. `/api/session/create`),
+// not `/api/{method.with.dots}`. Pre-fix this method emitted
+// `/api/session.create` which the gateway returned 404 for, hiding
+// the underlying payload mismatch from every test.
 func (c *RPCClient) Post(ctx context.Context, method string, payload any) (*rpcResponse, error) {
 	rpcID := newRPCID()
 
@@ -154,18 +172,24 @@ func (c *RPCClient) Post(ctx context.Context, method string, payload any) (*rpcR
 		return nil, fmt.Errorf("dsh.host: marshal payload for %s: %w", method, err)
 	}
 
+	wrapped, err := wrapRequestPayload(payloadBytes)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: wrap payload for %s: %w", method, err)
+	}
+
 	envelope := clientRequest{
 		Type:    "client-request",
 		RPCID:   rpcID,
 		Method:  method,
-		Payload: payloadBytes,
+		Payload: wrapped,
 	}
 	body, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, fmt.Errorf("dsh.host: marshal envelope for %s: %w", method, err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/"+method, bytes.NewReader(body))
+	url := c.baseURL + "/api/" + methodDotsToSlashes(method)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("dsh.host: build request %s: %w", method, err)
 	}
@@ -234,9 +258,11 @@ func (c *RPCClient) PostRaw(ctx context.Context, method string, payload json.Raw
 //
 // The server still expects HTTP 200 + a reasonable response on
 // the response side; the difference from Post is purely on the
-// request body shape.
+// request body shape. Method dots are converted to slashes to
+// match the gateway's slash-separated routing (F-dsh-preset-1).
 func (c *RPCClient) PostEnvelope(ctx context.Context, method string, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/"+method, bytes.NewReader(body))
+	url := c.baseURL + "/api/" + methodDotsToSlashes(method)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dsh.host: build request %s: %w", method, err)
 	}
@@ -589,4 +615,50 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// methodDotsToSlashes converts the dot-separated RPC method name
+// callers pass (e.g. "session.create") into the slash-separated
+// path segment dsh web's gateway expects (e.g. "session/create").
+//
+// F-dsh-preset-1 (2026-09-09): dsh web routes `POST /api/{a/b/c}`
+// (slash-separated); the dot form returns 404 from the gateway
+// without ever reaching the typert dispatcher. Verified live against
+// dsh 0.1.2-rc.1 (browser dashboard uses slashes).
+func methodDotsToSlashes(method string) string {
+	return strings.ReplaceAll(method, ".", "/")
+}
+
+// wrapRequestPayload wraps the JSON-marshaled payload into the
+// typert envelope shape dsh web's gateway requires:
+//
+//	{"args": {"request": <payload>}}    — typed methods (session/create, …)
+//	{"args": {}}                          — no-arg methods (agentPresets/list, …)
+//
+// The gateway refuses anything else ("Remote payload must contain
+// exactly one plain-object args field"). Empty `request` is also
+// rejected by typed methods whose descriptor doesn't name a
+// request field (e.g. agentPresets/list reports
+// `unexpected "request"`), so the wrapper picks the right shape
+// based on whether the caller passed any payload.
+//
+// F-dsh-preset-1 (2026-09-09): pre-fix this layer passed the payload
+// as-is, which the gateway rejected with `gateway/internal` for
+// missing `args` and `gateway/arguments-invalid` for the typed
+// methods (which expected `args.request`).
+func wrapRequestPayload(payloadBytes json.RawMessage) (json.RawMessage, error) {
+	if len(payloadBytes) == 0 || string(payloadBytes) == "null" {
+		// No-arg call — dashboard sends `{"args": {}}` for
+		// these (e.g. agentPresets/list). Sending
+		// `{"args": {"request": null}}` would fail for methods
+		// whose descriptor doesn't define a request field.
+		return json.Marshal(map[string]any{"args": map[string]any{}})
+	}
+	wrapped, err := json.Marshal(map[string]any{
+		"args": map[string]any{"request": json.RawMessage(payloadBytes)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return wrapped, nil
 }

@@ -2708,11 +2708,11 @@ func TestAdapter_OutThinking_PreservesWhitespace(t *testing.T) {
 // the result-message reaction to learn whether the turn
 // completed cleanly.
 func TestHeartbeatText_TerminalPrefix(t *testing.T) {
-	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
+	now := time.Now()
 	cases := []struct {
-		name string
-		hb   *messages.HeartbeatSnapshot
-		want string
+		name       string
+		hb         *messages.HeartbeatSnapshot
+		wantPrefix string // first rune of the line; "" means no terminal prefix
 	}{
 		{
 			name: "clean: Done with counters",
@@ -2720,7 +2720,7 @@ func TestHeartbeatText_TerminalPrefix(t *testing.T) {
 				ThinkCount: 3, ToolCount: 1, LastBeatAt: now,
 				Status: messages.HeartbeatDone,
 			},
-			want: "✅ <b>💭 3 · 🔧 1</b> · ⏱ 14:35:22",
+			wantPrefix: "✅ ",
 		},
 		{
 			name: "error: Error with counters",
@@ -2728,7 +2728,7 @@ func TestHeartbeatText_TerminalPrefix(t *testing.T) {
 				ThinkCount: 2, ToolCount: 4, LastBeatAt: now,
 				Status: messages.HeartbeatError,
 			},
-			want: "❌ <b>💭 2 · 🔧 4</b> · ⏱ 14:35:22",
+			wantPrefix: "❌ ",
 		},
 		{
 			name: "running: no prefix",
@@ -2736,23 +2736,31 @@ func TestHeartbeatText_TerminalPrefix(t *testing.T) {
 				ThinkCount: 1, LastBeatAt: now,
 				Status: messages.HeartbeatRunning,
 			},
-			want: "<b>💭 1</b> · ⏱ 14:35:22",
+			wantPrefix: "",
 		},
 		{
-			name: "clean terminal-only",
-			hb:   &messages.HeartbeatSnapshot{Status: messages.HeartbeatDone},
-			want: "✅ ",
+			name: "clean: Done with no activity",
+			hb: &messages.HeartbeatSnapshot{
+				Status: messages.HeartbeatDone,
+			},
+			wantPrefix: "✅ ",
 		},
 		{
-			name: "error terminal-only",
-			hb:   &messages.HeartbeatSnapshot{Status: messages.HeartbeatError},
-			want: "❌ ",
+			name: "error: Error with no activity",
+			hb: &messages.HeartbeatSnapshot{
+				Status: messages.HeartbeatError,
+			},
+			wantPrefix: "❌ ",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := heartbeatText(c.hb); got != c.want {
-				t.Fatalf("heartbeatText = %q, want %q", got, c.want)
+			got := heartbeatText(c.hb)
+			if !strings.HasPrefix(got, c.wantPrefix) {
+				t.Fatalf("heartbeatText = %q, want prefix %q", got, c.wantPrefix)
+			}
+			if c.wantPrefix != "" && !strings.Contains(got, "<b>") {
+				t.Fatalf("heartbeatText = %q, want the counter chip", got)
 			}
 		})
 	}

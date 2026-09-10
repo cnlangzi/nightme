@@ -51,8 +51,8 @@ const (
 	PromptDone
 
 	// PromptError: the `Prompt` has finished with a non-clean reason
-	// (EventAgentError / PromptEndProcessDied / PromptEndStalledKilled /
-	// PromptEndUserKilled / PromptEndUserStopped). Phase 0 emits this
+	// (EventAgentError / agent.PromptEndProcessDied / agent.PromptEndStalledKilled /
+	// agent.PromptEndUserKilled / agent.PromptEndUserStopped). Phase 0 emits this
 	// from the same readpump sites as PromptDone; channels distinguish
 	// it to paint the cross (❌) reaction instead of the check (✅).
 	// See `internal/agent/prompt_end_reason.go` for the full reason

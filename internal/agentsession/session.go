@@ -1492,7 +1492,7 @@ func (as *AgentSession) HandlePTYRestart(ctx context.Context, launcher Spawner) 
 //  3. set status=Exited BEFORE endPrompt so the chat layer's
 //     TryFlush on the resulting KindPromptEnded event skips Submit
 //     (sees StatusExited) instead of racing a dying bridge.
-//  4. endPrompt(PromptEndUserKilled) clears currentPrompt and
+//  4. endPrompt(agent.PromptEndUserKilled) clears currentPrompt and
 //     flips IsReady=true so the next TryFlush unblocks immediately
 //     (after respawn), without waiting for the bridge protocol to
 //     emit a terminal event.
@@ -1543,7 +1543,7 @@ func (as *AgentSession) Close() error {
 	// must precede endPrompt so the chat pump's TryFlush on the
 	// KindPromptEnded event sees StatusExited and skips Submit.
 	as.SetExited(0)
-	as.endPrompt(PromptEndUserKilled)
+	as.endPrompt(agent.PromptEndUserKilled)
 
 	if h == nil {
 		return nil // not running

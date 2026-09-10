@@ -7,8 +7,7 @@ package agent
 // normally. Lives in `agent` (alongside MessageState, ContentBlock,
 // BridgeDiagnostic) so the leaf `channel.Channel` interface can
 // reference it without importing `agentsession`. `agentsession`
-// re-exports it as a type alias for back-compat at call sites that
-// already talk in `agentsession.PromptEndReason`.
+// already talk in `agent.PromptEndReason`.
 //
 // Independent of the execution stage (`Prompt` itself has no State
 // field — see docs/feat/message_lifecycle.md §4.2).

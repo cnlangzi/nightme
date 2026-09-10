@@ -668,7 +668,7 @@ func waitForPromptEnd(ctx context.Context, cs *chatsession.ChatSession, userMsgI
 	case <-ctx.Done():
 		return ctx.Err()
 	case ev := <-evCh:
-		if ev.Reason != agentsession.PromptEndClean {
+		if ev.Reason != agent.PromptEndClean {
 			return fmt.Errorf("prompt ended with reason %v", ev.Reason)
 		}
 		return nil

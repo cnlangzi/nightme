@@ -68,9 +68,9 @@ const (
 	KindPromptEnded = agentsession.KindPromptEnded
 	KindLifecycle   = agentsession.KindLifecycle
 
-	PromptEndClean       = agentsession.PromptEndClean
-	PromptEndUserKilled  = agentsession.PromptEndUserKilled
-	PromptEndUserStopped = agentsession.PromptEndUserStopped
+	PromptEndClean       = agent.PromptEndClean
+	PromptEndUserKilled  = agent.PromptEndUserKilled
+	PromptEndUserStopped = agent.PromptEndUserStopped
 )
 
 // MessageKind is a type alias (re-export).
@@ -80,7 +80,7 @@ type (
 
 // PromptEndReason is a type; re-export it as a type alias.
 type (
-	PromptEndReason = agentsession.PromptEndReason
+	PromptEndReason = agent.PromptEndReason
 	PromptState     = agentsession.PromptState
 )
 

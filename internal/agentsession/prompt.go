@@ -40,15 +40,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// PromptEndReason is re-exported from `agent.PromptEndReason` so
-// existing references (`Prompt.EndReason`, `PromptEndedEvent.Reason`,
-// `endPrompt(reason PromptEndReason)` callers) compile unchanged
-// after the move. The canonical home is `agent.PromptEndReason` —
-// the leaf `channel.Channel.OnPromptEnded` signature consumes it
-// from there. See `internal/agent/prompt_end_reason.go` for the
-// full vocabulary.
-type PromptEndReason = agent.PromptEndReason
-
 // Prompt represents one merged submission to an AgentSession.
 //
 // One Prompt corresponds to exactly one SendBlocks call on the
@@ -116,9 +107,9 @@ type Prompt struct {
 	EndedAt time.Time
 
 	// EndReason describes why the Prompt ended. Zero value
-	// (`PromptEndClean` is iota=0, so technically non-zero too —
+	// (`agent.PromptEndClean` is iota=0, so technically non-zero too —
 	// callers should test `EndedAt.IsZero()` for "still running").
-	EndReason PromptEndReason
+	EndReason agent.PromptEndReason
 }
 
 // PromptHook is the flush-time callback installed on InputBuffer.
@@ -138,16 +129,3 @@ type Prompt struct {
 // hook itself is responsible for any locking it needs (typically
 // `ChatSession.mu` for the message-stage / currentPrompt writes).
 type PromptHook func(p *Prompt) error
-
-// Constants re-exported from agent so unqualified callers (e.g.
-// `endPrompt(PromptEndError)` in readpump.go) keep compiling.
-// Go has no const alias; these are plain consts pointing at the
-// same underlying values.
-const (
-	PromptEndClean        = agent.PromptEndClean
-	PromptEndError        = agent.PromptEndError
-	PromptEndProcessDied  = agent.PromptEndProcessDied
-	PromptEndStalledKilled = agent.PromptEndStalledKilled
-	PromptEndUserKilled   = agent.PromptEndUserKilled
-	PromptEndUserStopped  = agent.PromptEndUserStopped
-)

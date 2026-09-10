@@ -394,6 +394,7 @@ func (s HeartbeatSnapshot) Empty() bool {
 	}
 	return s.ThinkCount == 0 && s.ToolCount == 0 && s.LastBeatAt.IsZero()
 }
+
 // Emitter is the canonical "send an outbound message" interface
 // every chat session / runtime handler / one-shot sink talks to.
 // The default implementation lives in internal/gateway/outbound

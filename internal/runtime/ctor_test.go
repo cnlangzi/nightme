@@ -353,7 +353,7 @@ func TestPromptEndBus_ForwardsReasonToChannel(t *testing.T) {
 	cs.PromptEndBus.Publish(agentsession.PromptEndedEvent{
 		ChatID:    cs.ChatID,
 		UserMsgID: "om_err_test",
-		Reason:    agentsession.PromptEndError,
+		Reason:    agent.PromptEndError,
 	})
 
 	if len(stub.record) != 1 {
@@ -361,6 +361,6 @@ func TestPromptEndBus_ForwardsReasonToChannel(t *testing.T) {
 	}
 	if stub.record[0] != "oc_prompt_reason|om_err_test|error" {
 		t.Errorf("OnPromptEnded args = %q, want %q",
-	 stub.record[0], "oc_prompt_reason|om_err_test|error")
+			stub.record[0], "oc_prompt_reason|om_err_test|error")
 	}
 }

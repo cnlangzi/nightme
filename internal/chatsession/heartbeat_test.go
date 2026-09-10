@@ -528,11 +528,11 @@ func TestMarkTerminal_HeartbeatError(t *testing.T) {
 	// MarkTerminal must NOT touch counters / LastBeatAt
 	if after.ThinkCount != before.ThinkCount {
 		t.Fatalf("ThinkCount clobbered: before=%d after=%d",
-	 before.ThinkCount, after.ThinkCount)
+			before.ThinkCount, after.ThinkCount)
 	}
 	if !after.LastBeatAt.Equal(before.LastBeatAt) {
 		t.Fatalf("LastBeatAt clobbered: before=%v after=%v",
-	 before.LastBeatAt, after.LastBeatAt)
+			before.LastBeatAt, after.LastBeatAt)
 	}
 }
 

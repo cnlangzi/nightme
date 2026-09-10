@@ -175,9 +175,13 @@ func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResp
 	}
 
 	envelope := clientRequest{
-		Type:    "client-request",
-		RPCID:   rpcID,
-		Method:  method,
+		Type:  "client-request",
+		RPCID: rpcID,
+		// Method in the envelope must match the URL path the
+		// gateway routes on — dots are rejected with 'method
+		// does not match endpoint' (verified 2026-09-10 against
+		// dsh 0.1.2-rc.1). Convert before sending.
+		Method:  methodDotsToSlashes(method),
 		Payload: wrapped,
 	}
 	body, err := json.Marshal(envelope)

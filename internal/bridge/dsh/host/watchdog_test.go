@@ -1,9 +1,21 @@
 // watchdog_test.go — tests for the SharedHost watchdog / respawn cycle.
 //
-// Uses a tiny bash "fake dsh" subprocess that prints the URL line
-// and then either dies fast (simulating crash) or sleeps (so we can
-// observe the respawned instance). Tests do NOT depend on the real
-// dsh binary on PATH.
+// Uses a python "fake dsh" subprocess that binds the TCP port
+// (so spawnAndWire's waitForListen succeeds), prints the URL
+// line, writes its PID to FAKE_DSH_PIDFILE, and either dies
+// fast (simulating crash) or sleeps (so we can observe the
+// respawned instance). Tests do NOT depend on the real dsh
+// binary on PATH.
+//
+// The fake is a SINGLE python process — earlier attempts at a
+// bash + background-python split had env-var-order races and
+// parent-death-poll windows where the python listener could
+// be killed before waitForListen saw the bind. A single python
+// process that binds, prints, writes PID, then sleeps for
+// LIFETIME is deterministic: by the time spawnAndWire's
+// waitForListen polls, the port is already bound, and the
+// process exits cleanly (close socket → port freed) when the
+// sleep elapses.
 //
 // Build tag: the watchdog is only useful on unix where dsh runs;
 // windows is skipped via build tag.
@@ -24,48 +36,63 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
 
-const fakeDSHScript = `#!/bin/bash
-PORT="3080"
-# If the test wants to see the argv, write it BEFORE we touch
-# stdout (parent closes stdout pipe as soon as it parses the URL
-# line below, so any post-URL stdout write would EPIPE).
-if [[ -n "$FAKE_DSH_ARGVFILE" ]]; then
-    printf '%s\n' "$0 $*" > "$FAKE_DSH_ARGVFILE"
-fi
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --port) PORT="$2"; shift 2;;
-        *) shift;;
-    esac
-done
-echo "dsh web: http://127.0.0.1:${PORT}"
-# Write PID to FAKE_DSH_PIDFILE via direct redirect — the parent
-# closes our stdout pipe as soon as it parses the URL line above,
-# so any subsequent echo to stdout would EPIPE. printf to file
-# bypasses stdout entirely.
-if [[ -n "$FAKE_DSH_PIDFILE" ]]; then
-    printf '%d' "$$" > "$FAKE_DSH_PIDFILE"
-fi
-LIFETIME="${FAKE_DSH_LIFETIME:-0.05}"
-sleep "$LIFETIME"
-exit 1
+// fakeDSHScript is a python3 script that mimics the minimum
+// surface of `dsh --profile web` that spawnAndWire observes:
+//   - binds TCP on the --port we ask for (so waitForListen succeeds)
+//   - prints the URL line on stdout (legacy contract; production
+//     code no longer parses it but we keep emitting for tests
+//     that may still inspect stdout)
+//   - writes PID to FAKE_DSH_PIDFILE so tests can synchronize
+//     on the process lifecycle
+//   - sleeps FAKE_DSH_LIFETIME (default 0.05s), then exits 1
+//
+// LIFETIME=0.05 is intentionally tiny: tests run in sequence
+// and each test's spawn needs the port to be free when it
+// starts. A short lifetime + clean socket close on exit
+// guarantees the port is freed within milliseconds of the
+// script returning.
+const fakeDSHScript = `#!/usr/bin/env python3
+import sys, os, time, socket
+
+port = 3080
+i = 1
+while i < len(sys.argv):
+    a = sys.argv[i]
+    if a == "--port" and i + 1 < len(sys.argv):
+        port = int(sys.argv[i + 1])
+        i += 2
+    else:
+        i += 1
+
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', port))
+s.listen(5)
+
+print("dsh web: http://127.0.0.1:" + str(port))
+sys.stdout.flush()
+
+pidfile = os.environ.get('FAKE_DSH_PIDFILE')
+if pidfile:
+    with open(pidfile, 'w') as f:
+        f.write(str(os.getpid()))
+
+lifetime = float(os.environ.get('FAKE_DSH_LIFETIME', '0.05'))
+time.sleep(lifetime)
+s.close()
+sys.exit(1)
 `
 
-// writeFakeDSH drops the bash script into t.TempDir() and chmods it.
+// writeFakeDSH drops the python script into t.TempDir() and chmods it.
 func writeFakeDSH(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fake-dsh.sh")
+	path := filepath.Join(dir, "fake-dsh.py")
 	if err := os.WriteFile(path, []byte(fakeDSHScript), 0o755); err != nil {
 		t.Fatalf("write fake dsh: %v", err)
 	}
 	return path
 }
-
-// findFreePort is reserved for future tests that need to dial the
-// fake-dsh. Currently unused; the bash script just echoes whatever
-// port it was given and exits, so no kernel port binding is needed.
-var findFreePort = func() {} //nolint:unused // documentation stub
 
 // waitPIDFile polls path until it contains a positive integer, or
 // returns 0 on timeout.
@@ -105,7 +132,7 @@ func killFakeDSH(t *testing.T, sh *host.SharedHost) {
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		// Already gone (ESRCH); nothing to do.
+		// Already gone (ESR); nothing to do.
 		return
 	}
 	_ = proc.Signal(os.Kill)
@@ -130,7 +157,7 @@ func killFakeDSH(t *testing.T, sh *host.SharedHost) {
 }
 
 // TestSharedHost_WatchdogRespawns verifies the watchdog observes a
-// fake-dsh crash and spawns a replacement. The bash script writes
+// fake-dsh crash and spawns a replacement. The python script writes
 // its PID to FAKE_DSH_PIDFILE on startup; we observe the file
 // changing (different PID) as proof of respawn.
 //
@@ -197,23 +224,11 @@ func TestSharedHost_WatchdogRespawns(t *testing.T) {
 	killFakeDSH(t, sh)
 }
 
-// TestSharedHost_GracefulCloseStopsWatchdog verifies that Close()
-// prevents the watchdog from respawning even when the dsh subprocess
-// is still alive at close-time. Without this guarantee a Close
-// could race with a respawn and leave an orphaned subprocess.
-// ─── pure-unit backoff check ──────────────────────────────────────
-
 // TestRespawnDelay_Bounded verifies respawnDelay returns a value
 // within the documented bounds. We test via behavior (the
 // constant is unexported), checking that an obviously huge attempt
 // index clamps to the max.
 func TestRespawnDelay_Bounded(t *testing.T) {
-	// We can't call respawnDelay directly (unexported). Instead,
-	// assert via the watchdog's behavior: when StartSharedHost is
-	// given a fake-dsh that always fails, the watchdog should exit
-	// within ~maxRespawnAttempts × respawnBackoffMax (a few minutes).
-	// We don't actually wait that long; we just verify the bounds
-	// are reasonable. This test is a placeholder for documentation.
 	t.Skip("respawnDelay is unexported; bounded via direct testing of the watchdog which is slow")
 }
 

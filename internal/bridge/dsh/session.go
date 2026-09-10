@@ -942,8 +942,13 @@ func (d *driver) Reset(ctx context.Context) error {
 // should add a new method (e.g. ListSessionsPage) rather than
 // reusing this one.
 func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
+	// args wrapper key is "_request" (underscore prefix), per
+	// dsh 0.1.2-rc.1 typert descriptor (verified 2026-09-10).
+	// session/list is the odd one out — every other session.*
+	// endpoint uses "request". Using the wrong key returns
+	// result.ok=false with 'missing "_request"; unexpected "request"'.
 	resp, err := d.cli.RPC.Post(ctx, "session.list", map[string]any{
-		"request": map[string]any{},
+		"_request": map[string]any{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dsh: session.list: %w", err)

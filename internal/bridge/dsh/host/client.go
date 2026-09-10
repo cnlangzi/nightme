@@ -128,6 +128,18 @@ func NewRPCClient(baseURL string) *RPCClient {
 	}
 }
 
+// NewRPCClientWithHTTP is the test-friendly variant: callers
+// supply their own *http.Client (typically with a cookie jar +
+// redirect handler wired in). Used by the wire_e2e_test.go
+// harness to thread the dsh-auth cookie obtained from the
+// dashboard warm-up through every RPC. Production code uses
+// NewRPCClient — this variant exists so e2e probes don't have
+// to mock the auth dance.
+func NewRPCClientWithHTTP(baseURL string, http *http.Client) *RPCClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	return &RPCClient{baseURL: baseURL, http: http}
+}
+
 // BaseURL returns the root URL the client POSTs against. Useful for
 // tests + observability.
 func (c *RPCClient) BaseURL() string {
@@ -307,9 +319,17 @@ type SessionSummary struct {
 
 // SessionList queries /api/session.list. Used by Phase 4 restart-
 // recovery: match persisted sessionIds against current server state.
+//
+// The args wrapper key is "_request" (underscore prefix), not
+// "request" — dsh 0.1.2-rc.1's session/list endpoint names the
+// typed payload "_request" in the typert descriptor (verified
+// 2026-09-10). Other session.* endpoints use "request". Verified
+// empirically against the running gateway: returning the wrong key
+// produces result.ok=false with 'missing "_request"; unexpected
+// "request"'.
 func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 	resp, err := c.Post(ctx, "session.list", map[string]any{
-		"request": map[string]any{},
+		"_request": map[string]any{},
 	})
 	if err != nil {
 		return nil, err
@@ -333,28 +353,6 @@ type SessionCreateOpts struct {
 	CWD         string `json:"cwd,omitempty"`
 	SessionID   string `json:"sessionId,omitempty"` // preallocate id
 	AgentPreset string `json:"agentPreset,omitempty"`
-}
-
-// WorkspaceList queries /api/workspace.list. Used by EnsureWorkspace
-// to dedupe: rather than blindly create a new workspace, we look
-// up an existing one with the same path and reuse it.
-func (c *RPCClient) WorkspaceList(ctx context.Context) ([]WorkspaceSummary, error) {
-	resp, err := c.Post(ctx, "workspace.list", map[string]any{
-		"request": map[string]any{},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !resp.Result.OK {
-		return nil, fmt.Errorf("dsh.host: workspace.list: %s", resp.Result.ErrorMessage())
-	}
-	var value struct {
-		Items []WorkspaceSummary `json:"items"`
-	}
-	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
-		return nil, fmt.Errorf("dsh.host: workspace.list decode: %w", err)
-	}
-	return value.Items, nil
 }
 
 // WorkspaceSummary is the on-wire shape of one workspace.list row
@@ -501,9 +499,19 @@ type PromptPart struct {
 // SessionPrompt invokes /api/session.prompt. `mode` MUST be
 // "queue" or "steer" (dsh-api.md §2.1.9 — omitting it returns
 // bad-request: invalid input: expected "queue").
+//
+// The requestId field is REQUIRED by dsh 0.1.2-rc.1's typert
+// descriptor (verified 2026-09-10) — it's a client-minted identity
+// the server persists on the exact accepted user message so it can
+// dedupe retries / reconcile the wire-side request with the
+// in-session message. Without it the gateway rejects with
+// 'gateway/input-invalid: wire field "request" failed boundary
+// validation'. Same recipe as newRPCID() in Post — crypto/rand +
+// RFC 4122 §4.4. clientTimeZone is optional and we don't set it.
 func (c *RPCClient) SessionPrompt(ctx context.Context, sessionID, mode string, parts []PromptPart) error {
 	resp, err := c.Post(ctx, "session.prompt", map[string]any{
 		"request": map[string]any{
+			"requestId": newRPCID(),
 			"sessionId": sessionID,
 			"mode":      mode,
 			"content":   parts,

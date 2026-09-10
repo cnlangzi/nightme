@@ -121,7 +121,7 @@ type RPCClient struct {
 // "http://127.0.0.1:3080"). The trailing slash, if any, is dropped
 // because URL joining adds one (matches dsh/http.go newHTTPClient).
 func NewRPCClient(baseURL string) *RPCClient {
-	baseURL = strings.TrimRight(baseURL, "/")
+	baseURL = sanitizeBaseURL(baseURL)
 	return &RPCClient{
 		baseURL: baseURL,
 		http:    httpclient.DefaultWithTimeout(httpClientTimeout),
@@ -136,7 +136,7 @@ func NewRPCClient(baseURL string) *RPCClient {
 // NewRPCClient — this variant exists so e2e probes don't have
 // to mock the auth dance.
 func NewRPCClientWithHTTP(baseURL string, http *http.Client) *RPCClient {
-	baseURL = strings.TrimRight(baseURL, "/")
+	baseURL = sanitizeBaseURL(baseURL)
 	return &RPCClient{baseURL: baseURL, http: http}
 }
 
@@ -659,6 +659,32 @@ func truncate(s string, n int) string {
 // path segment dsh web's gateway expects (e.g. "session/create").
 func methodDotsToSlashes(method string) string {
 	return strings.ReplaceAll(method, ".", "/")
+}
+
+// sanitizeBaseURL strips trailing slashes AND any trailing/embedded
+// quote characters (", ') that would otherwise break the URL
+// parser and surface as %22 / %27 in the dial path. Real callers
+// never pass these; this is a belt-and-suspenders guard against
+// config-file typos. The literal values "" and "" are stripped
+// from the END only — embedded quotes in the middle of the URL
+// (e.g. "http://example.com/path") are left alone because they
+// can't happen in our config schema and stripping them would mask
+// a real bug.
+func sanitizeBaseURL(raw string) string {
+	// Strip trailing quote characters FIRST so the slash strip
+	// sees "http://x:8080" instead of "http://x:8080/" — the order
+	// matters because TrimRight("/") on a quote-suffixed URL would
+	// otherwise leave the slash and surface as %22 in the dial path.
+	for len(raw) > 0 {
+		last := raw[len(raw)-1]
+		if last == '"' || last == '\'' {
+			raw = raw[:len(raw)-1]
+			continue
+		}
+		break
+	}
+	// Then strip any trailing slashes (the canonical-clean form).
+	return strings.TrimRight(raw, "/")
 }
 
 // wrapArgs wraps the JSON-marshaled args under the typert

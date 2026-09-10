@@ -239,3 +239,43 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// ─── sanitizeBaseURL (defense-in-depth for trailing quotes) ───
+
+// TestSanitizeBaseURL_StripsTrailingQuote covers the defense for
+// the `.../api/workspace/create%22` regression where a baseURL
+// with a stray trailing `"` (typo from a config file or shell
+// quote mishandling) gets URL-encoded into the dial path and the
+// connection fails with the trailing quote glued to the endpoint.
+//
+// In production code baseURL is always constructed in-tree
+// (lifecycle.go formats "http://127.0.0.1:%d"), so this is a
+// belt-and-suspenders defense — but the regression was observable
+// from older binaries in the wild, so we lock the behavior down
+// with a unit test here.
+func TestSanitizeBaseURL_StripsTrailingQuote(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		// The actual regression input that produced %22:
+		{`http://127.0.0.1:3080"`, "http://127.0.0.1:3080"},
+		// Already-clean URL passes through unchanged.
+		{"http://127.0.0.1:3080", "http://127.0.0.1:3080"},
+		// Trailing slash is stripped (unchanged behavior).
+		{"http://127.0.0.1:3080/", "http://127.0.0.1:3080"},
+		// Token-bearing URL keeps the token, strips trailing quote.
+		{`http://127.0.0.1:3080/?token=abc"`, "http://127.0.0.1:3080/?token=abc"},
+		// Single-quote form (shell quote mishap).
+		{"http://127.0.0.1:3080'", "http://127.0.0.1:3080"},
+		// Multiple trailing quotes (defensive — shouldn't happen).
+		{`http://127.0.0.1:3080""`, "http://127.0.0.1:3080"},
+		// Mixed trailing slash + quote.
+		{`http://127.0.0.1:3080/"`, "http://127.0.0.1:3080"},
+	}
+	for _, c := range cases {
+		got := sanitizeBaseURL(c.in)
+		if got != c.want {
+			t.Errorf("sanitizeBaseURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

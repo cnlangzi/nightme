@@ -225,40 +225,21 @@ func NewEventHandler(
 		// OutHeartbeat 是观测结果经 em.Send 二次产出,不会进入
 		// Observe 路径,所以也不会自递归。
 		if userMsgID != "" && cs != nil && cs.Heartbeat() != nil {
-			if cs.Heartbeat().Observe(userMsgID, out.Kind) {
+			// Observe is the single choke point for both
+			// counting (OutThinking / OutToolStart) and terminal
+			// flip (OutResult → Done/Error by msg.Err). The
+			// follow-up emit fires whenever something visible
+			// changed — counter bump OR status transition — so
+			// the receipt PATCHes its header to ✅ / ❌ on the
+			// OutResult branch and to 💭 N · 🔧 M · ⏱ HH:MM:SS
+			// during counting activity. Ordering invariant
+			// (F-63 §3.2): Observe runs BEFORE the policy chain,
+			// so /think off / /tools off gates below can never
+			// suppress the counter increment. See heartbeat.go
+			// Observe doc for the per-kind action table.
+			if cs.Heartbeat().Observe(userMsgID, out) {
 				sendHeartbeatFollowUp(em, logger, chatID, userMsgID,
 					"observe:"+out.Kind.String(), cs.Heartbeat().Snapshot(userMsgID))
-			}
-		}
-
-		// OutResult is the agent's terminal payload for this turn.
-		// Flip the heartbeat snapshot's Done flag so the receipt
-		// header can prepend "✅" — the same lifecycle transition
-		// that the OnPromptEnded eventbus subscriber also fires.
-		// OnPromptEnded covers turns that exit without an
-		// OutResult (bridge crash, error path); this branch
-		// covers the happy path. The Done flip is idempotent
-		// across the two trigger sites — the second MarkDone
-		// call returns false and no duplicate OutHeartbeat is
-		// emitted.
-		//
-		// Runs after the Observe block so any preceding
-		// OutThinking / OutToolStart for this userMsgID has
-		// already incremented the snapshot's counters —
-		// MarkDone then flips Done on the same snapshot. The
-		// renderer reads both dimensions off one snapshot, so
-		// this order matters for the painted card.
-		//
-		// Ordering assumption (latent bug bait): no policy
-		// registered above this block can short-circuit on
-		// OutResult, because the tracker flip is irreversible.
-		// Today ThinkMode / ToolsMode gates do not fire on
-		// OutResult so this holds; future policies that match
-		// OutResult must be installed AFTER this block.
-		if out.Kind == messages.OutResult && userMsgID != "" && cs != nil && cs.Heartbeat() != nil {
-			if cs.Heartbeat().MarkTerminal(userMsgID, messages.HeartbeatDone) {
-				sendHeartbeatFollowUp(em, logger, chatID, userMsgID,
-					"markdone", cs.Heartbeat().Snapshot(userMsgID))
 			}
 		}
 

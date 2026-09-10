@@ -226,22 +226,23 @@ func WireRuntimeCallbacksAndRestore(
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
 			}
-			// Flip the heartbeat snapshot's Status to the verdict
-			// derived from this terminal lifecycle event. Covers
-			// turns that EXIT WITHOUT an OutResult (bridge crash,
-			// error path, shell error early-out): the runtime
-			// handler's OutResult branch doesn't fire on those,
-			// but endPrompt still does. Idempotent with the
-			// OutResult branch's MarkTerminal call — whichever
-			// of the two lands second finds Status already
-			// non-Running and returns false. The two triggers run
-			// on different goroutines (bridge drain vs readpump)
-			// so arrival order is NOT guaranteed; the tracker's
-			// mutex serialises them and the transition check
-			// collapses the race to a single flip.
+			// Flip the heartbeat snapshot's Status via the
+			// single Observe choke point. Covers turns that EXIT
+			// WITHOUT an OutResult (bridge crash, error path,
+			// shell error early-out): the runtime handler's
+			// OutResult branch doesn't fire on those, but
+			// endPrompt still does. Idempotent with the runtime
+			// handler's OutResult Observe call — whichever of
+			// the two lands second finds Status already
+			// non-Running and Observe returns false. The two
+			// triggers run on different goroutines (bridge
+			// drain vs readpump) so arrival order is NOT
+			// guaranteed; the tracker's mutex serialises them
+			// and the transition check collapses the race to a
+			// single flip.
 			//
-			// MarkTerminal fires first so the snapshot's Status
-			// is set before the receipt's next render reads it.
+			// Observe fires first so the snapshot's Status is
+			// set before the receipt's next render reads it.
 			// The OutHeartbeat follow-up and OnPromptEnded's
 			// SetPromptState PATCH both run async through the
 			// gateway; whichever render the gateway serialises
@@ -254,18 +255,19 @@ func WireRuntimeCallbacksAndRestore(
 			// PromptEndProcessDied / PromptEndStalledKilled /
 			// PromptEndUserKilled / PromptEndUserStopped) →
 			// HeartbeatError. The user-initiated kills
-			// (UserKilled / UserStopped) intentionally surface as
-			// ❌ so the user can distinguish a hand-cancelled
+			// (UserKilled / UserStopped) intentionally surface
+			// as ❌ so the user can distinguish a hand-cancelled
 			// turn from a clean completion — the renderer answers
 			// "did this turn complete without my intervention?",
-			// not "is anything wrong?". See agent.PromptEndReason
-			// for the full vocabulary rationale.
-			terminalStatus := messages.HeartbeatDone
-			if e.Reason.IsError() {
-				terminalStatus = messages.HeartbeatError
-			}
+			// not "is anything wrong?". See
+			// agent.PromptEndReason for the full vocabulary
+			// rationale.
 			if hb := cs.Heartbeat(); hb != nil {
-				if hb.MarkTerminal(e.UserMsgID, terminalStatus) {
+				endMsg := messages.OutboundMessage{
+					Kind:            messages.OutPromptEnded,
+					PromptEndReason: &e.Reason,
+				}
+				if hb.Observe(e.UserMsgID, endMsg) {
 					sendHeartbeatFollowUp(em, logger, e.ChatID, e.UserMsgID,
 						"endprompt", hb.Snapshot(e.UserMsgID))
 				}

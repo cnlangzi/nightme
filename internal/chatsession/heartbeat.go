@@ -1,12 +1,17 @@
 // Package chatsession — HeartbeatTracker (F-63).
 //
-// HeartbeatTracker accumulates per-turn progress counters
-// (ThinkCount / ToolCount / LastBeatAt) keyed by userMsgID and
-// exposes a single Observe() choke point that the runtime handler
-// calls before the policy chain. The tracker is the canonical
-// state for "is the agent still making progress during this turn";
-// Feishu adapter (and any future channel) reads it via OutboundMessage
-// snapshots delivered through the OutHeartbeat kind.
+// HeartbeatTracker is the per-turn state machine for "what is the
+// agent doing right now". It accumulates activity counters
+// (ThinkCount / ToolCount / LastBeatAt) and a terminal verdict
+// (Status) keyed by userMsgID. The runtime handler, the GTW
+// sink, and the CS pump's PromptEndBus subscriber all funnel
+// through Observe() — a single choke point that decides whether
+// the event is a counter bump or a terminal flip based on the
+// OutboundMessage kind and payload. The tracker is the canonical
+// state for "is the agent still making progress, and is this
+// turn over yet"; Feishu adapter (and any future channel) reads
+// it via OutboundMessage snapshots delivered through the
+// OutHeartbeat kind.
 //
 // Why this lives in chatsession (not runtime as the F-63 doc first
 // sketched): ChatSession owns the per-chat state and is the only
@@ -46,10 +51,10 @@ import (
 const DefaultHeartbeatCap = 1024
 
 // HeartbeatTracker accumulates per-turn progress counters keyed by
-// userMsgID. The runtime handler calls Observe() on every
-// outbound event (BEFORE the policy chain — see F-63 §3.2 for
-// the core invariant); callers that want to render the current
-// state call Snapshot() to read a copy.
+// userMsgID. Callers route every outbound event through Observe
+// (BEFORE the policy chain — see F-63 §3.2 for the core
+// invariant); callers that want to render the current state call
+// Snapshot() to read a copy.
 //
 // No explicit Drop: when the LRU evicts an entry, the userMsgID
 // simply disappears. Receipts that already hold their own copy of
@@ -78,34 +83,45 @@ func NewHeartbeatTracker(cap int) *HeartbeatTracker {
 	}
 }
 
-// Observe records an outbound event against the given userMsgID
-// and returns whether ThinkCount or ToolCount actually changed.
-// LastBeatAt is always refreshed (it's the "agent is alive"
-// signal), but a refresh-only Observe returns false — callers
-// should skip emitting OutHeartbeat when nothing meaningful
-// changed, since that would just burn a Feishu PATCH for an
-// identical body.
+// Observe is the single choke point for all heartbeat state
+// transitions. The msg.Kind determines the action; the payload
+// (msg.Err, msg.PromptEndReason) drives the verdict when the
+// kind is terminal:
 //
-// Counting rules (intentionally narrow, see F-63 §2 非目标):
+//	OutThinking     → ThinkCount++                      (returns true)
+//	OutToolStart    → ToolCount++                       (returns true)
+//	OutResult       → flipTerminal:
+//	                   msg.Err == nil → HeartbeatDone
+//	                   msg.Err != nil → HeartbeatError  (returns true)
+//	OutPromptEnded  → flipTerminal:
+//	                   msg.PromptEndReason == nil ||
+//	                   !msg.PromptEndReason.IsError()
+//	                   → HeartbeatDone
+//	                   else → HeartbeatError           (returns true)
+//	everything else → refresh LastBeatAt only          (returns false)
 //
-//	OutThinking  → ThinkCount++   (returns true)
-//	OutToolStart → ToolCount++    (returns true)
-//	everything else → only refresh LastBeatAt (returns false)
+// Returns true when anything visible changed (counter or
+// Status). Callers should use this to decide whether to emit a
+// follow-up OutHeartbeat; a refresh-only Observe should NOT
+// produce a redundant PATCH.
 //
-// OutHeartbeat itself is not in the counting switch — but since
-// Observe is only called from the handler with OutboundKinds
-// produced by gateway.Translate on raw AgentEvents, OutHeartbeat
-// never reaches Observe in practice (the handler emits
-// OutHeartbeat via em.Send, not via Observe). Defensive: if it
-// somehow does, the default branch only refreshes LastBeatAt and
-// returns false — no recursion, no double-counting.
+// All terminal flips are idempotent and verdict-agnostic: the
+// second Observe on the same userMsgID with any terminal kind
+// (or a different verdict payload) is a no-op. The first caller
+// wins; racing triggers (e.g. the runtime's OutResult branch
+// racing the CS pump's PromptEndBus subscriber) converge on a
+// single transition.
+//
+// OutHeartbeat itself is not in the kind switch — Observe is
+// only called with OutboundKinds produced by gateway.Translate
+// on raw AgentEvents or by the PromptEndBus subscriber; the
+// runtime emits OutHeartbeat via em.Send, so the kind never
+// recurses. Defensive default branch treats it as a refresh.
 //
 // userMsgID == "" is a no-op (returns false) — protects against
 // orphan events (EventAgentReady, etc.) that don't have a
 // receipt anchor.
-//
-// See MarkTerminal for the lifecycle counterpart.
-func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind) bool {
+func (t *HeartbeatTracker) Observe(userMsgID string, msg messages.OutboundMessage) bool {
 	if t == nil || userMsgID == "" {
 		return false
 	}
@@ -116,83 +132,73 @@ func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind)
 	snap.LastBeatAt = time.Now()
 
 	changed := false
-	switch kind {
+	switch msg.Kind {
 	case messages.OutThinking:
 		snap.ThinkCount++
 		changed = true
 	case messages.OutToolStart:
 		snap.ToolCount++
 		changed = true
+	case messages.OutResult:
+		// Verdict derived from msg.Err: a populated Err signals
+		// the bridge reported an errored result (Claude Code
+		// result.is_error / pi error turn). nil → clean.
+		status := messages.HeartbeatDone
+		if msg.Err != nil {
+			status = messages.HeartbeatError
+		}
+		if t.flipTerminalLocked(&snap, status) {
+			changed = true
+		}
+	case messages.OutPromptEnded:
+		// Verdict derived from msg.PromptEndReason. nil reason
+		// (defensive — production always populates it) and
+		// non-error reasons → Done; IsError() → Error. Mirrors
+		// the previous eventbus.go IsError() collapse.
+		status := messages.HeartbeatDone
+		if msg.PromptEndReason != nil && msg.PromptEndReason.IsError() {
+			status = messages.HeartbeatError
+		}
+		if t.flipTerminalLocked(&snap, status) {
+			changed = true
+		}
 	default:
-		// Touch LRU so this userMsgID stays recent —
-		// refresh-only activity is "recent" too.
-		t.snaps[userMsgID] = snap
-		t.touchLocked(userMsgID)
-		return false
+		// Refresh-only — no counter / no terminal flip. Fall
+		// through to the tail which writes back the
+		// LastBeatAt refresh and touches the LRU so this
+		// userMsgID stays recent for eviction ordering.
 	}
 	t.snaps[userMsgID] = snap
 	t.touchLocked(userMsgID)
 	return changed
 }
 
-// Snapshot returns a copy of the current heartbeat state for
-// userMsgID. Zero-value (no entry) is a valid response — callers
-// should pass the result to the channel adapter which uses
-// HeartbeatSnapshot.Empty() to decide whether to render anything.
+// flipTerminalLocked transitions the snapshot to a terminal
+// verdict. Returns true on the false→true transition (running →
+// terminal, regardless of which terminal), false otherwise
+// (no-op when already terminal). The first caller wins;
+// subsequent calls with a different verdict are still a no-op
+// (the tracker is verdict-agnostic on transition).
 //
-// MarkTerminal transitions the snapshot to a terminal verdict
-// for userMsgID. `status` is the desired post-call verdict —
-// HeartbeatDone for a clean completion, HeartbeatError for any
-// non-clean reason. Returns true on the false→true transition
-// (running → terminal, regardless of which terminal), false
-// otherwise (no-op when already terminal, userMsgID is empty,
-// or t is nil). Idempotent — racing calls converge on a single
-// transition.
-//
-// Idempotency is verdict-agnostic: a second MarkTerminal call
-// with a different status (e.g. the OutResult branch flipping
-// Done before the PromptEndBus subscriber flips Error) is still
-// a no-op once the snapshot is terminal. The first caller wins;
-// that ordering is non-deterministic between the two trigger
-// sites (bridge drain vs readpump) and either outcome is
-// acceptable. The richer endPrompt reason wins when it lands
-// first because the PromptEndBus subscriber runs on the same
-// goroutine as endPrompt, while the handler.go OutResult branch
-// runs on the bridge drain goroutine; in practice endPrompt is
-// the terminal source of truth and arrives last or first
-// depending on bridge.
-//
-// LRU: the false→true path touches the LRU; the idempotent
-// return does NOT. Both Observe and MarkTerminal use the LRU as
-// a "most recently active" signal; for a terminal entry there is
-// no further activity to track, so a racing second MarkTerminal
-// can safely skip the touch. The entry will still be evicted
-// under normal LRU pressure once its age dominates other
-// entries — and by that point the terminal ✅ / ❌ has already
-// PATCHed to the receipt via the first MarkTerminal's
-// OutHeartbeat follow-up.
-//
-// MarkTerminal deliberately does NOT touch ThinkCount / ToolCount
-// / LastBeatAt — the renderer paints those independently from
-// Status, so re-writing them here would either race the last
-// Observe or duplicate the ⏱ chip.
-func (t *HeartbeatTracker) MarkTerminal(userMsgID string, status messages.HeartbeatStatus) bool {
-	if t == nil || userMsgID == "" {
-		return false
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	snap := t.snaps[userMsgID]
+// Caller must hold t.mu. Does NOT touch the LRU — the
+// caller's Observe tail handles LRU unconditionally so terminal
+// and non-terminal paths share one touch point (no double-touch
+// on transitions). Does NOT touch ThinkCount / ToolCount /
+// LastBeatAt for the same reason; those live in Observe. Caller
+// writes the modified snap back via t.snaps[userMsgID] = snap
+// after this returns.
+func (t *HeartbeatTracker) flipTerminalLocked(snap *messages.HeartbeatSnapshot, status messages.HeartbeatStatus) bool {
 	if snap.Status != messages.HeartbeatRunning {
 		return false
 	}
 	snap.Status = status
-	t.snaps[userMsgID] = snap
-	t.touchLocked(userMsgID)
 	return true
 }
 
+// Snapshot returns a copy of the current heartbeat state for
+// userMsgID. Zero-value (no entry) is a valid response — callers
+// should pass the result to the channel adapter which uses
+// HeartbeatSnapshot.Empty() to decide whether to render anything.
 func (t *HeartbeatTracker) Snapshot(userMsgID string) messages.HeartbeatSnapshot {
 	if t == nil {
 		return messages.HeartbeatSnapshot{}

@@ -282,11 +282,18 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 	}
 
 	// Wait for drain — we expect 6 translated messages + at
-	// least 3 OutHeartbeat follow-ups (one per counter change:
-	// ToolStart, OutThinking, ToolStart). Counter increments
-	// happen BEFORE the policy gate, so even if a future change
-	// hides a kind, the heartbeat counter would still track it.
-	want := 9
+	// least 4 OutHeartbeat follow-ups (3 counter changes:
+	// ToolStart, OutThinking, ToolStart; plus 1 terminal flip
+	// from OutResult at the end of the agent run). Counter
+	// increments AND terminal flips happen BEFORE the policy
+	// gate via the consolidated Observe chokepoint, so even
+	// when a future change hides a kind the heartbeat would
+	// still track it AND flip to Done/Error on the terminal
+	// event. The terminal OutHeartbeat is what makes the GTW
+	// receipt's ⏱ header PATCH to ✅ on turn end — without
+	// it the heartbeat line would stay "🤖 Working" past the
+	// actual finish.
+	want := 10
 	if !ch.waitForSent(want, 2*time.Second) {
 		t.Fatalf("emitter never received %d messages; got %d sent",
 			want, len(ch.snapshot()))
@@ -304,15 +311,20 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 	if snap.LastBeatAt.IsZero() {
 		t.Errorf("LastBeatAt must be refreshed even on non-counter events")
 	}
+	// Terminal flip from OutResult must land on the snapshot.
+	if snap.Status == messages.HeartbeatRunning {
+		t.Errorf("Status = Running, want Done (OutResult must flip terminal)")
+	}
 
 	// Exactly 3 counter changes (ToolStart, OutThinking, ToolStart)
-	// → Observe returns true 3 times → dispatchSinkEvent fires
-	// OutHeartbeat exactly 3 times. Pin the exact count so a
-	// future regression that drops the follow-up emit (or
-	// double-counts) is caught immediately.
+	// + 1 terminal flip from OutResult → Observe returns true 4
+	// times → dispatchSinkEvent fires OutHeartbeat exactly 4
+	// times. Pin the exact count so a future regression that
+	// drops the follow-up emit (or double-counts) is caught
+	// immediately.
 	hbs := ch.heartbeatMsgs()
-	if len(hbs) != 3 {
-		t.Fatalf("OutHeartbeat count = %d, want 3 (one per counter change); sent=%+v",
+	if len(hbs) != 4 {
+		t.Fatalf("OutHeartbeat count = %d, want 4 (3 counter changes + 1 OutResult flip); sent=%+v",
 			len(hbs), ch.snapshot())
 	}
 	for i, hb := range hbs {
@@ -503,11 +515,29 @@ func TestRunAgentFor_NoDropPreservesOutResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runAgentFor: %v", err)
 	}
-	if !ch.waitForSent(1, 2*time.Second) {
-		t.Fatalf("emitter never received 1 message; got %d", len(ch.snapshot()))
+	// The sink no longer drops the terminal OutResult — without
+	// dropKinds the OutResult reaches the channel. The
+	// consolidated Observe fires a terminal OutHeartbeat
+	// follow-up BEFORE the drop check, so the captured stream
+	// carries both: 1 terminal OutHeartbeat (Observe flips
+	// Status → Done) + 1 OutResult. Wait for both.
+	if !ch.waitForSent(2, 2*time.Second) {
+		t.Fatalf("emitter never received 2 messages; got %d", len(ch.snapshot()))
 	}
 	got := ch.snapshot()
-	if len(got) != 1 || got[0].Kind != messages.OutResult {
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want 2 (terminal OutHeartbeat + OutResult): %+v",
+			len(got), got)
+	}
+	// First message is the terminal OutHeartbeat (Status flipped).
+	if got[0].Kind != messages.OutHeartbeat {
+		t.Fatalf("got[0].Kind = %v, want OutHeartbeat (terminal flip)", got[0].Kind)
+	}
+	if got[0].Heartbeat == nil || got[0].Heartbeat.Status == messages.HeartbeatRunning {
+		t.Fatalf("got[0] terminal heartbeat must carry non-Running Status, got %+v", got[0].Heartbeat)
+	}
+	// Second is the OutResult itself.
+	if got[1].Kind != messages.OutResult {
 		t.Fatalf("got %+v, want exactly one OutResult", got)
 	}
 }

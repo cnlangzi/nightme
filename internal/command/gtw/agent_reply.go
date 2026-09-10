@@ -133,7 +133,7 @@ func runAgentFor(
 	// of truth in outbound.StreamRunOnceToEmitter / dispatchSinkEvent,
 	// which in turn drives:
 	//   1. Translate (AgentEvent → OutboundMessage)
-	//   2. cs.Heartbeat().Observe(replyTo, out.Kind) — ThinkCount /
+	//   2. cs.Heartbeat().Observe(replyTo, out) — ThinkCount /
 	//      ToolCount increment BEFORE the policy gate (so /think
 	//      off / /tools off still surface real activity)
 	//   3. Auto-emit OutHeartbeat when counters change

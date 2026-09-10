@@ -486,12 +486,12 @@ func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error 
 // does not gate the render).
 //
 // Terminal Done: the changed check ALSO covers the snapshot's
-// Done flag (false→true). MarkDone on the tracker is the source
+// Done flag (false→true). The terminal flip happens inside HeartbeatTracker.Observe when it processes an OutResult / OutPromptEnded — Observe is the source
 // of the transition — ApplyHeartbeat just observes it. The
 // flip counts as a changed event and the rendered card picks
 // up the "✅" prefix via renderHeartbeatHeader's Done branch.
 // true→true is NOT a changed event (idempotency matches
-// MarkDone's transition semantics).
+// Observe's flipTerminalLocked transition semantics).
 //
 // Throttle: heartbeatMinInterval caps thinking-only PATCH rate.
 // ToolCount increases always PATCH immediately — a second Read
@@ -535,10 +535,10 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
 	//
 	// Done flips bypass the thinking throttle — the terminal
 	// "✅" prefix must paint promptly even inside a dense
-	// thinking-stream window. The MarkDone transition is
-	// idempotent at the source (HeartbeatTracker.MarkDone
-	// returns false on the second call), so this is at most
-	// one extra PATCH per turn.
+	// thinking-stream window. The terminal transition is
+	// idempotent at the source (HeartbeatTracker.Observe's
+	// internal flipTerminalLocked returns false on the second
+	// call), so this is at most one extra PATCH per turn.
 	if !toolChanged && r.heartbeatMinInterval > 0 &&
 		!doneChanged &&
 		!r.lastBodyPatch.IsZero() &&

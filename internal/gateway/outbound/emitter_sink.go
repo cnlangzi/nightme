@@ -229,10 +229,20 @@ func dispatchSinkEvent(
 			ChatID:    chatID,
 			UserMsgID: replyTo,
 		}
-		// 1. Observe FIRST — heartbeat counter increments even when
-		//    the policy gate below drops the message.
+		// 1. Observe FIRST — heartbeat counter increments AND
+		//    terminal verdict (OutResult → Done/Error by msg.Err)
+		//    flip happen in the same choke point. Critical for
+		//    /gtw commit / /gtw pr: those dispatchers drop
+		//    OutResult later in this function (caller opted out
+		//    via dropKinds so the dispatcher's own success card
+		//    isn't shadowed), but the terminal OutHeartbeat
+		//    follow-up emit fires here, BEFORE the drop check —
+		//    so the receipt's ⏱ / 💭 N · 🔧 M header still
+		//    PATCHes to ✅ Done on turn end. Without this the
+		//    GTW receipt would stay "🤖 Working" past the
+		//    actual finish.
 		if hb := cs.Heartbeat(); hb != nil && replyTo != "" {
-			if hb.Observe(replyTo, out.Kind) {
+			if hb.Observe(replyTo, out) {
 				snap := hb.Snapshot(replyTo)
 				if !snap.Empty() {
 					_ = em.Send(ctx, messages.OutboundMessage{

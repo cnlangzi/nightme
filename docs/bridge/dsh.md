@@ -51,9 +51,10 @@ pnpm dsh --profile headless "<task>"      # 单 turn print-mode,plain stdout
 ```
 dsh --profile web
 ```
-- **不带 `--port` flag** — 让 dsh 用自己的默认端口 **3080**(`host/discover.go:36` 的 `defaultDSHPort`)
-- **绝对不使用** `--port 0`(OS 随机端口):实机验证 dsh 不接受 0 + 会随机到奇怪端口,与 "reuse-or-spawn" 契约冲突(详见 `host/lifecycle.go:246-278`);`lifecycle.go:262-278` 还会**硬断言**端口必须是 3080,否则 kill spawn 并报清晰错误
-- stdout 第一行 `dsh web: http://127.0.0.1:3080`,正则提取 `<host>:<port>`;bridge 还要再校验端口 == 3080,不一致就 refuse
+- **显式传 `--port 3080`** — nightme 锁定端口,不依赖 dsh 默认值(2026-09-10 改;避免 dsh 默认端口漂移时 bridge 静默失联)
+- **绝对不使用** `--port 0`(OS 随机端口):实机验证 dsh 不接受 0 + 会随机到奇怪端口,与 "reuse-or-spawn" 契约冲突;详细 fallback 见 §1.3.1
+- **3080 被占且不是 dsh**:扫描 `3081..3099`(20 个候选端口)找第一个可用;`findFreePort` 用 `net.Listen` 测试,扫不到 → 报清晰错误"no free port in range 3080-3099"
+- **Readiness 判定**:TCP-poll `waitForListen(ctx, 3080)`,每 50ms 拨号一次,直到 TCP accept;不再解析 stdout URL(2016-09-10 改,避免 dsh stdout 格式漂移时 race);`cli.Start` 紧跟着做 HTTP 握手,捕获 kernel-accept-queue vs app-Accept race
 
 #### 1.3.2 HTTP RPC
 ```
@@ -99,8 +100,38 @@ Response:
 | `session.fork` | `{sessionId}` | 从现有 session 开新(daemon 重启续接用)|
 | `session.history` | `{sessionId, sinceSeq}` | 拉历史 event log |
 | `session.models` | `{sessionId}` | 查可用 model |
-| `host.describe` | `{}` | host metadata |
 | `respond` | `{rpcId, payload}` | **服务端推送帧的回环**(approval / question answers) |
+
+**未列入主流程的 RPC**:`agentPresets/list`(`{args:{}}`)返回 dsh 的 preset taxonomy(`standard/ptc/minimal/cordis`,每个 `trust:"system"`)。**0.1.2-rc.1 实机未提供 `host.describe`**,nightme 不再依赖该 RPC 做存在性探测(详见 §1.3.5)。
+
+#### 1.3.5 服务身份探测(2026-09-10 实测锁定)
+
+nightme 在 spawn 之前先 `DiscoverExisting(3080)`:TCP dial 3080,如果通就请求 **`GET /manifest.webmanifest`** 做服务身份确认。这一路径取代了旧版依赖 `POST /api/host.describe` 的 RPC 探针(后者在 dsh 0.1.2-rc.1 已 404)。
+
+```
+GET /manifest.webmanifest
+Accept: */*
+Cookie: (无 — 该 endpoint 不需 auth)
+→ 期望:
+  HTTP/1.1 200
+  Content-Type: application/manifest+json
+  {
+    "name":      "DeepSeek Harness",
+    "short_name": "DSH",
+    "start_url": "/",
+    ...
+  }
+```
+
+**指纹断言**(任一不满足即 `ErrNotDSH`):
+1. HTTP 200
+2. `Content-Type: application/manifest+json`
+3. JSON `name == "DeepSeek Harness"`(dsh-专属)
+4. JSON `short_name == "DSH"`(二次校验)
+
+**为什么不沿用 RPC 探针**:`host.describe` 在 0.1.2-rc.1 实测 404;`/api/version` / `/api/health` / `/healthz` 全部不存在;`agentPresets/list` 是唯一稳定的 RPC,但需 dsh-auth cookie(attach 到用户已经在浏览器开的 dsh 时拿不到 token)。`manifest.webmanifest` 是静态资源、unauth、dsh 启动即可用、含 dsh-专属字符串 — 实测验证这是当前唯一干净的 fingerprint 路径。
+
+**反例验证**:起一个 Python `http.server` 返回 `{"name":"Generic PWA",...}`,该 endpoint 200 + application/manifest+json 通过,但 `name != "DeepSeek Harness"` → 探针正确拒绝。
 
 #### 1.3.3 WebSocket 下行(2 条独立流)
 
@@ -314,8 +345,8 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
         return nil, fmt.Errorf("dsh: workspace is required")
     }
     
-    // ★ 不传 --port:让 dsh 用自己的默认 3080;lifecycle.go:262-278
-    //   会硬断言端口必须是 3080,否则 refuse spawn。
+    // ★ 显式传 --port 3080:nightme 锁定端口,不依赖 dsh 默认值。
+    //   3080 被占且不是 dsh → fallback 到 3081-3099(lifecycle.go:240+)。
     cmd := proc.New(ctx, "dsh", "--profile", "web")
     cmd.Dir = cfg.Workspace
     cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
@@ -328,7 +359,9 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
     if err := cmd.Start(); err != nil { return nil, fmt.Errorf("dsh: start: %w", err) }
     
     // Parse "dsh web: http://127.0.0.1:PORT\n" from stdout
-    url, err := parseWebURL(ctx, stdout, 5*time.Second)
+    // url extraction removed (2026-09-10): we know host (127.0.0.1)
+    //   and port (the --port flag we passed). waitForListen polls TCP
+    //   readiness instead of parsing stdout.
     if err != nil {
         _ = cmd.Process.Kill()
         _ = cmd.Wait()
@@ -658,7 +691,7 @@ func (d *driver) Close() error {
 ## 5. lifecycle 时间线(每 turn)
 
 ```
-t0   cmd.Start ──→ spawn dsh --profile web(默认 port 3080,不带 --port flag)
+t0   cmd.Start ──→ spawn dsh --profile web --port 3080 (显式锁端口)
                 ├── readPump goroutine (mux)
                 ├── readPump goroutine (host)
                 ├── drainStderr goroutine
@@ -744,9 +777,9 @@ t12  AgentSession.SetExited(0)
 **影响**:zero-config 接入,nightme 不注入任何 model/provider/credentials
 
 ### 8.4 dsh web spawn URL pattern
-**实测**:`dsh --profile web`(不带 `--port`,用 dsh 默认端口 3080) → stdout `dsh web: http://127.0.0.1:3080`,约 1.5s 启动
-**影响**:用正则 `dsh web: http://([^:]+):(\d+)` 提取 host:port;**然后**硬断言端口必须是 3080(`host/lifecycle.go:262-278`),否则 refuse spawn
-**关键决策**(2026-08):不带 `--port 0` 是故意的。`--port 0` 会让 dsh 随机选端口,与 "reuse-or-spawn" 契约(3080 或 fail loud)冲突 —— 如果 user 自己跑了一个 dsh 在 3080,nightme 用 `--port 0` 起在另一个端口,**sessions 会跨实例分裂**,无法 mux demux。`lifecycle.go:246-278` 显式 refuse fallback 到 `--port 0`
+**实测**(2026-09-10 实机 dsh 0.1.2-rc.1):`dsh --profile web` → stdout 第一行仍是 `dsh web: http://127.0.0.1:3080`,约 1.5s 启动
+**影响**(2026-09-10 改):nightme 现在**显式传 `--port 3080`**,不再依赖 stdout URL 解析;Readiness 靠 `waitForListen` TCP-poll。**这是 2026-09-10 的关键架构改动**:之前用正则 `dsh web: http://([^:]+):(\d+)` 提取 host:port + 硬断言端口 == 3080 的路径,会因为 (a) dsh stdout 格式漂移 或 (b) dsh 默认端口漂移 导致 race/silent failure。新路径用 TCP accept 判定 readiness,完全不依赖 stdout 文本。
+**关键决策**(2026-09-10):**永远不传 `--port 0`**(OS 随机端口)。理由与之前相同 —— 与 sessions 跨实例分裂问题冲突。3080 被占且非 dsh 时,`findFreePort(3081, 3099)` 扫候选端口,扫不到则 fail loud
 
 ### 8.5 WS 路径是 dot 不是 slash
 **关键常量**(从 `packages/client/connection/src/api-path.ts`):
@@ -815,7 +848,7 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROX
 - ❌ 不传 `DEEPSEEK_API_KEY` / `DSH_MODEL` / `DEEPSEEK_BASE_URL`
 - ✅ `cmd.Dir = cfg.Workspace`(运行时上下文)
 - ✅ `DSH_PERMISSION_MODE=danger-full-access`(权限放开,用户原话)
-- ✅ `--profile web`(统一 transport flag;**不带 `--port`**,用 dsh 默认 3080;**2026-08-22 起** `--profile headless` 不再使用)
+- ✅ `--profile web` + `--port <port>`(2026-09-10 显式化,锁定端口避免 dsh 默认漂移;**2026-08-22 起** `--profile headless` 不再使用)
 
 `Info().Args` 暴露的 argv 与实际 spawn 一致(避免 code-review §3 drift):
 - **统一**:`["--profile", "web"]`(Start 与 RunOnce 同一份)
@@ -840,7 +873,7 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROX
 | 症状 | 根因 | 修法 |
 |------|------|------|
 | `dsh: not found in PATH` | npm `@deepseek-ai/dsh` 未装 | `npm install -g @deepseek-ai/dsh` |
-| `dsh web: parse url timeout` | spawn 慢 / stdout 格式变 | 调 `parseWebURL` timeout 到 30s |
+| `dsh.host: dsh not listening on port N: timeout ...` | spawn 慢 / bind 失败 / 端口被抢 | 看 stderr(已附在 error + Warn 字段);`lsof -nP -iTCP:127.0.0.1 -sTCP:LISTEN` 看谁占着 |
 | HTTP 404 `/api/{method}` | method 写错(拼写/路径 dot vs slash) | 对照 `rpc-map.ts` 锁 method 名 |
 | `result.ok=false, error.code="bad-request"` | envelope 缺 `type` 或 `method` 字段 | 加 `"type":"client-request"` 和 `"method"` |
 | WS upgrade 失败(curl 52 empty reply) | 路径错(用 `/api/events/mux` 不是 `/api/events/mux`)| 用 dot 分隔 |

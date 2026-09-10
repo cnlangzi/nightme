@@ -4,9 +4,7 @@ package host_test
 
 import (
 	"context"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -57,45 +55,8 @@ func TestStartSharedHost_SpawnsWhenNoDsh(t *testing.T) {
 	}
 }
 
-// TestStartSharedHost_NonCanonicalPort — dsh spawned but bound a
-// non-3080 port (e.g. via DSH_PORT env override, a config file, or
-// the upcoming dsh --port 0 fallback). StartSharedHost must detect
-// the mismatch, kill the spawn, and return a clear error — silent
-// acceptance would let the daemon think it owns a host that the
-// next StartSharedHost call can't re-discover on 3080.
-func TestStartSharedHost_NonCanonicalPort(t *testing.T) {
-	host.UnsetGlobal()
-	host.UnsetSharedHost()
-	host.ResetEnsureForTest()
-	t.Cleanup(func() {
-		host.UnsetGlobal()
-		host.UnsetSharedHost()
-		host.ResetEnsureForTest()
-	})
-
-	// Build a fake-dsh that always reports a non-3080 port,
-	// regardless of argv. The daemon parses this URL and the
-	// port check (in StartSharedHost) must reject it.
-	dir := t.TempDir()
-	fakePath := filepath.Join(dir, "fake-dsh-wrong-port.sh")
-	script := `#!/bin/bash
-echo "dsh web: http://127.0.0.1:13080"
-sleep 30
-`
-	if err := os.WriteFile(fakePath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake dsh: %v", err)
-	}
-
-	sh, err := host.StartSharedHost(context.Background(), host.SharedHostOptions{
-		Workspace:  dir,
-		HostCmd:    fakePath,
-		ForceSpawn: true,
-	})
-	if err == nil {
-		killFakeDSH(t, sh)
-		t.Fatal("StartSharedHost should reject non-3080 port, got nil error")
-	}
-	if !strings.Contains(err.Error(), "13080") || !strings.Contains(err.Error(), "3080") {
-		t.Errorf("error should mention both ports, got: %v", err)
-	}
-}
+// (intentionally empty: no NonCanonicalPort assertion in the new
+// architecture. spawnAndWire passes --port explicitly, so dsh can't
+// bind elsewhere unless it's a dsh bug — and the contract is enforced
+// structurally, not by parsing stdout. waitForListen on the requested
+// port + cli.Start's HTTP handshake catch any drift downstream.)

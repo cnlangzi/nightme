@@ -15,7 +15,6 @@
 package host
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -81,11 +81,10 @@ func DiscoverExisting(ctx context.Context, port int) (*Client, error) {
 		return nil, err
 	}
 
-	// Probe RPC. probeDescribe takes baseURL (not *Client) because
-	// it bypasses Client.Post's envelope-wrapping — the probe
-	// crafts the clientRequest envelope inline and only needs the
-	// HTTP transport.
-	if err := probeDescribe(probeCtx, baseURL); err != nil {
+	// Probe RPC. probeDSHManifest takes baseURL (not *Client) because
+	// it bypasses Client.Post's envelope-wrapping — the probe only
+	// needs the HTTP transport.
+	if err := probeDSHManifest(probeCtx, baseURL); err != nil {
 		return nil, err
 	}
 
@@ -115,62 +114,64 @@ func probeLive(ctx context.Context, port int) (string, error) {
 	return u.String(), nil
 }
 
-// probeDescribe sends a single host.describe RPC and validates that
-// the response is a dsh server-response envelope (not just any
-// 200-OK JSON). The rpcId must echo our probe id — this is the
-// strongest "this is dsh" signal because rpcId echoing is a server
-// contract, not a coincidence of the JSON shape.
+// probeDSHManifest hits the web app manifest at /manifest.webmanifest
+// and verifies the body carries dsh-specific identity strings.
 //
-// Uses a one-shot http.Client rather than cli.Post — cli.Post
-// wraps the payload in another clientRequest envelope, which would
-// double-wrap our already-valid request body. The probe is the
-// only consumer that needs raw body posting; keeping it inline
-// avoids adding yet another RPCClient method.
-func probeDescribe(ctx context.Context, baseURL string) error {
-	probeID := "probe-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	body := []byte(fmt.Sprintf(
-		`{"type":"client-request","rpcId":%q,"method":"host.describe","payload":{}}`,
-		probeID,
-	))
-
-	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/host.describe", bytes.NewReader(body))
+// Why this endpoint (vs an RPC like host.describe):
+//   - Unauthenticated. dsh serves this path without the dsh-auth
+//     cookie, so the probe doesn't need a token from the user's
+//     dashboard session.
+//   - HTTP GET, no envelope. No JSON-RPC body to construct, no
+//     rpcId echo to verify.
+//   - Stable identity. The manifest always carries `"name":"DeepSeek
+//     Harness"` + `"short_name":"DSH"` — these are the dsh product
+//     strings, unique to this server, not coincidentally mockable
+//     by another web service on the same port.
+//
+// Verified 2026-09-10 against dsh 0.1.2-rc.1 (returns 200 with the
+// expected body). The previous RPC probe (host.describe) was a
+// regression risk because it 404s on this dsh release.
+func probeDSHManifest(ctx context.Context, baseURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		baseURL+"/manifest.webmanifest", nil)
 	if err != nil {
 		return errors.Join(ErrNotDSH, fmt.Errorf("build req: %w", err))
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
 
 	httpClient := httpclient.DefaultWithTimeout(probeTimeout)
-	httpResp, err := httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		// Transport error here means TCP got past probeLive but
-		// the connection broke before Do — treat as NotDSH (rare).
 		return errors.Join(ErrNotDSH, fmt.Errorf("do: %w", err))
 	}
-	defer httpResp.Body.Close()
+	defer resp.Body.Close()
 
-	if httpResp.StatusCode != 200 {
-		return errors.Join(ErrNotDSH, fmt.Errorf("HTTP %d", httpResp.StatusCode))
+	if resp.StatusCode != http.StatusOK {
+		return errors.Join(ErrNotDSH, fmt.Errorf("HTTP %d", resp.StatusCode))
+	}
+	// Browsers look for application/manifest+json; dsh honors that.
+	// Reject anything else (e.g. text/html from a generic 404 page)
+	// to keep the fingerprint tight.
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/manifest+json") {
+		return errors.Join(ErrNotDSH, fmt.Errorf("content-type=%q", ct))
 	}
 
-	respBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 64*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
 		return errors.Join(ErrNotDSH, fmt.Errorf("read body: %w", err))
 	}
 
-	var resp struct {
-		Type  string `json:"type"`
-		RPCID string `json:"rpcId"`
+	var manifest struct {
+		Name      string `json:"name"`
+		ShortName string `json:"short_name"`
 	}
-	if err := json.Unmarshal(respBytes, &resp); err != nil {
+	if err := json.Unmarshal(body, &manifest); err != nil {
 		return errors.Join(ErrNotDSH, fmt.Errorf("decode: %w", err))
 	}
-	if resp.Type != "server-response" {
-		return errors.Join(ErrNotDSH, fmt.Errorf("type=%q", resp.Type))
+	if manifest.Name != "DeepSeek Harness" {
+		return errors.Join(ErrNotDSH, fmt.Errorf("name=%q (want \"DeepSeek Harness\")", manifest.Name))
 	}
-	if resp.RPCID != probeID {
-		return errors.Join(ErrNotDSH,
-			fmt.Errorf("rpcId mismatch (sent %s, got %s)", probeID, resp.RPCID))
+	if manifest.ShortName != "DSH" {
+		return errors.Join(ErrNotDSH, fmt.Errorf("short_name=%q (want \"DSH\")", manifest.ShortName))
 	}
 	return nil
 }

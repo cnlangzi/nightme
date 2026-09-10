@@ -26,6 +26,12 @@ import (
 
 const fakeDSHScript = `#!/bin/bash
 PORT="3080"
+# If the test wants to see the argv, write it BEFORE we touch
+# stdout (parent closes stdout pipe as soon as it parses the URL
+# line below, so any post-URL stdout write would EPIPE).
+if [[ -n "$FAKE_DSH_ARGVFILE" ]]; then
+    printf '%s\n' "$0 $*" > "$FAKE_DSH_ARGVFILE"
+fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port) PORT="$2"; shift 2;;

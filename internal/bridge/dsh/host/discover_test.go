@@ -5,9 +5,7 @@ package host_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,43 +18,40 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
 
-// mockDSHServer is a httptest.Server-backed fake dsh that responds
-// to host.describe with a valid server-response envelope (rpcId
-// echoing). Records call count for assertions.
+// mockDSHServer is a httptest.Server-backed fake dsh that serves
+// the manifest.webmanifest fingerprint (verified against dsh
+// 0.1.2-rc.1 on 2026-09-10). Records call count for assertions.
+//
+// We mock the manifest endpoint, not host.describe, because the
+// real probe is now `GET /manifest.webmanifest` (an unauthenticated
+// static resource carrying dsh-internal identity strings). The
+// previous RPC-style mock used to assert on host.describe; that
+// path 404s on real dsh 0.1.2-rc.1 and was the original bug.
 type mockDSHServer struct {
 	server      *httptest.Server
-	describeHit atomic.Int64
+	manifestHit atomic.Int64
 }
 
 func newMockDSHServer(t *testing.T) *mockDSHServer {
 	t.Helper()
 	m := &mockDSHServer{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/host.describe", m.handleHostDescribe)
+	mux.HandleFunc("/manifest.webmanifest", m.handleManifest)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
 	return m
 }
 
-func (m *mockDSHServer) handleHostDescribe(w http.ResponseWriter, r *http.Request) {
-	m.describeHit.Add(1)
-	body, _ := io.ReadAll(r.Body)
-	var req struct {
-		Type  string `json:"type"`
-		RPCID string `json:"rpcId"`
-	}
-	_ = json.Unmarshal(body, &req)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"type":  "server-response",
-		"rpcId": req.RPCID,
-		"result": map[string]any{"ok": true, "value": map[string]any{
-			"version":          "dsh-test-0.1.0",
-			"cwd":              "/tmp",
-			"attachedSessions": 0,
-			"canOpenPath":      false,
-		}},
-	})
+func (m *mockDSHServer) handleManifest(w http.ResponseWriter, r *http.Request) {
+	m.manifestHit.Add(1)
+	w.Header().Set("Content-Type", "application/manifest+json")
+	_, _ = w.Write([]byte(`{
+		"name": "DeepSeek Harness",
+		"short_name": "DSH",
+		"start_url": "/",
+		"scope": "/",
+		"display": "fullscreen"
+	}`))
 }
 
 // portFromURL extracts the listen port from an httptest.Server URL.
@@ -89,8 +84,9 @@ func freePort(t *testing.T) int {
 }
 
 // TestDiscoverExisting_HitsLiveDsh verifies the happy path:
-// httptest bound → DiscoverExisting sends one probe RPC → returns
-// a usable *Client rooted at the discovered URL.
+// httptest bound → DiscoverExisting sends one probe GET to
+// /manifest.webmanifest → returns a usable *Client rooted at the
+// discovered URL.
 func TestDiscoverExisting_HitsLiveDsh(t *testing.T) {
 	mock := newMockDSHServer(t)
 	port := portFromURL(t, mock.server.URL)
@@ -106,8 +102,8 @@ func TestDiscoverExisting_HitsLiveDsh(t *testing.T) {
 		t.Fatal("expected non-nil client")
 	}
 
-	if got := mock.describeHit.Load(); got != 1 {
-		t.Errorf("expected 1 host.describe probe, got %d", got)
+	if got := mock.manifestHit.Load(); got != 1 {
+		t.Errorf("expected 1 manifest probe, got %d", got)
 	}
 
 	if !strings.Contains(cli.BaseURL(), strconv.Itoa(port)) {

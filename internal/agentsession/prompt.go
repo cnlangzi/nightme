@@ -40,6 +40,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// PromptEndReason is re-exported from `agent.PromptEndReason` so
+// existing references (`Prompt.EndReason`, `PromptEndedEvent.Reason`,
+// `endPrompt(reason PromptEndReason)` callers) compile unchanged
+// after the move. The canonical home is `agent.PromptEndReason` —
+// the leaf `channel.Channel.OnPromptEnded` signature consumes it
+// from there. See `internal/agent/prompt_end_reason.go` for the
+// full vocabulary.
+type PromptEndReason = agent.PromptEndReason
+
 // Prompt represents one merged submission to an AgentSession.
 //
 // One Prompt corresponds to exactly one SendBlocks call on the
@@ -112,66 +121,6 @@ type Prompt struct {
 	EndReason PromptEndReason
 }
 
-// PromptEndReason is the WHY of a Prompt ending. Independent of the
-// execution state (`Prompt` itself has no State field — Phase 0
-// derives "still running" from `EndedAt.IsZero()`, see
-// docs/feat/message_lifecycle.md §4.2).
-type PromptEndReason int
-
-const (
-	// PromptEndClean: agent emitted EventAgentDone normally.
-	PromptEndClean PromptEndReason = iota
-
-	// PromptEndError: agent emitted EventAgentError (unrecoverable
-	// per-event error reported by the bridge).
-	PromptEndError
-
-	// PromptEndProcessDied: AS process exited without producing
-	// EventAgentDone/EventAgentError. PHASE 0 DOES NOT TRIGGER THIS — the
-	// readPump's `!ok` branch currently returns without calling
-	// endPrompt. Reserved for the "Prompt 投递稳定性优化" PR
-	// (see docs/feat/message_lifecycle.md §8).
-	PromptEndProcessDied
-
-	// PromptEndStalledKilled: endPrompt called by the stall
-	// watchdog (L2). Phase 0 does not implement stall detection;
-	// reserved.
-	PromptEndStalledKilled
-
-	// PromptEndUserKilled: endPrompt called by `/close` slash
-	// command before process exit. Phase 0 does not distinguish
-	// user-initiated kills from ProcessDied; reserved.
-	PromptEndUserKilled
-
-	// PromptEndUserStopped: endPrompt called by /stop slash
-	// command. The bridge process MAY continue running (per-
-	// bridge Stop semantics — see internal/command/stop), but
-	// the in-flight Prompt is over from the user's POV and
-	// IsReady must flip true synchronously so the next TryFlush
-	// can land, without waiting for the bridge protocol to emit
-	// a terminal event.
-	PromptEndUserStopped
-)
-
-// String renders a PromptEndReason for logs / diagnostics.
-func (r PromptEndReason) String() string {
-	switch r {
-	case PromptEndClean:
-		return "clean"
-	case PromptEndError:
-		return "error"
-	case PromptEndProcessDied:
-		return "process-died"
-	case PromptEndStalledKilled:
-		return "stalled-killed"
-	case PromptEndUserKilled:
-		return "user-killed"
-	case PromptEndUserStopped:
-		return "user-stopped"
-	}
-	return "unknown"
-}
-
 // PromptHook is the flush-time callback installed on InputBuffer.
 // It receives a fully-built candidate Prompt (MessageIDs, Blocks,
 // IDs all populated) and is responsible for:
@@ -189,3 +138,16 @@ func (r PromptEndReason) String() string {
 // hook itself is responsible for any locking it needs (typically
 // `ChatSession.mu` for the message-stage / currentPrompt writes).
 type PromptHook func(p *Prompt) error
+
+// Constants re-exported from agent so unqualified callers (e.g.
+// `endPrompt(PromptEndError)` in readpump.go) keep compiling.
+// Go has no const alias; these are plain consts pointing at the
+// same underlying values.
+const (
+	PromptEndClean        = agent.PromptEndClean
+	PromptEndError        = agent.PromptEndError
+	PromptEndProcessDied  = agent.PromptEndProcessDied
+	PromptEndStalledKilled = agent.PromptEndStalledKilled
+	PromptEndUserKilled   = agent.PromptEndUserKilled
+	PromptEndUserStopped  = agent.PromptEndUserStopped
+)

@@ -682,7 +682,7 @@ func TestBuildReceiptCard_RendersReceiptHeartbeatAfterApply(t *testing.T) {
 func TestRenderHeartbeatHeader_DonePrependsCheck(t *testing.T) {
 	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
 	hb := &messages.HeartbeatSnapshot{
-		ThinkCount: 2, ToolCount: 5, LastBeatAt: now, Done: true,
+		ThinkCount: 2, ToolCount: 5, LastBeatAt: now, Status: messages.HeartbeatDone,
 	}
 	got := renderHeartbeatHeader(hb)
 	want := "✅ 💭 2 · 🔧 5 · ⏱ 14:35:22"
@@ -702,7 +702,7 @@ func TestRenderHeartbeatHeader_DonePrependsCheck(t *testing.T) {
 // the "🤖 Working" placeholder and the user's terminal signal
 // would never paint.
 func TestRenderHeartbeatHeader_DoneOnlyNoCounters(t *testing.T) {
-	hb := &messages.HeartbeatSnapshot{Done: true}
+	hb := &messages.HeartbeatSnapshot{Status: messages.HeartbeatDone}
 	got := renderHeartbeatHeader(hb)
 	if got != "✅ " {
 		t.Fatalf("renderHeartbeatHeader = %q, want %q (Done-only snapshot renders bare prefix)", got, "✅ ")
@@ -721,7 +721,7 @@ func TestRenderHeartbeatHeader_DoneOnlyNoCounters(t *testing.T) {
 // snapshot with no entries / tasks renders the bare "✅ "
 // line — NOT the "🤖 Working" front-part placeholder.
 func TestBuildReceiptCard_HeartbeatHeader_DoneOnlyRendersCheck(t *testing.T) {
-	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{Done: true})
+	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{Status: messages.HeartbeatDone})
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -741,7 +741,7 @@ func TestBuildReceiptCard_HeartbeatHeader_DoneOnlyRendersCheck(t *testing.T) {
 // reached terminal state. The header carries "✅" + counter chips.
 func TestBuildReceiptCard_HeartbeatHeader_DoneWithCounters(t *testing.T) {
 	body, _, err := buildReceiptCard(nil, nil, nil, &messages.HeartbeatSnapshot{
-		ThinkCount: 3, ToolCount: 2, LastBeatAt: time.Now(), Done: true,
+		ThinkCount: 3, ToolCount: 2, LastBeatAt: time.Now(), Status: messages.HeartbeatDone,
 	})
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
@@ -777,7 +777,7 @@ func TestApplyHeartbeat_DoneFlipTriggersPatch(t *testing.T) {
 
 	// Same counts, no LastBeatAt change, but Done flips false→true.
 	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
-		ThinkCount: 1, LastBeatAt: time.Now(), Done: true,
+		ThinkCount: 1, LastBeatAt: time.Now(), Status: messages.HeartbeatDone,
 	})
 	if got := len(bot.patches); got != 2 {
 		t.Fatalf("Done-flip PATCHes = %d, want 2 (Done transition must count as changed)", got)
@@ -796,10 +796,10 @@ func TestApplyHeartbeat_DoneIdempotent(t *testing.T) {
 	r.heartbeatMinInterval = 0
 
 	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
-		Done: true, LastBeatAt: time.Now(),
+		Status: messages.HeartbeatDone, LastBeatAt: time.Now(),
 	})
 	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
-		Done: true, LastBeatAt: time.Now(),
+		Status: messages.HeartbeatDone, LastBeatAt: time.Now(),
 	})
 
 	if got := len(bot.patches); got != 1 {
@@ -828,7 +828,7 @@ func TestApplyHeartbeat_DoneBypassesThinkingThrottle(t *testing.T) {
 	// Within the throttle window (no LastBeatAt / count change).
 	// Done flips — must PATCH through.
 	r.ApplyHeartbeat(context.Background(), messages.HeartbeatSnapshot{
-		ThinkCount: 1, LastBeatAt: time.Now(), Done: true,
+		ThinkCount: 1, LastBeatAt: time.Now(), Status: messages.HeartbeatDone,
 	})
 	if got := len(bot.patches); got != 2 {
 		t.Fatalf("throttle-window Done-flip PATCHes = %d, want 2 (Done must bypass thinking throttle)", got)
@@ -836,5 +836,68 @@ func TestApplyHeartbeat_DoneBypassesThinkingThrottle(t *testing.T) {
 	last := bot.patches[len(bot.patches)-1]
 	if !strings.Contains(last.Body, "✅") {
 		t.Fatalf("throttle-bypass PATCH missing ✅: %s", last.Body)
+	}
+}
+
+// TestRenderHeartbeatHeader_TerminalPrefix pins the verdict
+// prefix the renderHeartbeatHeader paints for the two terminal
+// HeartbeatStatus values. Clean → ✅, any non-clean reason → ❌.
+// Without these prefixes the user can't tell from the chunk
+// header alone whether the turn completed successfully — the
+// F-53 follow-up's "terminal ✅ prefix" only painted the clean
+// path before this change, conflating error and done.
+func TestRenderHeartbeatHeader_TerminalPrefix(t *testing.T) {
+	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
+	cases := []struct {
+		name string
+		hb   *messages.HeartbeatSnapshot
+		want string
+	}{
+		{
+			name: "clean: Done with counters",
+			hb: &messages.HeartbeatSnapshot{
+				ThinkCount: 3, ToolCount: 1, LastBeatAt: now,
+				Status: messages.HeartbeatDone,
+			},
+			want: "✅ 💭 3 · 🔧 1 · ⏱ 14:35:22",
+		},
+		{
+			name: "clean: Done with no counters (terminal-only)",
+			hb: &messages.HeartbeatSnapshot{
+				Status: messages.HeartbeatDone,
+			},
+			want: "✅ ",
+		},
+		{
+			name: "error: Error with counters",
+			hb: &messages.HeartbeatSnapshot{
+				ThinkCount: 2, ToolCount: 4, LastBeatAt: now,
+				Status: messages.HeartbeatError,
+			},
+			want: "❌ 💭 2 · 🔧 4 · ⏱ 14:35:22",
+		},
+		{
+			name: "error: Error with no counters (error-only terminal)",
+			hb: &messages.HeartbeatSnapshot{
+				Status: messages.HeartbeatError,
+			},
+			want: "❌ ",
+		},
+		{
+			name: "running: no prefix",
+			hb: &messages.HeartbeatSnapshot{
+				ThinkCount: 1, LastBeatAt: now,
+				Status: messages.HeartbeatRunning,
+			},
+			want: "💭 1 · ⏱ 14:35:22",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := renderHeartbeatHeader(c.hb)
+			if got != c.want {
+				t.Fatalf("renderHeartbeatHeader = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

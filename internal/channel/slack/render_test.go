@@ -3,6 +3,9 @@ package slack
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 func TestSessionChatID_RoundTrip(t *testing.T) {
@@ -265,5 +268,65 @@ func TestParseActionValue(t *testing.T) {
 	}
 	if _, _, ok := parseActionValue("::allow"); ok {
 		t.Fatal("an empty request id must be rejected")
+	}
+}
+
+// TestHeartbeatText_TerminalPrefix pins the verdict prefix that
+// heartbeatText paints for the two terminal HeartbeatStatus
+// values. Slack's standalone reaction surface (OnPromptEnded
+// → white_check_mark / x) was the only error indicator before
+// this change; the stream text now carries the same verdict
+// prefix inline so the user doesn't have to chase the
+// reaction.
+func TestHeartbeatText_TerminalPrefix(t *testing.T) {
+	now := time.Date(2026, 8, 15, 14, 35, 22, 0, time.UTC)
+	cases := []struct {
+		name string
+		hb   messages.HeartbeatSnapshot
+		want string
+	}{
+		{
+			name: "clean: Done with counters",
+			hb: messages.HeartbeatSnapshot{
+				ThinkCount: 3, ToolCount: 1, LastBeatAt: now,
+				Status: messages.HeartbeatDone,
+			},
+			want: "✅ 💭 3 · 🔧 1 · ⏱ 14:35:22",
+		},
+		{
+			name: "error: Error with counters",
+			hb: messages.HeartbeatSnapshot{
+				ThinkCount: 2, ToolCount: 4, LastBeatAt: now,
+				Status: messages.HeartbeatError,
+			},
+			want: "❌ 💭 2 · 🔧 4 · ⏱ 14:35:22",
+		},
+		{
+			name: "running: no prefix",
+			hb: messages.HeartbeatSnapshot{
+				ThinkCount: 1, LastBeatAt: now,
+				Status: messages.HeartbeatRunning,
+			},
+			want: "💭 1 · ⏱ 14:35:22",
+		},
+		{
+			// Terminal-only snapshot (no counters): the
+			// HeartbeatDone/Error prefix is the whole line.
+			name: "clean terminal-only",
+			hb:   messages.HeartbeatSnapshot{Status: messages.HeartbeatDone},
+			want: "✅ ",
+		},
+		{
+			name: "error terminal-only",
+			hb:   messages.HeartbeatSnapshot{Status: messages.HeartbeatError},
+			want: "❌ ",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := heartbeatText(&c.hb); got != c.want {
+				t.Fatalf("heartbeatText = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

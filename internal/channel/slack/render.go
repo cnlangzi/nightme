@@ -120,7 +120,7 @@ func footerBlocks(lines []string) []slackgo.Block {
 // prefixing them, because "Working" plus a live counter says the
 // same thing twice.
 func heartbeatText(hb *messages.HeartbeatSnapshot) string {
-	if hb == nil || (hb.ThinkCount == 0 && hb.ToolCount == 0) {
+	if hb == nil || (hb.ThinkCount == 0 && hb.ToolCount == 0 && hb.Status == messages.HeartbeatRunning) {
 		return "🤖 Working"
 	}
 	parts := make([]string, 0, 3)
@@ -133,7 +133,20 @@ func heartbeatText(hb *messages.HeartbeatSnapshot) string {
 	if !hb.LastBeatAt.IsZero() {
 		parts = append(parts, "⏱ "+hb.LastBeatAt.Format("15:04:05"))
 	}
-	return strings.Join(parts, " · ")
+	body := strings.Join(parts, " · ")
+	// Terminal verdict prefix: ✅ for clean completion,
+	// ❌ for any non-clean reason. Mirrors the Feishu /
+	// Telegram header semantics so a user who sees the stream
+	// text can tell at a glance whether the turn completed
+	// cleanly without checking the standalone reaction on the
+	// user message.
+	switch hb.Status {
+	case messages.HeartbeatDone:
+		return "✅ " + body
+	case messages.HeartbeatError:
+		return "❌ " + body
+	}
+	return body
 }
 
 // toolTitle renders the one-line label for a tool task card.

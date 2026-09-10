@@ -523,7 +523,7 @@ func (r *MessageReceipt) ApplyHeartbeat(ctx context.Context, snap messages.Heart
 	r.heartbeat = snap
 	thinkChanged := snap.ThinkCount != prev.ThinkCount
 	toolChanged := snap.ToolCount != prev.ToolCount
-	doneChanged := snap.Done != prev.Done
+	doneChanged := snap.Status != prev.Status
 	if !thinkChanged && !toolChanged && !doneChanged {
 		return
 	}

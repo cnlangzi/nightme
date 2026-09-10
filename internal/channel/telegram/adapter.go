@@ -1476,7 +1476,7 @@ func (a *Adapter) chainEditFn() editChunkFn {
 // ok=false for the raw form so we fall back to using chatID as
 // the raw chat id (matches the existing TopicState key shape).
 // See docs/channel/telegram.md §11.11 (v6.3).
-func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
+func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, reason agent.PromptEndReason) {
 	if chatID == "" {
 		return
 	}
@@ -1549,11 +1549,19 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 		// USER MSG slot is preserved in both branches — the stamp
 		// lands on a bot-owned message, never on the user's
 		// original message. [emoji] is in the official
-		// ReactionTypeEmoji whitelist (✅ U+2705 was rejected by
-		// Telegram API in v5 live probes; 🎉 is the stable
-		// replacement).
+		// ReactionTypeEmoji whitelist.
+		//
+		// 🎉 (clean) / ❌ (any non-clean reason). See
+		// agent.PromptEndReason.IsError for the verdict mapping.
+		// ✅ U+2705 was rejected by Telegram API in v5 live probes;
+		// 🎉 is the stable clean-path replacement, ❌
+		// shares the same whitelist status.
+		emoji := "\U0001F389"
+		if reason.IsError() {
+			emoji = "\u274c"
+		}
 		_ = a.setMessageReactions(ctx, rawChatID, int(targetID),
-			[]map[string]any{{"type": "emoji", "emoji": "\U0001F389"}})
+			[]map[string]any{{"type": "emoji", "emoji": emoji}})
 	}
 
 	// Turn-end cleanup: forget the in-memory chain. Frozen
@@ -1744,6 +1752,17 @@ func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 		snapshot.ThinkCount, snapshot.ToolCount)
 	if !snapshot.LastBeatAt.IsZero() {
 		text += " · ⏱ " + snapshot.LastBeatAt.Local().Format("15:04:05")
+	}
+	// Terminal verdict prefix: ✅ for clean completion,
+	// ❌ for any non-clean reason. Mirrors the Feishu header
+	// semantics so a user who sees the chunk header can tell at a
+	// glance whether the turn completed cleanly without checking
+	// the standalone 🎉/❌ reaction on the result message.
+	switch snapshot.Status {
+	case messages.HeartbeatDone:
+		return "✅ " + text
+	case messages.HeartbeatError:
+		return "❌ " + text
 	}
 	return text
 }

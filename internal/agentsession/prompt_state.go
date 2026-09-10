@@ -41,17 +41,23 @@ const (
 	// it on `AgentSession.currentPrompt`).
 	PromptRunning PromptState = iota
 
-	// PromptDone: the `Prompt` has finished — either cleanly
-	// (EventAgentDone) or with an error (EventAgentError). Wire-up is
-	// via `ChatSession.endPrompt(reason)`; the runtime
-	// translates that to a per-channel render via the
+	// PromptDone: the `Prompt` has finished — cleanly (EventAgentDone
+	// on the readpump). Wire-up is via `ChatSession.endPrompt(reason)`;
+	// the runtime translates that to a per-channel render via the
 	// `PromptEndBus` callback.
 	//
-	// Although the value is reserved, Phase 0 only emits
-	// PromptRunning → (no transition) for the happy path;
-	// the readpump calls `endPrompt` on EventAgentDone/Error and
-	// that mutates the receipt's promptState to PromptDone.
+	// Phase 0 only emits PromptRunning → (PromptDone or PromptError)
+	// from the readpump's EventAgentDone / EventAgentError branches.
 	PromptDone
+
+	// PromptError: the `Prompt` has finished with a non-clean reason
+	// (EventAgentError / PromptEndProcessDied / PromptEndStalledKilled /
+	// PromptEndUserKilled / PromptEndUserStopped). Phase 0 emits this
+	// from the same readpump sites as PromptDone; channels distinguish
+	// it to paint the cross (❌) reaction instead of the check (✅).
+	// See `internal/agent/prompt_end_reason.go` for the full reason
+	// vocabulary this verdict collapses.
+	PromptError
 )
 
 // String renders a PromptState for logs / diagnostics.
@@ -61,6 +67,8 @@ func (s PromptState) String() string {
 		return "running"
 	case PromptDone:
 		return "done"
+	case PromptError:
+		return "error"
 	}
 	return "unknown"
 }

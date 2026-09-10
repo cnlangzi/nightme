@@ -91,8 +91,8 @@ func TestPromptEndBus_DelegatesToChannelOnPromptEnded(t *testing.T) {
 	if len(stub.record) != 1 {
 		t.Fatalf("expected 1 OnPromptEnded call, got %d", len(stub.record))
 	}
-	if stub.record[0] != "oc_prompt_end|om_pe_test" {
-		t.Errorf("OnPromptEnded call args = %q, want %q", stub.record[0], "oc_prompt_end|om_pe_test")
+	if stub.record[0] != "oc_prompt_end|om_pe_test|clean" {
+		t.Errorf("OnPromptEnded call args = %q, want %q", stub.record[0], "oc_prompt_end|om_pe_test|clean")
 	}
 }
 
@@ -306,10 +306,10 @@ func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
 func (c *capturingChannel) Send(_ context.Context, _ messages.OutboundMessage) error {
 	return nil
 }
-func (c *capturingChannel) OnPromptEnded(_ context.Context, chatID, msgID string) {
+func (c *capturingChannel) OnPromptEnded(_ context.Context, chatID, msgID string, reason agent.PromptEndReason) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.record = append(c.record, chatID+"|"+msgID)
+	c.record = append(c.record, chatID+"|"+msgID+"|"+reason.String())
 }
 func (c *capturingChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return c.name, json.RawMessage("{}"), nil
@@ -326,3 +326,41 @@ func (c *capturingChannel) BuildBlocks(text string, _ []messages.Attachment) []a
 // build time. (The interface is satisfied implicitly; this
 // declaration is documentation.)
 var _ channel.Channel = (*capturingChannel)(nil)
+
+// TestPromptEndBus_ForwardsReasonToChannel pins that the
+// PromptEndBus subscriber passes e.Reason through to
+// ch.OnPromptEnded. Without the reason argument, channels
+// can't distinguish clean completion from a non-clean error
+// path (the F-63-era single-bool Done collapsed both into
+// one prefix). The subscriber must NOT swallow the reason
+// on its way to the channel.
+func TestPromptEndBus_ForwardsReasonToChannel(t *testing.T) {
+	mgr := chatsession.NewManager().WithPrimaryAgent("claude")
+	stub := &capturingChannel{name: "capture", record: []string{}}
+
+	if err := WireRuntimeCallbacksAndRestore(
+		mgr,
+		outbound.New(echo.New("test", io.Discard), outbound.Options{}),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		chatsession.GitStatusDeps{},
+		stub,
+	); err != nil {
+		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
+	}
+
+	cs, _ := mgr.GetOrCreate("oc_prompt_reason", "claude")
+
+	cs.PromptEndBus.Publish(agentsession.PromptEndedEvent{
+		ChatID:    cs.ChatID,
+		UserMsgID: "om_err_test",
+		Reason:    agentsession.PromptEndError,
+	})
+
+	if len(stub.record) != 1 {
+		t.Fatalf("expected 1 OnPromptEnded call, got %d", len(stub.record))
+	}
+	if stub.record[0] != "oc_prompt_reason|om_err_test|error" {
+		t.Errorf("OnPromptEnded args = %q, want %q",
+	 stub.record[0], "oc_prompt_reason|om_err_test|error")
+	}
+}

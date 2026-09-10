@@ -131,7 +131,7 @@ func (c *Channel) Record() []messages.OutboundMessage {
 
 // OnPromptEnded implements channel.Channel.OnPromptEnded as a
 // no-op — echo doesn't render receipts.
-func (c *Channel) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {}
+func (c *Channel) OnPromptEnded(ctx context.Context, chatID, userMsgID string, _ agent.PromptEndReason) {}
 
 // HealthSnapshot implements channel.Channel.HealthSnapshot as a
 // no-op — echo has no connection state worth reporting. Returns

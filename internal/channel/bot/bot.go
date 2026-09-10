@@ -186,7 +186,7 @@ func (b *Bot) Send(_ context.Context, msg messages.OutboundMessage) error {
 }
 
 // OnPromptEnded implements channel.Channel. No-op for bot (no UI).
-func (b *Bot) OnPromptEnded(_ context.Context, _ string, _ string) {}
+func (b *Bot) OnPromptEnded(_ context.Context, _ string, _ string, _ agent.PromptEndReason) {}
 
 // HealthSnapshot implements channel.Channel.
 func (b *Bot) HealthSnapshot() (string, json.RawMessage, error) {

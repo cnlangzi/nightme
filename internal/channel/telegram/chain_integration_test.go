@@ -245,7 +245,7 @@ func TestAdapter_OnPromptEnded_DM_RendersOnActiveChunkThenPurges(t *testing.T) {
 	drainDebouncedFlush(t, a, api)
 
 	// OnPromptEnded should sync-flush + stamp 🎉 on the active chunk.
-	a.OnPromptEnded(context.Background(), "400", "40")
+	a.OnPromptEnded(context.Background(), "400", "40", agent.PromptEndClean)
 
 	// Look for setMessageReaction with 🎉.
 	stamped := false
@@ -1111,7 +1111,7 @@ func TestAdapter_OnPromptEnded_DM_StampsOnResultMessage(t *testing.T) {
 	}
 
 	// 3. OnPromptEnded.
-	a.OnPromptEnded(context.Background(), "540", "54")
+	a.OnPromptEnded(context.Background(), "540", "54", agent.PromptEndClean)
 
 	// 4. Find the 🎉 setMessageReaction and verify it hit resultID,
 	// NOT activeChunkID, NOT userMsgID (54).
@@ -1181,7 +1181,7 @@ func TestAdapter_OnPromptEnded_NoOutResult_FallsBackToActiveChunk(t *testing.T) 
 		t.Fatalf("resultMessageID unexpectedly non-zero: %d", resultID)
 	}
 
-	a.OnPromptEnded(context.Background(), "550", "55")
+	a.OnPromptEnded(context.Background(), "550", "55", agent.PromptEndClean)
 
 	// 🎉 must stamp on activeChunkID (fallback path).
 	var stampedActive int

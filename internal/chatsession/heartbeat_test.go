@@ -428,16 +428,16 @@ func TestMarkDone_FlipsFlag(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
 	tr.Observe("u1", messages.OutThinking) // ThinkCount=1, LastBeatAt set
 	before := tr.Snapshot("u1")
-	if before.Done {
+	if before.Status != messages.HeartbeatRunning {
 		t.Fatal("pre-condition: Done must start false")
 	}
 
-	changed := tr.MarkDone("u1")
+	changed := tr.MarkTerminal("u1", messages.HeartbeatDone)
 	if !changed {
 		t.Fatal("first MarkDone must return changed=true")
 	}
 	after := tr.Snapshot("u1")
-	if !after.Done {
+	if after.Status == messages.HeartbeatRunning {
 		t.Fatal("Done must be true after MarkDone")
 	}
 	// MarkDone must NOT touch counters / LastBeatAt — those
@@ -457,13 +457,13 @@ func TestMarkDone_FlipsFlag(t *testing.T) {
 // race to MarkDone.
 func TestMarkDone_Idempotent(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	if !tr.MarkDone("u1") {
+	if !tr.MarkTerminal("u1", messages.HeartbeatDone) {
 		t.Fatal("first MarkDone must return true")
 	}
-	if tr.MarkDone("u1") {
+	if tr.MarkTerminal("u1", messages.HeartbeatDone) {
 		t.Fatal("second MarkDone must return false (idempotent transition)")
 	}
-	if tr.MarkDone("u1") {
+	if tr.MarkTerminal("u1", messages.HeartbeatDone) {
 		t.Fatal("third MarkDone must also return false")
 	}
 }
@@ -473,7 +473,7 @@ func TestMarkDone_Idempotent(t *testing.T) {
 // events without a receipt anchor.
 func TestMarkDone_EmptyUserMsgIDNoOp(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	if tr.MarkDone("") {
+	if tr.MarkTerminal("", messages.HeartbeatDone) {
 		t.Fatal("MarkDone(\"\") must return false")
 	}
 }
@@ -482,7 +482,7 @@ func TestMarkDone_EmptyUserMsgIDNoOp(t *testing.T) {
 // Observe's nil-safe call path).
 func TestMarkDone_NilTrackerSafe(t *testing.T) {
 	var tr *HeartbeatTracker
-	if tr.MarkDone("u1") {
+	if tr.MarkTerminal("u1", messages.HeartbeatDone) {
 		t.Fatal("nil tracker MarkDone must return false without panic")
 	}
 }
@@ -493,12 +493,81 @@ func TestMarkDone_NilTrackerSafe(t *testing.T) {
 // trip through the read path.
 func TestSnapshot_DoneVisible(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	tr.MarkDone("u1")
+	tr.MarkTerminal("u1", messages.HeartbeatDone)
 	snap := tr.Snapshot("u1")
-	if !snap.Done {
+	if snap.Status == messages.HeartbeatRunning {
 		t.Fatalf("Snapshot after MarkDone must carry Done=true, got %+v", snap)
 	}
 	if snap.Empty() {
 		t.Fatal("Done=true snapshot must not be Empty() (the follow-up OutHeartbeat would be dropped)")
+	}
+}
+
+// TestMarkTerminal_HeartbeatError covers the non-clean terminal
+// path: HeartbeatError should be the post-call Status, and the
+// tracker should still return true on the running→error
+// transition (the runtime's PromptEndBus subscriber calls this
+// for any PromptEndReason other than PromptEndClean).
+func TestMarkTerminal_HeartbeatError(t *testing.T) {
+	tr := NewHeartbeatTracker(8)
+	tr.Observe("u1", messages.OutThinking)
+	before := tr.Snapshot("u1")
+	if before.Status != messages.HeartbeatRunning {
+		t.Fatalf("initial Status = %v, want Running", before.Status)
+	}
+
+	changed := tr.MarkTerminal("u1", messages.HeartbeatError)
+	if !changed {
+		t.Fatal("MarkTerminal(Running → Error) must return true")
+	}
+
+	after := tr.Snapshot("u1")
+	if after.Status != messages.HeartbeatError {
+		t.Fatalf("post-MarkTerminal Status = %v, want Error", after.Status)
+	}
+	// MarkTerminal must NOT touch counters / LastBeatAt
+	if after.ThinkCount != before.ThinkCount {
+		t.Fatalf("ThinkCount clobbered: before=%d after=%d",
+	 before.ThinkCount, after.ThinkCount)
+	}
+	if !after.LastBeatAt.Equal(before.LastBeatAt) {
+		t.Fatalf("LastBeatAt clobbered: before=%v after=%v",
+	 before.LastBeatAt, after.LastBeatAt)
+	}
+}
+
+// TestMarkTerminal_FirstCallerWins pins the verdict-agnostic
+// idempotency contract: a second MarkTerminal call with a
+// DIFFERENT status is still a no-op once the snapshot is
+// terminal. The runtime has two trigger sites (handler.go's
+// OutResult branch vs PromptEndBus subscriber); whichever lands
+// first wins, and the other no-ops. This test pins the
+// documentation, not the actual ordering — production
+// non-determinism is acceptable per the doc comment on
+// MarkTerminal.
+func TestMarkTerminal_FirstCallerWins(t *testing.T) {
+	tr := NewHeartbeatTracker(8)
+
+	if !tr.MarkTerminal("u1", messages.HeartbeatDone) {
+		t.Fatal("first MarkTerminal(Done) must return true")
+	}
+	// Second call with DIFFERENT status: no-op, status unchanged.
+	if tr.MarkTerminal("u1", messages.HeartbeatError) {
+		t.Fatal("second MarkTerminal(Error) must return false (already terminal)")
+	}
+	if got := tr.Snapshot("u1").Status; got != messages.HeartbeatDone {
+		t.Fatalf("Status after racing call = %v, want Done (first caller wins)", got)
+	}
+
+	// And the reverse — error wins first, clean is ignored.
+	tr2 := NewHeartbeatTracker(8)
+	if !tr2.MarkTerminal("u2", messages.HeartbeatError) {
+		t.Fatal("first MarkTerminal(Error) must return true")
+	}
+	if tr2.MarkTerminal("u2", messages.HeartbeatDone) {
+		t.Fatal("second MarkTerminal(Done) must return false")
+	}
+	if got := tr2.Snapshot("u2").Status; got != messages.HeartbeatError {
+		t.Fatalf("Status = %v, want Error", got)
 	}
 }

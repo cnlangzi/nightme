@@ -104,7 +104,7 @@ func NewHeartbeatTracker(cap int) *HeartbeatTracker {
 // orphan events (EventAgentReady, etc.) that don't have a
 // receipt anchor.
 //
-// See MarkDone for the lifecycle counterpart.
+// See MarkTerminal for the lifecycle counterpart.
 func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind) bool {
 	if t == nil || userMsgID == "" {
 		return false
@@ -140,27 +140,43 @@ func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind)
 // should pass the result to the channel adapter which uses
 // HeartbeatSnapshot.Empty() to decide whether to render anything.
 //
-// MarkDone flips the snapshot's Done flag for userMsgID,
-// returning true on the false→true transition and false
-// otherwise (no-op when Done is already true, userMsgID is
-// empty, or t is nil). Idempotent — racing calls converge on
-// a single flip.
+// MarkTerminal transitions the snapshot to a terminal verdict
+// for userMsgID. `status` is the desired post-call verdict —
+// HeartbeatDone for a clean completion, HeartbeatError for any
+// non-clean reason. Returns true on the false→true transition
+// (running → terminal, regardless of which terminal), false
+// otherwise (no-op when already terminal, userMsgID is empty,
+// or t is nil). Idempotent — racing calls converge on a single
+// transition.
+//
+// Idempotency is verdict-agnostic: a second MarkTerminal call
+// with a different status (e.g. the OutResult branch flipping
+// Done before the PromptEndBus subscriber flips Error) is still
+// a no-op once the snapshot is terminal. The first caller wins;
+// that ordering is non-deterministic between the two trigger
+// sites (bridge drain vs readpump) and either outcome is
+// acceptable. The richer endPrompt reason wins when it lands
+// first because the PromptEndBus subscriber runs on the same
+// goroutine as endPrompt, while the handler.go OutResult branch
+// runs on the bridge drain goroutine; in practice endPrompt is
+// the terminal source of truth and arrives last or first
+// depending on bridge.
 //
 // LRU: the false→true path touches the LRU; the idempotent
-// return does NOT. Both Observe and MarkDone use the LRU as a
-// "most recently active" signal; for a terminal entry there is
-// no further activity to track, so a racing second MarkDone
+// return does NOT. Both Observe and MarkTerminal use the LRU as
+// a "most recently active" signal; for a terminal entry there is
+// no further activity to track, so a racing second MarkTerminal
 // can safely skip the touch. The entry will still be evicted
 // under normal LRU pressure once its age dominates other
-// entries — and by that point the terminal ✅ has already
-// PATCHed to the receipt via the first MarkDone's OutHeartbeat
-// follow-up.
+// entries — and by that point the terminal ✅ / ❌ has already
+// PATCHed to the receipt via the first MarkTerminal's
+// OutHeartbeat follow-up.
 //
-// MarkDone deliberately does NOT touch ThinkCount / ToolCount /
-// LastBeatAt — the renderer paints those independently from
-// Done, so re-writing them here would either race the last
+// MarkTerminal deliberately does NOT touch ThinkCount / ToolCount
+// / LastBeatAt — the renderer paints those independently from
+// Status, so re-writing them here would either race the last
 // Observe or duplicate the ⏱ chip.
-func (t *HeartbeatTracker) MarkDone(userMsgID string) bool {
+func (t *HeartbeatTracker) MarkTerminal(userMsgID string, status messages.HeartbeatStatus) bool {
 	if t == nil || userMsgID == "" {
 		return false
 	}
@@ -168,10 +184,10 @@ func (t *HeartbeatTracker) MarkDone(userMsgID string) bool {
 	defer t.mu.Unlock()
 
 	snap := t.snaps[userMsgID]
-	if snap.Done {
+	if snap.Status != messages.HeartbeatRunning {
 		return false
 	}
-	snap.Done = true
+	snap.Status = status
 	t.snaps[userMsgID] = snap
 	t.touchLocked(userMsgID)
 	return true

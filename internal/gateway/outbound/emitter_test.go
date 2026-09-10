@@ -42,7 +42,7 @@ func (f *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) erro
 
 // Channel-interface extensions (Phase 2.1 + 2.2). fakeChannel
 // has no live state — all three are trivial fallbacks.
-func (f *fakeChannel) OnPromptEnded(_ context.Context, _, _ string) {}
+func (f *fakeChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent.PromptEndReason) {}
 func (f *fakeChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return f.name, json.RawMessage("{}"), nil
 }

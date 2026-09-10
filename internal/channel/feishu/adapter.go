@@ -789,10 +789,19 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 }
 
 // OnPromptEnded (F-53 follow-up; Phase 2.1 channel-ext) transitions
-// the receipt bound to `userMsgID` to agentsession.PromptDone (✅
-// reaction on the card). Called by the runtime when
+// the receipt bound to `userMsgID` to a terminal prompt state
+// driven by `reason`. Called by the runtime when
 // `ChatSession.endPrompt` fires (i.e. the readpump saw
-// EventAgentDone or EventAgentError).
+// EventAgentDone or EventAgentError, or some other terminal
+// reason).
+//
+// Reason mapping: PromptEndClean → agentsession.PromptDone
+// (✅ reaction); every other reason (❌ on the card) maps
+// to agentsession.PromptError. The mapping collapses every
+// non-clean PromptEndReason (Error / ProcessDied / StalledKilled /
+// UserKilled / UserStopped) into a single error verdict; the
+// original reason is preserved on the Prompt for diagnostics /
+// writeback but is not surfaced to the chat UI.
 //
 // Best-effort: silently no-op when no receipt exists yet (e.g.
 // /close before any event arrived — the receipt would never have
@@ -803,9 +812,13 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // MarkReceiptPromptDone; renamed in Phase 2.1 to align with the
 // channel interface — the runtime no longer needs a type
 // assertion to reach this method.
-func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
+func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, reason agent.PromptEndReason) {
 	r := a.receiptFor(ctx, chatID, userMsgID)
 	if r == nil {
+		return
+	}
+	if reason.IsError() {
+		r.SetPromptState(ctx, agentsession.PromptError)
 		return
 	}
 	r.SetPromptState(ctx, agentsession.PromptDone)
@@ -2068,8 +2081,8 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 				// the receipt is created would lose its ✅
 				// prefix as soon as a later activity counter
 				// overwrote the pending entry.
-				if prev.Done {
-					snap.Done = true
+				if prev.Status != messages.HeartbeatRunning {
+					snap.Status = prev.Status
 				}
 			}
 			a.pendingHeartbeats[msg.ReplyTo] = snap
@@ -2989,7 +3002,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// paths (where the snapshot is what the test set it to) —
 	// render output never shows a "💭 0 · ⏱ ..." line.
 	switch {
-	case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0 || hb.Done):
+	case hb != nil && (hb.ThinkCount > 0 || hb.ToolCount > 0 || hb.Status != messages.HeartbeatRunning):
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": renderHeartbeatHeader(hb),
@@ -3089,16 +3102,19 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 // Counter chips are omitted when zero (think=0 produces no 💭
 // chip). LastBeatAt is omitted when zero.
 //
-// Terminal-state prefix (Done=true): prepends "✅ " to the line so
-// users can tell at a glance the turn finished. Applies regardless
-// of whether counters are populated — a /think off + /tools off
-// turn that produces just OutReply and OutResult still gets the ✅
-// (the caller's gate at buildReceiptCard allows Done-only snapshots
-// through, so the line ends up as just "✅" with no chip suffix).
+// Terminal-state prefix: prepends "✅ " for HeartbeatDone (clean
+// completion) or "❌ " for HeartbeatError (any non-clean
+// PromptEndReason — PromptEndError / ProcessDied / StalledKilled /
+// UserKilled / UserStopped). Applies regardless of whether counters
+// are populated — a /think off + /tools off turn that produces just
+// OutReply and OutResult still gets the terminal prefix (the
+// caller's gate at buildReceiptCard allows Status-only snapshots
+// through, so the line ends up as just "✅" / "❌" with no
+// chip suffix).
 //
 // Mutual exclusion is the caller's responsibility. buildReceiptCard
 // is the single in-tree caller and only invokes this when
-// ThinkCount > 0 || ToolCount > 0 || Done. Any future direct caller (a new
+// ThinkCount > 0 || ToolCount > 0 || Status != Running. Any future direct caller (a new
 // renderer, an admin/debug tool, a test) MUST gate on the same
 // condition before calling — otherwise the front-part "🤖 Working"
 // placeholder that buildReceiptCard renders in the "no activity"
@@ -3122,8 +3138,11 @@ func renderHeartbeatHeader(hb *messages.HeartbeatSnapshot) string {
 		parts = append(parts, "⏱ "+hb.LastBeatAt.Format("15:04:05"))
 	}
 	body := strings.Join(parts, " · ")
-	if hb.Done {
+	switch hb.Status {
+	case messages.HeartbeatDone:
 		return "✅ " + body
+	case messages.HeartbeatError:
+		return "❌ " + body
 	}
 	return body
 }
@@ -3392,6 +3411,7 @@ func mapStateToFeishuEmoji(state agent.MessageState) string {
 //	F-53 Phase 0 (revised):
 //	  agentsession.PromptRunning → OnIt       (🔄)
 //	  agentsession.PromptDone    → DONE       (✅)
+//	  agentsession.PromptError   → Cross      (❌)
 //
 // The 🔄 is added the first time the receipt renders (via
 // `MessageReceipt.SetPromptState(agentsession.PromptRunning)`); the ✅ is
@@ -3403,6 +3423,8 @@ func mapPromptStateToFeishuEmoji(state agentsession.PromptState) string {
 		return "OnIt" // 🔄
 	case agentsession.PromptDone:
 		return "DONE" // ✅
+	case agentsession.PromptError:
+		return "Cross" // ❌
 	}
 	return ""
 }

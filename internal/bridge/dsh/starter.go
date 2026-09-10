@@ -250,17 +250,15 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 				}
 			case agent.EventAgentPermission:
 				// RunOnce / Review have no interactive user on the
-				// chat channel. After #282 we dropped the
-				// `/permission danger-full-access` priming slash
-				// (host forwards leading-/ to the model instead of
-				// intercepting it), so a fresh session can still
-				// sit at workspace-write+ask and fire approvals
-				// mid-turn (git worktree locks, bash, …). Nobody
-				// reads Permission.ResponseCh on this path — the
-				// sink is observational only — so without an
-				// auto-allow here the turn wedges until the 5min
-				// decline watchdog. Prefer Options[0] ("Allow once"
-				// for approvals; first label for questions).
+				// chat channel. Sessions whose mode isn't
+				// danger-full-access (e.g. workspace-write, read-only)
+				// can still fire approvals mid-turn (git worktree
+				// locks, bash, …). Nobody reads Permission.ResponseCh
+				// on this path — the sink is observational only —
+				// so without an auto-allow here the turn wedges
+				// until the 5min decline watchdog. Prefer Options[0]
+				// ("Allow once" for approvals; first label for
+				// questions).
 				if err := autoAllowRunOncePermission(a, ev); err != nil {
 					dLog("dsh: RunOnce auto-allow permission: %v", err)
 				}

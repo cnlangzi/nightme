@@ -10,6 +10,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 	"github.com/cnlangzi/nightme/internal/chatstore"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/pathutil"
@@ -547,8 +548,8 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	// the (Agent, Cwd) key matches the pool filter.
 	activeCwd := cs.SelectedCwd()
 	as := NewAgentSession("as_kill", "oc_chat", "claude", activeCwd, nil)
-	as.SetHandleForTest(newRecordingAgentSession(1).buildLive())
-	as.SetStatusForTest(StatusRunning)
+	agentstest.SetHandle(as, newRecordingAgentSession(1).buildLive())
+	agentstest.SetStatus(as, StatusRunning)
 	// Put a Prompt in flight so the AS is mid-turn and the message
 	// queued below is not flushed immediately.
 	if err := as.Submit(&Prompt{Blocks: []agent.ContentBlock{{Text: "in-flight"}}}); err != nil {
@@ -588,8 +589,8 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	// Respawn: the next AS is ready by construction, so the queued
 	// message flushes against it.
 	newAS := NewAgentSession("as_respawn", "oc_chat", "claude", t.TempDir(), nil)
-	newAS.SetHandleForTest(newRecordingAgentSession(2).buildLive())
-	newAS.SetStatusForTest(StatusRunning)
+	agentstest.SetHandle(newAS, newRecordingAgentSession(2).buildLive())
+	agentstest.SetStatus(newAS, StatusRunning)
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: newAS.Agent, Cwd: newAS.Cwd}] = newAS
 	cs.selectedAS = newAS

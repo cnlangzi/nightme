@@ -134,9 +134,26 @@ func (c *RPCClient) BaseURL() string {
 	return c.baseURL
 }
 
-// Post issues one RPC. `payload` is JSON-marshaled into the
-// clientRequest envelope; the response is decoded into rpcResponse
-// and returned.
+// Post issues one RPC. `args` is JSON-marshaled and wrapped in the
+// standard typert envelope `{args: <args>}`, then POSTed to
+// `/api/{method}` (dots in the method name are converted to slashes
+// to match dsh web's canonical routing). The response is decoded
+// into rpcResponse and returned.
+//
+// IMPORTANT — args shape is method-specific:
+//   - typed single-arg methods (session/create, workspace/create,
+//     session/cancel, …): the dashboard wraps under `.request`, e.g.
+//     `args = {request: {workspaceId: ...}}` — the typert descriptor
+//     names the typed payload "request".
+//   - flat-arg methods (commands/execute, …): the fields live
+//     directly under `args`, e.g. `args = {agentId, line, images}`.
+//   - no-arg methods (agentPresets/list, …): empty object
+//     `args = {}`.
+//
+// Callers build the right shape — Post does NOT auto-wrap, because
+// the per-method descriptor shape can't be guessed from the
+// payload alone (an empty `{}` would silently fit both "request:"
+// and "no-arg" descriptors).
 //
 // Returns:
 //   - (resp, nil) on transport OK + business OK (resp.Result.OK == true)
@@ -144,28 +161,32 @@ func (c *RPCClient) BaseURL() string {
 //   - (nil, err) on transport / decode / id-mismatch failure
 //
 // Mirrors dsh/http.go Post so concurrent callers see the same wire
-// contract. Phase 0 keeps the two implementations separate so
-// existing tests don't break; Phase 3 will collapse.
-func (c *RPCClient) Post(ctx context.Context, method string, payload any) (*rpcResponse, error) {
+// contract.
+func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResponse, error) {
 	rpcID := newRPCID()
 
-	payloadBytes, err := json.Marshal(payload)
+	argsBytes, err := json.Marshal(args)
 	if err != nil {
-		return nil, fmt.Errorf("dsh.host: marshal payload for %s: %w", method, err)
+		return nil, fmt.Errorf("dsh.host: marshal args for %s: %w", method, err)
+	}
+	wrapped, err := wrapArgs(argsBytes)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: wrap args for %s: %w", method, err)
 	}
 
 	envelope := clientRequest{
 		Type:    "client-request",
 		RPCID:   rpcID,
 		Method:  method,
-		Payload: payloadBytes,
+		Payload: wrapped,
 	}
 	body, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, fmt.Errorf("dsh.host: marshal envelope for %s: %w", method, err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/"+method, bytes.NewReader(body))
+	url := c.baseURL + "/api/" + methodDotsToSlashes(method)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("dsh.host: build request %s: %w", method, err)
 	}
@@ -209,18 +230,6 @@ func (c *RPCClient) Post(ctx context.Context, method string, payload any) (*rpcR
 	return &resp, nil
 }
 
-// PostRaw is like Post but accepts a pre-marshaled RawMessage payload.
-// Used by typed wrappers that build the payload inline (e.g. Respond
-// constructs ApprovalResponsePayload without going through map[string]any).
-//
-// NOTE: PostRaw still wraps in the standard clientRequest envelope —
-// it just lets you pass a pre-marshaled payload instead of a Go value.
-// For envelopes that don't fit clientRequest (e.g. /api/respond's
-// client-response shape), use PostEnvelope instead.
-func (c *RPCClient) PostRaw(ctx context.Context, method string, payload json.RawMessage) (*rpcResponse, error) {
-	return c.Post(ctx, method, payload)
-}
-
 // PostEnvelope POSTs a pre-built raw JSON body without wrapping in
 // the standard clientRequest envelope. Used for /api/respond which
 // uses the client-response envelope (dsh-api.md §2.12) — type:"client-response",
@@ -234,9 +243,11 @@ func (c *RPCClient) PostRaw(ctx context.Context, method string, payload json.Raw
 //
 // The server still expects HTTP 200 + a reasonable response on
 // the response side; the difference from Post is purely on the
-// request body shape.
+// request body shape. Method dots are converted to slashes to
+// match the gateway's slash-separated routing (F-dsh-preset-1).
 func (c *RPCClient) PostEnvelope(ctx context.Context, method string, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/"+method, bytes.NewReader(body))
+	url := c.baseURL + "/api/" + methodDotsToSlashes(method)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dsh.host: build request %s: %w", method, err)
 	}
@@ -293,7 +304,9 @@ type SessionSummary struct {
 // SessionList queries /api/session.list. Used by Phase 4 restart-
 // recovery: match persisted sessionIds against current server state.
 func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
-	resp, err := c.Post(ctx, "session.list", map[string]any{})
+	resp, err := c.Post(ctx, "session.list", map[string]any{
+		"request": map[string]any{},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +335,9 @@ type SessionCreateOpts struct {
 // to dedupe: rather than blindly create a new workspace, we look
 // up an existing one with the same path and reuse it.
 func (c *RPCClient) WorkspaceList(ctx context.Context) ([]WorkspaceSummary, error) {
-	resp, err := c.Post(ctx, "workspace.list", map[string]any{})
+	resp, err := c.Post(ctx, "workspace.list", map[string]any{
+		"request": map[string]any{},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +401,9 @@ type WorkspaceSummary struct {
 // workspace survives across sessions, see driver.Close which
 // uses workspace.archiveSession instead of workspace.delete).
 func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, error) {
-	resp, err := c.Post(ctx, "workspace.create", map[string]any{"path": path})
+	resp, err := c.Post(ctx, "workspace.create", map[string]any{
+		"request": map[string]any{"path": path},
+	})
 	if err != nil {
 		return WorkspaceSummary{}, err
 	}
@@ -413,7 +430,7 @@ func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (Workspace
 // session-not-found when the id is neither live nor persisted.
 func (c *RPCClient) WorkspaceArchiveSession(ctx context.Context, sessionID string) error {
 	resp, err := c.Post(ctx, "workspace.archiveSession", map[string]any{
-		"sessionId": sessionID,
+		"request": map[string]any{"sessionId": sessionID},
 	})
 	if err != nil {
 		return err
@@ -429,7 +446,9 @@ func (c *RPCClient) WorkspaceArchiveSession(ctx context.Context, sessionID strin
 // Best-effort: callers log the error but don't propagate, since
 // shutdown still proceeds even if dsh is unreachable.
 func (c *RPCClient) WorkspaceDelete(ctx context.Context, workspaceID string) error {
-	resp, err := c.Post(ctx, "workspace.delete", map[string]any{"workspaceId": workspaceID})
+	resp, err := c.Post(ctx, "workspace.delete", map[string]any{
+		"request": map[string]any{"workspaceId": workspaceID},
+	})
 	if err != nil {
 		return err
 	}
@@ -443,7 +462,9 @@ func (c *RPCClient) WorkspaceDelete(ctx context.Context, workspaceID string) err
 // sessionId. Phase 2 will call this from ChatSession.Spawner; Phase 0
 // is just plumbing.
 func (c *RPCClient) SessionCreate(ctx context.Context, opts SessionCreateOpts) (string, error) {
-	resp, err := c.Post(ctx, "session.create", opts)
+	resp, err := c.Post(ctx, "session.create", map[string]any{
+		"request": opts,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -478,9 +499,11 @@ type PromptPart struct {
 // bad-request: invalid input: expected "queue").
 func (c *RPCClient) SessionPrompt(ctx context.Context, sessionID, mode string, parts []PromptPart) error {
 	resp, err := c.Post(ctx, "session.prompt", map[string]any{
-		"sessionId": sessionID,
-		"mode":      mode,
-		"content":   parts,
+		"request": map[string]any{
+			"sessionId": sessionID,
+			"mode":      mode,
+			"content":   parts,
+		},
 	})
 	if err != nil {
 		return err
@@ -497,12 +520,40 @@ func (c *RPCClient) SessionPrompt(ctx context.Context, sessionID, mode string, p
 // error so callers can decide; Phase 2 will codify the lenient
 // semantics the existing bridge uses in session.go:Close.
 func (c *RPCClient) SessionCancel(ctx context.Context, sessionID string) error {
-	resp, err := c.Post(ctx, "session.cancel", map[string]any{"sessionId": sessionID})
+	resp, err := c.Post(ctx, "session.cancel", map[string]any{
+		"request": map[string]any{"sessionId": sessionID},
+	})
 	if err != nil {
 		return err
 	}
 	if !resp.Result.OK {
 		return fmt.Errorf("dsh.host: session.cancel: %s", resp.Result.ErrorMessage())
+	}
+	return nil
+}
+
+// CommandsExecute invokes /api/commands/execute. `line` is the
+// full slash-command text (e.g. "/permission danger-full-access",
+// "/new", "/exit"). The dashboard fires this same RPC to flip
+// the session to Full access from the Access mode picker
+// (dsh-api.md §3.6).
+//
+// commands/execute is a FLAT-ARG method: the typert descriptor
+// names its fields directly under `args` (agentId, line, images),
+// NOT under `args.request`. Post() is now pass-through, so we
+// hand it the bare fields here and Post adds the outer `args`
+// wrapper.
+func (c *RPCClient) CommandsExecute(ctx context.Context, sessionID, line string) error {
+	resp, err := c.Post(ctx, "commands/execute", map[string]any{
+		"agentId": sessionID,
+		"line":    line,
+		"images":  []any{},
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Result.OK {
+		return fmt.Errorf("dsh.host: commands/execute: %s", resp.Result.ErrorMessage())
 	}
 	return nil
 }
@@ -589,4 +640,31 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// methodDotsToSlashes converts the dot-separated RPC method name
+// callers pass (e.g. "session.create") into the slash-separated
+// path segment dsh web's gateway expects (e.g. "session/create").
+func methodDotsToSlashes(method string) string {
+	return strings.ReplaceAll(method, ".", "/")
+}
+
+// wrapArgs wraps the JSON-marshaled args under the typert
+// envelope's `args` field. The gateway requires this wrapper
+// regardless of whether the underlying method takes args:
+//
+//	{"args": <args>}    — typed, flat-arg, or no-arg all share this shape
+//
+// The contents of `<args>` are method-specific (see Post's doc).
+// Callers pre-build the right inner shape — wrapArgs only adds
+// the outer envelope.
+func wrapArgs(argsBytes json.RawMessage) (json.RawMessage, error) {
+	if len(argsBytes) == 0 {
+		argsBytes = json.RawMessage("{}")
+	}
+	wrapped, err := json.Marshal(map[string]any{"args": json.RawMessage(argsBytes)})
+	if err != nil {
+		return nil, err
+	}
+	return wrapped, nil
 }

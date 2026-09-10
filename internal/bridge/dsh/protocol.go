@@ -537,10 +537,13 @@ func optionLabels(opts []AskUserQuestionOption) []string {
 // ─── /api/session.create response ──────────────────────────────────────
 
 // sessionCreateValue is the `value` payload of an OK session.create
-// response. We only consume SessionID; the rest are kept as
-// RawMessage for audit logs / future fields.
+// response. SessionID drives the bridge; AgentPreset is echoed
+// back by the host (it applies the configured default when the
+// request omits agentPreset, and the same id comes back) and we
+// log it for /diagnose parity with what the dashboard shows.
 type sessionCreateValue struct {
-	SessionID string `json:"sessionId"`
+	SessionID   string `json:"sessionId"`
+	AgentPreset string `json:"agentPreset,omitempty"`
 }
 
 // ─── /api/session.list response ───────────────────────────────────

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -98,7 +99,7 @@ func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle *agen
 	defer cs.mu.Unlock()
 	id := newAgentSessionID()
 	as := NewAgentSession(id, cs.ID, agentName, cwd, nil)
-	as.SetHandleForTest(handle)
+	agentstest.SetHandle(as, handle)
 	// Use a high pid that is virtually guaranteed not to be a real
 	// OS pid, so that the reapOrphan() call inside restartAgentSession's
 	// respawn path doesn't accidentally try to kill a system

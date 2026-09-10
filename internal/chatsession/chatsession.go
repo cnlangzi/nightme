@@ -1558,9 +1558,10 @@ func (cs *ChatSession) attachAgentSession(as *AgentSession) {
 // internal/command/gtw/close_test.go's step-0.5 / step-5.5
 // / happy-path-with-orphaned-AS assertions.
 //
-// Naming follows the SetHandleForTest / SetStatusForTest
-// convention on AgentSession: only test code should call
-// this. Caller is expected to wire Handle via SetHandleForTest
+// Naming follows the SetHandle / SetStatus convention on
+// AgentSession (the cross-package test affordances live in
+// internal/agentsession/agentstest). Only test code should
+// call this. Caller is expected to wire Handle via SetHandle
 // before any code path that drives as.Close() executes.
 //
 // Idempotent on the same (Agent, Cwd) key — overwrites the

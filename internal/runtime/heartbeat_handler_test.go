@@ -420,25 +420,25 @@ func TestEventHandler_Heartbeat_OrderInSequence(t *testing.T) {
 		}
 	}
 	// think + tool_start fire Observe → 2 follow-ups; OutResult
-	// fires MarkDone → +1 follow-up (the terminal "✅" signal).
+	// fires Observe terminal flip → +1 follow-up (the terminal "✅" signal).
 	if hbCount != 3 {
-		t.Fatalf("OutHeartbeat count = %d, want 3 (think + tool_start + OutResult MarkDone)", hbCount)
+		t.Fatalf("OutHeartbeat count = %d, want 3 (think + tool_start + OutResult ObserveTerminal)", hbCount)
 	}
-	// The MarkDone-triggered follow-up must carry Done=true so the
+	// The Observe-terminal-triggered follow-up must carry Done=true so the
 	// receipt header can prepend ✅.
 	if lastHB == nil || lastHB.Status != messages.HeartbeatDone {
-		t.Fatalf("final OutHeartbeat Done = %+v, want Done=true (MarkDone must propagate)", lastHB)
+		t.Fatalf("final OutHeartbeat Done = %+v, want Done=true (Observe terminal must propagate)", lastHB)
 	}
 }
 
-// TestEventHandler_OutResult_MarkDoneIdempotent pins the
+// TestEventHandler_OutResult_ObserveTerminalIdempotent pins the
 // transition semantics end-to-end: the second OutResult on the
 // same userMsgID (rare but legal — bridge retry, etc.) must
-// NOT emit a second OutHeartbeat with Done=true. MarkDone's
+// NOT emit a second OutHeartbeat with Done=true. Observe's
 // false→true transition check makes the second call a no-op,
 // so the runtime emits at most one terminal follow-up per
 // userMsgID per turn.
-func TestEventHandler_OutResult_MarkDoneIdempotent(t *testing.T) {
+func TestEventHandler_OutResult_ObserveTerminalIdempotent(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
@@ -466,10 +466,10 @@ func TestEventHandler_OutResult_MarkDoneIdempotent(t *testing.T) {
 		}
 	}
 	if hbCount != 1 {
-		t.Fatalf("OutHeartbeat count = %d, want 1 (second MarkDone must be a no-op)", hbCount)
+		t.Fatalf("OutHeartbeat count = %d, want 1 (second terminal Observe must be a no-op)", hbCount)
 	}
 
-	// Tracker state: Done=true (set on first MarkDone).
+	// Tracker state: Done=true (set on first terminal Observe).
 	snap := cs.Heartbeat().Snapshot("om_user_1")
 	if snap.Status == messages.HeartbeatRunning {
 		t.Fatalf("Heartbeat.Done = false, want true after first OutResult")
@@ -516,9 +516,9 @@ func TestEventHandler_OutResult_DoneOnlyEmitsCheck(t *testing.T) {
 		}
 	}
 	if hbCount != 1 {
-		t.Fatalf("OutHeartbeat count = %d, want 1 (MarkDone follow-up must fire even with zero counters)", hbCount)
+		t.Fatalf("OutHeartbeat count = %d, want 1 (terminal Observe follow-up must fire even with zero counters)", hbCount)
 	}
 	if lastHB == nil || lastHB.Status != messages.HeartbeatDone {
-		t.Fatalf("OutHeartbeat snapshot Done = %+v, want Done=true (MarkDone must fire on Done-only path)", lastHB)
+		t.Fatalf("OutHeartbeat snapshot Done = %+v, want Done=true (terminal Observe must fire on Done-only path)", lastHB)
 	}
 }

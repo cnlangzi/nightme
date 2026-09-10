@@ -287,7 +287,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		// and emitter.Send (channel emit) below as two separate
 		// product paths. No conflict: sink shows the process,
 		// the formatted text is the deliverable.
-		sink := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
+		//
+		// defer finalize() (F-63 follow-up fix-gtw-command-done):
+		// the sink's drain goroutine runs on its own ctx so the
+		// terminal OutHeartbeat's renderLocked is not canceled
+		// when revCtx's WithTimeout fires at goroutine return.
+		sink, finalize := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
+		defer finalize()
 
 		result, err := starter.Review(revCtx, rc, agent.WithEventSink(sink))
 		if err != nil {

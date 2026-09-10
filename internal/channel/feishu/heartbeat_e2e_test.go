@@ -97,7 +97,7 @@ func buildHandler(em messages.Emitter, cs *chatsession.ChatSession, thinkMode ch
 
 		// ⭐ F-63 observe BEFORE policies.
 		if env.UserMsgID != "" && cs.Heartbeat() != nil {
-			if cs.Heartbeat().Observe(env.UserMsgID, out.Kind) {
+			if cs.Heartbeat().Observe(env.UserMsgID, out) {
 				snap := cs.Heartbeat().Snapshot(env.UserMsgID)
 				if !snap.Empty() {
 					_ = em.Send(context.Background(), messages.OutboundMessage{

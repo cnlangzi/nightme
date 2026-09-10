@@ -71,7 +71,7 @@ func TestSendHeartbeatFollowUp_EmitsOutHeartbeat(t *testing.T) {
 // TestSendHeartbeatFollowUp_DropsEmpty — zero-valued snapshot
 // (no counters, no LastBeatAt, no Done) is dropped silently.
 // The empty-snapshot drop is the safety net for the LRU-evict
-// race between Observe/MarkDone and Snapshot.
+// race between Observe (terminal flip) and Snapshot.
 func TestSendHeartbeatFollowUp_DropsEmpty(t *testing.T) {
 	em := &captureEmitter{}
 	sendHeartbeatFollowUp(em, discardLogger(),

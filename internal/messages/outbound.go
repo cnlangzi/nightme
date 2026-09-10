@@ -134,6 +134,22 @@ const (
 	// gateway.Translate on raw AgentEvents) — so the kind is
 	// idempotent against its own emissions and never recurses.
 	OutHeartbeat
+
+	// OutPromptEnded marks the terminal lifecycle of a turn.
+	// Carries PromptEndReason on the message so the chokepoint
+	// (HeartbeatTracker.Observe) can derive the terminal verdict
+	// (Done vs Error) without a separate API. Sourced from
+	// AgentSession.endPrompt via the CS pump's PromptEndBus —
+	// covers turns that exit WITHOUT an OutResult (bridge
+	// crash, user-initiated kill, etc.) where the runtime
+	// handler's OutResult branch would otherwise be silent.
+	//
+	// OutPromptEnded is distinct from agentsession.KindPromptEnded:
+	// the latter is an internal AgentSession state-machine event
+	// (drives TryFlush / next-submit); this one is a chokepoint
+	// outbound kind that HeartbeatTracker.Observe watches to
+	// flip the heartbeat Status. Same lifecycle, two layers.
+	OutPromptEnded
 )
 
 // String renders OutboundKind for log lines.
@@ -169,6 +185,8 @@ func (k OutboundKind) String() string {
 		return "error"
 	case OutHeartbeat:
 		return "heartbeat"
+	case OutPromptEnded:
+		return "prompt_ended"
 	}
 	return "unknown"
 }
@@ -298,6 +316,13 @@ type OutboundMessage struct {
 	// this field via the default OutboundKind switch case.
 	Heartbeat *HeartbeatSnapshot
 
+	// PromptEndReason is the verdict payload for OutPromptEnded.
+	// nil for other Kinds. HeartbeatTracker.Observe reads this to
+	// derive HeartbeatDone (Reason == nil or PromptEndClean) vs
+	// HeartbeatError (Reason.IsError()). Populated by the CS
+	// pump's PromptEndBus subscriber from AgentSession.endPrompt.
+	PromptEndReason *agent.PromptEndReason
+
 	// GitStatus (F-CLAUDE-PRINT-002) is the workspace + git + PR
 	// context attached to every outbound message that flows to a
 	// Channel. Sourced from chatsession (chatsession caches its
@@ -332,11 +357,13 @@ type OutboundMessage struct {
 //	  "\u274c " (cross) instead of "\u2705 " (check) so the user can
 //	  tell at a glance which turns failed.
 //
-// Set by HeartbeatTracker.MarkTerminal, which the runtime calls
-// from two sites: handler.go's OutResult branch (always clean) and
-// the PromptEndBus subscriber (reads the PromptEndReason and maps
-// accordingly). Channels see this through OutHeartbeat.Heartbeat
-// and pick their prefix on render.
+// Set by HeartbeatTracker.Observe (single entry point that
+// handles counting + lifecycle flip in one switch). Trigger
+// events: OutResult on the runtime path (verdict derived from
+// msg.Err; msg.Err == nil → Done, else Error) and OutPromptEnded
+// from the CS pump's PromptEndBus subscriber (verdict derived
+// from msg.PromptEndReason.IsError()). Channels see this through
+// OutHeartbeat.Heartbeat and pick their prefix on render.
 type HeartbeatStatus int
 
 const (

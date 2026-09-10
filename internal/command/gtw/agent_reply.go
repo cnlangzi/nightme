@@ -133,7 +133,7 @@ func runAgentFor(
 	// of truth in outbound.StreamRunOnceToEmitter / dispatchSinkEvent,
 	// which in turn drives:
 	//   1. Translate (AgentEvent → OutboundMessage)
-	//   2. cs.Heartbeat().Observe(replyTo, out.Kind) — ThinkCount /
+	//   2. cs.Heartbeat().Observe(replyTo, out) — ThinkCount /
 	//      ToolCount increment BEFORE the policy gate (so /think
 	//      off / /tools off still surface real activity)
 	//   3. Auto-emit OutHeartbeat when counters change
@@ -157,7 +157,17 @@ func runAgentFor(
 	//     / HeartbeatObserved / Filtering / DropOutResult /
 	//     NoDropPreservesOutResult / SinkNilEmitter). Touching
 	//     the wiring above is a regression risk for those tests.
-	sink := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName, dropKinds...)
+	//
+	// defer finalize() (F-63 follow-up fix-gtw-command-done): the
+	// sink's drain goroutine runs on its own ctx, independent of
+	// `ctx`. finalize() closes the internal channel and blocks
+	// until the terminal OutHeartbeat's renderLocked has landed
+	// on the receipt card. If we let `ctx`'s defer cancel() fire
+	// first (it does, at runAgentFor return), renderLocked's 300ms
+	// PATCH throttle can race it and the receipt's terminal ✅
+	// PATCH never lands.
+	sink, finalize := outbound.StreamRunOnceToEmitter(ctx, cs.Emitter(), cs, slog.Default(), chatID, messageID, agentName, dropKinds...)
+	defer finalize()
 
 	res, err := a.RunOnce(ctx,
 		agent.StartConfig{Workspace: workspace},

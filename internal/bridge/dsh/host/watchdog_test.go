@@ -1,21 +1,21 @@
 // watchdog_test.go — tests for the SharedHost watchdog / respawn cycle.
 //
-// Uses a python "fake dsh" subprocess that binds the TCP port
-// (so spawnAndWire's waitForListen succeeds), prints the URL
-// line, writes its PID to FAKE_DSH_PIDFILE, and either dies
-// fast (simulating crash) or sleeps (so we can observe the
-// respawned instance). Tests do NOT depend on the real dsh
-// binary on PATH.
+// Uses a tiny Go binary as a fake dsh subprocess. The fake binds
+// the TCP port (so spawnAndWire's waitForListen succeeds), prints
+// the URL line, writes its PID to FAKE_DSH_PIDFILE, and either
+// dies fast (simulating crash) or sleeps (so we can observe the
+// respawned instance). Tests do NOT depend on the real dsh binary
+// on PATH.
 //
-// The fake is a SINGLE python process — earlier attempts at a
-// bash + background-python split had env-var-order races and
-// parent-death-poll windows where the python listener could
-// be killed before waitForListen saw the bind. A single python
-// process that binds, prints, writes PID, then sleeps for
-// LIFETIME is deterministic: by the time spawnAndWire's
-// waitForListen polls, the port is already bound, and the
-// process exits cleanly (close socket → port freed) when the
-// sleep elapses.
+// The fake is a single Go process. Earlier attempts at a bash +
+// background-python split had env-var-order races and parent-death
+// polling windows where the python listener could be killed before
+// waitForListen saw the bind. A pure Python fake was cleaner but
+// pulled a python3 dep into the test binary. A single Go binary
+// keeps everything in one language; the source is compiled once
+// per test binary in TestMain and the same binary is reused across
+// every test (per-test behavior is driven via env vars, not
+// rebuild).
 //
 // Build tag: the watchdog is only useful on unix where dsh runs;
 // windows is skipped via build tag.
@@ -26,6 +26,7 @@ package host_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,62 +37,121 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
 
-// fakeDSHScript is a python3 script that mimics the minimum
-// surface of `dsh --profile web` that spawnAndWire observes:
-//   - binds TCP on the --port we ask for (so waitForListen succeeds)
-//   - prints the URL line on stdout (legacy contract; production
-//     code no longer parses it but we keep emitting for tests
-//     that may still inspect stdout)
+// fakeDSHSource is the source of the fake-dsh binary used by
+// tests. Compiled once at TestMain; per-test behavior is driven
+// via env vars (FAKE_DSH_PIDFILE / FAKE_DSH_LIFETIME) and CLI
+// flags (--port). The binary mimics the minimum surface of
+// `dsh --profile web` that spawnAndWire observes:
+//
+//   - binds TCP on the --port we ask for (waitForListen sees it)
+//   - prints the URL line on stdout (legacy contract kept for
+//     any test still inspecting stdout)
 //   - writes PID to FAKE_DSH_PIDFILE so tests can synchronize
 //     on the process lifecycle
-//   - sleeps FAKE_DSH_LIFETIME (default 0.05s), then exits 1
+//   - sleeps FAKE_DSH_LIFETIME (default 0.05s) then exits 1
 //
-// LIFETIME=0.05 is intentionally tiny: tests run in sequence
-// and each test's spawn needs the port to be free when it
-// starts. A short lifetime + clean socket close on exit
-// guarantees the port is freed within milliseconds of the
-// script returning.
-const fakeDSHScript = `#!/usr/bin/env python3
-import sys, os, time, socket
+// Closing the listener before exit releases the port immediately,
+// which is what subsequent tests in the same run depend on —
+// fakeDSHScript's default 0.05s lifetime is intentionally tiny
+// for the same reason (tests run in sequence and each test's
+// spawn needs the port to be free).
+const fakeDSHSource = `package main
 
-port = 3080
-i = 1
-while i < len(sys.argv):
-    a = sys.argv[i]
-    if a == "--port" and i + 1 < len(sys.argv):
-        port = int(sys.argv[i + 1])
-        i += 2
-    else:
-        i += 1
+import (
+	"fmt"
+	"net"
+	"os"
+	"strconv"
+	"time"
+)
 
-s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(('127.0.0.1', port))
-s.listen(5)
+func main() {
+	port := 3080
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--port" && i+1 < len(os.Args) {
+			if p, err := strconv.Atoi(os.Args[i+1]); err == nil {
+				port = p
+			}
+			i++
+		}
+	}
 
-print("dsh web: http://127.0.0.1:" + str(port))
-sys.stdout.flush()
+	host := fmt.Sprintf("127.0.0.1:%d", port)
+	s, err := net.Listen("tcp", host)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fake-dsh: listen %s: %v\n", host, err)
+		os.Exit(2)
+	}
+	defer s.Close()
 
-pidfile = os.environ.get('FAKE_DSH_PIDFILE')
-if pidfile:
-    with open(pidfile, 'w') as f:
-        f.write(str(os.getpid()))
+	fmt.Printf("dsh web: http://%s\n", host)
 
-lifetime = float(os.environ.get('FAKE_DSH_LIFETIME', '0.05'))
-time.sleep(lifetime)
-s.close()
-sys.exit(1)
+	if pidfile := os.Getenv("FAKE_DSH_PIDFILE"); pidfile != "" {
+		if err := os.WriteFile(pidfile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "fake-dsh: pidfile %s: %v\n", pidfile, err)
+		}
+	}
+
+	lifetime := 0.05
+	if s := os.Getenv("FAKE_DSH_LIFETIME"); s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil {
+			lifetime = v
+		}
+	}
+	time.Sleep(time.Duration(lifetime * float64(time.Second)))
+	os.Exit(1)
+}
 `
 
-// writeFakeDSH drops the python script into t.TempDir() and chmods it.
+// fakeDSHBin is the compiled fake-dsh binary path. Set once by
+// TestMain; read by writeFakeDSH. Tests share the same binary
+// (behavior is parameterized via env vars / CLI flags, not
+// rebuild).
+var fakeDSHBin string
+
+// TestMain compiles fakeDSHBin once for the whole test binary.
+// Per-test writeFakeDSH is then just a path return — no per-test
+// compile overhead.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "fake-dsh-bin-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fake-dsh test setup: mkdir: %v\n", err)
+		os.Exit(2)
+	}
+
+	srcPath := filepath.Join(dir, "fake-dsh.go")
+	binPath := filepath.Join(dir, "fake-dsh")
+	if err := os.WriteFile(srcPath, []byte(fakeDSHSource), 0o644); err != nil {
+		os.RemoveAll(dir)
+		fmt.Fprintf(os.Stderr, "fake-dsh test setup: write source: %v\n", err)
+		os.Exit(2)
+	}
+
+	build := exec.Command("go", "build", "-o", binPath, srcPath)
+	if out, err := build.CombinedOutput(); err != nil {
+		os.RemoveAll(dir)
+		fmt.Fprintf(os.Stderr, "fake-dsh test setup: build failed: %v\n%s\n", err, out)
+		os.Exit(2)
+	}
+	fakeDSHBin = binPath
+
+	code := m.Run()
+
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// writeFakeDSH returns the path of the precompiled fake-dsh binary.
+// The build happens once per test binary (see TestMain); each call
+// here just hands back the path. Per-test configuration goes via
+// env vars (FAKE_DSH_PIDFILE / FAKE_DSH_LIFETIME) and the --port
+// flag passed to StartSharedHost, not via rebuild.
 func writeFakeDSH(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "fake-dsh.py")
-	if err := os.WriteFile(path, []byte(fakeDSHScript), 0o755); err != nil {
-		t.Fatalf("write fake dsh: %v", err)
+	if fakeDSHBin == "" {
+		t.Fatal("fake-dsh binary not built; TestMain must run first")
 	}
-	return path
+	return fakeDSHBin
 }
 
 // waitPIDFile polls path until it contains a positive integer, or
@@ -157,9 +217,9 @@ func killFakeDSH(t *testing.T, sh *host.SharedHost) {
 }
 
 // TestSharedHost_WatchdogRespawns verifies the watchdog observes a
-// fake-dsh crash and spawns a replacement. The python script writes
-// its PID to FAKE_DSH_PIDFILE on startup; we observe the file
-// changing (different PID) as proof of respawn.
+// fake-dsh crash and spawns a replacement. The fake writes its
+// PID to FAKE_DSH_PIDFILE on startup; we observe the file changing
+// (different PID) as proof of respawn.
 //
 // Phase 1 (crash): LIFETIME=0.1s, fake-dsh dies fast → watchdog fires.
 // Phase 2 (alive): LIFETIME=10s, watchdog respawns, new instance sticks.
@@ -231,7 +291,3 @@ func TestSharedHost_WatchdogRespawns(t *testing.T) {
 func TestRespawnDelay_Bounded(t *testing.T) {
 	t.Skip("respawnDelay is unexported; bounded via direct testing of the watchdog which is slow")
 }
-
-// Compile-time anchor (so unused imports don't drift if the file
-// gets pruned to skip-tags).
-var _ = os.Stderr

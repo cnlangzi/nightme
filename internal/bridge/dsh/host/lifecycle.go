@@ -268,10 +268,19 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 			"workspace", opts.Workspace)
 		return h, nil
 	case errors.Is(err, ErrNotRunning):
-		// Fall through to spawn path below.
+		// Fall through to spawn path below — 3080 is empty, we
+		// own the bind.
 	case errors.Is(err, ErrNotDSH):
-		return nil, fmt.Errorf("dsh.host: port %d responds but doesn't look like dsh: %w",
-			defaultDSHPort, err)
+		// 3080 has something on it but it isn't dsh (e.g. a
+		// user's local dev server, or a stale process from a
+		// previous operator session). Fall through to spawn path
+		// — the spawn-path block below sweeps [3081, 3099] for the
+		// first free port and spawns dsh there. Returning an error
+		// here would make the bridge unusable for any host that has
+		// even one non-dsh service on 3080, which is too brittle.
+		logger.Warn("dsh.host: port 3080 occupied by non-dsh; will fall back",
+			"foreign_port", defaultDSHPort,
+			"probe_err", err)
 	default:
 		return nil, fmt.Errorf("dsh.host: discover: %w", err)
 	}

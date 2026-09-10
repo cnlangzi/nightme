@@ -16,10 +16,12 @@ package host_test
 
 import (
 	"context"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
@@ -174,5 +176,51 @@ func TestEnsureSharedHost_MissingBinary(t *testing.T) {
 	if !strings.Contains(err.Error(), "dsh") &&
 		!strings.Contains(err.Error(), filepath.Base(binary)) {
 		t.Logf("error message lacks binary name; err=%v", err)
+	}
+}
+
+// TestEnsureSharedHost_FallsBackWhen3080Foreign covers the
+// regression where ErrNotDSH from DiscoverExisting returned
+// immediately, leaving the fallback-port code below the switch
+// unreachable. The fix: ErrNotDSH falls through to the spawn
+// path which sweeps [3081, 3099] for the first free port and
+// spawns dsh there. Without this, any host with a non-dsh service
+// on 3080 made the bridge unusable.
+//
+// Skipped by default: requires the test runner to bring up a
+// foreign HTTP server on 3080 first. See the test body for the
+// exact prerequisite command.
+func TestEnsureSharedHost_FallsBackWhen3080Foreign(t *testing.T) {
+	host.UnsetGlobal()
+	host.UnsetSharedHost()
+	host.ResetEnsureForTest()
+	t.Cleanup(func() {
+		host.UnsetGlobal()
+		host.UnsetSharedHost()
+		host.ResetEnsureForTest()
+	})
+	// Sanity: confirm 3080 is held by a non-dsh service. The
+	// outer test runner is expected to start one; if not, this
+	// test asserts the wrong thing (it would see ErrNotRunning
+	// and spawn on 3080 directly). Bail loudly so the user
+	// knows to start the foreign server.
+	c, err := net.DialTimeout("tcp", "127.0.0.1:3080", 200*time.Millisecond)
+	if err != nil {
+		t.Skip("no foreign server on 3080; rerun with one started externally")
+	}
+	c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cli, err := host.EnsureSharedHost(ctx, host.SharedHostOptions{
+		Workspace:      "/tmp",
+		HostCmd:        "dsh",
+		PermissionMode: "danger-full-access",
+	})
+	if err != nil {
+		t.Fatalf("EnsureSharedHost: %v", err)
+	}
+	if strings.HasSuffix(cli.BaseURL(), ":3080") {
+		t.Errorf("expected FALLBACK port since 3080 is foreign; got %s", cli.BaseURL())
 	}
 }

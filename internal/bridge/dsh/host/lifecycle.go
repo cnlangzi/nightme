@@ -10,14 +10,23 @@
 // Lifecycle model:
 //
 //	StartSharedHost(ctx, opts)
-//	  1. exec `dsh --profile web` (NO --port flag — dsh defaults to
-//	     its canonical port 3080; we explicitly refuse anything
-//	     other than 3080 to keep sessions from splitting across
-//	     instances; see spawnAndWire + the port assertion below)
-//	  2. read stdout until "dsh web: http://127.0.0.1:<port>" appears
-//	  3. construct *host.Client rooted at that URL
-//	  4. Client.Start pumps → mux/host WS connects
-//	  5. install client via host.SetGlobal so dsh.newDriver can find it
+//	  1. probe 127.0.0.1:3080 via DiscoverExisting (TCP dial +
+//	     GET /manifest.webmanifest fingerprint check). If a dsh is
+//	     already there, attach to it (ownsProcess=false, no
+//	     watchdog, daemon never tears it down on shutdown).
+//	  2. if 3080 is empty (ErrNotRunning), spawn a fresh dsh with
+//	     `--profile web --port 3080` explicit. Host is always
+//	     127.0.0.1 (dsh doesn't bind anywhere else); port is
+//	     whatever we passed via --port. Readiness is waitForListen
+//	     (TCP accept on the chosen port), NOT stdout parsing.
+//	  3. if 3080 is occupied by something that isn't dsh
+//	     (ErrNotDSH), sweep [3081, 3099] for the first free
+//	     port via findFreePort and spawn dsh on that. Range
+//	     exhausted → fail loud.
+//	  4. Client.Start pumps → mux/host WS connects (HTTP
+//	     handshake catches the small kernel-accept-queue vs
+//	     app-Accept race window).
+//	  5. install client via host.SetGlobal so dsh.newDriver can find it.
 //
 //	ShutdownSharedHost(ctx, client)
 //	  1. Client.Close (stops mux/host pumps)
@@ -25,9 +34,6 @@
 //	     at daemon shutdown — sessions were already Closed by the
 //	     runtime's own shutdown sequence)
 //	  3. SIGINT dsh, wait 5s, SIGKILL, wait 5s
-//
-// Phase 1 only implements start + graceful shutdown. Watchdog +
-// auto-restart on crash lands in Phase 2 (F-dsh-shared-host §4.2).
 package host
 
 import (
@@ -337,8 +343,6 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 // format drift caused silent timeouts) and unnecessary now that
 // we own the port choice.
 
-//
-
 // stderrRing is a bounded line buffer for dsh's stderr. The
 // waitForListen failure path dumps its snapshot into a Warn-level
 // log line so /diagnose can see what dsh actually said before we
@@ -599,8 +603,9 @@ func (h *SharedHost) tryRespawn() error {
 	return errors.New("dsh.host: max respawn attempts exceeded")
 }
 
-// spawnAndWire spawns a fresh dsh subprocess, parses its bound URL
-// from stdout, and constructs + starts a *Client rooted at that URL.
+// spawnAndWire spawns a fresh dsh subprocess with --port <port>
+// explicit, polls TCP readiness via waitForListen, and constructs
+// + starts a *Client rooted at fmt.Sprintf("http://127.0.0.1:%d", port).
 // Returns the live cmd (caller takes ownership of lifecycle) and the
 // started Client (RPC + Hub + Router). On any error after Start() the
 // cmd is killed + wait'd before returning so callers don't have to
@@ -609,10 +614,12 @@ func (h *SharedHost) tryRespawn() error {
 // Shared by StartSharedHost's initial spawn and the watchdog's
 // spawnOnce path — same mechanics, different ownership semantics.
 //
-// No --port flag: dsh's own default for --profile web is 3080, and
-// the reuse-or-spawn contract assumes "3080 or fail loud". Falling
-// back to --port 0 would split sessions across instances if the
-// user's dsh is on a different port.
+// --port is always explicit (no reliance on dsh's default) so the
+// daemon owns the bind. Host is always 127.0.0.1; nothing in this
+// code path supports remote hosts. The fallback-port sweep in
+// StartSharedHost picks a port from findFreePort(3081, 3099) when
+// 3080 is held by something that isn't dsh; spawnAndWire doesn't
+// choose the port itself, the caller does.
 func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger *slog.Logger) (*exec.Cmd, *Client, error) {
 	if logger == nil {
 		// Match StartSharedHost's nil-guard so callers and tests

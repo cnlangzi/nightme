@@ -54,7 +54,7 @@ dsh --profile web
 - **显式传 `--port 3080`** — nightme 锁定端口,不依赖 dsh 默认值(2026-09-10 改;避免 dsh 默认端口漂移时 bridge 静默失联)
 - **绝对不使用** `--port 0`(OS 随机端口):实机验证 dsh 不接受 0 + 会随机到奇怪端口,与 "reuse-or-spawn" 契约冲突;详细 fallback 见 §1.3.1
 - **3080 被占且不是 dsh**:扫描 `3081..3099`(20 个候选端口)找第一个可用;`findFreePort` 用 `net.Listen` 测试,扫不到 → 报清晰错误"no free port in range 3080-3099"
-- **Readiness 判定**:TCP-poll `waitForListen(ctx, 3080)`,每 50ms 拨号一次,直到 TCP accept;不再解析 stdout URL(2016-09-10 改,避免 dsh stdout 格式漂移时 race);`cli.Start` 紧跟着做 HTTP 握手,捕获 kernel-accept-queue vs app-Accept race
+- **Readiness 判定**:TCP-poll `waitForListen(ctx, &lt;port&gt;)`,每 50ms 拨号一次,直到 TCP accept;`&lt;port&gt;` 是 StartSharedHost 选定的端口(3080 canonical,或 3081-3099 fallback 中的第一个可用);不再解析 stdout URL(2026-09-10 改,避免 dsh stdout 格式漂移时 race);`cli.Start` 紧跟着做 HTTP 握手,捕获 kernel-accept-queue vs app-Accept race
 
 #### 1.3.2 HTTP RPC
 ```

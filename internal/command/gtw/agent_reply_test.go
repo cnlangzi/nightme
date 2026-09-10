@@ -286,7 +286,7 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 	// ToolStart, OutThinking, ToolStart; plus 1 terminal flip
 	// from OutResult at the end of the agent run). Counter
 	// increments AND terminal flips happen BEFORE the policy
-	// gate via the consolidated Observe chokepoint, so even
+	// gate via the Observe chokepoint, so even
 	// when a future change hides a kind the heartbeat would
 	// still track it AND flip to Done/Error on the terminal
 	// event. The terminal OutHeartbeat is what makes the GTW
@@ -517,7 +517,7 @@ func TestRunAgentFor_NoDropPreservesOutResult(t *testing.T) {
 	}
 	// The sink no longer drops the terminal OutResult — without
 	// dropKinds the OutResult reaches the channel. The
-	// consolidated Observe fires a terminal OutHeartbeat
+	// Observe fires a terminal OutHeartbeat
 	// follow-up BEFORE the drop check, so the captured stream
 	// carries both: 1 terminal OutHeartbeat (Observe flips
 	// Status → Done) + 1 OutResult. Wait for both.

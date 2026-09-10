@@ -166,9 +166,8 @@ func TestObserve_ResultFlipsStatusDone(t *testing.T) {
 
 // TestObserve_ResultWithErrFlipsStatusError pins the error
 // branch: an OutResult carrying Err flips to HeartbeatError
-// (so the receipt header paints ❌ instead of ✅). This is the
-// semantic fix the consolidated Observe brings — the pre-
-// refactor handler.go always flipped to Done regardless of Err.
+// (so the receipt header paints ❌ instead of ✅). Verdict
+// source: msg.Err != nil.
 func TestObserve_ResultWithErrFlipsStatusError(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
 	changed := tr.Observe("u1", messages.OutboundMessage{

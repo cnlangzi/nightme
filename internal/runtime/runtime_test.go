@@ -371,7 +371,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	got := ch.Record()
 	// Filter to OutResult only — the runtime also fires an
 	// OutHeartbeat follow-up after each OutResult (via
-	// HeartbeatTracker.MarkDone flipping Done=true for the
+	// HeartbeatTracker.Observe terminal flip setting Done=true for the
 	// terminal "✅" prefix). The per-turn Usage assertion is
 	// about the OutResult payload, not the heartbeat follow-up,
 	// so filtering makes the test orthogonal to the heartbeat
@@ -384,7 +384,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 		}
 	}
 	if len(results) != 2 {
-		t.Fatalf("got %d OutResult events, want 2 (filter excludes MarkDone follow-ups)", len(results))
+		t.Fatalf("got %d OutResult events, want 2 (filter excludes terminal Observe follow-ups)", len(results))
 	}
 	// First turn: Usage = (10, 5) — turn 1 only.
 	if u := results[0].Usage; u == nil ||

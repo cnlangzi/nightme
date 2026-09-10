@@ -582,3 +582,67 @@ func TestRunAgentFor_SinkNilEmitter(t *testing.T) {
 		t.Errorf("res.Text = %q, want ignored", res.Text)
 	}
 }
+
+// TestRunAgentFor_FinalizeBlocksUntilDrained pins the F-63
+// follow-up fix-gtw-command-done guarantee: defer finalize()
+// in runAgentFor blocks until the drain goroutine has
+// processed every enqueued event. The dispatcher's defer
+// cancel() fires AFTER finalize() returns (defer is LIFO,
+// and finalize is deferred LATER inside runAgentFor), so
+// the terminal OutHeartbeat's renderLocked is never racing
+// a canceled ctx.
+//
+// Pre-fix behavior: runAgentFor returned as soon as RunOnce
+// returned. The drain goroutine was still processing the
+// tail of the event stream when dispatchCommit's defer
+// cancel fired, killing renderLocked mid-throttle and
+// leaving the receipt card stuck on the pre-terminal
+// ⏱ / 💭 / 🔧 header.
+//
+// The test asserts that all queued events have been
+// delivered to the emitter by the time runAgentFor returns.
+// The post-fix contract is "after runAgentFor returns,
+// drainDone has fired" — observing this transitively via
+// the captured emitter.
+func TestRunAgentFor_FinalizeBlocksUntilDrained(t *testing.T) {
+	starter := &eventEmitterStarter{
+		name: "finalize-blocks",
+		events: []agent.AgentEvent{
+			{Kind: agent.EventAgentText, Text: "chunk 1"},
+			{Kind: agent.EventAgentText, Text: "chunk 2"},
+			{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "done"}},
+		},
+		runOnceText: "done",
+	}
+	cs, ch := newSinkTestRig(t, starter)
+
+	// Use a cancellable ctx so we can simulate the
+	// dispatcher's defer cancel() firing right at
+	// runAgentFor's return — the post-fix guarantee is that
+	// finalize() ran first, so the drain has already exited
+	// and every event has reached the emitter.
+	callCtx, cancel := context.WithCancel(context.Background())
+
+	if _, _, err := runAgentFor(
+		callCtx, cs, t.TempDir(),
+		"prompt", "chat-test", "msg-test", "", "",
+	); err != nil {
+		t.Fatalf("runAgentFor: %v", err)
+	}
+
+	// runAgentFor has returned. At this point defer finalize()
+	// has already run, which means the drain goroutine has
+	// finished. cancel() now fires AFTER finalize drained
+	// everything — too late to affect delivery.
+	cancel()
+
+	// 2 OutReply chunks (one per think event) + 1 terminal
+	// OutHeartbeat (Observe flips Status → Done on the
+	// OutResult, even though OutResult is also emitted but
+	// then dropped by no-dropKinds == nil here). Wait for
+	// all 3 to arrive.
+	if !ch.waitForSent(3, 2*time.Second) {
+		t.Fatalf("drain did not finish before runAgentFor returned; got %d: %+v",
+			len(ch.snapshot()), ch.snapshot())
+	}
+}

@@ -59,8 +59,8 @@ func (s *stubChannel) Send(_ context.Context, _ messages.OutboundMessage) error 
 	}
 	return nil
 }
-func (s *stubChannel) Patch(_ context.Context, _ messages.OutboundMessage) error { return nil }
-func (s *stubChannel) OnPromptEnded(_ context.Context, _, _ string)              {}
+func (s *stubChannel) Patch(_ context.Context, _ messages.OutboundMessage) error             { return nil }
+func (s *stubChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent.PromptEndReason) {}
 func (s *stubChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return s.name, json.RawMessage("{}"), nil
 }

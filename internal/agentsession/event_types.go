@@ -8,7 +8,7 @@
 //
 // File lives in the agentsession subpackage on purpose — the
 // structs depend only on `agent.MessageState` and the
-// internal `PromptEndReason` / `Status` types defined here. F-54
+// internal `agent.PromptEndReason` / `Status` types defined here. F-54
 // §3.1.
 package agentsession
 
@@ -69,7 +69,7 @@ type MessageStateEvent struct {
 }
 
 // PromptEndedEvent fires when a Prompt terminates. Replaces the
-// v1.3.x `onPromptEnd func(userMsgID string, reason PromptEndReason)`.
+// v1.3.x `onPromptEnd func(userMsgID string, reason agent.PromptEndReason)`.
 //
 // The feishu adapter uses this to flip the receipt from 🔄 (running)
 // to ✅ (clean) or ❌ (error). UserMsgID is the receipt anchor;
@@ -83,7 +83,7 @@ type PromptEndedEvent struct {
 	ChatID         string
 	UserMsgID      string
 	PromptID       string
-	Reason         PromptEndReason
+	Reason         agent.PromptEndReason
 	EndedAt        time.Time
 	AgentSessionID string
 }

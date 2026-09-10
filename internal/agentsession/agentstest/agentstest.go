@@ -6,8 +6,8 @@
 //
 // Every helper here delegates to a documented public method on
 // AgentSession. The package is purely a convenience namespace —
-// test code reads `agentstest.EndPrompt(as, agentsession.PromptEndClean)`
-// instead of `as.EndPromptForTest(PromptEndClean)`, so the
+// test code reads `agentstest.EndPrompt(as, agent.PromptEndClean)`
+// instead of `as.EndPromptForTest(agent.PromptEndClean)`, so the
 // "test-only" intent is obvious at every call site.
 //
 // Production code MUST NOT import this package.
@@ -24,7 +24,7 @@ import (
 // EndPrompt mirrors the deleted EndPromptForTest: simulate a
 // prompt-end by running the public EndPrompt surface. Idempotent
 // against no-op when currentPrompt is nil (EndPrompt skips cleanly).
-func EndPrompt(as *agentsession.AgentSession, reason agentsession.PromptEndReason) {
+func EndPrompt(as *agentsession.AgentSession, reason agent.PromptEndReason) {
 	as.EndPrompt(reason)
 }
 

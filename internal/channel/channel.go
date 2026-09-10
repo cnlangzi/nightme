@@ -85,7 +85,7 @@ type Channel interface {
 	Incoming() <-chan messages.InboundMessage
 	Send(ctx context.Context, msg messages.OutboundMessage) error
 
-	OnPromptEnded(ctx context.Context, chatID, userMsgID string)
+	OnPromptEnded(ctx context.Context, chatID, userMsgID string, reason agent.PromptEndReason)
 	HealthSnapshot() (name string, payload json.RawMessage, err error)
 	SetLogger(logger *slog.Logger)
 	BuildBlocks(text string, attachments []messages.Attachment) []agent.ContentBlock

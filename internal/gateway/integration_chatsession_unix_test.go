@@ -80,7 +80,7 @@ func (c *recordingChannel) Record() []messages.OutboundMessage {
 
 // Channel-interface extensions (Phase 2.1 + 2.2). recordingChannel
 // has no live state — all four are trivial fallbacks.
-func (c *recordingChannel) OnPromptEnded(_ context.Context, _, _ string) {}
+func (c *recordingChannel) OnPromptEnded(_ context.Context, _, _ string, _ agent.PromptEndReason) {}
 func (c *recordingChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "mock", json.RawMessage("{}"), nil
 }

@@ -34,9 +34,9 @@ func (s *spyChannel) Name() string { return "spy" }
 func (s *spyChannel) Incoming() <-chan messages.InboundMessage {
 	return make(chan messages.InboundMessage, 1)
 }
-func (s *spyChannel) Start(context.Context) error                   { return nil }
-func (s *spyChannel) Stop(context.Context) error                    { return nil }
-func (s *spyChannel) OnPromptEnded(context.Context, string, string) {}
+func (s *spyChannel) Start(context.Context) error                                          { return nil }
+func (s *spyChannel) Stop(context.Context) error                                           { return nil }
+func (s *spyChannel) OnPromptEnded(context.Context, string, string, agent.PromptEndReason) {}
 func (s *spyChannel) HealthSnapshot() (string, json.RawMessage, error) {
 	return "spy", nil, nil
 }

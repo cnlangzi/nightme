@@ -44,7 +44,7 @@ func discardLogger() *slog.Logger {
 func TestSendHeartbeatFollowUp_EmitsOutHeartbeat(t *testing.T) {
 	em := &captureEmitter{}
 	snap := messages.HeartbeatSnapshot{
-		ThinkCount: 2, ToolCount: 1, LastBeatAt: time.Now(), Done: true,
+		ThinkCount: 2, ToolCount: 1, LastBeatAt: time.Now(), Status: messages.HeartbeatDone,
 	}
 	sendHeartbeatFollowUp(em, discardLogger(),
 		"oc_1", "om_1", "observe", snap)
@@ -63,7 +63,7 @@ func TestSendHeartbeatFollowUp_EmitsOutHeartbeat(t *testing.T) {
 	if m.Heartbeat == nil {
 		t.Fatal("Heartbeat payload is nil")
 	}
-	if m.Heartbeat.ThinkCount != 2 || m.Heartbeat.ToolCount != 1 || !m.Heartbeat.Done {
+	if m.Heartbeat.ThinkCount != 2 || m.Heartbeat.ToolCount != 1 || m.Heartbeat.Status != messages.HeartbeatDone {
 		t.Errorf("snapshot not copied faithfully: %+v", *m.Heartbeat)
 	}
 }
@@ -88,7 +88,7 @@ func TestSendHeartbeatFollowUp_DropsEmpty(t *testing.T) {
 func TestSendHeartbeatFollowUp_DoneOnlyNotEmpty(t *testing.T) {
 	em := &captureEmitter{}
 	sendHeartbeatFollowUp(em, discardLogger(),
-		"oc_1", "om_1", "markdone", messages.HeartbeatSnapshot{Done: true})
+		"oc_1", "om_1", "markdone", messages.HeartbeatSnapshot{Status: messages.HeartbeatDone})
 	if len(em.snapshot()) != 1 {
 		t.Fatalf("Done-only snapshot must be sent; got %d calls", len(em.snapshot()))
 	}

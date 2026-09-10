@@ -464,12 +464,20 @@ func reactionFor(state agent.MessageState) string {
 }
 
 // OnPromptEnded closes the turn's placeholder and marks the user's
-// message done.
+// message with the terminal reaction.
 //
 // The stream MUST be closed here: unlike a Feishu card, which simply
 // stops updating, a Slack stream left open keeps rendering as
 // in-progress.
-func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
+//
+// Reaction choice: reactionDone ("white_check_mark") for clean
+// completions (PromptEndClean), reactionError ("x") for any
+// non-clean reason (PromptEndError / ProcessDied / StalledKilled /
+// UserKilled / UserStopped) so the user can distinguish hand-
+// cancelled / error turns from clean completions at the user-
+// message surface. See agent.PromptEndReason.IsError for the
+// verdict mapping.
+func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, reason agent.PromptEndReason) {
 	stream, ok := a.streams.lookup(chatID, userMsgID)
 	if ok {
 		if err := stream.finish(ctx); err != nil {
@@ -490,8 +498,17 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	if stream != nil && stream.threadTS != "" {
 		_ = a.api.SetAssistantStatus(ctx, channelID, stream.threadTS, "")
 	}
-	if err := a.api.AddReaction(ctx, channelID, userMsgID, reactionDone); err != nil {
-		a.log().Debug("slack: done reaction failed", "err", err)
+	// Pick the reaction based on the terminal reason. Clean
+	// completion paints the check mark; any non-clean reason
+	// (Error / ProcessDied / StalledKilled / UserKilled /
+	// UserStopped) paints the cross so the user can tell at a
+	// glance which turns did not succeed without intervention.
+	reaction := reactionDone
+	if reason.IsError() {
+		reaction = reactionError
+	}
+	if err := a.api.AddReaction(ctx, channelID, userMsgID, reaction); err != nil {
+		a.log().Debug("slack: prompt-ended reaction failed", "err", err)
 	}
 }
 

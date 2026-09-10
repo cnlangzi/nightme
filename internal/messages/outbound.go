@@ -318,9 +318,36 @@ type OutboundMessage struct {
 	GitStatus *GitStatus
 }
 
+// HeartbeatStatus is the terminal-state verdict of a heartbeat
+// snapshot. Three-valued so a turn that ended in error can be
+// distinguished from a clean completion; channels render this
+// directly into the heartbeat line (Feishu / Telegram / Slack each
+// pick their own per-status prefix, see their heartbeatText helpers).
+//
+//	HeartbeatRunning — observation in flight, no terminal event yet.
+//	HeartbeatDone    — clean completion (PromptEndClean).
+//	HeartbeatError   — any non-clean reason: PromptEndError,
+//	  PromptEndProcessDied, PromptEndStalledKilled,
+//	  PromptEndUserKilled, PromptEndUserStopped. Channels paint
+//	  "\u274c " (cross) instead of "\u2705 " (check) so the user can
+//	  tell at a glance which turns failed.
+//
+// Set by HeartbeatTracker.MarkTerminal, which the runtime calls
+// from two sites: handler.go's OutResult branch (always clean) and
+// the PromptEndBus subscriber (reads the PromptEndReason and maps
+// accordingly). Channels see this through OutHeartbeat.Heartbeat
+// and pick their prefix on render.
+type HeartbeatStatus int
+
+const (
+	HeartbeatRunning HeartbeatStatus = iota
+	HeartbeatDone
+	HeartbeatError
+)
+
 // HeartbeatSnapshot (F-63) is the per-turn progress signal carried
 // on OutHeartbeat messages. It carries BOTH per-turn activity
-// counters AND a terminal-state flag in one snapshot:
+// counters AND a terminal-state verdict in one snapshot:
 //
 //	ThinkCount / ToolCount — monotonic per-turn counters driven by
 //	  Observe() (incremented on OutThinking / OutToolStart,
@@ -331,22 +358,21 @@ type OutboundMessage struct {
 //	  by any OutboundKind, not just thinking / tool calls — it's
 //	  the "agent is alive" indicator).
 //
-//	Done — terminal-state flag. Flipped true by MarkDone() when
-//	  the runtime sees OutResult or ChatSession.endPrompt fires
-//	  (the readpump observed EventAgentDone / EventAgentError).
-//	  Set independently of counters — a done turn may carry
+//	Status — terminal-state verdict (see HeartbeatStatus). Set
+//	  independently of counters — a terminal turn may carry
 //	  non-zero counters from prior activity (the common case), or
 //	  zero counters when /think off + /tools off suppressed all
 //	  in-flight activity (rare). Renderer decides how to surface
-//	  Done — feishu prepends "✅ " to the heartbeat line.
+//	  Status — Feishu / Telegram / Slack each prepend an
+//	  appropriate emoji to the heartbeat line.
 //
 // Field semantics are stable; channels and tests are free to
 // consume them directly without coordinating with the runtime.
 type HeartbeatSnapshot struct {
-	ThinkCount int       `json:"think_count"`
-	ToolCount  int       `json:"tool_count"`
-	LastBeatAt time.Time `json:"last_beat_at"`
-	Done       bool      `json:"done"`
+	ThinkCount int             `json:"think_count"`
+	ToolCount  int             `json:"tool_count"`
+	LastBeatAt time.Time       `json:"last_beat_at"`
+	Status     HeartbeatStatus `json:"status"`
 }
 
 // Empty reports whether the snapshot carries no observable state.
@@ -355,15 +381,15 @@ type HeartbeatSnapshot struct {
 // OutThinking was dropped but tracker still fires one OutHeartbeat
 // with ThinkCount unchanged).
 //
-// Done flips the verdict: a snapshot with only Done=true (no
-// counters, no LastBeatAt) is NOT empty — the terminal state is a
-// meaningful signal in its own right (a turn can finish without
-// any visible thinking / tool activity, e.g. a one-shot answer
-// with /think off + /tools off). The follow-up OutHeartbeat must
-// reach the channel so the receipt can flip its Done flag and the
-// renderer can paint "✅".
+// Status flips the verdict: a snapshot with HeartbeatDone /
+// HeartbeatError (no counters, no LastBeatAt) is NOT empty — the
+// terminal state is a meaningful signal in its own right (a turn
+// can finish without any visible thinking / tool activity, e.g.
+// a one-shot answer with /think off + /tools off). The follow-up
+// OutHeartbeat must reach the channel so the receipt can flip its
+// terminal prefix and the renderer can paint "\u2705" / "\u274c".
 func (s HeartbeatSnapshot) Empty() bool {
-	if s.Done {
+	if s.Status != HeartbeatRunning {
 		return false
 	}
 	return s.ThinkCount == 0 && s.ToolCount == 0 && s.LastBeatAt.IsZero()

@@ -222,7 +222,7 @@ func TestPendingHeartbeat_DonePreservedOnMerge(t *testing.T) {
 		ChatID:    "oc_done_merge",
 		Kind:      messages.OutHeartbeat,
 		ReplyTo:   "om_done_merge_user",
-		Heartbeat: &messages.HeartbeatSnapshot{Done: true, LastBeatAt: t0},
+		Heartbeat: &messages.HeartbeatSnapshot{Status: messages.HeartbeatDone, LastBeatAt: t0},
 	}); err != nil {
 		t.Fatalf("Send 1 (terminal): %v", err)
 	}
@@ -243,7 +243,7 @@ func TestPendingHeartbeat_DonePreservedOnMerge(t *testing.T) {
 	merged := adapter.pendingHeartbeats["om_done_merge_user"]
 	adapter.mu.Unlock()
 
-	if !merged.Done {
+	if merged.Status == messages.HeartbeatRunning {
 		t.Fatalf("merged Done = false, want true (terminal flag must survive later counters-only OutHeartbeat)")
 	}
 	if merged.ThinkCount != 2 || merged.ToolCount != 1 {

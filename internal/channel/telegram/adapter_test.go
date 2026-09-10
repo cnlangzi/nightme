@@ -883,18 +883,18 @@ func TestAdapter_Send_DropsLongText(t *testing.T) {
 
 func TestAdapter_OnPromptEnded_NoTopic(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	a.OnPromptEnded(context.Background(), "100", "1")
+	a.OnPromptEnded(context.Background(), "100", "1", agent.PromptEndClean)
 }
 
 func TestAdapter_OnPromptEnded_WithTopic(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 1, PlaceholderMessageID: 50})
-	a.OnPromptEnded(context.Background(), "100", "1")
+	a.OnPromptEnded(context.Background(), "100", "1", agent.PromptEndClean)
 }
 
 func TestAdapter_OnPromptEnded_EmptyChat(t *testing.T) {
 	a, _ := newTestAdapter(t)
-	a.OnPromptEnded(context.Background(), "", "1")
+	a.OnPromptEnded(context.Background(), "", "1", agent.PromptEndClean)
 }
 
 func TestAdapter_HandleUpdate_Empty(t *testing.T) {
@@ -1204,7 +1204,7 @@ func TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder(t *testing.T) {
 	t.Skip("v9 chain rolling log: rewrite to active-chunk 🎉 reaction assertions; tracked in docs/channel/telegram.md §11.12.16 backlog")
 	a, api := newTestAdapter(t)
 	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, PlaceholderMessageID: 909})
-	a.OnPromptEnded(context.Background(), "100", "7")
+	a.OnPromptEnded(context.Background(), "100", "7", agent.PromptEndClean)
 
 	// Must NOT PATCH placeholder text (v4 dropped "<b>✅ Completed</b>" PATCH).
 	for _, call := range api.snapshotCalls() {
@@ -1257,7 +1257,7 @@ func TestAdapter_OnPromptEnded_DM_ReactsOnUserAndPlaceholder(t *testing.T) {
 // not call editMessageText (no anchor to PATCH).
 func TestAdapter_OnPromptEnded_DM_NoPlaceholder_NoOp(t *testing.T) {
 	a, api := newTestAdapter(t)
-	a.OnPromptEnded(context.Background(), "100", "1")
+	a.OnPromptEnded(context.Background(), "100", "1", agent.PromptEndClean)
 	if call := findCall(api.snapshotCalls(), "editMessageText"); call != nil {
 		t.Fatalf("expected no editMessageText with no placeholder, got %+v", call)
 	}
@@ -2696,5 +2696,123 @@ func TestAdapter_OutThinking_PreservesWhitespace(t *testing.T) {
 	want := "💭   hello world  \n\n\n"
 	if got := chain.chunks[0].entries[0].text; got != want {
 		t.Errorf("entries[0].text = %q, want %q (prefix + whitespace preserved + trailing \\n)", got, want)
+	}
+}
+
+// TestHeartbeatText_TerminalPrefix pins the verdict prefix that
+// heartbeatText paints for the two terminal HeartbeatStatus
+// values. Telegram's chunk header was previously indifferent to
+// the terminal state (the standalone 🎉 reaction carried the
+// only signal); this test pins that the chunk header itself
+// now carries ✅ / ❌ inline so the user doesn't have to chase
+// the result-message reaction to learn whether the turn
+// completed cleanly.
+func TestHeartbeatText_TerminalPrefix(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name       string
+		hb         *messages.HeartbeatSnapshot
+		wantPrefix string // first rune of the line; "" means no terminal prefix
+	}{
+		{
+			name: "clean: Done with counters",
+			hb: &messages.HeartbeatSnapshot{
+				ThinkCount: 3, ToolCount: 1, LastBeatAt: now,
+				Status: messages.HeartbeatDone,
+			},
+			wantPrefix: "✅ ",
+		},
+		{
+			name: "error: Error with counters",
+			hb: &messages.HeartbeatSnapshot{
+				ThinkCount: 2, ToolCount: 4, LastBeatAt: now,
+				Status: messages.HeartbeatError,
+			},
+			wantPrefix: "❌ ",
+		},
+		{
+			name: "running: no prefix",
+			hb: &messages.HeartbeatSnapshot{
+				ThinkCount: 1, LastBeatAt: now,
+				Status: messages.HeartbeatRunning,
+			},
+			wantPrefix: "",
+		},
+		{
+			name: "clean: Done with no activity",
+			hb: &messages.HeartbeatSnapshot{
+				Status: messages.HeartbeatDone,
+			},
+			wantPrefix: "✅ ",
+		},
+		{
+			name: "error: Error with no activity",
+			hb: &messages.HeartbeatSnapshot{
+				Status: messages.HeartbeatError,
+			},
+			wantPrefix: "❌ ",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := heartbeatText(c.hb)
+			if !strings.HasPrefix(got, c.wantPrefix) {
+				t.Fatalf("heartbeatText = %q, want prefix %q", got, c.wantPrefix)
+			}
+			// Snapshot-driven presence of <b>: when the snapshot
+			// carries observable state (counters, time) the body
+			// is wrapped in <b>...</b>; a terminal-only snapshot
+			// produces just the prefix, no chip — same shape
+			// as feishu's renderHeartbeatHeader.
+			hasChip := c.hb.ThinkCount > 0 || c.hb.ToolCount > 0 ||
+				!c.hb.LastBeatAt.IsZero()
+			if hasChip && !strings.Contains(got, "<b>") {
+				t.Fatalf("heartbeatText = %q, want the counter chip", got)
+			}
+			if !hasChip && strings.Contains(got, "<b>") {
+				t.Fatalf("heartbeatText = %q, want no chip (terminal-only)", got)
+			}
+		})
+	}
+}
+
+// TestPatchChainHeader_EmptyRunningKeepsColdBanner pins the
+// feishu-aligned §3.6 gate: an OutHeartbeat carrying a snapshot
+// with zero counters, zero LastBeatAt, and Running status must
+// NOT flip chunk.hasHeartbeat (the cold "Working" banner
+// remains). Without this gate the chunk header would silently
+// disappear on a /think off + /tools off turn.
+func TestPatchChainHeader_EmptyRunningKeepsColdBanner(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "600", TopicID: 0,
+		PlaceholderMessageID: 1300, UserMessageID: "60"})
+
+	// Seed the chain with one OutReply so a chunk exists.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "600", Kind: messages.OutReply, Text: "seed",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Empty running snapshot — must NOT flip hasHeartbeat.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "600", Kind: messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{
+			Status: messages.HeartbeatRunning,
+		},
+	}); err != nil {
+		t.Fatalf("empty running heartbeat: %v", err)
+	}
+
+	// Now terminal-only (zero counters, no LastBeatAt, Error).
+	// Per the gate, terminal status DOES flip hasHeartbeat so
+	// the user sees the ❌ prefix on the chunk header.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "600", Kind: messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{
+			Status: messages.HeartbeatError,
+		},
+	}); err != nil {
+		t.Fatalf("terminal-only heartbeat: %v", err)
 	}
 }

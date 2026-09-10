@@ -107,69 +107,9 @@ type Prompt struct {
 	EndedAt time.Time
 
 	// EndReason describes why the Prompt ended. Zero value
-	// (`PromptEndClean` is iota=0, so technically non-zero too —
+	// (`agent.PromptEndClean` is iota=0, so technically non-zero too —
 	// callers should test `EndedAt.IsZero()` for "still running").
-	EndReason PromptEndReason
-}
-
-// PromptEndReason is the WHY of a Prompt ending. Independent of the
-// execution state (`Prompt` itself has no State field — Phase 0
-// derives "still running" from `EndedAt.IsZero()`, see
-// docs/feat/message_lifecycle.md §4.2).
-type PromptEndReason int
-
-const (
-	// PromptEndClean: agent emitted EventAgentDone normally.
-	PromptEndClean PromptEndReason = iota
-
-	// PromptEndError: agent emitted EventAgentError (unrecoverable
-	// per-event error reported by the bridge).
-	PromptEndError
-
-	// PromptEndProcessDied: AS process exited without producing
-	// EventAgentDone/EventAgentError. PHASE 0 DOES NOT TRIGGER THIS — the
-	// readPump's `!ok` branch currently returns without calling
-	// endPrompt. Reserved for the "Prompt 投递稳定性优化" PR
-	// (see docs/feat/message_lifecycle.md §8).
-	PromptEndProcessDied
-
-	// PromptEndStalledKilled: endPrompt called by the stall
-	// watchdog (L2). Phase 0 does not implement stall detection;
-	// reserved.
-	PromptEndStalledKilled
-
-	// PromptEndUserKilled: endPrompt called by `/close` slash
-	// command before process exit. Phase 0 does not distinguish
-	// user-initiated kills from ProcessDied; reserved.
-	PromptEndUserKilled
-
-	// PromptEndUserStopped: endPrompt called by /stop slash
-	// command. The bridge process MAY continue running (per-
-	// bridge Stop semantics — see internal/command/stop), but
-	// the in-flight Prompt is over from the user's POV and
-	// IsReady must flip true synchronously so the next TryFlush
-	// can land, without waiting for the bridge protocol to emit
-	// a terminal event.
-	PromptEndUserStopped
-)
-
-// String renders a PromptEndReason for logs / diagnostics.
-func (r PromptEndReason) String() string {
-	switch r {
-	case PromptEndClean:
-		return "clean"
-	case PromptEndError:
-		return "error"
-	case PromptEndProcessDied:
-		return "process-died"
-	case PromptEndStalledKilled:
-		return "stalled-killed"
-	case PromptEndUserKilled:
-		return "user-killed"
-	case PromptEndUserStopped:
-		return "user-stopped"
-	}
-	return "unknown"
+	EndReason agent.PromptEndReason
 }
 
 // PromptHook is the flush-time callback installed on InputBuffer.

@@ -412,7 +412,7 @@ func TestOnPromptEnded_ClosesStreamAndMarksDone(t *testing.T) {
 	if err := a.Send(ctx, outbound(messages.OutReply, "answer")); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	a.OnPromptEnded(ctx, testChatID, "1000.1")
+	a.OnPromptEnded(ctx, testChatID, "1000.1", agent.PromptEndClean)
 
 	if n := api.countOf("StopStream"); n != 1 {
 		t.Fatalf("StopStream count = %d, want 1", n)
@@ -437,7 +437,7 @@ func TestOnPromptEnded_ClearsAssistantStatus(t *testing.T) {
 	ctx := context.Background()
 
 	_ = a.Send(ctx, outbound(messages.OutReply, "answer"))
-	a.OnPromptEnded(ctx, testChatID, "1000.1")
+	a.OnPromptEnded(ctx, testChatID, "1000.1", agent.PromptEndClean)
 
 	cleared := false
 	for _, c := range api.snapshot() {

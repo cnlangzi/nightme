@@ -162,7 +162,7 @@ type PromptEndedChange struct {
 	EndedAt time.Time
 
 	// EndReason mirrors Prompt.EndReason at the moment of endPrompt.
-	EndReason PromptEndReason
+	EndReason agent.PromptEndReason
 }
 
 // LifecycleChange describes a status transition on the AS itself.

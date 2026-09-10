@@ -146,7 +146,7 @@ func (as *AgentSession) readpumpLoop() {
 				// closed the underlying handle). Either way,
 				// the in-flight Prompt needs to end — this is
 				// the F-53 deadlock fix.
-				as.endPrompt(PromptEndProcessDied)
+				as.endPrompt(agent.PromptEndProcessDied)
 				as.emitLifecycleLocked(StatusExited)
 				return
 			}
@@ -200,9 +200,9 @@ func (as *AgentSession) readpumpLoop() {
 			// in-flight Prompt. The PromptEnded event is emitted
 			// by endPrompt itself.
 			if ev.Kind == agent.EventAgentDone || ev.Kind == agent.EventAgentError {
-				reason := PromptEndClean
+				reason := agent.PromptEndClean
 				if ev.Kind == agent.EventAgentError {
-					reason = PromptEndError
+					reason = agent.PromptEndError
 				}
 				as.endPrompt(reason)
 			}
@@ -241,9 +241,9 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 // endPrompt (CS-AS 边界重构 Phase 1) is the AS-internal Prompt
 // terminator. Called by:
 //
-//   - readpumpLoop, on EventAgentDone → PromptEndClean
-//   - readpumpLoop, on EventAgentError → PromptEndError
-//   - readpumpLoop, on channel close → PromptEndProcessDied (F-53
+//   - readpumpLoop, on EventAgentDone → agent.PromptEndClean
+//   - readpumpLoop, on EventAgentError → agent.PromptEndError
+//   - readpumpLoop, on channel close → agent.PromptEndProcessDied (F-53
 //     deadlock fix)
 //
 // Phase 0's `cs.endPrompt` did the same thing but was tied to
@@ -259,7 +259,7 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 // nil is a no-op (the channel-closed path may legitimately call
 // endPrompt twice — once for the in-flight Prompt, once for the
 // followup nothing).
-func (as *AgentSession) endPrompt(reason PromptEndReason) {
+func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	as.asMu.Lock()
 	if as.currentPrompt == nil {
 		as.asMu.Unlock()
@@ -310,7 +310,7 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 //
 // Internal callers should keep using endPrompt directly; this is
 // just the exported surface for cross-package control commands.
-func (as *AgentSession) EndPrompt(reason PromptEndReason) {
+func (as *AgentSession) EndPrompt(reason agent.PromptEndReason) {
 	as.endPrompt(reason)
 }
 

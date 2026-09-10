@@ -426,7 +426,7 @@ func TestEventHandler_Heartbeat_OrderInSequence(t *testing.T) {
 	}
 	// The MarkDone-triggered follow-up must carry Done=true so the
 	// receipt header can prepend ✅.
-	if lastHB == nil || !lastHB.Done {
+	if lastHB == nil || lastHB.Status != messages.HeartbeatDone {
 		t.Fatalf("final OutHeartbeat Done = %+v, want Done=true (MarkDone must propagate)", lastHB)
 	}
 }
@@ -471,7 +471,7 @@ func TestEventHandler_OutResult_MarkDoneIdempotent(t *testing.T) {
 
 	// Tracker state: Done=true (set on first MarkDone).
 	snap := cs.Heartbeat().Snapshot("om_user_1")
-	if !snap.Done {
+	if snap.Status == messages.HeartbeatRunning {
 		t.Fatalf("Heartbeat.Done = false, want true after first OutResult")
 	}
 }
@@ -518,7 +518,7 @@ func TestEventHandler_OutResult_DoneOnlyEmitsCheck(t *testing.T) {
 	if hbCount != 1 {
 		t.Fatalf("OutHeartbeat count = %d, want 1 (MarkDone follow-up must fire even with zero counters)", hbCount)
 	}
-	if lastHB == nil || !lastHB.Done {
+	if lastHB == nil || lastHB.Status != messages.HeartbeatDone {
 		t.Fatalf("OutHeartbeat snapshot Done = %+v, want Done=true (MarkDone must fire on Done-only path)", lastHB)
 	}
 }

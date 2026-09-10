@@ -256,7 +256,7 @@ func NewEventHandler(
 		// OutResult so this holds; future policies that match
 		// OutResult must be installed AFTER this block.
 		if out.Kind == messages.OutResult && userMsgID != "" && cs != nil && cs.Heartbeat() != nil {
-			if cs.Heartbeat().MarkDone(userMsgID) {
+			if cs.Heartbeat().MarkTerminal(userMsgID, messages.HeartbeatDone) {
 				sendHeartbeatFollowUp(em, logger, chatID, userMsgID,
 					"markdone", cs.Heartbeat().Snapshot(userMsgID))
 			}

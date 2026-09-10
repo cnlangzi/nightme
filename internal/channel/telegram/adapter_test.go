@@ -2759,9 +2759,60 @@ func TestHeartbeatText_TerminalPrefix(t *testing.T) {
 			if !strings.HasPrefix(got, c.wantPrefix) {
 				t.Fatalf("heartbeatText = %q, want prefix %q", got, c.wantPrefix)
 			}
-			if c.wantPrefix != "" && !strings.Contains(got, "<b>") {
+			// Snapshot-driven presence of <b>: when the snapshot
+			// carries observable state (counters, time) the body
+			// is wrapped in <b>...</b>; a terminal-only snapshot
+			// produces just the prefix, no chip — same shape
+			// as feishu's renderHeartbeatHeader.
+			hasChip := c.hb.ThinkCount > 0 || c.hb.ToolCount > 0 ||
+				!c.hb.LastBeatAt.IsZero()
+			if hasChip && !strings.Contains(got, "<b>") {
 				t.Fatalf("heartbeatText = %q, want the counter chip", got)
 			}
+			if !hasChip && strings.Contains(got, "<b>") {
+				t.Fatalf("heartbeatText = %q, want no chip (terminal-only)", got)
+			}
 		})
+	}
+}
+
+// TestPatchChainHeader_EmptyRunningKeepsColdBanner pins the
+// feishu-aligned §3.6 gate: an OutHeartbeat carrying a snapshot
+// with zero counters, zero LastBeatAt, and Running status must
+// NOT flip chunk.hasHeartbeat (the cold "Working" banner
+// remains). Without this gate the chunk header would silently
+// disappear on a /think off + /tools off turn.
+func TestPatchChainHeader_EmptyRunningKeepsColdBanner(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "600", TopicID: 0,
+		PlaceholderMessageID: 1300, UserMessageID: "60"})
+
+	// Seed the chain with one OutReply so a chunk exists.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "600", Kind: messages.OutReply, Text: "seed",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Empty running snapshot — must NOT flip hasHeartbeat.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "600", Kind: messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{
+			Status: messages.HeartbeatRunning,
+		},
+	}); err != nil {
+		t.Fatalf("empty running heartbeat: %v", err)
+	}
+
+	// Now terminal-only (zero counters, no LastBeatAt, Error).
+	// Per the gate, terminal status DOES flip hasHeartbeat so
+	// the user sees the ❌ prefix on the chunk header.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "600", Kind: messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{
+			Status: messages.HeartbeatError,
+		},
+	}); err != nil {
+		t.Fatalf("terminal-only heartbeat: %v", err)
 	}
 }

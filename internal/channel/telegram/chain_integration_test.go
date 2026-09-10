@@ -396,11 +396,14 @@ func TestChain_HeartbeatBoldHeaderPreservedThroughFlush(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// First heartbeat — sets headerLine to <b>💭 1 · 🔧 0</b>.
+	// First heartbeat — sets headerLine to <b>💭 1 · 🔧 2 · ⏱ ...</b>.
+	// Both counters are non-zero so the chip wrapper <b>...</b>
+	// appears (zero chips are skipped per feishu-aligned
+	// skip-zero semantics in heartbeatText).
 	_ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "800", Kind: messages.OutHeartbeat,
 		Heartbeat: &messages.HeartbeatSnapshot{
-			ThinkCount: 1, ToolCount: 0,
+			ThinkCount: 1, ToolCount: 2,
 			LastBeatAt: time.Date(2026, 8, 22, 9, 45, 15, 0, time.Local),
 		},
 	})
@@ -420,7 +423,7 @@ func TestChain_HeartbeatBoldHeaderPreservedThroughFlush(t *testing.T) {
 	if lastEdit == "" {
 		t.Fatal("no editMessageText body captured")
 	}
-	if !strings.Contains(lastEdit, "<b>💭 1 · 🔧 0</b>") {
+	if !strings.Contains(lastEdit, "<b>💭 1 · 🔧 2") {
 		t.Fatalf("editMessageText body missing raw <b>...</b> tags; got %q", lastEdit)
 	}
 	if strings.Contains(lastEdit, "&lt;b&gt;") {

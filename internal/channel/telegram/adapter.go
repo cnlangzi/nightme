@@ -1605,21 +1605,26 @@ func (a *Adapter) patchChainHeader(
 		chain.mu.Unlock()
 		return nil
 	}
-	if msg.Heartbeat != nil {
+	// Feishu-aligned gate (F-63 §3.6): heartbeatText is the
+	// back-part of the chunk header, never the cold-create
+	// "Working" front-part. A snapshot with zero counters /
+	// no LastBeatAt / Running status carries no observable
+	// state, so we keep the cold banner by routing to
+	// setHeader (which does NOT touch hasHeartbeat). Any
+	// terminal status — even with zero counters — still
+	// flips hasHeartbeat so the user sees the verdict prefix
+	// (✅ / ❌) on the chunk header.
+	if msg.Heartbeat != nil &&
+		(msg.Heartbeat.ThinkCount > 0 || msg.Heartbeat.ToolCount > 0 ||
+			!msg.Heartbeat.LastBeatAt.IsZero() ||
+			msg.Heartbeat.Status != messages.HeartbeatRunning) {
 		chain.chunks[chain.cursor].setHeaderFromHeartbeat(heartbeatText(msg.Heartbeat))
 	} else {
-		// OutHeartbeat always carries a Heartbeat payload in
-		// production (the gateway fills msg.Heartbeat before the
-		// Send case fires), but defensive fallback if a future
-		// caller forgets: reset to cold-create header text. NOTE:
-		// setHeader does NOT touch hasHeartbeat — if a previous
-		// heartbeat on this chunk had already flipped it true, it
-		// stays true. Compose will then render the cold banner
-		// header anyway because hasHeartbeat=true, which is a
-		// defensive inconsistency rather than the legacy silent-
-		// drop path. Acceptable: this branch only fires on a
-		// programmer error (missing Heartbeat payload) and the
-		// next legitimate OutHeartbeat will repair the state.
+		// Cold-create / empty running snapshot path: keep the
+		// "Working" banner, do NOT flip hasHeartbeat. A
+		// programmer error (missing Heartbeat payload) falls
+		// here too — next legitimate OutHeartbeat will repair
+		// the state.
 		chain.chunks[chain.cursor].setHeader(heartbeatText(nil))
 	}
 	a.logger.Info("telegram: heartbeat header set",
@@ -1748,23 +1753,40 @@ func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	if snapshot == nil {
 		return "<b>🤖 Working...</b>"
 	}
-	text := fmt.Sprintf("<b>💭 %d · 🔧 %d</b>",
-		snapshot.ThinkCount, snapshot.ToolCount)
-	if !snapshot.LastBeatAt.IsZero() {
-		text += " · ⏱ " + snapshot.LastBeatAt.Local().Format("15:04:05")
+	// Skip-zero-chips semantics aligned with feishu's
+	// renderHeartbeatHeader (F-63 §3.6): a zero ThinkCount /
+	// ToolCount does NOT contribute a chip, so a /think off +
+	// /tools off turn that still emits an OutHeartbeat produces
+	// just the prefix (or empty body when running). The bold
+	// HTML markup is Telegram's per-channel render format; the
+	// call site gates the cold-create "Working" banner so this
+	// function is the back-part only.
+	var parts []string
+	if snapshot.ThinkCount > 0 {
+		parts = append(parts, fmt.Sprintf("💭 %d", snapshot.ThinkCount))
 	}
-	// Terminal verdict prefix: ✅ for clean completion,
-	// ❌ for any non-clean reason. Mirrors the Feishu header
-	// semantics so a user who sees the chunk header can tell at a
-	// glance whether the turn completed cleanly without checking
-	// the standalone 🎉/❌ reaction on the result message.
+	if snapshot.ToolCount > 0 {
+		parts = append(parts, fmt.Sprintf("🔧 %d", snapshot.ToolCount))
+	}
+	if !snapshot.LastBeatAt.IsZero() {
+		parts = append(parts, "⏱ "+snapshot.LastBeatAt.Local().Format("15:04:05"))
+	}
+	body := strings.Join(parts, " · ")
+	// Counter chip wrapper when there's content (mirror feishu's
+	// "back-part" shape). Terminal-only snapshots produce just
+	// the prefix so the user still sees the verdict on a chunk
+	// that never accumulated counters (e.g. one-shot answer
+	// with /think off + /tools off).
+	if body != "" {
+		body = "<b>" + body + "</b>"
+	}
 	switch snapshot.Status {
 	case messages.HeartbeatDone:
-		return "✅ " + text
+		return "✅ " + body
 	case messages.HeartbeatError:
-		return "❌ " + text
+		return "❌ " + body
 	}
-	return text
+	return body
 }
 
 // renderInlineText was a thin wrapper around RenderMarkdown +

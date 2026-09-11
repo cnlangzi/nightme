@@ -159,6 +159,14 @@ func NewWithJar(baseURL string, jar http.CookieJar, log *slog.Logger) *Client {
 		// certainly confused about which constructor to use.
 		// Falling back to New keeps the bridge from panic'ing
 		// but the first /api call will 401 and surface the bug.
+		// Log loudly so the misconfiguration surfaces in startup
+		// logs rather than hours later when the bridge first
+		// tries to talk to dsh.
+		l := log
+		if l == nil {
+			l = slog.Default()
+		}
+		l.Error("dsh.host: NewWithJar called with nil jar; falling back to unauthenticated New — every /api/* will 401")
 		return New(baseURL, log)
 	}
 	if log == nil {
@@ -207,10 +215,14 @@ func (c *Client) Start(ctx context.Context) error {
 // Close does NOT close the underlying dsh process — that's the
 // caller's responsibility (Phase 1 adds the spawn wrapper, which
 // owns the dsh subprocess lifecycle).
+//
+// Done() fires AFTER Hub.Close returns — consumers that wait on
+// Done() can rely on the mux pump being fully drained (Hub.Close
+// blocks on dispatchDrain).
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
-		close(c.closed)
 		c.Hub.Close()
+		close(c.closed)
 	})
 }
 
@@ -316,9 +328,21 @@ func (c *Client) Subscribe(sessionID, cwd string, h MuxFrameHandler) (unsubscrib
 	}
 }
 
-// Unsubscribe removes the sessionId's mux handler and drops its
-// pending approval/question channels. See Router.Unsubscribe.
+// Unsubscribe removes the sessionId's mux handler, drops its pending
+// approval/question channels, AND cancels the StreamHub session
+// stream on dsh so the server stops pushing items for it. See
+// Router.Unsubscribe / Hub.Subscribe for the per-side contract.
+//
+// Use this (not Router.Unsubscribe directly) on every Close path —
+// skipping the Hub teardown leaks a stale session/follow stream on
+// dsh and a stale *sessionStream entry in StreamHub.sessions.
 func (c *Client) Unsubscribe(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	if c.Hub != nil {
+		c.Hub.Unsubscribe(sessionID)
+	}
 	c.Router.Unsubscribe(sessionID)
 }
 

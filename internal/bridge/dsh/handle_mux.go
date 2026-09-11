@@ -45,7 +45,6 @@ import (
 var warnLogger = slog.Default()
 
 // handleMuxFrame is the mux-pump entry. It unmarshals the payload
-// and dispatches by method.
 // and dispatches by method. Extracted from translate.go in
 // F-DSH-CHAT-001 so the dispatcher owns the event Type switch
 // (registration-driven) instead of an inline switch statement.
@@ -193,10 +192,10 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		d.replaySnapshot(payload)
 
 	case "host/cancel":
-		// Server-side cancellation of a previously-delivered
-		// Host waterfall event. The bridge doesn't keep waterfall
-		// promises (host events are observation-only), so just
-		// log and move on.
+		// Unreachable today: Host waterfall items route through
+		// StreamHub.dispatch → Router.DispatchHost (NOT
+		// handleMuxFrame). Kept as a debug-log escape hatch in case
+		// dsh starts sending host/* frames on the mux endpoint.
 		d.wireState.recordWireFrame(method, "", len(payload))
 		var c struct {
 			EventID string `json:"eventId"`
@@ -241,19 +240,20 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 // arrive on session/follow. Kept as a tight allow-list (NOT a
 // slash check) so we never accidentally route a legacy mux-frame
 // method (session/subscribed, session/projection, etc.) through
-// the per-event dispatch path.
+// the per-event dispatch path. Must stay in sync with
+// standardRegistry in dispatch.go — a missing entry silently
+// demotes the frame to "unknown method" with a Warn.
 func isSessionEventType(method string) bool {
 	switch method {
 	case "assistant/chunk", "assistant/message",
+		"tool/call", "tool/result",
 		"turn/start", "turn/end",
 		"step/start", "step/end",
 		"user/message",
 		"session/title", "session/title-llm-request",
 		"request/context",
-		"usage",
 		"agent/inbox/spliced",
-		"approval/asked", "approval/resolved",
-		"question/asked", "question/resolved",
+		"approval/asked",
 		"compaction/end",
 		"todo/write", "todo/update", "todo/delete":
 		return true
@@ -278,6 +278,11 @@ func parseSeqFromRPCID(rpcID string) int64 {
 // shape; route each through dispatchEvent exactly as if it had
 // arrived live. After the loop, advance lastSeq to the snapshot
 // cursor so the live stream doesn't redeliver anything below it.
+// bumpLastSeq is idempotent (max of current and new) so the order
+// matters only for the gap between "last record seq" and "cursor":
+// if dsh's cursor means "the next seq we will deliver", and the
+// last record we replayed has seq < cursor, the gap stays open
+// for live events to fill.
 //
 // Records can be either {type:"event", event:{...}} OR
 // {type:"chunks", event:{...}} (per typert). We only know how to

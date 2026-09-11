@@ -166,7 +166,6 @@ type SharedHost struct {
 	watchdogDone chan struct{}
 }
 
-// closedChan is a pre-closed channel used as the watchdogDone value
 // respawnBackoffBase / respawnBackoffMax bound the exponential
 // backoff between respawn attempts. After a successful respawn the
 // backoff resets. Total wait budget across one cycle is bounded
@@ -349,8 +348,14 @@ func mintAuthCookie(ctx context.Context, baseURL, token string) (http.CookieJar,
 	if err != nil {
 		return nil, fmt.Errorf("dsh.host: parse base url %q: %w", baseURL, err)
 	}
+	// url.Values.Set doesn't propagate back to URL.RawQuery; use
+	// Encode() to rebuild the query string with proper percent
+	// escaping (raw concatenation would mangle tokens containing
+	// & = + / or other reserved characters).
 	q := *u
-	q.RawQuery = "token=" + token
+	values := q.Query()
+	values.Set("token", token)
+	q.RawQuery = values.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, q.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("dsh.host: build token-exchange req: %w", err)

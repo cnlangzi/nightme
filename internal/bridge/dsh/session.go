@@ -8,9 +8,10 @@
 // AgentSession owns a single sessionId on the shared host.
 //
 // Lifecycle invariant: events chan is closed by Close() itself (no
-// separate lifecycle goroutine). Close() calls Router.Unsubscribe so
-// the shared host's mux pump stops routing frames for this sessionId;
-// the session is then garbage-collectable.
+// separate lifecycle goroutine). Close() calls Client.Unsubscribe so
+// the shared host's mux pump stops routing frames for this sessionId
+// AND the StreamHub cancels its session/follow stream on dsh; the
+// session is then garbage-collectable.
 //
 // This file replaces the pre-shared-host driver that spawned a dsh
 // subprocess per ChatSession. Per-driver fields like cmd / stdout /
@@ -872,7 +873,7 @@ func (d *driver) Reset(ctx context.Context) error {
 	}
 
 	if oldID != "" && oldID != newID {
-		d.cli.Router.Unsubscribe(oldID)
+		d.cli.Unsubscribe(oldID)
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = d.cli.RPC.SessionCancel(cancelCtx, oldID)
 		cancel()
@@ -1002,7 +1003,7 @@ func (d *driver) Close() error {
 		// Drop pending-approval channels for this session too — the
 		// runtime's permission handlers would otherwise wait forever
 		// on a sessionId nobody can answer anymore.
-		d.cli.Router.Unsubscribe(d.sessionID)
+		d.cli.Unsubscribe(d.sessionID)
 		if d.sessionID != "" {
 			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			if err := d.cli.RPC.SessionCancel(cancelCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {

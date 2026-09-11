@@ -35,6 +35,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -133,7 +134,7 @@ type StreamHub struct {
 	// dispatched item, negligible vs the WS round-trip cost.
 	dispatchMu    sync.Mutex
 	dispatchCount int
-	dispatchCond  *sync.Cond
+	dispatchCond  *sync.Cond // initialized in NewStreamHub, not lazily
 
 	streamSeq         atomic.Uint64 // mint unique streamIds
 	currentGeneration atomic.Uint64 // bumps on every connect; subs track which generation minted them
@@ -150,7 +151,7 @@ func NewStreamHub(baseURL string, log *slog.Logger, onMuxFrame, onHostFrame Fram
 	if log == nil {
 		log = slog.Default()
 	}
-	return &StreamHub{
+	h := &StreamHub{
 		baseURL:     baseURL,
 		log:         log,
 		onMuxFrame:  onMuxFrame,
@@ -160,6 +161,8 @@ func NewStreamHub(baseURL string, log *slog.Logger, onMuxFrame, onHostFrame Fram
 		stop:        make(chan struct{}),
 		writeCh:     make(chan clientFrame, 32),
 	}
+	h.dispatchCond = sync.NewCond(&h.dispatchMu)
+	return h
 }
 
 // NewStreamHubWithJar constructs a hub that attaches jar's cookies
@@ -198,12 +201,17 @@ func (h *StreamHub) Subscribe(sessionID string, _ FrameHandler) (unsubscribe fun
 	}
 	streamID := h.mintStreamID("sess")
 	sub := &sessionStream{
-		sessionID:  sessionID,
-		streamID:   streamID,
-		generation: h.currentGeneration.Load(),
+		sessionID: sessionID,
+		streamID:  streamID,
 	}
 
 	h.mu.Lock()
+	// Generation is captured under h.mu so the Subscribe-vs-
+	// reconnect race below can't leave us with a stale value.
+	// connectAndServe bumps currentGeneration under the same lock;
+	// taking it here means the open we enqueue below is consistent
+	// with the generation the next toReopen loop will read.
+	sub.generation = h.currentGeneration.Load()
 	if old, ok := h.sessions[sessionID]; ok {
 		delete(h.byStreamID, old.streamID)
 		h.queueCancelLocked(old.streamID)
@@ -250,6 +258,31 @@ func (h *StreamHub) Subscribe(sessionID string, _ FrameHandler) (unsubscribe fun
 				"session_id", sessionID, "stream_id", streamID)
 		})
 	}
+}
+
+// Unsubscribe tears down the session/follow stream for sessionID
+// (mirrors the cancel func returned by Subscribe but keyed by
+// sessionId so callers that lost the cancel func — typically
+// because they reached into Router.Unsubscribe directly — can
+// still free the hub-side resources).
+//
+// No-op when sessionID is unknown to the hub.
+func (h *StreamHub) Unsubscribe(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	h.mu.Lock()
+	sub, ok := h.sessions[sessionID]
+	if !ok {
+		h.mu.Unlock()
+		return
+	}
+	delete(h.sessions, sessionID)
+	delete(h.byStreamID, sub.streamID)
+	h.queueCancelLocked(sub.streamID)
+	h.mu.Unlock()
+	h.log.Info("dsh.host: unsubscribed session stream",
+		"session_id", sessionID, "stream_id", sub.streamID)
 }
 
 // sessionOpenPayload returns the `{args:{...}}` payload for the
@@ -396,7 +429,11 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 		httpURL := *u
 		httpURL.Scheme = "http"
 		for _, c := range h.jar.Cookies(&httpURL) {
-			requestHeader.Add("Cookie", c.Name+"="+c.Value)
+			// Cookie.String handles RFC 6265 §5.2 escaping for
+			// values containing ; , = " whitespace etc. A raw
+			// `Name+"="+Value` paste would corrupt the header
+			// for any non-trivial value.
+			requestHeader.Add("Cookie", c.String())
 		}
 	}
 
@@ -409,6 +446,12 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 	if err != nil {
 		netConn.Close()
 		if resp != nil {
+			// Drain + close the upgrade-response body so the
+			// connection doesn't leak fds across reconnect attempts.
+			if resp.Body != nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
 			return fmt.Errorf("dsh.host: ws dial %s: HTTP %d: %w",
 				u.String(), resp.StatusCode, err)
 		}
@@ -503,7 +546,7 @@ func (h *StreamHub) readLoop(conn *websocket.Conn) error {
 			h.log.Info("dsh.host: readLoop error", "err", err)
 			return err
 		}
-		h.log.Info("dsh.host: mux read", "bytes", len(raw), "preview", truncateBytes(raw, 200))
+		h.log.Debug("dsh.host: mux read", "bytes", len(raw), "preview", truncateBytes(raw, 200))
 		if len(raw) == 0 {
 			continue
 		}
@@ -629,12 +672,9 @@ func (h *StreamHub) invokeOnMux(method, rpcID string, payload json.RawMessage) {
 // markDispatchStart / markDispatchDone replace the old
 // dispatchWG.Add(1) / Done() pair. The mutex+counter+cond pattern
 // avoids the documented Add(1)↔Wait() race; see dispatchMu field
-// doc for motivation. Cond is lazily initialized to keep the
-// StreamHub struct literal readable.
+// doc for motivation. dispatchCond is initialized once in
+// NewStreamHub so waitDispatchDrain never observes a nil cond.
 func (h *StreamHub) markDispatchStart() {
-	if h.dispatchCond == nil {
-		h.dispatchCond = sync.NewCond(&h.dispatchMu)
-	}
 	h.dispatchMu.Lock()
 	h.dispatchCount++
 	h.dispatchMu.Unlock()
@@ -802,8 +842,8 @@ func translateHostEvent(raw json.RawMessage) (method, rpcID string, payload json
 //
 //	{ type:"snapshot", header, cursor, records, hasMore, projections }
 //	  → method = "session/snapshot"
-//	{ type:"event", event:{type, seq, time, data:{type, ...payload-fields}} }
-//	  → method = event.data.type (the per-event discriminator)
+//	{ type:"event", event:{type, seq, time, data:{...payload-fields}} }
+//	  → method = event.type (the top-level per-event discriminator)
 //	  → rpcId = stringified seq
 //	  → payload = event.data with sessionId added
 //	{ type:"end" } → not handled here (dispatcher handles "end" at the frame level)

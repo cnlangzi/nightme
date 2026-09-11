@@ -661,15 +661,13 @@ func methodDotsToSlashes(method string) string {
 	return strings.ReplaceAll(method, ".", "/")
 }
 
-// sanitizeBaseURL strips trailing slashes AND any trailing/embedded
-// quote characters (", ') that would otherwise break the URL
-// parser and surface as %22 / %27 in the dial path. Real callers
-// never pass these; this is a belt-and-suspenders guard against
-// config-file typos. The literal values "" and "" are stripped
-// from the END only — embedded quotes in the middle of the URL
-// (e.g. "http://example.com/path") are left alone because they
-// can't happen in our config schema and stripping them would mask
-// a real bug.
+// sanitizeBaseURL strips trailing slashes AND any trailing quote
+// characters (", ') that would otherwise break the URL parser and
+// surface as %22 / %27 in the dial path. Real callers never pass
+// these; this is a belt-and-suspenders guard against config-file
+// typos. Trailing quotes only — embedded quotes in the middle of
+// the URL would be a real bug and are left alone so they surface
+// instead of being silently masked.
 func sanitizeBaseURL(raw string) string {
 	// Strip trailing quote characters FIRST so the slash strip
 	// sees "http://x:8080" instead of "http://x:8080/" — the order
@@ -683,7 +681,6 @@ func sanitizeBaseURL(raw string) string {
 		}
 		break
 	}
-	// Then strip any trailing slashes (the canonical-clean form).
 	return strings.TrimRight(raw, "/")
 }
 

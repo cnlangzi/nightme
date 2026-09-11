@@ -1,13 +1,15 @@
 // Package handoff implements the `/handoff` slash command.
 //
 // /handoff serializes the current task into
-// `<cwd>/.nightme/handoff.md` so the next AI coding agent (or a
-// fresh session of the same one) can pick up the task with zero
-// prior context. The Agent receives the embedded handoff prompt
-// and writes the canonical file itself via its Write tool; this
-// package queues the prompt, pre-creates the `.nightme` directory
-// so the Agent doesn't burn a turn on mkdir, and post-verifies
-// that the file landed on disk before posting a success reply.
+// `$HOME/.nightme/handoff/<name>.md` so the next AI coding agent
+// (or a fresh session of the same one) can pick up the task with
+// zero prior context — from any cwd, not just the one the
+// previous agent was sitting in. The Agent receives the embedded
+// handoff prompt and writes the canonical file itself via its
+// Write tool; this package queues the prompt, pre-creates the
+// per-user handoff directory so the Agent doesn't burn a turn
+// on mkdir, and post-verifies that the file landed on disk
+// before posting a success reply.
 package handoff
 
 import (
@@ -25,13 +27,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
 
-// handoffFilename is the on-disk filename inside the per-cwd
-// nightme directory. /resume reads the same name so neither side
-// needs args. Directory creation and .gitignore maintenance go
-// through internal/nightmedir — this package only owns its own
-// filename.
-const handoffFilename = "handoff.md"
-
 // handoffPrompt placeholder. `{{...}}` is the chosen style
 // because it (a) doesn't collide with markdown / HTML tag
 // parsing that an Agent might apply to the prompt, and (b)
@@ -41,16 +36,25 @@ const handoffFilename = "handoff.md"
 //
 // The `_ABS` suffix signals that the runtime substitutes an
 // absolute filesystem path. Without that signal an Agent might
-// write relative paths (./handoff.md) thinking "ABS" means
+// write relative paths (./<name>.md) thinking "ABS" means
 // "abstract / non-literal".
 const placeholderHandoffFileAbs = "{{HANDOFF_FILE_ABS}}"
 
-// RenderHandoffPrompt substitutes the absolute per-cwd handoff
+// RenderHandoffPrompt substitutes the absolute per-user handoff
 // path into handoffPrompt. Exposed (rather than inlined in
 // Handle) so tests can pin the placeholder contract: no {{...}}
 // survives and the substituted text is platform-canonical.
-func RenderHandoffPrompt(cwd string) string {
-	return strings.ReplaceAll(handoffPrompt, placeholderHandoffFileAbs, nightmedir.FilePath(cwd, handoffFilename))
+//
+// name must already pass nightmedir.ValidateHandoffName;
+// RenderHandoffPrompt does not re-validate so a bad name shows
+// up as a literal path in the rendered prompt rather than
+// silently rounding to something usable.
+func RenderHandoffPrompt(name string) (string, error) {
+	abs, err := nightmedir.HandoffFilePath(name)
+	if err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(handoffPrompt, placeholderHandoffFileAbs, abs), nil
 }
 
 // handoffPrompt is the Agent's task for /handoff. The Agent has
@@ -61,23 +65,25 @@ func RenderHandoffPrompt(cwd string) string {
 //
 // Path placeholder:
 //
-//	{{HANDOFF_FILE_ABS}} →  nightmedir.FilePath(cwd, "handoff.md")
+//	{{HANDOFF_FILE_ABS}} →  nightmedir.HandoffFilePath(name)
 //
 // Why absolute paths in the prompt: the Agent's Write tool can
-// then call without having to reconstruct "<cwd>/.nightme/
-// handoff.md" from relative terms, which removes a class of
-// mistakes (writing to ~/.nightme/, to cwd-relative ./handoff.md,
-// etc.). See internal/nightmedir.RelPath for the slash-form
-// variant that stays in user-visible reply text.
+// then call without having to reconstruct
+// "~/.nightme/handoff/<name>.md" from relative terms, which
+// removes a class of mistakes (writing to cwd-relative paths,
+// dropping the .md suffix, etc.). See
+// internal/nightmedir.HandoffRelPath for the slash-form variant
+// that stays in user-visible reply text.
 //
 // RenderHandoffPrompt performs the substitution at Handle time
-// (after cs.SelectedCwd() is known). Tests pin both the
-// placeholder name and the "no placeholder survives" contract.
+// after nightmedir.ValidateHandoffName has accepted the name.
+// Tests pin both the placeholder name and the "no placeholder
+// survives" contract.
 const handoffPrompt = `You are performing a task handoff for the CURRENT task.
-Your job is to create a durable handoff document for the current project so that another AI coding agent (or a fresh session of yourself) can continue the task with ZERO prior context and become productive within 2 minutes.
+Your job is to create a durable, NAMED handoff document so that another AI coding agent (or a fresh session of yourself) can continue the task from ZERO prior context and become productive within 2 minutes — including from a different working directory than the one you are in now.
 The canonical handoff file is:
 {{HANDOFF_FILE_ABS}}
-This handoff belongs to the CURRENT PROJECT. Do not store it outside the current project directory.
+That path lives under the user's home directory and is shared across all projects the user might switch into. Do not store the handoff inside the current project; do not write to any other path.
 Do not merely generate the handoff as chat output. You must actually create or overwrite {{HANDOFF_FILE_ABS}} with the final handoff content.
 The purpose of this document is NOT to summarize the conversation. It is to serialize the current task state so another agent can safely continue from where the previous agent stopped.
 Use only information available in the current conversation/session and current task context.
@@ -184,21 +190,22 @@ func init() {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "handoff",
-		Summary:  "Serialize the current task into ./.nightme/handoff.md so the next agent can continue.",
-		Usage:    "/handoff",
+		Summary:  "Serialize the current task into ~/.nightme/handoff/<name>.md so the next agent can continue from any directory.",
+		Usage:    "/handoff <name>",
 		Category: "session",
 	}
 }
 
 // handoffSpec declares /handoff's argv grammar for the shared
-// lexer (issue #291): no flags, no positional args. /handoff is
-// single-action; any arg is a usage error rather than silently
-// dropped, mirroring /stop's contract.
+// lexer (issue #291): no flags, exactly one positional arg (the
+// handoff name). /handoff is single-action; a missing or extra
+// arg is a usage error rather than silently dropped, mirroring
+// /stop's contract.
 var handoffSpec = command.CmdSpec{
 	Name:    "/handoff",
-	Usage:   "/handoff",
-	MinArgs: 0,
-	MaxArgs: 0,
+	Usage:   "/handoff <name>",
+	MinArgs: 1,
+	MaxArgs: 1,
 }
 
 // Handle implements command.SlashCommandFactory.
@@ -206,18 +213,24 @@ var handoffSpec = command.CmdSpec{
 // Flow:
 //
 //  1. ChatSession + active CWD preflight (RequireActiveCwd).
+//     cwd is still required — the task itself is cwd-scoped even
+//     though the handoff document lives under $HOME — but the
+//     path of the handoff file no longer depends on it.
 //  2. Active-agent preflight (SelectedAgent + LookupSelectedAgentSession).
-//  3. Reject trailing args / any flag via ParseCmdArgs.
+//  3. Reject missing / extra args via ParseCmdArgs.
 //  4. input.MessageID guard — ChatSession.QueueUserMessage
 //     silently no-ops on empty ID; /queue has the same guard at
 //     queue/cmd.go:143. Without it, a synthetic inbound would
 //     get the ack while enqueuing nothing.
-//  5. EnsureDir <cwd>/.nightme + EnsureGitignoreEntry so the
-//     Agent doesn't waste a turn on mkdir and `git status`
-//     doesn't surface the handoff doc.
-//  6. Queue the embedded handoff prompt as a discrete
+//  5. ValidateHandoffName — character set / length / sentinel
+//     rules. Done before EnsureHandoffDir so a bad name never
+//     creates a directory on disk.
+//  6. EnsureHandoffDir — MkdirAll of $HOME/.nightme/handoff so
+//     the Agent doesn't waste a turn on mkdir. Per-user
+//     .gitignore is irrelevant (home is not inside a repo).
+//  7. Queue the rendered handoff prompt as a discrete
 //     MessageKindQueue Prompt batch.
-//  7. Spawn a goroutine on a detached context.Background: the
+//  8. Spawn a goroutine on a detached context.Background: the
 //     slash lifetime is short, but we still need to wait for the
 //     Agent to finish so we can stat the file. The goroutine
 //     posts the final reply via the chat's Emitter.
@@ -230,8 +243,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if cs == nil {
 		return command.Reply(ctx, rt, "No active chat session."), nil
 	}
-	cwd, failOut := command.RequireActiveCwd(cs)
-	if failOut != nil {
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
 		return failOut, nil
 	}
 
@@ -242,7 +254,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
-	if _, err := command.ParseCmdArgs(input.Args[1:], handoffSpec); err != nil {
+	parsed, err := command.ParseCmdArgs(input.Args[1:], handoffSpec)
+	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
@@ -251,19 +264,29 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			"Internal: missing message id; /handoff did not enqueue."), nil
 	}
 
-	if err := nightmedir.EnsureDir(cwd); err != nil {
-		return command.Reply(ctx, rt,
-			fmt.Sprintf("❌ /handoff: cannot create %s/: %v", nightmedir.DirName, err)), nil
+	name := parsed.Arg(0)
+	if err := nightmedir.ValidateHandoffName(name); err != nil {
+		return command.Reply(ctx, rt, "❌ /handoff: "+err.Error()), nil
 	}
-	if err := nightmedir.EnsureGitignoreEntry(cwd); err != nil {
+	if err := nightmedir.EnsureHandoffDir(); err != nil {
 		return command.Reply(ctx, rt,
-			fmt.Sprintf("❌ /handoff: cannot update .gitignore: %v", err)), nil
+			fmt.Sprintf("❌ /handoff: cannot create handoff dir: %v", err)), nil
+	}
+	absPath, err := nightmedir.HandoffFilePath(name)
+	if err != nil {
+		return command.Reply(ctx, rt,
+			fmt.Sprintf("❌ /handoff: resolve handoff path: %v", err)), nil
+	}
+	prompt, err := RenderHandoffPrompt(name)
+	if err != nil {
+		return command.Reply(ctx, rt,
+			fmt.Sprintf("❌ /handoff: render prompt: %v", err)), nil
 	}
 
 	msg := chatsession.Message{
 		ID:     input.MessageID,
 		ChatID: input.ChatID,
-		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: RenderHandoffPrompt(cwd)}},
+		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: prompt}},
 		Kind:   chatsession.MessageKindQueue,
 	}
 	if err := cs.QueueUserMessage(msg); err != nil {
@@ -273,7 +296,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	workCtx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer cancel()
-		final := verifyHandoff(workCtx, cs, input.MessageID, nightmedir.FilePath(cwd, handoffFilename))
+		final := verifyHandoff(workCtx, cs, input.MessageID, absPath, name)
 		em := cs.Emitter()
 		if em == nil {
 			slog.Warn("handoff: emitter nil; final reply dropped",
@@ -291,7 +314,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		}
 	}()
 
-	return command.Reply(ctx, rt, "⏳ /handoff queued; agent is writing ./.nightme/handoff.md."), nil
+	return command.Reply(ctx, rt, fmt.Sprintf("⏳ /handoff queued; agent is writing %s.", nightmedir.HandoffRelPath(name))), nil
 }
 
 // verifyHandoff waits for the Agent's PromptEnd signal then
@@ -305,11 +328,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 // Returns the user-facing reply text — either a success summary
 // naming the verified file, or a ❌ error line. The caller posts
 // this through the chat's Emitter as OutReply.
-func verifyHandoff(ctx context.Context, cs *chatsession.ChatSession, msgID, absPath string) string {
+func verifyHandoff(ctx context.Context, cs *chatsession.ChatSession, msgID, absPath, name string) string {
 	if err := waitForPromptEnd(ctx, cs, msgID, handoffTimeout); err != nil {
 		return "❌ /handoff: " + err.Error()
 	}
-	return verifyHandoffFile(absPath)
+	return verifyHandoffFile(absPath, name)
 }
 
 // verifyHandoffFile is the pure verification gate: stat the
@@ -318,18 +341,24 @@ func verifyHandoff(ctx context.Context, cs *chatsession.ChatSession, msgID, absP
 // testable from an internal test file (same package, lowercase
 // call site — see verify_internal_test.go) without spinning up
 // an AgentEventBus / PromptEndBus round-trip.
-func verifyHandoffFile(absPath string) string {
+//
+// absPath and relName pair: the absolute path for the Stat, the
+// already-validated name for the slash-form text echoed back to
+// the user. relName is the name without the ".md" suffix; this
+// matches HandoffRelPath's contract.
+func verifyHandoffFile(absPath, name string) string {
+	rel := nightmedir.HandoffRelPath(name)
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Sprintf("❌ /handoff: agent did not write %s; rerun /handoff or paste the handoff into the file manually.", nightmedir.RelPath(handoffFilename))
+			return fmt.Sprintf("❌ /handoff: agent did not write %s; rerun /handoff or paste the handoff into the file manually.", rel)
 		}
 		return fmt.Sprintf("❌ /handoff: stat %s failed: %v", absPath, err)
 	}
 	if info.Size() == 0 {
-		return fmt.Sprintf("❌ /handoff: %s exists but is empty; rerun /handoff.", nightmedir.RelPath(handoffFilename))
+		return fmt.Sprintf("❌ /handoff: %s exists but is empty; rerun /handoff.", rel)
 	}
-	return fmt.Sprintf("✅ /handoff\n\n%s saved (%d bytes).", nightmedir.RelPath(handoffFilename), info.Size())
+	return fmt.Sprintf("✅ /handoff\n\n%s saved (%d bytes).", rel, info.Size())
 }
 
 // waitForPromptEnd blocks until PromptEndBus delivers an event

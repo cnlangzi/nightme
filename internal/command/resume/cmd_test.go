@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +14,21 @@ import (
 	resumepkg "github.com/cnlangzi/nightme/internal/command/resume"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+// homeDir sandboxes $HOME (and USERPROFILE on Windows) to a temp
+// dir for the duration of the test, so nightmedir.HandoffDir()
+// resolves inside the sandbox rather than touching the real
+// user's home. Returns the temp home path so callers can build
+// expected absolute paths against it.
+func homeDir(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
+	return home
+}
 
 // outReply asserts that out is the OutReply path: Consumed, no
 // Reply, exactly one Outbound entry that is messages.OutReply
@@ -70,8 +86,8 @@ func TestFactory_Spec(t *testing.T) {
 	if s.Name != "resume" {
 		t.Fatalf("Spec.Name = %q, want resume", s.Name)
 	}
-	if s.Usage != "/resume" {
-		t.Errorf("Spec.Usage = %q, want /resume", s.Usage)
+	if s.Usage != "/resume <name>" {
+		t.Errorf("Spec.Usage = %q, want /resume <name>", s.Usage)
 	}
 	if s.Summary == "" {
 		t.Errorf("Spec.Summary is empty")
@@ -99,7 +115,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{ChatID: "c1", Args: []string{"resume"}})
+		command.SlashInput{ChatID: "c1", Args: []string{"resume", "demo"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -119,17 +135,17 @@ func TestFactory_Handle_NoSelectedAgent_RepliesHint(t *testing.T) {
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{ChatID: "c1", Args: []string{"resume"}})
+		command.SlashInput{ChatID: "c1", Args: []string{"resume", "demo"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	replyField(t, out, "no active agent")
 }
 
-// /resume accepts no flags and no positional args; a stray
-// token must surface as a usage error instead of being silently
-// dropped (issue #291).
-func TestFactory_Handle_RejectsTrailingArgs(t *testing.T) {
+// /resume requires exactly one positional arg (the name); a
+// missing arg is rejected with a usage error.
+func TestFactory_Handle_RejectsMissingArg(t *testing.T) {
+	homeDir(t)
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
@@ -143,24 +159,86 @@ func TestFactory_Handle_RejectsTrailingArgs(t *testing.T) {
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID: "c1",
-			Args:   []string{"resume", "extra"},
+			Args:   []string{"resume"},
 		})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	replyField(t, out, "unexpected positional argument")
+	replyField(t, out, "missing argument")
 }
 
-// /resume with cwd + agent but no ./.nightme/handoff.md in the
-// workspace → OutReply error pointing the user at /handoff.
-// Distinct from the preflight Reply path because the queue
-// placeholder was already created at MessageQueued time (the
-// framework commander emits it for every matched slash command).
-func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
+// /resume rejects extra positional args; mirroring /stop and
+// /handoff.
+func TestFactory_Handle_RejectsExtraArg(t *testing.T) {
+	homeDir(t)
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	// Empty temp dir — no .nightme/handoff.md on disk.
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
+		command.SlashInput{
+			ChatID: "c1",
+			Args:   []string{"resume", "demo", "extra"},
+		})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	replyField(t, out, "too many arguments")
+}
+
+// /resume rejects a name that fails ValidateHandoffName before
+// the file system is touched.
+func TestFactory_Handle_RejectsInvalidName(t *testing.T) {
+	homeDir(t)
+	mgr := chatsession.NewManager()
+	f := resumepkg.NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	in := command.SlashInput{
+		ChatID:    "c1",
+		MessageID: "m_bad_name",
+		Text:      "/resume ../escape",
+		Args:      []string{"resume", "../escape"},
+	}
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	text := outReply(t, out, in)
+	// "../escape" trips the leading-dot guard before the char
+	// loop sees the '/' — both /resume and /handoff tests pin
+	// this so a future re-order of ValidateHandoffName's checks
+	// would surface as a test diff rather than a silent change.
+	if !strings.Contains(text, "must not start with '.'") {
+		t.Errorf("expected validator error in %q", text)
+	}
+	if got := cs.QueueLen(); got != 0 {
+		t.Errorf("invalid name must not enqueue; got QueueLen=%d", got)
+	}
+}
+
+// /resume with cwd + agent but no ~/.nightme/handoff/demo.md on
+// disk → OutReply error pointing the user at /handoff. Distinct
+// from the preflight Reply path because the queue placeholder
+// was already created at MessageQueued time (the framework
+// commander emits it for every matched slash command).
+func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
+	homeDir(t)
+	mgr := chatsession.NewManager()
+	f := resumepkg.NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
@@ -171,16 +249,16 @@ func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
 	in := command.SlashInput{
 		ChatID:    "c1",
 		MessageID: "m_resume_missing",
-		Text:      "/resume",
-		Args:      []string{"resume"},
+		Text:      "/resume demo",
+		Args:      []string{"resume", "demo"},
 	}
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	text := outReply(t, out, in)
-	if !strings.Contains(text, ".nightme/handoff.md") {
-		t.Errorf("missing-handoff reply should name .nightme/handoff.md: %q", text)
+	if !strings.Contains(text, "~/.nightme/handoff/demo.md") {
+		t.Errorf("missing-handoff reply should name ~/.nightme/handoff/demo.md: %q", text)
 	}
 	if !strings.Contains(text, "/handoff") {
 		t.Errorf("missing-handoff reply should suggest /handoff: %q", text)
@@ -190,37 +268,36 @@ func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
 	}
 }
 
-// .nightme/handoff.md exists but is zero bytes → OutReply
-// error, also no enqueue. Mirrors the missing-file branch but
-// tells the user to re-run /handoff (their previous run
-// produced a blank doc).
+// ~/.nightme/handoff/demo.md exists but is zero bytes →
+// OutReply error, also no enqueue. Mirrors the missing-file
+// branch but tells the user to re-run /handoff.
 func TestFactory_Handle_HandoffEmpty_RepliesHint(t *testing.T) {
+	home := homeDir(t)
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	dir := t.TempDir()
-	if err := cs.SetSelectedCwd(dir); err != nil {
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("SetSelectedAgent: %v", err)
 	}
-	nightmeDir := filepath.Join(dir, ".nightme")
-	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll .nightme: %v", err)
+	hdir := filepath.Join(home, ".nightme", "handoff")
+	if err := os.MkdirAll(hdir, 0o700); err != nil {
+		t.Fatalf("MkdirAll handoff dir: %v", err)
 	}
 	// Truly empty (size==0). Whitespace-only is NOT empty here:
 	// the prompt's step 1 reads the file itself, so a stub with
 	// whitespace would just confuse the Agent.
-	if err := os.WriteFile(filepath.Join(nightmeDir, "handoff.md"), []byte{}, 0o644); err != nil {
-		t.Fatalf("seed empty handoff.md: %v", err)
+	if err := os.WriteFile(filepath.Join(hdir, "demo.md"), []byte{}, 0o644); err != nil {
+		t.Fatalf("seed empty handoff: %v", err)
 	}
 
 	in := command.SlashInput{
 		ChatID:    "c1",
 		MessageID: "m_resume_empty",
-		Text:      "/resume",
-		Args:      []string{"resume"},
+		Text:      "/resume demo",
+		Args:      []string{"resume", "demo"},
 	}
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
@@ -235,35 +312,35 @@ func TestFactory_Handle_HandoffEmpty_RepliesHint(t *testing.T) {
 	}
 }
 
-// Happy path: ./.nightme/handoff.md exists and contains a real
-// document → /resume queues exactly one message
+// Happy path: ~/.nightme/handoff/demo.md exists and contains a
+// real document → /resume queues exactly one message
 // (Kind=MessageKindQueue) and replies with the OutReply
 // "Resuming…" ack.
 func TestFactory_Handle_QueuesResume(t *testing.T) {
+	home := homeDir(t)
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	dir := t.TempDir()
-	if err := cs.SetSelectedCwd(dir); err != nil {
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("SetSelectedAgent: %v", err)
 	}
-	nightmeDir := filepath.Join(dir, ".nightme")
-	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll .nightme: %v", err)
+	hdir := filepath.Join(home, ".nightme", "handoff")
+	if err := os.MkdirAll(hdir, 0o700); err != nil {
+		t.Fatalf("MkdirAll handoff dir: %v", err)
 	}
 	doc := "# Handoff\n\n## Task\nFix the bug.\n\n## Completed\n- nothing yet\n"
-	if err := os.WriteFile(filepath.Join(nightmeDir, "handoff.md"), []byte(doc), 0o644); err != nil {
-		t.Fatalf("seed handoff.md: %v", err)
+	if err := os.WriteFile(filepath.Join(hdir, "demo.md"), []byte(doc), 0o644); err != nil {
+		t.Fatalf("seed handoff: %v", err)
 	}
 
 	in := command.SlashInput{
 		ChatID:    "c1",
 		MessageID: "m_resume_ok",
-		Text:      "/resume",
-		Args:      []string{"resume"},
+		Text:      "/resume demo",
+		Args:      []string{"resume", "demo"},
 	}
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
@@ -272,6 +349,9 @@ func TestFactory_Handle_QueuesResume(t *testing.T) {
 	text := outReply(t, out, in)
 	if !strings.Contains(text, "Resuming") {
 		t.Errorf("ack should mention Resuming: %q", text)
+	}
+	if !strings.Contains(text, "~/.nightme/handoff/demo.md") {
+		t.Errorf("ack should name the slash-form handoff path: %q", text)
 	}
 	if got := cs.QueueLen(); got != 1 {
 		t.Fatalf("QueueLen after /resume: got %d, want 1", got)
@@ -282,11 +362,11 @@ func TestFactory_Handle_QueuesResume(t *testing.T) {
 // and skip the QueueUserMessage (which silently no-ops on empty
 // ID). Mirrors /queue's guard at queue/cmd.go:143.
 func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
+	home := homeDir(t)
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
-	dir := t.TempDir()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	if err := cs.SetSelectedCwd(dir); err != nil {
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	if err := cs.SetSelectedAgent("claude"); err != nil {
@@ -294,19 +374,19 @@ func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
 	}
 	// Need a real handoff on disk so the test reaches the
 	// MessageID guard, not the missing-handoff error branch.
-	nightmeDir := filepath.Join(dir, ".nightme")
-	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll .nightme: %v", err)
+	hdir := filepath.Join(home, ".nightme", "handoff")
+	if err := os.MkdirAll(hdir, 0o700); err != nil {
+		t.Fatalf("MkdirAll handoff dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(nightmeDir, "handoff.md"), []byte("doc"), 0o644); err != nil {
-		t.Fatalf("seed handoff.md: %v", err)
+	if err := os.WriteFile(filepath.Join(hdir, "demo.md"), []byte("doc"), 0o644); err != nil {
+		t.Fatalf("seed handoff: %v", err)
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID: "c1",
-			Text:   "/resume",
-			Args:   []string{"resume"},
+			Text:   "/resume demo",
+			Args:   []string{"resume", "demo"},
 			// MessageID deliberately empty.
 		})
 	if err != nil {
@@ -322,31 +402,28 @@ func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
 }
 
 // RenderResumePrompt: every {{...}} placeholder resolves; no
-// forbidden-path roster leaks into the rendered prompt.
+// per-cwd / forbidden-path form leaks into the rendered prompt.
 func TestRenderResumePrompt_SubstitutesPath(t *testing.T) {
-	cwd := t.TempDir()
-	got := resumepkg.RenderResumePrompt(cwd)
+	home := homeDir(t)
+	got, err := resumepkg.RenderResumePrompt("demo")
+	if err != nil {
+		t.Fatalf("RenderResumePrompt: %v", err)
+	}
 
 	if strings.Contains(got, "{{") || strings.Contains(got, "}}") {
 		t.Errorf("rendered prompt contains unreplaced placeholders:\n%s", got)
 	}
 
-	want := filepath.Join(cwd, ".nightme", "handoff.md")
-	if !strings.Contains(got, want) {
-		t.Errorf("rendered prompt missing %s; got:\n%s", want, got)
+	wantFile := filepath.Join(home, ".nightme", "handoff", "demo.md")
+	if !strings.Contains(got, wantFile) {
+		t.Errorf("rendered prompt missing %s; got:\n%s", wantFile, got)
 	}
 
-	// No relative-form leakage (the Agent should only see the
-	// absolute path) and no forbidden-path roster (we removed
-	// the "~/.nightme/handoff.md" / "./handoff.md" list — these
-	// strings must NOT appear anywhere in the rendered prompt).
-	if strings.Contains(got, "./.nightme/handoff.md") {
-		t.Errorf("rendered prompt contains relative handoff path; Agent should see absolute only")
-	}
-	if strings.Contains(got, "~/.nightme/handoff.md") {
-		t.Errorf("rendered prompt must not include a forbidden-path roster")
-	}
-	if strings.Contains(got, "./handoff.md") {
-		t.Errorf("rendered prompt must not include a forbidden-path roster")
+	// Pinning the handoff to a single project would defeat the
+	// cross-cwd /resume design — keep this assertion so a
+	// future prompt edit that re-introduces project-scoping
+	// wording surfaces as a test diff.
+	if strings.Contains(got, "CURRENT PROJECT") {
+		t.Errorf("rendered prompt must not pin the handoff to a single project")
 	}
 }

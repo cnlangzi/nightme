@@ -789,8 +789,8 @@ func TestApplyHeartbeat_DoneFlipTriggersPatch(t *testing.T) {
 }
 
 // TestApplyHeartbeat_DoneIdempotent — true→true is NOT a changed
-// event (matches MarkDone's transition semantics). Applies to
-// the racing OutResult + PromptEndBus double MarkDone case.
+// event (matches Observe's flipTerminalLocked transition semantics). Applies to
+// the racing OutResult + PromptEndBus double Observe case.
 func TestApplyHeartbeat_DoneIdempotent(t *testing.T) {
 	r, bot := newTestReceipt(t)
 	r.heartbeatMinInterval = 0

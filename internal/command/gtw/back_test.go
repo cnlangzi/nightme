@@ -11,6 +11,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
 
 // --- tests ---
@@ -404,7 +405,7 @@ func TestRunBack_BranchEmpty_NoBranchRow(t *testing.T) {
 	rig := newCloseRig(t)
 	// Seed with Worktree set, Branch empty — the malformed
 	// half-window scenario.
-	if err := os.MkdirAll(filepath.Join(wt, nightmeDirName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(wt, nightmedir.DirName), 0o755); err != nil {
 		t.Fatalf("mkdir .nightme: %v", err)
 	}
 	if err := WriteGTWYml(wt, Context{

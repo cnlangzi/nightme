@@ -282,11 +282,18 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 	}
 
 	// Wait for drain — we expect 6 translated messages + at
-	// least 3 OutHeartbeat follow-ups (one per counter change:
-	// ToolStart, OutThinking, ToolStart). Counter increments
-	// happen BEFORE the policy gate, so even if a future change
-	// hides a kind, the heartbeat counter would still track it.
-	want := 9
+	// least 4 OutHeartbeat follow-ups (3 counter changes:
+	// ToolStart, OutThinking, ToolStart; plus 1 terminal flip
+	// from OutResult at the end of the agent run). Counter
+	// increments AND terminal flips happen BEFORE the policy
+	// gate via the Observe chokepoint, so even
+	// when a future change hides a kind the heartbeat would
+	// still track it AND flip to Done/Error on the terminal
+	// event. The terminal OutHeartbeat is what makes the GTW
+	// receipt's ⏱ header PATCH to ✅ on turn end — without
+	// it the heartbeat line would stay "🤖 Working" past the
+	// actual finish.
+	want := 10
 	if !ch.waitForSent(want, 2*time.Second) {
 		t.Fatalf("emitter never received %d messages; got %d sent",
 			want, len(ch.snapshot()))
@@ -304,15 +311,20 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 	if snap.LastBeatAt.IsZero() {
 		t.Errorf("LastBeatAt must be refreshed even on non-counter events")
 	}
+	// Terminal flip from OutResult must land on the snapshot.
+	if snap.Status == messages.HeartbeatRunning {
+		t.Errorf("Status = Running, want Done (OutResult must flip terminal)")
+	}
 
 	// Exactly 3 counter changes (ToolStart, OutThinking, ToolStart)
-	// → Observe returns true 3 times → dispatchSinkEvent fires
-	// OutHeartbeat exactly 3 times. Pin the exact count so a
-	// future regression that drops the follow-up emit (or
-	// double-counts) is caught immediately.
+	// + 1 terminal flip from OutResult → Observe returns true 4
+	// times → dispatchSinkEvent fires OutHeartbeat exactly 4
+	// times. Pin the exact count so a future regression that
+	// drops the follow-up emit (or double-counts) is caught
+	// immediately.
 	hbs := ch.heartbeatMsgs()
-	if len(hbs) != 3 {
-		t.Fatalf("OutHeartbeat count = %d, want 3 (one per counter change); sent=%+v",
+	if len(hbs) != 4 {
+		t.Fatalf("OutHeartbeat count = %d, want 4 (3 counter changes + 1 OutResult flip); sent=%+v",
 			len(hbs), ch.snapshot())
 	}
 	for i, hb := range hbs {
@@ -503,11 +515,29 @@ func TestRunAgentFor_NoDropPreservesOutResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runAgentFor: %v", err)
 	}
-	if !ch.waitForSent(1, 2*time.Second) {
-		t.Fatalf("emitter never received 1 message; got %d", len(ch.snapshot()))
+	// The sink no longer drops the terminal OutResult — without
+	// dropKinds the OutResult reaches the channel. The
+	// Observe fires a terminal OutHeartbeat
+	// follow-up BEFORE the drop check, so the captured stream
+	// carries both: 1 terminal OutHeartbeat (Observe flips
+	// Status → Done) + 1 OutResult. Wait for both.
+	if !ch.waitForSent(2, 2*time.Second) {
+		t.Fatalf("emitter never received 2 messages; got %d", len(ch.snapshot()))
 	}
 	got := ch.snapshot()
-	if len(got) != 1 || got[0].Kind != messages.OutResult {
+	if len(got) != 2 {
+		t.Fatalf("got %d messages, want 2 (terminal OutHeartbeat + OutResult): %+v",
+			len(got), got)
+	}
+	// First message is the terminal OutHeartbeat (Status flipped).
+	if got[0].Kind != messages.OutHeartbeat {
+		t.Fatalf("got[0].Kind = %v, want OutHeartbeat (terminal flip)", got[0].Kind)
+	}
+	if got[0].Heartbeat == nil || got[0].Heartbeat.Status == messages.HeartbeatRunning {
+		t.Fatalf("got[0] terminal heartbeat must carry non-Running Status, got %+v", got[0].Heartbeat)
+	}
+	// Second is the OutResult itself.
+	if got[1].Kind != messages.OutResult {
 		t.Fatalf("got %+v, want exactly one OutResult", got)
 	}
 }
@@ -550,5 +580,69 @@ func TestRunAgentFor_SinkNilEmitter(t *testing.T) {
 	}
 	if res.Text != "ignored" {
 		t.Errorf("res.Text = %q, want ignored", res.Text)
+	}
+}
+
+// TestRunAgentFor_FinalizeBlocksUntilDrained pins the F-63
+// follow-up fix-gtw-command-done guarantee: defer finalize()
+// in runAgentFor blocks until the drain goroutine has
+// processed every enqueued event. The dispatcher's defer
+// cancel() fires AFTER finalize() returns (defer is LIFO,
+// and finalize is deferred LATER inside runAgentFor), so
+// the terminal OutHeartbeat's renderLocked is never racing
+// a canceled ctx.
+//
+// Pre-fix behavior: runAgentFor returned as soon as RunOnce
+// returned. The drain goroutine was still processing the
+// tail of the event stream when dispatchCommit's defer
+// cancel fired, killing renderLocked mid-throttle and
+// leaving the receipt card stuck on the pre-terminal
+// ⏱ / 💭 / 🔧 header.
+//
+// The test asserts that all queued events have been
+// delivered to the emitter by the time runAgentFor returns.
+// The post-fix contract is "after runAgentFor returns,
+// drainDone has fired" — observing this transitively via
+// the captured emitter.
+func TestRunAgentFor_FinalizeBlocksUntilDrained(t *testing.T) {
+	starter := &eventEmitterStarter{
+		name: "finalize-blocks",
+		events: []agent.AgentEvent{
+			{Kind: agent.EventAgentText, Text: "chunk 1"},
+			{Kind: agent.EventAgentText, Text: "chunk 2"},
+			{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "done"}},
+		},
+		runOnceText: "done",
+	}
+	cs, ch := newSinkTestRig(t, starter)
+
+	// Use a cancellable ctx so we can simulate the
+	// dispatcher's defer cancel() firing right at
+	// runAgentFor's return — the post-fix guarantee is that
+	// finalize() ran first, so the drain has already exited
+	// and every event has reached the emitter.
+	callCtx, cancel := context.WithCancel(context.Background())
+
+	if _, _, err := runAgentFor(
+		callCtx, cs, t.TempDir(),
+		"prompt", "chat-test", "msg-test", "", "",
+	); err != nil {
+		t.Fatalf("runAgentFor: %v", err)
+	}
+
+	// runAgentFor has returned. At this point defer finalize()
+	// has already run, which means the drain goroutine has
+	// finished. cancel() now fires AFTER finalize drained
+	// everything — too late to affect delivery.
+	cancel()
+
+	// 2 OutReply chunks (one per think event) + 1 terminal
+	// OutHeartbeat (Observe flips Status → Done on the
+	// OutResult, even though OutResult is also emitted but
+	// then dropped by no-dropKinds == nil here). Wait for
+	// all 3 to arrive.
+	if !ch.waitForSent(3, 2*time.Second) {
+		t.Fatalf("drain did not finish before runAgentFor returned; got %d: %+v",
+			len(ch.snapshot()), ch.snapshot())
 	}
 }

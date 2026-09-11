@@ -16,8 +16,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+// observeKind is a small helper for tests that only care about
+// the kind + identity fields — the counter-only code paths
+// never inspect msg.Err / msg.PromptEndReason, so the empty
+// payload is sufficient.
+func observeKind(kind messages.OutboundKind) messages.OutboundMessage {
+	return messages.OutboundMessage{Kind: kind}
+}
 
 // TestNewHeartbeatTracker_Defaults pins the constructor's
 // fallback behaviour: zero / negative cap resolves to
@@ -51,7 +60,7 @@ func TestNewHeartbeatTracker_Defaults(t *testing.T) {
 // counter: OutThinking → ThinkCount++, returns true.
 func TestObserve_ThinkIncrementsCount(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	if changed := tr.Observe("u1", messages.OutThinking); !changed {
+	if changed := tr.Observe("u1", observeKind(messages.OutThinking)); !changed {
 		t.Fatal("first OutThinking should return changed=true")
 	}
 	snap := tr.Snapshot("u1")
@@ -70,7 +79,7 @@ func TestObserve_ThinkIncrementsCount(t *testing.T) {
 // OutToolStart.
 func TestObserve_ToolStartIncrementsCount(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	if changed := tr.Observe("u1", messages.OutToolStart); !changed {
+	if changed := tr.Observe("u1", observeKind(messages.OutToolStart)); !changed {
 		t.Fatal("first OutToolStart should return changed=true")
 	}
 	snap := tr.Snapshot("u1")
@@ -87,7 +96,7 @@ func TestObserve_ToolStartIncrementsCount(t *testing.T) {
 // counting both would inflate the visible counter).
 func TestObserve_ToolEndNoCount(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	tr.Observe("u1", messages.OutToolEnd)
+	tr.Observe("u1", observeKind(messages.OutToolEnd))
 	snap := tr.Snapshot("u1")
 	if snap.ToolCount != 0 {
 		t.Fatalf("OutToolEnd should not count: ToolCount = %d", snap.ToolCount)
@@ -104,7 +113,7 @@ func TestObserve_ToolEndNoCount(t *testing.T) {
 func TestObserve_ReplyNoCount(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
 	for i := 0; i < 50; i++ {
-		tr.Observe("u1", messages.OutReply)
+		tr.Observe("u1", observeKind(messages.OutReply))
 	}
 	snap := tr.Snapshot("u1")
 	if snap.ThinkCount != 0 || snap.ToolCount != 0 {
@@ -112,22 +121,191 @@ func TestObserve_ReplyNoCount(t *testing.T) {
 	}
 }
 
-// TestObserve_ResultNoCount — OutResult is one-per-turn, not a
-// counter.
-func TestObserve_ResultNoCount(t *testing.T) {
+// TestObserve_ErrorNoCount — OutError is rare and one-shot;
+// counter semantics would be misleading. OutError does NOT
+// trigger a terminal flip either (it surfaces through its own
+// channel rendering, not the heartbeat line).
+func TestObserve_ErrorNoCount(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	changed := tr.Observe("u1", messages.OutResult)
-	if changed {
-		t.Fatal("OutResult should return changed=false")
+	if changed := tr.Observe("u1", observeKind(messages.OutError)); changed {
+		t.Fatal("OutError should return changed=false")
+	}
+	snap := tr.Snapshot("u1")
+	if snap.Status != messages.HeartbeatRunning {
+		t.Fatalf("OutError must not flip terminal: snap=%+v", snap)
 	}
 }
 
-// TestObserve_ErrorNoCount — OutError is rare and one-shot;
-// counter semantics would be misleading.
-func TestObserve_ErrorNoCount(t *testing.T) {
+// TestObserve_ResultFlipsStatusDone pins that OutResult with
+// nil Err transitions the snapshot to HeartbeatDone. The
+// counter behaviour stays unchanged (no ThinkCount / ToolCount
+// bump on OutResult).
+func TestObserve_ResultFlipsStatusDone(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	if changed := tr.Observe("u1", messages.OutError); changed {
-		t.Fatal("OutError should return changed=false")
+	tr.Observe("u1", observeKind(messages.OutThinking)) // set up counters
+	before := tr.Snapshot("u1")
+
+	changed := tr.Observe("u1", messages.OutboundMessage{Kind: messages.OutResult})
+	if !changed {
+		t.Fatal("OutResult should return changed=true (terminal flip)")
+	}
+	after := tr.Snapshot("u1")
+	if after.Status != messages.HeartbeatDone {
+		t.Fatalf("Status = %v, want HeartbeatDone", after.Status)
+	}
+	// Counters must NOT change on OutResult.
+	if after.ThinkCount != before.ThinkCount {
+		t.Fatalf("OutResult clobbered ThinkCount: before=%d after=%d",
+			before.ThinkCount, after.ThinkCount)
+	}
+	if after.ToolCount != before.ToolCount {
+		t.Fatalf("OutResult clobbered ToolCount: before=%d after=%d",
+			before.ToolCount, after.ToolCount)
+	}
+}
+
+// TestObserve_ResultWithErrFlipsStatusError pins the error
+// branch: an OutResult carrying Err flips to HeartbeatError
+// (so the receipt header paints ❌ instead of ✅). Verdict
+// source: msg.Err != nil.
+func TestObserve_ResultWithErrFlipsStatusError(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	changed := tr.Observe("u1", messages.OutboundMessage{
+		Kind: messages.OutResult,
+		Err:  errTest("bridge reported failure"),
+	})
+	if !changed {
+		t.Fatal("OutResult+Err should return changed=true")
+	}
+	snap := tr.Snapshot("u1")
+	if snap.Status != messages.HeartbeatError {
+		t.Fatalf("Status = %v, want HeartbeatError", snap.Status)
+	}
+}
+
+// TestObserve_PromptEndedCleanFlipsDone pins the CS pump path:
+// OutPromptEnded with PromptEndClean (the readpump's
+// EventAgentDone) flips to HeartbeatDone.
+func TestObserve_PromptEndedCleanFlipsDone(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	clean := agent.PromptEndClean
+	changed := tr.Observe("u1", messages.OutboundMessage{
+		Kind:            messages.OutPromptEnded,
+		PromptEndReason: &clean,
+	})
+	if !changed {
+		t.Fatal("OutPromptEnded+Clean should return changed=true")
+	}
+	snap := tr.Snapshot("u1")
+	if snap.Status != messages.HeartbeatDone {
+		t.Fatalf("Status = %v, want HeartbeatDone", snap.Status)
+	}
+}
+
+// TestObserve_PromptEndedErrorFlipsError covers every non-clean
+// PromptEndReason — they all collapse to HeartbeatError, the
+// same way the old eventbus.go subscriber collapsed via
+// reason.IsError(). ProcessDied / UserKilled / UserStopped /
+// StalledKilled / Error all land here.
+func TestObserve_PromptEndedErrorFlipsError(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason agent.PromptEndReason
+	}{
+		{"error", agent.PromptEndError},
+		{"process_died", agent.PromptEndProcessDied},
+		{"stalled_killed", agent.PromptEndStalledKilled},
+		{"user_killed", agent.PromptEndUserKilled},
+		{"user_stopped", agent.PromptEndUserStopped},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tr := NewHeartbeatTracker(0)
+			reason := c.reason
+			changed := tr.Observe("u1", messages.OutboundMessage{
+				Kind:            messages.OutPromptEnded,
+				PromptEndReason: &reason,
+			})
+			if !changed {
+				t.Fatal("OutPromptEnded+Error should return changed=true")
+			}
+			if got := tr.Snapshot("u1").Status; got != messages.HeartbeatError {
+				t.Fatalf("Status = %v, want HeartbeatError", got)
+			}
+		})
+	}
+}
+
+// TestObserve_TerminalIdempotent pins the verdict-agnostic
+// idempotency contract: a second terminal Observe (any kind, any
+// verdict) is a no-op. The runtime has two terminal trigger
+// sites (handler.go's OutResult branch vs PromptEndBus
+// subscriber); whichever lands first wins, the other no-ops.
+func TestObserve_TerminalIdempotent(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	if !tr.Observe("u1", observeKind(messages.OutResult)) {
+		t.Fatal("first OutResult must return true")
+	}
+	if tr.Observe("u1", observeKind(messages.OutResult)) {
+		t.Fatal("second OutResult must return false (idempotent)")
+	}
+	clean := agent.PromptEndClean
+	if tr.Observe("u1", messages.OutboundMessage{
+		Kind: messages.OutPromptEnded, PromptEndReason: &clean,
+	}) {
+		t.Fatal("OutPromptEnded after OutResult must return false")
+	}
+	if got := tr.Snapshot("u1").Status; got != messages.HeartbeatDone {
+		t.Fatalf("Status = %v, want Done (first caller wins)", got)
+	}
+}
+
+// TestObserve_TerminalFirstCallerWins pins the verdict-agnostic
+// idempotency contract more aggressively: a second terminal
+// Observe with a DIFFERENT verdict is still a no-op once the
+// snapshot is terminal. Whichever verdict lands first sticks.
+func TestObserve_TerminalFirstCallerWins(t *testing.T) {
+	// Done wins first.
+	tr1 := NewHeartbeatTracker(0)
+	tr1.Observe("u1", observeKind(messages.OutResult))
+	if got := tr1.Snapshot("u1").Status; got != messages.HeartbeatDone {
+		t.Fatalf("first call Status = %v, want Done", got)
+	}
+	// Subsequent Error attempt is ignored.
+	tr1.Observe("u1", messages.OutboundMessage{
+		Kind: messages.OutResult, Err: errTest("ignored"),
+	})
+	if got := tr1.Snapshot("u1").Status; got != messages.HeartbeatDone {
+		t.Fatalf("after Error attempt Status = %v, want Done (first wins)", got)
+	}
+
+	// Error wins first.
+	tr2 := NewHeartbeatTracker(0)
+	tr2.Observe("u2", messages.OutboundMessage{
+		Kind: messages.OutResult, Err: errTest("first error"),
+	})
+	if got := tr2.Snapshot("u2").Status; got != messages.HeartbeatError {
+		t.Fatalf("first call Status = %v, want Error", got)
+	}
+	// Subsequent Done attempt is ignored.
+	clean := agent.PromptEndClean
+	tr2.Observe("u2", messages.OutboundMessage{
+		Kind: messages.OutPromptEnded, PromptEndReason: &clean,
+	})
+	if got := tr2.Snapshot("u2").Status; got != messages.HeartbeatError {
+		t.Fatalf("after Done attempt Status = %v, want Error (first wins)", got)
+	}
+}
+
+// TestObserve_ResultNoCounterChange pins that the OutResult
+// terminal flip does NOT also bump counters — OutResult is
+// one-per-turn, not a counter event.
+func TestObserve_ResultNoCounterChange(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	tr.Observe("u1", observeKind(messages.OutResult))
+	snap := tr.Snapshot("u1")
+	if snap.ThinkCount != 0 || snap.ToolCount != 0 {
+		t.Fatalf("OutResult must not count: snap=%+v", snap)
 	}
 }
 
@@ -152,29 +330,17 @@ func TestObserve_AllKindsRefreshLastBeat(t *testing.T) {
 		messages.OutChoicePatch,
 		messages.OutError,
 		messages.OutHeartbeat,
+		messages.OutPromptEnded,
 	}
 	for _, k := range kinds {
 		t.Run(k.String(), func(t *testing.T) {
 			tr := NewHeartbeatTracker(0)
-			tr.Observe("u1", k)
+			tr.Observe("u1", observeKind(k))
 			snap := tr.Snapshot("u1")
 			if snap.LastBeatAt.IsZero() {
-				t.Fatalf("kind %s did not refresh LastBeatAt", k.String())
+				t.Fatalf("kind %v must refresh LastBeatAt", k)
 			}
 		})
-	}
-}
-
-// TestObserve_LastBeatAlone covers the case where a kind is
-// non-counting but still observed: changed must be false so the
-// caller doesn't fire a useless OutHeartbeat.
-func TestObserve_LastBeatAlone(t *testing.T) {
-	tr := NewHeartbeatTracker(0)
-	if changed := tr.Observe("u1", messages.OutReply); changed {
-		t.Fatal("OutReply-only observe should return changed=false")
-	}
-	if changed := tr.Observe("u1", messages.OutReply); changed {
-		t.Fatal("repeat OutReply observe should still return changed=false")
 	}
 }
 
@@ -185,7 +351,7 @@ func TestObserve_LastBeatAlone(t *testing.T) {
 // double-counting).
 func TestObserve_OutHeartbeatIgnored(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	if changed := tr.Observe("u1", messages.OutHeartbeat); changed {
+	if changed := tr.Observe("u1", observeKind(messages.OutHeartbeat)); changed {
 		t.Fatal("OutHeartbeat should never report changed=true")
 	}
 	snap := tr.Snapshot("u1")
@@ -203,7 +369,7 @@ func TestObserve_OutHeartbeatIgnored(t *testing.T) {
 // anchor to a receipt.
 func TestObserve_EmptyUserMsgNoOp(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	if changed := tr.Observe("", messages.OutThinking); changed {
+	if changed := tr.Observe("", observeKind(messages.OutThinking)); changed {
 		t.Fatal("empty userMsgID should return changed=false")
 	}
 	if tr.Len() != 0 {
@@ -216,7 +382,7 @@ func TestObserve_EmptyUserMsgNoOp(t *testing.T) {
 // Both Observe and Snapshot must not panic.
 func TestObserve_NilTrackerSafe(t *testing.T) {
 	var tr *HeartbeatTracker
-	if changed := tr.Observe("u1", messages.OutThinking); changed {
+	if changed := tr.Observe("u1", observeKind(messages.OutThinking)); changed {
 		t.Fatal("nil tracker should return changed=false")
 	}
 	if snap := tr.Snapshot("u1"); !snap.Empty() {
@@ -233,14 +399,14 @@ func TestObserve_LRUEvicts(t *testing.T) {
 	// Fill to capacity.
 	for i := 0; i < cap; i++ {
 		uid := userMsgIDForIndex(i)
-		tr.Observe(uid, messages.OutThinking)
+		tr.Observe(uid, observeKind(messages.OutThinking))
 	}
 	if tr.Len() != cap {
 		t.Fatalf("Len after fill = %d, want %d", tr.Len(), cap)
 	}
 
 	// Add one more — should evict the first ("u0").
-	tr.Observe(userMsgIDForIndex(cap), messages.OutThinking)
+	tr.Observe(userMsgIDForIndex(cap), observeKind(messages.OutThinking))
 	if tr.Len() != cap {
 		t.Fatalf("Len after overflow = %d, want %d", tr.Len(), cap)
 	}
@@ -262,13 +428,13 @@ func TestObserve_LRUTouchUpdates(t *testing.T) {
 	const cap = 3
 	tr := NewHeartbeatTracker(cap)
 
-	tr.Observe("u0", messages.OutThinking) // head: [u0]
-	tr.Observe("u1", messages.OutThinking) // head: [u1, u0]
-	tr.Observe("u2", messages.OutThinking) // head: [u2, u1, u0]
-	tr.Observe("u0", messages.OutReply)    // head: [u0, u2, u1] — u0 moves up
+	tr.Observe("u0", observeKind(messages.OutThinking)) // head: [u0]
+	tr.Observe("u1", observeKind(messages.OutThinking)) // head: [u1, u0]
+	tr.Observe("u2", observeKind(messages.OutThinking)) // head: [u2, u1, u0]
+	tr.Observe("u0", observeKind(messages.OutReply))    // head: [u0, u2, u1] — u0 moves up
 
 	// Now write u3 — should evict u1 (the tail), NOT u0.
-	tr.Observe("u3", messages.OutThinking) // head: [u3, u0, u2]
+	tr.Observe("u3", observeKind(messages.OutThinking)) // head: [u3, u0, u2]
 
 	if snap := tr.Snapshot("u1"); !snap.Empty() {
 		t.Fatalf("u1 should be evicted (oldest), got %+v", snap)
@@ -290,11 +456,11 @@ func TestObserve_LRUTouchUpdates(t *testing.T) {
 func TestObserve_LastBeatReflectsLastEvent(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
 	t0 := time.Now()
-	tr.Observe("u1", messages.OutThinking)
+	tr.Observe("u1", observeKind(messages.OutThinking))
 	first := tr.Snapshot("u1").LastBeatAt
 
 	time.Sleep(2 * time.Millisecond)
-	tr.Observe("u1", messages.OutToolStart)
+	tr.Observe("u1", observeKind(messages.OutToolStart))
 	second := tr.Snapshot("u1").LastBeatAt
 
 	if !second.After(first) {
@@ -311,18 +477,18 @@ func TestObserve_LastBeatReflectsLastEvent(t *testing.T) {
 func TestObserve_MixedTurn(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
 
-	tr.Observe("u1", messages.OutThinking)
-	tr.Observe("u1", messages.OutToolStart)
-	tr.Observe("u1", messages.OutThinking)
-	tr.Observe("u1", messages.OutToolStart)
-	tr.Observe("u1", messages.OutReply)
-	tr.Observe("u1", messages.OutToolEnd)
-	tr.Observe("u1", messages.OutReply)
-	tr.Observe("u1", messages.OutToolStart)
-	tr.Observe("u1", messages.OutReply)
-	tr.Observe("u1", messages.OutReply)
-	tr.Observe("u1", messages.OutReply)
-	tr.Observe("u1", messages.OutResult)
+	tr.Observe("u1", observeKind(messages.OutThinking))
+	tr.Observe("u1", observeKind(messages.OutToolStart))
+	tr.Observe("u1", observeKind(messages.OutThinking))
+	tr.Observe("u1", observeKind(messages.OutToolStart))
+	tr.Observe("u1", observeKind(messages.OutReply))
+	tr.Observe("u1", observeKind(messages.OutToolEnd))
+	tr.Observe("u1", observeKind(messages.OutReply))
+	tr.Observe("u1", observeKind(messages.OutToolStart))
+	tr.Observe("u1", observeKind(messages.OutReply))
+	tr.Observe("u1", observeKind(messages.OutReply))
+	tr.Observe("u1", observeKind(messages.OutReply))
+	tr.Observe("u1", observeKind(messages.OutResult))
 
 	snap := tr.Snapshot("u1")
 	if snap.ThinkCount != 2 {
@@ -330,6 +496,9 @@ func TestObserve_MixedTurn(t *testing.T) {
 	}
 	if snap.ToolCount != 3 {
 		t.Fatalf("ToolCount = %d, want 3", snap.ToolCount)
+	}
+	if snap.Status != messages.HeartbeatDone {
+		t.Fatalf("Status = %v, want Done (OutResult flips terminal)", snap.Status)
 	}
 }
 
@@ -352,11 +521,11 @@ func TestObserve_ConcurrentSafe(t *testing.T) {
 				uid := userMsgIDForIndex((g + i) % 32)
 				switch i % 3 {
 				case 0:
-					tr.Observe(uid, messages.OutThinking)
+					tr.Observe(uid, observeKind(messages.OutThinking))
 				case 1:
-					tr.Observe(uid, messages.OutToolStart)
+					tr.Observe(uid, observeKind(messages.OutToolStart))
 				case 2:
-					tr.Observe(uid, messages.OutReply)
+					tr.Observe(uid, observeKind(messages.OutReply))
 				}
 			}
 		}(g)
@@ -398,7 +567,7 @@ func TestSnapshot_ZeroValueForUnknownUserMsg(t *testing.T) {
 // Observe results.
 func TestSnapshot_DoesNotMutateInternalState(t *testing.T) {
 	tr := NewHeartbeatTracker(0)
-	tr.Observe("u1", messages.OutThinking)
+	tr.Observe("u1", observeKind(messages.OutThinking))
 	snap := tr.Snapshot("u1")
 	snap.ThinkCount = 999
 	snap.ToolCount = 999
@@ -406,6 +575,22 @@ func TestSnapshot_DoesNotMutateInternalState(t *testing.T) {
 	again := tr.Snapshot("u1")
 	if again.ThinkCount != 1 || again.ToolCount != 0 {
 		t.Fatalf("snapshot leaked into tracker: %+v", again)
+	}
+}
+
+// TestSnapshot_TerminalVisible pins that the Status flip from
+// OutResult/OutPromptEnded is visible to Snapshot readers (the
+// runtime / sink / eventbus subscriber all read after Observe
+// to send the OutHeartbeat follow-up).
+func TestSnapshot_TerminalVisible(t *testing.T) {
+	tr := NewHeartbeatTracker(0)
+	tr.Observe("u1", observeKind(messages.OutResult))
+	snap := tr.Snapshot("u1")
+	if snap.Status == messages.HeartbeatRunning {
+		t.Fatalf("Status after OutResult must be terminal, got %+v", snap)
+	}
+	if snap.Empty() {
+		t.Fatal("terminal snapshot must not be Empty() (the follow-up OutHeartbeat would be dropped)")
 	}
 }
 
@@ -421,153 +606,10 @@ func userMsgIDForIndex(i int) string {
 	return "u" + string(digits[i/10:i/10+1]) + string(digits[i%10:i%10+1])
 }
 
-// TestMarkDone_FlipsFlag pins the basic terminal-state contract:
-// the first MarkDone call returns true and the snapshot's Done
-// becomes true; counters and LastBeatAt are untouched.
-func TestMarkDone_FlipsFlag(t *testing.T) {
-	tr := NewHeartbeatTracker(0)
-	tr.Observe("u1", messages.OutThinking) // ThinkCount=1, LastBeatAt set
-	before := tr.Snapshot("u1")
-	if before.Status != messages.HeartbeatRunning {
-		t.Fatal("pre-condition: Done must start false")
-	}
+// errTest is a tiny helper for tests that need a non-nil error
+// without importing errors everywhere.
+type errString string
 
-	changed := tr.MarkTerminal("u1", messages.HeartbeatDone)
-	if !changed {
-		t.Fatal("first MarkDone must return changed=true")
-	}
-	after := tr.Snapshot("u1")
-	if after.Status == messages.HeartbeatRunning {
-		t.Fatal("Done must be true after MarkDone")
-	}
-	// MarkDone must NOT touch counters / LastBeatAt — those
-	// already carry the in-turn state the renderer needs.
-	if after.ThinkCount != before.ThinkCount {
-		t.Fatalf("MarkDone clobbered ThinkCount: before=%d after=%d", before.ThinkCount, after.ThinkCount)
-	}
-	if after.LastBeatAt != before.LastBeatAt {
-		t.Fatalf("MarkDone clobbered LastBeatAt: before=%v after=%v", before.LastBeatAt, after.LastBeatAt)
-	}
-}
+func (e errString) Error() string { return string(e) }
 
-// TestMarkDone_Idempotent pins the transition check: the second
-// call returns false so the runtime handler emits at most one
-// follow-up OutHeartbeat per userMsgID per turn, even when
-// both the OutResult branch and the PromptEndBus subscriber
-// race to MarkDone.
-func TestMarkDone_Idempotent(t *testing.T) {
-	tr := NewHeartbeatTracker(0)
-	if !tr.MarkTerminal("u1", messages.HeartbeatDone) {
-		t.Fatal("first MarkDone must return true")
-	}
-	if tr.MarkTerminal("u1", messages.HeartbeatDone) {
-		t.Fatal("second MarkDone must return false (idempotent transition)")
-	}
-	if tr.MarkTerminal("u1", messages.HeartbeatDone) {
-		t.Fatal("third MarkDone must also return false")
-	}
-}
-
-// TestMarkDone_EmptyUserMsgIDNoOp — empty userMsgID is a no-op
-// (matches Observe's contract). Defends against orphan lifecycle
-// events without a receipt anchor.
-func TestMarkDone_EmptyUserMsgIDNoOp(t *testing.T) {
-	tr := NewHeartbeatTracker(0)
-	if tr.MarkTerminal("", messages.HeartbeatDone) {
-		t.Fatal("MarkDone(\"\") must return false")
-	}
-}
-
-// TestMarkDone_NilTrackerSafe — defensive nil check (mirrors
-// Observe's nil-safe call path).
-func TestMarkDone_NilTrackerSafe(t *testing.T) {
-	var tr *HeartbeatTracker
-	if tr.MarkTerminal("u1", messages.HeartbeatDone) {
-		t.Fatal("nil tracker MarkDone must return false without panic")
-	}
-}
-
-// TestSnapshot_DoneVisible pins that Snapshot returns the Done
-// flag — the runtime handler reads the snapshot after MarkDone
-// to send the OutHeartbeat follow-up, so the flag must round-
-// trip through the read path.
-func TestSnapshot_DoneVisible(t *testing.T) {
-	tr := NewHeartbeatTracker(0)
-	tr.MarkTerminal("u1", messages.HeartbeatDone)
-	snap := tr.Snapshot("u1")
-	if snap.Status == messages.HeartbeatRunning {
-		t.Fatalf("Snapshot after MarkDone must carry Done=true, got %+v", snap)
-	}
-	if snap.Empty() {
-		t.Fatal("Done=true snapshot must not be Empty() (the follow-up OutHeartbeat would be dropped)")
-	}
-}
-
-// TestMarkTerminal_HeartbeatError covers the non-clean terminal
-// path: HeartbeatError should be the post-call Status, and the
-// tracker should still return true on the running→error
-// transition (the runtime's PromptEndBus subscriber calls this
-// for any PromptEndReason other than PromptEndClean).
-func TestMarkTerminal_HeartbeatError(t *testing.T) {
-	tr := NewHeartbeatTracker(8)
-	tr.Observe("u1", messages.OutThinking)
-	before := tr.Snapshot("u1")
-	if before.Status != messages.HeartbeatRunning {
-		t.Fatalf("initial Status = %v, want Running", before.Status)
-	}
-
-	changed := tr.MarkTerminal("u1", messages.HeartbeatError)
-	if !changed {
-		t.Fatal("MarkTerminal(Running → Error) must return true")
-	}
-
-	after := tr.Snapshot("u1")
-	if after.Status != messages.HeartbeatError {
-		t.Fatalf("post-MarkTerminal Status = %v, want Error", after.Status)
-	}
-	// MarkTerminal must NOT touch counters / LastBeatAt
-	if after.ThinkCount != before.ThinkCount {
-		t.Fatalf("ThinkCount clobbered: before=%d after=%d",
-			before.ThinkCount, after.ThinkCount)
-	}
-	if !after.LastBeatAt.Equal(before.LastBeatAt) {
-		t.Fatalf("LastBeatAt clobbered: before=%v after=%v",
-			before.LastBeatAt, after.LastBeatAt)
-	}
-}
-
-// TestMarkTerminal_FirstCallerWins pins the verdict-agnostic
-// idempotency contract: a second MarkTerminal call with a
-// DIFFERENT status is still a no-op once the snapshot is
-// terminal. The runtime has two trigger sites (handler.go's
-// OutResult branch vs PromptEndBus subscriber); whichever lands
-// first wins, and the other no-ops. This test pins the
-// documentation, not the actual ordering — production
-// non-determinism is acceptable per the doc comment on
-// MarkTerminal.
-func TestMarkTerminal_FirstCallerWins(t *testing.T) {
-	tr := NewHeartbeatTracker(8)
-
-	if !tr.MarkTerminal("u1", messages.HeartbeatDone) {
-		t.Fatal("first MarkTerminal(Done) must return true")
-	}
-	// Second call with DIFFERENT status: no-op, status unchanged.
-	if tr.MarkTerminal("u1", messages.HeartbeatError) {
-		t.Fatal("second MarkTerminal(Error) must return false (already terminal)")
-	}
-	if got := tr.Snapshot("u1").Status; got != messages.HeartbeatDone {
-		t.Fatalf("Status after racing call = %v, want Done (first caller wins)", got)
-	}
-
-	// And the reverse — error wins first, clean is ignored.
-	tr2 := NewHeartbeatTracker(8)
-	if !tr2.MarkTerminal("u2", messages.HeartbeatError) {
-		t.Fatal("first MarkTerminal(Error) must return true")
-	}
-	if tr2.MarkTerminal("u2", messages.HeartbeatDone) {
-		t.Fatal("second MarkTerminal(Done) must return false")
-	}
-	if got := tr2.Snapshot("u2").Status; got != messages.HeartbeatError {
-		t.Fatalf("Status = %v, want Error", got)
-	}
-}
+func errTest(s string) error { return errString(s) }

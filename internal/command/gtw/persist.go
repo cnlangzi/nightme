@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 	"github.com/cnlangzi/nightme/internal/pathutil"
 	"gopkg.in/yaml.v3"
 )
@@ -74,19 +75,16 @@ func (d gtwYmlDoc) toContext() Context {
 }
 
 // NightmeDir is the per-worktree scratch directory holding gtw
-// state. Kept package-private so callers can't bypass the
-// Ensure/Write/Read helpers below.
-const nightmeDirName = ".nightme"
-
-// GtwYmlName is the canonical filename inside .nightme/.
+// state. Lives in internal/nightmedir; this package uses the
+// path helper to assemble its own filename path.
 const gtwYmlName = "gtw.yml"
 
 // gtwYmlPath is a small helper used by both Write and Read.
-// F-PATHUTIL-001 §13.3.1: route through pathutil.Join so the
-// platform-specific separator handling is consistent with every
-// other path operation in this package.
+// F-PATHUTIL-001 §13.3.1: route through nightmedir.FilePath +
+// pathutil.Join so the platform-specific separator handling is
+// consistent with every other path operation in this package.
 func gtwYmlPath(worktreePath string) string {
-	return pathutil.Join(worktreePath, nightmeDirName, gtwYmlName)
+	return nightmedir.FilePath(worktreePath, gtwYmlName)
 }
 
 // ErrGtwYmlExists is returned by WriteGTWYml when the file is
@@ -94,58 +92,15 @@ func gtwYmlPath(worktreePath string) string {
 // "another fix in progress" reply.
 var ErrGtwYmlExists = errors.New("gtw: .nightme/gtw.yml already exists")
 
-// EnsureGitignore makes sure `<worktreePath>/.gitignore` lists
-// `.nightme/` so the yml file inside that directory is not
-// surfaced by `git status`.
+// EnsureGitignore appends `.nightme/` to <worktreePath>/.gitignore
+// when missing. Thin wrapper around internal/nightmedir — kept
+// for caller-site readability ("gtw.EnsureGitignore" reads better
+// than "nightmedir.EnsureGitignoreEntry" at the call site of
+// `gtw fix`'s WorktreeAdd success path).
 //
-// Idempotent:
-//   - .gitignore missing              → create with `.nightme/\n`
-//   - .gitignore present, has entry    → no-op
-//   - .gitignore present, no entry     → append a line, preserve original content
-//
-// Each worktree has its own working tree, so this writes only to
-// the worktree's .gitignore (not the main repo's). See wip/gtw.md
-// §14.6 for the design rationale.
-//
-// NOTE: this only writes the file — it does NOT commit it. The
-// caller (completeFixAndDispatch) follows up with
-// CommitGitignore so the worktree ends up genuinely clean for
-// `git worktree remove`. Keeping the write and the commit as
-// separate steps lets tests cover each one in isolation.
+// Does NOT commit; CommitGitignoreIfDirty handles that below.
 func EnsureGitignore(worktreePath string) error {
-	// F-PATHUTIL-001 §13.3.1: pathutil.Join for separator consistency.
-	giPath := pathutil.Join(worktreePath, ".gitignore")
-
-	existing, readErr := os.ReadFile(giPath)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		return fmt.Errorf("read .gitignore: %w", readErr)
-	}
-
-	for _, raw := range strings.Split(string(existing), "\n") {
-		trimmed := strings.TrimSpace(raw)
-		// Match both the directory form (.nightme/) and the
-		// explicit-file form, in case a future user edits it
-		// manually. We don't expand globs or parse comments.
-		if trimmed == ".nightme/" || trimmed == ".nightme/gtw.yml" {
-			return nil
-		}
-	}
-
-	f, err := os.OpenFile(giPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
-	if err != nil {
-		return fmt.Errorf("open .gitignore: %w", err)
-	}
-	defer f.Close()
-
-	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
-		if _, err := f.WriteString("\n"); err != nil {
-			return fmt.Errorf("write newline before .nightme/ entry: %w", err)
-		}
-	}
-	if _, err := f.WriteString(".nightme/\n"); err != nil {
-		return fmt.Errorf("append .nightme/ to .gitignore: %w", err)
-	}
-	return nil
+	return nightmedir.EnsureGitignoreEntry(worktreePath)
 }
 
 // gitToolIdentity is the per-command identity override used by

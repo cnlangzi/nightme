@@ -20,18 +20,38 @@
 //	└─────────────────┘                       └──────────────────┘
 //
 // The bridge sees a non-blocking enqueue (drops via select on
-// ctx.Done if the chan is full + ctx is cancelled, which is the
-// well-defined backpressure signal). The drain goroutine runs at
-// its own pace and translates every event through outbound.Translate
-// before handing off to the Emitter.
+// the caller's ctx.Done if the chan is full + ctx is cancelled,
+// which is the well-defined backpressure signal). The drain
+// goroutine runs at its own pace and translates every event
+// through outbound.Translate before handing off to the Emitter.
 //
-// IMPORTANT: StreamRunOnceToEmitter returns the sink callback. The
-// caller passes it as agent.WithEventSink(...) to Starter.RunOnce /
-// Starter.Review. The drain goroutine stays alive until ctx is
-// cancelled (or the process exits). Tying the goroutine to ctx is
-// intentional: for /gtw commit and /gtw pr the ctx outlives the
-// one-shot call (it carries timeouts.Agent), so the drain finishes
-// naturally on return.
+// IMPORTANT: StreamRunOnceToEmitter returns a sink callback AND
+// a finalize function. The caller passes the sink as
+// agent.WithEventSink(...) to Starter.RunOnce / Starter.Review
+// and defers finalize() so the terminal OutHeartbeat lands on
+// the receipt card BEFORE the dispatcher's defer cancel() fires:
+//
+//	sink, finalize := outbound.StreamRunOnceToEmitter(ctx, em, cs, ...)
+//	defer finalize()                                      // blocks until drain exits
+//	res, err := a.RunOnce(ctx, blocks, WithEventSink(sink))
+//
+// Two contexts matter:
+//
+//	ctx        caller's; consulted only by the sink callback's
+//	           drop check (caller-shutdown backpressure signal).
+//	drainCtx   sink-internal; survives caller cancel and is
+//	           canceled by finalize() once the channel is drained.
+//
+// Tying the drain goroutine to the caller's ctx is wrong for
+// one-shot dispatchers (/gtw commit, /gtw pr, /review): the
+// dispatcher's WithTimeout(ctx, timeouts.Agent) defers cancel(),
+// which races the receipt's 300ms PATCH throttle inside
+// renderLocked. When defer cancel fires mid-throttle, renderLocked
+// returns ctx.Err() and the receipt's terminal ✅ PATCH never
+// lands — the card stays stuck on the pre-terminal ⏱ / 💭 / 🔧
+// header. Decoupling the drain's ctx from the caller's lets the
+// terminal OutHeartbeat finish rendering before dispatchCommit
+// returns and the WithTimeout cancel fires.
 //
 // One-shot calls run with full-access permission mode (no
 // Permission event handling), so the drain never has to wait for
@@ -102,27 +122,49 @@ func StreamRunOnceToEmitter(
 	logger *slog.Logger,
 	chatID, replyTo, agentName string,
 	dropKinds ...messages.OutboundKind,
-) func(agent.AgentEvent) {
+) (sink func(agent.AgentEvent), finalize func()) {
 	if em == nil {
-		return func(agent.AgentEvent) {}
+		return func(agent.AgentEvent) {}, func() {}
 	}
 
 	ch := make(chan agent.AgentEvent, sinkBufferSize)
+	drainDone := make(chan struct{})
+
+	// F-63 follow-up (fix-gtw-command-done): the drain goroutine
+	// runs on drainCtx, NOT on the caller's ctx. Decoupling matters
+	// for one-shot dispatchers (/gtw commit, /gtw pr, /review)
+	// whose defer cancel() at function return would otherwise
+	// cancel the terminal OutHeartbeat's renderLocked while it is
+	// still in flight. The receipt's 300ms PATCH throttle can keep
+	// renderLocked blocked on its timer for hundreds of ms after
+	// the last counter bump; defer cancel at dispatcher return
+	// races that timer and produces the
+	// "feishu receipt: heartbeat render failed err="context
+	// canceled"" warning, leaving the receipt card stuck on the
+	// pre-terminal ⏱ / 💭 / 🔧 header.
+	//
+	// The caller's ctx is consulted only by the sink callback's
+	// drop check (caller-shutdown backpressure signal). drainCtx
+	// is canceled by finalize() once the channel is closed and
+	// drained.
+	drainCtx, drainCancel := context.WithCancel(context.Background())
 
 	// Drain goroutine: pulls from the bridge's sink-chan,
 	// translates to OutboundMessage, and hands off to the Emitter.
 	// Decoupled from the bridge's drain loop so the bridge never
 	// waits on the Emitter (Feishu rate-limits, etc.).
 	go func() {
+		defer close(drainDone)
+		defer drainCancel()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-drainCtx.Done():
 				return
 			case ev, ok := <-ch:
 				if !ok {
 					return
 				}
-				dispatchSinkEvent(ctx, em, cs, logger, chatID, replyTo, agentName, ev, dropKinds)
+				dispatchSinkEvent(drainCtx, em, cs, logger, chatID, replyTo, agentName, ev, dropKinds)
 			}
 		}
 	}()
@@ -138,13 +180,12 @@ func StreamRunOnceToEmitter(
 	// the result via the sink alone. This trade-off keeps the
 	// bridge's wire parser / drain loop from blocking on a slow
 	// Feishu card send.
-	return func(ev agent.AgentEvent) {
+	sink = func(ev agent.AgentEvent) {
 		select {
 		case <-ctx.Done():
-			// Bridge context cancelled; the drain goroutine has
-			// already exited (or is about to). Drop silently — the
-			// bridge's defer Close will fire and tear down the
-			// session regardless.
+			// Caller context cancelled; the bridge may still emit
+			// but we drop silently. The drain goroutine continues
+			// processing any events already enqueued.
 		case ch <- ev:
 			// Common path: event queued for drain.
 		default:
@@ -154,6 +195,22 @@ func StreamRunOnceToEmitter(
 			)
 		}
 	}
+
+	// finalize closes ch (signals drain to drain remaining events
+	// and exit) and blocks until the drain goroutine returns.
+	// Callers MUST defer finalize() right after the sink is
+	// obtained; that way finalize runs when runAgentFor returns,
+	// closes the channel, and blocks until the terminal
+	// OutHeartbeat's PATCH has landed on the receipt card.
+	// Without this guarantee, the dispatcher's defer cancel()
+	// could race renderLocked's 300ms throttle timer and cancel
+	// the terminal render mid-flight (see drainCtx comment).
+	finalize = func() {
+		close(ch)
+		<-drainDone
+	}
+
+	return sink, finalize
 }
 
 // dispatchSinkEvent translates one AgentEvent to an OutboundMessage
@@ -229,10 +286,20 @@ func dispatchSinkEvent(
 			ChatID:    chatID,
 			UserMsgID: replyTo,
 		}
-		// 1. Observe FIRST — heartbeat counter increments even when
-		//    the policy gate below drops the message.
+		// 1. Observe FIRST — heartbeat counter increments AND
+		//    terminal verdict (OutResult → Done/Error by msg.Err)
+		//    flip happen in the same choke point. Critical for
+		//    /gtw commit / /gtw pr: those dispatchers drop
+		//    OutResult later in this function (caller opted out
+		//    via dropKinds so the dispatcher's own success card
+		//    isn't shadowed), but the terminal OutHeartbeat
+		//    follow-up emit fires here, BEFORE the drop check —
+		//    so the receipt's ⏱ / 💭 N · 🔧 M header still
+		//    PATCHes to ✅ Done on turn end. Without this the
+		//    GTW receipt would stay "🤖 Working" past the
+		//    actual finish.
 		if hb := cs.Heartbeat(); hb != nil && replyTo != "" {
-			if hb.Observe(replyTo, out.Kind) {
+			if hb.Observe(replyTo, out) {
 				snap := hb.Snapshot(replyTo)
 				if !snap.Empty() {
 					_ = em.Send(ctx, messages.OutboundMessage{

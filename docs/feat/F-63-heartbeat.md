@@ -1,32 +1,6 @@
 # F-63: Heartbeat — Receipt 顶部活动计数器与最后心跳时间
 
-> **Status**: Revised
-> **Date**: 2026-08-16
-> **Author**: 夜me
-> **Branch**: `fix-working`(原 `feat-hearbeat` 合并后,继续在主仓迭代)
-> **触发**: 用户长 turn(30s+)时,飞书占位卡静态显示 "⌨️ Working..." 让人误以为 agent 卡死。需要在 receipt 顶部动态显示 agent 真实进度(thinking / tool 调用次数 + 最近活动时间)。
-
-## 0. 修订记录
-
-### 2026-08-16 — 视觉收敛:Working 前缀与活动计数互斥
-
-原方案在有活动时把 `🤖 Working` 和 `💭 N · 🔧 M · ⏱ HH:MM:SS` 拼在同一行。实际使用中 `🤖 Working` 与 `💭/🔧` 同屏重复表述"agent 在干活"——`💭/🔧` 已经在计数了,前缀显得冗余。
-
-新规则:**两段互斥**。Receipt 顶部只有以下两种形态之一:
-
-1. **前半部分**(无活动) — `🤖 Working`
-   - 触发:`ThinkCount == 0 && ToolCount == 0` 且 entries/tasks 都空
-   - 视觉语义:"agent 已经在排队,但还没开始动手 / 纯快速回答转瞬即逝"
-2. **后半部分**(有活动) — `💭 N · 🔧 M · ⏱ HH:MM:SS`
-   - 触发:`ThinkCount > 0 || ToolCount > 0`
-   - 视觉语义:"agent 真的在做事"+ "最近活动时刻"
-   - ⏱ 时间戳作为"还在活动"的副信号,跟计数同段同生
-
-`🤖 Working` 不再作为后半部分的前缀。两段不会同时出现,二选一。
-
-实现侧的代码改动在 `internal/channel/feishu/adapter.go:buildReceiptCard` 的 switch 与 `renderHeartbeatHeader`,见 §3.6。
-
----
+用户长 turn(30s+)时,飞书占位卡静态显示 `⌨️ Working...` 让人误以为 agent 卡死。Receipt 顶部需要动态显示 agent 真实进度(thinking / tool 调用次数 + 最近活动时间)。
 
 ## 1. 背景与动机
 
@@ -38,7 +12,7 @@
 2. 多次 tool 调用(每次 0.5-30s)
 3. 偶尔一轮长思考(15s+)
 
-当前 receipt 卡片(`internal/channel/feishu/adapter.go:786` `ensureReceiptForTyping`)在第一条 OutReply 到达前只显示 `⌨️ Working...`;到达后变成 rolling-log。**整个 turn 内 receipt 顶部没有任何"agent 还在推进"的视觉信号**,长 thinking 间隙里用户以为 bot 死了。
+Receipt 卡片(`internal/channel/feishu/adapter.go:786` `ensureReceiptForTyping`)在第一条 OutReply 到达前只显示 `⌨️ Working...`;到达后变成 rolling-log。**整个 turn 内 receipt 顶部没有任何"agent 还在推进"的视觉信号**,长 thinking 间隙里用户以为 bot 死了。
 
 ### 1.2 核心约束
 
@@ -47,7 +21,7 @@ UX 上必须满足:
 - **极简**:不要堆砌明细,只要"次数 + 最后时间"(用户原话)
 - **真实**:计数反映 agent **真实动作**,不反映显示策略
 - **抗丢**:`/think off` / `/tools off` 不能让计数失真——这两个开关只影响显示,不影响 agent 行为
-  - 长路径:`cmd/nightme/run.go::newEventHandler` gate drop 原始 `OutThinking` / `OutTool*`，但**之前**已经 `Observe` 过了
+  - 长路径:`cmd/nightme/run.go::newEventHandler` gate drop 原始 `OutThinking` / `OutTool*`，但 Observe 在 policy gate 之前已经跑过
   - 一次路径:`internal/gateway/outbound/emitter_sink.go::dispatchSinkEvent` 同样先 Observe、再 gate（同一不变量）
 - **复用现有机制**:不引入新管道,沿用 OutboundMessage 主链路
 
@@ -64,12 +38,12 @@ UX 上必须满足:
 
 ### 目标
 
-- **观测在最高拦截点**:两个出口都 call `HeartbeatTracker.Observe(userMsgID, out.Kind)`,共享同一计数器
-  - 长路径:`cmd/nightme/run.go::newEventHandler`（长-lived bridge 走 `cs.AgentEventBus` 的订阅器）
-  - 一次路径:`internal/gateway/outbound/emitter_sink.go::dispatchSinkEvent`（`StreamRunOnceToEmitter` 的 drain goroutine，`/gtw commit` / `/review -a foo` 等 one-shot 调用都走这里）
+- **观测在最高拦截点**:两个出口都 call `HeartbeatTracker.Observe(userMsgID, out)`,共享同一计数器
+  - 长路径:`cmd/nightme/run.go::newEventHandler`(长-lived bridge 走 `cs.AgentEventBus` 的订阅器)
+  - 一次路径:`internal/gateway/outbound/emitter_sink.go::dispatchSinkEvent`(`StreamRunOnceToEmitter` 的 drain goroutine,`/gtw commit` / `/review -a foo` 等 one-shot 调用都走这里)
   - 两条路径都遵循 F-63 核心不变量:在 policy chain 之前 Observe,以保证 `/think off` / `/tools off` 期间数字照常累计
 - **观测在 policy 之前**:`/think off` / `/tools off` 不影响计数(核心不变量,§3.2 详述)
-- **新增 `OutHeartbeat` OutboundKind**:走同一条 `em.Send`,adapter 在 `Send` 里识别并 PATCH receipt 顶部
+- **`OutHeartbeat` OutboundKind**:走同一条 `em.Send`,adapter 在 `Send` 里识别并 PATCH receipt 顶部
 - **Feishu receipt 顶部 heartbeat header(两段互斥)**:
   - 有活动时(`ThinkCount > 0 || ToolCount > 0`):第一行渲染 `💭 N · 🔧 M · ⏱ HH:MM:SS`
   - 无活动时(`ThinkCount == 0 && ToolCount == 0`):第一行渲染 `🤖 Working` 占位
@@ -152,7 +126,7 @@ out.ReplyTo = userMsgID
 // 是"显示策略",不是 agent 行为策略。它们在 Policy.Apply 时 drop 消息,
 // 但 agent 实际上仍在 thinking / 调工具。计数器必须反映真实动作,
 // 才能让用户在关闭显示后仍能感知到 agent 还在推进。
-hbChanged := cs.Heartbeat().Observe(userMsgID, out.Kind)
+hbChanged := cs.Heartbeat().Observe(userMsgID, out)
 if hbChanged {
     snap := cs.Heartbeat().Snapshot(userMsgID)
     _ = em.Send(context.Background(), messages.OutboundMessage{
@@ -176,9 +150,9 @@ if err := em.Send(context.Background(), out); err != nil { /* log */ }
 
 **这条不变量由 `handler_test.go::TestEventHandler_ThinkOff_StillCounts` 和 `TestEventHandler_ToolsOff_StillCounts` 守护,任一破坏即 test fail。**
 
-### 3.3 观测规则:只计 ThinkCount / ToolCount,刷 LastBeatAt
+### 3.3 观测规则:单一 chokepoint 决策计数与终态
 
-`internal/runtime/heartbeat.go`(新文件):
+`internal/chatsession/heartbeat.go`(`Observe` 是 HeartbeatTracker 唯一的写入入口):
 
 ```go
 const defaultHeartbeatCap = 1024
@@ -186,44 +160,76 @@ const defaultHeartbeatCap = 1024
 // HeartbeatTracker per-ChatSession 心跳累计器,LRU 淘汰。
 // 不做显式 Drop:userMsgID 在 LRU 自然出队即丢弃。
 //
-// 计数规则(纯抽象,与 channel 无关):
-//   OutThinking  → ThinkCount++  (changed=true)
-//   OutToolStart → ToolCount++   (changed=true)
-//   其他          → 仅刷 LastBeatAt (changed=false,不触发 OutHeartbeat)
+// 观测规则(单 chokepoint,kind 决定行为,verdict 由 payload 派生):
+//   OutThinking      → ThinkCount++                   (changed=true)
+//   OutToolStart     → ToolCount++                    (changed=true)
+//   OutResult        → flipTerminal(snap, status)
+//                      status = msg.Err == nil ? Done : Error
+//                                                    (changed=true on transition)
+//   OutPromptEnded   → flipTerminal(snap, status)
+//                      status = msg.PromptEndReason != nil && IsError() ? Error : Done
+//                                                    (changed=true on transition)
+//   其他              → 仅刷 LastBeatAt                (changed=false)
+//
+// flipTerminal 是 verdict-agnostic 幂等的:Running→terminal 第一次返回 true,
+// 已经在终态返回 false(无论 verdict 是否相同)。
+// 两条触发路径在不同 goroutine(runtime handler 的 OutResult 分支 vs CS pump
+// 的 PromptEndBus 订阅者),到达顺序不定;tracker mutex 互斥序列化,
+// 第一个到达的 flipTerminal 设立 Status,后到的读到 Status != Running 直接返回 false,
+// 终态 Status 不再变化。
 //
 // 持久化:不写盘。daemon 重启即清零,与 Prompt 既有约定一致。
 type HeartbeatTracker struct {
     mu    sync.Mutex
     cap   int
-    order []string                          // 环形 LRU,头=最新,尾=最旧
+    order []string                          // LRU,头=最新,尾=最旧
     snaps map[string]messages.HeartbeatSnapshot
 }
 
-// Observe 累计一条计数。返回 changed=true 表示 ThinkCount/ToolCount 变化;
-// LastBeatAt 永远刷新但不触发 changed(避免高频 time.Now 触发无意义
-// OutHeartbeat)。
-func (t *HeartbeatTracker) Observe(userMsgID string, kind messages.OutboundKind) bool {
+// Observe 是 HeartbeatTracker 唯一的写入入口。返回 changed=true
+// 表示有可见状态变化(计数器或 Status),caller 据此决定是否发
+// follow-up OutHeartbeat。
+func (t *HeartbeatTracker) Observe(userMsgID string, msg messages.OutboundMessage) bool {
     if userMsgID == "" { return false }
     t.mu.Lock()
     defer t.mu.Unlock()
 
-    snap, ok := t.snaps[userMsgID]
+    snap := t.snaps[userMsgID]
     snap.LastBeatAt = time.Now()
+    changed := false
 
-    switch kind {
+    switch msg.Kind {
     case messages.OutThinking:
         snap.ThinkCount++
+        changed = true
     case messages.OutToolStart:
         snap.ToolCount++
+        changed = true
+    case messages.OutResult:
+        status := messages.HeartbeatDone
+        if msg.Err != nil { status = messages.HeartbeatError }
+        if t.flipTerminalLocked(&snap, status) { changed = true }
+    case messages.OutPromptEnded:
+        status := messages.HeartbeatDone
+        if msg.PromptEndReason != nil && msg.PromptEndReason.IsError() {
+            status = messages.HeartbeatError
+        }
+        if t.flipTerminalLocked(&snap, status) { changed = true }
     default:
-        // 只刷时间,不触发 changed → 不发 OutHeartbeat
-        // LastBeatAt 已是"agent 还活着"的统一信号
-        t.snaps[userMsgID] = snap
-        t.touchLocked(userMsgID)
-        return false
+        // refresh-only:不计数,不翻终态,只刷 LastBeatAt
     }
     t.snaps[userMsgID] = snap
     t.touchLocked(userMsgID)
+    return changed
+}
+
+// flipTerminalLocked 在 caller 持锁的情况下把 snapshot 翻到终态。
+// 不 touch LRU、不写 ThinkCount/ToolCount/LastBeatAt —— Observe 的
+// tail 统一负责 LRU 刷新,避免 transition 和 refresh 路径上的双重 touch。
+// verdict-agnostic 幂等:Running→terminal 返回 true,已在终态返回 false。
+func (t *HeartbeatTracker) flipTerminalLocked(snap *messages.HeartbeatSnapshot, status messages.HeartbeatStatus) bool {
+    if snap.Status != messages.HeartbeatRunning { return false }
+    snap.Status = status
     return true
 }
 
@@ -232,35 +238,6 @@ func (t *HeartbeatTracker) Snapshot(userMsgID string) messages.HeartbeatSnapshot
     t.mu.Lock()
     defer t.mu.Unlock()
     return t.snaps[userMsgID]
-}
-
-// MarkTerminal 把 snapshot 从 HeartbeatRunning 转移到终态
-// (status=HeartbeatDone 或 HeartbeatError)。返回 true 表示首次
-// Running→terminal 转移发生;已在终态或 userMsgID 为空则返回 false,
-// verdict-agnostic 幂等(无论第二次传的 status 是 Done 还是 Error)。
-//
-// 两个调用端在不同 goroutine:
-//   1. handler.go 的 OutResult 分支 → 固定 HeartbeatDone (干净完成路径)
-//   2. runtime eventbus 的 PromptEndBus 订阅者 → 读 e.Reason,
-//      PromptEndClean → HeartbeatDone,
-//      其余(PromptEndError / ProcessDied / StalledKilled /
-//      UserKilled / UserStopped)→ HeartbeatError
-// 到达顺序不定;tracker 用 mutex 互斥序列化,第一个到达的 MarkTerminal
-// 设立 Status,后到的调用读到 Status != HeartbeatRunning 直接返回 false,
-// 终态 Status 不再变化。
-func (t *HeartbeatTracker) MarkTerminal(userMsgID string, status messages.HeartbeatStatus) bool {
-    if userMsgID == "" { return false }
-    t.mu.Lock()
-    defer t.mu.Unlock()
-
-    snap, ok := t.snaps[userMsgID]
-    if snap.Status != messages.HeartbeatRunning {
-        return false
-    }
-    snap.Status = status
-    t.snaps[userMsgID] = snap
-    t.touchLocked(userMsgID)
-    return true
 }
 
 // touchLocked 把 userMsgID 移到 LRU 头部;超 cap 时淘汰尾部。
@@ -282,12 +259,16 @@ func (t *HeartbeatTracker) touchLocked(userMsgID string) {
 
 LRU 用切片实现,O(n) 但 cap=1024 时每次 Observe 开销 < 1µs,无需引入额外库。
 
+**OutResult 路径的 verdict 派生**:`msg.Err` 由 `gateway.Translate` 从 `AgentEvent.Result.IsError`(`ev.Err`)映射过来。所以 `OutResult` 带 `Err != nil` 直接翻 `HeartbeatError`(agent 报告这一轮是 errored);无 `Err` 翻 `HeartbeatDone`。这是 `OutResult` 一侧的纯消息派生命令,不需要上层 caller 传任何 verdict。
+
+**OutPromptEnded 路径的 verdict 派生**:`msg.PromptEndReason` 由 `runtime.eventbus` 的 `PromptEndBus` 订阅者从 `AgentSession.endPrompt(reason)` 的 `reason` 写入。`IsError()` 把所有非 Clean 原因(Error / ProcessDied / StalledKilled / UserKilled / UserStopped)坍缩到 `HeartbeatError`,跟 `HeartbeatStatus` 三态语义对齐。
+
 ### 3.4 信号链路:OutHeartbeat 走 em.Send,绕过 policy
 
 二次发送的 `OutHeartbeat` 走**同一条** `outbound.Emitter.Send` 管道:
 
 ```go
-hbChanged := cs.Heartbeat().Observe(userMsgID, out.Kind)
+hbChanged := cs.Heartbeat().Observe(userMsgID, out)
 if hbChanged {
     snap := cs.Heartbeat().Snapshot(userMsgID)
     _ = em.Send(context.Background(), messages.OutboundMessage{
@@ -502,12 +483,14 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
      不发时也走 readpump 的 EventAgentError 分支,触发 endPrompt(reason=PromptEndError)
    - 错误信号有两条平行通道,共享同一份 verdict (e.Reason):
      - **heartbeat 通道**:runtime.eventbus 的 PromptEndBus 订阅者读
-       `e.Reason.IsError()` → `MarkTerminal(HeartbeatError)` → receipt header
-       切换为 `❌ 💭 N · 🔧 M · ⏱ HH:MM:SS`;user-msg reaction 也切到 ❌
+       `e.Reason.IsError()` → 构造 `OutboundMessage{Kind: OutPromptEnded, PromptEndReason: &e.Reason}`,
+       Observe 翻终态 → receipt header 切换为 `❌ 💭 N · 🔧 M · ⏱ HH:MM:SS`;
+       user-msg reaction 也切到 ❌
      - **OutError 通道**:gateway.Translate 产出的独立错误卡片,与 heartbeat
        互不重叠;两条信号源都源于同一 EventAgentError,不会双发也不冲突
-   - 错误现在是 heartbeat 顶部的 first-class 视觉信号(❌ 前缀);先前版本
-     "错误只走 OutError 不进 heartbeat" 的行为已替换为 verdict 双通道
+   - 错误信号在 receipt 顶部以 ❌ 前缀显示;user-msg reaction 同步 ❌;
+     两条通道共享 `e.Reason` verdict,但走不同的 OutboundMessage 流,
+     不会互相覆盖也不会双发
 
 5. **Toggle 模式中途切换**
    - 用户 turn 中途 `/think off` → DefaultPolicies 重建或 Apply 行为变化
@@ -521,58 +504,28 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 
 ---
 
-## 4. 代码改动一览
-
-| 文件 | 类型 | 关键改动 |
-|---|---|---|
-| `internal/agent/prompt_end_reason.go` | **新** | `agent.PromptEndReason` 六值枚举 + `IsError()` + `String()`,Channel 接口与渲染层共享 verdict 词汇表的 canonical home |
-| `internal/agentsession/prompt_state.go` | 改 | `PromptState` 从二值(Running/Done)扩为三值(Running/Done/Error),与 `agent.PromptEndReason.IsError()` 对齐 |
-| `internal/agentsession/prompt.go` | 改 | `Prompt.EndReason` 字段类型改为 `agent.PromptEndReason`(原先的 `agentsession.PromptEndReason` 别名已删,符合 AGENTS.md §5 no-type-aliases 规则) |
-| `internal/messages/outbound.go` | 改 | 新增 `OutHeartbeat` 常量 / `HeartbeatSnapshot` 类型 / `OutboundMessage.Heartbeat` 字段;**新增 `HeartbeatStatus` 三态枚举** + `HeartbeatSnapshot.Status` 字段;`HeartbeatSnapshot.Empty()` 加入 `Status != Running` 短路(终态非空) |
-| `internal/runtime/heartbeat.go` | **新** | `HeartbeatTracker`(LRU) + `Observe` / `Snapshot` |
-| `internal/runtime/heartbeat_test.go` | **新** | LRU 行为 / Observe 规则 / LastBeatAt 刷新单测 |
-| `internal/chatsession/heartbeat.go` | 改 | `MarkDone(userMsgID)` → `MarkTerminal(userMsgID, status)`,接受 `messages.HeartbeatStatus` 三态;verdict-agnostic 幂等(第二次传任何 status 都返回 false) |
-| `internal/chatsession/chatsession.go` | 改 | `ChatSession.heartbeat` 字段 + `New()` 初始化 + `Heartbeat()` 访问器 |
-| `internal/runtime/handler.go` | 改 | NewEventHandler 闭包加观测 + 二次 Send(§3.2 锁定位);OutResult 分支调 `MarkTerminal(_, HeartbeatDone)` 固定 clean verdict |
-| `internal/runtime/eventbus.go` | 改 | `PromptEndBus` 订阅者读 `e.Reason.IsError()`,映射 `HeartbeatDone` / `HeartbeatError` 后调 `MarkTerminal`,与 handler 的 OutResult 分支 verdict-agnostic 幂等 |
-| `internal/runtime/handler_test.go` | 改 | ThinkOff/ToolsOff 不影响计数 / OutHeartbeat 不递归等不变量测试 |
-| `internal/channel/channel.go` | 改 | `Channel.OnPromptEnded` 签名加 `reason agent.PromptEndReason` 参数,channel 据此选择 ✅ / ❌ reaction 与 heartbeat header 前缀 |
-| `internal/channel/feishu/adapter.go` | 改 | `Adapter.Send` 加 OutHeartbeat case;`OnPromptEnded` 读 `reason` → `SetPromptState(PromptDone/PromptError)` + user-msg reaction ✅/❌;`renderHeartbeatHeader` 加 ✅ / ❌ Status switch(终态前缀) |
-| `internal/channel/feishu/receipt.go` | 改 | MessageReceipt 加 heartbeat 字段 / ApplyHeartbeat / 节流 / buildReceiptCard hb 参数 / 调用点同步;互斥规则扩为 `ThinkCount > 0 || ToolCount > 0 || Status != Running` |
-| `internal/channel/feishu/adapter_test.go` | 改 | OutHeartbeat 分支 + buildReceiptCard header 渲染单测 + terminal prefix 单测 |
-| `internal/channel/feishu/receipt_test.go` | 改 | ApplyHeartbeat 幂等 + 节流单测 |
-| `internal/channel/telegram/adapter.go` | 改 | `heartbeatText` 对齐 feishu skip-zero + ❌ Status switch;`OnPromptEnded` 读 `reason` → ✅/❌ placeholder reaction;调用点按 §3.6 互斥规则 gate(cold-create "Working" banner 与 back-part 不共存) |
-| `internal/channel/telegram/adapter_test.go` | 改 | heartbeatText 终态分支单测 + OnPromptEnded ✅/❌ reaction 单测 |
-| `internal/channel/slack/render.go` | 改 | `heartbeatText` 加 ✅ / ❌ Status switch + running-only fallback;feishu 对齐 |
-| `internal/channel/slack/render_test.go` | 改 | heartbeatText terminal prefix 单测 |
-| `docs/feat/F-63-heartbeat.md` | **新** | 本文档 |
-
-**预计 diff**: 核心生产代码约 +200 行,含测试 +375 行,含文档 ~440 行。
-
----
-
 ## 5. 用户可见行为(契约)
 
-| 场景 | 修复前 | 修复后 |
-|---|---|---|
-| 长 turn(30s+)有 think/tool 活动 | 卡片静态显示 `⌨️ Working...` | 顶部 `💭 N · 🔧 M · ⏱ HH:MM:SS` 实时更新(后半) |
-| 长 thinking 间隙(15s+,有 think 事件) | 完全无信号 | ⏱ 时间戳持续推进 + 💭 计数递增,证明 agent 还在推理 |
-| `/think off` + 长 turn(有 think) | (无 thinking 卡片) + `⌨️ Working...` 一直挂着 | (无 thinking 卡片) + 顶部 `💭 N · 🔧 M · ⏱ HH:MM:SS`,💭 数字照常累计 |
-| `/tools off` + 长 turn(有 tool) | (无 tool 行) + `⌨️ Working...` 一直挂着 | (无 tool 行) + 顶部 `💭 N · 🔧 M · ⏱ HH:MM:SS`,🔧 数字照常累计 |
-| 快速回答 turn(0 think + 0 tool) | `⌨️ Working...` 短暂后变 reply | 顶部 `🤖 Working` 占位(前半),无 ⏱ 噪声 |
-| prompt 干净结束 (`EventAgentDone` → `agent.PromptEndClean`) | receipt 改 ✅ reaction | receipt 改 ✅ reaction + 顶部 `✅ 💭 N · 🔧 M · ⏱ HH:MM:SS`(后半部分 + ✅ 前缀,终态保留本轮汇总) |
-| prompt 异常结束 (`EventAgentError` / `PromptEndProcessDied` / `PromptEndStalledKilled` / `PromptEndUserKilled` / `PromptEndUserStopped`) | (无 reaction 变更,只保留静态文字) | receipt 改 ❌ reaction + 顶部 `❌ 💭 N · 🔧 M · ⏱ HH:MM:SS`;若 `Diagnostic` 非空,OutError 仍是独立错误卡片,与 heartbeat header 并存 |
-| turn 切换(新一轮 think 事件落定) | (整个 turn 重新计数) | 后半部分保持,`💭` `🔧` `⏱` 自然反映当前 turn;不再有 `🤖 Working` 前缀闪烁 |
+| 场景 | receipt 顶部 | user-msg reaction | 备注 |
+|---|---|---|---|
+| 长 turn(30s+)有 think/tool 活动 | `💭 N · 🔧 M · ⏱ HH:MM:SS`(后半)实时更新 | — | ⏱ 时间戳随每次 Observe 推进 |
+| 长 thinking 间隙(15s+,有 think 事件) | `💭 N · ⏱ HH:MM:SS` | — | ⏱ 推进 + 💭 递增证明 agent 还在推理 |
+| `/think off` + 长 turn(有 think) | `💭 N · 🔧 M · ⏱ HH:MM:SS`,💭 数字照常累计 | — | 计数走 Observe-before-policy 不变量 |
+| `/tools off` + 长 turn(有 tool) | `💭 N · 🔧 M · ⏱ HH:MM:SS`,🔧 数字照常累计 | — | 同上 |
+| 快速回答 turn(0 think + 0 tool) | `🤖 Working`(前半),无 ⏱ 噪声 | — | 计数全 0 + entries/tasks 都空触发前半 |
+| prompt 干净结束(`EventAgentDone` → `agent.PromptEndClean`) | `✅ 💭 N · 🔧 M · ⏱ HH:MM:SS`(后半 + ✅ 前缀) | ✅ | 终态保留本轮汇总 |
+| prompt 异常结束(`EventAgentError` / `PromptEndProcessDied` / `PromptEndStalledKilled` / `PromptEndUserKilled` / `PromptEndUserStopped`) | `❌ 💭 N · 🔧 M · ⏱ HH:MM:SS` | ❌ | 若 `Diagnostic` 非空,OutError 是独立错误卡片,与 heartbeat header 并存 |
+| turn 切换(新一轮 think 事件落定) | 后半部分保持,`💭` `🔧` `⏱` 自然反映当前 turn | — | `🤖 Working` 不再闪烁;receipt 一直在 |
 
 ---
 
 ## 6. 可观测性
 
-- **slog 新增**:`runtime: heartbeat observe` (DEBUG, `user_msg_id` / `kind` / `changed` / `think_count` / `tool_count`),仅 handler 路径 debug 模式下输出
-- **slog 新增**:`feishu receipt: heartbeat render failed` (WARN, `card_msg_id` / `err`)
+- **slog 日志**:`runtime: heartbeat observe` (DEBUG, `user_msg_id` / `kind` / `changed` / `think_count` / `tool_count`),仅 handler 路径 debug 模式下输出
+- **slog 日志**:`feishu receipt: heartbeat render failed` (WARN, `card_msg_id` / `err`)
 - **telemetry**:OutHeartbeat 走 `em.Send` → `recordOutbound`,自动记录在 `OutboundSample` / `HealthEvent` 里,与 OutReply 等同
-- **doctor**:无新增字段;`PROBER` 块(F-61)无变动
-- **metrics**:无新增
+- **doctor**:`PROBER` 块(F-61)无变动
+- **metrics**:无 heartbeat 专属指标
 
 ---
 
@@ -586,13 +539,27 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 | `heartbeat_test.go` | `TestObserve_ToolStartIncrementsCount` | OutToolStart → ToolCount++,返回 true |
 | `heartbeat_test.go` | `TestObserve_ToolEndNoCount` | OutToolEnd → 不增加 ToolCount,返回 false |
 | `heartbeat_test.go` | `TestObserve_ReplyNoCount` | OutReply → 不增加任何 count,返回 false |
-| `heartbeat_test.go` | `TestObserve_ResultNoCount` | OutResult → 同上 |
-| `heartbeat_test.go` | `TestObserve_ErrorNoCount` | OutError → 同上 |
-| `heartbeat_test.go` | `TestObserve_AllKindsRefreshLastBeat` | 任意 13 种 OutboundKind 都让 LastBeatAt 推进 |
+| `heartbeat_test.go` | `TestObserve_ErrorNoCount` | OutError → 不增加任何 count,Status 不翻终态 |
+| `heartbeat_test.go` | `TestObserve_ResultNoCounterChange` | OutResult → 不增计数,但翻终态;`ThinkCount` / `ToolCount` 不动 |
+| `heartbeat_test.go` | `TestObserve_ResultFlipsStatusDone` | OutResult + nil Err → Status=HeartbeatDone |
+| `heartbeat_test.go` | `TestObserve_ResultWithErrFlipsStatusError` | OutResult + Err → Status=HeartbeatError |
+| `heartbeat_test.go` | `TestObserve_PromptEndedCleanFlipsDone` | OutPromptEnded + PromptEndClean → Status=HeartbeatDone |
+| `heartbeat_test.go` | `TestObserve_PromptEndedErrorFlipsError` | OutPromptEnded + 5 种 IsError() reason → 全部 Status=HeartbeatError |
+| `heartbeat_test.go` | `TestObserve_TerminalIdempotent` | 第二次 terminal Observe(任何 kind)返回 false,verdict 不再变化 |
+| `heartbeat_test.go` | `TestObserve_TerminalFirstCallerWins` | 第一次 verdict 决定 Status,后续不同 verdict 也 no-op |
+| `heartbeat_test.go` | `TestObserve_AllKindsRefreshLastBeat` | 16 种 OutboundKind(含 OutPromptEnded)都让 LastBeatAt 推进 |
 | `heartbeat_test.go` | `TestObserve_LastBeatAlone` | 仅刷时间不触发 changed |
+| `heartbeat_test.go` | `TestObserve_OutHeartbeatIgnored` | OutHeartbeat(防御性,生产不会出现)→ 仅刷时间 |
+| `heartbeat_test.go` | `TestObserve_EmptyUserMsgNoOp` | userMsgID="" → no-op |
+| `heartbeat_test.go` | `TestObserve_NilTrackerSafe` | nil tracker → no panic |
 | `heartbeat_test.go` | `TestObserve_LRUEvicts` | 写入超过 cap 的 uid 后,最久未访问的 uid 被淘汰,`Snapshot` 返回 zero |
 | `heartbeat_test.go` | `TestObserve_LRUTouchUpdates` | 重复 Observe 同一 uid 不会让其被淘汰 |
+| `heartbeat_test.go` | `TestObserve_LastBeatReflectsLastEvent` | 多次 Observe 后 LastBeatAt 是最近一次的时间 |
+| `heartbeat_test.go` | `TestObserve_MixedTurn` | 2 think + 3 tool start + 1 tool end + 5 reply + 1 result → ThinkCount=2, ToolCount=3, Status=Done |
 | `heartbeat_test.go` | `TestObserve_ConcurrentSafe` | 并发 Observe + Snapshot,`-race` 不报 |
+| `heartbeat_test.go` | `TestSnapshot_TerminalVisible` | Snapshot 读到的 Status 跟 Observe 写入一致 |
+| `heartbeat_test.go` | `TestSnapshot_ZeroValueForUnknownUserMsg` | 未观测的 userMsgID → empty snapshot |
+| `heartbeat_test.go` | `TestSnapshot_DoesNotMutateInternalState` | 修改 Snapshot 返回值不影响后续 Snapshot |
 | `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Idempotent` | 同 snapshot 二次调用不触发 renderLocked |
 | `heartbeat_receipt_test.go` | `TestApplyHeartbeat_Throttled` | 2s 内连续 ApplyHeartbeat 多次只渲染 ≤1 次 |
 | `heartbeat_receipt_test.go` | `TestApplyHeartbeat_PATCHCardHasHeader` | ApplyHeartbeat 后 buildReceiptCard 输出含 header(back part),且不出现 "🤖 Working" 前缀 |
@@ -601,7 +568,7 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 | `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_ThinkOnly` | hb={Think:3, Beat:t} → 后半 `💭 3 · ⏱ HH:MM:SS`;**不**带 "🤖 Working" 前缀;无 🔧 chip |
 | `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_ToolOnly` | hb={Tool:12, Beat:t} → 后半 `🔧 12 · ⏱ HH:MM:SS`,无 💭 chip,无 "🤖 Working" 前缀 |
 | `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_AllPopulated` | hb={Think:3, Tool:12, Beat:t} → 后半 `💭 3 · 🔧 12 · ⏱ HH:MM:SS`,无 "🤖 Working" 前缀 |
-| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly` | hb={Beat:t} + 无 entries/tasks → 渲染 front part `"🤖 Working"`,**不**带 ⏱ chip(新行为;旧的 !hb.Empty() gate 会渲染 `🤖 Working · ⏱ HH:MM:SS`) |
+| `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_LastBeatOnly` | hb={Beat:t} + 无 entries/tasks → 渲染 front part `"🤖 Working"`,**不**带 ⏱ chip(`!hb.Empty()` gate 在`LastBeatAt-only` 状态下不触发前半渲染) |
 | `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_WithEntries` | hb populated + entries 非空 → header 排在 entries 之前,且不出现 "🤖 Working" 前缀 |
 | `heartbeat_receipt_test.go` | `TestBuildReceiptCard_HeartbeatHeader_MutualExclusion` | 7 个子用例的表驱动矩阵(front/empty / back/think-only / back/tool-only / back/think+tool+time / front/LastBeatAt-only / no-header/entries-only / front/nil-hb),逐 case 断言 `wantHas` 与 `wantNot` 不重叠 — 钉死 §3.6 互斥契约的 4-way 行为 |
 | `heartbeat_receipt_test.go` | `TestRenderHeartbeatHeader_Direct` | 直接调 `renderHeartbeatHeader` 验证 `{Think:2, Tool:5, Beat:t}` → `"💭 2 · 🔧 5 · ⏱ HH:MM:SS"`(无 Working 前缀);空快照 → `""` |
@@ -618,6 +585,11 @@ buildReceiptCard 的 switch 仍允许它落到后半部分分支(条件已扩为
 | `handler_test.go` | `TestEventHandler_ObserveOrder_BeforePolicy` | Observe 返回 false 的事件 | 不发 OutHeartbeat,原 Out* 仍按 policy 决策 |
 | `handler_test.go` | `TestEventHandler_OutHeartbeat_NoRecursion` | 二次 Send OutHeartbeat | 总共 2 次 send,OutHeartbeat 不会引发第三次 |
 | `handler_test.go` | `TestEventHandler_DefaultMode_NoPolicyDrop` | policies 为空 | 计数与原 Out* 数量一致;OutHeartbeat 与原消息都到达 |
+| `handler_test.go` | `TestEventHandler_OutResult_ObserveTerminalIdempotent` | 同 userMsgID 两个 OutResult | 只发 1 次 terminal OutHeartbeat(第 2 次 Observe 返回 false) |
+| `handler_test.go` | `TestEventHandler_OutResult_DoneOnlyEmitsCheck` | `/think off / /tools off` + 单 OutResult | Done-only 也能发出 terminal OutHeartbeat,`Status=HeartbeatDone` |
+| `gtw/agent_reply_test.go` | `TestRunAgentFor_HeartbeatObserved` | run-once sink 路径 | 计数准确,terminal OutHeartbeat 在 dropKinds 之前发出 → receipt header 仍 PATCH |
+| `gtw/agent_reply_test.go` | `TestRunAgentFor_DropOutResult` | GTW 典型事件序列 + `dropKinds=[OutResult]` | OutResult 不进 em.Send,但 terminal OutHeartbeat 已发出 |
+| `gtw/agent_reply_test.go` | `TestRunAgentFor_NoDropPreservesOutResult` | 不传 dropKinds,OutResult 直达 channel | terminal OutHeartbeat + OutResult 都到达,顺序为 terminal 在前 |
 
 ### 7.3 回归
 

@@ -297,8 +297,8 @@ func (c *RPCClient) PostEnvelope(ctx context.Context, method string, body []byte
 	var standard struct {
 		Type   string `json:"type"`
 		Result struct {
-			OK     bool   `json:"ok"`
-			Error  any    `json:"error,omitempty"`
+			OK    bool `json:"ok"`
+			Error any  `json:"error,omitempty"`
 		} `json:"result"`
 	}
 	var legacy struct {
@@ -658,8 +658,8 @@ func (c *RPCClient) Respond(ctx context.Context, frameRpcID string, value any) e
 // this key. `Outcome` is the structured answer the human gave
 // (a QuestionAnswer or ApprovalOutcome) or the rejection reason.
 type WaterfallResultEnvelope struct {
-	ClientID string                  `json:"clientId"`
-	EventID  string                  `json:"eventId"`
+	ClientID string                   `json:"clientId"`
+	EventID  string                   `json:"eventId"`
 	Outcome  WaterfallOutcomeEnvelope `json:"outcome"`
 }
 
@@ -668,11 +668,11 @@ type WaterfallResultEnvelope struct {
 // "result" | "next" | "rejected":
 //
 //   - "result"   — the answer arrived; value is the typed payload
-//                  (QuestionAnswer for user-questions, "allowed-once"
-//                  | "rejected" for approval).
+//     (QuestionAnswer for user-questions, "allowed-once"
+//     | "rejected" for approval).
 //   - "rejected" — error carries the rejection reason
-//                  (ASK_CANCELLED for a user "Skip" click, or
-//                  NO_PROVIDER when no answerer is wired).
+//     (ASK_CANCELLED for a user "Skip" click, or
+//     NO_PROVIDER when no answerer is wired).
 //   - "next"     — no answer; defer to the next waterfall listener.
 //
 // Verified 2026-09-11 against dsh 0.1.2-rc.1 by capturing the real
@@ -707,9 +707,9 @@ type WaterfallOutcomeEnvelope struct {
 // → 200 {accepted:false, reason:...} on duplicate / stale
 func (c *RPCClient) SendWaterfallResult(ctx context.Context, clientID, eventID string, outcome WaterfallOutcomeEnvelope) error {
 	body, err := json.Marshal(map[string]any{
-		"type":    "client-request",
-		"rpcId":   newRPCID(),
-		"method":  "$events/result",
+		"type":   "client-request",
+		"rpcId":  newRPCID(),
+		"method": "$events/result",
 		"payload": map[string]any{"args": WaterfallResultEnvelope{
 			ClientID: clientID,
 			EventID:  eventID,

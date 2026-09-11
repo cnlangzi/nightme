@@ -46,15 +46,15 @@ import (
 
 // TestWireWaterfall_E2E_AskQuestion runs the full waterfall round
 // trip against a live dsh:
-//   1. Mint auth cookie via the launch URL.
-//   2. Create a session against a temp workspace.
-//   3. Send a prompt that triggers the model to call
-//      ask_user_question.
-//   4. Wait for the host $events waterfall to surface a
-//      user-questions/request frame.
-//   5. Answer via /api/$events/result.
-//   6. Assert the round trip succeeds (200 accepted, model
-//      continues the turn with the answer).
+//  1. Mint auth cookie via the launch URL.
+//  2. Create a session against a temp workspace.
+//  3. Send a prompt that triggers the model to call
+//     ask_user_question.
+//  4. Wait for the host $events waterfall to surface a
+//     user-questions/request frame.
+//  5. Answer via /api/$events/result.
+//  6. Assert the round trip succeeds (200 accepted, model
+//     continues the turn with the answer).
 func TestWireWaterfall_E2E_AskQuestion(t *testing.T) {
 	raw := os.Getenv("NIGHTME_TEST_DSH_URL")
 	if raw == "" {
@@ -219,7 +219,7 @@ got_permission:
 		case <-time.After(2 * time.Second):
 			if sawEvent {
 				return // success — dsh accepted our answer and
-				       // the model kept going
+				// the model kept going
 			}
 		}
 	}

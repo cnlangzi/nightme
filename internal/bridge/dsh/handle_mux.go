@@ -246,6 +246,7 @@ func isSessionEventType(method string) bool {
 		"request/context",
 		"agent/inbox/spliced",
 		"approval/asked",
+		"approval/decided",
 		"compaction/end",
 		"todo/write", "todo/update", "todo/delete":
 		return true

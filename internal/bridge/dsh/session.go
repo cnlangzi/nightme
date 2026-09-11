@@ -797,10 +797,9 @@ func (d *driver) SendPermission(resp string) error {
 	source := d.pendingSource[frameRpcID]
 
 	var (
-		outcome   = resp
-		envelope  host.WaterfallOutcomeEnvelope
-		muxValue  any
-		errMsg    string
+		outcome  = resp
+		envelope host.WaterfallOutcomeEnvelope
+		muxValue any
 	)
 	if isQuestion {
 		answer, err := questionAnswerFor(questions, resp)
@@ -808,10 +807,8 @@ func (d *driver) SendPermission(resp string) error {
 			d.pendingMu.Unlock()
 			return err
 		}
-		// host waterfall path
 		envelope.Kind = "result"
 		envelope.Value, _ = json.Marshal(host.QuestionAnswer{Answers: answer.Answers})
-		// legacy mux path
 		muxValue = host.QuestionResponse{SessionID: d.sessionID, Answer: answer}
 	} else {
 		outcome = canonicalApprovalOutcome(resp)
@@ -819,23 +816,18 @@ func (d *driver) SendPermission(resp string) error {
 			d.pendingMu.Unlock()
 			return fmt.Errorf("dsh: unknown approval outcome %q (expected approved|declined|allowed-once|rejected)", resp)
 		}
-		// host waterfall path
 		envelope.Kind = "result"
 		envelope.Value, _ = json.Marshal(outcome) // "allowed-once" | "rejected"
-		// legacy mux path
 		muxValue = host.ApprovalResponse{
 			SessionID:  d.sessionID,
 			ApprovalID: d.lastApprovalID[frameRpcID],
 			Outcome:    outcome,
 		}
 	}
-
-	d.pendingOrder = d.pendingOrder[1:]
+	// Snapshot the respCh pointer under the lock; the channel
+	// itself is closed/drained outside the lock so the slow RPC
+	// doesn't block concurrent SendPermission callers.
 	ch := d.pendingApprovals[frameRpcID]
-	delete(d.pendingApprovals, frameRpcID)
-	delete(d.pendingQuestions, frameRpcID)
-	delete(d.lastApprovalID, frameRpcID)
-	delete(d.pendingSource, frameRpcID)
 	d.pendingMu.Unlock()
 
 	if ch != nil {
@@ -845,30 +837,52 @@ func (d *driver) SendPermission(resp string) error {
 		}
 	}
 
+	// Capture the $events clientId under hostWaterfallMu (the writer
+	// in host_waterfall.go holds the same lock). Reading without
+	// the lock is a data race the race detector flags, AND pairs
+	// the client's snapshot with the lock-time clientId so a
+	// concurrent WS reconnect that overwrites hostRemoteClientID
+	// can't make us POST /api/$events/result with a clientId from
+	// a different connection than the one the eventId belongs to.
+	hostWaterfallMu.RLock()
+	clientID := hostRemoteClientID
+	hostWaterfallMu.RUnlock()
+
 	ctx := context.Background()
+	var sendErr error
 	switch source {
 	case "host":
-		clientID := hostRemoteClientID
 		if clientID == "" {
-			return errors.New("dsh: no clientId captured from host $events ready frame; cannot send waterfall result")
+			sendErr = errors.New("dsh: no clientId captured from host $events ready frame; cannot send waterfall result")
+			break
 		}
-		// /api/$events/result — verified 2026-09-11 against dsh
-		// 0.1.2-rc.1 by capturing the actual dashboard POST.
 		slogDefault().Info("dsh: SendPermission posting to /api/$events/result",
 			"client_id", clientID, "event_id", frameRpcID)
-		if err := d.cli.RPC.SendWaterfallResult(ctx, clientID, frameRpcID, envelope); err != nil {
-			slogDefault().Info("dsh: SendWaterfallResult FAILED", "err", err)
-			return fmt.Errorf("dsh: /api/$events/result: %w", err)
+		sendErr = d.cli.RPC.SendWaterfallResult(ctx, clientID, frameRpcID, envelope)
+		if sendErr != nil {
+			slogDefault().Info("dsh: SendWaterfallResult FAILED", "err", sendErr)
 		}
-		slogDefault().Info("dsh: SendWaterfallResult OK")
 	default:
-		// Legacy mux path — /api/respond with the client-response
-		// envelope (kind:"result", value:muxValue).
-		_ = errMsg
-		if err := d.cli.RPC.Respond(ctx, frameRpcID, muxValue); err != nil {
-			return fmt.Errorf("dsh: /api/respond: %w", err)
-		}
+		sendErr = d.cli.RPC.Respond(ctx, frameRpcID, muxValue)
 	}
+
+	if sendErr != nil {
+		// Pending entry stays alive: a subsequent SendPermission
+		// from the runtime's permission handler (retry click,
+		// reconnect-during-flight, etc.) can re-route through
+		// the same frameRpcID. The 5-minute permissionTimeout
+		// watchdog is the fallback if no retry arrives.
+		return fmt.Errorf("dsh: %w", sendErr)
+	}
+
+	// RPC succeeded — clear pending state and advance the FIFO.
+	d.pendingMu.Lock()
+	d.pendingOrder = d.pendingOrder[1:]
+	delete(d.pendingApprovals, frameRpcID)
+	delete(d.pendingQuestions, frameRpcID)
+	delete(d.lastApprovalID, frameRpcID)
+	delete(d.pendingSource, frameRpcID)
+	d.pendingMu.Unlock()
 
 	// Wake any in-process handler waiting on the registered channel
 	// (the channel is created by registerApproval / handleApprovalRequested

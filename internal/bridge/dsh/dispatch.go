@@ -191,9 +191,10 @@ var standardRegistry = newRegistry(map[string]eventHandler{
 	"turn/end":          handleTurnEnd,
 	"compaction/end":    handleCompactionEnd,
 	"todo/write":        handleTodoWrite,
-	"todo/update":       handleTodoUpdate,    // P3+: dsh will emit; handler is no-op now
-	"todo/delete":       handleTodoDelete,    // same
-	"approval/asked":    handleApprovalAsked, // session/event echo; mux approval/requested is the respondable gate
+	"todo/update":       handleTodoUpdate,      // P3+: dsh will emit; handler is no-op now
+	"todo/delete":       handleTodoDelete,      // same
+	"approval/asked":    handleApprovalAsked,   // session/event echo; mux approval/requested is the respondable gate
+	"approval/decided":  handleApprovalDecided, // host/dashboard settled the gate; emit PermissionSettled
 
 	// F-dsh-shared-host §5: 9 new event types discovered during
 	// the 2026-08-16 mux-demux probe against dsh 0.1.0-rc.6.
@@ -774,6 +775,39 @@ func handleApprovalAsked(env sessionEventEnvelope, view json.RawMessage, tr *tra
 	// registered a fake "evt-" key that cannot POST /api/respond.
 	dLog("dsh: session/event approval/asked (echo; mux approval/requested is the gate)")
 	return nil
+}
+
+// handleApprovalDecided is the audit-pair resolution: dsh
+// settled an approval on the host side (dashboard Allow once /
+// Reject, NO_PROVIDER, or host-side timeout) before the runtime
+// clicked the Feishu card. Emit EventAgentPermissionSettled so
+// the runtime can PATCH the card; dropPendingByRPCID will pick
+// up the still-live pending entry on the next dsh interaction.
+//
+// handleApprovalDecided is best-effort: if dsh never pairs the
+// audit with an existing pending entry (e.g. a session that
+// started after the host settled), we still log + skip so the
+// unknown-frame counter catches it.
+func handleApprovalDecided(env sessionEventEnvelope, view json.RawMessage, tr *translator, st *wireState, d *driver) []agent.AgentEvent {
+	var body struct {
+		ApprovalID string `json:"approvalId"`
+		Outcome    string `json:"outcome"`
+	}
+	if len(env.Data) > 0 {
+		_ = json.Unmarshal(env.Data, &body)
+	}
+	dLog("dsh: session/event approval/decided audit (approvalId=%s outcome=%s)",
+		body.ApprovalID, body.Outcome)
+	if body.ApprovalID == "" || body.Outcome == "" {
+		return nil
+	}
+	return []agent.AgentEvent{{
+		Kind: agent.EventAgentPermissionSettled,
+		PermissionSettled: &agent.AgentPermissionSettled{
+			Outcome: body.Outcome,
+			Source:  "dashboard",
+		},
+	}}
 }
 
 // ─── F-dsh-shared-host §5 new event handlers ────────────────────────

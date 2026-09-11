@@ -48,33 +48,27 @@ import (
 )
 
 var (
-	hostWaterfallMu      sync.RWMutex
-	hostWaterfallBySess  map[string]*driver // sessionID → driver
-	hostHandlerInstalled bool
+	hostWaterfallMu     sync.RWMutex
+	hostWaterfallBySess map[string]*driver // sessionID → driver
 )
 
-// installHostHandler registers the package-level host handler ONCE
-// against the shared client. Idempotent — first caller wins. Tests
-// that construct their own Client (host.New) install their own
-// handler and run in their own process; production drivers share
-// host.GetGlobal() and install once via the daemon.
+// installHostHandler wires hostWaterfallHandler onto cli's Router.
+// SetHostHandler is per-Client and replaces any prior handler, so
+// the call is naturally idempotent on the same Client and safe to
+// re-invoke when spawnAndWire constructs a new Client after dsh
+// respawns (the package-level state we want to reset across
+// respawns is `hostRemoteClientID` and `hostWaterfallBySess`, both
+// cleared below).
 func installHostHandler(cli *host.Client) {
 	if cli == nil {
 		return
 	}
 	hostWaterfallMu.Lock()
 	defer hostWaterfallMu.Unlock()
-	if hostHandlerInstalled {
-		slogDefault().Info("dsh: host handler already installed, skipping")
-		return
-	}
-	hostHandlerInstalled = true
 	if hostWaterfallBySess == nil {
 		hostWaterfallBySess = make(map[string]*driver)
 	}
-	slogDefault().Info("dsh: calling SetHostHandler")
 	cli.SetHostHandler(hostWaterfallHandler)
-	slogDefault().Info("dsh: installed host waterfall handler on client")
 }
 
 // registerDriverForWaterfall adds d to the package-level demux map
@@ -136,11 +130,19 @@ func hostWaterfallHandler(method, rpcID string, payload json.RawMessage) {
 		return
 	}
 
-	// Only the two gate events we respond to. Other host waterfall
-	// events (api-session/status, api-session/activity, etc.) are
-	// fire-and-forget Cordis emits with no agent-scoped answer
-	// expected; we debug-log and skip.
-	if method != "approval/request" && method != "user-questions/request" {
+	// Gate events we route to the driver:
+	//   - approval/request, user-questions/request: register a
+	//     pending entry the runtime's permission card answers.
+	//   - host/cancel: dsh cancelled the waterfall server-side
+	//     (timeout, dashboard answered, NO_PROVIDER). Drop the
+	//     pending entry so the runtime's ResponseCh unblocks
+	//     immediately instead of waiting for the 5-minute
+	//     permissionTimeout watchdog.
+	//
+	// Other host waterfall events (api-session/status,
+	// api-session/activity, etc.) are fire-and-forget Cordis emits
+	// with no agent-scoped answer expected; we debug-log and skip.
+	if method != "approval/request" && method != "user-questions/request" && method != "host/cancel" {
 		dLog("dsh: host waterfall method=%s (no driver handler)", method)
 		return
 	}
@@ -240,6 +242,15 @@ func (d *driver) handleHostFrame(method, rpcID string, payload json.RawMessage) 
 			Questions: qr.Questions,
 			Source:    "host",
 		})
+	case "host/cancel":
+		// dsh cancelled this waterfall server-side (timeout,
+		// dashboard answered, NO_PROVIDER). Drop the pending
+		// entry under rpcID — the runtime's ResponseCh unblocks
+		// immediately with "cancelled" so Feishu can PATCH the
+		// card.
+		if !d.dropPendingByRPCID(rpcID) {
+			dLog("dsh: host/cancel for unknown rpc_id=%s (no pending entry)", rpcID)
+		}
 	default:
 		dLog("dsh: unhandled host waterfall method=%s rpc_id=%s", method, rpcID)
 	}

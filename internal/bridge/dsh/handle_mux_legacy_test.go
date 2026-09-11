@@ -7,7 +7,6 @@
 package dsh
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 )
@@ -85,13 +84,13 @@ func TestHandleMuxFrame_LegacyQuestionRequested_LogsAndDrops(t *testing.T) {
 
 	// Confirm a real (non-legacy) mux method still works after
 	// the legacy fallback fired — proves the unknown branch does
-	// not poison subsequent dispatch.
+	// not poison subsequent dispatch. session/snapshot decodes
+	// records (may be empty for this synthetic input) without
+	// surfacing an unknown-method warning; we just need to verify
+	// the frame is consumed without a panic.
 	snapshot := []byte(mustJSON(t, map[string]any{
 		"type":   "snapshot",
 		"cursor": int64(0),
 	}))
 	d.handleMuxFrame("session/snapshot", "rpc-1", snapshot)
-	if !json.Valid(snapshot) {
-		t.Fatal("snapshot payload failed validation")
-	}
 }

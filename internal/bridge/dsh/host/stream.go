@@ -837,14 +837,6 @@ func translateHostEvent(raw json.RawMessage) (method, rpcID string, payload json
 		return "host/cancel", rec.EventID, mustJSON(map[string]any{
 			"eventId": rec.EventID,
 		})
-	case "ready":
-		// dsh sends the FIRST item on the host $events stream as
-		// {type:"ready", clientId, host:{home}}. Translate to a
-		// synthetic "ready" method so the bridge-side handler can
-		// capture ClientID for the /api/$events/result answer
-		// body. We send the raw payload so the handler can unmarshal
-		// clientId without going through the translate layer twice.
-		return "ready", "", raw
 	case "":
 		// Empty type means we couldn't decode — drop silently.
 		return "", "", nil

@@ -474,16 +474,74 @@ func TestHostWaterfallRegisterUnregister(t *testing.T) {
 }
 
 // resetHostWaterfallStateForTest clears the package-level map and
-// the installed flag so each test starts from a known empty state.
-// Without this, the test binary carries state across test cases
-// and the first installHostHandler call wins for the whole process.
+// the captured clientId so each test starts from a known empty
+// state. Without this, the test binary carries state across test
+// cases.
 func resetHostWaterfallStateForTest(t *testing.T) {
 	t.Helper()
 	hostWaterfallMu.Lock()
 	defer hostWaterfallMu.Unlock()
 	hostWaterfallBySess = nil
-	hostHandlerInstalled = false
 	hostRemoteClientID = "" // reset captured clientId
+}
+
+// TestHandleHostFrame_HostCancel_DropsPending pins the server-side
+// waterfall cancel path: when dsh sends {type:"cancel", eventId:…}
+// for an in-flight approval or question, dropPendingByRPCID must
+// drain the pending entry without firing /api/respond. Without
+// this the runtime's permission card stays interactive for up to
+// 5 minutes (until the permissionTimeout watchdog fires).
+func TestHandleHostFrame_HostCancel_DropsPending(t *testing.T) {
+	resetHostWaterfallStateForTest(t)
+	mock := newRespondMock(t)
+	cli := mock.installGlobal(t)
+	d := newTestDriver(cli, "/tmp/ws")
+	d.sessionID = "session-host-cancel"
+	t.Cleanup(func() { close(d.closed) })
+
+	registerDriverForWaterfall(d)
+
+	d.handleHostFrame("user-questions/request", "rpc-cancel-q", []byte(mustJSON(t, waterfallEnvelope{
+		AgentID: d.sessionID,
+		Request: json.RawMessage(mustJSON(t, map[string]any{
+			"questions": []map[string]any{
+				{"id": "q1", "question": "?", "options": []map[string]any{{"label": "A"}}},
+			},
+		})),
+	})))
+
+	// Drain the EventAgentPermission so the runtime side is
+	// waiting on the response channel.
+	select {
+	case ev := <-d.events:
+		if ev.Kind != agent.EventAgentPermission {
+			t.Fatalf("kind = %v, want EventAgentPermission", ev.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial ask event")
+	}
+
+	// Server-side cancel arrives.
+	d.handleHostFrame("host/cancel", "rpc-cancel-q", nil)
+
+	// No /api/respond (or /api/$events/result) must fire — the
+	// server cancelled without expecting a reply.
+	if err := waitForNoError(t, 200*time.Millisecond, func() error {
+		if mock.count.Load() != 0 {
+			return fmt.Errorf("respond mock fired %d times after cancel", mock.count.Load())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("mock fired after cancel: %v", err)
+	}
+
+	// Pending entry must be gone — a subsequent SendPermission
+	// against the same rpcID is a no-op (and the FIFO is empty
+	// after our initial drain, so SendPermission should error
+	// out cleanly).
+	if err := d.SendPermission("A"); err == nil {
+		t.Fatal("SendPermission after host/cancel should fail (no pending)")
+	}
 }
 
 func mustJSON(t *testing.T, v any) string {

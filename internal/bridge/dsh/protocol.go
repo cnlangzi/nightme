@@ -97,7 +97,8 @@ type muxApprovalRequested struct {
 // the wire. The mux frame switch in handle_mux.go records any
 // straggler as an unknown method (warn) and drops it. The audit
 // pair (approval/asked + approval/decided session events) is
-// handled by dispatch.go::handleApprovalAsked.
+// split: handleApprovalAsked is an echo (no event); handleApprovalDecided
+// emits EventAgentPermissionSettled for the runtime.
 
 // muxQuestionRequested is the payload of
 // serverFrame{method:"question/requested"}. `Questions` is an array

@@ -267,10 +267,15 @@ const (
 // the dsh 0.1.2-rc.1 bridge: the mux approval/resolved and
 // question/resolved frames dsh used to emit are no longer sent on
 // the wire. The audit pair (approval/asked + approval/decided
-// session events) is handled by dispatch.go::handleApprovalAsked,
-// which already emits EventAgentPermissionSettled. Host waterfall
-// cancellation comes through host/cancel on the host stream and
-// is dropped via dropPendingByRPCID directly from
+// session events) is split:
+//   - approval/asked is an echo; dispatch.go::handleApprovalAsked
+//     logs + drops (no AgentEvent — the runtime already saw
+//     EventAgentPermission from the host waterfall path).
+//   - approval/decided is the resolution; dispatch.go::
+//     handleApprovalDecided emits EventAgentPermissionSettled so
+//     the runtime can PATCH the still-live Feishu card.
+// Host waterfall cancellation comes through host/cancel on the
+// host stream and is dropped via dropPendingByRPCID directly from
 // handleHostFrame (see host_waterfall.go).
 
 // dropPendingByRPCID removes the pending channel under rpcID and

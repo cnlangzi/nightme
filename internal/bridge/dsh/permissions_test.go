@@ -356,6 +356,64 @@ func TestDropPendingByRPCID_DropsWithoutRespond(t *testing.T) {
 	}
 }
 
+// TestSendPermission_FailingRPCKeepsPendingEntry pins the new
+// contract: when /api/$events/result fails (or fires before the
+// $events ready frame populates clientId), the pending FIFO entry
+// must stay alive so a retry can re-route through the same rpcID.
+// Pre-fix the entry was deleted before the RPC call, so a transient
+// failure or a quick first-click race lost the user's answer.
+func TestSendPermission_FailingRPCKeepsPendingEntry(t *testing.T) {
+	mock := newRespondMock(t)
+	cli := mock.installGlobal(t)
+	d := newTestDriver(cli, "/tmp/ws")
+	d.sessionID = "session-retry"
+	t.Cleanup(func() { close(d.closed) })
+
+	d.handleApprovalRequested("rpc-retry-1", muxApprovalRequested{
+		SessionID:  d.sessionID,
+		ApprovalID: "appr-retry-1",
+		ToolName:   "Bash",
+		Reason:     "retry-after-fail",
+		Source:     "host",
+	})
+	select {
+	case <-d.events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for approval event")
+	}
+
+	// Simulate "no ready frame yet" by leaving hostRemoteClientID
+	// empty; SendPermission must return the empty-clientId error
+	// and leave the pending entry alive.
+	hostWaterfallMu.Lock()
+	hostRemoteClientID = ""
+	hostWaterfallMu.Unlock()
+
+	if err := d.SendPermission(approvalAllowOnce); err == nil {
+		t.Fatal("SendPermission should fail when clientId is empty")
+	}
+
+	d.pendingMu.Lock()
+	_, stillPending := d.pendingApprovals["rpc-retry-1"]
+	stillInOrder := false
+	for _, id := range d.pendingOrder {
+		if id == "rpc-retry-1" {
+			stillInOrder = true
+			break
+		}
+	}
+	d.pendingMu.Unlock()
+	if !stillPending {
+		t.Fatal("pendingApprovals lost the entry after a failed SendPermission")
+	}
+	if !stillInOrder {
+		t.Fatal("pendingOrder lost the entry after a failed SendPermission")
+	}
+	if mock.count.Load() != 0 {
+		t.Errorf("respond mock fired %d times on failed call", mock.count.Load())
+	}
+}
+
 type respondMock struct {
 	server *httptest.Server
 	count  atomic.Int64

@@ -17,6 +17,44 @@
 
 ---
 
+## 0. dsh 版本约束
+
+**bridge 仅支持 `dsh@0.1.2-rc.1`**。dsh 的 wire 协议在不同 rc 之间存在 break change,nightme dsh bridge 在实机抓包 + 源码双验后只针对 0.1.2-rc.1 编写,其他版本不保证兼容。
+
+### 0.1 兼容性矩阵
+
+| dsh 版本 | bridge 状态 | 失败模式 |
+|---|---|---|
+| **`0.1.2-rc.1`** | ✅ 支持(唯一目标) | — |
+| `0.1.0-rc.6` 及更早 | ❌ 不支持 | WS 走的是两个旧端点(`/api/events.mux` + `/api/events.host`),envelope 是嵌套 envelope;本 bridge 读 `/api/remote.mux` 单端点,直接 404 |
+| `0.1.2-rc.2` 及之后(若已发布) | ❌ 不支持 | method 可能改名、envelope 字段可能增减、`session/follow` 流形状可能变;落进 unknown-method warn,events 全部丢 |
+| `nightly` / `latest` track | ❌ 不支持 | bridge 不做版本探测 |
+
+### 0.2 为什么没有 runtime 多版本适配
+
+dsh 0.1.2-rc.1 的 launch token 是**进程内私有**的 — 既不写文件,也不暴露 API(详 §2.1)。nightme 拿不到外部 dsh 的 token → 无法 mint cookie → 无法 attach 到外部实例。这条 always-spawn 契约(详 §2.1)加上"nightme 拥有 dsh 进程",意味着 **dsh 升级 = nightme 同步升级**;不可能在 runtime 兼容多版本 dsh。
+
+### 0.3 改 dsh 版本时的流程
+
+1. **实机抓包 + 源码对照**:目标版本的 `@deepseek-ai/dsh-api-gateway` + `@deepseek-ai/dsh-api-session-controller` 仓内 contract,本机 `dsh --profile web` 起服务,用 §3 的 wire 形状逐一核对
+2. **更新本文件 §0.1 兼容性矩阵**:标记新版本为目标,移除旧版本(或写"已淘汰")
+3. **同步更新 README 的 DSH 行 + Prerequisites**(end user 看的版本说明)
+4. **CI 测试**:本仓的 `internal/bridge/dsh/host/*_test.go` 起 fake dsh subprocess,wire 形状对得上才能跑通;新协议下需要更新 mock
+5. **如果 dsh 升级到非 `@latest-stable`(例如又发了 0.1.2-rc.2)**:在 PR 里同时改 bridge 代码 + 本文件 + README,不能分开发布
+
+### 0.4 装错版本怎么排查
+
+| 症状 | 原因 | 排查 |
+|---|---|---|
+| `dsh.host: token-exchange: HTTP 401` | 用的不是 nightme spawn 的 dsh(可能 PATH 里另有别的 dsh) | `which dsh` 确认,`dsh --version` 看版本 |
+| WS upgrade 立刻断,log 报 `unexpected Sec-WebSocket-Protocol` 或 `HTTP 400` | dsh 比 0.1.2-rc.1 新,protocol negotiation 失败 | 装回 `npm i -g @deepseek-ai/dsh@0.1.2-rc.1` |
+| events 全丢,log 里全是 `dsh: mux unknown method` | dsh 协议比 0.1.2-rc.1 新,envelope 形状变了 | 同上 |
+| `mint dsh-auth cookie: no Set-Cookie in response` | dsh 协议比 0.1.2-rc.1 旧,token exchange 路径不存在 | 升级 dsh 到 0.1.2-rc.1 |
+
+bridge 不做硬卡(故意留软,方便先排查别的问题),但症状都对得上"装错版本"。
+
+---
+
 ## 1. dsh 是什么
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 是 DeepSeek AI 开源的 agent harness,核心口号 "everything is a plugin",由 Cordis 框架驱动。CLI 名 `dsh`,MIT 协议,主语言 TypeScript。

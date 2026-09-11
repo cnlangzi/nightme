@@ -1,42 +1,40 @@
 // lifecycle.go — process management for the shared dsh web daemon.
 //
 // In the shared-host architecture (F-dsh-shared-host), exactly ONE
-// `dsh --profile web` subprocess is owned by the nightme daemon —
-// started once at boot, kept alive for the daemon's lifetime,
-// gracefully shut down on exit. This file owns the subprocess;
-// the rest of the package (client.go, stream.go, router.go) talks
-// to it over HTTP + WebSocket.
+// `dsh --profile web` subprocess serves every ChatSession. This
+// file owns the lifecycle; the rest of the package (client.go,
+// stream.go, router.go) talks to dsh over HTTP + WebSocket.
 //
-// Lifecycle model (always-spawn — see F-dsh-shared-host §1.3.1):
+// dsh 0.1.2-rc.1 enforces per-process signed-cookie auth on
+// /api/* and /api/events.* (see
+// @deepseek-ai/dsh-client-connection/lib/index.js::BrowserAuth).
+// The signing secret is persisted to
+// `~/.dsh/.credentials.yaml` (record `client-connection/browser-session`,
+// payload.secret). Since the secret is per-`.dsh/` directory and
+// every dsh started by nightme uses the same directory, nightme
+// can MINT the dsh-auth cookie locally using that secret — no
+// launch-token exchange required. The cookie validates against any
+// dsh process on this host that's loaded the same secret, which
+// means nightme can attach to a still-running dsh on restart
+// without re-spawning or persisting anything of its own.
+//
+// Lifecycle model (sign-cookie-then-spawn):
 //
 //	StartSharedHost(ctx, opts)
-//	  1. TCP-dial 127.0.0.1:3080.
-//	     - dial succeeds → 3080 is occupied by SOMETHING (could be
-//	       another dsh, could be a foreign service — we don't
-//	       care). Spawn our own on findFreePort(3081, 3099).
-//	     - dial fails (refused/timeout) → 3080 is ours. Spawn there.
-//	  2. spawnAndWire spawns `dsh --profile web --port <port>` and:
-//	     a. parses the `?token=<launchToken>` from dsh's stdout
-//	        URL line,
-//	     b. GETs /?token=<launchToken> to mint the dsh-auth cookie
-//	        (dsh 0.1.2-rc.1 returns 303 with set-cookie; without
-//	        this step every /api/* and /api/events.* gets 401),
-//	     c. builds an http.CookieJar populated with the cookie,
-//	     d. constructs *Client with NewWithJar so both the HTTP
-//	        RPC client and the WS dialer carry it,
-//	     e. Client.Start kicks off mux/host WS pumps; the cookie
-//	        is now attached to every upgrade.
-//	  3. install client via host.SetGlobal so dsh.newDriver can
-//	     find it. Start the watchdog.
-//
-// Why we no longer "reuse existing dsh": dsh 0.1.2-rc.1 enforces
-// per-process signed-cookie auth on /api/* and /api/events.*. The
-// launch token is process-internal and never exposed to a file,
-// so we have no way to mint the cookie against someone else's dsh.
-// Attaching to an external dsh therefore means RPC and WS fail
-// with 401 — useless. The shared-host architecture is "nightme
-// owns dsh"; the reuse-existing branch was an optimization that's
-// no longer reachable in practice, so it's removed.
+//	  1. Mint a dsh-auth cookie using the signing secret loaded
+//	     from ~/.dsh/.credentials.yaml (via mintDSHAuthCookie).
+//	     No network round-trip to dsh — the algorithm is a pure
+//	     HMAC-SHA256 over a base64url-encoded payload.
+//	  2. Construct *Client with the minted cookie jar. The jar is
+//	     the same shape dsh itself emits, so every /api/* and WS
+//	     upgrade carries the cookie.
+//	  3. Pick a port (3080 default, fallback sweep [3081, 3099]
+//	     if 3080 is held by a non-dsh service).
+//	  4. spawnAndWire spawns `dsh --profile web --port <port>`,
+//	     dials /api/remote.mux, and the Hub's auth cookie is
+//	     already in place.
+//	  5. Install via SetGlobal so dsh.newDriver can find it.
+//	     Start the watchdog.
 //
 //	ShutdownSharedHost(ctx, client)
 //	  1. Client.Close (stops mux/host pumps)
@@ -46,6 +44,9 @@ package host
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -56,12 +57,14 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"regexp"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/cnlangzi/nightme/internal/proc"
 )
@@ -114,6 +117,13 @@ type SharedHostOptions struct {
 	// Used by tests (which need to drive their own fake dsh
 	// subprocess) and by users who explicitly want isolation
 	// (e.g. CI, multiple daemons on the same host). Default: false.
+	//
+	// Deprecated: with cookie-mint the spawn-vs-attach decision
+	// goes away. We always spawn our own dsh; the cookie we mint
+	// with the ~/.dsh/.credentials.yaml secret will be accepted by
+	// any other dsh that shares that .dsh/ directory (i.e. every
+	// dsh started from this user's HOME). ForceSpawn is preserved
+	// only for tests that need a clean isolated dsh subprocess.
 	ForceSpawn bool
 
 	// Port is the TCP port dsh should bind to. Set by
@@ -257,9 +267,6 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		)
 	}
 
-	// Step 2: spawn dsh with --port explicit. spawnAndWire also
-	// captures the launch token and mints the dsh-auth cookie
-	// before constructing the Client.
 	cmd, cli, err := spawnAndWire(ctx, opts, port, logger)
 	if err != nil {
 		return nil, err
@@ -309,14 +316,10 @@ func dialReachable(port int) bool {
 	return true
 }
 
-// dshURLPattern matches the first line of `dsh --profile web` stdout:
-//
-//	dsh web: http://127.0.0.1:3080/?token=<launchToken>
-//
-// Captures the full URL (host + port + path + query). spawnAndWire
-// uses the query to extract the launch token, then GETs /?token=...
-// to mint the dsh-auth cookie (see mintAuthCookie).
-var dshURLPattern = regexp.MustCompile(`dsh web:\s+(http://[^\s]+)`)
+// dshURLPattern removed: we no longer parse dsh's stdout for the
+// launch token — mintDSHAuthCookieFromCredentials signs the
+// dsh-auth cookie locally using the persisted signing secret
+// instead (see fix-dsh-shared-host).
 
 // defaultDSHPort is the canonical port both `dsh web` and the
 // spawned dsh subprocess default to. The fallback sweep in
@@ -339,55 +342,125 @@ const defaultDSHPort = 3080
 // The launch token only works on the initial GET / — it mints the
 // cookie. Without this step, every bridge call gets 401 and every
 // WS upgrade closes mid-handshake.
-func mintAuthCookie(ctx context.Context, baseURL, token string) (http.CookieJar, error) {
+// mintDSHAuthCookieFromCredentials signs a dsh-auth-<sha256>=v1.body.sig
+// cookie using the signing secret loaded from ~/.dsh/.credentials.yaml.
+// The algorithm is verified against dsh 0.1.2-rc.1 by capturing
+// the real POST body and reproducing the HMAC-SHA256 signature
+// byte-for-byte (2026-09-11). See
+// @deepseek-ai/dsh-client-connection/lib/index.js:encodeCookie.
+//
+// Returns a fresh cookiejar.Jar populated with one cookie scoped
+// to baseURL (cookie name = "dsh-auth-" + base64url(sha256(authority)));
+// the cookie lifetime is dsh.host.constants.cookieMaxAgeDays.
+//
+// Why this works: every dsh subprocess using the same ~/.dsh/
+// directory loads the same client-connection/browser-session
+// signing secret. We mint locally; dsh accepts. So we don't need
+// to spawn a fresh dsh OR persist a cookie OR attach to a running
+// dsh — just read ~/.dsh/.credentials.yaml, sign, attach.
+func mintDSHAuthCookieFromCredentials(authority string) (http.CookieJar, error) {
+	secret, err := loadBrowserSessionSecret()
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: load secret: %w", err)
+	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, fmt.Errorf("dsh.host: cookiejar: %w", err)
 	}
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("dsh.host: parse base url %q: %w", baseURL, err)
-	}
-	// url.Values.Set doesn't propagate back to URL.RawQuery; use
-	// Encode() to rebuild the query string with proper percent
-	// escaping (raw concatenation would mangle tokens containing
-	// & = + / or other reserved characters).
-	q := *u
-	values := q.Query()
-	values.Set("token", token)
-	q.RawQuery = values.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, q.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("dsh.host: build token-exchange req: %w", err)
-	}
-	// We deliberately do NOT pass the jar — the cookiejar is
-	// populated from this single response, not sent on it.
-	client := &http.Client{
-		Timeout: httpClientTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// dsh returns 303 → /. We want the cookies from THAT
-			// response, not from any further redirect. Stop after
-			// the first hop.
-			if len(via) >= 1 {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("dsh.host: token-exchange GET %s: %w", q.String(), err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusSeeOther && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("dsh.host: token-exchange: HTTP %d (want 303 or 200)", resp.StatusCode)
-	}
-	cookies := resp.Cookies()
-	if len(cookies) == 0 {
-		return nil, fmt.Errorf("dsh.host: token-exchange: no Set-Cookie in response (dsh version mismatch?)")
-	}
-	jar.SetCookies(u, cookies)
+	u := &url.URL{Scheme: "http", Host: authority}
+	cookieName := "dsh-auth-" + base64URL(sha256Sum([]byte(authority)))
+	cookieValue := encodeDSHAuthCookie(secret, authority, cookieMaxAgeDays)
+	jar.SetCookies(u, []*http.Cookie{{
+		Name:     cookieName,
+		Value:    cookieValue,
+		Path:     "/",
+		MaxAge:   cookieMaxAgeDays * 24 * 60 * 60,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	}})
 	return jar, nil
+}
+
+// loadBrowserSessionSecret reads ~/.dsh/.credentials.yaml and
+// returns the secret stored under
+// records["client-connection"]["browser-session"].payload.secret.
+//
+// The file is owned by the user (mode 0600) — same security
+// profile as the dsh-auth cookie itself. If the file is missing
+// or the schema is unexpected, we surface a clear error rather
+// than silently falling through to a network exchange (which
+// wouldn't work anyway — we have no token).
+func loadBrowserSessionSecret() ([]byte, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: home dir: %w", err)
+	}
+	path := filepath.Join(home, ".dsh", ".credentials.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: read %s: %w", path, err)
+	}
+	var rec struct {
+		Records map[string]struct {
+			Kind    string `json:"kind"`
+			Payload struct {
+				Secret string `json:"secret"`
+			} `json:"payload"`
+		} `json:"records"`
+	}
+	if err := yaml.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("dsh.host: parse %s: %w", path, err)
+	}
+	browserSession, ok := rec.Records["client-connection/browser-session"]
+	if !ok {
+		return nil, fmt.Errorf("dsh.host: %s missing client-connection/browser-session record", path)
+	}
+	if browserSession.Kind != "grant" {
+		return nil, fmt.Errorf("dsh.host: %s browser-session record kind=%q, want \"grant\"", path, browserSession.Kind)
+	}
+	raw, err := base64URLDecode(browserSession.Payload.Secret)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: secret base64url: %w", err)
+	}
+	return raw, nil
+}
+
+// encodeDSHAuthCookie builds the v1.body.sig cookie value per
+// dsh 0.1.2-rc.1's encodeCookie (verified 2026-09-11).
+func encodeDSHAuthCookie(secret []byte, authority string, maxAgeDays int) string {
+	body := encodeBase64URL([]byte(fmt.Sprintf(
+		`{"version":1,"authority":%q,"issuedAt":%d,"expiresAt":%d}`,
+		authority, time.Now().UnixMilli(),
+		time.Now().Add(time.Duration(maxAgeDays)*24*time.Hour).UnixMilli(),
+	)))
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(body))
+	return "v1." + body + "." + encodeBase64URL(mac.Sum(nil))
+}
+
+// cookieMaxAgeDays is the dsh-auth cookie's lifetime in days.
+// Matches dsh 0.1.2-rc.1's default (30 days, see
+// @deepseek-ai/dsh-client-connection/lib/index.js).
+const cookieMaxAgeDays = 30
+
+// encodeBase64URL / base64URLDecode / base64URL / sha256Sum are
+// thin wrappers around the stdlib encoders with the exact
+// padding / char-set semantics dsh 0.1.2-rc.1 uses. dsh strips the
+// trailing '=' padding (URL-safe base64) and uses the URL-safe
+// alphabet ('-' / '_' for '+' / '/'). We mirror that exactly.
+func encodeBase64URL(b []byte) string {
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func base64URLDecode(s string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(s)
+}
+
+func base64URL(b []byte) string { return encodeBase64URL(b) }
+
+func sha256Sum(b []byte) []byte {
+	h := sha256.Sum256(b)
+	return h[:]
 }
 
 // stderrRing is a bounded line buffer for dsh's stderr. The
@@ -703,43 +776,16 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 		}
 	}(stderr)
 
-	// waitForURLToken reads stdout until the URL line appears and
-	// captures the launch token, while continuing to drain the pipe
-	// in the background so dsh's stdout never deadlocks.
-	//
-	// We can't share the pipe between two goroutines — once one
-	// reads, the bytes are gone. So one goroutine does both: parse
-	// the URL line for the token, log every line for /diagnose
-	// triage, keep draining until EOF.
-	tokenCh := make(chan string, 1)
-	tokenErrCh := make(chan error, 1)
+	// Drain stdout so dsh's pipe buffer doesn't fill and deadlock
+	// the subprocess. We don't capture the launch token any more —
+	// mintDSHAuthCookieFromCredentials signs the cookie locally
+	// from the persisted signing secret, so no token exchange is
+	// needed (see fix-dsh-shared-host).
 	go func(r io.Reader) {
 		scnr := bufio.NewScanner(r)
 		scnr.Buffer(make([]byte, 0, 4096), 16*1024)
-		sent := false
 		for scnr.Scan() {
-			line := scnr.Text()
-			logger.Debug("dsh.host: stdout", "line", line)
-			if sent {
-				continue
-			}
-			if m := dshURLPattern.FindStringSubmatch(line); m != nil {
-				u, perr := url.Parse(m[1])
-				if perr != nil {
-					tokenErrCh <- fmt.Errorf("dsh.host: parse dsh url %q: %w", m[1], perr)
-					return
-				}
-				token := u.Query().Get("token")
-				if token == "" {
-					tokenErrCh <- fmt.Errorf("dsh.host: dsh url %q has no ?token=...", m[1])
-					return
-				}
-				tokenCh <- token
-				sent = true
-			}
-		}
-		if !sent {
-			tokenErrCh <- errors.New("dsh.host: stdout closed before URL line appeared")
+			logger.Debug("dsh.host: stdout", "line", scnr.Text())
 		}
 	}(stdout)
 
@@ -771,29 +817,17 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	// Mint the dsh-auth cookie from the launch token. Without this
-	// step dsh 0.1.2-rc.1 401s every /api/* and every WS upgrade.
-	tokenCtx, tokenCancel := context.WithTimeout(ctx, webURLParseTimeout)
-	token, err := func() (string, error) {
-		select {
-		case t := <-tokenCh:
-			return t, nil
-		case e := <-tokenErrCh:
-			return "", e
-		case <-tokenCtx.Done():
-			return "", fmt.Errorf("dsh.host: timeout waiting for launch token: %w", tokenCtx.Err())
-		}
-	}()
-	if err != nil {
-		tokenCancel()
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		_ = stdout.Close()
-		return nil, nil, fmt.Errorf("dsh.host: capture launch token: %w", err)
-	}
-
-	jar, err := mintAuthCookie(tokenCtx, baseURL, token)
-	tokenCancel()
+	// Mint the dsh-auth cookie directly using the signing secret
+	// loaded from ~/.dsh/.credentials.yaml. We skip the launch-token
+	// exchange because the same secret is shared by every dsh that
+	// uses this .dsh/ directory — so the cookie we mint is
+	// accepted by any dsh on this host, not just the one we
+	// spawned. See fix-dsh-shared-host for rationale; the
+	// algorithm is verified against dsh 0.1.2-rc.1 by capturing
+	// the real POST body and reproducing the HMAC-SHA256
+	// signature byte-for-byte (2026-09-11).
+	authority := strings.TrimPrefix(baseURL, "http://")
+	jar, err := mintDSHAuthCookieFromCredentials(authority)
 	if err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()

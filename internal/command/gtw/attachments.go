@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 	"github.com/cnlangzi/nightme/internal/pathutil"
 )
 
@@ -351,7 +352,7 @@ func fetchAttachment(ctx context.Context, url string) (string, []byte, error) {
 // writes — we don't want attachments showing up in `git
 // status` and tripping the /gtw close dirty check.
 func attachmentsDir(worktreePath string, issueID int) string {
-	return pathutil.Join(worktreePath, nightmeDirName, "attachments",
+	return pathutil.Join(worktreePath, nightmedir.DirName, "attachments",
 		fmt.Sprintf("issue-%d", issueID))
 }
 

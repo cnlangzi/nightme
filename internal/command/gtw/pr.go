@@ -287,7 +287,7 @@ func dispatchPR(
 
 // buildPRPrompt renders the text block the agent receives.
 //
-// Format (v3, NightMe-branded + Sourcery-style summary):
+// Format (v5, NightMe-branded + Sourcery-style summary):
 //
 //	## Summary by NightMe
 //	<1-2 sentences, imperative, WHAT not WHY>
@@ -346,7 +346,7 @@ func dispatchPR(
 // body to be grounded in real diff output the LLM itself
 // inspected.
 func buildPRPrompt(c Context, base string) string {
-	// v4 prompt. The semantic flow is:
+	// v5 prompt. The semantic flow is:
 	//   commit history + final diff → PR body → Summary by NightMe → PR title
 	//
 	// The title is a semantic compression of the Summary, NOT an
@@ -709,11 +709,13 @@ func appendClosesFooter(body string, issue int) string {
 	return body + "\n\n" + footer + "\n"
 }
 
-// extractRiskLevel pulls the optional `Risk: <level> — <reason>`
-// line out of a parsed PR body. Returns ("", "") when the line
-// is absent — the caller treats absence as "no risk field in
-// the IM card" rather than as an error. The level is
-// lowercased before returning so `Risk: HIGH — ...` and
+// extractRiskLevel pulls the `Risk: <level> — <reason>` line out
+// of a parsed PR body. The buildPRPrompt requires Risk on every
+// PR body, so a present line is the expected case; absence is
+// tolerated as a defensive fallback (returns ("", "")) so a
+// malformed LLM reply doesn't crash dispatchPR. The caller
+// treats absence as "no risk field in the IM card". The level
+// is lowercased before returning so `Risk: HIGH — ...` and
 // `Risk: high — ...` produce the same result.
 //
 // Body is passed in raw (already trimmed of leading/trailing
@@ -995,9 +997,10 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 // gone, and `🌿/🔗/📁` merge into the `→` family alongside the
 // existing `→ base:` row.
 //
-// v3 addition: optional `→ risk:` row. Sourced via
-// extractRiskLevel(body) — when the agent omitted the Risk line
-// (trivial PRs), riskLevel is "" and the row is skipped.
+// Renders the `→ risk:` row sourced via extractRiskLevel(body).
+// The buildPRPrompt requires Risk on every PR body, so the row
+// is normally always present; the `riskLevel == ""` branch stays
+// as a defensive fallback for malformed LLM replies.
 func renderPROpenedCard(c Context, base, url, riskLevel, riskReason string) string {
 	var sb strings.Builder
 	sb.WriteString("✅ PR opened\n")

@@ -303,14 +303,17 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// buildPRPrompt (plan §P3.1) — v4 invariants
+// buildPRPrompt (plan §P3.1) — v5 invariants
 //
 // These tests lock in the structural / behavioural anchors of the
-// v4 prompt rewrite (see buildPRPrompt doc comment). v4 introduces
-// the semantic flow `commit history + diff → body → Summary by
-// NightMe → PR title`, explicitly forbidding the "use the latest
-// commit subject as the PR title" shortcut that produced
-// misleading titles on branches whose last commit was a narrow fix.
+// v5 prompt (see buildPRPrompt doc comment). v5 inherits the v4
+// semantic flow `commit history + diff → body → Summary by
+// NightMe → PR title`, which explicitly forbids the "use the
+// latest commit subject as the PR title" shortcut that produced
+// misleading titles on branches whose last commit was a narrow
+// fix. v5 adds: `## Summary by NightMe` is the first section of
+// the body (immediately after the PR title), and Risk is mandatory
+// on every PR body.
 //
 // Carry-over invariants from v3:
 //   - The body has ONE `## ` heading (`## Summary by NightMe`).
@@ -320,7 +323,7 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 //     LLM can't drop / misformat it. See TestAppendClosesFooter_*
 //     for the footer-injection contract.
 //
-// v4-specific anchors:
+// v4 anchors:
 //   - The semantic flow ("commit history + final diff → understand
 //     the PR → PR body → Summary by NightMe → PR title") and the
 //     explicit "Do not reverse this order" line. Without this, LLMs
@@ -334,6 +337,12 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 //   - Tool-floor commands use both branch names explicitly
 //     (`<base>..<current>` and `<base>...<current>`), not
 //     `..HEAD`, so the agent's diff range is unambiguous.
+//
+// v5 anchors:
+//   - `## Summary by NightMe` is the first section of the body,
+//     immediately after the PR title.
+//   - `Risk: <low|medium|high> — <concise reason>` is mandatory on
+//     every PR body (no longer optional / non-trivial-only).
 // -----------------------------------------------------------------------------
 
 func TestBuildPRPrompt_Remote(t *testing.T) {
@@ -346,7 +355,8 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	}
 	p := buildPRPrompt(c, "main")
 
-	// v4 structural sections — all eight must be present.
+	// v4 structural sections — all eight must be present (v5
+	// inherits the same eight-section spine).
 	mustContain(t, p, "## Context")
 	mustContain(t, p, "## Goal")
 	mustContain(t, p, "## Understand the Complete Change")
@@ -378,7 +388,7 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	mustNotContain(t, p, "Closes #")
 	mustNotContain(t, p, "Refs #")
 
-	// Negative: v2/v3 sections that v4 must NOT leak back into
+	// Negative: v2/v3 sections that v4/v5 must NOT leak back into
 	// the prompt. Each of these was a `## ` heading in earlier
 	// versions; their presence means a future edit accidentally
 	// undid the rewrite.
@@ -397,8 +407,8 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	mustNotContain(t, p, "Lead with Why")
 	mustNotContain(t, p, "file-grouped summary")
 	// Negative: agent-side safety rail for not running side
-	// effects (v4 phrasing lives under "Do NOT execute", not
-	// the v3 "git push -u origin" / "git commit -m" wording).
+	// effects (v5 phrasing lives under "Do NOT execute", same as
+	// v4; not the v3 "git push -u origin" / "git commit -m" wording).
 	mustNotContain(t, p, "git push -u origin")
 	mustNotContain(t, p, "git commit -m")
 
@@ -432,11 +442,12 @@ func TestBuildPRPrompt_LocalNoIssue(t *testing.T) {
 	}
 }
 
-// TestBuildPRPrompt_NonWorktreeRepo: v4 does not inject a
-// `Repository:` line. The agent can look up owner/repo from the
-// GitHub PR header at PR-creation time if it needs to. The
-// negative guard is kept so a future edit doesn't reintroduce a
-// `Repository:` line with an empty value (the v2 bug D it
+// TestBuildPRPrompt_NonWorktreeRepo: v5 does not inject a
+// `Repository:` line (carried over from v4). The agent can look
+// up owner/repo from the GitHub PR header at PR-creation time if
+// it needs to. The negative guard is kept so a future edit
+// doesn't reintroduce a `Repository:` line with an empty value
+// (the v2 bug D it
 // originally guarded against).
 func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 	c := Context{
@@ -447,7 +458,7 @@ func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 	}
 	p := buildPRPrompt(c, "main")
 	if strings.Contains(p, "Repository: \n") || strings.Contains(p, "Repository: octocat") {
-		t.Fatalf("v4 prompt should not contain a Repository: line:\n%s", p)
+		t.Fatalf("v5 prompt should not contain a Repository: line:\n%s", p)
 	}
 }
 
@@ -468,8 +479,8 @@ func TestBuildPRPromptV4_BrandHeading(t *testing.T) {
 // TestBuildPRPromptV4_CategoriesPresent locks the six category
 // labels. If a future edit drops a label, the LLM loses a
 // stable slot to fill and the modal-pattern regression returns.
-// v4 no longer couples each label to a specific CC type — the
-// agent picks the right categories from the final diff, not
+// v4/v5 no longer couples each label to a specific CC type —
+// the agent picks the right categories from the final diff, not
 // from commit types — so this test only pins the labels.
 func TestBuildPRPromptV4_CategoriesPresent(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
@@ -489,7 +500,7 @@ func TestBuildPRPromptV4_CategoriesPresent(t *testing.T) {
 }
 
 // TestBuildPRPromptV4_NoDiffOverview guards the v2 sections
-// that v3/v4 explicitly dropped. PR #303 demonstrated the cost:
+// that v3/v4/v5 explicitly dropped. PR #303 demonstrated the cost:
 // the body was 4× the size of an equivalent Sourcery summary,
 // with identical coverage, because reviewers had to scan
 // through `## Diff overview` prose instead of category bullets.
@@ -523,7 +534,7 @@ func TestBuildPRPromptV4_ToolFloorMandatory(t *testing.T) {
 	mustContain(t, p, "Do not assume that the latest commit represents the purpose of the Pull Request")
 }
 
-// TestBuildPRPromptV4_DoNotCommitAsTitle is the central v4
+// TestBuildPRPromptV4_DoNotCommitAsTitle is the central v4/v5
 // invariant. Without the explicit "commit subject ≠ PR title"
 // decoupling, LLMs regress to the v3 default of inheriting the
 // latest commit subject as the title. This test fails if a
@@ -547,10 +558,10 @@ func TestBuildPRPromptV4_DoNotCommitAsTitle(t *testing.T) {
 }
 
 // TestBuildPRPromptV4_PreserveParseability guards the
-// parseability invariants that parsePRReply depends on. v4 adds
-// the semantic-flow rewrite but MUST NOT regress parseability —
-// a future edit that drops these strings silently breaks every
-// existing parsePRReply test in this file.
+// parseability invariants that parsePRReply depends on. v4
+// added the semantic-flow rewrite and v5 inherited it; future
+// edits MUST NOT regress parseability — dropping these strings
+// silently breaks every existing parsePRReply test in this file.
 func TestBuildPRPromptV4_PreserveParseability(t *testing.T) {
 	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
 	p := buildPRPrompt(c, "main")
@@ -561,7 +572,7 @@ func TestBuildPRPromptV4_PreserveParseability(t *testing.T) {
 	mustContain(t, p, "nested fenced code blocks")
 	// "Do NOT execute" guard is the agent-side safety rail
 	// that keeps pr() from triggering side effects. Do not let
-	// v4 edits drop it.
+	// v5 edits drop it.
 	mustContain(t, p, "Do NOT execute")
 	mustContain(t, p, "git commit")
 	mustContain(t, p, "gh pr create")
@@ -569,10 +580,10 @@ func TestBuildPRPromptV4_PreserveParseability(t *testing.T) {
 
 // TestBuildPRPromptV4_BranchInCommands checks that both the
 // base and current branch names appear in the tool-floor git
-// commands. v4 uses explicit `<base>..<current>` form rather
-// than `..HEAD`, so the agent's understanding of the diff
-// range does not depend on what HEAD resolves to in its
-// worktree.
+// commands. v4 introduced (and v5 keeps) the explicit
+// `<base>..<current>` form rather than `..HEAD`, so the agent's
+// understanding of the diff range does not depend on what HEAD
+// resolves to in its worktree.
 func TestBuildPRPromptV4_BranchInCommands(t *testing.T) {
 	p := buildPRPrompt(Context{Worktree: "/w", Branch: "feat/y", RepoRoot: "/r", Repo: "o/r"}, "develop")
 

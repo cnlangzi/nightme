@@ -401,6 +401,15 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	// the v3 "git push -u origin" / "git commit -m" wording).
 	mustNotContain(t, p, "git push -u origin")
 	mustNotContain(t, p, "git commit -m")
+
+	// v5 anchors: ## Summary by NightMe must be the first section
+	// of the body (immediately after the PR title); Risk is
+	// mandatory on every PR body, including low-risk changes.
+	mustContain(t, p, "first section of the PR body")
+	mustContain(t, p, "immediately after the PR title")
+	mustContain(t, p, "Do not place any other section before it")
+	mustContain(t, p, "do not omit the Risk line")
+	mustNotContain(t, p, "may be included")
 }
 
 func TestBuildPRPrompt_LocalNoIssue(t *testing.T) {
@@ -655,12 +664,14 @@ func TestAppendClosesFooter_DoesNotMatchDifferentIssue(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// extractRiskLevel (v3 addition)
+// extractRiskLevel
 //
-// Pulls the optional `Risk: <level> — <reason>` line out of a
-// parsed PR body. Returns ("", "") when the line is absent.
-// The level is lowercased so `Risk: HIGH — ...` and
-// `Risk: high — ...` produce the same result.
+// Pulls the `Risk: <level> — <reason>` line out of a parsed PR
+// body. The buildPRPrompt instructs the agent to include this
+// line on every PR body; absent is tolerated as a defensive
+// fallback (returns ("", "")) so a malformed LLM reply doesn't
+// crash dispatchPR. The level is lowercased so `Risk: HIGH — ...`
+// and `Risk: high — ...` produce the same result.
 // -----------------------------------------------------------------------------
 
 func TestExtractRiskLevel_LowEmDash(t *testing.T) {
@@ -698,8 +709,11 @@ func TestExtractRiskLevel_HighUppercase(t *testing.T) {
 	}
 }
 
-// TestExtractRiskLevel_Absent verifies the no-Risk case. Risk
-// is OPTIONAL — absence must not be treated as an error.
+// TestExtractRiskLevel_Absent verifies the no-Risk case. The
+// parser must remain permissive — absence is not an error at
+// parse time. The prompt instructs the agent to always include
+// Risk, but the parser tolerates absence as a defensive
+// fallback so a malformed LLM reply doesn't crash dispatchPR.
 func TestExtractRiskLevel_Absent(t *testing.T) {
 	body := "## Summary by NightMe\n\nJust a typo fix.\n"
 	l, r := extractRiskLevel(body)
@@ -721,7 +735,13 @@ func TestExtractRiskLevel_MidBody(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// renderPROpenedCard (v3 addition: optional → risk: row)
+// renderPROpenedCard
+//
+// Renders the IM-friendly success card, including the `→ risk:`
+// row sourced from extractRiskLevel. The buildPRPrompt requires
+// Risk on every PR body, so the row is normally always present;
+// the `riskLevel == ""` branch stays as a defensive fallback for
+// malformed LLM replies.
 // -----------------------------------------------------------------------------
 
 func TestRenderPROpenedCard_WithRisk(t *testing.T) {

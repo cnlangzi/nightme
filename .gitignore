@@ -72,4 +72,7 @@ graphify-out/
 # /tasks/ holds WIP design docs and implementation plans;
 # treated as ephemeral working notes (not tracked in git).
 /tasks/
+
+# Per-project handoff state (./.nightme/handoff.md) — written
+# at runtime by the /handoff slash command; never committed.
 .nightme/

@@ -32,44 +32,35 @@ import (
 // filename.
 const handoffFilename = "handoff.md"
 
-// handoffPrompt placeholders. `{{...}}` is the chosen style
+// handoffPrompt placeholder. `{{...}}` is the chosen style
 // because it (a) doesn't collide with markdown / HTML tag
 // parsing that an Agent might apply to the prompt, and (b)
 // matches common prompt-template conventions so an Agent that
 // has seen templated prompts before will recognize them as
 // substitution targets rather than literal text.
 //
-// Both names use `_ABS` suffix to signal that the runtime
-// substitutes an absolute filesystem path. Without that signal
-// an Agent might write relative paths (./handoff.md) thinking
-// "ABS" means "abstract / non-literal".
-const (
-	placeholderNightmeDirAbs  = "{{NIGHTME_DIR_ABS}}"
-	placeholderHandoffFileAbs = "{{HANDOFF_FILE_ABS}}"
-)
+// The `_ABS` suffix signals that the runtime substitutes an
+// absolute filesystem path. Without that signal an Agent might
+// write relative paths (./handoff.md) thinking "ABS" means
+// "abstract / non-literal".
+const placeholderHandoffFileAbs = "{{HANDOFF_FILE_ABS}}"
 
-// RenderHandoffPrompt substitutes the absolute per-cwd paths
-// into handoffPrompt. Exposed (rather than inlined in Handle) so
-// tests can pin the placeholder contract: no {{...}} survives,
-// the substituted text is platform-canonical, and the relative
-// `<cwd>/.nightme/handoff.md` form never appears in the
-// rendered output.
+// RenderHandoffPrompt substitutes the absolute per-cwd handoff
+// path into handoffPrompt. Exposed (rather than inlined in
+// Handle) so tests can pin the placeholder contract: no {{...}}
+// survives and the substituted text is platform-canonical.
 func RenderHandoffPrompt(cwd string) string {
-	p := handoffPrompt
-	p = strings.ReplaceAll(p, placeholderNightmeDirAbs, nightmedir.Path(cwd))
-	p = strings.ReplaceAll(p, placeholderHandoffFileAbs, nightmedir.FilePath(cwd, handoffFilename))
-	return p
+	return strings.ReplaceAll(handoffPrompt, placeholderHandoffFileAbs, nightmedir.FilePath(cwd, handoffFilename))
 }
 
 // handoffPrompt is the Agent's task for /handoff. The Agent has
 // the chat's full context; it produces a Markdown document
 // conforming to the structure described below and writes it to
 // the absolute handoff path that the runtime substitutes in via
-// the {{HANDOFF_FILE_ABS}} / {{NIGHTME_DIR_ABS}} placeholders.
+// the {{HANDOFF_FILE_ABS}} placeholder.
 //
-// Path placeholders:
+// Path placeholder:
 //
-//	{{NIGHTME_DIR_ABS}}  →  nightmedir.Path(cwd)        (per-cwd .nightme/)
 //	{{HANDOFF_FILE_ABS}} →  nightmedir.FilePath(cwd, "handoff.md")
 //
 // Why absolute paths in the prompt: the Agent's Write tool can
@@ -81,7 +72,7 @@ func RenderHandoffPrompt(cwd string) string {
 //
 // RenderHandoffPrompt performs the substitution at Handle time
 // (after cs.SelectedCwd() is known). Tests pin both the
-// placeholder names and the "no placeholder survives" contract.
+// placeholder name and the "no placeholder survives" contract.
 const handoffPrompt = `You are performing a task handoff for the CURRENT task.
 Your job is to create a durable handoff document for the current project so that another AI coding agent (or a fresh session of yourself) can continue the task with ZERO prior context and become productive within 2 minutes.
 The canonical handoff file is:
@@ -130,7 +121,6 @@ Never invent facts, causes, files, commands, test results, implementation detail
 - [unknown or risk]: [known evidence, current uncertainty, and potential impact]
 
 ## Persistence Requirements
-- The directory {{NIGHTME_DIR_ABS}} already exists — the runtime pre-creates it before the prompt is submitted; do not create a different directory.
 - Write the complete final handoff document to {{HANDOFF_FILE_ABS}}.
 - Create the file if it does not exist.
 - Overwrite the existing {{HANDOFF_FILE_ABS}}; do not append to an older handoff.

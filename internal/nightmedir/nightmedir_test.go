@@ -66,25 +66,23 @@ func TestEnsureDir_DoesNotCreateParent(t *testing.T) {
 	}
 }
 
-// Path: always forward-slash regardless of OS separator.
-func TestPath_ForwardSlash(t *testing.T) {
+// Path: platform-canonical join of cwd + DirName. Forward-slash
+// is not the contract here — that's RelPath's. The contract is
+// "ends in DirName, separator matches platform" so callers can
+// pass the result to os.Stat / os.WriteFile.
+func TestPath_EndsInDirName(t *testing.T) {
 	got := nightmedir.Path("/tmp/foo")
-	if !strings.HasSuffix(got, "/.nightme") {
-		t.Errorf("Path = %q, want suffix %q", got, "/.nightme")
-	}
-	if strings.Contains(got, `\`) {
-		t.Errorf("Path must not contain backslash; got %q", got)
+	if path := filepath.Join("/tmp/foo", nightmedir.DirName); got != path {
+		t.Errorf("Path = %q, want platform-canonical %q", got, path)
 	}
 }
 
-// FilePath: joins cwd + DirName + name with forward slashes.
-func TestFilePath_ForwardSlash(t *testing.T) {
+// FilePath: platform-canonical join of cwd + DirName + name.
+// Forward-slash is not the contract here — that's RelPath's.
+func TestFilePath_EndsInFile(t *testing.T) {
 	got := nightmedir.FilePath("/tmp/foo", "handoff.md")
-	if !strings.HasSuffix(got, "/.nightme/handoff.md") {
-		t.Errorf("FilePath = %q, want suffix %q", got, "/.nightme/handoff.md")
-	}
-	if strings.Contains(got, `\`) {
-		t.Errorf("FilePath must not contain backslash; got %q", got)
+	if path := filepath.Join("/tmp/foo", nightmedir.DirName, "handoff.md"); got != path {
+		t.Errorf("FilePath = %q, want platform-canonical %q", got, path)
 	}
 }
 

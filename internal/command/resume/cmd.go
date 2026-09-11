@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -36,9 +37,24 @@ import (
 // directory management goes through internal/nightmedir.
 const handoffFilename = "handoff.md"
 
-// handoffRelPath is the user-facing slash-form path embedded in
-// reply text. Forward-slash on every platform.
-const handoffRelPath = nightmedir.DirName + "/" + handoffFilename
+// handoffPrompt placeholder. Matches the convention used by the
+// /handoff package — the runtime substitutes the absolute path
+// before the Agent sees the prompt so the Agent's Read tool can
+// call without having to reconstruct the relative path.
+//
+// Same `{{...}}` style and `_ABS` suffix as the handoff
+// package; the names are kept identical so a single
+// "path placeholders" mental model applies across both
+// commands.
+const placeholderHandoffFileAbs = "{{HANDOFF_FILE_ABS}}"
+
+// RenderResumePrompt substitutes the absolute per-cwd handoff
+// path into resumePromptPrefix. Symmetric with the /handoff
+// package's RenderHandoffPrompt — tests pin the "no placeholder
+// survives" contract and the absolute-path semantics.
+func RenderResumePrompt(cwd string) string {
+	return strings.ReplaceAll(resumePromptPrefix, placeholderHandoffFileAbs, nightmedir.FilePath(cwd, handoffFilename))
+}
 
 // Factory is the command.SlashCommandFactory for /resume.
 type Factory struct{}
@@ -127,20 +143,20 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if err != nil {
 		if os.IsNotExist(err) {
 			return command.OutReply(input,
-				fmt.Sprintf("❌ /resume: %s not found in workspace; run /handoff first.", handoffRelPath)), nil
+				fmt.Sprintf("❌ /resume: %s not found in workspace; run /handoff first.", nightmedir.RelPath(handoffFilename))), nil
 		}
 		return command.OutReply(input,
 			fmt.Sprintf("❌ /resume: stat %s failed: %v", handoffAbsPath, err)), nil
 	}
 	if info.Size() == 0 {
 		return command.OutReply(input,
-			fmt.Sprintf("❌ /resume: %s is empty; run /handoff again.", handoffRelPath)), nil
+			fmt.Sprintf("❌ /resume: %s is empty; run /handoff again.", nightmedir.RelPath(handoffFilename))), nil
 	}
 
 	msg := chatsession.Message{
 		ID:     input.MessageID,
 		ChatID: input.ChatID,
-		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: resumePromptPrefix}},
+		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: RenderResumePrompt(cwd)}},
 		Kind:   chatsession.MessageKindQueue,
 	}
 	if err := cs.QueueUserMessage(msg); err != nil {
@@ -151,13 +167,16 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 }
 
 // resumePromptPrefix is the verbatim preamble /resume sends to
-// the Agent. Step 1 instructs the Agent to read ./.nightme/handoff.md
-// itself; this package does not inline the file body, so the
-// disk source is the single authoritative read.
+// the Agent. The {{HANDOFF_FILE_ABS}} placeholder resolves to
+// the absolute per-cwd handoff path via RenderResumePrompt;
+// the prompt intentionally mentions only the canonical path and
+// no forbidden-path list — giving the Agent a roster of wrong
+// paths to NOT use invites it to remember those paths and pick
+// one by mistake. Same logic the /handoff package applies.
 const resumePromptPrefix = `You are resuming an existing task from a previous AI coding agent.
-The current project may contain a handoff document at:
-./.nightme/handoff.md
-This file is the canonical handoff state for the CURRENT PROJECT.
+The current project contains a handoff document at the absolute path:
+{{HANDOFF_FILE_ABS}}
+That file is the canonical handoff state for the CURRENT PROJECT.
 
 Your job is to continue the existing task from the state described in that file. Do NOT restart the task from scratch.
 
@@ -165,7 +184,7 @@ The previous agent had different context from you. Treat the handoff as the prim
 
 ## Resume Procedure
 Follow this order:
-1. Read ./.nightme/handoff.md.
+1. Read {{HANDOFF_FILE_ABS}}.
 2. Identify:
   - the current task and success criteria
   - what has been completed
@@ -237,12 +256,12 @@ Do not:
 - restart from a clean slate merely because the codebase is unfamiliar
 
 ## Handoff File Errors
-If ./.nightme/handoff.md does not exist:
+If {{HANDOFF_FILE_ABS}} does not exist:
 1. Inspect the current project and working state.
 2. Determine whether the task can be identified from the current context.
 3. Continue when the intended task and next action are sufficiently clear.
 4. Do not fabricate a missing handoff.
-If ./.nightme/handoff.md exists but is empty, malformed, or clearly incomplete:
+If {{HANDOFF_FILE_ABS}} exists but is empty, malformed, or clearly incomplete:
 1. Use whatever valid information it contains.
 2. Inspect the current project to reconstruct the missing state.
 3. Continue from the earliest actionable unfinished work.
@@ -255,9 +274,7 @@ If the handoff is stale:
 ## Output Behavior
 Do not output a summary of the handoff before executing the task.
 Do not ask for confirmation before continuing when the next action is sufficiently clear.
-Start by reading:
-./.nightme/handoff.md
-Then inspect the relevant current project state and continue executing the task.
+Start by reading {{HANDOFF_FILE_ABS}}. Then inspect the relevant current project state and continue executing the task.
 
 Your primary objective is:
 Continue the existing task from the correct current state and make the next correct change toward completing it.

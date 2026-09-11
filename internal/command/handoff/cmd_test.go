@@ -242,3 +242,67 @@ func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
 		t.Errorf("empty MessageID must not enqueue; got QueueLen=%d", got)
 	}
 }
+
+// RenderHandoffPrompt: every {{...}} placeholder resolves to a
+// real absolute path; none survive in the rendered output.
+func TestRenderHandoffPrompt_SubstitutesPaths(t *testing.T) {
+	cwd := t.TempDir()
+	got := handoffpkg.RenderHandoffPrompt(cwd)
+
+	if strings.Contains(got, "{{") || strings.Contains(got, "}}") {
+		t.Errorf("rendered prompt contains unreplaced placeholder markers:\n%s", got)
+	}
+
+	// Both target paths appear verbatim — platform-canonical,
+	// no `cwd`-literal leakage.
+	wantDir := filepath.Join(cwd, ".nightme")
+	wantFile := filepath.Join(cwd, ".nightme", "handoff.md")
+	if !strings.Contains(got, wantDir) {
+		t.Errorf("rendered prompt missing %s; got:\n%s", wantDir, got)
+	}
+	if !strings.Contains(got, wantFile) {
+		t.Errorf("rendered prompt missing %s; got:\n%s", wantFile, got)
+	}
+
+	// Negative: the relative `./.nightme/handoff.md` form must
+	// NOT appear anywhere — the whole point of the placeholder
+	// is that the Agent sees the absolute path, never the
+	// relative shorthand. The forbidden-path roster
+	// (~/.nightme/handoff.md, ./handoff.md, ~/.handoff.md) was
+	// removed from the prompt so the Agent has only one path to
+	// follow — verify those literals are also gone.
+	if strings.Contains(got, "./.nightme/handoff.md") {
+		t.Errorf("rendered prompt contains relative handoff path; Agent should see absolute only")
+	}
+	for _, banned := range []string{"~/.nightme/handoff.md", "./handoff.md", "~/.handoff.md"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("rendered prompt contains forbidden-path roster entry %q", banned)
+		}
+	}
+}
+
+// RenderHandoffPrompt: the templated prompt still has the
+// structural content the Agent needs (h1, sections, persistence
+// rules) — the substitution must not have mangled the body.
+func TestRenderHandoffPrompt_PreservesStructure(t *testing.T) {
+	cwd := t.TempDir()
+	got := handoffpkg.RenderHandoffPrompt(cwd)
+
+	want := []string{
+		"# Handoff",
+		"## Task",
+		"## Completed",
+		"## In Progress",
+		"## Blocked",
+		"## Planned",
+		"### Confirmed Working",
+		"### Unknowns / Risks",
+		"## Persistence Requirements",
+		"## Output Behavior",
+	}
+	for _, s := range want {
+		if !strings.Contains(got, s) {
+			t.Errorf("rendered prompt missing required heading %q", s)
+		}
+	}
+}

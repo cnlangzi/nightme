@@ -320,3 +320,33 @@ func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
 		t.Errorf("empty MessageID must not enqueue; got QueueLen=%d", got)
 	}
 }
+
+// RenderResumePrompt: every {{...}} placeholder resolves; no
+// forbidden-path roster leaks into the rendered prompt.
+func TestRenderResumePrompt_SubstitutesPath(t *testing.T) {
+	cwd := t.TempDir()
+	got := resumepkg.RenderResumePrompt(cwd)
+
+	if strings.Contains(got, "{{") || strings.Contains(got, "}}") {
+		t.Errorf("rendered prompt contains unreplaced placeholders:\n%s", got)
+	}
+
+	want := filepath.Join(cwd, ".nightme", "handoff.md")
+	if !strings.Contains(got, want) {
+		t.Errorf("rendered prompt missing %s; got:\n%s", want, got)
+	}
+
+	// No relative-form leakage (the Agent should only see the
+	// absolute path) and no forbidden-path roster (we removed
+	// the "~/.nightme/handoff.md" / "./handoff.md" list — these
+	// strings must NOT appear anywhere in the rendered prompt).
+	if strings.Contains(got, "./.nightme/handoff.md") {
+		t.Errorf("rendered prompt contains relative handoff path; Agent should see absolute only")
+	}
+	if strings.Contains(got, "~/.nightme/handoff.md") {
+		t.Errorf("rendered prompt must not include a forbidden-path roster")
+	}
+	if strings.Contains(got, "./handoff.md") {
+		t.Errorf("rendered prompt must not include a forbidden-path roster")
+	}
+}

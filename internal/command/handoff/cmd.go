@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -31,20 +32,62 @@ import (
 // filename.
 const handoffFilename = "handoff.md"
 
-// handoffRelPath is the user-facing slash-form path embedded in
-// reply text. Forward-slash on every platform.
-const handoffRelPath = nightmedir.DirName + "/" + handoffFilename
+// handoffPrompt placeholders. `{{...}}` is the chosen style
+// because it (a) doesn't collide with markdown / HTML tag
+// parsing that an Agent might apply to the prompt, and (b)
+// matches common prompt-template conventions so an Agent that
+// has seen templated prompts before will recognize them as
+// substitution targets rather than literal text.
+//
+// Both names use `_ABS` suffix to signal that the runtime
+// substitutes an absolute filesystem path. Without that signal
+// an Agent might write relative paths (./handoff.md) thinking
+// "ABS" means "abstract / non-literal".
+const (
+	placeholderNightmeDirAbs  = "{{NIGHTME_DIR_ABS}}"
+	placeholderHandoffFileAbs = "{{HANDOFF_FILE_ABS}}"
+)
+
+// RenderHandoffPrompt substitutes the absolute per-cwd paths
+// into handoffPrompt. Exposed (rather than inlined in Handle) so
+// tests can pin the placeholder contract: no {{...}} survives,
+// the substituted text is platform-canonical, and the relative
+// `<cwd>/.nightme/handoff.md` form never appears in the
+// rendered output.
+func RenderHandoffPrompt(cwd string) string {
+	p := handoffPrompt
+	p = strings.ReplaceAll(p, placeholderNightmeDirAbs, nightmedir.Path(cwd))
+	p = strings.ReplaceAll(p, placeholderHandoffFileAbs, nightmedir.FilePath(cwd, handoffFilename))
+	return p
+}
 
 // handoffPrompt is the Agent's task for /handoff. The Agent has
 // the chat's full context; it produces a Markdown document
 // conforming to the structure described below and writes it to
-// ./.nightme/handoff.md via its Write tool.
+// the absolute handoff path that the runtime substitutes in via
+// the {{HANDOFF_FILE_ABS}} / {{NIGHTME_DIR_ABS}} placeholders.
+//
+// Path placeholders:
+//
+//	{{NIGHTME_DIR_ABS}}  →  nightmedir.Path(cwd)        (per-cwd .nightme/)
+//	{{HANDOFF_FILE_ABS}} →  nightmedir.FilePath(cwd, "handoff.md")
+//
+// Why absolute paths in the prompt: the Agent's Write tool can
+// then call without having to reconstruct "<cwd>/.nightme/
+// handoff.md" from relative terms, which removes a class of
+// mistakes (writing to ~/.nightme/, to cwd-relative ./handoff.md,
+// etc.). See internal/nightmedir.RelPath for the slash-form
+// variant that stays in user-visible reply text.
+//
+// RenderHandoffPrompt performs the substitution at Handle time
+// (after cs.SelectedCwd() is known). Tests pin both the
+// placeholder names and the "no placeholder survives" contract.
 const handoffPrompt = `You are performing a task handoff for the CURRENT task.
 Your job is to create a durable handoff document for the current project so that another AI coding agent (or a fresh session of yourself) can continue the task with ZERO prior context and become productive within 2 minutes.
 The canonical handoff file is:
-./.nightme/handoff.md
-This handoff belongs to the CURRENT PROJECT. Do not store it in the user's home directory or outside the current project.
-Do not merely generate the handoff as chat output. You must actually create or overwrite ./.nightme/handoff.md with the final handoff content.
+{{HANDOFF_FILE_ABS}}
+This handoff belongs to the CURRENT PROJECT. Do not store it outside the current project directory.
+Do not merely generate the handoff as chat output. You must actually create or overwrite {{HANDOFF_FILE_ABS}} with the final handoff content.
 The purpose of this document is NOT to summarize the conversation. It is to serialize the current task state so another agent can safely continue from where the previous agent stopped.
 Use only information available in the current conversation/session and current task context.
 Preserve:
@@ -87,19 +130,18 @@ Never invent facts, causes, files, commands, test results, implementation detail
 - [unknown or risk]: [known evidence, current uncertainty, and potential impact]
 
 ## Persistence Requirements
-- Create the directory ./.nightme/ if it does not exist.
-- Write the complete final handoff document to ./.nightme/handoff.md.
+- The directory {{NIGHTME_DIR_ABS}} already exists — the runtime pre-creates it before the prompt is submitted; do not create a different directory.
+- Write the complete final handoff document to {{HANDOFF_FILE_ABS}}.
 - Create the file if it does not exist.
-- Overwrite the existing ./.nightme/handoff.md; do not append to an older handoff.
+- Overwrite the existing {{HANDOFF_FILE_ABS}}; do not append to an older handoff.
 - The file content must be exactly the final handoff document and must begin with # Handoff.
-- Verify after writing that ./.nightme/handoff.md exists and contains the newly generated handoff.
-- Do not create or use ~/.handoff.md, ~/.nightme/handoff.md, ./handoff.md, or any other handoff location.
+- Verify after writing that {{HANDOFF_FILE_ABS}} exists and contains the newly generated handoff.
 
 ## Output Behavior
-The handoff document belongs in ./.nightme/handoff.md, not in the chat response.
+The handoff document belongs at {{HANDOFF_FILE_ABS}}, not in the chat response.
 After successfully writing and verifying the file, respond only with a concise confirmation that the handoff was saved.
 Do not print the entire handoff document in the response.
-If writing or verifying ./.nightme/handoff.md fails, report the failure clearly and do not claim that the handoff was saved.
+If writing or verifying {{HANDOFF_FILE_ABS}} fails, report the failure clearly and do not claim that the handoff was saved.
 
 ## Content Rules
 - Write the handoff in the language predominantly used by the user.
@@ -231,7 +273,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	msg := chatsession.Message{
 		ID:     input.MessageID,
 		ChatID: input.ChatID,
-		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: handoffPrompt}},
+		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: RenderHandoffPrompt(cwd)}},
 		Kind:   chatsession.MessageKindQueue,
 	}
 	if err := cs.QueueUserMessage(msg); err != nil {
@@ -290,14 +332,14 @@ func verifyHandoffFile(absPath string) string {
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Sprintf("❌ /handoff: agent did not write %s; rerun /handoff or paste the handoff into the file manually.", handoffRelPath)
+			return fmt.Sprintf("❌ /handoff: agent did not write %s; rerun /handoff or paste the handoff into the file manually.", nightmedir.RelPath(handoffFilename))
 		}
 		return fmt.Sprintf("❌ /handoff: stat %s failed: %v", absPath, err)
 	}
 	if info.Size() == 0 {
-		return fmt.Sprintf("❌ /handoff: %s exists but is empty; rerun /handoff.", handoffRelPath)
+		return fmt.Sprintf("❌ /handoff: %s exists but is empty; rerun /handoff.", nightmedir.RelPath(handoffFilename))
 	}
-	return fmt.Sprintf("✅ /handoff\n\n%s saved (%d bytes).", handoffRelPath, info.Size())
+	return fmt.Sprintf("✅ /handoff\n\n%s saved (%d bytes).", nightmedir.RelPath(handoffFilename), info.Size())
 }
 
 // waitForPromptEnd blocks until PromptEndBus delivers an event

@@ -62,15 +62,30 @@ func Path(cwd string) string {
 }
 
 // FilePath returns the absolute path to a specific file inside
-// the per-cwd nightme directory. Provided as a convenience for
-// callers that want a single source of truth for "<cwd>/.nightme/"
-// joins; the on-disk file itself is the caller's responsibility
-// (this package doesn't validate that name is a "well-known"
-// filename — it joins whatever the caller passes).
+// the per-cwd nightme directory, platform-canonical via
+// pathutil.Join. Provided as a convenience for callers that want
+// a single source of truth for "<cwd>/.nightme/<name>" joins;
+// the on-disk file itself is the caller's responsibility (this
+// package doesn't validate that name is a "well-known" filename
+// — it joins whatever the caller passes).
 //
-// Like Path, the separator is forward-slash.
+// Use FilePath for filesystem calls (os.Stat, os.Open). Use
+// RelPath for user-visible text where forward-slash consistency
+// is required regardless of platform.
 func FilePath(cwd, name string) string {
 	return pathutil.Join(cwd, DirName, name)
+}
+
+// RelPath returns the slash-form relative path to a file inside
+// the per-cwd nightme directory, for embedding in user-visible
+// reply text (Feishu / Slack / Telegram / bot IM cards all render
+// forward slashes regardless of host platform, so platform-
+// canonical `pathutil.Join` output would look wrong to the user).
+//
+// Symmetric with FilePath but always emits "/" — never run this
+// value through os.Stat or os.Open; use FilePath for those.
+func RelPath(name string) string {
+	return DirName + "/" + name
 }
 
 // EnsureDir creates <cwd>/.nightme/ if absent. Idempotent —

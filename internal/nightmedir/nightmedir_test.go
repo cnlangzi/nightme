@@ -88,6 +88,19 @@ func TestFilePath_ForwardSlash(t *testing.T) {
 	}
 }
 
+// RelPath: always slash-form ".nightme/<name>", independent of
+// platform. Used for user-visible reply text where IM cards render
+// forward slashes regardless of host OS.
+func TestRelPath_AlwaysSlash(t *testing.T) {
+	got := nightmedir.RelPath("handoff.md")
+	if got != ".nightme/handoff.md" {
+		t.Errorf("RelPath = %q, want .nightme/handoff.md", got)
+	}
+	if strings.Contains(got, `\`) {
+		t.Errorf("RelPath must not contain backslash; got %q", got)
+	}
+}
+
 // DirName is the public contract — anyone reading the codebase
 // should see the literal `.nightme/` and confirm it matches.
 func TestDirName_Literal(t *testing.T) {

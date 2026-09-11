@@ -287,7 +287,7 @@ func dispatchPR(
 
 // buildPRPrompt renders the text block the agent receives.
 //
-// Format (v3, NightMe-branded + Sourcery-style summary):
+// Format (v5, NightMe-branded + Sourcery-style summary):
 //
 //	## Summary by NightMe
 //	<1-2 sentences, imperative, WHAT not WHY>
@@ -299,7 +299,7 @@ func dispatchPR(
 //	Documentation:
 //	Chore / Build / CI:
 //
-//	Risk: <level> — <reason>  ← OPTIONAL, recommended for non-trivial
+//	Risk: <low|medium|high> — <concise reason>  ← MANDATORY on every PR body
 //
 // The `Closes #N` line is NOT part of the agent's output. dispatchPR
 // appends it in Go via appendClosesFooter(c.Issue) — keeping it out
@@ -323,7 +323,7 @@ func dispatchPR(
 //     reviewers decide merge-worthiness from the category
 //     prefix (Bug Fixes = behavior risk; New Features = new
 //     contract; Enhancements = non-breaking).
-//   - Risk line added (optional). Feeds the IM-card `→ risk:`
+//   - Risk line required on every PR body. Feeds the IM-card `→ risk:`
 //     row in renderPROpenedCard.
 //   - ## Context (repo / branch / base / worktree) dropped.
 //     GitHub PR header shows all of this; body duplication
@@ -346,7 +346,7 @@ func dispatchPR(
 // body to be grounded in real diff output the LLM itself
 // inspected.
 func buildPRPrompt(c Context, base string) string {
-	// v4 prompt. The semantic flow is:
+	// v5 prompt. The semantic flow is:
 	//   commit history + final diff → PR body → Summary by NightMe → PR title
 	//
 	// The title is a semantic compression of the Summary, NOT an
@@ -460,7 +460,16 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("## PR Body Format\n\n")
 	sb.WriteString("The PR body MUST use the following existing format.\n\n")
 	sb.WriteString("Do not invent a different structure.\n\n")
-	sb.WriteString("Use these sections when applicable:\n\n")
+	sb.WriteString("The body MUST begin immediately with:\n\n")
+	sb.WriteString("## Summary by NightMe\n\n")
+	sb.WriteString("<summary>\n\n")
+	sb.WriteString("This Summary must be the first section of the PR body, immediately after the PR title.\n\n")
+	sb.WriteString("Do not place any other section before it.\n\n")
+	sb.WriteString("This Summary must describe the overall purpose and result of the complete Pull Request.\n\n")
+	sb.WriteString("It should synthesize the meaningful changes into a concise description of what this Pull Request accomplishes as a whole.\n\n")
+	sb.WriteString("Do not turn the Summary into a list of commit messages.\n\n")
+	sb.WriteString("Do not make the Summary depend on the latest commit.\n\n")
+	sb.WriteString("After the Summary section, use these category sections when applicable, in this order:\n\n")
 	sb.WriteString("New Features:\n")
 	sb.WriteString("Bug Fixes:\n")
 	sb.WriteString("Enhancements:\n")
@@ -471,14 +480,11 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("Do not merely copy commit subjects into these sections.\n\n")
 	sb.WriteString("Do not create additional top-level sections.\n\n")
 	sb.WriteString("If a section has no meaningful content, omit it.\n\n")
-	sb.WriteString("A `Risk:` section may be included when there is a meaningful compatibility, migration, operational, or regression risk.\n\n")
-	sb.WriteString("The body MUST also contain exactly one:\n\n")
-	sb.WriteString("## Summary by NightMe\n\n")
-	sb.WriteString("This Summary must describe the overall purpose and result of the complete Pull Request.\n\n")
-	sb.WriteString("It should synthesize the meaningful changes above into a concise description of what this Pull Request accomplishes as a whole.\n\n")
-	sb.WriteString("Do not turn the Summary into a list of commit messages.\n\n")
-	sb.WriteString("Do not make the Summary depend on the latest commit.\n\n")
-	sb.WriteString("Preserve the existing position and role of `## Summary by NightMe` used by NightMe's PR format.\n\n")
+	sb.WriteString("After the category sections, the body MUST also contain exactly one Risk line:\n\n")
+	sb.WriteString("Risk: <low|medium|high> — <concise reason>\n\n")
+	sb.WriteString("Risk assessment is required for every PR.\n\n")
+	sb.WriteString("Assess the risk based on the actual changes in the PR, including compatibility, breaking behavior, API or wire changes, migration requirements, dependency/version coupling, lifecycle or state changes, operational impact, and regression risk when applicable.\n\n")
+	sb.WriteString("Even when the change is low risk, do not omit the Risk line.\n\n")
 
 	// --- PR Title -------------------------------------------------
 	sb.WriteString("## PR Title\n\n")
@@ -618,9 +624,9 @@ var prTitleJSONValueRegex = regexp.MustCompile(
 	`"[^"\\]*(?:\\.[^"\\]*)*"\s*:\s*"((?:feat|fix|chore|refactor|docs|test|build|ci|perf|style|revert)(?:\([^)]+\))?!?: \S[^"\n]*)"`,
 )
 
-// riskLineRegex extracts the optional `Risk: <level> — <reason>`
-// line that buildPRPrompt v3 tells the agent to include for
-// non-trivial PRs. The separator is intentionally tolerant —
+// riskLineRegex extracts the `Risk: <low|medium|high> — <reason>`
+// line that buildPRPrompt requires on every PR body. The separator
+// is intentionally tolerant —
 // em-dash, hyphen, or colon all work, since LLMs are
 // inconsistent. The level match is case-insensitive so
 // `Risk: HIGH — ...` and `Risk: high — ...` both match — the
@@ -703,11 +709,13 @@ func appendClosesFooter(body string, issue int) string {
 	return body + "\n\n" + footer + "\n"
 }
 
-// extractRiskLevel pulls the optional `Risk: <level> — <reason>`
-// line out of a parsed PR body. Returns ("", "") when the line
-// is absent — the caller treats absence as "no risk field in
-// the IM card" rather than as an error. The level is
-// lowercased before returning so `Risk: HIGH — ...` and
+// extractRiskLevel pulls the `Risk: <level> — <reason>` line out
+// of a parsed PR body. The buildPRPrompt requires Risk on every
+// PR body, so a present line is the expected case; absence is
+// tolerated as a defensive fallback (returns ("", "")) so a
+// malformed LLM reply doesn't crash dispatchPR. The caller
+// treats absence as "no risk field in the IM card". The level
+// is lowercased before returning so `Risk: HIGH — ...` and
 // `Risk: high — ...` produce the same result.
 //
 // Body is passed in raw (already trimmed of leading/trailing
@@ -989,9 +997,10 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 // gone, and `🌿/🔗/📁` merge into the `→` family alongside the
 // existing `→ base:` row.
 //
-// v3 addition: optional `→ risk:` row. Sourced via
-// extractRiskLevel(body) — when the agent omitted the Risk line
-// (trivial PRs), riskLevel is "" and the row is skipped.
+// Renders the `→ risk:` row sourced via extractRiskLevel(body).
+// The buildPRPrompt requires Risk on every PR body, so the row
+// is normally always present; the `riskLevel == ""` branch stays
+// as a defensive fallback for malformed LLM replies.
 func renderPROpenedCard(c Context, base, url, riskLevel, riskReason string) string {
 	var sb strings.Builder
 	sb.WriteString("✅ PR opened\n")

@@ -346,107 +346,212 @@ func dispatchPR(
 // body to be grounded in real diff output the LLM itself
 // inspected.
 func buildPRPrompt(c Context, base string) string {
-	// `c` is currently unused: the issue-closing footer that used
-	// to live here now ships via appendClosesFooter (deterministic,
-	// not LLM-driven). Keep the parameter so future prompt fields
-	// (e.g. provider-specific templates) can re-introduce c.Issue /
-	// c.Repo without churning every test call site.
-	_ = c
+	// v4 prompt. The semantic flow is:
+	//   commit history + final diff → PR body → Summary by NightMe → PR title
+	//
+	// The title is a semantic compression of the Summary, NOT an
+	// inheritance of the latest commit subject. parsePRReply is
+	// unchanged: the fenced block still has the title as its first
+	// line and the body as the remainder. The `Closes #N` footer
+	// continues to be appended in Go by dispatchPR via
+	// appendClosesFooter, not by the agent.
+	current := c.Branch
 	var sb strings.Builder
 
-	// --- Output Format (parseability — hard constraint) -----------
-	// Unchanged from v2. parsePRReply is unchanged; the new body
-	// shape has no nested fences and no leading-heading issues,
-	// so the existing permissive parser handles it.
-	sb.WriteString("## Output Format\n")
-	sb.WriteString("Reply with ONE fenced markdown code block (``` ... ```) and nothing else.\n")
-	sb.WriteString("First line inside the fence is the PR title (Conventional Commits 1.0.0).\n")
-	sb.WriteString("Remaining lines are the PR body (markdown).\n")
-	sb.WriteString("Do NOT nest additional ``` fences — the daemon's parser stops at the first closing fence.\n")
-	sb.WriteString("Indent code samples with 4 spaces instead.\n")
-	sb.WriteString("Minimal parseability example (your body should be richer than this):\n")
-	sb.WriteString("```\n")
-	sb.WriteString("feat(scope): short imperative subject\n\n")
-	sb.WriteString("## Summary by NightMe\n")
-	sb.WriteString("One sentence: what this PR does at the user/maintainer-visible level.\n\n")
+	// --- Heading --------------------------------------------------
+	sb.WriteString("You are preparing the Pull Request for the current Git branch.\n\n")
+
+	// --- Context --------------------------------------------------
+	sb.WriteString("## Context\n\n")
+	sb.WriteString("The current branch is:\n\n")
+	sb.WriteString("    " + current + "\n\n")
+	sb.WriteString("The Pull Request will compare it against:\n\n")
+	sb.WriteString("    " + base + "\n\n")
+	sb.WriteString("This is ONE Pull Request.\n\n")
+	sb.WriteString("The current branch may contain multiple commits since `" + base + "`.\n")
+	sb.WriteString("Those commits are the development history of this ONE Pull Request.\n\n")
+	sb.WriteString("The Pull Request represents the complete accumulated change:\n\n")
+	sb.WriteString("    " + base + " → " + current + "\n\n")
+	sb.WriteString("Your task is to describe that complete change for a Pull Request reviewer.\n\n")
+	sb.WriteString("A commit is a development step.\n\n")
+	sb.WriteString("A Pull Request is the reviewable unit of work.\n\n")
+	sb.WriteString("Therefore, the Pull Request title and body should describe the resulting work of the Pull Request, rather than simply describing one of its commits.\n\n")
+
+	// --- Goal -----------------------------------------------------
+	sb.WriteString("## Goal\n\n")
+	sb.WriteString("The goal is to produce a clear and accurate Pull Request description that allows a reviewer to understand:\n\n")
+	sb.WriteString("- what this Pull Request is mainly about\n")
+	sb.WriteString("- what meaningful changes it introduces\n")
+	sb.WriteString("- what behavior or capability is affected\n")
+	sb.WriteString("- what the overall result of the accumulated changes is\n\n")
+	sb.WriteString("The commit history is useful evidence for understanding the work.\n\n")
+	sb.WriteString("The final diff is the authoritative evidence of what the Pull Request actually changes.\n\n")
+	sb.WriteString("The Pull Request body explains the complete change.\n\n")
+	sb.WriteString("The `## Summary by NightMe` section provides the concise semantic summary of that complete change.\n\n")
+	sb.WriteString("The Pull Request title is the shortest useful expression of that Summary.\n\n")
+	sb.WriteString("Therefore the semantic flow is:\n\n")
+	sb.WriteString("    commit history + final diff\n")
+	sb.WriteString("              ↓\n")
+	sb.WriteString("       understand the PR\n")
+	sb.WriteString("              ↓\n")
+	sb.WriteString("          PR body\n")
+	sb.WriteString("              ↓\n")
+	sb.WriteString("      Summary by NightMe\n")
+	sb.WriteString("              ↓\n")
+	sb.WriteString("          PR title\n\n")
+	sb.WriteString("Do not reverse this order.\n\n")
+	sb.WriteString("Although the title appears first in the final output, determine its meaning only after the overall PR Summary has been established.\n\n")
+	sb.WriteString("Do not decide the title first and then write the Summary around it.\n\n")
+
+	// --- Understand the Complete Change ---------------------------
+	sb.WriteString("## Understand the Complete Change\n\n")
+	sb.WriteString("Before writing the PR description, inspect the complete change between the two branches.\n\n")
+	sb.WriteString("Use:\n\n")
+	sb.WriteString("    git log --oneline " + base + ".." + current + "\n\n")
+	sb.WriteString("    git diff " + base + "..." + current + " --stat\n\n")
+	sb.WriteString("    git diff " + base + "..." + current + "\n\n")
+	sb.WriteString("When necessary, inspect important files individually:\n\n")
+	sb.WriteString("    git diff " + base + "..." + current + " -- <path>\n\n")
+	sb.WriteString("Use the commit history to understand:\n\n")
+	sb.WriteString("- how the work evolved\n")
+	sb.WriteString("- what problems were encountered\n")
+	sb.WriteString("- why particular changes were made\n\n")
+	sb.WriteString("Use the final diff to determine:\n\n")
+	sb.WriteString("- what the branch actually changes\n")
+	sb.WriteString("- what behavior exists after all commits are applied\n")
+	sb.WriteString("- which changes are meaningful to the reviewer\n\n")
+	sb.WriteString("Do not treat individual commits as separate units of PR output.\n\n")
+	sb.WriteString("Do not assume that the latest commit represents the purpose of the Pull Request.\n\n")
+
+	// --- Information Hierarchy ------------------------------------
+	sb.WriteString("## Information Hierarchy\n\n")
+	sb.WriteString("Different information has different roles.\n\n")
+	sb.WriteString("### Commit history\n\n")
+	sb.WriteString("Commit messages describe individual development steps.\n\n")
+	sb.WriteString("They may be:\n\n")
+	sb.WriteString("- narrow\n")
+	sb.WriteString("- implementation-specific\n")
+	sb.WriteString("- incremental\n")
+	sb.WriteString("- corrective\n")
+	sb.WriteString("- temporary\n")
+	sb.WriteString("- focused on one part of the work\n\n")
+	sb.WriteString("Therefore:\n\n")
+	sb.WriteString("    commit subject ≠ PR title\n\n")
+	sb.WriteString("Commit messages are evidence for understanding the Pull Request, not the final source for its title.\n\n")
+	sb.WriteString("### Final diff\n\n")
+	sb.WriteString("The final diff represents the accumulated result of all commits.\n\n")
+	sb.WriteString("It is the strongest evidence for what the Pull Request finally changes.\n\n")
+	sb.WriteString("### PR body\n\n")
+	sb.WriteString("The PR body explains the meaningful changes introduced by the complete Pull Request.\n\n")
+	sb.WriteString("It must follow the existing NightMe PR body format defined below.\n\n")
+	sb.WriteString("### Summary by NightMe\n\n")
+	sb.WriteString("`## Summary by NightMe` is the canonical concise summary of the complete Pull Request.\n\n")
+	sb.WriteString("It is the semantic bridge between the detailed PR body and the concise PR title.\n\n")
+	sb.WriteString("### PR title\n\n")
+	sb.WriteString("The title is a concise representation of the overall Pull Request.\n\n")
+	sb.WriteString("It should be derived from the meaning of `## Summary by NightMe`.\n\n")
+	sb.WriteString("It is NOT:\n\n")
+	sb.WriteString("- the latest commit title\n")
+	sb.WriteString("- the most important-looking individual commit title\n")
+	sb.WriteString("- a concatenation of commit titles\n")
+	sb.WriteString("- an independent interpretation of one commit\n\n")
+
+	// --- PR Body Format -------------------------------------------
+	sb.WriteString("## PR Body Format\n\n")
+	sb.WriteString("The PR body MUST use the following existing format.\n\n")
+	sb.WriteString("Do not invent a different structure.\n\n")
+	sb.WriteString("Use these sections when applicable:\n\n")
+	sb.WriteString("New Features:\n")
 	sb.WriteString("Bug Fixes:\n")
-	sb.WriteString("- file:pkg/something.go: short consequence\n")
-	sb.WriteString("```\n\n")
+	sb.WriteString("Enhancements:\n")
+	sb.WriteString("Tests:\n")
+	sb.WriteString("Documentation:\n")
+	sb.WriteString("Chore / Build / CI:\n\n")
+	sb.WriteString("Each section should contain concise bullet points describing meaningful changes in the complete Pull Request.\n\n")
+	sb.WriteString("Do not merely copy commit subjects into these sections.\n\n")
+	sb.WriteString("Do not create additional top-level sections.\n\n")
+	sb.WriteString("If a section has no meaningful content, omit it.\n\n")
+	sb.WriteString("A `Risk:` section may be included when there is a meaningful compatibility, migration, operational, or regression risk.\n\n")
+	sb.WriteString("The body MUST also contain exactly one:\n\n")
+	sb.WriteString("## Summary by NightMe\n\n")
+	sb.WriteString("This Summary must describe the overall purpose and result of the complete Pull Request.\n\n")
+	sb.WriteString("It should synthesize the meaningful changes above into a concise description of what this Pull Request accomplishes as a whole.\n\n")
+	sb.WriteString("Do not turn the Summary into a list of commit messages.\n\n")
+	sb.WriteString("Do not make the Summary depend on the latest commit.\n\n")
+	sb.WriteString("Preserve the existing position and role of `## Summary by NightMe` used by NightMe's PR format.\n\n")
 
-	// --- Before you write (tool floor) -----------------------------
-	// Drop the v2 "shorter than git log" self-check — it was a
-	// guard against the 4-bullet modal regression; category-prefix
-	// mode is self-bounding on bullet count and doesn't need it.
-	sb.WriteString("## Before you write — tool floor\n")
-	sb.WriteString("You MUST run and read the output of these commands BEFORE composing the body:\n")
-	sb.WriteString("- `git log --oneline " + base + "..HEAD` — full commit list on this branch.\n")
-	sb.WriteString("- `git diff " + base + "...HEAD --stat` — per-file change footprint.\n")
-	sb.WriteString("- `git diff " + base + "...HEAD -- <path>` for at least one file you intend to mention by name.\n\n")
-	sb.WriteString("Do NOT write the bullets from commit messages alone — each bullet names a file and ends with the consequence, which the commit subject does not capture.\n\n")
+	// --- PR Title -------------------------------------------------
+	sb.WriteString("## PR Title\n\n")
+	sb.WriteString("After the PR body and `## Summary by NightMe` have been established, derive the PR title from that Summary.\n\n")
+	sb.WriteString("The title should be a semantic compression of the Summary.\n\n")
+	sb.WriteString("It should NOT simply truncate or copy the Summary.\n\n")
+	sb.WriteString("Rewrite the Summary into a concise, natural Conventional Commit title.\n\n")
+	sb.WriteString("The title must describe the overall Pull Request, not an individual development step.\n\n")
+	sb.WriteString("For example, if the branch contains several commits such as:\n\n")
+	sb.WriteString("    fix(heartbeat): distinguish error vs clean terminal verdict\n")
+	sb.WriteString("    fix(bridge-dsh): wire format and per-session permissions\n")
+	sb.WriteString("    fix(outbound): finalize drain before dispatcher cancels ctx\n\n")
+	sb.WriteString("do not automatically use:\n\n")
+	sb.WriteString("    fix(outbound): finalize drain before dispatcher cancels ctx\n\n")
+	sb.WriteString("merely because it is the latest commit.\n\n")
+	sb.WriteString("Instead, first establish what the complete Pull Request accomplishes, express that in `## Summary by NightMe`, and then derive the title from that Summary.\n\n")
+	sb.WriteString("An individual commit title may happen to be a good PR title, but only when it accurately represents the overall change described by the Summary.\n\n")
 
-	// --- Body shape (replaces v2 Four dimensions) ------------------
-	// Category labels derive from this PR's commit types — reuse
-	// the title's CC type to pick the right category, so the
-	// agent does not invent new groupings.
-	sb.WriteString("## Body shape — category-prefixed bullets\n")
-	sb.WriteString("After the one-sentence Summary, list the changes as bullets grouped under these category labels:\n\n")
-	sb.WriteString("- `New Features:` — from `feat(...)` commits. New user-visible or maintainer-visible capability.\n")
-	sb.WriteString("- `Bug Fixes:` — from `fix(...)` commits. Behaviour that previously misbehaved and now does not.\n")
-	sb.WriteString("- `Enhancements:` — from `refactor(...)` / `perf(...)` commits. Internal cleanup or perf that does not fix a bug. State explicitly if behaviour is unchanged.\n")
-	sb.WriteString("- `Tests:` — from `test(...)` commits. New or rewritten test coverage. Pin regressions by name.\n")
-	sb.WriteString("- `Documentation:` — from `docs(...)` commits. README, doc-comments, runbooks.\n")
-	sb.WriteString("- `Chore / Build / CI:` — from `chore(...)` / `build(...)` / `ci(...)` commits. Tooling, deps, release.\n\n")
-	sb.WriteString("Skip any category that has no commits of its type (do not write an empty header). Order categories by commit order on the branch, not alphabetically.\n\n")
-	sb.WriteString("Each bullet:\n")
-	sb.WriteString("- Names the file (`path/to/file.go`, optional `:line`).\n")
-	sb.WriteString("- Ends with the consequence, not the diff. `lookupSHA256 now sends User-Agent` not `added User-Agent header`.\n")
-	sb.WriteString("- Stays one line. Do NOT write a paragraph per bullet — reviewers scan bullets, they don't read paragraphs.\n\n")
-	sb.WriteString("If a commit spans multiple categories (e.g. a `refactor` that fixed a `fix` and added a `feat`), split its content into the matching categories and drop a one-line cross-reference in the others (`see Bug Fixes below`).\n\n")
+	// --- Conventional Commit Requirements -------------------------
+	sb.WriteString("## Conventional Commit Requirements\n\n")
+	sb.WriteString("The PR title MUST use:\n\n")
+	sb.WriteString("    <type>(<optional-scope>): <subject>\n\n")
+	sb.WriteString("Allowed types:\n\n")
+	sb.WriteString("    feat\n")
+	sb.WriteString("    fix\n")
+	sb.WriteString("    chore\n")
+	sb.WriteString("    refactor\n")
+	sb.WriteString("    docs\n")
+	sb.WriteString("    test\n")
+	sb.WriteString("    build\n")
+	sb.WriteString("    ci\n")
+	sb.WriteString("    perf\n")
+	sb.WriteString("    style\n")
+	sb.WriteString("    revert\n\n")
+	sb.WriteString("Choose the type according to the overall purpose of the Pull Request, as expressed by `## Summary by NightMe`.\n\n")
+	sb.WriteString("Do not simply inherit the type from the latest commit.\n\n")
+	sb.WriteString("Choose the scope according to the subsystem or area represented by the overall Pull Request.\n\n")
+	sb.WriteString("Do not simply inherit the scope from the latest commit.\n\n")
+	sb.WriteString("If no single scope accurately represents the overall Pull Request, omit the scope.\n\n")
+	sb.WriteString("Keep the subject concise, specific, and focused on the resulting behavior or capability.\n\n")
+	sb.WriteString("Keep the title within 72 characters when reasonably possible.\n\n")
 
-	// --- Risk line (optional, v3 addition) -------------------------
-	sb.WriteString("## Risk line (recommended, optional)\n")
-	sb.WriteString("End the body with a single `Risk:` line if the change is non-trivial:\n")
-	sb.WriteString("`Risk: <low|medium|high> — <one sentence explaining why>`\n\n")
-	sb.WriteString("Omit the Risk line for one-line fixes, typo-only commits, or pure doc changes — reviewers know those are low risk by inspection. Do NOT omit Risk on any change that touches request paths, persisted state, auth, or shared infrastructure.\n\n")
+	// --- Semantic Consistency -------------------------------------
+	sb.WriteString("## Semantic Consistency\n\n")
+	sb.WriteString("Before producing the final output, verify internally:\n\n")
+	sb.WriteString("- The body describes the complete `" + base + "` → `" + current + "` change.\n")
+	sb.WriteString("- `## Summary by NightMe` accurately summarizes the complete PR.\n")
+	sb.WriteString("- The title expresses the same overall meaning as the Summary.\n")
+	sb.WriteString("- The title does not introduce a different interpretation.\n")
+	sb.WriteString("- The title is not merely copied from the latest commit.\n")
+	sb.WriteString("- The title represents the Pull Request rather than one development step.\n\n")
+	sb.WriteString("Do not output this verification.\n\n")
 
-	// --- Conventional Commits — title rules (unchanged) -----------
-	sb.WriteString("## Conventional Commits — title rules (strict)\n")
-	sb.WriteString("- Format: <type>(<optional-scope>): <subject>\n")
-	sb.WriteString("- Types: feat, fix, chore, refactor, docs, test, build, ci, perf, style, revert\n")
-	sb.WriteString("- Subject ≤72 chars, imperative mood, no trailing period.\n")
-	sb.WriteString("- Scope names the layer (e.g. cmd, command, gtw, feishu, login), not the file path.\n")
-	sb.WriteString("- Breaking change: `!` after type/scope + `BREAKING CHANGE:` footer describing migration.\n\n")
-
-	// --- Do NOT (rewritten for category-prefix mode) ---------------
-	sb.WriteString("## Do NOT\n")
-	sb.WriteString("- Do NOT use `## ` markdown headings inside the body. The ONLY heading is `## Summary by NightMe` at the top. Categories are inline labels followed by colon (`New Features:`), NOT headings — GitHub renders each `## ` heading with a horizontal rule, and a body with several such headings looks fragmented instead of scannable.\n")
-	sb.WriteString("- Do NOT use `###` / `####` sub-headings inside the body.\n")
-	sb.WriteString("- Do NOT use `---` horizontal rules to separate categories. Blank lines are enough.\n")
-	sb.WriteString("- Do NOT write v2-style multi-heading sections (Why / What / file list / Test evidence). Category-prefix bullets replace them.\n")
-	sb.WriteString("- Do NOT write a paragraph under any category label. Bullets only — one line each.\n")
-	sb.WriteString("- Do NOT enumerate files in the body. GitHub's review UI shows file changes; duplicating them is noise.\n")
-	sb.WriteString("- Do NOT include prose outside the fence. The daemon's parser stops at the first closing ```.\n")
-	sb.WriteString("- Do NOT invent category labels outside the six above. Reuse the title's CC type to pick the right category.\n\n")
-
-	// --- Task ------------------------------------------------------
-	sb.WriteString("## Task\n")
-	sb.WriteString("1. Run the three commands in **Before you write** and read every line of their output.\n")
-	sb.WriteString("2. Compose the title from the dominant commit subject, or invent one if this branch is a squash candidate.\n")
-	sb.WriteString("3. Write the Summary (1-2 sentences, WHAT not WHY) and the category-prefixed bullets. Skip empty categories.\n")
-	sb.WriteString("4. Add a Risk line if the change is non-trivial (see Risk line above).\n")
-	// Issue-closing footer is no longer the agent's responsibility.
-	// dispatchPR appends `Closes #N` to the body in Go (see
-	// appendClosesFooter) — keeping it out of the prompt avoids
-	// the soft guarantee that breaks on every model regression.
-	sb.WriteString("\nDO NOT run `git commit`, `git push`, `gh pr create`, or `glab mr create`. Only generate the title + body.\n")
-
-	// ## Context (repo / branch / base / worktree) — REMOVED in v3.
-	// GitHub's PR header shows branch + base; the daemon's IM
-	// card (renderPROpenedCard) shows worktree + branch + base +
-	// url. Duplicating this in the body is noise. If a future
-	// product decision needs to inject a context block (e.g. for
-	// non-GitHub targets that lack a comparable header), restore
-	// it here behind a provider check.
+	// --- Output Format --------------------------------------------
+	sb.WriteString("## Output Format\n\n")
+	sb.WriteString("Reply with ONE fenced markdown code block.\n\n")
+	sb.WriteString("The FIRST line inside the code block MUST be the PR title.\n\n")
+	sb.WriteString("The remaining lines MUST be the PR body.\n\n")
+	sb.WriteString("The PR body MUST follow the existing format described above.\n\n")
+	sb.WriteString("Do not output:\n\n")
+	sb.WriteString("- reasoning\n")
+	sb.WriteString("- analysis\n")
+	sb.WriteString("- alternative titles\n")
+	sb.WriteString("- commit-by-commit title candidates\n")
+	sb.WriteString("- explanations outside the fenced block\n")
+	sb.WriteString("- additional output before or after the fenced block\n")
+	sb.WriteString("- nested fenced code blocks\n\n")
+	sb.WriteString("Do NOT execute:\n\n")
+	sb.WriteString("    git commit\n")
+	sb.WriteString("    git push\n")
+	sb.WriteString("    gh pr create\n")
+	sb.WriteString("    glab mr create\n\n")
+	sb.WriteString("The caller is responsible for creating the Pull Request.\n")
 
 	return sb.String()
 }

@@ -69,30 +69,35 @@ type muxSessionSubscribed struct {
 // muxApprovalRequested is the payload of
 // serverFrame{method:"approval/requested"}. `ApprovalID` is
 // audit-only. /api/respond is keyed on the envelope rpcId.
+//
+// This type is also the adapter target in host_waterfall.go —
+// handleHostFrame builds a muxApprovalRequested from the host
+// waterfall envelope so the existing handleApprovalRequested path
+// stays the single source of truth for permission-event emission.
 type muxApprovalRequested struct {
 	SessionID  string `json:"sessionId"`
 	ApprovalID string `json:"approvalId"`
 	ToolName   string `json:"toolName"`
 	CallID     string `json:"callId,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	// Source tags the wire origin of this frame so SendPermission
+	// can route the answer to the right RPC:
+	//   - "host" — dsh 0.1.2-rc.1 host $events waterfall;
+	//              answer posts to /api/$events/result.
+	//   - "mux"  — legacy mux approval/requested (defense-in-depth);
+	//              answer posts to /api/respond.
+	// Populated by the caller (handleMuxFrame vs handleHostFrame);
+	// never appears on the wire.
+	Source string `json:"-"`
 }
 
-// muxApprovalResolved is the audit frame after the host settled
-// an approval (dashboard or /api/respond). Bridge drops local
-// pending and PATCHes the Feishu card.
-type muxApprovalResolved struct {
-	SessionID  string `json:"sessionId"`
-	ApprovalID string `json:"approvalId"`
-	Outcome    string `json:"outcome"` // allowed-once | rejected | cancelled | unavailable
-}
-
-// muxQuestionResolved is the audit frame after a question batch is
-// answered or cancelled (dashboard or /api/respond).
-type muxQuestionResolved struct {
-	SessionID     string `json:"sessionId"`
-	QuestionRPCID string `json:"questionRpcId"`
-	Outcome       string `json:"outcome"` // answered | cancelled
-}
+// muxApprovalResolved and muxQuestionResolved were removed in the
+// dsh 0.1.2-rc.1 bridge: the mux approval/resolved and
+// question/resolved frames dsh used to emit are no longer sent on
+// the wire. The mux frame switch in handle_mux.go records any
+// straggler as an unknown method (warn) and drops it. The audit
+// pair (approval/asked + approval/decided session events) is
+// handled by dispatch.go::handleApprovalAsked.
 
 // muxQuestionRequested is the payload of
 // serverFrame{method:"question/requested"}. `Questions` is an array
@@ -101,6 +106,9 @@ type muxQuestionResolved struct {
 type muxQuestionRequested struct {
 	SessionID string            `json:"sessionId"`
 	Questions []questionPayload `json:"questions"`
+	// Source tags the wire origin (see muxApprovalRequested.Source).
+	// Populated by the caller; never appears on the wire.
+	Source string `json:"-"`
 }
 
 // questionPayload is one entry in muxQuestionRequested.Questions.
@@ -123,6 +131,68 @@ type questionPayload struct {
 	Question string                  `json:"question"`
 	Options  []AskUserQuestionOption `json:"options"`
 	Multi    bool                    `json:"multiSelect,omitempty"`
+}
+
+// ─── Host $events waterfall shapes (dsh 0.1.2-rc.1 actual wire) ───────────
+//
+// dsh 0.1.2-rc.1 emits approval + user-questions as Cordis waterfall
+// events on the host $events stream, NOT as mux top-level methods.
+// Source:
+//   - dsh-user-approval/lib/index.js::ApprovalService.request →
+//     ctx.waterfall("approval/request", req, …)
+//   - dsh-user-questions/lib/index.js::UserQuestionService.ask →
+//     ctx.waterfall("user-questions/request", request, …)
+// The gateway forwards these as {type:"waterfall", event, eventId,
+// agentId, request}; host/stream.go::translateHostEvent turns each
+// into (method=<event>, rpcID=eventId, payload={agentId, request}).
+//
+// For root sessions, Agent.id == SessionId
+// (dsh-agent/lib/types/types.d.ts — `interface Agent { readonly id:
+// SessionId }`). The bridge uses the envelope's AgentID as the demux
+// key to route the waterfall to the right per-session driver.
+
+// waterfallEnvelope is the host $events waterfall envelope produced
+// by host/stream.go::translateHostEvent. AgentID is the dsh runtime
+// agent id; for a root session it equals sessionId. Request is the
+// dsh-typed body (different per event name — see below).
+type waterfallEnvelope struct {
+	AgentID string          `json:"agentId"`
+	Request json.RawMessage `json:"request"`
+}
+
+// waterfallApprovalRequest is the body of approval/request. Matches
+// @deepseek-ai/dsh-user-approval/types.d.ts::ApprovalRequestEvent:
+//
+//	{ agent: Agent, toolName: string, callId?: ToolCallId,
+//	  reason?: string, signal?: AbortSignal }
+//
+// The dsh-minted ApprovalRequestId used to pair approval/asked with
+// approval/decided audit events is NOT surfaced here — we synthesise
+// a derived id from the host frame's eventId for the bridge's
+// d.lastApprovalID map (audit correlation only; /api/respond is
+// keyed on the frame rpcId).
+type waterfallApprovalRequest struct {
+	Agent    json.RawMessage `json:"agent"`
+	ToolName string          `json:"toolName"`
+	CallID   string          `json:"callId,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
+	Signal   json.RawMessage `json:"signal,omitempty"`
+}
+
+// waterfallQuestionRequest is the body of user-questions/request.
+// Matches @deepseek-ai/dsh-user-questions/types.d.ts::
+// AskUserQuestionRequestEvent:
+//
+//	{ questions: AskUserQuestionItem[], agent?: Agent,
+//	  signal?: AbortSignal }
+//
+// `questions[]` items reuse the existing questionPayload +
+// AskUserQuestionOption shapes (verified field-for-field against
+// AskUserQuestionItem / AskUserQuestionOption in the .d.ts).
+type waterfallQuestionRequest struct {
+	Questions []questionPayload `json:"questions"`
+	Agent     json.RawMessage   `json:"agent,omitempty"`
+	Signal    json.RawMessage   `json:"signal,omitempty"`
 }
 
 // ─── Mux session/event SessionEvent shapes (the 11 we decode) ────────

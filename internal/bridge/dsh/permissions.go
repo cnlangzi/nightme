@@ -82,9 +82,18 @@ func (d *driver) removeFromPendingOrderLocked(id string) {
 	}
 }
 
-// handleApprovalRequested is the mux approval/requested entry.
-// Called from handleMuxFrame. The respond key is frameRpcID (host
-// pendingApprovals map), NOT payload.approvalId (audit-only).
+// handleApprovalRequested is the approval entry shared by the mux
+// approval/requested path (legacy) AND the dsh 0.1.2-rc.1 host
+// waterfall path (approval/request, demuxed in host_waterfall.go).
+// The two call sites build a muxApprovalRequested-shaped value
+// from their respective envelopes and land here, so the rest of
+// the bridge has a single emit point for the permission event.
+//
+// The respond key is frameRpcID (host pendingApprovals map), NOT
+// payload.approvalId (audit-only). For the waterfall path
+// frameRpcID is the waterfall's eventId; for the legacy mux path
+// it's the server-frame rpcId. /api/respond is keyed the same way
+// in both cases, so SendPermission is unchanged.
 func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalRequested) {
 	if frameRpcID == "" {
 		dLog("dsh: approval/requested missing frame rpcId, skipping")
@@ -93,6 +102,7 @@ func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalReques
 	respCh := d.registerApproval(frameRpcID)
 	d.pendingMu.Lock()
 	d.lastApprovalID[frameRpcID] = ar.ApprovalID
+	d.pendingSource[frameRpcID] = ar.Source
 	d.pendingMu.Unlock()
 	d.deliver(agent.AgentEvent{
 		Kind: agent.EventAgentPermission,
@@ -106,7 +116,15 @@ func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalReques
 	})
 }
 
-// handleQuestionRequested is the mux question/requested entry.
+// handleQuestionRequested is the user-questions entry shared by the
+// mux question/requested path (legacy) AND the dsh 0.1.2-rc.1 host
+// waterfall path (user-questions/request, demuxed in
+// host_waterfall.go). Same shape of dual entry as
+// handleApprovalRequested — the muxQuestionRequested adapter is
+// built by the caller from either the legacy mux payload or the
+// waterfall envelope, then this method emits the
+// EventAgentPermission{PermissionKindQuestion, Questions} batch.
+//
 // dsh web's AskUserQuestion UX is a batch: host matchesQuestions
 // requires answers.length == questions.length, each answer.id
 // echoing the question id, in order. We therefore keep the batch
@@ -117,9 +135,9 @@ func (d *driver) handleApprovalRequested(frameRpcID string, ar muxApprovalReques
 // still maps onto the matching question in questionAnswerFor;
 // unmatched text becomes custom on the first question.
 //
-// `frameRpcID` is the server-frame rpcId of the question/requested
-// mux frame — /api/respond is keyed on this, NOT on
-// qr.SessionID+":q" (the OLD wrong key).
+// `frameRpcID` is the waterfall's eventId (host path) or the mux
+// frame rpcId (legacy path) — /api/respond is keyed on this, NOT
+// on qr.SessionID+":q" (the OLD wrong key).
 func (d *driver) handleQuestionRequested(frameRpcID string, qr muxQuestionRequested) {
 	if len(qr.Questions) == 0 {
 		// dsh sometimes emits a question/requested frame with an
@@ -132,6 +150,7 @@ func (d *driver) handleQuestionRequested(frameRpcID string, qr muxQuestionReques
 	respCh := d.registerApproval(frameRpcID)
 	d.pendingMu.Lock()
 	d.pendingQuestions[frameRpcID] = qr.Questions
+	d.pendingSource[frameRpcID] = qr.Source
 	d.pendingMu.Unlock()
 
 	// Render Action as "<header> — <question> [<opt1> | <opt2> | ...]"
@@ -244,50 +263,21 @@ const (
 	approvalReject    = "Reject"
 )
 
-// handleApprovalResolved drops the local pending entry when the
-// host already settled the gate (dashboard Allow once / Reject,
-// timeout, cancel). Mux session/event keeps flowing either way —
-// this only stops nightme from holding an unanswered Feishu card.
-func (d *driver) handleApprovalResolved(ar muxApprovalResolved) {
-	if !d.dropPendingByApprovalID(ar.ApprovalID) {
-		return
-	}
-	d.deliver(agent.AgentEvent{
-		Kind: agent.EventAgentPermissionSettled,
-		PermissionSettled: &agent.AgentPermissionSettled{
-			Outcome: ar.Outcome,
-			Source:  "dashboard",
-		},
-	})
-}
+// handleApprovalResolved and handleQuestionResolved were removed in
+// the dsh 0.1.2-rc.1 bridge: the mux approval/resolved and
+// question/resolved frames dsh used to emit are no longer sent on
+// the wire. The audit pair (approval/asked + approval/decided
+// session events) is handled by dispatch.go::handleApprovalAsked,
+// which already emits EventAgentPermissionSettled. Host waterfall
+// cancellation comes through host/cancel on the host stream and
+// is dropped via dropPendingByRPCID directly from
+// handleHostFrame (see host_waterfall.go).
 
-func (d *driver) handleQuestionResolved(questionRpcID, outcome string) {
-	if questionRpcID == "" || !d.dropPendingByRPCID(questionRpcID) {
-		return
-	}
-	d.deliver(agent.AgentEvent{
-		Kind: agent.EventAgentPermissionSettled,
-		PermissionSettled: &agent.AgentPermissionSettled{
-			Outcome: outcome,
-			Source:  "dashboard",
-		},
-	})
-}
-
-func (d *driver) dropPendingByApprovalID(approvalID string) bool {
-	if approvalID == "" {
-		return false
-	}
-	d.pendingMu.Lock()
-	defer d.pendingMu.Unlock()
-	for rpcID, aid := range d.lastApprovalID {
-		if aid == approvalID {
-			return d.dropPendingLocked(rpcID, "settled")
-		}
-	}
-	return false
-}
-
+// dropPendingByRPCID removes the pending channel under rpcID and
+// drains "settled" into it (best-effort, non-blocking). Used by
+// the host waterfall cancel path and any future host-driven
+// audit-close that needs to clear a pending entry by the frame
+// rpcId the server uses as the /api/respond correlation key.
 func (d *driver) dropPendingByRPCID(rpcID string) bool {
 	d.pendingMu.Lock()
 	defer d.pendingMu.Unlock()

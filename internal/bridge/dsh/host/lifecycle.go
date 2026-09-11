@@ -802,6 +802,14 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	}
 
 	cli := NewWithJar(baseURL, jar, logger)
+	// Install the host waterfall handler BEFORE Start — dsh sends
+	// the host $events `ready` frame immediately after the WS
+	// upgrade, so the handler must be wired before we dial. The
+	// install is process-once idempotent (see
+	// internal/bridge/dsh/host_waterfall.go::installHostHandler).
+	// Wired via a deferred host.OnLifecycleInstall to avoid an
+	// import cycle (this package is imported by the dsh package).
+	OnLifecycleInstall(cli)
 	if err := cli.Start(ctx); err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()

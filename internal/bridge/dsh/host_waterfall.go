@@ -1,0 +1,246 @@
+// host_waterfall.go — route dsh 0.1.2-rc.1 host $events waterfall
+// frames (approval/request, user-questions/request) to the per-session
+// driver, and route the runtime's permission card answer back via
+// POST /api/$events/result.
+//
+// Verified 2026-09-11 against dsh 0.1.2-rc.1 by capturing the actual
+// wire shapes:
+//
+//   - waterfall frame on $events stream (host $events):
+//     { type:"waterfall", event:"user-questions/request",
+//       eventId:"<uuid>", agentId:"<sessionId>",
+//       request:{questions:[…], agent:{id:"<sessionId>"}, signal:"…"}}
+//
+//   - answer RPC:
+//     POST /api/$events/result
+//     { type:"client-request", rpcId:"<uuid>", method:"$events/result",
+//       payload:{ args:{
+//         clientId:"<from ready frame>",
+//         eventId: "<from waterfall frame>",
+//         outcome:{ kind:"result",
+//                   value:{ answers:[{id:"…", selected:["…"]}] } } } } }
+//
+// Architecture:
+//
+//	StreamHub.onHostFrame → Client.Router.DispatchHost
+//	    → hostWaterfallHandler (installed once)
+//	    → driver.handleHostFrame(method, rpcID, payload)
+//
+// Demux key: the $events `ready` frame carries a per-connection
+// `clientId`; each remote client (nightme + dashboard) gets its own
+// when it subscribes. We capture it during `ready` and pair it
+// with the `eventId` (per-waterfall UUID) on every answer.
+//
+// Package-level map (`hostWaterfallBySess`) demuxes host waterfalls
+// by sessionId → driver. The shared host has at most one driver
+// per sessionId (per-chat-session lifecycle), and the map is
+// concurrent-safe under hostWaterfallMu.
+
+package dsh
+
+import (
+	"encoding/json"
+	"fmt"
+	"runtime/debug"
+	"sync"
+
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
+)
+
+var (
+	hostWaterfallMu      sync.RWMutex
+	hostWaterfallBySess  map[string]*driver // sessionID → driver
+	hostHandlerInstalled bool
+)
+
+// installHostHandler registers the package-level host handler ONCE
+// against the shared client. Idempotent — first caller wins. Tests
+// that construct their own Client (host.New) install their own
+// handler and run in their own process; production drivers share
+// host.GetGlobal() and install once via the daemon.
+func installHostHandler(cli *host.Client) {
+	if cli == nil {
+		return
+	}
+	hostWaterfallMu.Lock()
+	defer hostWaterfallMu.Unlock()
+	if hostHandlerInstalled {
+		slogDefault().Info("dsh: host handler already installed, skipping")
+		return
+	}
+	hostHandlerInstalled = true
+	if hostWaterfallBySess == nil {
+		hostWaterfallBySess = make(map[string]*driver)
+	}
+	slogDefault().Info("dsh: calling SetHostHandler")
+	cli.SetHostHandler(hostWaterfallHandler)
+	slogDefault().Info("dsh: installed host waterfall handler on client")
+}
+
+// registerDriverForWaterfall adds d to the package-level demux map
+// keyed by d.sessionID. Safe to call repeatedly with the same driver
+// (overwrites). Called from newDriver after handshake sets
+// d.sessionID, and from Reset after the new sessionId is established.
+func registerDriverForWaterfall(d *driver) {
+	if d == nil || d.sessionID == "" {
+		return
+	}
+	hostWaterfallMu.Lock()
+	defer hostWaterfallMu.Unlock()
+	if hostWaterfallBySess == nil {
+		hostWaterfallBySess = make(map[string]*driver)
+	}
+	hostWaterfallBySess[d.sessionID] = d
+}
+
+// unregisterDriverForWaterfall removes d from the demux map.
+// Idempotent.
+func unregisterDriverForWaterfall(d *driver) {
+	if d == nil || d.sessionID == "" {
+		return
+	}
+	hostWaterfallMu.Lock()
+	defer hostWaterfallMu.Unlock()
+	delete(hostWaterfallBySess, d.sessionID)
+}
+
+// hostWaterfallHandler is the single cli.SetHostHandler callback.
+// The first frame on the host $events stream is `{type:"ready",
+// clientId, host:{home}}` — we stash clientId in the package state
+// so every later waterfall frame's reply can carry the same
+// clientId (the gateway correlates result → pending remote event
+// via this key). Subsequent waterfall frames carry `event` (the
+// event name) and `eventId` (the per-frame UUID) and are demuxed
+// to the right driver by `agentId` (= sessionId for root sessions).
+func hostWaterfallHandler(method, rpcID string, payload json.RawMessage) {
+	slogDefault().Info("dsh: hostWaterfallHandler invoked", "method", method, "rpc_id", rpcID)
+	// First: try to record the clientId from the `ready` frame.
+	// The host gateway sends exactly one `ready` per $events stream
+	// immediately after WS upgrade, so this branch fires once per
+	// connection (and again on every reconnect — fine, we just
+	// overwrite with the new clientId).
+	if method == "ready" {
+		// The raw payload from translateHostEvent's ready case is
+		// the host item value: {type:"ready", clientId, host}.
+		var ready struct {
+			ClientID string `json:"clientId"`
+		}
+		if err := json.Unmarshal(payload, &ready); err != nil || ready.ClientID == "" {
+			slogDefault().Info("dsh: host ready frame missing clientId, dropping", "err", err, "raw", string(payload))
+			return
+		}
+		hostWaterfallMu.Lock()
+		hostRemoteClientID = ready.ClientID
+		hostWaterfallMu.Unlock()
+		slogDefault().Info("dsh: host ready captured clientId", "client_id", ready.ClientID)
+		return
+	}
+
+	// Only the two gate events we respond to. Other host waterfall
+	// events (api-session/status, api-session/activity, etc.) are
+	// fire-and-forget Cordis emits with no agent-scoped answer
+	// expected; we debug-log and skip.
+	if method != "approval/request" && method != "user-questions/request" {
+		dLog("dsh: host waterfall method=%s (no driver handler)", method)
+		return
+	}
+
+	var env waterfallEnvelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		dLog("dsh: host waterfall decode: %v", err)
+		return
+	}
+	if env.AgentID == "" {
+		dLog("dsh: host waterfall missing agentId, dropping method=%s rpc_id=%s",
+			method, rpcID)
+		return
+	}
+	hostWaterfallMu.RLock()
+	d := hostWaterfallBySess[env.AgentID]
+	hostWaterfallMu.RUnlock()
+	if d == nil {
+		dLog("dsh: host waterfall for unsubscribed session agent_id=%s method=%s",
+			env.AgentID, method)
+		return
+	}
+	d.handleHostFrame(method, rpcID, payload)
+}
+
+// hostRemoteClientID is the per-connection clientId dsh assigned to
+// nightme's $events stream in the most recent `ready` frame.
+// Captured by hostWaterfallHandler on `ready`, consumed by
+// driver.SendPermission when building the $events/result RPC
+// body. Single slot — concurrent reconnects overwrite, which is
+// the correct behavior because the old stream's pending
+// waterfalls are dead anyway (dsh closes them on disconnect).
+var hostRemoteClientID string
+
+// Register the host-waterfall install hook with the host package at
+// import time. spawnAndWire (host/lifecycle.go) calls
+// host.OnLifecycleInstall(cli) after constructing the Client but
+// before cli.Start(ctx), so the `ready` frame dsh sends on the new
+// WS arrives at a handler that is already wired.
+func init() {
+	host.SetLifecycleInstall(installHostHandler)
+}
+
+// handleHostFrame is the driver-side dispatch for host waterfall
+// frames. Switches on the dsh event name and emits an
+// EventAgentPermission directly (no mux-shape adaptation — the
+// approval/question helpers in permissions.go are also reached
+// via the legacy mux path, but host waterfall is the primary
+// entry in 0.1.2-rc.1).
+//
+// frameRpcID is the per-waterfall UUID from the frame; it's the
+// key dsh uses to correlate the user's answer back to the
+// pending waterfall.
+func (d *driver) handleHostFrame(method, rpcID string, payload json.RawMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			warnLogger.Error("dsh: host waterfall handler panic recovered",
+				"method", method,
+				"rpc_id", rpcID,
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()))
+		}
+	}()
+	switch method {
+	case "approval/request":
+		var env waterfallEnvelope
+		if err := json.Unmarshal(payload, &env); err != nil {
+			dLog("dsh: approval/request envelope decode: %v", err)
+			return
+		}
+		var ar waterfallApprovalRequest
+		if err := json.Unmarshal(env.Request, &ar); err != nil {
+			dLog("dsh: approval/request body decode: %v", err)
+			return
+		}
+		d.handleApprovalRequested(rpcID, muxApprovalRequested{
+			SessionID:  d.sessionID,
+			ApprovalID: "host-" + rpcID,
+			ToolName:   ar.ToolName,
+			CallID:     ar.CallID,
+			Reason:     ar.Reason,
+			Source:     "host",
+		})
+	case "user-questions/request":
+		var env waterfallEnvelope
+		if err := json.Unmarshal(payload, &env); err != nil {
+			dLog("dsh: user-questions/request envelope decode: %v", err)
+			return
+		}
+		var qr waterfallQuestionRequest
+		if err := json.Unmarshal(env.Request, &qr); err != nil {
+			dLog("dsh: user-questions/request body decode: %v", err)
+			return
+		}
+		d.handleQuestionRequested(rpcID, muxQuestionRequested{
+			SessionID: d.sessionID,
+			Questions: qr.Questions,
+			Source:    "host",
+		})
+	default:
+		dLog("dsh: unhandled host waterfall method=%s rpc_id=%s", method, rpcID)
+	}
+}

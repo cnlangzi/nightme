@@ -330,7 +330,7 @@ typert `SessionFollowFrame` 一帧:
 | `assistant/message` | 完整 message | `translate.go::handleAssistantMessage` |
 | `compaction/end` | 上下文压缩完成 | 静默(本期不渲染) |
 | `todo/write` | 任务条更新 | `applyTodoProjection` |
-| `approval/asked` | approval 请求 | 走 `permissions.go`(host stream 上是 waterfall,这里走 dispatcher) |
+| `approval/asked` | approval 审计 echo(`approval/asked` + `approval/decided` 配对) | session/event 上的 audit echo;**不是** respondable gate — 真正的 replyable gate 在 host `$events` waterfall 上的 `approval/request`,见 §3.8 |
 
 **`assistant/chunk` 内部 `chunk.type` 子分派**(dsh 0.1.2-rc.1 实机抓):
 
@@ -377,6 +377,40 @@ POST /api/respond
 ```
 
 bridge `host/client.go::RPCClient.Respond(ctx, frameRpcID, value)` 手工 marshal 这条 envelope,不经 `wrapArgs`。
+
+---
+
+### 3.8 Host waterfall wire (dsh 0.1.2-rc.1)
+
+dsh 0.1.2-rc.1 把 `approval` + `AskUserQuestion` 都搬到了 host `$events` waterfall 流上 — 不再走 mux 顶层 method。源码依据:
+
+- `@deepseek-ai/dsh-user-approval/lib/index.js::ApprovalService.request` → `ctx.waterfall("approval/request", req, …)`
+- `@deepseek-ai/dsh-user-questions/lib/index.js::UserQuestionService.ask` → `ctx.waterfall("user-questions/request", request, …)`
+- dsh-api-gateway 把这些 waterfall 转发到 `/api/remote.mux` 上 host stream 的 items,形状 `{type:"waterfall", event, eventId, agentId, request}`
+
+`host/stream.go::translateHostEvent` 把它翻译成 bridge envelope:
+
+```
+waterfall → (method=<event>, rpcID=eventId, payload={agentId, request})
+```
+
+`request` 的内容按 `event` 分:
+
+| event | request 形状(对应 dsh 包) |
+|---|---|
+| `approval/request` | `{agent: Agent, toolName: string, callId?: ToolCallId, reason?: string, signal?: AbortSignal}`(`@deepseek-ai/dsh-user-approval/types.d.ts::ApprovalRequestEvent`) |
+| `user-questions/request` | `{questions: AskUserQuestionItem[], agent?: Agent, signal?: AbortSignal}`(`@deepseek-ai/dsh-user-questions/types.d.ts::AskUserQuestionRequestEvent`) |
+
+`Agent.id === SessionId`(见 `@deepseek-ai/dsh-agent/lib/types/types.d.ts`),所以 root session 的 `request.agent.id == sessionId` — 这就是 demux key。
+
+**bridge 适配**(`internal/bridge/dsh/host_waterfall.go`):
+
+- `installHostHandler(cli)` 在第一个 driver 构造时一次性装全局 `cli.SetHostHandler(hostWaterfallHandler)`(幂等)
+- `hostWaterfallHandler` 按 `payload.agentId` 查 `hostWaterfallBySess map[sessionID]*driver` → `driver.handleHostFrame`
+- `driver.handleHostFrame` 把 waterfall envelope 适配成 mux envelope,调用现有的 `handleApprovalRequested` / `handleQuestionRequested`(`internal/bridge/dsh/permissions.go`),后者用同一份 `pendingApprovals` / `pendingQuestions` FIFO,reply key 仍是 waterfall 的 `eventId`
+- `/api/respond` 的 client-response envelope(§3.7)在 host waterfall 路径上不变 — `rpcId` 字段直接 echo `eventId`
+
+**为什么 mux 顶层 method 不再发**:旧 wire `approval/requested` / `question/requested` 在 0.1.0-rc.6 时代是 mux frame,0.1.2-rc.1 改成 Cordis waterfall 后不再发。`handleMuxFrame` 的兜底分支对任何 straggler 仍会 `recordAndCountUnknown` + warn(`"dsh: mux legacy method dropped"`),不进 permission 路径。
 
 ---
 
@@ -481,7 +515,8 @@ waitDispatchDrain: for count > 0: cond.Wait()
 `handleMuxFrame` switch:
 
 - `session/snapshot` → `replaySnapshot` 解 records 逐个 `dispatchEvent` + `bumpLastSeq(cursor)`
-- `session/subscribed` / `session/projection` / `approval/requested` / `question/requested` 等旧 wire method → 各自 legacy 路径(已废,本版无 dsh 会发这些)
+- `session/subscribed` / `session/projection` → 已废,本版无 dsh 会发这些
+- `approval/requested` / `approval/resolved` / `question/requested` / `question/resolved` → dsh 0.1.2-rc.1 不再发;若到则 `recordAndCountUnknown` + warn(`"dsh: mux legacy method dropped — dsh 0.1.2-rc.1 sends this as host waterfall"`),不 panic。真正的 respondable gate 在 host waterfall,见 §3.8。
 - `assistant/chunk` / `turn/start` / `step/end` / `user/message` 等新 wire method → `isSessionEventType` 白名单 → 构造 `sessionEventEnvelope{Type:method, Seq:parseSeqFromRPCID(rpcID), Data:payload}` → `dispatchEvent` → `dispatcher.dispatch` → registry handler
 - `host/cancel` → log
 - 其它 → `recordAndCountUnknown` + warn log
@@ -510,6 +545,8 @@ waitDispatchDrain: for count > 0: cond.Wait()
 `handler` 是 `session.go::handleMuxFrame` 的方法值,继续走 dispatcher / approval / question 等分支。
 
 approval 答案回环: `pendingApprovals[approvalId] <- decision`;`RPCClient.Respond` 发 `/api/respond` 用 `client-response` envelope(见 §3.7),`rpcId` 必须 echo server 推送的 `approval/requested.frameRpcID`(`approvalId` 是 audit-only,不是 answer key)。
+
+**Host waterfall demux**(dsh 0.1.2-rc.1):host `$events` 上的 waterfall(`approval/request`、`user-questions/request`)不携带 mux 顶层 `sessionId`,但 `request.agent.id == sessionId`(root session)。`host_waterfall.go` 用包级 `hostWaterfallBySess map[sessionID]*driver` 维护 demux 表,`installHostHandler(cli)` 在第一个 driver 构造时把全局 `cli.SetHostHandler(hostWaterfallHandler)` 装好,后续 driver 只 register 自己;`registerDriverForWaterfall(d)` / `unregisterDriverForWaterfall(d)` 在 `newDriver` / `Reset` / `Close` 钩子上调。`hostWaterfallHandler` 按 `payload.agentId` 查表 → `driver.handleHostFrame`,后者把 waterfall envelope 转成 mux envelope 形状调用现有的 `handleApprovalRequested` / `handleQuestionRequested`,reply key 仍是 waterfall 的 `eventId`(`/api/respond` envelope 不变)。
 
 ---
 

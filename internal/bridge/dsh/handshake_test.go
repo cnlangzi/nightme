@@ -368,6 +368,7 @@ func newTestDriver(cli *host.Client, workspace string) *driver {
 		pendingApprovals: map[string]chan string{},
 		pendingQuestions: map[string][]questionPayload{},
 		lastApprovalID:   map[string]string{},
+		pendingSource:    map[string]string{},
 		events:           make(chan agent.AgentEvent, 64),
 		translate:        newTranslator("dsh", workspace),
 		wireState:        newWireState(),

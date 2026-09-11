@@ -320,16 +320,22 @@ func TestSendPermission_AllowOnceLabel(t *testing.T) {
 	}
 }
 
-func TestApprovalResolved_DropsPendingWithoutRespond(t *testing.T) {
+func TestDropPendingByRPCID_DropsWithoutRespond(t *testing.T) {
+	// dsh 0.1.2-rc.1 dropped the mux approval/resolved frame in
+	// favour of host waterfall cancel; this test pins the new
+	// contract: dropPendingByRPCID (the path handleHostFrame uses
+	// for host/cancel on a waterfall) drains the pending channel
+	// without calling /api/respond, so a subsequent SendPermission
+	// from the runtime finds nothing to answer.
 	mock := newRespondMock(t)
 	cli := mock.installGlobal(t)
 	d := newTestDriver(cli, "/tmp/ws")
-	d.sessionID = "session-dash"
+	d.sessionID = "session-cancel"
 	t.Cleanup(func() { close(d.closed) })
 
-	d.handleApprovalRequested("rpc-appr-3", muxApprovalRequested{
+	d.handleApprovalRequested("rpc-cancel-1", muxApprovalRequested{
 		SessionID:  d.sessionID,
-		ApprovalID: "appr-3",
+		ApprovalID: "appr-cancel-1",
 		ToolName:   "Bash",
 		Reason:     "git add",
 	})
@@ -339,27 +345,14 @@ func TestApprovalResolved_DropsPendingWithoutRespond(t *testing.T) {
 		t.Fatal("timed out waiting for approval event")
 	}
 
-	d.handleApprovalResolved(muxApprovalResolved{
-		SessionID:  d.sessionID,
-		ApprovalID: "appr-3",
-		Outcome:    "allowed-once",
-	})
-	select {
-	case ev := <-d.events:
-		if ev.Kind != agent.EventAgentPermissionSettled {
-			t.Fatalf("kind = %v, want settled", ev.Kind)
-		}
-		if ev.PermissionSettled == nil || ev.PermissionSettled.Outcome != "allowed-once" {
-			t.Errorf("settled = %+v", ev.PermissionSettled)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for settled event")
+	if !d.dropPendingByRPCID("rpc-cancel-1") {
+		t.Fatal("dropPendingByRPCID returned false on live entry")
 	}
 	if mock.count.Load() != 0 {
-		t.Fatalf("respond calls = %d, want 0 (dashboard already answered)", mock.count.Load())
+		t.Fatalf("respond calls = %d, want 0 (cancel must not wire /api/respond)", mock.count.Load())
 	}
 	if err := d.SendPermission(approvalAllowOnce); err == nil {
-		t.Fatal("SendPermission after dashboard resolve should fail (no pending)")
+		t.Fatal("SendPermission after host cancel should fail (no pending)")
 	}
 }
 
@@ -373,6 +366,16 @@ func newRespondMock(t *testing.T) *respondMock {
 	t.Helper()
 	m := &respondMock{}
 	mux := http.NewServeMux()
+	// Modern host waterfall path (dsh 0.1.2-rc.1).
+	mux.HandleFunc("/api/$events/result", func(w http.ResponseWriter, r *http.Request) {
+		m.count.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		m.raw.Store(append([]byte(nil), body...))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accepted":true}`))
+	})
+	// Legacy mux /api/respond path (defense-in-depth).
 	mux.HandleFunc("/api/respond", func(w http.ResponseWriter, r *http.Request) {
 		m.count.Add(1)
 		body, _ := io.ReadAll(r.Body)

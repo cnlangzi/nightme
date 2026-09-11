@@ -355,7 +355,6 @@ func buildPRPrompt(c Context, base string) string {
 	// line and the body as the remainder. The `Closes #N` footer
 	// continues to be appended in Go by dispatchPR via
 	// appendClosesFooter, not by the agent.
-	_ = c
 	current := c.Branch
 	var sb strings.Builder
 

@@ -180,12 +180,11 @@ func TestEnsureSharedHost_MissingBinary(t *testing.T) {
 }
 
 // TestEnsureSharedHost_FallsBackWhen3080Foreign covers the
-// regression where ErrNotDSH from DiscoverExisting returned
-// immediately, leaving the fallback-port code below the switch
-// unreachable. The fix: ErrNotDSH falls through to the spawn
-// path which sweeps [3081, 3099] for the first free port and
-// spawns dsh there. Without this, any host with a non-dsh service
-// on 3080 made the bridge unusable.
+// always-spawn contract: when 3080 is occupied (by anything — dsh
+// or a foreign service), StartSharedHost picks the first free port
+// in [3081, 3099] and spawns nightme's own dsh there instead of
+// refusing. Skipping the fallback would make the bridge unusable
+// for any host that has even one non-dsh service on 3080.
 //
 // Skipped by default: requires the test runner to bring up a
 // foreign HTTP server on 3080 first. See the test body for the

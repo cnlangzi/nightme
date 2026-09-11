@@ -7,33 +7,40 @@
 // the rest of the package (client.go, stream.go, router.go) talks
 // to it over HTTP + WebSocket.
 //
-// Lifecycle model:
+// Lifecycle model (always-spawn — see F-dsh-shared-host §1.3.1):
 //
 //	StartSharedHost(ctx, opts)
-//	  1. probe 127.0.0.1:3080 via DiscoverExisting (TCP dial +
-//	     GET /manifest.webmanifest fingerprint check). If a dsh is
-//	     already there, attach to it (ownsProcess=false, no
-//	     watchdog, daemon never tears it down on shutdown).
-//	  2. if 3080 is empty (ErrNotRunning), spawn a fresh dsh with
-//	     `--profile web --port 3080` explicit. Host is always
-//	     127.0.0.1 (dsh doesn't bind anywhere else); port is
-//	     whatever we passed via --port. Readiness is waitForListen
-//	     (TCP accept on the chosen port), NOT stdout parsing.
-//	  3. if 3080 is occupied by something that isn't dsh
-//	     (ErrNotDSH), sweep [3081, 3099] for the first free
-//	     port via findFreePort and spawn dsh on that. Range
-//	     exhausted → fail loud.
-//	  4. Client.Start pumps → mux/host WS connects (HTTP
-//	     handshake catches the small kernel-accept-queue vs
-//	     app-Accept race window).
-//	  5. install client via host.SetGlobal so dsh.newDriver can find it.
+//	  1. TCP-dial 127.0.0.1:3080.
+//	     - dial succeeds → 3080 is occupied by SOMETHING (could be
+//	       another dsh, could be a foreign service — we don't
+//	       care). Spawn our own on findFreePort(3081, 3099).
+//	     - dial fails (refused/timeout) → 3080 is ours. Spawn there.
+//	  2. spawnAndWire spawns `dsh --profile web --port <port>` and:
+//	     a. parses the `?token=<launchToken>` from dsh's stdout
+//	        URL line,
+//	     b. GETs /?token=<launchToken> to mint the dsh-auth cookie
+//	        (dsh 0.1.2-rc.1 returns 303 with set-cookie; without
+//	        this step every /api/* and /api/events.* gets 401),
+//	     c. builds an http.CookieJar populated with the cookie,
+//	     d. constructs *Client with NewWithJar so both the HTTP
+//	        RPC client and the WS dialer carry it,
+//	     e. Client.Start kicks off mux/host WS pumps; the cookie
+//	        is now attached to every upgrade.
+//	  3. install client via host.SetGlobal so dsh.newDriver can
+//	     find it. Start the watchdog.
+//
+// Why we no longer "reuse existing dsh": dsh 0.1.2-rc.1 enforces
+// per-process signed-cookie auth on /api/* and /api/events.*. The
+// launch token is process-internal and never exposed to a file,
+// so we have no way to mint the cookie against someone else's dsh.
+// Attaching to an external dsh therefore means RPC and WS fail
+// with 401 — useless. The shared-host architecture is "nightme
+// owns dsh"; the reuse-existing branch was an optimization that's
+// no longer reachable in practice, so it's removed.
 //
 //	ShutdownSharedHost(ctx, client)
 //	  1. Client.Close (stops mux/host pumps)
-//	  2. session.cancel best-effort for any subscribed sessions (none
-//	     at daemon shutdown — sessions were already Closed by the
-//	     runtime's own shutdown sequence)
-//	  3. SIGINT dsh, wait 5s, SIGKILL, wait 5s
+//	  2. SIGINT dsh, wait 5s, SIGKILL, wait 5s
 package host
 
 import (
@@ -44,8 +51,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,16 +167,6 @@ type SharedHost struct {
 }
 
 // closedChan is a pre-closed channel used as the watchdogDone value
-// when SharedHost doesn't run a watchdog (ownsProcess=false). It's
-// a stand-in for the "watchdog already done" sentinel so callers
-// that (defensively) range on h.watchdogDone don't need to
-// special-case the no-watchdog path.
-var closedChan = func() chan struct{} {
-	c := make(chan struct{})
-	close(c)
-	return c
-}()
-
 // respawnBackoffBase / respawnBackoffMax bound the exponential
 // backoff between respawn attempts. After a successful respawn the
 // backoff resets. Total wait budget across one cycle is bounded
@@ -198,21 +199,28 @@ func (h *SharedHost) PID() int {
 	return h.cmd.Process.Pid
 }
 
-// StartSharedHost attaches to (or spawns) the shared dsh web daemon
-// and installs the resulting *Client as the process-wide singleton
-// via SetGlobal.
+// StartSharedHost spawns a fresh dsh web daemon and installs the
+// resulting *Client as the process-wide singleton via SetGlobal.
 //
-// Reuse-or-spawn:
+// Always-spawn contract (replaces the previous reuse-or-spawn):
 //
-//  1. Probe 127.0.0.1:3080 for an existing dsh. If found, attach to
-//     it (the user might have `dsh web` open in their browser) —
-//     the SharedHost ownsProcess=false; no subprocess lifecycle,
-//     no watchdog; Close just disconnects.
-//  2. If nothing's on 3080, spawn `dsh --profile web` (no --port
-//     flag → dsh defaults to 3080) and own it. Watchdog respawns
-//     on crash; Close SIGINTs.
-//  3. If something IS on 3080 but it's NOT dsh, surface the error
-//     (spawning on top of a foreign web service is a footgun).
+//  1. TCP-dial 127.0.0.1:3080.
+//     - dial succeeds → 3080 is occupied by SOMETHING (could be
+//     another dsh or a foreign service — we treat them the
+//     same). Spawn on findFreePort(3081, 3099).
+//     - dial fails (refused/timeout) → 3080 is ours. Spawn there.
+//  2. spawnAndWire spawns `dsh --profile web --port <port>`, parses
+//     the launch token from stdout, GETs /?token=... to mint the
+//     dsh-auth cookie, and constructs a Client that carries the
+//     cookie jar through both RPC and WS.
+//  3. SetGlobal installs the Client; watchdog respawns on crash.
+//
+// Why "always spawn" replaces "reuse existing": dsh 0.1.2-rc.1
+// enforces per-process signed-cookie auth. The launch token is
+// process-internal and never written to a file, so attaching to a
+// dsh we didn't spawn gives us no way to mint a valid cookie —
+// every /api/* and WS call gets 401. Reusing would only be
+// reachable if dsh itself added a token-sharing mechanism.
 //
 // Errors are fatal-startup semantics: callers should treat them as
 // hard-fail boot conditions (no per-session fallback).
@@ -231,87 +239,28 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		logger = slog.Default()
 	}
 
-	// Step 1: try to reuse an existing dsh on the default port,
-	// unless the caller opted out via ForceSpawn.
-	cli, err := func() (*Client, error) {
-		if opts.ForceSpawn {
-			return nil, ErrNotRunning
-		}
-		return DiscoverExisting(ctx, defaultDSHPort)
-	}()
-	switch {
-	case err == nil:
-		// Reused — build a SharedHost that owns no subprocess.
-		// watchdogDone is the pre-closed closedChan so Close's
-		// <-h.watchdogDone returns immediately without a
-		// special-case branch.
-		//
-		// CRITICAL: DiscoverExisting returns the Client fully
-		// wired but its Hub hasn't started pumping yet — call
-		// cli.Start(ctx) to bring up the mux+host WS pumps.
-		// Without this, ChatSessions subscribing via Router
-		// would never receive frames (the mux stream is open
-		// lazily inside Hub.Start).
-		if err := cli.Start(ctx); err != nil {
-			return nil, fmt.Errorf("dsh.host: client start (reuse): %w", err)
-		}
-		h := &SharedHost{
-			cli:          cli,
-			logger:       logger,
-			opts:         opts,
-			ownsProcess:  false,
-			watchdogDone: closedChan,
-		}
-		SetGlobal(cli)
-		logger.Info("dsh.host: attached to existing dsh web",
-			"base_url", cli.BaseURL(),
-			"workspace", opts.Workspace)
-		return h, nil
-	case errors.Is(err, ErrNotRunning):
-		// Fall through to spawn path below — 3080 is empty, we
-		// own the bind.
-	case errors.Is(err, ErrNotDSH):
-		// 3080 has something on it but it isn't dsh (e.g. a
-		// user's local dev server, or a stale process from a
-		// previous operator session). Fall through to spawn path
-		// — the spawn-path block below sweeps [3081, 3099] for the
-		// first free port and spawns dsh there. Returning an error
-		// here would make the bridge unusable for any host that has
-		// even one non-dsh service on 3080, which is too brittle.
-		logger.Warn("dsh.host: port 3080 occupied by non-dsh; will fall back",
-			"foreign_port", defaultDSHPort,
-			"probe_err", err)
-	default:
-		return nil, fmt.Errorf("dsh.host: discover: %w", err)
-	}
-
-	// Step 2: decide which port to spawn on. Canonical is 3080
-	// (probe already showed it's empty). If probe said ErrNotDSH
-	// — something foreign is squatting on 3080 — sweep the
-	// fallback range [3081, 3099] for the first free port and
-	// spawn there. The range is small on purpose: if 20 ports
-	// are taken the operator has a real port-storm problem and
-	// should be told rather than silently drifting further.
+	// Step 1: pick a port. Canonical is 3080; if anything is
+	// already listening there (dsh or foreign), sweep
+	// [3081, 3099] for the first free port.
 	port := defaultDSHPort
-	if errors.Is(err, ErrNotDSH) {
+	if dialReachable(defaultDSHPort) {
 		scanMin, scanMax := defaultPortScanMin, defaultPortScanMax
 		found, scanErr := findFreePort(scanMin, scanMax)
 		if scanErr != nil {
 			return nil, fmt.Errorf(
-				"dsh.host: port %d occupied by non-dsh and no free port in range %d-%d: %w",
+				"dsh.host: port %d occupied and no free port in range %d-%d: %w",
 				defaultDSHPort, scanMin, scanMax, scanErr)
 		}
 		port = found
-		logger.Warn("dsh.host: 3080 occupied by non-dsh; falling back",
+		logger.Warn("dsh.host: port 3080 occupied; spawning on fallback",
 			"foreign_port", defaultDSHPort,
 			"fallback_port", port,
 		)
 	}
 
-	// Step 3: spawn dsh with --port explicit. We pin the port so
-	// the contract doesn't depend on dsh's default-port behavior
-	// (which has historically drifted across versions) and so the
-	// Client URL we construct matches what we asked for.
+	// Step 2: spawn dsh with --port explicit. spawnAndWire also
+	// captures the launch token and mints the dsh-auth cookie
+	// before constructing the Client.
 	cmd, cli, err := spawnAndWire(ctx, opts, port, logger)
 	if err != nil {
 		return nil, err
@@ -345,12 +294,96 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	return host, nil
 }
 
-// parseWebURL removed: replaced by waitForListen (TCP-poll on the
-// port we asked dsh to bind via --port). Host is always 127.0.0.1
-// and port is whatever we passed to dsh, so we no longer parse
-// stdout for the URL line — that path was both fragile (dsh stdout
-// format drift caused silent timeouts) and unnecessary now that
-// we own the port choice.
+// dialReachable reports whether a TCP connection to 127.0.0.1:port
+// is accepted (regardless of what's on the other end). Used by
+// StartSharedHost to decide whether 3080 is occupied; we don't care
+// whether the responder is dsh or a foreign service — the policy
+// is "always spawn our own on a fresh port".
+func dialReachable(port int) bool {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	d := net.Dialer{Timeout: 500 * time.Millisecond}
+	conn, err := d.Dial("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// dshURLPattern matches the first line of `dsh --profile web` stdout:
+//
+//	dsh web: http://127.0.0.1:3080/?token=<launchToken>
+//
+// Captures the full URL (host + port + path + query). spawnAndWire
+// uses the query to extract the launch token, then GETs /?token=...
+// to mint the dsh-auth cookie (see mintAuthCookie).
+var dshURLPattern = regexp.MustCompile(`dsh web:\s+(http://[^\s]+)`)
+
+// defaultDSHPort is the canonical port both `dsh web` and the
+// spawned dsh subprocess default to. The fallback sweep in
+// StartSharedHost covers [3081, 3099] when this port is occupied.
+const defaultDSHPort = 3080
+
+// mintAuthCookie does the dsh 0.1.2-rc.1 launch-token → cookie
+// exchange: GET /?token=<launchToken>. dsh 303-redirects to / with
+// a Set-Cookie carrying the dsh-auth signed payload. We capture
+// that one cookie into a fresh cookiejar so every subsequent
+// /api/* and /api/events.* call carries it.
+//
+// baseURL is the dsh root WITHOUT the token query (e.g.
+// "http://127.0.0.1:3080"). token is the launch token printed on
+// dsh's stdout. Returned jar is populated; never nil unless an
+// error is also returned.
+//
+// Why this is necessary: dsh 0.1.2-rc.1 auth-gates /api/* and the
+// two /api/events.* WS endpoints with per-process signed cookies.
+// The launch token only works on the initial GET / — it mints the
+// cookie. Without this step, every bridge call gets 401 and every
+// WS upgrade closes mid-handshake.
+func mintAuthCookie(ctx context.Context, baseURL, token string) (http.CookieJar, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: cookiejar: %w", err)
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: parse base url %q: %w", baseURL, err)
+	}
+	q := *u
+	q.RawQuery = "token=" + token
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, q.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: build token-exchange req: %w", err)
+	}
+	// We deliberately do NOT pass the jar — the cookiejar is
+	// populated from this single response, not sent on it.
+	client := &http.Client{
+		Timeout: httpClientTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// dsh returns 303 → /. We want the cookies from THAT
+			// response, not from any further redirect. Stop after
+			// the first hop.
+			if len(via) >= 1 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: token-exchange GET %s: %w", q.String(), err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther && resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("dsh.host: token-exchange: HTTP %d (want 303 or 200)", resp.StatusCode)
+	}
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		return nil, fmt.Errorf("dsh.host: token-exchange: no Set-Cookie in response (dsh version mismatch?)")
+	}
+	jar.SetCookies(u, cookies)
+	return jar, nil
+}
 
 // stderrRing is a bounded line buffer for dsh's stderr. The
 // waitForListen failure path dumps its snapshot into a Warn-level
@@ -396,17 +429,6 @@ func (r *stderrRing) snapshot() []string {
 // --port to dsh explicitly, so the URL we construct is just
 // fmt.Sprintf("http://127.0.0.1:%d", port). Parsing the spawned
 // URL to extract a port we already own was redundant.
-
-// drainStderr keeps dsh's stderr pipe flowing. Without this, dsh
-// blocks once its 64 KiB stderr pipe buffer fills. We log lines at
-// debug level for post-mortem.
-func (h *SharedHost) drainStderr(stderr io.ReadCloser) {
-	scanner := bufio.NewScanner(stderr)
-	scanner.Buffer(make([]byte, 0, 4096), 16*1024)
-	for scanner.Scan() {
-		h.logger.Debug("dsh.host: stderr", "line", scanner.Text())
-	}
-}
 
 // waitCmd returns a channel that closes when cmd.Wait() returns.
 // cmd.Wait may only be called once; using a helper that runs it in
@@ -661,7 +683,7 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 
 	// Drain stderr so the pipe buffer doesn't fill and deadlock the
 	// subprocess. Logs each line at debug level for /diagnose
-	// triage; also retains a bounded ring so the parseWebURL
+	// triage; also retains a bounded ring so the waitForListen
 	// failure path can attach dsh's actual stderr to the error
 	// chain (regression visible in /review failures where the
 	// timeout branch used to discard everything).
@@ -676,12 +698,43 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 		}
 	}(stderr)
 
-	// Drain stdout to prevent pipe deadlock; we no longer parse it.
-	go func(r io.ReadCloser) {
+	// waitForURLToken reads stdout until the URL line appears and
+	// captures the launch token, while continuing to drain the pipe
+	// in the background so dsh's stdout never deadlocks.
+	//
+	// We can't share the pipe between two goroutines — once one
+	// reads, the bytes are gone. So one goroutine does both: parse
+	// the URL line for the token, log every line for /diagnose
+	// triage, keep draining until EOF.
+	tokenCh := make(chan string, 1)
+	tokenErrCh := make(chan error, 1)
+	go func(r io.Reader) {
 		scnr := bufio.NewScanner(r)
 		scnr.Buffer(make([]byte, 0, 4096), 16*1024)
+		sent := false
 		for scnr.Scan() {
-			logger.Debug("dsh.host: stdout", "line", scnr.Text())
+			line := scnr.Text()
+			logger.Debug("dsh.host: stdout", "line", line)
+			if sent {
+				continue
+			}
+			if m := dshURLPattern.FindStringSubmatch(line); m != nil {
+				u, perr := url.Parse(m[1])
+				if perr != nil {
+					tokenErrCh <- fmt.Errorf("dsh.host: parse dsh url %q: %w", m[1], perr)
+					return
+				}
+				token := u.Query().Get("token")
+				if token == "" {
+					tokenErrCh <- fmt.Errorf("dsh.host: dsh url %q has no ?token=...", m[1])
+					return
+				}
+				tokenCh <- token
+				sent = true
+			}
+		}
+		if !sent {
+			tokenErrCh <- errors.New("dsh.host: stdout closed before URL line appeared")
 		}
 	}(stdout)
 
@@ -713,7 +766,37 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	cli := New(baseURL, logger)
+	// Mint the dsh-auth cookie from the launch token. Without this
+	// step dsh 0.1.2-rc.1 401s every /api/* and every WS upgrade.
+	tokenCtx, tokenCancel := context.WithTimeout(ctx, webURLParseTimeout)
+	token, err := func() (string, error) {
+		select {
+		case t := <-tokenCh:
+			return t, nil
+		case e := <-tokenErrCh:
+			return "", e
+		case <-tokenCtx.Done():
+			return "", fmt.Errorf("dsh.host: timeout waiting for launch token: %w", tokenCtx.Err())
+		}
+	}()
+	if err != nil {
+		tokenCancel()
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		_ = stdout.Close()
+		return nil, nil, fmt.Errorf("dsh.host: capture launch token: %w", err)
+	}
+
+	jar, err := mintAuthCookie(tokenCtx, baseURL, token)
+	tokenCancel()
+	if err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		_ = stdout.Close()
+		return nil, nil, fmt.Errorf("dsh.host: mint dsh-auth cookie: %w", err)
+	}
+
+	cli := NewWithJar(baseURL, jar, logger)
 	if err := cli.Start(ctx); err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()
@@ -723,11 +806,26 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 }
 
 // spawnOnce is the watchdog's per-attempt spawn wrapper around
-// spawnAndWire. Passes through the host's captured opts (which
-// carry the port chosen by StartSharedHost — default 3080 or
-// fallback from findFreePort).
+// spawnAndWire.
+//
+// Port policy: try the port we captured at StartSharedHost first
+// (h.opts.Port). If it's now occupied (e.g. another daemon took
+// 3080 while our dsh was down, or the port is wedged), fall back
+// to findFreePort(3081, 3099) — same policy StartSharedHost uses
+// for cold start. This keeps the watchdog from giving up just
+// because the canonical port got stolen during the dead window.
 func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
-	return spawnAndWire(context.Background(), h.opts, h.opts.Port, h.logger)
+	port := h.opts.Port
+	if !dialReachable(port) {
+		if found, err := findFreePort(defaultPortScanMin, defaultPortScanMax); err == nil {
+			port = found
+			h.logger.Warn("dsh.host: captured port occupied during respawn; falling back",
+				"captured_port", h.opts.Port,
+				"respawn_port", port,
+			)
+		}
+	}
+	return spawnAndWire(context.Background(), h.opts, port, h.logger)
 }
 
 // waitForListen polls 127.0.0.1:port until TCP accepts a connection

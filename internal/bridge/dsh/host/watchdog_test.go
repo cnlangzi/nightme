@@ -60,8 +60,10 @@ const fakeDSHSource = `package main
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -84,13 +86,47 @@ func main() {
 	}
 	defer s.Close()
 
-	fmt.Printf("dsh web: http://%s\n", host)
+	// Real dsh 0.1.2-rc.1 prints a query token on the URL line;
+	// spawnAndWire captures it and uses it to mint the dsh-auth
+	// cookie. The fake mints a fixed token per invocation (the OS
+	// PID is unique enough for test purposes; tests that care
+	// about token stability can override via FAKE_DSH_TOKEN env).
+	token := os.Getenv("FAKE_DSH_TOKEN")
+	if token == "" {
+		token = fmt.Sprintf("fake-token-%d", os.Getpid())
+	}
+	fmt.Printf("dsh web: http://%s/?token=%s\n", host, token)
 
 	if pidfile := os.Getenv("FAKE_DSH_PIDFILE"); pidfile != "" {
 		if err := os.WriteFile(pidfile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "fake-dsh: pidfile %s: %v\n", pidfile, err)
 		}
 	}
+
+	// Minimal HTTP server so spawnAndWire's mintAuthCookie step
+	// gets a real Set-Cookie back. Real dsh validates the launch
+	// token and signs the cookie per-process; the fake just echoes
+	// a fixed cookie value with a counter so tests can assert on
+	// request counts. Anything else (/api/*, /api/events.*) gets
+	// a 200 with empty JSON — enough to keep the WS dial pump from
+	// crashing on every retry during the test.
+	var hits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Query().Get("token") == token {
+			w.Header().Set("Set-Cookie", fmt.Sprintf("dsh-auth-fake=v1.fake.%d; Max-Age=2592000; Path=/; HttpOnly", os.Getpid()))
+			w.WriteHeader(http.StatusSeeOther)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{\"items\":[]}"))
+	})
+	srv := &http.Server{Handler: mux}
+	go func() {
+		_ = srv.Serve(s)
+	}()
+	defer srv.Close()
 
 	lifetime := 0.05
 	if s := os.Getenv("FAKE_DSH_LIFETIME"); s != "" {

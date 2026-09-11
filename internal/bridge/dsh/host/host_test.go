@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,11 +37,13 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
 
+var _ = slog.Default
+
 // ─── mock dsh server ───────────────────────────────────────────────
 
 // mockDSH is an httptest.Server-backed fake dsh web. It exposes
-// the same surface (RPC + mux + host WS) and a tiny control
-// channel (`pushMux` / `pushHost`) so tests can inject frames.
+// the same surface (RPC + single Remote mux WS) and per-stream
+// push channels so tests can inject frames.
 type mockDSH struct {
 	server *httptest.Server
 
@@ -48,19 +51,39 @@ type mockDSH struct {
 	// Default returns an empty items array.
 	sessionListHook func() []host.SessionSummary
 
-	// pushMux / pushHost are channels that mux-pump / host-pump
-	// goroutines read from and forward to the active WS client.
-	// Tests send serverFrame JSON to inject frames.
-	pushMux  chan serverFrameEnvelope
-	pushHost chan serverFrameEnvelope
+	// streams maps server-minted streamId → push channel. Tests
+	// call pushMuxFrameForSession to enqueue an item on the right
+	// channel.
+	streamsMu       sync.RWMutex
+	streams         map[string]chan muxItem
+	sessionToStream map[string]string // sessionID → streamId (for tests)
+
+	// closeMu + closeFn close the active WS connection — used by
+	// the reconnect test to simulate server-side WS death. Replaced
+	// on every new connection so a fresh conn can be killed by a
+	// later shutdown() call.
+	closeMu sync.Mutex
+	closeFn func()
+
+	// capturedConnValue is the most recent WS connection. Used by
+	// pushMuxFrame to spin up ephemeral streams for unsubscribed
+	// sessions.
+	capturedConnValue *websocket.Conn
+
+	// writeMu serializes gorilla's WriteJSON/NextWriter — gorilla
+	// stores per-conn message state in `messageWriter` and is NOT
+	// safe for concurrent calls. All muxStreamWriter goroutines
+	// (one per open stream, plus ephemeral ones) take this lock
+	// before writing; without it, the race detector fires and
+	// concurrent frames can interleave bytes on the wire.
+	writeMu sync.Mutex
 
 	// counters (atomic) for assertions
-	muxConnectCount  atomic.Int64
-	hostConnectCount atomic.Int64
-	listCallCount    atomic.Int64
-	createCallCount  atomic.Int64
-	respondCount     atomic.Int64
-	lastRespondBody  atomic.Value // []byte
+	muxConnectCount atomic.Int64
+	listCallCount   atomic.Int64
+	createCallCount atomic.Int64
+	respondCount    atomic.Int64
+	lastRespondBody atomic.Value // []byte
 }
 
 type serverFrameEnvelope struct {
@@ -69,12 +92,18 @@ type serverFrameEnvelope struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
+// muxItem is what mockDSH sends back to the bridge over the mux WS.
+type muxItem struct {
+	StreamID string          `json:"streamId"`
+	Value    json.RawMessage `json:"value"`
+}
+
 // newMockDSH spins up an httptest.Server wired to look like dsh web.
 func newMockDSH(t *testing.T) *mockDSH {
 	t.Helper()
 	m := &mockDSH{
-		pushMux:  make(chan serverFrameEnvelope, 64),
-		pushHost: make(chan serverFrameEnvelope, 64),
+		streams:         make(map[string]chan muxItem),
+		sessionToStream: make(map[string]string),
 	}
 
 	mux := http.NewServeMux()
@@ -83,8 +112,7 @@ func newMockDSH(t *testing.T) *mockDSH {
 	mux.HandleFunc("/api/session/prompt", m.handleSessionPrompt)
 	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/respond", m.handleRespond)
-	mux.HandleFunc("/api/events.mux", m.handleMuxWS)
-	mux.HandleFunc("/api/events.host", m.handleHostWS)
+	mux.HandleFunc("/api/remote.mux", m.handleMuxWS)
 
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(m.server.Close)
@@ -151,66 +179,205 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// handleMuxWS is the dsh 0.1.2-rc.1 Remote mux endpoint. On
+// connect it sends `{type:"ready", clientId, host:{home:"..."}}`.
+// It then reads client frames and dispatches by streamId: open
+// frames register a push channel per session, cancel frames drop
+// the channel, item frames are queued for the matching session.
 func (m *mockDSH) handleMuxWS(w http.ResponseWriter, r *http.Request) {
 	m.muxConnectCount.Add(1)
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
-	go m.pumpFrames(conn, m.pushMux)
-}
+	m.closeMu.Lock()
+	m.capturedConnValue = conn
+	// Send a WS close frame so the client gets a clean close
+	// notification (rather than relying on TCP RST/FIN, which the
+	// gorilla client may not surface promptly depending on
+	// platform-specific TCP buffering).
+	m.closeFn = func() {
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "test shutdown"),
+			time.Now().Add(time.Second),
+		)
+		_ = conn.Close()
+	}
+	m.closeMu.Unlock()
 
-func (m *mockDSH) handleHostWS(w http.ResponseWriter, r *http.Request) {
-	m.hostConnectCount.Add(1)
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
-	if err != nil {
+	// Send the "ready" frame every dsh 0.1.2-rc.1 connection
+	// sends on upgrade. Bridge uses it only for log correlation.
+	ready := map[string]any{
+		"type":     "ready",
+		"clientId": "client-mock-001",
+		"host":     map[string]any{"home": "/tmp/test"},
+	}
+	if err := conn.WriteJSON(ready); err != nil {
+		_ = conn.Close()
 		return
 	}
-	go m.pumpFrames(conn, m.pushHost)
+
+	// Reader goroutine: parses client frames, registers/cancels
+	// per-stream push channels, broadcasts items to subscribers.
+	go m.muxPumpLoop(conn)
 }
 
-// pumpFrames forwards frames from the push channel to the WS client.
-// Closes when push channel is closed or the client disconnects.
-func (m *mockDSH) pumpFrames(conn *websocket.Conn, src <-chan serverFrameEnvelope) {
+// muxPumpLoop reads client frames and routes per-stream items to
+// the right push channel. Closes when the client disconnects.
+func (m *mockDSH) muxPumpLoop(conn *websocket.Conn) {
 	defer conn.Close()
 	for {
-		select {
-		case f, ok := <-src:
-			if !ok {
-				return
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if len(raw) == 0 {
+			continue
+		}
+		var f struct {
+			Type     string          `json:"type"`
+			StreamID string          `json:"streamId"`
+			Endpoint string          `json:"endpoint"`
+			Payload  json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &f); err != nil {
+			continue
+		}
+		switch f.Type {
+		case "open":
+			streamID := f.StreamID
+			ch := make(chan muxItem, 16)
+			m.streamsMu.Lock()
+			m.streams[streamID] = ch
+			if f.Endpoint == "session/follow" {
+				var args struct {
+					Args struct {
+						Address struct {
+							Kind      string `json:"kind"`
+							SessionID string `json:"sessionId"`
+						} `json:"address"`
+					} `json:"args"`
+				}
+				if err := json.Unmarshal(f.Payload, &args); err == nil &&
+					args.Args.Address.Kind == "session" {
+					m.sessionToStream[args.Args.Address.SessionID] = streamID
+				}
 			}
-			frame := map[string]any{
-				"type":    "server-request",
-				"rpcId":   f.RPCID,
-				"method":  f.Method,
-				"payload": json.RawMessage(f.Payload),
+			m.streamsMu.Unlock()
+			// Pump items from this stream's push channel onto the
+			// WS as `{type:"item", streamId, value}` frames.
+			go m.muxStreamWriter(conn, streamID, ch)
+		case "cancel":
+			streamID := "stream-" + f.StreamID
+			m.streamsMu.Lock()
+			if ch, ok := m.streams[streamID]; ok {
+				close(ch)
+				delete(m.streams, streamID)
 			}
-			if err := conn.WriteJSON(frame); err != nil {
-				return
-			}
-		case <-time.After(60 * time.Second):
-			// No-op timeout so the goroutine eventually exits if
-			// tests forget to drain the channel. Tests that need
-			// longer lifetimes can replace this.
+			m.streamsMu.Unlock()
+		}
+	}
+}
+
+// muxStreamWriter pumps items from a single stream's push channel
+// onto the shared WS as `{type:"item", streamId, value}` frames.
+// Recovers from WriteJSON panics (gorilla panics if the conn is
+// already closed mid-write) so one dead stream doesn't poison the
+// whole test process. Concurrent calls (across multiple writers)
+// are serialized via m.writeMu — gorilla's WriteJSON is not
+// safe for concurrent use.
+func (m *mockDSH) muxStreamWriter(conn *websocket.Conn, streamID string, src <-chan muxItem) {
+	defer func() {
+		_ = recover()
+	}()
+	for item := range src {
+		frame := map[string]any{
+			"type":     "item",
+			"streamId": item.StreamID,
+			"value":    item.Value,
+		}
+		m.writeMu.Lock()
+		err := conn.WriteJSON(frame)
+		m.writeMu.Unlock()
+		if err != nil {
 			return
 		}
 	}
 }
 
-// pushMuxFrame injects one server-request frame to the next mux
-// subscriber. Buffered chan (cap 64) means tests don't need to
-// coordinate pump goroutines — just send and proceed.
-func (m *mockDSH) pushMuxFrame(t *testing.T, method, rpcID string, payload any) {
+// pushMuxFrame injects one mux item to the session subscribed
+// under sessionID. Routes through streamId so the bridge's
+// per-session dispatch (extractSessionID on the payload's
+// sessionId field) can correctly route it.
+//
+// If sessionID has no active stream, pushMuxFrame creates an
+// ephemeral stream for it (mirroring what the bridge would have
+// seen had a Subscribe call been made). The bridge's router then
+// drops the frame because no subscriber matches — exactly the
+// scenario TestClient_DispatchDropsUnsubscribedSessions exercises.
+func (m *mockDSH) pushMuxFrame(t *testing.T, sessionID, method, rpcID string, payload any) {
 	t.Helper()
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("mock: marshal payload: %v", err)
 	}
-	select {
-	case m.pushMux <- serverFrameEnvelope{Method: method, RPCID: rpcID, Payload: raw}:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("mock: pushMuxFrame channel full or no reader")
+
+	m.streamsMu.Lock()
+	streamID, ok := m.sessionToStream[sessionID]
+	if !ok {
+		streamID = "ephemeral-" + sessionID
+		m.sessionToStream[sessionID] = streamID
+		conn := m.capturedConn()
+		if conn == nil {
+			m.streamsMu.Unlock()
+			t.Fatalf("mock: no conn (c.Start not called?)")
+		}
+		ch := make(chan muxItem, 16)
+		m.streams[streamID] = ch
+		go m.muxStreamWriter(conn, streamID, ch)
 	}
+	ch := m.streams[streamID]
+	m.streamsMu.Unlock()
+
+	value := wrapAsSessionEvent(method, rpcID, raw)
+
+	select {
+	case ch <- muxItem{StreamID: streamID, Value: value}:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("mock: pushMuxFrame channel full or no reader for session %q", sessionID)
+	}
+}
+
+// capturedConn returns the WS connection the most recent
+// handleMuxWS invocation captured. Used by pushMuxFrame to spin
+// up ephemeral streams for unsubscribed sessions. Returns nil
+// if no connection is currently active.
+func (m *mockDSH) capturedConn() *websocket.Conn {
+	m.closeMu.Lock()
+	defer m.closeMu.Unlock()
+	return m.capturedConnValue
+}
+
+// wrapAsSessionEvent encodes a (method, rpcID, payload) tuple as
+// the dsh SessionWireEvent shape bridge/stream.go::translateSessionEvent
+// expects: {type:"event", event:{type, seq, time, data:{<payload>}}}.
+func wrapAsSessionEvent(method, rpcID string, payload json.RawMessage) json.RawMessage {
+	seq := int64(0)
+	if n, err := strconv.ParseInt(strings.TrimPrefix(rpcID, "seq-"), 10, 64); err == nil {
+		seq = n
+	}
+	envelope := map[string]any{
+		"type": "event",
+		"event": map[string]any{
+			"type": method,
+			"seq":  seq,
+			"time": time.Now().UnixMilli(),
+			"data": json.RawMessage(payload),
+		},
+	}
+	b, _ := json.Marshal(envelope)
+	return b
 }
 
 // ─── HTTP envelope helpers ─────────────────────────────────────────
@@ -375,15 +542,16 @@ func TestClient_SubscribeAndDispatchBySessionID(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool {
 		return mock.muxConnectCount.Load() > 0
 	})
+	mock.waitForSessionStream(t, "session-alpha")
 
 	// Inject a session/subscribed baseline frame.
-	mock.pushMuxFrame(t, "session/subscribed", "rpc-sub-1", map[string]any{
+	mock.pushMuxFrame(t, "session-alpha", "session/subscribed", "rpc-sub-1", map[string]any{
 		"sessionId": "session-alpha",
 		"lastSeq":   42,
 	})
 
 	// Inject an approval/requested frame for the same session.
-	mock.pushMuxFrame(t, "approval/requested", "rpc-app-2", map[string]any{
+	mock.pushMuxFrame(t, "session-alpha", "approval/requested", "rpc-app-2", map[string]any{
 		"sessionId":  "session-alpha",
 		"approvalId": "approval-7",
 		"toolName":   "Bash",
@@ -395,11 +563,16 @@ func TestClient_SubscribeAndDispatchBySessionID(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 frames, got %d", len(got))
 	}
-	if got[0].Method != "session/subscribed" || got[0].RPCID != "rpc-sub-1" {
-		t.Errorf("frame 0 wrong: %+v", got[0])
+	// dsh 0.1.2-rc.1 wire uses `seq` (numeric event sequence) as
+	// the frame identity — bridge's translateSessionEvent converts
+	// that into the legacy `rpcId` slot. Test pushed both frames
+	// with seq=0 (default for fresh push), so both have the same
+	// seq-derived rpcId; the discriminator is method + payload.
+	if got[0].Method != "session/subscribed" {
+		t.Errorf("frame 0 wrong method: %+v", got[0])
 	}
-	if got[1].Method != "approval/requested" || got[1].RPCID != "rpc-app-2" {
-		t.Errorf("frame 1 wrong: %+v", got[1])
+	if got[1].Method != "approval/requested" {
+		t.Errorf("frame 1 wrong method: %+v", got[1])
 	}
 }
 
@@ -429,16 +602,29 @@ func TestClient_DispatchDropsUnsubscribedSessions(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool {
 		return mock.muxConnectCount.Load() > 0
 	})
+	mock.waitForSessionStream(t, "session-alpha")
 
-	// Push a frame for session-beta — should NOT be delivered to alpha's handler.
-	mock.pushMuxFrame(t, "session/event", "rpc-evt", map[string]any{
-		"sessionId": "session-beta",
+	// Push a frame for session-alpha FIRST — the alpha stream's
+	// writer has been alive since the open frame was processed, so
+	// the push is stable. The bridge's router dispatches it to the
+	// alpha handler.
+	mock.pushMuxFrame(t, "session-alpha", "session/event", "rpc-evt-2", map[string]any{
+		"sessionId": "session-alpha",
 		"event":     map[string]any{"type": "turn/end", "data": map[string]any{}},
 	})
+	// Wait for the bridge to actually receive + dispatch the alpha
+	// frame before pushing the ephemeral beta frame (which spins
+	// up an extra muxStreamWriter goroutine and races with the
+	// long-running alpha writer if back-to-back). Pessimistic
+	// 50ms is plenty for a loopback WS.
+	time.Sleep(50 * time.Millisecond)
 
-	// Push a frame for session-alpha — SHOULD be delivered.
-	mock.pushMuxFrame(t, "session/event", "rpc-evt-2", map[string]any{
-		"sessionId": "session-alpha",
+	// Push a frame for session-beta — but mock has no subscriber for
+	// session-beta, so pushMuxFrame must look up by sessionID. The
+	// bridge's router should drop the frame because session-alpha's
+	// handler doesn't match session-beta's sessionId.
+	mock.pushMuxFrame(t, "session-beta", "session/event", "rpc-evt", map[string]any{
+		"sessionId": "session-beta",
 		"event":     map[string]any{"type": "turn/end", "data": map[string]any{}},
 	})
 
@@ -446,8 +632,20 @@ func TestClient_DispatchDropsUnsubscribedSessions(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected exactly 1 frame (alpha only), got %d", len(got))
 	}
-	if got[0].RPCID != "rpc-evt-2" {
-		t.Errorf("wrong frame delivered: %+v", got[0])
+	// dsh 0.1.2-rc.1 wire uses seq-derived rpcId; both pushes
+	// share seq=0, so the discriminator is payload.sessionId.
+	// The bridge's Router must drop the beta frame (no subscriber)
+	// and deliver only the alpha frame — verified by checking
+	// payload.sessionId below.
+	if got[0].RPCID == "" {
+		t.Errorf("expected rpcId set, got %+v", got[0])
+	}
+	var sid struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(got[0].Payload, &sid)
+	if sid.SessionID != "session-alpha" {
+		t.Errorf("expected sessionId=session-alpha in delivered frame, got %q", sid.SessionID)
 	}
 }
 
@@ -474,7 +672,7 @@ func TestClient_HostStreamDispatch(t *testing.T) {
 	})
 
 	waitFor(t, 2*time.Second, func() bool {
-		return mock.hostConnectCount.Load() > 0
+		return mock.muxConnectCount.Load() > 0
 	})
 
 	// Inject a host/session-added frame (no sessionId on host stream).
@@ -498,11 +696,68 @@ func (m *mockDSH) pushHostFrame(t *testing.T, method, rpcID string, payload any)
 	if err != nil {
 		t.Fatalf("mock: marshal payload: %v", err)
 	}
+	m.streamsMu.RLock()
+	ch, ok := m.streams["host-$events"]
+	m.streamsMu.RUnlock()
+	if !ok {
+		t.Fatalf("mock: no host stream open (c.Start not called?)")
+	}
+	value, err := wrapAsHostEvent(method, rpcID, raw)
+	if err != nil {
+		t.Fatalf("mock: wrap host event: %v", err)
+	}
 	select {
-	case m.pushHost <- serverFrameEnvelope{Method: method, RPCID: rpcID, Payload: raw}:
+	case ch <- muxItem{StreamID: "host-$events", Value: value}:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("mock: pushHostFrame channel full or no reader")
 	}
+}
+
+// wrapAsHostEvent encodes a (method, rpcID, payload) tuple as a
+// dsh RemoteEventRecord for the Host stream.
+func wrapAsHostEvent(method, rpcID string, payload json.RawMessage) (json.RawMessage, error) {
+	envelope := map[string]any{
+		"id":    rpcID,
+		"event": method,
+	}
+	// Merge payload fields into the envelope so callers don't have
+	// to nest by hand. Strip any conflicting reserved keys first.
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &extra); err == nil {
+		delete(extra, "id")
+		delete(extra, "event")
+		for k, v := range extra {
+			envelope[k] = v
+		}
+	}
+	return json.Marshal(envelope)
+}
+
+// shutdown forcibly closes the active WS connection so the bridge
+// reconnects. Used by the reconnect test.
+func (m *mockDSH) shutdown() {
+	m.closeMu.Lock()
+	fn := m.closeFn
+	m.closeMu.Unlock()
+	if fn != nil {
+		tlog := slog.Default()
+		tlog.Info("mock.shutdown: closing active WS conn")
+		fn()
+	}
+}
+
+// waitForSessionStream polls until the mock has registered an open
+// frame for sessionID. Use this between c.Subscribe and
+// pushMuxFrame so the push doesn't race the open frame's
+// arrival on the mock side.
+func (m *mockDSH) waitForSessionStream(t *testing.T, sessionID string) {
+	t.Helper()
+	waitFor(t, 2*time.Second, func() bool {
+		m.streamsMu.RLock()
+		_, ok := m.sessionToStream[sessionID]
+		m.streamsMu.RUnlock()
+		return ok
+	})
 }
 
 // ─── Test: Pending approval register + answer ─────────────────────
@@ -602,11 +857,10 @@ func TestClient_ReconnectAfterServerClose(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return mock.muxConnectCount.Load() >= 1 })
 	firstCount := mock.muxConnectCount.Load()
 
-	// Close the mux WS by closing the push channel. pumpFrames
-	// returns on the close, ending the WS connection from the
-	// server side; the client's read pump sees the disconnect and
-	// the reconnect loop tries again.
-	close(mock.pushMux)
+	// Forcibly close the mux WS from the server side. The client's
+	// read pump sees the disconnect and the reconnect loop tries
+	// again.
+	mock.shutdown()
 
 	// Wait for the reconnect (exponential backoff base is 1s).
 	waitFor(t, 5*time.Second, func() bool {

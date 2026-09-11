@@ -20,6 +20,7 @@ package dsh
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -729,6 +730,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	}
 	resp, err := d.cli.RPC.Post(ctx, "session.prompt", map[string]any{
 		"request": map[string]any{
+			"requestId": mintRequestID(), // dsh 0.1.2-rc.1 typert requires requestId; client-minted UUID the server uses to dedupe retries
 			"sessionId": d.sessionID,
 			"mode":      "queue", // dsh-required discriminator; "steer" is the other valid value
 			"content":   content,
@@ -1195,6 +1197,25 @@ func isSupportedImageMediaType(mediaType string) bool {
 }
 
 // ─── helpers (also imported by translate.go / permissions.go) ─────────
+
+// mintRequestID mints a client-minted UUID the dsh server uses to
+// dedupe retries / reconcile the wire request with the in-session
+// message. Same recipe as host/client.go::newRPCID — crypto/rand +
+// RFC 4122 §4.4. dsh 0.1.2-rc.1's session.prompt typert descriptor
+// requires requestId on every prompt (verified 2026-09-11 against
+// the gateway); without it the prompt is rejected with
+// 'gateway/input-invalid: wire field "request" failed boundary
+// validation'.
+func mintRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%016x", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // errStr renders an error's string form, returning "<nil>" for the
 // nil case so log fields are always meaningful. Mirror of

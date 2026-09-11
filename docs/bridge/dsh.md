@@ -52,9 +52,10 @@ pnpm dsh --profile headless "<task>"      # 单 turn print-mode,plain stdout
 dsh --profile web
 ```
 - **显式传 `--port 3080`** — nightme 锁定端口,不依赖 dsh 默认值(2026-09-10 改;避免 dsh 默认端口漂移时 bridge 静默失联)
-- **绝对不使用** `--port 0`(OS 随机端口):实机验证 dsh 不接受 0 + 会随机到奇怪端口,与 "reuse-or-spawn" 契约冲突;详细 fallback 见 §1.3.1
-- **3080 被占且不是 dsh**:扫描 `3081..3099`(20 个候选端口)找第一个可用;`findFreePort` 用 `net.Listen` 测试,扫不到 → 报清晰错误"no free port in range 3080-3099"
-- **Readiness 判定**:TCP-poll `waitForListen(ctx, &lt;port&gt;)`,每 50ms 拨号一次,直到 TCP accept;`&lt;port&gt;` 是 StartSharedHost 选定的端口(3080 canonical,或 3081-3099 fallback 中的第一个可用);不再解析 stdout URL(2026-09-10 改,避免 dsh stdout 格式漂移时 race);`cli.Start` 紧跟着做 HTTP 握手,捕获 kernel-accept-queue vs app-Accept race
+- **绝对不使用** `--port 0`(OS 随机端口):实机验证 dsh 不接受 0 + 会随机到奇怪端口,与 "nightme 拥有 dsh" 契约冲突;详细 fallback 见 §1.3.1
+- **3080 被占(任何服务,dsh 或 foreign)**:扫描 `3081..3099`(20 个候选端口)找第一个可用;`findFreePort` 用 `net.Listen` 测试,扫不到 → 报清晰错误"no free port in range 3080-3099"。**always-spawn** 决策见 §1.3.1:nightme 不再 attach 到外部 dsh,即使它是 dsh 也照样 spawn 自己的
+- **Readiness 判定**:TCP-poll `waitForListen(ctx, &lt;port&gt;)`,每 50ms 拨号一次,直到 TCP accept;`&lt;port&gt;` 是 StartSharedHost 选定的端口(3080 canonical,或 3081-3099 fallback 中的第一个可用);`cli.Start` 紧跟着做 HTTP 握手,捕获 kernel-accept-queue vs app-Accept race
+- **Auth cookie mint**:dsh 0.1.2-rc.1 在 stdout URL 上带 `?token=<launchToken>`,必须用 token GET `/` → 303 + `set-cookie: dsh-auth-<hash>=<签名>` 换取后续 `/api/*` 和 WS 用到的 signed cookie。详见 §1.3.6
 
 #### 1.3.2 HTTP RPC
 ```
@@ -104,34 +105,119 @@ Response:
 
 **未列入主流程的 RPC**:`agentPresets/list`(`{args:{}}`)返回 dsh 的 preset taxonomy(`standard/ptc/minimal/cordis`,每个 `trust:"system"`)。**0.1.2-rc.1 实机未提供 `host.describe`**,nightme 不再依赖该 RPC 做存在性探测(详见 §1.3.5)。
 
-#### 1.3.5 服务身份探测(2026-09-10 实测锁定)
+#### 1.3.5 服务身份探测 — 已废弃
 
-nightme 在 spawn 之前先 `DiscoverExisting(3080)`:TCP dial 3080,如果通就请求 **`GET /manifest.webmanifest`** 做服务身份确认。这一路径取代了旧版依赖 `POST /api/host.describe` 的 RPC 探针(后者在 dsh 0.1.2-rc.1 已 404)。
+nightme 不再做任何"是否已有 dsh 在跑"的探测 — `StartSharedHost` 现在 **always-spawn**(见 §1.3.1)。原因:dsh 0.1.2-rc.1 的 auth 模型让"attach 到外部 dsh"不可达(launch token 不外泄,无法 mint cookie;详见 §1.3.6)。
+
+`manifest.webmanifest` endpoint 仍然存在,dsh 0.1.2-rc.1 实测:
+```
+GET /manifest.webmanifest  →  200 application/manifest+json
+{
+  "name":      "DeepSeek Harness",
+  "short_name": "DSH",
+  "start_url": "/",
+  ...
+}
+```
+但 nightme 不再读它(原 fingerprint 验证逻辑已在 always-spawn 化简时被删;`internal/bridge/dsh/host/discover.go` 已删除)。
+
+#### 1.3.6 Auth: launch token → dsh-auth cookie(2026-09-10 实测锁定)
+
+dsh 0.1.2-rc.1 起 **强制 per-process signed-cookie auth**:`/api/*` 和 WS upgrade endpoint 都用 `dsh-auth-<sha256(authority)>=<signed-payload>` cookie 校验,**没有任何无 auth 的业务 RPC**。launch token 仅在初始 `GET /` 上有效,用于 mint cookie 本身。
 
 ```
-GET /manifest.webmanifest
-Accept: */*
-Cookie: (无 — 该 endpoint 不需 auth)
+GET http://127.0.0.1:3080/?token=<launchToken>
+Cookie: (无)
 → 期望:
-  HTTP/1.1 200
-  Content-Type: application/manifest+json
-  {
-    "name":      "DeepSeek Harness",
-    "short_name": "DSH",
-    "start_url": "/",
-    ...
-  }
+  HTTP/1.1 303 See Other
+  location: /
+  set-cookie: dsh-auth-VPhEEcLKeqRDBoBalzN2Nm7CnfxKhLE00pKIDWxt1sw=
+             v1.eyJ2ZXJzaW9uIjoxLCJhdXRob3JpdHkiOiIxMjcuMC4wLjE6MzA4MCIs...;
+             Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict
 ```
 
-**指纹断言**(任一不满足即 `ErrNotDSH`):
-1. HTTP 200
-2. `Content-Type: application/manifest+json`
-3. JSON `name == "DeepSeek Harness"`(dsh-专属)
-4. JSON `short_name == "DSH"`(二次校验)
+**launch token 来源**:dsh spawn 后 stdout 第一行打印 `dsh web: http://127.0.0.1:3080/?token=<launchToken>`,`spawnAndWire` 用正则 `dsh web:\s+(http://[^\s]+)` 捕获完整 URL,`url.Query().Get("token")` 提取。
 
-**为什么不沿用 RPC 探针**:`host.describe` 在 0.1.2-rc.1 实测 404;`/api/version` / `/api/health` / `/healthz` 全部不存在;`agentPresets/list` 是唯一稳定的 RPC,但需 dsh-auth cookie(attach 到用户已经在浏览器开的 dsh 时拿不到 token)。`manifest.webmanifest` 是静态资源、unauth、dsh 启动即可用、含 dsh-专属字符串 — 实测验证这是当前唯一干净的 fingerprint 路径。
+**nightme 的 mint 流程**(`internal/bridge/dsh/host/lifecycle.go::spawnAndWire`):
+1. 单 goroutine 同时 drain stdout + parse URL line;token 一旦捕获立刻送 channel,后续行继续 drain(避免 dsh stdout pipe 填满 deadlock)。
+2. `waitForListen` 确认 TCP accept。
+3. `mintAuthCookie(ctx, baseURL, token)`:构造新 `cookiejar`,`GET /?token=<token>`,CheckRedirect 限制一次跳(303 → / 后立即返回),`resp.Cookies()` 拿到 `Set-Cookie`,`jar.SetCookies(u, cookies)` 注入。
+4. `NewWithJar(baseURL, jar, log)` 构造 Client:`RPCClient` 用 `&http.Client{Jar: jar, Timeout: ...}`(替换默认无 jar client);`StreamHub` 通过 `NewStreamHubWithJar` 把 jar 传到 `websocket.Dialer.Jar`,WS upgrade 自动带 cookie。
+5. `cli.Start` 启 WS pumps。
 
-**反例验证**:起一个 Python `http.server` 返回 `{"name":"Generic PWA",...}`,该 endpoint 200 + application/manifest+json 通过,但 `name != "DeepSeek Harness"` → 探针正确拒绝。
+**为什么不 attach 到外部 dsh**:
+- launch token 是 dsh process-internal 的,**既不写文件也不暴露 API**(grep `processLaunchToken` 全在内存对象上)
+- `/proc/<pid>/environ` / `/proc/<pid>/fd` 在 Linux 上可读,但 macOS 没 `/proc`,跨平台不可靠
+- 即使能读到 token,外部 dsh 的 `secret` 也是 per-process 的,我们伪造不出 cookie
+
+→ 外部 dsh attach 在 dsh 0.1.2-rc.1+ 下不可达,`StartSharedHost` 直接 always-spawn。
+
+#### 1.3.7 dsh 0.1.2-rc.1 Remote mux 协议(2026-09-11 实测锁定)
+
+dsh 0.1.2-rc.1 把 `/api/events.mux` + `/api/events.host` 合并成**单一** `/api/remote.mux`,wire 改成自定义 JSON 帧,不再是 gorilla server-push:
+
+```
+client → server:  {type:"open",   streamId, endpoint, payload:{args:{...}}}
+client → server:  {type:"cancel", streamId}
+server → client:  {type:"ready",  clientId, host:{home:"..."}}
+server → client:  {type:"item",   streamId, value}        ← 业务帧
+server → client:  {type:"end",    streamId}
+server → client:  {type:"error",  streamId, error:{code, message, details}}
+```
+
+**bridge 的 StreamHub 重写要点**:
+- **单一物理 WS** 到 `/api/remote.mux`(`stream.go::connectAndServe`)
+- **两条逻辑流**:
+  - `hostStreamID = "host-$events"`(固定)→ endpoint `"$events"`,payload `{args:{}}`,接收 Host lifecycle 帧
+  - 每个 session 一个 `session/follow` 流 → payload `{args:{address:{kind:"session", sessionId:"..."}}}`,接收 session event
+- **Cookie quirk 修复**:Go stdlib `cookiejar.Jar.Cookies(wsURL)` 对 ws:// 永远返 0(实现里 `if u.Scheme != "http" && u.Scheme != "https" return cookies`)。dsh 的 mux 升级要求 cookie,所以必须用 `websocket.NewClient` 而非 `Dialer.Dial`,把 cookie 头手工塞到 upgrade request 上
+- **dispatch 翻译**:`SessionFollowFrame.event.data` 形状 (`{type, seq, time, data}`) 翻译成 bridge 旧 `{method, rpcId, payload}` envelope;`payload.sessionId` 强制从订阅时的 sub.sessionID 注入(Router.DispatchMux 用它路由)
+- **host 事件帧**是 `RemoteEventRecord` (`{id, event, ...rest}`) 形状,直接 1:1 翻译
+
+**测试覆盖**:
+- mockDSH 重写:单 WS handler 读 client 帧的 `type/open/cancel` 字段,按 streamId 路由 item 到 `muxStreamWriter` goroutine
+- mockDSH 写并发安全:多 stream writer 用 `m.writeMu` 串行化 `conn.WriteJSON`(gorilla 内部 state 不能并发)
+- 全部 5 个 TestClient_* 通过 (`go test -race`)
+
+#### 1.3.7 Wire shape drift(2026-09-11 实测锁定)
+
+dsh 0.1.2-rc.1 的 typert descriptors 已经定型,但 nightme 的 client/session 还在用旧版 wire 假设。**本分支只修了其中一部分**;剩余的留给单独 PR。
+
+| 端点 | 旧 wire(当前 client.go / session.go) | dsh 0.1.2-rc.1 要求 | 本分支状态 |
+|------|--------------------------------------|-------------------|-----------|
+| `session.prompt` body | `{request:{sessionId, mode:"queue", content:[...]}}` | **必须加 `requestId`**(client-minted UUID);`mode` 必须是 `"queue"` 或 `"steer"`(不能空串) | ✅ 已修(`internal/bridge/dsh/session.go::SendBlocks` 加 `requestId` via `mintRequestID`) |
+| WS endpoint | `/api/events.mux` + `/api/events.host` | 单一 `/api/remote.mux` + 自定义 `{type:"open"\|"item"\|"end"\|"error", streamId}` 协议 | ❌ 未修(在 mock 测试里旧路径还在用;改 WS 协议会破所有 mock) |
+| `host.describe` RPC | POST `/api/host.describe` | **404**(已删除) | ⚠️ 不影响生产(probe 路径已删);但任何残留调用会 404 |
+| `workspace.create` body | `{cwd:"/path"}` | typert 要求 `{cwd}` 是绝对路径且 workspace 不重复存在(否则返 `gateway/arguments-conflict`) | ✅ bridge 当前用 `d.sessionID` 派生 `cwd` 应该 OK,但 **未实机验证过** |
+
+**为什么 WS 协议没顺手修**:
+- dsh 0.1.2-rc.1 的 mux 协议是 `{type:"open", streamId, endpoint, payload}` → 客户端**主动**发 `open` 帧(dsh 收到后 per-streamId 推 `{type:"item", value}` / `{type:"end"}` / `{type:"error", error}`)
+- nightme 的 bridge 是**被动**读 server-push(`{type:"server-request", method, rpcId, payload}`)
+- 完全不同的会话模型 — 改造需要重写 stream.go::runPump / readUntilClose + Router 的 dispatch
+- mock 测试用 httptest server,路径和帧格式都对不上新协议 → 会全 fail
+- **scope 太激进**,放单独 PR
+
+**实机 e2e 验证状态**(2026-09-11 against dsh 0.1.2-rc.1):
+| 步骤 | 结果 |
+|------|------|
+| `StartSharedHost` spawn dsh on 3080 | ✅ OK |
+| `GET /?token=X` → 303 + `set-cookie: dsh-auth-*` | ✅ OK |
+| cookie jar 通过 `NewWithJar` 串到 RPC client | ✅ OK(SessionList 返回 283 真 items) |
+| `SessionList` 真 RPC 返回 283 个真 session | ✅ OK |
+| `SessionCreate` 真 RPC 返回真 sessionID | ✅ OK(`session-{uuid}`) |
+| `SessionPrompt` body 含 `requestId` | ✅ OK(dsh 接受,`result.accepted=true`) |
+| 等模型 reply via WS | ❌ FAIL — WS 用旧路径,dsh 没反应;改路径后 dsh 用新 mux 协议,我们读不懂 |
+
+**用户的 `/review` 真正的失败路径**(按可能性排序):
+1. dsh 中途死了 + watchdog 重 spawn 用钉死的 3080(被占) → connection refused。**已在本次分支修**(watchdog 重 spawn 时也走 `findFreePort`)。✅
+2. `workspace.create` body shape 漂移 — 没验过,可能修需要类似 requestId 的添加
+3. `session.prompt` 缺 `requestId` — **本次分支修了**。✅
+4. WS 收不到 reply — 协议漂移,**未修**。❌
+
+**下次 PR 优先级**(按工作量和影响排):
+1. **WS mux 协议重写**(stream.go + Router.dispatcher)— 大改造,会让所有 mock 测试 fail。需要新增 mock mux server 跟 dsh 0.1.2-rc.1 wire 同步。
+2. **其他 RPC body shape** 校对(welcome.create, session.cancel 等)— 单测 + probe,工作量中等。
+3. **tray "Open Dashboard" 菜单** — 修了上面之后才有用,否则浏览器还是 stale URL。
 
 #### 1.3.3 WebSocket 下行(2 条独立流)
 
@@ -777,9 +863,9 @@ t12  AgentSession.SetExited(0)
 **影响**:zero-config 接入,nightme 不注入任何 model/provider/credentials
 
 ### 8.4 dsh web spawn URL pattern
-**实测**(2026-09-10 实机 dsh 0.1.2-rc.1):`dsh --profile web` → stdout 第一行仍是 `dsh web: http://127.0.0.1:3080`,约 1.5s 启动
-**影响**(2026-09-10 改):nightme 现在**显式传 `--port 3080`**,不再依赖 stdout URL 解析;Readiness 靠 `waitForListen` TCP-poll。**这是 2026-09-10 的关键架构改动**:之前用正则 `dsh web: http://([^:]+):(\d+)` 提取 host:port + 硬断言端口 == 3080 的路径,会因为 (a) dsh stdout 格式漂移 或 (b) dsh 默认端口漂移 导致 race/silent failure。新路径用 TCP accept 判定 readiness,完全不依赖 stdout 文本。
-**关键决策**(2026-09-10):**永远不传 `--port 0`**(OS 随机端口)。理由与之前相同 —— 与 sessions 跨实例分裂问题冲突。3080 被占且非 dsh 时,`findFreePort(3081, 3099)` 扫候选端口,扫不到则 fail loud
+**实测**(2026-09-10 实机 dsh 0.1.2-rc.1):`dsh --profile web` → stdout 第一行 `dsh web: http://127.0.0.1:3080/?token=<launchToken>`,约 1.5s 启动。
+**影响**(2026-09-10 改):nightme 显式传 `--port 3080`(或 fallback `[3081, 3099]`)给 dsh;Readiness 靠 `waitForListen` TCP-poll(不解析 stdout);随后 `mintAuthCookie` GET `/?token=<launchToken>` 换 signed cookie(详见 §1.3.6)。**这是 2026-09-10 的关键架构改动**:之前用正则 `dsh web: http://([^:]+):(\d+)` 提取 host:port + 硬断言端口 == 3080 的路径,会因为 (a) dsh stdout 格式漂移 或 (b) dsh 默认端口漂移 导致 race/silent failure。新路径用 TCP accept 判定 readiness,完全不依赖 stdout 文本做端口决策。
+**关键决策**(2026-09-10):**永远不传 `--port 0`**(OS 随机端口)。理由与之前相同 —— 与 sessions 跨实例分裂问题冲突。3080 被占(任何服务)时,`findFreePort(3081, 3099)` 扫候选端口,扫不到则 fail loud。**always-spawn** 见 §1.3.1:即使 3080 上有 dsh,我们也 spawn 自己的(因为外部 dsh 拿不到 cookie — §1.3.6)。
 
 ### 8.5 WS 路径是 dot 不是 slash
 **关键常量**(从 `packages/client/connection/src/api-path.ts`):
@@ -1433,7 +1519,7 @@ func WithEventSink(sink func(AgentEvent)) RunOnceOption
 | 多 session 并发 | N/A(进程独立) | ✅ 共享 dsh web,native 支持 n 个 session |
 | 日志 | 进程级 stdout | 增加 `dsh: session archived session_id=…` 行 |
 | 测试模式 | `print_real_unix_test.go` 跑 mock script | `session_real_unix_test.go` 跑 mock dsh web |
-| **用户自启 dsh web** | 不复用(headless 跑自己的) | **nightme 自动 attach**(`EnsureSharedHost` 的 reuse-or-spawn 命中 `DiscoverExisting`);用户原本开的 dashboard 与 nightme session 共享 mux 通道 — 可观测但不影响 nightme 行为 |
+| **用户自启 dsh web** | 不复用(headless 跑自己的) | **不 attach,nightme 自己 spawn 一个**(§1.3.1 always-spawn);用户的 dashboard 与 nightme session 在不同 dsh 实例上 — 各自独立 cookie 各自独立 WS,**nightme 不会复用用户 dashboard 的 session** |
 
 ### 15.8 后续 PR 路线
 

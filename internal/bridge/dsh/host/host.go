@@ -24,7 +24,9 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"sync"
 )
 
@@ -116,6 +118,12 @@ type Client struct {
 // Trailing slashes are tolerated (RPCClient strips them). An empty
 // baseURL is an error surfaced at Start time (Start needs a parseable
 // URL even if we don't dial immediately).
+//
+// New builds an unauthenticated client (no cookie jar). It is the
+// right entry point for tests with httptest-backed fake dsh servers
+// that don't auth-gate. Production code paths must use NewWithJar
+// — dsh 0.1.2-rc.1 auth-gates /api/* and /api/events.*, and an
+// unauthenticated client gets 401 on every call.
 func New(baseURL string, log *slog.Logger) *Client {
 	if log == nil {
 		log = slog.Default()
@@ -130,6 +138,43 @@ func New(baseURL string, log *slog.Logger) *Client {
 	// Wire Hub callbacks to Router. DispatchMux extracts sessionId
 	// from the payload itself — the Hub is payload-agnostic.
 	c.Hub = NewStreamHub(baseURL, log,
+		c.Router.DispatchMux,
+		c.Router.DispatchHost,
+	)
+	return c
+}
+
+// NewWithJar constructs the Client with a cookie jar attached to
+// both the HTTP RPC client and the WebSocket dialer. spawnAndWire
+// uses this after minting the dsh-auth cookie via the
+// `GET /?token=<launchToken>` exchange (dsh 0.1.2-rc.1 returns a
+// 303 with `set-cookie: dsh-auth-<hash>=<signed-payload>` which
+// we stash in jar before constructing the client).
+//
+// jar must be non-nil; passing nil is a programming error — use
+// New instead.
+func NewWithJar(baseURL string, jar http.CookieJar, log *slog.Logger) *Client {
+	if jar == nil {
+		// Defensive — callers that hand us a nil jar are almost
+		// certainly confused about which constructor to use.
+		// Falling back to New keeps the bridge from panic'ing
+		// but the first /api call will 401 and surface the bug.
+		return New(baseURL, log)
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	c := &Client{
+		baseURL: baseURL,
+		log:     log,
+		closed:  make(chan struct{}),
+	}
+	c.Router = NewRouter(log)
+	c.RPC = NewRPCClientWithHTTP(baseURL, &http.Client{
+		Jar:     jar,
+		Timeout: httpClientTimeout,
+	})
+	c.Hub = NewStreamHubWithJar(baseURL, jar, log,
 		c.Router.DispatchMux,
 		c.Router.DispatchHost,
 	)
@@ -246,9 +291,29 @@ type RecoverResult struct {
 // for the common cases. They're 1-line wrappers — the doc comments
 // live on Router.
 
-// Subscribe installs a per-session mux handler. See Router.Subscribe.
-func (c *Client) Subscribe(sessionID, cwd string, h MuxFrameHandler) {
+// Subscribe installs a per-session mux handler AND opens a
+// `session/follow` stream on the dsh mux connection so the
+// handler actually receives events. Returns a cancel function
+// that drops both the handler and the stream.
+//
+// cwd is captured for respawn recovery (see Router.Subscribe).
+func (c *Client) Subscribe(sessionID, cwd string, h MuxFrameHandler) (unsubscribe func()) {
 	c.Router.Subscribe(sessionID, cwd, h)
+	// StreamHub.Subscribe handles "no Hub yet" gracefully (it's a
+	// no-op when Hub is nil) — callers can call Subscribe before
+	// Start without panicking. The stream actually opens when
+	// Start runs and the mux pump comes up; re-issue Subscribe
+	// from inside Client.RecoverSubscriptions if you need a
+	// guaranteed post-respawn re-subscribe.
+	unsubscribeFromHub := c.Hub.Subscribe(sessionID, func(method, rpcID string, payload json.RawMessage) {
+		c.Router.DispatchMux(method, rpcID, payload)
+	})
+	return func() {
+		if unsubscribeFromHub != nil {
+			unsubscribeFromHub()
+		}
+		c.Router.Unsubscribe(sessionID)
+	}
 }
 
 // Unsubscribe removes the sessionId's mux handler and drops its

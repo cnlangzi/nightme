@@ -26,7 +26,7 @@ func TestVerifyHandoffFile_FileExists_ReportsSize(t *testing.T) {
 	if !strings.HasPrefix(got, "✅") {
 		t.Errorf("expected success prefix in %q", got)
 	}
-	if !strings.Contains(got, ".nightme/handoff/demo.md") {
+	if !strings.Contains(got, "~/.nightme/handoff/demo.md") {
 		t.Errorf("expected canonical slash-form path in %q", got)
 	}
 	if !strings.Contains(got, "saved") {
@@ -48,7 +48,7 @@ func TestVerifyHandoffFile_FileMissing_ReportsFailure(t *testing.T) {
 	if !strings.Contains(got, "did not write") {
 		t.Errorf("expected 'did not write' phrasing in %q", got)
 	}
-	if !strings.Contains(got, ".nightme/handoff/demo.md") {
+	if !strings.Contains(got, "~/.nightme/handoff/demo.md") {
 		t.Errorf("expected canonical path in %q", got)
 	}
 }

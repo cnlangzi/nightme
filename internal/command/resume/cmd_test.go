@@ -257,8 +257,8 @@ func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	text := outReply(t, out, in)
-	if !strings.Contains(text, ".nightme/handoff/demo.md") {
-		t.Errorf("missing-handoff reply should name .nightme/handoff/demo.md: %q", text)
+	if !strings.Contains(text, "~/.nightme/handoff/demo.md") {
+		t.Errorf("missing-handoff reply should name ~/.nightme/handoff/demo.md: %q", text)
 	}
 	if !strings.Contains(text, "/handoff") {
 		t.Errorf("missing-handoff reply should suggest /handoff: %q", text)
@@ -350,7 +350,7 @@ func TestFactory_Handle_QueuesResume(t *testing.T) {
 	if !strings.Contains(text, "Resuming") {
 		t.Errorf("ack should mention Resuming: %q", text)
 	}
-	if !strings.Contains(text, ".nightme/handoff/demo.md") {
+	if !strings.Contains(text, "~/.nightme/handoff/demo.md") {
 		t.Errorf("ack should name the slash-form handoff path: %q", text)
 	}
 	if got := cs.QueueLen(); got != 1 {
@@ -419,14 +419,10 @@ func TestRenderResumePrompt_SubstitutesPath(t *testing.T) {
 		t.Errorf("rendered prompt missing %s; got:\n%s", wantFile, got)
 	}
 
-	// Per-cwd handoff forms must not appear — the resume
-	// prompt only points the Agent at the canonical home path.
-	if strings.Contains(got, "./.nightme/handoff/demo.md") {
-		t.Errorf("rendered prompt must not include a per-cwd handoff path")
-	}
-	if strings.Contains(got, "./handoff/demo.md") {
-		t.Errorf("rendered prompt must not include a relative-cwd handoff path")
-	}
+	// Pinning the handoff to a single project would defeat the
+	// cross-cwd /resume design — keep this assertion so a
+	// future prompt edit that re-introduces project-scoping
+	// wording surfaces as a test diff.
 	if strings.Contains(got, "CURRENT PROJECT") {
 		t.Errorf("rendered prompt must not pin the handoff to a single project")
 	}

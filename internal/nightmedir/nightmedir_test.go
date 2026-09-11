@@ -341,11 +341,13 @@ func TestEnsureHandoffDir_PreservesExistingFiles(t *testing.T) {
 
 // HandoffRelPath: always slash-form, independent of host
 // platform — used in user-visible reply text where IM cards
-// render forward slashes regardless of OS.
+// render forward slashes regardless of OS. Includes the `~/`
+// prefix so the user knows where to find the file without
+// knowing the .nightme convention.
 func TestHandoffRelPath_AlwaysSlash(t *testing.T) {
 	got := nightmedir.HandoffRelPath("demo")
-	if got != ".nightme/handoff/demo.md" {
-		t.Errorf("HandoffRelPath = %q, want .nightme/handoff/demo.md", got)
+	if got != "~/.nightme/handoff/demo.md" {
+		t.Errorf("HandoffRelPath = %q, want ~/.nightme/handoff/demo.md", got)
 	}
 	if strings.Contains(got, `\`) {
 		t.Errorf("HandoffRelPath must not contain backslash; got %q", got)

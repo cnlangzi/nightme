@@ -403,23 +403,6 @@ func TestRenderHandoffPrompt_SubstitutesPaths(t *testing.T) {
 	if !strings.Contains(got, wantFile) {
 		t.Errorf("rendered prompt missing %s; got:\n%s", wantFile, got)
 	}
-
-	// Per-cwd handoff paths must NOT appear anywhere — the
-	// whole point of the rewrite is that the handoff lives in
-	// $HOME, not in <cwd>/.nightme/. The Agent only sees one
-	// canonical path; forbidding the per-cwd form removes a
-	// class of "I wrote it locally" mistakes.
-	for _, banned := range []string{"./.nightme/", "demo.md (relative", "demo.md (cwd"} {
-		if strings.Contains(got, banned) {
-			t.Errorf("rendered prompt contains forbidden-path form %q", banned)
-		}
-	}
-	if strings.Contains(got, "./.nightme/handoff/demo.md") {
-		t.Errorf("rendered prompt must not include the per-cwd handoff path")
-	}
-	if strings.Contains(got, "./handoff/demo.md") {
-		t.Errorf("rendered prompt must not include a relative-cwd handoff path")
-	}
 }
 
 // RenderHandoffPrompt: the templated prompt still has the

@@ -213,9 +213,9 @@ func EnsureGitignoreEntry(cwd string) error {
 // <cwd>/.nightme/ would defeat the purpose.
 const HandoffDirName = "handoff"
 
-// HandoffFileSuffix is the on-disk extension RenderedHandoffFilename
-// appends. Single source of truth for the extension so /handoff
-// and /resume cannot drift on a rename.
+// HandoffFileSuffix is the on-disk extension HandoffFilePath and
+// HandoffRelPath append. Single source of truth for the
+// extension so /handoff and /resume cannot drift on a rename.
 const HandoffFileSuffix = ".md"
 
 // handoffNameMaxLen caps ValidateHandoffName at 64 characters —
@@ -311,12 +311,16 @@ func ValidateHandoffName(name string) error {
 // `~/.nightme/handoff/<name>.md` for user-visible reply text
 // (Feishu / Slack / Telegram / bot IM cards all render forward
 // slashes regardless of host platform, so platform-canonical
-// pathutil.Join output would look wrong to the user).
+// pathutil.Join output would look wrong to the user). The `~/`
+// prefix anchors the path to the user's home — a bare
+// `.nightme/handoff/<name>.md` would not tell the user where to
+// find the file without first knowing that `.nightme/` lives
+// under $HOME.
 //
 // Caller must pass a name that ValidateHandoffName has already
 // accepted — HandoffRelPath does not re-validate, so a stray
 // '/' in name would render as an escaped path the user can't
 // follow.
 func HandoffRelPath(name string) string {
-	return DirName + "/" + HandoffDirName + "/" + name + HandoffFileSuffix
+	return "~/" + DirName + "/" + HandoffDirName + "/" + name + HandoffFileSuffix
 }

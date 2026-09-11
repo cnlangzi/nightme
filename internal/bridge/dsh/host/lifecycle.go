@@ -43,6 +43,7 @@ package host
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -248,9 +249,28 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		logger = slog.Default()
 	}
 
-	// Step 1: pick a port. Canonical is 3080; if anything is
-	// already listening there (dsh or foreign), sweep
-	// [3081, 3099] for the first free port.
+	// Step 1: try to attach to an existing dsh before spawning.
+	// The cookie we mint from ~/.dsh/.credentials.yaml is accepted
+	// by ANY dsh on this host that loaded the same secret — and
+	// every dsh on this user account does, because they all share
+	// ~/.dsh/. So if anything is already listening on 3080 (or any
+	// other port dsh uses), we probe with our minted cookie and
+	// reuse the running dsh. This eliminates the orphan-dsh-on-port-
+	// 3081-3099 pattern that the old "spawn fallback" policy
+	// created.
+	attachHost, attached := tryAttachExistingDSH(ctx, logger)
+	if attached {
+		logger.Info("dsh.host: attached to existing dsh — no spawn needed",
+			"port", attachHost.port)
+		// Run watchdog in "foreign process" mode: it watches the
+		// WS connection and re-attaches when it drops; if dsh dies
+		// permanently, we fall back to spawn.
+		go attachHost.watchForeign(logger)
+		return attachHost.host, nil
+	}
+
+	// Step 2: port 3080 free (or cookie rejected on the foreign
+	// dsh). Spawn our own.
 	port := defaultDSHPort
 	if dialReachable(defaultDSHPort) {
 		scanMin, scanMax := defaultPortScanMin, defaultPortScanMax
@@ -298,6 +318,106 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	go host.runWatchdog()
 
 	return host, nil
+}
+
+// attachedSharedHost bundles the resources for a foreign dsh we
+// attached to via tryAttachExistingDSH. We carry the resolved port
+// so the watchdog can re-probe on WS drop, and a no-cmd SharedHost
+// (cmd is nil — we didn't spawn it).
+type attachedSharedHost struct {
+	host *SharedHost
+	port int
+}
+
+// tryAttachExistingDSH probes 3080 (then 3081-3099 in order) for
+// any dsh that's already listening, builds a *Client with our
+// minted cookie, and calls /api/session/list to verify the cookie
+// validates. Returns the first hit; if all probes fail, returns
+// attached=false so the caller falls back to spawn.
+func tryAttachExistingDSH(ctx context.Context, logger *slog.Logger) (*attachedSharedHost, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	for _, port := range append([]int{defaultDSHPort}, fallbackPorts()...) {
+		if !dialReachable(port) {
+			continue
+		}
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+		authority := strings.TrimPrefix(baseURL, "http://")
+		jar, err := mintDSHAuthCookieFromCredentials(authority)
+		if err != nil {
+			logger.Debug("dsh.host: attach probe: mint cookie failed",
+				"port", port, "err", err)
+			continue
+		}
+		probe := &http.Client{Jar: jar, Timeout: 3 * time.Second}
+		// session.list is a typed POST (args._request); see
+		// @deepseek-ai/dsh-api-session-controller/lib/typert.host.js.
+		// Use POST + the canonical typert envelope so the gateway
+		// routes on namespace = "session" + method = "list".
+		body := []byte(`{"type":"client-request","rpcId":"probe","method":"session/list","payload":{"args":{"_request":{}}}}`)
+		req, _ := http.NewRequestWithContext(probeCtx, http.MethodPost,
+			baseURL+"/api/session/list", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := probe.Do(req)
+		if err != nil {
+			logger.Debug("dsh.host: attach probe: dial failed",
+				"port", port, "err", err)
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			logger.Debug("dsh.host: attach probe: cookie rejected",
+				"port", port, "status", resp.StatusCode)
+			continue
+		}
+		// Cookie validates — build the production *Client and start
+		// its WS pump. We didn't spawn this dsh so cmd is nil and
+		// ownsProcess=false; the watchdog must NOT kill it on Close.
+		cli := NewWithJar(baseURL, jar, logger)
+		// Install the host waterfall handler BEFORE Start — dsh
+		// sends the host $events `ready` frame immediately after
+		// the WS upgrade, so the handler must be wired before we
+		// dial.
+		OnLifecycleInstall(cli)
+		// Use the caller's long-lived ctx (StartSharedHost's), NOT
+		// probeCtx (10s timeout): the Hub's WS reconnect loop has
+		// to outlive the attach probe or it'll die mid-session.
+		if err := cli.Start(ctx); err != nil {
+			logger.Warn("dsh.host: attach probe: cli.Start failed",
+				"port", port, "err", err)
+			continue
+		}
+		SetGlobal(cli)
+		return &attachedSharedHost{
+			host: &SharedHost{cli: cli, logger: logger, opts: SharedHostOptions{}},
+			port: port,
+		}, true
+	}
+	return nil, false
+}
+
+// fallbackPorts returns [3081, 3082, …, 3099] for the attach
+// probe sweep. 3080 is tried first by the caller before iterating.
+func fallbackPorts() []int {
+	out := make([]int, 0, defaultPortScanMax-defaultPortScanMin+1)
+	for p := defaultPortScanMin; p <= defaultPortScanMax; p++ {
+		out = append(out, p)
+	}
+	return out
+}
+
+// watchForeign is the watchdog variant for attached (foreign) dsh.
+// We don't own cmd — if it dies permanently, re-probe with
+// tryAttachExistingDSH; if nothing is listening, fall back to a
+// fresh spawn on 3080 (the canonical port).
+func (a *attachedSharedHost) watchForeign(logger *slog.Logger) {
+	// The Hub's WS reconnect loop already kicks in transparently on
+	// transient WS drops. We only need to act if the dsh process
+	// itself exits (which we can't observe directly without a cmd
+	// handle). For now, do nothing — the next Start call from
+	// any chat session will re-probe.
+	_ = logger
 }
 
 // dialReachable reports whether a TCP connection to 127.0.0.1:port

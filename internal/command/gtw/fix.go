@@ -13,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/prcache"
 )
@@ -138,7 +139,7 @@ func RunFix(
 	// --force bypass path is gone (see F-gtw-fix.md §1.2);
 	// users with stale worktree paths run `git worktree
 	// remove --force <path>` or `/gtw close` manually.
-	if _, err := os.Stat(pathutil.Join(cs.SelectedCwd(), nightmeDirName, gtwYmlName)); err == nil {
+	if _, err := os.Stat(pathutil.Join(cs.SelectedCwd(), nightmedir.DirName, gtwYmlName)); err == nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}

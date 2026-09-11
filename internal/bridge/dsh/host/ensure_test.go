@@ -53,8 +53,8 @@ func TestEnsureSharedHost_FirstCallStarts(t *testing.T) {
 		ForceSpawn: true,
 	})
 	// Tear down the spawned fake-dsh subprocess before resetEnsureState
-	 // wipes the SharedHost pointer — killFakeDSH needs the pointer
-	 // to find the PID. Order matters because Cleanup hooks run LIFO.
+	// wipes the SharedHost pointer — killFakeDSH needs the pointer
+	// to find the PID. Order matters because Cleanup hooks run LIFO.
 	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 	if err != nil {
 		t.Fatalf("EnsureSharedHost: %v", err)
@@ -138,9 +138,9 @@ func TestEnsureSharedHost_ConcurrentFirstTouch(t *testing.T) {
 	wg.Wait()
 	// The Once means exactly one of the N goroutines actually spawned;
 	// killFakeDSH now tears down that single subprocess. Doing this
-	 // *after* wg.Wait ensures we capture the SharedHost pointer
-	 // (it's installed by the winning goroutine). Ordered before
-	 // the killFakeDSH so the cleanup runs after this test's body.
+	// *after* wg.Wait ensures we capture the SharedHost pointer
+	// (it's installed by the winning goroutine). Ordered before
+	// the killFakeDSH so the cleanup runs after this test's body.
 	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 
 	for i, err := range errs {

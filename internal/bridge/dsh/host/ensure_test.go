@@ -17,6 +17,7 @@ package host_test
 import (
 	"context"
 	"net"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -51,6 +52,10 @@ func TestEnsureSharedHost_FirstCallStarts(t *testing.T) {
 		HostCmd:    fake,
 		ForceSpawn: true,
 	})
+	// Tear down the spawned fake-dsh subprocess before resetEnsureState
+	 // wipes the SharedHost pointer — killFakeDSH needs the pointer
+	 // to find the PID. Order matters because Cleanup hooks run LIFO.
+	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 	if err != nil {
 		t.Fatalf("EnsureSharedHost: %v", err)
 	}
@@ -80,6 +85,7 @@ func TestEnsureSharedHost_SecondCallReturnsSame(t *testing.T) {
 		HostCmd:    fake,
 		ForceSpawn: true,
 	})
+	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 	if err != nil {
 		t.Fatalf("first EnsureSharedHost: %v", err)
 	}
@@ -130,6 +136,12 @@ func TestEnsureSharedHost_ConcurrentFirstTouch(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+	// The Once means exactly one of the N goroutines actually spawned;
+	// killFakeDSH now tears down that single subprocess. Doing this
+	 // *after* wg.Wait ensures we capture the SharedHost pointer
+	 // (it's installed by the winning goroutine). Ordered before
+	 // the killFakeDSH so the cleanup runs after this test's body.
+	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 
 	for i, err := range errs {
 		if err != nil {
@@ -198,6 +210,19 @@ func TestEnsureSharedHost_FallsBackWhen3080Foreign(t *testing.T) {
 		host.UnsetSharedHost()
 		host.ResetEnsureForTest()
 	})
+
+	// The test uses the real `dsh` binary (not fake-dsh) because
+	// it's exercising the production spawn path — only real dsh
+	// hits the fallback branch under the real wire shape. Skip
+	// when dsh isn't on PATH: CI runners don't ship dsh by default
+	// (only the user's workstation does), and exec.LookPath
+	// failing inside EnsureSharedHost would surface as an
+	// instantaneous "executable file not found" — not the
+	// fallback behavior the test is trying to assert.
+	if _, err := exec.LookPath("dsh"); err != nil {
+		t.Skipf("real dsh not on PATH: %v", err)
+	}
+
 	// Sanity: confirm 3080 is held by a non-dsh service. The
 	// outer test runner is expected to start one; if not, this
 	// test asserts the wrong thing (it would see ErrNotRunning

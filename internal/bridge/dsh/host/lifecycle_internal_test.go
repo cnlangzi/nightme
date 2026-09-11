@@ -144,27 +144,22 @@ func TestFindFreePort_FirstAvailable(t *testing.T) {
 }
 
 func TestFindFreePort_AllOccupiedFails(t *testing.T) {
-	// Bind two consecutive ports; scan that exact range — should fail.
-	l1, err := net.Listen("tcp", "127.0.0.1:0")
+	// Bind a single port; scan the [port, port] range. findFreePort
+	// must return an error because the only port in the range is
+	// bound. This used to bind two OS-assigned ports and scan from
+	// the smaller to the larger, which is flaky: nothing forces the
+	// two assigned ports to be consecutive, so any gap between them
+	// could be free and the test would falsely pass. Scanning a
+	// single port removes the assumption.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen 1: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
-	defer l1.Close()
-	p1 := l1.Addr().(*net.TCPAddr).Port
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
 
-	l2, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen 2: %v", err)
-	}
-	defer l2.Close()
-	p2 := l2.Addr().(*net.TCPAddr).Port
-
-	lo, hi := p1, p2
-	if lo > hi {
-		lo, hi = hi, lo
-	}
-	if _, err := findFreePort(lo, hi); err == nil {
-		t.Errorf("findFreePort(%d, %d) succeeded; want error (both bound)", lo, hi)
+	if _, err := findFreePort(port, port); err == nil {
+		t.Errorf("findFreePort(%d, %d) succeeded; want error (port bound)", port, port)
 	}
 }
 

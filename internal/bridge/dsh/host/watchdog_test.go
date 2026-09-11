@@ -128,7 +128,19 @@ func main() {
 	}()
 	defer srv.Close()
 
-	lifetime := 0.05
+	// Default 30s lifetime (override via FAKE_DSH_LIFETIME env).
+	//
+	// Lifetime must be long enough that spawnAndWire can complete
+	// the mint-cookie HTTP round-trip before the fake exits — on
+	// CI runners the round-trip can take >50ms due to VM clock
+	// jitter, and the previous 0.05s default caused intermittent
+	// "connection reset by peer" failures during mint. The fake is
+	// still a per-test fixture (not a long-running service) — each
+	// test that needs it explicitly tears down the subprocess in
+	// its Cleanup via killFakeDSH, so a long default does not leak
+	// across tests. The env override is preserved for any future
+	// test that wants the tight race-window behavior back.
+	lifetime := 30.0
 	if s := os.Getenv("FAKE_DSH_LIFETIME"); s != "" {
 		if v, err := strconv.ParseFloat(s, 64); err == nil {
 			lifetime = v

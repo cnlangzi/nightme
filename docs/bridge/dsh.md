@@ -169,7 +169,10 @@ server → client:  {type:"error",  streamId, error:{code, message, details}}
 - **单一物理 WS** 到 `/api/remote.mux`(`stream.go::connectAndServe`)
 - **两条逻辑流**:
   - `hostStreamID = "host-$events"`(固定)→ endpoint `"$events"`,payload `{args:{}}`,接收 Host lifecycle 帧
-  - 每个 session 一个 `session/follow` 流 → payload `{args:{address:{kind:"session", sessionId:"..."}}}`,接收 session event
+  - 每个 session 一个 `session/follow` 流 → payload `{args:{request:{address:{kind:"session", sessionId:"..."}}}}`,接收 session event
+  - **关键**:`session/follow` 的 args 必须用 `request` 包装(不是平铺 address)。typert 的 assertExactArguments 校验会返 `missing "request"; unexpected "address"` 错误,然后 mux server 返 1008 close。verified 2026-09-11 against dsh 0.1.2-rc.1
+  - **关键**:WS upgrade 不能带 `Sec-WebSocket-Protocol: <自定义值>`(dsh 用 `ws` 库严格校验,只接受空或不认识的子协议)。带自定义值返 `Invalid Sec-WebSocket-Protocol header` 400
+  - **关键**:Go stdlib `cookiejar.Jar.Cookies(wsURL)` 对 `ws://` URL 永远返空(显式 `if u.Scheme != "http" && u.Scheme != "https"`)。bridge 用 `websocket.NewClient` + 手动把 cookie 塞 `requestHeader` 解决
 - **Cookie quirk 修复**:Go stdlib `cookiejar.Jar.Cookies(wsURL)` 对 ws:// 永远返 0(实现里 `if u.Scheme != "http" && u.Scheme != "https" return cookies`)。dsh 的 mux 升级要求 cookie,所以必须用 `websocket.NewClient` 而非 `Dialer.Dial`,把 cookie 头手工塞到 upgrade request 上
 - **dispatch 翻译**:`SessionFollowFrame.event.data` 形状 (`{type, seq, time, data}`) 翻译成 bridge 旧 `{method, rpcId, payload}` envelope;`payload.sessionId` 强制从订阅时的 sub.sessionID 注入(Router.DispatchMux 用它路由)
 - **host 事件帧**是 `RemoteEventRecord` (`{id, event, ...rest}`) 形状,直接 1:1 翻译

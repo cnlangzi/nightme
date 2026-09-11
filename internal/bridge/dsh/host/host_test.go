@@ -251,17 +251,22 @@ func (m *mockDSH) muxPumpLoop(conn *websocket.Conn) {
 			m.streamsMu.Lock()
 			m.streams[streamID] = ch
 			if f.Endpoint == "session/follow" {
+				// Mirror dsh 0.1.2-rc.1's typert: session/follow args
+				// must be wrapped as {request: SessionFollowRequest},
+				// not flat. Verified 2026-09-11 against real dsh.
 				var args struct {
 					Args struct {
-						Address struct {
-							Kind      string `json:"kind"`
-							SessionID string `json:"sessionId"`
-						} `json:"address"`
+						Request struct {
+							Address struct {
+								Kind      string `json:"kind"`
+								SessionID string `json:"sessionId"`
+							} `json:"address"`
+						} `json:"request"`
 					} `json:"args"`
 				}
 				if err := json.Unmarshal(f.Payload, &args); err == nil &&
-					args.Args.Address.Kind == "session" {
-					m.sessionToStream[args.Args.Address.SessionID] = streamID
+					args.Args.Request.Address.Kind == "session" {
+					m.sessionToStream[args.Args.Request.Address.SessionID] = streamID
 				}
 			}
 			m.streamsMu.Unlock()
@@ -714,23 +719,37 @@ func (m *mockDSH) pushHostFrame(t *testing.T, method, rpcID string, payload any)
 }
 
 // wrapAsHostEvent encodes a (method, rpcID, payload) tuple as a
-// dsh RemoteEventRecord for the Host stream.
-func wrapAsHostEvent(method, rpcID string, payload json.RawMessage) (json.RawMessage, error) {
-	envelope := map[string]any{
-		"id":    rpcID,
-		"event": method,
-	}
-	// Merge payload fields into the envelope so callers don't have
-	// to nest by hand. Strip any conflicting reserved keys first.
-	var extra map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &extra); err == nil {
-		delete(extra, "id")
-		delete(extra, "event")
-		for k, v := range extra {
-			envelope[k] = v
+// dsh 0.1.2-rc.1 Host $events emit frame. The new wire shape is
+// `{type:"emit", event:<name>, args:[<positional args...>]}` —
+// the bridge's translateHostEvent pulls event as the method
+// discriminator and the args array flows through to the host
+// dispatch handler.
+//
+// rpcID is unused for emit frames (the real dsh doesn't mint
+// one for broadcast events), but tests pass it for parity with
+// pushSessionFrame. The waterfall shape would carry rpcId
+// instead, but we don't have a waterfall test yet — emit covers
+// the common broadcast path.
+func wrapAsHostEvent(method, _ string, payload json.RawMessage) (json.RawMessage, error) {
+	// If callers pass a single object as payload, fall through to
+	// `args:[<that-object>]` so a map caller doesn't silently
+	// produce `args:{}` (which the bridge would still translate,
+	// but losing structure). If they pass an array, use it directly.
+	var asArray json.RawMessage
+	if len(payload) > 0 && payload[0] == '[' {
+		asArray = payload
+	} else {
+		// Re-marshal so a map caller becomes args:[<map>].
+		asArray, _ = json.Marshal([]json.RawMessage{payload})
+		if len(asArray) == 0 {
+			asArray = json.RawMessage("[]")
 		}
 	}
-	return json.Marshal(envelope)
+	return json.Marshal(map[string]any{
+		"type":  "emit",
+		"event": method,
+		"args":  asArray,
+	})
 }
 
 // shutdown forcibly closes the active WS connection so the bridge

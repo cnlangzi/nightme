@@ -43,7 +43,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/version"
 	"github.com/gorilla/websocket"
 )
 
@@ -81,9 +80,16 @@ const (
 // handler is shared across all sessions (it's StreamHub.onMuxFrame
 // — Router handles per-session dispatch by extracting sessionId
 // from payload.sessionId).
+//
+// `generation` records the connection generation this streamId was
+// minted against. connectAndServe bumps generation on every dial
+// and only re-mints streamIds for subs from older generations.
+// New subs (added between dials via Subscribe) carry the current
+// generation and keep their streamId across the next reconnect.
 type sessionStream struct {
-	sessionID string
-	streamID  string
+	sessionID  string
+	streamID   string
+	generation uint64
 }
 
 // StreamHub owns one /api/remote.mux WebSocket connection. It
@@ -111,10 +117,26 @@ type StreamHub struct {
 	closed     bool
 	stop       chan struct{}
 
-	pumpWG     sync.WaitGroup
-	dispatchWG sync.WaitGroup
+	pumpWG sync.WaitGroup
 
-	streamSeq atomic.Uint64 // mint unique streamIds
+	// dispatchMu + dispatchCount replaces a sync.WaitGroup for
+	// in-flight handler accounting. The WaitGroup pattern has a
+	// documented race: "calls with a positive delta that occur when
+	// the counter is zero must happen before a Wait" — between an
+	// Add(1) in the dispatch hot path and a Wait() in Close(), a
+	// concurrent Done() can drop the counter to 0 with Wait already
+	// observing 0, causing Close to return before the handler
+	// finishes. Lock+counter+cond makes the same sequence safe
+	// because both Add(1) (encoded as dispatchCount++) and Wait
+	// (encoded as a cond.Wait loop) take dispatchMu and observe a
+	// consistent state. Tradeoff: one extra mutex acquisition per
+	// dispatched item, negligible vs the WS round-trip cost.
+	dispatchMu    sync.Mutex
+	dispatchCount int
+	dispatchCond  *sync.Cond
+
+	streamSeq         atomic.Uint64 // mint unique streamIds
+	currentGeneration atomic.Uint64 // bumps on every connect; subs track which generation minted them
 }
 
 // NewStreamHub constructs a hub without cookie attachment. Used by
@@ -159,6 +181,13 @@ func NewStreamHubWithJar(baseURL string, jar http.CookieJar, log *slog.Logger, o
 // next (re)connect — this avoids double-open when Subscribe is
 // called between a previous reconnect's open and the next connect.
 //
+// When the hub is already connected, Subscribe also enqueues an
+// open frame immediately (without waiting for a reconnect). The
+// streamId the sub carries is tagged with currentGeneration so
+// connectAndServe knows NOT to re-mint it on the next reconnect
+// (re-minting would orphan the items the server is about to push
+// for the streamId we just sent).
+//
 // Subscribing the same sessionID twice replaces the prior
 // subscription AND cancels the prior stream (last-wins) — matches
 // the bridge session.go pattern of "one handler per session,
@@ -168,7 +197,11 @@ func (h *StreamHub) Subscribe(sessionID string, _ FrameHandler) (unsubscribe fun
 		return func() {}
 	}
 	streamID := h.mintStreamID("sess")
-	sub := &sessionStream{sessionID: sessionID, streamID: streamID}
+	sub := &sessionStream{
+		sessionID:  sessionID,
+		streamID:   streamID,
+		generation: h.currentGeneration.Load(),
+	}
 
 	h.mu.Lock()
 	if old, ok := h.sessions[sessionID]; ok {
@@ -177,10 +210,31 @@ func (h *StreamHub) Subscribe(sessionID string, _ FrameHandler) (unsubscribe fun
 	}
 	h.sessions[sessionID] = sub
 	h.byStreamID[streamID] = sub
+	// If the hub is currently connected, enqueue the open frame
+	// NOW. If the hub isn't connected yet, connectAndServe will
+	// pick up this session from h.sessions on the next (re)connect.
+	if h.conn != nil && !h.closed {
+		select {
+		case h.writeCh <- clientFrame{
+			Type:     "open",
+			StreamID: streamID,
+			Endpoint: sessionFollowEndpoint,
+			Payload:  sessionOpenPayload(sessionID),
+		}:
+			h.log.Info("dsh.host: subscribed to session stream (immediate open)",
+				"session_id", sessionID, "stream_id", streamID)
+		default:
+			// writeCh full — connectAndServe's toReopen on the
+			// next reconnect will catch up. Drop the immediate
+			// attempt to avoid blocking the caller.
+			h.log.Warn("dsh.host: writeCh full; deferred session open",
+				"session_id", sessionID, "stream_id", streamID)
+		}
+	} else {
+		h.log.Info("dsh.host: subscribed to session stream (deferred open)",
+			"session_id", sessionID, "stream_id", streamID)
+	}
 	h.mu.Unlock()
-
-	h.log.Info("dsh.host: subscribed to session stream (deferred open)",
-		"session_id", sessionID, "stream_id", streamID)
 
 	var once sync.Once
 	return func() {
@@ -200,12 +254,20 @@ func (h *StreamHub) Subscribe(sessionID string, _ FrameHandler) (unsubscribe fun
 
 // sessionOpenPayload returns the `{args:{...}}` payload for the
 // session/follow open frame.
+//
+// dsh 0.1.2-rc.1's session/follow typert expects the args to be
+// wrapped as `{request: SessionFollowRequest}`, not flat. The
+// assertExactArguments gate rejects the flat shape with
+// "missing 'request'; unexpected 'address'". Verified 2026-09-11
+// by direct WS probe against dsh 0.1.2-rc.1.
 func sessionOpenPayload(sessionID string) json.RawMessage {
 	return mustJSON(map[string]any{
 		"args": map[string]any{
-			"address": map[string]any{
-				"kind":      "session",
-				"sessionId": sessionID,
+			"request": map[string]any{
+				"address": map[string]any{
+					"kind":      "session",
+					"sessionId": sessionID,
+				},
 			},
 		},
 	})
@@ -256,7 +318,19 @@ func (h *StreamHub) Close() {
 		_ = conn.Close()
 	}
 	h.pumpWG.Wait()
-	h.dispatchWG.Wait()
+	h.waitDispatchDrain()
+}
+
+// waitDispatchDrain blocks until every dispatched handler has
+// finished. Replaces the old dispatchWG.Wait() which had an
+// Add(1)↔Wait race. See the dispatchMu field doc for the
+// motivation; same idea but with cond instead of a sync.WaitGroup.
+func (h *StreamHub) waitDispatchDrain() {
+	h.dispatchMu.Lock()
+	defer h.dispatchMu.Unlock()
+	for h.dispatchCount > 0 {
+		h.dispatchCond.Wait()
+	}
 }
 
 // runMuxLoop owns the physical WS connection. It dials, serves
@@ -311,8 +385,13 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 	// http URL has the cookie stored. The fix: pull cookies via the
 	// http:// URL and stamp them onto the upgrade request header
 	// ourselves.
+	//
+	// Note: dsh 0.1.2-rc.1 rejects any Sec-WebSocket-Protocol it
+	// doesn't recognize (returns HTTP 400 "Invalid Sec-WebSocket-
+	// Protocol header") so we MUST NOT set a custom subprotocol
+	// here — the empty default negotiates to "no protocol" which
+	// dsh accepts.
 	requestHeader := http.Header{}
-	requestHeader.Set("Sec-WebSocket-Protocol", "nightme.bridge/v"+version.Version)
 	if h.jar != nil {
 		httpURL := *u
 		httpURL.Scheme = "http"
@@ -344,14 +423,28 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 		return nil
 	}
 	h.conn = conn
-	// After reconnect, re-open every active subscription. The
-	// server-side streamIds from the previous session are
-	// meaningless on the new connection — mint fresh ones.
+	// Bump the connection generation. Subs carry the generation
+	// they were minted against so a Subscribe that fires the open
+	// frame between reconnects doesn't get its streamId orphaned
+	// by the next toReopen loop (which mints a fresh id for stale
+	// subs only).
+	thisGen := h.currentGeneration.Add(1)
+	// After reconnect, re-open every active subscription whose
+	// streamId was minted against a previous connection. Subs
+	// from the current generation were just opened by Subscribe's
+	// immediate-open path; resending the open for them would make
+	// the server see a duplicate streamId and 1008 the connection.
 	toReopen := make([]clientFrame, 0, len(h.sessions)+1)
 	for _, sub := range h.sessions {
+		if sub.generation == thisGen {
+			// Subscribe already sent the open for this sub; the
+			// server is mid-stream on this streamId. Skip.
+			continue
+		}
 		newID := h.mintStreamID("sess")
 		delete(h.byStreamID, sub.streamID)
 		sub.streamID = newID
+		sub.generation = thisGen
 		h.byStreamID[newID] = sub
 		toReopen = append(toReopen, clientFrame{
 			Type:     "open",
@@ -372,7 +465,8 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 	})
 	h.mu.Unlock()
 
-	h.log.Info("dsh.host: mux stream connected", "url", u.String())
+	h.log.Info("dsh.host: mux stream connected", "url", u.String(),
+		"reopen_count", len(toReopen))
 
 	// Serve until either side errors out.
 	readErrCh := make(chan error, 1)
@@ -406,8 +500,10 @@ func (h *StreamHub) readLoop(conn *websocket.Conn) error {
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			h.log.Info("dsh.host: readLoop error", "err", err)
 			return err
 		}
+		h.log.Info("dsh.host: mux read", "bytes", len(raw), "preview", truncateBytes(raw, 200))
 		if len(raw) == 0 {
 			continue
 		}
@@ -447,7 +543,7 @@ func (h *StreamHub) dispatch(f serverFrame) {
 					"value_bytes", truncateBytes(f.Value, 200))
 				return
 			}
-			h.dispatchWG.Add(1)
+			h.markDispatchStart()
 			h.invokeOnHost(method, rpcID, payload)
 			return
 		}
@@ -466,7 +562,7 @@ func (h *StreamHub) dispatch(f serverFrame) {
 				"value_bytes", truncateBytes(f.Value, 200))
 			return
 		}
-		h.dispatchWG.Add(1)
+		h.markDispatchStart()
 		h.invokeOnMux(method, rpcID, payload)
 
 	case "end":
@@ -505,7 +601,7 @@ func (h *StreamHub) dispatch(f serverFrame) {
 }
 
 func (h *StreamHub) invokeOnHost(method, rpcID string, payload json.RawMessage) {
-	defer h.dispatchWG.Done()
+	defer h.markDispatchDone()
 	defer func() {
 		if r := recover(); r != nil {
 			h.log.Error("dsh.host: host dispatch handler panic",
@@ -518,7 +614,7 @@ func (h *StreamHub) invokeOnHost(method, rpcID string, payload json.RawMessage) 
 }
 
 func (h *StreamHub) invokeOnMux(method, rpcID string, payload json.RawMessage) {
-	defer h.dispatchWG.Done()
+	defer h.markDispatchDone()
 	defer func() {
 		if r := recover(); r != nil {
 			h.log.Error("dsh.host: mux dispatch handler panic",
@@ -528,6 +624,29 @@ func (h *StreamHub) invokeOnMux(method, rpcID string, payload json.RawMessage) {
 	if h.onMuxFrame != nil {
 		h.onMuxFrame(method, rpcID, payload)
 	}
+}
+
+// markDispatchStart / markDispatchDone replace the old
+// dispatchWG.Add(1) / Done() pair. The mutex+counter+cond pattern
+// avoids the documented Add(1)↔Wait() race; see dispatchMu field
+// doc for motivation. Cond is lazily initialized to keep the
+// StreamHub struct literal readable.
+func (h *StreamHub) markDispatchStart() {
+	if h.dispatchCond == nil {
+		h.dispatchCond = sync.NewCond(&h.dispatchMu)
+	}
+	h.dispatchMu.Lock()
+	h.dispatchCount++
+	h.dispatchMu.Unlock()
+}
+
+func (h *StreamHub) markDispatchDone() {
+	h.dispatchMu.Lock()
+	h.dispatchCount--
+	if h.dispatchCount == 0 {
+		h.dispatchCond.Broadcast()
+	}
+	h.dispatchMu.Unlock()
 }
 
 // writeLoop drains writeCh into the WS connection. Single-writer
@@ -557,23 +676,15 @@ func (h *StreamHub) writeLoop(ctx context.Context, conn *websocket.Conn) error {
 	}
 }
 
-// queueOpen puts a frame onto the write channel without blocking.
-// Safe to call before runMuxLoop starts (the frames queue up).
-func (h *StreamHub) queueOpen(frame clientFrame) {
-	select {
-	case h.writeCh <- frame:
-	default:
-		h.log.Warn("dsh.host: writeCh full; dropping open",
-			"stream_id", frame.StreamID, "endpoint", frame.Endpoint)
-	}
-}
-
-// queueCancelLocked must be called with h.mu held.
+// queueCancelLocked puts a `{type:"cancel", streamId}` frame on
+// the write channel without blocking. Must be called with h.mu
+// held. Drops on full channel — the pump is dead at that point
+// and a frame we couldn't send is harmless (the connection tear
+// down will cancel the server-side stream implicitly).
 func (h *StreamHub) queueCancelLocked(streamID string) {
 	select {
 	case h.writeCh <- clientFrame{Type: "cancel", StreamID: streamID}:
 	default:
-		// see queueOpen — pump is dead, dropping is the right call.
 	}
 }
 
@@ -620,31 +731,69 @@ type FrameHandler func(method, rpcID string, payload json.RawMessage)
 
 // ─── dispatch translation ─────────────────────────────────────────
 
-// translateHostEvent decodes one RemoteEventRecord item.
+// translateHostEvent decodes one item yielded by the Host $events
+// async iterable. dsh 0.1.2-rc.1 ships three item shapes (per
+// @deepseek-ai/dsh-api-gateway/lib/types/index.js::openRemoteEvents
+// + broadcastRemoteEvent + startRemoteEvent):
 //
-// Wire form (from dsh source):
+//	{ type:"ready",     clientId, host:{home} }           // FIRST item, no dispatch
+//	{ type:"emit",      event, args:[<positional args>] }  // broadcasted Cordis event
+//	{ type:"waterfall", event, eventId, agentId, request } // scoped event awaiting reply
+//	{ type:"cancel",    eventId }                          // server-side cancel of a waterfall
 //
-//	{ id?, event: "<discriminator>", ...eventFields }
+// The bridge's FrameHandler contract is {method, rpcID, payload}.
+// We map:
 //
-// The "event" field IS the method discriminator. id becomes rpcId.
+//	emit      → method=event, rpcId=auto (no server id), payload={args:[...]}
+//	waterfall → method=event, rpcId=eventId, payload={agentId, request}
+//	cancel    → method="host/cancel", rpcId=eventId, payload={"eventId":...}
+//	ready     → method="" (caller in dispatch() logs it; we don't translate)
+//
+// Verified against dsh 0.1.2-rc.1 real traffic: api-session/status
+// and api-session/activity arrive as emit frames with positional
+// args [sessionId, isRunning|timestamp].
 func translateHostEvent(raw json.RawMessage) (method, rpcID string, payload json.RawMessage) {
 	var rec struct {
-		ID    string          `json:"id"`
-		Event string          `json:"event"`
-		Rest  json.RawMessage `json:"-"`
+		Type    string          `json:"type"`
+		Event   string          `json:"event,omitempty"`
+		Args    json.RawMessage `json:"args,omitempty"`
+		EventID string          `json:"eventId,omitempty"`
+		AgentID string          `json:"agentId,omitempty"`
+		Request json.RawMessage `json:"request,omitempty"`
 	}
-	if err := json.Unmarshal(raw, &rec); err != nil || rec.Event == "" {
+	if err := json.Unmarshal(raw, &rec); err != nil {
 		return "", "", nil
 	}
-	body, err := json.Marshal(struct {
-		ID    string          `json:"id,omitempty"`
-		Event string          `json:"event"`
-		Rest  json.RawMessage `json:"-"`
-	}{ID: rec.ID, Event: rec.Event, Rest: rec.Rest})
-	if err != nil {
+	switch rec.Type {
+	case "emit":
+		if rec.Event == "" {
+			return "", "", nil
+		}
+		// No server-side id for emit frames; pass empty rpcId so
+		// callers can still log the (method, payload) pair but won't
+		// try to correlate with a /api/respond answer.
+		return rec.Event, "", mustJSON(map[string]any{"args": rec.Args})
+	case "waterfall":
+		if rec.Event == "" {
+			return "", "", nil
+		}
+		return rec.Event, rec.EventID, mustJSON(map[string]any{
+			"agentId": rec.AgentID,
+			"request": rec.Request,
+		})
+	case "cancel":
+		return "host/cancel", rec.EventID, mustJSON(map[string]any{
+			"eventId": rec.EventID,
+		})
+	case "ready", "":
+		// ready is handled in dispatch()'s top-level case; empty
+		// type means we couldn't decode — drop silently.
+		return "", "", nil
+	default:
+		// Unknown item type — log and drop. The dispatcher's
+		// "untranslated host item" path will record the bytes.
 		return "", "", nil
 	}
-	return rec.Event, rec.ID, body
 }
 
 // translateSessionEvent decodes one SessionFollowFrame item.

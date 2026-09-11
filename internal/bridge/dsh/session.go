@@ -303,13 +303,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// Mux is the live path from here; backfill only fills gaps.
 	d.seedLastSeq(ctx)
 
-	// Subscribe immediately after attach/create. Router.DispatchMux
-	// drops frames for unsubscribed sessionIds, and session.create
-	// attach is what makes dsh push live session/event on the
-	// already-open mux (dashboard select semantics). cwd is tracked
-	// so Client.RecoverSubscriptions can re-attach after a dsh
-	// respawn (session.create is keyed on sessionId+cwd).
-	cli.Router.Subscribe(d.sessionID, cfg.Workspace, d.handleMuxFrame)
+	// Subscribe immediately after attach/create. Use Client.Subscribe
+	// (not Router.Subscribe directly) so the StreamHub also opens a
+	// session/follow stream on the mux connection — Router-only
+	// would register the handler but never tell dsh which session
+	// to follow, and we'd silently miss every turn event. cwd is
+	// tracked so Client.RecoverSubscriptions can re-attach after a
+	// dsh respawn (session.create is keyed on sessionId+cwd).
+	cli.Subscribe(d.sessionID, cfg.Workspace, d.handleMuxFrame)
 
 	// Fetch the authoritative model selection via /api/session.models.
 	// session.create does NOT return the model — dsh requires the
@@ -889,7 +890,7 @@ func (d *driver) Reset(ctx context.Context) error {
 	d.lastApprovalID = map[string]string{}
 	d.pendingMu.Unlock()
 
-	d.cli.Router.Subscribe(newID, d.workspace, d.handleMuxFrame)
+	d.cli.Subscribe(newID, d.workspace, d.handleMuxFrame)
 
 	// Replay the per-session permission mode captured on the
 	// first handshake — the host doesn't carry it across a fresh

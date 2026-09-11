@@ -8,9 +8,10 @@
 // AgentSession owns a single sessionId on the shared host.
 //
 // Lifecycle invariant: events chan is closed by Close() itself (no
-// separate lifecycle goroutine). Close() calls Router.Unsubscribe so
-// the shared host's mux pump stops routing frames for this sessionId;
-// the session is then garbage-collectable.
+// separate lifecycle goroutine). Close() calls Client.Unsubscribe so
+// the shared host's mux pump stops routing frames for this sessionId
+// AND the StreamHub cancels its session/follow stream on dsh; the
+// session is then garbage-collectable.
 //
 // This file replaces the pre-shared-host driver that spawned a dsh
 // subprocess per ChatSession. Per-driver fields like cmd / stdout /
@@ -20,6 +21,7 @@ package dsh
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -302,13 +304,14 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// Mux is the live path from here; backfill only fills gaps.
 	d.seedLastSeq(ctx)
 
-	// Subscribe immediately after attach/create. Router.DispatchMux
-	// drops frames for unsubscribed sessionIds, and session.create
-	// attach is what makes dsh push live session/event on the
-	// already-open mux (dashboard select semantics). cwd is tracked
-	// so Client.RecoverSubscriptions can re-attach after a dsh
-	// respawn (session.create is keyed on sessionId+cwd).
-	cli.Router.Subscribe(d.sessionID, cfg.Workspace, d.handleMuxFrame)
+	// Subscribe immediately after attach/create. Use Client.Subscribe
+	// (not Router.Subscribe directly) so the StreamHub also opens a
+	// session/follow stream on the mux connection — Router-only
+	// would register the handler but never tell dsh which session
+	// to follow, and we'd silently miss every turn event. cwd is
+	// tracked so Client.RecoverSubscriptions can re-attach after a
+	// dsh respawn (session.create is keyed on sessionId+cwd).
+	cli.Subscribe(d.sessionID, cfg.Workspace, d.handleMuxFrame)
 
 	// Fetch the authoritative model selection via /api/session.models.
 	// session.create does NOT return the model — dsh requires the
@@ -729,6 +732,7 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 	}
 	resp, err := d.cli.RPC.Post(ctx, "session.prompt", map[string]any{
 		"request": map[string]any{
+			"requestId": mintRequestID(), // dsh 0.1.2-rc.1 typert requires requestId; client-minted UUID the server uses to dedupe retries
 			"sessionId": d.sessionID,
 			"mode":      "queue", // dsh-required discriminator; "steer" is the other valid value
 			"content":   content,
@@ -869,7 +873,7 @@ func (d *driver) Reset(ctx context.Context) error {
 	}
 
 	if oldID != "" && oldID != newID {
-		d.cli.Router.Unsubscribe(oldID)
+		d.cli.Unsubscribe(oldID)
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = d.cli.RPC.SessionCancel(cancelCtx, oldID)
 		cancel()
@@ -887,7 +891,7 @@ func (d *driver) Reset(ctx context.Context) error {
 	d.lastApprovalID = map[string]string{}
 	d.pendingMu.Unlock()
 
-	d.cli.Router.Subscribe(newID, d.workspace, d.handleMuxFrame)
+	d.cli.Subscribe(newID, d.workspace, d.handleMuxFrame)
 
 	// Replay the per-session permission mode captured on the
 	// first handshake — the host doesn't carry it across a fresh
@@ -942,8 +946,13 @@ func (d *driver) Reset(ctx context.Context) error {
 // should add a new method (e.g. ListSessionsPage) rather than
 // reusing this one.
 func (d *driver) ListSessions(ctx context.Context) ([]Session, error) {
+	// args wrapper key is "_request" (underscore prefix), per
+	// dsh 0.1.2-rc.1 typert descriptor (verified 2026-09-10).
+	// session/list is the odd one out — every other session.*
+	// endpoint uses "request". Using the wrong key returns
+	// result.ok=false with 'missing "_request"; unexpected "request"'.
 	resp, err := d.cli.RPC.Post(ctx, "session.list", map[string]any{
-		"request": map[string]any{},
+		"_request": map[string]any{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dsh: session.list: %w", err)
@@ -994,7 +1003,7 @@ func (d *driver) Close() error {
 		// Drop pending-approval channels for this session too — the
 		// runtime's permission handlers would otherwise wait forever
 		// on a sessionId nobody can answer anymore.
-		d.cli.Router.Unsubscribe(d.sessionID)
+		d.cli.Unsubscribe(d.sessionID)
 		if d.sessionID != "" {
 			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)
 			if err := d.cli.RPC.SessionCancel(cancelCtx, d.sessionID); err != nil && !isBenignCancelErr(err) {
@@ -1190,6 +1199,25 @@ func isSupportedImageMediaType(mediaType string) bool {
 }
 
 // ─── helpers (also imported by translate.go / permissions.go) ─────────
+
+// mintRequestID mints a client-minted UUID the dsh server uses to
+// dedupe retries / reconcile the wire request with the in-session
+// message. Same recipe as host/client.go::newRPCID — crypto/rand +
+// RFC 4122 §4.4. dsh 0.1.2-rc.1's session.prompt typert descriptor
+// requires requestId on every prompt (verified 2026-09-11 against
+// the gateway); without it the prompt is rejected with
+// 'gateway/input-invalid: wire field "request" failed boundary
+// validation'.
+func mintRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%016x", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // errStr renders an error's string form, returning "<nil>" for the
 // nil case so log fields are always meaningful. Mirror of

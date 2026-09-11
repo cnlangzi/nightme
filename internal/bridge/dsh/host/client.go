@@ -121,11 +121,23 @@ type RPCClient struct {
 // "http://127.0.0.1:3080"). The trailing slash, if any, is dropped
 // because URL joining adds one (matches dsh/http.go newHTTPClient).
 func NewRPCClient(baseURL string) *RPCClient {
-	baseURL = strings.TrimRight(baseURL, "/")
+	baseURL = sanitizeBaseURL(baseURL)
 	return &RPCClient{
 		baseURL: baseURL,
 		http:    httpclient.DefaultWithTimeout(httpClientTimeout),
 	}
+}
+
+// NewRPCClientWithHTTP is the test-friendly variant: callers
+// supply their own *http.Client (typically with a cookie jar +
+// redirect handler wired in). Used by the wire_e2e_test.go
+// harness to thread the dsh-auth cookie obtained from the
+// dashboard warm-up through every RPC. Production code uses
+// NewRPCClient — this variant exists so e2e probes don't have
+// to mock the auth dance.
+func NewRPCClientWithHTTP(baseURL string, http *http.Client) *RPCClient {
+	baseURL = sanitizeBaseURL(baseURL)
+	return &RPCClient{baseURL: baseURL, http: http}
 }
 
 // BaseURL returns the root URL the client POSTs against. Useful for
@@ -175,9 +187,13 @@ func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResp
 	}
 
 	envelope := clientRequest{
-		Type:    "client-request",
-		RPCID:   rpcID,
-		Method:  method,
+		Type:  "client-request",
+		RPCID: rpcID,
+		// Method in the envelope must match the URL path the
+		// gateway routes on — dots are rejected with 'method
+		// does not match endpoint' (verified 2026-09-10 against
+		// dsh 0.1.2-rc.1). Convert before sending.
+		Method:  methodDotsToSlashes(method),
 		Payload: wrapped,
 	}
 	body, err := json.Marshal(envelope)
@@ -303,9 +319,17 @@ type SessionSummary struct {
 
 // SessionList queries /api/session.list. Used by Phase 4 restart-
 // recovery: match persisted sessionIds against current server state.
+//
+// The args wrapper key is "_request" (underscore prefix), not
+// "request" — dsh 0.1.2-rc.1's session/list endpoint names the
+// typed payload "_request" in the typert descriptor (verified
+// 2026-09-10). Other session.* endpoints use "request". Verified
+// empirically against the running gateway: returning the wrong key
+// produces result.ok=false with 'missing "_request"; unexpected
+// "request"'.
 func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 	resp, err := c.Post(ctx, "session.list", map[string]any{
-		"request": map[string]any{},
+		"_request": map[string]any{},
 	})
 	if err != nil {
 		return nil, err
@@ -329,28 +353,6 @@ type SessionCreateOpts struct {
 	CWD         string `json:"cwd,omitempty"`
 	SessionID   string `json:"sessionId,omitempty"` // preallocate id
 	AgentPreset string `json:"agentPreset,omitempty"`
-}
-
-// WorkspaceList queries /api/workspace.list. Used by EnsureWorkspace
-// to dedupe: rather than blindly create a new workspace, we look
-// up an existing one with the same path and reuse it.
-func (c *RPCClient) WorkspaceList(ctx context.Context) ([]WorkspaceSummary, error) {
-	resp, err := c.Post(ctx, "workspace.list", map[string]any{
-		"request": map[string]any{},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !resp.Result.OK {
-		return nil, fmt.Errorf("dsh.host: workspace.list: %s", resp.Result.ErrorMessage())
-	}
-	var value struct {
-		Items []WorkspaceSummary `json:"items"`
-	}
-	if err := json.Unmarshal(resp.Result.Value, &value); err != nil {
-		return nil, fmt.Errorf("dsh.host: workspace.list decode: %w", err)
-	}
-	return value.Items, nil
 }
 
 // WorkspaceSummary is the on-wire shape of one workspace.list row
@@ -497,9 +499,19 @@ type PromptPart struct {
 // SessionPrompt invokes /api/session.prompt. `mode` MUST be
 // "queue" or "steer" (dsh-api.md §2.1.9 — omitting it returns
 // bad-request: invalid input: expected "queue").
+//
+// The requestId field is REQUIRED by dsh 0.1.2-rc.1's typert
+// descriptor (verified 2026-09-10) — it's a client-minted identity
+// the server persists on the exact accepted user message so it can
+// dedupe retries / reconcile the wire-side request with the
+// in-session message. Without it the gateway rejects with
+// 'gateway/input-invalid: wire field "request" failed boundary
+// validation'. Same recipe as newRPCID() in Post — crypto/rand +
+// RFC 4122 §4.4. clientTimeZone is optional and we don't set it.
 func (c *RPCClient) SessionPrompt(ctx context.Context, sessionID, mode string, parts []PromptPart) error {
 	resp, err := c.Post(ctx, "session.prompt", map[string]any{
 		"request": map[string]any{
+			"requestId": newRPCID(),
 			"sessionId": sessionID,
 			"mode":      mode,
 			"content":   parts,
@@ -647,6 +659,29 @@ func truncate(s string, n int) string {
 // path segment dsh web's gateway expects (e.g. "session/create").
 func methodDotsToSlashes(method string) string {
 	return strings.ReplaceAll(method, ".", "/")
+}
+
+// sanitizeBaseURL strips trailing slashes AND any trailing quote
+// characters (", ') that would otherwise break the URL parser and
+// surface as %22 / %27 in the dial path. Real callers never pass
+// these; this is a belt-and-suspenders guard against config-file
+// typos. Trailing quotes only — embedded quotes in the middle of
+// the URL would be a real bug and are left alone so they surface
+// instead of being silently masked.
+func sanitizeBaseURL(raw string) string {
+	// Strip trailing quote characters FIRST so the slash strip
+	// sees "http://x:8080" instead of "http://x:8080/" — the order
+	// matters because TrimRight("/") on a quote-suffixed URL would
+	// otherwise leave the slash and surface as %22 in the dial path.
+	for len(raw) > 0 {
+		last := raw[len(raw)-1]
+		if last == '"' || last == '\'' {
+			raw = raw[:len(raw)-1]
+			continue
+		}
+		break
+	}
+	return strings.TrimRight(raw, "/")
 }
 
 // wrapArgs wraps the JSON-marshaled args under the typert

@@ -16,6 +16,16 @@
 //   - approval/requested / approval/resolved:permissions 层处理
 //   - approval/asked:debug log only (respondable gate is approval/requested)
 //   - question/requested / question/resolved:handleQuestionRequested
+//
+// dsh 0.1.2-rc.1 (new wire) folds the per-event type into the mux
+// method itself: after host/stream.go::translateSessionEvent, the
+// FrameHandler sees method="assistant/chunk" (not "session/event"
+// with a nested envelope), and payload=event.data. handleMuxFrame
+// routes these by constructing a synthetic sessionEventEnvelope
+// and forwarding to dispatchEvent. The OLD wire method names
+// (session/event etc.) are kept for backward-compat reads and the
+// legacy session/subscribed / session/projection envelopes still
+// arrive on the new wire under their old method names.
 
 package dsh
 
@@ -24,6 +34,8 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strconv"
+	"strings"
 )
 
 // warnLogger is the package-level slog handle. Cached once at
@@ -33,7 +45,6 @@ import (
 var warnLogger = slog.Default()
 
 // handleMuxFrame is the mux-pump entry. It unmarshals the payload
-// and dispatches by method.
 // and dispatches by method. Extracted from translate.go in
 // F-DSH-CHAT-001 so the dispatcher owns the event Type switch
 // (registration-driven) instead of an inline switch statement.
@@ -168,7 +179,49 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 		d.wireState.recordWireFrame(method, "", len(payload))
 		dLog("dsh: mux approval/asked ignored (use approval/requested)")
 
+	case "session/snapshot":
+		// dsh 0.1.2-rc.1 sends one snapshot frame as the FIRST
+		// item on a session/follow stream (per SessionFollowFrame
+		// typert: type="snapshot" with header, cursor, records,
+		// hasMore, projections). Records may contain historical
+		// events that happened before we subscribed; replay each
+		// through dispatchEvent so wireState/translate stay
+		// consistent. Update lastSeq to the snapshot cursor so
+		// subsequent live events aren't deduped.
+		d.wireState.recordWireFrame(method, "", len(payload))
+		d.replaySnapshot(payload)
+
+	case "host/cancel":
+		// Unreachable today: Host waterfall items route through
+		// StreamHub.dispatch → Router.DispatchHost (NOT
+		// handleMuxFrame). Kept as a debug-log escape hatch in case
+		// dsh starts sending host/* frames on the mux endpoint.
+		d.wireState.recordWireFrame(method, "", len(payload))
+		var c struct {
+			EventID string `json:"eventId"`
+		}
+		_ = json.Unmarshal(payload, &c)
+		dLog("dsh: host waterfall cancel event_id=%s", c.EventID)
+
 	default:
+		// dsh 0.1.2-rc.1 wire folds per-event type into the mux
+		// method itself: host/stream.go::translateSessionEvent
+		// returns method = event.type (e.g. "assistant/chunk",
+		// "turn/start", "step/end", "user/message", "session/title",
+		// "request/context", "session/title-llm-request", "usage",
+		// "agent/inbox/spliced") and payload = event.data with
+		// sessionId injected. Route these through dispatchEvent
+		// so the registered handlers (assistant/chunk, turn/start,
+		// etc.) handle them.
+		if isSessionEventType(method) {
+			env := sessionEventEnvelope{
+				Type: method,
+				Seq:  parseSeqFromRPCID(rpcID),
+				Data: payload,
+			}
+			d.dispatchEvent(env, nil)
+			return
+		}
 		// Unknown mux method. P4: single lock acquire for ring
 		// record + count bump + count read (via
 		// recordAndCountUnknown). Warn level surfaces ops that
@@ -180,4 +233,92 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			"len", len(payload),
 			"unknown_total", unknownTotal)
 	}
+}
+
+// isSessionEventType reports whether method is one of the
+// dsh 0.1.2-rc.1 per-session event.type discriminators that
+// arrive on session/follow. Kept as a tight allow-list (NOT a
+// slash check) so we never accidentally route a legacy mux-frame
+// method (session/subscribed, session/projection, etc.) through
+// the per-event dispatch path. Must stay in sync with
+// standardRegistry in dispatch.go — a missing entry silently
+// demotes the frame to "unknown method" with a Warn.
+func isSessionEventType(method string) bool {
+	switch method {
+	case "assistant/chunk", "assistant/message",
+		"tool/call", "tool/result",
+		"turn/start", "turn/end",
+		"step/start", "step/end",
+		"user/message",
+		"session/title", "session/title-llm-request",
+		"request/context",
+		"agent/inbox/spliced",
+		"approval/asked",
+		"compaction/end",
+		"todo/write", "todo/update", "todo/delete":
+		return true
+	}
+	return false
+}
+
+// parseSeqFromRPCID extracts the numeric seq from a "seq-N" RPC ID
+// minted by host/stream.go::translateSessionEvent. Returns 0 when
+// the ID is empty or doesn't carry a seq — dispatchEvent treats
+// seq=0 as "no prior watermark to dedupe against", which is
+// benign for frames that don't carry one.
+func parseSeqFromRPCID(rpcID string) int64 {
+	rpcID = strings.TrimPrefix(rpcID, "seq-")
+	n, _ := strconv.ParseInt(rpcID, 10, 64)
+	return n
+}
+
+// replaySnapshot dispatches the records array of one
+// SessionFollowFrame snapshot. Records are themselves
+// SessionEvent envelopes with their own {type, seq, time, data}
+// shape; route each through dispatchEvent exactly as if it had
+// arrived live. After the loop, advance lastSeq to the snapshot
+// cursor so the live stream doesn't redeliver anything below it.
+// bumpLastSeq is idempotent (max of current and new) so the order
+// matters only for the gap between "last record seq" and "cursor":
+// if dsh's cursor means "the next seq we will deliver", and the
+// last record we replayed has seq < cursor, the gap stays open
+// for live events to fill.
+//
+// Records can be either {type:"event", event:{...}} OR
+// {type:"chunks", event:{...}} (per typert). We only know how to
+// dispatch "event" records today; "chunks" carries precomputed
+// text/tool/reasoning chunkrow data which would need its own
+// translator. Until F-32/F-52 redo that, log + drop the chunks
+// records.
+func (d *driver) replaySnapshot(payload json.RawMessage) {
+	var snap struct {
+		Header  json.RawMessage `json:"header,omitempty"`
+		Cursor  int64           `json:"cursor,omitempty"`
+		Records []struct {
+			Type  string          `json:"type"`
+			Event json.RawMessage `json:"event,omitempty"`
+		} `json:"records,omitempty"`
+	}
+	if err := json.Unmarshal(payload, &snap); err != nil {
+		dLog("dsh: snapshot decode: %v", err)
+		return
+	}
+	for _, rec := range snap.Records {
+		switch rec.Type {
+		case "event":
+			var env sessionEventEnvelope
+			if err := json.Unmarshal(rec.Event, &env); err != nil {
+				dLog("dsh: snapshot record decode: %v", err)
+				continue
+			}
+			d.dispatchEvent(env, nil)
+		case "chunks":
+			// Pre-aggregated chunk rows; not yet handled.
+			dLog("dsh: snapshot chunks record skipped (not implemented)")
+		}
+	}
+	if snap.Cursor > 0 {
+		d.bumpLastSeq(snap.Cursor)
+	}
+	dLog("dsh: snapshot replayed cursor=%d records=%d", snap.Cursor, len(snap.Records))
 }

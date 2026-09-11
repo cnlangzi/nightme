@@ -16,10 +16,13 @@ package host_test
 
 import (
 	"context"
+	"net"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
@@ -49,6 +52,10 @@ func TestEnsureSharedHost_FirstCallStarts(t *testing.T) {
 		HostCmd:    fake,
 		ForceSpawn: true,
 	})
+	// Tear down the spawned fake-dsh subprocess before resetEnsureState
+	// wipes the SharedHost pointer — killFakeDSH needs the pointer
+	// to find the PID. Order matters because Cleanup hooks run LIFO.
+	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 	if err != nil {
 		t.Fatalf("EnsureSharedHost: %v", err)
 	}
@@ -78,6 +85,7 @@ func TestEnsureSharedHost_SecondCallReturnsSame(t *testing.T) {
 		HostCmd:    fake,
 		ForceSpawn: true,
 	})
+	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 	if err != nil {
 		t.Fatalf("first EnsureSharedHost: %v", err)
 	}
@@ -128,6 +136,12 @@ func TestEnsureSharedHost_ConcurrentFirstTouch(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+	// The Once means exactly one of the N goroutines actually spawned;
+	// killFakeDSH now tears down that single subprocess. Doing this
+	// *after* wg.Wait ensures we capture the SharedHost pointer
+	// (it's installed by the winning goroutine). Ordered before
+	// the killFakeDSH so the cleanup runs after this test's body.
+	t.Cleanup(func() { killFakeDSH(t, host.GetSharedHost()) })
 
 	for i, err := range errs {
 		if err != nil {
@@ -174,5 +188,63 @@ func TestEnsureSharedHost_MissingBinary(t *testing.T) {
 	if !strings.Contains(err.Error(), "dsh") &&
 		!strings.Contains(err.Error(), filepath.Base(binary)) {
 		t.Logf("error message lacks binary name; err=%v", err)
+	}
+}
+
+// TestEnsureSharedHost_FallsBackWhen3080Foreign covers the
+// always-spawn contract: when 3080 is occupied (by anything — dsh
+// or a foreign service), StartSharedHost picks the first free port
+// in [3081, 3099] and spawns nightme's own dsh there instead of
+// refusing. Skipping the fallback would make the bridge unusable
+// for any host that has even one non-dsh service on 3080.
+//
+// Skipped by default: requires the test runner to bring up a
+// foreign HTTP server on 3080 first. See the test body for the
+// exact prerequisite command.
+func TestEnsureSharedHost_FallsBackWhen3080Foreign(t *testing.T) {
+	host.UnsetGlobal()
+	host.UnsetSharedHost()
+	host.ResetEnsureForTest()
+	t.Cleanup(func() {
+		host.UnsetGlobal()
+		host.UnsetSharedHost()
+		host.ResetEnsureForTest()
+	})
+
+	// The test uses the real `dsh` binary (not fake-dsh) because
+	// it's exercising the production spawn path — only real dsh
+	// hits the fallback branch under the real wire shape. Skip
+	// when dsh isn't on PATH: CI runners don't ship dsh by default
+	// (only the user's workstation does), and exec.LookPath
+	// failing inside EnsureSharedHost would surface as an
+	// instantaneous "executable file not found" — not the
+	// fallback behavior the test is trying to assert.
+	if _, err := exec.LookPath("dsh"); err != nil {
+		t.Skipf("real dsh not on PATH: %v", err)
+	}
+
+	// Sanity: confirm 3080 is held by a non-dsh service. The
+	// outer test runner is expected to start one; if not, this
+	// test asserts the wrong thing (it would see ErrNotRunning
+	// and spawn on 3080 directly). Bail loudly so the user
+	// knows to start the foreign server.
+	c, err := net.DialTimeout("tcp", "127.0.0.1:3080", 200*time.Millisecond)
+	if err != nil {
+		t.Skip("no foreign server on 3080; rerun with one started externally")
+	}
+	c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cli, err := host.EnsureSharedHost(ctx, host.SharedHostOptions{
+		Workspace:      "/tmp",
+		HostCmd:        "dsh",
+		PermissionMode: "danger-full-access",
+	})
+	if err != nil {
+		t.Fatalf("EnsureSharedHost: %v", err)
+	}
+	if strings.HasSuffix(cli.BaseURL(), ":3080") {
+		t.Errorf("expected FALLBACK port since 3080 is foreign; got %s", cli.BaseURL())
 	}
 }

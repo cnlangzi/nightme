@@ -10,7 +10,8 @@
 // the singleton pointer matches the legacy contract (tests and
 // diagnostic tools that read GetSharedHost). Closing the host is
 // delegated to the OS — when the daemon exits, the spawned dsh
-// stays alive (intended; it's a persistent service on port 3080).
+// stays alive (intended; it's a persistent service on port 3080
+// or a fallback in [3081, 3099]).
 //
 // Concurrency: the package's `globalClient` and `sharedHostGlobal`
 // are protected by their own mutexes; this helper layers a
@@ -35,15 +36,12 @@ var (
 // first call. Subsequent calls return the cached client.
 //
 // Behaviour:
-//   - If GetGlobal() already returns a non-nil client (e.g. a
-//     user-launched dsh on port 3080), it's returned as-is.
-//   - Otherwise calls StartSharedHost(ctx, opts):
-//   - discovers an existing dsh on port 3080 via
-//     DiscoverExisting (attaches, ownsProcess=false, no
-//     watchdog, no Close — daemon never closes a host it
-//     didn't spawn)
-//   - spawns a fresh dsh --profile web (ownsProcess=true,
-//     watchdog runs and respawns on crash)
+//   - If GetGlobal() already returns a non-nil client (set by a
+//     previous StartSharedHost in this process), it's returned
+//     as-is.
+//   - Otherwise calls StartSharedHost(ctx, opts), which always
+//     spawns a fresh dsh --profile web (ownsProcess=true,
+//     watchdog runs and respawns on crash).
 //   - On error, returns the error verbatim. A missing dsh binary
 //     surfaces here with the underlying exec.LookPath error.
 //
@@ -69,8 +67,7 @@ func EnsureSharedHost(ctx context.Context, opts SharedHostOptions) (*Client, err
 		}
 		SetSharedHost(h)
 		// StartSharedHost already populates the global Client via
-		// SetGlobal internally (both the reuse path and the spawn
-		// path). No-op here.
+		// SetGlobal internally (spawn path). No-op here.
 	})
 	if ensureErr != nil {
 		return nil, ensureErr

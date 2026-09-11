@@ -24,27 +24,21 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
 
-// handoffDir is the per-project directory the handoff lives in.
-// Mirrored by internal/command/handoff/cmd.go's handoffDir — both
-// sides read/write the same path, so a rename here MUST be
-// applied there too.
-const handoffDir = ".nightme"
-
 // handoffFilename is the on-disk filename /resume reads inside
-// handoffDir. Fixed name so /resume can locate it without args.
-// Lives under the chat's active CWD, not the user's $HOME.
+// the per-cwd nightme directory. Same name as /handoff writes;
+// directory management goes through internal/nightmedir.
 const handoffFilename = "handoff.md"
 
-// handoffPath is the full relative path; concatenation done once
-// here so the runtime reply strings don't drift.
-const handoffPath = handoffDir + string(filepath.Separator) + handoffFilename
+// handoffRelPath is the user-facing slash-form path embedded in
+// reply text. Forward-slash on every platform.
+const handoffRelPath = nightmedir.DirName + "/" + handoffFilename
 
 // Factory is the command.SlashCommandFactory for /resume.
 type Factory struct{}
@@ -128,19 +122,19 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			"Internal: missing message id; /resume did not enqueue."), nil
 	}
 
-	handoffAbsPath := filepath.Join(cwd, handoffPath)
+	handoffAbsPath := nightmedir.FilePath(cwd, handoffFilename)
 	info, err := os.Stat(handoffAbsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return command.OutReply(input,
-				fmt.Sprintf("❌ /resume: %s not found in workspace; run /handoff first.", handoffPath)), nil
+				fmt.Sprintf("❌ /resume: %s not found in workspace; run /handoff first.", handoffRelPath)), nil
 		}
 		return command.OutReply(input,
 			fmt.Sprintf("❌ /resume: stat %s failed: %v", handoffAbsPath, err)), nil
 	}
 	if info.Size() == 0 {
 		return command.OutReply(input,
-			fmt.Sprintf("❌ /resume: %s is empty; run /handoff again.", handoffPath)), nil
+			fmt.Sprintf("❌ /resume: %s is empty; run /handoff again.", handoffRelPath)), nil
 	}
 
 	msg := chatsession.Message{

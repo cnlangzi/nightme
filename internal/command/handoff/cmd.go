@@ -15,31 +15,25 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
 
-// handoffDir is the per-project directory the handoff lives in.
-// Pre-created by /handoff so the Agent doesn't waste a turn on
-// mkdir. Mirrored by internal/command/resume/handoffDir — both
-// sides read/write the same path, so a rename here MUST be
-// applied there too.
-const handoffDir = ".nightme"
-
-// handoffFilename is the on-disk filename written inside
-// handoffDir. Fixed name so /resume can locate it without args.
-// Lives under the chat's active CWD, not the user's $HOME — the
-// handoff is per-project, not per-user.
+// handoffFilename is the on-disk filename inside the per-cwd
+// nightme directory. /resume reads the same name so neither side
+// needs args. Directory creation and .gitignore maintenance go
+// through internal/nightmedir — this package only owns its own
+// filename.
 const handoffFilename = "handoff.md"
 
-// handoffPath is the full relative path; concatenation done once
-// here so the runtime reply strings don't drift.
-const handoffPath = handoffDir + string(filepath.Separator) + handoffFilename
+// handoffRelPath is the user-facing slash-form path embedded in
+// reply text. Forward-slash on every platform.
+const handoffRelPath = nightmedir.DirName + "/" + handoffFilename
 
 // handoffPrompt is the Agent's task for /handoff. The Agent has
 // the chat's full context; it produces a Markdown document
@@ -186,8 +180,9 @@ var handoffSpec = command.CmdSpec{
 //     silently no-ops on empty ID; /queue has the same guard at
 //     queue/cmd.go:143. Without it, a synthetic inbound would
 //     get the ack while enqueuing nothing.
-//  5. MkdirAll <cwd>/.nightme so the Agent doesn't waste a turn
-//     creating the directory itself.
+//  5. EnsureDir <cwd>/.nightme + EnsureGitignoreEntry so the
+//     Agent doesn't waste a turn on mkdir and `git status`
+//     doesn't surface the handoff doc.
 //  6. Queue the embedded handoff prompt as a discrete
 //     MessageKindQueue Prompt batch.
 //  7. Spawn a goroutine on a detached context.Background: the
@@ -224,9 +219,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			"Internal: missing message id; /handoff did not enqueue."), nil
 	}
 
-	if err := os.MkdirAll(filepath.Join(cwd, handoffDir), 0o755); err != nil {
+	if err := nightmedir.EnsureDir(cwd); err != nil {
 		return command.Reply(ctx, rt,
-			fmt.Sprintf("❌ /handoff: cannot create %s: %v", handoffDir, err)), nil
+			fmt.Sprintf("❌ /handoff: cannot create %s/: %v", nightmedir.DirName, err)), nil
+	}
+	if err := nightmedir.EnsureGitignoreEntry(cwd); err != nil {
+		return command.Reply(ctx, rt,
+			fmt.Sprintf("❌ /handoff: cannot update .gitignore: %v", err)), nil
 	}
 
 	msg := chatsession.Message{
@@ -242,7 +241,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	workCtx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer cancel()
-		final := verifyHandoff(workCtx, cs, input.MessageID, filepath.Join(cwd, handoffPath))
+		final := verifyHandoff(workCtx, cs, input.MessageID, nightmedir.FilePath(cwd, handoffFilename))
 		em := cs.Emitter()
 		if em == nil {
 			slog.Warn("handoff: emitter nil; final reply dropped",
@@ -291,14 +290,14 @@ func verifyHandoffFile(absPath string) string {
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Sprintf("❌ /handoff: agent did not write %s; rerun /handoff or paste the handoff into the file manually.", handoffPath)
+			return fmt.Sprintf("❌ /handoff: agent did not write %s; rerun /handoff or paste the handoff into the file manually.", handoffRelPath)
 		}
 		return fmt.Sprintf("❌ /handoff: stat %s failed: %v", absPath, err)
 	}
 	if info.Size() == 0 {
-		return fmt.Sprintf("❌ /handoff: %s exists but is empty; rerun /handoff.", handoffPath)
+		return fmt.Sprintf("❌ /handoff: %s exists but is empty; rerun /handoff.", handoffRelPath)
 	}
-	return fmt.Sprintf("✅ /handoff\n\n%s saved (%d bytes).", handoffPath, info.Size())
+	return fmt.Sprintf("✅ /handoff\n\n%s saved (%d bytes).", handoffRelPath, info.Size())
 }
 
 // waitForPromptEnd blocks until PromptEndBus delivers an event

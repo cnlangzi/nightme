@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
 
 // --- EnsureGitignore ---
@@ -373,7 +375,7 @@ func TestRemoveGTWYml_Idempotent(t *testing.T) {
 // (bypassing Context) so tests can construct intentionally
 // broken files (empty repoRoot, relative repoRoot, etc.).
 func writeYmlRaw(wt string, doc gtwYmlDoc) error {
-	if err := os.MkdirAll(filepath.Join(wt, nightmeDirName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(wt, nightmedir.DirName), 0o755); err != nil {
 		return err
 	}
 	out, err := yaml.Marshal(doc)

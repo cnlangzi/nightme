@@ -13,6 +13,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agentsession/agentstest"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
 
 // closeTestRig bundles the dependencies RunClose needs. Lives
@@ -230,7 +231,7 @@ func (r *closeTestRecCh) lastText() string {
 // that RunClose expects to find.
 func seedFix(t *testing.T, rig *closeTestRig, wt, repoRoot string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(wt, nightmeDirName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(wt, nightmedir.DirName), 0o755); err != nil {
 		t.Fatalf("mkdir .nightme: %v", err)
 	}
 	if err := WriteGTWYml(wt, Context{
@@ -271,7 +272,7 @@ func seedFix(t *testing.T, rig *closeTestRig, wt, repoRoot string) {
 // fixtures so the test names stay grep-able.
 func seedFixRemote(t *testing.T, rig *closeTestRig, prov *fakeGitProvider, wt, repoRoot string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(wt, nightmeDirName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(wt, nightmedir.DirName), 0o755); err != nil {
 		t.Fatalf("mkdir .nightme: %v", err)
 	}
 	if err := WriteGTWYml(wt, Context{

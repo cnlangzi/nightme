@@ -1,27 +1,29 @@
-// Package nightmedir owns the per-cwd `<cwd>/.nightme/` directory
-// — the canonical location where nightme stores runtime-generated
-// state that belongs to a single chat session's working directory
-// (handoff docs, gtw state, future per-project caches).
+// Package nightmedir owns the `.nightme` namespace that nightme
+// uses for runtime-generated state. Two distinct scopes share
+// the name:
 //
-// Filenames inside the directory are owned by each calling command
-// (gtw.yml is gtw's, handoff.md is handoff's, etc.). This package
-// owns only:
+//   - Per-cwd: `<cwd>/.nightme/` — state that belongs to one
+//     working directory (gtw state, future per-project caches).
+//     Owned by the existing Path / FilePath / EnsureDir /
+//     EnsureGitignoreEntry surface; not usable for cross-cwd
+//     handoff documents because each cwd would carve its own
+//     copy out of git status and lose them on cleanup.
+//   - Per-user: `$HOME/.nightme/` — state that belongs to the
+//     user across all cwds (config, Feishu inbox, bot workflow
+//     state, named handoff documents). The handoff helpers at
+//     the bottom of this file are the per-user subset the
+//     /handoff and /resume commands need.
 //
-//   - the directory name (.nightme)
-//   - directory creation (EnsureDir)
-//   - the .gitignore entry that keeps uncommitted runtime files
-//     out of `git status` (EnsureGitignoreEntry)
-//
-// All three operations are cwd-scoped and idempotent — calling
-// them on a clean worktree is a no-op, calling them after a
-// partial state has accumulated fills in the gaps. Callers that
-// need to commit the .gitignore change (gtw does, for
-// `git worktree remove --force` ergonomics) do that in their own
-// package — committing is a per-caller policy decision, not part
-// of the directory contract.
+// Filenames inside either directory are owned by each calling
+// command (gtw.yml is gtw's, <name>.md is the handoff command's,
+// etc.). This package owns only the directory names, the
+// per-cwd .gitignore entry, and the per-user handoff-dir creation
+// helper. Everything else is caller's responsibility.
 package nightmedir
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -201,4 +203,120 @@ func EnsureGitignoreEntry(cwd string) error {
 		return err
 	}
 	return nil
+}
+
+// HandoffDirName is the per-user subdirectory of $HOME/.nightme
+// where named handoff documents live. Kept distinct from the
+// per-cwd ".nightme/" so a /handoff written from one cwd can be
+// /resume'd from a different cwd — the whole reason /handoff
+// exists is to survive a cwd switch, and storing it under
+// <cwd>/.nightme/ would defeat the purpose.
+const HandoffDirName = "handoff"
+
+// HandoffFileSuffix is the on-disk extension RenderedHandoffFilename
+// appends. Single source of truth for the extension so /handoff
+// and /resume cannot drift on a rename.
+const HandoffFileSuffix = ".md"
+
+// handoffNameMaxLen caps ValidateHandoffName at 64 characters —
+// long enough for "nightme-gtw-fix-2026-08-02-claude-opus" and
+// short enough that a user reading the path aloud doesn't have
+// to take a breath.
+const handoffNameMaxLen = 64
+
+// HandoffDir returns the absolute path to the per-user handoff
+// directory: $HOME/.nightme/handoff. Does NOT create it —
+// /handoff owns EnsureHandoffDir so the per-user .nightme is
+// only materialised when at least one handoff has been written.
+//
+// Returns the os.UserHomeDir error wrapped, so callers can
+// surface "HOME unset" without re-importing os.
+func HandoffDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home: %w", err)
+	}
+	return pathutil.Join(home, DirName, HandoffDirName), nil
+}
+
+// HandoffFilePath returns the absolute path to a specific named
+// handoff document: $HOME/.nightme/handoff/<name>.md. Caller
+// owns directory creation (EnsureHandoffDir) and name validation
+// (ValidateHandoffName); both must run before this join lands
+// anywhere on disk.
+func HandoffFilePath(name string) (string, error) {
+	dir, err := HandoffDir()
+	if err != nil {
+		return "", err
+	}
+	return pathutil.Join(dir, name+HandoffFileSuffix), nil
+}
+
+// EnsureHandoffDir creates $HOME/.nightme/handoff if absent.
+// Uses MkdirAll (not the narrow EnsureDir contract) so the
+// per-user .nightme can be created lazily — calling /handoff
+// before any other nightme tool has run is a valid first-run
+// path. 0o700 matches the inbox convention from
+// internal/channel/feishu/attachment.go — even though handoff
+// docs are not secret, keeping the .nightme tree uniform means
+// `ls -la` on the directory doesn't surface a perm-bumped outlier.
+func EnsureHandoffDir() error {
+	dir, err := HandoffDir()
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(dir, 0o700)
+}
+
+// ValidateHandoffName is the single source of truth for the
+// <name> character set. Both /handoff and /resume call it before
+// any filesystem op so a malicious or malformed name never
+// reaches pathutil.Join. Character set is intentionally narrow:
+// ASCII letters, digits, '.', '_', '-'. Mirrors git refnames
+// minus the slash allowance (slashes would let a name escape the
+// handoff directory). Also rejects the bookkeeping sentinels
+// ('.' and '..') and any leading '-' or '.' so a name cannot
+// masquerade as a flag or a hidden file.
+func ValidateHandoffName(name string) error {
+	if name == "" {
+		return errors.New("name must not be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("%q is reserved", name)
+	}
+	if len(name) > handoffNameMaxLen {
+		return fmt.Errorf("name must be at most %d characters (got %d)",
+			handoffNameMaxLen, len(name))
+	}
+	if strings.HasPrefix(name, ".") {
+		return errors.New("name must not start with '.'")
+	}
+	if strings.HasPrefix(name, "-") {
+		return errors.New("name must not start with '-'")
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '_', r == '-':
+		default:
+			return fmt.Errorf("invalid character %q in name (only letters, digits, '_', '-' allowed)", r)
+		}
+	}
+	return nil
+}
+
+// HandoffRelPath renders a slash-form, host-friendly
+// `~/.nightme/handoff/<name>.md` for user-visible reply text
+// (Feishu / Slack / Telegram / bot IM cards all render forward
+// slashes regardless of host platform, so platform-canonical
+// pathutil.Join output would look wrong to the user).
+//
+// Caller must pass a name that ValidateHandoffName has already
+// accepted — HandoffRelPath does not re-validate, so a stray
+// '/' in name would render as an escaped path the user can't
+// follow.
+func HandoffRelPath(name string) string {
+	return DirName + "/" + HandoffDirName + "/" + name + HandoffFileSuffix
 }

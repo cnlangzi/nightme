@@ -1,17 +1,10 @@
 // Tests for the handoff package's slash command factory.
-//
-// Mirrors the layout used by internal/command/steer/cmd_test.go:
-// spec sanity, preflight early-exits, and the happy path that
-// proves the prompt lands in the queue. The collector + file
-// write side of /handoff (runHandoff) is exercised by the
-// production goroutine, not by these unit tests; e2e coverage
-// for the on-disk handoff.md lives in the integration harness
-// wired through the echo bridge (see e2e_slash_test.go for the
-// pattern).
 package handoff_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -130,15 +123,16 @@ func TestFactory_Handle_RejectsTrailingArgs(t *testing.T) {
 }
 
 // /handoff with all preflights green queues exactly one message
-// anchored on input.MessageID. The prompt body and Kind are
-// asserted by the constant in cmd.go; the count + ack is what
-// this test pins down (same shape as the /steer tests in
-// internal/command/steer/cmd_test.go).
+// anchored on input.MessageID AND pre-creates <cwd>/.nightme so
+// the Agent doesn't burn a turn on mkdir. The prompt body and
+// Kind are asserted by the constant in cmd.go; the count + ack
+// + .nightme existence is what this test pins down.
 func TestFactory_Handle_QueuesPrompt(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := handoffpkg.NewFactory()
+	dir := t.TempDir()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+	if err := cs.SetSelectedCwd(dir); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	if err := cs.SetSelectedAgent("claude"); err != nil {
@@ -162,5 +156,89 @@ func TestFactory_Handle_QueuesPrompt(t *testing.T) {
 
 	if got := cs.QueueLen(); got != 1 {
 		t.Fatalf("QueueLen after /handoff: got %d, want 1", got)
+	}
+	// <cwd>/.nightme must exist synchronously by the time the
+	// slash handler returns — otherwise the Agent wastes a turn
+	// on mkdir. MkdirAll is idempotent, so a second /handoff on
+	// the same workspace is also covered (directory already
+	// exists → no error).
+	info, err := os.Stat(filepath.Join(dir, ".nightme"))
+	if err != nil {
+		t.Fatalf("expected %s/.nightme to exist after /handoff, got: %v", dir, err)
+	}
+	if !info.IsDir() {
+		t.Errorf("%s/.nightme is not a directory", dir)
+	}
+}
+
+// /handoff on a workspace that already has a .nightme directory
+// must not error — MkdirAll is a no-op when the path exists.
+// Pins down the idempotency contract so re-runs (e.g. after an
+// interrupted first attempt) don't blow up.
+func TestFactory_Handle_NightmeExists_StillSucceeds(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := handoffpkg.NewFactory()
+	dir := t.TempDir()
+	nightmeDir := filepath.Join(dir, ".nightme")
+	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
+		t.Fatalf("setup MkdirAll: %v", err)
+	}
+	sentinel := filepath.Join(nightmeDir, "config.yml")
+	if err := os.WriteFile(sentinel, []byte("existing"), 0o644); err != nil {
+		t.Fatalf("setup write sentinel: %v", err)
+	}
+
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	if err := cs.SetSelectedCwd(dir); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
+		command.SlashInput{
+			ChatID:    "c1",
+			MessageID: "m_handoff_existing",
+			Text:      "/handoff",
+			Args:      []string{"handoff"},
+		})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	ackReply(t, out, "queued")
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("pre-existing sentinel was disturbed: %v", err)
+	}
+}
+
+// input.MessageID == "" → reply with the missing-id diagnostic
+// and skip the QueueUserMessage (which silently no-ops on empty
+// ID). Mirrors /queue's guard at queue/cmd.go:143.
+func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := handoffpkg.NewFactory()
+	dir := t.TempDir()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	if err := cs.SetSelectedCwd(dir); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
+		command.SlashInput{
+			ChatID: "c1",
+			Text:   "/handoff",
+			Args:   []string{"handoff"},
+			// MessageID deliberately empty.
+		})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	ackReply(t, out, "missing message id")
+	if got := cs.QueueLen(); got != 0 {
+		t.Errorf("empty MessageID must not enqueue; got QueueLen=%d", got)
 	}
 }

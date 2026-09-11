@@ -1,9 +1,4 @@
 // Tests for the resume package's slash command factory.
-//
-// Mirrors internal/command/handoff/cmd_test.go's layout: spec
-// sanity, preflight early-exits, the no-handoff / empty-handoff
-// branches, and the happy path that proves the resume body
-// (prefix + handoff.md contents) lands in the queue.
 package resume_test
 
 import (
@@ -156,16 +151,16 @@ func TestFactory_Handle_RejectsTrailingArgs(t *testing.T) {
 	replyField(t, out, "unexpected positional argument")
 }
 
-// /resume with cwd + agent but no ./handoff.md in the workspace
-// → OutReply error pointing the user at /handoff. Distinct from
-// the preflight Reply path because the queue placeholder was
-// already created at MessageQueued time (the framework commander
-// emits it for every matched slash command).
+// /resume with cwd + agent but no ./.nightme/handoff.md in the
+// workspace → OutReply error pointing the user at /handoff.
+// Distinct from the preflight Reply path because the queue
+// placeholder was already created at MessageQueued time (the
+// framework commander emits it for every matched slash command).
 func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	// Empty temp dir — no handoff.md on disk.
+	// Empty temp dir — no .nightme/handoff.md on disk.
 	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
@@ -184,8 +179,8 @@ func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	text := outReply(t, out, in)
-	if !strings.Contains(text, "handoff.md") {
-		t.Errorf("missing-handoff reply should name handoff.md: %q", text)
+	if !strings.Contains(text, ".nightme/handoff.md") {
+		t.Errorf("missing-handoff reply should name .nightme/handoff.md: %q", text)
 	}
 	if !strings.Contains(text, "/handoff") {
 		t.Errorf("missing-handoff reply should suggest /handoff: %q", text)
@@ -195,9 +190,10 @@ func TestFactory_Handle_HandoffMissing_RepliesHint(t *testing.T) {
 	}
 }
 
-// handoff.md exists but is empty → OutReply error, also no
-// enqueue. Mirrors the missing-file branch but tells the user
-// to re-run /handoff (their previous run produced a blank doc).
+// .nightme/handoff.md exists but is zero bytes → OutReply
+// error, also no enqueue. Mirrors the missing-file branch but
+// tells the user to re-run /handoff (their previous run
+// produced a blank doc).
 func TestFactory_Handle_HandoffEmpty_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
@@ -209,9 +205,15 @@ func TestFactory_Handle_HandoffEmpty_RepliesHint(t *testing.T) {
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("SetSelectedAgent: %v", err)
 	}
-	// Write a whitespace-only handoff.md.
-	if err := os.WriteFile(filepath.Join(dir, "handoff.md"), []byte("   \n\n"), 0o644); err != nil {
-		t.Fatalf("seed handoff.md: %v", err)
+	nightmeDir := filepath.Join(dir, ".nightme")
+	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll .nightme: %v", err)
+	}
+	// Truly empty (size==0). Whitespace-only is NOT empty here:
+	// the prompt's step 1 reads the file itself, so a stub with
+	// whitespace would just confuse the Agent.
+	if err := os.WriteFile(filepath.Join(nightmeDir, "handoff.md"), []byte{}, 0o644); err != nil {
+		t.Fatalf("seed empty handoff.md: %v", err)
 	}
 
 	in := command.SlashInput{
@@ -233,9 +235,10 @@ func TestFactory_Handle_HandoffEmpty_RepliesHint(t *testing.T) {
 	}
 }
 
-// Happy path: handoff.md exists and contains a real document →
-// /resume queues exactly one message (Kind=MessageKindQueue)
-// and replies with the OutReply "Resuming…" ack.
+// Happy path: ./.nightme/handoff.md exists and contains a real
+// document → /resume queues exactly one message
+// (Kind=MessageKindQueue) and replies with the OutReply
+// "Resuming…" ack.
 func TestFactory_Handle_QueuesResume(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := resumepkg.NewFactory()
@@ -247,8 +250,12 @@ func TestFactory_Handle_QueuesResume(t *testing.T) {
 	if err := cs.SetSelectedAgent("claude"); err != nil {
 		t.Fatalf("SetSelectedAgent: %v", err)
 	}
+	nightmeDir := filepath.Join(dir, ".nightme")
+	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll .nightme: %v", err)
+	}
 	doc := "# Handoff\n\n## Task\nFix the bug.\n\n## Completed\n- nothing yet\n"
-	if err := os.WriteFile(filepath.Join(dir, "handoff.md"), []byte(doc), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(nightmeDir, "handoff.md"), []byte(doc), 0o644); err != nil {
 		t.Fatalf("seed handoff.md: %v", err)
 	}
 
@@ -268,5 +275,48 @@ func TestFactory_Handle_QueuesResume(t *testing.T) {
 	}
 	if got := cs.QueueLen(); got != 1 {
 		t.Fatalf("QueueLen after /resume: got %d, want 1", got)
+	}
+}
+
+// input.MessageID == "" → reply with the missing-id diagnostic
+// and skip the QueueUserMessage (which silently no-ops on empty
+// ID). Mirrors /queue's guard at queue/cmd.go:143.
+func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := resumepkg.NewFactory()
+	dir := t.TempDir()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	if err := cs.SetSelectedCwd(dir); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+	// Need a real handoff on disk so the test reaches the
+	// MessageID guard, not the missing-handoff error branch.
+	nightmeDir := filepath.Join(dir, ".nightme")
+	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll .nightme: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nightmeDir, "handoff.md"), []byte("doc"), 0o644); err != nil {
+		t.Fatalf("seed handoff.md: %v", err)
+	}
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
+		command.SlashInput{
+			ChatID: "c1",
+			Text:   "/resume",
+			Args:   []string{"resume"},
+			// MessageID deliberately empty.
+		})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	text := outReply(t, out, command.SlashInput{ChatID: "c1"})
+	if !strings.Contains(text, "missing message id") {
+		t.Errorf("expected missing-id diagnostic in %q", text)
+	}
+	if got := cs.QueueLen(); got != 0 {
+		t.Errorf("empty MessageID must not enqueue; got QueueLen=%d", got)
 	}
 }

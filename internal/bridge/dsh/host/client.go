@@ -287,17 +287,34 @@ func (c *RPCClient) PostEnvelope(ctx context.Context, method string, body []byte
 		return fmt.Errorf("dsh.host: read body for %s: %w", method, err)
 	}
 
-	var receipt struct {
+	// dsh 0.1.2-rc.1 uses the standard client-response envelope
+	// for /api/$events/result (same shape as every other RPC):
+	// {type:"server-response", rpcId:..., result:{ok:true|false}}
+	// Older pre-0.1.2-rc.1 receipts used a flat
+	// {accepted:true|false, reason:...} shape (see PostEnvelope's
+	// /api/respond caller). Accept either to stay compatible with
+	// both.
+	var standard struct {
+		Type   string `json:"type"`
+		Result struct {
+			OK    bool `json:"ok"`
+			Error any  `json:"error,omitempty"`
+		} `json:"result"`
+	}
+	var legacy struct {
 		Accepted bool   `json:"accepted"`
 		Reason   string `json:"reason,omitempty"`
 	}
-	if err := json.Unmarshal(respBytes, &receipt); err != nil {
-		return fmt.Errorf("dsh.host: decode %s receipt: %w (body=%s)",
-			method, err, truncate(string(respBytes), 200))
+	var ok bool
+	switch {
+	case json.Unmarshal(respBytes, &standard) == nil && standard.Result.OK:
+		ok = true
+	case json.Unmarshal(respBytes, &legacy) == nil && legacy.Accepted:
+		ok = true
 	}
-	if !receipt.Accepted {
-		return fmt.Errorf("dsh.host: %s: server rejected response: %s",
-			method, receipt.Reason)
+	if !ok {
+		return fmt.Errorf("dsh.host: %s: server rejected response (raw=%s)",
+			method, truncate(string(respBytes), 200))
 	}
 	return nil
 }
@@ -626,6 +643,83 @@ func (c *RPCClient) Respond(ctx context.Context, frameRpcID string, value any) e
 		return fmt.Errorf("dsh.host: respond marshal: %w", err)
 	}
 	return c.PostEnvelope(ctx, "respond", body)
+}
+
+// WaterfallResultEnvelope is the args body for /api/$events/result.
+// One Remote client delivers this in response to a single waterfall
+// frame (approval/request or user-questions/request) that the host
+// pushed on the $events stream.
+//
+// `ClientID` is the client identity that was assigned in the
+// `ready` frame when this client opened the $events stream (so the
+// gateway can route the response back to the right pending
+// remote event). `EventID` is the per-waterfall UUID from the
+// frame — the gateway correlates the result to the pending via
+// this key. `Outcome` is the structured answer the human gave
+// (a QuestionAnswer or ApprovalOutcome) or the rejection reason.
+type WaterfallResultEnvelope struct {
+	ClientID string                   `json:"clientId"`
+	EventID  string                   `json:"eventId"`
+	Outcome  WaterfallOutcomeEnvelope `json:"outcome"`
+}
+
+// WaterfallOutcomeEnvelope is the {kind, value|error} envelope
+// dsh-api-gateway uses for Remote event results. `kind` is
+// "result" | "next" | "rejected":
+//
+//   - "result"   — the answer arrived; value is the typed payload
+//     (QuestionAnswer for user-questions, "allowed-once"
+//     | "rejected" for approval).
+//   - "rejected" — error carries the rejection reason
+//     (ASK_CANCELLED for a user "Skip" click, or
+//     NO_PROVIDER when no answerer is wired).
+//   - "next"     — no answer; defer to the next waterfall listener.
+//
+// Verified 2026-09-11 against dsh 0.1.2-rc.1 by capturing the real
+// POST /api/$events/result body emitted by the dashboard after
+// clicking Submit on a user-questions panel. Source shape:
+// @deepseek-ai/dsh-api-gateway/lib/types/stream-protocol.js
+// `parseRemoteEventResult` (typert validates {clientId, eventId,
+// outcome:{kind, ...}}); receiver @deepseek-ai/dsh-api-gateway/lib/
+// index.js `dispatchRpc` ($events/result branch) and
+// `receiveRemoteEventResult`.
+type WaterfallOutcomeEnvelope struct {
+	Kind  string          `json:"kind"`
+	Value json.RawMessage `json:"value,omitempty"`
+	Error json.RawMessage `json:"error,omitempty"`
+}
+
+// SendWaterfallResult answers a single waterfall frame that the host
+// pushed on the $events stream. `clientID` is from the `ready`
+// frame (constant for the lifetime of the $events stream);
+// `eventID` is the per-frame UUID from the waterfall frame.
+// `outcome` carries the typed answer or rejection.
+//
+// Returns the receipt error if dsh rejects the response (stale
+// eventId, wrong clientId, etc.); nil on success. Wire path:
+//
+//	POST /api/$events/result
+//	{ type:"client-request", rpcId:<uuid>,
+//	  method:"$events/result",
+//	  payload:{ args:{clientId, eventId, outcome} } }
+//
+// → 200 {accepted:true} on success
+// → 200 {accepted:false, reason:...} on duplicate / stale
+func (c *RPCClient) SendWaterfallResult(ctx context.Context, clientID, eventID string, outcome WaterfallOutcomeEnvelope) error {
+	body, err := json.Marshal(map[string]any{
+		"type":   "client-request",
+		"rpcId":  newRPCID(),
+		"method": "$events/result",
+		"payload": map[string]any{"args": WaterfallResultEnvelope{
+			ClientID: clientID,
+			EventID:  eventID,
+			Outcome:  outcome,
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("dsh.host: $events/result marshal: %w", err)
+	}
+	return c.PostEnvelope(ctx, "$events/result", body)
 }
 
 // ─── helpers ───────────────────────────────────────────────────────

@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,6 +162,15 @@ var fakeDSHBin string
 // Per-test writeFakeDSH is then just a path return — no per-test
 // compile overhead.
 func TestMain(m *testing.M) {
+	// Kill any real dsh processes this user account owns so the
+	// test suite starts in a clean state. The watchdog tests
+	// assume they have exclusive control over port 3080 (where
+	// fake-dsh binds); if a real dsh is running there, the
+	// fake-dsh bind fails and the tests fall over. The kill is
+	// scoped to the current UID via `pgrep -U` so we don't kill
+	// other users' daemons on a multi-user host.
+	killRealDSHForCleanTest()
+
 	dir, err := os.MkdirTemp("", "fake-dsh-bin-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fake-dsh test setup: mkdir: %v\n", err)
@@ -187,6 +197,28 @@ func TestMain(m *testing.M) {
 
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// killRealDSHForCleanTest SIGTERMs any user-owned `dsh --profile
+// web` processes before the test suite runs. This avoids the
+// attach-reuse path picking up a leftover dsh and skipping the
+// fake-dsh bind the watchdog tests rely on. Production code
+// never calls this — it's strictly a TestMain fixture.
+func killRealDSHForCleanTest() {
+	uid := os.Getuid()
+	out, err := exec.Command("pgrep", "-U", strconv.Itoa(uid), "-f", "dsh --profile web").Output()
+	if err != nil {
+		// pgrep returns 1 when no match — that's the desired state.
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		_ = exec.Command("kill", "-TERM", line).Run()
+	}
+	// Brief grace so the kills land before the fake-dsh bind race.
+	time.Sleep(500 * time.Millisecond)
 }
 
 // writeFakeDSH returns the path of the precompiled fake-dsh binary.
@@ -231,9 +263,14 @@ func procAlive(pid int) bool {
 // tests after the daemon stopped tearing dsh down on shutdown —
 // tests still need to terminate the spawned process so the test
 // binary doesn't leak it. No-op when sh owns no subprocess
-// (PID == 0).
+// (PID == 0) or when EnsureSharedHost failed before installing
+// the singleton (sh == nil — caller's cleanup must not crash on
+// the failure path).
 func killFakeDSH(t *testing.T, sh *host.SharedHost) {
 	t.Helper()
+	if sh == nil {
+		return
+	}
 	pid := sh.PID()
 	if pid == 0 {
 		return

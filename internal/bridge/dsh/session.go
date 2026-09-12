@@ -137,14 +137,19 @@ type driver struct {
 	pendingApprovals map[string]chan string
 	pendingOrder     []string
 	// pendingQuestions maps frame rpcId → the AskUserQuestionItem
-	// batch from question/requested. Present only for question
-	// frames; SendPermission uses it to emit QuestionResponse
-	// instead of ApprovalResponse. lastApprovalID maps frame rpcId
-	// → mux approvalId for approval/requested (used by
-	// /api/respond and dropPendingByApprovalID). Questions are
-	// keyed only in pendingQuestions.
+	// batch from the originating frame (host waterfall or legacy
+	// mux question/requested). Present only for question frames;
+	// SendPermission uses it to build the $events/result body
+	// (host path) or QuestionResponse (legacy mux path).
+	// lastApprovalID maps frame rpcId → mux approvalId for
+	// approval/requested (legacy mux path audit-only).
 	pendingQuestions map[string][]questionPayload
 	lastApprovalID   map[string]string
+	// pendingSource records the wire source ("host" for the
+	// $events waterfall, "mux" for legacy top-level mux frames)
+	// for each pending entry. SendPermission uses this to route
+	// the answer to /api/$events/result vs /api/respond.
+	pendingSource map[string]string
 
 	events chan agent.AgentEvent
 	// translate + wireState + dispatcher are the per-session
@@ -254,6 +259,7 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		pendingApprovals: map[string]chan string{},
 		pendingQuestions: map[string][]questionPayload{},
 		lastApprovalID:   map[string]string{},
+		pendingSource:    map[string]string{},
 		events:           make(chan agent.AgentEvent, eventBufferSize),
 		translate:        newTranslator(s.name, cfg.Workspace),
 		wireState:        newWireState(),
@@ -263,6 +269,16 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		lastSeq: -1,
 	}
 	d.dispatcher = newDispatcher(d.translate, d.wireState, d, d.deliver)
+
+	// The host waterfall handler is installed earlier — at host
+	// Client construction time (see host/lifecycle.go::spawnAndWire
+	// and host/install_hook.go::OnLifecycleInstall). Doing it here
+	// would be too late: dsh sends the `ready` frame on the WS
+	// immediately after cli.Start, and we need the handler wired
+	// before then so ClientID is captured for /api/$events/result.
+	//
+	// The driver just needs to register itself in the demux map
+	// once its sessionID is known (after handshakeSession).
 
 	// Session handshake: resume is dashboard "click a session in
 	// the left list" — POST session.create({sessionId, cwd})
@@ -312,6 +328,12 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// tracked so Client.RecoverSubscriptions can re-attach after a
 	// dsh respawn (session.create is keyed on sessionId+cwd).
 	cli.Subscribe(d.sessionID, cfg.Workspace, d.handleMuxFrame)
+
+	// Register the driver in the package-level host waterfall demux
+	// map. d.sessionID is the dsh session id (== runtime Agent.id
+	// for root sessions), used as the demux key by
+	// hostWaterfallHandler. Idempotent — re-registration overwrites.
+	registerDriverForWaterfall(d)
 
 	// Fetch the authoritative model selection via /api/session.models.
 	// session.create does NOT return the model — dsh requires the
@@ -754,16 +776,16 @@ func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) er
 // approval or question (FIFO). The pending FIFO is per-driver (each
 // session has its own queue); see the doc comment on pendingApprovals.
 //
-// The shared host's RPC client emits a proper client-response envelope
-// (dsh-api.md §2.12) keyed on the frame rpcId — NOT a client-request
-// envelope with method:"respond" (which was the pre-fix bridge bug;
-// dsh-api.md §11 item #2). The wire correlation is governed entirely
-// by the echoed rpcId, not by any payload.approvalId.
-//
-// Two value shapes share this method:
-//   - question/requested → QuestionResponse (dsh-api.md §2.12.2)
-//   - approval/requested → ApprovalResponse with outcome
-//     "allowed-once" | "rejected" (dsh-api.md §2.12.1)
+// Routing is decided by pendingSource[frameRpcID]:
+//   - "host": the gate came from the dsh 0.1.2-rc.1 host $events
+//     waterfall (approval/request or user-questions/request).
+//     Reply goes to POST /api/$events/result with the typed
+//     outcome envelope (kind:"result", value:{answers:[…]} for
+//     questions, kind:"result", value:"allowed-once"|"rejected"
+//     for approvals).
+//   - "mux": legacy dsh < 0.1.2-rc.1 path; reply goes to
+//     POST /api/respond with the client-response envelope
+//     (ApprovalResponse / QuestionResponse).
 func (d *driver) SendPermission(resp string) error {
 	d.pendingMu.Lock()
 	if len(d.pendingOrder) == 0 {
@@ -772,53 +794,95 @@ func (d *driver) SendPermission(resp string) error {
 	}
 	frameRpcID := d.pendingOrder[0]
 	questions, isQuestion := d.pendingQuestions[frameRpcID]
-	approvalID := d.lastApprovalID[frameRpcID]
+	source := d.pendingSource[frameRpcID]
 
-	var value any
-	outcome := resp
+	var (
+		outcome  = resp
+		envelope host.WaterfallOutcomeEnvelope
+		muxValue any
+	)
 	if isQuestion {
 		answer, err := questionAnswerFor(questions, resp)
 		if err != nil {
 			d.pendingMu.Unlock()
 			return err
 		}
-		value = host.QuestionResponse{
-			SessionID: d.sessionID,
-			Answer:    answer,
-		}
+		envelope.Kind = "result"
+		envelope.Value, _ = json.Marshal(host.QuestionAnswer{Answers: answer.Answers})
+		muxValue = host.QuestionResponse{SessionID: d.sessionID, Answer: answer}
 	} else {
 		outcome = canonicalApprovalOutcome(resp)
 		if outcome == "" {
 			d.pendingMu.Unlock()
 			return fmt.Errorf("dsh: unknown approval outcome %q (expected approved|declined|allowed-once|rejected)", resp)
 		}
-		value = host.ApprovalResponse{
+		envelope.Kind = "result"
+		envelope.Value, _ = json.Marshal(outcome) // "allowed-once" | "rejected"
+		muxValue = host.ApprovalResponse{
 			SessionID:  d.sessionID,
-			ApprovalID: approvalID,
+			ApprovalID: d.lastApprovalID[frameRpcID],
 			Outcome:    outcome,
 		}
 	}
-
-	d.pendingOrder = d.pendingOrder[1:]
+	// Snapshot the respCh pointer under the lock; the channel
+	// itself is closed/drained outside the lock so the slow RPC
+	// doesn't block concurrent SendPermission callers.
 	ch := d.pendingApprovals[frameRpcID]
-	delete(d.pendingApprovals, frameRpcID)
-	delete(d.pendingQuestions, frameRpcID)
-	delete(d.lastApprovalID, frameRpcID)
 	d.pendingMu.Unlock()
 
 	if ch != nil {
 		select {
-		case ch <- resp:
+		case ch <- outcome:
 		default:
 		}
 	}
 
-	// /api/respond uses the client-response envelope; the response
-	// shape is {accepted: true} on success, {accepted: false,
-	// reason: ...} on duplicate / stale rpcId (dsh-api.md §2.12).
-	if err := d.cli.RPC.Respond(context.Background(), frameRpcID, value); err != nil {
-		return fmt.Errorf("dsh: /api/respond: %w", err)
+	// Capture the $events clientId under hostWaterfallMu (the writer
+	// in host_waterfall.go holds the same lock). Reading without
+	// the lock is a data race the race detector flags, AND pairs
+	// the client's snapshot with the lock-time clientId so a
+	// concurrent WS reconnect that overwrites hostRemoteClientID
+	// can't make us POST /api/$events/result with a clientId from
+	// a different connection than the one the eventId belongs to.
+	hostWaterfallMu.RLock()
+	clientID := hostRemoteClientID
+	hostWaterfallMu.RUnlock()
+
+	ctx := context.Background()
+	var sendErr error
+	switch source {
+	case "host":
+		if clientID == "" {
+			sendErr = errors.New("dsh: no clientId captured from host $events ready frame; cannot send waterfall result")
+			break
+		}
+		slogDefault().Info("dsh: SendPermission posting to /api/$events/result",
+			"client_id", clientID, "event_id", frameRpcID)
+		sendErr = d.cli.RPC.SendWaterfallResult(ctx, clientID, frameRpcID, envelope)
+		if sendErr != nil {
+			slogDefault().Info("dsh: SendWaterfallResult FAILED", "err", sendErr)
+		}
+	default:
+		sendErr = d.cli.RPC.Respond(ctx, frameRpcID, muxValue)
 	}
+
+	if sendErr != nil {
+		// Pending entry stays alive: a subsequent SendPermission
+		// from the runtime's permission handler (retry click,
+		// reconnect-during-flight, etc.) can re-route through
+		// the same frameRpcID. The 5-minute permissionTimeout
+		// watchdog is the fallback if no retry arrives.
+		return fmt.Errorf("dsh: %w", sendErr)
+	}
+
+	// RPC succeeded — clear pending state and advance the FIFO.
+	d.pendingMu.Lock()
+	d.pendingOrder = d.pendingOrder[1:]
+	delete(d.pendingApprovals, frameRpcID)
+	delete(d.pendingQuestions, frameRpcID)
+	delete(d.lastApprovalID, frameRpcID)
+	delete(d.pendingSource, frameRpcID)
+	d.pendingMu.Unlock()
 
 	// Wake any in-process handler waiting on the registered channel
 	// (the channel is created by registerApproval / handleApprovalRequested
@@ -874,6 +938,12 @@ func (d *driver) Reset(ctx context.Context) error {
 
 	if oldID != "" && oldID != newID {
 		d.cli.Unsubscribe(oldID)
+		// Remove the old sessionID from the host waterfall demux map
+		// before the new one takes over — otherwise a waterfall that
+		// races between unsubscribe and subscribe would route to a
+		// stale driver instance. hostWaterfallHandler will debug-log
+		// the miss.
+		unregisterDriverForWaterfall(d)
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = d.cli.RPC.SessionCancel(cancelCtx, oldID)
 		cancel()
@@ -889,9 +959,13 @@ func (d *driver) Reset(ctx context.Context) error {
 	d.pendingOrder = nil
 	d.pendingQuestions = map[string][]questionPayload{}
 	d.lastApprovalID = map[string]string{}
+	d.pendingSource = map[string]string{}
 	d.pendingMu.Unlock()
 
 	d.cli.Subscribe(newID, d.workspace, d.handleMuxFrame)
+
+	// Re-bind the new sessionID in the host waterfall demux map.
+	registerDriverForWaterfall(d)
 
 	// Replay the per-session permission mode captured on the
 	// first handshake — the host doesn't carry it across a fresh
@@ -1003,6 +1077,10 @@ func (d *driver) Close() error {
 		// Drop pending-approval channels for this session too — the
 		// runtime's permission handlers would otherwise wait forever
 		// on a sessionId nobody can answer anymore.
+		// Unregister from the host waterfall demux map BEFORE
+		// Unsubscribe so a waterfall racing in this window is dropped
+		// (debug-logged) instead of handed to a closing driver.
+		unregisterDriverForWaterfall(d)
 		d.cli.Unsubscribe(d.sessionID)
 		if d.sessionID != "" {
 			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)

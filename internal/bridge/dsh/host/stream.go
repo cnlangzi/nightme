@@ -568,11 +568,23 @@ func (h *StreamHub) dispatch(f serverFrame) {
 	switch f.Type {
 	case "ready":
 		// dsh sends one {type:"ready", clientId, host:{home:"..."}}
-		// frame right after the WS upgrade completes. Nothing to
-		// do with it; just log so we can correlate dsh-side
-		// connection logs.
+		// frame right after the WS upgrade completes. Log for
+		// correlation, AND forward to the host handler as a
+		// synthetic "ready" event so the bridge can capture
+		// ClientID for the /api/$events/result RPC body (the
+		// answer key for host waterfall frames). See
+		// host_waterfall.go::hostWaterfallHandler.
 		h.log.Info("dsh.host: mux ready",
 			"client_id", f.ClientID, "host", string(f.Host))
+		// Repack clientId + host into a {clientId, host} value
+		// envelope so the bridge-side handler can unmarshal it
+		// the same way it unmarshals waterfall request bodies.
+		readyValue, _ := json.Marshal(struct {
+			ClientID string          `json:"clientId"`
+			Host     json.RawMessage `json:"host"`
+		}{ClientID: f.ClientID, Host: f.Host})
+		h.markDispatchStart()
+		h.invokeOnHost("ready", "", readyValue)
 		return
 
 	case "item":
@@ -825,9 +837,8 @@ func translateHostEvent(raw json.RawMessage) (method, rpcID string, payload json
 		return "host/cancel", rec.EventID, mustJSON(map[string]any{
 			"eventId": rec.EventID,
 		})
-	case "ready", "":
-		// ready is handled in dispatch()'s top-level case; empty
-		// type means we couldn't decode — drop silently.
+	case "":
+		// Empty type means we couldn't decode — drop silently.
 		return "", "", nil
 	default:
 		// Unknown item type — log and drop. The dispatcher's

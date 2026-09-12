@@ -686,12 +686,25 @@ func TestClient_HostStreamDispatch(t *testing.T) {
 		"blank":     true,
 	})
 
-	got := collectFrames(t, received, 1, 2*time.Second)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 host frame, got %d", len(got))
+	// dsh sends a synthetic "ready" event to the host handler as
+	// soon as the mux stream connects (host/stream.go::dispatch
+	// `case "ready"` repacks clientId+host and invokes the host
+	// handler so the bridge can capture the clientId for
+	// /api/$events/result). Drain it before checking the session-added
+	// frame we actually care about.
+	got := collectFrames(t, received, 2, 2*time.Second)
+	var sessionAdded *serverFrameEnvelope
+	for i := range got {
+		if got[i].Method == "host/session-added" {
+			sessionAdded = &got[i]
+			break
+		}
 	}
-	if got[0].Method != "host/session-added" {
-		t.Errorf("wrong method: %+v", got[0])
+	if sessionAdded == nil {
+		t.Fatalf("expected a host/session-added frame, got: %+v", got)
+	}
+	if sessionAdded.Method != "host/session-added" {
+		t.Errorf("wrong method: %+v", sessionAdded)
 	}
 }
 

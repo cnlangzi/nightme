@@ -701,16 +701,37 @@ func newWiredCS(t *testing.T, cap *stateCapture) *chatsession.ChatSession {
 	return cs
 }
 
-// awaitReply polls up to 10s for the goroutine to call Send. Returns
-// the recorded messages (may be empty if timeout fires).
+// awaitReply polls until the dispatch goroutine has stopped
+// sending — i.e. the recorded-call count is stable for
+// quietWindow. Tests assert on the full set of sends
+// (header + footer on the success path, header + footer on
+// the failure path, etc.), so we can't return on the first
+// Send the way the previous one-send-poll did — slow CI
+// runners (macOS VM) race the footer behind the assertion.
+//
+// quietWindow must be larger than the goroutine scheduler
+// granularity (typically ~10ms) and small enough that the
+// whole polling budget stays usable on the slow path.
 func awaitReply(t *testing.T, em *fakeEmitter) []messages.OutboundMessage {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	const (
+		overallBudget = 10 * time.Second
+		quietWindow   = 80 * time.Millisecond
+	)
+	deadline := time.Now().Add(overallBudget)
+	lastSeen := time.Now()
+	lastCount := -1
 	for time.Now().Before(deadline) {
-		if em.didReceiveReply() {
-			return em.callsCopy()
+		count := len(em.callsCopy())
+		if count > 0 && count == lastCount {
+			if time.Since(lastSeen) >= quietWindow {
+				return em.callsCopy()
+			}
+		} else {
+			lastCount = count
+			lastSeen = time.Now()
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	return em.callsCopy()
 }

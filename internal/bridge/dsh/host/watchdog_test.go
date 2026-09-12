@@ -263,9 +263,14 @@ func procAlive(pid int) bool {
 // tests after the daemon stopped tearing dsh down on shutdown —
 // tests still need to terminate the spawned process so the test
 // binary doesn't leak it. No-op when sh owns no subprocess
-// (PID == 0).
+// (PID == 0) or when EnsureSharedHost failed before installing
+// the singleton (sh == nil — caller's cleanup must not crash on
+// the failure path).
 func killFakeDSH(t *testing.T, sh *host.SharedHost) {
 	t.Helper()
+	if sh == nil {
+		return
+	}
 	pid := sh.PID()
 	if pid == 0 {
 		return

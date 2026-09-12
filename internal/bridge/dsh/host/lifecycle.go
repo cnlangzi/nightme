@@ -59,6 +59,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -436,10 +437,14 @@ func dialReachable(port int) bool {
 	return true
 }
 
-// dshURLPattern removed: we no longer parse dsh's stdout for the
-// launch token — mintDSHAuthCookieFromCredentials signs the
-// dsh-auth cookie locally using the persisted signing secret
-// instead (see fix-dsh-shared-host).
+// dshURLPattern matches the first line of `dsh --profile web` stdout:
+//
+//	dsh web: http://127.0.0.1:3080/?token=<launchToken>
+//
+// Captures the full URL (host + port + path + query). spawnAndWire
+// uses the query to extract the launch token, then GETs /?token=...
+// to mint the dsh-auth cookie (see mintAuthCookie).
+var dshURLPattern = regexp.MustCompile(`dsh web:\s+(http://[^\s]+)`)
 
 // defaultDSHPort is the canonical port both `dsh web` and the
 // spawned dsh subprocess default to. The fallback sweep in
@@ -450,7 +455,7 @@ const defaultDSHPort = 3080
 // exchange: GET /?token=<launchToken>. dsh 303-redirects to / with
 // a Set-Cookie carrying the dsh-auth signed payload. We capture
 // that one cookie into a fresh cookiejar so every subsequent
-// /api/* and /api/events.* call carries it.
+// /api/* and /api/remote.mux call carries it.
 //
 // baseURL is the dsh root WITHOUT the token query (e.g.
 // "http://127.0.0.1:3080"). token is the launch token printed on
@@ -458,10 +463,67 @@ const defaultDSHPort = 3080
 // error is also returned.
 //
 // Why this is necessary: dsh 0.1.2-rc.1 auth-gates /api/* and the
-// two /api/events.* WS endpoints with per-process signed cookies.
+// /api/remote.mux WS endpoint with per-process signed cookies.
 // The launch token only works on the initial GET / — it mints the
 // cookie. Without this step, every bridge call gets 401 and every
 // WS upgrade closes mid-handshake.
+//
+// Used by spawnAndWire when nightme owns the subprocess (so the
+// launch token is reachable on dsh's stdout). The attach path
+// (tryAttachExistingDSH) uses mintDSHAuthCookieFromCredentials
+// instead because a foreign dsh's launch token is process-internal
+// and never leaves its memory.
+func mintAuthCookie(ctx context.Context, baseURL, token string) (http.CookieJar, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: cookiejar: %w", err)
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: parse base url %q: %w", baseURL, err)
+	}
+	// url.Values.Set doesn't propagate back to URL.RawQuery; use
+	// Encode() to rebuild the query string with proper percent
+	// escaping (raw concatenation would mangle tokens containing
+	// & = + / or other reserved characters).
+	q := *u
+	values := q.Query()
+	values.Set("token", token)
+	q.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, q.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: build token-exchange req: %w", err)
+	}
+	// We deliberately do NOT pass the jar — the cookiejar is
+	// populated from this single response, not sent on it.
+	client := &http.Client{
+		Timeout: webURLParseTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// dsh returns 303 → /. We want the cookies from THAT
+			// response, not from any further redirect. Stop after
+			// the first hop.
+			if len(via) >= 1 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: token-exchange GET %s: %w", q.String(), err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther && resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("dsh.host: token-exchange: HTTP %d (want 303 or 200)", resp.StatusCode)
+	}
+	cookies := resp.Cookies()
+	if len(cookies) == 0 {
+		return nil, fmt.Errorf("dsh.host: token-exchange: no Set-Cookie in response (dsh version mismatch?)")
+	}
+	jar.SetCookies(u, cookies)
+	return jar, nil
+}
+
 // mintDSHAuthCookieFromCredentials signs a dsh-auth-<sha256>=v1.body.sig
 // cookie using the signing secret loaded from ~/.dsh/.credentials.yaml.
 // The algorithm is verified against dsh 0.1.2-rc.1 by capturing
@@ -478,6 +540,12 @@ const defaultDSHPort = 3080
 // signing secret. We mint locally; dsh accepts. So we don't need
 // to spawn a fresh dsh OR persist a cookie OR attach to a running
 // dsh — just read ~/.dsh/.credentials.yaml, sign, attach.
+//
+// Used by tryAttachExistingDSH (foreign dsh on the wire) and by
+// spawnAndWire when ~/.dsh/.credentials.yaml is available. When
+// the credentials file is missing, spawnAndWire falls back to
+// mintAuthCookie (launch-token exchange) — that's the spawn path
+// that runs on a CI runner with no prior dsh install.
 func mintDSHAuthCookieFromCredentials(authority string) (http.CookieJar, error) {
 	secret, err := loadBrowserSessionSecret()
 	if err != nil {
@@ -897,15 +965,40 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	}(stderr)
 
 	// Drain stdout so dsh's pipe buffer doesn't fill and deadlock
-	// the subprocess. We don't capture the launch token any more —
-	// mintDSHAuthCookieFromCredentials signs the cookie locally
-	// from the persisted signing secret, so no token exchange is
-	// needed (see fix-dsh-shared-host).
+	// the subprocess. The launch-token exchange path needs the
+	// first URL line; we capture it into tokenCh while still
+	// logging every line at debug level for /diagnose triage.
+	// Buffered=1 so the goroutine doesn't block if the receiver
+	// already grabbed the token.
+	tokenCh := make(chan string, 1)
+	tokenErrCh := make(chan error, 1)
 	go func(r io.Reader) {
 		scnr := bufio.NewScanner(r)
 		scnr.Buffer(make([]byte, 0, 4096), 16*1024)
+		sent := false
 		for scnr.Scan() {
-			logger.Debug("dsh.host: stdout", "line", scnr.Text())
+			line := scnr.Text()
+			logger.Debug("dsh.host: stdout", "line", line)
+			if sent {
+				continue
+			}
+			if m := dshURLPattern.FindStringSubmatch(line); m != nil {
+				u, perr := url.Parse(m[1])
+				if perr != nil {
+					tokenErrCh <- fmt.Errorf("dsh.host: parse dsh url %q: %w", m[1], perr)
+					return
+				}
+				token := u.Query().Get("token")
+				if token == "" {
+					tokenErrCh <- fmt.Errorf("dsh.host: dsh url %q has no ?token=...", m[1])
+					return
+				}
+				tokenCh <- token
+				sent = true
+			}
+		}
+		if !sent {
+			tokenErrCh <- errors.New("dsh.host: stdout closed before URL line appeared")
 		}
 	}(stdout)
 
@@ -937,22 +1030,45 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	// Mint the dsh-auth cookie directly using the signing secret
-	// loaded from ~/.dsh/.credentials.yaml. We skip the launch-token
-	// exchange because the same secret is shared by every dsh that
-	// uses this .dsh/ directory — so the cookie we mint is
-	// accepted by any dsh on this host, not just the one we
-	// spawned. See fix-dsh-shared-host for rationale; the
-	// algorithm is verified against dsh 0.1.2-rc.1 by capturing
-	// the real POST body and reproducing the HMAC-SHA256
-	// signature byte-for-byte (2026-09-11).
+	// Mint the dsh-auth cookie. Try the local-secret path first —
+	// it works without a launch-token round-trip and lets the
+	// minted cookie validate against any dsh on this user account
+	// (which is what the attach path needs). If ~/.dsh/.credentials.yaml
+	// is missing or unreadable, fall back to the launch-token
+	// exchange (we own this dsh, so the token is on stdout). The
+	// fallback keeps the spawn path working on machines that never
+	// ran dsh --profile web (CI runners, fresh nightme installs).
 	authority := strings.TrimPrefix(baseURL, "http://")
 	jar, err := mintDSHAuthCookieFromCredentials(authority)
 	if err != nil {
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		_ = stdout.Close()
-		return nil, nil, fmt.Errorf("dsh.host: mint dsh-auth cookie: %w", err)
+		logger.Debug("dsh.host: credentials-based mint unavailable; falling back to launch-token exchange",
+			"err", err)
+		// Wait for the launch token from the stdout drain goroutine.
+		tokenCtx, tokenCancel := context.WithTimeout(ctx, webURLParseTimeout)
+		token, terr := func() (string, error) {
+			select {
+			case t := <-tokenCh:
+				return t, nil
+			case e := <-tokenErrCh:
+				return "", e
+			case <-tokenCtx.Done():
+				return "", fmt.Errorf("dsh.host: timeout waiting for launch token: %w", tokenCtx.Err())
+			}
+		}()
+		tokenCancel()
+		if terr != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			_ = stdout.Close()
+			return nil, nil, terr
+		}
+		jar, err = mintAuthCookie(ctx, baseURL, token)
+		if err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			_ = stdout.Close()
+			return nil, nil, err
+		}
 	}
 
 	cli := NewWithJar(baseURL, jar, logger)

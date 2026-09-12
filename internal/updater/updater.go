@@ -1,33 +1,32 @@
 // Package updater — self-update support for nightme.
 //
-// The package owns three jobs, in order:
+// # Design
 //
-//   - Lookup: fetch the GitHub release metadata for a given tag,
-//     including the list of release assets and SHA256SUMS.
+// The package exposes two operations:
 //
-//   - Match: pick the single asset that matches the running
-//     binary's GOOS/GOARCH. Assets follow the
-//     "nightme_<version>_<os>_<arch>.<ext>" naming convention
-//     used by the project's release workflow (see the
-//     SHA256SUMS listing for v0.3.7 as the canonical example).
+//   - LookupLatestTag: probe the release feed for the current
+//     latest tag. nightme.dev first (CDN-cached, lets us count
+//     users per version), GitHub /releases/latest fallback when
+//     nightme.dev is unreachable.
 //
-//   - Download: fetch the matched asset to a staging path under
-//     DataDir/updates/<version>/, with cancellable context,
-//     stdlib-only progress reporting, and SHA256 verification
-//     against the SHA256SUMS file from the same release.
+//   - DownloadTag: fetch + SHA256-verify + extract the latest
+//     binary. URL composition is rule-based, no API call —
+//     GitHub first, nightme.dev mirror fallback.
 //
-// The package is stdlib-only. We could pull in
-// rhysd/go-github-selfupdate but it bundles its own GitHub
-// client, semaphore, and progress bar; for a single-binary
-// release like nightme the stdlib path is ~200 lines and
-// keeps the supply-chain surface small.
+// # Why no --tag / pinned versions
 //
-// Layering:
+// nightme.dev only retains the last two tags' worth of
+// assets, and the user-facing CLI always upgrades to the
+// latest release. There's no production scenario for
+// installing a historical version, so the API stays
+// pinned-tag-free.
 //
-//   - cmd/nightme/update.go (CLI shell)
-//   - internal/updater (this package: Lookup / Match / Download)
-//   - cmd/nightme/update.go (Install — next commit: selfupdate
-//     binary swap + daemon restart).
+// # Layering
+//
+//	cmd/nightme/update.go (CLI shell)
+//	cmd/nightme/repl_update_prompt.go (REPL prompt)
+//	internal/version (cached latest-tag lookup)
+//	internal/updater (this package: LookupLatestTag, DownloadTag, Install)
 package updater
 
 import (
@@ -54,448 +53,379 @@ import (
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
-// DefaultTimeout caps the entire download path (lookup +
-// checksum + asset). Production callers pass a derived context
-// so Ctrl-C cancels cleanly.
+// ----- endpoints -----------------------------------------------------
+
+// NightMeDevAPIBase is the base URL for nightme.dev's release
+// metadata. The /releases/latest endpoint lives at the root;
+// /releases/tags/<v> is not registered (the mirror only tracks
+// the most recent tags, not historical ones).
+var NightMeDevAPIBase = "https://nightme.dev"
+
+// GitHubAPIBase is the GitHub releases API base. Used for
+// tag lookup when nightme.dev is down.
+var GitHubAPIBase = "https://api.github.com/repos/cnlangzi/nightme"
+
+// GitHubDownloadBase is the GitHub release-asset download root.
+// Asset URLs follow <GitHubDownloadBase>/<tag-with-v>/<assetName>.
+var GitHubDownloadBase = "https://github.com/cnlangzi/nightme/releases/download"
+
+// MirrorDownloadBase is the nightme.dev mirror root. Asset URLs
+// follow <MirrorDownloadBase>/<ver-no-v>/<assetName>. The mirror
+// retains the last two tags worth of assets.
+var MirrorDownloadBase = "https://nightme.dev/downloads"
+
+// ----- download primitives ------------------------------------------
+
+// DefaultTimeout caps the entire DownloadTag flow (sums +
+// asset download + extraction). Production callers pass a
+// derived context so Ctrl-C cancels cleanly.
 const DefaultTimeout = 5 * time.Minute
 
-// ProgressFunc is called periodically during Download with the
-// current bytes read, total bytes (when known), and elapsed
-// wall time. Implementations typically render an ASCII progress
-// bar to the terminal. Callers may pass nil to skip progress
-// reporting entirely (faster path for tests / quiet mode).
-//
-// Frequency is best-effort: the downloader flushes a progress
-// event on every chunk boundary AND on every Tick interval
-// (200ms), whichever fires first. Total may be -1 if the
-// server did not send Content-Length.
+// ProgressFunc is called periodically during a single asset
+// download with the current bytes read, total bytes (when
+// known), and elapsed wall time. Callers may pass nil to skip
+// progress reporting (faster path for tests / quiet mode).
 type ProgressFunc func(downloaded int64, total int64, elapsed time.Duration)
 
 // QuietProgress is a no-op ProgressFunc for callers that want
-// to silence the progress reporter (CI, scripted runs, tests).
+// to silence the progress reporter.
 func QuietProgress(int64, int64, time.Duration) {}
 
-// Release is the subset of the GitHub release payload we read.
-// We don't decode every field — the asset list and the tag name
-// are all that Lookup consumers need.
-type Release struct {
-	TagName string  `json:"tag_name"`
-	Assets  []Asset `json:"assets"`
+// ----- latest-tag lookup -------------------------------------------
+
+// latestTagResponse is the slice of the GitHub-shaped release
+// payload we actually consume: just the tag_name. nightme.dev's
+// /releases/latest and GitHub's /releases/latest both emit a
+// JSON object containing "tag_name"; we ignore everything else.
+type latestTagResponse struct {
+	TagName string `json:"tag_name"`
 }
 
-// Asset is one downloadable file in a release. The fields we
-// need are name (for matching + SHA256SUMS lookup) and
-// browser_download_url (the actual asset URL). Size is useful
-// for the progress bar's total field.
-type Asset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-	Size               int64  `json:"size"`
-}
-
-// CheckResult is the unified stage-1 output. It bundles the
-// raw *Release (so downstream stages can pick the asset +
-// SHA256SUMS without a second API call) with the user-
-// facing Latest string and the Outdated bool.
+// LookupLatestTag returns the latest release tag (or verifies a
+// pinned one), preferring nightme.dev over GitHub.
 //
-//	Latest  — tag of the release we're targeting (e.g. "v0.3.7")
-//	Outdated — true when current < latest under semver rules
-//	Release — full *Release for stages 2 + 3
-type CheckResult struct {
-	Latest   string
-	Outdated bool
-	Release  *Release
-}
-
-// Check is stage 1: resolve the latest (or pinned) GitHub
-// release and decide whether the running build is out of
-// date. It does NOT touch the filesystem or any binaries.
+// When tag is empty, the latest non-prerelease release is
+// requested. When tag is non-empty (e.g. user passed --tag),
+// both sources fall back gracefully: nightme.dev will 404 on
+// /releases/tags/<v> (it doesn't serve historical tags) and
+// the GitHub fallback takes over.
 //
-// Tag is the optional `--tag vX.Y.Z` override; empty means
-// "latest". The current version is read from the package-
-// level version.Version via version.Compare.
+// Returns (tag-with-v, source-label, error). errors.Join wraps
+// the two source errors when both fail.
+// LookupLatestTag probes the release feed for the current latest
+// tag. nightme.dev first (CDN-cached, lets us count users per
+// version); GitHub /releases/latest fallback when nightme.dev is
+// unreachable.
 //
-// Errors are surfaced verbatim — the CLI translates them
-// into the "[1/3] check failed" line.
-func Check(ctx context.Context, tag string) (*CheckResult, error) {
-	release, err := Lookup(ctx, "cnlangzi/nightme", tag)
-	if err != nil {
-		return nil, err
+// Returns the tag (e.g. "v0.5.0", with the v), the source label
+// ("nightme.dev" or "github"), and any error. errors.Join wraps
+// the two source errors when both fail.
+func LookupLatestTag(ctx context.Context) (string, string, error) {
+	rel, err := lookupLatestTagOnce(ctx, NightMeDevAPIBase)
+	if err == nil {
+		return rel, "nightme.dev", nil
 	}
-	latest := release.TagName
-	outdated := isOutdatedLatest(latest)
-	return &CheckResult{
-		Latest:   latest,
-		Outdated: outdated,
-		Release:  release,
-	}, nil
-}
-
-// isOutdatedLatest compares version.Version (build-time
-// identity) with the latest tag from the release feed.
-// It defers to the internal/version.IsOutdated helper so the
-// comparison rules stay in lock-step with the REPL startup
-// prompt (which uses the same helper).
-func isOutdatedLatest(latest string) bool {
-	return version.IsOutdated(version.Version, latest)
-}
-
-// LookupURL is the base URL GitHub's releases API lives at.
-// Held as a var so tests can swap it for an httptest server
-// without having to plumb a base URL through every caller.
-//
-// Production callers should leave this untouched; the default
-// (api.github.com) is what we ship.
-var LookupURL = "https://api.github.com"
-
-// Lookup queries GitHub for the release that matches the
-// given tag (e.g. "v0.3.7" or "0.3.7"). When tag is empty the
-// API serves the latest non-prerelease release.
-//
-// repo is "owner/name" on GitHub. Tests override this to point
-// at an httptest server via LookupURL.
-func Lookup(ctx context.Context, repo, tag string) (*Release, error) {
-	url := LookupURL + "/repos/" + repo + "/releases/latest"
-	if tag != "" {
-		// GitHub's /releases/tags/<tag> route returns the
-		// same JSON shape and works for any tag, including
-		// those that point at a draft / pre-release.
-		url = LookupURL + "/repos/" + repo + "/releases/tags/" + tag
+	rel, err2 := lookupLatestTagOnce(ctx, GitHubAPIBase)
+	if err2 != nil {
+		return "", "", errors.Join(
+			fmt.Errorf("nightme.dev: %w", err),
+			fmt.Errorf("github: %w", err2),
+		)
 	}
+	return rel, "github", nil
+}
+
+// lookupLatestTagOnce fetches <baseURL>/releases/latest and
+// decodes the tag_name field. baseURL is either
+// NightMeDevAPIBase or GitHubAPIBase — both end with the
+// /releases path prefix, so the URL is identical between
+// the two sources.
+func lookupLatestTagOnce(ctx context.Context, baseURL string) (string, error) {
+	url := baseURL + "/releases/latest"
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build lookup request: %w", err)
+		return "", fmt.Errorf("build tag lookup request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", version.UserAgent())
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	client := httpclient.Default()
-	resp, err := client.Do(req)
+	resp, err := httpclient.Default().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("lookup release: %w", err)
+		return "", fmt.Errorf("tag lookup: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("lookup release: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("tag lookup: HTTP %d", resp.StatusCode)
 	}
 
-	var r Release
+	var r latestTagResponse
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return nil, fmt.Errorf("decode release: %w", err)
+		return "", fmt.Errorf("decode tag lookup: %w", err)
 	}
 	if r.TagName == "" {
-		return nil, errors.New("lookup release: empty tag_name")
+		return "", errors.New("tag lookup: empty tag_name")
 	}
-	return &r, nil
+	return r.TagName, nil
 }
 
-// MatchAsset picks the asset matching the running binary's
-// GOOS/GOARCH using the
-// "nightme_<version>_<os>_<arch>.<ext>" convention. When
-// version is empty the matcher accepts any version segment so
-// callers can use it across releases.
+// ----- URL composition ---------------------------------------------
+
+// GitHubAssetURL composes a GitHub release-asset download URL.
+// tag is the GitHub-shaped tag (e.g. "v0.5.0", with the v).
+// assetName is the bare filename (e.g. "nightme_0.5.0_linux_amd64.tar.gz",
+// no v prefix — matching the project release convention).
+func GitHubAssetURL(tag, assetName string) string {
+	return GitHubDownloadBase + "/" + tag + "/" + assetName
+}
+
+// MirrorAssetURL composes a nightme.dev mirror URL. The path
+// uses the version WITHOUT the v prefix (nightme.dev's
+// /downloads/0.5.0/ subdirectory, not /downloads/v0.5.0/).
+func MirrorAssetURL(tag, assetName string) string {
+	return MirrorDownloadBase + "/" + stripV(tag) + "/" + assetName
+}
+
+// stripV removes a leading "v" or "V" prefix. tag like
+// "v0.5.0" → "0.5.0"; already-bare "0.5.0" → "0.5.0".
+func stripV(tag string) string {
+	if len(tag) > 0 && (tag[0] == 'v' || tag[0] == 'V') {
+		return tag[1:]
+	}
+	return tag
+}
+
+// AssetNameForRuntime returns the asset filename matching the
+// running binary's GOOS / GOARCH + the given version (the bare
+// version, no v). Example:
 //
-// Returns nil (no error) when no asset matches — the caller
-// surfaces this as "no binary for darwin/amd64 in this
-// release", which is the correct diagnostic for an
-// unsupported OS/arch.
-func MatchAsset(release *Release, version string) *Asset {
-	wantOS := runtime.GOOS
-	wantArch := runtime.GOARCH
-	wantExt := "tar.gz"
-	if wantOS == "windows" {
-		wantExt = "zip"
+//	AssetNameForRuntime("0.5.0", "linux", "amd64")
+//	→ "nightme_0.5.0_linux_amd64.tar.gz"
+//
+// Windows uses .zip; everything else uses .tar.gz. The same
+// naming convention is used on both GitHub and the nightme.dev
+// mirror, so callers don't need to know which source served
+// the release.
+func AssetNameForRuntime(ver, goos, goarch string) string {
+	ext := "tar.gz"
+	if goos == "windows" {
+		ext = "zip"
 	}
-	// Strip a leading "v" so "v0.3.7" and "0.3.7" both match.
-	v := strings.TrimPrefix(version, "v")
-	if v == "" {
-		// Fall back to whatever the release's tag says so a
-		// single MatchAsset call works for "latest".
-		v = strings.TrimPrefix(release.TagName, "v")
-	}
-	want := fmt.Sprintf("nightme_%s_%s_%s.%s", v, wantOS, wantArch, wantExt)
-
-	for i := range release.Assets {
-		if release.Assets[i].Name == want {
-			return &release.Assets[i]
-		}
-	}
-	return nil
+	return fmt.Sprintf("nightme_%s_%s_%s.%s", ver, goos, goarch, ext)
 }
 
-// DownloadResult is what Download returns on success. The caller
-// (CLI / install command) reads StagingPath to swap the binary
-// in place. The parent dir is reachable as filepath.Dir(StagingPath)
-// — we deliberately do NOT carry it as a separate field here, since
-// every caller already has the original stagingDir in scope and
-// round-tripping a redundant string through the struct is pure
-// over-engineering (see the older "StagingDir:" iteration in git
-// history; dsh review 2026-08-26 caught the redundancy).
+// ----- download + verify -------------------------------------------
+
+// DownloadResult is what DownloadTag returns on success. Callers
+// read BinaryPath to swap the binary in place.
 type DownloadResult struct {
-	Asset       Asset
-	StagingPath string // absolute path under the stagingDir passed to Download
-	SHA256Hex   string // hex-encoded hash of the downloaded bytes
-	Bytes       int64  // total bytes written (== Asset.Size on success)
-	Cached      bool   // true when a local archive already matched SHA256SUMS
+	Tag        string // "v0.5.0"
+	BinaryPath string // absolute path to the verified binary
+	Source     string // which download base served it: "github" / "mirror"
+	AssetName  string // e.g. "nightme_0.5.0_linux_amd64.tar.gz"
+	SHA256Hex  string // verified hash, or "" if no sums file was reachable
 }
 
-// Download fetches the asset to stagingDir/<asset.Name> with
-// cancellable context, periodic progress reporting, and a
-// SHA256SUMS-driven integrity check.
+// SHA256SUMSName is the canonical sums filename in every
+// nightme release. Both GitHub and the nightme.dev mirror
+// always ship it as a release asset.
+const SHA256SUMSName = "SHA256SUMS.txt"
+
+// DownloadTag downloads + verifies + extracts the latest
+// nightme binary into <dataDir>/updates/<ver>/. The tag is
+// resolved internally via LookupLatestTag — callers don't
+// pin a version.
 //
-// The downloaded archive (.tar.gz on unix, .zip on windows) is
-// kept as-is in the staging dir; Install (next commit) is
-// responsible for extracting and replacing the binary.
+// Stage 1: download SHA256SUMS.txt (GitHub first, mirror fallback).
 //
-// stagingDir is typically <DataDir>/updates/<version>/. The
-// function creates it (parents included) if it does not exist.
+// Stage 2: parse the sums file for the target asset's hash.
+// The sums file MUST list our asset — a missing entry is a
+// hard error, not a soft fallback. A stripped sums file
+// alongside a tampered asset would otherwise install
+// silently.
 //
-// progress may be nil for silent downloads.
+// Stage 3: download the asset (GitHub first, mirror fallback)
+// and verify its SHA256 against the sums file. The SHA is
+// computed inline (no second file read) via fetchAsset's
+// tee.
 //
-// The SHA256SUMS file is fetched separately from the same
-// release; if it cannot be downloaded the function fails
-// closed (errors.New("checksums unreachable")) so callers
-// never silently install an unverified binary.
-func Download(
-	ctx context.Context,
-	release *Release,
-	asset *Asset,
-	stagingDir string,
-	progress ProgressFunc,
-) (*DownloadResult, error) {
-	if asset == nil {
-		return nil, errors.New("download: nil asset")
+// Stage 4: extract the archive into the staging dir.
+//
+// progress is called periodically during the binary download
+// (the largest, slowest transfer). Pass QuietProgress to
+// silence; pass nil to skip callbacks entirely.
+func DownloadTag(ctx context.Context, dataDir string, progress ProgressFunc) (*DownloadResult, error) {
+	if dataDir == "" {
+		return nil, errors.New("updater: empty data dir")
 	}
 
-	// 1. SHA256SUMS lookup. We refuse to download without it
-	// so a tampered release cannot slip past.
-	wantSum, err := lookupSHA256(ctx, release, asset.Name)
+	tag, _, err := LookupLatestTag(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("lookup latest tag: %w", err)
+	}
+
+	ver := stripV(tag)
+	stagingDir := filepath.Join(dataDir, "updates", ver)
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir staging dir: %w", err)
+	}
+
+	assetName := AssetNameForRuntime(ver, runtime.GOOS, runtime.GOARCH)
+
+	// Stage 1: pull the sums file. GitHub first, mirror fallback.
+	sumsPath, _, sumsSource, err := downloadAssetWithFallback(
+		ctx,
+		GitHubAssetURL(tag, SHA256SUMSName),
+		MirrorAssetURL(tag, SHA256SUMSName),
+		SHA256SUMSName,
+		stagingDir,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("download sums: %w", err)
+	}
+
+	// Stage 2: parse the sums file for our asset's expected
+	// hash. A missing entry is a HARD error: we just fetched
+	// the sums file successfully, so a stripped / partial
+	// sums alongside a tampered asset would otherwise install
+	// silently.
+	wantSum, err := lookupSHAInFile(sumsPath, assetName)
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Staging path.
-	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir staging dir: %w", err)
-	}
-	stagingPath := filepath.Join(stagingDir, asset.Name)
-
-	// 2b. Reuse a previously downloaded archive when its
-	// sha256 still matches the published SHA256SUMS. Size is
-	// a cheap reject; the hash is the actual gate.
-	if cached := verifyLocalArchive(stagingPath, wantSum, asset); cached != nil {
-		return cached, nil
-	}
-
-	// 3. Fetch the asset with a SHA256 tee so we don't need
-	// a second pass to verify. Progress is reported on every
-	// chunk + every tick.
-	out, err := os.OpenFile(stagingPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Stage 3: pull the binary, verifying SHA inline. The
+	// SHA is computed during the file write via fetchAsset's
+	// tee — no second pass over the bytes.
+	binArchive, gotSum, binSource, err := downloadAssetWithFallback(
+		ctx,
+		GitHubAssetURL(tag, assetName),
+		MirrorAssetURL(tag, assetName),
+		assetName,
+		stagingDir,
+		progress,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("open staging file: %w", err)
+		return nil, fmt.Errorf("download binary: %w", err)
+	}
+	if gotSum != wantSum {
+		return nil, fmt.Errorf("sha256 mismatch (%s): got %s, want %s",
+			binSource, gotSum, wantSum)
+	}
+
+	// Stage 4: extract.
+	binary, err := ExtractArchive(binArchive, stagingDir)
+	if err != nil {
+		return nil, fmt.Errorf("extract: %w", err)
+	}
+
+	// Use the binary source for the result label so callers
+	// know which mirror served the install (sums and binary
+	// could in principle differ if one source is partially
+	// broken; this records which one wrote the bytes that
+	// ended up on disk).
+	source := binSource
+	if source == "" {
+		source = sumsSource
+	}
+
+	return &DownloadResult{
+		Tag:        tag,
+		BinaryPath: binary,
+		Source:     source,
+		AssetName:  assetName,
+		SHA256Hex:  gotSum,
+	}, nil
+}
+
+// downloadAssetWithFallback fetches primaryURL; on failure
+// (network, 5xx, 4xx, body error) falls back to fallbackURL.
+// Returns (local-path, sha256hex, source-label, error). progress
+// is optional (nil = silent). The sha256hex is computed inline
+// during the file write — no second pass over the bytes.
+//
+// The "label" returned is "github" or "mirror" — used by
+// DownloadTag to surface which source served the bytes.
+func downloadAssetWithFallback(
+	ctx context.Context,
+	primaryURL, fallbackURL, assetName, stagingDir string,
+	progress ProgressFunc,
+) (string, string, string, error) {
+	if path, sum, err := fetchAsset(ctx, primaryURL, assetName, stagingDir, progress); err == nil {
+		return path, sum, "github", nil
+	}
+	path, sum, err := fetchAsset(ctx, fallbackURL, assetName, stagingDir, progress)
+	if err != nil {
+		return "", "", "", err
+	}
+	return path, sum, "mirror", nil
+}
+
+// fetchAsset downloads url into <stagingDir>/<assetName> with a
+// SHA256 tee so we don't need a second pass to hash it later.
+// Returns (local-path, sha256hex, error). Caller passes
+// progress to receive tick callbacks; nil is fine for quiet
+// mode.
+func fetchAsset(
+	ctx context.Context,
+	url, assetName, stagingDir string,
+	progress ProgressFunc,
+) (string, string, error) {
+	dst := filepath.Join(stagingDir, assetName)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", "", fmt.Errorf("open %s: %w", assetName, err)
 	}
 	cleanup := func() {
 		_ = out.Close()
-		// Best-effort remove on any failure path so a
-		// partial download doesn't sit in the staging dir
-		// and confuse the next attempt.
-		_ = os.Remove(stagingPath)
+		_ = os.Remove(dst)
 	}
 
 	hasher := sha256.New()
 	mw := io.MultiWriter(out, hasher)
-	reader, err := fetchWithProgress(ctx, asset.BrowserDownloadURL, asset.Size, mw, progress)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		cleanup()
-		return nil, err
+		return "", "", fmt.Errorf("build %s request: %w", assetName, err)
 	}
-	// Drain anything the progress reader buffered but didn't
-	// pass through mw.
-	if _, err := io.Copy(io.Discard, reader); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("drain response: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("close staging file: %w", err)
-	}
-
-	// 4. Verify.
-	gotSum := hex.EncodeToString(hasher.Sum(nil))
-	if gotSum != wantSum {
-		_ = os.Remove(stagingPath)
-		return nil, fmt.Errorf("sha256 mismatch: got %s, want %s", gotSum, wantSum)
-	}
-
-	return &DownloadResult{
-		Asset:       *asset,
-		StagingPath: stagingPath,
-		SHA256Hex:   gotSum,
-		Bytes:       asset.Size,
-	}, nil
-}
-
-// verifyLocalArchive returns a Cached DownloadResult when
-// path exists and its sha256 matches wantSum. A size mismatch
-// or any read error falls through to a fresh download
-// (returns nil) rather than failing closed — the published
-// sums are the source of truth, a leftover partial file is
-// just junk to overwrite.
-func verifyLocalArchive(path, wantSum string, asset *Asset) *DownloadResult {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil
-	}
-	if asset.Size > 0 && info.Size() != asset.Size {
-		return nil
-	}
-	gotSum, err := hashFile(path)
-	if err != nil || gotSum != wantSum {
-		return nil
-	}
-	return &DownloadResult{
-		Asset:       *asset,
-		StagingPath: path,
-		SHA256Hex:   gotSum,
-		Bytes:       info.Size(),
-		Cached:      true,
-	}
-}
-
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// lookupSHA256 fetches the SHA256SUMS file for the release
-// and returns the hash for the given asset filename. The
-// file format is "<hex>  <filename>" per line, matching
-// `sha256sum -b` output.
-func lookupSHA256(ctx context.Context, release *Release, assetName string) (string, error) {
-	var sumsAsset *Asset
-	for i := range release.Assets {
-		if release.Assets[i].Name == "SHA256SUMS.txt" {
-			sumsAsset = &release.Assets[i]
-			break
-		}
-	}
-	if sumsAsset == nil {
-		return "", errors.New("checksums: SHA256SUMS.txt not in release")
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sumsAsset.BrowserDownloadURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("build checksums request: %w", err)
-	}
-	// Download always comes through here — including on the
-	// cache-hit path, which re-verifies against the published
-	// sums. So this is the first request of every upgrade attempt,
-	// and it lands on the same release-CDN host as the asset
-	// fetch. An anonymous Go-http-client/1.1 here fails as
-	// "download checksums: HTTP 4xx", which reads like a missing
-	// file rather than a rejected client.
 	req.Header.Set("User-Agent", version.UserAgent())
-	client := httpclient.Default()
-	resp, err := client.Do(req)
+
+	resp, err := httpclient.Default().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("download checksums: %w", err)
+		cleanup()
+		return "", "", fmt.Errorf("%s: %w", assetName, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return "", fmt.Errorf("download checksums: HTTP %d", resp.StatusCode)
+		cleanup()
+		return "", "", fmt.Errorf("%s: HTTP %d", assetName, resp.StatusCode)
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
-			continue
-		}
-		// fields[0] = sha256 hex, fields[1] = filename.
-		// We compare filename with a leading "*" stripped
-		// (binary mode) for robustness against either
-		// convention being emitted.
-		name := strings.TrimPrefix(fields[1], "*")
-		if name == assetName {
-			return strings.ToLower(fields[0]), nil
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("scan checksums: %w", err)
-	}
-	return "", fmt.Errorf("checksums: %s not listed", assetName)
-}
-
-// fetchWithProgress issues the GET, copies the body into dst,
-// and reports progress. The returned reader is whatever
-// remains of the response body after copying; callers must
-// drain it to allow connection reuse.
-func fetchWithProgress(
-	ctx context.Context,
-	url string,
-	total int64,
-	dst io.Writer,
-	progress ProgressFunc,
-) (io.Reader, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build asset request: %w", err)
-	}
-	req.Header.Set("User-Agent", version.UserAgent())
-	req.Header.Set("Accept", "application/octet-stream")
-
-	client := httpclient.Default()
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("download asset: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("download asset: HTTP %d", resp.StatusCode)
-	}
-
-	// Prefer the server's Content-Length when the caller
-	// didn't get a hint (e.g. release metadata was stale).
-	if total <= 0 && resp.ContentLength > 0 {
-		total = resp.ContentLength
-	}
-
-	start := time.Now()
-	pr := &progressReader{
+	if _, err := io.Copy(mw, &progressReader{
 		underlying: resp.Body,
-		total:      total,
-		start:      start,
+		total:      resp.ContentLength,
 		progress:   progress,
+	}); err != nil {
+		cleanup()
+		return "", "", fmt.Errorf("copy %s: %w", assetName, err)
 	}
-	if _, err := io.Copy(dst, pr); err != nil {
-		resp.Body.Close()
-		return nil, fmt.Errorf("copy asset body: %w", err)
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return "", "", fmt.Errorf("close %s: %w", assetName, err)
 	}
-	// io.Copy already drained — return an empty reader so
-	// the caller's `io.Copy(io.Discard, reader)` is a no-op
-	// and can still close the body cleanly.
-	resp.Body.Close()
-	return io.NopCloser(strings.NewReader("")), nil
+	return dst, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // progressReader wraps an io.Reader and emits progress events
-// on chunk boundaries and on a 200ms ticker (whichever fires
-// first). total <= 0 means unknown.
+// on every chunk boundary and on a 200ms ticker. total <= 0
+// means unknown (chunked transfer without Content-Length).
 type progressReader struct {
 	underlying io.Reader
 	total      int64
@@ -522,96 +452,45 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// StagingDir returns the canonical staging path for a given
-// version: <DataDir>/updates/<version>/. Callers should pass
-// the value from config.Config.Paths.DataDir; an empty
-// DataDir disables staging (returns "" + error).
-func StagingDir(dataDir, version string) (string, error) {
-	if dataDir == "" {
-		return "", errors.New("staging dir: empty data dir")
-	}
-	v := strings.TrimPrefix(version, "v")
-	return filepath.Join(dataDir, "updates", v), nil
-}
-
-// FormatSpeed returns a human-readable bytes/sec string for the
-// progress reporter (e.g. "1.2 MB/s"). Exposed so tests can
-// pin the formatter output without re-implementing the math.
-func FormatSpeed(bytes int64, elapsed time.Duration) string {
-	if elapsed <= 0 {
-		return "0 B/s"
-	}
-	per := float64(bytes) / elapsed.Seconds()
-	return formatBytes(int64(per)) + "/s"
-}
-
-// FormatBytes is exposed for progress reporter reuse.
-func FormatBytes(n int64) string { return formatBytes(n) }
-
-func formatBytes(n int64) string {
-	const k = 1024
-	if n < k {
-		return strconv.FormatInt(n, 10) + " B"
-	}
-	div, exp := int64(k), 0
-	for n2 := n / k; n2 >= k; n2 /= k {
-		div *= k
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGT"[exp])
-}
-
-// NewASCIIProgressBar returns a ProgressFunc that renders a
-// single-line ASCII bar to out. The bar overwrites itself
-// with \r on every tick and the caller prints a final
-// newline (Download flushes an empty event by virtue of
-// total == done).
+// lookupSHAInFile scans a SHA256SUMS.txt file for the expected
+// hash of assetName. Format: "<hex>  <filename>" per line,
+// matching `sha256sum -b` output.
 //
-// Layout (width = 30 cells):
-//
-//	[==============              ]  47% 1.2 MB / 2.6 MB  4.3 MB/s  ETA 5s
-//
-// total <= 0 (server omitted Content-Length) renders an
-// indeterminate bar that only shows downloaded bytes —
-// the bar cell count grows as bytes arrive.
-func NewASCIIProgressBar(out io.Writer, total int64) ProgressFunc {
-	const width = 30
-	return func(downloaded, totalNow int64, elapsed time.Duration) {
-		if totalNow > 0 {
-			total = totalNow
-		}
-		var pct float64
-		if total > 0 {
-			pct = float64(downloaded) / float64(total)
-			if pct > 1 {
-				pct = 1
-			}
-		}
-		filled := min(int(pct*float64(width)), width)
-		bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
-		var speed, eta string
-		elapsedSec := elapsed.Seconds()
-		if elapsedSec > 0 {
-			speed = FormatSpeed(downloaded, elapsed)
-		} else {
-			speed = "— B/s"
-		}
-		if total > 0 && downloaded > 0 && elapsedSec > 0 {
-			remaining := time.Duration(float64(total-downloaded)/float64(downloaded)*elapsedSec) * time.Second
-			eta = " ETA " + remaining.Round(time.Second).String()
-		}
-		fmt.Fprintf(out, "\r[%s] %3d%% %s / %s  %s%s",
-			bar, int(pct*100),
-			FormatBytes(downloaded), FormatBytes(total),
-			speed, eta)
+// Returns an error when the file has no entry for assetName.
+// The caller (DownloadTag) treats this as a hard failure:
+// we've successfully fetched the sums file, so a missing
+// entry means a broken or tampered release, not a soft-degrade
+// case. A stripped sums file alongside a tampered asset
+// would otherwise install silently.
+func lookupSHAInFile(path, assetName string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open sums: %w", err)
 	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name == assetName {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan sums: %w", err)
+	}
+	return "", fmt.Errorf("sha256 sums: %s not listed", assetName)
 }
+
+// ----- extraction ---------------------------------------------------
 
 // ExtractArchive pulls the nightme binary out of the .tar.gz /
-// .zip downloaded by Download. Exposed here so install.go (next
-// commit) can reuse it without depending on archive-specific
-// code paths in two places. Returns the absolute path to the
-// extracted binary inside stagingDir.
+// .zip archive. Returns the absolute path to the extracted
+// binary inside stagingDir.
 func ExtractArchive(archivePath, stagingDir string) (string, error) {
 	if runtime.GOOS == "windows" {
 		return extractZIP(archivePath, stagingDir)
@@ -641,8 +520,6 @@ func extractTARGZ(archivePath, stagingDir string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read tar header: %w", err)
 		}
-		// We only care about the binary; release archives
-		// may also ship README / LICENSE entries.
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
@@ -702,9 +579,9 @@ func extractZIP(archivePath, stagingDir string) (string, error) {
 	return "", errors.New("extract: nightme.exe not found in zip")
 }
 
-// InstallResult is what Install returns on success. The caller
-// (CLI) reads NewBinaryPath to print "the new binary is at X"
-// and OldBinaryPath to mention the rollback path.
+// ----- install ------------------------------------------------------
+
+// InstallResult is what Install returns on success.
 type InstallResult struct {
 	NewBinaryPath string // path to the binary now on disk (== target)
 	OldBinaryPath string // path to the backup of the previous binary
@@ -714,33 +591,16 @@ type InstallResult struct {
 // Install replaces the running binary with a previously
 // downloaded + extracted one.
 //
-//	stagedBinaryPath  -- the nightme / nightme.exe produced by
-//	                      ExtractArchive, sitting in
-//	                      <DataDir>/updates/<version>/
-//	targetPath        -- the on-disk binary the user is currently
-//	                      invoking (os.Executable())
-//
 // Steps:
 //
-//  1. Refuse to install when source == target (copying onto
-//     itself on Windows is a permissions nightmare; on unix
-//     it'd succeed but is almost certainly a caller bug).
-//  2. Verify stagedBinaryPath is a regular file, readable,
-//     and executable-sized.
+//  1. Refuse to install when source == target.
+//  2. Verify stagedBinaryPath is a regular file with non-trivial size.
 //  3. Move targetPath → targetPath + ".old" (the backup).
-//     Move is rename(2) on unix — atomic on the same
-//     filesystem — so a crashed install leaves either the
-//     old binary in place or the new one in place; never a
-//     half-written file at targetPath.
 //  4. Copy stagedBinaryPath → targetPath.
-//  5. chmod 0755 on targetPath (the staging dir might have
-//     lost the +x bit during extraction under some umasks).
+//  5. chmod 0755 on targetPath.
 //
-// Errors before step 3 are pure: nothing on disk has changed.
-// Errors during step 4 attempt to roll back by renaming
-// targetPath.old back to targetPath. If the rollback also
-// fails the error wraps the rollback so the operator knows
-// to run `mv <target>.old <target>` by hand.
+// Errors before step 3 are pure. Errors during step 4 attempt
+// rollback; if rollback also fails the error wraps both.
 func Install(stagedBinaryPath, targetPath string) (*InstallResult, error) {
 	if stagedBinaryPath == "" {
 		return nil, errors.New("install: empty staged binary path")
@@ -749,10 +609,9 @@ func Install(stagedBinaryPath, targetPath string) (*InstallResult, error) {
 		return nil, errors.New("install: empty target path")
 	}
 	if stagedBinaryPath == targetPath {
-		return nil, fmt.Errorf("install: staged binary equals target (%s); refusing to copy onto itself", stagedBinaryPath)
+		return nil, fmt.Errorf("install: staged binary equals target (%s); refusing to copy onto itself", targetPath)
 	}
 
-	// Step 2: source checks.
 	srcInfo, err := os.Stat(stagedBinaryPath)
 	if err != nil {
 		return nil, fmt.Errorf("install: stat staged: %w", err)
@@ -761,12 +620,8 @@ func Install(stagedBinaryPath, targetPath string) (*InstallResult, error) {
 		return nil, fmt.Errorf("install: staged path is not a regular file (%s)", stagedBinaryPath)
 	}
 	if srcInfo.Size() < 1024 {
-		// Refuse to install a binary under 1 KiB — almost
-		// certainly a download error or a wrong asset.
 		return nil, fmt.Errorf("install: staged binary suspiciously small (%d bytes)", srcInfo.Size())
 	}
-	// Verify target's parent dir is writable so we don't
-	// get surprised mid-rename.
 	targetInfo, err := os.Stat(targetPath)
 	if err != nil {
 		return nil, fmt.Errorf("install: stat target: %w", err)
@@ -775,21 +630,13 @@ func Install(stagedBinaryPath, targetPath string) (*InstallResult, error) {
 		return nil, fmt.Errorf("install: target is not a regular file (%s)", targetPath)
 	}
 
-	// Step 3: move target → target.old. We use Rename; on
-	// cross-device moves (rare — staging usually lives
-	// under the user's homedir) this returns an error and
-	// we fall back to copy + remove.
 	oldPath := targetPath + ".old"
-	// Drop any stale .old from a previous install so the
-	// rename doesn't fail with "already exists".
 	_ = os.Remove(oldPath)
 	if err := os.Rename(targetPath, oldPath); err != nil {
 		return nil, fmt.Errorf("install: backup %s → %s: %w", targetPath, oldPath, err)
 	}
 
-	// Step 4: copy staged → target.
 	if err := copyFile(stagedBinaryPath, targetPath, 0o755); err != nil {
-		// Best-effort rollback.
 		if rbErr := os.Rename(oldPath, targetPath); rbErr != nil {
 			return nil, fmt.Errorf("install: copy %s → %s: %w; rollback also failed: %v",
 				stagedBinaryPath, targetPath, err, rbErr)
@@ -805,11 +652,7 @@ func Install(stagedBinaryPath, targetPath string) (*InstallResult, error) {
 	}, nil
 }
 
-// copyFile copies src → dst with the requested mode. dst is
-// truncated if it exists. We don't use io.Copy directly
-// because we want the destination's mode to be set even when
-// the copy itself is short (which it never should be, but
-// belt + suspenders).
+// copyFile copies src → dst with the requested mode.
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -829,4 +672,80 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return os.Chmod(dst, mode)
+}
+
+// ----- staging path -------------------------------------------------
+
+// StagingDir returns <DataDir>/updates/<ver-no-v>/. Callers
+// should pass cfg.Paths.DataDir; an empty DataDir disables
+// staging.
+func StagingDir(dataDir, ver string) (string, error) {
+	if dataDir == "" {
+		return "", errors.New("staging dir: empty data dir")
+	}
+	return filepath.Join(dataDir, "updates", stripV(ver)), nil
+}
+
+// ----- formatters ---------------------------------------------------
+
+// FormatSpeed returns a human-readable bytes/sec string for the
+// progress reporter.
+func FormatSpeed(bytes int64, elapsed time.Duration) string {
+	if elapsed <= 0 {
+		return "0 B/s"
+	}
+	per := float64(bytes) / elapsed.Seconds()
+	return formatBytes(int64(per)) + "/s"
+}
+
+// FormatBytes is exposed for progress reporter reuse.
+func FormatBytes(n int64) string { return formatBytes(n) }
+
+func formatBytes(n int64) string {
+	const k = 1024
+	if n < k {
+		return strconv.FormatInt(n, 10) + " B"
+	}
+	div, exp := int64(k), 0
+	for n2 := n / k; n2 >= k; n2 /= k {
+		div *= k
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGT"[exp])
+}
+
+// NewASCIIProgressBar returns a ProgressFunc that renders a
+// single-line ASCII bar to out. total <= 0 (server omitted
+// Content-Length) renders an indeterminate bar.
+func NewASCIIProgressBar(out io.Writer, total int64) ProgressFunc {
+	const width = 30
+	return func(downloaded, totalNow int64, elapsed time.Duration) {
+		if totalNow > 0 {
+			total = totalNow
+		}
+		var pct float64
+		if total > 0 {
+			pct = float64(downloaded) / float64(total)
+			if pct > 1 {
+				pct = 1
+			}
+		}
+		filled := min(int(pct*float64(width)), width)
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
+		var speed, eta string
+		elapsedSec := elapsed.Seconds()
+		if elapsedSec > 0 {
+			speed = FormatSpeed(downloaded, elapsed)
+		} else {
+			speed = "— B/s"
+		}
+		if total > 0 && downloaded > 0 && elapsedSec > 0 {
+			remaining := time.Duration(float64(total-downloaded)/float64(downloaded)*elapsedSec) * time.Second
+			eta = " ETA " + remaining.Round(time.Second).String()
+		}
+		fmt.Fprintf(out, "\r[%s] %3d%% %s / %s  %s%s",
+			bar, int(pct*100),
+			FormatBytes(downloaded), FormatBytes(total),
+			speed, eta)
+	}
 }

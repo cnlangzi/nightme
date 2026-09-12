@@ -118,6 +118,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/runtime"
+	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
 

@@ -69,13 +69,17 @@ const updateCheckTimeout = 5 * time.Second
 // PromptDeps bundles the knobs tests need without dragging in a
 // real config file.
 //
+//   - VersionCheck: pre-computed version-check result. Production
+//     runs the countdown + Check, then passes it in so the
+//     prompt doesn't hit the network twice. Tests inject a
+//     manually-built result (call *version.Checker.Check
+//     yourself and pass the result here). nil means "do a
+//     fresh live check via the production checker" — only
+//     useful for callers that don't already have a result.
 //   - Reader: line source for every y/N. nil skips the
 //     prompt entirely (runREPLWith's scanner path).
 //   - Out:    progress + status lines. nil = discard.
 //   - Logger: nil = slog.Default().
-//   - VersionCheck: already-computed nightme.dev result
-//     (production runs the countdown + Check, then passes
-//     it in so we don't hit the network twice).
 //   - ReExecAfterInstall: production-only; after a successful
 //     swap, re-exec the new binary so the user lands in the
 //     new version's shell. Tests leave this false.
@@ -83,7 +87,6 @@ const updateCheckTimeout = 5 * time.Second
 // tests inject a Reader closure over a bytes.Buffer so the
 // y/N flow is fully reproducible.
 type PromptDeps struct {
-	Checker            *version.Checker
 	VersionCheck       *version.CheckResult
 	Reader             func() (string, error)
 	Out                io.Writer
@@ -121,32 +124,26 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		logger = slog.Default()
 	}
 
-	// Stage 1: check. Honour deps.VersionCheck first (production
-	// already ran the countdown probe), then deps.Checker, and
-	// finally a fresh live check via newProductionChecker.
+	// Stage 1: check. Use the pre-computed VersionCheck when
+	// present (production); fall through to a fresh live
+	// check otherwise. Tests build the CheckResult themselves
+	// and inject it via VersionCheck.
 	logf := func(format string, args ...any) {
 		logger.Warn(fmt.Sprintf(format, args...))
 	}
-	var latest string
-	outdated := false
-	switch {
-	case deps.VersionCheck != nil:
+	var (
+		latest   string
+		outdated bool
+	)
+	if deps.VersionCheck != nil {
 		latest = deps.VersionCheck.Latest
 		outdated = deps.VersionCheck.Outdated
-	case deps.Checker != nil:
-		res := deps.Checker.Check(ctx, version.Version, logf)
-		if res.Latest != "" {
-			latest = res.Latest
-			outdated = res.Outdated
-		}
-	default:
+	} else {
 		c, _ := newProductionChecker(resolveDataDir())
 		if c != nil {
 			res := c.Check(ctx, version.Version, logf)
-			if res.Latest != "" {
-				latest = res.Latest
-				outdated = res.Outdated
-			}
+			latest = res.Latest
+			outdated = res.Outdated
 		}
 	}
 	if latest == "" || !outdated {

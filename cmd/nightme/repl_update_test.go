@@ -41,6 +41,15 @@ func stubCheckerWithTag(tag string) (*version.Checker, *atomic.Int32) {
 	return c, &calls
 }
 
+// precomputedChecker invokes a stub *version.Checker and returns
+// the result by value so the address is stable for injection
+// into PromptDeps.VersionCheck. Mirrors what production does:
+// run the check once and hand the result down.
+func precomputedChecker(c *version.Checker) *version.CheckResult {
+	res := c.Check(context.Background(), version.Version, nil)
+	return &res
+}
+
 // --- prompt tests ----------------------------------------
 
 // TestPrompt_OutdatedYes exercises the new flow: "y" at the
@@ -94,9 +103,9 @@ func TestPrompt_DeclineInstallKeepsStaging(t *testing.T) {
 	var out bytes.Buffer
 	calls := 0
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
-		Reader:  func() (string, error) { calls++; return "y\n", nil },
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
+		Reader:       func() (string, error) { calls++; return "y\n", nil },
 	})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -116,9 +125,9 @@ func TestPrompt_OutdatedNo(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
-		Reader:  func() (string, error) { return "n\n", nil },
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
+		Reader:       func() (string, error) { return "n\n", nil },
 	})
 	if err != nil {
 		t.Fatalf("promptForUpdateIfOutdated: %v", err)
@@ -142,9 +151,9 @@ func TestPrompt_OutdatedEnterOnly(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
-		Reader:  func() (string, error) { return "\n", nil },
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
+		Reader:       func() (string, error) { return "\n", nil },
 	})
 	if err != nil {
 		t.Fatalf("promptForUpdateIfOutdated: %v", err)
@@ -160,9 +169,9 @@ func TestPrompt_UpToDateIsSilent(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
-		Reader:  func() (string, error) { return "y\n", nil },
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
+		Reader:       func() (string, error) { return "y\n", nil },
 	})
 	if err != nil {
 		t.Fatalf("promptForUpdateIfOutdated: %v", err)
@@ -184,9 +193,9 @@ func TestPrompt_NetworkFailureIsSilent(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
-		Reader:  func() (string, error) { return "y\n", nil },
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
+		Reader:       func() (string, error) { return "y\n", nil },
 	})
 	if err != nil {
 		t.Fatalf("promptForUpdateIfOutdated: %v", err)
@@ -203,8 +212,8 @@ func TestPrompt_NoReaderIsSilent(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
 		// Reader deliberately nil.
 	})
 	if err != nil {
@@ -221,8 +230,8 @@ func TestPrompt_EOFIsTreatedAsNo(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
 		Reader: func() (string, error) {
 			return "", io.EOF
 		},
@@ -245,8 +254,8 @@ func TestPrompt_ReadErrorIsNonFatal(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
 		Reader: func() (string, error) {
 			return "", errors.New("synthetic read failure")
 		},
@@ -271,8 +280,8 @@ func TestPrompt_InvalidAnswerThenNoRePrompt(t *testing.T) {
 	calls := 0
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
 		Reader: func() (string, error) {
 			calls++
 			return "???\n", nil
@@ -333,9 +342,9 @@ func TestPrompt_LookupFiresOnce(t *testing.T) {
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Out:     &out,
-		Reader:  func() (string, error) { return "n\n", nil },
+		VersionCheck: precomputedChecker(checker),
+		Out:          &out,
+		Reader:       func() (string, error) { return "n\n", nil },
 	})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)

@@ -415,7 +415,7 @@ func decorateUpdateItem(item *systray.MenuItem) {
 	if cfg, err := config.LoadDefault(); err == nil && cfg != nil {
 		dataDir = cfg.Paths.DataDir
 	}
-	checker, _ := version.DefaultChecker(dataDir)
+	checker, _ := newProductionChecker(dataDir)
 	if checker == nil {
 		// Misconfig (no data dir resolution path at all) is
 		// silent: the tray surface is decorative, and the

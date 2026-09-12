@@ -25,9 +25,14 @@
 // Layering:
 //
 //   - cmd/nightme/update.go (CLI shell)
-//   - internal/updater (this package: Lookup / Match / Download)
-//   - cmd/nightme/update.go (Install — next commit: selfupdate
-//     binary swap + daemon restart).
+//   - cmd/nightme/repl_update_prompt.go (REPL prompt)
+//   - internal/version (cached version-check layer)
+//   - internal/updater (this package: Lookup / Match / Download / Install)
+//
+// Two source URLs feed Lookup: GitHubBaseURL (the upstream of
+// truth) and NightMeDevBaseURL (the lighter CDN mirror).
+// LookupForLatest and LookupForDownload compose them in opposite
+// orders — see their docstrings for the rationale.
 package updater
 
 import (
@@ -76,11 +81,16 @@ type ProgressFunc func(downloaded int64, total int64, elapsed time.Duration)
 func QuietProgress(int64, int64, time.Duration) {}
 
 // Release is the subset of the GitHub release payload we read.
-// We don't decode every field — the asset list and the tag name
-// are all that Lookup consumers need.
+// We don't decode every field — the asset list, the tag name,
+// and (when the source provides it) the published-at timestamp
+// are all Lookup consumers need. PublishedAt is best-effort:
+// GitHub's releases/latest always includes it; nightme.dev's
+// /releases/latest emits zero time when the cache came from
+// disk without a GitHub refresh (see nightmedev/cmd/app/version.go).
 type Release struct {
-	TagName string  `json:"tag_name"`
-	Assets  []Asset `json:"assets"`
+	TagName     string    `json:"tag_name"`
+	PublishedAt time.Time `json:"published_at,omitempty"`
+	Assets      []Asset   `json:"assets"`
 }
 
 // Asset is one downloadable file in a release. The fields we
@@ -93,75 +103,38 @@ type Asset struct {
 	Size               int64  `json:"size"`
 }
 
-// CheckResult is the unified stage-1 output. It bundles the
-// raw *Release (so downstream stages can pick the asset +
-// SHA256SUMS without a second API call) with the user-
-// facing Latest string and the Outdated bool.
-//
-//	Latest  — tag of the release we're targeting (e.g. "v0.3.7")
-//	Outdated — true when current < latest under semver rules
-//	Release — full *Release for stages 2 + 3
-type CheckResult struct {
-	Latest   string
-	Outdated bool
-	Release  *Release
-}
+// GitHubBaseURL is the base URL for the GitHub releases API. The
+// /repos/<repo> prefix is baked in so callers only need to append
+// /releases/latest or /releases/tags/<tag>. Held as a var so tests
+// can swap it for an httptest server.
+var GitHubBaseURL = "https://api.github.com/repos/cnlangzi/nightme"
 
-// Check is stage 1: resolve the latest (or pinned) GitHub
-// release and decide whether the running build is out of
-// date. It does NOT touch the filesystem or any binaries.
+// NightMeDevBaseURL is the base URL for the nightme.dev mirror.
+// nightme.dev serves only one upstream repo, so this base has no
+// /repos/<repo> prefix — the GitHub-shaped /releases/latest
+// endpoint lives directly under the root.
 //
-// Tag is the optional `--tag vX.Y.Z` override; empty means
-// "latest". The current version is read from the package-
-// level version.Version via version.Compare.
-//
-// Errors are surfaced verbatim — the CLI translates them
-// into the "[1/3] check failed" line.
-func Check(ctx context.Context, tag string) (*CheckResult, error) {
-	release, err := Lookup(ctx, "cnlangzi/nightme", tag)
-	if err != nil {
-		return nil, err
-	}
-	latest := release.TagName
-	outdated := isOutdatedLatest(latest)
-	return &CheckResult{
-		Latest:   latest,
-		Outdated: outdated,
-		Release:  release,
-	}, nil
-}
+// Held as a var so tests can swap it.
+var NightMeDevBaseURL = "https://nightme.dev"
 
-// isOutdatedLatest compares version.Version (build-time
-// identity) with the latest tag from the release feed.
-// It defers to the internal/version.IsOutdated helper so the
-// comparison rules stay in lock-step with the REPL startup
-// prompt (which uses the same helper).
-func isOutdatedLatest(latest string) bool {
-	return version.IsOutdated(version.Version, latest)
-}
-
-// LookupURL is the base URL GitHub's releases API lives at.
-// Held as a var so tests can swap it for an httptest server
-// without having to plumb a base URL through every caller.
+// Lookup fetches the GitHub-shaped release payload from baseURL.
+// baseURL must already include any /repos/<repo> prefix the
+// source requires — GitHubBaseURL does, NightMeDevBaseURL does
+// not, both because their upstream shapes differ.
 //
-// Production callers should leave this untouched; the default
-// (api.github.com) is what we ship.
-var LookupURL = "https://api.github.com"
-
-// Lookup queries GitHub for the release that matches the
-// given tag (e.g. "v0.3.7" or "0.3.7"). When tag is empty the
-// API serves the latest non-prerelease release.
-//
-// repo is "owner/name" on GitHub. Tests override this to point
-// at an httptest server via LookupURL.
-func Lookup(ctx context.Context, repo, tag string) (*Release, error) {
-	url := LookupURL + "/repos/" + repo + "/releases/latest"
+// When tag is empty the latest non-prerelease release is
+// requested. Otherwise the response is the release matching
+// /releases/tags/<tag>. Decoding tolerates empty tag_name as
+// a hard error so a cold-cache nightme.dev response (200 OK
+// with no release populated) doesn't masquerade as success.
+func Lookup(ctx context.Context, baseURL, tag string) (*Release, error) {
+	suffix := "/releases/latest"
 	if tag != "" {
-		// GitHub's /releases/tags/<tag> route returns the
-		// same JSON shape and works for any tag, including
-		// those that point at a draft / pre-release.
-		url = LookupURL + "/repos/" + repo + "/releases/tags/" + tag
+		// Same JSON shape as /releases/latest; works for
+		// any tag, including draft / pre-release.
+		suffix = "/releases/tags/" + tag
 	}
+	url := baseURL + suffix
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build lookup request: %w", err)
@@ -190,6 +163,56 @@ func Lookup(ctx context.Context, repo, tag string) (*Release, error) {
 		return nil, errors.New("lookup release: empty tag_name")
 	}
 	return &r, nil
+}
+
+// LookupForLatest fetches the release metadata that drives
+// version detection. nightme.dev is the primary source — its
+// /releases/latest endpoint mirrors GitHub on our own CDN and
+// is the cheaper, faster probe. GitHub is the fallback when
+// nightme.dev is unreachable, returns an empty payload (cold
+// cache), or fails to parse.
+//
+// The fallback chain is the OPPOSITE of LookupForDownload:
+// detection prefers the lighter source, download prefers the
+// authoritative one.
+//
+// Returns the release, the source label that served it
+// ("nightme.dev" or "github"), and any error. errors.Join
+// wraps the two source errors when both fail.
+func LookupForLatest(ctx context.Context, tag string) (*Release, string, error) {
+	rel, err := Lookup(ctx, NightMeDevBaseURL, tag)
+	if err == nil {
+		return rel, "nightme.dev", nil
+	}
+	rel, err2 := Lookup(ctx, GitHubBaseURL, tag)
+	if err2 != nil {
+		return nil, "", errors.Join(err, err2)
+	}
+	return rel, "github", nil
+}
+
+// LookupForDownload fetches the release payload that drives the
+// download stage. GitHub is the primary source — it's the
+// upstream of truth, the one we ship binaries to. nightme.dev is
+// the fallback when GitHub is rate-limited (60 anonymous req/hr)
+// or otherwise unreachable.
+//
+// The fallback chain is the OPPOSITE of LookupForLatest: download
+// prefers the authoritative source over our lighter mirror.
+//
+// Returns the release, the source label ("github" or
+// "nightme.dev"), and any error. errors.Join wraps the two
+// source errors when both fail.
+func LookupForDownload(ctx context.Context, tag string) (*Release, string, error) {
+	rel, err := Lookup(ctx, GitHubBaseURL, tag)
+	if err == nil {
+		return rel, "github", nil
+	}
+	rel, err2 := Lookup(ctx, NightMeDevBaseURL, tag)
+	if err2 != nil {
+		return nil, "", errors.Join(err, err2)
+	}
+	return rel, "nightme.dev", nil
 }
 
 // MatchAsset picks the asset matching the running binary's

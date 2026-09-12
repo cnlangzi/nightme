@@ -150,14 +150,13 @@ func (f *fixture) srvURL() string { return f.srv.URL }
 func TestLookup(t *testing.T) {
 	f := newFixture(t, "v9.9.9", "9.9.9", "fake-binary-body")
 
-	// LookupURL exists as a var precisely so tests can point the
-	// release API at an httptest server; use it rather than
-	// reaching out to api.github.com.
-	origURL := LookupURL
-	LookupURL = f.srvURL()
-	t.Cleanup(func() { LookupURL = origURL })
-
-	release, err := Lookup(context.Background(), f.repo, "")
+	// Pass the fixture URL with the GitHub-shaped /repos/<repo>
+	// prefix so the existing fixture routes (registered under
+	// that prefix) continue to work. Lookup takes any baseURL
+	// that ends with /<owner>/<repo>; production callers use
+	// GitHubBaseURL or NightMeDevBaseURL.
+	baseURL := f.srvURL() + "/repos/" + f.repo
+	release, err := Lookup(context.Background(), baseURL, "")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}

@@ -78,8 +78,10 @@ const updateCheckTimeout = 5 * time.Second
 //   - VersionCheck: already-computed nightme.dev result
 //     (production runs the countdown + Check, then passes
 //     it in so we don't hit the network twice).
-//   - CheckResult: GitHub release + assets (tests inject
-//     this to skip the live fetch on the download stage).
+//   - Release: full *updater.Release (tests inject this so
+//     the download stage skips the live LookupForDownload).
+//     When nil, the prompt calls LookupForDownload at the
+//     moment the user says yes — exactly like production.
 //   - ReExecAfterInstall: production-only; after a successful
 //     swap, re-exec the new binary so the user lands in the
 //     new version's shell. Tests leave this false.
@@ -89,7 +91,7 @@ const updateCheckTimeout = 5 * time.Second
 type PromptDeps struct {
 	Checker            *version.Checker
 	VersionCheck       *version.CheckResult
-	CheckResult        *updater.CheckResult
+	Release            *updater.Release
 	Reader             func() (string, error)
 	Out                io.Writer
 	Logger             *slog.Logger
@@ -126,36 +128,35 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		logger = slog.Default()
 	}
 
-	// Stage 1: check. Honour deps.CheckResult first (tests
-	// inject a fake GitHub release + assets), then
-	// deps.VersionCheck (production already ran the
-	// countdown probe), then deps.Checker, and finally a
-	// fresh live check when nothing is set.
+	// Stage 1: check. Honour deps.VersionCheck first (production
+	// already ran the countdown probe), then deps.Checker, and
+	// finally a fresh live check via newProductionChecker.
+	//
+	// The detection layer only needs Latest + Outdated. The
+	// full *updater.Release is fetched separately at stage 2
+	// via updater.LookupForDownload — keeping the two stages
+	// from sharing the *Release keeps their fallback orders
+	// independent (detection: nightme.dev → GitHub; download:
+	// GitHub → nightme.dev).
+	logf := func(format string, args ...any) {
+		logger.Warn(fmt.Sprintf(format, args...))
+	}
 	var latest string
 	outdated := false
-	var precomputed *updater.CheckResult
 	switch {
-	case deps.CheckResult != nil:
-		precomputed = deps.CheckResult
-		latest = precomputed.Latest
-		outdated = precomputed.Outdated
 	case deps.VersionCheck != nil:
 		latest = deps.VersionCheck.Latest
 		outdated = deps.VersionCheck.Outdated
 	case deps.Checker != nil:
-		res := deps.Checker.Check(ctx, version.Version, func(format string, args ...any) {
-			logger.Warn(fmt.Sprintf(format, args...))
-		})
+		res := deps.Checker.Check(ctx, version.Version, logf)
 		if res.Latest != "" {
 			latest = res.Latest
 			outdated = res.Outdated
 		}
 	default:
-		c, _ := version.DefaultChecker(resolveDataDir())
+		c, _ := newProductionChecker(resolveDataDir())
 		if c != nil {
-			res := c.Check(ctx, version.Version, func(format string, args ...any) {
-				logger.Warn(fmt.Sprintf(format, args...))
-			})
+			res := c.Check(ctx, version.Version, logf)
 			if res.Latest != "" {
 				latest = res.Latest
 				outdated = res.Outdated
@@ -196,34 +197,34 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		return nil
 	}
 
-	// Stage 2: download. We need the full Release (with its
-	// Assets list) for asset matching. In production we
-	// look up the advertised tag on GitHub (nightme.dev
-	// reports "0.3.10", GitHub tags "v0.3.10" — Equal
-	// treats those as the same release). Tests inject
-	// precomputed so we skip the network.
-	var checkRes *updater.CheckResult
-	if precomputed != nil {
-		checkRes = precomputed
+	// Stage 2: download metadata. LookupForDownload composes
+	// GitHub (primary) and nightme.dev (fallback) internally —
+	// the OPPOSITE of stage 1's detection source order, on
+	// purpose (see internal/updater). Tests inject deps.Release
+	// to skip the live fetch.
+	var release *updater.Release
+	if deps.Release != nil {
+		release = deps.Release
 	} else {
-		tag := version.Tag(latest)
-		checkRes, err = updater.Check(ctx, tag)
+		fmt.Fprintln(out, "  ·  fetching release metadata…")
+		rel, source, err := updater.LookupForDownload(ctx, version.Tag(latest))
 		if err != nil {
-			checkRes, err = updater.Check(ctx, "")
-		}
-		if err != nil {
-			fmt.Fprintf(out, "  %s  download failed (check): %v\n", paintRed(out, "✗"), err)
+			fmt.Fprintf(out, "  %s  download failed (lookup): %v\n", paintRed(out, "✗"), err)
 			return nil
 		}
-		if !version.Equal(checkRes.Latest, latest) {
+		if source != "github" {
+			fmt.Fprintf(out, "  ·  using %s mirror\n", source)
+		}
+		if rel.TagName != version.Tag(latest) {
 			fmt.Fprintf(out, "  %s  release moved during the prompt (%s → %s); aborting\n",
-				paintRed(out, "✗"), displayVer(latest), displayVer(checkRes.Latest))
+				paintRed(out, "✗"), displayVer(latest), displayVer(rel.TagName))
 			return nil
 		}
+		release = rel
 	}
 
 	dlCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-	dl, err := runDownloadStage(dlCtx, deps, cfg, checkRes)
+	dl, err := runDownloadStage(dlCtx, deps, cfg, release)
 	stop()
 	if err != nil {
 		fmt.Fprintf(out, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
@@ -272,17 +273,17 @@ func runDownloadStage(
 	ctx context.Context,
 	deps *PromptDeps,
 	cfg *config.Config,
-	checkRes *updater.CheckResult,
+	release *updater.Release,
 ) (*updater.DownloadResult, error) {
 	out := deps.Out
 
-	asset := updater.MatchAsset(checkRes.Release, checkRes.Latest)
+	asset := updater.MatchAsset(release, release.TagName)
 	if asset == nil {
 		return nil, fmt.Errorf("no release asset for %s/%s",
 			runtime.GOOS, runtime.GOARCH)
 	}
 
-	stagingDir, err := updater.StagingDir(cfg.Paths.DataDir, checkRes.Latest)
+	stagingDir, err := updater.StagingDir(cfg.Paths.DataDir, release.TagName)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +296,7 @@ func runDownloadStage(
 		asset.Name,
 		paintDim(out, updater.FormatBytes(asset.Size)))
 	progress := updater.NewASCIIProgressBar(out, asset.Size)
-	res, err := updater.Download(ctx, checkRes.Release, asset, stagingDir, progress)
+	res, err := updater.Download(ctx, release, asset, stagingDir, progress)
 	if err != nil {
 		return nil, err
 	}

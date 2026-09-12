@@ -181,16 +181,37 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 
 	ctx := cmd.Context()
 
-	res, err := updater.Check(ctx, opts.tag)
-	if err != nil {
-		fmt.Fprintf(errOut, "  %s  check failed: %v\n", paintRed(out, "✗"), err)
-		return err
+	// Stage 1: detect latest via the version cache (which calls
+	// updater.LookupForLatest under the hood — nightme.dev first,
+	// GitHub fallback). The Checker is configured with production
+	// wiring (see newProductionChecker / wireUpdaterLookup).
+	checker, _ := newProductionChecker(dataDir)
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(errOut, "  %s  %s\n", paintDim(out, "·"), fmt.Sprintf(format, args...))
+	}
+	checkRes := checker.Check(ctx, version.Version, logf)
+
+	// Resolve which tag we're targeting.
+	var targetTag string
+	switch {
+	case opts.tag != "":
+		// User pin — skip the "are we outdated?" gate. They asked
+		// for this specific tag explicitly; respect it even if it
+		// matches the running version (a re-install is a valid
+		// recovery path).
+		targetTag = version.Tag(opts.tag)
+	case checkRes.Latest != "":
+		targetTag = checkRes.Latest
+	default:
+		fmt.Fprintf(errOut, "  %s  no version info available; pass --tag vX.Y.Z to install a specific release.\n",
+			paintRed(out, "✗"))
+		return errors.New("no version info available")
 	}
 
 	current := displayVer(version.Version)
-	latest := displayVer(res.Latest)
+	latest := displayVer(targetTag)
 	fmt.Fprintln(out)
-	if !res.Outdated {
+	if opts.tag == "" && !checkRes.Outdated {
 		fmt.Fprintf(out, "  %s  Already up to date\n", paintGreen(out, "✓"))
 		fmt.Fprintf(out, "     %s\n", paintDim(out, current))
 		return nil
@@ -201,13 +222,26 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		paintDim(out, "→"),
 		paint(out, ansiBold+ansiGreen, latest))
 
-	asset := updater.MatchAsset(res.Release, res.Latest)
-	if asset == nil {
-		return fmt.Errorf("no release asset for %s/%s in %s; available: %s",
-			runtime.GOOS, runtime.GOARCH, res.Latest, assetNames(res.Release.Assets))
+	// Stage 2: download metadata via LookupForDownload (GitHub
+	// first, nightme.dev mirror fallback). The opposite order from
+	// stage 1 — see internal/updater.LookupForDownload for why.
+	fmt.Fprintf(errOut, "  %s  fetching release metadata…\n", paintDim(out, "·"))
+	release, source, err := updater.LookupForDownload(ctx, targetTag)
+	if err != nil {
+		fmt.Fprintf(errOut, "  %s  release fetch failed: %v\n", paintRed(out, "✗"), err)
+		return err
+	}
+	if source != "github" {
+		fmt.Fprintf(errOut, "  %s  using %s (github was unreachable)\n", paintDim(out, "·"), source)
 	}
 
-	stagingDir, err := updater.StagingDir(dataDir, res.Latest)
+	asset := updater.MatchAsset(release, targetTag)
+	if asset == nil {
+		return fmt.Errorf("no release asset for %s/%s in %s; available: %s",
+			runtime.GOOS, runtime.GOARCH, targetTag, assetNames(release.Assets))
+	}
+
+	stagingDir, err := updater.StagingDir(dataDir, targetTag)
 	if err != nil {
 		return err
 	}
@@ -220,7 +254,7 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 	if !opts.quiet {
 		progress = updater.NewASCIIProgressBar(out, asset.Size)
 	}
-	dlRes, err := updater.Download(ctx, res.Release, asset, stagingDir, progress)
+	dlRes, err := updater.Download(ctx, release, asset, stagingDir, progress)
 	if err != nil {
 		fmt.Fprintf(errOut, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
 		return err

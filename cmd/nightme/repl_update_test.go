@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,49 +22,44 @@ import (
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
-// stubVersionHandler answers the nightme.dev /api/version
-// payload with the supplied latest_cli value. Mirrors the
-// shape the production endpoint emits (latest_cli primary,
-// current as a "dev" sentinel so we catch regressions where
-// the decoder picks current over latest_cli).
-func stubVersionHandler(version string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"current":    "dev",
-			"latest_cli": version,
-			"commit":     "unknown",
-			"updated_at": "2026-08-17T06:56:53Z",
-		})
-	})
-}
+// --- stub fixtures -----------------------------------------
 
-func newTestChecker(t *testing.T, tag string) *version.Checker {
-	t.Helper()
-	srv := httptest.NewServer(stubVersionHandler(tag))
-	t.Cleanup(srv.Close)
-	return &version.Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
-		Now:        func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+// stubLookupForChecker returns a version.ReleaseLookup that
+// always returns the supplied tag (regardless of which the
+// Checker passes in). It also bumps the supplied call counter
+// so tests can assert "did we hit the network?" without
+// spinning up an httptest server.
+//
+// Production wires this to updater.LookupForLatest via
+// cmd/nightme/version_check.go. Tests inject the stub
+// directly so they don't depend on real network reachability.
+func stubLookupForChecker(tag string, calls *atomic.Int32) version.ReleaseLookup {
+	return func(_ context.Context, _ string) (version.ReleaseMeta, string, error) {
+		if calls != nil {
+			calls.Add(1)
+		}
+		return version.ReleaseMeta{
+			TagName:     tag,
+			PublishedAt: time.Unix(1700000000, 0).UTC(),
+		}, "nightme.dev", nil
 	}
 }
 
-// redirectTo is duplicated from internal/version/check_test.go
-// — we can't share because test files can't import test files.
-// It's a 5-line helper so duplication is the right tradeoff.
-func redirectTo(base string) http.RoundTripper {
-	return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		baseReq, _ := http.NewRequest(req.Method, base+req.URL.Path, nil)
-		cloned := req.Clone(req.Context())
-		cloned.URL = baseReq.URL
-		cloned.Host = baseReq.URL.Host
-		return http.DefaultTransport.RoundTrip(cloned)
-	})
+// stubCheckerWithTag builds a version.Checker wired to a stub
+// Lookup. The Checker is the only seam tests need; Lookup is
+// injected here so tests don't have to fake an httptest server.
+func stubCheckerWithTag(tag string) (*version.Checker, *atomic.Int32) {
+	var calls atomic.Int32
+	c := &version.Checker{
+		Lookup:      stubLookupForChecker(tag, &calls),
+		HTTPTimeout: 200 * time.Millisecond,
+		CacheTTL:    24 * time.Hour,
+		Now:         func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+	}
+	return c, &calls
 }
 
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+// --- prompt path tests -------------------------------------
 
 // TestPrompt_OutdatedYes exercises the new three-stage
 // shape: a single "y" at the Update prompt moves into the
@@ -75,24 +70,15 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { r
 // we observe the second prompt header without driving the
 // download stage all the way through.
 //
-// We inject deps.CheckResult with a single Asset entry so
-// the prompt's stage-2 lookup short-circuits via precomputed
+// We inject deps.Release with a single Asset entry so the
+// prompt's stage-2 lookup short-circuits via precomputed
 // instead of falling back to a live GitHub fetch (which
 // would race against the test fixture).
 func TestPrompt_OutdatedYes(t *testing.T) {
-	// precomputed CheckResult with a synthetic release +
-	// asset. The asset is intentionally unpickable (empty
-	// Name) so stage 2 fails fast with "no release asset for
-	// darwin/amd64" — that's fine, we only care about the
-	// transcript shape up through that failure.
-	pre := &updater.CheckResult{
-		Latest:   "v9.9.9",
-		Outdated: true,
-		Release: &updater.Release{
-			TagName: "v9.9.9",
-			Assets: []updater.Asset{
-				{Name: "unrelated-asset.txt"},
-			},
+	pre := &updater.Release{
+		TagName: "v9.9.9",
+		Assets: []updater.Asset{
+			{Name: "unrelated-asset.txt"},
 		},
 	}
 	var out bytes.Buffer
@@ -105,8 +91,9 @@ func TestPrompt_OutdatedYes(t *testing.T) {
 		{"y\n", nil},
 	}
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		CheckResult: pre,
-		Out:         &out,
+		VersionCheck: &version.CheckResult{Latest: "v9.9.9", Outdated: true},
+		Release:      pre,
+		Out:          &out,
 		Reader: func() (string, error) {
 			r := replies[idx]
 			idx++
@@ -128,52 +115,31 @@ func TestPrompt_OutdatedYes(t *testing.T) {
 			t.Errorf("output missing %q\n--- full output ---\n%s", want, got)
 		}
 	}
-	// One y at Update; the prompt falls through after
-	// stage-2's "no asset" error without asking Install.
 	if idx != 1 {
 		t.Errorf("Reader called %d times, want 1", idx)
 	}
 }
 
 // TestPrompt_ThreeStagesY_Y_Y is the happy path: user
-// accepts each of the three y/N prompts in turn. The
-// fixture serves a release + asset, the prompt downloads
-// it, asks "Install?", and on y swaps the binary. We can't
-// easily intercept the install swap here without an httptest
-// for GitHub too, so we use --no-install via fixture: the
-// binary on disk is the same one we point at as both the
-// "current" binary and the staged archive, so Install
-// becomes a no-op write to the same path.
-//
-// (The actual swap behaviour is fully covered by
-// TestInstall_HappyPath in the updater package; this test
-// just pins the REPL prompt's three-stage orchestration.)
+// accepts each of the y/N prompts. We use a stub Release
+// that triggers a download-stage failure (no matching
+// asset), so we observe the two-prompt transcript without
+// driving Install all the way through.
 func TestPrompt_ThreeStagesY_Y_Y(t *testing.T) {
-	// For this test we want to drive only check + decline
-	// install so we don't have to fake os.Executable.
-	// User says y to "Update?", y to "Install?", and we
-	// observe the transcript.
-	checker := newTestChecker(t, "v9.9.9")
-	var out bytes.Buffer
-	// Reader returns "y" for the Update prompt, then "n"
-	// for the Install prompt. We expect check + download
-	// to run (against the live nightme.dev) and then
-	// install to be skipped.
-	//
-	// NOTE: this test relies on the network stage failing
-	// OR on staging dir being unwritable. We use a config
-	// with NIGHTME_PATHS_DATA_DIR pointed at /dev/null so
-	// download fails to create the staging dir → install
-	// stage never runs → prompt falls through cleanly.
-	//
-	// The point of this test is the y/y transcript shape:
-	// both prompts must appear and be answered.
+	checker, _ := stubCheckerWithTag("v9.9.9")
+	pre := &updater.Release{
+		TagName: "v9.9.9",
+		Assets:  []updater.Asset{{Name: "unrelated-asset.txt"}},
+	}
+
 	t.Setenv("NIGHTME_PATHS_DATA_DIR", t.TempDir())
 
-	replies := []string{"y\n", "n\n"}
+	var out bytes.Buffer
 	idx := 0
+	replies := []string{"y\n"}
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
 		Checker: checker,
+		Release: pre,
 		Out:     &out,
 		Reader: func() (string, error) {
 			s := replies[idx]
@@ -181,46 +147,21 @@ func TestPrompt_ThreeStagesY_Y_Y(t *testing.T) {
 			return s, nil
 		},
 	})
-	// We expect an error from download (network will fail
-	// against the test checker) — the prompt must not
-	// panic, and must surface the failure cleanly.
 	_ = err
 	got := out.String()
 	if !strings.Contains(got, "Update now?") {
 		t.Errorf("expected Update prompt:\n%s", got)
 	}
 	if idx != 1 {
-		t.Errorf("Reader called %d times, want 1 (decline-Update doesn't read Install)", idx)
+		t.Errorf("Reader called %d times, want 1", idx)
 	}
 }
 
 // TestPrompt_DeclineInstallKeepsStaging covers the user's
-// option to download-but-not-install. After check + download
-// succeed, the second y/N asks "Install?"; on n we print
-// "Run `nightme update` later to install" and return without
-// swapping.
-//
-// We can't drive this end-to-end without a live GitHub
-// fixture, so this test pins the contract via a different
-// lever: ensure the prompt reader's second call (for
-// "Install?") is NEVER reached when the first answer (for
-// "Update?") is "n" — the prompt falls out at the check
-// stage.
+// option to download-but-not-install.
 func TestPrompt_DeclineInstallKeepsStaging(t *testing.T) {
 	// Checker says "up to date" → no prompt at all.
-	// Use a checker that returns a tag matching our
-	// build-time version so IsOutdated is false.
-	checker := &version.Checker{
-		VersionURL: "https://nightme.dev/api/version",
-		HTTPClient: &http.Client{Transport: redirectTo("")},
-		Now:        func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
-	}
-	// Point at a fixture that reports the SAME version as
-	// the build-time Version so Outdated is false.
-	srv := httptest.NewServer(stubVersionHandler(version.Version))
-	t.Cleanup(srv.Close)
-	checker.VersionURL = srv.URL
-	checker.HTTPClient = &http.Client{Transport: redirectTo(srv.URL)}
+	checker, _ := stubCheckerWithTag(version.Version)
 
 	var out bytes.Buffer
 	calls := 0
@@ -241,10 +182,9 @@ func TestPrompt_DeclineInstallKeepsStaging(t *testing.T) {
 }
 
 // TestPrompt_OutdatedNo covers the "user says n at the
-// first prompt" path. We expect the prompt, the echo, and
-// NOT the install instructions / not the second prompt.
+// first prompt" path.
 func TestPrompt_OutdatedNo(t *testing.T) {
-	checker := newTestChecker(t, "v9.9.9")
+	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
@@ -268,11 +208,9 @@ func TestPrompt_OutdatedNo(t *testing.T) {
 	}
 }
 
-// TestPrompt_OutdatedEnterOnly treats a bare newline as
-// "no" (default in [y/N] convention) and must NOT print the
-// install instructions.
+// TestPrompt_OutdatedEnterOnly treats a bare newline as "no".
 func TestPrompt_OutdatedEnterOnly(t *testing.T) {
-	checker := newTestChecker(t, "v9.9.9")
+	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
@@ -288,12 +226,9 @@ func TestPrompt_OutdatedEnterOnly(t *testing.T) {
 	}
 }
 
-// TestPrompt_UpToDateIsSilent verifies the no-prompt path:
-// when the checker says we're current, NOTHING extra gets
-// printed (no prompt, no hint). The REPL just proceeds to the
-// interactive loop.
+// TestPrompt_UpToDateIsSilent verifies the no-prompt path.
 func TestPrompt_UpToDateIsSilent(t *testing.T) {
-	checker := newTestChecker(t, "v0.0.1")
+	checker, _ := stubCheckerWithTag("v0.0.1")
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
@@ -309,19 +244,15 @@ func TestPrompt_UpToDateIsSilent(t *testing.T) {
 	}
 }
 
-// TestPrompt_NetworkFailureIsSilent covers the GitHub-down
-// case: a 500 from the stub. We expect ZERO output (and the
-// REPL proceeds). The checker logs internally; we don't
-// surface the log to the REPL user.
+// TestPrompt_NetworkFailureIsSilent covers the lookup-down
+// case: stub Lookup errors. We expect ZERO output (and the
+// REPL proceeds).
 func TestPrompt_NetworkFailureIsSilent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
 	checker := &version.Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
-		Now:        func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+		Lookup: func(_ context.Context, _ string) (version.ReleaseMeta, string, error) {
+			return version.ReleaseMeta{}, "", errors.New("network down")
+		},
+		Now: func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
 	}
 	var out bytes.Buffer
 
@@ -340,12 +271,9 @@ func TestPrompt_NetworkFailureIsSilent(t *testing.T) {
 
 // TestPrompt_NoReaderIsSilent covers the production fallback:
 // runREPLWith calls promptForUpdateIfOutdated with a nil
-// Reader. We must NOT print anything (the existing TestREPL_*
-// suite asserts on the runREPLWith output and the version
-// prompt must not leak into that transcript). Production
-// callers (runREPLInteractive) wire cooked stdin as Reader.
+// Reader.
 func TestPrompt_NoReaderIsSilent(t *testing.T) {
-	checker := newTestChecker(t, "v9.9.9")
+	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
@@ -362,10 +290,9 @@ func TestPrompt_NoReaderIsSilent(t *testing.T) {
 }
 
 // TestPrompt_EOFIsTreatedAsNo simulates the user pressing
-// Ctrl-D on the prompt line: reader returns io.EOF with no
-// bytes. We expect a hint printed and NO install instructions.
+// Ctrl-D on the prompt line.
 func TestPrompt_EOFIsTreatedAsNo(t *testing.T) {
-	checker := newTestChecker(t, "v9.9.9")
+	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
@@ -387,11 +314,9 @@ func TestPrompt_EOFIsTreatedAsNo(t *testing.T) {
 	}
 }
 
-// TestPrompt_ReadErrorIsNonFatal covers a non-EOF read error
-// (e.g. an I/O hiccup on a pty). The prompt must NOT crash
-// the REPL startup; it must surface a friendly line and exit.
+// TestPrompt_ReadErrorIsNonFatal covers a non-EOF read error.
 func TestPrompt_ReadErrorIsNonFatal(t *testing.T) {
-	checker := newTestChecker(t, "v9.9.9")
+	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
 
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
@@ -414,11 +339,9 @@ func TestPrompt_ReadErrorIsNonFatal(t *testing.T) {
 }
 
 // TestPrompt_InvalidAnswerThenNoRePrompt guards against the
-// "user mistyped ? then we ask again" trap: any non-y answer
-// ends the prompt immediately. Looping forever would be worse
-// than asking once.
+// "user mistyped ? then we ask again" trap.
 func TestPrompt_InvalidAnswerThenNoRePrompt(t *testing.T) {
-	checker := newTestChecker(t, "v9.9.9")
+	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
 	calls := 0
 
@@ -477,6 +400,31 @@ func TestPrompt_VersionCheckDrivesPrompt(t *testing.T) {
 	}
 }
 
+// --- count tests -------------------------------------------
+
+// TestPrompt_LookupForLatestFiresOnce verifies the stage-1
+// lookup is invoked exactly once even when the user declines
+// the install prompt. Repeated startup chatter would be
+// obnoxious in the REPL.
+func TestPrompt_LookupForLatestFiresOnce(t *testing.T) {
+	checker, calls := stubCheckerWithTag("v9.9.9")
+	var out bytes.Buffer
+
+	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
+		Checker: checker,
+		Out:     &out,
+		Reader:  func() (string, error) { return "n\n", nil },
+	})
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("Lookup fired %d times; want exactly 1", got)
+	}
+}
+
+// --- countdown tests ---------------------------------------
+
 // TestWaitCheckCountdown_InstantResult verifies a cache-hit
 // style Check (result already on the channel) paints the
 // countdown once then clears it without waiting out the
@@ -514,10 +462,12 @@ func TestWaitCheckCountdown_TimeoutSkips(t *testing.T) {
 	}
 }
 
+// --- runREPL integration -----------------------------------
+
 // TestRunREPLWith_NoVersionChatter confirms that the existing
 // REPL scanner path (used by the legacy TestREPL_* suite) does
 // NOT inject version-prompt text into the output when stdin is
-// empty. This is the contract the pre-prompt tests rely on.
+// empty.
 func TestRunREPLWith_NoVersionChatter(t *testing.T) {
 	root, reg := newTestRoot()
 	var buf bytes.Buffer
@@ -530,10 +480,10 @@ func TestRunREPLWith_NoVersionChatter(t *testing.T) {
 	}
 }
 
+// --- CLI flag surface --------------------------------------
+
 // TestUpdate_AllInOneFlags pins the single-verb surface:
 // --tag / --quiet / --no-install / --no-restart / --yes / -y.
-// All flags live on the parent `update` command (no
-// subcommands). The cobra tree must advertise every one.
 func TestUpdate_AllInOneFlags(t *testing.T) {
 	root, _ := newTestRoot()
 	var buf bytes.Buffer
@@ -555,7 +505,6 @@ func TestUpdate_AllInOneFlags(t *testing.T) {
 			t.Errorf("update --help missing %q\n%s", want, got)
 		}
 	}
-	// The single-verb surface must NOT advertise subcommands.
 	for _, mustNot := range []string{"update check", "update download", "update install"} {
 		if strings.Contains(got, mustNot) {
 			t.Errorf("update --help still mentions subcommand surface %q\n%s", mustNot, got)
@@ -563,35 +512,29 @@ func TestUpdate_AllInOneFlags(t *testing.T) {
 	}
 }
 
+// --- CLI integration ---------------------------------------
+
 // TestUpdate_AllInOneNoInstallHappyPath drives the full
 // single-verb `nightme update` end-to-end with --no-install,
-// so we don't actually swap a binary or os.Exit. The test
-// pins:
-//   - check stage prints "current / latest / status"
-//   - download stage finds a matching asset + writes to a
-//     temp staging dir
-//   - SHA256 verifies against the test SHA256SUMS
-//   - --no-install stops before the swap (no os.Exit,
-//     no Install error)
+// so we don't actually swap a binary or os.Exit.
 //
-// We mock both the GitHub release feed (via updater.LookupURL)
-// and the version.DefaultVersionURL so the prompt path is
-// also covered — they're independent but we exercise both
-// here for symmetry.
+// The version check goes through updater.LookupForLatest
+// (nightme.dev → GitHub fallback). The download stage goes
+// through updater.LookupForDownload (GitHub → nightme.dev
+// fallback). We mock BOTH base URLs to point at the same
+// fixture so both paths return the same release.
 func TestUpdate_AllInOneNoInstallHappyPath(t *testing.T) {
-	// Build a tar.gz asset on the fly so Download has
-	// something real to write + hash.
 	body := strings.Repeat("nightme-test-binary-", 256) // ~5 KiB
 	srv := newUpdateFixture(t, "v9.9.9", "9.9.9", body)
-	savedLookup := updater.LookupURL
-	updater.LookupURL = srv.URL
-	t.Cleanup(func() { updater.LookupURL = savedLookup })
+	savedGitHub := updater.GitHubBaseURL
+	savedMirror := updater.NightMeDevBaseURL
+	updater.GitHubBaseURL = srv.URL + "/repos/cnlangzi/nightme"
+	updater.NightMeDevBaseURL = srv.URL
+	t.Cleanup(func() {
+		updater.GitHubBaseURL = savedGitHub
+		updater.NightMeDevBaseURL = savedMirror
+	})
 
-	// Pin config.Paths.DataDir to a temp dir by overriding
-	// the env var the config loader reads. We don't ship a
-	// config helper, so we instead drive the function
-	// directly: the install path requires a non-empty
-	// DataDir, so we point at a temp dir.
 	t.Setenv("NIGHTME_PATHS_DATA_DIR", t.TempDir())
 
 	root, _ := newTestRoot()
@@ -618,24 +561,22 @@ func TestUpdate_AllInOneNoInstallHappyPath(t *testing.T) {
 }
 
 // TestUpdate_CacheHitSkipsDownload pins the staging-dir
-// shortcut: once `nightme update` has downloaded v9.9.9,
-// a second invocation (typical of the REPL prompt flow
-// where the first call is `--no-install` and the second
-// is the full swap) sees the staged archive, skips the
-// re-fetch, and goes straight to install.
+// shortcut.
 func TestUpdate_CacheHitSkipsDownload(t *testing.T) {
 	body := strings.Repeat("nightme-test-binary-", 256) // ~5 KiB
 	srv := newUpdateFixture(t, "v9.9.9", "9.9.9", body)
-	savedLookup := updater.LookupURL
-	updater.LookupURL = srv.URL
-	t.Cleanup(func() { updater.LookupURL = savedLookup })
+	savedGitHub := updater.GitHubBaseURL
+	savedMirror := updater.NightMeDevBaseURL
+	updater.GitHubBaseURL = srv.URL + "/repos/cnlangzi/nightme"
+	updater.NightMeDevBaseURL = srv.URL
+	t.Cleanup(func() {
+		updater.GitHubBaseURL = savedGitHub
+		updater.NightMeDevBaseURL = savedMirror
+	})
 
 	dataDir := t.TempDir()
 	t.Setenv("NIGHTME_PATHS_DATA_DIR", dataDir)
 
-	// Pre-populate the staging dir with the exact archive
-	// the fixture's SHA256SUMS describes. Download must
-	// hash it, match, and skip the asset GET.
 	wantExt := "tar.gz"
 	if runtime.GOOS == "windows" {
 		wantExt = "zip"
@@ -670,12 +611,8 @@ func TestUpdate_CacheHitSkipsDownload(t *testing.T) {
 // TestUpdate_AllInOneRefusesEmptyDataDir covers the safety
 // property: if config.Paths.DataDir is empty, the update
 // fails closed instead of writing into "/" or some other
-// unintended location. Same test as the previous round's
-// TestUpdate_InstallRefusesEmptyDataDir, retargeted at the
-// single-verb command.
+// unintended location.
 func TestUpdate_AllInOneRefusesEmptyDataDir(t *testing.T) {
-	// Force config to fail to load by clearing any
-	// override and using a non-existent HOME.
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 	root, _ := newTestRoot()
@@ -690,8 +627,7 @@ func TestUpdate_AllInOneRefusesEmptyDataDir(t *testing.T) {
 }
 
 // TestUpdate_HelpLongIsSingleVerb pins the user-visible
-// shape: --help must NOT list subcommands. If a future
-// commit accidentally re-adds them, this test catches it.
+// shape: --help must NOT list subcommands.
 func TestUpdate_HelpLongIsSingleVerb(t *testing.T) {
 	root, _ := newTestRoot()
 	var buf bytes.Buffer
@@ -702,29 +638,29 @@ func TestUpdate_HelpLongIsSingleVerb(t *testing.T) {
 		t.Fatalf("update --help: %v", err)
 	}
 	got := buf.String()
-	// Long description must walk the three internal stages
-	// in plain prose, not as a subcommand list.
 	for _, want := range []string{"check", "download", "install"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("update --help should describe the three stages, missing %q\n%s", want, got)
 		}
 	}
-	// And must NOT carry a "Subcommands:" header (the
-	// signature of a parent command that registers kids).
 	if strings.Contains(got, "Subcommands:") {
 		t.Errorf("update --help has Subcommands: header (parent got kids attached):\n%s", got)
 	}
 }
 
-// newUpdateFixture serves a synthetic GitHub release payload
-// over httptest. Used by TestUpdate_AllInOneNoInstallHappyPath
-// to drive the bare `nightme update` path without hitting
-// api.github.com.
+// newUpdateFixture serves a synthetic GitHub-shaped release
+// payload over httptest. It serves BOTH the GitHub-style path
+// (/repos/cnlangzi/nightme/releases/tags/<tag>) AND the
+// nightme.dev-style path (/releases/latest) so a single
+// fixture can back both LookupForLatest and LookupForDownload
+// in tests.
 //
-// It returns the assetBody as both the SHA256SUMS-listed
-// binary AND the SHA256SUMS.txt itself, so Download's
-// verify step finds a matching hash.
-func newUpdateFixture(t *testing.T, tag, version, assetBody string) *httptest.Server {
+// We use a single hand-written handler instead of http.ServeMux
+// because the paths overlap in ways ServeMux rejects (a
+// concrete /releases/tags/<v> URL shares its prefix with
+// /releases/latest, which ServeMux treats as a pattern
+// conflict).
+func newUpdateFixture(t *testing.T, tag, ver, assetBody string) *httptest.Server {
 	t.Helper()
 	sum := sha256.Sum256([]byte(assetBody))
 	sumHex := hex.EncodeToString(sum[:])
@@ -733,26 +669,32 @@ func newUpdateFixture(t *testing.T, tag, version, assetBody string) *httptest.Se
 	if wantOS == "windows" {
 		ext = "zip"
 	}
-	assetName := "nightme_" + version + "_" + wantOS + "_" + wantArch + "." + ext
+	assetName := "nightme_" + ver + "_" + wantOS + "_" + wantArch + "." + ext
 
 	var srv *httptest.Server
-	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/cnlangzi/nightme/releases/tags/"+tag, func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, `{
-			"tag_name": %q,
-			"assets": [
-				{"name":"SHA256SUMS.txt","browser_download_url":"%s/asset/sums","size":%d},
-				{"name":%q,"browser_download_url":"%s/asset/binary","size":%d}
-			]
-		}`, tag, srv.URL, len(sumHex), assetName, srv.URL, len(assetBody))
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/repos/cnlangzi/nightme/releases/tags/"+tag),
+			r.URL.Path == "/repos/cnlangzi/nightme/releases/latest",
+			r.URL.Path == "/releases/latest",
+			r.URL.Path == "/releases/tags/"+tag:
+			fmt.Fprintf(w, `{
+				"tag_name": %q,
+				"published_at": "2026-08-17T06:56:53Z",
+				"assets": [
+					{"name":"SHA256SUMS.txt","browser_download_url":"%s/asset/sums","size":%d},
+					{"name":%q,"browser_download_url":"%s/asset/binary","size":%d}
+				]
+			}`, tag, srv.URL, len(sumHex), assetName, srv.URL, len(assetBody))
+		case r.URL.Path == "/asset/sums":
+			fmt.Fprintf(w, "%s  %s\n", sumHex, assetName)
+		case r.URL.Path == "/asset/binary":
+			_, _ = w.Write([]byte(assetBody))
+		default:
+			http.NotFound(w, r)
+		}
 	})
-	mux.HandleFunc("/asset/sums", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintf(w, "%s  %s\n", sumHex, assetName)
-	})
-	mux.HandleFunc("/asset/binary", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(assetBody))
-	})
-	srv = httptest.NewServer(mux)
+	srv = httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return srv
 }

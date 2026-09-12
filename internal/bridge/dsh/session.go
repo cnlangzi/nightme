@@ -837,16 +837,18 @@ func (d *driver) SendPermission(resp string) error {
 		}
 	}
 
-	// Capture the $events clientId under hostWaterfallMu (the writer
-	// in host_waterfall.go holds the same lock). Reading without
-	// the lock is a data race the race detector flags, AND pairs
-	// the client's snapshot with the lock-time clientId so a
-	// concurrent WS reconnect that overwrites hostRemoteClientID
-	// can't make us POST /api/$events/result with a clientId from
-	// a different connection than the one the eventId belongs to.
-	hostWaterfallMu.RLock()
-	clientID := hostRemoteClientID
-	hostWaterfallMu.RUnlock()
+	// Capture the $events clientId atomically with the read.
+	// host.SetHostClientID is the writer (called from
+	// host/stream.go:case "ready", the dispatch site — the
+	// capture runs before any handler so the install-race that
+	// used to drop the one-shot ready frame is closed). Reading
+	// under host/host_state.go's RWMutex pairs our snapshot with
+	// the lock-time clientId: a concurrent WS reconnect that
+	// overwrites the slot can't make us POST /api/$events/result
+	// with a clientId from a different connection than the one
+	// the eventId belongs to. See host/host_state.go for the
+	// race-fix invariant.
+	clientID := host.GetHostClientID()
 
 	ctx := context.Background()
 	var sendErr error

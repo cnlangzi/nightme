@@ -87,7 +87,7 @@ NightMe 直接接住你已经在用的 AI 编程 agent 和日常聊天的 IM。�
 |---|---|
 | **飞书 Feishu**（国内）/ **Lark**（国际） | 可用 — `nightme login feishu` |
 | **Telegram** | 公测 — `nightme login telegram` |
-| **Slack** | 即将支持 |
+| **Slack** | 开发中 — `nightme login slack` |
 
 ## Prerequisites
 
@@ -183,6 +183,12 @@ sudo mv nightme /usr/local/bin/nightme
 
 ---
 
+## 升级与维护
+
+`nightme update` 是就地升级路径：解析最新 release、下载对应 asset、用发布的 SHA256SUMS 校验、替换二进制、重启 daemon。`--tag vX.Y.Z` 钉版本；`--yes` 跳过确认（CI）；`--no-install` 只下载不替换。重跑 one-liner 安装脚本同样完成替换。
+
+`nightme clean` 清空 `nightme.log` 和 `daemon-stderr.log`、清掉按会话存放的附件 inbox（`~/.nightme/inbox`），保留配置、session 状态、锁文件和 daemon socket。`nightme clean --all` 是全量本地重置——还会删配置、session store、生命周期文件和缓存；用 `--all` 前先 `stop` daemon。
+
 ## Quickstart
 
 ```bash
@@ -203,8 +209,14 @@ nightme start          # daemon 在后台跑起来
 | `nightme list` | 列出你所有的 agent：在哪个 chat、哪个项目、还活着还是已结束。 |
 | `nightme kill` | 一次性停掉所有 agent。在 chat 里发条消息就回来了，对话不丢。 |
 | `nightme logs` | 实时看 NightMe 在干什么。 |
-| `nightme doctor` | 觉得哪里不对时，看一眼 NightMe 是否健康。 |
-| `nightme agents` | 你配了哪些 AI agent。 |
+| `nightme config` | 交互菜单：实例名、主 agent、每个 agent 的二进制路径。 |
+| `nightme update` | 就地升级：检查、下载、SHA256 校验、安装、重启 daemon。 |
+| `nightme clean` | 清空日志、清掉附件 inbox；`--all` 全量本地重置（先停 daemon）。 |
+| `nightme workflow` | list / show / dry-run `~/.nightme/workflows/` 下的 workflow YAML。 |
+| `nightme doctor` | 觉得哪里不对时，看一眼 NightMe 是否健康。仅 Unix。 |
+| `nightme version` | 打印版本信息。 |
+
+`nightme test` 在 PTY 里起一个 CLI，做本地快速验证。
 
 「停」分三个范围：`/close`（单个项目）· `nightme kill`（所有 agent）· `nightme stop`（NightMe 自己）。三种都不会丢对话。
 
@@ -225,6 +237,11 @@ Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-
 | `/watch on\|off` | 当前 Chat 的消息监听模式（默认群内只听 `@bot` / `@_all`）。 |
 | `/think on\|off` | 是否在回复卡里展示 agent 思考过程。 |
 | `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
+| `/handoff <name>` | 把当前任务序列化到 `~/.nightme/handoff/<name>.md`，下一个 agent（或新 session）从任意目录接手。 |
+| `/resume <name>` | 在当前 session 里继续 `~/.nightme/handoff/<name>.md` 描述的任务。 |
+| `/review [--agent <agent>]` | 当前分支对比默认分支做 review（PR 模式），findings 注回当前 chat。`--agent` 指定用哪个 agent 跑 review。 |
+| `/wiki init [--modules] [--llmstxt] [--arch]` | 读码、分模块、写每个模块的 wiki 文件——把仓库 wiki 作为项目资产。 |
+| `/queue <message>` | 把一条消息作为独立 Prompt 追加进队列。 |
 | `/help` | 在 Chat 里列出所有斜杠命令。 |
 
 `!cmd` 在当前 Chat 的 CWD 里直接跑 shell 命令——规则见 [Shell mode](#shell-mode)。
@@ -337,6 +354,8 @@ GitHub / GitLab issues 是任务流——每次 `/gtw fix` 钉到一个 issue，
 
 5. **`/gtw close`** — 任务做完了（或者决定不做了），`/gtw close` 拆 worktree、回到 main，分支 ready to ship（或者 discard）。
 
+**`/gtw commit [-a <agent>]`** — 用配置的（或 `-a <agent>` 指定的）agent 在当前 worktree 里提交未提交的改动。`fix` 之后、`push` / `pr` 之前想让 agent 暂存并写 commit 时用。
+
 ### Hooks——把开发环境一起带过去
 
 AI 工具的索引（CodeGraph、语言服务器、缓存）一般放在仓库里。每个 worktree 是新 checkout——都要重建。Hooks 把这件事自动化了。
@@ -368,6 +387,20 @@ fix:
 - 单个 hook 默认 30s 超时。
 
 ---
+
+## Workflow 自动化
+
+`nightme workflow` 规划和检查 YAML 定义的自动化。Workflow 放在 `~/.nightme/workflows/*.yaml`，按 `name:` 去重加载。
+
+| 子命令 | 作用 |
+|---|---|
+| `nightme workflow list` | 汇总每个 workflow：名称、workspaces、触发器、jobs。`--json` 输出机器可读。 |
+| `nightme workflow show <name>` | 打印一个 workflow 的解析细节：触发器、jobs、steps、生效的 agent。 |
+| `nightme workflow run <name>` | 打印执行计划——哪个触发器会命中、哪些 step 跑、什么顺序。`--workspace` 覆盖 workspace。 |
+
+`run` 是规划 dry-run：只解析和排计划，不真正调 agent。
+
+YAML schema——`on:` 触发器、`worker:`、`jobs.<name>.steps`、`${{ }}` 表达式——见 [`docs/WFE.md`](./docs/WFE.md)。
 
 ## For developers
 
@@ -458,12 +491,18 @@ paths:
 | [`docs/PRD.md`](./docs/PRD.md) | 产品定义——做什么、为什么做、为谁做。不讲技术。 |
 | [`docs/SPEC.md`](./docs/SPEC.md) | 技术架构——组件、数据流、NFR。 |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | 功能索引——每个 F-XX 一行。 |
+| [`docs/CHANNEL.md`](./docs/CHANNEL.md) | 多 channel 架构——所有有凭据的 channel 自动并行启动，per-channel session 隔离。 |
+| [`docs/CHATSTORE.md`](./docs/CHATSTORE.md) | `chat_sessions.json` 真相源、ChatSession hydrate、AgentSessionPool。 |
 | [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + 引擎运行时架构——触发器、步骤、bot↔wfe 边界。 |
 | [`docs/feat/`](./docs/feat/) | 每个 feature 的设计文档。 |
 | [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、dsh、opencode、pi、copilot。 |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | 飞书 adapter 参考（渲染规则、卡片语义、线程路由）。 |
 | [`docs/flow/`](./docs/flow/) | 横切流程文档（如 3-layer doc model）。 |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | 飞书端到端手动测试 + 排错。 |
+| [`docs/WINDOWS.md`](./docs/WINDOWS.md) | Windows bridge 陷阱（env、`.cmd` shim、argv、信号）+ 修复。 |
+| [`docs/TESTS.md`](./docs/TESTS.md) | CI runner 上的跨平台 agent 启动 smoke test。 |
+| [`docs/Wiki.md`](./docs/Wiki.md) | `/wiki init` 设计——仓库 wiki 作为持久文档资产。 |
+| [`docs/primary-agent-detection.md`](./docs/primary-agent-detection.md) | Primary agent 解析链、内置白名单、首次运行 prompt。 |
 | [`CHANGELOG.md`](./CHANGELOG.md) | 当前 snapshot（单 `[Unreleased]` 段）。 |
 | [`MIGRATION.md`](./MIGRATION.md) | 历史 snapshot 之间的 breaking change 列表。 |
 
@@ -482,7 +521,7 @@ CI 跑在 GitHub Actions（`.github/workflows/ci.yml`），每次 push 和 PR �
 ### Project layout
 
 ```
-cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / agents / name)
+cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / kill / clean / update / workflow / version)
 configs/                           # example YAML config
 docs/
   PRD.md SPEC.md FEATURES.md       # 3-layer doc model
@@ -494,14 +533,15 @@ internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
-    acp/  claudecode/  codex/  copilot/  dsh/  opencode/  pi/  pty/
+    acp/  claudecode/  codex/  copilot/  cursor/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    bot/  echo/  feishu/  telegram/   # adapters (feishu + telegram are production)
+    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram beta; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
-    gtw/                           # /gtw fix / hooks / sync / close / back (worktree workflow)
+    handoff/ resume/ review/ wiki/ queue/   # task-continuity / review / wiki / queue
+    gtw/                           # /gtw fix / commit / push / pr / sync / close / back (worktree workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode
@@ -509,7 +549,7 @@ internal/
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
-  login/                           # IM bot 注册——feishu/ 处理飞书 / Lark 扫码登录
+  login/                           # IM bot 注册——feishu / slack / telegram onboarding
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)

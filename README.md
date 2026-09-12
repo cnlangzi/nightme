@@ -90,7 +90,7 @@ the way.
 |---|---|
 | **Feishu** (China) / **Lark** (International) | Available — `nightme login feishu` |
 | **Telegram** | Beta — `nightme login telegram` |
-| **Slack** | Coming soon |
+| **Slack** | In development — `nightme login slack` |
 
 ## Prerequisites
 
@@ -218,6 +218,12 @@ with the OS, so the tray is always built in.
 
 ---
 
+## Upgrade & maintenance
+
+`nightme update` is the in-place upgrade path: it resolves the latest release, downloads the matching asset, verifies it against the published SHA256SUMS, swaps the binary, and restarts the daemon. Pin a release with `--tag vX.Y.Z`; skip prompts with `--yes` (CI); pre-warm the download without installing with `--no-install`. Re-running the one-liner install script performs the same swap.
+
+`nightme clean` zeroes `nightme.log` and `daemon-stderr.log` and clears the per-session attachment inbox (`~/.nightme/inbox`), preserving config, session state, lock files, and the daemon socket. `nightme clean --all` is a full local reset — it also removes config, session stores, lifecycle files, and caches; stop the daemon before using `--all`.
+
 ## Quickstart
 
 ```bash
@@ -238,8 +244,14 @@ Most of the time you live in chat. These are the few things you do from a termin
 | `nightme list` | All your agents: which chat, which project, still alive or finished. |
 | `nightme kill` | Stop every agent at once. Send a message in the chat and it comes back, conversation intact. |
 | `nightme logs` | Watch what NightMe is doing, live. |
-| `nightme doctor` | Check NightMe's health when something feels off. |
-| `nightme agents` | Which AI agents you have set up. |
+| `nightme config` | Interactive menu: instance name, primary agent, per-agent binary path. |
+| `nightme update` | In-place upgrade: check, download, SHA256-verify, install, restart the daemon. |
+| `nightme clean` | Truncate logs and clear the attachment inbox; `--all` for a full local reset (stop the daemon first). |
+| `nightme workflow` | List / show / dry-run the workflow YAMLs under `~/.nightme/workflows/`. |
+| `nightme doctor` | Check NightMe's health when something feels off. Unix only. |
+| `nightme version` | Print version info. |
+
+`nightme test` spawns a CLI in a PTY for a quick local check.
 
 Stopping comes in three scopes: `/close` (one project) · `nightme kill` (all agents) · `nightme stop` (NightMe itself). Your conversations survive all three.
 
@@ -371,6 +383,11 @@ Three subcommands chain into a complete **local multi-branch development workflo
    to), `/gtw close` tears down the worktree, returns you to
    main, and the branch is ready to ship (or discard).
 
+**`/gtw commit [-a <agent>]`** — commit uncommitted work in the
+current worktree via the configured (or `-a <agent>`) agent. The
+in-loop step between `fix` and `push` / `pr` when you want the
+agent to stage and write the commit.
+
 ### Hooks — bring the dev environment with you
 
 AI tool indexes (CodeGraph, language servers, caches) usually live inside the repo. Each worktree is a fresh checkout — they all need rebuilding. Hooks automate that.
@@ -410,6 +427,20 @@ Iron rules (from the code):
 - All stdout/stderr is echoed back so you can see what actually ran.
 - 30s default timeout per hook.
 
+## Workflow automation
+
+`nightme workflow` plans and inspects YAML-defined automations. Workflows live in `~/.nightme/workflows/*.yaml`, loaded by name.
+
+| Subcommand | What it does |
+|---|---|
+| `nightme workflow list` | Summarize every workflow: name, workspaces, triggers, jobs. `--json` for machine output. |
+| `nightme workflow show <name>` | Print one workflow's parsed details: triggers, jobs, steps, effective agent. |
+| `nightme workflow run <name>` | Print the execution plan — which trigger fires, which steps run, in what order. `--workspace` overrides the workspace. |
+
+`run` is a planning dry-run: it parses and plans but does not invoke an agent.
+
+The YAML schema — `on:` triggers, `worker:`, `jobs.<name>.steps`, `${{ }}` expressions — is documented in [`docs/WFE.md`](./docs/WFE.md).
+
 ## Slash commands
 
 Chat-level slash commands. The `/gtw` subcommands live in
@@ -427,6 +458,11 @@ here.
 | `/watch on\|off` | Per-chat message-watch mode (default: only `@bot` / `@_all` in groups). |
 | `/think on\|off` | Show or hide the agent's thinking blocks in the receipt card. |
 | `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |
+| `/handoff <name>` | Serialize the current task into `~/.nightme/handoff/<name>.md` so the next agent (or a fresh session) continues from any directory. |
+| `/resume <name>` | Continue the task described by `~/.nightme/handoff/<name>.md` in the current session. |
+| `/review [--agent <agent>]` | Review the current branch against the default branch (PR mode); findings are injected back into this chat. `--agent` runs the review with a specific agent. |
+| `/wiki init [--modules] [--llmstxt] [--arch]` | Read the codebase, design modules, and write per-module wiki files — the repo wiki as a project asset. |
+| `/queue <message>` | Append `<message>` to the queue as a standalone Prompt. |
 | `/help` | List every slash command in-chat. |
 
 `!cmd` runs shell commands directly in the chat's CWD — see
@@ -527,12 +563,18 @@ Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute keys contai
 | [`docs/PRD.md`](./docs/PRD.md) | Product definition — what / why / for whom. No tech. |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Technical architecture — components, data flow, NFRs. |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table. |
+| [`docs/CHANNEL.md`](./docs/CHANNEL.md) | Multi-channel architecture — all credentialed channels auto-start, per-channel session isolation. |
+| [`docs/CHATSTORE.md`](./docs/CHATSTORE.md) | `chat_sessions.json` source of truth, ChatSession hydrate, AgentSessionPool. |
 | [`docs/WFE.md`](./docs/WFE.md) | Workflow YAML + engine runtime architecture — triggers, steps, bot↔wfe boundary. |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs. |
 | [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, dsh, opencode, pi, copilot. |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | Feishu adapter reference (rendering rules, card semantics, thread routing). |
 | [`docs/flow/`](./docs/flow/) | Cross-cutting flow docs (e.g. the 3-layer doc model). |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting. |
+| [`docs/WINDOWS.md`](./docs/WINDOWS.md) | Windows bridge pitfalls (env, `.cmd` shim, argv, signals) + fixes. |
+| [`docs/TESTS.md`](./docs/TESTS.md) | Cross-platform agent startup smoke test on CI runners. |
+| [`docs/Wiki.md`](./docs/Wiki.md) | `/wiki init` design — repo wiki as a durable doc asset. |
+| [`docs/primary-agent-detection.md`](./docs/primary-agent-detection.md) | Primary-agent resolution chain, built-in whitelist, first-run prompt. |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Current snapshot (single `[Unreleased]` section). |
 | [`MIGRATION.md`](./MIGRATION.md) | Breaking changes between earlier snapshots. |
 
@@ -551,7 +593,7 @@ CI runs on GitHub Actions (`.github/workflows/ci.yml`) for every push and pull r
 ### Project layout
 
 ```
-cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / agents / name)
+cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / kill / clean / update / workflow / version)
 configs/                           # example YAML config
 docs/
   PRD.md SPEC.md FEATURES.md       # 3-layer doc model
@@ -563,14 +605,15 @@ internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
   bridge/                          # Bridge abstraction, one sub-package per agent
-    acp/  claudecode/  codex/  copilot/  dsh/  opencode/  pi/  pty/
+    acp/  claudecode/  codex/  copilot/  cursor/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    bot/  echo/  feishu/  telegram/   # adapters (feishu + telegram are production)
+    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram beta; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
-    gtw/                           # /gtw fix / hooks / sync / close / back (worktree workflow)
+    handoff/ resume/ review/ wiki/ queue/   # task-continuity / review / wiki / queue
+    gtw/                           # /gtw fix / commit / push / pr / sync / close / back (worktree workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode
@@ -578,7 +621,7 @@ internal/
     inbound/  outbound/            # inbound dispatch chain + outbound sender
   gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
-  login/                           # IM bot registration — feishu/ handles QR login for Feishu / Lark
+  login/                           # IM bot registration — feishu / slack / telegram onboarding
   messages/                        # IM message types + dispatch
   prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)

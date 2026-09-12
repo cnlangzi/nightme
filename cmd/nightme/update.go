@@ -58,7 +58,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -222,69 +221,34 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		paintDim(out, "→"),
 		paint(out, ansiBold+ansiGreen, latest))
 
-	// Stage 2: download metadata via LookupForDownload (GitHub
-	// first, nightme.dev mirror fallback). The opposite order from
-	// stage 1 — see internal/updater.LookupForDownload for why.
-	fmt.Fprintf(errOut, "  %s  fetching release metadata…\n", paintDim(out, "·"))
-	release, source, err := updater.LookupForDownload(ctx, targetTag)
-	if err != nil {
-		fmt.Fprintf(errOut, "  %s  release fetch failed: %v\n", paintRed(out, "✗"), err)
-		return err
-	}
-	if source != "github" {
-		fmt.Fprintf(errOut, "  %s  using %s (github was unreachable)\n", paintDim(out, "·"), source)
-	}
-
-	asset := updater.MatchAsset(release, targetTag)
-	if asset == nil {
-		return fmt.Errorf("no release asset for %s/%s in %s; available: %s",
-			runtime.GOOS, runtime.GOARCH, targetTag, assetNames(release.Assets))
-	}
-
-	stagingDir, err := updater.StagingDir(dataDir, targetTag)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %s  %s  %s\n",
-		paintCyan(out, "↓"),
-		asset.Name,
-		paintDim(out, updater.FormatBytes(asset.Size)))
-	progress := updater.QuietProgress
-	if !opts.quiet {
-		progress = updater.NewASCIIProgressBar(out, asset.Size)
-	}
-	dlRes, err := updater.Download(ctx, release, asset, stagingDir, progress)
+	// Stage 2: download + verify + extract, in one call.
+	// updater.DownloadTag composes the URL itself (no API
+	// call) and tries GitHub first, mirror fallback. The
+	// verification + extraction happen inside.
+	fmt.Fprintf(errOut, "  %s  fetching release via github…\n", paintDim(out, "·"))
+	dlRes, err := updater.DownloadTag(ctx, targetTag, dataDir)
 	if err != nil {
 		fmt.Fprintf(errOut, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
 		return err
 	}
-	if dlRes.Cached {
-		fmt.Fprintf(out, "  %s  sha256 verified — skipping download\n", paintGreen(out, "✓"))
-	} else if !opts.quiet {
-		fmt.Fprintln(out)
+	if dlRes.Source == "mirror" {
+		fmt.Fprintf(errOut, "  %s  using mirror (github was unreachable)\n", paintDim(out, "·"))
 	}
 	fmt.Fprintf(out, "  %s  Staged %s  %s\n",
 		paintGreen(out, "✓"),
-		dlRes.Asset.Name,
-		paintDim(out, updater.FormatBytes(dlRes.Bytes)+", sha256="+dlRes.SHA256Hex))
+		dlRes.AssetName,
+		paintDim(out, "sha256="+dlRes.SHA256Hex))
 
 	if opts.noInstall {
 		fmt.Fprintf(out, "  %s  --no-install; stopping before swap\n", paintDim(out, "→"))
 		return nil
 	}
 
-	fmt.Fprintln(out)
-	binary, err := updater.ExtractArchive(dlRes.StagingPath, stagingDir)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
-
 	targetPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate current binary: %w", err)
 	}
-	installRes, err := updater.Install(binary, targetPath)
+	installRes, err := updater.Install(dlRes.BinaryPath, targetPath)
 	if err != nil {
 		return fmt.Errorf("install: %w", err)
 	}
@@ -345,15 +309,9 @@ func execAndExit(out io.Writer, binary string, argv []string) error {
 	return nil
 }
 
-// assetNames joins asset basenames into a comma-separated
-// string for the "no asset for our OS/arch" diagnostic.
-func assetNames(assets []updater.Asset) string {
-	names := make([]string, 0, len(assets))
-	for _, a := range assets {
-		names = append(names, a.Name)
-	}
-	return strings.Join(names, ", ")
-}
+// assetNames is no longer used — DownloadTag picks the
+// matching asset for runtime.GOOS / runtime.GOARCH internally
+// and surfaces a clear error if the platform isn't published.
 
 // daemonIsRunning reports whether a nightme daemon is up.
 // It uses the same socket-path resolution as `nightme status`

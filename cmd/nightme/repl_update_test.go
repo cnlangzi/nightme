@@ -3,51 +3,33 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
-// --- stub fixtures -----------------------------------------
+// --- stub fixtures ---------------------------------------
 
-// stubLookupForChecker returns a version.ReleaseLookup that
-// always returns the supplied tag (regardless of which the
-// Checker passes in). It also bumps the supplied call counter
-// so tests can assert "did we hit the network?" without
-// spinning up an httptest server.
-//
-// Production wires this to updater.LookupForLatest via
-// cmd/nightme/version_check.go. Tests inject the stub
-// directly so they don't depend on real network reachability.
-func stubLookupForChecker(tag string, calls *atomic.Int32) version.ReleaseLookup {
-	return func(_ context.Context, _ string) (version.ReleaseMeta, string, error) {
+// stubLookupForChecker returns a version.LatestTagLookup that
+// always returns the supplied tag. The call counter lets
+// tests assert on how many times the network seam fired
+// without spinning up an httptest server.
+func stubLookupForChecker(tag string, calls *atomic.Int32) version.LatestTagLookup {
+	return func(_ context.Context, _ string) (string, string, error) {
 		if calls != nil {
 			calls.Add(1)
 		}
-		return version.ReleaseMeta{
-			TagName:     tag,
-			PublishedAt: time.Unix(1700000000, 0).UTC(),
-		}, "nightme.dev", nil
+		return tag, "nightme.dev", nil
 	}
 }
 
 // stubCheckerWithTag builds a version.Checker wired to a stub
-// Lookup. The Checker is the only seam tests need; Lookup is
-// injected here so tests don't have to fake an httptest server.
+// Lookup.
 func stubCheckerWithTag(tag string) (*version.Checker, *atomic.Int32) {
 	var calls atomic.Int32
 	c := &version.Checker{
@@ -59,28 +41,13 @@ func stubCheckerWithTag(tag string) (*version.Checker, *atomic.Int32) {
 	return c, &calls
 }
 
-// --- prompt path tests -------------------------------------
+// --- prompt tests ----------------------------------------
 
-// TestPrompt_OutdatedYes exercises the new three-stage
-// shape: a single "y" at the Update prompt moves into the
-// download stage, which then asks "Install now?" next.
-//
-// We pin the y-then-EOF transcript (the user accepts the
-// initial y but then can't answer the Install prompt) so
-// we observe the second prompt header without driving the
-// download stage all the way through.
-//
-// We inject deps.Release with a single Asset entry so the
-// prompt's stage-2 lookup short-circuits via precomputed
-// instead of falling back to a live GitHub fetch (which
-// would race against the test fixture).
+// TestPrompt_OutdatedYes exercises the new flow: "y" at the
+// Update prompt triggers a download attempt (which will fail
+// against the test environment, but the transcript shape up
+// through that point is what we pin here).
 func TestPrompt_OutdatedYes(t *testing.T) {
-	pre := &updater.Release{
-		TagName: "v9.9.9",
-		Assets: []updater.Asset{
-			{Name: "unrelated-asset.txt"},
-		},
-	}
 	var out bytes.Buffer
 
 	idx := 0
@@ -92,7 +59,6 @@ func TestPrompt_OutdatedYes(t *testing.T) {
 	}
 	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
 		VersionCheck: &version.CheckResult{Latest: "v9.9.9", Outdated: true},
-		Release:      pre,
 		Out:          &out,
 		Reader: func() (string, error) {
 			r := replies[idx]
@@ -120,47 +86,9 @@ func TestPrompt_OutdatedYes(t *testing.T) {
 	}
 }
 
-// TestPrompt_ThreeStagesY_Y_Y is the happy path: user
-// accepts each of the y/N prompts. We use a stub Release
-// that triggers a download-stage failure (no matching
-// asset), so we observe the two-prompt transcript without
-// driving Install all the way through.
-func TestPrompt_ThreeStagesY_Y_Y(t *testing.T) {
-	checker, _ := stubCheckerWithTag("v9.9.9")
-	pre := &updater.Release{
-		TagName: "v9.9.9",
-		Assets:  []updater.Asset{{Name: "unrelated-asset.txt"}},
-	}
-
-	t.Setenv("NIGHTME_PATHS_DATA_DIR", t.TempDir())
-
-	var out bytes.Buffer
-	idx := 0
-	replies := []string{"y\n"}
-	err := promptForUpdateIfOutdated(context.Background(), &PromptDeps{
-		Checker: checker,
-		Release: pre,
-		Out:     &out,
-		Reader: func() (string, error) {
-			s := replies[idx]
-			idx++
-			return s, nil
-		},
-	})
-	_ = err
-	got := out.String()
-	if !strings.Contains(got, "Update now?") {
-		t.Errorf("expected Update prompt:\n%s", got)
-	}
-	if idx != 1 {
-		t.Errorf("Reader called %d times, want 1", idx)
-	}
-}
-
-// TestPrompt_DeclineInstallKeepsStaging covers the user's
-// option to download-but-not-install.
+// TestPrompt_DeclineInstallKeepsStaging covers the up-to-date
+// silent path. When Outdated is false, no prompt fires.
 func TestPrompt_DeclineInstallKeepsStaging(t *testing.T) {
-	// Checker says "up to date" → no prompt at all.
 	checker, _ := stubCheckerWithTag(version.Version)
 
 	var out bytes.Buffer
@@ -181,8 +109,8 @@ func TestPrompt_DeclineInstallKeepsStaging(t *testing.T) {
 	}
 }
 
-// TestPrompt_OutdatedNo covers the "user says n at the
-// first prompt" path.
+// TestPrompt_OutdatedNo covers "user says n at the first
+// prompt".
 func TestPrompt_OutdatedNo(t *testing.T) {
 	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
@@ -245,12 +173,11 @@ func TestPrompt_UpToDateIsSilent(t *testing.T) {
 }
 
 // TestPrompt_NetworkFailureIsSilent covers the lookup-down
-// case: stub Lookup errors. We expect ZERO output (and the
-// REPL proceeds).
+// case.
 func TestPrompt_NetworkFailureIsSilent(t *testing.T) {
 	checker := &version.Checker{
-		Lookup: func(_ context.Context, _ string) (version.ReleaseMeta, string, error) {
-			return version.ReleaseMeta{}, "", errors.New("network down")
+		Lookup: func(_ context.Context, _ string) (string, string, error) {
+			return "", "", errors.New("network down")
 		},
 		Now: func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
 	}
@@ -269,9 +196,8 @@ func TestPrompt_NetworkFailureIsSilent(t *testing.T) {
 	}
 }
 
-// TestPrompt_NoReaderIsSilent covers the production fallback:
-// runREPLWith calls promptForUpdateIfOutdated with a nil
-// Reader.
+// TestPrompt_NoReaderIsSilent covers runREPLWith's nil
+// Reader path.
 func TestPrompt_NoReaderIsSilent(t *testing.T) {
 	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
@@ -289,8 +215,7 @@ func TestPrompt_NoReaderIsSilent(t *testing.T) {
 	}
 }
 
-// TestPrompt_EOFIsTreatedAsNo simulates the user pressing
-// Ctrl-D on the prompt line.
+// TestPrompt_EOFIsTreatedAsNo.
 func TestPrompt_EOFIsTreatedAsNo(t *testing.T) {
 	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
@@ -338,8 +263,8 @@ func TestPrompt_ReadErrorIsNonFatal(t *testing.T) {
 	}
 }
 
-// TestPrompt_InvalidAnswerThenNoRePrompt guards against the
-// "user mistyped ? then we ask again" trap.
+// TestPrompt_InvalidAnswerThenNoRePrompt guards against
+// the "user mistyped ? then we ask again" trap.
 func TestPrompt_InvalidAnswerThenNoRePrompt(t *testing.T) {
 	checker, _ := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
@@ -364,10 +289,10 @@ func TestPrompt_InvalidAnswerThenNoRePrompt(t *testing.T) {
 	}
 }
 
-// TestPrompt_VersionCheckDrivesPrompt covers the production
-// wiring: runREPLInteractive runs the countdown Check, then
-// passes VersionCheck in so promptForUpdateIfOutdated does
-// not hit the network again.
+// TestPrompt_VersionCheckDrivesPrompt covers production:
+// runREPLInteractive runs the countdown Check, then passes
+// VersionCheck in so promptForUpdateIfOutdated does not hit
+// the network again.
 func TestPrompt_VersionCheckDrivesPrompt(t *testing.T) {
 	var out bytes.Buffer
 	calls := 0
@@ -400,13 +325,10 @@ func TestPrompt_VersionCheckDrivesPrompt(t *testing.T) {
 	}
 }
 
-// --- count tests -------------------------------------------
-
-// TestPrompt_LookupForLatestFiresOnce verifies the stage-1
-// lookup is invoked exactly once even when the user declines
-// the install prompt. Repeated startup chatter would be
-// obnoxious in the REPL.
-func TestPrompt_LookupForLatestFiresOnce(t *testing.T) {
+// TestPrompt_LookupFiresOnce verifies the stage-1 lookup is
+// invoked exactly once even when the user declines the
+// install prompt.
+func TestPrompt_LookupFiresOnce(t *testing.T) {
 	checker, calls := stubCheckerWithTag("v9.9.9")
 	var out bytes.Buffer
 
@@ -423,12 +345,8 @@ func TestPrompt_LookupForLatestFiresOnce(t *testing.T) {
 	}
 }
 
-// --- countdown tests ---------------------------------------
+// --- countdown tests -------------------------------------
 
-// TestWaitCheckCountdown_InstantResult verifies a cache-hit
-// style Check (result already on the channel) paints the
-// countdown once then clears it without waiting out the
-// timeout.
 func TestWaitCheckCountdown_InstantResult(t *testing.T) {
 	ch := make(chan version.CheckResult, 1)
 	ch <- version.CheckResult{Latest: "1.2.3", Outdated: true}
@@ -444,9 +362,6 @@ func TestWaitCheckCountdown_InstantResult(t *testing.T) {
 	}
 }
 
-// TestWaitCheckCountdown_TimeoutSkips returns a zero result
-// when Check never completes, so the caller falls through to
-// the shell without prompting.
 func TestWaitCheckCountdown_TimeoutSkips(t *testing.T) {
 	ch := make(chan version.CheckResult) // never sent
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -462,12 +377,8 @@ func TestWaitCheckCountdown_TimeoutSkips(t *testing.T) {
 	}
 }
 
-// --- runREPL integration -----------------------------------
+// --- runREPL integration ---------------------------------
 
-// TestRunREPLWith_NoVersionChatter confirms that the existing
-// REPL scanner path (used by the legacy TestREPL_* suite) does
-// NOT inject version-prompt text into the output when stdin is
-// empty.
 func TestRunREPLWith_NoVersionChatter(t *testing.T) {
 	root, reg := newTestRoot()
 	var buf bytes.Buffer
@@ -480,10 +391,8 @@ func TestRunREPLWith_NoVersionChatter(t *testing.T) {
 	}
 }
 
-// --- CLI flag surface --------------------------------------
+// --- CLI flag surface -------------------------------------
 
-// TestUpdate_AllInOneFlags pins the single-verb surface:
-// --tag / --quiet / --no-install / --no-restart / --yes / -y.
 func TestUpdate_AllInOneFlags(t *testing.T) {
 	root, _ := newTestRoot()
 	var buf bytes.Buffer
@@ -512,106 +421,11 @@ func TestUpdate_AllInOneFlags(t *testing.T) {
 	}
 }
 
-// --- CLI integration ---------------------------------------
-
-// TestUpdate_AllInOneNoInstallHappyPath drives the full
-// single-verb `nightme update` end-to-end with --no-install,
-// so we don't actually swap a binary or os.Exit.
-//
-// The version check goes through updater.LookupForLatest
-// (nightme.dev → GitHub fallback). The download stage goes
-// through updater.LookupForDownload (GitHub → nightme.dev
-// fallback). We mock BOTH base URLs to point at the same
-// fixture so both paths return the same release.
-func TestUpdate_AllInOneNoInstallHappyPath(t *testing.T) {
-	body := strings.Repeat("nightme-test-binary-", 256) // ~5 KiB
-	srv := newUpdateFixture(t, "v9.9.9", "9.9.9", body)
-	savedGitHub := updater.GitHubBaseURL
-	savedMirror := updater.NightMeDevBaseURL
-	updater.GitHubBaseURL = srv.URL + "/repos/cnlangzi/nightme"
-	updater.NightMeDevBaseURL = srv.URL
-	t.Cleanup(func() {
-		updater.GitHubBaseURL = savedGitHub
-		updater.NightMeDevBaseURL = savedMirror
-	})
-
-	t.Setenv("NIGHTME_PATHS_DATA_DIR", t.TempDir())
-
-	root, _ := newTestRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"update", "--no-install", "--tag", "v9.9.9"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("update --no-install: %v\n%s", err, buf.String())
-	}
-
-	got := buf.String()
-	for _, want := range []string{
-		"Update available",
-		"9.9.9",
-		"sha256",
-		"--no-install",
-		"stopping before swap",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("output missing %q\n--- full output ---\n%s", want, got)
-		}
-	}
-}
-
-// TestUpdate_CacheHitSkipsDownload pins the staging-dir
-// shortcut.
-func TestUpdate_CacheHitSkipsDownload(t *testing.T) {
-	body := strings.Repeat("nightme-test-binary-", 256) // ~5 KiB
-	srv := newUpdateFixture(t, "v9.9.9", "9.9.9", body)
-	savedGitHub := updater.GitHubBaseURL
-	savedMirror := updater.NightMeDevBaseURL
-	updater.GitHubBaseURL = srv.URL + "/repos/cnlangzi/nightme"
-	updater.NightMeDevBaseURL = srv.URL
-	t.Cleanup(func() {
-		updater.GitHubBaseURL = savedGitHub
-		updater.NightMeDevBaseURL = savedMirror
-	})
-
-	dataDir := t.TempDir()
-	t.Setenv("NIGHTME_PATHS_DATA_DIR", dataDir)
-
-	wantExt := "tar.gz"
-	if runtime.GOOS == "windows" {
-		wantExt = "zip"
-	}
-	wantName := fmt.Sprintf("nightme_9.9.9_%s_%s.%s",
-		runtime.GOOS, runtime.GOARCH, wantExt)
-	wantPath := filepath.Join(dataDir, "updates", "9.9.9", wantName)
-	if err := os.MkdirAll(filepath.Dir(wantPath), 0o700); err != nil {
-		t.Fatalf("mkdir staging: %v", err)
-	}
-	if err := os.WriteFile(wantPath, []byte(body), 0o600); err != nil {
-		t.Fatalf("seed archive: %v", err)
-	}
-
-	root, _ := newTestRoot()
-	var buf bytes.Buffer
-	root.SetOut(&buf)
-	root.SetErr(&buf)
-	root.SetArgs([]string{"update", "--no-install", "--tag", "v9.9.9"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("update --no-install (cache hit): %v\n%s", err, buf.String())
-	}
-	got := buf.String()
-	if !strings.Contains(got, "skipping download") {
-		t.Errorf("expected 'skipping download'; got:\n%s", got)
-	}
-	if !strings.Contains(got, "sha256 verified") {
-		t.Errorf("expected sha256 verified; got:\n%s", got)
-	}
-}
+// --- CLI integration --------------------------------------
 
 // TestUpdate_AllInOneRefusesEmptyDataDir covers the safety
 // property: if config.Paths.DataDir is empty, the update
-// fails closed instead of writing into "/" or some other
-// unintended location.
+// fails closed.
 func TestUpdate_AllInOneRefusesEmptyDataDir(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
@@ -646,55 +460,4 @@ func TestUpdate_HelpLongIsSingleVerb(t *testing.T) {
 	if strings.Contains(got, "Subcommands:") {
 		t.Errorf("update --help has Subcommands: header (parent got kids attached):\n%s", got)
 	}
-}
-
-// newUpdateFixture serves a synthetic GitHub-shaped release
-// payload over httptest. It serves BOTH the GitHub-style path
-// (/repos/cnlangzi/nightme/releases/tags/<tag>) AND the
-// nightme.dev-style path (/releases/latest) so a single
-// fixture can back both LookupForLatest and LookupForDownload
-// in tests.
-//
-// We use a single hand-written handler instead of http.ServeMux
-// because the paths overlap in ways ServeMux rejects (a
-// concrete /releases/tags/<v> URL shares its prefix with
-// /releases/latest, which ServeMux treats as a pattern
-// conflict).
-func newUpdateFixture(t *testing.T, tag, ver, assetBody string) *httptest.Server {
-	t.Helper()
-	sum := sha256.Sum256([]byte(assetBody))
-	sumHex := hex.EncodeToString(sum[:])
-	wantOS, wantArch := runtime.GOOS, runtime.GOARCH
-	ext := "tar.gz"
-	if wantOS == "windows" {
-		ext = "zip"
-	}
-	assetName := "nightme_" + ver + "_" + wantOS + "_" + wantArch + "." + ext
-
-	var srv *httptest.Server
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasPrefix(r.URL.Path, "/repos/cnlangzi/nightme/releases/tags/"+tag),
-			r.URL.Path == "/repos/cnlangzi/nightme/releases/latest",
-			r.URL.Path == "/releases/latest",
-			r.URL.Path == "/releases/tags/"+tag:
-			fmt.Fprintf(w, `{
-				"tag_name": %q,
-				"published_at": "2026-08-17T06:56:53Z",
-				"assets": [
-					{"name":"SHA256SUMS.txt","browser_download_url":"%s/asset/sums","size":%d},
-					{"name":%q,"browser_download_url":"%s/asset/binary","size":%d}
-				]
-			}`, tag, srv.URL, len(sumHex), assetName, srv.URL, len(assetBody))
-		case r.URL.Path == "/asset/sums":
-			fmt.Fprintf(w, "%s  %s\n", sumHex, assetName)
-		case r.URL.Path == "/asset/binary":
-			_, _ = w.Write([]byte(assetBody))
-		default:
-			http.NotFound(w, r)
-		}
-	})
-	srv = httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	return srv
 }

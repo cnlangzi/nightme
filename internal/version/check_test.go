@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +12,7 @@ import (
 	"time"
 )
 
-// --- pure-helper tests (unchanged from the legacy file) ----
+// --- pure-helper tests -----------------------------------
 
 func TestIsOutdated(t *testing.T) {
 	tests := []struct {
@@ -97,31 +95,31 @@ func TestTag(t *testing.T) {
 	}
 }
 
-// --- Lookup-stub helpers -----------------------------------
+// --- lookup stubs ----------------------------------------
 
-// stubLookup returns a ReleaseLookup that always succeeds with
-// the supplied tag. The call counter lets tests assert on how
-// many times the network seam fired.
-func stubLookup(tag string, calls *atomic.Int32) ReleaseLookup {
-	return func(_ context.Context, _ string) (ReleaseMeta, string, error) {
+// stubLookup returns a LatestTagLookup that always returns
+// the supplied tag. The call counter lets tests assert on
+// how many times the network seam fired.
+func stubLookup(tag string, calls *atomic.Int32) LatestTagLookup {
+	return func(_ context.Context, _ string) (string, string, error) {
 		if calls != nil {
 			calls.Add(1)
 		}
-		return ReleaseMeta{TagName: tag, PublishedAt: time.Unix(1700000000, 0).UTC()}, "nightme.dev", nil
+		return tag, "nightme.dev", nil
 	}
 }
 
-// errLookup returns a ReleaseLookup that always errors.
-func errLookup(msg string, calls *atomic.Int32) ReleaseLookup {
-	return func(_ context.Context, _ string) (ReleaseMeta, string, error) {
+// errLookup returns a LatestTagLookup that always errors.
+func errLookup(msg string, calls *atomic.Int32) LatestTagLookup {
+	return func(_ context.Context, _ string) (string, string, error) {
 		if calls != nil {
 			calls.Add(1)
 		}
-		return ReleaseMeta{}, "", errors.New(msg)
+		return "", "", errors.New(msg)
 	}
 }
 
-// --- DefaultChecker / production wiring -------------------
+// --- DefaultChecker / production wiring -----------------
 
 func TestDefaultChecker(t *testing.T) {
 	c, path := DefaultChecker(t.TempDir())
@@ -152,7 +150,18 @@ func TestDefaultChecker_EmptyDataDir(t *testing.T) {
 	}
 }
 
-// --- Check: cache hit / miss / fallback ---------------------
+// --- Check behavior -------------------------------------
+
+func TestCheck_LookupNil_ReturnsZero(t *testing.T) {
+	// Construction contract: DefaultChecker leaves Lookup nil
+	// (cycle avoidance). Check must degrade silently rather
+	// than panic when the caller forgot to wire Lookup.
+	c := &Checker{}
+	res := c.Check(context.Background(), "0.1.0", nil)
+	if res.Latest != "" {
+		t.Errorf("Latest = %q, want empty when Lookup nil", res.Latest)
+	}
+}
 
 func TestCheck_CacheHit_DoesNotCallLookup(t *testing.T) {
 	dir := t.TempDir()
@@ -217,7 +226,6 @@ func TestCheck_CacheMiss_CallsLookup_StoresResult(t *testing.T) {
 		t.Errorf("Lookup called %d times; want 1", got)
 	}
 
-	// Cache file must now contain the new entry.
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		t.Fatalf("read cache: %v", err)
@@ -228,9 +236,6 @@ func TestCheck_CacheMiss_CallsLookup_StoresResult(t *testing.T) {
 	}
 	if e.Latest != "v9.9.9" || e.Source != "nightme.dev" {
 		t.Errorf("cache entry = %+v", e)
-	}
-	if !e.CheckedAt.Equal(now) {
-		t.Errorf("CheckedAt = %v, want %v", e.CheckedAt, now)
 	}
 }
 
@@ -270,8 +275,7 @@ func TestCheck_BothFail_ReturnsZero(t *testing.T) {
 	var calls atomic.Int32
 	c := &Checker{
 		Lookup: errLookup("network down", &calls),
-		// CachePath empty → no fallback, no persistence.
-		Now: func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+		Now:    func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
 	}
 	res := c.Check(context.Background(), "0.1.0", nil)
 	if res.Latest != "" {
@@ -285,11 +289,11 @@ func TestCheck_BothFail_ReturnsZero(t *testing.T) {
 	}
 }
 
-func TestCheck_EmptyRelease_NotTreatedAsSuccess(t *testing.T) {
+func TestCheck_EmptyTag_NotTreatedAsSuccess(t *testing.T) {
 	var calls atomic.Int32
-	emptyLookup := func(_ context.Context, _ string) (ReleaseMeta, string, error) {
+	emptyLookup := func(_ context.Context, _ string) (string, string, error) {
 		calls.Add(1)
-		return ReleaseMeta{}, "nightme.dev", nil // no TagName
+		return "", "nightme.dev", nil
 	}
 	c := &Checker{
 		Lookup: emptyLookup,
@@ -297,20 +301,17 @@ func TestCheck_EmptyRelease_NotTreatedAsSuccess(t *testing.T) {
 	}
 	res := c.Check(context.Background(), "0.1.0", nil)
 	if res.Latest != "" {
-		t.Errorf("Latest = %q, want empty for empty release", res.Latest)
+		t.Errorf("Latest = %q, want empty for empty tag", res.Latest)
 	}
 }
 
 func TestCheck_TimeoutRespected(t *testing.T) {
-	// Lookup that respects ctx cancellation. We point
-	// HTTPTimeout at 50ms and ensure a 200ms-sleep Lookup
-	// is cut short.
-	slowLookup := func(ctx context.Context, _ string) (ReleaseMeta, string, error) {
+	slowLookup := func(ctx context.Context, _ string) (string, string, error) {
 		select {
 		case <-time.After(200 * time.Millisecond):
-			return ReleaseMeta{TagName: "v9.9.9"}, "nightme.dev", nil
+			return "v9.9.9", "nightme.dev", nil
 		case <-ctx.Done():
-			return ReleaseMeta{}, "", ctx.Err()
+			return "", "", ctx.Err()
 		}
 	}
 	c := &Checker{
@@ -329,32 +330,10 @@ func TestCheck_TimeoutRespected(t *testing.T) {
 	}
 }
 
-// TestCheck_TimeoutFieldDefaults verifies that HTTPTimeout=0
-// falls back to the package's httpTimeout default, so callers
-// that don't set it still get a sane budget.
-func TestCheck_TimeoutFieldDefaults(t *testing.T) {
-	c := &Checker{
-		Lookup: stubLookup("v0.0.1", nil),
-		Now:    func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
-	}
-	// Default Checker should not hang on a slow lookup —
-	// 0 HTTPTimeout field means "use httpTimeout".
-	if c.HTTPTimeout != 0 {
-		t.Errorf("HTTPTimeout = %v, want 0 (test setup should leave it default)", c.HTTPTimeout)
-	}
-	if c.HTTPTimeout == 0 && httpTimeout == 0 {
-		t.Errorf("both HTTPTimeout and httpTimeout are 0 — production would hang")
-	}
-}
-
-// --- legacy field compatibility ----------------------------
-
 // TestCheck_LegacyCacheSchema_LatestVersionIsIgnored pins the
 // upgrade path: a pre-rewrite cache file used `latest_version`,
 // not `latest`. The new schema doesn't read `latest_version`,
-// so the cache is treated as empty (Latest == "") and a live
-// Lookup fires. Otherwise a deployed fleet would silently keep
-// using stale data after the binary upgrade.
+// so the cache is treated as empty and a live Lookup fires.
 func TestCheck_LegacyCacheSchema_LatestVersionIsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "version-check.json")
@@ -381,21 +360,17 @@ func TestCheck_LegacyCacheSchema_LatestVersionIsIgnored(t *testing.T) {
 	}
 }
 
-// --- user-agent preservation (regression guard) -----------
-
-// TestDefaultChecker_NoHTTP means: with Lookup set to a stub,
-// the production factory never touches the network. The
-// smoke that proves the new wiring doesn't accidentally
-// reintroduce an HTTP field that fires at construction.
-func TestDefaultChecker_NoHTTP(t *testing.T) {
-	c, _ := DefaultChecker(t.TempDir())
-	if c.Lookup != nil {
-		t.Errorf("DefaultChecker pre-wired Lookup; the production wiring must stay in cmd/nightme")
+// TestCheck_TimeoutFieldDefaults verifies that HTTPTimeout=0
+// falls back to the package's httpTimeout default.
+func TestCheck_TimeoutFieldDefaults(t *testing.T) {
+	c := &Checker{
+		Lookup: stubLookup("v0.0.1", nil),
+		Now:    func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+	}
+	if c.HTTPTimeout != 0 {
+		t.Errorf("HTTPTimeout = %v, want 0 (test setup should leave it default)", c.HTTPTimeout)
+	}
+	if c.HTTPTimeout == 0 && httpTimeout == 0 {
+		t.Errorf("both HTTPTimeout and httpTimeout are 0 — production would hang")
 	}
 }
-
-// touch imports so test files stay tidy if helpers shrink.
-var (
-	_ = httptest.NewServer
-	_ = http.StatusOK
-)

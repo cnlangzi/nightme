@@ -51,8 +51,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -78,10 +76,6 @@ const updateCheckTimeout = 5 * time.Second
 //   - VersionCheck: already-computed nightme.dev result
 //     (production runs the countdown + Check, then passes
 //     it in so we don't hit the network twice).
-//   - Release: full *updater.Release (tests inject this so
-//     the download stage skips the live LookupForDownload).
-//     When nil, the prompt calls LookupForDownload at the
-//     moment the user says yes — exactly like production.
 //   - ReExecAfterInstall: production-only; after a successful
 //     swap, re-exec the new binary so the user lands in the
 //     new version's shell. Tests leave this false.
@@ -91,7 +85,6 @@ const updateCheckTimeout = 5 * time.Second
 type PromptDeps struct {
 	Checker            *version.Checker
 	VersionCheck       *version.CheckResult
-	Release            *updater.Release
 	Reader             func() (string, error)
 	Out                io.Writer
 	Logger             *slog.Logger
@@ -134,10 +127,9 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	//
 	// The detection layer only needs Latest + Outdated. The
 	// full *updater.Release is fetched separately at stage 2
-	// via updater.LookupForDownload — keeping the two stages
-	// from sharing the *Release keeps their fallback orders
-	// independent (detection: nightme.dev → GitHub; download:
-	// GitHub → nightme.dev).
+	// Detection is a single API call (the latest-tag probe).
+	// Download stage #2 is independent and uses the resolved
+	// tag to compose asset URLs (no second API call needed).
 	logf := func(format string, args ...any) {
 		logger.Warn(fmt.Sprintf(format, args...))
 	}
@@ -196,47 +188,27 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		fmt.Fprintln(out, "     Set data_dir in your config and run `nightme update`.")
 		return nil
 	}
-
-	// Stage 2: download metadata. LookupForDownload composes
-	// GitHub (primary) and nightme.dev (fallback) internally —
-	// the OPPOSITE of stage 1's detection source order, on
-	// purpose (see internal/updater). Tests inject deps.Release
-	// to skip the live fetch.
-	var release *updater.Release
-	if deps.Release != nil {
-		release = deps.Release
-	} else {
-		fmt.Fprintln(out, "  ·  fetching release metadata…")
-		rel, source, err := updater.LookupForDownload(ctx, version.Tag(latest))
-		if err != nil {
-			fmt.Fprintf(out, "  %s  download failed (lookup): %v\n", paintRed(out, "✗"), err)
-			return nil
-		}
-		if source != "github" {
-			fmt.Fprintf(out, "  ·  using %s mirror\n", source)
-		}
-		if rel.TagName != version.Tag(latest) {
-			fmt.Fprintf(out, "  %s  release moved during the prompt (%s → %s); aborting\n",
-				paintRed(out, "✗"), displayVer(latest), displayVer(rel.TagName))
-			return nil
-		}
-		release = rel
-	}
-
+	// Stage 2: download + verify + extract in one call.
+	// updater.DownloadTag composes the URL itself (no API
+	// call) and tries GitHub first, mirror fallback.
+	targetTag := version.Tag(latest)
 	dlCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-	dl, err := runDownloadStage(dlCtx, deps, cfg, release)
+	dl, err := runDownloadStage(dlCtx, deps, cfg, targetTag)
 	stop()
 	if err != nil {
 		fmt.Fprintf(out, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
 		fmt.Fprintln(out, "     Run `nightme update` from a shell to retry.")
 		return nil
 	}
+	if dl.Source == "mirror" {
+		fmt.Fprintln(out, "  ·  using mirror (github was unreachable)")
+	}
 
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %s  Staged %s  %s\n",
 		paintGreen(out, "✓"),
-		dl.Asset.Name,
-		paintDim(out, updater.FormatBytes(dl.Bytes)+", sha256="+dl.SHA256Hex))
+		dl.AssetName,
+		paintDim(out, "sha256="+dl.SHA256Hex))
 	if !askYesNo(out, deps.Reader, yesNoPrompt(out, "Install now?"), false) {
 		fmt.Fprintln(out, "     Run `nightme update` later to install.")
 		return nil
@@ -264,53 +236,25 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 // after the y/N answer). Keeping a separate helper would
 // duplicate the check logic and risk the two paths drifting.
 
-// runDownloadStage does the actual download with a
-// cancellable context (Ctrl-C = ctx cancel). On success it
-// returns the staged archive info so the install stage can
-// reuse it. On failure it prints a one-line error and
-// returns the error so the prompt falls through cleanly.
+// runDownloadStage is the cancellable wrapper around
+// updater.DownloadTag. The deps.Reader is no longer used
+// here (DownloadTag doesn't prompt), but we keep the
+// signature so the call site reads naturally — ctx cancel
+// handles Ctrl-C.
+//
+// Returns the verified binary path on success. On failure
+// the error propagates so the prompt falls through cleanly.
 func runDownloadStage(
 	ctx context.Context,
-	deps *PromptDeps,
+	_ *PromptDeps,
 	cfg *config.Config,
-	release *updater.Release,
+	tag string,
 ) (*updater.DownloadResult, error) {
-	out := deps.Out
-
-	asset := updater.MatchAsset(release, release.TagName)
-	if asset == nil {
-		return nil, fmt.Errorf("no release asset for %s/%s",
-			runtime.GOOS, runtime.GOARCH)
-	}
-
-	stagingDir, err := updater.StagingDir(cfg.Paths.DataDir, release.TagName)
-	if err != nil {
-		return nil, err
-	}
-	// "what / where from / where to" before the progress bar
-	// so the user knows what's about to download. The bar
-	// overwrites itself with \r; these lines stay put.
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %s  %s  %s\n",
-		paintCyan(out, "↓"),
-		asset.Name,
-		paintDim(out, updater.FormatBytes(asset.Size)))
-	progress := updater.NewASCIIProgressBar(out, asset.Size)
-	res, err := updater.Download(ctx, release, asset, stagingDir, progress)
-	if err != nil {
-		return nil, err
-	}
-	if res.Cached {
-		fmt.Fprintf(out, "  %s  sha256 verified — skipping download\n", paintGreen(out, "✓"))
-		return res, nil
-	}
-	fmt.Fprintln(out) // newline after the bar
-	return res, nil
+	return updater.DownloadTag(ctx, tag, cfg.Paths.DataDir)
 }
 
-// runInstallStage extracts the staged archive and swaps the
-// running binary. It also restarts the daemon (best-effort)
-// so a fresh REPL / shell picks up the new daemon.
+// runInstallStage swaps the running binary with the
+// downloaded one and restarts the daemon (best-effort).
 //
 // Returns the path of the binary that Install wrote — i.e.
 // the path the REPL was launched from BEFORE Install renamed
@@ -326,15 +270,11 @@ func runInstallStage(
 ) (string, error) {
 	out := deps.Out
 
-	binary, err := updater.ExtractArchive(dl.StagingPath, filepath.Dir(dl.StagingPath))
-	if err != nil {
-		return "", fmt.Errorf("extract: %w", err)
-	}
 	target, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locate current binary: %w", err)
 	}
-	installRes, err := updater.Install(binary, target)
+	installRes, err := updater.Install(dl.BinaryPath, target)
 	if err != nil {
 		return "", err
 	}

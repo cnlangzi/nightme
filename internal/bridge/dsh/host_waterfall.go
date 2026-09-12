@@ -28,8 +28,13 @@
 //
 // Demux key: the $events `ready` frame carries a per-connection
 // `clientId`; each remote client (nightme + dashboard) gets its own
-// when it subscribes. We capture it during `ready` and pair it
-// with the `eventId` (per-waterfall UUID) on every answer.
+// when it subscribes. The bridge echoes it back on every
+// /api/$events/result RPC body. Capture happens in the dispatch path
+// (host/stream.go:case "ready" → host.SetHostClientID), NOT here —
+// the host handler installs lazily on first newDriver, and the
+// one-shot ready frame would otherwise race the install and be
+// silently dropped. See host/host_state.go for the race-fix
+// invariant.
 //
 // Package-level map (`hostWaterfallBySess`) demuxes host waterfalls
 // by sessionId → driver. The shared host has at most one driver
@@ -56,9 +61,12 @@ var (
 // SetHostHandler is per-Client and replaces any prior handler, so
 // the call is naturally idempotent on the same Client and safe to
 // re-invoke when spawnAndWire constructs a new Client after dsh
-// respawns (the package-level state we want to reset across
-// respawns is `hostRemoteClientID` and `hostWaterfallBySess`, both
-// cleared below).
+// respawns. The clientId slot lives in the host/ subpackage now
+// (see host/host_state.go) and is overwritten on every new
+// connection by the dispatch path — no reset needed here. The
+// package-level state that DOES need clearing across respawns is
+// `hostWaterfallBySess` (the driver demux table), cleared below
+// before re-registering the new Client's handler.
 func installHostHandler(cli *host.Client) {
 	if cli == nil {
 		return
@@ -108,25 +116,14 @@ func unregisterDriverForWaterfall(d *driver) {
 // to the right driver by `agentId` (= sessionId for root sessions).
 func hostWaterfallHandler(method, rpcID string, payload json.RawMessage) {
 	slogDefault().Info("dsh: hostWaterfallHandler invoked", "method", method, "rpc_id", rpcID)
-	// First: try to record the clientId from the `ready` frame.
-	// The host gateway sends exactly one `ready` per $events stream
-	// immediately after WS upgrade, so this branch fires once per
-	// connection (and again on every reconnect — fine, we just
-	// overwrite with the new clientId).
+	// clientId capture is in host/stream.go:case "ready" (the
+	// dispatch site) so the one-shot ready frame is captured
+	// even if installHostHandler hasn't run yet. Nothing to do
+	// here — just early-return so the event doesn't fall through
+	// to the waterfall demux path, which would log
+	// "method=ready (no driver handler)" and bury the original
+	// signal under noise.
 	if method == "ready" {
-		// The raw payload from translateHostEvent's ready case is
-		// the host item value: {type:"ready", clientId, host}.
-		var ready struct {
-			ClientID string `json:"clientId"`
-		}
-		if err := json.Unmarshal(payload, &ready); err != nil || ready.ClientID == "" {
-			slogDefault().Info("dsh: host ready frame missing clientId, dropping", "err", err, "raw", string(payload))
-			return
-		}
-		hostWaterfallMu.Lock()
-		hostRemoteClientID = ready.ClientID
-		hostWaterfallMu.Unlock()
-		slogDefault().Info("dsh: host ready captured clientId", "client_id", ready.ClientID)
 		return
 	}
 
@@ -167,15 +164,6 @@ func hostWaterfallHandler(method, rpcID string, payload json.RawMessage) {
 	}
 	d.handleHostFrame(method, rpcID, payload)
 }
-
-// hostRemoteClientID is the per-connection clientId dsh assigned to
-// nightme's $events stream in the most recent `ready` frame.
-// Captured by hostWaterfallHandler on `ready`, consumed by
-// driver.SendPermission when building the $events/result RPC
-// body. Single slot — concurrent reconnects overwrite, which is
-// the correct behavior because the old stream's pending
-// waterfalls are dead anyway (dsh closes them on disconnect).
-var hostRemoteClientID string
 
 // Register the host-waterfall install hook with the host package at
 // import time. spawnAndWire (host/lifecycle.go) calls

@@ -569,13 +569,22 @@ func (h *StreamHub) dispatch(f serverFrame) {
 	case "ready":
 		// dsh sends one {type:"ready", clientId, host:{home:"..."}}
 		// frame right after the WS upgrade completes. Log for
-		// correlation, AND forward to the host handler as a
-		// synthetic "ready" event so the bridge can capture
-		// ClientID for the /api/$events/result RPC body (the
-		// answer key for host waterfall frames). See
-		// host_waterfall.go::hostWaterfallHandler.
+		// correlation, capture the clientId at the dispatch site
+		// (so the install-race where hostWaterfallHandler hasn't
+		// been wired yet can't drop the one-shot ready frame),
+		// then forward to the host handler for any downstream
+		// consumers.
 		h.log.Info("dsh.host: mux ready",
 			"client_id", f.ClientID, "host", string(f.Host))
+		// Capture clientId at the dispatch site, BEFORE invokeOnHost.
+		// The host handler installs lazily on first newDriver; if we
+		// depended on the handler to capture, the one-shot ready
+		// frame would race the install and silently drop on every
+		// spawn/attach that opens the WS before any chat session
+		// exists. dsh/session.go::SendPermission reads this same
+		// var for the /api/$events/result clientId field. See
+		// host_state.go for the full race-fix invariant.
+		SetHostClientID(f.ClientID)
 		// Repack clientId + host into a {clientId, host} value
 		// envelope so the bridge-side handler can unmarshal it
 		// the same way it unmarshals waterfall request bodies.

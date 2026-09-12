@@ -84,6 +84,14 @@ type mockDSH struct {
 	createCallCount atomic.Int64
 	respondCount    atomic.Int64
 	lastRespondBody atomic.Value // []byte
+
+	// readyClientID is the clientId dsh sends in the `ready` frame
+	// for the *current* mux connection. Stored as string so atomic
+	// load/store is type-safe; updated between connections by tests
+	// that want to verify the dispatch path overwrites a stale
+	// value (see host_state_test.go::TestReadyFrame_ReconnectOverwritesClientID).
+	// Default "client-mock-001" is set in newMockDSH.
+	readyClientID atomic.Value // string
 }
 
 type serverFrameEnvelope struct {
@@ -105,6 +113,10 @@ func newMockDSH(t *testing.T) *mockDSH {
 		streams:         make(map[string]chan muxItem),
 		sessionToStream: make(map[string]string),
 	}
+	// Default ready clientId; tests override via setReadyClientID
+	// to verify the dispatch path overwrites a stale value on
+	// reconnect (see host_state_test.go).
+	m.readyClientID.Store("client-mock-001")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/session/list", m.handleSessionList)
@@ -121,6 +133,16 @@ func newMockDSH(t *testing.T) *mockDSH {
 
 // url returns the mock server's URL.
 func (m *mockDSH) url() string { return m.server.URL }
+
+// setReadyClientID changes the clientId the next /api/remote.mux
+// upgrade will send in its `ready` frame. Tests use this to
+// simulate a fresh dsh process assigning a new per-connection
+// clientId; the bridge's dispatch path must overwrite any
+// previously captured value (see
+// host_state_test.go::TestReadyFrame_ReconnectOverwritesClientID).
+func (m *mockDSH) setReadyClientID(id string) {
+	m.readyClientID.Store(id)
+}
 
 // ─── HTTP handlers ─────────────────────────────────────────────────
 
@@ -208,9 +230,12 @@ func (m *mockDSH) handleMuxWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send the "ready" frame every dsh 0.1.2-rc.1 connection
 	// sends on upgrade. Bridge uses it only for log correlation.
+	// clientId is read at connection time (not at mock-construction
+	// time) so tests can rotate it between connections to verify
+	// the dispatch path overwrites stale values on reconnect.
 	ready := map[string]any{
 		"type":     "ready",
-		"clientId": "client-mock-001",
+		"clientId": m.readyClientID.Load().(string),
 		"host":     map[string]any{"home": "/tmp/test"},
 	}
 	if err := conn.WriteJSON(ready); err != nil {

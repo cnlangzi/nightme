@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
@@ -31,9 +33,12 @@ func TestHandleHostFrame_ApprovalRequest_FiresEventAgentPermission(t *testing.T)
 
 	registerDriverForWaterfall(d)
 
-	// Feed a `ready` frame first so the package-level clientId is
-	// captured (SendPermission needs it for /api/$events/result).
-	hostWaterfallHandler("ready", "ready-1", []byte(`{"clientId":"test-client-id"}`))
+	// clientId capture moved to the dispatch path
+	// (host/stream.go:case "ready" → host.SetHostClientID) in the
+	// F-hostready-install-race fix. In production the dispatch
+	// goroutine does this when the mux WS connects; the test
+	// stands in for it by setting the slot directly.
+	host.SetHostClientID("test-client-id")
 
 	env := waterfallEnvelope{
 		AgentID: d.sessionID,
@@ -153,9 +158,12 @@ func TestHandleHostFrame_UserQuestionsRequest_FiresEventAgentPermission(t *testi
 
 	registerDriverForWaterfall(d)
 
-	// Feed a `ready` frame first so the package-level clientId is
-	// captured (SendPermission needs it for /api/$events/result).
-	hostWaterfallHandler("ready", "ready-1", []byte(`{"clientId":"test-client-id"}`))
+	// clientId capture moved to the dispatch path
+	// (host/stream.go:case "ready" → host.SetHostClientID) in the
+	// F-hostready-install-race fix. In production the dispatch
+	// goroutine does this when the mux WS connects; the test
+	// stands in for it by setting the slot directly.
+	host.SetHostClientID("test-client-id")
 
 	env := waterfallEnvelope{
 		AgentID: d.sessionID,
@@ -482,7 +490,11 @@ func resetHostWaterfallStateForTest(t *testing.T) {
 	hostWaterfallMu.Lock()
 	defer hostWaterfallMu.Unlock()
 	hostWaterfallBySess = nil
-	hostRemoteClientID = "" // reset captured clientId
+	// clientId lives in the host/ subpackage now (see
+	// host/host_state.go). SetHostClientID("") is a no-op by
+	// design (don't let a malformed ready clobber a good id);
+	// the cross-package test reset lives at host.ResetHostClientIDForTest.
+	host.ResetHostClientIDForTest()
 }
 
 // TestHandleHostFrame_HostCancel_DropsPending pins the server-side

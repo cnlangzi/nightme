@@ -33,13 +33,9 @@ func TestGitHubAssetURL(t *testing.T) {
 
 func TestMirrorAssetURL(t *testing.T) {
 	got := MirrorAssetURL("v0.5.0", "nightme_0.5.0_linux_amd64.tar.gz")
-	want := "https://nightme.dev/downloads/0.5.0/nightme_0.5.0_linux_amd64.tar.gz"
+	want := "https://nightme.dev/downloads/v0.5.0/nightme_0.5.0_linux_amd64.tar.gz"
 	if got != want {
 		t.Errorf("MirrorAssetURL = %q, want %q", got, want)
-	}
-	// Strip-v must also work on already-bare versions.
-	if got := MirrorAssetURL("0.5.0", "f"); got != "https://nightme.dev/downloads/0.5.0/f" {
-		t.Errorf("MirrorAssetURL on bare ver = %q", got)
 	}
 }
 

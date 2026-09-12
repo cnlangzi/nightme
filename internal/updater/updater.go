@@ -183,10 +183,10 @@ func GitHubAssetURL(tag, assetName string) string {
 }
 
 // MirrorAssetURL composes a nightme.dev mirror URL. The path
-// uses the version WITHOUT the v prefix (nightme.dev's
-// /downloads/0.5.0/ subdirectory, not /downloads/v0.5.0/).
+// uses the tag as-is — nightme.dev serves assets under
+// /downloads/vX.Y.Z/, mirroring GitHub's URL convention.
 func MirrorAssetURL(tag, assetName string) string {
-	return MirrorDownloadBase + "/" + stripV(tag) + "/" + assetName
+	return MirrorDownloadBase + "/" + tag + "/" + assetName
 }
 
 // stripV removes a leading "v" or "V" prefix. tag like

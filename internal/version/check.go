@@ -4,8 +4,9 @@
 // (version.go: Version / GitCommit / BuildDate) and the live
 // release feed. It exposes:
 //
-//   - LatestTagLookup: the network seam. Production wires it
-//     to updater.LookupLatestTag (nightme.dev → GitHub fallback).
+//   - NewChecker: returns a ready-to-use *Checker with a
+//     caller-supplied Lookup. Production passes
+//     updater.LookupLatestTag; tests pass a stub.
 //   - Check: throttled lookup + 24h on-disk cache. The REPL
 //     must never block on a slow or unreachable source, so
 //     failures degrade silently.
@@ -42,15 +43,16 @@ const checkTTL = 24 * time.Hour
 const httpTimeout = 5 * time.Second
 
 // LatestTagLookup is the network seam the Checker calls into.
-// It returns the latest (or pinned) release tag — "v0.5.0" form,
-// with the leading v — plus the source label and any error.
-// Production wires this to updater.LookupLatestTag; tests
-// inject a stub.
-type LatestTagLookup func(ctx context.Context, tag string) (string, string, error)
+// It returns the latest release tag ("v0.5.0" form, with the
+// leading v), the source label ("nightme.dev" or "github"),
+// and any error. Production passes updater.LookupLatestTag;
+// tests inject a stub.
+type LatestTagLookup func(ctx context.Context) (string, string, error)
 
 // Checker holds the knobs the test harness needs to swap
 // (Lookup function, cache path, now function) without touching
-// production callers. Production code uses DefaultChecker().
+// production callers. NewChecker wires Lookup on construction
+// so production never sees an unwired Checker.
 type Checker struct {
 	// Lookup is the network entry point. Required: Check
 	// returns an empty result when Lookup is nil.
@@ -63,37 +65,50 @@ type Checker struct {
 	CacheTTL time.Duration
 
 	// CachePath is the file used for the throttle cache. Empty
-	// disables caching (every call hits Lookup).
+	// disables caching (every call hits Lookup). Production wires
+	// this to <DataDir>/version-check.json; tests use t.TempDir().
 	CachePath string
 
 	// Now lets tests pin "time" without sleeping. nil = time.Now.
 	Now func() time.Time
 }
 
-// DefaultChecker returns a Checker configured for production:
-// real HTTP timeout, real cache file under
-// cfg.Paths.DataDir/version-check.json. Lookup is NOT set —
-// the caller (cmd/nightme) attaches updater.LookupLatestTag
-// after construction.
-func DefaultChecker(dataDir string) (*Checker, string) {
+// NewChecker returns a ready-to-use *Checker. Production
+// passes updater.LookupLatestTag; tests pass a stub. dataDir
+// may be empty — when so, the cache is disabled.
+//
+// The second return is the cache path the Checker uses (empty
+// when dataDir was empty). Callers typically ignore it; the
+// field is exposed so `ls <dataDir>/version-check.json` can
+// be answered from a debugger.
+//
+// NewChecker wires Lookup on construction rather than leaving
+// it nil and relying on a separate `wireUpdaterLookup` step.
+// One constructor, one mental model: the Checker you got back
+// is the Checker you can call .Check on.
+func NewChecker(dataDir string, lookup LatestTagLookup) (*Checker, string) {
 	c := &Checker{
+		Lookup:      lookup,
 		HTTPTimeout: httpTimeout,
 		CacheTTL:    checkTTL,
 		Now:         time.Now,
 	}
-	if dataDir != "" {
-		// F-PATHUTIL-001 §13.3.1: pathutil.Join for cross-
-		// platform separator handling, AND NormalizeForOS on
-		// dataDir first because cfg.Paths.DataDir is user-
-		// supplied (YAML) and on Windows is commonly written
-		// with forward slashes.
-		if n, err := pathutil.NormalizeForOS(dataDir); err == nil {
-			dataDir = n
-		}
-		c.CachePath = pathutil.Join(dataDir, "version-check.json")
-		return c, c.CachePath
+	if dataDir == "" {
+		return c, ""
 	}
-	return c, ""
+	// F-PATHUTIL-001 §13.3.1: pathutil.Join for cross-
+	// platform separator handling, AND NormalizeForOS on
+	// dataDir first because cfg.Paths.DataDir is user-
+	// supplied (YAML) and on Windows is commonly written
+	// with forward slashes (Git Bash / WSL copy-paste
+	// habits). Without the Normalize, filepath.Join would
+	// return "F:/foo\version-check.json" — a mixed-
+	// separator path that os.OpenFile on Windows rejects.
+	if n, err := pathutil.NormalizeForOS(dataDir); err == nil {
+		dataDir = n
+	}
+	c.CachePath = pathutil.Join(dataDir, "version-check.json")
+	return c, c.CachePath
 }
 
 // CheckResult is what the REPL consumes. Latest == current
@@ -124,9 +139,10 @@ type CheckResult struct {
 // the REPL treats empty Latest as "skip the prompt".
 func (c *Checker) Check(ctx context.Context, currentVersion string, logf func(string, ...any)) CheckResult {
 	if c.Lookup == nil {
-		// Construction contract violation: Lookup is the
-		// only network seam and DefaultChecker leaves it
-		// nil on purpose (cycle avoidance). Return a zero
+		// Construction contract violation: NewChecker takes a
+		// Lookup; tests that want no-network should inject a
+		// stub. A nil Lookup here means the caller built the
+		// Checker by hand and forgot the field. Return a zero
 		// result so the caller degrades silently.
 		return CheckResult{Current: normalize(currentVersion)}
 	}
@@ -161,7 +177,7 @@ func (c *Checker) Check(ctx context.Context, currentVersion string, logf func(st
 	fctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	tag, source, err := c.Lookup(fctx, "")
+	tag, source, err := c.Lookup(fctx)
 	if err != nil {
 		if logf != nil {
 			logf("version check: %v", err)

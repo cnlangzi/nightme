@@ -33,7 +33,7 @@ func TestLive_DownloadSHA256SUMSFromGitHub(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	dl, err := DownloadTag(ctx, "v0.5.0", t.TempDir(), nil)
+	dl, err := DownloadTag(ctx, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("DownloadTag: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestLive_DownloadTag_GitHubFails_FallsBackToMirror(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	dl, err := DownloadTag(ctx, "v0.5.0", dataDir, nil)
+	dl, err := DownloadTag(ctx, dataDir, nil)
 	if err != nil {
 		t.Fatalf("DownloadTag with GitHub down: %v", err)
 	}

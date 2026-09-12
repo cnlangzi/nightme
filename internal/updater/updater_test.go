@@ -380,6 +380,8 @@ func newDownloadFixture(t *testing.T, tag, ver, assetBody string) *downloadFixtu
 	var srv *httptest.Server
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/releases/latest":
+			fmt.Fprintf(w, `{"tag_name":%q}`, tag)
 		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS.txt"):
 			fmt.Fprint(w, f.sums)
 		case strings.HasSuffix(r.URL.Path, "/"+assetName):
@@ -392,9 +394,12 @@ func newDownloadFixture(t *testing.T, tag, ver, assetBody string) *downloadFixtu
 	f.srv = srv
 
 	savedGH := GitHubDownloadBase
+	savedND := NightMeDevAPIBase
 	GitHubDownloadBase = srv.URL
+	NightMeDevAPIBase = srv.URL
 	t.Cleanup(func() {
 		GitHubDownloadBase = savedGH
+		NightMeDevAPIBase = savedND
 		srv.Close()
 	})
 	return f
@@ -405,7 +410,7 @@ func TestDownloadTag_HappyPath(t *testing.T) {
 	f := newDownloadFixture(t, "v9.9.9", "9.9.9", body)
 
 	dataDir := t.TempDir()
-	dl, err := DownloadTag(context.Background(), "v9.9.9", dataDir, nil)
+	dl, err := DownloadTag(context.Background(), dataDir, nil)
 	if err != nil {
 		t.Fatalf("DownloadTag: %v", err)
 	}
@@ -435,36 +440,24 @@ func TestDownloadTag_GitHubFails_FallsBackToMirror(t *testing.T) {
 	body := "small-body"
 	f := newDownloadFixture(t, "v9.9.9", "9.9.9", body)
 
-	// Point GitHub at a 503 stub. The mirror (real nightme.dev
-	// in the live tests, or a separate httptest here) is what
-	// should serve the download.
+	// GitHub path must fail. Point it at a 503 stub.
+	// MirrorDownloadBase must point at the fixture too —
+	// otherwise it falls back to real nightme.dev, which
+	// serves a v0.5.0 sums that doesn't list v9.9.9.
 	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer ghSrv.Close()
-	saved := GitHubDownloadBase
+	savedGH := GitHubDownloadBase
+	savedM := MirrorDownloadBase
 	GitHubDownloadBase = ghSrv.URL
-	t.Cleanup(func() { GitHubDownloadBase = saved })
+	MirrorDownloadBase = f.srv.URL
+	t.Cleanup(func() {
+		GitHubDownloadBase = savedGH
+		MirrorDownloadBase = savedM
+	})
 
-	// Now mirror needs to be reachable. Reuse the fixture's
-	// sums + asset endpoints by serving them on the mirror
-	// base path.
-	mirrorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS.txt"):
-			fmt.Fprint(w, f.sums)
-		case strings.HasSuffix(r.URL.Path, "/"+f.assetName):
-			_, _ = w.Write(f.assetBody)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer mirrorSrv.Close()
-	savedMirror := MirrorDownloadBase
-	MirrorDownloadBase = mirrorSrv.URL
-	t.Cleanup(func() { MirrorDownloadBase = savedMirror })
-
-	dl, err := DownloadTag(context.Background(), "v9.9.9", t.TempDir(), nil)
+	dl, err := DownloadTag(context.Background(), t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("DownloadTag: %v", err)
 	}
@@ -505,7 +498,7 @@ func TestDownloadTag_NoSumsFile_DegradesToSizeOnly(t *testing.T) {
 		MirrorDownloadBase = savedM
 	})
 
-	_, err := DownloadTag(context.Background(), "v9.9.9", t.TempDir(), nil)
+	_, err := DownloadTag(context.Background(), t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected error when sums file is missing on both sources")
 	}
@@ -528,7 +521,8 @@ func TestDownloadTag_SHA256Mismatch(t *testing.T) {
 	// Serve sums with WRONG hash so verify fails.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/releases/tags/"+tag):
+		case strings.HasSuffix(r.URL.Path, "/releases/tags/"+tag),
+			strings.HasSuffix(r.URL.Path, "/releases/latest"):
 			fmt.Fprintf(w, `{"tag_name":%q,"assets":[]}`, tag)
 		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS.txt"):
 			fmt.Fprintf(w, "0000000000000000000000000000000000000000000000000000000000000000  %s\n", assetName)
@@ -539,14 +533,17 @@ func TestDownloadTag_SHA256Mismatch(t *testing.T) {
 	defer srv.Close()
 	savedGH := GitHubDownloadBase
 	savedM := MirrorDownloadBase
+	savedND := NightMeDevAPIBase
 	GitHubDownloadBase = srv.URL
 	MirrorDownloadBase = srv.URL
+	NightMeDevAPIBase = srv.URL
 	t.Cleanup(func() {
 		GitHubDownloadBase = savedGH
 		MirrorDownloadBase = savedM
+		NightMeDevAPIBase = savedND
 	})
 
-	_, err := DownloadTag(context.Background(), tag, t.TempDir(), nil)
+	_, err := DownloadTag(context.Background(), t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected sha256 mismatch error, got nil")
 	}

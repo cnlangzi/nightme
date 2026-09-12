@@ -139,7 +139,7 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		latest = deps.VersionCheck.Latest
 		outdated = deps.VersionCheck.Outdated
 	} else {
-		c, _ := wiredChecker(resolveDataDir())
+		c, _ := version.NewChecker(resolveDataDir(), updater.LookupLatestTag)
 		if c != nil {
 			res := c.Check(ctx, version.Version, logf)
 			latest = res.Latest
@@ -179,15 +179,15 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		fmt.Fprintln(out, "     Set data_dir in your config and run `nightme update`.")
 		return nil
 	}
-	// Stage 2: download + verify + extract in one call.
-	// updater.DownloadTag composes the URL itself (no API
-	// call) and tries GitHub first, mirror fallback. Pass a
-	// progress bar to deps.Out so the user sees download
-	// activity (it can take minutes on a 100 MB binary).
-	targetTag := version.Tag(latest)
+	// Stage 2: download + verify + extract the latest tag.
+	// updater.DownloadTag resolves the tag itself (nightme.dev
+	// → GitHub fallback) so we don't have to thread it through
+	// from the version-check stage. Pass a progress bar to
+	// deps.Out so the user sees download activity (it can
+	// take minutes on a 100 MB binary).
 	progress := updater.NewASCIIProgressBar(out, 0)
 	dlCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-	dl, err := updater.DownloadTag(dlCtx, targetTag, cfg.Paths.DataDir, progress)
+	dl, err := updater.DownloadTag(dlCtx, cfg.Paths.DataDir, progress)
 	stop()
 	if err != nil {
 		fmt.Fprintf(out, "  %s  download failed: %v\n", paintRed(out, "✗"), err)

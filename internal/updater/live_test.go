@@ -30,7 +30,7 @@ func TestLive_LookupLatestTag_NightMeDev(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	tag, source, err := LookupLatestTag(ctx, "")
+	tag, source, err := LookupLatestTag(ctx)
 	if err != nil {
 		t.Fatalf("LookupLatestTag: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestLive_LookupLatestTag_FallsBackToGitHub(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	tag, source, err := LookupLatestTag(ctx, "")
+	tag, source, err := LookupLatestTag(ctx)
 	if err != nil {
 		t.Fatalf("LookupLatestTag with mirror down: %v", err)
 	}
@@ -77,29 +77,6 @@ func TestLive_LookupLatestTag_FallsBackToGitHub(t *testing.T) {
 
 // TestLive_LookupLatestTag_PinnedTag exercises the --tag
 // path. nightme.dev doesn't serve /releases/tags/<v> (its
-// routes.go only registers /releases/latest), so the call
-// naturally 404s there and falls through to GitHub.
-func TestLive_LookupLatestTag_PinnedTag(t *testing.T) {
-	skipIfNotLive(t)
-
-	// Use whatever v0.5.0 actually maps to on GitHub at
-	// the time of test. The exact tag doesn't matter as long
-	// as GitHub returns a non-empty tag_name.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	tag, source, err := LookupLatestTag(ctx, "v0.5.0")
-	if err != nil {
-		t.Fatalf("LookupLatestTag(v0.5.0): %v", err)
-	}
-	if source != "github" {
-		t.Errorf("source = %q, want github (nightme.dev 404s on /releases/tags/v0.5.0)", source)
-	}
-	if tag != "v0.5.0" {
-		t.Errorf("tag = %q, want v0.5.0", tag)
-	}
-}
-
 // TestLive_GitHubAssetURL pins the GitHub download URL rule.
 func TestLive_GitHubAssetURL(t *testing.T) {
 	skipIfNotLive(t)

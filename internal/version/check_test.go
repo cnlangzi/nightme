@@ -101,7 +101,7 @@ func TestTag(t *testing.T) {
 // the supplied tag. The call counter lets tests assert on
 // how many times the network seam fired.
 func stubLookup(tag string, calls *atomic.Int32) LatestTagLookup {
-	return func(_ context.Context, _ string) (string, string, error) {
+	return func(_ context.Context) (string, string, error) {
 		if calls != nil {
 			calls.Add(1)
 		}
@@ -111,7 +111,7 @@ func stubLookup(tag string, calls *atomic.Int32) LatestTagLookup {
 
 // errLookup returns a LatestTagLookup that always errors.
 func errLookup(msg string, calls *atomic.Int32) LatestTagLookup {
-	return func(_ context.Context, _ string) (string, string, error) {
+	return func(_ context.Context) (string, string, error) {
 		if calls != nil {
 			calls.Add(1)
 		}
@@ -119,15 +119,16 @@ func errLookup(msg string, calls *atomic.Int32) LatestTagLookup {
 	}
 }
 
-// --- DefaultChecker / production wiring -----------------
+// --- NewChecker ----------------------------------------
 
-func TestDefaultChecker(t *testing.T) {
-	c, path := DefaultChecker(t.TempDir())
+func TestNewChecker(t *testing.T) {
+	lookup := stubLookup("v9.9.9", nil)
+	c, path := NewChecker(t.TempDir(), lookup)
 	if c == nil {
-		t.Fatal("DefaultChecker returned nil")
+		t.Fatal("NewChecker returned nil")
 	}
-	if c.Lookup != nil {
-		t.Errorf("DefaultChecker set Lookup; production wires it via cmd/nightme (cycle avoidance)")
+	if c.Lookup == nil {
+		t.Errorf("NewChecker dropped the supplied Lookup")
 	}
 	if c.HTTPTimeout != httpTimeout {
 		t.Errorf("HTTPTimeout = %v, want %v", c.HTTPTimeout, httpTimeout)
@@ -140,10 +141,11 @@ func TestDefaultChecker(t *testing.T) {
 	}
 }
 
-func TestDefaultChecker_EmptyDataDir(t *testing.T) {
-	c, path := DefaultChecker("")
+func TestNewChecker_EmptyDataDir(t *testing.T) {
+	lookup := stubLookup("v9.9.9", nil)
+	c, path := NewChecker("", lookup)
 	if c == nil {
-		t.Fatal("DefaultChecker returned nil")
+		t.Fatal("NewChecker returned nil")
 	}
 	if path != "" || c.CachePath != "" {
 		t.Errorf("expected empty path when dataDir is empty, got path=%q CachePath=%q", path, c.CachePath)
@@ -153,9 +155,11 @@ func TestDefaultChecker_EmptyDataDir(t *testing.T) {
 // --- Check behavior -------------------------------------
 
 func TestCheck_LookupNil_ReturnsZero(t *testing.T) {
-	// Construction contract: DefaultChecker leaves Lookup nil
-	// (cycle avoidance). Check must degrade silently rather
-	// than panic when the caller forgot to wire Lookup.
+	// Construction contract: NewChecker takes a Lookup; tests
+	// that want no-network should inject a stub. A nil Lookup
+	// here means the caller built the Checker by hand and
+	// forgot the field. Check must degrade silently rather
+	// than panic in that case.
 	c := &Checker{}
 	res := c.Check(context.Background(), "0.1.0", nil)
 	if res.Latest != "" {
@@ -291,7 +295,7 @@ func TestCheck_BothFail_ReturnsZero(t *testing.T) {
 
 func TestCheck_EmptyTag_NotTreatedAsSuccess(t *testing.T) {
 	var calls atomic.Int32
-	emptyLookup := func(_ context.Context, _ string) (string, string, error) {
+	emptyLookup := func(_ context.Context) (string, string, error) {
 		calls.Add(1)
 		return "", "nightme.dev", nil
 	}
@@ -306,7 +310,7 @@ func TestCheck_EmptyTag_NotTreatedAsSuccess(t *testing.T) {
 }
 
 func TestCheck_TimeoutRespected(t *testing.T) {
-	slowLookup := func(ctx context.Context, _ string) (string, string, error) {
+	slowLookup := func(ctx context.Context) (string, string, error) {
 		select {
 		case <-time.After(200 * time.Millisecond):
 			return "v9.9.9", "nightme.dev", nil

@@ -72,7 +72,6 @@ import (
 //
 // Flags:
 //
-//	--tag vX.Y.Z      pin a specific release (default: latest)
 //	--quiet / -q      suppress progress bar (still verifies SHA256)
 //	--no-install      download + verify only; do NOT swap the binary.
 //	                  Useful in CI: pre-warm the staging dir, then run
@@ -82,7 +81,6 @@ import (
 //	--yes / -y        accept every stage without y/N prompts (CI mode)
 func newUpdateCmd() *cobra.Command {
 	var (
-		tag       string
 		quiet     bool
 		noInstall bool
 		noRestart bool
@@ -105,7 +103,6 @@ func newUpdateCmd() *cobra.Command {
 			"exec so the REPL's readline state survives.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUpdate(cmd, updateOpts{
-				tag:       tag,
 				quiet:     quiet,
 				noInstall: noInstall,
 				noRestart: noRestart,
@@ -114,8 +111,6 @@ func newUpdateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&tag, "tag", "",
-		"Specific release tag to install (default: latest)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"Suppress progress bar (still verifies SHA256)")
 	cmd.Flags().BoolVar(&noInstall, "no-install", false,
@@ -133,7 +128,6 @@ func newUpdateCmd() *cobra.Command {
 // Bundling keeps the function signature stable as we add
 // flags without touching every call site.
 type updateOpts struct {
-	tag       string
 	quiet     bool
 	noInstall bool
 	noRestart bool
@@ -178,38 +172,24 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 
 	ctx := cmd.Context()
 
-	// Stage 1: detect latest via the version cache. Skip the
-	// whole probe when --tag is given — the user pinned a
-	// specific release and we shouldn't burn a network round
-	// trip just to ignore the result.
-	var checkRes version.CheckResult
-	var targetTag string
-	switch {
-	case opts.tag != "":
-		// User pin — skip the "are we outdated?" gate. They asked
-		// for this specific tag explicitly; respect it even if it
-		// matches the running version (a re-install is a valid
-		// recovery path).
-		targetTag = version.Tag(opts.tag)
-	default:
-		checker, _ := wiredChecker(dataDir)
-		logf := func(format string, args ...any) {
-			fmt.Fprintf(errOut, "  %s  %s\n", paintDim(out, "·"), fmt.Sprintf(format, args...))
-		}
-		checkRes = checker.Check(ctx, version.Version, logf)
-		if checkRes.Latest != "" {
-			targetTag = checkRes.Latest
-		} else {
-			fmt.Fprintf(errOut, "  %s  no version info available; pass --tag vX.Y.Z to install a specific release.\n",
-				paintRed(out, "✗"))
-			return errors.New("no version info available")
-		}
+	// Stage 1: detect latest via the version cache. Always
+	// fresh — there's no "stay on this old version" path, so
+	// checking against nightme.dev/GitHub is what makes the
+	// CLI useful.
+	checker, _ := version.NewChecker(dataDir, updater.LookupLatestTag)
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(errOut, "  %s  %s\n", paintDim(out, "·"), fmt.Sprintf(format, args...))
+	}
+	checkRes := checker.Check(ctx, version.Version, logf)
+	if checkRes.Latest == "" {
+		fmt.Fprintf(errOut, "  %s  no version info available\n", paintRed(out, "✗"))
+		return errors.New("no version info available")
 	}
 
 	current := displayVer(version.Version)
-	latest := displayVer(targetTag)
+	latest := displayVer(checkRes.Latest)
 	fmt.Fprintln(out)
-	if opts.tag == "" && !checkRes.Outdated {
+	if !checkRes.Outdated {
 		fmt.Fprintf(out, "  %s  Already up to date\n", paintGreen(out, "✓"))
 		fmt.Fprintf(out, "     %s\n", paintDim(out, current))
 		return nil
@@ -229,7 +209,7 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 	if !opts.quiet {
 		progress = updater.NewASCIIProgressBar(out, 0)
 	}
-	dlRes, err := updater.DownloadTag(ctx, targetTag, dataDir, progress)
+	dlRes, err := updater.DownloadTag(ctx, dataDir, progress)
 	if err != nil {
 		fmt.Fprintf(errOut, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
 		return err

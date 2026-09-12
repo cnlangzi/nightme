@@ -2,31 +2,24 @@
 //
 // # Design
 //
-// The package exposes a single, high-level operation: download
-// and verify a release at a given tag. The CLI / REPL paths
-// call version.Checker.Check to learn "what's the latest tag?",
-// then hand that tag to DownloadTag here.
+// The package exposes two operations:
 //
-// # Three principles (mirroring the user-visible update flow)
+//   - LookupLatestTag: probe the release feed for the current
+//     latest tag. nightme.dev first (CDN-cached, lets us count
+//     users per version), GitHub /releases/latest fallback when
+//     nightme.dev is unreachable.
 //
-//  1. Latest-tag lookup prefers nightme.dev (CDN-cached, lets
-//     us count users per version). GitHub's /releases/latest
-//     is the fallback when nightme.dev is unreachable.
+//   - DownloadTag: fetch + SHA256-verify + extract the latest
+//     binary. URL composition is rule-based, no API call —
+//     GitHub first, nightme.dev mirror fallback.
 //
-//  2. Asset download prefers GitHub (it carries our release
-//     traffic cheaply; we have a small pipe). nightme.dev's
-//     /downloads mirror is the fallback for networks that
-//     can't reach GitHub.
+// # Why no --tag / pinned versions
 //
-//  3. Asset URLs are constructed from a known rule, NOT read
-//     out of a release JSON payload. Two bases, two forms:
-//
-//     - GitHub:  github.com/cnlangzi/nightme/releases/download/<tag>/<asset>
-//     - Mirror:  nightme.dev/downloads/<ver-no-v>/<asset>
-//
-//     Constructing the URL ourselves means we don't need a
-//     /releases/tags/<v> round-trip — the only API call we make
-//     is the latest-tag probe in #1.
+// nightme.dev only retains the last two tags' worth of
+// assets, and the user-facing CLI always upgrades to the
+// latest release. There's no production scenario for
+// installing a historical version, so the API stays
+// pinned-tag-free.
 //
 // # Layering
 //
@@ -119,12 +112,20 @@ type latestTagResponse struct {
 //
 // Returns (tag-with-v, source-label, error). errors.Join wraps
 // the two source errors when both fail.
-func LookupLatestTag(ctx context.Context, tag string) (string, string, error) {
-	rel, err := lookupLatestTagOnce(ctx, NightMeDevAPIBase, tag)
+// LookupLatestTag probes the release feed for the current latest
+// tag. nightme.dev first (CDN-cached, lets us count users per
+// version); GitHub /releases/latest fallback when nightme.dev is
+// unreachable.
+//
+// Returns the tag (e.g. "v0.5.0", with the v), the source label
+// ("nightme.dev" or "github"), and any error. errors.Join wraps
+// the two source errors when both fail.
+func LookupLatestTag(ctx context.Context) (string, string, error) {
+	rel, err := lookupLatestTagOnce(ctx, NightMeDevAPIBase)
 	if err == nil {
 		return rel, "nightme.dev", nil
 	}
-	rel, err2 := lookupLatestTagOnce(ctx, GitHubAPIBase, tag)
+	rel, err2 := lookupLatestTagOnce(ctx, GitHubAPIBase)
 	if err2 != nil {
 		return "", "", errors.Join(
 			fmt.Errorf("nightme.dev: %w", err),
@@ -134,16 +135,13 @@ func LookupLatestTag(ctx context.Context, tag string) (string, string, error) {
 	return rel, "github", nil
 }
 
-// lookupLatestTagOnce fetches <baseURL>/releases[/latest|/tags/<v>]
-// and decodes the tag_name field. baseURL is either
-// NightMeDevAPIBase or GitHubAPIBase — both end with a path
-// prefix so the suffix is the only thing that varies.
-func lookupLatestTagOnce(ctx context.Context, baseURL, tag string) (string, error) {
-	suffix := "/releases/latest"
-	if tag != "" {
-		suffix = "/releases/tags/" + tag
-	}
-	url := baseURL + suffix
+// lookupLatestTagOnce fetches <baseURL>/releases/latest and
+// decodes the tag_name field. baseURL is either
+// NightMeDevAPIBase or GitHubAPIBase — both end with the
+// /releases path prefix, so the URL is identical between
+// the two sources.
+func lookupLatestTagOnce(ctx context.Context, baseURL string) (string, error) {
+	url := baseURL + "/releases/latest"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -236,8 +234,10 @@ type DownloadResult struct {
 // always ship it as a release asset.
 const SHA256SUMSName = "SHA256SUMS.txt"
 
-// DownloadTag downloads + verifies + extracts the nightme
-// binary for the given tag into <dataDir>/updates/<ver>/.
+// DownloadTag downloads + verifies + extracts the latest
+// nightme binary into <dataDir>/updates/<ver>/. The tag is
+// resolved internally via LookupLatestTag — callers don't
+// pin a version.
 //
 // Stage 1: download SHA256SUMS.txt (GitHub first, mirror fallback).
 //
@@ -254,20 +254,17 @@ const SHA256SUMSName = "SHA256SUMS.txt"
 //
 // Stage 4: extract the archive into the staging dir.
 //
-// The function does not touch any release API besides the
-// initial tag lookup (which is the caller's job via
-// version.Checker); everything else is plain HTTP GET against
-// the well-known download URLs.
-//
 // progress is called periodically during the binary download
 // (the largest, slowest transfer). Pass QuietProgress to
 // silence; pass nil to skip callbacks entirely.
-func DownloadTag(ctx context.Context, tag, dataDir string, progress ProgressFunc) (*DownloadResult, error) {
-	if tag == "" {
-		return nil, errors.New("updater: empty tag")
-	}
+func DownloadTag(ctx context.Context, dataDir string, progress ProgressFunc) (*DownloadResult, error) {
 	if dataDir == "" {
 		return nil, errors.New("updater: empty data dir")
+	}
+
+	tag, _, err := LookupLatestTag(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("lookup latest tag: %w", err)
 	}
 
 	ver := stripV(tag)

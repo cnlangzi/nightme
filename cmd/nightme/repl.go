@@ -277,7 +277,7 @@ func runStartupUpdateCheck(out io.Writer, logger *slog.Logger, reader func() (st
 			logger.Warn(fmt.Sprintf(format, args...))
 		}
 	}
-	checker, _ := newProductionChecker(resolveDataDir())
+	checker, _ := wiredChecker(resolveDataDir())
 	res := checkWithCountdown(ctx, out, checker, version.Version, logf)
 	_ = promptForUpdateIfOutdated(ctx, &PromptDeps{
 		VersionCheck:       &res,

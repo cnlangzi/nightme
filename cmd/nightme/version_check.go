@@ -1,14 +1,14 @@
 // Package main — version-check wiring.
 //
-// internal/version.Checker.Lookup is a function field that
-// production wires to internal/updater.LookupLatestTag. The
-// version package can't import updater (cycle, since
+// internal/version.Checker.Lookup is a function field that the
+// production wiring attaches to internal/updater.LookupLatestTag.
+// The version package can't import updater (cycle, since
 // updater imports version for UserAgent), so the wiring lives
 // here in cmd/nightme where both packages are already imported.
 //
 // Every site that calls version.DefaultChecker should follow
 // up with a call to wireUpdaterLookup before using the
-// returned Checker.
+// returned Checker — wiredChecker packages that into one call.
 package main
 
 import (
@@ -23,10 +23,12 @@ func wireUpdaterLookup(c *version.Checker) {
 	c.Lookup = updater.LookupLatestTag
 }
 
-// newProductionChecker is a thin convenience used by every
-// caller of version.DefaultChecker. Returns a Checker ready
-// to call .Check on.
-func newProductionChecker(dataDir string) (*version.Checker, string) {
+// wiredChecker returns a *version.Checker with Lookup already
+// attached. Tests that want to inject a stub should build the
+// Checker themselves (see stubCheckerWithTag in
+// repl_update_test.go) — this helper exists for the four
+// production call sites that always want the live lookup.
+func wiredChecker(dataDir string) (*version.Checker, string) {
 	c, path := version.DefaultChecker(dataDir)
 	wireUpdaterLookup(c)
 	return c, path

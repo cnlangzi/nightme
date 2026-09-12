@@ -139,7 +139,7 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		latest = deps.VersionCheck.Latest
 		outdated = deps.VersionCheck.Outdated
 	} else {
-		c, _ := newProductionChecker(resolveDataDir())
+		c, _ := wiredChecker(resolveDataDir())
 		if c != nil {
 			res := c.Check(ctx, version.Version, logf)
 			latest = res.Latest

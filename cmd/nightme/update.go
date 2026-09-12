@@ -192,7 +192,7 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		// recovery path).
 		targetTag = version.Tag(opts.tag)
 	default:
-		checker, _ := newProductionChecker(dataDir)
+		checker, _ := wiredChecker(dataDir)
 		logf := func(format string, args ...any) {
 			fmt.Fprintf(errOut, "  %s  %s\n", paintDim(out, "·"), fmt.Sprintf(format, args...))
 		}

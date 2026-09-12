@@ -58,14 +58,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
-	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
@@ -180,17 +178,11 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 
 	ctx := cmd.Context()
 
-	// Stage 1: detect latest via the version cache (which calls
-	// updater.LookupForLatest under the hood — nightme.dev first,
-	// GitHub fallback). The Checker is configured with production
-	// wiring (see newProductionChecker / wireUpdaterLookup).
-	checker, _ := newProductionChecker(dataDir)
-	logf := func(format string, args ...any) {
-		fmt.Fprintf(errOut, "  %s  %s\n", paintDim(out, "·"), fmt.Sprintf(format, args...))
-	}
-	checkRes := checker.Check(ctx, version.Version, logf)
-
-	// Resolve which tag we're targeting.
+	// Stage 1: detect latest via the version cache. Skip the
+	// whole probe when --tag is given — the user pinned a
+	// specific release and we shouldn't burn a network round
+	// trip just to ignore the result.
+	var checkRes version.CheckResult
 	var targetTag string
 	switch {
 	case opts.tag != "":
@@ -199,12 +191,19 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		// matches the running version (a re-install is a valid
 		// recovery path).
 		targetTag = version.Tag(opts.tag)
-	case checkRes.Latest != "":
-		targetTag = checkRes.Latest
 	default:
-		fmt.Fprintf(errOut, "  %s  no version info available; pass --tag vX.Y.Z to install a specific release.\n",
-			paintRed(out, "✗"))
-		return errors.New("no version info available")
+		checker, _ := newProductionChecker(dataDir)
+		logf := func(format string, args ...any) {
+			fmt.Fprintf(errOut, "  %s  %s\n", paintDim(out, "·"), fmt.Sprintf(format, args...))
+		}
+		checkRes = checker.Check(ctx, version.Version, logf)
+		if checkRes.Latest != "" {
+			targetTag = checkRes.Latest
+		} else {
+			fmt.Fprintf(errOut, "  %s  no version info available; pass --tag vX.Y.Z to install a specific release.\n",
+				paintRed(out, "✗"))
+			return errors.New("no version info available")
+		}
 	}
 
 	current := displayVer(version.Version)
@@ -226,7 +225,11 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 	// call) and tries GitHub first, mirror fallback. The
 	// verification + extraction happen inside.
 	fmt.Fprintf(errOut, "  %s  fetching release via github…\n", paintDim(out, "·"))
-	dlRes, err := updater.DownloadTag(ctx, targetTag, dataDir)
+	progress := updater.QuietProgress
+	if !opts.quiet {
+		progress = updater.NewASCIIProgressBar(out, 0)
+	}
+	dlRes, err := updater.DownloadTag(ctx, targetTag, dataDir, progress)
 	if err != nil {
 		fmt.Fprintf(errOut, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
 		return err
@@ -309,10 +312,6 @@ func execAndExit(out io.Writer, binary string, argv []string) error {
 	return nil
 }
 
-// assetNames is no longer used — DownloadTag picks the
-// matching asset for runtime.GOOS / runtime.GOARCH internally
-// and surfaces a clear error if the platform isn't published.
-
 // daemonIsRunning reports whether a nightme daemon is up.
 // It uses the same socket-path resolution as `nightme status`
 // and is intentionally best-effort: any lookup error is
@@ -349,44 +348,4 @@ func runRestartInline(out io.Writer, targetPath string) error {
 	return cmd.Run()
 }
 
-// resolveInstallVersion is kept for the REPL path's
-// "no --tag" fallback (it picks the newest staging dir).
-// Not used by the CLI shell, which always re-checks
-// against the live version feed.
-func resolveInstallVersion(dataDir, tag string) (string, error) {
-	if tag != "" {
-		return strings.TrimPrefix(tag, "v"), nil
-	}
-	// F-PATHUTIL-001: cfg.Paths.DataDir is user-supplied via YAML
-	// and on Windows is commonly written with forward slashes
-	// (Git Bash / WSL habits). Normalize before joining so the
-	// staging directory comes out as "F:\nightme\updates" not
-	// "F:/nightme\updates" (which os.ReadDir on Windows rejects).
-	if n, err := pathutil.NormalizeForOS(dataDir); err == nil {
-		dataDir = n
-	}
-	updatesDir := pathutil.Join(dataDir, "updates")
-	entries, err := os.ReadDir(updatesDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("no staged installs under %s; run `nightme update` first", updatesDir)
-		}
-		return "", fmt.Errorf("read staging dir: %w", err)
-	}
-	if len(entries) == 0 {
-		return "", fmt.Errorf("no staged installs under %s; run `nightme update` first", updatesDir)
-	}
-	var newest string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if newest == "" || e.Name() > newest {
-			newest = e.Name()
-		}
-	}
-	if newest == "" {
-		return "", fmt.Errorf("no versioned subdirs under %s; run `nightme update` first", updatesDir)
-	}
-	return newest, nil
-}
+// daemonIsRunning reports whether a nightme daemon is up.

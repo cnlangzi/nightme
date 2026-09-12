@@ -405,7 +405,7 @@ func TestDownloadTag_HappyPath(t *testing.T) {
 	f := newDownloadFixture(t, "v9.9.9", "9.9.9", body)
 
 	dataDir := t.TempDir()
-	dl, err := DownloadTag(context.Background(), "v9.9.9", dataDir)
+	dl, err := DownloadTag(context.Background(), "v9.9.9", dataDir, nil)
 	if err != nil {
 		t.Fatalf("DownloadTag: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestDownloadTag_GitHubFails_FallsBackToMirror(t *testing.T) {
 	MirrorDownloadBase = mirrorSrv.URL
 	t.Cleanup(func() { MirrorDownloadBase = savedMirror })
 
-	dl, err := DownloadTag(context.Background(), "v9.9.9", t.TempDir())
+	dl, err := DownloadTag(context.Background(), "v9.9.9", t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("DownloadTag: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestDownloadTag_NoSumsFile_DegradesToSizeOnly(t *testing.T) {
 		MirrorDownloadBase = savedM
 	})
 
-	_, err := DownloadTag(context.Background(), "v9.9.9", t.TempDir())
+	_, err := DownloadTag(context.Background(), "v9.9.9", t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected error when sums file is missing on both sources")
 	}
@@ -546,7 +546,7 @@ func TestDownloadTag_SHA256Mismatch(t *testing.T) {
 		MirrorDownloadBase = savedM
 	})
 
-	_, err := DownloadTag(context.Background(), tag, t.TempDir())
+	_, err := DownloadTag(context.Background(), tag, t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected sha256 mismatch error, got nil")
 	}

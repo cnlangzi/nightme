@@ -101,13 +101,12 @@ func DefaultChecker(dataDir string) (*Checker, string) {
 // outdated. FromCache tells the caller whether the answer was
 // served from disk (so the UI can label it "last checked 3h ago").
 type CheckResult struct {
-	Current    string    `json:"current"`
-	Latest     string    `json:"latest"`
-	Outdated   bool      `json:"outdated"`
-	ReleasedAt time.Time `json:"released_at,omitempty"`
-	Source     string    `json:"source,omitempty"`
-	FromCache  bool      `json:"from_cache"`
-	CheckedAt  time.Time `json:"checked_at"`
+	Current   string    `json:"current"`
+	Latest    string    `json:"latest"`
+	Outdated  bool      `json:"outdated"`
+	Source    string    `json:"source,omitempty"`
+	FromCache bool      `json:"from_cache"`
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 // Check performs a throttled tag lookup:

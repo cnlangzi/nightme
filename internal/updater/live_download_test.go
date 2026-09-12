@@ -30,10 +30,10 @@ func TestLive_DownloadSHA256SUMSFromGitHub(t *testing.T) {
 		t.Skip("set NIGHTME_LIVE_TEST=1 to run live integration tests")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	dl, err := DownloadTag(ctx, "v0.5.0", t.TempDir())
+	dl, err := DownloadTag(ctx, "v0.5.0", t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("DownloadTag: %v", err)
 	}
@@ -71,14 +71,14 @@ func TestLive_DownloadTag_GitHubFails_FallsBackToMirror(t *testing.T) {
 	GitHubDownloadBase = srv.URL
 	t.Cleanup(func() { GitHubDownloadBase = saved })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	dataDir := filepath.Join(t.TempDir(), "data")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	dl, err := DownloadTag(ctx, "v0.5.0", dataDir)
+	dl, err := DownloadTag(ctx, "v0.5.0", dataDir, nil)
 	if err != nil {
 		t.Fatalf("DownloadTag with GitHub down: %v", err)
 	}

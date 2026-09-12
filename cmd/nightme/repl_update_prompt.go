@@ -124,12 +124,6 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	// Stage 1: check. Honour deps.VersionCheck first (production
 	// already ran the countdown probe), then deps.Checker, and
 	// finally a fresh live check via newProductionChecker.
-	//
-	// The detection layer only needs Latest + Outdated. The
-	// full *updater.Release is fetched separately at stage 2
-	// Detection is a single API call (the latest-tag probe).
-	// Download stage #2 is independent and uses the resolved
-	// tag to compose asset URLs (no second API call needed).
 	logf := func(format string, args ...any) {
 		logger.Warn(fmt.Sprintf(format, args...))
 	}
@@ -190,10 +184,13 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	}
 	// Stage 2: download + verify + extract in one call.
 	// updater.DownloadTag composes the URL itself (no API
-	// call) and tries GitHub first, mirror fallback.
+	// call) and tries GitHub first, mirror fallback. Pass a
+	// progress bar to deps.Out so the user sees download
+	// activity (it can take minutes on a 100 MB binary).
 	targetTag := version.Tag(latest)
+	progress := updater.NewASCIIProgressBar(out, 0)
 	dlCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-	dl, err := runDownloadStage(dlCtx, deps, cfg, targetTag)
+	dl, err := updater.DownloadTag(dlCtx, targetTag, cfg.Paths.DataDir, progress)
 	stop()
 	if err != nil {
 		fmt.Fprintf(out, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
@@ -229,28 +226,6 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	fmt.Fprintf(out, "  %s  Installed %s — exit and re-enter `nightme` to load the new binary.\n",
 		paintGreen(out, "✓"), displayVer(latest))
 	return nil
-}
-
-// promptCheckOnly has been removed: the prompt now handles
-// the "DataDir is empty" case inline (degrades to a hint
-// after the y/N answer). Keeping a separate helper would
-// duplicate the check logic and risk the two paths drifting.
-
-// runDownloadStage is the cancellable wrapper around
-// updater.DownloadTag. The deps.Reader is no longer used
-// here (DownloadTag doesn't prompt), but we keep the
-// signature so the call site reads naturally — ctx cancel
-// handles Ctrl-C.
-//
-// Returns the verified binary path on success. On failure
-// the error propagates so the prompt falls through cleanly.
-func runDownloadStage(
-	ctx context.Context,
-	_ *PromptDeps,
-	cfg *config.Config,
-	tag string,
-) (*updater.DownloadResult, error) {
-	return updater.DownloadTag(ctx, tag, cfg.Paths.DataDir)
 }
 
 // runInstallStage swaps the running binary with the
@@ -335,11 +310,6 @@ func askYesNo(out io.Writer, reader func() (string, error), prompt string, defau
 	}
 	return answer == "y" || answer == "yes"
 }
-
-// filepathDir was removed: its hand-rolled "/"-only scan broke on
-// Windows backslash paths and tripped the Win32 ERROR_SHARING_VIOLATION
-// when REPL extraction wrote to cwd/nightme.exe. The fix is to derive
-// stagingDir via filepath.Dir(dl.StagingPath) at the use site.
 
 // resolveDataDir returns cfg.Paths.DataDir or "" if config
 // can't be loaded. Used by the live-check fallback in the

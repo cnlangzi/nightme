@@ -242,12 +242,15 @@ const SHA256SUMSName = "SHA256SUMS.txt"
 // Stage 1: download SHA256SUMS.txt (GitHub first, mirror fallback).
 //
 // Stage 2: parse the sums file for the target asset's hash.
+// The sums file MUST list our asset — a missing entry is a
+// hard error, not a soft fallback. A stripped sums file
+// alongside a tampered asset would otherwise install
+// silently.
 //
 // Stage 3: download the asset (GitHub first, mirror fallback)
-// and verify its SHA256 against the sums file. If verification
-// fails on the primary source, the mirror copy is fetched and
-// re-verified; only if that also fails does the call return an
-// error.
+// and verify its SHA256 against the sums file. The SHA is
+// computed inline (no second file read) via fetchAsset's
+// tee.
 //
 // Stage 4: extract the archive into the staging dir.
 //
@@ -255,7 +258,11 @@ const SHA256SUMSName = "SHA256SUMS.txt"
 // initial tag lookup (which is the caller's job via
 // version.Checker); everything else is plain HTTP GET against
 // the well-known download URLs.
-func DownloadTag(ctx context.Context, tag, dataDir string) (*DownloadResult, error) {
+//
+// progress is called periodically during the binary download
+// (the largest, slowest transfer). Pass QuietProgress to
+// silence; pass nil to skip callbacks entirely.
+func DownloadTag(ctx context.Context, tag, dataDir string, progress ProgressFunc) (*DownloadResult, error) {
 	if tag == "" {
 		return nil, errors.New("updater: empty tag")
 	}
@@ -272,53 +279,45 @@ func DownloadTag(ctx context.Context, tag, dataDir string) (*DownloadResult, err
 	assetName := AssetNameForRuntime(ver, runtime.GOOS, runtime.GOARCH)
 
 	// Stage 1: pull the sums file. GitHub first, mirror fallback.
-	sumsPath, sumsSource, err := downloadAssetWithFallback(
+	sumsPath, _, sumsSource, err := downloadAssetWithFallback(
 		ctx,
 		GitHubAssetURL(tag, SHA256SUMSName),
 		MirrorAssetURL(tag, SHA256SUMSName),
 		SHA256SUMSName,
 		stagingDir,
-		QuietProgress,
+		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("download sums: %w", err)
 	}
 
-	// Stage 2: parse the sums file for our asset's expected hash.
+	// Stage 2: parse the sums file for our asset's expected
+	// hash. A missing entry is a HARD error: we just fetched
+	// the sums file successfully, so a stripped / partial
+	// sums alongside a tampered asset would otherwise install
+	// silently.
 	wantSum, err := lookupSHAInFile(sumsPath, assetName)
 	if err != nil {
-		return nil, fmt.Errorf("lookup expected sha: %w", err)
+		return nil, err
 	}
 
-	// Stage 3: pull the binary, verifying SHA as we go.
-	binArchive, binSource, err := downloadAssetWithFallback(
+	// Stage 3: pull the binary, verifying SHA inline. The
+	// SHA is computed during the file write via fetchAsset's
+	// tee — no second pass over the bytes.
+	binArchive, gotSum, binSource, err := downloadAssetWithFallback(
 		ctx,
 		GitHubAssetURL(tag, assetName),
 		MirrorAssetURL(tag, assetName),
 		assetName,
 		stagingDir,
-		nil, // progress is reported by fetchAsset's internal reader
+		progress,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("download binary: %w", err)
 	}
-	if wantSum != "" {
-		gotSum, err := fileSHA256(binArchive)
-		if err != nil {
-			return nil, fmt.Errorf("hash downloaded binary: %w", err)
-		}
-		if gotSum != wantSum {
-			// Hash mismatch on the source we picked. The
-			// other source has likely already been tried
-			// (downloadAssetWithFallback), but if the sums
-			// came from one source and the binary from
-			// another, we'd compare a github asset against
-			// the mirror's hash. We accept that case — the
-			// user opted into the fallback — but log it.
-			// If both sources still disagree, we err.
-			return nil, fmt.Errorf("sha256 mismatch (%s): got %s, want %s",
-				binSource, gotSum, wantSum)
-		}
+	if gotSum != wantSum {
+		return nil, fmt.Errorf("sha256 mismatch (%s): got %s, want %s",
+			binSource, gotSum, wantSum)
 	}
 
 	// Stage 4: extract.
@@ -342,14 +341,15 @@ func DownloadTag(ctx context.Context, tag, dataDir string) (*DownloadResult, err
 		BinaryPath: binary,
 		Source:     source,
 		AssetName:  assetName,
-		SHA256Hex:  wantSum,
+		SHA256Hex:  gotSum,
 	}, nil
 }
 
 // downloadAssetWithFallback fetches primaryURL; on failure
 // (network, 5xx, 4xx, body error) falls back to fallbackURL.
-// Returns (local-path, source-label, error). progress is
-// optional (nil = silent).
+// Returns (local-path, sha256hex, source-label, error). progress
+// is optional (nil = silent). The sha256hex is computed inline
+// during the file write — no second pass over the bytes.
 //
 // The "label" returned is "github" or "mirror" — used by
 // DownloadTag to surface which source served the bytes.
@@ -357,32 +357,31 @@ func downloadAssetWithFallback(
 	ctx context.Context,
 	primaryURL, fallbackURL, assetName, stagingDir string,
 	progress ProgressFunc,
-) (string, string, error) {
-	if path, err := fetchAsset(ctx, primaryURL, assetName, stagingDir, progress); err == nil {
-		return path, "github", nil
+) (string, string, string, error) {
+	if path, sum, err := fetchAsset(ctx, primaryURL, assetName, stagingDir, progress); err == nil {
+		return path, sum, "github", nil
 	}
-	path, err := fetchAsset(ctx, fallbackURL, assetName, stagingDir, progress)
+	path, sum, err := fetchAsset(ctx, fallbackURL, assetName, stagingDir, progress)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return path, "mirror", nil
+	return path, sum, "mirror", nil
 }
 
 // fetchAsset downloads url into <stagingDir>/<assetName> with a
 // SHA256 tee so we don't need a second pass to hash it later.
-// Returns the local file path on success.
-//
-// Caller passes progress to receive tick callbacks; nil is
-// fine for quiet mode.
+// Returns (local-path, sha256hex, error). Caller passes
+// progress to receive tick callbacks; nil is fine for quiet
+// mode.
 func fetchAsset(
 	ctx context.Context,
 	url, assetName, stagingDir string,
 	progress ProgressFunc,
-) (string, error) {
+) (string, string, error) {
 	dst := filepath.Join(stagingDir, assetName)
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return "", fmt.Errorf("open %s: %w", assetName, err)
+		return "", "", fmt.Errorf("open %s: %w", assetName, err)
 	}
 	cleanup := func() {
 		_ = out.Close()
@@ -395,21 +394,21 @@ func fetchAsset(
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		cleanup()
-		return "", fmt.Errorf("build %s request: %w", assetName, err)
+		return "", "", fmt.Errorf("build %s request: %w", assetName, err)
 	}
 	req.Header.Set("User-Agent", version.UserAgent())
 
 	resp, err := httpclient.Default().Do(req)
 	if err != nil {
 		cleanup()
-		return "", fmt.Errorf("%s: %w", assetName, err)
+		return "", "", fmt.Errorf("%s: %w", assetName, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		cleanup()
-		return "", fmt.Errorf("%s: HTTP %d", assetName, resp.StatusCode)
+		return "", "", fmt.Errorf("%s: HTTP %d", assetName, resp.StatusCode)
 	}
 
 	if _, err := io.Copy(mw, &progressReader{
@@ -418,13 +417,13 @@ func fetchAsset(
 		progress:   progress,
 	}); err != nil {
 		cleanup()
-		return "", fmt.Errorf("copy %s: %w", assetName, err)
+		return "", "", fmt.Errorf("copy %s: %w", assetName, err)
 	}
 	if err := out.Close(); err != nil {
 		_ = os.Remove(dst)
-		return "", fmt.Errorf("close %s: %w", assetName, err)
+		return "", "", fmt.Errorf("close %s: %w", assetName, err)
 	}
-	return dst, nil
+	return dst, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // progressReader wraps an io.Reader and emits progress events
@@ -460,11 +459,12 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 // hash of assetName. Format: "<hex>  <filename>" per line,
 // matching `sha256sum -b` output.
 //
-// Returns ("", nil) when the file has no entry for assetName.
-// This is a deliberately soft error: nightme.dev's mirror may
-// not always ship the sums file (older releases, partial
-// mirrors). Callers proceed with size-only integrity in that
-// case — same posture as the server's downloadAtomic fallback.
+// Returns an error when the file has no entry for assetName.
+// The caller (DownloadTag) treats this as a hard failure:
+// we've successfully fetched the sums file, so a missing
+// entry means a broken or tampered release, not a soft-degrade
+// case. A stripped sums file alongside a tampered asset
+// would otherwise install silently.
 func lookupSHAInFile(path, assetName string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -486,21 +486,7 @@ func lookupSHAInFile(path, assetName string) (string, error) {
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("scan sums: %w", err)
 	}
-	return "", nil
-}
-
-// fileSHA256 returns the hex-encoded SHA256 of path.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return "", fmt.Errorf("sha256 sums: %s not listed", assetName)
 }
 
 // ----- extraction ---------------------------------------------------

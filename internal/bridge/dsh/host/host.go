@@ -251,6 +251,20 @@ func (c *Client) WaitForDSHReady(ctx context.Context, path string, maxAttempts i
 // watchdog after a dsh respawn so surviving ChatSessions keep
 // receiving mux frames from the new dsh instance.
 //
+// Two parallel re-attach paths run per subscription:
+//
+//  1. RPC-level: SessionCreate with (sessionId, cwd) — re-anchors
+//     the session row in dsh's session controller so subsequent
+//     SessionPrompt calls don't return "session-not-found".
+//  2. Mux-level: Hub.Subscribe(sessionID, dispatchWrapper) — mints
+//     a fresh streamId in the current generation, enqueues an
+//     `open` frame on the mux so dsh starts pushing
+//     session/follow items to the NEW WS connection. Without
+//     this, every mux-side dispatcher still routes frames
+//     (Router has the handler via §13.3 Router transfer) but
+//     no frames ever arrive — dsh doesn't know we still want
+//     events for this session.
+//
 // Per-session failures are logged at Warn level so operators see
 // "5 sessions were dropped on respawn" without having to inspect
 // the code. The orphan list is still returned in the result
@@ -294,11 +308,34 @@ func (c *Client) RecoverSubscriptions(ctx context.Context, logger *slog.Logger) 
 			result.Orphaned = append(result.Orphaned, sub.SessionID)
 			continue
 		}
+		// Re-open the mux session/follow stream on the new dsh.
+		// The Router was already re-populated by §13.3
+		// tryRespawn (Router snapshot → re-Subscribe); here we
+		// only need the Hub side. StreamHub.Subscribe is a no-op
+		// when the WS isn't up yet — it stores the entry and
+		// connectAndServe's toReopen loop picks it up the next
+		// time the WS comes online.
+		if c.Hub != nil {
+			c.Hub.Subscribe(sub.SessionID, c.makeDispatchWrapper(sub.SessionID))
+		}
 		logger.Info("dsh.host: reattached subscription",
 			"session_id", sub.SessionID)
 		result.Reattached++
 	}
 	return result
+}
+
+// makeDispatchWrapper returns the mux-frame dispatch closure that
+// Hub.Subscribe wraps every session's session/follow frames in.
+// RecoverSubscriptions uses this to rebuild the per-session
+// dispatch on the new Hub; Client.Subscribe uses the same
+// wrapper to register on the original Subscribe call. Centralised
+// here so the dispatch contract (Router.DispatchMux with the
+// sessionId discriminator) is in one place.
+func (c *Client) makeDispatchWrapper(sessionID string) FrameHandler {
+	return func(method, rpcID string, payload json.RawMessage) {
+		c.Router.DispatchMux(method, rpcID, payload)
+	}
 }
 
 // RecoverResult summarizes the outcome of Client.RecoverSubscriptions.
@@ -325,12 +362,11 @@ func (c *Client) Subscribe(sessionID, cwd string, h MuxFrameHandler) (unsubscrib
 	// StreamHub.Subscribe handles "no Hub yet" gracefully (it's a
 	// no-op when Hub is nil) — callers can call Subscribe before
 	// Start without panicking. The stream actually opens when
-	// Start runs and the mux pump comes up; re-issue Subscribe
-	// from inside Client.RecoverSubscriptions if you need a
-	// guaranteed post-respawn re-subscribe.
-	unsubscribeFromHub := c.Hub.Subscribe(sessionID, func(method, rpcID string, payload json.RawMessage) {
-		c.Router.DispatchMux(method, rpcID, payload)
-	})
+	// Start runs and the mux pump comes up. The wrapper here
+	// just relays to Router.DispatchMux (Router carries the
+	// handler that was registered above); RecoverSubscriptions
+	// uses the same wrapper shape on the new Client post-respawn.
+	unsubscribeFromHub := c.Hub.Subscribe(sessionID, c.makeDispatchWrapper(sessionID))
 	return func() {
 		if unsubscribeFromHub != nil {
 			unsubscribeFromHub()

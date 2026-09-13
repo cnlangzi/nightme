@@ -1165,9 +1165,37 @@ func (h *SharedHost) tryRespawn() error {
 		ReplaceGlobal(cli)
 
 		if oldCli != nil {
+			// Snapshot the old Client's Router subscriptions
+			// BEFORE closing it — see comment below.
+			subs := oldCli.Router.Snapshot()
+			// Re-register each session on the new Client's
+			// Router (same SessionID + cwd + handler). This
+			// keeps the daemon's Router.muxSubs consistent
+			// across respawns so RecoverSubscriptions
+			// (called next by runWatchdog) actually sees the
+			// active subscriptions. Without this transfer,
+			// each respawn would orphan every active session's
+			// mux subscription and the chat session would
+			// silently stop receiving events. The StreamHub
+			// subscription is reconstructed by StreamHub's
+			// generation tracking on the next reconnect (see
+			// host/stream.go::toReopen).
+			//
+			// We deliberately reuse the same handler closure
+			// from the old Router entry — it's a *driver
+			// method value, so it doesn't hold any transport
+			// state that needs resetting.
+			for _, sub := range subs {
+				if sub.Handler == nil {
+					continue
+				}
+				cli.Router.Subscribe(sub.SessionID, sub.CWD, sub.Handler)
+			}
 			// Old Client's mux/host pumps already died with the
 			// old dsh (close on conn); just close the in-process
-			// state to free the goroutines cleanly.
+			// state to free the goroutines cleanly. The Router
+			// snapshot above lets the new Client pick up where
+			// the old one left off.
 			oldCli.Close()
 		}
 		h.logger.Info("dsh.host: respawn success",

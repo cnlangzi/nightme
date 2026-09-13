@@ -38,6 +38,7 @@ import (
 	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
@@ -350,7 +351,16 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 		// 1) Inject into AS as a user turn — main agent sees
 		//    the review and can act on follow-ups.
-		if err := sendBlocks(revCtx, blocks); err != nil {
+		//
+		// WithReplyTo(replyTo) tells the readpump to stamp the
+		// /review slash command's message_id onto every AgentEvent
+		// the main agent emits in response to this injected turn.
+		// Without the override, those events anchor to the prior
+		// prompt's LastMessageID (whatever the user message was
+		// before /review), and the chat channel renders the fix
+		// replies as a separate rolling card instead of folding
+		// them into the /review placeholder.
+		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review: AS inject failed",
 				"agent", runnerName,
 				"err", err,

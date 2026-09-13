@@ -177,6 +177,65 @@ func TestDispatcher_LookupMissesAfterRegistrationRemoval(t *testing.T) {
 	}
 }
 
+// TestDispatcher_SystemMessageAndRequestHeaderRegistered
+// §13.5 锁:dsh 0.1.5-rc.1 在 turn 序列里先发 system/message(seq=2) +
+// request/header(seq=3),bridge 必须把它们当 session event 接收,
+// 否则 isSessionEventType 会把它们当 unknown method 丢弃并打
+// misleading warn,而且 tr.active 永远起不来 → handleTurnEnd 不
+// emit EventAgentResult → drainForRunResult 收不到 result。
+//
+// 这两个 type 都路由到 handleDebugOnly(不产 AgentEvent),所以
+// 断言是"dispatcher 不 panic 且不产 event",证明 allow-list
+// + registry 都通了。
+func TestDispatcher_SystemMessageAndRequestHeaderRegistered(t *testing.T) {
+	for _, typ := range []string{"system/message", "request/header"} {
+		t.Run(typ, func(t *testing.T) {
+			tr := newTranslator("test-agent", "/tmp/test")
+			st := newWireState()
+			c := &collectDeliver{}
+			dispatcher := newDispatcher(tr, st, nil, c.deliver)
+
+			muxBytes := makeMuxEvent(t, typ, `{"placeholder":"value"}`)
+			env, view := decodeMuxEvent(t, muxBytes)
+			dispatcher.dispatch(env, view)
+
+			if len(c.events) != 0 {
+				t.Errorf("system-side event should produce 0 AgentEvents, got %d",
+					len(c.events))
+			}
+		})
+	}
+}
+
+// TestIsSessionEventType_AcceptsNewTypes is the source-of-truth
+// allow-list check (§13.5):system/message + request/header must
+// return true so handleMuxFrame's default branch sends them to
+// the dispatcher (where they're consumed by handleDebugOnly) and
+// skips the "mux unknown method" warn.
+func TestIsSessionEventType_AcceptsNewTypes(t *testing.T) {
+	for _, typ := range []string{
+		"assistant/chunk", "assistant/message",
+		"turn/start", "turn/end",
+		"system/message",
+		"request/header",
+		"request/context",
+		"todo/write", "todo/update", "todo/delete",
+	} {
+		if !isSessionEventType(typ) {
+			t.Errorf("isSessionEventType(%q) = false; want true", typ)
+		}
+	}
+	for _, typ := range []string{
+		"approval/requested", // legacy mux frame; see handle_mux.go:134
+		"session/projection",
+		"future/event",
+	} {
+		if isSessionEventType(typ) {
+			t.Errorf("isSessionEventType(%q) = true; want false", typ)
+		}
+	}
+}
+
 // TestDispatcher_RegistryHasAllExpectedTypes
 // 文档 §7.1 Phase 1+2 DoD 锁:注册表必须包含这 11 个 type。
 // 加新 type 时这个测试要同步更新,提醒 reviewer 思考 handler 实现。

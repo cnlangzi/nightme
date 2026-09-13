@@ -163,11 +163,18 @@ func (as *AgentSession) readpumpLoop() {
 			// Enrich event with anchor info from currentPrompt.
 			as.asMu.RLock()
 			prompt := as.currentPrompt
+			override := as.replyToOverrideLocked()
 			as.asMu.RUnlock()
 			var userMsgID, promptID string
 			if prompt != nil {
 				userMsgID = prompt.LastMessageID
 				promptID = prompt.ID
+			}
+			// See WithReplyTo: injected events (e.g. /review's
+			// review-text injection) anchor to the override
+			// message_id instead of currentPrompt.LastMessageID.
+			if override != "" {
+				userMsgID = override
 			}
 
 			// CRITICAL: copy ev to heap before taking its address.
@@ -269,6 +276,15 @@ func (as *AgentSession) endPrompt(reason agent.PromptEndReason) {
 	p.EndedAt = time.Now()
 	p.EndReason = reason
 	as.currentPrompt = nil
+	// The override is for events emitted during the just-ended
+	// prompt's lifetime. Once the prompt is gone, the readpump
+	// has no currentPrompt to enrich against — clearing here
+	// keeps a stale /review hint from leaking into the next
+	// prompt's first events if Submit races endPrompt (e.g.
+	// Submit clears on the prompt-install path, endPrompt clears
+	// on the prompt-done path; either suffices on its own but
+	// having both keeps the invariant local to either call site).
+	as.currentPromptOverrideUserMsgID = ""
 	as.isReady.Store(true)
 	stop := as.readpumpStop
 	as.asMu.Unlock()

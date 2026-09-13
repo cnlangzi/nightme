@@ -68,6 +68,11 @@ type HostFrameHandler func(method, rpcID string, payload json.RawMessage)
 type Subscription struct {
 	SessionID string
 	CWD       string
+	// Handler is the per-session mux dispatch closure. Only
+	// populated by Snapshot() — EnumerateSubscriptions omits
+	// it so existing callers (RecoverSubscriptions) don't
+	// need to special-case the closure semantics.
+	Handler MuxFrameHandler
 }
 
 // Router is the per-session mux subscription table + shared
@@ -153,12 +158,39 @@ func (r *Router) Unsubscribe(sessionID string) {
 }
 
 // EnumerateSubscriptions returns a snapshot of every active
-// subscription. Used by Client.RecoverSubscriptions after a dsh
-// respawn to re-attach every session on the new dsh instance.
+// subscription (Handler field left nil). Used by
+// Client.RecoverSubscriptions after a dsh respawn to re-attach
+// every session on the new dsh instance.
 //
 // The returned slice is a copy; the caller may iterate without
 // holding the router lock.
 func (r *Router) EnumerateSubscriptions() []Subscription {
+	return r.snapshot(false)
+}
+
+// Snapshot returns a snapshot of every active subscription INCL
+// the handler closure. Used by tryRespawn to transplant active
+// subscriptions from the dying Client's Router into the new
+// Client's Router so the daemon's mux dispatch keeps routing
+// frames to the same driver across respawns (otherwise every
+// respawn would orphan every active session — see
+// host/lifecycle.go::tryRespawn).
+//
+// The returned slice is a copy; the caller may iterate without
+// holding the router lock.
+func (r *Router) Snapshot() []Subscription {
+	return r.snapshot(true)
+}
+
+// snapshot walks the mux-subs map under the read lock and emits
+// one Subscription per entry. When withHandler is true the entry's
+// MuxFrameHandler closure is included (used for cross-Client
+// transplant on respawn); when false the Handler field is left
+// nil (used by RecoverSubscriptions, which only needs
+// SessionID+CWD to drive a server-side SessionCreate). All other
+// fields are identical. Centralising the loop here means new
+// fields on Subscription show up in both flavours automatically.
+func (r *Router) snapshot(withHandler bool) []Subscription {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]Subscription, 0, len(r.muxSubs))
@@ -166,7 +198,11 @@ func (r *Router) EnumerateSubscriptions() []Subscription {
 		if h == nil {
 			continue
 		}
-		out = append(out, Subscription{SessionID: sid, CWD: r.cwdBySess[sid]})
+		sub := Subscription{SessionID: sid, CWD: r.cwdBySess[sid]}
+		if withHandler {
+			sub.Handler = h
+		}
+		out = append(out, sub)
 	}
 	return out
 }

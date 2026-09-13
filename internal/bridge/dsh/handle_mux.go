@@ -244,6 +244,23 @@ func isSessionEventType(method string) bool {
 		"user/message",
 		"session/title", "session/title-llm-request",
 		"request/context",
+		// system/message and request/header are dsh 0.1.5-rc.1
+		// session events that fire BEFORE turn/start in the per-
+		// turn log (seq=2 and seq=3 respectively, with
+		// turn/start at seq=0 and user/message at seq=1). They
+		// are SurfaceEventType in dsh (system/message enters
+		// derived history; request/header is audit-only). They
+		// don't drive bridge behavior today, but dropping them
+		// at the allow-list gate causes the dispatcher to
+		// log a misleading "unknown method" warn AND — more
+		// importantly — skips them entirely so the translator's
+		// turn-state machine never sees seq=0/seq=1 (which arrive
+		// before the respawn-fix in §13.3, but after a healthy
+		// dsh has had time to push them). Both are routed to the
+		// dispatcher's "debug-only" sink (dispatch.go:211) which
+		// silently consumes them.
+		"system/message",
+		"request/header",
 		"agent/inbox/spliced",
 		"approval/asked",
 		"approval/decided",

@@ -363,6 +363,77 @@ func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 	return value.Items, nil
 }
 
+// WaitForDSHReady probes dsh until its internal plugins
+// (workspaceController, etc.) finish initializing, or until
+// maxAttempts is exhausted. Called from spawnAndWire after the
+// cookie mint closes the gap between "TCP accept" and "plugins
+// loaded" — without this probe, the driver's first workspace.create
+// hits "active Service workspaceController is unavailable" and
+// the user sees a startup-race error.
+//
+// Probe target: workspace.list (no args, dsh.md §2.4.5). The
+// request flows through the typert gateway and dispatches into
+// the workspaceController service; if the service is still
+// initializing, the gateway returns gateway/service-unavailable
+// (observed in the field 2026-09-13T09:38). Other failure modes:
+//
+//   - Network error: server mid-restart or socket closed.
+//     Treat as transient → retry.
+//   - gateway/service-unavailable: the documented startup race.
+//     Treat as transient → retry.
+//   - 4xx with a different error code: real config / wire
+//     mismatch. Treat as terminal → give up immediately so the
+//     caller sees the actual error (not a timeout).
+//   - 200 OK with empty list: dsh is up. Return.
+//
+// maxAttempts is the total number of tries (not retries); a value
+// of 1 disables retry. Backoff between attempts is respawnDelay
+// from the watchdog respawn path — same failure curve as the
+// attached-dsh fallback and the spawned-respawn paths.
+//
+// The context bounds the total wall time; cancel to abort early.
+func (c *RPCClient) WaitForDSHReady(ctx context.Context, maxAttempts int) error {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			// respawnDelay(0) = 0, respawnDelay(1) = 1s, etc.
+			// Bound by ctx so caller can abort.
+			t := time.NewTimer(respawnDelay(attempt))
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return ctx.Err()
+			case <-t.C:
+			}
+		}
+		// workspace.list takes no args per dsh.md §2.4.5.
+		// The gateway's typert descriptor accepts `{}` for
+		// methods that don't read from the request.
+		resp, err := c.Post(ctx, "workspace.list", map[string]any{
+			"request": map[string]any{},
+		})
+		if err != nil {
+			lastErr = fmt.Errorf("dsh.host: workspace.list: %w", err)
+			continue
+		}
+		if !resp.Result.OK {
+			msg := resp.Result.ErrorMessage()
+			if strings.Contains(msg, "service-unavailable") {
+				// dsh plugin race; retry.
+				lastErr = fmt.Errorf("dsh.host: workspace.list: %s", msg)
+				continue
+			}
+			// Real config / wire mismatch. Give up.
+			return fmt.Errorf("dsh.host: workspace.list (non-transient): %s", msg)
+		}
+		return nil
+	}
+	return fmt.Errorf("dsh.host: dsh not ready after %d attempts: %w", maxAttempts, lastErr)
+}
+
 // SessionCreateOpts is the wire body for /api/session.create.
 // Exactly one of WorkspaceID / CWD may be set (dsh-api.md §2.1.3).
 type SessionCreateOpts struct {

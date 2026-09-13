@@ -118,6 +118,22 @@ const (
 // respawn path.
 const maxAttachedFallbackAttempts = 3
 
+// dshReadyTimeout / dshReadyAttempts bound the post-cookie
+// readiness probe in spawnAndWire. The probe is per-call
+// (workspace.list) so per-attempt wall time is small; the
+// timeout is the cap. With respawnDelay backoff (0, 1s, 2s, ...)
+// 5 attempts sums to ~3s plus per-attempt RPC time — well
+// within a 15s budget on a healthy machine. Tuned in 2026-09
+// after observing the workspaceController startup race where
+// dsh's HTTP server is up but the plugin registry is still
+// loading — without this probe, the first workspace.create
+// after spawn returns "active Service workspaceController is
+// unavailable" and the user sees a startup-race error.
+const (
+	dshReadyTimeout  = 15 * time.Second
+	dshReadyAttempts = 5
+)
+
 // SharedHostOptions configures StartSharedHost.
 type SharedHostOptions struct {
 	// Workspace is the dsh process's working directory. dsh's bash /
@@ -1342,6 +1358,24 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	// Wired via a deferred host.OnLifecycleInstall to avoid an
 	// import cycle (this package is imported by the dsh package).
 	OnLifecycleInstall(cli)
+	// Wait for dsh's internal plugins (workspaceController etc.)
+	// to finish initializing. Without this probe, the driver's
+	// first workspace.create hits "active Service workspaceController
+	// is unavailable" — the HTTP server is up but the typert
+	// gateway's plugin registry is still loading. WaitForDSHReady
+	// polls workspace.list (a workspaceController-touching endpoint)
+	// and retries on "service-unavailable" with respawnDelay
+	// backoff. The cookie is required (workspace.list auths the
+	// request), so this must come after mintDSHAuthCookie. ctx is
+	// bounded by the spawn timeout so we don't hang forever on a
+	// genuinely broken dsh binary.
+	readyCtx, readyCancel := context.WithTimeout(ctx, dshReadyTimeout)
+	defer readyCancel()
+	if err := cli.WaitForDSHReady(readyCtx, dshReadyAttempts); err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return nil, nil, fmt.Errorf("dsh.host: dsh started but not ready: %w", err)
+	}
 	if err := cli.Start(ctx); err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()

@@ -232,6 +232,15 @@ func (c *Client) Done() <-chan struct{} {
 	return c.closed
 }
 
+// WaitForDSHReady is the *Client-level facade for
+// RPCClient.WaitForDSHReady. spawnAndWire calls this on the just-
+// constructed *Client after mintDSHAuthCookie; the underlying
+// RPCClient handles the actual probe + retry. See
+// RPCClient.WaitForDSHReady for the full contract.
+func (c *Client) WaitForDSHReady(ctx context.Context, maxAttempts int) error {
+	return c.RPC.WaitForDSHReady(ctx, maxAttempts)
+}
+
 // RecoverSubscriptions walks every active Router subscription and
 // re-attaches it on the current dsh via RPCClient.SessionCreate
 // (the sessionId+cwd is the documented re-attach key in

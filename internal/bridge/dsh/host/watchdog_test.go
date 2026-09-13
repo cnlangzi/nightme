@@ -59,7 +59,9 @@ import (
 const fakeDSHSource = `package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -113,6 +115,31 @@ func main() {
 	// crashing on every retry during the test.
 	var hits atomic.Int64
 	mux := http.NewServeMux()
+	// workspace.list — the post-spawn readiness probe (see
+	// internal/bridge/dsh/host/client.go::WaitForDSHReady).
+	// Must return a valid typert envelope with ok=true so the
+	// probe passes; otherwise spawnAndWire's 15s context times
+	// out and the test deadlocks waiting for the fake-dsh PID
+	// file (which IS being written — the fake-dsh is fine, the
+	// probe just keeps retrying past the PID-file wait).
+	mux.HandleFunc("/api/workspace/list", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// typert envelope: {"type":"server-response","rpcId":"<echoed>",
+		// "result":{"ok":true,"value":{"items":[]}}}. The client
+		// validates resp.RPCID == sent rpcID; without the echo
+		// the probe would treat the rpcId mismatch as a
+		// transport error and retry until the 15s context
+		// deadline. Echo the request's rpcId back. Use a map
+		// for unmarshal to avoid Go struct tags (the surrounding
+		// fakeDSHSource is one big raw string and any embedded
+		// backtick terminates it).
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		var env map[string]any
+		_ = json.Unmarshal(body, &env)
+		_, _ = fmt.Fprintf(w, "{\"type\":\"server-response\",\"rpcId\":%q,\"result\":{\"ok\":true,\"value\":{\"items\":[]}}}", env["rpcId"])
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		if r.URL.Query().Get("token") == token {

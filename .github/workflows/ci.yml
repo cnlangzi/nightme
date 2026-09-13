@@ -315,6 +315,67 @@ jobs:
             make build
           fi
 
+      - name: Verify update CLI surface
+        shell: bash
+        run: |
+          # Binary-level smoke for the `nightme update` command.
+          # The integration test (cmd/nightme/update_integration_test.go)
+          # covers the runtime chain (Check → DownloadTag → Install)
+          # with fixture servers. This step covers the CLI surface
+          # the unit tests can't catch: a missing import that
+          # breaks binary launch, a Cobra flag-parser regression,
+          # or a stale flag in --help output.
+          #
+          # We use `--no-install` + empty cfg so the binary
+          # bails before any network call, keeping the step
+          # hermetic.
+          bin="./bin/nightme"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            bin="./bin/nightme.exe"
+          fi
+          out=$("$bin" update --help 2>&1)
+          echo "$out"
+          # Extract only the flag-list section (between the
+          # "Flags:" header and EOF), so the Long description's
+          # example mentions like "--tag v0.3.7" don't match
+          # the flag-presence regex below.
+          flags=$("$bin" update --help 2>&1 | awk '/^Flags:/{flag=1; next} flag')
+          echo "$flags"
+          # Required flags after the recent simplification
+          # (--tag was removed). If anyone re-adds --tag or
+          # drops one of these, the assertions catch it.
+          for flag in "--quiet" "--no-install" "--no-restart" "--yes"; do
+            if ! echo "$flags" | grep -qE "[[:space:]]${flag}([[:space:]]|$)"; then
+              echo "::error::update --help missing flag '${flag}'"
+              exit 1
+            fi
+          done
+          if ! echo "$flags" | grep -qE "[[:space:]]-q,?[[:space:]]+\-\-quiet"; then
+            echo "::error::update --help missing shorthand '-q' for --quiet"
+            exit 1
+          fi
+          if ! echo "$flags" | grep -qE "[[:space:]]-y,?[[:space:]]+\-\-yes"; then
+            echo "::error::update --help missing shorthand '-y' for --yes"
+            exit 1
+          fi
+          # --tag must NOT be a flag (only mentioned in Long
+          # description examples; check flag section only).
+          if echo "$flags" | grep -qE "[[:space:]]\-\-tag([[:space:]]|$)"; then
+            echo "::error::update --help still exposes --tag as a flag"
+            exit 1
+          fi
+          # Single-verb surface: must NOT list subcommands.
+          if echo "$out" | grep -q '^Subcommands:'; then
+            echo "::error::update --help has 'Subcommands:' header — parent got kids attached"
+            exit 1
+          fi
+          # The binary itself must launch — catches missing
+          # imports / build breakage that unit tests miss
+          # (cmd/nightme/<file>_test.go only links files the
+          # test references; a missing import in an unrelated
+          # binary path slips through).
+          "$bin" --version
+
       - name: Verify bare REPL (banner + dispatch matrix)
         shell: bash
         run: |

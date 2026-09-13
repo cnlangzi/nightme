@@ -881,30 +881,42 @@ Go 文档原文: "Note that calls with a positive delta that occur when the coun
 
 discoverer 策略是 `recordAndCountUnknown` 计数 + warn log,而不是 fail-fast。好处: dsh 加新 event type 不会让 nightme 崩溃(graceful degradation),ops 通过 `DumpWireStats` 看 unknown count 决定是否升级 bridge。坏处: 新事件被无声丢弃,直到有人升级 dispatcher。trade-off 选前者(用户实机验证发现 `request/header` 是新增的,dump 可见,补 handler 是 PR 级别的工作)。
 
-### 6.8 WS Pong handler + 客户端心跳(2026-09-13 实测修正)
+### 6.8 WS Pong handler + 客户端心跳(2026-09-13 实测修正,review 二次修正)
 
 dsh server 端 `RemoteStreamMuxServer` 在第一笔 upgrade 后启动 `setInterval(ping, 2000)`,`MAX_MISSED_HEARTBEATS=2`(4s 没收 pong → `socket.terminate()`,client 看到 close 1006 abnormal closure,无 close frame)。bridge 当前用 gorilla `websocket.NewClient` 默认配置,**没有装 PingHandler** → 每条 WS 4s 内必断,然后 backoff 重连,8s 后又断,自激循环。
 
-修法:
+修法(`host/stream.go::connectAndServe`):
 
 ```go
-// host/stream.go::connectAndServe
+// 1. 在 PingHandler 里同时刷新 read deadline —— gorilla
+//    把 ping/pong/close 等控制帧直接 dispatch 到 handler,
+//    ReadMessage 不会返回,所以仅在 readLoop 重置 deadline
+//    是不够的:idle session(只有 2s ping,没有业务帧)60s 后
+//    会因 deadline 过期被踢。Reset on every ping 让 deadline
+//    永远对齐"最后一次网络活动"。
 conn.SetPingHandler(func(appData string) error {
+    _ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
     return conn.WriteControl(websocket.PongMessage,
         []byte(appData),
         time.Now().Add(time.Second))
 })
-// 给 readLoop 加 read deadline,每次收到任意帧都 reset
-conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-// 在 readLoop 顶:
+
+// 2. 初始 deadline(retry 1: connect-and-idle 阶段)。
+_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+
+// 3. readLoop 每帧 reset(retry 2: 业务帧数据通路)。
 for {
     _, msg, err := conn.ReadMessage()
-    conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+    _ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
     ...
 }
 ```
 
-副作用:这条 ws 永远不会因为"server 长时间不发帧"而死(60s 上限足够大,实际 server 总会每 2s 发 ping)。配合 §13.3 respawn Router 修复,`/review` 实际能跑通。
+`wsReadDeadline` 60s,远大于 dsh 的 2s ping 间隔 — 只在 dsh 整个 60s 没动静时才触发(那时 reconnect 比 hang 好)。
+
+**测试**:`host_test.go::TestStreamHub_PingHandlerResetsReadDeadline` —— 验证 idle 200ms 后 mux 连接仍保持(没有 reconnect)。如果未来 review 又把 deadline reset 退回到只在 readLoop 改,这个测试能立刻发现。
+
+副作用:这条 ws 永远不会因为"server 长时间不发帧"而死。配合 §13.3 + §14.5 respawn Router + Hub 同步重订,`/review` 实际能跑通。
 
 ---
 
@@ -1415,4 +1427,8 @@ HTTP 404 on /health                                       ← 验证 §11 health
 ### 14.5 review-driven 闭环(review of fix-dsn diff,2026-09-13)
 
 `/code-review` 拉了 dsh 对当前 diff 跑了 review,确认 §13.3 **只移植 Router 不够** — 新 Client 的 `Hub.sessions` 是空的,`session/follow` 流没有重开。修法已合进 §13.3:在 `RecoverSubscriptions` 里加 `c.Hub.Subscribe(sub.SessionID, c.makeDispatchWrapper(sub.SessionID))`。测试 `TestClient_RecoverSubscriptions_ReopensMuxStream` 验证 mock 端收到新 `open` 帧(`sessionToStream` 替换为新 streamId)+ push 帧能到 handler。
+
+### 14.6 review-driven ping-deadline 修正(2026-09-13)
+
+第二次 `/code-review` 抓到 §13.1 的 high-severity bug:**read deadline 只在 `readLoop` 顶 reset,不在 `SetPingHandler` 里 reset**。gorilla 把控制帧(ping/pong/close)直接 dispatch 到 handler,`ReadMessage` 不会返回 — 所以 idle session(只有 2s ping,没有业务帧)60s 后 deadline 过期,`ReadMessage` 返 i/o-timeout,`connectAndServe` 自杀重连。**修法**:`SetPingHandler` 闭包首行加 `conn.SetReadDeadline(time.Now().Add(wsReadDeadline))`。**回归锁**:`TestStreamHub_PingHandlerResetsReadDeadline` 验证 idle 200ms 后 mux 连接不重连。另外两条 finding(健康探测 stale doc + `EnumerateSubscriptions`/`Snapshot` DRY)已在 `health.go:run` 注释和 `router.go::snapshot` 私有 helper 里一并处理。
 

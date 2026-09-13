@@ -467,19 +467,45 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 	conn.SetReadLimit(wsFrameReadLimit)
 
 	// dsh's RemoteStreamMuxServer pings every 2s and terminates
+	// dsh's RemoteStreamMuxServer pings every 2s and terminates
 	// the socket after 2 missed pongs. Reply to each ping with the
 	// exact payload dsh sent (RFC 6455 §5.5.3) so the server's
 	// missed-pong counter resets; without this the server
 	// terminates the connection and the read loop sees close 1006
 	// "unexpected EOF" within 4 seconds of every reconnect.
+	//
+	// ALSO reset the read deadline here: control frames (ping /
+	// pong / close) are dispatched to the handler by gorilla
+	// WITHOUT making ReadMessage return, so the data-frame reset
+	// in readLoop is a no-op for idle sessions. Without this
+	// reset an idle mux (no business frames, only 2s pings) hits
+	// the absolute 60s deadline from line 483 / 578, ReadMessage
+	// returns i/o-timeout, and the connection tears down +
+	// reconnects even though dsh is perfectly healthy. Refresh on
+	// every ping keeps the deadline aligned with "last network
+	// activity" without leaking goroutines.
 	conn.SetPingHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 		return conn.WriteControl(websocket.PongMessage,
 			[]byte(appData),
 			time.Now().Add(time.Second))
 	})
-	// Initial read deadline — readLoop resets this on every
-	// successful frame read so a silent dsh can never wedge the
-	// pump forever.
+	// SetPongHandler is a no-op for now — gorilla surfaces pong
+	// frames only as a signal that the server is alive, and the
+	// server's missed-pong counter is what matters, not ours. We
+	// could add a SetPongHandler that resets the deadline too,
+	// but the server pings every 2s so a client-side pong is
+	// always within the same 2s window — handling pings is
+	// sufficient. (We track server liveness via the ping round-
+	// trip; if we ever want client-initiated pings, add a
+	// writeLoop ticker that emits Ping frames + a SetPongHandler
+	// that resets the deadline here.)
+	//
+	// Initial read deadline — readLoop also resets this on every
+	// successful data frame read; the ping handler above covers
+	// the idle-but-pinging case. The deadline only bites if dsh
+	// goes silent for >60s — in that case we'd rather reconnect
+	// than hang forever.
 	_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 
 	h.mu.Lock()

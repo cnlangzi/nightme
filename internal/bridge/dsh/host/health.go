@@ -147,10 +147,12 @@ func (h *HealthProbe) Strikes() int {
 	return h.strikes
 }
 
-// run is the probe goroutine. One tick per `interval`; on each tick
-// we issue GET /health and tally a strike on failure. After
-// strikesMax consecutive strikes we call onFailure once and reset
-// the counter so a healthy-after-respawn dsh doesn't immediately
+// run is the probe goroutine. One tick per `interval`; on each
+// tick we delegate to tick() which issues a session.list typed
+// RPC against the shared dsh host and tallies a strike on
+// transport error or result.ok=false. After strikesMax
+// consecutive strikes we call onFailure once and reset the
+// counter so a healthy-after-respawn dsh doesn't immediately
 // re-trigger.
 func (h *HealthProbe) run() {
 	defer close(h.done)

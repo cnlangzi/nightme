@@ -158,22 +158,14 @@ func (r *Router) Unsubscribe(sessionID string) {
 }
 
 // EnumerateSubscriptions returns a snapshot of every active
-// subscription. Used by Client.RecoverSubscriptions after a dsh
-// respawn to re-attach every session on the new dsh instance.
+// subscription (Handler field left nil). Used by
+// Client.RecoverSubscriptions after a dsh respawn to re-attach
+// every session on the new dsh instance.
 //
 // The returned slice is a copy; the caller may iterate without
 // holding the router lock.
 func (r *Router) EnumerateSubscriptions() []Subscription {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]Subscription, 0, len(r.muxSubs))
-	for sid, h := range r.muxSubs {
-		if h == nil {
-			continue
-		}
-		out = append(out, Subscription{SessionID: sid, CWD: r.cwdBySess[sid]})
-	}
-	return out
+	return r.snapshot(false)
 }
 
 // Snapshot returns a snapshot of every active subscription INCL
@@ -187,6 +179,18 @@ func (r *Router) EnumerateSubscriptions() []Subscription {
 // The returned slice is a copy; the caller may iterate without
 // holding the router lock.
 func (r *Router) Snapshot() []Subscription {
+	return r.snapshot(true)
+}
+
+// snapshot walks the mux-subs map under the read lock and emits
+// one Subscription per entry. When withHandler is true the entry's
+// MuxFrameHandler closure is included (used for cross-Client
+// transplant on respawn); when false the Handler field is left
+// nil (used by RecoverSubscriptions, which only needs
+// SessionID+CWD to drive a server-side SessionCreate). All other
+// fields are identical. Centralising the loop here means new
+// fields on Subscription show up in both flavours automatically.
+func (r *Router) snapshot(withHandler bool) []Subscription {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]Subscription, 0, len(r.muxSubs))
@@ -194,11 +198,11 @@ func (r *Router) Snapshot() []Subscription {
 		if h == nil {
 			continue
 		}
-		out = append(out, Subscription{
-			SessionID: sid,
-			CWD:       r.cwdBySess[sid],
-			Handler:   h,
-		})
+		sub := Subscription{SessionID: sid, CWD: r.cwdBySess[sid]}
+		if withHandler {
+			sub.Handler = h
+		}
+		out = append(out, sub)
 	}
 	return out
 }

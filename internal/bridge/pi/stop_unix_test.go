@@ -46,6 +46,7 @@ package pi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -574,16 +575,26 @@ func TestSendBlocks_RecordsInFlightPromptID(t *testing.T) {
 	// Poll for the id field to be set. SendBlocks sets
 	// inFlightPromptID synchronously under turnMu BEFORE
 	// entering the rpc.request wait, so 50ms is plenty.
+	// Also wait for the id to be in rpcClient.pending: there's
+	// a window where inFlightPromptID is set but rpc.request
+	// hasn't yet registered the pending channel. failResponse
+	// against an id not yet in pending is a no-op, which is
+	// exactly the race we hit on the macOS CI runner.
 	deadline := time.Now().Add(2 * time.Second)
 	var id string
-	var active bool
+	var active, inPending bool
 	for time.Now().Before(deadline) {
 		d.turnMu.Lock()
 		id = d.inFlightPromptID
 		active = d.turnActive
 		d.turnMu.Unlock()
 		if id != "" && active {
-			break
+			d.rpc.pendingMu.Lock()
+			_, inPending = d.rpc.pending[bytesToID(json.RawMessage(jsonString(id)))]
+			d.rpc.pendingMu.Unlock()
+			if inPending {
+				break
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

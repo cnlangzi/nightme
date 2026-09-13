@@ -1242,6 +1242,42 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// OutTaskUpdate); see §11.12.6 for the in-memory footer
 		// semantics. OutResult is intentionally NOT here — handled
 		// by the explicit case above.
+		//
+		// L2 (docs §20.6.2): for OutReply and OutCommandReply only,
+		// try the rich_message[blocks] walker before falling back
+		// to the chain. The walker is best-effort; complex markdown
+		// (tables, ordered lists, footnotes, raw HTML) returns
+		// ok=false and we land on the chain path unchanged. This
+		// keeps chain-attached kinds (OutThinking / OutTool* /
+		// OutError / OutTask*) on the chain — they're short
+		// prefix-formatted entries that don't benefit from a real
+		// block parser.
+		if (msg.Kind == messages.OutReply || msg.Kind == messages.OutCommandReply) &&
+			a.richModeAllowsSend() {
+			if blocksJSON, ok := markdownToRichBlocks(msg.Text); ok {
+				mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, replyAnchor, blocksJSON)
+				if err == nil {
+					a.logger.Info("telegram: L2 walker path",
+						"chat_id", rawChatID,
+						"kind", msg.Kind.String(),
+						"blocks_len", len(blocksJSON))
+					// Record on chain.resultMessageID so OnPromptEnded's
+					// 🎉 lands on the rich message instead of the
+					// active chain chunk (matches v9 P2 semantics for
+					// OutResult standalone replies, §11.12.4.1).
+					chain := a.chains.getOrCreate(rawChatID, topicID, replyAnchor)
+					chain.mu.Lock()
+					chain.resultMessageID = mid
+					chain.mu.Unlock()
+					return nil
+				}
+				a.logger.Warn("telegram: L2 walker path failed, falling back to chain",
+					"chat_id", rawChatID,
+					"kind", msg.Kind.String(),
+					"err", err)
+				// fall through to chain path
+			}
+		}
 		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, msg.Text)
 	}
 }

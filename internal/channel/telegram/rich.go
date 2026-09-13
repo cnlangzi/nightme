@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -202,6 +203,45 @@ func (a *Adapter) trySendRichMarkdown(
 	return int64(result.MessageID), nil
 }
 
+// trySendRichBlocks sends one Telegram message via the sendRichMessage
+// API, carrying a rich_message[blocks] body. blocksJSON must be a
+// JSON-encoded array (the output of markdownToRichBlocks when it
+// returns ok=true). Mirrors trySendRichMarkdown's contract: caller
+// decides error handling; L2 wiring falls back to chain on failure.
+func (a *Adapter) trySendRichBlocks(
+	ctx context.Context,
+	chatID string,
+	topicID int,
+	replyToMessageID int,
+	blocksJSON string,
+) (int64, error) {
+	// blocksJSON is a JSON array. Wrap in {"blocks": [...]} and
+	// embed as json.RawMessage so encoding/json inlines it
+	// verbatim instead of re-marshalling (which would escape the
+	// quotes and break the wire form).
+	params := map[string]any{
+		"chat_id": chatID,
+		"rich_message": map[string]any{
+			"blocks": json.RawMessage(blocksJSON),
+		},
+	}
+	if topicID > 0 {
+		params["message_thread_id"] = topicID
+	}
+	if replyToMessageID > 0 {
+		params["reply_to_message_id"] = replyToMessageID
+	}
+
+	var result SendMessageResult
+	if err := a.apiCall(ctx, "sendRichMessage", params, &result); err != nil {
+		return 0, err
+	}
+	if result.MessageID == 0 {
+		return 0, &apiError{Message: "sendRichMessage returned empty message_id"}
+	}
+	return int64(result.MessageID), nil
+}
+
 // richModeAllowsSend reports whether the per-instance RichMode config
 // permits trying the rich path. Adapter-side gate so the package-
 // level helpers (estimateRichBlocks, etc.) stay pure and unit-
@@ -261,20 +301,8 @@ func normaliseRichMode(raw string) string {
 	}
 }
 
-// markdownToRichBlocks converts raw markdown into a rich_message
-// [blocks] array suitable for sendRichMessage / editMessageText.
-//
-// L2 will replace the placeholder body with a real goldmark walker.
-// L1 callers do NOT call this — they go through trySendRichMarkdown
-// instead. The signature is exposed now so L2's sendOutResultMessage
-// branch has a stable API to call into.
-func markdownToRichBlocks(rawMD string) (string, bool) {
-	if rawMD == "" {
-		return "", false
-	}
-	// Placeholder: defer to the rich_message[markdown] server-side
-	// path until L2 lands. Returning ok=false signals to callers
-	// that no blocks were generated; L1 sendOutResultMessage falls
-	// through to the markdown field instead.
-	return "", false
-}
+// markdownToRichBlocks is implemented in rich_walker.go (L2). It
+// walks raw markdown and emits a JSON-encoded rich_message[blocks]
+// array; returns ok=false when the walker can't represent the input,
+// in which case callers should fall back to the L1
+// rich_message[markdown] path.

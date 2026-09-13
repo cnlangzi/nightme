@@ -433,7 +433,12 @@ func TestRunShell_EmptyCwd_OutReply(t *testing.T) {
 		t.Fatalf("expected consumed, got handled=%v out=%+v", handled, out)
 	}
 
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_empty_cwd", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) != 1 {
 		t.Fatalf("Send call count = %d, want 1 (header-only on empty CWD)", len(calls))
 	}
@@ -477,7 +482,12 @@ func TestRunShell_HeaderChunkFooter(t *testing.T) {
 		t.Fatalf("expected consumed, got handled=%v out=%+v", handled, out)
 	}
 
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_hcf", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) < 2 {
 		t.Fatalf("Send call count = %d, want >= 2 (header + footer)", len(calls))
 	}
@@ -531,7 +541,12 @@ func TestRunShell_False_FooterIsError(t *testing.T) {
 		t.Fatal("expected handled=true")
 	}
 
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_false", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) < 2 {
 		t.Fatalf("Send call count = %d, want >= 2", len(calls))
 	}
@@ -701,18 +716,55 @@ func newWiredCS(t *testing.T, cap *stateCapture) *chatsession.ChatSession {
 	return cs
 }
 
-// awaitReply polls up to 10s for the goroutine to call Send. Returns
-// the recorded messages (may be empty if timeout fires).
+// awaitReply polls until the dispatch goroutine has stopped
+// sending — i.e. the recorded-call count is stable for
+// quietWindow. Tests assert on the full set of sends
+// (header + footer on the success path, header + footer on
+// the failure path, etc.), so we can't return on the first
+// Send the way the previous one-send-poll did — slow CI
+// runners (macOS VM) race the footer behind the assertion.
+//
+// quietWindow must be larger than the goroutine scheduler
+// granularity (typically ~10ms) and small enough that the
+// whole polling budget stays usable on the slow path.
 func awaitReply(t *testing.T, em *fakeEmitter) []messages.OutboundMessage {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	const (
+		overallBudget = 10 * time.Second
+		quietWindow   = 80 * time.Millisecond
+	)
+	deadline := time.Now().Add(overallBudget)
+	lastSeen := time.Now()
+	lastCount := -1
 	for time.Now().Before(deadline) {
-		if em.didReceiveReply() {
-			return em.callsCopy()
+		count := len(em.callsCopy())
+		if count > 0 && count == lastCount {
+			if time.Since(lastSeen) >= quietWindow {
+				return em.callsCopy()
+			}
+		} else {
+			lastCount = count
+			lastSeen = time.Now()
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	return em.callsCopy()
+}
+
+// awaitAtLeastOneSend polls until the emitter has received at
+// least one Send. Use only for tests where MessageDone cannot
+// fire (nil cs, zero-value cs, empty MessageID) — positive
+// tests should use awaitState for a deterministic terminal-state
+// wait.
+func awaitAtLeastOneSend(t *testing.T, em *fakeEmitter, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(em.callsCopy()) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // awaitState polls cap until it records `target` for `userMsgID`, or
@@ -801,7 +853,12 @@ func TestDispatcherHandle_ShellCommand(t *testing.T) {
 		t.Fatalf("expected (ShellOutput{Consumed:true}, true), got handled=%v out=%+v", handled, out)
 	}
 
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_test", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) == 0 {
 		t.Fatal("expected Emitter to be called with streaming reply")
 	}
@@ -868,7 +925,12 @@ func TestDispatcherHandle_EmitsQueuedThenDone(t *testing.T) {
 	}
 
 	// Wait for the goroutine to finish (Send → defer → Done).
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_qd", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) == 0 {
 		t.Fatal("expected Emitter to be called")
 	}
@@ -924,7 +986,6 @@ func TestDispatcherHandle_NilMessageIDSkipsEmit(t *testing.T) {
 	}
 	cap := &stateCapture{}
 	cs := newWiredCS(t, cap)
-	em := &fakeEmitter{}
 	d := NewDispatcher()
 
 	_, handled := d.Handle(testMgr(t), cs, InboundRequest{
@@ -935,8 +996,10 @@ func TestDispatcherHandle_NilMessageIDSkipsEmit(t *testing.T) {
 	if !handled {
 		t.Fatal("expected handled=true even with empty MessageID")
 	}
-	// Wait for the goroutine, then assert no emits happened.
-	_ = awaitReply(t, em)
+	// Wait for the dispatch goroutine to settle (no MessageDone
+	// fires here — empty MessageID suppresses the framework
+	// ⏳→✅ contract). 100ms is well past any Send-side latency.
+	time.Sleep(100 * time.Millisecond)
 	if got := cap.snapshot(); len(got) != 0 {
 		t.Errorf("empty MessageID should suppress both Queued + Done, got %+v", got)
 	}
@@ -948,7 +1011,6 @@ func TestDispatcherHandle_NilCSSkipsEmit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("echo path uses sh -c; skip on Windows")
 	}
-	em := &fakeEmitter{}
 	d := NewDispatcher()
 
 	out, handled := d.Handle(nil, nil, InboundRequest{
@@ -959,10 +1021,10 @@ func TestDispatcherHandle_NilCSSkipsEmit(t *testing.T) {
 	if !handled || out == nil {
 		t.Fatalf("expected consumed=true even with nil cs, got handled=%v out=%+v", handled, out)
 	}
-	// Wait for goroutine completion so any deferred MessageDone
-	// would have fired if it had a cs to call into. The
-	// emitShellState nil-guard means this is a no-op.
-	_ = awaitReply(t, em)
+	// Wait for the goroutine to settle (no MessageDone fires —
+	// nil cs skips the publish). The emitShellState nil-guard
+	// means there's nothing to verify after the wait.
+	time.Sleep(100 * time.Millisecond)
 }
 
 // TestDispatcherHandle_ZeroValueCSDoesNotPanic covers the bare
@@ -986,10 +1048,14 @@ func TestDispatcherHandle_ZeroValueCSDoesNotPanic(t *testing.T) {
 	if !handled || out == nil {
 		t.Fatalf("expected consumed with zero-value cs, got handled=%v out=%+v", handled, out)
 	}
-	// Wait for goroutine — if the nil-bus guard is broken the
-	// emit call would panic and the goroutine would die before
-	// calling Send. The assertion below catches that.
-	calls := awaitReply(t, em)
+	// Wait for at least one Send to land — this test passes a
+	// zero-value cs (no MessageStateBus), so MessageDone never
+	// fires and the state-driven wait doesn't apply. Send is
+	// the only observable signal. If the nil-bus guard were
+	// broken the emit call would panic and the goroutine
+	// would die before calling Send — the timeout catches that.
+	awaitAtLeastOneSend(t, em, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) == 0 {
 		t.Fatal("expected Emitter to be called even with zero-value cs (nil-bus emit is a no-op)")
 	}
@@ -1030,7 +1096,12 @@ func TestDispatcherHandle_ReplySendFailed(t *testing.T) {
 	// also fails — total call count depends on whether the
 	// header Send happens to error before coalesceLines drives
 	// any chunks. We only assert >= 1 call + OutReply kind.
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_sendfail", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) == 0 {
 		t.Fatalf("expected at least one Send call, got 0")
 	}
@@ -1137,7 +1208,12 @@ func TestDispatcherHandle_ShellCommandFails(t *testing.T) {
 		t.Fatal("expected handled=true")
 	}
 
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_fail", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) == 0 {
 		t.Fatal("expected Emitter.Send to be called even on command failure")
 	}
@@ -1217,7 +1293,12 @@ func TestDispatcherHandle_ConcurrentDrainerFailure(t *testing.T) {
 	// send fails; the first one cancels shellCtx, CommandContext
 	// kills the child, and the footer also fails. We assert at
 	// least 2 calls (header + ≥1 drainer fail + footer).
-	calls := awaitReply(t, em)
+	// Wait for the dispatch goroutine to fully complete. MessageDone
+	// is the terminal state — fired in the LIFO defer after the last
+	// Send — so once we see it the recorded call list is stable.
+	// Deterministic, no quiet-window heuristic needed.
+	awaitState(t, cap, "om_concurrent", agent.MessageDone, 5*time.Second)
+	calls := em.callsCopy()
 	if len(calls) < 2 {
 		t.Errorf("Send call count = %d, want >= 2 (header + drainer + footer)", len(calls))
 	}

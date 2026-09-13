@@ -51,8 +51,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -71,15 +69,17 @@ const updateCheckTimeout = 5 * time.Second
 // PromptDeps bundles the knobs tests need without dragging in a
 // real config file.
 //
+//   - VersionCheck: pre-computed version-check result. Production
+//     runs the countdown + Check, then passes it in so the
+//     prompt doesn't hit the network twice. Tests inject a
+//     manually-built result (call *version.Checker.Check
+//     yourself and pass the result here). nil means "do a
+//     fresh live check via the production checker" — only
+//     useful for callers that don't already have a result.
 //   - Reader: line source for every y/N. nil skips the
 //     prompt entirely (runREPLWith's scanner path).
 //   - Out:    progress + status lines. nil = discard.
 //   - Logger: nil = slog.Default().
-//   - VersionCheck: already-computed nightme.dev result
-//     (production runs the countdown + Check, then passes
-//     it in so we don't hit the network twice).
-//   - CheckResult: GitHub release + assets (tests inject
-//     this to skip the live fetch on the download stage).
 //   - ReExecAfterInstall: production-only; after a successful
 //     swap, re-exec the new binary so the user lands in the
 //     new version's shell. Tests leave this false.
@@ -87,9 +87,7 @@ const updateCheckTimeout = 5 * time.Second
 // tests inject a Reader closure over a bytes.Buffer so the
 // y/N flow is fully reproducible.
 type PromptDeps struct {
-	Checker            *version.Checker
 	VersionCheck       *version.CheckResult
-	CheckResult        *updater.CheckResult
 	Reader             func() (string, error)
 	Out                io.Writer
 	Logger             *slog.Logger
@@ -126,40 +124,26 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		logger = slog.Default()
 	}
 
-	// Stage 1: check. Honour deps.CheckResult first (tests
-	// inject a fake GitHub release + assets), then
-	// deps.VersionCheck (production already ran the
-	// countdown probe), then deps.Checker, and finally a
-	// fresh live check when nothing is set.
-	var latest string
-	outdated := false
-	var precomputed *updater.CheckResult
-	switch {
-	case deps.CheckResult != nil:
-		precomputed = deps.CheckResult
-		latest = precomputed.Latest
-		outdated = precomputed.Outdated
-	case deps.VersionCheck != nil:
+	// Stage 1: check. Use the pre-computed VersionCheck when
+	// present (production); fall through to a fresh live
+	// check otherwise. Tests build the CheckResult themselves
+	// and inject it via VersionCheck.
+	logf := func(format string, args ...any) {
+		logger.Warn(fmt.Sprintf(format, args...))
+	}
+	var (
+		latest   string
+		outdated bool
+	)
+	if deps.VersionCheck != nil {
 		latest = deps.VersionCheck.Latest
 		outdated = deps.VersionCheck.Outdated
-	case deps.Checker != nil:
-		res := deps.Checker.Check(ctx, version.Version, func(format string, args ...any) {
-			logger.Warn(fmt.Sprintf(format, args...))
-		})
-		if res.Latest != "" {
+	} else {
+		c, _ := version.NewChecker(resolveDataDir(), updater.LookupLatestTag)
+		if c != nil {
+			res := c.Check(ctx, version.Version, logf)
 			latest = res.Latest
 			outdated = res.Outdated
-		}
-	default:
-		c, _ := version.DefaultChecker(resolveDataDir())
-		if c != nil {
-			res := c.Check(ctx, version.Version, func(format string, args ...any) {
-				logger.Warn(fmt.Sprintf(format, args...))
-			})
-			if res.Latest != "" {
-				latest = res.Latest
-				outdated = res.Outdated
-			}
 		}
 	}
 	if latest == "" || !outdated {
@@ -195,47 +179,30 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 		fmt.Fprintln(out, "     Set data_dir in your config and run `nightme update`.")
 		return nil
 	}
-
-	// Stage 2: download. We need the full Release (with its
-	// Assets list) for asset matching. In production we
-	// look up the advertised tag on GitHub (nightme.dev
-	// reports "0.3.10", GitHub tags "v0.3.10" — Equal
-	// treats those as the same release). Tests inject
-	// precomputed so we skip the network.
-	var checkRes *updater.CheckResult
-	if precomputed != nil {
-		checkRes = precomputed
-	} else {
-		tag := version.Tag(latest)
-		checkRes, err = updater.Check(ctx, tag)
-		if err != nil {
-			checkRes, err = updater.Check(ctx, "")
-		}
-		if err != nil {
-			fmt.Fprintf(out, "  %s  download failed (check): %v\n", paintRed(out, "✗"), err)
-			return nil
-		}
-		if !version.Equal(checkRes.Latest, latest) {
-			fmt.Fprintf(out, "  %s  release moved during the prompt (%s → %s); aborting\n",
-				paintRed(out, "✗"), displayVer(latest), displayVer(checkRes.Latest))
-			return nil
-		}
-	}
-
+	// Stage 2: download + verify + extract the latest tag.
+	// updater.DownloadTag resolves the tag itself (nightme.dev
+	// → GitHub fallback) so we don't have to thread it through
+	// from the version-check stage. Pass a progress bar to
+	// deps.Out so the user sees download activity (it can
+	// take minutes on a 100 MB binary).
+	progress := updater.NewASCIIProgressBar(out, 0)
 	dlCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
-	dl, err := runDownloadStage(dlCtx, deps, cfg, checkRes)
+	dl, err := updater.DownloadTag(dlCtx, cfg.Paths.DataDir, progress)
 	stop()
 	if err != nil {
 		fmt.Fprintf(out, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
 		fmt.Fprintln(out, "     Run `nightme update` from a shell to retry.")
 		return nil
 	}
+	if dl.Source == "mirror" {
+		fmt.Fprintln(out, "  ·  using mirror (github was unreachable)")
+	}
 
 	fmt.Fprintln(out)
 	fmt.Fprintf(out, "  %s  Staged %s  %s\n",
 		paintGreen(out, "✓"),
-		dl.Asset.Name,
-		paintDim(out, updater.FormatBytes(dl.Bytes)+", sha256="+dl.SHA256Hex))
+		dl.AssetName,
+		paintDim(out, "sha256="+dl.SHA256Hex))
 	if !askYesNo(out, deps.Reader, yesNoPrompt(out, "Install now?"), false) {
 		fmt.Fprintln(out, "     Run `nightme update` later to install.")
 		return nil
@@ -258,58 +225,8 @@ func promptForUpdateIfOutdated(ctx context.Context, deps *PromptDeps) error {
 	return nil
 }
 
-// promptCheckOnly has been removed: the prompt now handles
-// the "DataDir is empty" case inline (degrades to a hint
-// after the y/N answer). Keeping a separate helper would
-// duplicate the check logic and risk the two paths drifting.
-
-// runDownloadStage does the actual download with a
-// cancellable context (Ctrl-C = ctx cancel). On success it
-// returns the staged archive info so the install stage can
-// reuse it. On failure it prints a one-line error and
-// returns the error so the prompt falls through cleanly.
-func runDownloadStage(
-	ctx context.Context,
-	deps *PromptDeps,
-	cfg *config.Config,
-	checkRes *updater.CheckResult,
-) (*updater.DownloadResult, error) {
-	out := deps.Out
-
-	asset := updater.MatchAsset(checkRes.Release, checkRes.Latest)
-	if asset == nil {
-		return nil, fmt.Errorf("no release asset for %s/%s",
-			runtime.GOOS, runtime.GOARCH)
-	}
-
-	stagingDir, err := updater.StagingDir(cfg.Paths.DataDir, checkRes.Latest)
-	if err != nil {
-		return nil, err
-	}
-	// "what / where from / where to" before the progress bar
-	// so the user knows what's about to download. The bar
-	// overwrites itself with \r; these lines stay put.
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %s  %s  %s\n",
-		paintCyan(out, "↓"),
-		asset.Name,
-		paintDim(out, updater.FormatBytes(asset.Size)))
-	progress := updater.NewASCIIProgressBar(out, asset.Size)
-	res, err := updater.Download(ctx, checkRes.Release, asset, stagingDir, progress)
-	if err != nil {
-		return nil, err
-	}
-	if res.Cached {
-		fmt.Fprintf(out, "  %s  sha256 verified — skipping download\n", paintGreen(out, "✓"))
-		return res, nil
-	}
-	fmt.Fprintln(out) // newline after the bar
-	return res, nil
-}
-
-// runInstallStage extracts the staged archive and swaps the
-// running binary. It also restarts the daemon (best-effort)
-// so a fresh REPL / shell picks up the new daemon.
+// runInstallStage swaps the running binary with the
+// downloaded one and restarts the daemon (best-effort).
 //
 // Returns the path of the binary that Install wrote — i.e.
 // the path the REPL was launched from BEFORE Install renamed
@@ -325,15 +242,11 @@ func runInstallStage(
 ) (string, error) {
 	out := deps.Out
 
-	binary, err := updater.ExtractArchive(dl.StagingPath, filepath.Dir(dl.StagingPath))
-	if err != nil {
-		return "", fmt.Errorf("extract: %w", err)
-	}
 	target, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locate current binary: %w", err)
 	}
-	installRes, err := updater.Install(binary, target)
+	installRes, err := updater.Install(dl.BinaryPath, target)
 	if err != nil {
 		return "", err
 	}
@@ -394,11 +307,6 @@ func askYesNo(out io.Writer, reader func() (string, error), prompt string, defau
 	}
 	return answer == "y" || answer == "yes"
 }
-
-// filepathDir was removed: its hand-rolled "/"-only scan broke on
-// Windows backslash paths and tripped the Win32 ERROR_SHARING_VIOLATION
-// when REPL extraction wrote to cwd/nightme.exe. The fix is to derive
-// stagingDir via filepath.Dir(dl.StagingPath) at the use site.
 
 // resolveDataDir returns cfg.Paths.DataDir or "" if config
 // can't be loaded. Used by the live-check fallback in the

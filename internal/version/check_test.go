@@ -3,33 +3,16 @@ package version
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// stubVersionHandler answers the nightme.dev /api/version
-// payload. fetchLatest reads the latest_cli field first, with
-// current as a fallback, so we include both in the shape so
-// the tests double as a smoke for the field-priority logic.
-func stubVersionHandler(version string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"current": "dev", // intentionally "dev" so we can
-			// catch a regression where the decoder
-			// picks `current` over `latest_cli`.
-			"latest_cli": version,
-			"commit":     "unknown",
-			"updated_at": "2026-08-17T06:56:53.154834639+08:00",
-		})
-	})
-}
+// --- pure-helper tests -----------------------------------
 
 func TestIsOutdated(t *testing.T) {
 	tests := []struct {
@@ -112,206 +95,141 @@ func TestTag(t *testing.T) {
 	}
 }
 
-func TestChecker_FetchLatest(t *testing.T) {
-	srv := httptest.NewServer(stubVersionHandler("0.2.0"))
-	defer srv.Close()
+// --- lookup stubs ----------------------------------------
 
-	c := &Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
-		Now:        time.Now,
-	}
-	got, err := c.fetchLatest(context.Background())
-	if err != nil {
-		t.Fatalf("fetchLatest: %v", err)
-	}
-	if got != "0.2.0" {
-		t.Errorf("fetchLatest = %q, want %q", got, "0.2.0")
+// stubLookup returns a LatestTagLookup that always returns
+// the supplied tag. The call counter lets tests assert on
+// how many times the network seam fired.
+func stubLookup(tag string, calls *atomic.Int32) LatestTagLookup {
+	return func(_ context.Context) (string, string, error) {
+		if calls != nil {
+			calls.Add(1)
+		}
+		return tag, "nightme.dev", nil
 	}
 }
 
-// TestChecker_FetchLatest_PrefersLatestCliOverCurrent pins half of
-// the field-priority logic: when both are present we take
-// latest_cli even though current also looks like a real version.
-//
-// (Renamed from ...FallbackOnCurrentOnly, which promised to cover
-// the current-only case but only ever sent both fields. The real
-// current-only case was broken and untested — see
-// TestChecker_FetchLatest_CurrentOnlyBesideUnrelatedKeys.)
-func TestChecker_FetchLatest_PrefersLatestCliOverCurrent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"current":    "0.5.0",
-			"latest_cli": "0.6.0",
-			"updated_at": "2026-01-01T00:00:00Z",
-		})
-	}))
-	defer srv.Close()
-
-	c := &Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
-	}
-	got, err := c.fetchLatest(context.Background())
-	if err != nil {
-		t.Fatalf("fetchLatest: %v", err)
-	}
-	if got != "0.6.0" {
-		t.Errorf("fetchLatest = %q, want latest_cli %q (not current)", got, "0.6.0")
+// errLookup returns a LatestTagLookup that always errors.
+func errLookup(msg string, calls *atomic.Int32) LatestTagLookup {
+	return func(_ context.Context) (string, string, error) {
+		if calls != nil {
+			calls.Add(1)
+		}
+		return "", "", errors.New(msg)
 	}
 }
 
-// TestChecker_FetchLatest_LegacyTagName covers the rollback
-// path: a server that still emits the GitHub-style payload
-// (tag_name) should still work because we read tag_name as
-// the third-priority field.
-func TestChecker_FetchLatest_LegacyTagName(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name":     "v0.7.0",
-			"name":         "legacy",
-			"published_at": "2026-01-01T00:00:00Z",
-		})
-	}))
-	defer srv.Close()
+// --- NewChecker ----------------------------------------
 
-	c := &Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
+func TestNewChecker(t *testing.T) {
+	lookup := stubLookup("v9.9.9", nil)
+	c, path := NewChecker(t.TempDir(), lookup)
+	if c == nil {
+		t.Fatal("NewChecker returned nil")
 	}
-	got, err := c.fetchLatest(context.Background())
-	if err != nil {
-		t.Fatalf("fetchLatest: %v", err)
+	if c.Lookup == nil {
+		t.Errorf("NewChecker dropped the supplied Lookup")
 	}
-	if got != "v0.7.0" {
-		t.Errorf("fetchLatest = %q, want %q (legacy tag_name)", got, "v0.7.0")
+	if c.HTTPTimeout != httpTimeout {
+		t.Errorf("HTTPTimeout = %v, want %v", c.HTTPTimeout, httpTimeout)
+	}
+	if c.CacheTTL != checkTTL {
+		t.Errorf("CacheTTL = %v, want %v", c.CacheTTL, checkTTL)
+	}
+	if path == "" || !strings.HasSuffix(path, "version-check.json") {
+		t.Errorf("cache path %q missing version-check.json suffix", path)
 	}
 }
 
-// TestChecker_FetchLatest_NoUsableField ensures we surface a
-// clear error when the response is well-formed JSON but
-// carries no version-shaped field at all.
-func TestChecker_FetchLatest_NoUsableField(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"hello":"world","updated_at":"2026-01-01T00:00:00Z"}`))
-	}))
-	defer srv.Close()
-
-	c := &Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
+func TestNewChecker_EmptyDataDir(t *testing.T) {
+	lookup := stubLookup("v9.9.9", nil)
+	c, path := NewChecker("", lookup)
+	if c == nil {
+		t.Fatal("NewChecker returned nil")
 	}
-	_, err := c.fetchLatest(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "no usable version field") {
-		t.Fatalf("expected 'no usable version field' error, got %v", err)
+	if path != "" || c.CachePath != "" {
+		t.Errorf("expected empty path when dataDir is empty, got path=%q CachePath=%q", path, c.CachePath)
 	}
 }
 
-// redirectTo returns a RoundTripper that rewrites every URL
-// to the supplied base. Lets us point Checker at an httptest
-// server without making the repo field part of the URL.
-func redirectTo(base string) http.RoundTripper {
-	return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		// Copy the original request but swap scheme+host.
-		cloned := req.Clone(req.Context())
-		baseReq, _ := http.NewRequest(req.Method, base+req.URL.Path, nil)
-		cloned.URL = baseReq.URL
-		cloned.Host = baseReq.URL.Host
-		return http.DefaultTransport.RoundTrip(cloned)
-	})
-}
+// --- Check behavior -------------------------------------
 
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func TestChecker_FetchLatest_RateLimited(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
-	}))
-	defer srv.Close()
-
-	c := &Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
-	}
-	_, err := c.fetchLatest(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "rate limited") {
-		t.Fatalf("expected rate limited error, got %v", err)
+func TestCheck_LookupNil_ReturnsZero(t *testing.T) {
+	// Construction contract: NewChecker takes a Lookup; tests
+	// that want no-network should inject a stub. A nil Lookup
+	// here means the caller built the Checker by hand and
+	// forgot the field. Check must degrade silently rather
+	// than panic in that case.
+	c := &Checker{}
+	res := c.Check(context.Background(), "0.1.0", nil)
+	if res.Latest != "" {
+		t.Errorf("Latest = %q, want empty when Lookup nil", res.Latest)
 	}
 }
 
-func TestChecker_Check_CacheHit(t *testing.T) {
+func TestCheck_CacheHit_DoesNotCallLookup(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "version-check.json")
-	// Pre-seed a fresh cache so the live fetch is skipped.
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	if err := os.WriteFile(cachePath, []byte(`{
-		"latest_version": "9.9.9",
-		"checked_at": "2026-01-01T00:00:00Z"
+		"latest": "9.9.9",
+		"source": "nightme.dev",
+		"checked_at": "`+now.UTC().Format(time.RFC3339)+`"
 	}`), 0o600); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
 
-	// Now must be just after the seed time so age < TTL.
-	seed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var calls atomic.Int32
 	c := &Checker{
-		VersionURL: "",
-		HTTPClient: &http.Client{Transport: mustErrorTransport(t, "must not hit network")},
-		CachePath:  cachePath,
-		Now:        func() time.Time { return seed.Add(time.Minute) },
+		Lookup:    stubLookup("never-called", &calls),
+		CachePath: cachePath,
+		Now:       func() time.Time { return now.Add(time.Minute) },
 	}
 
-	var logged []string
-	res := c.Check(context.Background(), "0.1.0", func(format string, args ...any) {
-		logged = append(logged, format)
-	})
+	res := c.Check(context.Background(), "0.1.0", nil)
 	if !res.FromCache {
-		t.Errorf("FromCache = false, want true (live fetch happened)")
+		t.Errorf("FromCache = false, want true")
 	}
 	if res.Latest != "9.9.9" {
 		t.Errorf("Latest = %q, want %q", res.Latest, "9.9.9")
 	}
 	if !res.Outdated {
-		t.Errorf("Outdated = false, want true (0.1.0 < 9.9.9)")
+		t.Errorf("Outdated = false, want true")
 	}
-	if len(logged) != 0 {
-		t.Errorf("expected no log lines on cache hit, got %v", logged)
+	if got := calls.Load(); got != 0 {
+		t.Errorf("Lookup called %d times on cache hit; want 0", got)
 	}
 }
 
-func TestChecker_Check_LiveFetchAndPersist(t *testing.T) {
+func TestCheck_CacheMiss_CallsLookup_StoresResult(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "version-check.json")
 
-	srv := httptest.NewServer(stubVersionHandler("9.9.9"))
-	defer srv.Close()
-
-	// Force "now" to a known instant so cache timestamp is
-	// predictable.
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	var calls atomic.Int32
 	c := &Checker{
-		VersionURL: srv.URL,
-		HTTPClient: &http.Client{Transport: redirectTo(srv.URL)},
-		CachePath:  cachePath,
-		Now:        func() time.Time { return now },
+		Lookup:    stubLookup("v9.9.9", &calls),
+		CachePath: cachePath,
+		Now:       func() time.Time { return now },
 	}
 
 	res := c.Check(context.Background(), "0.1.0", nil)
 	if res.FromCache {
-		t.Errorf("FromCache = true, want false")
+		t.Errorf("FromCache = true on cache miss")
 	}
-	if res.Latest != "9.9.9" {
-		t.Errorf("Latest = %q, want %q (normalized)", res.Latest, "9.9.9")
+	if res.Latest != "v9.9.9" {
+		t.Errorf("Latest = %q, want %q", res.Latest, "v9.9.9")
 	}
 	if !res.Outdated {
 		t.Errorf("Outdated = false, want true")
 	}
-	if !res.CheckedAt.Equal(now) {
-		t.Errorf("CheckedAt = %v, want %v", res.CheckedAt, now)
+	if res.Source != "nightme.dev" {
+		t.Errorf("Source = %q, want %q", res.Source, "nightme.dev")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("Lookup called %d times; want 1", got)
 	}
 
-	// Cache file must exist and round-trip.
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		t.Fatalf("read cache: %v", err)
@@ -320,186 +238,143 @@ func TestChecker_Check_LiveFetchAndPersist(t *testing.T) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		t.Fatalf("decode cache: %v", err)
 	}
-	if e.Latest != "9.9.9" || !e.CheckedAt.Equal(now) {
-		t.Errorf("cache entry = %+v, want latest=9.9.9 checked_at=%v", e, now)
+	if e.Latest != "v9.9.9" || e.Source != "nightme.dev" {
+		t.Errorf("cache entry = %+v", e)
 	}
 }
 
-func TestChecker_Check_NetworkFailureIsSoft(t *testing.T) {
+func TestCheck_LookupFails_FallsBackToStaleCache(t *testing.T) {
 	dir := t.TempDir()
 	cachePath := filepath.Join(dir, "version-check.json")
-	// Pre-seed stale-but-present cache so we hit the
-	// fallback-on-error branch.
 	if err := os.WriteFile(cachePath, []byte(`{
-		"latest_version": "5.5.5",
+		"latest": "5.5.5",
+		"source": "github",
 		"checked_at": "2020-01-01T00:00:00Z"
 	}`), 0o600); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
 
+	var calls atomic.Int32
 	c := &Checker{
-		VersionURL: "",
-		HTTPClient: &http.Client{Transport: mustErrorTransport(t, "boom")},
-		CachePath:  cachePath,
-		Now:        func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+		Lookup:    errLookup("network down", &calls),
+		CachePath: cachePath,
+		Now:       func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
 	}
 	var logged []string
 	res := c.Check(context.Background(), "0.1.0", func(format string, args ...any) {
 		logged = append(logged, format)
 	})
 	if !res.FromCache {
-		t.Errorf("FromCache = false, want true (fallback to stale cache)")
+		t.Errorf("FromCache = false, want true (stale fallback)")
 	}
 	if res.Latest != "5.5.5" {
 		t.Errorf("Latest = %q, want stale %q", res.Latest, "5.5.5")
 	}
 	if len(logged) == 0 {
-		t.Errorf("expected a log line for the network error, got none")
+		t.Errorf("expected a log line for the lookup failure")
 	}
 }
 
-func TestChecker_Check_NoCacheNoNetwork(t *testing.T) {
+func TestCheck_BothFail_ReturnsZero(t *testing.T) {
+	var calls atomic.Int32
 	c := &Checker{
-		VersionURL: "",
-		HTTPClient: &http.Client{Transport: mustErrorTransport(t, "boom")},
-		// CachePath empty → no fallback, no persistence.
-		Now: func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+		Lookup: errLookup("network down", &calls),
+		Now:    func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
 	}
 	res := c.Check(context.Background(), "0.1.0", nil)
 	if res.Latest != "" {
 		t.Errorf("Latest = %q, want empty (no cache, no network)", res.Latest)
 	}
 	if res.Outdated {
-		t.Errorf("Outdated = true, want false (we can't tell without data)")
+		t.Errorf("Outdated = true, want false")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("Lookup called %d times; want 1", got)
 	}
 }
 
-func mustErrorTransport(t *testing.T, msg string) http.RoundTripper {
-	t.Helper()
-	return roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
-		return nil, &transportErr{msg: msg}
-	})
-}
-
-type transportErr struct{ msg string }
-
-func (e *transportErr) Error() string { return e.msg }
-
-func TestDefaultChecker(t *testing.T) {
-	c, path := DefaultChecker(t.TempDir())
-	if c == nil {
-		t.Fatal("DefaultChecker returned nil")
+func TestCheck_EmptyTag_NotTreatedAsSuccess(t *testing.T) {
+	var calls atomic.Int32
+	emptyLookup := func(_ context.Context) (string, string, error) {
+		calls.Add(1)
+		return "", "nightme.dev", nil
 	}
-	if c.VersionURL != DefaultVersionURL {
-		t.Errorf("VersionURL = %q, want %q", c.VersionURL, DefaultVersionURL)
+	c := &Checker{
+		Lookup: emptyLookup,
+		Now:    func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
 	}
-	if path == "" {
-		t.Errorf("expected non-empty cache path")
-	}
-	if !strings.HasSuffix(path, "version-check.json") {
-		t.Errorf("cache path %q missing version-check.json suffix", path)
+	res := c.Check(context.Background(), "0.1.0", nil)
+	if res.Latest != "" {
+		t.Errorf("Latest = %q, want empty for empty tag", res.Latest)
 	}
 }
 
-func TestDefaultChecker_EmptyDataDir(t *testing.T) {
-	c, path := DefaultChecker("")
-	if c == nil {
-		t.Fatal("DefaultChecker returned nil")
+func TestCheck_TimeoutRespected(t *testing.T) {
+	slowLookup := func(ctx context.Context) (string, string, error) {
+		select {
+		case <-time.After(200 * time.Millisecond):
+			return "v9.9.9", "nightme.dev", nil
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		}
 	}
-	if path != "" {
-		t.Errorf("path = %q, want empty when dataDir is empty", path)
+	c := &Checker{
+		Lookup:      slowLookup,
+		HTTPTimeout: 50 * time.Millisecond,
+		Now:         func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
 	}
-	if c.CachePath != "" {
-		t.Errorf("CachePath = %q, want empty", c.CachePath)
+	start := time.Now()
+	res := c.Check(context.Background(), "0.1.0", nil)
+	elapsed := time.Since(start)
+	if elapsed > 150*time.Millisecond {
+		t.Errorf("Check took %v, expected <150ms (timeout=50ms)", elapsed)
 	}
-}
-
-// TestChecker_FetchLatest_SendsNightmeUserAgent pins the identity
-// the version check presents to nightme.dev. The endpoint uses it
-// to break down "who is still running which release on what
-// platform", so the GOOS / GOARCH in the platform comment are load
-// bearing, not decoration.
-func TestChecker_FetchLatest_SendsNightmeUserAgent(t *testing.T) {
-	var seen string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = r.Header.Get("User-Agent")
-		_ = json.NewEncoder(w).Encode(map[string]any{"latest_cli": "0.2.0"})
-	}))
-	defer srv.Close()
-
-	c := &Checker{VersionURL: srv.URL, HTTPClient: srv.Client()}
-	if _, err := c.fetchLatest(context.Background()); err != nil {
-		t.Fatalf("fetchLatest: %v", err)
-	}
-
-	if want := UserAgent(); seen != want {
-		t.Errorf("User-Agent = %q, want %q", seen, want)
-	}
-	if !strings.HasPrefix(seen, "nightme/") {
-		t.Errorf("User-Agent = %q, want a nightme/ product token", seen)
-	}
-	if !strings.Contains(seen, runtime.GOOS) || !strings.Contains(seen, runtime.GOARCH) {
-		t.Errorf("User-Agent = %q, want it to carry GOOS and GOARCH", seen)
+	if res.Latest != "" {
+		t.Errorf("Latest = %q, want empty (lookup timed out)", res.Latest)
 	}
 }
 
-// TestChecker_FetchLatest_CurrentOnlyBesideUnrelatedKeys is the
-// case the old len(raw) > 1 guard broke: `current` is the only
-// field carrying a version, but the payload also has unrelated
-// keys. nightme.dev always sends updated_at, so this is the shape
-// a real response takes the moment latest_cli is absent — and the
-// old code returned "no usable version field" for it.
-func TestChecker_FetchLatest_CurrentOnlyBesideUnrelatedKeys(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"current":    "0.9.9",
-			"updated_at": "2026-01-01T00:00:00Z",
-			"notice":     "scheduled maintenance",
-		})
-	}))
-	defer srv.Close()
-
-	c := &Checker{VersionURL: srv.URL, HTTPClient: srv.Client()}
-	got, err := c.fetchLatest(context.Background())
-	if err != nil {
-		t.Fatalf("fetchLatest: %v", err)
+// TestCheck_LegacyCacheSchema_LatestVersionIsIgnored pins the
+// upgrade path: a pre-rewrite cache file used `latest_version`,
+// not `latest`. The new schema doesn't read `latest_version`,
+// so the cache is treated as empty and a live Lookup fires.
+func TestCheck_LegacyCacheSchema_LatestVersionIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "version-check.json")
+	if err := os.WriteFile(cachePath, []byte(`{
+		"latest_version": "9.9.9",
+		"checked_at": "2026-06-01T11:59:00Z"
+	}`), 0o600); err != nil {
+		t.Fatalf("seed cache: %v", err)
 	}
-	if got != "0.9.9" {
-		t.Errorf("fetchLatest = %q, want current %q", got, "0.9.9")
+
+	var calls atomic.Int32
+	c := &Checker{
+		Lookup:    stubLookup("v1.0.0", &calls),
+		CachePath: cachePath,
+		Now:       func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+	}
+	res := c.Check(context.Background(), "0.1.0", nil)
+	if res.Latest != "v1.0.0" {
+		t.Errorf("Latest = %q, want %q (live lookup should override legacy schema)",
+			res.Latest, "v1.0.0")
+	}
+	if res.FromCache {
+		t.Errorf("FromCache = true; legacy schema must not satisfy the new reader")
 	}
 }
 
-// TestChecker_FetchLatest_UnusableHigherPriorityKey covers the
-// other half: a higher-priority key that is present but carries
-// null / a non-string / blank space must not shadow a lower-
-// priority key that does carry a version.
-func TestChecker_FetchLatest_UnusableHigherPriorityKey(t *testing.T) {
-	for name, body := range map[string]string{
-		"null":       `{"latest_cli":null,"current":"0.9.9"}`,
-		"non-string": `{"latest_cli":42,"current":"0.9.9"}`,
-		"blank":      `{"latest_cli":"   ","current":"0.9.9"}`,
-		"tag_name":   `{"latest_cli":null,"tag_name":"v0.9.9","current":"0.1.0"}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = io.WriteString(w, body)
-			}))
-			defer srv.Close()
-
-			c := &Checker{VersionURL: srv.URL, HTTPClient: srv.Client()}
-			got, err := c.fetchLatest(context.Background())
-			if err != nil {
-				t.Fatalf("fetchLatest: %v", err)
-			}
-			// tag_name outranks current, so that case resolves to
-			// the tag; every other case falls through to current.
-			want := "0.9.9"
-			if name == "tag_name" {
-				want = "v0.9.9"
-			}
-			if got != want {
-				t.Errorf("fetchLatest = %q, want %q", got, want)
-			}
-		})
+// TestCheck_TimeoutFieldDefaults verifies that HTTPTimeout=0
+// falls back to the package's httpTimeout default.
+func TestCheck_TimeoutFieldDefaults(t *testing.T) {
+	c := &Checker{
+		Lookup: stubLookup("v0.0.1", nil),
+		Now:    func() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) },
+	}
+	if c.HTTPTimeout != 0 {
+		t.Errorf("HTTPTimeout = %v, want 0 (test setup should leave it default)", c.HTTPTimeout)
+	}
+	if c.HTTPTimeout == 0 && httpTimeout == 0 {
+		t.Errorf("both HTTPTimeout and httpTimeout are 0 — production would hang")
 	}
 }

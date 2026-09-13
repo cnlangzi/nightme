@@ -118,6 +118,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/proc"
 	"github.com/cnlangzi/nightme/internal/runtime"
+	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
@@ -415,7 +416,7 @@ func decorateUpdateItem(item *systray.MenuItem) {
 	if cfg, err := config.LoadDefault(); err == nil && cfg != nil {
 		dataDir = cfg.Paths.DataDir
 	}
-	checker, _ := version.DefaultChecker(dataDir)
+	checker, _ := version.NewChecker(dataDir, updater.LookupLatestTag)
 	if checker == nil {
 		// Misconfig (no data dir resolution path at all) is
 		// silent: the tray surface is decorative, and the

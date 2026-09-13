@@ -43,6 +43,7 @@ import (
 	"github.com/spf13/cobra"
 
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
@@ -277,7 +278,7 @@ func runStartupUpdateCheck(out io.Writer, logger *slog.Logger, reader func() (st
 			logger.Warn(fmt.Sprintf(format, args...))
 		}
 	}
-	checker, _ := version.DefaultChecker(resolveDataDir())
+	checker, _ := version.NewChecker(resolveDataDir(), updater.LookupLatestTag)
 	res := checkWithCountdown(ctx, out, checker, version.Version, logf)
 	_ = promptForUpdateIfOutdated(ctx, &PromptDeps{
 		VersionCheck:       &res,

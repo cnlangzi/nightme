@@ -209,6 +209,7 @@ var standardRegistry = newRegistry(map[string]eventHandler{
 	"agent/inbox/spliced":       handleDebugOnly,       // queue spliced by server
 	"user/message":              handleUserMessageEcho, // ⚠ do NOT emit; see handler doc
 	"request/header":            handleDebugOnly,
+	"system/message":            handleDebugOnly,
 	"request/context":           handleDebugOnly,
 	"step/start":                handleStepBoundary,
 	"step/end":                  handleStepBoundary,

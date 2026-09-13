@@ -289,15 +289,16 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 	// forwarded to the sink if one is installed.
 	result, translateErr := parsePrintStream(ctx, stdout, cfg.Workspace, sink)
 
-	// Always wait for the process to exit so we can capture
-	// both the exit code AND stderr. If parsePrintStream
-	// errored early (e.g. agent_settled never fired) pi may
-	// still be a useful signal via its stderr — model errors,
-	// auth errors, etc. land there. The wait+reap path is
-	// shared between success and failure so neither path loses
-	// diagnostic info.
-	waitErr := child.Wait()
+	// Drain stderr BEFORE cmd.Wait: exec.Cmd.Wait reaps the
+	// process and then closes the parent end of the StderrPipe
+	// (closeAfterWait). If the drain goroutine hasn't pulled
+	// the child's last stderr bytes out of the kernel pipe
+	// buffer by then, the close discards them and stderr_buf
+	// lands empty — silently dropping auth / model errors
+	// written right before a non-zero exit. Millisecond race
+	// window; surfaces under -race on Linux CI.
 	<-stderrDone
+	waitErr := child.Wait()
 
 	piLog("PrintMode Exit",
 		"pid", pid,

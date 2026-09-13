@@ -76,7 +76,7 @@ func TestTryAttachExistingDSH_ReusesRunningDSH(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	a, attached := tryAttachExistingDSH(ctx, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	a, attached := tryAttachExistingDSH(ctx, slog.New(slog.NewTextHandler(os.Stderr, nil)), SharedHostOptions{})
 	if !attached {
 		t.Fatal("tryAttachExistingDSH returned attached=false; want true (cookie validated against running dsh)")
 	}

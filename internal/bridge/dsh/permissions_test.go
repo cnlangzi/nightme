@@ -382,12 +382,13 @@ func TestSendPermission_FailingRPCKeepsPendingEntry(t *testing.T) {
 		t.Fatal("timed out waiting for approval event")
 	}
 
-	// Simulate "no ready frame yet" by leaving hostRemoteClientID
-	// empty; SendPermission must return the empty-clientId error
-	// and leave the pending entry alive.
-	hostWaterfallMu.Lock()
-	hostRemoteClientID = ""
-	hostWaterfallMu.Unlock()
+	// Simulate "no ready frame yet" by leaving the captured
+	// clientId empty; SendPermission must return the
+	// empty-clientId error and leave the pending entry alive.
+	// The reset lives in host/ (the dsh-level var moved there
+	// to close the dispatch-vs-handler install race — see
+	// host/host_state.go).
+	host.ResetHostClientIDForTest()
 
 	if err := d.SendPermission(approvalAllowOnce); err == nil {
 		t.Fatal("SendPermission should fail when clientId is empty")

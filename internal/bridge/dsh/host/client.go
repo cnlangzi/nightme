@@ -31,6 +31,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/cnlangzi/nightme/internal/httpclient"
 	"io"
@@ -361,6 +362,132 @@ func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 		return nil, fmt.Errorf("dsh.host: session.list decode: %w", err)
 	}
 	return value.Items, nil
+}
+
+// WaitForDSHReady probes dsh until its internal plugins
+// (workspaceController, etc.) finish initializing, or until
+// maxAttempts is exhausted. Called from spawnAndWire after the
+// cookie mint closes the gap between "TCP accept" and "plugins
+// loaded" — without this probe, the driver's first workspace.create
+// hits "active Service workspaceController is unavailable" and
+// the user sees a startup-race error.
+//
+// Probe target: workspace.list (no args, dsh.md §2.4.5). The
+// request flows through the typert gateway and dispatches into
+// the workspaceController service; if the service is still
+// initializing, the gateway returns gateway/service-unavailable
+// (observed in the field 2026-09-13T09:38). Other failure modes:
+//
+//   - Network error: server mid-restart or socket closed.
+//     Treat as transient → retry.
+//   - gateway/service-unavailable: the documented startup race.
+//     Treat as transient → retry.
+//   - 4xx with a different error code: real config / wire
+//     mismatch. Treat as terminal → give up immediately so the
+//     caller sees the actual error (not a timeout).
+//   - 200 OK with empty list: dsh is up. Return.
+//
+// maxAttempts is the total number of tries (not retries); a value
+// of 1 disables retry. Backoff between attempts is respawnDelay
+// from the watchdog respawn path — same failure curve as the
+// attached-dsh fallback and the spawned-respawn paths.
+//
+// The context bounds the total wall time; cancel to abort early.
+// WaitForDSHReady probes dsh until its internal plugins
+// (workspaceController, etc.) finish initializing, or until
+// maxAttempts is exhausted. Called from spawnAndWire after the
+// cookie mint closes the gap between "TCP accept" and "plugins
+// loaded" — without this probe, the driver's first workspace.create
+// hits "active Service workspaceController is unavailable" and
+// the user sees a startup-race error.
+//
+// Probe target: workspace.create. Verified empirically on
+// dsh 0.1.2-rc.1 in 2026-09: workspace.list returns 404, so
+// workspace.create is the only path-level read that exercises
+// workspaceController at startup. dsh's gateway validates the
+// `request.path` field as a required absolute path (per
+// dsh.md §2.4.2 "path 必须绝对"); an empty request triggers
+// `gateway/input-invalid: wire field "request" failed
+// boundary validation` and the probe is treated as a real
+// failure rather than a transient race — that's why the path
+// argument is mandatory.
+//
+// The path comes from the SharedHostOptions.Workspace that
+// spawnAndWire was called with — same path nightme's own
+// handshakeSession eventually passes to SessionCreate (via
+// workspace.create→ session.create). The probe is the same
+// RPC nightme will make seconds later, just done earlier to
+// surface plugin-init failures up front.
+//
+// Failure contract:
+//   - "gateway/service-unavailable" → transient (plugin race),
+//     retry with respawnDelay(attempt) backoff.
+//   - Transport error (network, rpcId mismatch, etc.) → also
+//     transient, retry. The Hub's WS reconnect handles a mid-
+//     spawn server restart; spawnAndWire is no different.
+//   - 4xx with a non-transient code (e.g. "input-invalid",
+//     "bad-request") → terminal, return immediately. The
+//     caller (spawnAndWire) kills the subprocess and
+//     surfaces the real error.
+//
+// maxAttempts is the total number of tries (not retries); a value
+// of 1 disables retry. Backoff between attempts is respawnDelay
+// from the watchdog respawn path — same failure curve as the
+// attached-dsh fallback and the spawned-respawn paths.
+//
+// The context bounds the total wall time; cancel to abort early.
+func (c *RPCClient) WaitForDSHReady(ctx context.Context, path string, maxAttempts int) error {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	if path == "" {
+		// workspace.create's path arg is required (dsh.md §2.4.2).
+		// Without a path the gateway rejects with input-invalid
+		// and the probe is treated as terminal — no retries, no
+		// fallback spawn. Caller should always pass opts.Workspace
+		// (the workspace path that the dsh session is bound to).
+		return errors.New("dsh.host: WaitForDSHReady: empty path; cannot probe")
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			// respawnDelay(0) = 0, respawnDelay(1) = 1s, etc.
+			// Bound by ctx so caller can abort.
+			t := time.NewTimer(respawnDelay(attempt))
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return ctx.Err()
+			case <-t.C:
+			}
+		}
+		// workspace.create with the workspace's canonical path.
+		// dsh is idempotent on (path) — returns the existing
+		// workspace row with created=false if it already exists.
+		// The probe only needs a 200 OK to confirm the
+		// workspaceController is loaded; we don't read the body.
+		resp, err := c.Post(ctx, "workspace.create", map[string]any{
+			"request": map[string]any{
+				"path": path,
+			},
+		})
+		if err != nil {
+			lastErr = fmt.Errorf("dsh.host: workspace.create: %w", err)
+			continue
+		}
+		if !resp.Result.OK {
+			msg := resp.Result.ErrorMessage()
+			if strings.Contains(msg, "service-unavailable") {
+				// dsh plugin race; retry.
+				lastErr = fmt.Errorf("dsh.host: workspace.create: %s", msg)
+				continue
+			}
+			// Real config / wire mismatch. Give up.
+			return fmt.Errorf("dsh.host: workspace.create (non-transient): %s", msg)
+		}
+		return nil
+	}
+	return fmt.Errorf("dsh.host: dsh not ready after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // SessionCreateOpts is the wire body for /api/session.create.

@@ -19,6 +19,7 @@ package host_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -84,6 +85,14 @@ type mockDSH struct {
 	createCallCount atomic.Int64
 	respondCount    atomic.Int64
 	lastRespondBody atomic.Value // []byte
+
+	// readyClientID is the clientId dsh sends in the `ready` frame
+	// for the *current* mux connection. Stored as string so atomic
+	// load/store is type-safe; updated between connections by tests
+	// that want to verify the dispatch path overwrites a stale
+	// value (see host_state_test.go::TestReadyFrame_ReconnectOverwritesClientID).
+	// Default "client-mock-001" is set in newMockDSH.
+	readyClientID atomic.Value // string
 }
 
 type serverFrameEnvelope struct {
@@ -105,6 +114,10 @@ func newMockDSH(t *testing.T) *mockDSH {
 		streams:         make(map[string]chan muxItem),
 		sessionToStream: make(map[string]string),
 	}
+	// Default ready clientId; tests override via setReadyClientID
+	// to verify the dispatch path overwrites a stale value on
+	// reconnect (see host_state_test.go).
+	m.readyClientID.Store("client-mock-001")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/session/list", m.handleSessionList)
@@ -121,6 +134,16 @@ func newMockDSH(t *testing.T) *mockDSH {
 
 // url returns the mock server's URL.
 func (m *mockDSH) url() string { return m.server.URL }
+
+// setReadyClientID changes the clientId the next /api/remote.mux
+// upgrade will send in its `ready` frame. Tests use this to
+// simulate a fresh dsh process assigning a new per-connection
+// clientId; the bridge's dispatch path must overwrite any
+// previously captured value (see
+// host_state_test.go::TestReadyFrame_ReconnectOverwritesClientID).
+func (m *mockDSH) setReadyClientID(id string) {
+	m.readyClientID.Store(id)
+}
 
 // ─── HTTP handlers ─────────────────────────────────────────────────
 
@@ -208,9 +231,12 @@ func (m *mockDSH) handleMuxWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send the "ready" frame every dsh 0.1.2-rc.1 connection
 	// sends on upgrade. Bridge uses it only for log correlation.
+	// clientId is read at connection time (not at mock-construction
+	// time) so tests can rotate it between connections to verify
+	// the dispatch path overwrites stale values on reconnect.
 	ready := map[string]any{
 		"type":     "ready",
-		"clientId": "client-mock-001",
+		"clientId": m.readyClientID.Load().(string),
 		"host":     map[string]any{"home": "/tmp/test"},
 	}
 	if err := conn.WriteJSON(ready); err != nil {
@@ -956,4 +982,169 @@ var (
 	_ = strings.Repeat
 	_ = sync.Once{}
 	_ io.Reader
+)
+
+// ─── WaitForDSHReady: startup readiness probe ──────────────────────
+
+// dshReadyStubServer is a minimal httptest.Server that handles
+// /api/workspace.create (the probe target). It fails the first
+// `failFirstN` requests with gateway/service-unavailable, then
+// returns 200 OK. count is the total request count (atomic).
+// Use `tErrBody` to switch the error body for non-transient tests.
+type dshReadyStubServer struct {
+	srv        *httptest.Server
+	failFirstN int
+	count      atomic.Int64
+}
+
+func newDSHReadyStub(t *testing.T, failFirstN int) *dshReadyStubServer {
+	t.Helper()
+	s := &dshReadyStubServer{failFirstN: failFirstN}
+	mux := http.NewServeMux()
+	// RPCClient.Post constructs the URL as baseURL + "/api/" +
+	// methodDotsToSlashes(method), so "workspace.create" becomes
+	// "/api/workspace/create" (slash, not dot). Match that.
+	mux.HandleFunc("/api/workspace/create", func(w http.ResponseWriter, r *http.Request) {
+		n := s.count.Add(1)
+		// dsh echoes the request's rpcId in the response.
+		// RPCClient.Post validates resp.RPCID == sent rpcID and
+		// returns a transport error on mismatch; which would
+		// trip our retry loop. Echo it back via map (the
+		// surrounding file is one big raw string in some
+		// tests; struct tags would require backticks).
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		var env map[string]any
+		_ = json.Unmarshal(body, &env)
+		sentRPCID, _ := env["rpcId"].(string)
+		if n <= int64(s.failFirstN) {
+			// Match dsh 0.1.2-rc.1's wire shape for
+			// gateway/service-unavailable.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK) // typert returns 200 with ok=false
+			_, _ = fmt.Fprintf(w, `{"type":"server-response","rpcId":%q,"result":{"ok":false,"error":{"code":"gateway/service-unavailable","message":"active Service \"workspaceController\" is unavailable"}}}`, sentRPCID)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"type":"server-response","rpcId":%q,"result":{"ok":true,"value":{"workspace":{"workspaceId":"stub"}}}}`, sentRPCID)
+	})
+	s.srv = httptest.NewServer(mux)
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+// TestRPCClient_WaitForDSHReady_RetriesOnServiceUnavailable pins
+// the contract: a transient "gateway/service-unavailable" from
+// the probe target (workspace.create) does NOT abort spawnAndWire —
+// the probe retries with respawnDelay backoff and eventually
+// returns nil once dsh's plugin registry is loaded.
+func TestRPCClient_WaitForDSHReady_RetriesOnServiceUnavailable(t *testing.T) {
+	stub := newDSHReadyStub(t, 3) // fail first 3, succeed on 4th
+	c := host.NewRPCClient(stub.srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := c.WaitForDSHReady(ctx, "/tmp/test", 5); err != nil {
+		t.Fatalf("WaitForDSHReady: %v", err)
+	}
+	if got := stub.count.Load(); got != 4 {
+		t.Errorf("workspace.create call count = %d, want 4 (3 failures + 1 success)", got)
+	}
+}
+
+// TestRPCClient_WaitForDSHReady_GivesUpAfterMaxAttempts pins
+// the failure cap: when ALL attempts return service-unavailable,
+// the probe returns the last error after maxAttempts. The
+// caller (spawnAndWire) propagates that as a hard spawn error
+// and tears down the subprocess.
+func TestRPCClient_WaitForDSHReady_GivesUpAfterMaxAttempts(t *testing.T) {
+	stub := newDSHReadyStub(t, 100) // always fail
+	c := host.NewRPCClient(stub.srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const maxAttempts = 4
+	err := c.WaitForDSHReady(ctx, "/tmp/test", maxAttempts)
+	if err == nil {
+		t.Fatal("expected error after all attempts fail, got nil")
+	}
+	if got := stub.count.Load(); got != int64(maxAttempts) {
+		t.Errorf("workspace.create call count = %d, want %d", got, maxAttempts)
+	}
+}
+
+// TestRPCClient_WaitForDSHReady_NonTransientIsTerminal pins the
+// fast-fail contract: a 4xx error code OTHER than
+// service-unavailable is treated as a real config / wire
+// mismatch and the probe returns immediately (not retried). This
+// avoids burning the timeout on a non-recoverable failure.
+func TestRPCClient_WaitForDSHReady_NonTransientIsTerminal(t *testing.T) {
+	// Single-shot mock that returns a non-transient error.
+	// Echoes the request's rpcId so RPCClient.Post's
+	// resp.RPCID == sent rpcID check passes; the probe
+	// then sees the business-level "bad-request" and must
+	// fast-fail (no retry).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		var env struct {
+			RPCID string `json:"rpcId"`
+		}
+		_ = json.Unmarshal(body, &env)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"type":"server-response","rpcId":"%s","result":{"ok":false,"error":{"code":"bad-request","message":"missing args"}}}`, env.RPCID)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := host.NewRPCClient(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// maxAttempts=10 — if the probe retried, the 5s timeout
+	// would fire. Instead it should return immediately after
+	// the single attempt.
+	start := time.Now()
+	err := c.WaitForDSHReady(ctx, "/tmp/test", 10)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error on non-transient failure, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("non-transient probe took %v; expected fast-fail (under 2s)", elapsed)
+	}
+}
+
+// TestRPCClient_WaitForDSHReady_ContextCancel pins the
+// context-cancellation contract: the probe honors ctx and
+// returns ctx.Err() if the context is cancelled mid-wait.
+func TestRPCClient_WaitForDSHReady_ContextCancel(t *testing.T) {
+	stub := newDSHReadyStub(t, 100) // always fail; probe will keep retrying
+	c := host.NewRPCClient(stub.srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel the ctx after 50ms while the probe is between
+	// attempts in respawnDelay(1)=1s.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := c.WaitForDSHReady(ctx, "/tmp/test", 10)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error after ctx cancel, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Errorf("probe took %v after cancel; expected fast return", elapsed)
+	}
+}
+
+// atomic.Int64 is imported via the stub server's count field.
+// errors.Is / context.Canceled are used by the cancel test.
+var (
+	_ atomic.Int64
+	_ = errors.Is
 )

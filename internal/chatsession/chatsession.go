@@ -1827,29 +1827,24 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	var spawnErr error
 	if spawner != nil {
 		spawnErr = as.Spawn(context.Background(), spawner)
-
-		// fix-stop (2026-08-15): when the bridge rejected the
-		// saved sessionID with agent.ErrResumeUnhealthy, the
-		// AgentSession.respawn path has already cleared the
-		// sessionID inside its own error branch. The next
-		// Spawn (without a resume id) should land on a fresh
-		// session — retry once before surfacing the error to
-		// the dispatcher. Without this, the user would see
-		// "Failed to spawn agent" on every inbound message
-		// after /close+--resume-rejection until they ran
-		// `/new` or hand-edited agent_sessions.json.
+		// (2026-09-13) No more auto-retry on ErrResumeUnhealthy.
+		// The previous fix-stop (2026-08-15) retry was added to
+		// avoid surfacing the "stale id" error to the user on every
+		// inbound message — but it had a worse side effect: the
+		// user's saved sessionId (e.g. session-26c4ff1a-...) was
+		// silently replaced by a fresh d5de9b4e, and the user
+		// never knew the original session existed but was rejected.
 		//
-		// Limit to ONE retry: the second attempt is a fresh
-		// spawn (no resume) so it can only fail with a
-		// different class of error (binary missing, handshake
-		// refused, etc.) — not the resume-stale-id loop. If
-		// the retry fails, surface the most recent error so
-		// the dispatcher can render it.
-		if spawnErr != nil && errors.Is(spawnErr, agent.ErrResumeUnhealthy) {
-			slog.Warn("chatsession: spawn retry without resume id after ErrResumeUnhealthy",
-				"chat_id", cs.ChatID, "as_id", as.ID, "agent", selectedAgent)
-			spawnErr = as.Spawn(context.Background(), spawner)
-		}
+		// New contract: the first Spawn call's error propagates
+		// to the dispatcher. The dispatcher renders the error
+		// in the chat card (the spawn path is wrapped with
+		// "Failed to spawn agent" below). The user can:
+		//   - send `/new` to explicitly start a fresh session
+		//   - inspect /Users/.../agent_sessions.json
+		//   - retry after fixing the underlying dsh state
+		// The AgentSession's saved sessionId is NOT touched —
+		// a subsequent `/retry` will pass the same id back to
+		// the bridge, which is what the user expects.
 	}
 
 	if spawner != nil {

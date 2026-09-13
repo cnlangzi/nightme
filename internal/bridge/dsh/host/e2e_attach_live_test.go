@@ -59,7 +59,7 @@ func TestE2ESpawnFallbackWhenNoForeignDSH(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, attached := tryAttachExistingDSH(ctx, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	_, attached := tryAttachExistingDSH(ctx, slog.New(slog.NewTextHandler(os.Stderr, nil)), SharedHostOptions{})
 	if attached {
 		t.Fatal("tryAttachExistingDSH returned attached=true with no dsh on 3080-3099; want false")
 	}

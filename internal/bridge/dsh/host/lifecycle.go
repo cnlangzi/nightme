@@ -96,6 +96,44 @@ const (
 	defaultPortScanMax = 3099
 )
 
+// Foreign-dsh probe tuning. When nightme attaches to a user dsh
+// (ownsProcess=false), the watchdog is dead. watchForeign takes
+// over: it periodically probes /api/session.list and on
+// `attachedProbeStrikes` consecutive failures considers the
+// foreign dsh dead and triggers fallbackToSpawn. 30s × 3 = 90s
+// detection latency is the production default; tests override
+// via attachedSharedHost.testHooks.
+const (
+	defaultAttachedProbeInterval = 30 * time.Second
+	defaultAttachedProbeStrikes  = 3
+	defaultAttachedProbeTimeout  = 5 * time.Second
+)
+
+// maxAttachedFallbackAttempts caps how many times fallbackToSpawn
+// will retry spawnOnce on transient failure (port busy, dsh
+// binary missing, etc.) before giving up. After giving up, the
+// monitor exits and the host is left in attached state — the
+// user can `make restart` to recover. Reuses respawnDelay for
+// backoff so the failure curve matches the standard watchdog
+// respawn path.
+const maxAttachedFallbackAttempts = 3
+
+// dshReadyTimeout / dshReadyAttempts bound the post-cookie
+// readiness probe in spawnAndWire. The probe is per-call
+// (workspace.list) so per-attempt wall time is small; the
+// timeout is the cap. With respawnDelay backoff (0, 1s, 2s, ...)
+// 5 attempts sums to ~3s plus per-attempt RPC time — well
+// within a 15s budget on a healthy machine. Tuned in 2026-09
+// after observing the workspaceController startup race where
+// dsh's HTTP server is up but the plugin registry is still
+// loading — without this probe, the first workspace.create
+// after spawn returns "active Service workspaceController is
+// unavailable" and the user sees a startup-race error.
+const (
+	dshReadyTimeout  = 15 * time.Second
+	dshReadyAttempts = 5
+)
+
 // SharedHostOptions configures StartSharedHost.
 type SharedHostOptions struct {
 	// Workspace is the dsh process's working directory. dsh's bash /
@@ -259,7 +297,7 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	// reuse the running dsh. This eliminates the orphan-dsh-on-port-
 	// 3081-3099 pattern that the old "spawn fallback" policy
 	// created.
-	attachHost, attached := tryAttachExistingDSH(ctx, logger)
+	attachHost, attached := tryAttachExistingDSH(ctx, logger, opts)
 	if attached {
 		logger.Info("dsh.host: attached to existing dsh — no spawn needed",
 			"port", attachHost.port)
@@ -325,9 +363,43 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 // attached to via tryAttachExistingDSH. We carry the resolved port
 // so the watchdog can re-probe on WS drop, and a no-cmd SharedHost
 // (cmd is nil — we didn't spawn it).
+//
+// testHooks is nil in production; tests inject non-nil values to
+// drive the probe loop fast and to signal completion via the
+// fallbackDone channel. Documented on each field.
 type attachedSharedHost struct {
-	host *SharedHost
-	port int
+	host      *SharedHost
+	port      int
+	testHooks *attachedTestHooks
+}
+
+// attachedTestHooks lets tests drive the probe loop with shorter
+// intervals / fewer strikes and signal completion through a
+// channel. Production never sets this (a in the dsh bridge
+// remains nil; the monitor uses the package-level constants).
+type attachedTestHooks struct {
+	// ProbeInterval overrides defaultAttachedProbeInterval when > 0.
+	ProbeInterval time.Duration
+	// ProbeStrikes overrides defaultAttachedProbeStrikes when > 0.
+	ProbeStrikes int
+	// ProbeTimeout overrides defaultAttachedProbeTimeout when > 0.
+	ProbeTimeout time.Duration
+	// FallbackDone is closed by watchForeign when fallbackToSpawn
+	// returns (or after a fallback failure that ends the monitor).
+	// Tests wait on this channel instead of polling internal state.
+	FallbackDone chan struct{}
+	// OnFallback, if non-nil, replaces the production
+	// fallbackToSpawn call. Tests use this to avoid spawning a
+	// real dsh subprocess (production fallback would fail or
+	// hang in a test environment). nil = production fallback.
+	OnFallback func(logger *slog.Logger) error
+
+	// Spawner, if non-nil, replaces a.host.spawnOnce inside
+	// the production fallback. Tests use this to inject a mock
+	// spawner (returns a fake *exec.Cmd / *Client without forking
+	// a real dsh) so they can drive the retry + state-mutation
+	// paths without a real subprocess. nil = production spawner.
+	Spawner func() (*exec.Cmd, *Client, error)
 }
 
 // tryAttachExistingDSH probes 3080 (then 3081-3099 in order) for
@@ -335,7 +407,7 @@ type attachedSharedHost struct {
 // minted cookie, and calls /api/session/list to verify the cookie
 // validates. Returns the first hit; if all probes fail, returns
 // attached=false so the caller falls back to spawn.
-func tryAttachExistingDSH(ctx context.Context, logger *slog.Logger) (*attachedSharedHost, bool) {
+func tryAttachExistingDSH(ctx context.Context, logger *slog.Logger, opts SharedHostOptions) (*attachedSharedHost, bool) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -391,7 +463,7 @@ func tryAttachExistingDSH(ctx context.Context, logger *slog.Logger) (*attachedSh
 		}
 		SetGlobal(cli)
 		return &attachedSharedHost{
-			host: &SharedHost{cli: cli, logger: logger, opts: SharedHostOptions{}},
+			host: &SharedHost{cli: cli, logger: logger, opts: opts},
 			port: port,
 		}, true
 	}
@@ -409,16 +481,222 @@ func fallbackPorts() []int {
 }
 
 // watchForeign is the watchdog variant for attached (foreign) dsh.
-// We don't own cmd — if it dies permanently, re-probe with
-// tryAttachExistingDSH; if nothing is listening, fall back to a
-// fresh spawn on 3080 (the canonical port).
+// We don't own cmd — there's no `<-waitCmd` to wait on. Instead,
+// we periodically probe /api/session.list on the attached cli and
+// count consecutive failures. After `attachedProbeStrikes`
+// failures (3 by default = 90s), we consider the foreign dsh
+// process dead and trigger fallbackToSpawn, which:
+//
+//  1. spawns a fresh dsh via h.spawnOnce (h.opts was captured at
+//     attach time so spawnAndWire has the right Workspace / HostCmd /
+//     PermissionMode / Port);
+//  2. swaps h.cmd/h.cli/ownsProcess on the SharedHost in place;
+//  3. swaps the *Client global (ReplaceGlobal) and the *SharedHost
+//     global (Unset/Set);
+//  4. closes the OLD cli so its Done() fires and the existing
+//     Keepalive → onRecover → spawner.Spawn pipeline takes over
+//     (rebuilds drivers with the user's sessionId preserved via
+//     dsh's idempotent session.create({sessionId, cwd}));
+//  5. starts the standard runWatchdog on the now-owned dsh.
+//
+// The Hub's own WS reconnect loop handles transient WS drops; we
+// only fire when the underlying dsh process itself is gone (RPC
+// repeatedly fails).
 func (a *attachedSharedHost) watchForeign(logger *slog.Logger) {
-	// The Hub's WS reconnect loop already kicks in transparently on
-	// transient WS drops. We only need to act if the dsh process
-	// itself exits (which we can't observe directly without a cmd
-	// handle). For now, do nothing — the next Start call from
-	// any chat session will re-probe.
-	_ = logger
+	interval := defaultAttachedProbeInterval
+	strikes := defaultAttachedProbeStrikes
+	probeTimeout := defaultAttachedProbeTimeout
+	var fallbackDone chan struct{}
+	if a.testHooks != nil {
+		if a.testHooks.ProbeInterval > 0 {
+			interval = a.testHooks.ProbeInterval
+		}
+		if a.testHooks.ProbeStrikes > 0 {
+			strikes = a.testHooks.ProbeStrikes
+		}
+		if a.testHooks.ProbeTimeout > 0 {
+			probeTimeout = a.testHooks.ProbeTimeout
+		}
+		fallbackDone = a.testHooks.FallbackDone
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var consecutiveFailures int
+	for {
+		// The monitor only exits via: (a) fallback succeeded
+		// (runWatchdog takes over), (b) fallback failed (logged
+		// and the daemon process dies with the Go runtime tearing
+		// us down). There is no other early-exit signal — we
+		// don't want to stop probing on transient failures.
+		<-ticker.C
+		if a.probeOnce(logger, probeTimeout) {
+			consecutiveFailures = 0
+			continue
+		}
+		consecutiveFailures++
+		if consecutiveFailures < strikes {
+			continue
+		}
+		logger.Warn("dsh.host: attached dsh appears dead after strikes; falling back to spawn",
+			"strikes", consecutiveFailures, "port", a.port)
+		var err error
+		if a.testHooks != nil && a.testHooks.OnFallback != nil {
+			err = a.testHooks.OnFallback(logger)
+		} else {
+			err = a.fallbackToSpawn(logger)
+		}
+		if err != nil {
+			logger.Error("dsh.host: fallback failed; monitor exiting",
+				"err", err)
+			if fallbackDone != nil {
+				close(fallbackDone)
+			}
+			return
+		}
+		if fallbackDone != nil {
+			close(fallbackDone)
+		}
+		return // runWatchdog now owns the new dsh.
+	}
+}
+
+// probeOnce calls /api/session.list on the attached cli with a
+// short timeout. Returns true on success (200 OK), false on any
+// error. The cli is read under h.mu; if the fallback path swapped
+// it in between, the new probe is against the new cli — that's
+// fine, the monitor returns either way.
+func (a *attachedSharedHost) probeOnce(logger *slog.Logger, timeout time.Duration) bool {
+	a.host.mu.RLock()
+	cli := a.host.cli
+	a.host.mu.RUnlock()
+	if cli == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if _, err := cli.RPC.SessionList(ctx); err != nil {
+		logger.Debug("dsh.host: attached probe failed", "err", err)
+		return false
+	}
+	return true
+}
+
+// fallbackToSpawn takes a foreign-dsh-attached SharedHost and
+// transitions it into the owned state by spawning a fresh dsh.
+// Called from watchForeign when the foreign dsh appears dead.
+//
+// Retries up to maxAttachedFallbackAttempts times on transient
+// spawn failure (port collision, dsh binary missing, etc.) with
+// respawnDelay backoff between attempts. After the cap, returns
+// the last error; the caller (watchForeign) logs and exits; the
+// user can `make restart` to recover.
+//
+// On the retry path, a transient failure (e.g. all of 3080-3099
+// occupied) usually clears on the next backoff tick — the system
+// recovers without a manual restart. Without the retry, a single
+// spawn failure would leave the host in attached state pointing
+// at a dead dsh with no way forward.
+func (a *attachedSharedHost) fallbackToSpawn(logger *slog.Logger) error {
+	spawner := func() (*exec.Cmd, *Client, error) { return a.host.spawnOnce() }
+	if a.testHooks != nil && a.testHooks.Spawner != nil {
+		spawner = a.testHooks.Spawner
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttachedFallbackAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(respawnDelay(attempt))
+			logger.Warn("dsh.host: fallback spawn attempt failed; retrying",
+				"attempt", attempt+1,
+				"max_attempts", maxAttachedFallbackAttempts,
+				"err", lastErr)
+		}
+		if err := a.tryFallbackOnce(logger, spawner); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("dsh.host: fallback spawn gave up after %d attempts: %w",
+		maxAttachedFallbackAttempts, lastErr)
+}
+
+// tryFallbackOnce does the actual foreign → owned transition.
+// Extracted from fallbackToSpawn so tests can drive the state-
+// mutation path directly with a mock Spawner. The retry loop
+// in fallbackToSpawn is the only thing above this; everything
+// else is the per-attempt state swap.
+//
+// Ordering matters: capture the OLD cli before spawnOnce (so we
+// can Close it to fire Done() for the existing drivers' Keepalive
+// path), then atomically swap h.cmd/h.cli/ownsProcess/watchdogDone,
+// then swap the process globals, then Close the old cli, then
+// start the new watchdog. We hold h.mu only around the field
+// mutations; the spawner runs lock-free (it doesn't touch h).
+//
+// Pre-condition: a.host.ownsProcess is false (caller checks).
+// Post-condition: a.host is in the owned state; process globals
+// point at the new cli/host; the OLD cli's Done() has fired.
+func (a *attachedSharedHost) tryFallbackOnce(logger *slog.Logger, spawner func() (*exec.Cmd, *Client, error)) error {
+	a.host.mu.RLock()
+	if a.host.ownsProcess {
+		a.host.mu.RUnlock()
+		// Already owned (e.g. monitor ran twice). No-op.
+		return nil
+	}
+	oldCli := a.host.cli // capture the dead/foreign cli for Close()
+	a.host.mu.RUnlock()
+
+	cmd, cli, err := spawner()
+	if err != nil {
+		return fmt.Errorf("dsh.host: fallback spawn: %w", err)
+	}
+
+	a.host.mu.Lock()
+	a.host.cmd = cmd
+	a.host.cli = cli
+	a.host.ownsProcess = true
+	if a.host.watchdogDone == nil {
+		a.host.watchdogDone = make(chan struct{})
+	}
+	a.host.mu.Unlock()
+
+	// Replace the process-global *Client first (non-panicking).
+	// Then Unset/Set the *SharedHost global (SetSharedHost panics
+	// on double-install, so Unset must precede Set).
+	ReplaceGlobal(cli)
+	UnsetSharedHost()
+	SetSharedHost(a.host)
+
+	// Fire the OLD cli's Done() so the existing drivers' Keepalive
+	// tick (in agentsession) sees the dead cli and calls onRecover
+	// → spawner.Spawn → fresh *dsh.driver → handshakeSession
+	// session.create({sessionId, cwd}) preserves the sessionId.
+	// Best-effort: Close returns nothing; the cli is already dead.
+	if oldCli != nil {
+		oldCli.Close()
+	}
+
+	// Hand the now-owned dsh to the standard watchdog. Health
+	// probe engages because ownsProcess=true; if the new dsh
+	// dies, runWatchdog respawns via the standard path.
+	go a.host.runWatchdog()
+
+	// cmd may be nil in tests where the Spawner hook is used to
+	// short-circuit the real spawn (e.g. unit tests that want
+	// state-mutation coverage without forking a dsh binary). The
+	// watchdog handles cmd==nil cleanly (returns immediately),
+	// so the log line is just a nice-to-have.
+	newPID := -1
+	if cmd != nil && cmd.Process != nil {
+		newPID = cmd.Process.Pid
+	}
+	logger.Info("dsh.host: fallback spawn complete",
+		"old_port", a.port,
+		"new_pid", newPID,
+	)
+	return nil
 }
 
 // dialReachable reports whether a TCP connection to 127.0.0.1:port
@@ -1080,6 +1358,28 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	// Wired via a deferred host.OnLifecycleInstall to avoid an
 	// import cycle (this package is imported by the dsh package).
 	OnLifecycleInstall(cli)
+	// Wait for dsh's internal plugins (workspaceController etc.)
+	// to finish initializing. Without this probe, the driver's
+	// first workspace.create hits "active Service workspaceController
+	// is unavailable" — the HTTP server is up but the typert
+	// gateway's plugin registry is still loading. WaitForDSHReady
+	// polls workspace.create (the same RPC nightme uses to bind
+	// the session) and retries on "service-unavailable" with
+	// respawnDelay backoff. opts.Workspace is the path argument
+	// dsh's workspace.create requires (dsh.md §2.4.2); passing the
+	// empty string triggers a terminal "input-invalid" error rather
+	// than a transient race, so the caller must supply it.
+	// The cookie is required (workspace.create auths the request),
+	// so this must come after mintDSHAuthCookie. ctx is bounded
+	// by the spawn timeout so we don't hang forever on a
+	// genuinely broken dsh binary.
+	readyCtx, readyCancel := context.WithTimeout(ctx, dshReadyTimeout)
+	defer readyCancel()
+	if err := cli.WaitForDSHReady(readyCtx, opts.Workspace, dshReadyAttempts); err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return nil, nil, fmt.Errorf("dsh.host: dsh started but not ready: %w", err)
+	}
 	if err := cli.Start(ctx); err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()

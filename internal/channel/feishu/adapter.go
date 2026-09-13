@@ -1414,7 +1414,25 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	return transient, true, nil
 }
 
+// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+// nil-safe 读 receipt 的 cardMsgID,给 probe 日志用。
+func cardMsgIDFor(r *MessageReceipt) string {
+	if r == nil {
+		return ""
+	}
+	return r.cardMsgID
+}
+
 func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
+	// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+	// 每次 Send 入口打一行,看 OutReply / OutCommandReply / OutMessageState
+	// 的实际到达序列(replyTo + chatID + text 长度 + kind)。
+	a.logger.Info("feishu.review-probe.Send",
+		"kind", msg.Kind.String(),
+		"reply_to", msg.ReplyTo,
+		"chat_id", msg.ChatID,
+		"text_len", len(msg.Text),
+	)
 	switch msg.Kind {
 	case messages.OutReply:
 		// F-44 revert: OutReply folds into the rolling-log receipt
@@ -1460,6 +1478,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// (no divider, no grey footer).
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
+			// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+			a.logger.Info("feishu.review-probe.OutReply.empty_drop",
+				"reply_to", msg.ReplyTo)
 			return nil
 		}
 		// F-45 §2.8: footer is always passed per-line to
@@ -1470,6 +1491,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// N+1 copies inline.
 		footerLines := statusbar.StatusBarLines(&msg)
 		if msg.ReplyTo == "" {
+			// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+			a.logger.Info("feishu.review-probe.OutReply.path",
+				"reply_to", msg.ReplyTo, "decision", "orphan_no_anchor")
 			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
 		// Cold-start: if no receipt exists for this userMsgID,
@@ -1477,9 +1501,21 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// ensureReceiptForReply sends the card via top-level Create
 		// (rootID=""); subsequent chunks PATCH the same card.
 		receipt, created, err := a.ensureReceiptForReplyWithFooter(ctx, msg.ChatID, msg.ReplyTo, text, footerLines)
+		// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+		// 看每条 OutReply 命中哪条路径 + receipt 当前状态。
+		a.logger.Info("feishu.review-probe.OutReply.path",
+			"reply_to", msg.ReplyTo,
+			"decision", "ensure",
+			"created", created,
+			"err", err,
+			"receipt_nil", receipt == nil,
+			"existing_card_msg_id", cardMsgIDFor(receipt),
+		)
 		if err != nil {
 			// Cold-start failed (SendCard error). Fall back to
 			// top-level Create so the user still sees the chunk.
+			a.logger.Info("feishu.review-probe.OutReply.path",
+				"reply_to", msg.ReplyTo, "decision", "orphan_cold_start_err")
 			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
 		if !created {
@@ -1608,7 +1644,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// AS handle") no longer applies.
 		if state == agent.MessageQueued {
 			footerLines := statusbar.StatusBarLines(&msg)
-			if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, footerLines); err != nil {
+			r, created, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, footerLines)
+			// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+			// 看 placeholder receipt 创没创 + 创在哪(userMsgID) + cardMsgID。
+			a.logger.Info("feishu.review-probe.MessageQueued.placeholder",
+				"user_msg_id", messageID,
+				"chat_id", msg.ChatID,
+				"created", created,
+				"err", err,
+				"card_msg_id", cardMsgIDFor(r),
+			)
+			if err != nil {
 				// Non-fatal: the reaction still fires, and the
 				// first OutReply will retry the cold-start card.
 				a.logger.Warn("feishu: ensureReceiptForTyping at MessageQueued failed",
@@ -1953,13 +1999,25 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 			return errors.New("feishu: OutCommandReply missing text")
 		}
 		if msg.ReplyTo == "" {
+			// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+			a.logger.Info("feishu.review-probe.OutCommandReply.path",
+				"reply_to", msg.ReplyTo, "decision", "orphan_no_anchor")
 			return a.postOrphanReplyCard(ctx, msg.ChatID, msg.Text, statusbar.StatusBarLines(&msg))
 		}
 		r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
+		// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+		a.logger.Info("feishu.review-probe.OutCommandReply.path",
+			"reply_to", msg.ReplyTo,
+			"decision", "receipt_lookup",
+			"receipt_nil", r == nil,
+			"existing_card_msg_id", cardMsgIDFor(r),
+		)
 		if r == nil {
 			// No placeholder to PATCH (race with MessageQueued
 			// or genuine pre-placeholder slash command). Fall back
 			// to a top-level card so the reply isn't dropped.
+			a.logger.Info("feishu.review-probe.OutCommandReply.path",
+				"reply_to", msg.ReplyTo, "decision", "orphan_no_receipt")
 			return a.postOrphanReplyCard(ctx, msg.ChatID, msg.Text, statusbar.StatusBarLines(&msg))
 		}
 		// Fold into the placeholder receipt. The shared helper

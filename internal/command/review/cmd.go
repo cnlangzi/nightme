@@ -295,7 +295,18 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		sink, finalize := outbound.StreamRunOnceToEmitter(revCtx, emitter, cs, slog.Default(), chatID, replyTo, runnerName)
 		defer finalize()
 
+		// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+		slog.Default().Info("feishu.review-probe.review.cmd",
+			"stage", "before-starter-review",
+			"chat_id", chatID, "reply_to", replyTo, "runner", runnerName,
+		)
+
 		result, err := starter.Review(revCtx, rc, agent.WithEventSink(sink))
+		// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+		slog.Default().Info("feishu.review-probe.review.cmd",
+			"stage", "after-starter-review",
+			"err", err, "result_text_len", len(result.Text),
+		)
 		if err != nil {
 			if emitter == nil {
 				return
@@ -367,6 +378,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		if revCtx.Err() != nil {
 			return
 		}
+		// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+		slog.Default().Info("feishu.review-probe.review.cmd",
+			"stage", "final-emitter-send",
+			"chat_id", chatID, "reply_to", replyTo, "text_len", len(formatted),
+		)
 		_ = emitter.Send(revCtx, messages.OutboundMessage{
 			ChatID:  chatID,
 			Kind:    messages.OutReply,

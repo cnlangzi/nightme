@@ -17,6 +17,8 @@ package command
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -218,14 +220,23 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, mgr *chats
 	// Framework ⏳ — every matched slash command gets a placeholder
 	// reaction on the user message before any work begins. Skipped
 	// for nil sessions / synthetic inbounds (no MessageID).
+	// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+	fmt.Fprintf(os.Stderr, "feishu.review-probe.commander: MessageQueued cmd=%s message_id=%q chat_id=%q\n",
+		cmdName, input.MessageID, input.ChatID)
 	chatsession.PublishMessageState(cs, input.MessageID, agent.MessageQueued)
+	// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+	fmt.Fprintf(os.Stderr, "feishu.review-probe.commander: MessageQueued-returned cmd=%s\n", cmdName)
 
 	out, err := cmd.Handle(ctx, rt, mgr, cs, input)
 
 	// Framework ✅ — fires unconditionally after cmd.Handle returns
 	// (success or error). For a nil cs / empty MessageID the helper
 	// is a no-op, so we don't need to repeat the guard here.
+	// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+	fmt.Fprintf(os.Stderr, "feishu.review-probe.commander: Handle-returned cmd=%s err=%v\n", cmdName, err)
 	chatsession.PublishMessageState(cs, input.MessageID, agent.MessageDone)
+	// PROBE(2026-09-13): /review long-roll-card 验证用,验证完删除。
+	fmt.Fprintf(os.Stderr, "feishu.review-probe.commander: MessageDone-emitted cmd=%s\n", cmdName)
 
 	if err != nil {
 		// The command itself errored — surface as a reply so the

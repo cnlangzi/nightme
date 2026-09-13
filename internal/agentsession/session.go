@@ -238,6 +238,52 @@ type AgentSession struct {
 	// closes eventQueue; subsequent calls are no-ops (close-on-
 	// closed-channel panic guard).
 	shutdownOnce sync.Once
+
+	// currentPromptOverrideUserMsgID is the readpump's UserMsgID
+	// override for the in-flight prompt. See WithReplyTo.
+	currentPromptOverrideUserMsgID string
+}
+
+// sendBlocksOpts is the variadic-arguments receiver for
+// AgentSession.SendBlocks.
+type sendBlocksOpts struct {
+	replyTo string
+}
+
+// WithReplyTo makes the readpump stamp messageID as UserMsgID on
+// every AgentEvent emitted in response to the next SendBlocks call,
+// instead of currentPrompt.LastMessageID. Used by /review so the
+// main agent's response to the injected review findings anchors to
+// the /review slash command and folds into its placeholder card.
+func WithReplyTo(messageID string) SendBlocksOption {
+	return func(o *sendBlocksOpts) { o.replyTo = messageID }
+}
+
+// SendBlocksOption is the variadic-arguments type for
+// AgentSession.SendBlocks.
+type SendBlocksOption func(*sendBlocksOpts)
+
+// replyToOverride returns the current override (empty == no
+// override; use prompt.LastMessageID).
+func (as *AgentSession) replyToOverride() string {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	return as.currentPromptOverrideUserMsgID
+}
+
+// replyToOverrideLocked returns the current override. Caller MUST
+// hold asMu.
+func (as *AgentSession) replyToOverrideLocked() string {
+	return as.currentPromptOverrideUserMsgID
+}
+
+// clearReplyToOverride resets the override. Called from Submit
+// (next user message enters InputBuffer) and endPrompt (current
+// prompt settled); the hint must not survive either transition.
+func (as *AgentSession) clearReplyToOverride() {
+	as.asMu.Lock()
+	as.currentPromptOverrideUserMsgID = ""
+	as.asMu.Unlock()
 }
 
 // newAgentSessionRuntime is the SOLE place that allocates an
@@ -937,6 +983,15 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	}
 }
 
+// ErrInjectionDuringTurn is returned by SendBlocks(WithReplyTo)
+// when a real user turn is mid-flight (currentPrompt set, isReady
+// false). The injection would otherwise stamp the user turn's
+// trailing events with the override UserMsgID and fold them into
+// the wrong card. Callers should drop the injection (the main
+// agent will see the prior turn settle before the next user
+// message arrives).
+var ErrInjectionDuringTurn = errors.New("agentsession: SendBlocks(WithReplyTo) refused: user turn in flight")
+
 // ErrNotRunning is returned by SendBlocks/Close when called
 // before Spawn() succeeds.
 var ErrNotRunning = errors.New("chatsession: AgentSession not running (Spawn not called or failed)")
@@ -1285,6 +1340,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// the rationale (anchor race fix).
 	as.asMu.Lock()
 	as.currentPrompt = p
+	as.currentPromptOverrideUserMsgID = ""
 	as.asMu.Unlock()
 	as.isReady.Store(false)
 
@@ -1374,14 +1430,48 @@ func (as *AgentSession) respawnFromDeadHandle(ctx context.Context) error {
 // (i.e. wake any in-flight send when the AS is deactivated), callers
 // should pass as.OpContext() — the AS-owned ctx installed by
 // Activate(parent).
-func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock, opts ...SendBlocksOption) error {
+	cfg := sendBlocksOpts{}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	if cfg.replyTo != "" {
+		// Refuse the override if a real user turn is in flight.
+		// SendBlocks(WithReplyTo) is for slash-command injections
+		// (/review) where the slash command's message_id is the
+		// anchor the user expects to see in chat. If a prior user
+		// turn is still streaming, setting the override here would
+		// stamp trailing user-turn events with the injection's
+		// replyTo and fold them into the wrong card.
+		//
+		// The chat-layer TryFlush gates user messages on
+		// as.IsReady() before Submit; this guard mirrors that
+		// gate for the injection path so injected and user turns
+		// cannot interleave their anchors.
+		as.asMu.RLock()
+		turnInFlight := as.currentPrompt != nil && !as.isReady.Load()
+		as.asMu.RUnlock()
+		if turnInFlight {
+			return ErrInjectionDuringTurn
+		}
+		as.asMu.Lock()
+		as.currentPromptOverrideUserMsgID = cfg.replyTo
+		as.asMu.Unlock()
+	}
 	as.asMu.RLock()
 	h := as.handle
 	as.asMu.RUnlock()
 	if h == nil {
+		if cfg.replyTo != "" {
+			as.clearReplyToOverride()
+		}
 		return ErrNotRunning
 	}
-	return h.SendBlocks(ctx, blocks)
+	err := h.SendBlocks(ctx, blocks)
+	if err != nil && cfg.replyTo != "" {
+		as.clearReplyToOverride()
+	}
+	return err
 }
 
 // New delegates to the bridge AgentSession.New(). Returns ErrNotRunning

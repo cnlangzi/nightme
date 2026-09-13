@@ -59,6 +59,14 @@ type Adapter struct {
 	// Validated against a fixed set of strings in NewAdapter;
 	// anything outside the set is treated as "off".
 	richMode string
+
+	// richTurns is the L3 per-turn rich-message index. When
+	// RichMode is on, chain-attached kinds (OutThinking / OutTool*
+	// / OutTask* / OutError / OutReply-default) accumulate into a
+	// single rich message per turn and PATCH via
+	// editMessageText(rich_message=...). Chain stays intact for
+	// fallback when RichMode is off.
+	richTurns *richTurnsIndex
 }
 
 func NewAdapter(cfg *config.Config) (*Adapter, error) {
@@ -99,6 +107,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		retry:     DefaultRetryConfig,
 		chains:    newChainLRU(defaultChainLRUCap),
 		richMode:  normaliseRichMode(cfgCopy.RichMode),
+		richTurns: newRichTurnsIndex(defaultRichTurnCap),
 	}, nil
 }
 
@@ -133,6 +142,7 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		retry:     DefaultRetryConfig,
 		chains:    newChainLRU(defaultChainLRUCap),
 		richMode:  normaliseRichMode(copy.RichMode),
+		richTurns: newRichTurnsIndex(defaultRichTurnCap),
 	}
 }
 
@@ -1296,6 +1306,15 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 // through sendOutResultMessage and lands as a standalone reply-
 // anchored Telegram message with its own StatusBar trailer. See
 // docs/channel/telegram.md §11.12.4.1 for the full rationale.
+//
+// L3 (§20.6.3): when RichMode is on, this function routes through
+// the richTurn index instead of the v9 chain. The richTurn
+// accumulates one block per segment into a single rich message
+// per turn and PATCHes via editMessageText(rich_message=...).
+// Chain remains intact for the RichMode=off path. Chain-attached
+// kinds that don't go through this method (OutToolStart /
+// OutToolEnd direct chain operations) keep using the chain until
+// L3 retires those code paths.
 func (a *Adapter) appendSegmentForKind(
 	ctx context.Context,
 	msg messages.OutboundMessage,
@@ -1306,6 +1325,33 @@ func (a *Adapter) appendSegmentForKind(
 	if strings.TrimSpace(segment) == "" {
 		return nil
 	}
+
+	// L3: richTurn path when RichMode is enabled.
+	if a.richModeAllowsSend() {
+		kind := ""
+		switch msg.Kind {
+		case messages.OutReply, messages.OutCommandReply:
+			kind = "reply"
+		case messages.OutThinking:
+			kind = "thinking"
+		case messages.OutToolStart, messages.OutToolEnd:
+			kind = "tool"
+		case messages.OutError:
+			kind = "error"
+		case messages.OutTaskCreate, messages.OutTaskUpdate:
+			kind = "task"
+		}
+		if kind != "" {
+			// Strip the trailing "\n" we used to add for the chain
+			// renderer's separator; the rich walker handles its own
+			// inter-block spacing.
+			body := strings.TrimRight(segment, "\n")
+			a.appendRichTurn(ctx, rawChatID, topicID, userMessageID,
+				richTurnEntry{kind: kind, body: body})
+			return nil
+		}
+	}
+
 	chain := a.chains.getOrCreate(rawChatID, topicID, userMessageID)
 
 	// Every text-emitting OutboundKind gets the StatusBar
@@ -1591,6 +1637,14 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 			"chat_id", rawChatID, "err", err)
 	}
 
+	// L3: also flush the rich turn (if any) so the 🎉 lands on the
+	// fully-rendered rich message. The rich turn was accumulating
+	// entries via appendRichTurn / updateRichTurnHeader under
+	// RichMode=on; this finalises it. Independent of the chain
+	// flush above — they can coexist (e.g., mixed-mode during
+	// migration).
+	a.OnPromptEndedRichTurn(rawChatID, topicID, parsedUserMsgID)
+
 	// v9 P2: 🎉 anchor selection — prefer the standalone result
 	// message (set by sendOutResultMessage) over the active chunk.
 	// Picking the result message ties the "completed" visual
@@ -1645,30 +1699,44 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 // (in-memory) and arms the debounced flush. Bound to the
 // OutHeartbeat Send case (v9 §11.12.8).
 //
-// The headerLine format is fully owned by the status function:
-// heartbeatText composes the full `<b>{status} · ⏱ HH:MM:SS</b>`
-// (with LastBeatAt as the timestamp); placeholderInitialText does
-// the same shape with time.Now() (local). patchChainHeader just
-// picks which formatter to call and stores the result. No markup
-// or timestamp composition happens here — that's the entire
-// point of the refactor.
-//
-// v9 P1 (2026-08-23): use setHeaderFromHeartbeat (not setHeader)
-// on the real-heartbeat branch. This flips chunk.hasHeartbeat=true
-// so Compose's "render header iff hasHeartbeat || entries==empty"
-// rule starts respecting the new info. Cold-create path constructs
-// the chunk with the cold banner header directly via newChunkBody
-// (no setHeader call needed), keeping hasHeartbeat=false for
-// non-agent turns — which is exactly what hides the frozen
-// "🤖 Working..." banner that was the v8 bug. Overflow / split /
-// rotate / tail paths use inheritLatestHeader to copy the (header,
-// hasHeartbeat) pair from the prior active chunk.
+// L3 (§20.6.3): when RichMode is on, routes through the richTurn
+// index — updateRichTurnHeader stores the header on the turn's
+// in-memory state and schedules a debounced
+// editMessageText(rich_message=...). Chain remains the
+// RichMode=off path.
 func (a *Adapter) patchChainHeader(
 	chatID string,
 	topicID int,
 	userMessageID int,
 	msg messages.OutboundMessage,
 ) error {
+	// Feishu-aligned gate (F-63 §3.6): heartbeatText is the
+	// back-part of the chunk header, never the cold-create
+	// "Working" front-part. A snapshot with zero counters /
+	// no LastBeatAt / Running status carries no observable
+	// state, so we keep the cold banner by routing to
+	// setHeader (which does NOT touch hasHeartbeat). Any
+	// terminal status — even with zero counters — still
+	// flips hasHeartbeat so the user sees the verdict prefix
+	// (✅ / ❌) on the chunk header.
+	header := heartbeatText(msg.Heartbeat)
+	if msg.Heartbeat != nil &&
+		(msg.Heartbeat.ThinkCount > 0 || msg.Heartbeat.ToolCount > 0 ||
+			!msg.Heartbeat.LastBeatAt.IsZero() ||
+			msg.Heartbeat.Status != messages.HeartbeatRunning) {
+		header = heartbeatText(msg.Heartbeat)
+	} else {
+		header = heartbeatText(nil)
+	}
+
+	// L3 path: richTurn when enabled.
+	if a.richModeAllowsSend() {
+		a.updateRichTurnHeader(chatID, topicID, userMessageID, header)
+		a.logger.Info("telegram: L3 heartbeat header set",
+			"chat_id", chatID, "header", header)
+		return nil
+	}
+
 	chain := a.chains.getOrCreate(chatID, topicID, userMessageID)
 	chain.mu.Lock()
 	if chain.cursor < 0 {

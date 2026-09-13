@@ -119,7 +119,13 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	// TryFlush SKIP race on slow CI runners (Windows VM) doesn't
 	// flake the build (see agentstest.WaitReady).
 	agentstest.EndPrompt(as, PromptEndClean)
-	if !agentstest.WaitReady(as, time.Second) {
+	// 3s budget (was 1s): Ubuntu CI runners under load can take
+	// 1-2s to schedule the goroutine that flips isReady after
+	// EndPrompt's asMu release; the original 1s budget was
+	// already known to be tight (commit 7aa267c was the
+	// previous deflake pass). Locally this still finishes in
+	// well under 100ms; the headroom is purely for the CI VM.
+	if !agentstest.WaitReady(as, 3*time.Second) {
 		t.Fatalf("AS not ready after EndPrompt (isReady propagation stalled)")
 	}
 	// Retry TryFlush a few times: between WaitReady returning
@@ -127,7 +133,11 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	// IsReady back to false (causing TryFlush to SKIP) before
 	// flipping it true again. Retry on the same condition
 	// until either the flush lands or we exhaust the budget.
-	deadline := time.Now().Add(time.Second)
+	// 5s deadline (was 1s) for the same reason — a 1s budget
+	// is below the tail latency of a heavily loaded Ubuntu CI
+	// runner. The retry still terminates as soon as the flush
+	// lands; this just widens the patience window.
+	deadline := time.Now().Add(5 * time.Second)
 	for got := spawner.sessions[0].SentCount(); got < base+1; got = spawner.sessions[0].SentCount() {
 		if err := cs.TryFlush(); err != nil {
 			t.Fatalf("TryFlush: %v", err)

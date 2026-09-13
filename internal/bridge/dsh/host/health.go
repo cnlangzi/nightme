@@ -5,37 +5,40 @@
 // but NOT the case where the subprocess is alive yet the HTTP /
 // WS server is wedged (event loop stuck, plugin init deadlock,
 // cordis frozen). The HealthProbe fills that gap: every interval
-// it issues `GET /health` (Cordis framework's standard liveness
-// endpoint, returns 200 in ~2ms when the host is healthy), and
-// after strikesMax consecutive failures it force-kills the dsh
-// subprocess so the main watchdog's cmd.Wait loop takes over and
-// respawns.
+// it issues a typed RPC against the shared dsh host (verified
+// 2026-09-13 to be the only reliable liveness check — dsh does
+// NOT expose a /health route), and after strikesMax consecutive
+// failures it force-kills the dsh subprocess so the main
+// watchdog's cmd.Wait loop takes over and respawns.
 //
 // The probe is intentionally simple:
-//   - GET /health, not POST /api/host.describe — the former is
-//     cheaper (~2ms vs ~2.7ms) and avoids JSON parsing on every
-//     tick. /health returns 200 with a tiny body whenever the
-//     dsh HTTP server can serve ANY request; host.describe adds
-//     business-level checks we don't need.
+//   - session.list via the cookie-jar'd RPCClient, not a raw
+//     GET /health. dsh 0.1.5-rc.1 does not register a /health
+//     route — the only HTTP surface is the upgrade /api/remote.mux
+//     plus the typed /api/* RPCs. session.list is the cheapest
+//     auth-gated call (~2ms when healthy) and is independent of
+//     session/agent state, so a healthy dsh with no sessions
+//     still answers {result:{ok:true, value:{items:[]}}}. The
+//     probe treats any non-OK result (HTTP error, transport
+//     error, or result.ok=false) as a strike.
 //   - 30s interval, 3s per-probe timeout, 3 strikes → 90s window
 //     from "first sign of trouble" to "force-respawn". Tolerates
 //     brief load spikes without false-positive respawns.
-//   - The probe runs in its own goroutine with its own http.Client
-//     so a slow probe never blocks the main watchdog or RPC paths.
+//   - The probe runs in its own goroutine and reuses the shared
+//     RPCClient (which already carries the dsh-auth cookie) so
+//     there's no extra HTTP plumbing or auth negotiation.
 //
-// Concurrency: the probe reads h.Client().BaseURL() each tick (so
-// it follows respawns to the new dsh URL) and calls h.onFailure
-// which lives in the watchdog's goroutine. The onFailure callback
-// (forceKill) is safe to call from any goroutine — it acquires
-// h.mu to swap / signal the cmd.
+// Concurrency: the probe reads h.Client() each tick (so it follows
+// respawns to the new dsh URL and the new RPC transport) and
+// calls h.onFailure which lives in the watchdog's goroutine. The
+// onFailure callback (forceKill) is safe to call from any
+// goroutine — it acquires h.mu to swap / signal the cmd.
 package host
 
 import (
 	"context"
 	"fmt"
-	"github.com/cnlangzi/nightme/internal/httpclient"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -48,23 +51,23 @@ const (
 	healthProbeInterval   = 30 * time.Second
 	healthProbeTimeout    = 3 * time.Second
 	healthProbeStrikesMax = 3
-	healthProbePath       = "/health"
 )
 
-// HealthProbe periodically issues GET /health on the shared dsh
-// host. After strikesMax consecutive failures it invokes
-// onFailure (typically: force-kill the dsh subprocess so the
-// main watchdog loop respawns).
+// HealthProbe periodically issues session.list via the shared
+// RPCClient on the dsh host. After strikesMax consecutive
+// failures it invokes onFailure (typically: force-kill the dsh
+// subprocess so the main watchdog loop respawns).
 //
 // Construct via NewHealthProbe, call Start to launch the probe
 // goroutine, and Stop (or wait on Done) at shutdown.
 //
-// The probe reads the URL from Client().BaseURL() on every tick so
-// it follows respawns automatically — no reconfiguration needed
-// when a new dsh comes up at a different URL.
+// The probe reads the live *Client each tick so it follows
+// respawns automatically — no reconfiguration needed when a new
+// dsh comes up at a different URL.
 type HealthProbe struct {
 	// clientGetter returns the current *Client (may change across
-	// respawns). We dereference each tick to follow the latest URL.
+	// respawns). We dereference each tick to follow the latest
+	// transport.
 	clientGetter func() *Client
 
 	onFailure func() // invoked once when strikes reach strikesMax
@@ -75,18 +78,17 @@ type HealthProbe struct {
 	interval   time.Duration
 	timeout    time.Duration
 	strikesMax int
-	path       string
 
 	mu      sync.Mutex
 	strikes int
 	closed  chan struct{}
 	done    chan struct{}
-	http    *http.Client // dedicated client (no shared RPC client — different timeout policy)
 }
 
 // NewHealthProbe constructs a probe with default tuning. The
 // caller supplies:
-//   - clientGetter: returns the live *Client (URL changes on respawn)
+//   - clientGetter: returns the live *Client (URL + transport
+//     change on respawn)
 //   - onFailure: invoked once per strike-out cycle (probe then resets
 //     strikes back to 0 so the next probe cycle starts fresh)
 //
@@ -102,10 +104,8 @@ func NewHealthProbe(clientGetter func() *Client, onFailure func(), logger *slog.
 		interval:     healthProbeInterval,
 		timeout:      healthProbeTimeout,
 		strikesMax:   healthProbeStrikesMax,
-		path:         healthProbePath,
 		closed:       make(chan struct{}),
 		done:         make(chan struct{}),
-		http:         httpclient.DefaultWithTimeout(healthProbeTimeout),
 	}
 }
 
@@ -168,28 +168,24 @@ func (h *HealthProbe) run() {
 
 // tick performs one health probe. Exposed as a method so tests can
 // invoke it synchronously without waiting for the ticker.
+//
+// The probe issues a session.list typed RPC through the shared
+// RPCClient (which already carries the dsh-auth cookie and
+// follows respawns). Anything other than a clean
+// {result:{ok:true, value:{items:...}}} counts as a strike —
+// transport errors, HTTP 4xx/5xx (including the 401 we'd see if
+// the cookie wasn't yet minted), and dsh-side result.ok=false
+// all funnel through the same recordFailure path.
 func (h *HealthProbe) tick() {
 	cli := h.clientGetter()
 	if cli == nil {
 		h.recordFailure(fmt.Errorf("dsh.host: health probe: client is nil"))
 		return
 	}
-	url := cli.BaseURL() + h.path
 	ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		h.recordFailure(fmt.Errorf("dsh.host: health probe: build req: %w", err))
-		return
-	}
-	resp, err := h.http.Do(req)
-	if err != nil {
+	if _, err := cli.RPC.SessionList(ctx); err != nil {
 		h.recordFailure(fmt.Errorf("dsh.host: health probe: %w", err))
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		h.recordFailure(fmt.Errorf("dsh.host: health probe: HTTP %d", resp.StatusCode))
 		return
 	}
 	// success — reset strike count

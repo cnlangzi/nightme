@@ -68,6 +68,11 @@ type HostFrameHandler func(method, rpcID string, payload json.RawMessage)
 type Subscription struct {
 	SessionID string
 	CWD       string
+	// Handler is the per-session mux dispatch closure. Only
+	// populated by Snapshot() — EnumerateSubscriptions omits
+	// it so existing callers (RecoverSubscriptions) don't
+	// need to special-case the closure semantics.
+	Handler MuxFrameHandler
 }
 
 // Router is the per-session mux subscription table + shared
@@ -167,6 +172,33 @@ func (r *Router) EnumerateSubscriptions() []Subscription {
 			continue
 		}
 		out = append(out, Subscription{SessionID: sid, CWD: r.cwdBySess[sid]})
+	}
+	return out
+}
+
+// Snapshot returns a snapshot of every active subscription INCL
+// the handler closure. Used by tryRespawn to transplant active
+// subscriptions from the dying Client's Router into the new
+// Client's Router so the daemon's mux dispatch keeps routing
+// frames to the same driver across respawns (otherwise every
+// respawn would orphan every active session — see
+// host/lifecycle.go::tryRespawn).
+//
+// The returned slice is a copy; the caller may iterate without
+// holding the router lock.
+func (r *Router) Snapshot() []Subscription {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Subscription, 0, len(r.muxSubs))
+	for sid, h := range r.muxSubs {
+		if h == nil {
+			continue
+		}
+		out = append(out, Subscription{
+			SessionID: sid,
+			CWD:       r.cwdBySess[sid],
+			Handler:   h,
+		})
 	}
 	return out
 }

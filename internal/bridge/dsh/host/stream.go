@@ -51,6 +51,13 @@ const (
 	wsHandshakeTimeout = 10 * time.Second
 	wsFrameReadLimit   = 10 * 1024 * 1024
 
+	// wsReadDeadline bounds how long a single frame can sit in the
+	// read buffer. dsh's RemoteStreamMuxServer pings every 2s and
+	// terminates the WS after 2 missed pongs (~4s); our pong
+	// handler (§6.8) keeps that timer satisfied, so a generous
+	// 60s ceiling is fine and only matters if dsh goes silent.
+	wsReadDeadline = 60 * time.Second
+
 	reconnectBaseDelay = 1 * time.Second
 	reconnectMaxDelay  = 30 * time.Second
 
@@ -459,6 +466,22 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 	}
 	conn.SetReadLimit(wsFrameReadLimit)
 
+	// dsh's RemoteStreamMuxServer pings every 2s and terminates
+	// the socket after 2 missed pongs. Reply to each ping with the
+	// exact payload dsh sent (RFC 6455 §5.5.3) so the server's
+	// missed-pong counter resets; without this the server
+	// terminates the connection and the read loop sees close 1006
+	// "unexpected EOF" within 4 seconds of every reconnect.
+	conn.SetPingHandler(func(appData string) error {
+		return conn.WriteControl(websocket.PongMessage,
+			[]byte(appData),
+			time.Now().Add(time.Second))
+	})
+	// Initial read deadline — readLoop resets this on every
+	// successful frame read so a silent dsh can never wedge the
+	// pump forever.
+	_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
+
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -546,6 +569,13 @@ func (h *StreamHub) readLoop(conn *websocket.Conn) error {
 			h.log.Info("dsh.host: readLoop error", "err", err)
 			return err
 		}
+		// Reset the read deadline on every successful frame so
+		// dsh's 2s ping (which arrives as a control frame and is
+		// handled by SetPingHandler, NOT ReadMessage) keeps the
+		// socket alive. The deadline only bites if dsh goes
+		// silent for >60s — in that case we'd rather reconnect
+		// than hang forever.
+		_ = conn.SetReadDeadline(time.Now().Add(wsReadDeadline))
 		h.log.Debug("dsh.host: mux read", "bytes", len(raw), "preview", truncateBytes(raw, 200))
 		if len(raw) == 0 {
 			continue

@@ -28,9 +28,11 @@ package host
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -164,19 +166,23 @@ func TestFallback_AttachedDSHDies_TriggersSpawn(t *testing.T) {
 // counter reset: a single successful probe (after one or more
 // failures) clears the counter, so transient blips don't
 // accumulate into a false fallback. We don't actually need the
-// real dsh for this — a stub that returns ok / fail on alternating
-// probes via a counter is enough, but using a real mockDSH with
-// a toggle is simpler.
+// real dsh for this — using a Spawner hook that no-ops lets us
+// drive the probe path without a real dsh subprocess (whose
+// respawn delay would otherwise dominate the test runtime).
 func TestFallback_ProbeRecoversOnTransientFailure(t *testing.T) {
 	mock := newMockDSHServer(t)
+	resetGlobalState(t)
 
 	hooks := &attachedTestHooks{
 		ProbeInterval: 20 * time.Millisecond,
-		ProbeStrikes:  5, // higher than what we'll allow to accumulate
+		ProbeStrikes:  5,
 		ProbeTimeout:  50 * time.Millisecond,
-		// FallbackDone is left nil — the monitor should never
-		// reach fallback in this test (transient blips reset
-		// the counter).
+		Spawner: func() (*exec.Cmd, *Client, error) {
+			// Mock spawner that no-ops: cmd=nil makes the
+			// watchdog exit immediately, cli is a fresh
+			// unstarted client (we only need state-swap).
+			return nil, New("http://127.0.0.1:1", slog.Default()), nil
+		},
 	}
 	a := newAttachedHostForTest(t, mock, hooks)
 
@@ -199,7 +205,8 @@ func TestFallback_ProbeRecoversOnTransientFailure(t *testing.T) {
 
 	// Give the monitor a chance to detect the dead state and
 	// exit. With ProbeInterval=20ms and ProbeStrikes=5, the
-	// fallback fires after ~100ms.
+	// fallback fires after ~100ms. Spawner no-ops so no
+	// respawnDelay; monitor exits immediately.
 	select {
 	case <-done:
 		// expected
@@ -258,3 +265,225 @@ var _ = func() *Client { return nil }()
 // should expect the pump to keep trying to reconnect silently
 // in the background.
 var _ = context.Canceled
+
+// resetGlobalState clears the package-level *Client and
+// *SharedHost globals. The fallback path mutates both, and any
+// state leaked across tests breaks parallel package-global
+// invariants (SetSharedHost panics on double-install, hence
+// "must reset between tests").
+func resetGlobalState(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		UnsetGlobal()
+		UnsetSharedHost()
+	})
+	// Defensive: also reset at start in case a previous test
+	// left state behind.
+	UnsetGlobal()
+	UnsetSharedHost()
+}
+
+// TestFallback_RetriesOnSpawnFailure pins the retry contract:
+// a transient spawn failure (e.g. all ports busy) does NOT
+// leave the host stuck. fallbackToSpawn retries up to
+// maxAttachedFallbackAttempts times with respawnDelay backoff
+// between attempts. On the final attempt, if the spawner
+// succeeds, the fallback completes; if all fail, the error
+// bubbles up.
+//
+// We use the Spawner testHooks to inject a counter-based mock
+// that fails the first N-1 calls and succeeds on the Nth. The
+// OnFallback hook is NOT set — we want to drive the real
+// fallbackToSpawn path.
+func TestFallback_RetriesOnSpawnFailure(t *testing.T) {
+	mock := newMockDSHServer(t)
+	resetGlobalState(t)
+
+	// Spawner: fail 2 times, succeed on the 3rd.
+	var calls int
+	var fakeCli *Client
+	hooks := &attachedTestHooks{
+		ProbeInterval: 20 * time.Millisecond,
+		ProbeStrikes:  1, // fail fast — we want to test the spawner loop
+		ProbeTimeout:  50 * time.Millisecond,
+		FallbackDone:  make(chan struct{}),
+		Spawner: func() (*exec.Cmd, *Client, error) {
+			calls++
+			if calls < 3 {
+				return nil, nil, errors.New("simulated spawn failure")
+			}
+			// 3rd call: success. We return nil cmd so the
+			// watchdog exits immediately (cmd == nil in its
+			// first iteration). And a fresh *Client (no need
+			// to start it; only the state-swap paths care).
+			fakeCli = New("http://127.0.0.1:1", slog.Default())
+			return nil, fakeCli, nil
+		},
+	}
+
+	a := newAttachedHostForTest(t, mock, hooks)
+
+	go a.watchForeign(slog.Default())
+	mock.shutdown()
+
+	// Retry budget: maxAttachedFallbackAttempts (3) attempts
+	// with respawnDelay(0)=0, respawnDelay(1)=1s, respawnDelay(2)=2s
+	// = ~3s total. Allow 6s for safety.
+	select {
+	case <-hooks.FallbackDone:
+		// expected
+	case <-time.After(6 * time.Second):
+		t.Fatalf("fallback did not complete; calls=%d", calls)
+	}
+
+	if calls != 3 {
+		t.Errorf("Spawner called %d times; want 3 (2 failures + 1 success)", calls)
+	}
+
+	// After fallback, the host must be in the owned state.
+	a.host.mu.RLock()
+	owns := a.host.ownsProcess
+	cli := a.host.cli
+	wd := a.host.watchdogDone
+	a.host.mu.RUnlock()
+
+	if !owns {
+		t.Error("host.ownsProcess is false after fallback; want true")
+	}
+	if cli == nil {
+		t.Error("host.cli is nil after fallback; want the mock cli")
+	}
+	if cli != fakeCli {
+		t.Error("host.cli is not the cli returned by the Spawner")
+	}
+	if wd == nil {
+		t.Error("host.watchdogDone is nil; want a non-nil channel allocated on transition")
+	}
+}
+
+// TestFallback_GivesUpAfterMaxAttempts pins the "give up"
+// contract: when ALL spawn attempts fail, fallbackToSpawn
+// returns the last error and watchForeign exits (logging the
+// failure). The host is left in attached state (cmd=nil,
+// ownsProcess=false) — the user has to `make restart` to
+// recover. This is a graceful degradation, not a silent
+// failure.
+func TestFallback_GivesUpAfterMaxAttempts(t *testing.T) {
+	mock := newMockDSHServer(t)
+	resetGlobalState(t)
+
+	var calls int
+	hooks := &attachedTestHooks{
+		ProbeInterval: 20 * time.Millisecond,
+		ProbeStrikes:  1,
+		ProbeTimeout:  50 * time.Millisecond,
+		FallbackDone:  make(chan struct{}),
+		Spawner: func() (*exec.Cmd, *Client, error) {
+			calls++
+			return nil, nil, errors.New("permanent spawn failure")
+		},
+	}
+
+	a := newAttachedHostForTest(t, mock, hooks)
+
+	start := time.Now()
+	go a.watchForeign(slog.Default())
+	mock.shutdown()
+
+	// Wait for the monitor to exit. With maxAttempts=3 and
+	// respawnDelay(0)=0, respawnDelay(1)=1s, respawnDelay(2)=2s
+	// the backoff sums to ~3s; allow 5s.
+	select {
+	case <-hooks.FallbackDone:
+		// expected — monitor exited cleanly
+	case <-time.After(6 * time.Second):
+		t.Fatalf("fallback did not give up; calls=%d, elapsed=%v", calls, time.Since(start))
+	}
+
+	if calls != maxAttachedFallbackAttempts {
+		t.Errorf("Spawner called %d times; want %d (one per attempt)", calls, maxAttachedFallbackAttempts)
+	}
+
+	// The host must NOT have transitioned to owned state.
+	a.host.mu.RLock()
+	owns := a.host.ownsProcess
+	cmd := a.host.cmd
+	a.host.mu.RUnlock()
+	if owns {
+		t.Error("host.ownsProcess is true after fallback gave up; want false")
+	}
+	if cmd != nil {
+		t.Errorf("host.cmd = %v after fallback gave up; want nil", cmd)
+	}
+}
+
+// TestFallback_StateMutationUnderMockSpawner pins the
+// state-mutation contract end-to-end: after a successful
+// fallback, the host fields are swapped correctly and the
+// process globals point at the new cli. We use a mock spawner
+// that returns a *Client we own (so we can verify the global).
+func TestFallback_StateMutationUnderMockSpawner(t *testing.T) {
+	mock := newMockDSHServer(t)
+	resetGlobalState(t)
+
+	newCli := New("http://127.0.0.1:1", slog.Default()) // unstarted is fine for state test
+	hooks := &attachedTestHooks{
+		ProbeInterval: 20 * time.Millisecond,
+		ProbeStrikes:  1,
+		ProbeTimeout:  50 * time.Millisecond,
+		FallbackDone:  make(chan struct{}),
+		OnFallback:    nil, // use the real fallback path
+		Spawner: func() (*exec.Cmd, *Client, error) {
+			// Return nil cmd so the watchdog exits on its
+			// first iteration (cmd == nil in runWatchdog's
+			// `if cmd == nil { return }`).
+			return nil, newCli, nil
+		},
+	}
+
+	a := newAttachedHostForTest(t, mock, hooks)
+
+	go a.watchForeign(slog.Default())
+	mock.shutdown()
+
+	select {
+	case <-hooks.FallbackDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback did not trigger")
+	}
+
+	// h.cli must be the new cli.
+	a.host.mu.RLock()
+	gotCli := a.host.cli
+	gotCmd := a.host.cmd
+	gotOwns := a.host.ownsProcess
+	gotWD := a.host.watchdogDone
+	a.host.mu.RUnlock()
+
+	if gotCli != newCli {
+		t.Errorf("host.cli = %p, want %p (the mock cli)", gotCli, newCli)
+	}
+	if gotCmd != nil {
+		t.Errorf("host.cmd = %v; want nil (mock spawner returned nil)", gotCmd)
+	}
+	if !gotOwns {
+		t.Error("host.ownsProcess is false; want true after fallback")
+	}
+	if gotWD == nil {
+		t.Error("host.watchdogDone is nil; want allocated")
+	}
+
+	// Process globals must point at the new host.
+	if GetGlobal() != newCli {
+		t.Errorf("GetGlobal() = %p, want %p (the new cli)", GetGlobal(), newCli)
+	}
+	if GetSharedHost() != a.host {
+		t.Errorf("GetSharedHost() = %p, want %p (a.host)", GetSharedHost(), a.host)
+	}
+}
+
+// suppress unused-import warnings in case the imports below
+// change with future edits.
+var _ = slog.Default
+var _ = exec.Command
+var _ = strings.Contains

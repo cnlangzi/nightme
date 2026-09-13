@@ -987,7 +987,7 @@ var (
 // ─── WaitForDSHReady: startup readiness probe ──────────────────────
 
 // dshReadyStubServer is a minimal httptest.Server that handles
-// /api/workspace.list (the probe target). It fails the first
+// /api/workspace.create (the probe target). It fails the first
 // `failFirstN` requests with gateway/service-unavailable, then
 // returns 200 OK. count is the total request count (atomic).
 // Use `tErrBody` to switch the error body for non-transient tests.
@@ -1002,32 +1002,30 @@ func newDSHReadyStub(t *testing.T, failFirstN int) *dshReadyStubServer {
 	s := &dshReadyStubServer{failFirstN: failFirstN}
 	mux := http.NewServeMux()
 	// RPCClient.Post constructs the URL as baseURL + "/api/" +
-	// methodDotsToSlashes(method), so "workspace.list" becomes
-	// "/api/workspace/list" (slash, not dot). Match that.
-	mux.HandleFunc("/api/workspace/list", func(w http.ResponseWriter, r *http.Request) {
+	// methodDotsToSlashes(method), so "workspace.create" becomes
+	// "/api/workspace/create" (slash, not dot). Match that.
+	mux.HandleFunc("/api/workspace/create", func(w http.ResponseWriter, r *http.Request) {
 		n := s.count.Add(1)
 		// dsh echoes the request's rpcId in the response.
 		// RPCClient.Post validates resp.RPCID == sent rpcID and
-		// returns a transport error on mismatch — which would
-		// trip our retry loop. Echo it back.
-		var sentRPCID string
-		if env := struct {
-			RPCID string `json:"rpcId"`
-		}{}; true {
-			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-			_ = json.Unmarshal(body, &env)
-			sentRPCID = env.RPCID
-		}
+		// returns a transport error on mismatch; which would
+		// trip our retry loop. Echo it back via map (the
+		// surrounding file is one big raw string in some
+		// tests; struct tags would require backticks).
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		var env map[string]any
+		_ = json.Unmarshal(body, &env)
+		sentRPCID, _ := env["rpcId"].(string)
 		if n <= int64(s.failFirstN) {
 			// Match dsh 0.1.2-rc.1's wire shape for
 			// gateway/service-unavailable.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK) // typert returns 200 with ok=false
-			_, _ = w.Write([]byte(`{"type":"server-response","rpcId":"` + sentRPCID + `","result":{"ok":false,"error":{"code":"gateway/service-unavailable","message":"active Service \"workspaceController\" is unavailable"}}}`))
+			_, _ = fmt.Fprintf(w, `{"type":"server-response","rpcId":%q,"result":{"ok":false,"error":{"code":"gateway/service-unavailable","message":"active Service \"workspaceController\" is unavailable"}}}`, sentRPCID)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"type":"server-response","rpcId":"` + sentRPCID + `","result":{"ok":true,"value":{"items":[]}}}`))
+		_, _ = fmt.Fprintf(w, `{"type":"server-response","rpcId":%q,"result":{"ok":true,"value":{"workspace":{"workspaceId":"stub"}}}}`, sentRPCID)
 	})
 	s.srv = httptest.NewServer(mux)
 	t.Cleanup(s.srv.Close)
@@ -1036,7 +1034,7 @@ func newDSHReadyStub(t *testing.T, failFirstN int) *dshReadyStubServer {
 
 // TestRPCClient_WaitForDSHReady_RetriesOnServiceUnavailable pins
 // the contract: a transient "gateway/service-unavailable" from
-// the probe target (workspace.list) does NOT abort spawnAndWire —
+// the probe target (workspace.create) does NOT abort spawnAndWire —
 // the probe retries with respawnDelay backoff and eventually
 // returns nil once dsh's plugin registry is loaded.
 func TestRPCClient_WaitForDSHReady_RetriesOnServiceUnavailable(t *testing.T) {
@@ -1049,7 +1047,7 @@ func TestRPCClient_WaitForDSHReady_RetriesOnServiceUnavailable(t *testing.T) {
 		t.Fatalf("WaitForDSHReady: %v", err)
 	}
 	if got := stub.count.Load(); got != 4 {
-		t.Errorf("workspace.list call count = %d, want 4 (3 failures + 1 success)", got)
+		t.Errorf("workspace.create call count = %d, want 4 (3 failures + 1 success)", got)
 	}
 }
 
@@ -1070,7 +1068,7 @@ func TestRPCClient_WaitForDSHReady_GivesUpAfterMaxAttempts(t *testing.T) {
 		t.Fatal("expected error after all attempts fail, got nil")
 	}
 	if got := stub.count.Load(); got != int64(maxAttempts) {
-		t.Errorf("workspace.list call count = %d, want %d", got, maxAttempts)
+		t.Errorf("workspace.create call count = %d, want %d", got, maxAttempts)
 	}
 }
 

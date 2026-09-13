@@ -1048,49 +1048,30 @@ func (as *AgentSession) respawn(
 		as.lastRunAt = time.Now()
 		as.asMu.Unlock()
 
-		// fix-stop (2026-08-15): if the bridge rejected the saved
-		// sessionID with agent.ErrResumeUnhealthy, clear the saved
-		// sessionID and persist so the chat layer's
-		// LookupSelectedAgentSession retry path (which catches
-		// this same error and re-Spawns) lands on a clean fresh
-		// session. Without this clear the retry would re-pass the
-		// same stale sessionID and re-fail identically — the user
-		// would see "Failed to spawn agent" on every message until
-		// they edit agent_sessions.json manually.
+		// (2026-09-13) Surface the resume-rejection error to the
+		// dispatcher instead of silently masking it. The previous
+		// "clear sessionID + let the next Spawn be fresh" behavior
+		// (added by fix-stop 2026-08-15) hid the original cause:
+		// the user's stored sessionId (e.g. session-26c4ff1a-...)
+		// was replaced by a fresh d5de9b4e, and the user never
+		// knew the original session existed but was rejected.
 		//
-		// Cases this catches:
-		//   - daemon restart with an AS restored from disk whose
-		//     sessionID the upstream CLI no longer recognizes
-		//     (e.g. nightly cleanup of stale threads, or a
-		//     different host).
-		//   - claudecode SIGINT-fallback path (the stdin pipe was
-		//     broken, so SIGINT terminated the CLI; the chat layer
-		//     respawns with --resume, hits the stale-id branch).
-		//     With the post-fix-stop control_request path this is
-		//     the exception rather than the rule — see
-		//     internal/bridge/claudecode/claudecode.go::Stop for
-		//     the primary happy path.
+		// New contract: when session.create returns a different
+		// id, the error propagates with the requested id AND the
+		// returned id in the message, and the saved sessionId
+		// stays unchanged in agent_sessions.json. The dispatcher
+		// (and the chat card) render the error. The user can:
+		//   - manually inspect /Users/.../agent_sessions.json
+		//   - send /new to explicitly start a fresh session
+		//     (handled by the dispatcher's own reset path)
+		//   - send the same prompt again after the dsh instance
+		//     has been restored to a state where the saved id
+		//     is recognized (e.g. workspace.create reused the
+		//     same cwd row)
 		//
-		// Keeping the SessionID clear here does NOT throw away
-		// the bridge's loud failure signal: we still return the
-		// wrapped error so callers that want to surface it (e.g.
-		// dispatcher in non-recovery mode) can.
-		if errors.Is(err, agent.ErrResumeUnhealthy) {
-			as.asMu.Lock()
-			cleared := as.sessionID != ""
-			as.sessionID = ""
-			persist := as.persist
-			as.asMu.Unlock()
-			slog.Warn("agentsession: resume rejected, cleared sessionID for fresh retry",
-				"as_id", as.ID, "agent", as.Agent)
-			if cleared && persist != nil {
-				if perr := persist(as.Entry()); perr != nil {
-					slog.Warn("agentsession: persist after clearing sessionID failed; next spawn may re-use stale id",
-						"as_id", as.ID, "err", perr)
-				}
-			}
-		}
-
+		// We do NOT auto-clear and we do NOT auto-retry with a
+		// fresh session. The original failure is loud; the user
+		// decides how to recover.
 		return fmt.Errorf("chatsession: respawn %s at %s: %w", as.Agent, as.Cwd, err)
 	}
 

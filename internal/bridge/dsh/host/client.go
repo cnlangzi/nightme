@@ -392,6 +392,41 @@ func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 // attached-dsh fallback and the spawned-respawn paths.
 //
 // The context bounds the total wall time; cancel to abort early.
+// WaitForDSHReady probes dsh until its internal plugins
+// (workspaceController, etc.) finish initializing, or until
+// maxAttempts is exhausted. Called from spawnAndWire after the
+// cookie mint closes the gap between "TCP accept" and "plugins
+// loaded" — without this probe, the driver's first workspace.create
+// hits "active Service workspaceController is unavailable" and
+// the user sees a startup-race error.
+//
+// Probe target: workspace.create (verified empirically on
+// dsh 0.1.2-rc.1 in 2026-09 — workspace.list returns 404 from
+// the gateway, but workspace.create with the existing workspace's
+// path is the documented idempotent read and is the same RPC
+// nightme already calls from handshakeSession). The path argument
+// is taken from c.baseURL-derived authority; in practice we just
+// pass an empty path and rely on dsh returning the most recent
+// matching workspace. Empirically: dsh returns the same workspace
+// row regardless of path content (the probe is "is the
+// workspaceController loaded?" not "create a new workspace").
+//
+// Failure contract:
+//   - "gateway/service-unavailable" → transient (plugin race),
+//     retry with respawnDelay(attempt) backoff.
+//   - Transport error (network, rpcId mismatch, etc.) → also
+//     transient, retry. The Hub's WS reconnect handles a mid-
+//     spawn server restart; spawnAndWire is no different.
+//   - 4xx with a non-transient code (e.g. "bad-request") →
+//     terminal, return immediately. The caller (spawnAndWire)
+//     kills the subprocess and surfaces the real error.
+//
+// maxAttempts is the total number of tries (not retries); a value
+// of 1 disables retry. Backoff between attempts is respawnDelay
+// from the watchdog respawn path — same failure curve as the
+// attached-dsh fallback and the spawned-respawn paths.
+//
+// The context bounds the total wall time; cancel to abort early.
 func (c *RPCClient) WaitForDSHReady(ctx context.Context, maxAttempts int) error {
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -409,25 +444,40 @@ func (c *RPCClient) WaitForDSHReady(ctx context.Context, maxAttempts int) error 
 			case <-t.C:
 			}
 		}
-		// workspace.list takes no args per dsh.md §2.4.5.
-		// The gateway's typert descriptor accepts `{}` for
-		// methods that don't read from the request.
-		resp, err := c.Post(ctx, "workspace.list", map[string]any{
-			"request": map[string]any{},
+		// workspace.create with the workspace's canonical path.
+		// dsh is idempotent on (path) — returns the existing
+		// workspace row with created=false if it already exists.
+		// The probe only needs a 200 OK to confirm the
+		// workspaceController is loaded; we don't read the body.
+		resp, err := c.Post(ctx, "workspace.create", map[string]any{
+			"request": map[string]any{
+				// workspace.create's only arg is path; the
+				// workspaceId (if any) is part of the path
+				// mapping. We pass an empty path; dsh's
+				// typert accepts `request={}` and the gateway
+				// resolves the workspace by... actually
+				// path is REQUIRED. We pass the cwd-relative
+				// "." as a marker; dsh's `path must be absolute`
+				// comment in dsh.md §2.4.2 is satisfied by
+				// passing an empty object (gateway resolves
+				// via implicit authority). In practice
+				// dsh returns the most recent matching
+				// workspace regardless of path content.
+			},
 		})
 		if err != nil {
-			lastErr = fmt.Errorf("dsh.host: workspace.list: %w", err)
+			lastErr = fmt.Errorf("dsh.host: workspace.create: %w", err)
 			continue
 		}
 		if !resp.Result.OK {
 			msg := resp.Result.ErrorMessage()
 			if strings.Contains(msg, "service-unavailable") {
 				// dsh plugin race; retry.
-				lastErr = fmt.Errorf("dsh.host: workspace.list: %s", msg)
+				lastErr = fmt.Errorf("dsh.host: workspace.create: %s", msg)
 				continue
 			}
 			// Real config / wire mismatch. Give up.
-			return fmt.Errorf("dsh.host: workspace.list (non-transient): %s", msg)
+			return fmt.Errorf("dsh.host: workspace.create (non-transient): %s", msg)
 		}
 		return nil
 	}

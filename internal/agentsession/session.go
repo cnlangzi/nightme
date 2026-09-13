@@ -238,6 +238,95 @@ type AgentSession struct {
 	// closes eventQueue; subsequent calls are no-ops (close-on-
 	// closed-channel panic guard).
 	shutdownOnce sync.Once
+
+	// currentPromptOverrideUserMsgID is a per-prompt UserMsgID override
+	// for readpump enrichment. /review uses SendBlocks(WithReplyTo(msgID))
+	// to inject the formatted review text into the running AS so the
+	// main agent can act on "fix the blockers" follow-ups; without the
+	// override, every AgentEvent emitted by the main agent in response
+	// to the injected review anchors to the prior prompt's
+	// LastMessageID (the previous user message), and the chat
+	// channel renders each event as a separate rolling card instead
+	// of folding them into the /review placeholder.
+	//
+	// Lifecycle: written by SendBlocks via WithReplyTo, cleared by
+	// Submit (when the next user message enters the InputBuffer). The
+	// readpump reads it under asMu and lets the override shadow
+	// prompt.LastMessageID for the entire lifetime of the injected
+	// prompt — multi-segment replies all share the same anchor, which
+	// is the UX the user expects.
+	currentPromptOverrideUserMsgID string
+}
+
+// sendBlocksOpts is the variadic-arguments receiver for
+// AgentSession.SendBlocks. Kept package-private; callers use
+// WithReplyTo to populate it. Adding fields is backwards-compatible
+// (the variadic option pattern preserves the existing 2-arg call
+// sites — /gtw, /gtw back, the runtime dispatcher, and the test
+// harnesses that call as.SendBlocks(ctx, blocks) verbatim).
+type sendBlocksOpts struct {
+	// replyTo is the UserMsgID the readpump should stamp on every
+	// AgentEvent it emits during the injected prompt's lifetime.
+	// Empty string means "use prompt.LastMessageID" — the
+	// pre-existing behavior.
+	replyTo string
+}
+
+// WithReplyTo stamps messageID as the UserMsgID anchor for every
+// AgentEvent the readpump emits in response to the next SendBlocks
+// call. The hint persists until Submit runs for the next user
+// message (which clears it) — see
+// currentPromptOverrideUserMsgID for the full lifecycle.
+//
+// Used by /review (internal/command/review/cmd.go) so the main
+// chat agent's response to the injected review findings lands in
+// the /review placeholder card instead of the prior user message's
+// card. Without this, /gtw commit, /gtw pr, and the runtime
+// dispatcher all anchor to prompt.LastMessageID via
+// AgentEventEnvelope.UserMsgID — correct for those paths, wrong for
+// /review because the injected text is conceptually a reply to the
+// /review slash command, not a new prompt from the user.
+//
+// Pattern: variadic option. Adding new options (e.g. WithSender
+// for "this is a system injection") is non-breaking — existing
+// 2-arg call sites continue to compile.
+func WithReplyTo(messageID string) SendBlocksOption {
+	return func(o *sendBlocksOpts) { o.replyTo = messageID }
+}
+
+// SendBlocksOption is the variadic-arguments type for
+// AgentSession.SendBlocks. See WithReplyTo for the canonical
+// option. Future options (e.g. injection source marker for
+// diagnostic logging) plug in here.
+type SendBlocksOption func(*sendBlocksOpts)
+
+// setReplyToOverride writes the override under asMu. Called by
+// SendBlocks after WithReplyTo is parsed. Package-private so the
+// only legitimate writer is SendBlocks; tests use it to simulate
+// the production path without a live bridge handle.
+func (as *AgentSession) setReplyToOverride(messageID string) {
+	as.asMu.Lock()
+	as.currentPromptOverrideUserMsgID = messageID
+	as.asMu.Unlock()
+}
+
+// replyToOverride returns the current override (empty == no
+// override; use prompt.LastMessageID). Package-private; readpump
+// uses this under asMu to compute the UserMsgID for each
+// AgentEvent it emits.
+func (as *AgentSession) replyToOverride() string {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	return as.currentPromptOverrideUserMsgID
+}
+
+// clearReplyToOverride resets the override. Called from Submit when
+// a new user message enters the InputBuffer — the injected prompt
+// is over, the next prompt anchors normally.
+func (as *AgentSession) clearReplyToOverride() {
+	as.asMu.Lock()
+	as.currentPromptOverrideUserMsgID = ""
+	as.asMu.Unlock()
 }
 
 // newAgentSessionRuntime is the SOLE place that allocates an
@@ -1285,6 +1374,12 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// the rationale (anchor race fix).
 	as.asMu.Lock()
 	as.currentPrompt = p
+	// Clear any replyTo override set by the previous prompt's
+	// SendBlocks(WithReplyTo(...)) — a new user message is starting
+	// a fresh turn that anchors on p.LastMessageID, not the prior
+	// /review (or other injection) hint. Without this, the override
+	// would persist until endPrompt, leaking across turn boundaries.
+	as.currentPromptOverrideUserMsgID = ""
 	as.asMu.Unlock()
 	as.isReady.Store(false)
 
@@ -1374,14 +1469,36 @@ func (as *AgentSession) respawnFromDeadHandle(ctx context.Context) error {
 // (i.e. wake any in-flight send when the AS is deactivated), callers
 // should pass as.OpContext() — the AS-owned ctx installed by
 // Activate(parent).
-func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock, opts ...SendBlocksOption) error {
+	cfg := sendBlocksOpts{}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	if cfg.replyTo != "" {
+		as.setReplyToOverride(cfg.replyTo)
+	}
 	as.asMu.RLock()
 	h := as.handle
 	as.asMu.RUnlock()
 	if h == nil {
+		// No handle: drop the override we just set so a later
+		// SendBlocks (on a freshly respawned handle) doesn't
+		// inherit a stale /review hint.
+		if cfg.replyTo != "" {
+			as.clearReplyToOverride()
+		}
 		return ErrNotRunning
 	}
-	return h.SendBlocks(ctx, blocks)
+	err := h.SendBlocks(ctx, blocks)
+	if err != nil {
+		// Bridge refused: same rationale as the nil-handle branch.
+		// Without this, a failed SendBlocks would leave a stale
+		// override for the next successful SendBlocks to inherit.
+		if cfg.replyTo != "" {
+			as.clearReplyToOverride()
+		}
+	}
+	return err
 }
 
 // New delegates to the bridge AgentSession.New(). Returns ErrNotRunning

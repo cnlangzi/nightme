@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -59,4 +60,25 @@ func OutReply(input SlashInput, text string) *SlashOutput {
 			ReplyTo: input.MessageID,
 		}},
 	}
+}
+
+// WithReplyTo is the command-level re-export of
+// agentsession.WithReplyTo. /review uses it to stamp the /review
+// slash command's message_id onto the AgentEvents the main agent
+// emits in response to the injected review findings, so the chat
+// channel folds those replies into the /review placeholder card
+// instead of the prior user message's card.
+//
+// Re-exported (rather than having each command package import
+// agentsession directly) to keep the command surface area visible
+// in one place. The /review cmd holds the only current caller —
+// the option is still variadic-friendly so future commands that
+// inject content into a running AS can use the same shape without
+// touching this file.
+//
+// Dependency direction: command → agentsession. agentsession
+// only imports command/services (the EventBus helper package), not
+// the command top-level package, so this re-export is acyclic.
+func WithReplyTo(messageID string) agentsession.SendBlocksOption {
+	return agentsession.WithReplyTo(messageID)
 }

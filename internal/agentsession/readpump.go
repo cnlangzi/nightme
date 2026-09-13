@@ -163,11 +163,25 @@ func (as *AgentSession) readpumpLoop() {
 			// Enrich event with anchor info from currentPrompt.
 			as.asMu.RLock()
 			prompt := as.currentPrompt
+			override := as.currentPromptOverrideUserMsgID
 			as.asMu.RUnlock()
 			var userMsgID, promptID string
 			if prompt != nil {
 				userMsgID = prompt.LastMessageID
 				promptID = prompt.ID
+			}
+			// /review injects the formatted review via SendBlocks
+			// (WithReplyTo(msgID)). The injected prompt is not a new
+			// user turn, so currentPrompt.LastMessageID is still the
+			// prior user message — but every AgentEvent the main
+			// agent emits in response to the review findings should
+			// anchor to the /review slash command so the chat
+			// channel folds the fix replies into the /review
+			// placeholder card. Override shadows LastMessageID for
+			// the lifetime of the injected prompt; Submit clears
+			// it when the next user message arrives.
+			if override != "" {
+				userMsgID = override
 			}
 
 			// CRITICAL: copy ev to heap before taking its address.

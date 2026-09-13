@@ -53,6 +53,12 @@ type Adapter struct {
 	// docs/channel/telegram.md §11.12.2). Pure in-memory; never
 	// persisted to telegram_state.json. Reset on Adapter.Stop.
 	chains *chainLRU
+
+	// richMode mirrors config.Telegram.RichMode and gates the L1
+	// rich_message[markdown] path (docs/channel/telegram.md §20.6.1).
+	// Validated against a fixed set of strings in NewAdapter;
+	// anything outside the set is treated as "off".
+	richMode string
 }
 
 func NewAdapter(cfg *config.Config) (*Adapter, error) {
@@ -92,6 +98,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
 		chains:    newChainLRU(defaultChainLRUCap),
+		richMode:  normaliseRichMode(cfgCopy.RichMode),
 	}, nil
 }
 
@@ -125,6 +132,7 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
 		chains:    newChainLRU(defaultChainLRUCap),
+		richMode:  normaliseRichMode(copy.RichMode),
 	}
 }
 
@@ -1329,6 +1337,32 @@ func (a *Adapter) sendOutResultMessage(
 ) error {
 	if strings.TrimSpace(msg.Text) == "" {
 		return nil
+	}
+
+	// L1 (docs §20.6.1): try the rich_message[markdown] path before
+	// falling back to the plain HTML chain. The rich path sends a
+	// single 32K-char message via sendRichMessage with the body
+	// wrapped in a StatusBar trailer, then records the messageID as
+	// the 🎉 anchor so OnPromptEnded lands on the rich message
+	// rather than the active chain chunk. Any failure (config off,
+	// preflight fail, server 4xx, network error) falls through to
+	// the existing HTML path below — the chain / splitTelegramText
+	// behaviour is unchanged for the fallback.
+	if a.richModeAllowsSend() && canUseRichMarkdown(msg.Text) {
+		full := buildRichMarkdownWithTrailer(msg.Text, statusbar.StatusBarLines(&msg))
+		mid, err := a.trySendRichMarkdown(ctx, rawChatID, topicID, userMessageID, full)
+		if err == nil {
+			chain := a.chains.getOrCreate(rawChatID, topicID, userMessageID)
+			chain.mu.Lock()
+			chain.resultMessageID = mid
+			chain.mu.Unlock()
+			return nil
+		}
+		a.logger.Warn("telegram: rich OutResult failed, falling back to plain HTML",
+			"chat_id", rawChatID,
+			"thread_id", topicID,
+			"err", err)
+		// fall through to plain HTML path
 	}
 
 	// Result body: raw msg.Text goes through RenderForWire so

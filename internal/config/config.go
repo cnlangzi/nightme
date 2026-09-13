@@ -125,6 +125,15 @@ type FeishuRateLimitConfig struct {
 type TelegramConfig struct {
 	BotToken       string `yaml:"bot_token"`
 	PollingTimeout int    `yaml:"polling_timeout"`
+
+	// RichMode controls Telegram Bot API 10.1 sendRichMessage path
+	// for OutResult payloads (docs/channel/telegram.md §20.6.1).
+	// Values: "off" (default — current plain-text HTML path),
+	// "auto" (per-chat decision, future), "on" (force rich when
+	// preflight passes). Pre-10.1 Telegram clients may render
+	// rich_message as blank; keep "off" unless you've verified
+	// the audience's client versions.
+	RichMode string `yaml:"rich_mode"`
 }
 
 // SlackConfig holds credentials for the Slack channel.

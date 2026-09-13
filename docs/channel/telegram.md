@@ -3717,3 +3717,363 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
   - 行为后果:frozen chunks 读出来仍然有意义 —— 用户可以从 banner 时序数出 agent 思考/工具推进节奏。`patchChainHeader` 维持"只更新 active cursor"的语义,避免 N 倍 `editMessageText` 风暴 —— 这是 inherit + patch 组合而非 broadcast 的关键。
   - 关闭 commit `a654fc3` 的 "ROTATE tail header 用 `heartbeatText(nil)` 不是 `cur.headerText()`" 决策 —— 错判,supersede。
 
+## 20. Rich Messages 路径
+
+Telegram Bot API 10.1（2026-06-11）起 `sendMessage` / `editMessageText` 之外另设两条等价但上限更高的路径：
+
+- `sendRichMessage(chat_id, rich_message=<json>)` —— 单 block 32K+ chars、500 blocks / message
+- `editMessageText(chat_id, message_id, rich_message=<json>)` —— 原位编辑富文本（body schema 同 `sendRichMessage`）
+
+### 20.1 上限对比
+
+| 维度 | `sendMessage` text 路径（现状） | `sendRichMessage` rich_message 路径 |
+|---|---|---|
+| 单 message 字符 | **4096** 严格 | 单 block 32K+ chars（实测 40K 通过，未触顶） |
+| 单 message blocks | n/a（单 string） | **500** 严格（501 → `RICH_MESSAGE_BLOCKS_TOO_MANY`） |
+| 顶层字段名 | `text`（string） | `rich_message`（JSON object） |
+| 原位编辑 | `editMessageText(text)`（4096 cap） | `editMessageText(rich_message=...)`（32K+ cap） |
+| `parse_mode` | `HTML` / `MarkdownV2` / `Markdown` | 不使用；结构通过 JSON 表达 |
+
+`rich_message` 对象三个候选 key：
+
+- `markdown`（string）—— 原 markdown 文本，**server 端自动解析为 blocks 再走 500 cap**。实测 5K chars → < 500 blocks ✓；16K chars → > 500 blocks ✗。
+- `html`（string）—— HTML 文本，同样自动解析。`html_style` / `style` 两个候选名均被 server 拒（"rich message must be non-empty"），实际 key 是 `html`。
+- `blocks`（array）—— 显式 block 数组，**跳过 server 端自动解析**，count 直接以发送的 array 为准。单 block 内容可达 32K+ chars。
+
+### 20.2 Block 类型
+
+Bot API 10.1 定义 25 种 input block type：paragraph、heading、pre、list、blockquote、expandable_blockquote、pullquote、divider、details、table、photo、video、audio、voice_note、animation、document、collage、slideshow、map、mathematical_expression、thinking、buttons、footer、anchor。
+
+**JSON 形状约定**：所有字段**平铺在 block 自身**上，**不嵌套**在同名 wrapper key 下。例：
+
+```json
+// ✓ 正确
+{"blocks":[{"type":"heading","text":"Title","size":1}]}
+
+// ✗ 错误（早期 round 5/6/7 一直用这种，全失败）
+{"blocks":[{"type":"heading","heading":{"text":"Title","size":1}}]}
+```
+
+`paragraph` 是唯一对嵌套形式宽容的 type（多余 `paragraph:{}` 包装被忽略）。其他 24 种严格按平铺形式解析。
+
+实测状态（`cmd/probe-telegram-rich/` round 5-9，按官方 Bot API 10.1 文档校正后）：
+
+| Type | 状态 | 字段 / 约束 |
+|---|---|---|
+| `paragraph` | ✓ | `text`（40K chars 单 block 通过） |
+| `heading` | ✓ | `text` + `size:1-6` |
+| `pre` | ✓ | `text` + `language`（可选） |
+| `divider` | ✓ **inline only** | 无字段；不能作为 blocks 数组唯一元素，必须跟 paragraph / blockquote 等并列或嵌套 |
+| `list` | ✓ | `items:[{blocks:[...]}, ...]` —— 每 item 内嵌 `blocks` 数组，**无 `type:"item"` 字段** |
+| `blockquote` | ✓ | `blocks:[InputRichBlock, ...]` + `credit`（可选） |
+| `expandable_blockquote` | ✓ | `text` + `credit`（可选） |
+| `pullquote` | ✓ | `text` + `credit`（可选） |
+| `details` | ✓ | `summary`（**不是 `header`**）+ `blocks` + `is_open`（可选） |
+| `table` | ✓ | `cells:[[RichBlockTableCell, ...], ...]`（2D 数组，cell 是 `{text, is_header, colspan, rowspan, align, valign}` 对象，**不是字符串**） |
+| `map` | ✓ | `location:{latitude, longitude, ...}`（Location 对象，**不是平铺字段**）+ `zoom`/`width`/`height`/`caption` |
+| `mathematical_expression` | ✓ | `expression`（LaTeX 字符串） |
+| `footer` | ✓ | `text` |
+| `anchor` | ✗ **inline only** | `name` 字段存在但 standalone 报 `RICH_MESSAGE_EMPTY`，需要作为其他 block 的 child |
+| `thinking` | ✗ | `RICH_MESSAGE_BLOCK_UNSUPPORTED` —— 大概率 Premium-only 或 bot-tier 未开通 |
+| `buttons` | ✓ | `buttons:[RichMessageButton, ...]`（1-8 个）；RichMessageButton 含 `text` / `url` / `callback_data` / `style` / `web_app` 等 |
+| `collage` | △ media-only children | `blocks:[InputRichBlock, ...]`，但 server 拒绝 paragraph child（`BLOCK_UNEXPECTED`），必须用 photo / video 等 media child |
+| `slideshow` | △ media-only children | 同 collage |
+| `photo` | ✓ | `photo:{type:"photo", media:"<url-or-file_id>"}`（InputMediaPhoto 嵌套结构），**仅 `https://telegram.org/` 域名实测 fetch 成功**，wikipedia / favicon 都 `failed to get HTTP URL content` |
+| `video` / `audio` / `voice_note` / `animation` / `document` | 未测 | 推断结构同 photo（`InputMedia*` 嵌套） |
+
+L2 落地所需 9 个常用 text block type（paragraph / heading / pre / list / blockquote / expandable_blockquote / pullquote / details / table）**全部通过**。footer / map / math / buttons / photo 5 个额外 type 也通，可按需选用。4 个限制（anchor inline-only / thinking 不支持 / collage-slideshow media-only / photo URL 白名单）明确，不阻塞 L2。
+
+### 20.3 自动解析的 block 计数
+
+`markdown` 和 `html` 两个 key 都先经 server 端解析器转 block，再走 500 cap。实测 cliff：
+
+| 输入 units | 解析后 blocks | 结果 |
+|---|---|---|
+| 100 | 200 | ✓ |
+| 200 | 400 | ✓ |
+| **300** | **600** | ✗ `RICH_MESSAGE_BLOCKS_TOO_MANY` |
+| 400+ | 800+ | ✗ |
+
+Cliff 落在 **[400, 600] blocks** 之间（与 `blocks` 显式 array 的 500 cap 一致 —— server 统一按 500 blocks 拒，无论来源是 `markdown` / `html` / `blocks`）。每 unit 是 `## heading\n\np\n\n` = 2 blocks；其他 markdown 元素的 block 权重不同（list item 算 1 block、code fence 算 1 block），实际 cliff 取决于 heading / fence / list 密度。
+
+接近 cap 的内容必须用 `blocks` key 显式表达 —— server 不再二次解析，发送的 array 就是计数的 array。
+
+### 20.4 迁移层级
+
+现状：所有 Telegram 出站走 `sendMessage(text=<html>, parse_mode=HTML)`，4096 cap 触发 `splitTelegramText`（`render.go:521`）+ 多 chunk 拆解 + chain rolling log 编排（§11.12）。Rich path 是该管线的可选替代，按改动量分三层。
+
+#### 20.4.1 Level 1 —— `rich_message[markdown]` 短内容优先
+
+- 判定分支：render 后长度对应 < 500 blocks（粗估 ≤ ~5K chars markdown / 实际取决于元素密度，见 §20.3）→ `rich_message: {"markdown": "<raw_md>"}`；否则回落 `text + parse_mode=HTML` 现状
+- 优先级：`OutResult`（v9 P2 已独立消息）最先切换 —— 长 result 是 4096 cap 的最大痛点
+- 覆盖 LLM reply 估计 ≥ 70%（典型 reply < 5K chars = < 50 blocks）
+- 改动量：≤ 1 天
+- 风险：pre-10.1 客户端 fallback 行为未知（见 §20.5 #1）
+
+#### 20.4.2 Level 2 —— 显式 `rich_message[blocks]`
+
+- 新文件 `internal/channel/telegram/rich.go` 提供 `markdownToRichBlocks(rawMD) []InputRichBlock` walker
+- **目标 block type 集合已全部验证可用**（§20.2）：paragraph / heading / pre / list / blockquote / expandable_blockquote / pullquote / details / table，加可选 footer / map / math / buttons / photo（photo 需可访问 URL）
+- walker 行为：markdown AST 节点映射到对应 block；不识别的 markdown 降级为 paragraph
+- Telegram send 路径用显式 blocks 取代 `RenderForWire` 的 HTML 输出；Feishu adapter 保持 HTML 不动
+- 改动量：1-2 天
+- UX 收益：真 heading 字号、真 code fence 语法高亮、真 list 缩进、真 table —— HTML 模式下这些都是 markdown 转 HTML 的近似
+- 风险：anchor 不可 standalone、divider 不可 standalone、thinking bot 不支持、collage/slideshow 只吃 media child —— walker 设计时把这些限制编入规则
+
+#### 20.4.3 Level 3 —— 单条 32K rich message，退役 v9 chain
+
+- 替换 `internal/channel/telegram/placeholder_chain.go` / `placeholder_chain_flush.go` / `chunk_body.go` / `chainLRU`（见 §11.12）整套为单条 32K rich message per turn
+- 所有 Out* 事件通过 `editMessageText(rich_message=...)` PATCH 同一条消息
+- 改动量：≥ 1 周
+- 价值评估：L2 落地后，L3 才有意义（单条 rich message 能装 40K+ chars + 真 block 结构，比 chain 滚 log 在 UX 上明显胜出）。当前 L2 边界已探明，技术可行性高
+
+### 20.5 待办
+
+1. pre-10.1 客户端（Desktop / iOS / Android）对 `rich_message` 的 fallback 行为 —— 无法 CLI 验证，需在旧版客户端实测
+2. `markdown` / `html` 自动拆 block 的 client 端 preflight 计数公式 —— send 前按启发式估算（每 heading/paragraph/code-fence/list-item = 1 block）避免中途 400；纯 heading + paragraph 模式下 500 blocks ≈ 200 units（见 §20.3）
+3. v9 chain `splitTelegramText` 与新路径的交互：保留 HTML 路径作 fallback，或一并退役（L3 落地时统一处理）
+4. L1 / L2 / L3 决策树：**L1 立即可落地**（独立、不阻塞）；L2 决策看 §20.5 #1 客户端 fallback 风险（若旧客户端 fallback 差，L2 收益打折扣）；L3 延后到 L2 稳定
+
+### 20.6 实现细节
+
+#### 20.6.1 L1 —— `rich_message[markdown]` 短内容分支
+
+**L1 scope 限定：仅 `OutResult`**。`OutReply` 走 v9 chain（chain-attached 7 种 kind 都不动），L2 才处理。理由：
+
+- v9 P2（§11.12.4.1）已让 `OutResult` 独立成单条消息，无 chain / edit 耦合
+- `OutResult` 是 LLM 最终输出，典型 < 5K chars，单条 `sendRichMessage` 直接消化
+- 最小改动点：仅 `sendOutResultMessage` 一处，分支分流；零新文件除 `rich.go`
+
+**Edit 路径不适用**：`OutResult` 在 v9 P2 是 one-shot send，`OutHeartbeat` 不打到它，`OnPromptEnded` 的 🎉 贴 `state.PlaceholderMessageID`（chain 首 chunk）而非 `state.ResultMessageID`。所以 L1 只动 send 路径，不影响 v9 chain 的 edit / heartbeat / onPromptEnded 链路。
+
+**改动范围**：
+
+- `internal/channel/telegram/adapter.go:1324` `sendOutResultMessage` —— 在 `RenderForWire` 之前插入分支判断
+- 配置层新增 `TelegramConfig.RichMode string`，取值 `off` / `auto` / `on`，默认 `off`（见 §20.8 pre-10.1 客户端风险缓解）
+- 新文件 `internal/channel/telegram/rich.go` —— 2 个 helper：`trySendRichMarkdown` + `estimateRichBlocks`
+
+**判定逻辑**（伪代码）：
+
+```go
+func (a *Adapter) sendOutResultMessage(ctx context.Context, msg messages.OutboundMessage, replyAnchor int) error {
+    rawMD := msg.Text                                  // raw markdown 来自 bridge，未经 RenderForWire
+    fallbackHTML := renderMarkdownSafe(rawMD)          // 现有 HTML 路径 fallback 产物
+
+    // 配置开关：RichMode=off 直接走 fallback（pre-10.1 客户端兼容，见 §20.8）
+    if a.richMode == "off" {
+        return a.sendOutResultHTML(ctx, fallbackHTML, replyAnchor)
+    }
+
+    // Preflight: 离线 goldmark 解析，估算 server 解析后的 block 数
+    est, _ := estimateRichBlocks(rawMD)
+    if est > 400 || len(rawMD) > 32_000 {
+        // 超过 server cap 安全余量，回落 plain HTML 路径
+        return a.sendOutResultHTML(ctx, fallbackHTML, replyAnchor)
+    }
+
+    // Try rich path
+    form := url.Values{
+        "chat_id":      {chatID},
+        "rich_message": {`{"markdown":` + jsonString(rawMD) + `}`},
+        // topicID / replyTo 处理同 sendOutResultMessage 现状
+    }
+    if err := a.api.call(ctx, "sendRichMessage", form, nil); err == nil {
+        return nil
+    } else {
+        a.logger.Warn("telegram: rich OutResult failed, falling back", "err", err)
+    }
+
+    // 任意 server 错误（4xx / 5xx / 网络）都回落，避免空消息
+    return a.sendOutResultHTML(ctx, fallbackHTML, replyAnchor)
+}
+```
+
+**Preflight 计数算法**（`estimateRichBlocks`）：
+
+```go
+// estimateRichBlocks 离线解析 markdown 估算 server 解析后的 block 数。
+// goldmark AST 节点类型映射到 server block 计数：
+//   ast.Heading               → 1 block
+//   ast.Paragraph             → 1 block
+//   ast.FencedCodeBlock       → 1 block
+//   ast.CodeBlock             → 1 block
+//   ast.ListItem              → 1 block（外层 list 容器不重复计）
+//   ast.Blockquote            → 1 block
+//   ast.Table                 → 1 block
+//   其它（HR 等）             → 0（保守估，< 真实 server 计数）
+// 阈值 400 = 500 cap × 0.8 buffer；超过即不送 rich。
+func estimateRichBlocks(rawMD string) (int, error) {
+    src := []byte(rawMD)
+    md := goldmark.New()
+    reader := text.NewReader(src)
+    root := md.Parser().Parse(reader)
+    n := 0
+    ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+        if !entering {
+            return ast.WalkContinue, nil
+        }
+        switch node.Kind() {
+        case ast.KindHeading, ast.KindParagraph,
+             ast.KindFencedCodeBlock, ast.KindCodeBlock,
+             ast.KindListItem,
+             ast.KindBlockquote, ast.KindTable:
+            n++
+        }
+        return ast.WalkContinue, nil
+    })
+    return n, nil
+}
+```
+
+**关键不变式**：
+
+- L1 仅 1 个新文件 `rich.go`（含 `trySendRichMarkdown` + `estimateRichBlocks`）；零 schema 变更
+- fallback 路径完全不动 → 出错 / preflight fail / config off 三种情况都回到 v9 P2 plain HTML 管线
+- `RichMode` 默认 `off`：旧客户端 fallback 风险由 config 控制启用范围
+- 不动 v9 chain 的 edit / heartbeat / onPromptEnded 链路；L1 完全旁路
+
+**RichMode 配置策略**：
+
+- `off`（默认）：所有 `OutResult` 走 plain HTML 路径，等价于现状
+- `auto`：每个 user / chat 按首次 enable 时间 + 客户端版本分布历史估算（待 Bot API 支持 client version 查询；当前等价 `off`）
+- `on`：所有 `OutResult` 强制走 rich 路径（preflight 仍兜底），用于灰度期内部 dogfooding
+
+#### 20.6.2 L2 —— 显式 `rich_message[blocks]` AST walker
+
+**新文件**：`internal/channel/telegram/rich.go`
+
+**核心 API**：
+
+```go
+// markdownToRichBlocks parses raw markdown and emits an InputRichBlock array
+// suitable for sendRichMessage / editMessageText(rich_message=). Supports 9
+// common block types (§20.2) plus inline RichText entities (§20.4); for
+// content the walker can't represent (footnote ref / strikethrough / raw HTML /
+// image), returns ok=false and the caller falls back to §20.6.1 L1 path.
+func markdownToRichBlocks(rawMD string) (blocks []InputRichBlock, ok bool)
+```
+
+**AST 映射表**（基于 goldmark 节点）：
+
+| goldmark AST | → InputRichBlock |
+|---|---|
+| `ast.Heading{Level:1-6}` | `{"type":"heading","text":<inline>,"size":1-6}` |
+| `ast.Paragraph` | `{"type":"paragraph","text":<inline>}` |
+| `ast.FencedCodeBlock` / `ast.CodeBlock` | `{"type":"pre","text":string,"language":<lang>}` |
+| `ast.List{Ordered:bool}` | `{"type":"list","items":[<item>]}` |
+| `ast.ListItem` → `InputRichBlockListItem` | `{"blocks":[<children>]}` |
+| `ast.Blockquote` | `{"type":"blockquote","blocks":[<children>]}` |
+| `ast.ThematicBreak` | `{"type":"divider"}`（仅当有 sibling；standalone 由 server 拒） |
+| `ast.Table` | `{"type":"table","cells":[[<cell>],...]}` |
+| 其它 | fallback 到 L1 `rich_message[markdown]` 路径 |
+
+**Inline 节点 → RichText 实体映射**：
+
+| goldmark AST | → RichText |
+|---|---|
+| `ast.Text{Segment:...}` | string in array |
+| `ast.Emphasis` | `{"type":"italic","text":...}` |
+| `ast.Strong` | `{"type":"bold","text":...}` |
+| `ast.CodeSpan` | `{"type":"code","text":...}` |
+| `ast.Link{Destination:...}` | `{"type":"url","text":...,"url":...}` |
+| 其它（image, raw HTML） | 降级为字符串 |
+
+**Inline 数组化规则**：如果 paragraph / heading 的 inline 序列中**只有 plain text**，`text` 字段保持 string（避免无意义数组）；出现任何 entity 时切到 array（§20.4 实测支持）。
+
+**改动范围**：
+
+- 新文件 `rich.go`：walker + 单元测试（goldmark AST → JSON 双向 round-trip 至少 30 case）
+- `adapter.go:815` `Send` OutReply 分支：在 L1 helper 后面追加 L2 调用（先试 L2，walker 失败回 L1 markdown，再不行回 plain HTML）
+- Feishu adapter 不动（继续用 HTML）
+
+#### 20.6.3 L3 —— 退役 v9 chain
+
+**Purge 目标**：
+
+- `internal/channel/telegram/placeholder_chain.go`
+- `internal/channel/telegram/placeholder_chain_flush.go`
+- `internal/channel/telegram/chunk_body.go`
+- §11.12 §11.12.3 三档阈值（3500 / 3900 / 4096）
+
+**替换为**：单条 32K rich message per turn。所有 OutXxx 事件通过 `editMessageText(rich_message=...)` PATCH 同一条消息。Debounce 250ms 保留（合并 burst edit）。
+
+**Edit 字节成本变化**：
+
+| 维度 | v9 chain (现状) | L3 单条 rich |
+|---|---|---|
+| 每次 PATCH 字节 | active chunk（~几 KB） | full body（32K+） |
+| 一 turn 消息数 | N chunk | 1 message + N edits |
+| 适合 turn 长度 | 长 turn（N 高） | 短 turn（避免无谓 PATCH） |
+
+L3 仅在 L2 生产数据证明"典型 turn < 32K chars"且"active chunk 编辑占比高"时落地。
+
+### 20.7 验证矩阵
+
+#### 20.7.1 L1 验收用例
+
+| # | 输入 | 期望 | 来源 |
+|---|---|---|---|
+| L1-1 | `rawMD = 4K chars` 纯 prose | `sendRichMessage(rich_message[markdown])` → 200 OK | §20.4 markdown 字段 |
+| L1-2 | `rawMD = 5K chars` 含 heading/list | 同上，server auto-parse 后 ~100 blocks < 500 | §20.3 cliff |
+| L1-3 | `rawMD = 6K chars` 含 200 units | server 拒 `RICH_MESSAGE_BLOCKS_TOO_MANY` → fallback | §20.3 cliff |
+| L1-4 | `rawMD = 40K chars` 单段 | fallback（超字符阈值，walker 估算不通过） | §20.1 字符上限 |
+| L1-5 | `sendRichMessage` 网络错误 | fallback，log warn | — |
+| L1-6 | OutResult 走 L1 路径 | 用户在 Telegram 看到带 markdown 渲染的 message | — |
+| L1-7 | OutReply 走 L1 路径 | 同上 | — |
+
+#### 20.7.2 L2 验收用例
+
+| # | 输入 markdown | walker 输出 | 来源 |
+|---|---|---|---|
+| L2-1 | `## Hi\n\nworld` | `[{heading,text:"Hi",size:2},{paragraph,text:"world"}]` | §20.2 |
+| L2-2 | `**bold** and [link](https://x)` | `[{paragraph,text:[{bold,text:"bold"}," and ",{url,text:"link",url:"https://x"}]}]` | §20.4 |
+| L2-3 | ` ```go\nx()\n``` ` | `[{pre,text:"x()",language:"go"}]` | §20.2 |
+| L2-4 | `- a\n- b` | `[{list,items:[{blocks:[{paragraph,text:"a"}]},{blocks:[{paragraph,text:"b"}]}]}]` | §20.2 |
+| L2-5 | `> quote` | `[{blockquote,blocks:[{paragraph,text:"quote"}]}]` | §20.2 |
+| L2-6 | `\| A \| B \|\n\|---\|---\|\n\| 1 \| 2 \|` | `[{table,cells:[[{text:"A"},{text:"B"}],[{text:"1"},{text:"2"}]]}]` | §20.2 |
+| L2-7 | `~~strike~~` | walker 不支持 → ok=false → fallback L1 | — |
+| L2-8 | `[^1]` footnote ref | 同上 | — |
+| L2-9 | nested list `- a\n  - b` | `[{list,items:[{blocks:[{paragraph,text:"a"},{list,items:[...]}]}]}]` | §20.2 |
+| L2-10 | 真实 Claude reply（混合 5+ 类型） | walker 输出 5+ blocks，全部在已验证 17 个 type 内 | — |
+
+#### 20.7.3 L3 验收用例
+
+| # | 场景 | 期望 |
+|---|---|---|
+| L3-1 | 长 turn（10+ tool calls） | 单条 rich message 顶部见 active header，bottom 滚动 log |
+| L3-2 | 短 turn（1-2 reply） | 直接一条 rich message，无 chain 概念 |
+| L3-3 | Heartbeat 频率 | 250ms debounce 保留 |
+| L3-4 | `EditMessageText` 32K body | 200 OK（已在 round 4 验证） |
+| L3-5 | reaction-only path | 不进 chain 概念，行为不变 |
+
+### 20.8 风险评估
+
+| 风险 | 验证状态 | 缓解 |
+|---|---|---|
+| Pre-10.1 客户端 fallback 显示空白 | 中（无法 CLI 测） | **L1 默认 `RichMode=off`**（§20.6.1），opt-in 启用；config 加 `telegram.rich_mode=off|auto|on` 字段（默认 `off`）。`auto` 模式后续可基于客户端版本探测（待 Bot API 支持 client version 查询）；当前 dogfooding 走 `on` 强制开 + 收集反馈。L2 灰度期同样受 `rich_mode` 控制 |
+| Markdown auto-parse cliff (>500 blocks 中途 400) | 已实测 200/400 ✓ 600+ ✗ | L1 preflight count 启发式；L2 用显式 blocks 绕开 |
+| Photo URL 白名单（仅 telegram.org 实测通过） | 已实测 | walker 不主动 emit photo block；显式发图仍走 `sendPhoto` |
+| Thinking block Premium-only | 已实测 `BLOCK_UNSUPPORTED` | walker 把 markdown emphasis 走 italic 不用 thinking；无 fallback 必要 |
+| Anchor / divider 不能 standalone | 已实测 | walker 规则：divider 必须有前后 sibling；anchor 仅作 list/blockquote 子块 |
+| Collage / slideshow 仅 media child | 已实测 `BLOCK_UNEXPECTED` | walker 跳过 collage/slideshow，纯文本 LLM 输出用不上 |
+| 富文本字段名未来变更 | 低 | 字段名集中在 `rich.go` 一处，变更单点改 |
+| Edit 字节成本上升 | 已知（32K vs 几 KB） | 仅 L3 关注；L3 落地后用生产 turn 长度分布数据评估 |
+| Concurrent edit race（两个 OutHeartbeat 同时 PATCH） | 未测 | L3 实现时 debounce + 单写者 goroutine；先 unit test 后 e2e |
+| `skip_entity_detection` 误用 | 未测 | 默认 `false`（API default）；walker 不主动关；A/B 验证需要时再开 |
+
+### 20.9 决策路径
+
+**L1 决策**（立即可判）：不依赖任何 L2/L3 验证。改动 ≤ 50 行，零新文件除 `rich.go`，可独立 PR，零阻塞。**建议立刻做**。
+
+**L2 决策**（L1 跑稳后判，1-2 周窗口）：
+
+- ✅ L1 在生产 1 周内无 fallback rate 异常（< 1%） → L2 进入候选
+- ⚠️ fallback rate > 5% → L2 优先级降，调查 markdown auto-parse 是否真不够
+- ❌ 旧客户端 fallback 报告显示频繁空白 → L2 改为 opt-in 配置项，按用户群分批启用
+
+**L3 决策**（L2 跑稳后判，4-8 周窗口）：
+
+- ✅ L2 生产数据显示典型 turn < 5K chars（active chunk 当前已经足够） → **L3 不上**
+- ⚠️ 数据显示典型 turn 5K-32K chars + chain chunk 切换频繁 → L3 进候选
+- ❌ chain 性能 / bug 报告 → 修复 chain 而不是退役
+

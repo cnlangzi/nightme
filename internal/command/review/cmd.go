@@ -38,6 +38,7 @@ import (
 	"log/slog"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
@@ -359,7 +360,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		// before /review), and the chat channel renders the fix
 		// replies as a separate rolling card instead of folding
 		// them into the /review placeholder.
-		if err := sendBlocks(revCtx, blocks, command.WithReplyTo(replyTo)); err != nil {
+		if err := sendBlocks(revCtx, blocks, agentsession.WithReplyTo(replyTo)); err != nil {
 			slog.Default().Warn("/review: AS inject failed",
 				"agent", runnerName,
 				"err", err,

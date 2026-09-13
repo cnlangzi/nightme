@@ -239,90 +239,47 @@ type AgentSession struct {
 	// closed-channel panic guard).
 	shutdownOnce sync.Once
 
-	// currentPromptOverrideUserMsgID is a per-prompt UserMsgID override
-	// for readpump enrichment. /review uses SendBlocks(WithReplyTo(msgID))
-	// to inject the formatted review text into the running AS so the
-	// main agent can act on "fix the blockers" follow-ups; without the
-	// override, every AgentEvent emitted by the main agent in response
-	// to the injected review anchors to the prior prompt's
-	// LastMessageID (the previous user message), and the chat
-	// channel renders each event as a separate rolling card instead
-	// of folding them into the /review placeholder.
-	//
-	// Lifecycle: written by SendBlocks via WithReplyTo, cleared by
-	// Submit (when the next user message enters the InputBuffer). The
-	// readpump reads it under asMu and lets the override shadow
-	// prompt.LastMessageID for the entire lifetime of the injected
-	// prompt — multi-segment replies all share the same anchor, which
-	// is the UX the user expects.
+	// currentPromptOverrideUserMsgID is the readpump's UserMsgID
+	// override for the in-flight prompt. See WithReplyTo.
 	currentPromptOverrideUserMsgID string
 }
 
 // sendBlocksOpts is the variadic-arguments receiver for
-// AgentSession.SendBlocks. Kept package-private; callers use
-// WithReplyTo to populate it. Adding fields is backwards-compatible
-// (the variadic option pattern preserves the existing 2-arg call
-// sites — /gtw, /gtw back, the runtime dispatcher, and the test
-// harnesses that call as.SendBlocks(ctx, blocks) verbatim).
+// AgentSession.SendBlocks.
 type sendBlocksOpts struct {
-	// replyTo is the UserMsgID the readpump should stamp on every
-	// AgentEvent it emits during the injected prompt's lifetime.
-	// Empty string means "use prompt.LastMessageID" — the
-	// pre-existing behavior.
 	replyTo string
 }
 
-// WithReplyTo stamps messageID as the UserMsgID anchor for every
-// AgentEvent the readpump emits in response to the next SendBlocks
-// call. The hint persists until Submit runs for the next user
-// message (which clears it) — see
-// currentPromptOverrideUserMsgID for the full lifecycle.
-//
-// Used by /review (internal/command/review/cmd.go) so the main
-// chat agent's response to the injected review findings lands in
-// the /review placeholder card instead of the prior user message's
-// card. Without this, /gtw commit, /gtw pr, and the runtime
-// dispatcher all anchor to prompt.LastMessageID via
-// AgentEventEnvelope.UserMsgID — correct for those paths, wrong for
-// /review because the injected text is conceptually a reply to the
-// /review slash command, not a new prompt from the user.
-//
-// Pattern: variadic option. Adding new options (e.g. WithSender
-// for "this is a system injection") is non-breaking — existing
-// 2-arg call sites continue to compile.
+// WithReplyTo makes the readpump stamp messageID as UserMsgID on
+// every AgentEvent emitted in response to the next SendBlocks call,
+// instead of currentPrompt.LastMessageID. Used by /review so the
+// main agent's response to the injected review findings anchors to
+// the /review slash command and folds into its placeholder card.
 func WithReplyTo(messageID string) SendBlocksOption {
 	return func(o *sendBlocksOpts) { o.replyTo = messageID }
 }
 
 // SendBlocksOption is the variadic-arguments type for
-// AgentSession.SendBlocks. See WithReplyTo for the canonical
-// option. Future options (e.g. injection source marker for
-// diagnostic logging) plug in here.
+// AgentSession.SendBlocks.
 type SendBlocksOption func(*sendBlocksOpts)
 
-// setReplyToOverride writes the override under asMu. Called by
-// SendBlocks after WithReplyTo is parsed. Package-private so the
-// only legitimate writer is SendBlocks; tests use it to simulate
-// the production path without a live bridge handle.
-func (as *AgentSession) setReplyToOverride(messageID string) {
-	as.asMu.Lock()
-	as.currentPromptOverrideUserMsgID = messageID
-	as.asMu.Unlock()
-}
-
 // replyToOverride returns the current override (empty == no
-// override; use prompt.LastMessageID). Package-private; readpump
-// uses this under asMu to compute the UserMsgID for each
-// AgentEvent it emits.
+// override; use prompt.LastMessageID).
 func (as *AgentSession) replyToOverride() string {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
 	return as.currentPromptOverrideUserMsgID
 }
 
-// clearReplyToOverride resets the override. Called from Submit when
-// a new user message enters the InputBuffer — the injected prompt
-// is over, the next prompt anchors normally.
+// replyToOverrideLocked returns the current override. Caller MUST
+// hold asMu.
+func (as *AgentSession) replyToOverrideLocked() string {
+	return as.currentPromptOverrideUserMsgID
+}
+
+// clearReplyToOverride resets the override. Called from Submit
+// (next user message enters InputBuffer) and endPrompt (current
+// prompt settled); the hint must not survive either transition.
 func (as *AgentSession) clearReplyToOverride() {
 	as.asMu.Lock()
 	as.currentPromptOverrideUserMsgID = ""
@@ -1026,6 +983,15 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	}
 }
 
+// ErrInjectionDuringTurn is returned by SendBlocks(WithReplyTo)
+// when a real user turn is mid-flight (currentPrompt set, isReady
+// false). The injection would otherwise stamp the user turn's
+// trailing events with the override UserMsgID and fold them into
+// the wrong card. Callers should drop the injection (the main
+// agent will see the prior turn settle before the next user
+// message arrives).
+var ErrInjectionDuringTurn = errors.New("agentsession: SendBlocks(WithReplyTo) refused: user turn in flight")
+
 // ErrNotRunning is returned by SendBlocks/Close when called
 // before Spawn() succeeds.
 var ErrNotRunning = errors.New("chatsession: AgentSession not running (Spawn not called or failed)")
@@ -1374,11 +1340,6 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// the rationale (anchor race fix).
 	as.asMu.Lock()
 	as.currentPrompt = p
-	// Clear any replyTo override set by the previous prompt's
-	// SendBlocks(WithReplyTo(...)) — a new user message is starting
-	// a fresh turn that anchors on p.LastMessageID, not the prior
-	// /review (or other injection) hint. Without this, the override
-	// would persist until endPrompt, leaking across turn boundaries.
 	as.currentPromptOverrideUserMsgID = ""
 	as.asMu.Unlock()
 	as.isReady.Store(false)
@@ -1475,28 +1436,40 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 		o(&cfg)
 	}
 	if cfg.replyTo != "" {
-		as.setReplyToOverride(cfg.replyTo)
+		// Refuse the override if a real user turn is in flight.
+		// SendBlocks(WithReplyTo) is for slash-command injections
+		// (/review) where the slash command's message_id is the
+		// anchor the user expects to see in chat. If a prior user
+		// turn is still streaming, setting the override here would
+		// stamp trailing user-turn events with the injection's
+		// replyTo and fold them into the wrong card.
+		//
+		// The chat-layer TryFlush gates user messages on
+		// as.IsReady() before Submit; this guard mirrors that
+		// gate for the injection path so injected and user turns
+		// cannot interleave their anchors.
+		as.asMu.RLock()
+		turnInFlight := as.currentPrompt != nil && !as.isReady.Load()
+		as.asMu.RUnlock()
+		if turnInFlight {
+			return ErrInjectionDuringTurn
+		}
+		as.asMu.Lock()
+		as.currentPromptOverrideUserMsgID = cfg.replyTo
+		as.asMu.Unlock()
 	}
 	as.asMu.RLock()
 	h := as.handle
 	as.asMu.RUnlock()
 	if h == nil {
-		// No handle: drop the override we just set so a later
-		// SendBlocks (on a freshly respawned handle) doesn't
-		// inherit a stale /review hint.
 		if cfg.replyTo != "" {
 			as.clearReplyToOverride()
 		}
 		return ErrNotRunning
 	}
 	err := h.SendBlocks(ctx, blocks)
-	if err != nil {
-		// Bridge refused: same rationale as the nil-handle branch.
-		// Without this, a failed SendBlocks would leave a stale
-		// override for the next successful SendBlocks to inherit.
-		if cfg.replyTo != "" {
-			as.clearReplyToOverride()
-		}
+	if err != nil && cfg.replyTo != "" {
+		as.clearReplyToOverride()
 	}
 	return err
 }

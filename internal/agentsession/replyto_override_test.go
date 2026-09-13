@@ -24,6 +24,7 @@
 package agentsession
 
 import (
+	"context"
 	"testing"
 )
 
@@ -52,7 +53,9 @@ func TestWithReplyTo_OverridesUserMsgIDForInjectedPrompt(t *testing.T) {
 	// production path: write the override under asMu. The test
 	// bypasses the live bridge handle requirement by going through
 	// the same package-private setter.
-	as.setReplyToOverride("u_review_slash")
+	as.asMu.Lock()
+	as.currentPromptOverrideUserMsgID = "u_review_slash"
+	as.asMu.Unlock()
 
 	// The readpump enrichment computes UserMsgID = override (if
 	// set) else prompt.LastMessageID. Replicate that decision
@@ -97,16 +100,13 @@ func TestWithReplyTo_ClearedOnSubmit(t *testing.T) {
 	as := makeBareAgentSession(t, "claude", "/tmp")
 
 	// Pretend /review just ran with the override set.
-	as.setReplyToOverride("u_review_slash")
+	as.asMu.Lock()
+	as.currentPromptOverrideUserMsgID = "u_review_slash"
+	as.asMu.Unlock()
 	if got := as.replyToOverride(); got != "u_review_slash" {
 		t.Fatalf("setup: override = %q; want u_review_slash", got)
 	}
 
-	// Bare-AS Submit fails (no bridge handle), but the production
-	// override-clear happens BEFORE the bridge call — so the
-	// clearing is observable even when the bridge step fails. Verify
-	// the package-private clear path directly: the same line runs
-	// inside Submit on the happy path.
 	as.clearReplyToOverride()
 	if got := as.replyToOverride(); got != "" {
 		t.Fatalf("override not cleared: got=%q", got)
@@ -133,5 +133,31 @@ func TestSendBlocksOption_WithReplyTo_StoresValue(t *testing.T) {
 	WithReplyTo("u_test")(&cfg)
 	if cfg.replyTo != "u_test" {
 		t.Fatalf("WithReplyTo: got=%q want=u_test", cfg.replyTo)
+	}
+}
+
+// TestSendBlocks_WithReplyTo_RefusesDuringUserTurn — the injection
+// guard fires when SendBlocks(WithReplyTo) is called while a real
+// user turn is mid-flight. Without the guard, the in-flight
+// prompt's trailing AgentEvents would inherit the override and
+// fold into the wrong card.
+func TestSendBlocks_WithReplyTo_RefusesDuringUserTurn(t *testing.T) {
+	as := makeBareAgentSession(t, "claude", "/tmp")
+
+	// Simulate "user turn in flight": currentPrompt set, isReady
+	// false (the AS has been Submit'd and the bridge hasn't
+	// emitted EventAgentDone yet).
+	as.SetCurrentPrompt(&Prompt{ID: "p_user", LastMessageID: "u_user"})
+	as.SetIsReady(false)
+
+	err := as.SendBlocks(context.TODO(), nil, WithReplyTo("u_review"))
+	if err != ErrInjectionDuringTurn {
+		t.Fatalf("got %v; want ErrInjectionDuringTurn", err)
+	}
+
+	// The override must NOT have been written — refusing the
+	// injection must not poison the AS state.
+	if got := as.replyToOverride(); got != "" {
+		t.Fatalf("override leaked despite refusal: got=%q", got)
 	}
 }

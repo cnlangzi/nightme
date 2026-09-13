@@ -1217,59 +1217,54 @@ func (h *HealthProbe) tick() {
 
 **风险**:低 — `RPCClient.SessionList` 是已有的 typed RPC,失败模式不变。
 
-### 13.3 P1 — respawn Router 移植(`host/lifecycle.go::tryRespawn`)
+### 13.3 P1 — respawn Router + Hub 移植(`host/lifecycle.go::tryRespawn` + `host/host.go::RecoverSubscriptions`)
 
-**根因**:`tryRespawn` 创建新 Client(`New` 会调 `NewRouter(log)` 建空 Router)后 `ReplaceGlobal(cli)` + `oldCli.Close()`,新 Router 是空的;`RecoverSubscriptions` walk 新 Router → 永远 `reattached:0`。
+**根因**(两层):
 
-**改动**(两种方案选一种):
+1. `tryRespawn` 创建新 Client(`New` 会调 `NewRouter(log)` 建空 Router)后 `ReplaceGlobal(cli)` + `oldCli.Close()`,新 Router 是空的;`RecoverSubscriptions` walk 新 Router → 永远 `reattached:0`。
+2. **review-driven gap**(2026-09-13):即便 Router 移植成功,新 Client 的 `Hub.sessions` 也是空的 — `session/follow` 流从来没人重新 `open`,dsh 端不知道 bridge 还想要这个 session 的事件 → Router 有 handler 但永远收不到 frame,session "silently dead"。`RecoverSubscriptions` 只调 `RPC.SessionCreate`,从不调 `Hub.Subscribe`。
 
-**方案 A:Router 提到 SharedHost 上,跨 respawn 复用**
-
-```go
-// host/lifecycle.go
-type SharedHost struct {
-    // ... existing
-    Router *Router  // 提到这里,跨 respawn 复用
-}
-
-func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
-    cli, err := /* existing */
-    cli.Router = h.Router  // 共享 Router
-    // ...
-}
-
-func (h *SharedHost) tryRespawn() error {
-    // 删掉 oldCli.Close()(Router 复用,只关 Hub)
-    oldHub := h.cli.Hub  // before swap
-    h.mu.Lock()
-    h.cmd = cmd
-    h.cli = cli
-    h.mu.Unlock()
-    ReplaceGlobal(cli)
-    oldHub.Close()
-    // ...
-}
-```
-
-**方案 B:`tryRespawn` 创建新 Client 后灌 Router**
+**改动**(方案 B + Hub 同步重订):
 
 ```go
-func (h *SharedHost) tryRespawn() error {
-    // ... swap cli ...
-    // 把旧 Router 的 entries 灌给新 Router
-    for _, sub := range oldCli.Router.EnumerateSubscriptions() {
-        cli.Router.Subscribe(sub.SessionID, sub.CWD, /* ??? handler 怎么搬? */)
+// host/router.go:Subscription 加 Handler 字段
+type Subscription struct {
+    SessionID string
+    CWD       string
+    Handler   MuxFrameHandler  // 新字段,Snapshot 用,Enumerate 不暴露
+}
+
+// 新增 Router.Snapshot()(Enumerate 同结构,但带 Handler)
+func (r *Router) Snapshot() []Subscription { ... }
+
+// host/lifecycle.go:tryRespawn 灌 Router
+subs := oldCli.Router.Snapshot()
+for _, sub := range subs {
+    if sub.Handler != nil {
+        cli.Router.Subscribe(sub.SessionID, sub.CWD, sub.Handler)
     }
 }
+// 然后才 oldCli.Close()
+
+// host/host.go:RecoverSubscriptions 加 Hub 重订(review gap)
+for _, sub := range c.Router.EnumerateSubscriptions() {
+    got, err := c.RPC.SessionCreate(ctx, opts)
+    // ... existing checks ...
+    if c.Hub != nil {
+        c.Hub.Subscribe(sub.SessionID, c.makeDispatchWrapper(sub.SessionID))
+    }
+    result.Reattached++
+}
 ```
 
-方案 A 更干净(避免 handler 引用问题);选 A。
+**为什么 Hub.Subscribe 之后 Router 不会双订**:`Hub.Subscribe` 是 last-wins(见 `stream.go:222-224` — 旧的 `streamID` 被 `queueCancelLocked` 取消,新的 streamId 在当前 generation 重新 mint);Router.Subscribe 也是 last-wins。所以 `RecoverSubscriptions` 多次调用幂等。
 
-**注意**:`Hub` 必须重建(每个 Client 的 Hub 持有自己的 WS connection,不能复用);`Router` 不持有 transport state,可以共享。
+**测试**:
+- `host_test.go::TestRouter_SnapshotTransfersActiveSubs` — Snapshot 含 Handler + 跨 Router 移植后还能 dispatch
+- `host_test.go::TestRouter_EnumerateDoesNotExposeHandler` — Enumerate 仍不暴露 Handler(回归锁)
+- `host_test.go::TestClient_RecoverSubscriptions_ReopensMuxStream` — Recover 后 mock 收到新 `open` 帧(`sessionToStream` 替换为新 streamId)+ push 帧能到 handler(review gap closure 锁)
 
-**测试**:`host_state_test.go` 已有 scenario,加一个 case:spawn → subscribe → 模拟 respawn → assert Router.muxSubs 仍包含订阅 → 模拟 dsh session.prompt → assert dispatch 到达 handler。
-
-**风险**:中 — `Router` 改成 SharedHost 字段后,所有 `h.cli.Router` 访问变成 `h.Router`;`host.go::New()` 不能再初始化 Router(由 SharedHost 创建时初始化一次)。
+**风险**:中 — `RecoverSubscriptions` 多调一次 `Hub.Subscribe`,但 last-wins 语义保证幂等;`Client.Subscribe` 的 wrapper 提取为 `makeDispatchWrapper` 共享,行为不变。
 
 ### 13.4 P2 — `$events/result` reply path(`host/client.go::RPCClient.Respond`)
 
@@ -1416,4 +1411,8 @@ HTTP 404 on /health                                       ← 验证 §11 health
 ```
 
 7 秒内:bios 帧(system/message + request/header)被丢、WS 被 server terminate(respawn 前的 surprise 切断)、respawn 完 recovery 看不到订阅 → Review 卡 "Working" 永不复原。
+
+### 14.5 review-driven 闭环(review of fix-dsn diff,2026-09-13)
+
+`/code-review` 拉了 dsh 对当前 diff 跑了 review,确认 §13.3 **只移植 Router 不够** — 新 Client 的 `Hub.sessions` 是空的,`session/follow` 流没有重开。修法已合进 §13.3:在 `RecoverSubscriptions` 里加 `c.Hub.Subscribe(sub.SessionID, c.makeDispatchWrapper(sub.SessionID))`。测试 `TestClient_RecoverSubscriptions_ReopensMuxStream` 验证 mock 端收到新 `open` 帧(`sessionToStream` 替换为新 streamId)+ push 帧能到 handler。
 

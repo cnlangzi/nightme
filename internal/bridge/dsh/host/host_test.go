@@ -175,7 +175,30 @@ func (m *mockDSH) handleSessionList(w http.ResponseWriter, r *http.Request) {
 
 func (m *mockDSH) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	m.createCallCount.Add(1)
-	writeRPC(w, rpcIDFromRequest(r), true, map[string]any{"sessionId": "session-mock-001"})
+	// Read body once — extract both rpcId (for writeRPC echo)
+	// and sessionId (for the reattach round-trip) from a single
+	// json.Unmarshal pass.
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	var raw struct {
+		RPCID   string `json:"rpcId"`
+		Payload struct {
+			Args struct {
+				Request struct {
+					SessionID string `json:"sessionId"`
+				} `json:"request"`
+			} `json:"args"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		slog.Default().Error("mock handleSessionCreate: body not JSON", "err", err, "body", string(body))
+		writeRPC(w, "", true, map[string]any{"sessionId": "session-mock-001"})
+		return
+	}
+	sessionID := raw.Payload.Args.Request.SessionID
+	if sessionID == "" {
+		sessionID = "session-mock-001"
+	}
+	writeRPC(w, raw.RPCID, true, map[string]any{"sessionId": sessionID})
 }
 
 func (m *mockDSH) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
@@ -1103,6 +1126,90 @@ func TestClient_ReconnectAfterServerClose(t *testing.T) {
 
 	if mock.muxConnectCount.Load() <= firstCount {
 		t.Fatalf("expected reconnect (count > %d), got %d", firstCount, mock.muxConnectCount.Load())
+	}
+}
+
+// ─── Test: RecoverSubscriptions re-opens mux streams ───────────────
+//
+// §13.3 + review gap closure: RecoverSubscriptions must (a) re-
+// attach the session on the new dsh via SessionCreate AND (b)
+// open a fresh session/follow stream on the new Hub by calling
+// Hub.Subscribe. Without (b), the Router has the handler but no
+// mux frames ever arrive — the session is silently dead post-
+// respawn.
+//
+// We assert (b) by verifying that RecoverSubscriptions results in
+// a new "open" frame being sent on the mux (the mock updates
+// sessionToStream on each open frame receipt). Then push a frame
+// for the recovered session and verify the handler runs.
+func TestClient_RecoverSubscriptions_ReopensMuxStream(t *testing.T) {
+	mock := newMockDSH(t)
+	c := host.New(mock.url(), slog.Default())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	waitFor(t, 2*time.Second, func() bool { return mock.muxConnectCount.Load() >= 1 })
+
+	var handlerHits atomic.Int64
+	unsub := c.Subscribe("session-recover", "/tmp/recover",
+		func(method, rpcID string, payload json.RawMessage) {
+			handlerHits.Add(1)
+		})
+	t.Cleanup(unsub)
+
+	// Capture the original streamId so we can detect that
+	// RecoverSubscriptions replaced it (Hub.Subscribe is last-wins).
+	waitFor(t, 1*time.Second, func() bool {
+		mock.streamsMu.RLock()
+		_, ok := mock.sessionToStream["session-recover"]
+		mock.streamsMu.RUnlock()
+		return ok
+	})
+	mock.streamsMu.RLock()
+	originalStreamID := mock.sessionToStream["session-recover"]
+	mock.streamsMu.RUnlock()
+	if originalStreamID == "" {
+		t.Fatal("setup: original Subscribe did not register sessionToStream entry")
+	}
+
+	// Now call RecoverSubscriptions. It must (a) RPC.SessionCreate
+	// successfully and (b) Hub.Subscribe to open a new
+	// session/follow stream on the mux.
+	result := c.RecoverSubscriptions(ctx, slog.Default())
+	if result.Reattached != 1 {
+		t.Fatalf("expected Reattached=1, got %d (orphaned=%d)",
+			result.Reattached, len(result.Orphaned))
+	}
+
+	// Wait for the new open frame to land and update
+	// sessionToStream (last-wins replacement, streamId differs).
+	waitFor(t, 1*time.Second, func() bool {
+		mock.streamsMu.RLock()
+		defer mock.streamsMu.RUnlock()
+		current := mock.sessionToStream["session-recover"]
+		return current != "" && current != originalStreamID
+	})
+	mock.streamsMu.RLock()
+	newStreamID := mock.sessionToStream["session-recover"]
+	mock.streamsMu.RUnlock()
+	if newStreamID == originalStreamID {
+		t.Errorf("RecoverSubscriptions did not mint a new mux streamId "+
+			"(still %q) — Hub.Subscribe not called?", newStreamID)
+	}
+
+	// Push a frame for the recovered session on the new stream
+	// and verify the handler receives it via the dispatch wrapper.
+	mock.pushMuxFrame(t, "session-recover",
+		"assistant/chunk", "seq-1",
+		map[string]any{"chunk": map[string]any{"type": "text-delta", "text": "hi"}})
+	waitFor(t, 2*time.Second, func() bool { return handlerHits.Load() >= 1 })
+	if got := handlerHits.Load(); got == 0 {
+		t.Errorf("handler not called after RecoverSubscriptions + push (got 0 hits)")
 	}
 }
 

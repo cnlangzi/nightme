@@ -58,15 +58,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
-	"github.com/cnlangzi/nightme/internal/pathutil"
 	"github.com/cnlangzi/nightme/internal/updater"
 	"github.com/cnlangzi/nightme/internal/version"
 )
@@ -75,7 +72,6 @@ import (
 //
 // Flags:
 //
-//	--tag vX.Y.Z      pin a specific release (default: latest)
 //	--quiet / -q      suppress progress bar (still verifies SHA256)
 //	--no-install      download + verify only; do NOT swap the binary.
 //	                  Useful in CI: pre-warm the staging dir, then run
@@ -85,7 +81,6 @@ import (
 //	--yes / -y        accept every stage without y/N prompts (CI mode)
 func newUpdateCmd() *cobra.Command {
 	var (
-		tag       string
 		quiet     bool
 		noInstall bool
 		noRestart bool
@@ -108,7 +103,6 @@ func newUpdateCmd() *cobra.Command {
 			"exec so the REPL's readline state survives.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runUpdate(cmd, updateOpts{
-				tag:       tag,
 				quiet:     quiet,
 				noInstall: noInstall,
 				noRestart: noRestart,
@@ -117,8 +111,6 @@ func newUpdateCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&tag, "tag", "",
-		"Specific release tag to install (default: latest)")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"Suppress progress bar (still verifies SHA256)")
 	cmd.Flags().BoolVar(&noInstall, "no-install", false,
@@ -136,7 +128,6 @@ func newUpdateCmd() *cobra.Command {
 // Bundling keeps the function signature stable as we add
 // flags without touching every call site.
 type updateOpts struct {
-	tag       string
 	quiet     bool
 	noInstall bool
 	noRestart bool
@@ -181,16 +172,24 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 
 	ctx := cmd.Context()
 
-	res, err := updater.Check(ctx, opts.tag)
-	if err != nil {
-		fmt.Fprintf(errOut, "  %s  check failed: %v\n", paintRed(out, "✗"), err)
-		return err
+	// Stage 1: detect latest via the version cache. Always
+	// fresh — there's no "stay on this old version" path, so
+	// checking against nightme.dev/GitHub is what makes the
+	// CLI useful.
+	checker, _ := version.NewChecker(dataDir, updater.LookupLatestTag)
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(errOut, "  %s  %s\n", paintDim(out, "·"), fmt.Sprintf(format, args...))
+	}
+	checkRes := checker.Check(ctx, version.Version, logf)
+	if checkRes.Latest == "" {
+		fmt.Fprintf(errOut, "  %s  no version info available\n", paintRed(out, "✗"))
+		return errors.New("no version info available")
 	}
 
 	current := displayVer(version.Version)
-	latest := displayVer(res.Latest)
+	latest := displayVer(checkRes.Latest)
 	fmt.Fprintln(out)
-	if !res.Outdated {
+	if !checkRes.Outdated {
 		fmt.Fprintf(out, "  %s  Already up to date\n", paintGreen(out, "✓"))
 		fmt.Fprintf(out, "     %s\n", paintDim(out, current))
 		return nil
@@ -201,56 +200,38 @@ func runUpdate(cmd *cobra.Command, opts updateOpts) error {
 		paintDim(out, "→"),
 		paint(out, ansiBold+ansiGreen, latest))
 
-	asset := updater.MatchAsset(res.Release, res.Latest)
-	if asset == nil {
-		return fmt.Errorf("no release asset for %s/%s in %s; available: %s",
-			runtime.GOOS, runtime.GOARCH, res.Latest, assetNames(res.Release.Assets))
-	}
-
-	stagingDir, err := updater.StagingDir(dataDir, res.Latest)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %s  %s  %s\n",
-		paintCyan(out, "↓"),
-		asset.Name,
-		paintDim(out, updater.FormatBytes(asset.Size)))
+	// Stage 2: download + verify + extract, in one call.
+	// updater.DownloadTag composes the URL itself (no API
+	// call) and tries GitHub first, mirror fallback. The
+	// verification + extraction happen inside.
+	fmt.Fprintf(errOut, "  %s  fetching release via github…\n", paintDim(out, "·"))
 	progress := updater.QuietProgress
 	if !opts.quiet {
-		progress = updater.NewASCIIProgressBar(out, asset.Size)
+		progress = updater.NewASCIIProgressBar(out, 0)
 	}
-	dlRes, err := updater.Download(ctx, res.Release, asset, stagingDir, progress)
+	dlRes, err := updater.DownloadTag(ctx, dataDir, progress)
 	if err != nil {
 		fmt.Fprintf(errOut, "  %s  download failed: %v\n", paintRed(out, "✗"), err)
 		return err
 	}
-	if dlRes.Cached {
-		fmt.Fprintf(out, "  %s  sha256 verified — skipping download\n", paintGreen(out, "✓"))
-	} else if !opts.quiet {
-		fmt.Fprintln(out)
+	if dlRes.Source == "mirror" {
+		fmt.Fprintf(errOut, "  %s  using mirror (github was unreachable)\n", paintDim(out, "·"))
 	}
 	fmt.Fprintf(out, "  %s  Staged %s  %s\n",
 		paintGreen(out, "✓"),
-		dlRes.Asset.Name,
-		paintDim(out, updater.FormatBytes(dlRes.Bytes)+", sha256="+dlRes.SHA256Hex))
+		dlRes.AssetName,
+		paintDim(out, "sha256="+dlRes.SHA256Hex))
 
 	if opts.noInstall {
 		fmt.Fprintf(out, "  %s  --no-install; stopping before swap\n", paintDim(out, "→"))
 		return nil
 	}
 
-	fmt.Fprintln(out)
-	binary, err := updater.ExtractArchive(dlRes.StagingPath, stagingDir)
-	if err != nil {
-		return fmt.Errorf("extract: %w", err)
-	}
-
 	targetPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate current binary: %w", err)
 	}
-	installRes, err := updater.Install(binary, targetPath)
+	installRes, err := updater.Install(dlRes.BinaryPath, targetPath)
 	if err != nil {
 		return fmt.Errorf("install: %w", err)
 	}
@@ -311,16 +292,6 @@ func execAndExit(out io.Writer, binary string, argv []string) error {
 	return nil
 }
 
-// assetNames joins asset basenames into a comma-separated
-// string for the "no asset for our OS/arch" diagnostic.
-func assetNames(assets []updater.Asset) string {
-	names := make([]string, 0, len(assets))
-	for _, a := range assets {
-		names = append(names, a.Name)
-	}
-	return strings.Join(names, ", ")
-}
-
 // daemonIsRunning reports whether a nightme daemon is up.
 // It uses the same socket-path resolution as `nightme status`
 // and is intentionally best-effort: any lookup error is
@@ -357,44 +328,4 @@ func runRestartInline(out io.Writer, targetPath string) error {
 	return cmd.Run()
 }
 
-// resolveInstallVersion is kept for the REPL path's
-// "no --tag" fallback (it picks the newest staging dir).
-// Not used by the CLI shell, which always re-checks
-// against the live version feed.
-func resolveInstallVersion(dataDir, tag string) (string, error) {
-	if tag != "" {
-		return strings.TrimPrefix(tag, "v"), nil
-	}
-	// F-PATHUTIL-001: cfg.Paths.DataDir is user-supplied via YAML
-	// and on Windows is commonly written with forward slashes
-	// (Git Bash / WSL habits). Normalize before joining so the
-	// staging directory comes out as "F:\nightme\updates" not
-	// "F:/nightme\updates" (which os.ReadDir on Windows rejects).
-	if n, err := pathutil.NormalizeForOS(dataDir); err == nil {
-		dataDir = n
-	}
-	updatesDir := pathutil.Join(dataDir, "updates")
-	entries, err := os.ReadDir(updatesDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("no staged installs under %s; run `nightme update` first", updatesDir)
-		}
-		return "", fmt.Errorf("read staging dir: %w", err)
-	}
-	if len(entries) == 0 {
-		return "", fmt.Errorf("no staged installs under %s; run `nightme update` first", updatesDir)
-	}
-	var newest string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if newest == "" || e.Name() > newest {
-			newest = e.Name()
-		}
-	}
-	if newest == "" {
-		return "", fmt.Errorf("no versioned subdirs under %s; run `nightme update` first", updatesDir)
-	}
-	return newest, nil
-}
+// daemonIsRunning reports whether a nightme daemon is up.

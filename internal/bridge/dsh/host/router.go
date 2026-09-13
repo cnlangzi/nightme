@@ -176,8 +176,10 @@ func (r *Router) EnumerateSubscriptions() []Subscription {
 // Calling SetHostHandler twice replaces the prior handler.
 func (r *Router) SetHostHandler(h HostFrameHandler) {
 	r.mu.Lock()
+	prev := r.hostHandler
 	r.hostHandler = h
 	r.mu.Unlock()
+	r.log.Info("dsh.host: SetHostHandler", "had_prev", prev != nil, "is_nil", h == nil)
 }
 
 // DispatchMux routes a mux frame. sessionId is extracted from the

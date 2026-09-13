@@ -4,14 +4,19 @@
 // (or a session that wants to keep the existing context but treat
 // the captured handoff as authoritative), it queues the embedded
 // resume prompt for the Agent. The prompt's step 1 instructs the
-// Agent to read <cwd>/.nightme/handoff.md itself, so this package
+// Agent to read the named handoff file itself, so this package
 // does NOT inline the file body — the canonical disk source is
 // the only authoritative copy.
 //
 // Companion semantics:
 //
-//   - /handoff — current Agent context → ./.nightme/handoff.md
-//   - /resume  — ./.nightme/handoff.md  → current Agent context
+//   - /handoff <name> — current Agent context → ~/.nightme/handoff/<name>.md
+//   - /resume  <name> — ~/.nightme/handoff/<name>.md       → current Agent context
+//
+// The handoff document lives under the user's home directory so
+// the resuming session does not need to be in the same cwd the
+// previous agent used; the prompt explicitly tells the Agent the
+// cwd may differ.
 //
 // Reply kind: OutReply (mirrors /queue and /steer — /resume is a
 // per-turn continuation that injects a message into the Agent's
@@ -32,11 +37,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
 
-// handoffFilename is the on-disk filename /resume reads inside
-// the per-cwd nightme directory. Same name as /handoff writes;
-// directory management goes through internal/nightmedir.
-const handoffFilename = "handoff.md"
-
 // handoffPrompt placeholder. Matches the convention used by the
 // /handoff package — the runtime substitutes the absolute path
 // before the Agent sees the prompt so the Agent's Read tool can
@@ -48,12 +48,21 @@ const handoffFilename = "handoff.md"
 // commands.
 const placeholderHandoffFileAbs = "{{HANDOFF_FILE_ABS}}"
 
-// RenderResumePrompt substitutes the absolute per-cwd handoff
+// RenderResumePrompt substitutes the absolute per-user handoff
 // path into resumePromptPrefix. Symmetric with the /handoff
 // package's RenderHandoffPrompt — tests pin the "no placeholder
 // survives" contract and the absolute-path semantics.
-func RenderResumePrompt(cwd string) string {
-	return strings.ReplaceAll(resumePromptPrefix, placeholderHandoffFileAbs, nightmedir.FilePath(cwd, handoffFilename))
+//
+// name must already pass nightmedir.ValidateHandoffName;
+// RenderResumePrompt does not re-validate so a bad name shows
+// up as a literal path in the rendered prompt rather than
+// silently rounding to something usable.
+func RenderResumePrompt(name string) (string, error) {
+	abs, err := nightmedir.HandoffFilePath(name)
+	if err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(resumePromptPrefix, placeholderHandoffFileAbs, abs), nil
 }
 
 // Factory is the command.SlashCommandFactory for /resume.
@@ -75,21 +84,22 @@ func init() {
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
 		Name:     "resume",
-		Summary:  "Continue the task described by ./.nightme/handoff.md in the current session.",
-		Usage:    "/resume",
+		Summary:  "Continue the task described by ~/.nightme/handoff/<name>.md in the current session.",
+		Usage:    "/resume <name>",
 		Category: "session",
 	}
 }
 
 // resumeSpec declares /resume's argv grammar for the shared lexer
-// (issue #291): no flags, no positional args. /resume is
-// single-action; any arg is a usage error rather than silently
-// dropped, mirroring /stop and /handoff's contracts.
+// (issue #291): no flags, exactly one positional arg (the
+// handoff name). /resume is single-action; a missing or extra
+// arg is a usage error rather than silently dropped, mirroring
+// /stop and /handoff's contracts.
 var resumeSpec = command.CmdSpec{
 	Name:    "/resume",
-	Usage:   "/resume",
-	MinArgs: 0,
-	MaxArgs: 0,
+	Usage:   "/resume <name>",
+	MinArgs: 1,
+	MaxArgs: 1,
 }
 
 // Handle implements command.SlashCommandFactory.
@@ -97,19 +107,25 @@ var resumeSpec = command.CmdSpec{
 // Flow:
 //
 //  1. ChatSession + active CWD preflight (RequireActiveCwd).
+//     cwd is still required even though the handoff document
+//     lives under $HOME — without a chat-scoped cwd there is no
+//     useful "where to continue" target for the resuming Agent.
 //  2. Active-agent preflight (SelectedAgent + LookupSelectedAgentSession).
-//  3. Reject trailing args / any flag via ParseCmdArgs.
+//  3. Reject missing / extra args via ParseCmdArgs.
 //  4. input.MessageID guard — ChatSession.QueueUserMessage
 //     silently no-ops on empty ID; mirrors the guard at
 //     queue/cmd.go:143.
-//  5. Stat ./.nightme/handoff.md. Missing or unreadable →
-//     OutReply error hinting at /handoff (NOT a fatal error —
-//     the user can run /handoff and retry).
-//  6. Queue the embedded resumePromptPrefix as a discrete
+//  5. ValidateHandoffName — character set / length / sentinel
+//     rules. Done before Stat so a bad name short-circuits with
+//     a clean usage error instead of a confusing "not found".
+//  6. Stat the named handoff. Missing or unreadable → OutReply
+//     error hinting at /handoff (NOT a fatal error — the user
+//     can run /handoff <name> and retry).
+//  7. Queue the embedded resumePromptPrefix as a discrete
 //     MessageKindQueue Prompt batch. The Agent reads the
 //     handoff from disk per the prompt's step 1; no inline
 //     copy of the file body is appended.
-//  7. Reply with OutReply ack so the channel folds it into the
+//  8. Reply with OutReply ack so the channel folds it into the
 //     same rolling-log card as the Agent's continuation.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	mgr *chatsession.Manager, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
@@ -117,8 +133,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if cs == nil {
 		return command.Reply(ctx, rt, "No active chat session."), nil
 	}
-	cwd, failOut := command.RequireActiveCwd(cs)
-	if failOut != nil {
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
 		return failOut, nil
 	}
 
@@ -129,7 +144,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
-	if _, err := command.ParseCmdArgs(input.Args[1:], resumeSpec); err != nil {
+	parsed, err := command.ParseCmdArgs(input.Args[1:], resumeSpec)
+	if err != nil {
 		return command.Reply(ctx, rt, "❌ "+err.Error()), nil
 	}
 
@@ -138,45 +154,59 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			"Internal: missing message id; /resume did not enqueue."), nil
 	}
 
-	handoffAbsPath := nightmedir.FilePath(cwd, handoffFilename)
+	name := parsed.Arg(0)
+	if err := nightmedir.ValidateHandoffName(name); err != nil {
+		return command.OutReply(input, "❌ /resume: "+err.Error()), nil
+	}
+	handoffAbsPath, err := nightmedir.HandoffFilePath(name)
+	if err != nil {
+		return command.OutReply(input,
+			fmt.Sprintf("❌ /resume: resolve handoff path: %v", err)), nil
+	}
 	info, err := os.Stat(handoffAbsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return command.OutReply(input,
-				fmt.Sprintf("❌ /resume: %s not found in workspace; run /handoff first.", nightmedir.RelPath(handoffFilename))), nil
+				fmt.Sprintf("❌ /resume: %s not found; run /handoff <name> first.", nightmedir.HandoffRelPath(name))), nil
 		}
 		return command.OutReply(input,
 			fmt.Sprintf("❌ /resume: stat %s failed: %v", handoffAbsPath, err)), nil
 	}
 	if info.Size() == 0 {
 		return command.OutReply(input,
-			fmt.Sprintf("❌ /resume: %s is empty; run /handoff again.", nightmedir.RelPath(handoffFilename))), nil
+			fmt.Sprintf("❌ /resume: %s is empty; rerun /handoff %s.", nightmedir.HandoffRelPath(name), name)), nil
 	}
 
+	prompt, err := RenderResumePrompt(name)
+	if err != nil {
+		return command.OutReply(input,
+			fmt.Sprintf("❌ /resume: render prompt: %v", err)), nil
+	}
 	msg := chatsession.Message{
 		ID:     input.MessageID,
 		ChatID: input.ChatID,
-		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: RenderResumePrompt(cwd)}},
+		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: prompt}},
 		Kind:   chatsession.MessageKindQueue,
 	}
 	if err := cs.QueueUserMessage(msg); err != nil {
 		return command.OutReply(input, fmt.Sprintf("Queue failed: %v", err)), nil
 	}
 
-	return command.OutReply(input, "🔄 Resuming task from ./.nightme/handoff.md…"), nil
+	return command.OutReply(input, fmt.Sprintf("🔄 Resuming task from %s…", nightmedir.HandoffRelPath(name))), nil
 }
 
 // resumePromptPrefix is the verbatim preamble /resume sends to
 // the Agent. The {{HANDOFF_FILE_ABS}} placeholder resolves to
-// the absolute per-cwd handoff path via RenderResumePrompt;
+// the absolute per-user handoff path via RenderResumePrompt;
 // the prompt intentionally mentions only the canonical path and
 // no forbidden-path list — giving the Agent a roster of wrong
 // paths to NOT use invites it to remember those paths and pick
 // one by mistake. Same logic the /handoff package applies.
 const resumePromptPrefix = `You are resuming an existing task from a previous AI coding agent.
-The current project contains a handoff document at the absolute path:
+The current working directory may differ from the one the previous agent was in; that is fine — the handoff document is not tied to any project.
+A handoff document for the task lives at the absolute path:
 {{HANDOFF_FILE_ABS}}
-That file is the canonical handoff state for the CURRENT PROJECT.
+That file is the canonical handoff state for the task you want to continue.
 
 Your job is to continue the existing task from the state described in that file. Do NOT restart the task from scratch.
 

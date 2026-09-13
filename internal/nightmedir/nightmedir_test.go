@@ -222,3 +222,181 @@ func TestEnsureGitignoreEntry_EmptyFile(t *testing.T) {
 		t.Errorf("empty file should get single entry; got %q", got)
 	}
 }
+
+// --- per-user handoff helpers ---
+
+// homeDir sandboxes $HOME (and USERPROFILE on Windows) so the
+// per-user helpers resolve inside the test sandbox. Mirrors
+// the helper in command/{handoff,resume}/cmd_test.go.
+func homeDir(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
+	return home
+}
+
+// HandoffDirName / HandoffFileSuffix / DirName: literal
+// contract — the slash-form composition downstream relies on
+// these being exactly these strings.
+func TestHandoff_Literals(t *testing.T) {
+	if nightmedir.HandoffDirName != "handoff" {
+		t.Errorf("HandoffDirName = %q, want handoff", nightmedir.HandoffDirName)
+	}
+	if nightmedir.HandoffFileSuffix != ".md" {
+		t.Errorf("HandoffFileSuffix = %q, want .md", nightmedir.HandoffFileSuffix)
+	}
+}
+
+// HandoffDir: returns $HOME/.nightme/handoff regardless of the
+// caller's cwd. Forward-slash-vs-platform separator comes from
+// pathutil.Join.
+func TestHandoffDir_Path(t *testing.T) {
+	home := homeDir(t)
+	got, err := nightmedir.HandoffDir()
+	if err != nil {
+		t.Fatalf("HandoffDir: %v", err)
+	}
+	want := filepath.Join(home, ".nightme", "handoff")
+	if got != want {
+		t.Errorf("HandoffDir = %q, want %q", got, want)
+	}
+}
+
+// HandoffFilePath: joins HandoffDir with <name>.md.
+func TestHandoffFilePath_Path(t *testing.T) {
+	home := homeDir(t)
+	got, err := nightmedir.HandoffFilePath("demo")
+	if err != nil {
+		t.Fatalf("HandoffFilePath: %v", err)
+	}
+	want := filepath.Join(home, ".nightme", "handoff", "demo.md")
+	if got != want {
+		t.Errorf("HandoffFilePath = %q, want %q", got, want)
+	}
+}
+
+// EnsureHandoffDir: missing dir → created (lazily creating
+// $HOME/.nightme too — the per-user .nightme may not exist on
+// a first-run sandbox).
+func TestEnsureHandoffDir_CreatesMissing(t *testing.T) {
+	home := homeDir(t)
+	if err := nightmedir.EnsureHandoffDir(); err != nil {
+		t.Fatalf("EnsureHandoffDir: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(home, ".nightme", "handoff"))
+	if err != nil {
+		t.Fatalf("expected handoff dir to exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("handoff is not a directory")
+	}
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Errorf("handoff perm = %o, want 0700", perm)
+		}
+	}
+}
+
+// EnsureHandoffDir: already exists → no error, perm unchanged.
+func TestEnsureHandoffDir_Idempotent(t *testing.T) {
+	home := homeDir(t)
+	dir := filepath.Join(home, ".nightme", "handoff")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("setup MkdirAll: %v", err)
+	}
+	if err := nightmedir.EnsureHandoffDir(); err != nil {
+		t.Fatalf("EnsureHandoffDir on existing dir: %v", err)
+	}
+	info, _ := os.Stat(dir)
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o755 {
+			t.Errorf("EnsureHandoffDir must not change existing perm; got %o, want 0755", perm)
+		}
+	}
+}
+
+// EnsureHandoffDir: a pre-existing sibling file inside the
+// directory must not be removed or modified.
+func TestEnsureHandoffDir_PreservesExistingFiles(t *testing.T) {
+	home := homeDir(t)
+	dir := filepath.Join(home, ".nightme", "handoff")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("setup MkdirAll: %v", err)
+	}
+	sentinel := filepath.Join(dir, "demo.md")
+	if err := os.WriteFile(sentinel, []byte("existing"), 0o644); err != nil {
+		t.Fatalf("setup write sentinel: %v", err)
+	}
+	if err := nightmedir.EnsureHandoffDir(); err != nil {
+		t.Fatalf("EnsureHandoffDir: %v", err)
+	}
+	body, _ := os.ReadFile(sentinel)
+	if string(body) != "existing" {
+		t.Errorf("sentinel file was disturbed: %q", body)
+	}
+}
+
+// HandoffRelPath: always slash-form, independent of host
+// platform — used in user-visible reply text where IM cards
+// render forward slashes regardless of OS. Includes the `~/`
+// prefix so the user knows where to find the file without
+// knowing the .nightme convention.
+func TestHandoffRelPath_AlwaysSlash(t *testing.T) {
+	got := nightmedir.HandoffRelPath("demo")
+	if got != "~/.nightme/handoff/demo.md" {
+		t.Errorf("HandoffRelPath = %q, want ~/.nightme/handoff/demo.md", got)
+	}
+	if strings.Contains(got, `\`) {
+		t.Errorf("HandoffRelPath must not contain backslash; got %q", got)
+	}
+}
+
+// ValidateHandoffName: comprehensive character set coverage.
+// One test instead of a table so the failure scenarios are
+// named individually.
+func TestValidateHandoffName(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantErr string
+	}{
+		{"empty", "", "must not be empty"},
+		{"dot", ".", `reserved`},
+		{"dotdot", "..", `reserved`},
+		{"leading_dot", ".hidden", "must not start with '.'"},
+		{"leading_dash", "-flag", "must not start with '-'"},
+		{"slash", "foo/bar", "invalid character"},
+		{"backslash", `foo\bar`, "invalid character"},
+		{"colon", "foo:bar", "invalid character"},
+		{"space", "foo bar", "invalid character"},
+		{"unicode", "foö", "invalid character"},
+		{"too_long", strings.Repeat("a", 65), "at most 64"},
+		{"exactly_64", strings.Repeat("a", 64), ""},
+		{"letters", "Demo", ""},
+		{"digits", "123", ""},
+		{"underscore", "demo_task", ""},
+		{"dash_inside", "demo-task", ""},
+		{"mixed", "Demo-1_task", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := nightmedir.ValidateHandoffName(tc.input)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("ValidateHandoffName(%q) = %v, want nil", tc.input, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("ValidateHandoffName(%q) = nil, want error containing %q", tc.input, tc.wantErr)
+				return
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("ValidateHandoffName(%q) = %v, want error containing %q", tc.input, err, tc.wantErr)
+			}
+		})
+	}
+}

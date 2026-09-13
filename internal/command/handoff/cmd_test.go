@@ -5,13 +5,30 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	handoffpkg "github.com/cnlangzi/nightme/internal/command/handoff"
+	"github.com/cnlangzi/nightme/internal/nightmedir"
 )
+
+// homeDir sandboxes $HOME (and USERPROFILE on Windows) to a temp
+// dir for the duration of the test, so nightmedir.HandoffDir()
+// resolves inside the sandbox rather than touching the real
+// user's home. Returns the temp home path so callers can build
+// expected absolute paths against it.
+func homeDir(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
+	return home
+}
 
 // ackReply asserts that out is the immediate-ack path: Consumed,
 // a Reply set, no Outbound entries. /handoff uses
@@ -40,8 +57,8 @@ func TestFactory_Spec(t *testing.T) {
 	if s.Name != "handoff" {
 		t.Fatalf("Spec.Name = %q, want handoff", s.Name)
 	}
-	if s.Usage != "/handoff" {
-		t.Errorf("Spec.Usage = %q, want /handoff", s.Usage)
+	if s.Usage != "/handoff <name>" {
+		t.Errorf("Spec.Usage = %q, want /handoff <name>", s.Usage)
 	}
 	if s.Summary == "" {
 		t.Errorf("Spec.Summary is empty")
@@ -70,7 +87,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{ChatID: "c1", Args: []string{"handoff"}})
+		command.SlashInput{ChatID: "c1", Args: []string{"handoff", "demo"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -90,17 +107,17 @@ func TestFactory_Handle_NoSelectedAgent_RepliesHint(t *testing.T) {
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
-		command.SlashInput{ChatID: "c1", Args: []string{"handoff"}})
+		command.SlashInput{ChatID: "c1", Args: []string{"handoff", "demo"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	ackReply(t, out, "no active agent")
 }
 
-// /handoff accepts no flags and no positional args; a stray
-// token must surface as a usage error instead of being silently
-// dropped (issue #291).
-func TestFactory_Handle_RejectsTrailingArgs(t *testing.T) {
+// /handoff requires exactly one positional arg (the name); a
+// missing arg must surface as a usage error rather than be
+// silently dropped (issue #291).
+func TestFactory_Handle_RejectsMissingArg(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := handoffpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
@@ -114,20 +131,136 @@ func TestFactory_Handle_RejectsTrailingArgs(t *testing.T) {
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID: "c1",
-			Args:   []string{"handoff", "extra"},
+			Args:   []string{"handoff"},
 		})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	ackReply(t, out, "unexpected positional argument")
+	ackReply(t, out, "missing argument")
+}
+
+// /handoff with more than one positional arg is rejected.
+// Mirrors /stop / /gtw close: tail tokens are not silently
+// dropped.
+func TestFactory_Handle_RejectsExtraArg(t *testing.T) {
+	mgr := chatsession.NewManager()
+	f := handoffpkg.NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
+		command.SlashInput{
+			ChatID: "c1",
+			Args:   []string{"handoff", "demo", "extra"},
+		})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	ackReply(t, out, "too many arguments")
+}
+
+// A name that fails ValidateHandoffName is rejected before any
+// mkdir touches disk. The Agent never sees the prompt; the user
+// gets the validator's error verbatim.
+func TestFactory_Handle_RejectsInvalidName(t *testing.T) {
+	homeDir(t)
+	mgr := chatsession.NewManager()
+	f := handoffpkg.NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		input    string
+		contains string
+	}{
+		// Lexer classifies these as positional (don't start with
+		// '-'), so they reach ValidateHandoffName and are rejected
+		// by its character-set / sentinel / leading-byte rules.
+		// "../escape" trips the leading-dot check before the char
+		// loop sees the '/' — the dot guard runs first and
+		// returns the leading-dot message.
+		{"escape_dot_dot", "../escape", "must not start with '.'"},
+		{"leading_dot", ".hidden", "must not start with '.'"},
+		{"slash_inside", "name/with/slash", "invalid character"},
+		{"backslash_inside", `name\backslash`, "invalid character"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs2, _ := mgr.GetOrCreate("c1", "claude")
+			if err := cs2.SetSelectedCwd(t.TempDir()); err != nil {
+				t.Fatalf("SetSelectedCwd: %v", err)
+			}
+			if err := cs2.SetSelectedAgent("claude"); err != nil {
+				t.Fatalf("SetSelectedAgent: %v", err)
+			}
+			out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs2,
+				command.SlashInput{
+					ChatID:    "c1",
+					MessageID: "m_bad_" + tc.name,
+					Text:      "/handoff " + tc.input,
+					Args:      []string{"handoff", tc.input},
+				})
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			ackReply(t, out, tc.contains)
+			if got := cs2.QueueLen(); got != 0 {
+				t.Errorf("invalid name must not enqueue; got QueueLen=%d", got)
+			}
+		})
+	}
+}
+
+// A name that starts with '-' is rejected by the lexer as an
+// unknown flag before ValidateHandoffName ever runs. The error
+// message names the offending flag and the Usage string, so the
+// user can recover without guessing.
+func TestFactory_Handle_RejectsFlagLikeName(t *testing.T) {
+	homeDir(t)
+	mgr := chatsession.NewManager()
+	f := handoffpkg.NewFactory()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
+	}
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
+	}
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
+		command.SlashInput{
+			ChatID:    "c1",
+			MessageID: "m_flag",
+			Text:      "/handoff -flag-like",
+			Args:      []string{"handoff", "-flag-like"},
+		})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	ackReply(t, out, "unknown flag")
+	if got := cs.QueueLen(); got != 0 {
+		t.Errorf("flag-shaped name must not enqueue; got QueueLen=%d", got)
+	}
 }
 
 // /handoff with all preflights green queues exactly one message
-// anchored on input.MessageID AND pre-creates <cwd>/.nightme so
-// the Agent doesn't burn a turn on mkdir. The prompt body and
-// Kind are asserted by the constant in cmd.go; the count + ack
-// + .nightme existence is what this test pins down.
+// anchored on input.MessageID AND pre-creates $HOME/.nightme/
+// handoff so the Agent doesn't burn a turn on mkdir. The
+// per-user .nightme lives outside any git repo, so no
+// .gitignore sync is needed (and none is performed).
 func TestFactory_Handle_QueuesPrompt(t *testing.T) {
+	homeDir(t)
 	mgr := chatsession.NewManager()
 	f := handoffpkg.NewFactory()
 	dir := t.TempDir()
@@ -142,8 +275,8 @@ func TestFactory_Handle_QueuesPrompt(t *testing.T) {
 	in := command.SlashInput{
 		ChatID:    "c1",
 		MessageID: "m_handoff",
-		Text:      "/handoff",
-		Args:      []string{"handoff"},
+		Text:      "/handoff demo",
+		Args:      []string{"handoff", "demo"},
 	}
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs, in)
 	if err != nil {
@@ -157,39 +290,45 @@ func TestFactory_Handle_QueuesPrompt(t *testing.T) {
 	if got := cs.QueueLen(); got != 1 {
 		t.Fatalf("QueueLen after /handoff: got %d, want 1", got)
 	}
-	// <cwd>/.nightme must exist synchronously by the time the
-	// slash handler returns — otherwise the Agent wastes a turn
-	// on mkdir. MkdirAll is idempotent, so a second /handoff on
-	// the same workspace is also covered (directory already
-	// exists → no error).
-	info, err := os.Stat(filepath.Join(dir, ".nightme"))
+	// $HOME/.nightme/handoff must exist synchronously by the
+	// time the slash handler returns — otherwise the Agent
+	// wastes a turn on mkdir. MkdirAll is idempotent, so a
+	// second /handoff on the same HOME is also covered
+	// (directory already exists → no error).
+	hdir, err := nightmedir.HandoffDir()
 	if err != nil {
-		t.Fatalf("expected %s/.nightme to exist after /handoff, got: %v", dir, err)
+		t.Fatalf("HandoffDir: %v", err)
+	}
+	info, err := os.Stat(hdir)
+	if err != nil {
+		t.Fatalf("expected %s to exist after /handoff, got: %v", hdir, err)
 	}
 	if !info.IsDir() {
-		t.Errorf("%s/.nightme is not a directory", dir)
+		t.Errorf("%s is not a directory", hdir)
 	}
 }
 
-// /handoff on a workspace that already has a .nightme directory
-// must not error — MkdirAll is a no-op when the path exists.
-// Pins down the idempotency contract so re-runs (e.g. after an
-// interrupted first attempt) don't blow up.
-func TestFactory_Handle_NightmeExists_StillSucceeds(t *testing.T) {
-	mgr := chatsession.NewManager()
-	f := handoffpkg.NewFactory()
-	dir := t.TempDir()
-	nightmeDir := filepath.Join(dir, ".nightme")
-	if err := os.MkdirAll(nightmeDir, 0o755); err != nil {
+// /handoff on a HOME that already has .nightme/handoff with a
+// pre-existing sibling file must not error — MkdirAll is a
+// no-op when the path exists. Pins down the idempotency
+// contract so re-runs (e.g. after an interrupted first attempt)
+// don't blow up, and pre-existing user-managed files in the
+// directory are left untouched.
+func TestFactory_Handle_HandoffDirExists_StillSucceeds(t *testing.T) {
+	home := homeDir(t)
+	hdir := filepath.Join(home, ".nightme", "handoff")
+	if err := os.MkdirAll(hdir, 0o700); err != nil {
 		t.Fatalf("setup MkdirAll: %v", err)
 	}
-	sentinel := filepath.Join(nightmeDir, "config.yml")
+	sentinel := filepath.Join(hdir, "unrelated.txt")
 	if err := os.WriteFile(sentinel, []byte("existing"), 0o644); err != nil {
 		t.Fatalf("setup write sentinel: %v", err)
 	}
 
+	mgr := chatsession.NewManager()
+	f := handoffpkg.NewFactory()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	if err := cs.SetSelectedCwd(dir); err != nil {
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	if err := cs.SetSelectedAgent("claude"); err != nil {
@@ -200,8 +339,8 @@ func TestFactory_Handle_NightmeExists_StillSucceeds(t *testing.T) {
 		command.SlashInput{
 			ChatID:    "c1",
 			MessageID: "m_handoff_existing",
-			Text:      "/handoff",
-			Args:      []string{"handoff"},
+			Text:      "/handoff demo",
+			Args:      []string{"handoff", "demo"},
 		})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -216,11 +355,11 @@ func TestFactory_Handle_NightmeExists_StillSucceeds(t *testing.T) {
 // and skip the QueueUserMessage (which silently no-ops on empty
 // ID). Mirrors /queue's guard at queue/cmd.go:143.
 func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
+	homeDir(t)
 	mgr := chatsession.NewManager()
 	f := handoffpkg.NewFactory()
-	dir := t.TempDir()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
-	if err := cs.SetSelectedCwd(dir); err != nil {
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	if err := cs.SetSelectedAgent("claude"); err != nil {
@@ -230,8 +369,8 @@ func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, cs,
 		command.SlashInput{
 			ChatID: "c1",
-			Text:   "/handoff",
-			Args:   []string{"handoff"},
+			Text:   "/handoff demo",
+			Args:   []string{"handoff", "demo"},
 			// MessageID deliberately empty.
 		})
 	if err != nil {
@@ -246,38 +385,23 @@ func TestFactory_Handle_NoMessageID_RepliesDiagnostic(t *testing.T) {
 // RenderHandoffPrompt: every {{...}} placeholder resolves to a
 // real absolute path; none survive in the rendered output.
 func TestRenderHandoffPrompt_SubstitutesPaths(t *testing.T) {
-	cwd := t.TempDir()
-	got := handoffpkg.RenderHandoffPrompt(cwd)
+	home := homeDir(t)
+	got, err := handoffpkg.RenderHandoffPrompt("demo")
+	if err != nil {
+		t.Fatalf("RenderHandoffPrompt: %v", err)
+	}
 
 	if strings.Contains(got, "{{") || strings.Contains(got, "}}") {
 		t.Errorf("rendered prompt contains unreplaced placeholder markers:\n%s", got)
 	}
 
-	// Both target paths appear verbatim — platform-canonical,
-	// no `cwd`-literal leakage.
-	wantDir := filepath.Join(cwd, ".nightme")
-	wantFile := filepath.Join(cwd, ".nightme", "handoff.md")
+	wantDir := filepath.Join(home, ".nightme", "handoff")
+	wantFile := filepath.Join(home, ".nightme", "handoff", "demo.md")
 	if !strings.Contains(got, wantDir) {
 		t.Errorf("rendered prompt missing %s; got:\n%s", wantDir, got)
 	}
 	if !strings.Contains(got, wantFile) {
 		t.Errorf("rendered prompt missing %s; got:\n%s", wantFile, got)
-	}
-
-	// Negative: the relative `./.nightme/handoff.md` form must
-	// NOT appear anywhere — the whole point of the placeholder
-	// is that the Agent sees the absolute path, never the
-	// relative shorthand. The forbidden-path roster
-	// (~/.nightme/handoff.md, ./handoff.md, ~/.handoff.md) was
-	// removed from the prompt so the Agent has only one path to
-	// follow — verify those literals are also gone.
-	if strings.Contains(got, "./.nightme/handoff.md") {
-		t.Errorf("rendered prompt contains relative handoff path; Agent should see absolute only")
-	}
-	for _, banned := range []string{"~/.nightme/handoff.md", "./handoff.md", "~/.handoff.md"} {
-		if strings.Contains(got, banned) {
-			t.Errorf("rendered prompt contains forbidden-path roster entry %q", banned)
-		}
 	}
 }
 
@@ -285,8 +409,11 @@ func TestRenderHandoffPrompt_SubstitutesPaths(t *testing.T) {
 // structural content the Agent needs (h1, sections, persistence
 // rules) — the substitution must not have mangled the body.
 func TestRenderHandoffPrompt_PreservesStructure(t *testing.T) {
-	cwd := t.TempDir()
-	got := handoffpkg.RenderHandoffPrompt(cwd)
+	homeDir(t)
+	got, err := handoffpkg.RenderHandoffPrompt("demo")
+	if err != nil {
+		t.Fatalf("RenderHandoffPrompt: %v", err)
+	}
 
 	want := []string{
 		"# Handoff",

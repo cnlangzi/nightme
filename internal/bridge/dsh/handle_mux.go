@@ -13,9 +13,19 @@
 //   - session/event:经 dispatcher 路由
 //   - session/projection:经 wireState.applyProjection
 //   - session/queue / session/jobs:本期不消费,debug log
-//   - approval/requested / approval/resolved:permissions 层处理
-//   - approval/asked:debug log only (respondable gate is approval/requested)
-//   - question/requested / question/resolved:handleQuestionRequested
+//   - approval/asked:debug log only (audit-only echo, NOT the
+//     respondable gate; dsh 0.1.2-rc.1 puts approval on the host
+//     $events waterfall as approval/request — see host_waterfall.go)
+//
+// Note: dsh 0.1.2-rc.1 folded approval + user-questions onto the
+// host $events waterfall stream. The mux top-level
+// approval/requested / approval/resolved / question/requested /
+// question/resolved methods are no longer emitted; if a frame still
+// arrives here it is recorded + counted + warn-logged as a
+// regression marker. The respondable path is
+// host_waterfall.go::driver.handleHostFrame, which adapts the
+// waterfall envelope to the existing handleApprovalRequested /
+// handleQuestionRequested helpers in permissions.go.
 //
 // dsh 0.1.2-rc.1 (new wire) folds the per-event type into the mux
 // method itself: after host/stream.go::translateSessionEvent, the
@@ -121,45 +131,27 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 			d.deliver(ev)
 		}
 
-	case "approval/requested":
-		d.wireState.recordWireFrame(method, "", len(payload))
-		var ar muxApprovalRequested
-		if err := json.Unmarshal(payload, &ar); err != nil {
-			dLog("dsh: approval/requested decode: %v", err)
-			return
-		}
-		d.handleApprovalRequested(rpcID, ar)
-
-	case "approval/resolved":
-		d.wireState.recordWireFrame(method, "", len(payload))
-		var ar muxApprovalResolved
-		if err := json.Unmarshal(payload, &ar); err != nil {
-			dLog("dsh: approval/resolved decode: %v", err)
-			return
-		}
-		d.handleApprovalResolved(ar)
-
-	case "question/requested":
-		d.wireState.recordWireFrame(method, "", len(payload))
-		var qr muxQuestionRequested
-		if err := json.Unmarshal(payload, &qr); err != nil {
-			dLog("dsh: question/requested decode: %v", err)
-			return
-		}
-		// Same routing-key constraint as approval/requested above:
-		// /api/respond is keyed on the server-frame rpcId, NOT the
-		// payload's SessionID+":q". We pass rpcID as the key and let
-		// handleQuestionRequested manage the display logic.
-		d.handleQuestionRequested(rpcID, qr)
-
-	case "question/resolved":
-		d.wireState.recordWireFrame(method, "", len(payload))
-		var qr muxQuestionResolved
-		if err := json.Unmarshal(payload, &qr); err != nil {
-			dLog("dsh: question/resolved decode: %v", err)
-			return
-		}
-		d.handleQuestionResolved(qr.QuestionRPCID, qr.Outcome)
+	case "approval/requested",
+		"approval/resolved",
+		"question/requested",
+		"question/resolved":
+		// dsh 0.1.2-rc.1 no longer emits these as mux top-level
+		// methods — both approval and user-questions gate on the
+		// host $events waterfall stream
+		// (approval/request, user-questions/request). The
+		// corresponding reply is `/api/respond` keyed on the
+		// waterfall's eventId.
+		//
+		// The handling lives in host_waterfall.go →
+		// driver.handleHostFrame. If a frame still arrives here
+		// (older dsh rc, or a future rc reverting to mux),
+		// record + count + warn so ops can spot the regression
+		// without breaking the bridge.
+		unknownTotal := d.wireState.recordAndCountUnknown(method, len(payload))
+		warnLogger.Warn("dsh: mux legacy method dropped — dsh 0.1.2-rc.1 sends this as host waterfall",
+			"method", method,
+			"rpc_id", rpcID,
+			"unknown_total", unknownTotal)
 
 	case "session/queue":
 		d.wireState.recordWireFrame(method, "", len(payload))
@@ -254,6 +246,7 @@ func isSessionEventType(method string) bool {
 		"request/context",
 		"agent/inbox/spliced",
 		"approval/asked",
+		"approval/decided",
 		"compaction/end",
 		"todo/write", "todo/update", "todo/delete":
 		return true

@@ -1,42 +1,40 @@
 // lifecycle.go — process management for the shared dsh web daemon.
 //
 // In the shared-host architecture (F-dsh-shared-host), exactly ONE
-// `dsh --profile web` subprocess is owned by the nightme daemon —
-// started once at boot, kept alive for the daemon's lifetime,
-// gracefully shut down on exit. This file owns the subprocess;
-// the rest of the package (client.go, stream.go, router.go) talks
-// to it over HTTP + WebSocket.
+// `dsh --profile web` subprocess serves every ChatSession. This
+// file owns the lifecycle; the rest of the package (client.go,
+// stream.go, router.go) talks to dsh over HTTP + WebSocket.
 //
-// Lifecycle model (always-spawn — see F-dsh-shared-host §1.3.1):
+// dsh 0.1.2-rc.1 enforces per-process signed-cookie auth on
+// /api/* and /api/events.* (see
+// @deepseek-ai/dsh-client-connection/lib/index.js::BrowserAuth).
+// The signing secret is persisted to
+// `~/.dsh/.credentials.yaml` (record `client-connection/browser-session`,
+// payload.secret). Since the secret is per-`.dsh/` directory and
+// every dsh started by nightme uses the same directory, nightme
+// can MINT the dsh-auth cookie locally using that secret — no
+// launch-token exchange required. The cookie validates against any
+// dsh process on this host that's loaded the same secret, which
+// means nightme can attach to a still-running dsh on restart
+// without re-spawning or persisting anything of its own.
+//
+// Lifecycle model (sign-cookie-then-spawn):
 //
 //	StartSharedHost(ctx, opts)
-//	  1. TCP-dial 127.0.0.1:3080.
-//	     - dial succeeds → 3080 is occupied by SOMETHING (could be
-//	       another dsh, could be a foreign service — we don't
-//	       care). Spawn our own on findFreePort(3081, 3099).
-//	     - dial fails (refused/timeout) → 3080 is ours. Spawn there.
-//	  2. spawnAndWire spawns `dsh --profile web --port <port>` and:
-//	     a. parses the `?token=<launchToken>` from dsh's stdout
-//	        URL line,
-//	     b. GETs /?token=<launchToken> to mint the dsh-auth cookie
-//	        (dsh 0.1.2-rc.1 returns 303 with set-cookie; without
-//	        this step every /api/* and /api/events.* gets 401),
-//	     c. builds an http.CookieJar populated with the cookie,
-//	     d. constructs *Client with NewWithJar so both the HTTP
-//	        RPC client and the WS dialer carry it,
-//	     e. Client.Start kicks off mux/host WS pumps; the cookie
-//	        is now attached to every upgrade.
-//	  3. install client via host.SetGlobal so dsh.newDriver can
-//	     find it. Start the watchdog.
-//
-// Why we no longer "reuse existing dsh": dsh 0.1.2-rc.1 enforces
-// per-process signed-cookie auth on /api/* and /api/events.*. The
-// launch token is process-internal and never exposed to a file,
-// so we have no way to mint the cookie against someone else's dsh.
-// Attaching to an external dsh therefore means RPC and WS fail
-// with 401 — useless. The shared-host architecture is "nightme
-// owns dsh"; the reuse-existing branch was an optimization that's
-// no longer reachable in practice, so it's removed.
+//	  1. Mint a dsh-auth cookie using the signing secret loaded
+//	     from ~/.dsh/.credentials.yaml (via mintDSHAuthCookie).
+//	     No network round-trip to dsh — the algorithm is a pure
+//	     HMAC-SHA256 over a base64url-encoded payload.
+//	  2. Construct *Client with the minted cookie jar. The jar is
+//	     the same shape dsh itself emits, so every /api/* and WS
+//	     upgrade carries the cookie.
+//	  3. Pick a port (3080 default, fallback sweep [3081, 3099]
+//	     if 3080 is held by a non-dsh service).
+//	  4. spawnAndWire spawns `dsh --profile web --port <port>`,
+//	     dials /api/remote.mux, and the Hub's auth cookie is
+//	     already in place.
+//	  5. Install via SetGlobal so dsh.newDriver can find it.
+//	     Start the watchdog.
 //
 //	ShutdownSharedHost(ctx, client)
 //	  1. Client.Close (stops mux/host pumps)
@@ -45,7 +43,11 @@ package host
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -56,12 +58,15 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/cnlangzi/nightme/internal/proc"
 )
@@ -91,6 +96,44 @@ const (
 	defaultPortScanMax = 3099
 )
 
+// Foreign-dsh probe tuning. When nightme attaches to a user dsh
+// (ownsProcess=false), the watchdog is dead. watchForeign takes
+// over: it periodically probes /api/session.list and on
+// `attachedProbeStrikes` consecutive failures considers the
+// foreign dsh dead and triggers fallbackToSpawn. 30s × 3 = 90s
+// detection latency is the production default; tests override
+// via attachedSharedHost.testHooks.
+const (
+	defaultAttachedProbeInterval = 30 * time.Second
+	defaultAttachedProbeStrikes  = 3
+	defaultAttachedProbeTimeout  = 5 * time.Second
+)
+
+// maxAttachedFallbackAttempts caps how many times fallbackToSpawn
+// will retry spawnOnce on transient failure (port busy, dsh
+// binary missing, etc.) before giving up. After giving up, the
+// monitor exits and the host is left in attached state — the
+// user can `make restart` to recover. Reuses respawnDelay for
+// backoff so the failure curve matches the standard watchdog
+// respawn path.
+const maxAttachedFallbackAttempts = 3
+
+// dshReadyTimeout / dshReadyAttempts bound the post-cookie
+// readiness probe in spawnAndWire. The probe is per-call
+// (workspace.list) so per-attempt wall time is small; the
+// timeout is the cap. With respawnDelay backoff (0, 1s, 2s, ...)
+// 5 attempts sums to ~3s plus per-attempt RPC time — well
+// within a 15s budget on a healthy machine. Tuned in 2026-09
+// after observing the workspaceController startup race where
+// dsh's HTTP server is up but the plugin registry is still
+// loading — without this probe, the first workspace.create
+// after spawn returns "active Service workspaceController is
+// unavailable" and the user sees a startup-race error.
+const (
+	dshReadyTimeout  = 15 * time.Second
+	dshReadyAttempts = 5
+)
+
 // SharedHostOptions configures StartSharedHost.
 type SharedHostOptions struct {
 	// Workspace is the dsh process's working directory. dsh's bash /
@@ -114,6 +157,13 @@ type SharedHostOptions struct {
 	// Used by tests (which need to drive their own fake dsh
 	// subprocess) and by users who explicitly want isolation
 	// (e.g. CI, multiple daemons on the same host). Default: false.
+	//
+	// Deprecated: with cookie-mint the spawn-vs-attach decision
+	// goes away. We always spawn our own dsh; the cookie we mint
+	// with the ~/.dsh/.credentials.yaml secret will be accepted by
+	// any other dsh that shares that .dsh/ directory (i.e. every
+	// dsh started from this user's HOME). ForceSpawn is preserved
+	// only for tests that need a clean isolated dsh subprocess.
 	ForceSpawn bool
 
 	// Port is the TCP port dsh should bind to. Set by
@@ -238,9 +288,28 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		logger = slog.Default()
 	}
 
-	// Step 1: pick a port. Canonical is 3080; if anything is
-	// already listening there (dsh or foreign), sweep
-	// [3081, 3099] for the first free port.
+	// Step 1: try to attach to an existing dsh before spawning.
+	// The cookie we mint from ~/.dsh/.credentials.yaml is accepted
+	// by ANY dsh on this host that loaded the same secret — and
+	// every dsh on this user account does, because they all share
+	// ~/.dsh/. So if anything is already listening on 3080 (or any
+	// other port dsh uses), we probe with our minted cookie and
+	// reuse the running dsh. This eliminates the orphan-dsh-on-port-
+	// 3081-3099 pattern that the old "spawn fallback" policy
+	// created.
+	attachHost, attached := tryAttachExistingDSH(ctx, logger, opts)
+	if attached {
+		logger.Info("dsh.host: attached to existing dsh — no spawn needed",
+			"port", attachHost.port)
+		// Run watchdog in "foreign process" mode: it watches the
+		// WS connection and re-attaches when it drops; if dsh dies
+		// permanently, we fall back to spawn.
+		go attachHost.watchForeign(logger)
+		return attachHost.host, nil
+	}
+
+	// Step 2: port 3080 free (or cookie rejected on the foreign
+	// dsh). Spawn our own.
 	port := defaultDSHPort
 	if dialReachable(defaultDSHPort) {
 		scanMin, scanMax := defaultPortScanMin, defaultPortScanMax
@@ -257,9 +326,6 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 		)
 	}
 
-	// Step 2: spawn dsh with --port explicit. spawnAndWire also
-	// captures the launch token and mints the dsh-auth cookie
-	// before constructing the Client.
 	cmd, cli, err := spawnAndWire(ctx, opts, port, logger)
 	if err != nil {
 		return nil, err
@@ -291,6 +357,346 @@ func StartSharedHost(ctx context.Context, opts SharedHostOptions) (*SharedHost, 
 	go host.runWatchdog()
 
 	return host, nil
+}
+
+// attachedSharedHost bundles the resources for a foreign dsh we
+// attached to via tryAttachExistingDSH. We carry the resolved port
+// so the watchdog can re-probe on WS drop, and a no-cmd SharedHost
+// (cmd is nil — we didn't spawn it).
+//
+// testHooks is nil in production; tests inject non-nil values to
+// drive the probe loop fast and to signal completion via the
+// fallbackDone channel. Documented on each field.
+type attachedSharedHost struct {
+	host      *SharedHost
+	port      int
+	testHooks *attachedTestHooks
+}
+
+// attachedTestHooks lets tests drive the probe loop with shorter
+// intervals / fewer strikes and signal completion through a
+// channel. Production never sets this (a in the dsh bridge
+// remains nil; the monitor uses the package-level constants).
+type attachedTestHooks struct {
+	// ProbeInterval overrides defaultAttachedProbeInterval when > 0.
+	ProbeInterval time.Duration
+	// ProbeStrikes overrides defaultAttachedProbeStrikes when > 0.
+	ProbeStrikes int
+	// ProbeTimeout overrides defaultAttachedProbeTimeout when > 0.
+	ProbeTimeout time.Duration
+	// FallbackDone is closed by watchForeign when fallbackToSpawn
+	// returns (or after a fallback failure that ends the monitor).
+	// Tests wait on this channel instead of polling internal state.
+	FallbackDone chan struct{}
+	// OnFallback, if non-nil, replaces the production
+	// fallbackToSpawn call. Tests use this to avoid spawning a
+	// real dsh subprocess (production fallback would fail or
+	// hang in a test environment). nil = production fallback.
+	OnFallback func(logger *slog.Logger) error
+
+	// Spawner, if non-nil, replaces a.host.spawnOnce inside
+	// the production fallback. Tests use this to inject a mock
+	// spawner (returns a fake *exec.Cmd / *Client without forking
+	// a real dsh) so they can drive the retry + state-mutation
+	// paths without a real subprocess. nil = production spawner.
+	Spawner func() (*exec.Cmd, *Client, error)
+}
+
+// tryAttachExistingDSH probes 3080 (then 3081-3099 in order) for
+// any dsh that's already listening, builds a *Client with our
+// minted cookie, and calls /api/session/list to verify the cookie
+// validates. Returns the first hit; if all probes fail, returns
+// attached=false so the caller falls back to spawn.
+func tryAttachExistingDSH(ctx context.Context, logger *slog.Logger, opts SharedHostOptions) (*attachedSharedHost, bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	for _, port := range append([]int{defaultDSHPort}, fallbackPorts()...) {
+		if !dialReachable(port) {
+			continue
+		}
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+		authority := strings.TrimPrefix(baseURL, "http://")
+		jar, err := mintDSHAuthCookieFromCredentials(authority)
+		if err != nil {
+			logger.Debug("dsh.host: attach probe: mint cookie failed",
+				"port", port, "err", err)
+			continue
+		}
+		probe := &http.Client{Jar: jar, Timeout: 3 * time.Second}
+		// session.list is a typed POST (args._request); see
+		// @deepseek-ai/dsh-api-session-controller/lib/typert.host.js.
+		// Use POST + the canonical typert envelope so the gateway
+		// routes on namespace = "session" + method = "list".
+		body := []byte(`{"type":"client-request","rpcId":"probe","method":"session/list","payload":{"args":{"_request":{}}}}`)
+		req, _ := http.NewRequestWithContext(probeCtx, http.MethodPost,
+			baseURL+"/api/session/list", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := probe.Do(req)
+		if err != nil {
+			logger.Debug("dsh.host: attach probe: dial failed",
+				"port", port, "err", err)
+			continue
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			logger.Debug("dsh.host: attach probe: cookie rejected",
+				"port", port, "status", resp.StatusCode)
+			continue
+		}
+		// Cookie validates — build the production *Client and start
+		// its WS pump. We didn't spawn this dsh so cmd is nil and
+		// ownsProcess=false; the watchdog must NOT kill it on Close.
+		cli := NewWithJar(baseURL, jar, logger)
+		// Install the host waterfall handler BEFORE Start — dsh
+		// sends the host $events `ready` frame immediately after
+		// the WS upgrade, so the handler must be wired before we
+		// dial.
+		OnLifecycleInstall(cli)
+		// Use the caller's long-lived ctx (StartSharedHost's), NOT
+		// probeCtx (10s timeout): the Hub's WS reconnect loop has
+		// to outlive the attach probe or it'll die mid-session.
+		if err := cli.Start(ctx); err != nil {
+			logger.Warn("dsh.host: attach probe: cli.Start failed",
+				"port", port, "err", err)
+			continue
+		}
+		SetGlobal(cli)
+		return &attachedSharedHost{
+			host: &SharedHost{cli: cli, logger: logger, opts: opts},
+			port: port,
+		}, true
+	}
+	return nil, false
+}
+
+// fallbackPorts returns [3081, 3082, …, 3099] for the attach
+// probe sweep. 3080 is tried first by the caller before iterating.
+func fallbackPorts() []int {
+	out := make([]int, 0, defaultPortScanMax-defaultPortScanMin+1)
+	for p := defaultPortScanMin; p <= defaultPortScanMax; p++ {
+		out = append(out, p)
+	}
+	return out
+}
+
+// watchForeign is the watchdog variant for attached (foreign) dsh.
+// We don't own cmd — there's no `<-waitCmd` to wait on. Instead,
+// we periodically probe /api/session.list on the attached cli and
+// count consecutive failures. After `attachedProbeStrikes`
+// failures (3 by default = 90s), we consider the foreign dsh
+// process dead and trigger fallbackToSpawn, which:
+//
+//  1. spawns a fresh dsh via h.spawnOnce (h.opts was captured at
+//     attach time so spawnAndWire has the right Workspace / HostCmd /
+//     PermissionMode / Port);
+//  2. swaps h.cmd/h.cli/ownsProcess on the SharedHost in place;
+//  3. swaps the *Client global (ReplaceGlobal) and the *SharedHost
+//     global (Unset/Set);
+//  4. closes the OLD cli so its Done() fires and the existing
+//     Keepalive → onRecover → spawner.Spawn pipeline takes over
+//     (rebuilds drivers with the user's sessionId preserved via
+//     dsh's idempotent session.create({sessionId, cwd}));
+//  5. starts the standard runWatchdog on the now-owned dsh.
+//
+// The Hub's own WS reconnect loop handles transient WS drops; we
+// only fire when the underlying dsh process itself is gone (RPC
+// repeatedly fails).
+func (a *attachedSharedHost) watchForeign(logger *slog.Logger) {
+	interval := defaultAttachedProbeInterval
+	strikes := defaultAttachedProbeStrikes
+	probeTimeout := defaultAttachedProbeTimeout
+	var fallbackDone chan struct{}
+	if a.testHooks != nil {
+		if a.testHooks.ProbeInterval > 0 {
+			interval = a.testHooks.ProbeInterval
+		}
+		if a.testHooks.ProbeStrikes > 0 {
+			strikes = a.testHooks.ProbeStrikes
+		}
+		if a.testHooks.ProbeTimeout > 0 {
+			probeTimeout = a.testHooks.ProbeTimeout
+		}
+		fallbackDone = a.testHooks.FallbackDone
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var consecutiveFailures int
+	for {
+		// The monitor only exits via: (a) fallback succeeded
+		// (runWatchdog takes over), (b) fallback failed (logged
+		// and the daemon process dies with the Go runtime tearing
+		// us down). There is no other early-exit signal — we
+		// don't want to stop probing on transient failures.
+		<-ticker.C
+		if a.probeOnce(logger, probeTimeout) {
+			consecutiveFailures = 0
+			continue
+		}
+		consecutiveFailures++
+		if consecutiveFailures < strikes {
+			continue
+		}
+		logger.Warn("dsh.host: attached dsh appears dead after strikes; falling back to spawn",
+			"strikes", consecutiveFailures, "port", a.port)
+		var err error
+		if a.testHooks != nil && a.testHooks.OnFallback != nil {
+			err = a.testHooks.OnFallback(logger)
+		} else {
+			err = a.fallbackToSpawn(logger)
+		}
+		if err != nil {
+			logger.Error("dsh.host: fallback failed; monitor exiting",
+				"err", err)
+			if fallbackDone != nil {
+				close(fallbackDone)
+			}
+			return
+		}
+		if fallbackDone != nil {
+			close(fallbackDone)
+		}
+		return // runWatchdog now owns the new dsh.
+	}
+}
+
+// probeOnce calls /api/session.list on the attached cli with a
+// short timeout. Returns true on success (200 OK), false on any
+// error. The cli is read under h.mu; if the fallback path swapped
+// it in between, the new probe is against the new cli — that's
+// fine, the monitor returns either way.
+func (a *attachedSharedHost) probeOnce(logger *slog.Logger, timeout time.Duration) bool {
+	a.host.mu.RLock()
+	cli := a.host.cli
+	a.host.mu.RUnlock()
+	if cli == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if _, err := cli.RPC.SessionList(ctx); err != nil {
+		logger.Debug("dsh.host: attached probe failed", "err", err)
+		return false
+	}
+	return true
+}
+
+// fallbackToSpawn takes a foreign-dsh-attached SharedHost and
+// transitions it into the owned state by spawning a fresh dsh.
+// Called from watchForeign when the foreign dsh appears dead.
+//
+// Retries up to maxAttachedFallbackAttempts times on transient
+// spawn failure (port collision, dsh binary missing, etc.) with
+// respawnDelay backoff between attempts. After the cap, returns
+// the last error; the caller (watchForeign) logs and exits; the
+// user can `make restart` to recover.
+//
+// On the retry path, a transient failure (e.g. all of 3080-3099
+// occupied) usually clears on the next backoff tick — the system
+// recovers without a manual restart. Without the retry, a single
+// spawn failure would leave the host in attached state pointing
+// at a dead dsh with no way forward.
+func (a *attachedSharedHost) fallbackToSpawn(logger *slog.Logger) error {
+	spawner := func() (*exec.Cmd, *Client, error) { return a.host.spawnOnce() }
+	if a.testHooks != nil && a.testHooks.Spawner != nil {
+		spawner = a.testHooks.Spawner
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttachedFallbackAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(respawnDelay(attempt))
+			logger.Warn("dsh.host: fallback spawn attempt failed; retrying",
+				"attempt", attempt+1,
+				"max_attempts", maxAttachedFallbackAttempts,
+				"err", lastErr)
+		}
+		if err := a.tryFallbackOnce(logger, spawner); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("dsh.host: fallback spawn gave up after %d attempts: %w",
+		maxAttachedFallbackAttempts, lastErr)
+}
+
+// tryFallbackOnce does the actual foreign → owned transition.
+// Extracted from fallbackToSpawn so tests can drive the state-
+// mutation path directly with a mock Spawner. The retry loop
+// in fallbackToSpawn is the only thing above this; everything
+// else is the per-attempt state swap.
+//
+// Ordering matters: capture the OLD cli before spawnOnce (so we
+// can Close it to fire Done() for the existing drivers' Keepalive
+// path), then atomically swap h.cmd/h.cli/ownsProcess/watchdogDone,
+// then swap the process globals, then Close the old cli, then
+// start the new watchdog. We hold h.mu only around the field
+// mutations; the spawner runs lock-free (it doesn't touch h).
+//
+// Pre-condition: a.host.ownsProcess is false (caller checks).
+// Post-condition: a.host is in the owned state; process globals
+// point at the new cli/host; the OLD cli's Done() has fired.
+func (a *attachedSharedHost) tryFallbackOnce(logger *slog.Logger, spawner func() (*exec.Cmd, *Client, error)) error {
+	a.host.mu.RLock()
+	if a.host.ownsProcess {
+		a.host.mu.RUnlock()
+		// Already owned (e.g. monitor ran twice). No-op.
+		return nil
+	}
+	oldCli := a.host.cli // capture the dead/foreign cli for Close()
+	a.host.mu.RUnlock()
+
+	cmd, cli, err := spawner()
+	if err != nil {
+		return fmt.Errorf("dsh.host: fallback spawn: %w", err)
+	}
+
+	a.host.mu.Lock()
+	a.host.cmd = cmd
+	a.host.cli = cli
+	a.host.ownsProcess = true
+	if a.host.watchdogDone == nil {
+		a.host.watchdogDone = make(chan struct{})
+	}
+	a.host.mu.Unlock()
+
+	// Replace the process-global *Client first (non-panicking).
+	// Then Unset/Set the *SharedHost global (SetSharedHost panics
+	// on double-install, so Unset must precede Set).
+	ReplaceGlobal(cli)
+	UnsetSharedHost()
+	SetSharedHost(a.host)
+
+	// Fire the OLD cli's Done() so the existing drivers' Keepalive
+	// tick (in agentsession) sees the dead cli and calls onRecover
+	// → spawner.Spawn → fresh *dsh.driver → handshakeSession
+	// session.create({sessionId, cwd}) preserves the sessionId.
+	// Best-effort: Close returns nothing; the cli is already dead.
+	if oldCli != nil {
+		oldCli.Close()
+	}
+
+	// Hand the now-owned dsh to the standard watchdog. Health
+	// probe engages because ownsProcess=true; if the new dsh
+	// dies, runWatchdog respawns via the standard path.
+	go a.host.runWatchdog()
+
+	// cmd may be nil in tests where the Spawner hook is used to
+	// short-circuit the real spawn (e.g. unit tests that want
+	// state-mutation coverage without forking a dsh binary). The
+	// watchdog handles cmd==nil cleanly (returns immediately),
+	// so the log line is just a nice-to-have.
+	newPID := -1
+	if cmd != nil && cmd.Process != nil {
+		newPID = cmd.Process.Pid
+	}
+	logger.Info("dsh.host: fallback spawn complete",
+		"old_port", a.port,
+		"new_pid", newPID,
+	)
+	return nil
 }
 
 // dialReachable reports whether a TCP connection to 127.0.0.1:port
@@ -327,7 +733,7 @@ const defaultDSHPort = 3080
 // exchange: GET /?token=<launchToken>. dsh 303-redirects to / with
 // a Set-Cookie carrying the dsh-auth signed payload. We capture
 // that one cookie into a fresh cookiejar so every subsequent
-// /api/* and /api/events.* call carries it.
+// /api/* and /api/remote.mux call carries it.
 //
 // baseURL is the dsh root WITHOUT the token query (e.g.
 // "http://127.0.0.1:3080"). token is the launch token printed on
@@ -335,10 +741,16 @@ const defaultDSHPort = 3080
 // error is also returned.
 //
 // Why this is necessary: dsh 0.1.2-rc.1 auth-gates /api/* and the
-// two /api/events.* WS endpoints with per-process signed cookies.
+// /api/remote.mux WS endpoint with per-process signed cookies.
 // The launch token only works on the initial GET / — it mints the
 // cookie. Without this step, every bridge call gets 401 and every
 // WS upgrade closes mid-handshake.
+//
+// Used by spawnAndWire when nightme owns the subprocess (so the
+// launch token is reachable on dsh's stdout). The attach path
+// (tryAttachExistingDSH) uses mintDSHAuthCookieFromCredentials
+// instead because a foreign dsh's launch token is process-internal
+// and never leaves its memory.
 func mintAuthCookie(ctx context.Context, baseURL, token string) (http.CookieJar, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -363,7 +775,7 @@ func mintAuthCookie(ctx context.Context, baseURL, token string) (http.CookieJar,
 	// We deliberately do NOT pass the jar — the cookiejar is
 	// populated from this single response, not sent on it.
 	client := &http.Client{
-		Timeout: httpClientTimeout,
+		Timeout: webURLParseTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// dsh returns 303 → /. We want the cookies from THAT
 			// response, not from any further redirect. Stop after
@@ -388,6 +800,133 @@ func mintAuthCookie(ctx context.Context, baseURL, token string) (http.CookieJar,
 	}
 	jar.SetCookies(u, cookies)
 	return jar, nil
+}
+
+// mintDSHAuthCookieFromCredentials signs a dsh-auth-<sha256>=v1.body.sig
+// cookie using the signing secret loaded from ~/.dsh/.credentials.yaml.
+// The algorithm is verified against dsh 0.1.2-rc.1 by capturing
+// the real POST body and reproducing the HMAC-SHA256 signature
+// byte-for-byte (2026-09-11). See
+// @deepseek-ai/dsh-client-connection/lib/index.js:encodeCookie.
+//
+// Returns a fresh cookiejar.Jar populated with one cookie scoped
+// to baseURL (cookie name = "dsh-auth-" + base64url(sha256(authority)));
+// the cookie lifetime is dsh.host.constants.cookieMaxAgeDays.
+//
+// Why this works: every dsh subprocess using the same ~/.dsh/
+// directory loads the same client-connection/browser-session
+// signing secret. We mint locally; dsh accepts. So we don't need
+// to spawn a fresh dsh OR persist a cookie OR attach to a running
+// dsh — just read ~/.dsh/.credentials.yaml, sign, attach.
+//
+// Used by tryAttachExistingDSH (foreign dsh on the wire) and by
+// spawnAndWire when ~/.dsh/.credentials.yaml is available. When
+// the credentials file is missing, spawnAndWire falls back to
+// mintAuthCookie (launch-token exchange) — that's the spawn path
+// that runs on a CI runner with no prior dsh install.
+func mintDSHAuthCookieFromCredentials(authority string) (http.CookieJar, error) {
+	secret, err := loadBrowserSessionSecret()
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: load secret: %w", err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: cookiejar: %w", err)
+	}
+	u := &url.URL{Scheme: "http", Host: authority}
+	cookieName := "dsh-auth-" + base64URL(sha256Sum([]byte(authority)))
+	cookieValue := encodeDSHAuthCookie(secret, authority, cookieMaxAgeDays)
+	jar.SetCookies(u, []*http.Cookie{{
+		Name:     cookieName,
+		Value:    cookieValue,
+		Path:     "/",
+		MaxAge:   cookieMaxAgeDays * 24 * 60 * 60,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	}})
+	return jar, nil
+}
+
+// loadBrowserSessionSecret reads ~/.dsh/.credentials.yaml and
+// returns the secret stored under
+// records["client-connection"]["browser-session"].payload.secret.
+//
+// The file is owned by the user (mode 0600) — same security
+// profile as the dsh-auth cookie itself. If the file is missing
+// or the schema is unexpected, we surface a clear error rather
+// than silently falling through to a network exchange (which
+// wouldn't work anyway — we have no token).
+func loadBrowserSessionSecret() ([]byte, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: home dir: %w", err)
+	}
+	path := filepath.Join(home, ".dsh", ".credentials.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: read %s: %w", path, err)
+	}
+	var rec struct {
+		Records map[string]struct {
+			Kind    string `json:"kind"`
+			Payload struct {
+				Secret string `json:"secret"`
+			} `json:"payload"`
+		} `json:"records"`
+	}
+	if err := yaml.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("dsh.host: parse %s: %w", path, err)
+	}
+	browserSession, ok := rec.Records["client-connection/browser-session"]
+	if !ok {
+		return nil, fmt.Errorf("dsh.host: %s missing client-connection/browser-session record", path)
+	}
+	if browserSession.Kind != "grant" {
+		return nil, fmt.Errorf("dsh.host: %s browser-session record kind=%q, want \"grant\"", path, browserSession.Kind)
+	}
+	raw, err := base64URLDecode(browserSession.Payload.Secret)
+	if err != nil {
+		return nil, fmt.Errorf("dsh.host: secret base64url: %w", err)
+	}
+	return raw, nil
+}
+
+// encodeDSHAuthCookie builds the v1.body.sig cookie value per
+// dsh 0.1.2-rc.1's encodeCookie (verified 2026-09-11).
+func encodeDSHAuthCookie(secret []byte, authority string, maxAgeDays int) string {
+	body := encodeBase64URL([]byte(fmt.Sprintf(
+		`{"version":1,"authority":%q,"issuedAt":%d,"expiresAt":%d}`,
+		authority, time.Now().UnixMilli(),
+		time.Now().Add(time.Duration(maxAgeDays)*24*time.Hour).UnixMilli(),
+	)))
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(body))
+	return "v1." + body + "." + encodeBase64URL(mac.Sum(nil))
+}
+
+// cookieMaxAgeDays is the dsh-auth cookie's lifetime in days.
+// Matches dsh 0.1.2-rc.1's default (30 days, see
+// @deepseek-ai/dsh-client-connection/lib/index.js).
+const cookieMaxAgeDays = 30
+
+// encodeBase64URL / base64URLDecode / base64URL / sha256Sum are
+// thin wrappers around the stdlib encoders with the exact
+// padding / char-set semantics dsh 0.1.2-rc.1 uses. dsh strips the
+// trailing '=' padding (URL-safe base64) and uses the URL-safe
+// alphabet ('-' / '_' for '+' / '/'). We mirror that exactly.
+func encodeBase64URL(b []byte) string {
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func base64URLDecode(s string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(s)
+}
+
+func base64URL(b []byte) string { return encodeBase64URL(b) }
+
+func sha256Sum(b []byte) []byte {
+	h := sha256.Sum256(b)
+	return h[:]
 }
 
 // stderrRing is a bounded line buffer for dsh's stderr. The
@@ -703,14 +1242,12 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 		}
 	}(stderr)
 
-	// waitForURLToken reads stdout until the URL line appears and
-	// captures the launch token, while continuing to drain the pipe
-	// in the background so dsh's stdout never deadlocks.
-	//
-	// We can't share the pipe between two goroutines — once one
-	// reads, the bytes are gone. So one goroutine does both: parse
-	// the URL line for the token, log every line for /diagnose
-	// triage, keep draining until EOF.
+	// Drain stdout so dsh's pipe buffer doesn't fill and deadlock
+	// the subprocess. The launch-token exchange path needs the
+	// first URL line; we capture it into tokenCh while still
+	// logging every line at debug level for /diagnose triage.
+	// Buffered=1 so the goroutine doesn't block if the receiver
+	// already grabbed the token.
 	tokenCh := make(chan string, 1)
 	tokenErrCh := make(chan error, 1)
 	go func(r io.Reader) {
@@ -771,37 +1308,78 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	// Mint the dsh-auth cookie from the launch token. Without this
-	// step dsh 0.1.2-rc.1 401s every /api/* and every WS upgrade.
-	tokenCtx, tokenCancel := context.WithTimeout(ctx, webURLParseTimeout)
-	token, err := func() (string, error) {
-		select {
-		case t := <-tokenCh:
-			return t, nil
-		case e := <-tokenErrCh:
-			return "", e
-		case <-tokenCtx.Done():
-			return "", fmt.Errorf("dsh.host: timeout waiting for launch token: %w", tokenCtx.Err())
-		}
-	}()
+	// Mint the dsh-auth cookie. Try the local-secret path first —
+	// it works without a launch-token round-trip and lets the
+	// minted cookie validate against any dsh on this user account
+	// (which is what the attach path needs). If ~/.dsh/.credentials.yaml
+	// is missing or unreadable, fall back to the launch-token
+	// exchange (we own this dsh, so the token is on stdout). The
+	// fallback keeps the spawn path working on machines that never
+	// ran dsh --profile web (CI runners, fresh nightme installs).
+	authority := strings.TrimPrefix(baseURL, "http://")
+	jar, err := mintDSHAuthCookieFromCredentials(authority)
 	if err != nil {
+		logger.Debug("dsh.host: credentials-based mint unavailable; falling back to launch-token exchange",
+			"err", err)
+		// Wait for the launch token from the stdout drain goroutine.
+		tokenCtx, tokenCancel := context.WithTimeout(ctx, webURLParseTimeout)
+		token, terr := func() (string, error) {
+			select {
+			case t := <-tokenCh:
+				return t, nil
+			case e := <-tokenErrCh:
+				return "", e
+			case <-tokenCtx.Done():
+				return "", fmt.Errorf("dsh.host: timeout waiting for launch token: %w", tokenCtx.Err())
+			}
+		}()
 		tokenCancel()
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		_ = stdout.Close()
-		return nil, nil, fmt.Errorf("dsh.host: capture launch token: %w", err)
-	}
-
-	jar, err := mintAuthCookie(tokenCtx, baseURL, token)
-	tokenCancel()
-	if err != nil {
-		_ = child.Process.Kill()
-		_ = child.Wait()
-		_ = stdout.Close()
-		return nil, nil, fmt.Errorf("dsh.host: mint dsh-auth cookie: %w", err)
+		if terr != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			_ = stdout.Close()
+			return nil, nil, terr
+		}
+		jar, err = mintAuthCookie(ctx, baseURL, token)
+		if err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			_ = stdout.Close()
+			return nil, nil, err
+		}
 	}
 
 	cli := NewWithJar(baseURL, jar, logger)
+	// Install the host waterfall handler BEFORE Start — dsh sends
+	// the host $events `ready` frame immediately after the WS
+	// upgrade, so the handler must be wired before we dial. The
+	// install is process-once idempotent (see
+	// internal/bridge/dsh/host_waterfall.go::installHostHandler).
+	// Wired via a deferred host.OnLifecycleInstall to avoid an
+	// import cycle (this package is imported by the dsh package).
+	OnLifecycleInstall(cli)
+	// Wait for dsh's internal plugins (workspaceController etc.)
+	// to finish initializing. Without this probe, the driver's
+	// first workspace.create hits "active Service workspaceController
+	// is unavailable" — the HTTP server is up but the typert
+	// gateway's plugin registry is still loading. WaitForDSHReady
+	// polls workspace.create (the same RPC nightme uses to bind
+	// the session) and retries on "service-unavailable" with
+	// respawnDelay backoff. opts.Workspace is the path argument
+	// dsh's workspace.create requires (dsh.md §2.4.2); passing the
+	// empty string triggers a terminal "input-invalid" error rather
+	// than a transient race, so the caller must supply it.
+	// The cookie is required (workspace.create auths the request),
+	// so this must come after mintDSHAuthCookie. ctx is bounded
+	// by the spawn timeout so we don't hang forever on a
+	// genuinely broken dsh binary.
+	readyCtx, readyCancel := context.WithTimeout(ctx, dshReadyTimeout)
+	defer readyCancel()
+	if err := cli.WaitForDSHReady(readyCtx, opts.Workspace, dshReadyAttempts); err != nil {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		return nil, nil, fmt.Errorf("dsh.host: dsh started but not ready: %w", err)
+	}
 	if err := cli.Start(ctx); err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()

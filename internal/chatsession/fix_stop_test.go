@@ -44,12 +44,21 @@ func (s *ruSpawner) Spawn(_ context.Context, name, cwd string, _ []string, sessi
 	return f.buildLive(), nil
 }
 
-// TestFix2_ResumeUnhealthyRetry — /close lands on a stale
-// sessionID; the next user message triggers an auto-recovery
-// Spawn (without resume). Without the fix, the user would see
-// "Failed to spawn agent" on every message until they hand-edit
-// agent_sessions.json.
-func TestFix2_ResumeUnhealthyRetry(t *testing.T) {
+// TestFix2_ResumeUnhealthy_SurfacesError — post-2026-09-13
+// design: the bridge's "resume rejected" error is loud, not
+// silently masked. The chat layer must NOT auto-retry with a
+// fresh session. The saved sessionId stays put and the
+// dispatcher renders the error. The user can `/new` to
+// explicitly start a fresh session.
+//
+// Previous (fix-stop 2026-08-15) behavior was to auto-retry
+// once with a fresh Spawn. That worked mechanically but masked
+// the original cause: the user never saw that their saved
+// sessionId (e.g. session-26c4ff1a-...) was rejected in favor
+// of a fresh id (d5de9b4e-...). The original sessionId was
+// silently replaced in agent_sessions.json and the user could
+// not recover it.
+func TestFix2_ResumeUnhealthy_SurfacesError(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	sp := &ruSpawner{}
 	cs, _ := New("c1", "claude")
@@ -68,32 +77,34 @@ func TestFix2_ResumeUnhealthyRetry(t *testing.T) {
 	as.SetSessionID("sess_stale")
 
 	// Simulate /close: as.Close() + proactive as.SetExited(0)
-	// (close.go fix #1 short-circuits the wait for the readpump's
-	// eventual lifecycle event).
 	as.Close()
 	as.SetExited(0)
 
-	// Real next-message dispatch path: LookupSelectedAgentSession.
-	if _, err := cs.LookupSelectedAgentSession(); err != nil {
-		t.Fatalf("post-close lookup: %v", err)
+	// Real next-message dispatch path. The bridge rejects the
+	// saved sessionId; we expect the error to surface to the
+	// dispatcher (not be silently masked by a fresh retry).
+	_, err := cs.LookupSelectedAgentSession()
+	if err == nil {
+		t.Fatal("expected resume-rejection error to surface to dispatcher")
+	}
+	if !errors.Is(err, agent.ErrResumeUnhealthy) {
+		t.Fatalf("err = %v, want errors.Is(_, agent.ErrResumeUnhealthy)", err)
 	}
 
+	// Verify the spawner was called twice (1 cold spawn for the
+	// initial AS, 1 rejected spawn for the resume attempt) and
+	// NOT a third retry with a fresh session. The previous
+	// fix-stop (2026-08-15) behavior would have triggered a 3rd
+	// call with empty sessionId; the new design surfaces the
+	// error instead.
 	sp.mu.Lock()
 	calls := sp.calls
-	lastIDs := append([]string(nil), sp.lastIDs...)
 	sp.mu.Unlock()
-
-	t.Logf("after /close+message: spawner.calls=%d lastIDs=%v", calls, lastIDs)
-
-	// Expect: cold spawn (""), rejected ("sess_stale"), retry ("").
-	if calls < 3 {
-		t.Errorf("auto-retry missing: calls=%d, want >= 3", calls)
+	if calls != 2 {
+		t.Errorf("auto-retry missing or excessive: calls=%d, want 2 (cold spawn + 1 rejected, no fresh-spawn retry)", calls)
 	}
-	if len(lastIDs) >= 3 && lastIDs[2] != "" {
-		t.Errorf("retry spawn[2] sessionID = %q, want empty (auto-recovery)", lastIDs[2])
-	}
-	if got := cs.SelectedAgentSession().Status(); got != StatusRunning {
-		t.Errorf("AS.status = %s, want StatusRunning after auto-recovery", got)
+	if got := cs.SelectedAgentSession().SessionID(); got != "sess_stale" {
+		t.Errorf("AS.sessionID = %q, want \"sess_stale\" (must NOT be auto-cleared)", got)
 	}
 }
 

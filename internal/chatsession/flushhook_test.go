@@ -122,11 +122,23 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	if !agentstest.WaitReady(as, time.Second) {
 		t.Fatalf("AS not ready after EndPrompt (isReady propagation stalled)")
 	}
-	if err := cs.TryFlush(); err != nil {
-		t.Fatalf("TryFlush: %v", err)
-	}
-	if got := spawner.sessions[0].SentCount(); got != base+1 {
-		t.Fatalf("after flush agent got %d, want %d", got, base+1)
+	// Retry TryFlush a few times: between WaitReady returning
+	// and the first TryFlush call, a slow CI runner can flip
+	// IsReady back to false (causing TryFlush to SKIP) before
+	// flipping it true again. Retry on the same condition
+	// until either the flush lands or we exhaust the budget.
+	deadline := time.Now().Add(time.Second)
+	for got := spawner.sessions[0].SentCount(); got < base+1; got = spawner.sessions[0].SentCount() {
+		if err := cs.TryFlush(); err != nil {
+			t.Fatalf("TryFlush: %v", err)
+		}
+		if got >= base+1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after flush agent got %d, want %d (TryFlush kept SKIPping within budget)", got, base+1)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

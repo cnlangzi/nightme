@@ -11,6 +11,34 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Breaking: `/handoff` and `/resume` move to `$HOME/.nightme/handoff/<name>.md`
+
+Both slash commands now require a positional `<name>` argument
+and write/read the named handoff document under the user's
+home directory, not the per-cwd `.nightme/` directory:
+
+- `/handoff <name>` — Agent writes to `~/.nightme/handoff/<name>.md`
+- `/resume <name>`  — Agent reads from `~/.nightme/handoff/<name>.md`
+
+`<name>` must match `[A-Za-z0-9_-]{1,64}`, may not start with
+`.` or `-`, and may not be `.` or `..`. The slash-command lexer
+also rejects missing / extra positional args, so a stray trailing
+token now errors out instead of silently dropping.
+
+Why this shape: a handoff document written under
+`<cwd>/.nightme/handoff.md` only survives in that one cwd.
+Storing under `$HOME/.nightme/handoff/<name>.md` lets the next
+session `/resume <name>` from any directory, including after a
+`/cwd` switch.
+
+No automatic migration. Pre-existing handoff files at
+`<cwd>/.nightme/handoff.md` are no longer read by `/resume`;
+move them manually with
+`mv <cwd>/.nightme/handoff.md ~/.nightme/handoff/<your-name>.md`
+before resuming. The per-cwd `<cwd>/.nightme/` directory still
+exists for other nightme state (gtw caches, …) — only the
+handoff file moves out.
+
 ### Breaking: strict CLI argument parsing on every `/<cmd>` (issue #291)
 
 The two-phase argv lexer F-XX introduced for `/gtw fix`

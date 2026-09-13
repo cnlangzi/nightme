@@ -281,15 +281,16 @@ func runPrintModeWithPrompt(
 	// of sitting on "Working…" for the full run.
 	result, translateErr := parsePrintStream(ctx, stdout, isReview, sink)
 
-	// Always wait for the process to exit so we can capture
-	// both the exit code AND stderr. If parsePrintStream
-	// errored early (e.g. result event never fired) claude may
-	// still be a useful signal via its stderr — model errors,
-	// auth errors, etc. land there. The wait+reap path is
-	// shared between success and failure so neither path loses
-	// diagnostic info.
-	waitErr := child.Wait()
+	// Drain stderr BEFORE cmd.Wait: exec.Cmd.Wait reaps the
+	// process and then closes the parent end of the StderrPipe
+	// (closeAfterWait). If the drain goroutine hasn't pulled the
+	// child's last stderr bytes out of the kernel pipe buffer by
+	// then, the close discards them and stderr_buf lands empty —
+	// silently dropping auth / model errors written right before
+	// a non-zero exit. Millisecond race window; surfaces under
+	// -race on Linux CI (TestPrintMode_Mock_NonZeroExit_SurfacesStderr).
 	<-stderrDone
+	waitErr := child.Wait()
 
 	claudeLog("PrintMode Exit",
 		"pid", pid,

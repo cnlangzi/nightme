@@ -30,9 +30,11 @@
 | `0.1.2-rc.2` 及之后(若已发布) | ❌ 不支持 | method 可能改名、envelope 字段可能增减、`session/follow` 流形状可能变;落进 unknown-method warn,events 全部丢 |
 | `nightly` / `latest` track | ❌ 不支持 | bridge 不做版本探测 |
 
-### 0.2 为什么没有 runtime 多版本适配
+### 0.2 attach 路径 + runtime 多版本
 
-dsh 0.1.2-rc.1 的 launch token 是**进程内私有**的 — 既不写文件,也不暴露 API(详 §2.1)。nightme 拿不到外部 dsh 的 token → 无法 mint cookie → 无法 attach 到外部实例。这条 always-spawn 契约(详 §2.1)加上"nightme 拥有 dsh 进程",意味着 **dsh 升级 = nightme 同步升级**;不可能在 runtime 兼容多版本 dsh。
+**attach 路径**(新,2026-09-11 实测验证):dsh 0.1.2-rc.1 的 dsh-auth cookie 签名 secret 持久化在 `~/.dsh/.credentials.yaml`(见 §7.1)。nightme 读这个 secret 本地签 cookie,**跳过 launch token exchange 直接 attach 到同 secret 的 dsh**(详见 §7.2)。launch token 仅在 spawn 自己 dsh 时用 — 见 §2.1 / §3.1。
+
+**runtime 多版本**:每个 nightme worktree 加载自己的 `dsh_api_gateway` / `dsh_session_controller` 源码,wire 必须对得上 dsh 0.1.2-rc.1。dsh 协议在不同 rc 之间有 break change,nightme 不能 runtime 兼容多版本 → **dsh 升级 = nightme 同步升级**(升级流程见 §0.3)。
 
 ### 0.3 改 dsh 版本时的流程
 
@@ -82,21 +84,24 @@ dsh --profile web --port 3080
 | `--port 0` | 禁止 | dsh 实机不接受,会随机到奇怪端口,与"nightme 拥有 dsh"契约冲突 |
 | `--no-open` | nightme spawn 时**不**传 | 需要 dsh 把 launch URL 吐到 stdout 给 nightme 抓;开浏览器不是 nightme 的事 |
 
-**always-spawn 决策**: dsh 0.1.2-rc.1 的 launch token 是 dsh 进程内私有,既不写文件也不暴露 API(`/proc/<pid>/environ` 在 macOS 上不存在);用户自己起的 dsh 拿不到 cookie、伪造不出 cookie → nightme 不可能 attach 到外部 dsh。**始终 spawn 自己的 dsh**。
+**attach-then-spawn 决策**: dsh 0.1.2-rc.1 用 `~/.dsh/.credentials.yaml` 里 `client-connection/browser-session.secret` 签 dsh-auth cookie(见 §3.1 + §7.1)。nightme 直接读这个 secret,本地 mint 出合法 cookie,跳过 launch token exchange。所以 **attach 优先**:StartSharedHost 第一步用我们 mint 的 cookie 探活 3080,验证通过就直接 attach(ownsProcess=false,不 kill 用户 dsh);不通过再扫 [3081, 3099];都失败才 spawn 自己的 dsh。
 
 ### 2.2 端口策略
 
 ```
 首选 3080(显式 --port)
-    ↓ 被占(任何服务)
-扫 [3081, 3099] 找第一个可用
-    ↓ 全部被占
+    ↓ TCP-dial reachable → 用 mint cookie 探 /api/session/list
+    ↓    ↓ 200 OK → attach 此 dsh(共享同一个 ~/.dsh/ secret)
+    ↓    ↓ 非 200 / 不可达 → fallback 扫 [3081, 3099]
+    ↓ 全部被占或 cookie 拒绝
 报错: "dsh.host: no free port in range 3080-3099"
 ```
 
 `findFreePort(base, range)` 用 `net.Listen` 测试,扫不到 → fail loud。
 
-**用户已启 dsh on 3080 的场景**: nightme 退让到 3081~3099。两个 dsh 实例各自独立 cookie 各自独立 WS,**nightme 不会复用用户 dashboard 的 session**。用户在 dashboard 看到的自己 session 与 nightme 跑的 session 互不干扰。
+**用户已启 dsh on 3080 的场景**: nightme attach 该 dsh,**复用其 session 历史**。session/cookie/WS 都由用户的 dsh 提供,nightme 不再 spawn 第二个 dsh。用户在 dashboard 看到的自己 session 与 nightme 跑的 session 走同一个 dsh 进程,**两者一致**。
+
+**特例:用户 dsh 占 3080 但用的是别的 secret**(极少见 — 比如两个独立账户),cookie 验证失败 → nightme fallback spawn 自己的 dsh(独立 secret,独立 session 历史)。
 
 ### 2.3 Readiness
 
@@ -330,7 +335,7 @@ typert `SessionFollowFrame` 一帧:
 | `assistant/message` | 完整 message | `translate.go::handleAssistantMessage` |
 | `compaction/end` | 上下文压缩完成 | 静默(本期不渲染) |
 | `todo/write` | 任务条更新 | `applyTodoProjection` |
-| `approval/asked` | approval 请求 | 走 `permissions.go`(host stream 上是 waterfall,这里走 dispatcher) |
+| `approval/asked` | approval 审计 echo(`approval/asked` + `approval/decided` 配对) | session/event 上的 audit echo;**不是** respondable gate — 真正的 replyable gate 在 host `$events` waterfall 上的 `approval/request`,见 §3.8 |
 
 **`assistant/chunk` 内部 `chunk.type` 子分派**(dsh 0.1.2-rc.1 实机抓):
 
@@ -377,6 +382,40 @@ POST /api/respond
 ```
 
 bridge `host/client.go::RPCClient.Respond(ctx, frameRpcID, value)` 手工 marshal 这条 envelope,不经 `wrapArgs`。
+
+---
+
+### 3.8 Host waterfall wire (dsh 0.1.2-rc.1)
+
+dsh 0.1.2-rc.1 把 `approval` + `AskUserQuestion` 都搬到了 host `$events` waterfall 流上 — 不再走 mux 顶层 method。源码依据:
+
+- `@deepseek-ai/dsh-user-approval/lib/index.js::ApprovalService.request` → `ctx.waterfall("approval/request", req, …)`
+- `@deepseek-ai/dsh-user-questions/lib/index.js::UserQuestionService.ask` → `ctx.waterfall("user-questions/request", request, …)`
+- dsh-api-gateway 把这些 waterfall 转发到 `/api/remote.mux` 上 host stream 的 items,形状 `{type:"waterfall", event, eventId, agentId, request}`
+
+`host/stream.go::translateHostEvent` 把它翻译成 bridge envelope:
+
+```
+waterfall → (method=<event>, rpcID=eventId, payload={agentId, request})
+```
+
+`request` 的内容按 `event` 分:
+
+| event | request 形状(对应 dsh 包) |
+|---|---|
+| `approval/request` | `{agent: Agent, toolName: string, callId?: ToolCallId, reason?: string, signal?: AbortSignal}`(`@deepseek-ai/dsh-user-approval/types.d.ts::ApprovalRequestEvent`) |
+| `user-questions/request` | `{questions: AskUserQuestionItem[], agent?: Agent, signal?: AbortSignal}`(`@deepseek-ai/dsh-user-questions/types.d.ts::AskUserQuestionRequestEvent`) |
+
+`Agent.id === SessionId`(见 `@deepseek-ai/dsh-agent/lib/types/types.d.ts`),所以 root session 的 `request.agent.id == sessionId` — 这就是 demux key。
+
+**bridge 适配**(`internal/bridge/dsh/host_waterfall.go`):
+
+- `installHostHandler(cli)` 在第一个 driver 构造时一次性装全局 `cli.SetHostHandler(hostWaterfallHandler)`(幂等)
+- `hostWaterfallHandler` 按 `payload.agentId` 查 `hostWaterfallBySess map[sessionID]*driver` → `driver.handleHostFrame`
+- `driver.handleHostFrame` 把 waterfall envelope 适配成 mux envelope,调用现有的 `handleApprovalRequested` / `handleQuestionRequested`(`internal/bridge/dsh/permissions.go`),后者用同一份 `pendingApprovals` / `pendingQuestions` FIFO,reply key 仍是 waterfall 的 `eventId`
+- `/api/respond` 的 client-response envelope(§3.7)在 host waterfall 路径上不变 — `rpcId` 字段直接 echo `eventId`
+
+**为什么 mux 顶层 method 不再发**:旧 wire `approval/requested` / `question/requested` 在 0.1.0-rc.6 时代是 mux frame,0.1.2-rc.1 改成 Cordis waterfall 后不再发。`handleMuxFrame` 的兜底分支对任何 straggler 仍会 `recordAndCountUnknown` + warn(`"dsh: mux legacy method dropped"`),不进 permission 路径。
 
 ---
 
@@ -481,7 +520,8 @@ waitDispatchDrain: for count > 0: cond.Wait()
 `handleMuxFrame` switch:
 
 - `session/snapshot` → `replaySnapshot` 解 records 逐个 `dispatchEvent` + `bumpLastSeq(cursor)`
-- `session/subscribed` / `session/projection` / `approval/requested` / `question/requested` 等旧 wire method → 各自 legacy 路径(已废,本版无 dsh 会发这些)
+- `session/subscribed` / `session/projection` → 已废,本版无 dsh 会发这些
+- `approval/requested` / `approval/resolved` / `question/requested` / `question/resolved` → dsh 0.1.2-rc.1 不再发;若到则 `recordAndCountUnknown` + warn(`"dsh: mux legacy method dropped — dsh 0.1.2-rc.1 sends this as host waterfall"`),不 panic。真正的 respondable gate 在 host waterfall,见 §3.8。
 - `assistant/chunk` / `turn/start` / `step/end` / `user/message` 等新 wire method → `isSessionEventType` 白名单 → 构造 `sessionEventEnvelope{Type:method, Seq:parseSeqFromRPCID(rpcID), Data:payload}` → `dispatchEvent` → `dispatcher.dispatch` → registry handler
 - `host/cancel` → log
 - 其它 → `recordAndCountUnknown` + warn log
@@ -510,6 +550,8 @@ waitDispatchDrain: for count > 0: cond.Wait()
 `handler` 是 `session.go::handleMuxFrame` 的方法值,继续走 dispatcher / approval / question 等分支。
 
 approval 答案回环: `pendingApprovals[approvalId] <- decision`;`RPCClient.Respond` 发 `/api/respond` 用 `client-response` envelope(见 §3.7),`rpcId` 必须 echo server 推送的 `approval/requested.frameRpcID`(`approvalId` 是 audit-only,不是 answer key)。
+
+**Host waterfall demux**(dsh 0.1.2-rc.1):host `$events` 上的 waterfall(`approval/request`、`user-questions/request`)不携带 mux 顶层 `sessionId`,但 `request.agent.id == sessionId`(root session)。`host_waterfall.go` 用包级 `hostWaterfallBySess map[sessionID]*driver` 维护 demux 表,`installHostHandler(cli)` 在第一个 driver 构造时把全局 `cli.SetHostHandler(hostWaterfallHandler)` 装好,后续 driver 只 register 自己;`registerDriverForWaterfall(d)` / `unregisterDriverForWaterfall(d)` 在 `newDriver` / `Reset` / `Close` 钩子上调。`hostWaterfallHandler` 按 `payload.agentId` 查表 → `driver.handleHostFrame`,后者把 waterfall envelope 转成 mux envelope 形状调用现有的 `handleApprovalRequested` / `handleQuestionRequested`,reply key 仍是 waterfall 的 `eventId`(`/api/respond` envelope 不变)。
 
 ---
 
@@ -604,9 +646,21 @@ watchdog 检测到 dsh 子进程 exit:
 
 shared host 是**多 session 共享**的,任何 ChatSession / AgentSession 都从 `host.GetGlobal()` 拿同一个 `*Client`。`host/` 把"全局 dsh 进程 + RPC + WS + Router"封装成单例,`dsh/` 只管"单 session 生命周期 + 翻译层 + 与 agent 包的接口"。Phase 3 之前共存,Phase 3 时把 envelope 类型 / 翻译层 / session.go::handleMuxFrame 合并到 `host/` 后再删 `dsh/`。
 
-### 6.2 为什么不 attach 用户自启的 dsh
+### 6.2 为什么 nightme 现在可以 attach 用户自启的 dsh
 
-§3.1 详细论证。简短版: dsh 0.1.2-rc.1 的 launch token 是进程内私有,跨进程拿不到;即使用户自启 dsh 在 3080,nightme 也得 spawn 自己的 dsh(到 3081+)。两个实例 cookie / WS / session 各自独立,nightme 不会"接管"用户 dashboard 上的 session。
+**早期假设**(2026-09-11 之前):§3.1 论证 dsh 0.1.2-rc.1 的 launch token 是进程内私有,跨进程拿不到,所以 nightme 无法 attach 到别人跑的 dsh。
+
+**实测推翻**(2026-09-11):`@deepseek-ai/dsh-client-connection/lib/index.js::BrowserAuth` 不只靠 launch token — 它用 `client-connection/browser-session.secret` 签 cookie。这个 secret 持久化在 `~/.dsh/.credentials.yaml`,**所有共享同一个 `~/.dsh/` 目录的 dsh 都加载同一份 secret**。
+
+所以 nightme 可以本地读 secret + 签出 dsh-auth cookie,**跳过 launch token exchange 直接 attach**。`host/lifecycle.go::tryAttachExistingDSH` 在 `StartSharedHost` 第一步走这个路径:
+
+1. mint cookie from `~/.dsh/.credentials.yaml` 的 secret
+2. POST `/api/session/list` 用 minted cookie 验证
+3. 200 OK → attach,ownsProcess=false(不 kill 用户的 dsh)
+4. 非 200 → fallback sweep [3081, 3099]
+5. 都失败 → spawn 自己的 dsh
+
+**好处**:daemon 重启不再丢失 session 历史(用户 worktree 持续工作),也不再有"daemon 在 3081+ 留一堆孤儿 dsh"的 sprawl 模式。
 
 ### 6.3 为什么有 `host/stream.go::translateSessionEvent` 翻译层
 
@@ -642,7 +696,97 @@ discoverer 策略是 `recordAndCountUnknown` 计数 + warn log,而不是 fail-fa
 
 ---
 
-## 7. 测试金字塔
+## 7. Operational lessons(实机 dsh 0.1.2-rc.1 接入经验,2026-09-11)
+
+本节按"踩坑 → 根因 → 修复"格式记录,方便下次接入时直接复用。
+
+### 7.1 dsh-auth cookie 是 HMAC-SHA256,不是 JWT
+
+**踩坑**:早期假设 dsh-auth 走 launch token exchange(GET `/?token=...` 拿 303 + Set-Cookie),以为 cookie 是不可伪造的 — 所以 nightme 不能 attach 到用户自启的 dsh。
+
+**实测推翻**:`@deepseek-ai/dsh-client-connection/lib/index.js:272-277` 的 `encodeCookie`:
+
+```js
+cookieName(authority) = "dsh-auth-" + base64url(sha256(authority))
+cookieValue = "v1." + base64url(JSON payload) + "." + base64url(HMAC-SHA256(secret, body))
+payload = {version:1, authority:"<host:port>", issuedAt:<ms>, expiresAt:<ms>}
+```
+
+secret 持久化在 `~/.dsh/.credentials.yaml` 的 `client-connection/browser-session.payload.secret`(32 字节,**URL-safe base64 不带 padding**)。所有共享这个 `~/.dsh/` 目录的 dsh 进程都加载同一份 secret。
+
+**byte-for-byte 验证**(`TestMintDSHAuthCookieFromCredentials_MatchesRealCookie`):用 2026-09-11 实机 dsh 0.1.2-rc.1 在 `:3088` 捕获的真实 cookie 做 fixture,自己写 HMAC 重新签名,产出**完全一致**的 cookie。
+
+**生产代码**:`host/lifecycle.go::mintDSHAuthCookieFromCredentials` + `loadBrowserSessionSecret` 用 `gopkg.in/yaml.v3` 解析 `.credentials.yaml`,按上面的算法签名。错误情形(secret 不在 / 文件不可读 / YAML 损坏)会 fail loud,不静默 fallback。
+
+### 7.2 tryAttachExistingDSH 比 spawn 优先级高
+
+**踩坑**:早期 `StartSharedHost` 看到 3080 被占就直接 fallback 到 3081,造成"daemon 重启一次就 spawn 一个新 dsh"的 sprawl,长期下来 3080-3099 散落 4-5 个 dsh 进程。
+
+**修复**:`host/lifecycle.go::tryAttachExistingDSH` 用 mint 的 cookie 验证 3080 可用 → 试 3081-3099 → 都失败才 spawn:
+
+```go
+port := defaultDSHPort  // 3080
+if attached, h := tryAttachExistingDSH(ctx, logger); attached {
+    return h, nil  // 复用用户的 dsh
+}
+// 才 fallback
+```
+
+**注意**:`attachedSharedHost.ownsProcess=false`,watchdog 不能 kill 它。如果用户的 dsh 死了,nightme daemon 不知道 → 下次 `/new` 时再次 attach,会 retry;如果还是失败,fallback spawn。
+
+### 7.3 `cli.Start(ctx)` 必须用长生命周期 ctx,不能复用探测 ctx
+
+**踩坑**(2026-09-11 实测):`tryAttachExistingDSH` 里用 `probeCtx` (10s timeout) 调用 `cli.Start(probeCtx)`。attach 成功后,Hub 的 WS pump 收到 10s 超时 → exit → session events 停止回 → 1 分钟后 `agentsession: readpump stalled`。
+
+**修复**(`lifecycle.go:383`):`cli.Start(ctx)` 用 `ctx`(StartSharedHost 的 caller ctx,daemon lifetime),**不用** `probeCtx`。`probeCtx` 只给 cookie 探测用,attach 成功后立刻 cancel。
+
+```go
+// WRONG:
+if err := cli.Start(probeCtx); err != nil { ... }
+// RIGHT:
+if err := cli.Start(ctx); err != nil { ... }  // caller ctx, lifetime = daemon
+```
+
+**症状模式**:用户 log 出现 `agentsession: readpump stalled (no events in threshold while in-flight); marking suspect` + attach 之后看不到 `mux stream connected`(deferred open 没 fire)→ 怀疑 Hub pump 已死。
+
+### 7.4 `session.list` 是 POST + slash,不是 GET + dot
+
+**踩坑**:`TestTryAttachExistingDSH_ReusesRunningDSH` 第一版用 `client.Get(baseURL + "/api/session/list")` → **HTTP 404**。以为是 cookie 没签对,debug 了半天。
+
+**根因**:`@deepseek-ai/dsh-api-session-controller/lib/typert.host.js` 把 `session.list` 标成 typed POST + args wrapper(`{_request:{}}`)。method 在 envelope 里是 `session/list`(slash),URL path 也是 `/api/session/list`。
+
+**修复**:`attach probe` 用 `http.NewRequest("POST", baseURL+"/api/session/list", body)`,envelope 是 `{"type":"client-request", "method":"session/list", "payload":{"args":{"_request":{}}}}`。
+
+这条经验也适用于所有 typed methods:`session.create`、`session.cancel`、`workspace.list`、`workspace.create` —— **全是 POST + envelope**。只有少数 fire-and-forget 的(`commands/execute`)可能走其他 shape。
+
+### 7.5 dsh 3080 fallback 3081 才是设计错误
+
+**踩坑**(长期):用户多个 worktree 各跑一个 nightme daemon + dsh。`fix-dsh-spawn` worktree 的 daemon 启动后 dsh 占 3080;`fix-dsh-ask-question` 的 daemon 启动,看到 3080 被占,fallback 3081 spawn 自己的 dsh。几次 `/new` 后,3080-3083 全被占用,用户切 worktree 找不到能 resume 的 dsh。
+
+**修复**:本节 §7.2 描述的 tryAttachExistingDSH → 一个 fix 解决了"daemon 重启丢 session"和"orphan dsh sprawl"两个问题。
+
+**遗留**:`session.list` 路径 404 那条 — 没在生产代码上修,只修了测试代码。生产代码用 `RPCClient.SessionList`(Post),应该没问题,但 `tryAttachExistingDSH` 用的 raw `client.Do` 路径要小心(目前已用 POST,以后改 typed method 时记得同步)。
+
+### 7.6 daemon.log 里的 "host handler installed" 是好信号
+
+attach 路径第一次触发时,`host_waterfall.go` 会 log:
+
+```
+INFO dsh: calling SetHostHandler
+INFO dsh: installed host waterfall handler on client
+```
+
+如果没看到这两行,说明 `installHostHandler` 没跑(可能 `cli == nil` 或被另一个 test binary 抢先 install 了 — 重复 install 是 idem-potent 的,只是 log 会写两次)。
+
+### 7.7 多 worktree 共享 ~/.dsh/.credentials.yaml
+
+**潜在问题**:用户有几个 nightme worktree 都 import `internal/bridge/dsh`,它们的 `~/.dsh/.credentials.yaml` 是同一个文件。如果一个 daemon 用 secret A 创了一个 session,另一个 daemon 看到 secret A 也对,但 cookie 在 dsh 看来是用 secret A 签的 — **能 validate 吗?** 能,因为 dsh 自己也是用 secret A 签的。
+
+**风险**:如果用户 `rm ~/.dsh/.credentials.yaml`(误操作),所有旧 dsh 实例会变得不响应 cookie 验证 → 新 daemon 会一直 fallback spawn。建议**永远不删除这个文件**,且 `~/.dsh/` 目录 mode 0700。
+
+---
+
+## 8. 测试金字塔
 
 ### 7.1 mock(无需真 dsh)
 
@@ -688,7 +832,7 @@ NIGHTME_TEST_DSH_URL='http://127.0.0.1:3082/?token=...' \
 
 ---
 
-## 8. 与其他 bridges 对照
+## 9. 与其他 bridges 对照
 
 | 维度 | claude | codex | pi | opencode | **dsh** |
 |------|--------|-------|----|----|---------|
@@ -705,7 +849,7 @@ NIGHTME_TEST_DSH_URL='http://127.0.0.1:3082/?token=...' \
 
 ---
 
-## 9. 不在范围(deferred)
+## 10. 不在范围(deferred)
 
 | 项 | 理由 |
 |----|------|
@@ -720,7 +864,7 @@ NIGHTME_TEST_DSH_URL='http://127.0.0.1:3082/?token=...' \
 
 ---
 
-## 10. 排错速查
+## 11. 排错速查
 
 | 症状 | 根因 | 修法 |
 |------|------|------|
@@ -744,7 +888,7 @@ NIGHTME_TEST_DSH_URL='http://127.0.0.1:3082/?token=...' \
 
 ---
 
-## 11. 参考
+## 12. 参考
 
 - 本机 dsh 仓根:`/Users/geax/.nvm/versions/node/v22.20.0/lib/node_modules/@deepseek-ai/dsh/`
 - dsh-api-gateway 源码:同仓下 `node_modules/@deepseek-ai/dsh-api-gateway/lib/types/index.js`(stream-protocol)、`lib/types/stream-protocol.d.ts`

@@ -469,8 +469,16 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		handleRunEvent(ev, &state)
 	})
 
-	waitErr := child.Wait()
+	// Drain stderr BEFORE cmd.Wait: exec.Cmd.Wait reaps the
+	// process and then closes the parent end of the StderrPipe
+	// (closeAfterWait). If the drain goroutine hasn't pulled
+	// the child's last stderr bytes out of the kernel pipe
+	// buffer by then, the close discards them and stderr_buf
+	// lands empty — silently dropping auth / model errors
+	// written right before a non-zero exit. Millisecond race
+	// window; surfaces under -race on Linux CI.
 	<-stderrDone
+	waitErr := child.Wait()
 
 	elapsedMs := time.Since(startTime).Milliseconds()
 

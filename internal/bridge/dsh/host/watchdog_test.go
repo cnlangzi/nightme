@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,7 +59,9 @@ import (
 const fakeDSHSource = `package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -112,6 +115,31 @@ func main() {
 	// crashing on every retry during the test.
 	var hits atomic.Int64
 	mux := http.NewServeMux()
+	// workspace.create — the post-spawn readiness probe (see
+	// internal/bridge/dsh/host/client.go::WaitForDSHReady).
+	// Must return a valid typert envelope with ok=true so the
+	// probe passes; otherwise spawnAndWire's 15s context times
+	// out and the test deadlocks waiting for the fake-dsh PID
+	// file (which IS being written — the fake-dsh is fine, the
+	// probe just keeps retrying past the PID-file wait).
+	mux.HandleFunc("/api/workspace/create", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// typert envelope: {"type":"server-response","rpcId":"<echoed>",
+		// "result":{"ok":true,"value":{"workspace":{...}}}}. The
+		// client validates resp.RPCID == sent rpcID; without the
+		// echo the probe would treat the rpcId mismatch as a
+		// transport error and retry until the 15s context
+		// deadline. Echo the request's rpcId back. Use a map
+		// for unmarshal to avoid Go struct tags (the surrounding
+		// fakeDSHSource is one big raw string and any embedded
+		// backtick terminates it).
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		var env map[string]any
+		_ = json.Unmarshal(body, &env)
+		_, _ = fmt.Fprintf(w, "{\"type\":\"server-response\",\"rpcId\":%q,\"result\":{\"ok\":true,\"value\":{\"workspace\":{\"workspaceId\":\"fake\"}}}}", env["rpcId"])
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		if r.URL.Query().Get("token") == token {
@@ -161,6 +189,15 @@ var fakeDSHBin string
 // Per-test writeFakeDSH is then just a path return — no per-test
 // compile overhead.
 func TestMain(m *testing.M) {
+	// Kill any real dsh processes this user account owns so the
+	// test suite starts in a clean state. The watchdog tests
+	// assume they have exclusive control over port 3080 (where
+	// fake-dsh binds); if a real dsh is running there, the
+	// fake-dsh bind fails and the tests fall over. The kill is
+	// scoped to the current UID via `pgrep -U` so we don't kill
+	// other users' daemons on a multi-user host.
+	killRealDSHForCleanTest()
+
 	dir, err := os.MkdirTemp("", "fake-dsh-bin-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fake-dsh test setup: mkdir: %v\n", err)
@@ -187,6 +224,28 @@ func TestMain(m *testing.M) {
 
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// killRealDSHForCleanTest SIGTERMs any user-owned `dsh --profile
+// web` processes before the test suite runs. This avoids the
+// attach-reuse path picking up a leftover dsh and skipping the
+// fake-dsh bind the watchdog tests rely on. Production code
+// never calls this — it's strictly a TestMain fixture.
+func killRealDSHForCleanTest() {
+	uid := os.Getuid()
+	out, err := exec.Command("pgrep", "-U", strconv.Itoa(uid), "-f", "dsh --profile web").Output()
+	if err != nil {
+		// pgrep returns 1 when no match — that's the desired state.
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		_ = exec.Command("kill", "-TERM", line).Run()
+	}
+	// Brief grace so the kills land before the fake-dsh bind race.
+	time.Sleep(500 * time.Millisecond)
 }
 
 // writeFakeDSH returns the path of the precompiled fake-dsh binary.
@@ -231,9 +290,14 @@ func procAlive(pid int) bool {
 // tests after the daemon stopped tearing dsh down on shutdown —
 // tests still need to terminate the spawned process so the test
 // binary doesn't leak it. No-op when sh owns no subprocess
-// (PID == 0).
+// (PID == 0) or when EnsureSharedHost failed before installing
+// the singleton (sh == nil — caller's cleanup must not crash on
+// the failure path).
 func killFakeDSH(t *testing.T, sh *host.SharedHost) {
 	t.Helper()
+	if sh == nil {
+		return
+	}
 	pid := sh.PID()
 	if pid == 0 {
 		return

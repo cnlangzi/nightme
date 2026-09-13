@@ -85,7 +85,7 @@ NightMe 直接接住你已经在用的 AI 编程 agent 和日常聊天的 IM。�
 
 | Channel | 状态 |
 |---|---|
-| **飞书 Feishu**（国内）/ **Lark**（国际） | 推荐（最佳体验）— `nightme login feishu` |
+| **飞书 Feishu**（国内）/ **Lark**（国际） | ⭐ 推荐 — `nightme login feishu` |
 | **Telegram** | 公测 — `nightme login telegram` |
 | **Slack** | 开发中 — `nightme login slack` |
 

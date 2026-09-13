@@ -88,7 +88,7 @@ the way.
 
 | Channel | Status |
 |---|---|
-| **Feishu** (China) / **Lark** (International) | Recommended (best experience) — `nightme login feishu` |
+| **Feishu** (China) / **Lark** (International) | ⭐ Recommended — `nightme login feishu` |
 | **Telegram** | Beta — `nightme login telegram` |
 | **Slack** | In development — `nightme login slack` |
 

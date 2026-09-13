@@ -1152,32 +1152,36 @@ func isBenignCancelErr(err error) bool {
 }
 
 // Keepalive is the driver.Keepalive implementation for the
-// dsh bridge. Shared-host model: the dsh subprocess is owned
-// by the daemon-wide SharedHost (not by this driver), so the
-// right thing to probe is the SHARED host.Client's done-channel
-// — it's the single source of truth for "is the dsh backend
-// reachable?". The watchdog in SharedHost handles the
-// respawn side when Client.Close() has fired; we just report
-// the dead state and let onRecover (supplied by the chat
-// layer) re-install a fresh Client via host.EnsureSharedHost.
-// See agent.driver.Keepalive for the full contract.
+// dsh bridge. Probes the per-driver d.cli (NOT host.GetGlobal()):
+// d.cli is the *Client the driver was bound to at handshake
+// time. We use d.cli because the foreign-dsh-attached
+// SharedHost's fallback path replaces the process-global *Client
+// via host.ReplaceGlobal, but d.cli on each pre-fallback driver
+// still points at the old (dead) client. The fallback calls
+// oldCli.Close() to fire d.cli.Done(); the next keepalive tick
+// then sees it closed and calls onRecover, which spawns a fresh
+// *dsh.driver via spawner.Spawn — and the new driver's
+// handshakeSession's session.create({sessionId, cwd}) preserves
+// the user's sessionId via dsh's idempotent session-create. See
+// agent.driver.Keepalive for the full contract.
 func (d *driver) Keepalive(ctx context.Context, onRecover func(context.Context) error) error {
 	if onRecover == nil {
 		return errors.New("dsh: keepalive and no recovery callback")
 	}
-	cli := host.GetGlobal()
+	cli := d.cli
 	if cli == nil {
-		// Shared host never started — e.g. lazy-start never fired because
-		// nobody sent a dsh prompt yet. Treat as dead so onRecover
-		// re-runs EnsureSharedHost and we get a host to query.
+		// Driver was constructed but the handshake never completed
+		// (no global client yet). Treat as dead so onRecover
+		// re-runs the spawner.
 		return onRecover(ctx)
 	}
 	select {
 	case <-cli.Done():
-		// Host Client closed (server shutdown, network blip, or
-		// the upstream dsh process exited). The shared-host watchdog
-		// re-spawns as needed; the chat layer's onRecover knows how
-		// to re-populate host.GetGlobal() for us.
+		// Per-driver client closed (foreign-dsh-attached fallback
+		// called oldCli.Close() to fire this, or the upstream dsh
+		// process exited and the watchdog swapped the global). The
+		// chat layer's onRecover knows how to rebuild a fresh
+		// driver via spawner.Spawn.
 		return onRecover(ctx)
 	default:
 		return nil

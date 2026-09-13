@@ -31,6 +31,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/cnlangzi/nightme/internal/httpclient"
 	"io"
@@ -400,16 +401,23 @@ func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 // hits "active Service workspaceController is unavailable" and
 // the user sees a startup-race error.
 //
-// Probe target: workspace.create (verified empirically on
-// dsh 0.1.2-rc.1 in 2026-09 — workspace.list returns 404 from
-// the gateway, but workspace.create with the existing workspace's
-// path is the documented idempotent read and is the same RPC
-// nightme already calls from handshakeSession). The path argument
-// is taken from c.baseURL-derived authority; in practice we just
-// pass an empty path and rely on dsh returning the most recent
-// matching workspace. Empirically: dsh returns the same workspace
-// row regardless of path content (the probe is "is the
-// workspaceController loaded?" not "create a new workspace").
+// Probe target: workspace.create. Verified empirically on
+// dsh 0.1.2-rc.1 in 2026-09: workspace.list returns 404, so
+// workspace.create is the only path-level read that exercises
+// workspaceController at startup. dsh's gateway validates the
+// `request.path` field as a required absolute path (per
+// dsh.md §2.4.2 "path 必须绝对"); an empty request triggers
+// `gateway/input-invalid: wire field "request" failed
+// boundary validation` and the probe is treated as a real
+// failure rather than a transient race — that's why the path
+// argument is mandatory.
+//
+// The path comes from the SharedHostOptions.Workspace that
+// spawnAndWire was called with — same path nightme's own
+// handshakeSession eventually passes to SessionCreate (via
+// workspace.create→ session.create). The probe is the same
+// RPC nightme will make seconds later, just done earlier to
+// surface plugin-init failures up front.
 //
 // Failure contract:
 //   - "gateway/service-unavailable" → transient (plugin race),
@@ -417,9 +425,10 @@ func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 //   - Transport error (network, rpcId mismatch, etc.) → also
 //     transient, retry. The Hub's WS reconnect handles a mid-
 //     spawn server restart; spawnAndWire is no different.
-//   - 4xx with a non-transient code (e.g. "bad-request") →
-//     terminal, return immediately. The caller (spawnAndWire)
-//     kills the subprocess and surfaces the real error.
+//   - 4xx with a non-transient code (e.g. "input-invalid",
+//     "bad-request") → terminal, return immediately. The
+//     caller (spawnAndWire) kills the subprocess and
+//     surfaces the real error.
 //
 // maxAttempts is the total number of tries (not retries); a value
 // of 1 disables retry. Backoff between attempts is respawnDelay
@@ -427,9 +436,17 @@ func (c *RPCClient) SessionList(ctx context.Context) ([]SessionSummary, error) {
 // attached-dsh fallback and the spawned-respawn paths.
 //
 // The context bounds the total wall time; cancel to abort early.
-func (c *RPCClient) WaitForDSHReady(ctx context.Context, maxAttempts int) error {
+func (c *RPCClient) WaitForDSHReady(ctx context.Context, path string, maxAttempts int) error {
 	if maxAttempts < 1 {
 		maxAttempts = 1
+	}
+	if path == "" {
+		// workspace.create's path arg is required (dsh.md §2.4.2).
+		// Without a path the gateway rejects with input-invalid
+		// and the probe is treated as terminal — no retries, no
+		// fallback spawn. Caller should always pass opts.Workspace
+		// (the workspace path that the dsh session is bound to).
+		return errors.New("dsh.host: WaitForDSHReady: empty path; cannot probe")
 	}
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -451,18 +468,7 @@ func (c *RPCClient) WaitForDSHReady(ctx context.Context, maxAttempts int) error 
 		// workspaceController is loaded; we don't read the body.
 		resp, err := c.Post(ctx, "workspace.create", map[string]any{
 			"request": map[string]any{
-				// workspace.create's only arg is path; the
-				// workspaceId (if any) is part of the path
-				// mapping. We pass an empty path; dsh's
-				// typert accepts `request={}` and the gateway
-				// resolves the workspace by... actually
-				// path is REQUIRED. We pass the cwd-relative
-				// "." as a marker; dsh's `path must be absolute`
-				// comment in dsh.md §2.4.2 is satisfied by
-				// passing an empty object (gateway resolves
-				// via implicit authority). In practice
-				// dsh returns the most recent matching
-				// workspace regardless of path content.
+				"path": path,
 			},
 		})
 		if err != nil {

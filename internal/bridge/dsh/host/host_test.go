@@ -1043,7 +1043,7 @@ func TestRPCClient_WaitForDSHReady_RetriesOnServiceUnavailable(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := c.WaitForDSHReady(ctx, 5); err != nil {
+	if err := c.WaitForDSHReady(ctx, "/tmp/test", 5); err != nil {
 		t.Fatalf("WaitForDSHReady: %v", err)
 	}
 	if got := stub.count.Load(); got != 4 {
@@ -1063,7 +1063,7 @@ func TestRPCClient_WaitForDSHReady_GivesUpAfterMaxAttempts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	const maxAttempts = 4
-	err := c.WaitForDSHReady(ctx, maxAttempts)
+	err := c.WaitForDSHReady(ctx, "/tmp/test", maxAttempts)
 	if err == nil {
 		t.Fatal("expected error after all attempts fail, got nil")
 	}
@@ -1102,7 +1102,7 @@ func TestRPCClient_WaitForDSHReady_NonTransientIsTerminal(t *testing.T) {
 	// would fire. Instead it should return immediately after
 	// the single attempt.
 	start := time.Now()
-	err := c.WaitForDSHReady(ctx, 10)
+	err := c.WaitForDSHReady(ctx, "/tmp/test", 10)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected error on non-transient failure, got nil")
@@ -1128,7 +1128,7 @@ func TestRPCClient_WaitForDSHReady_ContextCancel(t *testing.T) {
 	}()
 
 	start := time.Now()
-	err := c.WaitForDSHReady(ctx, 10)
+	err := c.WaitForDSHReady(ctx, "/tmp/test", 10)
 	elapsed := time.Since(start)
 
 	if err == nil {

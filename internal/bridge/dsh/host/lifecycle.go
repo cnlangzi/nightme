@@ -1363,15 +1363,19 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	// first workspace.create hits "active Service workspaceController
 	// is unavailable" — the HTTP server is up but the typert
 	// gateway's plugin registry is still loading. WaitForDSHReady
-	// polls workspace.list (a workspaceController-touching endpoint)
-	// and retries on "service-unavailable" with respawnDelay
-	// backoff. The cookie is required (workspace.list auths the
-	// request), so this must come after mintDSHAuthCookie. ctx is
-	// bounded by the spawn timeout so we don't hang forever on a
+	// polls workspace.create (the same RPC nightme uses to bind
+	// the session) and retries on "service-unavailable" with
+	// respawnDelay backoff. opts.Workspace is the path argument
+	// dsh's workspace.create requires (dsh.md §2.4.2); passing the
+	// empty string triggers a terminal "input-invalid" error rather
+	// than a transient race, so the caller must supply it.
+	// The cookie is required (workspace.create auths the request),
+	// so this must come after mintDSHAuthCookie. ctx is bounded
+	// by the spawn timeout so we don't hang forever on a
 	// genuinely broken dsh binary.
 	readyCtx, readyCancel := context.WithTimeout(ctx, dshReadyTimeout)
 	defer readyCancel()
-	if err := cli.WaitForDSHReady(readyCtx, dshReadyAttempts); err != nil {
+	if err := cli.WaitForDSHReady(readyCtx, opts.Workspace, dshReadyAttempts); err != nil {
 		_ = child.Process.Kill()
 		_ = child.Wait()
 		return nil, nil, fmt.Errorf("dsh.host: dsh started but not ready: %w", err)

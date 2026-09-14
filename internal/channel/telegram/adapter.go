@@ -325,6 +325,21 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	if text == "" {
 		text = message.Caption
 	}
+	// Drop bare /start before any state mutation. Telegram's
+	// `/start` is a platform convention for "begin a conversation" —
+	// forwarding it to the agent would publish a "🤖 Working..."
+	// placeholder and produce a long reply explaining the command
+	// isn't registered, neither of which the user wants. Variants
+	// like `/start foo` flow through normally.
+	if isBareStartCommand(text, a.botName) {
+		if a.logger != nil {
+			a.logger.Debug("telegram: dropped bare /start",
+				"chat_id", message.Chat.ID,
+				"message_id", message.MessageID,
+			)
+		}
+		return
+	}
 	hasMention := a.hasMention(message, text)
 	chatID := strconv.FormatInt(message.Chat.ID, 10)
 	threadID, err := a.ensureTopic(ctx, message)
@@ -747,6 +762,30 @@ func (a *Adapter) hasMention(message *Message, text string) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(text), "@"+strings.ToLower(a.botName))
+}
+
+// isBareStartCommand reports whether text is exactly `/start` or
+// `/start@<botusername>` (case-insensitive). Telegram's `/start` is a
+// platform convention for "begin a conversation" — it has no
+// meaning to nightme's command set, and forwarding it to the agent
+// produces a spurious "🤖 Working..." placeholder plus a long reply
+// explaining the command isn't registered. Drop it silently at the
+// adapter boundary so neither side burns time on it. Variants with
+// extra text (`/start foo`) are NOT matched — those are real
+// user prompts and should flow through normally.
+func isBareStartCommand(text, botUsername string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	low := strings.ToLower(t)
+	if low == "/start" {
+		return true
+	}
+	if botUsername == "" {
+		return false
+	}
+	return low == "/start@"+strings.ToLower(botUsername)
 }
 
 func (a *Adapter) sendChoice(ctx context.Context, msg messages.OutboundMessage, placeholderAnchor int) error {

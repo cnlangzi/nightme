@@ -1488,6 +1488,78 @@ func TestAdapter_HandleUpdate_EmptyMessage(t *testing.T) {
 	a.handleUpdate(context.Background(), Update{UpdateID: 1, Message: &Message{}})
 }
 
+// TestAdapter_HandleUpdate_DropsBareStart verifies that a bare
+// /start (Telegram's "begin conversation" convention) is silently
+// dropped at the adapter boundary — no placeholder message is
+// sent, no inbound is published, no agent invocation. Variants
+// like /start@<bot> follow the same path; /start with extra text
+// flows through normally.
+func TestAdapter_HandleUpdate_DropsBareStart(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"plain_start", "/start"},
+		{"start_with_bot_suffix", "/start@testbot"},
+		{"uppercase_start", "/START"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, api := newTestAdapter(t)
+			api.GetMeResult = UserInfo{ID: 999, Username: "testbot"}
+			a.botID = 999
+			a.botName = "testbot"
+
+			a.handleUpdate(context.Background(), Update{
+				UpdateID: 1,
+				Message: &Message{
+					MessageID: 100,
+					Date:      time.Now().Unix(),
+					Chat:      Chat{ID: 555, Type: "private"},
+					From:      &User{ID: 1},
+					Text:      tc.text,
+				},
+			})
+
+			select {
+			case msg := <-a.Incoming():
+				t.Fatalf("/start must not produce an inbound message; got %+v", msg)
+			case <-time.After(150 * time.Millisecond):
+				// Expected: no inbound, no placeholder sendMessage call.
+			}
+		})
+	}
+
+	// /start with extra text MUST flow through normally — it's a
+	// real user prompt, not a platform convention.
+	t.Run("start_with_extra_text_passes_through", func(t *testing.T) {
+		a, api := newTestAdapter(t)
+		api.GetMeResult = UserInfo{ID: 999, Username: "testbot"}
+		a.botID = 999
+		a.botName = "testbot"
+
+		a.handleUpdate(context.Background(), Update{
+			UpdateID: 1,
+			Message: &Message{
+				MessageID: 101,
+				Date:      time.Now().Unix(),
+				Chat:      Chat{ID: 555, Type: "private"},
+				From:      &User{ID: 1},
+				Text:      "/start please do the thing",
+			},
+		})
+
+		select {
+		case msg := <-a.Incoming():
+			if msg.Text != "/start please do the thing" {
+				t.Fatalf("inbound text = %q, want /start please do the thing", msg.Text)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("/start with extra text must produce an inbound message")
+		}
+	})
+}
+
 func TestAdapter_HandleCallback_Permission(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	a.config.PollingTimeout = 1

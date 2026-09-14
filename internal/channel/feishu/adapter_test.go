@@ -1842,7 +1842,7 @@ func TestSend_OutResult_EmptyPatchesReceiptFooter(t *testing.T) {
 			DurationMs: 100,
 			Usage:      usage,
 		},
-		Usage: (*messages.UsageInfo)(usage),
+		Usage: usage,
 	})
 	// The PATCH call into Feishu errors in this test env (no mock
 	// for patch_message); surface the error as a soft warning, not

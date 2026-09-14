@@ -289,7 +289,7 @@ func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bo
 		// runtime is a passive pass-through, so a nil Usage just
 		// means the channel footer omits Line 2.
 		if u := ev.Result.Usage; u != nil {
-			out.Usage = (*messages.UsageInfo)(u)
+			out.Usage = u
 		}
 		return out, true
 

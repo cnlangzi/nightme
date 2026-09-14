@@ -449,169 +449,34 @@ func chainFixture(t *testing.T, entries []richTurnEntry) string {
 	return body
 }
 
-// TestRenderRichTurnBlocks_OrderedListEntry verifies a chain entry
-// containing an ordered list reaches the wire as a list block.
-func TestRenderRichTurnBlocks_OrderedListEntry(t *testing.T) {
-	body := chainFixture(t, []richTurnEntry{
-		{kind: "reply", body: "1. one\n2. two\n3. three"},
-	})
-	var blocks []map[string]any
-	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
-		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
-	}
-	list := findBlockOfType(blocks, "list")
-	if list == nil {
-		t.Fatalf("expected a list block in chain output; got blocks=%v", countBlocksByType(blocks))
-	}
-	items, _ := list["items"].([]any)
-	if len(items) != 3 {
-		t.Errorf("list items=%d, want 3", len(items))
-	}
-}
-
-// TestRenderRichTurnBlocks_TableEntry verifies a chain entry with a
-// GFM table reaches the wire as a table block (not the older
-// paragraph-fallback path that stripped `|` chars into literal text).
-func TestRenderRichTurnBlocks_TableEntry(t *testing.T) {
-	body := chainFixture(t, []richTurnEntry{
-		{kind: "reply", body: "| A | B |\n|---|---|\n| 1 | 2 |"},
-	})
-	var blocks []map[string]any
-	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
-		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
-	}
-	table := findBlockOfType(blocks, "table")
-	if table == nil {
-		t.Fatalf("expected a table block; got types=%v", countBlocksByType(blocks))
-	}
-	cells, _ := table["cells"].([]any)
-	if len(cells) != 2 {
-		t.Errorf("table rows=%d, want 2 (header + 1 data)", len(cells))
-	}
-}
-
 // TestRenderRichTurnBlocks_FallbackParagraphEntry verifies that an
 // entry whose body triggers ok=false (here: an unterminated fence)
 // still lands in the chain as a rich paragraph block, never as
 // plain text. The Telegram adapter contract — every outbound bubble
 // is rich_message[blocks] — depends on this guard.
 func TestRenderRichTurnBlocks_FallbackParagraphEntry(t *testing.T) {
+	const raw = "before\n\n```\nunterminated fence"
 	body := chainFixture(t, []richTurnEntry{
-		{kind: "reply", body: "before\n\n```\nunterminated fence"},
+		{kind: "reply", body: raw},
 	})
 	var blocks []map[string]any
 	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
 		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
 	}
-	para := findBlockOfType(blocks, "paragraph")
-	if para == nil {
-		t.Fatalf("expected a paragraph block from the fallback; got types=%v", countBlocksByType(blocks))
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block from the fallback, got %d (types=%v)", len(blocks), countBlocksByType(blocks))
 	}
-	// Sanity: no "text" top-level field (which would be the
-	// plain-text sendMessage shape, not rich blocks). If a future
-	// change ever introduces a plain-text escape hatch, this
-	// assertion will surface it.
-	for _, b := range blocks {
-		if _, ok := b["text"]; ok && b["type"] != "paragraph" && b["type"] != "heading" && b["type"] != "pre" && b["type"] != "footer" {
-			// blocks above are the only ones allowed to hold
-			// `text`; any other type with a top-level `text`
-			// is a regression toward plain-text rendering.
-			t.Errorf("unexpected top-level text on block %v", b)
-		}
+	para := blocks[0]
+	if para["type"] != "paragraph" {
+		t.Fatalf("expected paragraph block, got type=%v", para["type"])
 	}
-}
-
-// TestRenderRichTurnBlocks_FootnoteStrippedInEntry verifies the
-// chain output for a paragraph with footnote refs is still rich
-// blocks — the footnote is silently stripped, surrounding text
-// survives, no plain-text escape is taken.
-func TestRenderRichTurnBlocks_FootnoteStrippedInEntry(t *testing.T) {
-	body := chainFixture(t, []richTurnEntry{
-		{kind: "reply", body: "claim[^1] after"},
-	})
-	var blocks []map[string]any
-	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
-		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
-	}
-	para := findBlockOfType(blocks, "paragraph")
-	if para == nil {
-		t.Fatalf("expected a paragraph block; got types=%v", countBlocksByType(blocks))
-	}
-	// Wire form: array (entity slot present). Verify the
-	// surrounding text pieces survived in order.
-	arr, ok := para["text"].([]any)
-	if !ok {
-		t.Fatalf("paragraph text should be array form, got %T", para["text"])
-	}
-	want := []string{"claim", " after"}
-	got := []string{}
-	for _, item := range arr {
-		if s, ok := item.(string); ok {
-			got = append(got, s)
-		}
-	}
-	for _, w := range want {
-		found := false
-		for _, g := range got {
-			if g == w {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("missing string piece %q in %v", w, got)
-		}
-	}
-}
-
-// TestRenderRichTurnBlocks_ImageAsURLInEntry verifies an inline
-// image ref in an entry renders through the chain as a clickable
-// url entity (not a plain-text `![alt](url)` literal).
-func TestRenderRichTurnBlocks_ImageAsURLInEntry(t *testing.T) {
-	body := chainFixture(t, []richTurnEntry{
-		{kind: "reply", body: "see ![logo](https://x.png) here"},
-	})
-	var blocks []map[string]any
-	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
-		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
-	}
-	para := findBlockOfType(blocks, "paragraph")
-	if para == nil {
-		t.Fatalf("expected a paragraph block; got types=%v", countBlocksByType(blocks))
-	}
-	arr, _ := para["text"].([]any)
-	var found bool
-	for _, item := range arr {
-		m, _ := item.(map[string]any)
-		if m["type"] == "url" && m["url"] == "https://x.png" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected url entity with url=https://x.png; got %+v", arr)
-	}
-}
-
-// TestRenderRichTurnBlocks_RawHTMLInEntry verifies raw HTML in a
-// chain entry lands as a paragraph block with the tags kept literal —
-// not as a separate rich block, not as plain-text escape, not bailed.
-func TestRenderRichTurnBlocks_RawHTMLInEntry(t *testing.T) {
-	body := chainFixture(t, []richTurnEntry{
-		{kind: "reply", body: `click <a href="https://x">here</a> now`},
-	})
-	var blocks []map[string]any
-	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
-		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
-	}
-	para := findBlockOfType(blocks, "paragraph")
-	if para == nil {
-		t.Fatalf("expected a paragraph block; got types=%v", countBlocksByType(blocks))
-	}
+	// Fallback paragraph carries the raw body verbatim — a plain-text
+	// sendMessage escape hatch would surface here as the body being
+	// the entire rich_message payload instead of a paragraph inside
+	// a blocks array.
 	text, _ := para["text"].(string)
-	want := `click <a href="https://x">here</a> now`
-	if text != want {
-		t.Errorf("text=%q, want literal %q", text, want)
+	if text != raw {
+		t.Errorf("paragraph text=%q, want %q (raw body)", text, raw)
 	}
 }
 

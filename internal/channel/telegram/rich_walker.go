@@ -149,33 +149,21 @@ func inlineToRichText(input string) any {
 				nextIdx = idx
 				matched = true
 				return sentinel
-			case "image":
-				// groups: 1 = alt, 2 = url.
-				alt := parts[1]
+			case "image", "url":
+				// groups: 1 = alt (image) | link text (url), 2 = url.
+				// Both shapes emit the same wire form: Telegram rich
+				// blocks have no inline image entity, so `![alt](url)`
+				// degrades to a clickable url with alt as the label.
 				url := parts[2]
 				if !safeLink(url) {
 					return match
 				}
-				// Empty alt → use URL as visible text.
-				// Otherwise the url entity has no
-				// human-readable label.
-				if alt == "" {
-					alt = url
+				text := parts[1]
+				// Empty alt → use URL as visible text so the entity
+				// has a human-readable label.
+				if pat.kind == "image" && text == "" {
+					text = url
 				}
-				slot := slot{kind: "image", text: alt, url: url}
-				slots = append(slots, slot)
-				sentinel := string(rune(puaBase + rune(idx)))
-				idx++
-				nextIdx = idx
-				matched = true
-				return sentinel
-			case "url":
-				// groups: 1 = link text, 2 = url.
-				url := parts[2]
-				if !safeLink(url) {
-					return match
-				}
-				text = parts[1]
 				slot := slot{kind: "url", text: text, url: url}
 				slots = append(slots, slot)
 				sentinel := string(rune(puaBase + rune(idx)))
@@ -241,13 +229,6 @@ func inlineToRichText(input string) any {
 		case "italic":
 			out = append(out, map[string]any{"type": "italic", "text": s.text})
 		case "url":
-			out = append(out, map[string]any{"type": "url", "text": s.text, "url": s.url})
-		case "image":
-			// `![alt](url)` becomes a clickable link.
-			// Telegram rich blocks have no inline image
-			// entity, so we degrade to the same shape as
-			// url — clicking opens the image URL in the
-			// user's browser.
 			out = append(out, map[string]any{"type": "url", "text": s.text, "url": s.url})
 		case "footnote":
 			// Stripped at substitution time; nothing to
@@ -366,9 +347,9 @@ func walkFence(lines []string, start int) (map[string]any, int, bool) {
 // Bullet (`-`/`*`/`+`) and ordered (`1.`/`2.`/...) markers both
 // produce the same `list` block shape — Telegram Bot API 10.1
 // `InputRichBlockList` has no ordered/unordered enum and no per-item
-// `type` field, so the rendering client infers the marker style from
-// the item text (`1.` prefix → ordered; `-` → bullet). Mixed
-// bullet+ordered in one run is treated as a single list; callers
+// `type` field. The marker (`1.`/`-`/`*`/`+`) is stripped from the
+// item body — the client cannot distinguish ordered from unordered.
+// Mixed bullet+ordered in one run is treated as a single list; callers
 // wanting strict separation should emit a blank line between them.
 func walkList(lines []string, start int) (map[string]any, int, bool) {
 	items := []map[string]any{}
@@ -378,15 +359,14 @@ func walkList(lines []string, start int) (map[string]any, int, bool) {
 		if trimmed == "" {
 			break
 		}
-		var body string
-		switch {
-		case richBulletPat.MatchString(trimmed):
-			body = richBulletPat.FindStringSubmatch(trimmed)[1]
-		case richOrderedPat.MatchString(trimmed):
-			body = richOrderedPat.FindStringSubmatch(trimmed)[1]
-		default:
-			goto done
+		var m []string
+		if m = richBulletPat.FindStringSubmatch(trimmed); m == nil {
+			m = richOrderedPat.FindStringSubmatch(trimmed)
 		}
+		if m == nil {
+			break
+		}
+		body := m[1]
 		item := map[string]any{
 			"blocks": []map[string]any{
 				{"type": "paragraph", "text": inlineToRichText(body)},
@@ -395,7 +375,6 @@ func walkList(lines []string, start int) (map[string]any, int, bool) {
 		items = append(items, item)
 		i++
 	}
-done:
 	if len(items) == 0 {
 		return nil, 0, false
 	}

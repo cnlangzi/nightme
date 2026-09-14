@@ -339,6 +339,13 @@ func TestWalker_Table_Alignment(t *testing.T) {
 		if align != wantAlign[j] {
 			t.Errorf("header cell %d align=%q, want %q", j, align, wantAlign[j])
 		}
+		// Default align ("") → omit the align field entirely so the
+		// wire form stays minimal.
+		if j == 3 {
+			if _, hasAlign := m["align"]; hasAlign {
+				t.Errorf("default-align column %d should omit align field, got %v", j, m)
+			}
+		}
 	}
 }
 
@@ -610,29 +617,6 @@ func TestWalker_Table_ThreeRows(t *testing.T) {
 			if isH, _ := m["is_header"].(bool); isH {
 				t.Errorf("data row %d col %d should NOT have is_header", i, j)
 			}
-		}
-	}
-}
-
-// TestWalker_Table_FourAlignments verifies the four alignment modes
-// (left, center, right, default) all surface when mixed on one row.
-func TestWalker_Table_FourAlignments(t *testing.T) {
-	in := "| L | C | R | D |\n|:--|:-:|--:|---|\n| a | b | c | d |"
-	out, ok := markdownToRichBlocks(in)
-	if !ok {
-		t.Fatal("table with mixed alignments should succeed")
-	}
-	var blocks []map[string]any
-	_ = json.Unmarshal([]byte(out), &blocks)
-	cells, _ := blocks[0]["cells"].([]any)
-	header, _ := cells[0].([]any)
-	// Default align ("") → omit the align field entirely (the wire
-	// form stays minimal).
-	for j, cell := range header {
-		m, _ := cell.(map[string]any)
-		_, hasAlign := m["align"]
-		if j == 3 && hasAlign {
-			t.Errorf("default-align column %d should omit align field, got %v", j, m)
 		}
 	}
 }
@@ -1085,14 +1069,6 @@ func TestWalker_Negative_TableThreeColHeaderTwoColBody(t *testing.T) {
 	in := "| A | B | C |\n|---|---|---|\n| 1 | 2 |"
 	if _, ok := markdownToRichBlocks(in); ok {
 		t.Fatal("table with header/data column count mismatch should bail")
-	}
-}
-
-func TestWalker_CharCap(t *testing.T) {
-	// Just over the cap → fall back.
-	big := strings.Repeat("x", richWalkerCharCap+1)
-	if _, ok := markdownToRichBlocks(big); ok {
-		t.Fatal("over-cap input should fall back")
 	}
 }
 

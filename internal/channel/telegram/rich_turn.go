@@ -344,12 +344,28 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 		})
 	}
 
-	// Footer: rendered as a fenced code block so box-drawing chars
-	// (┌──› / └──›) preserve. Falls back to a single paragraph if
-	// we want richer footer rendering in the future.
+	// Footer: rendered as a dedicated InputRichBlockFooter block
+	// (Telegram Bot API 10.1) with a preceding divider so the
+	// statusbar reads as a distinct footer region, not a code
+	// fence. The previous `type:"pre"` shape rendered the
+	// chevron-tail frame inside a code block with a "copy" affordance
+	// — visually noisy and indistinguishable from an LLM-emitted
+	// code sample. The footer block type is exactly what Telegram
+	// designed for "session metadata at the bottom of the message"
+	// and is rendered by the client as a muted caption region.
+	//
+	// A divider (InputRichBlockDivider, <hr/>) sits between the
+	// entries and the footer to give the eye a clean break before
+	// the metadata block. Box-drawing chars (┌──› / └──›) survive
+	// the trip because the footer's `text` field is plain
+	// RichText — not code, not pre — so the client renders the
+	// frame as text in the footer caption style.
 	if len(turn.footer) > 0 {
 		blocks = append(blocks, map[string]any{
-			"type": "pre",
+			"type": "divider",
+		})
+		blocks = append(blocks, map[string]any{
+			"type": "footer",
 			"text": strings.Join(turn.footer, "\n"),
 		})
 	}

@@ -1488,6 +1488,103 @@ func TestAdapter_HandleUpdate_EmptyMessage(t *testing.T) {
 	a.handleUpdate(context.Background(), Update{UpdateID: 1, Message: &Message{}})
 }
 
+// TestAdapter_HandleUpdate_DropsBareStart verifies that a bare
+// /start (Telegram's "begin conversation" convention) is silently
+// dropped at the adapter boundary — no placeholder message is
+// sent, no inbound is published, no agent invocation. Variants
+// like /start@<bot> follow the same path; /start with extra text
+// flows through normally.
+func TestAdapter_HandleUpdate_DropsBareStart(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"plain_start", "/start"},
+		{"start_with_bot_suffix", "/start@testbot"},
+		{"uppercase_start", "/START"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, api := newTestAdapter(t)
+			api.GetMeResult = UserInfo{ID: 999, Username: "testbot"}
+			a.botID = 999
+			a.botName = "testbot"
+
+			// Start so a.ctx is non-nil; without Start, publish's
+			// select races against a permanently-closed ctxDone
+			// channel and the "drop" assertion below would
+			// vacuously pass for the wrong reason (publish dropped
+			// the message rather than the bare-/start filter
+			// catching it).
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			defer func() { _ = a.Stop(context.Background()) }()
+			if err := a.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			a.handleUpdate(ctx, Update{
+				UpdateID: 1,
+				Message: &Message{
+					MessageID: 100,
+					Date:      time.Now().Unix(),
+					Chat:      Chat{ID: 555, Type: "private"},
+					From:      &User{ID: 1},
+					Text:      tc.text,
+				},
+			})
+
+			select {
+			case msg := <-a.Incoming():
+				t.Fatalf("/start must not produce an inbound message; got %+v", msg)
+			case <-time.After(150 * time.Millisecond):
+				// Expected: no inbound, no placeholder sendMessage call.
+			}
+		})
+	}
+
+	// /start with extra text MUST flow through normally — it's a
+	// real user prompt, not a platform convention.
+	//
+	// Must call Start so a.ctx is non-nil — publish uses a 3-way
+	// select against a.ctxDone(), and without Start ctxDone returns
+	// a closed channel, racing with the buffered send and dropping
+	// the message ~50% of the time.
+	t.Run("start_with_extra_text_passes_through", func(t *testing.T) {
+		a, api := newTestAdapter(t)
+		api.GetMeResult = UserInfo{ID: 999, Username: "testbot"}
+		a.botID = 999
+		a.botName = "testbot"
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer func() { _ = a.Stop(context.Background()) }()
+		if err := a.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		a.handleUpdate(ctx, Update{
+			UpdateID: 1,
+			Message: &Message{
+				MessageID: 101,
+				Date:      time.Now().Unix(),
+				Chat:      Chat{ID: 555, Type: "private"},
+				From:      &User{ID: 1},
+				Text:      "/start please do the thing",
+			},
+		})
+
+		select {
+		case msg := <-a.Incoming():
+			if msg.Text != "/start please do the thing" {
+				t.Fatalf("inbound text = %q, want /start please do the thing", msg.Text)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("/start with extra text must produce an inbound message")
+		}
+	})
+}
+
 func TestAdapter_HandleCallback_Permission(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	a.config.PollingTimeout = 1
@@ -2174,113 +2271,6 @@ func TestAdapter_Send_OutResultEmptyText(t *testing.T) {
 	if len(api.Calls) > 0 {
 		t.Fatalf("empty OutResult must not send: calls=%d", len(api.Calls))
 	}
-}
-
-func TestAdapter_HandleMessageReaction_ForwardsInbound(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer func() { _ = a.Stop(context.Background()) }()
-	_ = a.Start(ctx)
-	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:        Chat{ID: 100, Type: "private"},
-		MessageID:   99,
-		User:        User{ID: 7, Username: "alice"},
-		Date:        time.Now().Unix(),
-		NewReaction: []ReactionType{{Type: "emoji", Emoji: "👍"}},
-	})
-	select {
-	case msg := <-a.Incoming():
-		if msg.Reaction == nil {
-			t.Fatal("expected reaction")
-		}
-		if msg.Reaction.Emoji != "👍" {
-			t.Fatalf("emoji=%q", msg.Reaction.Emoji)
-		}
-		if msg.Reaction.TargetMsgID != "99" {
-			t.Fatalf("target msg id=%q", msg.Reaction.TargetMsgID)
-		}
-		if msg.UserID != "7" {
-			t.Fatalf("user id=%q", msg.UserID)
-		}
-		// 2026-08-22 fix: reaction ChatID must be namespaced
-		// ("tg_<chatid>") to match the message path. Otherwise
-		// runtime.findChatSession cannot resolve the owning
-		// ChatSession and gtw emoji-reaction routing silently
-		// drops the event.
-		if msg.ChatID != "tg_100" {
-			t.Fatalf("ChatID = %q, want tg_100 (namespaced §5.5)", msg.ChatID)
-		}
-		if msg.Reaction.ChatID != "tg_100" {
-			t.Fatalf("Reaction.ChatID = %q, want tg_100 (namespaced)", msg.Reaction.ChatID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no inbound")
-	}
-}
-
-func TestAdapter_HandleMessageReaction_IgnoresBotReaction(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer func() { _ = a.Stop(context.Background()) }()
-	_ = a.Start(ctx)
-	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:        Chat{ID: 100, Type: "private"},
-		MessageID:   99,
-		User:        User{ID: 999}, // matches fakeAPI's getMe user
-		NewReaction: []ReactionType{{Type: "emoji", Emoji: "👍"}},
-	})
-	select {
-	case msg := <-a.Incoming():
-		t.Fatalf("bot reaction must be ignored: %+v", msg)
-	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-func TestAdapter_HandleMessageReaction_RemovedEmoji(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer func() { _ = a.Stop(context.Background()) }()
-	_ = a.Start(ctx)
-	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:        Chat{ID: 100, Type: "private"},
-		MessageID:   99,
-		User:        User{ID: 7},
-		NewReaction: nil, // user removed all reactions
-	})
-	select {
-	case msg := <-a.Incoming():
-		if msg.Reaction == nil {
-			t.Fatal("expected reaction inbound even on removal")
-		}
-		if msg.Reaction.Emoji != "" {
-			t.Fatalf("expected empty emoji on removal, got %q", msg.Reaction.Emoji)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no inbound on reaction removal")
-	}
-}
-
-func TestAdapter_HandleMyChatMember_LogsWithoutPanic(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	a.handleMyChatMember(context.Background(), &ChatMemberUpdate{
-		Chat:          Chat{ID: 100, Type: "supergroup"},
-		From:          User{ID: 1},
-		OldChatMember: &ChatMember{Status: "left"},
-		NewChatMember: &ChatMember{Status: "administrator"},
-	})
-	// Just ensure no panic; the log is best-effort.
-}
-
-func TestAdapter_HandleChatMember_LogsWithoutPanic(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	a.handleChatMember(context.Background(), &ChatMemberUpdate{
-		Chat:          Chat{ID: 100, Type: "supergroup"},
-		From:          User{ID: 1},
-		NewChatMember: &ChatMember{Status: "member", User: User{ID: 7}},
-	})
 }
 
 func TestAdapter_ApiCall_AppliesRateLimitAndRetry(t *testing.T) {

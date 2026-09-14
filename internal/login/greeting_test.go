@@ -17,8 +17,8 @@ func TestGreetingMessage_ExactCopy(t *testing.T) {
 		"Chinese2": GreetingMessageChinese2,
 	}
 	want := map[string]string{
-		"English1": "Hi, this is NightMe 👋. Your pair programmer.",
-		"English2": "Set it running. Stay in the loop from your phone, on your terms 🚀.",
+		"English1": "Hi, this is NightMe 👋.",
+		"English2": "Run your local coding agents. Control them from your phone, on your terms 🚀",
 		"Chinese1": "你好，我是 NightMe 🌙。",
 		"Chinese2": "奔赴你的星辰大海，拥有你的自由生活。那些必须死守电脑、避无可避的无奈，让我替你守候 🛡️。",
 	}

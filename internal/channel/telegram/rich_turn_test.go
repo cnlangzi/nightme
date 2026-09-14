@@ -329,6 +329,65 @@ func TestRenderRichTurnBlocks_NoFooterNoDivider(t *testing.T) {
 	}
 }
 
+// TestRenderRichTurnBlocks_HeaderFollowedByDivider verifies a
+// divider sits between the heartbeat paragraph and the first
+// entry so the card reads as three distinct regions:
+// [heartbeat] ─ [body] ─ [footer]. The divider must come AFTER
+// the heartbeat text and BEFORE the first entry.
+func TestRenderRichTurnBlocks_HeaderFollowedByDivider(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 3",
+		hasContent:    true,
+		entries: []richTurnEntry{
+			{kind: "reply", body: "first body line"},
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(body, `"type":"divider"`) {
+		t.Fatalf("header → body divider must render; got %q", body)
+	}
+	headerIdx := strings.Index(body, "💭 3")
+	dividerIdx := strings.Index(body, `"type":"divider"`)
+	entryIdx := strings.Index(body, "first body line")
+	if headerIdx < 0 || dividerIdx < 0 || entryIdx < 0 {
+		t.Fatalf("missing header / divider / entry; got %q", body)
+	}
+	if !(headerIdx < dividerIdx && dividerIdx < entryIdx) {
+		t.Fatalf("divider must sit between header and entry; got %q", body)
+	}
+}
+
+// TestRenderRichTurnBlocks_NoBodyNoHeaderDivider verifies the
+// header divider is gated on body presence — a heartbeat alone
+// (no entries, no task list) emits no divider, since a stray
+// <hr/> with nothing below reads as visual noise.
+func TestRenderRichTurnBlocks_NoBodyNoHeaderDivider(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 3",
+		hasContent:    true,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(body, `"type":"divider"`) {
+		t.Fatalf("header without body must not emit a divider; got %q", body)
+	}
+}
+
 // TestRenderRichTurnBlocks_FooterPreservesChevronFrame verifies
 // the three statusbar lines land in the footer block's `text`
 // field as a single multi-line string, joined with newlines so

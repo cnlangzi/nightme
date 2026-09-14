@@ -292,7 +292,7 @@ Topic 方案要求：
 2. 群组已开启 Topics。
 3. Bot 是群组成员，并具备创建/管理 Topic 所需的权限；建议配置为管理员。
 4. Bot 使用长轮询（`getUpdates`）只订阅 `Message` 与 `CallbackQuery` 两类 update；所有其它 update 类型（`message_reaction` / `message_reaction_count` / `chat_member` / `my_chat_member` / `edited_message` / `channel_post` 等）一律不下发，避免任何非用户主动消息的事件推送到 `incoming` 通道。每个 Bot 只能有一个 `getUpdates` consumer,daemon 重启时用持久化的 `update_id + 1` 继续消费。
-5. 私聊没有 Forum Topic；私聊只能退化为普通消息，并在文档和 UI 中明确标注。
+5. 私聊场景 **不做** Forum Topic 分流。Bot API 10.3 起 DM 在 BotFather 启用 Topic Mode 后支持 `createForumTopic` / `message_thread_id > 0`(`Bot Platform Developer Terms of Service` §6.2.6),但仅 "one or more eligible TPAs they own" 可在 BotFather 看到该开关,eligibility 由 Telegram 单方决定;启用后该 TPA 内 Stars 购买按 15% 非退款抽成,且 `closeForumTopic` / `reopenForumTopic` 仍不支持私聊。综合考虑 eligibility 不可控、合规绑定和 API 缺口,nightme 维持 DM 走主窗口堆叠(每 turn 一条 `<b>🤖 Working...</b>` 占位 + reply 链 userMsgID),不在 adapter 增加第三路径。决策记录见 §15 N7。
 6. Topic 内发送的所有事件都必须显式携带正确的 `message_thread_id`。
 
 ## 7. 故障与边界
@@ -1683,6 +1683,69 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 | frozen chunk 处理 | 保持 frozen，不动 | 同 |
 | turn-end 清 cursor + chunks + lastFooter | ✅ | ✅ |
 | `OnPromptEnded` 🎉 on result message (fallback to active chunk) | ✅ | ✅ |
+| `OutThinking` / `OutToolStart` / `OutToolEnd` 渲染 | chain segment | **`sendMessageDraft` 累积(同 draft_id 动画过渡)** |
+
+#### 11.12.11.1 DM 私聊下 OutThinking / OutTool* 的 sendMessageDraft 路径
+
+Bot API 10.3 (2026-08-24) 起 `sendMessageDraft(chat_id, draft_id, text)` 在 `chat.type == "private"` 下可用：bot 反复调用同一 `draft_id` 时,客户端原地"动画过渡"draft 文本(不会替换为新消息),30 秒内未更新则自动消失。Bot 发任何 real message 到同一 chat 时,draft 也立刻消失(spec:"the draft will still disappear after a short time or if the bot sends a message")。
+
+nightme 把这条路径用在 DM 的三类流式事件上:
+
+- `OutThinking` → draft 显示"💭 ..."(纯文本,**REPLACE 语义**:每次新 thinking 替换前一次,只显示当前步骤)
+- `OutToolStart` → draft 显示"summarize_tool.go"产出的 `● Tool(args)` 行(替换 thinking)
+- `OutToolEnd` → draft 显示`⎿  📄 Tool → N lines` 行(替换上一个 tool 行)
+
+**REPLACE-not-append** 是显式设计选择(用户 2026-09-15 反馈):客户端在同 draft_id 反复调用时本身会"动画过渡",所以 REPLACE 模式下用户看到的是 ChatGPT 风格"当前步骤实时更新"视觉,而不是历史堆叠。appendEvent 内部每次先 `textBuf.Reset()` 再 `WriteString(text)`,确保发出去的 `text` 字段只有最新内容。
+
+**Gate**:adapter 在 `ChatType == "private"` 且这三种事件时才走 draft 路径;其他 Out* 仍走现有路径。运行时 upstream gate(`ThinkMode`/`ToolsMode`)保证 `tools=off` / `think=off` 时 runtime 不 emit 这两类事件,adapter 看不到就不分流。
+
+**Lifecycle**:
+
+```text
+turn start (any chat)
+  ensurePlaceholder(...):
+    - state.ChatType 写入(从 inbound Message.Chat.Type)
+    - a.richTurns.purge(chatID, topicID, userMessageID)
+    - 冷创建 rich turn 占位:
+        ├─ DM (ChatType == "private") → 跳过(草稿是 live surface,空占位只是噪音)
+        └─ 非 DM (supergroup/group) → sendRichMessage 冷创建占位
+    - 不调 draftStreamers.reset(任何 chat):draft 是 GLOBAL per (chat, thread),
+      stream 跨 turn 持久化,后续事件复用同一个 draft_id
+
+[turn N 期间,tools=on / think=on]
+  OutThinking / OutToolStart / OutToolEnd
+    → adapter.streamDraftEvent(ctx, rawChatID, topicID, segment)
+      → 非 DM  → return (false, nil)         → caller fall through 到 chain
+      → DM:
+        ├─ 成功 → return (true, nil)           → caller return nil (consumed)
+        └─ 失败 → return (true, nil) + log warn → caller return nil (DROP,不回退)
+
+turn N ends
+  OutReply / OutResult / OutError / OutCommandReply:
+    - DM: 走 v9 chain / appendSegmentForKind → appendRichTurn。
+      第一个 OutReply 在 DM 下会**lazy 冷创建** rich turn(getOrCreate → messageID==0 → sendRichMessageColdCreate),
+      后续 Out* editMessageText 复用。不再有"先空占位再编辑"的怪异 UX。
+    - OutResult 仍是独立 sendMessage + reply_to_message_id=userMsgID。
+      触发时 draft 自动消失(spec 明确),real message 永久保留。
+
+[turn N+1 开始]
+  ensurePlaceholder(...):同 turn N, 不调 draftStreamers.reset。
+  turn N 的 draft 已消失(real message 把它挤掉了),
+  stream 内 draft_id 仍然保留为上次分配的值,
+  下一个 OutThinking / OutTool 事件用同一个 draft_id 调 sendMessageDraft:
+    - server 把已消失的 draft_id 当作空闲槽 → 创建新 draft,客户端看到 fresh draft
+    - (同一 draft_id 不会 "animate" 因为旧 draft 已不在 server 状态中)
+```
+
+**DROP-on-failure 契约**(用户 2026-09-15 反馈):"think/tool 绝不混进正常的richMessage"。
+DM 下 `sendMessageDraft` 失败时,事件**不**回退到 `appendSegmentForKind` / 链式 rich turn 路径,而是被丢弃(streamer 内部 log warn 记录)。原因:
+- think/tool 的"家"在 DM 下是 draft;一旦 draft 失效,转回 richMessage 会让用户在同一个 turn 里同时看到 draft + richMessage 两条 think/tool 痕迹,违反"一致性"
+- 一致失败(latch 之后)整个 turn 的 think/tool 全部 drop,用户看 logs 知道 Bot API < 10.3 即可
+- 非 DM (state.ChatType != "private" 或 state 缺失)的事件保持原 fallthrough 到 chain,因为非 DM 没有 draft 这条路可走
+
+**Bot API 兼容性**:`sendMessageDraft` 是 Bot API 10.3 新增方法,daemon 端无需探测版本:第一次失败后 latch 行为退化到"所有 think/tool drop",daemon 重启后重试,期间用户需升级 Telegram bot library 或忽略 think/tool 的流式视觉。客户端不需要 10.3:旧客户端收到 sendMessageDraft 会以静默静态文本渲染或忽略 draft,但 OutResult/OutReply 等 real message 正常落地,无功能损失。
+
+**未触动**:`OutReply` / `OutResult` / `OutError` / `OutChoice` / `OutMessageState*` / `OutHeartbeat` / `OnPromptEnded` 🎉 reaction / 群 forum topic 路径 / StatusBar footer / callback / state 反应 / allowed_updates 全部不变。`can_stop` 按钮 + `Update.stopped_message_generation` 留待 runtime abort 能力落地后单独 PR;`sendRichMessageDraft` / `<tg-thinking>` block 留待 plain draft 数据稳定后单独 PR。
 
 ### 11.12.12 跟飞书 receipt 语义对位（v9）
 
@@ -3218,6 +3281,19 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 - 状态丢失：用户进入 Topic 后看不到当前 turn 的 session 标识。
 - **未来**：占位消息 PATCH 时把 SessionID / Model / AgentName 拼到 heartbeat 文本头部。
 
+#### N7. DM 私聊 Topic 模式(不实现,评审结论)
+
+- **结论**：nightme **不实现** Bot API 10.3 起的 DM 私聊 Topic 模式。
+- **API 现状**：Bot API 10.3 起 `getMe.has_topics_enabled == true` 的 bot 可在私聊中调用 `createForumTopic` / `editForumTopic` / `deleteForumTopic` / `unpinAllForumTopicMessages`,`Message.message_thread_id` / `Message.is_topic_message` 也已扩到 private chat。**`closeForumTopic` / `reopenForumTopic` 仍仅支持 forum supergroup chat**,DM 调用 server 拒。
+- **部分缓解**：`OutThinking` / `OutToolStart` / `OutToolEnd` 三类事件在 DM 下改走 `sendMessageDraft` 累积(详见 §11.12.11.1),无须 forum topic 容器就能给用户"思考中"的视觉反馈。本 N7 的"现有路径够用"理由在 draft 落地后弱化为"v9 chain + draft 双轨制,已经提供清晰的视觉分隔,topic 容器增益边际";"API 缺口"(closeForumTopic 私聊不可用)和"合规绑定"(Stars 抽成)两条理由仍然成立,结论维持不实现。
+- **不支持理由**:
+  1. **eligibility 不可控**:`Bot Platform Developer Terms of Service` §6.2.6 限定 "one or more eligible TPAs they own" 可启用该能力,Telegram 未公开 eligibility 判定细则(参考同章节 §6.2.5 相邻条款对 broadcast 提高限流要求 100k Stars + 100k MAU)。普通 nightme bot 极可能不在 eligibility 名单内,适配器代码改了也跑不通,真实用户无法验证。
+  2. **API 缺口**:DM 不支持 `closeForumTopic` / `reopenForumTopic`,Topic 复用、归档、限流清理都得改走 `deleteForumTopic`(一次性删 topic + 全部消息),跟群内 topic 生命周期不一致,适配器要写两套状态机。
+  3. **合规绑定**:启用后该 TPA 内 Stars 购买按 15% 非退款抽成(§6.2.6),即使 bot 不发 Stars 也承担合规约束,Telegram 保留单方调整费率的权利;为适配器代码增量去背负 ToS 约束不划算。
+  4. **现有路径够用**:v9 chain rolling log 的 DM 主窗口堆叠(每 turn 占位 + reply 链 userMsgID + reaction 状态)已经给 DM 用户清晰的视觉分隔,不需要 topic 容器。
+- **决策时点**:Bot API 10.3 (2026-08-24) 发布后评审,2026-09 确定不实现。
+- **重审触发条件**:任何一项变化 → (a) Telegram 把 DM topic mode 开放给所有 bot(去掉 eligibility) (b) Bot API 新增 DM `closeForumTopic` / `reopenForumTopic` (c) nightme 业务侧有"DM 内多任务并行"的硬需求。届时单独 PR 重启评审。
+
 ### 15.4 实现优先级建议
 
 如果未来要做 follow-up，建议按这个顺序：
@@ -3662,6 +3738,8 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 - StatusBar 本身走纯文本（emoji + 中点 `·` + 半角空格），没用 `<b>` `<code>` 强调（避免 OutError 那类 escape 边界），视觉不如 feishu grey footer，但 parse 零失败
 
 ## 19. 变更日志
+
+- **DM sendMessageDraft 路径 — 全局共享 + REPLACE**(OutThinking / OutToolStart / OutToolEnd 三类事件) — Bot API 10.3 (2026-08-24) 起在 `chat.type == "private"` 下用 `sendMessageDraft` 流式呈现 think/tool 活动,**draft 在每个 (chat, thread) 内全局共享,跨 turn 持久化**(用户 2026-09-15 反馈:"draft 可以全局共享,不需要分turn来处理";`ensurePlaceholder` 不再调 `draftStreamers.reset`,turn N 的 real message 自然把 draft 挤掉,turn N+1 复用同一个 draft_id 创建新 draft)。新增 `internal/channel/telegram/draft_streamer.go`(draftStreamer + draftIDCounter atomic.Int32 + errDraftFallback latch + REPLACE 语义)和 `draft_index.go`(per-(chat,thread) 索引);`state.go` `TopicState` 加 `ChatType` 字段(omitempty,老 state 兼容空值);`adapter.go` `ensurePlaceholder` 写入 ChatType,DM 下**不冷创建 rich turn 占位**(草稿是 live surface,空占位只是噪音;后续 OutReply 会 lazy 冷创建);`Send()` switch 三个 case 顶部调 `streamDraftEvent(ctx, rawChatID, topicID, segment)`(`msg` 参数去掉;签名简化),仅 `ChatType=="private"` 才走 draft,**DM draft 失败时 DROP 不回退**到 richMessage 路径(用户 2026-09-15 反馈:"think/tool 绝不混进正常的richMessage"),非 DM 走 chain。`appendEvent` 内部先 `textBuf.Reset()` 再 `WriteString`,实现 REPLACE 语义,客户端同 draft_id 动画过渡渲染为 ChatGPT 风格"当前步骤实时更新"。**未触动**:`OutReply` / `OutResult` / `OutError` / `OutHeartbeat` / 群 forum topic 路径 / `OnPromptEnded` 🎉 reaction / StatusBar footer / callback / state 反应 / allowed_updates 全部不变。`can_stop` 按钮 + `Update.stopped_message_generation` 留待 runtime abort 能力落地后单独 PR;`sendRichMessageDraft` / `<tg-thinking>` block 留待 plain draft 数据稳定后单独 PR。详见 §11.12.11.1。
 
 - **2026-08-22（v9 chain rolling log）** - 引入 per-turn multi-chunk chain，替代 v4 / v8 的"单占位 + 独立 bubble"双轨制。完整 spec 见 §11.12。新增文件：`internal/channel/telegram/placeholder_chain.go`（chainKey / placeholderChain / placeholderChunk / chainLRU，含 `appendSegment` / `flushChainNow` / `scheduleFlushDebounced` / `getOrCreateChain` / `patchActiveHeader` / `activeChunkMessageID`）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移，含 `formatToolStartCall` / `summarizeToolResult` / `displayToolArgs` / `compactJSONToolArgs` / `countLines` / `countUniqueFiles` / `truncate`）。改动：`Adapter.Send` 8 个 Out* case（OutReply/OutResult/OutThinking/OutToolStart/OutToolEnd/OutError/OutTaskCreate/OutTaskUpdate）重写为 `appendSegment` 路径；`OutHeartbeat` 改 `patchActiveHeader` + 走 debounce；`OnPromptEnded` 改 `flushChainNow` + 🎉 on active chunk + cursor reset；`formatTool` 内联实现替换为调 summarize helpers；`ensurePlaceholder` delegate 到 `appendSegment` 创建第一张 chunk。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。`TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。debounce window = 250 ms。LRU cap = 1000 chains。阈值三档：3500 chars raw buffer / 3900 chars rendered split / 4096 chars Telegram 硬限。Footer 内存语义：每 chunk 最多一个 footer，footer-bearing 事件（OutReply / OutResult / OutTaskCreate / OutTaskUpdate）来时刷新，其他不动。重启后 chain 失 = 下次事件来时建新 chunk（旧 frozen chunks 在 chat 里保留为历史证据）。
 

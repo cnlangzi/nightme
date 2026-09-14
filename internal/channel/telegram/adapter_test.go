@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2440,5 +2441,339 @@ func TestPatchChainHeader_EmptyRunningKeepsColdBanner(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("terminal-only heartbeat: %v", err)
+	}
+}
+
+// --- DM draft routing tests (Bot API 10.3+ sendMessageDraft) ---
+
+// setupDMState primes the adapter state with a private-DM topic
+// record so Send() can route through the draft path. Returns the
+// chatID (raw form) that Send() expects.
+func setupDMState(t *testing.T, a *Adapter, chatIDRaw int64) string {
+	t.Helper()
+	raw := strconv.FormatInt(chatIDRaw, 10)
+	if err := a.state.putTopic(&TopicState{
+		ChatID:        raw,
+		TopicID:       0,
+		ChatType:      "private",
+		UserMessageID: "1",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+	return raw
+}
+
+func setupGroupState(t *testing.T, a *Adapter, chatIDRaw int64, topicID int) string {
+	t.Helper()
+	raw := strconv.FormatInt(chatIDRaw, 10)
+	if err := a.state.putTopic(&TopicState{
+		ChatID:        raw,
+		TopicID:       topicID,
+		ChatType:      "supergroup",
+		UserMessageID: "1",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+	return raw
+}
+
+func findCallByMethod(calls []fakeCall, method string) *fakeCall {
+	for i := range calls {
+		if calls[i].Method == method {
+			return &calls[i]
+		}
+	}
+	return nil
+}
+
+func TestAdapter_Send_DM_OutThinking_StreamsToDraft(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "considering whether to invoke Read",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	draft := findCallByMethod(api.Calls, "sendMessageDraft")
+	if draft == nil {
+		t.Fatalf("expected sendMessageDraft call; got calls=%+v", api.Calls)
+	}
+	if draft.Params["chat_id"] != int64(100) {
+		t.Fatalf("chat_id = %v, want 100", draft.Params["chat_id"])
+	}
+	if text, _ := draft.Params["text"].(string); text != "considering whether to invoke Read" {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestAdapter_Send_DM_OutToolStart_StreamsToDraft(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+		Text:   "● Read(/tmp/foo.go)",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	draft := findCallByMethod(api.Calls, "sendMessageDraft")
+	if draft == nil {
+		t.Fatalf("expected sendMessageDraft call; got calls=%+v", api.Calls)
+	}
+}
+
+func TestAdapter_Send_DM_OutToolEnd_StreamsToDraft(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutToolEnd,
+		Tool:   &messages.ToolInfo{Name: "Read", Output: "47 lines"},
+		Text:   "⎿  📄 Read → 47 lines",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	draft := findCallByMethod(api.Calls, "sendMessageDraft")
+	if draft == nil {
+		t.Fatalf("expected sendMessageDraft call; got calls=%+v", api.Calls)
+	}
+}
+
+func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 42)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw + ":42",
+		Kind:   messages.OutThinking,
+		Text:   "thinking text",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
+		t.Fatalf("forum topic should NOT use sendMessageDraft; got call %+v", draft)
+	}
+}
+
+func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 42)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw + ":42",
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+		Text:   "● Read(/tmp/foo.go)",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
+		t.Fatalf("forum topic should NOT use sendMessageDraft; got call %+v", draft)
+	}
+}
+
+func TestAdapter_Send_DM_DraftFailureLatch_DropsDoNotFallthroughToChain(t *testing.T) {
+	// In DM, when sendMessageDraft fails, think/tool events are
+	// DROPPED (not sent to richMessage). This is the user's explicit
+	// design requirement: "think/tool 绝不混进正常的richMessage".
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+	api.Errors = []error{errors.New("simulated 400")}
+
+	// First OutToolStart: draft API fails → dropped. No rich turn
+	// cold-create either (we skip in DM).
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+		Text:   "● Read(/tmp/foo.go)",
+	}); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if c := countByMethod(api.Calls, "sendMessageDraft"); c != 1 {
+		t.Fatalf("first send: sendMessageDraft count = %d, want 1", c)
+	}
+	// Critical: no rich message fallback. No sendRichMessage,
+	// no sendMessage. The event is gone.
+	if c := countByMethod(api.Calls, "sendRichMessage"); c != 0 {
+		t.Fatalf("sendRichMessage count = %d, want 0 (DM draft failure must NOT fall through to richMessage)", c)
+	}
+	if c := countByMethod(api.Calls, "sendMessage"); c != 0 {
+		t.Fatalf("sendMessage count = %d, want 0 (DM draft failure must NOT fall through to sendMessage)", c)
+	}
+
+	// Second event in same turn: latch engaged, still dropped.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutToolEnd,
+		Tool:   &messages.ToolInfo{Name: "Read", Output: "47 lines"},
+		Text:   "⎿  📄 Read → 47 lines",
+	}); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+	if c := countByMethod(api.Calls, "sendMessageDraft"); c != 1 {
+		t.Fatalf("after second send: sendMessageDraft count = %d, want 1 (latch should prevent retry)", c)
+	}
+}
+
+func TestAdapter_Send_DM_DraftGloballyShared_AcrossTurns(t *testing.T) {
+	// Draft streamer is GLOBAL per (chat, thread) — no per-turn
+	// reset. The same draft_id is reused across turns so the
+	// streamer object identity survives. When turn N's real
+	// message lands, the server disposes the old draft; turn N+1's
+	// first event with the same draft_id is treated by the server
+	// as a brand-new draft (since the previous one was pushed out).
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "turn 1 thought",
+	})
+
+	// Simulate end of turn N → start of turn N+1 WITHOUT calling
+	// draftStreamers.reset. The streamer's draft_id should persist.
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+		Text:   "● Read(/tmp/foo.go)",
+	})
+
+	drafts := callsByMethod(api.Calls, "sendMessageDraft")
+	if len(drafts) != 2 {
+		t.Fatalf("expected 2 sendMessageDraft calls, got %d", len(drafts))
+	}
+	id0 := drafts[0].Params["draft_id"]
+	id1 := drafts[1].Params["draft_id"]
+	if id0 != id1 {
+		t.Fatalf("global draft: both turns should share draft_id; got %v vs %v", id0, id1)
+	}
+	// And the texts reflect REPLACE semantics per-event.
+	if got := drafts[1].Params["text"]; got != "● Read(/tmp/foo.go)" {
+		t.Fatalf("call 2 text = %v, want REPLACED tool line", got)
+	}
+}
+
+// countByMethod / callsByMethod are small helpers used by the
+// tests above to slice api.Calls by method name.
+func countByMethod(calls []fakeCall, method string) int {
+	n := 0
+	for _, c := range calls {
+		if c.Method == method {
+			n++
+		}
+	}
+	return n
+}
+
+func callsByMethod(calls []fakeCall, method string) []fakeCall {
+	var out []fakeCall
+	for _, c := range calls {
+		if c.Method == method {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func TestAdapter_EnsurePlaceholder_DM_SkipsRichTurnColdCreate(t *testing.T) {
+	// In DM, ensurePlaceholder must NOT cold-create the rich turn
+	// placeholder. The draft IS the live surface for think/tool;
+	// an empty rich message sitting next to the draft would just be
+	// noise.
+	a, api := newTestAdapter(t)
+	a.config.PollingTimeout = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func() { _ = a.Stop(context.Background()) }()
+	_ = a.Start(ctx)
+
+	a.handleUpdate(ctx, Update{
+		UpdateID: 1,
+		Message: &Message{
+			MessageID: 42,
+			Date:      time.Now().Unix(),
+			Chat:      Chat{ID: 100, Type: "private"},
+			From:      &User{ID: 1},
+			Text:      "hello",
+		},
+	})
+	// Drain the inbound channel so the test doesn't deadlock.
+	select {
+	case <-a.Incoming():
+	case <-time.After(time.Second):
+		t.Fatal("no inbound")
+	}
+
+	// After DM ensurePlaceholder: zero sendRichMessage / sendMessage
+	// calls should have been made. Only the inbound getUpdates
+	// bookkeeping (handled internally, not via api) and our dummy
+	// setup may have used the api.
+	for _, c := range api.Calls {
+		if c.Method == "sendRichMessage" || c.Method == "sendMessage" {
+			t.Fatalf("DM ensurePlaceholder must NOT send a rich turn placeholder; saw %s", c.Method)
+		}
+	}
+
+	// But subsequent OutReply (which DOES need a real message)
+	// should lazily cold-create a rich turn on its own.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutReply,
+		Text:   "actual reply content",
+	}); err != nil {
+		t.Fatalf("OutReply: %v", err)
+	}
+	if c := countByMethod(api.Calls, "sendRichMessage"); c == 0 {
+		t.Fatalf("OutReply in DM should cold-create rich turn on demand; saw %d sendRichMessage calls", c)
+	}
+}
+
+func TestAdapter_Send_DM_OutThinking_ReplacesDraftNotAccumulates(t *testing.T) {
+	// Each OutThinking event REPLACES the prior draft text. The
+	// chat shows only the latest thinking body, animated in place.
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "first thought",
+	})
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "second thought",
+	})
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "third thought",
+	})
+
+	drafts := callsByMethod(api.Calls, "sendMessageDraft")
+	if len(drafts) != 3 {
+		t.Fatalf("sendMessageDraft count = %d, want 3", len(drafts))
+	}
+	if got := drafts[0].Params["text"]; got != "first thought" {
+		t.Fatalf("call 1 text = %v, want \"first thought\"", got)
+	}
+	if got := drafts[1].Params["text"]; got != "second thought" {
+		t.Fatalf("call 2 text = %v, want \"second thought\" (REPLACE, not \"first thought\\n\\nsecond thought\")", got)
+	}
+	if got := drafts[2].Params["text"]; got != "third thought" {
+		t.Fatalf("call 3 text = %v, want \"third thought\" (REPLACE, not accumulated history)", got)
+	}
+
+	// All three calls share the same draft_id (animation, not
+	// replace-with-new-message).
+	id0 := drafts[0].Params["draft_id"]
+	for i, d := range drafts {
+		if d.Params["draft_id"] != id0 {
+			t.Fatalf("call %d draft_id=%v, want %v (same id → animate in place)", i, d.Params["draft_id"], id0)
+		}
 	}
 }

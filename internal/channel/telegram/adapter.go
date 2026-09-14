@@ -55,6 +55,14 @@ type Adapter struct {
 	// editMessageText(rich_message=...). Chain stays intact for
 	// fallback when RichMode is off.
 	richTurns *richTurnsIndex
+
+	// draftStreamers holds per-(chat,thread) draftStreamer
+	// instances used to stream OutThinking / OutToolStart /
+	// OutToolEnd via sendMessageDraft in private DMs (Bot API
+	// 10.3+). Group / forum-topic paths never consult this
+	// index — they go straight to the v9 chain. See
+	// draft_streamer.go for the latch / fallback contract.
+	draftStreamers *draftIndex
 }
 
 func NewAdapter(cfg *config.Config) (*Adapter, error) {
@@ -83,17 +91,18 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		return nil, fmt.Errorf("telegram: load state: %w", err)
 	}
 	return &Adapter{
-		name:      "telegram",
-		api:       newHTTPClient(botToken),
-		state:     state,
-		incoming:  make(chan messages.InboundMessage, 128),
-		logger:    slog.Default(),
-		config:    cfgCopy,
-		dataDir:   dataDir,
-		callbacks: make(map[string]struct{}),
-		limiter:   NewLimiter(nil, slog.Default()),
-		retry:     DefaultRetryConfig,
-		richTurns: newRichTurnsIndex(defaultRichTurnCap),
+		name:           "telegram",
+		api:            newHTTPClient(botToken),
+		state:          state,
+		incoming:       make(chan messages.InboundMessage, 128),
+		logger:         slog.Default(),
+		config:         cfgCopy,
+		dataDir:        dataDir,
+		callbacks:      make(map[string]struct{}),
+		limiter:        NewLimiter(nil, slog.Default()),
+		retry:          DefaultRetryConfig,
+		richTurns:      newRichTurnsIndex(defaultRichTurnCap),
+		draftStreamers: newDraftIndex(),
 	}, nil
 }
 
@@ -116,17 +125,18 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		api = newHTTPClient("test-token")
 	}
 	return &Adapter{
-		name:      "telegram",
-		api:       api,
-		state:     state,
-		incoming:  make(chan messages.InboundMessage, 128),
-		logger:    slog.Default(),
-		config:    copy,
-		dataDir:   dataDir,
-		callbacks: make(map[string]struct{}),
-		limiter:   NewLimiter(nil, slog.Default()),
-		retry:     DefaultRetryConfig,
-		richTurns: newRichTurnsIndex(defaultRichTurnCap),
+		name:           "telegram",
+		api:            api,
+		state:          state,
+		incoming:       make(chan messages.InboundMessage, 128),
+		logger:         slog.Default(),
+		config:         copy,
+		dataDir:        dataDir,
+		callbacks:      make(map[string]struct{}),
+		limiter:        NewLimiter(nil, slog.Default()),
+		retry:          DefaultRetryConfig,
+		richTurns:      newRichTurnsIndex(defaultRichTurnCap),
+		draftStreamers: newDraftIndex(),
 	}
 }
 
@@ -343,7 +353,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	// TopicState is keyed by chatID with TopicID=0 and the
 	// placeholder is later used as reply_to_message_id for all
 	// OutXxx bubbles (see docs/channel/telegram.md §11.11).
-	if err := a.ensurePlaceholder(ctx, chatID, threadID, message.MessageID); err != nil {
+	if err := a.ensurePlaceholder(ctx, chatID, threadID, message.MessageID, message); err != nil {
 		a.logger.Warn("telegram: ensure placeholder failed", "chat_id", chatID, "thread_id", threadID, "err", err)
 	}
 	// (no StatusBar cache to reset — see §18; the renderer is
@@ -455,6 +465,7 @@ func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) 
 			if err := a.state.putTopic(&TopicState{
 				ChatID:    chatID,
 				TopicID:   message.MessageThreadID,
+				ChatType:  message.Chat.Type,
 				CreatedAt: time.Now().UTC(),
 				UpdatedAt: time.Now().UTC(),
 			}); err != nil {
@@ -498,10 +509,18 @@ func (a *Adapter) ensureTopic(_ context.Context, message *Message) (int, error) 
 // under the rich message. The rich message is the turn's status
 // ticker (heartbeat header → 🎉 stamp), not the reply anchor.
 // See docs/channel/telegram.md §11.11.
-func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID, userMessageID int) error {
+func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID, userMessageID int, message *Message) error {
 	state, ok := a.state.topic(chatID, topicID)
 	if !ok {
 		state = &TopicState{ChatID: chatID, TopicID: topicID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	}
+	// Refresh ChatType on every turn so Send() can route
+	// OutTool/OutThink via sendMessageDraft when this chat is a
+	// private DM. ChatType rarely changes but we re-stamp
+	// defensively so a bot's chat.type upgrade (e.g. user
+	// invites bot to a forum) takes effect next turn.
+	if message != nil && message.Chat.Type != "" {
+		state.ChatType = message.Chat.Type
 	}
 
 	// Drop any in-memory rich turn for this turn — the previous
@@ -509,6 +528,14 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// but we don't track it anymore. Next Out* gets a fresh rich
 	// turn. Mirrors v9 chain's purge semantics.
 	a.richTurns.purge(chatID, topicID, userMessageID)
+
+	// Draft streamer is GLOBAL per (chat, thread) — no per-turn
+	// reset. The draft (identified by stable draft_id) persists
+	// across turns and is auto-disposed by Telegram when a real
+	// message lands in the same chat. The next turn's first
+	// event allocates a fresh draft naturally (or reuses the
+	// same draft_id after the old one was pushed out, which the
+	// server treats as a new draft).
 
 	// Eager placeholder create: send the rich message right now
 	// (per turn) instead of waiting for the first Out* event. The
@@ -529,12 +556,28 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 	turn.mu.Lock()
 	turn.headerLine = defaultRichTurnHeader
-	if err := a.sendRichTurnColdCreate(turn); err != nil {
-		a.logger.Warn("telegram: eager placeholder cold-create failed",
-			"chat_id", chatID,
-			"err", err)
-		// Fall through — first Out* event will retry cold-create
-		// via appendRichTurn's lazy path.
+	if state.ChatType != "private" {
+		// Non-DM: cold-create the rich turn placeholder so the
+		// chain path has something to edit from turn start.
+		if err := a.sendRichTurnColdCreate(turn); err != nil {
+			a.logger.Warn("telegram: eager placeholder cold-create failed",
+				"chat_id", chatID,
+				"err", err)
+			// Fall through — first Out* event will retry cold-create
+			// via appendRichTurn's lazy path.
+		}
+	} else {
+		// DM: skip rich turn cold-create. The draft IS the live
+		// surface for think/tool events; an empty rich turn
+		// placeholder would sit in the chat as a useless "🤖
+		// Working..." real message alongside the draft. Any
+		// subsequent Out* event that genuinely needs a real
+		// message (OutReply / OutResult / OutError) will lazily
+		// cold-create its own rich message via appendRichTurn's
+		// getOrCreate path — at that point there's actual
+		// content to render.
+		a.logger.Debug("telegram: skipping rich turn placeholder in DM (draft is live surface)",
+			"chat_id", chatID)
 	}
 	turn.mu.Unlock()
 
@@ -748,6 +791,46 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 // setMessageReaction / etc.). This keeps the API surface
 // exclusively in raw form while the rest of the runtime sees
 // the namespaced form.
+// streamDraftEvent routes a single OutThinking / OutToolStart /
+// OutToolEnd event into the per-(chat,thread) draftStreamer in DM
+// mode.
+//
+// Routing rules:
+//   - Non-DM (state.ChatType != "private", or no state): handled=false,
+//     caller falls through to the v9 chain path.
+//   - DM + draft succeeds: handled=true, event consumed by draft.
+//   - DM + draft fails (Bot API < 10.3, transient error, or
+//     latched): handled=true but the event is dropped with a log
+//     warning. We do NOT fall through to richMessage in DM — per
+//     design contract, think/tool events stay exclusively in the
+//     draft surface; mixing them into the richMessage placeholder
+//     is what the user complained about.
+//
+// Callers can ignore the error return (informational). The
+// returned bool is the only signal they need.
+func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, segment string) (bool, error) {
+	state, ok := a.state.topic(rawChatID, topicID)
+	if !ok || state.ChatType != "private" {
+		// Non-DM (or no state yet — old state file pre-ChatType):
+		// route stays on the v9 chain.
+		return false, nil
+	}
+	chatIDInt, parseErr := strconv.ParseInt(rawChatID, 10, 64)
+	if parseErr != nil {
+		// Pathological: rawChatID isn't digits-only. Bail to chain.
+		return false, nil
+	}
+	streamer := a.draftStreamers.getOrCreate(a.api, a.logger, chatIDInt, topicID)
+	err := streamer.appendEvent(ctx, segment)
+	if err != nil {
+		// DM draft failed: drop the event. Do NOT fall through to
+		// the richMessage path. Logging is the streamer's job
+		// (draft_streamer.go logs the API error on first failure).
+		return true, nil
+	}
+	return true, nil
+}
+
 func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -888,6 +971,11 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// (e.g., MessageDropped).
 		return a.setMessageReactions(ctx, rawChatID, messageID, nil)
 	case messages.OutToolStart:
+		// DM draft path: stream into animated draft via sendMessageDraft.
+		// Falls through to v9 chain on non-DM chat or draft failure.
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, formatTool(msg)); handled {
+			return nil
+		}
 		// L3 (§20.6.3): route through richTurn. The tool call line
 		// (`● Tool(args)`) becomes one paragraph block in the
 		// turn's rich message. The matching OutToolEnd appends the
@@ -914,6 +1002,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			statusbar.StatusBarLines(&msg))
 
 	case messages.OutToolEnd:
+		// DM draft path: stream into animated draft via sendMessageDraft.
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, formatTool(msg)); handled {
+			return nil
+		}
 		// L3: route through richTurn. The result line lands as a
 		// sibling block to the Start line in the same rich message.
 		// msg.Err vs msg.Tool.Err: gateway always sets Tool.Err;
@@ -980,6 +1072,12 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// trailer on every subsequent outbound message (see §18).
 		return nil
 	case messages.OutThinking:
+		// DM draft path: stream the thinking body into animated draft.
+		// Empty-text silent drop already happened at the top of Send,
+		// so msg.Text is non-empty here.
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, msg.Text); handled {
+			return nil
+		}
 		// F-think parity with feishu: prefix the reasoning body
 		// with `💭 ` so the user can scan the chat and instantly
 		// see "this is the agent's thinking" without reading the

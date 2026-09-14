@@ -220,6 +220,14 @@ type SharedHost struct {
 	// event" without sleeping on production-grade timing.
 	watchdogDone chan struct{}
 
+	// probe is the wedged-dsh detector (see health.go). It runs
+	// session.list via the shared RPCClient; after strikesMax
+	// consecutive failures it invokes forceKillCmd which sends
+	// SIGKILL to the subprocess, unblocking the monitor's
+	// waitCmd. nil until runMonitor starts the probe. Stopped
+	// by ShutdownSharedHost.
+	probe *HealthProbe
+
 	// testHooks is nil in production; tests inject non-nil values
 	// to drive the probe loop faster, replace the spawner, and
 	// signal completion via a channel. Documented on each field
@@ -540,6 +548,30 @@ func fallbackPorts() []int {
 func (h *SharedHost) runMonitor() {
 	defer close(h.watchdogDone)
 
+	// Health probe runs alongside the monitor: it issues
+	// session.list every healthProbeInterval; after strikesMax
+	// consecutive failures (event-loop frozen, plugin
+	// deadlock, WS stuck) it invokes h.forceKillCmd, which
+	// sends SIGKILL to the dsh subprocess. That unblocks the
+	// monitor's <-waitCmd(cmd) (owned branch) or the fallback
+	// probe path (attached branch with cmd==nil → no-op) and
+	// lets recovery continue. Without the probe, a wedged dsh
+	// blocks forever — there is no other signal that the dsh
+	// process is alive-but-stuck.
+	//
+	// The probe uses h.Client() (which follows the cli
+	// swap-on-respawn), so it automatically tracks fallback
+	// and respawn transitions. Stop drains the probe
+	// goroutine via HealthProbe.Done; ShutdownSharedHost calls
+	// Stop as part of teardown.
+	h.probe = NewHealthProbe(
+		func() *Client { return h.Client() },
+		h.forceKillCmd,
+		h.logger,
+	)
+	h.probe.Start()
+	defer h.probe.Stop()
+
 	for {
 		select {
 		case <-h.closed:
@@ -665,7 +697,7 @@ func (h *SharedHost) monitorAttachedFallback() error {
 		default:
 		}
 
-		cmd, cli, err := h.spawnAttachedOnce()
+		cmd, cli, port, err := h.spawnAttachedOnce()
 		if err != nil {
 			h.logger.Error("dsh.host: fallback spawn failed; retrying after backoff",
 				"err", err,
@@ -682,15 +714,34 @@ func (h *SharedHost) monitorAttachedFallback() error {
 		oldCli := h.cli
 		h.cmd = cmd
 		h.cli = cli
+		if port > 0 {
+			// Track the actual bound port so subsequent
+			// respawns (which re-enter spawnOnce) reuse it
+			// rather than drifting to a new findFreePort
+			// every cycle — see finding 6 in the lifecycle
+			// refactor review.
+			h.opts.Port = port
+		}
 		h.mu.Unlock()
 
 		// Swap the process-global Client. Existing drivers still
 		// hold references to oldCli; closing it fires oldCli.Done()
 		// which their Keepalive loop sees as "subprocess dead" and
 		// calls onRecover → spawner.Spawn → fresh *dsh.driver.
+		//
+		// Close is asynchronous: closing a Client drains its Hub
+		// pump goroutines synchronously (pumpWG.Wait inside
+		// Client.Close). Doing that on the monitor goroutine
+		// would block shutdown callers (ShutdownSharedHost can't
+		// drive h.closed through the monitor's backoff selects
+		// until oldCli.Close returns). Run it in a background
+		// goroutine so the monitor stays responsive. The Client
+		// is safe to close concurrently with the new Cli's
+		// subscription traffic — its Hub mux loop drains on its
+		// own.
 		ReplaceGlobal(cli)
 		if oldCli != nil {
-			oldCli.Close()
+			go oldCli.Close()
 		}
 
 		newPID := -1
@@ -707,13 +758,38 @@ func (h *SharedHost) monitorAttachedFallback() error {
 // spawnAttachedOnce is the attached-mode spawner. It honours the
 // Spawner test hook when set; production calls h.spawnOnce
 // (which honours h.opts.Port and falls back to findFreePort).
-func (h *SharedHost) spawnAttachedOnce() (*exec.Cmd, *Client, error) {
+// Returns the actual port the new dsh is listening on so the
+// caller can update h.opts.Port (otherwise respawn would re-check
+// a stale port and drift to a different fallback port every
+// cycle — see finding 6 in the lifecycle refactor review).
+func (h *SharedHost) spawnAttachedOnce() (*exec.Cmd, *Client, int, error) {
 	if hooks := h.effectiveTestHooks(); hooks.Spawner != nil {
-		return hooks.Spawner()
+		cmd, cli, err := hooks.Spawner()
+		// Test hooks don't go through spawnOnce's port
+		// selection, so the returned port is whatever
+		// matches the mock's URL. Use port=0 (meaning
+		// "don't update h.opts.Port").
+		return cmd, cli, 0, err
 	}
 	return h.spawnOnce()
 }
 
+// spawnRespawnOnce is the owned-mode respawner. It honours the
+// Respawner test hook when set; production calls h.spawnOnce.
+// Returns the actual port the new dsh bound to so the caller
+// can update h.opts.Port (see finding 6).
+func (h *SharedHost) spawnRespawnOnce() (*exec.Cmd, *Client, int, error) {
+	if hooks := h.effectiveTestHooks(); hooks.Respawner != nil {
+		cmd, cli, err := hooks.Respawner()
+		return cmd, cli, 0, err
+	}
+	return h.spawnOnce()
+}
+
+// spawnRespawnOnce is the owned-mode respawner. It honours the
+// Respawner test hook when set; production calls h.spawnOnce.
+// Returns the actual port the new dsh bound to so the caller
+// can update h.opts.Port (see finding 6).
 // probeOnce calls /api/session.list on the current client with
 // a short timeout. Returns true on success (200 OK), false on any
 // error. The test override (hooks.ProbeFailure) lets unit tests
@@ -792,10 +868,31 @@ func (h *SharedHost) recoverSubscriptions() {
 	}
 }
 
-// ShutdownSharedHost signals the monitor to exit and closes the
-// shared host's process-wide singletons. After ShutdownSharedHost
-// returns, dsh.newDriver will lazily re-materialise a new host
-// via EnsureSharedHost on next use. Safe to call multiple times.
+// ShutdownSharedHost tears down the shared dsh host so a fresh
+// nightme daemon can bind the port on next start. It performs
+// the same teardown the daemon SIGTERM path used to do via
+// SharedHost.Close before the refactor:
+//
+//  1. close h.closed — signals runMonitor + HealthProbe to
+//     exit (monitor returns nil errors from tryRespawn and
+//     its backoff selects wake up; probe selects close).
+//  2. wait for runMonitor to exit via watchdogDone (5s budget).
+//     Without this the HealthProbe below could race with a
+//     half-drained monitor.
+//  3. stop the HealthProbe (Stop drains its goroutine via the
+//     done channel). Belt-and-suspenders: probe also exits on
+//     h.closed but Stop makes the order deterministic.
+//  4. SIGINT the dsh subprocess, wait 5s for graceful exit.
+//     Falls through to SIGKILL if cmd is still alive. Either
+//     way releases the TCP port so the next start can bind.
+//  5. close the live *Client (drains Hub WS pump goroutines
+//     + Router state).
+//  6. unset the package-level singletons so a subsequent
+//     EnsureSharedHost (lazy start) re-materialises a clean
+//     host instead of returning the just-shut-down one.
+//
+// Safe to call multiple times (idempotent on the closed
+// channel); nil h is a no-op.
 func ShutdownSharedHost(h *SharedHost) {
 	if h == nil {
 		return
@@ -806,6 +903,53 @@ func ShutdownSharedHost(h *SharedHost) {
 	default:
 		close(h.closed)
 	}
+
+	// 2. wait for monitor to exit (bounded so a hung dsh
+	// doesn't block the daemon shutdown indefinitely).
+	if h.watchdogDone != nil {
+		select {
+		case <-h.watchdogDone:
+		case <-time.After(5 * time.Second):
+			h.logger.Warn("dsh.host: ShutdownSharedHost: monitor did not exit within 5s; continuing")
+		}
+	}
+
+	// 3. stop probe (idempotent if probe was never started
+	// — the Stop select handles a nil/no-op path).
+	if h.probe != nil {
+		h.probe.Stop()
+	}
+
+	// 4. SIGINT dsh subprocess, then SIGKILL if it ignores
+	// SIGINT. We take the cmd under mu; the field may have
+	// been nil since start (attached mode with no own proc).
+	h.mu.RLock()
+	cmd := h.cmd
+	oldCli := h.cli
+	h.mu.RUnlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Signal(os.Interrupt)
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+			// graceful exit
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done // wait for reap so we don't leave a zombie
+		}
+	}
+
+	// 5. close the live Client to drain Hub pumps.
+	if oldCli != nil {
+		oldCli.Close()
+	}
+
+	// 6. unset singletons so EnsureSharedHost rebuilds cleanly
+	// on next start (closes SetGlobal/UnsetSharedHost panics if
+	// called twice without Unset first).
+	UnsetGlobal()
+	UnsetSharedHost()
 }
 
 // dialReachable reports whether a TCP connection to 127.0.0.1:port
@@ -1195,7 +1339,7 @@ func (h *SharedHost) tryRespawn() error {
 		case <-time.After(respawnDelay(attempt)):
 		}
 
-		cmd, cli, err := h.spawnRespawnOnce()
+		cmd, cli, port, err := h.spawnRespawnOnce()
 		if err != nil {
 			h.logger.Warn("dsh.host: respawn attempt failed; retrying after backoff",
 				"attempt", attempt, "err", err)
@@ -1206,6 +1350,11 @@ func (h *SharedHost) tryRespawn() error {
 		oldCli := h.cli
 		h.cmd = cmd
 		h.cli = cli
+		if port > 0 {
+			// Track the actual bound port so subsequent
+			// respawns reuse it (see finding 6).
+			h.opts.Port = port
+		}
 		h.mu.Unlock()
 		ReplaceGlobal(cli)
 
@@ -1247,15 +1396,6 @@ func (h *SharedHost) tryRespawn() error {
 			"attempt", attempt)
 		return nil
 	}
-}
-
-// spawnRespawnOnce is the owned-mode respawner. It honours the
-// Respawner test hook when set; production calls h.spawnOnce.
-func (h *SharedHost) spawnRespawnOnce() (*exec.Cmd, *Client, error) {
-	if hooks := h.effectiveTestHooks(); hooks.Respawner != nil {
-		return hooks.Respawner()
-	}
-	return h.spawnOnce()
 }
 
 // spawnAndWire spawns a fresh dsh subprocess with --port <port>
@@ -1468,27 +1608,46 @@ func spawnAndWire(ctx context.Context, opts SharedHostOptions, port int, logger 
 	return child, cli, nil
 }
 
-// spawnOnce is the watchdog's per-attempt spawn wrapper around
-// spawnAndWire.
+// spawnOnce spawns nightme's own dsh subprocess. It prefers
+// h.opts.Port (the port nightme captured at Start) when that
+// port is currently free — dsh died and the kernel released
+// the TCP socket, so reuse it. If the port is still occupied
+// (previous dsh somehow still alive, or a foreign service
+// grabbed it during the dead window), fall back to the first
+// free port in [defaultPortScanMin, defaultPortScanMax] and
+// persist that as the new h.opts.Port via the caller's
+// bookkeeping.
 //
-// Port policy: try the port we captured at StartSharedHost first
-// (h.opts.Port). If it's now occupied (e.g. another daemon took
-// 3080 while our dsh was down, or the port is wedged), fall back
-// to findFreePort(3081, 3099) — same policy StartSharedHost uses
-// for cold start. This keeps the watchdog from giving up just
-// because the canonical port got stolen during the dead window.
-func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, error) {
+// Returns the actual port the new dsh bound to so the caller
+// can update h.opts.Port. Without this, every respawn would
+// re-evaluate the (now stale) captured port and drift to a
+// different fallback port — see findings 6-7 in the lifecycle
+// refactor review.
+//
+// Why port == 0 → no fallback (not the other way around):
+// h.opts.Port = 0 means "dsh never bound a port here yet"
+// (e.g. attached mode with a foreign dsh, or a fresh
+// StartSharedHost that went down the spawn path with
+// opts.Port still at the zero value). Forcing findFreePort
+// in that case would discard the user's deploy-time port
+// preference.
+func (h *SharedHost) spawnOnce() (*exec.Cmd, *Client, int, error) {
 	port := h.opts.Port
-	if !dialReachable(port) {
+	if port > 0 && dialReachable(port) {
+		// Captured port is held by something — previous dsh
+		// still alive, or foreign service grabbed it
+		// during the dead window. Fall back to the next
+		// free port.
 		if found, err := findFreePort(defaultPortScanMin, defaultPortScanMax); err == nil {
-			port = found
 			h.logger.Warn("dsh.host: captured port occupied during respawn; falling back",
 				"captured_port", h.opts.Port,
-				"respawn_port", port,
+				"respawn_port", found,
 			)
+			port = found
 		}
 	}
-	return spawnAndWire(context.Background(), h.opts, port, h.logger)
+	cmd, cli, err := spawnAndWire(context.Background(), h.opts, port, h.logger)
+	return cmd, cli, port, err
 }
 
 // waitForListen polls 127.0.0.1:port until TCP accepts a connection

@@ -98,6 +98,18 @@ const (
 	//   - pty        — exempt; raw byte stream with no block structure.
 	EventAgentText EventKind = iota
 
+	// EventAgentThinking is the agent's reasoning / thought text
+	// (Claude "thinking" blocks, Codex "reasoning" items, pi
+	// "thinking" deltas, dsh "thinking" chunks, etc.). Distinct
+	// from EventAgentText — bridges emit EventAgentThinking
+	// directly so the gateway routes it to OutThinking without
+	// string-prefix sniffing. Channels render this with a 💭 icon
+	// and side-line layout, vs 💬 / reply bubble for EventAgentText.
+	//
+	// Payload shape matches EventAgentText (Text field carries the
+	// reasoning body, no prefix marker).
+	EventAgentThinking
+
 	// EventAgentPermission is a permission request from the agent. The
 	// Channel renders it as an interactive UI (e.g. Feishu card with
 	// buttons) and the user choice is fed back via SendPermission.
@@ -168,6 +180,8 @@ func (k EventKind) String() string {
 	switch k {
 	case EventAgentText:
 		return "text"
+	case EventAgentThinking:
+		return "thinking"
 	case EventAgentPermission:
 		return "permission"
 	case EventAgentToolStart:

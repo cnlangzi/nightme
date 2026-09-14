@@ -138,3 +138,103 @@ func TestNormaliseRichMode_AutoConservative(t *testing.T) {
 		t.Errorf("normaliseRichMode(\"auto\") = %q, want auto", got)
 	}
 }
+
+func TestRenderRichTurnBlocks_ColdCreateDefaultHeading(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    defaultRichTurnHeader,
+		hasContent:    false,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(body, defaultRichTurnHeader) {
+		t.Fatalf("cold-create banner must render; got %q", body)
+	}
+	// Heartbeat is emitted as a paragraph block, not a heading —
+	// it sits at the same scale as surrounding content entries.
+	if !strings.Contains(body, `"type":"paragraph"`) {
+		t.Fatalf("cold-create heartbeat must be a paragraph block; got %q", body)
+	}
+	if strings.Contains(body, `"type":"heading"`) {
+		t.Fatalf("cold-create heartbeat must NOT be a heading block; got %q", body)
+	}
+}
+
+func TestRenderRichTurnBlocks_DefaultSuppressedAfterContent(t *testing.T) {
+	// Once content has arrived and no real heartbeat stamped
+	// the header, the default fallback must NOT render — the
+	// "🤖 Working…" banner would read as a stale "still thinking"
+	// cue over already-arrived entries.
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    defaultRichTurnHeader,
+		hasContent:    true,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(body, defaultRichTurnHeader) {
+		t.Fatalf("default banner must be suppressed after content; got %q", body)
+	}
+}
+
+func TestRenderRichTurnBlocks_RealHeartbeat(t *testing.T) {
+	// Real heartbeat (non-default text) replaces the default and
+	// renders as a paragraph block. heartbeatText no longer wraps
+	// in <b>/</b> at construction — so the rendered text is
+	// the raw line.
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "🔧 5 · ⏱ 09:50",
+		hasContent:    true,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(body, "🔧 5 · ⏱ 09:50") {
+		t.Fatalf("real heartbeat must render; got %q", body)
+	}
+	if strings.Contains(body, "<b>") || strings.Contains(body, "</b>") {
+		t.Fatalf("heartbeatText should not emit HTML tags; got %q", body)
+	}
+}
+
+func TestRenderRichTurnBlocks_TerminalVerdict(t *testing.T) {
+	// Done / Error verdicts carry "✅ " / "❌ " prefix. Render
+	// as a paragraph block — same shape as a normal heartbeat.
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "✅ ⏱ 14:05:40",
+		hasContent:    true,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(body, "✅ ⏱ 14:05:40") {
+		t.Fatalf("verdict + time must render; got %q", body)
+	}
+	if !strings.Contains(body, `"type":"paragraph"`) {
+		t.Fatalf("verdict must be a paragraph block; got %q", body)
+	}
+}

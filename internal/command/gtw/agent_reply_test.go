@@ -265,7 +265,7 @@ func TestRunAgentFor_HeartbeatObserved(t *testing.T) {
 			// ThinkingPrefix marker ("[思考] ", defined in
 			// internal/gateway/outbound/translate.go); gateway.Translate
 			// recognises it and maps to OutThinking.
-			{Kind: agent.EventAgentText, Text: "[思考] reasoning about the tool output"},
+			{Kind: agent.EventAgentThinking, Text: "reasoning about the tool output"},
 			{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: "t2", Name: "Read", Args: "f.go"}},
 			{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "done"}},
 		},
@@ -357,7 +357,7 @@ func TestRunAgentFor_Filtering(t *testing.T) {
 		name: "filtering",
 		events: []agent.AgentEvent{
 			{Kind: agent.EventAgentText, Text: "first reply"},
-			{Kind: agent.EventAgentText, Text: "[思考] step by step reasoning"},
+			{Kind: agent.EventAgentThinking, Text: "step by step reasoning"},
 			{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: "t1", Name: "Edit", Args: "go.mod"}},
 			{Kind: agent.EventAgentToolEnd, ToolEnd: &agent.AgentToolEndEvent{ID: "t1", Name: "Edit", Output: "ok"}},
 			{Kind: agent.EventAgentResult, Result: &agent.AgentResultEvent{Text: "final"}},

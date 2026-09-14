@@ -222,11 +222,11 @@ func TestTranslate_ThinkingDelta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("thinking_end: %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != agent.EventAgentText {
-		t.Fatalf("thinking_end produced %+v, want one EventAgentText", events)
+	if len(events) != 1 || events[0].Kind != agent.EventAgentThinking {
+		t.Fatalf("thinking_end produced %+v, want one EventAgentThinking", events)
 	}
-	if events[0].Text != "[思考] analyzing" {
-		t.Errorf("text = %q, want %q", events[0].Text, "[思考] analyzing")
+	if events[0].Text != "analyzing" {
+		t.Errorf("text = %q, want %q (no prefix sentinel)", events[0].Text, "analyzing")
 	}
 }
 
@@ -1719,10 +1719,10 @@ func TestTranslate_EndResetRestoresTranslation(t *testing.T) {
 
 	events := drive(t, tr, `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"back"}}`,
 		`{"type":"message_update","assistantMessageEvent":{"type":"thinking_end"}}`)
-	if len(events) != 1 || events[0].Kind != agent.EventAgentText {
-		t.Fatalf("after endReset events = %v, want one EventAgentText", kinds(events))
+	if len(events) != 1 || events[0].Kind != agent.EventAgentThinking {
+		t.Fatalf("after endReset events = %v, want one EventAgentThinking", kinds(events))
 	}
-	if events[0].Text != thinkingPrefix+"back" {
-		t.Errorf("Text = %q, want %q", events[0].Text, thinkingPrefix+"back")
+	if events[0].Text != "back" {
+		t.Errorf("Text = %q, want %q (no prefix)", events[0].Text, "back")
 	}
 }

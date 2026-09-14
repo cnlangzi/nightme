@@ -188,9 +188,9 @@ func testJSONString(s string) string {
 
 // TestTranslate_TextDeltaInlineThinkStripsTags verifies the central
 // invariant: a single text_delta whose payload contains
-// <think>...</think> yields ONE EventAgentText with the [思考]
-// prefix and leaves the surrounding text in textBuf without the
-// tags. The reply surface never sees "<think>".
+// <think>...</think> yields ONE EventAgentThinking with no
+// prefix sentinel and leaves the surrounding text in textBuf
+// without the tags. The reply surface never sees "<think>".
 func TestTranslate_TextDeltaInlineThinkStripsTags(t *testing.T) {
 	tr := newTestTranslator()
 
@@ -200,11 +200,11 @@ func TestTranslate_TextDeltaInlineThinkStripsTags(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1; got %+v", len(events), events)
 	}
-	if events[0].Kind != agent.EventAgentText {
-		t.Fatalf("event kind = %s, want EventAgentText", events[0].Kind)
+	if events[0].Kind != agent.EventAgentThinking {
+		t.Fatalf("event kind = %s, want EventAgentThinking", events[0].Kind)
 	}
-	if events[0].Text != "[思考] reasoning text" {
-		t.Errorf("event Text = %q, want %q", events[0].Text, "[思考] reasoning text")
+	if events[0].Text != "reasoning text" {
+		t.Errorf("event Text = %q, want %q (no prefix sentinel)", events[0].Text, "reasoning text")
 	}
 	if got := tr.turn.textBuf[0].String(); got != "Hello  world" {
 		t.Errorf("textBuf[0] = %q, want %q (tags must not leak into reply)", got, "Hello  world")
@@ -228,8 +228,8 @@ func TestTranslate_TextDeltaThinkSpansTwoDeltas(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1; got %+v", len(events), events)
 	}
-	if events[0].Text != "[思考] the user wants me to switch" {
-		t.Errorf("event Text = %q, want %q", events[0].Text, "[思考] the user wants me to switch")
+	if events[0].Text != "the user wants me to switch" {
+		t.Errorf("event Text = %q, want %q (no prefix sentinel)", events[0].Text, "the user wants me to switch")
 	}
 	if got := tr.turn.textBuf[0].String(); got != "Hello  world" {
 		t.Errorf("textBuf[0] = %q, want %q", got, "Hello  world")
@@ -244,7 +244,7 @@ func TestTranslate_TextDeltaThinkSpansTwoDeltas(t *testing.T) {
 func TestTranslate_TextDeltaOnlyThinkingLockedAway(t *testing.T) {
 	tr := newTestTranslator()
 
-	// Collect events across the whole turn — the [思考] event
+	// Collect events across the whole turn — the EventAgentThinking
 	// fires on the text_delta, before text_end / agent_settled.
 	var all []agent.AgentEvent
 	all = append(all, mustTranslate(t, tr, textDeltaEvent(0, "<think>secret plan</think>"))...)
@@ -257,16 +257,16 @@ func TestTranslate_TextDeltaOnlyThinkingLockedAway(t *testing.T) {
 	if strings.Contains(result.Text, "secret plan") {
 		t.Errorf("EventAgentResult.Text = %q, must not contain reasoning text", result.Text)
 	}
-	// And the reasoning did surface earlier as a [思考] event.
+	// And the reasoning did surface earlier as an EventAgentThinking.
 	hasThink := false
 	for _, ev := range all {
-		if ev.Kind == agent.EventAgentText && strings.Contains(ev.Text, "secret plan") {
+		if ev.Kind == agent.EventAgentThinking && strings.Contains(ev.Text, "secret plan") {
 			hasThink = true
 			break
 		}
 	}
 	if !hasThink {
-		t.Errorf("reasoning never surfaced as [思考] event; got texts=%v", texts(all))
+		t.Errorf("reasoning never surfaced as EventAgentThinking; got texts=%v", texts(all))
 	}
 }
 
@@ -293,8 +293,11 @@ func TestTranslate_MessageEndThinkingBlock(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1; got %+v", len(events), events)
 	}
-	if events[0].Text != "[思考] block-level reasoning" {
-		t.Errorf("event Text = %q, want %q", events[0].Text, "[思考] block-level reasoning")
+	if events[0].Kind != agent.EventAgentThinking {
+		t.Fatalf("event kind = %s, want EventAgentThinking", events[0].Kind)
+	}
+	if events[0].Text != "block-level reasoning" {
+		t.Errorf("event Text = %q, want %q (no prefix sentinel)", events[0].Text, "block-level reasoning")
 	}
 	// lastMessageText holds the plain text only.
 	if tr.turn.lastMessageText != "final reply" {
@@ -323,8 +326,11 @@ func TestTranslate_MessageEndTextBlockWithInlineTags(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1; got %+v", len(events), events)
 	}
-	if events[0].Text != "[思考] in-block reasoning" {
-		t.Errorf("event Text = %q, want %q", events[0].Text, "[思考] in-block reasoning")
+	if events[0].Kind != agent.EventAgentThinking {
+		t.Fatalf("event kind = %s, want EventAgentThinking", events[0].Kind)
+	}
+	if events[0].Text != "in-block reasoning" {
+		t.Errorf("event Text = %q, want %q (no prefix sentinel)", events[0].Text, "in-block reasoning")
 	}
 	if tr.turn.lastMessageText != "Hello  world" {
 		t.Errorf("lastMessageText = %q, want %q", tr.turn.lastMessageText, "Hello  world")

@@ -319,10 +319,8 @@ func handleAssistantChunk(env sessionEventEnvelope, view json.RawMessage, tr *tr
 		// Block-end is the authoritative carrier of a reasoning
 		// block's full text. Pre-fix this branch didn't exist; the
 		// whole reasoning-delta → block-end sequence was lost.
-		// We emit "[思考] ..." with the local thinkingPrefix
-		// constant (mirrors pi / codex) so the downstream
-		// gateway/outbound/translate.go routes the resulting
-		// OutboundMessage to OutThinking rather than OutReply.
+		// Emit EventAgentThinking directly so the gateway routes
+		// it to OutThinking without string-prefix sniffing.
 		tr.active = true
 		if data.Chunk.Block == nil {
 			return nil
@@ -339,8 +337,8 @@ func handleAssistantChunk(env sessionEventEnvelope, view json.RawMessage, tr *tr
 			// memory doesn't grow over a long turn.
 			delete(tr.reasoningBuf, idx)
 			return []agent.AgentEvent{{
-				Kind: agent.EventAgentText,
-				Text: thinkingPrefix + data.Chunk.Block.Text,
+				Kind: agent.EventAgentThinking,
+				Text: data.Chunk.Block.Text,
 			}}
 		}
 		// block-end for text: text-delta already accumulated into
@@ -835,14 +833,6 @@ func handleDebugOnly(env sessionEventEnvelope, view json.RawMessage, tr *transla
 	dLog("dsh: %s", env.Type)
 	return nil
 }
-
-// thinkingPrefix is the sentinel that gets prepended to every
-// thinking block before emit. The downstream gateway translate
-// (internal/gateway/outbound/translate.go) recognises this prefix
-// and routes the resulting OutboundMessage to OutThinking rather
-// than OutReply. Must stay in sync with the gateway constant.
-// Mirrors the same pattern in pi/translate.go and codex/translate.go.
-const thinkingPrefix = "[思考] "
 
 // handleUserMessageEcho is the same as handleDebugOnly but with a
 // stronger comment to flag the "do not emit" invariant. If a

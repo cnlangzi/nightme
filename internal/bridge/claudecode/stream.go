@@ -354,21 +354,17 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				}
 
 			case "thinking":
-				// Thinking blocks are surfaced as EventAgentText with a
-				// "[思考] " prefix so the channel layer (Feishu
-				// Renderer) can render them as a 💭 entry in the
-				// per-message activity log. The prefix lets the
-				// renderer tell thinking from a final reply and
-				// from a system-init blurb ("session initialized
-				// (model: …)") which already carries its own
-				// context. Empty blocks (Claude Code can emit a
-				// zero-length thinking delta) are skipped.
+				// Thinking blocks surface as EventAgentThinking
+				// so the gateway routes them to OutThinking
+				// directly — no string-prefix sniffing. Empty
+				// blocks (Claude Code can emit a zero-length
+				// thinking delta) are skipped.
 				if strings.TrimSpace(block.Thinking) == "" {
 					continue
 				}
 				events <- agent.AgentEvent{
-					Kind: agent.EventAgentText,
-					Text: "[思考] " + block.Thinking,
+					Kind: agent.EventAgentThinking,
+					Text: block.Thinking,
 				}
 
 			case "tool_use":

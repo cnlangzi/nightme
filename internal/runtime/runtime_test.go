@@ -42,8 +42,8 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] internal reasoning here",
+		Kind: agent.EventAgentThinking,
+		Text: "internal reasoning here",
 	}, UserMsgID: "om_user_1"})
 
 	got := ch.Record()
@@ -81,8 +81,8 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] internal reasoning here",
+		Kind: agent.EventAgentThinking,
+		Text: "internal reasoning here",
 	}, UserMsgID: "om_user_1"})
 
 	if got := countNonHeartbeat(ch.Record()); got != 0 {
@@ -181,8 +181,8 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 		}
 	}()
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] reasoning",
+		Kind: agent.EventAgentThinking,
+		Text: "reasoning",
 	}, UserMsgID: "om_user_1"})
 
 	if got := countNonHeartbeat(ch.Record()); got != 0 {
@@ -204,8 +204,8 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	thinking := agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] reasoning",
+		Kind: agent.EventAgentThinking,
+		Text: "reasoning",
 	}
 
 	// Phase 1: opt in to Show → forwarded.
@@ -656,8 +656,8 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 		t.Fatalf("SetThinkMode(Show): %v", err)
 	}
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] reasoning",
+		Kind: agent.EventAgentThinking,
+		Text: "reasoning",
 	}, UserMsgID: "om_1"})
 
 	got := ch.Record()
@@ -738,8 +738,8 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 
 	// OutThinking → dropped (ThinkMode gate)
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] reasoning",
+		Kind: agent.EventAgentThinking,
+		Text: "reasoning",
 	}, UserMsgID: "om_user_1"})
 
 	// OutToolStart → dropped (ToolsMode gate)
@@ -755,8 +755,8 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 
 	// OutThinking → still dropped (ThinkMode gate unchanged)
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] more reasoning",
+		Kind: agent.EventAgentThinking,
+		Text: "more reasoning",
 	}, UserMsgID: "om_user_2"})
 
 	// OutToolStart → now forwarded (ToolsMode flipped to Show)

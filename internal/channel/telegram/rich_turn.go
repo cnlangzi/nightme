@@ -68,6 +68,16 @@ type richTurn struct {
 	// semantics without the chain's per-chunk rotation.
 	headerLine string
 
+	// hasContent flips to true the moment the first entry / task
+	// list / footer-bearing event lands. Once true, the renderer
+	// stops using the cold-create default heartbeat text as a
+	// fallback heading — the placeholder card shows the user's
+	// content without a stale "🤖 Working…" banner once real
+	// activity has begun. Real heartbeat updates set headerLine to
+	// a non-default value, so the heading reappears with the
+	// live count / timestamp / terminal verdict.
+	hasContent bool
+
 	// entries are pending content lines not yet flushed. Cleared
 	// after every successful flush so the next event rebuilds from
 	// scratch.
@@ -150,6 +160,7 @@ func (a *Adapter) appendRichTurn(
 	if footer != nil {
 		turn.footer = footer
 	}
+	turn.hasContent = true
 	turn.dirty = true
 	a.scheduleRichTurnFlush(turn)
 	return nil
@@ -222,37 +233,71 @@ func (a *Adapter) flushRichTurn(ctx context.Context, turn *richTurn) error {
 		turn.chatID, turn.messageID, blocksJSON); err != nil {
 		return err
 	}
+	if a.logger != nil {
+		a.logger.Info("telegram: rich turn flushed",
+			"chat_id", turn.chatID,
+			"message_id", turn.messageID,
+			"has_content", turn.hasContent,
+			"header_line", turn.headerLine,
+			"blocks", blocksJSON,
+		)
+	}
 	turn.dirty = false
 	return nil
 }
 
-// renderRichTurnBlocksLocked builds the JSON blocks array for the
-// rich message. Mirrors chunkBody.Compose()'s section ordering:
-// header (when present) → entries (paragraphs) → task section
-// (when non-empty) → footer.
+// renderRichTurnBlocksLocked builds the JSON blocks array for
+// the rich message. Section ordering: header (when present) →
+// entries (paragraphs) → task section (when non-empty) → footer
+// (when present). The placeholder card shows the live turn state
+// to the user in one place; this is the merged UI the user
+// asked for when reverting from the draft-preview split.
 //
 // Caller MUST hold turn.mu.
+// defaultRichTurnHeader is the placeholder banner emitted on
+// cold-create and on every PATCH until the first OutHeartbeat
+// stamps cache.headerLine. Without this fallback, the
+// cold-create "🤖 Working..." heading disappears on the first
+// PATCH (render skips empty headerLine) and only reappears when
+// patchChainHeader fires later — which the user sees as
+// "heartbeat line only shows up at the end of the turn".
+const defaultRichTurnHeader = "🤖 Working..."
+
 func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 	var blocks []map[string]any
 
-	// Header: optional, single heading-style block. Use heading size 1
-	// for max visibility (matches the cold "🤖 Working..." banner).
+	// Header (heading) — three states:
 	//
-	// Strip the HTML bold wrapper that heartbeatText emits: rich
-	// blocks' text fields don't parse HTML, so the literal `<b>` /
-	// `</b>` tags would leak into the rendered heading. The clean
-	// fix lives at the wire boundary (where Telegram stops parsing
-	// HTML) — the rest of the pipeline keeps using `<b>...</b>` for
-	// the chain's legacy HTML path.
+	//   - headerLine == defaultRichTurnHeader && !hasContent:
+	//         cold-create banner. Render it so the user sees
+	//         immediate feedback that the turn is alive. This is
+	//         the only path that shows the cold-create default.
+	//   - headerLine is a real heartbeat / terminal verdict:
+	//         OutHeartbeat fired and stamped the cache with the
+	//         live text. Always render.
+	//   - headerLine == defaultRichTurnHeader && hasContent:
+	//         content arrived but no real heartbeat. The default
+	//         banner is suppressed — showing "🤖 Working…" once
+	//         entries are already on the card reads as a stale
+	//         "agent still thinking" cue. Render nothing.
+	//
+	// Strip <b>/</b> wrappers — rich block text fields don't
+	// parse HTML.
 	if turn.headerLine != "" {
-		headerText := strings.TrimSpace(turn.headerLine)
-		headerText = strings.TrimPrefix(headerText, "<b>")
-		headerText = strings.TrimSuffix(headerText, "</b>")
-		blocks = append(blocks, map[string]any{
-			"type": "heading",
-			"text": headerText,
-			"size": 1,
-		})
+		skipDefault := turn.headerLine == defaultRichTurnHeader && turn.hasContent
+		if !skipDefault {
+			// Heartbeat / status line — emitted as a paragraph
+			// block so it sits at the same text scale as the
+			// surrounding entries rather than dominating the
+			// card as a heading would.
+			headerText := strings.TrimSpace(turn.headerLine)
+			if headerText != "" {
+				blocks = append(blocks, map[string]any{
+					"type": "paragraph",
+					"text": headerText,
+				})
+			}
+		}
 	}
 
 	// Entries: one paragraph per pending event.
@@ -312,22 +357,6 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 	return encodeBlocksArray(blocks)
 }
 
-// updateRichTurnHeader replaces the header line (heartbeat text).
-// Coalesces with the next debounce flush.
-func (a *Adapter) updateRichTurnHeader(
-	chatID string,
-	topicID int,
-	userMessageID int,
-	header string,
-) {
-	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
-	turn.mu.Lock()
-	turn.headerLine = header
-	turn.dirty = true
-	turn.mu.Unlock()
-	a.scheduleRichTurnFlush(turn)
-}
-
 // setRichTurnTaskList replaces the task snapshot wholesale. Same
 // pattern as the v9 chain's setTaskList.
 func (a *Adapter) setRichTurnTaskList(
@@ -347,6 +376,34 @@ func (a *Adapter) setRichTurnTaskList(
 	if footer != nil {
 		turn.footer = footer
 	}
+	turn.hasContent = true
+	turn.dirty = true
+	turn.mu.Unlock()
+	a.scheduleRichTurnFlush(turn)
+}
+
+// updateRichTurnHeader replaces the header line (heartbeat text).
+// Coalesces with the next debounce flush so a burst of heartbeat
+// ticks results in one PATCH to Telegram, not one per snapshot.
+// Empty header text is a no-op so the cold-create placeholder
+// banner ("🤖 Working...") sticks until a real OutHeartbeat
+// arrives.
+func (a *Adapter) updateRichTurnHeader(
+	chatID string,
+	topicID int,
+	userMessageID int,
+	header string,
+) {
+	if header == "" {
+		return
+	}
+	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
+	turn.mu.Lock()
+	if turn.headerLine == header {
+		turn.mu.Unlock()
+		return
+	}
+	turn.headerLine = header
 	turn.dirty = true
 	turn.mu.Unlock()
 	a.scheduleRichTurnFlush(turn)
@@ -392,13 +449,16 @@ func (a *Adapter) OnPromptEndedRichMessageID(chatID string, topicID int, userMes
 // per-turn target. After this call, turn.messageID is set and
 // subsequent events go via editMessageText(rich_message=...).
 //
-// Currently uses an empty blocks array; the first appendRichTurn
-// triggers a flush that adds the first entry. Future work could
-// pre-populate with a "🤖 Working..." heading.
+// Cold-create MUST include at least one block — Telegram rejects
+// `{"blocks":[]}` with RICH_MESSAGE_EMPTY (issue #368). The
+// placeholder banner is a paragraph block (not a heading) so
+// the immediate-feedback text matches the scale of subsequent
+// PATCH content. Subsequent edits replace this paragraph via
+// renderRichTurnBlocksLocked.
 //
 // Caller MUST hold turn.mu.
 func (a *Adapter) sendRichTurnColdCreate(turn *richTurn) error {
-	body := `{"blocks":[]}`
+	body := `{"blocks":[{"type":"paragraph","text":"🤖 Working..."}]}`
 	mid, err := a.trySendRichBlocksEditRaw(turn.chatID, 0, body, turn.topicID, turn.userMessageID)
 	if err != nil {
 		return err

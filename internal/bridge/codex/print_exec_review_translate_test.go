@@ -191,10 +191,9 @@ func TestTranslateItemCompleted_CommandExecution_NonZeroExit(t *testing.T) {
 }
 
 // TestTranslateItemCompleted_Reasoning — reasoning items
-// surface as EventAgentText with the ThinkingPrefix sentinel so
-// the gateway.Translate maps it to OutOutMessage.Kind =
-// OutThinking, which the Feishu adapter renders as a 💭 side line
-// instead of an OutReply bubble.
+// surface as EventAgentThinking so the gateway maps it to
+// OutOutMessage.Kind = OutThinking. The Feishu adapter renders
+// this as a 💭 side line instead of an OutReply bubble.
 func TestTranslateItemCompleted_Reasoning(t *testing.T) {
 	var captured []agent.AgentEvent
 	sink := func(ev agent.AgentEvent) { captured = append(captured, ev) }
@@ -206,14 +205,14 @@ func TestTranslateItemCompleted_Reasoning(t *testing.T) {
 	})
 
 	if len(captured) != 1 {
-		t.Fatalf("captured = %+v, want one Text", captured)
+		t.Fatalf("captured = %+v, want one event", captured)
 	}
 	got := captured[0]
-	if got.Kind != agent.EventAgentText {
-		t.Errorf("Kind = %s, want Text", got.Kind)
+	if got.Kind != agent.EventAgentThinking {
+		t.Errorf("Kind = %s, want EventAgentThinking", got.Kind)
 	}
-	if !strings.HasPrefix(got.Text, "[思考] ") {
-		t.Errorf("Text = %q, want [思考] -prefixed", got.Text)
+	if strings.Contains(got.Text, "[思考]") {
+		t.Errorf("Text = %q must NOT carry the prefix sentinel", got.Text)
 	}
 	if !strings.Contains(got.Text, "Scanning diff for security issues") {
 		t.Errorf("Text missing reasoning body: %q", got.Text)

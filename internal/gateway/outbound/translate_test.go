@@ -28,10 +28,19 @@ func TestTranslate_EventText(t *testing.T) {
 	}
 }
 
-func TestTranslate_EventText_ThinkingPrefix(t *testing.T) {
-	msg, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] thinking…"})
+func TestTranslate_EventThinking(t *testing.T) {
+	// Bridges emit EventAgentThinking directly; the gateway
+	// routes it to OutThinking without string-prefix sniffing.
+	msg, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentThinking, Text: "thinking…"})
 	if !ok || msg.Kind != messages.OutThinking || msg.Text != "thinking…" {
 		t.Errorf("got kind=%v text=%q, want OutThinking / thinking…", msg.Kind, msg.Text)
+	}
+}
+
+func TestTranslate_EventThinking_EmptyDropped(t *testing.T) {
+	_, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentThinking, Text: "  "})
+	if ok {
+		t.Error("empty / whitespace-only thinking should drop, not emit")
 	}
 }
 

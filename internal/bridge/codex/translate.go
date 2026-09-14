@@ -27,12 +27,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// thinkingPrefix marks an EventAgentText as a reasoning block. The
-// gateway strips this prefix and routes the payload to OutThinking;
-// claudecode / pi bridges use the same sentinel so the channel layer
-// needs no per-bridge branching.
-const thinkingPrefix = "[思考] "
-
 // pendingTool tracks a tool invocation that has emitted item/started
 // but not yet the matching item/completed. Re-attached on the end
 // event for renderer context (id-stable correlation).
@@ -410,8 +404,8 @@ func (t *translator) handleItemCompleted(params json.RawMessage) {
 		t.mu.Unlock()
 		if text != "" {
 			t.deliver(agent.AgentEvent{
-				Kind: agent.EventAgentText,
-				Text: thinkingPrefix + text,
+				Kind: agent.EventAgentThinking,
+				Text: text,
 			})
 		}
 	case itemTypeCommandExecution, itemTypeFileChange, itemTypeWebSearch,

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
@@ -139,6 +140,35 @@ func (a *Adapter) appendRichTurn(
 	turn.entries = append(turn.entries, entry)
 	turn.dirty = true
 	a.scheduleRichTurnFlush(turn)
+}
+
+// appendRichTurnAndFlush appends an entry and immediately flushes
+// synchronously. Used by OutToolStart / OutToolEnd so the user sees
+// `● Tool(args)` and `⎿ result` as adjacent blocks within the
+// 250ms debounce window without waiting for the timer.
+func (a *Adapter) appendRichTurnAndFlush(
+	ctx context.Context,
+	chatID string,
+	topicID int,
+	userMessageID int,
+	entry richTurnEntry,
+) error {
+	if !a.richModeAllowsSend() {
+		return nil
+	}
+	a.appendRichTurn(ctx, chatID, topicID, userMessageID, entry)
+	turn, ok := a.richTurns.lookup(chatID, topicID, userMessageID)
+	if !ok || turn == nil {
+		return nil
+	}
+	// Stop any pending debounce; the synchronous flush supersedes it.
+	turn.mu.Lock()
+	if turn.debounceTimer != nil {
+		turn.debounceTimer.Stop()
+		turn.debounceTimer = nil
+	}
+	turn.mu.Unlock()
+	return a.flushRichTurn(ctx, turn)
 }
 
 // scheduleRichTurnFlush arms a 250ms debounce timer that calls
@@ -561,3 +591,24 @@ func (r *richTurnsIndex) purge(chatID string, topicID int, userMessageID int) {
 // path (the rich turn could pull in custom StatusBar rendering in
 // the future without re-adding the import).
 var _ = statusbar.RenderPanel
+
+// taskStatusToString maps agent.AgentTaskStatus to a stable string
+// the rich block renderer's list section consumes. Mirrors the
+// v9 chain's renderTaskLine switch (chain_body.go). Strings are
+// stable on the wire (no enum-name leakage) so future agent
+// status additions don't ripple into the rich-block schema.
+func taskStatusToString(s agent.AgentTaskStatus) string {
+	switch s {
+	case agent.TaskPending:
+		return "pending"
+	case agent.TaskInProgress:
+		return "in_progress"
+	case agent.TaskCompleted:
+		return "completed"
+	case agent.TaskDeleted:
+		return "deleted"
+	case agent.TaskCancelled:
+		return "cancelled"
+	}
+	return "pending"
+}

@@ -217,21 +217,12 @@ func replyAgent(
 		return &Result{Consumed: true}
 	}
 	out := messages.OutboundMessage{
-		ChatID:    chatID,
-		Kind:      messages.OutReply,
-		ReplyTo:   messageID,
-		Text:      text,
-		AgentName: agentName,
+		ChatID:  chatID,
+		Kind:    messages.OutReply,
+		ReplyTo: messageID,
+		Text:    text,
 	}
-	if out.Model == "" {
-		out.Model = res.Model
-	}
-	if out.SessionID == "" {
-		out.SessionID = res.SessionID
-	}
-	if res.Usage != nil {
-		out.Usage = (*messages.UsageInfo)(res.Usage)
-	}
+	messages.StampRunResult(&out, agentName, res)
 	_ = em.Send(ctx, out)
 	return &Result{Consumed: true}
 }

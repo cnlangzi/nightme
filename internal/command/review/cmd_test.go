@@ -35,7 +35,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // TestSpec_RejectsArgs covers the arg-rejection path. /review is
@@ -163,46 +162,23 @@ func dispatchWithNoCS(t *testing.T, args []string) (*command.SlashOutput, error)
 	})
 }
 
-// TestBuildTerminalReply_StampsAgentbarAndUsagebar verifies the
-// /review terminal OutReply carries AgentName / Model / SessionID
-// / Usage from the RunResult so the channel footer renders all
-// three StatusBar lines (agentbar / usagebar / gitbar).
-//
-// Regression for the bug where the terminal OutReply bypassed the
-// streaming-sink identity fallback (dispatchSinkEvent stamps
-// AgentName / Model / SessionID from cs.SelectedAgentSession for
-// streaming events; the terminal OutReply went straight to
-// emitter.Send with only ChatID / ReplyTo / Text, leaving the
-// StatusBar footer with only the GitStatus line). Same stamping
-// contract as gtw.replyAgent (F-CMD-REPLY-IDENTITY / PR #340).
-//
-// The pure-helper shape keeps the test off the async dispatcher
-// path (which would require a real ChatSession + AgentSession +
-// persistence + spawner — see file-level comment for why no
-// full-handle test exists).
-func TestBuildTerminalReply_StampsAgentbarAndUsagebar(t *testing.T) {
+// TestBuildTerminalReply_PassesThroughEnvelope checks the helper
+// is a thin wrapper: ChatID / ReplyTo / formatted text pass
+// through unchanged, Kind is fixed to OutReply, and stamping is
+// delegated to messages.StampRunResult (covered by
+// messages/stamp_test.go).
+func TestBuildTerminalReply_PassesThroughEnvelope(t *testing.T) {
 	const (
-		workspace  = "/ws/cnlangzi/nightme"
-		runnerName = "codex"
 		chatID     = "tg_42"
 		replyTo    = "msg-99"
-		reviewBody = "## Summary\nAll clean."
+		formatted  = "## Code review\n\nAll clean."
+		runnerName = "codex"
 	)
-	result := agent.RunResult{
-		Text:      reviewBody,
+	got := buildTerminalReply(chatID, replyTo, formatted, runnerName, agent.RunResult{
 		Model:     "MiniMax-M3",
-		SessionID: "01a09f36-96a6-78e0-aeae-5cab66010f09",
-		Usage: &agent.UsageInfo{
-			InputTokens:          12300,
-			OutputTokens:         400,
-			CacheReadInputTokens: 8000,
-			ContextWindowPct:     5.1,
-			ContextWindow:        200_000,
-			CostUSD:              0.012,
-		},
-	}
-
-	got := buildTerminalReply(workspace, runnerName, chatID, replyTo, result)
+		SessionID: "sess-1",
+		Usage:     &agent.UsageInfo{InputTokens: 100},
+	})
 
 	if got.ChatID != chatID {
 		t.Errorf("ChatID = %q, want %q", got.ChatID, chatID)
@@ -213,109 +189,19 @@ func TestBuildTerminalReply_StampsAgentbarAndUsagebar(t *testing.T) {
 	if got.Kind != messages.OutReply {
 		t.Errorf("Kind = %v, want OutReply", got.Kind)
 	}
+	if got.Text != formatted {
+		t.Errorf("Text = %q, want %q (must pass through unchanged)", got.Text, formatted)
+	}
 	if got.AgentName != runnerName {
-		t.Errorf("AgentName = %q, want %q (runnerName is authoritative)",
-			got.AgentName, runnerName)
+		t.Errorf("AgentName = %q, want %q", got.AgentName, runnerName)
 	}
 	if got.Model != "MiniMax-M3" {
-		t.Errorf("Model = %q, want %q (from result)", got.Model, "MiniMax-M3")
+		t.Errorf("Model = %q, want MiniMax-M3", got.Model)
 	}
-	if got.SessionID != "01a09f36-96a6-78e0-aeae-5cab66010f09" {
-		t.Errorf("SessionID = %q, want from result", got.SessionID)
+	if got.SessionID != "sess-1" {
+		t.Errorf("SessionID = %q, want sess-1", got.SessionID)
 	}
-	if got.Usage == nil {
-		t.Fatal("Usage = nil, want from result")
-	}
-	if got.Usage.InputTokens != 12300 || got.Usage.OutputTokens != 400 ||
-		got.Usage.CacheReadInputTokens != 8000 || got.Usage.CostUSD != 0.012 {
-		t.Errorf("Usage fields not propagated: %+v", got.Usage)
-	}
-	if !strings.Contains(got.Text, reviewBody) {
-		t.Errorf("Text missing review body; got %q", got.Text)
-	}
-	if !strings.Contains(got.Text, workspace) || !strings.Contains(got.Text, runnerName) {
-		t.Errorf("Text missing FormatReviewMessage preamble (workspace=%q, runner=%q); got %q",
-			workspace, runnerName, got.Text)
-	}
-
-	// StatusBarLines must render all three lines — agentbar,
-	// usagebar, gitbar. Without the stamp the footer would have
-	// only the gitbar line (workspace stamped by Emitter at the
-	// single chokepoint). We simulate the post-Emitter state by
-	// attaching a GitStatus (the Emitter does this in production
-	// at outbound.emitImpl.Send — outside the dispatcher's
-	// scope) so the gitbar renders in the assertion below.
-	got.GitStatus = &messages.GitStatus{
-		Workspace: workspace,
-		Snapshot: &messages.GitStatusSnapshot{
-			Branch:   "main",
-			Modified: 1,
-		},
-	}
-	lines := statusbar.StatusBarLines(&got)
-	wantSubstrs := []string{"🤖:", runnerName, "MiniMax-M3", "💰:", "📁:", "main"}
-	if len(lines) < 3 {
-		t.Fatalf("StatusBarLines rendered %d lines, want 3 (agentbar+usagebar+gitbar); got %v",
-			len(lines), lines)
-	}
-	for _, sub := range wantSubstrs {
-		found := false
-		for _, l := range lines {
-			if strings.Contains(l, sub) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("StatusBarLines missing %q; lines=%v", sub, lines)
-		}
-	}
-}
-
-// TestBuildTerminalReply_NilUsageDoesNotPanic covers the
-// bridge-doesn't-report-usage path (PTY heuristic impl, older
-// bridges). result.Usage is nil → out.Usage stays nil →
-// StatusBarLines drops Line 2 (usagebar) entirely. No crash.
-func TestBuildTerminalReply_NilUsageDoesNotPanic(t *testing.T) {
-	result := agent.RunResult{Text: "ok", Model: "m"}
-	got := buildTerminalReply("/ws", "claude", "tg_1", "m1", result)
-	if got.Usage != nil {
-		t.Errorf("Usage = %+v, want nil when result.Usage is nil", got.Usage)
-	}
-	if got.AgentName != "claude" {
-		t.Errorf("AgentName = %q, want claude", got.AgentName)
-	}
-	if got.Model != "m" {
-		t.Errorf("Model = %q, want m", got.Model)
-	}
-	// Simulate post-Emitter GitStatus stamp so the gitbar
-	// renders in the StatusBarLines assertion below.
-	got.GitStatus = &messages.GitStatus{
-		Workspace: "/ws",
-		Snapshot:  &messages.GitStatusSnapshot{Branch: "main"},
-	}
-	// StatusBarLines on a usage-less message should still
-	// produce agentbar + gitbar (2 lines, no usagebar).
-	lines := statusbar.StatusBarLines(&got)
-	hasIdentity, hasGit, hasUsage := false, false, false
-	for _, l := range lines {
-		if strings.Contains(l, "🤖:") {
-			hasIdentity = true
-		}
-		if strings.Contains(l, "📁:") {
-			hasGit = true
-		}
-		if strings.Contains(l, "💰:") {
-			hasUsage = true
-		}
-	}
-	if !hasIdentity {
-		t.Errorf("agentbar missing without usage; lines=%v", lines)
-	}
-	if !hasGit {
-		t.Errorf("gitbar missing; lines=%v", lines)
-	}
-	if hasUsage {
-		t.Errorf("usagebar should be absent when Usage is nil; lines=%v", lines)
+	if got.Usage == nil || got.Usage.InputTokens != 100 {
+		t.Errorf("Usage not stamped: %+v", got.Usage)
 	}
 }

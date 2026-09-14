@@ -377,22 +377,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		if revCtx.Err() != nil {
 			return
 		}
-		// buildTerminalReply stamps AgentName / Model / SessionID /
-		// Usage so the channel footer renders all three StatusBar
-		// lines (agentbar / usagebar / gitbar). The sink path
-		// (streaming events) gets these fields via
-		// dispatchSinkEvent's identity fallback; this terminal
-		// OutReply bypasses the sink and would otherwise ship an
-		// OutboundMessage with empty identity — the channel then
-		// renders only the GitStatus line, hiding which agent
-		// produced the review. Same stamping contract as
-		// gtw.replyAgent (F-CMD-REPLY-IDENTITY / PR #340):
-		// AgentName is authoritative from runnerName (caller-
-		// resolved); Model / SessionID / Usage fall back to the
-		// RunResult fields when non-empty. Extracted as a helper
-		// so the stamp policy is unit-testable without driving
-		// the full async dispatcher.
-		_ = emitter.Send(revCtx, buildTerminalReply(workspace, runnerName, chatID, replyTo, result))
+		_ = emitter.Send(revCtx, buildTerminalReply(chatID, replyTo, formatted, runnerName, result))
 	}()
 
 	// Return Consumed=true with no inline reply. The chat session
@@ -403,46 +388,19 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// buildTerminalReply assembles the OutboundMessage that the /review
-// dispatcher emits on success. The body is the FormatReviewMessage-
-// wrapped review text; AgentName is set from runnerName (caller-
-// resolved, authoritative); Model / SessionID / Usage fall back to
-// the RunResult fields when non-empty (so bridges that observe
-// these via their wire protocol — Claude Code result.modelUsage,
-// Codex thread.started, Pi print-mode peek — surface them on the
-// footer instead of dropping to empty).
-//
-// Stamp rationale: the channel adapter renders the StatusBar
-// footer (agentbar / usagebar / gitbar) from the OutboundMessage's
-// flat fields via statusbar.StatusBarLines(&msg). The streaming
-// events from the review RunOnce arrive via the sink
-// (outbound.StreamRunOnceToEmitter) and dispatchSinkEvent stamps
-// AgentName / Model / SessionID / Workspace there; the terminal
-// OutReply here bypasses the sink, so without this helper the
-// footer would render only the GitStatus line. Same contract as
-// gtw.replyAgent (F-CMD-REPLY-IDENTITY / PR #340) — see
-// internal/command/gtw/agent_reply.go:184.
-//
-// Extracted as a pure helper so the stamp policy is unit-testable
-// without driving the full async dispatcher (which would need a
-// real ChatSession + AgentSession + persist + spawner).
-func buildTerminalReply(workspace, runnerName, chatID, replyTo string, result agent.RunResult) messages.OutboundMessage {
-	formatted := agent.FormatReviewMessage(workspace, runnerName, result.Text)
+// buildTerminalReply assembles the /review terminal OutboundMessage.
+// The caller passes the already-formatted text (see
+// FormatReviewMessage) so the wrap is computed once for both the
+// AS-inject path and the channel-emit path. Stamp policy lives in
+// messages.StampRunResult; this helper is just the message
+// construction + stamp plumbing.
+func buildTerminalReply(chatID, replyTo, formatted, runnerName string, result agent.RunResult) messages.OutboundMessage {
 	out := messages.OutboundMessage{
-		ChatID:    chatID,
-		Kind:      messages.OutReply,
-		ReplyTo:   replyTo,
-		Text:      formatted,
-		AgentName: runnerName,
+		ChatID:  chatID,
+		Kind:    messages.OutReply,
+		ReplyTo: replyTo,
+		Text:    formatted,
 	}
-	if out.Model == "" {
-		out.Model = result.Model
-	}
-	if out.SessionID == "" {
-		out.SessionID = result.SessionID
-	}
-	if result.Usage != nil {
-		out.Usage = (*messages.UsageInfo)(result.Usage)
-	}
+	messages.StampRunResult(&out, runnerName, result)
 	return out
 }

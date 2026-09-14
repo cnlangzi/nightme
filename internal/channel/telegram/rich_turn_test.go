@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -236,5 +237,160 @@ func TestRenderRichTurnBlocks_TerminalVerdict(t *testing.T) {
 	}
 	if !strings.Contains(body, `"type":"paragraph"`) {
 		t.Fatalf("verdict must be a paragraph block; got %q", body)
+	}
+}
+
+// TestRenderRichTurnBlocks_FooterAsFooterBlock verifies the
+// statusbar lands in a dedicated InputRichBlockFooter block
+// (Telegram Bot API 10.1) rather than the legacy "pre" / code
+// block. The pre block rendered the chevron-tail frame inside a
+// code fence with a "copy" affordance — visually noisy and
+// indistinguishable from LLM-emitted code. The footer block type
+// is the platform-native "session metadata at the bottom of the
+// message" surface and renders as a muted caption region.
+func TestRenderRichTurnBlocks_FooterAsFooterBlock(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 1",
+		hasContent:    true,
+		footer: []string{
+			"🤖: claude opus-4-5",
+			"💰:「 1.2k / 0 / 234 · 5.0% (200k) · $0.012 」",
+			"📁: code/nightme · ⎇ main",
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(body, `"type":"footer"`) {
+		t.Fatalf("statusbar must render as a footer block; got %q", body)
+	}
+	if strings.Contains(body, `"type":"pre"`) {
+		t.Fatalf("statusbar must NOT render as a pre block; got %q", body)
+	}
+}
+
+// TestRenderRichTurnBlocks_FooterPrecededByDivider verifies a
+// divider sits between the entries and the footer so the eye
+// gets a clean break before the metadata block.
+func TestRenderRichTurnBlocks_FooterPrecededByDivider(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 1",
+		hasContent:    true,
+		footer:        []string{"🤖: claude", "💰:「 1k 」", "📁: code/nightme"},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !strings.Contains(body, `"type":"divider"`) {
+		t.Fatalf("divider must precede the footer; got %q", body)
+	}
+	dividerIdx := strings.Index(body, `"type":"divider"`)
+	footerIdx := strings.Index(body, `"type":"footer"`)
+	if dividerIdx < 0 || footerIdx < 0 || dividerIdx >= footerIdx {
+		t.Fatalf("divider must come before footer; got %q", body)
+	}
+}
+
+// TestRenderRichTurnBlocks_NoFooterNoDivider verifies that an
+// empty footer (zero-line / nil) emits neither a divider nor a
+// footer block — they ride together as a pair.
+func TestRenderRichTurnBlocks_NoFooterNoDivider(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 1",
+		hasContent:    true,
+		footer:        nil,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(body, `"type":"divider"`) {
+		t.Fatalf("no footer → no divider; got %q", body)
+	}
+	if strings.Contains(body, `"type":"footer"`) {
+		t.Fatalf("no footer → no footer block; got %q", body)
+	}
+}
+
+// TestRenderRichTurnBlocks_FooterPreservesChevronFrame verifies
+// the three statusbar lines land in the footer block's `text`
+// field as a single multi-line string, joined with newlines so
+// Telegram renders each icon-prefixed line as its own visual
+// row inside the footer caption region. The chevron-tail
+// box-drawing frame (┌──› / └──›) is deliberately NOT added
+// here — the native footer block type supplies the visual
+// frame, so hand-rendered box-drawing would double up and
+// clash with Telegram's own footer caption styling.
+func TestRenderRichTurnBlocks_FooterPreservesChevronFrame(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 1",
+		hasContent:    true,
+		footer: []string{
+			"🤖: claude opus-4-5 abc-123",
+			"💰:「 1.2k / 0 / 234 · 5.0% (200k) · $0.012 」",
+			"📁: code/nightme · ⎇ main",
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("render output must be valid JSON: %v\nbody=%s", err, body)
+	}
+	var footer map[string]any
+	for _, b := range blocks {
+		if b["type"] == "footer" {
+			footer = b
+			break
+		}
+	}
+	if footer == nil {
+		t.Fatalf("footer block not found in %v", blocks)
+	}
+	text, ok := footer["text"].(string)
+	if !ok {
+		t.Fatalf("footer text must be a string; got %T", footer["text"])
+	}
+	// Each of the three statusbar lines must appear in order, in a
+	// single string with newlines between them.
+	wantLines := []string{
+		"🤖: claude opus-4-5 abc-123",
+		"💰:「 1.2k / 0 / 234 · 5.0% (200k) · $0.012 」",
+		"📁: code/nightme · ⎇ main",
+	}
+	want := strings.Join(wantLines, "\n")
+	if text != want {
+		t.Fatalf("footer text mismatch:\n got: %q\nwant: %q", text, want)
+	}
+	// No chevron frame: native footer block supplies the visual
+	// surround. If a future change accidentally re-adds the
+	// ┌──› / └──› via statusbar.RenderPanel here, the assertion
+	// above (exact-string match) will fail first.
+	if strings.Contains(text, "┌") || strings.Contains(text, "└") {
+		t.Fatalf("footer block should not hand-draw box frame; got %q", text)
 	}
 }

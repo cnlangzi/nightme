@@ -455,18 +455,14 @@ func TestWalker_Fallback_UnterminatedFence(t *testing.T) {
 	}
 }
 
-// === Coverage extension for 2026-09-14 walker扩面 =============================
-//
-// The cases below exercise dimensions the original minimal walker did not
-// touch: edge cells, mixed inline entities inside tables / lists /
-// headings, multi-entity paragraphs, block-marker boundaries, empty /
-// whitespace inputs, char cap boundary, and negative cases that must
-// still bail (paragraph-only raw HTML, partial separator shapes,
-// heading → ordered list transition, etc.). Every test here assumes the
-//扩面 contract: walker returns ok=true whenever it can model the input,
-// and the only ok=false triggers are block-level shape errors.
-
-// -- Tables: cell content --------------------------------------------------------
+// Coverage extension for the markdown-to-rich walker: cell content
+// edges, mixed inline entities inside tables / lists / headings,
+// multi-entity paragraphs, block-marker boundaries, empty /
+// whitespace inputs, char-cap boundary, and negative cases that must
+// still bail (unterminated fence, malformed separator row,
+// column-count mismatch). The walker returns ok=true whenever it can
+// model the input; the only ok=false triggers are block-level shape
+// errors.
 
 // TestWalker_Table_InlineCodeInCell verifies the walker emits a code
 // entity for inline backtick content inside a table cell.
@@ -641,8 +637,6 @@ func TestWalker_Table_FourAlignments(t *testing.T) {
 	}
 }
 
-// -- Ordered list ---------------------------------------------------------------
-
 // TestWalker_OrderedList_SingleItem verifies a 1-item ordered list is
 // accepted (no minimum-count constraint).
 func TestWalker_OrderedList_SingleItem(t *testing.T) {
@@ -712,8 +706,6 @@ func TestWalker_OrderedList_HeadingStops(t *testing.T) {
 	}
 }
 
-// -- Footnote refs --------------------------------------------------------------
-
 // TestWalker_Footnote_Multiple verifies multiple footnote refs in one
 // paragraph are all stripped without affecting surrounding text.
 // The walker emits text pieces only — footnote entity slots are
@@ -780,8 +772,6 @@ func TestWalker_Footnote_AdjacentText(t *testing.T) {
 	}
 }
 
-// -- Image refs -----------------------------------------------------------------
-
 // TestWalker_Image_NonHttpURL verifies images with disallowed schemes
 // fall back to literal text (safeLink mirror). The walker does NOT
 // bail on these — the entity is just dropped.
@@ -845,8 +835,6 @@ func TestWalker_Image_TrailingImage(t *testing.T) {
 	}
 }
 
-// -- Raw HTML -------------------------------------------------------------------
-
 // TestWalker_RawHTML_SelfClosing verifies self-closing tags are kept
 // as literal text inside a paragraph block.
 func TestWalker_RawHTML_SelfClosing(t *testing.T) {
@@ -892,8 +880,6 @@ func TestWalker_RawHTML_MultipleTags(t *testing.T) {
 		t.Fatalf("expected 1 paragraph, got %+v", blocks)
 	}
 }
-
-// -- Mixed in real documents ----------------------------------------------------
 
 // TestWalker_Mixed_HeadingWithFootnote verifies a heading containing a
 // footnote ref still renders as a heading block (footnote stripped
@@ -976,8 +962,6 @@ func TestWalker_Mixed_TableAfterParagraph(t *testing.T) {
 	}
 }
 
-// -- Edge cases: empty / whitespace / char cap ---------------------------------
-
 // TestWalker_Empty_WhitespaceOnly verifies a whitespace-only payload
 // (no markdown signal at all) is rejected — the caller falls back to
 // a paragraph block. This guards against `e.body = "   \n  "` in the
@@ -1012,8 +996,6 @@ func TestWalker_CharCap_WellBelow(t *testing.T) {
 		t.Fatal("moderate input well below cap should succeed")
 	}
 }
-
-// -- Block-marker boundaries ----------------------------------------------------
 
 // TestWalker_BlockMarker_ParagraphThenFence verifies paragraph and
 // adjacent fenced code block are two separate blocks (fence has its
@@ -1079,8 +1061,6 @@ func TestWalker_BlockMarker_OrderedListFollowedByParagraph(t *testing.T) {
 		t.Errorf("block 1 type=%v, want paragraph", blocks[1]["type"])
 	}
 }
-
-// -- Walker negative cases that must still bail ---------------------------------
 
 // TestWalker_Negative_FenceNoBody verifies a fence with only the
 // opening line (no body, no close) bails.

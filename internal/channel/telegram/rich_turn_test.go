@@ -395,13 +395,12 @@ func TestRenderRichTurnBlocks_FooterPreservesChevronFrame(t *testing.T) {
 	}
 }
 
-// === Chain integration tests for 2026-09-14 walker扩面 =======================
-//
-// The cases below exercise the扩面 features at the chain entry layer
-// (renderRichTurnBlocksLocked), not just at the walker level. They
-// guard against regressions where the walker's new outputs fail to
-// flow through to the rich turn wire form, or where the bail path
-// re-introduces a plain text fallback.
+// Chain integration tests below exercise ordered list / table /
+// footnote / image / raw-HTML rendering through
+// renderRichTurnBlocksLocked, not just at the walker unit. They
+// guard against regressions where the walker output fails to flow
+// through to the rich turn wire form, or where the bail path
+// re-introduces a plain-text escape hatch.
 
 // countBlocksByType walks a rendered blocks array and tallies block
 // types. Used by the integration tests below to assert the chain
@@ -451,8 +450,7 @@ func chainFixture(t *testing.T, entries []richTurnEntry) string {
 }
 
 // TestRenderRichTurnBlocks_OrderedListEntry verifies a chain entry
-// containing an ordered list reaches the wire as a list block — the
-// walker扩面 contract.
+// containing an ordered list reaches the wire as a list block.
 func TestRenderRichTurnBlocks_OrderedListEntry(t *testing.T) {
 	body := chainFixture(t, []richTurnEntry{
 		{kind: "reply", body: "1. one\n2. two\n3. three"},
@@ -618,10 +616,10 @@ func TestRenderRichTurnBlocks_RawHTMLInEntry(t *testing.T) {
 }
 
 // TestRenderRichTurnBlocks_MultipleEntriesMix verifies a chain with
-// multiple entries each carrying different扩面 features — heading
-// (via entry body that's just a heading line), list, table, plain
-// paragraph — all flow through and produce the expected block mix
-// without dropping entries or bailing the whole chain.
+// multiple entries carrying different markdown shapes (heading,
+// list, table, plain paragraph) — all flow through and produce the
+// expected block mix without dropping entries or bailing the whole
+// chain.
 func TestRenderRichTurnBlocks_MultipleEntriesMix(t *testing.T) {
 	body := chainFixture(t, []richTurnEntry{
 		{kind: "reply", body: "1. one\n2. two"},

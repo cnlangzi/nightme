@@ -283,6 +283,7 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 	//
 	// Strip <b>/</b> wrappers — rich block text fields don't
 	// parse HTML.
+	headerEmitted := false
 	if turn.headerLine != "" {
 		skipDefault := turn.headerLine == defaultRichTurnHeader && turn.hasContent
 		if !skipDefault {
@@ -296,8 +297,20 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 					"type": "paragraph",
 					"text": headerText,
 				})
+				headerEmitted = true
 			}
 		}
+	}
+
+	// Heartbeat / body break — divider sits between the
+	// heartbeat line and the first body entry so the card
+	// reads as three distinct regions: [heartbeat] ─ [body] ─
+	// [footer]. Mirrors the footer divider below. Skipped
+	// when no body follows (the cold-create "🤖 Working…"
+	// banner alone, before any entry has landed) — a divider
+	// with nothing below it reads as a stray HR.
+	if headerEmitted && (len(turn.entries) > 0 || len(turn.taskList) > 0) {
+		blocks = append(blocks, map[string]any{"type": "divider"})
 	}
 
 	// Entries: one paragraph per pending event.

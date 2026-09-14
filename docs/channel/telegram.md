@@ -291,7 +291,7 @@ Topic 方案要求：
 1. 群组是 **Forum Supergroup**；普通群组没有 Forum Topic。
 2. 群组已开启 Topics。
 3. Bot 是群组成员，并具备创建/管理 Topic 所需的权限；建议配置为管理员。
-4. Bot 使用长轮询（`getUpdates`）接收 `Message`、`CallbackQuery` 和 `MyChatMember` 三类 update；其余（`message_reaction` / `message_reaction_count` / `chat_member`）在 `allowed_updates` 白名单中显式排除，避免入站噪声推送到 `incoming` 通道。每个 Bot 只能有一个 `getUpdates` consumer,daemon 重启时用持久化的 `update_id + 1` 继续消费。
+4. Bot 使用长轮询（`getUpdates`）只订阅 `Message` 与 `CallbackQuery` 两类 update；所有其它 update 类型（`message_reaction` / `message_reaction_count` / `chat_member` / `my_chat_member` / `edited_message` / `channel_post` 等）一律不下发，避免任何非用户主动消息的事件推送到 `incoming` 通道。每个 Bot 只能有一个 `getUpdates` consumer,daemon 重启时用持久化的 `update_id + 1` 继续消费。
 5. 私聊没有 Forum Topic；私聊只能退化为普通消息，并在文档和 UI 中明确标注。
 6. Topic 内发送的所有事件都必须显式携带正确的 `message_thread_id`。
 
@@ -3164,12 +3164,12 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 - 这意味着 Topic 永远是"空容器"，永远要靠内部的占位消息表达"会话状态"。
 - 已确认无替代方案。
 
-#### L10. 入站 reaction / chat_member update 不进入 inbound
+#### L10. 入站 update 严格收敛到 `message` + `callback_query`
 
-- `allowed_updates` 显式排除 `message_reaction` / `message_reaction_count` / `chat_member`，Telegram 服务端不下发这三类 update。
-- `Update` struct 仅暴露 `Message` / `EditedMessage` / `CallbackQuery` / `MyChatMember` 四个字段；`handleUpdate` 分发逻辑对其他类型无处理分支。
-- 结论：bot 不接收任何入站 reaction / chat_member 事件；emoji reaction 仅作为出站通道（`OutMessageState` → `setMessageReaction`）用于在 user 消息 / 占位消息上贴视觉状态。
-- 平台硬限制：即便重新开启订阅，`MessageReactionUpdate` 不携带 `message_thread_id`，topic 内的 reaction 仍无法命中 topic 内的 ChatSession（chatID 不带 thread 后缀）。
+- `allowed_updates` 显式列出 `["message", "callback_query"]`；其余所有 update 类型（`message_reaction` / `message_reaction_count` / `chat_member` / `my_chat_member` / `edited_message` / `channel_post` 等）服务端不下发。
+- `Update` struct 仅暴露 `Message` / `EditedMessage` / `CallbackQuery` 三个字段；`handleUpdate` 只对前两者有处理分支，`EditedMessage` 暂不消费（保留 JSON 解码兼容性）。
+- 结论：bot 不接收任何非用户主动消息的事件；emoji reaction 仅作为出站通道（`OutMessageState` → `setMessageReaction`）用于在 user 消息 / 占位消息上贴视觉状态。
+- 平台硬限制：若未来需要基于 emoji reaction 的交互，需重新开启 `message_reaction` 订阅；`MessageReactionUpdate` 不携带 `message_thread_id`，topic 内的 reaction 仍无法命中 topic 内的 ChatSession（chatID 不带 thread 后缀）。
 
 ### 15.2 降级类（用近似手段实现，已 work）
 
@@ -4079,4 +4079,3 @@ L3 仅在 L2 生产数据证明"典型 turn < 32K chars"且"active chunk 编辑�
 - ✅ L2 生产数据显示典型 turn < 5K chars（active chunk 当前已经足够） → **L3 不上**
 - ⚠️ 数据显示典型 turn 5K-32K chars + chain chunk 切换频繁 → L3 进候选
 - ❌ chain 性能 / bug 报告 → 修复 chain 而不是退役
-

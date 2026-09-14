@@ -373,32 +373,6 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	a.publish(inbound)
 }
 
-// handleMyChatMember tracks the bot's own membership changes:
-// added to / removed from / promoted in a chat. We just log; the
-// runtime doesn't act on bot lifecycle today, but a future
-// self-healing path (e.g. drop the chat from state when the bot
-// is kicked) can hook here.
-func (a *Adapter) handleMyChatMember(_ context.Context, update *ChatMemberUpdate) {
-	if update == nil || update.NewChatMember == nil {
-		return
-	}
-	chatID := strconv.FormatInt(update.Chat.ID, 10)
-	if a.logger != nil {
-		a.logger.Info("telegram: my_chat_member",
-			"chat_id", chatID,
-			"old_status", chatMemberStatus(update.OldChatMember),
-			"new_status", update.NewChatMember.Status,
-		)
-	}
-}
-
-func chatMemberStatus(m *ChatMember) string {
-	if m == nil {
-		return ""
-	}
-	return m.Status
-}
-
 func (a *Adapter) publish(inbound messages.InboundMessage) {
 	select {
 	case a.incoming <- inbound:

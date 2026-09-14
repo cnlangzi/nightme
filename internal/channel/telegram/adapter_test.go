@@ -2176,17 +2176,6 @@ func TestAdapter_Send_OutResultEmptyText(t *testing.T) {
 	}
 }
 
-func TestAdapter_HandleMyChatMember_LogsWithoutPanic(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	a.handleMyChatMember(context.Background(), &ChatMemberUpdate{
-		Chat:          Chat{ID: 100, Type: "supergroup"},
-		From:          User{ID: 1},
-		OldChatMember: &ChatMember{Status: "left"},
-		NewChatMember: &ChatMember{Status: "administrator"},
-	})
-	// Just ensure no panic; the log is best-effort.
-}
-
 func TestAdapter_ApiCall_AppliesRateLimitAndRetry(t *testing.T) {
 	a, api := newTestAdapter(t)
 	ctx := context.Background()

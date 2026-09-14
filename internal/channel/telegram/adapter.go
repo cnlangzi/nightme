@@ -15,7 +15,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
-	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/statusbar"
@@ -261,10 +260,13 @@ func (a *Adapter) pollLoop(ctx context.Context) {
 		// array via envelope.Result).
 		var updates []Update
 		err := a.api.call(ctx, "getUpdates", map[string]any{
-			"offset":          a.offset,
-			"limit":           100,
-			"timeout":         a.config.PollingTimeout,
-			"allowed_updates": []string{"message", "callback_query", "my_chat_member", "chat_member", "message_reaction"},
+			"offset":  a.offset,
+			"limit":   100,
+			"timeout": a.config.PollingTimeout,
+			// 仅订阅正常消息与交互按钮回调：所有其它 update 类型
+			//（message_reaction / message_reaction_count / chat_member /
+			// my_chat_member / edited_message / channel_post 等）一律不下发。
+			"allowed_updates": []string{"message", "callback_query"},
 		}, &updates)
 		if err != nil {
 			var apiErr *apiError
@@ -296,18 +298,6 @@ func (a *Adapter) handleUpdate(ctx context.Context, update Update) {
 	}
 	if update.CallbackQuery != nil {
 		a.handleCallbackQuery(ctx, update.CallbackQuery)
-		return
-	}
-	if update.MessageReaction != nil {
-		a.handleMessageReaction(ctx, update.MessageReaction)
-		return
-	}
-	if update.MyChatMember != nil {
-		a.handleMyChatMember(ctx, update.MyChatMember)
-		return
-	}
-	if update.ChatMember != nil {
-		a.handleChatMember(ctx, update.ChatMember)
 	}
 }
 
@@ -396,105 +386,6 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 		"text_len", len(text),
 	)
 	a.publish(inbound)
-}
-
-// handleMessageReaction converts a Telegram user-reaction
-// update into an InboundMessage.Reaction so the runtime can route
-// it to ChatSession.HandleAction (gtwDrafts decision / F-50 reaction
-// routing / F-31 MessageState FSM in that order).
-//
-// Telegram delivers one update per change. We only forward events
-// that have at least one emoji in the new reaction list — pure
-// removals (NewReaction empty) are reported with Emoji="" so the
-// runtime can clear its state.
-//
-// chatID MUST match the namespaced form produced by the message
-// path ("tg_<chat.id>") — otherwise runtime.findChatSession cannot
-// resolve the owning ChatSession and the reaction is silently
-// dropped at the gtw reaction handler (see the 2026-08-22 fix
-// notes; previously this function used the raw Telegram chat.id
-// which broke gtw emoji-reaction routing entirely).
-//
-// Known limitation: MessageReactionUpdate carries no message_thread_id,
-// so reactions on messages inside a Forum topic always resolve to
-// the chat-level chatID ("tg_<chat.id>" without thread suffix).
-// Topic-resident gtw drafts are keyed by the per-topic chatID
-// ("tg_<chat.id>:<thread_id>") and therefore cannot be reached by
-// a native emoji reaction. Documented in docs/channel/telegram.md
-// §15 (limitations / gap catalog).
-func (a *Adapter) handleMessageReaction(_ context.Context, update *MessageReactionUpdate) {
-	if update == nil || update.User.ID == 0 {
-		return
-	}
-	a.mu.Lock()
-	botID := a.botID
-	a.mu.Unlock()
-	if botID != 0 && update.User.ID == botID {
-		return
-	}
-	emoji := ""
-	if len(update.NewReaction) > 0 {
-		emoji = update.NewReaction[0].Emoji
-	}
-	rawChatID := strconv.FormatInt(update.Chat.ID, 10)
-	chatID := a.sessionChatID(rawChatID, 0)
-	inbound := messages.InboundMessage{
-		ChatID:     chatID,
-		UserID:     strconv.FormatInt(update.User.ID, 10),
-		MessageID:  strconv.Itoa(update.MessageID),
-		Time:       time.Unix(update.Date, 0).UTC(),
-		HasMention: true,
-		Reaction: &commandServices.ReactionEvent{
-			TargetMsgID: strconv.Itoa(update.MessageID),
-			Emoji:       emoji,
-			UserID:      strconv.FormatInt(update.User.ID, 10),
-			ChatID:      chatID,
-		},
-	}
-	a.publish(inbound)
-}
-
-// handleMyChatMember tracks the bot's own membership changes:
-// added to / removed from / promoted in a chat. We just log; the
-// runtime doesn't act on bot lifecycle today, but a future
-// self-healing path (e.g. drop the chat from state when the bot
-// is kicked) can hook here.
-func (a *Adapter) handleMyChatMember(_ context.Context, update *ChatMemberUpdate) {
-	if update == nil || update.NewChatMember == nil {
-		return
-	}
-	chatID := strconv.FormatInt(update.Chat.ID, 10)
-	if a.logger != nil {
-		a.logger.Info("telegram: my_chat_member",
-			"chat_id", chatID,
-			"old_status", chatMemberStatus(update.OldChatMember),
-			"new_status", update.NewChatMember.Status,
-		)
-	}
-}
-
-// handleChatMember is fired when a non-bot user joins/leaves a
-// chat. We log only; the runtime doesn't act on user membership
-// today.
-func (a *Adapter) handleChatMember(_ context.Context, update *ChatMemberUpdate) {
-	if update == nil || update.NewChatMember == nil {
-		return
-	}
-	chatID := strconv.FormatInt(update.Chat.ID, 10)
-	if a.logger != nil {
-		a.logger.Debug("telegram: chat_member",
-			"chat_id", chatID,
-			"user_id", update.NewChatMember.User.ID,
-			"new_status", update.NewChatMember.Status,
-		)
-	}
-}
-
-func chatMemberStatus(m *ChatMember) string {
-	if m == nil {
-		return ""
-	}
-	return m.Status
 }
 
 func (a *Adapter) publish(inbound messages.InboundMessage) {

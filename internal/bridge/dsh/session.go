@@ -517,7 +517,7 @@ func (d *driver) createFreshSession(ctx context.Context, workspace string) (stri
 	}
 
 	createCtx, createCancel := context.WithTimeout(ctx, handshakeTimeout)
-	createResp, err := d.cli.RPC.Post(createCtx, "session.create", map[string]any{
+	createResp, err := d.cli.RPC.PostWithReconnect(createCtx, "session.create", map[string]any{
 		"request": map[string]any{
 			"workspaceId": ws.WorkspaceID,
 		},

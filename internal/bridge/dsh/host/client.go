@@ -247,6 +247,96 @@ func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResp
 	return &resp, nil
 }
 
+// reconnectMaxAttempts bounds PostWithReconnect's retry loop.
+// Each attempt waits respawnDelay(attempt-1), capped at
+// respawnBackoffMax. The cumulative wall time stays under ~31s —
+// long enough to absorb a normal watchdog respawn (which is
+// forever-retry after #370 but usually succeeds within a few
+// seconds), short enough that a genuinely-dead host surfaces
+// quickly to /review and friends instead of wedging their
+// goroutines for minutes.
+const reconnectMaxAttempts = 8
+
+// PostWithReconnect is Post wrapped with retry on transient
+// transport errors. Use it from any caller that drives a real
+// dsh RPC and doesn't already have its own retry loop — typically
+// the typed convenience methods (WorkspaceCreate, SessionCreate)
+// and the session.go handshake path's raw Post.
+//
+// On a non-transport error (HTTP 500, JSON decode failure,
+// rpcId mismatch, business !OK response) the retry loop is
+// short-circuited — those failures are not the watchdog and
+// retrying would just hide the real cause.
+//
+// ctx cancellation aborts the wait between attempts; an
+// in-flight Post call runs to completion because Go's
+// http.Client respects ctx.
+func (c *RPCClient) PostWithReconnect(ctx context.Context, method string, args any) (*rpcResponse, error) {
+	var resp *rpcResponse
+	err := c.callWithReconnect(ctx, func(ctx context.Context) error {
+		r, err := c.Post(ctx, method, args)
+		if err != nil {
+			return err
+		}
+		resp = r
+		return nil
+	})
+	return resp, err
+}
+
+// callWithReconnect runs fn with retry on transient transport
+// failures. fn returning nil or a non-transient error short-
+// circuits the loop; fn returning a transient error triggers
+// respawnDelay(attempt-1) backoff and another try.
+//
+// Same curve as the watchdog (lifecycle.go::respawnDelay), so
+// caller-side and host-side recovery stay in step — when the
+// host is mid-respawn, the caller's wait matches the watchdog's
+// retry interval and the first successful respawn satisfies the
+// next caller attempt.
+func (c *RPCClient) callWithReconnect(ctx context.Context, fn func(ctx context.Context) error) error {
+	var lastErr error
+	for attempt := 0; attempt < reconnectMaxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(respawnDelay(attempt - 1)):
+			}
+		}
+		lastErr = fn(ctx)
+		if lastErr == nil || !isTransientTransportError(lastErr) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+// isTransientTransportError reports whether err looks like a
+// transport-level failure that's worth retrying — the dial failed
+// (dsh host died, watchdog is mid-respawn), the connection was
+// reset mid-flight, or the body closed prematurely. Business-
+// level failures (HTTP 4xx/5xx with a server-side error envelope,
+// decode mismatch, gateway/input-invalid, etc.) are NOT transient
+// here — they're handled by their callers.
+//
+// Substring match on the stdlib's wrapped error text keeps this
+// portable across unix + windows without depending on
+// syscall.ECONNREFUSED directly. The dsh host's actual error
+// text is "Post \"<url>\": dial tcp 127.0.0.1:3081: connect:
+// connection refused" (verified against the field-reported
+// /review failure).
+func isTransientTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "no such host") ||
+		strings.Contains(s, "EOF")
+}
+
 // PostEnvelope POSTs a pre-built raw JSON body without wrapping in
 // the standard clientRequest envelope. Used for /api/respond which
 // uses the client-response envelope (dsh-api.md §2.12) — type:"client-response",
@@ -546,8 +636,16 @@ type WorkspaceSummary struct {
 // ownership tracking, no per-driver cleanup on Close (the
 // workspace survives across sessions, see driver.Close which
 // uses workspace.archiveSession instead of workspace.delete).
+//
+// Transient transport retries: a freshly-dialed POST that returns
+// "connection refused" / "connection reset" / EOF is almost always
+// the watchdog respawning dsh under us (host/lifecycle.go
+// runMonitor is now forever-retry per #370). PostWithReconnect
+// gives the watchdog a ~31s window before surfacing the error;
+// callers in tight goroutines (Starter.RunOnce / /review) don't
+// see the failure in the gap.
 func (c *RPCClient) WorkspaceCreate(ctx context.Context, path string) (WorkspaceSummary, error) {
-	resp, err := c.Post(ctx, "workspace.create", map[string]any{
+	resp, err := c.PostWithReconnect(ctx, "workspace.create", map[string]any{
 		"request": map[string]any{"path": path},
 	})
 	if err != nil {
@@ -607,8 +705,11 @@ func (c *RPCClient) WorkspaceDelete(ctx context.Context, workspaceID string) err
 // SessionCreate invokes /api/session.create. Returns the new
 // sessionId. Phase 2 will call this from ChatSession.Spawner; Phase 0
 // is just plumbing.
+//
+// Wraps Post with PostWithReconnect — see WorkspaceCreate for the
+// watchdog-respawn window rationale.
 func (c *RPCClient) SessionCreate(ctx context.Context, opts SessionCreateOpts) (string, error) {
-	resp, err := c.Post(ctx, "session.create", map[string]any{
+	resp, err := c.PostWithReconnect(ctx, "session.create", map[string]any{
 		"request": opts,
 	})
 	if err != nil {

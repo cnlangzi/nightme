@@ -1963,40 +1963,6 @@ func summarizeToolResult(name, output string, err error) string {
 | `sendMessage` 同一 chat 串行速率 | agent turn 短时间内 burst 占位新建 chunk → 5 QPS per-chat 有封顶 | debounce 已经合并 hot path；overflow chunk 是冷路径，300-500ms 间隔足够 |
 | SPLIT partial-failure | sendFn 第 k 片失败时前 k-1 片 Telegram orphan 历史 | 接受；daemon 重启后消失；后续 appendSegment 走 case 3 ROTATE |
 
-### 11.12.18 变更日志
-
-- **2026-08-22** - 引入 v9 per-turn multi-chunk chain rolling log，替换 v4 / v8 的"单占位 + 独立 bubble"双轨制。新增文件：`internal/channel/telegram/placeholder_chain.go`（含 chainLRU）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移）。改动：`Adapter.Send` 8 个 Out* case 重写为 `appendSegment` 路径 / `OutHeartbeat` 改 `patchActiveHeader` / `OnPromptEnded` 改 flushChain + 🎉 + cursor reset / `formatTool` 改为调 summarize helpers / `ensurePlaceholder` delegate 到 chain。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。
-
-- **2026-08-22 (晚)** - 多次 P0/P1/P2 修复（P0 #1 cold-create 种子 entries，P0 #2 overflow tail 保留 content，P0 #3 case-3 内联 fast-forward 避免 mutex 重入，P1 byteOffset 死代码删除，P2 cold-start body 含 separator）。Commit `08f8f7e` 包含 codex review fixes。
-
-- **2026-08-22 (晚)** - chain integration tests `chain_integration_test.go` 加入。Commit `e355153`。
-
-- **2026-08-23** - §11.12.16 矩阵补完（`TestChainOverflow_TailHasNonEmptyEntries` P0 #2 lock-in 等），v9 chain codex review 收尾。
-
-- **2026-08-23** - `placeholder_chain_flush.go:217` 删除 debug `fmt.Println`；footer policy 改成数据驱动（`statusbar.StatusBarLines(msg) != nil` 决定 lastFooter 刷新，Kind 不锁）；`appendSegment` 每路径必 `dirty=true` + `scheduleFlushDebounced` 无条件调用，确保 Render 总发生。Commit `39579b8`。
-
-- **2026-08-23** - §18 StatusBar trailer 扩到所有 text-emitting kind（包括 OutThinking / OutToolStart / OutToolEnd / OutError / OutCommandReply）；`isTextEmittingKind` helper 收拢 policy。Commit `7bf76be`。
-
-- **2026-08-23** - **chainKey 加 userMessageID 字段**（commit `a654fc3`）—— 锁死 back-to-back user msg 的 Out* 串扰（race condition）。`getOrCreate / lookup / purge` 三个 chainLRU 方法加 userMessageID 参数；14 个 adapter.go call site 全部更新。`patchChainHeader` 加 userMessageID 显式参数（替代原 hardcoded 0）。**ROTATE tail header 改用 `heartbeatText(nil)`**（同 commit）—— ~~视觉连续性优先让位于"每条 message 的 header 反映创建时间"~~。**2026-08-23 (v9 P1.1) 推翻**:新 chunk header 不再"反映创建时间",而是完全 inherit 当时的 active 状态快照(`inheritLatestHeader`)。见 §11.12.7.4 + 同日 P1.1 变更日志。
-
-- **2026-08-23** - **SPLIT path 实现**（commit `aad7705`）—— §11.12.7.2 trigger 1 落地。`appendSegment` / `appendErrorSegment` 入口 pre-check（`len(segment) > chainChunkThresholdChars`）→ `splitOversizedSegmentLocked` / `splitOversizedErrorSegmentLocked`。`chunkBody.appendEntryHTML` 新方法（isHTML=true，Compose() 跳过 RenderMarkdown 避免二次转义）。6 个新 SPLIT 测试 + 1 个 ROTATE 测试数据修正（4000-char segment 改 3499-char，避开新 SPLIT 触发）。
-
-- **2026-08-23** - **3 个 chain-key isolation 回归测试**（commit `614922e`）：`TestChain_BackToBackUserMessages_AreSeparateChains` / `TestChain_DelayedOutReply_AfterNewUserMsg_DoesNotLeak` / `TestChain_Heartbeat_DoesNotCrossUserMessageBoundary`。
-
-- **2026-08-23** - **测试基础设施 race fix + footer 回归测试**（commit `2e4fb85`）：`sendMessageCounter` 改 `atomic.Int64`（pre-existing race 修干净，`go test -race` 现在 clean）；4 个 footer 回归测试（`TestChain_RenderAlwaysHappen_*` / `TestChain_DataDrivenFooter_*` / `TestChain_NewChunk_InheritsLastFooter` / `TestChain_MultipleOverflow_*`）；`fmt` import 清理。
-
-- **2026-08-23** - **Spec 同步**（commit `b68cc30`）：§11.12.2 chainKey + LRU cap 含义 / §11.12.3 阈值 + SPLIT rationale / §11.12.4 OutCommandReply + 超长处理段 / §11.12.6 数据驱动 footer + Render-always / §11.12.7.2 三触发器决策矩阵 / §11.12.8 heartbeat 例代码 / §11.12.10 chain loss / §11.12.11 Topic vs DM 不变。
-
-- **2026-08-23** - **Spec 进一步对齐**（本次 commit）：§11.12.2 chunkBody API 加 `appendEntryHTML` / §11.12.4 OutError 路径改为 `appendErrorSegment` / §11.12.5 核心 API 重写（package-level + chainLRU 实际签名）/ §11.12.7.2 trigger 1 partial-failure + trigger 3 step 5 header 来源 / §11.12.8 / §11.12.9 例代码改实际 / §11.12.15 commit 清单改 git log 引用 / §11.12.16 矩阵用实际 test 名 / §11.12.17 limits 表补 SPLIT + chain-key / §11.12.18 变更日志追加本批。
-
-- **2026-08-24** - **v9 P2 OutResult 独立消息**：对齐飞书 F-39 决策。`Send(OutResult)` 从 default 分支挑出走 `sendOutResultMessage` helper，直接 `sendTelegramMessage(reply_to_message_id=userMsgID, text=result+StatusBar trailer)`。新增 `placeholderChain.resultMessageID` 字段记录最后一片 result messageID；长 result > 3900 chars 走 `splitTelegramText` 切多片。`OnPromptEnded` 🎉 锚点改为 `chain.resultMessageID` 优先、零值回退 active chunk（保住 error-only / tool-only / slash-only turn 行为）。改动：`adapter.go` Send / OnPromptEnded + `placeholder_chain.go` struct；新增 helper `sendOutResultMessage` / `sendResultChunk`。**对齐项**：§11.12.4 表格 OutResult 行 + §11.12.4.1 新增（独立消息契约 + resultMessageID 字段语义）+ §11.12.9 代码示例 + §11.12.11 table 行 + §11.12.12 三栏飞书对位 + §11.12.13 长文本段 + §11.12.16 测试矩阵。**commit 拆解**：`chain: add resultMessageID anchor field` → `Send: split OutResult → standalone sendOutResultMessage` → `OnPromptEnded: prefer resultMessageID over active chunk` → `tests: OutResult standalone message + 🎉 anchor switch` → `docs: §11.12 v9 P2 OutResult 独立消息`。
-
-- **2026-08-24** - **v9 P2.1 OutResult standalone 移除中间分隔线**（user feedback on first dotest）。`sendOutResultMessage` 不再在 result body 和 trailer 之间插入 `\n────────\n` —— trailer 自带 `┌──› / └──›` box-drawing 边框提供视觉边界，额外横线让 standalone reply-anchored message 看起来"断裂"。`adapter.go` sendOutResultMessage helper 改为 `trailer = "\n" + statusbar.RenderPanel(sb)`。**chain chunk 仍保留 `────────────────` 分隔**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行）—— chain 上的 entries 是 activity log 序列，footer 是状态 summary，两者之间需要强分隔。**测试更新**：`TestAdapter_Send_OutResult_SendsStandaloneReply` 移除 `────────` 断言（其他 trailer 三行断言保留）。**doc 更新**：§11.12.4.1 视觉示例 + §11.12.4.1 契约第 2 条 + §11.12.18 变更日志（本条）。
-
-- **2026-08-24** - **DRY: 收口 wire-facing markdown 渲染，新增 `RenderForWire`**。v9 P2 把 OutResult 改成独立 `sendMessage` 时漏掉了 markdown→HTML 渲染步骤（用户写 `**bold**` / ```fences``` / `[link](url)` 全渲染成字面字符）。本次修复：(1) `internal/channel/telegram/render.go` 新增 `RenderForWire(raw string) string` —— 单一 wire-facing 入口，包一层 `RenderMarkdown` + 空串 short-circuit + err fallback（escapeHTML）。`sendOutResultMessage` 调它一次，trailer (`statusbar.RenderPanel`) 仍直通不再二次渲染避免 box-drawing 被 escape。(2) DRY 清扫：`topic.go` 删除三个 dead method —— `sendText` / `sendRenderedText`(v8 per-bubble path 残留，v9 chain 接管后零调用) + `createTopic` / `editTelegramKeyboard`(从 topic-mode 评审期留下，代码默认论坛用现成 `message_thread_id`，从未有生产 caller)；`adapter.go:1638` 替换过时的 `sendRenderedText which v9 no longer routes` 历史注释。(3) **chunkBody.Compose 继续走 `RenderMarkdown` 不是 `RenderForWire`** —— Compose 是 per-entry loop + `isHTML` 路由，不能套 block-level 包装；两个入口覆盖两条路径不算重复，是 render.go 注释里固定的契约。(4) 测试：`render_test.go` 新增 5 个 `TestRenderForWire_*`（empty / bold / fence / link safe / raw HTML escape）+ `adapter_statusbar_test.go` 新增 `TestAdapter_Send_DM_OutResult_RendersMarkdownToHTML`（端到端断言 `<b>` / `<code>` / `<pre>` / `<a>` 都进 wire + literal `**` ``` ``` ``` `[..](..)` **不**进 wire + `parse_mode=HTML` 仍存在 + trailer 仍三行）。**doc 更新**：§11.12.13 重写 Markdown 渲染段，明确 `RenderForWire` 是 wire 入口 + Compose 是 chunk 入口 + 未来 sanitize pipeline 只注入 `RenderForWire` 一处；§11.12.18 变更日志（本条）。
-
-- **2026-08-24** - **v9 P3: 渲染 DRY 收口 + blank-chunk 修复**。详见 §11.12.19。本次修复分两条独立但同 PR 的线：(1) **blank-chunk bug fix**：ROTATE / SPLIT 路径在边界条件下（segment 是空白 / entries 全是 `"\n"`）mint 出"只有 footer 的假空白 chunk"，用户视角像没说话又发一条。根因是 11 个 sendFn 站点缺守卫 + `strings.TrimSpace(Compose())` 被 footer box-drawing 字符欺骗。修法：`chunkBody.hasVisibleEntries()` —— 唯一一处"是空白"定义，看 entries + taskList 两个 section；`materializeChunk` 协调器封装 `stampFooter → hasVisibleEntries 检查 → sendFn → messageID 写回 → chain.chunks append` 五步，11 个 sendFn 站点（`appendSegment` cold-create / ROTATE / `appendSegmentLocked` cold-create / ROTATE / `appendErrorSegment` cold-create / ROTATE / `splitOversizedSegmentLocked` 循环 / `splitOversizedErrorSegmentLocked` 循环 / `flushChainNow` overflow intermediate + tail / `setTaskList` cold-create）全部收敛。 (2) **渲染 DRY**：5 处 `RenderMarkdown + escapeHTML fallback` 模式（`chunkBody.Compose` per-entry / `chunkBody.renderTaskSection` / `splitOversizedSegmentLocked` / `splitOversizedErrorSegmentLocked` / `RenderForWire`）+ 1 处 `body + "\n\n" + RenderPanel(footerLines)` trailer 拼接模式（`sendOutResultMessage`）—— 收口到两个共享原语：`renderMarkdownSafe(s)` 和 `appendTrailerToBody(body, footerLines)`。三层结构（数据类 → 协调器 → 共享原语）跟现有 v9 P1.1（`inheritLatestHeader` 收口）+ v9 P2（`RenderForWire` 收口）的演化路径一致。改动文件：`render.go`（新增两个原语 + `RenderForWire` 改薄壳）/ `chunk_body.go`（新增 `hasVisibleEntries` + 2 处 fallback 收敛）/ `placeholder_chain_flush.go`（新增 `materializeChunk` + 11 站点收敛 + 2 处 fallback 收敛）/ `adapter.go`（`sendOutResultMessage` 用 `appendTrailerToBody`）。**Compose 和 RenderForWire 保持分离**（结构性差异：chain 消息 vs standalone 消息），只是共享 `renderMarkdownSafe` 原语。**doc 更新**：§11.12.13（Markdown 渲染三层原语结构）/ §11.12.16（追加 P3 测试矩阵 22 个新 test case）/ §11.12.18（本条）/ 新增 §11.12.19（完整 P3 spec）。**commit 拆解**（建议）：`render: add renderMarkdownSafe + appendTrailerToBody primitives` → `chunkBody: hasVisibleEntries predicate` → `placeholder_chain_flush: materializeChunk coordinator` → `appendSegment / appendSegmentLocked / appendErrorSegment: route through materializeChunk` → `splitOversized*Locked / flushChainNow overflow: route through materializeChunk` → `chunkBody.Compose / renderTaskSection / split*: use renderMarkdownSafe` → `sendOutResultMessage: use appendTrailerToBody` → `tests: 22 new test cases for §11.12.16` → `docs: §11.12.19 P3 spec`。
-
 ### 11.12.19 渲染 DRY + blank-chunk 修复（2026-08-24）
 
 本节是 v9 P3 —— 收口渲染原语 + 修复 ROTATE/SPLIT 路径在边界条件下 mint 出的"只有 footer 的假空白 chunk"。**两条线独立但同 PR**：渲染原语收口（DRY）是 clean-code 改进，blank-chunk 修复是 user-visible bug fix。
@@ -3834,7 +3800,7 @@ Cliff 落在 **[400, 600] blocks** 之间（与 `blocks` 显式 array 的 500 ca
 1. pre-10.1 客户端(Desktop / iOS / Android)对 `rich_message` 的回退行为 —— **没有运行时回退**。sendRichMessage 失败会 surface error 给 runtime,旧客户端可能显示空白或报错,需要现场确认是否接受。详见 §20.8 风险评估 row 1
 2. `markdown` / `html` 自动拆 block 的 client 端 preflight 计数公式 —— 已实现(`estimateRichBlocks`,§20.6.1),阈值 400 / 500,实测匹配 server 行为
 3. v9 chain 与新路径的交互:已一并退役(commit `17b5372`),plain text fallback 也退役(commit `0d365d9`)。`maxTelegramTextLength = 3900`、`splitTelegramText`、`RenderForWire`、`maybeWrapFullExpandable` 全部删除,`richMode` 永远开启。新的唯一回退策略是 **sendRichMessage 失败 → error 返回 runtime**(不再 silent truncate 到 4K)
-4. L1 / L2 / L3 决策树:**全部完成,RichMode 常驻**。后续重点是 (a) Bot-side rate limit 实测,sendRichMessage 的 32K body 跟 4K body 走不同 rate bucket (b) 给 nightly / dogfooding 收集 L2 walker 在真实 LLM 输出上的 fallback rate,看 L2 walker 的 ok=false 比例,决定是否需要扩 walker 覆盖(ordered list / tables)
+4. L1 / L2 / L3 决策树:**全部完成,RichMode 常驻**。后续重点是 (a) Bot-side rate limit 实测,sendRichMessage 的 32K body 跟 4K body 走不同 rate bucket (b) L2 walker 覆盖 ordered list / table / inline footnote / inline image / raw HTML;唯一仍触发 ok=false 的形状只剩 block-level 结构错误(unterminated fence / table 缺 separator 行 / 列数 mismatch / 超字符上限)。fallback 始终是 rich_message[blocks] 里的一条 paragraph block,**没有** plain text 路径
 
 ### 20.6 实现细节
 
@@ -3943,51 +3909,58 @@ func estimateRichBlocks(rawMD string) (int, error) {
 
 #### 20.6.2 L2 —— 显式 `rich_message[blocks]` AST walker
 
-**新文件**：`internal/channel/telegram/rich.go`
+**新文件**：`internal/channel/telegram/rich.go`（L1 helper）+ `rich_walker.go`（L2 walker）+ `rich_turn.go`（L3 chain-attached entry 渲染）
 
 **核心 API**：
 
 ```go
-// markdownToRichBlocks parses raw markdown and emits an InputRichBlock array
-// suitable for sendRichMessage / editMessageText(rich_message=). Supports 9
-// common block types (§20.2) plus inline RichText entities (§20.4); for
-// content the walker can't represent (footnote ref / strikethrough / raw HTML /
-// image), returns ok=false and the caller falls back to §20.6.1 L1 path.
-func markdownToRichBlocks(rawMD string) (blocks []InputRichBlock, ok bool)
+// markdownToRichBlocks parses raw markdown and emits a JSON-encoded
+// rich_message[blocks] array. Returns ok=false ONLY when a block-level
+// shape is unrecognisable (unterminated fence, table without separator
+// row, column-count mismatch, char cap exceeded) — every inline syntax
+// the walker once deferred (footnote refs / image refs / raw HTML) is
+// now handled inline. The single caller (`renderRichTurnBlocksLocked`)
+// turns ok=false into one paragraph block with the raw body — still a
+// rich_message[blocks] payload, never plain text.
+func markdownToRichBlocks(rawMD string) (blocksJSON string, ok bool)
 ```
 
-**AST 映射表**（基于 goldmark 节点）：
+**当前实现：line-based regex walker**（`rich_walker.go`）。和上面 goldmark AST 形状对齐，但用纯正则 / 行扫描实现 —— 与 `render.go` 的 markdown→HTML 渲染器共享同一套语义假设，省 goldmark 升 direct dep 的 surface area。L2 边界明确：
 
-| goldmark AST | → InputRichBlock |
-|---|---|
-| `ast.Heading{Level:1-6}` | `{"type":"heading","text":<inline>,"size":1-6}` |
-| `ast.Paragraph` | `{"type":"paragraph","text":<inline>}` |
-| `ast.FencedCodeBlock` / `ast.CodeBlock` | `{"type":"pre","text":string,"language":<lang>}` |
-| `ast.List{Ordered:bool}` | `{"type":"list","items":[<item>]}` |
-| `ast.ListItem` → `InputRichBlockListItem` | `{"blocks":[<children>]}` |
-| `ast.Blockquote` | `{"type":"blockquote","blocks":[<children>]}` |
-| `ast.ThematicBreak` | `{"type":"divider"}`（仅当有 sibling；standalone 由 server 拒） |
-| `ast.Table` | `{"type":"table","cells":[[<cell>],...]}` |
-| 其它 | fallback 到 L1 `rich_message[markdown]` 路径 |
+| Markdown 构造 | walker 处理 | block 形态 |
+|---|---|---|
+| `# / ## / ###` heading | `walkHeading` | `{"type":"heading","text":<inline>,"size":<N}`} |
+| `\`\`\`lang` fence / `\`\`\`` no-lang | `walkFence` | `{"type":"pre","text":<joined>,"language":<lang>?}`} |
+| `-` / `*` / `+` bullet list | `walkList` | `{"type":"list","items":[{blocks:[paragraph]}]}` |
+| `1.` / `2.` ordered list | `walkList`（同一函数；bot API 10.1 `list` 无 ordered enum，client 从 item `1.` prefix 推断） | 同 bullet |
+| `>` blockquote | `walkBlockquote` | `{"type":"blockquote","blocks":[paragraph]}` |
+| `---` / `***` / `___` thematic break | inline in main loop | `{"type":"divider"}` |
+| `\| H1 \| H2 \|\n\|---\|---\|\n\| ... \|` table | `walkTable`（GFM 形；需 separator 行 + ≥1 data row） | `{"type":"table","cells":[[{text,is_header?,align?}],...]}` |
+| 段落（兜底） | `walkParagraph` | `{"type":"paragraph","text":<inline>}` |
+| 空字符串 / 仅 whitespace / >32K chars | — | `ok=false`（caller fallback paragraph） |
+| 未闭合 fence / table 缺 separator / 列数 mismatch | — | `ok=false`（caller fallback paragraph） |
 
-**Inline 节点 → RichText 实体映射**：
+**Inline 节点 → RichText 实体映射**（`inlineToRichText`）：
 
-| goldmark AST | → RichText |
-|---|---|
-| `ast.Text{Segment:...}` | string in array |
-| `ast.Emphasis` | `{"type":"italic","text":...}` |
-| `ast.Strong` | `{"type":"bold","text":...}` |
-| `ast.CodeSpan` | `{"type":"code","text":...}` |
-| `ast.Link{Destination:...}` | `{"type":"url","text":...,"url":...}` |
-| 其它（image, raw HTML） | 降级为字符串 |
+| Markdown inline | 处理 | 备注 |
+|---|---|---|
+| `` `code` `` | `{"type":"code","text":...}` | priority 在 `*`/`_` 之前 |
+| `**bold**` / `__bold__` | `{"type":"bold","text":...}` | |
+| `*italic*` / `_italic_` | `{"type":"italic","text":...}` | |
+| `[text](https?://\|tg://url)` | `{"type":"url","text":...,"url":...}` | scheme 白名单（`render.go` 同样） |
+| `![alt](https?://...)` | 降级到 `{"type":"url","text":alt,"url":...}` | rich blocks 无 inline image entity；alt 空时用 URL 作 label |
+| `[^id]` GFM footnote ref | **stripped**（slot 记录但 unwrap 不 emit） | 让长 footnote body 在 chat 里读起来干净 |
+| `<tag>...</tag>` raw HTML | **保留为 literal 文本** | 不再触发 `ok=false` |
+| 其它奇形 (`~~strike~~`, reference link, autolink `<x>`) | walker 不识别 → 退化成 paragraph 块里的 literal 文本 | |
 
-**Inline 数组化规则**：如果 paragraph / heading 的 inline 序列中**只有 plain text**，`text` 字段保持 string（避免无意义数组）；出现任何 entity 时切到 array（§20.4 实测支持）。
+**Inline 数组化规则**：paragraph / heading 的 inline 序列中**只有 plain text** 时，`text` 字段保持 string（避免无意义数组）；出现任何 entity（code/bold/italic/url/image）时切到 array（§20.4 实测支持）。footnote slot 也会触发 array 化（替换点分裂 piece），但 unwrap 阶段 footnote 不 emit，最终 wire form 仍是相邻 plain text 拼接。
 
-**改动范围**：
+**已知限制**（不触发 `ok=false`，但渲染会有 quirk）：
 
-- 新文件 `rich.go`：walker + 单元测试（goldmark AST → JSON 双向 round-trip 至少 30 case）
-- `adapter.go:815` `Send` OutReply 分支：在 L1 helper 后面追加 L2 调用（先试 L2，walker 失败回 L1 markdown，再不行回 plain HTML）
-- Feishu adapter 不动（继续用 HTML）
+- `~~strike~~` strikethrough：rich blocks 无对应 entity，渲染为字面字符 `~~strike~~`
+- Reference link `[text][id]`（分离式）：目前当普通文本处理，括号保留
+- Autolink `<https://x>`：同上，当普通文本
+
 
 #### 20.6.3 L3 —— 退役 v9 chain
 
@@ -4033,11 +4006,20 @@ L3 仅在 L2 生产数据证明"典型 turn < 32K chars"且"active chunk 编辑�
 | L2-3 | ` ```go\nx()\n``` ` | `[{pre,text:"x()",language:"go"}]` | §20.2 |
 | L2-4 | `- a\n- b` | `[{list,items:[{blocks:[{paragraph,text:"a"}]},{blocks:[{paragraph,text:"b"}]}]}]` | §20.2 |
 | L2-5 | `> quote` | `[{blockquote,blocks:[{paragraph,text:"quote"}]}]` | §20.2 |
-| L2-6 | `\| A \| B \|\n\|---\|---\|\n\| 1 \| 2 \|` | `[{table,cells:[[{text:"A"},{text:"B"}],[{text:"1"},{text:"2"}]]}]` | §20.2 |
-| L2-7 | `~~strike~~` | walker 不支持 → ok=false → fallback L1 | — |
-| L2-8 | `[^1]` footnote ref | 同上 | — |
-| L2-9 | nested list `- a\n  - b` | `[{list,items:[{blocks:[{paragraph,text:"a"},{list,items:[...]}]}]}]` | §20.2 |
-| L2-10 | 真实 Claude reply（混合 5+ 类型） | walker 输出 5+ blocks，全部在已验证 17 个 type 内 | — |
+| L2-6 | `\| A \| B \|\n\|---\|---\|\n\| 1 \| 2 \|` | `[{table,cells:[[{text:"A",is_header:true},{text:"B",is_header:true}],[{text:"1"},{text:"2"}]]}]` | §20.2 |
+| L2-7 | `1. one\n2. two` (ordered list) | `[{list,items:[{blocks:[{paragraph,text:"one"}]},{blocks:[{paragraph,text:"two"}]}]}]` | §20.6.2 |
+| L2-8 | `- bullet\n1. ordered\n* bullet` (mixed) | single `list` block，3 items | §20.6.2 |
+| L2-9 | `\| L \| C \| R \| D \|\n\|:--\|:-:\|--:\|---\|\n\| a \| b \| c \| d \|` | `cells[0]` align = `[left,center,right,""]` | §20.6.2 |
+| L2-10 | `before[^1]after` (footnote ref) | `[{paragraph,text:["before","after"]}]`（footnote slot 已 strip） | §20.6.2 |
+| L2-11 | `see ![logo](https://x.png) here` | `[{paragraph,text:["see ",{url,text:"logo",url:"https://x.png"}," here"]}]` | §20.6.2 |
+| L2-12 | `![](https://x.png)` (empty alt) | `[{paragraph,text:[{url,text:"https://x.png",url:"https://x.png"}]}]` | §20.6.2 |
+| L2-13 | `text with <raw>html</raw>` | `[{paragraph,text:"text with <raw>html</raw>"}]`（literal，不 bail） | §20.6.2 |
+| L2-14 | ` ```\nunterminated fence` | walker 报 `ok=false`（无 end marker，无法建模） → caller 兜底 paragraph block（**非** plain text） | §20.6.2 |
+| L2-15 | `\| A \| B \|\n\| 1 \| 2 \|` (无 separator) | walker 报 `ok=false` → caller 兜底 paragraph block | §20.6.2 |
+| L2-16 | `\| A \| B \|\n\|---\|---\|\n\| 1 \| 2 \| 3 \|` (列数 mismatch) | walker 报 `ok=false` → caller 兜底 paragraph block | §20.6.2 |
+| L2-17 | `~~strike~~` (strikethrough) | walker 当前不识别 → 渲染为字面 `~~strike~~`（不触发 fallback） | §20.6.2 已知限制 |
+| L2-18 | real Claude reply（heading + paragraph + bullet + code + table） | walker 输出 ≥5 blocks，全部在已验证 17 个 type 内 | — |
+
 
 #### 20.7.3 L3 验收用例
 

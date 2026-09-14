@@ -11,12 +11,19 @@ import (
 // markdownToRichBlocks — L2 walker (docs/channel/telegram.md §20.6.2).
 //
 // Pure-function line-based walker that converts raw markdown to a
-// rich_message[blocks] array. Supports the 9 common LLM-output block
-// types (paragraph / heading / pre / list / blockquote / divider /
-// details / table / footer) plus inline RichText entities (bold /
-// italic / code / url). Returns ok=false when the walker encounters
-// syntax it can't represent (footnote refs, raw HTML, images, task
-// lists); callers fall back to the L1 rich_message[markdown] path.
+// rich_message[blocks] array. Supports the 10 common LLM-output
+// block types (paragraph / heading / pre / list / blockquote /
+// divider / table / footer) plus inline RichText entities (bold /
+// italic / code / url / footnote-strip / image-as-url). Inline
+// footnote refs, inline image refs, and raw HTML are now handled
+// inside the walker (footnote stripped, image downgraded to url
+// entity, raw HTML kept as literal text inside a paragraph) so
+// none of them trigger ok=false. The only ok=false triggers today
+// are block-level shapes the walker can't model — malformed fence,
+// table without separator row / mismatched column count, char cap
+// exceeded. Callers (`renderRichTurnBlocksLocked`) treat ok=false as
+// "emit one paragraph block with the raw body" — still a rich
+// payload, never plain sendMessage text.
 //
 // No AST library dep — goldmark is in go.sum as a transitive but
 // not a direct dep. Adding it just for this walker would be a
@@ -38,24 +45,33 @@ const (
 )
 
 var (
-	richHeadingPat = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
-	richBulletPat  = regexp.MustCompile(`^[-*+]\s+(.+)$`)
-	richOrderedPat = regexp.MustCompile(`^\d+\.\s+(.+)$`)
-	richQuotePat   = regexp.MustCompile(`^>\s*(.*)$`)
-	richDividerPat = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})\s*$`)
+	richHeadingPat   = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
+	richBulletPat    = regexp.MustCompile(`^[-*+]\s+(.+)$`)
+	richOrderedPat   = regexp.MustCompile(`^\d+\.\s+(.+)$`)
+	richQuotePat     = regexp.MustCompile(`^>\s*(.*)$`)
+	richDividerPat   = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})\s*$`)
+	richTableRowPat  = regexp.MustCompile(`^\s*\|.*\|\s*$`)
+	richTableSepCell = regexp.MustCompile(`^[\s:]*:?-+:?[\s:]*$`)
+	richFootnotePat  = regexp.MustCompile(`\[\^([^\]]+)\]`)
+	richImagePat     = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
 )
 
 // inlinePatternOrder lists the inline regexes in priority order. The
 // walker applies them in sequence on each line of text. The order is
 // load-bearing: code spans (backticks) must run before bold/italic
 // because `*foo*` inside a code span must NOT be parsed as italic.
+// Image refs must run before plain url refs so `![alt](url)` is not
+// misread as a `[!alt](url)` link; footnote refs run before url so
+// `[^1]` is not consumed as a url target.
 var inlinePatternOrder = []struct {
 	pattern *regexp.Regexp
-	kind    string // "bold" | "italic" | "code" | "url"
+	kind    string // "bold" | "italic" | "code" | "url" | "image" | "footnote"
 }{
 	{regexp.MustCompile("`([^`\\n]+)`"), "code"},
 	{regexp.MustCompile(`\*\*([^*\n]+)\*\*|__([^_\n]+)__`), "bold"},
 	{regexp.MustCompile(`(^|[^*])\*([^*\n]+)\*|(^|[^_])_([^_\n]+)_`), "italic"},
+	{richFootnotePat, "footnote"},
+	{richImagePat, "image"},
 	{regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`), "url"},
 }
 
@@ -119,13 +135,35 @@ func inlineToRichText(input string) any {
 				if prefix == "" {
 					prefix = parts[3]
 				}
-			case "url":
-				// groups: 1 = link text, 2 = url.
+			case "footnote":
+				// GFM footnote ref `[^id]`. Stripped
+				// completely — the slot is recorded
+				// with empty text and the unwrap pass
+				// drops it. Footnote refs rarely carry
+				// meaning in Telegram chat context and
+				// dropping them keeps prose readable.
+				slot := slot{kind: "footnote", text: ""}
+				slots = append(slots, slot)
+				sentinel := string(rune(puaBase + rune(idx)))
+				idx++
+				nextIdx = idx
+				matched = true
+				return sentinel
+			case "image", "url":
+				// groups: 1 = alt (image) | link text (url), 2 = url.
+				// Both shapes emit the same wire form: Telegram rich
+				// blocks have no inline image entity, so `![alt](url)`
+				// degrades to a clickable url with alt as the label.
 				url := parts[2]
 				if !safeLink(url) {
 					return match
 				}
-				text = parts[1]
+				text := parts[1]
+				// Empty alt → use URL as visible text so the entity
+				// has a human-readable label.
+				if pat.kind == "image" && text == "" {
+					text = url
+				}
 				slot := slot{kind: "url", text: text, url: url}
 				slots = append(slots, slot)
 				sentinel := string(rune(puaBase + rune(idx)))
@@ -192,14 +230,20 @@ func inlineToRichText(input string) any {
 			out = append(out, map[string]any{"type": "italic", "text": s.text})
 		case "url":
 			out = append(out, map[string]any{"type": "url", "text": s.text, "url": s.url})
+		case "footnote":
+			// Stripped at substitution time; nothing to
+			// emit here. Falling through drops the
+			// sentinel piece silently.
 		}
 	}
 	return out
 }
 
 // walkParagraph consumes a run of non-blank non-marker lines and emits
-// a paragraph block. Returns ok=false if any line uses syntax we
-// can't represent (footnote refs, raw HTML, image refs).
+// a paragraph block. Inline footnote refs, image refs, and raw HTML
+// are now handled by inlineToRichText (footnote stripped, image
+// downgraded to url, raw HTML kept as literal text) — walkParagraph
+// only needs to bound the run by block markers.
 func walkParagraph(lines []string, start int) (map[string]any, int, bool) {
 	var collected []string
 	i := start
@@ -208,19 +252,6 @@ func walkParagraph(lines []string, start int) (map[string]any, int, bool) {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || isBlockMarker(trimmed) {
 			break
-		}
-		// Bail on syntax we don't represent.
-		if strings.Contains(trimmed, "[^") || strings.Contains(trimmed, "![") {
-			return nil, 0, false
-		}
-		// Raw HTML detection is conservative: any `<` not
-		// followed immediately by a space and a letter (i.e. an
-		// actual HTML tag) — markdown allows literal `<` in prose,
-		// so we only bail when the angle bracket is part of a
-		// likely-tag shape. Detecting every raw-HTML edge case is
-		// not the walker's job; markdown path will render it.
-		if looksLikeRawHTML(trimmed) {
-			return nil, 0, false
 		}
 		collected = append(collected, line)
 		i++
@@ -233,47 +264,6 @@ func walkParagraph(lines []string, start int) (map[string]any, int, bool) {
 		"type": "paragraph",
 		"text": inlineToRichText(text),
 	}, i, true
-}
-
-// looksLikeRawHTML reports whether a trimmed line contains a
-// likely-HTML-tag shape. Conservative — bails only when `<` is
-// followed by a tag-like body (`</x>` close, `<x` open) and at
-// least one alphabetic character before the next `>`. Literal `<`
-// in math expressions or comparisons is preserved.
-func looksLikeRawHTML(line string) bool {
-	for i := 0; i < len(line); i++ {
-		if line[i] != '<' {
-			continue
-		}
-		// Find matching `>` ahead.
-		j := strings.IndexByte(line[i:], '>')
-		if j < 0 {
-			continue
-		}
-		body := line[i+1 : i+j]
-		// Strip leading `/` (closing tags) and trailing `/` (void).
-		body = strings.TrimLeft(body, "/")
-		body = strings.TrimRight(body, "/")
-		if body == "" {
-			continue
-		}
-		// Tag body should start with a letter (or `!` for doctype).
-		if !((body[0] >= 'a' && body[0] <= 'z') || (body[0] >= 'A' && body[0] <= 'Z') || body[0] == '!') {
-			continue
-		}
-		// And contain at least one letter / digit.
-		hasAlnum := false
-		for _, r := range body {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-				hasAlnum = true
-				break
-			}
-		}
-		if hasAlnum {
-			return true
-		}
-	}
-	return false
 }
 
 // isBlockMarker reports whether a trimmed line starts a new block
@@ -296,11 +286,7 @@ func isBlockMarker(trimmed string) bool {
 		return true
 	case richDividerPat.MatchString(trimmed):
 		return true
-	case strings.HasPrefix(trimmed, "|") && strings.Contains(trimmed, "|"):
-		// crude table detection — first row with pipes. Real
-		// walker should validate the separator row; we keep it
-		// conservative and let the markdown path handle tables
-		// for now (L2 defer for tables).
+	case richTableRowPat.MatchString(trimmed):
 		return true
 	}
 	return false
@@ -357,9 +343,14 @@ func walkFence(lines []string, start int) (map[string]any, int, bool) {
 	return nil, 0, false
 }
 
-// walkList consumes a contiguous run of bullet list items. Ordered
-// lists and mixed-order lists fall back (ok=false) so the L1 path
-// picks them up.
+// walkList consumes a contiguous run of bullet or ordered list items.
+// Bullet (`-`/`*`/`+`) and ordered (`1.`/`2.`/...) markers both
+// produce the same `list` block shape — Telegram Bot API 10.1
+// `InputRichBlockList` has no ordered/unordered enum and no per-item
+// `type` field. The marker (`1.`/`-`/`*`/`+`) is stripped from the
+// item body — the client cannot distinguish ordered from unordered.
+// Mixed bullet+ordered in one run is treated as a single list; callers
+// wanting strict separation should emit a blank line between them.
 func walkList(lines []string, start int) (map[string]any, int, bool) {
 	items := []map[string]any{}
 	i := start
@@ -368,17 +359,21 @@ func walkList(lines []string, start int) (map[string]any, int, bool) {
 		if trimmed == "" {
 			break
 		}
-		if m := richBulletPat.FindStringSubmatch(trimmed); m != nil {
-			item := map[string]any{
-				"blocks": []map[string]any{
-					{"type": "paragraph", "text": inlineToRichText(m[1])},
-				},
-			}
-			items = append(items, item)
-			i++
-			continue
+		var m []string
+		if m = richBulletPat.FindStringSubmatch(trimmed); m == nil {
+			m = richOrderedPat.FindStringSubmatch(trimmed)
 		}
-		break
+		if m == nil {
+			break
+		}
+		body := m[1]
+		item := map[string]any{
+			"blocks": []map[string]any{
+				{"type": "paragraph", "text": inlineToRichText(body)},
+			},
+		}
+		items = append(items, item)
+		i++
 	}
 	if len(items) == 0 {
 		return nil, 0, false
@@ -387,6 +382,119 @@ func walkList(lines []string, start int) (map[string]any, int, bool) {
 		"type":  "list",
 		"items": items,
 	}, i, true
+}
+
+// walkTable consumes a markdown table starting at line start. The
+// shape mirrors GFM tables:
+//
+//	| H1 | H2 |
+//	|----|----|       ← separator row required
+//	| 1  | 2  |
+//
+// Each cell is emitted as `{text, is_header?, ...}` per Bot API 10.1
+// InputRichBlockTableCell. Alignment is derived from the separator
+// row's leading/trailing colon (:--- left, ---: right, :---: center,
+// --- default). Columns whose count disagrees across rows cause the
+// whole table to be rejected so the caller falls back to a single
+// paragraph block — better to degrade than ship a malformed cell
+// array the server will reject.
+func walkTable(lines []string, start int) (map[string]any, int, bool) {
+	if start+1 >= len(lines) {
+		return nil, 0, false
+	}
+	headerLine := strings.TrimSpace(lines[start])
+	sepLine := strings.TrimSpace(lines[start+1])
+	if !richTableRowPat.MatchString(headerLine) || !richTableRowPat.MatchString(sepLine) {
+		return nil, 0, false
+	}
+	sepCells := splitTableCells(sepLine)
+	if len(sepCells) == 0 {
+		return nil, 0, false
+	}
+	aligns := make([]string, len(sepCells))
+	for i, cell := range sepCells {
+		if !richTableSepCell.MatchString(strings.TrimSpace(cell)) {
+			return nil, 0, false
+		}
+		aligns[i] = parseTableAlign(strings.TrimSpace(cell))
+	}
+	headerCells := splitTableCells(headerLine)
+	if len(headerCells) != len(sepCells) {
+		return nil, 0, false
+	}
+	var rows [][]map[string]any
+	rows = append(rows, buildTableRow(headerCells, aligns, true))
+	i := start + 2
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			break
+		}
+		if !richTableRowPat.MatchString(trimmed) {
+			break
+		}
+		cells := splitTableCells(trimmed)
+		if len(cells) != len(headerCells) {
+			return nil, 0, false
+		}
+		rows = append(rows, buildTableRow(cells, aligns, false))
+		i++
+	}
+	// GFM requires at least one data row beneath the separator;
+	// a header + separator only is not a table.
+	if len(rows) < 2 {
+		return nil, 0, false
+	}
+	return map[string]any{
+		"type":  "table",
+		"cells": rows,
+	}, i, true
+}
+
+// splitTableCells splits a |...| row into trimmed cell strings.
+// The leading/trailing | that frame a row are dropped before split.
+func splitTableCells(row string) []string {
+	row = strings.TrimSpace(row)
+	row = strings.TrimPrefix(row, "|")
+	row = strings.TrimSuffix(row, "|")
+	return strings.Split(row, "|")
+}
+
+// parseTableAlign maps a separator cell (":---" / "---:" / ":---:" /
+// "---") to the corresponding InputRichBlockTableCell align value.
+// Empty string means "default left" — caller omits the `align` field.
+func parseTableAlign(sepCell string) string {
+	left := strings.HasPrefix(sepCell, ":")
+	right := strings.HasSuffix(sepCell, ":")
+	switch {
+	case left && right:
+		return "center"
+	case right:
+		return "right"
+	case left:
+		return "left"
+	}
+	return ""
+}
+
+// buildTableRow constructs one row of the cells 2D array.
+// isHeader=true marks the row as a header (first row per GFM);
+// align strings are dropped when empty so the wire form stays minimal.
+func buildTableRow(cells []string, aligns []string, isHeader bool) []map[string]any {
+	row := make([]map[string]any, len(cells))
+	for j, cell := range cells {
+		c := map[string]any{
+			"text": inlineToRichText(strings.TrimSpace(cell)),
+		}
+		if isHeader {
+			c["is_header"] = true
+		}
+		if aligns[j] != "" {
+			c["align"] = aligns[j]
+		}
+		row[j] = c
+	}
+	return row
 }
 
 // walkBlockquote consumes a contiguous run of > prefixed lines.
@@ -416,11 +524,15 @@ func walkBlockquote(lines []string, start int) (map[string]any, int, bool) {
 }
 
 // markdownToRichBlocks walks raw markdown and emits a JSON-encoded
-// rich_message[blocks] array. Returns ok=false when the walker hits
-// syntax it can't represent (footnote refs, raw HTML, images,
-// tables, ordered lists with non-numeric markers); callers fall
-// back to the L1 rich_message[markdown] path which lets Telegram's
-// server-side parser handle them.
+// rich_message[blocks] array. Returns ok=false only when a block-level
+// shape cannot be modelled (malformed fence, table without separator
+// row / mismatched column count, char cap exceeded). All inline
+// syntax — including footnote refs, image refs, and raw HTML — is
+// now handled: footnotes are stripped, images downgrade to url
+// entities, raw HTML stays as literal text inside a paragraph. The
+// only caller today, `renderRichTurnBlocksLocked`, treats ok=false
+// as a request to emit a single paragraph block with the raw body
+// — still a rich_message[blocks] payload, never plain text.
 //
 // The walker is deliberately line-based rather than AST-based: the
 // project's existing markdown renderer (render.go) is regex-based,
@@ -464,22 +576,13 @@ func markdownToRichBlocks(rawMD string) (string, bool) {
 			}
 			blocks = append(blocks, blk)
 			i = next
-		case richBulletPat.MatchString(trimmed):
+		case richBulletPat.MatchString(trimmed), richOrderedPat.MatchString(trimmed):
 			blk, next, ok := walkList(lines, i)
 			if !ok {
 				return "", false
 			}
 			blocks = append(blocks, blk)
 			i = next
-		case richOrderedPat.MatchString(trimmed):
-			// Ordered lists: defer to L1 markdown path. Adding
-			// proper ordered-list support requires tracking the
-			// `value` / `type` (a/A/i/I) per item, which the
-			// regex-based walker would need to refactor to do
-			// cleanly. L1's markdown path renders them as plain
-			// text with `1.` prefixes — acceptable trade-off
-			// until a real AST walker ships.
-			return "", false
 		case richQuotePat.MatchString(trimmed):
 			blk, next, ok := walkBlockquote(lines, i)
 			if !ok {
@@ -490,12 +593,13 @@ func markdownToRichBlocks(rawMD string) (string, bool) {
 		case richDividerPat.MatchString(trimmed):
 			blocks = append(blocks, map[string]any{"type": "divider"})
 			i++
-		case strings.HasPrefix(trimmed, "|"):
-			// Tables: defer to L1 markdown path. Tables in
-			// rich blocks require explicit cells / alignment
-			// arrays that the line-based walker doesn't model
-			// safely (alignment separators vary widely).
-			return "", false
+		case richTableRowPat.MatchString(trimmed):
+			blk, next, ok := walkTable(lines, i)
+			if !ok {
+				return "", false
+			}
+			blocks = append(blocks, blk)
+			i = next
 		default:
 			blk, next, ok := walkParagraph(lines, i)
 			if !ok {

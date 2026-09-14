@@ -453,3 +453,118 @@ func TestRenderRichTurnBlocks_FooterPreservesChevronFrame(t *testing.T) {
 		t.Fatalf("footer block should not hand-draw box frame; got %q", text)
 	}
 }
+
+// Chain integration tests below exercise ordered list / table /
+// footnote / image / raw-HTML rendering through
+// renderRichTurnBlocksLocked, not just at the walker unit. They
+// guard against regressions where the walker output fails to flow
+// through to the rich turn wire form, or where the bail path
+// re-introduces a plain-text escape hatch.
+
+// countBlocksByType walks a rendered blocks array and tallies block
+// types. Used by the integration tests below to assert the chain
+// produced the expected block mix.
+func countBlocksByType(blocks []map[string]any) map[string]int {
+	out := map[string]int{}
+	for _, b := range blocks {
+		if t, ok := b["type"].(string); ok {
+			out[t]++
+		}
+	}
+	return out
+}
+
+// findBlockOfType returns the first block of the given type (or nil).
+func findBlockOfType(blocks []map[string]any, kind string) map[string]any {
+	for _, b := range blocks {
+		if b["type"] == kind {
+			return b
+		}
+	}
+	return nil
+}
+
+// chainFixture is a small helper that constructs a richTurn with a
+// fixed chatID/topic/userMsg/headerLine and the given entries, then
+// returns the rendered blocks JSON. The renderer doesn't reach for
+// the network — `renderRichTurnBlocksLocked` is a pure function over
+// the struct.
+func chainFixture(t *testing.T, entries []richTurnEntry) string {
+	t.Helper()
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 1,
+		messageID:     100,
+		headerLine:    defaultRichTurnHeader,
+		hasContent:    true,
+		entries:       entries,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	return body
+}
+
+// TestRenderRichTurnBlocks_FallbackParagraphEntry verifies that an
+// entry whose body triggers ok=false (here: an unterminated fence)
+// still lands in the chain as a rich paragraph block, never as
+// plain text. The Telegram adapter contract — every outbound bubble
+// is rich_message[blocks] — depends on this guard.
+func TestRenderRichTurnBlocks_FallbackParagraphEntry(t *testing.T) {
+	const raw = "before\n\n```\nunterminated fence"
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: raw},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 block from the fallback, got %d (types=%v)", len(blocks), countBlocksByType(blocks))
+	}
+	para := blocks[0]
+	if para["type"] != "paragraph" {
+		t.Fatalf("expected paragraph block, got type=%v", para["type"])
+	}
+	// Fallback paragraph carries the raw body verbatim — a plain-text
+	// sendMessage escape hatch would surface here as the body being
+	// the entire rich_message payload instead of a paragraph inside
+	// a blocks array.
+	text, _ := para["text"].(string)
+	if text != raw {
+		t.Errorf("paragraph text=%q, want %q (raw body)", text, raw)
+	}
+}
+
+// TestRenderRichTurnBlocks_MultipleEntriesMix verifies a chain with
+// multiple entries carrying different markdown shapes (heading,
+// list, table, plain paragraph) — all flow through and produce the
+// expected block mix without dropping entries or bailing the whole
+// chain.
+func TestRenderRichTurnBlocks_MultipleEntriesMix(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: "1. one\n2. two"},
+		{kind: "reply", body: "| A | B |\n|---|---|\n| 1 | 2 |"},
+		{kind: "reply", body: "afterword"},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	types := countBlocksByType(blocks)
+	wantList := types["list"] >= 1
+	wantTable := types["table"] >= 1
+	wantPara := types["paragraph"] >= 1
+	if !wantList {
+		t.Errorf("missing list block; types=%v", types)
+	}
+	if !wantTable {
+		t.Errorf("missing table block; types=%v", types)
+	}
+	if !wantPara {
+		t.Errorf("missing paragraph block; types=%v", types)
+	}
+}

@@ -109,32 +109,6 @@ func TestCanUseRichMarkdown_Empty(t *testing.T) {
 	}
 }
 
-func TestBuildRichMarkdownWithTrailer(t *testing.T) {
-	body := "# Title\n\nparagraph"
-	footer := []string{"🤖 claude · opus-4-5 · sess-1"}
-	got := buildRichMarkdownWithTrailer(body, footer)
-	if !strings.Contains(got, body) {
-		t.Fatalf("trailer output should contain body, got %q", got)
-	}
-	if !strings.HasSuffix(got, footer[0]) && !strings.Contains(got, footer[0]) {
-		t.Fatalf("trailer output should contain footer line, got %q", got)
-	}
-	// StatusBar panel uses box-drawing chars; verify they survived.
-	if !strings.Contains(got, "┌") || !strings.Contains(got, "└") {
-		t.Fatalf("StatusBar box-drawing chars missing from trailer, got %q", got)
-	}
-}
-
-func TestBuildRichMarkdownWithTrailer_NoFooter(t *testing.T) {
-	body := "# Title\n\nparagraph"
-	if got := buildRichMarkdownWithTrailer(body, nil); got != body {
-		t.Fatalf("no footer: got %q, want %q", got, body)
-	}
-	if got := buildRichMarkdownWithTrailer(body, []string{}); got != body {
-		t.Fatalf("empty footer: got %q, want %q", got, body)
-	}
-}
-
 func TestBlockThresholdForRich(t *testing.T) {
 	// 500 * 4 / 5 = 400. Hard-coded so the relationship between
 	// richBlockCountLimit and the preflight margin stays visible

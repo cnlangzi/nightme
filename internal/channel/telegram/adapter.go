@@ -1141,7 +1141,7 @@ func (a *Adapter) sendOutResultMessage(
 		return nil
 	}
 
-	full := buildRichMarkdownWithTrailer(msg.Text, statusbar.StatusBarLines(&msg))
+	full := appendTrailerToBody(msg.Text, statusbar.StatusBarLines(&msg))
 	mid, err := a.trySendRichMarkdown(ctx, rawChatID, topicID, userMessageID, full)
 	if err != nil {
 		a.logger.Warn("telegram: rich OutResult failed (no plain fallback; migration target is rich)",
@@ -1298,7 +1298,7 @@ func atoiUserMsgID(s string) int {
 // chunkBody.Compose() with the trailer stitched in from
 // chain.lastFooter. L3 retired the chain and the plain-text
 // fallback: sendOutResultMessage is now rich-only and calls
-// buildRichMarkdownWithTrailer in rich.go to assemble the
+// appendTrailerToBody in render.go to assemble the
 // rich_message[markdown] body. No legacy renderForWire path.
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {

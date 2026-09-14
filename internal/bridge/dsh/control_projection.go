@@ -31,24 +31,12 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/bridge/dsh/host"
 )
 
 var (
 	modelProjectionMu sync.RWMutex
 	modelBySess       map[string]*driver // sessionID → driver
 )
-
-// installControlHandler is the lifecycle hook the parent dsh package
-// registers with the host package at import time. It currently does
-// nothing per-Client (the projection dispatch is wired in
-// host.Client.New itself) — kept as a hook so future per-Client
-// setup (e.g. wiping the demux table on respawn) has a stable
-// extension point.
-//
-// Idempotent across respawns: a fresh Client comes with a fresh
-// Control store, so nothing leaks across spawn/attach boundaries.
-func installControlHandler(_ *host.Client) {}
 
 // registerControlProjection installs a WatchSessionModel callback
 // for d.sessionID. The callback updates d.model and (when the value
@@ -131,7 +119,7 @@ func (d *driver) onSessionModelChanged(model string, fresh bool) {
 		SessionID: d.sessionID,
 		AgentName: d.agentName,
 		Workspace: d.workspace,
-		Branch:    detectBranch(d.workspace),
+		Branch:    d.branch,
 		Model:     model,
 	})
 }

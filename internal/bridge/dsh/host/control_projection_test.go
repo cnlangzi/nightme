@@ -34,8 +34,8 @@ func TestControlProjection_BaselineSeedsEntries(t *testing.T) {
 	if got := p.GetSessionModel("sess-missing"); got != "" {
 		t.Errorf("sess-missing = %q; want \"\"", got)
 	}
-	if !p.HasBaseline() {
-		t.Errorf("HasBaseline = false after ApplyBaseline; want true")
+	if !p.baseline {
+		t.Errorf("baseline flag false after ApplyBaseline; want true")
 	}
 }
 
@@ -168,8 +168,10 @@ func TestControlProjection_NonModelSelectionKeyIsNoop(t *testing.T) {
 
 // TestControlProjection_SessionVanishesFromBaseline verifies a
 // session that no longer appears in a new baseline fires its
-// watchers with model="", fresh=true so the driver can decide to
-// clear its cached model.
+// watchers with model="". fresh=false so the driver treats it as
+// a model change and re-emits EventAgentReady (the runtime's
+// SetModel is a no-op for "" but the persist side effect is the
+// same; a subsequent non-empty projection will overwrite).
 func TestControlProjection_SessionVanishesFromBaseline(t *testing.T) {
 	p := newControlProjection()
 	p.ApplyBaseline(map[string]string{"sess-A": "minimax"})
@@ -193,8 +195,8 @@ func TestControlProjection_SessionVanishesFromBaseline(t *testing.T) {
 	if got != "" {
 		t.Errorf("vanished model = %q; want \"\"", got)
 	}
-	if !fresh {
-		t.Errorf("vanished fresh = false; want true")
+	if fresh {
+		t.Errorf("vanished fresh = true; want false (treat as model change)")
 	}
 }
 
@@ -228,9 +230,6 @@ func TestControlProjection_NilOrEmptyArgsAreSafe(t *testing.T) {
 	var p *controlProjection // nil
 	if got := p.GetSessionModel("any"); got != "" {
 		t.Errorf("nil.GetSessionModel = %q; want \"\"", got)
-	}
-	if p.HasBaseline() {
-		t.Errorf("nil.HasBaseline = true; want false")
 	}
 	unsub := p.WatchSessionModel("any", func(string, bool) {})
 	if unsub == nil {

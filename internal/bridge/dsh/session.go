@@ -75,6 +75,16 @@ var ErrResumeUnhealthy = errors.New("dsh: resume session unhealthy")
 // see TestHandshakeSession_IndependentTimeouts for the pattern.
 var handshakeTimeout = 15 * time.Second
 
+// baselineWaitTimeout bounds how long Reset waits for the
+// session/control projection store to publish the new sessionId's
+// model before emitting the post-reset EventAgentReady. The WS
+// is up before Reset runs, so the baseline has usually already
+// landed; this bound only matters for the rare race where the
+// store is still receiving the baseline from a fresh reconnect.
+// 250ms is enough for the WS readLoop to deliver a frame in
+// practice; longer would just delay /new.
+const baselineWaitTimeout = 250 * time.Millisecond
+
 // dLog is a thin wrapper around slog.Default for the dsh bridge's
 // package-level log lines. Debug level keeps production output
 // quiet; tests don't assert on logs. Lives here (rather than in
@@ -130,6 +140,15 @@ type driver struct {
 	// store would keep firing onSessionModelChanged on a closed
 	// driver, dead-letter-ing events to a stale dsh session.
 	modelUnsub func()
+
+	// branch is the git branch of d.workspace, captured once at
+	// handshake time. Re-emitting EventAgentReady on a model
+	// change must NOT shell out to `git` again — the projection
+	// callback runs on the WS readLoop, and a slow `git` call
+	// would stall every model change for the daemon and starve
+	// the readLoop until dsh drops the connection. Cache once,
+	// reuse for every Ready event.
+	branch string
 
 	// pendingApprovals maps the server-frame rpcId (NOT the payload's
 	// approvalId) to the response channel we hand to runtime via
@@ -282,6 +301,16 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		// passes the dispatch dedup gate. See the field doc.
 		lastSeq: -1,
 	}
+	// Capture the git branch ONCE here. detectBranch shells out to
+	// `git -C <workspace> symbolic-ref --short HEAD`; calling it
+	// on every model change (the projection callback path) would
+	// stall the WS readLoop on slow `git` invocations and let dsh
+	// drop the connection. Branch is repo-scoped and stable for
+	// the lifetime of this driver; a `git checkout` mid-session
+	// won't be reflected in subsequent Ready events — accepted
+	// tradeoff, the runtime footer only renders Branch in the
+	// initial receipt.
+	d.branch = detectBranch(cfg.Workspace)
 	d.dispatcher = newDispatcher(d.translate, d.wireState, d, d.deliver)
 
 	// The host waterfall handler is installed earlier — at host
@@ -370,8 +399,8 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		SessionID: d.sessionID,
 		AgentName: d.agentName,
 		Workspace: d.workspace,
-		Branch:    detectBranch(d.workspace),
-		Model:     d.model,
+		Branch:    d.branch,
+		Model:     d.currentModel(),
 	})
 
 	// F-DSH-TODO-WIRE-FIX (2026-08-16): emit a single Info-level
@@ -557,12 +586,34 @@ func (e resumeUnhealthyError) Is(target error) bool {
 	return target == ErrResumeUnhealthy || target == agent.ErrResumeUnhealthy
 }
 
+// currentModel returns the latest cached model id under modelMu.
+// The model field is mutated by the projection callback (running
+// on the host's WS readLoop goroutine); every reader on the chat
+// session goroutine — including drainForRunResult, the EventAgentReady
+// emit sites in newDriver / Reset, and onSessionModelChanged
+// itself — must go through this helper or risk a data race
+// detectable by `go test -race`.
+func (d *driver) currentModel() string {
+	d.modelMu.Lock()
+	defer d.modelMu.Unlock()
+	return d.model
+}
+
 // deliver sends an event to the runtime's read pump. NEVER blocks —
 // if the buffer is full we drop with a Debug log. The runtime's
 // read pump drains via its own goroutine; if the runtime stops
 // reading for some reason, we want the bridge to keep producing
 // frames (so a /diagnose can see what happened) rather than
 // deadlocking the shared host's mux pump.
+//
+// Guard against the in-flight projection callback racing Close:
+// after Close runs, d.events is closed and a `d.events <- ev` send
+// would panic. The select-default branch falls through when the
+// channel is closed in Go (the receive happens, sees zero value,
+// drops), but the SEND on a closed channel panics. Adding
+// `case <-d.closed:` arms a non-blocking exit path for both
+// pre-Close (closed is open → never fires) and post-Close (closed
+// is closed → fires, drop).
 func (d *driver) deliver(ev agent.AgentEvent) {
 	select {
 	case d.events <- ev:
@@ -978,9 +1029,13 @@ func (d *driver) Reset(ctx context.Context) error {
 	// If the newID is already in the baseline (e.g. a sibling chat
 	// session in the same repo was the seed), the fresh callback
 	// resolves it synchronously here.
-	if d.modelUnsub != nil {
-		d.modelUnsub()
-	}
+	//
+	// Unregister via the package helper, not a bare d.modelUnsub():
+	// the helper also drops modelBySess[oldID] (otherwise the OLD
+	// entry remains and a stale projection frame for oldID would
+	// still re-enter this driver after the new watcher is wired).
+	unregisterControlProjection(d, d.modelUnsub)
+	d.modelUnsub = nil
 	d.modelMu.Lock()
 	d.model = ""
 	d.modelMu.Unlock()
@@ -988,13 +1043,30 @@ func (d *driver) Reset(ctx context.Context) error {
 
 	d.seedLastSeq(ctx)
 
+	// Wait briefly for the projection store to deliver the new
+	// session's model before emitting Ready. In the common case
+	// the baseline is already up and the fresh=true fire from
+	// registerControlProjection already set d.model — the timer
+	// returns immediately. The bound (baselineWaitTimeout) covers
+	// the rare race where the WS just reconnected and the baseline
+	// hasn't landed yet; we emit Ready with whatever we have and
+	// let the next projection delta re-emit Ready when the real
+	// model arrives.
+	if d.currentModel() == "" {
+		select {
+		case <-time.After(baselineWaitTimeout):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
 		SessionID: d.sessionID,
 		AgentName: d.agentName,
 		Workspace: d.workspace,
-		Branch:    detectBranch(d.workspace),
-		Model:     d.model,
+		Branch:    d.branch,
+		Model:     d.currentModel(),
 	})
 	return nil
 }

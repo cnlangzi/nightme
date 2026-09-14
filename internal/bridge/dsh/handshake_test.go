@@ -46,12 +46,6 @@ type handshakeMock struct {
 	lastCommand      atomic.Value // map[string]any
 
 	respondText atomic.Value // string — when set, prompt handler synthesises a complete turn
-
-	// initialModel is what the synthetic session/control baseline
-	// advertises for the first session.create. Tests that exercise
-	// the model path seed it before Start. Empty by default — the
-	// projection store stays empty and Ready fires with model="".
-	initialModel atomic.Value // string
 }
 
 func newHandshakeMock(t *testing.T) *handshakeMock {
@@ -60,7 +54,6 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/workspace/create", m.handleWorkspaceCreate)
 	mux.HandleFunc("/api/session/create", m.handleSessionCreate)
-	mux.HandleFunc("/api/session/models", m.handleSessionModels)
 	mux.HandleFunc("/api/session/history", m.handleSessionHistory)
 	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace/archiveSession", m.handleWorkspaceArchiveSession)
@@ -219,19 +212,6 @@ func (m *handshakeMock) handleSessionCreate(w http.ResponseWriter, r *http.Reque
 	m.createIDs = append(m.createIDs, id)
 	m.mu.Unlock()
 	writeOK(w, env.RPCID, map[string]any{"sessionId": id})
-}
-
-// handleSessionModels — OBSOLETE in 0.1.5-rc.1. The bridge no
-// longer calls POST /api/session.models (the per-session model
-// lives on the session/control stream's `modelSelection`
-// projection). The mock keeps the route registered so an
-// accidental RPC doesn't 404 in tests that incidentally probe it.
-func (m *handshakeMock) handleSessionModels(w http.ResponseWriter, r *http.Request) {
-	env := decodeEnvelope(r)
-	writeOK(w, env.RPCID, map[string]any{
-		"current":  map[string]any{"provider": "mock", "model": "mock-model"},
-		"routable": true,
-	})
 }
 
 func (m *handshakeMock) handleSessionHistory(w http.ResponseWriter, r *http.Request) {

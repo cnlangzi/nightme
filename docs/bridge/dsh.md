@@ -401,9 +401,9 @@ bridge 翻译(`host/stream.go::translateHostEvent`):
 - `cancel` → `method="host/cancel", rpcID=eventId`,payload 包 `{eventId}`
 - `ready` → 不翻译,dispatch 路径只 log(`dsh.host: mux ready clientId=...`)
 
-### 3.4a `session/control` stream items(2026-09-14 增,model 解析路径)
+### 3.4a `session/control` stream items
 
-dsh 0.1.2-rc.1 把 `session.models` 当成 per-session 当前 model 的查询 RPC;0.1.5-rc.1 把它拆成两个东西:
+dsh splits the per-session model surface into two pieces:
 
 - `session.modelCatalog`(无参,host-wide)— `/model` picker 的 catalog feed,不报 per-session 当前 model
 - `session/control`(stream,host-wide)— per-session 的 `modelSelection` projection 是权威源

@@ -212,7 +212,7 @@ func drainForRunResult(ctx context.Context, a *agent.Agent, blocks []agent.Conte
 	var sessionID, model string
 	if d, ok := a.Driver().(*driver); ok {
 		sessionID = d.sessionID
-		model = d.model
+		model = d.currentModel()
 	}
 	var readySeen = sessionID != "" // already seeded from driver; suppress duplicate Ready
 

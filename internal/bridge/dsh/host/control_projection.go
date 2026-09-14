@@ -43,10 +43,19 @@ type controlProjection struct {
 	mu       sync.Mutex
 	bySess   map[string]*modelEntry // sessionID → entry
 	baseline bool                   // true once the WS has delivered its first baseline
+	closed   bool                   // set by Client.Close; dispatch returns immediately when true
+}
+
+func (p *controlProjection) isClosed() bool {
+	if p == nil {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
 }
 
 type modelEntry struct {
-	model    string
 	resolve  string // resolved next ?? lastUsed, cached
 	watchers []*modelWatcher
 }
@@ -64,11 +73,9 @@ func newControlProjection() *controlProjection {
 
 // dispatch is the ControlFrameHandler wired by Client.New. It
 // applies the decoded frame to the projection store. Called from
-// the WS readLoop goroutine — must be non-blocking. The store's
-// callbacks (per-driver watchers) fire inline under p.mu; the
-// dispatcher contract is "no blocking work in cb".
+// the WS readLoop goroutine — must be non-blocking.
 func (p *controlProjection) dispatch(frame ControlFrame) {
-	if p == nil {
+	if p == nil || p.isClosed() {
 		return
 	}
 	switch frame.Kind {
@@ -84,6 +91,20 @@ func (p *controlProjection) dispatch(frame ControlFrame) {
 	}
 }
 
+// close marks the store as closed so any in-flight or future
+// dispatch on the WS readLoop drops quietly. Idempotent. Called
+// from Client.Close before the Hub closes — between those two
+// points a stray control frame could still arrive (goroutine
+// scheduling); the closed flag short-circuits it.
+func (p *controlProjection) close() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+}
+
 // ApplyBaseline seeds the store from a fresh session/control
 // baseline. Called once per WS connect (the first frame on the
 // control stream). Pre-existing entries for sessions dsh no longer
@@ -91,25 +112,37 @@ func (p *controlProjection) dispatch(frame ControlFrame) {
 // still active" and a session that disappeared from the baseline
 // either got archived or migrated to another dsh; in both cases
 // the driver should re-fetch on resume.
-//
-// watchFires=true means existing watchers receive an initial
-// "fresh" callback for every session that survived the rebaseline
-// (so a post-respawn runtime sees the new dsh's model).
 func (p *controlProjection) ApplyBaseline(sessions map[string]string) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.baseline = true
-	// Drop entries for sessions dsh no longer reports. Drivers
-	// holding watchers for those sessions are still called with
-	// model="" fresh=true so they know the projection is gone.
+	// Collect every watcher fire we owe the caller, then drop the
+	// lock before invoking them. Re-entry into the store from a
+	// watcher (rare but possible — e.g. a watcher that calls
+	// WatchSessionModel again on its own session) would deadlock
+	// on sync.Mutex if we held the lock across the fire.
+	type fire struct {
+		w     *modelWatcher
+		model string
+		fresh bool
+	}
+	var fires []fire
+	// Vanish fires: sessions dsh no longer reports. fresh=false so
+	// the driver treats it as a model change (re-emits EventAgentReady
+	// with model="") rather than silently dropping the Ready — the
+	// runtime's SetModel is a no-op for "" but the persist side
+	// effect is the same, and on next non-empty value the runtime
+	// captures it.
 	for sid, entry := range p.bySess {
 		if _, ok := sessions[sid]; !ok {
-			entry.model = ""
-			entry.resolve = ""
-			p.fireLocked(entry, "", true)
+			if entry.resolve != "" {
+				entry.resolve = ""
+				for _, w := range entry.watchers {
+					fires = append(fires, fire{w, "", false})
+				}
+			}
 		}
 	}
 	for sid, m := range sessions {
@@ -119,9 +152,17 @@ func (p *controlProjection) ApplyBaseline(sessions map[string]string) {
 			p.bySess[sid] = entry
 		}
 		if entry.resolve != m {
-			entry.model = m
 			entry.resolve = m
-			p.fireLocked(entry, m, !existed)
+			fresh := !existed
+			for _, w := range entry.watchers {
+				fires = append(fires, fire{w, m, fresh})
+			}
+		}
+	}
+	p.mu.Unlock()
+	for _, f := range fires {
+		if f.w != nil && f.w.cb != nil {
+			f.w.cb(f.model, f.fresh)
 		}
 	}
 }
@@ -135,34 +176,28 @@ func (p *controlProjection) ApplyProjection(sessionID, key string, resolvedModel
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	entry, ok := p.bySess[sessionID]
 	if !ok {
 		entry = &modelEntry{}
 		p.bySess[sessionID] = entry
 	}
 	if entry.resolve == resolvedModel {
+		p.mu.Unlock()
 		return
 	}
-	entry.model = resolvedModel
 	entry.resolve = resolvedModel
-	p.fireLocked(entry, resolvedModel, false)
-}
-
-// fireLocked invokes every watcher on entry. Caller must hold p.mu.
-// We copy the watcher slice under lock to avoid "callback runs and
-// unsubscribes, then we iterate the truncated slice" surprises.
-func (p *controlProjection) fireLocked(entry *modelEntry, model string, fresh bool) {
 	watchers := make([]*modelWatcher, len(entry.watchers))
 	copy(watchers, entry.watchers)
-	// Invoke after dropping the lock would be safer, but we want
-	// "fresh" to mean the very first callback the watcher sees.
-	// Callers are expected to be non-blocking (see type doc).
+	p.mu.Unlock()
+	// Fire AFTER dropping the lock — see re-entrancy note in
+	// ApplyBaseline. fresh=false on every projection delta (the
+	// driver distinguishes "first sight" from "live change" so it
+	// can decide whether to emit Ready).
 	for _, w := range watchers {
 		if w == nil || w.cb == nil {
 			continue
 		}
-		w.cb(model, fresh)
+		w.cb(resolvedModel, false)
 	}
 }
 
@@ -182,20 +217,6 @@ func (p *controlProjection) GetSessionModel(sessionID string) string {
 	return entry.resolve
 }
 
-// HasBaseline reports whether the store has received at least one
-// session/control baseline. Drivers use this to decide whether to
-// block on WaitForModel or fall back to emitting Ready with empty
-// model. False after every WS reconnect until the first new
-// baseline lands.
-func (p *controlProjection) HasBaseline() bool {
-	if p == nil {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.baseline
-}
-
 // WatchSessionModel registers cb to fire on every model change for
 // sessionID. The callback fires once with the current value (fresh=
 // true) before this function returns, even when that value is "" —
@@ -209,23 +230,19 @@ func (p *controlProjection) WatchSessionModel(sessionID string, cb modelWatchCB)
 		return func() {}
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	entry, ok := p.bySess[sessionID]
 	if !ok {
 		entry = &modelEntry{}
 		p.bySess[sessionID] = entry
 	}
-	// Wrap cb in a struct slot so the unsubscribe path can identify
-	// this specific registration without comparing function values
-	// (Go forbids `==` on func types — see testing failure when we
-	// tried `any(w) == any(cb)`). The slot is also how we let the
-	// caller hold the func reference if they want to re-fire it.
 	slot := &modelWatcher{cb: cb}
 	entry.watchers = append(entry.watchers, slot)
 	current := entry.resolve
-	// Fire the initial value under lock. cb may unregister itself
-	// (rare) — that's fine, the copy in fireLocked is the live
-	// snapshot at the moment of fire.
+	p.mu.Unlock()
+	// Fire AFTER dropping the lock — the cb may re-enter the store
+	// (rare but possible — e.g. another WatchSessionModel call on
+	// the same goroutine) and re-entry would deadlock on the
+	// non-recursive sync.Mutex.
 	cb(current, true)
 	return func() {
 		p.mu.Lock()

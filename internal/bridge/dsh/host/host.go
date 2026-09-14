@@ -233,6 +233,14 @@ func (c *Client) Start(ctx context.Context) error {
 // blocks on dispatchDrain).
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
+		// Mark the projection store closed BEFORE the Hub closes.
+		// The WS readLoop might be mid-dispatch when Hub.Close
+		// runs; the closed flag short-circuits any further
+		// mutations to the store. This matters on respawn too:
+		// ReplaceGlobal installs a new Client whose Control is a
+		// fresh store, and any straggler frame from the old Hub
+		// would otherwise mutate stale state.
+		c.Control.close()
 		c.Hub.Close()
 		close(c.closed)
 	})

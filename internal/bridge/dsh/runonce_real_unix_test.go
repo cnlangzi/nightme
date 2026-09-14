@@ -76,7 +76,7 @@ func TestE2E_RunOnce_RealDSH(t *testing.T) {
 	// permission rather than reply). What we care about is that the
 	// pipeline delivers a non-empty reply with the right metadata.
 	if res.Model == "" {
-		t.Errorf("RunResult.Model empty; want the model's id from session.models")
+		t.Errorf("RunResult.Model empty; want the model's id from session/control modelSelection projection")
 	}
 
 	t.Logf("E2E success: sessionId=%s model=%s elapsed=%s textLen=%d text=%q",

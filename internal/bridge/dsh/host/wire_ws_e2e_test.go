@@ -102,6 +102,12 @@ func TestWireWS_E2E(t *testing.T) {
 			hostFrames = append(hostFrames, method)
 			mu.Unlock()
 		},
+		// session/control is not exercised by this e2e test —
+		// the per-session event flow is what we validate. Pass
+		// nil so a stray control frame from a future dsh build
+		// is dropped quietly instead of panicking on a nil
+		// handler.
+		nil,
 	)
 	if err := hub.Start(ctx); err != nil {
 		t.Fatalf("hub.Start: %v", err)

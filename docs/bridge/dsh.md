@@ -284,10 +284,10 @@ Cookie: dsh-auth-<hash>=<signed>
 | `session/prompt` | `{request: {requestId, sessionId, mode, content, clientTimeZone?}}` | `requestId` 必填(client-minted UUID,server 用它去重);`mode` ∈ `queue`\|`steer` |
 | `session/cancel` | `{request: {sessionId}}` | best-effort,idle 时返 `session-not-found` |
 | `session/fork` | `{request: {sessionId, atSeq?}}` | daemon 重启续接用 |
-| `session/models` | `{request: {sessionId}}` | 查可用 model |
-| `session/selectModel` | `{request: {sessionId, provider, model, reasoningEffort?}}` | 切 model |
+| `session/modelCatalog` | `(无参)` | 查 host 级 catalog(`{default, routableProviders, groups, failures}`)。**不是** per-session 当前 model — 那个走 `session/control` 的 `modelSelection` projection,见 §3.4a |
+| `session/selectModel` | `{request: {sessionId, provider, model, reasoningEffort?}}` | 切 per-session model |
 | `session/follow` (stream) | `{request: {address: {kind:"session", sessionId}, maxMessages?}}` | 见 §3.5 |
-| `session/control` (stream) | `(无参)` | 基线 + jobs/queue 替换帧 |
+| `session/control` (stream) | `(无参)` | baseline + `projection` / `queue` / `jobs` 替换帧;`modelSelection` projection 是 per-session 当前 model 的权威源,见 §3.4a |
 | `workspace/create` | `{request: {path}}` | path 必须绝对;`created:bool` 指示是否新建 |
 | `workspace/archiveSession` | `{request: {sessionId}}` | 隐藏 session row(workspace 保留) |
 | `workspace/list` | `(无参)` | 列 workspace 视图 |
@@ -400,6 +400,53 @@ bridge 翻译(`host/stream.go::translateHostEvent`):
 - `waterfall` → `method=event, rpcID=eventId`,payload 包 `{agentId, request}`
 - `cancel` → `method="host/cancel", rpcID=eventId`,payload 包 `{eventId}`
 - `ready` → 不翻译,dispatch 路径只 log(`dsh.host: mux ready clientId=...`)
+
+### 3.4a `session/control` stream items
+
+dsh splits the per-session model surface into two pieces:
+
+- `session.modelCatalog`(无参,host-wide)— `/model` picker 的 catalog feed,不报 per-session 当前 model
+- `session/control`(stream,host-wide)— per-session 的 `modelSelection` projection 是权威源
+
+```
+首帧 baseline:
+{ "type":"baseline",
+  "value":{
+    "queues":   { <sid>: [...queued items] },
+    "jobs":     { <sid>: [...jobs] },
+    "projections":{
+      <sid>:{
+        "asOfSeq": <int64>,
+        "values": {
+          "modelSelection":{
+            "lastUsed": {provider, model, reasoningEffort?} | null,
+            "next":     {provider, model, reasoningEffort?} | null,
+          },
+          ... 其他 projection keys(dsh 0.1.5-rc.1 还会扩 inbox / imageLimits 等)
+        }
+      }
+    }
+  }
+}
+
+后续增量帧:
+{ "type":"projection", "sessionId":"<sid>", "key":"<projection-key>",
+  "value":<projection-specific shape>, "seq":<int64> }
+{ "type":"queue",      "sessionId":"<sid>", "items":[...], "seq":<int64> }
+{ "type":"jobs",       "sessionId":"<sid>", "jobs":[...],  "seq":<int64> }
+```
+
+**bridge 解析**(`host/stream.go::translateControlFrame`):
+
+- `baseline` → 喂给 `host/control_projection.go::controlProjection.ApplyBaseline`;每 session 解出 `modelSelection` 的 `next ?? lastUsed`,缓存在 `bySess[sessionID].resolve`
+- `projection`(`key=="modelSelection"`)→ `ApplyProjection(sessionID, "modelSelection", resolved)`,**只解码 modelSelection 这一种 key**;其他 projection key 走 RawMessage 不解码(forward-compat)
+- `queue` /`jobs` → 不解码,只透传 Raw 给 host,host 暂不消费
+
+**bridge 消费**(`dsh/control_projection.go::registerControlProjection`):
+
+每个 driver 在 handshake 后调 `cli.WatchSessionModel(sessionID, onSessionModelChanged)`。callback 同步触发一次(fresh=true 带当前 `resolve`),后续 projection 增量触发 fresh=false。driver 把 `modelSelection.next ?? lastUsed` 当作 `EventAgentReady.Model` 的权威值;用户在 dashboard picker 切 model → dsh 发 projection 增量 → bridge 重发 `EventAgentReady` 让 runtime `SetModel` 看到新值。
+
+**为什么不用 `session.modelCatalog.default`**:`session.modelCatalog` 返的是 host `agentDefaultModel.currentSelection()`,**没** 跟特定 session 绑定。一个用户可以给某个 session override model(走 `session/selectModel` + `model/selection` 事件),host `default` 不变但该 session 实际用的是 override 后的 model。要拿 per-session 真值必须读 `modelSelection` projection。
 
 ### 3.5 session/follow stream items
 
@@ -678,7 +725,7 @@ RPCClient.PostWithReconnect(ctx, method, args)
 
 retry 上限 = `reconnectMaxAttempts = 7`。原因:第 7 次 attempt 没有自己的 wait,前面 6 次 wait 累计 0.5+1+2+4+8+16 = 31.5s;第 8 次 attempt 的 wait 是 `respawnDelay(7) = 30s`(已经撞 `respawnBackoffMax` cap),加了之后总预算 61.5s,跟"31.5s 预算"的契约不一致。7 是守住 ~31s 的硬上限。
 
-调用方契约:`WorkspaceCreate` / `SessionCreate` 走 `PostWithReconnect`,`session.create` 在 `session.go::createFreshSession` 也走它。其他 raw `Post` 调用(`session.prompt` / `session.history` / `session.models` / `session.list`)保持单次 — 它们在 dsh 已经可用的稳态运行,不需要 respawn-window 重试。
+调用方契约:`WorkspaceCreate` / `SessionCreate` 走 `PostWithReconnect`,`session.create` 在 `session.go::createFreshSession` 也走它。其他 raw `Post` 调用(`session.prompt` / `session.history` / `session.modelCatalog` / `session.list`)保持单次 — 它们在 dsh 已经可用的稳态运行,不需要 respawn-window 重试。
 
 幂等性:重试场景下,**`workspace.create` 是 server-side 幂等的**(dsh 按 path dedupe,重复调返回同一个 workspaceId,`created:false`);**`session.create` 不是**(server 按调用顺序 commit,transport-level 失败但 server 实际已 commit 时,重试会开第二个 session,旧 sessionId 丢失,产生孤儿 row)。后续 caller 想严格幂等,可在 `SessionCreateOpts` 里预分配 `SessionID`(字段已存在,server 在新 create 时会 honor)。
 
@@ -1000,7 +1047,7 @@ for {
 
 - **`WaitForDSHReady`(`client.go`)自己已经是 retry loop**。如果 `Post` 内置 retry,`WaitForDSHReady` 调用时嵌套一层,worst-case backoff × attempts 叠加。
 - **业务错误不该被重试掩盖**。`Result.Error`(gateway/input-invalid、bad-request、session-conflict 等)是 server 主动拒绝,重试只会再错一次;HTTP 5xx / decode / rpcId mismatch 是 wire 异常也不是 transport 问题。这些在 `isTransientTransportError` 都是 false,直接返回。
-- **长尾 raw `Post`(`session.prompt` / `session.history` / `session.list` / `session.models`)走稳态**,host 已经活着的概率远大于 respawn 窗口的瞬态概率,加 retry 没收益反增延迟。这些调用继续走 `Post`。
+- **长尾 raw `Post`(`session.prompt` / `session.history` / `session.list` / `session.modelCatalog`)走稳态**,host 已经活着的概率远大于 respawn 窗口的瞬态概率,加 retry 没收益反增延迟。这些调用继续走 `Post`。per-session 的 model 解析走 `session/control` 流的 `modelSelection` projection,不走 RPC — 见 §3.4a。
 
 幂等性边界(必须知道,因为这是 caller-visible 差异):
 
@@ -1008,7 +1055,7 @@ for {
 |---|---|---|
 | `workspace.create` | 是(按 path dedupe,重复调返回同一 workspaceId,`created:false`) | 安全 |
 | `session.create` | 否(server 按调用序 commit,transport 失败但 server 已 commit 时重试会开第二个 session,旧 sessionId 丢失,产生孤儿 row) | 产生孤儿;严格 caller 应预分配 `opts.SessionID` |
-| `session.prompt` / `session.history` / `session.list` / `session.models` | session.prompt 是 server-side idempotent on `requestId`(client-mint),其余是 read | 安全 |
+| `session.prompt` / `session.history` / `session.list` / `session.modelCatalog` | session.prompt 是 server-side idempotent on `requestId`(client-mint),其余是 read | 安全 |
 | `workspace.archiveSession` / `workspace.delete` | 是 | 安全 |
 
 ---

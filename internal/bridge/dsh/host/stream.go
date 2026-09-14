@@ -71,6 +71,16 @@ const (
 	// against dsh 0.1.2-rc.1 (api-gateway types/stream-protocol.js).
 	hostEventsEndpoint = "$events"
 
+	// sessionControlEndpoint is the typert endpoint name dsh uses
+	// for the daemon-global live session/control stream (baseline
+	// + projection / queue / jobs deltas per
+	// packages/api/session-controller/src/control.ts). The
+	// endpoint takes no args; dsh returns one baseline + a stream
+	// of deltas. The bridge only decodes the `modelSelection`
+	// projection; other projections / queues / jobs ride through
+	// as RawMessage so projection schema bumps don't break us.
+	sessionControlEndpoint = "session/control"
+
 	// sessionFollowEndpoint is the typert endpoint name dsh uses
 	// for per-session live event streams. Verified 2026-09-11
 	// against dsh 0.1.2-rc.1 (api-session-controller
@@ -82,6 +92,11 @@ const (
 	// Host event stream. It's a constant so the dispatcher can
 	// route Host items to onHostFrame without a registry lookup.
 	hostStreamID = "host-$events"
+
+	// controlStreamID is the fixed streamId for the daemon-global
+	// session/control stream. Same fixed-id trick as hostStreamID —
+	// dispatcher routes by literal ID without a registry lookup.
+	controlStreamID = "host-control"
 )
 
 // sessionStream holds the per-session subscription state. The
@@ -113,9 +128,14 @@ type StreamHub struct {
 	// Callbacks. onHostFrame receives Host lifecycle events
 	// (decoded {method, rpcId, payload}); onMuxFrame receives
 	// every session event (Router.DispatchMux then routes by
-	// payload.sessionId).
-	onMuxFrame  FrameHandler
-	onHostFrame FrameHandler
+	// payload.sessionId). onControlFrame receives each item yielded
+	// by the session/control stream (the stream itself is opened
+	// by StreamHub on every (re)connect — drivers do not subscribe
+	// to it; they watch the resolved projection via the host
+	// package's Control store).
+	onMuxFrame     FrameHandler
+	onHostFrame    FrameHandler
+	onControlFrame ControlFrameHandler
 
 	mu         sync.RWMutex
 	sessions   map[string]*sessionStream // sessionID → subscription
@@ -154,19 +174,25 @@ type StreamHub struct {
 //
 // Callbacks must be non-blocking — see type doc on FrameHandler.
 // Pass nil for log to use slog.Default().
-func NewStreamHub(baseURL string, log *slog.Logger, onMuxFrame, onHostFrame FrameHandler) *StreamHub {
+//
+// onControlFrame is invoked once per item yielded by the
+// session/control stream (baseline + deltas). The hub opens the
+// session/control stream automatically on every (re)connect —
+// callers do not need to subscribe to it.
+func NewStreamHub(baseURL string, log *slog.Logger, onMuxFrame, onHostFrame FrameHandler, onControlFrame ControlFrameHandler) *StreamHub {
 	if log == nil {
 		log = slog.Default()
 	}
 	h := &StreamHub{
-		baseURL:     baseURL,
-		log:         log,
-		onMuxFrame:  onMuxFrame,
-		onHostFrame: onHostFrame,
-		sessions:    make(map[string]*sessionStream),
-		byStreamID:  make(map[string]*sessionStream),
-		stop:        make(chan struct{}),
-		writeCh:     make(chan clientFrame, 32),
+		baseURL:        baseURL,
+		log:            log,
+		onMuxFrame:     onMuxFrame,
+		onHostFrame:    onHostFrame,
+		onControlFrame: onControlFrame,
+		sessions:       make(map[string]*sessionStream),
+		byStreamID:     make(map[string]*sessionStream),
+		stop:           make(chan struct{}),
+		writeCh:        make(chan clientFrame, 32),
 	}
 	h.dispatchCond = sync.NewCond(&h.dispatchMu)
 	return h
@@ -180,8 +206,8 @@ func NewStreamHub(baseURL string, log *slog.Logger, onMuxFrame, onHostFrame Fram
 //
 // jar must be non-nil; passing nil is a programming error (use
 // NewStreamHub for the cookie-less test path).
-func NewStreamHubWithJar(baseURL string, jar http.CookieJar, log *slog.Logger, onMuxFrame, onHostFrame FrameHandler) *StreamHub {
-	h := NewStreamHub(baseURL, log, onMuxFrame, onHostFrame)
+func NewStreamHubWithJar(baseURL string, jar http.CookieJar, log *slog.Logger, onMuxFrame, onHostFrame FrameHandler, onControlFrame ControlFrameHandler) *StreamHub {
+	h := NewStreamHub(baseURL, log, onMuxFrame, onHostFrame, onControlFrame)
 	h.jar = jar
 	return h
 }
@@ -555,6 +581,16 @@ func (h *StreamHub) connectAndServe(ctx context.Context) error {
 		Endpoint: hostEventsEndpoint,
 		Payload:  mustJSON(map[string]any{"args": map[string]any{}}),
 	})
+	// Re-open the session/control stream (its streamId is fixed).
+	// Same rationale as hostStreamID: dsh re-creates it on the
+	// fresh connection; the bridge receives a fresh baseline
+	// containing every active session's projection snapshot.
+	toReopen = append(toReopen, clientFrame{
+		Type:     "open",
+		StreamID: controlStreamID,
+		Endpoint: sessionControlEndpoint,
+		Payload:  mustJSON(map[string]any{"args": map[string]any{}}),
+	})
 	h.mu.Unlock()
 
 	h.log.Info("dsh.host: mux stream connected", "url", u.String(),
@@ -667,6 +703,18 @@ func (h *StreamHub) dispatch(f serverFrame) {
 			h.invokeOnHost(method, rpcID, payload)
 			return
 		}
+		if f.StreamID == controlStreamID {
+			h.mu.RUnlock()
+			frame, ok := translateControlFrame(f.Value)
+			if !ok {
+				h.log.Debug("dsh.host: untranslated control item",
+					"value_bytes", truncateBytes(f.Value, 200))
+				return
+			}
+			h.markDispatchStart()
+			h.invokeOnControl(frame)
+			return
+		}
 		sub, ok := h.byStreamID[f.StreamID]
 		h.mu.RUnlock()
 		if !ok || sub == nil {
@@ -730,6 +778,19 @@ func (h *StreamHub) invokeOnHost(method, rpcID string, payload json.RawMessage) 
 	}()
 	if h.onHostFrame != nil {
 		h.onHostFrame(method, rpcID, payload)
+	}
+}
+
+func (h *StreamHub) invokeOnControl(frame ControlFrame) {
+	defer h.markDispatchDone()
+	defer func() {
+		if r := recover(); r != nil {
+			h.log.Error("dsh.host: control dispatch handler panic",
+				"kind", frame.Kind, "session_id", frame.SessionID, "panic", r)
+		}
+	}()
+	if h.onControlFrame != nil {
+		h.onControlFrame(frame)
 	}
 }
 
@@ -845,6 +906,139 @@ type clientFrame struct {
 // bytes of the method-specific object (already unmarshaled by
 // the time it gets here).
 type FrameHandler func(method, rpcID string, payload json.RawMessage)
+
+// ControlFrameKind is the discriminator on a session/control item
+// after translateControlFrame parses it.
+type ControlFrameKind string
+
+const (
+	ControlBaseline   ControlFrameKind = "baseline"
+	ControlProjection ControlFrameKind = "projection"
+	ControlQueue      ControlFrameKind = "queue"
+	ControlJobs       ControlFrameKind = "jobs"
+)
+
+// ControlFrame is the bridge-side decoded shape of one item on
+// the session/control stream. Carry depends on Kind:
+//
+//   - baseline:   Models map (sessionId → resolved model id)
+//   - projection: SessionID + Key + Model (when Key=="modelSelection")
+//   - queue / jobs: SessionID + Raw (RawMessage for forward compat)
+type ControlFrame struct {
+	Kind      ControlFrameKind
+	SessionID string
+	Key       string
+	Model     string            // only set for baseline+projection of modelSelection
+	Models    map[string]string // only set for baseline
+	Raw       json.RawMessage   // queue/jobs items + undecoded projection values
+}
+
+// ControlFrameHandler receives each ControlFrame yielded by the
+// session/control stream. Must be non-blocking — runs on the WS
+// readLoop goroutine.
+type ControlFrameHandler func(frame ControlFrame)
+
+// translateControlFrame parses one item yielded by the
+// session/control stream. Returns ok=false when the item type is
+// empty / unknown so the dispatcher can drop it quietly.
+//
+// Wire form (dsh 0.1.5-rc.1 control.ts):
+//
+//	{ type:"baseline",   value:{queues, jobs, projections:{<sid>:{asOfSeq,values:{modelSelection,...}}}} }
+//	{ type:"projection", sessionId, key, value, seq }
+//	{ type:"queue",      sessionId, items, seq }
+//	{ type:"jobs",       sessionId, jobs, seq }
+func translateControlFrame(raw json.RawMessage) (ControlFrame, bool) {
+	var f struct {
+		Type      string          `json:"type"`
+		SessionID string          `json:"sessionId,omitempty"`
+		Key       string          `json:"key,omitempty"`
+		Seq       int64           `json:"seq,omitempty"`
+		Value     json.RawMessage `json:"value,omitempty"`
+		Items     json.RawMessage `json:"items,omitempty"`
+		Jobs      json.RawMessage `json:"jobs,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return ControlFrame{}, false
+	}
+	switch f.Type {
+	case "baseline":
+		var b sessionControlBaselineWire
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return ControlFrame{}, false
+		}
+		// Project every session's modelSelection projection down to
+		// the resolved model id (next ?? lastUsed). Sessions with no
+		// recorded selection yet (both nil) map to "" — the watcher's
+		// fresh callback will see "".
+		models := make(map[string]string, len(b.Value.Projections))
+		for sid, proj := range b.Value.Projections {
+			models[sid] = proj.Values.ModelSelection.resolveModel()
+		}
+		return ControlFrame{
+			Kind:   ControlBaseline,
+			Models: models,
+			Raw:    raw,
+		}, true
+	case "projection":
+		if f.Key != "modelSelection" {
+			// Forward-compat: ride through undecoded. Hub caller
+			// (Client.Control.ApplyProjection) no-ops on non-
+			// modelSelection keys.
+			return ControlFrame{
+				Kind:      ControlProjection,
+				SessionID: f.SessionID,
+				Key:       f.Key,
+				Raw:       raw,
+			}, true
+		}
+		var proj modelSelectionProjection
+		if err := json.Unmarshal(f.Value, &proj); err != nil {
+			return ControlFrame{}, false
+		}
+		return ControlFrame{
+			Kind:      ControlProjection,
+			SessionID: f.SessionID,
+			Key:       f.Key,
+			Model:     proj.resolveModel(),
+			Raw:       f.Value,
+		}, true
+	case "queue":
+		return ControlFrame{
+			Kind:      ControlQueue,
+			SessionID: f.SessionID,
+			Raw:       f.Items,
+		}, true
+	case "jobs":
+		return ControlFrame{
+			Kind:      ControlJobs,
+			SessionID: f.SessionID,
+			Raw:       f.Jobs,
+		}, true
+	}
+	return ControlFrame{}, false
+}
+
+// sessionControlBaselineWire is the bridge-side decode of the
+// baseline frame. Defined here (not in protocol.go) because only
+// the hub's translator needs it — the projection store consumes
+// the decoded `Models` map directly.
+//
+// Wire form:
+//
+//	{ type:"baseline",
+//	  value:{ queues, jobs,
+//	          projections:{ <sid>:{ asOfSeq, values:{ modelSelection, ... } } } }
+type sessionControlBaselineWire struct {
+	Value struct {
+		Projections map[string]struct {
+			AsOfSeq int64 `json:"asOfSeq"`
+			Values  struct {
+				ModelSelection modelSelectionProjection `json:"modelSelection"`
+			} `json:"values"`
+		} `json:"projections"`
+	} `json:"value"`
+}
 
 // ─── dispatch translation ─────────────────────────────────────────
 

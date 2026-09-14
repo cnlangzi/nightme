@@ -677,52 +677,27 @@ type sessionListValue struct {
 	Items []Session `json:"items"`
 }
 
-// ─── /api/session.models response ────────────────────────────────────
-
-// sessionModelsValue is the `value` payload of an OK session.models
-// response. Mirrors dsh's `SessionModels` shape from
-// `packages/host/apiproxy/src/api/sessions.ts`.
+// ─── dsh 0.1.5-rc.1 model surface ───────────────────────────────────
 //
-// Current is the model's authoritative selection for the session's
-// NEXT assembled step — what dsh's adapter will dispatch to if the
-// user prompts right now. Bridge surfaces Current.Model on
-// EventAgentReady so the runtime can render the receipt header
-// (e.g. "session <id> · model <name>"). The dsh bridge intentionally
-// does not route a live model-change call — model changes require a
-// fresh session — but Current's shape is the same one a future
-// /api/session.selectModel would set, so the field names line up
-// with dsh's wire contract.
+// The 0.1.2-rc.1 wire had `session.models` returning
+// `{current:{provider,model}, routable, groups, failures}` keyed by
+// sessionId. 0.1.5-rc.1 refactored the model surface into two
+// pieces:
 //
-// Routable tells us whether an adapter currently serves
-// Current.Provider; without it, the session can't start a turn at
-// all. Bridge does not gate on this — dsh will return agent-busy
-// or model-unavailable if a prompt is sent without a routable
-// adapter — but the flag is preserved on the wire struct so a
-// future caller can surface it.
+//   1. `session.modelCatalog` (no args) returns the host-wide
+//      {default, routableProviders, groups, failures} catalog. This
+//      is the "which models can I pick" feed for /model pickers and
+//      does NOT report the per-session selection — picking one
+//      requires a separate `session/selectModel` call.
+//   2. `session/control` (stream) carries the per-session
+//      `modelSelection` projection as part of its baseline + every
+//      projection delta. The projection is `{lastUsed, next}` per
+//      `packages/api/session-controller/src/model-selection-projection.ts`.
 //
-// Groups + Failures are kept as RawMessage because the runtime
-// does not currently surface a /model picker UI for dsh (deferred
-// per docs/bridge/dsh.md §11). Future PR can decode them against
-// ModelProviderGroup / ModelCatalogFailure when /model lands.
-type sessionModelsValue struct {
-	Current  modelSelectionWire `json:"current"`
-	Routable bool               `json:"routable"`
-	Groups   json.RawMessage    `json:"groups,omitempty"`
-	Failures json.RawMessage    `json:"failures,omitempty"`
-}
-
-// modelSelectionWire is one entry of ModelSelection
-// (`sessions.ts: ModelSelection`). `Provider` is the registered
-// route key (e.g. "minimax-cn"), `Model` is the provider-owned
-// model id (e.g. "MiniMax-M3"). ReasoningEffort is optional and
-// only populated when the adapter exposes it for this exact route.
-//
-// The bridge stamps Model onto EventAgentReady.Model verbatim
-// (provider:model would be too wide for the runtime's model
-// string — runtime compares against `agent.UsageInfo.ContextWindow`
-// table and the channel footer wants a single token).
-type modelSelectionWire struct {
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoningEffort,omitempty"`
-}
+// The bridge reads the per-session model via #2 — that's the
+// authoritative source of "what model is this session actually
+// using right now". #1's `default` is the host-default fallback for
+// sessions that have not yet picked a model. The wire types
+// (modelSelectionProjection + the session/control frame envelope)
+// live in host/control_wire.go because the WS readLoop
+// translator decodes them there.

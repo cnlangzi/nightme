@@ -54,7 +54,6 @@ func newHandshakeMock(t *testing.T) *handshakeMock {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/workspace/create", m.handleWorkspaceCreate)
 	mux.HandleFunc("/api/session/create", m.handleSessionCreate)
-	mux.HandleFunc("/api/session/models", m.handleSessionModels)
 	mux.HandleFunc("/api/session/history", m.handleSessionHistory)
 	mux.HandleFunc("/api/session/cancel", m.handleSessionCancel)
 	mux.HandleFunc("/api/workspace/archiveSession", m.handleWorkspaceArchiveSession)
@@ -213,14 +212,6 @@ func (m *handshakeMock) handleSessionCreate(w http.ResponseWriter, r *http.Reque
 	m.createIDs = append(m.createIDs, id)
 	m.mu.Unlock()
 	writeOK(w, env.RPCID, map[string]any{"sessionId": id})
-}
-
-func (m *handshakeMock) handleSessionModels(w http.ResponseWriter, r *http.Request) {
-	env := decodeEnvelope(r)
-	writeOK(w, env.RPCID, map[string]any{
-		"current":  map[string]any{"provider": "mock", "model": "mock-model"},
-		"routable": true,
-	})
 }
 
 func (m *handshakeMock) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
@@ -510,6 +501,157 @@ func TestNewDriver_ResumeSeedsLastSeqWithoutReplayingHistory(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for EventAgentReady")
+	}
+}
+
+// peekLastSeq is defined in session.go (production-side helper
+// the resume tests reach for); not redeclared here.
+
+// GetModel returns d.model for tests. Reads under modelMu so
+// concurrent callers don't race the projection store's writer.
+func (d *driver) GetModel() string {
+	d.modelMu.Lock()
+	defer d.modelMu.Unlock()
+	return d.model
+}
+
+// TestNewDriver_StampsModelFromProjectionBaseline verifies the
+// new model resolution path: when the host projection store has a
+// baseline that already names our session, the driver's startup
+// EventAgentReady carries that model id (no /api/session.models
+// round-trip — that endpoint is gone in 0.1.5-rc.1).
+func TestNewDriver_StampsModelFromProjectionBaseline(t *testing.T) {
+	mock := newHandshakeMock(t)
+	cli := mock.installGlobal(t)
+
+	wantModel := "mock-model-from-projection"
+	cli.Control.ApplyBaseline(map[string]string{
+		"session-fresh-1": wantModel,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver: %v", err)
+	}
+	defer d.Close()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-d.events:
+			if ev.Kind != agent.EventAgentReady {
+				continue
+			}
+			if ev.SessionID != "session-fresh-1" {
+				t.Fatalf("Ready SessionID = %q", ev.SessionID)
+			}
+			if ev.Model != wantModel {
+				t.Fatalf("Ready Model = %q, want %q (from projection baseline)",
+					ev.Model, wantModel)
+			}
+			if got := d.GetModel(); got != wantModel {
+				t.Fatalf("driver.GetModel = %q, want %q", got, wantModel)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for startup EventAgentReady")
+		}
+	}
+}
+
+// TestNewDriver_EmitsReadyOnProjectionChange verifies a
+// projection delta after the initial Ready causes a second
+// EventAgentReady so the runtime's captured model stays current
+// when the user switches model via the dashboard picker.
+func TestNewDriver_EmitsReadyOnProjectionChange(t *testing.T) {
+	mock := newHandshakeMock(t)
+	cli := mock.installGlobal(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver: %v", err)
+	}
+	defer d.Close()
+
+	// Drain startup Ready (model is "" because the projection
+	// store was empty when the driver registered).
+	select {
+	case ev := <-d.events:
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("first event kind = %s, want EventAgentReady", ev.Kind)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for startup EventAgentReady")
+	}
+
+	cli.Control.ApplyProjection(d.sessionID, "modelSelection", "minimax")
+
+	select {
+	case ev := <-d.events:
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("event kind = %s, want EventAgentReady", ev.Kind)
+		}
+		if ev.Model != "minimax" {
+			t.Fatalf("Ready Model = %q, want minimax", ev.Model)
+		}
+		if got := d.GetModel(); got != "minimax" {
+			t.Fatalf("driver.GetModel = %q, want minimax", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for re-emitted EventAgentReady")
+	}
+}
+
+// TestNewDriver_NoReadyWhenModelUnchanged verifies a projection
+// delta with the same value is deduped — the store already
+// short-circuits identical values, and onSessionModelChanged
+// short-circuits when model == prev so we don't spam the runtime
+// with redundant Ready events.
+func TestNewDriver_NoReadyWhenModelUnchanged(t *testing.T) {
+	mock := newHandshakeMock(t)
+	cli := mock.installGlobal(t)
+
+	cli.Control.ApplyBaseline(map[string]string{
+		"session-fresh-1": "minimax",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d, err := newDriver(ctx, NewStarter("dsh"), agent.StartConfig{
+		Workspace: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("newDriver: %v", err)
+	}
+	defer d.Close()
+
+	select {
+	case ev := <-d.events:
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("first event kind = %s, want EventAgentReady", ev.Kind)
+		}
+		if ev.Model != "minimax" {
+			t.Fatalf("Ready Model = %q, want minimax", ev.Model)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for startup EventAgentReady")
+	}
+
+	cli.Control.ApplyProjection(d.sessionID, "modelSelection", "minimax")
+
+	select {
+	case ev := <-d.events:
+		t.Fatalf("unexpected re-emitted EventAgentReady with model=%q", ev.Model)
+	case <-time.After(500 * time.Millisecond):
+		// expected: nothing
 	}
 }
 

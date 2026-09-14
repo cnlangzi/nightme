@@ -111,11 +111,25 @@ type driver struct {
 	// would drop back to the dsh default.
 	permissionMode string
 
-	// model is the model's authoritative selection captured at
-	// session-create time via /api/session.models. Bridge stamps
-	// it onto EventAgentReady.Model so the runtime's receipt
-	// header renders "session <id> · model <name>".
-	model string
+	// model is the model's authoritative selection. Sourced from
+	// the host's session/control modelSelection projection (see
+	// control_projection.go). Updated live when the user picks a
+	// different model via the dashboard picker — dsh publishes
+	// the projection delta and onSessionModelChanged re-emits an
+	// EventAgentReady with the new value.
+	//
+	// modelMu guards model: the projection callback runs on the
+	// host's WS readLoop goroutine; newDriver / starter.go drain
+	// it on the chat session goroutine.
+	modelMu sync.Mutex
+	model   string
+
+	// modelUnsub is the unsubscribe func returned by
+	// registerControlProjection. Held on the driver so Close can
+	// detach the projection watcher; without this the projection
+	// store would keep firing onSessionModelChanged on a closed
+	// driver, dead-letter-ing events to a stale dsh session.
+	modelUnsub func()
 
 	// pendingApprovals maps the server-frame rpcId (NOT the payload's
 	// approvalId) to the response channel we hand to runtime via
@@ -335,27 +349,22 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// hostWaterfallHandler. Idempotent — re-registration overwrites.
 	registerDriverForWaterfall(d)
 
-	// Fetch the authoritative model selection via /api/session.models.
-	// session.create does NOT return the model — dsh requires the
-	// adapter to resolve the model route asynchronously (catalog
-	// lookup) and the selection is only readable through this RPC.
-	// Without this call, EventAgentReady.Model would always be empty
-	// AND a follow-up session.prompt would fail with `model-unavailable`.
-	modelCtx, modelCancel := context.WithTimeout(ctx, handshakeTimeout)
-	if sm, err := d.fetchSessionModels(modelCtx); err != nil {
-		dLog("dsh: session.models probe failed (continuing without model)",
-			"err", errStr(err))
-	} else {
-		d.model = sm.Current.Model
-		dLog("dsh: model resolved",
-			"model", d.model,
-			"provider", sm.Current.Provider,
-			"routable", sm.Routable)
-	}
-	modelCancel()
+	// Wire the session/control modelSelection projection to this
+	// driver. dsh 0.1.5-rc.1 removed the per-session `session.models`
+	// RPC; the authoritative model for a session now lives on the
+	// session/control stream's `modelSelection` projection
+	// (next ?? lastUsed), which the host exposes via cli.Control.
+	// WatchSessionModel fires synchronously with the current value
+	// (fresh=true) before returning, so d.model is set by the time
+	// we read it below. Live updates (dashboard picker) fire with
+	// fresh=false and re-emit EventAgentReady — see
+	// onSessionModelChanged.
+	d.modelUnsub = registerControlProjection(d)
 
 	// Emit EventAgentReady so the runtime can capture SessionID +
-	// Workspace + Branch + Model.
+	// Workspace + Branch + Model. d.model was just stamped by the
+	// watcher's fresh callback; the runtime's SetModel picks it up
+	// from here on every subsequent event.
 	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
 		SessionID: d.sessionID,
@@ -402,29 +411,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	go d.runBackfillLoop(bfCtx)
 
 	return d, nil
-}
-
-// fetchSessionModels calls POST /api/session.models on the shared
-// host and decodes the SessionModels envelope.
-func (d *driver) fetchSessionModels(ctx context.Context) (*sessionModelsValue, error) {
-	if d.sessionID == "" {
-		return nil, errors.New("dsh: session not initialized")
-	}
-	resp, err := d.cli.RPC.Post(ctx, "session.models", map[string]any{
-		"request": map[string]any{"sessionId": d.sessionID},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("dsh: session.models: %w", err)
-	}
-	if !resp.Result.OK {
-		return nil, fmt.Errorf("dsh: session.models rejected: %s",
-			resp.Result.ErrorMessage())
-	}
-	var out sessionModelsValue
-	if err := json.Unmarshal(resp.Result.Value, &out); err != nil {
-		return nil, fmt.Errorf("dsh: decode session.models value: %w", err)
-	}
-	return &out, nil
 }
 
 // handshakeSession runs the resume-or-create handshake against the
@@ -984,14 +970,21 @@ func (d *driver) Reset(ctx context.Context) error {
 		permCancel()
 	}
 
-	modelCtx, modelCancel := context.WithTimeout(ctx, handshakeTimeout)
-	if sm, err := d.fetchSessionModels(modelCtx); err != nil {
-		dLog("dsh: session.models probe failed after reset (continuing without model)",
-			"err", errStr(err))
-	} else {
-		d.model = sm.Current.Model
+	// The session/control modelSelection projection is keyed by
+	// sessionId; the baseline from the next connection may not yet
+	// include the fresh newID. Re-register the projection watcher
+	// against newID — the host store auto-fires the current value
+	// (which may be "") so d.model updates with whatever dsh has.
+	// If the newID is already in the baseline (e.g. a sibling chat
+	// session in the same repo was the seed), the fresh callback
+	// resolves it synchronously here.
+	if d.modelUnsub != nil {
+		d.modelUnsub()
 	}
-	modelCancel()
+	d.modelMu.Lock()
+	d.model = ""
+	d.modelMu.Unlock()
+	d.modelUnsub = registerControlProjection(d)
 
 	d.seedLastSeq(ctx)
 
@@ -1083,6 +1076,11 @@ func (d *driver) Close() error {
 		// Unsubscribe so a waterfall racing in this window is dropped
 		// (debug-logged) instead of handed to a closing driver.
 		unregisterDriverForWaterfall(d)
+		// Detach the session/control modelSelection projection
+		// watcher. unregisterControlProjection invokes modelUnsub
+		// so the host store stops firing on a closed driver.
+		unregisterControlProjection(d, d.modelUnsub)
+		d.modelUnsub = nil
 		d.cli.Unsubscribe(d.sessionID)
 		if d.sessionID != "" {
 			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 3*time.Second)

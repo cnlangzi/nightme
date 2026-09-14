@@ -88,7 +88,7 @@ func UnsetGlobal() {
 
 // Client is the single per-nightme-daemon facade for the shared dsh
 // web host. Every ChatSession / AgentSession interacts with the host
-// through this Client (via its three exported fields).
+// through this Client (via its exported fields).
 type Client struct {
 	baseURL string
 	log     *slog.Logger
@@ -106,6 +106,14 @@ type Client struct {
 	// pending-approvals/questions table. ChatSession/AgentSession
 	// register/unregister themselves here.
 	Router *Router
+
+	// Control holds the live store of session/control stream
+	// projections (the per-session modelSelection, plus the rest
+	// undecoded). Drivers register watchers via WatchSessionModel
+	// to be notified when the host-side model for their session
+	// changes — that includes the initial handshake resolve
+	// (baseline) and live updates from the dashboard picker.
+	Control *controlProjection
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -134,12 +142,14 @@ func New(baseURL string, log *slog.Logger) *Client {
 		closed:  make(chan struct{}),
 	}
 	c.Router = NewRouter(log)
+	c.Control = newControlProjection()
 	c.RPC = NewRPCClient(baseURL)
 	// Wire Hub callbacks to Router. DispatchMux extracts sessionId
 	// from the payload itself — the Hub is payload-agnostic.
 	c.Hub = NewStreamHub(baseURL, log,
 		c.Router.DispatchMux,
 		c.Router.DispatchHost,
+		c.Control.dispatch,
 	)
 	return c
 }
@@ -178,6 +188,7 @@ func NewWithJar(baseURL string, jar http.CookieJar, log *slog.Logger) *Client {
 		closed:  make(chan struct{}),
 	}
 	c.Router = NewRouter(log)
+	c.Control = newControlProjection()
 	c.RPC = NewRPCClientWithHTTP(baseURL, &http.Client{
 		Jar:     jar,
 		Timeout: httpClientTimeout,
@@ -185,6 +196,7 @@ func NewWithJar(baseURL string, jar http.CookieJar, log *slog.Logger) *Client {
 	c.Hub = NewStreamHubWithJar(baseURL, jar, log,
 		c.Router.DispatchMux,
 		c.Router.DispatchHost,
+		c.Control.dispatch,
 	)
 	return c
 }
@@ -397,6 +409,33 @@ func (c *Client) Unsubscribe(sessionID string) {
 // Router.SetHostHandler.
 func (c *Client) SetHostHandler(h HostFrameHandler) {
 	c.Router.SetHostHandler(h)
+}
+
+// WatchSessionModel registers cb to fire on every model selection
+// change for sessionID, including the initial current value with
+// fresh=true. Returns an unsubscribe function. The callback runs
+// synchronously on the WS readLoop goroutine — keep it non-blocking.
+//
+// Used by drivers to learn which model dsh will dispatch the
+// session's NEXT prompt to. The store is populated from the
+// session/control stream's baseline + projection deltas; see
+// control_projection.go for the wire mapping.
+func (c *Client) WatchSessionModel(sessionID string, cb modelWatchCB) func() {
+	if c.Control == nil {
+		return func() {}
+	}
+	return c.Control.WatchSessionModel(sessionID, cb)
+}
+
+// GetSessionModel returns the latest resolved model id for
+// sessionID, or "" when no projection has arrived yet (e.g. fresh
+// session before the first control baseline, or post-respawn before
+// the new dsh publishes its baseline).
+func (c *Client) GetSessionModel(sessionID string) string {
+	if c.Control == nil {
+		return ""
+	}
+	return c.Control.GetSessionModel(sessionID)
 }
 
 // RegisterPendingApproval stores a response channel under

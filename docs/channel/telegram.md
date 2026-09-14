@@ -291,7 +291,7 @@ Topic 方案要求：
 1. 群组是 **Forum Supergroup**；普通群组没有 Forum Topic。
 2. 群组已开启 Topics。
 3. Bot 是群组成员，并具备创建/管理 Topic 所需的权限；建议配置为管理员。
-4. Bot 使用长轮询（`getUpdates`）接收 `Message`、`CallbackQuery` 和 `MessageReactionUpdated` 等更新。每个 Bot 只能有一个 `getUpdates` consumer,daemon 重启时用持久化的 `update_id + 1` 继续消费。
+4. Bot 使用长轮询（`getUpdates`）接收 `Message`、`CallbackQuery` 和 `MyChatMember` 三类 update；其余（`message_reaction` / `message_reaction_count` / `chat_member`）在 `allowed_updates` 白名单中显式排除，避免入站噪声推送到 `incoming` 通道。每个 Bot 只能有一个 `getUpdates` consumer,daemon 重启时用持久化的 `update_id + 1` 继续消费。
 5. 私聊没有 Forum Topic；私聊只能退化为普通消息，并在文档和 UI 中明确标注。
 6. Topic 内发送的所有事件都必须显式携带正确的 `message_thread_id`。
 
@@ -3164,12 +3164,12 @@ runtime 侧零修改（emoji 决策完全 Channel 自治）；Channel 侧只动 
 - 这意味着 Topic 永远是"空容器"，永远要靠内部的占位消息表达"会话状态"。
 - 已确认无替代方案。
 
-#### L10. Telegram reaction update 不带 `message_thread_id`
+#### L10. 入站 reaction / chat_member update 不进入 inbound
 
-- `MessageReactionUpdate`（`setMessageReaction` 触发的 👍/✅/🔄 等 emoji 反应）只携带 `chat.id` 和 `message_id`，没有 `message_thread_id`。
-- 后果：topic 内的 reaction 永远路由不到该 topic 的 ChatSession（chatID 不带 thread 后缀），只能路由到 chat-level ChatSession。
-- 实际影响：gtw drafts 存在 topic 内时（`tg_<chatid>:<thread_id>`），用户给 topic 内 message 加 ✅ reaction **无法触发** gtw draft 处理。DM 和群主窗口的反应（无 thread）正常工作。
-- 修法（2026-08-22）：chat-level chatID 现在统一 namespaced（`tg_<chatid>`），DM / 主窗口 emoji reactions 能正常进 gtw draft 流程。Topic 内的 emoji reactions 仍是平台能力限制。
+- `allowed_updates` 显式排除 `message_reaction` / `message_reaction_count` / `chat_member`，Telegram 服务端不下发这三类 update。
+- `Update` struct 仅暴露 `Message` / `EditedMessage` / `CallbackQuery` / `MyChatMember` 四个字段；`handleUpdate` 分发逻辑对其他类型无处理分支。
+- 结论：bot 不接收任何入站 reaction / chat_member 事件；emoji reaction 仅作为出站通道（`OutMessageState` → `setMessageReaction`）用于在 user 消息 / 占位消息上贴视觉状态。
+- 平台硬限制：即便重新开启订阅，`MessageReactionUpdate` 不携带 `message_thread_id`，topic 内的 reaction 仍无法命中 topic 内的 ChatSession（chatID 不带 thread 后缀）。
 
 ### 15.2 降级类（用近似手段实现，已 work）
 

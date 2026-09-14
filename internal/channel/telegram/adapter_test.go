@@ -2176,93 +2176,6 @@ func TestAdapter_Send_OutResultEmptyText(t *testing.T) {
 	}
 }
 
-func TestAdapter_HandleMessageReaction_ForwardsInbound(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer func() { _ = a.Stop(context.Background()) }()
-	_ = a.Start(ctx)
-	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:        Chat{ID: 100, Type: "private"},
-		MessageID:   99,
-		User:        User{ID: 7, Username: "alice"},
-		Date:        time.Now().Unix(),
-		NewReaction: []ReactionType{{Type: "emoji", Emoji: "👍"}},
-	})
-	select {
-	case msg := <-a.Incoming():
-		if msg.Reaction == nil {
-			t.Fatal("expected reaction")
-		}
-		if msg.Reaction.Emoji != "👍" {
-			t.Fatalf("emoji=%q", msg.Reaction.Emoji)
-		}
-		if msg.Reaction.TargetMsgID != "99" {
-			t.Fatalf("target msg id=%q", msg.Reaction.TargetMsgID)
-		}
-		if msg.UserID != "7" {
-			t.Fatalf("user id=%q", msg.UserID)
-		}
-		// 2026-08-22 fix: reaction ChatID must be namespaced
-		// ("tg_<chatid>") to match the message path. Otherwise
-		// runtime.findChatSession cannot resolve the owning
-		// ChatSession and gtw emoji-reaction routing silently
-		// drops the event.
-		if msg.ChatID != "tg_100" {
-			t.Fatalf("ChatID = %q, want tg_100 (namespaced §5.5)", msg.ChatID)
-		}
-		if msg.Reaction.ChatID != "tg_100" {
-			t.Fatalf("Reaction.ChatID = %q, want tg_100 (namespaced)", msg.Reaction.ChatID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no inbound")
-	}
-}
-
-func TestAdapter_HandleMessageReaction_IgnoresBotReaction(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer func() { _ = a.Stop(context.Background()) }()
-	_ = a.Start(ctx)
-	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:        Chat{ID: 100, Type: "private"},
-		MessageID:   99,
-		User:        User{ID: 999}, // matches fakeAPI's getMe user
-		NewReaction: []ReactionType{{Type: "emoji", Emoji: "👍"}},
-	})
-	select {
-	case msg := <-a.Incoming():
-		t.Fatalf("bot reaction must be ignored: %+v", msg)
-	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-func TestAdapter_HandleMessageReaction_RemovedEmoji(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer func() { _ = a.Stop(context.Background()) }()
-	_ = a.Start(ctx)
-	a.handleMessageReaction(context.Background(), &MessageReactionUpdate{
-		Chat:        Chat{ID: 100, Type: "private"},
-		MessageID:   99,
-		User:        User{ID: 7},
-		NewReaction: nil, // user removed all reactions
-	})
-	select {
-	case msg := <-a.Incoming():
-		if msg.Reaction == nil {
-			t.Fatal("expected reaction inbound even on removal")
-		}
-		if msg.Reaction.Emoji != "" {
-			t.Fatalf("expected empty emoji on removal, got %q", msg.Reaction.Emoji)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no inbound on reaction removal")
-	}
-}
-
 func TestAdapter_HandleMyChatMember_LogsWithoutPanic(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	a.handleMyChatMember(context.Background(), &ChatMemberUpdate{
@@ -2272,15 +2185,6 @@ func TestAdapter_HandleMyChatMember_LogsWithoutPanic(t *testing.T) {
 		NewChatMember: &ChatMember{Status: "administrator"},
 	})
 	// Just ensure no panic; the log is best-effort.
-}
-
-func TestAdapter_HandleChatMember_LogsWithoutPanic(t *testing.T) {
-	a, _ := newTestAdapter(t)
-	a.handleChatMember(context.Background(), &ChatMemberUpdate{
-		Chat:          Chat{ID: 100, Type: "supergroup"},
-		From:          User{ID: 1},
-		NewChatMember: &ChatMember{Status: "member", User: User{ID: 7}},
-	})
 }
 
 func TestAdapter_ApiCall_AppliesRateLimitAndRetry(t *testing.T) {

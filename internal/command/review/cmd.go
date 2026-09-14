@@ -377,12 +377,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		if revCtx.Err() != nil {
 			return
 		}
-		_ = emitter.Send(revCtx, messages.OutboundMessage{
-			ChatID:  chatID,
-			Kind:    messages.OutReply,
-			ReplyTo: replyTo,
-			Text:    formatted,
-		})
+		_ = emitter.Send(revCtx, buildTerminalReply(chatID, replyTo, formatted, runnerName, result))
 	}()
 
 	// Return Consumed=true with no inline reply. The chat session
@@ -391,4 +386,21 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// The review findings arrive in chat asynchronously when the
 	// goroutine completes (both AS-injected and channel-emitted).
 	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// buildTerminalReply assembles the /review terminal OutboundMessage.
+// The caller passes the already-formatted text (see
+// FormatReviewMessage) so the wrap is computed once for both the
+// AS-inject path and the channel-emit path. Stamp policy lives in
+// messages.StampRunResult; this helper is just the message
+// construction + stamp plumbing.
+func buildTerminalReply(chatID, replyTo, formatted, runnerName string, result agent.RunResult) messages.OutboundMessage {
+	out := messages.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    messages.OutReply,
+		ReplyTo: replyTo,
+		Text:    formatted,
+	}
+	messages.StampRunResult(&out, runnerName, result)
+	return out
 }

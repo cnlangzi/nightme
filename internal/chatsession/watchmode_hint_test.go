@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -702,84 +703,86 @@ func TestManager_HintRetriesAcrossRestart_NoPersistence(t *testing.T) {
 // different chats must run independently — a slow/blocked Send
 // in chat A must NOT block chat B's hint attempt.
 //
-// We simulate slowness via a blocking channel: chat A's Send
-// blocks until we release it. While A is blocked, chat B's
-// hint must complete and stamp its tombstone. If they were
-// sharing a Manager-wide mutex, B would be stuck behind A.
+// Wrapped in synctest.Test so the bubble scheduler runs A
+// eagerly up to its durable block (channel receive on
+// releaseA), then B's goroutine to completion — no time.Sleep
+// barriers needed. Real wall-clock elapsed is essentially zero
+// regardless of CI runner load, so this no longer flakes on
+// Windows VM under scheduling pressure.
 func TestManager_HintPerChatLockIndependence(t *testing.T) {
-	dir := t.TempDir()
-	mgr, _, _ := makeHintTestManager(t, filepath.Join(dir, "chat_sessions.json"))
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		mgr, _, _ := makeHintTestManager(t, filepath.Join(dir, "chat_sessions.json"))
 
-	// Custom Emitter that blocks Send for chat A until
-	// releaseCh is closed, and returns immediately for all
-	// other chats. This simulates a slow Feishu API round-trip
-	// for chat A only.
-	releaseA := make(chan struct{})
-	em := &blockingEmitter{
-		releaseA:      releaseA,
-		defaultResult: &messages.OutboundMessage{},
-	}
-	mgr.WithEmitter(em)
-
-	if _, err := mgr.GetOrCreate("oc_A", "claude"); err != nil {
-		t.Fatalf("GetOrCreate A: %v", err)
-	}
-	if _, err := mgr.GetOrCreate("oc_B", "claude"); err != nil {
-		t.Fatalf("GetOrCreate B: %v", err)
-	}
-
-	// Kick off chat A's hint in a goroutine — it'll block on
-	// the Emitter until we close releaseA.
-	aDone := make(chan error, 1)
-	go func() {
-		aDone <- mgr.HandleInbound(context.Background(), newDropInboundMessage("oc_A"))
-	}()
-
-	// Give A's hint a moment to enter the lock and start
-	// blocking on Emitter.Send. We don't have a hook for
-	// "Send was entered", so use a tiny sleep as a poor man's
-	// barrier. 20ms is generous for goroutine scheduling.
-	time.Sleep(20 * time.Millisecond)
-
-	// Now drive chat B's hint. If the per-chat lock works, B
-	// completes immediately. If the bug regresses (Manager-wide
-	// lock held across A's Send), B hangs.
-	bDone := make(chan error, 1)
-	go func() {
-		bDone <- mgr.HandleInbound(context.Background(), newDropInboundMessage("oc_B"))
-	}()
-
-	// B must complete within a reasonable timeout despite A
-	// still being blocked.
-	select {
-	case err := <-bDone:
-		if err != nil {
-			t.Errorf("chat B HandleInbound errored: %v", err)
+		// Custom Emitter that blocks Send for chat A until
+		// releaseA is closed, and returns immediately for all
+		// other chats. This simulates a slow Feishu API
+		// round-trip for chat A only.
+		releaseA := make(chan struct{})
+		em := &blockingEmitter{
+			releaseA:      releaseA,
+			defaultResult: &messages.OutboundMessage{},
 		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("chat B was blocked behind chat A — per-chat lock independence regression")
-	}
+		mgr.WithEmitter(em)
 
-	// Verify B's tombstone was actually stamped despite A
-	// still pending.
-	csB := mgr.Get("oc_B")
-	if csB == nil {
-		t.Fatalf("chat B CS missing")
-	}
-	if !csB.WatcherHintEmitted() {
-		t.Errorf("chat B WatcherHintEmitted = false, want true (hint must have completed despite A blocking)")
-	}
-
-	// Release A and confirm it completes cleanly.
-	close(releaseA)
-	select {
-	case err := <-aDone:
-		if err != nil {
-			t.Errorf("chat A HandleInbound errored: %v", err)
+		if _, err := mgr.GetOrCreate("oc_A", "claude"); err != nil {
+			t.Fatalf("GetOrCreate A: %v", err)
 		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatalf("chat A didn't complete after releaseA was closed")
-	}
+		if _, err := mgr.GetOrCreate("oc_B", "claude"); err != nil {
+			t.Fatalf("GetOrCreate B: %v", err)
+		}
+
+		// Kick off chat A's hint. Inside the bubble the
+		// scheduler runs A eagerly until it durably blocks on
+		// `<-releaseA` (channel receive inside the bubble is
+		// durably blocking per synctest semantics), so by the
+		// time this goroutine returns A is parked in Emitter.Send.
+		aDone := make(chan error, 1)
+		go func() {
+			aDone <- mgr.HandleInbound(context.Background(), newDropInboundMessage("oc_A"))
+		}()
+		synctest.Wait()
+
+		// Now drive chat B's hint. If the per-chat lock works,
+		// B's hint completes immediately — A's lock and Send
+		// are unrelated to B. If the bug regresses (Manager-wide
+		// lock held across A's Send), B hangs and synctest
+		// panics when the bubble can't reach durable state.
+		bDone := make(chan error, 1)
+		go func() {
+			bDone <- mgr.HandleInbound(context.Background(), newDropInboundMessage("oc_B"))
+		}()
+
+		select {
+		case err := <-bDone:
+			if err != nil {
+				t.Errorf("chat B HandleInbound errored: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("chat B was blocked behind chat A — per-chat lock independence regression")
+		}
+
+		// Verify B's tombstone was actually stamped despite A
+		// still pending.
+		csB := mgr.Get("oc_B")
+		if csB == nil {
+			t.Fatalf("chat B CS missing")
+		}
+		if !csB.WatcherHintEmitted() {
+			t.Errorf("chat B WatcherHintEmitted = false, want true (hint must have completed despite A blocking)")
+		}
+
+		// Release A and confirm it completes cleanly.
+		close(releaseA)
+		select {
+		case err := <-aDone:
+			if err != nil {
+				t.Errorf("chat A HandleInbound errored: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("chat A didn't complete after releaseA was closed")
+		}
+	})
 }
 
 // blockingEmitter is a test-only Emitter that blocks Send for

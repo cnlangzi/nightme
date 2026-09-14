@@ -32,7 +32,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestSpec_RejectsArgs covers the arg-rejection path. /review is
@@ -158,4 +160,48 @@ func dispatchWithNoCS(t *testing.T, args []string) (*command.SlashOutput, error)
 		HasMention: false,
 		Args:       args,
 	})
+}
+
+// TestBuildTerminalReply_PassesThroughEnvelope checks the helper
+// is a thin wrapper: ChatID / ReplyTo / formatted text pass
+// through unchanged, Kind is fixed to OutReply, and stamping is
+// delegated to messages.StampRunResult (covered by
+// messages/stamp_test.go).
+func TestBuildTerminalReply_PassesThroughEnvelope(t *testing.T) {
+	const (
+		chatID     = "tg_42"
+		replyTo    = "msg-99"
+		formatted  = "## Code review\n\nAll clean."
+		runnerName = "codex"
+	)
+	got := buildTerminalReply(chatID, replyTo, formatted, runnerName, agent.RunResult{
+		Model:     "MiniMax-M3",
+		SessionID: "sess-1",
+		Usage:     &agent.UsageInfo{InputTokens: 100},
+	})
+
+	if got.ChatID != chatID {
+		t.Errorf("ChatID = %q, want %q", got.ChatID, chatID)
+	}
+	if got.ReplyTo != replyTo {
+		t.Errorf("ReplyTo = %q, want %q", got.ReplyTo, replyTo)
+	}
+	if got.Kind != messages.OutReply {
+		t.Errorf("Kind = %v, want OutReply", got.Kind)
+	}
+	if got.Text != formatted {
+		t.Errorf("Text = %q, want %q (must pass through unchanged)", got.Text, formatted)
+	}
+	if got.AgentName != runnerName {
+		t.Errorf("AgentName = %q, want %q", got.AgentName, runnerName)
+	}
+	if got.Model != "MiniMax-M3" {
+		t.Errorf("Model = %q, want MiniMax-M3", got.Model)
+	}
+	if got.SessionID != "sess-1" {
+		t.Errorf("SessionID = %q, want sess-1", got.SessionID)
+	}
+	if got.Usage == nil || got.Usage.InputTokens != 100 {
+		t.Errorf("Usage not stamped: %+v", got.Usage)
+	}
 }

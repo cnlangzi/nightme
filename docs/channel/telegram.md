@@ -3829,10 +3829,12 @@ Cliff 落在 **[400, 600] blocks** 之间（与 `blocks` 显式 array 的 500 ca
 
 ### 20.5 待办
 
-1. pre-10.1 客户端（Desktop / iOS / Android）对 `rich_message` 的 fallback 行为 —— 无法 CLI 验证，需在旧版客户端实测
-2. `markdown` / `html` 自动拆 block 的 client 端 preflight 计数公式 —— send 前按启发式估算（每 heading/paragraph/code-fence/list-item = 1 block）避免中途 400；纯 heading + paragraph 模式下 500 blocks ≈ 200 units（见 §20.3）
-3. v9 chain `splitTelegramText` 与新路径的交互：保留 HTML 路径作 fallback，或一并退役（L3 落地时统一处理）
-4. L1 / L2 / L3 决策树：**L1 立即可落地**（独立、不阻塞）；L2 决策看 §20.5 #1 客户端 fallback 风险（若旧客户端 fallback 差，L2 收益打折扣）；L3 延后到 L2 稳定
+> §20 调研完成,所有 L1/L2/L3 实施落地(commit `c443660` / `9617f3a` / `e06cd97` / `17b5372` / `0d365d9`)。本节保留给运行时验证项与已知限制。
+
+1. pre-10.1 客户端(Desktop / iOS / Android)对 `rich_message` 的回退行为 —— **没有运行时回退**。sendRichMessage 失败会 surface error 给 runtime,旧客户端可能显示空白或报错,需要现场确认是否接受。详见 §20.8 风险评估 row 1
+2. `markdown` / `html` 自动拆 block 的 client 端 preflight 计数公式 —— 已实现(`estimateRichBlocks`,§20.6.1),阈值 400 / 500,实测匹配 server 行为
+3. v9 chain 与新路径的交互:已一并退役(commit `17b5372`),plain text fallback 也退役(commit `0d365d9`)。`maxTelegramTextLength = 3900`、`splitTelegramText`、`RenderForWire`、`maybeWrapFullExpandable` 全部删除,`richMode` 永远开启。新的唯一回退策略是 **sendRichMessage 失败 → error 返回 runtime**(不再 silent truncate 到 4K)
+4. L1 / L2 / L3 决策树:**全部完成,RichMode 常驻**。后续重点是 (a) Bot-side rate limit 实测,sendRichMessage 的 32K body 跟 4K body 走不同 rate bucket (b) 给 nightly / dogfooding 收集 L2 walker 在真实 LLM 输出上的 fallback rate,看 L2 walker 的 ok=false 比例,决定是否需要扩 walker 覆盖(ordered list / tables)
 
 ### 20.6 实现细节
 
@@ -3877,14 +3879,15 @@ func (a *Adapter) sendOutResultMessage(ctx context.Context, msg messages.Outboun
         "rich_message": {`{"markdown":` + jsonString(rawMD) + `}`},
         // topicID / replyTo 处理同 sendOutResultMessage 现状
     }
-    if err := a.api.call(ctx, "sendRichMessage", form, nil); err == nil {
-        return nil
-    } else {
-        a.logger.Warn("telegram: rich OutResult failed, falling back", "err", err)
+    err := a.api.call(ctx, "sendRichMessage", form, nil)
+    if err != nil {
+        // 不回落 plain HTML —— L3 决定走 rich 路径的核心就是要去掉
+        // 4K 限制。失败直接 surface 给 runtime,运维可以据 error 排查。
+        a.logger.Warn("telegram: rich OutResult failed (no plain fallback)",
+            "chat_id", chatID, "thread_id", topicID, "err", err)
+        return err
     }
-
-    // 任意 server 错误（4xx / 5xx / 网络）都回落，避免空消息
-    return a.sendOutResultHTML(ctx, fallbackHTML, replyAnchor)
+    return nil
 }
 ```
 
@@ -4050,7 +4053,7 @@ L3 仅在 L2 生产数据证明"典型 turn < 32K chars"且"active chunk 编辑�
 
 | 风险 | 验证状态 | 缓解 |
 |---|---|---|
-| Pre-10.1 客户端 fallback 显示空白 | 中（无法 CLI 测） | **L1 默认 `RichMode=off`**（§20.6.1），opt-in 启用；config 加 `telegram.rich_mode=off|auto|on` 字段（默认 `off`）。`auto` 模式后续可基于客户端版本探测（待 Bot API 支持 client version 查询）；当前 dogfooding 走 `on` 强制开 + 收集反馈。L2 灰度期同样受 `rich_mode` 控制 |
+| Pre-10.1 客户端显示空白 | **接受**(已确认) | L1 起 RichMode 就常驻,无 plain-text fallback。Pre-10.1 客户端收到 `rich_message` 可能渲染为空白或报错,sendRichMessage 失败时 runtime 收到 error。需要产品侧确认接受这个 UX 代价;或后续加客户端版本探测(client_version API 当前不存在,待 Bot API 支持) |
 | Markdown auto-parse cliff (>500 blocks 中途 400) | 已实测 200/400 ✓ 600+ ✗ | L1 preflight count 启发式；L2 用显式 blocks 绕开 |
 | Photo URL 白名单（仅 telegram.org 实测通过） | 已实测 | walker 不主动 emit photo block；显式发图仍走 `sendPhoto` |
 | Thinking block Premium-only | 已实测 `BLOCK_UNSUPPORTED` | walker 把 markdown emphasis 走 italic 不用 thinking；无 fallback 必要 |

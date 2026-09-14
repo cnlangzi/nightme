@@ -580,47 +580,6 @@ func TestAppendTrailerToBody_PanelFramePreserved(t *testing.T) {
 	}
 }
 
-// TestRenderForWire_ShortBodyNotFolded: a short body stays
-// unwrapped — no point in forcing a user to expand a one-paragraph
-// result.
-func TestRenderForWire_ShortBodyNotFolded(t *testing.T) {
-	body := "short result"
-	got := RenderForWire(body)
-	if strings.Contains(got, "<blockquote") {
-		t.Errorf("RenderForWire short body should not wrap; got %q", got)
-	}
-}
-
-// TestRenderForWire_NoNestedFold: when RenderMarkdown already
-// emitted a `<blockquote expandable>` (via a long `>` quote inside
-// the body), RenderForWire must NOT wrap again — Telegram's HTML
-// parser rejects nested `<blockquote>`.
-func TestRenderForWire_NoNestedFold(t *testing.T) {
-	// Force the inner quote to be expandable: a `>` block longer
-	// than 800 chars after render.
-	longQuote := strings.Repeat("quoted ", 200) // 1600 chars
-	body := "> " + longQuote
-	got := RenderForWire(body)
-	count := strings.Count(got, "<blockquote")
-	if count > 1 {
-		t.Errorf("RenderForWire nested <blockquote>: count=%d; got %q", count, got)
-	}
-}
-
-// TestRenderForWire_Over4096Fallback: a body whose wrapped form
-// would exceed Telegram's 4096-char hard limit must NOT be wrapped.
-// The caller (sendOutResultMessage) handles the long content via
-// splitTelegramText — multiple message chunks, no expandable wrap.
-// Wrap overhead = 40 chars (open + close). 4096 - 40 = 4056 chars
-// max renderable before we fall back.
-func TestRenderForWire_Over4096Fallback(t *testing.T) {
-	body := strings.Repeat("x", 4090) // > expandableFullThresholdChars but wrap would exceed 4096
-	got := RenderForWire(body)
-	if strings.Contains(got, "<blockquote") {
-		t.Errorf("RenderForWire over-4096 must NOT wrap; got prefix %q", got[:min(60, len(got))])
-	}
-}
-
 func TestIsTableSeparator(t *testing.T) {
 	cases := []struct {
 		line string
@@ -673,84 +632,6 @@ func TestEscapeHTML(t *testing.T) {
 // guarantee. Keep this test set in lock-step with render.go's
 // RenderForWire body — if you change one, change the other.
 
-func TestRenderForWire_EmptyReturnsEmpty(t *testing.T) {
-	if got := RenderForWire(""); got != "" {
-		t.Fatalf("RenderForWire empty = %q, want empty", got)
-	}
-}
-
-func TestRenderForWire_BoldPassesThroughAsHTML(t *testing.T) {
-	got := RenderForWire("**strong**")
-	if !strings.Contains(got, "<b>strong</b>") {
-		t.Fatalf("RenderForWire bold = %q, want <b>strong</b>", got)
-	}
-	if strings.Contains(got, "**") {
-		t.Fatalf("RenderForWire bold leaked literal asterisks: %q", got)
-	}
-}
-
-func TestRenderForWire_FenceBlockRendersAsPreTag(t *testing.T) {
-	got := RenderForWire("```go\nfunc main() {}\n```")
-	if !strings.Contains(got, `<pre><code class="language-go">`) {
-		t.Fatalf("RenderForWire fence missing language-tagged pre/code: %q", got)
-	}
-	if !strings.Contains(got, "</code></pre>") {
-		t.Fatalf("RenderForWire fence missing closing: %q", got)
-	}
-	if !strings.Contains(got, "func main()") {
-		t.Fatalf("RenderForWire fence missing code body: %q", got)
-	}
-}
-
-func TestRenderForWire_LinkSafeScheme(t *testing.T) {
-	got := RenderForWire("[click](https://example.com)")
-	if !strings.Contains(got, `<a href="https://example.com">click</a>`) {
-		t.Fatalf("RenderForWire link = %q", got)
-	}
-}
-
-func TestRenderForWire_RawHTMLIsEscaped(t *testing.T) {
-	got := RenderForWire("<script>alert(1)</script>")
-	if strings.Contains(got, "<script>") {
-		t.Fatalf("RenderForWire leaked <script>: %q", got)
-	}
-	if !strings.Contains(got, "&lt;script&gt;") {
-		t.Fatalf("RenderForWire did not escape: %q", got)
-	}
-}
-
-func TestRenderForWire_NotForAlreadyRenderedHTML(t *testing.T) {
-	// Contract pin: RenderForWire is the raw-markdown → safe-HTML
-	// wire-facing entry. It is NOT safe to call on already-rendered
-	// HTML — entities get escaped a second time ("&amp;" →
-	// "&amp;amp;") and pre-baked tag literals ("<b>") turn into
-	// "&lt;b&gt;".
-	//
-	// sendOutResultMessage relies on this contract: the StatusBar
-	// trailer (statusbar.RenderPanel output) is pre-baked safe HTML
-	// and is composed OUTSIDE RenderForWire so the box-drawing frame
-	// + already-escaped entities survive intact. This test
-	// documents the "wrong use" (double-escape mode) so a future
-	// refactor that accidentally routes the trailer through
-	// RenderForWire — which would silently corrupt the StatusBar
-	// panel — is caught by the test suite as a visible regression
-	// (the assertions below start failing once the "wrong use"
-	// becomes the "correct use").
-	//
-	// pi review finding 2026-08-24: prior version of this test was
-	// vacuous (input had no < / > / &, so the condition was always
-	// false and the body never executed). The new input carries all
-	// three characters so each escape path fires.
-	in := "&amp; <b>safe</b>"
-	got := RenderForWire(in)
-	if !strings.Contains(got, "&amp;amp;") {
-		t.Errorf("RenderForWire must double-escape &amp; on already-rendered HTML; in=%q got=%q", in, got)
-	}
-	if !strings.Contains(got, "&lt;b&gt;") {
-		t.Errorf("RenderForWire must escape literal <b> tags; in=%q got=%q", in, got)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // v9 P3 — renderMarkdownSafe primitive + appendTrailerToBody primitive.
 // ---------------------------------------------------------------------------
@@ -792,29 +673,6 @@ func TestRenderMarkdownSafe_RawHTMLEscapes(t *testing.T) {
 	got := renderMarkdownSafe("<script>")
 	if !strings.Contains(got, "&lt;script&gt;") {
 		t.Fatalf("renderMarkdownSafe raw-HTML escape; got %q", got)
-	}
-}
-
-// TestRenderMarkdownSafe_DelegatesToRenderForWire confirms the v9 P3
-// DRY contract: RenderForWire is a thin wrapper around
-// renderMarkdownSafe. Both must produce byte-identical output for any
-// given input (so a future caller picking one over the other for
-// behaviour parity is safe).
-func TestRenderMarkdownSafe_DelegatesToRenderForWire(t *testing.T) {
-	cases := []string{
-		"",
-		"plain text",
-		"**bold**",
-		"`code`",
-		"```\nblock\n```",
-		"<tag>",
-	}
-	for _, in := range cases {
-		safe := renderMarkdownSafe(in)
-		wire := RenderForWire(in)
-		if safe != wire {
-			t.Errorf("renderMarkdownSafe(%q) != RenderForWire(%q); safe=%q wire=%q", in, in, safe, wire)
-		}
 	}
 }
 

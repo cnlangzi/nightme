@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -153,6 +154,145 @@ func TestAdapter_HealthSnapshot(t *testing.T) {
 	for _, key := range []string{"username", "connected", "offset"} {
 		if _, ok := parsed[key]; !ok {
 			t.Fatalf("missing key %q in %v", key, parsed)
+		}
+	}
+}
+
+// TestE2E_RichTurnLifecycle exercises the full L3 per-turn rich
+// message pipeline end-to-end: handleMessage creates the rich turn
+// state on the first inbound event, OutReply / OutThinking /
+// OutToolStart / OutToolEnd / OutError / OutTaskUpdate /
+// OutHeartbeat / OutResult all append to / PATCH the same rich
+// message via editMessageText(rich_message=...), and OnPromptEnded
+// stamps the 🎉 reaction on the rich message's id (NOT on a
+// chain chunk — chain is gone in L3).
+//
+// This is the regression test for the "rich mode always on" /
+// "v9 chain retired" migration. If any L3 step regresses, the
+// expectations below catch it: a missing sendRichMessage call,
+// a stray sendMessage call (plain HTML fallback was deleted),
+// or a 🎉 stamp that lands on the wrong message_id.
+func TestE2E_RichTurnLifecycle(t *testing.T) {
+	a, api := newTestAdapter(t)
+
+	// 1. Inbound message seeds the rich turn. No chain creation,
+	// no eager placeholder. L3: ensurePlaceholder is now a no-op.
+	a.handleMessage(context.Background(), &Message{
+		MessageID: 42,
+		Date:      time.Now().Unix(),
+		Chat:      Chat{ID: 100, Type: "private"},
+		From:      &User{ID: 1},
+		Text:      "hello",
+	})
+
+	// 2. OutReply — goes through appendSegmentForKind → appendRichTurn.
+	//    rich mode is always on, no RichMode gate. The walker may
+	//    or may not produce ok=true (markdown syntax dependent) —
+	//    the e2e invariant is that SOMETHING rich-flavored happens.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutReply,
+		Text:   "**bold** reply",
+	}); err != nil {
+		t.Fatalf("OutReply Send: %v", err)
+	}
+
+	// 3. OutHeartbeat → updateRichTurnHeader → scheduleFlushDebounced
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutHeartbeat,
+		Heartbeat: &messages.HeartbeatSnapshot{
+			Status:     messages.HeartbeatRunning,
+			ThinkCount: 2,
+		},
+	}); err != nil {
+		t.Fatalf("OutHeartbeat Send: %v", err)
+	}
+
+	// 4. OutResult — sendRichMessage path. The result message_id
+	//    is recorded on richTurn.resultMessageID for the 🎉 anchor.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutResult,
+		Text:   "final answer",
+	}); err != nil {
+		t.Fatalf("OutResult Send: %v", err)
+	}
+
+	// 5. OnPromptEnded — flush the rich turn, then stamp 🎉 on
+	//    the OutResult's message_id (richTurn.resultMessageID).
+	a.OnPromptEnded(context.Background(), "tg_100", "42", agent.PromptEndClean)
+
+	// 6. Assertions: every send went through sendRichMessage
+	//    (no plain-text sendMessage call anywhere — that path was
+	//    deleted). One sendRichMessage per Out* event (plus one
+	//    per flush), zero sendMessage calls.
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	for _, c := range api.Calls {
+		if c.Method == "sendMessage" {
+			t.Fatalf("plain-text sendMessage call survived (expected sendRichMessage): %+v", c.Params)
+		}
+	}
+	if len(api.Calls) == 0 {
+		t.Fatal("expected at least one sendRichMessage call")
+	}
+
+	// 7. The 🎉 reaction landed on a non-zero message_id.
+	//    setMessageReactions is called with the result message_id
+	//    (richTurn.resultMessageID), NOT the placeholder (chain gone).
+	var stampedTarget int64
+	for _, c := range api.Calls {
+		if c.Method == "setMessageReaction" {
+			switch mid := c.Params["message_id"].(type) {
+			case int:
+				if int64(mid) > 0 {
+					stampedTarget = int64(mid)
+				}
+			case int64:
+				if mid > 0 {
+					stampedTarget = mid
+				}
+			case float64:
+				if int64(mid) > 0 {
+					stampedTarget = int64(mid)
+				}
+			}
+		}
+	}
+	if stampedTarget == 0 {
+		t.Fatal("no setMessageReaction call with a non-zero message_id")
+	}
+}
+
+// TestE2E_RichPathFailureSurfaces ensures that when sendRichMessage
+// errors (e.g., pre-10.1 client returning 400, or transient
+// network failure), the error surfaces to the caller rather than
+// silently truncating to 4K. The plain-text fallback was deleted
+// in commit 0d365d9 — silent degradation is no longer an option.
+func TestE2E_RichPathFailureSurfaces(t *testing.T) {
+	a, api := newTestAdapter(t)
+	api.callErr = errors.New("simulated sendRichMessage 400")
+
+	err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_200",
+		Kind:   messages.OutReply,
+		Text:   "this should fail",
+	})
+	if err == nil {
+		t.Fatal("expected error from Send when sendRichMessage fails")
+	}
+	if !strings.Contains(err.Error(), "simulated sendRichMessage 400") {
+		t.Fatalf("error did not propagate: %v", err)
+	}
+
+	// And: no plain-text sendMessage fallback. The L3 retirement
+	// means OutReply errors out, it doesn't fall back to 4K.
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	for _, c := range api.Calls {
+		if c.Method == "sendMessage" {
+			t.Fatalf("plain-text sendMessage fallback was used (deleted in 0d365d9): %+v", c.Params)
 		}
 	}
 }

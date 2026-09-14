@@ -1,7 +1,6 @@
 package telegram
 
 import (
-	"errors"
 	"html"
 	"regexp"
 	"strings"
@@ -376,38 +375,6 @@ func renderMarkdownSafe(s string) string {
 // get double-folded.
 const expandableFullThresholdChars = 2000
 
-// RenderForWire was the legacy plain-text wire entry point for
-// turning raw markdown into Telegram parse_mode=HTML. Removed in
-// L3: sendOutResultMessage is now rich-only (calls
-// buildRichMarkdownWithTrailer in rich.go which sends via
-// sendRichMessage instead of legacy sendMessage + parse_mode=HTML).
-// No remaining caller.
-//
-// Kept here as dead code so existing test imports compile. Will be
-// removed in a follow-up PR alongside splitTelegramText.
-func RenderForWire(raw string) string {
-	rendered := renderMarkdownSafe(raw)
-	return maybeWrapFullExpandable(rendered)
-}
-
-// maybeWrapFullExpandable was used by RenderForWire to wrap the
-// rendered body in <blockquote expandable> for the plain-text
-// fallback path. Removed in L3: sendOutResultMessage is rich-only
-// (no plain HTML fallback), so the legacy renderForWire helper
-// chain has no remaining caller. The render.go markdown parser
-// (RenderMarkdown / renderMarkdownSafe / RenderInline) is kept
-// because rich.go / rich_walker.go still call into it for
-// inline-entity detection in fallback paths.
-//
-// Kept here as dead code (compiles, never invoked) until a follow-up
-// PR removes the function and its render.go references.
-func maybeWrapFullExpandable(rendered string) string {
-	if strings.Contains(rendered, "<blockquote expandable>") {
-		return rendered
-	}
-	return rendered
-}
-
 // appendTrailerToBody appends the StatusBar panel to body if
 // footerLines is non-empty. Returns body unchanged when footer is
 // absent. Sole place where the "body + \n\n + StatusBar frame"
@@ -464,46 +431,6 @@ func wireFormatFooterLine(line string) string {
 		}
 		return "<a href=\"" + html.EscapeString(url) + "\">" + html.EscapeString(text) + "</a>"
 	})
-}
-
-// splitTelegramText split the rendered HTML output of legacy
-// plain-text sendMessage into multiple reply-anchored chunks.
-// Removed in L3: sendOutResultMessage no longer falls back to
-// sendMessage; all rich path output goes through a single 32K rich
-// message via sendRichMessage (no chunking needed).
-//
-// Kept here as dead code so existing test imports compile. Will be
-// removed in a follow-up PR.
-func splitTelegramText(rendered string, limit int) ([]string, error) {
-	if limit <= 0 {
-		return nil, errors.New("telegram: invalid message limit")
-	}
-	if len(rendered) <= limit {
-		return []string{rendered}, nil
-	}
-
-	unsafe := computeUnsafePositions(rendered)
-
-	var chunks []string
-	start := 0
-	n := len(rendered)
-	for start < n {
-		end := start + limit
-		if end >= n {
-			chunks = append(chunks, rendered[start:])
-			return chunks, nil
-		}
-		cut := findSafeCut(rendered, unsafe, start, end)
-		if cut <= start {
-			// No safe cut within (start, end]; fall back to byte
-			// cut at end. May land inside a tag / pre block —
-			// documented known limitation.
-			cut = end
-		}
-		chunks = append(chunks, rendered[start:cut])
-		start = cut
-	}
-	return chunks, nil
 }
 
 // computeUnsafePositions walks rendered once and returns a bitmap

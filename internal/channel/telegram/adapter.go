@@ -1084,7 +1084,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// prefix-formatted entries that don't benefit from a real
 		// block parser.
 		if (msg.Kind == messages.OutReply || msg.Kind == messages.OutCommandReply) &&
-			a.richModeAllowsSend() {
+			true {
 			if blocksJSON, ok := markdownToRichBlocks(msg.Text); ok {
 				mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, replyAnchor, blocksJSON)
 				if err == nil {
@@ -1157,9 +1157,8 @@ func (a *Adapter) appendSegmentForKind(
 			// renderer's separator; the rich walker handles its own
 			// inter-block spacing.
 			body := strings.TrimRight(segment, "\n")
-			a.appendRichTurn(ctx, rawChatID, topicID, userMessageID,
+			return a.appendRichTurn(ctx, rawChatID, topicID, userMessageID,
 				richTurnEntry{kind: kind, body: body})
-			return nil
 		}
 	}
 
@@ -1376,8 +1375,18 @@ func atoiUserMsgID(s string) int {
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	payload, _ := json.Marshal(map[string]any{"username": a.botName, "connected": a.started && !a.stopped, "offset": a.offset})
+	pendingRichTurns := 0
+	if a.richTurns != nil {
+		pendingRichTurns = a.richTurns.size()
+	}
+	a.mu.Unlock()
+	payload, _ := json.Marshal(map[string]any{
+		"username":           a.botName,
+		"connected":          a.started && !a.stopped,
+		"offset":             a.offset,
+		"rich_path_enabled":  true,
+		"pending_rich_turns": pendingRichTurns,
+	})
 	return "telegram", payload, nil
 }
 

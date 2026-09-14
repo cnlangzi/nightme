@@ -8,19 +8,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// maxTelegramTextLength was the plain-text `sendMessage` per-message
-// ceiling (Telegram's hard limit is 4096; 3900 reserves 196 chars for
-// HTML escape / emoji expansion). Removed in L3: the legacy
-// `sendMessage` + `splitTelegramText` fallback was deleted from
-// adapter.go when sendOutResultMessage became rich-only (see
-// docs/channel/telegram.md §20). Rich messages go through
-// sendRichMessage with the Bot API 10.1 per-block cap (32K chars /
-// 500 blocks); no plain-text split path exists.
-//
-// Kept as an untyped constant so any stale reference compiles.
-// Delete this comment in a follow-up PR once the reference is gone.
-const maxTelegramTextLength = 3900
-
 // sendTelegramMessage is the single Telegram sendMessage egress.
 //
 // Parameters:

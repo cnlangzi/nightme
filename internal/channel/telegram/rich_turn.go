@@ -106,17 +106,22 @@ type taskListItem struct {
 	ActiveForm string
 }
 
-// Append a text body to the rich turn. Returns true on success
-// (message created or PATCH scheduled). Caller (Send cases)
-// doesn't need the return value — failure here is best-effort and
-// the chain fallback already kicked in upstream.
+// Append a text body to the rich turn. Returns an error if the
+// rich message cold-create fails; otherwise returns nil after the
+// entry is queued for the next debounced flush.
+//
+// Callers (Send's chain-attached kind cases) propagate the error
+// to runtime — the L3 migration's contract is "rich path failure
+// surfaces, no silent truncation". A nil error means the entry
+// was successfully queued; the actual flush happens 250ms later
+// via scheduleRichTurnFlush.
 func (a *Adapter) appendRichTurn(
-	ctx context.Context,
+	_ context.Context,
 	chatID string,
 	topicID int,
 	userMessageID int,
 	entry richTurnEntry,
-) {
+) error {
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 
 	turn.mu.Lock()
@@ -130,13 +135,14 @@ func (a *Adapter) appendRichTurn(
 			a.logger.Warn("telegram: rich turn cold-create failed",
 				"chat_id", chatID,
 				"err", err)
-			return
+			return err
 		}
 	}
 
 	turn.entries = append(turn.entries, entry)
 	turn.dirty = true
 	a.scheduleRichTurnFlush(turn)
+	return nil
 }
 
 // appendRichTurnAndFlush appends an entry and immediately flushes
@@ -278,20 +284,6 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 	}
 
 	return encodeBlocksArray(blocks)
-}
-
-// ensureRichTurn is the lazy first-event hook. Called from Send
-// before the first Out* event of a turn when RichMode is on. We
-// don't actually send anything here — the rich message is created
-// on the first appendRichTurn call. This function is reserved for
-// future "send a heading-only placeholder immediately" semantics
-// that match the v9 chain's "🤖 Working..." cold-create.
-//
-// Currently a no-op placeholder to keep Send's call site stable
-// across future enhancements (e.g., showing a banner while waiting
-// for the agent to think).
-func (a *Adapter) ensureRichTurn(chatID string, topicID int, userMessageID int) {
-	_ = a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 }
 
 // updateRichTurnHeader replaces the header line (heartbeat text).
@@ -570,6 +562,14 @@ func (r *richTurnsIndex) purge(chatID string, topicID int, userMessageID int) {
 			return
 		}
 	}
+}
+
+// size returns the current number of turns in the index. Used by
+// HealthSnapshot to expose pending rich turn count to operators.
+func (r *richTurnsIndex) size() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.turns)
 }
 
 // unused — kept for compile-time reference of statusbar import

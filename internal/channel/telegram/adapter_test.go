@@ -1510,7 +1510,20 @@ func TestAdapter_HandleUpdate_DropsBareStart(t *testing.T) {
 			a.botID = 999
 			a.botName = "testbot"
 
-			a.handleUpdate(context.Background(), Update{
+			// Start so a.ctx is non-nil; without Start, publish's
+			// select races against a permanently-closed ctxDone
+			// channel and the "drop" assertion below would
+			// vacuously pass for the wrong reason (publish dropped
+			// the message rather than the bare-/start filter
+			// catching it).
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			defer func() { _ = a.Stop(context.Background()) }()
+			if err := a.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			a.handleUpdate(ctx, Update{
 				UpdateID: 1,
 				Message: &Message{
 					MessageID: 100,
@@ -1532,13 +1545,25 @@ func TestAdapter_HandleUpdate_DropsBareStart(t *testing.T) {
 
 	// /start with extra text MUST flow through normally — it's a
 	// real user prompt, not a platform convention.
+	//
+	// Must call Start so a.ctx is non-nil — publish uses a 3-way
+	// select against a.ctxDone(), and without Start ctxDone returns
+	// a closed channel, racing with the buffered send and dropping
+	// the message ~50% of the time.
 	t.Run("start_with_extra_text_passes_through", func(t *testing.T) {
 		a, api := newTestAdapter(t)
 		api.GetMeResult = UserInfo{ID: 999, Username: "testbot"}
 		a.botID = 999
 		a.botName = "testbot"
 
-		a.handleUpdate(context.Background(), Update{
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer func() { _ = a.Stop(context.Background()) }()
+		if err := a.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		a.handleUpdate(ctx, Update{
 			UpdateID: 1,
 			Message: &Message{
 				MessageID: 101,

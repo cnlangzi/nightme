@@ -87,7 +87,7 @@ func (f *fakeAPI) call(ctx context.Context, method string, params map[string]any
 		}
 		return nil
 	}
-	if method == "sendMessage" {
+	if method == "sendMessage" || method == "sendRichMessage" {
 		if result != nil {
 			_ = json.Unmarshal([]byte(`{"message_id":`+strconv.Itoa(nextSendMessageID())+`,"chat":{"id":1,"type":"private"}}`), result)
 		}

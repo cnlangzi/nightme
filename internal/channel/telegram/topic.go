@@ -8,8 +8,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-const maxTelegramTextLength = 3900
-
 // sendTelegramMessage is the single Telegram sendMessage egress.
 //
 // Parameters:

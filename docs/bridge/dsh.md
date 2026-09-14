@@ -617,13 +617,16 @@ internal/bridge/dsh/
 ├── detect.go              # exec.LookPath("dsh") + `dsh web` smoke probe
 ├── session.go             # host.EnsureSharedHost + handshake + closeOnce + 翻译层
 ├── host/                  # shared host 子包
-│   ├── client.go          # HTTP RPC client(POST /api/{ns}/{method},args 包装,slash 转换)
+│   ├── client.go          # HTTP RPC client(POST /api/{ns}/{method},args 包装,slash 转换,caller-side retry on transient transport errors)
+│   ├── client_internal_test.go  # unit test for PostWithReconnect + isTransientTransportError
 │   ├── stream.go          # WebSocket client(单 /api/remote.mux,generation 跟踪,翻译)
 │   ├── router.go          # per-session 路由 + pending approval/question 表
-│   ├── lifecycle.go       # spawn + auth mint + watchdog + restart recovery
-│   ├── ensure.go          # 一次性 Start 全局 host + 并发安全
-│   ├── health.go          # 周期性 health check
-│   └── watchdog.go        # subprocess exit detection + backoff respawn
+│   ├── lifecycle.go       # spawn + auth mint + runMonitor(unified attached/owned 循环,backoff respawn,port 复用)
+│   ├── ensure.go          # lazy 一次性 Start 全局 host(sync.Once + 并发安全)
+│   ├── health.go          # 周期性 /api/session.list health probe(strikes → SIGKILL)
+│   ├── host.go            # Client 外观(RPC + Hub + Router 三件套)+ RecoverSubscriptions
+│   ├── host_state.go      # host $events ready frame 的 clientId capture slot
+│   └── install_hook.go    # 测试可注入的 spawner / probe 钩子
 ├── host/host_test.go      # StreamHub + Router mock 测试
 ├── host/wire_e2e_test.go  # 真 dsh RPC e2e(门控 wire_e2e tag + NIGHTME_TEST_DSH_URL)
 └── session_test.go ...    # 翻译层 + 状态机单测
@@ -645,6 +648,39 @@ RPCClient.Post
 ```
 
 `wrapArgs` 与 `methodDotsToSlashes` 是 wire-drift 的两个吸收点 — caller 不必关心。
+
+#### 4.2.1 Caller-side retry on transient transport errors(`PostWithReconnect`)
+
+`RPCClient.PostWithReconnect` wraps `Post` with a retry loop keyed off `isTransientTransportError`. The watchdog in §5.4 respawns dsh forever, but every respawn creates a transient window where dsh is unreachable; a single-shot `Post` then surfaces `connection refused` to the caller even though the watchdog will bring dsh back within seconds. `PostWithReconnect` is the bridge-side counterpart to that watchdog retry curve.
+
+```
+RPCClient.PostWithReconnect(ctx, method, args)
+  → callWithReconnect (7 attempts, ~31.5s budget)
+      ↳ attempt N>0 等待 respawnDelay(N-1) (500ms, 1s, 2s, 4s, 8s, 16s; cap respawnBackoffMax=30s)
+      ↳ 每次调 Post(method, args)
+      ↳ 错误分类:
+          - 透传: nil / 业务级 (HTTP 5xx / JSON decode / rpcId mismatch / Result.Error) → 立即返回
+          - 透传: ctx.Err() 在 wait 期间触发,但 lastErr != nil → 返回 lastErr(诊断价值更高)
+          - 透传: ctx.Err() 在 wait 期间触发,lastErr == nil → 返回 ctx.Err()
+          - 重试: transport 瞬态(connection refused / reset / io.EOF / io.ErrUnexpectedEOF)→ 等 respawnDelay 后再来一次
+```
+
+契约:
+
+| 信号 | 行为 |
+|---|---|
+| `connection refused` / `connection reset`(substr) | 瞬态,重试 |
+| `io.EOF` / `io.ErrUnexpectedEOF`(via `errors.Is`) | 瞬态,重试 |
+| HTTP 5xx / `gateway/input-invalid` / `rpcId mismatch` / `Result.Error` / `JSON decode` | **非**瞬态,立即返回(caller 自己处理) |
+| ctx 在 backoff wait 期间 cancel,且已经观察过瞬态错误 | 返回 lastErr(具体诊断),不是 `ctx.Err()` |
+| ctx 在 backoff wait 期间 cancel,且还没观察到任何错误 | 返回 `ctx.Err()` |
+| `no such host` (DNS 失败) | **非**瞬态;baseURL 配错或 resolver 坏,等也白等,且 dsh client 永远指 127.0.0.1,这是死分支 |
+
+retry 上限 = `reconnectMaxAttempts = 7`。原因:第 7 次 attempt 没有自己的 wait,前面 6 次 wait 累计 0.5+1+2+4+8+16 = 31.5s;第 8 次 attempt 的 wait 是 `respawnDelay(7) = 30s`(已经撞 `respawnBackoffMax` cap),加了之后总预算 61.5s,跟"31.5s 预算"的契约不一致。7 是守住 ~31s 的硬上限。
+
+调用方契约:`WorkspaceCreate` / `SessionCreate` 走 `PostWithReconnect`,`session.create` 在 `session.go::createFreshSession` 也走它。其他 raw `Post` 调用(`session.prompt` / `session.history` / `session.models` / `session.list`)保持单次 — 它们在 dsh 已经可用的稳态运行,不需要 respawn-window 重试。
+
+幂等性:重试场景下,**`workspace.create` 是 server-side 幂等的**(dsh 按 path dedupe,重复调返回同一个 workspaceId,`created:false`);**`session.create` 不是**(server 按调用顺序 commit,transport-level 失败但 server 实际已 commit 时,重试会开第二个 session,旧 sessionId 丢失,产生孤儿 row)。后续 caller 想严格幂等,可在 `SessionCreateOpts` 里预分配 `SessionID`(字段已存在,server 在新 create 时会 honor)。
 
 ### 4.3 WebSocket layer(`host/stream.go::StreamHub`)
 
@@ -806,24 +842,62 @@ Review  := RunOnce(prompt=agent.StandardPrompt())
 
 **为什么用 archiveSession 不用 workspace.delete**: workspace 是 repo-scoped(`git rev-parse --show-toplevel`),跨 driver 共享 — 同一个 git repo 的 chat session 与 `/review` run 共用 workspace;删掉会牵连其他 active session。`archiveSession` 只隐藏 session row,workspace 持久。
 
-### 5.4 重启 / 崩溃恢复
+### 5.4 重启 / 崩溃恢复 — 永久重试循环
+
+**当前契约**:没有重试上限。`runMonitor`(`host/lifecycle.go`)单一 goroutine 永久循环,dsh 不论怎么死都重新拉起来。理由写在 `runMonitor` 的 doc comment 里:nightme 把 dsh host lifecycle 接管到端到端,transient failure(pnpm 更新 dsh shim、端口被短暂占用、...)不应该让 user 跑 `make restart`。
+
+形态分两段,共享同一个 monitor goroutine:
 
 ```
-watchdog 检测到 dsh 子进程 exit:
-  attempt < maxRespawnAttempts(=5):
-    backoff(attempt)
-    fork/exec dsh again
-    post-respawn recovery:
-      ReattachSubscriptions:
-        for active session in router:
-          workspace.resume(session.workspaceID)
-          session.fork(session.sessionID) → newSessionID
-          client.Subscribe(newSessionID, ...)
-  attempt >= maxRespawnAttempts:
-    set h.dead = true; 错误返回 EnsureSharedHost
+runMonitor(h):
+  defer close(h.watchdogDone)
+
+  // health probe 跟 monitor 并行跑:每 healthProbeInterval 打一次 /api/session.list,
+  // strikesMax 次连续失败调 forceKillCmd 发 SIGKILL,绕开 dsh 进程存活但内部事件循环卡死的盲区
+  h.probe = NewHealthProbe(getClient, forceKillCmd, log)
+  h.probe.Start()
+  defer h.probe.Stop()
+
+  for {
+    select { case <-h.closed: return; default: }
+    cmd := h.cmd
+    if cmd == nil {
+      // attached mode: 探 dsh,死了就 fallback spawn 一个 owned
+      if monitorAttachedLoop() { return }    // 返回 true = shutting down
+      cmd = h.cmd                            // fallback 完 re-read
+      if cmd == nil { return }               // Spawner test hook 返回 nil
+      continue
+    }
+    // owned mode: 阻塞在 cmd.Wait,死了就 respawn
+    monitorOwnedLoop(cmd)
+  }
 ```
 
-`workspace.fork` 不是"原地接管"(dsh web 设计上不允许),而是 server-side 复制 session 内容到新 sessionId,旧 sessionId 仍可查(供 audit / 二次 fork)。bridge `SessionList` + `session.fork` 是 daemon 重启续接的 wire 路径。
+两条支线共用的不变量:
+
+- **forever retry**: monitorAttachedLoop 和 monitorOwnedLoop 都不返回错误,失败就按 `respawnDelay(attempt)` 退避后继续 — backoff 起点 `respawnBackoffBase = 500ms`,指数翻倍,撞 `respawnBackoffMax = 30s` 后保持 30s。所以「永久」实际是「最多等 30s + 重试一次」的速度,不是真的零延迟 spin。
+- **port 复用**:respawn 沿用 `h.opts.Port`,不再走 `findFreePort`,避免每次失败 → 3081 → 失败 → 3082 漂移成「端口扫满也找不到空闲」的雪崩(原 finding 6)。
+- **`ReplaceGlobal(cli)`**:每次成功 respawn 后替换 process-wide `*Client`,所以 `host.GetGlobal()` 永远返回最新可用的 client;旧的 `oldCli.Close()` 在 background goroutine 跑,新 client 订阅不会跟它阻塞竞争。
+- **Router + Hub 同步重订**:`tryRespawn` 在替换 client 之前先 `oldCli.Router.Snapshot()`,把 Handler 灌到新 `cli.Router`,再调 `Client.RecoverSubscriptions` 重新 `Hub.Subscribe`(`$events` ready frame 还没来时 Subscribe 是 no-op,WS 起来后 `toReopen` 会 reopen 这些流)。详见 §13.3。
+
+attached → owned 升级:monitorAttachedLoop 检测到 attach 失败(`defaultAttachedProbeStrikes` 次连续 ping 失败),调 `spawnAttachedOnce` 跑一次 fallback spawn(`spawnOnce` + cookie mint + `WaitForDSHReady`)。成功后填 `h.cmd`、切到 owned mode 继续循环 — monitor 同一 goroutine,只是下一轮 `cmd != nil` 走 owned 分支。
+
+post-respawn recovery(`tryRespawn` 的结尾):
+
+```
+  for each active sub in oldCli.Router.Snapshot():
+    if sub.Handler != nil:
+      cli.Router.Subscribe(sub.SessionID, sub.CWD, sub.Handler)
+  ReplaceGlobal(cli)
+  if oldCli != nil:
+    go oldCli.Close()                  // background: 不能阻塞 monitor
+  Client.RecoverSubscriptions:         // Hub 侧重订 + rpcId 复用
+    for each sub in Router.EnumerateSubscriptions():
+      RPC.SessionCreate(sessionId, cwd) → 验 server-side session 还在
+      Hub.Subscribe(sessionID, wrapper)  // mux 流重 open
+```
+
+respawn 循环的 caller-side 镜像在 §4.2.1 — `PostWithReconnect` 用同样的 `respawnDelay` 曲线,在 host 处于 respawn 窗口的 31.5s 内吃掉 transport 瞬态错误,跟 watchdog 同步。
 
 ---
 
@@ -917,6 +991,25 @@ for {
 **测试**:`host_test.go::TestStreamHub_PingHandlerResetsReadDeadline` —— 验证 idle 200ms 后 mux 连接仍保持(没有 reconnect)。如果未来 review 又把 deadline reset 退回到只在 readLoop 改,这个测试能立刻发现。
 
 副作用:这条 ws 永远不会因为"server 长时间不发帧"而死。配合 §13.3 + §14.5 respawn Router + Hub 同步重订,`/review` 实际能跑通。
+
+### 6.9 为什么 caller-side 重试坐在 RPC 层(`PostWithReconnect`)
+
+`§5.4` 的 watchdog 永久 retry 是 host-side;`§4.2.1` 的 `PostWithReconnect` 是 RPC-side。两边用同一条 `respawnDelay` 曲线 — `caller 等待 N 秒` 与 `host 下次 respawn 尝试` 时间一致,所以第一条 caller retry 命中刚拉起来的新 dsh。
+
+为什么不放在 `Post` 自己里而是单开 `PostWithReconnect`:
+
+- **`WaitForDSHReady`(`client.go`)自己已经是 retry loop**。如果 `Post` 内置 retry,`WaitForDSHReady` 调用时嵌套一层,worst-case backoff × attempts 叠加。
+- **业务错误不该被重试掩盖**。`Result.Error`(gateway/input-invalid、bad-request、session-conflict 等)是 server 主动拒绝,重试只会再错一次;HTTP 5xx / decode / rpcId mismatch 是 wire 异常也不是 transport 问题。这些在 `isTransientTransportError` 都是 false,直接返回。
+- **长尾 raw `Post`(`session.prompt` / `session.history` / `session.list` / `session.models`)走稳态**,host 已经活着的概率远大于 respawn 窗口的瞬态概率,加 retry 没收益反增延迟。这些调用继续走 `Post`。
+
+幂等性边界(必须知道,因为这是 caller-visible 差异):
+
+| Endpoint | server-side 幂等? | retry 安全? |
+|---|---|---|
+| `workspace.create` | 是(按 path dedupe,重复调返回同一 workspaceId,`created:false`) | 安全 |
+| `session.create` | 否(server 按调用序 commit,transport 失败但 server 已 commit 时重试会开第二个 session,旧 sessionId 丢失,产生孤儿 row) | 产生孤儿;严格 caller 应预分配 `opts.SessionID` |
+| `session.prompt` / `session.history` / `session.list` / `session.models` | session.prompt 是 server-side idempotent on `requestId`(client-mint),其余是 read | 安全 |
+| `workspace.archiveSession` / `workspace.delete` | 是 | 安全 |
 
 ---
 

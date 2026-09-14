@@ -49,15 +49,28 @@ func TestIsTransientTransportError_ConnectionReset(t *testing.T) {
 	}
 }
 
-func TestIsTransientTransportError_NoSuchHost(t *testing.T) {
-	if !isTransientTransportError(errors.New("dial tcp: lookup foo.invalid: no such host")) {
-		t.Fatalf("expected no-such-host error to be transient")
+func TestIsTransientTransportError_DNSFailureIsNotTransient(t *testing.T) {
+	// DNS failure isn't a watchdog-respawn signal — it's a
+	// misconfigured baseURL or a broken resolver. Retrying
+	// would just burn the 31s budget for no benefit.
+	if isTransientTransportError(errors.New("dial tcp: lookup foo.invalid: no such host")) {
+		t.Fatalf("no-such-host should NOT be transient")
 	}
 }
 
 func TestIsTransientTransportError_EOF(t *testing.T) {
-	if !isTransientTransportError(errors.New("unexpected EOF")) {
-		t.Fatalf("expected EOF error to be transient")
+	if !isTransientTransportError(io.EOF) {
+		t.Fatalf("io.EOF should be transient")
+	}
+	if !isTransientTransportError(io.ErrUnexpectedEOF) {
+		t.Fatalf("io.ErrUnexpectedEOF should be transient")
+	}
+	// Unwrapped "unexpected EOF" string without the sentinel
+	// must NOT match — substring matching on raw text would
+	// catch unrelated errors whose message happens to contain
+	// "EOF" (e.g. JSON truncation phrased differently).
+	if isTransientTransportError(errors.New("body ended unexpectedly")) {
+		t.Fatalf("unrelated EOF-text error should not be transient")
 	}
 }
 
@@ -174,12 +187,21 @@ func TestPostWithReconnect_NonTransientError_ShortCircuits(t *testing.T) {
 	}
 }
 
-func TestPostWithReconnect_ContextCancelDuringBackoff(t *testing.T) {
-	// Cancel the context mid-backoff — callWithReconnect should
-	// return ctx.Err() instead of waiting the full 500ms+ window.
+func TestPostWithReconnect_ContextCancelPrefersLastTransportError(t *testing.T) {
+	// If the ctx fires while we're waiting on a backoff AFTER
+	// having observed a transient transport error, the returned
+	// error should be the transport error (not ctx.Err()) — the
+	// transport signal is what the /review caller needs to see.
+	//
+	// Wire: failFirst=100 forces every attempt to return
+	// connection-refused. The first attempt fires immediately;
+	// the second attempt waits respawnDelay(0)=500ms. We cancel
+	// the ctx 250ms in — between attempt 1's failure and the
+	// end of attempt 2's backoff. lastErr is set; ctx fires
+	// during the wait.
 	cli := &http.Client{Transport: &flakyTransport{failFirst: 100, fallback: http.DefaultTransport}}
 	c := NewRPCClientWithHTTP("http://127.0.0.1:1", cli)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -187,8 +209,16 @@ func TestPostWithReconnect_ContextCancelDuringBackoff(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if err == nil {
-		t.Fatalf("expected error from cancelled ctx")
+		t.Fatalf("expected error")
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected transport error (connection refused), got ctx.Err() = %v", err)
+	}
+	if !isTransientTransportError(err) {
+		t.Errorf("expected transport signature in error; got %v", err)
+	}
+	// Also assert short-circuit: the loop should not have run
+	// out to the 31s budget when ctx cancels mid-backoff.
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("ctx cancel should short-circuit backoff; elapsed=%s", elapsed)
 	}

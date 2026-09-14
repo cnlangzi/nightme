@@ -248,14 +248,17 @@ func (c *RPCClient) Post(ctx context.Context, method string, args any) (*rpcResp
 }
 
 // reconnectMaxAttempts bounds PostWithReconnect's retry loop.
-// Each attempt waits respawnDelay(attempt-1), capped at
-// respawnBackoffMax. The cumulative wall time stays under ~31s —
-// long enough to absorb a normal watchdog respawn (which is
-// forever-retry after #370 but usually succeeds within a few
-// seconds), short enough that a genuinely-dead host surfaces
-// quickly to /review and friends instead of wedging their
-// goroutines for minutes.
-const reconnectMaxAttempts = 8
+// 7 attempts = 6 inter-attempt waits = 0.5+1+2+4+8+16 = 31.5s
+// (the seventh attempt itself has no wait). respawnDelay's curve
+// caps the eighth wait at respawnBackoffMax=30s, so going past
+// 7 attempts blows past the ~31s budget the docstring promises;
+// 7 is the upper bound that keeps caller wall time under control.
+//
+// Long enough to absorb a normal watchdog respawn (forever-retry
+// after #370 but usually succeeds within a few seconds), short
+// enough that a genuinely-dead host surfaces quickly to /review
+// and friends instead of wedging their goroutines for minutes.
+const reconnectMaxAttempts = 7
 
 // PostWithReconnect is Post wrapped with retry on transient
 // transport errors. Use it from any caller that drives a real
@@ -300,6 +303,15 @@ func (c *RPCClient) callWithReconnect(ctx context.Context, fn func(ctx context.C
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
+				// Prefer the observed transport error over
+				// ctx.Err() when we have one — the caller is
+				// debugging a /review that hit the watchdog
+				// respawn window, and "connection refused"
+				// tells them that; "context deadline
+				// exceeded" just hides it.
+				if lastErr != nil {
+					return lastErr
+				}
 				return ctx.Err()
 			case <-time.After(respawnDelay(attempt - 1)):
 			}
@@ -320,21 +332,28 @@ func (c *RPCClient) callWithReconnect(ctx context.Context, fn func(ctx context.C
 // decode mismatch, gateway/input-invalid, etc.) are NOT transient
 // here — they're handled by their callers.
 //
-// Substring match on the stdlib's wrapped error text keeps this
-// portable across unix + windows without depending on
-// syscall.ECONNREFUSED directly. The dsh host's actual error
-// text is "Post \"<url>\": dial tcp 127.0.0.1:3081: connect:
-// connection refused" (verified against the field-reported
-// /review failure).
+// The TCP-level signals (connection refused / connection reset)
+// are matched via substring because stdlib wraps them in
+// *net.OpError with text that varies across platforms; errors.Is
+// against syscall.ECONNREFUSED etc. is unix-only. EOF signals
+// are matched via errors.Is so unrelated errors whose text
+// happens to contain "EOF" don't trip the retry loop (matches
+// the pattern in internal/channel/*/retry.go).
+//
+// DNS-level failures (no such host) are intentionally NOT
+// transient: they signal a misconfigured baseURL or a broken
+// resolver, neither of which clears by waiting, and the dsh
+// client is always pointed at 127.0.0.1 in practice.
 func isTransientTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
 	s := err.Error()
 	return strings.Contains(s, "connection refused") ||
-		strings.Contains(s, "connection reset") ||
-		strings.Contains(s, "no such host") ||
-		strings.Contains(s, "EOF")
+		strings.Contains(s, "connection reset")
 }
 
 // PostEnvelope POSTs a pre-built raw JSON body without wrapping in
@@ -708,6 +727,20 @@ func (c *RPCClient) WorkspaceDelete(ctx context.Context, workspaceID string) err
 //
 // Wraps Post with PostWithReconnect — see WorkspaceCreate for the
 // watchdog-respawn window rationale.
+//
+// Idempotency note: unlike workspace.create (which dsh dedupes by
+// path on the server side), session.create is NOT server-side
+// idempotent — a transport error after the server has committed
+// the new session but before the response reaches the client will
+// cause the retry to allocate a SECOND session. The first
+// sessionId is lost; the orphaned row is GC'd by the workspace's
+// own cleanup eventually (workspace.archiveSession on Close, then
+// the workspace-row lifecycle). The leak window is narrow and
+// the orphan is harmless in practice (no mux subscriptions, no
+// Router entry), but if it ever becomes a real problem the fix is
+// to preallocate opts.SessionID on every call — the field exists
+// on SessionCreateOpts and the server honours it on a fresh
+// create.
 func (c *RPCClient) SessionCreate(ctx context.Context, opts SessionCreateOpts) (string, error) {
 	resp, err := c.PostWithReconnect(ctx, "session.create", map[string]any{
 		"request": opts,

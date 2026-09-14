@@ -716,6 +716,8 @@ func TestWalker_OrderedList_HeadingStops(t *testing.T) {
 
 // TestWalker_Footnote_Multiple verifies multiple footnote refs in one
 // paragraph are all stripped without affecting surrounding text.
+// The walker emits text pieces only — footnote entity slots are
+// silent in the unwrap pass.
 func TestWalker_Footnote_Multiple(t *testing.T) {
 	out, ok := markdownToRichBlocks("first[^1] middle[^2] end")
 	if !ok {
@@ -724,14 +726,14 @@ func TestWalker_Footnote_Multiple(t *testing.T) {
 	var blocks []map[string]any
 	_ = json.Unmarshal([]byte(out), &blocks)
 	arr, _ := blocks[0]["text"].([]any)
-	if len(arr) != 4 {
-		t.Fatalf("expected 4 pieces [first, middle, end], got %d: %v", len(arr), arr)
-	}
 	want := []string{"first", " middle", " end"}
+	if len(arr) != len(want) {
+		t.Fatalf("expected %d pieces, got %d: %v", len(want), len(arr), arr)
+	}
 	for i, w := range want {
-		s, _ := arr[i*2].(string)
+		s, _ := arr[i].(string)
 		if s != w {
-			t.Errorf("piece %d=%q, want %q", i*2, s, w)
+			t.Errorf("piece %d=%q, want %q", i, s, w)
 		}
 	}
 }
@@ -910,7 +912,8 @@ func TestWalker_Mixed_HeadingWithFootnote(t *testing.T) {
 
 // TestWalker_Mixed_ParagraphWithFootnoteAndImage verifies a single
 // paragraph with both inline footnote and inline image renders all
-// three substitution sites correctly.
+// three substitution sites correctly. The footnote slot is silent
+// in the unwrap pass; the image slot emits a url entity.
 func TestWalker_Mixed_ParagraphWithFootnoteAndImage(t *testing.T) {
 	in := "see [^1] and ![pic](https://x.png) end"
 	out, ok := markdownToRichBlocks(in)
@@ -920,45 +923,35 @@ func TestWalker_Mixed_ParagraphWithFootnoteAndImage(t *testing.T) {
 	var blocks []map[string]any
 	_ = json.Unmarshal([]byte(out), &blocks)
 	arr, _ := blocks[0]["text"].([]any)
-	var urlFound, piecesOK bool
-	// Expect: ["see ", (footnote slot - silent), " and ", {url}, " end"]
-	// i.e. 4 string pieces + 1 url entity in some order; the
-	// footnote slot does not emit so 4 strings + 1 entity = 5 arr
-	// items in total.
-	if len(arr) != 5 {
-		t.Fatalf("expected 5 array pieces, got %d: %v", len(arr), arr)
-	}
-	for _, item := range arr {
-		m, _ := item.(map[string]any)
-		if m["type"] == "url" && m["url"] == "https://x.png" {
-			urlFound = true
-		}
-	}
-	if !urlFound {
-		t.Errorf("url entity not found in %v", arr)
-	}
-	// Sanity: the plain string pieces still include "see ", " and ",
-	// " end" with the footnote slot swallowed in between.
-	want := []string{"see ", " and ", " end"}
-	got := []string{}
+
+	// Walk the array: 3 text pieces + 1 url entity = 4 items total.
+	// Verify the three text pieces and the url entity are all
+	// present in document order.
+	wantStrings := []string{"see ", " and ", " end"}
+	wantURL := "https://x.png"
+	wantText := "pic"
+
+	gotStrings := 0
+	gotURL := false
 	for _, item := range arr {
 		if s, ok := item.(string); ok {
-			got = append(got, s)
-		}
-	}
-	for _, w := range want {
-		found := false
-		for _, g := range got {
-			if g == w {
-				found = true
-				break
+			if gotStrings < len(wantStrings) && s == wantStrings[gotStrings] {
+				gotStrings++
+			}
+		} else if m, ok := item.(map[string]any); ok {
+			url, _ := m["url"].(string)
+			text, _ := m["text"].(string)
+			if m["type"] == "url" && url == wantURL && text == wantText {
+				gotURL = true
 			}
 		}
-		if !found {
-			t.Errorf("missing string piece %q in %v", w, got)
-		}
 	}
-	_ = piecesOK
+	if gotStrings != len(wantStrings) {
+		t.Errorf("matched only %d/%d string pieces in %v", gotStrings, len(wantStrings), arr)
+	}
+	if !gotURL {
+		t.Errorf("url entity for %s not found in %v", wantURL, arr)
+	}
 }
 
 // TestWalker_Mixed_TableAfterParagraph verifies paragraph then table
@@ -1114,7 +1107,6 @@ func TestWalker_Negative_TableThreeColHeaderTwoColBody(t *testing.T) {
 		t.Fatal("table with header/data column count mismatch should bail")
 	}
 }
-
 
 func TestWalker_CharCap(t *testing.T) {
 	// Just over the cap → fall back.

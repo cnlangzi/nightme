@@ -394,3 +394,255 @@ func TestRenderRichTurnBlocks_FooterPreservesChevronFrame(t *testing.T) {
 		t.Fatalf("footer block should not hand-draw box frame; got %q", text)
 	}
 }
+
+// === Chain integration tests for 2026-09-14 walker扩面 =======================
+//
+// The cases below exercise the扩面 features at the chain entry layer
+// (renderRichTurnBlocksLocked), not just at the walker level. They
+// guard against regressions where the walker's new outputs fail to
+// flow through to the rich turn wire form, or where the bail path
+// re-introduces a plain text fallback.
+
+// countBlocksByType walks a rendered blocks array and tallies block
+// types. Used by the integration tests below to assert the chain
+// produced the expected block mix.
+func countBlocksByType(blocks []map[string]any) map[string]int {
+	out := map[string]int{}
+	for _, b := range blocks {
+		if t, ok := b["type"].(string); ok {
+			out[t]++
+		}
+	}
+	return out
+}
+
+// findBlockOfType returns the first block of the given type (or nil).
+func findBlockOfType(blocks []map[string]any, kind string) map[string]any {
+	for _, b := range blocks {
+		if b["type"] == kind {
+			return b
+		}
+	}
+	return nil
+}
+
+// chainFixture is a small helper that constructs a richTurn with a
+// fixed chatID/topic/userMsg/headerLine and the given entries, then
+// returns the rendered blocks JSON. The renderer doesn't reach for
+// the network — `renderRichTurnBlocksLocked` is a pure function over
+// the struct.
+func chainFixture(t *testing.T, entries []richTurnEntry) string {
+	t.Helper()
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 1,
+		messageID:     100,
+		headerLine:    defaultRichTurnHeader,
+		hasContent:    true,
+		entries:       entries,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	return body
+}
+
+// TestRenderRichTurnBlocks_OrderedListEntry verifies a chain entry
+// containing an ordered list reaches the wire as a list block — the
+// walker扩面 contract.
+func TestRenderRichTurnBlocks_OrderedListEntry(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: "1. one\n2. two\n3. three"},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	list := findBlockOfType(blocks, "list")
+	if list == nil {
+		t.Fatalf("expected a list block in chain output; got blocks=%v", countBlocksByType(blocks))
+	}
+	items, _ := list["items"].([]any)
+	if len(items) != 3 {
+		t.Errorf("list items=%d, want 3", len(items))
+	}
+}
+
+// TestRenderRichTurnBlocks_TableEntry verifies a chain entry with a
+// GFM table reaches the wire as a table block (not the older
+// paragraph-fallback path that stripped `|` chars into literal text).
+func TestRenderRichTurnBlocks_TableEntry(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: "| A | B |\n|---|---|\n| 1 | 2 |"},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	table := findBlockOfType(blocks, "table")
+	if table == nil {
+		t.Fatalf("expected a table block; got types=%v", countBlocksByType(blocks))
+	}
+	cells, _ := table["cells"].([]any)
+	if len(cells) != 2 {
+		t.Errorf("table rows=%d, want 2 (header + 1 data)", len(cells))
+	}
+}
+
+// TestRenderRichTurnBlocks_FallbackParagraphEntry verifies that an
+// entry whose body triggers ok=false (here: an unterminated fence)
+// still lands in the chain as a rich paragraph block, never as
+// plain text. The Telegram adapter contract — every outbound bubble
+// is rich_message[blocks] — depends on this guard.
+func TestRenderRichTurnBlocks_FallbackParagraphEntry(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: "before\n\n```\nunterminated fence"},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	para := findBlockOfType(blocks, "paragraph")
+	if para == nil {
+		t.Fatalf("expected a paragraph block from the fallback; got types=%v", countBlocksByType(blocks))
+	}
+	// Sanity: no "text" top-level field (which would be the
+	// plain-text sendMessage shape, not rich blocks). If a future
+	// change ever introduces a plain-text escape hatch, this
+	// assertion will surface it.
+	for _, b := range blocks {
+		if _, ok := b["text"]; ok && b["type"] != "paragraph" && b["type"] != "heading" && b["type"] != "pre" && b["type"] != "footer" {
+			// blocks above are the only ones allowed to hold
+			// `text`; any other type with a top-level `text`
+			// is a regression toward plain-text rendering.
+			t.Errorf("unexpected top-level text on block %v", b)
+		}
+	}
+}
+
+// TestRenderRichTurnBlocks_FootnoteStrippedInEntry verifies the
+// chain output for a paragraph with footnote refs is still rich
+// blocks — the footnote is silently stripped, surrounding text
+// survives, no plain-text escape is taken.
+func TestRenderRichTurnBlocks_FootnoteStrippedInEntry(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: "claim[^1] after"},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	para := findBlockOfType(blocks, "paragraph")
+	if para == nil {
+		t.Fatalf("expected a paragraph block; got types=%v", countBlocksByType(blocks))
+	}
+	// Wire form: array (entity slot present). Verify the
+	// surrounding text pieces survived in order.
+	arr, ok := para["text"].([]any)
+	if !ok {
+		t.Fatalf("paragraph text should be array form, got %T", para["text"])
+	}
+	want := []string{"claim", " after"}
+	got := []string{}
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			got = append(got, s)
+		}
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing string piece %q in %v", w, got)
+		}
+	}
+}
+
+// TestRenderRichTurnBlocks_ImageAsURLInEntry verifies an inline
+// image ref in an entry renders through the chain as a clickable
+// url entity (not a plain-text `![alt](url)` literal).
+func TestRenderRichTurnBlocks_ImageAsURLInEntry(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: "see ![logo](https://x.png) here"},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	para := findBlockOfType(blocks, "paragraph")
+	if para == nil {
+		t.Fatalf("expected a paragraph block; got types=%v", countBlocksByType(blocks))
+	}
+	arr, _ := para["text"].([]any)
+	var found bool
+	for _, item := range arr {
+		m, _ := item.(map[string]any)
+		if m["type"] == "url" && m["url"] == "https://x.png" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected url entity with url=https://x.png; got %+v", arr)
+	}
+}
+
+// TestRenderRichTurnBlocks_RawHTMLInEntry verifies raw HTML in a
+// chain entry lands as a paragraph block with the tags kept literal —
+// not as a separate rich block, not as plain-text escape, not bailed.
+func TestRenderRichTurnBlocks_RawHTMLInEntry(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: `click <a href="https://x">here</a> now`},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	para := findBlockOfType(blocks, "paragraph")
+	if para == nil {
+		t.Fatalf("expected a paragraph block; got types=%v", countBlocksByType(blocks))
+	}
+	text, _ := para["text"].(string)
+	want := `click <a href="https://x">here</a> now`
+	if text != want {
+		t.Errorf("text=%q, want literal %q", text, want)
+	}
+}
+
+// TestRenderRichTurnBlocks_MultipleEntriesMix verifies a chain with
+// multiple entries each carrying different扩面 features — heading
+// (via entry body that's just a heading line), list, table, plain
+// paragraph — all flow through and produce the expected block mix
+// without dropping entries or bailing the whole chain.
+func TestRenderRichTurnBlocks_MultipleEntriesMix(t *testing.T) {
+	body := chainFixture(t, []richTurnEntry{
+		{kind: "reply", body: "1. one\n2. two"},
+		{kind: "reply", body: "| A | B |\n|---|---|\n| 1 | 2 |"},
+		{kind: "reply", body: "afterword"},
+	})
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody=%s", err, body)
+	}
+	types := countBlocksByType(blocks)
+	wantList := types["list"] >= 1
+	wantTable := types["table"] >= 1
+	wantPara := types["paragraph"] >= 1
+	if !wantList {
+		t.Errorf("missing list block; types=%v", types)
+	}
+	if !wantTable {
+		t.Errorf("missing table block; types=%v", types)
+	}
+	if !wantPara {
+		t.Errorf("missing paragraph block; types=%v", types)
+	}
+}

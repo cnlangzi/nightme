@@ -6,8 +6,6 @@ import (
 	"html"
 	"regexp"
 	"strings"
-
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // ---------------------------------------------------------------------------
@@ -144,23 +142,6 @@ func canUseRichMarkdown(rawMD string) bool {
 		return false
 	}
 	return estimateRichBlocks(rawMD) <= blockThresholdForRich()
-}
-
-// buildRichMarkdownWithTrailer appends the StatusBar trailer to a
-// markdown body. Rich messages don't have a separate footer field
-// (InputRichMessage exposes only blocks / html / markdown / media),
-// so the trailer rides inline. statusbar.RenderPanel output is
-// unicode box-drawing (`┌──› / └──›`) — Telegram's rich renderer
-// treats it as plain text, which is the intended visual: a distinct
-// frame below the result body, matching the chain chunk renderer's
-// footer convention.
-//
-// Returns rawMD unchanged when footerLines is empty.
-func buildRichMarkdownWithTrailer(rawMD string, footerLines []string) string {
-	if len(footerLines) == 0 {
-		return rawMD
-	}
-	return rawMD + "\n\n" + statusbar.RenderPanel(footerLines)
 }
 
 // trySendRichMarkdown sends one Telegram message via the

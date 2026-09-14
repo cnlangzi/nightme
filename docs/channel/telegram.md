@@ -3941,6 +3941,14 @@ func estimateRichBlocks(rawMD string) (int, error) {
 - `auto`：每个 user / chat 按首次 enable 时间 + 客户端版本分布历史估算（待 Bot API 支持 client version 查询；当前等价 `off`）
 - `on`：所有 `OutResult` 强制走 rich 路径（preflight 仍兜底），用于灰度期内部 dogfooding
 
+#### 20.6.1.1 StatusBar trailer PR link 转换
+
+`appendTrailerToBody`（`render.go`）是 body + StatusBar panel 拼接的单一入口：每个 footer 行过一遍 `wireFormatFooterLine`，把 `statusbar.formatPRSegment` 输出的 `[#N](url)` markdown 链接提升为 `<a href="url">#N</a>`，再交给 `statusbar.RenderPanel` 包成 frame。`sendOutResultMessage`（rich markdown 路径）和 chain chunk 的 parse_mode=HTML 路径都过同一条 helper。
+
+**为什么**：Bot API 10.1 `rich_message[markdown]` 解析器对 `[#N](url)` 形态有歧义——spec 的转义规则把 `#` 归到"非 entity 位置必须 `\` 转义"字符集，链接文本里的 `#N` 触发降级，整段 `[#N](url)` 当成字面量文本显示。inline `<a>` 是 Bot API 10.1 rich-markdown-style spec 明文允许的形态，且绕过 `#` 转义歧义。
+
+**为什么不动 statusbar 包**：Feishu 用 lark_md 原生渲染 `[#N](url)`，改 statusbar 包输出 `<a>` 会破坏 Feishu 端。转换下沉到 Telegram adapter 单侧的 `appendTrailerToBody`，保持 statusbar 包的 render-mode-agnostic 约束。
+
 #### 20.6.2 L2 —— 显式 `rich_message[blocks]` AST walker
 
 **新文件**：`internal/channel/telegram/rich.go`

@@ -2996,10 +2996,10 @@ type GreetingMessages []GreetingBody
 
 | 序号 | Chinese | English |
 |---|---|---|
-| 1 | `你好，我是 NightMe 🌙。` | `Hi, this is NightMe 👋. Your pair programmer.` |
-| 2 | `奔赴你的星辰大海，拥有你的自由生活。那些必须死守电脑、避无可避的无奈，让我替你守候 🛡️。` | `Set it running. Stay in the loop from your phone, on your terms 🚀.` |
+| 1 | `你好，我是 NightMe 🌙。` | `Hi, this is NightMe 👋.` |
+| 2 | `奔赴你的星辰大海，拥有你的自由生活。那些必须死守电脑、避无可避的无奈，让我替你守候 🛡️。` | `Run your local coding agents. Control them from your phone, on your terms 🚀` |
 
-中文第 2 条取自 `README.zh-CN.md` §开篇 verbatim；英文第 2 条强调 user agency（"stay in the loop ... on your terms"），与 A 方案"sci-fi `digital twin takes the wheel`"刻意保持距离。
+中文第 2 条取自 `README.zh-CN.md` §开篇 verbatim；英文第 2 条描述产品行为（"Run your local coding agents"）+ 用户掌控感（"Control them from your phone, on your terms"）。
 
 ### 19.4 实现位置
 

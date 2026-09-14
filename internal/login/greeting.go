@@ -34,13 +34,12 @@ type GreetingMessages []GreetingBody
 // greeting, each `_2` pair describes the next. Product approved
 // all four together; treat them as one source of truth.
 //
-// Tone notes (English): "this is NightMe" reads as a polite
-// announcement — bot introducing itself, not a person introducing
-// themselves. The English version is two short beats: identity
-// ("Hi, this is NightMe. Your pair programmer.") then value-prop
-// ("Set it running. Stay in the loop from your phone, on your
-// terms.") — the second line emphasizes user agency (control over
-// when to peek) rather than the bot's autonomy.
+// Tone notes (English): two short beats — identity ("Hi, this is
+// NightMe 👋.") then value-prop ("Run your local coding agents.
+// Control them from your phone, on your terms 🚀"). The second
+// line foregrounds what NightMe does (run local agents) and what
+// the user gets in return (control from anywhere, on their own
+// terms) — agency on the user's side, autonomy on the bot's.
 //
 // Tone notes (Chinese): the second line is the README.zh-CN.md
 // §开篇 verbatim — "奔赴你的星辰大海，拥有你的自由生活。那些必须
@@ -50,8 +49,8 @@ type GreetingMessages []GreetingBody
 // Marketing approved all four texts together; treat them as one
 // source of truth.
 const (
-	GreetingMessageEnglish1 = "Hi, this is NightMe 👋. Your pair programmer."
-	GreetingMessageEnglish2 = "Set it running. Stay in the loop from your phone, on your terms 🚀."
+	GreetingMessageEnglish1 = "Hi, this is NightMe 👋."
+	GreetingMessageEnglish2 = "Run your local coding agents. Control them from your phone, on your terms 🚀"
 	GreetingMessageChinese1 = "你好，我是 NightMe 🌙。"
 	GreetingMessageChinese2 = "奔赴你的星辰大海，拥有你的自由生活。那些必须死守电脑、避无可避的无奈，让我替你守候 🛡️。"
 )

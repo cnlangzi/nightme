@@ -242,34 +242,15 @@ func (a *Adapter) trySendRichBlocks(
 	return int64(result.MessageID), nil
 }
 
-// richModeAllowsSend reports whether the per-instance RichMode config
-// permits trying the rich path. Adapter-side gate so the package-
-// level helpers (estimateRichBlocks, etc.) stay pure and unit-
-// testable without instantiating an Adapter.
-func (a *Adapter) richModeAllowsSend() bool {
-	if a == nil {
-		return false
-	}
-	switch a.richMode {
-	case "on":
-		return true
-	case "off", "":
-		return false
-	case "auto":
-		// "auto" is reserved for future per-chat client-version
-		// detection (Bot API 10.1+ doesn't expose client version
-		// today, §20.8 risk row 1). Until that lands, "auto" is
-		// conservatively treated as "off" — refuse to send rich
-		// to clients we can't introspect.
-		return false
-	default:
-		// Unknown mode value: log once and refuse, mirroring
-		// "off". The strictest safe behaviour is to fall back to
-		// plain so an operator typo doesn't silently break
-		// message delivery.
-		return false
-	}
-}
+// richModeAllowsSend was a config gate that controlled whether the
+// adapter could use the rich-message path. L3 retired the gate —
+// rich mode is always on (no config flag, no opt-out). Kept as a
+// stub for any callers that still reference it; returns true so
+// the call sites keep working unchanged.
+//
+// Deprecated: callers should switch to unconditional rich-mode
+// use. Will be removed once every reference is gone.
+func (a *Adapter) richModeAllowsSend() bool { return true }
 
 // ---------------------------------------------------------------------------
 // L2 placeholder: markdownToRichBlocks (AST walker).
@@ -282,24 +263,15 @@ func (a *Adapter) richModeAllowsSend() bool {
 // before the walker body lands.
 // ---------------------------------------------------------------------------
 
-// normaliseRichMode trims / lowercases a config-supplied RichMode
-// value and falls back to "off" for anything outside the documented
-// set. Lives next to richModeAllowsSend so the package owns the
-// entire validation contract in one place.
-func normaliseRichMode(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "on":
-		return "on"
-	case "off", "":
-		return "off"
-	case "auto":
-		// Future: per-chat client-version detection. Until then,
-		// treated as off — see §20.8 risk row 1.
-		return "auto"
-	default:
-		return "off"
-	}
-}
+// normaliseRichMode was a config-validation helper that mapped
+// config.Telegram.RichMode values into a canonical form. With the
+// config field gone (L3: rich mode is always on), this is dead
+// code — callers should drop their RichMode string fields.
+//
+// Deprecated: kept as a stub returning the input verbatim so
+// existing test references compile. Will be removed once tests
+// are updated.
+func normaliseRichMode(raw string) string { return raw }
 
 // markdownToRichBlocks is implemented in rich_walker.go (L2). It
 // walks raw markdown and emits a JSON-encoded rich_message[blocks]

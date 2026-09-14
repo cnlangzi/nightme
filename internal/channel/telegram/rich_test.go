@@ -135,26 +135,6 @@ func TestBuildRichMarkdownWithTrailer_NoFooter(t *testing.T) {
 	}
 }
 
-func TestNormaliseRichMode(t *testing.T) {
-	cases := map[string]string{
-		"":             "off",
-		"off":          "off",
-		"OFF":          "off",
-		"  off":        "off",
-		"on":           "on",
-		"ON":           "on",
-		"  on  ":       "on",
-		"auto":         "auto",
-		"AUTO":         "auto",
-		"unknown-mode": "off",
-	}
-	for in, want := range cases {
-		if got := normaliseRichMode(in); got != want {
-			t.Errorf("normaliseRichMode(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestBlockThresholdForRich(t *testing.T) {
 	// 500 * 4 / 5 = 400. Hard-coded so the relationship between
 	// richBlockCountLimit and the preflight margin stays visible

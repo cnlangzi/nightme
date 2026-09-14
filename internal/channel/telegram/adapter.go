@@ -49,12 +49,6 @@ type Adapter struct {
 	muMessageStates sync.Mutex
 	messageStates   map[string]agent.MessageState
 
-	// richMode mirrors config.Telegram.RichMode and gates the L1
-	// rich_message[markdown] path (docs/channel/telegram.md §20.6.1).
-	// Validated against a fixed set of strings in NewAdapter;
-	// anything outside the set is treated as "off".
-	richMode string
-
 	// richTurns is the L3 per-turn rich-message index. When
 	// RichMode is on, chain-attached kinds (OutThinking / OutTool*
 	// / OutTask* / OutError / OutReply-default) accumulate into a
@@ -100,7 +94,6 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		callbacks: make(map[string]struct{}),
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
-		richMode:  normaliseRichMode(cfgCopy.RichMode),
 		richTurns: newRichTurnsIndex(defaultRichTurnCap),
 	}, nil
 }
@@ -134,7 +127,6 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		callbacks: make(map[string]struct{}),
 		limiter:   NewLimiter(nil, slog.Default()),
 		retry:     DefaultRetryConfig,
-		richMode:  normaliseRichMode(copy.RichMode),
 		richTurns: newRichTurnsIndex(defaultRichTurnCap),
 	}
 }
@@ -1110,7 +1102,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 					turn.mu.Unlock()
 					return nil
 				}
-				a.logger.Warn("telegram: L2 walker path failed, falling back to richTurn",
+				a.logger.Warn("telegram: L2 walker path failed, no fallback (rich mode always on)",
 					"chat_id", rawChatID,
 					"kind", msg.Kind.String(),
 					"err", err)
@@ -1146,7 +1138,7 @@ func (a *Adapter) appendSegmentForKind(
 	// L3: route through richTurn. The chain-attached kind is
 	// derived from msg.Kind so callers (OutReply, OutThinking,
 	// etc.) don't need to repeat the switch.
-	if a.richModeAllowsSend() {
+	if true {
 		kind := ""
 		switch msg.Kind {
 		case messages.OutReply, messages.OutCommandReply:
@@ -1183,32 +1175,29 @@ func (a *Adapter) appendSegmentForKind(
 }
 
 // sendOutResultMessage emits msg.Text as a standalone reply-anchored
-// Telegram message with its own StatusBar trailer. v9 P2 entry point
-// for OutResult — see docs/channel/telegram.md §11.12.4.1.
+// rich message via sendRichMessage. Empty text is silently dropped
+// at the top of Send (caller invariant).
 //
-// Behaviour:
-//   - Single sendMessage when body + trailer ≤ 3900 chars.
-//   - splitTelegramText (>= 2 pieces) when body + trailer > 3900
-//     chars. Each piece gets its own sendMessage with
-//     reply_to_message_id=userMessageID so the whole block reads as
-//     one logical reply cluster under the user's message.
-//   - Only the LAST successfully-sent piece's messageID is
-//     recorded on chain.resultMessageID — "last wins" semantics so
-//     OnPromptEnded's 🎉 lands on the visual end of the result
-//     block (matches v9 P1's "🎉 on the last-active chunk"
-//     intuition, but now bound to the result message instead of an
-//     arbitrary later activity segment).
-//   - Empty text is silently dropped at the top of Send (caller
-//     invariant); we still trim here defensively for symmetry with
-//     appendSegmentForKind.
+// Why no plain-text fallback: the migration to sendRichMessage
+// exists precisely to lift the 4096-char plain-text ceiling (see
+// docs/channel/telegram.md §20.1 — Bot API 10.1 supports up to
+// 32K+ chars per rich block). Falling back to sendMessage +
+// splitTelegramText(3900) when the rich path fails would re-impose
+// the very limit the migration removes. If sendRichMessage errors,
+// the caller surfaces the failure to the runtime — the user
+// gets a visible "send failed" rather than a silently truncated
+// message that hides what was rejected.
 //
-// Failure semantics: if any split piece's sendMessage fails, the
-// pieces that already shipped stay on Telegram as orphan history
-// (same as flushChainNow's trigger-3 / splitOversizedSegmentLocked
-// partial-failure behaviour). chain.resultMessageID is NOT updated
-// in that case, so OnPromptEnded falls back to the active chunk —
-// the user still gets a 🎉 somewhere, just not on a half-shipped
-// result block.
+// Preflight: canUseRichMarkdown gates on char length (<= 32K) and
+// estimated block count (<= 400 / 500 cap with 4/5 buffer). When
+// preflight fails, we attempt the send anyway — Telegram's parser
+// is the source of truth and our heuristic may be conservative.
+// If the server returns RICH_MESSAGE_BLOCKS_TOO_MANY, the caller
+// sees the error and decides what to do (today: log + return).
+//
+// 🎉 anchor: the rich message_id is stored on richTurn.resultMessageID
+// so OnPromptEnded's terminal reaction lands on the result message
+// rather than the active chain chunk (chain no longer exists in L3).
 func (a *Adapter) sendOutResultMessage(
 	ctx context.Context,
 	msg messages.OutboundMessage,
@@ -1219,106 +1208,21 @@ func (a *Adapter) sendOutResultMessage(
 		return nil
 	}
 
-	// L1 (docs §20.6.1): try the rich_message[markdown] path before
-	// falling back to the plain HTML chain. The rich path sends a
-	// single 32K-char message via sendRichMessage with the body
-	// wrapped in a StatusBar trailer, then records the messageID as
-	// the 🎉 anchor so OnPromptEnded lands on the rich message
-	// rather than the active chain chunk. Any failure (config off,
-	// preflight fail, server 4xx, network error) falls through to
-	// the existing HTML path below — the chain / splitTelegramText
-	// behaviour is unchanged for the fallback.
-	if a.richModeAllowsSend() && canUseRichMarkdown(msg.Text) {
-		full := buildRichMarkdownWithTrailer(msg.Text, statusbar.StatusBarLines(&msg))
-		mid, err := a.trySendRichMarkdown(ctx, rawChatID, topicID, userMessageID, full)
-		if err == nil {
-			turn := a.richTurns.getOrCreate(rawChatID, topicID, userMessageID)
-			turn.mu.Lock()
-			turn.resultMessageID = mid
-			turn.mu.Unlock()
-			return nil
-		}
-		a.logger.Warn("telegram: rich OutResult failed, falling back to plain HTML",
+	full := buildRichMarkdownWithTrailer(msg.Text, statusbar.StatusBarLines(&msg))
+	mid, err := a.trySendRichMarkdown(ctx, rawChatID, topicID, userMessageID, full)
+	if err != nil {
+		a.logger.Warn("telegram: rich OutResult failed (no plain fallback; migration target is rich)",
 			"chat_id", rawChatID,
 			"thread_id", topicID,
+			"text_len", len(full),
 			"err", err)
-		// fall through to plain HTML path
+		return err
 	}
-
-	// Result body: raw msg.Text goes through RenderForWire so
-	// markdown chars render as HTML rather than literal `**…**` /
-	// backtick-fences / `[..](..)` — same path chunkBody.Compose()
-	// applies to chain entries, so the standalone message renders
-	// consistently with the intermediate activity log. Trailer
-	// below is built via appendTrailerToBody (v9 P3 §11.12.19.3
-	// Layer-3 primitive) so the "body + \n\n + StatusBar frame"
-	// pattern lives in one place. The frame is already safe-HTML
-	// (statusbar.RenderPanel box-drawing), so appendTrailerToBody
-	// bypasses RenderMarkdown / escapeHTML — otherwise the `┌──› /
-	// └──›` frame would be run through escapeHTML and mangled.
-	//
-	// StatusBar trailer — every text-emitting kind carries §18
-	// trailer, OutResult included. StatusBarLines returns nil when
-	// msg has no status-bearing fields, in which case
-	// appendTrailerToBody returns body unchanged (matches chain
-	// appendSegmentForKind's policy).
-	//
-	// No horizontal-rule separator between result body and trailer
-	// here — the trailer's box-drawing frame (┌──› / └──›) provides
-	// its own visual boundary. v9 P2 first cut had "\n────────\n"
-	// but user feedback was that the extra divider felt heavy on a
-	// standalone reply-anchored message; chain chunks keep the
-	// separator (chunk_body.Compose still emits "────────────────\n"
-	// between entries and footer) because there the rule separates
-	// a long activity log from its summary footer.
-	body := RenderForWire(msg.Text)
-	full := appendTrailerToBody(body, statusbar.StatusBarLines(&msg))
-
-	var messageIDs []int64
-	if len(full) <= maxTelegramTextLength {
-		mid, err := a.sendResultChunk(ctx, rawChatID, topicID, userMessageID, full)
-		if err != nil {
-			return err
-		}
-		messageIDs = []int64{mid}
-	} else {
-		pieces, err := splitTelegramText(full, maxTelegramTextLength)
-		if err != nil {
-			return err
-		}
-		for _, p := range pieces {
-			mid, err := a.sendResultChunk(ctx, rawChatID, topicID, userMessageID, p)
-			if err != nil {
-				return err
-			}
-			messageIDs = append(messageIDs, mid)
-		}
-	}
-
-	// Record the LAST piece's messageID as the 🎉 anchor.
 	turn := a.richTurns.getOrCreate(rawChatID, topicID, userMessageID)
 	turn.mu.Lock()
-	turn.resultMessageID = messageIDs[len(messageIDs)-1]
+	turn.resultMessageID = mid
 	turn.mu.Unlock()
 	return nil
-}
-
-// sendResultChunk sends one Telegram message carrying a result piece.
-// Reply chain anchored to the user's message so the result reads as a
-// reply cluster under "hi" (DM) or the topic's user message (Forum).
-// Pure helper — does not touch chain state. The caller (sendOutResultMessage)
-// records the resulting messageID on chain.resultMessageID.
-func (a *Adapter) sendResultChunk(
-	ctx context.Context,
-	rawChatID string,
-	topicID, userMessageID int,
-	text string,
-) (int64, error) {
-	res, err := a.sendTelegramMessage(ctx, rawChatID, topicID, userMessageID, text, nil)
-	if err != nil {
-		return 0, err
-	}
-	return int64(res.MessageID), nil
 }
 
 // isTextEmittingKind reports whether msg.Kind flows through the
@@ -1439,19 +1343,15 @@ func (a *Adapter) patchChainHeader(
 	}
 
 	// L3 path: richTurn when enabled.
-	if a.richModeAllowsSend() {
+	if true {
 		a.updateRichTurnHeader(chatID, topicID, userMessageID, header)
 		a.logger.Info("telegram: L3 heartbeat header set",
 			"chat_id", chatID, "header", header)
 		return nil
 	}
 
-	// RichMode=off path. L3: the rich turn is the source of
-	// truth now; v9 chain is gone. Heartbeat is no-op when
-	// RichMode=off (L3 retirement accepts this — users running
-	// off-mode get plain sendMessage fallbacks via the legacy
-	// HTML pipeline, which doesn't render the per-beat header
-	// ticker).
+	// Rich mode is always on. We just returned above; the
+	// dead code below this comment is unreachable after L3.
 	return nil
 }
 
@@ -1468,13 +1368,11 @@ func atoiUserMsgID(s string) int {
 // v8 had a renderBodyWithStatusBar helper that paired markdown
 // rendering with a StatusBar trailer for the per-bubble path. v9
 // split this responsibility: chain entries render via
-// chunkBody.Compose() (§11.12) with the trailer stitched in from
-// chain.lastFooter, while OutResult standalone replies go through
-// sendOutResultMessage below — which today calls
-// RenderForWire(msg.Text) for the body and statusbar.RenderPanel
-// for the trailer (both helpers are exposed in render.go /
-// internal/statusbar respectively so future send sites reuse them
-// rather than re-encoding the body+trailer contract).
+// chunkBody.Compose() with the trailer stitched in from
+// chain.lastFooter. L3 retired the chain and the plain-text
+// fallback: sendOutResultMessage is now rich-only and calls
+// buildRichMarkdownWithTrailer in rich.go to assemble the
+// rich_message[markdown] body. No legacy renderForWire path.
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()

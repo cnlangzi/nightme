@@ -117,9 +117,6 @@ func (a *Adapter) appendRichTurn(
 	userMessageID int,
 	entry richTurnEntry,
 ) {
-	if !a.richModeAllowsSend() {
-		return
-	}
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 
 	turn.mu.Lock()
@@ -153,9 +150,6 @@ func (a *Adapter) appendRichTurnAndFlush(
 	userMessageID int,
 	entry richTurnEntry,
 ) error {
-	if !a.richModeAllowsSend() {
-		return nil
-	}
 	a.appendRichTurn(ctx, chatID, topicID, userMessageID, entry)
 	turn, ok := a.richTurns.lookup(chatID, topicID, userMessageID)
 	if !ok || turn == nil {
@@ -297,9 +291,6 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 // across future enhancements (e.g., showing a banner while waiting
 // for the agent to think).
 func (a *Adapter) ensureRichTurn(chatID string, topicID int, userMessageID int) {
-	if !a.richModeAllowsSend() {
-		return
-	}
 	_ = a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 }
 
@@ -311,9 +302,6 @@ func (a *Adapter) updateRichTurnHeader(
 	userMessageID int,
 	header string,
 ) {
-	if !a.richModeAllowsSend() {
-		return
-	}
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 	turn.mu.Lock()
 	turn.headerLine = header
@@ -331,9 +319,6 @@ func (a *Adapter) setRichTurnTaskList(
 	items []taskListItem,
 	footer []string,
 ) {
-	if !a.richModeAllowsSend() {
-		return
-	}
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 	turn.mu.Lock()
 	if len(items) == 0 {

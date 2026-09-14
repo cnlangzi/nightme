@@ -376,64 +376,36 @@ func renderMarkdownSafe(s string) string {
 // get double-folded.
 const expandableFullThresholdChars = 2000
 
-// RenderForWire is the SINGLE wire-facing entry point for turning
-// raw text (LLM markdown, agent output) into Telegram parse_mode=HTML
-// bytes. Outbound code paths that ship plain markdown straight to
-// sendMessage / sendTelegramMessage must call this first; the wire
-// already sets parse_mode=HTML (see topic.go), but the *content* still
-// has to be rendered — otherwise markdown chars leak through as
-// literals (e.g. `**bold**` shows as five characters instead of
-// rendered bold).
+// RenderForWire was the legacy plain-text wire entry point for
+// turning raw markdown into Telegram parse_mode=HTML. Removed in
+// L3: sendOutResultMessage is now rich-only (calls
+// buildRichMarkdownWithTrailer in rich.go which sends via
+// sendRichMessage instead of legacy sendMessage + parse_mode=HTML).
+// No remaining caller.
 //
-// Delegates to renderMarkdownSafe for the actual markdown→HTML pass
-// + fallback. Then wraps the result in `<blockquote expandable>`
-// when the rendered body is longer than expandableFullThresholdChars
-// so a long result message collapses to "▼ Expand" by default —
-// callers that ship a long OutResult no longer have to choose
-// between sending a 10-message chain and forcing the user to scroll
-// a single wall of text.
-//
-// chunkBody.Compose() does NOT route through this — its entries
-// flow is per-line with isHTML awareness, and error fallback is
-// inline (escapeHTML on miss). It calls renderMarkdownSafe directly
-// per entry. A block-level wrapper here would force chunk_body.go
-// to thread isHTML/isMarkdown flags through a stringly helper and
-// break the per-entry invariant in the public Compose() spec. Keep
-// RenderForWire scoped to "raw markdown block → safe HTML block".
+// Kept here as dead code so existing test imports compile. Will be
+// removed in a follow-up PR alongside splitTelegramText.
 func RenderForWire(raw string) string {
 	rendered := renderMarkdownSafe(raw)
 	return maybeWrapFullExpandable(rendered)
 }
 
-// maybeWrapFullExpandable wraps `rendered` in `<blockquote expandable>`
-// when it crosses the full-message fold threshold. The wrap is
-// skipped (and the original returned) when:
-//   - The output already contains a `<blockquote expandable>` tag
-//     (any sub-quote already opted in via expandableBlockquoteThresholdChars;
-//     nesting is illegal and Telegram's parser rejects it).
-//   - The rendered length is ≤ expandableFullThresholdChars — short
-//     bodies stay inline because expanding a small message is more
-//     annoying than reading it.
-//   - Wrapping would push the total over Telegram's 4096-char hard
-//     limit. We fall back to non-wrapped and let splitTelegramText
-//     cut the message into multiple chunks instead.
+// maybeWrapFullExpandable was used by RenderForWire to wrap the
+// rendered body in <blockquote expandable> for the plain-text
+// fallback path. Removed in L3: sendOutResultMessage is rich-only
+// (no plain HTML fallback), so the legacy renderForWire helper
+// chain has no remaining caller. The render.go markdown parser
+// (RenderMarkdown / renderMarkdownSafe / RenderInline) is kept
+// because rich.go / rich_walker.go still call into it for
+// inline-entity detection in fallback paths.
+//
+// Kept here as dead code (compiles, never invoked) until a follow-up
+// PR removes the function and its render.go references.
 func maybeWrapFullExpandable(rendered string) string {
 	if strings.Contains(rendered, "<blockquote expandable>") {
 		return rendered
 	}
-	if len(rendered) <= expandableFullThresholdChars {
-		return rendered
-	}
-	const openTag = "<blockquote expandable>"
-	const closeTag = "</blockquote>"
-	wrapped := openTag + rendered + closeTag
-	if len(wrapped) > 4096 {
-		// Wrap would push over Telegram's hard limit. Fall back
-		// to unwrapped; splitTelegramText will chop into multiple
-		// messages at the call site (sendOutResultMessage).
-		return rendered
-	}
-	return wrapped
+	return rendered
 }
 
 // appendTrailerToBody appends the StatusBar panel to body if
@@ -494,30 +466,14 @@ func wireFormatFooterLine(line string) string {
 	})
 }
 
-// splitTelegramText splits rendered HTML text into chunks of ≤ limit bytes.
+// splitTelegramText split the rendered HTML output of legacy
+// plain-text sendMessage into multiple reply-anchored chunks.
+// Removed in L3: sendOutResultMessage no longer falls back to
+// sendMessage; all rich path output goes through a single 32K rich
+// message via sendRichMessage (no chunking needed).
 //
-// Cuts are guaranteed to land at positions that are:
-//   - NOT inside an HTML tag (between '<' and the matching '>') —
-//     so no chunk starts mid-tag like `<b` / `</b` / `<blockqu`
-//   - NOT inside a <pre>...</pre> atomic block — pre blocks are kept
-//     whole when possible so the formatting wrapper is preserved
-//
-// When the natural newline-or-space cut would land inside a tag or
-// pre block, the cut walks back to the largest safe position ≤ limit.
-// Tiebreaker order: \n > ' ' > first safe position. When no safe
-// position exists in the window (rare; only when the entire window
-// is one giant tag or one giant pre block), the function falls back
-// to byte-cut at limit and accepts unbalanced tags in the resulting
-// chunks — Telegram's HTML parser tolerates stray open/close tags.
-//
-// pre-block-spanning-limits is a known limitation: if a single
-// <pre>...</pre> block exceeds `limit`, the hard-cut splits the
-// block in two and Telegram will render the two halves differently
-// (first half as preformatted, second half as plain text because
-// the stray `</pre>` at the end of chunk N and missing `<pre>` at
-// the start of chunk N+1 are interpreted literally). Future work
-// could insert balanced `</pre>` / `<pre>` pairs around the cut to
-// preserve rendering — out of scope for commit A.
+// Kept here as dead code so existing test imports compile. Will be
+// removed in a follow-up PR.
 func splitTelegramText(rendered string, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, errors.New("telegram: invalid message limit")

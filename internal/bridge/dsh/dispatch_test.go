@@ -376,8 +376,8 @@ func TestHandleAssistantChunk_ReasoningDelta_GoesToReasoningBuffer(t *testing.T)
 
 // TestHandleAssistantChunk_BlockEnd_Reasoning_EmitsThinking
 // block-end{type:"reasoning"} is the single source of truth for
-// thinking emit. Output must be "[思考] ..." prefixed so gateway
-// translate routes it to OutThinking (not OutReply).
+// thinking emit. Bridges emit EventAgentThinking directly so the
+// gateway routes it to OutThinking without string-prefix sniffing.
 func TestHandleAssistantChunk_BlockEnd_Reasoning_EmitsThinking(t *testing.T) {
 	tr := newTranslator("test-agent", "/tmp/test")
 	st := newWireState()
@@ -401,12 +401,11 @@ func TestHandleAssistantChunk_BlockEnd_Reasoning_EmitsThinking(t *testing.T) {
 		t.Fatalf("block-end{reasoning} should emit exactly 1 event, got %d", len(c.events))
 	}
 	ev := c.events[0]
-	if ev.Kind != agent.EventAgentText {
-		t.Errorf("event kind = %v, want EventAgentText", ev.Kind)
+	if ev.Kind != agent.EventAgentThinking {
+		t.Errorf("event kind = %v, want EventAgentThinking", ev.Kind)
 	}
-	wantPrefix := "[思考] "
-	if !strings.HasPrefix(ev.Text, wantPrefix) {
-		t.Errorf("thinking event Text = %q, want prefix %q (so gateway → OutThinking)", ev.Text, wantPrefix)
+	if strings.Contains(ev.Text, "[思考]") {
+		t.Errorf("thinking event must NOT carry the prefix sentinel; got %q", ev.Text)
 	}
 	if !strings.Contains(ev.Text, "让我想想怎么写") {
 		t.Errorf("thinking event Text = %q, want contains assembled reasoning", ev.Text)
@@ -671,14 +670,17 @@ func TestHandleAssistantChunk_ReasoningThenBlockEnd_DoesNotDoubleEmit(t *testing
 	env3, _ := decodeMuxEvent(t, mux3)
 	dispatcher.dispatch(env3, nil)
 
-	// Expected emit sequence: [思考] thinking... (from block-end)
+	// Expected emit sequence: EventAgentThinking (from block-end)
 	//                            + "the reply" (text block from message)
 	// The reasoning content in the message MUST be suppressed.
 	if len(c.events) != 2 {
-		t.Fatalf("expected 2 events ([思考] + reply), got %d: %+v", len(c.events), c.events)
+		t.Fatalf("expected 2 events (thinking + reply), got %d: %+v", len(c.events), c.events)
 	}
-	if !strings.HasPrefix(c.events[0].Text, "[思考] ") {
-		t.Errorf("events[0] should be thinking, got %q", c.events[0].Text)
+	if c.events[0].Kind != agent.EventAgentThinking {
+		t.Errorf("events[0] kind = %v, want EventAgentThinking", c.events[0].Kind)
+	}
+	if strings.Contains(c.events[0].Text, "[思考]") {
+		t.Errorf("events[0] must NOT carry the prefix sentinel; got %q", c.events[0].Text)
 	}
 	if c.events[1].Text != "the reply" {
 		t.Errorf("events[1] should be reply, got %q", c.events[1].Text)

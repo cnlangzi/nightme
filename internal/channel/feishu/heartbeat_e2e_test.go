@@ -145,7 +145,7 @@ func TestEndToEnd_Heartbeat_HeaderInPatchedCard(t *testing.T) {
 	// 2s throttle window of the first heartbeat PATCH.
 	handler(chatsession.AgentEventEnvelope{
 		ChatID: "oc_e2e_chat", AgentSession: as, UserMsgID: "om_e2e_user",
-		Event: &agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] pondering"},
+		Event: &agent.AgentEvent{Kind: agent.EventAgentThinking, Text: "pondering"},
 	})
 	handler(chatsession.AgentEventEnvelope{
 		ChatID: "oc_e2e_chat", AgentSession: as, UserMsgID: "om_e2e_user",
@@ -221,7 +221,7 @@ func TestEndToEnd_Heartbeat_ThinkOff_HeaderStillUpdates(t *testing.T) {
 
 	handler(chatsession.AgentEventEnvelope{
 		ChatID: "oc_e2e_thinkoff", AgentSession: as, UserMsgID: "om_e2e_user",
-		Event: &agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] hidden"},
+		Event: &agent.AgentEvent{Kind: agent.EventAgentThinking, Text: "hidden"},
 	})
 
 	// Counter incremented despite /think off (core F-63 invariant).

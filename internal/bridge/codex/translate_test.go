@@ -198,11 +198,11 @@ func TestTranslate_ReasoningIsDeliveredWithThinkingPrefix(t *testing.T) {
 	}`))
 
 	ev := cap.one(t, 1*time.Second)
-	if ev.Kind != agent.EventAgentText {
-		t.Fatalf("kind = %v, want EventAgentText", ev.Kind)
+	if ev.Kind != agent.EventAgentThinking {
+		t.Fatalf("kind = %v, want EventAgentThinking", ev.Kind)
 	}
-	if ev.Text != thinkingPrefix+"thinking about it" {
-		t.Errorf("text = %q, want %q", ev.Text, thinkingPrefix+"thinking about it")
+	if ev.Text != "thinking about it" {
+		t.Errorf("text = %q, want %q (no prefix)", ev.Text, "thinking about it")
 	}
 }
 

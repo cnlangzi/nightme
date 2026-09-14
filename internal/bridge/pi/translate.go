@@ -42,12 +42,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// thinkingPrefix marks an EventAgentText as a reasoning block rather than
-// a reply. gateway.Translate strips it and routes the payload to
-// OutThinking; the claudecode bridge uses the same sentinel, so the
-// channel renderers need no per-bridge branching.
-const thinkingPrefix = "[思考] "
-
 // pendingTool records a tool_call that has emitted
 // tool_execution_start but not yet the matching
 // tool_execution_end. The bridge uses it to re-attach Name +
@@ -612,13 +606,13 @@ func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logge
 		// Emit any extracted reasoning as a single EventAgentText
 		// with the [思考] sentinel — the gateway's outbound
 		// translator routes those to OutThinking rather than
-		// OutReply, matching the structured thinking_* path.
+		// routing EventAgentText → OutReply, matching the structured thinking_* path.
 		var out []agent.AgentEvent
 		if text := strings.TrimSpace(split.Thinking); text != "" {
 			t.turn.active = true
 			out = append(out, agent.AgentEvent{
-				Kind: agent.EventAgentText,
-				Text: thinkingPrefix + text,
+				Kind: agent.EventAgentThinking,
+				Text: text,
 			})
 		}
 		if len(out) > 0 {
@@ -651,8 +645,8 @@ func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logge
 			return nil, nil
 		}
 		return []agent.AgentEvent{{
-			Kind: agent.EventAgentText,
-			Text: thinkingPrefix + text,
+			Kind: agent.EventAgentThinking,
+			Text: text,
 		}}, nil
 
 	case "toolcall_start", "toolcall_delta", "toolcall_end":
@@ -771,8 +765,8 @@ func (t *translator) recordAssistantMessageLocked(msg assistantMessage) []agent.
 			inner = strings.TrimSpace(inner)
 			if inner != "" {
 				out = append(out, agent.AgentEvent{
-					Kind: agent.EventAgentText,
-					Text: thinkingPrefix + inner,
+					Kind: agent.EventAgentThinking,
+					Text: inner,
 				})
 			}
 		case "text":
@@ -794,8 +788,8 @@ func (t *translator) recordAssistantMessageLocked(msg assistantMessage) []agent.
 			}
 			if thinkText := strings.TrimSpace(split.Thinking); thinkText != "" {
 				out = append(out, agent.AgentEvent{
-					Kind: agent.EventAgentText,
-					Text: thinkingPrefix + thinkText,
+					Kind: agent.EventAgentThinking,
+					Text: thinkText,
 				})
 			}
 		}

@@ -176,11 +176,6 @@ type driver struct {
 	flushTimer *time.Timer
 	flushGen   uint64
 
-	// thinkingPrefix marks reasoning text so the gateway can route
-	// it to the thinking surface (OutThinking) rather than the reply
-	// surface (OutReply). Matches pi/dsh/opencode conventions.
-	thinkingPrefix string
-
 	// model is the bridge-local cached model name. Captured from
 	// vendor-extension sessionUpdate payloads (usage_update.model,
 	// session_info_update.model). May stay empty if the server
@@ -416,16 +411,15 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 
 	parentCtx, cancel := context.WithCancel(ctx)
 	live := &driver{
-		transport:      transport,
-		rpc:            newRPCClient(transport),
-		ctx:            parentCtx,
-		cancel:         cancel,
-		agentName:      s.name,
-		workspace:      cfg.Workspace,
-		events:         make(chan agent.AgentEvent, eventBufferSize),
-		textBuf:        &strings.Builder{},
-		thoughtBuf:     &strings.Builder{},
-		thinkingPrefix: "[思考] ",
+		transport:  transport,
+		rpc:        newRPCClient(transport),
+		ctx:        parentCtx,
+		cancel:     cancel,
+		agentName:  s.name,
+		workspace:  cfg.Workspace,
+		events:     make(chan agent.AgentEvent, eventBufferSize),
+		textBuf:    &strings.Builder{},
+		thoughtBuf: &strings.Builder{},
 	}
 	// readPump is the per-session long-lived read loop. Wrap in
 	// agent.SafeGo (outer, daemon-level safety net) +
@@ -1862,10 +1856,10 @@ func (d *driver) flushOnIdle(gen uint64) {
 	d.flushGen++ // invalidate any twin firing
 	d.textMu.Unlock()
 	if thoughtReady {
-		d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
+		d.flushBuffer(d.thoughtBuf, agent.EventAgentThinking)
 	}
 	if textReady {
-		d.flushBuffer(d.textBuf, "")
+		d.flushBuffer(d.textBuf, agent.EventAgentText)
 	}
 }
 
@@ -1880,14 +1874,15 @@ func (d *driver) stopFlushTimerLocked() {
 	}
 }
 
-// flushBuffer drains `buf` into a single EventAgentText and clears
-// it. No-op when the buffer is empty or all-whitespace. When `prefix`
-// is non-empty (e.g. thinkingPrefix) it is prepended to the content
-// so the gateway can route thinking payloads to the reasoning surface.
+// flushBuffer drains `buf` into a single EventAgentText-like
+// event and clears it. `kind` selects the event kind
+// (EventAgentText for reply text, EventAgentThinking for the
+// reasoning buffer). No-op when the buffer is empty or
+// all-whitespace.
 //
 // The caller must NOT hold d.textMu when calling this — flushBuffer
 // acquires the lock internally for the String/Reset/Emit sequence.
-func (d *driver) flushBuffer(buf *strings.Builder, prefix string) {
+func (d *driver) flushBuffer(buf *strings.Builder, kind agent.EventKind) {
 	if buf == nil {
 		return
 	}
@@ -1898,13 +1893,10 @@ func (d *driver) flushBuffer(buf *strings.Builder, prefix string) {
 	if text == "" {
 		return
 	}
-	if prefix != "" {
-		text = prefix + text
-	}
 	// deliver() stamps SessionID/AgentName/Workspace/Model
 	// automatically — no need to fill them here.
 	d.deliver(agent.AgentEvent{
-		Kind: agent.EventAgentText,
+		Kind: kind,
 		Text: text,
 	})
 }
@@ -1917,8 +1909,8 @@ func (d *driver) flushTextBuffers() {
 	d.textMu.Lock()
 	d.stopFlushTimerLocked()
 	d.textMu.Unlock()
-	d.flushBuffer(d.thoughtBuf, d.thinkingPrefix)
-	d.flushBuffer(d.textBuf, "")
+	d.flushBuffer(d.thoughtBuf, agent.EventAgentThinking)
+	d.flushBuffer(d.textBuf, agent.EventAgentText)
 }
 
 // shouldFlushBufferedText reports whether a mid-turn buffer is

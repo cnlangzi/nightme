@@ -42,8 +42,8 @@ func TestEventHandler_ThinkOff_StillCounts(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] internal reasoning here",
+		Kind: agent.EventAgentThinking,
+		Text: "internal reasoning here",
 	}, UserMsgID: "om_user_1"})
 
 	recorded := ch.Record()
@@ -166,9 +166,9 @@ func TestEventHandler_BothOff_StillCounts(t *testing.T) {
 		})
 	}
 
-	dispatch(agent.EventAgentText, "[思考] a")
+	dispatch(agent.EventAgentThinking, "a")
 	dispatch(agent.EventAgentToolStart, &agent.AgentToolStartEvent{ID: "t1", Name: "Read"})
-	dispatch(agent.EventAgentText, "[思考] b")
+	dispatch(agent.EventAgentThinking, "b")
 	dispatch(agent.EventAgentToolStart, &agent.AgentToolStartEvent{ID: "t2", Name: "Bash"})
 
 	snap := cs.Heartbeat().Snapshot("om_user_1")
@@ -231,7 +231,7 @@ func TestEventHandler_DefaultMode_StillCounts(t *testing.T) {
 		})
 	}
 
-	dispatch(agent.EventAgentText, "[思考] a")
+	dispatch(agent.EventAgentThinking, "a")
 	dispatch(agent.EventAgentText, "actual reply text")
 	dispatch(agent.EventAgentToolStart, &agent.AgentToolStartEvent{ID: "t1", Name: "Read"})
 	dispatch(agent.EventAgentToolEnd, &agent.AgentToolEndEvent{ID: "t1", Name: "Read"})
@@ -285,8 +285,8 @@ func TestEventHandler_OutHeartbeat_NoRecursion(t *testing.T) {
 	// Single thinking event. Expected: original OutThinking
 	// (gates default Show) + exactly one OutHeartbeat.
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
-		Kind: agent.EventAgentText,
-		Text: "[思考] single thought",
+		Kind: agent.EventAgentThinking,
+		Text: "single thought",
 	}, UserMsgID: "om_user_1"})
 
 	recorded := ch.Record()
@@ -384,7 +384,7 @@ func TestEventHandler_Heartbeat_OrderInSequence(t *testing.T) {
 		})
 	}
 
-	dispatch(&agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] pondering"})
+	dispatch(&agent.AgentEvent{Kind: agent.EventAgentThinking, Text: "pondering"})
 	dispatch(&agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: "t1", Name: "Read"}})
 	dispatch(&agent.AgentEvent{Kind: agent.EventAgentToolEnd, ToolEnd: &agent.AgentToolEndEvent{ID: "t1", Name: "Read"}})
 	dispatch(&agent.AgentEvent{Kind: agent.EventAgentText, Text: "final answer"})

@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"regexp"
 	"strings"
 
@@ -276,5 +277,125 @@ func normaliseRichMode(raw string) string { return raw }
 // markdownToRichBlocks is implemented in rich_walker.go (L2). It
 // walks raw markdown and emits a JSON-encoded rich_message[blocks]
 // array; returns ok=false when the walker can't represent the input,
-// in which case callers should fall back to the L1
+// in which which case callers should fall back to the L1
 // rich_message[markdown] path.
+
+// htmlChoiceBodyToBlocks parses the small HTML shape that
+// renderChoice produces — "<b>Title</b>\n\nBody" — into rich
+// blocks (heading + paragraph). Used by sendRichFromHTML to
+// convert Choice / Permission / ForceReply prompts into
+// rich_message[blocks] format. No fallback path: every outbound
+// bubble to Telegram must be rich_message format.
+//
+// renderChoice HTML-escapes its interpolated values via
+// escapeInline, and Telegram rich block text fields are plain
+// text — they do not interpret HTML. Unescape entities so the
+// user sees the original characters (& not &, < not <).
+func htmlChoiceBodyToBlocks(htmlBody string) string {
+	title, body := splitChoiceHTML(htmlBody)
+	title = html.UnescapeString(title)
+	body = html.UnescapeString(body)
+	var blocks []map[string]any
+	if title != "" {
+		blocks = append(blocks, map[string]any{
+			"type": "heading",
+			"text": title,
+			"size": 2,
+		})
+	}
+	if body != "" {
+		blocks = append(blocks, map[string]any{
+			"type": "paragraph",
+			"text": body,
+		})
+	}
+	if len(blocks) == 0 {
+		// Defensive: empty input still produces a valid blocks
+		// array so the wire form is {"blocks":[]} and never
+		// {"blocks":null}.
+		blocks = append(blocks, map[string]any{
+			"type": "paragraph",
+			"text": "",
+		})
+	}
+	b, _ := json.Marshal(blocks)
+	return string(b)
+}
+
+// splitChoiceHTML extracts the optional <b>...</b> heading and
+// remaining body from a renderChoice-shaped string. Returns
+// (title, body) with leading/trailing whitespace stripped.
+func splitChoiceHTML(htmlBody string) (string, string) {
+	trimmed := strings.TrimSpace(htmlBody)
+	if !strings.HasPrefix(trimmed, "<b>") {
+		return "", trimmed
+	}
+	end := strings.Index(trimmed, "</b>")
+	if end < 0 {
+		return "", trimmed
+	}
+	title := trimmed[3:end]
+	rest := strings.TrimSpace(trimmed[end+4:])
+	return title, rest
+}
+
+// sendRichFromHTML sends a Telegram message in rich_message[blocks]
+// format. Mirrors sendTelegramMessage's signature but uses
+// rich_message exclusively — there is NO plain-text fallback path
+// per the design contract (every outbound bubble is rich).
+//
+// Used for Choice / Permission / ForceReply prompts that
+// currently build HTML bodies via renderChoice — converting them
+// to rich blocks keeps the visual surface uniform.
+func (a *Adapter) sendRichFromHTML(
+	ctx context.Context,
+	chatID string,
+	topicID int,
+	replyToMessageID int,
+	htmlBody string,
+	keyboard map[string]any,
+) (SendMessageResult, error) {
+	params := map[string]any{
+		"chat_id": chatID,
+		"rich_message": map[string]any{
+			"blocks": json.RawMessage(htmlChoiceBodyToBlocks(htmlBody)),
+		},
+	}
+	if topicID > 0 {
+		params["message_thread_id"] = topicID
+	}
+	if replyToMessageID > 0 {
+		params["reply_to_message_id"] = replyToMessageID
+	}
+	if keyboard != nil {
+		params["reply_markup"] = keyboard
+	}
+	var result SendMessageResult
+	if err := a.apiCall(ctx, "sendRichMessage", params, &result); err != nil {
+		return SendMessageResult{}, err
+	}
+	return result, nil
+}
+
+// editRichFromHTML edits a Telegram message in rich_message[blocks]
+// format. Mirrors editTelegramMessage's signature, replacing
+// text + parse_mode with rich_message[blocks].
+func (a *Adapter) editRichFromHTML(
+	ctx context.Context,
+	chatID string,
+	messageID int,
+	htmlBody string,
+	keyboard map[string]any,
+) error {
+	params := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"rich_message": map[string]any{
+			"blocks": json.RawMessage(htmlChoiceBodyToBlocks(htmlBody)),
+		},
+	}
+	if keyboard != nil {
+		params["reply_markup"] = keyboard
+	}
+	return a.apiCall(ctx, "editMessageText", params, nil)
+}

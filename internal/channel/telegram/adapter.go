@@ -604,12 +604,34 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// turn. Mirrors v9 chain's purge semantics.
 	a.richTurns.purge(chatID, topicID, userMessageID)
 
-	// L3: create the empty rich message. The first OutHeartbeat or
-	// Out* event triggers sendRichTurnColdCreate (lazy). We don't
-	// pre-create eagerly here — empty rich messages with no content
-	// waste a Telegram slot; let the first event decide whether
-	// the turn needs a message at all.
+	// Eager placeholder create: send the rich message right now
+	// (per turn) instead of waiting for the first Out* event. The
+	// user gets immediate visual feedback that the bot received
+	// the message and is processing it — same UX as Feishu's OnIt
+	// reaction. Without this, slow agent turns (e.g., multi-step
+	// reasoning before any tool call) show nothing for many
+	// seconds and the user wonders if the bot is alive.
 	//
+	// cold-create is idempotent — Telegram rejects empty blocks
+	// with RICH_MESSAGE_EMPTY, so we send a single empty
+	// paragraph block as the placeholder body. The header
+	// (heartbeat line) is added later via renderRichTurnBlocksLocked
+	// only when the runtime emits an OutHeartbeat with a valid
+	// LastBeatAt — see patchChainHeader's Empty() guard. Before
+	// that, the placeholder card just shows entries as they
+	// arrive (no premature "🤖 Working…" banner).
+	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
+	turn.mu.Lock()
+	turn.headerLine = defaultRichTurnHeader
+	if err := a.sendRichTurnColdCreate(turn); err != nil {
+		a.logger.Warn("telegram: eager placeholder cold-create failed",
+			"chat_id", chatID,
+			"err", err)
+		// Fall through — first Out* event will retry cold-create
+		// via appendRichTurn's lazy path.
+	}
+	turn.mu.Unlock()
+
 	// The state.PlaceholderMessageID is intentionally not set here:
 	// L3 derives the 🎉 anchor from richTurn.messageID at
 	// OnPromptEnded time. The legacy field is preserved as
@@ -618,10 +640,11 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 
 	state.LastMessageID = 0
 	state.UserMessageID = strconv.Itoa(userMessageID)
-	a.logger.Debug("telegram: rich turn initialised (L3)",
+	a.logger.Debug("telegram: rich turn initialised (eager)",
 		"chat_id", chatID,
 		"thread_id", topicID,
 		"user_message_id", userMessageID,
+		"placeholder_message_id", turn.messageID,
 	)
 	return a.state.putTopic(state)
 }
@@ -743,7 +766,7 @@ func (a *Adapter) sendChoice(ctx context.Context, msg messages.OutboundMessage, 
 	// rawChatIDFromSession falls back to the input on parse failure
 	// so unit tests using raw chatID still work; runtime namespaced
 	// chatID always strips cleanly.
-	result, err := a.sendTelegramMessage(ctx, rawChatIDFromSession(msg.ChatID), topicID, placeholderAnchor, renderChoice(state), a.choiceKeyboard(state))
+	result, err := a.sendRichFromHTML(ctx, rawChatIDFromSession(msg.ChatID), topicID, placeholderAnchor, renderChoice(state), a.choiceKeyboard(state))
 	if err != nil {
 		return err
 	}
@@ -779,7 +802,7 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 	// falls back to the input on parse failure so unit tests using
 	// raw chatID still work; runtime namespaced chatID always
 	// strips cleanly.
-	if err := a.editTelegramMessage(ctx, rawChatIDFromSession(state.ChatID), state.MessageID, renderChoice(state), keyboard); err != nil {
+	if err := a.editRichFromHTML(ctx, rawChatIDFromSession(state.ChatID), state.MessageID, renderChoice(state), keyboard); err != nil {
 		return err
 	}
 	return a.state.putChoice(state)
@@ -876,16 +899,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	case messages.OutChoicePatch:
 		return a.patchChoice(ctx, msg)
 	case messages.OutHeartbeat:
-		// v9 P1 (2026-08-23): the eager ensurePlaceholder in
-		// handleMessage guarantees the chain + chunk exists before
-		// any Out* lands, so there is no race to guard against.
-		// patchChainHeader still defensively returns nil when
-		// chain.cursor < 0 (a transient / purged state) — that is
-		// its own correctness gate, not a placeholder-anchor
-		// resolution step. OutMessageState's 👌 reaction still
-		// announces the turn if a heartbeat ever gets silently
-		// dropped.
-		return a.patchChainHeader(rawChatID, topicID, replyAnchor, msg)
+		// Issue #368: heartbeat goes through the draft ticker
+		// (feedTicker on the wrapper side). The rich turn no
+		// longer carries the heartbeat as a heading; the draft
+		// preview is the single source of truth for ticker
+		// visuals. patchChainHeader keeps the log line and is the
+		// historical entry point; it now does nothing functional.
+		return a.patchChainHeader(msg)
 	case messages.OutMessageState:
 		if msg.MessageState == nil || msg.MessageState.MessageID == "" {
 			return errors.New("telegram: OutMessageState missing MessageState or MessageID")
@@ -946,6 +966,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// once per debounce — visually identical to the v9 chain's
 		// "in-place rewrite" UX, with the rewrite semantics replaced
 		// by "append second entry + debounced PATCH" semantics.
+		//
+		// Issue #368: statusbar trailer no longer rides on chain
+		// chunks — the draft_ticker wrapper handles the trailer.
+		// Pass nil to skip the now-unused footer parameter.
 		if msg.Tool == nil {
 			return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor,
 				formatTool(msg))
@@ -955,10 +979,6 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			startName = "tool"
 		}
 		startBody := formatToolStartCall(startName, msg.Tool.Args)
-		// Force a synchronous flush before the Start body lands so
-		// the user sees `● Tool(args)` immediately when paired with
-		// a delayed OutToolEnd. Without this the 250ms debounce
-		// would hold both lines until the timer fires.
 		return a.appendRichTurnAndFlush(ctx, rawChatID, topicID, replyAnchor,
 			richTurnEntry{kind: "tool", body: startBody},
 			statusbar.StatusBarLines(&msg))
@@ -992,7 +1012,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// blocks section (heading + list) — renderRichTurnBlocksLocked
 		// emits it as a single `list` block when present. Mirror
 		// v9 P2 contract: nil TaskList silent drops; empty Items
-		// clears the section.
+		// clears the section. Pass nil for footer — issue #368.
 		if msg.TaskList == nil {
 			return nil
 		}
@@ -1012,6 +1032,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// paragraph (markdown fenced-code wrap is preserved by the
 		// rich block renderer's fenced-code handling — the walker
 		// detects ``` fences and produces pre blocks natively).
+		// Footer param nil — issue #368.
 		body := msg.Text
 		if msg.Diagnostic != nil && msg.Diagnostic.StderrTail != "" {
 			body += "\n\n```\n" + msg.Diagnostic.StderrTail + "\n```"
@@ -1077,45 +1098,19 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// semantics. OutResult is intentionally NOT here — handled
 		// by the explicit case above.
 		//
-		// L2 (docs §20.6.2): for OutReply and OutCommandReply only,
-		// try the rich_message[blocks] walker before falling back
-		// to the chain. The walker is best-effort; complex markdown
-		// (tables, ordered lists, footnotes, raw HTML) returns
-		// ok=false and we land on the chain path unchanged. This
-		// keeps chain-attached kinds (OutThinking / OutTool* /
-		// OutError / OutTask*) on the chain — they're short
-		// prefix-formatted entries that don't benefit from a real
-		// block parser.
-		if msg.Kind == messages.OutReply || msg.Kind == messages.OutCommandReply {
-			if blocksJSON, ok := markdownToRichBlocks(msg.Text); ok {
-				mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, replyAnchor, blocksJSON)
-				if err == nil {
-					a.logger.Info("telegram: L2 walker path",
-						"chat_id", rawChatID,
-						"kind", msg.Kind.String(),
-						"blocks_len", len(blocksJSON))
-					// The walker message IS this turn's rich
-					// message — pin turn.messageID so subsequent
-					// Out* events PATCH the same message via
-					// editMessageText(rich_message=...) instead of
-					// cold-creating a second message. resultMessageID
-					// also takes this id so OnPromptEnded's 🎉 lands
-					// here (matches v9 P2 semantics for OutResult
-					// standalone replies, §11.12.4.1).
-					turn := a.richTurns.getOrCreate(rawChatID, topicID, replyAnchor)
-					turn.mu.Lock()
-					turn.messageID = mid
-					turn.resultMessageID = mid
-					turn.mu.Unlock()
-					return nil
-				}
-				a.logger.Warn("telegram: L2 walker path failed, no fallback (rich mode always on)",
-					"chat_id", rawChatID,
-					"kind", msg.Kind.String(),
-					"err", err)
-				// fall through to richTurn appendSegmentForKind path
-			}
-		}
+		// Every OutReply / OutCommandReply routes through
+		// appendSegmentForKind → appendRichTurn → renderRichTurnBlocksLocked
+		// → editMessageText(rich_message=...) PATCH. The placeholder
+		// card is the single visual surface for the turn (created
+		// eagerly by ensurePlaceholder); updates PATCH in place.
+		//
+		// The pre-merge L2 walker path (trySendRichBlocks →
+		// sendRichMessage) was REMOVED because it stood up a
+		// second standalone rich message instead of editing the
+		// placeholder, breaking the "single visual surface"
+		// invariant. The walker itself (markdownToRichBlocks)
+		// is still used by appendSegmentForKind's chain-attached
+		// kinds to convert markdown bodies into rich blocks.
 		return a.appendSegmentForKind(ctx, msg, rawChatID, topicID, replyAnchor, msg.Text)
 	}
 }
@@ -1161,7 +1156,10 @@ func (a *Adapter) appendSegmentForKind(
 	if kind != "" {
 		// Strip the trailing "\n" we used to add for the chain
 		// renderer's separator; the rich walker handles its own
-		// inter-block spacing.
+		// inter-block spacing. Footer carries the latest statusbar
+		// snapshot for this turn — renderRichTurnBlocksLocked
+		// emits it as a `pre` block at the bottom of the placeholder
+		// card.
 		body := strings.TrimRight(segment, "\n")
 		return a.appendRichTurn(ctx, rawChatID, topicID, userMessageID,
 			richTurnEntry{kind: kind, body: body},
@@ -1322,36 +1320,35 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	a.richTurns.purge(rawChatID, topicID, parsedUserMsgID)
 }
 
-func (a *Adapter) patchChainHeader(
-	chatID string,
-	topicID int,
-	userMessageID int,
-	msg messages.OutboundMessage,
-) error {
-	// Feishu-aligned gate (F-63 §3.6): heartbeatText is the
-	// back-part of the chunk header, never the cold-create
-	// "Working" front-part. A snapshot with zero counters /
-	// no LastBeatAt / Running status carries no observable
-	// state, so we keep the cold banner by routing to
-	// setHeader (which does NOT touch hasHeartbeat). Any
-	// terminal status — even with zero counters — still
-	// flips hasHeartbeat so the user sees the verdict prefix
-	// (✅ / ❌) on the chunk header.
-	header := heartbeatText(msg.Heartbeat)
-	if msg.Heartbeat != nil &&
-		(msg.Heartbeat.ThinkCount > 0 || msg.Heartbeat.ToolCount > 0 ||
-			!msg.Heartbeat.LastBeatAt.IsZero() ||
-			msg.Heartbeat.Status != messages.HeartbeatRunning) {
-		header = heartbeatText(msg.Heartbeat)
-	} else {
-		header = heartbeatText(nil)
+func (a *Adapter) patchChainHeader(msg messages.OutboundMessage) error {
+	if msg.Heartbeat == nil {
+		return nil
 	}
 
-	// L3: route the heartbeat into the richTurn. Rich mode is
-	// always on; the chain is gone.
-	a.updateRichTurnHeader(chatID, topicID, userMessageID, header)
-	a.logger.Info("telegram: heartbeat header set",
-		"chat_id", chatID, "header", header)
+	// Resolve routing keys the same way Send does, so the rich
+	// turn lookup hits the same cache entry the eventual
+	// editMessageText PATCH will land on.
+	rawChatID, _, ok := splitSessionID(msg.ChatID)
+	if !ok {
+		rawChatID = msg.ChatID
+	}
+	topicID := a.sessionTopicID(msg.ChatID)
+	userMessageID := 0
+	if state, ok := a.state.topic(rawChatID, topicID); ok {
+		if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
+			userMessageID = uid
+		}
+	}
+
+	// Hide the heartbeat line until the runtime has observed real
+	// activity. Empty() returns false for terminal snapshots
+	// (HeartbeatDone / HeartbeatError) so the verdict still shows
+	// even with zero counters / LastBeatAt.
+	if msg.Heartbeat.Empty() {
+		return nil
+	}
+
+	a.updateRichTurnHeader(rawChatID, topicID, userMessageID, heartbeatText(msg.Heartbeat))
 	return nil
 }
 
@@ -1454,18 +1451,18 @@ func formatTool(msg messages.OutboundMessage) string {
 // through StatusBar on every footer-bearing outbound message.
 // Removed.
 
-// heartbeatText composes the per-beat chunk header end-to-end:
-// status text + activity timestamp + bold markup. Same shape
-// as placeholderInitialText so both render the full
-// `<b>{status} · ⏱ HH:MM:SS</b>` line that becomes the
-// chunk's headerLine.
+// heartbeatText composes the per-beat progress line as plain
+// text (no HTML markup). Renders into a Telegram rich_message
+// paragraph block — NOT a heading — so it sits at the same
+// scale as surrounding content entries rather than dominating
+// the placeholder card.
 //
 // Timestamp source: snapshot.LastBeatAt — the last think/tool
 // event wall-clock, refreshed by chatsession heartbeat tracker.
 // NOT time.Now() at heartbeat emission (those can diverge when
 // the heartbeat timer fires after agent stalls). Returning the
 // activity time means the user sees "agent was last thinking
-// at HH:MM:SS", which is the v8 §11.11.1 v7 contract.
+// at HH:MM:SS".
 //
 // Local-time rendering (no .UTC()): the user reads the bot's
 // chat in their own timezone and expects the wall-clock they
@@ -1476,16 +1473,13 @@ func formatTool(msg messages.OutboundMessage) string {
 // a timestamp (we have nothing to attribute it to).
 func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 	if snapshot == nil {
-		return "<b>🤖 Working...</b>"
+		return "🤖 Working..."
 	}
 	// Skip-zero-chips semantics aligned with feishu's
 	// renderHeartbeatHeader (F-63 §3.6): a zero ThinkCount /
 	// ToolCount does NOT contribute a chip, so a /think off +
 	// /tools off turn that still emits an OutHeartbeat produces
-	// just the prefix (or empty body when running). The bold
-	// HTML markup is Telegram's per-channel render format; the
-	// call site gates the cold-create "Working" banner so this
-	// function is the back-part only.
+	// just the prefix (or empty body when running).
 	var parts []string
 	if snapshot.ThinkCount > 0 {
 		parts = append(parts, fmt.Sprintf("💭 %d", snapshot.ThinkCount))
@@ -1497,14 +1491,10 @@ func heartbeatText(snapshot *messages.HeartbeatSnapshot) string {
 		parts = append(parts, "⏱ "+snapshot.LastBeatAt.Local().Format("15:04:05"))
 	}
 	body := strings.Join(parts, " · ")
-	// Counter chip wrapper when there's content (mirror feishu's
-	// "back-part" shape). Terminal-only snapshots produce just
-	// the prefix so the user still sees the verdict on a chunk
-	// that never accumulated counters (e.g. one-shot answer
-	// with /think off + /tools off).
-	if body != "" {
-		body = "<b>" + body + "</b>"
-	}
+	// Terminal-only snapshots produce just the verdict prefix so
+	// the user still sees "✅ Done" / "❌ Failed" on a turn that
+	// never accumulated counters (e.g. one-shot answer with
+	// /think off + /tools off).
 	switch snapshot.Status {
 	case messages.HeartbeatDone:
 		return "✅ " + body

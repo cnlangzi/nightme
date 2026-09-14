@@ -106,7 +106,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/proc"
 )
 
@@ -1499,13 +1498,13 @@ func translateItemCompleted(sink func(agent.AgentEvent), item *codexExecItem) {
 			Text: text,
 		})
 	case "reasoning":
-		// Prefix with the gateway.Translate ThinkingPrefix sentinel
-		// so the channel adapter renders it as OutThinking (a 💭
-		// side line) instead of an OutReply bubble. See
-		// gateway/outbound/translate.go for the sentinel constant.
+		// Emit as EventAgentThinking so the gateway routes it to
+		// OutThinking directly — no string-prefix sniffing needed.
+		// Channels render this as a 💭 side line, distinct from
+		// the 💬 OutReply bubble for the agent's final answer.
 		sink(agent.AgentEvent{
-			Kind: agent.EventAgentText,
-			Text: outbound.ThinkingPrefix + item.Text,
+			Kind: agent.EventAgentThinking,
+			Text: item.Text,
 		})
 	case "mcp_tool_call":
 		name := item.Server

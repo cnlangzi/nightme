@@ -861,13 +861,13 @@ func TestAdapter_Send_OutChoice_NamespacedChatID_StripsTGPrefix(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	sendCall := findCall(api.snapshotCalls(), "sendMessage")
+	sendCall := findCall(api.snapshotCalls(), "sendRichMessage")
 	if sendCall == nil {
-		t.Fatal("expected sendMessage call")
+		t.Fatal("expected sendRichMessage call")
 	}
 	chatID, _ := sendCall.Params["chat_id"].(string)
 	if chatID != "100" {
-		t.Fatalf("sendMessage chat_id = %q, want raw %q (Telegram Bot API rejects tg_ prefix)", chatID, "100")
+		t.Fatalf("sendRichMessage chat_id = %q, want raw %q (Telegram Bot API rejects tg_ prefix)", chatID, "100")
 	}
 	if threadID, _ := sendCall.Params["message_thread_id"].(int); threadID != 42 {
 		t.Fatalf("message_thread_id = %v, want 42", sendCall.Params["message_thread_id"])
@@ -1722,7 +1722,7 @@ func TestAdapter_HandleInputClick_ForceReply(t *testing.T) {
 	// Now reply to the force_reply prompt.
 	promptID := 0
 	for _, call := range api.snapshotCalls() {
-		if call.Method != "sendMessage" {
+		if call.Method != "sendRichMessage" {
 			continue
 		}
 		markup, ok := call.Params["reply_markup"].(map[string]any)
@@ -1740,7 +1740,7 @@ func TestAdapter_HandleInputClick_ForceReply(t *testing.T) {
 		}
 	}
 	if promptID == 0 {
-		t.Fatal("no force_reply sendMessage")
+		t.Fatal("no force_reply sendRichMessage")
 	}
 }
 
@@ -2391,18 +2391,22 @@ func TestHeartbeatText_TerminalPrefix(t *testing.T) {
 			if !strings.HasPrefix(got, c.wantPrefix) {
 				t.Fatalf("heartbeatText = %q, want prefix %q", got, c.wantPrefix)
 			}
-			// Snapshot-driven presence of <b>: when the snapshot
+			// heartbeatText now produces plain text — no HTML tags.
+			// Pre-PR-369 it wrapped the body in <b>...</b> for
+			// parse_mode=HTML sendMessage; rich_message blocks
+			// render text literally so the wrapper is gone.
+			if strings.Contains(got, "<b>") || strings.Contains(got, "</b>") {
+				t.Fatalf("heartbeatText must NOT emit HTML tags; got %q", got)
+			}
+			// Snapshot-driven body presence: when the snapshot
 			// carries observable state (counters, time) the body
-			// is wrapped in <b>...</b>; a terminal-only snapshot
-			// produces just the prefix, no chip — same shape
-			// as feishu's renderHeartbeatHeader.
+			// carries the chip; a terminal-only snapshot produces
+			// just the prefix, no chip — same shape as feishu's
+			// renderHeartbeatHeader.
 			hasChip := c.hb.ThinkCount > 0 || c.hb.ToolCount > 0 ||
 				!c.hb.LastBeatAt.IsZero()
-			if hasChip && !strings.Contains(got, "<b>") {
-				t.Fatalf("heartbeatText = %q, want the counter chip", got)
-			}
-			if !hasChip && strings.Contains(got, "<b>") {
-				t.Fatalf("heartbeatText = %q, want no chip (terminal-only)", got)
+			if hasChip && !strings.Contains(got, "⏱") {
+				t.Fatalf("heartbeatText = %q, want time chip for active snapshot", got)
 			}
 		})
 	}

@@ -29,22 +29,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// thinkingPrefix is the sentinel the claudecode bridge prepends to
-// every thinking block before emitting EventAgentText. Renderer.render
-// (and Channel-specific renderers) use it to tell thinking from a
-// final reply and surface them with different icons (💭 vs 💬).
-// ThinkingPrefix is the sentinel the claudecode bridge (and the dsh
-// bridge's reasoning-block path) prepends to every thinking block
-// before emitting EventAgentText. Renderer.render (and Channel-
-// specific renderers) use it to tell thinking from a final reply
-// and surface them with different icons (💭 vs 💬).
-//
-// Exported so the dsh bridge (and any future bridge that wants
-// thinking to flow on OutThinking rather than OutReply) can write
-// the same prefix without copy-pasting the literal across the
-// bridge / gateway boundary.
-const ThinkingPrefix = "[思考] "
-
 // Translate converts one agent.AgentEvent into the abstract
 // messages.OutboundMessage stream. Returns the message to send and a
 // boolean indicating whether anything should be sent at all:
@@ -59,19 +43,30 @@ const ThinkingPrefix = "[思考] "
 // signal. Permission events are mapped to OutChoice; the Channel
 // renders the choice natively (Feishu interactive card, Slack block kit,
 // Web HTML).
+//
+// EventAgentThinking is the dedicated kind for the agent's
+// reasoning / thought blocks. Bridges emit it directly so the
+// gateway routes it to OutThinking without string-prefix
+// sniffing. The older "[思考] " sentinel is removed; bridges
+// that still emit that prefix on EventAgentText now land on
+// OutReply instead of OutThinking.
 func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bool) {
 	switch ev.Kind {
-	case agent.EventAgentText:
+	case agent.EventAgentThinking:
 		text := strings.TrimSpace(ev.Text)
 		if text == "" {
 			return messages.OutboundMessage{}, false
 		}
-		if strings.HasPrefix(text, ThinkingPrefix) {
-			return messages.OutboundMessage{
-				ChatID: chatID,
-				Kind:   messages.OutThinking,
-				Text:   strings.TrimPrefix(text, ThinkingPrefix),
-			}, true
+		return messages.OutboundMessage{
+			ChatID: chatID,
+			Kind:   messages.OutThinking,
+			Text:   text,
+		}, true
+
+	case agent.EventAgentText:
+		text := strings.TrimSpace(ev.Text)
+		if text == "" {
+			return messages.OutboundMessage{}, false
 		}
 		return messages.OutboundMessage{
 			ChatID: chatID,

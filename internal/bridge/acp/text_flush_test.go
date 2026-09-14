@@ -303,13 +303,12 @@ func newFlushTestDriver(t *testing.T) *driver {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	return &driver{
-		ctx:            ctx,
-		cancel:         cancel,
-		events:         make(chan agent.AgentEvent, 16),
-		textBuf:        &strings.Builder{},
-		thoughtBuf:     &strings.Builder{},
-		thinkingPrefix: "[思考] ",
-		agentName:      "test",
+		ctx:        ctx,
+		cancel:     cancel,
+		events:     make(chan agent.AgentEvent, 16),
+		textBuf:    &strings.Builder{},
+		thoughtBuf: &strings.Builder{},
+		agentName:  "test",
 	}
 }
 

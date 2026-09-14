@@ -39,6 +39,11 @@ type fakeAPI struct {
 	callCount int
 	// callErr is a static error override (returns from every call).
 	callErr error
+	// MethodErrors, if non-empty, makes only the listed methods
+	// fail with the given error. Lets tests poison a single
+	// Telegram method (e.g. getFile for retry tests) without
+	// corrupting unrelated calls like sendRichMessage.
+	MethodErrors map[string]error
 }
 
 type fakeCall struct {
@@ -69,6 +74,12 @@ func (f *fakeAPI) call(ctx context.Context, method string, params map[string]any
 	if f.TransientOnce != nil {
 		err := f.TransientOnce
 		f.TransientOnce = nil
+		return err
+	}
+	// Method-specific errors take precedence over the global
+	// Errors queue — this is how the download-failure tests poison
+	// only getFile without corrupting sendRichMessage / getUpdates.
+	if err, ok := f.MethodErrors[method]; ok {
 		return err
 	}
 	if len(f.Errors) > 0 {

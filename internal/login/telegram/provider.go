@@ -17,7 +17,7 @@
 // Greet flow (best-effort, fires AFTER CLI saves the config):
 //
 //  1. Tell user to message the bot ("send /start").
-//  2. Poll getUpdates with a 2-minute window for the first
+//  2. Poll getUpdates with a 5-minute window for the first
 //     private-chat message from any non-bot user.
 //  3. Send the canonical bilingual greeting bodies to that
 //     chat_id via sendMessage.
@@ -26,7 +26,7 @@
 //     never replays the login greeting.
 //
 // Greet's context is the parent ctx set by the CLI (10-minute
-// login timeout). The greeting wait caps itself at 2 minutes so
+// login timeout). The greeting wait caps itself at 5 minutes so
 // a user who walked away doesn't keep the CLI open longer than
 // necessary.
 //
@@ -56,8 +56,9 @@ import (
 // message. Generous enough that someone reading the CLI output,
 // picking up their phone, opening Telegram, and finding the bot
 // can complete the gesture; tight enough that a user who walked
-// away doesn't keep the CLI blocked.
-const greetWaitTimeout = 2 * time.Minute
+// away doesn't keep the CLI blocked. The CLI's parent ctx applies
+// its own upper bound (10 min default in cmd/nightme/login.go).
+const greetWaitTimeout = 5 * time.Minute
 
 // longPollSeconds is the long-polling timeout sent to getUpdates.
 // Telegram holds the connection open for up to this many seconds
@@ -200,7 +201,6 @@ func (p *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	p.botToken = token
 	p.botInfo = info
 
@@ -214,9 +214,27 @@ func (p *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 		fmt.Fprintf(p.out, "  Display:   %s\n", info.FirstName)
 	}
 
+	// Privacy Mode = ENABLED is the BotFather default; it restricts
+	// the bot to /commands, @mentions, replies, and service messages
+	// in groups. NightMe works either way — single-chat and
+	// /command-driven flows are fine. Disabling Privacy Mode unlocks
+	// multi-project parallel dev: the bot can read plain-text
+	// messages in shared groups so several projects can stay live
+	// simultaneously without anyone @-mentioning the bot. Hint is
+	// shown only when the flag is off; users who already configured
+	// it see nothing. Credentials are persisted regardless.
+	if !info.CanReadAllGroupMessages {
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, "💡 Telegram's Privacy Mode is still on. NightMe works")
+		fmt.Fprintln(p.out, "   either way — but to run several projects in parallel")
+		fmt.Fprintln(p.out, "   in shared groups without @-mentioning the bot each")
+		fmt.Fprintln(p.out, "   time, open @BotFather, send /setprivacy, and choose")
+		fmt.Fprintln(p.out, "   Disable. Re-add this bot to any existing groups after.")
+	}
+
 	return &login.Credentials{
 		BotToken:  token,
-		AppName:   info.displayName(),
+		AppName:   p.botInfo.displayName(),
 		CreatedAt: time.Now(),
 	}, nil
 }
@@ -249,26 +267,30 @@ func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) e
 	fmt.Fprintln(p.out, "📨 Greeting setup")
 	fmt.Fprintln(p.out, "-----------------")
 	if p.botInfo != nil && p.botInfo.Username != "" {
-		fmt.Fprintf(p.out, "Open Telegram, search for @%s, and send any message\n", p.botInfo.Username)
-		fmt.Fprintf(p.out, "(for example: /start).\n")
+		fmt.Fprintf(p.out, "Open Telegram, search for @%s, and send /start.\n", p.botInfo.Username)
 	} else {
-		fmt.Fprintln(p.out, "Open a private chat with your bot and send any message.")
+		fmt.Fprintln(p.out, "Open a private chat with your bot and send /start.")
 	}
-	fmt.Fprintf(p.out, "Waiting up to %s for your first message...\n", greetWaitTimeout)
+	fmt.Fprintln(p.out, "Waiting for /start...")
 
 	waitCtx, cancel := context.WithTimeout(ctx, greetWaitTimeout)
 	defer cancel()
 	chatID, err := p.waitForFirstMessage(waitCtx)
 	if err != nil {
-		// Soft failure: surface the cause but don't propagate as a
-		// hard error. The CLI orchestrator will log "greeting
-		// failed" if we returned a non-nil error; here we want
-		// the user to see the friendly "you can /start later"
-		// hint instead of a stack trace.
+		// Soft failure: the user might have walked away (deadline)
+		// or callAPI hit a real error (token revoked, network down).
+		// waitForFirstMessage returns a deadline-typed error in the
+		// first case and surfaces the underlying error in the
+		// second; both should end with the same calm hint and a
+		// hint pointing at the daemon, not a stack trace. Note: do
+		// NOT tell the user to "send /start" — the runtime adapter
+		// silently drops bare /start (see isBareStartCommand in
+		// internal/channel/telegram/adapter.go) so the bot would
+		// never reply. Send any non-/start message instead.
 		fmt.Fprintln(p.out)
-		fmt.Fprintf(p.out, "⏱  %v\n", err)
-		fmt.Fprintln(p.out, "You can still send /start later — NightMe will respond once")
-		fmt.Fprintln(p.out, "the daemon is running (`nightme start`; v1.3+ multi-channel — telegram auto-starts if creds present).")
+		fmt.Fprintln(p.out, "Skipped — send the bot any message once the daemon is")
+		fmt.Fprintln(p.out, "running (`nightme start`; v1.3+")
+		fmt.Fprintln(p.out, "multi-channel — telegram auto-starts if creds present).")
 		return nil
 	}
 
@@ -283,7 +305,14 @@ func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) e
 }
 
 // printInstructions prints the @BotFather walkthrough to p.out.
-// Kept short: 12 lines, fits a 24x80 terminal.
+// Kept short: fits a 24x80 terminal. We deliberately do NOT
+// mention Telegram's Privacy Mode here — /setprivacy is only
+// relevant for users who want multi-project parallel
+// development, and the message is more useful *after* login
+// when we can verify the bot's actual privacy setting via
+// getMe (skip the hint entirely when it's already disabled).
+// See docs/channel/telegram.md §11.3 and core.telegram.org
+// /bots/features#privacy-mode for the platform contract.
 func (p *Provider) printInstructions() {
 	fmt.Fprintln(p.out, "Telegram bot setup")
 	fmt.Fprintln(p.out, "==================")
@@ -353,6 +382,14 @@ type userInfo struct {
 	IsBot     bool   `json:"is_bot"`
 	Username  string `json:"username"`
 	FirstName string `json:"first_name"`
+
+	// CanReadAllGroupMessages reflects the BotFather /setprivacy
+	// setting (false = Privacy Mode ENABLED — the default). We
+	// surface a post-login warning when false so the user knows
+	// plain group messages will be filtered before they reach
+	// nightme. Bots added as group admins always receive all
+	// messages regardless of this flag.
+	CanReadAllGroupMessages bool `json:"can_read_all_group_messages"`
 }
 
 // displayName renders the bot's human-readable name. Falls back
@@ -415,15 +452,28 @@ func (p *Provider) validateToken(ctx context.Context, token string) (*userInfo, 
 //
 // We use long polling (timeout=25s) so the connection is held open
 // for at most 25 seconds per call. The deadline is set to
-// greetWaitTimeout (2 minutes) from above; we honour ctx.Err() at
+// greetWaitTimeout (5 minutes) from above; we honour ctx.Err() at
 // the top of each iteration so cancellation propagates fast.
 //
 // Only private-chat messages count. Group messages are skipped
 // silently: greeting in a group would be inappropriate (the user
 // may have added the bot to a topic for other reasons) and would
 // also leak the greeting to other chat members.
+//
+// Error handling distinguishes two cases so a misconfigured user
+// isn't left staring at "Waiting for /start..." for the full wait:
+//   - Context-cancelled (parent ctx / deadline / Ctrl+C): the long
+//     poll itself can outlive the deadline and surface a
+//     context-deadline error that is NOT a real failure — the user
+//     just walked away. Silent retry.
+//   - Real API error (401 token revoked between Login and Greet,
+//     network outage, malformed response): not transient; loop
+//     until ctx dies so the outer Greet shows the soft-failure
+//     hint, but log once via the caller (p.Out) on the first hit
+//     so the user sees WHY they're waiting.
 func (p *Provider) waitForFirstMessage(ctx context.Context) (int64, error) {
 	var offset int64
+	loggedRetry := false
 	for {
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -440,12 +490,23 @@ func (p *Provider) waitForFirstMessage(ctx context.Context) (int64, error) {
 
 		updates, err := p.callAPI(ctx, "getUpdates", params)
 		if err != nil {
-			// Transient: log and retry (the long-poll timeout may
-			// also have fired with an empty result, which is not
-			// an error from our side).
-			if ctx.Err() == nil {
-				fmt.Fprintf(p.out, "  (getUpdates retry: %v)\n", err)
-				time.Sleep(time.Second)
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				// Long-poll outlived the deadline. The user walked
+				// away — not a real failure. Silent retry; the next
+				// loop iteration's ctx.Err() check will exit.
+				continue
+			}
+			// Genuine API error. Log once (not per-second) so the
+			// user has a clue when the soft-failure hint eventually
+			// fires; then keep retrying until the wait ctx dies.
+			if !loggedRetry {
+				fmt.Fprintf(p.out, "  (getUpdates error: %v — still waiting)\n", err)
+				loggedRetry = true
+			}
+			select {
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				return 0, ctx.Err()
 			}
 			continue
 		}

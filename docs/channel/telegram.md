@@ -426,8 +426,8 @@ Telegram 没有类似飞书注册 API 的“扫码后自动创建 Bot”能力�
 
 - 只接私聊消息（chat.type == "private"）；群消息跳过，避免在群里广播 greeting。
 - 跳过 bot-from 消息（防止把别的 bot 的消息误认为 owner）。
-- greeting 内容：`Hi, this is NightMe 👋. Your pair programmer.` /
-  `Set it running. Stay in the loop from your phone, on your terms 🚀.`
+- greeting 内容：`Hi, this is NightMe 👋.` /
+  `Run your local coding agents. Control them from your phone, on your terms 🚀`
   只发英语：Telegram 没有飞书那种 post 双语信封，默认英语客户端也
   不会渲染中文，多发只会成噪音。中文副本留给飞书的 post envelope。
 - 错误是 soft-failure：greeting 失败不回滚 token 写入。

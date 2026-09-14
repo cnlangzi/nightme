@@ -60,6 +60,10 @@ func newFakeTelegramServer(t *testing.T, updates ...map[string]any) *fakeTelegra
 					"is_bot":     true,
 					"username":   "nightme_dev_bot",
 					"first_name": "NightMe Dev",
+					// Privacy Mode = disabled; Login succeeds silently
+					// with no recommendation. The "ENABLED" branch
+					// is covered by TestProvider_Login_PrivacyModeSoftRecommendation.
+					"can_read_all_group_messages": true,
 				},
 			})
 		case "getUpdates":
@@ -182,6 +186,11 @@ func TestProvider_Login_NonBotAccount(t *testing.T) {
 				"id":         12345,
 				"is_bot":     false,
 				"first_name": "Some User",
+				// Login rejects user-account tokens before any
+				// privacy check, so this field's value is moot —
+				// keep it explicit so future maintainers don't
+				// confuse themselves about which path gates what.
+				"can_read_all_group_messages": true,
 			},
 		})
 	}))
@@ -316,8 +325,26 @@ func TestProvider_Greet_TimeoutIsSoftError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Greet timeout should be soft (nil error), got %v", err)
 	}
-	if !strings.Contains(out.String(), "You can still send /start later") {
-		t.Fatalf("output missing soft-failure hint: %q", out.String())
+	outStr := out.String()
+	if !strings.Contains(outStr, "Skipped —") {
+		t.Fatalf("output missing soft-failure hint: %q", outStr)
+	}
+	if strings.Contains(outStr, "getUpdates retry") {
+		t.Fatalf("retry noise must not appear on timeout: %q", outStr)
+	}
+	// The post-timeout hint must not promise /start handling — the
+	// runtime adapter silently drops bare /start (isBareStartCommand
+	// in internal/channel/telegram/adapter.go), so a user who
+	// followed that exact instruction would never get a reply.
+	// Scope the check to the "Skipped —" block so the pre-timeout
+	// instruction line (which legitimately tells the user to send
+	// /start to trigger the greeting capture) doesn't trip it.
+	hint := outStr[strings.Index(outStr, "Skipped —"):]
+	if strings.Contains(hint, "send /start") {
+		t.Fatalf("hint must not promise /start handling: %q", hint)
+	}
+	if !strings.Contains(hint, "any message") {
+		t.Fatalf("hint must point at non-/start message path: %q", hint)
 	}
 }
 
@@ -402,7 +429,7 @@ func TestProvider_Greet_IgnoresBotMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Greet: %v", err)
 	}
-	if !strings.Contains(out.String(), "You can still send /start later") {
+	if !strings.Contains(out.String(), "Skipped —") {
 		t.Fatalf("bot-from message must be skipped, output: %q", out.String())
 	}
 }
@@ -464,6 +491,9 @@ func TestProvider_Login_ViaTokenOption(t *testing.T) {
 				"is_bot":     true,
 				"username":   "erpl_test_bot",
 				"first_name": "ERPL Test",
+				// Privacy Mode disabled; Login's soft-recommendation
+				// branch only fires when this field is absent/false.
+				"can_read_all_group_messages": true,
 			},
 		})
 	}))
@@ -495,5 +525,96 @@ func TestProvider_Login_ViaTokenOption(t *testing.T) {
 	// printInstructions must NOT have been called — non-interactive.
 	if strings.Contains(out.String(), "BotFather walkthrough") {
 		t.Fatalf("non-interactive Login should skip instructions")
+	}
+}
+
+// TestProvider_Login_PrivacyModeSoftRecommendation verifies that
+// when can_read_all_group_messages is false (Privacy Mode = ENABLED,
+// the BotFather default), Login still succeeds but prints a soft
+// recommendation explaining when to disable Privacy Mode. Privacy
+// Mode is NOT a hard block — nightme works in /command + @mention
+// mode regardless; the recommendation only matters for users who
+// want multi-project parallel dev in shared groups.
+func TestProvider_Login_PrivacyModeSoftRecommendation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"id":                          8688547819,
+				"is_bot":                      true,
+				"username":                    "nightme_dev_bot",
+				"first_name":                  "nightme",
+				"can_read_all_group_messages": false,
+			},
+		})
+	}))
+	defer server.Close()
+
+	out := &bytes.Buffer{}
+	p := &Provider{
+		opts:        Options{Token: "9999:test"},
+		out:         out,
+		in:          strings.NewReader(""),
+		http:        server.Client(),
+		endpointURL: func(token string) string { return server.URL + "/bot" + token + "/getMe" },
+	}
+
+	creds, err := p.Login(context.Background())
+	if err != nil {
+		t.Fatalf("Login must not fail under Privacy Mode = ENABLED: %v", err)
+	}
+	if creds.BotToken != "9999:test" {
+		t.Fatalf("BotToken = %q, want 9999:test", creds.BotToken)
+	}
+	output := out.String()
+	if !strings.Contains(output, "✓ Bot verified!") {
+		t.Fatalf("missing success banner:\n%s", output)
+	}
+	if !strings.Contains(output, "Privacy Mode is still on") {
+		t.Fatalf("missing soft recommendation:\n%s", output)
+	}
+	if !strings.Contains(output, "/setprivacy") {
+		t.Fatalf("missing /setprivacy hint:\n%s", output)
+	}
+	if !strings.Contains(output, "several projects in parallel") {
+		t.Fatalf("missing multi-project context:\n%s", output)
+	}
+}
+
+// TestProvider_Login_PrivacyModeDisabled verifies that when
+// can_read_all_group_messages is true, Login succeeds and does NOT
+// print the recommendation (no noise when the user already has
+// Privacy Mode disabled).
+func TestProvider_Login_PrivacyModeDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"id":                          8688547819,
+				"is_bot":                      true,
+				"username":                    "nightme_dev_bot",
+				"first_name":                  "nightme",
+				"can_read_all_group_messages": true,
+			},
+		})
+	}))
+	defer server.Close()
+
+	out := &bytes.Buffer{}
+	p := &Provider{
+		opts:        Options{Token: "9999:test"},
+		out:         out,
+		in:          strings.NewReader(""),
+		http:        server.Client(),
+		endpointURL: func(token string) string { return server.URL + "/bot" + token + "/getMe" },
+	}
+
+	if _, err := p.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if strings.Contains(out.String(), "Privacy Mode is ENABLED") {
+		t.Fatalf("recommendation must not print when privacy is already disabled:\n%s", out.String())
 	}
 }

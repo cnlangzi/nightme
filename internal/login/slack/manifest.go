@@ -44,7 +44,7 @@ func ManifestURL() string {
 // and assistant.threads.setStatus depend on.
 const AppManifest = `display_information:
   name: NightMe
-  description: Your pair programmer. Set it running, stay in the loop.
+  description: Run your local coding agents. Control them from your phone, on your terms.
   background_color: "#1a1a2e"
 features:
   bot_user:

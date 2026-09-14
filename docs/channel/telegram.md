@@ -1965,6 +1965,8 @@ func summarizeToolResult(name, output string, err error) string {
 
 ### 11.12.18 变更日志
 
+- **2026-09-14** - **L2 walker 扩面：ordered list / table / inline footnote / inline image / raw HTML 全部纳入 walker**。扩面前，`markdownToRichBlocks` 对 ordered list（`1. foo`）/ table（`| A | B |\n|---|---|\n| 1 | 2 |`）/inline footnote ref（`[^id]`）/ inline image ref（`![alt](url)`）/ raw HTML（`<tag>...</tag>`）全部返回 `ok=false`，caller fallback 到一个 paragraph block、字面 markdown 字符全部裸出。扩面后这些都走结构化 blocks：ordered list / table 用对应 block type；footnote 静默 strip、image-as-url 降级为 clickable link、raw HTML 作为字面文本保留（仍走 paragraph）。**fallback 形态不变** —— 仍是一个 paragraph block（rich_message[blocks]），**没有 plain text / `sendMessage(text=..., parse_mode=HTML)` 路径**（L3 退役阶段已删，§20.5 #3）。唯一仍触发 `ok=false` 的形状：unterminated fence / table 缺 separator 行 / 列数 mismatch / 超字符上限 —— 都是 block-level 结构错误，不是 markdown 语法不支持。改动文件：`internal/channel/telegram/rich_walker.go` （新增 4 个 regex / `walkTable` / `splitTableCells` / `parseTableAlign` / `buildTableRow`；`walkList` 同时接受 bullet 和 ordered；`walkParagraph` 移除 footnote / image / raw HTML bail；删除 `looksLikeRawHTML`） + `internal/channel/telegram/rich_walker_test.go` （替换 5 个 `TestWalker_Fallback_*` 为正向 `TestWalker_OrderedList` / `TestWalker_Table` / `TestWalker_Table_Alignment` / `TestWalker_Table_ColumnMismatch` / `TestWalker_Table_NoSeparator` / `TestWalker_InlineFootnoteStripped` / `TestWalker_InlineImageAsURL` / `TestWalker_InlineImageEmptyAlt` / `TestWalker_RawHTMLKept`；保留 `TestWalker_Fallback_UnterminatedFence`；`TestWalker_MixedBlocks` 加 ordered list 和 table 维度）。**doc 同步**：§20.5 #4 / §20.6.2 walker spec / §20.7.2 L2 验证矩阵。**commit 拆解（建议）**：`walker: extend inlinePatternOrder with footnote / image` → `walker: walkList accept ordered markers` → `walker: walkTable + helpers` → `walker: walkParagraph drop raw HTML bail` → `walker: drop looksLikeRawHTML` → `main loop: collapse bullet+ordered, route tables through walkTable` → `tests: replace 5 TestWalker_Fallback_* with positive coverage` → `docs: §20.5 #4 / §20.6.2 / §20.7.2 sync`。
+
 - **2026-08-22** - 引入 v9 per-turn multi-chunk chain rolling log，替换 v4 / v8 的"单占位 + 独立 bubble"双轨制。新增文件：`internal/channel/telegram/placeholder_chain.go`（含 chainLRU）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移）。改动：`Adapter.Send` 8 个 Out* case 重写为 `appendSegment` 路径 / `OutHeartbeat` 改 `patchActiveHeader` / `OnPromptEnded` 改 flushChain + 🎉 + cursor reset / `formatTool` 改为调 summarize helpers / `ensurePlaceholder` delegate 到 chain。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。
 
 - **2026-08-22 (晚)** - 多次 P0/P1/P2 修复（P0 #1 cold-create 种子 entries，P0 #2 overflow tail 保留 content，P0 #3 case-3 内联 fast-forward 避免 mutex 重入，P1 byteOffset 死代码删除，P2 cold-start body 含 separator）。Commit `08f8f7e` 包含 codex review fixes。
@@ -3834,7 +3836,7 @@ Cliff 落在 **[400, 600] blocks** 之间（与 `blocks` 显式 array 的 500 ca
 1. pre-10.1 客户端(Desktop / iOS / Android)对 `rich_message` 的回退行为 —— **没有运行时回退**。sendRichMessage 失败会 surface error 给 runtime,旧客户端可能显示空白或报错,需要现场确认是否接受。详见 §20.8 风险评估 row 1
 2. `markdown` / `html` 自动拆 block 的 client 端 preflight 计数公式 —— 已实现(`estimateRichBlocks`,§20.6.1),阈值 400 / 500,实测匹配 server 行为
 3. v9 chain 与新路径的交互:已一并退役(commit `17b5372`),plain text fallback 也退役(commit `0d365d9`)。`maxTelegramTextLength = 3900`、`splitTelegramText`、`RenderForWire`、`maybeWrapFullExpandable` 全部删除,`richMode` 永远开启。新的唯一回退策略是 **sendRichMessage 失败 → error 返回 runtime**(不再 silent truncate 到 4K)
-4. L1 / L2 / L3 决策树:**全部完成,RichMode 常驻**。后续重点是 (a) Bot-side rate limit 实测,sendRichMessage 的 32K body 跟 4K body 走不同 rate bucket (b) 给 nightly / dogfooding 收集 L2 walker 在真实 LLM 输出上的 fallback rate,看 L2 walker 的 ok=false 比例,决定是否需要扩 walker 覆盖(ordered list / tables)
+4. L1 / L2 / L3 决策树:**全部完成,RichMode 常驻**。后续重点是 (a) Bot-side rate limit 实测,sendRichMessage 的 32K body 跟 4K body 走不同 rate bucket (b) L2 walker 覆盖扩面 — ordered list / table / inline footnote / inline image / raw HTML 已全部纳入 walker(2026-09-14 commit);唯一仍触发 ok=false 的形状只剩 block-level 结构错误(unterminated fence / table 缺 separator 行 / 列数 mismatch / 超字符上限)。fallback 始终是 rich_message[blocks] 里的一条 paragraph block,**没有** plain text 路径(plain `sendMessage` / `parse_mode=HTML` 已在 L3 全部退役,见 §20.5 #3)
 
 ### 20.6 实现细节
 
@@ -3943,51 +3945,63 @@ func estimateRichBlocks(rawMD string) (int, error) {
 
 #### 20.6.2 L2 —— 显式 `rich_message[blocks]` AST walker
 
-**新文件**：`internal/channel/telegram/rich.go`
+**新文件**：`internal/channel/telegram/rich.go`（L1 helper）+ `rich_walker.go`（L2 walker）+ `rich_turn.go`（L3 chain-attached entry 渲染）
 
 **核心 API**：
 
 ```go
-// markdownToRichBlocks parses raw markdown and emits an InputRichBlock array
-// suitable for sendRichMessage / editMessageText(rich_message=). Supports 9
-// common block types (§20.2) plus inline RichText entities (§20.4); for
-// content the walker can't represent (footnote ref / strikethrough / raw HTML /
-// image), returns ok=false and the caller falls back to §20.6.1 L1 path.
-func markdownToRichBlocks(rawMD string) (blocks []InputRichBlock, ok bool)
+// markdownToRichBlocks parses raw markdown and emits a JSON-encoded
+// rich_message[blocks] array. Returns ok=false ONLY when a block-level
+// shape is unrecognisable (unterminated fence, table without separator
+// row, column-count mismatch, char cap exceeded) — every inline syntax
+// the walker once deferred (footnote refs / image refs / raw HTML) is
+// now handled inline. The single caller (`renderRichTurnBlocksLocked`)
+// turns ok=false into one paragraph block with the raw body — still a
+// rich_message[blocks] payload, never plain text.
+func markdownToRichBlocks(rawMD string) (blocksJSON string, ok bool)
 ```
 
-**AST 映射表**（基于 goldmark 节点）：
+**当前实现：line-based regex walker**（`rich_walker.go`）。和上面 goldmark AST 形状对齐，但用纯正则 / 行扫描实现 —— 与 `render.go` 的 markdown→HTML 渲染器共享同一套语义假设，省 goldmark 升 direct dep 的 surface area。L2 边界明确：
 
-| goldmark AST | → InputRichBlock |
-|---|---|
-| `ast.Heading{Level:1-6}` | `{"type":"heading","text":<inline>,"size":1-6}` |
-| `ast.Paragraph` | `{"type":"paragraph","text":<inline>}` |
-| `ast.FencedCodeBlock` / `ast.CodeBlock` | `{"type":"pre","text":string,"language":<lang>}` |
-| `ast.List{Ordered:bool}` | `{"type":"list","items":[<item>]}` |
-| `ast.ListItem` → `InputRichBlockListItem` | `{"blocks":[<children>]}` |
-| `ast.Blockquote` | `{"type":"blockquote","blocks":[<children>]}` |
-| `ast.ThematicBreak` | `{"type":"divider"}`（仅当有 sibling；standalone 由 server 拒） |
-| `ast.Table` | `{"type":"table","cells":[[<cell>],...]}` |
-| 其它 | fallback 到 L1 `rich_message[markdown]` 路径 |
+| Markdown 构造 | walker 处理 | block 形态 |
+|---|---|---|
+| `# / ## / ###` heading | `walkHeading` | `{"type":"heading","text":<inline>,"size":<N}`} |
+| `\`\`\`lang` fence / `\`\`\`` no-lang | `walkFence` | `{"type":"pre","text":<joined>,"language":<lang>?}`} |
+| `-` / `*` / `+` bullet list | `walkList` | `{"type":"list","items":[{blocks:[paragraph]}]}` |
+| `1.` / `2.` ordered list | `walkList`（同一函数；bot API 10.1 `list` 无 ordered enum，client 从 item `1.` prefix 推断） | 同 bullet |
+| `>` blockquote | `walkBlockquote` | `{"type":"blockquote","blocks":[paragraph]}` |
+| `---` / `***` / `___` thematic break | inline in main loop | `{"type":"divider"}` |
+| `\| H1 \| H2 \|\n\|---\|---\|\n\| ... \|` table | `walkTable`（GFM 形；需 separator 行 + ≥1 data row） | `{"type":"table","cells":[[{text,is_header?,align?}],...]}` |
+| 段落（兜底） | `walkParagraph` | `{"type":"paragraph","text":<inline>}` |
+| 空字符串 / 仅 whitespace / >32K chars | — | `ok=false`（caller fallback paragraph） |
+| 未闭合 fence / table 缺 separator / 列数 mismatch | — | `ok=false`（caller fallback paragraph） |
 
-**Inline 节点 → RichText 实体映射**：
+**Inline 节点 → RichText 实体映射**（`inlineToRichText`）：
 
-| goldmark AST | → RichText |
-|---|---|
-| `ast.Text{Segment:...}` | string in array |
-| `ast.Emphasis` | `{"type":"italic","text":...}` |
-| `ast.Strong` | `{"type":"bold","text":...}` |
-| `ast.CodeSpan` | `{"type":"code","text":...}` |
-| `ast.Link{Destination:...}` | `{"type":"url","text":...,"url":...}` |
-| 其它（image, raw HTML） | 降级为字符串 |
+| Markdown inline | 处理 | 备注 |
+|---|---|---|
+| `` `code` `` | `{"type":"code","text":...}` | priority 在 `*`/`_` 之前 |
+| `**bold**` / `__bold__` | `{"type":"bold","text":...}` | |
+| `*italic*` / `_italic_` | `{"type":"italic","text":...}` | |
+| `[text](https?://\|tg://url)` | `{"type":"url","text":...,"url":...}` | scheme 白名单（`render.go` 同样） |
+| `![alt](https?://...)` | 降级到 `{"type":"url","text":alt,"url":...}` | rich blocks 无 inline image entity；alt 空时用 URL 作 label |
+| `[^id]` GFM footnote ref | **stripped**（slot 记录但 unwrap 不 emit） | 让长 footnote body 在 chat 里读起来干净 |
+| `<tag>...</tag>` raw HTML | **保留为 literal 文本** | 不再触发 `ok=false` |
+| 其它奇形 (`~~strike~~`, reference link, autolink `<x>`) | walker 不识别 → 退化成 paragraph 块里的 literal 文本 | |
 
-**Inline 数组化规则**：如果 paragraph / heading 的 inline 序列中**只有 plain text**，`text` 字段保持 string（避免无意义数组）；出现任何 entity 时切到 array（§20.4 实测支持）。
+**Inline 数组化规则**：paragraph / heading 的 inline 序列中**只有 plain text** 时，`text` 字段保持 string（避免无意义数组）；出现任何 entity（code/bold/italic/url/image）时切到 array（§20.4 实测支持）。footnote slot 也会触发 array 化（替换点分裂 piece），但 unwrap 阶段 footnote 不 emit，最终 wire form 仍是相邻 plain text 拼接。
 
-**改动范围**：
+**已知限制**（不触发 `ok=false`，但渲染会有 quirk）：
 
-- 新文件 `rich.go`：walker + 单元测试（goldmark AST → JSON 双向 round-trip 至少 30 case）
-- `adapter.go:815` `Send` OutReply 分支：在 L1 helper 后面追加 L2 调用（先试 L2，walker 失败回 L1 markdown，再不行回 plain HTML）
-- Feishu adapter 不动（继续用 HTML）
+- `~~strike~~` strikethrough：rich blocks 无对应 entity，渲染为字面字符 `~~strike~~`
+- Reference link `[text][id]`（分离式）：目前当普通文本处理，括号保留
+- Autolink `<https://x>`：同上，当普通文本
+
+**改动范围（演进历史）**：
+
+- 2026-09-14 walker 扩面：ordered list / table / footnote strip / image-as-url / raw HTML-keep 全部纳入 walker，唯一仍触发 `ok=false` 的只剩 block-level 形状错误。**所有 fallback 都是 rich_message[blocks] 里的一条 paragraph block**，**没有任何 plain text / `sendMessage(text=..., parse_mode=HTML)` 路径**（§20.5 #3）
+- 未来切换到 goldmark AST walker 时：函数签名 / 返回形态 / fallback 契约都不变，只是把 line-based regex 实现替换为 AST walk
+- Feishu adapter 不动（继续用 `parse_mode=HTML`）
 
 #### 20.6.3 L3 —— 退役 v9 chain
 
@@ -4033,11 +4047,21 @@ L3 仅在 L2 生产数据证明"典型 turn < 32K chars"且"active chunk 编辑�
 | L2-3 | ` ```go\nx()\n``` ` | `[{pre,text:"x()",language:"go"}]` | §20.2 |
 | L2-4 | `- a\n- b` | `[{list,items:[{blocks:[{paragraph,text:"a"}]},{blocks:[{paragraph,text:"b"}]}]}]` | §20.2 |
 | L2-5 | `> quote` | `[{blockquote,blocks:[{paragraph,text:"quote"}]}]` | §20.2 |
-| L2-6 | `\| A \| B \|\n\|---\|---\|\n\| 1 \| 2 \|` | `[{table,cells:[[{text:"A"},{text:"B"}],[{text:"1"},{text:"2"}]]}]` | §20.2 |
-| L2-7 | `~~strike~~` | walker 不支持 → ok=false → fallback L1 | — |
-| L2-8 | `[^1]` footnote ref | 同上 | — |
-| L2-9 | nested list `- a\n  - b` | `[{list,items:[{blocks:[{paragraph,text:"a"},{list,items:[...]}]}]}]` | §20.2 |
-| L2-10 | 真实 Claude reply（混合 5+ 类型） | walker 输出 5+ blocks，全部在已验证 17 个 type 内 | — |
+| L2-6 | `\| A \| B \|\n\|---\|---\|\n\| 1 \| 2 \|` | `[{table,cells:[[{text:"A",is_header:true},{text:"B",is_header:true}],[{text:"1"},{text:"2"}]]}]` | §20.2 |
+| L2-7 | `1. one\n2. two` (ordered list) | `[{list,items:[{blocks:[{paragraph,text:"one"}]},{blocks:[{paragraph,text:"two"}]}]}]` | §20.6.2 |
+| L2-8 | `- bullet\n1. ordered\n* bullet` (mixed) | single `list` block，3 items | §20.6.2 |
+| L2-9 | `\| L \| C \| R \| D \|\n\|:--\|:-:\|--:\|---\|\n\| a \| b \| c \| d \|` | `cells[0]` align = `[left,center,right,""]` | §20.6.2 |
+| L2-10 | `before[^1]after` (footnote ref) | `[{paragraph,text:["before","after"]}]`（footnote slot 已 strip） | §20.6.2 |
+| L2-11 | `see ![logo](https://x.png) here` | `[{paragraph,text:["see ",{url,text:"logo",url:"https://x.png"}," here"]}]` | §20.6.2 |
+| L2-12 | `![](https://x.png)` (empty alt) | `[{paragraph,text:[{url,text:"https://x.png",url:"https://x.png"}]}]` | §20.6.2 |
+| L2-13 | `text with <raw>html</raw>` | `[{paragraph,text:"text with <raw>html</raw>"}]`（literal，不 bail） | §20.6.2 |
+| L2-14 | ` ```\nunterminated fence` | walker 报 `ok=false`（无 end marker，无法建模） → caller 兜底 paragraph block（**非** plain text） | §20.6.2 |
+| L2-15 | `\| A \| B \|\n\| 1 \| 2 \|` (无 separator) | walker 报 `ok=false` → caller 兜底 paragraph block | §20.6.2 |
+| L2-16 | `\| A \| B \|\n\|---\|---\|\n\| 1 \| 2 \| 3 \|` (列数 mismatch) | walker 报 `ok=false` → caller 兜底 paragraph block | §20.6.2 |
+| L2-17 | `~~strike~~` (strikethrough) | walker 当前不识别 → 渲染为字面 `~~strike~~`（不触发 fallback） | §20.6.2 已知限制 |
+| L2-18 | real Claude reply（heading + paragraph + bullet + code + table） | walker 输出 ≥5 blocks，全部在已验证 17 个 type 内 | — |
+
+> **2026-09-14 扩面前后变化**：L2-7/L2-8/L2-9/L2-10/L2-11/L2-12/L2-13 之前会在 `ok=false` 路径上把整段 body 塞进一个 paragraph block、字面 markdown 字符全部露出来；扩面后这些都走结构化 blocks，inline entities（code / bold / url / image-as-url）正确渲染，footnote 静默 strip，raw HTML 作为字面文本保留（仍走 paragraph block）。L2-14/L2-15/L2-16 是新一批 `ok=false` 边界 —— block-level 结构错误，不是 markdown 语法不支持；fallback 仍是一个 paragraph block（**`rich_message[blocks]`**，绝不降级 `sendMessage(text=..., parse_mode=HTML)`，见 §20.5 #3）。
 
 #### 20.7.3 L3 验收用例
 

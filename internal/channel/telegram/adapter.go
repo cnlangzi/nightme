@@ -960,7 +960,8 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// a delayed OutToolEnd. Without this the 250ms debounce
 		// would hold both lines until the timer fires.
 		return a.appendRichTurnAndFlush(ctx, rawChatID, topicID, replyAnchor,
-			richTurnEntry{kind: "tool", body: startBody})
+			richTurnEntry{kind: "tool", body: startBody},
+			statusbar.StatusBarLines(&msg))
 
 	case messages.OutToolEnd:
 		// L3: route through richTurn. The result line lands as a
@@ -984,7 +985,8 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// just ensures the result is rendered before the next
 		// OutToolStart arrives.
 		return a.appendRichTurnAndFlush(ctx, rawChatID, topicID, replyAnchor,
-			richTurnEntry{kind: "tool", body: resultBody})
+			richTurnEntry{kind: "tool", body: resultBody},
+			statusbar.StatusBarLines(&msg))
 	case messages.OutTaskCreate, messages.OutTaskUpdate:
 		// L3: route through richTurn. taskList is its own rich
 		// blocks section (heading + list) — renderRichTurnBlocksLocked
@@ -1015,7 +1017,8 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			body += "\n\n```\n" + msg.Diagnostic.StderrTail + "\n```"
 		}
 		a.appendRichTurn(ctx, rawChatID, topicID, replyAnchor,
-			richTurnEntry{kind: "error", body: body})
+			richTurnEntry{kind: "error", body: body},
+			statusbar.StatusBarLines(&msg))
 		return nil
 	case messages.OutInit:
 		// Silent drop — matches feishu F-44. The Init payload
@@ -1083,8 +1086,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// OutError / OutTask*) on the chain — they're short
 		// prefix-formatted entries that don't benefit from a real
 		// block parser.
-		if (msg.Kind == messages.OutReply || msg.Kind == messages.OutCommandReply) &&
-			true {
+		if msg.Kind == messages.OutReply || msg.Kind == messages.OutCommandReply {
 			if blocksJSON, ok := markdownToRichBlocks(msg.Text); ok {
 				mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, replyAnchor, blocksJSON)
 				if err == nil {
@@ -1092,12 +1094,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 						"chat_id", rawChatID,
 						"kind", msg.Kind.String(),
 						"blocks_len", len(blocksJSON))
-					// Record on chain.resultMessageID so OnPromptEnded's
-					// 🎉 lands on the rich message instead of the
-					// active chain chunk (matches v9 P2 semantics for
-					// OutResult standalone replies, §11.12.4.1).
+					// The walker message IS this turn's rich
+					// message — pin turn.messageID so subsequent
+					// Out* events PATCH the same message via
+					// editMessageText(rich_message=...) instead of
+					// cold-creating a second message. resultMessageID
+					// also takes this id so OnPromptEnded's 🎉 lands
+					// here (matches v9 P2 semantics for OutResult
+					// standalone replies, §11.12.4.1).
 					turn := a.richTurns.getOrCreate(rawChatID, topicID, replyAnchor)
 					turn.mu.Lock()
+					turn.messageID = mid
 					turn.resultMessageID = mid
 					turn.mu.Unlock()
 					return nil
@@ -1138,28 +1145,27 @@ func (a *Adapter) appendSegmentForKind(
 	// L3: route through richTurn. The chain-attached kind is
 	// derived from msg.Kind so callers (OutReply, OutThinking,
 	// etc.) don't need to repeat the switch.
-	if true {
-		kind := ""
-		switch msg.Kind {
-		case messages.OutReply, messages.OutCommandReply:
-			kind = "reply"
-		case messages.OutThinking:
-			kind = "thinking"
-		case messages.OutToolStart, messages.OutToolEnd:
-			kind = "tool"
-		case messages.OutError:
-			kind = "error"
-		case messages.OutTaskCreate, messages.OutTaskUpdate:
-			kind = "task"
-		}
-		if kind != "" {
-			// Strip the trailing "\n" we used to add for the chain
-			// renderer's separator; the rich walker handles its own
-			// inter-block spacing.
-			body := strings.TrimRight(segment, "\n")
-			return a.appendRichTurn(ctx, rawChatID, topicID, userMessageID,
-				richTurnEntry{kind: kind, body: body})
-		}
+	kind := ""
+	switch msg.Kind {
+	case messages.OutReply, messages.OutCommandReply:
+		kind = "reply"
+	case messages.OutThinking:
+		kind = "thinking"
+	case messages.OutToolStart, messages.OutToolEnd:
+		kind = "tool"
+	case messages.OutError:
+		kind = "error"
+	case messages.OutTaskCreate, messages.OutTaskUpdate:
+		kind = "task"
+	}
+	if kind != "" {
+		// Strip the trailing "\n" we used to add for the chain
+		// renderer's separator; the rich walker handles its own
+		// inter-block spacing.
+		body := strings.TrimRight(segment, "\n")
+		return a.appendRichTurn(ctx, rawChatID, topicID, userMessageID,
+			richTurnEntry{kind: kind, body: body},
+			statusbar.StatusBarLines(&msg))
 	}
 
 	// RichMode=off path: silent drop. v9 chain is gone in L3;
@@ -1341,16 +1347,11 @@ func (a *Adapter) patchChainHeader(
 		header = heartbeatText(nil)
 	}
 
-	// L3 path: richTurn when enabled.
-	if true {
-		a.updateRichTurnHeader(chatID, topicID, userMessageID, header)
-		a.logger.Info("telegram: L3 heartbeat header set",
-			"chat_id", chatID, "header", header)
-		return nil
-	}
-
-	// Rich mode is always on. We just returned above; the
-	// dead code below this comment is unreachable after L3.
+	// L3: route the heartbeat into the richTurn. Rich mode is
+	// always on; the chain is gone.
+	a.updateRichTurnHeader(chatID, topicID, userMessageID, header)
+	a.logger.Info("telegram: heartbeat header set",
+		"chat_id", chatID, "header", header)
 	return nil
 }
 

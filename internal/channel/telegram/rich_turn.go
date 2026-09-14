@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -110,6 +111,11 @@ type taskListItem struct {
 // rich message cold-create fails; otherwise returns nil after the
 // entry is queued for the next debounced flush.
 //
+// footer, when non-nil, replaces the turn's footer — same
+// "last-status-wins" semantics v9's chain.lastFooter applied.
+// Pass nil to leave any previously-set footer in place (used when
+// the caller has no status-bearing fields of its own).
+//
 // Callers (Send's chain-attached kind cases) propagate the error
 // to runtime — the L3 migration's contract is "rich path failure
 // surfaces, no silent truncation". A nil error means the entry
@@ -121,6 +127,7 @@ func (a *Adapter) appendRichTurn(
 	topicID int,
 	userMessageID int,
 	entry richTurnEntry,
+	footer []string,
 ) error {
 	turn := a.richTurns.getOrCreate(chatID, topicID, userMessageID)
 
@@ -140,6 +147,9 @@ func (a *Adapter) appendRichTurn(
 	}
 
 	turn.entries = append(turn.entries, entry)
+	if footer != nil {
+		turn.footer = footer
+	}
 	turn.dirty = true
 	a.scheduleRichTurnFlush(turn)
 	return nil
@@ -149,14 +159,20 @@ func (a *Adapter) appendRichTurn(
 // synchronously. Used by OutToolStart / OutToolEnd so the user sees
 // `● Tool(args)` and `⎿ result` as adjacent blocks within the
 // 250ms debounce window without waiting for the timer.
+//
+// Propagates cold-create errors so the caller can surface a "send
+// failed" signal rather than silently dropping the tool line.
 func (a *Adapter) appendRichTurnAndFlush(
 	ctx context.Context,
 	chatID string,
 	topicID int,
 	userMessageID int,
 	entry richTurnEntry,
+	footer []string,
 ) error {
-	a.appendRichTurn(ctx, chatID, topicID, userMessageID, entry)
+	if err := a.appendRichTurn(ctx, chatID, topicID, userMessageID, entry, footer); err != nil {
+		return err
+	}
 	turn, ok := a.richTurns.lookup(chatID, topicID, userMessageID)
 	if !ok || turn == nil {
 		return nil
@@ -221,10 +237,20 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 
 	// Header: optional, single heading-style block. Use heading size 1
 	// for max visibility (matches the cold "🤖 Working..." banner).
+	//
+	// Strip the HTML bold wrapper that heartbeatText emits: rich
+	// blocks' text fields don't parse HTML, so the literal `<b>` /
+	// `</b>` tags would leak into the rendered heading. The clean
+	// fix lives at the wire boundary (where Telegram stops parsing
+	// HTML) — the rest of the pipeline keeps using `<b>...</b>` for
+	// the chain's legacy HTML path.
 	if turn.headerLine != "" {
+		headerText := strings.TrimSpace(turn.headerLine)
+		headerText = strings.TrimPrefix(headerText, "<b>")
+		headerText = strings.TrimSuffix(headerText, "</b>")
 		blocks = append(blocks, map[string]any{
 			"type": "heading",
-			"text": turn.headerLine,
+			"text": headerText,
 			"size": 1,
 		})
 	}
@@ -444,6 +470,12 @@ func (a *Adapter) trySendRichBlocksEdit(
 // every element is a JSON object (map[string]any). Used to convert
 // the walker's JSON output into the []map[string]any slice the
 // renderRichTurnBlocksLocked builder expects.
+//
+// Returns nil on parse failure; callers fall through to the
+// plain-paragraph fallback. The walker output is produced by
+// json.Marshal over a controlled shape, so a failure here means
+// the walker contract drifted — flag it on the logger so the
+// regression surfaces.
 func mustParseBlocksArray(jsonStr string) []map[string]any {
 	var arr []map[string]any
 	if err := json.Unmarshal([]byte(jsonStr), &arr); err != nil {
@@ -465,31 +497,7 @@ func encodeBlocksArray(blocks []map[string]any) (string, error) {
 // strconvFormatInt is a tiny helper that wraps strconv.FormatInt with
 // base 10. Pulled out so the apiCall call site stays compact.
 func strconvFormatInt(n int64) string {
-	return jsonNumberString(n)
-}
-
-// jsonNumberString formats an int64 as JSON-compatible number bytes.
-// Defined separately to avoid importing strconv just for one callsite.
-func jsonNumberString(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	negative := n < 0
-	if negative {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if negative {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return strconv.FormatInt(n, 10)
 }
 
 // richTurns is the Adapter-scoped index of per-turn richTurn state.

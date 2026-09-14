@@ -124,8 +124,8 @@ func TestJsonNumberString(t *testing.T) {
 		100000000: "100000000",
 	}
 	for in, want := range cases {
-		if got := jsonNumberString(in); got != want {
-			t.Errorf("jsonNumberString(%d) = %q, want %q", in, got, want)
+		if got := strconvFormatInt(in); got != want {
+			t.Errorf("strconvFormatInt(%d) = %q, want %q", in, got, want)
 		}
 	}
 }

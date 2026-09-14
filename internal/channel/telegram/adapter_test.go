@@ -330,6 +330,45 @@ func TestAdapter_BuildBlocks_EmptyAttachments(t *testing.T) {
 	}
 }
 
+// TestAdapter_BuildBlocks_CaseInsensitiveMIME pins the case-
+// insensitive classification that the BuildBlocks pre-population
+// path applies (handleMessage line ~377). Without case folding,
+// a Document with MimeType "Image/PNG" would land in the agent
+// as ContentFile + media_type:"Image/PNG" — Anthropic API
+// rejects the mismatched media_type, surfacing as a bridge
+// error. This test is the regression guard for the half-fix that
+// only updated telegramAttachmentType but not BuildBlocks.
+func TestAdapter_BuildBlocks_CaseInsensitiveMIME(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	cases := []struct {
+		mime string
+		want agent.ContentBlockType
+		desc string
+	}{
+		{"image/png", agent.ContentImage, "lowercase"},
+		{"Image/PNG", agent.ContentImage, "titlecase"},
+		{"IMAGE/PNG", agent.ContentImage, "uppercase"},
+		{"image/JPEG", agent.ContentImage, "mixed case jpeg"},
+		{"Application/PDF", agent.ContentFile, "uppercase pdf"},
+		{"application/json", agent.ContentFile, "non-image"},
+	}
+	for _, c := range cases {
+		blocks := a.BuildBlocks("", []messages.Attachment{
+			{LocalPath: "/tmp/x", MimeType: c.mime},
+		})
+		if len(blocks) != 1 {
+			t.Errorf("%s (%q): blocks = %d, want 1", c.desc, c.mime, len(blocks))
+			continue
+		}
+		if blocks[0].Type != c.want {
+			t.Errorf("%s (%q): block type = %s, want %s", c.desc, c.mime, blocks[0].Type, c.want)
+		}
+		if blocks[0].MediaType != c.mime {
+			t.Errorf("%s (%q): MediaType = %q, want preserved", c.desc, c.mime, blocks[0].MediaType)
+		}
+	}
+}
+
 func TestAdapter_Incoming(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	ch := a.Incoming()

@@ -367,9 +367,19 @@ func TestAdapter_HandleMessage_Photo_RetryRecovers(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	api.FileBytes = []byte("\xff\xd8\xff\xe0fake-jpeg-bytes")
-	// First attempt's api.download fails; second attempt succeeds.
-	// getFile returns nil for both, so we only need 1 failure.
-	api.Errors = []error{nil, errFakeDownloadFailed}
+	// Shrink backoffs (production is 0s/5s/15s) so the test
+	// completes in <1s.
+	origBackoffs := downloadRetryConfig.Backoffs
+	downloadRetryConfig.Backoffs = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { downloadRetryConfig.Backoffs = origBackoffs })
+	// Use a custom API wrapper so only the api.download path
+	// fails on the first attempt and recovers on retry. The
+	// Errors queue can't do this — pollLoop's concurrent
+	// getUpdates would race the test for that queue and silently
+	// steal the failure, turning the "retry recovered" assertion
+	// meaningless.
+	wrapped := &flakyDownloadAPI{inner: api, failFirst: true}
+	a.api = wrapped
 
 	a.handleUpdate(context.Background(), Update{
 		UpdateID: 1,
@@ -396,6 +406,34 @@ func TestAdapter_HandleMessage_Photo_RetryRecovers(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for inbound message")
 	}
+
+	if wrapped.calls < 2 {
+		t.Fatalf("download was called %d times, want >= 2 (retry path exercised)", wrapped.calls)
+	}
+}
+
+// flakyDownloadAPI wraps apiClient and fails the first download
+// call. All other calls pass through. Used by RetryRecovers to
+// exercise the F-61 outer ladder without poisoning other API
+// methods via the Errors queue (pollLoop races would otherwise
+// swallow the failure).
+type flakyDownloadAPI struct {
+	inner     *fakeAPI
+	failFirst bool
+	calls     int
+}
+
+func (f *flakyDownloadAPI) call(ctx context.Context, method string, params map[string]any, result any) error {
+	return f.inner.call(ctx, method, params, result)
+}
+
+func (f *flakyDownloadAPI) download(ctx context.Context, filePath string) ([]byte, error) {
+	f.calls++
+	if f.failFirst {
+		f.failFirst = false
+		return nil, errFakeDownloadFailed
+	}
+	return f.inner.download(ctx, filePath)
 }
 
 // TestAdapter_HandleMessage_Document_PDF verifies that documents with
@@ -470,6 +508,12 @@ func (e *fakeDownloadErr) Error() string { return e.msg }
 // TestTelegramAttachmentType covers the MIME-based classifier used by
 // the Document attach site. Photos / Voice / Audio / Video pass their
 // own Type directly; only Document routes through this helper.
+//
+// Includes case-insensitive variants — the helper lower-cases the
+// input so RFC-allowed upper-case MIME strings still map to the
+// right Type. Without case folding, "Image/PNG" → "file" → agent
+// receives a non-multimodal ContentFile block + Anthropic API
+// rejects the wire format.
 func TestTelegramAttachmentType(t *testing.T) {
 	cases := []struct {
 		mime string
@@ -478,9 +522,14 @@ func TestTelegramAttachmentType(t *testing.T) {
 		{"image/png", "image"},
 		{"image/jpeg", "image"},
 		{"image/webp", "image"},
+		{"Image/PNG", "image"},  // mixed case
+		{"IMAGE/JPEG", "image"}, // uppercase
 		{"audio/mpeg", "audio"},
+		{"Audio/Ogg", "audio"}, // mixed case
 		{"video/mp4", "media"},
+		{"VIDEO/MP4", "media"},
 		{"application/pdf", "file"},
+		{"Application/PDF", "file"},
 		{"application/zip", "file"},
 		{"text/plain", "file"},
 	}

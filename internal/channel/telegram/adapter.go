@@ -364,7 +364,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 			a.logger.Warn("telegram: all attachment retries exhausted",
 				"chat_id", chatID,
 				"message_id", message.MessageID,
-				"failed_count", len(downloadRes.FailureKeys),
+				"failed_count", downloadRes.FailureCount,
 				"attempts", downloadRetryConfig.MaxAttempts,
 			)
 		}
@@ -373,13 +373,13 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 			return
 		}
 		attachments = nil
-	} else if len(downloadRes.FailureKeys) > 0 {
+	} else if downloadRes.FailureCount > 0 {
 		if a.logger != nil {
 			a.logger.Info("telegram: partial attachment download failure; sending the rest",
 				"chat_id", chatID,
 				"message_id", message.MessageID,
-				"failed_count", len(downloadRes.FailureKeys),
-				"succeeded_count", len(downloadRes.Atts)-len(downloadRes.FailureKeys),
+				"failed_count", downloadRes.FailureCount,
+				"succeeded_count", len(downloadRes.Atts)-downloadRes.FailureCount,
 				"attempts", downloadRetryConfig.MaxAttempts,
 			)
 		}
@@ -612,11 +612,6 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 // shipped yet) was racy by design and got superseded by
 // simply not being needed.
 
-func (a *Adapter) attachments(ctx context.Context, message *Message, chatID string) ([]messages.Attachment, error) {
-	res := a.downloadAttachments(ctx, message, chatID)
-	return res.Atts, nil
-}
-
 // downloadAttachments collects the inbound message's media sources
 // and downloads them with an outer retry ladder. Returns a
 // downloadResult so the caller can distinguish "nothing to download"
@@ -711,7 +706,7 @@ func (a *Adapter) collectAttachmentSources(message *Message) []attachmentSource 
 // losing Type / Name / MimeType hints.
 func (a *Adapter) downloadSourcesOnce(ctx context.Context, sources []attachmentSource, chatID string, messageID int) downloadResult {
 	atts := make([]messages.Attachment, 0, len(sources))
-	failedIDs := make([]string, 0)
+	failedCount := 0
 	for _, source := range sources {
 		att, err := a.downloadAttachment(ctx, source, chatID, messageID)
 		if err != nil {
@@ -721,36 +716,16 @@ func (a *Adapter) downloadSourcesOnce(ctx context.Context, sources []attachmentS
 				MimeType: source.MimeType,
 				Error:    err,
 			})
-			failedIDs = append(failedIDs, source.FileID)
+			failedCount++
 			continue
 		}
 		atts = append(atts, att)
 	}
 	return downloadResult{
-		Atts:        atts,
-		AllFailed:   len(failedIDs) == len(sources) && len(sources) > 0,
-		FailureKeys: failedKeysWithMeta(sources, failedIDs),
+		Atts:         atts,
+		AllFailed:    failedCount == len(sources) && len(sources) > 0,
+		FailureCount: failedCount,
 	}
-}
-
-// failedKeysWithMeta joins the failed FileIDs with their original
-// Type for the failure notification. e.g. "image:AgAD...", so the
-// user-visible warning can say "1 image failed to download" rather
-// than a bare FileID.
-func failedKeysWithMeta(sources []attachmentSource, failedIDs []string) []string {
-	typeByFileID := make(map[string]string, len(sources))
-	for _, s := range sources {
-		typeByFileID[s.FileID] = s.Type
-	}
-	out := make([]string, 0, len(failedIDs))
-	for _, id := range failedIDs {
-		if t := typeByFileID[id]; t != "" {
-			out = append(out, t+":"+id)
-		} else {
-			out = append(out, id)
-		}
-	}
-	return out
 }
 
 // notifyDownloadFailure emits a user-visible note about an
@@ -763,18 +738,21 @@ func failedKeysWithMeta(sources []attachmentSource, failedIDs []string) []string
 // text-only ("⚠️ ... sending text only") while a pure-image message
 // is dropped entirely ("❌ ... please retry").
 func (a *Adapter) notifyDownloadFailure(rawChatID string, topicID int, res downloadResult, pureImage bool) {
-	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Send → appendRichTurn → flushRichTurn all run on their own
+	// background ctx; the inbound ctx is already past its use-by
+	// date by the time the retry ladder gives up. Pass
+	// context.Background() so the rich turn's debounce + cold-
+	// create don't see a half-cancelled ctx.
 	sessionChatID := a.sessionChatID(rawChatID, topicID)
 	var text string
 	if pureImage {
 		text = fmt.Sprintf("❌ %d attachment(s) failed to download after %d attempts. Message dropped — please retry.",
-			len(res.FailureKeys), downloadRetryConfig.MaxAttempts)
+			res.FailureCount, downloadRetryConfig.MaxAttempts)
 	} else {
 		text = fmt.Sprintf("⚠️ %d attachment(s) failed to download after %d attempts; sending text only.",
-			len(res.FailureKeys), downloadRetryConfig.MaxAttempts)
+			res.FailureCount, downloadRetryConfig.MaxAttempts)
 	}
-	if err := a.Send(bgCtx, messages.OutboundMessage{
+	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: sessionChatID,
 		Kind:   messages.OutError,
 		Text:   text,
@@ -828,10 +806,10 @@ type downloadResult struct {
 	// either drop a pure-image message or degrade a text-bearing
 	// one to text-only + warn the user.
 	AllFailed bool
-	// FailureKeys is the list of "<type>:<file_id>" entries that
-	// failed — used by the user-facing notification so the message
-	// can call out "1 image failed" rather than a bare FileID.
-	FailureKeys []string
+	// FailureCount is the number of sources that failed in this
+	// attempt. Used by the user-facing notification ("3 attachment(s)
+	// failed to download") — no need to carry raw FileIDs.
+	FailureCount int
 }
 
 // downloadRetryConfig controls the outer ladder wrapping
@@ -1571,7 +1549,7 @@ func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []
 			continue
 		}
 		blockType := agent.ContentFile
-		if strings.HasPrefix(attachment.MimeType, "image/") {
+		if strings.HasPrefix(strings.ToLower(attachment.MimeType), "image/") {
 			blockType = agent.ContentImage
 		}
 		blocks = append(blocks, agent.ContentBlock{Type: blockType, Path: attachment.LocalPath, MediaType: attachment.MimeType})

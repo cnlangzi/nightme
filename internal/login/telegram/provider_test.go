@@ -325,11 +325,26 @@ func TestProvider_Greet_TimeoutIsSoftError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Greet timeout should be soft (nil error), got %v", err)
 	}
-	if !strings.Contains(out.String(), "Skipped —") {
-		t.Fatalf("output missing soft-failure hint: %q", out.String())
+	outStr := out.String()
+	if !strings.Contains(outStr, "Skipped —") {
+		t.Fatalf("output missing soft-failure hint: %q", outStr)
 	}
-	if strings.Contains(out.String(), "getUpdates retry") {
-		t.Fatalf("retry noise must not appear on timeout: %q", out.String())
+	if strings.Contains(outStr, "getUpdates retry") {
+		t.Fatalf("retry noise must not appear on timeout: %q", outStr)
+	}
+	// The post-timeout hint must not promise /start handling — the
+	// runtime adapter silently drops bare /start (isBareStartCommand
+	// in internal/channel/telegram/adapter.go), so a user who
+	// followed that exact instruction would never get a reply.
+	// Scope the check to the "Skipped —" block so the pre-timeout
+	// instruction line (which legitimately tells the user to send
+	// /start to trigger the greeting capture) doesn't trip it.
+	hint := outStr[strings.Index(outStr, "Skipped —"):]
+	if strings.Contains(hint, "send /start") {
+		t.Fatalf("hint must not promise /start handling: %q", hint)
+	}
+	if !strings.Contains(hint, "any message") {
+		t.Fatalf("hint must point at non-/start message path: %q", hint)
 	}
 }
 

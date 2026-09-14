@@ -17,7 +17,7 @@
 // Greet flow (best-effort, fires AFTER CLI saves the config):
 //
 //  1. Tell user to message the bot ("send /start").
-//  2. Poll getUpdates with a 2-minute window for the first
+//  2. Poll getUpdates with a 5-minute window for the first
 //     private-chat message from any non-bot user.
 //  3. Send the canonical bilingual greeting bodies to that
 //     chat_id via sendMessage.
@@ -26,7 +26,7 @@
 //     never replays the login greeting.
 //
 // Greet's context is the parent ctx set by the CLI (10-minute
-// login timeout). The greeting wait caps itself at 2 minutes so
+// login timeout). The greeting wait caps itself at 5 minutes so
 // a user who walked away doesn't keep the CLI open longer than
 // necessary.
 //
@@ -277,14 +277,19 @@ func (p *Provider) Greet(ctx context.Context, messages login.GreetingMessages) e
 	defer cancel()
 	chatID, err := p.waitForFirstMessage(waitCtx)
 	if err != nil {
-		// Soft failure: silent on the deadline (it just means the
-		// user walked away) and a one-liner otherwise. The CLI
-		// orchestrator logs "greeting failed" if we returned a
-		// non-nil error; here we want the user to see a calm hint,
-		// not a stack trace or a stack of retry lines.
+		// Soft failure: the user might have walked away (deadline)
+		// or callAPI hit a real error (token revoked, network down).
+		// waitForFirstMessage returns a deadline-typed error in the
+		// first case and surfaces the underlying error in the
+		// second; both should end with the same calm hint and a
+		// hint pointing at the daemon, not a stack trace. Note: do
+		// NOT tell the user to "send /start" — the runtime adapter
+		// silently drops bare /start (see isBareStartCommand in
+		// internal/channel/telegram/adapter.go) so the bot would
+		// never reply. Send any non-/start message instead.
 		fmt.Fprintln(p.out)
-		fmt.Fprintln(p.out, "Skipped — send /start any time. NightMe will pick it up")
-		fmt.Fprintln(p.out, "once the daemon is running (`nightme start`; v1.3+")
+		fmt.Fprintln(p.out, "Skipped — send the bot any message once the daemon is")
+		fmt.Fprintln(p.out, "running (`nightme start`; v1.3+")
 		fmt.Fprintln(p.out, "multi-channel — telegram auto-starts if creds present).")
 		return nil
 	}
@@ -447,15 +452,28 @@ func (p *Provider) validateToken(ctx context.Context, token string) (*userInfo, 
 //
 // We use long polling (timeout=25s) so the connection is held open
 // for at most 25 seconds per call. The deadline is set to
-// greetWaitTimeout (2 minutes) from above; we honour ctx.Err() at
+// greetWaitTimeout (5 minutes) from above; we honour ctx.Err() at
 // the top of each iteration so cancellation propagates fast.
 //
 // Only private-chat messages count. Group messages are skipped
 // silently: greeting in a group would be inappropriate (the user
 // may have added the bot to a topic for other reasons) and would
 // also leak the greeting to other chat members.
+//
+// Error handling distinguishes two cases so a misconfigured user
+// isn't left staring at "Waiting for /start..." for the full wait:
+//   - Context-cancelled (parent ctx / deadline / Ctrl+C): the long
+//     poll itself can outlive the deadline and surface a
+//     context-deadline error that is NOT a real failure — the user
+//     just walked away. Silent retry.
+//   - Real API error (401 token revoked between Login and Greet,
+//     network outage, malformed response): not transient; loop
+//     until ctx dies so the outer Greet shows the soft-failure
+//     hint, but log once via the caller (p.Out) on the first hit
+//     so the user sees WHY they're waiting.
 func (p *Provider) waitForFirstMessage(ctx context.Context) (int64, error) {
 	var offset int64
+	loggedRetry := false
 	for {
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -472,15 +490,23 @@ func (p *Provider) waitForFirstMessage(ctx context.Context) (int64, error) {
 
 		updates, err := p.callAPI(ctx, "getUpdates", params)
 		if err != nil {
-			// Transient: retry silently. The long-poll itself can
-			// outlive the deadline (Telegram holds the connection
-			// up to `timeout` seconds; our waitCtx may fire first),
-			// producing a context-deadline error that is NOT a real
-			// failure — the user just walked away. Logging it would
-			// spam the terminal on every timeout exit, which is
-			// what we explicitly want to avoid.
-			if ctx.Err() == nil {
-				time.Sleep(time.Second)
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				// Long-poll outlived the deadline. The user walked
+				// away — not a real failure. Silent retry; the next
+				// loop iteration's ctx.Err() check will exit.
+				continue
+			}
+			// Genuine API error. Log once (not per-second) so the
+			// user has a clue when the soft-failure hint eventually
+			// fires; then keep retrying until the wait ctx dies.
+			if !loggedRetry {
+				fmt.Fprintf(p.out, "  (getUpdates error: %v — still waiting)\n", err)
+				loggedRetry = true
+			}
+			select {
+			case <-time.After(time.Second):
+			case <-ctx.Done():
+				return 0, ctx.Err()
 			}
 			continue
 		}

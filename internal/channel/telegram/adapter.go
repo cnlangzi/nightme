@@ -709,9 +709,9 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 		// Order matters: read state.UserMessageID BEFORE it's
 		// overwritten further down, and parse the int once so the
 		// key matches what streamDraftEvent passes to getOrCreate.
-		priorUserMsgID, parseErr := strconv.Atoi(state.UserMessageID)
-		if parseErr == nil && priorUserMsgID > 0 {
-			if chatIDInt, parseErr := strconv.ParseInt(chatID, 10, 64); parseErr == nil {
+		priorUserMsgID, userMsgErr := strconv.Atoi(state.UserMessageID)
+		if userMsgErr == nil && priorUserMsgID > 0 {
+			if chatIDInt, chatErr := strconv.ParseInt(chatID, 10, 64); chatErr == nil {
 				a.draftStreamers.endProcess(chatIDInt, topicID, priorUserMsgID)
 			}
 		}
@@ -1824,7 +1824,16 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	// Safety net for turns with NO OutResult (e.g. OutError-only,
 	// runtime crash) — otherwise OutResult's send path covers it.
 	chatIDInt, _ := strconv.ParseInt(rawChatID, 10, 64)
-	a.draftStreamers.endProcess(chatIDInt, topicID, parsedUserMsgID)
+	if parsedUserMsgID > 0 {
+		// Skip when no per-turn anchor — calling endProcess with
+		// userMsgID=0 would build the key "<chatID>|0|0" and look
+		// up a non-existent slot (no-op), but it costs a map lookup
+		// and risks colliding with a future real turn whose
+		// userMsgID happens to be 0 (Telegram message_ids start at
+		// 1, so this is paranoid but consistent with the group
+		// path's `parsedUserMsgID > 0` guard below).
+		a.draftStreamers.endProcess(chatIDInt, topicID, parsedUserMsgID)
+	}
 	if a.groupDraft != nil && parsedUserMsgID > 0 {
 		// Skip when no per-turn anchor — the streamer already no-ops
 		// internally but skipping here avoids the warn log and the

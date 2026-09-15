@@ -13,19 +13,68 @@ import (
 type TopicState struct {
 	ChatID  string `json:"chat_id"`
 	TopicID int    `json:"topic_id"`
-	// ChatType is the Telegram chat.type string ("private" / "supergroup"
-	// / "group" / "channel"). Set on first inbound message and used by
-	// the adapter's Send() switch to route OutTool/OutThink events
-	// into the DM-only sendMessageDraft path. Empty for state files
-	// written before this field existed; Send() treats empty as
-	// "non-private" and falls back to the v9 chain path — backward
-	// compatible without state migration.
-	ChatType             string    `json:"chat_type,omitempty"`
+	// ChatKind is the nightme logical chat classification. Distinct
+	// from Telegram's literal chat.type — "group" and "supergroup"
+	// (forum or not) collapse to one kind because they share the same
+	// outbound routing contract (chain path + simulated DraftMessage).
+	//
+	//   "private": DM, sendMessageDraft (#383)
+	//   "group":   basic group + any supergroup, forum or not
+	//   "channel": not supported; outbound events silent-drop
+	//
+	// Replaces the legacy ChatType field (json:"chat_type"). Old state
+	// files are migrated on load: chat_type="private" → "private",
+	// chat_type="channel" → "channel", anything else → "group".
+	ChatKind string `json:"chat_kind,omitempty"`
+	// LegacyChatType preserves the original Telegram chat.type on
+	// read for the migration path; not written by new saves.
+	LegacyChatType string `json:"chat_type,omitempty"`
+	// DraftMessageID is the message_id of the per-turn DraftMessage
+	// used by the "group" ChatKind's simulated sendMessageDraft
+	// surface (see group_draft.go). Zero for DM (private uses
+	// server-managed drafts) and zero for any turn that hasn't yet
+	// produced a think/tool event. Cleared by ensurePlaceholder at
+	// every new turn so the next OutThinking cold-creates a fresh
+	// DraftMessage.
+	DraftMessageID       int       `json:"draft_message_id,omitempty"`
 	PlaceholderMessageID int       `json:"placeholder_message_id"`
 	UserMessageID        string    `json:"user_message_id"`
 	LastMessageID        int       `json:"last_message_id"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+// ChatKind enumerates the nightme logical chat classification
+// values stored in TopicState.ChatKind. See ChatKind field docs.
+const (
+	ChatKindPrivate = "private"
+	ChatKindGroup   = "group"
+	ChatKindChannel = "channel"
+)
+
+// ClassifyChat maps a Telegram chat.type string to a ChatKind value.
+// Empty / unknown input falls back to "group" — a defensive default
+// so a buggy inbound never lands in the silent-drop "channel" branch
+// by accident.
+func ClassifyChat(telegramType string) string {
+	switch telegramType {
+	case "private":
+		return "private"
+	case "channel":
+		return "channel"
+	default:
+		return "group"
+	}
+}
+
+// migrateChatKind upgrades a TopicState loaded from a pre-ChatKind
+// state file (chat_type present, chat_kind absent) to the new field.
+// Idempotent: a no-op once ChatKind is set.
+func (s *TopicState) migrateChatKind() {
+	if s == nil || s.ChatKind != "" {
+		return
+	}
+	s.ChatKind = ClassifyChat(s.LegacyChatType)
 }
 
 type InputState struct {
@@ -104,6 +153,33 @@ func newStateStore(path string) (*stateStore, error) {
 	}
 	if persisted.Topics != nil {
 		store.topics = persisted.Topics
+	}
+	// Migrate any TopicState loaded from a pre-ChatKind state file:
+	// the legacy `chat_type` field populates the new `chat_kind`
+	// field on the fly. Mutated in place so subsequent save() writes
+	// the new format. Persist immediately when any migration happened
+	// so the legacy field clears from disk on the first reload.
+	migrated := 0
+	for _, value := range store.topics {
+		if value == nil {
+			continue
+		}
+		hadLegacy := value.ChatKind == "" && value.LegacyChatType != ""
+		value.migrateChatKind()
+		// Stamp UpdatedAt when it was zero (legacy pre-ChatKind
+		// entries). Without this, the TTL prune below treats the
+		// migrated entry as "ancient" and deletes it on first
+		// load — a silent data loss for users upgrading from
+		// pre-ChatKind state files.
+		if value.UpdatedAt.IsZero() {
+			value.UpdatedAt = time.Now().UTC()
+		}
+		if hadLegacy {
+			migrated++
+		}
+	}
+	if migrated > 0 {
+		_ = store.save()
 	}
 	if persisted.Choices != nil {
 		store.choices = persisted.Choices

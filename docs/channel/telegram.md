@@ -1683,7 +1683,13 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 | frozen chunk 处理 | 保持 frozen，不动 | 同 |
 | turn-end 清 cursor + chunks + lastFooter | ✅ | ✅ |
 | `OnPromptEnded` 🎉 on result message (fallback to active chunk) | ✅ | ✅ |
-| `OutThinking` / `OutToolStart` / `OutToolEnd` 渲染 | chain segment | **`sendMessageDraft` 累积(同 draft_id 动画过渡)** |
+| `OutThinking` / `OutToolStart` / `OutToolEnd` 渲染 | **simulated `DraftMessage`(独立 message + editMessageText)** | **`sendMessageDraft` 累积(同 draft_id 动画过渡)** |
+| `DraftMessage` / draft 删除(turn end) | `deleteMessage` | server 自动消失 |
+| DraftMessage 锚点 | `reply_to_message_id = userMessageID` | n/a(无 reply) |
+| DraftMessage topic 隔离 | `message_thread_id = thread_id` | n/a |
+| REPLACE / ACCUMULATE 语义 | ✅ 与 DM 一致 | ✅(§11.12.11.1) |
+
+`streamDraftEvent` 按 `state.ChatKind` 分派(见 §11.12.11.2):`ChatKindPrivate` 走 server 端 draft,`ChatKindGroup` 走 bot 端模拟 `DraftMessage`。`ChatType`(Telegram 字面 chat.type)在 ensurePlaceholder 时经 `ClassifyChat` 收敛到这两个分类。
 
 #### 11.12.11.1 DM 私聊下 OutThinking / OutTool* 的 sendMessageDraft 路径
 
@@ -1723,25 +1729,28 @@ if replace {
 d.textBuf.WriteString(text)
 ```
 
-**Gate**:adapter 在 `ChatType == "private"` 且这三种事件时才走 draft 路径;其他 Out* 仍走现有路径。运行时 upstream gate(`ThinkMode`/`ToolsMode`)保证 `tools=off` / `think=off` 时 runtime 不 emit 这两类事件,adapter 看不到就不分流。
+**Gate**:adapter 在 `ChatKind == "private"` 且这三种事件时才走 draft 路径;其他 Out* 仍走现有路径。运行时 upstream gate(`ThinkMode`/`ToolsMode`)保证 `tools=off` / `think=off` 时 runtime 不 emit 这两类事件,adapter 看不到就不分流。
 
 **Lifecycle**:
 
 ```text
 turn start (any chat)
   ensurePlaceholder(...):
-    - state.ChatType 写入(从 inbound Message.Chat.Type)
+    - state.ChatKind 写入(`ClassifyChat(Message.Chat.Type)`:`private`/`channel` → 自身,其他 → `group`)
+    - `ChatKind == "group"` 时清 `state.DraftMessageID`(下个 Out* cold-create 新 DraftMessage)
     - a.richTurns.purge(chatID, topicID, userMessageID)
     - 冷创建 rich turn 占位:
-        ├─ DM (ChatType == "private") → 跳过(草稿是 live surface,空占位只是噪音)
+        ├─ DM (ChatKind == "private") → 跳过(草稿是 live surface,空占位只是噪音)
         └─ 非 DM (supergroup/group) → sendRichMessage 冷创建占位
     - 不调 draftStreamers.reset(任何 chat):draft 是 GLOBAL per (chat, thread),
       stream 跨 turn 持久化,后续事件复用同一个 draft_id
 
 [turn N 期间,tools=on / think=on]
   OutThinking / OutToolStart / OutToolEnd
-    → adapter.streamDraftEvent(ctx, rawChatID, topicID, segment, replace)
-      → 非 DM  → return (false, nil)         → caller fall through 到 chain
+    → adapter.streamDraftEvent(ctx, rawChatID, topicID, userMsgID, segment, replace)
+      → ChatKind == "private" → draftStreamer.appendEventWithThread → 成功/失败(详见本节 §11.12.11.1)
+      → ChatKind == "group"   → groupDraft.streamDraftEvent → cold-create sendMessage / editMessageText(详见 §11.12.11.2)
+      → 其它 / no state → return (false, nil) → caller fall through 到 chain
       → DM:
         ├─ 成功 → return (true, nil)           → caller return nil (consumed)
         └─ 失败 → return (true, nil) + log warn → caller return nil (DROP,不回退)
@@ -1776,11 +1785,88 @@ turn N ends (process boundary)
 DM 下 `sendMessageDraft` 失败时,事件**不**回退到 `appendSegmentForKind` / 链式 rich turn 路径,而是被丢弃(streamer 内部 log warn 记录)。原因:
 - think/tool 的"家"在 DM 下是 draft;一旦 draft 失效,转回 richMessage 会让用户在同一个 turn 里同时看到 draft + richMessage 两条 think/tool 痕迹,违反"一致性"
 - 一致失败(latch 之后)整个 turn 的 think/tool 全部 drop,用户看 logs 知道 Bot API < 10.3 即可
-- 非 DM (state.ChatType != "private" 或 state 缺失)的事件保持原 fallthrough 到 chain,因为非 DM 没有 draft 这条路可走
+- 非 DM (state.ChatKind != "private" 或 state 缺失)的事件保持原 fallthrough 到 chain;ChatKind == "group" 走 §11.12.11.2 的 simulated DraftMessage,不经过本节 sendMessageDraft 路径
 
 **Bot API 兼容性**:`sendMessageDraft` 是 Bot API 10.3 新增方法,daemon 端无需探测版本:第一次失败后 latch 行为退化到"所有 think/tool drop",daemon 重启后重试,期间用户需升级 Telegram bot library 或忽略 think/tool 的流式视觉。客户端不需要 10.3:旧客户端收到 sendMessageDraft 会以静默静态文本渲染或忽略 draft,但 OutResult/OutReply 等 real message 正常落地,无功能损失。
 
 **未触动**:`OutReply` / `OutResult` / `OutError` / `OutChoice` / `OutMessageState*` / `OutHeartbeat` / `OnPromptEnded` 🎉 reaction / 群 forum topic 路径 / StatusBar footer / callback / state 反应 / allowed_updates 全部不变。`can_stop` 按钮 + `Update.stopped_message_generation` 留待 runtime abort 能力落地后单独 PR;`sendRichMessageDraft` / `<tg-thinking>` block 留待 plain draft 数据稳定后单独 PR。
+
+#### 11.12.11.2 非私聊下 OutThinking / OutTool* 的 simulated DraftMessage 路径
+
+Telegram `sendMessageDraft` 是 DM-only API(spec:"target private chat",basic group 直接 `Bad Request`),非私聊场景(`ChatKind == "group"`,涵盖基础群 + forum supergroup)必须用另一条路模拟 messageDraft 的"live streaming surface"角色。本节定义 simulated DraftMessage:bot 自己发一条 message,然后用 `editMessageText` PATCH in place,turn end 时 `deleteMessage` 清理,跟 sendMessageDraft 的 auto-disappear 行为对位。
+
+**核心对位**(跟 §11.12.11.1 DM draft):
+
+| 维度 | DM sendMessageDraft | group simulated DraftMessage |
+|---|---|---|
+| 存储 | server-managed draft(无真实 message_id) | bot 拥有的真实 message(`TopicState.DraftMessageID`) |
+| 创建 | 首次 `sendMessageDraft` 隐式分配 `draft_id` | 首次 `sendMessage` 返回 message_id 并持久化 |
+| 更新 | 反复 `sendMessageDraft(同 draft_id)` | `editMessageText(同 message_id)` |
+| REPLACE / ACCUMULATE | 内存 textBuf,server 渲染 | 内存 textBuf(`groupDraftEntry.compose`),edit 时整 body 替换 |
+| turn end | server 在 OutResult 落地时自动消失 | bot `deleteMessage` + 清 `state.DraftMessageID` |
+| 锚点 | n/a(server 渲染) | `reply_to_message_id = userMessageID`(挂用户消息下) |
+| 线程隔离 | `message_thread_id`(DM 不用) | `message_thread_id = topicID`(forum topic 内 DraftMessage 留在 topic) |
+| 失败语义 | latch,后续 drop(no richMessage 回退) | 无 latch,edit 失败下次重试 / cold-create 失败 fall through 到 richTurn |
+
+**Lifecycle**(per turn,ChatKind == "group"):
+
+```text
+turn start
+  ensurePlaceholder(...)
+    ├─ state.ChatKind 写入 "group"(若 inbound Message.Chat.Type 是 "group"/"supergroup")
+    └─ state.DraftMessageID = 0  ← 下次 Out* cold-create 新 DraftMessage
+
+turn N 期间,OutThinking / OutToolStart / OutToolEnd
+  streamDraftEvent(...) → groupDraft.streamDraftEvent
+    ├─ entry 不存在 → 分配
+    ├─ compose buffer(REPLACE / ACCUMULATE)
+    ├─ entry.messageID == 0:
+    │    ├─ sendMessage(chat_id, message_thread_id=topicID, reply_to_message_id=userMsgID, text=buffer)
+    │    ├─ 成功 → 写入 entry.messageID,持久化 state.DraftMessageID
+    │    └─ 失败 → return (false, nil) → caller fall through 到 richTurn chain
+    └─ entry.messageID > 0:
+         └─ editMessageText(chat_id, message_id, text=buffer)(plain text,无 parse_mode)
+
+turn N ends
+  OutResult 发送时 / OnPromptEnded handler 末尾
+    → groupDraft.endProcess(chatID, topicID, userMsgID)
+       ├─ 若有 entry:取 entry.messageID,调 deleteMessage;删 entry
+       ├─ 删 state.DraftMessageID(同步 next-turn 干净)
+       └─ 若 entry 缺失但 state.DraftMessageID > 0(daemon 重启场景):直接 deleteMessage + 清 state
+```
+
+**REPLACE / ACCUMULATE 沿用 #383**(`groupDraftEntry.compose` 实现),完全等价于 DM 路径:
+
+- `OutThinking` → REPLACE → textBuf = `"💭 " + msg.Text`
+- `OutToolStart` → REPLACE → textBuf = `"● Tool(args)"`(`formatToolStartCall`)
+- `OutToolEnd` → ACCUMULATE → 在匹配 OutToolStart 下方追加 `"\n\n⎿  ...summary..."`(`summarizeToolResult`)
+- 同 draft_id 复用语义在 group 下变成"同 entry.messageID 复用",per-turn 隔离靠 `ensurePlaceholder` 清 `state.DraftMessageID`
+
+**DraftMessage 在 chat 中的视觉位置**:
+
+```text
+forum topic (user 视角)
+├─ User message: "帮我看看 foo.go"
+├─ DraftMessage: "💭 considering whether to invoke Read"   ← reply_to 挂 user message
+│       (后续 OutToolStart → REPLACE) "🔧 ● Read(/tmp/foo.go)"
+│       (后续 OutToolEnd   → ACCUMULATE) "🔧 ● Read(...)\n\n⎿  📄 Read → 47 lines"
+│       (下一个 OutThinking → REPLACE) "💭 next thought..."
+├─ richTurn (OutHeartbeat PATCH): "🤖 Working... 💭 3 · 🔧 5"
+├─ OutReply: "answer text..."(独立 sendMessage)
+└─ OutResult: "📝 final answer..."(独立 sendMessage)
+
+turn end: DraftMessage 被 deleteMessage 移除,richTurn / Reply / Result 留作历史
+```
+
+**`ChatType → ChatKind` 重命名**:Telegram 字面 chat.type(`"private"`/`"group"`/`"supergroup"`/`"channel"`)在 `ensurePlaceholder` 时经 `ClassifyChat` 收敛到 nightme 的 3 类(`"private"`/`"group"`/`"channel"`)。`state.ChatKind`(新字段,`json:"chat_kind,omitempty"`)取代旧 `state.ChatType`(`json:"chat_type,omitempty"`);老 state 文件在 `newStateStore` 时通过 `migrateChatKind` 把 `chat_type` 收敛到 `chat_kind` 并立即 save 持久化(`LegacyChatType` 字段保留读路径,新写不再带)。迁移同时 stamp `UpdatedAt` 避免 TTL prune 把零时间戳的老条目当成"ancient"误删。
+
+**为什么 draftMessageID 持久化**:bot 重启时 in-memory entry 全没了,如果当时 turn N 还没结束,后续 Out* 找不到 entry.messageID 会再次 cold-create 一条新 DraftMessage,旧 DraftMessage 永远留在 chat 里 没人 PATCH。持久化后重启能从 state 读到 DraftMessageID,后续 edit 直接复用同一条 message;若 turn 已结束则 `OnPromptEnded` 删之,不存在孤儿。
+
+**为什么不 mock 一份 fake draft API**:Telegram 没给非私聊的 draft API;`sendMessageDraft` 的 spec 明确只接受 private chat。createForumTopic 路由到独立 topic 是另一条思路(每群一个 NightMe topic),但当前 scope(只分 private / group)未做,在 `ChatKind == "group"` 下用 bot-owned message 模拟最简。
+
+**Bot API 兼容性**:纯 `sendMessage` / `editMessageText` / `deleteMessage`,Bot API 1.0+ 全部支持;无版本探测,无 latch,无客户端动画(只有静态文本 PATCH)。edit 失败的 transient 错误由 `apiCall` 内部 retry 处理,exhausted 时 `groupDraftManager` log warn,下次事件继续走同一个 buffer(无 latch 阻塞)。
+
+**未触动**:richTurn / chain / StatusBar footer / callback / reactions / `allowed_updates` / channel 处理全部不变;本节只新增 group 下 think/tool 的 DraftMessage surface。
 
 ### 11.12.12 跟飞书 receipt 语义对位（v9）
 
@@ -3773,6 +3859,9 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 - StatusBar 本身走纯文本（emoji + 中点 `·` + 半角空格），没用 `<b>` `<code>` 强调（避免 OutError 那类 escape 边界），视觉不如 feishu grey footer，但 parse 零失败
 
 ## 19. 变更日志
+
+
+- **ChatKind 重命名 + 非私聊 simulated DraftMessage 路径 — ChatType→ChatKind 收敛 + sendMessageDraft 群内模拟实现** — 把 Telegram 字面 chat.type(`private`/`group`/`supergroup`/`channel`)收敛到 nightme 逻辑分类(`private`/`group`/`channel`),`state.ChatType`(`json:"chat_type"`)重命名为 `state.ChatKind`(`json:"chat_kind"`),老 state 通过 `migrateChatKind` 在 load 时迁移并立即 save 持久化;`ensurePlaceholder` 时 `ClassifyChat` 把 inbound `Message.Chat.Type` 映射到 ChatKind。非私聊(`ChatKind == "group"`,涵盖基础群 + forum supergroup,forum 开关不影响)下 `OutThinking`/`OutToolStart`/`OutToolEnd` 走 new `group_draft.go` 的 simulated DraftMessage 路径:首次事件 `sendMessage(chat_id, message_thread_id=topicID, reply_to_message_id=userMsgID, text=buffer)` cold-create,后续事件 `editMessageText(同 message_id)` PATCH,REPLACE/ACCUMULATE 沿用 #383(`groupDraftEntry.compose`);turn end 由 `OnPromptEnded` / `OutResult` 触发 `groupDraft.endProcess` → `deleteMessage` + 清 `state.DraftMessageID`,跟 DM `sendMessageDraft` 的 auto-disappear 行为对位。cold-create 失败返回 `handled=false` fall through 到 richTurn chain,edit 失败由 `apiCall` 内部 retry 处理(无 latch)。`streamDraftEvent` 现在按 `state.ChatKind` 分派:`ChatKindPrivate` → draftStreamer(server draft,#383);`ChatKindGroup` → groupDraftManager(simulated);其他 / no state → fall through。新增 `internal/channel/telegram/group_draft.go`(`groupDraftEntry` + `groupDraftManager` + `streamDraftEvent` / `endProcess` / `deletePersisted`);`state.go` 加 `ChatKind` 常量(`ChatKindPrivate`/`ChatKindGroup`/`ChatKindChannel`)、`ClassifyChat`、`DraftMessageID` 字段、`migrateChatKind`、`newStateStore` 中 load 迁移 + 零 `UpdatedAt` 补 stamp(避免 TTL prune 误删);`adapter.go` `ensurePlaceholder` 写入 ChatKind 并 group 下清 DraftMessageID,`streamDraftEvent` 接受 `userMsgID` 参数,`OnPromptEnded` + `OutResult` 末尾调 `groupDraft.endProcess`;`testhelpers_test.go` fakeAPI 加 `deleteMessage` 通路。**未触动**:DM sendMessageDraft 路径(#383 整体行为不变)、richTurn / chain / StatusBar footer / callback / reactions / allowed_updates / channel 处理、createForumTopic 路线(NightMe topic 仍是后续 scope)。详见 §11.12.11.2。
 
 - **DM sendMessageDraft 路径 — DM-only (probe 2026-09-15) + 全局唯一 draft + REPLACE/ACCUMULATE 分事件 + endProcess 关边界**(OutThinking / OutToolStart / OutToolEnd 三类事件) — Bot API 10.3 (2026-08-24) 起在 `chat.type == "private"` 下用 `sendMessageDraft` 流式呈现 think/tool 活动。**ChatType gate 保留**(用户 2026-09-15 第五轮反馈曾尝试去掉 gate 走统一路由,但 2026-09-15 probe 验证: `sendMessageDraft` 在 basic group 中返回 `Bad Request`,触发的 latch 会导致整个 group 的 think/tool 事件被 drop——比当前 v9 chain 渲染更差)。`streamDraftEvent` 仅在 `state.ChatType == "private"` 时走 draft,group 仍走 v9 chain。**REPLACE / ACCUMULATE 按事件类型分**(用户 2026-09-15 第三轮反馈:"draft不需要重置,因为他每次都只是显示一个事件(think or toolstart+toolend), 相当于每个事件它都在做重置. 这就是为什么可以全局唯一一个draft的原因. thinking要加前缀💭 做区分")—— OutThinking REPLACE(`💭 ` 前缀 + msg.Text);OutToolStart REPLACE;OutToolEnd ACCUMULATE(堆叠在匹配 OutToolStart 下方形成完整 `🔧 call / ✅ result`)。**process end 由 `draftStreamers.endProcess` 处理**(用户 2026-09-15 第四轮反馈:"碰到OutResult/OutPromptEnded, 结束 messageDraft操作")—— OutResult case 和 OnPromptEnded handler 末尾调 `a.draftStreamers.endProcess(chatID, topicID)`,清空 draft_id + textBuf(保留 failed latch)。**forum topic 路由**(基础实现):`appendEventWithThread(ctx, text, replace, topicID)` 在 `topicID > 0` 时携带 `message_thread_id` 到 sendMessageDraft,但当前 ChatType gate 在 group 里不调用它,故保留为后续 forum-supergroup 支持的扩展点。新增 `internal/channel/telegram/draft_streamer.go`(draftStreamer + draftIDCounter atomic.Int32 + errDraftFallback latch + REPLACE/ACCUMULATE 双模式 + resetState/resetProcess 双 reset + appendEvent/appendEventWithThread 双入口)和 `draft_index.go`(per-(chat,thread) 索引 + endProcess 方法);`state.go` `TopicState` 加 `ChatType` 字段(omitempty,老 state 兼容空值);`adapter.go` `ensurePlaceholder` 写入 ChatType,DM 下**不冷创建 rich turn 占位**,非 DM 冷创建 rich turn 占位;`Send()` switch 三个 case 顶部调 `streamDraftEvent(ctx, rawChatID, topicID, segment, replace)`,**仅 `ChatType=="private"` 才走 draft**,**DM draft 失败时 DROP 不回退**到 richMessage 路径,非 DM 走 chain。客户端同 draft_id 动画过渡。**未触动**:`OutReply` / `OutResult` / `OutError` / `OutHeartbeat` / StatusBar footer / callback / state 反应 / allowed_updates 全部不变。`can_stop` 按钮 + `Update.stopped_message_generation` 留待 runtime abort 能力落地后单独 PR;`sendRichMessageDraft` / `<tg-thinking>` block 留待 plain draft 数据稳定后单独 PR;在保持 ChatType gate 的前提下进一步支持 forum supergroup 留待单独 PR(`is_forum` 探测 + ChatType gate 拆分)。详见 §11.12.11.1。
 

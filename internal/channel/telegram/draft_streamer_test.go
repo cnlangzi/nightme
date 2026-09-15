@@ -169,7 +169,7 @@ func TestDraftIndex_Reset_OnlyAffectsMatchingKey(t *testing.T) {
 
 	// Subsequent append on b should still send (b's state intact).
 	// And its draft_id should be the SAME as before the reset
-	// (reset only clears state.ChatType=private's streamer).
+	// (reset only clears state.ChatKind=private's streamer).
 	_ = b.appendEvent(context.Background(), "y", true)
 	if got := len(api.Calls); got != 3 {
 		t.Fatalf("call count = %d, want 3 (2 setup + 1 b append)", got)

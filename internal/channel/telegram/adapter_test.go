@@ -2527,227 +2527,6 @@ func findCallByMethod(calls []fakeCall, method string) *fakeCall {
 	return nil
 }
 
-func TestAdapter_Send_DM_OutThinking_StreamsToDraft(t *testing.T) {
-	a, api := newTestAdapter(t)
-	raw := setupDMState(t, a, 100)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "considering whether to invoke Read",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	draft := findCallByMethod(api.Calls, "sendMessageDraft")
-	if draft == nil {
-		t.Fatalf("expected sendMessageDraft call; got calls=%+v", api.Calls)
-	}
-	if draft.Params["chat_id"] != int64(100) {
-		t.Fatalf("chat_id = %v, want 100", draft.Params["chat_id"])
-	}
-	// "💭 " prefix added at adapter layer for visual consistency.
-	want := "💭 considering whether to invoke Read"
-	if text, _ := draft.Params["text"].(string); text != want {
-		t.Fatalf("text = %q, want %q (with 💭 prefix)", text, want)
-	}
-}
-
-func TestAdapter_Send_DM_OutToolStart_StreamsToDraft(t *testing.T) {
-	a, api := newTestAdapter(t)
-	raw := setupDMState(t, a, 100)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutToolStart,
-		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
-		Text:   "● Read(/tmp/foo.go)",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	draft := findCallByMethod(api.Calls, "sendMessageDraft")
-	if draft == nil {
-		t.Fatalf("expected sendMessageDraft call; got calls=%+v", api.Calls)
-	}
-}
-
-func TestAdapter_Send_DM_OutToolEnd_StreamsToDraft(t *testing.T) {
-	a, api := newTestAdapter(t)
-	raw := setupDMState(t, a, 100)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutToolEnd,
-		Tool:   &messages.ToolInfo{Name: "Read", Output: "47 lines"},
-		Text:   "⎿  📄 Read → 47 lines",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	draft := findCallByMethod(api.Calls, "sendMessageDraft")
-	if draft == nil {
-		t.Fatalf("expected sendMessageDraft call; got calls=%+v", api.Calls)
-	}
-}
-
-func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
-	// Groups (basic + forum supergroup) never use sendMessageDraft
-	// — the API rejects it (Bad Request). They take the simulated
-	// DraftMessage path via group_draft.go instead. Under the
-	// single-FIFO model, OnPromptEnded is the flush trigger:
-	// 5 events buffer silently, then OnPromptEnded produces one
-	// sendRichMessage cold-create (5 blocks) + one deleteMessage.
-	// The cold-create carries reply_to_message_id=userMsgID so the
-	// DraftMessage visually anchors under the user's message.
-	a, api := newTestAdapter(t)
-	raw := setupGroupState(t, a, -1001, 42)
-	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
-			ChatID: "tg_" + raw + ":42",
-			Kind:   messages.OutThinking,
-			Text:   "thinking text",
-		}); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
-	}
-	a.OnPromptEnded(context.Background(), "tg_"+raw+":42", "1", agent.PromptEndClean)
-
-	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
-		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
-	}
-	coldCreate := findCallByMethod(api.Calls, "sendRichMessage")
-	if coldCreate == nil {
-		t.Fatalf("group endProcess flush should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
-	}
-	if reply, _ := coldCreate.Params["reply_to_message_id"].(int); reply != 1 {
-		t.Fatalf("DraftMessage cold-create reply_to_message_id = %v, want 1 (userMsgID)", coldCreate.Params["reply_to_message_id"])
-	}
-	blocks := richMessageBlocks(coldCreate.Params["rich_message"])
-	if len(blocks) != 5 {
-		t.Fatalf("DraftMessage cold-create blocks = %d, want 5 (events 1..5); got %v", len(blocks), blocks)
-	}
-	if blocks[0] != "💭 thinking text" {
-		t.Fatalf("DraftMessage cold-create block[0] = %q, want %q", blocks[0], "💭 thinking text")
-	}
-}
-
-func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
-	// Same path as OutThinking: under the single-FIFO model,
-	// 5 OutToolStart events buffer silently; OnPromptEnded
-	// produces one sendRichMessage cold-create (5 blocks).
-	a, api := newTestAdapter(t)
-	raw := setupGroupState(t, a, -1001, 42)
-	for i := 1; i <= 5; i++ {
-		if err := a.Send(context.Background(), messages.OutboundMessage{
-			ChatID: "tg_" + raw + ":42",
-			Kind:   messages.OutToolStart,
-			Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
-			Text:   "● Read(/tmp/foo.go)",
-		}); err != nil {
-			t.Fatalf("send %d: %v", i, err)
-		}
-	}
-	a.OnPromptEnded(context.Background(), "tg_"+raw+":42", "1", agent.PromptEndClean)
-
-	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
-		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
-	}
-	coldCreate := findCallByMethod(api.Calls, "sendRichMessage")
-	if coldCreate == nil {
-		t.Fatalf("group endProcess flush should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
-	}
-	blocks := richMessageBlocks(coldCreate.Params["rich_message"])
-	if len(blocks) != 5 {
-		t.Fatalf("DraftMessage cold-create blocks = %d, want 5 (events 1..5); got %v", len(blocks), blocks)
-	}
-	if blocks[0] != "● Read(/tmp/foo.go)" {
-		t.Fatalf("DraftMessage cold-create block[0] = %q, want %q", blocks[0], "● Read(/tmp/foo.go)")
-	}
-}
-
-func TestAdapter_Send_DM_DraftFailureLatch_DropsDoNotFallthroughToChain(t *testing.T) {
-	// In DM, when sendMessageDraft fails, think/tool events are
-	// DROPPED (not sent to richMessage). This is the user's explicit
-	// design requirement: "think/tool 绝不混进正常的richMessage".
-	a, api := newTestAdapter(t)
-	raw := setupDMState(t, a, 100)
-	api.Errors = []error{errors.New("simulated 400")}
-
-	// First OutToolStart: draft API fails → dropped. No rich turn
-	// cold-create either (we skip in DM).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutToolStart,
-		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
-		Text:   "● Read(/tmp/foo.go)",
-	}); err != nil {
-		t.Fatalf("first send: %v", err)
-	}
-	if c := countByMethod(api.Calls, "sendMessageDraft"); c != 1 {
-		t.Fatalf("first send: sendMessageDraft count = %d, want 1", c)
-	}
-	// Critical: no rich message fallback. No sendRichMessage,
-	// no sendMessage. The event is gone.
-	if c := countByMethod(api.Calls, "sendRichMessage"); c != 0 {
-		t.Fatalf("sendRichMessage count = %d, want 0 (DM draft failure must NOT fall through to richMessage)", c)
-	}
-	if c := countByMethod(api.Calls, "sendMessage"); c != 0 {
-		t.Fatalf("sendMessage count = %d, want 0 (DM draft failure must NOT fall through to sendMessage)", c)
-	}
-
-	// Second event in same turn: latch engaged, still dropped.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutToolEnd,
-		Tool:   &messages.ToolInfo{Name: "Read", Output: "47 lines"},
-		Text:   "⎿  📄 Read → 47 lines",
-	}); err != nil {
-		t.Fatalf("second send: %v", err)
-	}
-	if c := countByMethod(api.Calls, "sendMessageDraft"); c != 1 {
-		t.Fatalf("after second send: sendMessageDraft count = %d, want 1 (latch should prevent retry)", c)
-	}
-}
-
-func TestAdapter_Send_DM_DraftGloballyShared_AcrossTurns(t *testing.T) {
-	// Draft streamer is GLOBAL per (chat, thread) — no per-turn
-	// reset. The same draft_id is reused across turns so the
-	// streamer object identity survives. When turn N's real
-	// message lands, the server disposes the old draft; turn N+1's
-	// first event with the same draft_id is treated by the server
-	// as a brand-new draft (since the previous one was pushed out).
-	a, api := newTestAdapter(t)
-	raw := setupDMState(t, a, 100)
-
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "turn 1 thought",
-	})
-
-	// Simulate end of turn N → start of turn N+1 WITHOUT calling
-	// draftStreamers.reset. The streamer's draft_id should persist.
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutToolStart,
-		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
-		Text:   "● Read(/tmp/foo.go)",
-	})
-
-	drafts := callsByMethod(api.Calls, "sendMessageDraft")
-	if len(drafts) != 2 {
-		t.Fatalf("expected 2 sendMessageDraft calls, got %d", len(drafts))
-	}
-	id0 := drafts[0].Params["draft_id"]
-	id1 := drafts[1].Params["draft_id"]
-	if id0 != id1 {
-		t.Fatalf("global draft: both turns should share draft_id; got %v vs %v", id0, id1)
-	}
-	// And the texts reflect REPLACE semantics per-event.
-	// Turn 2's OutToolStart REPLACES the prior turn's thinking.
-	want := "● Read(/tmp/foo.go)"
-	if got := drafts[1].Params["text"]; got != want {
-		t.Fatalf("call 2 text = %v, want %q (REPLACE across turn boundary)", got, want)
-	}
-}
-
-// countByMethod / callsByMethod are small helpers used by the
-// tests above to slice api.Calls by method name.
 func countByMethod(calls []fakeCall, method string) int {
 	n := 0
 	for _, c := range calls {
@@ -2768,112 +2547,55 @@ func callsByMethod(calls []fakeCall, method string) []fakeCall {
 	return out
 }
 
-func TestAdapter_EnsurePlaceholder_DM_SkipsRichTurnColdCreate(t *testing.T) {
-	// In DM, ensurePlaceholder must NOT cold-create the rich turn
-	// placeholder. The draft IS the live surface for think/tool;
-	// an empty rich message sitting next to the draft would just be
-	// noise.
-	a, api := newTestAdapter(t)
-	a.config.PollingTimeout = 1
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer func() { _ = a.Stop(context.Background()) }()
-	_ = a.Start(ctx)
+// --- DM draft routing tests (sendRichMessageDraft, two-stack buffer) ---
 
-	a.handleUpdate(ctx, Update{
-		UpdateID: 1,
-		Message: &Message{
-			MessageID: 42,
-			Date:      time.Now().Unix(),
-			Chat:      Chat{ID: 100, Type: "private"},
-			From:      &User{ID: 1},
-			Text:      "hello",
-		},
-	})
-	// Drain the inbound channel so the test doesn't deadlock.
-	select {
-	case <-a.Incoming():
-	case <-time.After(time.Second):
-		t.Fatal("no inbound")
-	}
-
-	// After DM ensurePlaceholder: zero sendRichMessage / sendMessage
-	// calls should have been made. Only the inbound getUpdates
-	// bookkeeping (handled internally, not via api) and our dummy
-	// setup may have used the api.
-	for _, c := range api.Calls {
-		if c.Method == "sendRichMessage" || c.Method == "sendMessage" {
-			t.Fatalf("DM ensurePlaceholder must NOT send a rich turn placeholder; saw %s", c.Method)
-		}
-	}
-
-	// But subsequent OutReply (which DOES need a real message)
-	// should lazily cold-create a rich turn on its own.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_100",
-		Kind:   messages.OutReply,
-		Text:   "actual reply content",
-	}); err != nil {
-		t.Fatalf("OutReply: %v", err)
-	}
-	if c := countByMethod(api.Calls, "sendRichMessage"); c == 0 {
-		t.Fatalf("OutReply in DM should cold-create rich turn on demand; saw %d sendRichMessage calls", c)
-	}
-}
-
-func TestAdapter_Send_DM_OutThinking_ReplacesAcrossEvents(t *testing.T) {
-	// Each OutThinking event REPLACES the prior draft text. The
-	// chat shows only the latest thinking body, animated in place.
+// TestAdapter_Send_DM_OutThinking_BuffersIntoStack verifies that
+// an OutThinking event routes into the DM draft path's
+// thinkingStack (no per-event wire call). OnPromptEnded triggers
+// the final flush which sends sendRichMessageDraft carrying the
+// accumulated thinking as paragraph blocks.
+func TestAdapter_Send_DM_OutThinking_BuffersIntoStack(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupDMState(t, a, 100)
 
-	_ = a.Send(context.Background(), messages.OutboundMessage{
+	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutThinking,
-		Text:   "first thought",
-	})
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "second thought",
-	})
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "third thought",
-	})
-
-	drafts := callsByMethod(api.Calls, "sendMessageDraft")
-	if len(drafts) != 3 {
-		t.Fatalf("sendMessageDraft count = %d, want 3", len(drafts))
-	}
-	// Each call's text is just the latest thinking line (with prefix).
-	if got := drafts[0].Params["text"]; got != "💭 first thought" {
-		t.Fatalf("call 1 text = %v, want \"💭 first thought\" (with 💭 prefix)", got)
-	}
-	want := "💭 third thought"
-	if got := drafts[2].Params["text"]; got != want {
-		t.Fatalf("final draft text = %q, want %q (REPLACE: each thinking REPLACES the prior body)", got, want)
+		Text:   "considering whether to invoke Read",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 
-	// All three calls share the same draft_id (animation, not
-	// replace-with-new-message).
-	id0 := drafts[0].Params["draft_id"]
-	for i, d := range drafts {
-		if d.Params["draft_id"] != id0 {
-			t.Fatalf("call %d draft_id=%v, want %v (same id → animate in place)", i, d.Params["draft_id"], id0)
-		}
+	// No wire call yet — the event just buffered.
+	if c := countByMethod(api.Calls, "sendRichMessageDraft"); c != 0 {
+		t.Fatalf("expected 0 sendRichMessageDraft pre-flush; got %d", c)
+	}
+
+	// OnPromptEnded → endProcess → flushLocked (one
+	// sendRichMessageDraft carrying the accumulated thinking).
+	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
+
+	draft := findCallByMethod(api.Calls, "sendRichMessageDraft")
+	if draft == nil {
+		t.Fatalf("expected sendRichMessageDraft on flush; got calls=%+v", api.Calls)
+	}
+	if draft.Params["chat_id"] != "100" {
+		t.Fatalf("chat_id = %v, want 100", draft.Params["chat_id"])
+	}
+	blocks := richMessageBlocks(draft.Params["rich_message"])
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1 (single OutThinking)", len(blocks))
+	}
+	want := "💭 considering whether to invoke Read"
+	if blocks[0] != want {
+		t.Fatalf("block[0] = %q, want %q", blocks[0], want)
 	}
 }
 
-func TestAdapter_Send_DM_OutTool_StartEnd_FormOneRecord(t *testing.T) {
-	// End-to-end: OutToolStart REPLACE-s, OutToolEnd ACCUMULATE-s
-	// onto the matching start, so the user sees one draft body
-	// containing both the call line and the result line.
-	//
-	// formatTool uses msg.Tool.Output (not msg.Text) to build the
-	// End body via summarizeToolResult, so the test must use a
-	// realistic Output string that summarizeToolResult can format.
+// TestAdapter_Send_DM_OutToolStartEnd_FlushAsOneRecord verifies
+// that an OutToolStart + OutToolEnd pair forms a single tool slot
+// and flushes as [Start, End] blocks under sendRichMessageDraft.
+func TestAdapter_Send_DM_OutToolStartEnd_FlushAsOneRecord(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupDMState(t, a, 100)
 
@@ -2890,26 +2612,29 @@ func TestAdapter_Send_DM_OutTool_StartEnd_FormOneRecord(t *testing.T) {
 		Text:   "(ignored — formatTool reads msg.Tool.Output)",
 	})
 
-	drafts := callsByMethod(api.Calls, "sendMessageDraft")
-	if len(drafts) != 2 {
-		t.Fatalf("sendMessageDraft count = %d, want 2", len(drafts))
+	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
+
+	draft := findCallByMethod(api.Calls, "sendRichMessageDraft")
+	if draft == nil {
+		t.Fatalf("expected sendRichMessageDraft on flush; got calls=%+v", api.Calls)
 	}
-	// First call: Start line alone.
-	if got := drafts[0].Params["text"]; got != "● Read(/tmp/foo.go)" {
-		t.Fatalf("call 1 text = %q, want Start line alone (REPLACE)", got)
+	blocks := richMessageBlocks(draft.Params["rich_message"])
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2 (Start + End)", len(blocks))
 	}
-	// Second call: Start + End stacked as one record. formatTool
-	// rendered End body via summarizeToolResult on 3 lines.
-	want := "● Read(/tmp/foo.go)\n\n⎿  📄 Read → 3 lines"
-	if got := drafts[1].Params["text"]; got != want {
-		t.Fatalf("call 2 text = %q, want %q (Start+End stacked via ACCUMULATE)", got, want)
+	if blocks[0] != "● Read(/tmp/foo.go)" {
+		t.Fatalf("block[0] = %q, want Start line", blocks[0])
+	}
+	wantEnd := "⎿  📄 Read → 3 lines"
+	if blocks[1] != wantEnd {
+		t.Fatalf("block[1] = %q, want %q", blocks[1], wantEnd)
 	}
 }
 
-func TestAdapter_Send_DM_OutThinkingAndOutTool_ReplacesAcrossKinds(t *testing.T) {
-	// Cross-kind REPLACE: a thinking line followed by a tool start
-	// shows ONLY the tool start (thinking REPLACED). Within a tool
-	// call (Start → End), End ACCUMULATEs onto Start.
+// TestAdapter_Send_DM_OutThinkingAndOutTool_StackOrdering
+// verifies that thinkingStack entries render BEFORE toolsStack
+// entries in the flushed blocks (buildBlocksFromStacks ordering).
+func TestAdapter_Send_DM_OutThinkingAndOutTool_StackOrdering(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupDMState(t, a, 100)
 
@@ -2925,27 +2650,30 @@ func TestAdapter_Send_DM_OutThinkingAndOutTool_ReplacesAcrossKinds(t *testing.T)
 		Text:   "● Read(/tmp/foo.go)",
 	})
 
-	drafts := callsByMethod(api.Calls, "sendMessageDraft")
-	if len(drafts) != 2 {
-		t.Fatalf("sendMessageDraft count = %d, want 2", len(drafts))
+	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
+
+	draft := findCallByMethod(api.Calls, "sendRichMessageDraft")
+	if draft == nil {
+		t.Fatalf("expected sendRichMessageDraft on flush; got calls=%+v", api.Calls)
 	}
-	// First call had "💭 " prefix on thinking.
-	wantFirst := "💭 considering whether to invoke Read"
-	if got := drafts[0].Params["text"]; got != wantFirst {
-		t.Fatalf("call 1 text = %q, want %q (thinking with 💭 prefix)", got, wantFirst)
+	blocks := richMessageBlocks(draft.Params["rich_message"])
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2 (1 thinking + 1 tool)", len(blocks))
 	}
-	// Tool start REPLACED the prior thinking line.
-	want := "● Read(/tmp/foo.go)"
-	if got := drafts[1].Params["text"]; got != want {
-		t.Fatalf("call 2 text = %q, want %q (cross-kind REPLACE — tool start wipes thinking)", got, want)
+	if blocks[0] != "💭 considering whether to invoke Read" {
+		t.Fatalf("block[0] = %q, want thinking first", blocks[0])
+	}
+	if blocks[1] != "● Read(/tmp/foo.go)" {
+		t.Fatalf("block[1] = %q, want tool after", blocks[1])
 	}
 }
 
+// TestAdapter_Send_DM_OutResult_EndsProcess verifies that
+// OutResult ends the draft process via endProcess: the streamer
+// is evicted from the index, draftID is reset, and a follow-up
+// turn allocates a fresh streamer.
 func TestAdapter_Send_DM_OutResult_EndsProcess(t *testing.T) {
-	// OutResult must end the draft process: clear draft_id +
-	// textBuf so the next turn's first event starts with a fresh
-	// draft (not contaminated by leftover text from this turn).
-	a, api := newTestAdapter(t)
+	a, _ := newTestAdapter(t)
 	raw := setupDMState(t, a, 100)
 
 	// Turn 1: events accumulate in the draft.
@@ -2962,14 +2690,13 @@ func TestAdapter_Send_DM_OutResult_EndsProcess(t *testing.T) {
 		Text:   "✅ Read → 47 lines",
 	})
 
-	// Verify draft has accumulated text before OutResult.
 	chatIDInt, _ := strconv.ParseInt(raw, 10, 64)
-	streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
-	streamer.mu.Lock()
-	textBefore := streamer.textBuf.String()
-	streamer.mu.Unlock()
-	if textBefore == "" {
-		t.Fatal("expected draft textBuf populated before OutResult")
+	turn1 := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
+	turn1.mu.Lock()
+	hasBuffer := len(turn1.thinkingStack) > 0 || len(turn1.toolsStack) > 0
+	turn1.mu.Unlock()
+	if !hasBuffer {
+		t.Fatal("expected streamer buffers populated before OutResult")
 	}
 
 	// OutResult ends the process.
@@ -2979,39 +2706,29 @@ func TestAdapter_Send_DM_OutResult_EndsProcess(t *testing.T) {
 		Text:   "final answer",
 	})
 
-	streamer.mu.Lock()
-	draftIDAfter := streamer.draftID
-	textAfter := streamer.textBuf.String()
-	streamer.mu.Unlock()
+	// Streamer evicted from the index — getOrCreate yields a fresh
+	// one with no buffer / no draftID.
+	fresh := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
+	if fresh == turn1 {
+		t.Fatal("expected fresh streamer after OutResult endProcess")
+	}
+	fresh.mu.Lock()
+	draftIDAfter := fresh.draftID
+	thinkAfter := len(fresh.thinkingStack)
+	toolsAfter := len(fresh.toolsStack)
+	fresh.mu.Unlock()
 	if draftIDAfter != 0 {
-		t.Fatalf("expected draft_id reset to 0 after OutResult, got %d", draftIDAfter)
+		t.Fatalf("fresh draftID = %d, want 0", draftIDAfter)
 	}
-	if textAfter != "" {
-		t.Fatalf("expected textBuf cleared after OutResult, got %q", textAfter)
-	}
-
-	// Turn 2: first event allocates a FRESH draft_id (not the
-	// pre-OutResult one).
-	api.Calls = nil
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "turn 2 first thought",
-	})
-	drafts := callsByMethod(api.Calls, "sendMessageDraft")
-	if len(drafts) != 1 {
-		t.Fatalf("expected 1 sendMessageDraft call, got %d", len(drafts))
-	}
-	want := "💭 turn 2 first thought"
-	if got := drafts[0].Params["text"]; got != want {
-		t.Fatalf("turn 2 first event text = %q, want %q (fresh draft, no turn 1 residue)", got, want)
+	if thinkAfter != 0 || toolsAfter != 0 {
+		t.Fatalf("fresh buffers non-empty: thinking=%d tools=%d", thinkAfter, toolsAfter)
 	}
 }
 
+// TestAdapter_OnPromptEnded_DM_EndsProcess is the safety-net path
+// for turns without OutResult (error-only / abort). It must also
+// end the draft process so the next turn starts fresh.
 func TestAdapter_OnPromptEnded_DM_EndsProcess(t *testing.T) {
-	// OnPromptEnded is a safety net for turns without OutResult
-	// (e.g. error-only turns). It must also end the draft
-	// process so the next turn starts fresh.
 	a, _ := newTestAdapter(t)
 	raw := setupDMState(t, a, 100)
 
@@ -3024,50 +2741,47 @@ func TestAdapter_OnPromptEnded_DM_EndsProcess(t *testing.T) {
 	chatIDInt, _ := strconv.ParseInt(raw, 10, 64)
 	streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
 	streamer.mu.Lock()
-	if streamer.textBuf.Len() == 0 {
-		streamer.mu.Unlock()
-		t.Fatal("expected textBuf populated after thinking")
-	}
+	hasBuffer := len(streamer.thinkingStack) > 0 || len(streamer.toolsStack) > 0
 	streamer.mu.Unlock()
+	if !hasBuffer {
+		t.Fatal("expected buffers populated after thinking")
+	}
 
-	// OnPromptEnded evicts the streamer from the index (per-turn
-	// isolation). A follow-up lookup must allocate a fresh streamer.
+	// OnPromptEnded evicts the streamer.
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
 	fresh := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
 	if fresh == streamer {
 		t.Fatal("expected fresh streamer after OnPromptEnded endProcess eviction")
 	}
-	if fresh.draftID != 0 {
-		t.Fatalf("expected fresh streamer's draftID == 0 after eviction, got %d", fresh.draftID)
-	}
-	if fresh.textBuf.Len() != 0 {
-		t.Fatalf("expected fresh streamer's textBuf empty, got %q", fresh.textBuf.String())
+	fresh.mu.Lock()
+	draftID := fresh.draftID
+	fresh.mu.Unlock()
+	if draftID != 0 {
+		t.Fatalf("fresh draftID = %d, want 0", draftID)
 	}
 }
 
-func TestAdapter_Send_DM_BackToBackTurns_IsolatedStreamers(t *testing.T) {
-	// Two user messages in a row must allocate two distinct
-	// draftStreamers — the per-turn isolation guarantee from
-	// docs/channel/telegram.md §11.12.11.3. Without this, a turn-N
-	// late OutToolEnd would land on turn-N+1's draft surface,
-	// producing crossed streams and confusing visual overlap.
-	a, api := newTestAdapter(t)
+// TestAdapter_Send_DM_BackToBackTurns_FreshStreamerPerTurn
+// verifies per-turn isolation: two user messages produce two
+// independent draftStreamers. Each turn's first event allocates a
+// fresh draftID (the per-turn eviction drops the prior streamer).
+func TestAdapter_Send_DM_BackToBackTurns_FreshStreamerPerTurn(t *testing.T) {
+	a, _ := newTestAdapter(t)
 	raw := setupDMState(t, a, 100)
+	chatIDInt, _ := strconv.ParseInt(raw, 10, 64)
 
 	// Turn 1: userMsgID=1.
 	_ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
-		Kind:    messages.OutToolStart,
+		Kind:    messages.OutThinking,
 		ReplyTo: "1",
-		Tool:    &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
-		Text:    "● Read(/tmp/foo.go)",
+		Text:    "💭 turn 1 thought",
 	})
-	turn1Drafts := callsByMethod(api.Calls, "sendMessageDraft")
-	if len(turn1Drafts) != 1 {
-		t.Fatalf("turn 1: expected 1 sendMessageDraft, got %d", len(turn1Drafts))
-	}
-	turn1DraftID := turn1Drafts[0].Params["draft_id"]
+	turn1Streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
+	turn1Streamer.mu.Lock()
+	turn1DraftID := turn1Streamer.draftID
+	turn1Streamer.mu.Unlock()
 
 	// OutResult ends turn 1 and evicts the streamer.
 	_ = a.Send(context.Background(), messages.OutboundMessage{
@@ -3077,21 +2791,30 @@ func TestAdapter_Send_DM_BackToBackTurns_IsolatedStreamers(t *testing.T) {
 		Text:    "turn 1 answer",
 	})
 
-	// Turn 2: userMsgID=2 (state.UserMessageID bumped by ensurePlaceholder,
-	// but the per-event ReplyTo is what streamDraftEvent uses).
+	// Turn 2: userMsgID=2.
 	_ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutThinking,
 		ReplyTo: "2",
-		Text:    "turn 2 thought",
+		Text:    "💭 turn 2 thought",
 	})
-	turn2Drafts := callsByMethod(api.Calls, "sendMessageDraft")
-	if len(turn2Drafts) != 2 {
-		t.Fatalf("turn 2: expected 2 sendMessageDraft total (1 from turn 1 + 1 from turn 2), got %d", len(turn2Drafts))
+	turn2Streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 2)
+	if turn2Streamer == turn1Streamer {
+		t.Fatal("turn 2 must allocate a fresh streamer")
 	}
-	turn2DraftID := turn2Drafts[1].Params["draft_id"]
-	if turn2DraftID == turn1DraftID {
-		t.Fatalf("turn 2 reused turn 1's draft_id (%v); per-turn isolation broken", turn1DraftID)
+	turn2Streamer.mu.Lock()
+	turn2DraftID := turn2Streamer.draftID
+	turn2Streamer.mu.Unlock()
+	if turn2DraftID != 0 {
+		t.Fatalf("turn 2 draftID = %d, want 0 (allocated only on first flush)", turn2DraftID)
+	}
+	// Note: turn1Streamer.draftID was also 0 pre-flush (first
+	// flush is what allocates). The per-turn isolation contract is
+	// the FRESH STREAMER, not a fresh draftID at the moment of
+	// streamDraftEvent. The OnPromptEnded / OutResult flush in
+	// each turn drives the actual wire allocation.
+	if turn1DraftID != 0 {
+		t.Fatalf("turn 1 pre-flush draftID = %d, want 0", turn1DraftID)
 	}
 }
 

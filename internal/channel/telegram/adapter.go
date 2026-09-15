@@ -714,7 +714,7 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 		priorUserMsgID, userMsgErr := strconv.Atoi(state.UserMessageID)
 		if userMsgErr == nil && priorUserMsgID > 0 {
 			if chatIDInt, chatErr := strconv.ParseInt(chatID, 10, 64); chatErr == nil {
-				a.draftStreamers.endProcess(chatIDInt, topicID, priorUserMsgID)
+				a.draftStreamers.endProcess(ctx, chatIDInt, topicID, priorUserMsgID)
 			}
 		}
 	}
@@ -1225,18 +1225,16 @@ func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicI
 			return false, nil
 		}
 		streamer := a.draftStreamers.getOrCreate(a.api, a.logger, chatIDInt, topicID, userMsgID)
-		// DM sendMessageDraft keeps its REPLACE / ACCUMULATE bool
-		// contract (see #383); the group path takes the typed Kind
-		// and derives REPLACE internally.
-		replace := kind == messages.OutThinking || kind == messages.OutToolStart
-		err := streamer.appendEventWithThread(ctx, segment, replace, topicID)
-		if err != nil {
-			// DM draft failed: drop the event. Do NOT fall through
-			// to the richMessage path ("think/tool 绝不混进正常的
-			// richMessage"). Logging is the streamer's job.
-			return true, nil
-		}
-		return true, nil
+		// DM path mirrors group_draft.go's two-stack buffer: OutThinking
+		// / OutToolStart / OutToolEnd feed the streamer's
+		// thinkingStack / toolsStack and a 10s timer triggers a
+		// sendRichMessageDraft flush of the latest 5+5 entries.
+		// topicID is captured on the streamer (for forum topic routing
+		// — though DM == private has topicID == 0 today, the path is
+		// kept for parity with groupDraftManager).
+		_ = topicID
+		handled, err := streamer.streamDraftEvent(ctx, segment, kind)
+		return handled, err
 	case ChatKindGroup:
 		if a.groupDraft == nil {
 			return false, nil
@@ -1584,7 +1582,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// Empty-text silent drop already happened at the top of
 		// Send, so msg.Text is non-empty here.
 		chatIDInt, _ := strconv.ParseInt(rawChatID, 10, 64)
-		a.draftStreamers.endProcess(chatIDInt, topicID, replyAnchor)
+		a.draftStreamers.endProcess(ctx, chatIDInt, topicID, replyAnchor)
 		if a.groupDraft != nil {
 			a.groupDraft.endProcess(ctx, rawChatID, topicID, replyAnchor)
 		}
@@ -1837,9 +1835,11 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	// 5. End the draft process for the chat kind so the next turn
 	// starts fresh. Two surfaces to clear, only one fires per
 	// turn depending on ChatKind:
-	//   - ChatKindPrivate: draftStreamers.endProcess (server-managed
-	//     draft via sendMessageDraft, Bot API 10.3+). Clears
-	//     draft_id + textBuf, preserves failure latch.
+	//   - ChatKindPrivate: draftStreamers.endProcess flushes any
+	//     remaining buffered events via sendRichMessageDraft (the
+	//     final draft surface before the real message lands) and
+	//     drops the streamer from the index. Server pushes the
+	//     draft automatically when OutResult / real message lands.
 	//   - ChatKindGroup:   groupDraft.endProcess deletes the real
 	//     Telegram message (sendMessageDraft's auto-disappear
 	//     analogue) and clears the persisted DraftMessageID. A
@@ -1855,7 +1855,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 		// userMsgID happens to be 0 (Telegram message_ids start at
 		// 1, so this is paranoid but consistent with the group
 		// path's `parsedUserMsgID > 0` guard below).
-		a.draftStreamers.endProcess(chatIDInt, topicID, parsedUserMsgID)
+		a.draftStreamers.endProcess(ctx, chatIDInt, topicID, parsedUserMsgID)
 	}
 	if a.groupDraft != nil && parsedUserMsgID > 0 {
 		// Skip when no per-turn anchor — the streamer already no-ops

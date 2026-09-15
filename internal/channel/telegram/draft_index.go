@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -8,8 +9,8 @@ import (
 
 // draftIndex manages draftStreamer instances keyed by
 // (chat_id, thread_id, user_msg_id). One streamer per turn so a
-// Bot API < 10.3 failure latch can't poison subsequent turns in
-// the same chat, and so cross-turn visual surfaces stay isolated
+// transient wire failure in turn N doesn't poison subsequent turns
+// in the same chat, and so cross-turn visual surfaces stay isolated
 // even if the runtime is late delivering events (see
 // docs/channel/telegram.md §11.12.11.3 — per-prompt isolation).
 //
@@ -48,16 +49,20 @@ func (i *draftIndex) getOrCreate(api apiClient, log *slog.Logger, chatID int64, 
 	return s
 }
 
-// reset purges the streamer state for one turn (called from
-// ensurePlaceholder's prior-turn cleanup, currently a no-op for
-// DM but kept symmetric with group_draft.go's API surface so
-// future DM-side bookkeeping has a stable hook).
+// reset was the prior-DM-turn cleanup hook. Kept for the parallel
+// API surface with group_draft.go's ensureEntry / endProcess
+// pattern; current DM callers have no use for it but the index
+// stays symmetric so future per-turn bookkeeping has a stable hook.
 func (i *draftIndex) reset(chatID int64, threadID int, userMsgID int) {
 	key := draftIndexKey(chatID, threadID, userMsgID)
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if s, ok := i.streamers[key]; ok {
-		s.resetState()
+		s.mu.Lock()
+		s.draftID = 0
+		s.thinkingStack = s.thinkingStack[:0]
+		s.toolsStack = s.toolsStack[:0]
+		s.mu.Unlock()
 	}
 }
 
@@ -65,16 +70,17 @@ func (i *draftIndex) reset(chatID int64, threadID int, userMsgID int) {
 // (typically after OutResult / OnPromptEnded). For DM we
 // EVICT the streamer — the next turn allocates a fresh one with
 // a fresh draft_id, which is the whole point of the per-turn
-// isolation. The failed latch is preserved in case eviction is
-// short-circuited (see resetProcess) but the typical happy-path
-// caller wants the streamer gone so subsequent turns don't see
-// stale state.
-func (i *draftIndex) endProcess(chatID int64, threadID int, userMsgID int) {
+// isolation. The streamer first runs its own endProcess to stop
+// the timer and flush any remaining buffered events as the final
+// surface before the real message (OutResult) lands.
+func (i *draftIndex) endProcess(ctx context.Context, chatID int64, threadID int, userMsgID int) {
 	key := draftIndexKey(chatID, threadID, userMsgID)
 	i.mu.Lock()
-	defer i.mu.Unlock()
-	if s, ok := i.streamers[key]; ok {
-		s.resetProcess()
-		delete(i.streamers, key)
+	s, ok := i.streamers[key]
+	delete(i.streamers, key)
+	i.mu.Unlock()
+	if !ok {
+		return
 	}
+	s.endProcess(ctx)
 }

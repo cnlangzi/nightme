@@ -159,7 +159,7 @@ Topic
 | `OutMessageState` / `OutMessageStateRemoved` | reactions 独立轨道 | `setMessageReaction` 贴到 user message（v6.3 单 reaction 预算） |
 | `OutInit` | silent drop | — |
 
-`OutThinking` / `OutToolStart` / `OutToolEnd` 在 DM 下走 §11.12.11.1 的 `sendMessageDraft` 路径，非 DM 走 §11.12.11.2 的 simulated DraftMessage 路径；两者都跟 rich turn 并行 — draft / DraftMessage 是这三类事件的 live streaming surface，rich turn 是其它事件的承载面。Draft path 失败时这三类事件直接 DROP，不回退到 rich turn。
+`OutThinking` / `OutToolStart` / `OutToolEnd` 在 DM 下走 §11.12.1 的 `sendRichMessageDraft` 路径，非 DM 走 §11.12.2 的 simulated DraftMessage 路径；两者都跟 rich turn 并行 — draft / DraftMessage 是这三类事件的 live streaming surface，rich turn 是其它事件的承载面。Draft path 失败时还原 buffer（issue #391）下次重试；最终落败才 DROP。
 
 视觉形态：
 
@@ -949,27 +949,61 @@ LRU cap = 1000（按 user message 计，cap = 1000 个并发 turn）。FIFO evic
 
 三类事件在 DM / group / forum topic 下走两条不同路径，行为对位飞书 receipt 的"live streaming"语义：用户进入 chat 立刻看到当前 think/tool 进度，turn 终止后自动消失。
 
-### 11.12.1 DM 私聊：`sendMessageDraft`
+### 11.12.1 DM 私聊：`sendRichMessageDraft`
 
-Bot API 10.3（2026-08-24）起 `sendMessageDraft(chat_id, draft_id, text)` 在 `chat.type == "private"` 下可用：bot 反复调用同一 `draft_id` 时，客户端原地"动画过渡"draft 文本，不会替换为新消息；30 秒内未更新则自动消失；bot 发任何 real message 到同一 chat 时 draft 也立即消失。
+Bot API 10.3 起 `sendMessageDraft` 在 `chat.type == "private"` 下可用；后续版本起 `sendRichMessageDraft` 允许 draft body 是 `rich_message={"blocks":[…]}` 数组，视觉与 §11.12.2 group simulated DraftMessage 一致——同一个 server-managed animated surface 容器，承载结构化 rich blocks（`draft_id` 仍是 server key）。
 
-nightme 把这条路径用在 DM 的三类流式事件上：
+架构与 §11.12.2 group simulated DraftMessage 完全平行：
 
-- `OutThinking` → **REPLACE** 语义：buffer 清空重写，draft body = `"💭 " + msg.Text`
-- `OutToolStart` → **REPLACE** 语义：draft body = `"● Tool(args)"`（`formatToolStartCall`）
-- `OutToolEnd` → **ACCUMULATE** 语义：append `"\n\n⎿ result"` 到现有 draft body，堆叠在匹配 OutToolStart 下方
+| 维度 | DM `sendRichMessageDraft` | group simulated DraftMessage |
+| --- | --- | --- |
+| 缓冲 | `thinkingStack` + `toolsStack`，各 cap 50 | 同 |
+| Send window per flush | latest 5 from each stack | 同 |
+| Trigger | 10s timer / endProcess | 同 |
+| Lock | `mu`（buffer 短持）/ `flushMu`（wire 期间） | 同 |
+| 失败 | 还原 buffer，下次重试（issue #391 对齐 group） | 同 |
+| 终态 | server 在 OutResult 落地时推 draft | bot 显式 `deleteMessage` |
+| Per-turn 隔离 | `draftIndexKey = chatID\|threadID\|userMsgID` | `groupDraftKey = chatID\|topicID\|userMsgID` |
+
+视觉：
 
 ```text
-OutThinking    →  draft = "💭 considering whether to invoke Read"     (REPLACE)
-OutToolStart   →  draft = "🔧 ● Read Tool(args)"                       (REPLACE)
-OutToolEnd     →  draft = "🔧 ● Read Tool(args)\n\n⎿  📄 Read → 47 lines" (ACCUMULATE)
-OutThinking    →  draft = "💭 considering whether to invoke Bash"        (REPLACE)
-OutToolStart   →  draft = "🔧 ● Bash(go build)"                          (REPLACE)
-OutToolEnd     →  draft = "🔧 ● Bash(go build)\n\n⎿  💻 Bash done"        (ACCUMULATE)
-OutResult      →  real message 落地 → server 把 draft 推出
+forum topic (user 视角)
+├─ User message: "帮我看看 foo.go"
+├─ DraftMessage (rich, animated): 最新 5 thinking + 最新 5 tool blocks   ← sendRichMessageDraft
+├─ rich turn (OutHeartbeat PATCH): "🤖 Working... 💭 N · 🔧 M"
+├─ OutReply: "answer text..."（独立 sendRichMessage）
+└─ OutResult: "📝 final answer..."（独立 sendRichMessage）
+
+turn end: OutResult 落地 → server 把 draft 推掉
 ```
 
-REPLACE 让单个 draft 在每个事件时重置（draft 的本质是"每次只显示一个事件"），ACCUMULATE 让单个 tool call 的 `🔧 call / ⎿ result` 一对在同一 draft 里形成完整记录，但**只在匹配 toolstart 之后立即**——下一个 toolstart 会 REPLACE 整个 draft。
+#### Lock 纪律（与 group 同款）
+
+```text
+streamDraftEvent：
+    mu.Lock()                            ← 极短，append + peek
+    switch kind:
+      OutThinking → thinkingStack append + FIFO evict
+      OutToolStart → toolsStack 新 slot + FIFO evict
+      OutToolEnd → 末 slot.ends append；空则 orphan slot
+    mu.Unlock()
+    startFlushTimerIfIdleLocked()        ← 不持 mu
+
+flushLocked（timer / endProcess 触发）：
+    1. mu.Lock(): pop latest 5+5 → mu.Unlock()
+    2. flushMu.Lock(): marshal + sendRichMessageDraft → flushMu.Unlock()
+    3. 失败 → mu.Lock(): 还原 slices → mu.Unlock()
+    4. 空 buffer → mu.Lock(): Stop timer + flushTimer=nil → mu.Unlock()
+
+endProcess：
+    - mu.Lock(): stop flushTimer
+    - flushLocked（reason="endProcess"）
+    - mu.Lock(): draftID = 0 → mu.Unlock()
+    - 外部 index 已 evict（draftStreamers.endProcess）
+```
+
+**关键**：`flushLocked` 的 wire 调用期间只持 `flushMu`，**不持 `mu`**。新 event 进 `streamDraftEvent` 走 `mu` 不冲突，因此即便 Telegram API 卡住，runtime 也不会卡在 `streamDraftEvent` 上（2026-09-15 21:00 群组那个 bug 的修复直接照搬）。
 
 #### Per-turn streamer 隔离
 
@@ -980,14 +1014,14 @@ REPLACE 让单个 draft 在每个事件时重置（draft 的本质是"每次只�
 | OutThinking → 新 streamer + 新 draft_id | 旧 streamer 已被 `endProcess` evict |
 | OutToolStart → draft 累积 | 新 streamer + 新 draft_id 重新走 |
 | OutToolEnd → draft 累积 | |
-| OutResult → `draftStreamers.endProcess` 清 draft + textBuf | |
+| OutResult → `draftStreamers.endProcess` 清 streamer | |
 | OnPromptEnded → safety net 调 `endProcess`（error-only turn / abort） | |
 
 视觉隔离：每个 turn 的 draft 表面独立，即便 turn N 滞留的 late event 飞到 turn N+1 也不会"复活"turn N 的 draft surface（各自的 draft_id 不同，server key 隔离）。
 
 #### Gate & drop-on-failure
 
-`streamDraftEvent` 仅在 `state.ChatKind == "private"` 时走 DM draft 路径；group / channel / no-state → fall through 到 rich turn path。DM draft path 失败时（Bot API < 10.3 或 server 拒），三类事件**DROP 不回退**到 rich turn —— 一致失败，避免 turn 里同时出现 draft + rich message 两条 think/tool 痕迹。
+`streamDraftEvent` 仅在 `state.ChatKind == "private"` 时走 DM draft 路径；group / channel / no-state → fall through 到 rich turn path。DM draft path 失败时（Bot API < 10.3 或 server 拒），三类事件**DROP 不回退**到 rich turn —— 一致失败，避免 turn 里同时出现 draft + rich message 两条 think/tool 痕迹。issue #391 contract：失败还原 buffer，下次重试。
 
 #### Lifecycle
 
@@ -998,19 +1032,22 @@ turn start
 
 turn N 期间
   OutThinking / OutToolStart / OutToolEnd
-    → streamDraftEvent → ChatKind == "private" → draftStreamer.appendEventWithThread
-    → ChatKind == "group"  → groupDraft.streamDraftEvent（§11.12.11.2）
+    → streamDraftEvent → ChatKind == "private" → draftStreamer.streamDraftEvent
+    → ChatKind == "group"  → groupDraft.streamDraftEvent（§11.12.2）
     → 其它 / no state     → fall through 到 rich turn
     → DM draft 成功 → (true, nil)            → caller return nil（consumed）
-    → DM draft 失败 → (true, nil) + log warn → caller return nil（DROP）
+    → DM draft 失败 → buffer 还原，下一次 timer / event 重试
 
 turn N ends
   OutResult 发送（real sendRichMessage）
-    1. draftStreamers.endProcess(chatID, topicID, replyAnchor) → 清 draft_id + textBuf（保留 failed latch）
+    1. draftStreamers.endProcess(ctx, chatID, topicID, replyAnchor)
+       ├─ stop flush timer
+       ├─ buffer 非空 → flushLocked("endProcess")
+       └─ drop streamer（no deleteMessage — server handles）
     2. sendOutResultMessage → real message 落地 → server 推 draft
   OnPromptEnded handler 末尾（safety net：no-OutResult turn）
     1. ...rich turn flush + 🎉 + purge
-    2. draftStreamers.endProcess(chatID, topicID, parsedUserMsgID)
+    2. draftStreamers.endProcess(ctx, chatID, topicID, parsedUserMsgID)
        parsedUserMsgID == 0 时 skip（orphan startup / test 路径）
 
 turn N+1 开始
@@ -1020,7 +1057,7 @@ turn N+1 开始
 
 #### Bot API 兼容性
 
-`sendMessageDraft` 是 Bot API 10.3 新增方法，daemon 端无需探测版本：第一次失败 latch 行为退化到"所有 think/tool drop"，daemon 重启后重试。客户端不需要 10.3：旧客户端收到 sendMessageDraft 会以静默静态文本渲染或忽略 draft，但 OutResult/OutReply 等 real message 正常落地，无功能损失。
+`sendRichMessageDraft` 是 rich 版 draft 方法（Bot API 10.3+ 扩展），daemon 端无需探测版本：失败时 buffer 还原，下次重试（issue #391 contract 与 group 对齐）。客户端不需要 10.3：旧客户端收到 sendRichMessageDraft 会以静默静态文本渲染或忽略 draft，但 OutResult / OutReply 等 real message 正常落地，无功能损失。
 
 ### 11.12.2 非私聊：simulated DraftMessage
 
@@ -1175,7 +1212,7 @@ turn end: DraftMessage 被 deleteMessage 移除
 
 | Limit | 描述 | 缓解 |
 | --- | --- | --- |
-| DM 下 `sendMessageDraft` 是 Bot API 10.3+ | Bot library < 10.3 拒收 → latch 行为退化，所有 DM think/tool 永久 drop | daemon 重启重试；latch 跨 turn 保留，需要用户升级 bot library 或忽略 think/tool 流式视觉 |
+| DM 下 `sendRichMessageDraft` 是 Bot API 10.3+ 扩展 | Bot library < 10.3 拒收 → wire call 持续失败，buffer 还原后下次重试仍失败，所有 DM think/tool 进 stack 但永远不落地 | daemon 重启无济于事（issue #391 buffer-restoration 保留条目），需要用户升级 bot library 或忽略 think/tool 流式视觉 |
 | 非私聊 simulated DraftMessage 是真实 message | turn 期间用户可见（不像 DM draft 那样只在 client 渲染）；如 sendMessage 失败 fall through 到 rich turn，会同时存在 DraftMessage + rich turn 两条 think/tool 痕迹 | cold-create 失败 → handled=false fall through（rich turn 第一段追加）；edit 失败 → 静默 log |
 | `group_draft.go` DraftMessage 持久化 | daemon 重启 mid-turn 后 `state.DraftMessageID > 0`，下次 event 拿回同 message_id 继续 edit；turn end safety net 删之 | orphan recovery：下次 `ensurePlaceholder` 先 `deleteOrphanSync` 清上 turn 残留 |
 | `state.ChatType` 老格式 state 文件 | 老 daemon 写入的 `chat_type` 字段在 `migrateChatNew` 迁移；load 时立即 save 持久化，零迁移延迟 | `LegacyChatType` 字段保留读路径；新写不再带 |
@@ -1364,12 +1401,12 @@ sendMessage 失败 → retry 3 次 → 仍失败就返回 error，runtime 看到
 
 - **结论**：nightme 不实现 Bot API 10.3 起的 DM 私聊 Topic 模式
 - **API 现状**：Bot API 10.3 起 `getMe.has_topics_enabled == true` 的 bot 可在私聊中调用 `createForumTopic` / `editForumTopic` / `deleteForumTopic` / `unpinAllForumTopicMessages`，`Message.message_thread_id` / `Message.is_topic_message` 也已扩到 private chat。**`closeForumTopic` / `reopenForumTopic` 仍仅支持 forum supergroup chat**，DM 调用 server 拒
-- **部分缓解**：`OutThinking` / `OutToolStart` / `OutToolEnd` 三类事件在 DM 下走 `sendMessageDraft`（详见 §11.12.1），无须 forum topic 容器就能给用户"思考中"的视觉反馈
+- **部分缓解**：`OutThinking` / `OutToolStart` / `OutToolEnd` 三类事件在 DM 下走 `sendRichMessageDraft`（详见 §11.12.1），无须 forum topic 容器就能给用户"思考中"的视觉反馈
 - **不支持理由**：
   1. **eligibility 不可控**：`Bot Platform Developer Terms of Service` §6.2.6 限定 "one or more eligible TPAs they own" 可启用该能力，Telegram 未公开 eligibility 判定细则
   2. **API 缺口**：DM 不支持 `closeForumTopic` / `reopenForumTopic`，Topic 复用、归档、限流清理都得改走 `deleteForumTopic`（一次性删 topic + 全部消息）
   3. **合规绑定**：启用后该 TPA 内 Stars 购买按 15% 非退款抽成（§6.2.6）
-  4. **现有路径够用**：DM `sendMessageDraft` 给用户清晰的"思考中"视觉，rich turn 单条 rich message 在 DM 下承担 turn 状态机，topic 容器增益边际低
+  4. **现有路径够用**：DM `sendRichMessageDraft` 给用户清晰的"思考中"视觉，rich turn 单条 rich message 在 DM 下承担 turn 状态机，topic 容器增益边际低
 - **重审触发条件**：Telegram 把 DM topic mode 开放给所有 bot / Bot API 新增 DM `closeForumTopic` / `reopenForumTopic` / nightme 业务侧有"DM 内多任务并行"硬需求
 
 ## 14. Telegram 独有、未利用的能力

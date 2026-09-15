@@ -86,7 +86,7 @@ NightMe 直接接住你已经在用的 AI 编程 agent 和日常聊天的 IM。�
 | Channel | 状态 |
 |---|---|
 | **飞书 Feishu**（国内）/ **Lark**（国际） | ⭐ 推荐 — `nightme login feishu` |
-| **Telegram** | 公测 — `nightme login telegram` |
+| **Telegram** | 正式发布 — `nightme login telegram` |
 | **Slack** | 开发中 — `nightme login slack` |
 
 ## Prerequisites
@@ -535,7 +535,7 @@ internal/
   bridge/                          # Bridge abstraction, one sub-package per agent
     acp/  claudecode/  codex/  copilot/  cursor/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram beta; slack in development)
+    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory

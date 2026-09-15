@@ -4,10 +4,13 @@
 // compile time, e.g.:
 //
 //	go build -ldflags "\
-//	    -X github.com/cnlangzi/nightme/internal/version.Version=$(git describe --tags --always) \
-//	    -X github.com/cnlangzi/nightme/internal/version.GitCommit=$(git rev-parse --short HEAD) \
+//	    -X github.com/cnlangzi/nightme/internal/version.Version=0.3.7 \
+//	    -X github.com/cnlangzi/nightme/internal/version.GitCommit=abc1234 \
 //	    -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 //	    ./cmd/nightme
+//
+// VERSION and GIT_COMMIT are typically set via environment variables
+// by the CI pipeline (ci.yml: 0.0.0, release.yml: tag name).
 //
 // The defaults below are used when no -ldflags are supplied (e.g.
 // `go run` during development) so `nightme --version` still prints

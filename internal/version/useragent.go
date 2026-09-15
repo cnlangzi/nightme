@@ -83,7 +83,7 @@ func uaToken(s string) string {
 }
 
 // isTchar reports whether r is an RFC 9110 §5.6.2 tchar. Every
-// value we actually emit — a semver tag, a `git describe` string,
+// value we actually emit — a semver tag, a version string,
 // a hex SHA, a Go toolchain version — is already tchar-clean, so
 // this only ever fires on injected garbage.
 func isTchar(r rune) bool {

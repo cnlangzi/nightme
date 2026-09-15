@@ -296,6 +296,9 @@ jobs:
       # on raw mode, which is the larger regression surface.
       - name: Build smoke binary
         shell: bash
+        env:
+          VERSION: "0.0.0"
+          GIT_COMMIT: ${{ github.sha }}
         run: |
           # Use the canonical build entry points so CI exercises
           # exactly what a developer would run locally:
@@ -577,6 +580,9 @@ jobs:
       # job's "Verify Linux tray split" step, which does install them.
       - name: Build nightme
         shell: bash
+        env:
+          VERSION: "0.0.0"
+          GIT_COMMIT: ${{ github.sha }}
         run: |
           # Use the canonical build entry points (mirrors the
           # `test` job's `Build smoke binary` step) so CI builds

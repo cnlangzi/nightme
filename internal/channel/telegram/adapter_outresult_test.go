@@ -15,8 +15,10 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -435,5 +437,278 @@ func TestOutResult_ResultMessageIDAnchorsOnPromptEnded(t *testing.T) {
 	}
 	if stampedTarget != 102 {
 		t.Errorf("🎉 stamped on message_id=%d, want 102 (resultMID)", stampedTarget)
+	}
+}
+
+// editBlocks extracts the rich_message.blocks JSON from an
+// editMessageText call's params map and decodes it. Returns
+// (nil, false) when the call isn't an edit or the blocks payload
+// is malformed. Companion to decodeBlocks (which only handles
+// sendRichMessage — editMessageText uses a different envelope:
+// rich_message is a json.RawMessage of the full envelope
+// `{"blocks":[…]}`, while sendRichMessage wraps it as
+// map[string]any{"blocks": json.RawMessage(…)}).
+func editBlocks(params map[string]any) ([]map[string]any, bool) {
+	raw, ok := params["rich_message"].(json.RawMessage)
+	if !ok {
+		return nil, false
+	}
+	var envelope struct {
+		Blocks []map[string]any `json:"blocks"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, false
+	}
+	return envelope.Blocks, true
+}
+
+// lastEditBlocks returns the blocks from the most recent
+// editMessageText call, or (nil, false) when no edit was
+// recorded.
+func lastEditBlocks(calls []fakeCall) ([]map[string]any, bool) {
+	for _, call := range slices.Backward(calls) {
+		if call.Method != "editMessageText" {
+			continue
+		}
+		return editBlocks(call.Params)
+	}
+	return nil, false
+}
+
+// TestOutResult_RefreshesTurnFooterWithUsage pins the new
+// contract: when OutResult arrives with Usage populated, the
+// rich-turn placeholder card's next editMessageText PATCH
+// carries the 💰 token-usage line. Previously the placeholder's
+// footer was last-stamped by a streaming OutReply (msg.Usage==nil)
+// and stayed stale until turn end — leaving the user staring at
+// a "🤖 Working..." card without ever seeing the token bar.
+//
+// Flow:
+//  1. OutReply cold-creates the placeholder (msg.Usage==nil →
+//     no 💰 line).
+//  2. OutResult lands → standalone message sent + turn.footer
+//     refreshed with the OutResult's StatusBarLines (Usage
+//     populated).
+//  3. OnPromptEnded's synchronous flushRichTurn PATCHes the
+//     placeholder; that final editMessageText's blocks carry a
+//     footer block whose text contains 💰.
+func TestOutResult_RefreshesTurnFooterWithUsage(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
+
+	// 1. OutReply — streaming event, msg.Usage is nil. Cold-creates
+	//    the placeholder; StatusBarLines on this message yields
+	//    Identity + Git (no Usage line) when those fields are
+	//    stamped by the runtime. We exercise the "no status
+	//    metadata on streaming event" path explicitly to lock the
+	//    delta: the streaming PATCH carries NO 💰 row.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutReply,
+		Text:   "starting",
+	}); err != nil {
+		t.Fatalf("OutReply Send: %v", err)
+	}
+
+	// 2. OutResult with Usage populated — both a standalone
+	//    sendRichMessage AND a turn.footer refresh happen here.
+	if err := a.Send(context.Background(), richOut(messages.OutResult, "final answer")); err != nil {
+		t.Fatalf("OutResult Send: %v", err)
+	}
+
+	// 3. Force a synchronous flush via OnPromptEnded's helper path
+	//    so the test doesn't race the 250ms debounce. The flush
+	//    emits a final editMessageText whose blocks carry the
+	//    refreshed footer (💰 included).
+	api.Calls = api.Calls[:0]
+	a.OnPromptEndedRichTurn("100", 0, 77)
+
+	blocks, ok := lastEditBlocks(api.snapshotCalls())
+	if !ok {
+		t.Fatal("expected an editMessageText from the synchronous flush; got none")
+	}
+	// Find the footer block; it should be the last block
+	// (after entries + divider).
+	var footerText string
+	for _, b := range blocks {
+		if b["type"] == "footer" {
+			text, _ := b["text"].(string)
+			footerText = text
+		}
+	}
+	if footerText == "" {
+		t.Fatalf("placeholder PATCH must include a footer block; blocks=%+v", blocks)
+	}
+	if !strings.Contains(footerText, "💰:") {
+		t.Errorf("placeholder footer must carry the 💰 token-usage line; got %q", footerText)
+	}
+	// Identity and Git lines survive the refresh too — the
+	// StatusBarLines snapshot from OutResult carries all three
+	// rows, not just Usage.
+	for _, want := range []string{"🤖:", "💰:", "📁:"} {
+		if !strings.Contains(footerText, want) {
+			t.Errorf("placeholder footer missing %q; got %q", want, footerText)
+		}
+	}
+}
+
+// TestOutResult_UsageOnlyNotDropped pins the loosened Send()
+// top-level guard: a turn that ends with empty Text but
+// populated Usage (translate.go passes those through) must NOT
+// be silently dropped at the empty-text filter. The richer
+// surface (footer refresh) is the only signal worth sending
+// — no standalone rich message (body is empty), but the
+// placeholder card still picks up the 💰 line on next flush.
+func TestOutResult_UsageOnlyNotDropped(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
+
+	// Seed the placeholder so the refresh path has something to
+	// PATCH.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutReply,
+		Text:   "starting",
+	}); err != nil {
+		t.Fatalf("OutReply Send: %v", err)
+	}
+	api.Calls = api.Calls[:0]
+
+	// Usage-only OutResult: empty Text, populated Usage. The
+	// pre-fix Send() top-level guard would drop this on the
+	// "OutResult with empty Text → silent drop" branch; the
+	// post-fix guard lets it through because StatusBarLines is
+	// non-nil.
+	usageOnly := messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutResult,
+		Text:   "",
+		Usage: &agent.UsageInfo{
+			InputTokens: 1_000, OutputTokens: 200, CostUSD: 0.012,
+		},
+	}
+	if err := a.Send(context.Background(), usageOnly); err != nil {
+		t.Fatalf("usage-only OutResult must not error: %v", err)
+	}
+
+	// No standalone rich message body — sendRichMessage count
+	// stays at 1 (the seed placeholder cold-create).
+	richCalls := findCalls(api.snapshotCalls(), "sendRichMessage")
+	if len(richCalls) != 0 {
+		t.Errorf("usage-only OutResult must not send a standalone message; got %d sendRichMessage calls",
+			len(richCalls))
+	}
+
+	// But the synchronous flush must include the 💰 row on the
+	// placeholder PATCH.
+	a.OnPromptEndedRichTurn("100", 0, 77)
+	blocks, ok := lastEditBlocks(api.snapshotCalls())
+	if !ok {
+		t.Fatal("expected editMessageText from flush; got none")
+	}
+	var footerText string
+	for _, b := range blocks {
+		if b["type"] == "footer" {
+			text, _ := b["text"].(string)
+			footerText = text
+		}
+	}
+	if !strings.Contains(footerText, "💰:") {
+		t.Errorf("usage-only OutResult must refresh placeholder footer with 💰; got %q", footerText)
+	}
+}
+
+// TestOutResult_ResultTextPreferredOverText verifies that
+// sendOutResultMessage uses msg.Result.Text (the canonical
+// OutResult payload) when present, rather than msg.Text. This
+// matches feishu's adapter and the OutboundMessage struct
+// contract ("Text carries the rendered body for OutReply /
+// OutThinking"; Result.Text is the OutResult body).
+func TestOutResult_ResultTextPreferredOverText(t *testing.T) {
+	a, api := newTestAdapter(t)
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "100",
+		Kind:   messages.OutResult,
+		Text:   "stale reply text",
+		Result: &agent.AgentResultEvent{
+			Text: "canonical result text",
+		},
+	}); err != nil {
+		t.Fatalf("OutResult Send: %v", err)
+	}
+	call := findSendRichMessage(api.snapshotCalls())
+	if call == nil {
+		t.Fatal("sendRichMessage missing")
+	}
+	blocks, ok := decodeBlocks(call.Params)
+	if !ok {
+		t.Fatalf("decodeBlocks failed; params=%+v", call.Params)
+	}
+	// Find the body paragraph and assert its text comes from
+	// Result.Text, not Text.
+	var bodyText string
+	for _, b := range blocks {
+		if b["type"] == "paragraph" {
+			bodyText, _ = b["text"].(string)
+			break
+		}
+	}
+	if !strings.Contains(bodyText, "canonical result text") {
+		t.Errorf("body must use msg.Result.Text; got %q", bodyText)
+	}
+	if strings.Contains(bodyText, "stale reply text") {
+		t.Errorf("body must not fall back to msg.Text when Result is set; got %q", bodyText)
+	}
+}
+
+// TestOutResult_FooterRefreshUpdatesDebouncedFlush verifies the
+// post-fix debounced flush path: after OutResult lands with
+// Usage, the 250ms debounce timer fires and emits an
+// editMessageText PATCH whose footer carries the 💰 row. Uses
+// a real sleep + buffer to let the timer fire — slower than
+// OnPromptEndedRichTurn but covers the async flush contract
+// without coupling to OnPromptEnded's call signature.
+func TestOutResult_FooterRefreshUpdatesDebouncedFlush(t *testing.T) {
+	a, api := newTestAdapter(t)
+	_ = a.state.putTopic(&TopicState{ChatID: "100", TopicID: 0, UserMessageID: "77"})
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_100",
+		Kind:   messages.OutReply,
+		Text:   "starting",
+	}); err != nil {
+		t.Fatalf("OutReply Send: %v", err)
+	}
+	api.Calls = api.Calls[:0]
+
+	if err := a.Send(context.Background(), richOut(messages.OutResult, "final")); err != nil {
+		t.Fatalf("OutResult Send: %v", err)
+	}
+
+	// Wait for the 250ms debounce + the 5s flush timeout buffer
+	// (the flush itself is fast; we just need the timer to fire).
+	deadline := time.Now().Add(2 * time.Second)
+	var blocks []map[string]any
+	var found bool
+	for time.Now().Before(deadline) {
+		if b, ok := lastEditBlocks(api.snapshotCalls()); ok {
+			blocks = b
+			found = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !found {
+		t.Fatal("debounced flush never emitted an editMessageText within 2s")
+	}
+	var footerText string
+	for _, blk := range blocks {
+		if blk["type"] == "footer" {
+			text, _ := blk["text"].(string)
+			footerText = text
+		}
+	}
+	if !strings.Contains(footerText, "💰:") {
+		t.Errorf("debounced flush must carry 💰 line; got footer=%q blocks=%+v", footerText, blocks)
 	}
 }

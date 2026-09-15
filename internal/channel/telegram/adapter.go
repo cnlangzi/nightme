@@ -1284,6 +1284,17 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	switch msg.Kind {
 	case messages.OutReply, messages.OutCommandReply, messages.OutResult, messages.OutThinking:
 		if strings.TrimSpace(msg.Text) == "" {
+			// OutResult is permissive: a turn may legitimately end
+			// with empty Text + populated Usage (translate.go
+			// passes those through for footer PATCH) or a non-nil
+			// Err (bridge reported an errored result). Only drop
+			// when ALL three signals are empty — otherwise the
+			// rich-turn placeholder would never get its final
+			// Usage line back-stamped.
+			if msg.Kind == messages.OutResult &&
+				(msg.Err != nil || statusbar.StatusBarLines(&msg) != nil) {
+				break
+			}
 			return nil
 		}
 	case messages.OutInit:
@@ -1677,9 +1688,18 @@ func (a *Adapter) appendSegmentForKind(
 	return nil
 }
 
-// sendOutResultMessage emits msg.Text as a standalone reply-anchored
-// rich message via sendRichMessage. Empty text is silently dropped
-// at the top of Send (caller invariant).
+// sendOutResultMessage emits the result body as a standalone
+// reply-anchored rich message via sendRichMessage and refreshes
+// the rich-turn placeholder's footer with the same StatusBar
+// snapshot so the 💰 token-usage row also lands on the live
+// PATCHed card.
+//
+// Body source prefers msg.Result.Text (the canonical OutResult
+// payload per agent.AgentResultEvent) and falls back to msg.Text
+// for slash-command / one-shot reply surfaces that don't carry
+// the typed Result envelope. Empty body silently skips the
+// standalone send — but the footer refresh below still runs when
+// the StatusBar carries any data (Usage / Identity / Git).
 //
 // Wire form: rich_message[blocks] carrying the markdown body walked
 // through markdownToRichBlocks (so headings / fences / lists / quotes
@@ -1709,37 +1729,65 @@ func (a *Adapter) appendSegmentForKind(
 // 🎉 anchor: the rich message_id is stored on richTurn.resultMessageID
 // so OnPromptEnded's terminal reaction lands on the result message
 // rather than the active chain chunk (chain no longer exists in L3).
+//
+// Footer refresh: streaming Out* events (OutReply / OutToolStart /
+// OutToolEnd / OutThinking / …) populate msg.Usage==nil so the
+// StatusBar the rich turn PATCHes during the turn never carries
+// the 💰 line. OutResult is the single event with Usage populated
+// (translate.go stamps it from AgentResultEvent.Usage). Re-stamping
+// turn.footer here is what brings the token-usage row onto the
+// placeholder card on the next editMessageText PATCH (debounced
+// 250ms, or synchronously by OnPromptEndedRichTurn).
 func (a *Adapter) sendOutResultMessage(
 	ctx context.Context,
 	msg messages.OutboundMessage,
 	rawChatID string,
 	topicID, userMessageID int,
 ) error {
-	if strings.TrimSpace(msg.Text) == "" {
-		return nil
+	body := strings.TrimSpace(msg.Text)
+	if msg.Result != nil {
+		body = strings.TrimSpace(msg.Result.Text)
 	}
 
-	blocksJSON, ok := buildResultBlocks(msg.Text, statusbar.StatusBarLines(&msg))
-	if !ok {
-		// Walker succeeded but produced 0 blocks (shouldn't
-		// happen — body is non-empty here — but defensive:
-		// silent drop rather than an empty rich message).
-		return nil
+	footerLines := statusbar.StatusBarLines(&msg)
+
+	if body != "" {
+		blocksJSON, ok := buildResultBlocks(body, footerLines)
+		if !ok {
+			// Walker succeeded but produced 0 blocks (shouldn't
+			// happen — body is non-empty here — but defensive:
+			// silent drop rather than an empty rich message).
+			return nil
+		}
+
+		mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, userMessageID, blocksJSON)
+		if err != nil {
+			a.logger.Warn("telegram: rich OutResult failed (no plain fallback; migration target is rich)",
+				"chat_id", rawChatID,
+				"thread_id", topicID,
+				"blocks_len", len(blocksJSON),
+				"err", err)
+			return err
+		}
+		turn := a.richTurns.getOrCreate(rawChatID, topicID, userMessageID)
+		turn.mu.Lock()
+		turn.resultMessageID = mid
+		turn.mu.Unlock()
 	}
 
-	mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, userMessageID, blocksJSON)
-	if err != nil {
-		a.logger.Warn("telegram: rich OutResult failed (no plain fallback; migration target is rich)",
-			"chat_id", rawChatID,
-			"thread_id", topicID,
-			"blocks_len", len(blocksJSON),
-			"err", err)
-		return err
+	// Refresh the rich-turn placeholder's footer so the live PATCHed
+	// card carries the 💰 token-usage line. Skipped when the
+	// StatusBar is empty (no footer block to render). The next
+	// debounce tick — or OnPromptEndedRichTurn's synchronous flush
+	// — picks this up and emits editMessageText.
+	if len(footerLines) > 0 {
+		turn := a.richTurns.getOrCreate(rawChatID, topicID, userMessageID)
+		turn.mu.Lock()
+		turn.footer = footerLines
+		turn.dirty = true
+		a.scheduleRichTurnFlush(turn)
+		turn.mu.Unlock()
 	}
-	turn := a.richTurns.getOrCreate(rawChatID, topicID, userMessageID)
-	turn.mu.Lock()
-	turn.resultMessageID = mid
-	turn.mu.Unlock()
 	return nil
 }
 

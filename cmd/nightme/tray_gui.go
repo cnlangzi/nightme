@@ -273,7 +273,7 @@ func trayOnReady(opts trayOptions) {
 	// - `<version>` is the compiled-in version.Version,
 	//   same string the REPL banner and `nightme version`
 	//   print, routed through displayVer so a leading "v"
-	//   (which `git describe --tags` injects via ldflags)
+	//   (which the CI pipeline injects via ldflags)
 	//   is stripped before it reaches the UI. Showing it
 	//   here means the user never needs to dig into a
 	//   submenu to learn which build is live.

@@ -1785,18 +1785,7 @@ func (a *Adapter) sendOutResultMessage(
 		turn.mu.Lock()
 		turn.footer = footerLines
 		turn.dirty = true
-		if turn.debounceTimer != nil {
-			turn.debounceTimer.Stop()
-		}
-		turn.debounceTimer = time.AfterFunc(250*time.Millisecond, func() {
-			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := a.flushRichTurn(flushCtx, turn); err != nil && a.logger != nil {
-				a.logger.Warn("telegram: rich turn flush failed",
-					"chat_id", turn.chatID,
-					"err", err)
-			}
-		})
+		a.scheduleRichTurnFlush(turn)
 		turn.mu.Unlock()
 	}
 	return nil

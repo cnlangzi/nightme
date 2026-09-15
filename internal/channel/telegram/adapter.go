@@ -1609,6 +1609,13 @@ func (a *Adapter) appendSegmentForKind(
 // rich message via sendRichMessage. Empty text is silently dropped
 // at the top of Send (caller invariant).
 //
+// Wire form: rich_message[blocks] carrying the markdown body walked
+// through markdownToRichBlocks (so headings / fences / lists / quotes
+// / tables / inline entities reach the wire as proper rich blocks),
+// followed by a divider + footer block whose `text` field is the
+// StatusBar lines rendered as RichText (PR anchors survive as
+// `{"type":"url",...}` entities, not literal markdown).
+//
 // Why no plain-text fallback: the migration to sendRichMessage
 // exists precisely to lift the 4096-char plain-text ceiling (see
 // docs/channel/telegram.md §20.1 — Bot API 10.1 supports up to
@@ -1619,12 +1626,13 @@ func (a *Adapter) appendSegmentForKind(
 // gets a visible "send failed" rather than a silently truncated
 // message that hides what was rejected.
 //
-// Preflight: canUseRichMarkdown gates on char length (<= 32K) and
-// estimated block count (<= 400 / 500 cap with 4/5 buffer). When
-// preflight fails, we attempt the send anyway — Telegram's parser
-// is the source of truth and our heuristic may be conservative.
-// If the server returns RICH_MESSAGE_BLOCKS_TOO_MANY, the caller
-// sees the error and decides what to do (today: log + return).
+// Preflight is delegated to buildResultBlocks / markdownToRichBlocks
+// (block-count cap = 400/500, char cap = 32K). When the walker bails
+// (block-cap / char-cap / malformed shape), buildResultBlocks
+// degrades to a single paragraph block rather than dropping the
+// message. If the server still rejects the resulting blocks
+// (RICH_MESSAGE_BLOCKS_TOO_MANY), the caller sees the error and
+// decides what to do (today: log + return).
 //
 // 🎉 anchor: the rich message_id is stored on richTurn.resultMessageID
 // so OnPromptEnded's terminal reaction lands on the result message
@@ -1639,13 +1647,20 @@ func (a *Adapter) sendOutResultMessage(
 		return nil
 	}
 
-	full := appendTrailerToBody(msg.Text, statusbar.StatusBarLines(&msg))
-	mid, err := a.trySendRichMarkdown(ctx, rawChatID, topicID, userMessageID, full)
+	blocksJSON, ok := buildResultBlocks(msg.Text, statusbar.StatusBarLines(&msg))
+	if !ok {
+		// Walker succeeded but produced 0 blocks (shouldn't
+		// happen — body is non-empty here — but defensive:
+		// silent drop rather than an empty rich message).
+		return nil
+	}
+
+	mid, err := a.trySendRichBlocks(ctx, rawChatID, topicID, userMessageID, blocksJSON)
 	if err != nil {
 		a.logger.Warn("telegram: rich OutResult failed (no plain fallback; migration target is rich)",
 			"chat_id", rawChatID,
 			"thread_id", topicID,
-			"text_len", len(full),
+			"blocks_len", len(blocksJSON),
 			"err", err)
 		return err
 	}
@@ -1813,9 +1828,11 @@ func atoiUserMsgID(s string) int {
 // split this responsibility: chain entries render via
 // chunkBody.Compose() with the trailer stitched in from
 // chain.lastFooter. L3 retired the chain and the plain-text
-// fallback: sendOutResultMessage is now rich-only and calls
-// appendTrailerToBody in render.go to assemble the
-// rich_message[markdown] body. No legacy renderForWire path.
+// fallback: sendOutResultMessage is now rich-only and routes
+// through buildResultBlocks (result_blocks.go) → trySendRichBlocks
+// (rich.go) → rich_message[blocks] body carrying markdown walker
+// blocks plus a divider + footer block. No legacy renderForWire
+// path, no plaintext trailer-in-markdown shape.
 
 func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
 	a.mu.Lock()

@@ -4,8 +4,6 @@ import (
 	"html"
 	"regexp"
 	"strings"
-
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 var (
@@ -331,107 +329,16 @@ func escapeHTML(value string) string {
 	return html.EscapeString(value)
 }
 
-// renderMarkdownSafe is the SOLE place that runs RenderMarkdown +
-// escapeHTML fallback. Callers that need "raw markdown → safe HTML
-// for Telegram wire" must use this rather than duplicating the
-// try-render-or-escape pattern at each call site.
-//
-// Layers above this primitive (each with its own concern):
-//   - RenderForWire: block-level wire entry, used by standalone
-//     messages (sendOutResultMessage)
-//   - chunkBody.Compose: per-entry loop with isHTML flag routing,
-//     used by chain chunks
-//   - splitOversizedSegmentLocked / splitOversizedErrorSegmentLocked:
-//     pre-render the whole oversized segment once before splitting
-//
-// RenderMarkdown and escapeHTML remain exported for the rare caller
-// (tests, low-level Compose per-entry loop, internal parser fall-
-// through) that wants raw escape or raw render.
-//
-// Future feishu §13.17 / §13.19-style sanitize pipeline (image
-// strip, heading demotion, fence newline normalization, non-HTTP
-// URL → plain) should be injected here — one site, every consumer
-// (RenderForWire, chunkBody.Compose, SPLIT pre-render) inherits
-// automatically. See docs/channel/telegram.md §11.12.13 / §11.12.19.
-func renderMarkdownSafe(s string) string {
-	if s == "" {
-		return ""
-	}
-	out, err := RenderMarkdown(s)
-	if err != nil {
-		return escapeHTML(s)
-	}
-	return out
-}
-
-// expandableFullThresholdChars is the cutoff at which RenderForWire
-// wraps the entire rendered block in `<blockquote expandable>` so
-// a single OutResult that looks "long" (already within the 4096
-// hard limit but visually heavy on Telegram) collapses to a one-
-// line "▼ Expand" affordance by default. The wrap is intentional
-// only at the BLOCK level — `>` quote sub-blocks already collapse
-// individually via expandableBlockquoteThresholdChars inside
-// RenderMarkdown, so a long message with many small quotes doesn't
-// get double-folded.
+// expandableFullThresholdChars is the cutoff at which a rendered
+// block that looks "long" (already within the rich path's 32K
+// per-block ceiling but visually heavy on Telegram) is intended
+// to wrap in `<blockquote expandable>` for a one-line "▼ Expand"
+// affordance. Today no caller wires this — the rich path
+// (buildResultBlocks + markdownToRichBlocks) handles long blocks
+// via the preflight's char-cap bail to a single paragraph. Kept
+// here so the §20.6 expandable-quote strategy remains in reach
+// for any future call site.
 const expandableFullThresholdChars = 2000
-
-// appendTrailerToBody appends the StatusBar panel to body if
-// footerLines is non-empty. Returns body unchanged when footer is
-// absent. Sole place where the "body + \n\n + StatusBar frame"
-// trailer pattern lives; previously inlined in sendOutResultMessage
-// and a candidate for duplication in any future standalone-message
-// render path.
-//
-// The "\n\n" gap (not "\n────\n" — see §11.12.4.1 v9 P2.1) gives the
-// StatusBar panel its own visual block below the result body. The
-// panel itself uses box-drawing chars (┌──› / └──›) that are
-// already safe-HTML — no further RenderMarkdown / escapeHTML call
-// here, since either would mangle the frame.
-//
-// Markdown link conversion (§20.7 commit D): footerLines may contain
-// markdown link syntax like `[#284](https://github.com/.../pull/284)`
-// from statusbar.formatPRSegment. The statusbar package emits this
-// for both Feishu (lark_md renders it natively) and Telegram (which
-// would too if we ran it through RenderMarkdown) — but the panel
-// path bypasses RenderMarkdown to preserve the box-drawing frame,
-// so Telegram receives the literal `[#N](url)` text. The user
-// observes `[#284](https://...)` as plain text instead of a clickable
-// link. Convert via the wire-format link rule (escape URL + text,
-// only allow http/https/tg schemes) so Telegram renders it as a
-// proper link while Feishu's statusbar consumer (which still passes
-// the raw textlines through its own lark_md) sees no change.
-func appendTrailerToBody(body string, footerLines []string) string {
-	if len(footerLines) == 0 {
-		return body
-	}
-	converted := make([]string, len(footerLines))
-	for i, line := range footerLines {
-		converted[i] = wireFormatFooterLine(line)
-	}
-	return body + "\n\n" + statusbar.RenderPanel(converted)
-}
-
-// wireFormatFooterLine rewrites markdown link syntax in a single
-// footer line into Telegram-safe HTML. Lines without `[...](...)`
-// pass through unchanged. Lines with unsafe schemes (file://,
-// javascript:, etc.) keep the literal markdown text — the link
-// is suppressed, not coerced into a malicious URL.
-//
-// This is the same rule renderInline applies for inline links;
-// duplicating it here keeps the footer path self-contained (no
-// need to thread an isHTML flag through statusbar to keep the
-// shared statusbar package render-mode-agnostic).
-func wireFormatFooterLine(line string) string {
-	return linkPattern.ReplaceAllStringFunc(line, func(match string) string {
-		parts := linkPattern.FindStringSubmatch(match)
-		text := parts[1]
-		url := parts[2]
-		if !safeLink(url) {
-			return match
-		}
-		return "<a href=\"" + html.EscapeString(url) + "\">" + html.EscapeString(text) + "</a>"
-	})
-}
 
 // computeUnsafePositions walks rendered once and returns a bitmap
 // of length n marking every byte position that is unsafe as a cut

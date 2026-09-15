@@ -303,6 +303,63 @@ func TestRenderRichTurnBlocks_FooterPrecededByDivider(t *testing.T) {
 	}
 }
 
+// TestRenderRichTurnBlocks_FooterPRAnchorBecomesUrlEntity verifies
+// that when a statusbar line carries a `[#N](url)` markdown link
+// (the PR anchor format statusbar.formatPRSegment emits), the
+// rich turn footer block renders the anchor as a `{"type":"url"}`
+// RichText entity — not literal text or unparsed HTML. Same
+// behaviour the standalone OutResult footer uses
+// (footerLinesToRichText is shared between the two paths).
+func TestRenderRichTurnBlocks_FooterPRAnchorBecomesUrlEntity(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 1",
+		hasContent:    true,
+		footer: []string{
+			"🤖: claude opus-4-5",
+			"💰:「 $0.05 」",
+			"📁: code/nightme · ⎇ main · [#284](https://github.com/cnlangzi/nightme/pull/284)",
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, body)
+	}
+	var footer map[string]any
+	for _, b := range blocks {
+		if b["type"] == "footer" {
+			footer = b
+			break
+		}
+	}
+	if footer == nil {
+		t.Fatalf("footer block missing; body=%s", body)
+	}
+	text, ok := footer["text"].([]any)
+	if !ok {
+		t.Fatalf("footer.text should be []any when PR anchor present, got %T: %v",
+			footer["text"], footer["text"])
+	}
+	var foundPR bool
+	for _, item := range text {
+		m, _ := item.(map[string]any)
+		if m["type"] == "url" && m["text"] == "#284" && m["url"] == "https://github.com/cnlangzi/nightme/pull/284" {
+			foundPR = true
+		}
+	}
+	if !foundPR {
+		t.Errorf("expected url entity {text:#284 url:...} in footer; got %v", text)
+	}
+}
+
 // TestRenderRichTurnBlocks_NoFooterNoDivider verifies that an
 // empty footer (zero-line / nil) emits neither a divider nor a
 // footer block — they ride together as a pair.

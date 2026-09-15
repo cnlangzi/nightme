@@ -38,7 +38,7 @@ import (
 // (e.g., add 💭 prefix to thinking, ```fences``` to errors).
 type richTurnEntry struct {
 	kind string // "thinking" | "tool_start" | "tool_end" | "error" | "task" | "reply"
-	body string // markdown body, rendered by the same renderMarkdownSafe the chain uses
+	body string // markdown body, walked through markdownToRichBlocks on flush
 }
 
 // richTurn is the per-turn state. Holds one Telegram rich message
@@ -369,17 +369,21 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 	//
 	// A divider (InputRichBlockDivider, <hr/>) sits between the
 	// entries and the footer to give the eye a clean break before
-	// the metadata block. Box-drawing chars (┌──› / └──›) survive
-	// the trip because the footer's `text` field is plain
-	// RichText — not code, not pre — so the client renders the
-	// frame as text in the footer caption style.
+	// the metadata block. footerLinesToRichText turns the statusbar
+	// lines into a RichText value: a plain `\n`-joined string when
+	// no line carries inline entities, or a `[]any` that mixes
+	// each line's inline-rich representation (PR anchors as url
+	// entities, bold/code where applicable) with `\n` separators.
+	// Same helper sendOutResultMessage uses, so the standalone
+	// result message and the rich turn placeholder render their
+	// footers identically.
 	if len(turn.footer) > 0 {
 		blocks = append(blocks, map[string]any{
 			"type": "divider",
 		})
 		blocks = append(blocks, map[string]any{
 			"type": "footer",
-			"text": strings.Join(turn.footer, "\n"),
+			"text": footerLinesToRichText(turn.footer),
 		})
 	}
 

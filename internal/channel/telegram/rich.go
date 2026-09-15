@@ -4,27 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"html"
-	"regexp"
 	"strings"
 )
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API 10.1 rich message path (docs/channel/telegram.md §20).
 //
-// Three layers:
-//   1. estimateRichBlocks    — line-based preflight count (L1).
-//   2. trySendRichMarkdown   — L1 send helper. Posts rich_message[markdown]
-//      via sendRichMessage, falling back to plain text on any server error.
-//   3. markdownToRichBlocks  — L2 AST walker (placeholder; not yet wired).
-//
-// L1 is implemented and gated on TelegramConfig.RichMode (default "off" —
-// pre-10.1 client compatibility, see §20.6.1 and §20.8). L2/L3 land in
-// subsequent commits; this file's structure anticipates them so L1 stays
-// internal and the public surface grows in one direction.
+// L3 (current): every rich_message send carries rich_message[blocks] —
+// block-level rich blocks built by markdownToRichBlocks (rich_walker.go)
+// for the body and by footerLinesToRichText (result_blocks.go) for the
+// StatusBar trailer. trySendRichBlocks is the only sender; the legacy
+// rich_message[markdown] path (trySendRichMarkdown + canUseRichMarkdown
+// + estimateRichBlocks) was retired when OutResult migrated from the
+// plaintext-statusbar-in-markdown shape to a real footer block.
 // ---------------------------------------------------------------------------
 
 // richBlockCountLimit is the Telegram server's per-message block cap
-// for rich_message[markdown] / [html] / [blocks] (verified in
+// for rich_message[blocks] (verified in
 // docs/channel/telegram.md §20.3). sendRichMessage returns
 // RICH_MESSAGE_BLOCKS_TOO_MANY above this count.
 const richBlockCountLimit = 500
@@ -52,144 +48,12 @@ func blockThresholdForRich() int {
 	return richBlockCountLimit * richBlockCountPreflightNumerator / richBlockCountPreflightDivisor
 }
 
-// estimateRichBlocks counts structural blocks in raw markdown to
-// predict how many blocks Telegram's auto-parser will produce.
-//
-// Heuristic aligns with the server's parser behaviour observed in
-// round 4 (§20.3): each heading / fenced code block / list item /
-// blockquote line counts as 1 block; consecutive non-blank lines
-// that aren't recognised structural markers collapse into a single
-// paragraph block. Plain-prose paragraphs are the most common
-// "inaccuracy" target — the server may emit one block per blank-
-// line-separated paragraph (matching our heuristic) or one block
-// per sentence (more aggressive). The preflight divisor (4/5) gives
-// enough slack that sentence-level splitting rarely trips us into
-// fallback unnecessarily.
-//
-// Pure function: no AST walk, no library dependency. The project's
-// existing markdown rendering (render.go) is also regex/line-based,
-// so a line-based preflight stays consistent with the rest of the
-// pipeline. L2 will introduce a real AST walker (goldmark) once we
-// add it as a direct dependency.
-func estimateRichBlocks(rawMD string) int {
-	if rawMD == "" {
-		return 0
-	}
-
-	const (
-		headingPat   = `^#{1,6}\s`
-		bulletPat    = `^[-*+]\s+`
-		orderedPat   = `^\d+\.\s+`
-		quotePat     = `^>\s*`
-		fenceOpenPat = `^` + "```"
-	)
-
-	n := 0
-	inFence := false
-	paragraphOpen := false
-
-	flushParagraph := func() {
-		if paragraphOpen {
-			n++
-			paragraphOpen = false
-		}
-	}
-
-	for _, rawLine := range strings.Split(rawMD, "\n") {
-		line := strings.TrimSpace(rawLine)
-
-		if strings.HasPrefix(line, fenceOpenPat) {
-			if !inFence {
-				n++
-				inFence = true
-			} else {
-				inFence = false
-			}
-			flushParagraph()
-			continue
-		}
-		if inFence {
-			// Lines inside a fenced code block don't break out as
-			// separate blocks — the entire fence is one block.
-			continue
-		}
-
-		if line == "" {
-			flushParagraph()
-			continue
-		}
-
-		switch {
-		case regexp.MustCompile(headingPat).MatchString(line),
-			regexp.MustCompile(bulletPat).MatchString(line),
-			regexp.MustCompile(orderedPat).MatchString(line),
-			regexp.MustCompile(quotePat).MatchString(line):
-			n++
-			flushParagraph()
-		default:
-			paragraphOpen = true
-		}
-	}
-	flushParagraph()
-	return n
-}
-
-// canUseRichMarkdown decides whether the rich path is worth trying for
-// a given markdown payload. Centralises the preflight so both L1's
-// OutResult handler and any future L2/L3 caller share the gate.
-func canUseRichMarkdown(rawMD string) bool {
-	if len(rawMD) == 0 || len(rawMD) > richMarkdownCharLimit {
-		return false
-	}
-	return estimateRichBlocks(rawMD) <= blockThresholdForRich()
-}
-
-// trySendRichMarkdown sends one Telegram message via the
-// sendRichMessage API, carrying a rich_message[markdown] body.
-//
-// chatID / topicID / replyToMessageID mirror the semantics of
-// sendTelegramMessage: topicID > 0 routes into a Forum topic;
-// replyToMessageID > 0 anchors the new bubble to the user's message.
-//
-// Returns the new message's ID on success, the apiError on failure.
-// The caller (sendOutResultMessage's L1 branch) decides how to react
-// to errors — L1's contract is "try rich, fall back to plain on any
-// non-2xx".
-func (a *Adapter) trySendRichMarkdown(
-	ctx context.Context,
-	chatID string,
-	topicID int,
-	replyToMessageID int,
-	rawMD string,
-) (int64, error) {
-	params := map[string]any{
-		"chat_id": chatID,
-		"rich_message": map[string]any{
-			"markdown": rawMD,
-		},
-	}
-	if topicID > 0 {
-		params["message_thread_id"] = topicID
-	}
-	if replyToMessageID > 0 {
-		params["reply_to_message_id"] = replyToMessageID
-	}
-
-	var result SendMessageResult
-	if err := a.apiCall(ctx, "sendRichMessage", params, &result); err != nil {
-		return 0, err
-	}
-	if result.MessageID == 0 {
-		return 0, &apiError{Message: "sendRichMessage returned empty message_id"}
-	}
-	return int64(result.MessageID), nil
-}
-
 // trySendRichBlocks sends one Telegram message via the sendRichMessage
 // API, carrying a rich_message[blocks] body. blocksJSON must be a
 // JSON-encoded array (the output of markdownToRichBlocks when it
-// returns ok=true). Mirrors trySendRichMarkdown's contract: caller
-// decides error handling; L2 wiring falls back to chain on failure.
+// returns ok=true). Caller decides error handling; today the only
+// caller is sendOutResultMessage, which surfaces errors to the
+// runtime rather than silently falling back to plain text.
 func (a *Adapter) trySendRichBlocks(
 	ctx context.Context,
 	chatID string,

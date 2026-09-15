@@ -211,7 +211,6 @@ jobs:
           GO_TAGS: ${{ matrix.go_tags }}
           CGO_ENABLED: ${{ matrix.cgo_enabled }}
           RAW_VERSION: ${{ github.ref_name }}
-          GIT_COMMIT: ${{ github.sha }}
         run: |
           export VERSION="${RAW_VERSION#v}"
           export GIT_COMMIT="${GITHUB_SHA:0:7}"

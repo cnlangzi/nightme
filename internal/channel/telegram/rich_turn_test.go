@@ -919,6 +919,71 @@ func TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML(t *testing.T) {
 	}
 }
 
+// TestRenderTaskRowText_FallbackSubjectTrimmed locks the
+// subject→id fallback contract: a whitespace-only Subject must
+// fall back to a (also-trimmed) ID, not produce a row of just
+// "• ". Regression guard for the review finding that the fallback
+// path skipped TrimSpace.
+func TestRenderTaskRowText_FallbackSubjectTrimmed(t *testing.T) {
+	cases := []struct {
+		name string
+		in   taskListItem
+		want string
+	}{
+		{"empty subject falls back to id", taskListItem{ID: "t1", Status: "pending"}, "• t1"},
+		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Status: "pending"}, "• t2"},
+		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Status: "pending"}, "• real"},
+		{"completed prefix intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Status: "completed"}, "✓ done"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := renderTaskRowText(c.in); got != c.want {
+				t.Errorf("renderTaskRowText(%+v) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix pins
+// the budget accounting: the trailing " " + … suffix is 2 runes
+// (space + ellipsis), so the budget loop must reserve 2 — not 1 —
+// for the marker. Regression guard for the review finding that
+// the +1 reserve silently let the last row off-budget by 1 rune.
+func TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix(t *testing.T) {
+	// Build N rows whose pre-suffix rune cost is exactly
+	// (budget - headline). With a +1 reserve, the last row
+	// would slip past the gate and end up over-budget after the
+	// " …" suffix is appended.
+	const totalRows = 5
+	// Subject tuned so cost = headline + 5 rows + 2 = budget
+	//  → headline (7) + 5*(len+1) + 2 = 3000  →  len = (3000-9)/5 - 1 = 597.4
+	// pick a safe size that fits with margin
+	subject := strings.Repeat("a", 590)
+	items := make([]taskListItem, totalRows)
+	for i := range items {
+		items[i] = taskListItem{ID: "t", Subject: subject, Status: "pending"}
+	}
+	blocks, ok := renderRichTurnTaskListBlocks(items)
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	// Find the list block.
+	var list map[string]any
+	for _, b := range blocks {
+		if b["type"] == "list" {
+			list = b
+		}
+	}
+	if list == nil {
+		t.Fatalf("no list block")
+	}
+	items2, _ := list["items"].([]map[string]any)
+	if len(items2) != totalRows {
+		t.Fatalf("budget should fit all %d rows (subject=590 runes + 2-reserve); got %d",
+			totalRows, len(items2))
+	}
+}
+
 // TestRenderRichTurnBlocksLocked_TaskListOrderAfterEntries pins the
 // section ordering: entries → task list → footer. The task list
 // must appear AFTER entries and BEFORE the footer divider so the

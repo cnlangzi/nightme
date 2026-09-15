@@ -18,6 +18,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/statusbar"
+	"github.com/cnlangzi/nightme/internal/stt"
 )
 
 type Adapter struct {
@@ -72,6 +73,15 @@ type Adapter struct {
 	// restart mid-turn can resume editing the same Telegram
 	// message. See group_draft.go for the lifecycle contract.
 	groupDraft *groupDraftManager
+
+	// voiceHandler is the seam to the local nightme-stt worker
+	// (set via SetVoiceHandler at startup). When non-nil,
+	// handleMessage routes incoming Voice attachments through
+	// it before publishing to the agent, so the agent sees a
+	// text transcript instead of raw opus bytes. nil means
+	// voice messages are passed through as audio attachments
+	// (legacy behaviour; new deployments always wire one).
+	voiceHandler *VoiceHandler
 }
 
 func NewAdapter(cfg *config.Config) (*Adapter, error) {
@@ -114,7 +124,46 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		draftStreamers: newDraftIndex(),
 	}
 	out.groupDraft = newGroupDraftManager(out.api, out.logger, out.state)
+	out.wireVoiceHandler()
 	return out, nil
+}
+
+// wireVoiceHandler constructs the local STT manager and voice
+// handler. Best-effort: a missing nightme-stt binary or
+// unreadable data dir logs and silently no-ops, so the adapter
+// still serves non-voice traffic (the failure surfaces as a
+// per-message "🎙 run nightme stt install" notice from the
+// voice handler itself, not at adapter construction).
+//
+// The manager's spawner only fails when first asked to spawn
+// (lazy), so wiring it at startup costs nothing when nightme-stt
+// is absent — the first Voice message pays the lookup cost.
+func (a *Adapter) wireVoiceHandler() {
+	if a.dataDir == "" || a.dataDir == os.TempDir() {
+		// dataDir is unset / fell back to /tmp — no place to
+		// put the nightme-stt binary. Skip silently; the
+		// legacy attachment-passthrough path remains in
+		// place.
+		return
+	}
+	ep, err := stt.DefaultEndpoint(a.dataDir)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("telegram: stt endpoint unavailable; voice transcription disabled",
+				"err", err, "data_dir", a.dataDir)
+		}
+		return
+	}
+	manager, err := stt.NewManager(stt.DefaultTransport(),
+		stt.ProductionSpawner(a.dataDir), ep)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("telegram: stt manager unavailable; voice transcription disabled",
+				"err", err)
+		}
+		return
+	}
+	a.voiceHandler = NewVoiceHandler(manager, a.logger)
 }
 
 func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Adapter {
@@ -164,6 +213,16 @@ func (a *Adapter) SetLogger(logger *slog.Logger) {
 	if a.limiter != nil {
 		a.limiter.logger = logger
 	}
+}
+
+// SetVoiceHandler wires the local-nightme-stt voice transcription
+// seam. When set, handleMessage routes incoming Voice attachments
+// through handler.HandleVoice before publishing to the agent.
+// Idempotent: subsequent calls replace the previous handler.
+func (a *Adapter) SetVoiceHandler(h *VoiceHandler) {
+	a.mu.Lock()
+	a.voiceHandler = h
+	a.mu.Unlock()
 }
 
 func (a *Adapter) Start(ctx context.Context) error {
@@ -406,6 +465,57 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 			)
 		}
 		a.notifyDownloadFailure(chatID, topicID, downloadRes, false)
+	}
+	// Voice transcription (issue #381 / docs/channel/telegram.md
+	// §21): when a Voice attachment is present and a voice
+	// handler is wired, run the audio through nightme-stt before
+	// the agent sees it. The transcript replaces the inbound
+	// text (or augments the caption when one is present) so the
+	// agent receives a clean text prompt; the voice attachment
+	// is stripped from the inbound.Attachments slice so the
+	// agent never sees raw opus bytes it couldn't consume.
+	if message.Voice != nil {
+		voiceFile := findVoiceAttachment(downloadRes.Atts)
+		if voiceFile == "" {
+			// Download failed or no matching att — the
+			// failure path above already notified the
+			// user. Drop the voice attachment from the
+			// list so the agent doesn't try to consume
+			// an empty / failed file.
+			attachments = dropVoiceAttachment(attachments)
+		} else if a.voiceHandler != nil {
+			outcome := a.voiceHandler.HandleVoice(ctx, message, voiceFile)
+			attachments = dropVoiceAttachment(attachments)
+			if outcome.Drop {
+				if outcome.Text != "" {
+					if text == "" {
+						text = outcome.Text
+					} else {
+						text = text + "\n\n" + outcome.Text
+					}
+				}
+			}
+			if outcome.Err != nil {
+				notice := voiceFailureText(outcome)
+				if notice != "" {
+					if err := a.Send(context.Background(), messages.OutboundMessage{
+						ChatID: a.sessionChatID(chatID, topicID),
+						Kind:   messages.OutError,
+						Text:   notice,
+					}); err != nil && a.logger != nil {
+						a.logger.Warn("telegram: voice failure notice failed",
+							"chat_id", chatID, "err", err)
+					}
+				}
+				if a.logger != nil {
+					a.logger.Warn("telegram: voice transcription failed",
+						"chat_id", chatID,
+						"message_id", message.MessageID,
+						"err", outcome.Err,
+					)
+				}
+			}
+		}
 	}
 	// (UserMessageID is already updated by ensurePlaceholder above;
 	// this redundant block was removed in the 2026-08-22 plan-C

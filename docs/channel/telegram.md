@@ -1187,11 +1187,11 @@ type chainLRU struct {
 
 **Out* payload 超长处理**：上面 8 个走 `appendSegment` / `appendErrorSegment` 的 kind 中，若单条 payload 自身 raw > 3500 chars（接近 4096 Telegram 硬限），§11.12.7.2 trigger 1 在 append 阶段直接 SPLIT 成多张 Telegram message，不再走普通 ROTATE。用户视觉上看到的是同时间戳的多片连续消息（视觉连续 vs ROTATE 的页面跳转）。
 
-#### 11.12.4.1 OutResult 独立消息（v9 P2, 2026-08-24）
+#### 11.12.4.1 OutResult 独立消息（v9 P2, 2026-08-24；rich blocks 2026-09-15）
 
 v9 P2 之前，OutResult 跟其他文本 kind 一样走 `appendSegment` 进 active chunk buffer，没有视觉差异 —— 同一个 chunk 里 `💭 thinking → ● Bash → ⎿ done → 📝 <result>` 挤在一起，`📝` 前缀其实从没真正渲染过（v9 Send 没加，`docs §3 表格里的"📝 <text>"是 v3 时代留下的描述，跟当前实现不一致`）。OnPromptEnded 的 🎉 贴 active chunk 的 messageID —— 如果 OutResult 之后又来了 OutReply / OutToolEnd，🎉 就飞到非 result 的 chunk 上了，**语义错位**。
 
-P2 把 OutResult 改独立 `sendMessage`：
+P2 把 OutResult 改独立消息；2026-09-15 进一步从 `sendMessage(parse_mode=HTML)` 切到 `sendRichMessage(rich_message[blocks])`，trailer 从 markdown body 末尾的 `statusbar.RenderPanel + wireFormatFooterLine` 升级成独立的 `footer` block。
 
 ```text
 Devin: 帮我写一个 go http server                  userMsgID = 42
@@ -1202,25 +1202,26 @@ nightme: 🤖 Working...                            ← chunk #0 placeholder / a
          💭 thinking...
          ● Write(...)
          ⎿  📝 Write → 42 bytes                   ← chunk #1 (ROTATE)
-[独立新消息] reply_to_message_id = 42
-nightme: 这是一个简单的 http server ...            ← result body
-        ┌──────────────›                          ← StatusBar trailer 边框
-        │  🤖: claude · opus-4-5 · sess-1
-        │  💰:「$0.05」
-        │  📁: code/nightme
-        └───────────────›                          (无中间 ──────── 分隔;
-        [🎉 reaction]                               trailer 自带 frame 边界)
+[独立新消息, reply_to_message_id = 42, rich_message[blocks]]
+nightme: 这是一个简单的 http server ...            ← result body (paragraph/heading/pre blocks)
+        ──────────────                             ← divider block
+        🤖: claude · opus-4-5 · sess-1             ← footer block (caption region)
+        💰:「$0.05」
+        📁: code/nightme · ⎇ main · #284            ← PR anchor as url entity
+        [🎉 reaction]                                 (footer block renders as
+                                                       muted caption; PR link
+                                                       clickable via url entity)
 ```
 
 **核心契约**：
 
-1. **OutResult 不进 chain**。`Send()` 把 OutResult 从 default 分支挑出走 `sendOutResultMessage` helper —— 直接调 `sendTelegramMessage(chat_id, topic_id, reply_to_message_id=userMsgID, text=result+trailer)`，每条 OutResult 都是独立的 Telegram message。
-2. **StatusBar trailer 一致，无中间分隔**。所有 text-emitting kind 都带 §18 trailer，OutResult 也不例外 —— body 末尾追加 `\n` + `statusbar.RenderPanel(sb)` 三行（`🤖 / 💰 / 📁`，box-drawing frame `┌──› / └──›` 提供视觉边界）。**OutResult standalone 不画 `────────` 横线**（2026-08-24 user feedback：trailer 自带 frame，分隔线反而让 result message 显得"断裂"）。**Chain chunk 仍然画 `────────────────` 分隔线**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行），因为 chain 上 entries 是一长串 activity log，footer 是状态 summary，两者之间需要强分隔。
-3. **长 result 自动 split**。`len(result+trailer) > 3900` → `splitTelegramText` 切成多片，每片单独 sendMessage（都带 `reply_to_message_id=userMsgID`，视觉上是 user msg 下的一组 reply 簇）。只有**最后一片**的 messageID 记录到 `chain.resultMessageID`（参见 §11.12.4.1.1）。
-4. **OnPromptEnded 🎉 锚点切换**。优先选 `chain.resultMessageID`；零值（turn 没收到任何 OutResult —— 纯 error / 纯 tool / 纯 slash command）回退到 active chunk 的 messageID，保住 v9 P1 行为。详见 §11.12.9。
-5. **chain 仍然承载中间产物**。OutReply / OutThinking / OutToolStart / OutToolEnd / OutError / OutTaskCreate / OutTaskUpdate / OutCommandReply 全部继续走 `appendSegment` —— 这套不动。
+1. **OutResult 不进 chain**。`Send()` 把 OutResult 从 default 分支挑出走 `sendOutResultMessage` helper —— 调 `trySendRichBlocks(chat_id, topic_id, reply_to_message_id=userMsgID, blocksJSON)`，每条 OutResult 都是独立的 Telegram message。`buildResultBlocks(body, footer)` (result_blocks.go) 把 body 走 `markdownToRichBlocks` 翻成 heading / fence / list / quote / paragraph blocks，结尾追加 `divider` + `footer` block。
+2. **StatusBar trailer 走 footer block，不是 plaintext 嵌入 markdown**。所有 text-emitting kind 都带 §18 trailer，OutResult 也不例外 —— 但 L3 之后 trailer 不再以 `body + "\n\n" + statusbar.RenderPanel + wireFormatFooterLine` 形式塞 markdown body，而是以独立的 `{"type":"footer","text":RichText}` block 出现在 rich message 末尾。`footerLinesToRichText` 把 statusbar 各行合并：纯字符串走 `strings.Join` 快路径，任意一行带 inline entity（典型是 git 行的 `[#N](url)` PR 锚点）就走 `[]any` 形态，行与行之间插 `\n` 字符串。Rich turn path (`renderRichTurnBlocksLocked`) 共享这个函数，两条出口视觉一致。**OutResult standalone 不画 `────────` 横线** —— divider block 自己就是这个分隔（chat client 渲染为 `<hr/>`）。**Chain chunk 仍然画 `────────────────` 分隔线**（chunk_body.Compose 在 entries 和 footer 之间硬编码这一行），因为 chain 上 entries 是一长串 activity log，footer 是状态 summary，两者之间需要强分隔。
+3. **长 result 自动 split**。`len(body) > richMarkdownCharLimit (32K)` → walker 拒绝，buildResultBlocks 退化成单 paragraph block（RichText 32K+ per-block ceiling 已显著高于 sendMessage 的 4096 字符上限，绝大多数 LLM 输出都不触发）。超长 body 走单一 paragraph block + caption footer，不切多片 —— 与 v9 chain 的 `splitTelegramText(3900)` 路径不同（chain 走 `sendMessage` + parse_mode=HTML，受 4096 字符硬限；rich blocks 走 32K 字符上限）。只有**最后一片**的 messageID 记录到 `richTurn.resultMessageID`（参见 §11.12.4.1.1）。
+4. **OnPromptEnded 🎉 锚点切换**。优先选 `richTurn.resultMessageID`（L3 把 chain.resultMessageID 迁移过来）；零值（turn 没收到任何 OutResult —— 纯 error / 纯 tool / 纯 slash command）回退到 rich turn placeholder 的 messageID，保住 v9 P1 行为。详见 §11.12.9。
+5. **chain / richTurn 仍然承载中间产物**。OutReply / OutThinking / OutToolStart / OutToolEnd / OutError / OutTaskCreate / OutTaskUpdate / OutCommandReply 全部走 `appendSegment` / `appendRichTurn`，L3 rich turn 这套不动。OutResult 是唯一例外，单独走 `buildResultBlocks` + `trySendRichBlocks`。
 
-##### 11.12.4.1.1 `chain.resultMessageID` 字段
+##### 11.12.4.1.1 `richTurn.resultMessageID` 字段
 
 ```go
 type placeholderChain struct {
@@ -1249,12 +1250,12 @@ type placeholderChain struct {
 
 ##### 11.12.4.1.2 跟飞书 receipt 的对位变化
 
-| 维度 | Feishu receipt（v9 P1） | Telegram v9 P1 | Telegram v9 P2 |
+| 维度 | Feishu receipt（v9 P1） | Telegram v9 P1 | Telegram v9 P2 (2026-09-15 L3 rich blocks) |
 |---|---|---|---|
 | Surface | 单一 receipt Card 2.0，PATCH 复用 | chain of N chunks，editMessageText 复用 active | chain of N chunks（中间产物）+ 1 张独立 result 消息 |
 | OutThinking / Tool / Reply / Error / Task / CommandReply | append 进 card body | append segment 进 active chunk | append segment 进 active chunk（不变） |
-| OutResult | 独立 reply (F-39 后) | append segment 进 active chunk（跟其他文本混在一起） | **独立 sendMessage + reply_to_message_id=userMsgID** |
-| StatusBar trailer | card `<hr>` + 灰色 markdown | chunk 末尾 renderPanel(lastFooter) | result 消息末尾 renderPanel(lastFooter) |
+| OutResult | 独立 reply (F-39 后) | append segment 进 active chunk（跟其他文本混在一起） | **独立 sendRichMessage(rich_message[blocks]) + reply_to_message_id=userMsgID**，body 走 markdownToRichBlocks，trailer 走 footer block |
+| StatusBar trailer | card `<hr>` + 灰色 markdown | chunk 末尾 `renderPanel(lastFooter)` | result 消息末尾 **`footerLinesToRichText(lastFooter)` → `{"type":"footer","text":RichText}` block**（PR 锚点作为 url entity，保留 clickable PR 行为） |
 | 🎉 终态 | ✅ reaction + card header ✅ | user msg 👌 不动；active chunk 贴 🎉 | user msg 👌 不动；**result message 贴 🎉**（无 result 时回退 active chunk） |
 
 跟飞书 F-39 决策完全对齐：result 是 turn 的成品输出，**独立消息**而非 inline 进 receipt。
@@ -1892,19 +1893,17 @@ v9 P2 把 OutResult 对齐到飞书 F-39 决策 —— **独立 reply 投递**�
 
 #### OutResult 独立 reply（v9 P2 修订）
 
-**v9 P2 起**：OutResult 改独立 `sendMessage(reply_to_message_id=userMsgID)`，对齐飞书 F-39 决策（独立 reply 投递，避免跟中间产物视觉同质）。
+**v9 P2 起**：OutResult 改独立消息（L3 进一步从 `sendMessage(parse_mode=HTML)` 切到 `sendRichMessage(rich_message[blocks])`），对齐飞书 F-39 决策（独立 reply 投递，避免跟中间产物视觉同质）。详见 §11.12.4.1。
 
-长 result 处理：单条 OutResult body + StatusBar trailer 长度 > 3900 chars → `splitTelegramText` 切成多片，每片单独 `sendMessage`，都带 `reply_to_message_id=userMsgID`（视觉上是 user msg 下的 reply 簇）。只有最后一片的 messageID 进 `chain.resultMessageID`（OnPromptEnded 🎉 锚点）。
+长 result 处理：单条 OutResult body 长度 > `richMarkdownCharLimit (32K)` → `markdownToRichBlocks` 拒绝，buildResultBlocks 退化成单 paragraph block（RichText 32K+ per-block ceiling 已显著高于 sendMessage 的 4096 字符上限，绝大多数 LLM 输出都不触发）。只有最后一片的 messageID 进 `richTurn.resultMessageID`（OnPromptEnded 🎉 锚点）。
 
 #### Markdown 渲染
 
-- `parse_mode=HTML` 走现有 `RenderMarkdown`，不切 MarkdownV2（escape 脆弱，参考 feishu.md §13.19）
-- **三层渲染原语（v9 P3 落地，§11.12.19）**：
-  - `renderMarkdownSafe(s string) string`（`render.go`，unexported）—— **唯一** 一处跑 `RenderMarkdown` + `escapeHTML` fallback + 空串 short-circuit。所有"raw markdown → safe HTML"的入口都走它，不在每个 call site 重复 try-render-or-escape 模式。
-  - `RenderForWire(raw string) string`（`render.go`，exported）—— wire-facing block 入口。`sendOutResultMessage` 走它把 `msg.Text` 转成 HTML 再串 trailer；trailer 本身 (`statusbar.RenderPanel` 输出 `┌──› / └──›` 边框) 是手工构造的 safe HTML，**不再二次渲染**(否则 box-drawing 字符会被 escape)。
-  - `chunkBody.Compose()` —— chain 消息入口，per-entry loop + `isHTML` flag 路由（`appendEntryHTML` 走 verbatim，跳过 `RenderMarkdown` 避免二次转义）。Compose 不套 `RenderForWire`，因为 `RenderForWire` 是 block-level 包装，会跟 per-entry `isHTML` 路由冲突。
-- **两个 markdown block 入口覆盖两条路径，不算重复**：`renderMarkdownSafe` 是原语（被 `RenderForWire` 和 `Compose` 共享），`RenderForWire` 是 standalone block 入口，`Compose` 是 chain chunk 入口。三层各管一摊：原语 / block 包装 / chunk 组合。
-- Feishu §13.17 / §13.19 同款 sanitize pipeline(非 HTTP URL → plain、fence newline、image strip、heading demotion)**只注入 `renderMarkdownSafe` 一次** —— 这就是它单独抽出来的最大动机：未来加 sanitize 只改原语一处，`RenderForWire` 和 `Compose` 自动继承，grep 不用扫整个 adapter。
+- **renderMarkdownSafe + appendTrailerToBody 在 2026-09-15 改造后已退役**。`renderMarkdownSafe`（render.go）的唯一调用方是已删除的 `RenderForWire`/`sendOutResultMessage` 老路径；`appendTrailerToBody` 同理（`body + "\n\n" + statusbar.RenderPanel` 拼接）—— L3 之后所有 rich message 走 `markdownToRichBlocks`（rich_walker.go）翻 blocks，再由 `buildResultBlocks`（result_blocks.go）拼 body + divider + footer block。当前 L3 渲染原语只有两段：
+  - `markdownToRichBlocks(rawMD string) (string, bool)`（`rich_walker.go`）—— L2 walker，把 raw markdown 转成 JSON 编码的 `rich_message[blocks]` 数组。Heading / fence / list / blockquote / divider / table / paragraph 全部映射到对应 rich block type。失败时退化成单 paragraph block（保留 inline entities），不丢消息。
+  - `chunkBody.Compose()` / `buildResultBlocks()` —— 两种组装策略：chain chunk 走 per-entry loop + `isHTML` flag 路由（`appendEntryHTML` 走 verbatim），OutResult standalone 走 block 数组拼接。两者共享 `footerLinesToRichText`（result_blocks.go）做 footer block 的 RichText 序列化。
+- `RenderMarkdown` / `escapeHTML`（render.go）仍 export 给 raw HTML 路径（Choice / Permission / ForceReply 用的 `sendRichFromHTML` / `editRichFromHTML`）和 walker 内部使用 —— 但不再走 result-message 的 trailer 路径。
+- Feishu §13.17 / §13.19 同款 sanitize pipeline(非 HTTP URL → plain、fence newline、image strip、heading demotion)若要落地，**只注入 `markdownToRichBlocks` + `inlineToRichText` 一处** —— 整条 L3 渲染链 (`buildResultBlocks` / `chunkBody.Compose` / `renderRichTurnBlocksLocked`) 自动继承，grep 不用扫整个 adapter。
 
 ### 11.12.14 summarize_tool 复用（同款）
 
@@ -2118,6 +2117,9 @@ func summarizeToolResult(name, output string, err error) string {
 | `TestFlushChainNow_OverflowPieces_DropsBlank` | trigger 3 safety net splitTelegramText 产出空白 piece → 不 sendFn |
 
 `renderMarkdownSafe` 共享原语测试（`render_test.go`）：
+
+> **2026-09-15 退役**：`renderMarkdownSafe` 已从 render.go 删除，这 5 个测试随之清退。当前 L3 渲染原语（`markdownToRichBlocks` / `inlineToRichText` / `buildResultBlocks` / `footerLinesToRichText`）不走 HTML escape 路径，本节仅作 v9 P3 历史快照。
+
 | 测试 | 验证 |
 |---|---|
 | `TestRenderMarkdownSafe_EmptyReturnsEmpty` | `""` → `""`（short-circuit） |
@@ -2127,6 +2129,9 @@ func summarizeToolResult(name, output string, err error) string {
 | `TestRenderMarkdownSafe_PreservesFallbackContract` | RenderMarkdown 返 error 时退到 `escapeHTML`（mock 验证） |
 
 `appendTrailerToBody` 测试（`render_test.go`）：
+
+> **2026-09-15 退役**：`appendTrailerToBody` 已从 render.go 删除，这 3 个测试随之清退。`buildResultBlocks`（result_blocks_test.go）提供同档覆盖 —— footer block 形态、divider 顺序、entity 保留、unsafe scheme 拦截、walker 拒绝退化、超长 char-cap 退化 —— 共 11 个 TestBuildResultBlocks_* / TestFooterLinesToRichText_*。
+
 | 测试 | 验证 |
 |---|---|
 | `TestAppendTrailerToBody_NoFooter` | `footerLines=nil` → body 原样返回 |
@@ -2147,7 +2152,12 @@ func summarizeToolResult(name, output string, err error) string {
 | `sendMessage` 同一 chat 串行速率 | agent turn 短时间内 burst 占位新建 chunk → 5 QPS per-chat 有封顶 | debounce 已经合并 hot path；overflow chunk 是冷路径，300-500ms 间隔足够 |
 | SPLIT partial-failure | sendFn 第 k 片失败时前 k-1 片 Telegram orphan 历史 | 接受；daemon 重启后消失；后续 appendSegment 走 case 3 ROTATE |
 
-### 11.12.19 渲染 DRY + blank-chunk 修复（2026-08-24）
+### 11.12.19 渲染 DRY + blank-chunk 修复（2026-08-24, partially superseded 2026-09-15）
+
+> **2026-09-15 L3 改造覆盖范围**：
+> - `renderMarkdownSafe` / `appendTrailerToBody` 已退役（无 caller）。详见 §11.12.13 末尾的"renderMarkdownSafe + appendTrailerToBody 在 2026-09-15 改造后已退役"段。
+> - `materializeChunk` / `chunkBody.hasVisibleEntries` 跟 v9 chain 一并退役（commit `17b5372`）。当前 L3 走 rich turn path（rich_turn.go 的 `appendRichTurn` + `flushRichTurn` + `renderRichTurnBlocksLocked`），空白守卫在 `appendRichTurn` 入口 (`if !turn.hasContent { ... }`) 跟 cold-create banner skip rule (§11.12.5.1) 双层承担。
+> - 本节保留作 v9 P3 设计决策历史，对比 §11.12.13 当前 L3 渲染原语时参考。
 
 本节是 v9 P3 —— 收口渲染原语 + 修复 ROTATE/SPLIT 路径在边界条件下 mint 出的"只有 footer 的假空白 chunk"。**两条线独立但同 PR**：渲染原语收口（DRY）是 clean-code 改进，blank-chunk 修复是 user-visible bug fix。
 
@@ -2369,24 +2379,7 @@ func renderMarkdownSafe(s string) string {
 
 **`appendTrailerToBody`** —— 1 处 trailer 拼接收口：
 
-```go
-// appendTrailerToBody appends the StatusBar panel to body if
-// footerLines is non-nil. Returns body unchanged when footer is
-// absent. Used by sendOutResultMessage and any future single-
-// shot message render path.
-func appendTrailerToBody(body string, footerLines []string) string {
-    if len(footerLines) == 0 {
-        return body
-    }
-    return body + "\n\n" + statusbar.RenderPanel(footerLines)
-}
-```
-
-调用方收敛：
-
-| 位置 | 之前 | 之后 |
-|---|---|---|
-| `sendOutResultMessage` (adapter.go) | `body + "\n\n" + statusbar.RenderPanel(sb)` | `appendTrailerToBody(body, sb)` |
+**`appendTrailerToBody` 在 2026-09-15 L3 改造后已退役**。它原本是 `sendOutResultMessage` 的唯一调用方（`body + "\n\n" + statusbar.RenderPanel` 拼字符串），L3 把 trailer 从 markdown body 末尾升级到独立的 footer block 之后没有调用方了。`buildResultBlocks`（result_blocks.go）取代它：直接产出 `divider` + `{"type":"footer","text":footerLinesToRichText(footerLines)}` 两个 block，不再走字符串拼接。
 
 #### 11.12.19.4 边界覆盖
 
@@ -4006,7 +3999,9 @@ Cliff 落在 **[400, 600] blocks** 之间（与 `blocks` 显式 array 的 500 ca
 
 ### 20.6 实现细节
 
-#### 20.6.1 L1 —— `rich_message[markdown]` 短内容分支
+#### 20.6.1 L1 —— `rich_message[markdown]` 短内容分支（2026-08 落地，2026-09-15 退役）
+
+> **2026-09-15 退役**：`trySendRichMarkdown` / `canUseRichMarkdown` / `estimateRichBlocks` 已从 rich.go 删除。`renderMarkdownSafe` / `appendTrailerToBody` 也从 render.go 删除。L1 的 `rich_message[markdown]` 入站 + parse_mode=HTML plaintext fallback 全部清退，新唯一发送路径是 L2/L3 的 `rich_message[blocks]`。详见 §20.5 #3-#4。本节保留作历史设计文档，**当前实现不走 L1**。
 
 **L1 scope 限定：仅 `OutResult`**。`OutReply` 走 v9 chain（chain-attached 7 种 kind 都不动），L2 才处理。理由：
 

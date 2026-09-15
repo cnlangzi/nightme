@@ -694,9 +694,9 @@ func taskStatusToString(s agent.AgentTaskStatus) string {
 // the rest of the consts are the feishu checklistBudgetRunes /
 // checklistMore / checklistOverflowPlaceholder triple.
 const (
-	richTurnTaskListHeadline           = "📋 Tasks"
-	richTurnTaskListBudgetRunes        = 3000
-	richTurnTaskListMore               = "…"
+	richTurnTaskListHeadline            = "📋 Tasks"
+	richTurnTaskListBudgetRunes         = 3000
+	richTurnTaskListMore                = "…"
 	richTurnTaskListOverflowPlaceholder = "• …"
 )
 

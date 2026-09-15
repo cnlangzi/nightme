@@ -114,6 +114,9 @@ func (f *fakeAPI) call(ctx context.Context, method string, params map[string]any
 	if method == "editMessageText" || method == "editMessageReplyMarkup" {
 		return nil
 	}
+	if method == "deleteMessage" {
+		return nil
+	}
 	if method == "sendMessageDraft" {
 		if result != nil {
 			_ = json.Unmarshal([]byte(`true`), result)

@@ -2496,7 +2496,7 @@ func setupDMState(t *testing.T, a *Adapter, chatIDRaw int64) string {
 	if err := a.state.putTopic(&TopicState{
 		ChatID:        raw,
 		TopicID:       0,
-		ChatType:      "private",
+		ChatKind:      ChatKindPrivate,
 		UserMessageID: "1",
 	}); err != nil {
 		t.Fatalf("putTopic: %v", err)
@@ -2510,7 +2510,7 @@ func setupGroupState(t *testing.T, a *Adapter, chatIDRaw int64, topicID int) str
 	if err := a.state.putTopic(&TopicState{
 		ChatID:        raw,
 		TopicID:       topicID,
-		ChatType:      "supergroup",
+		ChatKind:      ChatKindGroup,
 		UserMessageID: "1",
 	}); err != nil {
 		t.Fatalf("putTopic: %v", err)
@@ -2586,11 +2586,12 @@ func TestAdapter_Send_DM_OutToolEnd_StreamsToDraft(t *testing.T) {
 }
 
 func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
-	// Probe on 2026-09-15 confirmed Telegram Bot API rejects
-	// sendMessageDraft in basic groups (Bad Request). We can't
-	// cheaply distinguish forum-supergroup-with-forum-on from
-	// basic-group, so streamDraftEvent gates on ChatType=="private".
-	// Forum topics therefore fall through to the v9 chain path.
+	// Groups (basic + forum supergroup) never use sendMessageDraft
+	// — the API rejects it (Bad Request). They take the simulated
+	// DraftMessage path via group_draft.go instead: a real
+	// sendMessage cold-create + editMessageText subsequent. The
+	// cold-create carries reply_to_message_id=userMsgID so the
+	// DraftMessage visually anchors under the user's message.
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
 	if err := a.Send(context.Background(), messages.OutboundMessage{
@@ -2601,13 +2602,23 @@ func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
-		t.Fatalf("forum topic should NOT use sendMessageDraft; got call %+v", draft)
+		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
+	}
+	coldCreate := findCallByMethod(api.Calls, "sendMessage")
+	if coldCreate == nil {
+		t.Fatalf("group first event should cold-create a DraftMessage via sendMessage; got calls=%+v", api.Calls)
+	}
+	if reply, _ := coldCreate.Params["reply_to_message_id"].(int); reply != 1 {
+		t.Fatalf("DraftMessage cold-create reply_to_message_id = %v, want 1 (userMsgID)", coldCreate.Params["reply_to_message_id"])
+	}
+	if text, _ := coldCreate.Params["text"].(string); text != "💭 thinking text" {
+		t.Fatalf("DraftMessage cold-create text = %q, want %q", text, "💭 thinking text")
 	}
 }
 
 func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
-	// Same gate as OutThinking: forum topic falls through to v9
-	// chain because streamDraftEvent requires ChatType=="private".
+	// Same path as OutThinking: group first event cold-creates the
+	// simulated DraftMessage (sendMessage + reply_to_message_id).
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
 	if err := a.Send(context.Background(), messages.OutboundMessage{
@@ -2619,7 +2630,11 @@ func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
-		t.Fatalf("forum topic should NOT use sendMessageDraft; got call %+v", draft)
+		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
+	}
+	coldCreate := findCallByMethod(api.Calls, "sendMessage")
+	if coldCreate == nil {
+		t.Fatalf("group first OutToolStart should cold-create a DraftMessage via sendMessage; got calls=%+v", api.Calls)
 	}
 }
 

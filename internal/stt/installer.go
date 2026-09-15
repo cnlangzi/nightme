@@ -780,3 +780,34 @@ func killRunningWorker() {
 	// kill one process would dwarf the actual install.
 	killByName("nightme-stt")
 }
+
+// FindNightmeSTT locates the installed nightme-stt worker
+// binary under <dataDir>/stt/bin/. Returns the absolute
+// path on success, or an error if the binary is missing
+// (issue #381 §13 "first-use consent" surfaces this as
+// `errNotBuilt`).
+//
+// On Windows the binary carries a .exe suffix; on Unix it
+// doesn't. `isWindowsExe` is a build-tag constant set in
+// kill_unix.go / kill_windows.go so neither platform
+// needs to compile the other.
+func FindNightmeSTT(dataDir string) (string, error) {
+	if dataDir == "" {
+		return "", errors.New("stt: empty data dir")
+	}
+	binName := "nightme-stt"
+	if isWindowsExe {
+		binName += ".exe"
+	}
+	candidate := filepath.Join(dataDir, "stt", "bin", binName)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate, nil
+	}
+	return "", fmt.Errorf("%w: expected at %s", errNotBuilt, candidate)
+}
+
+// errNotBuilt is the sentinel returned by FindNightmeSTT
+// when the binary is missing. Callers (the Telegram
+// adapter's voice handler) detect this via errors.Is and
+// render a user-facing "nightme stt install" prompt.
+var errNotBuilt = errors.New("stt: nightme-stt runtime not installed")

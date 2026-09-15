@@ -3773,8 +3773,16 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 - StatusBar 本身走纯文本（emoji + 中点 `·` + 半角空格），没用 `<b>` `<code>` 强调（避免 OutError 那类 escape 边界），视觉不如 feishu grey footer，但 parse 零失败
 
 ## 19. 变更日志
+- **2026-09-15 — voice 消息转写(via nightme-stt worker)**。实现 issue #381 阶段性交付:Telegram 收到的 `message.Voice` 走独立进程转写。
+  - 新增 `cmd/nightme-stt/` 单独二进制 + `internal/stt/` 完整实现(协议 / manager / spawner / 安装 / ffmpeg + sherpa-onnx 集成)。worker 通过本地 Unix socket / Windows named pipe 通信,长度前缀 JSON framing,operation 集合 `{health, version, transcribe, shutdown}`。
+  - `internal/channel/telegram/voice.go` 整合 + adapter wiring:`caption + "\n\n" + transcription` 的拼接规则;Voice 消息转写成功后跳过 attachment 下载路径(避免重复);失败模式细分:无 worker 二进制 / 启动失败 / 空 transcription / 空 caption → 不同错误消息,fallback 路径不丢 audio。
+  - `nightme stt install/update` 镜像 nightme update 流程:三段(Check / Fetch / Activate),per-asset 原子激活,匿名 GitHub API 取 latest release + sherpa-onnx SenseVoice 模型,GitHub `digest` 字段 + `.sha256` sidecar 兜底 SHA 校验。
+  - 资源约束:音频 20 MiB 上限(覆盖 Telegram 50 MiB 端),转写结果 20K 字符裁剪,worker 复用而非 per-voice spawn,manager lazy 启动。详细 spec 见 §21。
+<<<<<<< HEAD
 
 - **DM sendMessageDraft 路径 — DM-only (probe 2026-09-15) + 全局唯一 draft + REPLACE/ACCUMULATE 分事件 + endProcess 关边界**(OutThinking / OutToolStart / OutToolEnd 三类事件) — Bot API 10.3 (2026-08-24) 起在 `chat.type == "private"` 下用 `sendMessageDraft` 流式呈现 think/tool 活动。**ChatType gate 保留**(用户 2026-09-15 第五轮反馈曾尝试去掉 gate 走统一路由,但 2026-09-15 probe 验证: `sendMessageDraft` 在 basic group 中返回 `Bad Request`,触发的 latch 会导致整个 group 的 think/tool 事件被 drop——比当前 v9 chain 渲染更差)。`streamDraftEvent` 仅在 `state.ChatType == "private"` 时走 draft,group 仍走 v9 chain。**REPLACE / ACCUMULATE 按事件类型分**(用户 2026-09-15 第三轮反馈:"draft不需要重置,因为他每次都只是显示一个事件(think or toolstart+toolend), 相当于每个事件它都在做重置. 这就是为什么可以全局唯一一个draft的原因. thinking要加前缀💭 做区分")—— OutThinking REPLACE(`💭 ` 前缀 + msg.Text);OutToolStart REPLACE;OutToolEnd ACCUMULATE(堆叠在匹配 OutToolStart 下方形成完整 `🔧 call / ✅ result`)。**process end 由 `draftStreamers.endProcess` 处理**(用户 2026-09-15 第四轮反馈:"碰到OutResult/OutPromptEnded, 结束 messageDraft操作")—— OutResult case 和 OnPromptEnded handler 末尾调 `a.draftStreamers.endProcess(chatID, topicID)`,清空 draft_id + textBuf(保留 failed latch)。**forum topic 路由**(基础实现):`appendEventWithThread(ctx, text, replace, topicID)` 在 `topicID > 0` 时携带 `message_thread_id` 到 sendMessageDraft,但当前 ChatType gate 在 group 里不调用它,故保留为后续 forum-supergroup 支持的扩展点。新增 `internal/channel/telegram/draft_streamer.go`(draftStreamer + draftIDCounter atomic.Int32 + errDraftFallback latch + REPLACE/ACCUMULATE 双模式 + resetState/resetProcess 双 reset + appendEvent/appendEventWithThread 双入口)和 `draft_index.go`(per-(chat,thread) 索引 + endProcess 方法);`state.go` `TopicState` 加 `ChatType` 字段(omitempty,老 state 兼容空值);`adapter.go` `ensurePlaceholder` 写入 ChatType,DM 下**不冷创建 rich turn 占位**,非 DM 冷创建 rich turn 占位;`Send()` switch 三个 case 顶部调 `streamDraftEvent(ctx, rawChatID, topicID, segment, replace)`,**仅 `ChatType=="private"` 才走 draft**,**DM draft 失败时 DROP 不回退**到 richMessage 路径,非 DM 走 chain。客户端同 draft_id 动画过渡。**未触动**:`OutReply` / `OutResult` / `OutError` / `OutHeartbeat` / StatusBar footer / callback / state 反应 / allowed_updates 全部不变。`can_stop` 按钮 + `Update.stopped_message_generation` 留待 runtime abort 能力落地后单独 PR;`sendRichMessageDraft` / `<tg-thinking>` block 留待 plain draft 数据稳定后单独 PR;在保持 ChatType gate 的前提下进一步支持 forum supergroup 留待单独 PR(`is_forum` 探测 + ChatType gate 拆分)。详见 §11.12.11.1。
+=======
+>>>>>>> 667f589 (docs(telegram): §21 voice 消息转写 (nightme-stt worker) + changelog)
 
 - **2026-08-22（v9 chain rolling log）** - 引入 per-turn multi-chunk chain，替代 v4 / v8 的"单占位 + 独立 bubble"双轨制。完整 spec 见 §11.12。新增文件：`internal/channel/telegram/placeholder_chain.go`（chainKey / placeholderChain / placeholderChunk / chainLRU，含 `appendSegment` / `flushChainNow` / `scheduleFlushDebounced` / `getOrCreateChain` / `patchActiveHeader` / `activeChunkMessageID`）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移，含 `formatToolStartCall` / `summarizeToolResult` / `displayToolArgs` / `compactJSONToolArgs` / `countLines` / `countUniqueFiles` / `truncate`）。改动：`Adapter.Send` 8 个 Out* case（OutReply/OutResult/OutThinking/OutToolStart/OutToolEnd/OutError/OutTaskCreate/OutTaskUpdate）重写为 `appendSegment` 路径；`OutHeartbeat` 改 `patchActiveHeader` + 走 debounce；`OnPromptEnded` 改 `flushChainNow` + 🎉 on active chunk + cursor reset；`formatTool` 内联实现替换为调 summarize helpers；`ensurePlaceholder` delegate 到 `appendSegment` 创建第一张 chunk。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。`TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。debounce window = 250 ms。LRU cap = 1000 chains。阈值三档：3500 chars raw buffer / 3900 chars rendered split / 4096 chars Telegram 硬限。Footer 内存语义：每 chunk 最多一个 footer，footer-bearing 事件（OutReply / OutResult / OutTaskCreate / OutTaskUpdate）来时刷新，其他不动。重启后 chain 失 = 下次事件来时建新 chunk（旧 frozen chunks 在 chat 里保留为历史证据）。
 
@@ -4182,3 +4190,98 @@ L3 仅在 L2 生产数据证明"典型 turn < 32K chars"且"active chunk 编辑�
 - ✅ L2 生产数据显示典型 turn < 5K chars（active chunk 当前已经足够） → **L3 不上**
 - ⚠️ 数据显示典型 turn 5K-32K chars + chain chunk 切换频繁 → L3 进候选
 - ❌ chain 性能 / bug 报告 → 修复 chain 而不是退役
+
+## 21. Voice 消息转写（nightme-stt worker）
+
+Telegram voice 消息（`message.Voice`）以 `.ogg`/Opus 形式下发。`telegram` adapter 把它交给一个独立的 `nightme-stt` worker 进程转写为文本，然后合并进 `InboundMessage.Text`，再走普通的 agent pipeline。worker 不在主 `nightme` binary 路径上（CGO + ONNX Runtime 依赖太重），由 manager 在第一个 Voice 消息到达时 lazy 启动，之后常驻直到 daemon 退出。
+
+### 21.1 进程模型
+
+```text
+Telegram Voice (message.Voice)
+        │
+        ▼  (existing download path: downloadTelegramFile → api.download)
+二进制字节
+        │
+        ▼  voice.handle (internal/channel/telegram/voice.go)
+        │
+   ┌────┴─────┐
+   │ 有 caption │
+   │ 无 caption │
+   └────┬─────┘
+        ▼
+nightme-stt worker (model.int8.onnx + tokens.txt on disk)
+   │
+   ▼  SenseVoice Small INT8 推理（offline, single utterance）
+转写文本
+        │
+        ▼  composeVoiceText(caption, transcription)
+        │   caption == "" && transcription == "" → ❌ 通知用户,不发布空消息
+        │   caption == ""  → transcription
+        │   transcription == "" → caption
+        │   都非空 → caption + "\n\n" + transcription
+        │
+   ▼  InboundMessage.Text
+(原 Voice attachment 跳过,voiceHandled=true)
+        │
+        ▼
+existing agent pipeline (turn → Out*)
+```
+
+worker 本身是 `cmd/nightme-stt/main.go` 的 `nightme-stt` 二进制。它通过本地 IPC socket 通信:
+- **macOS / Linux**:`~/.nightme/stt/stt.sock`（Unix Domain Socket）
+- **Windows**:`\\.\pipe\nightme-stt`（Named Pipe）
+
+主 `nightme` 端是 RPC client（`internal/stt/client.go`），worker 端是 RPC server（`internal/stt/server.go`）。协议用 length-prefixed JSON framing，operation 集合 = `{health, version, transcribe, shutdown}`。
+
+### 21.2 转写流程
+
+1. **下载**：adapter 复用 Telegram 文件下载（`api.download`）拿到 OGG/Opus 字节，存到 `bin/nightme-stt` 不需要走文件路径 —— RPC 把音频字节直接发过去。
+2. **首启检查**：manager.EnsureReady 看 `<dataDir>/stt/bin/nightme-stt` 存不存在。不存在就返 `errNotBuilt`，adapter 用 `notifyVoiceFailure` 推一条"❌ voice could not be transcribed. Run `nightme stt install`"给用户。
+3. **per-asset 原子安装**（`nightme stt install`）：从 GitHub Releases API 查 latest → 下 worker 二进制 + SenseVoice model → SHA-256 校验（GitHub `digest` 字段，fallback 到 `.sha256` sidecar）→ 写到 `<dataDir>/stt/bin/` + `<dataDir>/stt/models/sensevoice/`。
+4. **lazy spawn**：`execHandle` 启动 worker 进程,握手 Health（确保模型已 load 进 ONNX Runtime）+ Version（确认 protocol 版本兼容）。握手后 worker 常驻，下一个 Voice 消息直接 reuse。
+5. **转写 + 合并**：RPC Transcribe 接收音频字节（单次 ≤ 20 MiB；OGG/Opus 原生），worker 用 ffmpeg 解码到 16 kHz mono int16 LE PCM，喂给 sherpa-onnx-go SenseVoice 模型，单 utterance offline 推理。返回 `{text, language, duration_ms}`。
+6. **组装文本**：根据 caption / transcription 组合（见上面决策表），注入 `InboundMessage.Text`。
+7. **跳过 Voice attachment**：`voiceHandled=true`，原有的 attachment 下载路径不重复拿 audio。
+
+### 21.3 失败模式
+
+| 场景 | 行为 |
+|---|---|
+| `nightme-stt` 二进制缺失 | Voice 消息发 ❌ 提示文本,跳过整条消息,不发空 inbound |
+| Worker 启动但 Health 失败 | 同上,提示"重新 `nightme stt install`" |
+| Transcription 返空字符串 AND caption 空 | 通知用户 ❌ "voice could not be transcribed" |
+| Transcription 返空字符串 AND caption 非空 | 走 attachment 兜底,Voice 文件下载,caption 单独发 |
+| Transcription 成功 AND caption 非空 | caption + "\n\n" + transcription |
+| Transcription 成功 AND caption 空 | transcription 单独 |
+| 模型返回的语言 | SenseVoice 多语言(中/英/日/韩/粤),`Result.Language` 字段记录但目前不分支 |
+
+### 21.4 资源约束
+
+- 音频最大 20 MiB（覆盖 Telegram 端 50 MiB 上限 + 10 分钟长度内的安全缓冲）
+- 转写结果最大 20_000 字符（裁掉超出部分,防注入超大 payload 撑爆单条 inbound）
+- worker process per-daemon 复用,不是 per-voice spawn
+- worker 进程不跟随 telegram adapter lifecycle,**由 manager 在 EnsureReady 触发**
+
+### 21.5 CLI 入口
+
+```
+nightme stt status         # 安装状态摘要
+nightme stt install        # 一键从 GitHub Releases 拉 worker + model
+nightme stt update         # 同上,镜像 `nightme update` 三段(check/fetch/activate)
+nightme stt uninstall      # 删 <dataDir>/stt/ 整树
+nightme stt install --worker-only   # 只更 binary,跳过 230 MB model
+nightme stt install --model-only    # 只更 model,跳过 binary
+nightme stt install --quiet         # 关掉进度输出
+nightme doctor              # STT 块显示 binary 路径 + endpoint
+```
+
+`nightme stt install` 实际只下载/激活,不会跑 worker;worker 是 manager 第一个 Voice 消息时 lazy 起。安装 + 使用解耦,符合 issue #381 §3。
+
+### 21.6 已知 gap（issue #381 §23 Definition of Done）
+
+- Windows named-pipe transport 仅编译过(ci.yml `GOOS=windows go build` step),运行时行为靠 release job 的 `windows-latest` / `windows-11-arm` runner 端到端验证,本机无法跑。
+- `nightme stt install` 不做 release 资产 pinning —— 每次跑都查 GitHub Releases API 取 latest。issue #381 §5 "pinned source + SHA-256" 由 GitHub `digest` 字段 + `.sha256` sidecar 兜底,跟静态 manifest 等价,但多了一次网络。
+- Real-model inference 性能 / 资源指标(idle RSS / peak RSS / 10s 30s 60s 转写 wall-clock)未在本机测 —— 需要装了 ffmpeg + 下载了 SenseVoice 模型的环境跑,放 release smoke test。
+- `nightme stt status` 当前只 stat 文件存不存在,不发 manifest 里记录的 tag + SHA。status 输出有可改进点。
+

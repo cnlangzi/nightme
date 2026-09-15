@@ -172,6 +172,7 @@ jobs:
         shell: bash
         run: go vet ./...
 
+
       # Regression gate for #295. The bug was that cmd/nightme/tray.go
       # imported getlantern/systray unconditionally, so every Linux
       # binary recorded libayatana-appindicator3.so.1 as a DT_NEEDED

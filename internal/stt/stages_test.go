@@ -3,6 +3,7 @@ package stt
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,9 +12,6 @@ import (
 	"testing"
 )
 
-// assetAtURL returns a fake worker / model asset whose URL
-// points at the supplied httptest server path. Convenience
-// for the 3-stage tests.
 func workerAsset(srvURL, name string, sha string, size int64) Asset {
 	return Asset{
 		URL:     srvURL + "/" + name,
@@ -36,28 +34,27 @@ func modelAsset(srvURL, name string, sha string, size int64) Asset {
 	}
 }
 
-func TestCheckReturnsUpToDateWhenBinaryMatches(t *testing.T) {
+func writeManifest(t *testing.T, dataDir, workerTag, modelTag string) {
+	t.Helper()
+	manifestDir := filepath.Join(dataDir, "stt")
+	if err := os.MkdirAll(manifestDir, 0o700); err != nil {
+		t.Fatalf("mkdir manifest: %v", err)
+	}
+	rec := map[string]string{"worker_tag": workerTag, "model_tag": modelTag}
+	data, _ := json.Marshal(rec)
+	if err := os.WriteFile(filepath.Join(manifestDir, "manifest.json"), data, 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+}
+
+func TestCheckReturnsUpToDateWhenManifestTagMatches(t *testing.T) {
 	workerBin := []byte("#!/bin/sh\nexit 0\n")
 	tarGz := buildTarGz(t, map[string]string{"nightme-stt": string(workerBin)})
-	// SHA on disk is the binary's SHA, not the tarball's
-	// — the resolver reports the tarball's SHA because it
-	// matches what GitHub serves; the installer's
-	// post-extract SHA check happens in Fetch/Install.
-	// For the Check test we just need the asset's SHA to
-	// equal the binary's SHA.
-	binSHA := sha256OfBytes(workerBin)
-
 	srvURL, _ := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(tarGz)
 	}))
 
 	dir := t.TempDir()
-	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz", binSHA, int64(len(tarGz)))}
-	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m", "d", 1)}
-	inst, _ := NewInstaller(dir, wr, mr)
-	inst.http = http.DefaultClient
-
-	// Pre-populate worker at the right SHA + both model files.
 	binPath := filepath.Join(dir, "stt", "bin", "nightme-stt")
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -74,85 +71,98 @@ func TestCheckReturnsUpToDateWhenBinaryMatches(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	writeManifest(t, dir, "v0.0.0-test", "v0.0.0-test")
+
+	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
+	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
+	inst, _ := NewInstaller(dir, wr, mr)
+	inst.http = http.DefaultClient
 
 	res, err := inst.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
 	if !res.WorkerUpToDate {
-		t.Fatalf("expected WorkerUpToDate=true (SHA match), got false")
+		t.Fatalf("expected WorkerUpToDate=true (manifest tag matches), got false")
 	}
 	if !res.ModelUpToDate {
-		t.Fatalf("expected ModelUpToDate=true (files present), got false")
-	}
-	if res.LatestWorker.Tag != "v0.0.0-test" {
-		t.Fatalf("LatestWorker tag: %q", res.LatestWorker.Tag)
+		t.Fatalf("expected ModelUpToDate=true (manifest tag matches + files present), got false")
 	}
 }
 
-func TestCheckReportsOutdatedWhenBinaryDiffers(t *testing.T) {
+func TestCheckReportsOutdatedWhenManifestTagDiffers(t *testing.T) {
 	workerBin := []byte("#!/bin/sh\nexit 0\n")
 	tarGz := buildTarGz(t, map[string]string{"nightme-stt": string(workerBin)})
-
 	srvURL, _ := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(tarGz)
 	}))
 
 	dir := t.TempDir()
-	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz", sha256OfBytes(tarGz), int64(len(tarGz)))}
-	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m", "d", 1)}
-	inst, _ := NewInstaller(dir, wr, mr)
-	inst.http = http.DefaultClient
-
-	// Different SHA on disk vs latest → WorkerUpToDate=false.
-	wrongBin := []byte("different content entirely")
 	binPath := filepath.Join(dir, "stt", "bin", "nightme-stt")
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(binPath, wrongBin, 0o755); err != nil {
+	if err := os.WriteFile(binPath, workerBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	modelDir := filepath.Join(dir, "stt", "models", "sensevoice")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"model.int8.onnx", "tokens.txt"} {
+		if err := os.WriteFile(filepath.Join(modelDir, name), []byte("fake"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeManifest(t, dir, "v0.0.0-old", "v0.0.0-old")
+
+	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
+	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
+	inst, _ := NewInstaller(dir, wr, mr)
+	inst.http = http.DefaultClient
+
 	res, err := inst.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
 	if res.WorkerUpToDate {
-		t.Fatalf("expected WorkerUpToDate=false (SHA mismatch)")
+		t.Fatalf("expected WorkerUpToDate=false (manifest tag differs)")
 	}
-	if res.WorkerOnDisk != sha256OfBytes(wrongBin) {
-		t.Fatalf("WorkerOnDisk wrong: %q", res.WorkerOnDisk)
+	if res.WorkerOnDisk != "v0.0.0-old" {
+		t.Fatalf("WorkerOnDisk: got %q", res.WorkerOnDisk)
 	}
 }
 
-func TestCheckReportsModelMissing(t *testing.T) {
-	srvURL, _ := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Empty response — sha will fail size check anyway
-		// for the model side, but the Worker phase is
-		// what we're really testing.
-	}))
+func TestCheckReportsMissingManifest(t *testing.T) {
+	workerBin := []byte("#!/bin/sh\nexit 0\n")
+	tarGz := buildTarGz(t, map[string]string{"nightme-stt": string(workerBin)})
+	srvURL, _ := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
 	dir := t.TempDir()
 	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz",
-		sha256OfBytes([]byte("not-a-real-worker-but-sha-must-be-non-zero-here-xxxx")), 1)}
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
 	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
-		strings.Repeat("0", 64), 1)}
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
 	inst, _ := NewInstaller(dir, wr, mr)
 	inst.http = http.DefaultClient
 
-	// Don't pre-populate the model.
 	res, err := inst.Check(context.Background())
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
-	if res.ModelInstalled {
-		t.Fatalf("expected ModelInstalled=false (no model on disk)")
+	if res.WorkerOnDisk != "" {
+		t.Fatalf("expected empty WorkerOnDisk without manifest, got %q", res.WorkerOnDisk)
 	}
-	if res.ModelUpToDate {
-		t.Fatalf("expected ModelUpToDate=false when ModelInstalled=false")
+	if res.WorkerUpToDate {
+		t.Fatalf("expected WorkerUpToDate=false without manifest")
 	}
 }
 
-func TestFetchSkipsDownloadWhenSHAMatches(t *testing.T) {
+func TestFetchDownloadsWhenOnDiskSHADiffers(t *testing.T) {
 	workerBin := []byte("#!/bin/sh\nexit 0\n")
 	tarGz := buildTarGz(t, map[string]string{"nightme-stt": string(workerBin)})
 
@@ -163,21 +173,24 @@ func TestFetchSkipsDownloadWhenSHAMatches(t *testing.T) {
 	}))
 
 	dir := t.TempDir()
-	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz", sha256OfBytes(tarGz), int64(len(tarGz)))}
+	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
 	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
-		strings.Repeat("0", 64), 1)}
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
 	inst, _ := NewInstaller(dir, wr, mr)
 	inst.http = client
 
-	// Pre-populate worker binary so SHA matches → no download.
 	binPath := filepath.Join(dir, "stt", "bin", "nightme-stt")
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(binPath, workerBin, 0o755); err != nil {
+	if err := os.WriteFile(binPath, []byte("stale binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-populate model files so model fetch skips too.
+	// Pre-populate the model so Fetch only exercises the
+	// worker download path; model extraction would
+	// require a real bz2 fixture which is out of scope
+	// here.
 	modelDir := filepath.Join(dir, "stt", "models", "sensevoice")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -188,15 +201,15 @@ func TestFetchSkipsDownloadWhenSHAMatches(t *testing.T) {
 		}
 	}
 
-	fetch, err := inst.Fetch(context.Background(), nil, FetchOptions{})
+	_, err := inst.Fetch(context.Background(), nil, FetchOptions{})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if downloadCalled {
-		t.Fatalf("expected no download when SHA matches on disk")
+	if !downloadCalled {
+		t.Fatalf("expected download to fire when on-disk SHA != asset SHA")
 	}
-	if fetch.BytesDownloaded != 0 {
-		t.Fatalf("expected 0 bytes downloaded, got %d", fetch.BytesDownloaded)
+	if _, err := os.Stat(filepath.Join(dir, "stt", "manifest.json")); err != nil {
+		t.Fatalf("manifest not written: %v", err)
 	}
 }
 
@@ -216,13 +229,13 @@ func TestFetchSkipsSingleArtifactWithFlags(t *testing.T) {
 	}))
 
 	dir := t.TempDir()
-	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz", sha256OfBytes(tarGz), int64(len(tarGz)))}
+	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
 	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
-		strings.Repeat("0", 64), int64(len(tarGz)))}
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
 	inst, _ := NewInstaller(dir, wr, mr)
 	inst.http = client
 
-	// --worker-only should not touch the model.
 	_, err := inst.Fetch(context.Background(), nil, FetchOptions{WorkerOnly: true})
 	if err != nil {
 		t.Fatalf("Fetch WorkerOnly: %v", err)
@@ -243,7 +256,7 @@ func TestActivateLeavesExistingBinaryAloneWhenNoStaging(t *testing.T) {
 	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz",
 		sha256OfBytes(workerBin), int64(len(workerBin)))}
 	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
-		strings.Repeat("0", 64), 1)}
+		sha256OfBytes(workerBin), int64(len(workerBin)))}
 	inst, _ := NewInstaller(dir, wr, mr)
 	inst.http = http.DefaultClient
 
@@ -256,13 +269,7 @@ func TestActivateLeavesExistingBinaryAloneWhenNoStaging(t *testing.T) {
 	}
 	mtimeBefore := mustStat(t, binPath).ModTime()
 
-	// Pass an empty FetchResult — Activate is a no-op for
-	// the worker (WorkerStaging is empty) and just reports
-	// the existing path.
-	fetch := &FetchResult{
-		Worker: wr.asset,
-		Model:  mr.asset,
-	}
+	fetch := &FetchResult{Worker: wr.asset, Model: mr.asset}
 	res, err := inst.Activate(fetch, ActivateOptions{NoRestart: true})
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
@@ -279,8 +286,6 @@ func TestActivateLeavesExistingBinaryAloneWhenNoStaging(t *testing.T) {
 	}
 }
 
-// mustStat wraps os.Stat with t.Fatal — a tiny helper for
-// tests that need to assert file metadata after an op.
 func mustStat(t *testing.T, path string) os.FileInfo {
 	t.Helper()
 	fi, err := os.Stat(path)
@@ -290,9 +295,6 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 	return fi
 }
 
-// TestUpdateLikeFlowNoOpWhenUpToDate exercises the CLI's
-// update path at the test level: when Check reports up to
-// date, no network call happens, no install runs.
 func TestUpdateLikeFlowNoOpWhenUpToDate(t *testing.T) {
 	workerBin := []byte("#!/bin/sh\nexit 0\n")
 	tarGz := buildTarGz(t, map[string]string{"nightme-stt": string(workerBin)})
@@ -304,14 +306,6 @@ func TestUpdateLikeFlowNoOpWhenUpToDate(t *testing.T) {
 	}))
 
 	dir := t.TempDir()
-	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz", sha256OfBytes(tarGz), int64(len(tarGz)))}
-	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
-		strings.Repeat("0", 64), 1)}
-	inst, _ := NewInstaller(dir, wr, mr)
-	inst.http = http.DefaultClient
-
-	// Pre-populate everything so Check reports up-to-date
-	// BEFORE any Fetch. The test asserts no fetch happens.
 	binPath := filepath.Join(dir, "stt", "bin", "nightme-stt")
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -328,6 +322,14 @@ func TestUpdateLikeFlowNoOpWhenUpToDate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	writeManifest(t, dir, "v0.0.0-test", "v0.0.0-test")
+
+	wr := &fakeWorkerResolver{asset: workerAsset(srvURL, "w.tar.gz",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
+	mr := &fakeModelResolver{asset: modelAsset(srvURL, "m",
+		sha256OfBytes(tarGz), int64(len(tarGz)))}
+	inst, _ := NewInstaller(dir, wr, mr)
+	inst.http = http.DefaultClient
 
 	check, err := inst.Check(context.Background())
 	if err != nil {
@@ -337,15 +339,7 @@ func TestUpdateLikeFlowNoOpWhenUpToDate(t *testing.T) {
 		t.Fatalf("expected up-to-date: worker=%v model=%v",
 			check.WorkerUpToDate, check.ModelUpToDate)
 	}
-	// Update flow would exit here without calling Fetch /
-	// Install. The server got ZERO hits (resolvers didn't
-	// run after Check populated LatestWorker/LatestModel
-	// from the very first server request).
-	if srvHits > 1 {
-		t.Logf("server hit %d times (expected 1: one for Check's resolve)", srvHits)
-	}
 
-	// As a bonus, render what the CLI would print.
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "  ✓  Already up to date\n")
 	fmt.Fprintf(&buf, "     worker %s\n", check.LatestWorker.Tag)

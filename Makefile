@@ -182,6 +182,7 @@ release: winres ## Build a versioned binary into dist/nightme-<GOOS>-<GOARCH>[.e
 	@mkdir -p $(BIN_DIR)
 	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -tags '$(GO_TAGS)' -ldflags '$(LDFLAGS)' -o $(RELEASE_BIN) ./cmd/nightme
 
+
 # tray-assets is intentionally NOT in the build/release dependency
 # chain. The tray-icon byte payload that //go:embed resolves in
 # cmd/nightme/tray_assets.go is committed to the repo (Linux:

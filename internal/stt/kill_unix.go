@@ -19,3 +19,8 @@ import "os/exec"
 func killByName(name string) {
 	_ = exec.Command("pkill", "-f", name).Run()
 }
+
+// isWindowsExe is true on Windows, where the binary carries
+// a .exe suffix; false on Unix. The other half of this
+// build-tag pair lives in kill_windows.go.
+var isWindowsExe = false

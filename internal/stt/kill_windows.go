@@ -29,3 +29,7 @@ func killByName(name string) {
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
 	_ = cmd.Run()
 }
+
+// isWindowsExe is true on Windows; see kill_unix.go for the
+// other half of this build-tag pair.
+var isWindowsExe = true

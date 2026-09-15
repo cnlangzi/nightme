@@ -66,12 +66,14 @@ type Adapter struct {
 	// deleteMessage), which leaves the user free to type.
 	//
 	// liveDraft simulates the sendMessageDraft surface for
-	// every ChatKind via a real Telegram message +
+	// every non-channel ChatKind via a real Telegram message +
 	// editMessageText / deleteMessage trio. Per-turn entries
-	// live in memory; the message_id of the active DraftMessage
-	// is persisted to TopicState.DraftMessageID so a daemon
-	// restart mid-turn can resume editing the same Telegram
-	// message. See group_draft.go for the lifecycle contract.
+	// live in memory only — there is no persisted DraftMessageID
+	// on TopicState; a daemon restart mid-turn leaves the
+	// in-flight DraftMessage orphaned in chat (acceptable since
+	// the user is unlikely to resume the same turn, and the next
+	// turn creates a fresh DraftMessage). See live_draft.go for
+	// the lifecycle contract.
 	liveDraft *liveDraftManager
 
 	// voiceHandler is the seam to the local nightme-stt worker
@@ -689,12 +691,12 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// already retried transient errors, so a permanent failure
 	// here means the message is stuck (e.g. revoked bot perms).
 	if state.ChatKind == ChatKindGroup {
-		// No persisted DraftMessageID to recover from: the group
-		// draft is purely in-memory per-turn state. A daemon crash
-		// mid-turn leaves any in-flight DraftMessage orphaned in
-		// the chat — acceptable since the user is unlikely to
-		// resume the same turn, and endProcess's deleteMessage
-		// would have cleaned it up on the happy path.
+		// No persisted DraftMessageID to recover from: the liveDraft
+		// is purely in-memory per-turn state. A daemon crash mid-turn
+		// leaves any in-flight DraftMessage orphaned in the chat —
+		// acceptable since the user is unlikely to resume the same
+		// turn, and endProcess's deleteMessage would have cleaned it
+		// up on the happy path.
 	}
 	// ChatKindPrivate is handled the same way: the simulated
 	// DraftMessage lives in liveDraft, not in a per-chat-kind
@@ -1385,7 +1387,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// DM draft path: REPLACE semantics — OutToolStart is the
 		// "first half" of a tool display; OutToolEnd stacks below.
 		// Group path: cold-creates the simulated DraftMessage
-		// (group_draft.go); subsequent events editMessageText in
+		// (live_draft.go); subsequent events editMessageText in
 		// place. On cold-create failure falls through to richTurn.
 		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, formatTool(msg), messages.OutToolStart); handled {
 			return nil
@@ -1495,7 +1497,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// matches the chain path's body format (F-think parity with
 		// feishu) so DM and forum-topic visuals stay consistent.
 		// Group path: cold-creates / edits the simulated DraftMessage
-		// (group_draft.go) with the REPLACE buffer.
+		// (live_draft.go) with the REPLACE buffer.
 		// Empty-text silent drop already happened at the top of
 		// Send, so msg.Text is non-empty here.
 		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, "💭 "+msg.Text, messages.OutThinking); handled {

@@ -105,7 +105,7 @@ func TestAdapter_Send_Group_OutThinking_CreatesDraftMessage(t *testing.T) {
 			len(sends), api.Calls)
 	}
 
-	// OnPromptEnded → endProcess → flushLocked (sendRichMessage
+	// OnPromptEnded → endProcess → flush (sendRichMessage
 	// cold-create, 5 blocks) → deleteMessage.
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
@@ -179,7 +179,7 @@ func TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace(t *testing.T) 
 		t.Fatalf("OnPromptEnded must delete the cold-created DraftMessage; got %d deletes", len(dels))
 	}
 	if edits := callsByMethod(api.Calls, "editMessageText"); len(edits) != 0 {
-		t.Fatalf("endProcess only calls flushLocked once — no editMessageText expected; got %d", len(edits))
+		t.Fatalf("endProcess only calls flush once — no editMessageText expected; got %d", len(edits))
 	}
 }
 
@@ -250,7 +250,7 @@ func TestAdapter_Send_Group_NextTurn_CreatesFreshDraftMessage(t *testing.T) {
 	raw := setupGroupState(t, a, -1001, 0)
 
 	// Turn 1: 10 OutThinking events. OnPromptEnded → endProcess
-	// → flushLocked (cold-create, latest 5 = events 6..10) →
+	// → flush (cold-create, latest 5 = events 6..10) →
 	// deleteMessage. Turn 1's entry is dropped from m.entries.
 	for i := 1; i <= 10; i++ {
 		_ = a.Send(context.Background(), messages.OutboundMessage{
@@ -335,7 +335,7 @@ func TestAdapter_Send_Group_DraftMessage_RoutedThroughTopic(t *testing.T) {
 // TestAdapter_OnPromptEnded_Group_DeletesDraftMessage verifies the
 // turn-end cleanup contract under the two-stack model: the
 // OnPromptEnded path first flushes any buffered events via
-// flushLocked with reason="endProcess" (sendRichMessage on the
+// flush with reason="endProcess" (sendRichMessage on the
 // FIRST flush — messageID was 0), then deletes the resulting
 // Telegram message (the simulated DraftMessage's auto-disappear
 // analogue). There is no persisted DraftMessageID — the
@@ -350,7 +350,7 @@ func TestAdapter_OnPromptEnded_Group_DeletesDraftMessage(t *testing.T) {
 		Text:   "thought to be deleted",
 	})
 
-	// OnPromptEnded → endProcess → flushLocked (sendRichMessage
+	// OnPromptEnded → endProcess → flush (sendRichMessage
 	// cold-create) → deleteMessage.
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
@@ -425,7 +425,7 @@ func TestAdapter_Send_Group_OutResult_EndsDraftProcess(t *testing.T) {
 // The single-FIFO model only flushes via the 10s timer or
 // endProcess, and endProcess drops the entry. To exercise three
 // flushes (cold-create → edit-fail → edit-recover) on the same
-// entry we drive flushLocked directly through the package-level
+// entry we drive flush directly through the package-level
 // surface — the lock discipline and the buffer-restoration
 // contract are the production-relevant invariants, not the
 // specific trigger.
@@ -443,7 +443,7 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 		}
 	}
 
-	// Phase 1: cold-create. Drive flushLocked directly so the
+	// Phase 1: cold-create. Drive flush directly so the
 	// entry stays alive (endProcess would have dropped it).
 	a.liveDraft.mu.Lock()
 	entry, ok := a.liveDraft.entries[liveDraftKey(raw, 0, 1)]
@@ -451,8 +451,8 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 	if !ok || entry == nil {
 		t.Fatalf("group draft entry missing after seed")
 	}
-	if _, err := a.liveDraft.flushLocked(ctx, entry, raw, 0, "test-phase1"); err != nil {
-		t.Fatalf("phase 1 flushLocked: %v", err)
+	if _, err := a.liveDraft.flush(ctx, entry, raw, 0, "test-phase1"); err != nil {
+		t.Fatalf("phase 1 flush: %v", err)
 	}
 	cold := findCallByMethod(api.Calls, "sendRichMessage")
 	if cold == nil {
@@ -475,8 +475,8 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 	preFailSends := len(callsByMethod(api.Calls, "sendRichMessage"))
 
 	api.Errors = []error{errors.New("simulated editMessageText 429")}
-	if _, err := a.liveDraft.flushLocked(ctx, entry, raw, 0, "test-phase2-fail"); err != nil {
-		t.Fatalf("phase 2 flushLocked returned err: %v", err)
+	if _, err := a.liveDraft.flush(ctx, entry, raw, 0, "test-phase2-fail"); err != nil {
+		t.Fatalf("phase 2 flush returned err: %v", err)
 	}
 
 	// The popped slice must be restored: thinkingStack back at 5
@@ -511,8 +511,8 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 			t.Fatalf("recovery event %d not handled", i)
 		}
 	}
-	if _, err := a.liveDraft.flushLocked(ctx, entry, raw, 0, "test-phase3-recover"); err != nil {
-		t.Fatalf("phase 3 flushLocked: %v", err)
+	if _, err := a.liveDraft.flush(ctx, entry, raw, 0, "test-phase3-recover"); err != nil {
+		t.Fatalf("phase 3 flush: %v", err)
 	}
 	edits = callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != preFailEdits+2 {
@@ -607,7 +607,7 @@ func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *tes
 	}
 	wg.Wait()
 
-	// Force the flush. OnPromptEnded → endProcess → flushLocked
+	// Force the flush. OnPromptEnded → endProcess → flush
 	// (sendRichMessage cold-create, latest 5 of 10) → deleteMessage.
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
@@ -929,7 +929,7 @@ func TestLiveDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 		t.Fatalf("entry must be in m.entries after stream")
 	}
 
-	// Turn 1 ends. endProcess must (a) flush via flushLocked
+	// Turn 1 ends. endProcess must (a) flush via flush
 	// (sendRichMessage cold-create, latest 5) and (b) call
 	// deleteMessage and (c) drop the entry from m.entries.
 	api.Calls = nil

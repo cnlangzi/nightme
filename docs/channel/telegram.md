@@ -1587,8 +1587,8 @@ PR 锚点保留为 clickable url entity，不会退化为字面 markdown 文本�
 
 | Kind | 是否带 footer |
 | --- | --- |
-| `OutReply` / `OutCommandReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutError` / `OutTaskCreate` / `OutTaskUpdate` | footer-bearing kind：`statusbar.StatusBarLines(&msg)` 非空时刷新 rich turn.footer |
-| `OutResult` | 独立 rich message：footer 走 `buildResultBlocks` 的 `footerLinesToRichText(footerLines)` |
+| `OutReply` / `OutCommandReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutError` / `OutTaskCreate` / `OutTaskUpdate` | footer-bearing kind：streaming 事件 `msg.Usage == nil`，所以 `statusbar.StatusBarLines(&msg)` 只产 Identity / Git 行；rich turn PATCH 时刷 `turn.footer`（缺 Usage 行） |
+| `OutResult` | 双重贴附：(1) 独立 rich message footer 走 `buildResultBlocks` 的 `footerLinesToRichText(footerLines)`；(2) 同一份 `footerLines` 回写到占位卡的 `turn.footer`，让 💰 行追上 turn 内最后状态 |
 | `OutHeartbeat` | 不带（headerLine 是 heartbeat 文本本身） |
 | `OutChoice` / `OutChoicePatch` | 不挂（InlineKeyboard 自含，挂 footer 污染选择 UI） |
 | `OutMessageState` / `OutMessageStateRemoved` | 不挂（reactions 独立轨道，§14.1） |
@@ -1602,14 +1602,15 @@ PR 锚点保留为 clickable url entity，不会退化为字面 markdown 文本�
 - `Usage`：由 bridge 在终态 OutResult 上填（Claude Code `result.usage + result.modelUsage`，Pi `message_end.usage`）；streaming 中间 chunk 该字段为 nil → `StatusBarLines` zero-omit Line 2
 - `GitStatus`：由 chatsession 在 `SetSelectedCwd` / `/gtw commit` / `/gtw pr` 时刷，runtime 透传
 
-Kind 不锁 policy：runtime 在哪个 kind 上 stamp status 字段由 runtime 决定，rich turn 照单全收；`statusbar.StatusBarLines(&msg) == nil` 时 footer 不动，`!= nil` 时刷 `turn.footer`。
+Kind 不锁 policy：runtime 在哪个 kind 上 stamp status 字段由 runtime 决定，rich turn 照单全收；`statusbar.StatusBarLines(&msg) == nil` 时 footer 不动，`!= nil` 时刷 `turn.footer`。OutResult 是唯一同时刷新占位卡 + 独立消息 footer 的 kind —— 见 §16.4。
 
 ### 16.4 rich turn footer 生命周期
 
 每 turn 最多一个 footer block：
 
 - turn 开始时 footer = nil（footer block 不出现）
-- footer-bearing event 来 → `turn.footer` 刷新，dirty=true，scheduled flush
+- streaming footer-bearing event 来 → `turn.footer` 刷新（Identity / Git 两行，Usage 行因 `msg.Usage == nil` 缺席），dirty=true，scheduled flush
+- OutResult 到达时，footer 同时承担两件事：(1) 组装到独立 rich message 的 footer block；(2) 把同一份 `statusbar.StatusBarLines(&msg)` 回写到占位卡的 `turn.footer`，让 💰 行追上 turn 内最后状态。下次 debounce（250ms）或 `OnPromptEndedRichTurn` 的同步 flush 把新 footer PATCH 到占位卡
 - flush 时 `renderRichTurnBlocksLocked` 检查 `len(turn.footer) > 0`，非零时在 entries 之后追加 divider + footer block
 - turn 结束 → turn purge，footer 跟 turn 一起清零（下次 turn 干净启动）
 
@@ -1618,6 +1619,7 @@ Kind 不锁 policy：runtime 在哪个 kind 上 stamp status 字段由 runtime �
 - Telegram footer block 是 Bot API 10.1+ 特性，旧客户端可能不渲染 footer block（rich block 整体的 32K cap 仍生效）
 - PR 锚点作为 url entity 保留 clickable 行为，但客户端 footer region 的 link 视觉是 muted caption 风格
 - StatusBar 走纯文本 + 中点 `·` + 半角空格，不用 `<b>` `<code>` 强调，视觉不如 feishu grey footer，但 parse 零失败
+- OutResult 的 Usage 仅在终态一次性回写到占位卡 footer；streaming 阶段（OutReply / OutToolStart / OutToolEnd / …）的 PATCH 不带 Usage 行 —— 用户看到的"💰 出现"是 OutResult 到达后的最后一跳，不是实时 ticker
 
 ## 17. Rich Messages 路径
 

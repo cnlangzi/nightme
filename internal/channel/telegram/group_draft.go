@@ -26,6 +26,13 @@ import (
 // normally emits sequentially per ChatSession so this is a no-op
 // in practice, but the lock is what stops two concurrent cold-
 // creates from double-sending.
+//
+// Per-prompt isolation (see docs §11.12.11.3) is enforced by the
+// groupDraftKey already containing userMsgID: ensureEntry creates
+// a fresh entry per turn, so cross-turn entry reuse cannot happen
+// via the production keying. The adapter-side replyAnchor
+// resolution (msg.ReplyTo first, state.UserMessageID fallback) is
+// what guarantees caller correctness.
 type groupDraftEntry struct {
 	mu        sync.Mutex
 	textBuf   strings.Builder
@@ -115,7 +122,10 @@ func (m *groupDraftManager) ensureEntry(chatID string, topicID int, userMsgID in
 // userMsgID is BOTH the entry key (one entry per turn) and the
 // reply_to_message_id anchor on the cold-create sendMessage — the
 // DraftMessage visually hangs off the user's message like every
-// other turn message.
+// other turn message. Per-prompt isolation is enforced by the
+// groupDraftKey already containing userMsgID; the caller is
+// responsible for passing the per-event anchor (msg.ReplyTo),
+// see docs/channel/telegram.md §11.12.11.3.
 func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, userMsgID int, segment string, replace bool) (bool, error) {
 	if userMsgID <= 0 {
 		// No user message anchor → can't safely cold-create (a

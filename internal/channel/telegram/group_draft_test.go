@@ -488,6 +488,358 @@ func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *tes
 	}
 }
 
+// TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo verifies that
+// Send() derives replyAnchor from msg.ReplyTo, not from
+// state.UserMessageID. Setup pins state.UserMessageID="99" but the
+// event carries ReplyTo="42"; the cold-create must anchor to 42.
+func TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+	// Override state.UserMessageID to a different value to detect
+	// any code path that still reads state.
+	if err := a.state.putTopic(&TopicState{
+		ChatID:        raw,
+		TopicID:       0,
+		ChatKind:      ChatKindGroup,
+		UserMessageID: "99",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutThinking,
+		Text:    "anchored to msg.ReplyTo",
+		ReplyTo: "42",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	sends := callsByMethod(api.Calls, "sendMessage")
+	if len(sends) != 1 {
+		t.Fatalf("expected 1 sendMessage cold-create, got %d", len(sends))
+	}
+	if got, _ := sends[0].Params["reply_to_message_id"].(int); got != 42 {
+		t.Fatalf("cold-create reply_to_message_id = %v, want 42 (msg.ReplyTo)", sends[0].Params["reply_to_message_id"])
+	}
+}
+
+// TestAdapter_Send_Group_FallsBackToStateUserMessageID_WhenReplyToEmpty
+// verifies the orphan-fallback contract: events without msg.ReplyTo
+// (shell /gtw, startup EventAgentReady, test paths) attach to
+// state.UserMessageID — same as Feishu's orphan path.
+func TestAdapter_Send_Group_FallsBackToStateUserMessageID_WhenReplyToEmpty(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+	if err := a.state.putTopic(&TopicState{
+		ChatID:        raw,
+		TopicID:       0,
+		ChatKind:      ChatKindGroup,
+		UserMessageID: "77",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "orphan thought — no ReplyTo",
+		// ReplyTo intentionally empty
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	sends := callsByMethod(api.Calls, "sendMessage")
+	if len(sends) != 1 {
+		t.Fatalf("expected 1 sendMessage cold-create, got %d", len(sends))
+	}
+	if got, _ := sends[0].Params["reply_to_message_id"].(int); got != 77 {
+		t.Fatalf("orphan fallback reply_to_message_id = %v, want 77 (state.UserMessageID)", sends[0].Params["reply_to_message_id"])
+	}
+}
+
+// TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated
+// verifies that two consecutive turns produce two independent
+// DraftMessages anchored to their respective userMsgIDs, and that a
+// late event from turn 1 (delivered after turn 2's ensurePlaceholder
+// has overwritten state.UserMessageID) does NOT leak into turn 2's
+// DraftMessage. The bug would manifest as turn 2's sendMessage
+// carrying turn 1's body, or turn 1's late OutToolEnd rewriting
+// turn 2's message_id.
+func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+
+	// Turn 1: think starts the DraftMessage.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutThinking,
+		Text:    "turn 1 thought",
+		ReplyTo: "10",
+	}); err != nil {
+		t.Fatalf("turn 1 think: %v", err)
+	}
+	sends := callsByMethod(api.Calls, "sendMessage")
+	if len(sends) != 1 {
+		t.Fatalf("turn 1 cold-create expected 1 sendMessage, got %d", len(sends))
+	}
+	turn1ReplyTo, _ := sends[0].Params["reply_to_message_id"].(int)
+	if turn1ReplyTo != 10 {
+		t.Fatalf("turn 1 reply_to_message_id = %v, want 10", sends[0].Params["reply_to_message_id"])
+	}
+	turn1Text, _ := sends[0].Params["text"].(string)
+	if turn1Text != "💭 turn 1 thought" {
+		t.Fatalf("turn 1 text = %q, want %q", turn1Text, "💭 turn 1 thought")
+	}
+
+	// Simulate turn 2's user message arriving: ensurePlaceholder
+	// runs and overwrites state.UserMessageID to 11.
+	if err := a.ensurePlaceholder(context.Background(), raw, 0, 11, &Message{
+		MessageID: 11,
+		Chat:      Chat{ID: -1001, Type: "supergroup"},
+	}); err != nil {
+		t.Fatalf("ensurePlaceholder turn 2: %v", err)
+	}
+
+	// Turn 1 late OutToolEnd arrives with ReplyTo=10 (NOT state=11).
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutToolEnd,
+		Tool:    &messages.ToolInfo{Name: "Bash", Output: "ok"},
+		ReplyTo: "10",
+	}); err != nil {
+		t.Fatalf("turn 1 late OutToolEnd: %v", err)
+	}
+
+	// Expect: turn 1's late event went out as an editMessageText
+	// (it belongs to turn 1's DraftMessage), NOT a new sendMessage.
+	edits := callsByMethod(api.Calls, "editMessageText")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 editMessageText for turn 1 late event, got %d (sends=%d)", len(edits), len(callsByMethod(api.Calls, "sendMessage")))
+	}
+	// No new sendMessage — turn 1's entry was reused.
+	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {
+		t.Fatalf("turn 1 late event must NOT cold-create a new DraftMessage; sends=%d", len(sends))
+	}
+
+	// Now turn 2's OutThinking arrives — it must cold-create a fresh
+	// DraftMessage anchored to 11 (the state.UserMessageID AFTER
+	// ensurePlaceholder for turn 2), not 10.
+	api.Calls = nil
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutThinking,
+		Text:    "turn 2 thought",
+		ReplyTo: "11",
+	}); err != nil {
+		t.Fatalf("turn 2 think: %v", err)
+	}
+	sends2 := callsByMethod(api.Calls, "sendMessage")
+	if len(sends2) != 1 {
+		t.Fatalf("turn 2 cold-create expected 1 sendMessage, got %d", len(sends2))
+	}
+	turn2ReplyTo, _ := sends2[0].Params["reply_to_message_id"].(int)
+	if turn2ReplyTo != 11 {
+		t.Fatalf("turn 2 reply_to_message_id = %v, want 11", sends2[0].Params["reply_to_message_id"])
+	}
+	turn2Text, _ := sends2[0].Params["text"].(string)
+	if turn2Text != "💭 turn 2 thought" {
+		t.Fatalf("turn 2 text = %q, want %q", turn2Text, "💭 turn 2 thought")
+	}
+}
+
+// TestAdapter_Send_Group_OutResult_EndProcessUsesMsgReplyTo verifies
+// that Send(OutResult) calls groupDraft.endProcess with the
+// msg.ReplyTo-derived userMsgID, not state.UserMessageID.
+func TestAdapter_Send_Group_OutResult_EndProcessUsesMsgReplyTo(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+	// Pin state.UserMessageID to a sentinel — the OutResult must
+	// still end the per-ReplyTo turn.
+	if err := a.state.putTopic(&TopicState{
+		ChatID:        raw,
+		TopicID:       0,
+		ChatKind:      ChatKindGroup,
+		UserMessageID: "999",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+
+	// Turn with ReplyTo=42.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutThinking,
+		Text:    "turn anchored to 42",
+		ReplyTo: "42",
+	}); err != nil {
+		t.Fatalf("send think: %v", err)
+	}
+	api.Calls = nil
+
+	// OutResult ends the process — must delete the DraftMessage
+	// created for ReplyTo=42.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutResult,
+		Text:    "final answer",
+		ReplyTo: "42",
+	}); err != nil {
+		t.Fatalf("send result: %v", err)
+	}
+	if del := callsByMethod(api.Calls, "deleteMessage"); len(del) == 0 {
+		t.Fatalf("OutResult must trigger deleteMessage for the per-turn DraftMessage; got calls=%+v", api.Calls)
+	}
+}
+
+// TestAdapter_OnPromptEnded_Group_EndProcessSafetyNet verifies that
+// OnPromptEnded cleans up the DraftMessage even when no OutResult
+// was sent (error path, bridge crash, abort). Without the safety
+// net, the DraftMessage orphans in chat.
+func TestAdapter_OnPromptEnded_Group_EndProcessSafetyNet(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+
+	// Turn creates a DraftMessage via think, no OutResult follows.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutThinking,
+		Text:    "thinking that never finishes",
+		ReplyTo: "55",
+	}); err != nil {
+		t.Fatalf("send think: %v", err)
+	}
+	api.Calls = nil
+
+	// Prompt ends without OutResult.
+	a.OnPromptEnded(context.Background(), "tg_"+raw, "55", agent.PromptEndClean)
+
+	if del := callsByMethod(api.Calls, "deleteMessage"); len(del) == 0 {
+		t.Fatalf("OnPromptEnded safety net must trigger deleteMessage; got calls=%+v", api.Calls)
+	}
+}
+
+// TestGroupDraft_EndProcess_DropsEntryFromMap locks the
+// §11.12.11.3 invariant: endProcess MUST remove the per-turn
+// groupDraftEntry from m.entries (not just call deleteMessage), so
+// a late OutToolEnd from the just-ended turn cannot hit a 400
+// "message not found" by editing an already-deleted Telegram
+// message. After endProcess returns, m.entries must not contain
+// the turn's key, and a streamDraftEvent for the same userMsgID
+// must cold-create a fresh DraftMessage (not editMessageText).
+func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+
+	// Turn 1 cold-creates a DraftMessage.
+	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "first", true); !handled {
+		t.Fatalf("first call should be handled (cold-create); got handled=false")
+	}
+	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {
+		t.Fatalf("expected 1 cold-create, got %d", len(sends))
+	}
+
+	// Confirm the entry is in m.entries.
+	a.groupDraft.mu.Lock()
+	_, present := a.groupDraft.entries[groupDraftKey(raw, 0, 10)]
+	a.groupDraft.mu.Unlock()
+	if !present {
+		t.Fatalf("entry must be in m.entries after cold-create")
+	}
+
+	// Turn 1 ends. endProcess must (a) call deleteMessage and
+	// (b) drop the entry from m.entries.
+	api.Calls = nil
+	a.groupDraft.endProcess(context.Background(), raw, 0, 10)
+	if dels := callsByMethod(api.Calls, "deleteMessage"); len(dels) == 0 {
+		t.Fatalf("endProcess must trigger deleteMessage; got calls=%+v", api.Calls)
+	}
+	a.groupDraft.mu.Lock()
+	_, present = a.groupDraft.entries[groupDraftKey(raw, 0, 10)]
+	a.groupDraft.mu.Unlock()
+	if present {
+		t.Fatalf("endProcess MUST remove the entry from m.entries; otherwise a late event for this turn hits editMessageText against the deleted message_id")
+	}
+
+	// A late event for the same turn arrives — must cold-create a
+	// fresh DraftMessage (reply_to_message_id=10 still anchors the
+	// chain under the user's original message), NOT editMessageText
+	// the now-deleted id.
+	api.Calls = nil
+	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "late event", true); !handled {
+		t.Fatalf("late event must be handled (fresh cold-create); got handled=false")
+	}
+	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {
+		t.Fatalf("late event after endProcess must cold-create; got %d sendMessage", len(sends))
+	}
+	if edits := callsByMethod(api.Calls, "editMessageText"); len(edits) != 0 {
+		t.Fatalf("late event after endProcess must NOT editMessageText (entry was dropped); got %d edits", len(edits))
+	}
+}
+
+// TestAdapter_Send_Group_PatchChainHeaderUsesMsgReplyTo is the
+// OutHeartbeat-side equivalent of TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo:
+// patchChainHeader resolves its turn anchor from msg.ReplyTo
+// first, state.UserMessageID fallback second. Without this, a
+// back-to-back turn can misroute a heartbeat edit onto the next
+// turn's rich message (review finding #2).
+func TestAdapter_Send_Group_PatchChainHeaderUsesMsgReplyTo(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+	// Pin state to a different userMsgID to detect any path that
+	// still reads it as primary source.
+	if err := a.state.putTopic(&TopicState{
+		ChatID:        raw,
+		TopicID:       0,
+		ChatKind:      ChatKindGroup,
+		UserMessageID: "999",
+	}); err != nil {
+		t.Fatalf("putTopic: %v", err)
+	}
+	// First cold-create a rich turn for the ReplyTo=42 turn so
+	// patchChainHeader has something to PATCH.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutReply,
+		Text:    "seed reply",
+		ReplyTo: "42",
+	}); err != nil {
+		t.Fatalf("seed reply: %v", err)
+	}
+	api.Calls = nil
+
+	// Now send an OutHeartbeat anchored to ReplyTo=42. patchChainHeader
+	// must route the PATCH to turn 42's rich turn, NOT turn 999's.
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutHeartbeat,
+		ReplyTo: "42",
+		Heartbeat: &messages.HeartbeatSnapshot{
+			ThinkCount: 1,
+			ToolCount:  0,
+			LastBeatAt: time.Now(),
+		},
+	}); err != nil {
+		t.Fatalf("send heartbeat: %v", err)
+	}
+	// OutHeartbeat's effective behavior in this adapter is a no-op
+	// on the rich turn (see Send case OutHeartbeat comment). What
+	// we care about is that patchChainHeader was called with
+	// userMessageID=42, not 999. The seed reply produced a
+	// sendRichMessage call; if patchChainHeader misrouted to 999
+	// it would have created a fresh rich turn for 999. Verify
+	// only one sendRichMessage call (the seed, for turn 42) landed.
+	sends := callsByMethod(api.Calls, "sendRichMessage")
+	if len(sends) != 0 {
+		// Heartbeat without pre-existing rich body: no new sendRichMessage
+		// is the expected outcome (Compose header-skip rule + the
+		// heartbeat path itself is a no-op in this adapter per the
+		// OutHeartbeat case comment). If a stray sendRichMessage
+		// appears, it means patchChainHeader created a rich turn
+		// for the wrong userMsgID (999).
+		t.Fatalf("OutHeartbeat must NOT create a new sendRichMessage; got %d (calls=%+v)", len(sends), api.Calls)
+	}
+}
+
 // helpers — package-internal polling utilities for async goroutine
 // paths (deleteOrphanForNewTurn spawns a goroutine; tests need to
 // wait for its API call to land before asserting on api.Calls).

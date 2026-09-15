@@ -1267,17 +1267,46 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	// OutHeartbeat's only job is to PATCH the active chunk's
 	// header (hasHeartbeat flips → Compose renders), and the
 	// chunk's Telegram messageID is resolved inside
-	// patchChainHeader via the chainLRU. No state lookup needed
+	// patchChainHeader via the rich-turn index. No state lookup needed
 	// here. The legacy race-window guard (UserMessageID not yet
 	// populated → silent drop) is also gone: handleMessage is
 	// synchronous and writes state before publishing, so by the
 	// time any Out* reaches Send the chain is already in place.
 	//
-	// See docs/channel/telegram.md §11.11 for the full UX.
+	// See docs/channel/telegram.md §11.11 for the full UX and
+	// §11.12.11.3 for the per-prompt DraftMessage isolation rule.
+	//
+	// replyAnchor is the per-event turn anchor (Telegram
+	// reply_to_message_id, also the groupDraftKey suffix, also the
+	// richTurns key). It MUST come from msg.ReplyTo —
+	// that is the userMsgID the runtime stamped on this specific
+	// event in runtime/handler.go and gateway/outbound/emitter_sink.go.
+	// Reading state.UserMessageID here would conflate back-to-back
+	// turns (an event for the previous turn lands on the new
+	// turn's DraftMessage / rich turn when a new user message has
+	// already overwritten state.UserMessageID via ensurePlaceholder).
+	//
+	// Feishu parity: receiptFor(ctx, chatID, userMsgID) likewise
+	// uses the caller-provided userMsgID as the only anchor — the
+	// adapter never re-derives it from a "current turn" field.
+	//
+	// Fallback to state.UserMessageID is reserved for orphan events
+	// (shell /gtw / one-shot dispatchers, startup EventAgentReady)
+	// where the caller genuinely has no per-turn anchor — matches
+	// Feishu's orphan-fallback contract where an event without
+	// ReplyTo attaches to the most recent receipt rather than being
+	// silently dropped.
 	var replyAnchor int
-	if state, ok := a.state.topic(rawChatID, topicID); ok {
-		if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
+	if msg.ReplyTo != "" {
+		if uid, err := strconv.Atoi(msg.ReplyTo); err == nil && uid > 0 {
 			replyAnchor = uid
+		}
+	}
+	if replyAnchor == 0 {
+		if state, ok := a.state.topic(rawChatID, topicID); ok {
+			if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
+				replyAnchor = uid
+			}
 		}
 	}
 	switch msg.Kind {
@@ -1776,7 +1805,12 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	// runtime crash) — otherwise OutResult's send path covers it.
 	chatIDInt, _ := strconv.ParseInt(rawChatID, 10, 64)
 	a.draftStreamers.endProcess(chatIDInt, topicID)
-	if a.groupDraft != nil {
+	if a.groupDraft != nil && parsedUserMsgID > 0 {
+		// Skip when no per-turn anchor — the streamer already no-ops
+		// internally but skipping here avoids the warn log and the
+		// map lookup for truly orphan OnPromptEnded calls (startup,
+		// tests). Feishu parity: OnPromptEnded strictly acts on the
+		// caller-provided userMsgID and never re-derives it.
 		a.groupDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)
 	}
 }
@@ -1794,10 +1828,23 @@ func (a *Adapter) patchChainHeader(msg messages.OutboundMessage) error {
 		rawChatID = msg.ChatID
 	}
 	topicID := a.sessionTopicID(msg.ChatID)
+	// Per the §11.12.11.3 per-prompt isolation rule, the turn anchor
+	// comes from msg.ReplyTo (the runtime stamps it on every
+	// OutboundMessage including OutHeartbeat follow-ups — see
+	// runtime/heartbeat_followup.go). state.UserMessageID is the
+	// fallback only — reading it first would misroute a back-to-back
+	// turn's heartbeat edit onto the new turn's rich message.
 	userMessageID := 0
-	if state, ok := a.state.topic(rawChatID, topicID); ok {
-		if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
+	if msg.ReplyTo != "" {
+		if uid, err := strconv.Atoi(msg.ReplyTo); err == nil && uid > 0 {
 			userMessageID = uid
+		}
+	}
+	if userMessageID == 0 {
+		if state, ok := a.state.topic(rawChatID, topicID); ok {
+			if uid, err := strconv.Atoi(state.UserMessageID); err == nil && uid > 0 {
+				userMessageID = uid
+			}
 		}
 	}
 

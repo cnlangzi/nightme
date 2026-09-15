@@ -693,6 +693,28 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 			a.groupDraft.deleteOrphanSync(ctx, chatID, topicID, state.DraftMessageID)
 		}
 		state.DraftMessageID = 0
+	} else if state.ChatKind == ChatKindPrivate && state.UserMessageID != "" {
+		// DM prior-turn streamer cleanup. The previous turn's streamer
+		// normally gets evicted by Send(OutResult) → endProcess or
+		// OnPromptEnded → endProcess; this branch covers the case
+		// where the prior turn ended abnormally (bridge crash /
+		// daemon shutdown mid-turn / runtime abort). Without it a
+		// stranded streamer would sit in the index, holding a
+		// failed latch that would silently drop events from the new
+		// turn if it happened to reuse the same userMsgID — but the
+		// per-turn keying means the new turn allocates a fresh
+		// streamer anyway. The cleanup is therefore mostly about
+		// memory hygiene (don't keep dead streamers in the map).
+		//
+		// Order matters: read state.UserMessageID BEFORE it's
+		// overwritten further down, and parse the int once so the
+		// key matches what streamDraftEvent passes to getOrCreate.
+		priorUserMsgID, userMsgErr := strconv.Atoi(state.UserMessageID)
+		if userMsgErr == nil && priorUserMsgID > 0 {
+			if chatIDInt, chatErr := strconv.ParseInt(chatID, 10, 64); chatErr == nil {
+				a.draftStreamers.endProcess(chatIDInt, topicID, priorUserMsgID)
+			}
+		}
 	}
 
 	// Drop any in-memory rich turn for this turn — the previous
@@ -701,13 +723,11 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// turn. Mirrors v9 chain's purge semantics.
 	a.richTurns.purge(chatID, topicID, userMessageID)
 
-	// Draft streamer is GLOBAL per (chat, thread) — no per-turn
-	// reset. The draft (identified by stable draft_id) persists
-	// across turns and is auto-disposed by Telegram when a real
-	// message lands in the same chat. The next turn's first
-	// event allocates a fresh draft naturally (or reuses the
-	// same draft_id after the old one was pushed out, which the
-	// server treats as a new draft).
+	// Draft streamer is per-(chat, thread, userMsgID) — the prior
+	// turn's streamer was evicted by the cleanup above (or by the
+	// production endProcess calls). The next Out* event for this
+	// turn allocates a fresh streamer with a fresh draft_id, so
+	// the server-side draft surface is unambiguous per turn.
 
 	// Eager placeholder create: send the rich message right now
 	// (per turn) instead of waiting for the first Out* event. The
@@ -1185,7 +1205,7 @@ func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicI
 		if parseErr != nil {
 			return false, nil
 		}
-		streamer := a.draftStreamers.getOrCreate(a.api, a.logger, chatIDInt, topicID)
+		streamer := a.draftStreamers.getOrCreate(a.api, a.logger, chatIDInt, topicID, userMsgID)
 		err := streamer.appendEventWithThread(ctx, segment, replace, topicID)
 		if err != nil {
 			// DM draft failed: drop the event. Do NOT fall through
@@ -1541,7 +1561,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// Empty-text silent drop already happened at the top of
 		// Send, so msg.Text is non-empty here.
 		chatIDInt, _ := strconv.ParseInt(rawChatID, 10, 64)
-		a.draftStreamers.endProcess(chatIDInt, topicID)
+		a.draftStreamers.endProcess(chatIDInt, topicID, replyAnchor)
 		if a.groupDraft != nil {
 			a.groupDraft.endProcess(ctx, rawChatID, topicID, replyAnchor)
 		}
@@ -1804,7 +1824,16 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	// Safety net for turns with NO OutResult (e.g. OutError-only,
 	// runtime crash) — otherwise OutResult's send path covers it.
 	chatIDInt, _ := strconv.ParseInt(rawChatID, 10, 64)
-	a.draftStreamers.endProcess(chatIDInt, topicID)
+	if parsedUserMsgID > 0 {
+		// Skip when no per-turn anchor — calling endProcess with
+		// userMsgID=0 would build the key "<chatID>|0|0" and look
+		// up a non-existent slot (no-op), but it costs a map lookup
+		// and risks colliding with a future real turn whose
+		// userMsgID happens to be 0 (Telegram message_ids start at
+		// 1, so this is paranoid but consistent with the group
+		// path's `parsedUserMsgID > 0` guard below).
+		a.draftStreamers.endProcess(chatIDInt, topicID, parsedUserMsgID)
+	}
 	if a.groupDraft != nil && parsedUserMsgID > 0 {
 		// Skip when no per-turn anchor — the streamer already no-ops
 		// internally but skipping here avoids the warn log and the

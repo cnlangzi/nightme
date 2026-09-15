@@ -2942,7 +2942,7 @@ func TestAdapter_Send_DM_OutResult_EndsProcess(t *testing.T) {
 
 	// Verify draft has accumulated text before OutResult.
 	chatIDInt, _ := strconv.ParseInt(raw, 10, 64)
-	streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0)
+	streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
 	streamer.mu.Lock()
 	textBefore := streamer.textBuf.String()
 	streamer.mu.Unlock()
@@ -3000,7 +3000,7 @@ func TestAdapter_OnPromptEnded_DM_EndsProcess(t *testing.T) {
 	})
 
 	chatIDInt, _ := strconv.ParseInt(raw, 10, 64)
-	streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0)
+	streamer := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
 	streamer.mu.Lock()
 	if streamer.textBuf.Len() == 0 {
 		streamer.mu.Unlock()
@@ -3008,16 +3008,68 @@ func TestAdapter_OnPromptEnded_DM_EndsProcess(t *testing.T) {
 	}
 	streamer.mu.Unlock()
 
-	// OnPromptEnded clears the draft state.
+	// OnPromptEnded evicts the streamer from the index (per-turn
+	// isolation). A follow-up lookup must allocate a fresh streamer.
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
-	streamer.mu.Lock()
-	defer streamer.mu.Unlock()
-	if streamer.draftID != 0 {
-		t.Fatalf("expected draft_id reset after OnPromptEnded, got %d", streamer.draftID)
+	fresh := a.draftStreamers.getOrCreate(nil, newTestLogger(), chatIDInt, 0, 1)
+	if fresh == streamer {
+		t.Fatal("expected fresh streamer after OnPromptEnded endProcess eviction")
 	}
-	if streamer.textBuf.Len() != 0 {
-		t.Fatalf("expected textBuf cleared after OnPromptEnded, got %q", streamer.textBuf.String())
+	if fresh.draftID != 0 {
+		t.Fatalf("expected fresh streamer's draftID == 0 after eviction, got %d", fresh.draftID)
+	}
+	if fresh.textBuf.Len() != 0 {
+		t.Fatalf("expected fresh streamer's textBuf empty, got %q", fresh.textBuf.String())
+	}
+}
+
+func TestAdapter_Send_DM_BackToBackTurns_IsolatedStreamers(t *testing.T) {
+	// Two user messages in a row must allocate two distinct
+	// draftStreamers — the per-turn isolation guarantee from
+	// docs/channel/telegram.md §11.12.11.3. Without this, a turn-N
+	// late OutToolEnd would land on turn-N+1's draft surface,
+	// producing crossed streams and confusing visual overlap.
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+
+	// Turn 1: userMsgID=1.
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutToolStart,
+		ReplyTo: "1",
+		Tool:    &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+		Text:    "● Read(/tmp/foo.go)",
+	})
+	turn1Drafts := callsByMethod(api.Calls, "sendMessageDraft")
+	if len(turn1Drafts) != 1 {
+		t.Fatalf("turn 1: expected 1 sendMessageDraft, got %d", len(turn1Drafts))
+	}
+	turn1DraftID := turn1Drafts[0].Params["draft_id"]
+
+	// OutResult ends turn 1 and evicts the streamer.
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutResult,
+		ReplyTo: "1",
+		Text:    "turn 1 answer",
+	})
+
+	// Turn 2: userMsgID=2 (state.UserMessageID bumped by ensurePlaceholder,
+	// but the per-event ReplyTo is what streamDraftEvent uses).
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID:  "tg_" + raw,
+		Kind:    messages.OutThinking,
+		ReplyTo: "2",
+		Text:    "turn 2 thought",
+	})
+	turn2Drafts := callsByMethod(api.Calls, "sendMessageDraft")
+	if len(turn2Drafts) != 2 {
+		t.Fatalf("turn 2: expected 2 sendMessageDraft total (1 from turn 1 + 1 from turn 2), got %d", len(turn2Drafts))
+	}
+	turn2DraftID := turn2Drafts[1].Params["draft_id"]
+	if turn2DraftID == turn1DraftID {
+		t.Fatalf("turn 2 reused turn 1's draft_id (%v); per-turn isolation broken", turn1DraftID)
 	}
 }
 

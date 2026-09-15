@@ -1718,7 +1718,22 @@ OutToolEnd     →  draft = "🔧 ● Bash(go build)\n\n✅ Bash done"          
 OutResult       →  draft 自动消失(spec 明确),real message 永久保留
 ```
 
-**全局唯一一个 draft 的可行性**:每个事件 REPLACE 等价于 "每个事件做一次 reset",draft_id 是全局的(一次分配,跨 turn 复用),turn N 的 real message 把 draft 挤掉后 turn N+1 复用同一个 draft_id,server 把它当作新 draft(因为旧 draft 已 dispose)。
+**Per-turn 隔离(2026-09-15 修正)**:早期实现 (v9 P1 ~ v9 P2 plan-D 阶段) 是"全局唯一一个 draft 跨 turn 复用",靠"每个事件 REPLACE 等价于 reset + server 在 real message 落地时 dispose draft"两件事维持隔离。该方案在 **单并发 turn** 下成立,但 back-to-back turn 时:
+
+- runtime 滞留的 late OutToolEnd 会写进新 turn 的 draft(turn 边界 race)
+- Bot API < 10.3 bot 一旦 latch 触发,后续所有 turn 的 think/tool 永久 drop(latch 跨 turn 累积)
+- daemon 重启后旧 in-flight draft 跟新 first-event 互相覆盖
+
+修正后:`draftStreamer` 按 `(chat_id, thread_id, user_msg_id)` 三元组分桶,与 group `groupDraftKey` 完全对齐。每个 user 消息的 turn 独享 streamer 和 draft_id —— draft_id 通过 `draftIDCounter.Add(1)` 进程全局单调分配,每 turn 拿一个新号(server 视为新 draft surface)。
+
+修正点:
+
+- `draftIndex` key 改为三元 → 同 `(chat, thread)` 不同 `userMsgID` 拿不同 streamer
+- `endProcess` evict streamer(同时 `delete(i.streamers, key)`)→ 下次 `getOrCreate` 同 key 拿全新 streamer,新 draft_id
+- `ensurePlaceholder` 在 DM 分支先 `endProcess(state.UserMessageID)` 清上 turn,再覆盖 `state.UserMessageID = new`
+- `OnPromptEnded` / `OutResult` 末尾都按 per-event `userMsgID`(优先 `msg.ReplyTo`,fallback `state.UserMessageID`)调 `endProcess`,无 userMsgID 时跳过(no-op 守卫)
+
+视觉影响:每个 turn 的 draft 表面独立,即便 turn N 滞留的 late event 飞到 turn N+1 也不会"复活"turn N 的 draft surface(各自的 draft_id 不同,server key 隔离)。bot 重启行为同 group 路径(空 index,首事件按 userMsgID 重新分配)。
 
 appendEvent 内部:
 ```go
@@ -1761,22 +1776,19 @@ turn start (any chat)
 
 turn N ends (process boundary)
   OutResult 发送(real sendMessage):
-    1. adapter.draftStreamers.endProcess(rawChatID, topicID)
-       → 清空 draft_id + textBuf(保留 failed latch)
-       → 下次 appendEvent 重新分配 draft_id
+    1. adapter.draftStreamers.endProcess(rawChatID, topicID, replyAnchor)
+       → 清空 draft_id + textBuf(保留 failed latch) + evict from index
+       → 下次 appendEvent 走 getOrCreate 拿全新 streamer,新 draft_id
     2. sendOutResultMessage(...) → real message 落地 → server 把 draft 推出
   或无 OutResult 的 turn(error / runtime crash):
-    OnPromptEnded(ctx, chatID, ...):
+    OnPromptEnded(ctx, chatID, userMsgID, ...):
       1. ...rich turn 清理
-      2. adapter.draftStreamers.endProcess(rawChatID, topicID)  ← safety net
-  两种触发点都 end process,保证 turn N+1 拿到干净的 draft 状态。
+      2. adapter.draftStreamers.endProcess(rawChatID, topicID, parsedUserMsgID)  ← safety net(per-event userMsgID,孤儿事件 parsedUserMsgID=0 时跳过)
+  两种触发点都 end process,保证 turn N+1 拿到干净的新 streamer。
 
 [turn N+1 开始]
-  ensurePlaceholder(...):同 turn N, 不调 draftStreamers.reset。
-  stream 内 draft_id = 0,textBuf = "",failed latch 保留(Bot API < 10.3 bot 持续 latch)。
-  下一个 OutThinking / OutTool 事件:
-    - 第一次事件:stream 分配新 draft_id,清空 textBuf,REPLACE 写入。
-    - 后续事件:复用 draft_id,按 replace 标志累加或替换。
+  ensurePlaceholder(...):DM 分支先按 state.UserMessageID(覆盖前的旧值)调 draftStreamers.endProcess,清掉上 turn 可能滞留的 streamer;再覆盖 state.UserMessageID = new。
+  stream index 不持有 turn N 的 streamer,turn N+1 第一个 OutThinking / OutTool 事件走 getOrCreate 拿新 streamer,新 draft_id;后续事件复用 turn N+1 的 draft_id,按 replace 标志累加或替换。
 
   OutReply / OutError / OutCommandReply 走 v9 chain / appendSegmentForKind →
   appendRichTurn,第一个 OutReply lazy 冷创建 rich turn。
@@ -1879,8 +1891,16 @@ turn end: DraftMessage 被 deleteMessage 移除,richTurn / Reply / Result 留作
 
 - `adapter.Send()` 优先用 `msg.ReplyTo` 解析 `replyAnchor`;兜底 `state.UserMessageID`(仅兼容 shell / 框架 / 测试入口不 stamp `ReplyTo` 的场景,跟 Feishu orphan-fallback 行为对位)
 - `adapter.patchChainHeader`(OutHeartbeat)同样优先 `msg.ReplyTo`,兜底 state
-- per-turn 隔离靠 `groupDraftKey = chatID|topicID|userMsgID` 已经把 userMsgID 编进 key —— 同 key 必然同 turn,不需要额外的 binding guard
-- `OnPromptEnded` 末尾调 `groupDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)` 作为 safety net,覆盖无 OutResult 的 turn(error / abort / bridge crash);`parsedUserMsgID > 0` 才调,避免 startup / test orphan 路径打 warn
+- per-turn 隔离靠三套并行的 per-`userMsgID` 索引 ——
+  - **group**:`groupDraftKey = chatID|topicID|userMsgID`(已实现)
+  - **DM**(2026-09-15 修正):`draftIndexKey = chatID|threadID|userMsgID`(对齐 group,见 §11.12.11.1 末尾"Per-turn 隔离"段)
+  - **rich turn**:`richTurns` key 已含 userMsgID(已实现)
+  同 key 必然同 turn,不需要额外的 binding guard
+- `OnPromptEnded` 末尾调 **三套** endProcess 作为 safety net,覆盖无 OutResult 的 turn(error / abort / bridge crash):
+  - `draftStreamers.endProcess(rawChatID, topicID, parsedUserMsgID)`(DM,2026-09-15 新增)
+  - `groupDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)`(group)
+  - `richTurns.purge(rawChatID, topicID, parsedUserMsgID)`
+  `parsedUserMsgID > 0` 才调 DM/group 两条,避免 startup / test orphan 路径打 warn;rich turn purge 自带 no-op 守卫
 
 **为什么不只用 `state.UserMessageID`**:`state.UserMessageID` 是 `ensurePlaceholder` 在 handleMessage 同步覆盖的"最近一个 user msg id"。当 turn N 还在飞行(Out* events 还在来),turn N+1 的 user message 进来时 `ensurePlaceholder` 会把它覆盖成 N+1 —— 此时 turn N 滞留的 event 走 Send 读 state 就会拿到 N+1,reply_to_message_id 锚到 N+1、groupDraftKey 用 N+1、rich turn 也写到 N+1 的 turn 上。runtime handler / sink / heartbeat_followup / message-state bus 已经在 stamp `msg.ReplyTo` 时就给了 per-event 正确的 userMsgID,Send 路径必须用这个。
 
@@ -1890,10 +1910,10 @@ turn end: DraftMessage 被 deleteMessage 移除,richTurn / Reply / Result 留作
 |---|---|---|
 | turn anchor 源 | `msg.ReplyTo` 唯一来源 | `msg.ReplyTo` 优先 + state 兜底 |
 | 找不到 anchor | orphan path 走独立消息 | 兜底到 state.UserMessageID(同 Feishu orphan 行为) |
-| per-userMsgID 隔离 | `receiptsByUserMsgID` map | `groupDraftKey` map + `richTurns` map |
-| OnPromptEnded 清理 | `SetPromptState(terminal)` 走 receipt | `groupDraft.endProcess` safety net + rich turn 🎉 |
-| 跨 turn 串位防护 | receipt 严格 per-userMsgID | 优先 ReplyTo + `groupDraftKey` 含 userMsgID |
-| `endProcess` 清理 in-memory state | n/a | `delete(m.entries, key)` 必须完成,后续滞留 event 视作新 turn cold-create(review finding #1 锁定) |
+| per-userMsgID 隔离 | `receiptsByUserMsgID` map | `draftIndexKey` map(DM,2026-09-15 修正) + `groupDraftKey` map + `richTurns` map |
+| OnPromptEnded 清理 | `SetPromptState(terminal)` 走 receipt | `draftStreamers.endProcess` + `groupDraft.endProcess` safety net + rich turn 🎉 |
+| 跨 turn 串位防护 | receipt 严格 per-userMsgID | 优先 ReplyTo + 所有三个索引 key 都含 userMsgID |
+| `endProcess` 清理 in-memory state | n/a | group: `delete(m.entries, key)`;DM: `delete(i.streamers, key)` —— 后续滞留 event 视作新 turn cold-create(review finding #1 锁定) |
 
 ### 11.12.12 跟飞书 receipt 语义对位（v9）
 

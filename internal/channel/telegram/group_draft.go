@@ -38,10 +38,9 @@ const (
 // flushed snapshot until the next window replaces it.
 //
 // messageID is the Telegram message_id returned by the cold-create
-// sendRichMessage; 0 means "not yet sent". state.DraftMessageID still
-// mirrors messageID for the orphans-recovery path used by
-// ensurePlaceholder; the next commit drops that persistence as a
-// breaking change.
+// sendRichMessage; 0 means "not yet sent". In-memory only — there is
+// no persisted DraftMessageID, so a daemon restart mid-turn loses
+// the in-progress DraftMessage (acceptable trade-off).
 //
 // All mutable fields are guarded by mu. The lock is held across the
 // network roundtrip on streamDraftEvent / coldCreate / flushLocked
@@ -136,10 +135,9 @@ func kindToRichBlockKind(k messages.OutboundKind) string {
 //     the wait fall through to richTurn. After maxAttempts (2 total)
 //     the rest of the turn gives up and falls through too.
 type groupDraftManager struct {
-	api   apiClient
-	log   *slog.Logger
-	store *stateStore
-	mu    sync.Mutex
+	api apiClient
+	log *slog.Logger
+	mu  sync.Mutex
 	// entries is keyed by chatID|topicID|userMsgID. Map-level
 	// reads/writes are guarded by mu; per-entry mutation is
 	// guarded by entry.mu (taken by streamDraftEvent / coldCreate /
@@ -148,11 +146,10 @@ type groupDraftManager struct {
 	entries map[string]*groupDraftEntry
 }
 
-func newGroupDraftManager(api apiClient, log *slog.Logger, store *stateStore) *groupDraftManager {
+func newGroupDraftManager(api apiClient, log *slog.Logger) *groupDraftManager {
 	return &groupDraftManager{
 		api:     api,
 		log:     log,
-		store:   store,
 		entries: make(map[string]*groupDraftEntry),
 	}
 }
@@ -297,20 +294,10 @@ func (m *groupDraftManager) coldCreate(ctx context.Context, entry *groupDraftEnt
 		return false, fmt.Errorf("telegram: sendRichMessage returned empty message_id")
 	}
 	entry.messageID = result.MessageID
-	// Persist so a daemon restart mid-turn can resume editing the
-	// same message. Removed in the next commit (breaking).
-	if m.store != nil {
-		if state, ok := m.store.topic(rawChatID, topicID); ok && state != nil {
-			state.DraftMessageID = result.MessageID
-			if err := m.store.putTopic(state); err != nil && m.log != nil {
-				m.log.Warn("telegram: failed to persist DraftMessageID",
-					"chat_id", rawChatID,
-					"thread_id", topicID,
-					"err", err,
-				)
-			}
-		}
-	}
+	// No state persistence: the DraftMessage is purely in-memory
+	// per-turn state. A daemon restart mid-turn loses the
+	// in-progress buffer; the next turn starts fresh. This is
+	// deliberate — see commit history for the trade-off.
 	// Window 0 flushed: clear the buffer so the next event starts a
 	// fresh window (windowed semantics — the buffer is "next flush",
 	// not "all of history").
@@ -414,14 +401,10 @@ func (m *groupDraftManager) endProcess(ctx context.Context, rawChatID string, to
 	m.mu.Unlock()
 
 	if !ok {
-		// No in-memory entry — try the persisted state in case the
-		// daemon restarted mid-turn (orphan recovery). Removed in
-		// the next commit when state.DraftMessageID goes away.
-		if m.store != nil {
-			if state, ok := m.store.topic(rawChatID, topicID); ok && state != nil && state.DraftMessageID > 0 {
-				m.deleteOrphan(ctx, rawChatID, topicID, state.DraftMessageID)
-			}
-		}
+		// No in-memory entry. The DraftMessage is purely in-memory
+		// state (no persisted DraftMessageID); a daemon restart
+		// leaves any in-flight DraftMessage orphaned in the chat,
+		// which is acceptable — the next turn starts fresh.
 		return
 	}
 	entry.mu.Lock()
@@ -449,17 +432,14 @@ func (m *groupDraftManager) endProcess(ctx context.Context, rawChatID string, to
 	}
 }
 
-// deleteOrphan removes a DraftMessage by id and clears the
-// persisted DraftMessageID on success. On failure the persisted
-// state is left intact so the next ensurePlaceholder (for the
-// next turn) sees it and re-attempts the delete. Called from
-// endProcess (turn-end cleanup) and ensurePlaceholder (orphan
-// recovery for the previous turn's crash or deleteMessage-failed
-// message).
+// deleteOrphan removes a DraftMessage by id. On failure the
+// message stays in the chat — acceptable since the next turn's
+// cold-create creates a fresh DraftMessage rather than reusing
+// the orphan id.
 //
-// deleteMessage errors are logged not returned — failure to delete
-// is a UX nit (orphan in chat) but not a correctness issue; the
-// next ensurePlaceholder will retry.
+// deleteMessage errors are logged not returned — failure to
+// delete is a UX nit (orphan in chat) but not a correctness
+// issue.
 func (m *groupDraftManager) deleteOrphan(ctx context.Context, rawChatID string, topicID int, msgID int) {
 	if msgID == 0 {
 		return
@@ -474,33 +454,5 @@ func (m *groupDraftManager) deleteOrphan(ctx context.Context, rawChatID string, 
 			"message_id", msgID,
 			"err", err,
 		)
-		// Leave state.DraftMessageID set so the next
-		// ensurePlaceholder re-attempts. Returning early avoids
-		// losing the orphan reference.
-		return
 	}
-	if m.store != nil {
-		if state, ok := m.store.topic(rawChatID, topicID); ok && state != nil && state.DraftMessageID == msgID {
-			state.DraftMessageID = 0
-			if err := m.store.putTopic(state); err != nil && m.log != nil {
-				m.log.Warn("telegram: failed to clear DraftMessageID",
-					"chat_id", rawChatID,
-					"thread_id", topicID,
-					"err", err,
-				)
-			}
-		}
-	}
-}
-
-// deleteOrphanSync is the synchronous variant used by
-// ensurePlaceholder for the previous turn's leftover. It blocks
-// until the API call completes (success or failure) so the new
-// turn's cold-create sees a clean chat. Best-effort: on failure
-// the orphan persists.
-func (m *groupDraftManager) deleteOrphanSync(ctx context.Context, rawChatID string, topicID int, msgID int) {
-	if msgID <= 0 || m == nil {
-		return
-	}
-	m.deleteOrphan(ctx, rawChatID, topicID, msgID)
 }

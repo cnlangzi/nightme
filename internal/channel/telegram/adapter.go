@@ -123,7 +123,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		richTurns:      newRichTurnsIndex(defaultRichTurnCap),
 		draftStreamers: newDraftIndex(),
 	}
-	out.groupDraft = newGroupDraftManager(out.api, out.logger, out.state)
+	out.groupDraft = newGroupDraftManager(out.api, out.logger)
 	out.wireVoiceHandler()
 	return out, nil
 }
@@ -197,7 +197,7 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		retry:          DefaultRetryConfig,
 		richTurns:      newRichTurnsIndex(defaultRichTurnCap),
 		draftStreamers: newDraftIndex(),
-		groupDraft:     newGroupDraftManager(api, slog.Default(), state),
+		groupDraft:     newGroupDraftManager(api, slog.Default()),
 	}
 }
 
@@ -689,10 +689,12 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// already retried transient errors, so a permanent failure
 	// here means the message is stuck (e.g. revoked bot perms).
 	if state.ChatKind == ChatKindGroup {
-		if a.groupDraft != nil && state.DraftMessageID > 0 {
-			a.groupDraft.deleteOrphanSync(ctx, chatID, topicID, state.DraftMessageID)
-		}
-		state.DraftMessageID = 0
+		// No persisted DraftMessageID to recover from: the group
+		// draft is purely in-memory per-turn state. A daemon crash
+		// mid-turn leaves any in-flight DraftMessage orphaned in
+		// the chat — acceptable since the user is unlikely to
+		// resume the same turn, and endProcess's deleteMessage
+		// would have cleaned it up on the happy path.
 	} else if state.ChatKind == ChatKindPrivate && state.UserMessageID != "" {
 		// DM prior-turn streamer cleanup. The previous turn's streamer
 		// normally gets evicted by Send(OutResult) → endProcess or

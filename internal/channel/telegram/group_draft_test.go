@@ -243,8 +243,9 @@ func TestAdapter_Send_Group_DraftMessage_RoutedThroughTopic(t *testing.T) {
 
 // TestAdapter_OnPromptEnded_Group_DeletesDraftMessage verifies the
 // turn-end cleanup: deleteMessage fires for the simulated DraftMessage
-// (sendMessageDraft's auto-disappear analogue) and the persisted
-// DraftMessageID is cleared so the next turn starts clean.
+// (sendMessageDraft's auto-disappear analogue). There is no persisted
+// DraftMessageID anymore — the DraftMessage is purely in-memory state —
+// so this test only checks the deleteMessage side of the contract.
 func TestAdapter_OnPromptEnded_Group_DeletesDraftMessage(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
@@ -255,7 +256,7 @@ func TestAdapter_OnPromptEnded_Group_DeletesDraftMessage(t *testing.T) {
 		Text:   "thought to be deleted",
 	})
 
-	// The cold-create has already produced a message_id (counter 101).
+	// The cold-create has already produced a message_id.
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
 	deletes := callsByMethod(api.Calls, "deleteMessage")
@@ -267,15 +268,6 @@ func TestAdapter_OnPromptEnded_Group_DeletesDraftMessage(t *testing.T) {
 	}
 	if chat, _ := deletes[0].Params["chat_id"].(string); chat != raw {
 		t.Fatalf("deleteMessage chat_id = %q, want %q", chat, raw)
-	}
-
-	// Persisted DraftMessageID cleared on state.
-	state, ok := a.state.topic(raw, 0)
-	if !ok {
-		t.Fatalf("topic state missing")
-	}
-	if state.DraftMessageID != 0 {
-		t.Fatalf("state.DraftMessageID = %d, want 0 after OnPromptEnded", state.DraftMessageID)
 	}
 }
 
@@ -323,10 +315,13 @@ func TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn(t *testing.
 		t.Logf("send returned %v (expected nil or wrapped)", err)
 	}
 
-	// No DraftMessage should have been persisted.
-	state, _ := a.state.topic(raw, 0)
-	if state != nil && state.DraftMessageID != 0 {
-		t.Fatalf("expected DraftMessageID == 0 after cold-create failure, got %d", state.DraftMessageID)
+	// The in-memory entry must not have a messageID — the cold-create
+	// failed, so subsequent streamDraftEvent calls would still see
+	// messageID == 0 and retry on the next event (or fall through
+	// after the retry budget is exhausted).
+	entry, ok := a.groupDraft.entries[groupDraftKey(raw, 0, 1)]
+	if ok && entry.messageID != 0 {
+		t.Fatalf("entry.messageID = %d after cold-create failure; want 0", entry.messageID)
 	}
 }
 
@@ -361,13 +356,13 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 	}
 	send("first thought") // event 1: cold-create succeeds.
 
-	state, ok := a.state.topic(raw, 0)
-	if !ok || state == nil {
-		t.Fatalf("state missing after cold-create")
+	entry, ok := a.groupDraft.entries[groupDraftKey(raw, 0, 1)]
+	if !ok || entry == nil {
+		t.Fatalf("group draft entry missing after cold-create")
 	}
-	originalMsgID := state.DraftMessageID
+	originalMsgID := entry.messageID
 	if originalMsgID == 0 {
-		t.Fatalf("cold-create did not persist DraftMessageID")
+		t.Fatalf("cold-create did not produce a message_id")
 	}
 
 	for i := 2; i <= 10; i++ {
@@ -381,11 +376,15 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 	api.Errors = []error{errors.New("simulated editMessageText 429")}
 	send("failing flush thought")
 
-	// The DraftMessageID must be preserved — the entry is still
-	// alive and ready for the next event to retry on top.
-	state, _ = a.state.topic(raw, 0)
-	if state == nil || state.DraftMessageID != originalMsgID {
-		t.Fatalf("DraftMessageID changed on edit failure: was %d, now %v", originalMsgID, state)
+	// The messageID must be preserved — the entry is still alive
+	// and ready for the next event to retry on top.
+	entry, _ = a.groupDraft.entries[groupDraftKey(raw, 0, 1)]
+	if entry == nil || entry.messageID != originalMsgID {
+		got := -1
+		if entry != nil {
+			got = entry.messageID
+		}
+		t.Fatalf("entry.messageID changed on edit failure: was %d, now %d", originalMsgID, got)
 	}
 
 	// No rich turn entry should exist for this turn — if it did, the
@@ -466,143 +465,12 @@ func TestStateStore_ChatKindMigration(t *testing.T) {
 	}
 }
 
-// TestAdapter_Send_Group_EnsurePlaceholder_DeletesOrphan verifies the
-// crash / network-failure recovery path: when ensurePlaceholder sees
-// state.DraftMessageID > 0 from a previous turn (daemon crashed
-// mid-turn, or deleteMessage failed last time), it must
-// deleteMessage that orphan before clearing the state. Without this,
-// orphans pile up across daemon restarts.
-func TestAdapter_Send_Group_EnsurePlaceholder_DeletesOrphan(t *testing.T) {
-	a, api := newTestAdapter(t)
-	raw := setupGroupState(t, a, -1001, 0)
-
-	// Simulate a previous turn that left an orphan: stamp a
-	// DraftMessageID on state directly (no in-memory entry —
-	// equivalent to "daemon restarted after a cold-create but
-	// before OnPromptEnded").
-	if err := a.state.putTopic(&TopicState{
-		ChatID:         raw,
-		TopicID:        0,
-		ChatKind:       ChatKindGroup,
-		UserMessageID:  "1",
-		DraftMessageID: 999,
-	}); err != nil {
-		t.Fatalf("seed orphan: %v", err)
-	}
-
-	// Trigger ensurePlaceholder via handleMessage (the only
-	// caller). New inbound user message → orphan cleanup runs.
-	a.handleMessage(context.Background(), &Message{
-		MessageID: 2,
-		Chat:      Chat{ID: -1001, Type: "supergroup"},
-		Text:      "next turn",
-		From:      &User{ID: 7},
-		Date:      time.Now().Unix(),
-	})
-
-	// deleteOrphanForNewTurn is fire-and-forget; wait for the
-	// goroutine to fire the API call.
-	deletes := waitForMethod(t, api, "deleteMessage", 2*time.Second)
-	if len(deletes) != 1 {
-		t.Fatalf("expected 1 deleteMessage for orphan, got %d (calls=%+v)", len(deletes), api.Calls)
-	}
-	if mid, _ := deletes[0].Params["message_id"].(int); mid != 999 {
-		t.Fatalf("orphan delete message_id = %d, want 999", mid)
-	}
-
-	// state.DraftMessageID cleared after the deleteMessage (async).
-	state, _ := a.state.topic(raw, 0)
-	if state == nil {
-		t.Fatal("topic state missing")
-	}
-	waitFor(t, func() bool {
-		s, _ := a.state.topic(raw, 0)
-		return s != nil && s.DraftMessageID == 0
-	}, 2*time.Second, "state.DraftMessageID should clear after orphan delete")
-}
-
-// TestAdapter_Send_Group_EnsurePlaceholder_OrphanDeleteFailure_KeepsState
-// documents the best-effort contract: when the orphan delete fails,
-// state.DraftMessageID is still cleared (so the new turn's
-// cold-create can claim the slot) and the orphan is left in chat.
-// Retrying across turns would require a separate
-// OrphanDraftMessageID field to avoid races with the new turn's
-// cold-create, and apiCall already retries transient errors, so
-// the permanent-failure case is rare enough to accept the leak.
-func TestAdapter_Send_Group_EnsurePlaceholder_OrphanDeleteFailure_KeepsState(t *testing.T) {
-	a, api := newTestAdapter(t)
-	raw := setupGroupState(t, a, -1001, 0)
-
-	if err := a.state.putTopic(&TopicState{
-		ChatID:         raw,
-		TopicID:        0,
-		ChatKind:       ChatKindGroup,
-		UserMessageID:  "1",
-		DraftMessageID: 1234,
-	}); err != nil {
-		t.Fatalf("seed orphan: %v", err)
-	}
-	api.MethodErrors = map[string]error{
-		"deleteMessage": errors.New("simulated 500"),
-	}
-
-	a.handleMessage(context.Background(), &Message{
-		MessageID: 2,
-		Chat:      Chat{ID: -1001, Type: "supergroup"},
-		Text:      "trigger orphan cleanup",
-		From:      &User{ID: 7},
-		Date:      time.Now().Unix(),
-	})
-
-	// deleteMessage was attempted (sync, happens during handleMessage).
-	deletes := callsByMethod(api.Calls, "deleteMessage")
-	if len(deletes) != 1 {
-		t.Fatalf("expected 1 deleteMessage attempt for orphan, got %d (calls=%+v)", len(deletes), api.Calls)
-	}
-	if mid, _ := deletes[0].Params["message_id"].(int); mid != 1234 {
-		t.Fatalf("orphan delete message_id = %d, want 1234", mid)
-	}
-	// Best-effort: state cleared regardless of success so the new
-	// turn can claim the slot.
-	state, _ := a.state.topic(raw, 0)
-	if state == nil {
-		t.Fatal("topic state missing")
-	}
-	if state.DraftMessageID != 0 {
-		t.Fatalf("state.DraftMessageID = %d after orphan cleanup attempt, want 0 (best-effort clear)", state.DraftMessageID)
-	}
-}
-
-// TestAdapter_Send_Group_EndProcess_DeleteFailure_KeepsState verifies
-// the same retry-on-failure contract for the turn-end cleanup path:
-// deleteMessage from endProcess failing leaves state.DraftMessageID
-// intact so the next ensurePlaceholder retries.
-func TestAdapter_Send_Group_EndProcess_DeleteFailure_KeepsState(t *testing.T) {
-	a, api := newTestAdapter(t)
-	raw := setupGroupState(t, a, -1001, 0)
-
-	// Cold-create first (so endProcess has a message to delete).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "thought",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	// Make the next deleteMessage call fail.
-	api.Errors = []error{errors.New("simulated 500")}
-
-	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
-
-	state, _ := a.state.topic(raw, 0)
-	if state == nil {
-		t.Fatal("topic state missing")
-	}
-	if state.DraftMessageID == 0 {
-		t.Fatalf("state.DraftMessageID cleared despite deleteMessage failure; retry loop broken")
-	}
-}
+// (Removed: orphan-recovery tests. They exercised the contract of
+// persisting DraftMessageID to state so ensurePlaceholder could
+// delete orphaned messages from prior turns. state.DraftMessageID
+// is gone — orphans now stay in chat until the user notices, and
+// the new behavior is documented as such in group_draft.go and the
+// docs/channel/telegram.md §11.12.11.2 rewrite.)
 
 // TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate
 // fires N goroutines that all call Send with the same (chat, topic,
@@ -1010,32 +878,4 @@ func TestAdapter_Send_Group_PatchChainHeaderUsesMsgReplyTo(t *testing.T) {
 		// for the wrong userMsgID (999).
 		t.Fatalf("OutHeartbeat must NOT create a new sendRichMessage; got %d (calls=%+v)", len(sends), api.Calls)
 	}
-}
-
-// helpers — package-internal polling utilities for async goroutine
-// paths (deleteOrphanForNewTurn spawns a goroutine; tests need to
-// wait for its API call to land before asserting on api.Calls).
-
-func waitForMethod(t *testing.T, api *fakeAPI, method string, timeout time.Duration) []fakeCall {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cs := callsByMethod(api.snapshotCalls(), method); len(cs) > 0 {
-			return cs
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return nil
-}
-
-func waitFor(t *testing.T, cond func() bool, timeout time.Duration, msg string) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("timeout waiting for: %s", msg)
 }

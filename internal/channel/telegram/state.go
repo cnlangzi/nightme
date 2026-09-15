@@ -28,15 +28,7 @@ type TopicState struct {
 	ChatKind string `json:"chat_kind,omitempty"`
 	// LegacyChatType preserves the original Telegram chat.type on
 	// read for the migration path; not written by new saves.
-	LegacyChatType string `json:"chat_type,omitempty"`
-	// DraftMessageID is the message_id of the per-turn DraftMessage
-	// used by the "group" ChatKind's simulated sendMessageDraft
-	// surface (see group_draft.go). Zero for DM (private uses
-	// server-managed drafts) and zero for any turn that hasn't yet
-	// produced a think/tool event. Cleared by ensurePlaceholder at
-	// every new turn so the next OutThinking cold-creates a fresh
-	// DraftMessage.
-	DraftMessageID       int       `json:"draft_message_id,omitempty"`
+	LegacyChatType       string    `json:"chat_type,omitempty"`
 	PlaceholderMessageID int       `json:"placeholder_message_id"`
 	UserMessageID        string    `json:"user_message_id"`
 	LastMessageID        int       `json:"last_message_id"`

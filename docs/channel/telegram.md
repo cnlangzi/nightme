@@ -85,7 +85,7 @@ ChatID
 TopicID
 ChatKind        (private / group / channel)
 LegacyChatType  (read-only migration 字段)
-DraftMessageID  (仅 ChatKind == "group" 用；模拟 sendMessageDraft 的真实 message_id)
+DraftMessageID  (liveDraft simulated DraftMessage 的真实 message_id；fallback 字段，当前 turn 主要从 in-memory liveDraftEntry.messageID 读)
 UserMessageID   (本次 turn 的 user message_id)
 PlaceholderMessageID (read-only 兼容字段；新 turn 不再写)
 LastMessageID
@@ -159,7 +159,7 @@ Topic
 | `OutMessageState` / `OutMessageStateRemoved` | reactions 独立轨道 | `setMessageReaction` 贴到 user message（v6.3 单 reaction 预算） |
 | `OutInit` | silent drop | — |
 
-`OutThinking` / `OutToolStart` / `OutToolEnd` 在 DM 下走 §11.12.1 的 `sendRichMessageDraft` 路径，非 DM 走 §11.12.2 的 simulated DraftMessage 路径；两者都跟 rich turn 并行 — draft / DraftMessage 是这三类事件的 live streaming surface，rich turn 是其它事件的承载面。Draft path 失败时还原 buffer（issue #391）下次重试；最终落败才 DROP。
+`OutThinking` / `OutToolStart` / `OutToolEnd` 在 DM 和 group / forum topic 下走**同一条** unified 路径（§11.12.1 simulated DraftMessage），都跟 rich turn 并行 — DraftMessage 是这三类事件的 live streaming surface，rich turn 是其它事件的承载面。Draft path 失败时还原 buffer（issue #391）下次重试；最终落败才 DROP。
 
 视觉形态：
 
@@ -909,7 +909,7 @@ flush 总是发生（rich turn 没有 chain 的 ROTATE 概念）：turn.dirty = 
 3. 选 🎉 锚点：`turn.resultMessageID > 0`（本 turn 收到 OutResult）→ 用 result 消息；否则回退 `turn.messageID`（rich turn placeholder）
 4. `setMessageReaction(targetID, 🎉)`；`reason.IsError()` 时换 ❌（user message slot 不动，v6.3 单 reaction 预算守）
 5. `richTurns.purge(chatID, topicID, userMessageID)` —— turn 结束清 in-memory state
-6. `draftStreamers.endProcess(...)` + `groupDraft.endProcess(...)` —— DM/group draft surface 清理（详见 §11.12.11.1 / §11.12.11.2）
+6. `liveDraft.endProcess(...)` —— DM/group liveDraft surface 清理（详见 §11.12.1 unified simulated DraftMessage）
 
 `reason.IsError()` 时 🎉 换 ❌ —— 用 reaction 表达错误终态，不动 user message slot。
 
@@ -1297,12 +1297,12 @@ sendMessage 失败 → retry 3 次 → 仍失败就返回 error，runtime 看到
 
 - **结论**：nightme 不实现 Bot API 10.3 起的 DM 私聊 Topic 模式
 - **API 现状**：Bot API 10.3 起 `getMe.has_topics_enabled == true` 的 bot 可在私聊中调用 `createForumTopic` / `editForumTopic` / `deleteForumTopic` / `unpinAllForumTopicMessages`，`Message.message_thread_id` / `Message.is_topic_message` 也已扩到 private chat。**`closeForumTopic` / `reopenForumTopic` 仍仅支持 forum supergroup chat**，DM 调用 server 拒
-- **部分缓解**：`OutThinking` / `OutToolStart` / `OutToolEnd` 三类事件在 DM 下走 `sendRichMessageDraft`（详见 §11.12.1），无须 forum topic 容器就能给用户"思考中"的视觉反馈
+- **部分缓解**：`OutThinking` / `OutToolStart` / `OutToolEnd` 三类事件在 DM 下走 §11.12.1 unified simulated DraftMessage，无须 forum topic 容器就能给用户"思考中"的视觉反馈
 - **不支持理由**：
   1. **eligibility 不可控**：`Bot Platform Developer Terms of Service` §6.2.6 限定 "one or more eligible TPAs they own" 可启用该能力，Telegram 未公开 eligibility 判定细则
   2. **API 缺口**：DM 不支持 `closeForumTopic` / `reopenForumTopic`，Topic 复用、归档、限流清理都得改走 `deleteForumTopic`（一次性删 topic + 全部消息）
   3. **合规绑定**：启用后该 TPA 内 Stars 购买按 15% 非退款抽成（§6.2.6）
-  4. **现有路径够用**：DM `sendRichMessageDraft` 给用户清晰的"思考中"视觉，rich turn 单条 rich message 在 DM 下承担 turn 状态机，topic 容器增益边际低
+  4. **现有路径够用**：DM §11.12.1 simulated DraftMessage 给用户清晰的"思考中"视觉，rich turn 单条 rich message 在 DM 下承担 turn 状态机，topic 容器增益边际低
 - **重审触发条件**：Telegram 把 DM topic mode 开放给所有 bot / Bot API 新增 DM `closeForumTopic` / `reopenForumTopic` / nightme 业务侧有"DM 内多任务并行"硬需求
 
 ## 14. Telegram 独有、未利用的能力

@@ -10,8 +10,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// Two FIFO stacks for the simulated DraftMessage in
-// ChatKind=group, each capped at 50:
+// Two FIFO stacks for the simulated DraftMessage surface used
+// by every non-channel ChatKind (DM, basic group, forum
+// supergroup), each capped at 50:
 //
 //   - thinkingStack []richTurnEntry  cap 50: holds OutThinking
 //     events in arrival order. On overflow, oldest is FIFO-evicted.
@@ -31,11 +32,11 @@ import (
 // buffered events on a count threshold would defeat the purpose
 // of keeping recent context.
 const (
-	thinkingStackCap  = 50
-	toolsStackCap     = 50
-	groupDraftSendMax = 5 // per-stack, per flush
+	thinkingStackCap = 50
+	toolsStackCap    = 50
+	liveDraftSendMax = 5 // per-stack, per flush
 
-	groupDraftBatchInterval = 10 * time.Second
+	liveDraftBatchInterval = 10 * time.Second
 )
 
 // toolSlot is one entry in toolsStack: a single OutToolStart
@@ -50,11 +51,12 @@ type toolSlot struct {
 	ends  []richTurnEntry
 }
 
-// groupDraftEntry is the per-turn in-memory state for the simulated
-// DraftMessage surface used by ChatKind=group. Two FIFO stacks,
-// each capped at 50, hold all events since the last flush; the
-// buffer is bounded and Telegram only ever sees the latest 5 from
-// each stack per flush.
+// liveDraftEntry is the per-turn in-memory state for the simulated
+// DraftMessage surface used by every non-channel ChatKind (DM,
+// basic group, forum supergroup). Two FIFO stacks, each capped at
+// 50, hold all events since the last flush; the buffer is bounded
+// and Telegram only ever sees the latest 5 from each stack per
+// flush.
 //
 // Two locks:
 //   - mu protects the two stacks (append / peek / pop). Held
@@ -72,7 +74,7 @@ type toolSlot struct {
 // messageID is the Telegram message_id returned by the first
 // (cold-create) flush. 0 means "not yet sent". In-memory only —
 // no persisted DraftMessageID.
-type groupDraftEntry struct {
+type liveDraftEntry struct {
 	mu      sync.Mutex
 	flushMu sync.Mutex
 
@@ -92,38 +94,39 @@ type groupDraftEntry struct {
 	userMsgID int
 }
 
-// groupDraftManager owns the per-(chat, topic, userMsgID) entries
-// for the "group" ChatKind's simulated DraftMessage surface.
-type groupDraftManager struct {
+// liveDraftManager owns the per-(chat, topic, userMsgID) entries
+// for the simulated DraftMessage surface used by every
+// non-channel ChatKind (DM + group).
+type liveDraftManager struct {
 	api apiClient
 	log *slog.Logger
 	mu  sync.Mutex
 	// entries is keyed by chatID|topicID|userMsgID. Map-level
 	// reads/writes are guarded by mu; per-entry mutation is
 	// guarded by entry.mu (buffer) and entry.flushMu (API call).
-	entries map[string]*groupDraftEntry
+	entries map[string]*liveDraftEntry
 }
 
-func newGroupDraftManager(api apiClient, log *slog.Logger) *groupDraftManager {
-	return &groupDraftManager{
+func newLiveDraftManager(api apiClient, log *slog.Logger) *liveDraftManager {
+	return &liveDraftManager{
 		api:     api,
 		log:     log,
-		entries: make(map[string]*groupDraftEntry),
+		entries: make(map[string]*liveDraftEntry),
 	}
 }
 
-func groupDraftKey(chatID string, topicID int, userMsgID int) string {
+func liveDraftKey(chatID string, topicID int, userMsgID int) string {
 	return chatID + "|" + stringInt(topicID) + "|" + stringInt(userMsgID)
 }
 
 // ensureEntry returns the entry for a turn, allocating one on first
 // access. Caller holds the manager mutex.
-func (m *groupDraftManager) ensureEntry(chatID string, topicID int, userMsgID int) *groupDraftEntry {
-	key := groupDraftKey(chatID, topicID, userMsgID)
+func (m *liveDraftManager) ensureEntry(chatID string, topicID int, userMsgID int) *liveDraftEntry {
+	key := liveDraftKey(chatID, topicID, userMsgID)
 	if e, ok := m.entries[key]; ok {
 		return e
 	}
-	e := &groupDraftEntry{
+	e := &liveDraftEntry{
 		rawChatID: chatID,
 		topicID:   topicID,
 		userMsgID: userMsgID,
@@ -137,9 +140,11 @@ func (m *groupDraftManager) ensureEntry(chatID string, topicID int, userMsgID in
 // no timer is already pending. The actual Telegram API call
 // happens in flushLocked when the timer fires (or endProcess).
 //
-// The boolean mirrors streamDraftEvent's DM-side contract — true
-// means "consumed, do not fall through to the richTurn path".
-func (m *groupDraftManager) streamDraftEvent(_ context.Context, rawChatID string, topicID int, userMsgID int, segment string, kind messages.OutboundKind) (bool, error) {
+// Returns (handled=true) on success — caller treats it as consumed
+// and does NOT fall through to the richTurn path. Returns
+// (handled=false) on userMsgID <= 0 or unsupported kind so the
+// caller can decide whether to fall through.
+func (m *liveDraftManager) streamDraftEvent(_ context.Context, rawChatID string, topicID int, userMsgID int, segment string, kind messages.OutboundKind) (bool, error) {
 	if userMsgID <= 0 {
 		m.log.Info("telegram: streamDraftEvent fallthrough (userMsgID<=0)",
 			"chat_id", rawChatID,
@@ -205,7 +210,7 @@ func (m *groupDraftManager) streamDraftEvent(_ context.Context, rawChatID string
 }
 
 // flushLocked sends the LATEST N events from each stack (N =
-// groupDraftSendMax, or all if fewer) as a single rich_message
+// liveDraftSendMax, or all if fewer) as a single rich_message
 // via sendRichMessage (first flush) or editMessageText
 // (subsequent flushes). Popped entries are removed from the
 // stacks; on API failure they are restored (issue #391 contract).
@@ -219,7 +224,7 @@ func (m *groupDraftManager) streamDraftEvent(_ context.Context, rawChatID string
 // Step 1+2 ensures the buffer mutation happens under mu, the API
 // call happens under flushMu (without mu), so a slow API call
 // never blocks new streamDraftEvent calls.
-func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEntry, rawChatID string, topicID int, reason string) (bool, error) {
+func (m *liveDraftManager) flushLocked(ctx context.Context, entry *liveDraftEntry, rawChatID string, topicID int, reason string) (bool, error) {
 	// 1. Pop the latest 5 from each stack under mu.
 	entry.mu.Lock()
 	if len(entry.thinkingStack) == 0 && len(entry.toolsStack) == 0 {
@@ -227,7 +232,7 @@ func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEn
 		return true, nil
 	}
 
-	nThink := groupDraftSendMax
+	nThink := liveDraftSendMax
 	if nThink > len(entry.thinkingStack) {
 		nThink = len(entry.thinkingStack)
 	}
@@ -235,7 +240,7 @@ func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEn
 	copy(sendingThink, entry.thinkingStack[len(entry.thinkingStack)-nThink:])
 	entry.thinkingStack = entry.thinkingStack[:len(entry.thinkingStack)-nThink]
 
-	nTools := groupDraftSendMax
+	nTools := liveDraftSendMax
 	if nTools > len(entry.toolsStack) {
 		nTools = len(entry.toolsStack)
 	}
@@ -355,13 +360,13 @@ func buildBlocksFromStacks(thinking []richTurnEntry, tools []toolSlot) []map[str
 
 // startFlushTimerIfIdleLocked arms the 10s debounce timer if no
 // timer is already pending. Caller MUST NOT hold entry.mu.
-func (m *groupDraftManager) startFlushTimerIfIdleLocked(entry *groupDraftEntry) {
+func (m *liveDraftManager) startFlushTimerIfIdleLocked(entry *liveDraftEntry) {
 	entry.mu.Lock()
 	if entry.flushTimer != nil {
 		entry.mu.Unlock()
 		return
 	}
-	entry.flushTimer = time.AfterFunc(groupDraftBatchInterval, func() {
+	entry.flushTimer = time.AfterFunc(liveDraftBatchInterval, func() {
 		entry.mu.Lock()
 		if len(entry.thinkingStack) == 0 && len(entry.toolsStack) == 0 {
 			entry.flushTimer = nil
@@ -380,14 +385,14 @@ func (m *groupDraftManager) startFlushTimerIfIdleLocked(entry *groupDraftEntry) 
 // endProcess finalizes the simulated DraftMessage for a turn:
 // flushes any remaining buffered events, deletes the underlying
 // Telegram message, and drops the in-memory entry.
-func (m *groupDraftManager) endProcess(ctx context.Context, rawChatID string, topicID int, userMsgID int) {
+func (m *liveDraftManager) endProcess(ctx context.Context, rawChatID string, topicID int, userMsgID int) {
 	if userMsgID <= 0 {
 		return
 	}
 	m.mu.Lock()
-	entry, ok := m.entries[groupDraftKey(rawChatID, topicID, userMsgID)]
+	entry, ok := m.entries[liveDraftKey(rawChatID, topicID, userMsgID)]
 	if ok {
-		delete(m.entries, groupDraftKey(rawChatID, topicID, userMsgID))
+		delete(m.entries, liveDraftKey(rawChatID, topicID, userMsgID))
 	}
 	m.mu.Unlock()
 
@@ -416,7 +421,7 @@ func (m *groupDraftManager) endProcess(ctx context.Context, rawChatID string, to
 // deleteOrphan removes a DraftMessage by id. On failure the
 // message stays in the chat — acceptable since the next turn
 // creates a fresh DraftMessage.
-func (m *groupDraftManager) deleteOrphan(ctx context.Context, rawChatID string, topicID int, msgID int) {
+func (m *liveDraftManager) deleteOrphan(ctx context.Context, rawChatID string, topicID int, msgID int) {
 	if msgID == 0 {
 		return
 	}

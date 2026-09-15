@@ -61,18 +61,18 @@ type Adapter struct {
 	// observing the animated draft locks the user's send button
 	// for the duration of the turn — preventing the user from
 	// interjecting while the agent is composing. Both DM and
-	// group now flow through groupDraft (simulated
+	// group now flow through liveDraft (simulated
 	// DraftMessage: real rich message + editMessageText /
 	// deleteMessage), which leaves the user free to type.
 	//
-	// groupDraft simulates the sendMessageDraft surface for
+	// liveDraft simulates the sendMessageDraft surface for
 	// every ChatKind via a real Telegram message +
 	// editMessageText / deleteMessage trio. Per-turn entries
 	// live in memory; the message_id of the active DraftMessage
 	// is persisted to TopicState.DraftMessageID so a daemon
 	// restart mid-turn can resume editing the same Telegram
 	// message. See group_draft.go for the lifecycle contract.
-	groupDraft *groupDraftManager
+	liveDraft *liveDraftManager
 
 	// voiceHandler is the seam to the local nightme-stt worker
 	// (set via SetVoiceHandler at startup). When non-nil,
@@ -122,7 +122,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		retry:     DefaultRetryConfig,
 		richTurns: newRichTurnsIndex(defaultRichTurnCap),
 	}
-	out.groupDraft = newGroupDraftManager(out.api, out.logger)
+	out.liveDraft = newLiveDraftManager(out.api, out.logger)
 	out.wireVoiceHandler()
 	return out, nil
 }
@@ -184,18 +184,18 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		api = newHTTPClient("test-token")
 	}
 	return &Adapter{
-		name:       "telegram",
-		api:        api,
-		state:      state,
-		incoming:   make(chan messages.InboundMessage, 128),
-		logger:     slog.Default(),
-		config:     copy,
-		dataDir:    dataDir,
-		callbacks:  make(map[string]struct{}),
-		limiter:    NewLimiter(nil, slog.Default()),
-		retry:      DefaultRetryConfig,
-		richTurns:  newRichTurnsIndex(defaultRichTurnCap),
-		groupDraft: newGroupDraftManager(api, slog.Default()),
+		name:      "telegram",
+		api:       api,
+		state:     state,
+		incoming:  make(chan messages.InboundMessage, 128),
+		logger:    slog.Default(),
+		config:    copy,
+		dataDir:   dataDir,
+		callbacks: make(map[string]struct{}),
+		limiter:   NewLimiter(nil, slog.Default()),
+		retry:     DefaultRetryConfig,
+		richTurns: newRichTurnsIndex(defaultRichTurnCap),
+		liveDraft: newLiveDraftManager(api, slog.Default()),
 	}
 }
 
@@ -663,18 +663,20 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	if !ok {
 		state = &TopicState{ChatID: chatID, TopicID: topicID, ChatKind: ChatKindGroup, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	}
-	// Refresh ChatKind on every turn so Send() can route
-	// OutTool/OutThink via sendMessageDraft (private) or the
-	// simulated DraftMessage (group). ChatKind rarely changes
-	// but we re-stamp defensively so a bot's chat.type upgrade
-	// (e.g. user invites bot to a forum) takes effect next turn.
+	// Refresh ChatKind on every turn so Send() routes correctly
+	// even if chat.type changes (e.g. user invites bot to a forum).
+	// Both ChatKindPrivate and ChatKindGroup share the same
+	// liveDraft (simulated DraftMessage) path.
 	if message != nil && message.Chat.Type != "" {
 		state.ChatKind = ClassifyChat(message.Chat.Type)
 	}
-	// Per-turn DraftMessage reset for the group ChatKind. Private
-	// (server-managed draft) is unaffected. The next OutThinking
+	// Per-turn liveDraft reset for the group ChatKind. Private
+	// (chat.type=="private") has no persisted DraftMessageID to
+	// recover from either — the in-memory liveDraft entry from a
+	// prior turn, if any, is dropped below by endProcess in
+	// ensurePlaceholder's prior-turn cleanup. The next OutThinking
 	// in this turn cold-creates a fresh DraftMessage via
-	// streamDraftEvent's group branch.
+	// streamDraftEvent → liveDraft.streamDraftEvent.
 	//
 	// Orphan recovery: if the previous turn left a DraftMessage
 	// on disk (daemon crashed mid-turn, or the endProcess
@@ -695,7 +697,7 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 		// would have cleaned it up on the happy path.
 	}
 	// ChatKindPrivate is handled the same way: the simulated
-	// DraftMessage lives in groupDraft, not in a per-chat-kind
+	// DraftMessage lives in liveDraft, not in a per-chat-kind
 	// streamer. No additional per-kind cleanup needed here.
 
 	// Drop any in-memory rich turn for this turn — the previous
@@ -1162,7 +1164,7 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 //
 // Routing rules:
 //   - ChatKind == "private" / "group": simulated DraftMessage via
-//     groupDraftManager (sendRichMessage cold-create +
+//     liveDraftManager (sendRichMessage cold-create +
 //     editMessageText(rich_message=…) + deleteMessage at turn end).
 //     Both ChatKinds share the same surface — the animated
 //     sendMessageDraft path was retired because its send-button
@@ -1201,10 +1203,10 @@ func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicI
 	)
 	switch state.ChatKind {
 	case ChatKindPrivate, ChatKindGroup:
-		if a.groupDraft == nil {
+		if a.liveDraft == nil {
 			return false, nil
 		}
-		return a.groupDraft.streamDraftEvent(ctx, rawChatID, topicID, userMsgID, segment, kind)
+		return a.liveDraft.streamDraftEvent(ctx, rawChatID, topicID, userMsgID, segment, kind)
 	default:
 		// channel / unknown — fall through to chain.
 		return false, nil
@@ -1283,7 +1285,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 	// §11.12.11.3 for the per-prompt DraftMessage isolation rule.
 	//
 	// replyAnchor is the per-event turn anchor (Telegram
-	// reply_to_message_id, also the groupDraftKey suffix, also the
+	// reply_to_message_id, also the liveDraftKey suffix, also the
 	// richTurns key). It MUST come from msg.ReplyTo —
 	// that is the userMsgID the runtime stamped on this specific
 	// event in runtime/handler.go and gateway/outbound/emitter_sink.go.
@@ -1545,8 +1547,8 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// timeline shows only the result message. Empty-text silent
 		// drop already happened at the top of Send, so msg.Text is
 		// non-empty here.
-		if a.groupDraft != nil {
-			a.groupDraft.endProcess(ctx, rawChatID, topicID, replyAnchor)
+		if a.liveDraft != nil {
+			a.liveDraft.endProcess(ctx, rawChatID, topicID, replyAnchor)
 		}
 		return a.sendOutResultMessage(ctx, msg, rawChatID, topicID, replyAnchor)
 	default:
@@ -1796,7 +1798,7 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 
 	// 5. End the simulated DraftMessage process for the turn so the
 	// next turn starts fresh. Single surface for both DM and group:
-	// groupDraft.endProcess flushes any remaining buffered events
+	// liveDraft.endProcess flushes any remaining buffered events
 	// via sendRichMessage (cold-create or editMessageText PATCH) and
 	// deletes the underlying Telegram message — the server does not
 	// auto-disappear a real message the way sendMessageDraft pushes
@@ -1804,13 +1806,13 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	//
 	// Safety net for turns with NO OutResult (OutError-only, runtime
 	// crash, etc.) — otherwise OutResult's send path covers it.
-	if a.groupDraft != nil && parsedUserMsgID > 0 {
+	if a.liveDraft != nil && parsedUserMsgID > 0 {
 		// Skip when no per-turn anchor — the streamer already no-ops
 		// internally but skipping here avoids the warn log and the
 		// map lookup for truly orphan OnPromptEnded calls (startup,
 		// tests). Feishu parity: OnPromptEnded strictly acts on the
 		// caller-provided userMsgID and never re-derives it.
-		a.groupDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)
+		a.liveDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)
 	}
 }
 

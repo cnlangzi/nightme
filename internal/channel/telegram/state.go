@@ -18,9 +18,15 @@ type TopicState struct {
 	// (forum or not) collapse to one kind because they share the same
 	// outbound routing contract (chain path + simulated DraftMessage).
 	//
-	//   "private": DM, sendMessageDraft (#383)
+	//   "private": DM
 	//   "group":   basic group + any supergroup, forum or not
 	//   "channel": not supported; outbound events silent-drop
+	//
+	// Both "private" and "group" share the same outbound contract
+	// for OutThinking / OutToolStart / OutToolEnd: liveDraft
+	// (simulated DraftMessage: sendRichMessage cold-create +
+	// editMessageText PATCH + deleteMessage at turn end). Channel
+	// outbound is silent-drop.
 	//
 	// Replaces the legacy ChatType field (json:"chat_type"). Old state
 	// files are migrated on load: chat_type="private" → "private",

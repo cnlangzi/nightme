@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -2545,6 +2546,115 @@ func callsByMethod(calls []fakeCall, method string) []fakeCall {
 		}
 	}
 	return out
+}
+
+// TestAdapter_Send_DM_OutThinking_GoesThroughUnifiedPath locks
+// the per-prompt-isolation contract: after the animated draft
+// path was retired, DM must go through the same liveDraft (simulated
+// DraftMessage) surface as group / forum topic. 5 OutThinking
+// events buffer silently under the FIFO model; OnPromptEnded
+// triggers the final flush which calls sendRichMessage (cold-create
+// + 5 blocks) and deleteMessage. Without this test, a regression
+// that secretly re-routes DM (e.g. back to a dedicated draftStreamer)
+// would slip through because group tests still pass.
+func TestAdapter_Send_DM_OutThinking_GoesThroughUnifiedPath(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+
+	for i := 1; i <= 5; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   fmt.Sprintf("DM thought %d", i),
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+
+	// No wire calls during buffering (no count-based flush).
+	if c := countByMethod(api.Calls, "sendRichMessage"); c != 0 {
+		t.Fatalf("buffering should not trigger sendRichMessage; got %d (calls=%+v)",
+			c, api.Calls)
+	}
+	if c := countByMethod(api.Calls, "sendMessageDraft"); c != 0 {
+		t.Fatalf("DM must NOT use sendMessageDraft (retired animated draft path); got %d", c)
+	}
+	if c := countByMethod(api.Calls, "sendRichMessageDraft"); c != 0 {
+		t.Fatalf("DM must NOT use sendRichMessageDraft (never existed as a draft API); got %d", c)
+	}
+
+	// OnPromptEnded → liveDraft.endProcess → final flush + delete.
+	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
+
+	cold := findCallByMethod(api.Calls, "sendRichMessage")
+	if cold == nil {
+		t.Fatalf("DM must call sendRichMessage (cold-create) on flush; got calls=%+v", api.Calls)
+	}
+	// DM cold-create should NOT carry message_thread_id (topicID == 0 for private).
+	if _, has := cold.Params["message_thread_id"]; has {
+		t.Fatalf("DM cold-create should not carry message_thread_id; got %v", cold.Params)
+	}
+	blocks := richMessageBlocks(cold.Params["rich_message"])
+	if len(blocks) != 5 {
+		t.Fatalf("DM cold-create blocks = %d, want 5; got %v", len(blocks), blocks)
+	}
+	for i, want := range []string{
+		"💭 DM thought 1", "💭 DM thought 2",
+		"💭 DM thought 3", "💭 DM thought 4",
+		"💭 DM thought 5",
+	} {
+		if blocks[i] != want {
+			t.Fatalf("DM block[%d] = %q, want %q", i, blocks[i], want)
+		}
+	}
+
+	// Turn end deletes the DraftMessage (simulated; no animated
+	// server push here).
+	dels := callsByMethod(api.Calls, "deleteMessage")
+	if len(dels) != 1 {
+		t.Fatalf("DM endProcess must call deleteMessage exactly once; got %d (calls=%+v)",
+			len(dels), api.Calls)
+	}
+	if msgID, _ := dels[0].Params["message_id"].(int); msgID == 0 {
+		t.Fatalf("deleteMessage.message_id = 0; want the cold-created id")
+	}
+	if chatID, _ := dels[0].Params["chat_id"].(string); chatID != raw {
+		t.Fatalf("deleteMessage chat_id = %q, want %q", chatID, raw)
+	}
+}
+
+// TestAdapter_Send_DM_OutResult_EndsLiveDraftProcess verifies the
+// turn-end contract on the happy DM path: OutResult →
+// liveDraft.endProcess → final flush + deleteMessage, all without
+// OnPromptEnded. The cold-created DraftMessage is the one that
+// gets deleted (not the result message itself).
+func TestAdapter_Send_DM_OutResult_EndsLiveDraftProcess(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupDMState(t, a, 100)
+
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+		Text:   "● Read(/tmp/foo.go)",
+	})
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutResult,
+		Text:   "final answer",
+	})
+
+	cold := findCallByMethod(api.Calls, "sendRichMessage")
+	if cold == nil {
+		t.Fatalf("DM OutResult must trigger sendRichMessage cold-create; got calls=%+v", api.Calls)
+	}
+	del := findCallByMethod(api.Calls, "deleteMessage")
+	if del == nil {
+		t.Fatalf("DM OutResult must trigger deleteMessage for the liveDraft; got calls=%+v", api.Calls)
+	}
+	if msgID, _ := del.Params["message_id"].(int); msgID == 0 {
+		t.Fatalf("deleteMessage.message_id = 0; want the cold-created id from endProcess flush")
+	}
 }
 
 func newTestLoggerForAdapter() *slog.Logger {

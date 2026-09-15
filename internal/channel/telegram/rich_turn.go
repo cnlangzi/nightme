@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/statusbar"
@@ -331,30 +332,19 @@ func (a *Adapter) renderRichTurnBlocksLocked(turn *richTurn) (string, error) {
 		})
 	}
 
-	// Task list (when present): emit a heading + bullet list so
-	// the rich renderer can use native list blocks. v9 chain
-	// uses a custom "📋 Tasks" markdown todo list; here we use
-	// the explicit list/heading blocks which render more crisply.
-	if len(turn.taskList) > 0 {
-		var items []map[string]any
-		for _, t := range turn.taskList {
-			text := t.Subject
-			if text == "" {
-				text = t.ID
-			}
-			if t.Status == "completed" {
-				text = "✓ " + text
-			}
-			items = append(items, map[string]any{
-				"blocks": []map[string]any{
-					{"type": "paragraph", "text": text},
-				},
-			})
-		}
-		blocks = append(blocks, map[string]any{
-			"type":  "list",
-			"items": items,
-		})
+	// Task list (when present): emit a heading + native list so
+	// the rich renderer can use Telegram's first-class list blocks.
+	// The heading is a small but critical visual anchor — without
+	// it the user sees an unlabeled block of paragraphs mid-message
+	// and can't tell "this is the plan" apart from regular entries.
+	// Emoji prefix (📋) keeps parity with feishu's `**📋 Tasks**`
+	// heading and matches the convention other sections use for
+	// region markers (🤖 Working… / 💰 Usage).
+	//
+	// Empty / nil taskList → no heading, no list block — same as
+	// before. Mirrors the v9 chain's "no orphan headline" rule.
+	if taskBlocks, ok := renderRichTurnTaskListBlocks(turn.taskList); ok {
+		blocks = append(blocks, taskBlocks...)
 	}
 
 	// Footer: rendered as a dedicated InputRichBlockFooter block
@@ -697,4 +687,176 @@ func taskStatusToString(s agent.AgentTaskStatus) string {
 		return "cancelled"
 	}
 	return "pending"
+}
+
+// richTurnTaskListHeadline is the pre-baked text prepended to the
+// task section. Kept as a package-level const so the §11.12 docs and
+// the tests pin the same string — a future change has one source of
+// truth. The 📋 emoji matches feishu's `**📋 Tasks**` heading for
+// cross-channel visual parity.
+const richTurnTaskListHeadline = "📋 Tasks"
+
+// richTurnTaskListBudgetRunes caps the rendered task section
+// (headline + list rows summed). Telegram's rich message limit is
+// 32K chars total, but the card has other regions (header /
+// entries / footer / dividers) competing for that budget, so the
+// task section gets a generous-but-bounded slice. Long task lists
+// truncate at this budget with a "…" tail — same shape as feishu's
+// checklistBudgetRunes / checklistMore pair, so a 100-task snapshot
+// renders the first ~30 rows + truncation marker.
+const richTurnTaskListBudgetRunes = 3000
+
+// richTurnTaskListMore is the inline tail appended to the last
+// visible row when the rune budget truncated the list. Pure
+// ellipsis — matches feishu's checklistMore constant.
+const richTurnTaskListMore = "…"
+
+// richTurnTaskListOverflowPlaceholder is the single-row fallback
+// when the renderer drops every row to fit the budget. Mirrors
+// feishu's checklistOverflowPlaceholder so a degenerate giant
+// subject still surfaces a single task row instead of an empty
+// list block.
+const richTurnTaskListOverflowPlaceholder = "• …"
+
+// renderRichTurnTaskListBlock builds the two-block section emitted
+// for a non-empty taskList: a `heading` block (📋 Tasks) followed
+// by a `list` block of native Telegram list items. Returns ok=false
+// when items is empty (no blocks emitted) so callers can short-
+// circuit without an explicit length check.
+//
+// Pipeline:
+//   1. Filter rows whose status is terminal-but-not-rendered
+//      (cancelled / deleted). Other statuses (pending / in_progress
+//      / completed) always render — better than silently dropping a
+//      row the bridge meant to surface. Feishu does the same filter
+//      at checklistBudgetRunes (buildTaskChecklistChunks).
+//   2. Truncate trailing rows when the rendered rune count would
+//      exceed richTurnTaskListBudgetRunes. Whole-row drop — never
+//      mid-row — so the list shape stays well-formed. The last
+//      visible row gets a "…" suffix so the user sees the truncation.
+//   3. Compose each visible row into a Telegram list item: one
+//      paragraph per item, with status-specific prefix:
+//        pending     → "• <Subject>"
+//        in_progress → "• <Subject> (<ActiveForm>)"
+//        completed   → "✓ <Subject>"
+//   4. Prepend the heading block. Heading is unconditional when
+//      any task row is visible — the user needs the visual anchor
+//      to know "this is the plan" rather than "these are random
+//      entries mid-message".
+func renderRichTurnTaskListBlocks(items []taskListItem) ([]map[string]any, bool) {
+	if len(items) == 0 {
+		return nil, false
+	}
+
+	// Filter out terminal-but-not-rendered statuses first — these
+	// must not consume the rune budget (they're invisible downstream).
+	visible := make([]taskListItem, 0, len(items))
+	for _, it := range items {
+		switch it.Status {
+		case "cancelled", "deleted":
+			// Terminal statuses that don't make sense on a live
+			// checklist — drop them. Feishu buildTaskChecklistChunks
+			// filters the same way (TaskInProgress / TaskPending /
+			// TaskCompleted only).
+			continue
+		}
+		visible = append(visible, it)
+	}
+	if len(visible) == 0 {
+		// Every item filtered out → no heading, no list block. Same
+		// shape as the empty-input guard at the top.
+		return nil, false
+	}
+
+	// Rune-budgeted row selection. The budget is consumed by BOTH
+	// rows AND the trailing "…" suffix (so the marker doesn't push
+	// a real row over the limit).
+	const headlineRunes = 9 // "📋 Tasks" is 9 runes (1 emoji + " Tasks")
+	rows := make([]map[string]any, 0, len(visible))
+	total := headlineRunes
+	rendered := 0
+	for _, it := range visible {
+		rowText := renderTaskRowText(it)
+		cost := utf8.RuneCountInString(rowText) + 1 // +1 for separator
+		// Account for the trailing "…" suffix on the last visible
+		// row when this is the row we're about to render — keeps
+		// the truncated row's total cost inside the budget.
+		if total+cost+1 > richTurnTaskListBudgetRunes {
+			break
+		}
+		rows = append(rows, map[string]any{
+			"blocks": []map[string]any{
+				{"type": "paragraph", "text": rowText},
+			},
+		})
+		total += cost
+		rendered++
+	}
+	if rendered == 0 {
+		// First row alone overflowed the budget — emit a single
+		// placeholder row so the list block stays well-formed and
+		// the user still sees the section header above it.
+		return []map[string]any{
+			{"type": "heading", "text": richTurnTaskListHeadline, "size": 1},
+			{
+				"type": "list",
+				"items": []map[string]any{
+					{"blocks": []map[string]any{
+						{"type": "paragraph", "text": richTurnTaskListOverflowPlaceholder},
+					}},
+				},
+			},
+		}, true
+	}
+	if rendered < len(visible) {
+		// Append "…" suffix to the last visible row so the user
+		// sees the truncation marker. Matches feishu's
+		// `chunks[len-1] += " " + checklistMore` pattern.
+		last := rows[rendered-1]
+		// last["blocks"][0]["text"] — guard with type assertion so a
+		// future block-shape refactor doesn't NPE here.
+		if bs, ok := last["blocks"].([]map[string]any); ok && len(bs) > 0 {
+			if p, ok := bs[0]["text"].(string); ok {
+				bs[0]["text"] = p + " " + richTurnTaskListMore
+			}
+		}
+	}
+
+	return []map[string]any{
+		{"type": "heading", "text": richTurnTaskListHeadline, "size": 1},
+		{
+			"type":  "list",
+			"items": rows,
+		},
+	}, true
+}
+
+// renderTaskRowText formats one task row for the rich block list.
+// Status enum decides only the prefix shape (• / ✓); the row shape
+// is identical for every status so the output reads as a single
+// coherent list.
+//
+//   - pending     → • <Subject>
+//   - in_progress → • <Subject> (<ActiveForm>)    (open dot + soft suffix)
+//   - completed   → ✓ <Subject>                    (check mark)
+//
+// Empty Subject falls back to the task ID so a malformed snapshot
+// still produces a non-empty row. In_progress rows only show the
+// ActiveForm suffix when it's non-empty (no trailing parens for
+// empty forms).
+func renderTaskRowText(it taskListItem) string {
+	subject := strings.TrimSpace(it.Subject)
+	if subject == "" {
+		subject = it.ID
+	}
+	switch it.Status {
+	case "completed":
+		return "✓ " + subject
+	case "in_progress":
+		if it.ActiveForm != "" {
+			return "• " + subject + " (" + it.ActiveForm + ")"
+		}
+		return "• " + subject
+	}
+	return "• " + subject
 }

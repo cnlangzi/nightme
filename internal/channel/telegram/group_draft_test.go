@@ -479,12 +479,14 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 		t.Fatalf("phase 2 flushLocked returned err: %v", err)
 	}
 
-	// The popped slice must be restored: buffer back at 5.
+	// The popped slice must be restored: thinkingStack back at 5
+	// (we sent 5 thinking events in warmup, sent 5 in this
+	// flush, flush failed, so the popped 5 should be back).
 	entry.mu.Lock()
-	bufferAfterFail := len(entry.entries)
+	bufferAfterFail := len(entry.thinkingStack)
 	entry.mu.Unlock()
 	if bufferAfterFail != 5 {
-		t.Fatalf("buffer should be restored to 5 after edit failure, got %d", bufferAfterFail)
+		t.Fatalf("thinkingStack should be restored to 5 after edit failure, got %d", bufferAfterFail)
 	}
 	// messageID preserved — the entry stays in m.entries so the
 	// next flush will retry as editMessageText on the same id.

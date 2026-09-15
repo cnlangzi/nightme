@@ -2,7 +2,9 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +14,50 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
+
+// richMessageFirstBlockText extracts the first paragraph block's text
+// from the rich_message JSON envelope used by sendRichMessage and
+// editMessageText(rich_message=...). Returns "" if the envelope is
+// malformed or empty. The rich_message param is json.RawMessage
+// (a named []byte), so a switch handles both the typed and raw
+// byte-slice forms that can appear in fakeCall.Params after the
+// value is round-tripped through the form encoder.
+func richMessageFirstBlockText(raw any) string {
+	blocks := richMessageBlocks(raw)
+	if len(blocks) == 0 {
+		return ""
+	}
+	return blocks[0]
+}
+
+// richMessageBlocks decodes the rich_message envelope and returns
+// every paragraph block's text in order. Returns nil if the
+// envelope is malformed or empty.
+func richMessageBlocks(raw any) []string {
+	var data []byte
+	switch v := raw.(type) {
+	case json.RawMessage:
+		data = []byte(v)
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	default:
+		return nil
+	}
+	var env struct {
+		Blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"blocks"`
+	}
+	_ = json.Unmarshal(data, &env)
+	out := make([]string, 0, len(env.Blocks))
+	for _, b := range env.Blocks {
+		out = append(out, b.Text)
+	}
+	return out
+}
 
 // TestAdapter_Send_Group_OutThinking_CreatesDraftMessage asserts that
 // the first OutThinking in a group turn cold-creates a real Telegram
@@ -33,78 +79,105 @@ func TestAdapter_Send_Group_OutThinking_CreatesDraftMessage(t *testing.T) {
 	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
 		t.Fatalf("group must NOT use sendMessageDraft; got %+v", draft)
 	}
-	cold := findCallByMethod(api.Calls, "sendMessage")
+	cold := findCallByMethod(api.Calls, "sendRichMessage")
 	if cold == nil {
-		t.Fatalf("expected sendMessage cold-create for group DraftMessage; got calls=%+v", api.Calls)
+		t.Fatalf("expected sendRichMessage cold-create for group DraftMessage; got calls=%+v", api.Calls)
 	}
 	if cold.Params["reply_to_message_id"] != 1 {
 		t.Fatalf("reply_to_message_id = %v, want 1 (userMsgID)", cold.Params["reply_to_message_id"])
 	}
-	if got, _ := cold.Params["text"].(string); got != "💭 considering whether to invoke Read" {
+	if got := richMessageFirstBlockText(cold.Params["rich_message"]); got != "💭 considering whether to invoke Read" {
 		t.Fatalf("cold-create text = %q, want %q", got, "💭 considering whether to invoke Read")
 	}
 }
 
 // TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace
-// verifies the REPLACE path on the second event: editMessageText
-// (NOT a fresh sendMessage) targets the persisted DraftMessageID,
-// keeping the chat tidy.
+// verifies the REPLACE path: once the batch threshold (10 logical
+// events) is hit, the buffered entries flush via editMessageText
+// against the persisted DraftMessageID — NOT a fresh sendRichMessage.
+// The cold-create carries the first event; the editMessageText
+// carries the last event of the window (REPLACE wiped prior buffer
+// entries).
 func TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "first thought",
-	})
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "second thought",
-	})
+	// 11 OutThinking events: event 1 cold-creates (count resets to 0
+	// after coldCreate), events 2..10 buffer (count climbs 1..9),
+	// event 11 hits count >= 10 and flushes via editMessageText.
+	for i := 1; i <= 11; i++ {
+		_ = a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   fmt.Sprintf("thought %d", i),
+		})
+	}
 
-	sends := callsByMethod(api.Calls, "sendMessage")
+	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("expected exactly 1 sendMessage cold-create, got %d (calls=%+v)", len(sends), api.Calls)
+		t.Fatalf("expected exactly 1 sendRichMessage cold-create, got %d (calls=%+v)", len(sends), api.Calls)
 	}
 	edits := callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != 1 {
-		t.Fatalf("expected exactly 1 editMessageText for second event, got %d", len(edits))
+		t.Fatalf("expected exactly 1 editMessageText on batch flush, got %d", len(edits))
 	}
-	if text, _ := edits[0].Params["text"].(string); text != "💭 second thought" {
-		t.Fatalf("edit text = %q, want %q (REPLACE: prior body wiped)", text, "💭 second thought")
+	// REPLACE semantics: each OutThinking wipes prior entries, so
+	// the flush body shows only the LAST event of the window.
+	if got := richMessageFirstBlockText(edits[0].Params["rich_message"]); got != "💭 thought 11" {
+		t.Fatalf("edit first-block text = %q, want %q (REPLACE: prior body wiped)", got, "💭 thought 11")
 	}
 }
 
 // TestAdapter_Send_Group_OutToolEnd_ACCUMULATES_UnderStart verifies
 // the ACCUMULATE path: the OutToolEnd result line stacks under the
-// matching OutToolStart's call line in a single DraftMessage body,
-// separated by a blank line — same format as #383 DM draft.
+// matching OutToolStart's call line in a single DraftMessage body.
+// Each rich_turn entry becomes one paragraph block in the rich
+// message envelope; flush body is verified to have two blocks
+// (call + result) instead of one.
 func TestAdapter_Send_Group_OutToolEnd_ACCUMULATES_UnderStart(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
+	// Cold-create via first OutToolStart; buffer is wiped after
+	// the coldCreate sendRichMessage.
 	_ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutToolStart,
 		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
 		Text:   "● Read(/tmp/foo.go)",
 	})
+	// Pair 2 in the same post-cold-create window: OutToolStart
+	// REPLACES (entries=[Write/Start]), OutToolEnd ACCUMULATES
+	// under it (entries=[Write/Start, Write/End]). Forcing the
+	// flush via OnPromptEnded → endProcess → flushLocked exercises
+	// the same flush path a count- or timer-based flush would.
+	_ = a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutToolStart,
+		Tool:   &messages.ToolInfo{Name: "Write", Args: "/tmp/bar.go"},
+		Text:   "● Write(/tmp/bar.go)",
+	})
 	_ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutToolEnd,
-		Tool:   &messages.ToolInfo{Name: "Read", Output: "47 lines"},
-		Text:   "📄 Read → 47 lines",
+		Tool:   &messages.ToolInfo{Name: "Write", Output: "hello world"},
+		Text:   "📝 Write → 11 bytes",
 	})
+	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
 	edits := callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != 1 {
-		t.Fatalf("expected 1 editMessageText (OutToolEnd accumulate), got %d (calls=%+v)", len(edits), api.Calls)
+		t.Fatalf("expected 1 editMessageText (ACCUMULATE flush), got %d (calls=%+v)", len(edits), api.Calls)
 	}
-	want := "● Read(/tmp/foo.go)\n\n⎿  📄 Read → 1 lines"
-	if got, _ := edits[0].Params["text"].(string); got != want {
-		t.Fatalf("ACCUMULATE body = %q, want %q", got, want)
+	blocks := richMessageBlocks(edits[0].Params["rich_message"])
+	if len(blocks) != 2 {
+		t.Fatalf("ACCUMULATE rich_message blocks = %d, want 2 (Start+End); got %v", len(blocks), blocks)
+	}
+	if blocks[0] != "● Write(/tmp/bar.go)" {
+		t.Fatalf("ACCUMULATE block[0] = %q, want %q", blocks[0], "● Write(/tmp/bar.go)")
+	}
+	if blocks[1] != "⎿  📝 Write → 11 bytes" {
+		t.Fatalf("ACCUMULATE block[1] = %q, want %q", blocks[1], "⎿  📝 Write → 11 bytes")
 	}
 }
 
@@ -134,9 +207,9 @@ func TestAdapter_Send_Group_NextTurn_CreatesFreshDraftMessage(t *testing.T) {
 		Text:   "turn 2 thought",
 	})
 
-	sends := callsByMethod(api.Calls, "sendMessage")
+	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("turn 2 first event should cold-create a fresh DraftMessage; got %d sendMessage (calls=%+v)", len(sends), api.Calls)
+		t.Fatalf("turn 2 first event should cold-create a fresh DraftMessage; got %d sendRichMessage (calls=%+v)", len(sends), api.Calls)
 	}
 	if edits := callsByMethod(api.Calls, "editMessageText"); len(edits) != 0 {
 		t.Fatalf("turn 2 first event must NOT edit prior DraftMessage; got %d edits", len(edits))
@@ -159,9 +232,9 @@ func TestAdapter_Send_Group_DraftMessage_RoutedThroughTopic(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	cold := findCallByMethod(api.Calls, "sendMessage")
+	cold := findCallByMethod(api.Calls, "sendRichMessage")
 	if cold == nil {
-		t.Fatalf("expected sendMessage cold-create; got calls=%+v", api.Calls)
+		t.Fatalf("expected sendRichMessage cold-create; got calls=%+v", api.Calls)
 	}
 	if thread, _ := cold.Params["message_thread_id"].(int); thread != 42 {
 		t.Fatalf("message_thread_id = %v, want 42", cold.Params["message_thread_id"])
@@ -231,14 +304,14 @@ func TestAdapter_Send_Group_OutResult_EndsDraftProcess(t *testing.T) {
 }
 
 // TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn
-// verifies the contract: when the cold-create sendMessage fails,
+// verifies the contract: when the cold-create sendRichMessage fails,
 // streamDraftEvent returns handled=false so the caller falls
 // through to the richTurn chain path. Without this, a transient
 // API error would silently drop the event.
 func TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
-	api.Errors = []error{errors.New("simulated sendMessage 400")}
+	api.Errors = []error{errors.New("simulated sendRichMessage 400")}
 
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
@@ -258,23 +331,35 @@ func TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn(t *testing.
 }
 
 // TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath
-// verifies the contract: when the subsequent editMessageText fails
-// (e.g. Telegram 429), streamDraftEvent returns handled=true so the
-// caller does NOT fall through to the rich turn. Without this, tool
-// result lines (`⎿ 🔧 tool → N bytes`) would leak into the final
-// answer message — see issue #391.
+// verifies the contract: when a flush's editMessageText fails (e.g.
+// Telegram 429), streamDraftEvent returns handled=true so the caller
+// does NOT fall through to the rich turn. Without this, tool result
+// lines (`⎿ 🔧 tool → N bytes`) would leak into the final answer
+// message — see issue #391.
+//
+// With batched flush semantics (10 logical events per window), the
+// failing flush fires on the 11th event (count threshold). The
+// recovery flush fires on the 12th event (count was preserved on
+// failure, so it re-trips the threshold immediately).
 func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// First event: cold-create must succeed (no error queued).
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "first thought",
-	}); err != nil {
-		t.Fatalf("first send: %v", err)
+	// Events 1..10: cold-create + buffered (count climbs 1..9). The
+	// 11th event trips the count threshold and triggers the failing
+	// editMessageText; the 12th event triggers the recovery flush.
+	// We poison api.Errors between event 10 (buffered) and event 11
+	// (failing flush) so the cold-create at event 1 succeeds.
+	send := func(text string) {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   text,
+		}); err != nil {
+			t.Fatalf("send %q: %v", text, err)
+		}
 	}
+	send("first thought") // event 1: cold-create succeeds.
 
 	state, ok := a.state.topic(raw, 0)
 	if !ok || state == nil {
@@ -285,21 +370,19 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 		t.Fatalf("cold-create did not persist DraftMessageID")
 	}
 
-	// Second event: editMessageText will fail (Telegram 429
-	// simulation). streamDraftEvent MUST return handled=true so the
-	// caller does NOT route this event into the rich turn.
-	api.Errors = []error{errors.New("simulated editMessageText 429")}
-
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "second thought",
-	}); err != nil {
-		t.Fatalf("second send: %v", err)
+	for i := 2; i <= 10; i++ {
+		send(fmt.Sprintf("buffered thought %d", i))
 	}
 
-	// The DraftMessageID must be preserved — the entry is still alive
-	// and ready for the next event to retry on top.
+	// Event 11 trips count>=10 → flush → editMessageText fails
+	// (Telegram 429 simulation). streamDraftEvent MUST return
+	// handled=true so the caller does NOT route this event into the
+	// rich turn.
+	api.Errors = []error{errors.New("simulated editMessageText 429")}
+	send("failing flush thought")
+
+	// The DraftMessageID must be preserved — the entry is still
+	// alive and ready for the next event to retry on top.
 	state, _ = a.state.topic(raw, 0)
 	if state == nil || state.DraftMessageID != originalMsgID {
 		t.Fatalf("DraftMessageID changed on edit failure: was %d, now %v", originalMsgID, state)
@@ -312,34 +395,29 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 	}
 
 	// Exactly one editMessageText call was attempted (the failing
-	// one); no second sendMessage (no re-cold-create).
+	// one); no second sendRichMessage (no re-cold-create).
 	edits := callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != 1 {
 		t.Fatalf("expected 1 editMessageText call, got %d (calls=%+v)", len(edits), api.Calls)
 	}
-	sends := callsByMethod(api.Calls, "sendMessage")
+	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("expected 1 sendMessage cold-create, got %d", len(sends))
+		t.Fatalf("expected 1 sendRichMessage cold-create, got %d", len(sends))
 	}
 
-	// Recovery: a third event with API recovered must re-use the
-	// same DraftMessageID via editMessageText (no re-cold-create).
+	// Recovery: api.Errors cleared. The buffered count was preserved
+	// on failure, so the next event re-trips the count threshold
+	// immediately and flushes successfully (no re-cold-create).
 	api.Errors = nil
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "third thought (recovered)",
-	}); err != nil {
-		t.Fatalf("third send: %v", err)
-	}
+	send("recovery flush thought")
 
 	edits = callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != 2 {
 		t.Fatalf("expected 2 editMessageText after recovery, got %d", len(edits))
 	}
-	sends = callsByMethod(api.Calls, "sendMessage")
+	sends = callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("recovery must NOT re-cold-create; got %d sendMessage", len(sends))
+		t.Fatalf("recovery must NOT re-cold-create; got %d sendRichMessage", len(sends))
 	}
 }
 
@@ -529,15 +607,21 @@ func TestAdapter_Send_Group_EndProcess_DeleteFailure_KeepsState(t *testing.T) {
 // TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate
 // fires N goroutines that all call Send with the same (chat, topic,
 // userMsgID) simultaneously. The per-entry lock must serialise them
-// so exactly one sendMessage cold-create fires and the rest are
-// editMessageText on the same message_id. Without the lock, two
-// goroutines would both see entry.messageID == 0 and both
-// sendMessage → two messages in chat.
+// so exactly one sendRichMessage cold-create fires and only the
+// count-threshold flush produces a single editMessageText on the
+// same message_id. Without the lock, two goroutines would both see
+// entry.messageID == 0 and both sendRichMessage → two messages in
+// chat.
 func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	const N = 8
+	// 11 events: event 1 cold-creates (count resets to 0), events
+	// 2..10 buffer (count climbs 1..9), event 11 trips count>=10
+	// and flushes via editMessageText. The lock-held
+	// streamDraftEvent serialises all 11 calls, so the API sees
+	// exactly 1 cold-create + 1 flush.
+	const N = 11
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
@@ -552,26 +636,21 @@ func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *tes
 	}
 	wg.Wait()
 
-	sends := callsByMethod(api.Calls, "sendMessage")
+	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("expected exactly 1 sendMessage cold-create across %d concurrent events, got %d (calls=%+v)",
+		t.Fatalf("expected exactly 1 sendRichMessage cold-create across %d concurrent events, got %d (calls=%+v)",
 			N, len(sends), api.Calls)
 	}
 	edits := callsByMethod(api.Calls, "editMessageText")
-	if len(edits) != N-1 {
-		t.Fatalf("expected %d editMessageText (one per non-cold-create event), got %d", N-1, len(edits))
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 editMessageText (count-threshold flush), got %d", len(edits))
 	}
-	// All edits target the same message_id (the cold-create's).
-	coldID, _ := sends[0].Params["text"]
-	_ = coldID
-	for i, e := range edits {
-		// Just verify edits happened; the per-id equality check
-		// would need api.Calls to expose message_id which we
-		// already know is shared (otherwise the chat would have
-		// orphan messages from the race).
-		_ = i
-		_ = e
-	}
+	// All API calls target the same message_id (the cold-create's);
+	// the per-id equality check would need api.Calls to expose
+	// message_id which we already know is shared (otherwise the
+	// chat would have orphan messages from the race).
+	_ = richMessageFirstBlockText(sends[0].Params["rich_message"])
+	_ = richMessageFirstBlockText(edits[0].Params["rich_message"])
 }
 
 // TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo verifies that
@@ -601,9 +680,9 @@ func TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	sends := callsByMethod(api.Calls, "sendMessage")
+	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("expected 1 sendMessage cold-create, got %d", len(sends))
+		t.Fatalf("expected 1 sendRichMessage cold-create, got %d", len(sends))
 	}
 	if got, _ := sends[0].Params["reply_to_message_id"].(int); got != 42 {
 		t.Fatalf("cold-create reply_to_message_id = %v, want 42 (msg.ReplyTo)", sends[0].Params["reply_to_message_id"])
@@ -635,9 +714,9 @@ func TestAdapter_Send_Group_FallsBackToStateUserMessageID_WhenReplyToEmpty(t *te
 		t.Fatalf("send: %v", err)
 	}
 
-	sends := callsByMethod(api.Calls, "sendMessage")
+	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("expected 1 sendMessage cold-create, got %d", len(sends))
+		t.Fatalf("expected 1 sendRichMessage cold-create, got %d", len(sends))
 	}
 	if got, _ := sends[0].Params["reply_to_message_id"].(int); got != 77 {
 		t.Fatalf("orphan fallback reply_to_message_id = %v, want 77 (state.UserMessageID)", sends[0].Params["reply_to_message_id"])
@@ -649,9 +728,14 @@ func TestAdapter_Send_Group_FallsBackToStateUserMessageID_WhenReplyToEmpty(t *te
 // DraftMessages anchored to their respective userMsgIDs, and that a
 // late event from turn 1 (delivered after turn 2's ensurePlaceholder
 // has overwritten state.UserMessageID) does NOT leak into turn 2's
-// DraftMessage. The bug would manifest as turn 2's sendMessage
+// DraftMessage. The bug would manifest as turn 2's sendRichMessage
 // carrying turn 1's body, or turn 1's late OutToolEnd rewriting
 // turn 2's message_id.
+//
+// Batched-flush caveat: a single late event is now buffered (not
+// flushed immediately), so the per-turn isolation assertion is that
+// no new API call fires at all on the late event — it joins turn
+// 1's existing entry, awaiting the next flush.
 func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
@@ -665,15 +749,15 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 	}); err != nil {
 		t.Fatalf("turn 1 think: %v", err)
 	}
-	sends := callsByMethod(api.Calls, "sendMessage")
+	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("turn 1 cold-create expected 1 sendMessage, got %d", len(sends))
+		t.Fatalf("turn 1 cold-create expected 1 sendRichMessage, got %d", len(sends))
 	}
 	turn1ReplyTo, _ := sends[0].Params["reply_to_message_id"].(int)
 	if turn1ReplyTo != 10 {
 		t.Fatalf("turn 1 reply_to_message_id = %v, want 10", sends[0].Params["reply_to_message_id"])
 	}
-	turn1Text, _ := sends[0].Params["text"].(string)
+	turn1Text := richMessageFirstBlockText(sends[0].Params["rich_message"])
 	if turn1Text != "💭 turn 1 thought" {
 		t.Fatalf("turn 1 text = %q, want %q", turn1Text, "💭 turn 1 thought")
 	}
@@ -697,15 +781,17 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 		t.Fatalf("turn 1 late OutToolEnd: %v", err)
 	}
 
-	// Expect: turn 1's late event went out as an editMessageText
-	// (it belongs to turn 1's DraftMessage), NOT a new sendMessage.
-	edits := callsByMethod(api.Calls, "editMessageText")
-	if len(edits) != 1 {
-		t.Fatalf("expected 1 editMessageText for turn 1 late event, got %d (sends=%d)", len(edits), len(callsByMethod(api.Calls, "sendMessage")))
-	}
-	// No new sendMessage — turn 1's entry was reused.
-	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {
-		t.Fatalf("turn 1 late event must NOT cold-create a new DraftMessage; sends=%d", len(sends))
+	// Per-turn isolation: the late event goes to turn 1's entry
+	// (ReplyTo=10 → key=userMsgID=10). It does NOT cold-create a new
+	// DraftMessage for turn 2. With batching it is also not flushed
+	// yet, so no editMessageText fires.
+	//
+	// Two sendRichMessage calls are expected by this point: (1)
+	// turn 1's DraftMessage cold-create and (2) turn 2's eager rich
+	// turn placeholder fired by ensurePlaceholder. The late event
+	// must NOT add a third.
+	if sends := callsByMethod(api.Calls, "sendRichMessage"); len(sends) != 2 {
+		t.Fatalf("turn 1 late event must NOT cold-create a new DraftMessage; sends=%d (want 2)", len(sends))
 	}
 
 	// Now turn 2's OutThinking arrives — it must cold-create a fresh
@@ -720,15 +806,15 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 	}); err != nil {
 		t.Fatalf("turn 2 think: %v", err)
 	}
-	sends2 := callsByMethod(api.Calls, "sendMessage")
+	sends2 := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends2) != 1 {
-		t.Fatalf("turn 2 cold-create expected 1 sendMessage, got %d", len(sends2))
+		t.Fatalf("turn 2 cold-create expected 1 sendRichMessage, got %d", len(sends2))
 	}
 	turn2ReplyTo, _ := sends2[0].Params["reply_to_message_id"].(int)
 	if turn2ReplyTo != 11 {
 		t.Fatalf("turn 2 reply_to_message_id = %v, want 11", sends2[0].Params["reply_to_message_id"])
 	}
-	turn2Text, _ := sends2[0].Params["text"].(string)
+	turn2Text := richMessageFirstBlockText(sends2[0].Params["rich_message"])
 	if turn2Text != "💭 turn 2 thought" {
 		t.Fatalf("turn 2 text = %q, want %q", turn2Text, "💭 turn 2 thought")
 	}
@@ -820,7 +906,7 @@ func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "first", messages.OutThinking); !handled {
 		t.Fatalf("first call should be handled (cold-create); got handled=false")
 	}
-	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {
+	if sends := callsByMethod(api.Calls, "sendRichMessage"); len(sends) != 1 {
 		t.Fatalf("expected 1 cold-create, got %d", len(sends))
 	}
 
@@ -854,8 +940,8 @@ func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "late event", messages.OutThinking); !handled {
 		t.Fatalf("late event must be handled (fresh cold-create); got handled=false")
 	}
-	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {
-		t.Fatalf("late event after endProcess must cold-create; got %d sendMessage", len(sends))
+	if sends := callsByMethod(api.Calls, "sendRichMessage"); len(sends) != 1 {
+		t.Fatalf("late event after endProcess must cold-create; got %d sendRichMessage", len(sends))
 	}
 	if edits := callsByMethod(api.Calls, "editMessageText"); len(edits) != 0 {
 		t.Fatalf("late event after endProcess must NOT editMessageText (entry was dropped); got %d edits", len(edits))

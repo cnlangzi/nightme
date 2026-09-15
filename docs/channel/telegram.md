@@ -1808,27 +1808,33 @@ DM 下 `sendMessageDraft` 失败时,事件**不**回退到 `appendSegmentForKind
 
 Telegram `sendMessageDraft` 是 DM-only API(spec:"target private chat",basic group 直接 `Bad Request`),非私聊场景(`ChatKind == "group"`,涵盖基础群 + forum supergroup)必须用另一条路模拟 messageDraft 的"live streaming surface"角色。本节定义 simulated DraftMessage:bot 自己发一条 rich message,然后用 `editMessageText(rich_message=…)` PATCH in place,turn end 时 `deleteMessage` 清理,跟 sendMessageDraft 的 auto-disappear 行为对位。
 
+**统一 flush 模型**(no cold-create fast path):
+
+所有 OutThinking / OutToolStart / OutToolEnd 走**同一套**触发逻辑 —— batched in memory,flush 触发才上 Telegram API。第一个 flush 触发的是 `sendRichMessage`(cold-create),后续 flush 触发 `editMessageText`,**两条路径共用同一个 `flushLocked` 函数**;`entry.messageID==0` 时调 sendRichMessage,否则 editMessageText。没有"第一条 event 立即发"的 fast path —— 第一条 event 跟第 10 条一样要等 batch trigger。
+
 **核心对位**(跟 §11.12.11.1 DM draft 也跟 §20.6.3 rich turn 对齐):
 
 | 维度 | DM sendMessageDraft | group simulated DraftMessage(rich 版) |
 |---|---|---|
 | 存储 | server-managed draft(无真实 message_id) | bot 拥有的真实 rich message(in-memory `entry.messageID`,不持久化) |
-| 创建 | 首次 `sendMessageDraft` 隐式分配 `draft_id` | 首次 `sendRichMessage(rich_message={"blocks":[…]})` 返回 message_id |
-| 更新 | 反复 `sendMessageDraft(同 draft_id)` | `editMessageText(message_id=…, rich_message={"blocks":[…]})` |
-| 触发 | 每个事件立即(动画) | **批量化窗口**:10 events 或 10s,先到先发(避免 1/s per-chat 限流) |
+| 创建 | 首次 `sendMessageDraft` 隐式分配 `draft_id` | 第一次 flush 触发 `sendRichMessage(rich_message={"blocks":[…]})` 返回 message_id |
+| 更新 | 反复 `sendMessageDraft(同 draft_id)` | 后续 flush 触发 `editMessageText(message_id=…, rich_message={"blocks":[…]})` |
+| 触发 | 每个事件立即(动画) | **批量化窗口**:10 events 或 10s,先到先发(避免 1/s per-chat 限流);**cold-create 也走 batch trigger**(第一条 event 也要等) |
 | Windowed flush | 不适用 | 每次成功 flush 后清空 entries 缓冲区(下一次 event 重新累积) |
 | Delete at turn end | server 在 OutResult 落地时自动消失 | bot `deleteMessage` + drop entry |
-| 锚点 | n/a(server 渲染) | `reply_to_message_id = userMessageID`(挂用户消息下) |
+| 锚点 | n/a(server 渲染) | `reply_to_message_id = userMessageID`(挂用户消息下,只在第一次 flush 携带) |
 | 线程隔离 | `message_thread_id`(DM 不用) | `message_thread_id = topicID`(forum topic 内 DraftMessage 留在 topic) |
-| 失败语义 | latch,后续 drop(no richMessage 回退) | **edit 失败**保留 buffer,下次续试(issue #391);**cold-create 失败**延迟重试 1 次(5s),再用尽则整个 turn fall through 到 richTurn |
+| 失败语义 | latch,后续 drop(no richMessage 回退) | **sendRichMessage / editMessageText 失败**统一保留 buffer,下次 trigger 续试(issue #391 contract);无 latch,无 cold-create retry timer |
 
-**批量化窗口**(`group_draft.go:27-33` 常量):
+**批量化窗口**(`group_draft.go:25-28` 常量):
 
 | 触发 | 阈值 |
 |---|---|
-| 满 10 logical events | 立即 flush |
-| 距上次 flush 超过 10s | timer 到期 flush |
-| refresh timer | 每条新 event 重置 10s timer |
+| 满 10 logical events | 立即 flush(reason="count") |
+| 距上次 flush 超过 10s | timer 到期 flush(reason="timer") |
+| turn 结束 (OutResult / OnPromptEnded) | 立即 flush(reason="endProcess"),然后 deleteMessage |
+
+第一次 flush(`sendRichMessage`)与后续 flush(`editMessageText`)走**同一** `flushLocked` 函数,只是根据 `entry.messageID == 0` 切换底层 API。10 events / 10s 触发规则对两者一致。
 
 Logical event 计数规则(`streamDraftEvent` 内 `pendingEventCount` 字段):
 
@@ -1854,29 +1860,48 @@ turn start
 turn N 期间,OutThinking / OutToolStart / OutToolEnd
   streamDraftEvent(..., kind messages.OutboundKind) → groupDraft.streamDraftEvent
     ├─ entry 不存在 → 分配
-    ├─ hasGivenUpColdCreate → return (false, nil)(放弃 fall through)
-    ├─ coldCreateRetryTimer 仍在 → return (false, nil)(等 retry timer)
+    ├─ userMsgID <= 0 → return (false, nil) (INFO log: fallthrough userMsgID<=0)
     ├─ compose entry(kind → REPLACE/ACCUMULATE);logical event 计数
-    ├─ entry.messageID == 0:
-    │    ├─ sendRichMessage(rich_message={"blocks":[…]})
-    │    ├─ 成功 → entry.messageID 写入,清 entries(window 0 flushed)
-    │    └─ 失败 → coldCreateRetries++;若 < max(2) schedule retry timer 5s;
-    │              若 >= max 设 hasGivenUpColdCreate,本 turn 余下事件 fall through
-    └─ entry.messageID > 0:
-         ├─ 启动 10s flush timer(若 idle)
-         └─ pendingEventCount >= 10 → flushLocked
-              ├─ editMessageText(rich_message={"blocks":[…]})
+    ├─ startFlushTimerIfIdleLocked() — 启动 10s timer(若 idle)
+    └─ pendingEventCount >= 10 → flushLocked(reason="count")
+         ├─ entry.messageID == 0:
+         │    ├─ sendRichMessage(rich_message={"blocks":[…]})
+         │    ├─ 成功 → 写入 entry.messageID,清 entries
+         │    └─ 失败 → log WARN;buffer 保留;return (true, nil)
+         └─ entry.messageID > 0:
+              ├─ editMessageText(message_id=…, rich_message={"blocks":[…]})
               ├─ 成功 → 清 entries,重置 pendingEventCount + timer
-              └─ 失败 → return (true, nil)(#391 修复:buffer 保留,下次续试)
+              └─ 失败 → log WARN;buffer 保留;return (true, nil)
 
 turn N ends
   OutResult 发送时 / OnPromptEnded handler 末尾
     → groupDraft.endProcess(ctx, chatID, topicID, userMsgID)
-       ├─ Stop flush timer + coldCreateRetry timer(防 stale 触发)
-       ├─ 若 entry.messageID > 0 && pendingEventCount > 0:flushLocked 最后一次
-       ├─ deleteMessage(entry.messageID)
+       ├─ Stop flush timer(防 stale 触发)
+       ├─ 若 entries 非空:flushLocked(reason="endProcess")(最后一次 flush)
+       ├─ deleteMessage(entry.messageID)(若 messageID > 0)
        └─ drop entry
 ```
+
+**失败语义**(统一,无 retry / latch):
+
+- **sendRichMessage 失败**(cold-create):`entry.messageID` 保持 0,buffer 保留,下次 streamDraftEvent 触发 flush 时再试。**不**会立刻切到 richTurn。
+- **editMessageText 失败**(后续 flush):`entry.messageID` 保留,buffer 保留,下次 flush 再试。
+- **deleteMessage 失败**(endProcess):orphan 留在 chat;下次 turn 的 cold-create 创建新 message 而不是 reuse orphan id(可接受 UX nit)。
+- **冷启动 / `replyAnchor=0` / ChatKind 不匹配**:静默 fall through 到 richTurn(INFO log;见 §11.12.11.4 诊断日志)。
+
+这条契约跟 issue #391 一致 —— **任何 flush 失败都不允许 fall through**(fall through 会让 `⎿ 🔧 tool → N bytes` 漏到 rich turn body,污染 final answer message)。
+
+**诊断日志**:
+
+`groupDraft` 在每个关键点都打 INFO 日志(用户诊断路径):
+
+- `telegram: streamDraftEvent entered` — adapter 入口,打印 chatID/topicID/userMsgID/kind/ChatKind
+- `telegram: streamDraftEvent fallthrough (no topic state)` — `state.topic()` 缺失时的静默 fall through
+- `telegram: streamDraftEvent fallthrough (userMsgID<=0)` — replyAnchor=0 的静默 fall through
+- `telegram: streamDraftEvent buffered` — 每条 event 入 buffer,打印 pendingEventCount/buffered_entries/messageID
+- `telegram: group DraftMessage flushed` — 每次成功 flush(包含 reason="count"/"timer"/"endProcess")
+- `telegram: group DraftMessage flush failed` — 每次 flush 失败,buffer 保留
+- `telegram: group DraftMessage delete failed` — endProcess 的 deleteMessage 失败
 
 **为什么改用 rich_message 而不是 plain text**:
 
@@ -1895,10 +1920,10 @@ turn N ends
 **DraftMessage 在 chat 中的视觉位置**:
 
 ```text
-forum topic (user 视角,window 0 — cold-create 立即可见)
+forum topic (user 视角)
 ├─ User message: "帮我看看 foo.go"
 ├─ DraftMessage (rich): "💭 considering whether to invoke Read"   ← reply_to 挂 user message
-│       (window 1 — 10s 后或第 11 个 event 后整段 PATCH)
+│       (10s 后或第 11 个 event 触发整段 PATCH)
 │       "💭 now thinking about Edit\n\n🔧 ● Edit(…)\n\n⎿  ✓ applied"
 ├─ richTurn (OutHeartbeat PATCH): "🤖 Working... 💭 3 · 🔧 5"
 ├─ OutReply: "answer text..."(独立 sendMessage)
@@ -1907,7 +1932,7 @@ forum topic (user 视角,window 0 — cold-create 立即可见)
 turn end: DraftMessage 被 deleteMessage 移除,richTurn / Reply / Result 留作历史
 ```
 
-**`ChatType → ChatKind` 重命名**:Telegram 字面 chat.type(`"private"`/`"group"`/`"supergroup"`/`"channel"`)在 `ensurePlaceholder` 时经 `ClassifyChat` 收敛到 nightme 的 3 类(`"private"`/`"group"`/`"channel"`)。`state.ChatKind`(新字段,`json:"chat_kind,omitempty"`)取代旧 `state.ChatType`(`json:"chat_type,omitempty"`);老 state 文件在 `newStateStore` 时通过 `migrateChatKind` 把 `chat_type` 收敛到 `chat_kind` 并立即 save 持久化(`LegacyChatType` 字段保留读路径,新写不再带)。迁移同时 stamp `UpdatedAt` 避免 TTL prune 把零时间戳的老条目当成"ancient"误删。
+**`ChatType → ChatKind` 重命名**:Telegram 字面 chat.type(`"private"`/`"group"`/`"supergroup"`/`"channel"`)在 `ensurePlaceholder` 时经 `ClassifyChat` 收敛到 nightme 的 3 类(`"private"`/`"group"`/`"channel"`)。`state.ChatKind`(新字段,`json:"chat_kind,omitempty"`)取代旧 `state.ChatType`(旧字段 `json:"chat_type,omitempty"`,迁移后不再写入新文件,`LegacyChatType` 字段保留读路径)。老 state 文件在 `newStateStore` 时通过 `migrateChatKind` 把 `chat_type` 收敛到 `chat_kind` 并立即 save 持久化。迁移同时 stamp `UpdatedAt` 避免 TTL prune 把零时间戳的老条目当成"ancient"误删。
 
 **为什么不持久化 DraftMessageID**:`groupDraft` 完全 in-memory,daemon 重启会丢失当前 turn 的 in-flight DraftMessage。trade-off:
 
@@ -1920,9 +1945,9 @@ turn end: DraftMessage 被 deleteMessage 移除,richTurn / Reply / Result 留作
 
 **为什么不 mock 一份 fake draft API**:Telegram 没给非私聊的 draft API;`sendMessageDraft` 的 spec 明确只接受 private chat。createForumTopic 路由到独立 topic 是另一条思路(每群一个 NightMe topic),但当前 scope(只分 private / group)未做,在 `ChatKind == "group"` 下用 bot-owned rich message 模拟最简。
 
-**Bot API 兼容性**:纯 `sendRichMessage` / `editMessageText(rich_message=…)` / `deleteMessage`,需要 Bot API 10.1+(2025-06 引入的 `rich_message` 参数;`sendRichMessage` 同版本引入)。edit 失败保留 buffer 不退到 richTurn(issue #391),下一个 event 续试;cold-create 失败 schedule retry timer 5s(2 次重试窗口);耗尽则本 turn 余下事件 fall through 到 richTurn。
+**Bot API 兼容性**:纯 `sendRichMessage` / `editMessageText(rich_message=…)` / `deleteMessage`,需要 Bot API 10.1+(2025-06 引入的 `rich_message` 参数;`sendRichMessage` 同版本引入)。两类 flush 共用同一 `flushLocked` 函数;sendRichMessage / editMessageText 失败统一保留 buffer 不退到 richTurn(issue #391 contract)。
 
-**Rate-limit 友好度**(与 §11.12.11.1 / 20.6.3 整体设计一致):每 turn 最多 `ceil(N/10)` 次 `editMessageText`(N = 该 turn 的 logical event 数),`sendRichMessage` 仅 1 次。1 turn / 10s 窗口内最多 1 次 PATCH,远低于 Telegram per-chat 1/s 和 per-group 20/min 硬限。
+**Rate-limit 友好度**(与 §11.12.11.1 / 20.6.3 整体设计一致):每 turn 最多 `ceil(N/10)` 次 flush(N = 该 turn 的 logical event 数),首次 flush 1 次 `sendRichMessage` + 后续 `editMessageText`。1 turn / 10s 窗口内最多 1 次 PATCH,远低于 Telegram per-chat 1/s 和 per-group 20/min 硬限。
 
 **未触动**:DM sendMessageDraft 路径(§11.12.11.1)、richTurn(§20.6.3)、chain / StatusBar footer / callback / reactions / `allowed_updates` / channel 处理全部不变;本节只描述 group 下 think/tool 的 DraftMessage surface 的 rich 版。
 

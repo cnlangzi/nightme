@@ -83,6 +83,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	client  *RPCClient
+	handle  Handle
 	running bool
 	lastErr string
 }
@@ -129,6 +130,14 @@ func (m *Manager) EnsureReady(ctx context.Context) (Transcriber, error) {
 		}
 		_ = m.client.Close()
 		m.client = nil
+		// Kill the stale worker too — Health failure
+		// usually means the worker died; if it didn't,
+		// the next slow path's spawn would race on the
+		// socket. Best-effort, sync.Once-safe.
+		if m.handle != nil {
+			_ = m.handle.Stop(context.Background())
+			m.handle = nil
+		}
 		m.running = false
 	}
 
@@ -155,6 +164,7 @@ func (m *Manager) EnsureReady(ctx context.Context) (Transcriber, error) {
 		return nil, fmt.Errorf("stt: worker not ready: %w", err)
 	}
 	m.client = client
+	m.handle = proc
 	m.running = true
 	m.lastErr = ""
 	return client, nil
@@ -171,6 +181,16 @@ func (m *Manager) Stop(ctx context.Context) error {
 		_ = m.callShutdown(ctx)
 		_ = m.client.Close()
 		m.client = nil
+	}
+	// Kill the spawned process. The shutdown call above
+	// closes the IPC connection but the worker keeps
+	// running until its process exits; without this, every
+	// Stop() leaves a zombie nightme-stt. The Handle is
+	// idempotent (sync.Once inside execHandle.Stop) so a
+	// double-Stop is safe.
+	if m.handle != nil {
+		_ = m.handle.Stop(ctx)
+		m.handle = nil
 	}
 	m.running = false
 	return nil

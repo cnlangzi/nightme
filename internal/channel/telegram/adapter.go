@@ -475,7 +475,7 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	// is stripped from the inbound.Attachments slice so the
 	// agent never sees raw opus bytes it couldn't consume.
 	if message.Voice != nil {
-		voiceFile, voiceIdx := findVoiceAttachment(downloadRes.Atts)
+		voiceFile := findVoiceAttachment(downloadRes.Atts)
 		if voiceFile == "" {
 			// Download failed or no matching att — the
 			// failure path above already notified the
@@ -515,7 +515,6 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 					)
 				}
 			}
-			_ = voiceIdx
 		}
 	}
 	// (UserMessageID is already updated by ensurePlaceholder above;

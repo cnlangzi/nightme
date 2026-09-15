@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
@@ -79,7 +78,6 @@ func (unixTransport) Listen(ctx context.Context, endpoint Endpoint) (Listener, e
 
 type unixConn struct {
 	net.Conn
-	mu sync.Mutex
 }
 
 func (c *unixConn) ReadFrame(ctx context.Context, out any) error {

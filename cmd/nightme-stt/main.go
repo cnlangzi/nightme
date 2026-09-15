@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/cnlangzi/nightme/cmd/nightme-stt/internal/ffmpeg"
 	"github.com/cnlangzi/nightme/cmd/nightme-stt/internal/sherpa"
@@ -90,12 +89,6 @@ func run() error {
 	select {
 	case <-ctx.Done():
 		logger.Info("nightme-stt: signal received, shutting down")
-		// Give Serve a moment to drain. The signal-driven ctx
-		// will have already caused Accept to return; this
-		// timeout is just insurance against a hang.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = shutdownCtx
 		return nil
 	case err := <-done:
 		if err != nil && !errors.Is(err, context.Canceled) {

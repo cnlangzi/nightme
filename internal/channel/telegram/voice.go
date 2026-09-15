@@ -221,22 +221,16 @@ func EnsureOutcomeMessageKind(kind messages.OutboundKind, err error) messages.Ou
 
 // findVoiceAttachment returns the LocalPath of the first
 // attachment in atts whose name matches the voice file
-// collector's convention ("voice.ogg"), plus its index. The
-// collector names Voice attachments "voice.ogg" — see
-// collectAttachmentSources. If no match is found, returns ""
-// and -1.
-//
-// The index is returned for symmetry with other collector
-// helpers; handleMessage currently drops by name match rather
-// than by index because the voice attachment may not be the
-// only attachment on the message.
-func findVoiceAttachment(atts []messages.Attachment) (string, int) {
-	for i, att := range atts {
+// collector's convention ("voice.ogg"). The collector names
+// Voice attachments "voice.ogg" — see collectAttachmentSources.
+// Returns "" when no match is found.
+func findVoiceAttachment(atts []messages.Attachment) string {
+	for _, att := range atts {
 		if att.Name == "voice.ogg" || strings.HasSuffix(att.LocalPath, "voice.ogg") {
-			return att.LocalPath, i
+			return att.LocalPath
 		}
 	}
-	return "", -1
+	return ""
 }
 
 // dropVoiceAttachment returns atts minus any entry that

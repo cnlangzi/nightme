@@ -199,11 +199,14 @@ func DecodeResponse(data []byte) (*Response, error) {
 
 // ctxDeadline is a small helper used by both the client (to set the
 // per-call deadline on the worker) and the worker side (to honor
-// it during decode). Returns the absolute deadline, falling
-// back to a default if ctx has none.
+// it during decode). Returns the absolute deadline — the ctx's
+// own deadline if set, otherwise fallback seconds from now. The
+// bool is true iff a deadline is being applied (the callers gate
+// on it so a context with no deadline does NOT silently mean
+// "wait forever" — see unixConn.ReadFrame/WriteFrame).
 func ctxDeadline(ctx context.Context, fallback time.Duration) (time.Time, bool) {
 	if d, ok := ctx.Deadline(); ok {
 		return d, true
 	}
-	return time.Now().Add(fallback), false
+	return time.Now().Add(fallback), true
 }

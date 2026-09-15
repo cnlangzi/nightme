@@ -150,12 +150,9 @@ func TestFindVoiceAttachment(t *testing.T) {
 		{Name: "voice.ogg", LocalPath: "/tmp/voice.ogg"},
 		{Name: "doc.pdf", LocalPath: "/tmp/doc.pdf"},
 	}
-	path, idx := findVoiceAttachment(atts)
+	path := findVoiceAttachment(atts)
 	if path != "/tmp/voice.ogg" {
 		t.Fatalf("findVoiceAttachment path=%q, want /tmp/voice.ogg", path)
-	}
-	if idx != 1 {
-		t.Fatalf("findVoiceAttachment idx=%d, want 1", idx)
 	}
 }
 

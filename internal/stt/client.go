@@ -2,7 +2,6 @@ package stt
 
 import (
 	"context"
-	"errors"
 	"fmt"
 )
 
@@ -160,12 +159,3 @@ func (c *RPCClient) call(ctx context.Context, req *Request) (*Response, error) {
 	}
 	return &resp, nil
 }
-
-// writeFrame is a thin wrapper around c.conn.WriteFrame that
-// tags the error so callers can tell transport failures apart
-// from worker-reported errors.
-//
-// (Replaced by direct conn.WriteFrame usage in call(); kept
-// here as documentation of the transport-failure vs worker-
-// error distinction.)
-var _ = errors.New // keep the errors import in use

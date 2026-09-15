@@ -18,21 +18,20 @@ setlocal EnableExtensions EnableDelayedExpansion
 REM ---- version metadata ----
 set "TMPOUT=%TEMP%\nightme-build-%RANDOM%.tmp"
 
-git describe --tags --always --dirty > "%TMPOUT%" 2>nul
-if errorlevel 1 goto no_describe
-set /p VERSION=<"%TMPOUT%"
-goto got_describe
-:no_describe
+REM Version: use env var if set, else default to 0.1.0
+if defined VERSION goto got_version
 set "VERSION=0.1.0"
-:got_describe
+:got_version
 
+REM Git commit: use env var if set, else from git
+if defined GIT_COMMIT goto got_commit
 git rev-parse --short HEAD > "%TMPOUT%" 2>nul
 if errorlevel 1 goto no_revparse
 set /p GIT_COMMIT=<"%TMPOUT%"
-goto got_revparse
+goto got_commit
 :no_revparse
-set "GIT_COMMIT=unknown"
-:got_revparse
+set "GIT_COMMIT=local"
+:got_commit
 
 del "%TMPOUT%" 2>nul
 

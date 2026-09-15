@@ -210,7 +210,10 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GO_TAGS: ${{ matrix.go_tags }}
           CGO_ENABLED: ${{ matrix.cgo_enabled }}
+          RAW_VERSION: ${{ github.ref_name }}
         run: |
+          export VERSION="${RAW_VERSION#v}"
+          export GIT_COMMIT="${GITHUB_SHA:0:7}"
           set -euo pipefail
           if [ "${{ matrix.goos }}" = "windows" ]; then
             ./build.bat

@@ -31,9 +31,9 @@ import (
 // buffered events on a count threshold would defeat the purpose
 // of keeping recent context.
 const (
-	thinkingStackCap   = 50
-	toolsStackCap      = 50
-	groupDraftSendMax   = 5 // per-stack, per flush
+	thinkingStackCap  = 50
+	toolsStackCap     = 50
+	groupDraftSendMax = 5 // per-stack, per flush
 
 	groupDraftBatchInterval = 10 * time.Second
 )
@@ -211,10 +211,10 @@ func (m *groupDraftManager) streamDraftEvent(_ context.Context, rawChatID string
 // stacks; on API failure they are restored (issue #391 contract).
 //
 // Lock discipline:
-//   1. mu — peek + pop the to-send slice from each stack, release.
-//   2. flushMu — serialize the API call.
-//   3. On failure, mu — restore the popped slices.
-//   4. flushMu release.
+//  1. mu — peek + pop the to-send slice from each stack, release.
+//  2. flushMu — serialize the API call.
+//  3. On failure, mu — restore the popped slices.
+//  4. flushMu release.
 //
 // Step 1+2 ensures the buffer mutation happens under mu, the API
 // call happens under flushMu (without mu), so a slow API call

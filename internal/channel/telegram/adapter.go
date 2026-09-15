@@ -352,9 +352,38 @@ func (a *Adapter) handleMessage(ctx context.Context, message *Message) {
 	// Adapt the rest of the function to thread_id / state-key
 	// variables rather than the legacy topicID name.
 	topicID := threadID
-	attachments, err := a.attachments(ctx, message, chatID)
-	if err != nil && a.logger != nil {
-		a.logger.Warn("telegram: download attachments failed", "chat_id", chatID, "message_id", message.MessageID, "err", err)
+	downloadRes := a.downloadAttachments(ctx, message, chatID)
+	attachments := downloadRes.Atts
+	// F-61 parity with feishu: when all downloads fail, surface a
+	// user-visible note so the user knows their image was lost
+	// (rather than watching the bot silently produce a text-only
+	// reply). Pure-image messages (text == "") are dropped —
+	// feishu does the same — because there's nothing left to send.
+	if downloadRes.AllFailed {
+		if a.logger != nil {
+			a.logger.Warn("telegram: all attachment retries exhausted",
+				"chat_id", chatID,
+				"message_id", message.MessageID,
+				"failed_count", downloadRes.FailureCount,
+				"attempts", downloadRetryConfig.MaxAttempts,
+			)
+		}
+		a.notifyDownloadFailure(chatID, topicID, downloadRes, text == "")
+		if text == "" {
+			return
+		}
+		attachments = nil
+	} else if downloadRes.FailureCount > 0 {
+		if a.logger != nil {
+			a.logger.Info("telegram: partial attachment download failure; sending the rest",
+				"chat_id", chatID,
+				"message_id", message.MessageID,
+				"failed_count", downloadRes.FailureCount,
+				"succeeded_count", len(downloadRes.Atts)-downloadRes.FailureCount,
+				"attempts", downloadRetryConfig.MaxAttempts,
+			)
+		}
+		a.notifyDownloadFailure(chatID, topicID, downloadRes, false)
 	}
 	// (UserMessageID is already updated by ensurePlaceholder above;
 	// this redundant block was removed in the 2026-08-22 plan-C
@@ -583,39 +612,231 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 // shipped yet) was racy by design and got superseded by
 // simply not being needed.
 
-func (a *Adapter) attachments(ctx context.Context, message *Message, chatID string) ([]messages.Attachment, error) {
-	values := make([]attachmentSource, 0, 2)
+// downloadAttachments collects the inbound message's media sources
+// and downloads them with an outer retry ladder. Returns a
+// downloadResult so the caller can distinguish "nothing to download"
+// from "all attempts failed" and surface the right user-facing
+// notification.
+//
+// F-61 parity with feishu: outer ladder is 3 attempts with
+// 0s / 5s / 15s backoff between them. The inner per-attachment
+// retry in downloadAttachment (maxDownloadAttempts) catches
+// transient transport blips; this outer ladder catches ctx
+// cancellations and infra failures that span the whole message.
+func (a *Adapter) downloadAttachments(ctx context.Context, message *Message, chatID string) downloadResult {
+	sources := a.collectAttachmentSources(message)
+	if len(sources) == 0 {
+		return downloadResult{}
+	}
+	var last downloadResult
+	for attempt := 1; attempt <= downloadRetryConfig.MaxAttempts; attempt++ {
+		if attempt > 1 {
+			wait := downloadRetryConfig.Backoffs[attempt-1]
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return last
+				}
+			}
+		}
+		last = a.downloadSourcesOnce(ctx, sources, chatID, message.MessageID)
+		if !last.AllFailed {
+			return last
+		}
+	}
+	return last
+}
+
+// collectAttachmentSources walks the inbound Telegram message and
+// builds one attachmentSource per downloadable resource. Photos /
+// Voice / Audio / Video are categorised by their envelope field;
+// Document is classified by MIME via telegramAttachmentType since
+// Telegram's document envelope doesn't carry msg_type metadata.
+func (a *Adapter) collectAttachmentSources(message *Message) []attachmentSource {
+	var sources []attachmentSource
 	if len(message.Photo) > 0 {
-		values = append(values, attachmentSource{FileID: message.Photo[len(message.Photo)-1].FileID, Name: "image.jpg", MimeType: "image/jpeg"})
+		sources = append(sources, attachmentSource{
+			FileID:   message.Photo[len(message.Photo)-1].FileID,
+			Name:     "image.jpg",
+			MimeType: "image/jpeg",
+			Type:     "image",
+		})
 	}
 	if message.Document != nil {
-		values = append(values, attachmentSource{FileID: message.Document.FileID, Name: message.Document.FileName, MimeType: message.Document.MimeType})
+		sources = append(sources, attachmentSource{
+			FileID:   message.Document.FileID,
+			Name:     message.Document.FileName,
+			MimeType: message.Document.MimeType,
+			Type:     telegramAttachmentType(message.Document.MimeType),
+		})
 	}
 	if message.Audio != nil {
-		values = append(values, attachmentSource{FileID: message.Audio.FileID, Name: message.Audio.FileName, MimeType: message.Audio.MimeType})
+		sources = append(sources, attachmentSource{
+			FileID:   message.Audio.FileID,
+			Name:     message.Audio.FileName,
+			MimeType: message.Audio.MimeType,
+			Type:     "audio",
+		})
 	}
 	if message.Voice != nil {
-		values = append(values, attachmentSource{FileID: message.Voice.FileID, Name: "voice.ogg", MimeType: message.Voice.MimeType})
+		sources = append(sources, attachmentSource{
+			FileID:   message.Voice.FileID,
+			Name:     "voice.ogg",
+			MimeType: message.Voice.MimeType,
+			Type:     "audio",
+		})
 	}
 	if message.Video != nil {
-		values = append(values, attachmentSource{FileID: message.Video.FileID, Name: message.Video.FileName, MimeType: message.Video.MimeType})
+		sources = append(sources, attachmentSource{
+			FileID:   message.Video.FileID,
+			Name:     message.Video.FileName,
+			MimeType: message.Video.MimeType,
+			Type:     "media",
+		})
 	}
-	attachments := make([]messages.Attachment, 0, len(values))
-	for _, source := range values {
-		attachment, err := a.downloadAttachment(ctx, source, chatID, message.MessageID)
+	return sources
+}
+
+// downloadSourcesOnce performs one outer attempt: every source
+// gets a single download, failures are recorded with the original
+// source metadata so the downstream can retry-merge without
+// losing Type / Name / MimeType hints.
+func (a *Adapter) downloadSourcesOnce(ctx context.Context, sources []attachmentSource, chatID string, messageID int) downloadResult {
+	atts := make([]messages.Attachment, 0, len(sources))
+	failedCount := 0
+	for _, source := range sources {
+		att, err := a.downloadAttachment(ctx, source, chatID, messageID)
 		if err != nil {
-			attachments = append(attachments, messages.Attachment{Name: source.Name, MimeType: source.MimeType, Error: err})
+			atts = append(atts, messages.Attachment{
+				Type:     source.Type,
+				Name:     source.Name,
+				MimeType: source.MimeType,
+				Error:    err,
+			})
+			failedCount++
 			continue
 		}
-		attachments = append(attachments, attachment)
+		atts = append(atts, att)
 	}
-	return attachments, nil
+	return downloadResult{
+		Atts:         atts,
+		AllFailed:    failedCount == len(sources) && len(sources) > 0,
+		FailureCount: failedCount,
+	}
+}
+
+// notifyDownloadFailure emits a user-visible note about an
+// attachment download failure. Uses a fresh background ctx because
+// the inbound ctx may be cancelled by the time the retry ladder
+// runs out (matches feishu's F-61 fix #3 — reusing inbound ctx was
+// the 2026-08-12 silent-drop incident root cause).
+//
+// pureImage flips the wording: a text-bearing message degrades to
+// text-only ("⚠️ ... sending text only") while a pure-image message
+// is dropped entirely ("❌ ... please retry").
+func (a *Adapter) notifyDownloadFailure(rawChatID string, topicID int, res downloadResult, pureImage bool) {
+	// Send → appendRichTurn → flushRichTurn all run on their own
+	// background ctx; the inbound ctx is already past its use-by
+	// date by the time the retry ladder gives up. Pass
+	// context.Background() so the rich turn's debounce + cold-
+	// create don't see a half-cancelled ctx.
+	sessionChatID := a.sessionChatID(rawChatID, topicID)
+	var text string
+	if pureImage {
+		text = fmt.Sprintf("❌ %d attachment(s) failed to download after %d attempts. Message dropped — please retry.",
+			res.FailureCount, downloadRetryConfig.MaxAttempts)
+	} else {
+		text = fmt.Sprintf("⚠️ %d attachment(s) failed to download after %d attempts; sending text only.",
+			res.FailureCount, downloadRetryConfig.MaxAttempts)
+	}
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: sessionChatID,
+		Kind:   messages.OutError,
+		Text:   text,
+	}); err != nil && a.logger != nil {
+		a.logger.Warn("telegram: notify download failure failed",
+			"chat_id", sessionChatID, "err", err)
+	}
+}
+
+// telegramAttachmentType maps a Telegram document MIME to the
+// channel-native Attachment.Type vocabulary that the chatsession
+// manager's unified fallback path branches on (see
+// internal/chatsession/manager.go — only "image" gets the special
+// ContentImage block; everything else is ContentFile).
+//
+// Photos / Voice / Audio / Video attach sites hard-code their own
+// Type because the Telegram message envelope already discriminates
+// them; this helper exists only for Document, which can carry any
+// MIME and therefore needs to be classified by content.
+//
+// MIME comparisons are case-insensitive — Telegram clients today
+// emit lower-case, but the RFC allows any case, and getting this
+// wrong means a document image ("Image/PNG") falls through to the
+// generic "file" branch and the bridge encodes it as a
+// non-multimodal ContentFile block. Anthropic API rejects that
+// payload for image/* MIME, surfacing as a confusing bridge error.
+func telegramAttachmentType(mimeType string) string {
+	lower := strings.ToLower(mimeType)
+	switch {
+	case strings.HasPrefix(lower, "image/"):
+		return "image"
+	case strings.HasPrefix(lower, "audio/"):
+		return "audio"
+	case strings.HasPrefix(lower, "video/"):
+		return "media"
+	default:
+		return "file"
+	}
+}
+
+// downloadResult aggregates the outcome of attempting to download
+// every attachment on an inbound message. Mirrors feishu's
+// attachment.DownloadResult so the caller's notification logic can
+// distinguish "no attachments" / "all-failed" / "partial-failure"
+// and surface the right user-facing message.
+type downloadResult struct {
+	// Atts has one entry per source. LocalPath is populated on
+	// success; Error is populated on failure. Both cannot be set.
+	Atts []messages.Attachment
+	// AllFailed is true iff every source failed. The caller should
+	// either drop a pure-image message or degrade a text-bearing
+	// one to text-only + warn the user.
+	AllFailed bool
+	// FailureCount is the number of sources that failed in this
+	// attempt. Used by the user-facing notification ("3 attachment(s)
+	// failed to download") — no need to carry raw FileIDs.
+	FailureCount int
+}
+
+// downloadRetryConfig controls the outer ladder wrapping
+// downloadAttachments. Matches feishu's downloadRetryConfig in
+// attachment.go:402 — 3 attempts, 0s / 5s / 15s backoff. The
+// inner per-attachment retry (downloadOneWithRetry in feishu,
+// downloadAttachment's single-shot here — kept simple for now)
+// catches transport blips; this outer ladder catches longer
+// failures that span the whole message.
+var downloadRetryConfig = struct {
+	MaxAttempts int
+	Backoffs    []time.Duration
+}{
+	MaxAttempts: 3,
+	Backoffs:    []time.Duration{0, 5 * time.Second, 15 * time.Second},
 }
 
 type attachmentSource struct {
 	FileID   string
 	Name     string
 	MimeType string
+	// Type is the channel-native category (mirrors Feishu's
+	// "image" / "file" / "audio" / "media" vocab so the unified
+	// fallback path in chatsession.Manager.HandleInbound can
+	// classify the block correctly even when the channel-side
+	// BuildBlocks is bypassed).
+	Type string
 }
 
 func (a *Adapter) downloadAttachment(ctx context.Context, source attachmentSource, chatID string, messageID int) (messages.Attachment, error) {
@@ -639,7 +860,7 @@ func (a *Adapter) downloadAttachment(ctx context.Context, source attachmentSourc
 	if err := os.WriteFile(localPath, data, 0o600); err != nil {
 		return messages.Attachment{}, err
 	}
-	return messages.Attachment{LocalPath: localPath, MimeType: source.MimeType, Name: name, FileKey: source.FileID, FileName: name, Type: "file"}, nil
+	return messages.Attachment{LocalPath: localPath, MimeType: source.MimeType, Name: name, FileKey: source.FileID, FileName: name, Type: source.Type}, nil
 }
 
 func (a *Adapter) hasMention(message *Message, text string) bool {
@@ -1328,7 +1549,7 @@ func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []
 			continue
 		}
 		blockType := agent.ContentFile
-		if strings.HasPrefix(attachment.MimeType, "image/") {
+		if strings.HasPrefix(strings.ToLower(attachment.MimeType), "image/") {
 			blockType = agent.ContentImage
 		}
 		blocks = append(blocks, agent.ContentBlock{Type: blockType, Path: attachment.LocalPath, MediaType: attachment.MimeType})

@@ -183,3 +183,114 @@ func waitQueueLen(t *testing.T, cs *ChatSession, want int, timeout time.Duration
 	t.Fatalf("queue.Len() = %d, want >= %d (within %s)",
 		cs.queue.Len(), want, timeout)
 }
+
+// TestManager_HandleInbound_TelegramPhotoFallback locks the
+// telegram-specific contract: when the Telegram adapter publishes
+// an InboundMessage with Blocks pre-populated (the normal path),
+// the manager's fallback path is bypassed entirely. When Blocks
+// is empty AND the attachment carries Type:"image" (matching the
+// telegram AttachmentType vocabulary set in
+// internal/channel/telegram/adapter.go), the fallback path must
+// produce a ContentImage block, not ContentFile.
+//
+// Regression guard for the bug where the telegram adapter hard-
+// coded Type:"file" on every attachment — photos would have been
+// mis-classified as ContentFile if the manager fallback ever ran
+// (e.g. all downloads failed and BuildBlocks returned []).
+func TestManager_HandleInbound_TelegramPhotoFallback(t *testing.T) {
+	mgr := NewManager()
+	cs, _ := mgr.GetOrCreate("tg_telegram", "claude")
+	cs.SetSelectedCwd("/tmp")
+	cs.SetWatchMode(WatchModeAll)
+
+	mgr.HandleInbound(context.Background(), &messages.InboundMessage{
+		ChatID:    "tg_telegram",
+		MessageID: "om_tg_1",
+		UserID:    "u_tg",
+		// No caption + no pre-populated Blocks — exercises the
+		// fallback path with a telegram-style attachment.
+		Attachments: []messages.Attachment{
+			{Type: "image", LocalPath: "/tmp/photo.jpg", MimeType: "image/jpeg"},
+		},
+	})
+
+	waitQueueLen(t, cs, 1, 2*time.Second)
+	blocks := cs.queue.Peek()[0].Blocks
+	if len(blocks) != 1 {
+		t.Fatalf("block count = %d, want 1 (image from telegram photo)", len(blocks))
+	}
+	if blocks[0].Type != agent.ContentImage {
+		t.Errorf("block type = %s, want image (telegram photo must map to ContentImage, not ContentFile)",
+			blocks[0].Type)
+	}
+	if blocks[0].Path != "/tmp/photo.jpg" {
+		t.Errorf("block path = %s, want /tmp/photo.jpg", blocks[0].Path)
+	}
+}
+
+// TestManager_HandleInbound_TelegramDocument_PDFFallback covers the
+// non-image branch: a Document with application/pdf should produce
+// a ContentFile block, not ContentImage, regardless of the helper
+// in telegramAttachmentType. Without this guard, a future change
+// that over-broadens the "image" detection (e.g. matching by
+// extension instead of MIME) would silently route PDFs to the
+// image path and the bridge would base64-encode them as
+// image/undefined — Anthropic API rejects that.
+func TestManager_HandleInbound_TelegramDocument_PDFFallback(t *testing.T) {
+	mgr := NewManager()
+	cs, _ := mgr.GetOrCreate("tg_pdf", "claude")
+	cs.SetSelectedCwd("/tmp")
+	cs.SetWatchMode(WatchModeAll)
+
+	mgr.HandleInbound(context.Background(), &messages.InboundMessage{
+		ChatID:    "tg_pdf",
+		MessageID: "om_pdf_1",
+		UserID:    "u_pdf",
+		Attachments: []messages.Attachment{
+			{Type: "file", LocalPath: "/tmp/report.pdf", MimeType: "application/pdf"},
+		},
+	})
+
+	waitQueueLen(t, cs, 1, 2*time.Second)
+	blocks := cs.queue.Peek()[0].Blocks
+	if len(blocks) != 1 {
+		t.Fatalf("block count = %d, want 1 (file from telegram pdf)", len(blocks))
+	}
+	if blocks[0].Type != agent.ContentFile {
+		t.Errorf("block type = %s, want file (telegram PDF must map to ContentFile)",
+			blocks[0].Type)
+	}
+}
+
+// TestManager_HandleInbound_TelegramCaseInsensitiveMIME pins the
+// F-14-vocab parity: a Document with MimeType "Image/PNG" (mixed
+// case — RFC-allowed but rarely seen) must still produce a
+// ContentImage block. Without case-insensitive matching in
+// telegramAttachmentType, a misclassified document would land on
+// the agent as ContentFile and Anthropic API would reject the
+// media_type mismatch downstream.
+func TestManager_HandleInbound_TelegramCaseInsensitiveMIME(t *testing.T) {
+	mgr := NewManager()
+	cs, _ := mgr.GetOrCreate("tg_case", "claude")
+	cs.SetSelectedCwd("/tmp")
+	cs.SetWatchMode(WatchModeAll)
+
+	mgr.HandleInbound(context.Background(), &messages.InboundMessage{
+		ChatID:    "tg_case",
+		MessageID: "om_case_1",
+		UserID:    "u_case",
+		Attachments: []messages.Attachment{
+			// Simulates telegramAttachmentType("Image/PNG") → "image".
+			{Type: "image", LocalPath: "/tmp/photo.png", MimeType: "Image/PNG"},
+		},
+	})
+
+	waitQueueLen(t, cs, 1, 2*time.Second)
+	blocks := cs.queue.Peek()[0].Blocks
+	if len(blocks) != 1 {
+		t.Fatalf("block count = %d, want 1", len(blocks))
+	}
+	if blocks[0].Type != agent.ContentImage {
+		t.Errorf("block type = %s, want image", blocks[0].Type)
+	}
+}

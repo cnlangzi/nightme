@@ -1868,6 +1868,32 @@ turn end: DraftMessage 被 deleteMessage 移除,richTurn / Reply / Result 留作
 
 **未触动**:richTurn / chain / StatusBar footer / callback / reactions / `allowed_updates` / channel 处理全部不变;本节只新增 group 下 think/tool 的 DraftMessage surface。
 
+#### 11.12.11.3 per-prompt DraftMessage isolation
+
+**规则（跟 Feishu `receiptFor` / `receiptsByUserMsgID` 对齐）**:
+
+每个 Out* event 的 turn anchor (`reply_to_message_id` + groupDraftKey 后缀 + richTurns key) **必须**取自 `msg.ReplyTo`,不取自 `state.UserMessageID`。`state.UserMessageID` 只在 `ensurePlaceholder` 创建占位那一刻读一次,后续 Send 路径再读它就违反 per-turn 隔离 —— back-to-back turn 时旧 turn 滞留的 Out* 会写到新 turn 的 DraftMessage / rich turn 上,产生"信息串位"。`patchChainHeader`(OutHeartbeat)走同样的解析。
+
+**实现**:
+
+- `adapter.Send()` 优先用 `msg.ReplyTo` 解析 `replyAnchor`;兜底 `state.UserMessageID`(仅兼容 shell / 框架 / 测试入口不 stamp `ReplyTo` 的场景,跟 Feishu orphan-fallback 行为对位)
+- `adapter.patchChainHeader`(OutHeartbeat)同样优先 `msg.ReplyTo`,兜底 state
+- per-turn 隔离靠 `groupDraftKey = chatID|topicID|userMsgID` 已经把 userMsgID 编进 key —— 同 key 必然同 turn,不需要额外的 binding guard
+- `OnPromptEnded` 末尾调 `groupDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)` 作为 safety net,覆盖无 OutResult 的 turn(error / abort / bridge crash);`parsedUserMsgID > 0` 才调,避免 startup / test orphan 路径打 warn
+
+**为什么不只用 `state.UserMessageID`**:`state.UserMessageID` 是 `ensurePlaceholder` 在 handleMessage 同步覆盖的"最近一个 user msg id"。当 turn N 还在飞行(Out* events 还在来),turn N+1 的 user message 进来时 `ensurePlaceholder` 会把它覆盖成 N+1 —— 此时 turn N 滞留的 event 走 Send 读 state 就会拿到 N+1,reply_to_message_id 锚到 N+1、groupDraftKey 用 N+1、rich turn 也写到 N+1 的 turn 上。runtime handler / sink / heartbeat_followup / message-state bus 已经在 stamp `msg.ReplyTo` 时就给了 per-event 正确的 userMsgID,Send 路径必须用这个。
+
+**跟 Feishu 对位**:
+
+| 维度 | Feishu receipt | Telegram v1.1 |
+|---|---|---|
+| turn anchor 源 | `msg.ReplyTo` 唯一来源 | `msg.ReplyTo` 优先 + state 兜底 |
+| 找不到 anchor | orphan path 走独立消息 | 兜底到 state.UserMessageID(同 Feishu orphan 行为) |
+| per-userMsgID 隔离 | `receiptsByUserMsgID` map | `groupDraftKey` map + `richTurns` map |
+| OnPromptEnded 清理 | `SetPromptState(terminal)` 走 receipt | `groupDraft.endProcess` safety net + rich turn 🎉 |
+| 跨 turn 串位防护 | receipt 严格 per-userMsgID | 优先 ReplyTo + `groupDraftKey` 含 userMsgID |
+| `endProcess` 清理 in-memory state | n/a | `delete(m.entries, key)` 必须完成,后续滞留 event 视作新 turn cold-create(review finding #1 锁定) |
+
 ### 11.12.12 跟飞书 receipt 语义对位（v9）
 
 | 维度 | Feishu receipt | Telegram v9 P1 | Telegram v9 P2 |

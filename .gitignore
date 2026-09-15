@@ -2,6 +2,7 @@
 /bin/
 /dist/
 /nightme
+/nightme-stt
 *.exe
 *.exe~
 *.dll

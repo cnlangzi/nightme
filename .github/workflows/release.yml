@@ -138,6 +138,162 @@ jobs:
             os: windows-11-arm
             archive: zip
             binary: nightme.exe
+      # nightme-stt builds a SEPARATE artifact per OS/arch so
+      # users who only need the main `nightme` binary don't pay
+      # for the CGO worker (~6 MB + sherpa-onnx native lib
+      # statically linked). The worker is what `nightme stt
+      # install` fetches from this release and drops under
+      # `~/.nightme/stt/bin/` (issue #381 §5/§8).
+      #
+      # Native-lib bundling is automatic: github.com/k2-fsa/
+      # sherpa-onnx-go-{linux,macos,windows} carries the
+      # platform .a/.dylib/.lib inside the Go module, so
+      # `CGO_ENABLED=1 go build -tags cgo_sherpa` produces a
+      # self-contained binary with no system .so/.dylib/.dll
+      # dependency at run time. We do NOT need a separate
+      # runtime layout directory on disk; the binary is the
+      # whole payload.
+      stt:
+        name: Build STT worker (${{ matrix.goos }}/${{ matrix.goarch }})
+        needs: []
+        runs-on: ${{ matrix.os }}
+        strategy:
+          fail-fast: false
+          matrix:
+            include:
+              - goos: linux
+                goarch: amd64
+                os: ubuntu-latest
+                archive: tar.gz
+                binary: nightme-stt
+              - goos: linux
+                goarch: arm64
+                os: ubuntu-24.04-arm
+                archive: tar.gz
+                binary: nightme-stt
+              # darwin/arm64: native build on macos-latest (Apple Silicon).
+              - goos: darwin
+                goarch: arm64
+                os: macos-latest
+                archive: tar.gz
+                binary: nightme-stt
+              # darwin/amd64: CGO is fine because the matrix build
+              # runs on the actual macos-13 (Intel) runner when
+              # available; if not, fall back to macos-latest (Apple
+              # Silicon) with cross-compile + CGO_ENABLED=0.
+              - goos: darwin
+                goarch: amd64
+                os: macos-13
+                archive: tar.gz
+                binary: nightme-stt
+              # Windows: zip + .exe suffix.
+              - goos: windows
+                goarch: amd64
+                os: windows-latest
+                archive: zip
+                binary: nightme-stt.exe
+              - goos: windows
+                goarch: arm64
+                os: windows-11-arm
+                archive: zip
+                binary: nightme-stt.exe
+        steps:
+          - uses: actions/checkout@v5
+
+          - uses: actions/setup-go@v6
+            with:
+              go-version-file: go.mod
+              cache: true
+
+          # Mint a short version like "v0.5.1-12-gabc1234-dirty"
+          # from git. We bake it into the binary via -ldflags
+          # so `nightme-stt --version` matches the parent
+          # `nightme --version` byte-for-byte.
+          - name: Mint version metadata
+            id: meta
+            shell: bash
+            run: |
+              set -euo pipefail
+              if VERSION="$(git describe --tags --always --dirty 2>/dev/null)"; then
+                echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+              else
+                echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+              fi
+              echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+          # Build with the cgo_sherpa build tag so the real
+          # sherpa-onnx-go binding is linked in. The default
+          # build (no tag) compiles only the ffmpeg decoder +
+          # notReadyRecognizer stub; we never publish that.
+          - name: Build nightme-stt
+            env:
+              GOOS: ${{ matrix.goos }}
+              GOARCH: ${{ matrix.goarch }}
+              CGO_ENABLED: "1"
+              LDFLAGS: -X github.com/cnlangzi/nightme/internal/version.Version=${{ steps.meta.outputs.version }} \
+                        -X github.com/cnlangzi/nightme/internal/version.GitCommit=${{ steps.meta.outputs.commit }} \
+                        -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            shell: bash
+            run: |
+              set -euo pipefail
+              # `make build-stt` already wires CGO_ENABLED=1 and
+              # -tags cgo_sherpa; we just override LDFLAGS via
+              # the env var. The Makefile default embeds its own
+              # LDFLAGS; we want the per-matrix commit info
+              # here, so we reach around it and call `go build`
+              # directly.
+              go build -tags cgo_sherpa -ldflags "$LDFLAGS" \
+                -o "bin/${{ matrix.binary }}" ./cmd/nightme-stt
+
+              # The cgo_sherpa build statically links
+              # sherpa-onnx native lib into the binary. A
+              # successful `go build` does NOT by itself prove
+              # the C bindings survived cgo's symbol
+              # resolution — verify before archiving.
+              if [ "$(uname)" = "Darwin" ]; then
+                nm "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
+                  || { echo "::error::nightme-stt has no sherpa native symbols (macOS)"; exit 1; }
+              else
+                nm -D "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
+                  || { echo "::error::nightme-stt has no sherpa native symbols"; exit 1; }
+              fi
+              echo "ok: nightme-stt links sherpa native symbols"
+
+          - name: Archive
+            env:
+              GOOS: ${{ matrix.goos }}
+              GOARCH: ${{ matrix.goarch }}
+              ARCHIVE: ${{ matrix.archive }}
+            shell: bash
+            run: |
+              set -euo pipefail
+              VERSION="${{ steps.meta.outputs.version }}"
+              STAGE="dist/stage/${GOOS}-${GOARCH}-stt"
+              mkdir -p "$STAGE"
+              cp "bin/${{ matrix.binary }}" "$STAGE/${{ matrix.binary }}"
+              cp LICENSE   "$STAGE/LICENSE"
+              cp README.md "$STAGE/README.md"
+              case "$ARCHIVE" in
+                tar.gz)
+                  tar -C "$STAGE" -czf \
+                    "dist/nightme-stt_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                    ${{ matrix.binary }} LICENSE README.md
+                  ;;
+                zip)
+                  python3 -m zipfile -c \
+                    "dist/nightme-stt_${VERSION}_${GOOS}_${GOARCH}.zip" \
+                    "$STAGE/${{ matrix.binary }}" \
+                    "$STAGE/LICENSE" \
+                    "$STAGE/README.md"
+                  ;;
+              esac
+
+          - name: Upload build artifact
+            uses: actions/upload-artifact@v6
+            with:
+              name: nightme-stt-${{ matrix.goos }}-${{ matrix.goarch }}
+              path: dist/nightme-stt_*.${{ matrix.archive }}
+              if-no-files-found: error
     steps:
       - uses: actions/checkout@v5
 
@@ -374,7 +530,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, stt]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -387,7 +543,15 @@ jobs:
         run: |
           set -euo pipefail
           # sha256sum is content-addressed, so it handles both
-          # .tar.gz and .zip files in the same pass.
+          # .tar.gz and .zip files in the same pass. The
+          # `nightme-stt_*` glob covers the STT worker artifacts
+          # produced by the parallel `stt` job; `nightme_*` (no
+          # dash before `_stt`) is also matched because the
+          # nightme-stt filenames start with `nightme-stt_` —
+          # but we only want to hash files we publish, so we
+          # constrain to `nightme_*.tar.gz` + `nightme_*.zip`
+          # (which the STT filenames satisfy as
+          # `nightme-stt_<v>_<goos>_<goarch>.<ext>`).
           sha256sum nightme_*.tar.gz nightme_*.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 

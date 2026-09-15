@@ -1689,13 +1689,39 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 
 Bot API 10.3 (2026-08-24) 起 `sendMessageDraft(chat_id, draft_id, text)` 在 `chat.type == "private"` 下可用：bot 反复调用同一 `draft_id` 时,客户端原地"动画过渡"draft 文本(不会替换为新消息),30 秒内未更新则自动消失。Bot 发任何 real message 到同一 chat 时,draft 也立刻消失(spec:"the draft will still disappear after a short time or if the bot sends a message")。
 
-nightme 把这条路径用在 DM 的三类流式事件上:
+nightme 把这条路径用在 DM 的三类流式事件上,**REPLACE / ACCUMULATE 按事件类型分**:
 
-- `OutThinking` → draft 显示"💭 ..."(纯文本,**REPLACE 语义**:每次新 thinking 替换前一次,只显示当前步骤)
-- `OutToolStart` → draft 显示"summarize_tool.go"产出的 `● Tool(args)` 行(替换 thinking)
-- `OutToolEnd` → draft 显示`⎿  📄 Tool → N lines` 行(替换上一个 tool 行)
+- `OutThinking` → **REPLACE** 语义:adapter 在 `msg.Text` 前加 "💭 " 前缀后,清空 textBuf 写入,draft body = `"💭 <text>"`。每次新 thinking 把 draft 完全替换(等价于 "每个事件做一次 reset")。
+- `OutToolStart` → **REPLACE** 语义:draft body = `"● Tool(args)"`(`summarize_tool.go` 产出)。新 tool start 替换前一个事件(thinking 或上一个 tool)。
+- `OutToolEnd` → **ACCUMULATE** 语义:append `"\n\n✅ Tool → N lines"` 到 draft body,**堆叠**在匹配 OutToolStart 的 call 行下方,形成完整一条 `🔧 call / ✅ result` 记录。
 
-**REPLACE-not-append** 是显式设计选择(用户 2026-09-15 反馈):客户端在同 draft_id 反复调用时本身会"动画过渡",所以 REPLACE 模式下用户看到的是 ChatGPT 风格"当前步骤实时更新"视觉,而不是历史堆叠。appendEvent 内部每次先 `textBuf.Reset()` 再 `WriteString(text)`,确保发出去的 `text` 字段只有最新内容。
+**为什么分两种语义**(用户 2026-09-15 反馈最终版):
+- REPLACE 让 draft 在每个事件时重置(draft 的本质就是 "每次只显示一个事件"),所以**全局唯一一个 draft 即可**,不需要 per-turn reset
+- ACCUMULATE 让单个 tool call 的 "call / result" 一对在同一 draft 里形成完整记录(用户能看到完整的 tool 调用周期),但**只在匹配 toolstart 之后立即**,下一个 toolstart 会 REPLACE 掉整个 draft
+
+具体行为:
+
+```text
+OutThinking    →  draft = "💭 considering whether to invoke Read"        (REPLACE)
+OutToolStart   →  draft = "🔧 ● Read(/tmp/foo.go)"                     (REPLACE)
+OutToolEnd     →  draft = "🔧 ● Read(/tmp/foo.go)\n\n✅ Read → 47 lines"   (ACCUMULATE → 完整记录)
+OutThinking    →  draft = "💭 considering whether to invoke Bash"        (REPLACE → tool 记录消失)
+OutToolStart   →  draft = "🔧 ● Bash(go build)"                         (REPLACE)
+OutToolEnd     →  draft = "🔧 ● Bash(go build)\n\n✅ Bash done"           (ACCUMULATE → 完整记录)
+OutResult       →  draft 自动消失(spec 明确),real message 永久保留
+```
+
+**全局唯一一个 draft 的可行性**:每个事件 REPLACE 等价于 "每个事件做一次 reset",draft_id 是全局的(一次分配,跨 turn 复用),turn N 的 real message 把 draft 挤掉后 turn N+1 复用同一个 draft_id,server 把它当作新 draft(因为旧 draft 已 dispose)。
+
+appendEvent 内部:
+```go
+if replace {
+    d.textBuf.Reset()        // REPLACE:丢弃前内容
+} else if d.textBuf.Len() > 0 {
+    d.textBuf.WriteString("\n\n")  // ACCUMULATE:前面加空行分隔
+}
+d.textBuf.WriteString(text)
+```
 
 **Gate**:adapter 在 `ChatType == "private"` 且这三种事件时才走 draft 路径;其他 Out* 仍走现有路径。运行时 upstream gate(`ThinkMode`/`ToolsMode`)保证 `tools=off` / `think=off` 时 runtime 不 emit 这两类事件,adapter 看不到就不分流。
 
@@ -1714,27 +1740,36 @@ turn start (any chat)
 
 [turn N 期间,tools=on / think=on]
   OutThinking / OutToolStart / OutToolEnd
-    → adapter.streamDraftEvent(ctx, rawChatID, topicID, segment)
+    → adapter.streamDraftEvent(ctx, rawChatID, topicID, segment, replace)
       → 非 DM  → return (false, nil)         → caller fall through 到 chain
       → DM:
         ├─ 成功 → return (true, nil)           → caller return nil (consumed)
         └─ 失败 → return (true, nil) + log warn → caller return nil (DROP,不回退)
+      行为分类:
+        - OutThinking  / OutToolStart → replace=true  → draft body = "💭 ..." / "● Tool(args)"
+        - OutToolEnd                   → replace=false → 堆叠 "\n\n✅ Tool → N lines" 到现有 body
 
-turn N ends
-  OutReply / OutResult / OutError / OutCommandReply:
-    - DM: 走 v9 chain / appendSegmentForKind → appendRichTurn。
-      第一个 OutReply 在 DM 下会**lazy 冷创建** rich turn(getOrCreate → messageID==0 → sendRichMessageColdCreate),
-      后续 Out* editMessageText 复用。不再有"先空占位再编辑"的怪异 UX。
-    - OutResult 仍是独立 sendMessage + reply_to_message_id=userMsgID。
-      触发时 draft 自动消失(spec 明确),real message 永久保留。
+turn N ends (process boundary)
+  OutResult 发送(real sendMessage):
+    1. adapter.draftStreamers.endProcess(rawChatID, topicID)
+       → 清空 draft_id + textBuf(保留 failed latch)
+       → 下次 appendEvent 重新分配 draft_id
+    2. sendOutResultMessage(...) → real message 落地 → server 把 draft 推出
+  或无 OutResult 的 turn(error / runtime crash):
+    OnPromptEnded(ctx, chatID, ...):
+      1. ...rich turn 清理
+      2. adapter.draftStreamers.endProcess(rawChatID, topicID)  ← safety net
+  两种触发点都 end process,保证 turn N+1 拿到干净的 draft 状态。
 
 [turn N+1 开始]
   ensurePlaceholder(...):同 turn N, 不调 draftStreamers.reset。
-  turn N 的 draft 已消失(real message 把它挤掉了),
-  stream 内 draft_id 仍然保留为上次分配的值,
-  下一个 OutThinking / OutTool 事件用同一个 draft_id 调 sendMessageDraft:
-    - server 把已消失的 draft_id 当作空闲槽 → 创建新 draft,客户端看到 fresh draft
-    - (同一 draft_id 不会 "animate" 因为旧 draft 已不在 server 状态中)
+  stream 内 draft_id = 0,textBuf = "",failed latch 保留(Bot API < 10.3 bot 持续 latch)。
+  下一个 OutThinking / OutTool 事件:
+    - 第一次事件:stream 分配新 draft_id,清空 textBuf,REPLACE 写入。
+    - 后续事件:复用 draft_id,按 replace 标志累加或替换。
+
+  OutReply / OutError / OutCommandReply 走 v9 chain / appendSegmentForKind →
+  appendRichTurn,第一个 OutReply lazy 冷创建 rich turn。
 ```
 
 **DROP-on-failure 契约**(用户 2026-09-15 反馈):"think/tool 绝不混进正常的richMessage"。
@@ -3739,7 +3774,7 @@ OutError 的 `<pre>stderr</pre>` 是 pre-escape 的合法 Telegram HTML 标签�
 
 ## 19. 变更日志
 
-- **DM sendMessageDraft 路径 — 全局共享 + REPLACE**(OutThinking / OutToolStart / OutToolEnd 三类事件) — Bot API 10.3 (2026-08-24) 起在 `chat.type == "private"` 下用 `sendMessageDraft` 流式呈现 think/tool 活动,**draft 在每个 (chat, thread) 内全局共享,跨 turn 持久化**(用户 2026-09-15 反馈:"draft 可以全局共享,不需要分turn来处理";`ensurePlaceholder` 不再调 `draftStreamers.reset`,turn N 的 real message 自然把 draft 挤掉,turn N+1 复用同一个 draft_id 创建新 draft)。新增 `internal/channel/telegram/draft_streamer.go`(draftStreamer + draftIDCounter atomic.Int32 + errDraftFallback latch + REPLACE 语义)和 `draft_index.go`(per-(chat,thread) 索引);`state.go` `TopicState` 加 `ChatType` 字段(omitempty,老 state 兼容空值);`adapter.go` `ensurePlaceholder` 写入 ChatType,DM 下**不冷创建 rich turn 占位**(草稿是 live surface,空占位只是噪音;后续 OutReply 会 lazy 冷创建);`Send()` switch 三个 case 顶部调 `streamDraftEvent(ctx, rawChatID, topicID, segment)`(`msg` 参数去掉;签名简化),仅 `ChatType=="private"` 才走 draft,**DM draft 失败时 DROP 不回退**到 richMessage 路径(用户 2026-09-15 反馈:"think/tool 绝不混进正常的richMessage"),非 DM 走 chain。`appendEvent` 内部先 `textBuf.Reset()` 再 `WriteString`,实现 REPLACE 语义,客户端同 draft_id 动画过渡渲染为 ChatGPT 风格"当前步骤实时更新"。**未触动**:`OutReply` / `OutResult` / `OutError` / `OutHeartbeat` / 群 forum topic 路径 / `OnPromptEnded` 🎉 reaction / StatusBar footer / callback / state 反应 / allowed_updates 全部不变。`can_stop` 按钮 + `Update.stopped_message_generation` 留待 runtime abort 能力落地后单独 PR;`sendRichMessageDraft` / `<tg-thinking>` block 留待 plain draft 数据稳定后单独 PR。详见 §11.12.11.1。
+- **DM sendMessageDraft 路径 — DM-only (probe 2026-09-15) + 全局唯一 draft + REPLACE/ACCUMULATE 分事件 + endProcess 关边界**(OutThinking / OutToolStart / OutToolEnd 三类事件) — Bot API 10.3 (2026-08-24) 起在 `chat.type == "private"` 下用 `sendMessageDraft` 流式呈现 think/tool 活动。**ChatType gate 保留**(用户 2026-09-15 第五轮反馈曾尝试去掉 gate 走统一路由,但 2026-09-15 probe 验证: `sendMessageDraft` 在 basic group 中返回 `Bad Request`,触发的 latch 会导致整个 group 的 think/tool 事件被 drop——比当前 v9 chain 渲染更差)。`streamDraftEvent` 仅在 `state.ChatType == "private"` 时走 draft,group 仍走 v9 chain。**REPLACE / ACCUMULATE 按事件类型分**(用户 2026-09-15 第三轮反馈:"draft不需要重置,因为他每次都只是显示一个事件(think or toolstart+toolend), 相当于每个事件它都在做重置. 这就是为什么可以全局唯一一个draft的原因. thinking要加前缀💭 做区分")—— OutThinking REPLACE(`💭 ` 前缀 + msg.Text);OutToolStart REPLACE;OutToolEnd ACCUMULATE(堆叠在匹配 OutToolStart 下方形成完整 `🔧 call / ✅ result`)。**process end 由 `draftStreamers.endProcess` 处理**(用户 2026-09-15 第四轮反馈:"碰到OutResult/OutPromptEnded, 结束 messageDraft操作")—— OutResult case 和 OnPromptEnded handler 末尾调 `a.draftStreamers.endProcess(chatID, topicID)`,清空 draft_id + textBuf(保留 failed latch)。**forum topic 路由**(基础实现):`appendEventWithThread(ctx, text, replace, topicID)` 在 `topicID > 0` 时携带 `message_thread_id` 到 sendMessageDraft,但当前 ChatType gate 在 group 里不调用它,故保留为后续 forum-supergroup 支持的扩展点。新增 `internal/channel/telegram/draft_streamer.go`(draftStreamer + draftIDCounter atomic.Int32 + errDraftFallback latch + REPLACE/ACCUMULATE 双模式 + resetState/resetProcess 双 reset + appendEvent/appendEventWithThread 双入口)和 `draft_index.go`(per-(chat,thread) 索引 + endProcess 方法);`state.go` `TopicState` 加 `ChatType` 字段(omitempty,老 state 兼容空值);`adapter.go` `ensurePlaceholder` 写入 ChatType,DM 下**不冷创建 rich turn 占位**,非 DM 冷创建 rich turn 占位;`Send()` switch 三个 case 顶部调 `streamDraftEvent(ctx, rawChatID, topicID, segment, replace)`,**仅 `ChatType=="private"` 才走 draft**,**DM draft 失败时 DROP 不回退**到 richMessage 路径,非 DM 走 chain。客户端同 draft_id 动画过渡。**未触动**:`OutReply` / `OutResult` / `OutError` / `OutHeartbeat` / StatusBar footer / callback / state 反应 / allowed_updates 全部不变。`can_stop` 按钮 + `Update.stopped_message_generation` 留待 runtime abort 能力落地后单独 PR;`sendRichMessageDraft` / `<tg-thinking>` block 留待 plain draft 数据稳定后单独 PR;在保持 ChatType gate 的前提下进一步支持 forum supergroup 留待单独 PR(`is_forum` 探测 + ChatType gate 拆分)。详见 §11.12.11.1。
 
 - **2026-08-22（v9 chain rolling log）** - 引入 per-turn multi-chunk chain，替代 v4 / v8 的"单占位 + 独立 bubble"双轨制。完整 spec 见 §11.12。新增文件：`internal/channel/telegram/placeholder_chain.go`（chainKey / placeholderChain / placeholderChunk / chainLRU，含 `appendSegment` / `flushChainNow` / `scheduleFlushDebounced` / `getOrCreateChain` / `patchActiveHeader` / `activeChunkMessageID`）/ `internal/channel/telegram/summarize_tool.go`（从 feishu 平移，含 `formatToolStartCall` / `summarizeToolResult` / `displayToolArgs` / `compactJSONToolArgs` / `countLines` / `countUniqueFiles` / `truncate`）。改动：`Adapter.Send` 8 个 Out* case（OutReply/OutResult/OutThinking/OutToolStart/OutToolEnd/OutError/OutTaskCreate/OutTaskUpdate）重写为 `appendSegment` 路径；`OutHeartbeat` 改 `patchActiveHeader` + 走 debounce；`OnPromptEnded` 改 `flushChainNow` + 🎉 on active chunk + cursor reset；`formatTool` 内联实现替换为调 summarize helpers；`ensurePlaceholder` delegate 到 `appendSegment` 创建第一张 chunk。**未持久化**：`TopicState.PlaceholderChunkIDs`（本规划中曾计划加入，最终决定不写）；`buf` / `headerLine` / `lastFooter` 全部纯内存。`TopicState.PlaceholderMessageID` 保留为 read-only 兼容字段（不再写）。debounce window = 250 ms。LRU cap = 1000 chains。阈值三档：3500 chars raw buffer / 3900 chars rendered split / 4096 chars Telegram 硬限。Footer 内存语义：每 chunk 最多一个 footer，footer-bearing 事件（OutReply / OutResult / OutTaskCreate / OutTaskUpdate）来时刷新，其他不动。重启后 chain 失 = 下次事件来时建新 chunk（旧 frozen chunks 在 chat 里保留为历史证据）。
 

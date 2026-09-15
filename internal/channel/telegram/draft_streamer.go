@@ -68,19 +68,51 @@ func newDraftStreamer(api apiClient, log *slog.Logger, chatID int64, threadID in
 	}
 }
 
-// appendEvent REPLACES the draft text with this event and pushes
-// the new body to Telegram via sendMessageDraft. Same draft_id
-// across calls → client animates from prev text to new text in
-// place ("Changes to drafts with the same identifier are
-// animated"). REPLACE-not-append mirrors ChatGPT-style UX
-// where only the latest step is visible.
+// appendEventWithThread is appendEvent with an explicit
+// message_thread_id parameter (for forum topic routing). When
+// topicID > 0 the API call carries message_thread_id so the draft
+// is scoped to the correct forum topic (per Telegram API spec).
+//
+// When topicID == 0 (DM or non-forum group), behaves identically
+// to appendEvent.
+func (d *draftStreamer) appendEventWithThread(ctx context.Context, text string, replace bool, topicID int) error {
+	return d.appendEventInternal(ctx, text, replace, topicID)
+}
+
+// appendEvent pushes text to the draft via sendMessageDraft. The
+// replace flag controls how text is composed into the draft body:
+//
+//   - replace=true:  Reset textBuf first, then write text. Use for
+//     events that display ALONE — one event per draft visual
+//     surface. Each new event's body replaces the prior draft
+//     body in full (OutThinking, OutToolStart).
+//   - replace=false: Append text after a "\n\n" separator. Use
+//     for events that STACK onto an existing draft body to form a
+//     combined visual — OutToolEnd stacks onto its matching
+//     OutToolStart to render the full "🔧 call / ✅ result" pair
+//     as one draft body.
+//
+// User 2026-09-15 model: the draft visually shows ONE event at a
+// time. replace=true events REPLACE the prior body (equivalent to
+// "each event does its own reset"); replace=false events extend
+// the prior body so a tool's start + end render as one composite
+// display. Across turns no manual reset is needed: when a real
+// message (OutResult / OutReply) lands, Telegram disposes the
+// draft; the next turn's first event allocates a fresh draft
+// naturally (same draft_id, but old body is gone). This is why a
+// globally unique draft per (chat, thread) is sufficient.
 //
 // Returns errDraftFallback when the API call failed; the streamer
-// is latched for the rest of the turn. Callers should treat this as
-// "drop the event and all future events of this turn". The latch
-// is cleared by resetState at the next turn boundary, so the next
-// turn gets a fresh chance to use drafts.
-func (d *draftStreamer) appendEvent(ctx context.Context, text string) error {
+// is latched for the rest of the chat's turns until resetState
+// (admin / test utility) is called.
+func (d *draftStreamer) appendEvent(ctx context.Context, text string, replace bool) error {
+	return d.appendEventInternal(ctx, text, replace, 0)
+}
+
+// appendEventInternal is the shared implementation; topicID > 0
+// causes the API call to include message_thread_id so the draft
+// is scoped to the correct forum topic.
+func (d *draftStreamer) appendEventInternal(ctx context.Context, text string, replace bool, topicID int) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -90,14 +122,11 @@ func (d *draftStreamer) appendEvent(ctx context.Context, text string) error {
 	if d.draftID == 0 {
 		d.draftID = draftIDCounter.Add(1)
 	}
-	// REPLACE semantics: each event replaces the previous draft
-	// content. The client animates from prev text → new text in
-	// place (same draft_id → "Changes to drafts with the same
-	// identifier are animated"), giving a ChatGPT-style "only
-	// the latest step is visible" UX. We do not accumulate a
-	// history because the user wants the draft to mirror the
-	// agent's current activity, not a log of past steps.
-	d.textBuf.Reset()
+	if replace {
+		d.textBuf.Reset()
+	} else if d.textBuf.Len() > 0 {
+		d.textBuf.WriteString("\n\n")
+	}
 	d.textBuf.WriteString(text)
 
 	// No parse_mode: text is rendered as plain text. summarize_tool.go
@@ -107,11 +136,15 @@ func (d *draftStreamer) appendEvent(ctx context.Context, text string) error {
 	// HTML mode requires escaping for those characters; "AT&T"
 	// or "type <T>" would mangle). Plain-text rendering keeps
 	// the draft text lossless regardless of LLM output.
-	err := d.api.call(ctx, "sendMessageDraft", map[string]any{
+	params := map[string]any{
 		"chat_id":  d.chatID,
 		"draft_id": d.draftID,
 		"text":     d.textBuf.String(),
-	}, nil)
+	}
+	if topicID > 0 {
+		params["message_thread_id"] = topicID
+	}
+	err := d.api.call(ctx, "sendMessageDraft", params, nil)
 	if err != nil {
 		d.failed = true
 		d.log.Warn(
@@ -136,4 +169,23 @@ func (d *draftStreamer) resetState() {
 	d.draftID = 0
 	d.textBuf.Reset()
 	d.failed = false
+}
+
+// resetProcess ends the current agent process: clears draftID and
+// textBuf so the NEXT process (next turn's first event) starts
+// with a fresh draft. Differs from resetState in that the failure
+// latch is PRESERVED — a transient sendMessageDraft failure in this
+// process shouldn't be wiped just because the process ended; the
+// next process inherits the latch (so a Bot API < 10.3 bot keeps
+// dropping events until daemon restart).
+//
+// Called from:
+//   - Send case OutResult (real message sent → process ended)
+//   - OnPromptEnded (safety net for turns without OutResult)
+func (d *draftStreamer) resetProcess() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.draftID = 0
+	d.textBuf.Reset()
+	// failed intentionally preserved.
 }

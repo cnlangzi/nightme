@@ -51,3 +51,16 @@ func (i *draftIndex) reset(chatID int64, threadID int) {
 		s.resetState()
 	}
 }
+
+// endProcess signals that the current agent process is finished
+// (typically after OutResult / OnPromptEnded). Clears the
+// streamer's draft_id and textBuf so the next process starts
+// fresh, while preserving the failed latch.
+func (i *draftIndex) endProcess(chatID int64, threadID int) {
+	key := draftIndexKey(chatID, threadID)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if s, ok := i.streamers[key]; ok {
+		s.resetProcess()
+	}
+}

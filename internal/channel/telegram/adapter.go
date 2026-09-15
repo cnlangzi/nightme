@@ -808,7 +808,17 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 //
 // Callers can ignore the error return (informational). The
 // returned bool is the only signal they need.
-func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, segment string) (bool, error) {
+func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, segment string, replace bool) (bool, error) {
+	// ChatType gate: only private chats try sendMessageDraft.
+	// Telegram API spec restricts chat_id to "target private chat"
+	// (forum supergroups with message_thread_id are also accepted,
+	// but we don't have a way to distinguish forum-supergroup from
+	// basic-group without reading is_forum from getChat). Probe on
+	// 2026-09-15 confirmed: DM works, basic group returns Bad
+	// Request. Without this gate, a failed group call would engage
+	// the streamer's latch and DROP all subsequent think/tool
+	// events for that group — strictly worse than the current
+	// v9 chain rendering. Keep groups on the v9 chain path.
 	state, ok := a.state.topic(rawChatID, topicID)
 	if !ok || state.ChatType != "private" {
 		// Non-DM (or no state yet — old state file pre-ChatType):
@@ -821,11 +831,12 @@ func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicI
 		return false, nil
 	}
 	streamer := a.draftStreamers.getOrCreate(a.api, a.logger, chatIDInt, topicID)
-	err := streamer.appendEvent(ctx, segment)
+	err := streamer.appendEventWithThread(ctx, segment, replace, topicID)
 	if err != nil {
 		// DM draft failed: drop the event. Do NOT fall through to
-		// the richMessage path. Logging is the streamer's job
-		// (draft_streamer.go logs the API error on first failure).
+		// the richMessage path ("think/tool 绝不混进正常的richMessage").
+		// Logging is the streamer's job (draft_streamer.go logs the
+		// API error on first failure).
 		return true, nil
 	}
 	return true, nil
@@ -971,9 +982,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// (e.g., MessageDropped).
 		return a.setMessageReactions(ctx, rawChatID, messageID, nil)
 	case messages.OutToolStart:
-		// DM draft path: stream into animated draft via sendMessageDraft.
+		// DM draft path: REPLACE semantics — OutToolStart is the
+		// "first half" of a tool display; OutToolEnd stacks below.
 		// Falls through to v9 chain on non-DM chat or draft failure.
-		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, formatTool(msg)); handled {
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, formatTool(msg), true /*replace*/); handled {
 			return nil
 		}
 		// L3 (§20.6.3): route through richTurn. The tool call line
@@ -1002,8 +1014,10 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 			statusbar.StatusBarLines(&msg))
 
 	case messages.OutToolEnd:
-		// DM draft path: stream into animated draft via sendMessageDraft.
-		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, formatTool(msg)); handled {
+		// DM draft path: ACCUMULATE semantics — append result line
+		// below the matching OutToolStart, so the user sees the
+		// full "🔧 call / ✅ result" pair in one draft body.
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, formatTool(msg), false /*accumulate*/); handled {
 			return nil
 		}
 		// L3: route through richTurn. The result line lands as a
@@ -1072,10 +1086,13 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// trailer on every subsequent outbound message (see §18).
 		return nil
 	case messages.OutThinking:
-		// DM draft path: stream the thinking body into animated draft.
-		// Empty-text silent drop already happened at the top of Send,
-		// so msg.Text is non-empty here.
-		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, msg.Text); handled {
+		// DM draft path: REPLACE semantics — one thinking event
+		// displays alone as "💭 <text>". The "💭 " prefix
+		// matches the chain path's body format (F-think parity with
+		// feishu) so DM and forum-topic visuals stay consistent.
+		// Empty-text silent drop already happened at the top of
+		// Send, so msg.Text is non-empty here.
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, "💭 "+msg.Text, true /*replace*/); handled {
 			return nil
 		}
 		// F-think parity with feishu: prefix the reasoning body
@@ -1114,8 +1131,15 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// "last wins" semantics so the 🎉 lands on the visual end
 		// of the result block.
 		//
+		// End the draft process before sending the real message so
+		// the next process (next turn) starts with a fresh draft_id
+		// and empty textBuf. Telegram server will also push out the
+		// draft as soon as this real message lands.
+		//
 		// Empty-text silent drop already happened at the top of
 		// Send, so msg.Text is non-empty here.
+		chatIDInt, _ := strconv.ParseInt(rawChatID, 10, 64)
+		a.draftStreamers.endProcess(chatIDInt, topicID)
 		return a.sendOutResultMessage(ctx, msg, rawChatID, topicID, replyAnchor)
 	default:
 		// OutReply / OutCommandReply: every remaining text-emitting
@@ -1346,6 +1370,13 @@ func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string, r
 	// Next user message re-materialises a fresh rich turn via
 	// ensurePlaceholder.
 	a.richTurns.purge(rawChatID, topicID, parsedUserMsgID)
+
+	// 5. End the DM draft process (safety net for turns that
+	// had think/tool events but NO OutResult, e.g. an OutError-only
+	// turn or runtime crash before producing a result). Clears the
+	// streamer's draft_id + textBuf so the next turn starts fresh.
+	chatIDInt, _ := strconv.ParseInt(rawChatID, 10, 64)
+	a.draftStreamers.endProcess(chatIDInt, topicID)
 }
 
 func (a *Adapter) patchChainHeader(msg messages.OutboundMessage) error {

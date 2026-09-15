@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // groupDraftEntry is the per-turn in-memory state for the simulated
@@ -126,7 +128,7 @@ func (m *groupDraftManager) ensureEntry(chatID string, topicID int, userMsgID in
 // groupDraftKey already containing userMsgID; the caller is
 // responsible for passing the per-event anchor (msg.ReplyTo),
 // see docs/channel/telegram.md §11.12.11.3.
-func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, userMsgID int, segment string, replace bool) (bool, error) {
+func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, userMsgID int, segment string, kind messages.OutboundKind) (bool, error) {
 	if userMsgID <= 0 {
 		// No user message anchor → can't safely cold-create (a
 		// floating message would have nothing to chain under).
@@ -145,6 +147,10 @@ func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID stri
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
+	// REPLACE wipes prior body (OutThinking / OutToolStart — single
+	// visual surface for the latest event). ACCUMULATE stacks the
+	// result line under the matching tool start (OutToolEnd).
+	replace := kind == messages.OutThinking || kind == messages.OutToolStart
 	body := entry.composeLocked(segment, replace)
 
 	if entry.messageID == 0 {

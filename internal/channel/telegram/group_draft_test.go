@@ -817,7 +817,7 @@ func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 	raw := setupGroupState(t, a, -1001, 0)
 
 	// Turn 1 cold-creates a DraftMessage.
-	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "first", true); !handled {
+	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "first", messages.OutThinking); !handled {
 		t.Fatalf("first call should be handled (cold-create); got handled=false")
 	}
 	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {
@@ -851,7 +851,7 @@ func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 	// chain under the user's original message), NOT editMessageText
 	// the now-deleted id.
 	api.Calls = nil
-	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "late event", true); !handled {
+	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "late event", messages.OutThinking); !handled {
 		t.Fatalf("late event must be handled (fresh cold-create); got handled=false")
 	}
 	if sends := callsByMethod(api.Calls, "sendMessage"); len(sends) != 1 {

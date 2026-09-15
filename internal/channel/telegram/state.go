@@ -11,8 +11,16 @@ import (
 )
 
 type TopicState struct {
-	ChatID               string    `json:"chat_id"`
-	TopicID              int       `json:"topic_id"`
+	ChatID  string `json:"chat_id"`
+	TopicID int    `json:"topic_id"`
+	// ChatType is the Telegram chat.type string ("private" / "supergroup"
+	// / "group" / "channel"). Set on first inbound message and used by
+	// the adapter's Send() switch to route OutTool/OutThink events
+	// into the DM-only sendMessageDraft path. Empty for state files
+	// written before this field existed; Send() treats empty as
+	// "non-private" and falls back to the v9 chain path — backward
+	// compatible without state migration.
+	ChatType             string    `json:"chat_type,omitempty"`
 	PlaceholderMessageID int       `json:"placeholder_message_id"`
 	UserMessageID        string    `json:"user_message_id"`
 	LastMessageID        int       `json:"last_message_id"`

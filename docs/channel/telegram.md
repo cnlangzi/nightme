@@ -947,136 +947,32 @@ LRU cap = 1000（按 user message 计，cap = 1000 个并发 turn）。FIFO evic
 
 ## 11.12 OutThinking / OutToolStart / OutToolEnd 的 live streaming surface
 
-三类事件在 DM / group / forum topic 下走两条不同路径，行为对位飞书 receipt 的"live streaming"语义：用户进入 chat 立刻看到当前 think/tool 进度，turn 终止后自动消失。
+三类事件在 DM / group / forum topic 下都走同一条 unified 路径：bot-owned rich message + `editMessageText(rich_message=…)` PATCH in place + `deleteMessage` 清理。**没有 ChatKind 分支**：DM 跟 group 共享 `groupDraftManager`（命名沿用历史，行为已统一）。行为对位飞书 receipt 的"live streaming"语义：用户进入 chat 立刻看到当前 think/tool 进度，turn 终止后自动消失；用户仍可照常打字 / interject，bot 不锁 send button。
 
-### 11.12.1 DM 私聊：`sendRichMessageDraft`
+### 11.12.1 统一流式表面（DM + group / forum topic）
 
-Bot API 10.3 起 `sendMessageDraft` 在 `chat.type == "private"` 下可用；后续版本起 `sendRichMessageDraft` 允许 draft body 是 `rich_message={"blocks":[…]}` 数组，视觉与 §11.12.2 group simulated DraftMessage 一致——同一个 server-managed animated surface 容器，承载结构化 rich blocks（`draft_id` 仍是 server key）。
+所有 `ChatKind != "channel"` 的 turn 都过同一条路径：bot 发一条 rich message → 持续 `editMessageText(rich_message=…)` PATCH 最新 5 thinking + 最新 5 tool blocks → turn end `deleteMessage` 清理。模拟 sendMessageDraft 的"live streaming surface"角色。
 
-架构与 §11.12.2 group simulated DraftMessage 完全平行：
+**为什么不直接用 `sendMessageDraft`（plain text）/ `sendRichMessageDraft`（rich blocks）**：
 
-| 维度 | DM `sendRichMessageDraft` | group simulated DraftMessage |
+- Telegram `sendMessageDraft` 是 DM-only API（spec："target private chat"，basic group 直接 `Bad Request`），无法覆盖 forum topic / basic group 场景
+- 实机验证 animated draft 行为：bot 调 `sendMessageDraft` 后，client 端 send button 会显示三点动画，期间 user 不能发送新消息——这对"在 turn 期间 user 想 interject / 补充上下文"的常见 UX 是不可接受的
+- 选择真实 rich message（用户可照常打字）+ turn end `deleteMessage` 自动消失，UX 与 animated draft 等价但没有 send button 锁
+
+**核心对位**（与 §11.11 rich turn 对齐）：
+
+| 维度 | Telegram v11.12 统一流式表面 | Feishu receipt |
 | --- | --- | --- |
-| 缓冲 | `thinkingStack` + `toolsStack`，各 cap 50 | 同 |
-| Send window per flush | latest 5 from each stack | 同 |
-| Trigger | 10s timer / endProcess | 同 |
-| Lock | `mu`（buffer 短持）/ `flushMu`（wire 期间） | 同 |
-| 失败 | 还原 buffer，下次重试（issue #391 对齐 group） | 同 |
-| 终态 | server 在 OutResult 落地时推 draft | bot 显式 `deleteMessage` |
-| Per-turn 隔离 | `draftIndexKey = chatID\|threadID\|userMsgID` | `groupDraftKey = chatID\|topicID\|userMsgID` |
-
-视觉：
-
-```text
-forum topic (user 视角)
-├─ User message: "帮我看看 foo.go"
-├─ DraftMessage (rich, animated): 最新 5 thinking + 最新 5 tool blocks   ← sendRichMessageDraft
-├─ rich turn (OutHeartbeat PATCH): "🤖 Working... 💭 N · 🔧 M"
-├─ OutReply: "answer text..."（独立 sendRichMessage）
-└─ OutResult: "📝 final answer..."（独立 sendRichMessage）
-
-turn end: OutResult 落地 → server 把 draft 推掉
-```
-
-#### Lock 纪律（与 group 同款）
-
-```text
-streamDraftEvent：
-    mu.Lock()                            ← 极短，append + peek
-    switch kind:
-      OutThinking → thinkingStack append + FIFO evict
-      OutToolStart → toolsStack 新 slot + FIFO evict
-      OutToolEnd → 末 slot.ends append；空则 orphan slot
-    mu.Unlock()
-    startFlushTimerIfIdleLocked()        ← 不持 mu
-
-flushLocked（timer / endProcess 触发）：
-    1. mu.Lock(): pop latest 5+5 → mu.Unlock()
-    2. flushMu.Lock(): marshal + sendRichMessageDraft → flushMu.Unlock()
-    3. 失败 → mu.Lock(): 还原 slices → mu.Unlock()
-    4. 空 buffer → mu.Lock(): Stop timer + flushTimer=nil → mu.Unlock()
-
-endProcess：
-    - mu.Lock(): stop flushTimer
-    - flushLocked（reason="endProcess"）
-    - mu.Lock(): draftID = 0 → mu.Unlock()
-    - 外部 index 已 evict（draftStreamers.endProcess）
-```
-
-**关键**：`flushLocked` 的 wire 调用期间只持 `flushMu`，**不持 `mu`**。新 event 进 `streamDraftEvent` 走 `mu` 不冲突，因此即便 Telegram API 卡住，runtime 也不会卡在 `streamDraftEvent` 上（2026-09-15 21:00 群组那个 bug 的修复直接照搬）。
-
-#### Per-turn streamer 隔离
-
-`draftStreamer` 按 `(chat_id, thread_id, user_msg_id)` 三元组分桶，跟 `groupDraftKey` 完全对齐。每个 user 消息的 turn 独享 streamer，draft_id 通过 `draftIDCounter.Add(1)` 进程全局单调分配——每 turn 拿一个新号（server 视为新 draft surface）。
-
-| turn N 期间 | turn N+1 期间 |
-| --- | --- |
-| OutThinking → 新 streamer + 新 draft_id | 旧 streamer 已被 `endProcess` evict |
-| OutToolStart → draft 累积 | 新 streamer + 新 draft_id 重新走 |
-| OutToolEnd → draft 累积 | |
-| OutResult → `draftStreamers.endProcess` 清 streamer | |
-| OnPromptEnded → safety net 调 `endProcess`（error-only turn / abort） | |
-
-视觉隔离：每个 turn 的 draft 表面独立，即便 turn N 滞留的 late event 飞到 turn N+1 也不会"复活"turn N 的 draft surface（各自的 draft_id 不同，server key 隔离）。
-
-#### Gate & drop-on-failure
-
-`streamDraftEvent` 仅在 `state.ChatKind == "private"` 时走 DM draft 路径；group / channel / no-state → fall through 到 rich turn path。DM draft path 失败时（Bot API < 10.3 或 server 拒），三类事件**DROP 不回退**到 rich turn —— 一致失败，避免 turn 里同时出现 draft + rich message 两条 think/tool 痕迹。issue #391 contract：失败还原 buffer，下次重试。
-
-#### Lifecycle
-
-```text
-turn start
-  ensurePlaceholder: ChatKind 写入；DM 下不冷创建 rich turn 占位（draft 是 live surface）
-  draft streamer 不预先分配（lazy）
-
-turn N 期间
-  OutThinking / OutToolStart / OutToolEnd
-    → streamDraftEvent → ChatKind == "private" → draftStreamer.streamDraftEvent
-    → ChatKind == "group"  → groupDraft.streamDraftEvent（§11.12.2）
-    → 其它 / no state     → fall through 到 rich turn
-    → DM draft 成功 → (true, nil)            → caller return nil（consumed）
-    → DM draft 失败 → buffer 还原，下一次 timer / event 重试
-
-turn N ends
-  OutResult 发送（real sendRichMessage）
-    1. draftStreamers.endProcess(ctx, chatID, topicID, replyAnchor)
-       ├─ stop flush timer
-       ├─ buffer 非空 → flushLocked("endProcess")
-       └─ drop streamer（no deleteMessage — server handles）
-    2. sendOutResultMessage → real message 落地 → server 推 draft
-  OnPromptEnded handler 末尾（safety net：no-OutResult turn）
-    1. ...rich turn flush + 🎉 + purge
-    2. draftStreamers.endProcess(ctx, chatID, topicID, parsedUserMsgID)
-       parsedUserMsgID == 0 时 skip（orphan startup / test 路径）
-
-turn N+1 开始
-  ensurePlaceholder：DM 下按 state.UserMessageID（覆盖前的旧值）先 endProcess 清上 turn 可能滞留的 streamer
-  stream index 不持有 turn N 的 streamer → 第一个 OutThinking / OutTool 事件走 getOrCreate 拿新 streamer
-```
-
-#### Bot API 兼容性
-
-`sendRichMessageDraft` 是 rich 版 draft 方法（Bot API 10.3+ 扩展），daemon 端无需探测版本：失败时 buffer 还原，下次重试（issue #391 contract 与 group 对齐）。客户端不需要 10.3：旧客户端收到 sendRichMessageDraft 会以静默静态文本渲染或忽略 draft，但 OutResult / OutReply 等 real message 正常落地，无功能损失。
-
-### 11.12.2 非私聊：simulated DraftMessage
-
-Telegram `sendMessageDraft` 是 DM-only API（spec："target private chat"，basic group 直接 `Bad Request`），非私聊场景（`ChatKind == "group"`，涵盖基础群 + forum supergroup）必须用 bot-owned message 模拟 messageDraft 的"live streaming surface"角色：bot 发一条 rich message，用 `editMessageText(rich_message=…)` PATCH in place，turn end `deleteMessage` 清理，跟 sendMessageDraft 的 auto-disappear 行为对位。
-
-**核心对位**（跟 §11.12.1 DM draft 也跟 §11.11 rich turn 对齐）：
-
-| 维度 | DM sendMessageDraft | group simulated DraftMessage（rich 版） |
-| --- | --- | --- |
-| 存储 | server-managed draft（无真实 message_id） | bot 拥有的真实 rich message（in-memory `entry.messageID`，不持久化） |
-| 创建 | 首次 `sendMessageDraft` 隐式分配 `draft_id` | 第一次 flush 触发 `sendRichMessage(rich_message={"blocks":[…]})` 返回 message_id |
-| 更新 | 反复 `sendMessageDraft(同 draft_id)` | 后续 flush 触发 `editMessageText(message_id=…, rich_message={"blocks":[…]})` |
-| 触发 | 每个事件立即（动画） | 10s timer / endProcess（**无 count 触发**） |
-| Send window | 不适用 | 每次 flush 取各 stack 最新 5（共 5+5 = 10 blocks，稳在 Telegram 长度限制内） |
-| Windowed flush | 不适用 | 每次成功 flush 后清掉取走的 entries，其余留在 buffer |
-| Delete at turn end | server 在 OutResult 落地时自动消失 | bot `deleteMessage` + drop entry |
-| 锚点 | n/a（server 渲染） | `reply_to_message_id = userMessageID`（挂用户消息下，仅 cold-create 时携带） |
-| 线程隔离 | `message_thread_id`（DM 不用） | `message_thread_id = topicID`（forum topic 内 DraftMessage 留在 topic） |
-| 失败语义 | latch，后续 drop（无 richMessage 回退） | **sendRichMessage / editMessageText 失败**统一保留 buffer，下次 trigger 续试（issue #391 contract）；无 cold-create retry / latch |
+| 存储 | bot 拥有的真实 rich message（in-memory `entry.messageID`） | receipt card（in-memory） |
+| 创建 | 第一次 flush 触发 `sendRichMessage(rich_message={"blocks":[…]})` 返回 message_id | `SendMessageReceipt` 首次 render |
+| 更新 | 后续 flush 触发 `editMessageText(message_id=…, rich_message={"blocks":[…]})` | `PatchMessage` 增删 div |
+| 触发 | 10s timer / endProcess（**无 count 触发**） | Out* event 立即 |
+| Send window | 每次 flush 取各 stack 最新 5（共 5+5 = 10 blocks，稳在 Telegram 长度限制内） | full receipt 累积 |
+| Windowed flush | 每次成功 flush 后清掉取走的 entries，其余留在 buffer | n/a |
+| Delete at turn end | bot `deleteMessage` + drop entry | receipt 保留作为时间线证据 |
+| 锚点 | `reply_to_message_id = userMessageID`（cold-create 时携带） | thread reply chain |
+| 线程隔离 | `message_thread_id = topicID`（forum topic 内 DraftMessage 留在 topic；DM 下 topicID == 0 不带） | thread_id |
+| 失败语义 | sendRichMessage / editMessageText 失败统一保留 buffer，下次 trigger 续试（issue #391 contract） | retry / fall through |
 
 **两个独立 FIFO 栈，各容量 50**：
 
@@ -1095,12 +991,12 @@ Telegram `sendMessageDraft` 是 DM-only API（spec："target private chat"，bas
 
 5 thinking + 5 tools = 10 blocks × ~1KB ≈ 10KB，远低于 Telegram 4096 字符限制或 rich_message block 上限。
 
-**Lifecycle**（per turn，ChatKind == "group"）：
+**Lifecycle**（per turn，ChatKind == "private" / "group" 共用）：
 
 ```text
 turn start
   ensurePlaceholder(...)
-    ├─ state.ChatKind 写入 "group"
+    ├─ state.ChatKind 写入
     └─ 内存分配新 groupDraftEntry（无 state 持久化）
 
 turn N 期间，OutThinking / OutToolStart / OutToolEnd
@@ -1131,7 +1027,7 @@ turn N ends
 `entry.mu`（buffer mutation，append / peek / pop 期间持锁，**网络 roundtrip 期间释放**）+ `entry.flushMu`（API call 期间持锁）。两把锁分离保证：
 
 - `streamDraftEvent` 调 `append` 时**不**调 API，只持 `mu` 极短时间
-- 即使 Telegram API 慢/卡住，新的 event 仍能 append 进 buffer，agent runtime 不会卡住（2026-09-15 21:00 观察到的"主流程卡住"现象的修复）
+- 即使 Telegram API 慢/卡住，新的 streamDraftEvent 调用仍能 append 进 buffer，agent runtime 不会卡住（2026-09-15 21:00 观察到的"主流程卡住"现象的修复）
 
 **OutToolEnd 孤儿处理**：若 `toolsStack` 为空（无 open slot），OutToolEnd 被当成新 slot 的隐式 Start（body 进入 `slot.start`，后续 Ends 可 attach 到这个 slot）。
 
@@ -1150,11 +1046,12 @@ turn N ends
 - **格式一致性**：跟 §11.11 rich turn placeholder 同款 envelope，process 提示和 answer 提示视觉统一
 - **零 escape 负担**：rich_message 直接传 `json.RawMessage`，blocks 是结构化对象，无需 `parse_mode=HTML` 的 `<`,`>`,`&` 转义
 - **future-proof**：未来想给 thinking 加 spoiler、给 tool result 加 `<pre>` fence，直接在 paragraph block 上加 entity / 替换 block type
+- **user freedom**：simulated DraftMessage 是真实 Telegram message，user 在 bot thinking 期间可以照常打字 / interject，不会被 draft 锁住 send button
 
 **视觉位置**：
 
 ```text
-forum topic (user 视角)
+DM 私聊 (user 视角)
 ├─ User message: "帮我看看 foo.go"
 ├─ DraftMessage (rich): 最新 5 thinking + 最新 5 tool blocks   ← reply_to 挂 user message
 ├─ rich turn (OutHeartbeat PATCH): "🤖 Working... 💭 N · 🔧 M"
@@ -1163,6 +1060,8 @@ forum topic (user 视角)
 
 turn end: DraftMessage 被 deleteMessage 移除
 ```
+
+forum topic 视觉形态相同：用户消息 → DraftMessage (rich, message_thread_id=topicID) → rich turn → OutReply / OutResult。DM 与 group / topic 唯一差异：DM 下 `message_thread_id` 不带。
 
 **为什么不持久化 DraftMessageID**：`groupDraft` 完全 in-memory，daemon 重启会丢失当前 turn 的 in-flight DraftMessage。trade-off：
 
@@ -1173,29 +1072,27 @@ turn end: DraftMessage 被 deleteMessage 移除
 
 **Bot API 兼容性**：纯 `sendRichMessage` / `editMessageText(rich_message=…)` / `deleteMessage`，需要 Bot API 10.1+（2025-06 引入的 `rich_message` 参数和 `sendRichMessage`）。sendRichMessage / editMessageText 失败统一保留 buffer 不退到 rich turn（issue #391 contract）。
 
-**Rate-limit 友好度**（与 §11.12.1 / §11.11 整体设计一致）：每 turn 最多 `ceil(N/50)` 次 flush（N = 该 turn 的 events 总数，cap 50 后开始 evict 老的），每次 flush 最多 5+5=10 blocks。远低于 Telegram per-chat 1/s 和 per-group 20/min 硬限。
+**Rate-limit 友好度**（与 §11.11 整体设计一致）：每 turn 最多 `ceil(N/50)` 次 flush（N = 该 turn 的 events 总数，cap 50 后开始 evict 老的），每次 flush 最多 5+5=10 blocks。远低于 Telegram per-chat 1/s 和 per-group 20/min 硬限。
 
-### 11.12.3 per-prompt isolation
+### 11.12.2 per-prompt isolation
 
-每个 Out* event 的 turn anchor（`reply_to_message_id` + `draftIndexKey` 后缀 + `richTurns` key）**必须**取自 `msg.ReplyTo`，不取自 `state.UserMessageID`。`state.UserMessageID` 只在 `ensurePlaceholder` 创建占位那一刻读一次，后续 Send 路径再读它就违反 per-turn 隔离 — back-to-back turn 时旧 turn 滞留的 Out* 会写到新 turn 的 rich turn 上，产生"信息串位"。
+每个 Out* event 的 turn anchor（`reply_to_message_id` + `groupDraftKey` 后缀 + `richTurns` key）**必须**取自 `msg.ReplyTo`，不取自 `state.UserMessageID`。`state.UserMessageID` 只在 `ensurePlaceholder` 创建占位那一刻读一次，后续 Send 路径再读它就违反 per-turn 隔离 — back-to-back turn 时旧 turn 滞留的 Out* 会写到新 turn 的 rich turn 上，产生"信息串位"。
 
 **实现**：
 
 - `adapter.Send()` 优先用 `msg.ReplyTo` 解析 `replyAnchor`；兜底 `state.UserMessageID`（兼容 shell / 框架 / 测试入口不 stamp `ReplyTo` 的场景，跟 Feishu orphan-fallback 行为对位）
 - `adapter.patchChainHeader`（OutHeartbeat）同样优先 `msg.ReplyTo`，兜底 state
-- per-turn 隔离靠三套并行的 per-`userMsgID` 索引：
-  - **DM**：`draftIndexKey = chatID|threadID|userMsgID`
-  - **group**：`groupDraftKey = chatID|topicID|userMsgID`
+- per-turn 隔离靠两套并行的 per-`userMsgID` 索引：
+  - **stream surface**：`groupDraftKey = chatID|topicID|userMsgID`（DM 与 group 共用，chat_kind 不参与 key）
   - **rich turn**：`richTurns` key 已含 userMessageID
 
   同 key 必然同 turn，不需要额外的 binding guard。
 
-- `OnPromptEnded` 末尾调**三套** endProcess 作为 safety net，覆盖无 OutResult 的 turn（error / abort / bridge crash）：
-  - `draftStreamers.endProcess(rawChatID, topicID, parsedUserMsgID)`（DM）
-  - `groupDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)`（group）
+- `OnPromptEnded` 末尾调**两套** endProcess 作为 safety net，覆盖无 OutResult 的 turn（error / abort / bridge crash）：
+  - `groupDraft.endProcess(ctx, rawChatID, topicID, parsedUserMsgID)`（stream surface）
   - `richTurns.purge(rawChatID, topicID, parsedUserMsgID)`
 
-  `parsedUserMsgID > 0` 才调 DM/group 两条，避免 startup / test orphan 路径打 warn；rich turn purge 自带 no-op 守卫。
+  `parsedUserMsgID > 0` 才调 stream surface 端，避免 startup / test orphan 路径打 warn；rich turn purge 自带 no-op 守卫。
 
 跟 Feishu receipt 的语义对位：
 
@@ -1203,17 +1100,16 @@ turn end: DraftMessage 被 deleteMessage 移除
 | --- | --- | --- |
 | turn anchor 源 | `msg.ReplyTo` 唯一来源 | `msg.ReplyTo` 优先 + state 兜底 |
 | 找不到 anchor | orphan path 走独立消息 | 兜底到 `state.UserMessageID`（同 Feishu orphan 行为） |
-| per-userMsgID 隔离 | `receiptsByUserMsgID` map | `draftIndexKey` map（DM） + `groupDraftKey` map + `richTurns` map |
-| OnPromptEnded 清理 | `SetPromptState(terminal)` 走 receipt | 三套 endProcess safety net + rich turn 🎉 |
-| 跨 turn 串位防护 | receipt 严格 per-userMsgID | 优先 ReplyTo + 所有三个索引 key 都含 userMsgID |
-| `endProcess` 清理 in-memory state | n/a | group: `delete(m.entries, key)`；DM: `delete(i.streamers, key)` |
+| per-userMsgID 隔离 | `receiptsByUserMsgID` map | `groupDraftKey` map + `richTurns` map |
+| OnPromptEnded 清理 | `SetPromptState(terminal)` 走 receipt | 两套 endProcess safety net + rich turn 🎉 |
+| 跨 turn 串位防护 | receipt 严格 per-userMsgID | 优先 ReplyTo + 所有索引 key 都含 userMsgID |
+| `endProcess` 清理 in-memory state | n/a | `delete(m.entries, key)` |
 
-### 11.12.4 已知限制
+### 11.12.3 已知限制
 
 | Limit | 描述 | 缓解 |
 | --- | --- | --- |
-| DM 下 `sendRichMessageDraft` 是 Bot API 10.3+ 扩展 | Bot library < 10.3 拒收 → wire call 持续失败，buffer 还原后下次重试仍失败，所有 DM think/tool 进 stack 但永远不落地 | daemon 重启无济于事（issue #391 buffer-restoration 保留条目），需要用户升级 bot library 或忽略 think/tool 流式视觉 |
-| 非私聊 simulated DraftMessage 是真实 message | turn 期间用户可见（不像 DM draft 那样只在 client 渲染）；如 sendMessage 失败 fall through 到 rich turn，会同时存在 DraftMessage + rich turn 两条 think/tool 痕迹 | cold-create 失败 → handled=false fall through（rich turn 第一段追加）；edit 失败 → 静默 log |
+| simulated DraftMessage 是真实 message | turn 期间用户可见（不像 animated draft 那样只在 client 渲染）；如 sendRichMessage 失败 fall through 到 rich turn，会同时存在 DraftMessage + rich turn 两条 think/tool 痕迹 | cold-create 失败 → handled=false fall through（rich turn 第一段追加）；edit 失败 → 静默 log |
 | `group_draft.go` DraftMessage 持久化 | daemon 重启 mid-turn 后 `state.DraftMessageID > 0`，下次 event 拿回同 message_id 继续 edit；turn end safety net 删之 | orphan recovery：下次 `ensurePlaceholder` 先 `deleteOrphanSync` 清上 turn 残留 |
 | `state.ChatType` 老格式 state 文件 | 老 daemon 写入的 `chat_type` 字段在 `migrateChatNew` 迁移；load 时立即 save 持久化，零迁移延迟 | `LegacyChatType` 字段保留读路径；新写不再带 |
 

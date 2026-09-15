@@ -440,53 +440,77 @@ jobs:
 
       # Mint the same version metadata as the main `nightme`
       # binary so `nightme-stt --version` matches byte-for-byte.
-      # `git describe` works on tag pushes; falls back to a
-      # dev string for branch builds (the main job does the
-      # same dance).
+      # `${GITHUB_REF_NAME#v}` matches the main job's derivation
+      # (release.yml line 265) — `git describe --tags` would
+      # leave the `v` prefix on the tag, drifting the STT
+      # version string from the main binary's. The release
+      # workflow only fires on `push: tags: v*`, so this
+      # branch of the fallback is dead in practice; the dev
+      # string is only hit during local / branch builds.
       - name: Mint version metadata
         id: meta
         shell: bash
         run: |
           set -euo pipefail
-          if VERSION="$(git describe --tags --always --dirty 2>/dev/null)"; then
-            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [ -n "${GITHUB_REF_NAME:-}" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
           else
-            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)"
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       # Build with -tags cgo_sherpa so the real sherpa-onnx-go
       # binding is linked in. The default build (no tag) compiles
       # only the ffmpeg decoder + stub recognizer; we never
-      # publish that. We bypass `make build-stt` here so the
-      # per-matrix LDFLAGS (version, commit, build date) win.
+      # publish that. LDFLAGS is built inside the run: script
+      # because YAML plain-scalar folding turns `\`+newline
+      # into a literal backslash+space (not a shell
+      # continuation), and bash does not re-evaluate `$(date)`
+      # inside an expanded variable — both would brick the
+      # linker.
       - name: Build nightme-stt
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
-          LDFLAGS: -X github.com/cnlangzi/nightme/internal/version.Version=${{ steps.meta.outputs.version }} \
-                    -X github.com/cnlangzi/nightme/internal/version.GitCommit=${{ steps.meta.outputs.commit }} \
-                    -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         shell: bash
         run: |
           set -euo pipefail
-          go build -tags cgo_sherpa -ldflags "$LDFLAGS" \
+          VERSION="${{ steps.meta.outputs.version }}"
+          COMMIT="${{ steps.meta.outputs.commit }}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-X github.com/cnlangzi/nightme/internal/version.Version=${VERSION} \
+                   -X github.com/cnlangzi/nightme/internal/version.GitCommit=${COMMIT} \
+                   -X github.com/cnlangzi/nightme/internal/version.BuildDate=${BUILD_DATE}"
+          go build -tags cgo_sherpa -ldflags "${LDFLAGS}" \
             -o "bin/${{ matrix.binary }}" ./cmd/nightme-stt
 
           # The cgo_sherpa build statically links sherpa-onnx
           # native lib into the binary. A successful `go build`
           # does NOT by itself prove the C bindings survived
           # cgo's symbol resolution — verify before archiving.
-          # macOS `nm` output differs from Linux's, so branch
-          # on the host OS rather than passing -D universally.
-          if [ "$(uname)" = "Darwin" ]; then
-            nm "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
-              || { echo "::error::nightme-stt has no sherpa native symbols (macOS)"; exit 1; }
-          else
-            nm -D "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
-              || { echo "::error::nightme-stt has no sherpa native symbols"; exit 1; }
-          fi
+          # Branch on matrix.goos (NOT uname) so the Windows
+          # runners get the right tool: `nm -D` reads the ELF
+          # dynamic symbol table and a Windows PE has no such
+          # table. `strings | grep SherpaOnnx` works on every
+          # platform that ships `strings` (all three runners
+          # do — binutils on Linux, llvm on macOS, mingw on
+          # Windows).
+          case "${{ matrix.goos }}" in
+            windows)
+              strings "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
+                || { echo "::error::nightme-stt has no sherpa native symbols (Windows)"; exit 1; }
+              ;;
+            darwin)
+              nm "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
+                || { echo "::error::nightme-stt has no sherpa native symbols (macOS)"; exit 1; }
+              ;;
+            *)
+              nm -D "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
+                || { echo "::error::nightme-stt has no sherpa native symbols"; exit 1; }
+              ;;
+          esac
           echo "ok: nightme-stt links sherpa native symbols"
 
       - name: Archive

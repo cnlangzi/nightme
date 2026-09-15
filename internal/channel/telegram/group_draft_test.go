@@ -59,29 +59,46 @@ func richMessageBlocks(raw any) []string {
 	return out
 }
 
-// TestAdapter_Send_Group_OutThinking_CreatesDraftMessage asserts that
-// the first OutThinking in a group turn cold-creates a real Telegram
-// message (sendMessage) — no sendMessageDraft, no richTurn chain
-// segment — and that the cold-create carries reply_to_message_id so
-// the DraftMessage hangs under the user's message.
+// TestAdapter_Send_Group_OutThinking_CreatesDraftMessage verifies the
+// uniform flush logic: the first N-1 OutThinking events in a turn
+// compose into the in-memory buffer without firing any Telegram API
+// call. The Nth event (count threshold) is the first flush, which
+// cold-creates the DraftMessage via sendRichMessage. The cold-create
+// carries reply_to_message_id so the DraftMessage hangs under the
+// user's message.
 func TestAdapter_Send_Group_OutThinking_CreatesDraftMessage(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
+	// First 9 events: buffered, no API call fires.
+	for i := 1; i <= 9; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   fmt.Sprintf("buffered thought %d", i),
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
+		t.Fatalf("group must NOT use sendMessageDraft; got %+v", draft)
+	}
+	if sends := callsByMethod(api.Calls, "sendRichMessage"); len(sends) != 0 {
+		t.Fatalf("first 9 events must NOT trigger sendRichMessage (batched); got %d (calls=%+v)",
+			len(sends), api.Calls)
+	}
+
+	// 10th event: trips count threshold, cold-creates via sendRichMessage.
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutThinking,
 		Text:   "considering whether to invoke Read",
 	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
-		t.Fatalf("group must NOT use sendMessageDraft; got %+v", draft)
+		t.Fatalf("send 10: %v", err)
 	}
 	cold := findCallByMethod(api.Calls, "sendRichMessage")
 	if cold == nil {
-		t.Fatalf("expected sendRichMessage cold-create for group DraftMessage; got calls=%+v", api.Calls)
+		t.Fatalf("expected sendRichMessage cold-create on count flush; got calls=%+v", api.Calls)
 	}
 	if cold.Params["reply_to_message_id"] != 1 {
 		t.Fatalf("reply_to_message_id = %v, want 1 (userMsgID)", cold.Params["reply_to_message_id"])
@@ -92,20 +109,20 @@ func TestAdapter_Send_Group_OutThinking_CreatesDraftMessage(t *testing.T) {
 }
 
 // TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace
-// verifies the REPLACE path: once the batch threshold (10 logical
-// events) is hit, the buffered entries flush via editMessageText
-// against the persisted DraftMessageID — NOT a fresh sendRichMessage.
-// The cold-create carries the first event; the editMessageText
-// carries the last event of the window (REPLACE wiped prior buffer
-// entries).
+// verifies the cold-create → edit transition. With the uniform
+// flush logic, the first flush (at 10 events) cold-creates via
+// sendRichMessage; subsequent flushes (at every additional 10
+// events) PATCH via editMessageText. REPLACE semantics: each
+// OutThinking wipes prior entries, so each flush body shows only
+// the last event of its window.
 func TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// 11 OutThinking events: event 1 cold-creates (count resets to 0
-	// after coldCreate), events 2..10 buffer (count climbs 1..9),
-	// event 11 hits count >= 10 and flushes via editMessageText.
-	for i := 1; i <= 11; i++ {
+	// 20 OutThinking events: events 1-10 buffer, event 10 trips count
+	// threshold → sendRichMessage (cold-create). Events 11-20 buffer,
+	// event 20 trips count threshold → editMessageText.
+	for i := 1; i <= 20; i++ {
 		_ = a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
 			Kind:   messages.OutThinking,
@@ -119,12 +136,12 @@ func TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace(t *testing.T) 
 	}
 	edits := callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != 1 {
-		t.Fatalf("expected exactly 1 editMessageText on batch flush, got %d", len(edits))
+		t.Fatalf("expected exactly 1 editMessageText on second batch flush, got %d", len(edits))
 	}
 	// REPLACE semantics: each OutThinking wipes prior entries, so
-	// the flush body shows only the LAST event of the window.
-	if got := richMessageFirstBlockText(edits[0].Params["rich_message"]); got != "💭 thought 11" {
-		t.Fatalf("edit first-block text = %q, want %q (REPLACE: prior body wiped)", got, "💭 thought 11")
+	// the edit body shows only the LAST event of the second window.
+	if got := richMessageFirstBlockText(edits[0].Params["rich_message"]); got != "💭 thought 20" {
+		t.Fatalf("edit first-block text = %q, want %q (REPLACE: prior body wiped)", got, "💭 thought 20")
 	}
 }
 
@@ -134,23 +151,45 @@ func TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace(t *testing.T) 
 // Each rich_turn entry becomes one paragraph block in the rich
 // message envelope; flush body is verified to have two blocks
 // (call + result) instead of one.
+//
+// Under the uniform flush logic, the first flush cold-creates via
+// sendRichMessage; subsequent flushes edit via editMessageText. To
+// exercise the ACCUMULATE editMessageText path this test first
+// forces cold-create via 10 filler events, then sends the
+// Start+End pair (which compose into the buffer with REPLACE+
+// ACCUMULATE) and triggers the second flush via OnPromptEnded
+// (which calls flushLocked with reason="endProcess" — same code
+// path as count/timer flushes).
 func TestAdapter_Send_Group_OutToolEnd_ACCUMULATES_UnderStart(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// Cold-create via first OutToolStart; buffer is wiped after
-	// the coldCreate sendRichMessage.
+	// 10 filler OutThinking events trip the count threshold and
+	// cold-create via sendRichMessage. Buffer is wiped; entry
+	// now has messageID set so subsequent flushes go via
+	// editMessageText.
+	for i := 1; i <= 10; i++ {
+		_ = a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   fmt.Sprintf("filler %d", i),
+		})
+	}
+	if sends := callsByMethod(api.Calls, "sendRichMessage"); len(sends) != 1 {
+		t.Fatalf("filler phase: expected 1 cold-create sendRichMessage, got %d", len(sends))
+	}
+
+	api.Calls = nil
+
+	// Pair 1: OutToolStart REPLACES (entries=[Read/Start]). Pair 2:
+	// OutToolStart REPLACES (entries=[Write/Start]), OutToolEnd
+	// ACCUMULATES under it (entries=[Write/Start, Write/End]).
 	_ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutToolStart,
 		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
 		Text:   "● Read(/tmp/foo.go)",
 	})
-	// Pair 2 in the same post-cold-create window: OutToolStart
-	// REPLACES (entries=[Write/Start]), OutToolEnd ACCUMULATES
-	// under it (entries=[Write/Start, Write/End]). Forcing the
-	// flush via OnPromptEnded → endProcess → flushLocked exercises
-	// the same flush path a count- or timer-based flush would.
 	_ = a.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "tg_" + raw,
 		Kind:   messages.OutToolStart,
@@ -167,7 +206,7 @@ func TestAdapter_Send_Group_OutToolEnd_ACCUMULATES_UnderStart(t *testing.T) {
 
 	edits := callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != 1 {
-		t.Fatalf("expected 1 editMessageText (ACCUMULATE flush), got %d (calls=%+v)", len(edits), api.Calls)
+		t.Fatalf("expected 1 editMessageText (ACCUMULATE endProcess flush), got %d (calls=%+v)", len(edits), api.Calls)
 	}
 	blocks := richMessageBlocks(edits[0].Params["rich_message"])
 	if len(blocks) != 2 {
@@ -182,59 +221,76 @@ func TestAdapter_Send_Group_OutToolEnd_ACCUMULATES_UnderStart(t *testing.T) {
 }
 
 // TestAdapter_Send_Group_NextTurn_CreatesFreshDraftMessage verifies
-// that ensurePlaceholder's per-turn DraftMessageID reset (group
-// ChatKind branch) prevents stale edits to the prior turn's
-// DraftMessage. Turn N+1 must cold-create a new one.
+// that endProcess drops the prior turn's entry from m.entries so
+// turn N+1 can cold-create a fresh DraftMessage rather than
+// editMessageText the now-deleted id. Under the uniform flush
+// logic, "cold-create" happens on the first flush trigger (count
+// threshold) per turn — both turns here use the count trigger.
 func TestAdapter_Send_Group_NextTurn_CreatesFreshDraftMessage(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// Turn 1: think + tool pair.
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "turn 1 thought",
-	})
-	// Force turn-end so the next Out* cold-creates fresh.
+	// Turn 1: 10 OutThinking events trip the count threshold and
+	// cold-create via sendRichMessage. OnPromptEnded flushes the
+	// remaining (empty) buffer and deletes the DraftMessage, then
+	// drops the entry from m.entries.
+	for i := 1; i <= 10; i++ {
+		_ = a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   fmt.Sprintf("turn 1 thought %d", i),
+		})
+	}
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
+	if dels := callsByMethod(api.Calls, "deleteMessage"); len(dels) != 1 {
+		t.Fatalf("turn 1 OnPromptEnded should delete the cold-created DraftMessage; got %d deletes", len(dels))
+	}
 	api.Calls = nil
 
-	// Turn 2: new user message resets state.DraftMessageID; first
-	// OutThinking must cold-create a brand new sendMessage.
-	_ = a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "turn 2 thought",
-	})
+	// Turn 2: 10 OutThinking events for the new turn. The prior
+	// turn's entry was dropped, so the FIRST flush is again a
+	// cold-create (sendRichMessage), not an editMessageText on
+	// the deleted id.
+	for i := 1; i <= 10; i++ {
+		_ = a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   fmt.Sprintf("turn 2 thought %d", i),
+		})
+	}
 
 	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
-		t.Fatalf("turn 2 first event should cold-create a fresh DraftMessage; got %d sendRichMessage (calls=%+v)", len(sends), api.Calls)
+		t.Fatalf("turn 2 cold-create should produce 1 sendRichMessage; got %d (calls=%+v)", len(sends), api.Calls)
 	}
 	if edits := callsByMethod(api.Calls, "editMessageText"); len(edits) != 0 {
-		t.Fatalf("turn 2 first event must NOT edit prior DraftMessage; got %d edits", len(edits))
+		t.Fatalf("turn 2 first flush must NOT edit prior DraftMessage (entry was dropped); got %d edits", len(edits))
 	}
 }
 
 // TestAdapter_Send_Group_DraftMessage_RoutedThroughTopic verifies
 // that when the user is inside a forum topic (topicID > 0), the
-// cold-create carries message_thread_id so the DraftMessage lives
+// first flush carries message_thread_id so the DraftMessage lives
 // in the same topic as the conversation.
 func TestAdapter_Send_Group_DraftMessage_RoutedThroughTopic(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw + ":42",
-		Kind:   messages.OutThinking,
-		Text:   "topic-scoped thought",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
+	// 10 events trip the count threshold and trigger the first
+	// flush (sendRichMessage cold-create).
+	for i := 1; i <= 10; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw + ":42",
+			Kind:   messages.OutThinking,
+			Text:   fmt.Sprintf("topic-scoped thought %d", i),
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 	}
 
 	cold := findCallByMethod(api.Calls, "sendRichMessage")
 	if cold == nil {
-		t.Fatalf("expected sendRichMessage cold-create; got calls=%+v", api.Calls)
+		t.Fatalf("expected sendRichMessage cold-create on count flush; got calls=%+v", api.Calls)
 	}
 	if thread, _ := cold.Params["message_thread_id"].(int); thread != 42 {
 		t.Fatalf("message_thread_id = %v, want 42", cold.Params["message_thread_id"])
@@ -242,10 +298,12 @@ func TestAdapter_Send_Group_DraftMessage_RoutedThroughTopic(t *testing.T) {
 }
 
 // TestAdapter_OnPromptEnded_Group_DeletesDraftMessage verifies the
-// turn-end cleanup: deleteMessage fires for the simulated DraftMessage
-// (sendMessageDraft's auto-disappear analogue). There is no persisted
-// DraftMessageID anymore — the DraftMessage is purely in-memory state —
-// so this test only checks the deleteMessage side of the contract.
+// turn-end cleanup contract under the uniform flush logic: the
+// OnPromptEnded path first flushes any buffered events (via
+// sendRichMessage on the FIRST flush — messageID was 0), then
+// deletes the resulting Telegram message (the simulated
+// DraftMessage's auto-disappear analogue). There is no persisted
+// DraftMessageID — the DraftMessage is purely in-memory state.
 func TestAdapter_OnPromptEnded_Group_DeletesDraftMessage(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
@@ -256,15 +314,21 @@ func TestAdapter_OnPromptEnded_Group_DeletesDraftMessage(t *testing.T) {
 		Text:   "thought to be deleted",
 	})
 
-	// The cold-create has already produced a message_id.
+	// OnPromptEnded → endProcess → flushLocked (sendRichMessage
+	// cold-create) → deleteMessage.
 	a.OnPromptEnded(context.Background(), "tg_"+raw, "1", agent.PromptEndClean)
 
+	sends := callsByMethod(api.Calls, "sendRichMessage")
+	if len(sends) != 1 {
+		t.Fatalf("endProcess must flush via sendRichMessage (first flush, messageID=0); got %d (calls=%+v)",
+			len(sends), api.Calls)
+	}
 	deletes := callsByMethod(api.Calls, "deleteMessage")
 	if len(deletes) != 1 {
 		t.Fatalf("expected 1 deleteMessage on OnPromptEnded, got %d (calls=%+v)", len(deletes), api.Calls)
 	}
 	if msgID, _ := deletes[0].Params["message_id"].(int); msgID == 0 {
-		t.Fatalf("deleteMessage with message_id = 0; want the cold-created id")
+		t.Fatalf("deleteMessage with message_id = 0; want the cold-created id from endProcess flush")
 	}
 	if chat, _ := deletes[0].Params["chat_id"].(string); chat != raw {
 		t.Fatalf("deleteMessage chat_id = %q, want %q", chat, raw)
@@ -295,35 +359,12 @@ func TestAdapter_Send_Group_OutResult_EndsDraftProcess(t *testing.T) {
 	}
 }
 
-// TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn
-// verifies the contract: when the cold-create sendRichMessage fails,
-// streamDraftEvent returns handled=false so the caller falls
-// through to the richTurn chain path. Without this, a transient
-// API error would silently drop the event.
-func TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn(t *testing.T) {
-	a, api := newTestAdapter(t)
-	raw := setupGroupState(t, a, -1001, 0)
-	api.Errors = []error{errors.New("simulated sendRichMessage 400")}
-
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "fallback thought",
-	}); err != nil {
-		// Send itself returns nil; the fallback to richTurn is
-		// internal and silent on the error path.
-		t.Logf("send returned %v (expected nil or wrapped)", err)
-	}
-
-	// The in-memory entry must not have a messageID — the cold-create
-	// failed, so subsequent streamDraftEvent calls would still see
-	// messageID == 0 and retry on the next event (or fall through
-	// after the retry budget is exhausted).
-	entry, ok := a.groupDraft.entries[groupDraftKey(raw, 0, 1)]
-	if ok && entry.messageID != 0 {
-		t.Fatalf("entry.messageID = %d after cold-create failure; want 0", entry.messageID)
-	}
-}
+// (Removed: TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn.
+// The cold-create fast path is gone under the uniform flush logic —
+// every event composes into the buffer, and on flush failure
+// streamDraftEvent returns handled=true (issue #391) so the rich turn
+// path never sees tool/think leakage. There is no longer a "cold-
+// create fails → fall through" branch to verify.)
 
 // TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath
 // verifies the contract: when a flush's editMessageText fails (e.g.
@@ -332,19 +373,16 @@ func TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn(t *testing.
 // lines (`⎿ 🔧 tool → N bytes`) would leak into the final answer
 // message — see issue #391.
 //
-// With batched flush semantics (10 logical events per window), the
-// failing flush fires on the 11th event (count threshold). The
-// recovery flush fires on the 12th event (count was preserved on
-// failure, so it re-trips the threshold immediately).
+// Under the uniform flush logic the cold-create flush fires on the
+// 10th event (sendRichMessage) and subsequent flushes fire on every
+// additional 10 events (editMessageText). The failing flush fires
+// on event 20. The recovery flush fires on event 21 (count was
+// preserved on failure, so the very next event re-trips the
+// threshold).
 func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// Events 1..10: cold-create + buffered (count climbs 1..9). The
-	// 11th event trips the count threshold and triggers the failing
-	// editMessageText; the 12th event triggers the recovery flush.
-	// We poison api.Errors between event 10 (buffered) and event 11
-	// (failing flush) so the cold-create at event 1 succeeds.
 	send := func(text string) {
 		if err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw,
@@ -354,7 +392,12 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 			t.Fatalf("send %q: %v", text, err)
 		}
 	}
-	send("first thought") // event 1: cold-create succeeds.
+
+	// Events 1..10: 10th trips count threshold → sendRichMessage
+	// cold-create succeeds.
+	for i := 1; i <= 10; i++ {
+		send(fmt.Sprintf("cold-create thought %d", i))
+	}
 
 	entry, ok := a.groupDraft.entries[groupDraftKey(raw, 0, 1)]
 	if !ok || entry == nil {
@@ -365,16 +408,16 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 		t.Fatalf("cold-create did not produce a message_id")
 	}
 
-	for i := 2; i <= 10; i++ {
-		send(fmt.Sprintf("buffered thought %d", i))
-	}
-
-	// Event 11 trips count>=10 → flush → editMessageText fails
-	// (Telegram 429 simulation). streamDraftEvent MUST return
-	// handled=true so the caller does NOT route this event into the
-	// rich turn.
+	// Poison api.Errors so the next call (the upcoming count flush
+	// editMessageText) fails with simulated Telegram 429.
 	api.Errors = []error{errors.New("simulated editMessageText 429")}
-	send("failing flush thought")
+
+	// Events 11..20: 20th trips count threshold → editMessageText
+	// fails. The buffer + messageID are preserved so the very next
+	// event can retry.
+	for i := 11; i <= 20; i++ {
+		send(fmt.Sprintf("failing flush thought %d", i))
+	}
 
 	// The messageID must be preserved — the entry is still alive
 	// and ready for the next event to retry on top.
@@ -404,9 +447,10 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 		t.Fatalf("expected 1 sendRichMessage cold-create, got %d", len(sends))
 	}
 
-	// Recovery: api.Errors cleared. The buffered count was preserved
-	// on failure, so the next event re-trips the count threshold
-	// immediately and flushes successfully (no re-cold-create).
+	// Recovery: api.Errors cleared (the single poison was already
+	// consumed). The buffered count was preserved on failure, so the
+	// next event re-trips the count threshold immediately and flushes
+	// successfully (no re-cold-create).
 	api.Errors = nil
 	send("recovery flush thought")
 
@@ -476,20 +520,22 @@ func TestStateStore_ChatKindMigration(t *testing.T) {
 // fires N goroutines that all call Send with the same (chat, topic,
 // userMsgID) simultaneously. The per-entry lock must serialise them
 // so exactly one sendRichMessage cold-create fires and only the
-// count-threshold flush produces a single editMessageText on the
-// same message_id. Without the lock, two goroutines would both see
-// entry.messageID == 0 and both sendRichMessage → two messages in
-// chat.
+// second count-threshold flush produces a single editMessageText on
+// the same message_id. Without the lock, two goroutines would both
+// see entry.messageID == 0 and both sendRichMessage → two messages
+// in chat.
 func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// 11 events: event 1 cold-creates (count resets to 0), events
-	// 2..10 buffer (count climbs 1..9), event 11 trips count>=10
-	// and flushes via editMessageText. The lock-held
-	// streamDraftEvent serialises all 11 calls, so the API sees
-	// exactly 1 cold-create + 1 flush.
-	const N = 11
+	// 20 concurrent events: the first 10 buffer (count climbs 1..10),
+	// the 10th trips the count threshold and flushes via
+	// sendRichMessage (cold-create). Events 11..20 buffer again
+	// (count climbs 1..10), the 20th trips the count threshold and
+	// flushes via editMessageText. The lock-held streamDraftEvent
+	// serialises all 20 calls, so the API sees exactly 1 cold-create
+	// + 1 editMessageText.
+	const N = 20
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
@@ -511,7 +557,7 @@ func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *tes
 	}
 	edits := callsByMethod(api.Calls, "editMessageText")
 	if len(edits) != 1 {
-		t.Fatalf("expected 1 editMessageText (count-threshold flush), got %d", len(edits))
+		t.Fatalf("expected 1 editMessageText (second count-threshold flush), got %d", len(edits))
 	}
 	// All API calls target the same message_id (the cold-create's);
 	// the per-id equality check would need api.Calls to expose
@@ -524,7 +570,7 @@ func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *tes
 // TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo verifies that
 // Send() derives replyAnchor from msg.ReplyTo, not from
 // state.UserMessageID. Setup pins state.UserMessageID="99" but the
-// event carries ReplyTo="42"; the cold-create must anchor to 42.
+// event carries ReplyTo="42"; the cold-create flush must anchor to 42.
 func TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
@@ -539,13 +585,17 @@ func TestAdapter_Send_Group_OutThinking_UsesMsgReplyTo(t *testing.T) {
 		t.Fatalf("putTopic: %v", err)
 	}
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID:  "tg_" + raw,
-		Kind:    messages.OutThinking,
-		Text:    "anchored to msg.ReplyTo",
-		ReplyTo: "42",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
+	// 10 events trip the count threshold and trigger the first
+	// flush (sendRichMessage cold-create).
+	for i := 1; i <= 10; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID:  "tg_" + raw,
+			Kind:    messages.OutThinking,
+			Text:    "anchored to msg.ReplyTo",
+			ReplyTo: "42",
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 	}
 
 	sends := callsByMethod(api.Calls, "sendRichMessage")
@@ -573,13 +623,17 @@ func TestAdapter_Send_Group_FallsBackToStateUserMessageID_WhenReplyToEmpty(t *te
 		t.Fatalf("putTopic: %v", err)
 	}
 
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw,
-		Kind:   messages.OutThinking,
-		Text:   "orphan thought — no ReplyTo",
-		// ReplyTo intentionally empty
-	}); err != nil {
-		t.Fatalf("send: %v", err)
+	// 10 events trip the count threshold and trigger the first
+	// flush (sendRichMessage cold-create).
+	for i := 1; i <= 10; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw,
+			Kind:   messages.OutThinking,
+			Text:   "orphan thought — no ReplyTo",
+			// ReplyTo intentionally empty
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 	}
 
 	sends := callsByMethod(api.Calls, "sendRichMessage")
@@ -600,22 +654,27 @@ func TestAdapter_Send_Group_FallsBackToStateUserMessageID_WhenReplyToEmpty(t *te
 // carrying turn 1's body, or turn 1's late OutToolEnd rewriting
 // turn 2's message_id.
 //
-// Batched-flush caveat: a single late event is now buffered (not
-// flushed immediately), so the per-turn isolation assertion is that
-// no new API call fires at all on the late event — it joins turn
-// 1's existing entry, awaiting the next flush.
+// Under the uniform flush logic, each turn must accumulate 10
+// events before the first flush fires — so the test uses 10
+// OutThinkings per turn to drive cold-creates. A late single event
+// from turn 1 lands in turn 1's buffer (key=userMsgID=10), and the
+// next turn 2 flush is anchored to userMsgID=11 (the state anchor
+// AFTER turn 2's ensurePlaceholder).
 func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// Turn 1: think starts the DraftMessage.
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID:  "tg_" + raw,
-		Kind:    messages.OutThinking,
-		Text:    "turn 1 thought",
-		ReplyTo: "10",
-	}); err != nil {
-		t.Fatalf("turn 1 think: %v", err)
+	// Turn 1: 10 OutThinkings trip the count threshold and cold-create
+	// the DraftMessage anchored to ReplyTo=10.
+	for i := 1; i <= 10; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID:  "tg_" + raw,
+			Kind:    messages.OutThinking,
+			Text:    "turn 1 thought",
+			ReplyTo: "10",
+		}); err != nil {
+			t.Fatalf("turn 1 think %d: %v", i, err)
+		}
 	}
 	sends := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends) != 1 {
@@ -631,7 +690,9 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 	}
 
 	// Simulate turn 2's user message arriving: ensurePlaceholder
-	// runs and overwrites state.UserMessageID to 11.
+	// runs and overwrites state.UserMessageID to 11. It also
+	// cold-creates turn 2's rich turn placeholder (a separate
+	// sendRichMessage — different surface from the group draft).
 	if err := a.ensurePlaceholder(context.Background(), raw, 0, 11, &Message{
 		MessageID: 11,
 		Chat:      Chat{ID: -1001, Type: "supergroup"},
@@ -640,6 +701,8 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 	}
 
 	// Turn 1 late OutToolEnd arrives with ReplyTo=10 (NOT state=11).
+	// It buffers into turn 1's entry — does NOT trigger another flush
+	// (count was reset on the prior cold-create).
 	if err := a.Send(context.Background(), messages.OutboundMessage{
 		ChatID:  "tg_" + raw,
 		Kind:    messages.OutToolEnd,
@@ -651,8 +714,7 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 
 	// Per-turn isolation: the late event goes to turn 1's entry
 	// (ReplyTo=10 → key=userMsgID=10). It does NOT cold-create a new
-	// DraftMessage for turn 2. With batching it is also not flushed
-	// yet, so no editMessageText fires.
+	// DraftMessage for turn 2 and does NOT trigger any new flush.
 	//
 	// Two sendRichMessage calls are expected by this point: (1)
 	// turn 1's DraftMessage cold-create and (2) turn 2's eager rich
@@ -662,17 +724,19 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 		t.Fatalf("turn 1 late event must NOT cold-create a new DraftMessage; sends=%d (want 2)", len(sends))
 	}
 
-	// Now turn 2's OutThinking arrives — it must cold-create a fresh
-	// DraftMessage anchored to 11 (the state.UserMessageID AFTER
-	// ensurePlaceholder for turn 2), not 10.
+	// Now turn 2's 10 OutThinkings arrive — they must cold-create a
+	// fresh DraftMessage anchored to 11 (the state.UserMessageID
+	// AFTER ensurePlaceholder for turn 2), not 10.
 	api.Calls = nil
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID:  "tg_" + raw,
-		Kind:    messages.OutThinking,
-		Text:    "turn 2 thought",
-		ReplyTo: "11",
-	}); err != nil {
-		t.Fatalf("turn 2 think: %v", err)
+	for i := 1; i <= 10; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID:  "tg_" + raw,
+			Kind:    messages.OutThinking,
+			Text:    "turn 2 thought",
+			ReplyTo: "11",
+		}); err != nil {
+			t.Fatalf("turn 2 think %d: %v", i, err)
+		}
 	}
 	sends2 := callsByMethod(api.Calls, "sendRichMessage")
 	if len(sends2) != 1 {
@@ -761,21 +825,25 @@ func TestAdapter_OnPromptEnded_Group_EndProcessSafetyNet(t *testing.T) {
 // TestGroupDraft_EndProcess_DropsEntryFromMap locks the
 // §11.12.11.3 invariant: endProcess MUST remove the per-turn
 // groupDraftEntry from m.entries (not just call deleteMessage), so
-// a late OutToolEnd from the just-ended turn cannot hit a 400
-// "message not found" by editing an already-deleted Telegram
+// a late streamDraftEvent from the just-ended turn cannot hit a
+// 400 "message not found" by editing an already-deleted Telegram
 // message. After endProcess returns, m.entries must not contain
-// the turn's key, and a streamDraftEvent for the same userMsgID
-// must cold-create a fresh DraftMessage (not editMessageText).
+// the turn's key, and the next batch of events for the same
+// userMsgID must cold-create a fresh DraftMessage (not
+// editMessageText the now-deleted id).
 func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 0)
 
-	// Turn 1 cold-creates a DraftMessage.
-	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "first", messages.OutThinking); !handled {
-		t.Fatalf("first call should be handled (cold-create); got handled=false")
+	// Turn 1: 10 streamDraftEvent calls trip the count threshold and
+	// cold-create via sendRichMessage.
+	for i := 1; i <= 10; i++ {
+		if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "first", messages.OutThinking); !handled {
+			t.Fatalf("call %d should be handled; got handled=false", i)
+		}
 	}
 	if sends := callsByMethod(api.Calls, "sendRichMessage"); len(sends) != 1 {
-		t.Fatalf("expected 1 cold-create, got %d", len(sends))
+		t.Fatalf("expected 1 cold-create after 10 events, got %d", len(sends))
 	}
 
 	// Confirm the entry is in m.entries.
@@ -787,7 +855,8 @@ func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 	}
 
 	// Turn 1 ends. endProcess must (a) call deleteMessage and
-	// (b) drop the entry from m.entries.
+	// (b) drop the entry from m.entries. Buffer is empty after the
+	// count flush, so endProcess skips the inner flushLocked call.
 	api.Calls = nil
 	a.groupDraft.endProcess(context.Background(), raw, 0, 10)
 	if dels := callsByMethod(api.Calls, "deleteMessage"); len(dels) == 0 {
@@ -800,19 +869,21 @@ func TestGroupDraft_EndProcess_DropsEntryFromMap(t *testing.T) {
 		t.Fatalf("endProcess MUST remove the entry from m.entries; otherwise a late event for this turn hits editMessageText against the deleted message_id")
 	}
 
-	// A late event for the same turn arrives — must cold-create a
+	// 10 late events for the same turn arrive — must cold-create a
 	// fresh DraftMessage (reply_to_message_id=10 still anchors the
 	// chain under the user's original message), NOT editMessageText
 	// the now-deleted id.
 	api.Calls = nil
-	if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "late event", messages.OutThinking); !handled {
-		t.Fatalf("late event must be handled (fresh cold-create); got handled=false")
+	for i := 1; i <= 10; i++ {
+		if handled, _ := a.groupDraft.streamDraftEvent(context.Background(), raw, 0, 10, "late event", messages.OutThinking); !handled {
+			t.Fatalf("late event %d must be handled (fresh cold-create); got handled=false", i)
+		}
 	}
 	if sends := callsByMethod(api.Calls, "sendRichMessage"); len(sends) != 1 {
-		t.Fatalf("late event after endProcess must cold-create; got %d sendRichMessage", len(sends))
+		t.Fatalf("late events after endProcess must cold-create; got %d sendRichMessage", len(sends))
 	}
 	if edits := callsByMethod(api.Calls, "editMessageText"); len(edits) != 0 {
-		t.Fatalf("late event after endProcess must NOT editMessageText (entry was dropped); got %d edits", len(edits))
+		t.Fatalf("late events after endProcess must NOT editMessageText (entry was dropped); got %d edits", len(edits))
 	}
 }
 

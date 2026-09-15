@@ -1196,11 +1196,28 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 // Callers can ignore the error return (informational). The
 // returned bool is the only signal they need.
 func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, userMsgID int, segment string, kind messages.OutboundKind) (bool, error) {
+	a.logger.Info("telegram: streamDraftEvent entered",
+		"chat_id", rawChatID,
+		"thread_id", topicID,
+		"user_msg_id", userMsgID,
+		"kind", kind.String(),
+	)
 	state, ok := a.state.topic(rawChatID, topicID)
 	if !ok {
 		// No state yet — caller falls through to chain.
+		a.logger.Info("telegram: streamDraftEvent fallthrough (no topic state)",
+			"chat_id", rawChatID,
+			"thread_id", topicID,
+			"user_msg_id", userMsgID,
+			"kind", kind.String(),
+		)
 		return false, nil
 	}
+	a.logger.Info("telegram: streamDraftEvent dispatching",
+		"chat_id", rawChatID,
+		"thread_id", topicID,
+		"chat_kind", state.ChatKind,
+	)
 	switch state.ChatKind {
 	case ChatKindPrivate:
 		chatIDInt, parseErr := strconv.ParseInt(rawChatID, 10, 64)

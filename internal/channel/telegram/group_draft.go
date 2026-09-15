@@ -3,7 +3,6 @@ package telegram
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -19,14 +18,13 @@ import (
 //   - whichever fires first
 //
 // 1 flush / 10s per (chat, topic, turn) stays comfortably below
-// Telegram's 1/s per-chat and 20/min per-group limits. Cold-create
-// failures retry once after 5s; the second failure falls the rest
-// of the turn through to richTurn.
+// Telegram's 1/s per-chat and 20/min per-group limits. Both the first
+// sendRichMessage (cold-create) and subsequent editMessageText flushes
+// follow the same trigger rules — there is no "immediate cold-create
+// on first event" fast path.
 const (
 	groupDraftBatchMaxEvents = 10
 	groupDraftBatchInterval  = 10 * time.Second
-	coldCreateRetryDelay     = 5 * time.Second
-	coldCreateMaxAttempts    = 2 // initial + 1 retry
 )
 
 // groupDraftEntry is the per-turn in-memory state for the simulated
@@ -37,15 +35,15 @@ const (
 // cleared (windowed semantics): Telegram keeps showing the last
 // flushed snapshot until the next window replaces it.
 //
-// messageID is the Telegram message_id returned by the cold-create
-// sendRichMessage; 0 means "not yet sent". In-memory only — there is
+// messageID is the Telegram message_id returned by the first flush
+// (cold-create). 0 means "not yet sent". In-memory only — there is
 // no persisted DraftMessageID, so a daemon restart mid-turn loses
 // the in-progress DraftMessage (acceptable trade-off).
 //
 // All mutable fields are guarded by mu. The lock is held across the
-// network roundtrip on streamDraftEvent / coldCreate / flushLocked
-// so concurrent events on the same turn compose + send in serial
-// order. timer callbacks also acquire mu before touching state.
+// network roundtrip on streamDraftEvent / flushLocked so concurrent
+// events on the same turn compose + send in serial order. timer
+// callbacks also acquire mu before touching state.
 //
 // Per-prompt isolation (see docs §11.12.11.3) is enforced by the
 // groupDraftKey already containing userMsgID: ensureEntry creates a
@@ -54,8 +52,9 @@ const (
 type groupDraftEntry struct {
 	mu sync.Mutex
 
-	// Persistent identity — set by cold-create, survives the
-	// buffer-flush lifecycle.
+	// Persistent identity — set by the first flush (cold-create via
+	// sendRichMessage); survives the buffer-flush lifecycle so
+	// subsequent flushes can PATCH the same Telegram message.
 	messageID int
 
 	// Buffer for the current window. Cleared after each successful
@@ -67,12 +66,6 @@ type groupDraftEntry struct {
 	pendingEventCount int  // logical events since last flush (OutToolStart+End = 1)
 	pendingToolStart  bool // true while an OutToolStart is awaiting its End
 	flushTimer        *time.Timer
-
-	// Cold-create retry state. Set after a failed sendRichMessage;
-	// cleared on the next successful cold-create.
-	coldCreateRetries    int
-	coldCreateRetryTimer *time.Timer
-	hasGivenUpColdCreate bool
 
 	// Captured context for timer callbacks (which fire in their own
 	// goroutine and need to re-acquire mu before touching state).
@@ -117,32 +110,34 @@ func kindToRichBlockKind(k messages.OutboundKind) string {
 //
 // Lifecycle per turn:
 //
-//	OutThinking / OutToolStart / OutToolEnd (first of turn)
-//	    → ensureEntry + compose (window 0)
-//	    → coldCreate sendRichMessage + persist message_id
-//	subsequent events
-//	    → compose into window buffer; pendingEventCount++
-//	    → trigger flush at 10 events or 10s timer
+//	OutThinking / OutToolStart / OutToolEnd
+//	    → ensureEntry + compose into window buffer; pendingEventCount++
+//	    → flush triggered by 10 events or 10s timer
+//	    → first flush: sendRichMessage (cold-create)
+//	    → subsequent flushes: editMessageText(messageID, …)
 //	OutResult / OnPromptEnded
-//	    → flush remaining buffered events
-//	    → deleteMessage + clear state + drop entry
+//	    → flush remaining buffered events (final flush)
+//	    → deleteMessage + drop entry
 //
 // Failure semantics:
 //
-//   - editMessageText failure → buffer preserved, return handled=true
-//     (issue #391 — fall through to richTurn was leaking tool lines)
-//   - cold-create failure → schedule retry after 5s; events during
-//     the wait fall through to richTurn. After maxAttempts (2 total)
-//     the rest of the turn gives up and falls through too.
+//   - sendRichMessage / editMessageText failure → buffer preserved,
+//     return handled=true (issue #391 — fall through to richTurn
+//     was leaking tool lines into the final answer message).
+//   - No retry / no latch: every event accumulates into the buffer;
+//     the next trigger (count or timer, or the next event that
+//     pushes past 10) re-attempts the same flush. A sustained
+//     outage means the user sees a "stale buffer" until the next
+//     successful flush, never a missing event — events are queued
+//     in memory regardless.
 type groupDraftManager struct {
 	api apiClient
 	log *slog.Logger
 	mu  sync.Mutex
 	// entries is keyed by chatID|topicID|userMsgID. Map-level
 	// reads/writes are guarded by mu; per-entry mutation is
-	// guarded by entry.mu (taken by streamDraftEvent / coldCreate /
-	// flushLocked / endProcess for the whole operation, by timer
-	// callbacks for retry / flush).
+	// guarded by entry.mu (taken by streamDraftEvent / flushLocked
+	// / endProcess for the whole operation, by timer callbacks).
 	entries map[string]*groupDraftEntry
 }
 
@@ -176,24 +171,30 @@ func (m *groupDraftManager) ensureEntry(chatID string, topicID int, userMsgID in
 
 // streamDraftEvent applies one OutThinking / OutToolStart /
 // OutToolEnd event to the simulated DraftMessage for this turn:
-// composes the in-memory buffer (windowed) and either cold-creates
-// or flushes via sendRichMessage / editMessageText.
+// composes the in-memory buffer (windowed) and arms the flush
+// triggers. The actual Telegram API call happens in flushLocked
+// when 10 events accumulate or 10s elapse.
 //
 // The boolean mirrors streamDraftEvent's DM-side contract — true
 // means "consumed, do not fall through to the richTurn path".
 //
 // userMsgID is BOTH the entry key (one entry per turn) and the
 // reply_to_message_id anchor on the cold-create sendRichMessage —
-// the DraftMessage visually hangs off the user's message like
-// every other turn message. Per-prompt isolation is enforced by the
+// the DraftMessage visually hangs off the user's message like every
+// other turn message. Per-prompt isolation is enforced by the
 // groupDraftKey already containing userMsgID; the caller is
 // responsible for passing the per-event anchor (msg.ReplyTo), see
 // docs/channel/telegram.md §11.12.11.3.
 func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, userMsgID int, segment string, kind messages.OutboundKind) (bool, error) {
 	if userMsgID <= 0 {
-		// No user message anchor → can't safely cold-create (a
-		// floating message would have nothing to chain under).
-		// Bail to caller fallthrough (richTurn path renders it).
+		// No user message anchor → can't safely reply_to the user's
+		// message. Bail to caller fallthrough (richTurn path renders it).
+		m.log.Info("telegram: streamDraftEvent fallthrough (userMsgID<=0)",
+			"chat_id", rawChatID,
+			"thread_id", topicID,
+			"user_msg_id", userMsgID,
+			"kind", kind.String(),
+		)
 		return false, nil
 	}
 	m.mu.Lock()
@@ -202,16 +203,6 @@ func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID stri
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-
-	if entry.hasGivenUpColdCreate {
-		// Already used our cold-create attempts this turn.
-		return false, nil
-	}
-	if entry.coldCreateRetryTimer != nil {
-		// Waiting for the cold-create retry timer. Fall this event
-		// through to richTurn; the rich surface accumulates it.
-		return false, nil
-	}
 
 	// REPLACE wipes prior body (OutThinking / OutToolStart — single
 	// visual surface for the latest event). ACCUMULATE stacks the
@@ -227,94 +218,33 @@ func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID stri
 	entry.pendingToolStart = (kind == messages.OutToolStart)
 	entry.composeIntoEntriesLocked(segment, kind)
 
-	if entry.messageID == 0 {
-		return m.coldCreate(ctx, entry, rawChatID, topicID, userMsgID)
-	}
+	m.log.Info("telegram: streamDraftEvent buffered",
+		"chat_id", rawChatID,
+		"thread_id", topicID,
+		"user_msg_id", userMsgID,
+		"kind", kind.String(),
+		"pending_event_count", entry.pendingEventCount,
+		"buffered_entries", len(entry.entries),
+		"message_id", entry.messageID,
+	)
 
 	m.startFlushTimerIfIdleLocked(entry)
 	if entry.pendingEventCount >= groupDraftBatchMaxEvents {
-		return m.flushLocked(ctx, entry, rawChatID, topicID)
+		return m.flushLocked(ctx, entry, rawChatID, topicID, "count")
 	}
-	return true, nil
-}
-
-// coldCreate sends the first event as a rich message via
-// sendRichMessage. On failure it schedules a delayed retry; once
-// the retry budget is exhausted the rest of the turn gives up and
-// subsequent streamDraftEvent calls return handled=false (events
-// flow through to richTurn). Caller MUST hold entry.mu.
-func (m *groupDraftManager) coldCreate(ctx context.Context, entry *groupDraftEntry, rawChatID string, topicID int, userMsgID int) (bool, error) {
-	blocksJSON, err := buildParagraphBlocksForEntries(entry.entries)
-	if err != nil {
-		return false, err
-	}
-
-	params := map[string]any{
-		"chat_id":      rawChatID,
-		"rich_message": json.RawMessage(blocksJSON),
-	}
-	if topicID > 0 {
-		params["message_thread_id"] = topicID
-	}
-	if userMsgID > 0 {
-		params["reply_to_message_id"] = userMsgID
-	}
-
-	var result SendMessageResult
-	if err := m.api.call(ctx, "sendRichMessage", params, &result); err != nil {
-		entry.coldCreateRetries++
-		if entry.coldCreateRetries >= coldCreateMaxAttempts {
-			entry.hasGivenUpColdCreate = true
-			m.log.Warn("telegram: group DraftMessage cold-create gave up; rest of turn falls through to richTurn",
-				"chat_id", rawChatID,
-				"thread_id", topicID,
-				"user_msg_id", userMsgID,
-				"attempts", entry.coldCreateRetries,
-				"err", err,
-			)
-		} else {
-			entry.coldCreateRetryTimer = time.AfterFunc(coldCreateRetryDelay, func() {
-				entry.mu.Lock()
-				entry.coldCreateRetryTimer = nil
-				entry.mu.Unlock()
-			})
-			m.log.Warn("telegram: group DraftMessage cold-create failed; retrying after delay",
-				"chat_id", rawChatID,
-				"thread_id", topicID,
-				"user_msg_id", userMsgID,
-				"attempt", entry.coldCreateRetries,
-				"err", err,
-			)
-		}
-		return false, err
-	}
-	if result.MessageID == 0 {
-		entry.coldCreateRetries++
-		entry.hasGivenUpColdCreate = entry.coldCreateRetries >= coldCreateMaxAttempts
-		return false, fmt.Errorf("telegram: sendRichMessage returned empty message_id")
-	}
-	entry.messageID = result.MessageID
-	// No state persistence: the DraftMessage is purely in-memory
-	// per-turn state. A daemon restart mid-turn loses the
-	// in-progress buffer; the next turn starts fresh. This is
-	// deliberate — see commit history for the trade-off.
-	// Window 0 flushed: clear the buffer so the next event starts a
-	// fresh window (windowed semantics — the buffer is "next flush",
-	// not "all of history").
-	entry.entries = entry.entries[:0]
-	entry.pendingEventCount = 0
-	entry.pendingToolStart = false
 	return true, nil
 }
 
 // flushLocked serializes the current entries buffer as a rich
-// message and PATCHes the Telegram message via editMessageText. On
-// success the buffer is cleared (windowed semantics); on failure
-// the buffer is preserved for the next streamDraftEvent to retry
-// on top of (issue #391 — fall through would leak tool result
-// lines into the rich turn body). Caller MUST hold entry.mu.
-func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEntry, rawChatID string, topicID int) (bool, error) {
-	if entry.messageID == 0 || len(entry.entries) == 0 {
+// message and PATCHes the Telegram message via editMessageText (or
+// sendRichMessage for the first flush). On success the buffer is
+// cleared (windowed semantics); on failure the buffer is preserved
+// for the next streamDraftEvent to retry on top of (issue #391 —
+// fall through would leak tool result lines into the rich turn body).
+//
+// Caller MUST hold entry.mu.
+func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEntry, rawChatID string, topicID int, reason string) (bool, error) {
+	if len(entry.entries) == 0 {
 		return true, nil
 	}
 
@@ -325,28 +255,63 @@ func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEn
 
 	params := map[string]any{
 		"chat_id":      rawChatID,
-		"message_id":   entry.messageID,
 		"rich_message": json.RawMessage(blocksJSON),
 	}
 	if topicID > 0 {
 		params["message_thread_id"] = topicID
 	}
 
-	if err := m.api.call(ctx, "editMessageText", params, nil); err != nil {
-		// editMessageText failed: stay on the draft path. The entry
-		// (and messageID) stay intact so the next event retries on
-		// top of the prior buffer. Returning false here would let
-		// the caller fall through to the rich turn path and leak
-		// tool result lines (`⎿ 🔧 tool → N bytes`) into the final
-		// answer message — see issue #391.
-		m.log.Warn("telegram: group DraftMessage edit failed",
+	var method string
+	if entry.messageID == 0 {
+		// First flush: cold-create via sendRichMessage. The
+		// DraftMessage visually hangs off the user's message so it
+		// sits in the same chain as the rich turn placeholder.
+		method = "sendRichMessage"
+		if entry.userMsgID > 0 {
+			params["reply_to_message_id"] = entry.userMsgID
+		}
+		var result SendMessageResult
+		if err := m.api.call(ctx, "sendRichMessage", params, &result); err == nil && result.MessageID > 0 {
+			entry.messageID = result.MessageID
+		} else if err == nil {
+			err = &apiError{Message: "telegram: sendRichMessage returned empty message_id"}
+		}
+	} else {
+		// Subsequent flush: PATCH the existing Telegram message in
+		// place. The rich_message envelope is the same shape as the
+		// cold-create body so the user sees a continuous message.
+		method = "editMessageText"
+		params["message_id"] = entry.messageID
+		err = m.api.call(ctx, "editMessageText", params, nil)
+	}
+
+	if err != nil {
+		// Send failed: stay on the draft path. The entry (and
+		// messageID on subsequent attempts) stays intact so the
+		// next trigger retries on top of the prior buffer. Returning
+		// false here would let the caller fall through to the rich
+		// turn path and leak tool result lines (`⎿ 🔧 tool → N
+		// bytes`) into the final answer message — see issue #391.
+		m.log.Warn("telegram: group DraftMessage flush failed",
 			"chat_id", rawChatID,
 			"thread_id", topicID,
+			"method", method,
 			"message_id", entry.messageID,
+			"blocks", len(entry.entries),
+			"reason", reason,
 			"err", err,
 		)
 		return true, nil
 	}
+
+	m.log.Info("telegram: group DraftMessage flushed",
+		"chat_id", rawChatID,
+		"thread_id", topicID,
+		"method", method,
+		"message_id", entry.messageID,
+		"blocks", len(entry.entries),
+		"reason", reason,
+	)
 	entry.entries = entry.entries[:0]
 	entry.pendingEventCount = 0
 	entry.pendingToolStart = false
@@ -367,7 +332,7 @@ func (m *groupDraftManager) startFlushTimerIfIdleLocked(entry *groupDraftEntry) 
 	entry.flushTimer = time.AfterFunc(groupDraftBatchInterval, func() {
 		entry.mu.Lock()
 		defer entry.mu.Unlock()
-		if entry.pendingEventCount == 0 || entry.messageID == 0 {
+		if entry.pendingEventCount == 0 || len(entry.entries) == 0 {
 			entry.flushTimer = nil
 			return
 		}
@@ -375,15 +340,15 @@ func (m *groupDraftManager) startFlushTimerIfIdleLocked(entry *groupDraftEntry) 
 		defer cancel()
 		// timer fires asynchronously; flushLocked logs + preserves
 		// the buffer on failure, so we don't propagate the error.
-		_, _ = m.flushLocked(ctx, entry, entry.rawChatID, entry.topicID)
+		_, _ = m.flushLocked(ctx, entry, entry.rawChatID, entry.topicID, "timer")
 	})
 }
 
 // endProcess finalizes the simulated DraftMessage for a turn:
 // flushes any buffered events (so the last window isn't lost),
-// deletes the underlying Telegram message, clears the persisted
-// state, and drops the in-memory entry. Mirrors the DM draft's
-// auto-disappear-on-real-message behavior (#383).
+// deletes the underlying Telegram message, and drops the in-memory
+// entry. Mirrors the DM draft's auto-disappear-on-real-message
+// behavior (#383).
 //
 // Safe to call when no DraftMessage exists for the turn (no-op).
 // Called from adapter.OnPromptEnded (safety net for turns without
@@ -408,21 +373,17 @@ func (m *groupDraftManager) endProcess(ctx context.Context, rawChatID string, to
 		return
 	}
 	entry.mu.Lock()
-	// Stop both timers before flush so a stale timer doesn't fire
+	// Stop the timer before flush so a stale timer doesn't fire
 	// after endProcess has deleted the message.
 	if entry.flushTimer != nil {
 		entry.flushTimer.Stop()
 		entry.flushTimer = nil
 	}
-	if entry.coldCreateRetryTimer != nil {
-		entry.coldCreateRetryTimer.Stop()
-		entry.coldCreateRetryTimer = nil
-	}
 	// Flush any buffered events first so the user sees the final
 	// window before we delete the message. Failure is non-fatal —
 	// the buffer is about to be discarded with the entry.
-	if entry.messageID > 0 && entry.pendingEventCount > 0 {
-		_, _ = m.flushLocked(ctx, entry, rawChatID, topicID)
+	if len(entry.entries) > 0 {
+		_, _ = m.flushLocked(ctx, entry, rawChatID, topicID, "endProcess")
 	}
 	msgID := entry.messageID
 	entry.mu.Unlock()

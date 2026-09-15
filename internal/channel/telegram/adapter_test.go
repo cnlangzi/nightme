@@ -2588,25 +2588,29 @@ func TestAdapter_Send_DM_OutToolEnd_StreamsToDraft(t *testing.T) {
 func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
 	// Groups (basic + forum supergroup) never use sendMessageDraft
 	// — the API rejects it (Bad Request). They take the simulated
-	// DraftMessage path via group_draft.go instead: a real
-	// sendRichMessage cold-create + editMessageText subsequent. The
-	// cold-create carries reply_to_message_id=userMsgID so the
-	// DraftMessage visually anchors under the user's message.
+	// DraftMessage path via group_draft.go instead. Under the
+	// uniform flush logic, the first flush (count threshold) goes
+	// through sendRichMessage (cold-create); subsequent flushes go
+	// through editMessageText. The cold-create carries
+	// reply_to_message_id=userMsgID so the DraftMessage visually
+	// anchors under the user's message.
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw + ":42",
-		Kind:   messages.OutThinking,
-		Text:   "thinking text",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
+	for i := 1; i <= 10; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw + ":42",
+			Kind:   messages.OutThinking,
+			Text:   "thinking text",
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 	}
 	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
 		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
 	}
 	coldCreate := findCallByMethod(api.Calls, "sendRichMessage")
 	if coldCreate == nil {
-		t.Fatalf("group first event should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
+		t.Fatalf("group first flush should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
 	}
 	if reply, _ := coldCreate.Params["reply_to_message_id"].(int); reply != 1 {
 		t.Fatalf("DraftMessage cold-create reply_to_message_id = %v, want 1 (userMsgID)", coldCreate.Params["reply_to_message_id"])
@@ -2617,24 +2621,27 @@ func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
 }
 
 func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
-	// Same path as OutThinking: group first event cold-creates the
-	// simulated DraftMessage (sendRichMessage + reply_to_message_id).
+	// Same path as OutThinking: group's first flush (count threshold)
+	// cold-creates the simulated DraftMessage (sendRichMessage +
+	// reply_to_message_id).
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw + ":42",
-		Kind:   messages.OutToolStart,
-		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
-		Text:   "● Read(/tmp/foo.go)",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
+	for i := 1; i <= 10; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw + ":42",
+			Kind:   messages.OutToolStart,
+			Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+			Text:   "● Read(/tmp/foo.go)",
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 	}
 	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
 		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
 	}
 	coldCreate := findCallByMethod(api.Calls, "sendRichMessage")
 	if coldCreate == nil {
-		t.Fatalf("group first OutToolStart should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
+		t.Fatalf("group first flush should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
 	}
 }
 

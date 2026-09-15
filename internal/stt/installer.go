@@ -350,11 +350,11 @@ type ActivateOptions struct {
 // Fetch+Activate under the hood.
 func (i *Installer) Activate(fetch *FetchResult, opts ActivateOptions) (*InstallResult, error) {
 	res := &InstallResult{
-		WorkerTag: fetch.Worker.Tag,
-		ModelTag:  fetch.Model.Tag,
-		WorkerPath: workerInstallPath(i.dataDir, fetch.Worker.Binary),
+		WorkerTag:     fetch.Worker.Tag,
+		ModelTag:      fetch.Model.Tag,
+		WorkerPath:    workerInstallPath(i.dataDir, fetch.Worker.Binary),
 		WorkerVersion: fetch.Worker.Tag,
-		ModelDir:   modelInstallPath(i.dataDir),
+		ModelDir:      modelInstallPath(i.dataDir),
 	}
 	if fetch.WorkerStaging != "" {
 		res.WorkerInstalled = true

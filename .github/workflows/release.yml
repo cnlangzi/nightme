@@ -138,215 +138,6 @@ jobs:
             os: windows-11-arm
             archive: zip
             binary: nightme.exe
-<<<<<<< HEAD
-  # nightme-stt builds a SEPARATE artifact per OS/arch so
-  # users who only need the main `nightme` binary don't pay
-  # for the CGO worker. The worker is what `nightme stt
-  # install` fetches from this release and drops under
-  # `~/.nightme/stt/bin/`.
-  #
-  # sherpa-onnx-go-{linux,macos,windows} ships only shared
-  # libs (.so/.dylib/.dll) under `lib/<triple>/`. We bundle
-  # the matching trio alongside the binary and link with
-  # `-Wl,-rpath,$ORIGIN/lib` so the published archive is
-  # self-contained at run time — no system libsherpa /
-  # libonnxruntime required.
-  stt:
-    name: Build STT worker (${{ matrix.goos }}/${{ matrix.goarch }})
-    needs: []
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            os: ubuntu-latest
-            archive: tar.gz
-            binary: nightme-stt
-            lib_subdir: x86_64-unknown-linux-gnu
-          - goos: linux
-            goarch: arm64
-            os: ubuntu-24.04-arm
-            archive: tar.gz
-            binary: nightme-stt
-            lib_subdir: aarch64-unknown-linux-gnu
-          - goos: darwin
-            goarch: arm64
-            os: macos-latest
-            archive: tar.gz
-            binary: nightme-stt
-            lib_subdir: aarch64-apple-darwin
-          - goos: windows
-            goarch: amd64
-            os: windows-latest
-            archive: zip
-            binary: nightme-stt.exe
-            lib_subdir: x86_64-w64-mingw32
-          - goos: windows
-            goarch: arm64
-            os: windows-11-arm
-            archive: zip
-            binary: nightme-stt.exe
-            lib_subdir: aarch64-w64-mingw32
-=======
-      # nightme-stt builds a SEPARATE artifact per OS/arch so
-      # users who only need the main `nightme` binary don't pay
-      # for the CGO worker (~6 MB + sherpa-onnx native lib
-      # statically linked). The worker is what `nightme stt
-      # install` fetches from this release and drops under
-      # `~/.nightme/stt/bin/` (issue #381 §5/§8).
-      #
-      # Native-lib bundling is automatic: github.com/k2-fsa/
-      # sherpa-onnx-go-{linux,macos,windows} carries the
-      # platform .a/.dylib/.lib inside the Go module, so
-      # `CGO_ENABLED=1 go build -tags cgo_sherpa` produces a
-      # self-contained binary with no system .so/.dylib/.dll
-      # dependency at run time. We do NOT need a separate
-      # runtime layout directory on disk; the binary is the
-      # whole payload.
-      stt:
-        name: Build STT worker (${{ matrix.goos }}/${{ matrix.goarch }})
-        needs: []
-        runs-on: ${{ matrix.os }}
-        strategy:
-          fail-fast: false
-          matrix:
-            include:
-              - goos: linux
-                goarch: amd64
-                os: ubuntu-latest
-                archive: tar.gz
-                binary: nightme-stt
-              - goos: linux
-                goarch: arm64
-                os: ubuntu-24.04-arm
-                archive: tar.gz
-                binary: nightme-stt
-              # darwin/arm64: native build on macos-latest (Apple Silicon).
-              - goos: darwin
-                goarch: arm64
-                os: macos-latest
-                archive: tar.gz
-                binary: nightme-stt
-              # darwin/amd64: CGO is fine because the matrix build
-              # runs on the actual macos-13 (Intel) runner when
-              # available; if not, fall back to macos-latest (Apple
-              # Silicon) with cross-compile + CGO_ENABLED=0.
-              - goos: darwin
-                goarch: amd64
-                os: macos-13
-                archive: tar.gz
-                binary: nightme-stt
-              # Windows: zip + .exe suffix.
-              - goos: windows
-                goarch: amd64
-                os: windows-latest
-                archive: zip
-                binary: nightme-stt.exe
-              - goos: windows
-                goarch: arm64
-                os: windows-11-arm
-                archive: zip
-                binary: nightme-stt.exe
-        steps:
-          - uses: actions/checkout@v5
-
-          - uses: actions/setup-go@v6
-            with:
-              go-version-file: go.mod
-              cache: true
-
-          # Mint a short version like "v0.5.1-12-gabc1234-dirty"
-          # from git. We bake it into the binary via -ldflags
-          # so `nightme-stt --version` matches the parent
-          # `nightme --version` byte-for-byte.
-          - name: Mint version metadata
-            id: meta
-            shell: bash
-            run: |
-              set -euo pipefail
-              if VERSION="$(git describe --tags --always --dirty 2>/dev/null)"; then
-                echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-              else
-                echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
-              fi
-              echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
-          # Build with the cgo_sherpa build tag so the real
-          # sherpa-onnx-go binding is linked in. The default
-          # build (no tag) compiles only the ffmpeg decoder +
-          # notReadyRecognizer stub; we never publish that.
-          - name: Build nightme-stt
-            env:
-              GOOS: ${{ matrix.goos }}
-              GOARCH: ${{ matrix.goarch }}
-              CGO_ENABLED: "1"
-              LDFLAGS: -X github.com/cnlangzi/nightme/internal/version.Version=${{ steps.meta.outputs.version }} \
-                        -X github.com/cnlangzi/nightme/internal/version.GitCommit=${{ steps.meta.outputs.commit }} \
-                        -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            shell: bash
-            run: |
-              set -euo pipefail
-              # `make build-stt` already wires CGO_ENABLED=1 and
-              # -tags cgo_sherpa; we just override LDFLAGS via
-              # the env var. The Makefile default embeds its own
-              # LDFLAGS; we want the per-matrix commit info
-              # here, so we reach around it and call `go build`
-              # directly.
-              go build -tags cgo_sherpa -ldflags "$LDFLAGS" \
-                -o "bin/${{ matrix.binary }}" ./cmd/nightme-stt
-
-              # The cgo_sherpa build statically links
-              # sherpa-onnx native lib into the binary. A
-              # successful `go build` does NOT by itself prove
-              # the C bindings survived cgo's symbol
-              # resolution — verify before archiving.
-              if [ "$(uname)" = "Darwin" ]; then
-                nm "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
-                  || { echo "::error::nightme-stt has no sherpa native symbols (macOS)"; exit 1; }
-              else
-                nm -D "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \
-                  || { echo "::error::nightme-stt has no sherpa native symbols"; exit 1; }
-              fi
-              echo "ok: nightme-stt links sherpa native symbols"
-
-          - name: Archive
-            env:
-              GOOS: ${{ matrix.goos }}
-              GOARCH: ${{ matrix.goarch }}
-              ARCHIVE: ${{ matrix.archive }}
-            shell: bash
-            run: |
-              set -euo pipefail
-              VERSION="${{ steps.meta.outputs.version }}"
-              STAGE="dist/stage/${GOOS}-${GOARCH}-stt"
-              mkdir -p "$STAGE"
-              cp "bin/${{ matrix.binary }}" "$STAGE/${{ matrix.binary }}"
-              cp LICENSE   "$STAGE/LICENSE"
-              cp README.md "$STAGE/README.md"
-              case "$ARCHIVE" in
-                tar.gz)
-                  tar -C "$STAGE" -czf \
-                    "dist/nightme-stt_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
-                    ${{ matrix.binary }} LICENSE README.md
-                  ;;
-                zip)
-                  python3 -m zipfile -c \
-                    "dist/nightme-stt_${VERSION}_${GOOS}_${GOARCH}.zip" \
-                    "$STAGE/${{ matrix.binary }}" \
-                    "$STAGE/LICENSE" \
-                    "$STAGE/README.md"
-                  ;;
-              esac
-
-          - name: Upload build artifact
-            uses: actions/upload-artifact@v6
-            with:
-              name: nightme-stt-${{ matrix.goos }}-${{ matrix.goarch }}
-              path: dist/nightme-stt_*.${{ matrix.archive }}
-              if-no-files-found: error
->>>>>>> 7249018 (feat(stt): wire real install/update flow via GitHub Releases)
     steps:
       - uses: actions/checkout@v5
 
@@ -355,95 +146,156 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Mint version metadata
+      # GTK3 + AppIndicator dev headers for the -gui variant's CGo
+      # dependency. The DEFAULT Linux binary does not need these
+      # (it is built CGO_ENABLED=0 with the tray compiled out), but
+      # the same runner builds both, so we install unconditionally
+      # for linux.
+      #
+      # Condition is on matrix.goos, NOT matrix.os: linux/arm64
+      # runs on ubuntu-24.04-arm, so an `== 'ubuntu-latest'` test
+      # would silently skip the install there and fail the -gui
+      # link step.
+      - name: Install systray build deps (Linux)
+        if: matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgtk-3-dev libayatana-appindicator3-dev
+
+      # Pre-install go-winres on Windows BEFORE build.bat runs.
+      # build.bat's own install path (download deps, set NM_GOPATH,
+      # refresh PATH, then `where go-winres`) is fragile: it shells
+      # out to a nested `for /f` on the result of `go env GOPATH`,
+      # and on a cold windows-11-arm runner that lookup has been
+      # observed to return empty (so `where go-winres` keeps
+      # failing even though `go install` wrote the binary to
+      # %GOPATH%\bin). Doing the install in the workflow itself —
+      # where we control PATH directly via `$GITHUB_PATH` — sidesteps
+      # the cmd's PATH-refresh dance entirely.
+      - name: Install go-winres (Windows)
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # Delegate to the canonical build entry points so the release
+      # binary is byte-for-byte what `make build` / `build.bat`
+      # produces locally:
+      #   - LDFLAGS: VERSION, GIT_COMMIT, BUILD_DATE baked in via
+      #     the Makefile (and the matching section in build.bat)
+      #   - Windows: go-winres injects logo.ico + manifest.xml as
+      #     cmd/nightme/rsrc_windows_*.syso (auto-linked)
+      #   - macOS: tray-assets generates trayTemplate.icns, and
+      #     app-bundle wraps bin/nightme into dist/NightMe.app
+      #   - Linux: tray-assets generates tray.png
+      # A bare `go build` here would silently drop every embed step
+      # and the release binary would have no icon, no manifest, and
+      # no version metadata — three independent regressions in one
+      # missing line. shell: bash so the same script works on all
+      # three runners (Git Bash is preinstalled on windows-latest).
+      #
+      # GOOS/GOARCH are exported so the Makefile's host-tracking
+      # defaults cannot silently produce a wrong-arch binary if the
+      # matrix's runner label ever drifts away from the target arch.
+      #
+      # GO_TAGS / CGO_ENABLED honor the matrix entries: darwin/amd64
+      # sets `notray` and `CGO_ENABLED=0` to build the tray-less
+      # cross-compiled default binary (see the matrix entry comment
+      # for why cross-compile cannot engage CGo on macos-latest).
+      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GO_TAGS: ${{ matrix.go_tags }}
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ./build.bat
+          elif [ "${{ matrix.goos }}" = "darwin" ]; then
+            # macOS ships the .app bundle alongside the bare
+            # binary so Finder-installed users get the proper
+            # menu-bar icon without having to run `make
+            # app-bundle` themselves.
+            make build
+            make app-bundle
+          else
+            # Linux builds TWO binaries (see the matrix comment):
+            #
+            #   bin/nightme     default. CGO_ENABLED=0 forces a
+            #                   fully static executable — with the
+            #                   tray compiled out, systray is the
+            #                   only CGo dependency in the tree, so
+            #                   this links no shared objects at all
+            #                   and runs on any Linux host.
+            #   bin/nightme-gui -tags gui. Dynamically links GTK3 +
+            #                   AppIndicator for the tray icon.
+            #
+            # Order matters: build the static one FIRST. `make
+            # build-gui` recurses into `make build` with an
+            # overridden BIN_NAME, so running it second cannot
+            # clobber bin/nightme.
+            CGO_ENABLED=0 make build
+            make build-gui
+
+            # Fail the release rather than ship the #295 regression
+            # again: the default artifact must not carry a GTK or
+            # AppIndicator DT_NEEDED entry. `file` is used instead
+            # of ldd for the static assertion because ldd exits
+            # non-zero on a static binary.
+            if ! file bin/nightme | grep -q "statically linked"; then
+              echo "::error::bin/nightme is not statically linked — CGO_ENABLED=0 did not take effect"
+              file bin/nightme
+              exit 1
+            fi
+            if ldd bin/nightme 2>&1 | grep -qiE "ayatana|gtk-3"; then
+              echo "::error::default Linux binary links GTK/AppIndicator (regression of #295)"
+              ldd bin/nightme
+              exit 1
+            fi
+          fi
+
+      - name: Stage archive
         id: meta
         shell: bash
         run: |
           set -euo pipefail
-          if VERSION="$(git describe --tags --always --dirty 2>/dev/null)"; then
-            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="dist/stage/${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "$STAGE"
+          cp "bin/${{ matrix.binary }}" "$STAGE/${{ matrix.binary }}"
+          cp LICENSE  "$STAGE/LICENSE"
+          cp README.md "$STAGE/README.md"
+          # macOS: also stage the .app bundle so the tar.gz
+          # archive carries it. The dedicated .app-only zip is
+          # produced by the Archive step below.
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            if [ -d "dist/NightMe.app" ]; then
+              cp -R "dist/NightMe.app" "$STAGE/NightMe.app"
+            else
+              echo "::error::dist/NightMe.app missing after 'make app-bundle' (build step did not run app-bundle?)"
+              exit 1
+            fi
           fi
-          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
-      # Locate the platform-specific sherpa-onnx-go sub-module so
-      # we can copy the matching .so/.dylib/.dll into the
-      # archive. The module path is stable across releases
-      # because Go module caching keeps the same dir name.
-      - name: Locate sherpa-onnx-go libs
-        id: loc
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The cgo build expects SRCDIR/lib/<triple>/<libs>.
-          # Module path is the same on every runner; we just
-          # need to resolve $GOMODCACHE to the actual root.
-          GOMOD=$(go env GOMODCACHE)
-          TRIPLE="${{ matrix.lib_subdir }}"
-          LIB_DIR="${GOMOD}/github.com/k2-fsa/sherpa-onnx-go-${GOOS/ windows/windows}@$(go list -m -f '{{.Version}}' github.com/k2-fsa/sherpa-onnx-go-${GOOS/ windows/windows})/lib/${TRIPLE}"
-          # macOS Go uses "darwin" as GOOS; the per-arch
-          # triple is "aarch64-apple-darwin".
-          if [ "${GOOS}" = "darwin" ]; then
-            LIB_DIR="${GOMOD}/github.com/k2-fsa/sherpa-onnx-go-macos@$(go list -m -f '{{.Version}}' github.com/k2-fsa/sherpa-onnx-go-macos)/lib/aarch64-apple-darwin"
+          # Linux: stage the tray-enabled variant into its own
+          # directory. The binary is renamed back to plain
+          # `nightme` so a user who wants the tray can extract the
+          # -gui archive straight over an existing install without
+          # renaming anything or fixing up their PATH.
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            if [ ! -f "bin/nightme-gui" ]; then
+              echo "::error::bin/nightme-gui missing after 'make build-gui'"
+              exit 1
+            fi
+            GUI_STAGE="dist/stage/${{ matrix.goos }}-${{ matrix.goarch }}-gui"
+            mkdir -p "$GUI_STAGE"
+            cp bin/nightme-gui "$GUI_STAGE/nightme"
+            cp LICENSE   "$GUI_STAGE/LICENSE"
+            cp README.md "$GUI_STAGE/README.md"
           fi
-          if [ "${GOOS}" = "windows" ]; then
-            LIB_DIR="${GOMOD}/github.com/k2-fsa/sherpa-onnx-go-windows@$(go list -m -f '{{.Version}}' github.com/k2-fsa/sherpa-onnx-go-windows)/lib/${TRIPLE}"
-          fi
-          if [ ! -d "${LIB_DIR}" ]; then
-            echo "::error::sherpa-onnx-go libs not found at ${LIB_DIR}"
-            exit 1
-          fi
-          echo "lib_dir=${LIB_DIR}" >> "$GITHUB_OUTPUT"
-
-      # Build with cgo_sherpa + rpath baked to $ORIGIN/lib.
-      # The platform libs (sherpa-onnx-c-api, onnxruntime) are
-      # copied into STAGE/lib/ so the relative rpath resolves
-      # at run time without requiring system packages.
-      - name: Build nightme-stt
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "1"
-          CGO_LDFLAGS: -Wl,-rpath,$ORIGIN/lib
-          LDFLAGS: -X github.com/cnlangzi/nightme/internal/version.Version=${{ steps.meta.outputs.version }}                     -X github.com/cnlangzi/nightme/internal/version.GitCommit=${{ steps.meta.outputs.commit }}                     -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        shell: bash
-        run: |
-          set -euo pipefail
-          go build -tags cgo_sherpa -ldflags "$LDFLAGS"             -o "bin/${{ matrix.binary }}" ./cmd/nightme-stt
-          # Confirm the C binding actually got linked.
-          if [ "$(uname)" = "Darwin" ]; then
-            nm "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null               || { echo "::error::nightme-stt has no sherpa native symbols (macOS)"; exit 1; }
-          else
-            nm -D "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null               || { echo "::error::nightme-stt has no sherpa native symbols"; exit 1; }
-          fi
-          echo "ok: nightme-stt links sherpa native symbols"
-
-      # Stage binary + libs side-by-side so the rpath resolves
-      # at run time. STAGE/lib/ matches the $ORIGIN/lib rpath
-      # baked at link time.
-      - name: Stage
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          ARCHIVE: ${{ matrix.archive }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${{ steps.meta.outputs.version }}"
-          STAGE="dist/stage/${GOOS}-${GOARCH}-stt"
-          mkdir -p "${STAGE}/lib"
-          cp "bin/${{ matrix.binary }}" "${STAGE}/${{ matrix.binary }}"
-          cp -R "${{ steps.loc.outputs.lib_dir }}/." "${STAGE}/lib/"
-          cp LICENSE   "${STAGE}/LICENSE"
-          cp README.md "${STAGE}/README.md"
-          # Verify the libs are actually there. Failure here
-          # means the cgo module dropped support for this arch
-          # and we should drop the matrix leg.
-          if [ -z "$(ls -A "${STAGE}/lib" | grep -E '\.(so|dylib|dll)$')" ]; then
-            echo "::error::no shared libs copied for ${GOOS}/${GOARCH}"
-            exit 1
-          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Archive
         env:
@@ -454,26 +306,75 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
-          STAGE="dist/stage/${GOOS}-${GOARCH}-stt"
+          STAGE="dist/stage/${GOOS}-${GOARCH}"
           case "$ARCHIVE" in
             tar.gz)
-              tar -C "$STAGE" -czf                 "dist/nightme-stt_${VERSION}_${GOOS}_${GOARCH}.tar.gz"                 ${{ matrix.binary }} lib LICENSE README.md
+              # macOS: include the .app bundle alongside the
+              # bare binary. Linux: just the binary.
+              if [ "${GOOS}" = "darwin" ]; then
+                tar -C "$STAGE" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                  ${{ matrix.binary }} NightMe.app LICENSE README.md
+              else
+                tar -C "$STAGE" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                  ${{ matrix.binary }} LICENSE README.md
+              fi
+              # Linux-only: the tray-enabled companion archive.
+              # Same layout and same inner binary name as the
+              # default archive; only the tarball name differs, so
+              # install.sh keeps resolving the default (tray-less)
+              # asset with no change and users opt in to the tray
+              # by downloading the -gui archive explicitly.
+              if [ "${GOOS}" = "linux" ]; then
+                tar -C "dist/stage/${GOOS}-${GOARCH}-gui" -czf \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}-gui.tar.gz" \
+                  nightme LICENSE README.md
+              fi
+              # macOS-only: a separate .app-only zip for
+              # Finder-native install. macOS users typically
+              # double-click the .zip in Safari → drag the
+              # extracted .app to /Applications. The
+              # tar.gz's embedded NightMe.app also works
+              # but requires the user to know to extract
+              # the .app; .zip is the discoverable path.
+              if [ "${GOOS}" = "darwin" ]; then
+                python3 -m zipfile -c \
+                  "dist/nightme_${VERSION}_${GOOS}_${GOARCH}-app.zip" \
+                  "$STAGE/NightMe.app"
+              fi
               ;;
             zip)
-              python3 -m zipfile -c                 "dist/nightme-stt_${VERSION}_${GOOS}_${GOARCH}.zip"                 "$STAGE/${{ matrix.binary }}"                 "$STAGE/lib"                 "$STAGE/LICENSE"                 "$STAGE/README.md"
+              # python3 is preinstalled on the three hosted runners
+              # (Windows ships it as both `python` and `python3`).
+              # Using it avoids needing the `zip` apt package on
+              # Linux and PowerShell Compress-Archive on Windows.
+              python3 -m zipfile -c \
+                "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.zip" \
+                "$STAGE/${{ matrix.binary }}" \
+                "$STAGE/LICENSE" \
+                "$STAGE/README.md"
               ;;
           esac
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v6
         with:
-          name: nightme-stt-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/nightme-stt_*.${{ matrix.archive }}
+          name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/nightme_*.${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload .app bundle (macOS only)
+        if: matrix.goos == 'darwin'
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}-app
+          path: dist/nightme_*-app.zip
           if-no-files-found: error
 
   release:
     name: Publish GitHub Release
-    needs: [build, stt]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -485,30 +386,9 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-<<<<<<< HEAD
-          # Hash the main `nightme_…` and the worker
-          # `nightme-stt_…` archives. The dash in
-          # `nightme-stt_*` is the whole reason the original
-          # single-glob didn't match — a glob with `nightme_*`
-          # requires an underscore right after `nightme`, and
-          # `nightme-stt_*` has a dash.
-          sha256sum \
-            nightme_*.tar.gz nightme_*.zip \
-            nightme-stt_*.tar.gz nightme-stt_*.zip \
-            > SHA256SUMS.txt
-=======
           # sha256sum is content-addressed, so it handles both
-          # .tar.gz and .zip files in the same pass. The
-          # `nightme-stt_*` glob covers the STT worker artifacts
-          # produced by the parallel `stt` job; `nightme_*` (no
-          # dash before `_stt`) is also matched because the
-          # nightme-stt filenames start with `nightme-stt_` —
-          # but we only want to hash files we publish, so we
-          # constrain to `nightme_*.tar.gz` + `nightme_*.zip`
-          # (which the STT filenames satisfy as
-          # `nightme-stt_<v>_<goos>_<goarch>.<ext>`).
+          # .tar.gz and .zip files in the same pass.
           sha256sum nightme_*.tar.gz nightme_*.zip > SHA256SUMS.txt
->>>>>>> 7249018 (feat(stt): wire real install/update flow via GitHub Releases)
           cat SHA256SUMS.txt
 
       - name: Publish release

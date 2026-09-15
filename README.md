@@ -89,7 +89,7 @@ the way.
 | Channel | Status |
 |---|---|
 | **Feishu** (China) / **Lark** (International) | ⭐ Recommended — `nightme login feishu` |
-| **Telegram** | Beta — `nightme login telegram` |
+| **Telegram** | Ready — `nightme login telegram` |
 | **Slack** | In development — `nightme login slack` |
 
 ## Prerequisites
@@ -607,7 +607,7 @@ internal/
   bridge/                          # Bridge abstraction, one sub-package per agent
     acp/  claudecode/  codex/  copilot/  cursor/  dsh/  opencode/  pi/  pty/
   channel/                         # Channel interface
-    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram beta; slack in development)
+    bot/  echo/  feishu/  slack/  telegram/   # adapters (feishu production; telegram ready; slack in development)
   chatsession/                     # ChatSession + pool manager + persistence
   cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory

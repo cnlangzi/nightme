@@ -27,31 +27,41 @@ var draftIDCounter atomic.Int32
 
 // draftStreamer accumulates OutThinking / OutToolStart / OutToolEnd
 // events into a single animated draft via sendMessageDraft (Bot API
-// 10.3+). Reusing the same draft_id across calls causes the client
-// to animate the draft in place rather than replace it, giving a
-// ChatGPT-style streaming view of agent activity.
+// 10.3+). Reusing the same draft_id across calls within a turn
+// causes the client to animate the draft in place rather than
+// replace it, giving a ChatGPT-style streaming view of agent
+// activity.
 //
-// Lifecycle: one streamer per (chat_id, thread_id), GLOBAL across
-// turns. Allocated on first draft-eligible event; the streamer
-// object stays alive in the index for the daemon's lifetime.
-// draft_id is allocated once and reused across turns — when a
-// turn ends with a real message, the server pushes the draft out
-// and a fresh event with the same draft_id naturally creates a
-// new draft. We deliberately do NOT reset state per turn: a
-// global draft gives simpler semantics (one draft per chat, no
-// turn-boundary races between late events and the next turn's
-// reset).
+// Lifecycle: one streamer per (chat_id, thread_id, user_msg_id) —
+// per-turn scope. Allocated on first draft-eligible event; the
+// streamer object lives until endProcess evicts it from the index
+// (called from Send's OutResult branch and OnPromptEnded). Each
+// turn gets a fresh draft_id; cross-turn reuse of the streamer
+// object would conflate back-to-back user prompts and is explicitly
+// not supported (see docs/channel/telegram.md §11.12.11.3 for the
+// per-prompt isolation contract, mirrored from group_draft.go).
+//
+// Per-turn eviction matters because:
+//   - draft_id is the server-side key into the draft surface; two
+//     turns sharing draft_id would render as one animated draft.
+//   - The failure latch is per-turn: a Bot API < 10.3 bot should
+//     keep dropping events for the failing turn, but a later turn
+//     (with a fresh streamer) should still be allowed to try.
+//   - Memory: a process that runs many turns must not accumulate
+//     dead streamers indefinitely.
 //
 // Scope: DM only (chat.type == "private"). Groups / forum topics
-// never consult this streamer — they go straight to the v9 chain.
-// The Send() switch in adapter.go is responsible for the routing
-// decision; this struct just streams when asked.
+// never consult this streamer — they go straight to the v9 chain
+// via group_draft.go. The Send() switch in adapter.go is
+// responsible for the routing decision; this struct just streams
+// when asked.
 type draftStreamer struct {
 	api apiClient
 	log *slog.Logger
 
-	chatID   int64
-	threadID int
+	chatID    int64
+	threadID  int
+	userMsgID int // turn anchor; the streamer belongs to exactly one user message
 
 	mu      sync.Mutex
 	draftID int32           // 0 = unallocated; allocated on first appendEvent
@@ -59,12 +69,13 @@ type draftStreamer struct {
 	failed  bool            // sticky latch for the current turn
 }
 
-func newDraftStreamer(api apiClient, log *slog.Logger, chatID int64, threadID int) *draftStreamer {
+func newDraftStreamer(api apiClient, log *slog.Logger, chatID int64, threadID int, userMsgID int) *draftStreamer {
 	return &draftStreamer{
-		api:      api,
-		log:      log,
-		chatID:   chatID,
-		threadID: threadID,
+		api:       api,
+		log:       log,
+		chatID:    chatID,
+		threadID:  threadID,
+		userMsgID: userMsgID,
 	}
 }
 

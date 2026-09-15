@@ -17,7 +17,7 @@ func newTestLogger() *slog.Logger {
 
 func TestDraftStreamer_FirstAppend_AllocatesDraftID(t *testing.T) {
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 	if err := s.appendEvent(context.Background(), "hello", true); err != nil {
 		t.Fatalf("appendEvent: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestDraftStreamer_FirstAppend_AllocatesDraftID(t *testing.T) {
 
 func TestDraftStreamer_ReusesDraftID(t *testing.T) {
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 	_ = s.appendEvent(context.Background(), "first", true)
 	_ = s.appendEvent(context.Background(), "second", true)
 	_ = s.appendEvent(context.Background(), "third", true)
@@ -62,7 +62,7 @@ func TestDraftStreamer_ReplacesTextOnEachEvent(t *testing.T) {
 	// the draft body and writes only the new text. The user sees
 	// a single event at a time, animated in place via same draft_id.
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 	_ = s.appendEvent(context.Background(), "alpha", true)
 	_ = s.appendEvent(context.Background(), "beta", true)
 	_ = s.appendEvent(context.Background(), "gamma", true)
@@ -74,7 +74,7 @@ func TestDraftStreamer_ReplacesTextOnEachEvent(t *testing.T) {
 
 func TestDraftStreamer_FailedLatch_PreventsRetry(t *testing.T) {
 	api := &fakeAPI{Errors: []error{errors.New("simulated 400")}}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 	err1 := s.appendEvent(context.Background(), "first", true)
 	if !errors.Is(err1, errDraftFallback) {
 		t.Fatalf("first err = %v, want errDraftFallback", err1)
@@ -92,7 +92,7 @@ func TestDraftStreamer_FailedLatch_PreventsRetry(t *testing.T) {
 func TestDraftStreamer_ResetState_ClearsLatch(t *testing.T) {
 	// First API call fails → latch engaged.
 	api := &fakeAPI{Errors: []error{errors.New("first fails")}}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 	_ = s.appendEvent(context.Background(), "first", true)
 
 	s.resetState()
@@ -107,7 +107,7 @@ func TestDraftStreamer_ResetState_ClearsLatch(t *testing.T) {
 
 func TestDraftStreamer_AppendEvent_EmptyText(t *testing.T) {
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 	if err := s.appendEvent(context.Background(), "", true); err != nil {
 		t.Fatalf("appendEvent empty: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestDraftStreamer_AppendEvent_NoParseMode(t *testing.T) {
 	// require escaping literal "&" and "<" in LLM output
 	// ("AT&T", "type <T>") which silently mangles content.
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 	_ = s.appendEvent(context.Background(), "plain ascii", true)
 	_ = s.appendEvent(context.Background(), "<b>bold</b> tool call", true)
 	_ = s.appendEvent(context.Background(), "AT&T thinking", true)
@@ -137,26 +137,34 @@ func TestDraftStreamer_AppendEvent_NoParseMode(t *testing.T) {
 func TestDraftIndex_GetOrCreate_ReturnsSameInstance(t *testing.T) {
 	idx := newDraftIndex()
 	api := &fakeAPI{}
-	a := idx.getOrCreate(api, newTestLogger(), 100, 0)
-	b := idx.getOrCreate(api, newTestLogger(), 100, 0)
+	a := idx.getOrCreate(api, newTestLogger(), 100, 0, 1000)
+	b := idx.getOrCreate(api, newTestLogger(), 100, 0, 1000)
 	if a != b {
-		t.Fatalf("expected same streamer for same (chat, thread)")
+		t.Fatalf("expected same streamer for same (chat, thread, userMsgID)")
 	}
-	c := idx.getOrCreate(api, newTestLogger(), 100, 5)
+	c := idx.getOrCreate(api, newTestLogger(), 100, 5, 1000)
 	if a == c {
 		t.Fatalf("expected different streamer for different thread_id")
 	}
-	d := idx.getOrCreate(api, newTestLogger(), 200, 0)
+	d := idx.getOrCreate(api, newTestLogger(), 200, 0, 1000)
 	if a == d {
 		t.Fatalf("expected different streamer for different chat_id")
+	}
+	// Same (chat, thread), different userMsgID → different streamer.
+	// This is the per-turn isolation guarantee: a back-to-back turn
+	// (new userMsgID) cannot accidentally land on the prior turn's
+	// draft surface.
+	e := idx.getOrCreate(api, newTestLogger(), 100, 0, 1001)
+	if a == e {
+		t.Fatalf("expected different streamer for different userMsgID (per-turn isolation)")
 	}
 }
 
 func TestDraftIndex_Reset_OnlyAffectsMatchingKey(t *testing.T) {
 	idx := newDraftIndex()
 	api := &fakeAPI{}
-	a := idx.getOrCreate(api, newTestLogger(), 100, 0)
-	b := idx.getOrCreate(api, newTestLogger(), 100, 5)
+	a := idx.getOrCreate(api, newTestLogger(), 100, 0, 1000)
+	b := idx.getOrCreate(api, newTestLogger(), 100, 0, 1001) // different userMsgID
 
 	_ = a.appendEvent(context.Background(), "x", true)
 	_ = b.appendEvent(context.Background(), "x", true)
@@ -164,12 +172,12 @@ func TestDraftIndex_Reset_OnlyAffectsMatchingKey(t *testing.T) {
 		t.Fatalf("setup: call count = %d, want 2", got)
 	}
 
-	// Reset only (100, 0) — b should NOT be touched.
-	idx.reset(100, 0)
+	// Reset only (100, 0, 1000) — b (different userMsgID) untouched.
+	idx.reset(100, 0, 1000)
 
 	// Subsequent append on b should still send (b's state intact).
-	// And its draft_id should be the SAME as before the reset
-	// (reset only clears state.ChatKind=private's streamer).
+	// b's draft_id must be unchanged: reset only clears the matching
+	// streamer's state, not b's.
 	_ = b.appendEvent(context.Background(), "y", true)
 	if got := len(api.Calls); got != 3 {
 		t.Fatalf("call count = %d, want 3 (2 setup + 1 b append)", got)
@@ -177,7 +185,81 @@ func TestDraftIndex_Reset_OnlyAffectsMatchingKey(t *testing.T) {
 	idBefore := api.Calls[1].Params["draft_id"]
 	idAfter := api.Calls[2].Params["draft_id"]
 	if idBefore != idAfter {
-		t.Fatalf("b's draft_id changed after reset of (100, 0): before=%v after=%v", idBefore, idAfter)
+		t.Fatalf("b's draft_id changed after reset of (100, 0, 1000): before=%v after=%v", idBefore, idAfter)
+	}
+}
+
+func TestDraftIndex_EndProcess_EvictsFromIndex(t *testing.T) {
+	// endProcess on the production path (Send OutResult /
+	// OnPromptEnded) removes the streamer from the index so the
+	// next turn allocates a fresh one. This is the per-turn
+	// isolation enforcement — a re-getOrCreate with the same key
+	// after endProcess must yield a NEW streamer (different
+	// pointer, different draft_id).
+	idx := newDraftIndex()
+	api := &fakeAPI{}
+	first := idx.getOrCreate(api, newTestLogger(), 100, 0, 1000)
+	if err := first.appendEvent(context.Background(), "turn 1", true); err != nil {
+		t.Fatalf("appendEvent: %v", err)
+	}
+	firstDraftID := first.draftID
+
+	idx.endProcess(100, 0, 1000)
+
+	// Same key → fresh streamer (evicted then re-created).
+	second := idx.getOrCreate(api, newTestLogger(), 100, 0, 1000)
+	if first == second {
+		t.Fatalf("expected new streamer after endProcess, got same pointer")
+	}
+	// draft_id allocation is per-streamer; the second streamer
+	// must start with draftID == 0 and allocate a fresh one on
+	// next appendEvent.
+	if second.draftID != 0 {
+		t.Fatalf("expected fresh streamer's draftID == 0, got %d", second.draftID)
+	}
+	if err := second.appendEvent(context.Background(), "turn 2", true); err != nil {
+		t.Fatalf("second appendEvent: %v", err)
+	}
+	if second.draftID == 0 {
+		t.Fatal("expected fresh draftID allocated on second append")
+	}
+	// Different streamer's draftID should differ (both consume from
+	// the same atomic counter, but the first was latched into
+	// firstDraftID before eviction; the second gets a different
+	// number because it's a different streamer doing the allocation).
+	if second.draftID == firstDraftID {
+		t.Fatalf("expected different draftID after endProcess eviction; both = %d", second.draftID)
+	}
+}
+
+func TestDraftIndex_EndProcess_OnlyAffectsMatchingKey(t *testing.T) {
+	// endProcess on one turn must not evict another turn's
+	// streamer (different userMsgID).
+	idx := newDraftIndex()
+	api := &fakeAPI{}
+	a := idx.getOrCreate(api, newTestLogger(), 100, 0, 1000)
+	b := idx.getOrCreate(api, newTestLogger(), 100, 0, 1001)
+
+	_ = a.appendEvent(context.Background(), "x", true)
+	_ = b.appendEvent(context.Background(), "x", true)
+
+	idx.endProcess(100, 0, 1000) // turn 1000 ends, turn 1001 keeps streaming
+
+	// a's slot is gone from the index, b's slot still holds the
+	// same streamer instance.
+	if _, ok := idx.streamers[draftIndexKey(100, 0, 1000)]; ok {
+		t.Fatal("expected turn 1000 evicted from index")
+	}
+	if _, ok := idx.streamers[draftIndexKey(100, 0, 1001)]; !ok {
+		t.Fatal("expected turn 1001 still present in index")
+	}
+
+	// b continues to function — appendEvent still works without
+	// re-allocation, and the draft_id is the same as before.
+	idBefore := b.draftID
+	_ = b.appendEvent(context.Background(), "y", true)
+	if b.draftID != idBefore {
+		t.Fatalf("b's draft_id changed unexpectedly: before=%d after=%d", idBefore, b.draftID)
 	}
 }
 
@@ -188,7 +270,7 @@ func TestDraftStreamer_ToolStartReplaceToolEndAccumulate(t *testing.T) {
 	// tool call: Start REPLACE → End ACCUMULATE. Across events:
 	// REPLACE wipes prior body.
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 
 	_ = s.appendEvent(context.Background(), "💭 considering whether to invoke Read", true)
 	_ = s.appendEvent(context.Background(), "🔧 ● Read(/tmp/foo.go)", true)
@@ -239,7 +321,7 @@ func TestDraftStreamer_ResetProcess_ClearsDraftIDAndTextBuf_PreservesFailed(t *t
 	// restart, not be silently healed by a successful process
 	// end).
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 
 	// Latch on a transient failure.
 	api.Errors = []error{errors.New("simulated 400")}
@@ -314,7 +396,7 @@ func TestDraftStreamer_AppendEventWithThread_ForwardsMessageThreadID(t *testing.
 	// must include message_thread_id in the sendMessageDraft call.
 	// For topicID==0 (DM), no message_thread_id is sent.
 	api := &fakeAPI{}
-	s := newDraftStreamer(api, newTestLogger(), 100, 0)
+	s := newDraftStreamer(api, newTestLogger(), 100, 0, 100)
 
 	// topicID=0 → no message_thread_id
 	_ = s.appendEventWithThread(context.Background(), "first", true, 0)

@@ -2588,53 +2588,75 @@ func TestAdapter_Send_DM_OutToolEnd_StreamsToDraft(t *testing.T) {
 func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
 	// Groups (basic + forum supergroup) never use sendMessageDraft
 	// — the API rejects it (Bad Request). They take the simulated
-	// DraftMessage path via group_draft.go instead: a real
-	// sendMessage cold-create + editMessageText subsequent. The
-	// cold-create carries reply_to_message_id=userMsgID so the
+	// DraftMessage path via group_draft.go instead. Under the
+	// single-FIFO model, OnPromptEnded is the flush trigger:
+	// 5 events buffer silently, then OnPromptEnded produces one
+	// sendRichMessage cold-create (5 blocks) + one deleteMessage.
+	// The cold-create carries reply_to_message_id=userMsgID so the
 	// DraftMessage visually anchors under the user's message.
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw + ":42",
-		Kind:   messages.OutThinking,
-		Text:   "thinking text",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
+	for i := 1; i <= 5; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw + ":42",
+			Kind:   messages.OutThinking,
+			Text:   "thinking text",
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 	}
+	a.OnPromptEnded(context.Background(), "tg_"+raw+":42", "1", agent.PromptEndClean)
+
 	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
 		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
 	}
-	coldCreate := findCallByMethod(api.Calls, "sendMessage")
+	coldCreate := findCallByMethod(api.Calls, "sendRichMessage")
 	if coldCreate == nil {
-		t.Fatalf("group first event should cold-create a DraftMessage via sendMessage; got calls=%+v", api.Calls)
+		t.Fatalf("group endProcess flush should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
 	}
 	if reply, _ := coldCreate.Params["reply_to_message_id"].(int); reply != 1 {
 		t.Fatalf("DraftMessage cold-create reply_to_message_id = %v, want 1 (userMsgID)", coldCreate.Params["reply_to_message_id"])
 	}
-	if text, _ := coldCreate.Params["text"].(string); text != "💭 thinking text" {
-		t.Fatalf("DraftMessage cold-create text = %q, want %q", text, "💭 thinking text")
+	blocks := richMessageBlocks(coldCreate.Params["rich_message"])
+	if len(blocks) != 5 {
+		t.Fatalf("DraftMessage cold-create blocks = %d, want 5 (events 1..5); got %v", len(blocks), blocks)
+	}
+	if blocks[0] != "💭 thinking text" {
+		t.Fatalf("DraftMessage cold-create block[0] = %q, want %q", blocks[0], "💭 thinking text")
 	}
 }
 
 func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
-	// Same path as OutThinking: group first event cold-creates the
-	// simulated DraftMessage (sendMessage + reply_to_message_id).
+	// Same path as OutThinking: under the single-FIFO model,
+	// 5 OutToolStart events buffer silently; OnPromptEnded
+	// produces one sendRichMessage cold-create (5 blocks).
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
-	if err := a.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "tg_" + raw + ":42",
-		Kind:   messages.OutToolStart,
-		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
-		Text:   "● Read(/tmp/foo.go)",
-	}); err != nil {
-		t.Fatalf("send: %v", err)
+	for i := 1; i <= 5; i++ {
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			ChatID: "tg_" + raw + ":42",
+			Kind:   messages.OutToolStart,
+			Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp/foo.go"},
+			Text:   "● Read(/tmp/foo.go)",
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 	}
+	a.OnPromptEnded(context.Background(), "tg_"+raw+":42", "1", agent.PromptEndClean)
+
 	if draft := findCallByMethod(api.Calls, "sendMessageDraft"); draft != nil {
 		t.Fatalf("group should NOT use sendMessageDraft; got call %+v", draft)
 	}
-	coldCreate := findCallByMethod(api.Calls, "sendMessage")
+	coldCreate := findCallByMethod(api.Calls, "sendRichMessage")
 	if coldCreate == nil {
-		t.Fatalf("group first OutToolStart should cold-create a DraftMessage via sendMessage; got calls=%+v", api.Calls)
+		t.Fatalf("group endProcess flush should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
+	}
+	blocks := richMessageBlocks(coldCreate.Params["rich_message"])
+	if len(blocks) != 5 {
+		t.Fatalf("DraftMessage cold-create blocks = %d, want 5 (events 1..5); got %v", len(blocks), blocks)
+	}
+	if blocks[0] != "● Read(/tmp/foo.go)" {
+		t.Fatalf("DraftMessage cold-create block[0] = %q, want %q", blocks[0], "● Read(/tmp/foo.go)")
 	}
 }
 

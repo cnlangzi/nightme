@@ -123,7 +123,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		richTurns:      newRichTurnsIndex(defaultRichTurnCap),
 		draftStreamers: newDraftIndex(),
 	}
-	out.groupDraft = newGroupDraftManager(out.api, out.logger, out.state)
+	out.groupDraft = newGroupDraftManager(out.api, out.logger)
 	out.wireVoiceHandler()
 	return out, nil
 }
@@ -197,7 +197,7 @@ func NewAdapterWithClient(cfg *config.Config, api apiClient, dataDir string) *Ad
 		retry:          DefaultRetryConfig,
 		richTurns:      newRichTurnsIndex(defaultRichTurnCap),
 		draftStreamers: newDraftIndex(),
-		groupDraft:     newGroupDraftManager(api, slog.Default(), state),
+		groupDraft:     newGroupDraftManager(api, slog.Default()),
 	}
 }
 
@@ -689,10 +689,12 @@ func (a *Adapter) ensurePlaceholder(ctx context.Context, chatID string, topicID,
 	// already retried transient errors, so a permanent failure
 	// here means the message is stuck (e.g. revoked bot perms).
 	if state.ChatKind == ChatKindGroup {
-		if a.groupDraft != nil && state.DraftMessageID > 0 {
-			a.groupDraft.deleteOrphanSync(ctx, chatID, topicID, state.DraftMessageID)
-		}
-		state.DraftMessageID = 0
+		// No persisted DraftMessageID to recover from: the group
+		// draft is purely in-memory per-turn state. A daemon crash
+		// mid-turn leaves any in-flight DraftMessage orphaned in
+		// the chat — acceptable since the user is unlikely to
+		// resume the same turn, and endProcess's deleteMessage
+		// would have cleaned it up on the happy path.
 	} else if state.ChatKind == ChatKindPrivate && state.UserMessageID != "" {
 		// DM prior-turn streamer cleanup. The previous turn's streamer
 		// normally gets evicted by Send(OutResult) → endProcess or
@@ -1193,12 +1195,29 @@ func (a *Adapter) patchChoice(ctx context.Context, msg messages.OutboundMessage)
 //
 // Callers can ignore the error return (informational). The
 // returned bool is the only signal they need.
-func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, userMsgID int, segment string, replace bool) (bool, error) {
+func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicID int, userMsgID int, segment string, kind messages.OutboundKind) (bool, error) {
+	a.logger.Info("telegram: streamDraftEvent entered",
+		"chat_id", rawChatID,
+		"thread_id", topicID,
+		"user_msg_id", userMsgID,
+		"kind", kind.String(),
+	)
 	state, ok := a.state.topic(rawChatID, topicID)
 	if !ok {
 		// No state yet — caller falls through to chain.
+		a.logger.Info("telegram: streamDraftEvent fallthrough (no topic state)",
+			"chat_id", rawChatID,
+			"thread_id", topicID,
+			"user_msg_id", userMsgID,
+			"kind", kind.String(),
+		)
 		return false, nil
 	}
+	a.logger.Info("telegram: streamDraftEvent dispatching",
+		"chat_id", rawChatID,
+		"thread_id", topicID,
+		"chat_kind", state.ChatKind,
+	)
 	switch state.ChatKind {
 	case ChatKindPrivate:
 		chatIDInt, parseErr := strconv.ParseInt(rawChatID, 10, 64)
@@ -1206,6 +1225,10 @@ func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicI
 			return false, nil
 		}
 		streamer := a.draftStreamers.getOrCreate(a.api, a.logger, chatIDInt, topicID, userMsgID)
+		// DM sendMessageDraft keeps its REPLACE / ACCUMULATE bool
+		// contract (see #383); the group path takes the typed Kind
+		// and derives REPLACE internally.
+		replace := kind == messages.OutThinking || kind == messages.OutToolStart
 		err := streamer.appendEventWithThread(ctx, segment, replace, topicID)
 		if err != nil {
 			// DM draft failed: drop the event. Do NOT fall through
@@ -1218,7 +1241,7 @@ func (a *Adapter) streamDraftEvent(ctx context.Context, rawChatID string, topicI
 		if a.groupDraft == nil {
 			return false, nil
 		}
-		return a.groupDraft.streamDraftEvent(ctx, rawChatID, topicID, userMsgID, segment, replace)
+		return a.groupDraft.streamDraftEvent(ctx, rawChatID, topicID, userMsgID, segment, kind)
 	default:
 		// channel / unknown — fall through to chain.
 		return false, nil
@@ -1399,7 +1422,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// Group path: cold-creates the simulated DraftMessage
 		// (group_draft.go); subsequent events editMessageText in
 		// place. On cold-create failure falls through to richTurn.
-		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, formatTool(msg), true /*replace*/); handled {
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, formatTool(msg), messages.OutToolStart); handled {
 			return nil
 		}
 		// L3 (§20.6.3): route through richTurn. The tool call line
@@ -1433,7 +1456,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// full "🔧 call / ✅ result" pair in one draft body.
 		// Group path: edits the simulated DraftMessage with the
 		// appended result line (REPLACE/ACCUMULATE per #383).
-		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, formatTool(msg), false /*accumulate*/); handled {
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, formatTool(msg), messages.OutToolEnd); handled {
 			return nil
 		}
 		// L3: route through richTurn. The result line lands as a
@@ -1510,7 +1533,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) (err e
 		// (group_draft.go) with the REPLACE buffer.
 		// Empty-text silent drop already happened at the top of
 		// Send, so msg.Text is non-empty here.
-		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, "💭 "+msg.Text, true /*replace*/); handled {
+		if handled, _ := a.streamDraftEvent(ctx, rawChatID, topicID, replyAnchor, "💭 "+msg.Text, messages.OutThinking); handled {
 			return nil
 		}
 		// F-think parity with feishu: prefix the reasoning body

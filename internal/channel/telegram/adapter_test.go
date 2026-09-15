@@ -2589,14 +2589,14 @@ func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
 	// Groups (basic + forum supergroup) never use sendMessageDraft
 	// — the API rejects it (Bad Request). They take the simulated
 	// DraftMessage path via group_draft.go instead. Under the
-	// uniform flush logic, the first flush (count threshold) goes
-	// through sendRichMessage (cold-create); subsequent flushes go
-	// through editMessageText. The cold-create carries
-	// reply_to_message_id=userMsgID so the DraftMessage visually
-	// anchors under the user's message.
+	// two-stack model, the first cap flush fires when
+	// thinkingStack reaches cap (5) — event 6 trips the cap and
+	// goes through sendRichMessage (cold-create). The cold-create
+	// carries reply_to_message_id=userMsgID so the DraftMessage
+	// visually anchors under the user's message.
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
-	for i := 1; i <= 10; i++ {
+	for i := 1; i <= 6; i++ {
 		if err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw + ":42",
 			Kind:   messages.OutThinking,
@@ -2615,18 +2615,22 @@ func TestAdapter_Send_ForumTopic_OutThinking_UsesChainNotDraft(t *testing.T) {
 	if reply, _ := coldCreate.Params["reply_to_message_id"].(int); reply != 1 {
 		t.Fatalf("DraftMessage cold-create reply_to_message_id = %v, want 1 (userMsgID)", coldCreate.Params["reply_to_message_id"])
 	}
-	if got := richMessageFirstBlockText(coldCreate.Params["rich_message"]); got != "💭 thinking text" {
-		t.Fatalf("DraftMessage cold-create first block = %q, want %q", got, "💭 thinking text")
+	blocks := richMessageBlocks(coldCreate.Params["rich_message"])
+	if len(blocks) != 5 {
+		t.Fatalf("DraftMessage cold-create blocks = %d, want 5 (events 1..5); got %v", len(blocks), blocks)
+	}
+	if blocks[0] != "💭 thinking text" {
+		t.Fatalf("DraftMessage cold-create block[0] = %q, want %q", blocks[0], "💭 thinking text")
 	}
 }
 
 func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
-	// Same path as OutThinking: group's first flush (count threshold)
-	// cold-creates the simulated DraftMessage (sendRichMessage +
-	// reply_to_message_id).
+	// Same path as OutThinking: under the two-stack model,
+	// toolsStack cap is 5 slots. 6 OutToolStart events: 5 fill
+	// toolsStack, 6th trips cap → sendRichMessage (cold-create).
 	a, api := newTestAdapter(t)
 	raw := setupGroupState(t, a, -1001, 42)
-	for i := 1; i <= 10; i++ {
+	for i := 1; i <= 6; i++ {
 		if err := a.Send(context.Background(), messages.OutboundMessage{
 			ChatID: "tg_" + raw + ":42",
 			Kind:   messages.OutToolStart,
@@ -2642,6 +2646,13 @@ func TestAdapter_Send_ForumTopic_OutToolStart_UsesChainNotDraft(t *testing.T) {
 	coldCreate := findCallByMethod(api.Calls, "sendRichMessage")
 	if coldCreate == nil {
 		t.Fatalf("group first flush should cold-create a DraftMessage via sendRichMessage; got calls=%+v", api.Calls)
+	}
+	blocks := richMessageBlocks(coldCreate.Params["rich_message"])
+	if len(blocks) != 5 {
+		t.Fatalf("DraftMessage cold-create blocks = %d, want 5 (events 1..5); got %v", len(blocks), blocks)
+	}
+	if blocks[0] != "● Read(/tmp/foo.go)" {
+		t.Fatalf("DraftMessage cold-create block[0] = %q, want %q", blocks[0], "● Read(/tmp/foo.go)")
 	}
 }
 

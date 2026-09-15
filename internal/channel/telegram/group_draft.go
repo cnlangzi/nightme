@@ -10,35 +10,57 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// Batch window parameters for the simulated DraftMessage in
-// ChatKind=group. Hard-coded per the design decision (no cfg):
+// Stack capacity for the simulated DraftMessage in ChatKind=group.
 //
-//   - 10 events triggers an immediate flush (count-based)
-//   - 10s after the first buffered event triggers a flush (time-based)
-//   - whichever fires first
+// Two parallel stacks, each capped at 5:
 //
-// 1 flush / 10s per (chat, topic, turn) stays comfortably below
-// Telegram's 1/s per-chat and 20/min per-group limits. Both the first
-// sendRichMessage (cold-create) and subsequent editMessageText flushes
-// follow the same trigger rules — there is no "immediate cold-create
-// on first event" fast path.
+//   - thinkingStack: holds up to 5 OutThinking events (latest 5).
+//   - toolsStack: holds up to 5 tool-call slots. Each slot is
+//     "1 OutToolStart + its trailing N consecutive OutToolEnd
+//     events". When the 6th slot would arrive, the buffer must
+//     flush first so the new slot has room.
+//
+// When either stack reaches its cap, an immediate flush is
+// triggered before appending the new event. The new event then
+// enters the (now empty) stack. The 10s timer is the fallback
+// trigger when neither stack fills.
+//
+// With both caps at 5, the max buffer size is roughly 10 events
+// (5 thinking + 5 tool slots) — comfortably under Telegram's
+// per-chat 1/s and per-group 20/min limits.
 const (
-	groupDraftBatchMaxEvents = 10
-	groupDraftBatchInterval  = 10 * time.Second
+	thinkingStackCap = 5
+	toolsStackCap    = 5
+
+	// 10s timer fallback when neither stack fills. Without this
+	// a turn that emits 1 OutThinking + 1 OutToolStart would never
+	// flush — both stacks are well below cap.
+	groupDraftBatchInterval = 10 * time.Second
 )
 
-// groupDraftEntry is the per-turn in-memory state for the simulated
-// DraftMessage surface used by ChatKind=group. The buffer is a
-// windowed slice of richTurnEntry (one paragraph block per entry);
-// flushes happen at 10 events or 10s after the first buffered event,
-// whichever comes first. After a successful flush the buffer is
-// cleared (windowed semantics): Telegram keeps showing the last
-// flushed snapshot until the next window replaces it.
+// toolSlot is one entry in toolsStack: a single OutToolStart
+// followed by its trailing OutToolEnd events. The slot is created
+// when the Start arrives and stays open until either the next
+// Start closes it implicitly, or the buffer flushes.
 //
-// messageID is the Telegram message_id returned by the first flush
-// (cold-create). 0 means "not yet sent". In-memory only — there is
-// no persisted DraftMessageID, so a daemon restart mid-turn loses
-// the in-progress DraftMessage (acceptable trade-off).
+// An OutToolEnd arriving with no open slot becomes an orphan
+// slot (start is empty, ends holds the lone End) so the result
+// line is still visible after flush.
+type toolSlot struct {
+	start richTurnEntry // zero-value richTurnEntry if the slot has no Start
+	ends  []richTurnEntry
+}
+
+// groupDraftEntry is the per-turn in-memory state for the simulated
+// DraftMessage surface used by ChatKind=group. The buffer is two
+// parallel stacks (thinkingStack + toolsStack), each capped at 5.
+// Both stacks clear on every successful flush (windowed semantics):
+// the Telegram message shows the last flushed snapshot until the
+// next flush replaces it.
+//
+// messageID is the Telegram message_id returned by the first
+// (cold-create) flush. 0 means "not yet sent". In-memory only —
+// no persisted DraftMessageID.
 //
 // All mutable fields are guarded by mu. The lock is held across the
 // network roundtrip on streamDraftEvent / flushLocked so concurrent
@@ -57,49 +79,19 @@ type groupDraftEntry struct {
 	// subsequent flushes can PATCH the same Telegram message.
 	messageID int
 
-	// Buffer for the current window. Cleared after each successful
-	// flush (windowed semantics — Telegram shows the last flushed
-	// snapshot, the buffer holds the next).
-	entries []richTurnEntry
+	// Two parallel stacks, each capped. Cleared after every
+	// successful flush.
+	thinkingStack []richTurnEntry // cap 5
+	toolsStack    []toolSlot      // cap 5 slots
 
-	// Batch bookkeeping.
-	pendingEventCount int  // logical events since last flush (OutToolStart+End = 1)
-	pendingToolStart  bool // true while an OutToolStart is awaiting its End
-	flushTimer        *time.Timer
+	// 10s timer fallback.
+	flushTimer *time.Timer
 
 	// Captured context for timer callbacks (which fire in their own
 	// goroutine and need to re-acquire mu before touching state).
 	rawChatID string
 	topicID   int
 	userMsgID int
-}
-
-// composeIntoEntriesLocked applies REPLACE / ACCUMULATE to the
-// current window's entries. REPLACE wipes prior content; ACCUMULATE
-// appends the new entry. Caller MUST hold e.mu.
-func (e *groupDraftEntry) composeIntoEntriesLocked(body string, kind messages.OutboundKind) {
-	replace := kind == messages.OutThinking || kind == messages.OutToolStart
-	if replace {
-		e.entries = e.entries[:0]
-	}
-	e.entries = append(e.entries, richTurnEntry{
-		kind: kindToRichBlockKind(kind),
-		body: body,
-	})
-}
-
-// kindToRichBlockKind maps the OutboundKind to richTurnEntry.kind
-// so the same rendering pipeline (richTurn.appendRichTurnAndFlush)
-// can consume group_draft entries verbatim.
-func kindToRichBlockKind(k messages.OutboundKind) string {
-	switch k {
-	case messages.OutThinking:
-		return "thinking"
-	case messages.OutToolStart, messages.OutToolEnd:
-		return "tool"
-	default:
-		return ""
-	}
 }
 
 // groupDraftManager owns the per-(chat, topic, userMsgID) entries
@@ -111,8 +103,8 @@ func kindToRichBlockKind(k messages.OutboundKind) string {
 // Lifecycle per turn:
 //
 //	OutThinking / OutToolStart / OutToolEnd
-//	    → ensureEntry + compose into window buffer; pendingEventCount++
-//	    → flush triggered by 10 events or 10s timer
+//	    → ensureEntry + append to thinkingStack / toolsStack
+//	    → flush triggered by stack-cap (5), 10s timer, or endProcess
 //	    → first flush: sendRichMessage (cold-create)
 //	    → subsequent flushes: editMessageText(messageID, …)
 //	OutResult / OnPromptEnded
@@ -124,12 +116,6 @@ func kindToRichBlockKind(k messages.OutboundKind) string {
 //   - sendRichMessage / editMessageText failure → buffer preserved,
 //     return handled=true (issue #391 — fall through to richTurn
 //     was leaking tool lines into the final answer message).
-//   - No retry / no latch: every event accumulates into the buffer;
-//     the next trigger (count or timer, or the next event that
-//     pushes past 10) re-attempts the same flush. A sustained
-//     outage means the user sees a "stale buffer" until the next
-//     successful flush, never a missing event — events are queued
-//     in memory regardless.
 type groupDraftManager struct {
 	api apiClient
 	log *slog.Logger
@@ -171,9 +157,9 @@ func (m *groupDraftManager) ensureEntry(chatID string, topicID int, userMsgID in
 
 // streamDraftEvent applies one OutThinking / OutToolStart /
 // OutToolEnd event to the simulated DraftMessage for this turn:
-// composes the in-memory buffer (windowed) and arms the flush
-// triggers. The actual Telegram API call happens in flushLocked
-// when 10 events accumulate or 10s elapse.
+// appends to the appropriate stack and triggers a flush if the
+// new event would overflow that stack's cap. The 10s timer is
+// armed/refreshed to cover the case where neither stack fills.
 //
 // The boolean mirrors streamDraftEvent's DM-side contract — true
 // means "consumed, do not fall through to the richTurn path".
@@ -204,51 +190,88 @@ func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID stri
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	// REPLACE wipes prior body (OutThinking / OutToolStart — single
-	// visual surface for the latest event). ACCUMULATE stacks the
-	// result line under the matching tool start (OutToolEnd).
-	replace := kind == messages.OutThinking || kind == messages.OutToolStart
-	// OutToolStart+End pair counts as one logical event for the
-	// batch threshold; an OutToolEnd with no pending Start (orphan)
-	// is a new event on its own.
-	isNewLogicalEvent := replace || (kind == messages.OutToolEnd && !entry.pendingToolStart)
-	if isNewLogicalEvent {
-		entry.pendingEventCount++
+	// Decide whether appending this event would overflow its
+	// stack's cap. If so, flush first so the new event has room.
+	// The flush is synchronous — we hold entry.mu through the API
+	// call — so by the time we append, the stacks are empty.
+	needsFlush := false
+	switch kind {
+	case messages.OutThinking:
+		needsFlush = len(entry.thinkingStack) >= thinkingStackCap
+	case messages.OutToolStart:
+		needsFlush = len(entry.toolsStack) >= toolsStackCap
+	case messages.OutToolEnd:
+		// End appends to the last open slot; only overflows when
+		// the End is orphan (no open slot) AND toolsStack is at
+		// cap — in that case it would create a 6th slot, so flush.
+		if len(entry.toolsStack) == 0 {
+			needsFlush = len(entry.toolsStack) >= toolsStackCap
+		}
 	}
-	entry.pendingToolStart = (kind == messages.OutToolStart)
-	entry.composeIntoEntriesLocked(segment, kind)
+
+	if needsFlush {
+		if _, err := m.flushLocked(ctx, entry, rawChatID, topicID, "capacity"); err != nil {
+			return false, err
+		}
+	}
+
+	// Append to the appropriate stack.
+	switch kind {
+	case messages.OutThinking:
+		entry.thinkingStack = append(entry.thinkingStack, richTurnEntry{
+			kind: "thinking",
+			body: segment,
+		})
+	case messages.OutToolStart:
+		// New Start closes the implicit "open" state of the prior
+		// slot (it can no longer receive Ends). Subsequent Ends
+		// attach to THIS slot.
+		entry.toolsStack = append(entry.toolsStack, toolSlot{
+			start: richTurnEntry{kind: "tool", body: segment},
+		})
+	case messages.OutToolEnd:
+		if len(entry.toolsStack) == 0 {
+			// Orphan End (no preceding OutToolStart): treat as
+			// the implicit Start of a new slot. Subsequent Ends
+			// (or a fresh Start) will close this slot naturally.
+			entry.toolsStack = append(entry.toolsStack, toolSlot{
+				start: richTurnEntry{kind: "tool", body: segment},
+			})
+		} else {
+			slot := &entry.toolsStack[len(entry.toolsStack)-1]
+			slot.ends = append(slot.ends, richTurnEntry{kind: "tool", body: segment})
+		}
+	}
 
 	m.log.Info("telegram: streamDraftEvent buffered",
 		"chat_id", rawChatID,
 		"thread_id", topicID,
 		"user_msg_id", userMsgID,
 		"kind", kind.String(),
-		"pending_event_count", entry.pendingEventCount,
-		"buffered_entries", len(entry.entries),
+		"thinking_stack_len", len(entry.thinkingStack),
+		"tools_stack_len", len(entry.toolsStack),
 		"message_id", entry.messageID,
 	)
 
 	m.startFlushTimerIfIdleLocked(entry)
-	if entry.pendingEventCount >= groupDraftBatchMaxEvents {
-		return m.flushLocked(ctx, entry, rawChatID, topicID, "count")
-	}
 	return true, nil
 }
 
-// flushLocked serializes the current entries buffer as a rich
-// message and PATCHes the Telegram message via editMessageText (or
-// sendRichMessage for the first flush). On success the buffer is
-// cleared (windowed semantics); on failure the buffer is preserved
-// for the next streamDraftEvent to retry on top of (issue #391 —
-// fall through would leak tool result lines into the rich turn body).
+// flushLocked serializes the current thinkingStack + toolsStack as a
+// rich message and PATCHes the Telegram message via editMessageText
+// (or sendRichMessage for the first flush). On success both stacks
+// clear (windowed semantics); on failure they are preserved for the
+// next trigger to retry on top of (issue #391 — fall through would
+// leak tool result lines into the rich turn body).
 //
 // Caller MUST hold entry.mu.
 func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEntry, rawChatID string, topicID int, reason string) (bool, error) {
-	if len(entry.entries) == 0 {
+	if len(entry.thinkingStack) == 0 && len(entry.toolsStack) == 0 {
 		return true, nil
 	}
 
-	blocksJSON, err := buildParagraphBlocksForEntries(entry.entries)
+	blocks := renderStacksAsBlocks(entry.thinkingStack, entry.toolsStack)
+	blocksJSON, err := json.Marshal(blocks)
 	if err != nil {
 		return true, err
 	}
@@ -278,26 +301,20 @@ func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEn
 		}
 	} else {
 		// Subsequent flush: PATCH the existing Telegram message in
-		// place. The rich_message envelope is the same shape as the
-		// cold-create body so the user sees a continuous message.
+		// place.
 		method = "editMessageText"
 		params["message_id"] = entry.messageID
 		err = m.api.call(ctx, "editMessageText", params, nil)
 	}
 
 	if err != nil {
-		// Send failed: stay on the draft path. The entry (and
-		// messageID on subsequent attempts) stays intact so the
-		// next trigger retries on top of the prior buffer. Returning
-		// false here would let the caller fall through to the rich
-		// turn path and leak tool result lines (`⎿ 🔧 tool → N
-		// bytes`) into the final answer message — see issue #391.
 		m.log.Warn("telegram: group DraftMessage flush failed",
 			"chat_id", rawChatID,
 			"thread_id", topicID,
 			"method", method,
 			"message_id", entry.messageID,
-			"blocks", len(entry.entries),
+			"thinking_blocks", len(entry.thinkingStack),
+			"tool_blocks", toolSlotBlockCount(entry.toolsStack),
 			"reason", reason,
 			"err", err,
 		)
@@ -309,17 +326,55 @@ func (m *groupDraftManager) flushLocked(ctx context.Context, entry *groupDraftEn
 		"thread_id", topicID,
 		"method", method,
 		"message_id", entry.messageID,
-		"blocks", len(entry.entries),
+		"thinking_blocks", len(entry.thinkingStack),
+		"tool_blocks", toolSlotBlockCount(entry.toolsStack),
 		"reason", reason,
 	)
-	entry.entries = entry.entries[:0]
-	entry.pendingEventCount = 0
-	entry.pendingToolStart = false
+	entry.thinkingStack = entry.thinkingStack[:0]
+	entry.toolsStack = entry.toolsStack[:0]
 	if entry.flushTimer != nil {
 		entry.flushTimer.Stop()
 		entry.flushTimer = nil
 	}
 	return true, nil
+}
+
+// renderStacksAsBlocks flattens thinkingStack + toolsStack into the
+// ordered list of paragraph blocks sent to Telegram. Layout:
+// thinking events in stack order (oldest first), then each tool
+// slot rendered as [Start, End1, End2, ...].
+func renderStacksAsBlocks(thinkingStack []richTurnEntry, toolsStack []toolSlot) []map[string]any {
+	total := len(thinkingStack)
+	for _, s := range toolsStack {
+		total++
+		total += len(s.ends)
+	}
+	blocks := make([]map[string]any, 0, total)
+	for _, t := range thinkingStack {
+		blocks = append(blocks, map[string]any{"type": "paragraph", "text": t.body})
+	}
+	for _, slot := range toolsStack {
+		if slot.start.body != "" {
+			blocks = append(blocks, map[string]any{"type": "paragraph", "text": slot.start.body})
+		}
+		for _, e := range slot.ends {
+			blocks = append(blocks, map[string]any{"type": "paragraph", "text": e.body})
+		}
+	}
+	return blocks
+}
+
+// toolSlotBlockCount returns the total number of paragraph blocks
+// a tool slot list would render (Start + each End).
+func toolSlotBlockCount(slots []toolSlot) int {
+	n := 0
+	for _, s := range slots {
+		if s.start.body != "" {
+			n++
+		}
+		n += len(s.ends)
+	}
+	return n
 }
 
 // startFlushTimerIfIdleLocked arms the 10s debounce timer if no
@@ -332,14 +387,12 @@ func (m *groupDraftManager) startFlushTimerIfIdleLocked(entry *groupDraftEntry) 
 	entry.flushTimer = time.AfterFunc(groupDraftBatchInterval, func() {
 		entry.mu.Lock()
 		defer entry.mu.Unlock()
-		if entry.pendingEventCount == 0 || len(entry.entries) == 0 {
+		if len(entry.thinkingStack) == 0 && len(entry.toolsStack) == 0 {
 			entry.flushTimer = nil
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		// timer fires asynchronously; flushLocked logs + preserves
-		// the buffer on failure, so we don't propagate the error.
 		_, _ = m.flushLocked(ctx, entry, entry.rawChatID, entry.topicID, "timer")
 	})
 }
@@ -382,7 +435,7 @@ func (m *groupDraftManager) endProcess(ctx context.Context, rawChatID string, to
 	// Flush any buffered events first so the user sees the final
 	// window before we delete the message. Failure is non-fatal —
 	// the buffer is about to be discarded with the entry.
-	if len(entry.entries) > 0 {
+	if len(entry.thinkingStack) > 0 || len(entry.toolsStack) > 0 {
 		_, _ = m.flushLocked(ctx, entry, rawChatID, topicID, "endProcess")
 	}
 	msgID := entry.messageID

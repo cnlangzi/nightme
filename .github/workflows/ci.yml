@@ -300,6 +300,7 @@ jobs:
           VERSION: "0.0.0"
           GIT_COMMIT: ${{ github.sha }}
         run: |
+          export GIT_COMMIT="${GITHUB_SHA:0:7}"
           # Use the canonical build entry points so CI exercises
           # exactly what a developer would run locally:
           #   - Windows: build.bat (cmd-native, also documents
@@ -584,6 +585,7 @@ jobs:
           VERSION: "0.0.0"
           GIT_COMMIT: ${{ github.sha }}
         run: |
+          export GIT_COMMIT="${GITHUB_SHA:0:7}"
           # Use the canonical build entry points (mirrors the
           # `test` job's `Build smoke binary` step) so CI builds
           # exactly what a developer ships:

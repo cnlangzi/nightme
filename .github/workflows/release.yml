@@ -214,6 +214,7 @@ jobs:
           GIT_COMMIT: ${{ github.sha }}
         run: |
           export VERSION="${RAW_VERSION#v}"
+          export GIT_COMMIT="${GITHUB_SHA:0:7}"
           set -euo pipefail
           if [ "${{ matrix.goos }}" = "windows" ]; then
             ./build.bat

@@ -3,7 +3,7 @@
 
 GO            ?= go
 VERSION       ?= 0.1.0
-GIT_COMMIT    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_COMMIT    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "local")
 BUILD_DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS       := -X github.com/cnlangzi/nightme/internal/version.Version=$(VERSION) \
                 -X github.com/cnlangzi/nightme/internal/version.GitCommit=$(GIT_COMMIT) \

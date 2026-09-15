@@ -206,16 +206,19 @@ func (m *groupDraftManager) streamDraftEvent(ctx context.Context, rawChatID stri
 		"text":       body,
 	}
 	if err := m.api.call(ctx, "editMessageText", params, nil); err != nil {
-		// Transient failures retry inside apiCall; if the retry
-		// budget is exhausted, the event is lost but the next
-		// event will retry on top of the prior buffer (no latch).
+		// editMessageText failed: stay on the draft path. The entry
+		// (and messageID) stay intact so the next event retries on
+		// top of the prior buffer. Returning false here would let
+		// the caller fall through to the rich turn path and leak
+		// tool result lines (`⎿ 🔧 tool → N bytes`) into the final
+		// answer message — see issue #391.
 		m.log.Warn("telegram: group DraftMessage edit failed",
 			"chat_id", rawChatID,
 			"thread_id", topicID,
 			"message_id", entry.messageID,
 			"err", err,
 		)
-		return false, err
+		return true, nil
 	}
 	return true, nil
 }

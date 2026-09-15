@@ -257,6 +257,92 @@ func TestAdapter_Send_Group_ColdCreateFailure_FallsThroughToRichTurn(t *testing.
 	}
 }
 
+// TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath
+// verifies the contract: when the subsequent editMessageText fails
+// (e.g. Telegram 429), streamDraftEvent returns handled=true so the
+// caller does NOT fall through to the rich turn. Without this, tool
+// result lines (`⎿ 🔧 tool → N bytes`) would leak into the final
+// answer message — see issue #391.
+func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T) {
+	a, api := newTestAdapter(t)
+	raw := setupGroupState(t, a, -1001, 0)
+
+	// First event: cold-create must succeed (no error queued).
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "first thought",
+	}); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+
+	state, ok := a.state.topic(raw, 0)
+	if !ok || state == nil {
+		t.Fatalf("state missing after cold-create")
+	}
+	originalMsgID := state.DraftMessageID
+	if originalMsgID == 0 {
+		t.Fatalf("cold-create did not persist DraftMessageID")
+	}
+
+	// Second event: editMessageText will fail (Telegram 429
+	// simulation). streamDraftEvent MUST return handled=true so the
+	// caller does NOT route this event into the rich turn.
+	api.Errors = []error{errors.New("simulated editMessageText 429")}
+
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "second thought",
+	}); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+
+	// The DraftMessageID must be preserved — the entry is still alive
+	// and ready for the next event to retry on top.
+	state, _ = a.state.topic(raw, 0)
+	if state == nil || state.DraftMessageID != originalMsgID {
+		t.Fatalf("DraftMessageID changed on edit failure: was %d, now %v", originalMsgID, state)
+	}
+
+	// No rich turn entry should exist for this turn — if it did, the
+	// tool/think line leaked into the rich turn (the #391 bug).
+	if turn, ok := a.richTurns.lookup(raw, 0, 1); ok && turn != nil {
+		t.Fatalf("rich turn was created for failed edit — fallback leaked; entries=%d", len(turn.entries))
+	}
+
+	// Exactly one editMessageText call was attempted (the failing
+	// one); no second sendMessage (no re-cold-create).
+	edits := callsByMethod(api.Calls, "editMessageText")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 editMessageText call, got %d (calls=%+v)", len(edits), api.Calls)
+	}
+	sends := callsByMethod(api.Calls, "sendMessage")
+	if len(sends) != 1 {
+		t.Fatalf("expected 1 sendMessage cold-create, got %d", len(sends))
+	}
+
+	// Recovery: a third event with API recovered must re-use the
+	// same DraftMessageID via editMessageText (no re-cold-create).
+	api.Errors = nil
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "tg_" + raw,
+		Kind:   messages.OutThinking,
+		Text:   "third thought (recovered)",
+	}); err != nil {
+		t.Fatalf("third send: %v", err)
+	}
+
+	edits = callsByMethod(api.Calls, "editMessageText")
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 editMessageText after recovery, got %d", len(edits))
+	}
+	sends = callsByMethod(api.Calls, "sendMessage")
+	if len(sends) != 1 {
+		t.Fatalf("recovery must NOT re-cold-create; got %d sendMessage", len(sends))
+	}
+}
+
 // TestStateStore_ChatKindMigration verifies that an old state file
 // with `chat_type` (and no `chat_kind`) is migrated on load to the
 // new field with the expected mapping.

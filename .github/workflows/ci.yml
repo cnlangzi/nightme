@@ -627,31 +627,33 @@ jobs:
       # with `Error: no such instruction` — the exact failure that
       # bit release.yml.
       #
-      # `msystem: MINGW64` (not CLANGARM64) is intentional: the
-      # `mingw-w64-aarch64-gcc` package lives in the MINGW64 repo
-      # as an x86_64-hosted aarch64 cross-compiler. CLANGARM64's
-      # repo has no such package (it ships clang-only for native
-      # aarch64 build). On aarch64 host the MINGW64 installer runs
-      # via Windows 11 ARM64's x86_64 emulation — slower than native
-      # but the package set is what we need.
+      # `msystem: CLANGARM64` is the only MSYS2 env that supports
+      # aarch64 — it ships clang (NOT gcc; MSYS2's MINGW64 repo
+      # only carries `mingw-w64-{x86_64,i686}-gcc`, never
+      # `mingw-w64-aarch64-gcc`, which is why pacman errors
+      # with `target not found`). On CLANGARM64, clang defaults
+      # to `--target=aarch64-w64-mingw32`, so CC=clang produces
+      # the right object files for Go's cgo. lld pulls in
+      # `lld-link` for the final PE link.
       #
       # Gated to the windows-11-arm leg; the agent-smoke steps below
       # are gated to the other three legs. Two step groups within
       # one job is cheaper than a separate job (no second runner
       # spin-up, shared checkout + go cache).
-      - name: Install AArch64 MinGW toolchain
+      - name: Install AArch64 MinGW toolchain (clang)
         if: matrix.os == 'windows-11-arm'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: CLANGARM64
           update: true
           install: >-
             git
-            mingw-w64-aarch64-gcc
+            clang
+            lld
 
       # Single Build STT step covers BOTH arm64 legs.
-      #   - windows-11-arm: GOOS=windows, CC=aarch64-w64-mingw32-gcc
-      #     (mingw toolchain installed one step above).
+      #   - windows-11-arm: GOOS=windows, CC=clang (from CLANGARM64
+      #     msystem, targets aarch64-w64-mingw32 by default).
       #   - ubuntu-24.04-arm: GOOS=linux, default host gcc
       #     (gcc-aarch64-linux-gnu is preinstalled; no apt step
       #     needed).
@@ -666,7 +668,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "windows-11-arm" ]; then
-            export CC=aarch64-w64-mingw32-gcc
+            export CC=clang
           fi
           make build-stt
 

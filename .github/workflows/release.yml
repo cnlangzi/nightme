@@ -493,27 +493,29 @@ jobs:
       # `stp x29,x30,[sp,`, `blr x20`, …), which the wrong
       # assembler rejects with `Error: no such instruction`.
       #
-      # `msystem: MINGW64` (not CLANGARM64) is intentional:
-      # the `mingw-w64-aarch64-gcc` package lives in the
-      # MINGW64 repo as an x86_64-hosted aarch64 cross-
-      # compiler. CLANGARM64's repo has no such package
-      # (it ships clang-only for native aarch64 build). On
-      # aarch64 host the MINGW64 installer runs via Windows
-      # 11 ARM64's x86_64 emulation — slower than native but
-      # the package set is what we need.
+      # `msystem: CLANGARM64` is the only MSYS2 env that
+      # supports aarch64 — it ships clang (Not gcc; MSYS2's
+      # MINGW64 repo only carries `mingw-w64-{x86_64,i686}-
+      # gcc`, never `mingw-w64-aarch64-gcc`, which is why
+      # pacman errors with `target not found`). On
+      # CLANGARM64, clang defaults to
+      # `--target=aarch64-w64-mingw32`, so CC=clang produces
+      # the right object files for Go's cgo. lld pulls in
+      # `lld-link` for the final PE link.
       #
       # Linux / darwin legs have a correct default gcc
       # already, so the step is gated to the windows/arm64
       # leg only.
-      - name: Install AArch64 MinGW toolchain
+      - name: Install AArch64 MinGW toolchain (clang)
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: CLANGARM64
           update: true
           install: >-
             git
-            mingw-w64-aarch64-gcc
+            clang
+            lld
 
       - name: Build STT
         env:
@@ -527,7 +529,7 @@ jobs:
           # CC override only on windows/arm64; other legs let
           # cgo auto-detect the host compiler.
           if [ "${{ matrix.goos }}" = "windows" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
-            export CC=aarch64-w64-mingw32-gcc
+            export CC=clang
           fi
           make build-stt
 

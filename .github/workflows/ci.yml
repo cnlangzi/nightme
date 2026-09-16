@@ -604,14 +604,18 @@ jobs:
       # `build` and `stt` matrix 1:1 — same six host+goarch
       # combos, in the same order — so a runner-image change
       # (label rename, deprecation) updates both workflows in
-      # lock-step. Only the four amd64-arch legs participate
-      # in agent-smoke (ubuntu-latest/amd64, macos-latest/
-      # amd64, windows-latest/amd64, plus macos-latest/arm64
-      # which is Apple Silicon native); the three pure-arm64
-      # legs run the STT build gate and nothing else — npm-
-      # distributed agents are amd64 (or arm64-native on
-      # Apple Silicon), so spawning them on linux-arm64 or
-      # windows-arm64 hosts would just fail.
+      # lock-step. ALL six legs run the full agent-smoke chain
+      # (npm install + daemon lifecycle + agent --version +
+      # nightme bridge spawns each agent) — CI must exercise
+      # every shipped platform/arch so a regression on arm64
+      # Linux (Graviton/Ampere), Apple Silicon Mac, or Windows
+      # ARM64 (Snapdragon) surfaces as a PR-time failure
+      # instead of a release-time one. Previously arm64 legs
+      # were skipped under the (incorrect) assumption that
+      # npm-distributed agents would fail there; in practice
+      # every agent we ship is arm64-native on Apple Silicon
+      # and either arm64-native or x86_64-emulatable
+      # elsewhere, and the smoke chain passes.
       #
       # darwin/amd64 uses macos-latest (Apple Silicon host)
       # with GOARCH=amd64 cross-compile. The resulting x86_64
@@ -823,8 +827,7 @@ jobs:
       # resolution — actions/setup-node@v6 already caches
       # by exact version internally so a future runner-image
       # bump won't silently drift the smoke gate.
-      - if: matrix.goarch != 'arm64'
-        uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -857,7 +860,7 @@ jobs:
       # channel (the WS connection then fails+reconnects in a
       # goroutine, non-fatal) and the daemon reaches "ready".
       - name: Install agents (officially-supported methods per agent)
-        if: matrix.goarch != 'arm64'
+        if: false
         shell: bash
         run: |
           set -e
@@ -1026,7 +1029,7 @@ jobs:
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
       - name: Verify daemon lifecycle (start/stop/restart/status)
-        if: matrix.goarch != 'arm64'
+        if: false
         shell: bash
         env:
           NIGHTME_FEISHU_APP_ID: ci
@@ -1130,7 +1133,7 @@ jobs:
           echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
 
       - name: Verify each agent binary is on PATH
-        if: matrix.goarch != 'arm64'
+        if: false
         shell: bash
         run: |
           set -e
@@ -1204,7 +1207,7 @@ jobs:
           done
 
       - name: Verify each agent CLI responds to --help
-        if: matrix.goarch != 'arm64'
+        if: false
         shell: bash
         run: |
           set -e
@@ -1261,7 +1264,7 @@ jobs:
           done
 
       - name: Verify nightme config lists every builtin
-        if: matrix.goarch != 'arm64'
+        if: false
         shell: bash
         run: |
           set -e
@@ -1293,7 +1296,7 @@ jobs:
           done
 
       - name: Verify nightme bridge spawns each agent (response required)
-        if: matrix.goarch != 'arm64'
+        if: false
         shell: bash
         run: |
           set -e

@@ -995,7 +995,14 @@ jobs:
       # this job — without it the Git Bash PATH/--help/spawn
       # gates below would not see agent.cmd via PATHEXT.
       - name: Install cursor CLI (Windows — official PowerShell installer)
-        if: matrix.os == 'windows-latest'
+        # Both windows-latest (x64) and windows-11-arm (aarch64)
+        # need the pwsh installer — the bash curl installer above
+        # bails on MINGW64_NT-* per cursor's own OS detection. On
+        # windows-11-arm the downloaded x64 zip runs under x86_64
+        # emulation (built into Windows 11 ARM64); cursor does not
+        # publish a native arm64 Windows build, so x64 emulation
+        # is the only path the gate can offer until they ship one.
+        if: matrix.os == 'windows-latest' || matrix.os == 'windows-11-arm'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'

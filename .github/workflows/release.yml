@@ -506,66 +506,37 @@ jobs:
       # Linux / darwin legs have a correct default gcc
       # already, so the step is gated to the windows/arm64
       # leg only.
-      - name: Install AArch64 MinGW toolchain (clang)
-        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
-        uses: msys2/setup-msys2@v2
-        with:
-          # See ci.yml's matching step for full rationale:
-          # default `C:\msys64` is Git for Windows' bundled old
-          # MSYS2 (no CLANGARM64 env); `cache: true` (default)
-          # routes the install through toolcache + symlink,
-          # which is flaky on Windows runners. The msys2/
-          # setup-msys2 v2 input is `location` (NOT `install-dir`
-          # — v2 silently ignores the v1 name, observed in PR
-          # #400 with `Unexpected input(s) 'install-dir'`). Force
-          # a direct install with cache: false.
-          location: 'C:\a\msys64'
-          cache: false
-          msystem: CLANGARM64
-          update: true
-          install: >-
-            git
-            clang
-            lld
-
-      # See ci.yml's matching Locate step for full rationale:
-      # the action doesn't expose its actual install path via
-      # outputs. `location: C:\a\msys64` causes the action to
-      # drop MSYS2 at `C:\a\msys64\msys64\` (one nested level),
-      # observed in PR #400. Probe that path first, then the
-      # other candidates. Export the discovered root so Build
-      # STT's CC pinning works.
-      - name: Locate MSYS2 CLANGARM64 clang
+      - name: Install llvm-mingw (aarch64-w64-mingw32)
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
         shell: bash
         run: |
           set -euo pipefail
-          for candidate in \
-            "C:/a/msys64/msys64" \
-            "C:/a/msys64" \
-            "C:/msys64" \
-            "C:/Program Files/msys2" \
-            "C:/tools/msys64"; do
-            if [ -x "$candidate/clangarm64/bin/clang.exe" ]; then
-              echo "MSYS2_ROOT=$candidate" >> "$GITHUB_ENV"
-              echo "Found MSYS2 CLANGARM64 clang at $candidate/clangarm64/bin/clang.exe"
-              exit 0
-            fi
-          done
-          echo "::error::Could not find MSYS2 CLANGARM64 clang in any candidate location"
-          echo "---"
-          echo "where clang (PATH first hit):"
-          where.exe clang 2>&1 || true
-          echo "---"
-          echo "C:\\a\\msys64 (fresh install target, if exists):"
-          ls -la "C:/a/msys64/" 2>&1 | head -30 || true
-          echo "---"
-          echo "C:\\a\\msys64\\msys64 (one level deeper, if exists):"
-          ls -la "C:/a/msys64/msys64/" 2>&1 | head -30 || true
-          echo "---"
-          echo "C:\\msys64 contents (Git for Windows fallback, if exists):"
-          ls -la "C:/msys64/" 2>&1 | head -30 || true
-          exit 1
+          LLVM_MINGW_VERSION="20260908"
+          TOOLCHAIN_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-aarch64.zip"
+          mkdir -p /c/llvm-mingw
+          echo "Downloading llvm-mingw aarch64 (${LLVM_MINGW_VERSION})..."
+          curl -fsSL --retry 3 -o /tmp/llvm-mingw.zip "${TOOLCHAIN_URL}"
+          echo "Extracting to C:\\llvm-mingw ..."
+          powershell -NoProfile -Command "Expand-Archive -Path 'C:\Users\runneradmin\AppData\Local\Temp\llvm-mingw.zip' -DestinationPath 'C:\llvm-mingw' -Force"
+          LLVM_MINGW_ROOT=$(find /c/llvm-mingw -maxdepth 1 -type d -name "llvm-mingw-*" | head -1)
+          if [ -z "${LLVM_MINGW_ROOT}" ]; then
+            echo "::error::Failed to discover llvm-mingw root under C:\\llvm-mingw"
+            ls -la /c/llvm-mingw/ || true
+            exit 1
+          fi
+          if [ ! -x "${LLVM_MINGW_ROOT}/bin/clang.exe" ]; then
+            echo "::error::clang.exe missing under ${LLVM_MINGW_ROOT}/bin/"
+            ls "${LLVM_MINGW_ROOT}/bin/" 2>&1 || true
+            exit 1
+          fi
+          if [ ! -d "${LLVM_MINGW_ROOT}/aarch64-w64-mingw32" ]; then
+            echo "::error::aarch64-w64-mingw32 sysroot missing under ${LLVM_MINGW_ROOT}/"
+            ls "${LLVM_MINGW_ROOT}/" 2>&1 || true
+            exit 1
+          fi
+          echo "LLVM_MINGW_ROOT=${LLVM_MINGW_ROOT}" >> "$GITHUB_ENV"
+          echo "OK: llvm-mingw installed at ${LLVM_MINGW_ROOT}"
+          "${LLVM_MINGW_ROOT}/bin/clang.exe" --version | head -2
 
       - name: Build STT
         env:
@@ -573,18 +544,13 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.meta.outputs.version }}
           GIT_COMMIT: ${{ steps.meta.outputs.commit }}
-          # On windows/arm64, point cgo at MSYS2's CLANGARM64
-          # clang absolute path. The Visual Studio LLVM clang
-          # (which `which clang` finds first on Windows PATH)
-          # doesn't know aarch64-w64-mingw32 sysroot and won't
-          # translate cgo's `-L` into lld-link's `/LIBPATH` for
-          # the sherpa-onnx .lib files in Go's module cache —
-          # same root cause documented on the ci.yml Build STT
-          # step. The MSYS2 install path comes from the Locate
-          # step above via $GITHUB_ENV (`MSYS2_ROOT`); other
-          # legs leave CC unset and let cgo auto-detect the
-          # host compiler.
-          CC: ${{ matrix.goos == 'windows' && matrix.goarch == 'arm64' && format('{0}/clangarm64/bin/clang.exe', env.MSYS2_ROOT) || '' }}
+          # On windows/arm64, point cgo at llvm-mingw's native
+          # aarch64 clang — see ci.yml's matching Install step
+          # for the full rationale (Visual Studio LLVM clang
+          # can't drive cgo's `-L` to lld-link's `/LIBPATH:`,
+          # and MSYS2 on windows-11-arm is fundamentally broken
+          # because the action downloads an x86_64 base.exe).
+          CC: ${{ matrix.goos == 'windows' && matrix.goarch == 'arm64' && format('{0}/bin/clang.exe', env.LLVM_MINGW_ROOT) || '' }}
         shell: bash
         run: |
           set -euo pipefail

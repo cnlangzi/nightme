@@ -2595,13 +2595,11 @@ func TestAdapter_Send_DM_OutThinking_GoesThroughUnifiedPath(t *testing.T) {
 		t.Fatalf("DM cold-create should not carry message_thread_id; got %v", cold.Params)
 	}
 	blocks := richMessageBlocks(cold.Params["rich_message"])
-	if len(blocks) != 5 {
-		t.Fatalf("DM cold-create blocks = %d, want 5; got %v", len(blocks), blocks)
+	if len(blocks) != 2 {
+		t.Fatalf("DM cold-create blocks = %d, want 2 (latest 2 of 5 = events 4..5); got %v", len(blocks), blocks)
 	}
 	for i, want := range []string{
-		"💭 DM thought 1", "💭 DM thought 2",
-		"💭 DM thought 3", "💭 DM thought 4",
-		"💭 DM thought 5",
+		"💭 DM thought 4", "💭 DM thought 5",
 	} {
 		if blocks[i] != want {
 			t.Fatalf("DM block[%d] = %q, want %q", i, blocks[i], want)

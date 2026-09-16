@@ -21,21 +21,21 @@ import (
 //     OutToolStart opens a new slot; OutToolEnd appends to the
 //     LAST slot's ends. On overflow, oldest slot is FIFO-evicted.
 //
-// Send window per flush: latest 5 from each stack (or fewer if
-// the stack has fewer). Each flush sends a single rich_message
-// with thinking blocks first, then tool blocks, all under
-// Telegram's per-message length cap. 5+5 = 10 blocks × ~1KB
-// each ≈ 10KB, well under the limits.
+// Send window per flush: latest 2 from thinkingStack, latest 5
+// from toolsStack (or fewer if the stack has fewer). Each flush
+// sends a single rich_message with thinking blocks first, then
+// tool blocks, all under Telegram's per-message length cap.
+// 2+5 = 7 blocks × ~1KB each ≈ 7KB, well under the limits.
 //
 // Flush triggers: 10s timer fallback, endProcess / OnPromptEnded.
-// No count-based trigger — with cap 50 + send 5, dropping
+// No count-based trigger — with cap 50 + send 2/5, dropping
 // buffered events on a count threshold would defeat the purpose
 // of keeping recent context.
 const (
-	thinkingStackCap = 50
-	toolsStackCap    = 50
-	liveDraftSendMax = 5 // per-stack, per flush
-
+	thinkingStackCap       = 50
+	toolsStackCap          = 50
+	thinkingStackFlushMax  = 2 // thinking: per-flush send window
+	toolsStackFlushMax     = 5 // tools:    per-flush send window
 	liveDraftBatchInterval = 10 * time.Second
 )
 
@@ -221,10 +221,11 @@ func (m *liveDraftManager) streamDraftEvent(_ context.Context, rawChatID string,
 
 // flush is the lock-acquiring wrapper around flushInner for the
 // timer-callback path. Captures the LATEST N events from each
-// stack (N = liveDraftSendMax, or all if fewer) as a single
-// rich_message via sendRichMessage (first flush) or editMessageText
-// (subsequent flushes). Popped entries are removed from the stacks;
-// on API failure they are restored (issue #391 contract).
+// stack (thinkingStackFlushMax from thinking, toolsStackFlushMax
+// from tools, or all if fewer) as a single rich_message via
+// sendRichMessage (first flush) or editMessageText (subsequent
+// flushes). Popped entries are removed from the stacks; on API
+// failure they are restored.
 //
 // Lock discipline (per entry):
 //  1. mu — peek + pop the to-send slice from each stack, release.
@@ -254,7 +255,7 @@ func (m *liveDraftManager) flushInner(ctx context.Context, entry *liveDraftEntry
 		return true, nil
 	}
 
-	nThink := liveDraftSendMax
+	nThink := thinkingStackFlushMax
 	if nThink > len(entry.thinkingStack) {
 		nThink = len(entry.thinkingStack)
 	}
@@ -262,7 +263,7 @@ func (m *liveDraftManager) flushInner(ctx context.Context, entry *liveDraftEntry
 	copy(sendingThink, entry.thinkingStack[len(entry.thinkingStack)-nThink:])
 	entry.thinkingStack = entry.thinkingStack[:len(entry.thinkingStack)-nThink]
 
-	nTools := liveDraftSendMax
+	nTools := toolsStackFlushMax
 	if nTools > len(entry.toolsStack) {
 		nTools = len(entry.toolsStack)
 	}

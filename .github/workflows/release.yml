@@ -514,9 +514,12 @@ jobs:
           # default `C:\msys64` is Git for Windows' bundled old
           # MSYS2 (no CLANGARM64 env); `cache: true` (default)
           # routes the install through toolcache + symlink,
-          # which is flaky on Windows runners. Force a direct
-          # install at `C:\a\msys64` with cache: false.
-          install-dir: 'C:\a\msys64'
+          # which is flaky on Windows runners. The msys2/
+          # setup-msys2 v2 input is `location` (NOT `install-dir`
+          # — v2 silently ignores the v1 name, observed in PR
+          # #400 with `Unexpected input(s) 'install-dir'`). Force
+          # a direct install with cache: false.
+          location: 'C:\a\msys64'
           cache: false
           msystem: CLANGARM64
           update: true

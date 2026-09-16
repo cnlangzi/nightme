@@ -644,30 +644,33 @@ jobs:
         if: matrix.os == 'windows-11-arm'
         uses: msys2/setup-msys2@v2
         with:
-          # The default install-dir `C:\msys64` is occupied on
-          # windows-11-arm runners by the Git for Windows-bundled
-          # MSYS2, which is too old to have the CLANGARM64 env
-          # (added in MSYS2 ~2022) — so `pacman -S clang` in
-          # CLANGARM64 msystem silently fails to land in
-          # `<root>/clangarm64/bin/`. Two non-default knobs fix
-          # this:
+          # The default `C:\msys64` is occupied on windows-11-arm
+          # runners by the Git for Windows-bundled MSYS2, which
+          # is too old to have the CLANGARM64 env (added ~2022) —
+          # so `pacman -S clang` in CLANGARM64 msystem silently
+          # fails to land in `<root>/clangarm64/bin/`. Two
+          # non-default knobs fix this:
           #
-          #   install-dir: 'C:\a\msys64'
+          #   location: 'C:\a\msys64'
           #     Drop MSYS2 in a fresh per-job location instead
-          #     of the Git-bundled root.
+          #     of the Git-bundled root. The msys2/setup-msys2 v2
+          #     action exposes this as `location` (NOT `install-
+          #     dir` as v1 did — the v1 name silently does nothing
+          #     on v2, observed in PR #400 with `Unexpected
+          #     input(s) 'install-dir'`).
           #
           #   cache: false
           #     `cache: true` (the default) installs MSYS2 into
           #     `C:\hostedtoolcache\windows\msys2-installer\
-          #     <version>\x64\msys64` and treats `install-dir` as
-          #     a symbolic-link target. Symbolic links on Windows
+          #     <version>\x64\msys64` and treats `location` as a
+          #     symbolic-link target. Symbolic links on Windows
           #     runners are flaky, and the Locate step's `ls
           #     C:/a/msys64/` reliably reports `No such file or
           #     directory` even after a successful install.
           #     `cache: false` makes the action drop MSYS2 at
-          #     `install-dir` directly — slower (no toolcache
-          #     reuse) but predictable.
-          install-dir: 'C:\a\msys64'
+          #     `location` directly — slower (no toolcache reuse)
+          #     but predictable.
+          location: 'C:\a\msys64'
           cache: false
           msystem: CLANGARM64
           update: true

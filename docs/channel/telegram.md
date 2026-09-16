@@ -156,10 +156,10 @@ Topic
 | `OutResult` | 独立 sendRichMessage | `sendOutResultMessage` → `sendRichMessage(rich_message[blocks])`，reply-anchored 到 user message |
 | `OutChoice` / `OutChoicePatch` | 独立 InlineKeyboard 消息 | `sendChoice` / `patchChoice` → `sendRichMessage(rich_message=…)` / `editMessageText(rich_message=…)` |
 | `OutHeartbeat` | rich turn header PATCH | `patchChainHeader` → `updateRichTurnHeader`（header line 走 `paragraph` block，无 footer） |
-| `OutMessageState` / `OutMessageStateRemoved` | reactions 独立轨道 | `setMessageReaction` 贴到 user message（v6.3 单 reaction 预算） |
+| `OutMessageState` / `OutMessageStateRemoved` | reactions 独立轨道 | `setMessageReaction` 贴到 user message（Telegram Bot 单 reaction 预算，每条消息只能有一个 emoji） |
 | `OutInit` | silent drop | — |
 
-`OutThinking` / `OutToolStart` / `OutToolEnd` 在 DM 和 group / forum topic 下走**同一条** unified 路径（§11.12.1 simulated DraftMessage），都跟 rich turn 并行 — DraftMessage 是这三类事件的 live streaming surface，rich turn 是其它事件的承载面。Draft path 失败时还原 buffer（issue #391）下次重试；最终落败才 DROP。
+`OutThinking` / `OutToolStart` / `OutToolEnd` 在 DM 和 group / forum topic 下走**同一条** unified 路径（§11.12.1 simulated DraftMessage），都跟 rich turn 并行 — DraftMessage 是这三类事件的 live streaming surface，rich turn 是其它事件的承载面。Draft path 失败时还原 buffer，下次重试；最终落败才 DROP。
 
 视觉形态：
 
@@ -251,7 +251,7 @@ func sessionChatID(rawChatID string, threadID int) string {
 
 ### 5.2 不需要 ChatSession 加 Telegram 专用字段
 
-修订前的设计曾考虑在 ChatSession 加 Telegram 专用字段（`TelegramChatID` / `TelegramTopicID` / `TelegramPlaceholderID`）。**修订后不需要**——这些状态走 Telegram adapter 自己的 state file,ChatSession 完全不感知 IM 协议细节:
+Telegram adapter 的占位、Topic、placeholder message id 全部走 adapter 自己的 state file,ChatSession 不持有任何 Telegram 专用字段——它只看到 `tg_<chat.id>[:thread_id]` 这种 namespaced string,跟飞书的 `oc_<hex>` 一样不透明:
 
 ```text
 ChatSession          ← chatsession 包,不知道 telegram
@@ -260,8 +260,6 @@ ChatSession          ← chatsession 包,不知道 telegram
 ├── SelectedAgent     ← /use 设
 └── InputBuffer FSM   ← 通用
 ```
-
-`tg_` 前缀让 ChatSession 这层就跟飞书的 `oc_<hex>` 一样不透明——它只是收到一个 string,用它作 chatstore 的 key。
 
 ### 5.3 路由规则（基于 tg_ 前缀）
 
@@ -292,8 +290,8 @@ threadID > 0
         └── 使用 chat_id + message_id，不需要 message_thread_id
 
 threadID == 0
-  ├── sendMessage → 主窗口 / 私聊（带 reply_to_message_id = userMsgID；topic 模式下额外带 message_thread_id。v3 修订）
-  └── editMessageText → 占位消息（v3：每 turn 一个新占位，跨 turn 留作时间线状态标记；详见 §11.11）
+  ├── sendMessage → 主窗口 / 私聊（带 reply_to_message_id = userMsgID；topic 模式下额外带 message_thread_id）
+  └── editMessageText → 占位消息（每 turn 一个新占位，跨 turn 留作时间线状态标记；详见 §11.11）
 ```
 
 ```
@@ -308,7 +306,7 @@ Topic 方案要求：
 2. 群组已开启 Topics。
 3. Bot 是群组成员，并具备创建/管理 Topic 所需的权限；建议配置为管理员。
 4. Bot 使用长轮询（`getUpdates`）只订阅 `Message` 与 `CallbackQuery` 两类 update；所有其它 update 类型（`message_reaction` / `message_reaction_count` / `chat_member` / `my_chat_member` / `edited_message` / `channel_post` 等）一律不下发，避免任何非用户主动消息的事件推送到 `incoming` 通道。每个 Bot 只能有一个 `getUpdates` consumer,daemon 重启时用持久化的 `update_id + 1` 继续消费。
-5. 私聊场景 **不做** Forum Topic 分流。Bot API 10.3 起 DM 在 BotFather 启用 Topic Mode 后支持 `createForumTopic` / `message_thread_id > 0`(`Bot Platform Developer Terms of Service` §6.2.6),但仅 "one or more eligible TPAs they own" 可在 BotFather 看到该开关,eligibility 由 Telegram 单方决定;启用后该 TPA 内 Stars 购买按 15% 非退款抽成,且 `closeForumTopic` / `reopenForumTopic` 仍不支持私聊。综合考虑 eligibility 不可控、合规绑定和 API 缺口,nightme 维持 DM 走主窗口堆叠(每 turn 一条 `<b>🤖 Working...</b>` 占位 + reply 链 userMsgID),不在 adapter 增加第三路径。决策记录见 §15 N7。
+5. 私聊场景 **不做** Forum Topic 分流。Bot API 10.3 起 DM 在 BotFather 启用 Topic Mode 后支持 `createForumTopic` / `message_thread_id > 0`(`Bot Platform Developer Terms of Service` §6.2.6),但仅 "one or more eligible TPAs they own" 可在 BotFather 看到该开关,eligibility 由 Telegram 单方决定;启用后该 TPA 内 Stars 购买按 15% 非退款抽成,且 `closeForumTopic` / `reopenForumTopic` 仍不支持私聊。综合考虑 eligibility 不可控、合规绑定和 API 缺口,nightme 维持 DM 走主窗口堆叠(每 turn 一条 `<b>🤖 Working...</b>` 占位 + reply 链 userMsgID),不在 adapter 增加第三路径。决策记录见 §13.3 N7。
 6. Topic 内发送的所有事件都必须显式携带正确的 `message_thread_id`。
 
 ## 7. 故障与边界
@@ -319,7 +317,7 @@ Topic 方案要求：
 - 消息超过 Telegram 文本长度限制：按 API 限制拆分，结果消息保留顺序并明确 continuation。
 - Bot 被移出群组或权限变化：进入降级路径；在主窗口发送一次不可恢复的连接错误，而不是继续静默丢弃。
 - 多个 chat 共享一个 Telegram 群组：按 `tg_<chat.id>:<thread_id>` 路由,不能只靠群组 `chat.id`——chatID 必须含 thread_id 才能 partition。
-- 同一 Topic 被重复创建：Telegram 原生 message_thread_id 唯一——adapter 只需用 thread_id 而非自建 sentinel topic,见 §5.1 修订。
+- 同一 Topic 被重复创建：Telegram 原生 message_thread_id 唯一——adapter 用 thread_id 直接路由,不维护自建 sentinel topic。
 
 ## 8. 实施顺序
 
@@ -700,17 +698,17 @@ chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
 
 ### 11.7 主窗口、Topic 和监听模式
 
-主窗口消息直接在主窗口回,不再创建 sentinel topic。Bot 收到群主窗口消息后,chatID = `tg_-10012345` (无 thread_id 后缀),所有回复走主窗口:
+主窗口消息直接在主窗口回。Bot 收到群主窗口消息后,chatID = `tg_-10012345` (无 thread_id 后缀),所有回复走主窗口:
 
 ```text
 群主窗口 (Forum-enabled)
 └── 用户消息 (thread_id=0)
     └── adapter 拼 chatID = "tg_-10012345"
         └── 走普通 slash / agent 流程
-            ├── thinking → 独立消息
-            ├── tool start → 独立消息
-            ├── tool end → 独立消息
-            └── result → 独立消息
+            ├── thinking → 模拟 DraftMessage（live_draft）
+            ├── tool start → 模拟 DraftMessage（live_draft）
+            ├── tool end → 模拟 DraftMessage（live_draft）
+            └── result → 独立 sendRichMessage
 ```
 
 ```text
@@ -718,20 +716,20 @@ chat_id                        ← "tg_<digits>" or "tg_<digits>:<thread_id>"
 └── 用户消息 (thread_id=42)
     └── adapter 拼 chatID = "tg_-10012345:42"
         └── 走普通 slash / agent 流程 (与主窗口一样)
-            ├── thinking → 独立消息
-            ├── tool start → 独立消息
-            ├── tool end → 独立消息
-            └── result → 独立消息
+            ├── thinking → 模拟 DraftMessage（live_draft，message_thread_id=42）
+            ├── tool start → 模拟 DraftMessage（live_draft，message_thread_id=42）
+            ├── tool end → 模拟 DraftMessage（live_draft，message_thread_id=42）
+            └── result → 独立 sendRichMessage（message_thread_id=42）
 ```
 
-**Sentinel topic 不存在**：原来"主窗口创建 nightme sentinel topic"流程不存在。`tg_<chat.id>:<thread_id>` 拼接让 chatID 是 (chat, topic) 二元组的纯函数——不需要 Telegram 分配 sentinel topic；sentinel topic ID 不可控，daemon 重启 / state 丢失会导致 ID 漂移，违反 chatID 稳定性约束。
+**没有 sentinel topic**：nightme 不在主窗口为 group chat 创建自建 sentinel topic。`tg_<chat.id>:<thread_id>` 拼接让 chatID 是 (chat, topic) 二元组的纯函数,主窗口消息直接走 `tg_<chat.id>`,真实 topic 消息走 `tg_<chat.id>:<thread_id>`,两者天然 partition。
 
 DM / 群主窗口（thread_id=0）和真实 topic（thread_id > 0）走**统一的 per-turn rich message**方案：
 
 - 每个用户消息进来 → `ensurePlaceholder` **新建**一条 rich message（`sendRichMessage(rich_message=…)`），DM 下不创建（draft 是 live surface，empty placeholder 只是噪音）。
 - 同一 turn 的所有 OutXxx（`OutReply` / `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutResult` / `OutError` / `OutChoice`）走 `appendRichTurn` / `appendRichTurnAndFlush`，由 `renderRichTurnBlocksLocked` 渲染为同一 rich message 的多段 blocks；非 DM 时携带 `reply_to_message_id = UserMessageID` + `message_thread_id = thread_id`，DM 下 reply-to 仍带，message_thread_id 不带。
 - `OutResult` 单独 `sendRichMessage` 走独立消息，reply-anchored 到 user message，不进 rich turn。
-- turn 状态走 **message reaction**：runtime `MessageStateBus` → `OutMessageState` 触发 `setMessageReaction(userMsgID, 👌)`（v6.3 单 reaction 预算）；`OnPromptEnded` 在 result 消息（fallback rich message）上贴 🎉 / ❌。
+- turn 状态走 **message reaction**：runtime `MessageStateBus` → `OutMessageState` 触发 `setMessageReaction(userMsgID, 👌)`（Telegram Bot 单 reaction 预算）；`OnPromptEnded` 在 result 消息（fallback rich message）上贴 🎉 / ❌。
 - `OutHeartbeat` PATCH 当前 turn 的 rich message header（`💭 N · 🔧 M · ⏱ HH:MM:SS`）—— 是 in-turn 状态 ticker，单独 paragraph block，不带 footer。
 - 跨 turn：老 rich message 留作历史证据（不再被 PATCH），新 turn 创建新 rich message 独立承载新状态。
 
@@ -907,7 +905,7 @@ flush 总是发生（rich turn 没有 chain 的 ROTATE 概念）：turn.dirty = 
 1. 停止 pending debounce timer
 2. 同步 `flushRichTurn` —— 让 🎉 落在已完整渲染的 final state 上
 3. 选 🎉 锚点：`turn.resultMessageID > 0`（本 turn 收到 OutResult）→ 用 result 消息；否则回退 `turn.messageID`（rich turn placeholder）
-4. `setMessageReaction(targetID, 🎉)`；`reason.IsError()` 时换 ❌（user message slot 不动，v6.3 单 reaction 预算守）
+4. `setMessageReaction(targetID, 🎉)`；`reason.IsError()` 时换 ❌（user message slot 不动，单 reaction 预算保持）
 5. `richTurns.purge(chatID, topicID, userMessageID)` —— turn 结束清 in-memory state
 6. `liveDraft.endProcess(...)` —— DM/group liveDraft surface 清理（详见 §11.12.1 unified simulated DraftMessage）
 
@@ -915,9 +913,9 @@ flush 总是发生（rich turn 没有 chain 的 ROTATE 概念）：turn.dirty = 
 
 #### 11.11.8 restart 行为
 
-rich turn 不持久化。daemon 重启 = in-memory rich turn 失。turn  N  已发送的 rich message 留在 Telegram chat（不会消失，没人 PATCH）。下次 user message 进来 `ensurePlaceholder` 冷创建新 rich message。
+rich turn 不持久化。daemon 重启时 in-memory rich turn 丢失;之前 turn 已发送的 rich message 留在 Telegram chat（不会消失,后续没有人再 PATCH）。下次 user message 进来 `ensurePlaceholder` 冷创建新 rich message。
 
-LRU cap = 1000（按 user message 计，cap = 1000 个并发 turn）。FIFO evict（不是 LRU —— turn 结束主动 purge，index 不需要 access order 跟踪）。
+`richTurnsIndex` cap = 1000（按 user message 计,最多 1000 个并发 turn）。FIFO evict（不是 LRU —— turn 结束主动 purge,index 不需要 access order 跟踪）。
 
 #### 11.11.9 测试契约
 
@@ -942,12 +940,12 @@ LRU cap = 1000（按 user message 计，cap = 1000 个并发 turn）。FIFO evic
 | `TestOnPromptEndedRichTurn_PurgesTurn` | flush 完 purge turn 出 index |
 | `TestRichTurnsIndex_FIFOEviction` | cap 满后 evict 最老的（按插入顺序） |
 | `TestRichTurnsIndex_PurgeRemovesKey` | purge 后 lookup miss |
-| `TestRenderMarkdownToRichBlocks_HeadingFenceListTable` | walker 渲染 L2 验证矩阵 |
+| `TestRenderMarkdownToRichBlocks_HeadingFenceListTable` | walker 渲染 markdown 验证矩阵 |
 | `TestRenderMarkdownToRichBlocks_StrikethroughQuirk` | `~~strike~~` 渲染为字面 `~~strike~~`（rich block 无 strike entity） |
 
 ## 11.12 OutThinking / OutToolStart / OutToolEnd 的 live streaming surface
 
-三类事件在 DM / group / forum topic 下都走同一条 unified 路径：bot-owned rich message + `editMessageText(rich_message=…)` PATCH in place + `deleteMessage` 清理。**没有 ChatKind 分支**：DM 跟 group 共享 `groupDraftManager`（命名沿用历史，行为已统一）。行为对位飞书 receipt 的"live streaming"语义：用户进入 chat 立刻看到当前 think/tool 进度，turn 终止后自动消失；用户仍可照常打字 / interject，bot 不锁 send button。
+三类事件在 DM / group / forum topic 下都走同一条 unified 路径：bot-owned rich message + `editMessageText(rich_message=…)` PATCH in place + `deleteMessage` 清理。**没有 ChatKind 分支**：DM 跟 group 共享 `liveDraftManager`（管理两类 ChatKind 的流式表面）。行为对位飞书 receipt 的"live streaming"语义：用户进入 chat 立刻看到当前 think/tool 进度，turn 终止后自动消失；用户仍可照常打字 / interject，bot 不锁 send button。
 
 ### 11.12.1 统一流式表面（DM + group / forum topic）
 
@@ -961,7 +959,7 @@ LRU cap = 1000（按 user message 计，cap = 1000 个并发 turn）。FIFO evic
 
 **核心对位**（与 §11.11 rich turn 对齐）：
 
-| 维度 | Telegram v11.12 统一流式表面 | Feishu receipt |
+| 维度 | Telegram 模拟 DraftMessage（§11.12） | Feishu receipt |
 | --- | --- | --- |
 | 存储 | bot 拥有的真实 rich message（in-memory `entry.messageID`） | receipt card（in-memory） |
 | 创建 | 第一次 flush 触发 `sendRichMessage(rich_message={"blocks":[…]})` 返回 message_id | `SendMessageReceipt` 首次 render |
@@ -972,7 +970,7 @@ LRU cap = 1000（按 user message 计，cap = 1000 个并发 turn）。FIFO evic
 | Delete at turn end | bot `deleteMessage` + drop entry | receipt 保留作为时间线证据 |
 | 锚点 | `reply_to_message_id = userMessageID`（cold-create 时携带） | thread reply chain |
 | 线程隔离 | `message_thread_id = topicID`（forum topic 内 DraftMessage 留在 topic；DM 下 topicID == 0 不带） | thread_id |
-| 失败语义 | sendRichMessage / editMessageText 失败统一保留 buffer，下次 trigger 续试（issue #391 contract） | retry / fall through |
+| 失败语义 | sendRichMessage / editMessageText 失败统一保留 buffer，下次 trigger 续试 | retry / fall through |
 
 **两个独立 FIFO 栈，各容量 50**：
 
@@ -987,7 +985,7 @@ LRU cap = 1000（按 user message 计，cap = 1000 个并发 turn）。FIFO evic
 2. 从 `toolsStack` 取最新 5 slots → 每个 slot 渲染成 [Start?, End1, End2, …] blocks
 3. 合并成一段 `{"blocks":[…]}` JSON
 4. `sendRichMessage`（首次）/ `editMessageText`（后续）发给 Telegram
-5. 失败时把取走的 entries 还原（issue #391）
+5. 失败时把取走的 entries 还原
 
 5 thinking + 5 tools = 10 blocks × ~1KB ≈ 10KB，远低于 Telegram 4096 字符限制或 rich_message block 上限。
 
@@ -1055,13 +1053,13 @@ DM 私聊 (user 视角)
 ├─ User message: "帮我看看 foo.go"
 ├─ DraftMessage (rich): 最新 5 thinking + 最新 5 tool blocks   ← reply_to 挂 user message
 ├─ rich turn (OutHeartbeat PATCH): "🤖 Working... 💭 N · 🔧 M"
-├─ OutReply: "answer text..."（独立 sendRichMessage）
+├─ rich turn (OutReply PATCH): "answer text..."
 └─ OutResult: "📝 final answer..."（独立 sendRichMessage）
 
 turn end: DraftMessage 被 deleteMessage 移除
 ```
 
-forum topic 视觉形态相同：用户消息 → DraftMessage (rich, message_thread_id=topicID) → rich turn → OutReply / OutResult。DM 与 group / topic 唯一差异：DM 下 `message_thread_id` 不带。
+forum topic 视觉形态相同：用户消息 → DraftMessage (rich, message_thread_id=topicID) → rich turn → OutResult。DM 与 group / topic 唯一差异：DM 下 `message_thread_id` 不带。
 
 **为什么不持久化 DraftMessageID**：`groupDraft` 完全 in-memory，daemon 重启会丢失当前 turn 的 in-flight DraftMessage。trade-off：
 
@@ -1070,7 +1068,7 @@ forum topic 视觉形态相同：用户消息 → DraftMessage (rich, message_th
 - ⚠️ daemon 重启 mid-turn 会留孤儿在 chat；用户不会主动 resume 同 turn，影响有限
 - ⚠️ 第 2 次 turn 自动 cold-create 新 message
 
-**Bot API 兼容性**：纯 `sendRichMessage` / `editMessageText(rich_message=…)` / `deleteMessage`，需要 Bot API 10.1+（2025-06 引入的 `rich_message` 参数和 `sendRichMessage`）。sendRichMessage / editMessageText 失败统一保留 buffer 不退到 rich turn（issue #391 contract）。
+**Bot API 兼容性**：纯 `sendRichMessage` / `editMessageText(rich_message=…)` / `deleteMessage`，需要 Bot API 10.1+（提供 `rich_message` 参数和 `sendRichMessage` 方法）。sendRichMessage / editMessageText 失败统一保留 buffer，不退到 rich turn。
 
 **Rate-limit 友好度**（与 §11.11 整体设计一致）：每 turn 最多 `ceil(N/50)` 次 flush（N = 该 turn 的 events 总数，cap 50 后开始 evict 老的），每次 flush 最多 5+5=10 blocks。远低于 Telegram per-chat 1/s 和 per-group 20/min 硬限。
 
@@ -1146,7 +1144,7 @@ qino 提交答案并继续当前交互
 
 1. 校验 `callback_query.from.id` 是否为当前 Choice 操作人。
 2. 校验 `callback_query.message.chat.id` 和 `message_thread_id`。
-3. 通过 `shortID` 查 `ChoiceState`（完整 RequestID 走 state store 反查，`callback_data` 64 字节限制详见 §15 L3）。
+3. 通过 `shortID` 查 `ChoiceState`（完整 RequestID 走 state store 反查，`callback_data` 64 字节限制详见 §13.1 L3）。
 4. 调用 `answerCallbackQuery` 结束按钮 loading。
 5. 将 Choice 提示更新为"等待输入"状态，禁用 / 删除 `Type your answer` 按钮。
 6. 在同一个 Topic 中发送 ForceReply 消息。
@@ -1229,7 +1227,7 @@ Telegram 没有 "append to existing message" 语义。所有"原位更新"都是
 
 Telegram 的 `reply_to_message_id` 只在视觉上"引用"，消息本身仍然显示在 Topic 主消息流。设计上靠 Topic 自身隔离来替代。
 
-#### L6. 没有 markdown 原生支持，只能用受限 HTML 子集（已退化为 rich blocks）
+#### L6. 没有 markdown 原生支持，只能用受限 HTML 子集（全部 Out* 出口走 rich blocks）
 
 Telegram 只支持 `<b>` `<i>` `<u>` `<s>` `<strike>` `<del>` `<code>` `<pre>` `<a href>` `<tg-spoiler>`。所有 text 出口走 `rich_message[blocks]`（Bot API 10.1+）渲染为原生 rich block（heading / pre / list / blockquote / table / footer 等），不再是 markdown→HTML 的近似。颜色 / 字号仍不支持。
 
@@ -1279,7 +1277,7 @@ Telegram 没有"删除单个 reaction"的 API，"删除"通过 `reaction: []` �
 
 #### N3. OnPromptEnded 用 reaction 表达错误终态
 
-已用 `setMessageReaction(targetID, ❌)` 承担错误终态（reason.IsError() 时换 emoji）。user message slot 不动（v6.3 单 reaction 预算守）。
+已用 `setMessageReaction(targetID, ❌)` 承担错误终态（reason.IsError() 时换 emoji）。user message slot 不动（单 reaction 预算保持）。
 
 #### N4. Orphan reply fallback
 
@@ -1514,7 +1512,7 @@ footer block 的 `text` 由 `footerLinesToRichText(footerLines)`（`internal/cha
 
 PR 锚点保留为 clickable url entity，不会退化为字面 markdown 文本。
 
-完整契约 / 测试在 `internal/statusbar/statusbar_test.go`（从 feishu F-45 §1.6 的 `usage_footer_test.go` 迁移）。
+完整契约 / 测试在 `internal/statusbar/statusbar_test.go`。
 
 ### 16.2 贴附规则
 
@@ -1655,7 +1653,7 @@ walker 拒收形状（block-cap / char-cap / malformed shape）→ `ok=false` �
 | 风险 | 状态 | 缓解 |
 | --- | --- | --- |
 | Pre-10.1 客户端显示空白 | 接受 | RichMode 常驻，无 plain-text fallback。Pre-10.1 客户端收到 `rich_message` 可能渲染为空白或报错。客户端版本探测 client_version API 不存在，待 Bot API 落地 |
-| Markdown auto-parse cliff（>500 blocks） | 实测 200/400 ✓ 600+ ✗ | L2 走显式 blocks 绕开 |
+| Markdown auto-parse cliff（>500 blocks） | 实测 200/400 ✓ 600+ ✗ | 走显式 blocks 数组构造，绕开 markdown 自动解析 |
 | Photo URL 白名单（仅 telegram.org 实测通过） | 实测 | walker 不主动 emit photo block；显式发图仍走 `sendPhoto` |
 | Thinking block Premium-only | 实测 `BLOCK_UNSUPPORTED` | walker 把 markdown emphasis 走 italic 不用 thinking |
 | Anchor / divider 不能 standalone | 实测 | walker 规则：divider 必须有前后 sibling；anchor 仅作 list/blockquote 子块 |

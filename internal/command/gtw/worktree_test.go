@@ -2,6 +2,8 @@ package gtw
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,4 +167,132 @@ func (f *fakeGit) Run(_ context.Context, _ string, args ...string) (string, stri
 		return "", "", nil
 	}
 	return "", "", nil
+}
+
+// scriptedGit is a GitRunner whose responses are pre-registered
+// per argv prefix. Any unregistered command returns ("", "",
+// errors.New(...)) — mirroring how a real runner reports a
+// "command failed" git error, which keeps the new DefaultBranch
+// fallback chain honest about its error path.
+//
+// Used by TestDefaultBranch_* below to drive each tier of the
+// fallback chain without spawning real git.
+type scriptedGit struct {
+	responses map[string]scriptedGitResp
+}
+
+type scriptedGitResp struct {
+	stdout string
+	stderr string
+	err    error
+}
+
+func newScriptedGit() *scriptedGit {
+	return &scriptedGit{responses: map[string]scriptedGitResp{}}
+}
+
+func (s *scriptedGit) on(prefix string, stdout, stderr string, err error) {
+	s.responses[prefix] = scriptedGitResp{stdout, stderr, err}
+}
+
+func (s *scriptedGit) Run(_ context.Context, _ string, args ...string) (string, string, error) {
+	if len(args) == 0 {
+		return "", "", errors.New("scriptedGit: empty argv")
+	}
+	if r, ok := s.responses[args[0]]; ok {
+		return r.stdout, r.stderr, r.err
+	}
+	return "", "", fmt.Errorf("scriptedGit: no response for %s", args[0])
+}
+
+// TestDefaultBranch_SymbolicRefHit covers the fast path:
+// refs/remotes/origin/HEAD is set and resolves cleanly. The
+// ls-remote fallback should never run — verify by leaving it
+// unmocked (scriptedGit returns error for unmocked commands).
+func TestDefaultBranch_SymbolicRefHit(t *testing.T) {
+	git := newScriptedGit()
+	git.on("symbolic-ref", "origin/main\n", "", nil)
+
+	got, err := DefaultBranch(context.Background(), "", git)
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "main" {
+		t.Errorf("DefaultBranch = %q, want %q", got, "main")
+	}
+}
+
+// TestDefaultBranch_SymbolicRefFails_LsRemoteSymref covers the
+// fallback tier: origin/HEAD isn't cached (e.g. skinny clone),
+// but the remote still advertises HEAD via ls-remote --symref.
+// Parses the standard "ref: refs/heads/<branch>\tHEAD" line.
+func TestDefaultBranch_SymbolicRefFails_LsRemoteSymref(t *testing.T) {
+	git := newScriptedGit()
+	git.on("symbolic-ref", "", "fatal: not a symbolic ref", errors.New("exit 128"))
+	git.on("ls-remote", "ref: refs/heads/develop\tHEAD\nabc123\tHEAD\n", "", nil)
+
+	got, err := DefaultBranch(context.Background(), "", git)
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "develop" {
+		t.Errorf("DefaultBranch = %q, want %q", got, "develop")
+	}
+}
+
+// TestDefaultBranch_SymbolicRefMalformed covers the edge where
+// symbolic-ref succeeds but returns a value we can't parse
+// (e.g. "origin/" with an empty branch). The implementation must
+// fall through to the next strategy rather than erroring.
+func TestDefaultBranch_SymbolicRefMalformed(t *testing.T) {
+	git := newScriptedGit()
+	git.on("symbolic-ref", "origin/\n", "", nil)
+	git.on("ls-remote", "ref: refs/heads/main\tHEAD\n", "", nil)
+
+	got, err := DefaultBranch(context.Background(), "", git)
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "main" {
+		t.Errorf("DefaultBranch = %q, want %q", got, "main")
+	}
+}
+
+// TestDefaultBranch_LsRemoteNoSymref covers the case where the
+// remote doesn't advertise a HEAD symref (some self-hosted
+// GitLab / older gitea). The ls-remote output is just the SHA
+// line; we have no strategy that can guess — must error.
+func TestDefaultBranch_LsRemoteNoSymref(t *testing.T) {
+	git := newScriptedGit()
+	git.on("symbolic-ref", "", "fatal: not a symbolic ref", errors.New("exit 128"))
+	git.on("ls-remote", "abc123def456\tHEAD\n", "", nil)
+
+	_, err := DefaultBranch(context.Background(), "", git)
+	if err == nil {
+		t.Fatal("DefaultBranch: want error when neither strategy yields a branch")
+	}
+	if !strings.Contains(err.Error(), "default branch") {
+		t.Errorf("error should mention 'default branch': %v", err)
+	}
+}
+
+// TestDefaultBranch_AllFail covers the bare-repo / no-origin
+// case: every strategy errors. The error message must mention
+// `default branch` (general signal) AND give a remediation hint
+// (run `git remote set-head origin --auto` / `git fetch origin`).
+func TestDefaultBranch_AllFail(t *testing.T) {
+	git := newScriptedGit()
+	git.on("symbolic-ref", "", "fatal: not a symbolic ref", errors.New("exit 128"))
+	git.on("ls-remote", "", "fatal: could not read from remote", errors.New("exit 128"))
+
+	_, err := DefaultBranch(context.Background(), "", git)
+	if err == nil {
+		t.Fatal("DefaultBranch: want error when all strategies fail")
+	}
+	if !strings.Contains(err.Error(), "default branch") {
+		t.Errorf("error should mention 'default branch': %v", err)
+	}
+	if !strings.Contains(err.Error(), "git remote set-head") {
+		t.Errorf("error should include a remediation hint: %v", err)
+	}
 }

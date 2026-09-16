@@ -210,32 +210,85 @@ func CurrentBranch(ctx context.Context, dir string, git GitRunner) (string, erro
 }
 
 // DefaultBranch discovers the repository's default branch name
-// (e.g. "main", "master", "develop") via the symbolic-ref
-// `refs/remotes/origin/HEAD` that GitHub / GitLab / most
-// remotes set on first clone. Returns the bare branch name
-// (no `origin/` prefix). Errors when the ref is missing —
-// caller surfaces the "no upstream" hint to the user.
+// (e.g. "main", "master", "develop"). Two-tier fallback:
 //
-// Repos cloned before the host set this ref, or fresh local
-// repos without an `origin`, will hit this error path. The
-// caller is expected to surface a friendly message; we do
-// NOT fall back to "main" by name because that would silently
-// pick the wrong branch on `master`-default repos.
+//  1. `git symbolic-ref --short refs/remotes/origin/HEAD` —
+//     set by GitHub / GitLab / most remotes on first clone;
+//     fastest path, no network.
+//  2. `git ls-remote --symref origin HEAD` — asks the remote
+//     directly. Catches skinny / fresh clones that haven't
+//     pulled origin/HEAD into the local cache yet, plus
+//     clones where step 1 was never run.
+//
+// Returns the bare branch name (no `origin/` prefix). Errors
+// when both strategies yield nothing — caller surfaces a hint
+// about `git remote set-head origin --auto` / `git fetch origin`.
+//
+// We deliberately do NOT guess "main" / "master" by name: a
+// silent default would pick the wrong branch on repos whose
+// upstream is `develop`, `trunk`, etc.
 func DefaultBranch(ctx context.Context, dir string, git GitRunner) (string, error) {
+	if branch, ok := defaultBranchFromOriginHead(ctx, dir, git); ok {
+		return branch, nil
+	}
+	if branch, ok := defaultBranchFromRemoteSymref(ctx, dir, git); ok {
+		return branch, nil
+	}
+	return "", fmt.Errorf(
+		"could not determine default branch: refs/remotes/origin/HEAD " +
+			"is not set and `git ls-remote --symref origin HEAD` did not " +
+			"return a symref (run `git remote set-head origin --auto` " +
+			"or `git fetch origin` to populate it)",
+	)
+}
+
+// defaultBranchFromOriginHead reads the locally cached
+// refs/remotes/origin/HEAD. Returns (branch, true) on success;
+// ("", false) when the ref is missing, malformed, or the
+// underlying git call fails (caller tries the next strategy).
+func defaultBranchFromOriginHead(ctx context.Context, dir string, git GitRunner) (string, bool) {
 	out, _, err := git.Run(ctx, dir,
 		"symbolic-ref", "--short", "refs/remotes/origin/HEAD")
 	if err != nil {
-		return "", fmt.Errorf(
-			"discover default branch via refs/remotes/origin/HEAD: %w "+
-				"(no origin remote? run `git remote add origin <url>` and `git fetch origin`)",
-			err)
+		return "", false
 	}
 	ref := strings.TrimSpace(out)
 	branch := strings.TrimPrefix(ref, "origin/")
 	if branch == "" || branch == ref {
-		return "", fmt.Errorf("unrecognised default branch ref %q", ref)
+		return "", false
 	}
-	return branch, nil
+	return branch, true
+}
+
+// defaultBranchFromRemoteSymref asks the remote directly via
+// `git ls-remote --symref origin HEAD`. Output line shape on
+// remotes that advertise the symref:
+//
+//	ref: refs/heads/<branch>\tHEAD
+//	<sha>\tHEAD
+//
+// We want the first line — it's the symref pointing at the
+// remote's default. Older / non-standard remotes that don't
+// advertise HEAD return only the SHA line; we treat that as
+// "no result" so the caller can surface a clean error.
+func defaultBranchFromRemoteSymref(ctx context.Context, dir string, git GitRunner) (string, bool) {
+	out, _, err := git.Run(ctx, dir,
+		"ls-remote", "--symref", "origin", "HEAD")
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(line, "ref: refs/heads/")
+		if !ok {
+			continue
+		}
+		branch, _, _ := strings.Cut(rest, "\t")
+		branch = strings.TrimSpace(branch)
+		if branch != "" {
+			return branch, true
+		}
+	}
+	return "", false
 }
 
 // RefreshDefaultBranch brings repoRoot (which MUST be the

@@ -510,11 +510,14 @@ jobs:
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
         uses: msys2/setup-msys2@v2
         with:
-          # Default `C:\msys64` is Git for Windows' bundled old
-          # MSYS2 (no CLANGARM64 env). Force a fresh install at
-          # `C:\a\msys64` so CLANGARM64 is actually present.
-          # See ci.yml's matching step for the full rationale.
+          # See ci.yml's matching step for full rationale:
+          # default `C:\msys64` is Git for Windows' bundled old
+          # MSYS2 (no CLANGARM64 env); `cache: true` (default)
+          # routes the install through toolcache + symlink,
+          # which is flaky on Windows runners. Force a direct
+          # install at `C:\a\msys64` with cache: false.
           install-dir: 'C:\a\msys64'
+          cache: false
           msystem: CLANGARM64
           update: true
           install: >-

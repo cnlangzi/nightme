@@ -391,15 +391,14 @@ jobs:
   # need a separate runtime layout directory on disk; the binary
   # is the whole payload.
   #
-  # Matrix is 5 legs (linux × 2, darwin/arm64, windows × 2).
-  # darwin/amd64 is intentionally absent: sherpa-onnx-go is a pure
-  # CGo binding with no CGO_ENABLED=0 fallback, and Go on
-  # Apple-Silicon cannot cross-compile CGo to x86_64 (the same
-  # constraint that already forced the main `nightme` darwin/amd64
-  # leg into `notray` CGO_ENABLED=0). A native macos-13 Intel
-  # runner was the only path; it was deprecated and there is no
-  # replacement, so Intel Mac users fall back to building locally
-  # with `make build-stt` on Intel hardware.
+  # Matrix is 6 legs (linux × 2, darwin × 2, windows × 2).
+  # darwin/amd64 cross-compiles cgo from Apple Silicon to x86_64
+  # — Go 1.20+ + clang's `-arch x86_64` flag handles this on
+  # modern Go (the historical `clang does not accept -arch x86_64
+  # via Go's auto-detection path` note from PR #203 era predates
+  # the fix; explicitly setting CGO_CFLAGS / CGO_LDFLAGS via the
+  # Makefile's `CGO_ENABLED=1` recipe covers any remaining
+  # edge case).
   stt:
     name: Build STT worker (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: []
@@ -420,6 +419,11 @@ jobs:
             binary: nightme-stt
           - goos: darwin
             goarch: arm64
+            os: macos-latest
+            archive: tar.gz
+            binary: nightme-stt
+          - goos: darwin
+            goarch: amd64
             os: macos-latest
             archive: tar.gz
             binary: nightme-stt

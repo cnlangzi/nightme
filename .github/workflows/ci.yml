@@ -590,27 +590,52 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # 3-OS matrix on purpose. Same axes as `test` — every OS
+      # we ship a binary for, we also verify the bridge can
+      # actually start every AI coding agent on that OS. Arch
+      # (Intel vs Apple Silicon) is intentionally NOT a matrix
+      # axis: nightme is Go + npm, both treat amd64 and arm64
+      # equivalently, and adding `macos-13` would re-test the
+      # same OS layer with negligible signal. Each runner
+      # reports independently so a Linux-only npm registry
+      # hiccup doesn't gate Windows / macOS.
+      #
+      # The runner labels here mirror release.yml's main
+      # `build` and `stt` matrix 1:1 — same six host+goarch
+      # combos, in the same order — so a runner-image change
+      # (label rename, deprecation) updates both workflows in
+      # lock-step. ALL six legs run the full agent-smoke chain
+      # (npm install + daemon lifecycle + agent --version +
+      # nightme bridge spawns each agent) — CI must exercise
+      # every shipped platform/arch so a regression on arm64
+      # Linux (Graviton/Ampere), Apple Silicon Mac, or Windows
+      # ARM64 (Snapdragon) surfaces as a PR-time failure
+      # instead of a release-time one. Previously arm64 legs
+      # were skipped under the (incorrect) assumption that
+      # npm-distributed agents would fail there; in practice
+      # every agent we ship is arm64-native on Apple Silicon
+      # and either arm64-native or x86_64-emulatable
+      # elsewhere, and the smoke chain passes.
+      #
+      # darwin/amd64 uses macos-latest (Apple Silicon host)
+      # with GOARCH=amd64 cross-compile. The resulting x86_64
+      # nightme binary runs via Rosetta 2 — installed by
+      # default on Sonoma+ runners — so the agent-smoke chain
+      # (npm-install + spawn) still works end-to-end.
       matrix:
-        # 3-OS matrix on purpose. Same axes as `test` — every OS
-        # we ship a binary for, we also verify the bridge can
-        # actually start every AI coding agent on that OS. Arch
-        # (Intel vs Apple Silicon) is intentionally NOT a matrix
-        # axis: nightme is Go + npm, both treat amd64 and arm64
-        # equivalently, and adding `macos-13` would re-test the
-        # same OS layer with negligible signal. Each runner
-        # reports independently so a Linux-only npm registry
-        # hiccup doesn't gate Windows / macOS.
-        #
-        # The runner labels here mirror release.yml's main
-        # `build` and `stt` matrix 1:1 — same five host labels,
-        # in the same order — so a runner-image change (label
-        # rename, deprecation) updates both workflows in lock-
-        # step. Only the three amd64 legs participate in agent-
-        # smoke; the two arm64 legs (ubuntu-24.04-arm for linux,
-        # windows-11-arm for windows) run the STT build gate and
-        # nothing else — npm-distributed agents are amd64-only,
-        # so spawning them on arm64 would just fail.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+        include:
+            - os: ubuntu-latest
+              goarch: amd64
+            - os: ubuntu-24.04-arm
+              goarch: arm64
+            - os: macos-latest
+              goarch: arm64
+            - os: macos-latest
+              goarch: amd64
+            - os: windows-latest
+              goarch: amd64
+            - os: windows-11-arm
+              goarch: arm64
     steps:
       - uses: actions/checkout@v5
 
@@ -716,6 +741,30 @@ jobs:
         shell: bash
         env:
           VERSION: "0.0.0"
+          # Force the build to match matrix.goarch. On native
+          # legs (host arch == matrix.goarch) this is a no-op;
+          # on the cross-compile leg (macos-latest arm64 host
+          # building darwin/amd64) it overrides Go's host default
+          # so `make build` produces the right `bin/nightme`.
+          GOARCH: ${{ matrix.goarch }}
+          # darwin/amd64 cross-compile from Apple Silicon needs
+          # the same `notray + CGO_ENABLED=0` workaround that
+          # release.yml's main build job already uses for the
+          # same leg. getlantern/systray's Objective-C bridge
+          # (`systray_darwin.m`) can't be cross-compiled because
+          # Apple clang on arm64 doesn't forward `-arch x86_64`
+          # to its C compile step (Go's cgo invokes the host
+          # cc with CGO_CFLAGS unset), so symbols like
+          # `nativeLoop` / `registerSystray` end up undefined at
+          # link time. `-tags notray` selects the no-op stub
+          # tray (cmd/nightme/tray_stub.go) which has no cgo
+          # dependency, sidestepping the entire problem.
+          # This matches what release.yml's `build` job already
+          # does for darwin/amd64, so the CI smoke binary and
+          # the published release binary are byte-equivalent on
+          # that leg.
+          CGO_ENABLED: ${{ matrix.os == 'macos-latest' && matrix.goarch == 'amd64' && '0' || '1' }}
+          GO_TAGS: ${{ matrix.os == 'macos-latest' && matrix.goarch == 'amd64' && 'notray' || '' }}
         run: |
           export GIT_COMMIT="${GITHUB_SHA:0:7}"
           # Use the canonical build entry points (mirrors the
@@ -727,39 +776,37 @@ jobs:
           #     Makefile to bake version metadata in)
           # Both produce bin/nightme[.exe] with version metadata
           # baked in via -ldflags.
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./build.bat
-          elif [ "${{ matrix.os }}" = "windows-11-arm" ]; then
-            # build.bat works on aarch64 too (go-winres + go build
-            # are arch-portable Go tools); it's the cgo_sherpa
-            # build that needs the mingw toolchain, which is why
-            # build.bat is fine here without it.
+          if [ "${{ matrix.os }}" = "windows-latest" ] || [ "${{ matrix.os }}" = "windows-11-arm" ]; then
             ./build.bat
           else
             make build
           fi
 
-      # Build nightme-stt only on the two arm64 legs. The
-      # `Install llvm-mingw (aarch64-w64-mingw32)` step above
-      # provides a native aarch64 clang + lld + aarch64-w64-
-      # mingw32 sysroot that cgo drives correctly. We point
-      # CC at the discovered llvm-mingw bin so cgo doesn't
-      # fall back to the Visual Studio LLVM clang (which can't
-      # translate cgo's `-L` to lld-link's `/LIBPATH:` and
-      # can't find the sherpa-onnx .lib files).
+      # Build nightme-stt on ALL six legs. CI must gate every
+      # platform/arch that release.yml ships — release runs only
+      # on tag push (low frequency, late detection), CI runs per
+      # PR (high frequency, fail-fast). Skipping any release
+      # target in CI means a regression in that path slips past
+      # review and surfaces as a release-time failure instead of
+      # a PR-time one. release.yml covers all six OS×arch combos
+      # (linux × 2, darwin × 2, windows × 2), so this step does
+      # too.
       #
-      # ubuntu-24.04-arm leaves CC unset — the host's preinstalled
-      # gcc-aarch64-linux-gnu handles cgo natively.
+      # GOOS / GOARCH follow matrix.goos / matrix.goarch. CC
+      # only needs to point at llvm-mingw clang on windows-11-arm
+      # (Visual Studio's bundled clang lacks aarch64-w64-mingw32
+      # sysroot support); every other leg uses the host's default
+      # C compiler (mingw gcc on amd64 windows, gcc on linux,
+      # Apple clang on darwin).
       - name: Build STT
-        if: matrix.os == 'windows-11-arm' || matrix.os == 'ubuntu-24.04-arm'
         env:
-          GOOS: ${{ matrix.os == 'windows-11-arm' && 'windows' || 'linux' }}
-          GOARCH: arm64
+          GOOS: ${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'windows-11-arm' && 'windows' || matrix.os == 'macos-latest' && 'darwin' || 'linux' }}
+          GOARCH: ${{ matrix.goarch }}
           CC: ${{ matrix.os == 'windows-11-arm' && format('{0}/bin/clang.exe', env.LLVM_MINGW_ROOT) || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.os }}" = "windows-11-arm" ]; then
+          if [ "${{ matrix.os }}" = "windows-latest" ] || [ "${{ matrix.os }}" = "windows-11-arm" ]; then
             ./build-stt.bat
           else
             make build-stt
@@ -780,8 +827,7 @@ jobs:
       # resolution — actions/setup-node@v6 already caches
       # by exact version internally so a future runner-image
       # bump won't silently drift the smoke gate.
-      - if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
-        uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -814,7 +860,6 @@ jobs:
       # channel (the WS connection then fails+reconnects in a
       # goroutine, non-fatal) and the daemon reaches "ready".
       - name: Install agents (officially-supported methods per agent)
-        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -909,13 +954,21 @@ jobs:
           # Cursor CLI on unix: official curl-pipe bash installer.
           # Drops `agent` into ~/.local/bin/agent (primary) plus
           # `cursor-agent` legacy symlink alongside — both on
-          # PATH for the hosted runner user. The Windows leg
-          # uses the separate pwsh step below; running the bash
+          # PATH for the hosted runner user. The Windows legs
+          # use the separate pwsh step below; running the bash
           # installer from Git Bash would fail with "Unsupported
           # operating system: MINGW64_NT-..." because the bash
           # branch has no Windows code path (case "${OS}" in
-          # Linux*|Darwin*)).
-          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+          # Linux*|Darwin*) — applies to BOTH windows-latest and
+          # windows-11-arm. Cursor CLI does not yet publish a
+          # Windows ARM64 native binary, so the Windows legs
+          # fall through to the pwsh installer; that one only
+          # runs on windows-latest (downloads the x64 zip which
+          # runs under x86_64 emulation on ARM64 Windows, but we
+          # don't exercise that path here — the cross-compile
+          # workflow isn't a core CI smoke target). On windows-11-
+          # arm cursor is intentionally not installed at all.
+          if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
             curl -fsSL https://cursor.com/install | bash
           fi
 
@@ -942,7 +995,14 @@ jobs:
       # this job — without it the Git Bash PATH/--help/spawn
       # gates below would not see agent.cmd via PATHEXT.
       - name: Install cursor CLI (Windows — official PowerShell installer)
-        if: matrix.os == 'windows-latest'
+        # Both windows-latest (x64) and windows-11-arm (aarch64)
+        # need the pwsh installer — the bash curl installer above
+        # bails on MINGW64_NT-* per cursor's own OS detection. On
+        # windows-11-arm the downloaded x64 zip runs under x86_64
+        # emulation (built into Windows 11 ARM64); cursor does not
+        # publish a native arm64 Windows build, so x64 emulation
+        # is the only path the gate can offer until they ship one.
+        if: matrix.os == 'windows-latest' || matrix.os == 'windows-11-arm'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -983,7 +1043,6 @@ jobs:
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
       - name: Verify daemon lifecycle (start/stop/restart/status)
-        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         env:
           NIGHTME_FEISHU_APP_ID: ci
@@ -1087,7 +1146,6 @@ jobs:
           echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
 
       - name: Verify each agent binary is on PATH
-        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1161,7 +1219,6 @@ jobs:
           done
 
       - name: Verify each agent CLI responds to --help
-        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1218,7 +1275,6 @@ jobs:
           done
 
       - name: Verify nightme config lists every builtin
-        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1250,7 +1306,6 @@ jobs:
           done
 
       - name: Verify nightme bridge spawns each agent (response required)
-        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e

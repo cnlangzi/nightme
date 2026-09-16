@@ -530,15 +530,18 @@ jobs:
 
       # See ci.yml's matching Locate step for full rationale:
       # the action doesn't expose its actual install path via
-      # outputs. Probe a few candidates — `C:\a\msys64` is
-      # where the install step above targets — and export the
-      # discovered root so Build STT's CC pinning works.
+      # outputs. `location: C:\a\msys64` causes the action to
+      # drop MSYS2 at `C:\a\msys64\msys64\` (one nested level),
+      # observed in PR #400. Probe that path first, then the
+      # other candidates. Export the discovered root so Build
+      # STT's CC pinning works.
       - name: Locate MSYS2 CLANGARM64 clang
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
         shell: bash
         run: |
           set -euo pipefail
           for candidate in \
+            "C:/a/msys64/msys64" \
             "C:/a/msys64" \
             "C:/msys64" \
             "C:/Program Files/msys2" \
@@ -556,6 +559,9 @@ jobs:
           echo "---"
           echo "C:\\a\\msys64 (fresh install target, if exists):"
           ls -la "C:/a/msys64/" 2>&1 | head -30 || true
+          echo "---"
+          echo "C:\\a\\msys64\\msys64 (one level deeper, if exists):"
+          ls -la "C:/a/msys64/msys64/" 2>&1 | head -30 || true
           echo "---"
           echo "C:\\msys64 contents (Git for Windows fallback, if exists):"
           ls -la "C:/msys64/" 2>&1 | head -30 || true

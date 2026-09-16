@@ -680,18 +680,20 @@ jobs:
             lld
 
       # The action doesn't expose its actual install path via
-      # action outputs. Probe common locations — `C:\a\msys64`
-      # is where the install step above targets, `C:\msys64`
-      # is the Git for Windows fallback (no CLANGARM64 env), and
-      # two more belt-and-braces candidates. Export the
-      # discovered root so the Build STT step's CC works
-      # regardless of where the action actually dropped MSYS2.
+      # action outputs. Probe common locations — `C:\a\msys64\msys64`
+      # is where `location: C:\a\msys64` actually drops MSYS2
+      # (the action nests one more `msys64/` under `location`,
+      # observed in PR #400). `C:\msys64` is the Git for Windows
+      # fallback (no CLANGARM64 env), and two more belt-and-braces
+      # candidates. Export the discovered root so the Build STT
+      # step's CC works regardless of where the action dropped it.
       - name: Locate MSYS2 CLANGARM64 clang
         if: matrix.os == 'windows-11-arm'
         shell: bash
         run: |
           set -euo pipefail
           for candidate in \
+            "C:/a/msys64/msys64" \
             "C:/a/msys64" \
             "C:/msys64" \
             "C:/Program Files/msys2" \
@@ -709,6 +711,9 @@ jobs:
           echo "---"
           echo "C:\\a\\msys64 (fresh install target, if exists):"
           ls -la "C:/a/msys64/" 2>&1 | head -30 || true
+          echo "---"
+          echo "C:\\a\\msys64\\msys64 (one level deeper, if exists):"
+          ls -la "C:/a/msys64/msys64/" 2>&1 | head -30 || true
           echo "---"
           echo "C:\\msys64 contents (Git for Windows fallback, if exists):"
           ls -la "C:/msys64/" 2>&1 | head -30 || true

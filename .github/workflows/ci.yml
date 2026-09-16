@@ -778,33 +778,31 @@ jobs:
             make build
           fi
 
-      # Build nightme-stt only on the two arm64 legs. The
-      # `Install llvm-mingw (aarch64-w64-mingw32)` step above
-      # provides a native aarch64 clang + lld + aarch64-w64-
-      # mingw32 sysroot that cgo drives correctly. We point
-      # CC at the discovered llvm-mingw bin so cgo doesn't
-      # fall back to the Visual Studio LLVM clang (which can't
-      # translate cgo's `-L` to lld-link's `/LIBPATH:` and
-      # can't find the sherpa-onnx .lib files).
+      # Build nightme-stt on ALL six legs. CI must gate every
+      # platform/arch that release.yml ships — release runs only
+      # on tag push (low frequency, late detection), CI runs per
+      # PR (high frequency, fail-fast). Skipping any release
+      # target in CI means a regression in that path slips past
+      # review and surfaces as a release-time failure instead of
+      # a PR-time one. release.yml covers all six OS×arch combos
+      # (linux × 2, darwin × 2, windows × 2), so this step does
+      # too.
       #
-      # ubuntu-24.04-arm leaves CC unset — the host's preinstalled
-      # gcc-aarch64-linux-gnu handles cgo natively.
+      # GOOS / GOARCH follow matrix.goos / matrix.goarch. CC
+      # only needs to point at llvm-mingw clang on windows-11-arm
+      # (Visual Studio's bundled clang lacks aarch64-w64-mingw32
+      # sysroot support); every other leg uses the host's default
+      # C compiler (mingw gcc on amd64 windows, gcc on linux,
+      # Apple clang on darwin).
       - name: Build STT
-        if: matrix.goarch == 'arm64'
         env:
-          GOARCH: arm64
-          GOOS: ${{ matrix.os == 'windows-11-arm' && 'windows' || matrix.os == 'ubuntu-24.04-arm' && 'linux' || 'darwin' }}
-          # On windows-11-arm, point cgo at llvm-mingw's native
-          # aarch64 clang. linux/arm64 + darwin/arm64 legs leave
-          # CC unset — ubuntu-24.04-arm uses the preinstalled
-          # gcc-aarch64-linux-gnu; macos-latest (Apple Silicon)
-          # uses Apple clang, which handles aarch64-w64-mingw32
-          # cgo correctly when CC points at it via the host PATH.
+          GOOS: ${{ matrix.os == 'windows-latest' || matrix.os == 'windows-11-arm' && 'windows' || matrix.os == 'macos-latest' && 'darwin' || 'linux' }}
+          GOARCH: ${{ matrix.goarch }}
           CC: ${{ matrix.os == 'windows-11-arm' && format('{0}/bin/clang.exe', env.LLVM_MINGW_ROOT) || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.os }}" = "windows-11-arm" ]; then
+          if [ "${{ matrix.os }}" = "windows-latest" ] || [ "${{ matrix.os }}" = "windows-11-arm" ]; then
             ./build-stt.bat
           else
             make build-stt

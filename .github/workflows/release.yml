@@ -523,15 +523,24 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.meta.outputs.version }}
           GIT_COMMIT: ${{ steps.meta.outputs.commit }}
+          # On windows/arm64, point cgo at MSYS2's CLANGARM64
+          # clang absolute path. The Visual Studio LLVM clang
+          # (which `which clang` finds first on Windows PATH)
+          # doesn't know aarch64-w64-mingw32 sysroot and won't
+          # translate cgo's `-L` into lld-link's `/LIBPATH` for
+          # the sherpa-onnx .lib files in Go's module cache —
+          # same root cause documented on the ci.yml Build STT
+          # step. Other legs leave CC unset and let cgo
+          # auto-detect the host compiler.
+          CC: ${{ matrix.goos == 'windows' && matrix.goarch == 'arm64' && 'C:/msys64/clangarm64/bin/clang.exe' || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          # CC override only on windows/arm64; other legs let
-          # cgo auto-detect the host compiler.
-          if [ "${{ matrix.goos }}" = "windows" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
-            export CC=clang
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ./build-stt.bat
+          else
+            make build-stt
           fi
-          make build-stt
 
           # The cgo_sherpa build statically links sherpa-onnx
           # native lib into the binary. A successful `make

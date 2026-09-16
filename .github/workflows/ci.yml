@@ -651,26 +651,76 @@ jobs:
             clang
             lld
 
-      # Single Build STT step covers BOTH arm64 legs.
-      #   - windows-11-arm: GOOS=windows, CC=clang (from CLANGARM64
-      #     msystem, targets aarch64-w64-mingw32 by default).
-      #   - ubuntu-24.04-arm: GOOS=linux, default host gcc
-      #     (gcc-aarch64-linux-gnu is preinstalled; no apt step
-      #     needed).
-      # The conditional CC export keeps the Makefile invocation
-      # identical across both legs.
+      # Build nightme runs on EVERY leg (windows-11-arm included)
+      # because `make build` / `build.bat` produces a fully static
+      # CGO_ENABLED=0 binary that doesn't depend on the mingw
+      # toolchain. This is the cheap smoke that catches a Makefile
+      # or build.bat regression on the windows/arm64 runner before
+      # any agent-smoke gate pays runner minutes.
+      # No GTK/AppIndicator install here, deliberately. Since #295
+      # the default build has no CGo dependency, so the dev headers
+      # would be pure runner-minute waste — and re-installing them
+      # would also re-assert the misconception that caused #295
+      # ("building nightme on Linux needs GTK"). The -gui variant
+      # is compiled and link-checked in the `test` job's
+      # "Verify Linux tray split" step, which does install them.
+      - name: Build nightme
+        shell: bash
+        env:
+          VERSION: "0.0.0"
+        run: |
+          export GIT_COMMIT="${GITHUB_SHA:0:7}"
+          # Use the canonical build entry points (mirrors the
+          # `test` job's `Build smoke binary` step) so CI builds
+          # exactly what a developer ships:
+          #   - Windows: build.bat (cmd-native, also documents
+          #     how Windows users build without GnuWin32 make)
+          #   - Linux/macOS: make build (uses LDFLAGS from the
+          #     Makefile to bake version metadata in)
+          # Both produce bin/nightme[.exe] with version metadata
+          # baked in via -ldflags.
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./build.bat
+          elif [ "${{ matrix.os }}" = "windows-11-arm" ]; then
+            # build.bat works on aarch64 too (go-winres + go build
+            # are arch-portable Go tools); it's the cgo_sherpa
+            # build that needs the mingw toolchain, which is why
+            # build.bat is fine here without it.
+            ./build.bat
+          else
+            make build
+          fi
+
+      # Build nightme-stt only on the two arm64 legs. The
+      # `Install AArch64 MinGW toolchain (clang)` step above
+      # installs MSYS2's CLANGARM64 clang into
+      # `C:\msys64\clangarm64\bin\`; we must point CC at that
+      # absolute path on windows-11-arm because the Visual
+      # Studio LLVM clang (`C:\Program Files\LLVM\bin\clang.exe`,
+      # earlier on Windows PATH) doesn't understand the
+      # aarch64-w64-mingw32 sysroot and fails to translate cgo's
+      # `-L` flags into lld-link's `/LIBPATH` for the sherpa-onnx
+      # .lib files in Go's module cache. The earlier `target not
+      # found: mingw-w64-aarch64-gcc` round-trip was a different
+      # failure mode for the same root cause: MSYS2 doesn't ship a
+      # mingw gcc for aarch64, so we have to go through clang.
+      #
+      # ubuntu-24.04-arm leaves CC unset — the host's preinstalled
+      # gcc-aarch64-linux-gnu handles cgo natively.
       - name: Build STT
         if: matrix.os == 'windows-11-arm' || matrix.os == 'ubuntu-24.04-arm'
         env:
           GOOS: ${{ matrix.os == 'windows-11-arm' && 'windows' || 'linux' }}
           GOARCH: arm64
+          CC: ${{ matrix.os == 'windows-11-arm' && 'C:/msys64/clangarm64/bin/clang.exe' || '' }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "${{ matrix.os }}" = "windows-11-arm" ]; then
-            export CC=clang
+            ./build-stt.bat
+          else
+            make build-stt
           fi
-          make build-stt
 
       # setup-node is needed for the npm-distributed agents. Node
       # 22 LTS is the floor: as of mid-2026, several transitive
@@ -691,42 +741,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '22'
-
-      # No GTK/AppIndicator install here, deliberately. This job only
-      # runs `make build`, which since #295 produces the tray-less
-      # default binary with no CGo dependency — so the dev headers
-      # would be pure runner-minute waste. Keeping the step would
-      # also re-assert the very misconception that caused #295
-      # ("building nightme on Linux needs GTK"), which is now false.
-      # The -gui variant is compiled and link-checked in the `test`
-      # job's "Verify Linux tray split" step, which does install them.
-      - name: Build nightme
-        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
-        shell: bash
-        env:
-          VERSION: "0.0.0"
-        run: |
-          export GIT_COMMIT="${GITHUB_SHA:0:7}"
-          # Use the canonical build entry points (mirrors the
-          # `test` job's `Build smoke binary` step) so CI builds
-          # exactly what a developer ships:
-          #   - Windows: build.bat (cmd-native, also documents
-          #     how Windows users build without GnuWin32 make)
-          #   - Linux/macOS: make build (uses LDFLAGS from the
-          #     Makefile to bake version metadata in)
-          # Both produce bin/nightme[.exe] with version metadata
-          # baked in via -ldflags. Going through these scripts
-          # (rather than a bare 'go build -o dist/nightme')
-          # means a regression in build.bat or the Makefile
-          # LDFLAGS list surfaces as a failing CI gate instead
-          # of a Windows-only user-facing "version unknown"
-          # surprise — and the daemon lifecycle + agent-spawn
-          # steps below all consume bin/nightme[.exe].
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./build.bat
-          else
-            make build
-          fi
 
       # Daemon lifecycle smoke (start / stop / restart / status) on
       # every shipped OS. This is the regression gate for the

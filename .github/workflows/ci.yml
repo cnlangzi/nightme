@@ -590,37 +590,36 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # 3-OS matrix on purpose. Same axes as `test` — every OS
+      # we ship a binary for, we also verify the bridge can
+      # actually start every AI coding agent on that OS. Arch
+      # (Intel vs Apple Silicon) is intentionally NOT a matrix
+      # axis: nightme is Go + npm, both treat amd64 and arm64
+      # equivalently, and adding `macos-13` would re-test the
+      # same OS layer with negligible signal. Each runner
+      # reports independently so a Linux-only npm registry
+      # hiccup doesn't gate Windows / macOS.
+      #
+      # The runner labels here mirror release.yml's main
+      # `build` and `stt` matrix 1:1 — same six host+goarch
+      # combos, in the same order — so a runner-image change
+      # (label rename, deprecation) updates both workflows in
+      # lock-step. Only the four amd64-arch legs participate
+      # in agent-smoke (ubuntu-latest/amd64, macos-latest/
+      # amd64, windows-latest/amd64, plus macos-latest/arm64
+      # which is Apple Silicon native); the three pure-arm64
+      # legs run the STT build gate and nothing else — npm-
+      # distributed agents are amd64 (or arm64-native on
+      # Apple Silicon), so spawning them on linux-arm64 or
+      # windows-arm64 hosts would just fail.
+      #
+      # darwin/amd64 uses macos-latest (Apple Silicon host)
+      # with GOARCH=amd64 cross-compile. The resulting x86_64
+      # nightme binary runs via Rosetta 2 — installed by
+      # default on Sonoma+ runners — so the agent-smoke chain
+      # (npm-install + spawn) still works end-to-end.
       matrix:
-        # 3-OS matrix on purpose. Same axes as `test` — every OS
-        # we ship a binary for, we also verify the bridge can
-        # actually start every AI coding agent on that OS. Arch
-        # (Intel vs Apple Silicon) is intentionally NOT a matrix
-        # axis: nightme is Go + npm, both treat amd64 and arm64
-        # equivalently, and adding `macos-13` would re-test the
-        # same OS layer with negligible signal. Each runner
-        # reports independently so a Linux-only npm registry
-        # hiccup doesn't gate Windows / macOS.
-        #
-        # The runner labels here mirror release.yml's main
-        # `build` and `stt` matrix 1:1 — same six host+goarch
-        # combos, in the same order — so a runner-image change
-        # (label rename, deprecation) updates both workflows in
-        # lock-step. Only the four amd64-arch legs participate
-        # in agent-smoke (ubuntu-latest/amd64, macos-latest/
-        # amd64, windows-latest/amd64, plus macos-latest/arm64
-        # which is Apple Silicon native); the three pure-arm64
-        # legs run the STT build gate and nothing else — npm-
-        # distributed agents are amd64 (or arm64-native on
-        # Apple Silicon), so spawning them on linux-arm64 or
-        # windows-arm64 hosts would just fail.
-        #
-        # darwin/amd64 uses macos-latest (Apple Silicon host)
-        # with GOARCH=amd64 cross-compile. The resulting x86_64
-        # nightme binary runs via Rosetta 2 — installed by
-        # default on Sonoma+ runners — so the agent-smoke chain
-        # (npm-install + spawn) still works end-to-end.
-        matrix:
-          include:
+        include:
             - os: ubuntu-latest
               goarch: amd64
             - os: ubuntu-24.04-arm

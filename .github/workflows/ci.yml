@@ -743,6 +743,24 @@ jobs:
           # building darwin/amd64) it overrides Go's host default
           # so `make build` produces the right `bin/nightme`.
           GOARCH: ${{ matrix.goarch }}
+          # darwin/amd64 cross-compile from Apple Silicon needs
+          # the same `notray + CGO_ENABLED=0` workaround that
+          # release.yml's main build job already uses for the
+          # same leg. getlantern/systray's Objective-C bridge
+          # (`systray_darwin.m`) can't be cross-compiled because
+          # Apple clang on arm64 doesn't forward `-arch x86_64`
+          # to its C compile step (Go's cgo invokes the host
+          # cc with CGO_CFLAGS unset), so symbols like
+          # `nativeLoop` / `registerSystray` end up undefined at
+          # link time. `-tags notray` selects the no-op stub
+          # tray (cmd/nightme/tray_stub.go) which has no cgo
+          # dependency, sidestepping the entire problem.
+          # This matches what release.yml's `build` job already
+          # does for darwin/amd64, so the CI smoke binary and
+          # the published release binary are byte-equivalent on
+          # that leg.
+          CGO_ENABLED: ${{ matrix.os == 'macos-latest' && matrix.goarch == 'amd64' && '0' || '1' }}
+          GO_TAGS: ${{ matrix.os == 'macos-latest' && matrix.goarch == 'amd64' && 'notray' || '' }}
         run: |
           export GIT_COMMIT="${GITHUB_SHA:0:7}"
           # Use the canonical build entry points (mirrors the

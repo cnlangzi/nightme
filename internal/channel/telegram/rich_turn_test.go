@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -625,3 +626,412 @@ func TestRenderRichTurnBlocks_MultipleEntriesMix(t *testing.T) {
 		t.Errorf("missing paragraph block; types=%v", types)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// v9 P2 task section (§11.12.6.1) — rich-turn list block rendering.
+// Verifies the 📋 Tasks heading + native list block pipeline that
+// landed after the v9 chain → rich-turn L3 retirement.
+// ---------------------------------------------------------------------------
+
+// TestRenderRichTurnBlocksLocked_TaskListSection pins the canonical
+// task section shape: a `heading` block (📋 Tasks) followed by a
+// `list` block of native Telegram list items. The order must be
+// heading → list, not list → heading, so the user's eye lands on
+// the section marker before scanning the rows.
+func TestRenderRichTurnBlocksLocked_TaskListSection(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID:        "123",
+		topicID:       0,
+		userMessageID: 0,
+		messageID:     100,
+		headerLine:    "💭 1",
+		hasContent:    true,
+		taskList: []taskListItem{
+			{ID: "t1", Subject: "Plan the API", Status: "completed"},
+			{ID: "t2", Subject: "Write code", Status: "in_progress", ActiveForm: "coding"},
+			{ID: "t3", Subject: "Write tests", Status: "pending"},
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("render output must be valid JSON: %v\nbody=%s", err, body)
+	}
+	// Find the heading + list blocks (skip the header paragraph at
+	// index 0 and the divider at index 1).
+	var heading map[string]any
+	var list map[string]any
+	for _, b := range blocks {
+		switch b["type"] {
+		case "heading":
+			heading = b
+		case "list":
+			list = b
+		}
+	}
+	if heading == nil {
+		t.Fatalf("expected a heading block; blocks=%v", blocks)
+	}
+	if got, want := heading["text"], richTurnTaskListHeadline; got != want {
+		t.Fatalf("heading text = %q, want %q", got, want)
+	}
+	if list == nil {
+		t.Fatalf("expected a list block; blocks=%v", blocks)
+	}
+	// Verify ordering: heading must precede the list in the wire form.
+	headingIdx, listIdx := -1, -1
+	for i, b := range blocks {
+		if b["type"] == "heading" {
+			headingIdx = i
+		}
+		if b["type"] == "list" {
+			listIdx = i
+		}
+	}
+	if !(headingIdx >= 0 && listIdx > headingIdx) {
+		t.Fatalf("heading (%d) must precede list (%d); blocks=%v",
+			headingIdx, listIdx, blocks)
+	}
+	// Verify rows: 3 items, prefix per status.
+	rawItems, _ := list["items"].([]any)
+	if len(rawItems) != 3 {
+		t.Fatalf("expected 3 list items; got %d", len(rawItems))
+	}
+	type row struct{ text string }
+	gotRows := make([]row, 0, len(rawItems))
+	for _, raw := range rawItems {
+		it, _ := raw.(map[string]any)
+		bs, _ := it["blocks"].([]any)
+		if len(bs) == 0 {
+			continue
+		}
+		p, _ := bs[0].(map[string]any)
+		text, _ := p["text"].(string)
+		gotRows = append(gotRows, row{text})
+	}
+	wantPrefixes := []string{"✓ ", "• ", "• "}
+	wantSubjects := []string{"Plan the API", "Write code (coding)", "Write tests"}
+	for i, r := range gotRows {
+		if !strings.HasPrefix(r.text, wantPrefixes[i]) {
+			t.Errorf("row %d prefix = %q, want %q…; got %q",
+				i, r.text[:min(2, len(r.text))], wantPrefixes[i], r.text)
+		}
+		if r.text[len(wantPrefixes[i]):] != wantSubjects[i] {
+			t.Errorf("row %d subject = %q, want %q",
+				i, r.text[len(wantPrefixes[i]):], wantSubjects[i])
+		}
+	}
+}
+
+// TestRenderRichTurnBlocksLocked_EmptyTaskListOmitsSection locks
+// the no-orphan-headline rule: an empty / nil taskList produces no
+// heading + no list block, so the user doesn't see a "📋 Tasks"
+// banner over an empty list.
+func TestRenderRichTurnBlocksLocked_EmptyTaskListOmitsSection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		items []taskListItem
+	}{
+		{"nil slice", nil},
+		{"empty slice", []taskListItem{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newTestAdapter(t)
+			turn := &richTurn{
+				chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
+				headerLine: "💭 1", hasContent: true,
+				taskList: tc.items,
+			}
+			body, err := a.renderRichTurnBlocksLocked(turn)
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if strings.Contains(body, richTurnTaskListHeadline) {
+				t.Fatalf("empty taskList must NOT paint headline; body=%s", body)
+			}
+			if strings.Contains(body, `"type":"list"`) {
+				t.Fatalf("empty taskList must NOT emit list block; body=%s", body)
+			}
+		})
+	}
+}
+
+// TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedFiltered
+// locks the status filter: cancelled / deleted rows are dropped
+// before the rune budget is consumed. Mirrors feishu's
+// buildTaskChecklistChunks which only buckets InProgress / Pending
+// / Completed.
+func TestRenderRichTurnBlocksLocked_TaskCancelledAndDeletedFiltered(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
+		headerLine: "💭 0", hasContent: true,
+		taskList: []taskListItem{
+			{ID: "t1", Subject: "alive-pending", Status: "pending"},
+			{ID: "t2", Subject: "DEAD-cancelled", Status: "cancelled"},
+			{ID: "t3", Subject: "alive-completed", Status: "completed"},
+			{ID: "t4", Subject: "DEAD-deleted", Status: "deleted"},
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(body, "DEAD-cancelled") {
+		t.Fatalf("TaskCancelled row must be filtered; body=%s", body)
+	}
+	if strings.Contains(body, "DEAD-deleted") {
+		t.Fatalf("TaskDeleted row must be filtered; body=%s", body)
+	}
+	if !strings.Contains(body, "alive-pending") {
+		t.Fatalf("live pending row missing; body=%s", body)
+	}
+	if !strings.Contains(body, "alive-completed") {
+		t.Fatalf("live completed row missing; body=%s", body)
+	}
+	// Headline must still render (live rows present).
+	if !strings.Contains(body, richTurnTaskListHeadline) {
+		t.Fatalf("headline missing despite live rows; body=%s", body)
+	}
+}
+
+// TestRenderRichTurnBlocksLocked_TaskAllFilteredOmitsSection locks
+// the dual-guard: when every row is filtered out, the section
+// disappears entirely (no orphan headline, no empty list block).
+func TestRenderRichTurnBlocksLocked_TaskAllFilteredOmitsSection(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
+		headerLine: "💭 0", hasContent: true,
+		taskList: []taskListItem{
+			{ID: "t1", Subject: "DEAD-cancelled", Status: "cancelled"},
+			{ID: "t2", Subject: "DEAD-deleted", Status: "deleted"},
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(body, richTurnTaskListHeadline) {
+		t.Fatalf("all-filtered taskList must NOT paint headline; body=%s", body)
+	}
+	if strings.Contains(body, `"type":"list"`) {
+		t.Fatalf("all-filtered taskList must NOT emit list block; body=%s", body)
+	}
+}
+
+// TestRenderRichTurnBlocksLocked_TaskListTruncatesAtBudget pins
+// the rune-budget truncation: a long checklist is cut off at
+// richTurnTaskListBudgetRunes, the last visible row gets a "…"
+// suffix, and the markdown list shape stays well-formed. Without
+// this, a 100-task snapshot would push the rich message past
+// Telegram's 32K-char cap.
+func TestRenderRichTurnBlocksLocked_TaskListTruncatesAtBudget(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	const totalTasks = 60
+	tasks := make([]taskListItem, totalTasks)
+	for i := range tasks {
+		tasks[i] = taskListItem{
+			ID:      "t" + strconv.Itoa(i),
+			Subject: strings.Repeat("x", 80), // 80-char subject
+			Status:  "pending",
+		}
+	}
+	turn := &richTurn{
+		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
+		headerLine: "💭 0", hasContent: true,
+		taskList: tasks,
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	var list map[string]any
+	for _, b := range blocks {
+		if b["type"] == "list" {
+			list = b
+			break
+		}
+	}
+	if list == nil {
+		t.Fatalf("expected list block; blocks=%v", blocks)
+	}
+	rawItems, _ := list["items"].([]any)
+	items := make([]map[string]any, 0, len(rawItems))
+	for _, raw := range rawItems {
+		if it, ok := raw.(map[string]any); ok {
+			items = append(items, it)
+		}
+	}
+	if len(items) >= totalTasks {
+		t.Fatalf("expected truncation to drop rows; got %d / %d", len(items), totalTasks)
+	}
+	if len(items) < 20 {
+		t.Fatalf("too few rows; expected ~30, got %d (budget may be too tight)", len(items))
+	}
+	// Last visible row must carry the "…" suffix.
+	if len(items) > 0 {
+		last := items[len(items)-1]
+		bs, _ := last["blocks"].([]any)
+		if len(bs) > 0 {
+			p, _ := bs[0].(map[string]any)
+			text, _ := p["text"].(string)
+			if !strings.HasSuffix(text, richTurnTaskListMore) {
+				t.Errorf("last visible row must end with %q; got tail %q",
+					richTurnTaskListMore, text[max(0, len(text)-10):])
+			}
+		}
+	}
+}
+
+// TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML locks the
+// HTML-escape guard: a subject containing `<script>` must be
+// escaped by the rich block renderer's inlineToRichText path so
+// Telegram doesn't interpret it as a tag. XSS regression guard.
+func TestRenderRichTurnBlocksLocked_TaskSubjectEscapesHTML(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
+		headerLine: "💭 0", hasContent: true,
+		taskList: []taskListItem{
+			{ID: "t1", Subject: "<script>alert('xss')</script>", Status: "pending"},
+			{ID: "t2", Subject: "with & ampersand", Status: "pending"},
+		},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	// The raw "<script>" literal must not appear in the wire form
+	// (Telegram would refuse the message if it did, but we want a
+	// tighter guard here — the rich block encoder should escape
+	// every entity it touches).
+	if strings.Contains(body, "<script>") {
+		t.Fatalf("subject <script> must be HTML-escaped; body=%s", body)
+	}
+}
+
+// TestRenderTaskRowText_FallbackSubjectTrimmed locks the
+// subject→id fallback contract: a whitespace-only Subject must
+// fall back to a (also-trimmed) ID, not produce a row of just
+// "• ". Regression guard for the review finding that the fallback
+// path skipped TrimSpace.
+func TestRenderTaskRowText_FallbackSubjectTrimmed(t *testing.T) {
+	cases := []struct {
+		name string
+		in   taskListItem
+		want string
+	}{
+		{"empty subject falls back to id", taskListItem{ID: "t1", Status: "pending"}, "• t1"},
+		{"whitespace subject falls back to id", taskListItem{ID: "t2", Subject: "   ", Status: "pending"}, "• t2"},
+		{"whitespace id still produces a useful row", taskListItem{ID: "   ", Subject: "real", Status: "pending"}, "• real"},
+		{"completed prefix intact with trimmed subject", taskListItem{ID: "x", Subject: "  done  ", Status: "completed"}, "✓ done"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := renderTaskRowText(c.in); got != c.want {
+				t.Errorf("renderTaskRowText(%+v) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix pins
+// the budget accounting: the trailing " " + … suffix is 2 runes
+// (space + ellipsis), so the budget loop must reserve 2 — not 1 —
+// for the marker. Regression guard for the review finding that
+// the +1 reserve silently let the last row off-budget by 1 rune.
+func TestRenderRichTurnTaskListBlocks_BudgetAccountsForSuffix(t *testing.T) {
+	// Build N rows whose pre-suffix rune cost is exactly
+	// (budget - headline). With a +1 reserve, the last row
+	// would slip past the gate and end up over-budget after the
+	// " …" suffix is appended.
+	const totalRows = 5
+	// Subject tuned so cost = headline + 5 rows + 2 = budget
+	//  → headline (7) + 5*(len+1) + 2 = 3000  →  len = (3000-9)/5 - 1 = 597.4
+	// pick a safe size that fits with margin
+	subject := strings.Repeat("a", 590)
+	items := make([]taskListItem, totalRows)
+	for i := range items {
+		items[i] = taskListItem{ID: "t", Subject: subject, Status: "pending"}
+	}
+	blocks, ok := renderRichTurnTaskListBlocks(items)
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	// Find the list block.
+	var list map[string]any
+	for _, b := range blocks {
+		if b["type"] == "list" {
+			list = b
+		}
+	}
+	if list == nil {
+		t.Fatalf("no list block")
+	}
+	items2, _ := list["items"].([]map[string]any)
+	if len(items2) != totalRows {
+		t.Fatalf("budget should fit all %d rows (subject=590 runes + 2-reserve); got %d",
+			totalRows, len(items2))
+	}
+}
+
+// TestRenderRichTurnBlocksLocked_TaskListOrderAfterEntries pins the
+// section ordering: entries → task list → footer. The task list
+// must appear AFTER entries and BEFORE the footer divider so the
+// user's eye reads the plan between the body content and the
+// status trailer.
+func TestRenderRichTurnBlocksLocked_TaskListOrderAfterEntries(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	turn := &richTurn{
+		chatID: "123", topicID: 0, userMessageID: 0, messageID: 100,
+		headerLine: "💭 1", hasContent: true,
+		entries: []richTurnEntry{
+			{kind: "reply", body: "thinking out loud"},
+		},
+		taskList: []taskListItem{
+			{ID: "t1", Subject: "Plan", Status: "pending"},
+		},
+		footer: []string{"🤖: claude", "💰: tokens"},
+	}
+	body, err := a.renderRichTurnBlocksLocked(turn)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(body), &blocks); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	headingIdx, listIdx, lastDividerIdx, footerIdx := -1, -1, -1, -1
+	for i, b := range blocks {
+		switch b["type"] {
+		case "heading":
+			if h, _ := b["text"].(string); h == richTurnTaskListHeadline {
+				headingIdx = i
+			}
+		case "list":
+			listIdx = i
+		case "divider":
+			lastDividerIdx = i
+		case "footer":
+			footerIdx = i
+		}
+	}
+	// Order must be: <header> <divider> <entries> [heading, list] [divider, footer]
+	if !(headingIdx > 0 && listIdx == headingIdx+1 &&
+		lastDividerIdx > listIdx && footerIdx == lastDividerIdx+1) {
+		t.Fatalf("expected order: heading(idx=%d) +1=list(idx=%d), divider(idx=%d) +1=footer(idx=%d); blocks=%v",
+			headingIdx, listIdx, lastDividerIdx, footerIdx, blocks)
+	}
+}
+
+// min / max are builtins since Go 1.21 (toolchain is 1.27), so
+// no local helpers needed here.

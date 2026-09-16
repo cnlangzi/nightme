@@ -860,7 +860,6 @@ jobs:
       # channel (the WS connection then fails+reconnects in a
       # goroutine, non-fatal) and the daemon reaches "ready".
       - name: Install agents (officially-supported methods per agent)
-        if: false
         shell: bash
         run: |
           set -e
@@ -1029,7 +1028,6 @@ jobs:
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
       - name: Verify daemon lifecycle (start/stop/restart/status)
-        if: false
         shell: bash
         env:
           NIGHTME_FEISHU_APP_ID: ci
@@ -1133,7 +1131,6 @@ jobs:
           echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
 
       - name: Verify each agent binary is on PATH
-        if: false
         shell: bash
         run: |
           set -e
@@ -1207,7 +1204,6 @@ jobs:
           done
 
       - name: Verify each agent CLI responds to --help
-        if: false
         shell: bash
         run: |
           set -e
@@ -1264,7 +1260,6 @@ jobs:
           done
 
       - name: Verify nightme config lists every builtin
-        if: false
         shell: bash
         run: |
           set -e
@@ -1296,7 +1291,6 @@ jobs:
           done
 
       - name: Verify nightme bridge spawns each agent (response required)
-        if: false
         shell: bash
         run: |
           set -e

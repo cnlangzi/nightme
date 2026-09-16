@@ -117,13 +117,11 @@ func TestAdapter_Send_Group_OutThinking_CreatesDraftMessage(t *testing.T) {
 		t.Fatalf("reply_to_message_id = %v, want 1 (userMsgID)", cold.Params["reply_to_message_id"])
 	}
 	blocks := richMessageBlocks(cold.Params["rich_message"])
-	if len(blocks) != 5 {
-		t.Fatalf("cold-create blocks = %d, want 5 (events 1..5); got %v", len(blocks), blocks)
+	if len(blocks) != 2 {
+		t.Fatalf("cold-create blocks = %d, want 2 (latest 2 of 5 = events 4..5); got %v", len(blocks), blocks)
 	}
 	for i, want := range []string{
-		"💭 buffered thought 1", "💭 buffered thought 2",
-		"💭 buffered thought 3", "💭 buffered thought 4",
-		"💭 buffered thought 5",
+		"💭 buffered thought 4", "💭 buffered thought 5",
 	} {
 		if blocks[i] != want {
 			t.Fatalf("cold-create block[%d] = %q, want %q", i, blocks[i], want)
@@ -166,14 +164,14 @@ func TestAdapter_Send_Group_OutThinking_SecondEvent_EDITesInPlace(t *testing.T) 
 		t.Fatalf("expected exactly 1 sendRichMessage cold-create, got %d (calls=%+v)", len(sends), api.Calls)
 	}
 	coldBlocks := richMessageBlocks(sends[0].Params["rich_message"])
-	if len(coldBlocks) != 5 {
-		t.Fatalf("cold-create blocks = %d, want 5 (latest 5 of 10 = events 6..10); got %v", len(coldBlocks), coldBlocks)
+	if len(coldBlocks) != 2 {
+		t.Fatalf("cold-create blocks = %d, want 2 (latest 2 of 10 = events 9..10); got %v", len(coldBlocks), coldBlocks)
 	}
-	if coldBlocks[0] != "💭 thought 6" {
-		t.Fatalf("cold-create block[0] = %q, want %q", coldBlocks[0], "💭 thought 6")
+	if coldBlocks[0] != "💭 thought 9" {
+		t.Fatalf("cold-create block[0] = %q, want %q", coldBlocks[0], "💭 thought 9")
 	}
-	if coldBlocks[4] != "💭 thought 10" {
-		t.Fatalf("cold-create block[4] = %q, want %q", coldBlocks[4], "💭 thought 10")
+	if coldBlocks[1] != "💭 thought 10" {
+		t.Fatalf("cold-create block[1] = %q, want %q", coldBlocks[1], "💭 thought 10")
 	}
 	if dels := callsByMethod(api.Calls, "deleteMessage"); len(dels) != 1 {
 		t.Fatalf("OnPromptEnded must delete the cold-created DraftMessage; got %d deletes", len(dels))
@@ -479,14 +477,16 @@ func TestAdapter_Send_Group_EditMessageTextFailure_StaysOnDraftPath(t *testing.T
 		t.Fatalf("phase 2 flush returned err: %v", err)
 	}
 
-	// The popped slice must be restored: thinkingStack back at 5
-	// (we sent 5 thinking events in warmup, sent 5 in this
-	// flush, flush failed, so the popped 5 should be back).
+	// The popped slice must be restored: thinkingStack back to its
+	// pre-flush size. After Phase 1 cold-create the stack held 3
+	// leftover events (seed 1..5 minus the popped 2); Phase 2 added
+	// 5 warmup events (6..10) → 8 total. Phase 2 flush pops the
+	// latest 2, editMessageText fails, the popped 2 are restored.
 	entry.mu.Lock()
 	bufferAfterFail := len(entry.thinkingStack)
 	entry.mu.Unlock()
-	if bufferAfterFail != 5 {
-		t.Fatalf("thinkingStack should be restored to 5 after edit failure, got %d", bufferAfterFail)
+	if bufferAfterFail != 8 {
+		t.Fatalf("thinkingStack should be restored to 8 after edit failure, got %d", bufferAfterFail)
 	}
 	// messageID preserved — the entry stays in m.entries so the
 	// next flush will retry as editMessageText on the same id.
@@ -616,8 +616,8 @@ func TestAdapter_Send_Group_ConcurrentStreamDraftEvent_NoDoubleColdCreate(t *tes
 		t.Fatalf("expected exactly 1 sendRichMessage cold-create across %d concurrent events, got %d (calls=%+v)",
 			N, len(sends), api.Calls)
 	}
-	if got := len(richMessageBlocks(sends[0].Params["rich_message"])); got != 5 {
-		t.Fatalf("cold-create blocks = %d, want 5 (latest 5 of 10)", got)
+	if got := len(richMessageBlocks(sends[0].Params["rich_message"])); got != 2 {
+		t.Fatalf("cold-create blocks = %d, want 2 (latest 2 of 10)", got)
 	}
 	deletes := callsByMethod(api.Calls, "deleteMessage")
 	if len(deletes) != 1 {
@@ -755,8 +755,8 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 		t.Fatalf("turn 1 reply_to_message_id = %v, want 10", sends[0].Params["reply_to_message_id"])
 	}
 	turn1Blocks := richMessageBlocks(sends[0].Params["rich_message"])
-	if len(turn1Blocks) != 5 {
-		t.Fatalf("turn 1 blocks = %d, want 5 (latest 5); got %v", len(turn1Blocks), turn1Blocks)
+	if len(turn1Blocks) != 2 {
+		t.Fatalf("turn 1 blocks = %d, want 2 (latest 2); got %v", len(turn1Blocks), turn1Blocks)
 	}
 	if turn1Blocks[0] != "💭 turn 1 thought" {
 		t.Fatalf("turn 1 block[0] = %q, want %q", turn1Blocks[0], "💭 turn 1 thought")
@@ -821,8 +821,8 @@ func TestAdapter_Send_Group_BackToBackPrompts_DraftMessagesIsolated(t *testing.T
 		t.Fatalf("turn 2 reply_to_message_id = %v, want 11", sends2[0].Params["reply_to_message_id"])
 	}
 	turn2Blocks := richMessageBlocks(sends2[0].Params["rich_message"])
-	if len(turn2Blocks) != 5 {
-		t.Fatalf("turn 2 blocks = %d, want 5 (latest 5); got %v", len(turn2Blocks), turn2Blocks)
+	if len(turn2Blocks) != 2 {
+		t.Fatalf("turn 2 blocks = %d, want 2 (latest 2); got %v", len(turn2Blocks), turn2Blocks)
 	}
 	if turn2Blocks[0] != "💭 turn 2 thought" {
 		t.Fatalf("turn 2 block[0] = %q, want %q", turn2Blocks[0], "💭 turn 2 thought")

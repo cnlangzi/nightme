@@ -949,7 +949,7 @@ rich turn 不持久化。daemon 重启时 in-memory rich turn 丢失;之前 turn
 
 ### 11.12.1 统一流式表面（DM + group / forum topic）
 
-所有 `ChatKind != "channel"` 的 turn 都过同一条路径：bot 发一条 rich message → 持续 `editMessageText(rich_message=…)` PATCH 最新 5 thinking + 最新 5 tool blocks → turn end `deleteMessage` 清理。模拟 sendMessageDraft 的"live streaming surface"角色。
+所有 `ChatKind != "channel"` 的 turn 都过同一条路径：bot 发一条 rich message → 持续 `editMessageText(rich_message=…)` PATCH 最新 2 thinking + 最新 5 tool blocks → turn end `deleteMessage` 清理。模拟 sendMessageDraft 的"live streaming surface"角色。
 
 **为什么不直接用 `sendMessageDraft`（plain text）/ `sendRichMessageDraft`（rich blocks）**：
 
@@ -965,7 +965,7 @@ rich turn 不持久化。daemon 重启时 in-memory rich turn 丢失;之前 turn
 | 创建 | 第一次 flush 触发 `sendRichMessage(rich_message={"blocks":[…]})` 返回 message_id | `SendMessageReceipt` 首次 render |
 | 更新 | 后续 flush 触发 `editMessageText(message_id=…, rich_message={"blocks":[…]})` | `PatchMessage` 增删 div |
 | 触发 | 10s timer / endProcess（**无 count 触发**） | Out* event 立即 |
-| Send window | 每次 flush 取各 stack 最新 5（共 5+5 = 10 blocks，稳在 Telegram 长度限制内） | full receipt 累积 |
+| Send window | 每次 flush 取 thinking 最新 2 + tools 最新 5（共 2+5 = 7 blocks，稳在 Telegram 长度限制内） | full receipt 累积 |
 | Windowed flush | 每次成功 flush 后清掉取走的 entries，其余留在 buffer | n/a |
 | Delete at turn end | bot `deleteMessage` + drop entry | receipt 保留作为时间线证据 |
 | 锚点 | `reply_to_message_id = userMessageID`（cold-create 时携带） | thread reply chain |
@@ -981,13 +981,13 @@ rich turn 不持久化。daemon 重启时 in-memory rich turn 丢失;之前 turn
 
 **每次 flush 行为**：
 
-1. 从 `thinkingStack` 取最新 5（不足则全取）→ 渲染成 paragraph blocks
+1. 从 `thinkingStack` 取最新 2（不足则全取）→ 渲染成 paragraph blocks
 2. 从 `toolsStack` 取最新 5 slots → 每个 slot 渲染成 [Start?, End1, End2, …] blocks
 3. 合并成一段 `{"blocks":[…]}` JSON
 4. `sendRichMessage`（首次）/ `editMessageText`（后续）发给 Telegram
 5. 失败时把取走的 entries 还原
 
-5 thinking + 5 tools = 10 blocks × ~1KB ≈ 10KB，远低于 Telegram 4096 字符限制或 rich_message block 上限。
+2 thinking + 5 tools = 7 blocks × ~1KB ≈ 7KB，远低于 Telegram 4096 字符限制或 rich_message block 上限。
 
 **Lifecycle**（per turn，ChatKind == "private" / "group" 共用）：
 
@@ -1009,7 +1009,7 @@ flush 触发
   - 10s timer 到期
   - endProcess / OnPromptEnded
   行为：
-  - entry.mu 持锁下 pop 最新 5+5 → 释放 entry.mu
+  - entry.mu 持锁下 pop 最新 2+5 → 释放 entry.mu
   - entry.flushMu 持锁下 sendRichMessage / editMessageText → API call（**不持 buffer lock**）
   - 失败时 entry.mu 持锁下还原 entries
 
@@ -1051,7 +1051,7 @@ turn N ends
 ```text
 DM 私聊 (user 视角)
 ├─ User message: "帮我看看 foo.go"
-├─ DraftMessage (rich): 最新 5 thinking + 最新 5 tool blocks   ← reply_to 挂 user message
+├─ DraftMessage (rich): 最新 2 thinking + 最新 5 tool blocks   ← reply_to 挂 user message
 ├─ rich turn (OutHeartbeat PATCH): "🤖 Working... 💭 N · 🔧 M"
 ├─ rich turn (OutReply PATCH): "answer text..."
 └─ OutResult: "📝 final answer..."（独立 sendRichMessage）
@@ -1070,7 +1070,7 @@ forum topic 视觉形态相同：用户消息 → DraftMessage (rich, message_th
 
 **Bot API 兼容性**：纯 `sendRichMessage` / `editMessageText(rich_message=…)` / `deleteMessage`，需要 Bot API 10.1+（提供 `rich_message` 参数和 `sendRichMessage` 方法）。sendRichMessage / editMessageText 失败统一保留 buffer，不退到 rich turn。
 
-**Rate-limit 友好度**（与 §11.11 整体设计一致）：每 turn 最多 `ceil(N/50)` 次 flush（N = 该 turn 的 events 总数，cap 50 后开始 evict 老的），每次 flush 最多 5+5=10 blocks。远低于 Telegram per-chat 1/s 和 per-group 20/min 硬限。
+**Rate-limit 友好度**（与 §11.11 整体设计一致）：每 turn 最多 `ceil(N/50)` 次 flush（N = 该 turn 的 events 总数，cap 50 后开始 evict 老的），每次 flush 最多 2+5=7 blocks。远低于 Telegram per-chat 1/s 和 per-group 20/min 硬限。
 
 ### 11.12.2 per-prompt isolation
 

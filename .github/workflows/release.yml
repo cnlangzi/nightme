@@ -517,6 +517,36 @@ jobs:
             clang
             lld
 
+      # See ci.yml's matching Locate step for full rationale:
+      # msys2/setup-msys2's install path isn't exposed via action
+      # outputs, and on windows-11-arm it doesn't always land at
+      # the default `C:\msys64`. Probe a few candidates and
+      # export the discovered root so the Build STT step's CC
+      # pinning works.
+      - name: Locate MSYS2 CLANGARM64 clang
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in \
+            "C:/msys64" \
+            "C:/Program Files/msys2" \
+            "C:/tools/msys64"; do
+            if [ -x "$candidate/clangarm64/bin/clang.exe" ]; then
+              echo "MSYS2_ROOT=$candidate" >> "$GITHUB_ENV"
+              echo "Found MSYS2 CLANGARM64 clang at $candidate/clangarm64/bin/clang.exe"
+              exit 0
+            fi
+          done
+          echo "::error::Could not find MSYS2 CLANGARM64 clang in any candidate location"
+          echo "---"
+          echo "where clang (PATH first hit):"
+          where.exe clang 2>&1 || true
+          echo "---"
+          echo "C:\\ root listing:"
+          ls /c/ 2>&1 | head -40 || true
+          exit 1
+
       - name: Build STT
         env:
           GOOS: ${{ matrix.goos }}
@@ -530,9 +560,11 @@ jobs:
           # translate cgo's `-L` into lld-link's `/LIBPATH` for
           # the sherpa-onnx .lib files in Go's module cache —
           # same root cause documented on the ci.yml Build STT
-          # step. Other legs leave CC unset and let cgo
-          # auto-detect the host compiler.
-          CC: ${{ matrix.goos == 'windows' && matrix.goarch == 'arm64' && 'C:/msys64/clangarm64/bin/clang.exe' || '' }}
+          # step. The MSYS2 install path comes from the Locate
+          # step above via $GITHUB_ENV (`MSYS2_ROOT`); other
+          # legs leave CC unset and let cgo auto-detect the
+          # host compiler.
+          CC: ${{ matrix.goos == 'windows' && matrix.goarch == 'arm64' && format('{0}/clangarm64/bin/clang.exe', env.MSYS2_ROOT) || '' }}
         shell: bash
         run: |
           set -euo pipefail

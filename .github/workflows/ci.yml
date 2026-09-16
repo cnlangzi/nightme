@@ -651,6 +651,38 @@ jobs:
             clang
             lld
 
+      # msys2/setup-msys2 doesn't expose its actual install path
+      # via action outputs. Default is `C:\msys64` but on some
+      # runners (incl. windows-11-arm, observed 2026-09) the
+      # install lands elsewhere — CC pinning to a hard-coded path
+      # then fails with `file does not exist`. Probe common
+      # locations and export the discovered root to env so the
+      # Build STT step can use it. Fails loudly with diagnostics
+      # if no candidate matches.
+      - name: Locate MSYS2 CLANGARM64 clang
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in \
+            "C:/msys64" \
+            "C:/Program Files/msys2" \
+            "C:/tools/msys64"; do
+            if [ -x "$candidate/clangarm64/bin/clang.exe" ]; then
+              echo "MSYS2_ROOT=$candidate" >> "$GITHUB_ENV"
+              echo "Found MSYS2 CLANGARM64 clang at $candidate/clangarm64/bin/clang.exe"
+              exit 0
+            fi
+          done
+          echo "::error::Could not find MSYS2 CLANGARM64 clang in any candidate location"
+          echo "---"
+          echo "where clang (PATH first hit):"
+          where.exe clang 2>&1 || true
+          echo "---"
+          echo "C:\\ root listing (looking for msys installs):"
+          ls /c/ 2>&1 | head -40 || true
+          exit 1
+
       # Build nightme runs on EVERY leg (windows-11-arm included)
       # because `make build` / `build.bat` produces a fully static
       # CGO_ENABLED=0 binary that doesn't depend on the mingw
@@ -712,7 +744,16 @@ jobs:
         env:
           GOOS: ${{ matrix.os == 'windows-11-arm' && 'windows' || 'linux' }}
           GOARCH: arm64
-          CC: ${{ matrix.os == 'windows-11-arm' && 'C:/msys64/clangarm64/bin/clang.exe' || '' }}
+          # On windows-11-arm, point cgo at MSYS2's CLANGARM64
+          # clang absolute path. The Visual Studio LLVM clang
+          # (which `where clang` returns first on Windows PATH)
+          # doesn't know aarch64-w64-mingw32 sysroot and won't
+          # translate cgo's `-L` into lld-link's `/LIBPATH` for
+          # the sherpa-onnx .lib files in Go's module cache. The
+          # MSYS2 install path comes from the Locate step above
+          # via $GITHUB_ENV (`MSYS2_ROOT`); other legs leave CC
+          # unset and let cgo auto-detect the host compiler.
+          CC: ${{ matrix.os == 'windows-11-arm' && format('{0}/clangarm64/bin/clang.exe', env.MSYS2_ROOT) || '' }}
         shell: bash
         run: |
           set -euo pipefail

@@ -4,6 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/version"
 )
 
 // Server runs the worker side of the local RPC protocol. One
@@ -18,6 +22,11 @@ type Server struct {
 	decoder    Decoder
 	recognizer Recognizer
 	logger     *slog.Logger
+	// startedAt is wall-clock at NewServer time. Captured
+	// once so consecutive OpStatus calls report the same
+	// StartedAt for the lifetime of the worker — clients
+	// compute uptime by subtracting it from time.Now().
+	startedAt time.Time
 }
 
 // NewServer wires a Server. Recognizer is loaded lazily by
@@ -32,6 +41,7 @@ func NewServer(listener Listener, decoder Decoder, recognizer Recognizer, logger
 		decoder:    decoder,
 		recognizer: recognizer,
 		logger:     logger,
+		startedAt:  time.Now(),
 	}
 }
 
@@ -96,6 +106,8 @@ func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
 		return &Response{Version: ProtocolVersion, OK: true}
 	case OpVersion:
 		return &Response{Version: ProtocolVersion, OK: true}
+	case OpStatus:
+		return s.status(ctx)
 	case OpTranscribe:
 		return s.transcribe(ctx, req)
 	case OpShutdown:
@@ -107,6 +119,29 @@ func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
 			ErrorCode: CodeInvalidRequest,
 			ErrorMsg:  fmt.Sprintf("unknown op %q", req.Op),
 		}
+	}
+}
+
+// status returns the runtime snapshot served by OpStatus. PID is
+// captured per-call (the kernel can recycle PIDs, but this is the
+// correct moment-of-call value); StartedAt is the Server's
+// construction time and is stable for the worker's lifetime;
+// BuildVer is the nightme-stt X.Y.Z the worker was compiled from,
+// matching internal/version.Version injected via -ldflags at build
+// time. The CLI (`nightme stt status`) compares BuildVer against
+// the nightme core's version to surface a binary-mismatch before
+// voice transcription hits it.
+func (s *Server) status(_ context.Context) *Response {
+	return &Response{
+		Version: ProtocolVersion,
+		OK:      true,
+		WorkerStatus: &WorkerStatus{
+			PID:       os.Getpid(),
+			StartedAt: s.startedAt,
+			Endpoint:  s.listener.Endpoint(),
+			Version:   ProtocolVersion,
+			BuildVer:  version.Version,
+		},
 	}
 }
 

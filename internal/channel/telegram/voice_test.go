@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/stt"
@@ -37,6 +38,15 @@ type fakeTranscriber struct {
 func (t *fakeTranscriber) Health(ctx context.Context) error { return nil }
 func (t *fakeTranscriber) Version(ctx context.Context) (int, error) {
 	return stt.ProtocolVersion, nil
+}
+func (t *fakeTranscriber) WorkerStatus(ctx context.Context) (stt.WorkerStatus, error) {
+	return stt.WorkerStatus{
+		PID:       12345,
+		StartedAt: time.Now(),
+		Endpoint:  "test-sock",
+		Version:   stt.ProtocolVersion,
+		BuildVer:  "test",
+	}, nil
 }
 func (t *fakeTranscriber) Transcribe(ctx context.Context, audio []byte, format string) (stt.TranscribeResult, error) {
 	if t.err != nil {

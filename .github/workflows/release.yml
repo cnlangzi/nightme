@@ -463,43 +463,49 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Build with -tags cgo_sherpa so the real sherpa-onnx-go
-      # binding is linked in. The default build (no tag) compiles
-      # only the ffmpeg decoder + stub recognizer; we never
-      # publish that. LDFLAGS is built inside the run: script
-      # because YAML plain-scalar folding turns `\`+newline
-      # into a literal backslash+space (not a shell
-      # continuation), and bash does not re-evaluate `$(date)`
-      # inside an expanded variable — both would brick the
-      # linker.
+      # Delegate to `make build-stt` so the release binary is
+      # byte-for-byte what a developer produces locally with
+      # the same command. The Makefile bakes the shared
+      # Version/GitCommit/BuildDate fields into
+      # internal/version via -ldflags, so `nightme-stt` and
+      # `nightme` report the same version banner. CGO_ENABLED=1
+      # + -tags cgo_sherpa selects the real SenseVoice binding
+      # (cmd/nightme-stt/internal/sherpa/sherpa_onnx.go) — the
+      # stub at cmd/nightme-stt/internal/sherpa/stub.go is for
+      # `go build` smoke runs only and is never published.
+      #
+      # The Makefile writes to `bin/nightme-stt$(EXT)` and
+      # $(EXT) picks up `.exe` on Windows automatically, so
+      # the produced path matches `bin/nightme-stt` /
+      # `bin/nightme-stt.exe` on every platform.
+      #
+      # GOOS/GOARCH are exported so the Makefile's
+      # host-tracking defaults cannot silently produce a
+      # wrong-arch binary if the matrix's runner label ever
+      # drifts away from the target arch — same belt-and-
+      # braces guard as the main `nightme` build above.
       - name: Build nightme-stt
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "1"
+          VERSION: ${{ steps.meta.outputs.version }}
+          GIT_COMMIT: ${{ steps.meta.outputs.commit }}
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${{ steps.meta.outputs.version }}"
-          COMMIT="${{ steps.meta.outputs.commit }}"
-          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          LDFLAGS="-X github.com/cnlangzi/nightme/internal/version.Version=${VERSION} \
-                   -X github.com/cnlangzi/nightme/internal/version.GitCommit=${COMMIT} \
-                   -X github.com/cnlangzi/nightme/internal/version.BuildDate=${BUILD_DATE}"
-          go build -tags cgo_sherpa -ldflags "${LDFLAGS}" \
-            -o "bin/${{ matrix.binary }}" ./cmd/nightme-stt
+          make build-stt
 
           # The cgo_sherpa build statically links sherpa-onnx
-          # native lib into the binary. A successful `go build`
-          # does NOT by itself prove the C bindings survived
-          # cgo's symbol resolution — verify before archiving.
-          # Branch on matrix.goos (NOT uname) so the Windows
-          # runners get the right tool: `nm -D` reads the ELF
-          # dynamic symbol table and a Windows PE has no such
-          # table. `strings | grep SherpaOnnx` works on every
-          # platform that ships `strings` (all three runners
-          # do — binutils on Linux, llvm on macOS, mingw on
-          # Windows).
+          # native lib into the binary. A successful `make
+          # build-stt` does NOT by itself prove the C bindings
+          # survived cgo's symbol resolution — verify before
+          # archiving. Branch on matrix.goos (NOT uname) so the
+          # Windows runners get the right tool: `nm -D` reads
+          # the ELF dynamic symbol table and a Windows PE has
+          # no such table. `strings | grep SherpaOnnx` works
+          # on every platform that ships `strings` (all three
+          # runners do — binutils on Linux, llvm on macOS,
+          # mingw on Windows).
           case "${{ matrix.goos }}" in
             windows)
               strings "bin/${{ matrix.binary }}" 2>/dev/null | grep -i 'SherpaOnnx' >/dev/null \

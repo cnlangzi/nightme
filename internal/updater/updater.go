@@ -45,6 +45,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -217,6 +218,25 @@ func AssetNameForRuntime(ver, goos, goarch string) string {
 	return fmt.Sprintf("nightme_%s_%s_%s.%s", ver, goos, goarch, ext)
 }
 
+// STTAssetNameForRuntime is the nightme-stt analog of
+// AssetNameForRuntime. The asset layout is identical
+// (nightme-stt_<ver>_<os>_<arch>.<ext>) — same naming
+// convention, same archive types, same release flow — so
+// `nightme stt install` can use the same GitHub / mirror
+// fallback chain as `nightme update`.
+//
+// Example:
+//
+//	STTAssetNameForRuntime("0.5.0", "linux", "amd64")
+//	→ "nightme-stt_0.5.0_linux_amd64.tar.gz"
+func STTAssetNameForRuntime(ver, goos, goarch string) string {
+	ext := "tar.gz"
+	if goos == "windows" {
+		ext = "zip"
+	}
+	return fmt.Sprintf("nightme-stt_%s_%s_%s.%s", ver, goos, goarch, ext)
+}
+
 // ----- download + verify -------------------------------------------
 
 // DownloadResult is what DownloadTag returns on success. Callers
@@ -233,6 +253,27 @@ type DownloadResult struct {
 // nightme release. Both GitHub and the nightme.dev mirror
 // always ship it as a release asset.
 const SHA256SUMSName = "SHA256SUMS.txt"
+
+// downloadSpec is the per-binary-type configuration that
+// DownloadTag / DownloadSTT share. Each release artifact
+// (nightme, nightme-stt) has its own asset name pattern
+// (nightme_<ver>_<os>_<arch>.<ext> vs nightme-stt_<ver>_<os>_<arch>.<ext>)
+// and its own archive's binary basename, but the download /
+// verify / extract flow is otherwise identical — so the two
+// public entry points are thin wrappers around downloadTag
+// (below).
+type downloadSpec struct {
+	// AssetName returns the asset filename for a given
+	// (ver, goos, goarch) triple. Examples: "nightme_0.5.0_linux_amd64.tar.gz",
+	// "nightme-stt_0.5.0_windows_amd64.zip".
+	AssetName func(ver, goos, goarch string) string
+	// Extract pulls the binary out of the staged archive.
+	Extract func(archivePath, stagingDir string) (string, error)
+	// BinaryLabel is the basename to record in DownloadResult's
+	// error messages and progress logs. Lets users grep for
+	// the right artifact when something goes wrong.
+	BinaryLabel string
+}
 
 // DownloadTag downloads + verifies + extracts the latest
 // nightme binary into <dataDir>/updates/<ver>/. The tag is
@@ -258,6 +299,36 @@ const SHA256SUMSName = "SHA256SUMS.txt"
 // (the largest, slowest transfer). Pass QuietProgress to
 // silence; pass nil to skip callbacks entirely.
 func DownloadTag(ctx context.Context, dataDir string, progress ProgressFunc) (*DownloadResult, error) {
+	return downloadTag(ctx, dataDir, progress, downloadSpec{
+		AssetName:   AssetNameForRuntime,
+		Extract:     ExtractArchive,
+		BinaryLabel: "nightme",
+	})
+}
+
+// DownloadSTT is the nightme-stt analog of DownloadTag. Same
+// three-stage flow (sums → asset → verify → extract) against
+// the same GitHub release feed, but the asset name pattern
+// (`nightme-stt_*`) and the extracted binary basename
+// (`nightme-stt` / `nightme-stt.exe`) differ. The CLI uses
+// this for `nightme stt install` / `nightme stt update`.
+//
+// Staging dir is the same `<dataDir>/updates/<ver>/` so an
+// `updater.StagingDir` lookup works for both binaries; the
+// filename inside the staging dir is what tells them apart.
+func DownloadSTT(ctx context.Context, dataDir string, progress ProgressFunc) (*DownloadResult, error) {
+	return downloadTag(ctx, dataDir, progress, downloadSpec{
+		AssetName:   STTAssetNameForRuntime,
+		Extract:     ExtractSTTArchive,
+		BinaryLabel: "nightme-stt",
+	})
+}
+
+// downloadTag is the shared implementation behind DownloadTag
+// and DownloadSTT. Spec.AssetName + spec.Extract carry the
+// only per-binary differences; everything else (sums fetch,
+// verify, extract, source labeling) is identical.
+func downloadTag(ctx context.Context, dataDir string, progress ProgressFunc, spec downloadSpec) (*DownloadResult, error) {
 	if dataDir == "" {
 		return nil, errors.New("updater: empty data dir")
 	}
@@ -273,7 +344,7 @@ func DownloadTag(ctx context.Context, dataDir string, progress ProgressFunc) (*D
 		return nil, fmt.Errorf("mkdir staging dir: %w", err)
 	}
 
-	assetName := AssetNameForRuntime(ver, runtime.GOOS, runtime.GOARCH)
+	assetName := spec.AssetName(ver, runtime.GOOS, runtime.GOARCH)
 
 	// Stage 1: pull the sums file. GitHub first, mirror fallback.
 	sumsPath, _, sumsSource, err := downloadAssetWithFallback(
@@ -310,7 +381,7 @@ func DownloadTag(ctx context.Context, dataDir string, progress ProgressFunc) (*D
 		progress,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("download binary: %w", err)
+		return nil, fmt.Errorf("download %s binary: %w", spec.BinaryLabel, err)
 	}
 	if gotSum != wantSum {
 		return nil, fmt.Errorf("sha256 mismatch (%s): got %s, want %s",
@@ -318,9 +389,9 @@ func DownloadTag(ctx context.Context, dataDir string, progress ProgressFunc) (*D
 	}
 
 	// Stage 4: extract.
-	binary, err := ExtractArchive(binArchive, stagingDir)
+	binary, err := spec.Extract(binArchive, stagingDir)
 	if err != nil {
-		return nil, fmt.Errorf("extract: %w", err)
+		return nil, fmt.Errorf("extract %s: %w", spec.BinaryLabel, err)
 	}
 
 	// Use the binary source for the result label so callers
@@ -492,13 +563,36 @@ func lookupSHAInFile(path, assetName string) (string, error) {
 // .zip archive. Returns the absolute path to the extracted
 // binary inside stagingDir.
 func ExtractArchive(archivePath, stagingDir string) (string, error) {
-	if runtime.GOOS == "windows" {
-		return extractZIP(archivePath, stagingDir)
-	}
-	return extractTARGZ(archivePath, stagingDir)
+	return extractArchive(archivePath, stagingDir, []string{"nightme", "nightme.exe"})
 }
 
-func extractTARGZ(archivePath, stagingDir string) (string, error) {
+// ExtractSTTArchive is the nightme-stt analog of ExtractArchive.
+// Same archive format, same staging layout — only the binary
+// basename inside the archive differs (`nightme-stt` /
+// `nightme-stt.exe` instead of `nightme` / `nightme.exe`).
+func ExtractSTTArchive(archivePath, stagingDir string) (string, error) {
+	return extractArchive(archivePath, stagingDir, []string{"nightme-stt", "nightme-stt.exe"})
+}
+
+// extractArchive picks the right format for the current GOOS
+// and dispatches. allowedBaseNames is the set of binary
+// filenames we accept from the archive — both `nightme` and
+// `nightme-stt` share this code path so each archive type
+// supplies its own basename list.
+func extractArchive(archivePath, stagingDir string, allowedBaseNames []string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return extractZIP(archivePath, stagingDir, allowedBaseNames)
+	}
+	return extractTARGZ(archivePath, stagingDir, allowedBaseNames)
+}
+
+// allowedBaseName reports whether base is in the allow-list.
+// Case-sensitive — archives always ship lowercase basenames.
+func allowedBaseName(base string, allowed []string) bool {
+	return slices.Contains(allowed, base)
+}
+
+func extractTARGZ(archivePath, stagingDir string, allowedBaseNames []string) (string, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return "", fmt.Errorf("open tar.gz: %w", err)
@@ -515,7 +609,7 @@ func extractTARGZ(archivePath, stagingDir string) (string, error) {
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return "", errors.New("extract: nightme binary not found in archive")
+			return "", errors.New("extract: target binary not found in archive")
 		}
 		if err != nil {
 			return "", fmt.Errorf("read tar header: %w", err)
@@ -524,7 +618,7 @@ func extractTARGZ(archivePath, stagingDir string) (string, error) {
 			continue
 		}
 		base := filepath.Base(hdr.Name)
-		if base != "nightme" && base != "nightme.exe" {
+		if !allowedBaseName(base, allowedBaseNames) {
 			continue
 		}
 		out := filepath.Join(stagingDir, base)
@@ -543,7 +637,7 @@ func extractTARGZ(archivePath, stagingDir string) (string, error) {
 	}
 }
 
-func extractZIP(archivePath, stagingDir string) (string, error) {
+func extractZIP(archivePath, stagingDir string, allowedBaseNames []string) (string, error) {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return "", fmt.Errorf("open zip: %w", err)
@@ -552,7 +646,7 @@ func extractZIP(archivePath, stagingDir string) (string, error) {
 
 	for _, f := range r.File {
 		base := filepath.Base(f.Name)
-		if base != "nightme.exe" {
+		if !allowedBaseName(base, allowedBaseNames) {
 			continue
 		}
 		rc, err := f.Open()
@@ -576,7 +670,7 @@ func extractZIP(archivePath, stagingDir string) (string, error) {
 		}
 		return out, nil
 	}
-	return "", errors.New("extract: nightme.exe not found in zip")
+	return "", errors.New("extract: target binary not found in zip")
 }
 
 // ----- install ------------------------------------------------------

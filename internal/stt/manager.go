@@ -38,11 +38,29 @@ type ProcessManager interface {
 
 // Status is the snapshot returned by Status. Field names are
 // stable for JSON / CLI consumers.
+//
+// `Running` / `PID` / `LastError` / `BinaryPath` / `NotBuilt`
+// are local-to-Manager facts (did the spawn succeed, what
+// process is alive, what's the binary path on disk).
+// `StartedAt` / `BuildVer` come from the worker's OpStatus
+// RPC and tell the caller how long the live worker has been
+// up and what version it was compiled from. `Endpoint` is
+// the IPC socket / pipe the manager dialed.
+//
+// `Version` (int) is the IPC protocol version, while `BuildVer`
+// (string) is the human-facing X.Y.Z. The two are redundant
+// for normal use but kept separate because they fail in
+// different scenarios: a Version mismatch is a wire-protocol
+// problem (manager will refuse to talk to the worker); a
+// BuildVer mismatch is a packaging drift (both binaries still
+// talk, but should be reinstalled in lockstep).
 type Status struct {
 	Running    bool
 	PID        int
 	Endpoint   string
 	Version    int
+	BuildVer   string
+	StartedAt  time.Time
 	LastError  string
 	BinaryPath string
 	NotBuilt   bool
@@ -212,6 +230,9 @@ func (m *Manager) Status(ctx context.Context) Status {
 		Running:  m.running,
 		Endpoint: string(m.endpoint),
 	}
+	if m.handle != nil {
+		s.PID = m.handle.PID()
+	}
 	if m.lastErr != "" {
 		s.LastError = m.lastErr
 	}
@@ -219,6 +240,11 @@ func (m *Manager) Status(ctx context.Context) Status {
 		v, err := m.client.Version(ctx)
 		if err == nil {
 			s.Version = v
+		}
+		ws, err := m.client.WorkerStatus(ctx)
+		if err == nil {
+			s.StartedAt = ws.StartedAt
+			s.BuildVer = ws.BuildVer
 		}
 	}
 	return s

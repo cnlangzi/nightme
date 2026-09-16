@@ -168,6 +168,51 @@ jobs:
         shell: bash
         run: go build ./...
 
+      # nightme-stt is a SEPARATE binary that NightMe spawns as
+      # a child process for Voice transcription (issue #381).
+      # Its two build modes — `cgo_sherpa` (production, links
+      # sherpa-onnx-go CGO binding) and the default stub
+      # (cmd/nightme-stt/internal/sherpa/stub.go) — use the
+      # same package with build-tag-selected files, so a
+      # regression in either half surfaces as a failed `go
+      # build` here.
+      #
+      # Two assertions, mirroring the Linux tray-split gate
+      # pattern above:
+      #   1. `-tags cgo_sherpa` builds cleanly — catches the
+      #      "missing sherpa-onnx-go module" class that bit
+      #      release.yml before this gate existed, plus any
+      #      future native-lib / header drift.
+      #   2. default (stub) build still compiles — catches a
+      #      refactor that drops the //go:build !cgo_sherpa
+      #      file or breaks the build-tag wiring, which would
+      #      otherwise only surface on a developer's `go run`
+      #      in a tree without CGO set up.
+      #
+      # No system deps needed: sherpa-onnx-go-{linux,macos,
+      # windows} ship the platform .a/.dylib/.lib inside the
+      # Go module, so CGO links the worker from the module
+      # cache with no libgtk / libayatana / etc. install.
+      # The three hosted runners all ship a working C
+      # toolchain (gcc on Ubuntu, clang on macOS, mingw via
+      # Git Bash on Windows), so CGO_ENABLED=1 is honored
+      # uniformly.
+      - name: Build nightme-stt (both tag modes)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CGO_ENABLED=1 go build -tags cgo_sherpa -o /tmp/nightme-stt-cgo ./cmd/nightme-stt
+          echo "ok: -tags cgo_sherpa builds"
+
+          # Default build (no tag) → stub recognizer. This
+          # is what `go run ./cmd/nightme-stt` produces for
+          # a developer without CGO, and what unit-test
+          # builds consume; it must keep compiling or smoke
+          # tests on every contributor machine break.
+          go build -o /tmp/nightme-stt-stub ./cmd/nightme-stt
+          echo "ok: default (stub) build compiles"
+
       - name: Vet
         shell: bash
         run: go vet ./...

@@ -53,6 +53,16 @@ func IsNotBuilt(err error) bool {
 // nightme-stt is a normal child process — no daemon mode,
 // no system service. NightMe owns its lifecycle.
 //
+// No flags are passed to the child: the worker resolves its
+// own dataDir from NIGHTME_PATHS_DATA_DIR (falling back to
+// ~/.nightme) and derives the endpoint via stt.DefaultEndpoint.
+// nightme core and the worker share internal/version and
+// internal/stt.DefaultEndpoint, so they agree on the socket
+// path without a flag handshake. The Spawner signature still
+// receives endpoint because test spawners (loopback) and the
+// Manager's dial() path use it — production just doesn't need
+// to forward it.
+//
 // We deliberately use `exec.Command`, NOT
 // `exec.CommandContext`. The Manager's `EnsureReady` ctx
 // is cancelled the moment `EnsureReady` returns — if we passed
@@ -68,10 +78,8 @@ func ProductionSpawner(dataDir string) Spawner {
 			return nil, err
 		}
 		_ = ctx
-		cmd := exec.Command(bin,
-			"--endpoint", string(endpoint),
-			"--data-dir", dataDir,
-		)
+		_ = endpoint // see comment above; kept in signature for test spawners + Manager dial()
+		cmd := exec.Command(bin)
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {

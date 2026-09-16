@@ -23,6 +23,7 @@ const ProtocolVersion = 1
 const (
 	OpHealth     = "health"
 	OpVersion    = "version"
+	OpStatus     = "status"
 	OpTranscribe = "transcribe"
 	OpShutdown   = "shutdown"
 )
@@ -57,14 +58,48 @@ type Request struct {
 }
 
 // Response is the wire envelope sent worker → client.
+//
+// Per-op payload fields use `omitempty` so the wire shape stays
+// narrow on each code path: a Transcribe response carries only
+// Text/Language/DurationMS; a Status response carries only
+// WorkerStatus. The OpStatus field on Request tells the worker
+// which fields to populate.
 type Response struct {
-	Version    int    `json:"version"`
-	OK         bool   `json:"ok"`
-	ErrorCode  string `json:"error_code,omitempty"`
-	ErrorMsg   string `json:"error,omitempty"`
-	Text       string `json:"text,omitempty"`
-	Language   string `json:"language,omitempty"`
-	DurationMS int64  `json:"duration_ms,omitempty"`
+	Version      int           `json:"version"`
+	OK           bool          `json:"ok"`
+	ErrorCode    string        `json:"error_code,omitempty"`
+	ErrorMsg     string        `json:"error,omitempty"`
+	Text         string        `json:"text,omitempty"`
+	Language     string        `json:"language,omitempty"`
+	DurationMS   int64         `json:"duration_ms,omitempty"`
+	WorkerStatus *WorkerStatus `json:"worker_status,omitempty"`
+}
+
+// WorkerStatus is what OpStatus returns. It is the canonical
+// runtime snapshot of a live nightme-stt process; the
+// `nightme stt status` CLI renders this directly, and the
+// in-process Manager merges it into its own Status (which also
+// carries install state — see manager.go).
+//
+//   - PID is os.Getpid() at the moment of the call.
+//   - StartedAt is the Server's NewServer wall-clock; it is
+//     stable for the lifetime of the worker process, so a
+//     follow-up OpStatus always reports the same value.
+//   - Endpoint is what the listener is bound to (the
+//     conventional `<dataDir>/stt/stt.sock` on Unix or
+//     `\\.\pipe\nightme-stt` on Windows).
+//   - Version is the IPC protocol version spoken on this
+//     connection (= stt.ProtocolVersion for the running
+//     worker; clients use it to detect mismatches).
+//   - BuildVer is the X.Y.Z the worker was compiled from
+//     (internal/version.Version), so a CLI can compare it
+//     against the nightme core that spawned it.
+type WorkerStatus struct {
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+	Endpoint  Endpoint  `json:"endpoint"`
+	Version   int       `json:"version"`
+	BuildVer  string    `json:"build_ver"`
 }
 
 // MaxFrameSize caps individual frames so a malformed peer can't

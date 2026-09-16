@@ -572,6 +572,19 @@ jobs:
   # bridges. Cross-compile had no test coverage to add; it only
   # surfaced `//go:build` mismatches that `go vet` in `test` would
   # catch on the relevant native runner anyway.
+  #
+  # Exception: the `windows-11-arm` matrix leg in this job is NOT
+  # an agent-smoke branch — it's a windows/arm64 STT build gate.
+  # windows-latest (amd64) can't exercise that target: cgo to
+  # windows/arm64 needs aarch64 mingw, which Go's cgo auto-detects
+  # from PATH but is absent on a default amd64 runner (and on
+  # Git for Windows' MSYS2 minimal even on windows-11-arm). The
+  # build-stt-specific steps below are gated to windows-11-arm; the
+  # rest of this job's steps (npm install, agent spawn smoke) are
+  # gated to the OTHER three legs. Same job keeps the cheap-first
+  # ordering — startup is still last in the dependency chain, but
+  # the windows/arm64 toolchain regression now fails here instead
+  # of in release.
   startup:
     needs: test
     runs-on: ${{ matrix.os }}
@@ -587,7 +600,17 @@ jobs:
         # same OS layer with negligible signal. Each runner
         # reports independently so a Linux-only npm registry
         # hiccup doesn't gate Windows / macOS.
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        #
+        # The runner labels here mirror release.yml's main
+        # `build` and `stt` matrix 1:1 — same five host labels,
+        # in the same order — so a runner-image change (label
+        # rename, deprecation) updates both workflows in lock-
+        # step. Only the three amd64 legs participate in agent-
+        # smoke; the two arm64 legs (ubuntu-24.04-arm for linux,
+        # windows-11-arm for windows) run the STT build gate and
+        # nothing else — npm-distributed agents are amd64-only,
+        # so spawning them on arm64 would just fail.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v5
 
@@ -595,6 +618,152 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # Git for Windows on windows-11-arm ships MSYS2 minimal whose
+      # default `gcc` is NOT an AArch64 cross-compiler. Go's cgo
+      # finds `gcc` via PATH and invokes it to assemble
+      # `runtime/cgo/gcc_arm64.S` (AArch64 mnemonics: `stp x29,x30,
+      # [sp,`, `blr x20`, …). The wrong assembler rejects those
+      # with `Error: no such instruction` — the exact failure that
+      # bit release.yml.
+      #
+      # Download a native aarch64 Windows LLVM+mingw toolchain
+      # from mstorsjo/llvm-mingw. Bypasses MSYS2 entirely — the
+      # MSYS2 path is fundamentally broken on windows-11-arm
+      # because msys2/setup-msys2 v2 downloads an x86_64 base.exe
+      # (only x86_64 base.exe is hosted in
+      # msys2-installer/<version>/x64/; no arm64 native base
+      # exists), so any `pacman -S clang lld` in CLANGARM64
+      # msystem silently falls back to x86_64 packages and
+      # installs them under mingw64/ instead of clangarm64/
+      # (observed in PR #400 with download lines like
+      # `clang-21.1.8-2-x86_64 downloading...`).
+      #
+      # llvm-mingw ships:
+      #   - native aarch64 clang/clang++/lld/lld-link
+      #   - self-contained aarch64-w64-mingw32 sysroot
+      #     (headers, libs, import libs) under
+      #     `<root>/aarch64-w64-mingw32/`
+      #   - clang defaults to --target=aarch64-w64-mingw32
+      #   - properly translates cgo's `-L` to lld-link's
+      #     `/LIBPATH:` (this is the exact integration that
+      #     Visual Studio's LLVM clang lacks — see the earlier
+      #     `lld-link: could not open 'sherpa-onnx-c-api.lib'`
+      #     failure mode)
+      #
+      # PowerShell's Expand-Archive handles .zip natively
+      # (Windows has no native .7z; this is why we explicitly
+      # picked a .zip distribution). ~150MB download, ~30s CI
+      # cost — could be cached with actions/cache later if
+      # the overhead matters.
+      #
+      # Gated to the windows-11-arm leg. Other arm64 leg
+      # (ubuntu-24.04-arm) uses preinstalled
+      # gcc-aarch64-linux-gnu and doesn't need this.
+      - name: Install llvm-mingw (aarch64-w64-mingw32)
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: |
+          set -euo pipefail
+          LLVM_MINGW_VERSION="20260908"
+          TOOLCHAIN_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-aarch64.zip"
+          mkdir -p /c/llvm-mingw
+          echo "Downloading llvm-mingw aarch64 (${LLVM_MINGW_VERSION})..."
+          curl -fsSL --retry 3 -o /tmp/llvm-mingw.zip "${TOOLCHAIN_URL}"
+          echo "Extracting to C:\\llvm-mingw ..."
+          powershell -NoProfile -Command "Expand-Archive -Path 'C:\Users\runneradmin\AppData\Local\Temp\llvm-mingw.zip' -DestinationPath 'C:\llvm-mingw' -Force"
+          # Top-level dir is `llvm-mingw-<ver>-ucrt-aarch64`.
+          # Discover it instead of hardcoding so a release bump
+          # doesn't break the workflow.
+          LLVM_MINGW_ROOT=$(find /c/llvm-mingw -maxdepth 1 -type d -name "llvm-mingw-*" | head -1)
+          if [ -z "${LLVM_MINGW_ROOT}" ]; then
+            echo "::error::Failed to discover llvm-mingw root under C:\\llvm-mingw"
+            ls -la /c/llvm-mingw/ || true
+            exit 1
+          fi
+          # Sanity: clang and aarch64-w64-mingw32 sysroot must
+          # both be present.
+          if [ ! -x "${LLVM_MINGW_ROOT}/bin/clang.exe" ]; then
+            echo "::error::clang.exe missing under ${LLVM_MINGW_ROOT}/bin/"
+            ls "${LLVM_MINGW_ROOT}/bin/" 2>&1 || true
+            exit 1
+          fi
+          if [ ! -d "${LLVM_MINGW_ROOT}/aarch64-w64-mingw32" ]; then
+            echo "::error::aarch64-w64-mingw32 sysroot missing under ${LLVM_MINGW_ROOT}/"
+            ls "${LLVM_MINGW_ROOT}/" 2>&1 || true
+            exit 1
+          fi
+          # Normalize to a /c/-style POSIX path for the env var
+          # (CI substitution consumes it as a string).
+          echo "LLVM_MINGW_ROOT=${LLVM_MINGW_ROOT}" >> "$GITHUB_ENV"
+          echo "OK: llvm-mingw installed at ${LLVM_MINGW_ROOT}"
+          "${LLVM_MINGW_ROOT}/bin/clang.exe" --version | head -2
+
+      # Build nightme runs on EVERY leg (windows-11-arm included)
+      # because `make build` / `build.bat` produces a fully static
+      # CGO_ENABLED=0 binary that doesn't depend on the mingw
+      # toolchain. This is the cheap smoke that catches a Makefile
+      # or build.bat regression on the windows/arm64 runner before
+      # any agent-smoke gate pays runner minutes.
+      # No GTK/AppIndicator install here, deliberately. Since #295
+      # the default build has no CGo dependency, so the dev headers
+      # would be pure runner-minute waste — and re-installing them
+      # would also re-assert the misconception that caused #295
+      # ("building nightme on Linux needs GTK"). The -gui variant
+      # is compiled and link-checked in the `test` job's
+      # "Verify Linux tray split" step, which does install them.
+      - name: Build nightme
+        shell: bash
+        env:
+          VERSION: "0.0.0"
+        run: |
+          export GIT_COMMIT="${GITHUB_SHA:0:7}"
+          # Use the canonical build entry points (mirrors the
+          # `test` job's `Build smoke binary` step) so CI builds
+          # exactly what a developer ships:
+          #   - Windows: build.bat (cmd-native, also documents
+          #     how Windows users build without GnuWin32 make)
+          #   - Linux/macOS: make build (uses LDFLAGS from the
+          #     Makefile to bake version metadata in)
+          # Both produce bin/nightme[.exe] with version metadata
+          # baked in via -ldflags.
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./build.bat
+          elif [ "${{ matrix.os }}" = "windows-11-arm" ]; then
+            # build.bat works on aarch64 too (go-winres + go build
+            # are arch-portable Go tools); it's the cgo_sherpa
+            # build that needs the mingw toolchain, which is why
+            # build.bat is fine here without it.
+            ./build.bat
+          else
+            make build
+          fi
+
+      # Build nightme-stt only on the two arm64 legs. The
+      # `Install llvm-mingw (aarch64-w64-mingw32)` step above
+      # provides a native aarch64 clang + lld + aarch64-w64-
+      # mingw32 sysroot that cgo drives correctly. We point
+      # CC at the discovered llvm-mingw bin so cgo doesn't
+      # fall back to the Visual Studio LLVM clang (which can't
+      # translate cgo's `-L` to lld-link's `/LIBPATH:` and
+      # can't find the sherpa-onnx .lib files).
+      #
+      # ubuntu-24.04-arm leaves CC unset — the host's preinstalled
+      # gcc-aarch64-linux-gnu handles cgo natively.
+      - name: Build STT
+        if: matrix.os == 'windows-11-arm' || matrix.os == 'ubuntu-24.04-arm'
+        env:
+          GOOS: ${{ matrix.os == 'windows-11-arm' && 'windows' || 'linux' }}
+          GOARCH: arm64
+          CC: ${{ matrix.os == 'windows-11-arm' && format('{0}/bin/clang.exe', env.LLVM_MINGW_ROOT) || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "windows-11-arm" ]; then
+            ./build-stt.bat
+          else
+            make build-stt
+          fi
 
       # setup-node is needed for the npm-distributed agents. Node
       # 22 LTS is the floor: as of mid-2026, several transitive
@@ -611,44 +780,10 @@ jobs:
       # resolution — actions/setup-node@v6 already caches
       # by exact version internally so a future runner-image
       # bump won't silently drift the smoke gate.
-      - uses: actions/setup-node@v6
+      - if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
-
-      # No GTK/AppIndicator install here, deliberately. This job only
-      # runs `make build`, which since #295 produces the tray-less
-      # default binary with no CGo dependency — so the dev headers
-      # would be pure runner-minute waste. Keeping the step would
-      # also re-assert the very misconception that caused #295
-      # ("building nightme on Linux needs GTK"), which is now false.
-      # The -gui variant is compiled and link-checked in the `test`
-      # job's "Verify Linux tray split" step, which does install them.
-      - name: Build nightme
-        shell: bash
-        env:
-          VERSION: "0.0.0"
-        run: |
-          export GIT_COMMIT="${GITHUB_SHA:0:7}"
-          # Use the canonical build entry points (mirrors the
-          # `test` job's `Build smoke binary` step) so CI builds
-          # exactly what a developer ships:
-          #   - Windows: build.bat (cmd-native, also documents
-          #     how Windows users build without GnuWin32 make)
-          #   - Linux/macOS: make build (uses LDFLAGS from the
-          #     Makefile to bake version metadata in)
-          # Both produce bin/nightme[.exe] with version metadata
-          # baked in via -ldflags. Going through these scripts
-          # (rather than a bare 'go build -o dist/nightme')
-          # means a regression in build.bat or the Makefile
-          # LDFLAGS list surfaces as a failing CI gate instead
-          # of a Windows-only user-facing "version unknown"
-          # surprise — and the daemon lifecycle + agent-spawn
-          # steps below all consume bin/nightme[.exe].
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ./build.bat
-          else
-            make build
-          fi
 
       # Daemon lifecycle smoke (start / stop / restart / status) on
       # every shipped OS. This is the regression gate for the
@@ -679,6 +814,7 @@ jobs:
       # channel (the WS connection then fails+reconnects in a
       # goroutine, non-fatal) and the daemon reaches "ready".
       - name: Install agents (officially-supported methods per agent)
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -847,6 +983,7 @@ jobs:
           Write-Host "OK: appended $agentPath to GITHUB_PATH"
 
       - name: Verify daemon lifecycle (start/stop/restart/status)
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         env:
           NIGHTME_FEISHU_APP_ID: ci
@@ -950,6 +1087,7 @@ jobs:
           echo "OK: daemon lifecycle (start/stop/restart/status) green on ${{ matrix.os }}"
 
       - name: Verify each agent binary is on PATH
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1023,6 +1161,7 @@ jobs:
           done
 
       - name: Verify each agent CLI responds to --help
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1079,6 +1218,7 @@ jobs:
           done
 
       - name: Verify nightme config lists every builtin
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e
@@ -1110,6 +1250,7 @@ jobs:
           done
 
       - name: Verify nightme bridge spawns each agent (response required)
+        if: matrix.os != 'windows-11-arm' && matrix.os != 'ubuntu-24.04-arm'
         shell: bash
         run: |
           set -e

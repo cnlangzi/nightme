@@ -484,16 +484,81 @@ jobs:
       # wrong-arch binary if the matrix's runner label ever
       # drifts away from the target arch — same belt-and-
       # braces guard as the main `nightme` build above.
-      - name: Build nightme-stt
+      #
+      # windows/arm64 toolchain note: Git for Windows on
+      # windows-11-arm ships MSYS2 minimal whose default
+      # `gcc` is NOT an AArch64 cross-compiler. Go's cgo
+      # finds `gcc` via PATH and invokes it to assemble
+      # `runtime/cgo/gcc_arm64.S` (AArch64 mnemonics:
+      # `stp x29,x30,[sp,`, `blr x20`, …), which the wrong
+      # assembler rejects with `Error: no such instruction`.
+      #
+      # `msystem: CLANGARM64` is the only MSYS2 env that
+      # supports aarch64 — it ships clang (Not gcc; MSYS2's
+      # MINGW64 repo only carries `mingw-w64-{x86_64,i686}-
+      # gcc`, never `mingw-w64-aarch64-gcc`, which is why
+      # pacman errors with `target not found`). On
+      # CLANGARM64, clang defaults to
+      # `--target=aarch64-w64-mingw32`, so CC=clang produces
+      # the right object files for Go's cgo. lld pulls in
+      # `lld-link` for the final PE link.
+      #
+      # Linux / darwin legs have a correct default gcc
+      # already, so the step is gated to the windows/arm64
+      # leg only.
+      - name: Install llvm-mingw (aarch64-w64-mingw32)
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          LLVM_MINGW_VERSION="20260908"
+          TOOLCHAIN_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-aarch64.zip"
+          mkdir -p /c/llvm-mingw
+          echo "Downloading llvm-mingw aarch64 (${LLVM_MINGW_VERSION})..."
+          curl -fsSL --retry 3 -o /tmp/llvm-mingw.zip "${TOOLCHAIN_URL}"
+          echo "Extracting to C:\\llvm-mingw ..."
+          powershell -NoProfile -Command "Expand-Archive -Path 'C:\Users\runneradmin\AppData\Local\Temp\llvm-mingw.zip' -DestinationPath 'C:\llvm-mingw' -Force"
+          LLVM_MINGW_ROOT=$(find /c/llvm-mingw -maxdepth 1 -type d -name "llvm-mingw-*" | head -1)
+          if [ -z "${LLVM_MINGW_ROOT}" ]; then
+            echo "::error::Failed to discover llvm-mingw root under C:\\llvm-mingw"
+            ls -la /c/llvm-mingw/ || true
+            exit 1
+          fi
+          if [ ! -x "${LLVM_MINGW_ROOT}/bin/clang.exe" ]; then
+            echo "::error::clang.exe missing under ${LLVM_MINGW_ROOT}/bin/"
+            ls "${LLVM_MINGW_ROOT}/bin/" 2>&1 || true
+            exit 1
+          fi
+          if [ ! -d "${LLVM_MINGW_ROOT}/aarch64-w64-mingw32" ]; then
+            echo "::error::aarch64-w64-mingw32 sysroot missing under ${LLVM_MINGW_ROOT}/"
+            ls "${LLVM_MINGW_ROOT}/" 2>&1 || true
+            exit 1
+          fi
+          echo "LLVM_MINGW_ROOT=${LLVM_MINGW_ROOT}" >> "$GITHUB_ENV"
+          echo "OK: llvm-mingw installed at ${LLVM_MINGW_ROOT}"
+          "${LLVM_MINGW_ROOT}/bin/clang.exe" --version | head -2
+
+      - name: Build STT
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.meta.outputs.version }}
           GIT_COMMIT: ${{ steps.meta.outputs.commit }}
+          # On windows/arm64, point cgo at llvm-mingw's native
+          # aarch64 clang — see ci.yml's matching Install step
+          # for the full rationale (Visual Studio LLVM clang
+          # can't drive cgo's `-L` to lld-link's `/LIBPATH:`,
+          # and MSYS2 on windows-11-arm is fundamentally broken
+          # because the action downloads an x86_64 base.exe).
+          CC: ${{ matrix.goos == 'windows' && matrix.goarch == 'arm64' && format('{0}/bin/clang.exe', env.LLVM_MINGW_ROOT) || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          make build-stt
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ./build-stt.bat
+          else
+            make build-stt
+          fi
 
           # The cgo_sherpa build statically links sherpa-onnx
           # native lib into the binary. A successful `make

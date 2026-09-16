@@ -484,7 +484,29 @@ jobs:
       # wrong-arch binary if the matrix's runner label ever
       # drifts away from the target arch — same belt-and-
       # braces guard as the main `nightme` build above.
-      - name: Build nightme-stt
+      #
+      # windows/arm64 toolchain note: Git for Windows on
+      # windows-11-arm ships MSYS2 minimal whose default
+      # `gcc` is NOT an AArch64 cross-compiler. Go's cgo
+      # finds `gcc` via PATH and invokes it to assemble
+      # `runtime/cgo/gcc_arm64.S` (AArch64 mnemonics:
+      # `stp x29,x30,[sp,`, `blr x20`, …), which the wrong
+      # assembler rejects with `Error: no such instruction`.
+      # Installing mingw-w64-aarch64-gcc and pinning CC
+      # sidesteps that lookup. Linux / darwin legs have a
+      # correct default gcc already, so the step is gated to
+      # the windows/arm64 leg only.
+      - name: Install AArch64 MinGW toolchain
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          install: >-
+            git
+            mingw-w64-aarch64-gcc
+
+      - name: Build STT
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -493,6 +515,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # CC override only on windows/arm64; other legs let
+          # cgo auto-detect the host compiler.
+          if [ "${{ matrix.goos }}" = "windows" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+            export CC=aarch64-w64-mingw32-gcc
+          fi
           make build-stt
 
           # The cgo_sherpa build statically links sherpa-onnx
